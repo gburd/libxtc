@@ -347,15 +347,6 @@ struct xtc_proc {
 	struct envelope  *save_tail;
 	_Atomic size_t    mbox_saved;
 
-	/* BEAM recv-mark optimization for selective receive.  When the
-	 * caller invokes xtc_recv_match repeatedly with the same
-	 * (match_fn, user) pair, we remember which save_queue entries
-	 * have already been tested against that predicate so we don't
-	 * re-walk them.  Cleared whenever the predicate changes. */
-	xtc_match_fn      last_match_fn;
-	void             *last_match_user;
-	struct envelope  *recv_mark;       /* skip up to and including this entry */
-
 	/* Receive coordination. */
 	xtc_waker_t       recv_waker;
 	int               waker_armed;
@@ -427,6 +418,21 @@ struct xtc_proc {
 	 * xtc_exit_pid; checked at every yield/recv parking point.
 	 * The flag carries the reason+1 so 0 means "no kill pending". */
 	_Atomic int kill_pending;
+
+	/* Kill-wake target: the task this proc's fiber runs as and the loop
+	 * it last yielded on, recorded by __xtc_proc_ctx_save at every yield
+	 * so xtc_exit_pid can make the proc runnable wherever it is parked.
+	 * park_await is 1 while the fiber is parked in xtc_await, which has
+	 * no kill check and must not be woken early. */
+	_Atomic(xtc_task_t *) run_task;
+	_Atomic(xtc_loop_t *) run_loop;
+	_Atomic int           park_await;
+	int                   yield_park;   /* last yield was a park (owner) */
+
+	/* xtc_proc_trap_exit: 1 = a linked peer's exit arrives as an 'E'
+	 * message; 0 (default) = a non-normal peer exit kills this proc.
+	 * Written by the owner, read by the exiting peer's thread. */
+	_Atomic int trap_exit;
 
 	/* A2 cancellation masking (MonadCancel uncancelable/poll).  While
 	 * mask_depth > 0 an asynchronous kill (xtc_exit_pid) delivered at a
@@ -540,7 +546,9 @@ _Static_assert(
 struct xtc_proc_slot {
 	struct xtc_proc *proc;       /* NULL if free */
 	uint32_t         gen;
+	uint32_t         next_free;  /* free-list link (XTC_PT_FREE_NONE = end) */
 };
+#define XTC_PT_FREE_NONE UINT32_MAX
 
 /*
  * Write striping for the per-loop proc table (PLAN.md 19.5c).  The old
@@ -586,6 +594,13 @@ struct xtc_proc_table {
 	 */
 	_Atomic size_t        n_used;
 	pthread_mutex_t       stripes[XTC_PT_NSTRIPES];
+	/* Free slot indices (LIFO through slot.next_free) and the count of
+	 * slots ever handed out, so a spawn is O(1) instead of a scan from
+	 * slot 0 under all 16 stripes.  free_lock nests INSIDE a stripe
+	 * (release paths hold one stripe, the allocator holds all). */
+	pthread_mutex_t       free_lock;
+	uint32_t              free_head;
+	size_t                hw;
 	int                   inited;
 };
 
@@ -649,63 +664,207 @@ __current_proc_slot(void)
 }
 #define __current_proc (*__current_proc_slot())
 static void __xtc_proc_kill_check(void);   /* installed as the resume kill hook */
+static struct xtc_proc *__proc_reanchor(struct xtc_proc *self);
 
 /*
- * The table lives in a side struct hung off xtc_loop->user_data... but
- * we don't have that field.  Use a per-loop pointer hashed by loop
- * pointer in a tiny global table.  For M8 four-loop typical use this
- * is fine; M9 adds a proper field.
+ * Loop registry: loop pointer -> proc table, for every loop hosting
+ * procs.  Read on EVERY send/wake (__table_for), written only when a
+ * loop gets its first proc or is finalized.
+ *
+ *   __lt     dense array of the live entries [0, __lt_n) (inspection,
+ *            the by-id fallback scan, and the hash rebuild source)
+ *   __lt_h   open-addressed hash of the same entries (load <= 1/2), so
+ *            a send finds its loop's table in O(1)
+ *   __lt_id  loop id (exec slot + 1; 0 = standalone) -> a live loop with
+ *            that id, for __resolve's off-exec lookup
+ *
+ * Writers serialize on __lt_lock and bracket every change with the
+ * __lt_seq seqlock; readers are lock-free and retry if a writer ran
+ * (rare).  LOOP_TABLE_MAX bounds live loops, not loops ever created; a
+ * full registry fails the spawn with XTC_E_RESOURCE.
  */
-#define LOOP_TABLE_MAX 64
-/*
- * Loop registry.  Read-mostly: written only when a loop is created or
- * finalized (rare), read on EVERY cross-thread wake/send that falls to
- * __resolve's Strategy 2 (hot -- one per command boundary under a
- * fiber-per-session server).  The slot's `loop` and `tbl` pointers are
- * therefore ATOMIC so the read path scans them lock-free with acquire
- * loads; only the writers (register/unregister, which also mutate the
- * table contents and free memory) serialize on __lt_lock.  A reader
- * that races a concurrent unregister either sees the old loop pointer
- * (and then finds its table, or a NULL slot) or the NULL -- never a
- * torn pointer; the proc-header refcount + generation check on the
- * resolved proc handles the rest of the lifetime race, exactly as it
- * did when this scan held the lock.
- */
+#define LOOP_TABLE_MAX 1024
+#define LT_HCAP        (2 * LOOP_TABLE_MAX)
+#define LT_ID_MAX      LOOP_TABLE_MAX
 struct lt_entry {
 	_Atomic(xtc_loop_t *)            loop;
 	_Atomic(struct xtc_proc_table *) tbl;
 };
 static pthread_mutex_t __lt_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct lt_entry __lt[LOOP_TABLE_MAX];
+static int __lt_n;                                  /* under __lt_lock */
+static struct lt_entry __lt_h[LT_HCAP];
+static _Atomic(xtc_loop_t *) __lt_id[LT_ID_MAX];
+static _Atomic unsigned __lt_seq;
+
+static inline unsigned
+__lt_hash(const xtc_loop_t *loop)
+{
+	uint64_t v = (uint64_t)(uintptr_t)loop;
+	v ^= v >> 29;
+	v *= 0x9E3779B97F4A7C15ULL;
+	return (unsigned)(v >> 40) & (LT_HCAP - 1u);
+}
+
+static inline uint16_t
+__lt_loop_id(const xtc_loop_t *l)
+{
+	return (uint16_t)(l->exec_id < 0 ? 0 : l->exec_id + 1);
+}
+
+/* Writer side of the seqlock (caller holds __lt_lock). */
+static void
+__lt_write_begin(void)
+{
+	atomic_store_explicit(&__lt_seq,
+	    atomic_load_explicit(&__lt_seq, memory_order_relaxed) + 1u,
+	    memory_order_relaxed);
+	atomic_thread_fence(memory_order_release);
+}
+static void
+__lt_write_end(void)
+{
+	atomic_store_explicit(&__lt_seq,
+	    atomic_load_explicit(&__lt_seq, memory_order_relaxed) + 1u,
+	    memory_order_release);
+}
+
+static void
+__lt_hash_put(xtc_loop_t *loop, struct xtc_proc_table *t)
+{
+	unsigned h = __lt_hash(loop);
+	while (atomic_load_explicit(&__lt_h[h].loop,
+	    memory_order_relaxed) != NULL)
+		h = (h + 1u) & (LT_HCAP - 1u);
+	atomic_store_explicit(&__lt_h[h].tbl, t, memory_order_release);
+	atomic_store_explicit(&__lt_h[h].loop, loop, memory_order_release);
+}
+
+/* Lock-free lookup of loop's table (NULL if none). */
+static struct xtc_proc_table *
+__lt_find(xtc_loop_t *loop)
+{
+	unsigned seq, h;
+	xtc_loop_t *l;
+	struct xtc_proc_table *t;
+	for (;;) {
+		seq = atomic_load_explicit(&__lt_seq, memory_order_acquire);
+		if (seq & 1u)
+			continue;              /* a writer is mid-change */
+		t = NULL;
+		for (h = __lt_hash(loop); ; h = (h + 1u) & (LT_HCAP - 1u)) {
+			l = atomic_load_explicit(&__lt_h[h].loop,
+			    memory_order_acquire);
+			if (l == NULL)
+				break;
+			if (l == loop) {
+				t = atomic_load_explicit(&__lt_h[h].tbl,
+				    memory_order_acquire);
+				break;
+			}
+		}
+		atomic_thread_fence(memory_order_acquire);
+		if (atomic_load_explicit(&__lt_seq,
+		    memory_order_relaxed) == seq)
+			return t;
+	}
+}
+
+/* Lock-free: a live registered loop whose id is `id` (NULL if none). */
+static xtc_loop_t *
+__lt_find_id(uint16_t id)
+{
+	unsigned seq;
+	int i, n;
+	xtc_loop_t *l, *found;
+	if (id < LT_ID_MAX)
+		return atomic_load_explicit(&__lt_id[id], memory_order_acquire);
+	for (;;) {
+		seq = atomic_load_explicit(&__lt_seq, memory_order_acquire);
+		if (seq & 1u)
+			continue;
+		found = NULL;
+		n = LOOP_TABLE_MAX;
+		for (i = 0; i < n; i++) {
+			l = atomic_load_explicit(&__lt[i].loop,
+			    memory_order_acquire);
+			if (l == NULL)
+				break;             /* dense: end of live entries */
+			if (__lt_loop_id(l) == id) {
+				found = l;
+				break;
+			}
+		}
+		atomic_thread_fence(memory_order_acquire);
+		if (atomic_load_explicit(&__lt_seq,
+		    memory_order_relaxed) == seq)
+			return found;
+	}
+}
+
+/* Remove loop from the registry; returns its table (NULL if absent).
+ * Caller holds __lt_lock. */
+static struct xtc_proc_table *
+__lt_remove_locked(xtc_loop_t *loop)
+{
+	struct xtc_proc_table *tbl = NULL;
+	uint16_t id;
+	int i, j;
+	for (i = 0; i < __lt_n; i++)
+		if (atomic_load_explicit(&__lt[i].loop,
+		    memory_order_relaxed) == loop)
+			break;
+	if (i == __lt_n)
+		return NULL;
+	tbl = atomic_load_explicit(&__lt[i].tbl, memory_order_relaxed);
+	id = __lt_loop_id(loop);
+	__lt_write_begin();
+	/* Dense array: move the last entry into the hole. */
+	__lt_n--;
+	atomic_store_explicit(&__lt[i].loop, atomic_load_explicit(
+	    &__lt[__lt_n].loop, memory_order_relaxed), memory_order_release);
+	atomic_store_explicit(&__lt[i].tbl, atomic_load_explicit(
+	    &__lt[__lt_n].tbl, memory_order_relaxed), memory_order_release);
+	atomic_store_explicit(&__lt[__lt_n].loop, NULL, memory_order_release);
+	atomic_store_explicit(&__lt[__lt_n].tbl, NULL, memory_order_release);
+	/* Hash: rebuild from the dense array (no tombstones). */
+	for (j = 0; j < (int)LT_HCAP; j++) {
+		atomic_store_explicit(&__lt_h[j].loop, NULL,
+		    memory_order_relaxed);
+		atomic_store_explicit(&__lt_h[j].tbl, NULL,
+		    memory_order_relaxed);
+	}
+	for (j = 0; j < __lt_n; j++)
+		__lt_hash_put(atomic_load_explicit(&__lt[j].loop,
+		    memory_order_relaxed), atomic_load_explicit(&__lt[j].tbl,
+		    memory_order_relaxed));
+	/* By-id index: hand the id to another live loop that has it. */
+	if (id < LT_ID_MAX && atomic_load_explicit(&__lt_id[id],
+	    memory_order_relaxed) == loop) {
+		xtc_loop_t *other = NULL;
+		for (j = 0; j < __lt_n; j++) {
+			xtc_loop_t *l = atomic_load_explicit(&__lt[j].loop,
+			    memory_order_relaxed);
+			if (__lt_loop_id(l) == id) { other = l; break; }
+		}
+		atomic_store_explicit(&__lt_id[id], other,
+		    memory_order_release);
+	}
+	__lt_write_end();
+	return tbl;
+}
 
 /* M11.5b: invalidate the registry entry for `loop` and free its
  * table.  Called from xtc_loop_fini.  Idempotent. */
 void
 __xtc_proc_loop_unregister(xtc_loop_t *loop)
 {
-	int i;
 	struct xtc_proc_table *tbl = NULL;
+	/* Drop the registry entry; the table is freed after the unlock, and
+	 * the contract is that a loop being finalized has no live procs and
+	 * no in-flight wakes to it. */
 	(void) __proc_mtx_lock(&__lt_lock);
-	for (i = 0; i < LOOP_TABLE_MAX; i++) {
-		if (atomic_load_explicit(&__lt[i].loop,
-		    memory_order_relaxed) == loop) {
-			tbl = atomic_load_explicit(&__lt[i].tbl,
-			    memory_order_relaxed);
-			/* Publish the slot vacancy with release stores so a
-			 * lock-free reader sees loop==NULL (skip) rather than a
-			 * live loop with a NULL/freed tbl.  Clear loop FIRST so
-			 * a concurrent reader that still sees the old loop then
-			 * reads tbl gets the (still-valid-until-freed-below)
-			 * table; the actual free happens after the unlock, and
-			 * the contract is that a loop being finalized has no
-			 * live procs and no in-flight wakes to it. */
-			atomic_store_explicit(&__lt[i].loop, NULL,
-			    memory_order_release);
-			atomic_store_explicit(&__lt[i].tbl, NULL,
-			    memory_order_release);
-			break;
-		}
-	}
+	tbl = __lt_remove_locked(loop);
 	(void) __proc_mtx_unlock(&__lt_lock);
 	if (tbl != NULL) {
 		/* Free still-live process headers.  By contract a loop
@@ -723,6 +882,7 @@ __xtc_proc_loop_unregister(xtc_loop_t *loop)
 			}
 			__os_free(tbl->slots);
 		}
+		(void)pthread_mutex_destroy(&tbl->free_lock);
 		(void)pthread_mutex_destroy(&tbl->stripes[0]);
 		{
 			unsigned s;
@@ -736,60 +896,54 @@ __xtc_proc_loop_unregister(xtc_loop_t *loop)
 static struct xtc_proc_table *
 __table_for(xtc_loop_t *loop, int create)
 {
-	int i;
-	struct xtc_proc_table *t = NULL;
+	(void)create;   /* lookup only; creation is __table_get */
+	return __lt_find(loop);
+}
 
-	/* Lock-free fast path: an existing loop's table is found by an
-	 * acquire scan of the atomic slots -- no __lt_lock.  This is the
-	 * path every cross-thread wake/send takes (the table already
-	 * exists), so it must not serialize on the global lock. */
-	for (i = 0; i < LOOP_TABLE_MAX; i++) {
-		if (atomic_load_explicit(&__lt[i].loop,
-		    memory_order_acquire) == loop) {
-			return atomic_load_explicit(&__lt[i].tbl,
-			    memory_order_acquire);
-		}
+/* The table for `loop`, creating and registering it on first use.
+ * XTC_E_RESOURCE when LOOP_TABLE_MAX live loops already host procs. */
+static int
+__table_get(xtc_loop_t *loop, struct xtc_proc_table **out)
+{
+	struct xtc_proc_table *t;
+	uint16_t id;
+	unsigned s;
+	int rc = XTC_OK;
+
+	if ((t = __lt_find(loop)) != NULL) {
+		*out = t;
+		return XTC_OK;
 	}
-	if (!create) return NULL;
-
-	/* Slow path: create + register a new table.  Serialized on
-	 * __lt_lock (rare -- first proc spawned on a loop).  Re-scan under
-	 * the lock in case another thread created it between our lock-free
-	 * scan and acquiring the lock. */
 	(void) __proc_mtx_lock(&__lt_lock);
-	for (i = 0; i < LOOP_TABLE_MAX; i++) {
-		if (atomic_load_explicit(&__lt[i].loop,
-		    memory_order_relaxed) == loop) {
-			t = atomic_load_explicit(&__lt[i].tbl,
-			    memory_order_relaxed);
-			goto out;
-		}
-	}
-	if (__os_calloc(1, sizeof *t, (void **)&t) != XTC_OK)
+	if ((t = __lt_find(loop)) != NULL)
 		goto out;
-	{
-		unsigned s;
-		for (s = 0; s < XTC_PT_NSTRIPES; s++)
-			(void)pthread_mutex_init(&t->stripes[s], NULL);
+	if (__lt_n >= LOOP_TABLE_MAX) {
+		rc = XTC_E_RESOURCE;
+		goto out;
 	}
+	if ((rc = __os_calloc(1, sizeof *t, (void **)&t)) != XTC_OK) {
+		t = NULL;
+		goto out;
+	}
+	for (s = 0; s < XTC_PT_NSTRIPES; s++)
+		(void)pthread_mutex_init(&t->stripes[s], NULL);
+	(void)pthread_mutex_init(&t->free_lock, NULL);
+	t->free_head = XTC_PT_FREE_NONE;
 	t->inited = 1;
-	for (i = 0; i < LOOP_TABLE_MAX; i++) {
-		if (atomic_load_explicit(&__lt[i].loop,
-		    memory_order_relaxed) == NULL) {
-			/* Publish tbl BEFORE loop (release), so a lock-free
-			 * reader that sees a non-NULL loop is guaranteed to
-			 * then see the fully-initialized table, never NULL. */
-			atomic_store_explicit(&__lt[i].tbl, t,
-			    memory_order_release);
-			atomic_store_explicit(&__lt[i].loop, loop,
-			    memory_order_release);
-			goto out;
-		}
-	}
-	__os_free(t); t = NULL;
+	id = __lt_loop_id(loop);
+	__lt_write_begin();
+	atomic_store_explicit(&__lt[__lt_n].tbl, t, memory_order_release);
+	atomic_store_explicit(&__lt[__lt_n].loop, loop, memory_order_release);
+	__lt_n++;
+	__lt_hash_put(loop, t);
+	if (id < LT_ID_MAX && atomic_load_explicit(&__lt_id[id],
+	    memory_order_relaxed) == NULL)
+		atomic_store_explicit(&__lt_id[id], loop, memory_order_release);
+	__lt_write_end();
 out:
 	(void) __proc_mtx_unlock(&__lt_lock);
-	return t;
+	*out = t;
+	return rc;
 }
 
 /*
@@ -824,17 +978,18 @@ __table_alloc_slot(struct xtc_proc_table *t, struct xtc_proc *p,
 	/* Spawn path: may grow (realloc) the slot array, so it claims ALL
 	 * stripes -- no lookup/release on any local_id can be mid-flight
 	 * while the array base moves.  Spawns are far rarer than sends, so
-	 * serializing them is fine. */
+	 * serializing them is fine; the slot pick itself is O(1). */
 	__pt_lock_all(t);
-	for (i = 0; i < t->cap; i++) {
-		if (t->slots[i].proc == NULL) {
-			t->slots[i].proc = p;
-			*out_local = (uint16_t)i;
-			*out_gen   = ++t->slots[i].gen;
-			atomic_fetch_add_explicit(&t->n_used, 1,
-			    memory_order_relaxed);
-			goto out;
-		}
+	(void) __proc_mtx_lock(&t->free_lock);
+	idx = t->free_head;
+	if (idx != XTC_PT_FREE_NONE)
+		t->free_head = t->slots[idx].next_free;
+	(void) __proc_mtx_unlock(&t->free_lock);
+	if (idx != XTC_PT_FREE_NONE)
+		goto take;
+	if (t->hw < t->cap) {
+		idx = t->hw++;
+		goto take;
 	}
 	/* Grow -- but never past what local_id can represent. */
 	if (t->cap >= (size_t)XTC_PROC_MAX_LOCAL_ID) {
@@ -844,24 +999,18 @@ __table_alloc_slot(struct xtc_proc_table *t, struct xtc_proc *p,
 	if (new_cap > (size_t)XTC_PROC_MAX_LOCAL_ID)
 		new_cap = (size_t)XTC_PROC_MAX_LOCAL_ID;
 	if (__os_realloc(t->slots, new_cap * sizeof *ns,
-	    (void **)&ns) != XTC_OK || ns == NULL) {
+	    (void **)&ns) != XTC_OK) {
 		rc = XTC_E_NOMEM; goto out;
 	}
 	for (i = t->cap; i < new_cap; i++) {
 		ns[i].proc = NULL;
 		ns[i].gen = 0;
+		ns[i].next_free = XTC_PT_FREE_NONE;
 	}
 	t->slots = ns;
 	t->cap = new_cap;
-
-	idx = atomic_load_explicit(&t->n_used,
-	    memory_order_relaxed);   /* first new slot */
-	/* The scan above found no free slot and the grow is bounded, so
-	 * n_used is the first fresh index; assert it in range rather than
-	 * trusting the invariant blindly. */
-	if (idx >= t->cap) {
-		rc = XTC_E_RESOURCE; goto out;
-	}
+	idx = t->hw++;
+take:
 	t->slots[idx].proc = p;
 	*out_local = (uint16_t)idx;
 	*out_gen   = ++t->slots[idx].gen;
@@ -869,6 +1018,19 @@ __table_alloc_slot(struct xtc_proc_table *t, struct xtc_proc *p,
 out:
 	__pt_unlock_all(t);
 	return rc;
+}
+
+/* Vacate slot `local_id` (caller holds its stripe and saw proc != NULL)
+ * and return it to the free list. */
+static void
+__table_vacate_locked(struct xtc_proc_table *t, uint16_t local_id)
+{
+	t->slots[local_id].proc = NULL;
+	atomic_fetch_sub_explicit(&t->n_used, 1, memory_order_relaxed);
+	(void) __proc_mtx_lock(&t->free_lock);
+	t->slots[local_id].next_free = t->free_head;
+	t->free_head = local_id;
+	(void) __proc_mtx_unlock(&t->free_lock);
 }
 
 static void
@@ -931,11 +1093,8 @@ __table_release(struct xtc_proc_table *t, uint16_t local_id)
 	unsigned st = __pt_stripe(local_id);
 	(void) __proc_mtx_lock(&t->stripes[st]);
 	if (local_id < t->cap) {
-		if (t->slots[local_id].proc != NULL) {
-			t->slots[local_id].proc = NULL;
-			atomic_fetch_sub_explicit(&t->n_used, 1,
-			    memory_order_relaxed);
-		}
+		if (t->slots[local_id].proc != NULL)
+			__table_vacate_locked(t, local_id);
 	}
 	(void) __proc_mtx_unlock(&t->stripes[st]);
 }
@@ -975,9 +1134,9 @@ __mbox_pop_locked(struct xtc_proc *p)
 }
 
 static int
-__mbox_deliver_locked(struct xtc_proc *p, struct envelope *e)
+__mbox_deliver_locked(struct xtc_proc *p, struct envelope *e, int sys)
 {
-	int armed;
+	int armed, rc = XTC_OK;
 	int wm_fire = 0;
 	size_t wm_depth = 0, wm_cap = 0;
 	xtc_waker_t wk = { 0 };
@@ -988,8 +1147,12 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e)
 	 * which parses as (!alive || cap>0) ? ... and produced
 	 * surprising behaviour on platforms where alive timing
 	 * differed.  Explicit parens. */
+	/* sys: a DOWN / link EXIT.  It bypasses mailbox_cap (and the
+	 * spurious-full buggify): those signals are bounded by the number of
+	 * links and monitors, not by traffic, and dropping one leaves a
+	 * supervisor waiting forever for a death it asked to observe. */
 	if (!atomic_load_explicit(&p->alive, memory_order_relaxed) ||
-	    (p->mbox_cap > 0 &&
+	    (!sys && p->mbox_cap > 0 &&
 	     (p->mbox_n +
 	      atomic_load_explicit(&p->mbox_saved, memory_order_relaxed))
 	     >= p->mbox_cap) ||
@@ -1002,7 +1165,7 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e)
 	     * FoundationDB's "smallest legal buffer" buggify.  The per-call
 	     * coin (25%) keeps sends eventually succeeding so senders that
 	     * retry make progress.  A no-op in production. */
-	    (atomic_load_explicit(&p->alive, memory_order_relaxed) &&
+	    (!sys && atomic_load_explicit(&p->alive, memory_order_relaxed) &&
 	    XTC_SIM_BUGGIFY("proc.mbox.spurious_full") &&
 	     xtc_sim_fault(250))) {
 		p->mbox_drop_total++;
@@ -1044,10 +1207,15 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e)
 			atomic_fetch_or_explicit(&p->task->wake_revents,
 			    XTC_WAIT_MAILBOX, memory_order_relaxed);
 #if !XTC_DST_BUG(XTC_DST_BUG_LOSTWAKE)
-		(void)xtc_waker_wake(&wk);
+		/* The message is already queued, so a failed wake cannot be
+		 * rolled back.  Report it instead of returning XTC_OK over a
+		 * parked receiver that was never woken: the caller must not
+		 * resend (the message IS delivered) and may retry the wake with
+		 * xtc_proc_wake. */
+		rc = xtc_waker_wake(&wk);
 #endif   /* planted bug LOSTWAKE: drop this wake -> parked receiver hangs */
 	}
-	return XTC_OK;
+	return rc;
 }
 
 /*
@@ -1068,7 +1236,7 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e)
  * a use-after-free (surfaced by DST machine-death + net-latency: a
  * deferred delivery to a proc killed inside the deferral window).
  */
-struct __mbox_deferred { xtc_pid_t pid; struct envelope *e; };
+struct __mbox_deferred { xtc_pid_t pid; struct envelope *e; int sys; };
 
 /* Forward decl (definition at __resolve below): the deferred callback
  * re-resolves the target by pid at fire time. */
@@ -1080,7 +1248,7 @@ __mbox_deferred_run(void *arg)
 	struct __mbox_deferred *d = arg;
 	struct xtc_proc *p = __resolve(d->pid, NULL);
 	if (p != NULL) {
-		(void)__mbox_deliver_locked(p, d->e);
+		(void)__mbox_deliver_locked(p, d->e, d->sys);
 		__proc_release(p);
 	} else
 		__env_free(d->e);   /* target gone: drop the delayed message */
@@ -1088,7 +1256,7 @@ __mbox_deferred_run(void *arg)
 }
 
 static int
-__mbox_deliver(struct xtc_proc *p, struct envelope *e)
+__mbox_deliver(struct xtc_proc *p, struct envelope *e, int sys)
 {
 	/*
 	 * DST cross-loop network model (sim only; a single relaxed load
@@ -1126,6 +1294,7 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e)
 					(void)__os_clock_mono(&now);
 					d->pid = p->pid;
 					d->e = e;
+					d->sys = sys;
 					if (__xtc_io_sim_defer_cb(dst->io,
 					    now + lat, __mbox_deferred_run,
 					    d) == XTC_OK)
@@ -1137,7 +1306,7 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e)
 			}
 		}
 	}
-	return __mbox_deliver_locked(p, e);
+	return __mbox_deliver_locked(p, e, sys);
 }
 
 /* ---------- spawn entry trampoline ---------- */
@@ -1172,6 +1341,9 @@ __proc_entry(void *arg)
 	 */
 	p->task = __xtc_current_task();
 	p->coro = __xtc_current_coro;
+	atomic_store_explicit(&p->run_loop, __xtc_current_loop_get(),
+	    memory_order_relaxed);
+	atomic_store_explicit(&p->run_task, p->task, memory_order_relaxed);
 	/*
 	 * Publish the reverse link too, from the fiber, while it is
 	 * unambiguously ours: a primitive that must not act on the wrong
@@ -1249,6 +1421,11 @@ proc_exit:
 	 * monitors so a replacement spawned in reaction sees no resource
 	 * (e.g. a lock) still held by the dead proc. */
 	__run_proc_at_exit(p);
+	/* No more parks: stop xtc_exit_pid waking this task (it is about to
+	 * complete).  Under mbox_lock, which the killer holds for its read. */
+	(void) __proc_mtx_lock(&p->mbox_lock);
+	atomic_store_explicit(&p->run_task, NULL, memory_order_relaxed);
+	(void) __proc_mtx_unlock(&p->mbox_lock);
 	/* __notify_links_and_monitors frees p (releases the slot,
 	 * destroys the mailbox lock, frees the struct), so snapshot the
 	 * exit reason before the call -- reading p->exit_reason after it
@@ -1265,6 +1442,16 @@ proc_exit:
 static int __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
     const xtc_proc_opts_t *opts, xtc_pid_t *out_pid, int rel,
     uint64_t *out_ref);
+
+static __os_once_t __proc_hooks_once = XTC_OS_ONCE_INIT;
+static void
+__proc_hooks_install(void)
+{
+	__xtc_fiber_ctx_save = __xtc_proc_ctx_save;
+	__xtc_fiber_ctx_restore = __xtc_proc_ctx_restore;
+	__xtc_fiber_kill_check = __xtc_proc_kill_check;
+	__xtc_loop_fini_hook = __xtc_proc_loop_unregister;
+}
 
 /*
  * PUBLIC: int xtc_proc_spawn __P((xtc_loop_t *, xtc_proc_fn, void *, const xtc_proc_opts_t *, xtc_pid_t *));
@@ -1308,17 +1495,14 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	/* link/monitor require a calling process to be the other end. */
 	if (rel != 0 && self == NULL) return XTC_E_INVAL;
 
-	/* Install the fiber-context preservation hooks so a yield/await
+	/* Install the fiber-context preservation hooks (so a yield/await
 	 * inside a proc keeps __current_proc pointing at this proc on
-	 * resume.  Idempotent: every spawn writes the same stable function
-	 * addresses.  Done here (not at a global init) because the proc
-	 * layer has no other mandatory entry point. */
-	__xtc_fiber_ctx_save = __xtc_proc_ctx_save;
-	__xtc_fiber_ctx_restore = __xtc_proc_ctx_restore;
-	__xtc_fiber_kill_check = __xtc_proc_kill_check;
-	__xtc_loop_fini_hook = __xtc_proc_loop_unregister;
+	 * resume) exactly once.  Done here because the proc layer has no
+	 * other mandatory entry point; once, so a spawn never rewrites a
+	 * global every running fiber reads. */
+	(void)__os_call_once(&__proc_hooks_once, __proc_hooks_install);
 
-	if (XTC_UNLIKELY((tbl = __table_for(loop, 1)) == NULL)) return XTC_E_NOMEM;
+	if (XTC_UNLIKELY((rc = __table_get(loop, &tbl)) != XTC_OK)) return rc;
 
 	if (XTC_UNLIKELY((rc = __os_calloc(1, sizeof *p, (void **)&p)) != XTC_OK))
 		return rc;
@@ -1578,6 +1762,32 @@ xtc_proc_set_class(xtc_exec_class_t cls)
 void *
 __xtc_proc_ctx_save(void)
 {
+	struct xtc_coro *c = __xtc_current_coro_get();
+	struct xtc_proc *rp = c != NULL ? (struct xtc_proc *)c->proc : NULL;
+	xtc_task_t *t = c != NULL ? c->self : NULL;
+	xtc_loop_t *l;
+	/*
+	 * Record, on the RUNNING fiber's proc, whether this yield is a PARK
+	 * and where it is parked: the resume hook must not unwind a woken
+	 * park (its waiter may still be linked on a shared queue, or an SQE
+	 * may point at its frame), and xtc_exit_pid needs the task + loop to
+	 * wake it.  Called on every yield, owner fiber only.
+	 */
+	if (rp != NULL && t != NULL && rp->task == t &&
+	    atomic_load_explicit(&rp->alive, memory_order_relaxed)) {
+		rp->yield_park = t->park_requested ||
+		    atomic_load_explicit(&t->park_timer,
+		    memory_order_relaxed) != NULL ||
+		    atomic_load_explicit(&t->park_fd, memory_order_relaxed) >= 0 ||
+		    c->_parked_on != NULL;
+		atomic_store_explicit(&rp->park_await, c->_parked_on != NULL,
+		    memory_order_relaxed);
+		l = __xtc_current_loop_get();
+		if (l != NULL && atomic_load_explicit(&rp->run_loop,
+		    memory_order_relaxed) != l)
+			atomic_store_explicit(&rp->run_loop, l,
+			    memory_order_relaxed);
+	}
 	return __current_proc;
 }
 
@@ -1678,10 +1888,32 @@ __xtc_proc_kill_deliver(struct xtc_proc *self)
 	xtc_exit_self(kp - 1);
 }
 
+/*
+ * The resume hook.  After a PLAIN or preemption yield it delivers a
+ * pending kill (the xtc_launch runaway cancel).  After a PARK yield it
+ * does not unwind: the park site still owns state that must be undone
+ * first (a stack waiter linked on a shared queue, a grant, an SQE
+ * pointing at its frame), so it delivers at its own safe point -- recv,
+ * sleep and wait_fd here, xtc_mask_leave / __xtc_proc_kill_poll in the
+ * sync layer -- or, for a site that does neither, at the proc's next
+ * delivery point.  A masked kill is latched exactly as before.
+ */
 static void
 __xtc_proc_kill_check(void)
 {
-	__xtc_proc_kill_deliver(__current_proc);
+	struct xtc_proc *self = __proc_reanchor(__current_proc);
+	if (self == NULL)
+		return;
+	if (self->yield_park && __mask_depth(self) == 0)
+		return;
+	__xtc_proc_kill_deliver(self);
+}
+
+/* See proc_int.h. */
+void
+__xtc_proc_kill_poll(void)
+{
+	__xtc_proc_kill_deliver(__proc_reanchor(__current_proc));
 }
 
 /* ---------- A3: async causal trace ---------- */
@@ -1825,6 +2057,9 @@ xtc_proc_sleep(int64_t ns)
 	deadline += ns;
 	for (;;) {
 		void *ctx;
+		/* A kill that arrived before this park (the resume hook does
+		 * not deliver after a park) is honored here, not after it. */
+		__xtc_proc_kill_deliver(self);
 		(void)__os_clock_mono(&now);
 		if (now >= deadline)
 			return XTC_OK;
@@ -1852,6 +2087,10 @@ xtc_proc_sleep(int64_t ns)
 		__xtc_proc_ctx_restore(ctx);
 		__current_proc = self;
 		__xtc_trace_causal(XTC_CAUSAL_RESUME, __func__);
+		/* Woken early (a kill, a spurious wake): release the park
+		 * timer before anything else so a kill never leaves it behind;
+		 * the next iteration re-arms it. */
+		__xtc_task_cancel_park_timer(self->task);
 		__xtc_proc_kill_deliver(self);
 		/* Spurious / early wake: loop until the deadline. */
 	}
@@ -1910,24 +2149,11 @@ __resolve(xtc_pid_t pid, xtc_loop_t **out_loop_for_send)
 	 * before xtc_loop_run, or a cross-thread wake to a loop outside
 	 * the caller's exec): scan the global loop table for the loop
 	 * whose encoded ID matches this pid.  LOCK-FREE: the slots are
-	 * atomic, read with acquire loads (see struct lt_entry) -- this is
-	 * the hot cross-thread-wake path and must not serialize on
-	 * __lt_lock.  Linear in number of loops (<=64).
+	 * the by-id index (see __lt_find_id) -- this is the hot
+	 * cross-thread-wake path and must not serialize on __lt_lock.
 	 */
-	if (target_loop == NULL) {
-		int i;
-		for (i = 0; i < LOOP_TABLE_MAX; i++) {
-			xtc_loop_t *l = atomic_load_explicit(&__lt[i].loop,
-			    memory_order_acquire);
-			uint16_t lid;
-			if (l == NULL) continue;
-			lid = (uint16_t)(l->exec_id < 0 ? 0 : l->exec_id + 1);
-			if (lid == pid.loop_id) {
-				target_loop = l;
-				break;
-			}
-		}
-	}
+	if (target_loop == NULL)
+		target_loop = __lt_find_id(pid.loop_id);
 
 	if (target_loop == NULL) return NULL;
 	if (out_loop_for_send) *out_loop_for_send = target_loop;
@@ -1974,7 +2200,9 @@ __xtc_proc_self_loop(xtc_pid_t *out_pid)
 	return self != NULL ? self->loop : NULL;
 }
 
-static int __send_on(xtc_loop_t *, xtc_pid_t, const void *, size_t);
+static int __send_ex(xtc_loop_t *, xtc_pid_t, const void *, size_t, int);
+#define __send_on(o, t, d, n)  __send_ex((o), (t), (d), (n), 0)
+#define __send_sys(t, d, n)    __send_ex(NULL, (t), (d), (n), 1)
 
 /* PUBLIC: int xtc_send __P((xtc_pid_t, const void *, size_t)); */
 int
@@ -1992,9 +2220,11 @@ __xtc_send_on(xtc_loop_t *owner, xtc_pid_t to, const void *data, size_t size)
 	return __send_on(owner, to, data, size);
 }
 
-/* xtc_send resolved in `owner`'s table (NULL: by pid alone). */
+/* xtc_send resolved in `owner`'s table (NULL: by pid alone).  sys = 1
+ * for a DOWN / link EXIT (bypasses mailbox_cap, see __mbox_deliver_locked). */
 static int
-__send_on(xtc_loop_t *owner, xtc_pid_t to, const void *data, size_t size)
+__send_ex(xtc_loop_t *owner, xtc_pid_t to, const void *data, size_t size,
+    int sys)
 {
 	struct xtc_proc *p;
 	xtc_loop_t *target;
@@ -2041,7 +2271,7 @@ __send_on(xtc_loop_t *owner, xtc_pid_t to, const void *data, size_t size)
 	 * One relaxed mask load when the source is off. */
 	__xtc_tail_emit(XTC_TAIL_MSG, XTC_TAIL_SEND, to, (uint64_t)size);
 
-	rc = __mbox_deliver(p, e);
+	rc = __mbox_deliver(p, e, sys);
 	__proc_release(p);
 	return rc;
 }
@@ -2073,7 +2303,7 @@ static int
 __exit_pid_on(xtc_loop_t *owner, xtc_pid_t target, int reason)
 {
 	struct xtc_proc *p;
-	int expected = 0, desired;
+	int expected = 0, desired, rc = XTC_OK;
 	if (XTC_UNLIKELY(xtc_pid_is_none(target))) return XTC_E_INVAL;
 	p = __resolve_on(owner, target, NULL);
 	if (XTC_UNLIKELY(p == NULL)) return XTC_E_INVAL;
@@ -2086,17 +2316,37 @@ __exit_pid_on(xtc_loop_t *owner, xtc_pid_t target, int reason)
 	(void)atomic_compare_exchange_strong_explicit(&p->kill_pending,
 	    &expected, desired, memory_order_release, memory_order_relaxed);
 
-	/* Best-effort: if the target is parked on its recv waker, wake
-	 * it so it can observe the kill.  If it's runnable already this
-	 * is a no-op. */
+	/*
+	 * Make the target runnable wherever it is parked (sleep, sem,
+	 * amutex, future, lock manager, recv, wait_fd), not only when its
+	 * recv waker is armed, so it reaches a delivery point now instead of
+	 * when its park would have ended.  run_task/run_loop are the task and
+	 * loop of its last yield (__xtc_proc_ctx_save); xtc_waker_wake does
+	 * the PARKED->SCHEDULED CAS, or latches wake_pending if the target is
+	 * still RUNNING.  Done under mbox_lock: the exit path clears run_task
+	 * under the same lock before the task can complete, so a non-NULL
+	 * run_task names a live task.  xtc_await parks are skipped (await
+	 * treats any wake as completion); that kill lands after the await.
+	 * A woken park is never unwound inside xtc_yield (see
+	 * __xtc_proc_kill_check), so this wake is safe for every park site.
+	 */
 	(void) __proc_mtx_lock(&p->mbox_lock);
 	if (p->waker_armed) {
-		xtc_waker_wake(&p->recv_waker);
+		rc = xtc_waker_wake(&p->recv_waker);
 		p->waker_armed = 0;
+	} else {
+		xtc_waker_t wk;
+		wk.task = atomic_load_explicit(&p->run_task,
+		    memory_order_relaxed);
+		wk.loop = atomic_load_explicit(&p->run_loop,
+		    memory_order_relaxed);
+		if (wk.task != NULL && wk.loop != NULL &&
+		    !atomic_load_explicit(&p->park_await, memory_order_relaxed))
+			rc = xtc_waker_wake(&wk);
 	}
 	(void) __proc_mtx_unlock(&p->mbox_lock);
 	__proc_release(p);
-	return XTC_OK;
+	return rc;
 }
 
 /* PUBLIC: int xtc_exit_pid_deadline __P((xtc_pid_t, int, int64_t, int *)); */
@@ -2275,6 +2525,7 @@ int
 xtc_proc_wake(xtc_pid_t target)
 {
 	struct xtc_proc *p;
+	int rc = XTC_OK;
 
 	if (XTC_UNLIKELY(xtc_pid_is_none(target)))
 		return XTC_E_INVAL;
@@ -2291,11 +2542,11 @@ xtc_proc_wake(xtc_pid_t target)
 		 * re-checks fd readiness + the mailbox; recv re-checks the
 		 * mailbox), so a spurious wake simply re-parks.  Setting a false
 		 * MAILBOX/fd bit here would mislead out_revents. */
-		xtc_waker_wake(&p->recv_waker);
+		rc = xtc_waker_wake(&p->recv_waker);
 	}
 	(void) __proc_mtx_unlock(&p->mbox_lock);
 	__proc_release(p);
-	return XTC_OK;
+	return rc;
 }
 
 /* ---------- receive ---------- */
@@ -2311,8 +2562,8 @@ static int
 __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
           int64_t timeout_ns)
 {
-	struct xtc_proc *self = __current_proc;
-	struct envelope *e, **link;
+	struct xtc_proc *self = __current_proc, *prev_self;
+	struct envelope *e, **link, *mark;
 	int64_t deadline = -1;
 
 	/*
@@ -2348,46 +2599,32 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 		deadline = now + timeout_ns;
 	}
 
-	/* BEAM recv-mark: if the predicate has changed since the last
-	 * call, invalidate the mark and re-test the whole save queue.
-	 * If unchanged, we'll skip past `recv_mark` on the walk below. */
-	if (self->last_match_fn != match || self->last_match_user != u) {
-		self->last_match_fn = match;
-		self->last_match_user = u;
-		self->recv_mark = NULL;
-	}
+	/*
+	 * Save-queue mark, local to THIS call: once the walk and the mailbox
+	 * pull below have run, every envelope in the save queue has been
+	 * tested against this call's predicate, so a resume after a park only
+	 * needs to test what arrives in the mailbox.  It is deliberately not
+	 * kept across calls: the predicate's meaning lives in *u, and callers
+	 * (xtc_recv_correlate, svr.c) reuse one stack struct with a different
+	 * value, so a mark keyed on the (match, u) pointers skipped envelopes
+	 * the new value would have matched.
+	 */
+	mark = NULL;
 
 	for (;;) {
-		struct envelope *skip_until = self->recv_mark;
-		int past_mark = (skip_until == NULL);
-		/* Walk save queue first.  Skip entries up to and including
-		 * recv_mark (already tested with this predicate). */
-		link = &self->save_head;
+		struct envelope *prev = mark;
+		/* Walk the save queue after the mark. */
+		link = (mark != NULL) ? &mark->next : &self->save_head;
 		while ((e = *link) != NULL) {
-			if (!past_mark) {
-				if (e == skip_until) past_mark = 1;
-				link = &e->next;
-				continue;
-			}
 			if (match(e->data, e->size, u)) {
-				/* Unlink. */
 				*link = e->next;
 				atomic_fetch_sub_explicit(&self->mbox_saved, 1,
 				    memory_order_relaxed);
-				if (self->save_tail == e) {
-					/* Walk to recompute tail.  O(N) but
-					 * portable; the back-pointer trick using
-					 * offsetof(envelope, next) was suspected of
-					 * miscompilation on MinGW Windows. */
-					struct envelope *t = self->save_head;
-					if (t == NULL) self->save_tail = NULL;
-					else {
-						while (t->next != NULL) t = t->next;
-						self->save_tail = t;
-					}
-				}
+				if (self->save_tail == e)
+					self->save_tail = prev;
 				goto deliver;
 			}
+			prev = e;
 			link = &e->next;
 		}
 
@@ -2442,10 +2679,8 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 			(void) __proc_mtx_lock(&self->mbox_lock);
 		}
 
-		/* Update recv_mark: everything in save_queue has now been
-		 * tested against this predicate.  Next call with the same
-		 * predicate will skip past this point in the queue. */
-		self->recv_mark = self->save_tail;
+		/* Everything in the save queue has now been tested. */
+		mark = self->save_tail;
 
 		/* Nothing to deliver.  Check timeout. */
 		if (timeout_ns == 0) return XTC_E_AGAIN;
@@ -2518,9 +2753,16 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 		 * then).
 		 */
 		__current_proc = self;
+		prev_self = self;
 		self = __proc_reanchor(self);
+		if (self != prev_self)
+			mark = NULL;   /* a different proc's save queue */
 
-		/* Re-check kill flag after yielding back. */
+		/* Re-check kill flag after yielding back; release the park
+		 * timer first so an unwind leaves none behind. */
+		if (atomic_load_explicit(&self->kill_pending,
+		    memory_order_acquire) != 0)
+			__xtc_task_cancel_park_timer(self->task);
 		__xtc_proc_kill_deliver(self);
 
 		(void) __proc_mtx_lock(&self->mbox_lock);
@@ -4299,6 +4541,22 @@ xtc_unlink(xtc_pid_t other)
 	return XTC_OK;
 }
 
+/* PUBLIC: int xtc_proc_trap_exit __P((int)); */
+/*
+ * Set whether the CALLING proc traps exits: when on, a linked peer's
+ * exit (normal or not) arrives as an 'E' message instead of killing this
+ * proc.  Returns the previous setting (0/1), or XTC_E_INVAL off a proc.
+ */
+int
+xtc_proc_trap_exit(int on)
+{
+	struct xtc_proc *self = __proc_reanchor(__current_proc);
+	if (self == NULL)
+		return XTC_E_INVAL;
+	return atomic_exchange_explicit(&self->trap_exit, on ? 1 : 0,
+	    memory_order_relaxed);
+}
+
 /* PUBLIC: int xtc_monitor __P((xtc_pid_t, uint64_t *)); */
 int
 xtc_monitor(xtc_pid_t target, uint64_t *out_ref)
@@ -4336,7 +4594,7 @@ xtc_monitor(xtc_pid_t target, uint64_t *out_ref)
 			uint8_t exit_kind;
 		} XTC_PACKED down = { 'D', ref, target, XTC_DOWN_NOPROC, 3 };
 		XTC_PACK_POP
-		(void)xtc_send(self->pid, &down, sizeof down);
+		(void)__send_sys(self->pid, &down, sizeof down);
 		if (out_ref) *out_ref = ref;
 		if (peer) __proc_release(peer);
 		return XTC_OK;
@@ -4413,18 +4671,37 @@ __notify_links_and_monitors(struct xtc_proc *p)
 		monitors = p->monitors;         p->monitors = NULL;
 		if (tbl != NULL) {
 			if (p->pid.local_id < tbl->cap &&
-			    tbl->slots[p->pid.local_id].proc == p) {
-				tbl->slots[p->pid.local_id].proc = NULL;
-				atomic_fetch_sub_explicit(&tbl->n_used, 1,
-				    memory_order_relaxed);
-			}
+			    tbl->slots[p->pid.local_id].proc == p)
+				__table_vacate_locked(tbl, p->pid.local_id);
 			(void) __proc_mtx_unlock(&tbl->stripes[pst]);
 		}
 	}
 
+	/*
+	 * Link semantics (BEAM): a peer that traps exits gets the 'E'
+	 * message for every exit, normal or not.  A peer that does not trap
+	 * is KILLED with the same reason when this exit is non-normal, and
+	 * hears nothing when it is normal.  A peer already gone is a no-op.
+	 */
 	for (le = links; le != NULL; le = next_le) {
+		struct xtc_proc *peer;
+		int trap;
 		next_le = le->next;
-		(void)xtc_send(le->peer, &exit_signal, sizeof exit_signal);
+		peer = __resolve(le->peer, NULL);
+		if (peer != NULL) {
+			trap = atomic_load_explicit(&peer->trap_exit,
+			    memory_order_relaxed);
+			__proc_release(peer);
+			if (trap) {
+				if (__send_sys(le->peer, &exit_signal,
+				    sizeof exit_signal) != XTC_OK)
+					__xtc_tail_emit(XTC_TAIL_SCHED,
+					    XTC_TAIL_LIFECYCLE_DROP, p->pid, 0);
+			} else if (p->exit_reason != 0) {
+				(void)__exit_pid_on(NULL, le->peer,
+				    p->exit_reason);
+			}
+		}
 		__link_free(le);
 	}
 
@@ -4435,12 +4712,11 @@ __notify_links_and_monitors(struct xtc_proc *p)
 		down_signal.pid  = p->pid;
 		down_signal.reason = p->exit_reason;
 		down_signal.exit_kind = (uint8_t)p->exit_kind;
-		/* A DROPPED DOWN is a supervision fault, not a stray packet:
-		 * the watcher will wait forever for a terminal event that is
-		 * never coming.  The send is bounded on purpose (correct
-		 * backpressure), so ordinary traffic CAN win this race -- but
-		 * losing it must not be silent.  Record it. */
-		if (xtc_send(me->watcher, &down_signal,
+		/* A DOWN bypasses the watcher's mailbox_cap (a dropped DOWN
+		 * leaves the watcher waiting forever for a terminal event).
+		 * What can still fail is a watcher already gone, or an
+		 * allocation; record it rather than lose it silently. */
+		if (__send_sys(me->watcher, &down_signal,
 		    sizeof down_signal) != XTC_OK)
 			__xtc_tail_emit(XTC_TAIL_SCHED,
 			    XTC_TAIL_LIFECYCLE_DROP, p->pid, 0);
@@ -4627,11 +4903,14 @@ xtc_inspect_procs(xtc_inspect_proc_fn cb, void *user)
 int
 xtc_inspect_loops(xtc_inspect_loop_fn cb, void *user)
 {
-	xtc_loop_info_t infos[LOOP_TABLE_MAX];
+	xtc_loop_info_t *infos = NULL;
 	int n = 0, i;
 
 	if (cb == NULL)
 		return XTC_E_INVAL;
+	if (__os_malloc(sizeof *infos * LOOP_TABLE_MAX,
+	    (void **)&infos) != XTC_OK)
+		return XTC_E_NOMEM;
 
 	(void) __proc_mtx_lock(&__lt_lock);
 	for (i = 0; i < LOOP_TABLE_MAX; i++) {
@@ -4662,6 +4941,7 @@ xtc_inspect_loops(xtc_inspect_loop_fn cb, void *user)
 	for (i = 0; i < n; i++)
 		if (cb(&infos[i], user) != 0)
 			break;
+	__os_free(infos);
 	return n;
 }
 

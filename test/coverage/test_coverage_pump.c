@@ -202,6 +202,7 @@ linker_proc(void *arg)
 	void *m; size_t s;
 	int rc;
 
+	(void)xtc_proc_trap_exit(1);   /* receive the EXIT, do not die of it */
 	rc = xtc_link(target);
 	if (rc != XTC_OK) {
 		/* Target was already gone (race with its xtc_exit_self).

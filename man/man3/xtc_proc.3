@@ -23,6 +23,7 @@
 .Nm xtc_proc_wake ,
 .Nm xtc_link ,
 .Nm xtc_unlink ,
+.Nm xtc_proc_trap_exit ,
 .Nm xtc_monitor ,
 .Nm xtc_proc_mailbox_stats ,
 .Nm xtc_fault_guard_install ,
@@ -67,6 +68,8 @@
 .Fn xtc_link "xtc_pid_t other"
 .Ft int
 .Fn xtc_unlink "xtc_pid_t other"
+.Ft int
+.Fn xtc_proc_trap_exit "int on"
 .Ft int
 .Fn xtc_monitor "xtc_pid_t target" "uint64_t *out_ref"
 .Ft int
@@ -173,6 +176,14 @@ if the target is dead, or
 if the target's mailbox is full and bounded.
 Sending is asynchronous: the send returns immediately whether or
 not the receiver is currently scheduled.
+If the message was queued but waking a parked receiver failed, the
+send returns that error
+.Pq e.g. Dv XTC_E_NOMEM
+rather than
+.Dv XTC_OK ;
+the message IS delivered, so do not resend it; call
+.Fn xtc_proc_wake
+to retry the wake.
 .Pp
 Mailboxes are bounded by
 .Fa mailbox_cap
@@ -216,8 +227,18 @@ performs selective receive: the callback
 .Fa match_fn
 is invoked for each envelope in arrival order; the first one for
 which it returns 1 is delivered.  Non-matching envelopes are
-parked in a save queue and re-checked on the next call only if
-the predicate has changed (BEAM-style recv-mark optimisation).
+parked in a save queue.  Every call tests the whole save queue
+against its predicate first, so a call whose predicate value differs
+from the previous call's (even through the same
+.Fa user_data
+pointer) still finds an envelope saved earlier.  Releases before
+1.55.1 skipped saved envelopes when
+.Fa match_fn
+and
+.Fa user_data
+were the same pointers as the previous call, which made
+.Fn xtc_recv_correlate
+miss a reply that arrived before its request was waited on.
 .Pp
 .Fn xtc_recv_correlate
 collects
@@ -312,10 +333,19 @@ terminates the calling process; cleanup runs and any links /
 monitors fire.
 .Pp
 .Fn xtc_exit_pid
-terminates another process by pid.  Asynchronous; the target
-notices on its next yield or
-.Fn xtc_recv
-parking point.
+terminates another process by pid.  Asynchronous: it sets the kill and
+makes the target runnable wherever it is parked
+.Pq Fn xtc_proc_sleep , Fn xtc_recv , Fn xtc_proc_wait_fd , No and the sync primitives ,
+so the target acts on it promptly rather than when its park would have
+ended.  A park site delivers the kill at its own safe point, after it
+has released what it holds; one that does not, delivers it at the
+target's next
+.Fn xtc_recv ,
+.Fn xtc_proc_sleep ,
+or plain yield.  A proc parked in
+.Fn xtc_await
+is not woken; it sees the kill after the await returns.  A kill inside a
+masked region is latched as before.
 It is fire-and-forget:
 .Dv XTC_OK
 means the kill flag was set, not that the target ever acted on it.
@@ -449,12 +479,36 @@ for
 .Dv XTC_PID_NONE .
 .Pp
 .Fn xtc_link
-creates a bidirectional link.  If either end exits with a
-non-normal reason, the other receives an
+creates a bidirectional link with BEAM semantics.  When either end exits
+with a non-normal reason
+.Pq reason != 0 ,
+the other end is killed with the same reason, unless it traps exits.
+A normal exit is silent to a peer that does not trap exits.
+A peer that traps exits is never killed by a link: it receives an
 .Sq EXIT
-signal in its mailbox.
+message
+.Po Vt {kind='E', reason, pid, exit_kind} ;
+decode with
+.Fn xtc_down_decode_ex Pc
+for every linked exit, normal or not.
 .Fn xtc_unlink
 removes the link.
+.Pp
+.Fn xtc_proc_trap_exit
+sets whether the calling proc traps exits (default off) and returns the
+previous setting, or
+.Dv XTC_E_INVAL
+off a proc.
+.Pp
+This is a behaviour change in 1.55.1.  Earlier releases never killed a
+linked peer; every peer received an
+.Sq EXIT
+message for every exit, normal included.  Code that links and then
+waits for that message must call
+.Fn xtc_proc_trap_exit 1
+first.
+.Dv XTC_HAVE_PROC_TRAP_EXIT
+is defined when the call exists.
 .Pp
 .Fn xtc_monitor
 creates a unidirectional monitor.  The watcher receives a
@@ -462,6 +516,11 @@ creates a unidirectional monitor.  The watcher receives a
 message
 .Po Vt {kind='D', ref, pid, reason} Pc
 when the monitored process exits.
+DOWN and EXIT messages are not subject to
+.Fa mailbox_cap :
+they are bounded by the number of monitors and links, so a watcher
+whose mailbox is full still receives them.  Releases before 1.55.1
+dropped them in that case.
 .Pp
 .Fn xtc_proc_mailbox_stats
 snapshots a process's mailbox into

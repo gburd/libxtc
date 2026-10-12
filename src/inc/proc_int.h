@@ -69,4 +69,20 @@ int       __xtc_exit_self_kind(int reason, int kind);
  */
 void      __xtc_trace_causal(int kind, const char *site);
 
+/*
+ * Deliver a kill pending on the calling proc, at a park site's safe
+ * point (after it has dequeued its waiter, returned any grant, cancelled
+ * its park timer and dropped its locks).  No-op off a proc, when no kill
+ * is pending, or when the kill is masked (it is latched, as at any other
+ * delivery point); otherwise unwinds via xtc_exit_self.  The resume hook
+ * inside xtc_yield does NOT deliver after a park yield, so a park site
+ * that never calls this simply sees the kill at the proc's next delivery
+ * point.
+ */
+void      __xtc_proc_kill_poll(void);
+
+/* xtc_exit_pid makes a target parked anywhere runnable (except inside
+ * xtc_await), so a park site re-checks promptly and can deliver the kill. */
+#define XTC_HAVE_PROC_KILL_WAKE 1
+
 #endif /* XTC_PROC_INT_H */

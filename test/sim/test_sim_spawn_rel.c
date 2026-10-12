@@ -90,6 +90,7 @@ supervisor(void *arg)
 	int i, seen = 0, tries;
 	int want = 2 * N_PER_SUP;
 
+	(void)xtc_proc_trap_exit(1);   /* linked exits arrive as 'E' */
 	for (i = 0; i < N_PER_SUP; i++) {
 		xtc_pid_t pid;
 		uint64_t ref = 0;

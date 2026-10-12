@@ -67,6 +67,7 @@ int xtc_proc_sleep __P((int64_t));
 int xtc_proc_spawn __P((xtc_loop_t *, xtc_proc_fn, void *, const xtc_proc_opts_t *, xtc_pid_t *));
 int xtc_proc_spawn_link __P((xtc_loop_t *, xtc_proc_fn, void *, const xtc_proc_opts_t *, xtc_pid_t *));
 int xtc_proc_spawn_monitor __P((xtc_loop_t *, xtc_proc_fn, void *, const xtc_proc_opts_t *, xtc_pid_t *, uint64_t *));
+int xtc_proc_trap_exit __P((int));
 int xtc_proc_wait_fd __P((int, uint32_t, int64_t, uint32_t *));
 int xtc_proc_wake __P((xtc_pid_t));
 int xtc_recv __P((void **, size_t *, int64_t));

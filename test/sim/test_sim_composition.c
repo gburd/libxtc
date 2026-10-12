@@ -102,6 +102,7 @@ driver(void *arg)
 	int my_monitors = 0, my_links = 0;
 	int op;
 
+	(void)xtc_proc_trap_exit(1);   /* linked exits arrive as 'E' */
 	for (op = 0; op < OPS_PER_DRV; op++) {
 		int which = (int)__xtc_sim_rng_range(XTC_SIM_RNG_APP, 6);
 		unsigned lp = (unsigned)__xtc_sim_rng_range(XTC_SIM_RNG_APP,
