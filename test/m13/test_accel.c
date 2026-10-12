@@ -219,6 +219,167 @@ test_wait_fence_badfd(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- wait_fence with an unread mailbox message (BLOCKER 2) ----
+ * xtc_proc_wait_fd returns at once while the caller's mailbox is
+ * non-empty, and wait_fence used to re-wait on that immediately: a 100%
+ * CPU spin that never returned and starved every fiber on the loop.
+ * A 10 ms heartbeat fiber shares the loop; a watchdog thread turns the
+ * old hang into a failure. */
+#if HAVE_EVENTFD
+#include <pthread.h>
+#include <stdlib.h>
+#include <time.h>
+
+static _Atomic int g_beats, g_mb_done;
+static int g_mb_rc, g_mb_fd, g_mb_mode;
+static double g_mb_elapsed;
+static size_t g_mb_depth;
+static xtc_pid_t g_mb_waiter;
+
+static double
+mb_now(void)
+{
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
+}
+
+static void
+mb_heartbeat(void *a)
+{
+	(void)a;
+	while (!atomic_load(&g_mb_done)) {
+		atomic_fetch_add(&g_beats, 1);
+		(void)xtc_proc_sleep(10 * 1000 * 1000);
+	}
+}
+
+/* mode 0: pending mail, 300 ms timeout, fence never fires.
+ * mode 1: pending mail, no timeout, a peer signals the fence at ~100 ms.
+ * mode 2: no mail, 300 ms timeout, a stray xtc_proc_wake at ~20 ms. */
+static void
+mb_waiter(void *a)
+{
+	xtc_mailbox_stats_t st;
+	double t0;
+	(void)a;
+	if (g_mb_mode != 2)
+		(void)xtc_send(xtc_self(), "ctl", 3);
+	t0 = mb_now();
+	g_mb_rc = xtc_accel_wait_fence(g_mb_fd,
+	    g_mb_mode == 1 ? -1 : 300LL * 1000 * 1000);
+	g_mb_elapsed = mb_now() - t0;
+	memset(&st, 0, sizeof st);
+	(void)xtc_proc_mailbox_stats(xtc_self(), &st);
+	g_mb_depth = st.depth;
+	atomic_store(&g_mb_done, 1);
+}
+
+static void
+mb_peer(void *a)
+{
+	uint64_t one = 1;
+	(void)a;
+	if (g_mb_mode == 1) {
+		(void)xtc_proc_sleep(100LL * 1000 * 1000);
+		if (write(g_mb_fd, &one, sizeof one) != (ssize_t)sizeof one)
+			g_mb_rc = -99;
+	} else if (g_mb_mode == 2) {
+		(void)xtc_proc_sleep(20LL * 1000 * 1000);
+		(void)xtc_proc_wake(g_mb_waiter);
+	}
+}
+
+static void *
+mb_watchdog(void *a)
+{
+	int i;
+	(void)a;
+	for (i = 0; i < 300 && !atomic_load(&g_mb_done); i++)
+		usleep(10000);
+	if (!atomic_load(&g_mb_done)) {
+		fprintf(stderr, "wait_fence never returned (mode %d), "
+		    "heartbeats=%d in 3 s\n", g_mb_mode, atomic_load(&g_beats));
+		_exit(3);
+	}
+	return NULL;
+}
+
+static void
+mb_run(int mode)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_pid_t pid;
+	pthread_t wd;
+	g_mb_mode = mode;
+	atomic_store(&g_beats, 0);
+	atomic_store(&g_mb_done, 0);
+	g_mb_rc = 12345;
+	g_mb_fd = eventfd(0, EFD_NONBLOCK);
+	munit_assert_int(g_mb_fd, >=, 0);
+	munit_assert_int(pthread_create(&wd, NULL, mb_watchdog, NULL), ==, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, mb_heartbeat, NULL, NULL, &pid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, mb_waiter, NULL, NULL,
+	    &g_mb_waiter), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, mb_peer, NULL, NULL, &pid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)pthread_join(wd, NULL);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	(void)close(g_mb_fd);
+	printf("# mode %d: rc=%d after %.3f s, heartbeats=%d, mail left=%zu\n",
+	    mode, g_mb_rc, g_mb_elapsed, atomic_load(&g_beats), g_mb_depth);
+}
+#endif
+
+static MunitResult
+test_wait_fence_mailbox(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	if (!ACCEL_BUILT)
+		return MUNIT_SKIP;
+#if HAVE_EVENTFD
+	/* Timeout honoured exactly, loop not starved, mail untouched. */
+	mb_run(0);
+	munit_assert_int(g_mb_rc, ==, XTC_E_AGAIN);
+	munit_assert_double(g_mb_elapsed, >=, 0.299);
+	munit_assert_double(g_mb_elapsed, <, 1.0);
+	munit_assert_int(atomic_load(&g_beats), >=, 10);
+	munit_assert_size(g_mb_depth, ==, 1);
+	/* No timeout: a fence signalled by a fiber on the same loop is seen
+	 * (that fiber could not run at all while the waiter spun). */
+	mb_run(1);
+	munit_assert_int(g_mb_rc, ==, XTC_OK);
+	munit_assert_double(g_mb_elapsed, <, 1.0);
+	munit_assert_int(atomic_load(&g_beats), >=, 5);
+	munit_assert_size(g_mb_depth, ==, 1);
+	return MUNIT_OK;
+#else
+	return MUNIT_SKIP;
+#endif
+}
+
+/* A stray xtc_proc_wake (documented as legal) must not cut the timeout:
+ * it used to set the remaining budget to 0, so a 300 ms wait ended as a
+ * timeout at the 20 ms wake. */
+static MunitResult
+test_wait_fence_stray_wake(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	if (!ACCEL_BUILT)
+		return MUNIT_SKIP;
+#if HAVE_EVENTFD
+	mb_run(2);
+	munit_assert_int(g_mb_rc, ==, XTC_E_AGAIN);
+	munit_assert_double(g_mb_elapsed, >=, 0.299);
+	return MUNIT_OK;
+#else
+	return MUNIT_SKIP;
+#endif
+}
+
 /* ---- run_blocking: runs the closure, returns its result ---- */
 static int
 compute_fn(void *arg)
@@ -249,6 +410,8 @@ static MunitTest tests[] = {
 	{ "/wait_fence_signal",  test_wait_fence_signalled, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/wait_fence_timeout", test_wait_fence_timeout,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/wait_fence_badfd",   test_wait_fence_badfd,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/wait_fence_mailbox", test_wait_fence_mailbox,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/wait_fence_stray_wake", test_wait_fence_stray_wake, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/run_blocking",       test_run_blocking,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
