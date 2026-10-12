@@ -262,7 +262,7 @@ xtc_bdev_open(const char *path, int flags, xtc_bdev_t **out)
 		return rc;
 	}
 
-	/* ponytail: geometry probe is a defaults-returning stub on Windows;
+	/* The geometry probe is a defaults-returning stub on Windows;
 	 * an IOCTL_DISK_GET_DRIVE_GEOMETRY_EX query on a \\.\PhysicalDriveN
 	 * handle is the upgrade path when raw-device support lands there. */
 	b->fd = fd;

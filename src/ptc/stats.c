@@ -509,7 +509,7 @@ xtc_dist_record(xtc_dist_t *d, double value)
  * Snapshot + Chan merge of all shards into (out_n, out_mean, out_m2),
  * starting from the empty accumulator (0, 0, 0).  Plain pairwise Chan
  * merge; no compensated summation.
- * ponytail: defer Neumaier compensation unless a consumer proves drift.
+ * Neumaier compensation is deferred unless a consumer proves drift.
  */
 static void
 __dist_merge(const xtc_dist_t *d, uint64_t *out_n, double *out_mean,
@@ -582,7 +582,7 @@ xtc_dist_stddev(const xtc_dist_t *d)
 	 * link line) for one square root is not worth it.  The argument
 	 * is a variance -- always finite and >= 0 -- so a handful of
 	 * iterations from a decent seed converges to full double
-	 * precision.  ponytail: swap for sqrt() if libxtc ever grows a
+	 * precision.  Could swap for sqrt() if libxtc ever grows a
 	 * real libm dependency. */
 	double x, prev;
 	int i;

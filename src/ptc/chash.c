@@ -110,7 +110,7 @@
 #include <stdint.h>
 
 /*
- * ponytail: 64 fixed write stripes.  A key's stripe is derived from
+ * 64 fixed write stripes.  A key's stripe is derived from
  * its BUCKET INDEX (idx & (NSTRIPES-1)), not from independent hash
  * bits -- two keys that land in the SAME bucket must always pick the
  * SAME stripe lock, or two writers could race unprotected on that
@@ -499,7 +499,7 @@ __xtc_chash_nbuckets(const xtc_chash_t *h)
  * total and deterministic, no node lost or duplicated.  It is the
  * exact inverse of the grow split.
  *
- * ponytail: one xtc_rcu_retire call per old node (no batch-retire API
+ * One xtc_rcu_retire call per old node (no batch-retire API
  * on xtc_rcu); fine for the "rare, amortised" resize this is, revisit
  * if a workload greater than a few hundred thousand live keys makes
  * resize pauses (all stripes blocked for the O(n) rehash) show up in a

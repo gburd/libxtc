@@ -2175,8 +2175,8 @@ bm_reclaim_quarantine(bm_t *bm)
 	if (bm == NULL)
 		return;
 	(void)pthread_mutex_lock(&bm->pid_mu);
-	/* ponytail: defer the whole epoch while any old frame owner remains;
-	 * per-pid deferral is only needed if this measurably delays reuse.
+	/* Defer the whole epoch while any old frame owner remains; per-pid
+	 * deferral would only be needed if this measurably delays reuse.
 	 * Pins include writeback: reusing its pid early lets an old disk
 	 * write overwrite the new incarnation even with distinct frames. */
 	if (bm->quar_pids_n == 0 ||

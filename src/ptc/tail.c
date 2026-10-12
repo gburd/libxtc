@@ -641,7 +641,7 @@ out:
  * box by spilling a dial9 segment to a directory (xtc_tail_spill_dial9),
  * which a sidecar or scp then ships to wherever the dial9 viewer reads.
  *
- * Deliberately NO background thread (ponytail: a thread is only warranted
+ * Deliberately NO background thread (a thread is only warranted
  * once a consumer needs unattended periodic spill).  The caller decides
  * when to spill -- at shutdown, on a signal, on a health-check trigger, or
  * periodically from its own timer.  A crash-surviving trace is the caller

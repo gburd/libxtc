@@ -205,7 +205,7 @@ smoke_xt_sender(LPVOID param)
 {
 	int i;
 	(void)param;
-	/* ponytail: fixed 20 ms nudge so the burst lands while the loop
+	/* Fixed 20 ms nudge so the burst lands while the loop
 	 * thread is parked in GQCS (the wakeup path we want to hit); the
 	 * test is still correct if it lands earlier -- the message just
 	 * waits in the mailbox -- so this only biases toward the wakeup

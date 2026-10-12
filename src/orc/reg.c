@@ -32,7 +32,7 @@
  * locker_table[256] and the named-service workload the registry
  * serves (tens to hundreds of long-lived names).
  *
- * ponytail: fixed 256 buckets, no resize.  If a deployment ever
+ * Fixed 256 buckets, no resize.  If a deployment ever
  * registers tens of thousands of names, bump REG_NBUCKETS or add a
  * one-shot grow-on-first-overflow -- but only when a real workload
  * shows chains long enough to matter.
