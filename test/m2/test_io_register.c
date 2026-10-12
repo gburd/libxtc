@@ -361,6 +361,163 @@ test_closed_registered_fd(const MunitParameter p[], void *d)
 }
 #endif
 
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <sys/resource.h>
+#include <sys/socket.h>
+#include "xtc_inject.h"
+
+int __xtc_io_reg_stats(xtc_io_t *, int *, int *, int *);
+
+/*
+ * R7: readiness must survive a stalled consumer, and no registration may
+ * leak.  N fds all become ready while the loop is not polling, so the
+ * kernel produces more completions than the io_uring CQ holds (CQ
+ * overflow).  The consumer then behaves like the dispatcher: one event
+ * per fd, deleting the registration on the event.  Two rounds on the
+ * same io; every round must deliver all N events, and once everything
+ * is deleted no retired node may remain.
+ *
+ * Before (io_uring, N=5000): round 0 delivered 5000 but left 4556
+ * retired nodes waiting forever for a terminal CQE that had already been
+ * posted; round 1 delivered 0 of 5000 (the ring stopped reporting
+ * readiness).  The second half forces "SQ full" through an injection
+ * point, so every arm and cancel takes the deferred path.  Other
+ * backends run the readiness half (they have no CQ to overflow) and
+ * skip the leak accounting.
+ */
+static int
+r7_round(xtc_io_t *io, int (*sp)[2], char *seen, int n)
+{
+	xtc_io_event_t ev[256];
+	int i, k, got = 0, idle = 0, cnt;
+	char b;
+
+	for (i = 0; i < n; i++) {
+		seen[i] = 0;
+		munit_assert_int(xtc_io_reg_fd(io, sp[i][0], XTC_IO_READABLE,
+		    (void *)(intptr_t)(i + 1)), ==, XTC_OK);
+	}
+	for (i = 0; i < n; i++)
+		munit_assert_int((int)write(sp[i][1], "x", 1), ==, 1);
+	while (got < n && idle < 20) {
+		cnt = 0;
+		munit_assert_int(xtc_io_poll(io, ev, 256, 50LL * 1000000,
+		    &cnt), ==, XTC_OK);
+		if (cnt == 0) { idle++; continue; }
+		idle = 0;
+		for (k = 0; k < cnt; k++) {
+			int ix = (int)(intptr_t)ev[k].tag - 1;
+			if (ix < 0 || ix >= n || seen[ix])
+				continue;
+			seen[ix] = 1;
+			got++;
+			munit_assert_int(xtc_io_del_fd(io, sp[ix][0]), ==,
+			    XTC_OK);
+		}
+	}
+	for (i = 0; i < n; i++) {
+		(void)read(sp[i][0], &b, 1);
+		if (!seen[i])
+			(void)xtc_io_del_fd(io, sp[i][0]);
+	}
+	return got;
+}
+
+/* Poll until no retired node is left (the cancels' CQEs drain). */
+static void
+r7_settle(xtc_io_t *io, int *live, int *zombies, int *pending)
+{
+	xtc_io_event_t ev[64];
+	int i, cnt;
+	for (i = 0; i < 50; i++) {
+		if (__xtc_io_reg_stats(io, live, zombies, pending) != XTC_OK)
+			return;
+		if (*zombies == 0 && *pending == 0)
+			return;
+		(void)xtc_io_poll(io, ev, 64, 10LL * 1000000, &cnt);
+	}
+}
+
+static void
+r7_inj(const char *name, void *user)
+{
+	(void)name; (void)user;
+}
+
+static MunitResult
+test_overflow_no_leak(const MunitParameter p[], void *d)
+{
+	enum { N = 5000 };
+	static int sp[N][2];
+	static char seen[N];
+	struct rlimit rl;
+	xtc_io_t *io = NULL;
+	int i, round, live = -1, zombies = -1, pending = -1, uring;
+	(void)p; (void)d;
+
+	munit_assert_int(getrlimit(RLIMIT_NOFILE, &rl), ==, 0);
+	if (rl.rlim_cur < 2 * N + 64) {
+		rl.rlim_cur = (rl.rlim_max == RLIM_INFINITY ||
+		    rl.rlim_max >= 2 * N + 64) ? 2 * N + 64 : rl.rlim_max;
+		(void)setrlimit(RLIMIT_NOFILE, &rl);
+		(void)getrlimit(RLIMIT_NOFILE, &rl);
+		if (rl.rlim_cur < 2 * N + 64)
+			return MUNIT_SKIP;   /* cannot open 2N fds here */
+	}
+	/* select(2) cannot watch fds >= FD_SETSIZE. */
+	if (strcmp(xtc_io_backend_name(), "select") == 0)
+		return MUNIT_SKIP;
+	uring = strcmp(xtc_io_backend_name(), "uring") == 0;
+	for (i = 0; i < N; i++) {
+		munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, sp[i]),
+		    ==, 0);
+		munit_assert_int(fcntl(sp[i][0], F_SETFL, O_NONBLOCK), ==, 0);
+	}
+	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	for (round = 0; round < 2; round++) {
+		munit_assert_int(r7_round(io, sp, seen, N), ==, N);
+		if (!uring)
+			continue;
+		r7_settle(io, &live, &zombies, &pending);
+		munit_assert_int(live, ==, 0);
+		munit_assert_int(zombies, ==, 0);
+		munit_assert_int(pending, ==, 0);
+	}
+
+	/* SQ full on every arm and cancel: the deferred queue must carry
+	 * them all, and still nothing may be lost or leaked. */
+	munit_assert_int(xtc_inject_attach("io.uring.sq_full", r7_inj, NULL),
+	    ==, XTC_OK);
+	for (i = 0; i < 64; i++)
+		munit_assert_int(xtc_io_reg_fd(io, sp[i][0], XTC_IO_READABLE,
+		    (void *)(intptr_t)(i + 1)), ==, XTC_OK);
+	if (uring) {
+		munit_assert_int(__xtc_io_reg_stats(io, &live, &zombies,
+		    &pending), ==, XTC_OK);
+		munit_assert_int(live, ==, 64);
+		munit_assert_int(pending, ==, 64);
+	}
+	for (i = 0; i < 64; i++)
+		munit_assert_int(xtc_io_del_fd(io, sp[i][0]), ==, XTC_OK);
+	(void)xtc_inject_detach("io.uring.sq_full");
+	if (uring) {
+		r7_settle(io, &live, &zombies, &pending);
+		munit_assert_int(live, ==, 0);
+		munit_assert_int(zombies, ==, 0);
+		munit_assert_int(pending, ==, 0);
+	}
+	munit_assert_int(r7_round(io, sp, seen, N), ==, N);
+
+	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	for (i = 0; i < N; i++) {
+		(void)close(sp[i][0]);
+		(void)close(sp[i][1]);
+	}
+	return MUNIT_OK;
+}
+#endif
+
 static MunitTest tests[] = {
 	{ "/R1_basic",     test_reg_basic,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/R2_bad_args",  test_reg_bad_args, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -373,6 +530,9 @@ static MunitTest tests[] = {
 	{ "/R5_del_fd",    test_del_fd,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #if !defined(_WIN32)
 	{ "/R6_closed_registered_fd", test_closed_registered_fd, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+#endif
+#if !defined(_WIN32)
+	{ "/R7_overflow_no_leak", test_overflow_no_leak, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #endif
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
