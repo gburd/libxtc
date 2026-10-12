@@ -487,7 +487,17 @@ XTC_API void xtc_tls_destroy(xtc_tls_t *tls);
  *	                and call again when the event fires
  *	  XTC_E_INVAL   tls is NULL
  *	  XTC_E_NOSYS   TLS not compiled in
+ *	  XTC_E_IO      the peer or transport failed (EOF without close_notify,
+ *	                reset, send/recv error); tear the connection down
  *	  (other)       backend-specific hard error; connection must be torn down
+ *
+ *	There is no built-in handshake deadline: pass the time left before
+ *	your own deadline as the xtc_proc_wait_fd timeout (xtc_tls(3)).
+ *
+ *	Errors are per connection.  Each backend clears its per-thread error
+ *	state before every handshake / read / write / shutdown call and after
+ *	a failure, so one bad peer cannot fail a later call on another
+ *	connection that shares the thread.
  */
 XTC_API int  xtc_tls_handshake(xtc_tls_t *tls);
 
@@ -504,10 +514,14 @@ XTC_API int  xtc_tls_handshake(xtc_tls_t *tls);
  * xtc_tls_read --
  *	Read up to buflen decrypted bytes into buf.
  *
- *	On XTC_OK, *out_n holds the number of bytes read (may be < buflen).
+ *	On XTC_OK, *out_n holds the number of bytes read (may be < buflen);
+ *	*out_n == 0 is a clean EOF (the peer sent close_notify).
  *	On XTC_E_AGAIN the fd was not readable; *out_n is 0.
+ *	On XTC_E_IO the peer closed without close_notify (truncation), reset
+ *	the connection, or the transport failed.
  *	On XTC_E_INVAL tls, buf, or out_n is NULL.
  *	On XTC_E_NOSYS TLS was not compiled in.
+ *	Any other negative code is a hard TLS error; tear the connection down.
  */
 XTC_API int  xtc_tls_read(xtc_tls_t *tls, void *buf, size_t buflen, size_t *out_n);
 
@@ -517,6 +531,7 @@ XTC_API int  xtc_tls_read(xtc_tls_t *tls, void *buf, size_t buflen, size_t *out_
  *
  *	On XTC_OK, *out_n holds the number of bytes consumed (may be < buflen).
  *	On XTC_E_AGAIN the fd was not writable; *out_n is 0.
+ *	On XTC_E_IO the peer or transport failed (reset, closed, send error).
  *	On XTC_E_INVAL tls, buf, or out_n is NULL.
  *	On XTC_E_NOSYS TLS was not compiled in.
  */
