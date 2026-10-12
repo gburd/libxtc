@@ -793,7 +793,11 @@ static void
 __lockmgr_kill_deliver(void)
 {
 	(void)xtc_mask_leave();
+#ifdef XTC_HAVE_PROC_KILL_WAKE
+	__xtc_proc_kill_poll();
+#else
 	if (__xtc_fiber_kill_check != NULL) __xtc_fiber_kill_check();
+#endif
 }
 
 int

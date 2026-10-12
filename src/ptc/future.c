@@ -322,14 +322,18 @@ xtc_promise_drop(xtc_promise_t *prom)
  * c->lock (see future_get).  Does not return unless an enclosing mask of
  * the caller defers the kill; then the wait's mask is re-raised and
  * *masked becomes 2 (stop checking).  xtc_mask_leave delivers a kill the
- * resume hook latched under the wait's mask; the direct hook call
- * delivers one it did not latch.
+ * resume hook latched under the wait's mask; the poll delivers one it
+ * did not latch.
  */
 static void
 fut_kill_deliver(int *masked)
 {
 	(void)xtc_mask_leave();
+#ifdef XTC_HAVE_PROC_KILL_WAKE
+	__xtc_proc_kill_poll();
+#else
 	if (__xtc_fiber_kill_check != NULL) __xtc_fiber_kill_check();
+#endif
 	(void)xtc_mask_enter();
 	*masked = 2;
 }
