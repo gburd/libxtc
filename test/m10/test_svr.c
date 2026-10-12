@@ -604,6 +604,192 @@ test_svr_call_off_loop(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ================================================================
+ * E-B1: off-proc caller times out, the server replies LATE.
+ *
+ * The handler sleeps 300 ms; a plain-thread caller gives up at 50 ms and
+ * then keeps its stack busy over the region the call frame used.  Before
+ * 1.55.1 the request carried the address of the caller's stack reply slot
+ * and the late xtc_svr_reply wrote/locked/signalled through it: ASan
+ * stack-use-after-return in xtc_svr_reply, SEGV in xtc_notify_signal, or
+ * (release) silent corruption of the live frame -- caught here by the
+ * canary check.  The late reply must be discarded.
+ * ================================================================ */
+
+static xtc_loop_t *g_late_loop;
+static _Atomic int g_late_reply_rc = 12345;
+
+static int
+late_handle_call(void *st, const void *req, size_t size, xtc_svr_call_t *call)
+{
+	(void)st; (void)req; (void)size;
+	(void)xtc_proc_sleep(300LL * 1000 * 1000);
+	atomic_store(&g_late_reply_rc, xtc_svr_reply(call, "late", 4));
+	return XTC_SVR_STOP;
+}
+
+/* Fill a stack area that overlaps the dead call frame and hold it live
+ * across the late-reply window; return the number of bytes that changed. */
+static __attribute__((noinline)) int
+late_scrub_and_hold(void)
+{
+	volatile unsigned char buf[16384];
+	size_t i;
+	int bad = 0;
+	for (i = 0; i < sizeof buf; i++) buf[i] = 0x5a;
+	(void)xtc_sleep_ns(600LL * 1000 * 1000);
+	for (i = 0; i < sizeof buf; i++)
+		if (buf[i] != 0x5a) bad++;
+	return bad;
+}
+
+struct late_args {
+	xtc_pid_t   target;
+	_Atomic int rc;
+	_Atomic int corrupted;
+};
+
+static void *
+late_thread(void *arg)
+{
+	struct late_args *a = arg;
+	void  *reply = NULL;
+	size_t rsz = 0;
+	int rc;
+
+	(void)xtc_sleep_ns(50LL * 1000 * 1000);   /* let the loop start */
+	rc = xtc_svr_call(a->target, "q", 1, &reply, &rsz,
+	    50LL * 1000 * 1000);
+	atomic_store(&a->rc, rc);
+	xtc_free(reply);
+	atomic_store(&a->corrupted, late_scrub_and_hold());
+	(void)xtc_loop_stop(g_late_loop);
+	return NULL;
+}
+
+static MunitResult
+test_svr_off_loop_late_reply(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_svr_t  *svr = NULL;
+	xtc_svr_callbacks_t cb = { .handle_call = late_handle_call };
+	struct late_args a;
+	pthread_t th;
+	(void)p; (void)d;
+
+	memset(&a, 0, sizeof a);
+	atomic_store(&a.rc, -12345);
+	atomic_store(&a.corrupted, -1);
+	atomic_store(&g_late_reply_rc, 12345);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	g_late_loop = loop;
+	munit_assert_int(xtc_svr_start(loop, &cb, NULL, NULL, &svr), ==, XTC_OK);
+	a.target = xtc_svr_pid(svr);
+	munit_assert_int(pthread_create(&th, NULL, late_thread, &a), ==, 0);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+
+	munit_assert_int(atomic_load(&a.rc), ==, XTC_E_AGAIN);
+	munit_assert_int(atomic_load(&a.corrupted), ==, 0);
+	/* The late reply found no caller and was discarded. */
+	munit_assert_int(atomic_load(&g_late_reply_rc), ==, XTC_E_NOTFOUND);
+	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* ================================================================
+ * Server exits mid-call.  The handler calls xtc_exit_self without
+ * replying.  Before 1.55.1 the caller had no way to notice: it waited
+ * out its full timeout (forever with -1), and xtc_svr_join never saw the
+ * server stop.  Now the call fails fast with XTC_E_NOTFOUND, from a proc
+ * and from a plain thread, and the server is joinable.
+ * ================================================================ */
+
+static int
+dying_handle_call(void *st, const void *req, size_t size, xtc_svr_call_t *call)
+{
+	(void)st; (void)req; (void)size; (void)call;
+	(void)xtc_proc_sleep(20LL * 1000 * 1000);
+	xtc_exit_self(3);
+	return XTC_SVR_CONTINUE;
+}
+
+struct dying_args {
+	xtc_pid_t   target;
+	xtc_loop_t *loop;
+	_Atomic int rc;
+	_Atomic int64_t elapsed_ns;
+};
+
+static void
+dying_do_call(struct dying_args *a)
+{
+	void  *reply = NULL;
+	size_t rsz = 0;
+	int64_t t0 = xtc_clock_mono();
+	atomic_store(&a->rc, xtc_svr_call(a->target, "q", 1, &reply, &rsz,
+	    5LL * 1000 * 1000 * 1000));
+	atomic_store(&a->elapsed_ns, xtc_clock_mono() - t0);
+	xtc_free(reply);
+}
+
+static void
+dying_caller_proc(void *arg)
+{
+	dying_do_call(arg);
+}
+
+static void *
+dying_caller_thread(void *arg)
+{
+	struct dying_args *a = arg;
+	(void)xtc_sleep_ns(50LL * 1000 * 1000);
+	dying_do_call(a);
+	(void)xtc_loop_stop(a->loop);
+	return NULL;
+}
+
+static MunitResult
+test_svr_server_dies_mid_call(const MunitParameter p[], void *d)
+{
+	const char *mode = munit_parameters_get(p, "caller");
+	xtc_loop_t *loop = NULL;
+	xtc_svr_t  *svr = NULL;
+	xtc_svr_callbacks_t cb = { .handle_call = dying_handle_call };
+	struct dying_args a;
+	pthread_t th;
+	(void)d;
+
+	memset(&a, 0, sizeof a);
+	atomic_store(&a.rc, -12345);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_svr_start(loop, &cb, NULL, NULL, &svr), ==, XTC_OK);
+	a.target = xtc_svr_pid(svr);
+	a.loop = loop;
+	if (strcmp(mode, "proc") == 0) {
+		munit_assert_int(xtc_proc_spawn(loop, dying_caller_proc, &a,
+		    NULL, NULL), ==, XTC_OK);
+		munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	} else {
+		munit_assert_int(pthread_create(&th, NULL, dying_caller_thread,
+		    &a), ==, 0);
+		munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+		munit_assert_int(pthread_join(th, NULL), ==, 0);
+	}
+	munit_assert_int(atomic_load(&a.rc), ==, XTC_E_NOTFOUND);
+	munit_assert_int64(atomic_load(&a.elapsed_ns), <,
+	    2LL * 1000 * 1000 * 1000);
+	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+static char *dying_modes[] = { "proc", "thread", NULL };
+static MunitParameterEnum dying_params[] = {
+	{ "caller", dying_modes }, { NULL, NULL }
+};
+
 static MunitTest tests[] = {
 	{ "/svr_basic", test_svr_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/call_name", test_svr_call_name, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -611,6 +797,8 @@ static MunitTest tests[] = {
 	{ "/deferred_reply", test_svr_deferred_reply, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/handle_continue", test_svr_handle_continue, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/call_off_loop",  test_svr_call_off_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/off_loop_late_reply", test_svr_off_loop_late_reply, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/server_dies_mid_call", test_svr_server_dies_mid_call, NULL, NULL, MUNIT_TEST_OPTION_NONE, dying_params },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10.5/svr", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

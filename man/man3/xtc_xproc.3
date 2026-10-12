@@ -119,9 +119,13 @@ monitor/DOWN machinery applies unchanged.
 .Fn xtc_xlink
 is the bidirectional form (like
 .Xr xtc_link 3
-across the fork boundary): the child's exit delivers an EXIT signal to
-the linking fiber, and if the linking fiber / parent process dies the
-child observes its control channel close and shuts down.  It links to
+across the fork boundary, with its BEAM semantics since 1.55.1): an
+abnormal child exit (nonzero code or signal) kills the linking fiber
+unless it traps exits, and a clean exit is silent; a fiber that called
+.Fn xtc_proc_trap_exit 1
+first instead receives an EXIT message for every child exit.  If the
+linking fiber / parent process dies the child observes its control
+channel close and shuts down.  It links to
 the same shadow proc
 .Fn xtc_xmonitor
 uses, so the intra-process link machinery extends across the fork

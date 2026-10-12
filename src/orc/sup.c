@@ -29,6 +29,7 @@ struct child {
 	xtc_pid_t        pid;
 	uint64_t         monitor_ref;
 	int              alive;
+	int              dynamic;   /* added by xtc_sup_add_child */
 };
 
 struct xtc_supervisor {
@@ -241,6 +242,7 @@ __handle_add_child(struct xtc_supervisor *sup, const struct add_child_msg *a)
 	idx = sup->n_children;
 	memset(&sup->children[idx], 0, sizeof(struct child));
 	sup->children[idx].spec = a->spec;
+	sup->children[idx].dynamic = 1;
 	rc = __spawn_child(sup, &sup->children[idx]);
 	if (rc != XTC_OK) {
 		(void)__xtc_mtx_unlock(&sup->lock);
@@ -501,6 +503,19 @@ __sup_entry(void *arg)
 		}
 
 		if (!__should_restart(sup, &sup->children[idx], d.reason)) {
+			/* A dynamic child that is not coming back (TEMPORARY, or
+			 * TRANSIENT after a normal exit) leaves the table, as in
+			 * OTP.  Before 1.55.1 its slot stayed forever: 20000
+			 * short-lived pool workers left n_children at 20000 and
+			 * made every add and DOWN scan them.  Order-preserving
+			 * removal, so rest_for_one ordering is unchanged. */
+			if (sup->children[idx].dynamic) {
+				memmove(&sup->children[idx],
+				    &sup->children[idx + 1],
+				    (size_t)(sup->n_children - idx - 1) *
+				    sizeof(struct child));
+				sup->n_children--;
+			}
 			(void)__xtc_mtx_unlock(&sup->lock);
 			continue;
 		}
@@ -782,6 +797,9 @@ xtc_sup_join(xtc_supervisor_t *sup, int64_t timeout_ns)
 }
 
 int xtc_sup_n_children(const xtc_supervisor_t *sup) {
+	/* Unlocked on purpose: the supervisor holds sup->lock across
+	 * yields during a group restart, so a same-loop caller blocking on
+	 * it would deadlock the loop thread.  A snapshot. */
 	return sup ? sup->n_children : 0;
 }
 int xtc_sup_n_alive(const xtc_supervisor_t *sup) {

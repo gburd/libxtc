@@ -5,12 +5,8 @@
  * src/orc/reg.c
  *	Process registry implementation.  M10.5: a chained FNV-1a hash
  *	table (name -> xtc_pid_t) under a single mutex.  Lookup,
- *	register, and unregister are O(1) average.  This is the same
- *	fixed-size, separately-chained, single-mutex model used by
- *	src/ptc/lock_mgr.c and src/ptc/alloc_audit.c.  A future M11+
- *	step may add RCU-protected lockless reads (see Option B in
- *	.agent/M_REGISTRY_HASH.md); the node/bucket layout here is a
- *	strict subset of that, so no rework is required.
+ *	register, and unregister are O(1) average: the bucket array
+ *	doubles whenever the entry count passes the bucket count.
  */
 
 #include "xtc_int.h"
@@ -28,16 +24,13 @@
 #include <string.h>
 
 /*
- * Fixed power-of-two bucket count, no resize -- matches lock_mgr.c's
- * locker_table[256] and the named-service workload the registry
- * serves (tens to hundreds of long-lived names).
- *
- * Fixed 256 buckets, no resize.  If a deployment ever
- * registers tens of thousands of names, bump REG_NBUCKETS or add a
- * one-shot grow-on-first-overflow -- but only when a real workload
- * shows chains long enough to matter.
+ * Initial power-of-two bucket count.  The table doubles (under the lock,
+ * rehashing in place) when an insert takes the entry count past the
+ * bucket count, so chains stay O(1) at any size.  It never shrinks.
+ * Before 1.55.1 the 256 buckets were fixed: whereis cost 47 ns at 100
+ * names and 5.1 us at 100k.
  */
-#define REG_NBUCKETS 256u               /* power of two */
+#define REG_NBUCKETS0 256u              /* power of two */
 
 struct reg_node {
 	struct reg_node *next;          /* collision chain link */
@@ -49,7 +42,8 @@ struct reg_node {
 
 struct xtc_reg {
 	pthread_mutex_t   lock;
-	struct reg_node **buckets;      /* REG_NBUCKETS heads, zeroed */
+	struct reg_node **buckets;      /* nbuckets heads */
+	uint32_t          nbuckets;     /* power of two */
 	int               n;            /* live entry count */
 	_Atomic int       has_reaper;   /* 1 once a reaper proc has registered */
 	xtc_pid_t         reaper;       /* the reaper's pid (valid if has_reaper) */
@@ -83,11 +77,13 @@ xtc_reg_create(xtc_reg_t **out)
 	int rc;
 	if (out == NULL) return XTC_E_INVAL;
 	if ((rc = __os_calloc(1, sizeof *r, (void **)&r)) != XTC_OK) return rc;
-	rc = __os_calloc(REG_NBUCKETS, sizeof *r->buckets, (void **)&r->buckets);
+	rc = __os_calloc(REG_NBUCKETS0, sizeof *r->buckets,
+	    (void **)&r->buckets);
 	if (rc != XTC_OK) {
 		__os_free(r);
 		return rc;
 	}
+	r->nbuckets = REG_NBUCKETS0;
 	(void)pthread_mutex_init(&r->lock, NULL);
 	*out = r;
 	return XTC_OK;
@@ -98,7 +94,7 @@ xtc_reg_destroy(xtc_reg_t *r)
 {
 	uint32_t b;
 	if (r == NULL) return;
-	for (b = 0; b < REG_NBUCKETS; b++) {
+	for (b = 0; b < r->nbuckets; b++) {
 		struct reg_node *node = r->buckets[b], *next;
 		while (node != NULL) {
 			next = node->next;
@@ -112,12 +108,51 @@ xtc_reg_destroy(xtc_reg_t *r)
 	__os_free(r);
 }
 
+/* Bucket head for hash h.  Called with r->lock held. */
+static struct reg_node **
+__reg_bucket(struct xtc_reg *r, uint32_t h)
+{
+	return &r->buckets[h & (r->nbuckets - 1)];
+}
+
+/*
+ * Insert a fresh node (head-insert), doubling the bucket array first if
+ * the table is at load factor 1.  Called with r->lock held.  A failed
+ * grow is not an error: the insert still succeeds, chains just get
+ * longer until a later grow succeeds.
+ */
+static void
+__reg_insert_locked(struct xtc_reg *r, struct reg_node *node)
+{
+	struct reg_node **nb, **head, *e, *next;
+	uint32_t nn, b;
+
+	if ((uint32_t)r->n >= r->nbuckets && r->nbuckets <= UINT32_MAX / 2 &&
+	    __os_calloc((size_t)r->nbuckets * 2, sizeof *nb,
+	    (void **)&nb) == XTC_OK) {
+		nn = r->nbuckets * 2;
+		for (b = 0; b < r->nbuckets; b++)
+			for (e = r->buckets[b]; e != NULL; e = next) {
+				next = e->next;
+				e->next = nb[e->hash & (nn - 1)];
+				nb[e->hash & (nn - 1)] = e;
+			}
+		__os_free(r->buckets);
+		r->buckets = nb;
+		r->nbuckets = nn;
+	}
+	head = __reg_bucket(r, node->hash);
+	node->next = *head;
+	*head = node;
+	r->n++;
+}
+
 /* Find a node by name in its bucket.  Called with r->lock held. */
 static struct reg_node *
 __reg_find_locked(struct xtc_reg *r, const char *name, uint32_t h)
 {
 	struct reg_node *node;
-	for (node = r->buckets[h & (REG_NBUCKETS - 1)]; node != NULL;
+	for (node = *__reg_bucket(r, h); node != NULL;
 	    node = node->next)
 		if (node->hash == h && strcmp(node->name, name) == 0)
 			return node;
@@ -128,11 +163,10 @@ int
 xtc_reg_register(xtc_reg_t *r, const char *name, xtc_pid_t pid)
 {
 	struct reg_node *node;
-	uint32_t h, b;
+	uint32_t h;
 	int rc = XTC_OK;
 	if (r == NULL || name == NULL) return XTC_E_INVAL;
 	h = __reg_hash(name);
-	b = h & (REG_NBUCKETS - 1);
 	(void)__xtc_mtx_lock(&r->lock);
 #if XTC_DST_BUG(XTC_DST_BUG_REGDUP)
 	/* planted bug (REGDUP): skip the already-registered check -> a
@@ -150,9 +184,7 @@ xtc_reg_register(xtc_reg_t *r, const char *name, xtc_pid_t pid)
 	}
 	node->hash = h;
 	node->pid = pid;
-	node->next = r->buckets[b];      /* head-insert */
-	r->buckets[b] = node;
-	r->n++;
+	__reg_insert_locked(r, node);
 out:
 	(void)__xtc_mtx_unlock(&r->lock);
 	return rc;
@@ -167,7 +199,7 @@ xtc_reg_unregister(xtc_reg_t *r, const char *name)
 	if (r == NULL || name == NULL) return XTC_E_INVAL;
 	h = __reg_hash(name);
 	(void)__xtc_mtx_lock(&r->lock);
-	for (link = &r->buckets[h & (REG_NBUCKETS - 1)]; (node = *link) != NULL;
+	for (link = __reg_bucket(r, h); (node = *link) != NULL;
 	    link = &node->next) {
 		if (node->hash == h && strcmp(node->name, name) == 0) {
 			*link = node->next;      /* unlink by link pointer */
@@ -230,14 +262,13 @@ int
 xtc_reg_register_dup(xtc_reg_t *r, const char *key, xtc_pid_t pid)
 {
 	struct reg_node *node;
-	uint32_t h, b;
+	uint32_t h;
 	int rc = XTC_OK;
 	if (r == NULL || key == NULL) return XTC_E_INVAL;
 	h = __reg_hash(key);
-	b = h & (REG_NBUCKETS - 1);
 	(void)__xtc_mtx_lock(&r->lock);
 	/* Idempotent: skip if this exact (key, pid) is already present. */
-	for (node = r->buckets[b]; node != NULL; node = node->next)
+	for (node = *__reg_bucket(r, h); node != NULL; node = node->next)
 		if (node->hash == h && node->dup &&
 		    strcmp(node->name, key) == 0 &&
 		    xtc_pid_eq(node->pid, pid)) {
@@ -252,9 +283,7 @@ xtc_reg_register_dup(xtc_reg_t *r, const char *key, xtc_pid_t pid)
 	node->hash = h;
 	node->pid = pid;
 	node->dup = 1;
-	node->next = r->buckets[b];
-	r->buckets[b] = node;
-	r->n++;
+	__reg_insert_locked(r, node);
 out:
 	(void)__xtc_mtx_unlock(&r->lock);
 	return rc;
@@ -273,7 +302,7 @@ xtc_reg_unregister_pid(xtc_reg_t *r, const char *key, xtc_pid_t pid)
 	if (r == NULL || key == NULL) return XTC_E_INVAL;
 	h = __reg_hash(key);
 	(void)__xtc_mtx_lock(&r->lock);
-	for (link = &r->buckets[h & (REG_NBUCKETS - 1)];
+	for (link = __reg_bucket(r, h);
 	    (node = *link) != NULL; link = &node->next) {
 		if (node->hash == h && strcmp(node->name, key) == 0 &&
 		    xtc_pid_eq(node->pid, pid)) {
@@ -301,7 +330,7 @@ xtc_reg_drop_pid(xtc_reg_t *r, xtc_pid_t pid)
 	int removed = 0;
 	if (r == NULL) return 0;
 	(void)__xtc_mtx_lock(&r->lock);
-	for (b = 0; b < REG_NBUCKETS; b++) {
+	for (b = 0; b < r->nbuckets; b++) {
 		struct reg_node **link = &r->buckets[b], *node;
 		while ((node = *link) != NULL) {
 			if (xtc_pid_eq(node->pid, pid)) {
@@ -338,7 +367,7 @@ xtc_reg_members(xtc_reg_t *r, const char *key,
 	if (r == NULL || key == NULL || fn == NULL) return 0;
 	h = __reg_hash(key);
 	(void)__xtc_mtx_lock(&r->lock);
-	for (node = r->buckets[h & (REG_NBUCKETS - 1)]; node != NULL;
+	for (node = *__reg_bucket(r, h); node != NULL;
 	    node = node->next) {
 		if (node->hash == h && strcmp(node->name, key) == 0) {
 			count++;
