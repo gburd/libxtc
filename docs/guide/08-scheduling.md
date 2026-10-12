@@ -265,13 +265,58 @@ The rules the snippet follows:
   draining it gives the same result without refill.
 - You need a latency bound in time. Use a latency class and the stall
   watchdog; the bypass bound counts opportunities.
-- Many threads submit directly. The engine requires an owner process to
-  receive that work.
+- Many threads submit directly, and you do not want a thread-safe
+  admission path. The synchronous `xtc_batch_submit` requires an owner
+  process to receive the work; if front-end loops or plain threads must
+  feed a group, use the async cross-loop admission below instead.
 
-Leaving the feature off costs nothing. The
-[continuous batching example]({{ '/examples/continuous-batching/' | relative_url }})
-runs two groups, a heartbeat, cancellation, capacity retry, and
-BLOCKED/resume, and compares static and continuous admission.
+## Async offload, cross-loop submission, and placement
+
+The synchronous engine above runs one step callback per iteration on the
+driver fiber: the step must finish on the CPU before the driver yields.
+An LLM-style inference server wants more -- a decode step offloaded to a
+GPU/NPU and *awaited* while new requests join, requests fed in from
+front-end loops, and groups placed near their device. Three additive
+features (all behind `--enable-sched-policy`, all `XTC_E_NOSYS` in a
+default build, no existing public struct grown) close that gap. They are
+described in full in [`xtc_batch(3)`]({{ '/reference/api/xtc_batch/' | relative_url }});
+the summary:
+
+- **Async offload.** `xtc_batch_create_async` replaces the single step
+  with a `submit`/`collect` pair. `submit` launches one device operation
+  over the ready vector and returns a completion descriptor
+  (`xtc_batch_exec_t`); the driver awaits it *without stalling the loop*;
+  `collect` reads the outputs and decides per-member CONTINUE/DONE at the
+  next boundary. The exec kind is FENCE (an fd -- native only, since the
+  simulation backend has no fd-readiness hook), FUTURE (an
+  `xtc_future_t`, sim-deterministic), BLOCKING (a closure on the blocking
+  pool), or SYNC. An optional `exec_timeout_ns` bounds a stuck op, and a
+  cancel is honored at an iteration boundary -- `collect` still runs so
+  the application frees its device buffer and the member ends ABORTED
+  exactly once.
+- **Cross-loop / cross-thread admission.** `xtc_batch_submit_mt`,
+  `_cancel_mt` and `_resume_mt` are callable from any loop or a plain OS
+  thread. They touch only a bounded lock-light ring + record pool + the
+  group's monotonic handle counter, never the group's slots; the owner
+  loop drains the ring at each boundary. A cancel is never lost even when
+  it reaches the ring before its submit from a different producer.
+- **Placement.** `xtc_batch_loop_for_device` maps a probed accelerator
+  to the executor loop whose carrier is on the device's NUMA node
+  (best-effort, loop 0 fallback), and `xtc_batch_router_create` /
+  `_route` / `_destroy` shard one logical model across N caller-created
+  groups by a stable key. These are advisory glue, not a scheduler:
+  there is no automatic migration of a live group.
+
+Two examples drive real accelerators through this API with a FAKE
+backend fallback that needs no device and runs in `make check`:
+
+- [`examples/13_gpu_batching`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/13_gpu_batching/README.md)
+  -- continuous-batching Mandelbrot over OpenCL, demonstrated on two AMD
+  GPUs at once (one group per device, each on its own carrier loop).
+- [`examples/14_hetero_batching`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/14_hetero_batching/README.md)
+  -- a heterogeneous capstone driving an Intel Arc GPU (OpenCL) and an
+  Intel AI Boost NPU (Level Zero) concurrently, with GPU and NPU
+  operations in overlapping in-flight windows.
 
 ## Demonstrated in
 

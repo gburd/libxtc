@@ -1002,7 +1002,7 @@ examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_brea
 # (The TLS doc snippet, docs/_includes/snippets/14_tls_echo.c, is gated by
 # test/docs/test_doc_snippets.sh like every other snippet; that gate links
 # the build's XTC_TLS_LIBS.)
-check-examples: check-continuous-batching 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker tnt_echo
+check-examples: check-continuous-batching check-gpu-batching check-hetero-batching 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker tnt_echo
 	@for t in 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo \
 	          10_circuit_breaker; do \
 		printf 'running example: %s\n' "$$t"; \
@@ -1027,6 +1027,43 @@ check-continuous-batching: $(STATIC_LIB)
 continuous_batching: $(srcdir)/../examples/12_continuous_batching/main.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ \
 	    $(srcdir)/../examples/12_continuous_batching/main.c \
+	    $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# examples/13_gpu_batching (OpenCL Mandelbrot) and 14_hetero_batching
+# (GPU + NPU). Both ship a FAKE backend that needs NO accelerator: with
+# neither XTC_WITH_OPENCL nor XTC_WITH_LEVELZERO defined, the sources pull
+# in no CL/Level-Zero header or symbol, so the self-test build links ONLY
+# libxtc.a + $(LIBS) (pthread/libm) -- exactly like continuous_batching --
+# and `make check` stays dependency-free and deterministic (the GPU/NPU
+# paths are built by the examples' own Makefiles, not here).
+.PHONY: check-gpu-batching
+check-gpu-batching: $(STATIC_LIB)
+	@if grep -q '^\#define XTC_ENABLE_SCHED_POLICY 1' xtc_config.h; then \
+		$(MAKE) mandel && \
+		./mandel --self-test && \
+		sh $(srcdir)/../examples/check_help.sh ./mandel; \
+	else \
+		echo '  [examples] SKIP: gpu batching (--enable-sched-policy disabled)'; \
+	fi
+
+mandel: $(srcdir)/../examples/13_gpu_batching/mandel.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ \
+	    $(srcdir)/../examples/13_gpu_batching/mandel.c \
+	    $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+.PHONY: check-hetero-batching
+check-hetero-batching: $(STATIC_LIB)
+	@if grep -q '^\#define XTC_ENABLE_SCHED_POLICY 1' xtc_config.h; then \
+		$(MAKE) hetero && \
+		./hetero --self-test && \
+		sh $(srcdir)/../examples/check_help.sh ./hetero; \
+	else \
+		echo '  [examples] SKIP: hetero batching (--enable-sched-policy disabled)'; \
+	fi
+
+hetero: $(srcdir)/../examples/14_hetero_batching/hetero.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ \
+	    $(srcdir)/../examples/14_hetero_batching/hetero.c \
 	    $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 01_hello: $(srcdir)/../examples/01_hello_async.c $(STATIC_LIB)
@@ -2141,7 +2178,7 @@ uninstall:
 clean:
 	$(RM) $(LIB_OBJS) $(STATIC_LIB) $(TESTS_C) $(TESTS_PBT) compile_commands.json
 	$(RM) check-skips-c.txt check-skips-sh.txt check-skips-pbt.txt .tests-c.out .tests-sh.out .tests-c.rc .tests-sh.rc
-	$(RM) soak_mem_bound continuous_batching bench_continuous_batching
+	$(RM) soak_mem_bound continuous_batching bench_continuous_batching mandel hetero
 	$(RM) $(SHARED_LIB_REAL) $(SHARED_LIB_SONAME) $(SHARED_LIB_LINKNAME)
 	$(RM) libxtc.exp
 	rm -rf *.dSYM

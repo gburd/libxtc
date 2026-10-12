@@ -1150,6 +1150,25 @@ xtc_exec_loop(xtc_exec_t *e, int idx)
 	return e->loops[idx];
 }
 
+/*
+ * Internal (NOT public): the NUMA node loop `idx`'s carrier thread
+ * runs on, as recorded by __xtc_exec_worker at startup (the same
+ * steal-placement hint pass-1 uses).  Returns -1 for a bad index or
+ * before the workers have run (loop_node unallocated).  Used by the
+ * advisory xtc_batch_loop_for_device placement helper; it only reads a
+ * static-after-startup topology hint, never a sim-nondeterministic
+ * source.
+ */
+int
+__xtc_exec_loop_node(xtc_exec_t *e, int idx)
+{
+	if (e == NULL || idx < 0 || idx >= e->n_loops
+	    || e->loop_node == NULL)
+		return -1;
+	return atomic_load_explicit((_Atomic int *)&e->loop_node[idx],
+	    memory_order_relaxed);
+}
+
 /* PUBLIC: int xtc_exec_loop_stats __P((xtc_exec_t *, int, xtc_loop_stats_t *)); */
 int
 xtc_exec_loop_stats(xtc_exec_t *e, int idx, xtc_loop_stats_t *out)
