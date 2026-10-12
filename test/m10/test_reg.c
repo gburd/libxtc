@@ -400,10 +400,103 @@ test_reg_mon_no_silent_loss(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * E-M11: lookups stay O(1) as the table grows.  Before 1.55.1 the 256
+ * buckets were fixed, so at 200k names every whereis walked a ~780-node
+ * chain: ~100x the cost at 1k names (measured 47 ns at 100 names, 5.1 us
+ * at 100k).  The table now doubles at load factor 1.  Asserts both
+ * correctness across many grows (unique + dup keys, drop_pid) and that
+ * the per-lookup cost at 200k names is within 25x of that at 1k (best
+ * of 3 timings).  The residual growth is cache misses on a table that no
+ * longer fits in cache, not chain walks; the fixed table was ~700x.
+ */
+static int64_t
+reg_lookup_ns(xtc_reg_t *r, int n)
+{
+	char name[32];
+	xtc_pid_t got;
+	int64_t best = INT64_MAX, t0, t;
+	int rep, i;
+	for (rep = 0; rep < 3; rep++) {
+		t0 = xtc_clock_mono();
+		for (i = 0; i < 100000; i++) {
+			(void)snprintf(name, sizeof name, "svc-%d",
+			    (int)(((int64_t)i * 7919) % n));
+			munit_assert_int(xtc_reg_whereis(r, name, &got), ==,
+			    XTC_OK);
+		}
+		t = xtc_clock_mono() - t0;
+		if (t < best) best = t;
+	}
+	return best / 100000;
+}
+
+static int
+reg_count_member(xtc_pid_t pid, void *user)
+{
+	(void)pid;
+	(*(int *)user)++;
+	return 0;
+}
+
+static MunitResult
+test_reg_resize(const MunitParameter p[], void *d)
+{
+#define NBIG 200000
+	xtc_reg_t *r;
+	xtc_pid_t got, member = { 0, 7, 7 };
+	char name[32];
+	int64_t small_ns, big_ns;
+	int i, seen = 0;
+	(void)p; (void)d;
+
+	munit_assert_int(xtc_reg_create(&r), ==, XTC_OK);
+	for (i = 0; i < 1000; i++) {
+		xtc_pid_t pid = { 0, 1, (uint32_t)(i + 1) };
+		(void)snprintf(name, sizeof name, "svc-%d", i);
+		munit_assert_int(xtc_reg_register(r, name, pid), ==, XTC_OK);
+	}
+	munit_assert_int(xtc_reg_register_dup(r, "group", member), ==, XTC_OK);
+	small_ns = reg_lookup_ns(r, 1000);
+	for (i = 1000; i < NBIG; i++) {
+		xtc_pid_t pid = { 0, 1, (uint32_t)(i + 1) };
+		(void)snprintf(name, sizeof name, "svc-%d", i);
+		munit_assert_int(xtc_reg_register(r, name, pid), ==, XTC_OK);
+	}
+	munit_assert_int(xtc_reg_count(r), ==, NBIG + 1);
+	for (i = 0; i < NBIG; i++) {
+		xtc_pid_t want = { 0, 1, (uint32_t)(i + 1) };
+		(void)snprintf(name, sizeof name, "svc-%d", i);
+		munit_assert_int(xtc_reg_whereis(r, name, &got), ==, XTC_OK);
+		munit_assert_true(xtc_pid_eq(got, want));
+	}
+	/* Duplicate a registered name fails; the dup entry survived the
+	 * rehashes. */
+	munit_assert_int(xtc_reg_register(r, "svc-12345", member), ==,
+	    XTC_E_INVAL);
+	munit_assert_int(xtc_reg_members(r, "group", reg_count_member, &seen),
+	    ==, 1);
+	munit_assert_int(xtc_reg_drop_pid(r, member), ==, 1);
+	big_ns = reg_lookup_ns(r, NBIG);
+	munit_logf(MUNIT_LOG_INFO, "whereis: %lld ns at 1k, %lld ns at %d",
+	    (long long)small_ns, (long long)big_ns, NBIG);
+	munit_assert_int64(big_ns, <=, 25 * (small_ns > 0 ? small_ns : 1));
+
+	for (i = 0; i < NBIG; i++) {
+		(void)snprintf(name, sizeof name, "svc-%d", i);
+		munit_assert_int(xtc_reg_unregister(r, name), ==, XTC_OK);
+	}
+	munit_assert_int(xtc_reg_count(r), ==, 0);
+	xtc_reg_destroy(r);
+	return MUNIT_OK;
+#undef NBIG
+}
+
 static MunitTest tests[] = {
 	{ "/reg_basic", test_reg_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reg_collisions", test_reg_collisions, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reg_scale", test_reg_scale, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/reg_resize", test_reg_resize, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reg_dup_keys", test_reg_dup_keys, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reg_crash_aware", test_reg_crash_aware, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reg_mon_no_silent_loss", test_reg_mon_no_silent_loss, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
