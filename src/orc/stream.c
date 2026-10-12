@@ -13,6 +13,7 @@
 
 #include "xtc_int.h"
 #include "xtc_stream.h"
+#include "xtc_async.h"    /* xtc_yield between for_each retries */
 
 enum stream_kind { S_BASE, S_MAP, S_FILTER, S_DEMAND };
 
@@ -148,7 +149,14 @@ xtc_stream_for_each(xtc_stream_t *s, int (*fn)(void *, void *), void *user)
 		void *v = NULL;
 		int rc = xtc_stream_next(s, &v);
 		if (rc == XTC_E_NOTFOUND) return XTC_OK;   /* end of stream */
-		if (rc == XTC_E_AGAIN) continue;           /* retry */
+		if (rc == XTC_E_AGAIN) {
+			/* Not ready: let the producer run before retrying.
+			 * Before 1.55.1 this spun without yielding, so a
+			 * producer fiber on the same loop never ran (livelock).
+			 * Off a fiber xtc_yield is a no-op. */
+			xtc_yield();
+			continue;
+		}
 		if (rc != XTC_OK) return rc;               /* error */
 		if ((rc = fn(v, user)) != 0) return rc;    /* early stop */
 	}
