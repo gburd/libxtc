@@ -18,6 +18,7 @@
 #include "io_int.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <poll.h>
 #include <unistd.h>
 #include <string.h>
@@ -153,14 +154,36 @@ __revents_to_flags(short revents)
 	return f;
 }
 
+/*
+ * fd -> slot index, so reg/mod/del are O(1).  They scanned the pollfd
+ * array, and xtc_proc_wait_fd does a reg and a del per park; poll(2)
+ * itself stays O(registered fds) per wait, which is inherent to it.
+ */
 static int
 __find_slot(const xtc_io_t *io, int fd)
 {
-	int i;
-	for (i = 0; i < io->n; i++)
-		if (io->pfds[i].fd == fd)
-			return i;
-	return -1;
+	return (fd < io->slot_cap) ? io->slot_of[fd] - 1 : -1;
+}
+
+static int
+__slot_reserve(xtc_io_t *io, int fd)
+{
+	int *ns, ncap, rc;
+	if (fd < io->slot_cap)
+		return XTC_OK;
+	ncap = io->slot_cap > 0 ? io->slot_cap : 64;
+	while (ncap <= fd) {
+		if (ncap > INT_MAX / 2)
+			return XTC_E_RESOURCE;
+		ncap *= 2;
+	}
+	if ((rc = __os_realloc(io->slot_of, (size_t)ncap * sizeof *ns,
+	    (void **)&ns)) != XTC_OK)
+		return rc;
+	memset(ns + io->slot_cap, 0, (size_t)(ncap - io->slot_cap) * sizeof *ns);
+	io->slot_of = ns;
+	io->slot_cap = ncap;
+	return XTC_OK;
 }
 
 static int
@@ -189,6 +212,8 @@ __xtc_io_backend_init(xtc_io_t *io)
 	io->tags = NULL;
 	io->n = 0;
 	io->cap = 0;
+	io->slot_of = NULL;
+	io->slot_cap = 0;
 	io->pending_del = NULL; io->n_pending_del = io->cap_pending_del = 0;
 	atomic_store_explicit(&io->has_pending_del, 0, memory_order_relaxed);
 	atomic_store_explicit(&io->owner_set, 0, memory_order_relaxed);
@@ -211,6 +236,9 @@ __xtc_io_backend_fini(xtc_io_t *io)
 	io->pfds = NULL;
 	io->tags = NULL;
 	io->n = io->cap = 0;
+	__os_free(io->slot_of);
+	io->slot_of = NULL;
+	io->slot_cap = 0;
 	__os_free(io->pending_del); io->pending_del = NULL;
 	io->n_pending_del = io->cap_pending_del = 0;
 	(void)pthread_mutex_destroy(&io->del_lock);
@@ -219,10 +247,13 @@ __xtc_io_backend_fini(xtc_io_t *io)
 int
 __xtc_io_register_wakeup(xtc_io_t *io, int fd)
 {
+	int rc;
 	if (io->n >= io->cap) {
-		int rc = __grow(io);
-		if (rc != XTC_OK) return rc;
+		if ((rc = __grow(io)) != XTC_OK) return rc;
 	}
+	if ((rc = __slot_reserve(io, fd)) != XTC_OK)
+		return rc;
+	io->slot_of[fd] = WAKEUP_SLOT + 1;
 	io->pfds[WAKEUP_SLOT].fd = fd;
 	io->pfds[WAKEUP_SLOT].events = POLLIN;
 	io->pfds[WAKEUP_SLOT].revents = 0;
@@ -246,11 +277,14 @@ xtc_io_reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 	if (io->n >= io->cap) {
 		if ((rc = __grow(io)) != XTC_OK) return rc;
 	}
+	if ((rc = __slot_reserve(io, fd)) != XTC_OK)
+		return rc;
 	io->pfds[io->n].fd = fd;
 	io->pfds[io->n].events = __interest_to_events(interest);
 	io->pfds[io->n].revents = 0;
 	io->tags[io->n] = tag;
 	io->n++;
+	io->slot_of[fd] = io->n;   /* slot + 1 */
 	return XTC_OK;
 }
 
@@ -286,10 +320,12 @@ xtc_io_del_fd(xtc_io_t *io, int fd)
 	if (slot == WAKEUP_SLOT)
 		return XTC_E_INVAL;
 	/* swap with last and shrink */
+	io->slot_of[fd] = 0;
 	io->n--;
 	if (slot != io->n) {
 		io->pfds[slot] = io->pfds[io->n];
 		io->tags[slot] = io->tags[io->n];
+		io->slot_of[io->pfds[slot].fd] = slot + 1;
 	}
 	return XTC_OK;
 }

@@ -57,7 +57,30 @@ backend; the floor xtc promises on every Tier 1 platform.
 The Linux
 .Xr epoll 7
 backend.
+.It Sy uring
+The Linux io_uring backend (multishot poll); the default when
+liburing is found.
+.It Sy select
+The
+.Xr select 2
+backend; limited to descriptors below
+.Dv FD_SETSIZE .
 .El
+.Pp
+Registration, modification and removal are O(1) on every backend.
+A wait on
+.Sy poll
+or
+.Sy select
+still costs O(registered descriptors), because
+.Xr poll 2
+and
+.Xr select 2
+scan the whole set.
+Measured with one loop, 100 echoing connections and K idle ones:
+poll serves 216k round trips/s at K=0, 57k at K=10k and 7.5k at
+K=30k, while epoll and uring stay above 145k at K=30k.
+For thousands of mostly-idle connections use epoll or uring.
 .Pp
 .Fn xtc_io_backend_name
 returns the compiled-in backend's name as a static string.
