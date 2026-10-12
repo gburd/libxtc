@@ -8,6 +8,7 @@
  *	on checkout until another fiber checks a resource back in.
  */
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -125,9 +126,78 @@ test_pool_block_until_checkin(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---------- two fiber waiters, two checkins (sem lost wakeup) ----------
+ *
+ * Two fibers block in xtc_pool_checkout on an empty pool; a third checks
+ * in one resource, yields, checks in another.  Both waiters must get one.
+ * On 1.55.0 the first checkin's xtc_sem_post detaches the whole fiber wait
+ * queue; the waiter that loses the re-check re-parks off-queue, so the
+ * second checkin wakes nobody and it waits out its timeout (runtime-core
+ * B1).  DEPENDS ON fix155/sync (the xtc_sem fix): fails on this branch
+ * alone, passes once that lands.
+ */
+struct two_wait_ctx {
+	xtc_pool_t *pool;
+	void       *held[2];
+	_Atomic int got;
+};
+
+static void
+two_wait_waiter(void *arg)
+{
+	struct two_wait_ctx *c = arg;
+	void *r = NULL;
+	if (xtc_pool_checkout(c->pool, 2LL * 1000 * 1000 * 1000, &r) == XTC_OK)
+		atomic_fetch_add(&c->got, 1);
+}
+
+static void
+two_wait_poster(void *arg)
+{
+	struct two_wait_ctx *c = arg;
+	xtc_yield();   /* both waiters park first */
+	xtc_yield();
+	munit_assert_int(xtc_pool_checkin(c->pool, c->held[0]), ==, XTC_OK);
+	xtc_yield();
+	munit_assert_int(xtc_pool_checkin(c->pool, c->held[1]), ==, XTC_OK);
+}
+
+static MunitResult
+test_pool_two_waiters(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	struct two_wait_ctx c;
+	int res[2];
+	int64_t t0;
+	(void)p; (void)d;
+
+	memset(&c, 0, sizeof c);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_pool_create(2, &c.pool), ==, XTC_OK);
+	munit_assert_int(xtc_pool_add(c.pool, &res[0]), ==, XTC_OK);
+	munit_assert_int(xtc_pool_add(c.pool, &res[1]), ==, XTC_OK);
+	munit_assert_int(xtc_pool_checkout(c.pool, 0, &c.held[0]), ==, XTC_OK);
+	munit_assert_int(xtc_pool_checkout(c.pool, 0, &c.held[1]), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, two_wait_waiter, &c, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, two_wait_waiter, &c, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, two_wait_poster, &c, NULL, NULL),
+	    ==, XTC_OK);
+	t0 = xtc_clock_mono();
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load(&c.got), ==, 2);
+	/* Both woke on the checkins, not on their 2 s timeouts. */
+	munit_assert_int64(xtc_clock_mono() - t0, <, 1LL * 1000 * 1000 * 1000);
+	xtc_pool_destroy(c.pool);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/accounting", test_pool_accounting, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/block_until_checkin", test_pool_block_until_checkin, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/two_waiters", test_pool_two_waiters, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10.7/pool", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
