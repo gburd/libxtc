@@ -136,6 +136,7 @@ typedef struct xtc_mailbox_stats {
  * PUBLIC: int       xtc_proc_wake __P((xtc_pid_t));
  * PUBLIC: int       xtc_link __P((xtc_pid_t));
  * PUBLIC: int       xtc_unlink __P((xtc_pid_t));
+ * PUBLIC: int       xtc_proc_trap_exit __P((int));
  * PUBLIC: int       xtc_monitor __P((xtc_pid_t, uint64_t *));
  */
 
@@ -154,7 +155,8 @@ XTC_API int       xtc_proc_spawn(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
  *
  * _link:    bidirectional fate, exactly like calling xtc_link(child)
  *           the instant the child is born -- an abnormal exit on either
- *           side raises an EXIT on the other.
+ *           side kills the other, or delivers it an EXIT message if it
+ *           traps exits (see xtc_link / xtc_proc_trap_exit).
  * _monitor: unidirectional; the caller receives a DOWN (with *out_ref
  *           as the monitor reference) when the child exits, exactly
  *           like xtc_monitor(child).
@@ -499,9 +501,28 @@ XTC_API int       xtc_proc_sleep(int64_t ns);
  * EXIT/DOWN signals to linked / monitoring procs. */
 XTC_API int       xtc_exit_self(int reason);
 
-/* Link / unlink: bidirectional fate. */
+/*
+ * Link / unlink: bidirectional fate (BEAM semantics, since 1.55.1).
+ * When a linked proc exits with a NON-normal reason (!= 0), each linked
+ * peer that does not trap exits is killed with the same reason (as if by
+ * xtc_exit_pid).  A normal exit (reason 0) is silent to a non-trapping
+ * peer.  A peer that traps exits (xtc_proc_trap_exit(1)) is never killed
+ * by a link; it receives an 'E' message for every linked exit, normal or
+ * not (decode with xtc_down_decode_ex; ref is 0).
+ *
+ * Before 1.55.1 a link never killed anything: every peer received an 'E'
+ * message for every exit, normal included.  Code that links and then
+ * waits for that 'E' must now call xtc_proc_trap_exit(1) first.
+ */
 XTC_API int       xtc_link(xtc_pid_t other);
 XTC_API int       xtc_unlink(xtc_pid_t other);
+
+/*
+ * Set whether the CALLING proc traps exits (default off).  Returns the
+ * previous setting (0 or 1), or XTC_E_INVAL off a proc.
+ */
+XTC_API int       xtc_proc_trap_exit(int on);
+#define XTC_HAVE_PROC_TRAP_EXIT 1
 
 /* ---- Monitor DOWN reasons ------------------------------------------
  *

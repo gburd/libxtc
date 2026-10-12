@@ -32,6 +32,7 @@
 #include "xtc_int.h"
 #include "xtc_res.h"
 #include "xtc_inject.h"   /* drive the wait_fd check/arm window deterministically */
+#include "xtc_exec.h"     /* >64-loop executor (M10) */
 
 /* Process CPU seconds, portably.  POSIX: CLOCK_PROCESS_CPUTIME_ID.
  * Windows: GetProcessTimes (kernel+user), which IS the clean Win32
@@ -384,6 +385,7 @@ sl_parent(void *arg)
 	XTC_PACK_POP
 	struct sl_exit *ex;
 	xtc_pid_t child;
+	(void)xtc_proc_trap_exit(1);   /* receive the EXIT, do not die of it */
 	if (xtc_proc_spawn_link(s->loop, sl_bad_child,
 	    NULL, NULL, &child) != XTC_OK)
 		return;
@@ -2476,6 +2478,308 @@ test_at_exit_park_clean_control(const MunitParameter p[], void *d)
 	return pak_run(/*killed=*/0);
 }
 
+
+/* ===================== 1.55.1 regression tests ===================== */
+
+#define F155_MS (1000LL * 1000)
+
+/* ---- B2: selective receive must test envelopes already in the save
+ * queue when the predicate VALUE changes behind the same user pointer.
+ * Pre-fix: the second recv_match skipped the saved 'B' (stale recv-mark
+ * keyed on the (fn, user) pointer pair) and timed out. ---- */
+struct b2_want { char c; };
+static int
+b2_match(const void *d, size_t n, void *u)
+{
+	return n == 1 && *(const char *)d == ((struct b2_want *)u)->c;
+}
+static xtc_pid_t b2_self;
+static int b2_r1 = -99, b2_r2 = -99;
+static void
+b2_helper(void *a)
+{
+	char c = 'A';
+	(void)a;
+	(void)xtc_proc_sleep(5 * F155_MS);
+	(void)xtc_send(b2_self, &c, 1);
+}
+static int
+b2_wait(xtc_loop_t *loop, struct b2_want *w, char which)
+{
+	void *m = NULL; size_t n = 0; int rc;
+	(void)loop;
+	w->c = which;
+	rc = xtc_recv_match(b2_match, w, &m, &n, 500 * F155_MS);
+	if (m) xtc_free(m);
+	return rc;
+}
+static void
+b2_main(void *a)
+{
+	xtc_loop_t *loop = a;
+	struct b2_want w;          /* ONE struct, reused with a new value */
+	char b = 'B';
+	b2_self = xtc_self();
+	(void)xtc_send(b2_self, &b, 1);
+	(void)xtc_proc_spawn(loop, b2_helper, NULL, NULL, NULL);
+	b2_r1 = b2_wait(loop, &w, 'A');   /* 'B' -> save queue, park, 'A' */
+	b2_r2 = b2_wait(loop, &w, 'B');   /* 'B' is in the save queue */
+}
+static MunitResult
+test_recv_match_reused_user(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	(void)p; (void)d;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, b2_main, loop, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(b2_r1, ==, XTC_OK);
+	munit_assert_int(b2_r2, ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* ---- M1/D4: a DOWN reaches a watcher whose mailbox is FULL.  Pre-fix
+ * the DOWN was an ordinary capped send and was dropped. ---- */
+static int m1_got_down;
+static void
+m1_target(void *a) { (void)a; (void)xtc_proc_sleep(10 * F155_MS); }
+static void
+m1_watch(void *a)
+{
+	xtc_loop_t *loop = a;
+	xtc_pid_t t, me = xtc_self();
+	uint64_t ref;
+	void *m; size_t n; int i;
+	munit_assert_int(xtc_proc_spawn_monitor(loop, m1_target, NULL, NULL,
+	    &t, &ref), ==, XTC_OK);
+	for (i = 0; i < 8; i++) {
+		char j = 'j';
+		munit_assert_int(xtc_send(me, &j, 1), ==, XTC_OK);
+	}
+	{
+		char j = 'j';   /* the mailbox really is full */
+		munit_assert_int(xtc_send(me, &j, 1), ==, XTC_E_AGAIN);
+	}
+	(void)xtc_proc_sleep(40 * F155_MS);    /* target exits meanwhile */
+	while (xtc_recv(&m, &n, 50 * F155_MS) == XTC_OK) {
+		if (n > 1 && *(char *)m == 'D') m1_got_down = 1;
+		xtc_free(m);
+	}
+}
+static MunitResult
+test_down_bypasses_full_mailbox(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	xtc_proc_opts_t o;
+	(void)p; (void)d;
+	memset(&o, 0, sizeof o);
+	o.mailbox_cap = 8;
+	m1_got_down = 0;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, m1_watch, loop, &o, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(m1_got_down, ==, 1);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* ---- M2/D3: link semantics.  (a) a non-trapping peer is KILLED by a
+ * linked abnormal exit with the same reason; (b) it hears nothing on a
+ * linked normal exit; (c) a trapping peer gets 'E' for both.  Pre-fix:
+ * (a) the peer kept running, (b) it got an 'E' anyway. ---- */
+struct m2_st {
+	xtc_loop_t *loop;
+	int child_reason;    /* reason the linked child exits with */
+	int trap;            /* parent traps exits */
+	int parent_reason;   /* parent's DOWN reason, seen by the observer */
+	int parent_down;
+	int got_e, e_reason; /* parent saw an 'E' (trap) */
+	int survived;        /* parent ran past its wait */
+};
+static void
+m2_child(void *a)
+{
+	struct m2_st *s = a;
+	(void)xtc_proc_sleep(2 * F155_MS);
+	(void)xtc_exit_self(s->child_reason);
+}
+static void
+m2_parent(void *a)
+{
+	struct m2_st *s = a;
+	xtc_pid_t c;
+	void *m = NULL; size_t n = 0;
+#ifdef XTC_HAVE_PROC_TRAP_EXIT
+	if (s->trap)
+		munit_assert_int(xtc_proc_trap_exit(1), ==, 0);
+#endif
+	munit_assert_int(xtc_proc_spawn_link(s->loop, m2_child, s, NULL, &c),
+	    ==, XTC_OK);
+	if (xtc_recv(&m, &n, 100 * F155_MS) == XTC_OK) {
+		xtc_down_info_t di;
+		if (n > 0 && *(char *)m == 'E' &&
+		    xtc_down_decode_ex(m, n, &di) == XTC_OK) {
+			s->got_e = 1;
+			s->e_reason = di.reason;
+		}
+		xtc_free(m);
+	}
+	s->survived = 1;
+}
+static void
+m2_observer(void *a)
+{
+	struct m2_st *s = a;
+	xtc_pid_t pp;
+	uint64_t ref;
+	void *m = NULL; size_t n = 0;
+	munit_assert_int(xtc_proc_spawn_monitor(s->loop, m2_parent, s, NULL,
+	    &pp, &ref), ==, XTC_OK);
+	if (xtc_recv(&m, &n, 2000 * F155_MS) == XTC_OK) {
+		xtc_pid_t dp; int r;
+		if (xtc_down_decode(m, n, &dp, &r) == XTC_OK) {
+			s->parent_down = 1;
+			s->parent_reason = r;
+		}
+		xtc_free(m);
+	}
+}
+static void
+m2_run(struct m2_st *s)
+{
+	xtc_loop_t *loop;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	s->loop = loop;
+	munit_assert_int(xtc_proc_spawn(loop, m2_observer, s, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+}
+static MunitResult
+test_link_semantics(const MunitParameter p[], void *d)
+{
+	struct m2_st s;
+	(void)p; (void)d;
+	/* (a) abnormal exit kills a non-trapping peer with the same reason */
+	memset(&s, 0, sizeof s); s.child_reason = 7;
+	m2_run(&s);
+	munit_assert_int(s.parent_down, ==, 1);
+	munit_assert_int(s.survived, ==, 0);
+	munit_assert_int(s.got_e, ==, 0);
+	munit_assert_int(s.parent_reason, ==, 7);
+	/* (b) normal exit is silent to a non-trapping peer */
+	memset(&s, 0, sizeof s); s.child_reason = 0;
+	m2_run(&s);
+	munit_assert_int(s.survived, ==, 1);
+	munit_assert_int(s.got_e, ==, 0);
+	munit_assert_int(s.parent_reason, ==, 0);
+#ifdef XTC_HAVE_PROC_TRAP_EXIT
+	/* (c) a trapping peer gets 'E' (abnormal and normal) and lives */
+	memset(&s, 0, sizeof s); s.child_reason = 7; s.trap = 1;
+	m2_run(&s);
+	munit_assert_int(s.survived, ==, 1);
+	munit_assert_int(s.got_e, ==, 1);
+	munit_assert_int(s.e_reason, ==, 7);
+	memset(&s, 0, sizeof s); s.child_reason = 0; s.trap = 1;
+	m2_run(&s);
+	munit_assert_int(s.survived, ==, 1);
+	munit_assert_int(s.got_e, ==, 1);
+	munit_assert_int(s.e_reason, ==, 0);
+	/* off a proc */
+	munit_assert_int(xtc_proc_trap_exit(1), ==, XTC_E_INVAL);
+#endif
+	return MUNIT_OK;
+}
+
+/* ---- M3/D2: xtc_exit_pid interrupts a proc parked in xtc_proc_sleep
+ * (and on a semaphore).  Pre-fix the DOWN came when the 3 s sleep ended
+ * (2.999 s), and the sem-parked proc never died. ---- */
+static int64_t m3_lat_ns;
+static int m3_reason, m3_status;
+static void
+m3_sleeper(void *a) { (void)a; (void)xtc_proc_sleep(3000 * F155_MS); }
+static void
+m3_killer(void *a)
+{
+	xtc_loop_t *loop = xtc_proc_userdata();
+	xtc_pid_t t;
+	uint64_t ref;
+	void *m = NULL; size_t n = 0;
+	int64_t t0;
+	(void)a;
+	munit_assert_int(xtc_proc_spawn_monitor(loop, m3_sleeper, NULL, NULL,
+	    &t, &ref), ==, XTC_OK);
+	(void)xtc_proc_sleep(2 * F155_MS);
+	t0 = xtc_clock_mono();
+	munit_assert_int(xtc_exit_pid_deadline(t, 9, 1000 * F155_MS,
+	    &m3_status), ==, XTC_OK);
+	if (xtc_recv(&m, &n, 5000 * F155_MS) == XTC_OK) {
+		xtc_pid_t dp;
+		m3_lat_ns = xtc_clock_mono() - t0;
+		(void)xtc_down_decode(m, n, &dp, &m3_reason);
+		xtc_free(m);
+	}
+}
+static void
+m3_killer_entry(void *a)
+{
+	(void)xtc_proc_set_userdata(((void **)a)[0]);
+	m3_killer(((void **)a)[1]);
+}
+static void
+m3_run(int sem)
+{
+	xtc_loop_t *loop;
+	void *args[2];
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	args[0] = loop; args[1] = sem ? (void *)1 : NULL;
+	m3_lat_ns = -1; m3_reason = -1; m3_status = -1;
+	munit_assert_int(xtc_proc_spawn(loop, m3_killer_entry, args, NULL,
+	    NULL), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+}
+static MunitResult
+test_kill_interrupts_park(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	m3_run(0);
+	(void)m3_run;
+	munit_assert_int(m3_status, ==, XTC_KILL_DELIVERED);
+	munit_assert_int(m3_reason, ==, 9);
+	munit_assert_int64(m3_lat_ns, >=, 0);
+	munit_assert_int64(m3_lat_ns, <, 500 * F155_MS);
+	/* The sem-parked case is the sync lane's (sync.c delivers at its
+	 * own safe point); here only the wake itself is proc.c's. */
+	return MUNIT_OK;
+}
+
+/* ---- M10: procs on more than 64 loops.  Pre-fix the 65th loop's spawn
+ * failed with XTC_E_NOMEM. ---- */
+#define M10_NL 80
+static _Atomic int m10_ran;
+static void
+m10_proc(void *a) { (void)a; atomic_fetch_add(&m10_ran, 1); }
+static MunitResult
+test_many_loops(const MunitParameter p[], void *d)
+{
+	xtc_exec_t *e;
+	int i;
+	(void)p; (void)d;
+	atomic_store(&m10_ran, 0);
+	munit_assert_int(xtc_exec_init(&e, M10_NL), ==, XTC_OK);
+	for (i = 0; i < M10_NL; i++)
+		munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, i), m10_proc,
+		    NULL, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	munit_assert_int(atomic_load(&m10_ran), ==, M10_NL);
+	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/send_recv_basic",   test_send_recv_basic,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/self",              test_self,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -2514,6 +2818,11 @@ static MunitTest tests[] = {
 #if !defined(_WIN32)
 	{ "/cross_thread_send_wakes", test_cross_thread_send_wakes, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #endif
+	{ "/recv_match_reused_user", test_recv_match_reused_user, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/down_bypasses_full_mailbox", test_down_bypasses_full_mailbox, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/link_semantics", test_link_semantics, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/kill_interrupts_park", test_kill_interrupts_park, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/many_loops", test_many_loops, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m8/proc", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

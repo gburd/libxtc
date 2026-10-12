@@ -651,6 +651,7 @@ lnk_parent(void *a)
 	void *m = NULL;
 	size_t n = 0;
 	xtc_down_info_t di;
+	(void)xtc_proc_trap_exit(1);   /* receive the EXIT, do not die of it */
 	arm();
 	s->spawn_rc = xtc_proc_spawn_link(s->loop, lnk_child, NULL, NULL, &c);
 	disarm();

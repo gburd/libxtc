@@ -116,6 +116,7 @@ observer(void *arg)
 	void *m = NULL;
 	size_t n = 0;
 
+	(void)xtc_proc_trap_exit(1);   /* receive the EXIT, do not die of it */
 	(void)xtc_link(oa->target);
 	(void)xtc_monitor(oa->target, NULL);
 

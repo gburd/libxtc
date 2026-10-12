@@ -123,9 +123,60 @@ test_correlate_bad_args(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* B2: two outstanding requests, reply 2 arrives FIRST.  recv_correlate(1)
+ * saves reply 2; recv_correlate(2) must then find it in the save queue.
+ * Pre-fix it timed out (XTC_E_AGAIN) with the reply sitting there. */
+struct oo_req { xtc_pid_t parent; uint32_t id; int delay_ms; };
+static int g_oo_rc1 = -99, g_oo_rc2 = -99;
+static void
+oo_worker(void *a)
+{
+	struct oo_req *r = a;
+	(void)xtc_proc_sleep((int64_t)r->delay_ms * 1000 * 1000);
+	(void)xtc_send(r->parent, &r->id, sizeof r->id);
+}
+static int
+oo_collect(uint32_t id)
+{
+	xtc_msg_t m[1];
+	int n = 0, rc;
+	rc = xtc_recv_correlate(&id, sizeof id, 1, m, &n,
+	    500LL * 1000 * 1000);
+	if (n) __os_free(m[0].data);
+	return rc;
+}
+static void
+oo_main(void *a)
+{
+	xtc_loop_t *loop = a;
+	static struct oo_req r1, r2;
+	r1.parent = r2.parent = xtc_self();
+	r1.id = 1; r1.delay_ms = 10;
+	r2.id = 2; r2.delay_ms = 0;
+	(void)xtc_proc_spawn(loop, oo_worker, &r1, NULL, NULL);
+	(void)xtc_proc_spawn(loop, oo_worker, &r2, NULL, NULL);
+	g_oo_rc1 = oo_collect(1);
+	g_oo_rc2 = oo_collect(2);
+}
+static MunitResult
+test_correlate_out_of_order(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	(void)p; (void)d;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, oo_main, loop, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(g_oo_rc1, ==, XTC_OK);
+	munit_assert_int(g_oo_rc2, ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/correlate_fork_join", test_correlate_fork_join, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/correlate_bad_args",  test_correlate_bad_args,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/correlate_out_of_order", test_correlate_out_of_order, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = {
