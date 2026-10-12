@@ -14,10 +14,8 @@
  *	calling process until it finishes, so the loop keeps running
  *	other work meanwhile.
  *
- *	The wakeup reuses the runtime's existing machinery: the pool
- *	thread signals completion on a pipe the calling process waits on
- *	with xtc_proc_wait_fd, so no new scheduler integration is
- *	needed.
+ *	The pool thread wakes the parked process through its task waker.
+ *	No file descriptor is used per call.
  */
 
 #ifndef XTC_BLOCKING_H
@@ -32,9 +30,11 @@
  * until it completes; fn's return value is stored in *out_result.
  *
  * Must be called from within a process / coroutine running on a loop.
- * Called outside that context (or where the offload cannot be set up)
- * it runs fn synchronously on the current thread -- always correct,
- * just not yielding.  Returns XTC_OK once fn has run.
+ * Called outside that context it runs fn synchronously on the current
+ * thread -- always correct, just not yielding.  Returns XTC_OK once fn
+ * has run.  On a loop fn never runs on the loop thread: XTC_E_AGAIN
+ * (offload queue full, 65536 waiting calls) or XTC_E_RESOURCE (no pool
+ * thread could start) are returned WITHOUT running fn.
  *
  * PUBLIC: int  xtc_blocking_run __P((int (*)(void *), void *, int *));
  */
@@ -43,8 +43,8 @@ XTC_API int xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result);
 /*
  * Off-loop variant of xtc_blocking_run for a plain OS thread that is NOT
  * a libxtc fiber (xtc_self() == none): offload fn(arg) to the pool and
- * block the CALLING thread on the completion pipe with a real read(2),
- * instead of parking a fiber (which a bare thread cannot do).  fn runs
+ * block the CALLING thread until it completes, instead of parking a
+ * fiber (which a bare thread cannot do).  fn runs
  * on a pool worker, not inline on the caller.
  *
  * It is still synchronous from the caller's view (it blocks the calling
@@ -54,8 +54,8 @@ XTC_API int xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result);
  * other multiplexed tasks during a blocking call, make those tasks
  * fibers on a loop and use xtc_blocking_run (which yields).  Returns
  * XTC_E_INVAL if fn is NULL or if called from a fiber/loop process
- * (use xtc_blocking_run there); on a pool/pipe setup failure it runs fn
- * inline and returns XTC_OK.
+ * (use xtc_blocking_run there); XTC_E_AGAIN / XTC_E_RESOURCE as for
+ * xtc_blocking_run, without running fn.
  *
  * PUBLIC: int  xtc_blocking_run_off_loop __P((int (*)(void *), void *, int *));
  */
@@ -67,7 +67,8 @@ XTC_API int xtc_blocking_run_off_loop(int (*fn)(void *), void *arg,
  * immediately, without waiting for or collecting the result.  Never
  * parks, so it is callable from any context (e.g. prefetch/read-ahead).
  * The caller owns arg's lifetime until fn runs (or has fn free it);
- * there is no completion signal.
+ * there is no completion signal.  XTC_E_AGAIN (queue full),
+ * XTC_E_RESOURCE (no pool thread) or XTC_E_NOMEM: fn was not queued.
  *
  * PUBLIC: int  xtc_blocking_submit __P((int (*)(void *), void *));
  */

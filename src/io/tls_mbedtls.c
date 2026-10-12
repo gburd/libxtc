@@ -176,6 +176,12 @@ map_want(struct xtc_tls *t, int rc)
 	case MBEDTLS_ERR_SSL_WANT_WRITE:
 		t->wants_write = 1;
 		return XTC_E_AGAIN;
+	case MBEDTLS_ERR_SSL_CONN_EOF:
+	case MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY:   /* where data was due */
+	case MBEDTLS_ERR_NET_RECV_FAILED:
+	case MBEDTLS_ERR_NET_SEND_FAILED:
+	case MBEDTLS_ERR_NET_CONN_RESET:
+		return XTC_E_IO;          /* peer or transport went away */
 	default:
 		return XTC_E_INTERNAL;
 	}
@@ -635,6 +641,8 @@ xtc_tls_read(xtc_tls_t *tls, void *buf, size_t buflen, size_t *out_n)
 	xtc_tls_clear_wants(tls);
 
 	rc = mbedtls_ssl_read(&tls->ssl, (unsigned char *)buf, buflen);
+	if (rc == 0 && buflen > 0)
+		return XTC_E_IO;   /* transport EOF without close_notify */
 	if (rc >= 0) {
 		*out_n = (size_t)rc;
 		return XTC_OK;

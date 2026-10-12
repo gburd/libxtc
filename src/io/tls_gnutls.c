@@ -136,6 +136,11 @@ map_again(struct xtc_tls *t, int rc)
 			t->wants_write = 1;
 		return XTC_E_AGAIN;
 	}
+	/* The peer or transport went away: EOF without close_notify
+	 * (truncation), a reset, or any send/recv failure. */
+	if (rc == GNUTLS_E_PREMATURE_TERMINATION ||
+	    rc == GNUTLS_E_PULL_ERROR || rc == GNUTLS_E_PUSH_ERROR)
+		return XTC_E_IO;
 	return XTC_E_INTERNAL;
 }
 

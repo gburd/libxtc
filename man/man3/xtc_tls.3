@@ -78,6 +78,64 @@ when the fd needs more poll iterations.
 .Fn xtc_tls_shutdown
 performs the bidirectional close-notify dance; same WANT_*
 translation.
+.Sh RETURN VALUES
+.Fn xtc_tls_handshake ,
+.Fn xtc_tls_read ,
+.Fn xtc_tls_write
+and
+.Fn xtc_tls_shutdown
+return:
+.Bl -tag -width "XTC_E_INTERNAL" -offset indent
+.It Dv XTC_OK
+Progress.  From
+.Fn xtc_tls_read ,
+.Va *out_n
+== 0 is a clean EOF: the peer sent close_notify.
+.It Dv XTC_E_AGAIN
+Wait for the direction reported by
+.Fn xtc_tls_wants_read
+/
+.Fn xtc_tls_wants_write
+and call again.
+.It Dv XTC_E_IO
+The peer or the transport failed: the connection closed without
+close_notify (a truncation), was reset, or a send/recv failed.  Tear
+the connection down.
+.It Dv XTC_E_INTERNAL
+Any other hard TLS error (a protocol violation, a failed certificate
+verification, a non-TLS peer).  Tear the connection down.
+.El
+.Pp
+An error is confined to the connection that produced it.  Every
+backend clears its per-thread error state (OpenSSL's error queue,
+wolfSSL's compat queue) before each of these calls and again after a
+failure, so a bad peer on one connection cannot make a later call on
+another connection served by the same thread fail.
+.Sh DEADLINES
+The library applies no handshake or idle timeout of its own: the
+caller drives every step, so it owns the clock.  Bound the handshake
+with an absolute deadline and pass the time remaining to each wait;
+the same shape bounds an idle read.  A peer that stalls mid-handshake
+(slowloris) then costs at most the deadline:
+.Bd -literal -offset indent
+int64_t deadline = xtc_clock_mono() + 5000000000LL;   /* 5 s */
+for (;;) {
+    int64_t left;
+    uint32_t rev = 0;
+    int rc = xtc_tls_handshake(tls);
+    if (rc == XTC_OK) break;
+    if (rc != XTC_E_AGAIN) goto drop;
+    left = deadline - xtc_clock_mono();
+    if (left <= 0) goto drop;                 /* handshake too slow */
+    rc = xtc_proc_wait_fd(fd, xtc_tls_wants_read(tls)
+                          ? XTC_IO_READABLE : XTC_IO_WRITABLE,
+                          left, &rev);
+    if (rc != XTC_OK) goto drop;   /* XTC_E_AGAIN = deadline hit */
+}
+.Ed
+.Pp
+.Fn xtc_clock_mono
+is virtualised under the simulator, so the deadline replays.
 .Sh OPTIONS
 .Vt xtc_tls_opts_t
 fields:
