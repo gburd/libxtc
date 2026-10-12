@@ -9,6 +9,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 #include "munit.h"
@@ -17,6 +18,8 @@
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "xtc_blocking.h"
+#include "xtc_exec.h"
+#include "proc_int.h"   /* XTC_HAVE_PROC_KILL_WAKE once the proc branch lands */
 #include "os_time.h"
 
 /* notify: stored signal, drains on first wait. */
@@ -538,6 +541,525 @@ test_fiber_timeout_expiry(const MunitParameter p[], void *d)
 #endif   /* !_WIN32 */
 }
 
+/* ---- B1: two fiber waiters, two posts -------------------------------
+ *
+ * Two fibers wait on one sem (count 0) / notify; a poster posts once,
+ * lets both run, posts again.  Both must be released promptly.  The
+ * 1.55.0 wake detached the whole queue, so the loser of the first post
+ * re-parked unqueued and the second post woke nobody: with a finite
+ * timeout it was only released by its own timer (latency == timeout).
+ */
+#define TW_TIMEOUT (3000LL * 1000 * 1000)   /* 3 s: far above any wake */
+#define TW_PROMPT  (1000LL * 1000 * 1000)   /* 1 s: "prompt" bound */
+static xtc_sem_t    *g_tw_sem;
+static xtc_notify_t *g_tw_n;
+static int           g_tw_mode;             /* 0 sem, 1 notify */
+static atomic_int    g_tw_ok;
+static atomic_int    g_tw_late;
+
+static void
+tw_waiter(void *a)
+{
+	int64_t t0, t1;
+	int rc;
+	(void)a;
+	(void)__os_clock_mono(&t0);
+	rc = g_tw_mode == 0 ? xtc_sem_acquire(g_tw_sem, 1, TW_TIMEOUT)
+	                    : xtc_notify_wait(g_tw_n, TW_TIMEOUT);
+	(void)__os_clock_mono(&t1);
+	if (rc == XTC_OK) atomic_fetch_add(&g_tw_ok, 1);
+	if (t1 - t0 > TW_PROMPT) atomic_fetch_add(&g_tw_late, 1);
+}
+
+static void
+tw_post(void)
+{
+	if (g_tw_mode == 0) (void)xtc_sem_post(g_tw_sem, 1);
+	else (void)xtc_notify_signal(g_tw_n);
+}
+
+static void
+tw_poster(void *a)
+{
+	int i;
+	(void)a;
+	for (i = 0; i < 5; i++) xtc_yield();      /* both waiters park */
+	tw_post();
+	for (i = 0; i < 20; i++) xtc_yield();     /* one wins, one re-parks */
+	tw_post();
+}
+
+static MunitResult
+tw_run(int mode)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_pid_t pid;
+	g_tw_mode = mode;
+	atomic_store(&g_tw_ok, 0);
+	atomic_store(&g_tw_late, 0);
+	munit_assert_int(xtc_sem_create(0, &g_tw_sem), ==, XTC_OK);
+	munit_assert_int(xtc_notify_create(&g_tw_n), ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, tw_waiter, NULL, NULL, &pid), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, tw_waiter, NULL, NULL, &pid), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, tw_poster, NULL, NULL, &pid), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+	xtc_sem_destroy(g_tw_sem);
+	xtc_notify_destroy(g_tw_n);
+	munit_assert_int(atomic_load(&g_tw_ok), ==, 2);
+	munit_assert_int(atomic_load(&g_tw_late), ==, 0);
+	return MUNIT_OK;
+}
+
+static MunitResult
+test_sem_two_waiters(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return tw_run(0);
+}
+
+static MunitResult
+test_notify_two_waiters(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return tw_run(1);
+}
+
+/* ---- B1: conservation under N waiters / M posts ---------------------
+ *
+ * CW_WAITERS fibers spread over CW_LOOPS loops each take CW_ROUNDS
+ * acquires of 1 or 2 units; a poster posts exactly the total demand in
+ * random chunks with random yields between.  Property: every acquire
+ * succeeds promptly (none stranded until its timeout), units acquired
+ * == units posted, and the count ends at 0.  Repeated with fresh seeds.
+ */
+#define CW_LOOPS   4
+#define CW_WAITERS 12
+#define CW_ROUNDS  20
+static xtc_sem_t  *g_cw_sem;
+static atomic_int  g_cw_taken;     /* units acquired */
+static atomic_int  g_cw_fail;      /* acquire returned != OK */
+static atomic_int  g_cw_late;      /* acquire took > TW_PROMPT */
+static atomic_int  g_cw_done;      /* waiters that finished */
+static int         g_cw_need[CW_WAITERS][CW_ROUNDS];
+static int         g_cw_chunks[CW_WAITERS * CW_ROUNDS * 2];
+static int         g_cw_yields[CW_WAITERS * CW_ROUNDS * 2];
+static int         g_cw_nchunks;
+
+static void
+cw_waiter(void *a)
+{
+	int id = (int)(intptr_t)a, r;
+	for (r = 0; r < CW_ROUNDS; r++) {
+		int64_t t0, t1;
+		int rc;
+		(void)__os_clock_mono(&t0);
+		rc = xtc_sem_acquire(g_cw_sem, (unsigned)g_cw_need[id][r],
+		    TW_TIMEOUT);
+		(void)__os_clock_mono(&t1);
+		if (rc != XTC_OK) { atomic_fetch_add(&g_cw_fail, 1); continue; }
+		atomic_fetch_add(&g_cw_taken, g_cw_need[id][r]);
+		if (t1 - t0 > TW_PROMPT) atomic_fetch_add(&g_cw_late, 1);
+		if (r & 1) xtc_yield();
+	}
+	atomic_fetch_add(&g_cw_done, 1);
+}
+
+static void
+cw_poster(void *a)
+{
+	int i, y;
+	(void)a;
+	for (i = 0; i < g_cw_nchunks; i++) {
+		for (y = 0; y < g_cw_yields[i]; y++) xtc_yield();
+		(void)xtc_sem_post(g_cw_sem, (unsigned)g_cw_chunks[i]);
+	}
+}
+
+static MunitResult
+test_sem_conservation(const MunitParameter p[], void *d)
+{
+	int iter, i, r, total, left;
+	(void)p; (void)d;
+	for (iter = 0; iter < 10; iter++) {
+		xtc_exec_t *e = NULL;
+		total = 0;
+		for (i = 0; i < CW_WAITERS; i++)
+			for (r = 0; r < CW_ROUNDS; r++) {
+				g_cw_need[i][r] = 1 + (munit_rand_uint32() & 1);
+				total += g_cw_need[i][r];
+			}
+		g_cw_nchunks = 0;
+		for (left = total; left > 0; left -= g_cw_chunks[g_cw_nchunks++]) {
+			int c = 1 + (int)(munit_rand_uint32() % 3);
+			g_cw_chunks[g_cw_nchunks] = c < left ? c : left;
+			g_cw_yields[g_cw_nchunks] = (int)(munit_rand_uint32() % 4);
+		}
+		atomic_store(&g_cw_taken, 0);
+		atomic_store(&g_cw_fail, 0);
+		atomic_store(&g_cw_late, 0);
+		atomic_store(&g_cw_done, 0);
+		munit_assert_int(xtc_sem_create(0, &g_cw_sem), ==, XTC_OK);
+		munit_assert_int(xtc_exec_init(&e, CW_LOOPS), ==, XTC_OK);
+		for (i = 0; i < CW_WAITERS; i++)
+			munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e,
+			    i % CW_LOOPS), cw_waiter, (void *)(intptr_t)i,
+			    NULL, NULL), ==, XTC_OK);
+		munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0),
+		    cw_poster, NULL, NULL, NULL), ==, XTC_OK);
+		munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+		(void)xtc_exec_fini(e);
+		munit_assert_int(atomic_load(&g_cw_done), ==, CW_WAITERS);
+		munit_assert_int(atomic_load(&g_cw_fail), ==, 0);
+		munit_assert_int(atomic_load(&g_cw_late), ==, 0);
+		munit_assert_int(atomic_load(&g_cw_taken), ==, total);
+		munit_assert_int(xtc_sem_count(g_cw_sem), ==, 0);
+		xtc_sem_destroy(g_cw_sem);
+	}
+	return MUNIT_OK;
+}
+
+/* ---- M5: a timed lock grant must not leave its park timer armed -----
+ *
+ * The holder keeps the lock 10 ms; the waiter takes it with a 2 s
+ * timeout, then does ONE plain xtc_yield.  1.55.0 left the timed wait's
+ * park timer in the task slot on the grant path, so that yield parked
+ * until the stale deadline (measured 1.991 s).
+ */
+#define TL_TIMEOUT (2000LL * 1000 * 1000)
+static xtc_amutex_t  *g_tl_m;
+static xtc_arwlock_t *g_tl_rw;
+static int            g_tl_kind;           /* 0 amutex, 1 rd, 2 wr */
+static int64_t        g_tl_yield_ns;
+static int            g_tl_rc;
+
+static void
+tl_holder(void *a)
+{
+	(void)a;
+	if (g_tl_kind == 0) (void)xtc_amutex_lock(g_tl_m, -1);
+	else (void)xtc_arwlock_wrlock(g_tl_rw, -1);
+	(void)xtc_proc_sleep(10LL * 1000 * 1000);
+	if (g_tl_kind == 0) (void)xtc_amutex_unlock(g_tl_m);
+	else (void)xtc_arwlock_unlock(g_tl_rw);
+}
+
+static void
+tl_waiter(void *a)
+{
+	int64_t t0, t1;
+	(void)a;
+	(void)xtc_proc_sleep(1LL * 1000 * 1000);   /* holder goes first */
+	g_tl_rc = g_tl_kind == 0 ? xtc_amutex_lock(g_tl_m, TL_TIMEOUT) :
+	    g_tl_kind == 1 ? xtc_arwlock_rdlock(g_tl_rw, TL_TIMEOUT) :
+	                     xtc_arwlock_wrlock(g_tl_rw, TL_TIMEOUT);
+	(void)__os_clock_mono(&t0);
+	xtc_yield();
+	(void)__os_clock_mono(&t1);
+	g_tl_yield_ns = t1 - t0;
+	if (g_tl_rc != XTC_OK) return;
+	if (g_tl_kind == 0) (void)xtc_amutex_unlock(g_tl_m);
+	else (void)xtc_arwlock_unlock(g_tl_rw);
+}
+
+static MunitResult
+test_timed_lock_no_stale_timer(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	for (g_tl_kind = 0; g_tl_kind < 3; g_tl_kind++) {
+		xtc_loop_t *loop = NULL;
+		g_tl_rc = -999;
+		g_tl_yield_ns = -1;
+		munit_assert_int(xtc_amutex_create(&g_tl_m), ==, XTC_OK);
+		munit_assert_int(xtc_arwlock_create(&g_tl_rw), ==, XTC_OK);
+		munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+		munit_assert_int(xtc_proc_spawn(loop, tl_holder, NULL, NULL, NULL), ==, XTC_OK);
+		munit_assert_int(xtc_proc_spawn(loop, tl_waiter, NULL, NULL, NULL), ==, XTC_OK);
+		munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+		(void)xtc_loop_fini(loop);
+		xtc_amutex_destroy(g_tl_m);
+		xtc_arwlock_destroy(g_tl_rw);
+		munit_logf(MUNIT_LOG_INFO, "kind %d: rc=%d yield %.3f ms",
+		    g_tl_kind, g_tl_rc, (double)g_tl_yield_ns / 1e6);
+		munit_assert_int(g_tl_rc, ==, XTC_OK);
+		munit_assert_int64(g_tl_yield_ns, <, 50LL * 1000 * 1000);
+	}
+	return MUNIT_OK;
+}
+
+/* ---- gate: drain on an OPEN gate wakes when the count reaches 0 ---- */
+static xtc_gate_t *g_gd;
+static int64_t     g_gd_ns;
+static int         g_gd_rc;
+
+static void
+gd_drainer(void *a)
+{
+	int64_t t0, t1;
+	(void)a;
+	(void)__os_clock_mono(&t0);
+	g_gd_rc = xtc_gate_drain(g_gd, TW_TIMEOUT);
+	(void)__os_clock_mono(&t1);
+	g_gd_ns = t1 - t0;
+}
+
+static void
+gd_worker(void *a)
+{
+	(void)a;
+	(void)xtc_proc_sleep(5LL * 1000 * 1000);
+	(void)xtc_gate_leave(g_gd);
+}
+
+static MunitResult
+test_gate_drain_open(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	(void)p; (void)d;
+	munit_assert_int(xtc_gate_create(&g_gd), ==, XTC_OK);
+	munit_assert_int(xtc_gate_enter(g_gd), ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, gd_drainer, NULL, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, gd_worker, NULL, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+	xtc_gate_destroy(g_gd);
+	munit_assert_int(g_gd_rc, ==, XTC_OK);
+	munit_assert_int64(g_gd_ns, <, TW_PROMPT);
+	return MUNIT_OK;
+}
+
+/* ---- kill a parked waiter, then wake it -----------------------------
+ *
+ * A waiter queued on a lock is killed (xtc_exit_pid) and is then handed
+ * the lock by the holder's unlock.  It must die WITHOUT keeping the
+ * grant: a third proc must get the lock.  In 1.55.0 the resume hook
+ * inside xtc_yield unwound the killed waiter before it could give the
+ * grant back, so the lock stayed held by a dead fiber forever.
+ */
+static xtc_amutex_t  *g_kw_m;
+static xtc_arwlock_t *g_kw_rw;
+static xtc_sem_t     *g_kw_sem;
+static xtc_notify_t  *g_kw_n;
+static xtc_barrier_t *g_kw_b;
+static xtc_gate_t    *g_kw_g;
+static int            g_kw_kind;   /* index into kw_kinds */
+static xtc_loop_t    *g_kw_loop;
+static xtc_pid_t      g_kw_victim;
+static atomic_int     g_kw_victim_ret;    /* victim's wait returned */
+static int            g_kw_third_rc;
+static int            g_kw_down;
+
+static int64_t        g_kw_tmo;    /* victim's timeout: -1 or 50 ms */
+
+static void
+kw_victim(void *a)
+{
+	(void)a;
+	switch (g_kw_kind) {
+	case 0: (void)xtc_amutex_lock(g_kw_m, g_kw_tmo); break;
+	case 1: (void)xtc_arwlock_wrlock(g_kw_rw, g_kw_tmo); break;
+	case 2: (void)xtc_sem_acquire(g_kw_sem, 1, g_kw_tmo); break;
+	case 3: (void)xtc_notify_wait(g_kw_n, g_kw_tmo); break;
+	case 4: (void)xtc_barrier_wait(g_kw_b); break;
+	default: (void)xtc_gate_drain(g_kw_g, g_kw_tmo); break;
+	}
+	atomic_store(&g_kw_victim_ret, 1);       /* must not be reached */
+}
+
+static void
+kw_driver(void *a)
+{
+	uint64_t ref;
+	void *m = NULL;
+	size_t n = 0;
+	int i;
+	(void)a;
+	if (g_kw_kind == 0) (void)xtc_amutex_lock(g_kw_m, -1);
+	if (g_kw_kind == 1) (void)xtc_arwlock_wrlock(g_kw_rw, -1);
+	if (g_kw_kind == 5) (void)xtc_gate_enter(g_kw_g);
+	munit_assert_int(xtc_proc_spawn_monitor(g_kw_loop, kw_victim,
+	    NULL, NULL, &g_kw_victim, &ref), ==, XTC_OK);
+	for (i = 0; i < 10; i++) xtc_yield();    /* victim parks */
+	if (g_kw_kind == 5) (void)xtc_gate_close(g_kw_g);
+	munit_assert_int(xtc_exit_pid(g_kw_victim, 9), ==, XTC_OK);
+	/* Past a timed victim's 50 ms deadline, so its own timer resumes
+	 * it while it is still queued. */
+	(void)xtc_proc_sleep(100LL * 1000 * 1000);
+	/* The later wake: hand the victim the lock / a unit / a signal. */
+	switch (g_kw_kind) {
+	case 0: (void)xtc_amutex_unlock(g_kw_m); break;
+	case 1: (void)xtc_arwlock_unlock(g_kw_rw); break;
+	case 2: (void)xtc_sem_post(g_kw_sem, 1); break;
+	case 3: (void)xtc_notify_signal(g_kw_n); break;
+	case 4: g_kw_third_rc = xtc_barrier_wait(g_kw_b); break;
+	default: (void)xtc_gate_leave(g_kw_g); break;
+	}
+	g_kw_down = xtc_recv(&m, &n, 2000LL * 1000 * 1000) == XTC_OK;
+	if (m != NULL) xtc_free(m);
+	/* The victim's grant must have been given back. */
+	switch (g_kw_kind) {
+	case 0:
+		g_kw_third_rc = xtc_amutex_lock(g_kw_m, 500LL * 1000 * 1000);
+		if (g_kw_third_rc == XTC_OK) (void)xtc_amutex_unlock(g_kw_m);
+		break;
+	case 1:
+		g_kw_third_rc = xtc_arwlock_rdlock(g_kw_rw, 500LL * 1000 * 1000);
+		if (g_kw_third_rc == XTC_OK) (void)xtc_arwlock_unlock(g_kw_rw);
+		break;
+	case 2:
+		g_kw_third_rc = xtc_sem_acquire(g_kw_sem, 1, 500LL * 1000 * 1000);
+		break;
+	case 3:
+		g_kw_third_rc = xtc_notify_wait(g_kw_n, 500LL * 1000 * 1000);
+		break;
+	case 4:
+		break;          /* the generation completed: rc set above */
+	default:
+		g_kw_third_rc = xtc_gate_drain(g_kw_g, 0);
+		break;
+	}
+}
+
+static const char *kw_kinds[] = { "amutex", "arwlock", "sem", "notify",
+    "barrier", "gate", NULL };
+static const char *kw_waits[] = { "inf", "timed", NULL };
+static MunitParameterEnum kw_params[] = {
+	{ (char *)"kind", (char **)kw_kinds },
+	{ (char *)"wait", (char **)kw_waits },
+	{ NULL, NULL }
+};
+#if defined(XTC_HAVE_PROC_KILL_WAKE)
+static MunitParameterEnum kw_kind_params[] = {
+	{ (char *)"kind", (char **)kw_kinds },
+	{ NULL, NULL }
+};
+#endif
+
+static int
+kw_param_kind(const MunitParameter p[])
+{
+	const char *k = munit_parameters_get(p, "kind");
+	int i;
+	for (i = 0; k != NULL && kw_kinds[i] != NULL; i++)
+		if (strcmp(k, kw_kinds[i]) == 0) return i;
+	return 0;
+}
+
+/* Fresh primitives + one loop running `driver`; asserts the victim never
+ * returned from its wait and its DOWN arrived. */
+static void
+kw_run(xtc_proc_fn driver)
+{
+	xtc_loop_t *loop = NULL;
+	atomic_store(&g_kw_victim_ret, 0);
+	g_kw_third_rc = -999;
+	g_kw_down = 0;
+	munit_assert_int(xtc_amutex_create(&g_kw_m), ==, XTC_OK);
+	munit_assert_int(xtc_arwlock_create(&g_kw_rw), ==, XTC_OK);
+	munit_assert_int(xtc_sem_create(0, &g_kw_sem), ==, XTC_OK);
+	munit_assert_int(xtc_notify_create(&g_kw_n), ==, XTC_OK);
+	munit_assert_int(xtc_barrier_create(2, &g_kw_b), ==, XTC_OK);
+	munit_assert_int(xtc_gate_create(&g_kw_g), ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	g_kw_loop = loop;
+	munit_assert_int(xtc_proc_spawn(loop, driver, NULL, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+	xtc_amutex_destroy(g_kw_m);
+	xtc_arwlock_destroy(g_kw_rw);
+	xtc_sem_destroy(g_kw_sem);
+	xtc_notify_destroy(g_kw_n);
+	xtc_barrier_destroy(g_kw_b);
+	xtc_gate_destroy(g_kw_g);
+	munit_logf(MUNIT_LOG_INFO, "%s: down=%d third_rc=%d",
+	    kw_kinds[g_kw_kind], g_kw_down, g_kw_third_rc);
+	munit_assert_int(atomic_load(&g_kw_victim_ret), ==, 0);
+	munit_assert_int(g_kw_down, ==, 1);
+}
+
+static MunitResult
+test_kill_then_wake(const MunitParameter p[], void *d)
+{
+	const char *wt = munit_parameters_get(p, "wait");
+	(void)d;
+	g_kw_kind = kw_param_kind(p);
+	g_kw_tmo = (wt != NULL && strcmp(wt, "timed") == 0) ?
+	    50LL * 1000 * 1000 : -1;
+	kw_run(kw_driver);
+	munit_assert_int(g_kw_third_rc, ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+#if defined(XTC_HAVE_PROC_KILL_WAKE)
+/* ---- prompt kill of a parked waiter (no other wake) -----------------
+ *
+ * Needs xtc_exit_pid to wake a target parked anywhere (proc branch).
+ * The victim waits forever on a sem / notify / amutex nobody releases;
+ * the kill alone must end it within 1 s, and leave the primitive
+ * usable (no stale waiter left linked).
+ */
+static int64_t g_kp_ns;
+
+static void
+kp_driver(void *a)
+{
+	uint64_t ref;
+	void *m = NULL;
+	size_t n = 0;
+	int64_t t0, t1;
+	int i;
+	(void)a;
+	if (g_kw_kind == 0) (void)xtc_amutex_lock(g_kw_m, -1);
+	if (g_kw_kind == 1) (void)xtc_arwlock_wrlock(g_kw_rw, -1);
+	if (g_kw_kind == 5) (void)xtc_gate_enter(g_kw_g);
+	munit_assert_int(xtc_proc_spawn_monitor(g_kw_loop, kw_victim,
+	    NULL, NULL, &g_kw_victim, &ref), ==, XTC_OK);
+	for (i = 0; i < 10; i++) xtc_yield();
+	(void)__os_clock_mono(&t0);
+	munit_assert_int(xtc_exit_pid(g_kw_victim, 9), ==, XTC_OK);
+	g_kw_down = xtc_recv(&m, &n, 1000LL * 1000 * 1000) == XTC_OK;
+	(void)__os_clock_mono(&t1);
+	g_kp_ns = t1 - t0;
+	if (m != NULL) xtc_free(m);
+	switch (g_kw_kind) {
+	case 4:                 /* nothing to release */
+		g_kw_third_rc = XTC_OK;
+		break;
+	case 5: (void)xtc_gate_leave(g_kw_g);
+		g_kw_third_rc = xtc_gate_drain(g_kw_g, 0);
+		break;
+	case 0: (void)xtc_amutex_unlock(g_kw_m);
+		g_kw_third_rc = xtc_amutex_try_lock(g_kw_m);
+		if (g_kw_third_rc == XTC_OK) (void)xtc_amutex_unlock(g_kw_m);
+		break;
+	case 1: (void)xtc_arwlock_unlock(g_kw_rw);
+		g_kw_third_rc = xtc_arwlock_wrlock(g_kw_rw, 0);
+		if (g_kw_third_rc == XTC_OK) (void)xtc_arwlock_unlock(g_kw_rw);
+		break;
+	case 2: (void)xtc_sem_post(g_kw_sem, 1);
+		g_kw_third_rc = xtc_sem_try_acquire(g_kw_sem, 1);
+		break;
+	default: (void)xtc_notify_signal(g_kw_n);    /* notify */
+		g_kw_third_rc = xtc_notify_wait(g_kw_n, 0);
+		break;
+	}
+}
+
+static MunitResult
+test_kill_prompt(const MunitParameter p[], void *d)
+{
+	(void)d;
+	g_kw_kind = kw_param_kind(p);
+	g_kw_tmo = -1;
+	kw_run(kp_driver);
+	munit_assert_int64(g_kp_ns, <, 1000LL * 1000 * 1000);
+	munit_assert_int(g_kw_third_rc, ==, XTC_OK);
+	return MUNIT_OK;
+}
+#endif /* XTC_HAVE_PROC_KILL_WAKE */
+
 static MunitTest tests[] = {
 	{ "/notify_stored",       test_notify_stored,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/notify_cross_thread", test_notify_cross_thread, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -551,6 +1073,15 @@ static MunitTest tests[] = {
 	{ "/barrier",             test_barrier,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/gate",                test_gate,                NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fiber_timeout_expiry", test_fiber_timeout_expiry, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/sem_two_waiters",     test_sem_two_waiters,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/notify_two_waiters",  test_notify_two_waiters,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/sem_conservation",    test_sem_conservation,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/timed_lock_no_stale_timer", test_timed_lock_no_stale_timer, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/gate_drain_open",     test_gate_drain_open,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/kill_then_wake",      test_kill_then_wake,      NULL, NULL, MUNIT_TEST_OPTION_NONE, kw_params },
+#if defined(XTC_HAVE_PROC_KILL_WAKE)
+	{ "/kill_prompt",         test_kill_prompt,         NULL, NULL, MUNIT_TEST_OPTION_NONE, kw_kind_params },
+#endif
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m9/sync", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
