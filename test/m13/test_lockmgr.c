@@ -14,6 +14,8 @@
 #include "munit.h"
 #include "xtc.h"
 #include "xtc_lockmgr.h"
+#include "xtc_loop.h"
+#include "xtc_proc.h"
 #include "xtc_int.h"
 
 /* Conflict matrix sanity check via the public API. */
@@ -654,6 +656,95 @@ test_upgrade_folds_entry(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- kill a parked fiber waiter, then release -----------------------
+ *
+ * A fiber parked in xtc_lock_get is killed and the holder then releases,
+ * which GRANTS the lock to the killed waiter's entry.  In 1.55.0 the
+ * resume hook unwound the waiter inside xtc_yield, so the grant was
+ * kept by a dead fiber forever (a third locker timed out) and the
+ * entry's waker pointed into a dead stack.  The grant must be released
+ * and another locker must get the lock.  The timed variant is resumed
+ * by its own timer first.
+ */
+static xtc_lockmgr_t *g_km;
+static xtc_locker_t   g_km_l1, g_km_l2, g_km_l3;
+static xtc_loop_t    *g_km_loop;
+static int64_t        g_km_tmo;
+static atomic_int     g_km_returned;
+static int            g_km_down;
+static int            g_km_after;
+
+static void
+km_victim(void *arg)
+{
+	(void)arg;
+	(void)xtc_lock_get(g_km, g_km_l2, "k", 1, XTC_LOCK_X, g_km_tmo);
+	atomic_store(&g_km_returned, 1);          /* must not be reached */
+}
+
+static void
+km_driver(void *arg)
+{
+	xtc_pid_t victim;
+	uint64_t ref;
+	void *m = NULL;
+	size_t n = 0;
+	int i;
+	(void)arg;
+	munit_assert_int(xtc_lock_get(g_km, g_km_l1, "k", 1, XTC_LOCK_X, 0), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn_monitor(g_km_loop, km_victim, NULL,
+	    NULL, &victim, &ref), ==, XTC_OK);
+	for (i = 0; i < 10; i++) xtc_yield();     /* victim parks */
+	munit_assert_int(xtc_exit_pid(victim, 9), ==, XTC_OK);
+	(void)xtc_proc_sleep(100LL * 1000 * 1000);  /* past a 50 ms timer */
+	munit_assert_int(xtc_lock_put(g_km, g_km_l1, "k", 1), ==, XTC_OK);
+	g_km_down = xtc_recv(&m, &n, 2000LL * 1000 * 1000) == XTC_OK;
+	if (m != NULL) xtc_free(m);
+	g_km_after = xtc_lock_get(g_km, g_km_l3, "k", 1, XTC_LOCK_X,
+	    500LL * 1000 * 1000);
+	if (g_km_after == XTC_OK) (void)xtc_lock_put(g_km, g_km_l3, "k", 1);
+}
+
+static MunitResult
+test_kill_then_release(const MunitParameter p[], void *d)
+{
+	const char *wt = munit_parameters_get(p, "wait");
+	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_loop_t *loop = NULL;
+	(void)d;
+	o.detect_mode = XTC_LOCK_DETECT_NONE;
+	g_km_tmo = (wt != NULL && strcmp(wt, "timed") == 0) ?
+	    50LL * 1000 * 1000 : -1;
+	atomic_store(&g_km_returned, 0);
+	g_km_down = 0;
+	g_km_after = -999;
+	munit_assert_int(xtc_lockmgr_create(&o, &g_km), ==, XTC_OK);
+	munit_assert_int(xtc_lockmgr_id(g_km, &g_km_l1), ==, XTC_OK);
+	munit_assert_int(xtc_lockmgr_id(g_km, &g_km_l2), ==, XTC_OK);
+	munit_assert_int(xtc_lockmgr_id(g_km, &g_km_l3), ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	g_km_loop = loop;
+	munit_assert_int(xtc_proc_spawn(loop, km_driver, NULL, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+	munit_logf(MUNIT_LOG_INFO, "down=%d after=%d held=%d waiting=%d",
+	    g_km_down, g_km_after, xtc_lockmgr_n_held(g_km),
+	    xtc_lockmgr_n_waiting(g_km));
+	munit_assert_int(atomic_load(&g_km_returned), ==, 0);
+	munit_assert_int(g_km_down, ==, 1);
+	munit_assert_int(g_km_after, ==, XTC_OK);
+	munit_assert_int(xtc_lockmgr_n_held(g_km), ==, 0);
+	munit_assert_int(xtc_lockmgr_n_waiting(g_km), ==, 0);
+	xtc_lockmgr_destroy(g_km);
+	return MUNIT_OK;
+}
+
+static char *km_waits[] = { (char *)"inf", (char *)"timed", NULL };
+static MunitParameterEnum km_params[] = {
+	{ (char *)"wait", km_waits },
+	{ NULL, NULL }
+};
+
 static MunitTest tests[] = {
 	{ "/modes",              test_modes,              NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/wait_grant",         test_wait_grant,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -671,6 +762,7 @@ static MunitTest tests[] = {
 	{ "/conversion_not_behind_waiter", test_conversion_not_behind_waiter, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/upgrade_honors_deadline",    test_upgrade_honors_deadline,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/upgrade_folds_entry",        test_upgrade_folds_entry,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/kill_then_release",          test_kill_then_release,          NULL, NULL, MUNIT_TEST_OPTION_NONE, km_params },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m13/lockmgr", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
