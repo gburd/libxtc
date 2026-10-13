@@ -912,6 +912,24 @@ nat_select_run(struct sx_stmt *st)
  * any other decline, a generic "unsupported SQL".  This keeps the error
  * surface compatible with SQLite for the common case (a typo'd table).
  */
+/* Message for a write that the log refused (see wal_commit fail-stop). */
+#define SX_MSG_WAL_IO "I/O error: write-ahead log write or fsync failed; " \
+	"the transaction was not committed and the database is read-only " \
+	"until restart"
+#define SX_MSG_SERIALIZE "could not serialize access due to concurrent " \
+	"update; transaction rolled back"
+
+static int
+nat_set_err(sx_db *db, const char *msg, int rc)
+{
+	struct sx_native_db *nd;
+	if (!sx_is_native_db(db)) return rc;
+	nd = (struct sx_native_db *)db;
+	free(nd->errmsg);
+	nd->errmsg = strdup(msg);
+	return rc;
+}
+
 static int
 nat_set_run_error(struct sx_stmt *st)
 {
@@ -919,6 +937,8 @@ nat_set_run_error(struct sx_stmt *st)
 	char buf[160];
 	const char *tab = NULL;
 	if (!sx_is_native_db(st->db)) return SX_ERROR;
+	if (xstore_wal_failed())
+		return nat_set_err(st->db, SX_MSG_WAL_IO, SX_ERROR);
 	nd = (struct sx_native_db *)st->db;
 	free(nd->errmsg);
 	/* A first unresolved base table name -> "no such table: NAME". */
@@ -974,8 +994,10 @@ sx_step(sx_stmt *st)
 			if (nd) nd->spn = 0;
 			rc = xstore_commit(st->db);
 			if (rc == 0) return SX_DONE;
-			if (rc == SX_BUSY) return SX_BUSY;   /* serialization conflict */
-			return SX_ERROR;
+			if (rc == SX_BUSY)      /* serialization conflict */
+				return nat_set_err(st->db, SX_MSG_SERIALIZE, SX_BUSY);
+			return nat_set_err(st->db, xstore_wal_failed() ? SX_MSG_WAL_IO
+			    : "commit failed; transaction rolled back", SX_ERROR);
 		}
 		case SXN_ROLLBACK: {
 			struct sx_native_db *nd = sx_is_native_db(st->db)

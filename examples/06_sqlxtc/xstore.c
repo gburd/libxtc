@@ -2310,24 +2310,31 @@ xs_rowid(xsql_vtab_cursor *pc, xsql_int64 *pRowid)
 /* Dispatch one WAL record to the log durably: group commit on a loop
  * (parks the fiber on the writer's ack), synchronous append off a loop.
  * No-op when no WAL is attached. */
-static uint64_t
-xs_wal_emit(const uint8_t *rec, size_t sz)
+static int
+xs_wal_emit(const uint8_t *rec, size_t sz, uint64_t *lsn)
 {
-	uint64_t lsn = 0;
+	*lsn = 0;
 	if (g_xwal == NULL)
-		return 0;
+		return XTC_OK;
 	if (xtc_pid_is_none(xtc_self()))
-		(void)wal_commit_sync(g_xwal, rec, (uint32_t)sz, &lsn);
-	else
-		(void)wal_commit(g_xwal, rec, (uint32_t)sz, &lsn);
-	return lsn;
+		return wal_commit_sync(g_xwal, rec, (uint32_t)sz, lsn);
+	return wal_commit(g_xwal, rec, (uint32_t)sz, lsn);
+}
+
+/* 1 once the attached log has fail-stopped (a write or fsync failed):
+ * the engine is read-only until restart.  See wal_commit. */
+int
+xstore_wal_failed(void)
+{
+	return g_xwal != NULL && wal_failed(g_xwal);
 }
 
 /* Log a single committed version (the autocommit single-statement
  * path); same record layout as the multi-version xs_wal_log.  Returns
- * the assigned log LSN. */
-static uint64_t
-xs_wal_put(uint64_t ts, uint32_t tableid, int64_t rowid, const void *val, int vlen, int deleted)
+ * XTC_OK with the assigned LSN in *lsn, or an error (nothing durable). */
+static int
+xs_wal_put(uint64_t ts, uint32_t tableid, int64_t rowid, const void *val,
+    int vlen, int deleted, uint64_t *lsn)
 {
 	uint8_t rec[64 + XS_VMAX];        /* one XL_UPDATE + a trailing XL_COMMIT */
 	uint8_t *p = rec;
@@ -2343,13 +2350,13 @@ xs_wal_put(uint64_t ts, uint32_t tableid, int64_t rowid, const void *val, int vl
 	b.flags = deleted ? XS_F_DELETED : 0;
 	b.redo = vl ? val : NULL; b.redo_len = vl;
 	if ((n = xl_enc_update(p, sizeof rec, &h, &b)) < 0)
-		return 0;
+		return XTC_E_INVAL;
 	p += n;
 	h.type = XL_COMMIT;               /* this single statement is its own txn */
 	if ((n = xl_enc_simple(p, sizeof rec - (size_t)(p - rec), &h)) < 0)
-		return 0;
+		return XTC_E_INVAL;
 	p += n;
-	return xs_wal_emit(rec, (size_t)(p - rec));
+	return xs_wal_emit(rec, (size_t)(p - rec), lsn);
 }
 
 /* STEAL: log one spilled payload as an XL_UPDATE belonging to a steal
@@ -2365,13 +2372,16 @@ xs_wal_emit_stage(uint64_t steal_txn, int64_t stage_id, const void *val, uint16_
 	xl_hdr_t h;
 	xl_body_t b;
 	int n;
+	uint64_t lsn;
 
 	h.type = XL_UPDATE; h.txn_id = steal_txn; h.prev_lsn = 0;
 	memset(&b, 0, sizeof b);
 	b.tableid = XS_STAGE_TID; b.rowid = stage_id; b.commit_ts = 0;
 	b.redo = vlen ? val : NULL; b.redo_len = vlen;
+	/* Best-effort: a failed log write latches the log failed, so the
+	 * owning transaction's commit record then fails too. */
 	if ((n = xl_enc_update(rec, sizeof rec, &h, &b)) > 0)
-		(void)xs_wal_emit(rec, (size_t)n);
+		(void)xs_wal_emit(rec, (size_t)n, &lsn);
 }
 
 /*
@@ -2418,7 +2428,7 @@ xs_smo_page(void *user, bm_pid_t pid, const void *image,
 	h.type = XL_PAGE; h.txn_id = 0; h.prev_lsn = lsn;
 	if ((n = xl_enc_page(rec, cap, &h, (uint32_t)pid, image,
 	    (uint16_t)page_size)) > 0)
-		rlsn = xs_wal_emit(rec, (size_t)n);
+		(void)xs_wal_emit(rec, (size_t)n, &rlsn);   /* 0 on failure */
 	free(rec);
 	return rlsn;
 }
@@ -2448,6 +2458,7 @@ xs_smo_end(void *user, uint64_t token)
 	xl_hdr_t h;
 	xl_body_t b;
 	int n;
+	uint64_t lsn;
 
 	(void)user;
 	if (g_xwal == NULL)
@@ -2460,7 +2471,7 @@ xs_smo_end(void *user, uint64_t token)
 	memset(&b, 0, sizeof b);
 	b.undo_next_lsn = token;
 	if ((n = xl_enc_clr(clr, sizeof clr, &h, &b)) > 0)
-		(void)xs_wal_emit(clr, (size_t)n);
+		(void)xs_wal_emit(clr, (size_t)n, &lsn);
 }
 
 /* Install the SMO physiological-logging hook on the B-tree layer.  The
@@ -2526,7 +2537,11 @@ xs_put(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n, int d
 	if (n < 0) n = 0;
 	if (n > XS_VMAX) n = XS_VMAX;
 	if (g_xwal != NULL) {
-		uint64_t lsn = xs_wal_put(ts, tableid, rowid, blob, n, deleted);  /* durable BEFORE apply */
+		uint64_t lsn = 0;
+		/* Durable BEFORE apply.  A failed log write applies nothing: the
+		 * caller gets an error and the row never becomes visible. */
+		if (xs_wal_put(ts, tableid, rowid, blob, n, deleted, &lsn) != XTC_OK)
+			return SX_ERROR;
 		bt_set_lsn(bt, lsn);   /* stamp this change's LSN onto the page */
 	}
 	enc_vkey(tableid, rowid, ts, key);
@@ -2989,23 +3004,23 @@ xs_sync(xsql_vtab *pv)
  * On a loop the commit joins the group-commit batch; off a loop it
  * appends synchronously.  Returns the assigned commit LSN (0 on OOM).
  */
-static uint64_t
-xs_wal_log(xstore_ctx_t *cx, uint64_t ts)
+static int
+xs_wal_log(xstore_ctx_t *cx, uint64_t ts, uint64_t *clsn)
 {
 	size_t sz = XL_HDR_LEN;           /* trailing XL_COMMIT */
 	uint8_t *rec, *p;
 	xl_hdr_t h;
 	xl_body_t b;
-	int i, n;
-	uint64_t lsn;
+	int i, n, rc;
 
 	for (i = 0; i < cx->wn; i++) {
 		uint16_t vl = cx->wbuf[i].deleted ? 0 : (uint16_t)cx->wbuf[i].len;
 		sz += (size_t)XL_HDR_LEN + xl_update_size(vl, 0);
 	}
+	*clsn = 0;
 	rec = malloc(sz);
 	if (rec == NULL)
-		return 0;                     /* best-effort; durability lost on OOM */
+		return XTC_E_NOMEM;           /* not logged: the commit fails */
 	p = rec;
 	for (i = 0; i < cx->wn; i++) {
 		xs_wrec_t *w = &cx->wbuf[i];
@@ -3016,18 +3031,18 @@ xs_wal_log(xstore_ctx_t *cx, uint64_t ts)
 		b.flags = w->deleted ? XS_F_DELETED : 0;
 		b.redo = vl ? w->data : NULL; b.redo_len = vl;
 		if ((n = xl_enc_update(p, sz - (size_t)(p - rec), &h, &b)) < 0) {
-			free(rec); return 0;
+			free(rec); return XTC_E_INVAL;
 		}
 		p += n;
 	}
 	h.type = XL_COMMIT; h.txn_id = ts; h.prev_lsn = 0;
 	if ((n = xl_enc_simple(p, sz - (size_t)(p - rec), &h)) < 0) {
-		free(rec); return 0;
+		free(rec); return XTC_E_INVAL;
 	}
 	p += n;
-	lsn = xs_wal_emit(rec, (size_t)(p - rec));
+	rc = xs_wal_emit(rec, (size_t)(p - rec), clsn);
 	free(rec);
-	return lsn;
+	return rc;
 }
 
 static int
@@ -3052,7 +3067,15 @@ xs_commit_ctx(xstore_ctx_t *cx)
 				(void)xs_wrec_ensure(cx, &cx->wbuf[i]);
 		ts = hlc_tick();     /* one timestamp for the txn */
 		if (g_xwal != NULL) {
-			uint64_t clsn = xs_wal_log(cx, ts);   /* durable BEFORE apply */
+			uint64_t clsn = 0;
+			/* Durable BEFORE apply.  If the log write fails the
+			 * transaction is not durable: apply nothing, abort it, and
+			 * report the error (the client must not be told it
+			 * committed). */
+			if (xs_wal_log(cx, ts, &clsn) != XTC_OK) {
+				(void)xs_rollback_ctx(cx);
+				return SX_ERROR;
+			}
 			/* Stamp the commit LSN onto every leaf these inserts dirty,
 			 * so a physiological leaf after-image (xs_leaf_page) carries a
 			 * monotonic page LSN recovery can gate the apply by.  Without
