@@ -352,7 +352,12 @@ batch_flush(wal_t *w)
 		ack.txn_id = w->pend[i].txn_id;
 		ack.lsn = status == XTC_OK ? w->pend[i].lsn : 0;
 		ack.status = status;
-		(void)xtc_send(w->pend[i].reply_to, &ack, sizeof ack);
+		/* A full mailbox (XTC_E_AGAIN, soft backpressure) must not drop
+		 * the ack: the committer is parked on it forever otherwise.
+		 * Any other error means the committer is gone. */
+		while (xtc_send(w->pend[i].reply_to, &ack, sizeof ack) ==
+		    XTC_E_AGAIN)
+			(void)xtc_proc_sleep(10LL * 1000);
 	}
 	w->blen = 0;
 	w->pcount = 0;
@@ -480,7 +485,10 @@ wal_commit(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
 	if (len)
 		memcpy(msg->data, record, len);
 
-	rc = xtc_send(w->writer_pid, msg, msz);
+	/* The writer's mailbox is a soft cap: retry on XTC_E_AGAIN rather
+	 * than fail the commit for backpressure. */
+	while ((rc = xtc_send(w->writer_pid, msg, msz)) == XTC_E_AGAIN)
+		(void)xtc_proc_sleep(10LL * 1000);
 	free(msg);
 	if (rc != XTC_OK)
 		return rc;
@@ -787,7 +795,8 @@ wal_writer_stop(wal_t *w)
 
 	if (w == NULL)
 		return XTC_E_INVAL;
-	rc = xtc_send(w->writer_pid, &kind, sizeof kind);
+	while ((rc = xtc_send(w->writer_pid, &kind, sizeof kind)) == XTC_E_AGAIN)
+		(void)xtc_proc_sleep(10LL * 1000);   /* soft cap: never drop STOP */
 	/* Wait for the writer to drain its batch and exit before a caller
 	 * (wal_close) frees the log out from under it. */
 	for (i = 0; i < 100000 &&
