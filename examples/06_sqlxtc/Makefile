@@ -140,7 +140,7 @@ clean:
 	rm -f test_redo_page
 	rm -f test_inplace_redo
 	rm -f test_fuzzy_checkpoint
-	rm -f test_clean_restart
+	rm -f test_clean_restart test_dw_fail
 	rm -f test_steal
 	rm -f test_steal_page
 	rm -f test_steal_leaf
@@ -166,7 +166,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-quack-range test-sql-parse test-admin test-wal test-wal-recover test-wal-fail test-torn-smo test-wal-compact test-wal-lsn-monotone test-shard test-mvcc test-xstore test-xstore-scan test-index test-savepoint test-isolation test-ww-conflict test-native-txn test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-fuzzy-checkpoint test-bufmgr-mt test-scan-resist test-sweep-bound test-persist test-cursor-resume test-clean-restart test-steal test-steal-torn test-steal-page test-steal-leaf test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
+test: $(TARGET) test-quack test-quack-range test-sql-parse test-admin test-wal test-wal-recover test-wal-fail test-torn-smo test-wal-compact test-wal-lsn-monotone test-shard test-mvcc test-xstore test-xstore-scan test-index test-savepoint test-isolation test-ww-conflict test-native-txn test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-fuzzy-checkpoint test-bufmgr-mt test-scan-resist test-sweep-bound test-persist test-cursor-resume test-clean-restart test-dw-fail test-steal test-steal-torn test-steal-page test-steal-leaf test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -505,6 +505,14 @@ test_publication_pin: test_publication_pin.c bufmgr.c bufmgr.h
 
 test-publication-pin: test_publication_pin
 	./test_publication_pin
+
+# Double-write slot + clean-shutdown I/O failures propagate (bufmgr.c is
+# #included for its internals; the engine minus bufmgr.o is linked).
+test_dw_fail: test_dw_fail.c bufmgr.c bufmgr.h engine.o db.o quack.o xstore.o xlog.o wal.o btree.o btnode.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ test_dw_fail.c engine.o db.o quack.o xstore.o xlog.o wal.o btree.o btnode.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
+
+test-dw-fail: test_dw_fail
+	./test_dw_fail
 
 test_flush_pin: test_flush_pin.c bufmgr.c bufmgr.h
 	$(CC) $(CFLAGS) -o $@ test_flush_pin.c $(LDFLAGS)

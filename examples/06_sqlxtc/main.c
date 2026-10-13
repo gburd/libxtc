@@ -362,7 +362,7 @@ main(int argc, char **argv)
 	xtc_tcp_opts_t tcp_opts = XTC_TCP_OPTS_DEFAULT;
 	db_opts_t db_opts = DB_OPTS_DEFAULT;
 	xtc_pid_t metrics_pid;
-	int rc;
+	int rc, exit_rc = 0;
 
 	/* Parsing and execution have deeper stacks than a small actor,
 	 * particularly with sanitizer instrumentation. Set this before
@@ -523,11 +523,15 @@ main(int argc, char **argv)
 	xtc_log_drain(log);
 	close(srv->listen_fd);
 	db_destroy(srv->db);
-	if (cfg.storage_path != NULL)
-		sx_storage_close();        /* checkpoint + stop procs + close */
+	if (cfg.storage_path != NULL &&
+	    sx_storage_close() != SX_OK) {   /* checkpoint + stop procs + close */
+		fprintf(stderr, "sqlxtc: shutdown flush failed; the store was "
+		    "NOT marked clean (the next start replays the log)\n");
+		exit_rc = 1;
+	}
 	xtc_app_destroy(srv->app);   /* joins the supervisor + frees the exec */
 	free(srv->res);
 	xtc_log_destroy(log);
 	(void)sx_shutdown();
-	return 0;
+	return exit_rc;
 }

@@ -333,8 +333,14 @@ sx_storage_open(const char *path, unsigned int n_frames)
 	if (trusted) {
 		xstore_set_clock(clock);          /* restore the commit clock */
 		bt_set_meta(g_xbt, 0, clock);     /* mark dirty: a crash now rebuilds */
-		bt_write_super(g_xbt);
-		(void)bm_sync(g_xbm);
+		/* The cleared flag MUST be durable before any change: otherwise
+		 * a crash leaves a "clean" base that misses later commits and
+		 * the next open would skip the log replay that holds them. */
+		if (bt_write_super(g_xbt) != XTC_OK || bm_sync(g_xbm) != XTC_OK) {
+			bt_close(g_xbt); g_xbt = NULL;
+			bm_destroy(g_xbm); g_xbm = NULL;
+			return SX_ERROR;
+		}
 	} else {
 		/* Fresh page file; rebuild the tree from the (bounded) log. */
 		o.reopen = 0;
@@ -434,9 +440,11 @@ sx_storage_quiesce(void)
 	g_xrunning = 0;
 }
 
-void
+int
 sx_storage_close(void)
 {
+	int ok = 1;
+
 	if (g_xrunning) {
 		if (g_xwal != NULL) wal_writer_stop(g_xwal);
 		bm_trickler_stop(g_xbm);
@@ -448,25 +456,33 @@ sx_storage_close(void)
 	 * open (the write-ahead hook reads it), compact the log so a future
 	 * crash replays a bounded log, then mark the base clean and fsync
 	 * the marker so the next open can trust the base and skip recovery.
-	 * A crash anywhere before the clean marker is durable leaves the
-	 * flag unset, so recovery rebuilds -- always safe.
+	 * The marker is written ONLY if every step succeeded: a page that
+	 * did not reach the file, a failed sync, a failed compaction, or a
+	 * log that fail-stopped earlier all leave the flag unset, so the next
+	 * open rebuilds from the (complete) log -- always safe.  A crash
+	 * anywhere before the marker is durable has the same effect.
 	 */
 	if (g_xbt != NULL && g_xbm != NULL) {
-		(void)bm_checkpoint(g_xbm);        /* flush all dirty pages + fsync */
-		if (g_xwal != NULL)
-			(void)xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal,
-			    g_xwal_path);
+		if (g_xwal != NULL && wal_failed(g_xwal))
+			ok = 0;                    /* do not trust anything after an I/O error */
+		if (ok && bm_checkpoint(g_xbm) != XTC_OK)   /* flush all dirty pages + fsync */
+			ok = 0;
+		if (ok && g_xwal != NULL &&
+		    xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal,
+		    g_xwal_path) != XTC_OK)
+			ok = 0;
 		bm_set_wal_flush(g_xbm, NULL, NULL);   /* drop the hook before closing the log */
 	}
 	xstore_set_wal(NULL);
 	if (g_xwal != NULL) { wal_close(g_xwal); g_xwal = NULL; }
-	if (g_xbt != NULL && g_xbm != NULL) {
+	if (ok && g_xbt != NULL && g_xbm != NULL) {
 		bt_set_meta(g_xbt, 1, xstore_clock());  /* base is consistent up to here */
-		bt_write_super(g_xbt);
-		(void)bm_sync(g_xbm);              /* make the clean marker durable */
+		if (bt_write_super(g_xbt) != XTC_OK || bm_sync(g_xbm) != XTC_OK)
+			ok = 0;                    /* marker may be torn: next open rebuilds */
 	}
 	if (g_xbt != NULL) { bt_close(g_xbt); g_xbt = NULL; }
 	if (g_xbm != NULL) { bm_destroy(g_xbm); g_xbm = NULL; }
+	return ok ? SX_OK : SX_ERROR;
 }
 
 void

@@ -304,6 +304,11 @@ void bm_trickler_stop(bm_t *bm);
 int  bm_read_super(bm_t *bm, void *buf, size_t len);
 int  bm_write_super(bm_t *bm, const void *buf, size_t len);
 int  bm_sync(bm_t *bm);
+/* Flush every dirty page and fdatasync.  XTC_OK only if every dirty
+ * page reached the file (through the double-write slot when enabled);
+ * XTC_E_AGAIN if some frame was skipped (pinned/latched) or its write
+ * failed, XTC_E_IO if the sync failed.  bm_write_super / bm_sync return
+ * XTC_E_IO on an I/O failure. */
 int  bm_checkpoint(bm_t *bm);
 
 /* Observability snapshot. */
