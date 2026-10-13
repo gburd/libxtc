@@ -1060,7 +1060,74 @@ test_kill_prompt(const MunitParameter p[], void *d)
 }
 #endif /* XTC_HAVE_PROC_KILL_WAKE */
 
+/*
+ * A recursive amutex held by a proc that exits is not re-entrant for
+ * the next proc on the loop.  The owner was the task pointer alone, and
+ * a finished proc's task struct is recycled for the next proc, so that
+ * proc "re-entered" a lock it never took.  Proc A takes the lock and
+ * exits holding it; each later proc B must time out.
+ */
+static xtc_amutex_t *g_ra_m;
+static int g_ra_got, g_ra_runs, g_ra_held;
+
+static void
+ra_holder(void *a)
+{
+	(void)a;
+	if (xtc_amutex_lock(g_ra_m, -1) == XTC_OK) g_ra_held = 1;
+}
+
+static void
+ra_other(void *a)
+{
+	(void)a;
+	g_ra_runs++;
+	if (xtc_amutex_lock(g_ra_m, 1000000) == XTC_OK) {
+		g_ra_got++;
+		(void)xtc_amutex_unlock(g_ra_m);
+	}
+}
+
+static void
+ra_driver(void *a)
+{
+	xtc_loop_t *loop = a;
+	int i;
+	if (xtc_proc_spawn(loop, ra_holder, NULL, NULL, NULL) != XTC_OK)
+		return;
+	for (i = 0; i < 10; i++) {
+		/* The previous proc has finished: its task struct is free. */
+		(void)xtc_proc_sleep(3 * 1000 * 1000);
+		if (xtc_proc_spawn(loop, ra_other, NULL, NULL, NULL) != XTC_OK)
+			return;
+	}
+	(void)xtc_proc_sleep(3 * 1000 * 1000);
+}
+
+static MunitResult
+test_amutex_recursive_exit(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	(void)p; (void)d;
+	g_ra_got = g_ra_runs = g_ra_held = 0;
+	munit_assert_int(xtc_amutex_create_ex(&g_ra_m, XTC_AMUTEX_RECURSIVE),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, ra_driver, loop, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_assert_int(g_ra_held, ==, 1);
+	munit_assert_int(g_ra_runs, ==, 10);
+	munit_assert_int(g_ra_got, ==, 0);
+	/* Still held by the dead proc: off a loop, try_lock must refuse. */
+	munit_assert_int(xtc_amutex_try_lock(g_ra_m), ==, XTC_E_AGAIN);
+	xtc_amutex_destroy(g_ra_m);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
+	{ "/amutex_recursive_exit", test_amutex_recursive_exit, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/notify_stored",       test_notify_stored,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/notify_cross_thread", test_notify_cross_thread, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/sem_basic",           test_sem_basic,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

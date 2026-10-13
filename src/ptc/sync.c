@@ -636,6 +636,7 @@ struct xtc_amutex {
 	struct amutex_owner {
 		int       kind;          /* 0 none, 1 fiber, 2 thread */
 		void     *task;          /* fiber identity (kind 1) */
+		xtc_pid_t pid;           /* its proc, or XTC_PID_NONE (kind 1) */
 		pthread_t thr;           /* thread identity (kind 2) */
 	}                     owner;     /* valid while held; under lock */
 	int                   count;     /* recursion depth */
@@ -668,14 +669,18 @@ amutex_release_locked(xtc_amutex_t *m)
 
 /* Identity of the current execution context: the running fiber's task
  * on a loop, else the OS thread.  Tracked by FIBER on a loop so two
- * fibers sharing one OS thread are distinct owners. */
+ * fibers sharing one OS thread are distinct owners.  A finished proc's
+ * task struct is recycled for the next proc on its loop, so the task
+ * pointer alone would let that proc re-enter a lock the dead one still
+ * holds; the proc's pid (generation-tagged) tells them apart. */
 static struct amutex_owner
 amutex_self_owner(void)
 {
 	struct amutex_owner o;
 	xtc_task_t *t = __xtc_current_task();
 	o.task = NULL;
-	if (t != NULL) { o.kind = 1; o.task = t; }
+	o.pid = XTC_PID_NONE;
+	if (t != NULL) { o.kind = 1; o.task = t; o.pid = xtc_self(); }
 	else           { o.kind = 2; o.thr = pthread_self(); }
 	return o;
 }
@@ -684,7 +689,8 @@ static int
 amutex_owner_eq(const struct amutex_owner *a, const struct amutex_owner *b)
 {
 	if (a->kind != b->kind || a->kind == 0) return 0;
-	if (a->kind == 1) return a->task == b->task;
+	if (a->kind == 1)
+		return a->task == b->task && xtc_pid_eq(a->pid, b->pid);
 	return pthread_equal(a->thr, b->thr);
 }
 
