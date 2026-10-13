@@ -214,12 +214,19 @@ test_reclaim_correct(const MunitParameter p[], void *d)
 
 #define LIFE_LIVE   256
 
-/* ASan's allocator quarantine (256 MB by default) and its own mappings
- * show up in RSS and /proc/self/maps.  Under ASan, check mappings with a
- * bound that still catches the regression (two per HISTORICAL spawn,
- * i.e. +200000) and skip the RSS bound; the release build checks both
- * tightly. */
-#ifdef XTC_UNDER_ASAN
+/* ASan's allocator quarantine (256 MB by default) and TSan's per-fiber
+ * state show up in RSS and /proc/self/maps.  Under a sanitizer, check
+ * mappings with a bound that still catches the regression (two per
+ * HISTORICAL spawn, i.e. +200000) and skip the RSS bound; the release
+ * build checks both tightly. */
+#if defined(__SANITIZE_THREAD__)
+# define XTC_UNDER_TSAN 1
+#elif defined(__has_feature)
+# if __has_feature(thread_sanitizer)
+#  define XTC_UNDER_TSAN 1
+# endif
+#endif
+#if defined(XTC_UNDER_ASAN) || defined(XTC_UNDER_TSAN)
 # define LIFE_MAPS_SLACK  8192
 # define LIFE_CHECK_RSS   0
 #else
