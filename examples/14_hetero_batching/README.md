@@ -35,13 +35,18 @@ and the per-group backend selection differ:
   This is what `--self-test` uses.
 - **opencl** (`XTC_WITH_OPENCL=1`): real GPU. `submit()` enqueues one decode
   NDRange per ready request and bridges the resulting `cl_event` to the
-  engine's FUTURE exec kind via a detached worker thread that
-  `clWaitForEvents` then `xtc_promise_set`.
+  engine's FUTURE exec kind through the group's one long-lived waiter
+  thread, which `clWaitForEvents`, releases the event, then
+  `xtc_promise_set`. (A thread per op costs ~50-100 us per op; a persistent
+  waiter ~13-19 us. Use the FENCE kind where the runtime exports a fence
+  fd.)
 - **levelzero** (`XTC_WITH_LEVELZERO=1`): real NPU. `submit()` appends a small
   Level Zero workload to the NPU command list, executes it on the NPU command
-  queue, and signals a `ze_event`; a detached worker thread does
+  queue, and signals a `ze_event`; the group's waiter thread does
   `zeEventHostSynchronize` then `xtc_promise_set` -- the **same FUTURE bridge**
-  as OpenCL.
+  as OpenCL. Each request stages through its own region of the host-visible
+  buffer, and `collect()` copies that region back only after the event fired,
+  so the data really made the round trip.
 
 `--hetero` wires group 0 -> **opencl (GPU)** and group 1 -> **levelzero (NPU)**.
 
@@ -138,7 +143,10 @@ and asserts:
 - checksum == an independent scalar reference,
 - **both groups made progress** (reqs_done > 0 on each),
 - variable-length requests coexist (shallow = 1 iteration, deep > 1),
-- continuous occupancy > static occupancy,
+- static mode (same queue depth of 8, cohort refill) is equally correct --
+  it reports both modes' occupancy (fake, 48 requests: continuous 58 ops at
+  3.66 members/op, static 71 ops at 2.99) but does not assert one beats the
+  other: that is an op count, not a speed claim,
 - SYNC and FUTURE exec kinds both correct.
 
 It passes with no GPU/NPU present and is byte-identical across runs.
@@ -152,8 +160,13 @@ It passes with no GPU/NPU present and is byte-identical across runs.
   The opencl backend therefore uses `CL_MEM_USE_HOST_PTR` and reads the shared
   host pointer directly after `clFinish` (the Arc iGPU is UMA, so the host
   array is coherent) -- no read-buffer, no map, so no built-in copy kernel.
-- **NPU event pool.** Each NPU op allocates a `ze_event`, destroyed
-  asynchronously by its waiter thread. The event pool is sized well above the
-  group's live capacity and the event index rotates, so a free slot is always
-  available before an older event's async destroy lands (a 1-slot pool reports
-  spurious device errors under churn).
+- **NPU event pool.** Each NPU op creates a `ze_event` at a rotating pool
+  index; the waiter destroys it after the completion and only then marks the
+  index free, so an index is never reused while its previous event lives (if
+  it ever were, the op fails with `XTC_E_AGAIN` instead of a device error).
+
+The OpenCL and Level Zero backends were changed after their last hardware
+run (persistent waiter, per-request NPU staging regions, event-index
+tracking, no polling feeder); they are compile-checked but have NOT been
+re-run on the Lunar Lake GPU/NPU since. The expected output above is from
+the earlier version.
