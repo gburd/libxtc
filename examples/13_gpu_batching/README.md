@@ -22,9 +22,14 @@ differs:
   or SYNC. This is what `--self-test` uses.
 - **opencl** (`XTC_WITH_OPENCL=1`): real GPU. `submit()` sets per-tile kernel
   args, enqueues one NDRange per tile, and bridges the resulting `cl_event` to
-  the engine's FUTURE exec kind via a detached worker thread that
-  `clWaitForEvents` then `xtc_promise_set`. `collect()` reads back each tile's
-  buffer region and decides DONE (converged) vs CONTINUE (needs more passes).
+  the engine's FUTURE exec kind through ONE long-lived waiter thread per
+  device: `submit()` hands it the event and a promise, it `clWaitForEvents`,
+  releases the event, and calls `xtc_promise_set`. `collect()` reads back each
+  tile's buffer region and decides DONE (converged) vs CONTINUE (needs more
+  passes). This is the pattern to copy: a thread created per device op costs
+  about 50-100 us per op (measured ~17.6k ops/s ceiling), a persistent waiter
+  about 13-19 us. If your runtime can export a pollable fence fd, use the
+  FENCE exec kind instead and no waiter thread is needed at all.
 - FENCE kind is not used: OpenCL does not portably export a sync_file fd, so
   FUTURE is the portable path (the hardware note prescribes this).
 
@@ -46,8 +51,9 @@ make XTC_WITH_OPENCL=1 XTC_BUILD=/abs/path/to/configured-build
 ./mandel --backend=opencl --devices=2 --mode=continuous
 ```
 
-`XTC_BUILD` defaults to `../../.agent/final-native`. libxtc and `make check`
-have NO OpenCL dependency; only the opencl backend links `-lOpenCL`.
+`XTC_BUILD` defaults to `../../build_unix` (an in-tree configured build).
+libxtc and `make check` have NO OpenCL dependency; only the opencl backend
+links `-lOpenCL`.
 
 On a multi-GPU box (e.g. two AMD R9 280X via rusticl):
 
@@ -74,10 +80,19 @@ feeds both concurrently -- both GPUs busy at once.
 - **Variable-length tiles:** shallow tiles (outside the set) converge in one
   pass and DONE early; deep tiles (near the boundary) need many passes and stay
   in the batch. The self-test asserts shallow=1 pass, deepest > 1.
-- **Continuous vs static occupancy:** continuous refills a freed slot
-  immediately, so the device vector stays fuller (higher members-per-op) and
-  needs fewer device ops for the same tiles. The self-test asserts
-  continuous occupancy > static.
+- **Continuous vs static refill:** both modes keep up to 8 tiles admitted
+  and send at most 4 per device op, so the device sees the same queue depth.
+  Continuous refills each freed slot at once; static waits for its whole
+  cohort of 8 to finish before admitting the next 8, so a deep tile leaves
+  its cohort's freed slots empty. With the fake backend at 512x512, 8x8
+  tiles, maxiter 512 this gives 121 device ops (4.00 members/op) for
+  continuous and 166 (2.92 members/op) for static. That is an op count,
+  not a speed-up: on the tested GPUs neither mode was faster in wall time at
+  this size (1 GPU: 0.86 s both), and running on 2 GPUs is faster because
+  it uses two devices, not because of continuous batching. The self-test
+  checks both modes are correct; it does not assert one beats the other.
+- **The feeder does not poll:** it sleeps on an `xtc_notify` that
+  `complete()` signals, and wakes only when a slot has freed.
 - **Exactly-once completion:** every accepted tile completes exactly once; the
   `complete` callback asserts it.
 - **Checksum:** an exact integer sum of per-pixel escape-iteration counts. The
@@ -88,6 +103,10 @@ feeds both concurrently -- both GPUs busy at once.
 ## Self-test (no GPU)
 
 `./mandel --self-test` runs the fake backend deterministically and asserts all
-of the above (exactly-once, checksum == reference, variable passes, continuous
-> static occupancy, SYNC and FUTURE both correct). It passes with no GPU
-present and is byte-identical across runs.
+of the above (exactly-once, checksum == reference, variable passes, static
+mode equally correct, SYNC and FUTURE both correct) and prints both modes'
+occupancy. It passes with no GPU present and is byte-identical across runs.
+
+The OpenCL backend was changed after its last hardware run (persistent
+waiter thread, event release, no half-applied state on an enqueue failure);
+it is compile-checked but has not been re-run on a GPU since.
