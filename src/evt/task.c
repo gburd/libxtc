@@ -36,13 +36,34 @@
  * loop_fini.
  */
 
+/* The free list a struct of the given pinned-ness lives on.  Pinned and
+ * migratable structs are kept apart so a stale waker left by a migratable
+ * incarnation (which may name a thief loop) can never re-queue a pinned
+ * task on the wrong loop; see __xtc_task_reclaim. */
+static xtc_task_t **
+__task_freelist(xtc_loop_t *loop, int pinned)
+{
+	return pinned ? &loop->task_free : &loop->task_free_mig;
+}
+
+/* Push a completed task struct onto its loop's free list. */
+static void
+__task_freelist_push(xtc_loop_t *loop, xtc_task_t *t)
+{
+	xtc_task_t **head = __task_freelist(loop, t->pinned);
+	t->q_next = *head;   /* reuse q_next as free-list link */
+	*head = t;
+	loop->task_free_n++;
+}
+
 /* Pop a recycled task struct from the loop's free list, or NULL. */
 static xtc_task_t *
-__task_freelist_pop(xtc_loop_t *loop)
+__task_freelist_pop(xtc_loop_t *loop, int pinned)
 {
-	xtc_task_t *t = loop->task_free;
+	xtc_task_t **head = __task_freelist(loop, pinned);
+	xtc_task_t *t = *head;
 	if (t != NULL) {
-		loop->task_free = t->q_next;
+		*head = t->q_next;
 		loop->task_free_n--;
 	}
 	return t;
@@ -52,15 +73,17 @@ __task_freelist_pop(xtc_loop_t *loop)
  * free list if available, else malloc.  recyclable marks a free-list-
  * eligible struct (recycle on completion). */
 static int
-__task_alloc(xtc_loop_t *loop, xtc_task_t **out)
+__task_alloc(xtc_loop_t *loop, int pinned, xtc_task_t **out)
 {
 	xtc_task_t *t = NULL;
 	int rc;
 	if (__xtc_current_loop == loop)      /* home thread owns the list */
-		t = __task_freelist_pop(loop);
+		t = __task_freelist_pop(loop, pinned);
 	if (t != NULL) {
+		int typestable = t->typestable;
 		memset(t, 0, sizeof *t);
 		t->recyclable = 1;
+		t->typestable = typestable;
 		*out = t;
 		return XTC_OK;
 	}
@@ -103,13 +126,127 @@ __xtc_task_free(xtc_task_t *t)
 		loop->all_tasks = t->all_next;
 	if (t->all_next != NULL)
 		t->all_next->all_prev = t->all_prev;
-	if (t->recyclable && loop != NULL &&
-	    loop->task_free_n < XTC_TASK_FREELIST_MAX) {
-		t->q_next = loop->task_free;   /* reuse q_next as free-list link */
-		loop->task_free = t;
-		loop->task_free_n++;
-	} else {
+	if (loop != NULL && (t->typestable || (t->recyclable &&
+	    loop->task_free_n < XTC_TASK_FREELIST_MAX)))
+		__task_freelist_push(loop, t);
+	else
 		__os_free(t);
+}
+
+/* --- lifetime (fix155): reclaim a finished proc fiber at DONE ---------
+ *
+ * A proc's coro task used to stay on its loop's all_tasks, with its fiber
+ * stack (two mappings: stack + guard) and coro struct, until
+ * xtc_loop_fini.  A server spawning one proc per connection therefore
+ * grew by ~6 KB RSS and two VMAs per connection EVER served, and on a
+ * stock kernel (vm.max_map_count 65530) every spawn failed after ~32K.
+ *
+ * The coro step marks a finished proc fiber (t->reclaim; a proc's task
+ * handle is never handed out, unlike xtc_async's out_task) and the loop's
+ * DONE handler calls __xtc_task_reclaim on the scheduler stack, after the
+ * switch back, so the dead fiber stack is no longer executing:
+ *
+ *   - its fiber stack, coro and any leftover park timer / fd registration
+ *     are released at once, on whichever loop it finished (all
+ *     thread-agnostic; the stack goes to this thread's bounded stack pool
+ *     or is unmapped);
+ *   - the task STRUCT goes back to its home loop: all_tasks and the free
+ *     lists are owned by the home loop's thread, so a task that finished
+ *     on a thief is handed back through the home loop's lock-free dead
+ *     stack and recycled when the home loop next steps (or at fini).
+ *
+ * Wakers hold a raw task pointer (xtc_waker_t is a frozen public
+ * {loop, task} pair, so there is no room for a generation), and a few
+ * can fire after the task finished (a wake racing a migrated fiber's
+ * exit).  So a reclaimed struct is never returned to the allocator while
+ * its loop lives: it stays on the loop's free list (bounded by the
+ * high-water count of live tasks) and is freed at xtc_loop_fini.  A late
+ * waker then lands on a valid task struct -- a no-op on a DONE task, at
+ * worst one spurious wake of the next incarnation, which every park site
+ * already tolerates (xtc_await re-parks until its target is done).  The
+ * free lists are split by pinned-ness so that spurious wake can never
+ * move a pinned task to a thief loop.
+ */
+
+/* Release what a finished task holds besides its struct.  Any thread. */
+static void
+__task_release_parts(xtc_task_t *t)
+{
+	extern int __xtc_io_defer_del_fd(xtc_io_t *, int);
+	xtc_io_t *io;
+	int fd;
+
+	/* A proc parks only through sites that disarm on resume, so these
+	 * are normally clear; release them anyway so a recycled struct never
+	 * inherits a timer or an fd tag naming it. */
+	__xtc_task_cancel_park_timer(t);
+	fd = atomic_exchange_explicit(&t->park_fd, -1, memory_order_acq_rel);
+	io = t->park_io;
+	t->park_io = NULL;
+	if (fd >= 0)
+		(void)__xtc_io_defer_del_fd(io != NULL ? io : t->loop->io, fd);
+	if (t->cleanup != NULL) {
+		t->cleanup(t->cleanup_arg);   /* fiber stack + coro */
+		t->cleanup = NULL;
+		t->cleanup_arg = NULL;
+	}
+}
+
+/* Unlink t from its home loop's all_tasks and keep the struct on the
+ * loop's free list.  Home loop thread only. */
+static void
+__task_recycle_home(xtc_loop_t *loop, xtc_task_t *t)
+{
+	if (t->all_prev != NULL)
+		t->all_prev->all_next = t->all_next;
+	else if (loop->all_tasks == t)
+		loop->all_tasks = t->all_next;
+	if (t->all_next != NULL)
+		t->all_next->all_prev = t->all_prev;
+	t->all_next = t->all_prev = NULL;
+	t->typestable = 1;
+	__task_freelist_push(loop, t);
+}
+
+/*
+ * Reclaim a finished task marked t->reclaim.  Called by `loop`'s DONE
+ * handler on the scheduler stack; `loop` is the loop it finished on.
+ */
+void
+__xtc_task_reclaim(xtc_loop_t *loop, xtc_task_t *t)
+{
+	xtc_loop_t *home = t->loop;
+	xtc_task_t *old;
+
+	__task_release_parts(t);
+	if (home == loop) {
+		__task_recycle_home(loop, t);
+		return;
+	}
+	/* Finished on a thief: hand the struct back to its home loop. */
+	old = atomic_load_explicit(&home->dead_head, memory_order_relaxed);
+	do {
+		t->dead_next = old;
+	} while (!atomic_compare_exchange_weak_explicit(&home->dead_head,
+	    &old, t, memory_order_release, memory_order_relaxed));
+}
+
+/* Recycle the tasks other loops handed back.  Owner thread only; called
+ * at the top of every loop step and by xtc_loop_fini. */
+void
+__xtc_task_reclaim_drain(xtc_loop_t *loop)
+{
+	xtc_task_t *t, *n;
+
+	if (atomic_load_explicit(&loop->dead_head,
+	    memory_order_relaxed) == NULL)
+		return;
+	t = atomic_exchange_explicit(&loop->dead_head, NULL,
+	    memory_order_acquire);
+	for (; t != NULL; t = n) {
+		n = t->dead_next;
+		t->dead_next = NULL;
+		__task_recycle_home(loop, t);
 	}
 }
 
@@ -149,7 +286,7 @@ __xtc_task_spawn_cleanup(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 			return rc;
 	}
 
-	if ((rc = __task_alloc(loop, &t)) != XTC_OK) {
+	if ((rc = __task_alloc(loop, pinned, &t)) != XTC_OK) {
 		if (loop->res != NULL)
 			xtc_res_release(loop->res, XTC_RES_TASKS, 1);
 		return rc;

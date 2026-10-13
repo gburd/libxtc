@@ -97,6 +97,7 @@
 #elif defined(__SANITIZE_ADDRESS__) || \
     __has_feature(address_sanitizer)
 #  include <sanitizer/common_interface_defs.h>
+#  include <sanitizer/asan_interface.h>   /* ASAN_UNPOISON_MEMORY_REGION */
 #  define XTC_FIBER_SWITCH_ANNOTATE 1
 #endif
 
@@ -293,6 +294,13 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 			(void)xtc_waker_wake(&w);
 			c->waiter = NULL;
 		}
+		/* lifetime: a finished PROC fiber is reclaimed by the loop's
+		 * DONE handler (task.c __xtc_task_reclaim).  Its task handle
+		 * was never handed out; an xtc_async task's was, so that one
+		 * stays until xtc_loop_fini.  c->proc is set by __proc_entry
+		 * before the body runs and never cleared. */
+		if (c->proc != NULL)
+			self->reclaim = 1;
 		return XTC_TASK_DONE;
 	}
 	/* Awaiting another coroutine: stay parked; the awaitee fires our
@@ -328,6 +336,13 @@ __coro_destroy(struct xtc_coro *c)
 	if (c->stack != NULL) {
 		long pg = sysconf(_SC_PAGESIZE);
 		size_t total = c->stack_sz + (pg > 0 ? (size_t)pg : 4096);
+#if defined(XTC_FIBER_SWITCH_ANNOTATE)
+		/* A finished fiber leaves its last frames' redzones poisoned
+		 * (it never returned; a kill longjmp skipped more).  Clear them
+		 * so the next fiber on this stack starts clean. */
+		ASAN_UNPOISON_MEMORY_REGION((char *)c->stack +
+		    (total - c->stack_sz), c->stack_sz);
+#endif
 		/* Recycle the stack (guard page intact) into the per-thread
 		 * pool so the next spawn skips mmap+mprotect; munmap only if
 		 * the pool is full or the size no longer matches. */
@@ -473,11 +488,15 @@ xtc_await(xtc_task_t *t, intptr_t *result)
 
 	/* Inside a coroutine: register as the target's waiter, set the
 	 * "stay parked" hint, and jump back to the scheduler. */
-	target->waiter = me->self;
-	me->self->q_next = NULL;
-	me->_parked_on = target;
-	{
-		void *pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
+	/* Re-park until the target is done: any other wake (a reclaimed
+	 * task's late waker landing on this reused task, a kill wake) is
+	 * spurious here.  See coro_uctx.c. */
+	while (!target->done) {
+		void *pctx;
+		target->waiter = me->self;
+		me->self->q_next = NULL;
+		me->_parked_on = target;
+		pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
 		__san_switch_to(&me->san_fake_stack, __san_sched_bottom,
 		    __san_sched_size);
 		__tsan_switch_out();
@@ -485,7 +504,6 @@ xtc_await(xtc_task_t *t, intptr_t *result)
 		__san_switch_done(me->san_fake_stack);   /* resumed on our stack */
 		if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
 	}
-	/* Resumed: target->done is now true. */
 	if (result) *result = target->result;
 	return XTC_OK;
 }

@@ -190,6 +190,18 @@ struct xtc_task {
 	 * DONE before it runs, so one link field is enough and the inbox
 	 * needs no allocation and cannot fail. */
 	struct xtc_task *inbox_next;
+
+	/* --- lifetime (fix155): reclaim at DONE ---
+	 * reclaim: set by the coro step when a PROC fiber finishes (a proc's
+	 * task handle is never handed out), so the loop releases its stack,
+	 * coro and task at DONE instead of at loop_fini.  dead_next links a
+	 * task that finished on a thief onto its home loop's dead stack.
+	 * Reclaimed task structs are never returned to the allocator while
+	 * the loop lives (see __xtc_task_reclaim): a late waker always lands
+	 * on a valid task. */
+	int              reclaim;
+	int              typestable;   /* once reclaimed: never freed before fini */
+	struct xtc_task *dead_next;
 };
 
 /*
@@ -464,6 +476,15 @@ struct xtc_loop {
 	pthread_t  owner_tid;
 	int        owner_set;
 #endif
+
+	/* --- lifetime (fix155): reclaimed-task bookkeeping ---
+	 * dead_head: lock-free MPSC stack of this loop's tasks that reached
+	 * DONE on another loop (pushed by the thief, drained by this loop's
+	 * owner).  task_free_mig: the free list for reclaimed MIGRATABLE task
+	 * structs, kept apart from task_free (pinned) so a stale waker naming
+	 * a thief loop can never re-queue a pinned task there. */
+	_Atomic(struct xtc_task *) dead_head;
+	struct xtc_task           *task_free_mig;
 };
 
 #if defined(XTC_DIAGNOSTIC)
@@ -520,6 +541,9 @@ int  __xtc_loop_class_create(xtc_loop_t *loop, int shares,
  * never work-stolen); unpinned tasks may migrate via the deque. */
 int  __xtc_task_spawn_ex(xtc_loop_t *loop, xtc_task_fn fn, void *user,
                          int pinned, xtc_task_t **out_task);
+/* lifetime (fix155): reclaim a finished proc fiber (task.c). */
+void __xtc_task_reclaim(xtc_loop_t *loop, xtc_task_t *t);
+void __xtc_task_reclaim_drain(xtc_loop_t *loop);
 int  __xtc_task_spawn_cleanup(xtc_loop_t *loop, xtc_task_fn fn, void *user,
          int pinned, void (*cleanup)(void *), void *cleanup_arg,
          xtc_task_t **out_task);

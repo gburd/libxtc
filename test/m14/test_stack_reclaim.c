@@ -199,11 +199,236 @@ test_reclaim_correct(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+
+/* ---- B3: completed proc fibers are reclaimed before loop teardown ----
+ *
+ * Every proc used to keep its fiber stack (two VMAs: stack + guard) and
+ * its coro until xtc_loop_fini, so a server spawning one proc per
+ * connection grew without bound and, on a stock kernel
+ * (vm.max_map_count 65530), failed every spawn after ~32K lifetime
+ * spawns.  These cases spawn many short-lived procs with a bounded number
+ * live and assert that address-space mappings and RSS track the LIVE
+ * count, not the history.  Linux only (they read /proc/self). */
+#if defined(__linux__)
+#include <stdio.h>
+
+#define LIFE_LIVE   256
+
+static long
+life_status_kb(const char *key)
+{
+	FILE *f = fopen("/proc/self/status", "r");
+	char line[256];
+	long v = -1;
+	size_t kl = strlen(key);
+	if (f == NULL) return -1;
+	while (fgets(line, sizeof line, f) != NULL)
+		if (strncmp(line, key, kl) == 0) {
+			v = atol(line + kl);
+			break;
+		}
+	fclose(f);
+	return v;
+}
+
+static long
+life_maps(void)
+{
+	FILE *f = fopen("/proc/self/maps", "r");
+	long n = 0;
+	int c;
+	if (f == NULL) return -1;
+	while ((c = fgetc(f)) != EOF)
+		n += (c == '\n');
+	fclose(f);
+	return n;
+}
+
+static long          life_n;          /* procs to spawn in total */
+static atomic_long   life_live;       /* spawned and not yet exited */
+static atomic_long   life_started;
+static atomic_long   life_exited;
+static long          life_spawn_fail; /* first failing index, or -1 */
+static int           life_mode;       /* 0 return, 1 exit_self,
+                                       * 2 killed parked, 3 killed running */
+static long          life_maps_peak, life_rss_peak;
+
+/* Runs on every exit path: return, xtc_exit_self, and a kill unwind. */
+static void
+life_on_exit(void *arg)
+{
+	(void)arg;
+	atomic_fetch_sub(&life_live, 1);
+	atomic_fetch_add(&life_exited, 1);
+}
+
+static void
+life_child(void *arg)
+{
+	int i;
+	(void)arg;
+	(void)xtc_proc_at_exit(life_on_exit, NULL);
+	atomic_fetch_add(&life_started, 1);
+	switch (life_mode) {
+	case 1:
+		xtc_yield();
+		(void)xtc_exit_self(3);
+		break;
+	case 2:
+		(void)xtc_proc_sleep((int64_t)60 * 1000000000);
+		break;
+	case 3:
+		for (i = 0; i < 1000000; i++)
+			xtc_yield();
+		break;
+	default:
+		xtc_yield();
+		break;
+	}
+}
+
+static void
+life_sample(void)
+{
+	long m = life_maps(), r = life_status_kb("VmRSS:");
+	if (m > life_maps_peak) life_maps_peak = m;
+	if (r > life_rss_peak) life_rss_peak = r;
+}
+
+static void
+life_spawner(void *arg)
+{
+	xtc_loop_t *l = arg;
+	xtc_pid_t pids[LIFE_LIVE];
+	long i = 0;
+	int k, j;
+
+	while (i < life_n) {
+		if (life_mode < 2) {
+			/* Steady state: keep up to LIFE_LIVE alive. */
+			while (atomic_load(&life_live) >= LIFE_LIVE)
+				xtc_yield();
+			atomic_fetch_add(&life_live, 1);
+			if (xtc_proc_spawn(l, life_child, NULL, NULL,
+			    NULL) != XTC_OK) {
+				atomic_fetch_sub(&life_live, 1);
+				life_spawn_fail = i;
+				return;
+			}
+			if ((i & 1023) == 0)
+				life_sample();
+			i++;
+			continue;
+		}
+		/* Kill modes: a batch of LIFE_LIVE parked (2) or runnable (3)
+		 * procs, all started, then all killed. */
+		for (k = 0; k < LIFE_LIVE && i < life_n; k++, i++) {
+			atomic_fetch_add(&life_live, 1);
+			if (xtc_proc_spawn(l, life_child, NULL, NULL,
+			    &pids[k]) != XTC_OK) {
+				atomic_fetch_sub(&life_live, 1);
+				life_spawn_fail = i;
+				return;
+			}
+		}
+		while (atomic_load(&life_started) < i)
+			xtc_yield();
+		life_sample();
+		for (j = 0; j < k; j++)
+			(void)xtc_exit_pid(pids[j], 9);
+		while (atomic_load(&life_exited) < i)
+			xtc_yield();
+	}
+}
+
+static MunitResult
+life_run(long n, int mode)
+{
+	xtc_loop_t *l = NULL;
+	long m0, r0, m1, r1;
+	long maps_grow, rss_grow;
+
+	life_n = n;
+	life_mode = mode;
+	life_spawn_fail = -1;
+	atomic_store(&life_live, 0);
+	atomic_store(&life_started, 0);
+	atomic_store(&life_exited, 0);
+
+	munit_assert_int(xtc_loop_init(&l), ==, XTC_OK);
+	m0 = life_maps();
+	r0 = life_status_kb("VmRSS:");
+	life_maps_peak = m0;
+	life_rss_peak = r0;
+	munit_assert_int(xtc_proc_spawn(l, life_spawner, l, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(l), ==, XTC_OK);
+	life_sample();
+	m1 = life_maps();
+	r1 = life_status_kb("VmRSS:");
+	maps_grow = life_maps_peak - m0;
+	rss_grow = life_rss_peak - r0;
+	/* stdout, so the numbers show on a passing run too. */
+	printf("  mode %d: %ld spawned, %ld exited, maps +%ld (peak), "
+	    "rss +%ld kB (peak); at end maps +%ld rss +%ld kB\n",
+	    mode, n, (long)atomic_load(&life_exited), maps_grow, rss_grow,
+	    m1 - m0, r1 - r0);
+	fflush(stdout);
+	(void)xtc_loop_fini(l);
+
+	munit_assert_long(life_spawn_fail, ==, -1);
+	munit_assert_long(atomic_load(&life_exited), ==, n);
+	/* Two VMAs per live fiber stack, plus the bounded stack pool and
+	 * allocator slack -- not two per historical spawn. */
+	munit_assert_long(maps_grow, <, 2 * LIFE_LIVE + 64);
+	munit_assert_long(rss_grow, <, 32 * 1024);
+	return MUNIT_OK;
+}
+
+static MunitResult
+test_reclaim_spawn_exit(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return life_run(100000, 0);
+}
+
+static MunitResult
+test_reclaim_exit_self(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return life_run(100000, 1);
+}
+
+static MunitResult
+test_reclaim_kill_parked(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return life_run(100000, 2);
+}
+
+static MunitResult
+test_reclaim_kill_running(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return life_run(100000, 3);
+}
+#endif /* __linux__ */
+
 static MunitTest tests[] = {
 	{ "/off_by_default", test_off_by_default, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reclaim_correct", test_reclaim_correct, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
+#if defined(__linux__)
+	{ "/spawn_exit_100k", test_reclaim_spawn_exit, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/exit_self_100k", test_reclaim_exit_self, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/kill_parked_100k", test_reclaim_kill_parked, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/kill_running_100k", test_reclaim_kill_running, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+#endif
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 
