@@ -46,6 +46,7 @@ struct xtc_loop;                 /* fwd: background storage procs run here */
 #define SX_MISUSE   21     /* API misuse (NULL stmt, out-of-range bind) */
 #define SX_NOMEM     7     /* out of memory */
 #define SX_BUSY      5     /* serialization conflict / contention */
+#define SX_CONSTRAINT 19   /* unique / primary-key violation */
 #define SX_ROW     100
 #define SX_DONE    101
 
