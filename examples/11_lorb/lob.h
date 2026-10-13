@@ -93,6 +93,9 @@ typedef struct lob_book {
 	xtc_slab_t  *order_slab;
 	xtc_slab_t  *limit_slab;
 
+	/* Price of the most recent fill (0 = none yet); elects stops. */
+	int last_price;
+
 	/* Perf counters, reset per public op, as in the original. */
 	int executed_orders_count;
 	int avl_balance_count;
