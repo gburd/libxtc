@@ -28,6 +28,7 @@
 #include "wal.h"
 #include "xstore.h"
 #include "xtc.h"
+#include "xtc_async.h"
 #include "xtc_exec.h"
 #include "xtc_proc.h"
 #include "t_tmp.h"
@@ -107,6 +108,9 @@ main(void)
 	int fd, nloops;
 	long i;
 
+	/* SQL runs on fibers: use the server's 512 KiB stack (main.c), not
+	 * the 64 KiB library default, which sanitizer frames can exceed. */
+	if (xtc_set_stack_size(512u * 1024u) != XTC_OK) return 1;
 	for (nloops = 1; nloops <= 4; nloops += 3) {
 		t_tmpl(logp, sizeof logp, "sqlxtc-skew-log");
 		t_tmpl(pg, sizeof pg, "sqlxtc-skew-pg");
