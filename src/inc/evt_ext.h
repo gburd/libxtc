@@ -65,6 +65,7 @@ int xtc_task_park_on_timer __P((xtc_task_t *, int64_t));
 int xtc_task_spawn __P((xtc_loop_t *, xtc_task_fn, void *, xtc_task_t **));
 int xtc_task_waker __P((xtc_task_t *, xtc_waker_t *));
 int xtc_timer_cancel __P((xtc_timer_t *));
+int xtc_timer_release __P((xtc_timer_t *));
 int xtc_timer_set __P((xtc_loop_t *, int64_t, xtc_timer_fn, void *, xtc_timer_t **));
 int xtc_waker_wake __P((const xtc_waker_t *));
 int xtc_yield_check __P((void));

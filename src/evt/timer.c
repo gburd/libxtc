@@ -26,6 +26,13 @@ __timer_slab_ensure(xtc_loop_t *loop)
 	o = (xtc_slab_opts_t)XTC_SLAB_OPTS_DEFAULT;
 	o.name = "loop.timer";
 	o.obj_size = sizeof(xtc_timer_t);
+	/* No per-thread magazine: a timer's last reference may be dropped on
+	 * any thread (xtc_timer_release, a cross-thread cancel), and a
+	 * magazine on a thread other than the one that destroys the slab at
+	 * loop_fini would be left holding slots of a freed slab.  Until timers
+	 * were reclaimed during the run the magazine was always empty anyway,
+	 * so every alloc already took the locked path. */
+	o.flags |= XTC_SLAB_NO_MAGAZINE;
 	return xtc_slab_create(&o, (struct xtc_slab **)&loop->timer_slab);
 }
 
@@ -103,6 +110,11 @@ __xtc_timer_heap_push(xtc_loop_t *loop, xtc_timer_t *t)
 		    (rc = __grow(loop)) != XTC_OK)
 			return rc;
 	}
+	/* The DST late-fire path re-pushes a node its pop already claimed;
+	 * make it cancellable again. */
+	if (atomic_load_explicit(&t->fired, memory_order_relaxed) ==
+	    XTC_TIMER_FIRED)
+		atomic_store_explicit(&t->fired, 0, memory_order_relaxed);
 	t->heap_idx = loop->n_timers;
 	loop->timers[loop->n_timers++] = t;
 	__sift_up(loop->timers, t->heap_idx);
@@ -110,12 +122,13 @@ __xtc_timer_heap_push(xtc_loop_t *loop, xtc_timer_t *t)
 }
 
 /*
- * Drop one park-timer reference (see loop_int.h).  refs == 0 marks a
- * non-refcounted timer (xtc_timer_set, owned by all_timers): a no-op.
- * The last of the two owners (heap, task park_timer slot) to release
- * frees the node.  A bounded O(1) free; see the NOALLOC note on the
- * pop-due callers.  Defined ABOVE the NOALLOC region so its __os_free
- * is not flagged -- the callers inside the region carry XTC_NOALLOC_OK.
+ * Drop one timer reference (see loop_int.h).  Every timer has two owners:
+ * the heap, and the task's park_timer slot (park timers) or the caller's
+ * handle (xtc_timer_set).  The last to let go frees the node, to the
+ * loop's timer slab or the heap allocator it came from.  A bounded O(1)
+ * free; see the NOALLOC note on the pop-due callers.  Defined ABOVE the
+ * NOALLOC region so its frees are not flagged -- the callers inside the
+ * region carry XTC_NOALLOC_OK.
  */
 void
 __xtc_timer_park_release(xtc_timer_t *t)
@@ -123,15 +136,20 @@ __xtc_timer_park_release(xtc_timer_t *t)
 	if (t == NULL)
 		return;
 	if (atomic_load_explicit(&t->refs, memory_order_relaxed) == 0)
-		return;   /* not a park timer: freed at loop_fini */
-	if (atomic_fetch_sub_explicit(&t->refs, 1, memory_order_acq_rel) == 1)
+		return;   /* defensive: no owner left */
+	if (atomic_fetch_sub_explicit(&t->refs, 1, memory_order_acq_rel) != 1)
+		return;
+	if (t->from_slab)
+		xtc_slab_free((struct xtc_slab *)t->loop->timer_slab, t);
+	else
 		__os_free(t);
 }
 
 static int
 __is_cancelled(xtc_timer_t *t)
 {
-	return atomic_load_explicit(&t->cancelled, memory_order_acquire);
+	return atomic_load_explicit(&t->fired, memory_order_acquire) ==
+	    XTC_TIMER_CANCELLED;
 }
 
 /* Remove the node at heap index i (owner only).  The caller drops the
@@ -219,13 +237,18 @@ __xtc_timer_heap_pop_due(xtc_loop_t *loop, int64_t now_ns)
 	for (;;) {
 		xtc_timer_t *top = __heap_top_unsafe(loop);
 		if (top == NULL) return NULL;
-		if (__is_cancelled(top)) {
-			(void)__heap_pop_unsafe(loop);
-			__xtc_timer_park_release(top);  /* XTC_NOALLOC_OK: bounded free of one popped park timer */
-			continue;
+		int expect = 0;
+		if (!__is_cancelled(top)) {
+			if (top->deadline_ns > now_ns) return NULL;
+			/* Claim it to fire; a concurrent cancel that got there
+			 * first wins, and the node is dropped below. */
+			if (atomic_compare_exchange_strong_explicit(&top->fired,
+			    &expect, XTC_TIMER_FIRED, memory_order_acq_rel,
+			    memory_order_acquire))
+				return __heap_pop_unsafe(loop);
 		}
-		if (top->deadline_ns > now_ns) return NULL;
-		return __heap_pop_unsafe(loop);
+		(void)__heap_pop_unsafe(loop);
+		__xtc_timer_park_release(top);  /* XTC_NOALLOC_OK: bounded free of one popped timer */
 	}
 }
 
@@ -235,7 +258,7 @@ __xtc_timer_heap_next_deadline(xtc_loop_t *loop)
 	while (loop->n_timers > 0 && __is_cancelled(loop->timers[0])) {
 		xtc_timer_t *dead = loop->timers[0];
 		(void)__heap_pop_unsafe(loop);
-		__xtc_timer_park_release(dead);  /* XTC_NOALLOC_OK: bounded free of one popped park timer */
+		__xtc_timer_park_release(dead);  /* XTC_NOALLOC_OK: bounded free of one popped timer */
 	}
 	return loop->n_timers == 0 ? -1 : loop->timers[0]->deadline_ns;
 }
@@ -265,6 +288,10 @@ xtc_timer_set(xtc_loop_t *loop, int64_t delay_ns, xtc_timer_fn fn, void *user,
 		return rc;
 	}
 	t->deadline_ns = now_ns + delay_ns;
+	/* Owners: the heap, plus the caller's handle if one is returned.
+	 * With no handle the timer is freed as soon as it fires. */
+	atomic_store_explicit(&t->refs, out_timer != NULL ? 2 : 1,
+	    memory_order_relaxed);
 	t->cb = fn;
 	t->user = user;
 	t->waiter = NULL;
@@ -278,21 +305,27 @@ xtc_timer_set(xtc_loop_t *loop, int64_t delay_ns, xtc_timer_fn fn, void *user,
 		xtc_slab_free((struct xtc_slab *)loop->timer_slab, t);
 		return rc;
 	}
-	/* Splice into all_timers so loop_fini can free it. */
-	t->all_next = loop->all_timers;
-	loop->all_timers = t;
+	/* Not on all_timers: a handle that is never released is freed with
+	 * the timer slab at loop_fini. */
 	if (out_timer) *out_timer = t;
 	return XTC_OK;
 }
 
-/* PUBLIC: int xtc_timer_cancel __P((xtc_timer_t *)); */
+/*
+ * Cancel `timer` if it has not fired.  Returns 1 if this call stopped the
+ * fire (the callback will never run), 0 if the timer had fired, was
+ * firing, or was already cancelled.  `fired` is the arbiter: it leaves 0
+ * exactly once, to FIRED (the owner's pop claimed it) or to CANCELLED.
+ * The caller must hold a reference (a handle or a park slot).
+ */
 int
-xtc_timer_cancel(xtc_timer_t *timer)
+__xtc_timer_try_cancel(xtc_timer_t *timer)
 {
-	xtc_loop_t *loop;
-	if (timer == NULL) return XTC_E_INVAL;
-	if (atomic_load_explicit(&timer->fired, memory_order_acquire))
-		return XTC_OK;     /* Tm8: already fired, no-op */
+	xtc_loop_t *loop = timer->loop;
+	int expect = 0;
+	if (!atomic_compare_exchange_strong_explicit(&timer->fired, &expect,
+	    XTC_TIMER_CANCELLED, memory_order_acq_rel, memory_order_acquire))
+		return 0;
 	atomic_store_explicit(&timer->cancelled, 1, memory_order_release);
 	/*
 	 * On the loop's own thread, take the node out of the heap now (Tm13):
@@ -303,12 +336,30 @@ xtc_timer_cancel(xtc_timer_t *timer)
 	 * the heap grows.  __xtc_current_loop_get is the out-of-line read, so
 	 * a fiber that migrated cannot see its previous thread's binding.
 	 */
-	loop = timer->loop;
-	if (loop != NULL && __xtc_current_loop_get() == loop &&
-	    timer->heap_idx >= 0) {
+	if (__xtc_current_loop_get() == loop && timer->heap_idx >= 0) {
 		XTC_ASSERT_LOOP_OWNER(loop, "timer min-heap (cancel)");
 		__heap_remove_at(loop, timer->heap_idx);
 		__xtc_timer_park_release(timer);   /* the heap's reference */
 	}
+	return 1;
+}
+
+/* PUBLIC: int xtc_timer_cancel __P((xtc_timer_t *)); */
+int
+xtc_timer_cancel(xtc_timer_t *timer)
+{
+	if (timer == NULL) return XTC_E_INVAL;
+	(void)__xtc_timer_try_cancel(timer);   /* Tm8: after fire, a no-op */
+	return XTC_OK;
+}
+
+/* PUBLIC: int xtc_timer_release __P((xtc_timer_t *)); */
+int
+xtc_timer_release(xtc_timer_t *timer)
+{
+	/* Only xtc_timer_set hands out handles (from_slab); a park timer is
+	 * never the caller's to release. */
+	if (timer == NULL || !timer->from_slab) return XTC_E_INVAL;
+	__xtc_timer_park_release(timer);   /* the handle's reference */
 	return XTC_OK;
 }

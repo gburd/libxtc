@@ -729,7 +729,7 @@ xtc_future_when_any(xtc_future_t **futs, int n, xtc_future_t **out_fut)
 /* with_timeout: race the source against a loop timer. */
 struct timeout_ctx {
 	xtc_promise_t *prom;
-	xtc_timer_t   *timer;
+	xtc_timer_t   *timer;       /* we hold its handle until we are freed */
 	_Atomic int    done;
 	_Atomic int    remaining;   /* source cb + timer cb both must retire it */
 };
@@ -738,8 +738,11 @@ static void
 timeout_retire(struct timeout_ctx *t)
 {
 	if (atomic_fetch_sub_explicit(&t->remaining, 1,
-	    memory_order_acq_rel) == 1)
+	    memory_order_acq_rel) == 1) {
+		if (t->timer != NULL)
+			(void)xtc_timer_release(t->timer);
 		__os_free(t);
+	}
 }
 
 static void
@@ -750,8 +753,12 @@ timeout_src_complete(intptr_t value, int status, void *u)
 	if (atomic_compare_exchange_strong_explicit(&t->done, &expected, 1,
 	    memory_order_acq_rel, memory_order_relaxed)) {
 		(void)xtc_promise_set(t->prom, value, status);
-		if (t->timer != NULL)
-			(void)xtc_timer_cancel(t->timer);
+		/* A cancel that stops the fire also retires for the timer
+		 * callback, which will now never run.  Before 1.55.1 nothing
+		 * retired for it, so every source that beat its timeout leaked
+		 * this context, and the timer stayed allocated to loop_fini. */
+		if (t->timer != NULL && __xtc_timer_try_cancel(t->timer))
+			timeout_retire(t);
 	}
 	timeout_retire(t);
 }

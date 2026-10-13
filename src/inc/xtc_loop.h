@@ -65,6 +65,7 @@ typedef void (*xtc_timer_fn)(void *user);
  *
  * PUBLIC: int  xtc_timer_set __P((xtc_loop_t *, int64_t, xtc_timer_fn, void *, xtc_timer_t **));
  * PUBLIC: int  xtc_timer_cancel __P((xtc_timer_t *));
+ * PUBLIC: int  xtc_timer_release __P((xtc_timer_t *));
  */
 XTC_API int  xtc_loop_init(xtc_loop_t **out);
 XTC_API int  xtc_loop_fini(xtc_loop_t *loop);
@@ -137,5 +138,16 @@ XTC_API int  xtc_waker_wake(const xtc_waker_t *w);
 XTC_API int  xtc_timer_set(xtc_loop_t *loop, int64_t delay_ns,
                            xtc_timer_fn fn, void *user, xtc_timer_t **out_timer);
 XTC_API int  xtc_timer_cancel(xtc_timer_t *timer);
+/*
+ * xtc_timer_release --
+ * Give up the handle xtc_timer_set returned.  The timer is unaffected (a
+ * pending one still fires unless cancelled first); its memory is
+ * reclaimed once it has fired or been cancelled and the handle is
+ * released.  The handle must not be used afterwards.  A handle that is
+ * never released stays valid until xtc_loop_fini, as before 1.55.1.
+ * Pass NULL as xtc_timer_set's out_timer to need no handle at all.
+ * Returns XTC_OK, or XTC_E_INVAL for NULL.  Any thread.
+ */
+XTC_API int  xtc_timer_release(xtc_timer_t *timer);
 
 #endif /* XTC_LOOP_H */
