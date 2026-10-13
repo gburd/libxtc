@@ -32,6 +32,8 @@
 #include "xtc_exec.h"
 #include "xtc_proc.h"
 #include "xtc_async.h"
+#include "xtc_int.h"
+#include "loop_int.h"     /* free-list / spare counts for the N2 case */
 
 /* Detect AddressSanitizer portably (nested #if -- a bare
  * __has_feature(...) breaks on gcc where __has_feature is undefined). */
@@ -505,6 +507,216 @@ test_reclaim_migratable(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * A long-lived watcher that spawn_monitors many short-lived children (a
+ * supervisor restarting a child) and consumes every DOWN.  The watcher's
+ * own monitor entries used to be kept until the watcher exited, 64 bytes
+ * per child ever monitored; they must track the live children.
+ */
+#define MON_N     200000
+#define MON_LIVE  64
+
+static long mon_rss_grow;
+static long mon_fail;
+
+static void
+mon_child(void *arg)
+{
+	(void)arg;
+}
+
+static void
+mon_watcher(void *arg)
+{
+	xtc_loop_t *l = arg;
+	long i, live = 0, r0 = 0;
+	void *m;
+	size_t n;
+
+	for (i = 0; i < MON_N; i++) {
+		xtc_pid_t c;
+		uint64_t ref;
+		if (i == MON_N / 10)
+			r0 = life_status_kb("VmRSS:");
+		while (live >= MON_LIVE)
+			if (xtc_recv(&m, &n, -1) == XTC_OK) {
+				live--;
+				xtc_free(m);
+			}
+		if (xtc_proc_spawn_monitor(l, mon_child, NULL, NULL, &c,
+		    &ref) != XTC_OK) {
+			mon_fail = i;
+			return;
+		}
+		live++;
+	}
+	while (live > 0)
+		if (xtc_recv(&m, &n, -1) == XTC_OK) {
+			live--;
+			xtc_free(m);
+		}
+	mon_rss_grow = life_status_kb("VmRSS:") - r0;
+}
+
+static MunitResult
+test_reclaim_monitor_entries(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *l = NULL;
+	(void)p; (void)d;
+
+	mon_fail = -1;
+	mon_rss_grow = 0;
+	munit_assert_int(xtc_loop_init(&l), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(l, mon_watcher, l, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(l), ==, XTC_OK);
+	(void)xtc_loop_fini(l);
+	printf("  monitor watcher: %d children, rss +%ld kB from 10%% to "
+	    "the end (%.1f B per child)\n", MON_N, mon_rss_grow,
+	    mon_rss_grow * 1024.0 / (MON_N * 0.9));
+	fflush(stdout);
+	munit_assert_long(mon_fail, ==, -1);
+	/* Before: 64 B per child ever monitored (~11 MB here). */
+	if (LIFE_CHECK_RSS)
+		munit_assert_long(mon_rss_grow, <, 2 * 1024);
+	return MUNIT_OK;
+}
+
+/*
+ * Cross-loop spawns (the round-robin acceptor: accept on loop 0, spawn
+ * each connection proc on loop 1).  The spawner is not on the target
+ * loop's thread, so it could not reuse that loop's recycled task structs
+ * and malloc'd a fresh one per spawn, while loop 1 kept every finished
+ * one: ~185 B per spawn ever made, forever.  Retained structs must track
+ * the peak live count.  mode 0: plain spawn, 1: spawn_monitor,
+ * 2: migratable.
+ */
+#define XS_N     200000
+#define XS_LIVE  64
+
+static xtc_exec_t *xs_exec;
+static xtc_pid_t   xs_acc;
+static int         xs_mode;
+static long        xs_rss_grow, xs_fail;
+
+static void
+xs_child(void *arg)
+{
+	char c = 'x';
+	(void)arg;
+	(void)xtc_send(xs_acc, &c, 1);
+}
+
+static void
+xs_acceptor(void *arg)
+{
+	xtc_loop_t *l = xtc_exec_loop(xs_exec, 1);
+	xtc_proc_opts_t o;
+	long i, live = 0, r0 = 0;
+	void *m;
+	size_t n;
+	(void)arg;
+
+	memset(&o, 0, sizeof o);
+	o.migratable = (xs_mode == 2);
+	xs_acc = xtc_self();
+	for (i = 0; i < XS_N; i++) {
+		xtc_pid_t c;
+		uint64_t ref;
+		int rc;
+		if (i == XS_N / 10)
+			r0 = life_status_kb("VmRSS:");
+		while (live >= XS_LIVE)
+			if (xtc_recv(&m, &n, -1) == XTC_OK) {
+				if (n == 1)
+					live--;
+				xtc_free(m);
+			}
+		rc = xs_mode == 1
+		    ? xtc_proc_spawn_monitor(l, xs_child, NULL, NULL, &c, &ref)
+		    : xtc_proc_spawn(l, xs_child, NULL, &o, &c);
+		if (rc != XTC_OK) {
+			xs_fail = i;
+			return;
+		}
+		live++;
+	}
+	while (live > 0)
+		if (xtc_recv(&m, &n, -1) == XTC_OK) {
+			if (n == 1)
+				live--;
+			xtc_free(m);
+		}
+	xs_rss_grow = life_status_kb("VmRSS:") - r0;
+}
+
+static long
+xs_list_len(xtc_task_t *t)
+{
+	long n = 0;
+	for (; t != NULL; t = t->q_next)
+		n++;
+	return n;
+}
+
+static MunitResult
+xs_run(int mode)
+{
+	xtc_loop_t *l;
+	long kept = 0;
+	int i;
+
+	xs_mode = mode;
+	xs_fail = -1;
+	xs_rss_grow = 0;
+	munit_assert_int(xtc_exec_init(&xs_exec, 2), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(xs_exec, 0),
+	    xs_acceptor, NULL, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_exec_run(xs_exec), ==, XTC_OK);
+	/* Recycled structs still held by the loops (the workers have
+	 * stopped; nothing else touches the lists now). */
+	for (i = 0; i < 2; i++) {
+		l = xtc_exec_loop(xs_exec, i);
+		kept += xs_list_len(l->task_free) +
+		    xs_list_len(l->task_free_mig) +
+		    xs_list_len(l->task_spare[0]) +
+		    xs_list_len(l->task_spare[1]);
+	}
+	(void)xtc_exec_fini(xs_exec);
+	printf("  cross-loop mode %d: %d spawns, %ld task structs kept, "
+	    "rss +%ld kB from 10%% to the end (%.1f B/spawn)\n", mode, XS_N,
+	    kept, xs_rss_grow, xs_rss_grow * 1024.0 / (XS_N * 0.9));
+	fflush(stdout);
+	munit_assert_long(xs_fail, ==, -1);
+	/* Peak live per loop + the local free-list cap + slack; before
+	 * the fix one per spawn (~XS_N). */
+	munit_assert_long(kept, <, 2 * (XS_LIVE + 64) + 64);
+	if (LIFE_CHECK_RSS)
+		munit_assert_long(xs_rss_grow, <, 8 * 1024);
+	return MUNIT_OK;
+}
+
+static MunitResult
+test_reclaim_cross_loop(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return xs_run(0);
+}
+
+static MunitResult
+test_reclaim_cross_loop_monitor(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return xs_run(1);
+}
+
+static MunitResult
+test_reclaim_cross_loop_migratable(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return xs_run(2);
+}
+
 static MunitResult
 test_reclaim_spawn_exit(const MunitParameter p[], void *d)
 {
@@ -550,6 +762,14 @@ static MunitTest tests[] = {
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/migratable_100k", test_reclaim_migratable, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/monitor_entries_200k", test_reclaim_monitor_entries, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/cross_loop_200k", test_reclaim_cross_loop, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/cross_loop_monitor_200k", test_reclaim_cross_loop_monitor, NULL,
+	    NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/cross_loop_migratable_200k", test_reclaim_cross_loop_migratable,
+	    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #endif
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

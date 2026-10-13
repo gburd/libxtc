@@ -77,7 +77,16 @@ struct rcu_state {
 	int                inited;
 };
 
-static struct rcu_state __rcu = { 0, PTHREAD_MUTEX_INITIALIZER, NULL, {0}, 0 };
+/*
+ * The epoch starts at 1, never 0: a reader publishes the current epoch
+ * into its active_epoch and 0 there means "not in a read side", so a
+ * reader entering at epoch 0 was invisible to synchronize and could have
+ * its object freed under it.  xtc_rcu_fini resets to the same start.
+ */
+#define XTC_RCU_EPOCH_START 1
+
+static struct rcu_state __rcu = { XTC_RCU_EPOCH_START,
+    PTHREAD_MUTEX_INITIALIZER, NULL, {0}, 0 };
 static XTC_THREAD_LOCAL struct rcu_tls *__rcu_self = NULL;
 
 /*
@@ -278,7 +287,8 @@ xtc_rcu_fini(void)
 		__rcu_ftbl[b] = NULL;
 	__rcu_self = NULL;
 	__rcu.inited = 0;
-	atomic_store_explicit(&__rcu.epoch, 0, memory_order_relaxed);
+	atomic_store_explicit(&__rcu.epoch, XTC_RCU_EPOCH_START,
+	    memory_order_relaxed);
 	(void)__xtc_mtx_unlock(&__rcu.lock);
 }
 
