@@ -3161,8 +3161,9 @@ xs_begin(xsql_vtab *pv)
  * by the vtab xSync (2PC phase 1) and the native commit path.
  */
 static int
-xs_ssi_validate(xstore_ctx_t *cx)
+xs_ssi_validate_locked(xstore_ctx_t *cx)
 {
+	const struct xs_inflight *e;
 	int i, out_edge = 0, in_edge;
 	xs_rkey_t *wr;
 	int nwr;
@@ -3171,11 +3172,23 @@ xs_ssi_validate(xstore_ctx_t *cx)
 	/*
 	 * Outgoing edge: a key we read was overwritten by a transaction
 	 * that committed after our snapshot -- read straight from the
-	 * shared B-tree's version timestamps, so it sees every committer.
+	 * shared B-tree's version timestamps, so it sees every committer --
+	 * or is being written by a commit still in flight (it holds a
+	 * timestamp newer than our snapshot but its versions may not be in
+	 * the tree yet).  The caller holds the commit lock, so the in-flight
+	 * set is exactly the commits that passed validation before us:
+	 * validation and commit are serialized (two transactions in a
+	 * write skew can no longer both validate before either is visible).
 	 */
-	for (i = 0; i < cx->rn; i++)
+	for (i = 0; i < cx->rn && !out_edge; i++) {
 		if (xs_newest_ts(cx->bt, cx->rset[i].tableid, cx->rset[i].rowid)
 		    > cx->txn_snap) { out_edge = 1; break; }
+		for (e = g_inflight; e != NULL; e = e->next)
+			if (xs_inflight_has(e, cx->rset[i].tableid, cx->rset[i].rowid)) {
+				out_edge = 1;
+				break;
+			}
+	}
 	if (cx->did_scan &&
 	    atomic_load_explicit(&g_xclock, memory_order_relaxed) > cx->txn_snap)
 		out_edge = 1;
@@ -3209,7 +3222,11 @@ xs_sync(xsql_vtab *pv)
 	 * rolls the transaction back -- xCommit (phase 2) is too late.
 	 *
 	 */
-	return xs_ssi_validate(((xstore_vtab_t *)pv)->ctx);
+	int rc;
+	xs_commit_lock();
+	rc = xs_ssi_validate_locked(((xstore_vtab_t *)pv)->ctx);
+	xs_commit_unlock();
+	return rc;
 }
 #endif /* SQLXTC_VTAB */
 
@@ -3277,16 +3294,18 @@ xs_commit_ctx(xstore_ctx_t *cx)
 	int i, rc = SX_OK;
 	if (!cx->in_txn)
 		return SX_OK;
-	/* Serializable validation (SSI pivot) BEFORE applying writes: a
-	 * dangerous pivot aborts with SX_BUSY.  The vtab runs this in
-	 * xSync; the native commit path runs it here, and on a failure rolls
-	 * the transaction back (the vtab relies on SQLite calling xRollback
-	 * after an xSync failure; the native path must do it itself). */
-	if ((rc = xs_ssi_validate(cx)) != SX_OK) {
-		(void)xs_rollback_ctx(cx);
-		return rc;
+	if (cx->wn == 0) {
+		/* Read-only: SSI can only fail a transaction that writes (an
+		 * empty write set has no incoming edge), so no commit lock.
+		 * Keep the read set visible to concurrent peers until GC. */
+		ssi_commit(cx->ssi, xs_visible());
+		cx->ssi = NULL;
+		wbuf_clear(cx);
+		cx->in_txn = 0;
+		xs_pin_recompute(cx);
+		return SX_OK;
 	}
-	if (cx->wn > 0) {
+	{
 		if (cx->steal_txn != 0)              /* STEAL: bring spilled payloads back */
 			for (i = 0; i < cx->wn; i++)
 				(void)xs_wrec_ensure(cx, &cx->wbuf[i]);
@@ -3297,8 +3316,13 @@ xs_commit_ctx(xstore_ctx_t *cx)
 		memset(&fl, 0, sizeof fl);
 		fl.ws = cx->wbuf;
 		fl.wn = cx->wn;
+		/* Serializable validation (SSI pivot), the first-committer-
+		 * wins check, the timestamp and the in-flight registration are
+		 * one atomic step under the commit lock; a dangerous pivot or a
+		 * write-write conflict rolls back with SX_BUSY. */
 		xs_commit_lock();
-		if (xs_ww_conflict_locked(cx->bt, cx->wbuf, cx->wn)) {
+		if (xs_ssi_validate_locked(cx) != SX_OK ||
+		    xs_ww_conflict_locked(cx->bt, cx->wbuf, cx->wn)) {
 			xs_commit_unlock();
 			(void)xs_rollback_ctx(cx);
 			return SX_BUSY;           /* serialization failure */
@@ -3353,11 +3377,6 @@ xs_commit_ctx(xstore_ctx_t *cx)
 		ssi_commit(cx->ssi, ts);     /* publish commit_ts for SSI peers */
 		xs_inflight_remove(&fl);
 		xs_wait_visible(ts);         /* COMMIT returns once it is visible */
-	} else {
-		/* read-only: keep the read set visible to concurrent peers
-		 * until GC, stamped at the current clock. */
-		ssi_commit(cx->ssi,
-		    atomic_load_explicit(&g_xclock, memory_order_relaxed));
 	}
 	cx->ssi = NULL;
 	wbuf_clear(cx);

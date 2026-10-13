@@ -32,6 +32,7 @@ test_wal_fail
 test_ww_conflict
 test_dw_fail
 test_commit_visibility
+test_ssi_skew
 test_torn_smo
 test_wal_compact
 test_wal_lsn_monotone
