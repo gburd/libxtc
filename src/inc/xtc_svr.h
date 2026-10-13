@@ -103,9 +103,10 @@ XTC_API xtc_pid_t xtc_svr_pid(const xtc_svr_t *svr);
  * A timed-out, aborted or server-gone call only stops the CALLER
  * waiting.  A reply the server sends afterwards to an off-proc caller is
  * discarded (that xtc_svr_reply returns XTC_E_NOTFOUND); to an in-proc
- * caller it is still delivered to the caller's mailbox, as a message
- * whose first 4 bytes are the call's internal tag, and a later plain
- * xtc_recv will see it. */
+ * caller it is delivered to the caller's mailbox as an internally framed
+ * reply envelope (never confused with an application message), which the
+ * caller's next xtc_svr_call discards; a proc that makes no further call
+ * can still see it with a plain xtc_recv. */
 XTC_API int xtc_svr_call(xtc_pid_t target,
                          const void *req, size_t req_size,
                          void **out_reply, size_t *out_size,
