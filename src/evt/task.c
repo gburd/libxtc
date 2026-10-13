@@ -11,6 +11,7 @@
 #include "xtc_tail.h"     /* SCHED: dispatch (WAKE) hook */
 #include "tail_int.h"     /* __xtc_tail_emit / __xtc_tail_on */
 #include "loop_int.h"
+#include "preempt_int.h"  /* __xtc_unsafe_enter/leave around the spare lock */
 
 #include <stdint.h>
 #include <string.h>
@@ -30,10 +31,11 @@
  *
  * Ownership: only the HOME loop's thread pushes/pops its free list
  * (the DONE-handler recycle is gated on t->loop == running loop), so
- * no synchronization is needed.  A stolen task completing on a thief
- * is NOT recycled (it is left for loop_fini), keeping this single-
- * threaded.  The free list is drained (structs __os_free'd) at
- * loop_fini.
+ * no synchronization is needed.  A task that finishes on a thief is
+ * handed back to its home loop (__xtc_task_reclaim).  Beyond a small
+ * local cap the home loop pushes onto a locked spare list that a spawn
+ * from another thread can pop (below).  Both are drained (structs
+ * __os_free'd) at loop_fini.
  */
 
 /* The free list a struct of the given pinned-ness lives on.  Pinned and
@@ -46,39 +48,143 @@ __task_freelist(xtc_loop_t *loop, int pinned)
 	return pinned ? &loop->task_free : &loop->task_free_mig;
 }
 
-/* Push a completed task struct onto its loop's free list. */
+/*
+ * Cross-thread spares.  A spawn onto a loop from ANOTHER thread (the
+ * round-robin acceptor: accept on loop A, spawn the connection proc on
+ * loop B) cannot pop B's owner-only free list, and used to malloc a fresh
+ * struct every time while B recycled every finished one onto that list:
+ * retention grew by one struct per spawn ever made.  So the owner keeps
+ * at most XTC_TASK_FREELIST_LOCAL structs on its own lists and pushes the
+ * rest onto task_spare, which any thread pops under a spinlock (held for
+ * a few pointer moves; never across a yield, an allocation or another
+ * lock; preemption deferred).  Recycled structs still never go back to
+ * the allocator before xtc_loop_fini (type-stable, see below), and the
+ * structs of each pinned-ness belonging to a loop stay within its peak
+ * live count + XTC_TASK_FREELIST_LOCAL + 1: a home spawn mallocs only
+ * when its free list and spare are both empty, a foreign one only when
+ * the spare is empty (checked under the lock) and the free list holds at
+ * most the local cap.
+ */
+#ifndef XTC_TASK_FREELIST_LOCAL
+#define XTC_TASK_FREELIST_LOCAL 64
+#endif
+
+static void
+__task_spare_lock(xtc_loop_t *loop)
+{
+	__xtc_unsafe_enter();
+	while (atomic_exchange_explicit(&loop->task_spare_lock, 1,
+	    memory_order_acquire))
+		while (atomic_load_explicit(&loop->task_spare_lock,
+		    memory_order_relaxed))
+			__os_pause();
+}
+
+static void
+__task_spare_unlock(xtc_loop_t *loop)
+{
+	atomic_store_explicit(&loop->task_spare_lock, 0, memory_order_release);
+	__xtc_unsafe_leave();
+}
+
+/* Push a struct onto loop's spare for its pinned-ness.  Any thread. */
+static void
+__task_spare_push(xtc_loop_t *loop, xtc_task_t *t)
+{
+	int k = t->pinned ? 1 : 0;
+	__task_spare_lock(loop);
+	t->q_next = loop->task_spare[k];
+	loop->task_spare[k] = t;
+	atomic_store_explicit(&loop->task_spare_n,
+	    atomic_load_explicit(&loop->task_spare_n, memory_order_relaxed) + 1,
+	    memory_order_relaxed);
+	__task_spare_unlock(loop);
+}
+
+/* Pop a struct of the given pinned-ness from loop's spare, or NULL. */
+static xtc_task_t *
+__task_spare_pop(xtc_loop_t *loop, int pinned)
+{
+	int k = pinned ? 1 : 0;
+	xtc_task_t *t;
+	__task_spare_lock(loop);
+	if ((t = loop->task_spare[k]) != NULL) {
+		loop->task_spare[k] = t->q_next;
+		atomic_store_explicit(&loop->task_spare_n,
+		    atomic_load_explicit(&loop->task_spare_n,
+		    memory_order_relaxed) - 1, memory_order_relaxed);
+	}
+	__task_spare_unlock(loop);
+	return t;
+}
+
+/* Recycled structs held by loop (free lists + spare); for the plain cap. */
+static int
+__task_retained(xtc_loop_t *loop)
+{
+	return loop->task_free_n +
+	    atomic_load_explicit(&loop->task_spare_n, memory_order_relaxed);
+}
+
+/* Push a completed task struct onto its loop's free list, or its spare
+ * once the free list is at the local cap.  Home loop thread only. */
 static void
 __task_freelist_push(xtc_loop_t *loop, xtc_task_t *t)
 {
-	xtc_task_t **head = __task_freelist(loop, t->pinned);
+	xtc_task_t **head;
+	if (loop->task_free_n >= XTC_TASK_FREELIST_LOCAL) {
+		__task_spare_push(loop, t);
+		return;
+	}
+	head = __task_freelist(loop, t->pinned);
 	t->q_next = *head;   /* reuse q_next as free-list link */
 	*head = t;
 	loop->task_free_n++;
 }
 
-/* Pop a recycled task struct from the loop's free list, or NULL. */
+/* Pop a recycled task struct for a spawn onto loop, or NULL.  The home
+ * thread takes its own free list first; any thread may take a spare. */
 static xtc_task_t *
 __task_freelist_pop(xtc_loop_t *loop, int pinned)
 {
-	xtc_task_t **head = __task_freelist(loop, pinned);
-	xtc_task_t *t = *head;
-	if (t != NULL) {
-		*head = t->q_next;
-		loop->task_free_n--;
+	xtc_task_t **head;
+	xtc_task_t *t;
+	if (__xtc_current_loop == loop) {    /* home thread owns the list */
+		head = __task_freelist(loop, pinned);
+		if ((t = *head) != NULL) {
+			*head = t->q_next;
+			loop->task_free_n--;
+			return t;
+		}
 	}
-	return t;
+	return __task_spare_pop(loop, pinned);
+}
+
+/* xtc_loop_fini: move the spares onto the free lists, which fini frees.
+ * Declared in loop_int.h. */
+void
+__xtc_task_spare_fini(xtc_loop_t *loop)
+{
+	xtc_task_t *t;
+	int k;
+	for (k = 0; k < 2; k++)
+		while ((t = loop->task_spare[k]) != NULL) {
+			loop->task_spare[k] = t->q_next;
+			t->q_next = *__task_freelist(loop, k);
+			*__task_freelist(loop, k) = t;
+		}
+	atomic_store_explicit(&loop->task_spare_n, 0, memory_order_relaxed);
 }
 
 /* Allocate a zeroed task struct: reuse a recycled one from the loop's
- * free list if available, else malloc.  recyclable marks a free-list-
- * eligible struct (recycle on completion). */
+ * free list or spare if available, else malloc.  recyclable marks a free-
+ * list-eligible struct (recycle on completion). */
 static int
 __task_alloc(xtc_loop_t *loop, int pinned, xtc_task_t **out)
 {
-	xtc_task_t *t = NULL;
+	xtc_task_t *t;
 	int rc;
-	if (__xtc_current_loop == loop)      /* home thread owns the list */
-		t = __task_freelist_pop(loop, pinned);
+	t = __task_freelist_pop(loop, pinned);
 	if (t != NULL) {
 		int typestable = t->typestable;
 		memset(t, 0, sizeof *t);
@@ -127,7 +233,7 @@ __xtc_task_free(xtc_task_t *t)
 	if (t->all_next != NULL)
 		t->all_next->all_prev = t->all_prev;
 	if (loop != NULL && (t->typestable || (t->recyclable &&
-	    loop->task_free_n < XTC_TASK_FREELIST_MAX)))
+	    __task_retained(loop) < XTC_TASK_FREELIST_MAX)))
 		__task_freelist_push(loop, t);
 	else
 		__os_free(t);
@@ -326,7 +432,13 @@ __xtc_task_spawn_cleanup(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 		rc = xtc_res_acquire(loop->res, XTC_RES_INBOX_MSGS, 1);
 		if (rc != XTC_OK) {
 			xtc_res_release(loop->res, XTC_RES_TASKS, 1);
-			__xtc_task_free(t);   /* not yet on all_tasks; slab-aware */
+			/* Not on all_tasks, and this is not loop's thread, so
+			 * not its free list either: back to the spare (a
+			 * recycled struct must stay type-stable). */
+			if (t->typestable)
+				__task_spare_push(loop, t);
+			else
+				__os_free(t);
 			if (out_task) *out_task = NULL;
 			return rc;
 		}
