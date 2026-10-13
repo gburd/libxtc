@@ -195,6 +195,14 @@ On failure each returns a negative
 .Va errno
 value
 .Pq e.g. Li -EIO .
+When the operation would be offloaded to the blocking pool (no native
+asynchronous backend for it) and the pool refuses the work, the call
+returns
+.Li -EAGAIN
+(the pool queue is full) or
+.Li -ENOMEM
+(no pool thread could be started) without performing the operation,
+rather than running the system call on the loop thread.
 .Sh CONTEXT
 Call from a fiber running on a loop for the async path; off a loop the
 operation runs synchronously on the calling thread.  The buffer must
