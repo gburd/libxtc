@@ -14,7 +14,12 @@
  *	For a call (byte 1 selects the reply route):
  *	  'C' 's' id[8] payload  -- off-proc caller: id names an in-flight
  *	                            reply slot (see __svr_slots below)
- *	  'C' 'p' pid[8] tag[4] payload -- in-proc caller: reply by mailbox
+ *	  'C' 'p' pid[8] tag[8] payload -- in-proc caller: reply by mailbox
+ *
+ *	In-proc reply (to the caller's mailbox):
+ *	  SVR_REPLY_MAGIC[8] tag[8] payload
+ *	The magic keeps an ordinary application message from being taken
+ *	as a reply; the 64-bit tag is never reused.
  *
  *	For a cast:
  *	  byte 0:    'X'
@@ -38,15 +43,39 @@
 #include <stdlib.h>
 #include <string.h>
 
-static int __recv_reply_for_tag(uint32_t tag, xtc_pid_t target, void **out,
+static int __recv_reply_for_tag(uint64_t tag, xtc_pid_t target, void **out,
                                 size_t *out_size, int64_t timeout_ns,
                                 xtc_abort_token_t *tok);
+
+#define SVR_REPLY_HDR 16
+static const uint8_t SVR_REPLY_MAGIC[8] = {
+	0xfe, 'x', 't', 'c', 's', 'v', 'r', 0xa5
+};
+
+/* xtc_pid_t packed into one word so it can be published atomically. */
+static uint64_t
+__svr_pid_pack(xtc_pid_t p)
+{
+	uint64_t v;
+	memcpy(&v, &p, sizeof v);
+	return v;
+}
+
+static xtc_pid_t
+__svr_pid_unpack(uint64_t v)
+{
+	xtc_pid_t p;
+	memcpy(&p, &v, sizeof p);
+	return p;
+}
 
 struct xtc_svr {
 	xtc_loop_t           *loop;
 	xtc_svr_callbacks_t   cb;
 	void                 *state;
-	xtc_pid_t             pid;
+	/* Packed xtc_pid_t. Stored by xtc_svr_start and again (same value)
+	 * by the server proc itself, read from any thread. */
+	_Atomic uint64_t      pid;
 	xtc_notify_t         *stopped;
 	_Atomic int           stop_requested;
 	_Atomic int           alive;
@@ -96,7 +125,7 @@ struct xtc_svr_call {
 	struct xtc_svr           *svr;
 	uint64_t                  slot_id;     /* slot path (0 = pid path) */
 	xtc_pid_t                 reply_pid;   /* pid-based path  */
-	uint32_t                  reply_tag;
+	uint64_t                  reply_tag;
 	int                       heap;        /* 1 == heap copy from _save */
 };
 
@@ -172,7 +201,8 @@ __svr_entry(void *arg)
 {
 	struct xtc_svr *s = arg;
 	int hooked;
-	s->pid = xtc_self();
+	atomic_store_explicit(&s->pid, __svr_pid_pack(xtc_self()),
+	    memory_order_release);
 	hooked = (xtc_proc_at_exit(__svr_exited, s) == XTC_OK);
 
 	if (s->cb.init != NULL) {
@@ -223,7 +253,7 @@ __svr_entry(void *arg)
 			/* Call: byte 1 is the routing tag.
 			 *   's' = slot routing  (bytes 2..9 = slot id,     payload at +10)
 			 *   'p' = pid  routing  (bytes 2..9 = xtc_pid_t,
-			 *                       bytes 10..13 = tag,        payload at +14)
+			 *                       bytes 10..17 = tag,        payload at +18)
 			 */
 			struct xtc_svr_call call = {0};
 			size_t hdr;
@@ -232,10 +262,10 @@ __svr_entry(void *arg)
 			if (size >= 10 && ((uint8_t *)msg)[1] == 's') {
 				memcpy(&call.slot_id, (uint8_t *)msg + 2, 8);
 				hdr = 10;
-			} else if (size >= 14 && ((uint8_t *)msg)[1] == 'p') {
+			} else if (size >= 18 && ((uint8_t *)msg)[1] == 'p') {
 				memcpy(&call.reply_pid, (uint8_t *)msg + 2, 8);
-				memcpy(&call.reply_tag, (uint8_t *)msg + 10, 4);
-				hdr = 14;
+				memcpy(&call.reply_tag, (uint8_t *)msg + 10, 8);
+				hdr = 18;
 			} else {
 				/* Malformed call.  Skip. */
 				s->inflight = NULL;
@@ -309,7 +339,8 @@ xtc_svr_start(xtc_loop_t *loop, const xtc_svr_callbacks_t *cb, void *state,
 		__os_free(s);
 		return rc;
 	}
-	s->pid = pid;
+	atomic_store_explicit(&s->pid, __svr_pid_pack(pid),
+	    memory_order_release);
 	*out = s;
 	return XTC_OK;
 }
@@ -321,7 +352,8 @@ xtc_svr_stop(xtc_svr_t *s)
 	atomic_store_explicit(&s->stop_requested, 1, memory_order_release);
 	{
 		uint8_t kick = 'S';
-		(void)xtc_send(s->pid, &kick, 1);
+		(void)xtc_send(__svr_pid_unpack(atomic_load_explicit(&s->pid,
+		    memory_order_acquire)), &kick, 1);
 	}
 	return XTC_OK;
 }
@@ -353,19 +385,21 @@ xtc_pid_t
 xtc_svr_pid(const xtc_svr_t *s)
 {
 	xtc_pid_t none = {0,0,0};
-	return s ? s->pid : none;
+	return s ? __svr_pid_unpack(atomic_load_explicit(&s->pid,
+	               memory_order_acquire)) : none;
 }
 
 /* ----- client side ----------------------------------------------- */
 
-/* Absolute deadline for timeout_ns (-1 = none). */
+/* Absolute deadline for timeout_ns (-1 = none), saturating at INT64_MAX
+ * (a huge finite timeout must not overflow into "no deadline"). */
 static int64_t
 __svr_deadline(int64_t timeout_ns)
 {
 	int64_t now = 0;
 	if (timeout_ns < 0) return -1;
 	(void)__os_clock_mono(&now);
-	return now + timeout_ns;
+	return timeout_ns > INT64_MAX - now ? INT64_MAX : now + timeout_ns;
 }
 
 /* The next wait slice before `deadline`, or -1 once it has passed. */
@@ -409,7 +443,8 @@ __svr_wait_slot(struct __svr_reply_slot *slot, xtc_pid_t target,
  * server that died mid-call left an infinite-timeout caller parked
  * forever).  A timeout, abort or server exit only stops the CALLER
  * waiting.  A later reply to an off-proc caller is discarded; to an
- * in-proc caller it still lands in its mailbox (documented).
+ * in-proc caller it lands in its mailbox and is dropped by that proc's
+ * next in-proc call (see __recv_reply_for_tag).
  */
 static int
 __svr_call(xtc_pid_t target, const void *req, size_t req_size,
@@ -426,7 +461,7 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 	 * Every path below computes msg_size = header + req_size; a
 	 * req_size near SIZE_MAX would wrap to a small allocation and
 	 * the subsequent memcpy would overflow the heap.  The largest
-	 * header used below is 14 bytes; reject with margin. */
+	 * header used below is 18 bytes; reject with margin. */
 	if (req_size > SIZE_MAX - 64) return XTC_E_INVAL;
 	if (out_reply == NULL || out_size == NULL) return XTC_E_INVAL;
 
@@ -435,19 +470,19 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 	 * starve the server itself), so route the reply back through
 	 * the caller's mailbox using xtc_recv_match. */
 	if (!xtc_pid_is_none(xtc_self())) {
-		static _Atomic uint32_t g_next_tag;
-		uint32_t tag = atomic_fetch_add_explicit(&g_next_tag, 1,
+		static _Atomic uint64_t g_next_tag;
+		uint64_t tag = atomic_fetch_add_explicit(&g_next_tag, 1,
 		    memory_order_relaxed) + 1;
 		xtc_pid_t self_pid = xtc_self();
 
-		msg_size = 14 + req_size;
+		msg_size = 18 + req_size;
 		if (__os_malloc(msg_size, (void **)&buf) != XTC_OK)
 			return XTC_E_NOMEM;
 		buf[0] = 'C';
 		buf[1] = 'p';
 		memcpy(buf + 2, &self_pid, 8);
-		memcpy(buf + 10, &tag, 4);
-		if (req_size > 0) memcpy(buf + 14, req, req_size);
+		memcpy(buf + 10, &tag, 8);
+		if (req_size > 0) memcpy(buf + 18, req, req_size);
 
 		rc = xtc_send(target, buf, msg_size);
 		__os_free(buf);
@@ -594,14 +629,17 @@ xtc_svr_reply(xtc_svr_call_t *call, const void *reply, size_t size)
 		(void)__xtc_mtx_unlock(&__svr_slots_lock);
 		if (copy != NULL) __os_free(copy);
 	} else if (!xtc_pid_is_none(call->reply_pid)) {
-		/* Encode reply for in-proc caller: tag (4 bytes) + payload. */
+		/* Encode reply for in-proc caller: magic + tag + payload. */
 		uint8_t *buf;
-		size_t msg_size = 4 + size;
+		size_t msg_size;
+		if (size > SIZE_MAX - SVR_REPLY_HDR) return XTC_E_INVAL;
+		msg_size = SVR_REPLY_HDR + size;
 		buf = NULL;
 		if (__os_malloc(msg_size, (void **)&buf) != XTC_OK)
 			return XTC_E_NOMEM;
-		memcpy(buf, &call->reply_tag, 4);
-		if (size > 0) memcpy(buf + 4, reply, size);
+		memcpy(buf, SVR_REPLY_MAGIC, 8);
+		memcpy(buf + 8, &call->reply_tag, 8);
+		if (size > 0) memcpy(buf + SVR_REPLY_HDR, reply, size);
 		rc = xtc_send(call->reply_pid, buf, msg_size);
 		__os_free(buf);
 	}
@@ -626,59 +664,61 @@ xtc_svr_call_save(const xtc_svr_call_t *call)
 	return saved;
 }
 
-/* In-proc receive helper: walk our own mailbox for a reply matching
- * `tag`, save other messages back to the queue. */
-struct __tag_match { uint32_t tag; };
+/* In-proc receive helper.  The predicate takes ANY svr reply (magic
+ * prefix); other messages stay queued for the proc.  A proc has at most
+ * one in-proc call outstanding (the caller waits here), so a reply whose
+ * tag is not the current one answers an earlier call that already gave
+ * up (timeout, abort, server exit): it is dropped here, so late replies
+ * never pile up in the save queue or slow later calls. */
 static int
-__match_reply_tag(const void *data, size_t size, void *u)
+__match_svr_reply(const void *data, size_t size, void *u)
 {
-	const struct __tag_match *m = u;
-	if (size < 4) return 0;
-	return memcmp(data, &m->tag, 4) == 0;
+	(void)u;
+	return size >= SVR_REPLY_HDR &&
+	    memcmp(data, SVR_REPLY_MAGIC, sizeof SVR_REPLY_MAGIC) == 0;
 }
 
 static int
-__recv_reply_for_tag(uint32_t tag, xtc_pid_t target, void **out,
+__recv_reply_for_tag(uint64_t tag, xtc_pid_t target, void **out,
                      size_t *out_size, int64_t timeout_ns,
                      xtc_abort_token_t *tok)
 {
-	struct __tag_match m = { tag };
 	void  *msg = NULL;
 	size_t size = 0;
 	int64_t deadline = __svr_deadline(timeout_ns), w;
-	int    rc;
+	uint64_t got;
+	int    rc, gone = 0;
 
 	/* Sliced so the abort token and the server's liveness are polled
-	 * between mailbox waits (see __svr_call). */
+	 * between mailbox waits (see __svr_call).  Once the server is seen
+	 * gone, one more slice is allowed for a reply sent just before the
+	 * exit and still in flight (cross-loop delivery can be deferred). */
 	for (;;) {
 		if (tok != NULL && xtc_abort_token_is_aborted(tok))
 			return XTC_E_ABORTED;
 		w = __svr_slice(deadline);
-		rc = xtc_recv_match(__match_reply_tag, &m, &msg, &size,
+		rc = xtc_recv_match(__match_svr_reply, NULL, &msg, &size,
 		    w < 0 ? 0 : w);
-		if (rc != XTC_E_AGAIN) break;          /* matched or error */
-		if (w < 0) break;                      /* timed out */
-		if (__svr_gone(target)) {
-			/* One more slice for a reply sent just before the
-			 * exit and still in flight (cross-loop delivery can be
-			 * deferred), then give up. */
-			w = __svr_slice(deadline);
-			rc = xtc_recv_match(__match_reply_tag, &m, &msg, &size,
-			    w < 0 ? 0 : w);
-			if (rc == XTC_E_AGAIN) rc = XTC_E_NOTFOUND;
-			break;
+		if (rc == XTC_OK) {
+			memcpy(&got, (uint8_t *)msg + 8, sizeof got);
+			if (got == tag) break;
+			__os_free(msg);                /* late reply: drop */
+			msg = NULL;
+			continue;
 		}
+		if (rc != XTC_E_AGAIN) return rc;
+		if (gone) return XTC_E_NOTFOUND;
+		if (w < 0) return XTC_E_AGAIN;         /* timed out */
+		if (__svr_gone(target)) gone = 1;
 	}
-	if (rc != XTC_OK) return rc;
-	if (size < 4) { __os_free(msg); return XTC_E_INVAL; }
-	/* Strip the 4-byte tag prefix. */
-	*out_size = size - 4;
+	/* Strip the header. */
+	*out_size = size - SVR_REPLY_HDR;
 	if (*out_size > 0) {
 		void *copy = NULL;
 		if (__os_malloc(*out_size, &copy) != XTC_OK) {
 			__os_free(msg); return XTC_E_NOMEM;
 		}
-		memcpy(copy, (uint8_t *)msg + 4, *out_size);
+		memcpy(copy, (uint8_t *)msg + SVR_REPLY_HDR, *out_size);
 		*out = copy;
 	} else {
 		*out = NULL;

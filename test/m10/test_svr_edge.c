@@ -195,14 +195,16 @@ test_reply_when_stopped(const MunitParameter p[], void *d)
  * Gap (3): OOM during the reply path.
  *
  * A size-targeted allocator hook fails the single __os_malloc inside
- * xtc_svr_reply (the pid-routing path allocates 4 + reply_size bytes).
+ * xtc_svr_reply (the pid-routing path allocates 16 + reply_size bytes).
  * We pick a distinctive reply size so ONLY that allocation fails; the
  * handler records the XTC_E_NOMEM return.  No reply is ever sent; the
  * server then stops, so the caller fails with XTC_E_NOTFOUND.
  * ================================================================ */
 
-#define OOM_REPLY_SIZE   4093              /* distinctive; 4 + this = 4097 */
-#define OOM_MSG_SIZE     (4 + OOM_REPLY_SIZE)
+/* The in-proc reply frame is a 16-byte header (reply magic + 64-bit tag)
+ * plus the payload (src/orc/svr.c, SVR_REPLY_HDR). */
+#define OOM_REPLY_SIZE   4081              /* distinctive; 16 + this = 4097 */
+#define OOM_MSG_SIZE     (16 + OOM_REPLY_SIZE)
 
 static struct __os_alloc_hook g_saved_hook;
 static _Atomic int g_oom_armed;
