@@ -49,6 +49,12 @@ void xstore_set_wal(struct wal *w);
 /* 1 once the attached log has fail-stopped after a write/fsync error:
  * every later write fails until the store is reopened. */
 int  xstore_wal_failed(void);
+/* Hold back every commit (and STEAL spill) and wait for in-flight ones
+ * to finish, so the tree and log are stable for a checkpoint; readers
+ * keep running.  Pair with xstore_quiesce_end.  Call from a proc or off
+ * a loop, holding no engine lock. */
+void xstore_quiesce_begin(void);
+void xstore_quiesce_end(void);
 
 /* Recover the B-tree from the log at `wal_path`: replay every committed
  * transaction's versions (idempotent -- version keys are immutable),

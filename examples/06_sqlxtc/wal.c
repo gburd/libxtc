@@ -752,6 +752,12 @@ wal_durable_lsn(const wal_t *w)
 	return atomic_load_explicit(&w->durable_lsn, memory_order_relaxed);
 }
 
+uint64_t
+wal_size(const wal_t *w)
+{
+	return w == NULL ? 0 : (uint64_t)w->off;
+}
+
 int
 wal_fd(const wal_t *w)
 {
