@@ -28,6 +28,7 @@
 #include "xtc_loop.h"      /* xtc_loop_t -- background storage procs */
 
 #include <assert.h>
+#include <stdatomic.h>
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -202,6 +203,73 @@ static bt_t *g_xbt;
 static wal_t *g_xwal;
 static char   g_xwal_path[1024];
 static int    g_xrunning;        /* background procs spawned */
+
+/*
+ * Periodic checkpoint.  The log is compacted (xstore_checkpoint_wal: a
+ * CHECKPOINT record plus the live rows replace the whole log) whenever
+ * it grows past max(g_ckpt_min, 2 x its size after the last checkpoint)
+ * -- the doubling keeps the O(live data) dump amortized against the
+ * writes that triggered it.  Commits are held back (xstore_quiesce_*)
+ * only while the dump runs; readers continue.  Recovery replays the
+ * compacted log, so its work is O(live data + writes since the last
+ * checkpoint).  A failed checkpoint leaves the old (complete) log in
+ * place and is retried.
+ */
+static uint64_t     g_ckpt_min = 64ull << 20;  /* bytes; sx_storage_set_checkpoint */
+static _Atomic int  g_ckpt_stop, g_ckpt_alive;
+static _Atomic uint64_t g_ckpt_count;
+
+void
+sx_storage_set_checkpoint(uint64_t min_bytes)
+{
+	g_ckpt_min = min_bytes > 0 ? min_bytes : (64ull << 20);
+}
+
+uint64_t
+sx_storage_checkpoints(void)
+{
+	return atomic_load(&g_ckpt_count);
+}
+
+static void
+sx_ckpt_proc(void *arg)
+{
+	uint64_t floor = 0;
+	(void)arg;
+	while (!atomic_load(&g_ckpt_stop)) {
+		uint64_t sz, trig;
+		(void)xtc_proc_sleep(50LL * 1000 * 1000);
+		if (g_xwal == NULL || wal_failed(g_xwal))
+			continue;
+		sz = wal_size(g_xwal);
+		trig = floor * 2 > g_ckpt_min ? floor * 2 : g_ckpt_min;
+		if (sz < trig)
+			continue;
+		xstore_quiesce_begin();
+		if (xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal,
+		    g_xwal_path) == XTC_OK) {
+			floor = wal_size(g_xwal);
+			atomic_fetch_add(&g_ckpt_count, 1);
+		}
+		xstore_quiesce_end();
+	}
+	atomic_store(&g_ckpt_alive, 0);
+}
+
+static void
+sx_ckpt_stop(void)
+{
+	int i;
+	if (!atomic_load(&g_ckpt_alive))
+		return;
+	atomic_store(&g_ckpt_stop, 1);
+	for (i = 0; i < 2000 && atomic_load(&g_ckpt_alive); i++) {
+		if (xtc_pid_is_none(xtc_self()))
+			(void)xtc_sleep_ns(10LL * 1000 * 1000);
+		else
+			(void)xtc_proc_sleep(10LL * 1000 * 1000);
+	}
+}
 
 int
 sx_open(const char *path, sx_db **out)
@@ -395,6 +463,15 @@ sx_storage_run(xtc_loop_t *loop)
 		return SX_OK;
 	if (g_xwal != NULL)
 		(void)wal_writer_spawn(g_xwal, loop, NULL);
+	if (g_xwal != NULL) {
+		xtc_proc_opts_t co = { 0 };
+		xtc_pid_t cp;
+		co.name = "checkpoint";
+		atomic_store(&g_ckpt_stop, 0);
+		atomic_store(&g_ckpt_alive, 1);
+		if (xtc_proc_spawn(loop, sx_ckpt_proc, NULL, &co, &cp) != XTC_OK)
+			atomic_store(&g_ckpt_alive, 0);
+	}
 	(void)bm_provider_spawn(g_xbm, loop, 1LL * 1000 * 1000, NULL);  /* 1ms */
 	(void)bm_trickler_spawn(g_xbm, loop, 5LL * 1000 * 1000, NULL);  /* 5ms */
 	g_xrunning = 1;
@@ -412,13 +489,20 @@ sx_storage_run(xtc_loop_t *loop)
 int
 sx_storage_checkpoint(void)
 {
+	int rc = SX_OK;
 	if (g_xbm == NULL)
 		return SX_OK;
 	(void)bm_checkpoint(g_xbm);            /* flush dirty pages (not for durability) */
-	if (g_xwal != NULL &&
-	    xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal, g_xwal_path) != XTC_OK)
-		return SX_ERROR;
-	return SX_OK;
+	if (g_xwal != NULL) {
+		xstore_quiesce_begin();
+		if (xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal,
+		    g_xwal_path) != XTC_OK)
+			rc = SX_ERROR;
+		else
+			atomic_fetch_add(&g_ckpt_count, 1);
+		xstore_quiesce_end();
+	}
+	return rc;
 }
 
 /*
@@ -434,6 +518,7 @@ sx_storage_quiesce(void)
 {
 	if (!g_xrunning)
 		return;
+	sx_ckpt_stop();
 	if (g_xwal != NULL) wal_writer_stop(g_xwal);
 	bm_trickler_stop(g_xbm);
 	bm_provider_stop(g_xbm);
@@ -446,6 +531,7 @@ sx_storage_close(void)
 	int ok = 1;
 
 	if (g_xrunning) {
+		sx_ckpt_stop();
 		if (g_xwal != NULL) wal_writer_stop(g_xwal);
 		bm_trickler_stop(g_xbm);
 		bm_provider_stop(g_xbm);
@@ -494,6 +580,7 @@ sx_storage_abandon(void)
 	 * so it keeps the full durable history.  The next open finds no
 	 * marker and rebuilds the tree from the log. */
 	if (g_xrunning) {
+		sx_ckpt_stop();
 		if (g_xwal != NULL) wal_writer_stop(g_xwal);
 		bm_trickler_stop(g_xbm);
 		bm_provider_stop(g_xbm);

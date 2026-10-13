@@ -232,6 +232,12 @@ uint64_t xstore_clock(void) { return atomic_load_explicit(&g_xclock, memory_orde
 struct xs_inflight;
 static struct xs_inflight *g_inflight;   /* guarded by the commit lock */
 static void xs_visible_catchup_locked(void);
+/* Checkpoint gate (xstore_quiesce_begin): while set, no commit takes a
+ * timestamp and no STEAL spill writes the log.  Guarded by the commit
+ * lock.  g_wal_busy counts log writes in progress (any xs_wal_emit). */
+static int g_ckpt_gate;
+static _Atomic int g_wal_busy;
+static void xs_gate_wait_locked(void);
 
 void
 xstore_set_clock(uint64_t v)
@@ -2351,12 +2357,76 @@ xs_rowid(xsql_vtab_cursor *pc, xsql_int64 *pRowid)
 static int
 xs_wal_emit(const uint8_t *rec, size_t sz, uint64_t *lsn)
 {
+	int rc;
 	*lsn = 0;
 	if (g_xwal == NULL)
 		return XTC_OK;
+	atomic_fetch_add_explicit(&g_wal_busy, 1, memory_order_acq_rel);
 	if (xtc_pid_is_none(xtc_self()))
-		return wal_commit_sync(g_xwal, rec, (uint32_t)sz, lsn);
-	return wal_commit(g_xwal, rec, (uint32_t)sz, lsn);
+		rc = wal_commit_sync(g_xwal, rec, (uint32_t)sz, lsn);
+	else
+		rc = wal_commit(g_xwal, rec, (uint32_t)sz, lsn);
+	atomic_fetch_sub_explicit(&g_wal_busy, 1, memory_order_acq_rel);
+	return rc;
+}
+
+/* Sleep briefly: on a proc park the fiber, off a loop block the thread. */
+static void
+xs_nap(void)
+{
+	if (xtc_pid_is_none(xtc_self()))
+		(void)xtc_sleep_ns(200LL * 1000);
+	else
+		(void)xtc_proc_sleep(200LL * 1000);
+}
+
+/* Caller holds the commit lock: wait (dropping and re-taking it) while a
+ * checkpoint holds the gate. */
+static void
+xs_gate_wait_locked(void)
+{
+	while (g_ckpt_gate) {
+		xs_commit_unlock();
+		xs_nap();
+		xs_commit_lock();
+	}
+}
+
+/*
+ * Quiesce writers for a checkpoint: close the gate (new commits and
+ * spills wait), then wait until no commit is in flight and no log write
+ * is outstanding.  On return the tree and the log are stable until
+ * xstore_quiesce_end; readers keep running.  Call from a proc (or off a
+ * loop); never while holding an engine lock.
+ */
+void
+xstore_quiesce_begin(void)
+{
+	int idle = 0;
+	xs_commit_lock();
+	while (g_ckpt_gate) {          /* one checkpoint at a time */
+		xs_commit_unlock();
+		xs_nap();
+		xs_commit_lock();
+	}
+	g_ckpt_gate = 1;
+	xs_commit_unlock();
+	while (!idle) {
+		xs_commit_lock();
+		idle = g_inflight == NULL &&
+		    atomic_load_explicit(&g_wal_busy, memory_order_acquire) == 0;
+		xs_commit_unlock();
+		if (!idle)
+			xs_nap();
+	}
+}
+
+void
+xstore_quiesce_end(void)
+{
+	xs_commit_lock();
+	g_ckpt_gate = 0;
+	xs_commit_unlock();
 }
 
 /* 1 once the attached log has fail-stopped (a write or fsync failed):
@@ -2541,7 +2611,7 @@ xstore_register_smo(int enable)
 static void
 xs_spill_payloads(xstore_ctx_t *cx)
 {
-	int i;
+	int i, gated;
 
 	if (g_xwal == NULL)
 		return;
@@ -2552,15 +2622,26 @@ xs_spill_payloads(xstore_ctx_t *cx)
 
 		if (w->spilled || w->data == NULL || w->len == 0)
 			continue;
+		/* A checkpoint is dumping the tree: keep payloads in memory. */
+		xs_commit_lock();
+		gated = g_ckpt_gate;
+		if (!gated)
+			atomic_fetch_add_explicit(&g_wal_busy, 1, memory_order_acq_rel);
+		xs_commit_unlock();
+		if (gated)
+			break;
 		sid = (int64_t)atomic_fetch_add_explicit(&g_stage_seq, 1,
 		    memory_order_relaxed);
 		enc_vkey(XS_STAGE_TID, sid, 0, key);
-		if (bt_insert(cx->bt, key, XS_VKLEN, w->data, w->len) != XTC_OK)
+		if (bt_insert(cx->bt, key, XS_VKLEN, w->data, w->len) != XTC_OK) {
+			atomic_fetch_sub_explicit(&g_wal_busy, 1, memory_order_acq_rel);
 			continue;                  /* keep it in memory on failure */
+		}
 		if (cx->steal_txn == 0)
 			cx->steal_txn = atomic_fetch_add_explicit(&g_steal_txn, 1,
 			    memory_order_relaxed);
 		xs_wal_emit_stage(cx->steal_txn, sid, w->data, w->len);
+		atomic_fetch_sub_explicit(&g_wal_busy, 1, memory_order_acq_rel);
 		free(w->data); w->data = NULL; w->spilled = 1; w->stage_id = sid;
 		cx->wbuf_bytes -= w->len;
 	}
@@ -2680,19 +2761,23 @@ xs_ww_conflict_locked(bt_t *bt, const xs_wrec_t *ws, int wn)
 
 static int
 xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n,
-    int deleted, uint64_t *out_ts);
+    int deleted, uint64_t base, uint64_t *out_ts);
 
 static int
 xs_put(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n, int deleted)
 {
 	uint64_t ts;
-	return xs_put_ts(bt, tableid, rowid, blob, n, deleted, &ts);
+	return xs_put_ts(bt, tableid, rowid, blob, n, deleted, 0, &ts);
 }
 
-/* Autocommit write of one version; *out_ts gets its commit timestamp. */
+/* Autocommit write of one version; *out_ts gets its commit timestamp.
+ * base != 0: the value was computed from a read at snapshot `base`; if
+ * the row has a newer committed version (or a commit writing it is in
+ * flight) return SX_BUSY and write nothing (first-committer-wins).  The
+ * check and the registration are one step under the commit lock. */
 static int
 xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n,
-    int deleted, uint64_t *out_ts)
+    int deleted, uint64_t base, uint64_t *out_ts)
 {
 	uint8_t key[XS_VKLEN];
 	uint8_t buf[1 + XS_VMAX];
@@ -2705,6 +2790,16 @@ xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n,
 	fl.tid = tableid;
 	fl.rid = rowid;
 	xs_commit_lock();
+	xs_gate_wait_locked();
+	if (base != 0) {
+		xs_wrec_t probe;
+		memset(&probe, 0, sizeof probe);
+		probe.tableid = tableid; probe.rowid = rowid; probe.base = base;
+		if (xs_ww_conflict_locked(bt, &probe, 1)) {
+			xs_commit_unlock();
+			return SX_BUSY;
+		}
+	}
 	xs_inflight_add_locked(&fl);
 	xs_commit_unlock();
 	ts = fl.ts;
@@ -2930,7 +3025,8 @@ xs_put_pruned(xstore_ctx_t *cx, uint32_t tableid, int64_t rowid, const void *blo
 	uint8_t pre[XS_VMAX]; int prelen = 0;
 	int rc;
 	prelen = xs_idx_preimage(cx->bt, tableid, rowid, pre, (int)sizeof pre);
-	rc = xs_put_ts(cx->bt, tableid, rowid, blob, n, deleted, &cx->last_ts);
+	rc = xs_put_ts(cx->bt, tableid, rowid, blob, n, deleted, cx->stmt_base,
+	    &cx->last_ts);
 	if (rc == SX_OK) {
 		xs_idx_maintain(cx->bt, tableid, rowid,
 		    (const uint8_t *)blob, deleted ? 0 : n, deleted,
@@ -2981,25 +3077,13 @@ xstore_write_txn(struct xsql *db, uint32_t tableid, int64_t rowid,
 		                  deleted ? 0 : reclen, deleted);
 		return rc == SX_OK ? 0 : -1;
 	}
-	/* Autocommit: the statement computed this row from its read at
-	 * stmt_base; if the row was committed past that since (or a commit
-	 * writing it is in flight) the write would lose that update. */
-	if (cx->stmt_base != 0) {
-		xs_wrec_t probe;
-		int conflict;
-		memset(&probe, 0, sizeof probe);
-		probe.tableid = tableid; probe.rowid = rowid;
-		probe.base = cx->stmt_base;
-		xs_commit_lock();
-		conflict = xs_ww_conflict_locked(cx->bt, &probe, 1);
-		xs_commit_unlock();
-		if (conflict) {
-			cx->last_conflict = 1;
-			return SX_BUSY;
-		}
-	}
+	/* Autocommit: an UPDATE/DELETE computed this row from its read at
+	 * stmt_base; xs_put_ts refuses it (SX_BUSY) if the row was committed
+	 * past that since, or a commit writing it is in flight. */
 	rc = xs_put_pruned(cx, tableid, rowid, deleted ? NULL : rec,
 	                   deleted ? 0 : reclen, deleted);
+	if (rc == SX_BUSY)
+		cx->last_conflict = 1;
 	if (rc == SX_OK)
 		xs_wait_visible(cx->last_ts);
 	return rc == SX_OK ? 0 : -1;
@@ -3321,6 +3405,7 @@ xs_commit_ctx(xstore_ctx_t *cx)
 		 * one atomic step under the commit lock; a dangerous pivot or a
 		 * write-write conflict rolls back with SX_BUSY. */
 		xs_commit_lock();
+		xs_gate_wait_locked();
 		if (xs_ssi_validate_locked(cx) != SX_OK ||
 		    xs_ww_conflict_locked(cx->bt, cx->wbuf, cx->wn)) {
 			xs_commit_unlock();
@@ -5072,9 +5157,15 @@ xs_dump_tree(wal_emit_fn emit, void *ectx, void *user)
 		uint16_t payl;
 		int n;
 
-		if (bt_cursor_next(cur, &k, &klen, &vv, &vl) != XTC_OK ||
-		    klen != XS_VKLEN)
+		if (bt_cursor_next(cur, &k, &klen, &vv, &vl) != XTC_OK)
 			break;
+		/* Secondary-index entries (XS_IDX_LEAD keys, not version keys)
+		 * are derived data rebuilt at open; skip them.  They sort between
+		 * the user tables and the index catalog (table-id 0xFFFFFFFD), so
+		 * stopping here -- as this loop used to -- dropped the index
+		 * catalog from every compacted log. */
+		if (klen != XS_VKLEN || ((const uint8_t *)k)[0] == XS_IDX_LEAD)
+			continue;
 		kb = (const uint8_t *)k;
 		tableid = dec_tableid(kb); rowid = dec_rowid(kb);
 		if (tableid == XS_STAGE_TID)

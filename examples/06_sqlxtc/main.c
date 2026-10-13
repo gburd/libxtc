@@ -291,6 +291,9 @@ usage(FILE *fp, const char *prog)
 	    "      --storage-frames=N  xstore buffer-pool pages (0=default)\n"
 	    "      --storage-direct    open the store with O_DIRECT\n"
 	    "      --storage-adaptive  adaptive writeback pacing\n"
+	    "      --checkpoint-mb=N   compact the log once it passes\n"
+	    "                        max(N MiB, 2 x its last checkpoint size)\n"
+	    "                        (default 64)\n"
 	    "      --no-shared       accepted for compatibility (every connection\n"
 	    "                        always has its own handle and transaction)\n"
 	    "  -t, --threads=N       worker loops (default 1; >1 = parallel,\n"
@@ -304,7 +307,7 @@ static int
 parse_args(int argc, char **argv, server_cfg_t *cfg)
 {
 	enum { OPT_NO_SHARED = 1000, OPT_HELP, OPT_STORAGE, OPT_STORAGE_FRAMES,
-	       OPT_STORAGE_DIRECT, OPT_STORAGE_ADAPTIVE };
+	       OPT_STORAGE_DIRECT, OPT_STORAGE_ADAPTIVE, OPT_CKPT_MB };
 	static struct option lo[] = {
 		{ "host", required_argument, NULL, 'h' },
 		{ "port", required_argument, NULL, 'p' },
@@ -318,6 +321,7 @@ parse_args(int argc, char **argv, server_cfg_t *cfg)
 		{ "storage-frames", required_argument, NULL, OPT_STORAGE_FRAMES },
 		{ "storage-direct", no_argument, NULL, OPT_STORAGE_DIRECT },
 		{ "storage-adaptive", no_argument, NULL, OPT_STORAGE_ADAPTIVE },
+		{ "checkpoint-mb", required_argument, NULL, OPT_CKPT_MB },
 		{ "no-shared", no_argument, NULL, OPT_NO_SHARED },
 		{ "threads", required_argument, NULL, 't' },
 		{ "verbose", no_argument, NULL, 'v' },
@@ -342,6 +346,9 @@ parse_args(int argc, char **argv, server_cfg_t *cfg)
 		case OPT_STORAGE_FRAMES: cfg->storage_frames = (unsigned)atoi(optarg); break;
 		case OPT_STORAGE_DIRECT: cfg->storage_direct = 1; break;
 		case OPT_STORAGE_ADAPTIVE: cfg->storage_adaptive = 1; break;
+		case OPT_CKPT_MB:
+			sx_storage_set_checkpoint((uint64_t)strtoull(optarg, NULL, 10) << 20);
+			break;
 		case 'v': cfg->verbose = 1; break;
 		case OPT_NO_SHARED: cfg->shared_handle = 0; break;
 		case OPT_HELP: usage(stdout, argv[0]); return 1;

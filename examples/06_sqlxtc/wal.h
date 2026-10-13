@@ -116,6 +116,9 @@ int  wal_truncate(wal_t *w);
 /* 1 once a log write/fsync has failed (the log is fail-stopped). */
 int  wal_failed(const wal_t *w);
 
+/* Bytes of complete records in the log (the append offset). */
+uint64_t wal_size(const wal_t *w);
+
 /* The highest LSN on stable storage (fsync'd).  Monotonic. */
 uint64_t wal_durable_lsn(const wal_t *w);
 
