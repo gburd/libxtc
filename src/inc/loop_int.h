@@ -185,19 +185,23 @@ struct xtc_task {
 /*
  * Timer record.  Kept in a binary min-heap inside the loop.
  *
- * Cancel is lazy: we mark cancelled and skip on pop.  Cancel is O(1)
- * by cost; the heap may carry up to N stale entries until the next
- * extraction reaches them.  For M3 this is good enough; M5 may
- * upgrade to a hierarchical wheel.
+ * A cancel on the loop's own thread removes the node from the heap at
+ * once (O(log n), by heap_idx).  A cancel from any other thread may not
+ * touch the heap: it only marks the node, and the owner drops it when it
+ * reaches the root or when a full heap is swept before growing
+ * (timer.c).  So the heap is bounded by the live timers, and a non-empty
+ * heap whose cancelled root has been popped (what
+ * __xtc_timer_heap_next_deadline does) holds a live timer.
  */
 struct xtc_timer {
 	int64_t      deadline_ns;
 	xtc_timer_fn cb;
 	void        *user;
 	xtc_task_t  *waiter;        /* task to wake when fired (NULL if pure cb) */
-	int          heap_idx;      /* current position in heap (-1 if not in) */
-	int          cancelled;
-	int          fired;
+	int          heap_idx;      /* current position in heap (-1 if not in);
+	                             * owner-only */
+	_Atomic int  cancelled;     /* atomic: set by a cancel on any thread */
+	_Atomic int  fired;
 	int          sim_late;      /* DST: 1 once a buggify late-fire bumped
 	                             * this timer's deadline (bump at most
 	                             * once so a late fire cannot spin);

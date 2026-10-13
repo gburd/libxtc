@@ -3,9 +3,11 @@
  * Use of this source code is governed by the ISC License.
  *
  * src/evt/timer.c
- *	Binary min-heap of pending timers.  Lazy deletion: a cancelled
- *	timer is left in the heap and skipped on extraction.
- *	See M3_CLAIMS.md, Tm5-Tm10.
+ *	Binary min-heap of pending timers.  A cancel on the loop's own
+ *	thread removes the node at once; a cancel from another thread only
+ *	marks it, and the owner drops marked nodes when they reach the root
+ *	or when a full heap is swept before it would grow.
+ *	See M3_CLAIMS.md, Tm5-Tm13.
  */
 
 #include "xtc_int.h"
@@ -69,6 +71,8 @@ __sift_down(xtc_timer_t **h, int n, int i)
 	}
 }
 
+static void __sweep_cancelled(xtc_loop_t *loop);
+
 static int
 __grow(xtc_loop_t *loop)
 {
@@ -88,7 +92,16 @@ __xtc_timer_heap_push(xtc_loop_t *loop, xtc_timer_t *t)
 	int rc;
 	XTC_ASSERT_LOOP_OWNER(loop, "timer min-heap (push)");
 	if (loop->n_timers >= loop->cap_timers) {
-		if ((rc = __grow(loop)) != XTC_OK) return rc;
+		/* Full: first drop the nodes cancelled from other threads, and
+		 * grow only if the heap is still more than half full, so the
+		 * O(n) sweep runs at most once per n/2 pushes and the heap stays
+		 * within a small factor of the live timer count. */
+		if (loop->n_timers > 0)
+			__sweep_cancelled(loop);
+		if ((loop->cap_timers == 0 ||
+		    loop->n_timers > loop->cap_timers / 2) &&
+		    (rc = __grow(loop)) != XTC_OK)
+			return rc;
 	}
 	t->heap_idx = loop->n_timers;
 	loop->timers[loop->n_timers++] = t;
@@ -113,6 +126,51 @@ __xtc_timer_park_release(xtc_timer_t *t)
 		return;   /* not a park timer: freed at loop_fini */
 	if (atomic_fetch_sub_explicit(&t->refs, 1, memory_order_acq_rel) == 1)
 		__os_free(t);
+}
+
+static int
+__is_cancelled(xtc_timer_t *t)
+{
+	return atomic_load_explicit(&t->cancelled, memory_order_acquire);
+}
+
+/* Remove the node at heap index i (owner only).  The caller drops the
+ * heap's reference. */
+static void
+__heap_remove_at(xtc_loop_t *loop, int i)
+{
+	xtc_timer_t **h = loop->timers;
+	int last = --loop->n_timers;
+	h[i]->heap_idx = -1;
+	if (i == last)
+		return;
+	h[i] = h[last];
+	h[i]->heap_idx = i;
+	if (i > 0 && h[i]->deadline_ns < h[(i - 1) / 2]->deadline_ns)
+		__sift_up(h, i);
+	else
+		__sift_down(h, loop->n_timers, i);
+}
+
+/* Drop every cancelled node from the heap and rebuild it (owner only). */
+static void
+__sweep_cancelled(xtc_loop_t *loop)
+{
+	xtc_timer_t **h = loop->timers;
+	int i, n = 0;
+	for (i = 0; i < loop->n_timers; i++) {
+		xtc_timer_t *t = h[i];
+		if (__is_cancelled(t)) {
+			t->heap_idx = -1;
+			__xtc_timer_park_release(t);   /* the heap's reference */
+			continue;
+		}
+		t->heap_idx = n;
+		h[n++] = t;
+	}
+	loop->n_timers = n;
+	for (i = n / 2 - 1; i >= 0; i--)
+		__sift_down(h, n, i);
 }
 
 /* XTC_NOALLOC_BEGIN: per-tick timer dequeue/peek path (PLAN.md 19.23) --
@@ -161,7 +219,7 @@ __xtc_timer_heap_pop_due(xtc_loop_t *loop, int64_t now_ns)
 	for (;;) {
 		xtc_timer_t *top = __heap_top_unsafe(loop);
 		if (top == NULL) return NULL;
-		if (top->cancelled) {
+		if (__is_cancelled(top)) {
 			(void)__heap_pop_unsafe(loop);
 			__xtc_timer_park_release(top);  /* XTC_NOALLOC_OK: bounded free of one popped park timer */
 			continue;
@@ -174,7 +232,7 @@ __xtc_timer_heap_pop_due(xtc_loop_t *loop, int64_t now_ns)
 int64_t
 __xtc_timer_heap_next_deadline(xtc_loop_t *loop)
 {
-	while (loop->n_timers > 0 && loop->timers[0]->cancelled) {
+	while (loop->n_timers > 0 && __is_cancelled(loop->timers[0])) {
 		xtc_timer_t *dead = loop->timers[0];
 		(void)__heap_pop_unsafe(loop);
 		__xtc_timer_park_release(dead);  /* XTC_NOALLOC_OK: bounded free of one popped park timer */
@@ -231,8 +289,26 @@ xtc_timer_set(xtc_loop_t *loop, int64_t delay_ns, xtc_timer_fn fn, void *user,
 int
 xtc_timer_cancel(xtc_timer_t *timer)
 {
+	xtc_loop_t *loop;
 	if (timer == NULL) return XTC_E_INVAL;
-	if (timer->fired) return XTC_OK;     /* Tm8: already fired, no-op */
-	timer->cancelled = 1;
+	if (atomic_load_explicit(&timer->fired, memory_order_acquire))
+		return XTC_OK;     /* Tm8: already fired, no-op */
+	atomic_store_explicit(&timer->cancelled, 1, memory_order_release);
+	/*
+	 * On the loop's own thread, take the node out of the heap now (Tm13):
+	 * leaving it until it reached the root let one earlier live timer pin
+	 * every cancelled one behind it.  heap_idx is owner-only and -1 once
+	 * the node has left the heap.  Off the owner thread only the mark is
+	 * safe; the owner drops the node at the root or in the sweep before
+	 * the heap grows.  __xtc_current_loop_get is the out-of-line read, so
+	 * a fiber that migrated cannot see its previous thread's binding.
+	 */
+	loop = timer->loop;
+	if (loop != NULL && __xtc_current_loop_get() == loop &&
+	    timer->heap_idx >= 0) {
+		XTC_ASSERT_LOOP_OWNER(loop, "timer min-heap (cancel)");
+		__heap_remove_at(loop, timer->heap_idx);
+		__xtc_timer_park_release(timer);   /* the heap's reference */
+	}
 	return XTC_OK;
 }
