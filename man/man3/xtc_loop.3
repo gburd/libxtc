@@ -16,7 +16,8 @@
 .Nm xtc_task_park_on_fd ,
 .Nm xtc_waker_wake ,
 .Nm xtc_timer_set ,
-.Nm xtc_timer_cancel
+.Nm xtc_timer_cancel ,
+.Nm xtc_timer_release
 .Nd L2 single-thread event loop, tasks, wakers, timers
 .Sh SYNOPSIS
 .In xtc_loop.h
@@ -47,6 +48,8 @@
                    "xtc_timer_fn fn" "void *user" "xtc_timer_t **out"
 .Ft int
 .Fn xtc_timer_cancel "xtc_timer_t *timer"
+.Ft int
+.Fn xtc_timer_release "xtc_timer_t *timer"
 .Sh DESCRIPTION
 The L2 event loop drives a single OS thread.
 A loop owns one
@@ -178,13 +181,47 @@ schedules a callback to fire after at least
 nanoseconds.
 The handle written to
 .Fa *out
-remains valid for the lifetime of the loop, including after the
-timer has fired
-.Pq see Fn xtc_timer_cancel .
+remains valid, including after the timer has fired
+.Pq see Fn xtc_timer_cancel ,
+until it is passed to
+.Fn xtc_timer_release
+or the loop is finalised.
+.Fa out
+may be
+.Dv NULL
+when no handle is needed; the timer's memory is then reclaimed as soon
+as it fires.
 .Pp
 .Fn xtc_timer_cancel
 prevents a not-yet-fired timer from firing.
 A cancel after the timer has already fired is a safe no-op.
+A cancel on the loop's own thread removes the timer from the heap at
+once; a cancel from another thread marks it, and the loop drops it
+before the heap next grows, so cancelled timers never accumulate.
+.Pp
+.Fn xtc_timer_release
+gives up the handle.
+It does not cancel: a pending timer still fires unless it was
+cancelled first.
+The timer's memory is reclaimed once it has fired or been cancelled
+and its handle has been released.
+The handle must not be used after the release.
+Every handle should be released or cancelled-and-released: a handle
+that is never released keeps its timer (about 128 bytes) allocated
+until
+.Fn xtc_loop_fini ,
+which on a long-running loop is unbounded growth.
+.Fn xtc_timer_release
+was added in 1.55.1; before it, every
+.Fn xtc_timer_set
+timer, and every
+.Fn xtc_future_with_timeout ,
+was retained until
+.Fn xtc_loop_fini .
+.Fn xtc_timer_cancel
+and
+.Fn xtc_timer_release
+may be called from any thread.
 .Sh RETURN VALUES
 .Dv XTC_OK
 on success;
