@@ -200,6 +200,19 @@ jobs:
       - name: Scheduler feature matrix and replay equivalence
         timeout-minutes: 25
         run: sh test/dist/test_sched_policy_build.sh
+      - name: Cross-loop batch admission, looped
+        # The mt cases race producers against the driver; a small runner
+        # rarely loses a race once, so run them 20 times (about 1 s each).
+        timeout-minutes: 10
+        run: |
+          mkdir build_mt && cd build_mt
+          ../dist/configure --enable-sched-policy --with-io-backend=epoll \
+            --with-tls=none >/dev/null
+          make -j2 test_batch >/dev/null
+          for i in $(seq 20); do
+            timeout 60 ./test_batch --mt-only >/dev/null ||
+              { echo "test_batch --mt-only failed on iteration $i"; exit 1; }
+          done
 
   sanitizers:
     runs-on: codeberg-small

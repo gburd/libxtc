@@ -2645,11 +2645,18 @@ async_tests(void)
 
 #endif
 
+/* argv[1] == "--mt-only": run just the cross-loop (multi-threaded) cases,
+ * which CI loops to catch timing-dependent regressions. */
 int
-main(void)
+main(int argc, char **argv)
 {
 #ifdef XTC_ENABLE_SCHED_POLICY
 	int i;
+	if (argc > 1 && strcmp(argv[1], "--mt-only") == 0) {
+		mt_tests();
+		puts("batch: mt OK");
+		return 0;
+	}
 	handle_exhaustion();
 	charge_limits();
 	storage_overflow();
@@ -2664,6 +2671,8 @@ main(void)
 	involuntary_callback();
 	async_tests();
 #else
+	(void)argc;
+	(void)argv;
 	assert(xtc_batch_create(NULL, NULL, NULL) == XTC_E_NOSYS);
 	assert(xtc_batch_submit(NULL, NULL, 0, NULL) == XTC_E_NOSYS);
 	assert(xtc_batch_submit_mt(NULL, NULL, 0, NULL) == XTC_E_NOSYS);
