@@ -34,8 +34,19 @@ SVR_PID=$!
 echo "$SVR_PID" > "$PIDFILE"
 
 cleanup() {
+    # SIGTERM first: the server drains, closes its store and exits.
+    kill -TERM "$SVR_PID" 2>/dev/null || true
+    for _ in $(seq 1 50); do
+        kill -0 "$SVR_PID" 2>/dev/null || break
+        sleep 0.1
+    done
     kill -9 "$SVR_PID" 2>/dev/null || true
-    rm -f "$PIDFILE"
+    # A :memory: database's store is /tmp/sqlxtc-mem-<pid>.xstore plus
+    # its log and double-write files; nothing reuses them.
+    rm -f "$PIDFILE" /tmp/sqlxtc-mem-"$SVR_PID".xstore \
+        /tmp/sqlxtc-mem-"$SVR_PID".xstore-wal \
+        /tmp/sqlxtc-mem-"$SVR_PID".xstore.dwb \
+        /tmp/sqlxtc-mem-"$SVR_PID".xstore-wal.compact
 }
 trap cleanup EXIT
 
