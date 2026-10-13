@@ -46,6 +46,7 @@ struct xtc_loop;                 /* fwd: background storage procs run here */
 #define SX_MISUSE   21     /* API misuse (NULL stmt, out-of-range bind) */
 #define SX_NOMEM     7     /* out of memory */
 #define SX_BUSY      5     /* serialization conflict / contention */
+#define SX_CONSTRAINT 19   /* unique / primary-key violation */
 #define SX_ROW     100
 #define SX_DONE    101
 
@@ -94,6 +95,9 @@ int  sx_storage_close(void);
  * durable).  The next sx_storage_open rebuilds the tree from the full
  * log.  Intended for crash-recovery tests. */
 void sx_storage_abandon(void);
+/* Buffer-pool statistics of the open store (zeroed when closed). */
+struct bm_stats;
+void sx_storage_bm_stats(struct bm_stats *out);
 
 /* 1 if the libxtc-native storage engine is open (so plain CREATE TABLE
  * is routed to it).  0 otherwise. */

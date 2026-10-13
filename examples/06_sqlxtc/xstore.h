@@ -207,6 +207,18 @@ int64_t xstore_max_rowid_txn(struct xsql *db, uint32_t tableid);
  * a committed row, a buffered upsert reveals one)?  Lets the native
  * INSERT enforce PK uniqueness inside a transaction.  Returns 1 / 0. */
 int xstore_row_exists_txn(struct xsql *db, uint32_t tableid, int64_t rowid);
+/* INSERT one new row (the key must not already exist).  Autocommit
+ * checks absence atomically with the write, waiting out an in-flight
+ * writer of the key; in a transaction the commit's write-write check
+ * refuses a row committed since the snapshot.  Returns 0, 1 on a unique
+ * violation, -1 on any other error. */
+int xstore_insert_txn(struct xsql *db, uint32_t tableid, int64_t rowid,
+                      const uint8_t *rec, int reclen);
+/* Reserve an auto-assigned rowid for `tableid`: greater than `floor`
+ * (the visible max, including this txn's buffered rows) and than any
+ * rowid already handed out in this process, so concurrent INSERTs that
+ * omit the key never pick the same one. */
+int64_t xstore_next_rowid(struct xsql *db, uint32_t tableid, int64_t floor);
 /* Native table schema (replaces PRAGMA table_info / sqlite_master).  One
  * column descriptor per declared column, in declared order; column 0 is
  * the INTEGER PRIMARY KEY (the rowid).  `affinity` is the SQLite type
