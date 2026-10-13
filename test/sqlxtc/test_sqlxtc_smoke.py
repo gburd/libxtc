@@ -169,11 +169,20 @@ def main():
         check("lost update is refused", "serialize" in str(e))
     _, rows, _ = o.query("SELECT bal FROM acct WHERE id=1")
     check("first committer wins", rows == [[120]])
+    # A duplicate primary key is a UNIQUE violation, not "unsupported SQL".
+    try:
+        a.query("INSERT INTO acct(id,bal) VALUES(1,0)")
+        check("duplicate key is refused", False)
+    except RuntimeError as e:
+        check("duplicate key is refused",
+              "UNIQUE constraint failed: acct.id" in str(e))
     # SERIALIZABLE is selectable over the wire.
     a.query("BEGIN")
     a.query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
     a.query("COMMIT")
     a.query("BEGIN ISOLATION LEVEL SERIALIZABLE")
+    a.query("COMMIT")
+    a.query("START TRANSACTION ISOLATION LEVEL REPEATABLE READ")
     a.query("COMMIT")
     a.query("SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL"
             " SNAPSHOT")
