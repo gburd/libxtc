@@ -18,7 +18,13 @@
 #include "proc_int.h"
 #include "xtc_proc.h"
 #include "xtc_sync.h"
+#include "os_time.h"
+#include <pthread.h>
 #include <stdio.h> /* sysfs numa_node read in the placement helper */
+
+/* src/ptc/accel.c (internal): fence wait to an absolute deadline with a
+ * stop predicate consulted after every wake. */
+int __xtc_accel_fence_wait(int, int64_t, int (*)(void *), void *);
 #if defined(XTC_DIAGNOSTIC)
 #include <stdlib.h> /* abort */
 #endif
@@ -48,7 +54,7 @@ struct batch_slot {
 	uint64_t handle, charge;
 	void *request;
 	enum batch_slot_state state;
-	int outcome, cancel, on_clist;
+	int outcome, cancel, on_clist, hinted;
 	uint32_t prev, next, cnext;
 };
 struct batch_list {
@@ -66,20 +72,25 @@ struct batch_hent {
  * when batch_collect_inflight consumes it -- so double-terminalize is
  * structurally impossible.
  *
- * FUTURE kind only: cancel_prom/wait own the edge-triggered cancel path. At
- * the submit->inflight transition the engine makes a cancel promise/future
- * pair and a `wait` future = when_any{device future, cancel future}; the
- * driver parks on `wait`, so a device completion OR an owner cancel wakes it
- * with no periodic re-park. when_any CONSUMES both input future handles, so
- * after it the engine owns exactly two reclaimable handles: `wait` (the
- * combined future) and `cancel_prom` (the write half it resolves/drops). The
- * device read half is owned by when_any's combinator and reclaimed when the
- * app resolves its own promise -- never a pointer into the group, so no
- * cross-reference outlives teardown. The finalizer reclaims BOTH `wait` and
- * `cancel_prom` exactly once on every path. */
+ * FUTURE kind: the device future is chained (xtc_future_map) to a heap
+ * token. When the application resolves its promise, from any thread, the
+ * token records the status and signals the group notify; the driver parks
+ * on that notify, so a device completion, an owner cancel, a cancel-close,
+ * a cross-loop cancel and a kill all wake the same single wait. The token
+ * is refcounted (the map callback holds one ref, the engine the other) and
+ * the engine detaches it under its lock at finalize, so a promise resolved
+ * after the group is destroyed touches only the token. `wait` is the
+ * mapped future (engine-owned, discarded at finalize); if the map could
+ * not be allocated, `wait` is the device future itself and the driver
+ * polls it in 1 ms slices instead. */
+struct batch_tok {
+	pthread_mutex_t lock;
+	xtc_batch_t *b; /* NULL once the engine detached */
+	int refs, done, status;
+};
 struct batch_inflight {
 	xtc_batch_exec_t exec;
-	xtc_promise_t *cancel_prom;
+	struct batch_tok *tok;
 	xtc_future_t *wait;
 	uint32_t *idx;
 	size_t n;
@@ -467,6 +478,7 @@ batch_retire(xtc_batch_t *b, struct batch_slot *s)
 	s->request = NULL;
 	s->outcome = 0;
 	s->cancel = 0;
+	s->hinted = 0;
 	batch_move(b, s, B_FREE);
 	--b->live;
 	batch_mt_admit_held(b);
@@ -501,13 +513,81 @@ batch_deliver(xtc_batch_t *b)
 	}
 }
 
+static void
+batch_tok_unref(struct batch_tok *t)
+{
+	int left;
+	(void)__xtc_mtx_lock(&t->lock);
+	left = --t->refs;
+	(void)__xtc_mtx_unlock(&t->lock);
+	if (left == 0) {
+		(void)pthread_mutex_destroy(&t->lock);
+		__os_free(t);
+	}
+}
+
+/* xtc_future_map callback: runs once, on the thread that resolved (or
+ * dropped) the application's promise. */
+static intptr_t
+batch_tok_fire(intptr_t value, int status, void *user)
+{
+	struct batch_tok *t = user;
+	(void)__xtc_mtx_lock(&t->lock);
+	t->done = 1;
+	t->status = status;
+	if (t->b != NULL) {
+		(void)xtc_notify_signal(t->b->notify);
+		(void)xtc_loop_wake(t->b->loop);
+	}
+	(void)__xtc_mtx_unlock(&t->lock);
+	batch_tok_unref(t);
+	return value;
+}
+
+/* Fire cancel_hint, once per member, for every in-flight member whose
+ * cancel (owner cancel, cancel_mt, or cancel-close) has landed -- or, with
+ * `all`, for every in-flight member (forced teardown). Runs on the driver
+ * as soon as it observes the cancel, while the op may still be running.
+ * Caller must not hold the unsafe bracket (the hint is user code; mutators
+ * return XTC_E_DEADLK during it, as during collect). */
+static void
+batch_fire_hints(xtc_batch_t *b, int all)
+{
+	struct batch_slot *s;
+	size_t j;
+	if (b->cancel_hint == NULL || !b->inflight.valid)
+		return;
+	for (j = 0; j < b->inflight.n; ++j) {
+		__xtc_unsafe_enter();
+		s = &b->slots[b->inflight.idx[j]];
+		if (s->hinted || !(all || s->cancel || b->cancelling)) {
+			__xtc_unsafe_leave();
+			continue;
+		}
+		s->hinted = 1;
+		b->callback = 1;
+		__xtc_unsafe_leave();
+		b->cancel_hint(s->handle, b->opts.user);
+		__xtc_unsafe_enter();
+		b->callback = 0;
+		__xtc_unsafe_leave();
+	}
+}
+
 /* THE SINGLE FINALIZER for an offloaded op. collect() runs exactly once; each
  * in-flight member is finalized by exactly one call to this. Reached from (1)
  * the driver after the token wait returns and (2) batch_cleanup on forced
  * teardown (exec_status XTC_BATCH_EXEC_ABORTED), only when inflight.valid.
  * Caller must NOT hold the unsafe bracket (collect is user code and may yield).
  * The single-token inflight.valid flag, cleared here, makes a second
- * terminalize of the same member structurally impossible. */
+ * terminalize of the same member structurally impossible.
+ *
+ * Unless the op is known finished (exec_status OK), no member re-enters a
+ * vector: after TIMEOUT a member collect leaves CONTINUE/BLOCKED/UNSET fails
+ * with XTC_E_AGAIN, after ABORTED every member is cancelled, and after a
+ * negative status (the engine could not await the op) every member fails
+ * with that code. The device op may still be running in all three cases,
+ * so its buffers are never handed to a new submit. */
 static void
 batch_collect_inflight(xtc_batch_t *b, int exec_status)
 {
@@ -515,6 +595,7 @@ batch_collect_inflight(xtc_batch_t *b, int exec_status)
 	xtc_batch_result_t *r;
 	size_t n, j;
 	int rc, aborted;
+	batch_fire_hints(b, exec_status == XTC_BATCH_EXEC_ABORTED);
 	__xtc_unsafe_enter();
 #if defined(XTC_DIAGNOSTIC)
 	if (!b->inflight.valid)
@@ -529,45 +610,46 @@ batch_collect_inflight(xtc_batch_t *b, int exec_status)
 		s = &b->slots[b->inflight.idx[j]];
 		r = &b->results[j];
 		aborted = s->cancel || exec_status == XTC_BATCH_EXEC_ABORTED;
-		if (aborted) {
-			if (b->cancel_hint != NULL)
-				b->cancel_hint(s->handle, b->opts.user);
+		if (aborted)
 			batch_terminal(b, s, XTC_E_ABORTED);
-		} else if (rc != XTC_OK)
+		else if (exec_status < 0)
+			batch_terminal(b, s, batch_error(exec_status) ?
+			                         exec_status : XTC_E_INTERNAL);
+		else if (rc != XTC_OK)
 			batch_terminal(b, s,
 			               batch_error(rc) ? rc : XTC_E_INTERNAL);
 		else if (r->state == XTC_BATCH_DONE)
 			batch_terminal(b, s, XTC_OK);
-		else if (r->state == XTC_BATCH_BLOCKED)
-			batch_move(b, s, B_BLOCKED);
-		else if (r->state == XTC_BATCH_CONTINUE)
-			batch_move(b, s, B_READY); /* re-enters next vector */
 		else if (r->state == XTC_BATCH_ERROR)
 			batch_terminal(b, s,
 			               batch_error(r->error) ? r->error :
 			                                       XTC_E_INTERNAL);
+		else if (exec_status == XTC_BATCH_EXEC_TIMEOUT)
+			batch_terminal(b, s, XTC_E_AGAIN); /* op may be live */
+		else if (r->state == XTC_BATCH_BLOCKED)
+			batch_move(b, s, B_BLOCKED);
+		else if (r->state == XTC_BATCH_CONTINUE)
+			batch_move(b, s, B_READY); /* re-enters next vector */
 		else
 			batch_terminal(b, s, XTC_E_INTERNAL);
 	}
 	if (exec_status == XTC_BATCH_EXEC_TIMEOUT)
 		batch_inc(&b->astats.offload_timeouts);
-	else if (exec_status != XTC_BATCH_EXEC_OK
-	         && exec_status != XTC_BATCH_EXEC_ABORTED)
+	else if (exec_status < 0)
 		batch_inc(&b->astats.offload_errors);
-	/* Reclaim the engine-owned FUTURE handles exactly once (see
-	 * struct batch_inflight). `wait` is the when_any combined future;
-	 * batch_await nulls it on consume, so this discards it only on a kill
-	 * before/through the await. `cancel_prom` is the write half the engine
-	 * owns: drop it (a dropped promise aborts the cancel cell) so when_any's
-	 * combinator retires its ref and frees -- idempotent because set/drop
-	 * nulls it. The device read half is owned by when_any, not the engine. */
+	/* Reclaim the engine-owned FUTURE state exactly once: detach the token
+	 * (a later promise resolution then touches only the token) and discard
+	 * the engine's future handle. */
+	if (b->inflight.tok != NULL) {
+		(void)__xtc_mtx_lock(&b->inflight.tok->lock);
+		b->inflight.tok->b = NULL;
+		(void)__xtc_mtx_unlock(&b->inflight.tok->lock);
+		batch_tok_unref(b->inflight.tok);
+		b->inflight.tok = NULL;
+	}
 	if (b->inflight.wait != NULL) {
 		__xtc_future_discard(b->inflight.wait);
 		b->inflight.wait = NULL;
-	}
-	if (b->inflight.cancel_prom != NULL) {
-		xtc_promise_drop(b->inflight.cancel_prom);
-		b->inflight.cancel_prom = NULL;
 	}
 	b->inflight.exec.future = NULL;
 	b->inflight.valid = 0;
@@ -974,106 +1056,167 @@ batch_mt_leave(xtc_batch_t *b)
 	    memory_order_release);
 }
 
-/* FUTURE kind: build the edge-triggered cancel path for the op just launched.
- * Makes a cancel promise/future pair owned solely by the inflight record and
- * sets b->inflight.wait = when_any{device future, cancel future}, so a device
- * completion OR a cancel-close resolution wakes the single wait. when_any
- * consumes BOTH input future handles, so the engine afterward owns exactly
- * `wait` (combined) and `cancel_prom` (write half), reclaimed once by the
- * finalizer. On OOM it degrades to parking directly on the device future (no
- * early cancel wake, completion still wakes); `wait` then IS the device future
- * and the finalizer discards it the same way. Called on the driver fiber. */
+/* FUTURE kind: chain the device future to a completion token (see struct
+ * batch_inflight). On allocation failure the device future itself is kept
+ * and polled. Called on the driver fiber. */
 static void
 batch_future_arm(xtc_batch_t *b)
 {
-	xtc_promise_t *cp = NULL;
-	xtc_future_t *cf = NULL, *combined = NULL;
-	xtc_future_t *inputs[2];
-	if (xtc_future_new_pair(&cp, &cf) != XTC_OK) {
-		b->inflight.wait = b->inflight.exec.future; /* degrade */
-		b->inflight.exec.future = NULL;
-		return;
-	}
-	inputs[0] = b->inflight.exec.future;
-	inputs[1] = cf;
-	if (xtc_future_when_any(inputs, 2, &combined) != XTC_OK) {
-		/* when_any did NOT consume on failure: both handles still ours. */
-		xtc_promise_drop(cp);
-		__xtc_future_discard(cf);
-		b->inflight.wait = b->inflight.exec.future; /* degrade */
-		b->inflight.exec.future = NULL;
-		return;
-	}
-	/* when_any consumed both device + cancel read halves. */
+	struct batch_tok *t;
+	xtc_future_t *mapped = NULL;
+	b->inflight.wait = b->inflight.exec.future;
 	b->inflight.exec.future = NULL;
-	b->inflight.cancel_prom = cp;
-	b->inflight.wait = combined;
+	if (b->inflight.wait == NULL
+	    || __os_calloc(1, sizeof(*t), (void **)&t) != XTC_OK)
+		return;
+	(void)pthread_mutex_init(&t->lock, NULL);
+	t->b = b;
+	t->refs = 2; /* the map callback + the engine */
+	if (xtc_future_map(b->inflight.wait, batch_tok_fire, t, &mapped)
+	    != XTC_OK) {
+		(void)pthread_mutex_destroy(&t->lock);
+		__os_free(t);
+		return; /* not consumed: poll the device future */
+	}
+	b->inflight.wait = mapped;
+	b->inflight.tok = t;
+}
+
+/* After every wake of an await: apply cross-loop controls that landed
+ * meanwhile (a cancel_mt on an in-flight member must reach cancel_hint
+ * now, not at the boundary), fire hints, and report a cancel-close. */
+static int
+batch_await_stop(void *arg)
+{
+	xtc_batch_t *b = arg;
+	__xtc_unsafe_enter();
+	batch_mt_drain(b);
+	__xtc_unsafe_leave();
+	batch_fire_hints(b, 0);
+	return b->cancelling;
+}
+
+static int
+batch_exec_error(int rc)
+{
+	return batch_error(rc) ? rc : XTC_E_INTERNAL;
+}
+
+static int64_t
+batch_deadline(xtc_batch_t *b)
+{
+	int64_t now = 0;
+	if (b->exec_timeout_ns <= 0)
+		return -1;
+	(void)__os_clock_mono(&now);
+	return b->exec_timeout_ns > INT64_MAX - now ? INT64_MAX :
+	                                             now + b->exec_timeout_ns;
+}
+
+/* FUTURE await: one notify wait against an absolute deadline (the
+ * simulator virtualizes __os_clock_mono), re-evaluated after every wake, so
+ * stray wakes never shorten it. Builds with the kill-wake proc layer run it
+ * unmasked: a kill wakes the notify wait, which unlinks its waiter and
+ * delivers, and batch_cleanup finalizes the op. Otherwise it runs masked
+ * and a kill seen at a wake ends it as ABORTED (delivered at the leave). */
+static int
+batch_await_future(xtc_batch_t *b)
+{
+	int64_t deadline = batch_deadline(b), now = 0, wait_ns;
+	intptr_t val;
+	int rc, ready, st;
+#ifndef XTC_HAVE_PROC_KILL_WAKE
+	(void)xtc_mask_enter();
+#endif
+	for (;;) {
+		if (batch_await_stop(b)) {
+			rc = XTC_BATCH_EXEC_ABORTED;
+			break;
+		}
+#ifndef XTC_HAVE_PROC_KILL_WAKE
+		if (xtc_cancel_requested()) {
+			rc = XTC_BATCH_EXEC_ABORTED;
+			break;
+		}
+#endif
+		if (b->inflight.tok != NULL) {
+			(void)__xtc_mtx_lock(&b->inflight.tok->lock);
+			ready = b->inflight.tok->done;
+			st = b->inflight.tok->status;
+			(void)__xtc_mtx_unlock(&b->inflight.tok->lock);
+		} else if (b->inflight.wait == NULL) {
+			ready = 1; /* submit handed over no future */
+			st = XTC_E_INVAL;
+		} else {
+			ready = 0;
+			st = XTC_OK;
+			(void)xtc_future_ready(b->inflight.wait, &ready);
+			if (ready) {
+				st = xtc_future_wait(b->inflight.wait, &val, 0);
+				b->inflight.wait = NULL; /* consumed */
+			}
+		}
+		if (ready) {
+			rc = st == XTC_OK ? XTC_BATCH_EXEC_OK :
+			                    batch_exec_error(st);
+			break;
+		}
+		wait_ns = -1;
+		if (deadline >= 0) {
+			(void)__os_clock_mono(&now);
+			if (now >= deadline) {
+				rc = XTC_BATCH_EXEC_TIMEOUT;
+				break;
+			}
+			wait_ns = deadline - now;
+		}
+		if (b->inflight.tok == NULL
+		    && (wait_ns < 0 || wait_ns > 1000000))
+			wait_ns = 1000000; /* polling fallback */
+		(void)xtc_notify_wait(b->notify, wait_ns);
+	}
+#ifndef XTC_HAVE_PROC_KILL_WAKE
+	(void)xtc_mask_leave();
+#endif
+	return rc;
 }
 
 /* Await the offload token. Returns the exec_status to hand collect: OK on
- * completion, TIMEOUT if the budget elapsed, ABORTED if the group was cancel-
- * closed while the op was outstanding. Not reached for SYNC (no park).
- *
- * The engine OWNS the FUTURE token's lifetime: submit builds a cancel
- * promise/future pair and parks on when_any{device future, cancel future}.
- * A device completion OR a cancel-close resolution wakes the single combined
- * wait with NO periodic re-park -- edge-triggered, not polled. The app keeps
- * the DEVICE promise and resolves/drops it; the engine keeps the CANCEL
- * promise (b->inflight.cancel_prom) and drops it in the finalizer. */
+ * completion, TIMEOUT if exec_timeout_ns elapsed first, ABORTED if the
+ * group was cancel-closed (or the driver killed) while the op was
+ * outstanding, or a NEGATIVE XTC_E_* when the engine could not await the
+ * op at all (bad or closed fence fd, no accel support, the blocking pool
+ * refused the closure, a dropped or failed device promise, an unknown
+ * exec kind). Not reached for SYNC (no park). */
 static int
 batch_await(xtc_batch_t *b)
 {
-	intptr_t val;
 	int rc, result = 0;
 	switch (b->inflight.exec.kind) {
 	case XTC_BATCH_EXEC_FENCE:
-		/* The fd park (xtc_proc_wait_fd) is interruptible and mailbox-
-		 * wakeable; its stack waiter is runtime-owned, so a kill unwind
-		 * through batch_cleanup is safe. The app owns fence_fd. */
-		rc = xtc_accel_wait_fence(b->inflight.exec.fence_fd,
-		    b->exec_timeout_ns > 0 ? b->exec_timeout_ns : -1);
-		return rc == XTC_E_AGAIN ? XTC_BATCH_EXEC_TIMEOUT :
-		                           XTC_BATCH_EXEC_OK;
+		/* Interruptible fd park; the app owns fence_fd. close(CANCEL)
+		 * and cancels wake it (xtc_proc_wake); a kill unwinds out of
+		 * it and batch_cleanup finalizes. */
+		rc = __xtc_accel_fence_wait(b->inflight.exec.fence_fd,
+		    batch_deadline(b), batch_await_stop, b);
+		if (rc == XTC_OK)
+			return XTC_BATCH_EXEC_OK;
+		if (rc == XTC_E_AGAIN)
+			return XTC_BATCH_EXEC_TIMEOUT;
+		if (rc == XTC_E_ABORTED)
+			return XTC_BATCH_EXEC_ABORTED;
+		return batch_exec_error(rc);
 	case XTC_BATCH_EXEC_FUTURE:
-		/* Edge-triggered: one wait on the when_any combined future.
-		 * The app resolves the DEVICE promise on completion and the
-		 * owner-loop close(CANCEL) path resolves the CANCEL promise on
-		 * teardown -- either wakes this wait immediately, so there is
-		 * no 1ms re-park and cancel is noticed with completion-wake
-		 * latency, not a slice floor. b->cancelling (set by close
-		 * CANCEL under the owner bracket before the cancel promise is
-		 * resolved) tells cancel apart from completion after the wake.
-		 * when_any already consumed the device/cancel read halves at
-		 * submit; the combined future (b->inflight.wait) is the only
-		 * handle this park touches. The wait runs masked so its stack
-		 * waiter is unlinked before any kill can unwind; xtc_future_wait
-		 * CONSUMES the combined future on completion and NOT on timeout,
-		 * so a timeout leaves it for the finalizer to discard. */
-		rc = XTC_BATCH_EXEC_OK;
-		(void)xtc_mask_enter();
-		{
-			int wrc = xtc_future_wait(b->inflight.wait, &val,
-			    b->exec_timeout_ns > 0 ? b->exec_timeout_ns : -1);
-			if (wrc == XTC_E_AGAIN)
-				rc = XTC_BATCH_EXEC_TIMEOUT;
-			else {
-				/* consumed by the wait */
-				b->inflight.wait = NULL;
-				if (b->cancelling)
-					rc = XTC_BATCH_EXEC_ABORTED;
-			}
-		}
-		(void)xtc_mask_leave();
-		return rc;
+		return batch_await_future(b);
 	case XTC_BATCH_EXEC_BLOCKING:
 		/* The pool call runs to completion; no engine timeout applies
 		 * to a blocking closure (it holds a pool thread for its whole
-		 * run). */
-		(void)xtc_blocking_run(b->inflight.exec.run,
-		                       b->inflight.exec.arg, &result);
-		return XTC_BATCH_EXEC_OK;
+		 * run). A closure the pool refused never ran. */
+		rc = xtc_blocking_run(b->inflight.exec.run,
+		                      b->inflight.exec.arg, &result);
+		return rc == XTC_OK ? XTC_BATCH_EXEC_OK : batch_exec_error(rc);
 	default:
-		return XTC_BATCH_EXEC_OK;
+		return XTC_E_INVAL; /* unknown exec kind */
 	}
 }
 
@@ -1168,6 +1311,8 @@ batch_driver(void *arg)
 			b->callback = 0;
 			__xtc_unsafe_leave();
 			(void)xtc_mask_leave();
+			b->inflight.tok = NULL;
+			b->inflight.wait = NULL;
 			if (exec.kind == XTC_BATCH_EXEC_FUTURE)
 				batch_future_arm(b);
 			exec_status = exec.kind == XTC_BATCH_EXEC_SYNC ?
@@ -1570,6 +1715,9 @@ xtc_batch_cancel(xtc_batch_t *b, uint64_t handle)
 			else
 				s->cancel = 1;
 			(void)xtc_notify_signal(b->notify);
+			/* In flight: wake the await so cancel_hint fires now. */
+			if (s->state == B_INFLIGHT)
+				(void)xtc_proc_wake(b->driver);
 		}
 	}
 	__xtc_unsafe_leave();
@@ -1702,6 +1850,11 @@ batch_mt_control_submit(xtc_batch_t *b, uint64_t handle, enum batch_mt_op op)
 		batch_inc_atomic(&b->mt.n_rejections);
 		return XTC_E_AGAIN;
 	}
+	/* A FENCE await parks on the fd, not the notify: wake it so a cancel
+	 * of an in-flight member reaches cancel_hint at once. Still inside the
+	 * gate, so the driver (and its pid) cannot be gone yet. */
+	if (op == MT_CANCEL)
+		(void)xtc_proc_wake(b->driver);
 	batch_mt_leave(b);
 	batch_inc_atomic(&b->mt.n_queued);
 	return XTC_OK;
@@ -1753,21 +1906,12 @@ xtc_batch_close(xtc_batch_t *b, enum xtc_batch_close_mode mode)
 			           memory_order_relaxed) == 0)
 				atomic_store_explicit(&b->mt.gate, 1,
 				    memory_order_seq_cst);
-			/* Edge-triggered abort of an outstanding FUTURE op:
-			 * resolve the engine-owned cancel promise so the driver's
-			 * when_any wait wakes IMMEDIATELY (no 1ms slice). Set
-			 * consumes the handle, so null it; the finalizer then has
-			 * nothing left to drop. b->cancelling is already set above
-			 * so batch_await maps the wake to ABORTED. Runs on the
-			 * owner loop, same as the driver, so no cross-thread race
-			 * with the park. */
-			if (mode == XTC_BATCH_CANCEL && b->inflight.valid
-			    && b->inflight.cancel_prom != NULL) {
-				(void)xtc_promise_set(b->inflight.cancel_prom, 0,
-				    XTC_E_ABORTED);
-				b->inflight.cancel_prom = NULL;
-			}
+			/* The notify wakes an idle driver and a FUTURE await;
+			 * the proc wake ends a FENCE await, which then sees
+			 * b->cancelling and reports ABORTED. */
 			(void)xtc_notify_signal(b->notify);
+			if (mode == XTC_BATCH_CANCEL && b->inflight.valid)
+				(void)xtc_proc_wake(b->driver);
 		}
 	}
 	__xtc_unsafe_leave();
