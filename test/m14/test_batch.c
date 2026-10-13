@@ -2197,7 +2197,7 @@ struct oc {
 	xtc_batch_t *batch;
 	int kind, fence_fd, blocking_rc, cont_on_timeout;
 	int64_t timeout_ns;
-	xtc_promise_t *prom;
+	xtc_promise_t *_Atomic prom; /* handed to the "device" thread */
 	_Atomic int op_running, overlap, submits, collects, hints, completions;
 	_Atomic int hint_while_running, done, stage;
 	int statuses[8], outcome;
@@ -2236,12 +2236,15 @@ oc_submit(const xtc_batch_item_t *items, size_t n, void *user,
 	c->driver = xtc_self();
 	exec->kind = c->kind;
 	switch (c->kind) {
-	case XTC_BATCH_EXEC_FUTURE:
-		if (xtc_future_new_pair(&c->prom, &f) != XTC_OK)
+	case XTC_BATCH_EXEC_FUTURE: {
+		xtc_promise_t *p;
+		if (xtc_future_new_pair(&p, &f) != XTC_OK)
 			return XTC_E_NOMEM;
 		exec->future = f;
 		atomic_store(&c->op_running, 1);
+		atomic_store(&c->prom, p);
 		break;
+	}
 	case XTC_BATCH_EXEC_FENCE:
 		exec->fence_fd = c->fence_fd;
 		atomic_store(&c->op_running, 1);
@@ -2319,12 +2322,13 @@ oc_device(void *arg)
 {
 	struct oc *c = arg;
 	uint64_t one = 1;
+	xtc_promise_t *p;
 	usleep((useconds_t)g_dev_ms * 1000);
 	atomic_store(&c->op_running, 0);
 	if (c->kind == XTC_BATCH_EXEC_FENCE && c->fence_fd >= 0)
 		assert(write(c->fence_fd, &one, sizeof one) == sizeof one);
-	else if (c->prom != NULL)
-		(void)xtc_promise_set(c->prom, 0, XTC_OK);
+	else if ((p = atomic_exchange(&c->prom, NULL)) != NULL)
+		(void)xtc_promise_set(p, 0, XTC_OK);
 	return NULL;
 }
 
@@ -2545,8 +2549,8 @@ async_future_kill(void)
 	oc_run(c, oc_peer_kill, -1);
 	assert(c->statuses[0] == XTC_BATCH_EXEC_ABORTED);
 	assert(c->outcome == XTC_E_ABORTED && c->t_collect < 1.0);
-	if (c->prom != NULL)
-		xtc_promise_drop(c->prom);
+	if (atomic_load(&c->prom) != NULL)
+		xtc_promise_drop(atomic_exchange(&c->prom, NULL));
 #else
 	puts("batch-async: future kill test skipped (needs proc kill-wake)");
 #endif
