@@ -79,7 +79,10 @@ int  sx_storage_run(struct xtc_loop *loop);
  * truncate the log -- see engine.c. */
 int  sx_storage_checkpoint(void);
 void sx_storage_quiesce(void);
-void sx_storage_close(void);
+/* Clean shutdown: flush, compact the log, mark the base clean.  Returns
+ * SX_OK, or SX_ERROR if any flush/sync/compaction failed -- the base is
+ * then NOT marked clean and the next open replays the log. */
+int  sx_storage_close(void);
 /* Drop all in-memory engine state WITHOUT a checkpoint or clean marker,
  * simulating a crash (dirty pages lost, the log left intact and
  * durable).  The next sx_storage_open rebuilds the tree from the full

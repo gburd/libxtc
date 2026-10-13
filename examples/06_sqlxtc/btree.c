@@ -182,7 +182,7 @@ struct bt_super {
 	uint64_t clean;          /* 1 if the base was cleanly shut down */
 	uint64_t commit_clock;   /* persisted MVCC commit clock at clean shutdown */
 };
-void
+int
 bt_write_super(bt_t *bt)
 {
 	struct bt_super s;
@@ -192,7 +192,7 @@ bt_write_super(bt_t *bt)
 	s.height = atomic_load(&bt->st_height);
 	s.clean = bt->meta_clean;
 	s.commit_clock = bt->meta_clock;
-	(void)bm_write_super(bt->bm, &s, sizeof s);
+	return bm_write_super(bt->bm, &s, sizeof s);
 }
 
 void
@@ -375,7 +375,7 @@ bt_open(bm_t *bm, bt_t **out)
 	atomic_store(&bt->st_height, 1);
 	bm_unfix(bm, rf, 1);
 
-	bt_write_super(bt);             /* persist where the root lives */
+	(void)bt_write_super(bt);       /* persist where the root lives */
 
 	*out = bt;
 	return XTC_OK;
@@ -834,7 +834,7 @@ post_separator(bt_t *bt, bm_pid_t *path, int level,
 		bm_unlatch(nf); bm_unfix(bm, nf, 1);
 		atomic_store(&bt->root_pid, npid);
 		atomic_fetch_add(&bt->st_height, 1);
-		bt_write_super(bt);     /* root pid changed: persist it */
+		(void)bt_write_super(bt);   /* root pid changed: persist it */
 	}
 	return XTC_OK;
 }
@@ -1349,7 +1349,7 @@ collapse_root(bt_t *bt)
 			return;
 		atomic_store(&bt->root_pid, only_child);
 		atomic_fetch_sub(&bt->st_height, 1);
-		bt_write_super(bt);            /* root pid changed: persist it */
+		(void)bt_write_super(bt);      /* root pid changed: persist it */
 		if (bm_free_pid(bm, rpid) == XTC_OK)
 			atomic_fetch_add(&bt->st_reclaimed, 1);
 	}
