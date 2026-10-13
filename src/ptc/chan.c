@@ -203,6 +203,13 @@ xtc_chan_mpsc_try_send(xtc_chan_mpsc_t *c, void *msg)
 		if (XTC_UNLIKELY(rc != XTC_OK)) return rc;
 	}
 
+	/* The reserve (head CAS) .. publish (slot store) window must not be
+	 * involuntarily preempted: the consumer cannot take a reserved slot
+	 * until it is written, so a producer preempted there stalls every
+	 * later message (and, before try_recv stopped spinning, hung a
+	 * consumer on the producer's own loop forever).  The unsafe bracket
+	 * makes the preemption timer defer; it is a TLS increment. */
+	__xtc_unsafe_enter();
 	for (;;) {
 		head = atomic_load_explicit(&c->head, memory_order_relaxed);
 		tail = atomic_load_explicit(&c->tail, memory_order_acquire);
@@ -215,6 +222,7 @@ xtc_chan_mpsc_try_send(xtc_chan_mpsc_t *c, void *msg)
 		     * permanently fail; the site coin gates whether it is live). */
 		    (XTC_SIM_BUGGIFY("chan.mpsc.spurious_full") &&
 		     xtc_sim_fault(250))) {
+			__xtc_unsafe_leave();
 			if (c->res != NULL)
 				xtc_res_release(c->res, XTC_RES_CHAN_SLOTS, 1);
 			return XTC_E_AGAIN;
@@ -226,6 +234,7 @@ xtc_chan_mpsc_try_send(xtc_chan_mpsc_t *c, void *msg)
 	}
 	atomic_store_explicit(&c->slots[head & (c->cap - 1)], msg,
 	    memory_order_release);
+	__xtc_unsafe_leave();
 	if (atomic_load_explicit(&c->has_waker, memory_order_acquire))
 		(void)xtc_waker_wake(&c->waker);
 	return XTC_OK;
@@ -244,13 +253,15 @@ xtc_chan_mpsc_try_recv(xtc_chan_mpsc_t *c, void **out)
 			return XTC_E_INVAL;
 		return XTC_E_AGAIN;
 	}
-	/* Spin until the slot is non-NULL (the producer might have
-	 * reserved it but not yet stored). */
-	for (;;) {
-		v = atomic_load_explicit(&c->slots[tail & (c->cap - 1)],
-		    memory_order_acquire);
-		if (XTC_LIKELY(v != NULL)) break;
-	}
+	/* The producer may have reserved this slot but not yet stored it.
+	 * Never spin for it: the producer can be a preempted or descheduled
+	 * fiber on this very thread.  Report AGAIN without consuming; the
+	 * store fires the waker, and the next try_recv takes this slot (FIFO
+	 * order is kept: a later slot is never taken first). */
+	v = atomic_load_explicit(&c->slots[tail & (c->cap - 1)],
+	    memory_order_acquire);
+	if (XTC_UNLIKELY(v == NULL))
+		return XTC_E_AGAIN;
 	atomic_store_explicit(&c->slots[tail & (c->cap - 1)], NULL,
 	    memory_order_relaxed);
 	atomic_store_explicit(&c->tail, tail + 1, memory_order_release);

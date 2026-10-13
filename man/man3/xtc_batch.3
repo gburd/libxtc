@@ -113,6 +113,13 @@ Cancel records a request for terminal cancellation at a boundary. A cancellation
 recorded before the next vector excludes the request. Already recorded DONE
 wins over later cancellation. Stale handles return XTC_E_INVAL after terminal
 notification. Duplicate cancellation before notification is harmless.
+An owner-loop
+.B xtc_batch_cancel
+also accepts a live handle from
+.B xtc_batch_submit_mt
+that has not been admitted yet (still on the ring, or held for a slot): the
+request is cancelled and never runs. If an earlier hand-in on the ring is
+still being written by its producer, the call returns XTC_E_AGAIN; retry.
 .PP
 Resume changes a live BLOCKED request to READY. Duplicate resume on READY is
 harmless. WAITING and terminal requests are not resumable and return XTC_E_INVAL.
@@ -279,14 +286,19 @@ xtc_batch_create, whose options cannot carry the field) returns XTC_E_NOSYS
 from these calls. Cross-loop admission is orthogonal to the synchronous-versus-
 async step: an mt-enabled async group with a plain SYNC step works the same.
 .PP
-mt_queue_cap bounds a lock-free MPSC admission ring and a preallocated pool of
-admission records, both charged through the loop's resource accountant at
-create. The three mt calls allocate nothing: they claim a record from the
-pool, stamp a handle, and push onto the ring; a full ring or exhausted pool
-returns XTC_E_AGAIN and counts mt_rejections. mt_queue_cap (pending hand-ins)
-is distinct from capacity (admitted live requests). A hand-in that waits
-for a slot keeps its record, so mt_queue_cap also bounds hand-ins accepted
-but not yet admitted.
+mt_queue_cap bounds a lock-free MPSC admission ring and two preallocated pools
+of admission records (mt_queue_cap SUBMIT records and mt_queue_cap control
+records for cancel_mt/resume_mt), all charged through the loop's resource
+accountant at create. The three mt calls allocate nothing: they claim a record
+from their pool, stamp a handle, and push onto the ring; a full ring or
+exhausted pool returns XTC_E_AGAIN and counts mt_rejections. mt_queue_cap
+(pending hand-ins) is distinct from capacity (admitted live requests). A
+hand-in that waits for a slot keeps its SUBMIT record, so mt_queue_cap also
+bounds hand-ins accepted but not yet admitted. Held hand-ins never take a
+control record: a cancel_mt or resume_mt is refused only while mt_queue_cap
+other controls are themselves still undrained, so a group whose slots are
+all BLOCKED behind held hand-ins can always be resumed or cancelled from
+another loop.
 .PP
 There is no blocking submit_mt. On XTC_E_AGAIN the caller retries: a fiber
 yields (xtc_yield) or sleeps (xtc_proc_sleep) between attempts, a plain

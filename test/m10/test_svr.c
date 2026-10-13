@@ -785,6 +785,225 @@ test_svr_server_dies_mid_call(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ================================================================
+ * In-proc late replies, reply spoofing, huge timeouts, pid publication
+ * (re-review of 1.55.1).
+ * ================================================================ */
+
+/* Echo server: the request is {delay_us, seq}; sleep delay_us, echo. */
+static int
+echo_handle_call(void *st, const void *req, size_t size, xtc_svr_call_t *call)
+{
+	uint32_t d;
+	(void)st;
+	memcpy(&d, req, sizeof d);
+	if (d != 0)
+		(void)xtc_proc_sleep((int64_t)d * 1000);
+	(void)xtc_svr_reply(call, req, size);
+	return XTC_SVR_CONTINUE;
+}
+
+struct inproc_args {
+	xtc_svr_t *svr;
+	int n, ok, tmo, wrong;
+	uint64_t saved;
+};
+
+/* (a) A proc caller whose call times out must not keep the late reply in
+ * its save queue forever (before: one saved envelope per timed-out call,
+ * each walked by every later call). Odd calls: 200 us timeout vs a 2 ms
+ * handler; even calls: plenty of time. Every reply must be its own. */
+static void
+inproc_late_caller(void *arg)
+{
+	struct inproc_args *a = arg;
+	xtc_mailbox_stats_t ms;
+	uint32_t req[2], *r;
+	size_t rs;
+	int i, rc;
+	for (i = 1; i <= a->n; i++) {
+		req[0] = (i % 2) ? 2000 : 0;
+		req[1] = (uint32_t)i;
+		r = NULL;
+		rs = 0;
+		rc = xtc_svr_call(xtc_svr_pid(a->svr), req, sizeof req,
+		    (void **)&r, &rs, (i % 2) ? 200000 : 5000000000LL);
+		if (rc == XTC_OK) {
+			if (rs != sizeof req || r[1] != (uint32_t)i)
+				a->wrong++;
+			else
+				a->ok++;
+		} else if (rc == XTC_E_AGAIN)
+			a->tmo++;
+		else
+			a->wrong++;
+		xtc_free(r);
+	}
+	munit_assert_int(xtc_proc_mailbox_stats(xtc_self(), &ms), ==, XTC_OK);
+	a->saved = ms.saved + ms.depth;
+	(void)xtc_svr_stop(a->svr);
+}
+
+static MunitResult
+test_svr_inproc_late_replies(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_svr_t  *svr = NULL;
+	xtc_svr_callbacks_t cb = { .handle_call = echo_handle_call };
+	struct inproc_args a;
+	(void)p; (void)d;
+	memset(&a, 0, sizeof a);
+	a.n = 400;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_svr_start(loop, &cb, NULL, NULL, &svr), ==, XTC_OK);
+	a.svr = svr;
+	munit_assert_int(xtc_proc_spawn(loop, inproc_late_caller, &a, NULL,
+	    NULL), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_logf(MUNIT_LOG_INFO, "ok=%d timeout=%d wrong=%d left queued=%llu",
+	    a.ok, a.tmo, a.wrong, (unsigned long long)a.saved);
+	munit_assert_int(a.wrong, ==, 0);
+	munit_assert_int(a.ok, >=, a.n / 2);
+	munit_assert_int(a.tmo, >, 0);
+	/* At most the last timed-out call's reply may still be in flight. */
+	munit_assert_uint64(a.saved, <=, 1);
+	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* (b) An ordinary app message already queued on the caller must not be
+ * taken as the reply, even when its first bytes look like a small tag
+ * (before: {1,0,0,0,...} was returned as the first call's reply). It must
+ * still be there for the proc afterwards. */
+struct spoof_args {
+	xtc_svr_t *svr;
+	int rc, got_real, app_kept;
+};
+
+static void
+spoof_caller(void *arg)
+{
+	struct spoof_args *a = arg;
+	unsigned char app[16] = { 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0,
+	                          'E', 'V', 'I', 'L' };
+	uint32_t req[2] = { 1000, 7 }, *r = NULL;
+	size_t rs = 0;
+	void *m = NULL;
+	size_t ms = 0;
+	int i;
+	for (i = 1; i <= 4; i++) {
+		app[0] = (unsigned char)i;
+		app[8] = (unsigned char)i;
+		munit_assert_int(xtc_send(xtc_self(), app, sizeof app), ==,
+		    XTC_OK);
+	}
+	a->rc = xtc_svr_call(xtc_svr_pid(a->svr), req, sizeof req,
+	    (void **)&r, &rs, 5000000000LL);
+	a->got_real = a->rc == XTC_OK && rs == sizeof req && r[1] == 7;
+	xtc_free(r);
+	for (i = 0; i < 4; i++) {
+		if (xtc_recv(&m, &ms, 0) == XTC_OK && ms == sizeof app &&
+		    memcmp((unsigned char *)m + 12, "EVIL", 4) == 0)
+			a->app_kept++;
+		xtc_free(m);
+		m = NULL;
+	}
+	(void)xtc_svr_stop(a->svr);
+}
+
+static MunitResult
+test_svr_inproc_reply_not_spoofed(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_svr_t  *svr = NULL;
+	xtc_svr_callbacks_t cb = { .handle_call = echo_handle_call };
+	struct spoof_args a;
+	(void)p; (void)d;
+	memset(&a, 0, sizeof a);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_svr_start(loop, &cb, NULL, NULL, &svr), ==, XTC_OK);
+	a.svr = svr;
+	munit_assert_int(xtc_proc_spawn(loop, spoof_caller, &a, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(a.rc, ==, XTC_OK);
+	munit_assert_int(a.got_real, ==, 1);
+	munit_assert_int(a.app_kept, ==, 4);
+	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* (c) timeout_ns == INT64_MAX: the deadline must saturate (before: signed
+ * overflow, UB; UBSan reports it, release wrapped to "no deadline"), from
+ * a proc and from a plain thread. (d) xtc_svr_pid is read from another
+ * thread while the server proc publishes its own pid (TSan). */
+struct bigto_args {
+	xtc_svr_t *svr;
+	xtc_loop_t *loop;
+	_Atomic int proc_rc;
+	int thread_rc;
+	xtc_pid_t seen;
+};
+
+static void
+bigto_caller(void *arg)
+{
+	struct bigto_args *a = arg;
+	uint32_t req[2] = { 0, 1 };
+	void *r = NULL;
+	size_t rs = 0;
+	atomic_store(&a->proc_rc, xtc_svr_call(xtc_svr_pid(a->svr), req,
+	    sizeof req, &r, &rs, INT64_MAX));
+	xtc_free(r);
+}
+
+static void *
+bigto_thread(void *arg)
+{
+	struct bigto_args *a = arg;
+	uint32_t req[2] = { 0, 2 };
+	void *r = NULL;
+	size_t rs = 0;
+	a->seen = xtc_svr_pid(a->svr);
+	a->thread_rc = xtc_svr_call(a->seen, req, sizeof req, &r, &rs,
+	    INT64_MAX);
+	xtc_free(r);
+	while (atomic_load(&a->proc_rc) == -12345)
+		(void)xtc_sleep_ns(1000000);
+	(void)xtc_svr_stop(a->svr);
+	return NULL;
+}
+
+static MunitResult
+test_svr_huge_timeout(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_svr_t  *svr = NULL;
+	xtc_svr_callbacks_t cb = { .handle_call = echo_handle_call };
+	struct bigto_args a;
+	pthread_t th;
+	(void)p; (void)d;
+	memset(&a, 0, sizeof a);
+	atomic_store(&a.proc_rc, -12345);
+	a.thread_rc = -12345;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_svr_start(loop, &cb, NULL, NULL, &svr), ==, XTC_OK);
+	a.svr = svr;
+	a.loop = loop;
+	munit_assert_int(xtc_proc_spawn(loop, bigto_caller, &a, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(pthread_create(&th, NULL, bigto_thread, &a), ==, 0);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+	munit_assert_int(atomic_load(&a.proc_rc), ==, XTC_OK);
+	munit_assert_int(a.thread_rc, ==, XTC_OK);
+	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static char *dying_modes[] = { "proc", "thread", NULL };
 static MunitParameterEnum dying_params[] = {
 	{ "caller", dying_modes }, { NULL, NULL }
@@ -798,6 +1017,9 @@ static MunitTest tests[] = {
 	{ "/handle_continue", test_svr_handle_continue, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/call_off_loop",  test_svr_call_off_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/off_loop_late_reply", test_svr_off_loop_late_reply, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/inproc_late_replies", test_svr_inproc_late_replies, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/inproc_reply_not_spoofed", test_svr_inproc_reply_not_spoofed, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/huge_timeout", test_svr_huge_timeout, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/server_dies_mid_call", test_svr_server_dies_mid_call, NULL, NULL, MUNIT_TEST_OPTION_NONE, dying_params },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
