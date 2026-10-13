@@ -3,7 +3,7 @@
 # GPU (OpenCL) backend: make XTC_WITH_OPENCL=1   (links -lOpenCL)
 # NPU (Level Zero) backend: make XTC_WITH_LEVELZERO=1  (links -lze_loader)
 # The --hetero capstone needs BOTH: make XTC_WITH_OPENCL=1 XTC_WITH_LEVELZERO=1
-XTC_BUILD ?= ../../.agent/final-native
+XTC_BUILD ?= ../../build_unix
 XTC_INC ?= ../../src/inc
 CC = cc
 CFLAGS ?= -O2 -g

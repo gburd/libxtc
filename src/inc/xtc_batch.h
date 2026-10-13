@@ -53,11 +53,15 @@ enum xtc_batch_exec_kind {
 	XTC_BATCH_EXEC_FUTURE,  /* app resolves an xtc_future (sim-clean) */
 	XTC_BATCH_EXEC_BLOCKING /* synchronous closure on the blocking pool */
 };
-/* exec_status passed to collect: positive engine sentinels, NOT an xtc_err
- * (so an engine condition is told apart from a device-returned XTC_E_*). */
+/* exec_status passed to collect: a non-negative engine sentinel below, or a
+ * NEGATIVE XTC_E_* when the engine could not await the op (bad/closed fence
+ * fd, no accel support, refused blocking closure, failed/dropped device
+ * promise); every member then fails with that code. Only EXEC_OK means the
+ * op finished: after any other status it may still be running, and no
+ * member is resubmitted (see xtc_batch(3)). */
 #define XTC_BATCH_EXEC_OK      0
-#define XTC_BATCH_EXEC_TIMEOUT 1 /* exec_timeout_ns elapsed */
-#define XTC_BATCH_EXEC_ABORTED 2 /* group torn down mid-op */
+#define XTC_BATCH_EXEC_TIMEOUT 1 /* exec_timeout_ns elapsed (FENCE/FUTURE) */
+#define XTC_BATCH_EXEC_ABORTED 2 /* cancel-closed or driver killed mid-op */
 typedef struct xtc_batch_exec {
 	enum xtc_batch_exec_kind kind;
 	int fence_fd;          /* FENCE: borrowed; app closes */
@@ -75,14 +79,16 @@ typedef struct xtc_batch_async_opts {
 	 * it bounds BOTH the pending hand-in ring and its preallocated record
 	 * pool; distinct from `capacity` (admitted live requests). */
 	uint32_t mt_queue_cap;
-	int64_t exec_timeout_ns; /* 0 = none */
+	int64_t exec_timeout_ns; /* 0 = none; FENCE/FUTURE wait only */
 	xtc_exec_class_t sched_class;
 	int (*submit)(const xtc_batch_item_t *, size_t, void *,
 	              xtc_batch_exec_t *);
 	int (*collect)(const xtc_batch_item_t *, xtc_batch_result_t *, size_t,
 	               int, void *);
 	void (*complete)(uint64_t, void *, int, void *);
-	void (*cancel_hint)(uint64_t, void *); /* optional, may be NULL */
+	/* Optional: fires once per in-flight member when its cancel lands,
+	 * while the op is still outstanding. */
+	void (*cancel_hint)(uint64_t, void *);
 	void *user;
 } xtc_batch_async_opts_t;
 
@@ -91,7 +97,8 @@ typedef struct xtc_batch_async_stats {
 	uint64_t offloads, offload_timeouts, offload_errors;
 	/* mt_queued: hand-ins pushed through the admission ring over the
 	 * group's life (monotonic). mt_rejections: submit_mt/cancel_mt/
-	 * resume_mt rejected because the ring or record pool was full. */
+	 * resume_mt rejected because the ring or record pool was full, or
+	 * submit_mt refused because the group was closed. */
 	uint64_t mt_queued, mt_rejections;
 } xtc_batch_async_stats_t;
 
@@ -133,11 +140,16 @@ XTC_API int xtc_batch_get_async_stats(xtc_batch_t *, xtc_batch_async_stats_t *);
  * ring + record pool + the group's monotonic handle counter, never the
  * group's slots. The driver (owner loop) drains the ring at each iteration
  * boundary. submit_mt stamps and returns a handle immediately; admission into
- * the active set happens at the next boundary. A cancel is never lost even if
- * it reaches the ring before its submit from a different producer. Returns
- * XTC_E_NOSYS if mt_queue_cap == 0 (mt not enabled) or the build lacks
+ * the active set happens at the next boundary (a hand-in that finds the group
+ * full waits, in order, for a slot). Every XTC_OK is followed by exactly one
+ * complete callback. A cancel_mt for a handle the caller was given is always
+ * applied; one for a completed handle is discarded. Returns XTC_E_NOSYS if
+ * mt_queue_cap == 0 (mt not enabled) or the build lacks
  * --enable-sched-policy; XTC_E_AGAIN if the ring/pool is full or the group is
- * closed; XTC_E_RANGE on an impossible charge. See xtc_batch(3). */
+ * closed (no handle issued; retry with a yield/sleep, there is no blocking
+ * variant); XTC_E_RANGE on an impossible charge or handle exhaustion.
+ * cancel_mt/resume_mt return XTC_E_INVAL once the driver has finished.
+ * See xtc_batch(3). */
 XTC_API int xtc_batch_submit_mt(xtc_batch_t *, void *, uint64_t, uint64_t *);
 XTC_API int xtc_batch_cancel_mt(xtc_batch_t *, uint64_t);
 XTC_API int xtc_batch_resume_mt(xtc_batch_t *, uint64_t);
@@ -157,9 +169,10 @@ XTC_API int xtc_batch_resume_mt(xtc_batch_t *, uint64_t);
  * index in [0, xtc_exec_n_loops) to *out_loop_idx and returns XTC_OK.
  * Falls back to loop 0 (still XTC_OK -- absence is not an error, matching
  * xtc_accel's convention) when the device numa_node is -1/unknown, the
- * executor's loops record no known node (e.g. called before the executor
- * ran, or a single-NUMA host), or numa_nodes <= 1. Returns XTC_E_INVAL on
- * a NULL argument. See xtc_batch(3). */
+ * executor's loops record no known node, or numa_nodes <= 1. A carrier
+ * records its node when it starts, so before the executor has run (when a
+ * group can be created) this currently always returns loop 0. Returns
+ * XTC_E_INVAL on a NULL argument. See xtc_batch(3). */
 XTC_API int xtc_batch_loop_for_device(xtc_exec_t *,
     const xtc_accel_dev_t *, int *);
 

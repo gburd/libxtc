@@ -19,9 +19,10 @@
  *	  FAKE  -- pure-CPU Mandelbrot, deterministic, the default, needs no GPU,
  *	           runs in CI and under the sim backend.  SYNC or FUTURE exec.
  *	  OPENCL-- real GPU via OpenCL; submit() enqueues an NDRange and bridges
- *	           the cl_event completion to the engine's FUTURE exec kind via a
- *	           detached worker thread that clWaitForEvents then
- *	           xtc_promise_set.  collect() reads back the per-tile buffer.
+ *	           the cl_event completion to the engine's FUTURE exec kind via
+ *	           ONE long-lived waiter thread per device that clWaitForEvents
+ *	           then xtc_promise_set (a thread per op costs ~50-100 us/op).
+ *	           collect() reads back the per-tile buffer.
  *	The same batch driver (submit/collect) feeds all backends unchanged;
  *	only the vtable differs.  Compiled with XTC_WITH_OPENCL=1 for the GPU
  *	backend; without it, only FAKE is built and no OpenCL dependency exists.
@@ -36,6 +37,7 @@
 #include "xtc_exec.h"
 #include "xtc_future.h"
 #include "xtc_proc.h"
+#include "xtc_sync.h"
 
 #ifdef XTC_WITH_OPENCL
 #define CL_TARGET_OPENCL_VERSION 120
@@ -149,17 +151,23 @@ struct group {
 	uint64_t in_flight_sum;     /* sum of per-op member counts (occupancy) */
 	unsigned max_in_flight;     /* widest op */
 	unsigned tiles_done;        /* tiles that reached DONE here */
+	unsigned n_terminal;        /* complete() calls on this group */
+	xtc_notify_t *done_note;    /* complete() -> feeder: a slot freed */
 #ifdef XTC_WITH_OPENCL
 	cl_context ctx;
 	cl_command_queue q;
 	cl_program prog;
 	cl_kernel kern;
 	cl_mem dbuf;                /* device output, TILE_PX_MAX * ntiles_cap */
-	cl_event last_event;        /* current op's event (freed in collect) */
 	int cl_ready;
-	/* bridge: tiles touched by the current op, for read-back in collect */
-	const struct tile *op_tiles[MAX_TILES];
-	size_t op_n;
+	/* The device's one waiter thread and its single-op hand-off (the
+	 * engine runs at most one op per group at a time). */
+	pthread_t waiter;
+	pthread_mutex_t wmu;
+	pthread_cond_t wcv;
+	cl_event wev;               /* op to wait for, NULL = idle */
+	xtc_promise_t *wprom;
+	int wquit, waiter_up;
 #endif
 };
 
@@ -361,6 +369,8 @@ cl_discover(void)
 	return XTC_OK;
 }
 
+static int cl_waiter_start(struct group *);
+
 static int
 cl_group_init(struct group *g, int dev_index)
 {
@@ -398,37 +408,82 @@ cl_group_init(struct group *g, int dev_index)
 	    cap * sizeof(cl_uint), NULL, &err);
 	if (err != CL_SUCCESS)
 		return XTC_E_IO;
+	if (cl_waiter_start(g) != XTC_OK)
+		return XTC_E_IO;
 	g->cl_ready = 1;
 	fprintf(stderr, "group %d -> cl device %d (%s)\n",
 	    (int)(g - g->demo->groups), dev_index, nm);
 	return XTC_OK;
 }
 
-/* Bridge argument: the detached waiter thread owns these. */
-struct cl_wait {
-	cl_event event;
-	xtc_promise_t *prom;
-};
-
+/*
+ * The FUTURE bridge: one waiter thread per device, started at group init.
+ * submit hands it (event, promise) and returns; the waiter blocks in
+ * clWaitForEvents, releases the event, and resolves the promise, which
+ * wakes the driver on its loop.  The engine keeps at most one op in flight
+ * per group, so a one-entry hand-off is enough.
+ */
 static void *
 cl_waiter(void *arg)
 {
-	struct cl_wait *w = arg;
+	struct group *g = arg;
+	cl_event ev;
+	xtc_promise_t *prom;
+	cl_int st;
 
-	clWaitForEvents(1, &w->event);
-	/* Resolve from this plain OS thread; the engine's FUTURE await wakes
-	 * the driver on its own loop (dual-mode park/wake). */
-	xtc_promise_set(w->prom, 0, XTC_OK);
-	free(w);
+	pthread_mutex_lock(&g->wmu);
+	for (;;) {
+		while (g->wev == NULL && !g->wquit)
+			pthread_cond_wait(&g->wcv, &g->wmu);
+		if (g->wev == NULL)
+			break;
+		ev = g->wev;
+		prom = g->wprom;
+		g->wev = NULL;
+		g->wprom = NULL;
+		pthread_mutex_unlock(&g->wmu);
+		st = clWaitForEvents(1, &ev);
+		clReleaseEvent(ev);
+		xtc_promise_set(prom, 0, st == CL_SUCCESS ? XTC_OK : XTC_E_IO);
+		pthread_mutex_lock(&g->wmu);
+	}
+	pthread_mutex_unlock(&g->wmu);
 	return NULL;
+}
+
+static int
+cl_waiter_start(struct group *g)
+{
+	pthread_mutex_init(&g->wmu, NULL);
+	pthread_cond_init(&g->wcv, NULL);
+	if (pthread_create(&g->waiter, NULL, cl_waiter, g) != 0)
+		return XTC_E_IO;
+	g->waiter_up = 1;
+	return XTC_OK;
+}
+
+static void
+cl_waiter_stop(struct group *g)
+{
+	if (!g->waiter_up)
+		return;
+	pthread_mutex_lock(&g->wmu);
+	g->wquit = 1;
+	pthread_cond_signal(&g->wcv);
+	pthread_mutex_unlock(&g->wmu);
+	pthread_join(g->waiter, NULL);
+	g->waiter_up = 0;
 }
 
 /*
  * OPENCL submit: for each ready tile set the per-tile kernel args and enqueue
  * its NDRange on the group's queue (one buffer region per tile, keyed by the
- * tile's slot). The ops chain on one in-order queue; we take the LAST tile's
- * cl_event as the completion token for the whole vector and bridge it to a
- * FUTURE via a detached waiter thread.
+ * tile's slot).  The ops chain on one in-order queue; the LAST tile's
+ * cl_event is the completion token for the whole vector and goes to the
+ * device's waiter thread.  Tile state (pass) advances only after every
+ * enqueue succeeded, so a mid-vector failure leaves no member half-updated;
+ * kernels already enqueued are drained with clFinish before the error is
+ * returned, so no device work outlives the failed op.
  */
 static int
 cl_submit(struct group *g, const xtc_batch_item_t *items, size_t n,
@@ -436,14 +491,12 @@ cl_submit(struct group *g, const xtc_batch_item_t *items, size_t n,
 {
 	xtc_promise_t *prom;
 	xtc_future_t *fut;
-	struct cl_wait *w;
 	cl_event ev = NULL;
 	cl_int err;
 	size_t i;
 
 	if (!g->cl_ready)
 		return XTC_E_IO;
-	g->op_n = 0;
 	for (i = 0; i < n; i++) {
 		struct tile *t = items[i].request;
 		cl_uint W = (cl_uint)t->img_w, H = (cl_uint)t->img_h;
@@ -466,42 +519,30 @@ cl_submit(struct group *g, const xtc_batch_item_t *items, size_t n,
 		clSetKernelArg(g->kern, 8, sizeof cap, &cap);
 		if (ev != NULL)
 			clReleaseEvent(ev);
+		ev = NULL;
 		err = clEnqueueNDRangeKernel(g->q, g->kern, 1, NULL, &gws, NULL,
 		    0, NULL, &ev);
-		if (err != CL_SUCCESS)
+		if (err != CL_SUCCESS) {
+			clFinish(g->q);
 			return XTC_E_IO;
-		g->op_tiles[g->op_n++] = t;
-		t->pass++;
+		}
 	}
 	clFlush(g->q);
 	if (xtc_future_new_pair(&prom, &fut) != XTC_OK) {
 		if (ev != NULL)
 			clReleaseEvent(ev);
+		clFinish(g->q);
 		return XTC_E_NOMEM;
 	}
-	w = malloc(sizeof *w);
-	if (w == NULL) {
-		xtc_promise_drop(prom);
-		if (ev != NULL)
-			clReleaseEvent(ev);
-		return XTC_E_NOMEM;
-	}
-	w->event = ev; /* waiter releases it after the wait */
-	w->prom = prom;
-	g->last_event = ev;
+	for (i = 0; i < n; i++)
+		((struct tile *)items[i].request)->pass++;
+	pthread_mutex_lock(&g->wmu);
+	g->wev = ev;      /* the waiter releases it after the wait */
+	g->wprom = prom;
+	pthread_cond_signal(&g->wcv);
+	pthread_mutex_unlock(&g->wmu);
 	exec->kind = XTC_BATCH_EXEC_FUTURE;
 	exec->future = fut;
-	{
-		pthread_t th;
-		if (pthread_create(&th, NULL, cl_waiter, w) != 0) {
-			free(w);
-			xtc_promise_drop(prom);
-			if (ev != NULL)
-				clReleaseEvent(ev);
-			return XTC_E_IO;
-		}
-		pthread_detach(th);
-	}
 	return XTC_OK;
 }
 
@@ -512,9 +553,11 @@ cl_collect(struct group *g, const xtc_batch_item_t *items,
 	size_t i;
 
 	/* The waiter released the event already after resolving the promise;
-	 * read back each tile's region from the shared device buffer. */
-	if (g->last_event != NULL)
-		g->last_event = NULL;
+	 * read back each tile's region from the shared device buffer.  On any
+	 * status but OK the kernels may still be running: wait for them before
+	 * the buffer is reused. */
+	if (exec_status != XTC_BATCH_EXEC_OK)
+		clFinish(g->q);
 	for (i = 0; i < n; i++) {
 		struct tile *t = items[i].request;
 		size_t base = (size_t)t->slot * TILE_PX_MAX;
@@ -548,6 +591,7 @@ cl_group_fini(struct group *g)
 {
 	if (!g->cl_ready)
 		return;
+	cl_waiter_stop(g);
 	clReleaseMemObject(g->dbuf);
 	clReleaseKernel(g->kern);
 	clReleaseProgram(g->prog);
@@ -611,6 +655,8 @@ batch_complete(uint64_t handle, void *request, int outcome, void *user)
 		g->demo->cancelled++;
 	else
 		g->demo->failed++;
+	g->n_terminal++;
+	(void)xtc_notify_signal(g->done_note); /* wake the feeder */
 }
 
 /* ---------------------------------------------------------------------- */
@@ -655,23 +701,15 @@ struct feed_arg {
 };
 
 /*
- * Continuous feeder: submit up to `capacity` tiles, then as each completes
- * (a free slot opens) submit the next pending tile, keeping the batch full.
- * Static feeder: submit one cohort of `max_active` tiles, wait for ALL to
- * finish, then submit the next cohort -- the control that under-fills.
+ * Both feeders keep up to GROUP_CAP tiles admitted, so the device sees the
+ * same queue depth; only the refill rule differs.
+ * Continuous: whenever a tile completes, submit the next pending tile.
+ * Static: submit a cohort of GROUP_CAP tiles, wait until ALL of them have
+ * completed, then submit the next cohort -- a deep tile holds the cohort's
+ * freed slots empty until it finishes.
+ * The feeder sleeps on the group's notify (signalled by complete()); it
+ * does not poll.
  */
-static int
-group_pending_done(struct group *g, int first, int last)
-{
-	struct demo *d = g->demo;
-	int i, done = 0;
-
-	for (i = first; i < last; i++)
-		if (d->tiles[i].completions == 1)
-			done++;
-	return done == (last - first);
-}
-
 #define GROUP_CAP 8   /* admitted live tiles per group */
 #define GROUP_ACTIVE 4 /* max tiles per device op (vector width) */
 
@@ -681,44 +719,32 @@ feeder(void *arg)
 	struct feed_arg *fa = arg;
 	struct demo *d = fa->d;
 	struct group *g = fa->g;
-	int next = fa->first_tile, admitted = 0;
+	int next = fa->first_tile, cohort_end, rc;
+	unsigned target;
 
-	if (d->continuous) {
-		/* Prime the batch to capacity, then refill as tiles complete. */
-		while (next < fa->last_tile && admitted < GROUP_CAP) {
-			must(xtc_batch_submit(g->batch, &d->tiles[next],
-			    1, &d->tiles[next].handle), "submit");
+	while (next < fa->last_tile) {
+		if (d->continuous) {
+			rc = xtc_batch_submit(g->batch, &d->tiles[next], 1,
+			    &d->tiles[next].handle);
+			if (rc == XTC_E_AGAIN) {
+				/* Full: sleep until a tile completes. */
+				must(xtc_notify_wait(g->done_note, -1), "wait");
+				continue;
+			}
+			must(rc, "submit");
 			next++;
-			admitted++;
+			continue;
 		}
-		while (!group_pending_done(g, fa->first_tile, fa->last_tile)) {
-			/* Refill freed slots with pending tiles. */
-			while (next < fa->last_tile) {
-				int rc = xtc_batch_submit(g->batch,
-				    &d->tiles[next], 1, &d->tiles[next].handle);
-				if (rc == XTC_E_AGAIN)
-					break; /* batch full, wait for drain */
-				must(rc, "submit refill");
-				next++;
-			}
-			xtc_yield();
-		}
-	} else {
-		/* Static: cohort of GROUP_ACTIVE at a time, drain fully. */
-		while (next < fa->last_tile) {
-			int cohort = 0;
-			int cohort_start = next;
-			while (next < fa->last_tile && cohort < GROUP_ACTIVE) {
-				must(xtc_batch_submit(g->batch,
-				    &d->tiles[next], 1,
-				    &d->tiles[next].handle), "submit cohort");
-				next++;
-				cohort++;
-			}
-			while (!group_pending_done(g, cohort_start, next))
-				xtc_yield();
-		}
+		cohort_end = next + GROUP_CAP < fa->last_tile ?
+		    next + GROUP_CAP : fa->last_tile;
+		target = g->n_terminal + (unsigned)(cohort_end - next);
+		for (; next < cohort_end; next++)
+			must(xtc_batch_submit(g->batch, &d->tiles[next], 1,
+			    &d->tiles[next].handle), "submit cohort");
+		while (g->n_terminal < target)
+			must(xtc_notify_wait(g->done_note, -1), "wait");
 	}
+	/* DRAIN finishes every submitted tile before the driver exits. */
 	must(xtc_batch_close(g->batch, XTC_BATCH_DRAIN), "close");
 }
 
@@ -769,6 +795,7 @@ run(struct demo *d)
 		opts.collect = batch_collect;
 		opts.complete = batch_complete;
 		opts.user = g;
+		must(xtc_notify_create(&g->done_note), "notify");
 		must(xtc_batch_create_async(g->loop, &opts, &g->batch),
 		    "create_async");
 	}
@@ -794,6 +821,7 @@ run(struct demo *d)
 		rs.per_group_done[i] = g->tiles_done;
 		rs.per_group_submits[i] = g->submits;
 		must(xtc_batch_destroy(g->batch), "destroy");
+		xtc_notify_destroy(g->done_note);
 		g->demo->dev->group_fini(g);
 	}
 	if (rs.total_submits > 0)
@@ -903,16 +931,18 @@ self_test(void)
 			die("variable-length tiles (shallow=1 pass, deep>1)");
 	}
 
-	/* 3. Continuous vs static occupancy: same work, continuous keeps the
-	 *    device vector fuller (higher members-per-op). */
+	/* 3. Static mode (same queue depth, cohort refill) is equally correct.
+	 *    Occupancy is reported, not asserted: which mode issues fewer device
+	 *    ops depends on the tile-depth mix, and on real devices neither mode
+	 *    has shown a wall-time win at this size (see README). */
 	fake_use_sync = 0;
 	ds = demo_new(0, 1, 128, 128, 4, 256);
 	rsc = run(ds);
 	sum_s = checksum_tiles(ds);
 	if (sum_s != ref)
 		die("static checksum != reference");
-	if (!(rc.avg_occupancy > rsc.avg_occupancy))
-		die("continuous occupancy must exceed static");
+	if (ds->completed != (unsigned)ds->ntiles)
+		die("static: every tile completes exactly once");
 
 	/* 4. SYNC exec kind also works and matches. */
 	fake_use_sync = 1;

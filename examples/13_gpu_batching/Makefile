@@ -1,7 +1,7 @@
 # Build libxtc with --enable-sched-policy first (see README).
 # FAKE backend (default): links only libxtc.a + pthread, no OpenCL.
 # OPENCL backend: make XTC_WITH_OPENCL=1 (links -lOpenCL).
-XTC_BUILD ?= ../../.agent/final-native
+XTC_BUILD ?= ../../build_unix
 XTC_INC ?= ../../src/inc
 CC = cc
 CFLAGS ?= -O2 -g

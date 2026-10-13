@@ -290,19 +290,35 @@ the summary:
   next boundary. The exec kind is FENCE (an fd -- native only, since the
   simulation backend has no fd-readiness hook), FUTURE (an
   `xtc_future_t`, sim-deterministic), BLOCKING (a closure on the blocking
-  pool), or SYNC. An optional `exec_timeout_ns` bounds a stuck op, and a
-  cancel is honored at an iteration boundary -- `collect` still runs so
-  the application frees its device buffer and the member ends ABORTED
-  exactly once.
+  pool), or SYNC. An optional `exec_timeout_ns` bounds how long the
+  *engine waits* for a FENCE or FUTURE op (BLOCKING ignores it: a pool
+  thread cannot be interrupted). It does not stop the device: after a
+  timeout, an abort or a negative (could-not-await) exec status the op
+  may still be running, so the engine never resubmits those members over
+  the same buffers -- they end terminal -- and the application must keep
+  the op's buffers until its own runtime says the op is done. A cancel
+  of an in-flight member fires `cancel_hint` as soon as it lands (so the
+  application can abort its kernel) and is consumed at the completion
+  boundary -- `collect` still runs and the member ends ABORTED exactly
+  once. `close(CANCEL)` and a kill of the driver end a FENCE or FUTURE
+  wait promptly.
 - **Cross-loop / cross-thread admission.** `xtc_batch_submit_mt`,
   `_cancel_mt` and `_resume_mt` are callable from any loop or a plain OS
   thread. They touch only a bounded lock-light ring + record pool + the
   group's monotonic handle counter, never the group's slots; the owner
-  loop drains the ring at each boundary. A cancel is never lost even when
-  it reaches the ring before its submit from a different producer.
+  loop drains the ring at each boundary. An `XTC_OK` from `submit_mt`
+  always leads to exactly one completion: a hand-in that finds the group
+  full waits (in submission order) for a slot, and a closed group refuses
+  `submit_mt` with `XTC_E_AGAIN` before issuing a handle. A full ring or
+  record pool also returns `XTC_E_AGAIN`; the caller retries (yield or
+  sleep between attempts -- there is no blocking variant). A
+  `cancel_mt` from any producer for a handle it was given is always
+  applied; one for a handle that already completed is discarded.
 - **Placement.** `xtc_batch_loop_for_device` maps a probed accelerator
   to the executor loop whose carrier is on the device's NUMA node
-  (best-effort, loop 0 fallback), and `xtc_batch_router_create` /
+  (best-effort, loop 0 fallback). Carriers record their node only when
+  they start, so before the executor has run -- the only time a group
+  can be created -- it currently always returns loop 0; and `xtc_batch_router_create` /
   `_route` / `_destroy` shard one logical model across N caller-created
   groups by a stable key. These are advisory glue, not a scheduler:
   there is no automatic migration of a live group.

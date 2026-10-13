@@ -12,8 +12,12 @@
 #include "xtc_blocking.h"
 #include "xtc_future.h"
 #include "loop_int.h"
+#include "proc_int.h" /* XTC_HAVE_PROC_KILL_WAKE */
 #include <assert.h>
+#include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
 #if defined(__linux__)
 #include <sys/eventfd.h>
 #include <unistd.h>
@@ -1453,7 +1457,7 @@ mt_overflow(void)
 	assert(xtc_batch_create_async(xtc_exec_loop(c.exec, 0), &o, &c.batch)
 	       == XTC_OK);
 	for (i = 0; i < 5; ++i) {
-		int rc = xtc_batch_submit_mt(c.batch, &c.req[0], 1, &h);
+		int rc = xtc_batch_submit_mt(c.batch, &c.req[i], 1, &h);
 		if (rc == XTC_E_AGAIN)
 			rejects++;
 		else
@@ -1465,9 +1469,14 @@ mt_overflow(void)
 	/* charge out of range and mt-disabled paths. */
 	assert(xtc_batch_submit_mt(c.batch, &c.req[0], 0, &h) == XTC_E_RANGE);
 	assert(xtc_batch_submit_mt(c.batch, &c.req[0], 999, &h) == XTC_E_RANGE);
-	/* Close + let the (idle) driver exit so destroy succeeds. */
+	/* Close + run: every accepted hand-in still completes exactly once
+	 * (ABORTED by the cancel-close), then the driver exits. */
 	assert(xtc_batch_close(c.batch, XTC_BATCH_CANCEL) == XTC_OK);
 	assert(xtc_exec_run(c.exec) == XTC_OK);
+	assert(atomic_load(&c.completed) == 5 - rejects);
+	for (i = 0; i < 5 - rejects; ++i)
+		assert(c.req[i].completions == 1
+		       && c.req[i].outcome == XTC_E_ABORTED);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
 	assert(xtc_exec_fini(c.exec) == XTC_OK);
 	puts("batch-mt: ring overflow -> AGAIN, rejections counted, no leak OK");
@@ -1494,53 +1503,134 @@ mt_disabled(void)
 	puts("batch-mt: mt_queue_cap 0 -> submit_mt NOSYS OK");
 }
 
-/* THE KEY REGRESSION: cross-producer lost-cancel. A CANCEL for handle H is
- * pushed onto the ring BEFORE H's own SUBMIT (the race two different producers
- * create). The white-box inject hook forces that exact ring order. With the
- * early-control set, draining the CANCEL parks (H, CANCEL); draining the SUBMIT
- * creates the slot and applies the pending cancel, so the member ends ABORTED
- * exactly once and its step/collect never run on it. Without the early-control
- * set (XTC_NO_EARLY_CONTROL), the CANCEL is dropped (no slot yet) and the
- * member runs to completion -- the lost cancel this test guards against. */
 extern int __xtc_batch_mt_inject(xtc_batch_t *, int, uint64_t, void *, uint64_t);
 
+/* MAJOR 3 regression: "a cancel is never lost" decayed after mt_queue_cap
+ * stale cancels. A cancel_mt for a handle that already completed (the
+ * client-disconnect race) used to be parked forever in a bounded early-
+ * control set; once mt_queue_cap of them had accumulated, a later cancel
+ * that needed remembering was silently dropped. Here 3 * mt_queue_cap
+ * stale cancels are issued, then a cancel_mt from a DIFFERENT producer
+ * loop races its target while that target is HELD behind a full group: the
+ * target must still end ABORTED without ever running, and nothing may have
+ * been retained for the stale cancels (they are discarded on drain). */
+struct stale_ctx {
+	struct mt_ctx *c;
+	uint64_t victim;
+	_Atomic int phase;
+};
+static struct stale_ctx g_stale;
+
+static int
+mt_block_submit(const xtc_batch_item_t *items, size_t n, void *user,
+                xtc_batch_exec_t *exec)
+{
+	size_t i;
+	(void)user;
+	exec->kind = XTC_BATCH_EXEC_SYNC;
+	for (i = 0; i < n; ++i)
+		((struct mt_req *)items[i].request)->ran++;
+	return XTC_OK;
+}
+
+/* req[0] blocks (holding the only slot) until phase 2; every other
+ * request finishes in one step. */
+static int
+mt_block_collect(const xtc_batch_item_t *items, xtc_batch_result_t *results,
+                 size_t n, int exec_status, void *user)
+{
+	struct mt_ctx *c = user;
+	size_t i;
+	(void)exec_status;
+	for (i = 0; i < n; ++i)
+		results[i].state = items[i].request == &c->req[0]
+		        && atomic_load(&g_stale.phase) < 2 ?
+		    XTC_BATCH_BLOCKED : XTC_BATCH_DONE;
+	return XTC_OK;
+}
+
 static void
-mt_lost_cancel(void)
+mt_stale_canceller(void *arg)
+{
+	struct mt_ctx *c = arg;
+	int i;
+	while (atomic_load(&g_stale.phase) < 1)
+		xtc_yield();
+	/* Different producer than the submitter: cancel the held victim. */
+	while (xtc_batch_cancel_mt(c->batch, g_stale.victim) != XTC_OK)
+		xtc_yield();
+	for (i = 0; i < 8; ++i)
+		xtc_yield();
+	atomic_store(&g_stale.phase, 2);
+}
+
+static void
+mt_stale_owner(void *arg)
+{
+	struct mt_ctx *c = arg;
+	uint64_t h;
+	int i, k;
+	/* 3 * mt_queue_cap stale cancels: each names a request that has
+	 * already completed. */
+	for (k = 0; k < 12; ++k) {
+		while (xtc_batch_submit_mt(c->batch, &c->req[7], 1, &h)
+		       != XTC_OK)
+			xtc_yield();
+		while (c->req[7].completions == 0)
+			xtc_yield();
+		c->req[7].completions = 0;
+		while (xtc_batch_cancel_mt(c->batch, h) != XTC_OK)
+			xtc_yield();
+		for (i = 0; i < 4; ++i)
+			xtc_yield();
+	}
+	/* req[0] takes the only slot and blocks; the victim (req[1]) is then
+	 * held behind it. */
+	while (xtc_batch_submit_mt(c->batch, &c->req[0], 1, &h) != XTC_OK)
+		xtc_yield();
+	while (c->req[0].ran == 0)
+		xtc_yield();
+	while (xtc_batch_submit_mt(c->batch, &c->req[1], 1, &g_stale.victim)
+	       != XTC_OK)
+		xtc_yield();
+	atomic_store(&g_stale.phase, 1);
+	while (atomic_load(&g_stale.phase) < 2)
+		xtc_yield();
+	assert(xtc_batch_resume_mt(c->batch, h) == XTC_OK);
+	while (c->req[0].completions == 0 || c->req[1].completions == 0)
+		xtc_yield();
+	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+}
+
+static void
+mt_stale_cancels(void)
 {
 	struct mt_ctx c = { 0 };
 	xtc_batch_async_opts_t o;
+	xtc_batch_stats_t s = { .size = sizeof(s), .version = XTC_BATCH_VERSION };
 	xtc_pid_t pid;
-	uint64_t H = 1; /* the handle both the cancel and submit name */
-	c.n_req = 1;
-	c.n_producers = 0;
-	c.req[0].left = 2;
-	assert(xtc_exec_init(&c.exec, 1) == XTC_OK);
-	o = mt_opts(&c, 4, 4);
+	memset(&g_stale, 0, sizeof g_stale);
+	g_stale.c = &c;
+	assert(xtc_exec_init(&c.exec, 2) == XTC_OK);
+	o = mt_opts(&c, 1, 4); /* one slot, mt_queue_cap 4 */
+	o.submit = mt_block_submit;
+	o.collect = mt_block_collect;
 	assert(xtc_batch_create_async(xtc_exec_loop(c.exec, 0), &o, &c.batch)
 	       == XTC_OK);
-	/* Push the CANCEL for H FIRST, then the SUBMIT for H -- the exact
-	 * cross-producer order the single-FIFO-ring argument cannot defeat. */
-	assert(__xtc_batch_mt_inject(c.batch, 1 /*MT_CANCEL*/, H, NULL, 0)
-	       == XTC_OK);
-	assert(__xtc_batch_mt_inject(c.batch, 0 /*MT_SUBMIT*/, H, &c.req[0], 1)
-	       == XTC_OK);
-	/* The controller just closes once the one member has terminated. */
-	assert(xtc_proc_spawn(xtc_exec_loop(c.exec, 0), mt_controller_fn, &c,
+	assert(xtc_proc_spawn(xtc_exec_loop(c.exec, 0), mt_stale_owner, &c,
 	    NULL, &pid) == XTC_OK);
+	assert(xtc_proc_spawn(xtc_exec_loop(c.exec, 1), mt_stale_canceller,
+	    &c, NULL, &pid) == XTC_OK);
 	assert(xtc_exec_run(c.exec) == XTC_OK);
-	assert(c.req[0].completions == 1);
-#ifdef XTC_NO_EARLY_CONTROL
-	/* Mutant build: the cancel is lost, the member runs and completes OK. */
-	assert(c.req[0].outcome == XTC_OK && c.req[0].ran >= 1);
-#else
-	/* Correct build: ABORTED before it ever ran; step/collect never saw it. */
-	assert(c.req[0].outcome == XTC_E_ABORTED);
-	assert(c.req[0].ran == 0);
-#endif
-	mt_conservation(&c);
+	assert(c.req[0].completions == 1 && c.req[0].outcome == XTC_OK);
+	assert(c.req[1].completions == 1);
+	assert(c.req[1].outcome == XTC_E_ABORTED); /* the cancel was kept */
+	assert(c.req[1].ran == 0);                 /* and it never ran */
+	assert(xtc_batch_get_stats(c.batch, &s) == XTC_OK);
+	assert(s.completed == 13 && s.cancelled == 1 && s.rejections == 0);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
 	assert(xtc_exec_fini(c.exec) == XTC_OK);
-	puts("batch-mt: cross-producer cancel-before-submit never lost OK");
+	puts("batch-mt: stale cancels discarded; a later cancel is never lost OK");
 }
 
 /* cancel_mt/resume_mt for a handle STILL IN THE RING (not yet drained) is
@@ -1692,14 +1782,255 @@ mt_contended_pool(void)
 	puts("batch-mt: contended free-pool, concurrent claims, exactly-once OK");
 }
 
+/* BLOCKER 1 regression: a hand-in drained while every slot is taken was
+ * dropped (no completion, counted as a rejection) although submit_mt had
+ * already returned XTC_OK and its handle. Six hand-ins into a 2-slot group,
+ * queued before the first boundary, must all complete exactly once, in
+ * submission order, with zero rejections. The bounded controller turns the
+ * old hang into an assertion. */
+struct hold_ctx {
+	struct mt_ctx *c;
+	uint64_t order[8];
+	_Atomic int n_order;
+};
+static struct hold_ctx *g_hold;
+
+static void
+mt_hold_complete(uint64_t handle, void *request, int outcome, void *user)
+{
+	int i;
+	(void)request;
+	assert(outcome == XTC_OK);
+	i = atomic_fetch_add_explicit(&g_hold->n_order, 1,
+	    memory_order_relaxed);
+	if (i < 8)
+		g_hold->order[i] = handle;
+	mt_count_complete(handle, request, outcome, user);
+}
+
+static void
+mt_bounded_controller_fn(void *arg)
+{
+	struct mt_ctx *c = arg;
+	long guard = 0;
+	while (atomic_load_explicit(&c->completed, memory_order_relaxed)
+	    < c->n_req && ++guard < 200000)
+		xtc_yield();
+	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+}
+
+static void
+mt_full_hold(void)
+{
+	struct mt_ctx c = { 0 };
+	struct hold_ctx hc = { 0 };
+	xtc_batch_async_opts_t o;
+	xtc_batch_stats_t s = { .size = sizeof(s), .version = XTC_BATCH_VERSION };
+	xtc_pid_t pid;
+	uint64_t h[6];
+	int i;
+	hc.c = &c;
+	g_hold = &hc;
+	c.n_req = 6;
+	assert(xtc_exec_init(&c.exec, 1) == XTC_OK);
+	o = mt_opts(&c, 2, 8);
+	o.submit = mt_count_submit;
+	o.collect = mt_count_collect;
+	o.complete = mt_hold_complete;
+	assert(xtc_batch_create_async(xtc_exec_loop(c.exec, 0), &o, &c.batch)
+	       == XTC_OK);
+	for (i = 0; i < 6; ++i)
+		assert(xtc_batch_submit_mt(c.batch, NULL, 1, &h[i]) == XTC_OK);
+	assert(xtc_proc_spawn(xtc_exec_loop(c.exec, 0),
+	    mt_bounded_controller_fn, &c, NULL, &pid) == XTC_OK);
+	assert(xtc_exec_run(c.exec) == XTC_OK);
+	assert(atomic_load(&c.completed) == 6);
+	for (i = 0; i < 6; ++i)
+		assert(hc.order[i] == h[i]); /* admission order preserved */
+	assert(xtc_batch_get_stats(c.batch, &s) == XTC_OK);
+	assert(s.rejections == 0 && s.completed == 6 && s.queued == 0);
+	assert(xtc_batch_destroy(c.batch) == XTC_OK);
+	assert(xtc_exec_fini(c.exec) == XTC_OK);
+	puts("batch-mt: hand-ins beyond capacity held, all completed in order OK");
+}
+
+/* MAJOR 2 regression: submit_mt into a closed or closing group returned
+ * XTC_OK and a handle that never completed. Now (a) after close every
+ * submit_mt returns XTC_E_AGAIN without touching *out, before and after the
+ * driver has gone; (b) with plain-thread producers racing close(DRAIN),
+ * every XTC_OK handle completes exactly once. */
+struct close_ctx {
+	struct mt_ctx *c;
+	_Atomic int closed, ok;
+	_Atomic int done[4096];
+};
+static struct close_ctx g_close;
+
+static void
+mt_close_complete(uint64_t handle, void *request, int outcome, void *user)
+{
+	(void)request;
+	(void)user;
+	assert(outcome == XTC_OK);
+	assert(handle < 4096);
+	assert(atomic_fetch_add(&g_close.done[handle], 1) == 0);
+	(void)atomic_fetch_add_explicit(&g_close.c->completed, 1,
+	    memory_order_relaxed);
+}
+
+static void *
+mt_close_producer(void *arg)
+{
+	struct mt_ctx *c = arg;
+	uint64_t h;
+	int rc;
+	for (;;) {
+		h = 0;
+		rc = xtc_batch_submit_mt(c->batch, NULL, 1, &h);
+		if (rc == XTC_OK) {
+			assert(h != 0 && h < 4096);
+			(void)atomic_fetch_add(&g_close.ok, 1);
+		} else {
+			assert(rc == XTC_E_AGAIN && h == 0);
+			if (atomic_load(&g_close.closed))
+				break;
+		}
+		if (atomic_load(&g_close.ok) >= 3000)
+			break;
+	}
+	return NULL;
+}
+
+static void
+mt_close_owner(void *arg)
+{
+	struct mt_ctx *c = arg;
+	while (atomic_load(&g_close.ok) < 200)
+		xtc_yield();
+	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+	atomic_store(&g_close.closed, 1);
+}
+
+static void
+mt_closed(void)
+{
+	struct mt_ctx c = { 0 };
+	xtc_batch_async_opts_t o;
+	xtc_pid_t pid;
+	pthread_t th[2];
+	uint64_t h = 77;
+	int i;
+	/* (a) closed pre-run, then after the driver has exited. */
+	assert(xtc_exec_init(&c.exec, 1) == XTC_OK);
+	o = mt_opts(&c, 4, 4);
+	o.submit = mt_count_submit;
+	o.collect = mt_count_collect;
+	o.complete = mt_count_complete;
+	assert(xtc_batch_create_async(xtc_exec_loop(c.exec, 0), &o, &c.batch)
+	       == XTC_OK);
+	assert(xtc_batch_close(c.batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_submit_mt(c.batch, NULL, 1, &h) == XTC_E_AGAIN);
+	assert(h == 77);
+	assert(xtc_exec_run(c.exec) == XTC_OK);
+	for (i = 0; i < 8; ++i)
+		assert(xtc_batch_submit_mt(c.batch, NULL, 1, &h) == XTC_E_AGAIN);
+	assert(h == 77 && atomic_load(&c.completed) == 0);
+	assert(xtc_batch_destroy(c.batch) == XTC_OK);
+	assert(xtc_exec_fini(c.exec) == XTC_OK);
+	/* (b) producers racing close(DRAIN). */
+	memset(&c, 0, sizeof c);
+	memset(&g_close, 0, sizeof g_close);
+	g_close.c = &c;
+	assert(xtc_exec_init(&c.exec, 1) == XTC_OK);
+	o = mt_opts(&c, 4, 8);
+	o.submit = mt_count_submit;
+	o.collect = mt_count_collect;
+	o.complete = mt_close_complete;
+	assert(xtc_batch_create_async(xtc_exec_loop(c.exec, 0), &o, &c.batch)
+	       == XTC_OK);
+	assert(xtc_proc_spawn(xtc_exec_loop(c.exec, 0), mt_close_owner, &c,
+	    NULL, &pid) == XTC_OK);
+	for (i = 0; i < 2; ++i)
+		assert(pthread_create(&th[i], NULL, mt_close_producer, &c) == 0);
+	assert(xtc_exec_run(c.exec) == XTC_OK);
+	for (i = 0; i < 2; ++i)
+		assert(pthread_join(th[i], NULL) == 0);
+	assert(atomic_load(&c.completed) == atomic_load(&g_close.ok));
+	assert(xtc_batch_destroy(c.batch) == XTC_OK);
+	assert(xtc_exec_fini(c.exec) == XTC_OK);
+	printf("batch-mt: closed group refuses submit_mt; %d hand-ins racing "
+	       "close all completed once OK\n", atomic_load(&g_close.ok));
+}
+
+/* NIT: handle exhaustion under concurrency. With fetch-add + restore, a
+ * producer racing another at UINT64_MAX could stamp a wrapped handle (1)
+ * between the wrap and the restore. 4 threads hammer submit_mt after the
+ * last 8 handles: exactly 8 succeed, all in range, and every later call
+ * is XTC_E_RANGE. */
+struct exh_ctx {
+	xtc_batch_t *batch;
+	_Atomic int ok, bad;
+};
+
+static void *
+mt_exhaust_thread(void *arg)
+{
+	struct exh_ctx *e = arg;
+	uint64_t h;
+	int i, rc;
+	for (i = 0; i < 200000; ++i) {
+		rc = xtc_batch_submit_mt(e->batch, NULL, 1, &h);
+		if (rc == XTC_OK) {
+			atomic_fetch_add(&e->ok, 1);
+			if (h <= UINT64_MAX - 8)
+				atomic_fetch_add(&e->bad, 1);
+		} else if (rc != XTC_E_RANGE && rc != XTC_E_AGAIN)
+			atomic_fetch_add(&e->bad, 1);
+	}
+	return NULL;
+}
+
+static void
+mt_handle_exhaustion(void)
+{
+	struct mt_ctx c = { 0 };
+	struct exh_ctx e = { 0 };
+	xtc_batch_async_opts_t o;
+	pthread_t th[4];
+	int i;
+	assert(xtc_exec_init(&c.exec, 1) == XTC_OK);
+	o = mt_opts(&c, 4, 32);
+	o.submit = mt_count_submit;
+	o.collect = mt_count_collect;
+	o.complete = mt_count_complete;
+	assert(xtc_batch_create_async(xtc_exec_loop(c.exec, 0), &o, &c.batch)
+	       == XTC_OK);
+	__xtc_batch_set_last_handle(c.batch, UINT64_MAX - 8);
+	e.batch = c.batch;
+	for (i = 0; i < 4; ++i)
+		assert(pthread_create(&th[i], NULL, mt_exhaust_thread, &e) == 0);
+	for (i = 0; i < 4; ++i)
+		assert(pthread_join(th[i], NULL) == 0);
+	assert(atomic_load(&e.bad) == 0 && atomic_load(&e.ok) == 8);
+	assert(xtc_batch_close(c.batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_exec_run(c.exec) == XTC_OK);
+	assert(atomic_load(&c.completed) == 8);
+	assert(xtc_batch_destroy(c.batch) == XTC_OK);
+	assert(xtc_exec_fini(c.exec) == XTC_OK);
+	puts("batch-mt: concurrent handle exhaustion never wraps OK");
+}
+
 static void
 mt_tests(void)
 {
 	mt_disabled();
 	mt_overflow();
 	mt_multiproducer();
+	mt_full_hold();
+	mt_closed();
+	mt_handle_exhaustion();
 	mt_contended_pool();
-	mt_lost_cancel();
+	mt_stale_cancels();
 	mt_cancel_in_ring();
 }
 
@@ -1854,6 +2185,451 @@ placement_tests(void)
 	placement_router();
 }
 
+/* --------------------------------------------------------------------------
+ * Async-offload contract (review 1.55 MAJOR 1/4/5/6 + the BLOCKING rc).
+ * One harness: a 1-member async group whose submit hands the engine a
+ * token chosen per case, a peer on the same loop that acts at a set time,
+ * and a watchdog thread that turns a hang into a failure. Times are wall
+ * clock (native build).
+ * -------------------------------------------------------------------------- */
+struct oc {
+	xtc_loop_t *loop;
+	xtc_batch_t *batch;
+	int kind, fence_fd, blocking_rc, cont_on_timeout;
+	int64_t timeout_ns;
+	xtc_promise_t *_Atomic prom; /* handed to the "device" thread */
+	_Atomic int op_running, overlap, submits, collects, hints, completions;
+	_Atomic int hint_while_running, done, stage;
+	int statuses[8], outcome;
+	double t0, t_collect, t_hint;
+	xtc_pid_t driver;
+	const char *name;
+};
+static struct oc g_oc;
+
+static double
+oc_now(void)
+{
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
+}
+
+static int
+oc_blocking_fn(void *arg)
+{
+	(void)arg;
+	return 0;
+}
+
+static int
+oc_submit(const xtc_batch_item_t *items, size_t n, void *user,
+          xtc_batch_exec_t *exec)
+{
+	struct oc *c = user;
+	xtc_future_t *f;
+	(void)items;
+	(void)n;
+	if (atomic_load(&c->op_running))
+		atomic_fetch_add(&c->overlap, 1); /* resubmitted over a live op */
+	atomic_fetch_add(&c->submits, 1);
+	c->driver = xtc_self();
+	exec->kind = c->kind;
+	switch (c->kind) {
+	case XTC_BATCH_EXEC_FUTURE: {
+		xtc_promise_t *p;
+		if (xtc_future_new_pair(&p, &f) != XTC_OK)
+			return XTC_E_NOMEM;
+		exec->future = f;
+		atomic_store(&c->op_running, 1);
+		atomic_store(&c->prom, p);
+		break;
+	}
+	case XTC_BATCH_EXEC_FENCE:
+		exec->fence_fd = c->fence_fd;
+		atomic_store(&c->op_running, 1);
+		break;
+	case XTC_BATCH_EXEC_BLOCKING:
+		exec->run = oc_blocking_fn;
+		break;
+	default:
+		break;
+	}
+	return XTC_OK;
+}
+
+static int
+oc_collect(const xtc_batch_item_t *items, xtc_batch_result_t *results,
+           size_t n, int exec_status, void *user)
+{
+	struct oc *c = user;
+	size_t i;
+	int k = atomic_fetch_add(&c->collects, 1);
+	(void)items;
+	if (k < 8)
+		c->statuses[k] = exec_status;
+	if (k == 0)
+		c->t_collect = oc_now() - c->t0;
+	for (i = 0; i < n; ++i)
+		results[i].state = exec_status == XTC_BATCH_EXEC_OK ?
+		    XTC_BATCH_DONE :
+		    (c->cont_on_timeout ? XTC_BATCH_CONTINUE : XTC_BATCH_DONE);
+	return XTC_OK;
+}
+
+static void
+oc_hint(uint64_t handle, void *user)
+{
+	struct oc *c = user;
+	(void)handle;
+	if (atomic_fetch_add(&c->hints, 1) == 0)
+		c->t_hint = oc_now() - c->t0;
+	if (atomic_load(&c->op_running))
+		atomic_fetch_add(&c->hint_while_running, 1);
+}
+
+static void
+oc_complete(uint64_t handle, void *request, int outcome, void *user)
+{
+	struct oc *c = user;
+	(void)handle;
+	(void)request;
+	assert(atomic_fetch_add(&c->completions, 1) == 0); /* exactly once */
+	c->outcome = outcome;
+}
+
+static void *
+oc_watchdog(void *arg)
+{
+	struct oc *c = arg;
+	int i;
+	for (i = 0; i < 500 && !atomic_load(&c->done); i++)
+		usleep(10000);
+	if (!atomic_load(&c->done)) {
+		fprintf(stderr, "%s: hung (submits=%d collects=%d "
+		    "completions=%d hints=%d)\n", c->name, atomic_load(&c->submits),
+		    atomic_load(&c->collects), atomic_load(&c->completions),
+		    atomic_load(&c->hints));
+		_exit(3);
+	}
+	return NULL;
+}
+
+/* The "device": finishes the op at `ms`, from a plain thread. */
+static int g_dev_ms;
+static void *
+oc_device(void *arg)
+{
+	struct oc *c = arg;
+	uint64_t one = 1;
+	xtc_promise_t *p;
+	usleep((useconds_t)g_dev_ms * 1000);
+	atomic_store(&c->op_running, 0);
+	if (c->kind == XTC_BATCH_EXEC_FENCE && c->fence_fd >= 0)
+		assert(write(c->fence_fd, &one, sizeof one) == sizeof one);
+	else if ((p = atomic_exchange(&c->prom, NULL)) != NULL)
+		(void)xtc_promise_set(p, 0, XTC_OK);
+	return NULL;
+}
+
+static void
+oc_setup(struct oc *c, const char *name, int kind, int64_t timeout_ns)
+{
+	xtc_batch_async_opts_t o = { .size = sizeof(o),
+		                     .version = XTC_BATCH_VERSION,
+		                     .capacity = 2,
+		                     .max_active = 2,
+		                     .resource_capacity = 2,
+		                     .mt_queue_cap = 4,
+		                     .submit = oc_submit,
+		                     .collect = oc_collect,
+		                     .complete = oc_complete,
+		                     .cancel_hint = oc_hint };
+	uint64_t h;
+	memset(c, 0, sizeof *c);
+	c->name = name;
+	c->kind = kind;
+	c->fence_fd = -1;
+	c->timeout_ns = timeout_ns;
+	o.exec_timeout_ns = timeout_ns;
+	o.user = c;
+	assert(xtc_loop_init(&c->loop) == XTC_OK);
+	assert(xtc_batch_create_async(c->loop, &o, &c->batch) == XTC_OK);
+	assert(xtc_batch_submit(c->batch, NULL, 1, &h) == XTC_OK);
+	c->t0 = oc_now();
+}
+
+static void
+oc_run(struct oc *c, void (*peer)(void *), int device_ms)
+{
+	pthread_t wd, dev;
+	xtc_pid_t pid;
+	g_dev_ms = device_ms;
+	assert(pthread_create(&wd, NULL, oc_watchdog, c) == 0);
+	if (device_ms >= 0)
+		assert(pthread_create(&dev, NULL, oc_device, c) == 0);
+	assert(xtc_proc_spawn(c->loop, peer, c, NULL, &pid) == XTC_OK);
+	assert(xtc_loop_run(c->loop) == XTC_OK);
+	if (device_ms >= 0)
+		assert(pthread_join(dev, NULL) == 0);
+	atomic_store(&c->done, 1);
+	assert(pthread_join(wd, NULL) == 0);
+	assert(xtc_batch_destroy(c->batch) == XTC_OK);
+	assert(xtc_loop_fini(c->loop) == XTC_OK);
+	printf("batch-async: %s: collects=%d status0=%d outcome=%d hints=%d "
+	       "t_collect=%.3f t_hint=%.3f\n", c->name, atomic_load(&c->collects),
+	       c->statuses[0], c->outcome, atomic_load(&c->hints), c->t_collect,
+	       c->t_hint);
+}
+
+static void
+oc_peer_drain(void *arg)
+{
+	struct oc *c = arg;
+	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+}
+
+/* MAJOR 1: FENCE wait errors used to reach collect as EXEC_OK. */
+static void
+async_fence_errors(void)
+{
+#if defined(__linux__) && defined(XTC_HAVE_ACCEL)
+	struct oc *c = &g_oc;
+	xtc_batch_async_stats_t as = { .size = sizeof(as),
+		                       .version = XTC_BATCH_VERSION };
+	oc_setup(c, "fence fd=-1", XTC_BATCH_EXEC_FENCE, 0);
+	c->fence_fd = -1;
+	assert(xtc_batch_get_async_stats(c->batch, &as) == XTC_OK);
+	oc_run(c, oc_peer_drain, -1);
+	assert(c->statuses[0] == XTC_E_INVAL && c->outcome == XTC_E_INVAL);
+	oc_setup(c, "fence closed fd", XTC_BATCH_EXEC_FENCE, 0);
+	c->fence_fd = eventfd(0, 0);
+	(void)close(c->fence_fd);
+	oc_run(c, oc_peer_drain, -1);
+	assert(c->statuses[0] == XTC_E_INVAL && c->outcome == XTC_E_INVAL);
+#else
+	puts("batch-async: fence error test skipped (no accel support)");
+#endif
+}
+
+/* lead item: a blocking closure the pool refused (or never ran) must not
+ * reach collect as EXEC_OK. exec->run == NULL makes xtc_blocking_run
+ * return XTC_E_INVAL without running anything -- the same channel as the
+ * pool's XTC_E_AGAIN / XTC_E_RESOURCE on the io branch. */
+static int
+oc_submit_norun(const xtc_batch_item_t *items, size_t n, void *user,
+                xtc_batch_exec_t *exec)
+{
+	int rc = oc_submit(items, n, user, exec);
+	exec->run = NULL;
+	return rc;
+}
+
+static void
+async_blocking_refused(void)
+{
+	struct oc *c = &g_oc;
+	xtc_batch_async_opts_t o = { .size = sizeof(o),
+		                     .version = XTC_BATCH_VERSION,
+		                     .capacity = 1,
+		                     .max_active = 1,
+		                     .resource_capacity = 1,
+		                     .submit = oc_submit_norun,
+		                     .collect = oc_collect,
+		                     .complete = oc_complete };
+	xtc_batch_async_stats_t as = { .size = sizeof(as),
+		                       .version = XTC_BATCH_VERSION };
+	uint64_t h;
+	memset(c, 0, sizeof *c);
+	c->name = "blocking refused";
+	c->kind = XTC_BATCH_EXEC_BLOCKING;
+	o.user = c;
+	assert(xtc_loop_init(&c->loop) == XTC_OK);
+	assert(xtc_batch_create_async(c->loop, &o, &c->batch) == XTC_OK);
+	assert(xtc_batch_submit(c->batch, NULL, 1, &h) == XTC_OK);
+	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_loop_run(c->loop) == XTC_OK);
+	assert(xtc_batch_get_async_stats(c->batch, &as) == XTC_OK);
+	assert(c->statuses[0] == XTC_E_INVAL && c->outcome == XTC_E_INVAL);
+	assert(as.offload_errors == 1);
+	assert(xtc_batch_destroy(c->batch) == XTC_OK);
+	assert(xtc_loop_fini(c->loop) == XTC_OK);
+	puts("batch-async: blocking closure refused -> negative exec_status OK");
+}
+
+/* MAJOR 4: after TIMEOUT, collect's CONTINUE must not resubmit over the
+ * live op; the member fails with XTC_E_AGAIN. FUTURE, 50 ms timeout, op
+ * finishes at 300 ms. */
+static void
+async_timeout_no_resubmit(void)
+{
+	struct oc *c = &g_oc;
+	oc_setup(c, "timeout+CONTINUE", XTC_BATCH_EXEC_FUTURE, 50000000);
+	c->cont_on_timeout = 1;
+	oc_run(c, oc_peer_drain, 300);
+	assert(c->statuses[0] == XTC_BATCH_EXEC_TIMEOUT);
+	assert(atomic_load(&c->overlap) == 0 && atomic_load(&c->submits) == 1);
+	assert(c->outcome == XTC_E_AGAIN);
+}
+
+/* MAJOR 4: a stray xtc_proc_wake must not cut a FENCE timeout. 2 s
+ * budget, stray wake at 20 ms, fence at 300 ms: collect sees OK ~0.3 s. */
+static void
+oc_peer_stray(void *arg)
+{
+	struct oc *c = arg;
+	while (atomic_load(&c->submits) == 0)
+		xtc_yield();
+	(void)xtc_proc_sleep(20000000);
+	(void)xtc_proc_wake(c->driver);
+	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+}
+
+static void
+async_fence_stray_wake(void)
+{
+#if defined(__linux__) && defined(XTC_HAVE_ACCEL)
+	struct oc *c = &g_oc;
+	oc_setup(c, "fence stray wake", XTC_BATCH_EXEC_FENCE, 2000000000LL);
+	c->fence_fd = eventfd(0, EFD_NONBLOCK);
+	oc_run(c, oc_peer_stray, 300);
+	(void)close(c->fence_fd);
+	assert(c->statuses[0] == XTC_BATCH_EXEC_OK && c->outcome == XTC_OK);
+	assert(c->t_collect >= 0.29);
+#endif
+}
+
+/* MAJOR 5: close(CANCEL) must end a FENCE that never fires. */
+static void
+oc_peer_cancel(void *arg)
+{
+	struct oc *c = arg;
+	while (atomic_load(&c->submits) == 0)
+		xtc_yield();
+	(void)xtc_proc_sleep(20000000);
+	assert(xtc_batch_close(c->batch, XTC_BATCH_CANCEL) == XTC_OK);
+}
+
+static void
+async_fence_close_cancel(void)
+{
+#if defined(__linux__) && defined(XTC_HAVE_ACCEL)
+	struct oc *c = &g_oc;
+	oc_setup(c, "fence close(CANCEL)", XTC_BATCH_EXEC_FENCE, 0);
+	c->fence_fd = eventfd(0, EFD_NONBLOCK);
+	oc_run(c, oc_peer_cancel, -1);
+	(void)close(c->fence_fd);
+	assert(c->statuses[0] == XTC_BATCH_EXEC_ABORTED);
+	assert(c->outcome == XTC_E_ABORTED && c->t_collect < 1.0);
+	assert(atomic_load(&c->hints) == 1);
+#endif
+}
+
+/* MAJOR 5: a kill must end a FUTURE that never resolves. Needs the
+ * kill-wake proc layer (fix155/proc): before it, a kill cannot wake a
+ * parked fiber at all. */
+#ifdef XTC_HAVE_PROC_KILL_WAKE
+static void
+oc_peer_kill(void *arg)
+{
+	struct oc *c = arg;
+	while (atomic_load(&c->submits) == 0)
+		xtc_yield();
+	(void)xtc_proc_sleep(20000000);
+	assert(xtc_exit_pid(c->driver, 1) == XTC_OK);
+}
+#endif
+
+static void
+async_future_kill(void)
+{
+#ifdef XTC_HAVE_PROC_KILL_WAKE
+	struct oc *c = &g_oc;
+	oc_setup(c, "future kill", XTC_BATCH_EXEC_FUTURE, 0);
+	oc_run(c, oc_peer_kill, -1);
+	assert(c->statuses[0] == XTC_BATCH_EXEC_ABORTED);
+	assert(c->outcome == XTC_E_ABORTED && c->t_collect < 1.0);
+	if (atomic_load(&c->prom) != NULL)
+		xtc_promise_drop(atomic_exchange(&c->prom, NULL));
+#else
+	puts("batch-async: future kill test skipped (needs proc kill-wake)");
+#endif
+}
+
+/* MAJOR 6: cancel_hint fires when the cancel lands on an in-flight member
+ * (op still running), for owner cancel and for cancel_mt from a plain
+ * thread. Op finishes at 300 ms; the cancel lands at ~20 ms. */
+static void
+oc_peer_owner_cancel(void *arg)
+{
+	struct oc *c = arg;
+	while (atomic_load(&c->submits) == 0)
+		xtc_yield();
+	(void)xtc_proc_sleep(20000000);
+	assert(xtc_batch_cancel(c->batch, 1) == XTC_OK);
+	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+}
+
+static void *
+oc_mt_canceller(void *arg)
+{
+	struct oc *c = arg;
+	while (atomic_load(&c->submits) == 0)
+		usleep(1000);
+	usleep(20000);
+	assert(xtc_batch_cancel_mt(c->batch, 1) == XTC_OK);
+	return NULL;
+}
+
+static void
+async_hint_on_landing(void)
+{
+	struct oc *c = &g_oc;
+	pthread_t t;
+	int kind;
+	for (kind = 0; kind < 2; ++kind) {
+		oc_setup(c, kind ? "hint (FENCE, cancel_mt)" :
+		                   "hint (FUTURE, owner cancel)",
+		    kind ? XTC_BATCH_EXEC_FENCE : XTC_BATCH_EXEC_FUTURE, 0);
+#if !defined(__linux__) || !defined(XTC_HAVE_ACCEL)
+		if (kind) {
+			assert(xtc_batch_close(c->batch, XTC_BATCH_CANCEL)
+			       == XTC_OK);
+			assert(xtc_loop_run(c->loop) == XTC_OK);
+			assert(xtc_batch_destroy(c->batch) == XTC_OK);
+			assert(xtc_loop_fini(c->loop) == XTC_OK);
+			break;
+		}
+#else
+		if (kind)
+			c->fence_fd = eventfd(0, EFD_NONBLOCK);
+#endif
+		if (kind)
+			assert(pthread_create(&t, NULL, oc_mt_canceller, c) == 0);
+		oc_run(c, kind ? oc_peer_drain : oc_peer_owner_cancel, 300);
+		if (kind) {
+			assert(pthread_join(t, NULL) == 0);
+			(void)close(c->fence_fd);
+		}
+		assert(atomic_load(&c->hints) == 1);
+		assert(atomic_load(&c->hint_while_running) == 1);
+		assert(c->t_hint < 0.2);
+		assert(c->outcome == XTC_E_ABORTED);
+	}
+}
+
+static void
+async_contract_tests(void)
+{
+	async_fence_errors();
+	async_blocking_refused();
+	async_timeout_no_resubmit();
+	async_fence_stray_wake();
+	async_fence_close_cancel();
+	async_future_kill();
+	async_hint_on_landing();
+}
+
 static void
 async_tests(void)
 {
@@ -1866,17 +2642,25 @@ async_tests(void)
 	async_teardown_resolved();
 	async_cancel_wakes_immediately();
 	async_fence_kind();
+	async_contract_tests();
 	mt_tests();
 	placement_tests();
 }
 
 #endif
 
+/* argv[1] == "--mt-only": run just the cross-loop (multi-threaded) cases,
+ * which CI loops to catch timing-dependent regressions. */
 int
-main(void)
+main(int argc, char **argv)
 {
 #ifdef XTC_ENABLE_SCHED_POLICY
 	int i;
+	if (argc > 1 && strcmp(argv[1], "--mt-only") == 0) {
+		mt_tests();
+		puts("batch: mt OK");
+		return 0;
+	}
 	handle_exhaustion();
 	charge_limits();
 	storage_overflow();
@@ -1891,6 +2675,8 @@ main(void)
 	involuntary_callback();
 	async_tests();
 #else
+	(void)argc;
+	(void)argv;
 	assert(xtc_batch_create(NULL, NULL, NULL) == XTC_E_NOSYS);
 	assert(xtc_batch_submit(NULL, NULL, 0, NULL) == XTC_E_NOSYS);
 	assert(xtc_batch_submit_mt(NULL, NULL, 0, NULL) == XTC_E_NOSYS);
