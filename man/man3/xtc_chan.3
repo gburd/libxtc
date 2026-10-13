@@ -167,6 +167,14 @@ marks the channel closed; and
 reports the queued count.
 .Fn xtc_chan_mpsc_destroy
 frees it.
+.Fn xtc_chan_mpsc_try_recv
+never spins: if the oldest slot was reserved by a sender that has not
+finished writing it, it returns
+.Dv XTC_E_AGAIN
+even though
+.Fn xtc_chan_mpsc_len
+is nonzero; the sender's write fires the waker and the next call
+returns that message (FIFO order is kept).
 .It mpmc
 Multiple producers, multiple consumers.  Bounded ring buffer
 serialising both sides via per-slot sequence numbers
