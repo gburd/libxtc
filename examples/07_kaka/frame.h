@@ -41,6 +41,25 @@ enum {
 	KAKA_ERROR        = 0xff
 };
 
+/* ERROR frame codes (u16).  After BAD_REQUEST the broker closes the
+ * connection; after the others it keeps serving it. */
+enum {
+	KAKA_ERR_BAD_REQUEST = 1,   /* malformed or unsupported request */
+	KAKA_ERR_MEMORY      = 2,   /* PRODUCE rejected by --max-memory:
+	                             * nothing from the batch was stored */
+	KAKA_ERR_STORAGE     = 3,   /* write/fsync failed: the partition
+	                             * accepts no more writes (fail-stop);
+	                             * the batch may be partially on disk */
+	KAKA_ERR_TIMEOUT     = 4,   /* partition did not answer in time */
+	KAKA_ERR_SHUTDOWN    = 5,   /* broker is shutting down */
+	KAKA_ERR_GROUP       = 6    /* offset store full or failed */
+};
+
+/* Largest frame: the u32 length field (type + body) may not exceed
+ * this.  A FETCH reply is clamped to fit. */
+#define KAKA_MAX_FRAME   (64u * 1024u * 1024u)
+#define KAKA_MAX_RECORD  (16u * 1024u * 1024u)
+
 /* A decoded record (borrowed pointers into the source buffer). */
 typedef struct kaka_record {
 	const uint8_t *key;
@@ -68,6 +87,19 @@ typedef struct kaka_fetch {
 	uint64_t    offset;
 	uint32_t    max_bytes;
 } kaka_fetch_t;
+
+/* A COMMIT (offset set) or OFFSETS (offset get) request body.
+ * COMMIT:  u16 group_len | group | u16 topic_len | topic |
+ *          u32 partition | u64 offset
+ * OFFSETS: the same without the offset. */
+typedef struct kaka_commit {
+	const char *group;
+	uint16_t    group_len;
+	const char *topic;
+	uint16_t    topic_len;
+	uint32_t    partition;
+	uint64_t    offset;
+} kaka_commit_t;
 
 /* ---- big-endian primitives (exposed for the partition log) ---- */
 
@@ -108,6 +140,11 @@ int kaka_produce_next_record(kaka_produce_t *p, kaka_record_t *rec);
 int kaka_decode_fetch(const uint8_t *body, size_t body_len,
                       kaka_fetch_t *out);
 
+int kaka_decode_commit(const uint8_t *body, size_t body_len,
+                       kaka_commit_t *out);
+int kaka_decode_offsets(const uint8_t *body, size_t body_len,
+                        kaka_commit_t *out);
+
 /* ---- response encoders (into a caller buffer) ---- */
 
 /* PRODUCE_ACK: the base offset assigned to the produced batch. */
@@ -116,6 +153,12 @@ long kaka_encode_produce_ack(uint8_t *dst, size_t cap, uint64_t base_offset);
 /* ERROR: u16 code + message. */
 long kaka_encode_error(uint8_t *dst, size_t cap,
                        uint16_t code, const char *msg);
+
+/* COMMIT_ACK: empty body. */
+long kaka_encode_commit_ack(uint8_t *dst, size_t cap);
+
+/* OFFSET: u8 found | u64 offset (0 when found == 0). */
+long kaka_encode_offset(uint8_t *dst, size_t cap, int found, uint64_t offset);
 
 /* RECORDS frame header: caller then appends each record via
  * kaka_encode_record.  Returns header bytes written, or -1. */

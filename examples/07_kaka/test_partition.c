@@ -215,6 +215,172 @@ test_bounded_memory(void)
 	    N, (unsigned long long)max_resident);
 }
 
+static void
+rmdir_all(const char *dir)
+{
+	char cmd[320];
+	snprintf(cmd, sizeof cmd, "find '%s' -delete 2>/dev/null", dir);
+	if (system(cmd) != 0) { /* best effort */ }
+}
+
+static int g_syncs;
+
+static int
+count_sync(int fd)
+{
+	g_syncs++;
+	return fsync(fd) == 0 ? 0 : -1;
+}
+
+static int
+fail_sync(int fd)
+{
+	(void)fd;
+	return -5;
+}
+
+/* plog_append alone is not durable; plog_sync is; a failed sync
+ * fail-stops the log; a torn tail is truncated on reopen. */
+static void
+test_sync_and_torn_tail(void)
+{
+	char dir[256], path[320];
+	plog_t *l;
+	kaka_record_t r, got;
+	FILE *f;
+	int i;
+
+	snprintf(dir, sizeof dir, "/tmp/kaka-sync-test-%d", (int)getpid());
+	(void)mkdir(dir, 0700);
+	plog_set_sync_hook(count_sync);
+	ASSERT(plog_create_ex(dir, 0, &l) == 0);
+	r = mkrec("k", "v0");
+	ASSERT(plog_append(l, &r) == 0);
+	ASSERT(plog_synced(l) == 0 && plog_high_water(l) == 1);
+	g_syncs = 0;
+	ASSERT(plog_sync(l) == 0);
+	ASSERT(g_syncs == 1 && plog_synced(l) == 1);
+	for (i = 1; i < 10; i++) {
+		r = mkrec("k", "vN");
+		ASSERT(plog_append(l, &r) == i);
+	}
+	ASSERT(plog_sync(l) == 0 && g_syncs == 2);   /* one sync, 9 records */
+	plog_set_sync_hook(fail_sync);
+	r = mkrec("k", "lost");
+	ASSERT(plog_append(l, &r) == 10);
+	ASSERT(plog_sync(l) != 0 && plog_failed(l));
+	ASSERT(plog_append(l, &r) < 0);              /* fail-stop */
+	ASSERT(plog_synced(l) == 10);
+	plog_set_sync_hook(count_sync);
+	plog_destroy(l);
+
+	/* Tear the last record: reopen keeps 0..9 (and drops 10 only if
+	 * torn; here we append garbage after it). */
+	snprintf(path, sizeof path, "%s/%020d.log", dir, 0);
+	f = fopen(path, "ab");
+	ASSERT(f != NULL);
+	fwrite("\x01\x02\x03\x04garbage-tail", 1, 16, f);
+	fclose(f);
+	ASSERT(plog_create_ex(dir, 0, &l) == 0);
+	ASSERT(plog_high_water(l) == 11);
+	ASSERT(plog_read(l, 10, &got) == 1 && got.value_len == 4);
+	r = mkrec("k", "after");
+	ASSERT(plog_append(l, &r) == 11);
+	plog_destroy(l);
+	ASSERT(plog_create_ex(dir, 0, &l) == 0);
+	ASSERT(plog_high_water(l) == 12);
+	ASSERT(plog_read(l, 11, &got) == 1 && got.value_len == 5 &&
+	    memcmp(got.value, "after", 5) == 0);
+	plog_destroy(l);
+	plog_set_sync_hook(NULL);
+	rmdir_all(dir);
+	printf("  ok   sync_and_torn_tail (ack needs sync, fail-stop, torn tail)\n");
+}
+
+/* Cold reads go through the sparse index: reading a deep offset of a
+ * big closed segment costs at most ~IDX_INTERVAL bytes of scan, so many
+ * random cold reads are fast; plog_fetch returns exact wire records. */
+static void
+test_index_and_fetch(void)
+{
+	char dir[256], v[600];
+	plog_t *l;
+	kaka_record_t r, got;
+	uint8_t buf[8192];
+	uint64_t off;
+	uint32_t n;
+	size_t need;
+	long w;
+	int i;
+
+	snprintf(dir, sizeof dir, "/tmp/kaka-idx-test-%d", (int)getpid());
+	(void)mkdir(dir, 0700);
+	ASSERT(plog_create_ex(dir, 8u << 20, &l) == 0);   /* 8 MiB segment */
+	memset(v, 'x', sizeof v);
+	for (i = 0; i < 20000; i++) {
+		snprintf(v, sizeof v, "%08d", i);
+		v[8] = 'x';
+		r.key = NULL; r.key_len = 0;
+		r.value = (const uint8_t *)v; r.value_len = sizeof v;
+		ASSERT(plog_append(l, &r) == i);
+	}
+	plog_evict_all(l);                  /* force every read cold */
+	ASSERT(plog_mem_records(l) == 0 && plog_mem_bytes(l) == 0);
+	for (i = 0; i < 20000; i += 7) {
+		char want[9];
+		snprintf(want, sizeof want, "%08d", i);
+		ASSERT(plog_read(l, (uint64_t)i, &got) == 1);
+		ASSERT(got.value_len == sizeof v && memcmp(got.value, want, 8) == 0);
+	}
+	off = 12345;
+	w = plog_fetch(l, &off, 20000, buf, sizeof buf, &n, &need);
+	ASSERT(n == 13 && off == 12358);              /* 13 x 616 B fit */
+	ASSERT(w == 13 * (16 + 600) && kaka_get_u64(buf) == 12345);
+	off = 19995;
+	w = plog_fetch(l, &off, 20000, buf, sizeof buf, &n, &need);
+	ASSERT(n == 5 && off == 20000);               /* stops at end */
+	off = 0;
+	w = plog_fetch(l, &off, 20000, buf, 100, &n, &need);
+	ASSERT(w == 0 && n == 0 && need == 616 && off == 0);
+	plog_destroy(l);
+	rmdir_all(dir);
+	printf("  ok   index_and_fetch (2858 random cold reads, wire fetch)\n");
+}
+
+/* Size-based retention deletes the oldest closed segments; reads below
+ * the retained start return 0; a reopen sees the same range. */
+static void
+test_retention(void)
+{
+	char dir[256], v[100];
+	plog_t *l;
+	kaka_record_t r, got;
+	uint64_t start;
+	int i;
+
+	snprintf(dir, sizeof dir, "/tmp/kaka-ret-test-%d", (int)getpid());
+	(void)mkdir(dir, 0700);
+	ASSERT(plog_create_ex(dir, 4096, &l) == 0);
+	plog_set_retention(l, 16384);
+	memset(v, 'r', sizeof v);
+	r.key = NULL; r.key_len = 0;
+	r.value = (const uint8_t *)v; r.value_len = sizeof v;
+	for (i = 0; i < 5000; i++)
+		ASSERT(plog_append(l, &r) == i);
+	ASSERT(plog_segments(l) <= 6);
+	start = plog_start(l);
+	ASSERT(start > 0 && start < 5000);
+	ASSERT(plog_read(l, start - 1, &got) == 0);
+	ASSERT(plog_read(l, start, &got) == 1);
+	plog_destroy(l);
+	ASSERT(plog_create_ex(dir, 4096, &l) == 0);
+	ASSERT(plog_start(l) == start && plog_high_water(l) == 5000);
+	plog_destroy(l);
+	rmdir_all(dir);
+	printf("  ok   retention (5000 x 100 B, 16 KiB cap, start=%llu)\n",
+	    (unsigned long long)start);
+}
+
 int
 main(void)
 {
@@ -223,6 +389,9 @@ main(void)
 	test_growth();
 	test_segmented_recovery();
 	test_bounded_memory();
+	test_sync_and_torn_tail();
+	test_index_and_fetch();
+	test_retention();
 	printf("All kaka partition tests passed.\n");
 	return 0;
 }
