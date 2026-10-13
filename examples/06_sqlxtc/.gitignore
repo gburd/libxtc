@@ -34,6 +34,7 @@ test_ww_conflict
 test_dw_fail
 test_commit_visibility
 test_ssi_skew
+test_dup_insert
 test_ckpt_bound
 test_torn_smo
 test_wal_compact

@@ -8078,6 +8078,39 @@ vx_run_write(struct xsql *db, const char *sql, int64_t *nchanges, char **errmsg)
 	return vx_run_write_p(db, sql, NULL, 0, nchanges, errmsg);
 }
 
+/* The canonical duplicate-key error ("UNIQUE constraint failed: t.id"). */
+static void
+vx_unique_err(char **errmsg, const char *table, const char *pk)
+{
+	char m[160];
+	if (errmsg == NULL) return;
+	free(*errmsg);
+	snprintf(m, sizeof m, "UNIQUE constraint failed: %s.%s", table, pk);
+	*errmsg = strdup(m);
+}
+
+/* Apply one INSERTed row.  REPLACE overwrites; a plain INSERT must not
+ * find the key, checked atomically with the write (xstore_insert_txn),
+ * so two concurrent INSERTs of one key cannot both succeed.  Returns 0,
+ * or -1 with *errmsg set. */
+static int
+vx_insert_row(struct xsql *db, uint32_t tableid, int64_t rowid,
+    const uint8_t *rec, int reclen, int replace, const char *table,
+    const char *pk, char **errmsg)
+{
+	int rc;
+	if (replace)
+		rc = xstore_write_txn(db, tableid, rowid, rec, reclen, 0) == 0 ? 0 : -1;
+	else
+		rc = xstore_insert_txn(db, tableid, rowid, rec, reclen);
+	if (rc == 0) return 0;
+	if (rc == 1)
+		vx_unique_err(errmsg, table, pk);
+	else if (errmsg != NULL && *errmsg == NULL)
+		*errmsg = strdup("native insert failed");
+	return -1;
+}
+
 int
 vx_run_write_p(struct xsql *db, const char *sql,
                const vx_cell_t *binds, int nbinds,
@@ -8345,12 +8378,12 @@ vx_run_write_p(struct xsql *db, const char *sql,
 		vx_cell_t cells[64];
 		uint8_t rec[XS_REC_MAX];
 		int ci, reclen;
-		int64_t rowid = ++maxr;
+		int64_t rowid = xstore_next_rowid(db, tableid, maxr);
 		for (ci = 0; ci < ws.n; ci++) { cells[ci].type = VX_NULL; cells[ci].nbytes = 0; }
 		reclen = encode_payload(&cells[1], ws.n - 1, rec, (int)sizeof rec);
 		if (reclen < 0) { rc = 0; goto done; }   /* unexpected -> VDBE */
-		if (xstore_write_txn(db, tableid, rowid, rec, reclen, 0) != 0) {
-			if (errmsg) *errmsg = strdup("native default-values insert failed");
+		if (vx_insert_row(db, tableid, rowid, rec, reclen, 0, tabbuf,
+		    ws.name[0], errmsg) != 0) {
 			rc = -1; goto done;
 		}
 		if (nchanges) *nchanges = 1;
@@ -8456,16 +8489,20 @@ vx_run_write_p(struct xsql *db, const char *sql,
 			if (cells[0].type == VX_INT) {
 				rowid = cells[0].i; if (rowid > maxr) maxr = rowid;
 			} else if (cells[0].type == VX_NULL) {
-				rowid = ++maxr;
+				rowid = maxr = xstore_next_rowid(db, tableid, maxr);
 			} else { free(buf2); vx_result_free(sres); rc = 0; goto done; }
 
 			if (cells[0].type == VX_INT && !ins->replace) {
 				uint8_t probe[XS_REC_MAX]; int pl, bi;
 				pl = read_one_row((struct xsql *)db, bt, tabbuf, rowid, probe, (int)sizeof probe);
 				if (pl < 0) { free(buf2); vx_result_free(sres); rc = -1; goto done; }
-				if (pl > 0) { free(buf2); vx_result_free(sres); rc = 0; goto done; }
-				for (bi = 0; bi < nb2; bi++)
-					if (buf2[bi].rowid == rowid) { free(buf2); vx_result_free(sres); rc = 0; goto done; }
+				for (bi = 0; pl == 0 && bi < nb2; bi++)
+					if (buf2[bi].rowid == rowid) pl = 1;
+				if (pl > 0) {              /* duplicate key: nothing written yet */
+					free(buf2); vx_result_free(sres);
+					vx_unique_err(errmsg, tabbuf, ws.name[0]);
+					rc = -1; goto done;
+				}
 			}
 
 			if (nb2 == cap2) {
@@ -8482,10 +8519,10 @@ vx_run_write_p(struct xsql *db, const char *sql,
 		vx_result_free(sres);
 
 		for (r = 0; r < nb2; r++) {
-			if (xstore_write_txn(db, tableid, buf2[r].rowid,
-			                     buf2[r].rec, buf2[r].reclen, 0) != 0) {
+			if (vx_insert_row(db, tableid, buf2[r].rowid, buf2[r].rec,
+			    buf2[r].reclen, ins->replace, tabbuf, ws.name[0],
+			    errmsg) != 0) {
 				free(buf2);
-				if (errmsg) *errmsg = strdup("native insert-select failed");
 				rc = -1; goto done;
 			}
 			applied2++;
@@ -8535,46 +8572,31 @@ vx_run_write_p(struct xsql *db, const char *sql,
 				rowid = cells[0].i;
 				if (rowid > maxr) maxr = rowid;
 			} else if (cells[0].type == VX_NULL) {
-				rowid = ++maxr;
+				rowid = maxr = xstore_next_rowid(db, tableid, maxr);
 			} else { free(buf); rc = 0; goto done; }   /* non-int PK -> VDBE */
 
 			/* PRIMARY KEY uniqueness: a plain INSERT onto an existing
-			 * rowid is a constraint violation in SQLite (REPLACE would
-			 * overwrite -- handled separately).  When the target PK
-			 * already exists (committed B-tree) or repeats within THIS
-			 * statement, fall back to the VDBE, which produces the
-			 * canonical UNIQUE-constraint error -- the native path has
-			 * written nothing yet, so the fallback is clean.  An explicit
-			 * PK inside an open transaction may also collide with an
-			 * uncommitted buffered row the committed scan cannot see, so
-			 * that case also falls back.  An autovalued (NULL) PK never
-			 * collides. */
-			if (cells[0].type == VX_INT) {
+			 * rowid is a UNIQUE constraint violation (REPLACE overwrites).
+			 * A key that already exists (committed, or buffered in this
+			 * txn) or repeats within THIS statement fails the statement
+			 * before anything is written.  This early check gives the
+			 * error cheaply; the apply below re-checks atomically with the
+			 * write, which is what stops a concurrent INSERT of the same
+			 * key from winning too. */
+			if (cells[0].type == VX_INT && !ins->replace) {
 				uint8_t probe[XS_REC_MAX]; int pl, bi;
-				if (ins->replace) {
-					/* REPLACE deliberately overwrites a conflicting PK; no
-					 * uniqueness check.  An intra-statement repeat keeps the
-					 * last row, which xstore's put-by-rowid achieves since
-					 * the rows apply in order. */
-				} else if (xstore_in_txn(db)) {
-					/* In a txn the committed scan cannot see this txn's
-					 * buffered rows, so use the wbuf-aware existence check.
-					 * A collision (committed or buffered) -> fall back so the
-					 * VDBE raises the canonical UNIQUE error; an intra-stmt
-					 * repeat also falls back. */
-					if (xstore_row_exists_txn(db, tableid, rowid)) {
-						free(buf); rc = 0; goto done;
-					}
-					for (bi = 0; bi < nb; bi++)
-						if (buf[bi].rowid == rowid) { free(buf); rc = 0; goto done; }
-				} else {
-					pl = read_one_row((struct xsql *)db, bt, tabbuf, rowid, probe, (int)sizeof probe);
-					if (pl < 0) { free(buf); rc = -1; goto done; }
-					if (pl > 0) { free(buf); rc = 0; goto done; }
-					for (bi = 0; bi < nb; bi++)
-						if (buf[bi].rowid == rowid) {
-							free(buf); rc = 0; goto done;
-						}
+				if (xstore_in_txn(db))
+					pl = xstore_row_exists_txn(db, tableid, rowid);
+				else
+					pl = read_one_row((struct xsql *)db, bt, tabbuf, rowid,
+					    probe, (int)sizeof probe);
+				if (pl < 0) { free(buf); rc = -1; goto done; }
+				for (bi = 0; pl == 0 && bi < nb; bi++)
+					if (buf[bi].rowid == rowid) pl = 1;
+				if (pl > 0) {
+					free(buf);
+					vx_unique_err(errmsg, tabbuf, ws.name[0]);
+					rc = -1; goto done;
 				}
 			}
 
@@ -8586,16 +8608,15 @@ vx_run_write_p(struct xsql *db, const char *sql,
 			nb++;
 		}
 
-		/* All rows validated: apply.  xstore_write_txn buffers into the
-		 * open transaction (atomic at COMMIT) or autocommits each row. */
+		/* All rows validated: apply.  In a transaction each row is
+		 * buffered (atomic at COMMIT); in autocommit each row commits on
+		 * its own, and a key taken concurrently since the check above
+		 * fails the statement with a UNIQUE error (rows before it stay). */
 		for (r = 0; r < nb; r++) {
-			if (xstore_write_txn(db, tableid, buf[r].rowid,
-			                     buf[r].rec, buf[r].reclen, 0) != 0) {
-				/* A put failed after some applied: report an error rather
-				 * than fall back (the VDBE would re-insert the applied
-				 * rows).  Storage-level failure, not a recognition miss. */
+			if (vx_insert_row(db, tableid, buf[r].rowid, buf[r].rec,
+			    buf[r].reclen, ins->replace, tabbuf, ws.name[0],
+			    errmsg) != 0) {
 				free(buf);
-				if (errmsg) *errmsg = strdup("native insert failed");
 				rc = -1; goto done;
 			}
 			applied++;

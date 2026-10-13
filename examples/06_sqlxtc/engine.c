@@ -1158,19 +1158,29 @@ sx_step(sx_stmt *st)
 		case SXN_WRITE: {
 			int64_t nch = 0;
 			int rc;
+			char *verr = NULL;
 			const char *w = st->sql;
 			while (isspace((unsigned char)*w)) w++;
 			/* UPDATE/DELETE compute rows from a read: give the statement
-			 * one snapshot and a write-write check against it.  INSERT has
-			 * no read dependency (and REPLACE may rewrite its own key). */
+			 * one snapshot and a write-write check against it.  An INSERT
+			 * reads only "the key is absent", which the insert path checks
+			 * atomically with the write (xstore_insert_txn). */
 			if (sx_word(&w, "UPDATE") || sx_word(&w, "DELETE"))
 				xstore_stmt_begin(st->db);
 			rc = vx_run_write_p((struct xsql *)st->db, st->sql,
-			    st->nbind ? st->binds : NULL, st->nbind, &nch, NULL);
+			    st->nbind ? st->binds : NULL, st->nbind, &nch, &verr);
 			xstore_stmt_end(st->db);
-			if (rc == 1) { st->nchanges = nch; return SX_DONE; }
-			if (xstore_last_conflict(st->db))
+			if (rc == 1) { free(verr); st->nchanges = nch; return SX_DONE; }
+			if (xstore_last_conflict(st->db)) {
+				free(verr);
 				return nat_set_err(st->db, SX_MSG_SERIALIZE, SX_BUSY);
+			}
+			if (verr != NULL && strncmp(verr, "UNIQUE", 6) == 0) {
+				rc = nat_set_err(st->db, verr, SX_CONSTRAINT);
+				free(verr);
+				return rc;
+			}
+			free(verr);
 			/* The native write path declined: a hard error (no VDBE). */
 			return nat_set_run_error(st);
 		}
