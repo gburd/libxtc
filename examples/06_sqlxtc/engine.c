@@ -951,6 +951,7 @@ sx_word(const char **pp, const char *w)
  *   SET SESSION CHARACTERISTICS AS TRANSACTION
  *       ISOLATION LEVEL <lvl>                          -> session level
  *   BEGIN [TRANSACTION] ISOLATION LEVEL <lvl>          -> BEGIN + txn level
+ *   START TRANSACTION ISOLATION LEVEL <lvl>            -> BEGIN + txn level
  * <lvl> is SERIALIZABLE | REPEATABLE READ | READ COMMITTED |
  * READ UNCOMMITTED | SNAPSHOT.  Returns the kind (SXN_SET_ISO or
  * SXN_BEGIN) with the canonical level in lvl and *session set, or
@@ -968,6 +969,9 @@ sx_classify_iso(const char *sql, char *lvl, size_t cap, int *session)
 	while (isspace((unsigned char)*p)) p++;
 	if (sx_word(&p, "BEGIN")) {
 		(void)sx_word(&p, "TRANSACTION");
+		k = SXN_BEGIN;
+	} else if (sx_word(&p, "START")) {      /* START TRANSACTION ISOLATION ... */
+		if (!sx_word(&p, "TRANSACTION")) return SXN_NONE;
 		k = SXN_BEGIN;
 	} else if (sx_word(&p, "SET")) {
 		if (sx_word(&p, "SESSION")) {
