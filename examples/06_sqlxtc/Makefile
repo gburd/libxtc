@@ -154,6 +154,7 @@ clean:
 	rm -f test_btree
 	rm -f test_btree_loop
 	rm -f test_btree_mt
+	rm -f test_btree_stale_descent
 	rm -f test_btree_delete_merge test_savepoint test_isolation test_ww_conflict test_commit_visibility test_ssi_skew test_ckpt_bound
 	rm -f test_vfs_loop test_vfs_loop.o
 	rm -rf $(AMALG_DIR)
@@ -504,7 +505,15 @@ test-drop-reserved: test_drop_reserved
 	./test_drop_reserved control
 	./test_drop_reserved
 
-test: test-evict-revalidate test-btree-late-load test-flush-pin test-publication-pin test-private-frame test-pid-writeback
+test: test-evict-revalidate test-btree-late-load test-flush-pin test-publication-pin test-private-frame test-pid-writeback test-btree-stale-descent
+
+# A descent that keeps hitting stale nodes still returns a held leaf
+# (bufmgr.c and btree.c are #included for the test-only stale seam).
+test_btree_stale_descent: test_btree_stale_descent.c bufmgr.c bufmgr.h btree.c btnode.c
+	$(CC) $(CFLAGS) -o $@ test_btree_stale_descent.c btnode.c $(LDFLAGS)
+
+test-btree-stale-descent: test_btree_stale_descent
+	./test_btree_stale_descent
 
 test_pid_writeback: test_pid_writeback.c bufmgr.c bufmgr.h
 	$(CC) $(CFLAGS) -o $@ test_pid_writeback.c $(LDFLAGS)

@@ -20,6 +20,7 @@ test_sweep_bound
 test_evict_revalidate
 test_evict_revalidate_sampled
 test_btree_late_load
+test_btree_stale_descent
 test_flush_pin
 test_publication_pin
 test_private_frame
