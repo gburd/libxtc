@@ -241,6 +241,27 @@ test_wake_no_alloc(const MunitParameter p[], void *d)
  */
 #define M1_HELD  5
 #define M1_WAKES 40
+
+/* Waker for the m1 test.  Cross-loop wakes legitimately coalesce (a wake
+ * of a task that is SCHEDULED or RUNNING is only a latch, Wk3), so firing
+ * exactly n wakes and expecting n distinct resumptions hangs the parker
+ * whenever two wakes merge (seen under make -j load).  Instead keep
+ * waking until the parker has run the target number of times; every
+ * wake that lands on a PARKED parker is still a real cross-loop WAKE
+ * through the inbox, which is what the accounting check needs. */
+static int m1_waker_fn(xtc_task_t *self, void *u) {
+	struct waker_args *a = u;
+	(void)self;
+	while (__os_atomic_load_i32(&a->s->init_done) == 0)
+		(void)__os_sleep_ns(100 * 1000LL);
+	while (__os_atomic_load_i32(&a->s->parker_runs) < a->s->max_runs) {
+		(void)xtc_waker_wake(&a->s->parker_waker);
+		__os_atomic_fetch_add_i32(&a->s->wake_calls, 1);
+		(void)__os_sleep_ns(200 * 1000LL);
+	}
+	return XTC_TASK_DONE;
+}
+
 static MunitResult
 test_inbox_res_wake_symmetric(const MunitParameter p[], void *d)
 {
@@ -258,9 +279,9 @@ test_inbox_res_wake_symmetric(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_res_acquire(r0, XTC_RES_INBOX_MSGS, M1_HELD),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_exec_spawn_on(e, 0, parker_fn, &s, NULL), ==, XTC_OK);
-	munit_assert_int(xtc_exec_spawn_on(e, 1, waker_fn,  &wa, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_exec_spawn_on(e, 1, m1_waker_fn, &wa, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	munit_assert_int(__os_atomic_load_i32(&s.parker_runs), >=, 2);
+	munit_assert_int(__os_atomic_load_i32(&s.parker_runs), ==, M1_WAKES + 1);
 	munit_assert_int64(xtc_res_used(r0, XTC_RES_INBOX_MSGS), ==, M1_HELD);
 	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
 	return MUNIT_OK;
