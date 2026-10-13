@@ -6,7 +6,7 @@
 #
 # Targets:
 #   make            build the lorb driver + unit tests
-#   make test       build and run the unit tests
+#   make test       build and run the unit + differential tests
 #   make clean      remove objects + binaries
 #
 # Override XTC_BUILD to point at a different libxtc build dir.
@@ -38,7 +38,7 @@ CFLAGS  += $(LIBURING_INC)
 LDFLAGS  = -pthread $(XTC_BUILD)/libxtc.a $(XTC_LDFLAGS) $(LIBS)
 
 TARGET  = lorb
-TESTS   = test_lob
+TESTS   = test_lob test_lob_diff
 
 .PHONY: all clean test
 
@@ -50,8 +50,12 @@ $(TARGET): driver.c lob.c lob.h
 test_lob: test_lob.c lob.c lob.h t_assert.h
 	$(CC) $(CFLAGS) -o $@ test_lob.c lob.c $(LDFLAGS)
 
+test_lob_diff: test_lob_diff.c lob.c lob.h
+	$(CC) $(CFLAGS) -o $@ test_lob_diff.c lob.c $(LDFLAGS)
+
 test: $(TESTS)
 	./test_lob
+	./test_lob_diff
 
 clean:
 	rm -f $(TARGET) $(TESTS) *.o
