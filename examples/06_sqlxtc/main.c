@@ -165,24 +165,29 @@ listener_proc(void *arg)
 {
 	server_t *srv = arg;
 	void *msg; size_t msg_len;
+	xtc_tcp_opts_t nodelay = { .nodelay = 1 };
 
 	while (!atomic_load(&srv->shutdown_requested)) {
 		rate_limit_refill(srv);
 		for (;;) {
-			struct sockaddr_in addr;
-			socklen_t alen = sizeof addr;
-			int fd;
+			int fd = -1, arc;
 			conn_opts_t opts;
 			xtc_pid_t pid;
 
-			fd = accept(srv->listen_fd, (struct sockaddr *)&addr,
-			            &alen);
-			if (fd < 0) {
-				if (errno == EAGAIN || errno == EWOULDBLOCK)
-					break;
-				if (errno == EINTR) continue;
+			/* xtc_net_accept: non-blocking + CLOEXEC + no-SIGPIPE, and
+			 * errno mapped to XTC_E_*.  Out of descriptors (EMFILE /
+			 * ENFILE -> XTC_E_RESOURCE) must not spin on the still-
+			 * readable listen fd: back off 10 ms so connections close
+			 * and free descriptors, then retry. */
+			arc = xtc_net_accept(srv->listen_fd, &fd);
+			if (arc == XTC_E_AGAIN)
+				break;                    /* drained */
+			if (arc == XTC_E_RESOURCE || arc == XTC_E_NOMEM) {
+				(void)xtc_proc_sleep(10LL * 1000 * 1000);
 				break;
 			}
+			if (arc != XTC_OK)
+				break;                    /* transient; wait for readiness */
 
 			if (srv->cfg.max_clients > 0 &&
 			    atomic_load(&srv->conn_count) >= srv->cfg.max_clients) {
@@ -190,18 +195,13 @@ listener_proc(void *arg)
 				    "{\"err\":\"max_clients\"}\n";
 				(void)send(fd, reject, strlen(reject),
 				    MSG_DONTWAIT | MSG_NOSIGNAL);
-				close(fd);
+				xtc_net_close(fd);
 				continue;
 			}
 
-			{
-				/* Disable Nagle on the accepted fd via the
-				 * portable helper (libxtc handles the per-OS
-				 * setsockopt), then make it non-blocking. */
-				xtc_tcp_opts_t topts = { .nodelay = 1 };
-				(void)xtc_net_apply_tcp_opts(fd, &topts);
-				xtc_net_setnonblock(fd);
-			}
+			/* Disable Nagle via the portable helper (the fd is already
+			 * non-blocking from xtc_net_accept). */
+			(void)xtc_net_apply_tcp_opts(fd, &nodelay);
 
 			memset(&opts, 0, sizeof opts);
 			opts.fd = fd;
@@ -225,7 +225,7 @@ listener_proc(void *arg)
 			if (conn_spawn(cl, &opts, &pid) == XTC_OK) {
 				server_inc_conn(srv);
 			} else {
-				close(fd);
+				xtc_net_close(fd);
 			}
 		}
 
