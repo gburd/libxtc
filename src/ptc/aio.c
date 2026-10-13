@@ -144,6 +144,25 @@ aio_blk_fn(void *arg)
 #endif
 }
 
+/*
+ * xtc_blocking_run already runs the work synchronously off a loop (and
+ * under the simulator) and returns XTC_OK, so a non-OK result means the
+ * pool REFUSED the work on a loop: its queue is full (XTC_E_AGAIN) or
+ * no pool thread could be started (XTC_E_RESOURCE).  Running the
+ * syscall inline here would block every fiber on the loop -- the stall
+ * the pool exists to prevent -- so report it to the aio caller as a
+ * negative errno instead, the convention every xtc_aio_* result uses.
+ * Leaves *rc (the syscall's result) alone when the work ran.
+ */
+static void
+aio_blk_refused(int brc, int *rc)
+{
+	if (brc == XTC_OK)
+		return;
+	*rc = (brc == XTC_E_AGAIN) ? -EAGAIN
+	    : (brc == XTC_E_INVAL) ? -EINVAL : -ENOMEM;
+}
+
 static int
 aio_offload(int op, int fd, void *buf, uint32_t len, int64_t off)
 {
@@ -151,8 +170,7 @@ aio_offload(int op, int fd, void *buf, uint32_t len, int64_t off)
 	int rc;
 	memset(&b, 0, sizeof b);
 	b.fd = fd; b.op = op; b.buf = buf; b.len = len; b.off = off;
-	if (xtc_blocking_run(aio_blk_fn, &b, &rc) != XTC_OK)
-		rc = aio_blk_fn(&b);   /* off a loop: run inline */
+	aio_blk_refused(xtc_blocking_run(aio_blk_fn, &b, &rc), &rc);
 	return rc;
 }
 
@@ -165,8 +183,7 @@ aio_offload_v(int op, int fd, const struct iovec *iov, int iovcnt,
 	int rc;
 	memset(&b, 0, sizeof b);
 	b.fd = fd; b.op = op; b.off = off; b.iov = iov; b.iovcnt = iovcnt;
-	if (xtc_blocking_run(aio_blk_fn, &b, &rc) != XTC_OK)
-		rc = aio_blk_fn(&b);
+	aio_blk_refused(xtc_blocking_run(aio_blk_fn, &b, &rc), &rc);
 	return rc;
 }
 #endif
