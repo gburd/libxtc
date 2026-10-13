@@ -493,6 +493,9 @@ int  __xtc_loop_class_create(xtc_loop_t *loop, int shares,
  * never work-stolen); unpinned tasks may migrate via the deque. */
 int  __xtc_task_spawn_ex(xtc_loop_t *loop, xtc_task_fn fn, void *user,
                          int pinned, xtc_task_t **out_task);
+int  __xtc_task_spawn_cleanup(xtc_loop_t *loop, xtc_task_fn fn, void *user,
+         int pinned, void (*cleanup)(void *), void *cleanup_arg,
+         xtc_task_t **out_task);
 int  __xtc_timer_heap_push(xtc_loop_t *loop, xtc_timer_t *t);
 xtc_timer_t *__xtc_timer_heap_pop_due(xtc_loop_t *loop, int64_t now_ns);
 /*
