@@ -661,15 +661,15 @@ __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
 	c->tsan_fiber = __tsan_create_fiber(0);
 #endif
 
-	if ((rc = __xtc_task_spawn_ex(loop, __xtc_coro_step, c, pinned, &t)) != XTC_OK) {
+	/* cleanup releases the fiber stack + coro struct when the loop tears
+	 * the task down at fini.  It is stored before the task is published
+	 * (it may run at once on another loop); c->self needs no store here,
+	 * __xtc_coro_step binds it on every step. */
+	if ((rc = __xtc_task_spawn_cleanup(loop, __xtc_coro_step, c, pinned,
+	    __coro_task_cleanup, c, &t)) != XTC_OK) {
 		__coro_destroy(c);
 		return rc;
 	}
-	c->self = t;
-	/* Release the fiber stack + coro struct when the loop tears the
-	 * task down at fini. */
-	t->cleanup = __coro_task_cleanup;
-	t->cleanup_arg = c;
 
 	if (out_task) *out_task = t;
 	return XTC_OK;

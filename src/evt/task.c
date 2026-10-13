@@ -120,6 +120,22 @@ int
 __xtc_task_spawn_ex(xtc_loop_t *loop, xtc_task_fn fn, void *user,
                     int pinned, xtc_task_t **out_task)
 {
+	return __xtc_task_spawn_cleanup(loop, fn, user, pinned, NULL, NULL,
+	    out_task);
+}
+
+/*
+ * __xtc_task_spawn_ex plus a fini-time cleanup hook.  The hook is stored
+ * BEFORE the task is enqueued or published to another loop's inbox, so
+ * the loop that runs it (possibly on another thread, possibly to DONE)
+ * never sees a half-initialized task.  xtc_async passes its coro teardown
+ * here; storing it after the spawn returned was a TSan-reported race.
+ */
+int
+__xtc_task_spawn_cleanup(xtc_loop_t *loop, xtc_task_fn fn, void *user,
+    int pinned, void (*cleanup)(void *), void *cleanup_arg,
+    xtc_task_t **out_task)
+{
 	xtc_task_t *t;
 	int rc;
 
@@ -150,6 +166,8 @@ __xtc_task_spawn_ex(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 	    memory_order_relaxed);
 	t->park_fd = -1;
 	atomic_store_explicit(&t->wake_revents, 0, memory_order_relaxed);
+	t->cleanup = cleanup;
+	t->cleanup_arg = cleanup_arg;
 
 	if (out_task) *out_task = t;
 

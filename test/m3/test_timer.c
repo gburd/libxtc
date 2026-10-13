@@ -12,6 +12,10 @@
 #include "xtc_loop.h"
 #include "os_time.h"
 #include "os_alloc.h"
+#include "loop_int.h"   /* white-box: heap size, the loop's timer slab */
+#include "xtc_slab.h"
+#include "xtc_proc.h"
+#include "xtc_future.h"
 
 #include <stdatomic.h>
 
@@ -357,6 +361,261 @@ test_park_timers_freed_with_slab(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+
+/* [Tm13] M6 (review155): a cancelled timer must leave the heap even when
+ * an earlier-deadline live timer sits at the root.  v1.55.0 only dropped
+ * cancelled entries when they reached the root, so one housekeeping timer
+ * plus set/cancel churn (every timed recv woken by a message) grew the
+ * heap without bound: TM13_N dead entries here.  Two paths: a cancel on
+ * the loop's own thread (removed at once) and a cancel off the loop's
+ * thread (marked; swept out before the heap would grow). */
+#define TM13_N      100000
+#define TM13_BOUND  1000
+static xtc_loop_t *g_tm13_loop;
+static int g_tm13_max;
+static void tm13_noop(void *u) { (void)u; }
+
+static void
+tm13_churn(xtc_loop_t *loop)
+{
+	xtc_timer_t *root, *t;
+	int i;
+	g_tm13_max = 0;
+	/* The live root: earlier than every churned timer. */
+	munit_assert_int(xtc_timer_set(loop, 10 * XTC_NS_PER_SEC, tm13_noop,
+	    NULL, &root), ==, XTC_OK);
+	for (i = 0; i < TM13_N; i++) {
+		munit_assert_int(xtc_timer_set(loop, 60 * XTC_NS_PER_SEC,
+		    tm13_noop, NULL, &t), ==, XTC_OK);
+		munit_assert_int(xtc_timer_cancel(t), ==, XTC_OK);
+		if (loop->n_timers > g_tm13_max)
+			g_tm13_max = loop->n_timers;
+	}
+	munit_logf(MUNIT_LOG_INFO, "%d set+cancel behind a live root: "
+	    "max heap %d, final heap %d", TM13_N, g_tm13_max, loop->n_timers);
+	munit_assert_int(g_tm13_max, <, TM13_BOUND);
+	munit_assert_int(xtc_timer_cancel(root), ==, XTC_OK);
+}
+
+static int
+tm13_task(xtc_task_t *self, void *u)
+{
+	(void)self; (void)u;
+	tm13_churn(g_tm13_loop);   /* on the loop's thread */
+	return XTC_TASK_DONE;
+}
+
+static MunitResult
+test_cancel_removes_owner(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	munit_assert_int(xtc_loop_init(&g_tm13_loop), ==, XTC_OK);
+	munit_assert_int(xtc_task_spawn(g_tm13_loop, tm13_task, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(g_tm13_loop), ==, XTC_OK);
+	munit_assert_int(g_tm13_loop->n_timers, ==, 0);
+	munit_assert_int(xtc_loop_fini(g_tm13_loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+static MunitResult
+test_cancel_removes_offloop(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	(void)p; (void)d;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	tm13_churn(loop);          /* off the loop's thread (not running) */
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);   /* nothing live */
+	munit_assert_int(loop->n_timers, ==, 0);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* The review's reproducer shape (rt.c case E): one housekeeping proc that
+ * sleeps in a loop keeps a live timer at the root, while a ping-pong pair
+ * does xtc_recv with a 5 s timeout; every recv woken by a message cancels
+ * its (refcounted) park timer.  v1.55.0 kept every one of them. */
+#define TM13_ROUNDS 100000
+static volatile int g_tm13_stop;
+static xtc_pid_t g_tm13_ping, g_tm13_pong;
+static void
+tm13_ticker(void *a)
+{
+	(void)a;
+	while (!g_tm13_stop)
+		(void)xtc_proc_sleep(50 * XTC_NS_PER_MS);
+}
+static void
+tm13_pong(void *a)
+{
+	void *m;
+	size_t n;
+	int done = 0, x = 0;
+	(void)a;
+	while (!done) {
+		if (xtc_recv(&m, &n, 5 * XTC_NS_PER_SEC) != XTC_OK) return;
+		done = *(int *)m;
+		xtc_free(m);
+		(void)xtc_send(g_tm13_ping, &x, sizeof x);
+	}
+}
+static void
+tm13_ping(void *a)
+{
+	void *m;
+	size_t n;
+	int i, d;
+	(void)a;
+	g_tm13_max = 0;
+	for (i = 0; i < TM13_ROUNDS; i++) {
+		d = (i == TM13_ROUNDS - 1);
+		(void)xtc_send(g_tm13_pong, &d, sizeof d);
+		if (xtc_recv(&m, &n, 5 * XTC_NS_PER_SEC) != XTC_OK) break;
+		xtc_free(m);
+		if (g_tm13_loop->n_timers > g_tm13_max)
+			g_tm13_max = g_tm13_loop->n_timers;
+	}
+	g_tm13_stop = 1;
+}
+
+static MunitResult
+test_cancel_removes_timed_recv(const MunitParameter p[], void *d)
+{
+	xtc_pid_t t;
+	(void)p; (void)d;
+	g_tm13_stop = 0;
+	munit_assert_int(xtc_loop_init(&g_tm13_loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(g_tm13_loop, tm13_ticker, NULL, NULL,
+	    &t), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(g_tm13_loop, tm13_pong, NULL, NULL,
+	    &g_tm13_pong), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(g_tm13_loop, tm13_ping, NULL, NULL,
+	    &g_tm13_ping), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(g_tm13_loop), ==, XTC_OK);
+	munit_logf(MUNIT_LOG_INFO, "%d timed-recv round trips behind a live "
+	    "ticker: max heap %d", TM13_ROUNDS, g_tm13_max);
+	munit_assert_int(g_tm13_max, <, TM13_BOUND);
+	munit_assert_int(xtc_loop_fini(g_tm13_loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* [Tm14] M4 (review155): an xtc_timer_set timer must be reclaimable during
+ * the run.  v1.55.0 kept every one on all_timers until xtc_loop_fini
+ * (+128 B per timer; rt.c case D: 1M timers, +125 MB), and every
+ * xtc_future_with_timeout called xtc_timer_set.  Measured as the timers
+ * still allocated from the loop's timer slab (white-box n_inuse) after
+ * TM14_N have fired or been cancelled; a leak leaves all TM14_N. */
+#define TM14_N      100000
+#define TM14_BOUND  1000
+static xtc_loop_t *g_tm14_loop;
+static long g_tm14_fired;
+static long g_tm14_inuse;
+static void tm14_cb(void *u) { (void)u; g_tm14_fired++; }
+
+static long
+tm14_inuse(xtc_loop_t *loop)
+{
+	xtc_slab_stats_t st;
+	if (loop->timer_slab == NULL) return 0;
+	munit_assert_int(xtc_slab_stat((const xtc_slab_t *)loop->timer_slab,
+	    &st), ==, XTC_OK);
+	return (long)st.n_inuse;
+}
+
+/* Set + release (fires later), set + cancel + release, and set with no
+ * handle, TM14_N of each, sleeping so the fired ones are drained. */
+static void
+tm14_set_proc(void *a)
+{
+	xtc_timer_t *t;
+	long i;
+	(void)a;
+	for (i = 0; i < TM14_N; i++) {
+		munit_assert_int(xtc_timer_set(g_tm14_loop, 1000, tm14_cb, NULL,
+		    &t), ==, XTC_OK);
+		munit_assert_int(xtc_timer_release(t), ==, XTC_OK);
+		munit_assert_int(xtc_timer_set(g_tm14_loop, XTC_NS_PER_SEC,
+		    tm14_cb, NULL, &t), ==, XTC_OK);
+		munit_assert_int(xtc_timer_cancel(t), ==, XTC_OK);
+		munit_assert_int(xtc_timer_release(t), ==, XTC_OK);
+		munit_assert_int(xtc_timer_set(g_tm14_loop, 1000, tm14_cb, NULL,
+		    NULL), ==, XTC_OK);
+		if (i % 1000 == 999)
+			(void)xtc_proc_sleep(10 * 1000);
+	}
+	(void)xtc_proc_sleep(XTC_NS_PER_MS);
+	g_tm14_inuse = tm14_inuse(g_tm14_loop);
+}
+
+static MunitResult
+test_timer_set_reclaimed(const MunitParameter p[], void *d)
+{
+	xtc_pid_t pid;
+	(void)p; (void)d;
+	g_tm14_fired = 0;
+	munit_assert_int(xtc_loop_init(&g_tm14_loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(g_tm14_loop, tm14_set_proc, NULL,
+	    NULL, &pid), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(g_tm14_loop), ==, XTC_OK);
+	munit_logf(MUNIT_LOG_INFO, "%d x3 xtc_timer_set: fired %ld, still "
+	    "allocated %ld", TM14_N, g_tm14_fired, g_tm14_inuse);
+	munit_assert_long(g_tm14_fired, ==, 2L * TM14_N);
+	munit_assert_long(g_tm14_inuse, <, TM14_BOUND);
+	munit_assert_int(xtc_loop_fini(g_tm14_loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* xtc_future_with_timeout, both outcomes: the source wins (set before the
+ * timeout) and the timeout wins.  Each must reclaim its timer. */
+static void
+tm14_future_proc(void *a)
+{
+	xtc_promise_t *prom;
+	xtc_future_t *fut, *tf;
+	intptr_t out;
+	long i;
+	int rc;
+	(void)a;
+	for (i = 0; i < TM14_N; i++) {
+		munit_assert_int(xtc_future_new_pair(&prom, &fut), ==, XTC_OK);
+		munit_assert_int(xtc_future_with_timeout(fut, XTC_NS_PER_SEC,
+		    &tf), ==, XTC_OK);
+		munit_assert_int(xtc_promise_set(prom, (intptr_t)i, XTC_OK),
+		    ==, XTC_OK);
+		munit_assert_int(xtc_future_await(tf, &out), ==, XTC_OK);
+		munit_assert_long((long)out, ==, i);
+		if (i % 100 == 0) {
+			/* The timeout wins: a 1us timeout on a never-set
+			 * source. */
+			munit_assert_int(xtc_future_new_pair(&prom, &fut), ==,
+			    XTC_OK);
+			munit_assert_int(xtc_future_with_timeout(fut, 1000,
+			    &tf), ==, XTC_OK);
+			rc = xtc_future_await(tf, &out);
+			munit_assert_int(rc, ==, XTC_E_AGAIN);
+			xtc_promise_drop(prom);
+		}
+	}
+	(void)xtc_proc_sleep(XTC_NS_PER_MS);
+	g_tm14_inuse = tm14_inuse(g_tm14_loop);
+}
+
+static MunitResult
+test_future_timeout_reclaimed(const MunitParameter p[], void *d)
+{
+	xtc_pid_t pid;
+	(void)p; (void)d;
+	munit_assert_int(xtc_loop_init(&g_tm14_loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(g_tm14_loop, tm14_future_proc, NULL,
+	    NULL, &pid), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(g_tm14_loop), ==, XTC_OK);
+	munit_logf(MUNIT_LOG_INFO, "%d xtc_future_with_timeout: timers still "
+	    "allocated %ld", TM14_N, g_tm14_inuse);
+	munit_assert_long(g_tm14_inuse, <, TM14_BOUND);
+	munit_assert_int(xtc_loop_fini(g_tm14_loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/Tm5_basic",            test_timer_basic,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Tm6_order",            test_order,              NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -366,6 +625,11 @@ static MunitTest tests[] = {
 	{ "/Tm10_park_on_timer",   test_park_on_timer,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Tm11_timer_under_busy_runqueue", test_timer_under_busy_runqueue, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Tm12_park_timers_freed_with_slab", test_park_timers_freed_with_slab, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Tm13_cancel_removes_owner",  test_cancel_removes_owner,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Tm13_cancel_removes_offloop", test_cancel_removes_offloop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Tm13_cancel_removes_timed_recv", test_cancel_removes_timed_recv, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Tm14_timer_set_reclaimed",   test_timer_set_reclaimed,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Tm14_future_timeout_reclaimed", test_future_timeout_reclaimed, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m3/timer", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
