@@ -485,6 +485,18 @@ struct xtc_loop {
 	 * a thief loop can never re-queue a pinned task there. */
 	_Atomic(struct xtc_task *) dead_head;
 	struct xtc_task           *task_free_mig;
+
+	/* --- rr3 (fix155): bounded task-struct retention across threads ---
+	 * The owner-only free lists hold at most XTC_TASK_FREELIST_LOCAL
+	 * structs (task_free_n); the owner pushes the rest onto task_spare,
+	 * which ANY thread may pop under task_spare_lock (a spinlock), so a
+	 * spawn from another loop reuses this loop's recycled structs instead
+	 * of always mallocing.  Indexed by pinned (0 migratable, 1 pinned),
+	 * kept apart like the free lists.  task_spare_n is written under the
+	 * lock and read relaxed for the plain-task cap.  See __task_alloc. */
+	_Atomic int                task_spare_lock;
+	struct xtc_task           *task_spare[2];
+	_Atomic int                task_spare_n;
 };
 
 #if defined(XTC_DIAGNOSTIC)
@@ -544,6 +556,8 @@ int  __xtc_task_spawn_ex(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 /* lifetime (fix155): reclaim a finished proc fiber (task.c). */
 void __xtc_task_reclaim(xtc_loop_t *loop, xtc_task_t *t);
 void __xtc_task_reclaim_drain(xtc_loop_t *loop);
+/* rr3 (fix155): move the cross-thread spares onto the free lists (fini). */
+void __xtc_task_spare_fini(xtc_loop_t *loop);
 int  __xtc_task_spawn_cleanup(xtc_loop_t *loop, xtc_task_fn fn, void *user,
          int pinned, void (*cleanup)(void *), void *cleanup_arg,
          xtc_task_t **out_task);
