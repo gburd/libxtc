@@ -7,9 +7,9 @@ exercise the parts of libxtc that the earlier examples do not:
 sustained backpressure, per-partition ordering, segmented on-disk
 logs, and consumer-group offset tracking.
 
-This document is the design and the build plan.  The code lands in
-phases; each phase is independently testable and leaves the tree
-green.
+This document is the design.  It was written as a phased build plan;
+the Status section at the end says what was built and how it is
+tested.
 
 ## What kaka is and is not
 
@@ -29,9 +29,9 @@ In scope:
   * Segmented log storage with offset indexing, reusing the Bitcask
     record/CRC discipline from the rexis example.
   * Bounded memory under a producer flood -- records in closed (rolled)
-    segments are evicted from RAM and cold reads fall back to the
-    segment files, so resident memory stays bounded (~2 segments) no
-    matter how many messages are appended.  Combined with credit-based
+    segments are evicted from RAM and cold reads go to the segment
+    files through an offset index, so resident memory stays bounded
+    (~2 segments) no matter how many messages are appended.  Combined with credit-based
     backpressure on in-flight requests, this is the property that is the
     real test of an actor runtime.
 
@@ -39,7 +39,8 @@ Out of scope (documented, not built):
 
   * Replication, ISR, leader election.
   * Exactly-once semantics / transactions.
-  * Log compaction by key (only time/size retention).
+  * Log compaction by key, and time-based retention (only size-based
+    retention, `--retention-bytes`, is implemented; off by default).
   * The Kafka binary protocol; kaka uses a small framed protocol of
     its own, the way sqlxtc uses Quack rather than the PostgreSQL
     wire protocol.
@@ -58,11 +59,11 @@ primitive, chosen deliberately.
 | Record append            | `xtc_send` to the partition proc     | The mailbox cap is the partition's in-flight write bound |
 | Backpressure             | credit-based flow control (see below)| The mailbox cap alone drops on overflow; kaka adds credits so producers throttle instead |
 | Segmented log + index    | Bitcask-style records (from rexis)   | Reuses the CRC-framed append log; segments roll at a size threshold |
-| Offset / high-water mark | `xtc_lrlock` over the partition meta | Consumers read the high-water mark wait-free; the partition proc is the sole writer |
-| Consumer group state     | `xtc_lockmgr` keyed by (group, part) | Partition assignment within a group is a lock: one consumer holds the (group, partition) lock at a time |
-| Offset commit store      | Bitcask KV (group,partition -> off)  | Durable, survives broker restart |
+| Offset / high-water mark | partition proc state                 | The partition proc is the sole writer and reader; FETCH asks it |
+| Consumer group state     | (not built)                          | Partition assignment / rebalancing is not implemented; consumers pick their partitions |
+| Offset commit store      | coordinator proc + segmented log     | COMMIT / OFFSETS requests; each commit is fdatasync'ed before its ack and replayed on restart |
 | Per-topic metrics        | `xtc_stats` counters + histograms    | Produce/consume rates, append latency p50/p99 |
-| Resource budget          | `xtc_res`                            | Bounded RSS, connection count, in-flight bytes |
+| Resource budget          | `xtc_res`                            | `--max-memory` caps record bytes held in RAM; `--max-clients` caps connections |
 
 The single most important line in that table is the partition log:
 because a partition is an `xtc_proc` and all appends are messages to
@@ -82,9 +83,9 @@ layers credit-based flow control on top of the mailbox:
   2. A producer that exhausts its credit stops reading from its
      socket -- it removes the socket from the event loop via
      `xtc_proc_wait_fd` so it parks instead of spinning.
-  3. As the partition proc durably appends records, it returns credit
-     to the producer (a small control message), which resumes
-     reading.
+  3. As the partition proc durably appends records (fdatasync before
+     the ack), it returns credit to the producer (the ack), which
+     resumes reading.
 
 The in-flight credit window is expressed with libxtc's
 `xtc_credit` regulator (`broker_credit_selftest` in broker.c): the
@@ -103,35 +104,36 @@ benchmark, and the one Kafka itself spends the most engineering on.
 WINDOW of recent records in RAM (partition.c: the in-memory slot vector).
 When a segment rolls closed its records are durable on disk, so they are
 EVICTED from RAM; a read of an evicted offset is served from the segment
-file (`__cold_read`).  Resident memory therefore stays bounded (~2
+file through the segment's sparse offset index (`plog_fetch`).  Resident memory therefore stays bounded (~2
 segments) regardless of how many messages have been appended -- verified
 by test_partition's `bounded_memory` case (20,000 appends, RAM peak ~1300
 records, evicted reads still correct).  So the broker is bounded in BOTH
-in-flight work and cumulative resident memory.  (A larger recovered log
-is fully replayed into RAM on open, then re-bounded as new segments roll;
-compacting recovery is a further refinement, not needed for the
-steady-state flood property.)
+in-flight work and cumulative resident memory.  Recovery does not load
+records into RAM: it scans the segments to rebuild the index (CRC-checking
+the newest one), and the RAM window starts empty.
 
 ## On-disk layout
 
     <dir>/<topic>-<partition>/
-        00000000000000000000.log     segment, Bitcask-framed records
-        00000000000000000000.index   offset -> file position
+        00000000000000000000.log     segment, CRC-framed records
         00000000000000093124.log     next segment after roll
         ...
     <dir>/__offsets/
-        bitcask.data                 group,partition -> committed offset
+        00000000000000000000.log     committed offsets (same format)
 
-Each record on disk carries the Bitcask header (CRC32, timestamp,
-key-len, value-len) plus the 64-bit logical offset.  Recovery on
-startup scans the active segment of each partition to rebuild the
-in-memory offset index and high-water mark, exactly as the rexis
-Bitcask recovers its key index.
+Each record on disk is `crc32 | offset u64 | key_len u32 | value_len
+u32 | key | value`; the bytes after the CRC are exactly the FETCH wire
+encoding.  The offset index (one entry per ~4 KiB) is kept in memory
+and rebuilt by scanning the segments at startup, as the rexis Bitcask
+rebuilds its key index.  A segment is fdatasync'ed before the next one
+is created, so only the newest segment can have a torn tail; it is
+truncated at the first bad record.
 
 ## Protocol
 
 A small length-framed binary protocol (PROTOCOL.md, written in
-phase 1).  Request types: PRODUCE, FETCH, COMMIT, OFFSETS, METADATA.
+phase 1).  Request types: PRODUCE, FETCH, COMMIT, OFFSETS (METADATA is
+reserved).
 Each frame is a 4-byte length, a 1-byte type, and a type-specific
 body.  The wire format is deliberately minimal; the example is about
 the broker internals, not protocol design.
@@ -187,62 +189,35 @@ judge.
 
 ## Status
 
-Phases 1-2 complete: the framing codec, the in-memory partition log, and
-the broker's partition/connection procs are implemented and tested.
+Built and tested (`make test`, in-process, no daemon):
 
-  * `frame.c` -- wire codec; `test_frame` (6 checks) round-trips
-    every frame and request/response type.
-  * `partition.c` -- in-memory ordered log; `test_partition` (3
-    checks) covers append/offset assignment, read-by-offset, and
-    growth past the initial capacity.
-  * `broker.c` -- partition_proc (one xtc_proc per topic/partition,
-    single-owner ordering) and conn_proc (socket parked via
-    xtc_proc_wait_fd).  `test_broker` drives a full PRODUCE -> FETCH
-    round-trip in-process through a real xtc loop (no socket), so it
-    runs under `make test` without a daemon.
+  * `frame.c` -- wire codec; `test_frame` round-trips every frame type.
+  * `partition.c` -- the segmented log; `test_partition` covers offsets,
+    growth, recovery across rolls and restarts, bounded RAM, ack-needs-
+    sync and fail-stop on a failed sync, torn-tail truncation, cold
+    reads through the index, and size-based retention.
+  * `broker.c` -- partition and connection procs.  `test_broker` drives
+    them through a real xtc loop: PRODUCE/FETCH, the credit window
+    (peak in-flight <= 4), metrics and the memory budget (over-cap
+    PRODUCE answered with a MEMORY error, nothing stored), group commit
+    (64 queued produces, one fdatasync), fail-stop after an fsync error,
+    the budget tracking live RAM rather than lifetime bytes, and a
+    request that outlives its connection's timeout (it owns its payload).
+  * `group.c` -- the offset coordinator; `test_group` covers commit /
+    fetch, isolation, and replay after a restart.
 
-The networked end-to-end path (a TCP client against the running
-broker) is built but exercised manually; the in-process self-test is
-the automated correctness gate for the proc-messaging layer.
+The networked paths (accept back-off under fd exhaustion, SIGTERM drain
+of a loaded broker, COMMIT/OFFSETS across a kill -9, kill -9 crash
+recovery of acked records, cold-FETCH latency) are exercised by an
+external harness against a running broker, not by `make test`.
 
-Phase 2 (segmented persistence) is done: partition.c gains
-plog_create_ex, which writes each append to a CRC-framed segment
-file that rolls at a size threshold and is scanned + replayed on
-restart.  The broker persists each partition under
-<log_dir>/<topic>-<partition>/ when started with --dir.  A
-standalone test produces 3000 records across several segment rolls
-and verifies they survive two restarts.
+Durability modes (main.c):
 
-Phase 3 (credit-based backpressure) is done: a producer is granted a
-fixed credit budget and keeps at most that many PRODUCE requests
-outstanding to a partition at once; each reply returns one credit.
-The bounded partition mailbox is the hard backstop, and the credit
-window keeps the producer from ever reaching it -- end-to-end flow
-control that bounds broker memory under a flood.  broker_credit_selftest
-drives it in-process: a 4-credit producer streams 200 records, the
-observed peak in-flight never exceeds 4, and every record lands in
-order.
+  * default -- a PRODUCE is acked after fdatasync (group commit).
+  * `--fsync-interval-ms=N` -- acked after write(2); fdatasync at most
+    every N ms, on segment roll, and at shutdown.  A broker crash loses
+    nothing (the page cache survives it); a kernel crash or power loss
+    can lose up to N ms of acked records.
 
-Phase 4 (consumer-group offset coordination) is done: a single
-coordinator proc owns every group's committed offsets.  Because
-exactly one process touches that state, the offset table needs no
-lock -- commits and fetches are serialized by the coordinator's
-mailbox, the same single-owner pattern the partition proc uses for
-log ordering.  group_selftest drives it in-process: commit/fetch
-round-trips, last-write-wins on re-commit, and isolation across both
-groups and partitions.  Offsets are also durable: passing a directory
-to group_coordinator_spawn_ex persists each commit to a segmented
-plog and replays it on startup, so a restarted coordinator recovers
-the committed positions (group_persist_selftest verifies this across
-two coordinator lifetimes, including last-write-wins).
-
-Phase 5 (observability and budgets) is done.  The partition proc
-records xtc_stats counters (produce/fetch request, record, and byte
-totals; rejected records) and per-request latency histograms.  A
-broker memory budget, an xtc_res cap on stored record payload (the
--m/--max-memory flag), bounds the broker under a producer flood:
-PRODUCE past the cap is rejected rather than letting an unbounded
-producer grow the broker without limit.  broker_metrics_selftest
-drives both in-process -- the counters and histograms move on a
-produce/fetch workload, and a 12-byte cap admits exactly three
-4-byte records and rejects the rest.
+Not built: replication, consumer-group membership and rebalancing,
+METADATA, time-based retention, compaction.
