@@ -6,6 +6,72 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## RESOLVED (1.56): the 1.55.0 production-readiness review
+
+An adversarial review of 1.55.0 (five areas, every BLOCKER/MAJOR
+reproduced on a 32-vCPU host) found 11 BLOCKERs and ~37 MAJORs; 1.56
+fixes them, each with a regression test shown to fail on 1.55.0.  The
+ones a consumer is most likely to have hit:
+
+* `xtc_sem_acquire` / `xtc_notify_wait` stranded a second fiber waiter
+  forever; `xtc_recv_correlate` / `xtc_recv_match` skipped replies already
+  in the save queue when the predicate's value changed behind the same
+  pointer.
+* A killed proc parked in a sync, future, lwlock or lockmgr wait left its
+  stack waiter linked (use-after-return on the next post) or kept a lock
+  grant; `xtc_exit_pid` could not interrupt `xtc_proc_sleep` or those
+  waits at all.
+* Finished procs were never reclaimed (see below); cancelled timers and
+  every `xtc_timer_set` / `xtc_future_with_timeout` timer were retained
+  until `xtc_loop_fini`.
+* A yielding migratable fiber starved every other migratable fiber on its
+  loop, and a loop with any pending timer never stole work.
+* OpenSSL: one client's TLS error made the next TLS call on that thread
+  fail for every healthy connection.
+* io_uring: on completion-queue overflow the kernel ends multishot polls;
+  the backend did not notice, so registrations leaked and readiness was
+  lost.  fd lookup was a linear scan on io_uring, poll and select.
+* `xtc_blocking_run` used a pipe per call and, at EMFILE, silently ran the
+  work on the loop thread.
+* `xtc_batch_submit_mt` returned `XTC_OK` and a handle for requests it
+  later dropped; `xtc_accel_wait_fence` spun at 100% CPU with an unread
+  message pending.
+* `xtc_svr_call` from a plain thread let a late reply write into the
+  timed-out caller's freed stack frame.
+
+The full list, with before/after measurements, is in the 1.56.0 release
+notes (`debian/changelog`).  Behaviour changes a consumer must act on:
+
+* **Links have BEAM semantics.**  A linked proc's NON-normal exit kills
+  every linked peer that does not trap exits; a normal exit is silent to
+  it.  Call `xtc_proc_trap_exit(1)` to receive an `E` message instead
+  (`XTC_HAVE_PROC_TRAP_EXIT` is defined when available).
+* DOWN and EXIT messages bypass `mailbox_cap`.
+* `xtc_notify_signal` hands each signal to exactly one parked fiber,
+  oldest first; `xtc_sem_post(n)` wakes only the waiters the count can
+  satisfy; `xtc_gate_drain` on an open gate returns when the count
+  reaches 0.
+* Migratable work migrates more by default: an executor loop with an
+  empty run queue steals even while it owns pending timers.
+* TLS peer EOF without close_notify, a reset, or a transport error is
+  `XTC_E_IO` (was `XTC_E_INTERNAL`).
+* `xtc_blocking_run` may return `XTC_E_AGAIN` (queue full) or
+  `XTC_E_RESOURCE` (no pool thread) without running `fn`; it never runs
+  `fn` on the loop thread.  `xtc_aio_*` report that as `-EAGAIN` /
+  `-ENOMEM`.
+* `xtc_svr_call` to a server that dies returns `XTC_E_NOTFOUND`.
+* `xtc_send` returns the wake error (the message is still queued) instead
+  of `XTC_OK` if waking the receiver failed.
+* `xtc_lock_get` / `xtc_lock_upgrade` return `XTC_E_ABORTED` when the
+  waiter is killed under an enclosing mask.
+* The proc registry supports 1024 live loops (was 64); a full registry is
+  `XTC_E_RESOURCE`.
+* `xtc_chan_mpsc_try_recv` can return `XTC_E_AGAIN` while
+  `xtc_chan_mpsc_len()` is above zero (a sender is mid-write); retry.
+* `xtc_rcu_current_epoch()` returns 1 on a fresh rcu (was 0).
+* New functions: `xtc_proc_trap_exit`, `xtc_timer_release`,
+  `xtc_net_listen_backlog`.  No existing public struct changed.
+
 ## NEW (1.55): asynchronous (device-offload) continuous batching
 
 **What it adds.** `xtc_batch_create_async` turns a batch group's step
@@ -396,66 +462,113 @@ maintainer must consciously update) is the cheap mechanical guard and
 does not exist yet.
 
 ---
-## DEFERRED: completed fibers are not reclaimed until loop teardown
+## OPEN (1.56): sqlxtc recovery, kaka scope, and other example limits
 
-**Status:** OPEN and DELIBERATE -- a known bounded-memory limitation,
-deferred to its own cycle because reclaiming safely touches five files
-at once.
+The example programs are teaching code built on libxtc's public API.
+After the 1.55.0 production-readiness review their durability and
+isolation defects were fixed (1.56); what remains is recorded here.
 
-**What it is.**  A coroutine-backed task stays on the loop's `all_tasks`
-list from spawn until `xtc_loop_fini`, even after it has reached DONE.
-`src/evt/loop.c:771-803` recycles a completed PLAIN task back to the
-loop's slab, but explicitly keeps coro-backed tasks (`cleanup != NULL`,
-or `fn == __xtc_coro_step`) on `all_tasks` so that fiber-stack teardown
-stays on the one path that is known safe; `src/evt/coro_uctx.c:628` sets
-`t->cleanup = __coro_task_cleanup` with the comment "release the fiber
-stack + coro struct when the loop tears the task down at fini," and
-`xtc_loop_fini` (`src/evt/loop.c:280-287`) is what finally walks the list
-and runs every cleanup.
+* **sqlxtc crash recovery rebuilds from the log.**  Recovery replays the
+  write-ahead log onto a fresh page file; it does not yet trust the
+  on-disk pages, their double-write buffer, or page LSNs
+  (`xstore_recover_inplace` is exercised by tests only).  The log is
+  compacted periodically (`--checkpoint-mb`, default 64 MiB, and at 2x
+  the last post-checkpoint size), so restart time is proportional to the
+  live data plus the writes since the last checkpoint.  Commits pause
+  while a checkpoint dumps the live rows.
+* **sqlxtc fail-stops on a log I/O error.**  Any write-ahead-log write or
+  fsync error (ENOSPC, EIO, EFBIG) fails the transactions in that batch
+  and every later write with an I/O error until the server restarts;
+  acknowledged commits are durable.  The superblock (clean flag) is a
+  single pwrite at offset 0, not double-written.  Mid-log corruption is
+  treated as end-of-log and truncated on reopen without a diagnostic.
+* **sqlxtc serialization failures.**  SNAPSHOT, REPEATABLE READ and
+  SERIALIZABLE are first-committer-wins: a write-write conflict fails the
+  later COMMIT (and a racing autocommit UPDATE/DELETE) with "could not
+  serialize access due to concurrent update".  Clients must retry.
+* **kaka is not Kafka.**  It spawns one proc per connection, has no
+  consumer-group membership/rebalancing, no time-based retention, and no
+  METADATA request.  Produces are acknowledged only after a group-commit
+  fdatasync (`--fsync-interval-ms` relaxes this).
+* **rexis `--cores` pins; it does not add threads.**  The server runs one
+  event loop.  `--max-memory` bounds the keyspace and every client's
+  query/output buffers; a client over its output limit is disconnected.
+* **lorb `test_lob` leaks under LeakSanitizer** (pre-existing):
+  `lob_book_destroy` does not free its `xtc_chash` nodes.
+* **sqlxtc restart after kill -9.**  For about 50 ms after the killed
+  process is reaped, the kernel can still accept a connection on its
+  listening socket and then reset it.  Nothing is acknowledged on such a
+  connection; a client retries.  A graceful SIGTERM closes the listener
+  first and is unaffected.
 
-**Consequence.**  For a long-lived service that spawns many short-lived
-procs, retained memory tracks **historical** work, not concurrent work.
-The peak is the TOTAL number of procs ever spawned on that loop times
-the per-fiber stack, not the high-water number of live procs.
+## OPEN (1.56): late or deferred kills, and poll/select scaling
 
-**Measured** (Linux, x86-64, default 64 KiB stack; 20,000 procs spawned
-and each run to completion before the next, so at most ONE existed at a
-time):
+* `xtc_exit_pid` wakes a proc parked anywhere, and the sync, future,
+  lwlock and lockmgr waits deliver the kill at once.  A proc parked in
+  `xtc_await`, an `xtc_aio_*` operation, or an `xtc_blocking_run`
+  offload receives it only when that operation completes (memory-safe,
+  but late; the offload is MASKED by design so the pool worker never
+  writes into a dead frame).
+* `xtc_timer_set` with a non-NULL `out_timer`: a handle that is never
+  passed to `xtc_timer_release` stays allocated (~128 B) until
+  `xtc_loop_fini`.  Pass NULL when no handle is needed.
+* The poll and select backends do O(registered fds) work per wait,
+  inherent to poll(2)/select(2): measured 216k round-trips/s with no idle
+  connections, 57k at 10k idle and 7.5k at 30k idle.  Use epoll or
+  io_uring for many mostly-idle connections.
+* There is no built-in TLS handshake or idle timeout.  Bound them with
+  `xtc_proc_wait_fd` timeouts; `xtc_tls(3)` DEADLINES shows the pattern.
 
-```
-20000 procs, max 1 concurrent: VmSize +1402768 kB (70.1 kB/proc),
-                               VmRSS  + 123016 kB ( 6.2 kB/proc)
-after xtc_loop_fini:           VmSize 51924 kB, VmRSS 45332 kB
-```
+## RESOLVED (1.56): a finished proc fiber is reclaimed at once
 
-So 1.4 GB of address space and 123 MB resident for work whose concurrent
-footprint was one fiber.  It is released at `xtc_loop_fini`, so this is
-retention, not a leak in the LSan sense -- and LSan therefore does not
-flag it, which is why it needs to be written down here.
+**Status:** RESOLVED in 1.56 for processes (`xtc_proc_spawn` and its
+variants -- every per-connection unit in the shipped servers).
 
-**Workarounds today**, in order of preference:
+**What it was.**  A coroutine task stayed on its loop's `all_tasks` list,
+with its fiber stack (two mappings: stack + guard page) and coro struct,
+until `xtc_loop_fini`.  Memory tracked the number of procs EVER spawned on
+the loop, not the number alive: +617 MB RSS and +200,000 mappings after
+100,000 short-lived procs with at most 256 live.  On a stock Linux kernel
+(`vm.max_map_count` 65530) every spawn failed after about 32,000 lifetime
+spawns.
 
-1. Structure long-lived work as a POOL of long-lived procs consuming
-   from a channel or mailbox, rather than one proc per unit of work.
-   This is the idiomatic shape anyway and it makes the bound the pool
-   size.
-2. Lower `xtc_set_stack_size()` if the work is shallow -- it scales the
-   per-proc cost linearly.
-3. For a bounded batch, use a loop per batch and `xtc_loop_fini` between
-   batches.
+**Now.**  When a proc's fiber finishes (it returns, calls `xtc_exit_self`,
+is killed, or faults and is contained) the loop releases it on the
+scheduler stack, after switching off the dead fiber.  The stack goes to a
+per-thread cache of at most 64 (or is unmapped) and the coro is freed.
+The task struct is recycled on its home loop; a proc that finished on a
+work-stealing thief is handed back through a lock-free list.  Same test
+after the fix: +1.4 MB RSS, +131 mappings.  A 4-loop migratable run with
+~480,000 steals stays at +878 mappings at peak and +8 after
+`xtc_exec_fini`.
 
-**Why it is deferred rather than fixed.**  Freeing at DONE means a task
-releasing its own fiber stack while that stack may still be the one
-executing, and the `all_tasks` unlink is not thread-safe under work
-stealing (a stolen task completes on the thief, which is exactly why the
-existing plain-task recycle is conditioned on `t->loop == loop`).  Doing
-it correctly requires a coordinated change across `src/evt/loop.c`,
-`src/evt/task.c`, all three coroutine substrates (`coro_uctx.c`,
-`coro_fctx.c`, `coro_winfiber.c`), and `src/ptc/proc.c` -- with a
-deferred-free / epoch handoff so the stack is released only once nothing
-can be running on it.  That is a design change with a real
-use-after-free failure mode if rushed, so it gets its own cycle rather
-than being bolted onto an unrelated one.
+**Still retained until `xtc_loop_fini` (by contract, not a leak):**
+
+* A task created with `xtc_task_spawn` or `xtc_async`.  Its handle is
+  documented as valid for the loop's lifetime and `xtc_await` reads the
+  finished coroutine's result through it.  A long-lived service should run
+  short-lived work as procs, not as bare `xtc_async` coroutines.
+* Task STRUCTS (a few hundred bytes each, no stacks).  Recycled ones are
+  kept on the loop's free list up to the high-water count of
+  simultaneously live tasks and freed at `xtc_loop_fini`.  They are never
+  returned to the allocator mid-run because a waker is a raw
+  `{loop, task}` pair: a late wake must land on a valid task, and at worst
+  it is one spurious wake, which every wait tolerates.
+
+**Sharp edge for library code.**  State keyed on the running task's
+identity must be released when the fiber exits, because the next proc on
+that loop usually reuses the struct.  Two in-tree cases were found and
+fixed in the same release: a `xtc_cfg` session binding (now unbound when
+the proc exits) and the owner of a recursive `xtc_amutex` (now the task
+plus the proc's pid, so a later proc cannot re-enter a lock a dead proc
+still holds).
+
+**`xtc_loop_fini` with live procs.**  Procs still parked when their loop
+is finalized (an executor shut down with idle connections) have their
+queued and saved messages, link and monitor entries, and memory context
+released.  Their at-exit callbacks are NOT run and no DOWN or exit signal
+is sent, because their fibers never resume.  Make procs that hold external
+resources exit before shutdown.
 
 ---
 ## RESOLVED (1.49.x): allocator, accounting, cancellation and lifetime defects
