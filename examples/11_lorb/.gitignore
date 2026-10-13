@@ -1,5 +1,6 @@
 # examples/11_lorb -- built artifacts (never committed; see AGENTS.md)
 /lorb
 /test_lob
+/test_lob_diff
 *.o
 *.dSYM/

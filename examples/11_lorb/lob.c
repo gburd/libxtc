@@ -138,15 +138,6 @@ order_execute(lob_order_t *o)
 	o->parent->size -= 1;
 }
 
-static void
-order_modify(lob_order_t *o, int new_shares, int new_limit)
-{
-	o->shares = new_shares;
-	o->limit = new_limit;
-	o->next = o->prev = NULL;
-	o->parent = NULL;
-}
-
 /* ---- Limit operations (Limit.cpp) ---------------------------------- */
 
 static void
@@ -498,7 +489,7 @@ change_stop_book_roots(lob_book_t *b, lob_limit_t *s)
 
 /* ---- add a new (empty) limit / stop level -------------------------- */
 
-static void
+static lob_limit_t *
 add_limit(lob_book_t *b, int price, bool buy)
 {
 	xtc_chash_t *map = buy ? b->limit_buy_map : b->limit_sell_map;
@@ -515,9 +506,10 @@ add_limit(lob_book_t *b, int price, bool buy)
 		(void)tree_insert(b, *tree, nl, NULL, tree, false);
 		update_book_edge_insert(b, nl);
 	}
+	return nl;
 }
 
-static void
+static lob_limit_t *
 add_stop(lob_book_t *b, int price, bool buy)
 {
 	lob_limit_t **tree = stop_tree_slot(b, buy);
@@ -533,6 +525,7 @@ add_stop(lob_book_t *b, int price, bool buy)
 		(void)tree_insert(b, *tree, ns, NULL, tree, true);
 		update_stop_book_edge_insert(b, ns);
 	}
+	return ns;
 }
 
 /* ---- delete an emptied limit / stop level -------------------------- */
@@ -578,211 +571,230 @@ delete_stop_level(lob_book_t *b, lob_limit_t *s)
 
 /* ---- matching core ------------------------------------------------- */
 
-/* Forward decls for the mutually recursive stop machinery. */
-static void execute_stop_orders(lob_book_t *b, bool buy);
+/*
+ * The matching rules are stated in README.md ("Matching rules") and
+ * checked against a reference matcher by test_lob_diff.c.
+ */
+
+/* Append a limit order to the back of its price level. */
+static void
+rest_order(lob_book_t *b, lob_order_t *o)
+{
+	xtc_chash_t *map = o->buy ? b->limit_buy_map : b->limit_sell_map;
+	lob_limit_t *l = map_get_limit(map, o->limit);
+
+	if (l == NULL)
+		l = add_limit(b, o->limit, o->buy);
+	limit_append(l, o);
+}
+
+/* Append a stop / stop-limit order to the back of its trigger level. */
+static void
+rest_stop(lob_book_t *b, lob_order_t *o, int stop_price)
+{
+	lob_limit_t *l = map_get_limit(b->stop_map, stop_price);
+
+	if (l == NULL)
+		l = add_stop(b, stop_price, o->buy);
+	limit_append(l, o);
+}
+
+/* Unlink a resting order from its level; drop the level if it empties. */
+static void
+unlink_order(lob_book_t *b, lob_order_t *o)
+{
+	lob_limit_t *l = o->parent;
+
+	order_cancel(o);
+	o->next = o->prev = NULL;
+	o->parent = NULL;
+	if (l->size != 0)
+		return;
+	if (o->cat == LOB_LIMIT)
+		delete_limit(b, l);
+	else
+		delete_stop_level(b, l);
+}
+
+static void
+free_order(lob_book_t *b, lob_order_t *o)
+{
+	(void)xtc_chash_remove(b->order_map, &o->id, NULL);
+	xtc_slab_free(b->order_slab, o);
+}
 
 /*
- * Execute a market order against the book.  If the book cannot fully
- * fill it, the remainder is simply forgotten (as in the original).
+ * Match an aggressive order against the opposite side: best price
+ * first, FIFO within a level, each fill at the resting order's price
+ * (recorded in last_price).  limit_price 0 = market (no bound).
+ * Returns the unfilled shares.
  */
-static void
-market_order_helper(lob_book_t *b, bool buy, int shares)
+static int
+match(lob_book_t *b, bool buy, int shares, int limit_price)
 {
 	lob_limit_t **edge = buy ? &b->lowest_sell : &b->highest_buy;
 
-	while (*edge != NULL && (*edge)->head->shares <= shares) {
-		lob_order_t *ho = (*edge)->head;
+	while (shares > 0 && *edge != NULL) {
+		lob_limit_t *l = *edge;
+		lob_order_t *ho = l->head;
+
+		if (limit_price != 0 &&
+		    (buy ? l->price > limit_price : l->price < limit_price))
+			break;
+		b->last_price = l->price;
+		b->executed_orders_count += 1;
+		if (ho->shares > shares) {
+			order_partially_fill(ho, shares);
+			return 0;
+		}
 		shares -= ho->shares;
 		order_execute(ho);
-		if ((*edge)->size == 0)
-			delete_limit(b, *edge);
-		(void)xtc_chash_remove(b->order_map, &ho->id, NULL);
-		xtc_slab_free(b->order_slab, ho);
-		b->executed_orders_count += 1;
-	}
-	if (*edge != NULL && shares != 0) {
-		order_partially_fill((*edge)->head, shares);
-		b->executed_orders_count += 1;
-	}
-}
-
-/*
- * A limit order that crosses the book executes its crossing part as a
- * market order.  Returns the shares left to rest on the book (0 if
- * fully filled).
- */
-static int
-limit_order_as_market_order(lob_book_t *b, int id, bool buy, int shares,
-                            int limit_price)
-{
-	(void)id;
-	if (buy) {
-		while (b->lowest_sell != NULL && shares != 0 &&
-		    b->lowest_sell->price <= limit_price) {
-			if (shares <= b->lowest_sell->total_volume) {
-				market_order_helper(b, buy, shares);
-				return 0;
-			}
-			shares -= b->lowest_sell->total_volume;
-			market_order_helper(b, buy,
-			    b->lowest_sell->total_volume);
-		}
-		return shares;
-	}
-	while (b->highest_buy != NULL && shares != 0 &&
-	    b->highest_buy->price >= limit_price) {
-		if (shares <= b->highest_buy->total_volume) {
-			market_order_helper(b, buy, shares);
-			return 0;
-		}
-		shares -= b->highest_buy->total_volume;
-		market_order_helper(b, buy, b->highest_buy->total_volume);
+		free_order(b, ho);
+		if (l->size == 0)
+			delete_limit(b, l);
 	}
 	return shares;
 }
 
 /*
- * An already-existing order (a triggered stop-limit) crosses the book:
- * execute its crossing part as a market order.  Frees the order if it
- * is fully filled.  Returns the remaining shares.
- */
-static int
-existing_order_as_market_order(lob_book_t *b, lob_order_t *ho, bool buy)
-{
-	int shares = ho->shares;
-	int id = ho->id;
-	int limit_price = ho->limit;
-
-	if (buy) {
-		while (b->lowest_sell != NULL &&
-		    b->lowest_sell->price <= limit_price) {
-			if (shares <= b->lowest_sell->total_volume) {
-				(void)xtc_chash_remove(b->order_map, &id, NULL);
-				xtc_slab_free(b->order_slab, ho);
-				market_order_helper(b, buy, shares);
-				return 0;
-			}
-			shares -= b->lowest_sell->total_volume;
-			market_order_helper(b, buy,
-			    b->lowest_sell->total_volume);
-		}
-		return shares;
-	}
-	while (b->highest_buy != NULL &&
-	    b->highest_buy->price >= limit_price) {
-		if (shares <= b->highest_buy->total_volume) {
-			(void)xtc_chash_remove(b->order_map, &id, NULL);
-			xtc_slab_free(b->order_slab, ho);
-			market_order_helper(b, buy, shares);
-			return 0;
-		}
-		shares -= b->highest_buy->total_volume;
-		market_order_helper(b, buy, b->highest_buy->total_volume);
-	}
-	return shares;
-}
-
-/* Convert a triggered stop-limit order's head order into a limit order. */
-static void
-stop_limit_order_to_limit_order(lob_book_t *b, lob_order_t *ho, bool buy)
-{
-	lob_limit_t **edge = buy ? &b->lowest_stop_buy : &b->highest_stop_sell;
-	order_execute(ho);
-	if ((*edge)->size == 0)
-		delete_stop_level(b, *edge);
-
-	int shares = existing_order_as_market_order(b, ho, buy);
-	if (shares != 0) {
-		ho->shares = shares;
-		ho->cat = LOB_LIMIT;
-		xtc_chash_t *map = buy ? b->limit_buy_map : b->limit_sell_map;
-		if (map_get_limit(map, ho->limit) == NULL)
-			add_limit(b, ho->limit, buy);
-		limit_append(map_get_limit(map, ho->limit), ho);
-	}
-}
-
-/*
- * Fire any stop orders whose stop price has been reached.  Stop market
- * orders re-enter as market orders; stop-limit orders convert to limit
- * orders.  Iterates until no more trigger (a fired stop can move the
- * book edge and trigger the next).
+ * Enter an existing, unlinked order (already in the order map) as an
+ * aggressive order at o->limit (0 = market): match it, then rest a
+ * limit remainder at the back of its level; a market remainder is
+ * dropped (as in the original).
  */
 static void
-execute_stop_orders(lob_book_t *b, bool buy)
+enter_order(lob_book_t *b, lob_order_t *o)
 {
-	if (buy) {
-		while (b->lowest_stop_buy != NULL &&
-		    (b->lowest_sell == NULL ||
-		     b->lowest_stop_buy->price <= b->lowest_sell->price)) {
-			lob_order_t *ho = b->lowest_stop_buy->head;
-			if (ho->limit == 0) {
-				int shares = ho->shares;
-				order_execute(ho);
-				if (b->lowest_stop_buy->size == 0)
-					delete_stop_level(b, b->lowest_stop_buy);
-				(void)xtc_chash_remove(b->order_map, &ho->id,
-				    NULL);
-				xtc_slab_free(b->order_slab, ho);
-				market_order_helper(b, true, shares);
-			} else {
-				stop_limit_order_to_limit_order(b, ho, buy);
-			}
-		}
-	} else {
-		while (b->highest_stop_sell != NULL &&
-		    (b->highest_buy == NULL ||
-		     b->highest_stop_sell->price >= b->highest_buy->price)) {
-			lob_order_t *ho = b->highest_stop_sell->head;
-			if (ho->limit == 0) {
-				int shares = ho->shares;
-				order_execute(ho);
-				if (b->highest_stop_sell->size == 0)
-					delete_stop_level(b,
-					    b->highest_stop_sell);
-				(void)xtc_chash_remove(b->order_map, &ho->id,
-				    NULL);
-				xtc_slab_free(b->order_slab, ho);
-				market_order_helper(b, false, shares);
-			} else {
-				stop_limit_order_to_limit_order(b, ho, buy);
-			}
-		}
+	o->shares = match(b, o->buy, o->shares, o->limit);
+	if (o->shares == 0 || o->limit == 0) {
+		free_order(b, o);
+		return;
+	}
+	o->cat = LOB_LIMIT;
+	rest_order(b, o);
+}
+
+/*
+ * Fire every stop elected by the last trade price: a buy stop when
+ * last_price >= its stop price, a sell stop when last_price <= it.
+ * One order at a time -- the lowest elected buy stop level first, then
+ * the highest elected sell stop level, FIFO within a level -- and the
+ * test is re-made after each, because a fired stop's own fills move
+ * last_price (cascade).  Terminates: every pass removes one stop.
+ */
+static void
+run_stops(lob_book_t *b)
+{
+	for (;;) {
+		lob_limit_t *s;
+		lob_order_t *o;
+
+		if (b->lowest_stop_buy != NULL &&
+		    b->lowest_stop_buy->price <= b->last_price)
+			s = b->lowest_stop_buy;
+		else if (b->highest_stop_sell != NULL &&
+		    b->highest_stop_sell->price >= b->last_price)
+			s = b->highest_stop_sell;
+		else
+			return;
+		o = s->head;
+		unlink_order(b, o);
+		enter_order(b, o);
 	}
 }
 
-/* Stop MARKET order that already crosses the book -> fire immediately. */
-static int
-stop_order_as_market_order(lob_book_t *b, int id, bool buy, int shares,
-                           int stop_price)
+/*
+ * Place a stop (in the order map, unlinked).  A stop whose price is
+ * already at or through the opposite best quote is elected on entry;
+ * otherwise it rests until a trade elects it.
+ */
+static void
+place_stop(lob_book_t *b, lob_order_t *o, int stop_price)
 {
-	if (buy && b->lowest_sell != NULL &&
-	    stop_price <= b->lowest_sell->price) {
-		lob_market_order(b, id, true, shares);
-		return 0;
-	} else if (!buy && b->highest_buy != NULL &&
-	    stop_price >= b->highest_buy->price) {
-		lob_market_order(b, id, false, shares);
-		return 0;
-	}
-	return shares;
+	lob_limit_t *opp = o->buy ? b->lowest_sell : b->highest_buy;
+
+	if (opp != NULL &&
+	    (o->buy ? stop_price <= opp->price : stop_price >= opp->price))
+		enter_order(b, o);
+	else
+		rest_stop(b, o, stop_price);
 }
 
-/* Stop-LIMIT order that already crosses -> enter immediately as limit. */
-static int
-stop_limit_order_as_limit_order(lob_book_t *b, int id, bool buy, int shares,
-                                int limit_price, int stop_price)
+static void
+begin_op(lob_book_t *b)
 {
-	if (buy && b->lowest_sell != NULL &&
-	    stop_price <= b->lowest_sell->price) {
-		lob_add_limit_order(b, id, true, shares, limit_price);
-		return 0;
-	} else if (!buy && b->highest_buy != NULL &&
-	    stop_price >= b->highest_buy->price) {
-		lob_add_limit_order(b, id, false, shares, limit_price);
-		return 0;
+	b->executed_orders_count = 0;
+	b->avl_balance_count = 0;
+}
+
+/* Every public op that traded re-checks the stops. */
+static void
+end_op(lob_book_t *b)
+{
+	if (b->executed_orders_count != 0)
+		run_stops(b);
+}
+
+static void
+add_stop_common(lob_book_t *b, int id, bool buy, int shares,
+                int limit_price, int stop_price, lob_cat_t cat)
+{
+	lob_order_t *o;
+
+	begin_op(b);
+	if ((o = order_new(b, id, buy, shares, limit_price, cat)) == NULL)
+		return;
+	(void)xtc_chash_insert(b->order_map, &o->id, o, NULL);
+	place_stop(b, o, stop_price);
+	end_op(b);
+}
+
+/* A live order of category `cat`, or NULL. */
+static lob_order_t *
+find_order(lob_book_t *b, int id, lob_cat_t cat)
+{
+	lob_order_t *o = map_get_order(b->order_map, id);
+
+	return (o != NULL && o->cat == cat) ? o : NULL;
+}
+
+static void
+cancel_common(lob_book_t *b, int id, lob_cat_t cat)
+{
+	lob_order_t *o;
+
+	begin_op(b);
+	if ((o = find_order(b, id, cat)) == NULL)
+		return;
+	unlink_order(b, o);
+	free_order(b, o);
+}
+
+/*
+ * Modify a stop / stop-limit order.  Same trigger, same limit and no
+ * more shares: changed in place, keeping its place in the trigger
+ * queue.  Anything else is a cancel + re-add under the same id.
+ */
+static void
+modify_stop_common(lob_book_t *b, int id, int new_shares,
+                   int new_limit_price, int new_stop_price, lob_cat_t cat)
+{
+	lob_order_t *o;
+
+	begin_op(b);
+	if ((o = find_order(b, id, cat)) == NULL)
+		return;
+	if (new_stop_price == o->parent->price &&
+	    new_limit_price == o->limit && new_shares <= o->shares) {
+		o->parent->total_volume -= o->shares - new_shares;
+		o->shares = new_shares;
+		return;
 	}
-	return shares;
+	unlink_order(b, o);
+	o->shares = new_shares;
+	o->limit = new_limit_price;
+	place_stop(b, o, new_stop_price);
+	end_op(b);
 }
 
 /* ---- public order API ---------------------------------------------- */
@@ -791,176 +803,99 @@ void
 lob_market_order(lob_book_t *b, int id, bool buy, int shares)
 {
 	(void)id;
-	b->executed_orders_count = 0;
-	b->avl_balance_count = 0;
-	market_order_helper(b, buy, shares);
-	execute_stop_orders(b, buy);
+	begin_op(b);
+	(void)match(b, buy, shares, 0);
+	end_op(b);
 }
 
 void
 lob_add_limit_order(lob_book_t *b, int id, bool buy, int shares,
                     int limit_price)
 {
-	b->avl_balance_count = 0;
-	shares = limit_order_as_market_order(b, id, buy, shares, limit_price);
+	lob_order_t *o;
 
-	if (shares != 0) {
-		lob_order_t *o = order_new(b, id, buy, shares, limit_price,
-		    LOB_LIMIT);
+	begin_op(b);
+	shares = match(b, buy, shares, limit_price);
+	if (shares != 0 &&
+	    (o = order_new(b, id, buy, shares, limit_price, LOB_LIMIT)) != NULL) {
 		(void)xtc_chash_insert(b->order_map, &o->id, o, NULL);
-
-		xtc_chash_t *map = buy ? b->limit_buy_map : b->limit_sell_map;
-		if (map_get_limit(map, limit_price) == NULL)
-			add_limit(b, limit_price, buy);
-		limit_append(map_get_limit(map, limit_price), o);
-	} else {
-		execute_stop_orders(b, buy);
+		rest_order(b, o);
 	}
+	end_op(b);
 }
 
 void
 lob_cancel_limit_order(lob_book_t *b, int id)
 {
-	b->executed_orders_count = 0;
-	b->avl_balance_count = 0;
-	lob_order_t *o = map_get_order(b->order_map, id);
-	if (o == NULL)
-		return;
-
-	order_cancel(o);
-	if (o->parent->size == 0)
-		delete_limit(b, o->parent);
-	(void)xtc_chash_remove(b->order_map, &o->id, NULL);
-	xtc_slab_free(b->order_slab, o);
+	cancel_common(b, id, LOB_LIMIT);
 }
 
+/*
+ * Modify a resting limit order.  Same price and no more shares: the
+ * size is reduced in place and the order keeps its time priority.  A
+ * price change or a size increase loses priority: the order is pulled
+ * and re-entered as a new aggressive order at the new price -- it
+ * matches whatever it now crosses and any remainder rests at the back
+ * of its level.
+ */
 void
 lob_modify_limit_order(lob_book_t *b, int id, int new_shares, int new_limit)
 {
-	b->executed_orders_count = 0;
-	b->avl_balance_count = 0;
-	lob_order_t *o = map_get_order(b->order_map, id);
-	if (o == NULL)
+	lob_order_t *o;
+
+	begin_op(b);
+	if ((o = find_order(b, id, LOB_LIMIT)) == NULL)
 		return;
-
-	bool buy = o->buy;
-	order_cancel(o);
-	if (o->parent->size == 0)
-		delete_limit(b, o->parent);
-
-	order_modify(o, new_shares, new_limit);
-	xtc_chash_t *map = buy ? b->limit_buy_map : b->limit_sell_map;
-	if (map_get_limit(map, new_limit) == NULL)
-		add_limit(b, new_limit, buy);
-	limit_append(map_get_limit(map, new_limit), o);
+	if (new_limit == o->limit && new_shares <= o->shares) {
+		o->parent->total_volume -= o->shares - new_shares;
+		o->shares = new_shares;
+		return;
+	}
+	unlink_order(b, o);
+	o->shares = new_shares;
+	o->limit = new_limit;
+	enter_order(b, o);
+	end_op(b);
 }
 
 void
 lob_add_stop_order(lob_book_t *b, int id, bool buy, int shares, int stop_price)
 {
-	b->executed_orders_count = 0;
-	b->avl_balance_count = 0;
-	shares = stop_order_as_market_order(b, id, buy, shares, stop_price);
-
-	if (shares != 0) {
-		lob_order_t *o = order_new(b, id, buy, shares, 0, LOB_STOP);
-		(void)xtc_chash_insert(b->order_map, &o->id, o, NULL);
-		if (map_get_limit(b->stop_map, stop_price) == NULL)
-			add_stop(b, stop_price, buy);
-		limit_append(map_get_limit(b->stop_map, stop_price), o);
-	}
+	add_stop_common(b, id, buy, shares, 0, stop_price, LOB_STOP);
 }
 
 void
 lob_cancel_stop_order(lob_book_t *b, int id)
 {
-	b->executed_orders_count = 0;
-	b->avl_balance_count = 0;
-	lob_order_t *o = map_get_order(b->order_map, id);
-	if (o == NULL)
-		return;
-
-	order_cancel(o);
-	if (o->parent->size == 0)
-		delete_stop_level(b, o->parent);
-	(void)xtc_chash_remove(b->order_map, &o->id, NULL);
-	xtc_slab_free(b->order_slab, o);
+	cancel_common(b, id, LOB_STOP);
 }
 
 void
 lob_modify_stop_order(lob_book_t *b, int id, int new_shares, int new_stop_price)
 {
-	b->executed_orders_count = 0;
-	b->avl_balance_count = 0;
-	lob_order_t *o = map_get_order(b->order_map, id);
-	if (o == NULL)
-		return;
-
-	bool buy = o->buy;
-	order_cancel(o);
-	if (o->parent->size == 0)
-		delete_stop_level(b, o->parent);
-
-	order_modify(o, new_shares, 0);
-	if (map_get_limit(b->stop_map, new_stop_price) == NULL)
-		add_stop(b, new_stop_price, buy);
-	limit_append(map_get_limit(b->stop_map, new_stop_price), o);
+	modify_stop_common(b, id, new_shares, 0, new_stop_price, LOB_STOP);
 }
 
 void
 lob_add_stop_limit_order(lob_book_t *b, int id, bool buy, int shares,
                          int limit_price, int stop_price)
 {
-	b->executed_orders_count = 0;
-	b->avl_balance_count = 0;
-	shares = stop_limit_order_as_limit_order(b, id, buy, shares,
-	    limit_price, stop_price);
-
-	if (shares != 0) {
-		lob_order_t *o = order_new(b, id, buy, shares, limit_price,
-		    LOB_STOP_LIMIT);
-		(void)xtc_chash_insert(b->order_map, &o->id, o, NULL);
-		if (map_get_limit(b->stop_map, stop_price) == NULL)
-			add_stop(b, stop_price, buy);
-		limit_append(map_get_limit(b->stop_map, stop_price), o);
-	}
+	add_stop_common(b, id, buy, shares, limit_price, stop_price,
+	    LOB_STOP_LIMIT);
 }
 
 void
 lob_cancel_stop_limit_order(lob_book_t *b, int id)
 {
-	b->executed_orders_count = 0;
-	b->avl_balance_count = 0;
-	lob_order_t *o = map_get_order(b->order_map, id);
-	if (o == NULL)
-		return;
-
-	order_cancel(o);
-	if (o->parent->size == 0)
-		delete_stop_level(b, o->parent);
-	(void)xtc_chash_remove(b->order_map, &o->id, NULL);
-	xtc_slab_free(b->order_slab, o);
+	cancel_common(b, id, LOB_STOP_LIMIT);
 }
 
 void
 lob_modify_stop_limit_order(lob_book_t *b, int id, int new_shares,
                             int new_limit_price, int new_stop_price)
 {
-	b->executed_orders_count = 0;
-	b->avl_balance_count = 0;
-	lob_order_t *o = map_get_order(b->order_map, id);
-	if (o == NULL)
-		return;
-
-	bool buy = o->buy;
-	order_cancel(o);
-	if (o->parent->size == 0)
-		delete_stop_level(b, o->parent);
-
-	order_modify(o, new_shares, new_limit_price);
-	if (map_get_limit(b->stop_map, new_stop_price) == NULL)
-		add_stop(b, new_stop_price, buy);
-	limit_append(map_get_limit(b->stop_map, new_stop_price), o);
+	modify_stop_common(b, id, new_shares, new_limit_price, new_stop_price,
+	    LOB_STOP_LIMIT);
 }
 
 /* ---- lookups / traversals ------------------------------------------ */

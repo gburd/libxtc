@@ -63,6 +63,51 @@ Assumptions (as in the original): shares > 0, prices > 0, order ids
 unique.  A `Limit` price of `0` on an `Order` marks a (converted) stop
 *market* order.
 
+## Matching rules
+
+These are the engine's contract; `test_lob_diff.c` checks lorb against
+an independent reference matcher that implements exactly this list.
+
+  * **Price-time priority.**  An incoming order matches the best
+    opposite price first, FIFO within a level, while it crosses (a buy
+    at or above the ask, a sell at or below the bid; a market order has
+    no bound).  Each fill trades at the resting order's price.  A limit
+    remainder rests at the back of its level; a market remainder is
+    dropped.
+  * **Modify a limit order.**  Same price and no more shares: the size
+    is reduced in place and the order keeps its time priority.  Any
+    other modify (a new price, or more shares) loses priority: the order
+    is pulled and re-entered as a new aggressive order at the new price,
+    so it trades against whatever it now crosses and any remainder rests
+    at the back of its level.  The book is never left crossed.
+  * **Stop election.**  The engine records the last trade price.  After
+    every operation that traded, a buy stop is elected when the last
+    trade is at or above its stop price, a sell stop when it is at or
+    below.  Elected stops fire one at a time -- the lowest elected
+    buy-stop level first, then the highest elected sell-stop level, FIFO
+    within a level -- and the test is repeated after each, because a
+    fired stop's own fills move the last trade price (cascade).  A stop
+    market order then trades as a market order; a stop-limit order as a
+    limit order at its limit price, resting any remainder.  So stops
+    fire on any trade: a market order, a limit order that crosses only
+    partly, a modify, or another stop.
+  * **Stop on entry.**  A stop whose price is already at or through the
+    opposite best quote when it is added (or modified) is elected
+    immediately.
+  * **Modify a stop / stop-limit.**  Same stop price, same limit price
+    and no more shares: changed in place, keeping its place in the
+    trigger queue.  Anything else is a cancel plus a re-add under the
+    same id (and the stop-on-entry rule applies).
+
+lorb 1.55.0, following the C++ original, did neither of the
+trade-driven parts: its modify
+re-linked the order at the new price without matching (a modify could
+leave best bid above best ask), and it examined stops only after some
+operations, against the opposite quote rather than the trade price (a
+partly-crossing limit order never fired a stop; an emptied bid side
+fired every resting sell stop with no trade).  The differential test
+found both; they are fixed.
+
 ## Files
 
   * `lob.h` / `lob.c` -- the engine (order, limit, book merged into one
@@ -74,7 +119,13 @@ unique.  A `Limit` price of `0` on an `Order` marks a (converted) stop
     p50/p99/p999 latency from a sorted latency sample.
   * `test_lob.c` -- unit tests ported from the C++ GoogleTest suite:
     add/cancel/modify, BST + AVL structure, market/limit matching with
-    partial fills, and each stop / stop-limit order type.
+    partial fills, and each stop / stop-limit order type; plus targeted
+    cases for the matching rules above.
+  * `test_lob_diff.c` -- differential test: lorb and a flat-array
+    reference matcher take the same random stream of limit / market /
+    cancel / modify / stop / stop-limit operations (1000 seeds x 2000
+    ops by default), and the two books (orders, FIFO positions, level
+    totals, book edges) must be identical after every operation.
   * `t_assert.h` -- the pass/fail-by-exit-code check macro.
 
 ## Build and run
@@ -88,18 +139,24 @@ nix develop --command bash -c 'cd examples/11_lorb && make'
 (Override `XTC_BUILD` if your libxtc build dir is not `../../build_unix`.)
 
 ```sh
-make test                       # build + run the unit tests
+make test                       # build + run the unit + differential tests
 ./lorb                          # 1,000,000 orders, 11,000 resting, seed 12345
 ./lorb 2000000 11000 42         # n_orders  n_initial  seed
 ```
 
-The driver prints throughput and the latency percentiles, e.g.:
+The driver prints throughput and the latency percentiles:
 
 ```
-processed 2000000 orders in 0.77 s
-throughput: 2589539 orders/s (2.59 M TPS)
-latency ns: mean=370  p50=272  p99=1036  p999=2429  max=30147255
+processed 2000000 orders in ... s
+throughput: ... orders/s (... M TPS)
+latency ns: mean=...  p50=...  p99=...  p999=...  max=...
 ```
+
+Measured: ~1.8-2.0 M orders/s on a c7i.8xlarge (Xeon Platinum 8488C;
+`./lorb 2000000`, gcc -O2, default `configure` build of libxtc, idle
+host); the 1.55.0 engine measured the same in interleaved runs, so the
+matching-rule fixes above cost nothing measurable.  A shared, busy host
+of the same type measured lower (1.33-1.43 M/s for both engines).
 
 ## Design decisions and trade-offs vs the C++ original
 
@@ -141,8 +198,8 @@ because the original is wrong here:
     `->parent` disagrees with the parent's child pointer" class of bug
     cannot occur.
 
-These changes preserve the matching semantics exactly (the trees are
-only a price index; order/fill logic is unchanged) and are validated by
+These tree changes do not affect matching (the trees are only a price
+index) and are validated by
 an invariant fuzzer: 30 seeds x 2,000,000 mixed operations each, with
 every tree checked for BST order, AVL balance, parent-pointer
 consistency, and acyclicity -- all pass.  The stock C++ engine, built
@@ -156,7 +213,10 @@ the original, all stops (buy and sell, market and limit) live in a
 single price-keyed map, so a buy stop and a sell stop cannot coexist at
 the same price.  The driver keeps buy stops above the spread and sell
 stops below it (the original's convention), which keeps the two sides
-in disjoint price ranges so the collision never arises.  This is a
+in disjoint price ranges so the collision does not arise in practice
+(checked: none in 6 seeds x 2,000,000 driver orders); the differential
+test simply skips a stop that would land on an opposite-side stop
+level.  This is a
 faithful limitation, not a lorb bug.
 
 **Known ceiling.**  The AVL height query (`lob_limit_height`) is
