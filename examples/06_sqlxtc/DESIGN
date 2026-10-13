@@ -263,9 +263,20 @@ Recovery runs the ARIES analysis / redo / undo passes: redo is
 physiological and page-LSN-gated (replaying an already-applied change is
 a no-op), and undo of a loser transaction writes compensation log
 records so undo is itself idempotent under a second crash.  A clean
-shutdown is detected and trusted, so a clean restart skips replay.  The
-log is bounded by checkpointing, which compacts it in place (a checkpoint
-record plus a dump of the live tree atomically replace the old log).
+shutdown is detected and trusted, so a clean restart skips replay (the
+clean marker is written only if every shutdown flush and sync
+succeeded).  The log is bounded by checkpointing, which compacts it in
+place (a checkpoint record plus a dump of the live tree atomically
+replace the old log); the server checkpoints from a background proc
+whenever the log passes max(--checkpoint-mb, 2 x its post-checkpoint
+size).  After a crash the server rebuilds the tree from the compacted
+log onto a fresh page file; the in-place path (double-write buffer +
+page-LSN-gated redo, xstore_recover_inplace) is exercised by tests only.
+
+A failed or short log write or fdatasync fail-stops the log: every
+commit in that batch gets XTC_E_IO (the client sees an I/O error), and
+every later write is refused until restart.  A commit is acked only
+when its record is durable.
 
 6.4 Catalog, MVCC, isolation (xstore.c)
 
@@ -278,13 +289,18 @@ key gets a hidden synthetic rowid column).
 
 The engine provides:
 
-  - snapshot isolation with per-connection isolation levels (read
-    committed through serializable), and time-travel reads (AS OF a
-    commit timestamp);
+  - a transaction per connection, snapshot isolation with first-
+    committer-wins write-write conflict detection, and per-connection
+    isolation levels (read committed through serializable) selectable
+    over the wire with BEGIN ... ISOLATION LEVEL / SET TRANSACTION
+    ISOLATION LEVEL; time-travel reads (AS OF a commit timestamp, C API);
+  - snapshots taken from a read horizon that trails in-flight commits,
+    so no snapshot sees a partly applied transaction;
   - serializable snapshot isolation (SSI): a native scan records its
     reads into both a read set and the SSI registry, and the commit-time
     check rolls the transaction back on a dangerous read-write pivot
-    (write-skew);
+    (write-skew); validation is serialized with commit under the
+    commit lock and also sees writers still in flight;
   - in-transaction read-your-writes: an uncommitted write buffer is
     overlaid on a committed range scan (insert appends newest-wins,
     update replaces, delete hides);

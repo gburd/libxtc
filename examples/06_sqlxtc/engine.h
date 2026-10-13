@@ -75,11 +75,20 @@ void sx_storage_set_io(int direct, int adaptive);
 /* Start the background storage procs (WAL group-commit writer, page
  * provider, trickler) on `loop`.  Call after the loop exists. */
 int  sx_storage_run(struct xtc_loop *loop);
-/* Flush all dirty pages durable (a running checkpoint).  Does not
- * truncate the log -- see engine.c. */
+/* Checkpoint now: compact the log to a CHECKPOINT record + the live rows
+ * (commits are held back while it runs).  The server also does this
+ * automatically from a background proc whenever the log passes
+ * max(min_bytes, 2 x its post-checkpoint size); set the floor with
+ * sx_storage_set_checkpoint before sx_storage_run (default 64 MiB). */
 int  sx_storage_checkpoint(void);
+#define SX_HAVE_PERIODIC_CHECKPOINT 1
+void sx_storage_set_checkpoint(uint64_t min_bytes);
+uint64_t sx_storage_checkpoints(void);   /* checkpoints completed */
 void sx_storage_quiesce(void);
-void sx_storage_close(void);
+/* Clean shutdown: flush, compact the log, mark the base clean.  Returns
+ * SX_OK, or SX_ERROR if any flush/sync/compaction failed -- the base is
+ * then NOT marked clean and the next open replays the log. */
+int  sx_storage_close(void);
 /* Drop all in-memory engine state WITHOUT a checkpoint or clean marker,
  * simulating a crash (dirty pages lost, the log left intact and
  * durable).  The next sx_storage_open rebuilds the tree from the full

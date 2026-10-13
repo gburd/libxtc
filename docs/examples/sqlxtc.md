@@ -54,7 +54,7 @@ flowchart TD
         VX --> BM["buffer pool + B-link tree"]
         BM --> WAL["WAL + double-write"]
         WAL --> AIO["xtc_aio<br/>(parks a fiber, not a thread)"]
-        LR["lrlock / RCU / lock mgr"] -.->|page concurrency| BM
+        LT["page latches (xtc_arwlock)<br/>+ commit lock (xtc_amutex)"] -.->|concurrency| BM
     end
 ```
 
@@ -74,10 +74,10 @@ textbook ones SQLite also uses.
    which is the modern analytic-engine shape and far friendlier to the
    CPU.
 3. **Concurrency and I/O.** SQLite serializes on a mutex and does
-   synchronous I/O; sqlxtc uses libxtc's
-   [left-right locks]({{ '/reference/locks/' | relative_url }}), RCU, and
-   the lock manager for page concurrency, and routes every disk
-   operation through
+   synchronous I/O; sqlxtc uses libxtc's parking latches
+   (`xtc_arwlock` per buffer-pool frame, `xtc_amutex` for the catalog
+   and the commit critical section) and MVCC versions, so readers never
+   block writers, and routes every disk operation through
    [`xtc_aio(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_aio.3)
    so a slow read **parks a fiber, not a thread**.
 
@@ -96,8 +96,65 @@ textbook ones SQLite also uses.
 - **`btree.c` / `btnode.c`** -- a B-link tree with concurrent,
   latch-coupled descents and latch-free reads.
 - **`wal.c` / `xlog.c`** -- write-ahead logging, group commit, and
-  crash recovery (redo/undo), all validated under the deterministic
-  simulator.
+  crash recovery (redo/undo), validated under the deterministic
+  simulator and by kill -9 torture of the server.
+- **`xstore.c`** -- the catalog and MVCC record store: per-connection
+  transactions, snapshot reads, first-committer-wins write-write
+  conflict detection, and SSI for SERIALIZABLE.
+
+## Transactions and isolation
+
+Every client connection has its own transaction (whatever `--threads`
+is): its uncommitted writes are buffered privately and are invisible to
+other connections until COMMIT, and ROLLBACK discards only its own
+writes.
+
+| Level | Reads | Write-write conflicts | Selected by |
+| --- | --- | --- | --- |
+| SNAPSHOT (default), REPEATABLE READ | one snapshot per transaction | first committer wins; the loser's COMMIT fails | default / `BEGIN ISOLATION LEVEL REPEATABLE READ` |
+| READ COMMITTED (READ UNCOMMITTED is the same) | a fresh snapshot per statement | a row committed since the statement's snapshot fails the COMMIT | `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` |
+| SERIALIZABLE | one snapshot per transaction | as SNAPSHOT, plus SSI: a dangerous read-write pivot (write skew) fails the COMMIT | `BEGIN ISOLATION LEVEL SERIALIZABLE` |
+
+The statements accepted over the wire are
+`BEGIN [TRANSACTION] ISOLATION LEVEL <level>`,
+`SET TRANSACTION ISOLATION LEVEL <level>` (inside a transaction, before
+its first query) and
+`SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL <level>`
+(the connection default). A refused COMMIT returns
+`could not serialize access due to concurrent update; transaction rolled
+back`; the transaction is gone and the client retries it. An autocommit
+`UPDATE`/`DELETE` that races a concurrent commit of the same row fails
+the same way instead of overwriting it.
+
+Snapshots are taken from a *read horizon* that trails commits still
+writing their log record or applying their versions, so a snapshot
+never sees part of a transaction, and a row never appears inside a
+running snapshot. COMMIT returns once the commit is durable and visible.
+
+## Durability and I/O errors
+
+A commit is acknowledged only after its log record is written and
+`fdatasync`'d (group commit amortizes the fsync across concurrent
+committers). If a log write or fsync fails -- ENOSPC, EIO, a file-size
+limit -- every commit in that batch gets an `I/O error` reply and the
+log **fail-stops**: the server refuses every later write with the same
+error (reads still work) until it is restarted. After a failed fsync the
+kernel may have dropped the dirty pages it could not write, so retrying
+cannot make the earlier writes durable; restarting replays the log,
+which holds exactly the acknowledged commits. A double-write slot that
+cannot be made durable blocks the page's home write, and a clean
+shutdown whose flush fails does not mark the store clean, so the next
+start replays the log.
+
+The log is compacted while the server runs: a background checkpoint
+replaces it with a checkpoint record plus the live rows whenever it
+passes `max(--checkpoint-mb, 2 x its size after the last checkpoint)`
+(default 64 MiB). Commits pause for the duration of the dump; reads do
+not. Crash recovery replays the compacted log onto a fresh page file,
+so restart time is proportional to the live data plus the writes since
+the last checkpoint. (The in-place recovery path that would trust the
+page file and its double-write buffer exists and is tested, but the
+server does not use it yet.)
 
 ## Buffer replacement: HOT/COOL and CLOCK
 
@@ -218,15 +275,15 @@ really libxtc machinery. Here is the runtime shape:
 
 ```mermaid
 flowchart TD
-    APP(["xtc_app + root supervisor"]):::sup --> SVR["xtc_svr listener<br/>(gen_server)"]
+    APP(["xtc_app + root supervisor"]):::sup --> SVR["listener proc<br/>(supervised, xtc_net_accept)"]
     SVR -->|xtc_proc_spawn per client| C1["conn proc (fiber)"]
     SVR -->|xtc_proc_spawn per client| C2["conn proc (fiber)"]
     EX["xtc_exec: one loop per core,<br/>work-stealing"]:::run -.->|runs| C1 & C2
     C1 -->|parse + plan| VX["vectorized executor<br/>(runs on the conn fiber)"]
     VX -->|descend, fix pages| BT["B-link tree<br/>(latch-coupled on the fiber)"]
     BT --> BM["buffer pool"]
-    BM -->|latch-free reads| LR["lrlock / RCU"]:::lock
-    BM -->|ordered page locks| LM["lock manager"]:::lock
+    BM -->|per-frame latches| LT["xtc_arwlock<br/>(parks the fiber)"]:::lock
+    VX -->|COMMIT| CL["commit lock + in-flight set<br/>(xtc_amutex)"]:::lock
     BM -->|page I/O| AIO["xtc_aio: a miss parks<br/>the fiber, not the thread"]:::run
     C1 -->|memory budget| RES["xtc_res caps"]
     classDef sup fill:#e8f0ff,stroke:#36b;
@@ -235,7 +292,8 @@ flowchart TD
 ```
 
 - **Supervision.** The server is an `xtc_app` with a root supervisor; the
-  connection front door is an `xtc_svr` gen_server. A connection proc
+  connection front door is a supervised listener proc that accepts with
+  `xtc_net_accept` (backing off on EMFILE). A connection proc
   that crashes is contained and does not take the server down --
   [let it crash]({{ '/philosophy/let-it-crash/' | relative_url }}) at the
   connection granularity.
@@ -251,14 +309,20 @@ flowchart TD
   structures (the deliberate
   [compromise]({{ '/philosophy/message-passing/' | relative_url }}) away
   from pure message passing, because copying pages through mailboxes
-  would be absurd). Reads go latch-free through `lrlock` / RCU; ordered
-  multi-page access uses the deadlock-detecting lock manager. Connection
-  *state*, by contrast, is private to each conn fiber -- shared-nothing
-  where it can be, shared-with-discipline where it must be.
-- **Locking.** Latch-coupling on the B-link tree uses short page latches;
-  the lock manager handles the cases that need ordered locks with
-  deadlock detection -- the thing hand-rolled `pthread_mutex` ordering
-  cannot give you.
+  would be absurd). Readers do not lock rows: MVCC gives each one a
+  snapshot. Connection *state* -- the open transaction, its write buffer
+  and snapshot -- is private to each connection, shared-nothing where it
+  can be, shared-with-discipline where it must be. (The catalog uses an
+  `lrlock` for its read-mostly table count; sqlxtc does not use RCU or
+  the deadlock-detecting lock manager -- `04_lockmgr_demo` in
+  [the examples index]({{ '/examples/' | relative_url }}) shows those.)
+- **Locking.** Latch-coupling on the B-link tree uses short per-frame
+  `xtc_arwlock` latches that park the fiber instead of blocking the
+  thread, taken in a fixed top-down order so they cannot deadlock. One
+  `xtc_amutex` commit lock makes the write-write check, SSI validation,
+  timestamp assignment and in-flight registration a single atomic step;
+  the log write and the apply run outside it, so group commit still
+  batches concurrent committers.
 - **Resource limits.** `xtc_res` caps bound memory and in-flight work so
   a query storm degrades instead of OOMing.
 
@@ -270,11 +334,16 @@ flowchart TD
 - **Deterministic testing of the whole engine.** Because all I/O and
   scheduling flow through libxtc, the simulator can replay a full
   transaction workload -- with injected torn writes, crashes, and
-  fsync-loss -- from a seed. The storage engine's crash-safety is a
-  *tested* property, not a hope. See [Testing]({{ '/testing/' | relative_url }}).
-- **Real concurrency primitives.** lrlock and RCU give latch-free reads
-  on hot structures; the lock manager gives deadlock detection where the
-  B-tree needs ordered locks.
+  fsync-loss -- from a seed. Crash safety is tested at three levels: the
+  simulator (seeded crashes, torn writes, lost fsyncs), the server under
+  repeated kill -9 with every acknowledged commit checked after restart,
+  and injected log-write failures (a file-size limit makes every write
+  past it fail) where every acknowledged commit must survive and every
+  failed one must have returned an error. See
+  [Testing]({{ '/testing/' | relative_url }}).
+- **Parking primitives.** `xtc_arwlock` / `xtc_amutex` let a latch holder
+  park on I/O without wedging the loop, which is what lets the engine
+  hold a page latch across a page read.
 
 ## Challenges (warts and all)
 
@@ -298,9 +367,9 @@ flowchart TD
 
 ```sh
 cd examples/06_sqlxtc && make XTC_BUILD=../../build sqlxtc-server
-./sqlxtc-server &
+./sqlxtc-server -d /var/tmp/demo.db &    # durable store /var/tmp/demo.db.xstore
 # then talk the Quack JSON protocol, or run the in-process test suite:
-make XTC_BUILD=../../build test-mvcc test-wal-recover test-btree
+make XTC_BUILD=../../build test-wal-fail test-ww-conflict test-wal-recover test-btree
 ```
 
 ---

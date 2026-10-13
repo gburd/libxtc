@@ -36,6 +36,8 @@
 
 typedef struct wal wal_t;
 
+#define WAL_HAVE_FAILSTOP 1   /* wal_failed(); commits fail-stop on I/O error */
+
 typedef struct wal_opts {
 	const char *path;          /* log file */
 	int64_t     window_ns;     /* group-commit gather window (e.g. 500us) */
@@ -51,6 +53,7 @@ typedef struct wal_stats {
 	uint64_t bytes;            /* payload bytes logged */
 	uint64_t max_batch_seen;   /* largest batch coalesced */
 	uint64_t durable_lsn;      /* highest LSN on stable storage */
+	uint64_t failed;           /* commits refused because a log write failed */
 } wal_stats_t;
 
 /* Create the log and its backing file (does not spawn the writer). */
@@ -68,6 +71,14 @@ xtc_pid_t wal_writer_pid(const wal_t *w);
  * from the writer).  Returns XTC_OK with the assigned durable LSN in
  * *lsn, or an error.  Many callers calling concurrently coalesce into
  * one fsync.
+ *
+ * Fail-stop: if a log write or fdatasync fails (or is short), every
+ * commit in that batch returns XTC_E_IO, durable_lsn does not advance,
+ * and the log latches failed -- every later wal_commit/wal_commit_sync
+ * returns XTC_E_IO without writing, until the log is reopened.  A commit
+ * that got XTC_E_IO may or may not be on disk after a restart (its bytes
+ * may have reached the file before the fsync failed); a commit that got
+ * XTC_OK is durable.
  */
 int  wal_commit(wal_t *w, const void *record, uint32_t len, uint64_t *lsn);
 
@@ -101,6 +112,12 @@ int  wal_scan(const char *path, wal_replay_cb cb, void *user);
  * checkpoint quiesces commits, truncates, then resumes.  Returns XTC_OK.
  */
 int  wal_truncate(wal_t *w);
+
+/* 1 once a log write/fsync has failed (the log is fail-stopped). */
+int  wal_failed(const wal_t *w);
+
+/* Bytes of complete records in the log (the append offset). */
+uint64_t wal_size(const wal_t *w);
 
 /* The highest LSN on stable storage (fsync'd).  Monotonic. */
 uint64_t wal_durable_lsn(const wal_t *w);
