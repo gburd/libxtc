@@ -1,3 +1,119 @@
+libxtc (1.56.0-1) unstable; urgency=medium
+
+  * MINOR release -- fixes every BLOCKER and MAJOR from an adversarial
+    production-readiness review of 1.55.0 (runtime, I/O+TLS, storage,
+    batching, orchestration, example servers), each with a regression
+    test shown to fail on 1.55.0.  Contains BEHAVIOUR CHANGES (below).
+    No existing public struct changed size.
+  * NEW API: xtc_proc_trap_exit, xtc_timer_release,
+    xtc_net_listen_backlog.
+  * BEHAVIOUR CHANGE -- links have BEAM semantics.  A linked proc's
+    non-normal exit kills every linked peer that does not trap exits; a
+    normal exit is silent to it.  xtc_proc_trap_exit(1) makes a peer
+    receive an 'E' message instead (XTC_HAVE_PROC_TRAP_EXIT).  Before, a
+    link only sent 'E', on normal exits too, and killed nothing.
+  * Runtime fixes:
+    - xtc_sem_acquire / xtc_notify_wait no longer strand a second fiber
+      waiter; notify hands each signal to exactly one parked fiber,
+      oldest first, and sem_post(n) wakes only satisfiable waiters.
+    - xtc_recv_match / xtc_recv_correlate no longer skip messages already
+      in the save queue when the predicate value changes.
+    - Finished procs are reclaimed at once (stack, coro, task), not at
+      xtc_loop_fini: 100k short-lived procs went from +617 MB RSS and
+      +200,000 mappings to +1.4 MB and +131.  Spawning no longer fails
+      after ~32K lifetime spawns.  xtc_await returns only once its target
+      has finished.
+    - xtc_exit_pid wakes a proc parked anywhere; sync, future, lwlock and
+      lockmgr waits unlink and give back grants before the kill unwinds
+      (they used to leave a stack waiter linked or keep a lock).
+    - DOWN/EXIT messages bypass mailbox_cap.  xtc_send returns the wake
+      error (message still queued) instead of XTC_OK.
+    - Cancelled timers leave the heap; xtc_timer_set and
+      xtc_future_with_timeout timers are reclaimed.
+    - Timed amutex/arwlock grants no longer leave a stale park timer
+      (the next plain yield stalled for the rest of the timeout).
+    - Yielding migratable fibers run FIFO (one used to starve the rest);
+      a loop with an empty run queue steals even with pending timers;
+      cross-loop wake is allocation- and lock-free and cannot fail.
+    - The proc registry supports 1024 live loops (was 64); full is
+      XTC_E_RESOURCE.  xtc_gate_drain on an open gate returns at zero.
+  * I/O and TLS fixes:
+    - TLS errors are confined to their connection (one non-TLS client
+      dropped every OpenSSL session on its thread); peer EOF without
+      close_notify / reset is XTC_E_IO (was XTC_E_INTERNAL).
+    - io_uring re-arms polls the kernel ends on CQ overflow (readiness
+      was lost and registrations leaked); CQ is 4096 entries; fd lookup
+      is O(1) on io_uring, poll and select (io_uring at 30k idle
+      connections: 4.2k -> 147k round trips/s).
+    - xtc_blocking_run uses no fd per call, has a bounded queue, and
+      never runs fn on the loop thread (may return XTC_E_AGAIN /
+      XTC_E_RESOURCE); xtc_aio_* report that as -EAGAIN / -ENOMEM.
+    - Default listen backlog is SOMAXCONN (was 128/64).
+  * Batching and accelerators (--enable-sched-policy):
+    - xtc_batch_submit_mt no longer drops accepted requests (5.4M of
+      5.4M lost in a 10 s storm on 1.55.0); submit_mt to a closed group
+      returns XTC_E_AGAIN; stale cancels no longer crowd out real ones.
+    - xtc_accel_wait_fence no longer spins on a pending message.
+    - FENCE/BLOCKING failures reach collect as a negative exec_status;
+      timed-out ops are never resubmitted into live buffers; kill and
+      close(CANCEL) end any wait; cancel_hint fires when the cancel lands.
+    - Admission and handle lookup are O(admitted)/O(1): 8.1 ms -> 83 us
+      per boundary at capacity 8192 / max_active 4096.
+    - examples 13/14 use one waiter thread per device (16.9k -> 72.8k
+      ops/s); not re-run on GPU/NPU hardware.
+  * Orchestration: xtc_svr_call from a thread no longer lets a late reply
+    write into the caller's freed stack; a call to a server that dies
+    returns XTC_E_NOTFOUND; the registry grows (1M names: 298 us ->
+    548 ns per lookup); SIMPLE_OFO reclaims exited dynamic children.
+  * Example servers: sqlxtc acks only durable commits and fail-stops on
+    log I/O errors, gives every connection its own transaction, detects
+    write-write conflicts (first committer wins), publishes commits
+    atomically, serializes SSI validation, bounds its log with periodic
+    checkpoints, and no longer returns a row twice when a scan races a
+    split.  kaka acks after fsync, rejects over-cap produces, indexes
+    segments (64 MiB cold fetch 8.6 s -> 0.47 s), wires COMMIT/OFFSETS,
+    and shuts down on SIGTERM.  rexis no longer truncates replies over
+    64 KiB or caps LRANGE/KEYS, bounds client buffers, and stops spinning
+    on oversized requests.  lorb re-matches modified orders and fires
+    stops on every trade.  All four servers accept via xtc_net_accept
+    with EMFILE back-off.
+  * Independent re-review of the fixes found, and this release also fixes:
+    - Kill delivery: a kill that landed while a proc ran after a park was
+      lost by the next sync/future/lwlock/lockmgr wait (a fix that missed
+      a merge); now pinned by /m9/sync/kill_after_park_while_running.
+    - Reclaim follow-ups: a recycled proc task inherited the previous
+      proc's xtc_cfg session binding and recursive xtc_amutex ownership
+      (both fixed); procs spawned from another loop now reuse recycled
+      task structs (1M cross-loop spawns: +163 MB -> flat); a watcher
+      drops its monitor entry once the DOWN is sent.
+    - xtc_chan_mpsc: the reserve-then-write window is no longer
+      preemptible, and the consumer returns XTC_E_AGAIN instead of
+      spinning on a slot still being written (a same-loop producer
+      preempted there hung the loop; also present in 1.55.0).
+    - xtc_batch: cancel_mt/resume_mt have their own record pool, so held
+      submits can no longer wedge a group; owner-loop xtc_batch_cancel
+      accepts a held mt handle.
+    - xtc_svr: in-proc replies carry an internal marker and a 64-bit tag,
+      so late replies are dropped and an app message cannot pose as a
+      reply; INT64_MAX timeouts saturate.
+    - OpenSSL transport mode: a connection's error codes are saved and
+      restored around each user callback, so a callback that yields can
+      no longer pick up another connection's error.
+    - xtc_rcu: the epoch starts at 1, so a reader that entered before
+      the first synchronize is no longer freed under (also in 1.55.0);
+      xtc_rcu_current_epoch() returns 1 on a fresh rcu.
+    - sqlxtc: concurrent autocommit INSERTs of the same key (or with an
+      auto-assigned key) no longer overwrite acked rows; SIGTERM exits in
+      ~0.1 s at any thread count; crash recovery of a 64 MB log takes
+      0.7 s (was 133 s).
+  * Tested on Linux x86-64 (Debian 13, gcc 14, clang 19): make check on
+    io_uring, epoll, poll and select; ASan+UBSan make check; TSan of the
+    concurrency suites; make check-dst, DST corpus, planted-bug suite
+    (16/16, new bug 16 BATCHDROP).  NOT tested: kqueue, IOCP, event
+    ports, Windows fibers, real GPU/NPU hardware, multi-NUMA placement.
+
+ -- Greg Burd <greg@burd.me>  Tue, 13 Oct 2026 12:00:00 -0400
+
 libxtc (1.55.0-1) unstable; urgency=medium
 
   * MINOR release -- asynchronous (device-offload) continuous batching,
