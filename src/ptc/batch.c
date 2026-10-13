@@ -7,9 +7,6 @@
 
 #ifdef XTC_ENABLE_SCHED_POLICY
 #include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
-#ifndef XTC_DST_BUG_BATCHDROP
-#define XTC_DST_BUG_BATCHDROP 16 /* batch.c: drop a held mt hand-in */
-#endif
 #include "loop_int.h"
 #include "preempt_int.h"
 #include "xtc_accel.h"

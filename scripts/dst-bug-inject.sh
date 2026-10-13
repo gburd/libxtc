@@ -76,6 +76,7 @@ write_cases() {
 		"13;test_sim_batch;0;1;FAIL: batch seed=[0-9]+ phase=0 tick=0: terminal outcome" \
 		"14;test_sim_batch;0;1;completed member retained in vector" \
 		"15;test_sim_sched_policy;0;1;FAIL: scheduler fairness bound: gap=[0-9]+ bound=7" \
+		"16;test_sim_batch;0;1;mt accepted hand-in never completed" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -93,6 +94,7 @@ write_cases() {
 # 13 BATCHSTALE batch.c ignores handle identity -> wrong request cancelled
 # 14 BATCHDONE  batch.c retains DONE members    -> completed vector membership
 # 15 SCHEDFAIR  sched.c skips fairness override -> bounded service
+# 16 BATCHDROP  batch.c drops a held hand-in  -> accepted => completed
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

@@ -66,6 +66,8 @@
  *	 14  BATCHDONE -- batch.c retains DONE members in the next vector.
  *	 15  SCHEDFAIR -- sched.c ignores the mandatory fairness override;
  *	                   the bounded-service invariant fails.
+ *	 16  BATCHDROP -- batch.c drops an mt hand-in drained into a full
+ *	                   group; an accepted request never completes.
  *
  *	NOT plantable under DST (an honest gap, recorded so it is not
  *	mistaken for missing coverage): the xtc_amutex mutual-exclusion and
@@ -115,5 +117,6 @@
 #define XTC_DST_BUG_BATCHSTALE 13  /* batch.c: ignore handle identity */
 #define XTC_DST_BUG_BATCHDONE  14  /* batch.c: retain completed vector member */
 #define XTC_DST_BUG_SCHEDFAIR  15  /* sched.c: bypass mandatory fairness override */
+#define XTC_DST_BUG_BATCHDROP  16  /* batch.c: drop a held mt hand-in */
 
 #endif /* XTC_DST_INJECT_H */
