@@ -81,6 +81,11 @@ void      __xtc_trace_causal(int kind, const char *site);
  */
 void      __xtc_proc_kill_poll(void);
 
+/* Unbind any xtc_cfg session bound by task `t` (cfg.c).  Called on the
+ * proc exit path after the at-exit hooks, before the task can be
+ * recycled for another proc. */
+void      __xtc_cfg_task_exit(xtc_task_t *t);
+
 /* xtc_exit_pid makes a target parked anywhere runnable (except inside
  * xtc_await), so a park site re-checks promptly and can deliver the kill. */
 #define XTC_HAVE_PROC_KILL_WAKE 1
