@@ -308,6 +308,35 @@ test_modify_invalid_id(lob_book_t *b)
 	ASSERT(lob_search_limit(b, 80, true)->total_volume == 10);
 }
 
+/* A price change that crosses must trade, never leave a crossed book. */
+static void
+test_modify_crossing_matches(lob_book_t *b)
+{
+	lob_add_limit_order(b, 1, true, 10, 9);
+	lob_add_limit_order(b, 2, false, 6, 11);
+	lob_modify_limit_order(b, 1, 10, 12);
+	ASSERT(b->lowest_sell == NULL);
+	ASSERT(lob_search_order(b, 2) == NULL);
+	ASSERT(b->highest_buy->price == 12);
+	ASSERT(b->highest_buy->total_volume == 4);
+	ASSERT(lob_search_limit(b, 9, true) == NULL);
+}
+
+/* Size decrease keeps time priority; a size increase loses it. */
+static void
+test_modify_priority(lob_book_t *b)
+{
+	lob_add_limit_order(b, 111, true, 10, 80);
+	lob_add_limit_order(b, 112, true, 20, 80);
+	lob_modify_limit_order(b, 111, 5, 80);
+	ASSERT(lob_search_limit(b, 80, true)->head->id == 111);
+	ASSERT(lob_search_limit(b, 80, true)->total_volume == 25);
+	lob_modify_limit_order(b, 111, 30, 80);
+	ASSERT(lob_search_limit(b, 80, true)->head->id == 112);
+	ASSERT(lob_search_limit(b, 80, true)->tail->id == 111);
+	ASSERT(lob_search_limit(b, 80, true)->total_volume == 50);
+}
+
 /* ---- limit order that crosses (market limit) ----------------------- */
 
 static void
@@ -408,6 +437,38 @@ test_stop_that_is_market(lob_book_t *b)
 	ASSERT(b->highest_buy->total_volume == 5);
 	ASSERT(b->highest_buy->head->shares == 5);
 	ASSERT(b->highest_stop_sell == NULL);
+}
+
+/*
+ * A limit order that only partly fills still trades through a stop:
+ * buy 70@12 prints at 10 and 12 and rests 10@12; the last trade (12)
+ * elects buy stop@11, which buys 20 from the 14 level.
+ */
+static void
+test_partial_cross_fires_stop(lob_book_t *b)
+{
+	lob_add_limit_order(b, 1, false, 10, 10);
+	lob_add_limit_order(b, 2, false, 50, 12);
+	lob_add_limit_order(b, 3, false, 50, 14);
+	lob_add_stop_order(b, 4, true, 20, 11);
+	ASSERT(lob_search_stop(b, 11) != NULL);
+	lob_add_limit_order(b, 5, true, 70, 12);
+	ASSERT(b->highest_buy->price == 12);
+	ASSERT(b->highest_buy->total_volume == 10);
+	ASSERT(lob_search_stop(b, 11) == NULL);
+	ASSERT(lob_search_order(b, 4) == NULL);
+	ASSERT(b->lowest_sell->price == 14);
+	ASSERT(b->lowest_sell->total_volume == 30);
+}
+
+/* No trade, no election: an empty bid side alone does not fire sells. */
+static void
+test_stop_needs_a_trade(lob_book_t *b)
+{
+	lob_add_stop_order(b, 1, false, 10, 6);
+	lob_market_order(b, 2, false, 5);
+	ASSERT(lob_search_stop(b, 6) != NULL);
+	ASSERT(lob_search_order(b, 1) != NULL);
 }
 
 /* ---- stop limit orders --------------------------------------------- */
@@ -528,6 +589,8 @@ main(void)
 	RUN(test_market_empty_book);
 	RUN(test_modify_to_existing_limit);
 	RUN(test_modify_invalid_id);
+	RUN(test_modify_crossing_matches);
+	RUN(test_modify_priority);
 	RUN(test_sell_limit_that_is_market);
 	RUN(test_partial_market_limit);
 	RUN(test_adding_a_stop);
@@ -535,6 +598,8 @@ main(void)
 	RUN(test_multiple_stop_levels_by_market_buy);
 	RUN(test_stop_cascade_two_iterations);
 	RUN(test_stop_that_is_market);
+	RUN(test_partial_cross_fires_stop);
+	RUN(test_stop_needs_a_trade);
 	RUN(test_adding_a_stop_limit);
 	RUN(test_stop_limit_to_market);
 	RUN(test_stop_limit_partial_to_market);

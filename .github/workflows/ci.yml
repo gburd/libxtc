@@ -952,6 +952,7 @@ jobs:
         run: |
           make XTC_BUILD=../../build_ci
           ./test_lob
+          ./test_lob_diff
       - name: rexis server + test/m99 (RESP, loopback, PBT, measured budgets)
         # The README flagship.  Forks real servers on kernel-chosen free
         # loopback ports (no fixed port, so no collision on a shared
