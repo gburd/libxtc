@@ -144,22 +144,19 @@ make test                       # build + run the unit + differential tests
 ./lorb 2000000 11000 42         # n_orders  n_initial  seed
 ```
 
-The driver prints throughput and the latency percentiles.  One run of
-`./lorb 2000000` on a 32-vCPU host (Xeon Platinum 8488C, Debian
-13, gcc 14, default `configure` build of libxtc), pinned to one core:
+The driver prints throughput and the latency percentiles:
 
 ```
-processed 2000000 orders in 1.43 s
-throughput: 1405459 orders/s (1.41 M TPS)
-latency ns: mean=683  p50=519  p99=1887  p999=3740  max=44454072
+processed 2000000 orders in ... s
+throughput: ... orders/s (... M TPS)
+latency ns: mean=...  p50=...  p99=...  p999=...  max=...
 ```
 
-Five pinned runs there gave 1.33-1.41 M orders/s (p50 ~510-550 ns,
-p99 ~1.9-2.0 us); the default 1,000,000-order run gives 1.7-1.9 M/s.  The matching-rule fixes above did not
-change it: the 1.55.0 engine measured 1.34-1.43 M/s in the same
-interleaved runs.  Earlier figures of ~2.5-2.6 M/s were measured on a
-different machine and build and were not reproduced on this one; treat
-any number as specific to its host.
+Measured: ~1.8-2.0 M orders/s on a 32-vCPU host (Xeon Platinum 8488C;
+`./lorb 2000000`, gcc -O2, default `configure` build of libxtc, idle
+host); the 1.55.0 engine measured the same in interleaved runs, so the
+matching-rule fixes above cost nothing measurable.  A shared, busy host
+of the same type measured lower (1.33-1.43 M/s for both engines).
 
 ## Design decisions and trade-offs vs the C++ original
 
