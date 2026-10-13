@@ -216,8 +216,9 @@ struct bt_cursor {
 	int            done;
 	bm_pid_t       parked_pid;  /* leaf pid remembered while parked */
 	int            parked;      /* 1 == latch released, resume re-fixes */
-	uint8_t        keybuf[BT_MAX_KEY];
-	uint16_t       keylen;
+	uint8_t        keybuf[BT_MAX_KEY];  /* scan position: last key returned, */
+	uint16_t       keylen;              /* or the start key before the first */
+	int            have_key;            /* 1 == keybuf was returned: resume after it */
 };
 
 /* Lexicographic compare of two byte strings as unsigned bytes. */
@@ -1984,6 +1985,12 @@ bt_cursor_open(bt_t *bt, const void *start, uint16_t klen, bt_cursor_t **out)
 
 		/* First slot with key >= start. */
 		c->slot = btnode_search(bm_page(leaf), start, klen, &found);
+		/* Remember the start as the scan position, so a park or a
+		 * stale-link re-descent before the first key resumes here. */
+		if (klen <= sizeof c->keybuf) {
+			memcpy(c->keybuf, start, klen);
+			c->keylen = klen;
+		}
 	}
 	/* Read-ahead the next leaf so a forward scan stays a cache hit. */
 	{
@@ -1994,6 +2001,8 @@ bt_cursor_open(bt_t *bt, const void *start, uint16_t klen, bt_cursor_t **out)
 	*out = c;
 	return XTC_OK;
 }
+
+static int cursor_seek(bt_cursor_t *c, bm_frame_t *f);
 
 int
 bt_cursor_next(bt_cursor_t *c, const void **key, uint16_t *klen,
@@ -2026,6 +2035,7 @@ bt_cursor_next(bt_cursor_t *c, const void **key, uint16_t *klen,
 			}
 			(void)btnode_get(pg, c->slot, NULL, NULL, &vp, &vl);
 			c->slot++;
+			c->have_key = 1;
 			if (key != NULL)
 				*key = c->keybuf;
 			if (klen != NULL)
@@ -2054,20 +2064,16 @@ bt_cursor_next(bt_cursor_t *c, const void **key, uint16_t *klen,
 			if (frc == XTC_E_AGAIN) {
 				/* The right sibling pid was quarantined by a
 				 * concurrent merge: the link is stale.  Re-descend
-				 * from the last key returned to find the leaf that
-				 * now owns the next key, then continue the scan. */
+				 * from the scan position to find the leaf that now
+				 * owns the next key, then continue the scan. */
 				bm_frame_t *rf = NULL;
-				int slot, found = 0;
 
-				if (cursor_descend(c->bt, c->keybuf, c->keylen,
-				    &rf) != XTC_OK || rf == NULL) {
+				if (cursor_descend(c->bt,
+				    c->keylen ? c->keybuf : NULL, c->keylen,
+				    &rf) != XTC_OK || cursor_seek(c, rf) != XTC_OK) {
 					c->done = 1;
 					return XTC_E_NOTFOUND;
 				}
-				slot = btnode_search(bm_page(rf), c->keybuf,
-				    c->keylen, &found);
-				c->leaf = rf;
-				c->slot = found ? slot + 1 : slot;
 				continue;
 			}
 			if (frc != XTC_OK) {
@@ -2110,20 +2116,70 @@ bt_cursor_park(bt_cursor_t *c)
 }
 
 /*
+ * Position the cursor in `f` (fixed + shared-latched) just past the
+ * scan position (at it, if no key has been returned yet).  `f` is only
+ * a candidate -- the parked leaf, or a leaf reached by a descent -- and
+ * may no longer own the position:
+ *   - a split while parked moves the upper half of the leaf, possibly
+ *     including the position key, to a new right sibling.  The parked
+ *     pid still names the left half; searching it for the key returns
+ *     its slot count, and the scan would then restart at the right
+ *     sibling's slot 0, yielding again every key between the split
+ *     separator and the position.  Walk right (move_right) instead.
+ *   - a merge may have freed the page, and its pid been reissued as any
+ *     node.  If it is not a live leaf, or the position is at/below its
+ *     lower fence (its range moved left), re-descend from the root.
+ * Takes ownership of `f`.  Returns XTC_OK, or XTC_E_NOTFOUND (done) if
+ * a needed re-descent fails.
+ */
+static int
+cursor_seek(bt_cursor_t *c, bm_frame_t *f)
+{
+	bm_t *bm = c->bt->bm;
+	const void *k = c->keylen ? c->keybuf : NULL;
+	void *pg = bm_page(f);
+	int slot, found = 0;
+
+	if (!btnode_is_leaf(pg) || btnode_is_dead(pg) ||
+	    (k != NULL && btnode_below_lo_fence(pg, k, c->keylen))) {
+		bm_unlatch(f);
+		bm_unfix(bm, f, 0);
+		if (cursor_descend(c->bt, k, c->keylen, &f) != XTC_OK) {
+			c->done = 1;
+			return XTC_E_NOTFOUND;
+		}
+	}
+	(void)move_right(c->bt, &f, k, c->keylen, 0);
+	if (k != NULL && btnode_beyond_hi_fence(bm_page(f), k, c->keylen) &&
+	    btnode_right_sibling(bm_page(f)) != 0) {
+		/* move_right could not fix the sibling (merged away):
+		 * re-descend, which retries past the merge. */
+		bm_unlatch(f);
+		bm_unfix(bm, f, 0);
+		if (cursor_descend(c->bt, k, c->keylen, &f) != XTC_OK) {
+			c->done = 1;
+			return XTC_E_NOTFOUND;
+		}
+	}
+	slot = btnode_search(bm_page(f), c->keybuf, c->keylen, &found);
+	c->leaf = f;
+	c->slot = (found && c->have_key) ? slot + 1 : slot;
+	return XTC_OK;
+}
+
+/*
  * Resume a parked cursor without re-descending the tree: re-fix the
  * remembered leaf, shared-latch it, and position just past the last
- * key returned.  If that leaf split while parked, keys that moved to
- * the new right sibling are still reached by bt_cursor_next following
- * the right-sibling chain.  O(1) amortized vs the O(log n) of a fresh
- * bt_cursor_open.
+ * key returned (cursor_seek: walks right if a split moved that key to a
+ * new sibling, re-descends if the page was merged away).  O(1)
+ * amortized vs the O(log n) of a fresh bt_cursor_open.
  */
 int
 bt_cursor_resume(bt_cursor_t *c)
 {
 	bm_t *bm;
 	bm_frame_t *nf = NULL;
-	void *pg;
-	int slot, found = 0;
+	int rc;
 
 	if (c == NULL)
 		return XTC_E_INVAL;
@@ -2134,30 +2190,17 @@ bt_cursor_resume(bt_cursor_t *c)
 	if (bm_fix_pid(bm, c->parked_pid, &nf) != XTC_OK) {
 		/* The parked leaf was reclaimed (its pid quarantined) by a
 		 * concurrent merge, or could not be re-fixed: fall back to a
-		 * fresh root-to-leaf descent from the last key returned. */
-		bm_frame_t *rf = NULL;
-		int rslot, rfound = 0;
-
-		if (cursor_descend(c->bt, c->keybuf, c->keylen, &rf) != XTC_OK ||
-		    rf == NULL) {
+		 * fresh root-to-leaf descent from the scan position. */
+		if (cursor_descend(c->bt, c->keylen ? c->keybuf : NULL,
+		    c->keylen, &nf) != XTC_OK) {
 			c->done = 1;
 			return XTC_E_NOTFOUND;
 		}
-		rslot = btnode_search(bm_page(rf), c->keybuf, c->keylen, &rfound);
-		c->leaf = rf;
-		c->slot = rfound ? rslot + 1 : rslot;
-		atomic_fetch_add(&c->bt->st_resumes, 1);
-		return XTC_OK;
-	}
-	bm_latch_shared(nf);
-	pg = bm_page(nf);
-	/* First slot with key >= the last key returned; skip it if present
-	 * (already yielded), else start at the first key greater than it. */
-	slot = btnode_search(pg, c->keybuf, c->keylen, &found);
-	c->leaf = nf;
-	c->slot = found ? slot + 1 : slot;
+	} else
+		bm_latch_shared(nf);
+	rc = cursor_seek(c, nf);
 	atomic_fetch_add(&c->bt->st_resumes, 1);
-	return XTC_OK;
+	return rc;
 }
 
 void

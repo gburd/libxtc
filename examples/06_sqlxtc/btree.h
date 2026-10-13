@@ -165,15 +165,15 @@ void bt_get_stats(bt_t *bt, bt_stats_t *out);
  * leaf latch and pin while remembering the leaf and the last key
  * returned -- and later resumes it.  Resume re-fixes the SAME leaf and
  * continues from just past the last key, an O(1) amortized scan step
- * instead of an O(log n) re-descent.  Correct across concurrent splits
- * (page ids are stable for a live leaf and the B-link right-sibling
- * chain reaches any keys that moved right after the park) and across
- * concurrent merges: resume re-fixes the parked leaf and checks it
- * still covers the resume key (it is a leaf whose fence range brackets
- * the last key returned).  A merge that reclaimed the parked page --
- * so the re-fixed page fails that check -- falls back to a fresh
- * root-to-leaf descent from the remembered key, so a reclaimed-and-
- * reused page id can never feed the scan stale rows.
+ * instead of an O(log n) re-descent.  Correct across concurrent splits:
+ * a split can move the last key returned (and everything after it) to
+ * a new right sibling, so resume walks right (B-link move-right) to the
+ * leaf whose fences cover that key before continuing -- it never
+ * restarts at a sibling's first slot, which would yield keys again.
+ * Correct across concurrent merges: if the re-fixed page is no longer
+ * a live leaf, or the key is at/below its lower fence, resume falls
+ * back to a fresh root-to-leaf descent from the remembered key, so a
+ * reclaimed-and-reused page id can never feed the scan stale rows.
  */
 int  bt_cursor_park(bt_cursor_t *c);
 int  bt_cursor_resume(bt_cursor_t *c);
