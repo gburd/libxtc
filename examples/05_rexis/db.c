@@ -258,19 +258,11 @@ db_create(const db_opts_t *opts, db_t **out)
 	xtc_lrlock_publish_full_sync(db->lr);
 	xtc_lrlock_write_end(db->lr);
 
-	/* Allocate buckets for the second copy too */
-	tbl = xtc_lrlock_write_begin(db->lr);
-	/* After full_sync the read copy has buckets = NULL; we need to
-	 * allocate separately for the now-write copy. */
-	if ((tbl->buckets = xtc_calloc(tbl->n_buckets, sizeof(db_entry_t *))) == NULL) {
-		xtc_lrlock_write_end(db->lr);
-		/* Clean up the other copy's buckets */
-		xtc_lrlock_destroy(db->lr);
-		xtc_free(db);
-		return XTC_E_NOMEM;
-	}
-	xtc_lrlock_publish_full_sync(db->lr);
-	xtc_lrlock_write_end(db->lr);
+	/* publish_full_sync copied the table struct into the other copy, so
+	 * both copies now share this one bucket array (every write_end does
+	 * the same full sync).  A second array used to be allocated here and
+	 * the next full sync overwrote one copy's pointer with the other's,
+	 * leaking 512 KiB per db_create (ASan, test_db_persist). */
 
 	xtc_lrlock_mark_ready(db->lr);
 
