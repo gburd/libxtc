@@ -425,15 +425,20 @@ bt_reopen(bm_t *bm, bt_t **out)
 	return XTC_OK;
 }
 
-static void (*bt_close_hook)(bt_t *) = NULL;
+/* Set by every connection registration (always to the same function),
+ * possibly from several loops at once: atomic so that is not a race. */
+typedef void (*bt_close_hook_fn)(bt_t *);
+static _Atomic(bt_close_hook_fn) bt_close_hook = NULL;
 
 void
 bt_close(bt_t *bt)
 {
+	bt_close_hook_fn hook;
 	if (bt == NULL)
 		return;
-	if (bt_close_hook != NULL)
-		bt_close_hook(bt);     /* let xstore drop cached state for this bt */
+	hook = atomic_load_explicit(&bt_close_hook, memory_order_acquire);
+	if (hook != NULL)
+		hook(bt);              /* let xstore drop cached state for this bt */
 	if (bt->smo != NULL)
 		xtc_arwlock_destroy(bt->smo);
 	free(bt);
@@ -442,7 +447,7 @@ bt_close(bt_t *bt)
 void
 bt_set_close_hook(void (*fn)(bt_t *))
 {
-	bt_close_hook = fn;
+	atomic_store_explicit(&bt_close_hook, fn, memory_order_release);
 }
 
 void

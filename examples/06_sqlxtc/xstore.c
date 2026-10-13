@@ -1986,11 +1986,11 @@ xstore_rec_col(const uint8_t *rec, int reclen, int idx,
 		if (t == 0) {
 			if (i == idx) return XSTORE_C_NULL;
 		} else if (t == 1) {
-			int64_t x = 0; int b;
+			uint64_t x = 0; int b;    /* unsigned: no signed-shift UB */
 			if (off + 8 > reclen) break;
-			for (b = 0; b < 8; b++) x |= (int64_t)rec[off + b] << (8 * b);
+			for (b = 0; b < 8; b++) x |= (uint64_t)rec[off + b] << (8 * b);
 			off += 8;
-			if (i == idx) { if (iout) *iout = x; return XSTORE_C_INT; }
+			if (i == idx) { if (iout) *iout = (int64_t)x; return XSTORE_C_INT; }
 		} else if (t == 2) {
 			uint64_t bits = 0; double d; int b;
 			if (off + 8 > reclen) break;
