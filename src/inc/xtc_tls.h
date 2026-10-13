@@ -412,6 +412,14 @@ XTC_API int  xtc_tls_ctx_set_sni_cb(xtc_tls_ctx_t *ctx,
  *             other negative = hard failure.  A short write is fine.
  *   userdata: the transport's userdata, passed to both callbacks.
  *
+ * A callback may yield the fiber (xtc_proc_wait_fd, xtc_proc_sleep, a
+ * channel receive) while other connections run on the same thread.  The
+ * backend keeps each connection's TLS error state separate across that
+ * suspension (OpenSSL's error queue is per thread; it is saved before
+ * the callback and restored after it), so neither connection's failure
+ * is reported on the other.  A callback must not itself call xtc_tls_*
+ * on the connection it serves.
+ *
  * The caller retains ownership of whatever the transport wraps;
  * xtc_tls_destroy does not touch it.  There is no fd, so
  * xtc_tls_wants_read/_write still report the direction the stall is in,

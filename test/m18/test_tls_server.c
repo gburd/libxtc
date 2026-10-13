@@ -33,6 +33,9 @@
 #include "munit.h"
 #include "xtc_int.h"
 #include "xtc_tls.h"
+#include "xtc_async.h"
+#include "xtc_loop.h"
+#include "xtc_proc.h"
 
 /* =========================================================================
  * TLS-enabled branch -- full implementation (any backend).
@@ -1564,6 +1567,265 @@ test_server_error_isolation(const MunitParameter params[], void *data)
 }
 
 /* -------------------------------------------------------------------------
+ * test_server_transport_yield_isolation:
+ *   The same isolation in TRANSPORT mode when the callbacks YIELD, which
+ *   xtc_tls.h invites.  The error queue is per OS thread, and fibers
+ *   interleave on one thread, so clearing it when an op begins is not
+ *   enough: an op can suspend in the middle.  Two transport sessions on
+ *   one loop, interleaved deterministically:
+ *     1. victim V (healthy, established) calls xtc_tls_read; its read_cb
+ *        yields;
+ *     2. attacker A runs its handshake on a garbage record; OpenSSL
+ *        queues A's error, then calls A's write_cb to send the alert,
+ *        which yields;
+ *     3. V resumes, finds no data, and must get XTC_E_AGAIN -- before,
+ *        A's queued entry made it SSL_ERROR_SSL -> XTC_E_INTERNAL, which
+ *        tore the healthy session down -- then runs a second read, whose
+ *        op-start clear must not destroy A's pending error;
+ *     4. A resumes and must fail exactly as it does in fd mode.
+ * ----------------------------------------------------------------------- */
+/* A handshake record carrying an unknown handshake message: a fatal
+ * alert that OpenSSL writes AFTER it queues the error. */
+static const char yjunk[] = "\x16\x03\x01\x00\x05hello";
+
+struct ysess {
+    int        fd;
+    int        attacker;
+    xtc_tls_t *tls;
+    int        rc;
+    int        rc2;
+};
+
+static int g_yv_read_yield;    /* victim read_cb yields until A is in write */
+static int g_ya_write_yield;   /* attacker write_cb yields until V is done */
+static int g_yv_in_read;
+static int g_ya_in_write;
+static int g_yv_done;
+
+static void
+yield_until(const int *flag)
+{
+    int i;
+    for (i = 0; i < 1000 && !*flag; i++)
+        xtc_yield();
+}
+
+static int
+yread(void *ud, void *buf, size_t len)
+{
+    struct ysess *s = ud;
+    ssize_t n;
+
+    if (!s->attacker && g_yv_read_yield) {
+        g_yv_in_read = 1;
+        yield_until(&g_ya_in_write);
+    }
+    n = read(s->fd, buf, len);
+    if (n >= 0)
+        return (int)n;
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+        return XTC_E_AGAIN;
+    return XTC_E_IO;
+}
+
+static int
+ywrite(void *ud, const void *buf, size_t len)
+{
+    struct ysess *s = ud;
+    ssize_t n;
+
+    if (s->attacker && g_ya_write_yield) {
+        g_ya_in_write = 1;
+        yield_until(&g_yv_done);
+    }
+    n = write(s->fd, buf, len);
+    if (n > 0)
+        return (int)n;
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        return XTC_E_AGAIN;
+    return XTC_E_IO;
+}
+
+/* sv[0] carries the session; the garbage is already queued on it. */
+static int
+yattacker_open(xtc_tls_ctx_t *ctx, struct ysess *a, int sv[2])
+{
+    xtc_tls_transport_t xt;
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0 ||
+        set_nonblock(sv[0]) != 0 ||
+        write(sv[1], yjunk, sizeof yjunk - 1) != (ssize_t)(sizeof yjunk - 1))
+        return XTC_E_IO;
+    (void)shutdown(sv[1], SHUT_WR);
+    memset(a, 0, sizeof *a);
+    a->fd = sv[0];
+    a->attacker = 1;
+    xt.read_cb = yread;
+    xt.write_cb = ywrite;
+    xt.userdata = a;
+    return xtc_tls_create_transport(ctx, &xt, &a->tls);
+}
+
+/* The garbage is all queued, so the handshake fails without waiting. */
+static int
+yattacker_run(struct ysess *a)
+{
+    int i, rc = XTC_E_AGAIN;
+    for (i = 0; i < 100 && rc == XTC_E_AGAIN; i++)
+        rc = xtc_tls_handshake(a->tls);
+    return rc;
+}
+
+/* Reference outcome: the same bytes on an fd-mode session, whose BIO is
+ * not the caller's and never yields. */
+static int
+yattacker_fd_ref(xtc_tls_ctx_t *ctx)
+{
+    xtc_tls_t *t = NULL;
+    int sv[2], i, rc;
+
+    munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), ==, 0);
+    munit_assert_int(set_nonblock(sv[0]), ==, 0);
+    munit_assert_int((int)write(sv[1], yjunk, sizeof yjunk - 1), ==,
+                     (int)(sizeof yjunk - 1));
+    (void)shutdown(sv[1], SHUT_WR);
+    munit_assert_int(xtc_tls_create(ctx, sv[0], &t), ==, XTC_OK);
+    rc = XTC_E_AGAIN;
+    for (i = 0; i < 100 && rc == XTC_E_AGAIN; i++)
+        rc = xtc_tls_handshake(t);
+    xtc_tls_destroy(t);
+    close(sv[0]);
+    close(sv[1]);
+    return rc;
+}
+
+static void
+yvictim_fiber(void *arg)
+{
+    struct ysess *v = arg;
+    char buf[16];
+    size_t n;
+
+    g_yv_read_yield = 1;
+    v->rc = xtc_tls_read(v->tls, buf, sizeof buf, &n);
+    g_yv_read_yield = 0;
+    v->rc2 = xtc_tls_read(v->tls, buf, sizeof buf, &n);
+    g_yv_done = 1;
+}
+
+static void
+yattacker_fiber(void *arg)
+{
+    struct ysess *a = arg;
+    yield_until(&g_yv_in_read);   /* V is suspended inside SSL_read */
+    a->rc = yattacker_run(a);
+}
+
+static MunitResult
+test_server_transport_yield_isolation(const MunitParameter params[],
+    void *data)
+{
+    xtc_tls_opts_t  opts;
+    xtc_tls_ctx_t  *ctx = NULL;
+    xtc_tls_transport_t xt;
+    xtc_loop_t     *loop = NULL;
+    struct client_args ca;
+    struct ysess    v, a;
+    pthread_t       tid;
+    int             sv[2], av[2], rc, rc_ctrl;
+    char            rbuf[CLIENT_MSG_LEN + 1];
+
+    (void)params;
+    (void)data;
+
+    memset(&opts, 0, sizeof(opts));
+    opts.cert_file   = TEST_CERT_PATH;
+    opts.key_file    = TEST_KEY_PATH;
+    opts.min_version = XTC_TLS_VER_12;
+    munit_assert_int(xtc_tls_ctx_create(XTC_TLS_SERVER, &opts, &ctx),
+                     ==, XTC_OK);
+
+    /* Controls: the fd-mode outcome for the attacker's bytes, and the
+     * same in transport mode with callbacks that do not yield.  A
+     * transport callback must not change how a failure is classified
+     * (dropping the session's own queued error would turn it into a
+     * transport error, XTC_E_IO). */
+    g_yv_read_yield = g_ya_write_yield = 0;
+    g_yv_in_read = g_ya_in_write = g_yv_done = 0;
+    rc_ctrl = yattacker_fd_ref(ctx);
+    munit_assert_int(rc_ctrl, !=, XTC_OK);
+    munit_assert_int(rc_ctrl, !=, XTC_E_AGAIN);
+    rc = yattacker_open(ctx, &a, av);
+    if (rc == XTC_E_NOSYS) {
+        xtc_tls_ctx_destroy(ctx);
+        close(av[0]);
+        close(av[1]);
+        return MUNIT_SKIP;   /* backend has no custom transport */
+    }
+    munit_assert_int(rc, ==, XTC_OK);
+    munit_assert_int(yattacker_run(&a), ==, rc_ctrl);
+    xtc_tls_destroy(a.tls);
+    close(av[0]);
+    close(av[1]);
+
+    /* The healthy victim session, established before the loop runs. */
+    munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), ==, 0);
+    munit_assert_int(set_nonblock(sv[0]), ==, 0);
+    munit_assert_int(set_nonblock(sv[1]), ==, 0);
+    memset(&v, 0, sizeof v);
+    v.fd = sv[0];
+    xt.read_cb = yread;
+    xt.write_cb = ywrite;
+    xt.userdata = &v;
+    munit_assert_int(xtc_tls_create_transport(ctx, &xt, &v.tls), ==, XTC_OK);
+    memset(&ca, 0, sizeof(ca));
+    ca.fd = sv[1];
+    ca.rc = 1;
+    munit_assert_int(pthread_create(&tid, NULL, client_thread, &ca), ==, 0);
+    munit_assert_int(poll_until_done(v.tls, sv[0], xtc_tls_handshake, 5000),
+                     ==, XTC_OK);
+
+    munit_assert_int(yattacker_open(ctx, &a, av), ==, XTC_OK);
+    g_ya_write_yield = 1;
+    munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+    munit_assert_int(xtc_proc_spawn(loop, yvictim_fiber, &v, NULL, NULL),
+                     ==, XTC_OK);
+    munit_assert_int(xtc_proc_spawn(loop, yattacker_fiber, &a, NULL, NULL),
+                     ==, XTC_OK);
+    munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+    munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+    g_ya_write_yield = 0;
+
+    /* The interleaving happened: A was suspended in its alert write
+     * while V's read resumed. */
+    munit_assert_int(g_yv_in_read, ==, 1);
+    munit_assert_int(g_ya_in_write, ==, 1);
+    munit_assert_int(g_yv_done, ==, 1);
+    munit_assert_int(v.rc, ==, XTC_E_AGAIN);
+    munit_assert_int(v.rc2, ==, XTC_E_AGAIN);
+    munit_assert_int(a.rc, ==, rc_ctrl);
+    xtc_tls_destroy(a.tls);
+    close(av[0]);
+    close(av[1]);
+
+    /* And the victim still works end to end. */
+    munit_assert_int(tls_write_all(v.tls, sv[0], "hello", CLIENT_MSG_LEN,
+                     5000), ==, XTC_OK);
+    memset(rbuf, 0, sizeof(rbuf));
+    munit_assert_int(tls_read_exact(v.tls, sv[0], rbuf, CLIENT_MSG_LEN,
+                     5000), ==, XTC_OK);
+    munit_assert_memory_equal(CLIENT_MSG_LEN, rbuf, "hello");
+    (void)xtc_tls_shutdown(v.tls);
+    pthread_join(tid, NULL);
+    munit_assert_int(ca.rc, ==, 0);
+    xtc_tls_destroy(v.tls);
+    xtc_tls_ctx_destroy(ctx);
+    close(sv[0]);
+    close(sv[1]);
+    return MUNIT_OK;
+}
+
+/* -------------------------------------------------------------------------
  * test_server_peer_eof:
  *   How a read reports the peer going away.
  *     clean  -- close_notify then close: XTC_OK with *out_n == 0 (EOF).
@@ -1686,6 +1948,8 @@ static MunitTest tests[] = {
       MUNIT_TEST_OPTION_NONE, NULL },
     { "/peer_eof",             test_server_peer_eof,            suite_setup, suite_teardown,
       MUNIT_TEST_OPTION_NONE, NULL },
+    { "/transport_yield_isolation", test_server_transport_yield_isolation,
+      suite_setup, suite_teardown, MUNIT_TEST_OPTION_NONE, NULL },
     { "/ctx_create_destroy",   test_server_ctx_create_destroy,  suite_setup, suite_teardown,
       MUNIT_TEST_OPTION_NONE, NULL },
     { "/handshake_roundtrip",  test_server_handshake_roundtrip, suite_setup, suite_teardown,
