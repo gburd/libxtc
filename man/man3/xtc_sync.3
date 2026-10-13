@@ -178,6 +178,13 @@ never parks;
 releases; and
 .Fn xtc_amutex_destroy
 frees it.
+A proc that exits while holding an amutex leaves it held forever
+(there is no robust-mutex recovery, and a later proc never inherits a
+recursive amutex's ownership), so release it in an
+.Fn xtc_proc_at_exit
+hook (see
+.Xr xtc_proc 3 )
+if the proc can die inside the critical section.
 .It Vt xtc_arwlock
 Async reader-writer latch (shared / exclusive).  Blocked acquires park
 the fiber, exactly as
