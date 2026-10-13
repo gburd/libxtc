@@ -46,6 +46,7 @@
 
 #include "xtc.h"             /* XTC_OK */
 #include "xtc_exec.h"        /* V2: morsel-parallel workers, one per loop */
+#include "xtc_sync.h"        /* xtc_amutex_static: VX_LK_CC */
 
 /* Native ASCII pattern matchers (no SQLite).  xs_like: '%' matches any
  * run, '_' any one byte, ASCII case-insensitive (SQLite's default LIKE).
@@ -1023,8 +1024,15 @@ static vx_expr_t *compile_expr(struct vx_compiler *c, const sql_expr_t *e);
  * (a 2-part column qualified by this outer table) so they get srcrow
  * slots.  Set around the single-table pass-1 collection and cleared
  * after; NULL on the join path (correlated subqueries fall back there).
- * Prepare is single-threaded per statement, so a file-scoped pointer is
- * safe. */
+ * These file-scoped variables (cc_otab, cc_bt, cc_inner_cols,
+ * cc_inner_ncol) are shared by every loop, and a prepare can park
+ * (catalog lock, page I/O) and resume on another thread, so every
+ * vx_prepare_select runs under the recursive static amutex VX_LK_CC
+ * (recursive: correlated-subquery trial prepares re-enter it on the same
+ * fiber).  Found by TSan under a 4-loop, 8-client load; without it two
+ * concurrent correlated EXISTS queries crashed the server (NULL
+ * cc_inner_cols entry -> SIGSEGV in strlen from corr_collect). */
+#define VX_LK_CC 12u
 static const char *cc_otab;
 
 /* Optional inner-table schema access for EXISTS correlation during
@@ -3751,8 +3759,24 @@ vx_try_prepare_binds(struct xsql *db, const char *sql,
  * arena (which it takes ownership of -- freed on fallback, kept on the
  * returned plan).  This is the post-parse body shared by the string
  * entry point and the set-op runner. */
+static int vx_prepare_select_body(struct xsql *db, sql_arena_t *ast,
+    const sql_select_t *sel, const vx_cell_t *binds, int nbinds,
+    vx_stmt_t **out, char **errmsg);
+
 static int
 vx_prepare_select(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
+                  const vx_cell_t *binds, int nbinds,
+                  vx_stmt_t **out, char **errmsg)
+{
+	int rc;
+	(void)xtc_amutex_lock(xtc_amutex_static(VX_LK_CC), -1);
+	rc = vx_prepare_select_body(db, ast, sel, binds, nbinds, out, errmsg);
+	(void)xtc_amutex_unlock(xtc_amutex_static(VX_LK_CC));
+	return rc;
+}
+
+static int
+vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
                   const vx_cell_t *binds, int nbinds,
                   vx_stmt_t **out, char **errmsg)
 {
@@ -6220,7 +6244,13 @@ struct sort_ctx {
 	int              nkey;
 	const int       *desc;   /* nkey */
 };
-static struct sort_ctx *g_sort_ctx;   /* qsort_r is not portable; serialize */
+/* qsort_r is not portable, so the comparator reads its context from
+ * here.  Thread-local: ORDER BY queries run concurrently on different
+ * loops (--threads N), and qsort runs to completion on one thread with
+ * no fiber switch, so a per-thread slot is exact.  (A process-global
+ * slot was overwritten and then NULLed by a concurrent sort: SIGSEGV in
+ * sort_index_cmp under a 4-loop reader workload.) */
+static _Thread_local struct sort_ctx *g_sort_ctx;
 
 static int
 sort_index_cmp(const void *pa, const void *pb)

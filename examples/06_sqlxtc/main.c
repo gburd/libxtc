@@ -165,24 +165,29 @@ listener_proc(void *arg)
 {
 	server_t *srv = arg;
 	void *msg; size_t msg_len;
+	xtc_tcp_opts_t nodelay = { .nodelay = 1 };
 
 	while (!atomic_load(&srv->shutdown_requested)) {
 		rate_limit_refill(srv);
 		for (;;) {
-			struct sockaddr_in addr;
-			socklen_t alen = sizeof addr;
-			int fd;
+			int fd = -1, arc;
 			conn_opts_t opts;
 			xtc_pid_t pid;
 
-			fd = accept(srv->listen_fd, (struct sockaddr *)&addr,
-			            &alen);
-			if (fd < 0) {
-				if (errno == EAGAIN || errno == EWOULDBLOCK)
-					break;
-				if (errno == EINTR) continue;
+			/* xtc_net_accept: non-blocking + CLOEXEC + no-SIGPIPE, and
+			 * errno mapped to XTC_E_*.  Out of descriptors (EMFILE /
+			 * ENFILE -> XTC_E_RESOURCE) must not spin on the still-
+			 * readable listen fd: back off 10 ms so connections close
+			 * and free descriptors, then retry. */
+			arc = xtc_net_accept(srv->listen_fd, &fd);
+			if (arc == XTC_E_AGAIN)
+				break;                    /* drained */
+			if (arc == XTC_E_RESOURCE || arc == XTC_E_NOMEM) {
+				(void)xtc_proc_sleep(10LL * 1000 * 1000);
 				break;
 			}
+			if (arc != XTC_OK)
+				break;                    /* transient; wait for readiness */
 
 			if (srv->cfg.max_clients > 0 &&
 			    atomic_load(&srv->conn_count) >= srv->cfg.max_clients) {
@@ -190,18 +195,13 @@ listener_proc(void *arg)
 				    "{\"err\":\"max_clients\"}\n";
 				(void)send(fd, reject, strlen(reject),
 				    MSG_DONTWAIT | MSG_NOSIGNAL);
-				close(fd);
+				xtc_net_close(fd);
 				continue;
 			}
 
-			{
-				/* Disable Nagle on the accepted fd via the
-				 * portable helper (libxtc handles the per-OS
-				 * setsockopt), then make it non-blocking. */
-				xtc_tcp_opts_t topts = { .nodelay = 1 };
-				(void)xtc_net_apply_tcp_opts(fd, &topts);
-				xtc_net_setnonblock(fd);
-			}
+			/* Disable Nagle via the portable helper (the fd is already
+			 * non-blocking from xtc_net_accept). */
+			(void)xtc_net_apply_tcp_opts(fd, &nodelay);
 
 			memset(&opts, 0, sizeof opts);
 			opts.fd = fd;
@@ -225,7 +225,7 @@ listener_proc(void *arg)
 			if (conn_spawn(cl, &opts, &pid) == XTC_OK) {
 				server_inc_conn(srv);
 			} else {
-				close(fd);
+				xtc_net_close(fd);
 			}
 		}
 
@@ -291,7 +291,11 @@ usage(FILE *fp, const char *prog)
 	    "      --storage-frames=N  xstore buffer-pool pages (0=default)\n"
 	    "      --storage-direct    open the store with O_DIRECT\n"
 	    "      --storage-adaptive  adaptive writeback pacing\n"
-	    "      --no-shared       per-conn handle (vs one shared handle)\n"
+	    "      --checkpoint-mb=N   compact the log once it passes\n"
+	    "                        max(N MiB, 2 x its last checkpoint size)\n"
+	    "                        (default 64)\n"
+	    "      --no-shared       accepted for compatibility (every connection\n"
+	    "                        always has its own handle and transaction)\n"
 	    "  -t, --threads=N       worker loops (default 1; >1 = parallel,\n"
 	    "                        connection-per-proc across N OS threads)\n"
 	    "  -v, --verbose\n"
@@ -303,7 +307,7 @@ static int
 parse_args(int argc, char **argv, server_cfg_t *cfg)
 {
 	enum { OPT_NO_SHARED = 1000, OPT_HELP, OPT_STORAGE, OPT_STORAGE_FRAMES,
-	       OPT_STORAGE_DIRECT, OPT_STORAGE_ADAPTIVE };
+	       OPT_STORAGE_DIRECT, OPT_STORAGE_ADAPTIVE, OPT_CKPT_MB };
 	static struct option lo[] = {
 		{ "host", required_argument, NULL, 'h' },
 		{ "port", required_argument, NULL, 'p' },
@@ -317,6 +321,7 @@ parse_args(int argc, char **argv, server_cfg_t *cfg)
 		{ "storage-frames", required_argument, NULL, OPT_STORAGE_FRAMES },
 		{ "storage-direct", no_argument, NULL, OPT_STORAGE_DIRECT },
 		{ "storage-adaptive", no_argument, NULL, OPT_STORAGE_ADAPTIVE },
+		{ "checkpoint-mb", required_argument, NULL, OPT_CKPT_MB },
 		{ "no-shared", no_argument, NULL, OPT_NO_SHARED },
 		{ "threads", required_argument, NULL, 't' },
 		{ "verbose", no_argument, NULL, 'v' },
@@ -341,6 +346,9 @@ parse_args(int argc, char **argv, server_cfg_t *cfg)
 		case OPT_STORAGE_FRAMES: cfg->storage_frames = (unsigned)atoi(optarg); break;
 		case OPT_STORAGE_DIRECT: cfg->storage_direct = 1; break;
 		case OPT_STORAGE_ADAPTIVE: cfg->storage_adaptive = 1; break;
+		case OPT_CKPT_MB:
+			sx_storage_set_checkpoint((uint64_t)strtoull(optarg, NULL, 10) << 20);
+			break;
 		case 'v': cfg->verbose = 1; break;
 		case OPT_NO_SHARED: cfg->shared_handle = 0; break;
 		case OPT_HELP: usage(stdout, argv[0]); return 1;
@@ -361,7 +369,7 @@ main(int argc, char **argv)
 	xtc_tcp_opts_t tcp_opts = XTC_TCP_OPTS_DEFAULT;
 	db_opts_t db_opts = DB_OPTS_DEFAULT;
 	xtc_pid_t metrics_pid;
-	int rc;
+	int rc, exit_rc = 0;
 
 	/* Parsing and execution have deeper stacks than a small actor,
 	 * particularly with sanitizer instrumentation. Set this before
@@ -522,11 +530,15 @@ main(int argc, char **argv)
 	xtc_log_drain(log);
 	close(srv->listen_fd);
 	db_destroy(srv->db);
-	if (cfg.storage_path != NULL)
-		sx_storage_close();        /* checkpoint + stop procs + close */
+	if (cfg.storage_path != NULL &&
+	    sx_storage_close() != SX_OK) {   /* checkpoint + stop procs + close */
+		fprintf(stderr, "sqlxtc: shutdown flush failed; the store was "
+		    "NOT marked clean (the next start replays the log)\n");
+		exit_rc = 1;
+	}
 	xtc_app_destroy(srv->app);   /* joins the supervisor + frees the exec */
 	free(srv->res);
 	xtc_log_destroy(log);
 	(void)sx_shutdown();
-	return 0;
+	return exit_rc;
 }

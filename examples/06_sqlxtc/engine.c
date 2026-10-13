@@ -28,9 +28,12 @@
 #include "xtc_loop.h"      /* xtc_loop_t -- background storage procs */
 
 #include <assert.h>
+#include <stdatomic.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>      /* access, unlink, F_OK */
 
@@ -48,7 +51,7 @@ enum sx_native_kind {
 	SXN_ROLLBACK, SXN_SAVEPOINT, SXN_RELEASE, SXN_ROLLBACK_TO,
 	SXN_CREATE, SXN_DROP, SXN_PRAGMA_NOP, SXN_PRAGMA_TABLE_INFO,
 	SXN_CREATE_VIEW, SXN_DROP_VIEW, SXN_ALTER,
-	SXN_CREATE_INDEX, SXN_DROP_INDEX
+	SXN_CREATE_INDEX, SXN_DROP_INDEX, SXN_SET_ISO
 };
 
 struct sx_stmt {
@@ -201,6 +204,73 @@ static wal_t *g_xwal;
 static char   g_xwal_path[1024];
 static int    g_xrunning;        /* background procs spawned */
 
+/*
+ * Periodic checkpoint.  The log is compacted (xstore_checkpoint_wal: a
+ * CHECKPOINT record plus the live rows replace the whole log) whenever
+ * it grows past max(g_ckpt_min, 2 x its size after the last checkpoint)
+ * -- the doubling keeps the O(live data) dump amortized against the
+ * writes that triggered it.  Commits are held back (xstore_quiesce_*)
+ * only while the dump runs; readers continue.  Recovery replays the
+ * compacted log, so its work is O(live data + writes since the last
+ * checkpoint).  A failed checkpoint leaves the old (complete) log in
+ * place and is retried.
+ */
+static uint64_t     g_ckpt_min = 64ull << 20;  /* bytes; sx_storage_set_checkpoint */
+static _Atomic int  g_ckpt_stop, g_ckpt_alive;
+static _Atomic uint64_t g_ckpt_count;
+
+void
+sx_storage_set_checkpoint(uint64_t min_bytes)
+{
+	g_ckpt_min = min_bytes > 0 ? min_bytes : (64ull << 20);
+}
+
+uint64_t
+sx_storage_checkpoints(void)
+{
+	return atomic_load(&g_ckpt_count);
+}
+
+static void
+sx_ckpt_proc(void *arg)
+{
+	uint64_t floor = 0;
+	(void)arg;
+	while (!atomic_load(&g_ckpt_stop)) {
+		uint64_t sz, trig;
+		(void)xtc_proc_sleep(50LL * 1000 * 1000);
+		if (g_xwal == NULL || wal_failed(g_xwal))
+			continue;
+		sz = wal_size(g_xwal);
+		trig = floor * 2 > g_ckpt_min ? floor * 2 : g_ckpt_min;
+		if (sz < trig)
+			continue;
+		xstore_quiesce_begin();
+		if (xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal,
+		    g_xwal_path) == XTC_OK) {
+			floor = wal_size(g_xwal);
+			atomic_fetch_add(&g_ckpt_count, 1);
+		}
+		xstore_quiesce_end();
+	}
+	atomic_store(&g_ckpt_alive, 0);
+}
+
+static void
+sx_ckpt_stop(void)
+{
+	int i;
+	if (!atomic_load(&g_ckpt_alive))
+		return;
+	atomic_store(&g_ckpt_stop, 1);
+	for (i = 0; i < 2000 && atomic_load(&g_ckpt_alive); i++) {
+		if (xtc_pid_is_none(xtc_self()))
+			(void)xtc_sleep_ns(10LL * 1000 * 1000);
+		else
+			(void)xtc_proc_sleep(10LL * 1000 * 1000);
+	}
+}
+
 int
 sx_open(const char *path, sx_db **out)
 {
@@ -331,8 +401,14 @@ sx_storage_open(const char *path, unsigned int n_frames)
 	if (trusted) {
 		xstore_set_clock(clock);          /* restore the commit clock */
 		bt_set_meta(g_xbt, 0, clock);     /* mark dirty: a crash now rebuilds */
-		bt_write_super(g_xbt);
-		(void)bm_sync(g_xbm);
+		/* The cleared flag MUST be durable before any change: otherwise
+		 * a crash leaves a "clean" base that misses later commits and
+		 * the next open would skip the log replay that holds them. */
+		if (bt_write_super(g_xbt) != XTC_OK || bm_sync(g_xbm) != XTC_OK) {
+			bt_close(g_xbt); g_xbt = NULL;
+			bm_destroy(g_xbm); g_xbm = NULL;
+			return SX_ERROR;
+		}
 	} else {
 		/* Fresh page file; rebuild the tree from the (bounded) log. */
 		o.reopen = 0;
@@ -387,6 +463,15 @@ sx_storage_run(xtc_loop_t *loop)
 		return SX_OK;
 	if (g_xwal != NULL)
 		(void)wal_writer_spawn(g_xwal, loop, NULL);
+	if (g_xwal != NULL) {
+		xtc_proc_opts_t co = { 0 };
+		xtc_pid_t cp;
+		co.name = "checkpoint";
+		atomic_store(&g_ckpt_stop, 0);
+		atomic_store(&g_ckpt_alive, 1);
+		if (xtc_proc_spawn(loop, sx_ckpt_proc, NULL, &co, &cp) != XTC_OK)
+			atomic_store(&g_ckpt_alive, 0);
+	}
 	(void)bm_provider_spawn(g_xbm, loop, 1LL * 1000 * 1000, NULL);  /* 1ms */
 	(void)bm_trickler_spawn(g_xbm, loop, 5LL * 1000 * 1000, NULL);  /* 5ms */
 	g_xrunning = 1;
@@ -404,13 +489,20 @@ sx_storage_run(xtc_loop_t *loop)
 int
 sx_storage_checkpoint(void)
 {
+	int rc = SX_OK;
 	if (g_xbm == NULL)
 		return SX_OK;
 	(void)bm_checkpoint(g_xbm);            /* flush dirty pages (not for durability) */
-	if (g_xwal != NULL &&
-	    xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal, g_xwal_path) != XTC_OK)
-		return SX_ERROR;
-	return SX_OK;
+	if (g_xwal != NULL) {
+		xstore_quiesce_begin();
+		if (xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal,
+		    g_xwal_path) != XTC_OK)
+			rc = SX_ERROR;
+		else
+			atomic_fetch_add(&g_ckpt_count, 1);
+		xstore_quiesce_end();
+	}
+	return rc;
 }
 
 /*
@@ -426,16 +518,20 @@ sx_storage_quiesce(void)
 {
 	if (!g_xrunning)
 		return;
+	sx_ckpt_stop();
 	if (g_xwal != NULL) wal_writer_stop(g_xwal);
 	bm_trickler_stop(g_xbm);
 	bm_provider_stop(g_xbm);
 	g_xrunning = 0;
 }
 
-void
+int
 sx_storage_close(void)
 {
+	int ok = 1;
+
 	if (g_xrunning) {
+		sx_ckpt_stop();
 		if (g_xwal != NULL) wal_writer_stop(g_xwal);
 		bm_trickler_stop(g_xbm);
 		bm_provider_stop(g_xbm);
@@ -446,25 +542,33 @@ sx_storage_close(void)
 	 * open (the write-ahead hook reads it), compact the log so a future
 	 * crash replays a bounded log, then mark the base clean and fsync
 	 * the marker so the next open can trust the base and skip recovery.
-	 * A crash anywhere before the clean marker is durable leaves the
-	 * flag unset, so recovery rebuilds -- always safe.
+	 * The marker is written ONLY if every step succeeded: a page that
+	 * did not reach the file, a failed sync, a failed compaction, or a
+	 * log that fail-stopped earlier all leave the flag unset, so the next
+	 * open rebuilds from the (complete) log -- always safe.  A crash
+	 * anywhere before the marker is durable has the same effect.
 	 */
 	if (g_xbt != NULL && g_xbm != NULL) {
-		(void)bm_checkpoint(g_xbm);        /* flush all dirty pages + fsync */
-		if (g_xwal != NULL)
-			(void)xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal,
-			    g_xwal_path);
+		if (g_xwal != NULL && wal_failed(g_xwal))
+			ok = 0;                    /* do not trust anything after an I/O error */
+		if (ok && bm_checkpoint(g_xbm) != XTC_OK)   /* flush all dirty pages + fsync */
+			ok = 0;
+		if (ok && g_xwal != NULL &&
+		    xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal,
+		    g_xwal_path) != XTC_OK)
+			ok = 0;
 		bm_set_wal_flush(g_xbm, NULL, NULL);   /* drop the hook before closing the log */
 	}
 	xstore_set_wal(NULL);
 	if (g_xwal != NULL) { wal_close(g_xwal); g_xwal = NULL; }
-	if (g_xbt != NULL && g_xbm != NULL) {
+	if (ok && g_xbt != NULL && g_xbm != NULL) {
 		bt_set_meta(g_xbt, 1, xstore_clock());  /* base is consistent up to here */
-		bt_write_super(g_xbt);
-		(void)bm_sync(g_xbm);              /* make the clean marker durable */
+		if (bt_write_super(g_xbt) != XTC_OK || bm_sync(g_xbm) != XTC_OK)
+			ok = 0;                    /* marker may be torn: next open rebuilds */
 	}
 	if (g_xbt != NULL) { bt_close(g_xbt); g_xbt = NULL; }
 	if (g_xbm != NULL) { bm_destroy(g_xbm); g_xbm = NULL; }
+	return ok ? SX_OK : SX_ERROR;
 }
 
 void
@@ -476,6 +580,7 @@ sx_storage_abandon(void)
 	 * so it keeps the full durable history.  The next open finds no
 	 * marker and rebuilds the tree from the log. */
 	if (g_xrunning) {
+		sx_ckpt_stop();
 		if (g_xwal != NULL) wal_writer_stop(g_xwal);
 		bm_trickler_stop(g_xbm);
 		bm_provider_stop(g_xbm);
@@ -781,6 +886,75 @@ sx_classify(const char *sql, int *tail_more,
 }
 #endif /* SQLXTC_HAVE_LIME */
 
+#ifdef SQLXTC_HAVE_LIME
+/* Case-insensitive match of the next word in *pp against `w`; on a
+ * match advance *pp past it (and following whitespace) and return 1. */
+static int
+sx_word(const char **pp, const char *w)
+{
+	const char *p = *pp;
+	size_t n = strlen(w);
+	if (strncasecmp(p, w, n) != 0) return 0;
+	if (isalnum((unsigned char)p[n]) || p[n] == '_') return 0;
+	p += n;
+	while (isspace((unsigned char)*p)) p++;
+	*pp = p;
+	return 1;
+}
+
+/*
+ * Isolation-level statements, recognized here rather than in the Lime
+ * grammar (so the committed generated parser is unchanged):
+ *   SET TRANSACTION ISOLATION LEVEL <lvl>              -> txn level
+ *   SET SESSION CHARACTERISTICS AS TRANSACTION
+ *       ISOLATION LEVEL <lvl>                          -> session level
+ *   BEGIN [TRANSACTION] ISOLATION LEVEL <lvl>          -> BEGIN + txn level
+ * <lvl> is SERIALIZABLE | REPEATABLE READ | READ COMMITTED |
+ * READ UNCOMMITTED | SNAPSHOT.  Returns the kind (SXN_SET_ISO or
+ * SXN_BEGIN) with the canonical level in lvl and *session set, or
+ * SXN_NONE if the text is not one of these.
+ */
+static enum sx_native_kind
+sx_classify_iso(const char *sql, char *lvl, size_t cap, int *session)
+{
+	const char *p = sql, *names[] = { "serializable", "repeatable read",
+	    "read committed", "read uncommitted", "snapshot" };
+	enum sx_native_kind k;
+	size_t i;
+
+	*session = 0;
+	while (isspace((unsigned char)*p)) p++;
+	if (sx_word(&p, "BEGIN")) {
+		(void)sx_word(&p, "TRANSACTION");
+		k = SXN_BEGIN;
+	} else if (sx_word(&p, "SET")) {
+		if (sx_word(&p, "SESSION")) {
+			if (!sx_word(&p, "CHARACTERISTICS") || !sx_word(&p, "AS"))
+				return SXN_NONE;
+			*session = 1;
+		}
+		if (!sx_word(&p, "TRANSACTION")) return SXN_NONE;
+		k = SXN_SET_ISO;
+	} else
+		return SXN_NONE;
+	if (!sx_word(&p, "ISOLATION") || !sx_word(&p, "LEVEL")) return SXN_NONE;
+	for (i = 0; i < sizeof names / sizeof names[0]; i++) {
+		const char *q = p, *w = names[i], *sp = strchr(w, ' ');
+		char first[16];
+		if (sp != NULL) {
+			snprintf(first, sizeof first, "%.*s", (int)(sp - w), w);
+			if (!sx_word(&q, first) || !sx_word(&q, sp + 1)) continue;
+		} else if (!sx_word(&q, w))
+			continue;
+		while (*q == ';' || isspace((unsigned char)*q)) q++;
+		if (*q != '\0') return SXN_NONE;
+		snprintf(lvl, cap, "%s", w);
+		return k;
+	}
+	return SXN_NONE;
+}
+#endif
+
 int
 sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
            const char **tail)
@@ -799,9 +973,13 @@ sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
 	 * the driver is complete this decline becomes an error instead.)
 	 */
 	if (g_native_driver && (n_bytes < 0 || (size_t)n_bytes == strlen(sql))) {
-		int more = 0;
+		int more = 0, session = 0;
 		char nm[128], cols[1024];
-		enum sx_native_kind k = sx_classify(sql, &more, nm, sizeof nm, cols, sizeof cols);
+		enum sx_native_kind k = sx_classify_iso(sql, nm, sizeof nm, &session);
+		if (k == SXN_NONE)
+			k = sx_classify(sql, &more, nm, sizeof nm, cols, sizeof cols);
+		else
+			cols[0] = session ? 's' : 't';    /* level scope */
 		if (k != SXN_NONE) {
 			st = (struct sx_stmt *)calloc(1, sizeof *st);
 			if (st == NULL) return SX_NOMEM;
@@ -845,6 +1023,10 @@ sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
 						free(st->ddl_name); free(st->sql); free(st); return SX_NOMEM; }
 					memcpy(st->ddl_cols, cols, total);
 				}
+			} else if (k == SXN_SET_ISO || (k == SXN_BEGIN && nm[0] != '\0')) {
+				st->ddl_name = strdup(nm);     /* the isolation level */
+				if (st->ddl_name == NULL) { free(st->sql); free(st); return SX_NOMEM; }
+				st->splevel = (cols[0] == 's');   /* 1 = session scope */
 			} else if (k == SXN_DROP_INDEX) {
 				st->ddl_name = strdup(nm);     /* index name to drop */
 				if (st->ddl_name == NULL) { free(st->sql); free(st); return SX_NOMEM; }
@@ -912,6 +1094,24 @@ nat_select_run(struct sx_stmt *st)
  * any other decline, a generic "unsupported SQL".  This keeps the error
  * surface compatible with SQLite for the common case (a typo'd table).
  */
+/* Message for a write that the log refused (see wal_commit fail-stop). */
+#define SX_MSG_WAL_IO "I/O error: write-ahead log write or fsync failed; " \
+	"the transaction was not committed and the database is read-only " \
+	"until restart"
+#define SX_MSG_SERIALIZE "could not serialize access due to concurrent " \
+	"update; transaction rolled back"
+
+static int
+nat_set_err(sx_db *db, const char *msg, int rc)
+{
+	struct sx_native_db *nd;
+	if (!sx_is_native_db(db)) return rc;
+	nd = (struct sx_native_db *)db;
+	free(nd->errmsg);
+	nd->errmsg = strdup(msg);
+	return rc;
+}
+
 static int
 nat_set_run_error(struct sx_stmt *st)
 {
@@ -919,6 +1119,8 @@ nat_set_run_error(struct sx_stmt *st)
 	char buf[160];
 	const char *tab = NULL;
 	if (!sx_is_native_db(st->db)) return SX_ERROR;
+	if (xstore_wal_failed())
+		return nat_set_err(st->db, SX_MSG_WAL_IO, SX_ERROR);
 	nd = (struct sx_native_db *)st->db;
 	free(nd->errmsg);
 	/* A first unresolved base table name -> "no such table: NAME". */
@@ -955,9 +1157,20 @@ sx_step(sx_stmt *st)
 		switch (st->nkind) {
 		case SXN_WRITE: {
 			int64_t nch = 0;
-			int rc = vx_run_write_p((struct xsql *)st->db, st->sql,
+			int rc;
+			const char *w = st->sql;
+			while (isspace((unsigned char)*w)) w++;
+			/* UPDATE/DELETE compute rows from a read: give the statement
+			 * one snapshot and a write-write check against it.  INSERT has
+			 * no read dependency (and REPLACE may rewrite its own key). */
+			if (sx_word(&w, "UPDATE") || sx_word(&w, "DELETE"))
+				xstore_stmt_begin(st->db);
+			rc = vx_run_write_p((struct xsql *)st->db, st->sql,
 			    st->nbind ? st->binds : NULL, st->nbind, &nch, NULL);
+			xstore_stmt_end(st->db);
 			if (rc == 1) { st->nchanges = nch; return SX_DONE; }
+			if (xstore_last_conflict(st->db))
+				return nat_set_err(st->db, SX_MSG_SERIALIZE, SX_BUSY);
 			/* The native write path declined: a hard error (no VDBE). */
 			return nat_set_run_error(st);
 		}
@@ -965,7 +1178,25 @@ sx_step(sx_stmt *st)
 			struct sx_native_db *nd = sx_is_native_db(st->db)
 			    ? (struct sx_native_db *)st->db : NULL;
 			if (nd) nd->spn = 0;
-			return xstore_native_begin(st->db) == 0 ? SX_DONE : SX_ERROR;
+			if (xstore_native_begin(st->db) != 0) return SX_ERROR;
+			if (st->ddl_name != NULL &&     /* BEGIN ISOLATION LEVEL x */
+			    xstore_set_txn_isolation(st->db, st->ddl_name) != 0)
+				return nat_set_err(st->db,
+				    "cannot set the isolation level", SX_ERROR);
+			return SX_DONE;
+		}
+		case SXN_SET_ISO: {
+			int rc;
+			if (st->splevel)
+				rc = xstore_set_isolation(st->db, st->ddl_name);
+			else
+				rc = xstore_set_txn_isolation(st->db, st->ddl_name);
+			if (rc == 0) return SX_DONE;
+			return nat_set_err(st->db, rc == -2
+			    ? "SET TRANSACTION must be inside a transaction (BEGIN first)"
+			    : rc == -3
+			    ? "SET TRANSACTION must precede any query in the transaction"
+			    : "cannot set the isolation level", SX_ERROR);
 		}
 		case SXN_COMMIT: {
 			struct sx_native_db *nd = sx_is_native_db(st->db)
@@ -974,8 +1205,10 @@ sx_step(sx_stmt *st)
 			if (nd) nd->spn = 0;
 			rc = xstore_commit(st->db);
 			if (rc == 0) return SX_DONE;
-			if (rc == SX_BUSY) return SX_BUSY;   /* serialization conflict */
-			return SX_ERROR;
+			if (rc == SX_BUSY)      /* serialization conflict */
+				return nat_set_err(st->db, SX_MSG_SERIALIZE, SX_BUSY);
+			return nat_set_err(st->db, xstore_wal_failed() ? SX_MSG_WAL_IO
+			    : "commit failed; transaction rolled back", SX_ERROR);
 		}
 		case SXN_ROLLBACK: {
 			struct sx_native_db *nd = sx_is_native_db(st->db)

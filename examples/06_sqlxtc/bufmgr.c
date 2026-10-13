@@ -334,6 +334,7 @@ struct bm {
 	uint32_t          dw_next;       /* next slot to claim (round-robin) */
 	_Atomic uint64_t  dw_seq;        /* monotonic write sequence */
 	_Atomic uint64_t  s_dw_repaired; /* pages restored from the DW on reopen */
+	_Atomic uint64_t  s_io_errors;   /* failed page / double-write writes */
 
 	/* ARIES page LSN (active when lsn_off >= 0). */
 	int               lsn_off;       /* byte offset of the page LSN, or -1 */
@@ -482,8 +483,11 @@ free_pop(bm_t *bm)
 #define BM_DW_HDR   16            /* [pid:8][seq:8] per slot */
 
 /* Log `page` (destined for `pid`) to the next double-write slot and make
- * it durable.  Called by flush_frame BEFORE the final write. */
-static void
+ * it durable.  Called by flush_frame BEFORE the final write.  Returns 0,
+ * or -1 if the slot write or its fdatasync failed -- the caller must then
+ * NOT write the home page (it would be unprotected against a torn write)
+ * and keeps the page dirty for a later attempt. */
+static int
 dw_protect(bm_t *bm, bm_pid_t pid, const void *page)
 {
 	uint8_t hdr[BM_DW_HDR];
@@ -492,7 +496,7 @@ dw_protect(bm_t *bm, bm_pid_t pid, const void *page)
 	off_t off;
 
 	if (bm->dw_fd < 0)
-		return;                       /* double-write disabled */
+		return 0;                     /* double-write disabled */
 	pthread_mutex_lock(&bm->dw_mu);
 	slot = bm->dw_next;
 	bm->dw_next = (slot + 1u) % bm->dw_slots;
@@ -503,12 +507,13 @@ dw_protect(bm_t *bm, bm_pid_t pid, const void *page)
 	off = (off_t)slot * (off_t)(BM_DW_HDR + bm->page_size);
 	/* Full-page log to the slot, durable BEFORE the final write, via
 	 * libxtc async file I/O (native io_uring completion, or offloaded
-	 * on a readiness-only backend).  Best-effort like the page writes:
-	 * a torn slot just means that page is re-logged at the next flush. */
-	(void)xtc_aio_pwrite(bm->dw_fd, hdr, BM_DW_HDR, (int64_t)off);
-	(void)xtc_aio_pwrite(bm->dw_fd, page, bm->page_size,
-	    (int64_t)off + BM_DW_HDR);
-	(void)xtc_aio_fdatasync(bm->dw_fd);
+	 * on a readiness-only backend). */
+	if (xtc_aio_pwrite(bm->dw_fd, hdr, BM_DW_HDR, (int64_t)off) != BM_DW_HDR ||
+	    xtc_aio_pwrite(bm->dw_fd, page, bm->page_size,
+	    (int64_t)off + BM_DW_HDR) != (int)bm->page_size ||
+	    xtc_aio_fdatasync(bm->dw_fd) != 0)
+		return -1;
+	return 0;
 }
 
 /* On reopen, replay the double-write ring onto the main file in sequence
@@ -622,11 +627,16 @@ flush_frame(bm_t *bm, bm_frame_t *f)
 	atomic_store_explicit(&f->dirty, 0, memory_order_release);
 	xtc_arwlock_unlock(f->latch);
 	BM_FLUSH_TEST_HOOK(bm, f);
-	dw_protect(bm, f->pid, snap);       /* full-page log, durable, BEFORE the final write */
-	clean = do_io(bm, snap, f->pid, 1) == 0;
+	/* Full-page log, durable, BEFORE the final write.  If the slot
+	 * cannot be made durable the home write is skipped (it would be
+	 * unprotected) and the page stays dirty. */
+	clean = dw_protect(bm, f->pid, snap) == 0 &&
+	    do_io(bm, snap, f->pid, 1) == 0;
 	xtc_aligned_free(snap);
-	if (!clean)
+	if (!clean) {
 		atomic_store_explicit(&f->dirty, 1, memory_order_release);
+		atomic_fetch_add_explicit(&bm->s_io_errors, 1, memory_order_relaxed);
+	}
 	else
 		atomic_fetch_add_explicit(&bm->s_flushed, 1, memory_order_relaxed);
 release:
@@ -2638,7 +2648,13 @@ tr_prepare(bm_t *bm, bm_frame_t *f, void *dst)
 	}
 	atomic_store_explicit(&f->dirty, 0, memory_order_release);
 	xtc_arwlock_unlock(f->latch);
-	dw_protect(bm, f->pid, dst);    /* double-write log (no-op if disabled) */
+	/* Double-write log (no-op if disabled).  If the slot is not durable
+	 * the page must not be written home: re-dirty it and give it back. */
+	if (dw_protect(bm, f->pid, dst) != 0) {
+		atomic_store_explicit(&f->dirty, 1, memory_order_release);
+		atomic_fetch_add_explicit(&bm->s_io_errors, 1, memory_order_relaxed);
+		goto release;
+	}
 	return 1;
 release:
 	atomic_store_explicit(&f->io_busy, 0, memory_order_release);
@@ -2972,7 +2988,7 @@ bm_write_super(bm_t *bm, const void *buf, size_t len)
 	if (bm == NULL || buf == NULL || len > bm->page_size)
 		return XTC_E_INVAL;
 	n = pwrite(bm->fd, buf, len, 0);          /* page 0 == superblock */
-	return (n == (ssize_t)len) ? XTC_OK : XTC_E_INTERNAL;
+	return (n == (ssize_t)len) ? XTC_OK : XTC_E_IO;
 }
 
 int
@@ -2996,7 +3012,7 @@ int
 bm_sync(bm_t *bm)
 {
 	if (bm == NULL) return XTC_E_INVAL;
-	return xtc_aio_fdatasync(bm->fd) == 0 ? XTC_OK : XTC_E_INTERNAL;
+	return xtc_aio_fdatasync(bm->fd) == 0 ? XTC_OK : XTC_E_IO;
 }
 
 int
@@ -3010,10 +3026,20 @@ bm_checkpoint(bm_t *bm)
 	 * by an active writer is left -- a quiesced checkpoint should run
 	 * with no writes in flight, which the WAL-truncation caller
 	 * arranges. */
+	uint32_t left = 0;
+	int rc;
 	for (i = 0; i < bm->n_frames; i++) {
 		bm_frame_t *f = &bm->frames[i];
-		if (atomic_load_explicit(&f->dirty, memory_order_acquire))
-			(void)flush_frame(bm, f);
+		if (atomic_load_explicit(&f->dirty, memory_order_acquire) &&
+		    !flush_frame(bm, f))
+			left++;
 	}
-	return bm_sync(bm);
+	rc = bm_sync(bm);
+	if (rc != XTC_OK)
+		return rc;
+	/* A frame that could not be written (I/O error, or skipped because
+	 * it was pinned/latched) means the base is NOT complete: report it so
+	 * a caller about to trust the base (a clean-shutdown marker, a log
+	 * truncation) does not. */
+	return left == 0 ? XTC_OK : XTC_E_AGAIN;
 }

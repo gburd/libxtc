@@ -26,6 +26,7 @@
 #include "quack.h"
 #include "sql_parse.h"
 #include "xtc_io.h"
+#include "xtc_net.h"
 #include "xtc_log.h"
 #include "xtc_stats.h"
 
@@ -387,7 +388,7 @@ conn_proc(void *arg)
 	if (st->h_conn != NULL)
 		db_conn_close(st->db, st->h_conn, st->h_owned);
 
-	close(st->fd);
+	xtc_net_close(st->fd);   /* pairs with xtc_net_accept (fd accounting) */
 	free(st->rbuf);
 	quack_buf_free(&st->wbuf);
 	free(st);
