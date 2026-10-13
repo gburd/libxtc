@@ -220,23 +220,23 @@ db_destroy(db_t *db)
 int
 db_conn_open(db_t *db, sx_db **out, int *out_owned)
 {
-	if (db->shared && db->sdb) {
-		*out = db->sdb;
-		*out_owned = 0;
-		return XTC_OK;
+	sx_db *h = NULL;
+	const char *p = db->open_path ? db->open_path : db->path;
+
+	/* Always a private handle per connection, even in single-handle
+	 * mode: the native handle carries the connection's transaction
+	 * state (open txn, snapshot, write buffer, isolation level), so a
+	 * handle shared between connections would merge their transactions
+	 * and expose one client's uncommitted writes to every other.  Every
+	 * native handle binds the same process-global store, so nothing is
+	 * lost by not sharing one. */
+	if (sx_open(p, &h) != SX_OK) {
+		if (h) sx_close(h);
+		return XTC_E_INVAL;
 	}
-	{
-		sx_db *h = NULL;
-		const char *p = db->open_path ? db->open_path : db->path;
-		int rc = sx_open(p, &h);
-		if (rc != SX_OK) {
-			if (h) sx_close(h);
-			return XTC_E_INVAL;
-		}
-		*out = h;
-		*out_owned = 1;
-		return XTC_OK;
-	}
+	*out = h;
+	*out_owned = 1;
+	return XTC_OK;
 }
 
 void

@@ -125,6 +125,36 @@ def main():
     cols, rows, n = c.query("SELECT 42")
     check("survive after err", rows == [[42]])
 
+    # Per-connection transactions (default --threads 1).  Each client owns
+    # its own transaction: another client's uncommitted writes are
+    # invisible, COMMIT/ROLLBACK affect only the issuing client, and an
+    # autocommit statement from one client is never absorbed into another
+    # client's open transaction.
+    a, o = Client(PORT), Client(PORT)
+    a.query("CREATE TABLE acct(id INTEGER PRIMARY KEY, bal INTEGER)")
+    a.query("INSERT INTO acct(id,bal) VALUES(1,100)")
+    a.query("BEGIN")
+    a.query("UPDATE acct SET bal=999 WHERE id=1")
+    a.query("INSERT INTO acct(id,bal) VALUES(2,5)")
+    _, rows, _ = o.query("SELECT bal FROM acct WHERE id=1")
+    check("no dirty read of an open UPDATE", rows == [[100]])
+    _, rows, _ = o.query("SELECT bal FROM acct WHERE id=2")
+    check("no dirty read of an open INSERT", rows == [])
+    o.query("INSERT INTO acct(id,bal) VALUES(3,7)")   # autocommit, other conn
+    a.query("ROLLBACK")
+    _, rows, _ = o.query("SELECT id, bal FROM acct ORDER BY id")
+    check("ROLLBACK undoes only its own txn", rows == [[1, 100], [3, 7]])
+    a.query("BEGIN")
+    a.query("UPDATE acct SET bal=bal+10 WHERE id=1")
+    o.query("BEGIN")
+    o.query("UPDATE acct SET bal=bal+1 WHERE id=3")
+    o.query("ROLLBACK")
+    a.query("COMMIT")
+    _, rows, _ = o.query("SELECT id, bal FROM acct ORDER BY id")
+    check("txns are not merged across conns", rows == [[1, 110], [3, 7]])
+    a.close()
+    o.close()
+
     c.close()
 
     if fails:
