@@ -6220,7 +6220,13 @@ struct sort_ctx {
 	int              nkey;
 	const int       *desc;   /* nkey */
 };
-static struct sort_ctx *g_sort_ctx;   /* qsort_r is not portable; serialize */
+/* qsort_r is not portable, so the comparator reads its context from
+ * here.  Thread-local: ORDER BY queries run concurrently on different
+ * loops (--threads N), and qsort runs to completion on one thread with
+ * no fiber switch, so a per-thread slot is exact.  (A process-global
+ * slot was overwritten and then NULLed by a concurrent sort: SIGSEGV in
+ * sort_index_cmp under a 4-loop reader workload.) */
+static _Thread_local struct sort_ctx *g_sort_ctx;
 
 static int
 sort_index_cmp(const void *pa, const void *pb)
