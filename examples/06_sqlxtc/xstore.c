@@ -816,7 +816,7 @@ static int g_view_n;
 /* Connection -> B-tree association, so a from-scratch executor driven
  * from a connection handle (xstore_bt_of) can open a storage-native
  * scan over the same B-tree the connection's xstore tables use. */
-#define XS_DBMAP_MAX 64
+#define XS_DBMAP_MAX 1024   /* open connections (>= the server's default max_clients) */
 static struct xs_dbmap_ent { struct xsql *db; bt_t *bt; xstore_ctx_t *ctx; } g_dbmap[XS_DBMAP_MAX];
 static int g_dbmap_n;
 
@@ -4237,19 +4237,23 @@ static xstore_ctx_t *
 xs_ctx_init_and_map(struct xsql *db, bt_t *bt, int native)
 {
 	xstore_ctx_t *ctx = malloc(sizeof *ctx);
+	int i, slot = -1;
 	if (ctx == NULL)
 		return NULL;
 	bt_set_close_hook(xstore_cat_forget);   /* clear cached ids when a bt closes */
 	ctx->bt = bt;
 	xs_cat_lock();
-	{
-		int i, slot = -1;
-		for (i = 0; i < g_dbmap_n; i++)
-			if (g_dbmap[i].db == db) { slot = i; break; }
-		if (slot < 0 && g_dbmap_n < XS_DBMAP_MAX) slot = g_dbmap_n++;
-		if (slot >= 0) { g_dbmap[slot].db = db; g_dbmap[slot].bt = bt; g_dbmap[slot].ctx = ctx; }
-	}
+	for (i = 0; i < g_dbmap_n; i++)
+		if (g_dbmap[i].db == db) { slot = i; break; }
+	if (slot < 0 && g_dbmap_n < XS_DBMAP_MAX) slot = g_dbmap_n++;
+	if (slot >= 0) { g_dbmap[slot].db = db; g_dbmap[slot].bt = bt; g_dbmap[slot].ctx = ctx; }
 	xs_cat_unlock();
+	if (slot < 0) {
+		/* Map full: refuse the connection rather than hand back a
+		 * handle with no transaction context. */
+		free(ctx);
+		return NULL;
+	}
 	atomic_store(&ctx->read_snap, 0);
 	ctx->in_txn = 0;
 	ctx->txn_snap = 0;

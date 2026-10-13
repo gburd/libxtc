@@ -70,10 +70,11 @@ void db_handle_put(db_t *db, sx_db *h, int owned);
 
 /* Connection-lifetime handle: open once when a connection starts and
  * hold it until the connection closes (vs db_handle_get's per-call
- * acquire).  In single-handle mode returns the shared handle
- * (*out_owned == 0); otherwise opens a fresh per-connection handle
- * (*out_owned == 1).  This stable handle is what makes the prepared-
- * statement cache and connection-per-proc parallelism possible. */
+ * acquire).  Always a fresh per-connection handle (*out_owned == 1):
+ * the handle owns the connection's transaction state, so it is never
+ * shared between connections.  This stable handle is what makes the
+ * prepared-statement cache and connection-per-proc parallelism
+ * possible. */
 int  db_conn_open(db_t *db, sx_db **out, int *out_owned);
 void db_conn_close(db_t *db, sx_db *h, int owned);
 
