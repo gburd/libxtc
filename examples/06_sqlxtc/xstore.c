@@ -115,6 +115,17 @@
 #define HLC_LOGICAL_BITS 16
 #define HLC_LOGICAL_MASK ((1ULL << HLC_LOGICAL_BITS) - 1)
 static _Atomic uint64_t g_xclock = 1;
+/*
+ * Read horizon.  g_xclock is the newest timestamp HANDED OUT; a commit
+ * holding one may still be writing its log record or applying its
+ * versions.  Snapshots are taken from g_xvisible instead: every commit
+ * with ts <= g_xvisible is durable and fully applied.  It advances (under
+ * the commit lock) when the oldest in-flight commit finishes -- see
+ * xs_inflight_remove -- so a snapshot never sees part of a transaction,
+ * and a transaction never sees a row appear inside its own snapshot.
+ */
+static _Atomic uint64_t g_xvisible = 1;
+static uint64_t xs_visible(void);
 
 /*
  * Wall-clock milliseconds since the epoch, the HLC physical component.
@@ -217,22 +228,29 @@ uint64_t xstore_undo_clrs(void) { return atomic_load_explicit(&g_undo_clrs, memo
 /* The MVCC commit clock, for the engine to persist at a clean shutdown
  * and restore when it trusts the base on restart. */
 uint64_t xstore_clock(void) { return atomic_load_explicit(&g_xclock, memory_order_relaxed); }
+
+struct xs_inflight;
+static struct xs_inflight *g_inflight;   /* guarded by the commit lock */
+static void xs_visible_catchup_locked(void);
+
 void
 xstore_set_clock(uint64_t v)
 {
-	uint64_t cur = atomic_load_explicit(&g_xclock, memory_order_relaxed);
+	uint64_t cur;
 
 	/* Restore-on-restart and the HLC merge-on-observe rule are the same
 	 * operation: never let the clock run backwards.  Advance to v only
-	 * if it is ahead of the current stamp (CAS-loop against concurrent
-	 * ticks).  When the engine is distributed, a node calls this with a
-	 * timestamp received from a peer so its own stamps stay causally
-	 * after everything it has observed. */
-	while (v > cur) {
-		if (atomic_compare_exchange_weak_explicit(&g_xclock, &cur, v,
-		    memory_order_relaxed, memory_order_relaxed))
-			return;
-	}
+	 * if it is ahead of the current stamp.  When the engine is
+	 * distributed, a node calls this with a timestamp received from a
+	 * peer so its own stamps stay causally after everything it has
+	 * observed.  Under the commit lock (timestamps are minted there), and
+	 * the read horizon follows only when no commit is in flight. */
+	xs_commit_lock();
+	cur = atomic_load_explicit(&g_xclock, memory_order_relaxed);
+	if (v > cur)
+		atomic_store_explicit(&g_xclock, v, memory_order_relaxed);
+	xs_visible_catchup_locked();
+	xs_commit_unlock();
 }
 
 /* HLC merge-on-observe: fold a timestamp seen from a peer into the
@@ -307,6 +325,7 @@ typedef struct xstore_ctx {
 	int              txn_iso;     /* level of the open txn (SET TRANSACTION) */
 	int              touched;     /* open txn has read or written */
 	uint64_t         stmt_base;   /* snapshot the current DML statement reads */
+	uint64_t         last_ts;     /* commit ts of this connection's last write */
 	int              last_conflict; /* last write hit a write-write conflict */
 	xs_rkey_t       *rset;        /* (table,rowid) read in this txn (serializable) */
 	int              rn, rcap;
@@ -1320,7 +1339,7 @@ xs_enter_ctx(xstore_ctx_t *cx, struct xsql *db)
 	}
 	if (!autocommit && !cx->in_txn) {
 		cx->in_txn = 1;
-		cx->txn_snap = atomic_load_explicit(&g_xclock, memory_order_relaxed);
+		cx->txn_snap = xs_visible();
 		wbuf_clear(cx);
 		cx->steal_txn = 0;
 		cx->rn = 0;
@@ -1780,7 +1799,7 @@ xstore_scan_open(bt_t *bt, const char *table, uint64_t snap,
 	if (s == NULL) return NULL;
 	s->c.bt = bt;
 	s->c.tableid = tid;
-	s->c.snap = snap ? snap : atomic_load_explicit(&g_xclock, memory_order_relaxed);
+	s->c.snap = snap ? snap : xs_visible();
 	s->c.lo = lo; s->c.has_lo = has_lo ? 1 : 0;
 	s->c.hi = hi; s->c.has_hi = has_hi ? 1 : 0;
 	s->c.have_last = 0;
@@ -2567,8 +2586,6 @@ struct xs_inflight {
 	int64_t             rid;
 	struct xs_inflight *next;
 };
-static struct xs_inflight *g_inflight;   /* guarded by the commit lock */
-
 static int
 xs_inflight_has(const struct xs_inflight *e, uint32_t tid, int64_t rid)
 {
@@ -2590,6 +2607,23 @@ xs_inflight_add_locked(struct xs_inflight *e)
 	g_inflight = e;
 }
 
+/* Caller holds the commit lock.  Advance the read horizon to just below
+ * the oldest commit still in flight (or to the clock when none is): every
+ * timestamp at or below it is durable and applied.  Monotonic. */
+static void
+xs_visible_catchup_locked(void)
+{
+	const struct xs_inflight *e;
+	uint64_t v = atomic_load_explicit(&g_xclock, memory_order_relaxed);
+	for (e = g_inflight; e != NULL; e = e->next)
+		if (e->ts - 1 < v)
+			v = e->ts - 1;
+	if (v > atomic_load_explicit(&g_xvisible, memory_order_relaxed))
+		atomic_store_explicit(&g_xvisible, v, memory_order_release);
+}
+
+/* The commit (applied or failed) leaves the in-flight set: publish it to
+ * readers by advancing the horizon past every completed commit. */
 static void
 xs_inflight_remove(struct xs_inflight *e)
 {
@@ -2597,7 +2631,29 @@ xs_inflight_remove(struct xs_inflight *e)
 	xs_commit_lock();
 	for (pp = &g_inflight; *pp != NULL; pp = &(*pp)->next)
 		if (*pp == e) { *pp = e->next; break; }
+	xs_visible_catchup_locked();
 	xs_commit_unlock();
+}
+
+static uint64_t
+xs_visible(void)
+{
+	return atomic_load_explicit(&g_xvisible, memory_order_acquire);
+}
+
+/* Return only once commit `ts` is visible to new snapshots, so a session
+ * always reads its own commit.  The horizon waits only on OLDER commits
+ * still in flight (logging or applying), which never wait on younger
+ * ones, so this terminates.  Must be called holding no engine lock. */
+static void
+xs_wait_visible(uint64_t ts)
+{
+	while (xs_visible() < ts) {
+		if (xtc_pid_is_none(xtc_self()))
+			(void)xtc_sleep_ns(20LL * 1000);
+		else
+			(void)xtc_proc_sleep(20LL * 1000);
+	}
 }
 
 /*
@@ -2623,7 +2679,20 @@ xs_ww_conflict_locked(bt_t *bt, const xs_wrec_t *ws, int wn)
 }
 
 static int
+xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n,
+    int deleted, uint64_t *out_ts);
+
+static int
 xs_put(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n, int deleted)
+{
+	uint64_t ts;
+	return xs_put_ts(bt, tableid, rowid, blob, n, deleted, &ts);
+}
+
+/* Autocommit write of one version; *out_ts gets its commit timestamp. */
+static int
+xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n,
+    int deleted, uint64_t *out_ts)
 {
 	uint8_t key[XS_VKLEN];
 	uint8_t buf[1 + XS_VMAX];
@@ -2639,6 +2708,7 @@ xs_put(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n, int d
 	xs_inflight_add_locked(&fl);
 	xs_commit_unlock();
 	ts = fl.ts;
+	*out_ts = ts;
 	if (g_xwal != NULL) {
 		uint64_t lsn = 0;
 		/* Durable BEFORE apply.  A failed log write applies nothing: the
@@ -2860,14 +2930,14 @@ xs_put_pruned(xstore_ctx_t *cx, uint32_t tableid, int64_t rowid, const void *blo
 	uint8_t pre[XS_VMAX]; int prelen = 0;
 	int rc;
 	prelen = xs_idx_preimage(cx->bt, tableid, rowid, pre, (int)sizeof pre);
-	rc = xs_put(cx->bt, tableid, rowid, blob, n, deleted);
+	rc = xs_put_ts(cx->bt, tableid, rowid, blob, n, deleted, &cx->last_ts);
 	if (rc == SX_OK) {
 		xs_idx_maintain(cx->bt, tableid, rowid,
 		    (const uint8_t *)blob, deleted ? 0 : n, deleted,
 		    prelen > 0 ? pre : NULL, prelen);
 		if (cx->autovacuum)
 			xs_maybe_prune(cx->bt, tableid, rowid,
-			    snap_horizon(atomic_load_explicit(&g_xclock, memory_order_relaxed)));
+			    snap_horizon(xs_visible()));
 	}
 	return rc;
 }
@@ -2930,6 +3000,8 @@ xstore_write_txn(struct xsql *db, uint32_t tableid, int64_t rowid,
 	}
 	rc = xs_put_pruned(cx, tableid, rowid, deleted ? NULL : rec,
 	                   deleted ? 0 : reclen, deleted);
+	if (rc == SX_OK)
+		xs_wait_visible(cx->last_ts);
 	return rc == SX_OK ? 0 : -1;
 }
 
@@ -2941,7 +3013,7 @@ xstore_stmt_begin(struct xsql *db)
 {
 	xstore_ctx_t *cx = xstore_ctx_of(db);
 	if (cx == NULL) return;
-	cx->stmt_base = atomic_load_explicit(&g_xclock, memory_order_acquire);
+	cx->stmt_base = xs_visible();
 	cx->last_conflict = 0;
 }
 
@@ -3274,11 +3346,13 @@ xs_commit_ctx(xstore_ctx_t *cx)
 				    w->data, w->deleted ? 0 : (int)w->len, w->deleted,
 				    prelen > 0 ? pre : NULL, prelen);
 				if (cx->autovacuum)
-					xs_maybe_prune(cx->bt, w->tableid, w->rowid, snap_horizon(ts));
+					xs_maybe_prune(cx->bt, w->tableid, w->rowid,
+					    snap_horizon(xs_visible()));
 			}
 		}
 		ssi_commit(cx->ssi, ts);     /* publish commit_ts for SSI peers */
 		xs_inflight_remove(&fl);
+		xs_wait_visible(ts);         /* COMMIT returns once it is visible */
 	} else {
 		/* read-only: keep the read set visible to concurrent peers
 		 * until GC, stamped at the current clock. */
@@ -3433,7 +3507,7 @@ xstore_set_txn_isolation(struct xsql *db, const char *level)
 int64_t
 xstore_clock_now(void)
 {
-	return (int64_t)atomic_load_explicit(&g_xclock, memory_order_relaxed);
+	return (int64_t)xs_visible();   /* the newest fully committed stamp */
 }
 
 /* Pin the connection's reads at timestamp ts (xstore_as_of(ts)); ts 0
@@ -3458,7 +3532,7 @@ xstore_gc_run(struct xsql *db)
 	uint64_t now, horizon;
 	int reclaimed = 0;
 	if (c == NULL) return -1;
-	now = atomic_load_explicit(&g_xclock, memory_order_relaxed);
+	now = xs_visible();             /* readers may sit at the horizon */
 	horizon = snap_horizon(now);
 	(void)xs_gc(c->bt, horizon, &reclaimed);
 	if (horizon > atomic_load_explicit(&g_gc_horizon, memory_order_relaxed))
@@ -4464,6 +4538,7 @@ xs_ctx_init_and_map(struct xsql *db, bt_t *bt, int native)
 	ctx->txn_iso = XS_ISO_SNAPSHOT;
 	ctx->touched = 0;
 	ctx->stmt_base = 0;
+	ctx->last_ts = 0;
 	ctx->last_conflict = 0;
 	ctx->rset = NULL;
 	ctx->rn = ctx->rcap = 0;
@@ -4857,8 +4932,7 @@ xstore_recover(bt_t *bt, const char *wal_path)
 		free(r.txn[i].upd);
 	free(r.txn);
 
-	if (r.max_ts >= atomic_load_explicit(&g_xclock, memory_order_relaxed))
-		atomic_store_explicit(&g_xclock, r.max_ts + 1, memory_order_relaxed);
+	xstore_set_clock(r.max_ts + 1);   /* clock and read horizon */
 	return rc;
 }
 
@@ -4930,8 +5004,7 @@ xstore_recover_inplace(bt_t *bt, bm_t *bm, const char *wal_path,
 		free(r.txn[i].upd);
 	free(r.txn);
 
-	if (r.max_ts >= atomic_load_explicit(&g_xclock, memory_order_relaxed))
-		atomic_store_explicit(&g_xclock, r.max_ts + 1, memory_order_relaxed);
+	xstore_set_clock(r.max_ts + 1);   /* clock and read horizon */
 	return rc;
 }
 

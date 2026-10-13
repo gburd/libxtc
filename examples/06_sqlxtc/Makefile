@@ -154,7 +154,7 @@ clean:
 	rm -f test_btree
 	rm -f test_btree_loop
 	rm -f test_btree_mt
-	rm -f test_btree_delete_merge test_savepoint test_isolation test_ww_conflict
+	rm -f test_btree_delete_merge test_savepoint test_isolation test_ww_conflict test_commit_visibility
 	rm -f test_vfs_loop test_vfs_loop.o
 	rm -rf $(AMALG_DIR)
 	rm -f sql_parse_gen.o sql_parse_drv.o
@@ -166,7 +166,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-quack-range test-sql-parse test-admin test-wal test-wal-recover test-wal-fail test-torn-smo test-wal-compact test-wal-lsn-monotone test-shard test-mvcc test-xstore test-xstore-scan test-index test-savepoint test-isolation test-ww-conflict test-native-txn test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-fuzzy-checkpoint test-bufmgr-mt test-scan-resist test-sweep-bound test-persist test-cursor-resume test-clean-restart test-dw-fail test-steal test-steal-torn test-steal-page test-steal-leaf test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
+test: $(TARGET) test-quack test-quack-range test-sql-parse test-admin test-wal test-wal-recover test-wal-fail test-torn-smo test-wal-compact test-wal-lsn-monotone test-shard test-mvcc test-xstore test-xstore-scan test-index test-savepoint test-isolation test-ww-conflict test-commit-visibility test-native-txn test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-fuzzy-checkpoint test-bufmgr-mt test-scan-resist test-sweep-bound test-persist test-cursor-resume test-clean-restart test-dw-fail test-steal test-steal-torn test-steal-page test-steal-leaf test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -381,6 +381,12 @@ test_ww_conflict: test_ww_conflict.c $(ENGINE_NATIVE)
 
 test-ww-conflict: test_ww_conflict
 	./test_ww_conflict
+
+test_commit_visibility: test_commit_visibility.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_commit_visibility.c $(ENGINE_NATIVE) $(LDFLAGS)
+
+test-commit-visibility: test_commit_visibility
+	./test_commit_visibility
 
 test_isolation: test_isolation.c $(ENGINE_NATIVE)
 	$(CC) $(CFLAGS) -o $@ test_isolation.c $(ENGINE_NATIVE) $(LDFLAGS)
