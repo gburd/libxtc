@@ -48,7 +48,7 @@ flowchart LR
         P1["conn proc 1"] --> KS[("keyspace")]
         P2["conn proc 2"] --> KS
         PN["conn proc N"] --> KS
-        EX["executor:<br/>one loop per core,<br/>work-stealing"] -.->|runs| P1 & P2 & PN
+        EX["one xtc_loop<br/>(one thread)"] -.->|runs| P1 & P2 & PN
     end
 ```
 
@@ -57,12 +57,15 @@ keyspace, and an optional persistent log (rexis uses a
 [bitcask](https://riak.com/assets/bitcask-intro.pdf)-style append store,
 Redis uses RDB/AOF).
 
-**Different:** where Redis pins everything to one thread, rexis runs
-**one lightweight process per connection** across an executor of one
-loop per core. Each connection process parses its own commands and owns
-its own protocol state -- there is no shared connection table to lock. A
-slow command occupies its own process and can be preempted or parked
-without stalling other clients.
+**Different:** where Redis runs a hand-written reactor with a client
+table, rexis runs **one lightweight process per connection**. Each
+connection process parses its own commands and owns its own protocol
+state and buffers -- there is no shared connection table to lock. Today
+all of them run on ONE `xtc_loop` (one OS thread), like Redis; the
+per-connection-process shape is what would let them spread across an
+`xtc_exec` executor, but that needs the keyspace's writers serialized
+across loops and is not done (`--cores=N` only pins the one thread to
+CPUs 0..N-1).
 
 ## How it works
 
@@ -85,11 +88,21 @@ without stalling other clients.
   **`bitcask.c`** is the append-only persistence layer.
 - **`metrics.c`** exposes counters via
   [`xtc_stats(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_stats.3).
-- Memory is bounded by
+- Memory is bounded by one
   [`xtc_res(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_res.3)
-  budgets, so a client flood is *rejected* at a cap rather than driving
-  the server to OOM -- something Redis controls with `maxmemory` and an
-  eviction policy.
+  budget that the keyspace AND every client's query/output buffer growth
+  charge, so a client flood is *rejected* at a cap rather than driving
+  the server to OOM -- something Redis controls with `maxmemory`, an
+  eviction policy, and `client-output-buffer-limit`.
+- **Output backpressure.** A reply is built into a per-connection output
+  buffer that grows up to `--max-output`; a reply that would pass it is
+  replaced *whole* by an error (a truncated reply would desynchronize
+  every reply after it). Once more than 1 MiB is unsent the connection
+  stops reading and running commands until the client drains it, so a
+  client that pipelines without reading is slowed by TCP flow control
+  instead of growing the server. A command larger than `--max-request`
+  is refused at its header and the connection closed (Redis
+  `proto-max-bulk-len`).
 
 ## How libxtc concepts are applied
 
@@ -113,10 +126,12 @@ without stalling other clients.
   private to its process, so the parser, the buffers, and the in-flight
   command have exactly one owner. There is no shared connection registry
   to protect.
-- **Uses every core** without turning atomic-by-single-thread into a
-  lock nightmare: the keyspace is the one shared structure, and it can
+- **A path to more cores** without turning atomic-by-single-thread into
+  a lock nightmare: the keyspace is the one shared structure, and it can
   be guarded by a single primitive (or sharded) rather than by ad-hoc
-  locking spread across the codebase.
+  locking spread across the codebase. rexis itself still runs one loop;
+  spreading the connection processes over an executor is the step not
+  taken.
 - **Backpressure and budgets are first-class** (`xtc_res`), not bolted
   on.
 
@@ -132,12 +147,24 @@ without stalling other clients.
   across socket boundaries); the parser has to resume cleanly when a
   command spans two `read`s, which is exactly the kind of state that
   fibers keep on the stack instead of in a hand-rolled parser context.
+- **Buffers are where a server dies.** The 1.55 review found every
+  version of this mistake in rexis at once: a reply bigger than the
+  write buffer went out as a bare header, a slow reader got a corrupted
+  stream, LRANGE/KEYS silently stopped at 1024 elements, a client
+  holding a large partial command pinned a core (and kept it pinned
+  after hanging up), and `--max-memory` did not count client buffers at
+  all (300 clients took a 10 MB-capped server to 314 MB). The fixes --
+  a growable output buffer with a hard limit, read-side backpressure, a
+  request-size cap enforced at the header, EOF tracked separately from
+  errors, and client buffers charged to the same budget -- are each a
+  few lines; finding that they were missing took an adversarial client.
+  `test/m99/test_rexis_budgets.c` now measures each one.
 
 ## Run it
 
 ```sh
 cd examples/05_rexis && make XTC_BUILD=../../build
-./rexis &                       # listens on the RESP port
+./rexis-server-xtc &            # listens on the RESP port (6379)
 redis-cli set hello world
 redis-cli get hello             # -> "world"
 ```
