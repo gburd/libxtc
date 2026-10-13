@@ -255,6 +255,19 @@ db_create(const db_opts_t *opts, db_t **out)
 		return XTC_E_NOMEM;
 	}
 	tbl->mem_used = bucket_bytes;
+	/* Charge the bucket array to the shared budget too, so the budget's
+	 * total is exactly what INFO reports as used_memory (keyspace +
+	 * client buffers).  A cap below it cannot hold an empty keyspace. */
+	if (db->opts.res != NULL &&
+	    xtc_res_acquire(db->opts.res, XTC_RES_MEM_BYTES,
+	    (int64_t)bucket_bytes) != XTC_OK) {
+		xtc_free(tbl->buckets);
+		tbl->buckets = NULL;
+		xtc_lrlock_write_end(db->lr);
+		xtc_lrlock_destroy(db->lr);
+		xtc_free(db);
+		return XTC_E_RESOURCE;
+	}
 	xtc_lrlock_publish_full_sync(db->lr);
 	xtc_lrlock_write_end(db->lr);
 
@@ -305,6 +318,9 @@ db_destroy(db_t *db)
 			}
 		}
 		xtc_free(tbl->buckets);
+		if (db->opts.res != NULL)
+			xtc_res_release(db->opts.res, XTC_RES_MEM_BYTES,
+			    (int64_t)(tbl->n_buckets * sizeof(db_entry_t *)));
 	}
 	xtc_lrlock_write_end(db->lr);
 
@@ -397,38 +413,34 @@ db_llen(db_t *db, const char *key, size_t key_len)
 	return e->val.list.count;
 }
 
-int
+size_t
 db_lrange(db_t *db, const char *key, size_t key_len,
-          int start, int stop,
-          const char **out_data, size_t *out_len, int out_cap)
+          int64_t start, int64_t stop, db_visit_fn fn, void *user)
 {
 	const db_entry_t *e = db_lookup(db, key, key_len);
 	const db_list_node_t *n;
-	int count, idx, written = 0;
+	int64_t count, idx;
 
-	if (!e || e->type != DB_VAL_LIST)
+	if (!e || e->type != DB_VAL_LIST ||
+	    (e->expire_at_ns > 0 && xtc_now_ns() >= e->expire_at_ns)) {
+		fn(NULL, 0, NULL, 0, user);
 		return 0;
-	if (e->expire_at_ns > 0 && xtc_now_ns() >= e->expire_at_ns)
-		return 0;
+	}
 
-	count = (int)e->val.list.count;
+	count = (int64_t)e->val.list.count;
 	if (start < 0) start = count + start;
 	if (stop < 0)  stop = count + stop;
 	if (start < 0) start = 0;
 	if (stop >= count) stop = count - 1;
 	if (start > stop)
-		return 0;
+		start = stop + 1;   /* empty range: still announce 0 */
+	fn(NULL, (size_t)(stop - start + 1), NULL, 0, user);
 
 	idx = 0;
-	for (n = e->val.list.head; n && written < out_cap; n = n->next) {
-		if (idx >= start && idx <= stop) {
-			out_data[written] = n->data;
-			out_len[written] = n->len;
-			written++;
-		}
-		idx++;
-	}
-	return written;
+	for (n = e->val.list.head; n && idx <= stop; n = n->next, idx++)
+		if (idx >= start)
+			fn(n->data, n->len, NULL, 0, user);
+	return (size_t)(stop - start + 1);
 }
 
 int
@@ -466,67 +478,23 @@ db_hlen(db_t *db, const char *key, size_t key_len)
 	return e->val.hash.count;
 }
 
-int
-db_hkeys(db_t *db, const char *key, size_t key_len,
-         const char **out_keys, size_t *out_lens, int out_cap)
+size_t
+db_hscan(db_t *db, const char *key, size_t key_len,
+         db_visit_fn fn, void *user)
 {
 	const db_entry_t *e = db_lookup(db, key, key_len);
 	const db_hash_field_t *f;
-	int i = 0;
 
-	if (!e || e->type != DB_VAL_HASH)
+	if (!e || e->type != DB_VAL_HASH ||
+	    (e->expire_at_ns > 0 && xtc_now_ns() >= e->expire_at_ns)) {
+		fn(NULL, 0, NULL, 0, user);
 		return 0;
-	if (e->expire_at_ns > 0 && xtc_now_ns() >= e->expire_at_ns)
-		return 0;
-
-	for (f = e->val.hash.head; f && i < out_cap; f = f->next, i++) {
-		out_keys[i] = f->data;
-		out_lens[i] = f->key_len;
 	}
-	return i;
-}
-
-int
-db_hvals(db_t *db, const char *key, size_t key_len,
-         const char **out_vals, size_t *out_lens, int out_cap)
-{
-	const db_entry_t *e = db_lookup(db, key, key_len);
-	const db_hash_field_t *f;
-	int i = 0;
-
-	if (!e || e->type != DB_VAL_HASH)
-		return 0;
-	if (e->expire_at_ns > 0 && xtc_now_ns() >= e->expire_at_ns)
-		return 0;
-
-	for (f = e->val.hash.head; f && i < out_cap; f = f->next, i++) {
-		out_vals[i] = f->data + f->key_len + 1;
-		out_lens[i] = f->val_len;
-	}
-	return i;
-}
-
-int
-db_hgetall(db_t *db, const char *key, size_t key_len,
-           const char **out_keys, size_t *out_key_lens,
-           const char **out_vals, size_t *out_val_lens, int out_cap)
-{
-	const db_entry_t *e = db_lookup(db, key, key_len);
-	const db_hash_field_t *f;
-	int i = 0;
-
-	if (!e || e->type != DB_VAL_HASH)
-		return 0;
-	if (e->expire_at_ns > 0 && xtc_now_ns() >= e->expire_at_ns)
-		return 0;
-
-	for (f = e->val.hash.head; f && i < out_cap; f = f->next, i++) {
-		out_keys[i] = f->data;
-		out_key_lens[i] = f->key_len;
-		out_vals[i] = f->data + f->key_len + 1;
-		out_val_lens[i] = f->val_len;
-	}
-	return i;
+	fn(NULL, e->val.hash.count, NULL, 0, user);
+	for (f = e->val.hash.head; f; f = f->next)
+		fn(f->data, f->key_len, f->data + f->key_len + 1, f->val_len,
+		    user);
+	return e->val.hash.count;
 }
 
 /* Simple glob matching: * matches any sequence, ? matches one char */
@@ -554,24 +522,32 @@ glob_match(const char *pattern, size_t plen, const char *str, size_t slen)
 	return pi == plen;
 }
 
-int
+size_t
 db_keys(db_t *db, const char *pattern, size_t pattern_len,
-        const char **out_keys, size_t *out_lens, int out_cap)
+        db_visit_fn fn, void *user)
 {
 	const db_table_t *tbl = xtc_lrlock_read_data(db->lr);
 	int64_t now = xtc_now_ns();
-	int count = 0;
-	size_t i;
+	const db_entry_t *e;
+	size_t i, count = 0;
+	int pass;
 
-	for (i = 0; i < tbl->n_buckets && count < out_cap; i++) {
-		const db_entry_t *e;
-		for (e = tbl->buckets[i]; e && count < out_cap; e = e->next) {
-			if (e->expire_at_ns > 0 && now >= e->expire_at_ns)
-				continue;
-			if (glob_match(pattern, pattern_len, e->key, e->key_len)) {
-				out_keys[count] = e->key;
-				out_lens[count] = e->key_len;
-				count++;
+	/* Pass 0 counts, pass 1 visits: same snapshot, same `now`, so the
+	 * announced count is exactly the number visited. */
+	for (pass = 0; pass < 2; pass++) {
+		if (pass == 1)
+			fn(NULL, count, NULL, 0, user);
+		for (i = 0; i < tbl->n_buckets; i++) {
+			for (e = tbl->buckets[i]; e; e = e->next) {
+				if (e->expire_at_ns > 0 && now >= e->expire_at_ns)
+					continue;
+				if (!glob_match(pattern, pattern_len, e->key,
+				    e->key_len))
+					continue;
+				if (pass == 0)
+					count++;
+				else
+					fn(e->key, e->key_len, NULL, 0, user);
 			}
 		}
 	}

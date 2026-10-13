@@ -133,29 +133,37 @@ int  db_ttl(db_t *db, const char *key, size_t key_len);
 /* Get list length (0 if not found or not a list) */
 size_t db_llen(db_t *db, const char *key, size_t key_len);
 
-/* Get list range.  Fills out[] up to out_cap elements.
- * Returns count written.  start/stop are 0-based, can be negative. */
-int db_lrange(db_t *db, const char *key, size_t key_len,
-              int start, int stop,
-              const char **out_data, size_t *out_len, int out_cap);
+/* Visitor for the multi-element reads below.  It is called FIRST with
+ * a == NULL and alen = the number of elements that follow (so a RESP
+ * reply can write its array header from the same snapshot the elements
+ * come from), then once per element: (a, alen) is the list item, key, or
+ * hash field; (b, blen) is the hash field's value for db_hscan and
+ * NULL/0 otherwise.  The pointers are valid only during the call
+ * (between db_read_begin/end). */
+typedef void (*db_visit_fn)(const char *a, size_t alen,
+                            const char *b, size_t blen, void *user);
+
+/* Visit list elements start..stop (0-based, negative counts from the
+ * end, inclusive, as LRANGE).  Returns the number of elements in the
+ * range -- ALL of them: there is no cap (the reply's size is bounded by
+ * the connection's output limit instead). */
+size_t db_lrange(db_t *db, const char *key, size_t key_len,
+                 int64_t start, int64_t stop, db_visit_fn fn, void *user);
 
 /* Hash operations (read) */
 int    db_hget(db_t *db, const char *key, size_t key_len,
                const char *field, size_t field_len,
                const char **data, size_t *len);
 size_t db_hlen(db_t *db, const char *key, size_t key_len);
-int    db_hkeys(db_t *db, const char *key, size_t key_len,
-                const char **out_keys, size_t *out_lens, int out_cap);
-int    db_hvals(db_t *db, const char *key, size_t key_len,
-                const char **out_vals, size_t *out_lens, int out_cap);
-int    db_hgetall(db_t *db, const char *key, size_t key_len,
-                  const char **out_keys, size_t *out_key_lens,
-                  const char **out_vals, size_t *out_val_lens, int out_cap);
+/* Visit every field of a hash (fn gets field, value).  Returns the
+ * field count. */
+size_t db_hscan(db_t *db, const char *key, size_t key_len,
+                db_visit_fn fn, void *user);
 
-/* Enumerate keys matching glob pattern.
- * Returns count written.  Pattern supports * and ? wildcards. */
-int db_keys(db_t *db, const char *pattern, size_t pattern_len,
-            const char **out_keys, size_t *out_lens, int out_cap);
+/* Visit every live key matching a glob pattern (* and ? wildcards).
+ * Returns the match count.  No cap. */
+size_t db_keys(db_t *db, const char *pattern, size_t pattern_len,
+               db_visit_fn fn, void *user);
 
 /* Statistics */
 size_t db_key_count(db_t *db);

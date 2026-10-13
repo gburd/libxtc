@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "cmd.h"
+#include "conn.h"
 #include "xtc_pg.h"
 #include "xtc_stats.h"
 
@@ -282,21 +283,50 @@ cmd_ttl(cmd_ctx_t *ctx)
 	return 0;
 }
 
+/* Visitors that stream a multi-element read straight into the reply
+ * buffer: no fixed-size staging array, so no silent cap (LRANGE / KEYS
+ * used to stop at 1024 elements and HGETALL at 512, under a header that
+ * claimed only that many).  The first call (a == NULL) carries the
+ * element count for the array header (see db_visit_fn).  The reply's
+ * size is bounded by the connection's output limit; past it the
+ * buffer's sticky error turns the whole reply into an error (conn.c). */
+static void
+visit_bulk(const char *a, size_t alen, const char *b, size_t blen, void *u)
+{
+	(void)b; (void)blen;
+	if (a == NULL)
+		resp_write_array(u, alen);
+	else
+		resp_write_bulk(u, a, alen);
+}
+
+static void
+visit_val(const char *a, size_t alen, const char *b, size_t blen, void *u)
+{
+	if (a == NULL)
+		resp_write_array(u, alen);
+	else
+		resp_write_bulk(u, b, blen);
+}
+
+static void
+visit_pair(const char *a, size_t alen, const char *b, size_t blen, void *u)
+{
+	if (a == NULL) {
+		resp_write_array(u, alen * 2);
+		return;
+	}
+	resp_write_bulk(u, a, alen);
+	resp_write_bulk(u, b, blen);
+}
+
 static int
 cmd_keys(cmd_ctx_t *ctx)
 {
-	const char *keys[1024];
-	size_t lens[1024];
-	int i, n;
-
 	db_read_begin(ctx->db);
-	n = db_keys(ctx->db, ctx->argv[1].u.str.data, ctx->argv[1].u.str.len,
-	            keys, lens, 1024);
+	(void)db_keys(ctx->db, ctx->argv[1].u.str.data, ctx->argv[1].u.str.len,
+	    visit_bulk, ctx->out);
 	db_read_end(ctx->db);
-
-	resp_write_array(ctx->out, n);
-	for (i = 0; i < n; i++)
-		resp_write_bulk(ctx->out, keys[i], lens[i]);
 	return 0;
 }
 
@@ -425,21 +455,15 @@ cmd_llen(cmd_ctx_t *ctx)
 static int
 cmd_lrange(cmd_ctx_t *ctx)
 {
-	const char *data[1024];
-	size_t lens[1024];
-	int start, stop, n, i;
+	int64_t start, stop;
 
-	start = atoi(ctx->argv[2].u.str.data);
-	stop = atoi(ctx->argv[3].u.str.data);
+	start = atoll(ctx->argv[2].u.str.data);
+	stop = atoll(ctx->argv[3].u.str.data);
 
 	db_read_begin(ctx->db);
-	n = db_lrange(ctx->db, ctx->argv[1].u.str.data, ctx->argv[1].u.str.len,
-	              start, stop, data, lens, 1024);
+	(void)db_lrange(ctx->db, ctx->argv[1].u.str.data,
+	    ctx->argv[1].u.str.len, start, stop, visit_bulk, ctx->out);
 	db_read_end(ctx->db);
-
-	resp_write_array(ctx->out, n);
-	for (i = 0; i < n; i++)
-		resp_write_bulk(ctx->out, data[i], lens[i]);
 	return 0;
 }
 
@@ -505,56 +529,30 @@ cmd_hdel(cmd_ctx_t *ctx)
 static int
 cmd_hkeys(cmd_ctx_t *ctx)
 {
-	const char *keys[1024];
-	size_t lens[1024];
-	int i, n;
-
 	db_read_begin(ctx->db);
-	n = db_hkeys(ctx->db, ctx->argv[1].u.str.data, ctx->argv[1].u.str.len,
-	             keys, lens, 1024);
+	(void)db_hscan(ctx->db, ctx->argv[1].u.str.data,
+	    ctx->argv[1].u.str.len, visit_bulk, ctx->out);
 	db_read_end(ctx->db);
-
-	resp_write_array(ctx->out, n);
-	for (i = 0; i < n; i++)
-		resp_write_bulk(ctx->out, keys[i], lens[i]);
 	return 0;
 }
 
 static int
 cmd_hvals(cmd_ctx_t *ctx)
 {
-	const char *vals[1024];
-	size_t lens[1024];
-	int i, n;
-
 	db_read_begin(ctx->db);
-	n = db_hvals(ctx->db, ctx->argv[1].u.str.data, ctx->argv[1].u.str.len,
-	             vals, lens, 1024);
+	(void)db_hscan(ctx->db, ctx->argv[1].u.str.data,
+	    ctx->argv[1].u.str.len, visit_val, ctx->out);
 	db_read_end(ctx->db);
-
-	resp_write_array(ctx->out, n);
-	for (i = 0; i < n; i++)
-		resp_write_bulk(ctx->out, vals[i], lens[i]);
 	return 0;
 }
 
 static int
 cmd_hgetall(cmd_ctx_t *ctx)
 {
-	const char *keys[512], *vals[512];
-	size_t key_lens[512], val_lens[512];
-	int i, n;
-
 	db_read_begin(ctx->db);
-	n = db_hgetall(ctx->db, ctx->argv[1].u.str.data, ctx->argv[1].u.str.len,
-	               keys, key_lens, vals, val_lens, 512);
+	(void)db_hscan(ctx->db, ctx->argv[1].u.str.data,
+	    ctx->argv[1].u.str.len, visit_pair, ctx->out);
 	db_read_end(ctx->db);
-
-	resp_write_array(ctx->out, n * 2);
-	for (i = 0; i < n; i++) {
-		resp_write_bulk(ctx->out, keys[i], key_lens[i]);
-		resp_write_bulk(ctx->out, vals[i], val_lens[i]);
-	}
 	return 0;
 }
 
@@ -577,11 +575,12 @@ cmd_info(cmd_ctx_t *ctx)
 {
 	char buf[2048];
 	int n;
-	size_t keys, mem;
+	size_t keys, mem, clients;
 	long long cmd_total = 0, cmd_p50 = 0, cmd_p99 = 0;
 
 	keys = db_key_count(ctx->db);
 	mem = db_mem_used(ctx->db);
+	clients = (size_t)conn_client_bytes();
 
 	/* Pull command stats from the xtc_stats objects metrics.c owns.
 	 * These are the same counters cmd_execute records into. */
@@ -599,13 +598,15 @@ cmd_info(cmd_ctx_t *ctx)
 	    "# Clients\r\n"
 	    "# Memory\r\n"
 	    "used_memory:%zu\r\n"
+	    "used_memory_dataset:%zu\r\n"
+	    "used_memory_clients:%zu\r\n"
 	    "# Commandstats\r\n"
 	    "cmd_total:%lld\r\n"
 	    "cmd_latency_p50_ns:%lld\r\n"
 	    "cmd_latency_p99_ns:%lld\r\n"
 	    "# Keyspace\r\n"
 	    "db0:keys=%zu,expires=0\r\n",
-	    mem, cmd_total, cmd_p50, cmd_p99, keys);
+	    mem + clients, mem, clients, cmd_total, cmd_p50, cmd_p99, keys);
 
 	(void)ctx;
 	resp_write_bulk(ctx->out, buf, (size_t)n);

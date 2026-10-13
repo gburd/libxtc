@@ -6,11 +6,19 @@
  *	rexis (Redis-protocol-compatible) server entry point.
  *
  *	Resource budgets enforced via xtc_res:
- *	  --cores=N        pin to N cores via sched_setaffinity
- *	  --max-memory=N   XTC_RES_MEM_BYTES cap; OOM error on exceed
+ *	  --cores=N        restrict the process to CPUs 0..N-1
+ *	                   (sched_setaffinity).  rexis runs ONE loop on ONE
+ *	                   thread; this does not add threads.
+ *	  --max-memory=N   XTC_RES_MEM_BYTES cap over the keyspace AND the
+ *	                   growth of every client's query/output buffers
+ *	                   (above a fixed 16 KiB each); OOM error on exceed
  *	  --max-keys=N     per-database limit
  *	  --max-clients=N  concurrent connection limit
  *	  --max-iops=N     rate-limit incoming commands per second
+ *	  --max-request=N  largest command accepted (proto-max-bulk-len)
+ *	  --max-output=N   per-client pending reply bytes
+ *	                   (client-output-buffer-limit)
+ *	  --timeout=SECS   close a connection idle that long (0 = never)
  *
  *	Once the socket is listening the server prints ONE line to stdout,
  *	"rexis: listening on HOST:PORT", and flushes it: a test harness waits
@@ -75,6 +83,9 @@ typedef struct server_cfg {
 	int64_t     max_net_mbps;
 	int         verbose;
 	const char *persist_dir;
+	size_t      max_request;
+	size_t      max_output;
+	int64_t     timeout_s;
 } server_cfg_t;
 
 #define SERVER_CFG_DEFAULT { \
@@ -87,7 +98,10 @@ typedef struct server_cfg {
 	.max_iops = 0, \
 	.max_net_mbps = 0, \
 	.verbose = 0, \
-	.persist_dir = NULL \
+	.persist_dir = NULL, \
+	.max_request = CONN_DEFAULT_MAX_REQUEST, \
+	.max_output = CONN_DEFAULT_MAX_OUTPUT, \
+	.timeout_s = 0 \
 }
 
 /* ----- Server state ----- */
@@ -110,6 +124,7 @@ typedef struct server {
 
 	/* Shutdown */
 	_Atomic int      shutdown_requested;
+	xtc_tcp_opts_t   conn_tcp_opts;  /* applied to each accepted socket */
 	xtc_pid_t        expire_pid;     /* woken by the listener on shutdown */
 	xtc_pid_t        metrics_pid;
 } server_t;
@@ -173,10 +188,17 @@ pin_to_cores(int n_cores)
 
 /* ----- Listener proc ----- */
 
+/* Pause after a failed accept (fd exhaustion, ENOMEM). */
+#define ACCEPT_BACKOFF_NS  (10LL * 1000 * 1000)
+
 static void
 listener_proc(void *arg)
 {
 	server_t *srv = arg;
+	int rc, backing_off = 0;
+	uint32_t revents;
+	void *msg;
+	size_t msg_len;
 
 	while (!atomic_load(&srv->shutdown_requested)) {
 		/* Refill rate limit tokens */
@@ -184,39 +206,43 @@ listener_proc(void *arg)
 
 		/* Non-blocking accept loop */
 		for (;;) {
-			struct sockaddr_in addr;
-			socklen_t addrlen = sizeof(addr);
 			int fd;
 			xtc_pid_t conn_pid;
 			conn_opts_t opts;
 
-			fd = accept(srv->listen_fd, (struct sockaddr *)&addr,
-			            &addrlen);
-			if (fd < 0) {
-				if (errno == EAGAIN || errno == EWOULDBLOCK)
-					break;
-				if (errno == EINTR)
-					continue;
+			rc = xtc_net_accept(srv->listen_fd, &fd);
+			if (rc == XTC_E_AGAIN)
+				break;           /* backlog drained: park */
+			if (rc != XTC_OK) {
+				/* EMFILE/ENFILE (XTC_E_RESOURCE), ENOMEM, ...:
+				 * the pending connection stays in the backlog,
+				 * so the listen fd stays readable and parking on
+				 * it would return at once -- the classic EMFILE
+				 * busy loop (this proc ran at 100% CPU for the
+				 * whole of an fd-exhaustion flood).  Sleep
+				 * instead; a connection closing frees an fd. */
+				if (!backing_off)
+					XTC_LOG_WARN_F("accept: %s; backing off",
+					    xtc_strerror(rc));
+				backing_off = 1;
+				(void)xtc_proc_sleep(ACCEPT_BACKOFF_NS);
 				break;
 			}
+			backing_off = 0;
 
 			/* Check connection limit.  conn_count is the number of
 			 * LIVE connections: the conn proc decrements it on exit,
 			 * so this is a concurrency cap, not a lifetime one. */
 			if (srv->cfg.max_clients > 0 &&
 			    atomic_load(&srv->conn_count) >= srv->cfg.max_clients) {
-				close(fd);
+				xtc_net_close(fd);
 				XTC_LOG_WARN_F("max_clients reached, rejecting");
 				continue;
 			}
 
-			/* Set socket options */
-			{
-				/* Portable Nagle-off via libxtc, then non-blocking. */
-				xtc_tcp_opts_t topts = { .nodelay = 1 };
-				(void)xtc_net_apply_tcp_opts(fd, &topts);
-				xtc_net_setnonblock(fd);
-			}
+			/* Nagle off (xtc_net_accept already made the fd
+			 * non-blocking and close-on-exec). */
+			(void)xtc_net_apply_tcp_opts(fd, &srv->conn_tcp_opts);
 
 			/* Spawn connection proc */
 			memset(&opts, 0, sizeof(opts));
@@ -227,6 +253,10 @@ listener_proc(void *arg)
 			opts.pubsub = xtc_app_registry(srv->app);
 			opts.conn_count = &srv->conn_count;
 			opts.shutdown = &srv->shutdown_requested;
+			opts.client_res = srv->res;
+			opts.max_request = srv->cfg.max_request;
+			opts.max_output = srv->cfg.max_output;
+			opts.idle_timeout_ns = srv->cfg.timeout_s * 1000000000LL;
 			if (srv->cfg.max_iops > 0) {
 				opts.iops_tokens = (int64_t *)&srv->iops_tokens;
 				opts.iops_cap = srv->cfg.max_iops;
@@ -237,26 +267,22 @@ listener_proc(void *arg)
 			atomic_fetch_add(&srv->conn_count, 1);
 			if (conn_spawn(srv->loop, &opts, &conn_pid) != XTC_OK) {
 				atomic_fetch_sub(&srv->conn_count, 1);
-				close(fd);
+				xtc_net_close(fd);
 			}
 		}
 
 		/* Wait for the next connection to arrive (or for shutdown
 		 * via the kill flag).  Wakes exactly on listen-fd readiness;
 		 * idle CPU is effectively zero. */
-		{
-			uint32_t revents = 0;
-			(void)xtc_proc_wait_fd(srv->listen_fd,
-			    XTC_IO_READABLE,
-			    100LL * 1000 * 1000,  /* 100ms timeout to re-check shutdown flag */
-			    &revents);
-			/* If the wakeup was a mailbox message, drain it (kept
-			 * for compatibility with mailbox-driven control). */
-			if (revents & XTC_WAIT_MAILBOX) {
-				void *msg; size_t msg_len;
-				while (xtc_recv(&msg, &msg_len, 0) == XTC_OK) {
-					if (msg) xtc_free(msg);
-				}
+		revents = 0;
+		(void)xtc_proc_wait_fd(srv->listen_fd, XTC_IO_READABLE,
+		    100LL * 1000 * 1000,  /* 100ms timeout to re-check shutdown flag */
+		    &revents);
+		/* If the wakeup was a mailbox message, drain it (kept for
+		 * compatibility with mailbox-driven control). */
+		if (revents & XTC_WAIT_MAILBOX) {
+			while (xtc_recv(&msg, &msg_len, 0) == XTC_OK) {
+				if (msg) xtc_free(msg);
 			}
 		}
 	}
@@ -310,11 +336,17 @@ usage(FILE *fp, const char *prog)
 	    "Options:\n"
 	    "  -h, --host=ADDR       Bind address (default: 0.0.0.0)\n"
 	    "  -p, --port=PORT       Bind port (default: 6379)\n"
-	    "  -c, --cores=N         Pin to N cores (0 = no pinning)\n"
-	    "  -m, --max-memory=N    Memory cap in bytes (0 = unlimited)\n"
+	    "  -c, --cores=N         Restrict to CPUs 0..N-1 (0 = no pinning; rexis\n"
+	    "                        is single-threaded, this adds no threads)\n"
+	    "  -m, --max-memory=N    Memory cap in bytes over the keyspace plus all\n"
+	    "                        client buffers (0 = unlimited)\n"
 	    "  -k, --max-keys=N      Key count cap (0 = unlimited)\n"
 	    "  -n, --max-clients=N   Max concurrent connections (default: 10000)\n"
 	    "  -i, --max-iops=N      Rate limit commands/sec (0 = unlimited)\n"
+	    "      --max-request=N   Largest command accepted, bytes (default 64 MiB)\n"
+	    "      --max-output=N    Per-client unsent reply limit, bytes (default\n"
+	    "                        128 MiB; a reply past it becomes an error)\n"
+	    "      --timeout=SECS    Close a connection idle for SECS (0 = never)\n"
 	    "      --persist=DIR     Enable Bitcask persistence in DIR (string SET/DEL only)\n"
 	    "  -v, --verbose         Verbose logging\n"
 	    "      --help            Show this help\n"
@@ -353,7 +385,7 @@ parse_num(const char *opt, const char *s, long long max, long long *out)
 static int
 parse_args(int argc, char **argv, server_cfg_t *cfg)
 {
-	enum { OPT_HELP = 1000 };
+	enum { OPT_HELP = 1000, OPT_MAX_REQUEST, OPT_MAX_OUTPUT, OPT_TIMEOUT };
 	static struct option longopts[] = {
 		{ "host",        required_argument, NULL, 'h' },
 		{ "port",        required_argument, NULL, 'p' },
@@ -363,6 +395,9 @@ parse_args(int argc, char **argv, server_cfg_t *cfg)
 		{ "max-clients", required_argument, NULL, 'n' },
 		{ "max-iops",    required_argument, NULL, 'i' },
 		{ "persist",     required_argument, NULL, 'P' },
+		{ "max-request", required_argument, NULL, OPT_MAX_REQUEST },
+		{ "max-output",  required_argument, NULL, OPT_MAX_OUTPUT },
+		{ "timeout",     required_argument, NULL, OPT_TIMEOUT },
 		{ "verbose",     no_argument,       NULL, 'v' },
 		{ "help",        no_argument,       NULL, OPT_HELP },
 		{ NULL, 0, NULL, 0 }
@@ -408,6 +443,21 @@ parse_args(int argc, char **argv, server_cfg_t *cfg)
 			break;
 		case 'P':
 			cfg->persist_dir = optarg;
+			break;
+		case OPT_MAX_REQUEST:
+			if ((rc = parse_num("max-request", optarg, INT64_MAX,
+			    &v)) == 0)
+				cfg->max_request = (size_t)v;
+			break;
+		case OPT_MAX_OUTPUT:
+			if ((rc = parse_num("max-output", optarg, INT64_MAX,
+			    &v)) == 0)
+				cfg->max_output = (size_t)v;
+			break;
+		case OPT_TIMEOUT:
+			if ((rc = parse_num("timeout", optarg, INT32_MAX,
+			    &v)) == 0)
+				cfg->timeout_s = v;
 			break;
 		case 'v':
 			cfg->verbose = 1;
@@ -483,8 +533,13 @@ main(int argc, char **argv)
 		fprintf(stderr, "failed to allocate resource state\n");
 		return 1;
 	}
-	if (cfg.max_memory > 0)
-		res_caps.mem_bytes = cfg.max_memory;
+	/* One XTC_RES_MEM_BYTES budget for the keyspace AND the growth of
+	 * every client's query/output buffers (Redis counts client buffers
+	 * in used_memory too; see conn.h for the fixed per-client base).  Before, only keyspace allocations were charged: 300 clients
+	 * each holding a 990 KB partial command took a --max-memory=10MB
+	 * server to 314 MB RSS while INFO said 0.5 MB.  0 = no cap (the
+	 * xtc_res default of 1 GiB used to apply silently). */
+	res_caps.mem_bytes = cfg.max_memory;
 	xtc_res_init(srv->res, &res_caps);
 
 	/* Initialize rate limiter */
@@ -496,7 +551,8 @@ main(int argc, char **argv)
 	db_opts.res = srv->res;
 	db_opts.persist_dir = cfg.persist_dir;
 	if (db_create(&db_opts, &srv->db) != XTC_OK) {
-		fprintf(stderr, "failed to create database\n");
+		fprintf(stderr, "failed to create database (a --max-memory "
+		    "below the empty keyspace's bucket array?)\n");
 		return 1;
 	}
 	if (cfg.persist_dir != NULL) {
@@ -516,6 +572,7 @@ main(int argc, char **argv)
 		return 1;
 	}
 	xtc_net_setnonblock(srv->listen_fd);
+	srv->conn_tcp_opts = (xtc_tcp_opts_t){ .nodelay = 1 };
 	printf("rexis: listening on %s:%d\n", cfg.host, cfg.port);
 	fflush(stdout);
 

@@ -45,6 +45,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #ifdef __linux__
@@ -60,6 +61,10 @@ typedef struct rexis_srv {
 	pid_t pid;
 	int   port;
 } rexis_srv_t;
+
+/* If > 0, the next started server runs with RLIMIT_NOFILE soft = this
+ * (set in the child only, so the test process keeps its own limit). */
+static int rexis_child_nofile;
 
 static int64_t
 rexis_now_ms(void)
@@ -128,6 +133,13 @@ rexis_try_start(rexis_srv_t *s, int port, const char *const *extra,
 		dup2(pfd[1], STDOUT_FILENO);
 		close(pfd[0]);
 		close(pfd[1]);
+		if (rexis_child_nofile > 0) {
+			struct rlimit rl;
+			if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+				rl.rlim_cur = (rlim_t)rexis_child_nofile;
+				(void)setrlimit(RLIMIT_NOFILE, &rl);
+			}
+		}
 		execv(bin, argv);
 		fprintf(stderr, "rexis_harness: exec %s: %s\n", bin,
 		    strerror(errno));
@@ -263,6 +275,84 @@ rexis_build(char *buf, size_t cap, int argc, ...)
 	}
 	va_end(ap);
 	return len;
+}
+
+/* Read exactly n bytes, or until EOF / the socket's SO_RCVTIMEO /
+ * deadline_ms.  Returns the bytes read. */
+static inline size_t
+rexis_read_n(int fd, char *buf, size_t n, int deadline_ms)
+{
+	int64_t end = rexis_now_ms() + deadline_ms;
+	size_t got = 0;
+	ssize_t r;
+
+	while (got < n && rexis_now_ms() < end) {
+		r = recv(fd, buf + got, n - got, 0);
+		if (r <= 0)
+			break;
+		got += (size_t)r;
+	}
+	return got;
+}
+
+/* Send all of buf (bounded by SO_SNDTIMEO if the caller set one). */
+static inline int
+rexis_send_all(int fd, const char *buf, size_t n)
+{
+	size_t off = 0;
+	ssize_t r;
+
+	while (off < n) {
+		r = send(fd, buf + off, n - off, MSG_NOSIGNAL);
+		if (r <= 0)
+			return -1;
+		off += (size_t)r;
+	}
+	return 0;
+}
+
+/* utime + stime of pid in clock ticks (Linux /proc), or -1. */
+static inline long long
+rexis_cpu_ticks(pid_t pid)
+{
+#ifdef __linux__
+	char path[64], line[1024], *p;
+	unsigned long long ut, st;
+	FILE *f;
+	int i;
+
+	snprintf(path, sizeof path, "/proc/%d/stat", (int)pid);
+	if ((f = fopen(path, "r")) == NULL)
+		return -1;
+	if (fgets(line, sizeof line, f) == NULL) {
+		fclose(f);
+		return -1;
+	}
+	fclose(f);
+	/* Fields after "(comm)": state is 3rd; utime 14th, stime 15th. */
+	if ((p = strrchr(line, ')')) == NULL)
+		return -1;
+	p += 2;
+	for (i = 3; i < 14 && p != NULL; i++)
+		if ((p = strchr(p, ' ')) != NULL)
+			p++;
+	if (p == NULL || sscanf(p, "%llu %llu", &ut, &st) != 2)
+		return -1;
+	return (long long)(ut + st);
+#else
+	(void)pid;
+	return -1;
+#endif
+}
+
+/* Ticks the server burned over the next ms milliseconds. */
+static inline long long
+rexis_cpu_over(pid_t pid, int ms)
+{
+	long long t0 = rexis_cpu_ticks(pid), t1;
+	usleep((useconds_t)ms * 1000);
+	t1 = rexis_cpu_ticks(pid);
+	return (t0 < 0 || t1 < 0) ? -1 : t1 - t0;
 }
 
 #endif /* REXIS_HARNESS_H */
