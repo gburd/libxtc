@@ -214,6 +214,19 @@ test_reclaim_correct(const MunitParameter p[], void *d)
 
 #define LIFE_LIVE   256
 
+/* ASan's allocator quarantine (256 MB by default) and its own mappings
+ * show up in RSS and /proc/self/maps.  Under ASan, check mappings with a
+ * bound that still catches the regression (two per HISTORICAL spawn,
+ * i.e. +200000) and skip the RSS bound; the release build checks both
+ * tightly. */
+#ifdef XTC_UNDER_ASAN
+# define LIFE_MAPS_SLACK  8192
+# define LIFE_CHECK_RSS   0
+#else
+# define LIFE_MAPS_SLACK  64
+# define LIFE_CHECK_RSS   1
+#endif
+
 static long
 life_status_kb(const char *key)
 {
@@ -380,8 +393,108 @@ life_run(long n, int mode)
 	munit_assert_long(atomic_load(&life_exited), ==, n);
 	/* Two VMAs per live fiber stack, plus the bounded stack pool and
 	 * allocator slack -- not two per historical spawn. */
-	munit_assert_long(maps_grow, <, 2 * LIFE_LIVE + 64);
-	munit_assert_long(rss_grow, <, 32 * 1024);
+	munit_assert_long(maps_grow, <, 2 * LIFE_LIVE + LIFE_MAPS_SLACK);
+	if (LIFE_CHECK_RSS)
+		munit_assert_long(rss_grow, <, 32 * 1024);
+	return MUNIT_OK;
+}
+
+/*
+ * Migratable procs on a 4-loop executor: children are stolen and many
+ * finish on a thief loop, so their task structs go back to the home loop
+ * through its dead stack.  Each carrier thread keeps up to
+ * XTC_STACK_POOL_MAX (64) stacks pooled, two mappings each, and the
+ * pools are unmapped when the carriers exit.
+ */
+#define LIFE_LOOPS  4
+
+static xtc_exec_t   *life_exec;
+static atomic_long   life_mig_done;
+
+static void
+life_mig_child(void *arg)
+{
+	int i;
+	(void)arg;
+	for (i = 0; i < 4; i++)
+		xtc_yield();
+	atomic_fetch_sub(&life_live, 1);
+	atomic_fetch_add(&life_mig_done, 1);
+}
+
+static void
+life_mig_spawner(void *arg)
+{
+	xtc_loop_t *l = arg;
+	xtc_proc_opts_t o;
+	long i;
+
+	memset(&o, 0, sizeof o);
+	o.migratable = 1;
+	for (i = 0; i < life_n; i++) {
+		while (atomic_load(&life_live) >= LIFE_LIVE)
+			xtc_yield();
+		atomic_fetch_add(&life_live, 1);
+		if (xtc_proc_spawn(l, life_mig_child, NULL, &o, NULL) !=
+		    XTC_OK) {
+			atomic_fetch_sub(&life_live, 1);
+			life_spawn_fail = i;
+			break;
+		}
+		if ((i & 1023) == 0)
+			life_sample();
+	}
+	while (atomic_load(&life_live) > 0)
+		xtc_yield();
+	life_sample();
+	(void)xtc_exec_stop(life_exec);
+}
+
+static MunitResult
+test_reclaim_migratable(const MunitParameter p[], void *d)
+{
+	long m0, r0, m1, maps_grow, rss_grow;
+	int64_t steals = 0;
+	int i;
+	(void)p; (void)d;
+
+	life_n = 100000;
+	life_spawn_fail = -1;
+	atomic_store(&life_live, 0);
+	atomic_store(&life_mig_done, 0);
+	munit_assert_int(xtc_exec_init(&life_exec, LIFE_LOOPS), ==, XTC_OK);
+	xtc_exec_set_service_mode(life_exec, 1);
+	m0 = life_maps();
+	r0 = life_status_kb("VmRSS:");
+	life_maps_peak = m0;
+	life_rss_peak = r0;
+	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(life_exec, 0),
+	    life_mig_spawner, xtc_exec_loop(life_exec, 0), NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_exec_run(life_exec), ==, XTC_OK);
+	for (i = 0; i < LIFE_LOOPS; i++) {
+		xtc_loop_stats_t st;
+		if (xtc_exec_loop_stats(life_exec, i, &st) == XTC_OK)
+			steals += (int64_t)st.steals;
+	}
+	(void)xtc_exec_fini(life_exec);
+	m1 = life_maps();
+	maps_grow = life_maps_peak - m0;
+	rss_grow = life_rss_peak - r0;
+	printf("  migratable: %ld done, %lld steals, maps +%ld (peak), "
+	    "rss +%ld kB (peak); after exec_fini maps %+ld\n",
+	    (long)atomic_load(&life_mig_done), (long long)steals, maps_grow,
+	    rss_grow, m1 - m0);
+	fflush(stdout);
+
+	munit_assert_long(life_spawn_fail, ==, -1);
+	munit_assert_long(atomic_load(&life_mig_done), ==, life_n);
+	munit_assert_long(maps_grow, <,
+	    2 * LIFE_LIVE + LIFE_LOOPS * 2 * 64 + LIFE_MAPS_SLACK);
+	if (LIFE_CHECK_RSS)
+		munit_assert_long(rss_grow, <, 32 * 1024);
+	/* Carrier threads have exited: their stack pools are unmapped. */
+	munit_assert_long(m1 - m0, <, LIFE_MAPS_SLACK);
 	return MUNIT_OK;
 }
 
@@ -427,6 +540,8 @@ static MunitTest tests[] = {
 	{ "/kill_parked_100k", test_reclaim_kill_parked, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/kill_running_100k", test_reclaim_kill_running, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/migratable_100k", test_reclaim_migratable, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 #endif
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
