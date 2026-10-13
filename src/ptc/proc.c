@@ -602,6 +602,10 @@ struct xtc_proc_table {
 	uint32_t              free_head;
 	size_t                hw;
 	int                   inited;
+	/* Retired-table list link (__lt_tbl_free, under __lt_lock).  A
+	 * finalized loop's table is kept for reuse rather than freed; see
+	 * __xtc_proc_loop_unregister. */
+	struct xtc_proc_table *retired_next;
 };
 
 static inline unsigned
@@ -854,43 +858,107 @@ __lt_remove_locked(xtc_loop_t *loop)
 	return tbl;
 }
 
-/* M11.5b: invalidate the registry entry for `loop` and free its
- * table.  Called from xtc_loop_fini.  Idempotent. */
+/* Tables of finalized loops, kept for reuse (under __lt_lock). */
+static struct xtc_proc_table *__lt_tbl_free;
+static void __proc_release(struct xtc_proc *p);
+
+/*
+ * M11.5b: invalidate the registry entry for `loop` and tear down its
+ * table.  Called from xtc_loop_fini.  Idempotent.
+ *
+ * A loop may be finalized with procs still alive (an executor shut down
+ * with idle connection procs parked in recv).  Their fibers are freed by
+ * the loop's all_tasks walk right after this, so the procs can never
+ * exit: release here what exit would have -- queued and saved messages,
+ * link and monitor entries, the proc's memory context -- then drop the
+ * owner reference (a sender still holding a resolver reference frees the
+ * struct when it lets go).  At-exit callbacks are NOT run: they would
+ * run off their fiber, after their loop stopped.
+ *
+ * The table itself is not freed: __lt_find is lock-free, so a reader on
+ * another thread may hold the table pointer across this removal.  The
+ * table is emptied under all its stripes (cap 0, so such a reader takes
+ * a still-valid stripe lock and finds nothing) and kept on a list that
+ * __table_get reuses, bounded by the peak number of loops with procs.
+ */
 void
 __xtc_proc_loop_unregister(xtc_loop_t *loop)
 {
 	struct xtc_proc_table *tbl = NULL;
-	/* Drop the registry entry; the table is freed after the unlock, and
-	 * the contract is that a loop being finalized has no live procs and
-	 * no in-flight wakes to it. */
+	struct xtc_proc_slot *slots;
+	size_t k, cap;
+
 	(void) __proc_mtx_lock(&__lt_lock);
 	tbl = __lt_remove_locked(loop);
 	(void) __proc_mtx_unlock(&__lt_lock);
-	if (tbl != NULL) {
-		/* Free still-live process headers.  By contract a loop
-		 * being finalized has no live procs left, but we defend
-		 * the path anyway. */
-		if (tbl->slots != NULL) {
-			size_t k;
-			for (k = 0; k < tbl->cap; k++) {
-				struct xtc_proc *p = tbl->slots[k].proc;
-				if (p != NULL) {
-					(void)pthread_mutex_destroy(&p->mbox_lock);
-					__os_free(p);
-					tbl->slots[k].proc = NULL;
-				}
-			}
-			__os_free(tbl->slots);
+	if (tbl == NULL)
+		return;
+
+	__pt_lock_all(tbl);
+	slots = tbl->slots;
+	cap = tbl->cap;
+	tbl->slots = NULL;
+	tbl->cap = 0;
+	tbl->hw = 0;
+	atomic_store_explicit(&tbl->n_used, 0, memory_order_relaxed);
+	(void) __proc_mtx_lock(&tbl->free_lock);
+	tbl->free_head = XTC_PT_FREE_NONE;
+	(void) __proc_mtx_unlock(&tbl->free_lock);
+	__pt_unlock_all(tbl);
+
+	for (k = 0; k < cap; k++) {
+		struct xtc_proc *p = slots[k].proc;
+		struct envelope *e, *n;
+		struct link_entry *le, *next_le;
+		struct mon_entry *me, *next_me;
+		if (p == NULL)
+			continue;
+		/* Under mbox_lock: a late sender either queued before this
+		 * (drained here) or sees the proc dead and drops its message. */
+		(void) __proc_mtx_lock(&p->mbox_lock);
+		atomic_store_explicit(&p->alive, 0, memory_order_relaxed);
+		atomic_store_explicit(&p->run_task, NULL, memory_order_relaxed);
+		p->waker_armed = 0;
+		for (e = p->mbox_head; e != NULL; e = n) {
+			n = e->next;
+			__env_free(e);
 		}
-		(void)pthread_mutex_destroy(&tbl->free_lock);
-		(void)pthread_mutex_destroy(&tbl->stripes[0]);
-		{
-			unsigned s;
-			for (s = 1; s < XTC_PT_NSTRIPES; s++)
-				(void)pthread_mutex_destroy(&tbl->stripes[s]);
+		p->mbox_head = p->mbox_tail = NULL;
+		p->mbox_n = 0;
+		(void) __proc_mtx_unlock(&p->mbox_lock);
+		for (e = p->save_head; e != NULL; e = n) {
+			n = e->next;
+			__env_free(e);
 		}
-		__os_free(tbl);
+		p->save_head = p->save_tail = NULL;
+		atomic_store_explicit(&p->mbox_saved, 0, memory_order_relaxed);
+		for (le = p->links; le != NULL; le = next_le) {
+			next_le = le->next;
+			__link_free(le);
+		}
+		p->links = NULL;
+		for (me = p->monitors; me != NULL; me = next_me) {
+			next_me = me->next;
+			__mon_free(me);
+		}
+		p->monitors = NULL;
+		for (me = p->monitored_by; me != NULL; me = next_me) {
+			next_me = me->next;
+			__mon_free(me);
+		}
+		p->monitored_by = NULL;
+		if (p->proc_mctx != NULL) {
+			xtc_mctx_destroy(p->proc_mctx);
+			p->proc_mctx = NULL;
+		}
+		__proc_release(p);   /* the owner reference */
 	}
+	__os_free(slots);
+
+	(void) __proc_mtx_lock(&__lt_lock);
+	tbl->retired_next = __lt_tbl_free;
+	__lt_tbl_free = tbl;
+	(void) __proc_mtx_unlock(&__lt_lock);
 }
 
 static struct xtc_proc_table *
@@ -921,15 +989,21 @@ __table_get(xtc_loop_t *loop, struct xtc_proc_table **out)
 		rc = XTC_E_RESOURCE;
 		goto out;
 	}
-	if ((rc = __os_calloc(1, sizeof *t, (void **)&t)) != XTC_OK) {
-		t = NULL;
-		goto out;
+	if ((t = __lt_tbl_free) != NULL) {
+		/* A finalized loop's table: already emptied, locks live. */
+		__lt_tbl_free = t->retired_next;
+		t->retired_next = NULL;
+	} else {
+		if ((rc = __os_calloc(1, sizeof *t, (void **)&t)) != XTC_OK) {
+			t = NULL;
+			goto out;
+		}
+		for (s = 0; s < XTC_PT_NSTRIPES; s++)
+			(void)pthread_mutex_init(&t->stripes[s], NULL);
+		(void)pthread_mutex_init(&t->free_lock, NULL);
+		t->free_head = XTC_PT_FREE_NONE;
+		t->inited = 1;
 	}
-	for (s = 0; s < XTC_PT_NSTRIPES; s++)
-		(void)pthread_mutex_init(&t->stripes[s], NULL);
-	(void)pthread_mutex_init(&t->free_lock, NULL);
-	t->free_head = XTC_PT_FREE_NONE;
-	t->inited = 1;
 	id = __lt_loop_id(loop);
 	__lt_write_begin();
 	atomic_store_explicit(&__lt[__lt_n].tbl, t, memory_order_release);
