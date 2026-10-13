@@ -127,9 +127,15 @@ __xtc_exec_try_steal(xtc_loop_t *me)
 		xtc_loop_t *victim;
 		void *t;
 		if (idx == me->exec_id) continue;
-		if (exec->loop_node && atomic_load_explicit(
-		    (_Atomic int *)&exec->loop_node[idx],
-		    memory_order_relaxed) != my_node) continue;
+		/* Pass 1 prefers a same-node victim; a node not yet recorded
+		 * (-1, carrier not started) on either side matches anything,
+		 * so a fresh executor steals exactly as before. */
+		if (exec->loop_node && my_node >= 0) {
+			int vn = atomic_load_explicit(
+			    (_Atomic int *)&exec->loop_node[idx],
+			    memory_order_relaxed);
+			if (vn >= 0 && vn != my_node) continue;
+		}
 		victim = exec->loops[idx];
 		if (xtc_deque_len(&victim->deque) == 0) continue;
 		/* Buggify: under DST, occasionally skip a NUMA-near victim that
@@ -376,6 +382,12 @@ xtc_exec_init(xtc_exec_t **out, int n_loops)
 	    (void **)&e->loop_node)) != XTC_OK) {
 		__os_free(e->workers); __os_free(e->loops); __os_free(e); return rc;
 	}
+	/* A loop's NUMA node is unknown (-1) until its carrier thread starts
+	 * and records it.  calloc's 0 would read as "node 0" and falsely
+	 * match a node-0 device in xtc_batch_loop_for_device. */
+	for (i = 0; i < n_loops; i++)
+		atomic_store_explicit((_Atomic int *)&e->loop_node[i], -1,
+		    memory_order_relaxed);
 	atomic_store_explicit(&e->stop_flag, 0, memory_order_relaxed);
 	e->n_loops = n_loops;
 	e->started = 0;
