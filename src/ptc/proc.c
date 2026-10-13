@@ -3904,6 +3904,7 @@ __run_proc_at_exit(struct xtc_proc *p)
 	for (i = p->n_at_exit - 1; i >= 0; i--)
 		p->at_exit[i].fn(p->at_exit[i].arg);
 	p->n_at_exit = 0;
+	__xtc_cfg_task_exit(p->task);
 	if (p->proc_mctx != NULL) {
 		xtc_mctx_destroy(p->proc_mctx);
 		p->proc_mctx = NULL;

@@ -10,9 +10,11 @@
 #include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
 #include "xtc_cfg.h"
 #include "coro_int.h"      /* __xtc_current_task: the calling fiber's identity */
+#include "proc_int.h"      /* __xtc_cfg_task_exit */
 
 #include <limits.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #if defined(_WIN32)
@@ -691,6 +693,13 @@ struct xtc_cfg_session {
  * xtc_chash the registry is slated to get.
  */
 static xtc_cfg_session_t *__cfg_bound_head;
+/* Number of sessions on that list, written under __cfg_lock.  Read
+ * without it by __xtc_cfg_task_exit so a proc exit takes the global lock
+ * only when something is bound.  A fiber's bind happens-before its exit
+ * (on one thread, or across a migration hand-off), and every later value
+ * of the counter still counts that binding while it is linked, so an
+ * exiting fiber that holds a binding never reads 0. */
+static _Atomic unsigned __cfg_nbound;
 static _Thread_local xtc_cfg_session_t *__cfg_ssn_tls;   /* off-fiber binds */
 
 /* Unlink `s` from the bound list if it is linked.  Called with the
@@ -704,6 +713,8 @@ __cfg_unbind_ssn_locked(xtc_cfg_session_t *s)
 			*link = b->bnext;
 			b->bnext = NULL;
 			b->owner = NULL;
+			atomic_fetch_sub_explicit(&__cfg_nbound, 1,
+			    memory_order_relaxed);
 			return;
 		}
 	}
@@ -720,6 +731,8 @@ __cfg_unbind_task_locked(xtc_task_t *t)
 			*link = b->bnext;
 			b->bnext = NULL;
 			b->owner = NULL;
+			atomic_fetch_sub_explicit(&__cfg_nbound, 1,
+			    memory_order_relaxed);
 			return b;
 		}
 	}
@@ -737,6 +750,21 @@ __cfg_ssn_current_locked(void)
 	for (b = __cfg_bound_head; b != NULL; b = b->bnext)
 		if (b->owner == me) return b;
 	return NULL;
+}
+
+/* Drop whatever binding the exiting fiber `t` holds.  The binding is
+ * keyed on the task pointer, and a finished proc's task struct is
+ * recycled for the next proc on the loop, so a binding left in place
+ * would be inherited by that proc.  The session stays the consumer's. */
+void
+__xtc_cfg_task_exit(xtc_task_t *t)
+{
+	if (t == NULL ||
+	    atomic_load_explicit(&__cfg_nbound, memory_order_relaxed) == 0)
+		return;
+	(void)__xtc_mtx_lock(&__cfg_lock);
+	(void)__cfg_unbind_task_locked(t);
+	(void)__xtc_mtx_unlock(&__cfg_lock);
 }
 
 /* Same, for callers that do NOT already hold the lock. */
@@ -832,6 +860,7 @@ xtc_cfg_session_bind(xtc_cfg_session_t *s)
 		s->owner = me;
 		s->bnext = __cfg_bound_head;
 		__cfg_bound_head = s;
+		atomic_fetch_add_explicit(&__cfg_nbound, 1, memory_order_relaxed);
 	}
 	(void)__xtc_mtx_unlock(&__cfg_lock);
 	return prev;

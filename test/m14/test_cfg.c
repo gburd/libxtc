@@ -966,6 +966,91 @@ test_session_per_fiber(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- a binding does not outlive the proc that made it ----
+ *
+ * REGRESSION (H17).  A binding is keyed on the binding fiber's task
+ * pointer, and a finished proc's task struct is recycled for the next
+ * proc spawned on the same loop.  Nothing unbound on exit, so the next
+ * proc inherited the previous proc's session (its SET overrides).
+ * Proc A binds a session with an override and returns without
+ * unbinding; proc B, spawned after A finished, must see no session and
+ * the global value.  10 cycles; before the fix every B saw A's session.
+ */
+struct ssn_exit_arg {
+	xtc_loop_t        *loop;
+	xtc_cfg_session_t *s;
+	int                a_ran, b_ran, leaked, wrong_val;
+};
+
+static void
+ssn_exit_a(void *a)
+{
+	struct ssn_exit_arg *arg = a;
+	(void)xtc_cfg_session_bind(arg->s);
+	arg->a_ran++;
+}
+
+static void
+ssn_exit_b(void *a)
+{
+	struct ssn_exit_arg *arg = a;
+	int v = -1;
+	if (xtc_cfg_session_current() != NULL) arg->leaked++;
+	if (xtc_cfg_get_int("se.work_mem", &v) != XTC_OK || v != 4)
+		arg->wrong_val++;
+	arg->b_ran++;
+}
+
+static void
+ssn_exit_driver(void *a)
+{
+	struct ssn_exit_arg *arg = a;
+	int i, n;
+	for (i = 0; i < 10; i++) {
+		if (xtc_proc_spawn(arg->loop, ssn_exit_a, arg, NULL, NULL)
+		    != XTC_OK) return;
+		for (n = 0; n < 1000 && arg->a_ran == i; n++) xtc_yield();
+		/* Let A's fiber reach DONE so its task struct is reusable. */
+		for (n = 0; n < 4; n++) xtc_yield();
+		if (xtc_proc_spawn(arg->loop, ssn_exit_b, arg, NULL, NULL)
+		    != XTC_OK) return;
+		for (n = 0; n < 1000 && arg->b_ran == i; n++) xtc_yield();
+	}
+}
+
+static MunitResult
+test_session_unbound_at_exit(const MunitParameter p[], void *d)
+{
+	xtc_cfg_spec_t spec = { 0 };
+	struct ssn_exit_arg arg = { 0 };
+	int v = -1;
+	(void)p; (void)d;
+
+	spec.name = "se.work_mem"; spec.kind = XTC_CFG_INT; spec.dflt.d_int = 4;
+	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_session_create(&arg.s), ==, XTC_OK);
+	munit_assert_int(xtc_cfg_ssn_set_int(arg.s, "se.work_mem", 11,
+	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&arg.loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(arg.loop, ssn_exit_driver, &arg, NULL,
+	    NULL), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(arg.loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(arg.loop), ==, XTC_OK);
+
+	munit_assert_int(arg.a_ran, ==, 10);
+	munit_assert_int(arg.b_ran, ==, 10);
+	munit_assert_int(arg.leaked, ==, 0);
+	munit_assert_int(arg.wrong_val, ==, 0);
+	/* The session is still the consumer's: exit unbound it, nothing more. */
+	munit_assert_ptr_null(xtc_cfg_session_bind(arg.s));
+	munit_assert_int(xtc_cfg_get_int("se.work_mem", &v), ==, XTC_OK);
+	munit_assert_int(v, ==, 11);
+	munit_assert_ptr_equal(xtc_cfg_session_bind(NULL), arg.s);
+	xtc_cfg_session_destroy(arg.s);
+	munit_assert_int(xtc_cfg_unregister("se.work_mem"), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 /* ---- unregister vs. session teardown, in EITHER order ----
  *
  * REGRESSION (was: heap-use-after-free).  A session override keeps a raw
@@ -1311,6 +1396,7 @@ static MunitTest tests[] = {
 	{ "/register_basic",   test_register_basic,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/session_scoping",  test_session_scoping,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/session_per_fiber", test_session_per_fiber,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/session_exit",     test_session_unbound_at_exit, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/unreg_ordering",   test_unregister_ordering,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/int_bounds",       test_int_bounds,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/double",           test_double,                NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

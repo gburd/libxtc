@@ -143,6 +143,13 @@
  * on a genuinely absent key. */
 #define BT_DELETE_RETRIES 4
 
+/* Test-only seam: force a descent's root-level stale check to fire.
+ * Defined by test_btree_stale_descent.c before it includes this file;
+ * production builds compile it to 0. */
+#ifndef BT_STALE_TEST_HOOK
+#define BT_STALE_TEST_HOOK() 0
+#endif
+
 struct bt {
 	bm_t             *bm;
 	uint32_t          page_size;
@@ -1002,9 +1009,14 @@ descend_shared(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 	bm_pid_t pid;
 	bm_frame_t *f;
 	void *pg;
-	int rc, attempt;
+	int rc;
 
-	for (attempt = 0; attempt < BT_DELETE_RETRIES; attempt++) {
+	/* Retry until a descent lands on a live leaf.  Each stale hit means
+	 * a concurrent merge changed the path; it finishes and the next
+	 * descent routes past it.  (This was bounded at BT_DELETE_RETRIES
+	 * and then returned the last frame -- which the stale branch had
+	 * already unlatched and unfixed, so the caller released it twice.) */
+	for (;;) {
 		int stale = 0;
 
 		pid = atomic_load(&bt->root_pid);
@@ -1021,7 +1033,8 @@ descend_shared(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 		/* Stale-node guard at the root (see the internal-level guard
 		 * below): a concurrent merge may have unlinked it or absorbed
 		 * its range leftward; restart the descent. */
-		if (btnode_is_dead(pg) || btnode_below_lo_fence(pg, key, klen)) {
+		if (BT_STALE_TEST_HOOK() || btnode_is_dead(pg) ||
+		    btnode_below_lo_fence(pg, key, klen)) {
 			bm_unlatch(f);
 			bm_unfix(bm, f, 0);
 			xtc_yield();
@@ -1071,8 +1084,7 @@ descend_shared(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 		}
 		/* If this leaf was merged away (marked dead, or the key is
 		 * at/below its lower fence -- absorbed leftward where
-		 * move_right cannot follow), restart from the root.  Bounded
-		 * retries absorb any realistic merge race. */
+		 * move_right cannot follow), restart from the root. */
 		if (!btnode_is_dead(pg) && !btnode_below_lo_fence(pg, key, klen)) {
 			*out = f;
 			return XTC_OK;
@@ -1081,10 +1093,6 @@ descend_shared(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 		bm_unfix(bm, f, 0);
 		xtc_yield();
 	}
-	/* Exhausted retries under relentless merging: hand back the last
-	 * leaf reached; its contents are valid, so a miss is conclusive. */
-	*out = f;
-	return XTC_OK;
 }
 
 /*
@@ -1875,20 +1883,22 @@ cursor_descend(bt_t *bt, const void *start, uint16_t klen, bm_frame_t **out)
 	bm_pid_t pid;
 	bm_frame_t *f;
 	void *pg;
-	int rc, attempt;
+	int rc;
 
 	atomic_fetch_add(&bt->st_descents, 1);
 
 	/*
-	 * Bounded latch-free retries (like descend_shared): a concurrent
+	 * Latch-free retries until a live leaf (like descend_shared): a concurrent
 	 * merge can unlink a node we are descending through, or absorb its
 	 * range into a LEFT sibling -- which move_right cannot follow.  We
 	 * revalidate dead/lo-fence at EVERY level and restart from the root
 	 * on a hit so the cursor never opens onto a merged-away page.  With
 	 * start == NULL there is no routing key, so only the dead flag can
-	 * fire (the leftmost child is never absorbed leftward).
+	 * fire (the leftmost child is never absorbed leftward).  Unbounded
+	 * for the reason given in descend_shared: the frame handed back must
+	 * be the one this descent still holds.
 	 */
-	for (attempt = 0; attempt < BT_DELETE_RETRIES; attempt++) {
+	for (;;) {
 		int stale = 0;
 
 		pid = atomic_load(&bt->root_pid);
@@ -1902,7 +1912,7 @@ cursor_descend(bt_t *bt, const void *start, uint16_t klen, bm_frame_t **out)
 		bm_latch_shared(f);
 		(void)move_right(bt, &f, start, klen, 0);
 		pg = bm_page(f);
-		if (btnode_is_dead(pg) ||
+		if (BT_STALE_TEST_HOOK() || btnode_is_dead(pg) ||
 		    (start != NULL && btnode_below_lo_fence(pg, start, klen))) {
 			bm_unlatch(f); bm_unfix(bm, f, 0);
 			xtc_yield();
@@ -1951,10 +1961,6 @@ cursor_descend(bt_t *bt, const void *start, uint16_t klen, bm_frame_t **out)
 		*out = f;
 		return XTC_OK;
 	}
-	/* Exhausted retries under relentless merging: hand back the last
-	 * leaf reached; its contents are valid for a scan. */
-	*out = f;
-	return XTC_OK;
 }
 
 int
