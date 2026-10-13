@@ -70,7 +70,24 @@ struct envelope {
 /* ---------- proc ---------- */
 
 struct link_entry { struct link_entry *next; xtc_pid_t peer; };
-struct mon_entry  { struct mon_entry *next; uint64_t ref; xtc_pid_t target; xtc_pid_t watcher; };
+/*
+ * A monitor is two entries: the watcher's (on watcher->monitors) and the
+ * target's (on target->monitored_by, peer = the watcher's entry).  The
+ * watcher's entry is shared: refs counts its holders (the watcher's list
+ * and the target's peer pointer).  The target drops its reference when
+ * its exit has sent the DOWN; the watcher then finds refs == 1 and frees
+ * the entry on its own thread (__mon_watch_push), so the watcher's list
+ * stays owner-only and tracks its LIVE monitors, not every monitor it
+ * ever created.
+ */
+struct mon_entry  {
+	struct mon_entry *next;
+	uint64_t          ref;
+	xtc_pid_t         target;
+	xtc_pid_t         watcher;
+	struct mon_entry *peer;   /* target side: the watcher's entry */
+	_Atomic int       refs;   /* watcher side: holders (1 or 2) */
+};
 
 /* M11.5b: pools for link_entry / mon_entry (fixed-size, hot path). */
 static _Atomic(xtc_slab_t *) __link_slab     = NULL;
@@ -285,6 +302,14 @@ __mon_alloc(void)
 static void __mon_free(struct mon_entry *e) {
 	if (e == NULL) return;
 	if (__mon_slab) xtc_slab_free(__mon_slab, e); else free(e);
+}
+/* Drop one holder of a watcher-side entry; free it with the last. */
+static void
+__mon_put(struct mon_entry *w)
+{
+	if (w != NULL && atomic_fetch_sub_explicit(&w->refs, 1,
+	    memory_order_acq_rel) == 1)
+		__mon_free(w);
 }
 
 struct xtc_proc {
@@ -527,6 +552,10 @@ struct xtc_proc {
 	struct link_entry *links;
 	struct mon_entry  *monitors;     /* monitors WE created (we are watcher) */
 	struct mon_entry  *monitored_by; /* monitors others created on us */
+	/* Owner-only: entries on `monitors`, and the length at which the
+	 * next push sweeps out entries whose target has exited. */
+	size_t             mon_n;
+	size_t             mon_sweep_at;
 };
 
 /*
@@ -939,11 +968,12 @@ __xtc_proc_loop_unregister(xtc_loop_t *loop)
 		p->links = NULL;
 		for (me = p->monitors; me != NULL; me = next_me) {
 			next_me = me->next;
-			__mon_free(me);
+			__mon_put(me);
 		}
 		p->monitors = NULL;
 		for (me = p->monitored_by; me != NULL; me = next_me) {
 			next_me = me->next;
+			__mon_put(me->peer);
 			__mon_free(me);
 		}
 		p->monitored_by = NULL;
@@ -1554,6 +1584,37 @@ xtc_proc_spawn(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 }
 
 /*
+ * Push a watcher-side monitor entry onto self->monitors (owner only).
+ * Entries whose target has exited (refs == 1: only this list holds them)
+ * are swept out first once the list has doubled since the last sweep, so
+ * the list stays within twice the live monitors plus a constant and each
+ * push costs amortized O(1).  A supervisor that monitors every restart
+ * used to keep 64 bytes per child ever monitored until it exited.
+ */
+static void
+__mon_watch_push(struct xtc_proc *self, struct mon_entry *w)
+{
+	struct mon_entry **pp, *e;
+
+	if (self->mon_n >= self->mon_sweep_at) {
+		for (pp = &self->monitors; (e = *pp) != NULL; ) {
+			if (atomic_load_explicit(&e->refs,
+			    memory_order_acquire) == 1) {
+				*pp = e->next;
+				__mon_free(e);
+				self->mon_n--;
+			} else {
+				pp = &e->next;
+			}
+		}
+		self->mon_sweep_at = self->mon_n < 32 ? 64 : 2 * self->mon_n;
+	}
+	w->next = self->monitors;
+	self->monitors = w;
+	self->mon_n++;
+}
+
+/*
  * Shared spawn core.  `rel` selects the parent<->child relationship
  * established ATOMICALLY, before the child is enqueued and can run:
  *   0 -- none (plain spawn)
@@ -1680,11 +1741,13 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 		mw->ref = ref;
 		mw->target = spawned_pid;
 		mw->watcher = self->pid;
-		mw->next = self->monitors;
-		self->monitors = mw;
+		mw->peer = NULL;
+		atomic_store_explicit(&mw->refs, 2, memory_order_relaxed);
+		__mon_watch_push(self, mw);
 		mt->ref = ref;
 		mt->target = spawned_pid;
 		mt->watcher = self->pid;
+		mt->peer = mw;
 		mt->next = p->monitored_by;
 		p->monitored_by = mt;
 		if (out_ref) *out_ref = ref;
@@ -1722,7 +1785,9 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 			while (*pp != NULL) {
 				if (xtc_pid_eq((*pp)->target, spawned_pid)) {
 					struct mon_entry *e = *pp;
-					*pp = e->next; __mon_free(e); break;
+					*pp = e->next; __mon_free(e);
+					self->mon_n--;
+					break;
 				}
 				pp = &(*pp)->next;
 			}
@@ -4699,18 +4764,31 @@ xtc_monitor(xtc_pid_t target, uint64_t *out_ref)
 	    memory_order_relaxed) + 1;
 	me->target = target;
 	me->watcher = self->pid;
-	me->next = self->monitors;
-	self->monitors = me;
+	me->peer = NULL;
+	atomic_store_explicit(&me->refs, 1, memory_order_relaxed);
 	{
 		struct mon_entry *m2 = __mon_alloc();
 		if (m2 != NULL) {
-			*m2 = *me;
-			/* Cross-loop-safe push onto the peer's monitored_by list;
-			 * drop the entry if the peer exited meanwhile. */
-			if (!__peer_push_monitored_by(target, m2))
+			m2->ref = me->ref;
+			m2->target = target;
+			m2->watcher = self->pid;
+			m2->peer = me;
+			atomic_store_explicit(&m2->refs, 0,
+			    memory_order_relaxed);
+			/* The target holds `me` once m2 is on its list (it may
+			 * exit and drop it at once), so count it first.
+			 * Cross-loop-safe push onto the peer's monitored_by
+			 * list; drop the entry if the peer exited meanwhile. */
+			atomic_store_explicit(&me->refs, 2,
+			    memory_order_relaxed);
+			if (!__peer_push_monitored_by(target, m2)) {
+				atomic_store_explicit(&me->refs, 1,
+				    memory_order_relaxed);
 				__mon_free(m2);
+			}
 		}
 	}
+	__mon_watch_push(self, me);
 	if (out_ref) *out_ref = me->ref;
 	return XTC_OK;
 }
@@ -4811,12 +4889,15 @@ __notify_links_and_monitors(struct xtc_proc *p)
 		    sizeof down_signal) != XTC_OK)
 			__xtc_tail_emit(XTC_TAIL_SCHED,
 			    XTC_TAIL_LIFECYCLE_DROP, p->pid, 0);
+		/* The DOWN is sent: release the watcher's entry so the
+		 * watcher's next monitor push sweeps it out. */
+		__mon_put(me->peer);
 		__mon_free(me);
 	}
 
 	for (me = monitors; me != NULL; me = next_me) {
 		next_me = me->next;
-		__mon_free(me);
+		__mon_put(me);
 	}
 
 	/* The slot was already released (under the table lock) above, so no

@@ -387,6 +387,7 @@ xtc_loop_fini(xtc_loop_t *loop)
 	if (loop->timer_slab != NULL)
 		xtc_slab_destroy((struct xtc_slab *)loop->timer_slab);
 	/* Drain the task free-list (recycled task structs). */
+	__xtc_task_spare_fini(loop);
 	{
 		xtc_task_t *ft, *fn;
 		for (ft = loop->task_free; ft != NULL; ft = fn) {
