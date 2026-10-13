@@ -104,6 +104,16 @@ does not own, duplicate, or close
 .Fa fence_fd ;
 the caller retains ownership.  It must be called from within a fiber.
 .Pp
+The timeout is measured against a deadline, so spurious wakes (for
+example
+.Xr xtc_proc_wake 3 )
+never shorten it.  Messages in the caller's mailbox neither end the
+wait nor are consumed by it.  While a message is pending the fiber
+cannot park on the fd, so it checks the fence every 50 microseconds,
+backing off to every millisecond, sleeping in between; the loop keeps
+running other fibers, at the cost of up to one millisecond of extra
+completion latency until the caller drains its mailbox.
+.Pp
 .Fn xtc_accel_run_blocking
 runs the synchronous accelerator call
 .Fa fn Ns ( Ns Fa arg Ns )

@@ -92,6 +92,15 @@ jobs:
             --with-io-backend=epoll --with-tls=none && make -j2 check)
           (cd build_sched_sim && ../dist/configure --enable-sched-policy \
             --with-io-backend=sim --with-tls=none && make -j2 && make check-dst)
+      - name: Cross-loop batch admission, looped
+        # The mt cases race producers against the driver; a 2-vCPU runner
+        # rarely loses a race once, so run them 20 times (about 1 s each).
+        timeout-minutes: 5
+        run: |
+          for i in $(seq 20); do
+            timeout 60 ./build_sched/test_batch --mt-only >/dev/null ||
+              { echo "test_batch --mt-only failed on iteration $i"; exit 1; }
+          done
 
   coro-fctx:
     # Force the fcontext coroutine substrate (the musl path) on a

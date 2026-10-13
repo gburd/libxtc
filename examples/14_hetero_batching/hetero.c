@@ -27,14 +27,14 @@
  *	            --hetero selects real silicon.  SYNC or FUTURE exec.
  *	  OPENCL -- real GPU (XTC_WITH_OPENCL=1): submit() enqueues one NDRange
  *	            per ready member, bridges the cl_event to the engine's FUTURE
- *	            exec kind via a detached worker thread (clWaitForEvents then
- *	            xtc_promise_set).  collect() reads back via clEnqueueMapBuffer
+ *	            exec kind via the group's one long-lived waiter thread
+ *	            (clWaitForEvents then xtc_promise_set).  collect() reads back via clEnqueueMapBuffer
  *	            (NOT clEnqueueReadBuffer -- that path crashes inside the
  *	            Lunar-Lake compute-runtime; see README).
  *	  LEVELZERO -- real NPU (XTC_WITH_LEVELZERO=1): submit() appends a small
  *	            Level Zero compute workload to the NPU command list and
  *	            executes it on the NPU command queue, signalling a ze_event;
- *	            a detached worker thread does zeEventHostSynchronize then
+ *	            the group's waiter thread does zeEventHostSynchronize then
  *	            xtc_promise_set -- the SAME FUTURE bridge as OpenCL.  The NPU
  *	            op is a device-memory copy chain (host->device->device->host)
  *	            per decode iteration: an honest "NPU command-queue round-trip"
@@ -59,6 +59,7 @@
 #include "xtc_exec.h"
 #include "xtc_future.h"
 #include "xtc_proc.h"
+#include "xtc_sync.h"
 
 #if defined(XTC_WITH_OPENCL) || defined(XTC_WITH_LEVELZERO)
 #include <pthread.h>
@@ -190,6 +191,19 @@ struct group {
 	unsigned max_in_flight;
 	unsigned reqs_done;
 	unsigned overlap_ops;       /* ops that ran while the other was busy */
+	unsigned n_terminal;        /* complete() calls on this group */
+	xtc_notify_t *done_note;    /* complete() -> feeder: a slot freed */
+#if defined(XTC_WITH_OPENCL) || defined(XTC_WITH_LEVELZERO)
+	/* The group's one device-waiter thread and its one-op hand-off. */
+	pthread_t waiter;
+	pthread_mutex_t wmu;
+	pthread_cond_t wcv;
+	int (*wwait)(void *);
+	void (*wrelease)(void *);
+	void *wev;
+	xtc_promise_t *wprom;       /* NULL = idle */
+	int wquit, waiter_up;
+#endif
 #ifdef XTC_WITH_OPENCL
 	cl_context ctx;
 	cl_command_queue q;
@@ -206,9 +220,11 @@ struct group {
 	ze_command_list_handle_t zelist;
 	ze_event_pool_handle_t zepool;
 	unsigned ze_evt_next;       /* rotating event index into zepool */
+	atomic_int ze_evt_busy[64]; /* index in use until its event is destroyed */
+	struct ze_ev *ze_evs;       /* per-index waiter argument (ZE_EVT_SLOTS) */
 	ze_device_handle_t zedev;
 	void *zdev_a, *zdev_b;      /* NPU device memory */
-	void *zhost;                /* host-visible staging */
+	void *zhost;                /* host-visible staging, one region per slot */
 	int ze_ready;
 #endif
 };
@@ -360,6 +376,99 @@ inflight_leave(void)
 #endif
 
 /* ---------------------------------------------------------------------- */
+/* FUTURE bridge: one long-lived waiter thread per device group.          */
+/* ---------------------------------------------------------------------- */
+
+#if defined(XTC_WITH_OPENCL) || defined(XTC_WITH_LEVELZERO)
+/*
+ * submit hands the group's waiter one (wait, release, promise) job and
+ * returns; the waiter blocks in the device's own wait call, releases the
+ * device event, and resolves the promise, which wakes the driver on its
+ * loop.  A thread per op costs ~50-100 us/op (measured); one per device
+ * costs ~13-19 us.  The engine keeps at most one op in flight per group, so
+ * a one-entry hand-off is enough.  wait() returns 0 on success.
+ */
+static void *
+dev_waiter(void *arg)
+{
+	struct group *g = arg;
+	int (*wait)(void *);
+	void (*release)(void *);
+	void *ev;
+	xtc_promise_t *prom;
+	int st;
+
+	pthread_mutex_lock(&g->wmu);
+	for (;;) {
+		while (g->wprom == NULL && !g->wquit)
+			pthread_cond_wait(&g->wcv, &g->wmu);
+		if (g->wprom == NULL)
+			break;
+		wait = g->wwait;
+		release = g->wrelease;
+		ev = g->wev;
+		prom = g->wprom;
+		g->wprom = NULL;
+		pthread_mutex_unlock(&g->wmu);
+		st = wait(ev);
+		inflight_leave();
+		release(ev);
+		xtc_promise_set(prom, 0, st == 0 ? XTC_OK : XTC_E_IO);
+		pthread_mutex_lock(&g->wmu);
+	}
+	pthread_mutex_unlock(&g->wmu);
+	return NULL;
+}
+
+static int
+dev_waiter_start(struct group *g)
+{
+	pthread_mutex_init(&g->wmu, NULL);
+	pthread_cond_init(&g->wcv, NULL);
+	if (pthread_create(&g->waiter, NULL, dev_waiter, g) != 0)
+		return XTC_E_IO;
+	g->waiter_up = 1;
+	return XTC_OK;
+}
+
+static void
+dev_waiter_stop(struct group *g)
+{
+	if (!g->waiter_up)
+		return;
+	pthread_mutex_lock(&g->wmu);
+	g->wquit = 1;
+	pthread_cond_signal(&g->wcv);
+	pthread_mutex_unlock(&g->wmu);
+	pthread_join(g->waiter, NULL);
+	g->waiter_up = 0;
+}
+
+/* Hand the op's completion to the waiter and give the engine its future. */
+static int
+dev_waiter_post(struct group *g, int (*wait)(void *),
+    void (*release)(void *), void *ev, xtc_batch_exec_t *exec)
+{
+	xtc_promise_t *prom;
+	xtc_future_t *fut;
+
+	if (xtc_future_new_pair(&prom, &fut) != XTC_OK)
+		return XTC_E_NOMEM;
+	pthread_mutex_lock(&g->wmu);
+	g->wwait = wait;
+	g->wrelease = release;
+	g->wev = ev;
+	g->wprom = prom;
+	pthread_cond_signal(&g->wcv);
+	pthread_mutex_unlock(&g->wmu);
+	exec->kind = XTC_BATCH_EXEC_FUTURE;
+	exec->future = fut;
+	return XTC_OK;
+}
+#endif
+
+
+/* ---------------------------------------------------------------------- */
 /* OPENCL backend: real GPU, cl_event -> FUTURE bridge.                   */
 /* ---------------------------------------------------------------------- */
 
@@ -460,34 +569,29 @@ cl_group_init(struct group *g, int dev_index)
 	return XTC_OK;
 }
 
-struct cl_wait {
-	cl_event event;
-	xtc_promise_t *prom;
-};
-
-static void *
-cl_waiter(void *arg)
+static int
+cl_wait_ev(void *ev)
 {
-	struct cl_wait *w = arg;
-
-	clWaitForEvents(1, &w->event);
-	inflight_leave();
-	xtc_promise_set(w->prom, 0, XTC_OK);
-	clReleaseEvent(w->event);
-	free(w);
-	return NULL;
+	cl_event e = ev;
+	return clWaitForEvents(1, &e) == CL_SUCCESS ? 0 : -1;
 }
 
+static void
+cl_release_ev(void *ev)
+{
+	clReleaseEvent((cl_event)ev);
+}
+
+/* Members' iteration counters advance only once every enqueue succeeded;
+ * on a mid-vector failure the kernels already queued are drained first. */
 static int
 cl_submit(struct group *g, const xtc_batch_item_t *items, size_t n,
     xtc_batch_exec_t *exec)
 {
-	xtc_promise_t *prom;
-	xtc_future_t *fut;
-	struct cl_wait *w;
 	cl_event ev = NULL;
 	cl_int err;
 	size_t i;
+	int rc;
 
 	if (!g->cl_ready)
 		return XTC_E_IO;
@@ -507,45 +611,25 @@ cl_submit(struct group *g, const xtc_batch_item_t *items, size_t n,
 		clSetKernelArg(g->kern, 5, sizeof nn, &nn);
 		if (ev != NULL)
 			clReleaseEvent(ev);
+		ev = NULL;
 		err = clEnqueueNDRangeKernel(g->q, g->kern, 1, NULL, &gws, NULL,
 		    0, NULL, &ev);
 		if (err != CL_SUCCESS) {
+			clFinish(g->q);
 			inflight_leave();
 			return XTC_E_IO;
 		}
-		r->iter++;
 	}
 	clFlush(g->q);
-	if (xtc_future_new_pair(&prom, &fut) != XTC_OK) {
+	if ((rc = dev_waiter_post(g, cl_wait_ev, cl_release_ev, ev, exec))
+	    != XTC_OK) {
+		clReleaseEvent(ev);
+		clFinish(g->q);
 		inflight_leave();
-		if (ev != NULL)
-			clReleaseEvent(ev);
-		return XTC_E_NOMEM;
+		return rc;
 	}
-	w = malloc(sizeof *w);
-	if (w == NULL) {
-		inflight_leave();
-		xtc_promise_drop(prom);
-		if (ev != NULL)
-			clReleaseEvent(ev);
-		return XTC_E_NOMEM;
-	}
-	w->event = ev; /* waiter releases it after the wait */
-	w->prom = prom;
-	exec->kind = XTC_BATCH_EXEC_FUTURE;
-	exec->future = fut;
-	{
-		pthread_t th;
-		if (pthread_create(&th, NULL, cl_waiter, w) != 0) {
-			inflight_leave();
-			free(w);
-			xtc_promise_drop(prom);
-			if (ev != NULL)
-				clReleaseEvent(ev);
-			return XTC_E_IO;
-		}
-		pthread_detach(th);
-	}
+	for (i = 0; i < n; i++)
+		((struct req *)items[i].request)->iter++;
 	return XTC_OK;
 }
 
@@ -556,6 +640,7 @@ cl_collect(struct group *g, const xtc_batch_item_t *items,
 	size_t i;
 
 	if (exec_status != XTC_BATCH_EXEC_OK) {
+		clFinish(g->q); /* the kernels may still be running */
 		for (i = 0; i < n; i++) {
 			results[i].state = XTC_BATCH_ERROR;
 			results[i].error = XTC_E_IO;
@@ -584,6 +669,7 @@ cl_group_fini(struct group *g)
 {
 	if (!g->cl_ready)
 		return;
+	dev_waiter_stop(g);
 	clReleaseMemObject(g->dbuf);
 	clReleaseKernel(g->kern);
 	clReleaseProgram(g->prog);
@@ -616,14 +702,16 @@ static const struct device opencl_device = {
 		return XTC_E_IO; } } while (0)
 
 /*
- * Event pool slots.  Each NPU op allocates a fresh event; the waiter thread
- * destroys it asynchronously after the completion, so a slot is reclaimed
- * slightly later than the op finishes.  Rotating across enough slots (> the
- * group's admitted capacity) guarantees a free index is always available
- * before the async destroy of an older one lands -- otherwise zeEventCreate
- * on an exhausted pool fails and the op is reported as a device error.
+ * Event pool slots.  Each NPU op creates an event at a rotating pool index;
+ * the waiter destroys it after the completion and only then marks the index
+ * free (ze_evt_busy), so an index is never reused while its previous event
+ * lives.  The engine runs one op per group at a time, so a few slots are
+ * plenty; 64 leaves slack for the waiter's release lagging the next submit.
  */
 #define ZE_EVT_SLOTS 64
+/* Host staging regions: one per request slot modulo this (>= GROUP_CAP, so
+ * the members of one op never share a region). */
+#define ZE_STAGE_SLOTS 16
 
 static ze_driver_handle_t ze_vpu_drv;
 static ze_device_handle_t ze_vpu_dev;
@@ -673,6 +761,12 @@ ze_discover(void)
 	return ze_vpu_dev != NULL ? XTC_OK : XTC_E_IO;
 }
 
+struct ze_ev {
+	struct group *g;
+	ze_event_handle_t ev;
+	unsigned idx;
+};
+
 static int
 ze_group_init(struct group *g, int dev_index)
 {
@@ -682,6 +776,7 @@ ze_group_init(struct group *g, int dev_index)
 	ze_device_mem_alloc_desc_t ddesc;
 	ze_host_mem_alloc_desc_t hdesc;
 	size_t bytes = (size_t)WORK_ELEMS * sizeof(uint32_t);
+	int k;
 
 	(void)dev_index;
 	if (ze_discover() != XTC_OK)
@@ -712,7 +807,13 @@ ze_group_init(struct group *g, int dev_index)
 
 	memset(&hdesc, 0, sizeof hdesc);
 	hdesc.stype = ZE_STRUCTURE_TYPE_HOST_MEM_ALLOC_DESC;
-	ZCK(zeMemAllocHost(g->zectx, &hdesc, bytes, 64, &g->zhost), "hmem");
+	ZCK(zeMemAllocHost(g->zectx, &hdesc, bytes * ZE_STAGE_SLOTS, 64,
+	    &g->zhost), "hmem");
+	g->ze_evs = calloc(ZE_EVT_SLOTS, sizeof *g->ze_evs);
+	if (g->ze_evs == NULL)
+		return XTC_E_NOMEM;
+	for (k = 0; k < ZE_EVT_SLOTS; k++)
+		atomic_store(&g->ze_evt_busy[k], 0);
 
 	{
 		ze_event_pool_desc_t epdesc;
@@ -723,36 +824,39 @@ ze_group_init(struct group *g, int dev_index)
 		ZCK(zeEventPoolCreate(g->zectx, &epdesc, 1, &g->zedev,
 		    &g->zepool), "epool");
 	}
+	if (dev_waiter_start(g) != XTC_OK)
+		return XTC_E_IO;
 	g->ze_ready = 1;
 	fprintf(stderr, "group %d (NPU) -> Level Zero VPU "
 	    "(op: device-memory copy chain per iteration)\n", g->gidx);
 	return XTC_OK;
 }
 
-struct ze_wait {
-	struct group *g;
-	ze_event_handle_t ev;
-	xtc_promise_t *prom;
-};
-
-static void *
-ze_waiter(void *arg)
+static int
+ze_wait_ev(void *arg)
 {
-	struct ze_wait *w = arg;
+	struct ze_ev *e = arg;
+	return zeEventHostSynchronize(e->ev, UINT64_MAX) == ZE_RESULT_SUCCESS ?
+	    0 : -1;
+}
 
-	zeEventHostSynchronize(w->ev, UINT64_MAX);
-	inflight_leave();
-	xtc_promise_set(w->prom, 0, XTC_OK);
-	zeEventDestroy(w->ev);
-	free(w);
-	return NULL;
+/* Destroy the event, then free its pool index for reuse. */
+static void
+ze_release_ev(void *arg)
+{
+	struct ze_ev *e = arg;
+	zeEventDestroy(e->ev);
+	atomic_store(&e->g->ze_evt_busy[e->idx], 0);
 }
 
 /*
  * NPU submit: for each ready member run the SAME decode_step on the host and
- * stage the result into host-visible memory, then append a device-memory copy
- * chain (host->device A, device A->device B, device B->host) to the NPU
- * command list and execute it on the NPU command queue, signalling a ze_event.
+ * write the result into that member's own region of the host-visible
+ * staging buffer, then append a device-memory copy chain (host -> device A
+ * -> device B -> the member's host region) to the NPU command list and
+ * execute it on the NPU command queue, signalling a ze_event.  collect()
+ * copies each member's region into r->work only after the event fired, so
+ * the data really made the round trip.
  *
  * HONEST LABEL: the compute (decode_step) runs on the host; the NPU work is a
  * COMMAND-QUEUE ROUND-TRIP (device-memory copies), not a matmul.  What this
@@ -761,54 +865,57 @@ ze_waiter(void *arg)
  * bridge.  A native NPU compute kernel/graph is out of scope (needs a compiled
  * L0 module / OpenVINO IR; see README).
  *
- * The command list is reset each op (zeCommandListReset) so one list is
- * reused.  Members in a vector are copied one after another through the same
- * device buffers; correctness of the per-member data is checked on the host
- * via decode_step (the device copy is a fidelity + queue exercise).
+ * Members in one op are serialized through the shared device buffers by the
+ * barriers.  The command list is reset each op (zeCommandListReset).  An
+ * event pool index is reused only after the waiter has destroyed the event
+ * that last used it (ze_evt_busy); with one op in flight per group that is
+ * always true by the next op, and if it ever is not the op fails cleanly.
  */
 static int
 ze_submit(struct group *g, const xtc_batch_item_t *items, size_t n,
     xtc_batch_exec_t *exec)
 {
-	xtc_promise_t *prom;
-	xtc_future_t *fut;
-	struct ze_wait *w;
 	ze_event_desc_t edesc;
-	ze_event_handle_t ev;
+	struct ze_ev *e;
 	size_t bytes = (size_t)WORK_ELEMS * sizeof(uint32_t);
 	size_t i;
+	unsigned idx;
+	int rc;
 
 	if (!g->ze_ready)
 		return XTC_E_IO;
+	idx = g->ze_evt_next++ % ZE_EVT_SLOTS;
+	if (atomic_exchange(&g->ze_evt_busy[idx], 1) != 0) {
+		fprintf(stderr, "ze: event slot %u still in use\n", idx);
+		return XTC_E_AGAIN;
+	}
+	e = &g->ze_evs[idx];
+	e->g = g;
+	e->idx = idx;
 	inflight_enter(g);
-
 	memset(&edesc, 0, sizeof edesc);
 	edesc.stype = ZE_STRUCTURE_TYPE_EVENT_DESC;
-	edesc.index = (uint32_t)(g->ze_evt_next++ % ZE_EVT_SLOTS);
+	edesc.index = idx;
 	edesc.signal = ZE_EVENT_SCOPE_FLAG_HOST;
 	edesc.wait = ZE_EVENT_SCOPE_FLAG_HOST;
-	if (zeEventCreate(g->zepool, &edesc, &ev) != ZE_RESULT_SUCCESS) {
-		fprintf(stderr, "ze: eventCreate failed (pool exhausted?)\n");
+	if (zeEventCreate(g->zepool, &edesc, &e->ev) != ZE_RESULT_SUCCESS) {
+		fprintf(stderr, "ze: eventCreate failed\n");
+		atomic_store(&g->ze_evt_busy[idx], 0);
 		inflight_leave();
 		return XTC_E_IO;
 	}
-
-	if (zeCommandListReset(g->zelist) != ZE_RESULT_SUCCESS) {
-		inflight_leave();
-		zeEventDestroy(ev);
-		return XTC_E_IO;
-	}
+	if (zeCommandListReset(g->zelist) != ZE_RESULT_SUCCESS)
+		goto fail;
 	for (i = 0; i < n; i++) {
 		struct req *r = items[i].request;
-		uint32_t *stage = g->zhost;
+		uint32_t *stage = (uint32_t *)g->zhost +
+		    (size_t)(r->slot % ZE_STAGE_SLOTS) * WORK_ELEMS;
+		uint32_t acc = decode_step(r->acc, r->id, r->iter);
 		int k;
-		ze_event_handle_t sig = (i == n - 1) ? ev : NULL;
+		ze_event_handle_t sig = (i == n - 1) ? e->ev : NULL;
 
-		r->acc = decode_step(r->acc, r->id, r->iter);
 		for (k = 0; k < WORK_ELEMS; k++)
-			stage[k] = r->acc ^ (uint32_t)k;
-		r->iter++;
-		/* host->dev A -> dev B -> host, through the NPU queue. */
+			stage[k] = acc ^ (uint32_t)k;
 		if (zeCommandListAppendMemoryCopy(g->zelist, g->zdev_a, stage,
 		    bytes, NULL, 0, NULL) != ZE_RESULT_SUCCESS ||
 		    zeCommandListAppendBarrier(g->zelist, NULL, 0, NULL)
@@ -818,59 +925,48 @@ ze_submit(struct group *g, const xtc_batch_item_t *items, size_t n,
 		    zeCommandListAppendBarrier(g->zelist, NULL, 0, NULL)
 		    != ZE_RESULT_SUCCESS ||
 		    zeCommandListAppendMemoryCopy(g->zelist, stage, g->zdev_b,
-		    bytes, sig, 0, NULL) != ZE_RESULT_SUCCESS) {
-			inflight_leave();
-			zeEventDestroy(ev);
-			return XTC_E_IO;
-		}
-		/* copy the (round-tripped) data back into the member */
-		memcpy(r->work, stage, bytes);
+		    bytes, sig, 0, NULL) != ZE_RESULT_SUCCESS ||
+		    zeCommandListAppendBarrier(g->zelist, NULL, 0, NULL)
+		    != ZE_RESULT_SUCCESS)
+			goto fail;
 	}
 	if (zeCommandListClose(g->zelist) != ZE_RESULT_SUCCESS ||
 	    zeCommandQueueExecuteCommandLists(g->zeq, 1, &g->zelist, NULL)
 	    != ZE_RESULT_SUCCESS) {
 		fprintf(stderr, "ze: close/execute failed\n");
-		inflight_leave();
-		zeEventDestroy(ev);
-		return XTC_E_IO;
+		goto fail;
 	}
-	if (xtc_future_new_pair(&prom, &fut) != XTC_OK) {
+	if ((rc = dev_waiter_post(g, ze_wait_ev, ze_release_ev, e, exec))
+	    != XTC_OK) {
+		(void)zeCommandQueueSynchronize(g->zeq, UINT64_MAX);
+		zeEventDestroy(e->ev);
+		atomic_store(&g->ze_evt_busy[idx], 0);
 		inflight_leave();
-		zeEventDestroy(ev);
-		return XTC_E_NOMEM;
+		return rc;
 	}
-	w = malloc(sizeof *w);
-	if (w == NULL) {
-		inflight_leave();
-		xtc_promise_drop(prom);
-		zeEventDestroy(ev);
-		return XTC_E_NOMEM;
-	}
-	w->g = g;
-	w->ev = ev;
-	w->prom = prom;
-	exec->kind = XTC_BATCH_EXEC_FUTURE;
-	exec->future = fut;
-	{
-		pthread_t th;
-		if (pthread_create(&th, NULL, ze_waiter, w) != 0) {
-			inflight_leave();
-			free(w);
-			xtc_promise_drop(prom);
-			zeEventDestroy(ev);
-			return XTC_E_IO;
-		}
-		pthread_detach(th);
+	/* Committed: advance the members (their new acc is in staging). */
+	for (i = 0; i < n; i++) {
+		struct req *r = items[i].request;
+		r->acc = decode_step(r->acc, r->id, r->iter);
+		r->iter++;
 	}
 	return XTC_OK;
+fail:
+	zeEventDestroy(e->ev);
+	atomic_store(&g->ze_evt_busy[idx], 0);
+	inflight_leave();
+	return XTC_E_IO;
 }
 
 static void
 ze_collect(struct group *g, const xtc_batch_item_t *items,
     xtc_batch_result_t *results, size_t n, int exec_status)
 {
+	size_t bytes = (size_t)WORK_ELEMS * sizeof(uint32_t);
 	size_t i;
 
+	if (exec_status != XTC_BATCH_EXEC_OK)
+		(void)zeCommandQueueSynchronize(g->zeq, UINT64_MAX);
 	for (i = 0; i < n; i++) {
 		struct req *r = items[i].request;
 		if (exec_status != XTC_BATCH_EXEC_OK) {
@@ -878,6 +974,9 @@ ze_collect(struct group *g, const xtc_batch_item_t *items,
 			results[i].error = XTC_E_IO;
 			continue;
 		}
+		/* The event fired: the region holds the round-tripped data. */
+		memcpy(r->work, (uint32_t *)g->zhost +
+		    (size_t)(r->slot % ZE_STAGE_SLOTS) * WORK_ELEMS, bytes);
 		decide(g, r, &results[i]);
 	}
 }
@@ -887,6 +986,8 @@ ze_group_fini(struct group *g)
 {
 	if (!g->ze_ready)
 		return;
+	dev_waiter_stop(g);
+	free(g->ze_evs);
 	zeEventPoolDestroy(g->zepool);
 	zeMemFree(g->zectx, g->zdev_a);
 	zeMemFree(g->zectx, g->zdev_b);
@@ -950,6 +1051,8 @@ batch_complete(uint64_t handle, void *request, int outcome, void *user)
 		g->demo->cancelled++;
 	else
 		g->demo->failed++;
+	g->n_terminal++;
+	(void)xtc_notify_signal(g->done_note); /* wake the feeder */
 }
 
 /* ---------------------------------------------------------------------- */
@@ -984,17 +1087,14 @@ struct feed_arg {
 	int first_req, last_req; /* this group's slice [first,last) */
 };
 
-static int
-group_pending_done(struct demo *d, int first, int last)
-{
-	int i, done = 0;
-
-	for (i = first; i < last; i++)
-		if (d->reqs[i].completions == 1)
-			done++;
-	return done == (last - first);
-}
-
+/*
+ * Both feeders keep up to GROUP_CAP requests admitted, so the device sees
+ * the same queue depth; only the refill rule differs.  Continuous: submit
+ * the next pending request whenever one completes.  Static: submit a
+ * cohort of GROUP_CAP, wait until ALL of them complete, then the next
+ * cohort.  The feeder sleeps on the group's notify (signalled by
+ * complete()); it does not poll.
+ */
 #define GROUP_CAP 8    /* admitted live requests per group */
 #define GROUP_ACTIVE 4 /* max requests per device op (vector width) */
 
@@ -1004,40 +1104,29 @@ feeder(void *arg)
 	struct feed_arg *fa = arg;
 	struct demo *d = fa->d;
 	struct group *g = fa->g;
-	int next = fa->first_req, admitted = 0;
+	int next = fa->first_req, cohort_end, rc;
+	unsigned target;
 
-	if (d->continuous) {
-		while (next < fa->last_req && admitted < GROUP_CAP) {
-			must(xtc_batch_submit(g->batch, &d->reqs[next],
-			    1, &d->reqs[next].handle), "submit");
+	while (next < fa->last_req) {
+		if (d->continuous) {
+			rc = xtc_batch_submit(g->batch, &d->reqs[next], 1,
+			    &d->reqs[next].handle);
+			if (rc == XTC_E_AGAIN) {
+				must(xtc_notify_wait(g->done_note, -1), "wait");
+				continue;
+			}
+			must(rc, "submit");
 			next++;
-			admitted++;
+			continue;
 		}
-		while (!group_pending_done(d, fa->first_req, fa->last_req)) {
-			while (next < fa->last_req) {
-				int rc = xtc_batch_submit(g->batch,
-				    &d->reqs[next], 1, &d->reqs[next].handle);
-				if (rc == XTC_E_AGAIN)
-					break;
-				must(rc, "submit refill");
-				next++;
-			}
-			xtc_yield();
-		}
-	} else {
-		while (next < fa->last_req) {
-			int cohort = 0;
-			int cohort_start = next;
-			while (next < fa->last_req && cohort < GROUP_ACTIVE) {
-				must(xtc_batch_submit(g->batch,
-				    &d->reqs[next], 1,
-				    &d->reqs[next].handle), "submit cohort");
-				next++;
-				cohort++;
-			}
-			while (!group_pending_done(d, cohort_start, next))
-				xtc_yield();
-		}
+		cohort_end = next + GROUP_CAP < fa->last_req ?
+		    next + GROUP_CAP : fa->last_req;
+		target = g->n_terminal + (unsigned)(cohort_end - next);
+		for (; next < cohort_end; next++)
+			must(xtc_batch_submit(g->batch, &d->reqs[next], 1,
+			    &d->reqs[next].handle), "submit cohort");
+		while (g->n_terminal < target)
+			must(xtc_notify_wait(g->done_note, -1), "wait");
 	}
 	must(xtc_batch_close(g->batch, XTC_BATCH_DRAIN), "close");
 }
@@ -1113,6 +1202,7 @@ run(struct demo *d, int nreqs)
 		opts.collect = batch_collect;
 		opts.complete = batch_complete;
 		opts.user = g;
+		must(xtc_notify_create(&g->done_note), "notify");
 		must(xtc_batch_create_async(g->loop, &opts, &g->batch),
 		    "create_async");
 	}
@@ -1138,6 +1228,7 @@ run(struct demo *d, int nreqs)
 		rs.per_group_overlap[i] = g->overlap_ops;
 		rs.per_group_backend[i] = g->dev->name;
 		must(xtc_batch_destroy(g->batch), "destroy");
+		xtc_notify_destroy(g->done_note);
 		g->dev->group_fini(g);
 	}
 #if defined(XTC_WITH_OPENCL) || defined(XTC_WITH_LEVELZERO)
@@ -1241,15 +1332,17 @@ self_test(void)
 	if (!(min_depth == 1 && max_depth > min_depth))
 		die("variable-length requests (shallow=1, deep>1)");
 
-	/* 4. Continuous vs static occupancy: continuous keeps vectors fuller. */
+	/* 4. Static mode (same queue depth, cohort refill) is equally correct.
+	 *    Occupancy is reported, not asserted: which mode issues fewer device
+	 *    ops depends on the depth mix, and it is not a wall-time claim. */
 	fake_use_sync = 0;
 	ds = demo_new(0, 2, 0);
 	rsc = run(ds, 48);
 	sum_s = checksum_reqs(ds);
 	if (sum_s != ref)
 		die("static checksum != reference");
-	if (!(rc.avg_occupancy > rsc.avg_occupancy))
-		die("continuous occupancy must exceed static");
+	if (ds->completed != (unsigned)ds->nreqs)
+		die("static: every request completes exactly once");
 
 	/* 5. SYNC exec kind also works and matches. */
 	fake_use_sync = 1;

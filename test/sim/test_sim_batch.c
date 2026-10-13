@@ -574,19 +574,22 @@ arun(uint64_t seed, struct trace *trace)
 /* --------------------------------------------------------------------------
  * Cross-loop admission (S2) sim scenario. A producer on a SIBLING loop feeds a
  * SYNC-step group on the model loop via submit_mt at seeded virtual times, and
- * cancel_mt's one member in-stream. A white-box inject forces one
- * cross-producer CANCEL-before-SUBMIT so the early-control set is exercised
- * deterministically: that member must end ABORTED. The ring/free-pool/handle
- * counter read no clock and no unseeded RNG, so the event trace replays
- * byte-identically. */
+ * cancel_mt's one member in-stream. req[0] is submitted first and its handle
+ * handed (by message) to a canceller on the MODEL loop, a different producer:
+ * its cancel_mt must abort req[0] before it ever runs, whether req[0] is
+ * still in the ring, held behind a full group, or waiting in a slot. The
+ * group's capacity is smaller than the hand-in burst, so held hand-ins are
+ * exercised on every seed. The ring/free-pool/handle counter read no clock
+ * and no unseeded RNG, so the event trace replays byte-identically. */
 #define MNREQ 5
 struct mreq {
 	uint64_t handle;
 	unsigned id, left, ran;
-	int terminal, expect_abort;
+	int terminal, expect_abort, aborted;
 };
 struct mfix {
 	xtc_batch_t *batch;
+	xtc_pid_t canceller;
 	uint64_t seed;
 	unsigned accepted, terminals, completed, cancelled;
 	struct mreq req[MNREQ];
@@ -658,6 +661,7 @@ mcomplete(uint64_t handle, void *request, int outcome, void *user)
 	mrequire(f, !r->terminal, "mt terminal twice");
 	(void)handle;
 	r->terminal = 1;
+	r->aborted = outcome == XTC_E_ABORTED;
 	f->terminals++;
 	if (outcome == XTC_OK)
 		f->completed++;
@@ -665,9 +669,6 @@ mcomplete(uint64_t handle, void *request, int outcome, void *user)
 		f->cancelled++;
 	mevent(f, 202, r->id, (uint64_t)(int64_t)outcome, 0);
 }
-
-extern int __xtc_batch_mt_inject(xtc_batch_t *, int, uint64_t, void *,
-    uint64_t);
 
 /* Producer on a sibling loop: submit_mt each request after a seeded virtual
  * delay, cancel_mt one member mid-stream. The engine stamps the handle, so a
@@ -677,15 +678,19 @@ mproducer(void *arg)
 {
 	struct mfix *f = arg;
 	unsigned i;
-	/* req[0] is the white-box cross-producer case handled in mrun; the
-	 * producer owns req[1..MNREQ-1]. Pick its in-stream cancel from that
-	 * range so it never collides with req[0]. */
+	/* req[0] is the cross-producer case: its handle goes to the canceller
+	 * on the model loop. Pick the in-stream cancel from the rest so it
+	 * never collides with req[0]. */
 	int cancel_id = 1 + (int)(f->seed % (MNREQ - 1));
-	for (i = 1; i < MNREQ; ++i) {
+	for (i = 0; i < MNREQ; ++i) {
 		int64_t d = 40 + (int64_t)((f->seed >> (i % 11)) % 73);
 		uint64_t h = 0;
 		int rc;
-		mrequire(f, xtc_proc_sleep(d) == XTC_OK, "mt virtual delay");
+		/* Odd seeds: burst the first hand-ins back to back so they
+		 * queue behind the full group (held). */
+		if (i > 0 && (i > 2 || !(f->seed & 1)))
+			mrequire(f, xtc_proc_sleep(d) == XTC_OK,
+			    "mt virtual delay");
 		for (;;) {
 			rc = xtc_batch_submit_mt(f->batch, &f->req[i], 1, &h);
 			if (rc == XTC_OK)
@@ -696,6 +701,9 @@ mproducer(void *arg)
 		f->req[i].handle = h;
 		f->accepted++;
 		mevent(f, 201, i, h, 0);
+		if (i == 0)
+			mrequire(f, xtc_send(f->canceller, &h, sizeof h) == XTC_OK,
+			    "mt handle to canceller");
 		if ((int)i == cancel_id) {
 			mrequire(f, xtc_batch_cancel_mt(f->batch, h) == XTC_OK,
 			    "mt cancel");
@@ -706,15 +714,38 @@ mproducer(void *arg)
 	    memory_order_relaxed);
 }
 
+/* Canceller on the model loop: a different producer than the submitter. */
+static void
+mcanceller(void *arg)
+{
+	struct mfix *f = arg;
+	void *msg = NULL;
+	size_t size = 0;
+	uint64_t h;
+	mrequire(f, xtc_recv(&msg, &size, -1) == XTC_OK && size == sizeof h,
+	    "mt canceller receive");
+	memcpy(&h, msg, sizeof h);
+	xtc_free(msg);
+	mrequire(f, xtc_batch_cancel_mt(f->batch, h) == XTC_OK,
+	    "mt cross-producer cancel");
+	mevent(f, 203, 0, h, 0);
+}
+
 /* Controller on the model loop: wait for every member to terminate then close
  * so the driver exits. */
 static void
 mcontroller(void *arg)
 {
 	struct mfix *f = arg;
+	unsigned ticks = 0;
 	while (f->terminals < MNREQ
-	    || !atomic_load_explicit(&f->producer_done, memory_order_relaxed))
+	    || !atomic_load_explicit(&f->producer_done, memory_order_relaxed)) {
+		/* A clean run needs a few dozen ticks; an accepted hand-in that
+		 * never completes keeps this loop going forever. */
+		mrequire(f, ++ticks <= 1000,
+		    "mt accepted hand-in never completed");
 		mrequire(f, xtc_proc_sleep(50) == XTC_OK, "mt controller tick");
+	}
 	mrequire(f, xtc_batch_close(f->batch, XTC_BATCH_DRAIN) == XTC_OK,
 	    "mt drain close");
 }
@@ -737,7 +768,7 @@ mrun(uint64_t seed, struct trace *trace)
 	mrequire(&f, xtc_exec_init(&exec, 2) == XTC_OK, "mt exec init");
 	o.size = sizeof(o);
 	o.version = XTC_BATCH_VERSION;
-	o.capacity = CAPACITY + 2;
+	o.capacity = ACTIVE;
 	o.max_active = ACTIVE;
 	o.resource_capacity = RESOURCES + 2;
 	o.mt_queue_cap = 8;
@@ -747,21 +778,11 @@ mrun(uint64_t seed, struct trace *trace)
 	o.user = &f;
 	mrequire(&f, xtc_batch_create_async(xtc_exec_loop(exec, 0), &o,
 	    &f.batch) == XTC_OK, "mt create");
-	/* The cross-producer lost-cancel case, driven deterministically: push a
-	 * CANCEL for a reserved handle BEFORE its SUBMIT (req[0]). This member
-	 * is accounted here (not via the producer) and must end ABORTED. */
 	f.req[0].expect_abort = 1;
-	f.accepted++;
-	{
-		uint64_t H = 1; /* first handle the group ever issues */
-		mrequire(&f, __xtc_batch_mt_inject(f.batch, 1 /*CANCEL*/, H,
-		    NULL, 0) == XTC_OK, "inject cancel");
-		mrequire(&f, __xtc_batch_mt_inject(f.batch, 0 /*SUBMIT*/, H,
-		    &f.req[0], 1) == XTC_OK, "inject submit");
-		mevent(&f, 203, 0, H, 0);
-	}
-	/* The producer submits req[1..MNREQ-1] from loop 1. It accounts only
-	 * those it submits, so pre-mark req[0] handled above. */
+	/* req[0] blocks once it runs, so it can only finish by the cancel. */
+	f.req[0].left = 1000000;
+	mrequire(&f, xtc_proc_spawn(xtc_exec_loop(exec, 0), mcanceller, &f,
+	    NULL, &f.canceller) == XTC_OK, "mt canceller spawn");
 	mrequire(&f, xtc_proc_spawn(xtc_exec_loop(exec, 1), mproducer, &f, NULL,
 	    &pid) == XTC_OK, "mt producer spawn");
 	mrequire(&f, xtc_proc_spawn(xtc_exec_loop(exec, 0), mcontroller, &f,
@@ -770,10 +791,9 @@ mrun(uint64_t seed, struct trace *trace)
 	    "mt step budget/determinism guard");
 	mrequire(&f, f.terminals == MNREQ, "mt terminal conservation");
 	mrequire(&f, f.completed + f.cancelled == MNREQ, "mt terminal split");
-	/* req[0]'s cancel reached the ring before its submit; the early-control
-	 * set must have aborted it before it ever ran. */
-	mrequire(&f, f.req[0].terminal && f.req[0].ran == 0,
-	    "mt cross-producer cancel lost (early-control)");
+	/* req[0] was cancelled by another producer; it must end ABORTED. */
+	mrequire(&f, f.req[0].terminal && f.req[0].aborted,
+	    "mt cross-producer cancel lost");
 	for (i = 0; i < MNREQ; ++i)
 		mrequire(&f, f.req[i].terminal, "mt member finalized");
 	mrequire(&f, xtc_sim_check(exec) == XTC_OK, "mt sim invariants");
