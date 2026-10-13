@@ -124,6 +124,15 @@ elapsed without acquiring.
 The deadlock detector chose
 .Fa locker
 as a victim; the call rolls back any partial state.
+.It Dv XTC_E_ABORTED
+The calling fiber was killed
+.Pq Fn xtc_exit_pid
+while it waited, and an enclosing cancellation mask of the caller
+defers the kill
+.Pq Fn xtc_mask_enter , Fn xtc_uncancelable .
+The wait is abandoned and the lock is NOT held; the kill is delivered
+when the caller's mask drops.  Without an enclosing mask the kill is
+delivered at once and the call does not return.
 .It Dv XTC_E_INVAL
 Bad arguments or unknown
 .Fa locker .
