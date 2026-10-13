@@ -382,18 +382,20 @@ static struct batch_slot *
 batch_find(xtc_batch_t *b, uint64_t handle)
 {
 	uint32_t v, i;
+#if XTC_DST_BUG(XTC_DST_BUG_BATCHSTALE)
+	/* Planted bug: ignore handle identity, take the first live slot. */
+	(void)v;
+	for (i = 0; handle != 0 && i < b->opts.capacity; ++i)
+		if (b->slots[i].state != B_FREE)
+			return &b->slots[i];
+	return NULL;
+#else
+	(void)i;
 	if (batch_map_get(b, handle, &v) && v < b->opts.capacity
 	    && b->slots[v].state != B_FREE)
 		return &b->slots[v];
-#if XTC_DST_BUG(XTC_DST_BUG_BATCHSTALE)
-	/* Planted bug: ignore handle identity, take any live slot. */
-	for (i = 0; i < b->opts.capacity; ++i)
-		if (b->slots[i].state != B_FREE)
-			return &b->slots[i];
-#else
-	(void)i;
-#endif
 	return NULL;
+#endif
 }
 
 /* Record a cancel. A not-yet-running member is linked for the next boundary
