@@ -737,9 +737,15 @@ static void
 mcontroller(void *arg)
 {
 	struct mfix *f = arg;
+	unsigned ticks = 0;
 	while (f->terminals < MNREQ
-	    || !atomic_load_explicit(&f->producer_done, memory_order_relaxed))
+	    || !atomic_load_explicit(&f->producer_done, memory_order_relaxed)) {
+		/* A clean run needs a few dozen ticks; an accepted hand-in that
+		 * never completes keeps this loop going forever. */
+		mrequire(f, ++ticks <= 1000,
+		    "mt accepted hand-in never completed");
 		mrequire(f, xtc_proc_sleep(50) == XTC_OK, "mt controller tick");
+	}
 	mrequire(f, xtc_batch_close(f->batch, XTC_BATCH_DRAIN) == XTC_OK,
 	    "mt drain close");
 }

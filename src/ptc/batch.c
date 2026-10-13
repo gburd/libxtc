@@ -7,6 +7,9 @@
 
 #ifdef XTC_ENABLE_SCHED_POLICY
 #include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
+#ifndef XTC_DST_BUG_BATCHDROP
+#define XTC_DST_BUG_BATCHDROP 16 /* batch.c: drop a held mt hand-in */
+#endif
 #include "loop_int.h"
 #include "preempt_int.h"
 #include "xtc_accel.h"
@@ -987,6 +990,11 @@ batch_mt_drain(xtc_batch_t *b)
 			batch_mt_control(b, rec->handle, rec->op);
 			batch_mt_release(b, rec);
 		} else if (b->mt.held != NULL || b->live == b->opts.capacity) {
+#if XTC_DST_BUG(XTC_DST_BUG_BATCHDROP)
+			/* Planted bug: drop the accepted hand-in (v1.55.0). */
+			batch_mt_release(b, rec);
+			continue;
+#endif
 			if (b->mt.held_tail != NULL)
 				b->mt.held_tail->next = rec;
 			else
