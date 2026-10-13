@@ -220,7 +220,16 @@ static _Atomic uint64_t g_undo_clrs  = 0;
 
 /* Optional process-global write-ahead log (see xstore_set_wal). */
 static wal_t *g_xwal = NULL;
-void xstore_set_wal(struct wal *w) { g_xwal = (wal_t *)w; }
+static void xs_commit_state_reset(void);
+/* Attaching or detaching the log is engine setup/teardown: no commit can
+ * legitimately be in flight, so drop any in-flight state a crashed or
+ * abandoned run left behind (see xs_commit_state_reset). */
+void
+xstore_set_wal(struct wal *w)
+{
+	g_xwal = (wal_t *)w;
+	xs_commit_state_reset();
+}
 
 /* Number of CLRs written during recovery undo so far (for tests/metrics). */
 uint64_t xstore_undo_clrs(void) { return atomic_load_explicit(&g_undo_clrs, memory_order_relaxed); }
@@ -2722,6 +2731,25 @@ xs_visible(void)
 	return atomic_load_explicit(&g_xvisible, memory_order_acquire);
 }
 
+/* Forget every in-flight commit and reopen the checkpoint gate.  Only for
+ * points where no commit can be running (log attach/detach, recovery):
+ * a run that was abandoned with a committer parked mid-commit (a
+ * simulated crash, a test dropping its loop) leaves that committer's
+ * stack-resident registry entry linked, which would otherwise dangle
+ * and pin the read horizon below it forever. */
+static void
+xs_commit_state_reset(void)
+{
+	xs_commit_lock();
+	g_inflight = NULL;
+	g_ckpt_gate = 0;
+	atomic_store_explicit(&g_wal_busy, 0, memory_order_relaxed);
+	atomic_store_explicit(&g_xvisible,
+	    atomic_load_explicit(&g_xclock, memory_order_relaxed),
+	    memory_order_release);
+	xs_commit_unlock();
+}
+
 /* Return only once commit `ts` is visible to new snapshots, so a session
  * always reads its own commit.  The horizon waits only on OLDER commits
  * still in flight (logging or applying), which never wait on younger
@@ -5014,6 +5042,7 @@ xstore_recover(bt_t *bt, const char *wal_path)
 	struct xs_recover r;
 	int rc, i;
 
+	xs_commit_state_reset();
 	memset(&r, 0, sizeof r);
 	r.bt = bt;
 	rc = wal_scan(wal_path, xs_recover_cb, &r);
@@ -5076,6 +5105,7 @@ xstore_recover_inplace(bt_t *bt, bm_t *bm, const char *wal_path,
 	struct xs_recover r;
 	int rc, i;
 
+	xs_commit_state_reset();
 	memset(&r, 0, sizeof r);
 	r.bt = bt;
 	r.bm = bm;               /* in-place mode: apply XL_PAGE images */
