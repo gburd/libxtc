@@ -1962,6 +1962,64 @@ mt_closed(void)
 	       "close all completed once OK\n", atomic_load(&g_close.ok));
 }
 
+/* NIT: handle exhaustion under concurrency. With fetch-add + restore, a
+ * producer racing another at UINT64_MAX could stamp a wrapped handle (1)
+ * between the wrap and the restore. 4 threads hammer submit_mt after the
+ * last 8 handles: exactly 8 succeed, all in range, and every later call
+ * is XTC_E_RANGE. */
+struct exh_ctx {
+	xtc_batch_t *batch;
+	_Atomic int ok, bad;
+};
+
+static void *
+mt_exhaust_thread(void *arg)
+{
+	struct exh_ctx *e = arg;
+	uint64_t h;
+	int i, rc;
+	for (i = 0; i < 200000; ++i) {
+		rc = xtc_batch_submit_mt(e->batch, NULL, 1, &h);
+		if (rc == XTC_OK) {
+			atomic_fetch_add(&e->ok, 1);
+			if (h <= UINT64_MAX - 8)
+				atomic_fetch_add(&e->bad, 1);
+		} else if (rc != XTC_E_RANGE && rc != XTC_E_AGAIN)
+			atomic_fetch_add(&e->bad, 1);
+	}
+	return NULL;
+}
+
+static void
+mt_handle_exhaustion(void)
+{
+	struct mt_ctx c = { 0 };
+	struct exh_ctx e = { 0 };
+	xtc_batch_async_opts_t o;
+	pthread_t th[4];
+	int i;
+	assert(xtc_exec_init(&c.exec, 1) == XTC_OK);
+	o = mt_opts(&c, 4, 32);
+	o.submit = mt_count_submit;
+	o.collect = mt_count_collect;
+	o.complete = mt_count_complete;
+	assert(xtc_batch_create_async(xtc_exec_loop(c.exec, 0), &o, &c.batch)
+	       == XTC_OK);
+	__xtc_batch_set_last_handle(c.batch, UINT64_MAX - 8);
+	e.batch = c.batch;
+	for (i = 0; i < 4; ++i)
+		assert(pthread_create(&th[i], NULL, mt_exhaust_thread, &e) == 0);
+	for (i = 0; i < 4; ++i)
+		assert(pthread_join(th[i], NULL) == 0);
+	assert(atomic_load(&e.bad) == 0 && atomic_load(&e.ok) == 8);
+	assert(xtc_batch_close(c.batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_exec_run(c.exec) == XTC_OK);
+	assert(atomic_load(&c.completed) == 8);
+	assert(xtc_batch_destroy(c.batch) == XTC_OK);
+	assert(xtc_exec_fini(c.exec) == XTC_OK);
+	puts("batch-mt: concurrent handle exhaustion never wraps OK");
+}
+
 static void
 mt_tests(void)
 {
@@ -1970,6 +2028,7 @@ mt_tests(void)
 	mt_multiproducer();
 	mt_full_hold();
 	mt_closed();
+	mt_handle_exhaustion();
 	mt_contended_pool();
 	mt_stale_cancels();
 	mt_cancel_in_ring();
