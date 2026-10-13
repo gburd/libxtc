@@ -195,19 +195,27 @@ struct xtc_task {
 /*
  * Timer record.  Kept in a binary min-heap inside the loop.
  *
- * Cancel is lazy: we mark cancelled and skip on pop.  Cancel is O(1)
- * by cost; the heap may carry up to N stale entries until the next
- * extraction reaches them.  For M3 this is good enough; M5 may
- * upgrade to a hierarchical wheel.
+ * `fired` decides a cancel racing a fire: it leaves 0 exactly once, to
+ * XTC_TIMER_FIRED (the owner's pop claimed it) or XTC_TIMER_CANCELLED.
+ * A cancel on the loop's own thread removes the node from the heap at
+ * once (O(log n), by heap_idx).  A cancel from any other thread may not
+ * touch the heap: it only marks the node, and the owner drops it when it
+ * reaches the root or when a full heap is swept before growing
+ * (timer.c).  So the heap is bounded by the live timers, and a non-empty
+ * heap whose cancelled root has been popped (what
+ * __xtc_timer_heap_next_deadline does) holds a live timer.
  */
+#define XTC_TIMER_FIRED      1
+#define XTC_TIMER_CANCELLED  2
 struct xtc_timer {
 	int64_t      deadline_ns;
 	xtc_timer_fn cb;
 	void        *user;
 	xtc_task_t  *waiter;        /* task to wake when fired (NULL if pure cb) */
-	int          heap_idx;      /* current position in heap (-1 if not in) */
-	int          cancelled;
-	int          fired;
+	int          heap_idx;      /* current position in heap (-1 if not in);
+	                             * owner-only */
+	_Atomic int  cancelled;     /* 1 once a cancel won (fired == CANCELLED) */
+	_Atomic int  fired;         /* 0, XTC_TIMER_FIRED or _CANCELLED */
 	int          sim_late;      /* DST: 1 once a buggify late-fire bumped
 	                             * this timer's deadline (bump at most
 	                             * once so a late fire cannot spin);
@@ -215,15 +223,12 @@ struct xtc_timer {
 	int          from_slab;     /* 1: from loop->timer_slab (xtc_timer_set);
 	                             * 0: __os_calloc (the park timers of
 	                             * xtc_task_park_on_timer / wait_fd). */
-	_Atomic int  refs;          /* 0: NOT refcounted -- lives on all_timers
-	                             * until loop_fini (xtc_timer_set timers).
-	                             * >0: a park timer, freed by the LAST of its
-	                             * two owners (the heap and the task's
-	                             * park_timer slot) to release it, so a fired
-	                             * or cancelled park timer is reclaimed at
-	                             * once instead of retained to loop_fini.
-	                             * Either owner may run on a different thread
-	                             * (a517a32), so the count is atomic. */
+	_Atomic int  refs;          /* owners left: the heap, plus the task's
+	                             * park_timer slot (park timers) or the
+	                             * caller's handle (xtc_timer_set, until
+	                             * xtc_timer_release).  The last to release
+	                             * frees the node.  Either owner may run on a
+	                             * different thread (a517a32), so atomic. */
 	xtc_loop_t  *loop;          /* back-pointer for cancel-by-handle */
 	struct xtc_timer *all_next; /* per-loop linked list for cleanup */
 };
@@ -322,7 +327,8 @@ struct xtc_loop {
 	/* All tasks ever spawned, for cleanup.  Owner-only after init. */
 	struct xtc_task *all_tasks;
 
-	/* All timers ever created, for cleanup at fini. */
+	/* Unused since 1.55.1 (always NULL): every timer is refcounted, and
+	 * timers still held at fini are freed with timer_slab. */
 	xtc_timer_t *all_timers;
 
 	/* M11.5b: per-loop slab cache for xtc_timer_t.  Created lazily
@@ -514,17 +520,22 @@ int  __xtc_loop_class_create(xtc_loop_t *loop, int shares,
  * never work-stolen); unpinned tasks may migrate via the deque. */
 int  __xtc_task_spawn_ex(xtc_loop_t *loop, xtc_task_fn fn, void *user,
                          int pinned, xtc_task_t **out_task);
+int  __xtc_task_spawn_cleanup(xtc_loop_t *loop, xtc_task_fn fn, void *user,
+         int pinned, void (*cleanup)(void *), void *cleanup_arg,
+         xtc_task_t **out_task);
 int  __xtc_timer_heap_push(xtc_loop_t *loop, xtc_timer_t *t);
 xtc_timer_t *__xtc_timer_heap_pop_due(xtc_loop_t *loop, int64_t now_ns);
 /*
- * Drop one reference to a park timer (refs > 0) and free it at zero.  A
- * no-op for a non-refcounted timer (refs == 0: an xtc_timer_set timer,
- * owned by all_timers).  Its two owners -- the timer heap and the task's
- * park_timer slot -- each call this exactly once when they let go, so the
- * node is reclaimed as soon as it has both fired/cancelled AND left the
- * slot, not retained until loop_fini.  Defined in timer.c.
+ * Drop one reference to a timer and free it at zero.  Its two owners --
+ * the timer heap, and the task's park_timer slot or the caller's
+ * xtc_timer_set handle -- each call this exactly once when they let go,
+ * so the node is reclaimed as soon as it has fired/cancelled AND been let
+ * go, not retained until loop_fini.  Defined in timer.c.
  */
 void __xtc_timer_park_release(xtc_timer_t *t);
+/* Cancel; 1 if this call stopped the fire, else 0.  Any thread; the
+ * caller holds a reference.  Defined in timer.c. */
+int  __xtc_timer_try_cancel(xtc_timer_t *t);
 int64_t      __xtc_timer_heap_next_deadline(xtc_loop_t *loop);
 void __xtc_task_cancel_park_timer(xtc_task_t *self);
 int  __xtc_loop_dispatch_event(xtc_loop_t *loop, xtc_io_event_t *ev);
