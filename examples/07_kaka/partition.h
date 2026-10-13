@@ -8,30 +8,28 @@
  *
  *	A kaka partition: an ordered, append-only log of records.
  *
- *	The design leans on libxtc's actor model.  Each partition is
- *	owned by exactly one xtc_proc; every PRODUCE for that partition
- *	is a message to that proc.  Two consequences fall out for free:
+ *	Each partition is owned by exactly one xtc_proc; every PRODUCE for
+ *	that partition is a message to that proc, so appends need no lock
+ *	and offsets come out monotonic (the BEAM single-owner insight
+ *	applied to a Kafka partition).
  *
- *	  1. Ordering.  The mailbox serializes appends, so records get
- *	     monotonic offsets with no per-partition lock on the write
- *	     path.  This is the BEAM single-owner insight applied to a
- *	     Kafka partition.
+ *	Persistence (plog_create_ex with a directory): records are appended
+ *	to CRC-framed segment files that roll at a size threshold.  Each
+ *	segment carries an in-memory sparse offset index (one entry per
+ *	~4 KiB of log, like Kafka's .index), so a read below the in-RAM
+ *	window seeks straight to the record instead of scanning.  Cold
+ *	reads use xtc_aio_pread, so the owning proc parks and the loop
+ *	keeps serving other connections.
  *
- *	  2. Bounded in-flight writes.  The mailbox cap is the natural
- *	     limit on un-acked produce requests; credit-based flow
- *	     control (Phase 3) builds on it to throttle producers
- *	     instead of dropping.
+ *	Durability is explicit: plog_append makes a record visible to the
+ *	writer but NOT durable; plog_sync (fdatasync via xtc_aio_fdatasync)
+ *	makes every appended record durable.  The broker acks a PRODUCE
+ *	only after plog_sync succeeds (group commit: one sync covers every
+ *	request batched behind it).  A failed write or sync puts the log in
+ *	a failed state (fail-stop): every later append fails.
  *
- *	The high-water mark (next offset) is published through an
- *	xtc_lrlock so consumers read it wait-free, never contending
- *	with the appending writer.
- *
- *	Phase 1 keeps records in memory.  Phase 2 swaps the backing
- *	store for Bitcask-framed segments without changing this API.
- *
- *	The log core below (plog_*) is plain data structure, unit-tested
- *	without any proc or socket.  partition_spawn wraps it in an
- *	xtc_proc.
+ *	The log core is plain data structure, unit-tested without any proc
+ *	or socket (the aio calls run synchronously off a loop).
  */
 
 #ifndef KAKA_PARTITION_H
@@ -42,49 +40,88 @@
 
 #include "frame.h"
 
-/* ---- in-memory partition log (the testable core) ---- */
-
 typedef struct plog plog_t;
 
-/* Create/destroy an in-memory log starting at base offset 0. */
+/* In-memory log starting at offset 0 (no persistence). */
 int   plog_create(plog_t **out);
 
 /*
- * Create a log backed by segmented, CRC-framed files in `dir`
- * (Phase 2).  Records are appended to a segment that rolls to a new
- * file once it exceeds `seg_roll_bytes` (0 selects a 1 MiB default);
- * segment files are named <20-digit-base-offset>.log, Kafka-style.
- * On open, existing segments in `dir` are scanned and replayed so
- * the log resumes at its previous high-water mark.  `dir` must
- * already exist.  Passing dir == NULL is equivalent to plog_create
- * (pure in-memory).  Reads remain O(1) in memory; the segments give
- * durability and crash recovery.
+ * Log backed by segment files in `dir` (which must exist).  A segment
+ * rolls once it exceeds `seg_roll_bytes` (0 = 1 MiB); files are named
+ * <20-digit-base-offset>.log.  On open the segments are scanned to
+ * rebuild the offset index and high-water mark; a torn or CRC-failing
+ * tail of the newest segment is truncated (a crash mid-append).  An
+ * inconsistency in an older segment fails the open rather than
+ * silently dropping or renumbering records.  dir == NULL is
+ * plog_create.
  */
 int   plog_create_ex(const char *dir, size_t seg_roll_bytes, plog_t **out);
 
+/* Size-based retention: after a roll, delete the oldest closed
+ * segments while the log exceeds `bytes` (0 = keep everything, the
+ * default).  The active segment is never deleted. */
+void  plog_set_retention(plog_t *log, uint64_t bytes);
+
+/* Sync, close and free. */
 void  plog_destroy(plog_t *log);
 
-/* Append one record; returns the offset assigned (>= 0) or -1 on OOM.
- * The record bytes are copied into the log. */
+/* Append one record (bytes are copied); returns its offset, or -1 on
+ * OOM, an oversized record, an I/O error, or a failed log.  Not
+ * durable until plog_sync. */
 int64_t plog_append(plog_t *log, const kaka_record_t *rec);
 
-/* Current high-water mark: the offset the next append will receive,
- * i.e. one past the last stored record. */
+/* Make every appended record durable.  0 on success; -1 on a sync
+ * failure, after which the log is failed.  No-op in memory mode. */
+int   plog_sync(plog_t *log);
+
+/* 1 once a write or sync has failed (no further appends accepted). */
+int   plog_failed(const plog_t *log);
+
+/* High-water mark: the offset the next append receives. */
 uint64_t plog_high_water(const plog_t *log);
 
-/* Fetch the record at `offset` into *rec (borrowed pointers into the
- * log's storage, valid until the next append/destroy).  Returns 1 on
- * hit, 0 if offset >= high-water, -1 on a freed/compacted offset. */
+/* Durable high-water: every offset below it survived a plog_sync (in
+ * memory mode, equal to plog_high_water). */
+uint64_t plog_synced(const plog_t *log);
+
+/* Oldest offset still stored (advances with retention). */
+uint64_t plog_start(const plog_t *log);
+
+/* Read the record at `offset` into *rec (borrowed pointers, valid
+ * until the next call on the log).  1 hit, 0 if offset >= high-water
+ * or below plog_start, -1 on I/O error. */
 int   plog_read(plog_t *log, uint64_t offset, kaka_record_t *rec);
 
-/* Number of live records. */
+/*
+ * Copy records [*offset, end) in FETCH wire format (u64 offset | u32
+ * key_len | u32 value_len | key | value) into dst, stopping before the
+ * first record that does not fit in `cap` bytes.  An *offset below
+ * plog_start starts at plog_start.  Returns the bytes written (>= 0),
+ * sets *n to the records copied and advances *offset past them; -1 on
+ * an I/O error or a CRC mismatch.  When no record fit, *need (if
+ * non-NULL) is set to the next record's wire size.
+ */
+long  plog_fetch(plog_t *log, uint64_t *offset, uint64_t end, uint8_t *dst,
+    size_t cap, uint32_t *n, size_t *need);
+
+/* Total records ever appended (== high-water). */
 uint64_t plog_count(const plog_t *log);
 
-/* Number of records currently RESIDENT IN MEMORY (the in-RAM window).
- * In persistence mode this stays bounded (~2 segments) even as
- * plog_count / plog_high_water climb without limit, because records in
- * closed segments are evicted from RAM.  Exposed for the bounded-memory
- * test; equals plog_count() in pure in-memory mode. */
+/* Records / payload bytes currently resident in RAM.  In persistence
+ * mode this is a bounded window (~2 segments) because records of
+ * closed segments are evicted (they stay readable from disk). */
 uint64_t plog_mem_records(const plog_t *log);
+uint64_t plog_mem_bytes(const plog_t *log);
+
+/* Evict every RAM-resident record (persistence mode only; the records
+ * stay readable from disk).  Used under memory-budget pressure. */
+void  plog_evict_all(plog_t *log);
+
+/* Number of segment files currently on disk (0 in memory mode). */
+uint64_t plog_segments(const plog_t *log);
+
+/* Test hook: replace the data-file sync (default xtc_aio_fdatasync).
+ * fn returns 0 or a negative errno.  NULL restores the default. */
+void  plog_set_sync_hook(int (*fn)(int fd));
 
 #endif /* KAKA_PARTITION_H */

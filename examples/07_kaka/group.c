@@ -94,8 +94,18 @@ grp_find(const struct grp_entry *tab, const char *group, const char *topic,
 	return 0;
 }
 
-/* Encode/append one committed offset to the durable log. */
-static void
+static int
+grp_count(const struct grp_entry *tab)
+{
+	int i, n = 0;
+	for (i = 0; i < GRP_MAX_ENTRIES; i++)
+		n += tab[i].used;
+	return n;
+}
+
+/* Append one committed offset to the durable log and fdatasync it.
+ * Returns 0, or -1 if it could not be made durable. */
+static int
 grp_persist(plog_t *log, const struct grp_req *req)
 {
 	uint8_t key[GRP_KEY_LEN];
@@ -105,7 +115,7 @@ grp_persist(plog_t *log, const struct grp_req *req)
 	int i;
 
 	if (log == NULL)
-		return;
+		return 0;
 	memset(key, 0, sizeof key);
 	memcpy(key, req->group, KAKA_GROUP_NAME_MAX);
 	memcpy(key + KAKA_GROUP_NAME_MAX, req->topic, KAKA_TOPIC_NAME_MAX);
@@ -121,7 +131,9 @@ grp_persist(plog_t *log, const struct grp_req *req)
 		val[i] = (uint8_t)((o >> (8 * i)) & 0xff);
 	rec.key = key; rec.key_len = GRP_KEY_LEN;
 	rec.value = val; rec.value_len = GRP_VAL_LEN;
-	(void)plog_append(log, &rec);
+	if (plog_append(log, &rec) < 0)
+		return -1;
+	return plog_sync(log);
 }
 
 /* Replay the durable log into the in-memory table (commit order =
@@ -172,13 +184,15 @@ coordinator_proc(void *arg)
 	plog_t *log = NULL;
 	void *msg;
 	size_t mlen;
+	int has_dir;
 
 	tab = calloc(GRP_MAX_ENTRIES, sizeof *tab);
 	if (tab == NULL) {
 		free(ca);
 		return;
 	}
-	if (ca != NULL && ca->has_dir) {
+	has_dir = ca != NULL && ca->has_dir;
+	if (has_dir) {
 		if (plog_create_ex(ca->dir, 0, &log) != 0)
 			log = NULL;
 		else
@@ -207,13 +221,18 @@ coordinator_proc(void *arg)
 		rep.tag = req.tag;
 
 		if (req.op == GRP_COMMIT) {
-			if (grp_upsert(tab, req.group, req.topic,
+			/* Durable first, then visible; the ack follows both. */
+			if ((has_dir && log == NULL) ||
+			    (!grp_find(tab, req.group, req.topic,
+			    req.partition, NULL) &&
+			    grp_count(tab) == GRP_MAX_ENTRIES) ||
+			    grp_persist(log, &req) != 0 ||
+			    grp_upsert(tab, req.group, req.topic,
 			    req.partition, req.offset) != 0) {
-				rep.ok = 0;          /* table full */
+				rep.ok = 0;          /* full or not durable */
 				(void)xtc_send(req.reply, &rep, sizeof rep);
 				continue;
 			}
-			grp_persist(log, &req);  /* durable, after in-memory */
 			rep.ok = 1;
 			rep.offset = req.offset;
 			(void)xtc_send(req.reply, &rep, sizeof rep);

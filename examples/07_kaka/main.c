@@ -6,11 +6,10 @@
  *
  * examples/07_kaka/main.c
  *
- *	Phase 0 scaffold for kaka, a Kafka-shaped log broker on libxtc.
- *	Starts an xtc_app, binds a TCP listener under a supervisor, and
- *	accepts connections that it closes immediately.  Subsequent
- *	phases (see README.md) add the protocol codec, partition logs,
- *	persistence, backpressure, and consumer groups.
+ *	kaka, a Kafka-shaped log broker on libxtc.  Starts an xtc_app,
+ *	binds a TCP listener under a supervisor, and serves the kaka
+ *	protocol (PROTOCOL.md) with one proc per connection and one per
+ *	partition.  SIGTERM/SIGINT drain the broker and exit.
  */
 
 #include <errno.h>
@@ -42,6 +41,9 @@ typedef struct broker_cfg {
 	const char *log_dir;
 	int64_t     max_memory;
 	int         max_clients;
+	int64_t     fsync_interval_ms;
+	int64_t     segment_bytes;
+	int64_t     retention_bytes;
 } broker_cfg_t;
 
 #define BROKER_CFG_DEFAULT { \
@@ -49,7 +51,10 @@ typedef struct broker_cfg {
 	.port = 9092, \
 	.log_dir = "/tmp/kaka", \
 	.max_memory = 0, \
-	.max_clients = 10000 \
+	.max_clients = 10000, \
+	.fsync_interval_ms = 0, \
+	.segment_bytes = 0, \
+	.retention_bytes = 0 \
 }
 
 typedef struct broker {
@@ -67,47 +72,60 @@ static void
 on_signal(int sig)
 {
 	(void)sig;
-	if (g_broker != NULL)
-		atomic_store(&g_broker->shutdown_requested, 1);
+	if (g_broker == NULL)
+		return;
+	if (atomic_exchange(&g_broker->shutdown_requested, 1) != 0)
+		_exit(1);                 /* second signal: give up now */
+	(void)alarm(30);                  /* backstop: exit even if wedged */
 }
 
 /*
- * Phase 0 listener: accept connections and close them.  Phase 1
- * replaces the close with spawning a per-connection xtc_proc that
- * speaks the kaka protocol, parking on the socket via
- * xtc_proc_wait_fd so an idle connection costs no CPU.
+ * Listener: accept with xtc_net_accept and hand each socket to a
+ * connection proc.  Out of descriptors (EMFILE/ENFILE) or memory, it
+ * backs off 10 ms and retries, leaving the connection in the backlog,
+ * instead of spinning or exiting.  It re-checks the shutdown flag at
+ * least every 100 ms; on shutdown it stops accepting, drains the broker
+ * (broker_shutdown) and stops the app.
  */
 static void
 listener_proc(void *arg)
 {
 	broker_t *b = arg;
+	int64_t last_warn = 0;
 
 	while (!atomic_load(&b->shutdown_requested)) {
-		struct sockaddr_in addr;
-		socklen_t alen = sizeof addr;
-		int fd = accept(b->listen_fd, (struct sockaddr *)&addr, &alen);
-		if (fd < 0) {
-			if (errno == EAGAIN || errno == EWOULDBLOCK) {
-				/* Park until the listen fd is readable again;
-				 * no busy spin. */
-				uint32_t revents = 0;
-				(void)xtc_proc_wait_fd(b->listen_fd,
-				    XTC_IO_READABLE, 1000LL * 1000 * 1000,
-				    &revents);
-				continue;
-			}
-			if (errno == EINTR)
-				continue;
+		int fd = -1;
+		int rc = xtc_net_accept(b->listen_fd, &fd);
+		if (rc == XTC_OK) {
+			atomic_fetch_add(&b->conn_count, 1);
+			if (broker_spawn_conn(b->loop, fd) != 0)
+				xtc_net_close(fd);    /* table full */
+			continue;
+		}
+		if (rc == XTC_E_AGAIN) {
+			uint32_t revents = 0;
+			(void)xtc_proc_wait_fd(b->listen_fd, XTC_IO_READABLE,
+			    100LL * 1000 * 1000, &revents);
+			continue;
+		}
+		if (rc == XTC_E_INVAL) {
+			XTC_LOG_ERROR_F("kaka: listen socket unusable; "
+			    "shutting down");
 			break;
 		}
-		/* Spawn a connection proc to service the socket; it parks
-		 * on the fd via xtc_proc_wait_fd, so idle connections cost
-		 * no CPU, and closes the fd on exit. */
-		atomic_fetch_add(&b->conn_count, 1);
-		xtc_net_setnonblock(fd);
-		if (broker_spawn_conn(b->loop, fd) != 0)
-			(void)close(fd);
+		/* XTC_E_RESOURCE (fd limit), XTC_E_NOMEM, XTC_E_IO. */
+		if (xtc_clock_mono() - last_warn > 1000LL * 1000 * 1000) {
+			XTC_LOG_WARN_F("kaka: accept: %s; backing off",
+			    xtc_strerror(rc));
+			last_warn = xtc_clock_mono();
+		}
+		(void)xtc_proc_sleep(10LL * 1000 * 1000);
 	}
+	XTC_LOG_INFO_F("kaka: shutdown requested; draining");
+	xtc_net_close(b->listen_fd);
+	b->listen_fd = -1;
+	broker_shutdown(5LL * 1000 * 1000 * 1000);
+	(void)xtc_app_stop(b->app);
 }
 
 static void
@@ -116,7 +134,7 @@ usage(FILE *fp, const char *prog)
 	fprintf(fp,
 	    "Usage: %s [options]\n"
 	    "\n"
-	    "kaka -- a Kafka-shaped log broker on libxtc (Phase 0 scaffold)\n"
+	    "kaka -- a Kafka-shaped log broker on libxtc\n"
 	    "\n"
 	    "Options:\n"
 	    "  -h, --host=ADDR       Bind address (default: 0.0.0.0)\n"
@@ -124,6 +142,16 @@ usage(FILE *fp, const char *prog)
 	    "  -d, --dir=PATH        Log directory (default: /tmp/kaka)\n"
 	    "  -m, --max-memory=N    Memory cap in bytes (0 = unlimited)\n"
 	    "  -n, --max-clients=N   Max connections (default: 10000)\n"
+	    "      --fsync-interval-ms=N\n"
+	    "                        0 (default): ack a PRODUCE only after\n"
+	    "                        fdatasync (group commit).  N > 0: ack\n"
+	    "                        after write(2), fdatasync at most every\n"
+	    "                        N ms -- an OS crash or power loss can\n"
+	    "                        lose up to N ms of acked records\n"
+	    "      --segment-bytes=N Segment roll size (default: 1 MiB)\n"
+	    "      --retention-bytes=N\n"
+	    "                        Delete the oldest segments of a partition\n"
+	    "                        beyond N bytes (default: 0 = keep all)\n"
 	    "      --help            Show this help\n",
 	    prog);
 }
@@ -137,6 +165,9 @@ parse_args(int argc, char **argv, broker_cfg_t *cfg)
 		{ "dir",         required_argument, NULL, 'd' },
 		{ "max-memory",  required_argument, NULL, 'm' },
 		{ "max-clients", required_argument, NULL, 'n' },
+		{ "fsync-interval-ms", required_argument, NULL, 'F' },
+		{ "segment-bytes", required_argument, NULL, 'S' },
+		{ "retention-bytes", required_argument, NULL, 'R' },
 		{ "help",        no_argument,       NULL, 'H' },
 		{ NULL, 0, NULL, 0 }
 	};
@@ -151,6 +182,9 @@ parse_args(int argc, char **argv, broker_cfg_t *cfg)
 		case 'd': cfg->log_dir = optarg; break;
 		case 'm': cfg->max_memory = atoll(optarg); break;
 		case 'n': cfg->max_clients = atoi(optarg); break;
+		case 'F': cfg->fsync_interval_ms = atoll(optarg); break;
+		case 'S': cfg->segment_bytes = atoll(optarg); break;
+		case 'R': cfg->retention_bytes = atoll(optarg); break;
 		case 'H':
 			usage(stdout, argv[0]);
 			return 1;
@@ -199,6 +233,7 @@ main(int argc, char **argv)
 	}
 	xtc_net_setnonblock(b->listen_fd);
 
+	(void)signal(SIGPIPE, SIG_IGN);
 	(void)signal(SIGINT, on_signal);
 	(void)signal(SIGTERM, on_signal);
 
@@ -213,6 +248,15 @@ main(int argc, char **argv)
 	b->loop = xtc_app_loop(b->app);
 	broker_set_loop(b->loop);
 	broker_set_log_dir(cfg.log_dir);
+	broker_set_fsync_interval(cfg.fsync_interval_ms * 1000 * 1000);
+	broker_set_segment_bytes(cfg.segment_bytes > 0 ?
+	    (size_t)cfg.segment_bytes : 0);
+	broker_set_retention_bytes(cfg.retention_bytes > 0 ?
+	    (uint64_t)cfg.retention_bytes : 0);
+	if (broker_start(b->loop, cfg.max_clients) != 0) {
+		fprintf(stderr, "broker start failed\n");
+		return 1;
+	}
 
 	/* Observability + memory budget: stored record payload is capped
 	 * at cfg.max_memory (0 = unbounded); PRODUCE past the cap is
@@ -225,15 +269,16 @@ main(int argc, char **argv)
 	kids[0].name = "listener";
 	kids[0].fn = listener_proc;
 	kids[0].arg = b;
-	kids[0].policy = XTC_RESTART_PERMANENT;
+	kids[0].policy = XTC_RESTART_TRANSIENT;
 
 	if (xtc_app_start(b->app, kids, 1) != XTC_OK) {
 		fprintf(stderr, "app start failed\n");
 		return 1;
 	}
 
-	XTC_LOG_INFO_F("kaka listening on %s:%d, log dir %s (persistent)",
-	    cfg.host, cfg.port, cfg.log_dir);
+	XTC_LOG_INFO_F("kaka listening on %s:%d, log dir %s (%s)",
+	    cfg.host, cfg.port, cfg.log_dir, cfg.fsync_interval_ms > 0 ?
+	    "relaxed fsync" : "fsync before ack");
 	if (log != NULL)
 		xtc_log_drain(log);
 
@@ -244,7 +289,8 @@ main(int argc, char **argv)
 	if (log != NULL)
 		xtc_log_drain(log);
 
-	(void)close(b->listen_fd);
+	if (b->listen_fd >= 0)
+		xtc_net_close(b->listen_fd);
 	xtc_app_destroy(b->app);
 	if (log != NULL)
 		xtc_log_destroy(log);

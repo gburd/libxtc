@@ -43,18 +43,23 @@ SRCS    = main.c frame.c partition.c broker.c group.c metrics.c
 OBJS    = $(SRCS:.c=.o)
 TARGET  = kaka-broker
 
+TESTS   = test_frame test_partition test_broker test_group
+
 .PHONY: all clean test
 
-all: $(TARGET) test_frame test_partition test_broker test_group
+all: $(TARGET) $(TESTS)
+
+test: $(TESTS)
+	@for t in $(TESTS); do ./$$t || exit 1; done
 
 test_frame: test_frame.c frame.c frame.h
 	$(CC) $(CFLAGS) -o $@ test_frame.c frame.c
 
-test_partition: test_partition.c partition.c frame.h partition.h
-	$(CC) $(CFLAGS) -o $@ test_partition.c partition.c
+test_partition: test_partition.c partition.c frame.c frame.h partition.h
+	$(CC) $(CFLAGS) -o $@ test_partition.c partition.c frame.c $(LDFLAGS)
 
-test_broker: test_broker.c broker.c frame.c partition.c metrics.c broker.h
-	$(CC) $(CFLAGS) -o $@ test_broker.c broker.c frame.c partition.c metrics.c $(LDFLAGS)
+test_broker: test_broker.c broker.c frame.c partition.c metrics.c group.c broker.h
+	$(CC) $(CFLAGS) -o $@ test_broker.c broker.c frame.c partition.c metrics.c group.c $(LDFLAGS)
 
 test_group: test_group.c group.c group.h partition.c frame.c
 	$(CC) $(CFLAGS) -o $@ test_group.c group.c partition.c frame.c $(LDFLAGS)
@@ -66,5 +71,5 @@ $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJS) $(TARGET) test_frame test_partition test_broker test_group
+	rm -f $(OBJS) $(TARGET) $(TESTS)
 	rm -rf *.dSYM
