@@ -1055,10 +1055,13 @@ xs_cat_find_or_create(bt_t *bt, const char *name, const char *coldefs)
  * the close hook) so a freed bt pointer reused by a new tree cannot
  * match a stale entry and resolve a wrong table-id.  The persisted
  * catalog (table-id 0) remains authoritative. */
+static void xs_rowid_hw_forget(bt_t *bt);
+
 static void
 xstore_cat_forget(bt_t *bt)
 {
 	int i;
+	xs_rowid_hw_forget(bt);
 	xs_cat_lock();
 	for (i = 0; i < g_cat_n; ) {
 		if (g_cat[i].bt == bt) {
@@ -2789,23 +2792,47 @@ xs_ww_conflict_locked(bt_t *bt, const xs_wrec_t *ws, int wn)
 
 static int
 xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n,
-    int deleted, uint64_t base, uint64_t *out_ts);
+    int deleted, uint64_t base, int insert, uint64_t *out_ts);
+static int xs_row_live(bt_t *bt, uint32_t tableid, int64_t rowid);
 
 static int
 xs_put(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n, int deleted)
 {
 	uint64_t ts;
-	return xs_put_ts(bt, tableid, rowid, blob, n, deleted, 0, &ts);
+	return xs_put_ts(bt, tableid, rowid, blob, n, deleted, 0, 0, &ts);
+}
+
+/* An INSERT reads "the key is absent".  Caller holds the commit lock.
+ * Wait (dropping the lock) until no in-flight commit writes the key --
+ * its outcome decides -- then report whether a live version exists.
+ * In-flight commits never wait on an inserter, so this terminates. */
+static int
+xs_key_live_locked(bt_t *bt, uint32_t tableid, int64_t rowid)
+{
+	const struct xs_inflight *e;
+	for (;;) {
+		for (e = g_inflight; e != NULL; e = e->next)
+			if (xs_inflight_has(e, tableid, rowid))
+				break;
+		if (e == NULL)
+			return xs_row_live(bt, tableid, rowid);
+		xs_commit_unlock();
+		xs_nap();
+		xs_commit_lock();
+		xs_gate_wait_locked();
+	}
 }
 
 /* Autocommit write of one version; *out_ts gets its commit timestamp.
  * base != 0: the value was computed from a read at snapshot `base`; if
  * the row has a newer committed version (or a commit writing it is in
- * flight) return SX_BUSY and write nothing (first-committer-wins).  The
+ * flight) return SX_BUSY and write nothing (first-committer-wins).
+ * insert: the key must not exist; if it does (once any in-flight writer
+ * of it has finished) return SX_CONSTRAINT and write nothing.  The
  * check and the registration are one step under the commit lock. */
 static int
 xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n,
-    int deleted, uint64_t base, uint64_t *out_ts)
+    int deleted, uint64_t base, int insert, uint64_t *out_ts)
 {
 	uint8_t key[XS_VKLEN];
 	uint8_t buf[1 + XS_VMAX];
@@ -2819,6 +2846,10 @@ xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n,
 	fl.rid = rowid;
 	xs_commit_lock();
 	xs_gate_wait_locked();
+	if (insert && xs_key_live_locked(bt, tableid, rowid)) {
+		xs_commit_unlock();
+		return SX_CONSTRAINT;
+	}
 	if (base != 0) {
 		xs_wrec_t probe;
 		memset(&probe, 0, sizeof probe);
@@ -3048,13 +3079,14 @@ xs_maybe_prune(bt_t *bt, uint32_t tableid, int64_t rowid, uint64_t horizon)
  * captured before the write (to remove its old index entry) and the new
  * value's entry is added after. */
 static int
-xs_put_pruned(xstore_ctx_t *cx, uint32_t tableid, int64_t rowid, const void *blob, int n, int deleted)
+xs_put_pruned(xstore_ctx_t *cx, uint32_t tableid, int64_t rowid, const void *blob, int n,
+    int deleted, int insert)
 {
 	uint8_t pre[XS_VMAX]; int prelen = 0;
 	int rc;
 	prelen = xs_idx_preimage(cx->bt, tableid, rowid, pre, (int)sizeof pre);
 	rc = xs_put_ts(cx->bt, tableid, rowid, blob, n, deleted, cx->stmt_base,
-	    &cx->last_ts);
+	    insert, &cx->last_ts);
 	if (rc == SX_OK) {
 		xs_idx_maintain(cx->bt, tableid, rowid,
 		    (const uint8_t *)blob, deleted ? 0 : n, deleted,
@@ -3109,12 +3141,94 @@ xstore_write_txn(struct xsql *db, uint32_t tableid, int64_t rowid,
 	 * stmt_base; xs_put_ts refuses it (SX_BUSY) if the row was committed
 	 * past that since, or a commit writing it is in flight. */
 	rc = xs_put_pruned(cx, tableid, rowid, deleted ? NULL : rec,
-	                   deleted ? 0 : reclen, deleted);
+	                   deleted ? 0 : reclen, deleted, 0);
 	if (rc == SX_BUSY)
 		cx->last_conflict = 1;
 	if (rc == SX_OK)
 		xs_wait_visible(cx->last_ts);
 	return rc == SX_OK ? 0 : -1;
+}
+
+/* INSERT of one new row: like xstore_write_txn, but the key must not
+ * exist.  Autocommit checks that atomically with the write (see
+ * xs_put_ts); in a transaction the statement checked it and the commit's
+ * write-write check catches a row committed since the snapshot.
+ * Returns 0, 1 if the key exists (unique violation), or -1 on error. */
+int
+xstore_insert_txn(struct xsql *db, uint32_t tableid, int64_t rowid,
+                  const uint8_t *rec, int reclen)
+{
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	int rc;
+	if (cx == NULL) return -1;
+	xs_enter_ctx(cx, db);
+	if (cx->in_txn)
+		return xstore_write_txn(db, tableid, rowid, rec, reclen, 0);
+	rc = xs_put_pruned(cx, tableid, rowid, rec, reclen, 0, 1);
+	if (rc == SX_OK) {
+		xs_wait_visible(cx->last_ts);
+		return 0;
+	}
+	return rc == SX_CONSTRAINT ? 1 : -1;
+}
+
+/*
+ * Auto-assigned rowids.  The highest rowid handed out per (bt, table) in
+ * this process, so concurrent INSERTs that omit the key never pick the
+ * same one (each would otherwise compute the same committed max + 1).
+ * A rolled-back reservation leaves a gap, as SQLite may.  Guarded by the
+ * commit lock; entries for a bt are dropped when it closes.  If the table
+ * is full the old max + 1 is used, and a collision is then refused by the
+ * INSERT's uniqueness check rather than lost.
+ */
+#define XS_ROWID_HW_MAX 256
+static struct xs_rowid_hw {
+	bt_t    *bt;
+	uint32_t tableid;
+	int64_t  hw;
+} g_rowid_hw[XS_ROWID_HW_MAX];
+static int g_rowid_hw_n;
+
+int64_t
+xstore_next_rowid(struct xsql *db, uint32_t tableid, int64_t floor)
+{
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	int64_t r = floor + 1;
+	int i;
+	if (cx == NULL) return r;
+	xs_commit_lock();
+	for (i = 0; i < g_rowid_hw_n; i++)
+		if (g_rowid_hw[i].bt == cx->bt && g_rowid_hw[i].tableid == tableid)
+			break;
+	if (i == g_rowid_hw_n && i < XS_ROWID_HW_MAX) {
+		g_rowid_hw[i].bt = cx->bt;
+		g_rowid_hw[i].tableid = tableid;
+		g_rowid_hw[i].hw = floor;
+		g_rowid_hw_n++;
+	}
+	if (i < g_rowid_hw_n) {
+		if (g_rowid_hw[i].hw >= r)
+			r = g_rowid_hw[i].hw + 1;
+		g_rowid_hw[i].hw = r;
+	}
+	xs_commit_unlock();
+	return r;
+}
+
+static void
+xs_rowid_hw_forget(bt_t *bt)
+{
+	int i;
+	xs_commit_lock();
+	for (i = 0; i < g_rowid_hw_n; ) {
+		if (g_rowid_hw[i].bt == bt) {
+			g_rowid_hw_n--;
+			if (i != g_rowid_hw_n) g_rowid_hw[i] = g_rowid_hw[g_rowid_hw_n];
+		} else {
+			i++;
+		}
+	}
+	xs_commit_unlock();
 }
 
 /* Start of a DML statement: record the snapshot its reads use, the
@@ -3197,7 +3311,7 @@ xs_update(xsql_vtab *pv, int argc, xsql_value **argv,
 		int64_t rid = xsql_value_int64(argv[0]);   /* DELETE */
 		if (cx->in_txn)
 			return xs_buf_write(cx, v->tableid, rid, NULL, 0, 1);
-		return xs_put_pruned(cx, v->tableid, rid, NULL, 0, 1);
+		return xs_put_pruned(cx, v->tableid, rid, NULL, 0, 1, 0);
 	}
 	{
 		/*
@@ -3240,13 +3354,13 @@ xs_update(xsql_vtab *pv, int argc, xsql_value **argv,
 			int64_t oldid = xsql_value_int64(argv[0]);
 			if (oldid != rowid) {
 				if (cx->in_txn) (void)xs_buf_write(cx, v->tableid, oldid, NULL, 0, 1);
-				else (void)xs_put_pruned(cx, v->tableid, oldid, NULL, 0, 1);
+				else (void)xs_put_pruned(cx, v->tableid, oldid, NULL, 0, 1, 0);
 			}
 		}
 		if (pRowid != NULL) *pRowid = rowid;
 		if (cx->in_txn)
 			return xs_buf_write(cx, v->tableid, rowid, rec, reclen, 0);
-		return xs_put_pruned(cx, v->tableid, rowid, rec, reclen, 0);
+		return xs_put_pruned(cx, v->tableid, rowid, rec, reclen, 0, 0);
 	}
 }
 #endif /* SQLXTC_VTAB */

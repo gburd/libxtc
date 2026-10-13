@@ -108,6 +108,8 @@ sql_classify_prefix(const char *sql, size_t len, sql_info_t *info)
 		info->readonly = 1;
 	} else if ((n = parse_keyword(p, end, "BEGIN")) != 0) {
 		info->kind = SQL_KIND_BEGIN;
+	} else if ((n = parse_keyword(p, end, "START")) != 0) {
+		info->kind = SQL_KIND_BEGIN;      /* START TRANSACTION [ISOLATION ...] */
 	} else if ((n = parse_keyword(p, end, "COMMIT")) != 0) {
 		info->kind = SQL_KIND_COMMIT;
 	} else if ((n = parse_keyword(p, end, "END")) != 0) {

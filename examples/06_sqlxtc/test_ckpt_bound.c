@@ -29,6 +29,7 @@
 
 #include "engine.h"
 #include "xtc.h"
+#include "xtc_async.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "t_tmp.h"
@@ -99,6 +100,9 @@ main(void)
 	long c, bad = 0, end_wal;
 	int fd, i;
 
+	/* SQL runs on fibers: use the server's 512 KiB stack (main.c), not
+	 * the 64 KiB library default, which sanitizer frames can exceed. */
+	if (xtc_set_stack_size(512u * 1024u) != XTC_OK) return 1;
 	t_tmpl(path, sizeof path, "sqlxtc-ckpt");
 	if ((fd = mkstemp(path)) < 0) return 1;
 	close(fd);

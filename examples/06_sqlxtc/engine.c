@@ -217,6 +217,7 @@ static int    g_xrunning;        /* background procs spawned */
  */
 static uint64_t     g_ckpt_min = 64ull << 20;  /* bytes; sx_storage_set_checkpoint */
 static _Atomic int  g_ckpt_stop, g_ckpt_alive;
+static xtc_pid_t    g_ckpt_pid;
 static _Atomic uint64_t g_ckpt_count;
 
 void
@@ -238,7 +239,13 @@ sx_ckpt_proc(void *arg)
 	(void)arg;
 	while (!atomic_load(&g_ckpt_stop)) {
 		uint64_t sz, trig;
-		(void)xtc_proc_sleep(50LL * 1000 * 1000);
+		void *m = NULL;
+		size_t mn = 0;
+		/* Tick every 50 ms; sx_ckpt_stop's message ends the wait early. */
+		if (xtc_recv(&m, &mn, 50LL * 1000 * 1000) == XTC_OK)
+			xtc_free(m);
+		if (atomic_load(&g_ckpt_stop))
+			break;
 		if (g_xwal == NULL || wal_failed(g_xwal))
 			continue;
 		sz = wal_size(g_xwal);
@@ -256,6 +263,11 @@ sx_ckpt_proc(void *arg)
 	atomic_store(&g_ckpt_alive, 0);
 }
 
+/* Stop the checkpoint proc and, on a proc, wait for it to finish any
+ * checkpoint in progress.  Off a proc there is no wait, as for the
+ * other storage procs: the caller is past xtc_exec_run / xtc_loop_run,
+ * so the proc's loop no longer runs (waiting there cost 20 s per
+ * shutdown) and the proc cannot touch the engine again. */
 static void
 sx_ckpt_stop(void)
 {
@@ -263,12 +275,11 @@ sx_ckpt_stop(void)
 	if (!atomic_load(&g_ckpt_alive))
 		return;
 	atomic_store(&g_ckpt_stop, 1);
-	for (i = 0; i < 2000 && atomic_load(&g_ckpt_alive); i++) {
-		if (xtc_pid_is_none(xtc_self()))
-			(void)xtc_sleep_ns(10LL * 1000 * 1000);
-		else
-			(void)xtc_proc_sleep(10LL * 1000 * 1000);
-	}
+	(void)xtc_send(g_ckpt_pid, "s", 1);     /* end its tick wait now */
+	if (xtc_pid_is_none(xtc_self()))
+		return;
+	for (i = 0; i < 2000 && atomic_load(&g_ckpt_alive); i++)
+		(void)xtc_proc_sleep(1LL * 1000 * 1000);
 }
 
 int
@@ -418,7 +429,22 @@ sx_storage_open(const char *path, unsigned int n_frames)
 			bm_destroy(g_xbm); g_xbm = NULL;
 			return SX_ERROR;
 		}
+		/*
+		 * Replay without the double-write ring.  Every page evicted
+		 * during replay used to cost a ring write plus an fdatasync
+		 * (~2.5 s per MB of log).  Torn-page protection buys nothing
+		 * here: this page file is fresh, and no open trusts it until a
+		 * clean shutdown has flushed it through the ring and set the
+		 * clean flag.  A crash during or after replay, before that,
+		 * finds the flag clear and rebuilds again from the log.  Replay
+		 * only reads the log (undo appends CLRs, which replay
+		 * idempotently), so recovery can be repeated.  The checkpoint
+		 * below makes the log compact and durable before any new
+		 * commit.
+		 */
+		bm_set_double_write(g_xbm, 0);
 		(void)xstore_recover(g_xbt, g_xwal_path);  /* replay the log */
+		bm_set_double_write(g_xbm, 1);
 	}
 
 	/* Open the log (append past whatever is there). */
@@ -471,6 +497,8 @@ sx_storage_run(xtc_loop_t *loop)
 		atomic_store(&g_ckpt_alive, 1);
 		if (xtc_proc_spawn(loop, sx_ckpt_proc, NULL, &co, &cp) != XTC_OK)
 			atomic_store(&g_ckpt_alive, 0);
+		else
+			g_ckpt_pid = cp;
 	}
 	(void)bm_provider_spawn(g_xbm, loop, 1LL * 1000 * 1000, NULL);  /* 1ms */
 	(void)bm_trickler_spawn(g_xbm, loop, 5LL * 1000 * 1000, NULL);  /* 5ms */
@@ -506,12 +534,15 @@ sx_storage_checkpoint(void)
 }
 
 /*
- * Stop the background storage procs (WAL writer, page provider,
- * trickler) without tearing down the engine, so an executor running
- * them can go idle and xtc_exec_run can return -- after which the
- * caller does sx_storage_close off the loop.  Idempotent.  Safe to
- * call from a proc once all committers are done (no commit may follow,
- * since the group-commit writer is stopped).
+ * Stop the background storage procs (checkpointer, WAL writer, page
+ * provider, trickler) without tearing down the engine, so an executor
+ * running them can go idle or be stopped -- after which the caller does
+ * sx_storage_close off the loop.  Call from a proc while the loops still
+ * run.  Commits already in flight finish (logged, acknowledged and
+ * applied) before the writer stops; any later commit waits at the
+ * checkpoint gate and is never acknowledged, so the store that
+ * sx_storage_close flushes holds every acknowledged commit and no
+ * half-applied one.  Idempotent.
  */
 void
 sx_storage_quiesce(void)
@@ -519,6 +550,8 @@ sx_storage_quiesce(void)
 	if (!g_xrunning)
 		return;
 	sx_ckpt_stop();
+	if (g_xwal != NULL)
+		xstore_quiesce_begin();        /* closed until the next open */
 	if (g_xwal != NULL) wal_writer_stop(g_xwal);
 	bm_trickler_stop(g_xbm);
 	bm_provider_stop(g_xbm);
@@ -590,6 +623,15 @@ sx_storage_abandon(void)
 	if (g_xwal != NULL) { wal_close(g_xwal); g_xwal = NULL; }
 	if (g_xbt != NULL) { bt_close(g_xbt); g_xbt = NULL; }
 	if (g_xbm != NULL) { bm_destroy(g_xbm); g_xbm = NULL; }
+}
+
+void
+sx_storage_bm_stats(struct bm_stats *out)
+{
+	if (g_xbm != NULL)
+		bm_get_stats(g_xbm, out);
+	else
+		memset(out, 0, sizeof *out);
 }
 
 int
@@ -909,6 +951,7 @@ sx_word(const char **pp, const char *w)
  *   SET SESSION CHARACTERISTICS AS TRANSACTION
  *       ISOLATION LEVEL <lvl>                          -> session level
  *   BEGIN [TRANSACTION] ISOLATION LEVEL <lvl>          -> BEGIN + txn level
+ *   START TRANSACTION ISOLATION LEVEL <lvl>            -> BEGIN + txn level
  * <lvl> is SERIALIZABLE | REPEATABLE READ | READ COMMITTED |
  * READ UNCOMMITTED | SNAPSHOT.  Returns the kind (SXN_SET_ISO or
  * SXN_BEGIN) with the canonical level in lvl and *session set, or
@@ -926,6 +969,9 @@ sx_classify_iso(const char *sql, char *lvl, size_t cap, int *session)
 	while (isspace((unsigned char)*p)) p++;
 	if (sx_word(&p, "BEGIN")) {
 		(void)sx_word(&p, "TRANSACTION");
+		k = SXN_BEGIN;
+	} else if (sx_word(&p, "START")) {      /* START TRANSACTION ISOLATION ... */
+		if (!sx_word(&p, "TRANSACTION")) return SXN_NONE;
 		k = SXN_BEGIN;
 	} else if (sx_word(&p, "SET")) {
 		if (sx_word(&p, "SESSION")) {
@@ -1158,19 +1204,29 @@ sx_step(sx_stmt *st)
 		case SXN_WRITE: {
 			int64_t nch = 0;
 			int rc;
+			char *verr = NULL;
 			const char *w = st->sql;
 			while (isspace((unsigned char)*w)) w++;
 			/* UPDATE/DELETE compute rows from a read: give the statement
-			 * one snapshot and a write-write check against it.  INSERT has
-			 * no read dependency (and REPLACE may rewrite its own key). */
+			 * one snapshot and a write-write check against it.  An INSERT
+			 * reads only "the key is absent", which the insert path checks
+			 * atomically with the write (xstore_insert_txn). */
 			if (sx_word(&w, "UPDATE") || sx_word(&w, "DELETE"))
 				xstore_stmt_begin(st->db);
 			rc = vx_run_write_p((struct xsql *)st->db, st->sql,
-			    st->nbind ? st->binds : NULL, st->nbind, &nch, NULL);
+			    st->nbind ? st->binds : NULL, st->nbind, &nch, &verr);
 			xstore_stmt_end(st->db);
-			if (rc == 1) { st->nchanges = nch; return SX_DONE; }
-			if (xstore_last_conflict(st->db))
+			if (rc == 1) { free(verr); st->nchanges = nch; return SX_DONE; }
+			if (xstore_last_conflict(st->db)) {
+				free(verr);
 				return nat_set_err(st->db, SX_MSG_SERIALIZE, SX_BUSY);
+			}
+			if (verr != NULL && strncmp(verr, "UNIQUE", 6) == 0) {
+				rc = nat_set_err(st->db, verr, SX_CONSTRAINT);
+				free(verr);
+				return rc;
+			}
+			free(verr);
 			/* The native write path declined: a hard error (no VDBE). */
 			return nat_set_run_error(st);
 		}

@@ -329,11 +329,13 @@ struct bm {
 
 	/* double-write buffer (torn-page protection); dw_fd < 0 == disabled */
 	int               dw_fd;
+	int               dw_off;        /* bm_set_double_write(bm, 0) */
 	pthread_mutex_t   dw_mu;
 	uint32_t          dw_slots;      /* ring size in slots */
 	uint32_t          dw_next;       /* next slot to claim (round-robin) */
 	_Atomic uint64_t  dw_seq;        /* monotonic write sequence */
 	_Atomic uint64_t  s_dw_repaired; /* pages restored from the DW on reopen */
+	_Atomic uint64_t  s_dw_writes;   /* page images written to the DW ring */
 	_Atomic uint64_t  s_io_errors;   /* failed page / double-write writes */
 
 	/* ARIES page LSN (active when lsn_off >= 0). */
@@ -495,8 +497,9 @@ dw_protect(bm_t *bm, bm_pid_t pid, const void *page)
 	uint32_t slot;
 	off_t off;
 
-	if (bm->dw_fd < 0)
+	if (bm->dw_fd < 0 || bm->dw_off)
 		return 0;                     /* double-write disabled */
+	atomic_fetch_add_explicit(&bm->s_dw_writes, 1, memory_order_relaxed);
 	pthread_mutex_lock(&bm->dw_mu);
 	slot = bm->dw_next;
 	bm->dw_next = (slot + 1u) % bm->dw_slots;
@@ -1976,6 +1979,13 @@ bm_get_lsn(bm_t *bm)
 }
 
 void
+bm_set_double_write(bm_t *bm, int on)
+{
+	if (bm != NULL)
+		bm->dw_off = on ? 0 : 1;
+}
+
+void
 bm_set_wal_flush(bm_t *bm, int (*flush)(void *ctx, uint64_t lsn), void *ctx)
 {
 	bm->wal_flush = flush;
@@ -2970,6 +2980,7 @@ bm_get_stats(bm_t *bm, bm_stats_t *out)
 	out->tr_passes = atomic_load_explicit(&bm->s_tr_passes, memory_order_relaxed);
 	out->tr_adaptive = atomic_load_explicit(&bm->s_tr_adaptive, memory_order_relaxed);
 	out->dw_repaired = atomic_load_explicit(&bm->s_dw_repaired, memory_order_relaxed);
+	out->dw_writes = atomic_load_explicit(&bm->s_dw_writes, memory_order_relaxed);
 	out->freed = atomic_load_explicit(&bm->s_freed, memory_order_relaxed);
 	out->reissued = atomic_load_explicit(&bm->s_reissued, memory_order_relaxed);
 	out->free_pids = bm->free_pids_n;   /* approximate (read without the pid lock) */

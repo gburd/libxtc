@@ -40,6 +40,7 @@
 #include "wal.h"
 #include "xstore.h"
 #include "xtc.h"
+#include "xtc_async.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "t_tmp.h"
@@ -318,6 +319,9 @@ int
 main(void)
 {
 	signal(SIGXFSZ, SIG_IGN);
+	/* SQL runs on fibers: use the server's 512 KiB stack (main.c), not
+	 * the 64 KiB library default, which sanitizer frames can exceed. */
+	if (xtc_set_stack_size(512u * 1024u) != XTC_OK) return 1;
 	if (test_wal_level() != 0) { fprintf(stderr, "FAIL: wal setup\n"); return 1; }
 	if (test_engine_level() != 0) { fprintf(stderr, "FAIL: engine setup\n"); return 1; }
 	if (g_fail) { fprintf(stderr, "FAIL: test_wal_fail\n"); return 1; }
