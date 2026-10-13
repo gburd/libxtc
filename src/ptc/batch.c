@@ -898,8 +898,9 @@ batch_mt_push(xtc_batch_t *b, struct batch_mt_rec *rec)
  *
  * There is no "cancel arrived before its submit" case to remember. The
  * ring (src/ptc/chan.c, xtc_chan_mpsc_try_send) reserves a slot by CAS on
- * head, and the consumer drains strictly in tail order, spinning on a
- * reserved-but-unwritten slot rather than skipping it. submit_mt writes
+ * head, and the consumer drains strictly in tail order: on a reserved-but-
+ * unwritten slot try_recv stops (AGAIN) rather than skipping it, and the
+ * next drain resumes at that slot. submit_mt writes
  * *out only after its push succeeded, so any producer that can name H in
  * cancel_mt/resume_mt reserves its slot after SUBMIT(H)'s: the control is
  * always drained after the submit. (The private __xtc_batch_mt_inject hook
@@ -1270,8 +1271,14 @@ batch_driver(void *arg)
 		}
 		__xtc_unsafe_leave();
 		if (n == 0) {
-			if (!finished && !pending && b->closed
-			    && b->live == 0 && b->mt.n_held == 0)
+			/* A non-empty ring that did not drain holds a record
+			 * reserved but not yet written (try_recv stops there
+			 * with AGAIN): yield so its producer can finish rather
+			 * than spin the loop. */
+			if (!finished && b->l_term.head == B_NIL
+			    && (pending
+			        || (b->closed && b->live == 0
+			            && b->mt.n_held == 0)))
 				xtc_yield(); /* a producer is mid-push: brief */
 			else if (!finished && !pending)
 				(void)xtc_notify_wait(b->notify, -1);
