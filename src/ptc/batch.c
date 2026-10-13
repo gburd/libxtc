@@ -97,11 +97,16 @@ struct batch_inflight {
 
 /* Cross-loop admission (S2). One group-wide bounded MPSC ring carries SUBMIT,
  * CANCEL and RESUME control records in FIFO order to the single driver. The
- * records are drawn from a preallocated pool seeded into a SECOND MPSC
- * "free-pool" channel (claim = try_recv, release = try_send), so submit_mt is
- * allocation-free and the ABA hazard of a bespoke lock-free free-list is
- * avoided by reusing the already-proven channel. See the design's
- * "Decisions locked" record-pool text. */
+ * records are preallocated and drawn from free-pool channels (claim =
+ * try_recv, release = try_send), so the mt calls are allocation-free and the
+ * ABA hazard of a bespoke lock-free free-list is avoided by reusing the
+ * already-proven channel. SUBMITs and controls use SEPARATE pools of
+ * mt_queue_cap records each: a held SUBMIT keeps its record (backpressure),
+ * so with one shared pool, held hand-ins could take every record and starve
+ * the resume_mt/cancel_mt that would free a slot (a group of BLOCKED members
+ * then wedged). A control record is never held; the driver returns it at
+ * the next drain. The ring holds both kinds, so it never fills while a
+ * record is claimed. */
 enum batch_mt_op { MT_SUBMIT, MT_CANCEL, MT_RESUME };
 struct batch_mt_rec {
 	enum batch_mt_op op;
@@ -112,9 +117,10 @@ struct batch_mt_rec {
 };
 struct batch_mt {
 	xtc_chan_mpsc_t *ring;      /* producers -> driver, control records */
-	xtc_chan_mpmc_t *pool;      /* free record pointers (claim/release) */
-	struct batch_mt_rec *recs;  /* preallocated record storage */
-	uint32_t cap;               /* mt_queue_cap (recs length) */
+	xtc_chan_mpmc_t *pool;      /* free SUBMIT records (recs[0..cap)) */
+	xtc_chan_mpmc_t *cpool;     /* free control records (recs[cap..2cap)) */
+	struct batch_mt_rec *recs;  /* preallocated record storage, 2 * cap */
+	uint32_t cap;               /* mt_queue_cap */
 	/* SUBMITs drained while every slot was taken. They were accepted
 	 * (the producer holds a handle), so they wait here in arrival order
 	 * and are admitted as slots free; their records stay out of the pool,
@@ -786,8 +792,8 @@ batch_vector(xtc_batch_t *b)
 
 static int batch_alloc(size_t count, size_t size, void **out);
 
-/* Create the ring, free-pool and record storage, and seed the free-pool
- * with every record pointer. Charged through the group's loop res. mt stays
+/* Create the ring, the two free-pools and the record storage, and seed each
+ * pool with its records. Charged through the group's loop res. mt stays
  * disabled (ring == NULL) when cap == 0. */
 static int
 batch_mt_init(xtc_batch_t *b, uint32_t cap)
@@ -797,24 +803,30 @@ batch_mt_init(xtc_batch_t *b, uint32_t cap)
 	int rc;
 	if (cap == 0)
 		return XTC_OK;
-	if ((rc = batch_alloc(cap, sizeof(*b->mt.recs),
+	if (cap > UINT32_MAX / 2)
+		return XTC_E_RANGE;
+	if ((rc = batch_alloc(2 * (size_t)cap, sizeof(*b->mt.recs),
 	                      (void **)&b->mt.recs))
 	        != XTC_OK
-	    || (rc = xtc_chan_mpsc_create(res, cap, &b->mt.ring)) != XTC_OK
-	    /* The pool only recirculates the preallocated records, so it is
-	     * not charged per slot: a release must never fail for want of a
-	     * resource unit (see batch_mt_release). */
-	    || (rc = xtc_chan_mpmc_create(NULL, cap, &b->mt.pool)) != XTC_OK)
+	    /* Room for every SUBMIT and every control record at once. */
+	    || (rc = xtc_chan_mpsc_create(res, 2 * (size_t)cap, &b->mt.ring))
+	           != XTC_OK
+	    /* The pools only recirculate the preallocated records, so they
+	     * are not charged per slot: a release must never fail for want
+	     * of a resource unit (see batch_mt_release). */
+	    || (rc = xtc_chan_mpmc_create(NULL, cap, &b->mt.pool)) != XTC_OK
+	    || (rc = xtc_chan_mpmc_create(NULL, cap, &b->mt.cpool)) != XTC_OK)
 		return rc;
 	b->mt.cap = cap;
 	atomic_store_explicit(&b->mt.n_queued, 0, memory_order_relaxed);
 	atomic_store_explicit(&b->mt.n_rejections, 0, memory_order_relaxed);
-	/* Seed the free-pool with each record pointer.  The pool capacity is
-	 * cap (its backing ring may round up internally), so all cap records
-	 * always fit. */
+	/* Seed each pool. A pool's capacity is cap, so its cap records always
+	 * fit. */
 	for (i = 0; i < cap; ++i)
 		if ((rc = xtc_chan_mpmc_try_send(b->mt.pool, &b->mt.recs[i]))
-		    != XTC_OK)
+		        != XTC_OK
+		    || (rc = xtc_chan_mpmc_try_send(b->mt.cpool,
+		            &b->mt.recs[cap + i])) != XTC_OK)
 			return rc;
 	return XTC_OK;
 }
@@ -832,24 +844,32 @@ batch_mt_fini(xtc_batch_t *b)
 		xtc_chan_mpmc_destroy(b->mt.pool);
 		b->mt.pool = NULL;
 	}
+	if (b->mt.cpool != NULL) {
+		(void)xtc_chan_mpmc_close(b->mt.cpool);
+		xtc_chan_mpmc_destroy(b->mt.cpool);
+		b->mt.cpool = NULL;
+	}
 	__os_free(b->mt.recs);
 	b->mt.recs = NULL;
 }
 
-/* Producer side: claim a free record (NULL if the pool is empty). The pool is
- * an mpmc channel so concurrent producer claims each pop a distinct record
- * (its try_recv serializes consumers under a lock); an mpsc pool would hand
- * the same record to two racing claimers. */
+/* Producer side: claim a free SUBMIT (op == MT_SUBMIT) or control record
+ * (NULL if that pool is empty). A pool is an mpmc channel so concurrent
+ * producer claims each pop a distinct record (its try_recv serializes
+ * consumers under a lock); an mpsc pool would hand the same record to two
+ * racing claimers. */
 static struct batch_mt_rec *
-batch_mt_claim(xtc_batch_t *b)
+batch_mt_claim(xtc_batch_t *b, enum batch_mt_op op)
 {
 	void *p = NULL;
-	if (xtc_chan_mpmc_try_recv(b->mt.pool, &p) != XTC_OK)
+	if (xtc_chan_mpmc_try_recv(op == MT_SUBMIT ? b->mt.pool : b->mt.cpool,
+	        &p) != XTC_OK)
 		return NULL;
 	return p;
 }
 
-/* Return a record to the free-pool.  Conservation invariant: a record is
+/* Return a record to the free-pool it came from (by its index: SUBMIT
+ * records are recs[0..cap)).  Conservation invariant: a record is
  * only ever released after it was claimed from this same pool, so
  * claimed + in-pool == cap always and the pool can never be legitimately
  * full here, and the pool is uncharged so no resource limit applies.  A
@@ -862,8 +882,10 @@ batch_mt_claim(xtc_batch_t *b)
 static void
 batch_mt_release(xtc_batch_t *b, struct batch_mt_rec *rec)
 {
+	xtc_chan_mpmc_t *pool = (size_t)(rec - b->mt.recs) < b->mt.cap ?
+	                            b->mt.pool : b->mt.cpool;
 	int tries = 0;
-	while (xtc_chan_mpmc_try_send(b->mt.pool, rec) != XTC_OK)
+	while (xtc_chan_mpmc_try_send(pool, rec) != XTC_OK)
 		if (++tries >= 1 << 20)
 			abort();
 }
@@ -898,8 +920,9 @@ batch_mt_push(xtc_batch_t *b, struct batch_mt_rec *rec)
  *
  * There is no "cancel arrived before its submit" case to remember. The
  * ring (src/ptc/chan.c, xtc_chan_mpsc_try_send) reserves a slot by CAS on
- * head, and the consumer drains strictly in tail order, spinning on a
- * reserved-but-unwritten slot rather than skipping it. submit_mt writes
+ * head, and the consumer drains strictly in tail order: on a reserved-but-
+ * unwritten slot try_recv stops (AGAIN) rather than skipping it, and the
+ * next drain resumes at that slot. submit_mt writes
  * *out only after its push succeeded, so any producer that can name H in
  * cancel_mt/resume_mt reserves its slot after SUBMIT(H)'s: the control is
  * always drained after the submit. (The private __xtc_batch_mt_inject hook
@@ -1270,8 +1293,14 @@ batch_driver(void *arg)
 		}
 		__xtc_unsafe_leave();
 		if (n == 0) {
-			if (!finished && !pending && b->closed
-			    && b->live == 0 && b->mt.n_held == 0)
+			/* A non-empty ring that did not drain holds a record
+			 * reserved but not yet written (try_recv stops there
+			 * with AGAIN): yield so its producer can finish rather
+			 * than spin the loop. */
+			if (!finished && b->l_term.head == B_NIL
+			    && (pending
+			        || (b->closed && b->live == 0
+			            && b->mt.n_held == 0)))
 				xtc_yield(); /* a producer is mid-push: brief */
 			else if (!finished && !pending)
 				(void)xtc_notify_wait(b->notify, -1);
@@ -1494,7 +1523,7 @@ __xtc_batch_mt_inject(xtc_batch_t *b, int op_cancel_resume_submit,
 	struct batch_mt_rec *rec;
 	if (b == NULL || b->mt.ring == NULL)
 		return XTC_E_NOSYS;
-	rec = batch_mt_claim(b);
+	rec = batch_mt_claim(b, (enum batch_mt_op)op_cancel_resume_submit);
 	if (rec == NULL)
 		return XTC_E_AGAIN;
 	rec->op = (enum batch_mt_op)op_cancel_resume_submit;
@@ -1706,11 +1735,30 @@ xtc_batch_cancel(xtc_batch_t *b, uint64_t handle)
 #ifdef XTC_ENABLE_SCHED_POLICY
 	struct batch_slot *s;
 	int rc;
+	uint32_t v;
 	__xtc_unsafe_enter();
 	rc = batch_mutable(b);
 	if (rc == XTC_OK) {
+		/* An mt handle may still be in the ring or held for a slot: it
+		 * was accepted, so drain (as the driver would at its next
+		 * boundary) and cancel a held record in place. If the drain
+		 * stopped at a slot another producer has not finished writing,
+		 * an issued H may be behind it: report AGAIN (retry), never
+		 * INVAL for a live handle. */
 		s = batch_find(b, handle);
 		if (s == NULL)
+			batch_mt_drain(b);
+		if (s == NULL && (s = batch_find(b, handle)) == NULL
+		    && batch_map_get(b, handle, &v)
+		    && v >= b->opts.capacity) {
+			b->mt.recs[v - b->opts.capacity].cancel = 1;
+			(void)xtc_notify_signal(b->notify);
+		} else if (s == NULL && b->mt.ring != NULL
+		    && xtc_chan_mpsc_len(b->mt.ring) != 0 && handle != 0
+		    && handle <= atomic_load_explicit(&b->handle_ctr,
+		                     memory_order_relaxed))
+			rc = XTC_E_AGAIN;
+		else if (s == NULL)
 			rc = XTC_E_INVAL;
 		else {
 			/* A committed terminal result wins; never rewrite it.
@@ -1783,7 +1831,7 @@ xtc_batch_submit_mt(xtc_batch_t *b, void *request, uint64_t charge,
 	 * issued, so an XTC_OK always means a completion will follow. */
 	if (batch_mt_enter(b, 1, 1) != XTC_OK)
 		return XTC_E_AGAIN;
-	rec = batch_mt_claim(b);
+	rec = batch_mt_claim(b, MT_SUBMIT);
 	if (rec == NULL) {
 		batch_mt_leave(b, 0);
 		return XTC_E_AGAIN;
@@ -1835,7 +1883,7 @@ batch_mt_control_submit(xtc_batch_t *b, uint64_t handle, enum batch_mt_op op)
 		return XTC_E_INVAL;
 	if (batch_mt_enter(b, 2, 0) != XTC_OK)
 		return XTC_E_INVAL; /* driver finished: the handle is stale */
-	rec = batch_mt_claim(b);
+	rec = batch_mt_claim(b, op);
 	if (rec == NULL) {
 		batch_mt_leave(b, 0);
 		return XTC_E_AGAIN;

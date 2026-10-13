@@ -89,7 +89,10 @@ XTC_API void   xtc_chan_mpsc_destroy(xtc_chan_mpsc_t *c);
  */
 XTC_API int    xtc_chan_mpsc_try_send(xtc_chan_mpsc_t *c, void *msg);
 
-/* Non-blocking receive.  Returns XTC_E_AGAIN on empty. */
+/* Non-blocking receive.  Returns XTC_E_AGAIN on empty, and also when the
+ * oldest slot is reserved by a sender that has not finished writing it
+ * (len may then be nonzero); it never spins.  The sender's write fires
+ * the waker. */
 XTC_API int    xtc_chan_mpsc_try_recv(xtc_chan_mpsc_t *c, void **out);
 
 /* Register the consumer's waker.  Fired on every successful send. */

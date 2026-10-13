@@ -51,9 +51,28 @@ struct xtc_supervisor {
 	_Atomic int            alive;
 	_Atomic int            stop_requested;
 	_Atomic int            abandon_wait;   /* __xtc_sup_abandon_wait */
-	xtc_pid_t              sup_pid;
+	/* Packed xtc_pid_t. Stored by xtc_sup_start and again (same value)
+	 * by the supervisor proc itself, read from any thread. */
+	_Atomic uint64_t       sup_pid;
 	xtc_notify_t          *stopped;
 };
+
+static uint64_t
+__sup_pid_pack(xtc_pid_t p)
+{
+	uint64_t v;
+	memcpy(&v, &p, sizeof v);
+	return v;
+}
+
+static xtc_pid_t
+__sup_pid_load(struct xtc_supervisor *sup)
+{
+	uint64_t v = atomic_load_explicit(&sup->sup_pid, memory_order_acquire);
+	xtc_pid_t p;
+	memcpy(&p, &v, sizeof p);
+	return p;
+}
 
 /* The DOWN signal envelope shape we emit in xtc_proc_exit cleanup. */
 XTC_PACK_PUSH
@@ -443,7 +462,8 @@ __sup_entry(void *arg)
 	struct xtc_supervisor *sup = arg;
 	int i;
 
-	sup->sup_pid = xtc_self();
+	atomic_store_explicit(&sup->sup_pid, __sup_pid_pack(xtc_self()),
+	    memory_order_release);
 
 	for (i = 0; i < sup->n_children; i++) {
 		if (__spawn_child(sup, &sup->children[i]) != XTC_OK) {
@@ -656,7 +676,8 @@ xtc_sup_start(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
 	 */
 	if ((rc = xtc_proc_spawn(loop, __sup_entry, sup, NULL, &pid)) != XTC_OK)
 		goto fail3;
-	sup->sup_pid = pid;
+	atomic_store_explicit(&sup->sup_pid, __sup_pid_pack(pid),
+	    memory_order_release);
 	*out_sup = sup;
 	return XTC_OK;
 
@@ -706,7 +727,8 @@ xtc_sup_add_child(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
 	a.reply_loop = __xtc_proc_self_loop(&a.reply);
 	a.tag = atomic_fetch_add_explicit(&tagctr, 1, memory_order_relaxed) + 1;
 	a.spec = *spec;
-	if (__xtc_send_on(sup->loop, sup->sup_pid, &a, sizeof a) != XTC_OK)
+	if (__xtc_send_on(sup->loop, __sup_pid_load(sup), &a, sizeof a)
+	    != XTC_OK)
 		return XTC_E_INTERNAL;
 
 	for (;;) {
@@ -736,7 +758,7 @@ xtc_sup_stop(xtc_supervisor_t *sup)
 		uint8_t kick = 'X';
 		/* Owner-qualified: off-loop, a pid-only send landed on the
 		 * first standalone loop with an equal pid (stray message). */
-		(void)__xtc_send_on(sup->loop, sup->sup_pid, &kick, 1);
+		(void)__xtc_send_on(sup->loop, __sup_pid_load(sup), &kick, 1);
 	}
 	return XTC_OK;
 }

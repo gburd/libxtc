@@ -91,11 +91,14 @@ discarded, and that
 .Fn xtc_svr_reply
 returns
 .Dv XTC_E_NOTFOUND .
-To an in-process caller the late reply is still delivered to its
-mailbox (a message whose first four bytes are the call's internal tag),
-where a later plain
-.Fn xtc_recv
-sees it.
+To an in-process caller the late reply is delivered to its mailbox as
+an internally framed reply envelope (a fixed marker plus the call's
+64-bit tag; application messages are never mistaken for a reply), and
+the caller's next
+.Fn xtc_svr_call
+discards it, so late replies do not accumulate.  A proc that makes no
+further call can still see such an envelope with a plain
+.Fn xtc_recv .
 .Pp
 .Fn xtc_svr_call_abortable
 is the same call with cooperative cancellation: while it waits for the

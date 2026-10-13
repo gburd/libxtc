@@ -2020,6 +2020,259 @@ mt_handle_exhaustion(void)
 	puts("batch-mt: concurrent handle exhaustion never wraps OK");
 }
 
+/* NEW-MAJOR-1 regression (re-review of the B1 fix): held hand-ins keep their
+ * records, and cancel_mt/resume_mt used to claim from the SAME pool. With
+ * capacity 1 filled by a BLOCKED (or long in-flight) member and
+ * mt_queue_cap hand-ins held behind it, every cross-loop control got
+ * XTC_E_AGAIN forever: a resume_mt that would unblock the group was never
+ * accepted (the group wedged), and a cancel_mt of the in-flight op could not
+ * reach cancel_hint. Controls now have their own records.
+ * mode 0: resume_mt of the BLOCKED member must be accepted and the group
+ *         must drain with no owner-loop help.
+ * mode 1: cancel_mt of the in-flight FUTURE member must be accepted and fire
+ *         cancel_hint while the op still runs; the member ends ABORTED.
+ * mode 2 (NIT): owner-loop xtc_batch_cancel of a HELD mt handle cancels it
+ *         (XTC_OK, never runs, ABORTED) instead of returning XTC_E_INVAL. */
+static double oc_now(void);
+struct starve {
+	xtc_batch_t *batch;
+	int mode;
+	struct mt_req req[5];
+	uint64_t h0, h1;
+	xtc_promise_t *prom;
+	_Atomic int phase, completed, unblocked, hints, hint_in_flight;
+	_Atomic int op_done, r0_ran; /* r0_ran: req[0] reached submit */
+	int ctl_rc, ctl_tries, self_drained, owner_rc;
+};
+static struct starve g_sv;
+
+static int
+sv_submit(const xtc_batch_item_t *items, size_t n, void *user,
+          xtc_batch_exec_t *exec)
+{
+	struct mt_req *r;
+	xtc_future_t *f;
+	size_t i;
+	(void)user;
+	for (i = 0; i < n; ++i)
+		((struct mt_req *)items[i].request)->ran++;
+	r = items[0].request;
+	if (r == &g_sv.req[0])
+		atomic_store(&g_sv.r0_ran, 1);
+	if (g_sv.mode == 1 && n == 1 && r == &g_sv.req[0] && r->ran == 1) {
+		assert(xtc_future_new_pair(&g_sv.prom, &f) == XTC_OK);
+		exec->kind = XTC_BATCH_EXEC_FUTURE;
+		exec->future = f;
+		return XTC_OK;
+	}
+	exec->kind = XTC_BATCH_EXEC_SYNC;
+	return XTC_OK;
+}
+
+static int
+sv_collect(const xtc_batch_item_t *items, xtc_batch_result_t *results,
+           size_t n, int exec_status, void *user)
+{
+	size_t i;
+	(void)exec_status;
+	(void)user;
+	for (i = 0; i < n; ++i)
+		results[i].state = g_sv.mode != 1
+		        && items[i].request == &g_sv.req[0]
+		        && !atomic_load(&g_sv.unblocked) ?
+		    XTC_BATCH_BLOCKED : XTC_BATCH_DONE;
+	return XTC_OK;
+}
+
+static void
+sv_complete(uint64_t handle, void *request, int outcome, void *user)
+{
+	struct mt_req *r = request;
+	(void)handle;
+	(void)user;
+	r->completions++;
+	assert(r->completions == 1);
+	r->outcome = outcome;
+	(void)atomic_fetch_add(&g_sv.completed, 1);
+}
+
+static void
+sv_hint(uint64_t handle, void *user)
+{
+	(void)user;
+	(void)atomic_fetch_add(&g_sv.hints, 1);
+	if (handle == g_sv.h0 && !atomic_load(&g_sv.op_done))
+		atomic_store(&g_sv.hint_in_flight, 1);
+}
+
+static void *
+sv_producer(void *arg)
+{
+	struct starve *v = arg;
+	uint64_t h;
+	double t0;
+	int i, rc, tries;
+	(void)arg;
+	while (xtc_batch_submit_mt(v->batch, &v->req[0], 1, &v->h0) != XTC_OK)
+		usleep(100);
+	while (!atomic_load(&v->r0_ran))
+		usleep(100);
+	usleep(20000);
+	/* mt_queue_cap more: every one is held (the only slot is taken). */
+	for (i = 1; i <= 4; ++i) {
+		tries = 0;
+		while (xtc_batch_submit_mt(v->batch, &v->req[i], 1, &h)
+		       != XTC_OK) {
+			assert(++tries < 20000);
+			usleep(100);
+		}
+		if (i == 1)
+			v->h1 = h;
+	}
+	usleep(50000); /* let the driver drain them into the held FIFO */
+	if (v->mode == 2) {
+		atomic_store(&v->phase, 1);
+		return NULL;
+	}
+	if (v->mode == 0)
+		atomic_store(&v->unblocked, 1);
+	t0 = oc_now();
+	for (;;) {
+		rc = v->mode == 0 ? xtc_batch_resume_mt(v->batch, v->h0) :
+		                    xtc_batch_cancel_mt(v->batch, v->h0);
+		if (rc == XTC_OK || oc_now() - t0 > 2.0)
+			break;
+		v->ctl_tries++;
+		usleep(50);
+	}
+	v->ctl_rc = rc;
+	atomic_store(&v->phase, 1);
+	return NULL;
+}
+
+/* Owner loop: observe, then (only if the control never landed) unwedge so
+ * the failure is reported instead of hanging, and close. */
+static void
+sv_owner(void *arg)
+{
+	struct starve *v = arg;
+	int rc, i;
+	while (atomic_load(&v->phase) == 0)
+		(void)xtc_proc_sleep(1000000);
+	if (v->mode == 2) {
+		v->owner_rc = xtc_batch_cancel(v->batch, v->h1);
+		atomic_store(&v->unblocked, 1);
+		while ((rc = xtc_batch_resume(v->batch, v->h0)) == XTC_E_DEADLK)
+			xtc_yield();
+	}
+	if (v->mode == 1) {
+		for (i = 0; i < 200 && !atomic_load(&v->hints); ++i)
+			(void)xtc_proc_sleep(1000000);
+		atomic_store(&v->op_done, 1);
+		(void)xtc_promise_set(v->prom, 0, XTC_OK);
+	}
+	for (i = 0; i < 2000 && atomic_load(&v->completed) < 5; ++i)
+		(void)xtc_proc_sleep(1000000);
+	v->self_drained = atomic_load(&v->completed) == 5;
+	if (!v->self_drained && v->mode == 0) {
+		atomic_store(&v->unblocked, 1);
+		while ((rc = xtc_batch_resume(v->batch, v->h0)) == XTC_E_DEADLK)
+			xtc_yield();
+	}
+	while ((rc = xtc_batch_close(v->batch, XTC_BATCH_DRAIN))
+	       == XTC_E_DEADLK)
+		xtc_yield();
+	assert(rc == XTC_OK);
+}
+
+static void
+mt_control_starvation(int mode)
+{
+	struct starve *v = &g_sv;
+	xtc_exec_t *ex;
+	xtc_batch_async_opts_t o = { .size = sizeof(o),
+		                     .version = XTC_BATCH_VERSION,
+		                     .capacity = 1,
+		                     .max_active = 1,
+		                     .resource_capacity = 1,
+		                     .mt_queue_cap = 4,
+		                     .submit = sv_submit,
+		                     .collect = sv_collect,
+		                     .complete = sv_complete,
+		                     .cancel_hint = sv_hint };
+	pthread_t t;
+	xtc_pid_t pid;
+	int i;
+	memset(v, 0, sizeof *v);
+	v->mode = mode;
+	assert(xtc_exec_init(&ex, 1) == XTC_OK);
+	assert(xtc_batch_create_async(xtc_exec_loop(ex, 0), &o, &v->batch)
+	       == XTC_OK);
+	assert(xtc_proc_spawn(xtc_exec_loop(ex, 0), sv_owner, v, NULL, &pid)
+	       == XTC_OK);
+	assert(pthread_create(&t, NULL, sv_producer, v) == 0);
+	assert(xtc_exec_run(ex) == XTC_OK);
+	assert(pthread_join(t, NULL) == 0);
+	printf("batch-mt: control starvation mode %d: ctl_rc=%d after %d "
+	       "AGAIN retries, self_drained=%d hints=%d in_flight=%d "
+	       "owner_rc=%d completed=%d\n", mode, v->ctl_rc, v->ctl_tries,
+	    v->self_drained, atomic_load(&v->hints),
+	    atomic_load(&v->hint_in_flight), v->owner_rc,
+	    atomic_load(&v->completed));
+	assert(atomic_load(&v->completed) == 5);
+	for (i = 0; i < 5; ++i)
+		assert(v->req[i].completions == 1);
+	if (mode == 0) {
+		assert(v->ctl_rc == XTC_OK);
+		assert(v->self_drained);
+		for (i = 0; i < 5; ++i)
+			assert(v->req[i].outcome == XTC_OK);
+	} else if (mode == 1) {
+		assert(v->ctl_rc == XTC_OK);
+		assert(atomic_load(&v->hints) == 1);
+		assert(atomic_load(&v->hint_in_flight) == 1);
+		assert(v->req[0].outcome == XTC_E_ABORTED);
+		for (i = 1; i < 5; ++i)
+			assert(v->req[i].outcome == XTC_OK);
+	} else {
+		assert(v->owner_rc == XTC_OK);
+		assert(v->req[1].ran == 0);
+		assert(v->req[1].outcome == XTC_E_ABORTED);
+		assert(v->req[0].outcome == XTC_OK);
+	}
+	assert(xtc_batch_destroy(v->batch) == XTC_OK);
+	assert(xtc_exec_fini(ex) == XTC_OK);
+}
+
+/* NIT companion: an owner-loop cancel of an mt handle still in the ring
+ * (not yet drained) is applied, not rejected as stale. Pre-run setup is
+ * externally serialized, so the owner calls are made from here. */
+static void
+mt_owner_cancel_in_ring(void)
+{
+	struct mt_ctx c = { 0 };
+	xtc_batch_async_opts_t o;
+	xtc_pid_t pid;
+	uint64_t h;
+	c.n_req = 1;
+	c.req[0].left = 1;
+	assert(xtc_exec_init(&c.exec, 1) == XTC_OK);
+	o = mt_opts(&c, 4, 4);
+	assert(xtc_batch_create_async(xtc_exec_loop(c.exec, 0), &o, &c.batch)
+	       == XTC_OK);
+	assert(xtc_batch_submit_mt(c.batch, &c.req[0], 1, &h) == XTC_OK);
+	assert(xtc_batch_cancel(c.batch, h) == XTC_OK);
+	assert(xtc_batch_cancel(c.batch, h + 100) == XTC_E_INVAL);
+	assert(xtc_proc_spawn(xtc_exec_loop(c.exec, 0), mt_controller_fn, &c,
+	    NULL, &pid) == XTC_OK);
+	assert(xtc_exec_run(c.exec) == XTC_OK);
+	assert(c.req[0].completions == 1 && c.req[0].outcome == XTC_E_ABORTED);
+	assert(c.req[0].ran == 0);
+	assert(xtc_batch_destroy(c.batch) == XTC_OK);
+	assert(xtc_exec_fini(c.exec) == XTC_OK);
+	puts("batch-mt: owner cancel of an undrained mt handle applied OK");
+}
+
 static void
 mt_tests(void)
 {
@@ -2032,6 +2285,10 @@ mt_tests(void)
 	mt_contended_pool();
 	mt_stale_cancels();
 	mt_cancel_in_ring();
+	mt_control_starvation(0);
+	mt_control_starvation(1);
+	mt_control_starvation(2);
+	mt_owner_cancel_in_ring();
 }
 
 /* ----- placement helpers (S3) ---------------------------------------- */

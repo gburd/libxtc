@@ -6,15 +6,22 @@
  */
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "munit.h"
 #include "xtc.h"
 #include "xtc_chan.h"
 #include "xtc_loop.h"
 #include "xtc_int.h"
+#include "xtc_async.h"
+#include "xtc_exec.h"
+#include "xtc_preempt.h"
+#include "xtc_proc.h"
 
 /* ----- oneshot ---------------------------------------------------- */
 
@@ -384,11 +391,137 @@ test_demand_waker_wake_now(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ----- mpsc under involuntary preemption -------------------------- */
+
+/* A producer fiber preempted (Phase 2, signal-context) between the
+ * ring's head CAS and its slot store, on the SAME loop as a consumer
+ * that drains without yielding (here: inside a critical section, like
+ * the batch driver's unsafe-bracketed drain), used to hang the loop:
+ * try_recv spun forever on the reserved-but-unwritten slot and the
+ * preempted producer could never run again.  The producer window is now
+ * unpreemptible and try_recv reports AGAIN on an unwritten slot.  A
+ * watchdog thread turns a hang into an abort (a test failure). */
+#ifndef __has_feature
+#define __has_feature(x) 0
+#endif
+
+struct pr_ctx {
+	xtc_chan_mpsc_t *c;
+	_Atomic uint64_t sent, recvd;
+	_Atomic int stop, done, bad;
+};
+
+static void
+pr_producer(void *arg)
+{
+	struct pr_ctx *x = arg;
+	int64_t t0 = xtc_clock_mono(), now = t0;
+	uint64_t seq = 0;
+	unsigned k = 0;
+	munit_assert_int(xtc_preempt_arm(20000), ==, XTC_OK);
+	while (now - t0 < 1500LL * 1000 * 1000) {
+		if (xtc_chan_mpsc_try_send(x->c, (void *)(uintptr_t)(seq + 1))
+		    == XTC_OK)
+			atomic_store(&x->sent, ++seq);
+		if ((++k & 63) == 0) {
+			xtc_yield();
+			now = xtc_clock_mono();
+		}
+	}
+	(void)xtc_preempt_disarm();
+	atomic_store(&x->stop, 1);
+}
+
+static void
+pr_consumer(void *arg)
+{
+	struct pr_ctx *x = arg;
+	uint64_t want = 1;
+	void *v;
+	for (;;) {
+		xtc_proc_critical_enter();
+		while (xtc_chan_mpsc_try_recv(x->c, &v) == XTC_OK) {
+			if ((uintptr_t)v != want)
+				atomic_store(&x->bad, 1);   /* FIFO broken */
+			want++;
+			atomic_store(&x->recvd, want - 1);
+		}
+		xtc_proc_critical_leave();
+		if (atomic_load(&x->stop)
+		    && atomic_load(&x->recvd) == atomic_load(&x->sent))
+			break;
+		xtc_yield();
+	}
+}
+
+static void *
+pr_watchdog(void *arg)
+{
+	struct pr_ctx *x = arg;
+	uint64_t last = 0, cur;
+	int stall = 0;
+	while (!atomic_load(&x->done)) {
+		usleep(100000);
+		cur = atomic_load(&x->recvd);
+		if (cur == last && ++stall >= 30) {
+			fprintf(stderr, "mpsc_involuntary_preempt: HANG, no "
+			    "message received for 3 s (sent=%llu recvd=%llu)\n",
+			    (unsigned long long)atomic_load(&x->sent),
+			    (unsigned long long)cur);
+			abort();
+		}
+		if (cur != last)
+			stall = 0;
+		last = cur;
+	}
+	return NULL;
+}
+
+static MunitResult
+test_mpsc_involuntary_preempt(const MunitParameter p[], void *d)
+{
+	extern int __xtc_coro_preempt_effective(void);
+	static struct pr_ctx x;
+	xtc_exec_t *e = NULL;
+	pthread_t w;
+	(void)p; (void)d;
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
+    __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	/* Signal-context preemption nests inside the sanitizer fiber-switch
+	 * annotations (see test/m14/test_preempt_p2.c). */
+	return MUNIT_SKIP;
+#endif
+	if (!xtc_preempt_supported() || !__xtc_coro_preempt_effective())
+		return MUNIT_SKIP;
+	memset(&x, 0, sizeof x);
+	munit_assert_int(xtc_chan_mpsc_create(NULL, 64, &x.c), ==, XTC_OK);
+	xtc_preempt_set_involuntary(1);
+	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0), pr_consumer, &x,
+	    NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0), pr_producer, &x,
+	    NULL, NULL), ==, XTC_OK);
+	munit_assert_int(pthread_create(&w, NULL, pr_watchdog, &x), ==, 0);
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	atomic_store(&x.done, 1);
+	(void)pthread_join(w, NULL);
+	xtc_preempt_set_involuntary(0);
+	munit_assert_int(atomic_load(&x.bad), ==, 0);
+	munit_assert_uint64(atomic_load(&x.recvd), ==, atomic_load(&x.sent));
+	munit_assert_uint64(atomic_load(&x.sent), >, 0);
+	munit_logf(MUNIT_LOG_INFO, "sent=recvd=%llu",
+	    (unsigned long long)atomic_load(&x.sent));
+	(void)xtc_exec_fini(e);
+	xtc_chan_mpsc_destroy(x.c);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/oneshot_basic",       test_oneshot_basic,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/mpsc_basic",          test_mpsc_basic,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/mpsc_set_waker",      test_mpsc_set_waker,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/mpsc_concurrent",     test_mpsc_concurrent,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/mpsc_involuntary_preempt", test_mpsc_involuntary_preempt, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/watch_latest_wins",   test_watch_latest_wins,NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/res_caps",            test_res_caps,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/demand_backpressure", test_demand_backpressure, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
