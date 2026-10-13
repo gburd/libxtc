@@ -563,6 +563,8 @@ cl_group_init(struct group *g, int dev_index)
 	    CL_MEM_USE_HOST_PTR, cap * sizeof(cl_uint), g->dbuf_host, &err);
 	if (err != CL_SUCCESS)
 		return XTC_E_IO;
+	if (dev_waiter_start(g) != XTC_OK)
+		return XTC_E_IO;
 	g->cl_ready = 1;
 	fprintf(stderr, "group %d (GPU) -> cl device %d (%s)\n",
 	    g->gidx, dev_index, nm);
