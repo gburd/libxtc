@@ -21,13 +21,11 @@
 #include "os_time.h"
 #include <pthread.h>
 #include <stdio.h> /* sysfs numa_node read in the placement helper */
+#include <stdlib.h> /* abort */
 
 /* src/ptc/accel.c (internal): fence wait to an absolute deadline with a
  * stop predicate consulted after every wake. */
 int __xtc_accel_fence_wait(int, int64_t, int (*)(void *), void *);
-#if defined(XTC_DIAGNOSTIC)
-#include <stdlib.h> /* abort */
-#endif
 
 enum batch_slot_state {
 	B_FREE,
@@ -339,15 +337,16 @@ batch_error(int rc)
 static uint64_t
 batch_next_handle(xtc_batch_t *b)
 {
-	uint64_t prev =
-	    atomic_fetch_add_explicit(&b->handle_ctr, 1, memory_order_relaxed);
-	if (prev == UINT64_MAX) {
-		/* Wrapped: restore so a second attempt also sees exhaustion. */
-		atomic_store_explicit(&b->handle_ctr, UINT64_MAX,
-		    memory_order_relaxed);
-		return 0;
-	}
-	return prev + 1;
+	/* CAS, not fetch-add: the counter must never pass through a wrapped
+	 * value another producer could stamp. */
+	uint64_t cur =
+	    atomic_load_explicit(&b->handle_ctr, memory_order_relaxed);
+	do {
+		if (cur == UINT64_MAX)
+			return 0;
+	} while (!atomic_compare_exchange_weak_explicit(&b->handle_ctr, &cur,
+	    cur + 1, memory_order_relaxed, memory_order_relaxed));
+	return cur + 1;
 }
 
 /* NULL TLS is allowed only for externally serialized setup, or explicitly
@@ -800,7 +799,10 @@ batch_mt_init(xtc_batch_t *b, uint32_t cap)
 	                      (void **)&b->mt.recs))
 	        != XTC_OK
 	    || (rc = xtc_chan_mpsc_create(res, cap, &b->mt.ring)) != XTC_OK
-	    || (rc = xtc_chan_mpmc_create(res, cap, &b->mt.pool)) != XTC_OK)
+	    /* The pool only recirculates the preallocated records, so it is
+	     * not charged per slot: a release must never fail for want of a
+	     * resource unit (see batch_mt_release). */
+	    || (rc = xtc_chan_mpmc_create(NULL, cap, &b->mt.pool)) != XTC_OK)
 		return rc;
 	b->mt.cap = cap;
 	atomic_store_explicit(&b->mt.n_queued, 0, memory_order_relaxed);
@@ -848,31 +850,20 @@ batch_mt_claim(xtc_batch_t *b)
 /* Return a record to the free-pool.  Conservation invariant: a record is
  * only ever released after it was claimed from this same pool, so
  * claimed + in-pool == cap always and the pool can never be legitimately
- * full here.  A try_send can therefore only fail transiently (e.g. a DST
- * buggify spurious-full); retry until it lands so a record is never lost
- * to circulation, which would slowly starve the pool.  Bounded in
- * practice because the slot provably exists; the diagnostic assert pins
- * the invariant rather than looping unboundedly on a real bug. */
+ * full here, and the pool is uncharged so no resource limit applies.  A
+ * try_send can therefore only fail transiently (a DST buggify spurious-
+ * full, a fresh draw per call); retry until it lands so a record is never
+ * lost to circulation, which would slowly starve the pool.  2^20
+ * consecutive failures cannot happen while the invariant holds, so that
+ * is treated as the invariant violation it is: fail-stop, not a silent
+ * drop. */
 static void
 batch_mt_release(xtc_batch_t *b, struct batch_mt_rec *rec)
 {
-	int rc, tries = 0;
-	(void)tries;
-	for (;;) {
-		rc = xtc_chan_mpmc_try_send(b->mt.pool, rec);
-		if (rc == XTC_OK)
-			return;
-		if (++tries >= 1 << 20) {
-#if defined(XTC_DIAGNOSTIC)
-			/* The pool has a free slot by the conservation
-			 * invariant; a persistent failure is a bug, not
-			 * backpressure. */
+	int tries = 0;
+	while (xtc_chan_mpmc_try_send(b->mt.pool, rec) != XTC_OK)
+		if (++tries >= 1 << 20)
 			abort();
-#else
-			return;   /* give up rather than hang a release */
-#endif
-		}
-	}
 }
 
 /* Producer side: push a filled record onto the ring, wake the driver. On a
@@ -2039,11 +2030,16 @@ xtc_batch_loop_for_device(xtc_exec_t *exec, const xtc_accel_dev_t *dev,
 	dev_node = batch_device_node(dev->name);
 	if (dev_node < 0 || __os_numa_nnodes() <= 1)
 		return XTC_OK;
-	/* First loop whose carrier recorded that node wins. A loop whose
-	 * node is unknown (-1, carrier not yet run) never matches, so a
-	 * pre-run call falls through to loop 0. */
+	/* First loop whose carrier recorded that node wins. A carrier
+	 * records its node only when it starts, so a loop that has never
+	 * run has no known node (the executor's table reads 0 then, which
+	 * would falsely match a node-0 device) and is skipped: before the
+	 * executor runs, every call falls back to loop 0. */
 	for (i = 0; i < n_loops; ++i) {
 		extern int __xtc_exec_loop_node(xtc_exec_t *, int);
+		if (atomic_load_explicit(&xtc_exec_loop(exec, i)->sched.phase,
+		        memory_order_acquire) == 0)
+			continue;
 		if (__xtc_exec_loop_node(exec, i) == dev_node) {
 			*out_loop_idx = i;
 			return XTC_OK;
