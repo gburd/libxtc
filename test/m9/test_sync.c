@@ -15,6 +15,7 @@
 #include "munit.h"
 #include "xtc.h"
 #include "xtc_sync.h"
+#include "xtc_future.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "xtc_blocking.h"
@@ -1058,6 +1059,125 @@ test_kill_prompt(const MunitParameter p[], void *d)
 	munit_assert_int(g_kw_third_rc, ==, XTC_OK);
 	return MUNIT_OK;
 }
+
+/*
+ * A kill that lands while the target is RUNNING after an earlier park
+ * (here a recv), before it enters a sync wait, must still unwind that
+ * wait promptly.  The resume hook skips delivery after a park yield, so
+ * the wait's own delivery point has to deliver the kill directly
+ * (__xtc_proc_kill_poll); calling the resume hook there returns early
+ * because the earlier recv park left yield_park set, and the wait then
+ * parks for good.  Caught by the 1.55.x re-review (kp.c) after the fix
+ * that switches the wait sites to __xtc_proc_kill_poll was left out of
+ * a merge: no DOWN within 3 s for sem, notify, amutex and future.
+ */
+static xtc_exec_t *g_kr_e;
+static int64_t g_kr_ns;
+static xtc_promise_t *g_kr_pr;
+static xtc_future_t *g_kr_f;
+
+static void
+kr_victim(void *a)
+{
+	void *m;
+	size_t n;
+	int64_t t0 = 0, t = 0;
+	intptr_t v;
+	(void)a;
+	if (xtc_recv(&m, &n, -1) == XTC_OK)
+		xtc_free(m);
+	(void)__os_clock_mono(&t0);
+	do {                         /* busy, no yield: the kill lands here */
+		(void)__os_clock_mono(&t);
+	} while (t - t0 < 50LL * 1000 * 1000);
+	switch (g_kw_kind) {
+	case 0: (void)xtc_amutex_lock(g_kw_m, -1); break;
+	case 2: (void)xtc_sem_acquire(g_kw_sem, 1, -1); break;
+	case 3: (void)xtc_notify_wait(g_kw_n, -1); break;
+	default: (void)xtc_future_wait(g_kr_f, &v, -1); break;
+	}
+}
+
+static void
+kr_holder(void *a)
+{
+	(void)a;
+	if (xtc_amutex_lock(g_kw_m, -1) == XTC_OK) {
+		(void)xtc_proc_sleep(2LL * 1000 * 1000 * 1000);
+		(void)xtc_amutex_unlock(g_kw_m);
+	}
+}
+
+static void
+kr_killer(void *a)
+{
+	xtc_pid_t v, h;
+	uint64_t ref;
+	void *m;
+	size_t n;
+	char c = 'x';
+	int64_t t0 = 0, t1 = 0;
+	(void)a;
+	if (g_kw_kind == 0) {
+		(void)xtc_proc_spawn(xtc_exec_loop(g_kr_e, 1), kr_holder, NULL,
+		    NULL, &h);
+		(void)xtc_proc_sleep(1000 * 1000);
+	}
+	if (xtc_proc_spawn_monitor(xtc_exec_loop(g_kr_e, 0), kr_victim, NULL,
+	    NULL, &v, &ref) != XTC_OK)
+		return;
+	(void)xtc_proc_sleep(5 * 1000 * 1000);
+	(void)xtc_send(v, &c, 1);
+	(void)xtc_proc_sleep(10 * 1000 * 1000);
+	(void)__os_clock_mono(&t0);
+	(void)xtc_exit_pid(v, 9);
+	if (xtc_recv(&m, &n, 1000LL * 1000 * 1000) == XTC_OK) {
+		(void)__os_clock_mono(&t1);
+		g_kr_ns = t1 - t0;
+		xtc_free(m);
+	} else {
+		/* Release whatever the victim is stuck on so the run ends. */
+		if (g_kw_kind == 2) (void)xtc_sem_post(g_kw_sem, 1);
+		else if (g_kw_kind == 3) (void)xtc_notify_signal(g_kw_n);
+		else if (g_kw_kind == 1) (void)xtc_promise_set(g_kr_pr, 1, 0);
+		if (xtc_recv(&m, &n, 4LL * 1000 * 1000 * 1000) == XTC_OK)
+			xtc_free(m);
+	}
+}
+
+static char *kr_kinds[] = { "amutex", "future", "sem", "notify", NULL };
+static MunitParameterEnum kr_params[] = { { "kind", kr_kinds }, { NULL, NULL } };
+
+static MunitResult
+test_kill_after_park_while_running(const MunitParameter p[], void *d)
+{
+	const char *k = munit_parameters_get(p, "kind");
+	xtc_pid_t pid;
+	(void)d;
+	g_kw_kind = !strcmp(k, "amutex") ? 0 : !strcmp(k, "future") ? 1
+	    : !strcmp(k, "sem") ? 2 : 3;
+	g_kr_ns = -1;
+	munit_assert_int(xtc_sem_create(0, &g_kw_sem), ==, XTC_OK);
+	munit_assert_int(xtc_notify_create(&g_kw_n), ==, XTC_OK);
+	munit_assert_int(xtc_amutex_create(&g_kw_m), ==, XTC_OK);
+	munit_assert_int(xtc_future_new_pair(&g_kr_pr, &g_kr_f), ==, XTC_OK);
+	munit_assert_int(xtc_exec_init(&g_kr_e, 2), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(g_kr_e, 1), kr_killer,
+	    NULL, NULL, &pid), ==, XTC_OK);
+	munit_assert_int(xtc_exec_run(g_kr_e), ==, XTC_OK);
+	munit_assert_int(xtc_exec_fini(g_kr_e), ==, XTC_OK);
+	/* The killed waiter never consumed the future (and only kind 1 used
+	 * it); settle and consume it so the cell is released.  The set may
+	 * already have happened on the killer's fallback path. */
+	(void)xtc_promise_set(g_kr_pr, 1, 0);
+	(void)xtc_future_wait(g_kr_f, NULL, 0);
+	xtc_amutex_destroy(g_kw_m);
+	xtc_notify_destroy(g_kw_n);
+	xtc_sem_destroy(g_kw_sem);
+	munit_assert_int64(g_kr_ns, >=, 0);
+	munit_assert_int64(g_kr_ns, <, 500LL * 1000 * 1000);
+	return MUNIT_OK;
+}
 #endif /* XTC_HAVE_PROC_KILL_WAKE */
 
 /*
@@ -1148,6 +1268,7 @@ static MunitTest tests[] = {
 	{ "/kill_then_wake",      test_kill_then_wake,      NULL, NULL, MUNIT_TEST_OPTION_NONE, kw_params },
 #if defined(XTC_HAVE_PROC_KILL_WAKE)
 	{ "/kill_prompt",         test_kill_prompt,         NULL, NULL, MUNIT_TEST_OPTION_NONE, kw_kind_params },
+	{ "/kill_after_park_while_running", test_kill_after_park_while_running, NULL, NULL, MUNIT_TEST_OPTION_NONE, kr_params },
 #endif
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
