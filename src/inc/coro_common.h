@@ -46,8 +46,25 @@ struct stack_pool {
 	void   *slots[XTC_STACK_POOL_MAX];
 	size_t  size;                 /* stack_sz these were allocated at */
 	int     n;
+	int     atexit_armed;         /* thread-exit drain registered */
 };
 static XTC_THREAD_LOCAL struct stack_pool __stack_pool;
+
+/* Thread exit: unmap the stacks still pooled.  Finished fibers now feed
+ * the pool while a loop runs (not only at loop_fini), so an executor
+ * worker would otherwise strand up to XTC_STACK_POOL_MAX stacks -- two
+ * mappings each -- every time it exits. */
+static void
+__stack_pool_drain(void *arg)
+{
+	struct stack_pool *p = &__stack_pool;
+	long pg = sysconf(_SC_PAGESIZE);
+	size_t guard = pg > 0 ? (size_t)pg : 4096u;
+	(void)arg;
+	while (p->n > 0)
+		(void)munmap(p->slots[--p->n], p->size + guard);
+	p->atexit_armed = 0;
+}
 
 /* Pop a cached stack of `stack_sz` (guard already installed), or NULL. */
 static void *
@@ -65,6 +82,11 @@ static int
 __stack_pool_put(void *base, size_t stack_sz)
 {
 	struct stack_pool *p = &__stack_pool;
+	if (!p->atexit_armed) {
+		if (__os_thread_atexit(__stack_pool_drain, NULL) != XTC_OK)
+			return 0;     /* cannot drain at exit: do not pool */
+		p->atexit_armed = 1;
+	}
 	if (p->n == 0) p->size = stack_sz;   /* first entry sets the pool size */
 	if (p->size != stack_sz || p->n == XTC_STACK_POOL_MAX)
 		return 0;

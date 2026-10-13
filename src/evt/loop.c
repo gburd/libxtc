@@ -334,6 +334,9 @@ xtc_loop_fini(xtc_loop_t *loop)
 
 	if (__xtc_loop_fini_hook != NULL)
 		__xtc_loop_fini_hook(loop);
+	/* lifetime: tasks handed back by other loops are still on all_tasks;
+	 * move them to the free list first so the walk below skips them. */
+	__xtc_task_reclaim_drain(loop);
 
 	for (t = loop->all_tasks; t != NULL; t = next_t) {
 		next_t = t->all_next;
@@ -409,6 +412,11 @@ xtc_loop_fini(xtc_loop_t *loop)
 			__os_free(ft);
 		}
 		loop->task_free = NULL;
+		for (ft = loop->task_free_mig; ft != NULL; ft = fn) {
+			fn = ft->q_next;
+			__os_free(ft);
+		}
+		loop->task_free_mig = NULL;
 	}
 	__os_free(loop->timers);
 	__xtc_inbox_fini(&loop->inbox);
@@ -855,6 +863,7 @@ __xtc_loop_step(xtc_loop_t *loop)
 
 	/* Drain any cross-thread wakers / publishes. */
 	(void)__xtc_inbox_drain(loop);
+	__xtc_task_reclaim_drain(loop);   /* lifetime: tasks handed back */
 
 	/* 1. Run queue. */
 #ifdef XTC_ENABLE_SCHED_POLICY
@@ -1029,6 +1038,10 @@ __xtc_loop_step(xtc_loop_t *loop)
 			    t->fn != __xtc_coro_step) {
 				extern void __xtc_task_free(xtc_task_t *);
 				__xtc_task_free(t);
+				t = NULL;
+			} else if (t->reclaim) {
+				/* lifetime: a finished proc fiber (task.c). */
+				__xtc_task_reclaim(loop, t);
 				t = NULL;
 			}
 			break;

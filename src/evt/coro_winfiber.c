@@ -178,6 +178,13 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 			(void)xtc_waker_wake(&w);
 			c->waiter = NULL;
 		}
+		/* lifetime: a finished PROC fiber is reclaimed by the loop's
+		 * DONE handler (task.c __xtc_task_reclaim).  Its task handle
+		 * was never handed out; an xtc_async task's was, so that one
+		 * stays until xtc_loop_fini.  c->proc is set by __proc_entry
+		 * before the body runs and never cleared. */
+		if (c->proc != NULL)
+			self->reclaim = 1;
 		/* Do NOT destroy here: the task's cleanup
 		 * (__coro_task_cleanup) releases the fiber + coro struct
 		 * once, at loop_fini.  Destroying eagerly here too left the
@@ -231,10 +238,12 @@ xtc_await(xtc_task_t *t, intptr_t *result)
 		return XTC_OK;
 	}
 
-	target->waiter = me->self;
-	me->_parked_on = target;
-	{
-		void *pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
+	/* Re-park until the target is done; see coro_uctx.c. */
+	while (!target->done) {
+		void *pctx;
+		target->waiter = me->self;
+		me->_parked_on = target;
+		pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
 		(void)SwitchToFiber(me->loop_fiber);
 		if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
 	}

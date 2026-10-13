@@ -1190,17 +1190,17 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e, int sys)
 		wm_cap = p->mbox_cap;
 	}
 	armed = p->waker_armed;
-	/* Copy the waker OUT under the lock: xtc_waker_wake itself must run
-	 * OUTSIDE mbox_lock (it may re-enter proc/loop APIs), but reading
-	 * p->recv_waker after unlocking races the receiver re-arming it on
-	 * its next recv cycle.  A local copy taken under the lock is
-	 * race-free and the wake fires from the copy. */
-	if (armed)
-		wk = p->recv_waker;
-	(void) __proc_mtx_unlock(&p->mbox_lock);
-	if (wm_fire)
-		p->mbox_wm_fn(p->pid, wm_depth, wm_cap, p->mbox_wm_user);
+	/* Wake the parked receiver UNDER mbox_lock, as xtc_proc_wake and
+	 * xtc_exit_pid do.  The receiver clears waker_armed under this lock
+	 * after it resumes, and its exit takes it too, so while we hold it
+	 * the receiver cannot run past its park, exit and have its task
+	 * reclaimed and reused: the wake and the wake_revents bit always land
+	 * on the task that armed the waker.  Firing after the unlock let a
+	 * descheduled sender wake (and tag) whatever task reused the struct.
+	 * xtc_waker_wake takes no proc lock (it CASes the task state and
+	 * queues it locally or on the target loop's lock-free inbox). */
 	if (armed) {
+		wk = p->recv_waker;
 		/* Record the wake cause so xtc_proc_wait_fd / etc. can
 		 * tell why we resumed. */
 		if (p->task != NULL)
@@ -1215,6 +1215,9 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e, int sys)
 		rc = xtc_waker_wake(&wk);
 #endif   /* planted bug LOSTWAKE: drop this wake -> parked receiver hangs */
 	}
+	(void) __proc_mtx_unlock(&p->mbox_lock);
+	if (wm_fire)
+		p->mbox_wm_fn(p->pid, wm_depth, wm_cap, p->mbox_wm_user);
 	return rc;
 }
 
@@ -4767,16 +4770,16 @@ __proc_free(struct xtc_proc *p)
 
 	(void)pthread_mutex_destroy(&p->mbox_lock);
 	/*
-	 * Sever the coro's back-pointer before the proc goes away.  The coro
-	 * outlives the proc (the loop owns it and steps it once more to
-	 * observe the DONE verdict), so leaving coro->proc dangling here is a
-	 * use-after-free the moment anything reads it -- TSan caught exactly
-	 * that as a heap-use-after-free in __xtc_coro_step.  Clearing it is
-	 * safe: the only reader (xtc_proc_wait_fd's re-anchor) treats NULL as
-	 * "no better identity available" and keeps its existing self.
+	 * Do NOT touch p->coro here.  This runs when the LAST reference
+	 * drops, which can be a resolver on another thread long after the
+	 * fiber finished and the loop reclaimed its coro (and reused it for
+	 * another proc), so a write through p->coro would land in freed or
+	 * foreign memory.  The coro's back-pointer (coro->proc) is only read
+	 * by the fiber itself while it runs (__xtc_proc_ctx_save at a yield,
+	 * xtc_proc_wait_fd's re-anchor), never after __proc_entry's final
+	 * notify, and the loop uses it at DONE only as "this was a proc"
+	 * (coro_uctx.c __xtc_coro_step), without dereferencing it.
 	 */
-	if (p->coro != NULL && p->coro->proc == p)
-		p->coro->proc = NULL;
 	__os_free(p);
 }
 
