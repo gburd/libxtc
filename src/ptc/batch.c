@@ -1026,13 +1026,18 @@ batch_mt_quiesced(xtc_batch_t *b)
 }
 
 /* Producer side: enter the gate (XTC_OK) or report it shut (XTC_E_AGAIN).
- * `limit` is the first gate value that refuses this call. */
+ * `limit` is the first gate value that refuses this call; a refusal counts
+ * in mt_rejections when `count` is set. Every producer access to the group
+ * happens between enter and leave, so once the driver has seen inflight ==
+ * 0 at gate 2 no producer touches the group again. */
 static int
-batch_mt_enter(xtc_batch_t *b, int limit)
+batch_mt_enter(xtc_batch_t *b, int limit, int count)
 {
 	(void)atomic_fetch_add_explicit(&b->mt.inflight, 1,
 	    memory_order_seq_cst);
 	if (atomic_load_explicit(&b->mt.gate, memory_order_seq_cst) >= limit) {
+		if (count)
+			batch_inc_atomic(&b->mt.n_rejections);
 		(void)atomic_fetch_sub_explicit(&b->mt.inflight, 1,
 		    memory_order_release);
 		return XTC_E_AGAIN;
@@ -1040,9 +1045,11 @@ batch_mt_enter(xtc_batch_t *b, int limit)
 	return XTC_OK;
 }
 
+/* Leave the gate, counting the call as queued or rejected first. */
 static void
-batch_mt_leave(xtc_batch_t *b)
+batch_mt_leave(xtc_batch_t *b, int queued)
 {
+	batch_inc_atomic(queued ? &b->mt.n_queued : &b->mt.n_rejections);
 	(void)atomic_fetch_sub_explicit(&b->mt.inflight, 1,
 	    memory_order_release);
 }
@@ -1767,20 +1774,17 @@ xtc_batch_submit_mt(xtc_batch_t *b, void *request, uint64_t charge,
 		return XTC_E_RANGE;
 	/* Closed (or closing) group: refused here, before any handle is
 	 * issued, so an XTC_OK always means a completion will follow. */
-	if (batch_mt_enter(b, 1) != XTC_OK) {
-		batch_inc_atomic(&b->mt.n_rejections);
+	if (batch_mt_enter(b, 1, 1) != XTC_OK)
 		return XTC_E_AGAIN;
-	}
 	rec = batch_mt_claim(b);
 	if (rec == NULL) {
-		batch_mt_leave(b);
-		batch_inc_atomic(&b->mt.n_rejections);
+		batch_mt_leave(b, 0);
 		return XTC_E_AGAIN;
 	}
 	handle = batch_next_handle(b);
 	if (handle == 0) {
 		batch_mt_release(b, rec);
-		batch_mt_leave(b);
+		batch_mt_leave(b, 0);
 		return XTC_E_RANGE; /* handle space exhausted */
 	}
 	rec->op = MT_SUBMIT;
@@ -1791,12 +1795,10 @@ xtc_batch_submit_mt(xtc_batch_t *b, void *request, uint64_t charge,
 		/* Ring full (push released the record). The handle is burned
 		 * -- handles are never reused, so this only advances the
 		 * counter; no slot was created and no leak occurs. */
-		batch_mt_leave(b);
-		batch_inc_atomic(&b->mt.n_rejections);
+		batch_mt_leave(b, 0);
 		return XTC_E_AGAIN;
 	}
-	batch_mt_leave(b);
-	batch_inc_atomic(&b->mt.n_queued);
+	batch_mt_leave(b, 1);
 	*out = handle;
 	return XTC_OK;
 #else
@@ -1824,12 +1826,11 @@ batch_mt_control_submit(xtc_batch_t *b, uint64_t handle, enum batch_mt_op op)
 		return XTC_E_NOSYS;
 	if (handle == 0)
 		return XTC_E_INVAL;
-	if (batch_mt_enter(b, 2) != XTC_OK)
+	if (batch_mt_enter(b, 2, 0) != XTC_OK)
 		return XTC_E_INVAL; /* driver finished: the handle is stale */
 	rec = batch_mt_claim(b);
 	if (rec == NULL) {
-		batch_mt_leave(b);
-		batch_inc_atomic(&b->mt.n_rejections);
+		batch_mt_leave(b, 0);
 		return XTC_E_AGAIN;
 	}
 	rec->op = op;
@@ -1837,8 +1838,7 @@ batch_mt_control_submit(xtc_batch_t *b, uint64_t handle, enum batch_mt_op op)
 	rec->request = NULL;
 	rec->charge = 0;
 	if (batch_mt_push(b, rec) != XTC_OK) {
-		batch_mt_leave(b);
-		batch_inc_atomic(&b->mt.n_rejections);
+		batch_mt_leave(b, 0);
 		return XTC_E_AGAIN;
 	}
 	/* A FENCE await parks on the fd, not the notify: wake it so a cancel
@@ -1846,8 +1846,7 @@ batch_mt_control_submit(xtc_batch_t *b, uint64_t handle, enum batch_mt_op op)
 	 * gate, so the driver (and its pid) cannot be gone yet. */
 	if (op == MT_CANCEL)
 		(void)xtc_proc_wake(b->driver);
-	batch_mt_leave(b);
-	batch_inc_atomic(&b->mt.n_queued);
+	batch_mt_leave(b, 1);
 	return XTC_OK;
 }
 #endif
