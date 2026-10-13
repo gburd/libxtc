@@ -111,6 +111,9 @@ backend clears its per-thread error state (OpenSSL's error queue,
 wolfSSL's compat queue) before each of these calls and again after a
 failure, so a bad peer on one connection cannot make a later call on
 another connection served by the same thread fail.
+This also holds in custom-transport mode when the callbacks yield the
+fiber in the middle of a call (see
+.Sx SNI AND CUSTOM TRANSPORT ) .
 .Sh DEADLINES
 The library applies no handshake or idle timeout of its own: the
 caller drives every step, so it owns the clock.  Bound the handshake
@@ -264,7 +267,17 @@ window.  The callbacks are BIO-like: return the byte count, 0 for a
 clean EOF, or
 .Dv XTC_E_AGAIN
 to signal would-block (the caller then drives its own readiness and
-retries the TLS op).  These are OpenSSL-backend features; other
+retries the TLS op).
+A callback may yield the fiber (for example in
+.Fn xtc_proc_wait_fd )
+while other connections run on the same thread: the connection's
+OpenSSL error-queue entries are saved before the callback and restored
+after it, and anything another connection queued meanwhile is dropped,
+so a failure on one connection is never reported on another.
+A callback must not call
+.Nm xtc_tls_*
+on the connection it is serving.
+These are OpenSSL-backend features; other
 backends return
 .Dv XTC_E_NOSYS .
 .Sh INTROSPECTION
