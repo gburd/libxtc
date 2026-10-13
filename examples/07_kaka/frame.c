@@ -11,8 +11,6 @@
 
 #include <string.h>
 
-#define KAKA_MAX_FRAME  (64u * 1024u * 1024u)   /* 64 MiB hard cap */
-#define KAKA_MAX_RECORD (16u * 1024u * 1024u)
 
 /* ---- big-endian primitives ---- */
 
@@ -119,7 +117,56 @@ kaka_decode_fetch(const uint8_t *body, size_t body_len, kaka_fetch_t *out)
 	return 0;
 }
 
+/* ---- COMMIT / OFFSETS decode ---- */
+
+static int
+__decode_group_key(const uint8_t *body, size_t body_len, kaka_commit_t *out,
+    size_t tail)
+{
+	const uint8_t *p = body, *end = body + body_len;
+	if (body_len < 2) return -1;
+	out->group_len = kaka_get_u16(p); p += 2;
+	if ((size_t)(end - p) < (size_t)out->group_len + 2) return -1;
+	out->group = (const char *)p; p += out->group_len;
+	out->topic_len = kaka_get_u16(p); p += 2;
+	if ((size_t)(end - p) < (size_t)out->topic_len + 4 + tail) return -1;
+	out->topic = (const char *)p; p += out->topic_len;
+	out->partition = kaka_get_u32(p); p += 4;
+	out->offset = tail ? kaka_get_u64(p) : 0;
+	return 0;
+}
+
+int
+kaka_decode_commit(const uint8_t *body, size_t body_len, kaka_commit_t *out)
+{
+	return __decode_group_key(body, body_len, out, 8);
+}
+
+int
+kaka_decode_offsets(const uint8_t *body, size_t body_len, kaka_commit_t *out)
+{
+	return __decode_group_key(body, body_len, out, 0);
+}
+
 /* ---- response encoders ---- */
+
+long
+kaka_encode_commit_ack(uint8_t *dst, size_t cap)
+{
+	if (cap < 5) return -1;
+	kaka_frame_header(dst, cap, KAKA_COMMIT_ACK, 0);
+	return 5;
+}
+
+long
+kaka_encode_offset(uint8_t *dst, size_t cap, int found, uint64_t offset)
+{
+	if (cap < 5 + 9) return -1;
+	kaka_frame_header(dst, cap, KAKA_OFFSET, 9);
+	dst[5] = found ? 1 : 0;
+	kaka_put_u64(dst + 6, found ? offset : 0);
+	return 5 + 9;
+}
 
 long
 kaka_encode_produce_ack(uint8_t *dst, size_t cap, uint64_t base_offset)
