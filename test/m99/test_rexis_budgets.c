@@ -22,6 +22,7 @@
  *	was checked the server ignored SIGTERM and every test hung.
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +32,21 @@
 #include "rexis_harness.h"
 
 static rexis_srv_t g_srv;
+
+/* RSS bounds are meaningless under AddressSanitizer: its quarantine
+ * keeps freed chunks resident and every allocation carries redzones
+ * (the unfixed server and the fixed one both exceed them).  The
+ * accounting assertions (used_memory <= cap, refusals) still run. */
+#if defined(__SANITIZE_ADDRESS__)
+#define RSS_CHECKS 0
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define RSS_CHECKS 0
+#endif
+#endif
+#ifndef RSS_CHECKS
+#define RSS_CHECKS 1
+#endif
 
 /* Start with `extra` args or fail the test. */
 #define START(...) do {                                                   \
@@ -188,7 +204,8 @@ test_memory_budget(const MunitParameter p[], void *d)
 	 * the cap on glibc).  1.5x allows for allocator differences and
 	 * still fails a server that under-counts by half (grows ~2.1x)
 	 * or does not enforce at all (grows 4x). */
-	munit_assert_llong(rss1 - rss0, <=, MEM_CAP + MEM_CAP / 2);
+	if (RSS_CHECKS)
+		munit_assert_llong(rss1 - rss0, <=, MEM_CAP + MEM_CAP / 2);
 #endif
 
 	/* Still serving after refusing writes. */
@@ -429,6 +446,260 @@ test_sigterm_with_client(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ----- request / client-buffer limits (1.55 review E-M3, E-M4) ----- */
+
+/* Bounded wait for EOF: 1 if the server closed the connection. */
+static int
+closed_by_server(int fd, int ms)
+{
+	char b[256];
+	int64_t end = rexis_now_ms() + ms;
+	ssize_t n;
+
+	while (rexis_now_ms() < end) {
+		n = recv(fd, b, sizeof b, 0);
+		if (n == 0)
+			return 1;
+		if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
+		    errno != EINTR)
+			return 1;        /* RST */
+	}
+	return 0;
+}
+
+/* A partial bulk larger than the old 1 MiB read cap used to pin a core:
+ * the read path returned -1 at the full buffer without reading (so it
+ * never saw EOF either), and the proc spun on a readable socket -- 300
+ * ticks / 3 s while the client held the partial bulk and 199 ticks / 2 s
+ * AFTER it disconnected (exorc/rexis_attack.py bigbulk).  Now the buffer
+ * grows to hold one command of up to --max-request bytes (default
+ * 64 MiB), a client that hangs up mid-command is closed, and a header
+ * announcing more than --max-request is refused at once with an error
+ * and a close (Redis proto-max-bulk-len). */
+static MunitResult
+test_oversize_request_refused(const MunitParameter p[], void *d)
+{
+	static char body[1200000];
+	char hdr[128], resp[256];
+	int fd, n;
+	long long t = 0;
+	(void)p; (void)d;
+
+	START("--max-clients=100");
+	memset(body, 'z', sizeof body);
+
+	/* 1: 1.2 MB of a 2 MB bulk, held, then the client hangs up. */
+	fd = rexis_connect(&g_srv, 2000);
+	munit_assert_int(fd, >=, 0);
+	n = snprintf(hdr, sizeof hdr, "*3\r\n$3\r\nSET\r\n$1\r\nk\r\n"
+	    "$2000000\r\n");
+	munit_assert_int(rexis_send_all(fd, hdr, (size_t)n), ==, 0);
+	munit_assert_int(rexis_send_all(fd, body, sizeof body), ==, 0);
+	usleep(300 * 1000);
+#ifdef __linux__
+	t = rexis_cpu_over(g_srv.pid, 2000);
+	printf("\n  partial 2 MB bulk held: server CPU %lld ticks / 2 s\n", t);
+	munit_assert_llong(t, <=, 20);   /* a spin is ~200 */
+#endif
+	close(fd);
+	usleep(300 * 1000);
+#ifdef __linux__
+	t = rexis_cpu_over(g_srv.pid, 2000);
+	printf("  after the client hung up: %lld ticks / 2 s\n", t);
+	munit_assert_llong(t, <=, 20);
+#endif
+
+	/* 2: a header announcing 100 MB (> the 64 MiB default) is refused
+	 * at the header, without waiting for the body, and closed. */
+	fd = rexis_connect(&g_srv, 2000);
+	munit_assert_int(fd, >=, 0);
+	n = snprintf(hdr, sizeof hdr, "*3\r\n$3\r\nSET\r\n$1\r\nk\r\n"
+	    "$100000000\r\n");
+	munit_assert_int(rexis_send_all(fd, hdr, (size_t)n), ==, 0);
+	n = (int)recv(fd, resp, sizeof resp - 1, 0);
+	munit_assert_int(n, >, 0);
+	resp[n] = '\0';
+	printf("  100 MB header -> %s", resp);
+	munit_assert_ptr_not_null(strstr(resp, "-ERR Protocol error"));
+	munit_assert_true(closed_by_server(fd, 3000));
+	close(fd);
+
+	fd = rexis_connect(&g_srv, 2000);
+	munit_assert_int(fd, >=, 0);
+	munit_assert_true(served(fd));
+	close(fd);
+	STOP_CLEAN();
+	(void)t;
+	return MUNIT_OK;
+}
+
+/* --max-memory used to cover the keyspace only: 300 connections each
+ * holding a 990 KB partial bulk took a --max-memory=10MB server to
+ * 314 MB RSS while INFO said used_memory 0.5 MB.  Client query buffers
+ * are now charged to the same budget; a client whose buffer would pass
+ * it gets -OOM and is closed, and RSS stays near the cap. */
+#define CLI_CAP   (10LL * 1024 * 1024)
+#define CLI_CONNS 100
+
+static MunitResult
+test_client_buffers_bounded(const MunitParameter p[], void *d)
+{
+	static char body[990000];
+	char cap_arg[48], hdr[128];
+	int fds[CLI_CONNS], i, n, refused = 0;
+	long long rss0 = -1, rss1 = -1, used;
+	int ctl;
+	(void)p; (void)d;
+
+	snprintf(cap_arg, sizeof cap_arg, "--max-memory=%lld", CLI_CAP);
+	START(cap_arg);
+	ctl = rexis_connect(&g_srv, 2000);
+	munit_assert_int(ctl, >=, 0);
+	munit_assert_true(served(ctl));
+#ifdef __linux__
+	rss0 = rss_bytes(g_srv.pid);
+#endif
+	memset(body, 'm', sizeof body);
+	n = snprintf(hdr, sizeof hdr, "*3\r\n$3\r\nSET\r\n$1\r\nk\r\n"
+	    "$1000000\r\n");
+	for (i = 0; i < CLI_CONNS; i++) {
+		fds[i] = rexis_connect(&g_srv, 2000);
+		munit_assert_int(fds[i], >=, 0);
+		(void)rexis_send_all(fds[i], hdr, (size_t)n);
+		(void)send(fds[i], body, sizeof body, MSG_NOSIGNAL);
+	}
+	usleep(1000 * 1000);
+#ifdef __linux__
+	rss1 = rss_bytes(g_srv.pid);
+#endif
+	for (i = 0; i < CLI_CONNS; i++)
+		refused += closed_by_server(fds[i], 20);
+	used = info_field(ctl, "used_memory:");
+	printf("\n  client buffers: cap %lld, %d/%d conns refused, "
+	    "used_memory %lld, RSS %lld -> %lld (+%lld)\n", CLI_CAP, refused,
+	    CLI_CONNS, used, rss0, rss1, rss1 - rss0);
+	munit_assert_int(refused, >, 0);
+	munit_assert_llong(used, <=, CLI_CAP);
+#ifdef __linux__
+	/* Unbounded: +99 MB.  Bounded: the cap plus the fixed 32 KiB base
+	 * per connection (3.2 MB) and allocator slack. */
+	if (RSS_CHECKS)
+		munit_assert_llong(rss1 - rss0, <=, 2 * CLI_CAP);
+#endif
+	for (i = 0; i < CLI_CONNS; i++)
+		close(fds[i]);
+	munit_assert_true(served(ctl));
+	close(ctl);
+	STOP_CLEAN();
+	return MUNIT_OK;
+}
+
+/* A reply over --max-output is replaced by an error (never truncated),
+ * and the connection stays usable. */
+static MunitResult
+test_output_limit(const MunitParameter p[], void *d)
+{
+	static char cmd[300000], buf[256];
+	static const char err[] = "-ERR reply exceeds the client output limit";
+	char *v;
+	int fd, n;
+	(void)p; (void)d;
+
+	START("--max-output=100000");
+	fd = rexis_connect(&g_srv, 2000);
+	munit_assert_int(fd, >=, 0);
+	v = malloc(200001);
+	munit_assert_ptr_not_null(v);
+	memset(v, 'w', 200000);
+	v[200000] = '\0';
+	n = rexis_build(cmd, sizeof cmd, 3, "SET", "w", v);
+	munit_assert_int(rexis_send_all(fd, cmd, (size_t)n), ==, 0);
+	munit_assert_size(rexis_read_n(fd, buf, 5, 3000), ==, 5);
+	n = rexis_build(cmd, sizeof cmd, 2, "GET", "w");
+	munit_assert_int(rexis_send_all(fd, cmd, (size_t)n), ==, 0);
+	n = (int)recv(fd, buf, sizeof buf - 1, 0);
+	munit_assert_int(n, >, 0);
+	buf[n] = '\0';
+	munit_assert_int(strncmp(buf, err, sizeof err - 1), ==, 0);
+	munit_assert_true(served(fd));
+	free(v);
+	close(fd);
+	STOP_CLEAN();
+	return MUNIT_OK;
+}
+
+/* --timeout=SECS closes a connection idle that long (Redis `timeout`).
+ * There was no idle timeout at all: an idle connection was re-checked
+ * every second and kept forever. */
+static MunitResult
+test_idle_timeout(const MunitParameter p[], void *d)
+{
+	int idle, busy, i;
+	int64_t t0;
+	(void)p; (void)d;
+
+	START("--timeout=1");
+	idle = rexis_connect(&g_srv, 4000);
+	busy = rexis_connect(&g_srv, 4000);
+	munit_assert_int(idle, >=, 0);
+	munit_assert_int(busy, >=, 0);
+	munit_assert_true(served(idle));
+	t0 = rexis_now_ms();
+	for (i = 0; i < 6; i++) {        /* busy stays active for 3 s */
+		usleep(500 * 1000);
+		munit_assert_true(served(busy));
+	}
+	munit_assert_true(closed_by_server(idle, 2500));
+	printf("\n  timeout: idle conn closed, busy conn served for %lld ms\n",
+	    (long long)(rexis_now_ms() - t0));
+	close(idle);
+	close(busy);
+	STOP_CLEAN();
+	return MUNIT_OK;
+}
+
+/* fd exhaustion: with RLIMIT_NOFILE low, a flood of connections used to
+ * spin the listener at 100% CPU (raw accept() -> EMFILE -> park on the
+ * still-readable listen fd -> repeat).  With xtc_net_accept + back-off
+ * it idles, and recovers once the flood is closed. */
+#define EMFILE_LIMIT 64
+#define EMFILE_FLOOD 150
+
+static MunitResult
+test_emfile_no_spin(const MunitParameter p[], void *d)
+{
+#ifdef __linux__
+	int fds[EMFILE_FLOOD], i, fd;
+	long long t;
+	(void)p; (void)d;
+
+	rexis_child_nofile = EMFILE_LIMIT;
+	START("--max-clients=10000");
+	rexis_child_nofile = 0;
+	for (i = 0; i < EMFILE_FLOOD; i++)
+		fds[i] = rexis_connect(&g_srv, 1000);
+	usleep(300 * 1000);
+	t = rexis_cpu_over(g_srv.pid, 2000);
+	printf("\n  emfile: %d conns vs RLIMIT_NOFILE %d: server CPU %lld "
+	    "ticks / 2 s\n", EMFILE_FLOOD, EMFILE_LIMIT, t);
+	munit_assert_llong(t, >=, 0);
+	munit_assert_llong(t, <=, 40);   /* a spin is ~200 */
+	for (i = 0; i < EMFILE_FLOOD; i++)
+		if (fds[i] >= 0)
+			close(fds[i]);
+	usleep(500 * 1000);
+	fd = rexis_connect(&g_srv, 2000);
+	munit_assert_int(fd, >=, 0);
+	munit_assert_true(served(fd));
+	close(fd);
+	STOP_CLEAN();
+	return MUNIT_OK;
+#else
+	(void)p; (void)d;
+	return MUNIT_SKIP;
+#endif
+}
+
 static MunitTest tests[] = {
 	{ "/memory_budget",    test_memory_budget,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/key_limit",        test_key_limit,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -436,6 +707,11 @@ static MunitTest tests[] = {
 	{ "/iops_limit",       test_iops_limit,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/core_pinning",     test_core_pinning,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/sigterm_with_client", test_sigterm_with_client, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/oversize_request_refused", test_oversize_request_refused, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/client_buffers_bounded", test_client_buffers_bounded, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/output_limit",     test_output_limit,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/idle_timeout",     test_idle_timeout,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/emfile_no_spin",   test_emfile_no_spin,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 
