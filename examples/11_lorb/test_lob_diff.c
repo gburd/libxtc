@@ -264,7 +264,7 @@ compare(const lob_book_t *b)
 				if (t && l != NULL && l->buy != s)
 					continue;   /* the other side's level */
 				if (cnt[t][s][px] == 0) {
-					if (l != NULL && !(t && cnt[t][!s][px]))
+					if (l != NULL)
 						return 3;
 					continue;
 				}
