@@ -1468,10 +1468,10 @@ __xtc_batch_set_last_handle(xtc_batch_t *b, uint64_t last)
 }
 
 /* Test-only (not PUBLIC): push a raw control/submit record onto the mt ring
- * with a CALLER-CHOSEN handle (bypassing the atomic stamp), so a test can
- * force the exact cross-producer ring order -- e.g. a CANCEL for handle H
- * BEFORE H's SUBMIT -- and prove the early-control set never loses a cancel.
- * Returns XTC_OK, XTC_E_AGAIN (ring/pool full), or XTC_E_NOSYS (mt disabled).
+ * with a CALLER-CHOSEN handle (bypassing the atomic stamp and the admission
+ * gate), so a test can place exact records in the ring -- e.g. SUBMIT(H)
+ * then CANCEL(H) in one boundary. A forged CANCEL ahead of its SUBMIT is
+ * treated as stale (see batch_mt_control). Returns XTC_OK, XTC_E_AGAIN (ring/pool full), or XTC_E_NOSYS (mt disabled).
  * Setup-time only; the record is drained by the driver at the next boundary. */
 int
 __xtc_batch_mt_inject(xtc_batch_t *b, int op_cancel_resume_submit,

@@ -149,8 +149,12 @@ collect at once (lets a CPU group use the async API uniformly).
 .B XTC_BATCH_EXEC_FENCE
 A pollable completion fence fd in out_exec->fence_fd (sync_file / dma-fence /
 eventfd), awaited through the same loop readiness path as xtc_accel_wait_fence.
-The application owns the fd; the engine never dups or closes it and simply
-stops waiting on teardown.
+The application owns the fd; the engine never dups or closes it. The wait
+ends on the fence, on exec_timeout_ns, on close(XTC_BATCH_CANCEL) (status
+XTC_BATCH_EXEC_ABORTED), or when the driver is killed; mail sent to the
+driver does not end it. A bad or closed fd, or a build without accelerator
+support, is reported as a negative exec_status (see below), never as
+success.
 NATIVE ONLY: the simulator has no fd-readiness hook, so a FENCE group is not
 sim-reachable (use FUTURE for deterministic coverage).
 .TP
@@ -161,7 +165,9 @@ Pass the READ half (the future); the engine takes responsibility for consuming
 it exactly once, via the normal wait on completion or by discarding it on
 timeout or teardown.
 The application keeps the PROMISE half and resolves or drops it; it must NOT
-also wait on or free the future handle it handed over.
+also wait on or free the future handle it handed over. Resolving it with a
+non-OK status, or dropping it, is reported to collect as that negative
+status. Resolving it after the group was destroyed is safe.
 This half-and-half split keeps the token leak-free and double-free-free across
 teardown.
 FUTURE is the sim-deterministic path.
@@ -169,7 +175,10 @@ FUTURE is the sim-deterministic path.
 .B XTC_BATCH_EXEC_BLOCKING
 A synchronous closure out_exec->run(out_exec->arg) run on the xtc_blocking
 pool; the driver parks while a pool thread runs it (coarse offload, one pool
-thread held).
+thread held). exec_timeout_ns does not apply (a pool thread cannot be
+interrupted), and neither close nor a kill ends the wait early. If the pool
+refuses the closure (xtc_blocking_run returns an error without running it),
+collect sees that error as a negative exec_status.
 .PP
 A nonzero submit return fails that iteration's members (no operation is
 outstanding).
@@ -184,20 +193,37 @@ collect reads device outputs and sets each result state (CONTINUE, DONE,
 BLOCKED, or ERROR) exactly as a synchronous step would, so one member emitting
 end-of-stream becomes DONE while the rest CONTINUE.
 collect reads only the vectors it is handed, never live group state.
-It runs exactly once per outstanding operation, including on teardown, so the
-application can always free that operation's device buffers.
+It runs exactly once per outstanding operation, including on teardown, so
+the application always learns the operation's fate. Only after
+XTC_BATCH_EXEC_OK is the operation known to have finished; after any other
+status it MAY STILL BE RUNNING on the device, and the application must keep
+its buffers until its own runtime reports the operation done (for example by
+handing them to the completion handler of the device event it already
+waits on).
 .PP
-exec_status is a POSITIVE engine sentinel, distinct from an xtc_err a device
-may report, so the two are never confused:
+exec_status is one of the non-negative engine sentinels
 .B XTC_BATCH_EXEC_OK
 (the token fired),
 .B XTC_BATCH_EXEC_TIMEOUT
-(exec_timeout_ns elapsed first), or
+(exec_timeout_ns elapsed first; the engine's wait ends at that deadline even
+across spurious wakes), or
 .B XTC_BATCH_EXEC_ABORTED
-(the group was cancel-closed or torn down while the operation was
-outstanding).
-The engine never auto-retries a side-effecting operation; collect decides,
-returning CONTINUE to keep a member and resubmit next iteration, or failing it.
+(the group was cancel-closed, or the driver killed or torn down, while the
+operation was outstanding), or a NEGATIVE XTC_E_* error: the engine could not
+await the operation at all (a bad or closed fence fd gives XTC_E_INVAL, a
+build without accelerator support XTC_E_NOSYS, a refused blocking closure or
+a failed or dropped device promise its error code, an unknown exec kind
+XTC_E_INVAL). A negative status fails every member of the vector with that
+code and counts in offload_errors.
+.PP
+The engine never auto-retries a side-effecting operation, and it never
+resubmits a member while its previous operation may still be running. After
+XTC_BATCH_EXEC_OK, collect decides: CONTINUE keeps a member for the next
+iteration, DONE or ERROR ends it. After XTC_BATCH_EXEC_TIMEOUT, DONE and
+ERROR are honoured, and a member left CONTINUE, BLOCKED or UNSET ends with
+XTC_E_AGAIN (the device may still own its buffers). After
+XTC_BATCH_EXEC_ABORTED every member ends XTC_E_ABORTED; after a negative
+status every member ends with that status.
 .PP
 The per-member device-output location and per-sequence cache slot are NOT new
 struct fields: the request pointer the application submitted is its
@@ -207,22 +233,31 @@ release that sequence's resources.
 libxtc owns no model state; the abstraction stops at the completion token.
 .PP
 CANCELLATION AT A BOUNDARY.
-A cancel (owner loop) on a member whose operation is outstanding is ACCEPTED,
-not refused: it only records the cancellation and does not interrupt the
-operation mid-flight.
-It is consumed at the completion boundary, where collect still runs (device
-buffer freed) and the member then ends XTC_E_ABORTED exactly once.
-If cancel_hint is set it fires when a cancel lands on an in-flight member, so
-the application may signal its own runtime.
+A cancel (xtc_batch_cancel, xtc_batch_cancel_mt, or close(XTC_BATCH_CANCEL))
+on a member whose operation is outstanding is ACCEPTED, not refused: it
+records the cancellation and does not interrupt the operation mid-flight.
+If cancel_hint is set it fires on the driver as soon as the driver observes
+the cancel while the operation is still outstanding (the cancel wakes the
+driver's wait), once per member, so the application may signal its own
+runtime to abort the kernel; a forced teardown fires it for every in-flight
+member before collect. Mutators return XTC_E_DEADLK during the hint, as
+during collect.
+The cancel is consumed at the completion boundary: collect still runs and the
+member then ends XTC_E_ABORTED exactly once.
+A close(XTC_BATCH_CANCEL) also ends a FENCE or FUTURE wait at once (status
+XTC_BATCH_EXEC_ABORTED); an owner or cross-loop cancel of one member does
+not end the wait.
 Cancellation is iteration-granular, never mid-kernel.
 .PP
 EXACTLY ONCE ACROSS TEARDOWN.
 Each in-flight member is finalized by exactly one call, whether the operation
-completed normally, timed out, was cancelled, or the group was destroyed while
-the driver was parked on the token.
+completed normally, timed out, was cancelled, or the driver was killed while
+parked on the token.
 A forced teardown runs collect once with XTC_BATCH_EXEC_ABORTED before
-finalizing, so a device buffer is never leaked and a member is never completed
-twice.
+finalizing, so a member is never completed twice. A kill of the driver ends a
+FENCE wait at once; it ends a FUTURE wait at once on builds whose process
+layer wakes parked fibers on kill (otherwise at the device's completion or
+exec_timeout_ns). A BLOCKING wait always lasts until the closure returns.
 .PP
 .B xtc_batch_get_async_stats
 reports offloads, offload_timeouts, offload_errors, mt_queued, and
@@ -249,7 +284,15 @@ admission records, both charged through the loop's resource accountant at
 create. The three mt calls allocate nothing: they claim a record from the
 pool, stamp a handle, and push onto the ring; a full ring or exhausted pool
 returns XTC_E_AGAIN and counts mt_rejections. mt_queue_cap (pending hand-ins)
-is distinct from capacity (admitted live requests).
+is distinct from capacity (admitted live requests). A hand-in that waits
+for a slot keeps its record, so mt_queue_cap also bounds hand-ins accepted
+but not yet admitted.
+.PP
+There is no blocking submit_mt. On XTC_E_AGAIN the caller retries: a fiber
+yields (xtc_yield) or sleeps (xtc_proc_sleep) between attempts, a plain
+thread sleeps or yields its CPU. The ring empties at the driver's next
+iteration boundary, and records return to the pool as hand-ins are admitted,
+so a short back-off (tens of microseconds, growing) avoids burning a core.
 .PP
 HANDLE RETURNED IMMEDIATELY, ADMISSION AT A BOUNDARY.
 .B xtc_batch_submit_mt
@@ -257,20 +300,22 @@ stamps a group-global monotonic handle and returns it at once, so the caller
 has a usable handle before the request is admitted. The driver drains the ring
 at its next iteration boundary and only then creates the waiting slot and
 subjects it to the usual capacity, resource, and FCFS admission. A hand-in
-that passes the ring but cannot yet be admitted waits in the group's normal
-waiting state; it is not rejected after the handle is issued. Handles from the
-owner-loop and mt paths share one monotonic space and are never reused.
+that passes the ring but finds every slot taken is held, in arrival order,
+and takes the next freed slot before any later submission; it is never
+rejected after the handle is issued, and an owner-loop xtc_batch_submit
+returns XTC_E_AGAIN while any hand-in is held (FCFS). Every XTC_OK from
+xtc_batch_submit_mt is followed by exactly one complete callback. Handles from
+the owner-loop and mt paths share one monotonic space and are never reused;
+concurrent exhaustion never wraps.
 .PP
 A CANCEL IS NEVER LOST.
-Because the handle is stamped before the record is pushed, a cancel issued by
-a DIFFERENT producer than the one that submitted can reach the ring BEFORE its
-submit. The driver handles this: a cancel or resume whose target slot does not
-yet exist is held in a bounded early-control set and applied the moment the
-matching submit creates the slot. A pending cancel aborts the member before it
-ever runs (its step/collect are never called for it); a pending resume on a
-fresh waiting slot is a no-op. Because handles are never reused, an
-early-control entry can match only its own later submit. A cancel is therefore
-never lost regardless of producer or ring order.
+xtc_batch_submit_mt returns the handle only after its record is on the ring,
+and the ring is drained in the order slots were reserved, so a cancel_mt or
+resume_mt for that handle -- from any producer that was given it -- is always
+drained after the submit. It is applied to the request wherever it is: held,
+waiting (it never runs), active or in flight. A cancel or resume for a handle
+that has already completed (the client-disconnect race) is discarded; nothing
+is retained for it, so any number of such races cost nothing.
 .PP
 CROSS-LOOP RESULTS (REPLY-FUTURE PATTERN).
 Completion still runs the group's complete callback on the DRIVER loop; the
@@ -298,15 +343,17 @@ first run requires execution of its driver. Stopping a loop or executor is
 not draining: destroy returns XTC_E_AGAIN while the driver remains present.
 After a stopped run, route close through an owner process and run again.
 .PP
-With cross-loop producers the same order holds and extends to the ring. A
-producer calling
-.B xtc_batch_submit_mt
-concurrently with close is best-effort: the admission ring is not closed by
+With cross-loop producers the same order holds and extends to the ring.
+Once
 .B xtc_batch_close
-(only destroy closes it), so a racing hand-in may be accepted and return a
-handle, then dropped at the next driver drain (counted in rejections, with no
-completion callback), or it may lose a full ring and get XTC_E_AGAIN. An
-AGAIN-on-closed result is not promised on the producer side. Freedom from a
+has returned, every
+.B xtc_batch_submit_mt
+returns XTC_E_AGAIN without issuing a handle. A submit_mt that races close
+either gets XTC_E_AGAIN or an XTC_OK handle that completes exactly once:
+XTC_BATCH_DRAIN runs it, XTC_BATCH_CANCEL ends it XTC_E_ABORTED. The driver
+does not finish until every such hand-in has been drained. cancel_mt and
+resume_mt stay accepted while the driver runs (a cancel during a drain still
+matters) and return XTC_E_INVAL once it has finished. Freedom from a
 freed-memory access is not a property the ring enforces across teardown; it
 rests on the caller obligation below. The admission ring and record pool are
 closed and freed only in destroy, after the driver is gone, and the group heap
@@ -346,10 +393,12 @@ accel* node from /sys/class/accel/<name>/device/numa_node (dev->name is the
 short label, e.g. "renderD128" or "accel0"). On success it writes a valid
 loop index in [0, xtc_exec_n_loops) to out_loop_idx and returns XTC_OK. When
 the device numa_node is -1 or unknown, the executor's loops record no known
-node (for example when the helper is called before the executor has run, so
-no carrier has recorded its node yet), or the host reports a single NUMA
-node, it writes 0 (the loop-0 fallback) and still returns XTC_OK: absence of
-topology is not an error, matching xtc_accel's convention. It never returns
+node, or the host reports a single NUMA node, it writes 0 (the loop-0
+fallback) and still returns XTC_OK: absence of topology is not an error,
+matching xtc_accel's convention. A carrier records its node when it starts,
+so a loop that has not run has no known node: called before the executor
+has run -- which is when a group can be created -- the helper currently
+always returns loop 0. It never returns
 an out-of-range index. A NULL argument returns XTC_E_INVAL. The read is a
 one-shot static-topology probe and touches no sim-nondeterministic source,
 so it is safe to call under the deterministic simulator; it is not meant for
@@ -387,10 +436,13 @@ returns NULL on a NULL router.
 The snapshot includes queued, ready, blocked, reserved_units, iterations,
 completed, cancelled, failed, rejections, max_vector, and total_members.
 Queued means waiting for admission; ready and blocked count active members.
+Queued includes cross-loop hand-ins held for a slot.
 Iteration and membership totals measure vector calls and their occupancy.
 Terminal counters advance after completion delivery returns (or after an
-interrupted delivery is retired). Rejections count invalid or unsuccessful
-submissions after owner/callback validation. Cumulative counters saturate at
+interrupted delivery is retired). Rejections count owner-loop
+xtc_batch_submit calls that failed after owner/callback validation; refused
+mt calls count in the async statistics' mt_rejections instead, and
+an accepted hand-in is never counted as a rejection. Cumulative counters saturate at
 UINT64_MAX. Per-request timing belongs in application instrumentation.
 .SH ERRORS
 XTC_E_INVAL indicates malformed arguments, descriptor size, foreign ownership,
