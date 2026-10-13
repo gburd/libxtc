@@ -62,8 +62,20 @@ The function is called by the loop whenever the task becomes
 runnable; its return value tells the loop what to do next:
 .Bl -tag -width XTC_TASK_PENDING -compact
 .It Dv XTC_TASK_DONE
-The task is finished and is reaped at
-.Fn xtc_loop_fini .
+The task is finished.
+A task created with
+.Fn xtc_task_spawn
+or
+.Xr xtc_async 3
+is reaped at
+.Fn xtc_loop_fini ,
+so the handle it returned stays valid until then.
+The fiber of a process
+.Pq Xr xtc_proc 3 ,
+whose task handle is never handed out, is reclaimed as soon as it
+finishes: its stack returns to a small per-thread cache (or is
+unmapped) and its task is recycled, so memory and mappings track the
+number of live processes, not the number ever spawned.
 .It Dv XTC_TASK_RESCHED
 Re-queue the task at the back of the run queue: it runs again only
 after every task already queued.  This holds for pinned and migratable
@@ -110,10 +122,26 @@ backends keep armed across the drain) and delivers no event, so a
 spurious wake is always safe.
 .Pp
 .Fn xtc_loop_fini
-frees every task ever spawned, every timer ever created (live or
-fired), the loop's
+frees every task still held by the loop, every timer ever created
+(live or fired), the loop's
 .Vt xtc_io_t ,
 and the loop struct itself.
+Processes still alive on the loop
+.Pq parked in a receive, a sleep, or any other wait
+are torn down with it: their queued messages, link and monitor
+entries, and memory context are released, but their
+.Fn xtc_proc_at_exit
+callbacks are not run and no
+.Dq DOWN
+or exit signal is sent, because their fibers never resume.
+A process that must release an external resource on shutdown should
+be told to exit, for example with
+.Fn xtc_exit_pid
+.Pq see Xr xtc_proc 3 ,
+and allowed to finish before the loop is finalized.
+Messages sent to such a process after
+.Fn xtc_loop_fini
+are dropped.
 .Sh TASKS
 .Fn xtc_task_spawn
 creates a new task in
