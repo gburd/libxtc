@@ -6,8 +6,9 @@
  *	Table-driven tests for the RESP protocol parser.
  */
 
-#include <string.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "munit.h"
 #include "../../examples/05_rexis/proto.h"
@@ -667,6 +668,142 @@ test_resp3_map(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ----- Regressions (1.55 review) ----- */
+
+/* libFuzzer input (exorc/resp_fuzz.c, UBSan): "5738690000005738693 * 10
+ * cannot be represented in type 'int64_t'".  The digit loop multiplied
+ * first and tested `val < 0` after; the product wrapped to a POSITIVE
+ * value, so the check missed and the line parsed as
+ * 2046667778928732082. */
+static MunitResult
+test_integer_overflow_fuzz_input(const MunitParameter p[], void *d)
+{
+	static const char in[] = ":57386900000057386930\r\n";
+	resp_parser_t parser;
+	resp_value_t val;
+	size_t consumed;
+	(void)p; (void)d;
+
+	resp_parser_init(&parser, in, sizeof in - 1);
+	munit_assert_int(resp_parse(&parser, &val, &consumed), ==,
+	    RESP_ERR_PROTO);
+	return MUNIT_OK;
+}
+
+static MunitResult
+test_integer_limits(const MunitParameter p[], void *d)
+{
+	static const char max[] = ":9223372036854775807\r\n";
+	static const char over[] = ":9223372036854775808\r\n";
+	static const char bulk[] = "$99999999999999999999\r\nx\r\n";
+	resp_parser_t parser;
+	resp_value_t val;
+	size_t consumed;
+	(void)p; (void)d;
+
+	resp_parser_init(&parser, max, sizeof max - 1);
+	munit_assert_int(resp_parse(&parser, &val, &consumed), ==, RESP_OK);
+	munit_assert_llong(val.u.ival, ==, INT64_MAX);
+	resp_parser_init(&parser, over, sizeof over - 1);
+	munit_assert_int(resp_parse(&parser, &val, &consumed), ==,
+	    RESP_ERR_PROTO);
+	resp_parser_init(&parser, bulk, sizeof bulk - 1);
+	munit_assert_int(resp_parse(&parser, &val, &consumed), ==,
+	    RESP_ERR_PROTO);
+	return MUNIT_OK;
+}
+
+/* An incomplete command leaves the parser at the command's start, so a
+ * caller can keep [pos, len) and retry when more bytes arrive.  It used
+ * to stop after the array header and the complete elements. */
+static MunitResult
+test_command_incomplete_pos(const MunitParameter p[], void *d)
+{
+	static const char in[] = "*2\r\n$3\r\nGET\r\n$1\r\n";
+	resp_parser_t parser;
+	resp_value_t argv[4];
+	int argc;
+	size_t consumed;
+	(void)p; (void)d;
+
+	resp_parser_init(&parser, in, sizeof in - 1);
+	munit_assert_int(resp_parse_command(&parser, argv, 4, &argc,
+	    &consumed), ==, RESP_NEED_MORE);
+	munit_assert_size(parser.pos, ==, 0);
+	return MUNIT_OK;
+}
+
+/* A type line that cannot end within max_inline bytes is refused, not
+ * rescanned on every read forever. */
+static MunitResult
+test_unterminated_line_bounded(const MunitParameter p[], void *d)
+{
+	static char in[100000];
+	resp_parser_t parser;
+	resp_value_t argv[4];
+	int argc;
+	size_t consumed;
+	(void)p; (void)d;
+
+	memset(in, '1', sizeof in);
+	in[0] = '*';
+	resp_parser_init(&parser, in, sizeof in);
+	munit_assert_int(resp_parse_command(&parser, argv, 4, &argc,
+	    &consumed), ==, RESP_ERR_TOOLARGE);
+	return MUNIT_OK;
+}
+
+/* Inline commands (what telnet / nc send).  Used to be a protocol
+ * error. */
+static MunitResult
+test_inline_command(const MunitParameter p[], void *d)
+{
+	static const char in[] = "SET  k\tv\r\n\r\nPING\nGET";
+	resp_parser_t parser;
+	resp_value_t argv[4];
+	int argc;
+	size_t consumed;
+	(void)p; (void)d;
+
+	resp_parser_init(&parser, in, sizeof in - 1);
+	munit_assert_int(resp_parse_command(&parser, argv, 4, &argc,
+	    &consumed), ==, RESP_OK);
+	munit_assert_int(argc, ==, 3);
+	munit_assert_size(consumed, ==, 10);
+	munit_assert_memory_equal(3, argv[0].u.str.data, "SET");
+	munit_assert_size(argv[1].u.str.len, ==, 1);
+	munit_assert_memory_equal(1, argv[2].u.str.data, "v");
+	/* blank line: an empty command */
+	munit_assert_int(resp_parse_command(&parser, argv, 4, &argc,
+	    &consumed), ==, RESP_OK);
+	munit_assert_int(argc, ==, 0);
+	munit_assert_int(resp_parse_command(&parser, argv, 4, &argc,
+	    &consumed), ==, RESP_OK);
+	munit_assert_int(argc, ==, 1);
+	munit_assert_memory_equal(4, argv[0].u.str.data, "PING");
+	/* no newline yet */
+	munit_assert_int(resp_parse_command(&parser, argv, 4, &argc,
+	    &consumed), ==, RESP_NEED_MORE);
+	return MUNIT_OK;
+}
+
+/* A reply that does not fit leaves the buffer in a STICKY error state,
+ * so the caller can drop the whole reply.  Before, resp_write_bulk wrote
+ * the "$100000\r\n" header, failed on the body, and the header went out
+ * alone -- desynchronizing the client's stream. */
+static MunitResult
+test_write_overflow_sticky(const MunitParameter p[], void *d)
+{
+	char buf[16];
+	resp_buf_t out;
+	(void)p; (void)d;
+
+	resp_buf_init(&out, buf, sizeof buf);
+	munit_assert_int(resp_write_bulk(&out, "0123456789abcdef", 16), !=, 0);
+	munit_assert_int(resp_write_ok(&out), !=, 0);   /* still failing */
+	return MUNIT_OK;
+}
+
 /* ----- Test suite ----- */
 
 static MunitTest tests[] = {
@@ -723,6 +860,13 @@ static MunitTest tests[] = {
 	{ "/resp3_boolean_false",  test_resp3_boolean_false, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/resp3_map",            test_resp3_map,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 
+	/* Regressions */
+	{ "/integer_overflow_fuzz_input", test_integer_overflow_fuzz_input, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/integer_limits",       test_integer_limits,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/command_incomplete_pos", test_command_incomplete_pos, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/unterminated_line_bounded", test_unterminated_line_bounded, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/inline_command",       test_inline_command,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/write_overflow_sticky", test_write_overflow_sticky, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 

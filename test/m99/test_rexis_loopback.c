@@ -418,6 +418,236 @@ test_many_replies_one_conn(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ----- Regressions (1.55 review, rexis findings E-M1 / E-M2) ----- */
+
+/* An n-byte value of c's. */
+static char *
+build_value(size_t n, char c)
+{
+	char *v = malloc(n + 1);
+	munit_assert_ptr_not_null(v);
+	memset(v, c, n);
+	v[n] = '\0';
+	return v;
+}
+
+/* SET key to an n-byte value (one round trip). */
+static void
+set_big(int fd, const char *key, size_t n)
+{
+	char *v = build_value(n, 'y'), *cmd = malloc(n + 128), ok[8];
+	int len;
+
+	munit_assert_ptr_not_null(cmd);
+	len = build_cmd(cmd, n + 128, 3, "SET", key, v);
+	munit_assert_int(rexis_send_all(fd, cmd, (size_t)len), ==, 0);
+	munit_assert_size(rexis_read_n(fd, ok, 5, 3000), ==, 5);
+	munit_assert_memory_equal(5, ok, "+OK\r\n");
+	free(v);
+	free(cmd);
+}
+
+/* A reply larger than the connection's 64 KiB write buffer used to be
+ * truncated to its header: GET of a 100000 B value returned the 9 bytes
+ * "$100000\r\n" and nothing else (exorc/rexis_attack.py hugeget). */
+static MunitResult
+test_big_reply(const MunitParameter p[], void *d)
+{
+	const size_t n = 100000;
+	char cmd[64], *want, *got;
+	int fd, len, hl;
+	(void)p; (void)d;
+
+	fd = connect_server();
+	munit_assert_int(fd, >=, 0);
+	set_big(fd, "huge", n);
+	want = malloc(n + 32);
+	got = malloc(n + 32);
+	munit_assert_ptr_not_null(want);
+	munit_assert_ptr_not_null(got);
+	hl = snprintf(want, 32, "$%zu\r\n", n);
+	memset(want + hl, 'y', n);
+	memcpy(want + hl + n, "\r\n", 2);
+	len = build_cmd(cmd, sizeof cmd, 2, "GET", "huge");
+	munit_assert_int(rexis_send_all(fd, cmd, (size_t)len), ==, 0);
+	munit_assert_size(rexis_read_n(fd, got, (size_t)hl + n + 2, 5000), ==,
+	    (size_t)hl + n + 2);
+	munit_assert_memory_equal((size_t)hl + n + 2, got, want);
+	/* and the stream is still in sync */
+	len = build_cmd(cmd, sizeof cmd, 1, "PING");
+	munit_assert_int(rexis_send_all(fd, cmd, (size_t)len), ==, 0);
+	munit_assert_size(rexis_read_n(fd, got, 7, 2000), ==, 7);
+	munit_assert_memory_equal(7, got, "+PONG\r\n");
+	free(want);
+	free(got);
+	close(fd);
+	return MUNIT_OK;
+}
+
+/* A client that pipelines many replies' worth of commands and does not
+ * read for a while.  The server used to drop whatever did not fit its
+ * write buffer: 20000 pipelined GETs of a 1000 B value delivered 599
+ * complete replies and a corrupted stream.  Every byte must arrive, in
+ * order, exactly. */
+static MunitResult
+test_slow_reader_pipeline(const MunitParameter p[], void *d)
+{
+	enum { N = 20000, V = 1000 };
+	char one[V + 16], *pipe_buf, *got;
+	size_t one_len, cmd_len, i;
+	int fd, len;
+	char cmd[64];
+	(void)p; (void)d;
+
+	fd = connect_server();
+	munit_assert_int(fd, >=, 0);
+	set_big(fd, "v", V);
+	len = snprintf(one, sizeof one, "$%d\r\n", V);
+	memset(one + len, 'y', V);
+	memcpy(one + len + V, "\r\n", 2);
+	one_len = (size_t)len + V + 2;
+
+	cmd_len = (size_t)build_cmd(cmd, sizeof cmd, 2, "GET", "v");
+	pipe_buf = malloc(cmd_len * N);
+	got = malloc(one_len * N);
+	munit_assert_ptr_not_null(pipe_buf);
+	munit_assert_ptr_not_null(got);
+	for (i = 0; i < N; i++)
+		memcpy(pipe_buf + i * cmd_len, cmd, cmd_len);
+	munit_assert_int(rexis_send_all(fd, pipe_buf, cmd_len * N), ==, 0);
+	usleep(1500 * 1000);              /* do not read for a while */
+	munit_assert_size(rexis_read_n(fd, got, one_len * N, 20000), ==,
+	    one_len * N);
+	for (i = 0; i < N; i++)
+		if (memcmp(got + i * one_len, one, one_len) != 0)
+			munit_errorf("reply %zu of %d corrupted", i, N);
+	free(pipe_buf);
+	free(got);
+	close(fd);
+	return MUNIT_OK;
+}
+
+/* Count "$<n>\r\n" bulk headers for exactly-n-byte elements. */
+static int
+count_bulks(const char *buf, size_t len, const char *hdr)
+{
+	size_t hl = strlen(hdr), i;
+	int c = 0;
+
+	for (i = 0; i + hl <= len; i++)
+		if (memcmp(buf + i, hdr, hl) == 0)
+			c++;
+	return c;
+}
+
+/* LRANGE / KEYS / HGETALL used to stop at 1024 / 1024 / 512 elements
+ * (fixed stack arrays) under a header that claimed only that many:
+ * LRANGE of 2000 elements answered "*1024", KEYS * over 3000 keys
+ * "*1024" -- wrong results, no error. */
+static MunitResult
+test_multi_element_replies_uncapped(const MunitParameter p[], void *d)
+{
+	enum { NL = 2000, NK = 3000, NH = 1500 };
+	static char cmd[NK * 64], buf[NL * 120 + 64];
+	char key[32], fld[32], one[160], v[101];
+	size_t want, off = 0;
+	int fd, i, len, n;
+	(void)p; (void)d;
+
+	fd = connect_server();
+	munit_assert_int(fd, >=, 0);
+
+	/* list: 2000 x 100 B */
+	memset(v, 'e', 100);
+	v[100] = '\0';
+	for (i = 0; i < NL; i++) {
+		len = build_cmd(one, sizeof one, 3, "RPUSH", "L", v);
+		memcpy(cmd + off, one, (size_t)len);
+		off += (size_t)len;
+		if (off > sizeof cmd - sizeof one || i == NL - 1) {
+			munit_assert_int(rexis_send_all(fd, cmd, off), ==, 0);
+			off = 0;
+		}
+	}
+	/* drain the NL integer replies ":1\r\n".. ":2000\r\n" */
+	want = 0;
+	for (i = 1; i <= NL; i++)
+		want += (size_t)snprintf(one, sizeof one, ":%d\r\n", i);
+	munit_assert_size(rexis_read_n(fd, buf, want, 5000), ==, want);
+
+	len = build_cmd(one, sizeof one, 4, "LRANGE", "L", "0", "-1");
+	n = build_cmd(one + len, sizeof one - (size_t)len, 1, "PING");
+	munit_assert_int(rexis_send_all(fd, one, (size_t)(len + n)), ==, 0);
+	want = 7 + (size_t)NL * (6 + 100 + 2) + 7;   /* "*2000\r\n" .. +PONG */
+	munit_assert_size(rexis_read_n(fd, buf, want, 5000), ==, want);
+	munit_assert_memory_equal(7, buf, "*2000\r\n");
+	munit_assert_int(count_bulks(buf, want, "$100\r\n"), ==, NL);
+	munit_assert_memory_equal(7, buf + want - 7, "+PONG\r\n");
+
+	/* keys: 3000 more ("L" is one already) */
+	off = 0;
+	for (i = 0; i < NK; i++) {
+		snprintf(key, sizeof key, "key%05d", i);
+		len = build_cmd(one, sizeof one, 3, "SET", key, "v");
+		memcpy(cmd + off, one, (size_t)len);
+		off += (size_t)len;
+	}
+	munit_assert_int(rexis_send_all(fd, cmd, off), ==, 0);
+	munit_assert_size(rexis_read_n(fd, buf, 5 * NK, 5000), ==, 5 * NK);
+	len = build_cmd(one, sizeof one, 2, "KEYS", "key*");
+	munit_assert_int(rexis_send_all(fd, one, (size_t)len), ==, 0);
+	want = 7 + (size_t)NK * (4 + 8 + 2);          /* "$8\r\nkeyNNNNN\r\n" */
+	munit_assert_size(rexis_read_n(fd, buf, want, 5000), ==, want);
+	munit_assert_memory_equal(7, buf, "*3000\r\n");
+	munit_assert_int(count_bulks(buf, want, "$8\r\nkey"), ==, NK);
+
+	/* hash: 1500 fields -> HGETALL is 3000 bulks */
+	off = 0;
+	for (i = 0; i < NH; i++) {
+		snprintf(fld, sizeof fld, "f%05d", i);
+		len = build_cmd(one, sizeof one, 4, "HSET", "H", fld, "x");
+		memcpy(cmd + off, one, (size_t)len);
+		off += (size_t)len;
+	}
+	munit_assert_int(rexis_send_all(fd, cmd, off), ==, 0);
+	munit_assert_size(rexis_read_n(fd, buf, 4 * NH, 5000), ==, 4 * NH);
+	len = build_cmd(one, sizeof one, 2, "HGETALL", "H");
+	munit_assert_int(rexis_send_all(fd, one, (size_t)len), ==, 0);
+	want = 7 + (size_t)NH * ((4 + 6 + 2) + (4 + 1 + 2));
+	munit_assert_size(rexis_read_n(fd, buf, want, 5000), ==, want);
+	munit_assert_memory_equal(7, buf, "*3000\r\n");
+	munit_assert_int(count_bulks(buf, want, "$6\r\nf"), ==, NH);
+	len = build_cmd(one, sizeof one, 2, "HKEYS", "H");
+	munit_assert_int(rexis_send_all(fd, one, (size_t)len), ==, 0);
+	want = 7 + (size_t)NH * (4 + 6 + 2);
+	munit_assert_size(rexis_read_n(fd, buf, want, 5000), ==, want);
+	munit_assert_memory_equal(7, buf, "*1500\r\n");
+
+	close(fd);
+	return MUNIT_OK;
+}
+
+/* Inline commands (telnet / nc / redis-cli's raw mode) used to be
+ * answered "-ERR protocol error" and the connection closed. */
+static MunitResult
+test_inline_commands(const MunitParameter p[], void *d)
+{
+	static const char in[] = "PING\r\nSET a  b\r\n\r\nGET a\nECHO hi\r\n";
+	static const char want[] = "+PONG\r\n+OK\r\n$1\r\nb\r\n$2\r\nhi\r\n";
+	char got[64];
+	int fd;
+	(void)p; (void)d;
+
+	fd = connect_server();
+	munit_assert_int(fd, >=, 0);
+	munit_assert_int(rexis_send_all(fd, in, sizeof in - 1), ==, 0);
+	munit_assert_size(rexis_read_n(fd, got, sizeof want - 1, 3000), ==,
+	    sizeof want - 1);
+	munit_assert_memory_equal(sizeof want - 1, got, want);
+	close(fd);
+	return MUNIT_OK;
+}
+
 /* ----- Test suite ----- */
 
 static MunitTest tests[] = {
@@ -434,6 +664,10 @@ static MunitTest tests[] = {
 	{ "/quit",             test_quit,             setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/unknown_command",  test_unknown_command,  setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/many_replies_one_conn", test_many_replies_one_conn, setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/big_reply",        test_big_reply,        setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/slow_reader_pipeline", test_slow_reader_pipeline, setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/multi_element_replies_uncapped", test_multi_element_replies_uncapped, setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/inline_commands",  test_inline_commands,  setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 

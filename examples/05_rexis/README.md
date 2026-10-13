@@ -43,7 +43,9 @@ redis-cli -p 16379 GET hello
 | Connection | PING, ECHO, QUIT, AUTH, SELECT |
 | Admin | INFO, COMMAND, CLUSTER NODES |
 
-Both RESP2 (Redis 1.x-5.x) and RESP3 (Redis 6+) protocols are accepted.
+Both RESP2 (Redis 1.x-5.x) and RESP3 (Redis 6+) protocols are accepted,
+as are inline commands (`PING\r\n`, `SET k v\r\n` -- what telnet and
+`nc` send; words are split on spaces/tabs and not unquoted).
 
 Pub/Sub is built on libxtc process groups (`xtc_pg`, over the
 duplicate-key registry `xtc_reg_register_dup`): SUBSCRIBE joins the
@@ -64,21 +66,35 @@ and pattern subscriptions (PSUBSCRIBE) are also out of scope.
 
 ## Resource budget enforcement
 
-This is the centerpiece for the P99 conference demo.  All five caps below
+This is the centerpiece for the P99 conference demo.  The caps below
 hold under stress:
 
 | Flag | What it bounds | How |
 |---|---|---|
-| `--cores=N` | CPU cores used | `sched_setaffinity(2)` pins the process; xtc_loops fanned out via xtc_exec |
-| `--max-memory=N` | RSS bytes | Every alloc charged to `xtc_res` with `XTC_RES_MEM_BYTES` cap; OOM error returned to client on exceed |
+| `--cores=N` | Which CPUs the process may run on | `sched_setaffinity(2)` restricts it to CPUs 0..N-1.  rexis runs ONE event loop on ONE thread, so this pins; it does not add threads (`--cores=4` is still one busy core) |
+| `--max-memory=N` | Keyspace + client buffers | One `xtc_res` `XTC_RES_MEM_BYTES` budget charged by every keyspace allocation (including the bucket array) AND by every client query/output buffer's growth above a fixed 16 KiB each.  A write that would pass it gets `-OOM`; a client whose buffer would pass it gets `-OOM` and is closed.  `INFO` `used_memory` is the budget's total (`used_memory_dataset` + `used_memory_clients`).  Not covered: the fixed 32 KiB of buffers per connection (bounded by `--max-clients`), proc stacks, allocator overhead.  0 = no cap |
 | `--max-keys=N` | DB key count | Per-DB counter; SET/HSET/LPUSH refused above cap |
 | `--max-clients=N` | Concurrent connections | Listener checks the live count before spawning a per-conn proc; over-limit connections are closed |
 | `--max-iops=N` | Commands/sec | Token bucket refilled every second; excess commands are DELAYED (held in the connection's buffer until tokens return), not rejected |
+| `--max-request=N` | Largest command (default 64 MiB) | Redis `proto-max-bulk-len`: a bulk whose header announces more is refused at once (`-ERR Protocol error: ...`) and the connection closed; the query buffer grows only to hold one command |
+| `--max-output=N` | Unsent reply bytes per client (default 128 MiB) | Redis `client-output-buffer-limit`: a reply that would pass it is replaced WHOLE by `-ERR reply exceeds the client output limit` (never truncated); a pub/sub subscriber that falls that far behind is disconnected |
+| `--timeout=SECS` | Idle connections (default 0 = never) | Redis `timeout`: no byte in either direction for SECS closes the connection; subscribers are exempt |
+
+Backpressure: once more than 1 MiB of a client's replies are unsent, its
+connection stops reading and running commands until the client drains
+them, so a client that pipelines without reading is slowed by TCP flow
+control rather than growing the server.  Malformed input is answered
+with an error and the connection is closed (the rest of the stream
+cannot be trusted).  Under fd exhaustion (EMFILE) the listener backs off
+10 ms per failed accept instead of spinning, and recovers when fds free.
 
 Verified by MEASUREMENT in `test/m99/test_rexis_budgets.c`: server RSS
-growth while offered 4x the memory cap, the server's CPU affinity mask,
-connections actually served, and the reply rate of a pipelined burst
-(<= 1.5x `--max-iops`).  Run with `make check-rexis` in a build dir.
+growth while offered 4x the memory cap and while 100 clients each hold a
+990 KB partial command, the server's CPU affinity mask, connections
+actually served, the reply rate of a pipelined burst (<= 1.5x
+`--max-iops`), server CPU while a client holds an oversized partial
+bulk and under an fd flood, and the idle timeout.  Run with
+`make check-rexis` in a build dir.
 
 ## Architecture
 
@@ -145,9 +161,9 @@ In `test/m99/`:
 
 | Test | Cases | Coverage |
 |---|---|---|
-| `test_resp_parser.c` | 33 | RESP2/RESP3 framing, malformed input |
-| `test_rexis_loopback.c` | 12 | End-to-end command round-trips |
-| `test_rexis_budgets.c` | 6 | All five `--max-*` caps, measured; clean SIGTERM |
+| `test_resp_parser.c` | 39 | RESP2/RESP3 framing, inline commands, malformed input, integer overflow |
+| `test_rexis_loopback.c` | 17 | End-to-end round-trips, replies larger than any buffer, slow readers, uncapped LRANGE/KEYS/HGETALL |
+| `test_rexis_budgets.c` | 11 | Every `--max-*` cap, measured; request/output limits, client-buffer memory, idle timeout, EMFILE; clean SIGTERM |
 | `test_rexis_pbt.c` | 5 | properties (atomicity, idempotence, FIFO) |
 
 Run via `make check-rexis` in a libxtc build dir (CI runs it in the
@@ -230,6 +246,12 @@ shaped the library:
   the note in `bitcask.h` about why, and `examples/06_sqlxtc/wal.c` for
   the `xtc_aio_*` alternative.
 * `KEYS pattern` is O(n) like real Redis -- documented, not a bug.
+* Single-threaded: one event loop serves every connection (see
+  `--cores` above).  A multi-loop rexis would need the keyspace's
+  writers serialized across loops; not done.
+* A client that pipelines an unbounded stream and never reads stalls
+  once the socket buffers fill (backpressure, above); Redis instead
+  buffers replies without limit for normal clients by default.
 * `INFO` output is hand-rolled and approximate; real Redis has
   hundreds of metrics; we expose ~30.
 * `CLUSTER NODES` returns a single-node response unconditionally.

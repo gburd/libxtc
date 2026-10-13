@@ -73,6 +73,7 @@ typedef struct resp_parser {
 	size_t       pos;
 	size_t       max_depth;     /* recursion limit; default 8 */
 	size_t       max_bulk;      /* max bulk string size; default 512 MB */
+	size_t       max_inline;    /* max inline command / type line; 64 KiB */
 } resp_parser_t;
 
 /*
@@ -96,10 +97,15 @@ void resp_parser_init(resp_parser_t *p, const char *buf, size_t len);
 resp_err_t resp_parse(resp_parser_t *p, resp_value_t *out, size_t *consumed);
 
 /*
- * Parse a complete command (array of bulk strings) into argv/argc.
- * Returns RESP_OK on success, with *argc set and argv[] filled.
- * argv[i].data points into the original buffer.
- * max_args limits the argv array size.
+ * Parse a complete command into argv/argc.  Two forms, as in Redis: a
+ * multibulk array of bulk strings ("*2\r\n$3\r\nGET\r\n$1\r\nk\r\n"),
+ * or, when the first byte is not '*', an INLINE command: one line of
+ * space/tab-separated words ending in "\n" or "\r\n" ("GET k\r\n",
+ * what telnet or `nc` sends).  Inline words are not unquoted.
+ * Returns RESP_OK on success, with *argc set and argv[] filled; argc 0
+ * means an empty command ("*0", "*-1", a blank line) that the caller
+ * should skip without a reply.  argv[i].data points into the original
+ * buffer.  max_args limits the argv array size (RESP_ERR_TOOLARGE).
  */
 resp_err_t resp_parse_command(resp_parser_t *p,
                               resp_value_t *argv, int max_args,
@@ -108,16 +114,33 @@ resp_err_t resp_parse_command(resp_parser_t *p,
 /* ----- Response builder --------------------------------------------- */
 
 /*
- * Response buffer.  Caller-owned; typically stack-allocated or from slab.
+ * Response buffer.  Caller-owned.  By default it is FIXED: an append that
+ * does not fit fails.  Set `grow` to let it grow: the callback must make
+ * b->cap >= need (reallocating b->data) and return 0, or return -1 to
+ * refuse (a limit or a memory budget).
+ *
+ * `err` is STICKY: once an append fails, every later append on the same
+ * buffer fails too, so a reply is never left with its header written and
+ * its body dropped -- the caller checks `err` after building a reply,
+ * truncates back to where the reply started, and answers with an error
+ * instead.  (A partial reply on the wire desynchronizes the client's
+ * RESP stream for every reply after it.)
  */
 typedef struct resp_buf {
 	char   *data;
 	size_t  cap;
 	size_t  len;
+	int     err;
+	int   (*grow)(struct resp_buf *b, size_t need);
+	void   *grow_arg;
 } resp_buf_t;
 
+/* Fixed buffer over data[0..cap).  err = 0, grow = NULL. */
 void resp_buf_init(resp_buf_t *b, char *data, size_t cap);
 void resp_buf_reset(resp_buf_t *b);
+
+/* Append raw bytes (an already-encoded RESP frame). */
+int resp_write_raw(resp_buf_t *b, const void *data, size_t len);
 
 /* Append simple string: +msg\r\n */
 int resp_write_simple(resp_buf_t *b, const char *msg);
@@ -135,7 +158,7 @@ int resp_write_bulk(resp_buf_t *b, const char *data, size_t len);
 int resp_write_bulk_null(resp_buf_t *b);
 
 /* Append array header: *count\r\n */
-int resp_write_array(resp_buf_t *b, int count);
+int resp_write_array(resp_buf_t *b, size_t count);
 int resp_write_array_null(resp_buf_t *b);
 
 /* Helpers */
