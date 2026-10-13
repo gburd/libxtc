@@ -303,12 +303,59 @@ client_hello_cb(SSL *ssl, int *al, void *arg)
  * the caller's read_cb/write_cb.  We set the retry flag on XTC_E_AGAIN
  * so SSL_get_error reports WANT_READ / WANT_WRITE and the caller drives
  * its own readiness, exactly as with an fd BIO.
+ *
+ * The callbacks may yield the fiber (xtc_tls.h invites it), and other
+ * fibers on this thread then run OpenSSL against the same per-thread
+ * error queue.  So each callback is bracketed: before it, this
+ * connection's pending entries are moved off the queue onto the fiber's
+ * stack (OpenSSL pushes a handshake error BEFORE it writes the alert
+ * that reports it, so they can be ours and must survive); after it,
+ * whatever other fibers left is dropped and ours are put back.  Without
+ * this, a peer's failed handshake suspended in its alert write made a
+ * healthy session's WANT_READ read as SSL_ERROR_SSL.  Only the codes
+ * are kept: SSL_get_error and tls_fail read nothing else, and every op
+ * clears the queue when it ends.
  * ----------------------------------------------------------------------- */
+
+#define TLS_ERR_STASH 16   /* >= the queue depth on every OpenSSL flavor */
+
+struct tls_err_stash {
+	unsigned long e[TLS_ERR_STASH];   /* oldest first */
+	int           n;
+};
+
+static void
+tls_err_save(struct tls_err_stash *s)
+{
+	unsigned long e;
+
+	s->n = 0;
+	while (s->n < TLS_ERR_STASH && (e = ERR_get_error()) != 0)
+		s->e[s->n++] = e;
+}
+
+static void
+tls_err_restore(const struct tls_err_stash *s)
+{
+	int i;
+
+	ERR_clear_error();
+	for (i = 0; i < s->n; i++) {
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L && \
+    !defined(LIBRESSL_VERSION_NUMBER) && !defined(OPENSSL_IS_BORINGSSL)
+		ERR_raise(ERR_GET_LIB(s->e[i]), ERR_GET_REASON(s->e[i]));
+#else
+		ERR_put_error(ERR_GET_LIB(s->e[i]), 0, ERR_GET_REASON(s->e[i]),
+		    __FILE__, __LINE__);
+#endif
+	}
+}
 
 static int
 transport_bio_read(BIO *b, char *buf, int len)
 {
 	struct xtc_tls *t = (struct xtc_tls *)BIO_get_data(b);
+	struct tls_err_stash es;
 	int             rc;
 
 	BIO_clear_retry_flags(b);
@@ -316,7 +363,9 @@ transport_bio_read(BIO *b, char *buf, int len)
 		return -1;
 	if (len <= 0)
 		return 0;
+	tls_err_save(&es);
 	rc = t->transport.read_cb(t->transport.userdata, buf, (size_t)len);
+	tls_err_restore(&es);
 	if (rc > 0)
 		return rc;
 	if (rc == 0)
@@ -332,6 +381,7 @@ static int
 transport_bio_write(BIO *b, const char *buf, int len)
 {
 	struct xtc_tls *t = (struct xtc_tls *)BIO_get_data(b);
+	struct tls_err_stash es;
 	int             rc;
 
 	BIO_clear_retry_flags(b);
@@ -339,7 +389,9 @@ transport_bio_write(BIO *b, const char *buf, int len)
 		return -1;
 	if (len <= 0)
 		return 0;
+	tls_err_save(&es);
 	rc = t->transport.write_cb(t->transport.userdata, buf, (size_t)len);
+	tls_err_restore(&es);
 	if (rc > 0)
 		return rc;
 	if (rc == XTC_E_AGAIN) {
