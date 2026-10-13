@@ -271,6 +271,14 @@ int xstore_native_mode(struct xsql *db, int on);
 /* Set the connection isolation level from a name (the native C-API
  * equivalent of the xstore_isolation() SQL function). */
 int xstore_set_isolation(struct xsql *db, const char *level);
+/* Level for the current transaction only (SET TRANSACTION ISOLATION
+ * LEVEL); 0 ok, -1 bad level, -2 not in a txn, -3 txn already queried. */
+int xstore_set_txn_isolation(struct xsql *db, const char *level);
+/* Mark the start of a DML statement (write-write conflict base). */
+void xstore_stmt_begin(struct xsql *db);
+void xstore_stmt_end(struct xsql *db);
+/* 1 if the current statement's last write was refused as a conflict. */
+int  xstore_last_conflict(struct xsql *db);
 /* Native C-API equivalents of the MVCC SQL functions. */
 int64_t xstore_clock_now(void);              /* xstore_now() */
 int xstore_as_of(struct xsql *db, int64_t ts);   /* xstore_as_of(ts) */

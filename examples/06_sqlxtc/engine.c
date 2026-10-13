@@ -28,9 +28,11 @@
 #include "xtc_loop.h"      /* xtc_loop_t -- background storage procs */
 
 #include <assert.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>      /* access, unlink, F_OK */
 
@@ -48,7 +50,7 @@ enum sx_native_kind {
 	SXN_ROLLBACK, SXN_SAVEPOINT, SXN_RELEASE, SXN_ROLLBACK_TO,
 	SXN_CREATE, SXN_DROP, SXN_PRAGMA_NOP, SXN_PRAGMA_TABLE_INFO,
 	SXN_CREATE_VIEW, SXN_DROP_VIEW, SXN_ALTER,
-	SXN_CREATE_INDEX, SXN_DROP_INDEX
+	SXN_CREATE_INDEX, SXN_DROP_INDEX, SXN_SET_ISO
 };
 
 struct sx_stmt {
@@ -781,6 +783,75 @@ sx_classify(const char *sql, int *tail_more,
 }
 #endif /* SQLXTC_HAVE_LIME */
 
+#ifdef SQLXTC_HAVE_LIME
+/* Case-insensitive match of the next word in *pp against `w`; on a
+ * match advance *pp past it (and following whitespace) and return 1. */
+static int
+sx_word(const char **pp, const char *w)
+{
+	const char *p = *pp;
+	size_t n = strlen(w);
+	if (strncasecmp(p, w, n) != 0) return 0;
+	if (isalnum((unsigned char)p[n]) || p[n] == '_') return 0;
+	p += n;
+	while (isspace((unsigned char)*p)) p++;
+	*pp = p;
+	return 1;
+}
+
+/*
+ * Isolation-level statements, recognized here rather than in the Lime
+ * grammar (so the committed generated parser is unchanged):
+ *   SET TRANSACTION ISOLATION LEVEL <lvl>              -> txn level
+ *   SET SESSION CHARACTERISTICS AS TRANSACTION
+ *       ISOLATION LEVEL <lvl>                          -> session level
+ *   BEGIN [TRANSACTION] ISOLATION LEVEL <lvl>          -> BEGIN + txn level
+ * <lvl> is SERIALIZABLE | REPEATABLE READ | READ COMMITTED |
+ * READ UNCOMMITTED | SNAPSHOT.  Returns the kind (SXN_SET_ISO or
+ * SXN_BEGIN) with the canonical level in lvl and *session set, or
+ * SXN_NONE if the text is not one of these.
+ */
+static enum sx_native_kind
+sx_classify_iso(const char *sql, char *lvl, size_t cap, int *session)
+{
+	const char *p = sql, *names[] = { "serializable", "repeatable read",
+	    "read committed", "read uncommitted", "snapshot" };
+	enum sx_native_kind k;
+	size_t i;
+
+	*session = 0;
+	while (isspace((unsigned char)*p)) p++;
+	if (sx_word(&p, "BEGIN")) {
+		(void)sx_word(&p, "TRANSACTION");
+		k = SXN_BEGIN;
+	} else if (sx_word(&p, "SET")) {
+		if (sx_word(&p, "SESSION")) {
+			if (!sx_word(&p, "CHARACTERISTICS") || !sx_word(&p, "AS"))
+				return SXN_NONE;
+			*session = 1;
+		}
+		if (!sx_word(&p, "TRANSACTION")) return SXN_NONE;
+		k = SXN_SET_ISO;
+	} else
+		return SXN_NONE;
+	if (!sx_word(&p, "ISOLATION") || !sx_word(&p, "LEVEL")) return SXN_NONE;
+	for (i = 0; i < sizeof names / sizeof names[0]; i++) {
+		const char *q = p, *w = names[i], *sp = strchr(w, ' ');
+		char first[16];
+		if (sp != NULL) {
+			snprintf(first, sizeof first, "%.*s", (int)(sp - w), w);
+			if (!sx_word(&q, first) || !sx_word(&q, sp + 1)) continue;
+		} else if (!sx_word(&q, w))
+			continue;
+		while (*q == ';' || isspace((unsigned char)*q)) q++;
+		if (*q != '\0') return SXN_NONE;
+		snprintf(lvl, cap, "%s", w);
+		return k;
+	}
+	return SXN_NONE;
+}
+#endif
+
 int
 sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
            const char **tail)
@@ -799,9 +870,13 @@ sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
 	 * the driver is complete this decline becomes an error instead.)
 	 */
 	if (g_native_driver && (n_bytes < 0 || (size_t)n_bytes == strlen(sql))) {
-		int more = 0;
+		int more = 0, session = 0;
 		char nm[128], cols[1024];
-		enum sx_native_kind k = sx_classify(sql, &more, nm, sizeof nm, cols, sizeof cols);
+		enum sx_native_kind k = sx_classify_iso(sql, nm, sizeof nm, &session);
+		if (k == SXN_NONE)
+			k = sx_classify(sql, &more, nm, sizeof nm, cols, sizeof cols);
+		else
+			cols[0] = session ? 's' : 't';    /* level scope */
 		if (k != SXN_NONE) {
 			st = (struct sx_stmt *)calloc(1, sizeof *st);
 			if (st == NULL) return SX_NOMEM;
@@ -845,6 +920,10 @@ sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
 						free(st->ddl_name); free(st->sql); free(st); return SX_NOMEM; }
 					memcpy(st->ddl_cols, cols, total);
 				}
+			} else if (k == SXN_SET_ISO || (k == SXN_BEGIN && nm[0] != '\0')) {
+				st->ddl_name = strdup(nm);     /* the isolation level */
+				if (st->ddl_name == NULL) { free(st->sql); free(st); return SX_NOMEM; }
+				st->splevel = (cols[0] == 's');   /* 1 = session scope */
 			} else if (k == SXN_DROP_INDEX) {
 				st->ddl_name = strdup(nm);     /* index name to drop */
 				if (st->ddl_name == NULL) { free(st->sql); free(st); return SX_NOMEM; }
@@ -975,9 +1054,20 @@ sx_step(sx_stmt *st)
 		switch (st->nkind) {
 		case SXN_WRITE: {
 			int64_t nch = 0;
-			int rc = vx_run_write_p((struct xsql *)st->db, st->sql,
+			int rc;
+			const char *w = st->sql;
+			while (isspace((unsigned char)*w)) w++;
+			/* UPDATE/DELETE compute rows from a read: give the statement
+			 * one snapshot and a write-write check against it.  INSERT has
+			 * no read dependency (and REPLACE may rewrite its own key). */
+			if (sx_word(&w, "UPDATE") || sx_word(&w, "DELETE"))
+				xstore_stmt_begin(st->db);
+			rc = vx_run_write_p((struct xsql *)st->db, st->sql,
 			    st->nbind ? st->binds : NULL, st->nbind, &nch, NULL);
+			xstore_stmt_end(st->db);
 			if (rc == 1) { st->nchanges = nch; return SX_DONE; }
+			if (xstore_last_conflict(st->db))
+				return nat_set_err(st->db, SX_MSG_SERIALIZE, SX_BUSY);
 			/* The native write path declined: a hard error (no VDBE). */
 			return nat_set_run_error(st);
 		}
@@ -985,7 +1075,25 @@ sx_step(sx_stmt *st)
 			struct sx_native_db *nd = sx_is_native_db(st->db)
 			    ? (struct sx_native_db *)st->db : NULL;
 			if (nd) nd->spn = 0;
-			return xstore_native_begin(st->db) == 0 ? SX_DONE : SX_ERROR;
+			if (xstore_native_begin(st->db) != 0) return SX_ERROR;
+			if (st->ddl_name != NULL &&     /* BEGIN ISOLATION LEVEL x */
+			    xstore_set_txn_isolation(st->db, st->ddl_name) != 0)
+				return nat_set_err(st->db,
+				    "cannot set the isolation level", SX_ERROR);
+			return SX_DONE;
+		}
+		case SXN_SET_ISO: {
+			int rc;
+			if (st->splevel)
+				rc = xstore_set_isolation(st->db, st->ddl_name);
+			else
+				rc = xstore_set_txn_isolation(st->db, st->ddl_name);
+			if (rc == 0) return SX_DONE;
+			return nat_set_err(st->db, rc == -2
+			    ? "SET TRANSACTION must be inside a transaction (BEGIN first)"
+			    : rc == -3
+			    ? "SET TRANSACTION must precede any query in the transaction"
+			    : "cannot set the isolation level", SX_ERROR);
 		}
 		case SXN_COMMIT: {
 			struct sx_native_db *nd = sx_is_native_db(st->db)

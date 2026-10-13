@@ -76,12 +76,15 @@
 #define XS_LK_CAT  8u   /* catalog (g_cat) + view registry */
 #define XS_LK_SSI  9u   /* SSI registry */
 #define XS_LK_SNAP 10u  /* active-snapshot set */
+#define XS_LK_COMMIT 11u /* commit validation + timestamp + in-flight registry */
 #define xs_cat_lock()    (void)xtc_amutex_lock(xtc_amutex_static(XS_LK_CAT), -1)
 #define xs_cat_unlock()  (void)xtc_amutex_unlock(xtc_amutex_static(XS_LK_CAT))
 #define xs_ssi_lock()    (void)xtc_amutex_lock(xtc_amutex_static(XS_LK_SSI), -1)
 #define xs_ssi_unlock()  (void)xtc_amutex_unlock(xtc_amutex_static(XS_LK_SSI))
 #define xs_snap_lock()   (void)xtc_amutex_lock(xtc_amutex_static(XS_LK_SNAP), -1)
 #define xs_snap_unlock() (void)xtc_amutex_unlock(xtc_amutex_static(XS_LK_SNAP))
+#define xs_commit_lock()   (void)xtc_amutex_lock(xtc_amutex_static(XS_LK_COMMIT), -1)
+#define xs_commit_unlock() (void)xtc_amutex_unlock(xtc_amutex_static(XS_LK_COMMIT))
 
 /*
  * Commit clock.  Every committed version is stamped with a unique,
@@ -276,6 +279,9 @@ typedef struct xs_wrec {
 	uint8_t *data;        /* malloc'd; NULL for a delete or when spilled */
 	int      spilled;     /* 1: payload is in the STEAL staging area, not data */
 	int64_t  stage_id;    /* staging key suffix when spilled */
+	uint64_t base;        /* snapshot the write was computed against: a
+	                       * committed version newer than this at commit
+	                       * time is a write-write conflict */
 } xs_wrec_t;
 
 /* A logical row identity: a transaction spans tables, so the read set
@@ -297,7 +303,11 @@ typedef struct xstore_ctx {
 	xs_wrec_t       *wbuf;        /* buffered writes, applied atomically */
 	int              wn, wcap;
 	int              serializable; /* 1 == validate the read set on commit */
-	int              isolation;   /* XS_ISO_* -- see below; default SNAPSHOT */
+	int              isolation;   /* session level, XS_ISO_*; default SNAPSHOT */
+	int              txn_iso;     /* level of the open txn (SET TRANSACTION) */
+	int              touched;     /* open txn has read or written */
+	uint64_t         stmt_base;   /* snapshot the current DML statement reads */
+	int              last_conflict; /* last write hit a write-write conflict */
 	xs_rkey_t       *rset;        /* (table,rowid) read in this txn (serializable) */
 	int              rn, rcap;
 	int              did_scan;    /* txn did a full scan (table-level read) */
@@ -381,6 +391,10 @@ wbuf_add(xstore_ctx_t *c, uint32_t tableid, int64_t rowid, const void *blob, int
 	w = &c->wbuf[c->wn];
 	w->tableid = tableid; w->rowid = rowid; w->deleted = deleted;
 	w->len = 0; w->data = NULL; w->spilled = 0; w->stage_id = 0;
+	/* Snapshot levels compute every write against txn_snap; READ
+	 * COMMITTED against the statement's latest-committed view. */
+	w->base = c->txn_iso >= XS_ISO_REPEATABLE_READ ? c->txn_snap
+	    : c->stmt_base;
 	if (!deleted && n > 0) {
 		if (n > XS_VMAX) n = XS_VMAX;
 		w->data = malloc((size_t)n);
@@ -1311,7 +1325,9 @@ xs_enter_ctx(xstore_ctx_t *cx, struct xsql *db)
 		cx->steal_txn = 0;
 		cx->rn = 0;
 		cx->did_scan = 0;
-		cx->serializable = (cx->isolation == XS_ISO_SERIALIZABLE);
+		cx->txn_iso = cx->isolation;
+		cx->touched = 0;
+		cx->serializable = (cx->txn_iso == XS_ISO_SERIALIZABLE);
 		cx->ssi = cx->serializable ? ssi_begin(cx->txn_snap) : NULL;
 		xs_pin_recompute(cx);     /* pin txn_snap against version GC */
 	}
@@ -1796,8 +1812,10 @@ xstore_scan_open_txn(struct xsql *db, const char *table, uint64_t snap,
 		uint64_t rs = atomic_load_explicit(&ctx->read_snap, memory_order_relaxed);
 		if (rs != 0)
 			snap = rs;
-		else if (ctx->in_txn && ctx->isolation >= XS_ISO_REPEATABLE_READ)
+		else if (ctx->in_txn && ctx->txn_iso >= XS_ISO_REPEATABLE_READ)
 			snap = ctx->txn_snap;
+		else if (ctx->stmt_base != 0)
+			snap = ctx->stmt_base;   /* one snapshot for a DML statement */
 		/* else leave 0 -> xstore_scan_open uses the latest clock */
 	}
 	s = xstore_scan_open(bt, table, snap, lo, has_lo, hi, has_hi);
@@ -1808,6 +1826,7 @@ xstore_scan_open_txn(struct xsql *db, const char *table, uint64_t snap,
 	 * exactly as the vtab cursor does.  Outside a txn the plain committed
 	 * scan is exact. */
 	if (ctx != NULL && ctx->in_txn) {
+		ctx->touched = 1;
 		s->ryw_ctx = ctx;
 		s->ryw_overlay = (ctx->wn > 0);
 		s->ryw_track = (ctx->serializable != 0);
@@ -2528,27 +2547,115 @@ xs_spill_payloads(xstore_ctx_t *cx)
 	}
 }
 
+static uint64_t xs_newest_ts(bt_t *bt, uint32_t tableid, int64_t rowid);
+
+/*
+ * In-flight commit registry.  A commit takes its timestamp and registers
+ * its write set here under the commit lock, then logs (parking on the
+ * group-commit fsync) and applies its versions WITHOUT the lock, and
+ * unregisters when the versions are in the tree (or the commit failed).
+ * The write-write check runs under the same lock, so a key written by a
+ * commit that has a timestamp but whose versions are not in the tree yet
+ * is still seen as a conflict.  Entries live on the committing fiber's
+ * stack for the duration of its commit.
+ */
+struct xs_inflight {
+	uint64_t            ts;
+	const xs_wrec_t    *ws;     /* txn write set (wn entries), or NULL */
+	int                 wn;
+	uint32_t            tid;    /* single-key autocommit write (ws == NULL) */
+	int64_t             rid;
+	struct xs_inflight *next;
+};
+static struct xs_inflight *g_inflight;   /* guarded by the commit lock */
+
+static int
+xs_inflight_has(const struct xs_inflight *e, uint32_t tid, int64_t rid)
+{
+	int i;
+	if (e->ws == NULL)
+		return e->tid == tid && e->rid == rid;
+	for (i = 0; i < e->wn; i++)
+		if (e->ws[i].tableid == tid && e->ws[i].rowid == rid)
+			return 1;
+	return 0;
+}
+
+/* Caller holds the commit lock.  Mint the timestamp and link `e`. */
+static void
+xs_inflight_add_locked(struct xs_inflight *e)
+{
+	e->ts = hlc_tick();
+	e->next = g_inflight;
+	g_inflight = e;
+}
+
+static void
+xs_inflight_remove(struct xs_inflight *e)
+{
+	struct xs_inflight **pp;
+	xs_commit_lock();
+	for (pp = &g_inflight; *pp != NULL; pp = &(*pp)->next)
+		if (*pp == e) { *pp = e->next; break; }
+	xs_commit_unlock();
+}
+
+/*
+ * First-committer-wins.  Caller holds the commit lock.  A buffered write
+ * conflicts if the row has a committed version newer than the snapshot
+ * the write was computed against (w->base), or if a commit still in
+ * flight writes the same row (it has a timestamp after every snapshot
+ * that cannot see it).  Returns 1 on a conflict.
+ */
+static int
+xs_ww_conflict_locked(bt_t *bt, const xs_wrec_t *ws, int wn)
+{
+	const struct xs_inflight *e;
+	int i;
+	for (i = 0; i < wn; i++) {
+		if (xs_newest_ts(bt, ws[i].tableid, ws[i].rowid) > ws[i].base)
+			return 1;
+		for (e = g_inflight; e != NULL; e = e->next)
+			if (xs_inflight_has(e, ws[i].tableid, ws[i].rowid))
+				return 1;
+	}
+	return 0;
+}
+
 static int
 xs_put(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n, int deleted)
 {
 	uint8_t key[XS_VKLEN];
 	uint8_t buf[1 + XS_VMAX];
-	uint64_t ts = hlc_tick();
+	struct xs_inflight fl;
+	uint64_t ts;
+	int rc;
 	if (n < 0) n = 0;
 	if (n > XS_VMAX) n = XS_VMAX;
+	memset(&fl, 0, sizeof fl);
+	fl.tid = tableid;
+	fl.rid = rowid;
+	xs_commit_lock();
+	xs_inflight_add_locked(&fl);
+	xs_commit_unlock();
+	ts = fl.ts;
 	if (g_xwal != NULL) {
 		uint64_t lsn = 0;
 		/* Durable BEFORE apply.  A failed log write applies nothing: the
 		 * caller gets an error and the row never becomes visible. */
-		if (xs_wal_put(ts, tableid, rowid, blob, n, deleted, &lsn) != XTC_OK)
+		if (xs_wal_put(ts, tableid, rowid, blob, n, deleted, &lsn) != XTC_OK) {
+			xs_inflight_remove(&fl);
 			return SX_ERROR;
+		}
 		bt_set_lsn(bt, lsn);   /* stamp this change's LSN onto the page */
 	}
 	enc_vkey(tableid, rowid, ts, key);
 	buf[0] = deleted ? XS_F_DELETED : 0;
 	if (!deleted && n > 0) memcpy(buf + 1, blob, (size_t)n);
-	return bt_insert(bt, key, XS_VKLEN, buf, (uint16_t)(1 + (deleted ? 0 : n)))
+	rc = bt_insert(bt, key, XS_VKLEN, buf, (uint16_t)(1 + (deleted ? 0 : n)))
 	    == XTC_OK ? SX_OK : SX_ERROR;
+	xs_inflight_remove(&fl);
+	return rc;
 }
 
 /* The commit_ts of the newest committed version of `rowid`, or 0 if the
@@ -2798,13 +2905,58 @@ xstore_write_txn(struct xsql *db, uint32_t tableid, int64_t rowid,
 	int rc;
 	if (cx == NULL) return -1;
 	xs_enter_ctx(cx, db);   /* sync in_txn with SQLite's autocommit flag */
-	if (cx->in_txn)
+	if (cx->in_txn) {
+		cx->touched = 1;
 		rc = xs_buf_write(cx, tableid, rowid, deleted ? NULL : rec,
 		                  deleted ? 0 : reclen, deleted);
-	else
-		rc = xs_put_pruned(cx, tableid, rowid, deleted ? NULL : rec,
-		                   deleted ? 0 : reclen, deleted);
+		return rc == SX_OK ? 0 : -1;
+	}
+	/* Autocommit: the statement computed this row from its read at
+	 * stmt_base; if the row was committed past that since (or a commit
+	 * writing it is in flight) the write would lose that update. */
+	if (cx->stmt_base != 0) {
+		xs_wrec_t probe;
+		int conflict;
+		memset(&probe, 0, sizeof probe);
+		probe.tableid = tableid; probe.rowid = rowid;
+		probe.base = cx->stmt_base;
+		xs_commit_lock();
+		conflict = xs_ww_conflict_locked(cx->bt, &probe, 1);
+		xs_commit_unlock();
+		if (conflict) {
+			cx->last_conflict = 1;
+			return SX_BUSY;
+		}
+	}
+	rc = xs_put_pruned(cx, tableid, rowid, deleted ? NULL : rec,
+	                   deleted ? 0 : reclen, deleted);
 	return rc == SX_OK ? 0 : -1;
+}
+
+/* Start of a DML statement: record the snapshot its reads use, the
+ * base for its write-write conflict check (READ COMMITTED and
+ * autocommit; snapshot levels use txn_snap). */
+void
+xstore_stmt_begin(struct xsql *db)
+{
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	if (cx == NULL) return;
+	cx->stmt_base = atomic_load_explicit(&g_xclock, memory_order_acquire);
+	cx->last_conflict = 0;
+}
+
+void
+xstore_stmt_end(struct xsql *db)
+{
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	if (cx != NULL) cx->stmt_base = 0;
+}
+
+int
+xstore_last_conflict(struct xsql *db)
+{
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	return cx != NULL && cx->last_conflict;
 }
 
 /* True if the connection currently has an open (non-autocommit)
@@ -3048,6 +3200,7 @@ xs_wal_log(xstore_ctx_t *cx, uint64_t ts, uint64_t *clsn)
 static int
 xs_commit_ctx(xstore_ctx_t *cx)
 {
+	struct xs_inflight fl;
 	uint64_t ts;
 	int i, rc = SX_OK;
 	if (!cx->in_txn)
@@ -3065,7 +3218,22 @@ xs_commit_ctx(xstore_ctx_t *cx)
 		if (cx->steal_txn != 0)              /* STEAL: bring spilled payloads back */
 			for (i = 0; i < cx->wn; i++)
 				(void)xs_wrec_ensure(cx, &cx->wbuf[i]);
-		ts = hlc_tick();     /* one timestamp for the txn */
+		/* First-committer-wins write-write check, the timestamp, and
+		 * the in-flight registration are one atomic step under the
+		 * commit lock; the log write and the apply run outside it so
+		 * group commit still batches concurrent committers. */
+		memset(&fl, 0, sizeof fl);
+		fl.ws = cx->wbuf;
+		fl.wn = cx->wn;
+		xs_commit_lock();
+		if (xs_ww_conflict_locked(cx->bt, cx->wbuf, cx->wn)) {
+			xs_commit_unlock();
+			(void)xs_rollback_ctx(cx);
+			return SX_BUSY;           /* serialization failure */
+		}
+		xs_inflight_add_locked(&fl);  /* one timestamp for the txn */
+		xs_commit_unlock();
+		ts = fl.ts;
 		if (g_xwal != NULL) {
 			uint64_t clsn = 0;
 			/* Durable BEFORE apply.  If the log write fails the
@@ -3073,6 +3241,7 @@ xs_commit_ctx(xstore_ctx_t *cx)
 			 * report the error (the client must not be told it
 			 * committed). */
 			if (xs_wal_log(cx, ts, &clsn) != XTC_OK) {
+				xs_inflight_remove(&fl);
 				(void)xs_rollback_ctx(cx);
 				return SX_ERROR;
 			}
@@ -3109,6 +3278,7 @@ xs_commit_ctx(xstore_ctx_t *cx)
 			}
 		}
 		ssi_commit(cx->ssi, ts);     /* publish commit_ts for SSI peers */
+		xs_inflight_remove(&fl);
 	} else {
 		/* read-only: keep the read set visible to concurrent peers
 		 * until GC, stamped at the current clock. */
@@ -3208,20 +3378,50 @@ xstore_native_mode(struct xsql *db, int on)
  * "read committed", "repeatable read", "snapshot", "serializable").  The
  * native C-API equivalent of the xstore_isolation() SQL function.
  * Returns 0 on success, -1 if the connection or name is unknown. */
+static int
+xs_iso_parse(const char *level)
+{
+	if (level == NULL) return -1;
+	if (ciprefix(level, "read un"))      return XS_ISO_READ_UNCOMMITTED;
+	if (ciprefix(level, "read c"))       return XS_ISO_READ_COMMITTED;
+	if (ciprefix(level, "rep"))          return XS_ISO_REPEATABLE_READ;
+	if (ciprefix(level, "snap"))         return XS_ISO_SNAPSHOT;
+	if (ciprefix(level, "ser"))          return XS_ISO_SERIALIZABLE;
+	return -1;
+}
+
 int
 xstore_set_isolation(struct xsql *db, const char *level)
 {
 	xstore_ctx_t *cx = xstore_ctx_of(db);
-	int lvl;
-	if (cx == NULL || level == NULL) return -1;
-	if (ciprefix(level, "read un"))      lvl = XS_ISO_READ_UNCOMMITTED;
-	else if (ciprefix(level, "read c"))  lvl = XS_ISO_READ_COMMITTED;
-	else if (ciprefix(level, "rep"))     lvl = XS_ISO_REPEATABLE_READ;
-	else if (ciprefix(level, "snap"))    lvl = XS_ISO_SNAPSHOT;
-	else if (ciprefix(level, "ser"))     lvl = XS_ISO_SERIALIZABLE;
-	else return -1;
-	cx->isolation = lvl;
+	int lvl = xs_iso_parse(level);
+	if (cx == NULL || lvl < 0) return -1;
+	cx->isolation = lvl;            /* takes effect at the next txn */
+	return 0;
+}
+
+/* SET TRANSACTION ISOLATION LEVEL: the level of the CURRENT transaction
+ * only (the session level resumes at the next one).  Must be issued
+ * inside a transaction before it reads or writes anything.  Returns 0,
+ * -1 for an unknown connection/level, -2 outside a transaction, -3 if
+ * the transaction already ran a query. */
+int
+xstore_set_txn_isolation(struct xsql *db, const char *level)
+{
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	int lvl = xs_iso_parse(level);
+	if (cx == NULL || lvl < 0) return -1;
+	xs_enter_ctx(cx, db);
+	if (!cx->in_txn) return -2;
+	if (cx->touched || cx->wn > 0) return -3;
+	cx->txn_iso = lvl;
 	cx->serializable = (lvl == XS_ISO_SERIALIZABLE);
+	if (cx->serializable && cx->ssi == NULL)
+		cx->ssi = ssi_begin(cx->txn_snap);
+	else if (!cx->serializable && cx->ssi != NULL) {
+		ssi_abort(cx->ssi);
+		cx->ssi = NULL;
+	}
 	return 0;
 }
 
@@ -4261,6 +4461,10 @@ xs_ctx_init_and_map(struct xsql *db, bt_t *bt, int native)
 	ctx->wn = ctx->wcap = 0;
 	ctx->serializable = 0;
 	ctx->isolation = XS_ISO_SNAPSHOT;
+	ctx->txn_iso = XS_ISO_SNAPSHOT;
+	ctx->touched = 0;
+	ctx->stmt_base = 0;
+	ctx->last_conflict = 0;
 	ctx->rset = NULL;
 	ctx->rn = ctx->rcap = 0;
 	ctx->did_scan = 0;

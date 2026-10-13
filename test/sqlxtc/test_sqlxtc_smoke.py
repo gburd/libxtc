@@ -152,6 +152,32 @@ def main():
     a.query("COMMIT")
     _, rows, _ = o.query("SELECT id, bal FROM acct ORDER BY id")
     check("txns are not merged across conns", rows == [[1, 110], [3, 7]])
+
+    # Lost update (default SNAPSHOT): both read 110, both add; the second
+    # COMMIT must fail with a serialization error, not silently win.
+    a.query("BEGIN")
+    o.query("BEGIN")
+    a.query("SELECT bal FROM acct WHERE id=1")
+    o.query("SELECT bal FROM acct WHERE id=1")
+    a.query("UPDATE acct SET bal=bal+10 WHERE id=1")
+    o.query("UPDATE acct SET bal=bal+20 WHERE id=1")
+    a.query("COMMIT")
+    try:
+        o.query("COMMIT")
+        check("lost update is refused", False)
+    except RuntimeError as e:
+        check("lost update is refused", "serialize" in str(e))
+    _, rows, _ = o.query("SELECT bal FROM acct WHERE id=1")
+    check("first committer wins", rows == [[120]])
+    # SERIALIZABLE is selectable over the wire.
+    a.query("BEGIN")
+    a.query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+    a.query("COMMIT")
+    a.query("BEGIN ISOLATION LEVEL SERIALIZABLE")
+    a.query("COMMIT")
+    a.query("SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL"
+            " SNAPSHOT")
+    check("isolation statements accepted", True)
     a.close()
     o.close()
 

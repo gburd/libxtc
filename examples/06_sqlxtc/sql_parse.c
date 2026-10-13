@@ -101,6 +101,11 @@ sql_classify_prefix(const char *sql, size_t len, sql_info_t *info)
 	} else if ((n = parse_keyword(p, end, "PRAGMA")) != 0) {
 		info->kind = SQL_KIND_PRAGMA;
 		info->readonly = 1;     /* approximation */
+	} else if ((n = parse_keyword(p, end, "SET")) != 0) {
+		/* SET TRANSACTION / SET SESSION CHARACTERISTICS (isolation
+		 * level); the engine validates the rest. */
+		info->kind = SQL_KIND_PRAGMA;
+		info->readonly = 1;
 	} else if ((n = parse_keyword(p, end, "BEGIN")) != 0) {
 		info->kind = SQL_KIND_BEGIN;
 	} else if ((n = parse_keyword(p, end, "COMMIT")) != 0) {
