@@ -128,7 +128,7 @@ clean:
 	rm -f test_quack_range
 	rm -f test_mem test_mem.o
 	rm -f test_wal test_wal.o wal.o
-	rm -f test_wal_recover
+	rm -f test_wal_recover test_wal_fail
 	rm -f test_torn_smo
 	rm -f test_wal_compact test_wal_lsn_monotone
 	rm -f test_shard test_shard.o
@@ -166,7 +166,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-quack-range test-sql-parse test-admin test-wal test-wal-recover test-torn-smo test-wal-compact test-wal-lsn-monotone test-shard test-mvcc test-xstore test-xstore-scan test-index test-savepoint test-isolation test-native-txn test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-fuzzy-checkpoint test-bufmgr-mt test-scan-resist test-sweep-bound test-persist test-cursor-resume test-clean-restart test-steal test-steal-torn test-steal-page test-steal-leaf test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
+test: $(TARGET) test-quack test-quack-range test-sql-parse test-admin test-wal test-wal-recover test-wal-fail test-torn-smo test-wal-compact test-wal-lsn-monotone test-shard test-mvcc test-xstore test-xstore-scan test-index test-savepoint test-isolation test-native-txn test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-fuzzy-checkpoint test-bufmgr-mt test-scan-resist test-sweep-bound test-persist test-cursor-resume test-clean-restart test-steal test-steal-torn test-steal-page test-steal-leaf test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -266,6 +266,13 @@ test_wal_recover: test_wal_recover.c $(ENGINE_NATIVE)
 
 test-wal-recover: test_wal_recover
 	./test_wal_recover
+
+# ---- WAL write/fsync failure: fail-stop, never ack a lost commit ----
+test_wal_fail: test_wal_fail.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_wal_fail.c $(ENGINE_NATIVE) $(LDFLAGS)
+
+test-wal-fail: test_wal_fail
+	./test_wal_fail
 
 test_torn_smo: test_torn_smo.c $(ENGINE_NATIVE)
 	$(CC) $(CFLAGS) -o $@ test_torn_smo.c $(ENGINE_NATIVE) $(LDFLAGS)

@@ -123,6 +123,7 @@ struct wal_msg {                 /* committer -> writer */
 struct wal_ack {                 /* writer -> committer */
 	uint64_t txn_id;
 	uint64_t lsn;
+	int32_t  status;             /* XTC_OK, or the error that failed the batch */
 };
 
 struct wal_pending {             /* one committer awaiting the current batch */
@@ -147,6 +148,13 @@ struct wal {
 	uint32_t           pcount;
 	uint64_t           next_lsn;
 	_Atomic uint64_t   durable_lsn;
+	/* Fail-stop latch.  Set on the first failed or short log write or
+	 * fdatasync; once set, nothing more is written and every commit
+	 * fails with XTC_E_IO until the log is reopened (process restart).
+	 * After a failed fsync the kernel may have dropped the dirty pages
+	 * it could not write, so retrying cannot make the earlier records
+	 * durable (PostgreSQL's fsync lesson): stop instead. */
+	_Atomic int        failed;
 
 	pthread_mutex_t    sync_mu;   /* serializes wal_commit_sync appends */
 
@@ -155,6 +163,7 @@ struct wal {
 	uint64_t s_batches;
 	uint64_t s_bytes;
 	uint64_t s_maxbatch;
+	uint64_t s_failed;            /* commits refused by a failed log write */
 };
 
 /* Scan an open log fd to its end: *off_out := offset just past the last
@@ -289,12 +298,15 @@ batch_add(wal_t *w, const uint8_t *data, uint32_t len,
 	return XTC_OK;
 }
 
-/* Durably write the current batch, then ack every committer in it. */
+/* Durably write the current batch, then ack every committer in it.
+ * On a failed or short write, or a failed fdatasync, neither the append
+ * offset nor durable_lsn moves, every committer in the batch gets an
+ * XTC_E_IO ack, and the log latches failed (see struct wal). */
 static void
 batch_flush(wal_t *w)
 {
 	struct wal_ack ack;
-	int rc;
+	int rc, status = XTC_OK;
 	uint32_t i;
 
 	if (w->pcount == 0)
@@ -307,25 +319,39 @@ batch_flush(wal_t *w)
 	 * serving other work -- and on io_uring the batch write and its
 	 * fdatasync ride the same ring with no pool thread involved.
 	 */
-	rc = xtc_aio_pwrite(w->fd, w->bbuf, (uint32_t)w->blen, (int64_t)w->off);
+	if (atomic_load_explicit(&w->failed, memory_order_acquire)) {
+		status = XTC_E_IO;
+	} else {
+		rc = xtc_aio_pwrite(w->fd, w->bbuf, (uint32_t)w->blen,
+		    (int64_t)w->off);
+		if (rc != (int)w->blen)
+			status = XTC_E_IO;
 #if XTC_DST_BUG(XTC_DST_BUG_NODURABLE)
-	(void)rc;   /* planted bug: skip the fdatasync but still ack below ->
-	             * an acked commit is not durable across a crash */
+		/* planted bug: skip the fdatasync but still ack below -> an
+		 * acked commit is not durable across a crash */
 #else
-	rc = (rc == (int)w->blen) ? xtc_aio_fdatasync(w->fd) : -1;
+		else if (xtc_aio_fdatasync(w->fd) != 0)
+			status = XTC_E_IO;
 #endif
-	(void)rc;                            /* a real engine would surface I/O errors */
+	}
 
-	w->off += (off_t)w->blen;
-	atomic_store_explicit(&w->durable_lsn, w->pend[w->pcount - 1].lsn, memory_order_relaxed);
-	w->s_batches++;
-	w->s_commits += w->pcount;
-	if (w->pcount > w->s_maxbatch)
-		w->s_maxbatch = w->pcount;
+	if (status == XTC_OK) {
+		w->off += (off_t)w->blen;
+		atomic_store_explicit(&w->durable_lsn,
+		    w->pend[w->pcount - 1].lsn, memory_order_release);
+		w->s_batches++;
+		w->s_commits += w->pcount;
+		if (w->pcount > w->s_maxbatch)
+			w->s_maxbatch = w->pcount;
+	} else {
+		atomic_store_explicit(&w->failed, 1, memory_order_release);
+		w->s_failed += w->pcount;
+	}
 
 	for (i = 0; i < w->pcount; i++) {
 		ack.txn_id = w->pend[i].txn_id;
-		ack.lsn = w->pend[i].lsn;
+		ack.lsn = status == XTC_OK ? w->pend[i].lsn : 0;
+		ack.status = status;
 		(void)xtc_send(w->pend[i].reply_to, &ack, sizeof ack);
 	}
 	w->blen = 0;
@@ -438,6 +464,8 @@ wal_commit(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
 
 	if (w == NULL || (record == NULL && len != 0))
 		return XTC_E_INVAL;
+	if (atomic_load_explicit(&w->failed, memory_order_acquire))
+		return XTC_E_IO;          /* fail-stop: the log is poisoned */
 
 	msz = sizeof *msg + len;
 	msg = malloc(msz);
@@ -468,10 +496,11 @@ wal_commit(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
 		return XTC_E_INTERNAL;
 	}
 	ack = am;
-	if (lsn != NULL)
+	rc = ack->status;
+	if (rc == XTC_OK && lsn != NULL)
 		*lsn = ack->lsn;
 	free(am);
-	return XTC_OK;
+	return rc;
 }
 
 int
@@ -487,17 +516,21 @@ wal_commit_sync(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
 		return XTC_E_INVAL;
 
 	(void)pthread_mutex_lock(&w->sync_mu);
-	my_lsn = ++w->next_lsn;
+	if (atomic_load_explicit(&w->failed, memory_order_acquire)) {
+		rc = XTC_E_IO; goto out;
+	}
+	my_lsn = w->next_lsn + 1;
 	memcpy(hdr, &my_lsn, 8);
 	memcpy(hdr + 8, &len, 4);
 	/* header + payload at the current append offset */
 	if (pwrite(w->fd, hdr, WAL_REC_HDR, w->off) != (ssize_t)WAL_REC_HDR) {
-		rc = XTC_E_INTERNAL; goto out;
+		rc = XTC_E_IO; goto out;
 	}
 	for (done = 0; done < len; ) {
 		ssize_t n = pwrite(w->fd, (const uint8_t *)record + done, len - done,
 		    w->off + (off_t)WAL_REC_HDR + (off_t)done);
-		if (n < 0) { if (errno == EINTR) continue; rc = XTC_E_INTERNAL; goto out; }
+		if (n < 0 && errno == EINTR) continue;
+		if (n <= 0) { rc = XTC_E_IO; goto out; }
 		done += (size_t)n;
 	}
 	/* self-checking trailer so recovery can drop a torn tail */
@@ -505,18 +538,29 @@ wal_commit_sync(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
 	memcpy(trl, &crc, WAL_REC_CRC);
 	if (pwrite(w->fd, trl, WAL_REC_CRC,
 	    w->off + (off_t)WAL_REC_HDR + (off_t)len) != (ssize_t)WAL_REC_CRC) {
-		rc = XTC_E_INTERNAL; goto out;
+		rc = XTC_E_IO; goto out;
 	}
-	if (fdatasync(w->fd) != 0) { rc = XTC_E_INTERNAL; goto out; }
+	if (fdatasync(w->fd) != 0) { rc = XTC_E_IO; goto out; }
+	w->next_lsn = my_lsn;
 	w->off += (off_t)WAL_REC_HDR + (off_t)len + (off_t)WAL_REC_CRC;
-	atomic_store_explicit(&w->durable_lsn, my_lsn, memory_order_relaxed);
+	atomic_store_explicit(&w->durable_lsn, my_lsn, memory_order_release);
 	w->s_commits++;
 	w->s_batches++;
 	w->s_bytes += len;
 	if (lsn != NULL) *lsn = my_lsn;
 out:
+	if (rc == XTC_E_IO) {
+		atomic_store_explicit(&w->failed, 1, memory_order_release);
+		w->s_failed++;
+	}
 	(void)pthread_mutex_unlock(&w->sync_mu);
 	return rc;
+}
+
+int
+wal_failed(const wal_t *w)
+{
+	return w != NULL && atomic_load_explicit(&w->failed, memory_order_acquire);
 }
 
 /* Rebind an open log handle to `path` after it was replaced on disk
@@ -756,4 +800,5 @@ wal_get_stats(wal_t *w, wal_stats_t *out)
 	out->bytes = w->s_bytes;
 	out->max_batch_seen = w->s_maxbatch;
 	out->durable_lsn = atomic_load_explicit(&w->durable_lsn, memory_order_relaxed);
+	out->failed = w->s_failed;
 }

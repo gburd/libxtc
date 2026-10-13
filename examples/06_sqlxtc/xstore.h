@@ -46,6 +46,9 @@ void xstore_unregister_native(struct xsql *db);
  * after commit can redo it and a crash before leaves no trace.  NULL
  * (the default) means no durability. */
 void xstore_set_wal(struct wal *w);
+/* 1 once the attached log has fail-stopped after a write/fsync error:
+ * every later write fails until the store is reopened. */
+int  xstore_wal_failed(void);
 
 /* Recover the B-tree from the log at `wal_path`: replay every committed
  * transaction's versions (idempotent -- version keys are immutable),
