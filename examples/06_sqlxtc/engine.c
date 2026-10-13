@@ -429,7 +429,22 @@ sx_storage_open(const char *path, unsigned int n_frames)
 			bm_destroy(g_xbm); g_xbm = NULL;
 			return SX_ERROR;
 		}
+		/*
+		 * Replay without the double-write ring.  Every page evicted
+		 * during replay used to cost a ring write plus an fdatasync
+		 * (~2.5 s per MB of log).  Torn-page protection buys nothing
+		 * here: this page file is fresh, and no open trusts it until a
+		 * clean shutdown has flushed it through the ring and set the
+		 * clean flag.  A crash during or after replay, before that,
+		 * finds the flag clear and rebuilds again from the log.  Replay
+		 * only reads the log (undo appends CLRs, which replay
+		 * idempotently), so recovery can be repeated.  The checkpoint
+		 * below makes the log compact and durable before any new
+		 * commit.
+		 */
+		bm_set_double_write(g_xbm, 0);
 		(void)xstore_recover(g_xbt, g_xwal_path);  /* replay the log */
+		bm_set_double_write(g_xbm, 1);
 	}
 
 	/* Open the log (append past whatever is there). */
@@ -608,6 +623,15 @@ sx_storage_abandon(void)
 	if (g_xwal != NULL) { wal_close(g_xwal); g_xwal = NULL; }
 	if (g_xbt != NULL) { bt_close(g_xbt); g_xbt = NULL; }
 	if (g_xbm != NULL) { bm_destroy(g_xbm); g_xbm = NULL; }
+}
+
+void
+sx_storage_bm_stats(struct bm_stats *out)
+{
+	if (g_xbm != NULL)
+		bm_get_stats(g_xbm, out);
+	else
+		memset(out, 0, sizeof *out);
 }
 
 int

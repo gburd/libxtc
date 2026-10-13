@@ -95,6 +95,9 @@ int  sx_storage_close(void);
  * durable).  The next sx_storage_open rebuilds the tree from the full
  * log.  Intended for crash-recovery tests. */
 void sx_storage_abandon(void);
+/* Buffer-pool statistics of the open store (zeroed when closed). */
+struct bm_stats;
+void sx_storage_bm_stats(struct bm_stats *out);
 
 /* 1 if the libxtc-native storage engine is open (so plain CREATE TABLE
  * is routed to it).  0 otherwise. */

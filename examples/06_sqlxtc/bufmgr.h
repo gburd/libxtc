@@ -138,6 +138,11 @@ void bm_set_lsn(bm_t *bm, uint64_t lsn);
  * page's after-image carrying the same LSN the page is stamped with. */
 uint64_t bm_get_lsn(bm_t *bm);
 void bm_set_wal_flush(bm_t *bm, int (*flush)(void *ctx, uint64_t lsn), void *ctx);
+/* Turn the double-write ring (opts.double_write) off (0) or back on (1).
+ * Off, pages are written home with no ring copy and no fdatasync: only
+ * for a page file nothing will trust after a crash (a rebuild in
+ * progress).  Call with no flush in flight (no procs running). */
+void bm_set_double_write(bm_t *bm, int on);
 
 /*
  * Physiological redo: apply a full-page after-image during recovery.
@@ -330,6 +335,7 @@ typedef struct bm_stats {
 	uint64_t tr_passes;     /* trickler passes total */
 	uint64_t tr_adaptive;   /* trickler passes that ran the GA tuner */
 	uint64_t dw_repaired;   /* pages restored from the double-write on reopen */
+	uint64_t dw_writes;     /* page images written to the double-write ring */
 	uint64_t freed;         /* page ids put on the reclaim freelist */
 	uint64_t reissued;      /* allocations served from the reclaim freelist */
 	uint64_t free_pids;     /* page ids currently on the reclaim freelist */
