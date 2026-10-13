@@ -2041,7 +2041,7 @@ struct starve {
 	uint64_t h0, h1;
 	xtc_promise_t *prom;
 	_Atomic int phase, completed, unblocked, hints, hint_in_flight;
-	_Atomic int op_done;
+	_Atomic int op_done, r0_ran; /* r0_ran: req[0] reached submit */
 	int ctl_rc, ctl_tries, self_drained, owner_rc;
 };
 static struct starve g_sv;
@@ -2057,6 +2057,8 @@ sv_submit(const xtc_batch_item_t *items, size_t n, void *user,
 	for (i = 0; i < n; ++i)
 		((struct mt_req *)items[i].request)->ran++;
 	r = items[0].request;
+	if (r == &g_sv.req[0])
+		atomic_store(&g_sv.r0_ran, 1);
 	if (g_sv.mode == 1 && n == 1 && r == &g_sv.req[0] && r->ran == 1) {
 		assert(xtc_future_new_pair(&g_sv.prom, &f) == XTC_OK);
 		exec->kind = XTC_BATCH_EXEC_FUTURE;
@@ -2113,7 +2115,7 @@ sv_producer(void *arg)
 	(void)arg;
 	while (xtc_batch_submit_mt(v->batch, &v->req[0], 1, &v->h0) != XTC_OK)
 		usleep(100);
-	while (v->req[0].ran == 0)
+	while (!atomic_load(&v->r0_ran))
 		usleep(100);
 	usleep(20000);
 	/* mt_queue_cap more: every one is held (the only slot is taken). */
