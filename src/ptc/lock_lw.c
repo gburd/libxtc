@@ -351,6 +351,19 @@ __lw_fw_wake_all(xtc_lwlock_t *l)
 	}
 }
 
+/* Deliver a pending kill to a fiber waiter that has unlinked itself and
+ * dropped wait_mu.  Does not return unless the caller's own mask defers
+ * the kill. */
+static void
+__lw_kill_deliver(void)
+{
+#ifdef XTC_HAVE_PROC_KILL_WAKE
+	__xtc_proc_kill_poll();
+#else
+	if (__xtc_fiber_kill_check != NULL) __xtc_fiber_kill_check();
+#endif
+}
+
 /* ----- public API ----- */
 
 int
@@ -465,8 +478,7 @@ xtc_lwlock_acquire(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 				/* Killed.  Deliver it (no return unless the
 				 * caller's mask defers it; then retry the slow
 				 * path from the top without checking again). */
-				if (__xtc_fiber_kill_check != NULL)
-					__xtc_fiber_kill_check();
+				__lw_kill_deliver();
 				kill_deferred = 1;
 				continue;
 			}
