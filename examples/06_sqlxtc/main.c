@@ -160,6 +160,17 @@ pin_to_cores(int n_cores)
 #endif
 }
 
+/* Stop taking connections: unlisten so new connects are refused rather
+ * than queued on a socket nobody will accept from. */
+static void
+stop_accepting(server_t *srv)
+{
+	if (srv->listen_fd >= 0) {
+		xtc_net_close(srv->listen_fd);
+		srv->listen_fd = -1;
+	}
+}
+
 static void
 listener_proc(void *arg)
 {
@@ -239,35 +250,30 @@ listener_proc(void *arg)
 			    &revents);
 			if (revents & XTC_WAIT_MAILBOX) {
 				while (xtc_recv(&msg, &msg_len, 0) == XTC_OK) {
+					if (xtc_app_is_shutdown_msg(msg, msg_len))
+						atomic_store(&srv->shutdown_requested, 1);
 					if (msg) xtc_free(msg);
 				}
 			}
 		}
 	}
 
-	/* Shutdown observed: stop the application (the root supervisor
-	 * exits and releases the executor, so xtc_app_run returns).  We are
-	 * a supervised child; the supervisor will not restart us once its
-	 * stop is requested. */
-	(void)xtc_app_stop(srv->app);
-}
-
-static void
-sig_handler(int sig)
-{
-	(void)sig;
-	atomic_store(&g_server.shutdown_requested, 1);
-}
-
-static void
-setup_signals(void)
-{
-	struct sigaction sa = { 0 };
-	sa.sa_handler = sig_handler;
-	sigemptyset(&sa.sa_mask);
-	sigaction(SIGINT, &sa, NULL);
-	sigaction(SIGTERM, &sa, NULL);
-	signal(SIGPIPE, SIG_IGN);
+	/*
+	 * Drain requested (SIGTERM / SIGINT, via xtc_app_drain_on_signal).
+	 * Every loop is still running, so stop the storage procs HERE, from
+	 * a proc: the checkpointer finishes any checkpoint and exits,
+	 * commits already in flight finish (the WAL writer is still up), new
+	 * ones wait at the checkpoint gate and are never acknowledged, then
+	 * the WAL writer, trickler and provider stop.  Then return; the
+	 * drain halts the loops and main() flushes and closes the store.
+	 * Stopping them after the loops were halted is what used to hang
+	 * shutdown for 20 s.
+	 */
+	XTC_LOG_INFO_F("sqlxtc draining: no new connections; stopping the "
+	    "storage procs");
+	stop_accepting(srv);
+	sx_storage_quiesce();            /* no-op if the store is not running */
+	XTC_LOG_INFO_F("sqlxtc storage quiesced");
 }
 
 static void
@@ -464,7 +470,7 @@ main(int argc, char **argv)
 	}
 	xtc_net_setnonblock(srv->listen_fd);
 
-	setup_signals();
+	signal(SIGPIPE, SIG_IGN);
 
 	/* Supervised, optionally multi-loop application.  --threads > 1
 	 * makes xtc_app own an N-loop executor (loop 0 hosts the supervised
@@ -510,6 +516,15 @@ main(int argc, char **argv)
 		if (xtc_app_start(srv->app, kids, 1) != XTC_OK) {
 			fprintf(stderr, "app start failed\n"); return 1;
 		}
+		/* SIGTERM / SIGINT: ask the listener to drain (it quiesces the
+		 * store from a proc), then halt every loop -- on -t 1 as well,
+		 * where idle connection procs would otherwise keep the loop
+		 * running forever. */
+		if (xtc_app_drain_on_signal(srv->app, 30LL * 1000 * 1000 * 1000,
+		    2LL * 1000 * 1000 * 1000, NULL) != XTC_OK) {
+			fprintf(stderr, "cannot install the shutdown handler\n");
+			return 1;
+		}
 	}
 
 	/* Start the storage engine's background procs (group-commit WAL
@@ -528,7 +543,7 @@ main(int argc, char **argv)
 
 	XTC_LOG_INFO_F("sqlxtc shutting down");
 	xtc_log_drain(log);
-	close(srv->listen_fd);
+	stop_accepting(srv);
 	db_destroy(srv->db);
 	if (cfg.storage_path != NULL &&
 	    sx_storage_close() != SX_OK) {   /* checkpoint + stop procs + close */

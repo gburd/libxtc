@@ -217,6 +217,7 @@ static int    g_xrunning;        /* background procs spawned */
  */
 static uint64_t     g_ckpt_min = 64ull << 20;  /* bytes; sx_storage_set_checkpoint */
 static _Atomic int  g_ckpt_stop, g_ckpt_alive;
+static xtc_pid_t    g_ckpt_pid;
 static _Atomic uint64_t g_ckpt_count;
 
 void
@@ -238,7 +239,13 @@ sx_ckpt_proc(void *arg)
 	(void)arg;
 	while (!atomic_load(&g_ckpt_stop)) {
 		uint64_t sz, trig;
-		(void)xtc_proc_sleep(50LL * 1000 * 1000);
+		void *m = NULL;
+		size_t mn = 0;
+		/* Tick every 50 ms; sx_ckpt_stop's message ends the wait early. */
+		if (xtc_recv(&m, &mn, 50LL * 1000 * 1000) == XTC_OK)
+			xtc_free(m);
+		if (atomic_load(&g_ckpt_stop))
+			break;
 		if (g_xwal == NULL || wal_failed(g_xwal))
 			continue;
 		sz = wal_size(g_xwal);
@@ -256,6 +263,11 @@ sx_ckpt_proc(void *arg)
 	atomic_store(&g_ckpt_alive, 0);
 }
 
+/* Stop the checkpoint proc and, on a proc, wait for it to finish any
+ * checkpoint in progress.  Off a proc there is no wait, as for the
+ * other storage procs: the caller is past xtc_exec_run / xtc_loop_run,
+ * so the proc's loop no longer runs (waiting there cost 20 s per
+ * shutdown) and the proc cannot touch the engine again. */
 static void
 sx_ckpt_stop(void)
 {
@@ -263,12 +275,11 @@ sx_ckpt_stop(void)
 	if (!atomic_load(&g_ckpt_alive))
 		return;
 	atomic_store(&g_ckpt_stop, 1);
-	for (i = 0; i < 2000 && atomic_load(&g_ckpt_alive); i++) {
-		if (xtc_pid_is_none(xtc_self()))
-			(void)xtc_sleep_ns(10LL * 1000 * 1000);
-		else
-			(void)xtc_proc_sleep(10LL * 1000 * 1000);
-	}
+	(void)xtc_send(g_ckpt_pid, "s", 1);     /* end its tick wait now */
+	if (xtc_pid_is_none(xtc_self()))
+		return;
+	for (i = 0; i < 2000 && atomic_load(&g_ckpt_alive); i++)
+		(void)xtc_proc_sleep(1LL * 1000 * 1000);
 }
 
 int
@@ -471,6 +482,8 @@ sx_storage_run(xtc_loop_t *loop)
 		atomic_store(&g_ckpt_alive, 1);
 		if (xtc_proc_spawn(loop, sx_ckpt_proc, NULL, &co, &cp) != XTC_OK)
 			atomic_store(&g_ckpt_alive, 0);
+		else
+			g_ckpt_pid = cp;
 	}
 	(void)bm_provider_spawn(g_xbm, loop, 1LL * 1000 * 1000, NULL);  /* 1ms */
 	(void)bm_trickler_spawn(g_xbm, loop, 5LL * 1000 * 1000, NULL);  /* 5ms */
@@ -506,12 +519,15 @@ sx_storage_checkpoint(void)
 }
 
 /*
- * Stop the background storage procs (WAL writer, page provider,
- * trickler) without tearing down the engine, so an executor running
- * them can go idle and xtc_exec_run can return -- after which the
- * caller does sx_storage_close off the loop.  Idempotent.  Safe to
- * call from a proc once all committers are done (no commit may follow,
- * since the group-commit writer is stopped).
+ * Stop the background storage procs (checkpointer, WAL writer, page
+ * provider, trickler) without tearing down the engine, so an executor
+ * running them can go idle or be stopped -- after which the caller does
+ * sx_storage_close off the loop.  Call from a proc while the loops still
+ * run.  Commits already in flight finish (logged, acknowledged and
+ * applied) before the writer stops; any later commit waits at the
+ * checkpoint gate and is never acknowledged, so the store that
+ * sx_storage_close flushes holds every acknowledged commit and no
+ * half-applied one.  Idempotent.
  */
 void
 sx_storage_quiesce(void)
@@ -519,6 +535,8 @@ sx_storage_quiesce(void)
 	if (!g_xrunning)
 		return;
 	sx_ckpt_stop();
+	if (g_xwal != NULL)
+		xstore_quiesce_begin();        /* closed until the next open */
 	if (g_xwal != NULL) wal_writer_stop(g_xwal);
 	bm_trickler_stop(g_xbm);
 	bm_provider_stop(g_xbm);
