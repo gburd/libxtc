@@ -14,10 +14,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <errno.h>
 #include <stdatomic.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include "xtc.h"
 #include "xtc_io.h"
@@ -33,23 +30,25 @@ pgmock_listener_proc(void *arg)
 	pgmock_listener_t *lst = arg;
 	void *msg;
 	size_t msg_len;
+	uint32_t revents;
 
 	while (!atomic_load(lst->shutdown)) {
-		/* Drain the accept backlog. */
+		/* Drain the accept backlog.  xtc_net_accept maps EMFILE /
+		 * ENFILE to XTC_E_RESOURCE: back off 10 ms (the connection
+		 * stays in the backlog) instead of spinning on a listen fd
+		 * that stays readable. */
 		for (;;) {
-			int fd = accept(lst->listen_fd, NULL, NULL);
+			int fd = -1;
+			int rc = xtc_net_accept(lst->listen_fd, &fd);
 			pgmock_backend_opts_t bo;
 			xtc_pid_t pid;
 
-			if (fd < 0) {
-				if (errno == EAGAIN || errno == EWOULDBLOCK)
-					break;
-				if (errno == EINTR)
-					continue;
+			if (rc == XTC_E_AGAIN)
+				break;
+			if (rc != XTC_OK) {
+				(void)xtc_proc_sleep(10LL * 1000 * 1000);
 				break;
 			}
-
-			xtc_net_setnonblock(fd);
 			bo.fd = fd;
 			if (pgmock_backend_spawn(lst->loop, &bo, &pid) ==
 			    XTC_OK) {
@@ -61,23 +60,19 @@ pgmock_listener_proc(void *arg)
 						lst->pids[i] = pid;
 				}
 			} else {
-				close(fd);
+				xtc_net_close(fd);
 			}
 		}
 
 		/* Park until the listen fd is readable, a wake byte arrives,
 		 * or the 100ms cap fires (to re-check shutdown). */
-		{
-			uint32_t revents = 0;
-			(void)xtc_proc_wait_fd(lst->listen_fd,
-			    XTC_IO_READABLE,
-			    100LL * 1000 * 1000,
-			    &revents);
-			if (revents & XTC_WAIT_MAILBOX) {
-				while (xtc_recv(&msg, &msg_len, 0) == XTC_OK) {
-					if (msg != NULL)
-						xtc_free(msg);
-				}
+		revents = 0;
+		(void)xtc_proc_wait_fd(lst->listen_fd, XTC_IO_READABLE,
+		    100LL * 1000 * 1000, &revents);
+		if (revents & XTC_WAIT_MAILBOX) {
+			while (xtc_recv(&msg, &msg_len, 0) == XTC_OK) {
+				if (msg != NULL)
+					xtc_free(msg);
 			}
 		}
 	}

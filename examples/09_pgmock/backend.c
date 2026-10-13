@@ -37,6 +37,7 @@
 
 #include "xtc.h"
 #include "xtc_io.h"
+#include "xtc_net.h"
 #include "xtc_proc.h"
 
 #include "backend.h"
@@ -351,7 +352,7 @@ backend_cleanup(void *arg)
 {
 	backend_state_t *st = arg;
 	if (st->fd >= 0) {
-		close(st->fd);
+		xtc_net_close(st->fd);
 		st->fd = -1;
 	}
 	free(st);
