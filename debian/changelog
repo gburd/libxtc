@@ -127,16 +127,21 @@ libxtc (1.56.0-1) unstable; urgency=medium
       <sys/mman.h>).
     - examples/14: the GPU group's waiter thread is started (--hetero
       hung).
+    - FreeBSD: the DST drivers link the libraries configure found
+      (-lrt), and tests-sh runs make-invoking scripts with the outer
+      make, so make check, check-dst and the DST corpus run there.
   * Tested on Linux x86-64 (Debian 13, gcc 14, clang 19): make check on
     io_uring, epoll, poll and select; ASan+UBSan make check; TSan of the
     concurrency suites; make check-dst, DST corpus, planted-bug suite
     (16/16, new bug 16 BATCHDROP).  Gates: Linux x86-64 with an Intel
-    Arc GPU and NPU (examples 12-14); Windows 11 ARM64 MSVC, VS 18,
-    native ARM64 and x64 (IOCP, Windows fibers); FreeBSD 15.1 kqueue
-    make check (on a host later found to have faulty RAM, so backed by
-    CI's FreeBSD VM job); real riscv64 (SpacemiT X100) make check on
-    epoll only.  NOT tested: event ports, multi-NUMA placement; on
-    riscv64, io_uring, TLS, the sim build and the other backends.
+    Arc GPU and NPU (examples 12-14); Windows 11 ARM64 MSVC, VS 18 native
+    ARM64 and VS 17/18 x64 (IOCP, Windows fibers); FreeBSD 15.1-RELEASE
+    make check on kqueue, poll, select, sched-policy and ASan+UBSan, plus
+    check-dst, the DST corpus and the planted-bug suite; real riscv64
+    (SpacemiT X100) make check on epoll, poll, select, sched-policy and
+    forced fcontext, plus check-dst, corpus and a 10k-seed swarm.  NOT
+    tested: event ports, multi-NUMA placement; io_uring and TLS on
+    riscv64.
 
  -- Greg Burd <greg@burd.me>  Tue, 13 Oct 2026 12:00:00 -0400
 
