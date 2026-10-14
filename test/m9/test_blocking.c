@@ -21,7 +21,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#if !defined(_WIN32)
 #include <sys/resource.h>
+#endif
 
 #include "munit.h"
 #include "xtc.h"
@@ -505,6 +507,7 @@ fd_proc(void *arg)
 		atomic_fetch_add(&g_fd_ok, 1);
 }
 
+#if !defined(_WIN32)
 static int
 fd_count(void)
 {
@@ -514,15 +517,19 @@ fd_count(void)
 			n++;
 	return n;
 }
+#endif
 
 static MunitResult
 test_no_fd_per_call(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
 	xtc_proc_opts_t opts = { 0 };
+#if !defined(_WIN32)
 	struct rlimit old, lim;
+	int before, top = 0;
+#endif
 	xtc_pid_t pid;
-	int i, before, top = 0;
+	int i;
 	(void)p; (void)d;
 
 	xtc_blocking_shutdown();
@@ -536,6 +543,9 @@ test_no_fd_per_call(const MunitParameter p[], void *d)
 		munit_assert_int(xtc_proc_spawn(loop, fd_proc,
 		    (void *)(intptr_t)i, &opts, &pid), ==, XTC_OK);
 	}
+	/* The fd-limit squeeze and fd count are POSIX (rlimit, fcntl); on
+	 * Windows the off-loop and completion assertions below still run. */
+#if !defined(_WIN32)
 	before = fd_count();
 	for (i = 0; i < 4096; i++)
 		if (fcntl(i, F_GETFD) != -1)
@@ -547,6 +557,9 @@ test_no_fd_per_call(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(fd_count(), ==, before);
 	munit_assert_int(setrlimit(RLIMIT_NOFILE, &old), ==, 0);
+#else
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+#endif
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	munit_assert_int(atomic_load(&g_fd_on_loop), ==, 0);
 	munit_assert_int(atomic_load(&g_fd_off_loop), ==, NFD);

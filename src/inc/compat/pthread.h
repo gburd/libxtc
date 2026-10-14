@@ -168,7 +168,8 @@ pthread_once(pthread_once_t *once, void (*init)(void))
  * lifetime of the thread) carries the retval slot the trampoline
  * writes and pthread_join reads back.  pthread_t is a pointer to it,
  * not the raw HANDLE, so join can recover the value POSIX promises. */
-struct xtc__thunk { void *(*fn)(void *); void *arg; void *ret; HANDLE h; };
+struct xtc__thunk { void *(*fn)(void *); void *arg; void *ret; HANDLE h;
+                   volatile LONG state; /* 0 running, 1 done, 2 detached */ };
 typedef struct xtc__thunk *pthread_t;
 typedef int    pthread_attr_t;
 
@@ -177,6 +178,10 @@ xtc__thread_trampoline(void *p)
 {
 	struct xtc__thunk *t = (struct xtc__thunk *)p;
 	t->ret = t->fn(t->arg);
+	/* A detached thread's thunk is freed by whichever side finishes
+	 * second: pthread_detach must not free it while fn still runs. */
+	if (InterlockedExchange(&t->state, 1) == 2)
+		free(t);
 	return 0;
 }
 static __inline int
@@ -188,7 +193,7 @@ pthread_create(pthread_t *th, const pthread_attr_t *a,
 	(void)a;
 	t = (struct xtc__thunk *)malloc(sizeof *t);
 	if (t == NULL) return EAGAIN;
-	t->fn = fn; t->arg = arg; t->ret = NULL;
+	t->fn = fn; t->arg = arg; t->ret = NULL; t->state = 0;
 	h = _beginthreadex(NULL, 0, xtc__thread_trampoline, t, 0, NULL);
 	if (h == 0) { free(t); return EAGAIN; }
 	t->h = (HANDLE)h;
@@ -205,7 +210,12 @@ pthread_join(pthread_t th, void **retval)
 	return 0;
 }
 static __inline int pthread_detach(pthread_t th)
-{ CloseHandle(th->h); free(th); return 0; }
+{
+	CloseHandle(th->h);
+	if (InterlockedExchange(&th->state, 2) == 1)
+		free(th);       /* already finished; else the trampoline frees */
+	return 0;
+}
 /* pthread_self: threads not created via pthread_create (e.g. the main
  * thread, or a raw OS thread) have no thunk, so a per-thread thunk is
  * lazily allocated in TLS and its h holds a real handle to self.  Its
@@ -220,6 +230,7 @@ static __inline pthread_t pthread_self(void)
 		    GetCurrentProcess(), &self_slot.h, 0, FALSE,
 		    DUPLICATE_SAME_ACCESS);
 		self_slot.fn = NULL; self_slot.arg = NULL; self_slot.ret = NULL;
+		self_slot.state = 0;
 		have_self = 1;
 	}
 	return &self_slot;

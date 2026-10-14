@@ -219,18 +219,19 @@ if errorlevel 1 (
   goto :eof
 )
 %TN%.exe > "%TN%.runlog" 2>&1
-rem  Honor the automake SKIP convention: exit code 77 == SKIP, not a
-rem  failure.  Timing-fragile tests (e.g. concurrency/test_wake_after_
-rem  migration when no migration was observed this run, or
-rem  test_proc_wake_crossthread on Windows) legitimately exit 77; this
-rem  gate must not read that as TEST FAILED.  cmd's `if errorlevel N` is
-rem  ">= N", so test 77 before 1.
-if errorlevel 77 if not errorlevel 78 (
+rem  Capture the EXACT exit code.  `if errorlevel 1` means ">= 1", and a
+rem  crashed Windows process exits with a NEGATIVE NTSTATUS (0xC0000005,
+rem  0xC0000374 heap corruption, 0xC0000409 fastfail) -- the old test read
+rem  every crash as OK.  77 == SKIP (automake convention); anything else
+rem  nonzero, negative included, is a failure.
+set RC=!ERRORLEVEL!
+if "!RC!"=="77" (
   echo   [munit] %MS%\%TN% SKIP
   set /a MUNIT_SKIP+=1
   goto :eof
 )
-if errorlevel 1 (
+if not "!RC!"=="0" (
+  echo   [munit] %MS%\%TN% exit code !RC!
   echo   [munit] %MS%\%TN% TEST FAILED
   rem  Print the FAILING CASE.  Test output went to >nul, so a run
   rem  failure named only the binary -- on a platform with no local host
@@ -282,13 +283,15 @@ if errorlevel 1 (
   goto :eof
 )
 %TN%.exe > "%TN%.runlog" 2>&1
-rem  cmd's `if errorlevel N` is ">= N", so test 77 before 1.
-if errorlevel 77 if not errorlevel 78 (
+rem  Exact exit code (crashes are NEGATIVE NTSTATUS values; see :run_munit).
+set RC=!ERRORLEVEL!
+if "!RC!"=="77" (
   echo   [munit] %MS%\%TN% SKIP
   set /a MUNIT_SKIP+=1
   goto :eof
 )
-if errorlevel 1 (
+if not "!RC!"=="0" (
+  echo   [munit] %MS%\%TN% exit code !RC!
   echo   [munit] %MS%\%TN% TEST FAILED
   rem  Print the FAILING CASE.  Test output went to >nul, so a run
   rem  failure named only the binary -- on a platform with no local host
@@ -338,8 +341,9 @@ if errorlevel 1 (
   goto :eof
 )
 %TN%.exe > "%TN%.runlog" 2>&1
-if errorlevel 1 (
-  echo   [munit] %MS%\%TN% ADVISORY TEST FAILED ^(AFD-timing; not gated^)
+set RC=!ERRORLEVEL!
+if not "!RC!"=="0" (
+  echo   [munit] %MS%\%TN% ADVISORY TEST FAILED rc=!RC! ^(AFD-timing; not gated^)
   goto :eof
 )
 echo   [munit] %MS%\%TN% OK ^(advisory^)
