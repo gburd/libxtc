@@ -237,7 +237,11 @@ test_tcp_knobs(const MunitParameter p[], void *d)
 	l = sizeof v;
 	munit_assert_int(getsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (void *)&v, &l), ==, 0);
 	munit_assert_int(v, !=, 0);
+#if defined(_WIN32)
+	closesocket((SOCKET)fd);  /* a SOCKET, not a CRT fd: _close() fastfails */
+#else
 	close(fd);
+#endif
 	return MUNIT_OK;
 }
 
@@ -294,7 +298,11 @@ test_setnonblock(const MunitParameter p[], void *d)
 	fd = (int)socket(AF_INET, SOCK_STREAM, 0);
 	munit_assert_int(fd, >=, 0);
 	munit_assert_int(xtc_net_setnonblock(fd), ==, XTC_OK);
+#if defined(_WIN32)
+	closesocket((SOCKET)fd);
+#else
 	close(fd);
+#endif
 	return MUNIT_OK;
 }
 

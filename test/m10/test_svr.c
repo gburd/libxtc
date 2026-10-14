@@ -630,7 +630,12 @@ late_handle_call(void *st, const void *req, size_t size, xtc_svr_call_t *call)
 
 /* Fill a stack area that overlaps the dead call frame and hold it live
  * across the late-reply window; return the number of bytes that changed. */
-static __attribute__((noinline)) int
+#if defined(_MSC_VER)
+#define LATE_NOINLINE __declspec(noinline)
+#else
+#define LATE_NOINLINE __attribute__((noinline))
+#endif
+static LATE_NOINLINE int
 late_scrub_and_hold(void)
 {
 	volatile unsigned char buf[16384];
