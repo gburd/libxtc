@@ -370,33 +370,64 @@ __flush_pending(xtc_io_t *io)
 }
 
 /*
- * Ring geometry.  The CQ must comfortably exceed the number of armed
- * multishot polls: when it fills, the kernel ENDS each multishot whose
- * CQE it cannot post (its final CQE goes to the overflow list without
- * IORING_CQE_F_MORE).  The reap path re-arms such a poll, so overflow
- * costs a round trip, not readiness -- but a roomy CQ keeps it rare.
- * 4096 CQEs is 64 KiB per ring.  A kernel that refuses CQSIZE (pre-5.5)
- * or the larger ring (pre-5.12 memlock accounting) gets the old
- * 256-entry default.
+ * Ring geometry.  When the CQ fills, the kernel ENDS each multishot poll
+ * whose CQE it cannot post (its final CQE goes to the overflow list
+ * without IORING_CQE_F_MORE).  The reap path re-arms such a poll, so
+ * overflow costs a round trip, not readiness.  A larger CQ would make it
+ * rarer but costs per-user locked memory; see __xtc_io_backend_init.
  */
 #define XTC_URING_SQ_ENTRIES   256u
-#define XTC_URING_CQ_ENTRIES   4096u
+#define XTC_URING_CQ_ENTRIES   0u     /* 0 = kernel default (2 x SQ) */
+
+/*
+ * io_uring_queue_exit releases a ring's memory ASYNCHRONOUSLY (the kernel
+ * tears it down on a workqueue), so a process that creates and destroys
+ * rings back to back can transiently see -ENOMEM from the next setup
+ * while earlier rings are still being freed -- measured on Linux 7.2: a
+ * tight create/exit loop fails within 14-200 iterations, and every
+ * failure clears within 4 ms.  1.55.0 hit it too, just less often (its
+ * rings were smaller).  Retry ENOMEM briefly; anything else, or ENOMEM
+ * that persists, is a real error.  Ring setup is not a hot path.
+ */
+#define XTC_URING_INIT_RETRIES 200    /* x 1 ms */
+
+static int
+__ring_setup(struct io_uring *ring, unsigned cq_entries, int retries)
+{
+	struct io_uring_params prm;
+	int rc, k;
+
+	for (k = 0; ; k++) {
+		memset(&prm, 0, sizeof prm);
+		if (cq_entries != 0) {
+			prm.flags = IORING_SETUP_CQSIZE;
+			prm.cq_entries = cq_entries;
+		}
+		rc = io_uring_queue_init_params(XTC_URING_SQ_ENTRIES, ring,
+		    &prm);
+		if (rc != -ENOMEM || k >= retries)
+			return rc;
+		(void)__os_sleep_ns(1000LL * 1000);   /* XTC_BLOCKING_OK: ring setup, once per loop */
+	}
+}
 
 int
 __xtc_io_backend_init(xtc_io_t *io)
 {
-	struct io_uring_params prm;
 	int rc;
 
-	memset(&prm, 0, sizeof prm);
-	prm.flags = IORING_SETUP_CQSIZE;
-	prm.cq_entries = XTC_URING_CQ_ENTRIES;
-	rc = io_uring_queue_init_params(XTC_URING_SQ_ENTRIES, &io->ring, &prm);
-	if (rc < 0)
-		rc = io_uring_queue_init(XTC_URING_SQ_ENTRIES, &io->ring, 0);
+	/* Ring memory comes from a per-user budget (RLIMIT_MEMLOCK, commonly
+	 * 8 MiB).  The default geometry (CQ = 2 x SQ) fits ~200 rings; a
+	 * 4096-entry CQ fits only ~67 and, once the budget fragments, a
+	 * smaller fallback ring does not fit either (measured on Linux 7.2).
+	 * So the CQ stays at the default size: an executor with one ring per
+	 * loop must start on a 96-core host.  CQ overflow is not lossy (the
+	 * reap path re-arms a poll the kernel ended), only slower. */
+	rc = __ring_setup(&io->ring, XTC_URING_CQ_ENTRIES,
+	    XTC_URING_INIT_RETRIES);
 	if (rc < 0) {
 		errno = -rc;
-		return XTC_E_INTERNAL;
+		return rc == -ENOMEM ? XTC_E_NOMEM : XTC_E_INTERNAL;
 	}
 	/*
 	 * Cap this ring's kernel io-wq worker pool so N carriers on an
