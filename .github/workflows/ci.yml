@@ -875,7 +875,7 @@ jobs:
           for t in test_chan test_mctx test_timer test_loop test_svr \
                    test_sync test_lockmgr; do
             echo "===== memcheck $t ====="
-            valgrind --tool=memcheck \
+            XTC_UNDER_VALGRIND=1 valgrind --tool=memcheck \
               --suppressions=../.github/valgrind.supp \
               --leak-check=full \
               --show-leak-kinds=definite,indirect \
