@@ -106,11 +106,37 @@ libxtc (1.56.0-1) unstable; urgency=medium
       auto-assigned key) no longer overwrite acked rows; SIGTERM exits in
       ~0.1 s at any thread count; crash recovery of a 64 MB log takes
       0.7 s (was 133 s).
+  * Found by the release's platform gates and fixed:
+    - IOCP: a cross-loop fd unregister (a stolen migratable fiber's
+      wait cleanup) corrupted the owning loop's heap; it is now deferred
+      to the owner, as on io_uring, poll and select (also in 1.55.0).
+      The MSVC gate treated crashed tests (negative exit codes) as
+      passes; it now checks exact exit codes.  The compat
+      pthread_detach freed the thread thunk while it was in use.
+    - io_uring: back to the default CQ size (a 4096-entry CQ fit only
+      67 rings in an 8 MiB memlock budget, so an 80-loop executor could
+      not start); a transient ENOMEM from ring setup (asynchronous ring
+      teardown) is retried, and a persistent one is XTC_E_NOMEM.
+    - OpenSSL 3.3 reports a certificate-verification failure as
+      SSL_ERROR_SYSCALL; it is XTC_E_INTERNAL again, not XTC_E_IO.
+    - xtc_ncpus counts only CPUs in the process's affinity mask (also
+      in 1.55.0).
+    - kqueue: the native file-AIO path is compiled in (it was compiled
+      out by a header-order bug; also in 1.55.0).
+    - The amalgamation compiles on macOS and riscv64 (missing
+      <sys/mman.h>).
+    - examples/14: the GPU group's waiter thread is started (--hetero
+      hung).
   * Tested on Linux x86-64 (Debian 13, gcc 14, clang 19): make check on
     io_uring, epoll, poll and select; ASan+UBSan make check; TSan of the
     concurrency suites; make check-dst, DST corpus, planted-bug suite
-    (16/16, new bug 16 BATCHDROP).  NOT tested: kqueue, IOCP, event
-    ports, Windows fibers, real GPU/NPU hardware, multi-NUMA placement.
+    (16/16, new bug 16 BATCHDROP).  Gates: Linux x86-64 with an Intel
+    Arc GPU and NPU (examples 12-14); Windows 11 ARM64 MSVC, VS 18,
+    native ARM64 and x64 (IOCP, Windows fibers); FreeBSD 15.1 kqueue
+    make check (on a host later found to have faulty RAM, so backed by
+    CI's FreeBSD VM job); real riscv64 (SpacemiT X100) make check on
+    epoll only.  NOT tested: event ports, multi-NUMA placement; on
+    riscv64, io_uring, TLS, the sim build and the other backends.
 
  -- Greg Burd <greg@burd.me>  Tue, 13 Oct 2026 12:00:00 -0400
 
