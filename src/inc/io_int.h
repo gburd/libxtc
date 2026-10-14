@@ -27,6 +27,7 @@ struct __xtc_solaris_reg {
 	void     *tag;
 };
 #elif defined(XTC_IO_BACKEND_IOCP)
+#include <pthread.h>   /* MSVC: the compat shim; MinGW: winpthreads */
 /*
  * Windows IOCP backend (round 2): native completion port plus the
  * AFD poll fast path that turns a connected/listening socket's
@@ -169,6 +170,24 @@ struct xtc_io {
 	struct __xtc_iocp_aio  *aio_pend;   /* file AIOs in flight */
 	int  n_aio;
 	int  cap_aio;
+	/*
+	 * Cross-loop deferred unregister, as io_uring/poll/select have:
+	 * reg_iocp/dead_iocp are a USERSPACE registry owned by this io's
+	 * poll thread.  A migrated fiber's xtc_proc_wait_fd cleanup used to
+	 * call xtc_io_del_fd on this io from ANOTHER thread while the owner
+	 * was mid-poll -- racing the swap-remove and the dead-list free:
+	 * heap corruption (/m5/exec/Blk3_cross_loop_del_fd under MSVC and
+	 * MinGW, 1.55.0 and 1.56.0).  A foreign thread now queues the fd
+	 * under del_lock and nudges the owner, which drains the queue at the
+	 * top of xtc_io_poll and before a re-registration.
+	 */
+	int             *pending_del;
+	int              n_pending_del;
+	int              cap_pending_del;
+	_Atomic int      has_pending_del;
+	pthread_mutex_t  del_lock;
+	pthread_t        owner_tid;
+	_Atomic int      owner_set;
 #elif defined(XTC_IO_BACKEND_AIX)
 	int   ps;                          /* pollset_t */
 	void *reg_aix;                     /* struct __xtc_aix_reg * */

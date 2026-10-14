@@ -122,6 +122,11 @@
 #include <string.h>
 
 #define XTC_IOCP_KEY_WAKEUP   ((ULONG_PTR)1)
+
+/* Cross-loop deferred unregister helpers (defined with
+ * __xtc_io_defer_del_fd below). */
+static void __drain_pending_del(xtc_io_t *io);
+static void __apply_pending_del_for(xtc_io_t *io, int fd);
 #define XTC_IOCP_KEY_IO       ((ULONG_PTR)0)   /* socket poll + file AIO */
 
 /* Bounded re-poll interval for the AFD async-completion workaround
@@ -306,8 +311,18 @@ __xtc_io_backend_init(xtc_io_t *io)
 	io->n_dead = io->cap_dead = 0;
 	io->aio_pend = NULL;
 	io->n_aio = io->cap_aio = 0;
+	io->pending_del = NULL;
+	io->n_pending_del = io->cap_pending_del = 0;
+	atomic_store_explicit(&io->has_pending_del, 0, memory_order_relaxed);
+	atomic_store_explicit(&io->owner_set, 0, memory_order_relaxed);
+	if (pthread_mutex_init(&io->del_lock, NULL) != 0) {
+		(void)CloseHandle(h);
+		io->iocp = NULL;
+		return XTC_E_INTERNAL;
+	}
 
 	if ((rc = __open_afd(io)) != XTC_OK) {
+		(void)pthread_mutex_destroy(&io->del_lock);
 		(void)CloseHandle(h);
 		io->iocp = NULL;
 		return rc;
@@ -387,6 +402,10 @@ __xtc_io_backend_fini(xtc_io_t *io)
 	__os_free(io->aio_pend);
 	io->aio_pend = NULL;
 	io->n_aio = io->cap_aio = 0;
+	__os_free(io->pending_del);
+	io->pending_del = NULL;
+	io->n_pending_del = io->cap_pending_del = 0;
+	(void)pthread_mutex_destroy(&io->del_lock);
 }
 
 int
@@ -691,6 +710,7 @@ xtc_io_reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 
 	if (io == NULL || fd < 0 || interest == 0)
 		return XTC_E_INVAL;
+	__apply_pending_del_for(io, fd);
 	if (__find_reg(io, fd) >= 0)
 		return XTC_E_INVAL;
 	if ((rc = __base_socket(fd, &base)) != XTC_OK)
@@ -817,24 +837,106 @@ xtc_io_del_fd(xtc_io_t *io, int fd)
 	return XTC_OK;
 }
 
-/* Non-io_uring backends: reg/del are kernel-synchronized (epoll) or
- * this backend keeps its own registry; the cross-loop deferred-
- * unregister that io_uring needs is a no-op passthrough here (the
- * caller is xtc_proc_wait_fd cleanup after a migration).  Provided so
- * the single caller links on every backend. */
-/* No-op: only io_uring has a single-owner fds list + SQ ring that needs
- * an eagerly-recorded owner thread; this backend is kernel-synchronized
- * or keeps its own registry.  Provided so every backend links. */
+/*
+ * Cross-loop deferred unregister (the io_poll.c scheme).  The registry
+ * (reg_iocp + dead_iocp) belongs to the thread that polls this io; a
+ * migrated fiber's xtc_proc_wait_fd cleanup may run on another thread.
+ */
+static int
+__is_owner(const xtc_io_t *io)
+{
+	return !atomic_load_explicit(&io->owner_set, memory_order_acquire) ||
+	    pthread_equal(pthread_self(), io->owner_tid);
+}
+
+/* Owner thread: perform every queued unregister.  Called at the top of
+ * xtc_io_poll, before the registry is read. */
+static void
+__drain_pending_del(xtc_io_t *io)
+{
+	int i, n, local[32];
+	if (!atomic_load_explicit(&io->has_pending_del, memory_order_acquire))
+		return;
+	for (;;) {
+		(void)pthread_mutex_lock(&io->del_lock);
+		n = io->n_pending_del;
+		if (n > (int)(sizeof local / sizeof local[0]))
+			n = (int)(sizeof local / sizeof local[0]);
+		for (i = 0; i < n; i++)
+			local[i] = io->pending_del[i];
+		for (i = n; i < io->n_pending_del; i++)
+			io->pending_del[i - n] = io->pending_del[i];
+		io->n_pending_del -= n;
+		if (io->n_pending_del == 0)
+			atomic_store_explicit(&io->has_pending_del, 0,
+			    memory_order_relaxed);
+		(void)pthread_mutex_unlock(&io->del_lock);
+		for (i = 0; i < n; i++)
+			(void)xtc_io_del_fd(io, local[i]);
+		if (n < (int)(sizeof local / sizeof local[0]))
+			return;
+	}
+}
+
+/* Owner thread, before (re-)registering fd: a deferred delete of the same
+ * fd still queued would make the add fail as a duplicate.  Apply it now. */
+static void
+__apply_pending_del_for(xtc_io_t *io, int fd)
+{
+	int i, found = 0;
+	if (!atomic_load_explicit(&io->has_pending_del, memory_order_acquire))
+		return;
+	(void)pthread_mutex_lock(&io->del_lock);
+	for (i = 0; i < io->n_pending_del; i++) {
+		if (io->pending_del[i] != fd)
+			continue;
+		found = 1;
+		io->pending_del[i] = io->pending_del[--io->n_pending_del];
+		i--;
+	}
+	if (io->n_pending_del == 0)
+		atomic_store_explicit(&io->has_pending_del, 0,
+		    memory_order_relaxed);
+	(void)pthread_mutex_unlock(&io->del_lock);
+	if (found)
+		(void)xtc_io_del_fd(io, fd);
+}
+
 void
 __xtc_io_set_owner(xtc_io_t *io)
 {
-	(void)io;
+	if (io != NULL &&
+	    !atomic_load_explicit(&io->owner_set, memory_order_relaxed)) {
+		io->owner_tid = pthread_self();
+		atomic_store_explicit(&io->owner_set, 1, memory_order_release);
+	}
 }
 
+/* Unregister fd on io from ANY thread: inline on the owner, queued (and
+ * the owner nudged) otherwise. */
 int
 __xtc_io_defer_del_fd(xtc_io_t *io, int fd)
 {
-	return xtc_io_del_fd(io, fd);
+	int *np;
+	if (io == NULL || fd < 0) return XTC_E_INVAL;
+	if (__is_owner(io))
+		return xtc_io_del_fd(io, fd);
+	(void)pthread_mutex_lock(&io->del_lock);
+	if (io->n_pending_del == io->cap_pending_del) {
+		int nc = io->cap_pending_del ? io->cap_pending_del * 2 : 16;
+		if (__os_realloc(io->pending_del, (size_t)nc * sizeof(int),
+		    (void **)&np) != XTC_OK) {
+			(void)pthread_mutex_unlock(&io->del_lock);
+			return XTC_E_NOMEM;
+		}
+		io->pending_del = np;
+		io->cap_pending_del = nc;
+	}
+	io->pending_del[io->n_pending_del++] = fd;
+	atomic_store_explicit(&io->has_pending_del, 1, memory_order_release);
+	(void)pthread_mutex_unlock(&io->del_lock);
+	(void)xtc_io_wakeup(io);
+	return XTC_OK;
 }
 
 /* --------------------------------------------------------------- */
@@ -1034,6 +1136,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 	if (io == NULL || events == NULL || max <= 0 || n_out == NULL)
 		return XTC_E_INVAL;
 	*n_out = 0;
+	__drain_pending_del(io);
 
 	batch_max = max < (int)(sizeof batch / sizeof batch[0])
 	    ? max : (int)(sizeof batch / sizeof batch[0]);
