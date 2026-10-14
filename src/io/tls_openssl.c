@@ -1089,6 +1089,20 @@ tls_fail(xtc_tls_t *tls, int err)
 		tls->wants_write = 1;
 		return XTC_E_AGAIN;
 	case SSL_ERROR_SYSCALL:
+		/* OpenSSL 3.x reports some PROTOCOL failures as SYSCALL with
+		 * an SSL-library reason on the queue -- e.g. the client that
+		 * rejects the server's certificate (134 =
+		 * SSL_R_CERTIFICATE_VERIFY_FAILED) on OpenSSL 3.3.  That is not
+		 * a transport failure; classify it by the queued reason.  An
+		 * empty queue (or a non-SSL reason) is the real EOF/reset case. */
+		rc = (e != 0 && ERR_GET_LIB(e) == ERR_LIB_SSL) ? XTC_E_INTERNAL
+		    : XTC_E_IO;
+#if defined(SSL_R_UNEXPECTED_EOF_WHILE_READING)
+		if (ERR_GET_LIB(e) == ERR_LIB_SSL &&
+		    ERR_GET_REASON(e) == SSL_R_UNEXPECTED_EOF_WHILE_READING)
+			rc = XTC_E_IO;
+#endif
+		break;
 	case SSL_ERROR_ZERO_RETURN:
 		rc = XTC_E_IO;
 		break;
