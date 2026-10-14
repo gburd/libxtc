@@ -27,6 +27,7 @@
 #include "aio_int.h"      /* __xtc_aio_done_set: cross-thread completion flag */
 
 #include <errno.h>
+#include <signal.h>       /* SIGEV_KEVENT: must be visible to the AIO gate below */
 #include <unistd.h>
 #include <sys/event.h>
 #include <sys/time.h>

@@ -489,6 +489,22 @@ test_big_reply(const MunitParameter p[], void *d)
  * write buffer: 20000 pipelined GETs of a 1000 B value delivered 599
  * complete replies and a corrupted stream.  Every byte must arrive, in
  * order, exactly. */
+/* The pipeline is sent from its own thread: the server stops reading
+ * while its pending output is over OUT_SOFT, so a blocking send of the
+ * whole pipeline before any read deadlocks wherever the loopback socket
+ * buffers cannot absorb it (FreeBSD's defaults hold ~200 KB; this
+ * pipeline is ~440 KB).  The client still does not read for 1.5 s. */
+struct pipe_send { int fd; const char *buf; size_t len; int rc; };
+
+static void *
+pipe_send_fn(void *arg)
+{
+	struct pipe_send *ps = arg;
+
+	ps->rc = rexis_send_all(ps->fd, ps->buf, ps->len);
+	return NULL;
+}
+
 static MunitResult
 test_slow_reader_pipeline(const MunitParameter p[], void *d)
 {
@@ -497,6 +513,8 @@ test_slow_reader_pipeline(const MunitParameter p[], void *d)
 	size_t one_len, cmd_len, i;
 	int fd, len;
 	char cmd[64];
+	struct pipe_send ps;
+	pthread_t th;
 	(void)p; (void)d;
 
 	fd = connect_server();
@@ -514,10 +532,13 @@ test_slow_reader_pipeline(const MunitParameter p[], void *d)
 	munit_assert_ptr_not_null(got);
 	for (i = 0; i < N; i++)
 		memcpy(pipe_buf + i * cmd_len, cmd, cmd_len);
-	munit_assert_int(rexis_send_all(fd, pipe_buf, cmd_len * N), ==, 0);
+	ps.fd = fd; ps.buf = pipe_buf; ps.len = cmd_len * N; ps.rc = -1;
+	munit_assert_int(pthread_create(&th, NULL, pipe_send_fn, &ps), ==, 0);
 	usleep(1500 * 1000);              /* do not read for a while */
 	munit_assert_size(rexis_read_n(fd, got, one_len * N, 20000), ==,
 	    one_len * N);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+	munit_assert_int(ps.rc, ==, 0);
 	for (i = 0; i < N; i++)
 		if (memcmp(got + i * one_len, one, one_len) != 0)
 			munit_errorf("reply %zu of %d corrupted", i, N);
