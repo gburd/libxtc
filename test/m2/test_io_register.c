@@ -417,7 +417,9 @@ r7_round(xtc_io_t *io, int (*sp)[2], char *seen, int n)
 		}
 	}
 	for (i = 0; i < n; i++) {
-		(void)read(sp[i][0], &b, 1);
+		/* Drain the readiness byte; a short read is fine here. */
+		if (read(sp[i][0], &b, 1) < 0)
+			b = 0;
 		if (!seen[i])
 			(void)xtc_io_del_fd(io, sp[i][0]);
 	}

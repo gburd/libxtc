@@ -1862,7 +1862,8 @@ eof_client(void *arg)
         xtc_tls_create(ctx, a->fd, &tls) == XTC_OK &&
         poll_until_done(tls, a->fd, xtc_tls_handshake, 5000) == XTC_OK)
         a->rc = 0;
-    (void)read(a->ctl, &b, 1);           /* wait for the server's go */
+    if (read(a->ctl, &b, 1) < 0)         /* wait for the server's go */
+        b = 0;
     if (a->mode == EOF_CLEAN && tls != NULL)
         (void)poll_until_done(tls, a->fd, xtc_tls_shutdown, 5000);
     (void)close(a->fd);
