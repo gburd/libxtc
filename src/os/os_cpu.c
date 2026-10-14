@@ -160,7 +160,15 @@ __os_ncpus(void)
 	int hw = (n < 1) ? 1 : (int)n;
 # if defined(__linux__)
 	{
-		int capped = __cgroup_cpu_quota_ncpus(hw);
+		/* Online is not schedulable: taskset/cpusets, or SoCs whose
+		 * extra online cores no process may run on (SpacemiT: 16
+		 * online, mask 0-7).  Clamp to the calling thread's mask. */
+		cpu_set_t set;
+		int capped;
+		if (sched_getaffinity(0, sizeof set, &set) == 0 &&
+		    CPU_COUNT(&set) > 0 && CPU_COUNT(&set) < hw)
+			hw = CPU_COUNT(&set);
+		capped = __cgroup_cpu_quota_ncpus(hw);
 		if (capped > 0)
 			return capped;
 	}
