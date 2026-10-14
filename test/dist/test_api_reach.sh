@@ -28,6 +28,11 @@
 # Exit 0 = clean, 1 = an untested export (or a stale allowlist line).
 
 set -eu
+# sort and comm must agree on collation.  In a UTF-8 locale uutils
+# coreutils (Ubuntu 25.10+) sorts by locale but comm checks bytes, so
+# comm aborts "not in sorted order" and set -e exits 1 with no message.
+LC_ALL=C
+export LC_ALL
 : "${XTC_SRC_DIR:?}"
 : "${XTC_BUILD_DIR:?}"
 

@@ -42,7 +42,10 @@ and
 (microseconds), the effective count is
 .Fn ceil quota/period ,
 clamped to at least 1 and at most the real hardware count from
-.Fn sysconf _SC_NPROCESSORS_ONLN .
+.Fn sysconf _SC_NPROCESSORS_ONLN ,
+itself first clamped to the calling thread's
+.Fn sched_getaffinity
+mask (online CPUs the process may not run on are not counted).
 This makes the default reactor/thread-pool sizing correct inside a
 Kubernetes pod or Docker container with a CPU limit, instead of
 sizing for cores the process cannot actually schedule on.
