@@ -1202,7 +1202,7 @@ tests-sh: $(STATIC_LIB) tnt_echo
 	@: >check-skips-sh.txt; \
 	for t in $(TESTS_SH); do \
 		echo "running shell test: $$(basename $$t)"; \
-		{ CC='$(CC)' \
+		{ CC='$(CC)' MAKE='$(MAKE)' \
 		  XTC_BUILD_DIR=$(abs_builddir) \
 		  XTC_SRC_DIR=$(abs_top_srcdir)/.. \
 		  XTC_SNIPPET_CFLAGS='$(SNIPPET_SAN_CFLAGS)' \

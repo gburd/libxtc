@@ -56,7 +56,7 @@ for f in Makefile config.log config.status xtc_config.h libxtc.a; do
 	fi
 done
 
-make distclean >/dev/null
+${MAKE:-make} distclean >/dev/null
 
 # After distclean every generated file must be gone.
 for f in Makefile config.log config.status xtc_config.h libxtc.a; do
