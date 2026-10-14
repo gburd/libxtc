@@ -39,6 +39,20 @@ ones a consumer is most likely to have hit:
 * `xtc_svr_call` from a plain thread let a late reply write into the
   timed-out caller's freed stack frame.
 
+The 1.56.0 platform gates (Linux GPU/NPU, Windows ARM64/x64 MSVC,
+FreeBSD, real riscv64) then found, and 1.56.0 fixes:
+
+* Windows IOCP: a migratable fiber's fd cleanup running on another loop
+  corrupted the heap (`/m5/exec/Blk3_cross_loop_del_fd`, also in
+  1.55.0).  The MSVC test gate counted crashed tests as passes, which is
+  how it stayed hidden; it now checks exact exit codes.
+* `xtc_ncpus` counted CPUs outside the process's affinity mask (riscv64
+  SoCs with fenced-off cores; also 1.55.0).
+* FreeBSD: the native kqueue file-AIO path was compiled out (1.55.0
+  too); every `xtc_aio_*` went to the blocking pool.
+* io_uring: back-to-back ring create/destroy could fail with a transient
+  `ENOMEM`; a persistent one is now `XTC_E_NOMEM`.
+
 The full list, with before/after measurements, is in the 1.56.0 release
 notes (`debian/changelog`).  Behaviour changes a consumer must act on:
 
@@ -518,6 +532,38 @@ isolation defects were fixed (1.56); what remains is recorded here.
   io_uring for many mostly-idle connections.
 * There is no built-in TLS handshake or idle timeout.  Bound them with
   `xtc_proc_wait_fd` timeouts; `xtc_tls(3)` DEADLINES shows the pattern.
+
+## OPEN: involuntary preemption corrupts a busy same-loop pair (x86-64 ucontext)
+
+**Status:** OPEN, pre-existing (1.55.0 identical).  Involuntary
+preemption is opt-in (`xtc_preempt_set_involuntary(1)`); the default,
+cooperative preemption, is not affected.
+
+**What happens.**  A producer and consumer on ONE loop, both preempted by
+the signal timer (`xtc_preempt_arm(20000)`) while they spin on an mpsc
+channel, either stall (the loop thread runs, the channel is empty, the
+consumer never sees the last message) or abort with "stack smashing
+detected" inside `xtc_yield` (`coro_uctx.c`).  On floki (x86-64 glibc
+ucontext) a 1-loop reproducer stalled 9/12 and aborted 3/12 on the 1.56
+candidate and 10/12 and 2/12 on 1.55.0; `-mno-red-zone` does not help.
+GitHub CI's sched-policy job hit it in `/m7/chan/mpsc_involuntary_preempt`.
+
+**What to do.**  Do not enable involuntary preemption in production.
+The test is opt-in (`XTC_TEST_INVOLUNTARY=1`) until the signal-context
+redirect path is fixed.
+
+## OPEN: valgrind memcheck reports libxtc fiber stacks as invalid
+
+**Status:** OPEN, tooling limitation; not a memory error in libxtc.
+
+libxtc allocates fiber stacks with `mmap` and does not register them with
+`VALGRIND_STACK_REGISTER`, so once a fiber resumes on another loop's
+thread after a cross-loop `xtc_amutex` hand-off, memcheck flags its stack
+accesses (thousands of "invalid read/write" reports for a two-loop
+amutex test on 1.55.0 and 1.56).  ASan, which libxtc annotates for fiber
+switches, reports nothing for the same tests.  CI's memcheck job sets
+`XTC_UNDER_VALGRIND=1`, which skips the amutex case of
+`/m9/sync/kill_after_park_while_running`; use ASan for fiber code.
 
 ## RESOLVED (1.56): a finished proc fiber is reclaimed at once
 
