@@ -26,6 +26,13 @@
 #ifndef XTC_CORO_COMMON_H
 #define XTC_CORO_COMMON_H
 
+/* Self-contained: __stack_pool_drain calls munmap and the reclaim lever
+ * madvise.  The includer usually has these already, but the amalgamation
+ * emits this header before coro_uctx.c's own <sys/mman.h>, and macOS
+ * rejects the implicit declaration (and then the late asm-labelled one). */
+#include <sys/mman.h>
+#include <unistd.h>
+
 /* ---- Fiber-stack pool (per-thread) --------------------------------
  *
  * Every fresh fiber stack costs an mmap + an mprotect(PROT_NONE) for its
