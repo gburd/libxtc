@@ -44,6 +44,8 @@ BUDGET="${XTC_DST_BUDGET:-64}"
 RUN_TIMEOUT="${XTC_DST_TIMEOUT:-300}"
 
 INC="-I$ROOT/src/inc"
+# The libraries configure found a build's libxtc.a needs (FreeBSD: -lrt).
+cfg_libs() { sed -n 's/^LIBS[[:space:]]*=[[:space:]]*//p' "$1/Makefile"; }
 BMDIR="$ROOT/examples/06_sqlxtc"
 
 # bug-id ; catching-test ; sqlxtc-engine-needed(0/1) ; seeded(0/1) ; EXPECT
@@ -219,7 +221,7 @@ while IFS=';' read -r bug test_c need_eng seeded expect; do
 		# shellcheck disable=SC2086
 		if ! $CC -g -O1 -std=c11 -D_GNU_SOURCE -I"$clean" $INC $extra_inc \
 			"$ROOT/test/sim/$test_c.c" $eng "$clean/libxtc.a" \
-			-pthread -ldl -lm -o "$ctl" 2>/dev/null; then
+			-pthread -ldl -lm $(cfg_libs "$clean") -o "$ctl" 2>/dev/null; then
 			echo "  [bug $bug] FAIL: $test_c did not build CLEAN (control)"
 			fails=$((fails + 1)); continue
 		fi
@@ -251,7 +253,7 @@ while IFS=';' read -r bug test_c need_eng seeded expect; do
 	# shellcheck disable=SC2086
 	if ! $CC -g -O1 -std=c11 -D_GNU_SOURCE -DXTC_DST_INJECT_BUG=$bug \
 		-I"$bdir" $INC $extra_inc "$ROOT/test/sim/$test_c.c" $engobjs \
-		"$bdir/libxtc.a" -pthread -ldl -lm -o "$exe" 2>/dev/null; then
+		"$bdir/libxtc.a" -pthread -ldl -lm $(cfg_libs "$bdir") -o "$exe" 2>/dev/null; then
 		echo "  [bug $bug] FAIL: $test_c did not build"
 		fails=$((fails + 1)); continue
 	fi

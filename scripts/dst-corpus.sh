@@ -60,6 +60,8 @@ case "$(uname -s)" in
 Darwin) libs="-pthread -lm" ;;
 *)      libs="-pthread -ldl -lm" ;;
 esac
+# Plus the libraries configure found libxtc.a needs (FreeBSD: -lrt).
+libs="$libs $(sed -n 's/^LIBS[[:space:]]*=[[:space:]]*//p' "$build/Makefile")"
 
 # Compile a distinct pinned test once, caching the executable in $work.
 # Prints the exe path on stdout, or nothing on a build failure.

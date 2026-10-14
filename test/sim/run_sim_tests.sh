@@ -68,6 +68,9 @@ case "$(uname -s)" in
 Darwin) libs="-pthread -lm" ;;
 *)      libs="-pthread -ldl -lm" ;;
 esac
+# Plus the libraries configure found libxtc.a needs (FreeBSD: -lrt for
+# the preempt timer_* calls).
+libs="$libs $(sed -n 's/^LIBS[[:space:]]*=[[:space:]]*//p' "$build/Makefile")"
 
 # test_sim_bufmgr drives the sqlxtc storage-engine buffer manager
 # (examples/06_sqlxtc/bufmgr.c) under DST, so it needs that source
