@@ -243,6 +243,14 @@ def turso_steps():
               tq(21, [2, 3, lst])]
     s += [tq(13, [1, 2, "NOSUCH"]), tq(14, [1, 2, "NOSUCH"])]
     s += [tq(15, [1, 2, 3]), tq(16, [2, 3, 4]), tq(22, [1, 1, 5])]
+    # ordstat.c binds c_last (TEXT) into stmt 22's "c_id = ?": SQLite
+    # applies the column's numeric affinity to the bind, a non-numeric
+    # string stays TEXT and compares unequal (no row), "5" becomes 5.
+    s += [tq(22, [1, 1, "BARBARBAR"]), tq(22, [1, 1, "5"]),
+          ("SELECT c_id FROM customer WHERE c_w_id = 1 AND c_d_id = 1 AND "
+           "c_id < 'x' AND c_id > '3'", None, "u"),
+          ("SELECT count(*) FROM customer WHERE c_last = ?", [5], "u"),
+          ("SELECT count(*) FROM customer WHERE c_last > ?", [5], "u")]
     s += [tq(17, [123.5, "newdata", 1, 2, 3]), tq(15, [1, 2, 3]),
           tq(16, [1, 2, 3])]
     s += [tq(18, [-5.5, 1, 2, 4]), tq(22, [1, 2, 4])]

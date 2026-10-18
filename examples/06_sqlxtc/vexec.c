@@ -1891,6 +1891,7 @@ compile_scalar_subquery(struct vx_compiler *c, const sql_expr_t *e)
 #define VX_IN_SELECT_MAX 4096
 
 static int cmp_vals(const vx_cell_t *a, const vx_cell_t *b);   /* fwd */
+static int sort_cmp(const vx_cell_t *a, const vx_cell_t *b);   /* fwd */
 
 static int in_sorted_cmp(const void *pa, const void *pb)
 {
@@ -2027,6 +2028,41 @@ compile_in_select(struct vx_compiler *c, const sql_expr_t *e)
 	return n;
 }
 
+static void coerce_to_affinity(vx_cell_t *v, enum vx_aff aff,
+                               struct vx_arena_blk **arena);
+static void coerce_numeric(vx_cell_t *v);
+
+/*
+ * SQLite's comparison affinity for a COLUMN compared with a LITERAL or
+ * bound ? (which has no affinity): a column with numeric affinity
+ * applies numeric affinity to the other side, a TEXT column text
+ * affinity, a BLOB/none column none.  Applied once, here, to the
+ * literal; eval then compares in SQLite's cross-class order (number <
+ * text < blob).  Returns 1 when the pair is now safe (literal coerced as
+ * SQLite would), 0 when this rule does not apply (the caller's other
+ * gates decide), -1 never.  The Turso Order-Status binds c_last (TEXT)
+ * into "c_id = ?": SQLite matches nothing, a gate rejection failed the
+ * whole transaction.
+ */
+static int
+cmp_affinity_gate(struct vx_compiler *c, vx_expr_t *a, vx_expr_t *b)
+{
+	vx_expr_t *col, *lit;
+	enum vx_aff aff;
+	if (a->op == VXO_COL && b->op == VXO_LIT) { col = a; lit = b; }
+	else if (b->op == VXO_COL && a->op == VXO_LIT) { col = b; lit = a; }
+	else return 0;
+	if (lit->lit.type == VX_NULL) return 1;
+	aff = node_class(c, col);
+	if (aff == VX_AFF_NUMERIC) {
+		if (lit->lit.type == VX_TEXT) coerce_numeric(&lit->lit);
+	} else if (aff == VX_AFF_TEXT) {
+		if (lit->lit.type == VX_INT || lit->lit.type == VX_REAL)
+			coerce_to_affinity(&lit->lit, VX_AFF_TEXT, &c->st->plan_arena);
+	}
+	return 1;
+}
+
 static vx_expr_t *
 compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 {
@@ -2104,6 +2140,7 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 	case SX_E_BINARY: {
 		enum vx_op op;
 		vx_expr_t *n, *a, *b;
+		int dyn_coerce = 0;
 		if (e->op2 == TK_LIKE) {
 			/* x LIKE y  ==  like(y, x): operand in .a, pattern in .b.
 			 * SQLite's LIKE is ASCII case-insensitive with no ESCAPE
@@ -2140,6 +2177,9 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 			break;
 		case VXO_EQ: case VXO_NE: case VXO_LT: case VXO_LE:
 		case VXO_GT: case VXO_GE: {
+			int g = cmp_affinity_gate(c, a, b);
+			if (g < 0) { c->fail = 1; return NULL; }
+			if (g > 0) break;
 			/* No-coercion gate: both numeric, or both text.  Anything
 			 * with a blob/none-affinity operand or a numeric-vs-text
 			 * pairing could coerce -> fall back.  EXCEPTION: a value of
@@ -2162,13 +2202,14 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 			 * comparison NULL whatever the other side: no coercion. */
 			if (!ok && (is_null_lit(a) || is_null_lit(b))) ok = 1;
 			if (!ok) { c->fail = 1; return NULL; }
+			dyn_coerce = a_dyn || b_dyn;
 			break;
 		}
 		default: break;   /* AND/OR: operands are boolean-ish, fine */
 		}
 
 		n = expr_node(c, op);
-		if (n) { n->a = a; n->b = b; }
+		if (n) { n->a = a; n->b = b; n->col = dyn_coerce; }
 		return n;
 	}
 
@@ -2196,11 +2237,14 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 			return NULL;
 		ca = node_class(c, operand); clo = node_class(c, lo); chi = node_class(c, hi);
 		/* Both bounds must compare to the operand under the no-coercion
-		 * rule (both numeric, or both text). */
-		if (!(((ca == VX_AFF_NUMERIC && clo == VX_AFF_NUMERIC) ||
-		       (ca == VX_AFF_TEXT && clo == VX_AFF_TEXT)) &&
-		      ((ca == VX_AFF_NUMERIC && chi == VX_AFF_NUMERIC) ||
-		       (ca == VX_AFF_TEXT && chi == VX_AFF_TEXT)))) {
+		 * rule (both numeric, or both text), or under SQLite's affinity
+		 * rule for a literal bound against a column. */
+		if (!((((ca == VX_AFF_NUMERIC && clo == VX_AFF_NUMERIC) ||
+		        (ca == VX_AFF_TEXT && clo == VX_AFF_TEXT)) ||
+		       cmp_affinity_gate(c, operand, lo) > 0) &&
+		      (((ca == VX_AFF_NUMERIC && chi == VX_AFF_NUMERIC) ||
+		        (ca == VX_AFF_TEXT && chi == VX_AFF_TEXT)) ||
+		       cmp_affinity_gate(c, operand2, hi) > 0))) {
 			c->fail = 1; return NULL;
 		}
 		gel = expr_node(c, VXO_GE);
@@ -2724,13 +2768,14 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 		 * numeric-vs-text pairing).  Coerce the text side to a number when
 		 * it looks numeric, matching SQLite; a non-numeric string keeps
 		 * its text value (SQLite then orders number < text). */
-		{
+		if (e->col) {   /* a dynamic (subquery / CASE) operand */
 			int a_num = (a.type == VX_INT || a.type == VX_REAL);
 			int b_num = (b.type == VX_INT || b.type == VX_REAL);
 			if (a_num && b.type == VX_TEXT) (void)coerce_numeric(&b);
 			else if (b_num && a.type == VX_TEXT) (void)coerce_numeric(&a);
 		}
-		c = cmp_vals(&a, &b);
+		/* SQLite order across storage classes: number < text < blob. */
+		c = sort_cmp(&a, &b);
 		out->type = VX_INT;
 		switch (e->op) {
 		case VXO_EQ: out->i = (c == 0); break;
