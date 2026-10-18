@@ -664,10 +664,16 @@ coldef(R) ::= TK_ID(N) type_opt(TY) col_constraints(CC). {
 }
 
 %type type_opt {sql_str_t}
+%type type_name {sql_str_t}
 type_opt(R) ::= .                                          { R.p = NULL; R.len = 0; }
-type_opt(R) ::= TK_ID(T).                                  { R = tok_str(T); }
-type_opt(R) ::= TK_ID(T) TK_LP TK_NUMBER TK_RP.            { R = tok_str(T); }
-type_opt(R) ::= TK_ID(T) TK_LP TK_NUMBER TK_COMMA TK_NUMBER TK_RP. { R = tok_str(T); }
+type_opt(R) ::= type_name(T).                              { R = T; }
+type_opt(R) ::= type_name(T) TK_LP TK_NUMBER TK_RP.        { R = T; }
+type_opt(R) ::= type_name(T) TK_LP TK_NUMBER TK_COMMA TK_NUMBER TK_RP. { R = T; }
+/* A type name is one or more identifiers ("DOUBLE PRECISION", "UNSIGNED
+ * BIG INT"); the slice spans them all, as SQLite's typetoken does, so the
+ * affinity rules see every word. */
+type_name(R) ::= TK_ID(T).                  { R = tok_str(T); }
+type_name(R) ::= type_name(A) TK_ID(T).     { R = A; R.len = (uint32_t)((T.p + T.len) - A.p); }
 
 %type col_constraints {int}
 %type col_constraint  {int}

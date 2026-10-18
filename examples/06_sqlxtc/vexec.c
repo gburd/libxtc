@@ -332,8 +332,12 @@ typedef struct vx_htab {
  * over which the projection and WHERE filter are evaluated.  Column
  * references in proj/filter index the combined row. */
 
-/* Column affinity (SQLite rules, three buckets). */
-enum vx_aff { VX_AFF_BLOB = 0, VX_AFF_TEXT, VX_AFF_NUMERIC };
+/* Column affinity class.  The compiler's comparison gates use three
+ * buckets (BLOB / TEXT / NUMERIC); vx_affinity() also yields the two
+ * SQLite store affinities INTEGER and REAL, which coerce_to_affinity uses
+ * and node_class() folds back to NUMERIC. */
+enum vx_aff { VX_AFF_BLOB = 0, VX_AFF_TEXT, VX_AFF_NUMERIC,
+              VX_AFF_INTEGER, VX_AFF_REAL };
 
 /* Materialized result of running a plan (also the row source when a
  * plan runs as a nested derived table / subquery).  Defined here so the
@@ -584,15 +588,27 @@ str_contains_ci(const char *hay, const char *needle)
 	return 0;
 }
 
+/* SQLite's five affinity rules, in order (datatype3.html 3.1). */
 static enum vx_aff
 vx_affinity(const char *decltype)
 {
 	if (decltype == NULL || decltype[0] == '\0') return VX_AFF_BLOB;
+	if (str_contains_ci(decltype, "INT")) return VX_AFF_INTEGER;
 	if (str_contains_ci(decltype, "CHAR") ||
 	    str_contains_ci(decltype, "CLOB") ||
 	    str_contains_ci(decltype, "TEXT")) return VX_AFF_TEXT;
 	if (str_contains_ci(decltype, "BLOB")) return VX_AFF_BLOB;
+	if (str_contains_ci(decltype, "REAL") ||
+	    str_contains_ci(decltype, "FLOA") ||
+	    str_contains_ci(decltype, "DOUB")) return VX_AFF_REAL;
 	return VX_AFF_NUMERIC;
+}
+
+/* The comparison-gate class of an affinity (INTEGER/REAL are numeric). */
+static enum vx_aff
+aff_class(enum vx_aff a)
+{
+	return (a == VX_AFF_INTEGER || a == VX_AFF_REAL) ? VX_AFF_NUMERIC : a;
 }
 
 /* ---- recognizer: a small column-name table ----------------------- */
@@ -649,7 +665,7 @@ resolve_schema(struct xsql *db, const char *table, struct namevec *nv, int *pay)
 					 * KEY -- so its affinity is numeric, not the empty/BLOB
 					 * default a bare "k" coldef would give. */
 					nv->aff[i] = cols[c].is_pk ? VX_AFF_NUMERIC
-					                          : vx_affinity(cols[c].decltype);
+					                          : aff_class(vx_affinity(cols[c].decltype));
 					resolved++;
 				}
 			/* The special names rowid / _rowid_ / oid are aliases for the
@@ -2376,6 +2392,30 @@ eval_bool(const struct vx_stmt *st, const vx_expr_t *e,
 	return 0;
 }
 
+/* Render a REAL the way SQLite turns one into TEXT ("%!.15g", sqlite
+ * 3.46): 15 significant digits; a value with no '.' in that form gets
+ * ".0" (before the exponent, so 1e20 -> "1.0e+20"); -0.0 is "0.0";
+ * +-Inf is "Inf" / "-Inf"; NaN is NULL in SQLite and never reaches here.
+ * Writes at most cap bytes (cap >= 32) and returns the length. */
+static int
+real_text(double r, char *buf, size_t cap)
+{
+	char *e;
+	int n;
+	if (r == 0.0) r = 0.0;                  /* -0.0 -> 0.0 */
+	if (isinf(r)) return snprintf(buf, cap, "%s", r < 0 ? "-Inf" : "Inf");
+	n = snprintf(buf, cap, "%.15g", r);
+	if (n < 0 || (size_t)n + 3 > cap || strchr(buf, '.') != NULL) return n;
+	e = strchr(buf, 'e');
+	if (e == NULL) {
+		memcpy(buf + n, ".0", 3);
+	} else {
+		memmove(e + 2, e, strlen(e) + 1);
+		e[0] = '.'; e[1] = '0';
+	}
+	return n + 2;
+}
+
 /* SQLite numeric affinity on a TEXT cell: if the WHOLE string parses as
  * an integer or real (optional sign, decimal, exponent), rewrite the
  * cell in place to VX_INT / VX_REAL; otherwise leave it as text.  Used
@@ -2419,11 +2459,14 @@ coerce_numeric(vx_cell_t *v)
 	}
 }
 
-/* Apply SQLite column affinity to a value being stored (INSERT).  TEXT
- * affinity converts INTEGER/REAL to its text form; NUMERIC affinity
- * converts a numeric-looking TEXT to INTEGER/REAL (coerce_numeric);
- * BLOB/none affinity leaves the value as-is.  NULL is never coerced.
- * Text produced for an int/real is allocated in `arena`. */
+/* Apply SQLite column affinity to a value being stored (INSERT/UPDATE).
+ * TEXT converts INTEGER/REAL to its text form.  NUMERIC / INTEGER / REAL
+ * convert a numeric-looking TEXT to a number; NUMERIC and INTEGER also
+ * turn an integral in-range REAL into an INTEGER (3.0 -> 3, as SQLite's
+ * applyAffinity / IntegerAffinity do); REAL stores any number as REAL
+ * (3 -> 3.0, the read-back view SQLite gives a REAL column).  BLOB/none
+ * leaves the value as-is.  NULL is never coerced.  Text produced for an
+ * int/real is allocated in `arena`. */
 static void
 coerce_to_affinity(vx_cell_t *v, enum vx_aff aff, struct vx_arena_blk **arena)
 {
@@ -2434,11 +2477,9 @@ coerce_to_affinity(vx_cell_t *v, enum vx_aff aff, struct vx_arena_blk **arena)
 		if (v->type == VX_TEXT || v->type == VX_BLOB) return;
 		if (v->type == VX_INT)
 			n = snprintf(buf, sizeof buf, "%lld", (long long)v->i);
-		else if (v->type == VX_REAL) {
-			/* SQLite renders an integral real without a fraction via %!.15g;
-			 * use %g which matches for the corpus values. */
-			n = snprintf(buf, sizeof buf, "%g", v->r);
-		} else return;
+		else if (v->type == VX_REAL)
+			n = real_text(v->r, buf, sizeof buf);
+		else return;
 		if (n < 0 || n >= (int)sizeof buf) return;
 		{
 			uint8_t *p = (uint8_t *)arena_alloc(arena, (size_t)n + 1);
@@ -2446,8 +2487,16 @@ coerce_to_affinity(vx_cell_t *v, enum vx_aff aff, struct vx_arena_blk **arena)
 			memcpy(p, buf, (size_t)n + 1);
 			v->type = VX_TEXT; v->bytes = p; v->nbytes = (uint32_t)n;
 		}
-	} else if (aff == VX_AFF_NUMERIC) {
+	} else if (aff == VX_AFF_NUMERIC || aff == VX_AFF_INTEGER ||
+	           aff == VX_AFF_REAL) {
 		if (v->type == VX_TEXT) (void)coerce_numeric(v);
+		if (aff == VX_AFF_REAL && v->type == VX_INT) {
+			v->type = VX_REAL; v->r = (double)v->i;
+		} else if (aff != VX_AFF_REAL && v->type == VX_REAL &&
+		    v->r > -9223372036854775808.0 && v->r < 9223372036854775807.0 &&
+		    v->r == (double)(int64_t)v->r) {
+			v->type = VX_INT; v->i = (int64_t)v->r;
+		}
 	}
 	/* VX_AFF_BLOB (none affinity): no conversion. */
 }
@@ -2542,7 +2591,7 @@ cell_text(const vx_cell_t *v, struct vx_arena_blk **arena, uint32_t *n)
 		return v->bytes;
 	}
 	if (v->type == VX_INT) m = snprintf(tmp, sizeof tmp, "%lld", (long long)v->i);
-	else                   m = snprintf(tmp, sizeof tmp, "%g", v->r);
+	else                   m = real_text(v->r, tmp, sizeof tmp);
 	if (m < 0) { *n = 0; return (const uint8_t *)""; }
 	p = (uint8_t *)arena_alloc(arena, (size_t)m + 1);
 	if (p == NULL) { *n = 0; return NULL; }
@@ -2646,10 +2695,10 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 		if (a.type == VX_NULL || b.type == VX_NULL) { out->type = VX_NULL; return; }
 		/* Render each operand to text (SQLite TEXT coercion of numerics). */
 		if (a.type == VX_INT) { na = (uint32_t)snprintf(ta, sizeof ta, "%lld", (long long)a.i); pa = (uint8_t *)ta; }
-		else if (a.type == VX_REAL) { na = (uint32_t)snprintf(ta, sizeof ta, "%g", a.r); pa = (uint8_t *)ta; }
+		else if (a.type == VX_REAL) { na = (uint32_t)real_text(a.r, ta, sizeof ta); pa = (uint8_t *)ta; }
 		else { pa = a.bytes; na = a.nbytes; }
 		if (b.type == VX_INT) { nb = (uint32_t)snprintf(tb, sizeof tb, "%lld", (long long)b.i); pb = (uint8_t *)tb; }
-		else if (b.type == VX_REAL) { nb = (uint32_t)snprintf(tb, sizeof tb, "%g", b.r); pb = (uint8_t *)tb; }
+		else if (b.type == VX_REAL) { nb = (uint32_t)real_text(b.r, tb, sizeof tb); pb = (uint8_t *)tb; }
 		else { pb = b.bytes; nb = b.nbytes; }
 		buf = (uint8_t *)arena_alloc(arena, (size_t)na + nb + 1);
 		if (buf == NULL) { out->type = VX_NULL; return; }
@@ -2953,7 +3002,7 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 				/* numeric: SQLite length(123) = length('123'); render. */
 				char tmp[64]; int m;
 				if (a.type == VX_INT) m = snprintf(tmp, sizeof tmp, "%lld", (long long)a.i);
-				else m = snprintf(tmp, sizeof tmp, "%g", a.r);
+				else m = real_text(a.r, tmp, sizeof tmp);
 				out->i = m;
 			}
 			return;
@@ -3441,7 +3490,7 @@ acc_step(vx_acc_t *a, enum vx_agg_kind kind, const vx_cell_t *v,
 		uint32_t seplen = a->gc_sep ? a->gc_seplen : 1;
 		if (v->type == VX_TEXT || v->type == VX_BLOB) { vp = (const char *)v->bytes; vn = v->nbytes; }
 		else if (v->type == VX_INT) { vn = (uint32_t)snprintf(tmp, sizeof tmp, "%lld", (long long)v->i); vp = tmp; }
-		else { vn = (uint32_t)snprintf(tmp, sizeof tmp, "%g", v->r); vp = tmp; }
+		else { vn = (uint32_t)real_text(v->r, tmp, sizeof tmp); vp = tmp; }
 		{
 			uint32_t add = (a->seen ? seplen : 0) + vn;
 			if (a->gc_len + add + 1 > a->gc_cap) {
@@ -6043,7 +6092,7 @@ jsrc_build(struct xsql *db, const char *table, char names[][64], int ncol,
 				/* The PK is the INTEGER rowid (numeric affinity)
 				 * regardless of its declared type, matching SQLite. */
 				js->aff[i] = cols[c].is_pk ? VX_AFF_NUMERIC
-				                          : vx_affinity(cols[c].decltype);
+				                          : aff_class(vx_affinity(cols[c].decltype));
 				break;
 			}
 	for (i = 0; i < ncol; i++) if (js->pay[i] == -2) return -1;   /* unresolved */
@@ -8586,6 +8635,9 @@ vx_run_write_p(struct xsql *db, const char *sql,
 					break; }
 				default: dst->type = VX_NULL; break;
 				}
+				/* Store affinity, exactly as INSERT VALUES applies it. */
+				coerce_to_affinity(dst, vx_affinity(ws.decltype[colmap[ci]]),
+				    &cell_arena);
 			}
 			if (cells[0].type == VX_INT) {
 				rowid = cells[0].i; if (rowid > maxr) maxr = rowid;
