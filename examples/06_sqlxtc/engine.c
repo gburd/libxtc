@@ -844,7 +844,10 @@ sx_classify(const char *sql, int *tail_more,
 				for (col = c->cols; col && ok; col = col->next) {
 					int w, is_pk = (!implicit && col == pk);
 					if (!implicit && (phase == 0 ? !is_pk : is_pk)) continue;
-					if (col->name.len == 0) { ok = 0; break; }
+					/* The catalog's "name type,..." form cannot hold a
+					 * name with a space or comma (a quoted "b c"). */
+					if (col->name.len == 0 || memchr(col->name.p, ' ', col->name.len) ||
+					    memchr(col->name.p, ',', col->name.len)) { ok = 0; break; }
 					if (col->type.len > 0)
 						w = snprintf(colbuf + co, colcap - co, "%s%.*s %.*s",
 						    co ? "," : "", (int)col->name.len, col->name.p,

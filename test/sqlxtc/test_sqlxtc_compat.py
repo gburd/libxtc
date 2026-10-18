@@ -34,7 +34,9 @@ from compat_common import Quack, normalise_rows, Server  # noqa: E402
 # opts (optional dict): "ordered": True compares rows in ORDER (default is
 # an order-insensitive multiset compare, which cannot see a wrong ORDER BY
 # or LIMIT/OFFSET window); "params": [...] binds the test statement's
-# ? / ?NNN / :name markers (sent as Quack "params", positional).
+# ? / ?NNN / :name markers (sent as Quack "params", positional);
+# "ref_params" overrides what sqlite3 gets (a dict for :name markers,
+# which python's sqlite3 will not take positionally from 3.14 on).
 CORPUS = [
     # ---- DDL ----
     ("ddl_create", [], "CREATE TABLE t(a INT, b TEXT)"),
@@ -471,6 +473,56 @@ CORPUS = [
       "CREATE TABLE dst(x REAL, i INTEGER)",
       "INSERT INTO dst SELECT a, b FROM src"],
      "SELECT x, typeof(x), i, typeof(i) FROM dst"),
+    # Identifiers: case-insensitive tables and columns, quoted names,
+    # non-reserved keywords as names (SQLite parse.y:272 %fallback ID).
+    ("id_case_select",
+     ["CREATE TABLE Tq(Aa INT, bB TEXT)", "INSERT INTO TQ VALUES(1,'x'),(2,'y')"],
+     "SELECT aa, BB FROM tq WHERE AA = 2"),
+    ("id_case_insert_cols",
+     ["CREATE TABLE Tq(Aa INT, bB TEXT)", "INSERT INTO tq(BB, aA) VALUES('z', 3)"],
+     "SELECT * FROM TQ"),
+    ("id_case_update_delete",
+     ["CREATE TABLE Tq(id INTEGER PRIMARY KEY, Aa INT)",
+      "INSERT INTO tq VALUES(1,10),(2,20),(3,30)",
+      "UPDATE TQ SET AA = aa + 1 WHERE ID = 1", "DELETE FROM tQ WHERE aA = 30"],
+     "SELECT Id, aa FROM Tq"),
+    ("id_case_join",
+     ["CREATE TABLE Tq(Aa INT, v TEXT)", "CREATE TABLE U(X INT, w TEXT)",
+      "INSERT INTO tq VALUES(1,'a'),(2,'b')", "INSERT INTO u VALUES(1,'p'),(3,'q')"],
+     "SELECT T1.v, t2.W FROM TQ AS T1 JOIN u AS T2 ON t1.AA = T2.x"),
+    ("id_case_group",
+     ["CREATE TABLE t(G INT, v INT)", "INSERT INTO t VALUES(1,1),(1,2),(2,5)"],
+     "SELECT g, SUM(V) FROM T GROUP BY G"),
+    ("id_quoted",
+     ["CREATE TABLE \"Tq\"(\"bc\" TEXT, [d] INT, `e` INT, \"q\"\"x\" INT)",
+      "INSERT INTO tq VALUES('x', 2, 3, 4)"],
+     "SELECT \"BC\", [D], `E`, \"q\"\"x\" FROM [TQ]"),
+    ("id_quoted_alias", [], "SELECT 1 AS \"My Col\", 2 AS [x y]"),
+    ("id_quoted_keyword",
+     ["CREATE TABLE t(\"select\" INT, \"from\" INT)", "INSERT INTO t VALUES(1, 2)"],
+     "SELECT \"select\", \"from\" FROM t WHERE \"select\" = 1"),
+    ("id_keyword_cols",
+     ["CREATE TABLE k(key INT, end INT, plan INT, temp INT, replace INT, "
+      "query INT, offset INT, view INT, desc INT, asc INT)",
+      "INSERT INTO k VALUES(1,2,3,4,5,6,7,8,9,10)"],
+     "SELECT key, end, plan, temp, replace, query, offset, view, desc, asc FROM k"),
+    ("id_keyword_table",
+     ["CREATE TABLE plan(key INT, first INT)", "INSERT INTO plan VALUES(1, 2)"],
+     "SELECT key, first FROM plan WHERE key = 1"),
+    ("id_keyword_funcs", [],
+     "SELECT like('a%', 'abc'), replace('abc', 'b', 'x')"),
+    # Parameter forms ?NNN / :name / @name / $name, numbered as SQLite does.
+    ("param_qmark", [], "SELECT ? + 1, ?", {"params": [41, "x"]}),
+    ("param_numbered", [], "SELECT ?2, ?1, ?2", {"params": [10, 20]}),
+    ("param_mixed", [], "SELECT ?, ?3, ?", {"params": [1, 2, 3, 4]}),
+    ("param_named", [], "SELECT :a, @b, $c, :a",
+     {"params": [1, 2, 3], "ref_params": {"a": 1, "b": 2, "c": 3}}),
+    ("param_where_numbered",
+     ["CREATE TABLE t(a INT, b TEXT)", "INSERT INTO t VALUES(1,'x'),(2,'y')"],
+     "SELECT a, b FROM t WHERE a = ?2 AND b = ?1", {"params": ["y", 2]}),
+    ("param_insert_numbered",   # the PROTOCOL.md example shape
+     ["CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT)"],
+     "INSERT INTO t(id, name) VALUES(?1, ?2)", {"params": [7, "ann"]}),
 ]
 
 # Features sqlxtc does not yet implement.  Reported, not failed -- these
@@ -488,6 +540,7 @@ def compare(qk, ref, setup, test, opts=None):
     opts = opts or {}
     ordered = bool(opts.get("ordered"))
     params = opts.get("params")
+    ref_params = opts.get("ref_params", params)
     for s in setup:
         qk.query(s)
         try:
@@ -498,8 +551,10 @@ def compare(qk, ref, setup, test, opts=None):
     rerr = None
     rrows = []
     try:
-        if params is not None:
-            rrows = ref.execute(test, tuple(params)).fetchall()
+        if ref_params is not None:
+            if not isinstance(ref_params, dict):
+                ref_params = tuple(ref_params)
+            rrows = ref.execute(test, ref_params).fetchall()
         else:
             rrows = ref.execute(test).fetchall()
     except sqlite3.Error as e:

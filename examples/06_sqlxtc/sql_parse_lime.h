@@ -31,6 +31,12 @@ typedef struct sql_parse_state {
 	const char  *err_msg;
 	sql_arena_t *arena;       /* AST allocation arena (caller-owned) */
 	sql_stmt_t  *stmts;       /* parsed statement list (the AST root) */
+	/* Parameter numbering, done in lexical order by the TK_QMARK action
+	 * the way SQLite does it: ? = highest-so-far + 1, ?NNN = NNN, and
+	 * :name / @name / $name = a new ordinal on first sight, reused after. */
+	int          nparam;      /* highest ordinal assigned so far */
+	int          npname;
+	struct { const char *p; int len; int ord; } pname[32];
 } sql_parse_state_t;
 
 #endif /* SQLXTC_SQL_PARSE_LIME_H */

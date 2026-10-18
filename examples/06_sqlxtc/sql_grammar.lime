@@ -81,6 +81,32 @@ static sql_str_t num_lit(sql_parse_state_t *ps, sql_token_t t) {
     return s;
 }
 
+/* The 1-based ordinal of a parameter token (see sql_parse_state_t). */
+static int param_ordinal(sql_parse_state_t *ps, sql_token_t t) {
+    int i, v = 0;
+    if (t.len == 1) return ++ps->nparam;                 /* ? */
+    if (t.p[0] == '?') {                                 /* ?NNN */
+        for (i = 1; i < t.len && v <= 32766; i++) v = v * 10 + (t.p[i] - '0');
+        if (v < 1 || v > 32766) {
+            ps->error = 1;
+            ps->err_msg = "variable number must be between ?1 and ?32766";
+            return 0;
+        }
+        if (v > ps->nparam) ps->nparam = v;
+        return v;
+    }
+    for (i = 0; i < ps->npname; i++)                     /* :name @name $name */
+        if (ps->pname[i].len == t.len && memcmp(ps->pname[i].p, t.p, (size_t)t.len) == 0)
+            return ps->pname[i].ord;
+    if (ps->npname >= (int)(sizeof ps->pname / sizeof ps->pname[0])) {
+        ps->error = 1; ps->err_msg = "too many SQL variables"; return 0;
+    }
+    ps->pname[ps->npname].p = t.p;
+    ps->pname[ps->npname].len = t.len;
+    ps->pname[ps->npname].ord = ++ps->nparam;
+    return ps->pname[ps->npname++].ord;
+}
+
 /* Record an expression node's verbatim source span from a token (the
  * slice covering this leaf in the original SQL).  The whole-expression
  * span is unioned over the tree by sql_expr_span(). */
@@ -248,10 +274,17 @@ struct limit_v { sql_expr_t *limit; sql_expr_t *offset; };
 %token TK_ID.       %token TK_NUMBER.  %token TK_STRING.  %token TK_BLOB.
 %token TK_ESCAPE.   %token TK_NULLS.   %token TK_FIRST.   %token TK_LAST.
 
-/* Non-reserved keywords: when one cannot parse as itself it is retried
- * as an identifier (SQLite parse.y:272), so "first" / "last" / "nulls"
- * stay usable as column names. */
-%fallback TK_ID TK_NULLS TK_FIRST TK_LAST.
+/* Non-reserved keywords: a token in this list that has no action in the
+ * current parser state is retried as TK_ID, so it still works as a table,
+ * column or function name ("key", "end", "plan", like(), replace(), ...).
+ * This is SQLite's list (parse.y:272), restricted to the keywords this
+ * grammar has.  It is resolved at run time, so it adds no LALR conflicts. */
+%fallback TK_ID
+  TK_ASC TK_ATTACH TK_BEGIN TK_BY TK_CAST TK_DATABASE TK_DESC TK_DETACH
+  TK_END TK_EXPLAIN TK_IF TK_KEY TK_LIKE TK_OFFSET TK_PLAN TK_PRAGMA
+  TK_QUERY TK_RECURSIVE TK_RELEASE TK_RENAME TK_REPLACE TK_ROLLBACK
+  TK_SAVEPOINT TK_TEMP TK_TEMPORARY TK_TRIGGER TK_VIEW TK_WITH
+  TK_NULLS TK_FIRST TK_LAST.
 
 /* ===== expression precedence (low to high) ===== *
  *
@@ -952,13 +985,6 @@ expr(R) ::= TK_ID(F) TK_LP TK_DISTINCT expr_list(L) TK_RP(P). {
     R = mk_expr(pstate, SX_E_FUNC); if (R) { R->name[0] = tok_str(F); R->nname = 1; R->list = L; R->ival = 1; }
     if (R) { R->src = F.p; R->srclen = (uint32_t)((P.p + P.len) - F.p); }
 }
-expr(R) ::= TK_REPLACE(F) TK_LP expr_list(L) TK_RP(P). {
-    /* REPLACE is a keyword (INSERT OR REPLACE); allow it as the scalar
-     * replace(S,F,R) function too. */
-    R = mk_expr(pstate, SX_E_FUNC);
-    if (R) { R->name[0].p = "replace"; R->name[0].len = 7; R->nname = 1; R->list = L;
-             R->src = F.p; R->srclen = (uint32_t)((P.p + P.len) - F.p); }
-}
 expr(R) ::= TK_CAST(C) TK_LP expr(E) TK_AS type_opt(TY) TK_RP(P). {
     /* CAST(expr AS type) -- modelled as a FUNC named "cast" with the
      * target type in name[1] and the operand as the single list arg. */
@@ -999,7 +1025,11 @@ expr_atom(R) ::= TK_BLOB(T).   { R = mk_expr(pstate, SX_E_BLOB);   if (R) { R->l
 expr_atom(R) ::= TK_NULL(T).   { R = mk_expr(pstate, SX_E_NULL); span_tok(R, T); }
 expr_atom(R) ::= TK_TRUE(T).   { R = mk_expr(pstate, SX_E_BOOL); if (R) { R->ival = 1; span_tok(R, T); } }
 expr_atom(R) ::= TK_FALSE(T).  { R = mk_expr(pstate, SX_E_BOOL); if (R) { R->ival = 0; span_tok(R, T); } }
-expr_atom(R) ::= TK_QMARK(T).  { R = mk_expr(pstate, SX_E_PARAM); span_tok(R, T); }
+expr_atom(R) ::= TK_QMARK(T).  {
+    R = mk_expr(pstate, SX_E_PARAM);
+    if (R) R->ival = param_ordinal(pstate, T);
+    span_tok(R, T);
+}
 expr_atom(R) ::= TK_ID(T).     { R = mk_expr(pstate, SX_E_COLUMN); if (R) { R->name[0] = tok_str(T); R->nname = 1; span_tok(R, T); } }
 expr_atom(R) ::= TK_ID(A) TK_DOT TK_ID(B). {
     R = mk_expr(pstate, SX_E_COLUMN); if (R) { R->name[0] = tok_str(A); R->name[1] = tok_str(B); R->nname = 2;

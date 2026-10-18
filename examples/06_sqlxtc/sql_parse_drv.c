@@ -210,7 +210,18 @@ lex_next(lex_t *l, sql_token_t *tok)
 		case '-':  l->p++; tok->len = 1; return TK_MINUS;
 		case '/':  l->p++; tok->len = 1; return TK_SLASH;
 		case '%':  l->p++; tok->len = 1; return TK_PERCENT;
-		case '?':  l->p++; tok->len = 1; return TK_QMARK;
+		case '?':   /* ? or ?NNN */
+			l->p++;
+			while (l->p < l->end && isdigit((unsigned char)*l->p)) l->p++;
+			tok->len = (int)(l->p - tok->p);
+			return TK_QMARK;
+		case ':': case '@': case '$':   /* :name @name $name */
+			l->p++;
+			while (l->p < l->end &&
+			    (isalnum((unsigned char)*l->p) || *l->p == '_')) l->p++;
+			tok->len = (int)(l->p - tok->p);
+			if (tok->len < 2) return -1;
+			return TK_QMARK;
 		case '~':  l->p++; tok->len = 1; return TK_TILDE;
 		case '&':  l->p++; tok->len = 1; return TK_AMP;
 		case '=':
@@ -267,18 +278,21 @@ lex_next(lex_t *l, sql_token_t *tok)
 			}
 			return -1;     /* unterminated */
 		}
-		case '"': {
+		case '"': case '`': case '[': {
+			/* Quoted identifier; "" / `` inside is one quote ([x] has no
+			 * escape).  The driver dequotes it before the parser. */
+			char close = (c == '[') ? ']' : c;
 			l->p++;
-			while (l->p < l->end && *l->p != '"') l->p++;
-			if (l->p < l->end) l->p++;
-			tok->len = (int)(l->p - tok->p);
-			return TK_ID;     /* quoted identifier */
-		}
-		case '`': case '[': {
-			char close = (c == '`') ? '`' : ']';
-			l->p++;
-			while (l->p < l->end && *l->p != close) l->p++;
-			if (l->p < l->end) l->p++;
+			for (;;) {
+				if (l->p >= l->end) return -1;     /* unterminated */
+				if (*l->p == close) {
+					if (close != ']' && l->p + 1 < l->end &&
+					    l->p[1] == close) { l->p += 2; continue; }
+					l->p++;
+					break;
+				}
+				l->p++;
+			}
 			tok->len = (int)(l->p - tok->p);
 			return TK_ID;
 		}
@@ -348,10 +362,33 @@ lex_next(lex_t *l, sql_token_t *tok)
 
 /* ===== driver ===== */
 
+/* A quoted identifier token "x" / [x] / `x`: point it at the bare name,
+ * collapsing a doubled quote (""/``) into the arena when present, so the
+ * grammar and every AST consumer see the identifier itself. */
+static void
+dequote_id(sql_token_t *tok, sql_parse_state_t *st)
+{
+	char q = tok->p[0], close = (q == '[') ? ']' : q;
+	const char *p = tok->p + 1;
+	int n = tok->len - 2, i, o;
+	char *buf;
+	if (n < 0) return;
+	if (close == ']' || memchr(p, close, (size_t)n) == NULL) {
+		tok->p = p; tok->len = n; return;
+	}
+	buf = (char *)sql_arena_alloc(st->arena, (size_t)n + 1);
+	if (buf == NULL) { st->error = 1; st->err_msg = "oom"; return; }
+	for (i = 0, o = 0; i < n; i++) {
+		buf[o++] = p[i];
+		if (p[i] == close && i + 1 < n && p[i + 1] == close) i++;
+	}
+	tok->p = buf; tok->len = o;
+}
+
 /*
  * Core: run the push parser over `sql`, filling `st` (which the caller
- * has initialized with an arena).  Assigns 1-based ordinals to ? params
- * in lexed order.  Returns 0 on accept, -1 on lex/parse error.
+ * has initialized with an arena).  Returns 0 on accept, -1 on lex/parse
+ * error.
  */
 static int
 sql_parse_run(const char *sql, size_t len, sql_parse_state_t *st)
@@ -371,6 +408,11 @@ sql_parse_run(const char *sql, size_t len, sql_parse_state_t *st)
 			st->err_msg = "lex error";
 			break;
 		}
+		if (t == TK_ID && tok.len >= 2 &&
+		    (tok.p[0] == '"' || tok.p[0] == '[' || tok.p[0] == '`')) {
+			dequote_id(&tok, st);
+			if (st->error) break;
+		}
 		SqlParse(parser, t, tok, st);
 		if (st->error) break;
 	}
@@ -380,90 +422,6 @@ sql_parse_run(const char *sql, size_t len, sql_parse_state_t *st)
 	}
 	SqlParseFree(parser, free);
 	return st->error ? -1 : 0;
-}
-
-/* Walk the AST and assign 1-based ordinals to ? parameters in the
- * left-to-right order they appear.  (The grammar leaves PARAM.ival 0;
- * a single post-order walk numbers them.) */
-static void number_params_expr(sql_expr_t *e, int *next);
-static void number_params_list(sql_exprlist_t *l, int *next) {
-	sql_exprlist_item_t *it;
-	if (!l) return;
-	for (it = l->head; it; it = it->next) number_params_expr(it->expr, next);
-}
-static void number_params_expr(sql_expr_t *e, int *next) {
-	sql_case_arm_t *arm;
-	if (!e) return;
-	if (e->op == SX_E_PARAM) { e->ival = (*next)++; return; }
-	number_params_expr(e->a, next);
-	number_params_expr(e->b, next);
-	number_params_expr(e->c, next);
-	number_params_list(e->list, next);
-	for (arm = e->arms; arm; arm = arm->next) {
-		number_params_expr(arm->when, next);
-		number_params_expr(arm->then, next);
-	}
-	number_params_expr(e->els, next);
-}
-
-static void number_params_select(sql_select_t *s, int *next);
-static void
-number_params_src(sql_src_t *src, int *next)
-{
-	for (; src; src = src->next) {
-		if (src->subquery) number_params_select(src->subquery, next);
-		number_params_expr(src->on, next);
-	}
-}
-static void
-number_params_select(sql_select_t *s, int *next)
-{
-	if (!s) return;
-	number_params_list(s->cols, next);
-	number_params_src(s->from, next);
-	number_params_expr(s->where, next);
-	number_params_list(s->group, next);
-	number_params_expr(s->having, next);
-	number_params_list(s->order, next);
-	number_params_expr(s->limit, next);
-	number_params_expr(s->offset, next);
-	number_params_select(s->rhs, next);
-}
-static void
-number_params_stmt(sql_stmt_t *s, int *next)
-{
-	if (!s) return;
-	switch (s->kind) {
-	case SQL_KIND_SELECT:
-		number_params_select(s->u.select, next);
-		break;
-	case SQL_KIND_INSERT:
-		if (s->u.insert) {
-			int i;
-			for (i = 0; i < s->u.insert->n_rows; i++)
-				number_params_list(s->u.insert->rows[i], next);
-			number_params_select(s->u.insert->select, next);
-		}
-		break;
-	case SQL_KIND_UPDATE:
-		if (s->u.update) {
-			sql_assign_t *a;
-			for (a = s->u.update->sets; a; a = a->next)
-				number_params_expr(a->val, next);
-			number_params_expr(s->u.update->where, next);
-		}
-		break;
-	case SQL_KIND_DELETE:
-		if (s->u.del) number_params_expr(s->u.del->where, next);
-		break;
-	case SQL_KIND_CREATE:
-		if (s->u.create) number_params_select(s->u.create->select, next);
-		break;
-	case SQL_KIND_PRAGMA:
-		if (s->u.pragma) number_params_expr(s->u.pragma->value, next);
-		break;
-	default: break;
-	}
 }
 
 int
@@ -489,14 +447,8 @@ sql_parse_ast(const char *sql, size_t len, sql_arena_t **arena_out,
 		sql_arena_destroy(arena);
 		return -1;
 	}
-	/* ? parameter ordinals are assigned by a post-order walk of each
-	 * statement's expression trees (left-to-right appearance order). */
-	{
-		int next = 1;
-		sql_stmt_t *s;
-		for (s = st.stmts; s; s = s->next)
-			number_params_stmt(s, &next);
-	}
+	/* Parameter ordinals were assigned in lexical order by the grammar's
+	 * TK_QMARK action (param_ordinal). */
 	if (arena_out) *arena_out = arena; else sql_arena_destroy(arena);
 	if (root_out) *root_out = st.stmts;
 	return 0;

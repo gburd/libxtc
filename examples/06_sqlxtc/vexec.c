@@ -626,7 +626,7 @@ nv_add(struct namevec *nv, const sql_str_t *s)
 	if (s == NULL || s->len == 0 || s->len >= 64) return -1;
 	for (i = 0; i < nv->n; i++)
 		if ((int)strlen(nv->names[i]) == (int)s->len &&
-		    memcmp(nv->names[i], s->p, s->len) == 0)
+		    strncasecmp(nv->names[i], s->p, s->len) == 0)
 			return i;
 	if (nv->n >= 32) return -1;
 	memcpy(nv->names[nv->n], s->p, s->len);
@@ -658,7 +658,7 @@ resolve_schema(struct xsql *db, const char *table, struct namevec *nv, int *pay)
 			for (c = 0; c < nc; c++)
 				for (i = 0; i < nv->n; i++) {
 					if (pay[i] != -2) continue;
-					if (strcmp(nv->names[i], cols[c].name) != 0) continue;
+					if (strcasecmp(nv->names[i], cols[c].name) != 0) continue;
 					pay[i] = cols[c].is_pk ? -1 : (c - 1);
 					/* The PK is the INTEGER rowid regardless of its declared
 					 * type, matching how SQLite reports an INTEGER PRIMARY
@@ -733,13 +733,13 @@ struct vx_compiler {
 	int              nbinds;
 };
 
-/* Slice == C-string (case-sensitive for identifiers, as SQLite folds
- * case only for keywords; column-name matching here is exact). */
+/* Identifier slice == C-string.  ASCII case-insensitive: SQLite resolves
+ * table, alias and column names without regard to (ASCII) case. */
 static int
 str_eq_cstr(const sql_str_t *s, const char *cs)
 {
 	size_t n = strlen(cs);
-	return (size_t)s->len == n && memcmp(s->p, cs, n) == 0;
+	return (size_t)s->len == n && strncasecmp(s->p, cs, n) == 0;
 }
 
 /* Resolve a column reference to a combined-row index in a join context.
@@ -3692,7 +3692,7 @@ ast_is_named_col(const sql_expr_t *e, const char *pk)
 {
 	return e && e->op == SX_E_COLUMN && e->nname >= 1 &&
 	    e->name[e->nname - 1].len == strlen(pk) &&
-	    strncmp(e->name[e->nname - 1].p, pk, strlen(pk)) == 0;
+	    strncasecmp(e->name[e->nname - 1].p, pk, strlen(pk)) == 0;
 }
 
 /* Tighten a rowid range [lo, hi] (per has_lo / has_hi) with any
@@ -4398,7 +4398,7 @@ expr_same(const sql_expr_t *a, const sql_expr_t *b)
 		if (a->nname != b->nname) return 0;
 		{ int k; for (k = 0; k < a->nname; k++)
 			if (a->name[k].len != b->name[k].len ||
-			    memcmp(a->name[k].p, b->name[k].p, a->name[k].len) != 0)
+			    strncasecmp(a->name[k].p, b->name[k].p, a->name[k].len) != 0)
 				return 0;
 		  return 1; }
 	case SX_E_NUMBER: case SX_E_STRING:
@@ -4413,7 +4413,7 @@ expr_same(const sql_expr_t *a, const sql_expr_t *b)
 		const sql_exprlist_item_t *ia, *ib;
 		if (a->ival != b->ival) return 0;
 		if (a->name[0].len != b->name[0].len ||
-		    memcmp(a->name[0].p, b->name[0].p, a->name[0].len) != 0) return 0;
+		    strncasecmp(a->name[0].p, b->name[0].p, a->name[0].len) != 0) return 0;
 		ia = a->list ? a->list->head : NULL;
 		ib = b->list ? b->list->head : NULL;
 		for (; ia && ib; ia = ia->next, ib = ib->next)
@@ -6087,7 +6087,7 @@ jsrc_build(struct xsql *db, const char *table, char names[][64], int ncol,
 	for (i = 0; i < ncol; i++) js->pay[i] = -2;
 	for (i = 0; i < ncol; i++)
 		for (c = 0; c < nc; c++)
-			if (strcmp(names[i], cols[c].name) == 0) {
+			if (strcasecmp(names[i], cols[c].name) == 0) {
 				js->pay[i] = cols[c].is_pk ? -1 : (c - 1);
 				/* The PK is the INTEGER rowid (numeric affinity)
 				 * regardless of its declared type, matching SQLite. */
@@ -7940,7 +7940,7 @@ is_pk_col(const sql_expr_t *e, const char *pkname)
 {
 	return e != NULL && e->op == SX_E_COLUMN && e->nname >= 1 &&
 	    e->name[e->nname - 1].len == strlen(pkname) &&
-	    strncmp(e->name[e->nname - 1].p, pkname, strlen(pkname)) == 0;
+	    strncasecmp(e->name[e->nname - 1].p, pkname, strlen(pkname)) == 0;
 }
 
 /* Evaluate a literal expression to an integer, or fail. */
@@ -8168,7 +8168,7 @@ eval_set_expr(const sql_expr_t *e, const vx_cell_t *pay, int npay,
 		}
 		for (k = 0; k < ws->n; k++)
 			if (nm->len == strlen(ws->name[k]) &&
-			    strncmp(nm->p, ws->name[k], nm->len) == 0) {
+			    strncasecmp(nm->p, ws->name[k], nm->len) == 0) {
 				if (k == 0) { out->type = VX_INT; out->i = rowid; return 0; }
 				if (k - 1 >= npay) return -1;
 				*out = pay[k - 1]; return 0;
@@ -8390,7 +8390,7 @@ vx_run_write_p(struct xsql *db, const char *sql,
 			int col = -1, k;
 			for (k = 0; k < ws.n; k++)
 				if (a->col.len == strlen(ws.name[k]) &&
-				    strncmp(a->col.p, ws.name[k], a->col.len) == 0) { col = k; break; }
+				    strncasecmp(a->col.p, ws.name[k], a->col.len) == 0) { col = k; break; }
 			if (col < 0) { sql_arena_destroy(arena); return 0; } /* unknown col -> VDBE */
 			if (col == 0) {
 				if (pk_reassign) { sql_arena_destroy(arena); return 0; }  /* SET k twice */
@@ -8575,7 +8575,7 @@ vx_run_write_p(struct xsql *db, const char *sql,
 				nm = &ce->name[ce->nname - 1];
 				for (k = 0; k < ws.n; k++)
 					if (nm->len == strlen(ws.name[k]) &&
-					    strncmp(nm->p, ws.name[k], nm->len) == 0) { col = k; break; }
+					    strncasecmp(nm->p, ws.name[k], nm->len) == 0) { col = k; break; }
 				if (col < 0 || ncolmap >= 64) { sql_arena_destroy(arena); return 0; }
 				colmap[ncolmap++] = col;
 			}
