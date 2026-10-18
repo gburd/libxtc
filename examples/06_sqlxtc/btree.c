@@ -151,6 +151,35 @@
 #define BT_STALE_TEST_HOOK() 0
 #endif
 
+/*
+ * In-debug node validator (RethinkDB runs leaf::validate after every
+ * mutation in debug builds).  With -DBT_CHECK -- and always in a DST
+ * build (the sim I/O backend), where a seed then pins the failure --
+ * every node a mutation leaves behind is checked with btnode_check
+ * while still latched, and a malformed node aborts at the call that
+ * made it, with the reason.  A no-op otherwise.
+ */
+#if defined(XTC_IO_BACKEND_SIM) && !defined(BT_CHECK)
+#define BT_CHECK 1
+#endif
+#ifdef BT_CHECK
+#include <stdio.h>
+static void
+bt_check_node(const void *pg, const char *fn, int line)
+{
+	char why[200];
+
+	if (btnode_check(pg, why, sizeof why) != 0) {
+		fprintf(stderr, "BT_CHECK: %s:%d: malformed node: %s\n", fn,
+		    line, why);
+		abort();
+	}
+}
+#define BT_CHECK_NODE(pg) bt_check_node((pg), __func__, __LINE__)
+#else
+#define BT_CHECK_NODE(pg) ((void)0)
+#endif
+
 struct bt {
 	bm_t             *bm;
 	uint32_t          page_size;
@@ -168,6 +197,7 @@ struct bt {
 	_Atomic uint64_t  st_ovf_reads;  /* out-of-line values read back */
 	_Atomic uint64_t  st_ovf_pages;  /* data pages written for them */
 	_Atomic uint64_t  st_ovf_freed;  /* data pages freed (delete/replace) */
+	_Atomic uint64_t  st_sample_pages; /* nodes read by bt_sample_keys */
 	uint64_t          meta_clean;  /* superblock clean flag (open/close only) */
 	uint64_t          meta_clock;  /* superblock commit clock (open/close only) */
 	uint8_t          *smo_scratch; /* one page of scratch for internal split /
@@ -652,6 +682,7 @@ bt_open(bm_t *bm, bt_t **out)
 	/* Root starts as a single leaf with -inf/+inf fences (prefix 0). */
 	btnode_init(bm_page(rf), ps, 1);
 	btnode_set_fences(bm_page(rf), NULL, 0, NULL, 0);
+	BT_CHECK_NODE(bm_page(rf));
 	atomic_store(&bt->root_pid, rpid);
 	atomic_store(&bt->st_height, 1);
 	bm_unfix(bm, rf, 1);
@@ -1009,6 +1040,7 @@ bt_insert_fast(bt_t *bt, const void *key, uint16_t klen, const void *val,
 	}
 	r = btnode_insert_f(pg, key, klen, val, vlen, vflag);
 	if (r == 0) {
+		BT_CHECK_NODE(pg);
 		atomic_fetch_add(&bt->st_inserts, 1);
 		/* Physiological redo for a plain (non-split) in-leaf insert:
 		 * log the leaf's after-image so in-place recovery can repair a
@@ -1065,6 +1097,7 @@ post_separator(bt_t *bt, bm_pid_t *path, int level,
 		pp = bm_page(pf);
 
 		if (internal_insert(pp, cur_sep, cur_seplen, cur_right) == 0) {
+			BT_CHECK_NODE(pp);
 			bm_predirty(bm, pf); smo_log_page(bt, path[level], bm_page(pf));
 			bm_unlatch(pf); bm_unfix(bm, pf, 1);   /* absorbed */
 			return XTC_OK;
@@ -1085,6 +1118,8 @@ post_separator(bt_t *bt, bm_pid_t *path, int level,
 			r = internal_insert(bm_page(rf), cur_sep, cur_seplen, cur_right);
 		else
 			r = internal_insert(pp, cur_sep, cur_seplen, cur_right);
+		BT_CHECK_NODE(bm_page(rf));
+		BT_CHECK_NODE(pp);
 		bm_predirty(bm, rf); smo_log_page(bt, rpid, bm_page(rf));
 		bm_predirty(bm, pf); smo_log_page(bt, path[level], bm_page(pf));
 		bm_unlatch(rf); bm_unfix(bm, rf, 1);
@@ -1119,6 +1154,7 @@ post_separator(bt_t *bt, bm_pid_t *path, int level,
 			bm_unlatch(nf); bm_unfix(bm, nf, 1);
 			return XTC_E_INTERNAL;
 		}
+		BT_CHECK_NODE(bm_page(nf));
 		bm_predirty(bm, nf); smo_log_page(bt, npid, bm_page(nf));
 		bm_unlatch(nf); bm_unfix(bm, nf, 1);
 		atomic_store(&bt->root_pid, npid);
@@ -1269,6 +1305,7 @@ bt_insert_leaf(bt_t *bt, const void *key, uint16_t klen, const void *val,
 	      XTC_SIM_BUGGIFY("btree.split.eager") &&
 	      xtc_sim_buggify_fault(200)) &&
 	    btnode_insert_f(pg, key, klen, val, vlen, vflag) == 0) {
+		BT_CHECK_NODE(pg);
 		atomic_fetch_add(&bt->st_inserts, 1);
 		/* Non-split in-leaf insert on the SMO path (an upsert, or a
 		 * fast-path miss re-run under the lock): log the leaf image too,
@@ -1305,6 +1342,8 @@ bt_insert_leaf(bt_t *bt, const void *key, uint16_t klen, const void *val,
 		r = btnode_insert_f(bm_page(rf), key, klen, val, vlen, vflag);
 	else
 		r = btnode_insert_f(pg, key, klen, val, vlen, vflag);
+	BT_CHECK_NODE(pg);
+	BT_CHECK_NODE(bm_page(rf));
 	/*
 	 * Open the nested top action and log both leaf images (the new
 	 * right and the shrunk left) as physiological redo before they
@@ -1909,6 +1948,8 @@ merge_level(bt_t *bt, bm_pid_t *path, int level, const void *key,
 	 * dropped), then free R -- which is now unreachable.
 	 */
 	(void)btnode_remove(pp, rslot);
+	BT_CHECK_NODE(lp);
+	BT_CHECK_NODE(pp);
 	bm_unlatch(lf); bm_unfix(bm, lf, 1);   /* merged node: dirty */
 	lf = NULL;
 	btnode_mark_dead(rp);
@@ -2195,6 +2236,7 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 		}
 		oldlen = take_ovf_ref(pg, s, oldref);
 		(void)btnode_remove(pg, s);
+		BT_CHECK_NODE(pg);
 		{
 			/* Decide whether the leaf now underflows.  We hold it
 			 * exclusive, so the count/used reading is stable. */
@@ -2263,6 +2305,7 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 	}
 	oldlen = take_ovf_ref(pg, s, oldref);
 	(void)btnode_remove(pg, s);
+	BT_CHECK_NODE(pg);
 	bm_unlatch(f); bm_unfix(bm, f, 1);
 	(void)xtc_arwlock_unlock(bt->smo);
 	if (oldlen > 0)
@@ -2445,6 +2488,235 @@ bt_seek_lt(bt_t *bt, const void *hi, uint16_t hlen, void *out,
 		}
 	}
 	return XTC_E_INTERNAL;
+}
+
+/* ---- key-distribution sample (RethinkDB get_distribution) ---------- */
+
+struct bt_sample {
+	bt_t          *bt;
+	const uint8_t *lo, *hi;    /* [lo, hi); NULL = unbounded */
+	uint16_t       lolen, hilen;
+	int            depth;
+	uint8_t       *buf;        /* found keys, concatenated */
+	size_t         bused, bcap;
+	uint32_t      *off;        /* key i starts at buf + off[i] */
+	uint16_t      *len;
+	uint32_t       n, ncap;
+	int            leaf_below; /* the level being emitted is the leaves'
+	                            * parent level (all leaves are equally deep) */
+};
+
+static int
+sample_in_range(const struct bt_sample *sm, const void *k, uint16_t kl)
+{
+	return (sm->lo == NULL || key_cmp(k, kl, sm->lo, sm->lolen) >= 0) &&
+	    (sm->hi == NULL || key_cmp(k, kl, sm->hi, sm->hilen) < 0);
+}
+
+static int
+sample_add(struct bt_sample *sm, const void *k, uint16_t kl)
+{
+	void *nb;
+
+	if (!sample_in_range(sm, k, kl))
+		return XTC_OK;
+	if (sm->n == sm->ncap) {
+		uint32_t nc = sm->ncap ? sm->ncap * 2 : 256;
+
+		if ((nb = realloc(sm->off, nc * sizeof *sm->off)) == NULL)
+			return XTC_E_NOMEM;
+		sm->off = nb;
+		if ((nb = realloc(sm->len, nc * sizeof *sm->len)) == NULL)
+			return XTC_E_NOMEM;
+		sm->len = nb;
+		sm->ncap = nc;
+	}
+	if (sm->bused + kl > sm->bcap) {
+		size_t nc = sm->bcap ? sm->bcap * 2 : 16384;
+
+		while (nc < sm->bused + kl)
+			nc *= 2;
+		if ((nb = realloc(sm->buf, nc)) == NULL)
+			return XTC_E_NOMEM;
+		sm->buf = nb;
+		sm->bcap = nc;
+	}
+	memcpy(sm->buf + sm->bused, k, kl);
+	sm->off[sm->n] = (uint32_t)sm->bused;
+	sm->len[sm->n] = kl;
+	sm->bused += kl;
+	sm->n++;
+	return XTC_OK;
+}
+
+/* A root leaf has no separators: its keys are the sample. */
+static int
+sample_leaf(struct bt_sample *sm, const void *pg)
+{
+	uint8_t k[BT_MAX_KEY];
+	uint16_t kl = 0;
+	int i, cnt = (int)btnode_count(pg), rc = XTC_OK;
+
+	for (i = 0; i < cnt && rc == XTC_OK; i++)
+		if (btnode_full_key(pg, i, k, sizeof k, &kl) == 0)
+			rc = sample_add(sm, k, kl);
+	return rc;
+}
+
+/* Add separators 1..cnt-1 (slot 0 is the -infinity key) of internal
+ * node `pg` that lie in range. */
+static int
+sample_seps(struct bt_sample *sm, const void *pg)
+{
+	uint8_t k[BT_MAX_KEY];
+	uint16_t kl = 0;
+	int i, cnt = (int)btnode_count(pg), rc = XTC_OK;
+
+	for (i = 1; i < cnt && rc == XTC_OK; i++)
+		if (btnode_full_key(pg, i, k, sizeof k, &kl) == 0)
+			rc = sample_add(sm, k, kl);
+	return rc;
+}
+
+/*
+ * Visit the shared-latched internal node `pg` at `level` (0 = root).  At
+ * the depth limit, or once its children are known to be leaves, it
+ * contributes its own separators.  Otherwise each child whose range
+ * (sep_i, sep_i+1] meets [lo, hi) is visited in order, and the separator
+ * between two visited children -- a boundary of the deeper level too --
+ * is emitted between them, so the output is strictly ascending.  Leaf
+ * keys are never emitted (a parent separator can equal a live leaf key):
+ * the first leaf child met only teaches the walk where the leaf level is,
+ * which costs one page read per call.  The child is latched before its
+ * parent is released and every latch is taken top-down (the order every
+ * descent uses), so a merge -- which needs the parent exclusive -- cannot
+ * free a child under the walk.  Returns XTC_OK, XTC_E_AGAIN (a dead
+ * node: restart), or an error.
+ */
+static int
+sample_node(struct bt_sample *sm, void *pg, int level)
+{
+	bm_t *bm = sm->bt->bm;
+	uint8_t k[BT_MAX_KEY], nk[BT_MAX_KEY];
+	uint16_t kl = 0, nkl = 0;
+	int i, cnt = (int)btnode_count(pg), rc = XTC_OK;
+
+	if (level >= sm->depth || sm->leaf_below)
+		return sample_seps(sm, pg);
+	for (i = 0; i < cnt && rc == XTC_OK; i++) {
+		bm_frame_t *cf;
+		void *cp;
+
+		/* k = sep_i (child i's exclusive lower bound), nk = sep_i+1. */
+		if (i > 0) {
+			memcpy(k, nk, nkl);
+			kl = nkl;
+		}
+		if (i + 1 < cnt &&
+		    btnode_full_key(pg, i + 1, nk, sizeof nk, &nkl) != 0)
+			return XTC_E_INTERNAL;
+		if (i > 0 && sm->hi != NULL &&
+		    key_cmp(k, kl, sm->hi, sm->hilen) >= 0)
+			break;                  /* this and later children >= hi */
+		if (i + 1 < cnt && sm->lo != NULL &&
+		    key_cmp(nk, nkl, sm->lo, sm->lolen) < 0)
+			continue;               /* child entirely below lo */
+		rc = bm_fix_pid(bm, child_pid_at(pg, i), &cf);
+		if (rc != XTC_OK)
+			return rc;
+		bm_latch_shared(cf);
+		atomic_fetch_add(&sm->bt->st_sample_pages, 1);
+		cp = bm_page(cf);
+		if (btnode_is_dead(cp)) {
+			rc = XTC_E_AGAIN;
+		} else if (btnode_is_leaf(cp)) {
+			/* The first child this node visits: nothing of this
+			 * node was emitted yet, so emit its separators. */
+			sm->leaf_below = 1;
+			rc = sample_seps(sm, pg);
+			i = cnt;
+		} else {
+			if (i > 0)
+				rc = sample_add(sm, k, kl);
+			if (rc == XTC_OK)
+				rc = sample_node(sm, cp, level + 1);
+		}
+		bm_unlatch(cf);
+		bm_unfix(bm, cf, 0);
+	}
+	return rc;
+}
+
+int
+bt_sample_keys(bt_t *bt, const void *lo, uint16_t lolen, const void *hi,
+    uint16_t hilen, int depth, void *keys_out, uint16_t key_cap,
+    uint16_t *lens_out, int max_keys, uint32_t *n_out)
+{
+	struct bt_sample sm;
+	uint32_t i, m = 0;
+	int rc;
+
+	if (bt == NULL || n_out == NULL || depth < 0 || max_keys < 0 ||
+	    (max_keys > 0 && (keys_out == NULL || lens_out == NULL)))
+		return XTC_E_INVAL;
+	*n_out = 0;
+	memset(&sm, 0, sizeof sm);
+	sm.bt = bt;
+	sm.lo = lolen ? lo : NULL;
+	sm.lolen = lolen;
+	sm.hi = hilen ? hi : NULL;
+	sm.hilen = hilen;
+	sm.depth = depth < BT_MAX_HEIGHT ? depth : BT_MAX_HEIGHT;
+	for (;;) {
+		bm_pid_t pid = atomic_load(&bt->root_pid);
+		bm_frame_t *f;
+
+		sm.n = 0;
+		sm.bused = 0;
+		sm.leaf_below = 0;
+		rc = bm_fix_pid(bt->bm, pid, &f);
+		if (rc == XTC_E_AGAIN) {   /* root collapsed + quarantined */
+			xtc_yield();
+			continue;
+		}
+		if (rc != XTC_OK)
+			break;
+		bm_latch_shared(f);
+		atomic_fetch_add(&bt->st_sample_pages, 1);
+		/* Dead, or no longer the root (it grew: its right half would
+		 * be missed): restart. */
+		if (btnode_is_dead(bm_page(f)) || pid != atomic_load(&bt->root_pid))
+			rc = XTC_E_AGAIN;
+		else if (btnode_is_leaf(bm_page(f)))
+			rc = sample_leaf(&sm, bm_page(f));   /* no separators yet */
+		else
+			rc = sample_node(&sm, bm_page(f), 0);
+		bm_unlatch(f);
+		bm_unfix(bt->bm, f, 0);
+		if (rc != XTC_E_AGAIN)
+			break;
+		xtc_yield();           /* a merge raced the walk: restart */
+	}
+	if (rc == XTC_OK) {
+		/* Evenly thin n found keys to at most max_keys, skipping keys
+		 * the caller cannot hold. */
+		for (i = 0; i < (uint32_t)max_keys && i < sm.n; i++) {
+			uint32_t j = sm.n <= (uint32_t)max_keys ? i :
+			    (uint32_t)(((uint64_t)(i + 1) * sm.n) /
+			    ((uint64_t)max_keys + 1));
+
+			if (sm.len[j] > key_cap)
+				continue;
+			memcpy((uint8_t *)keys_out + (size_t)m * key_cap,
+			    sm.buf + sm.off[j], sm.len[j]);
+			lens_out[m++] = sm.len[j];
+		}
+		*n_out = m;
+	}
+	free(sm.buf);
+	free(sm.off);
+	free(sm.len);
+	return rc;
 }
 
 int
@@ -2749,4 +3021,5 @@ bt_get_stats(bt_t *bt, bt_stats_t *out)
 	out->ovf_reads = atomic_load(&bt->st_ovf_reads);
 	out->ovf_pages = atomic_load(&bt->st_ovf_pages);
 	out->ovf_freed = atomic_load(&bt->st_ovf_freed);
+	out->sample_pages = atomic_load(&bt->st_sample_pages);
 }

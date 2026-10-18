@@ -2202,6 +2202,63 @@ xstore_max_rowid(bt_t *bt, uint32_t tableid)
 }
 
 int
+xstore_rowid_split_points(bt_t *bt, uint32_t tableid, int64_t lo, int64_t hi,
+                          int n, int64_t *out)
+{
+	/* Sample the version-key separators inside the table's [lo, hi)
+	 * rowid range (RethinkDB get_distribution), decode each key's rowid
+	 * and keep the strictly increasing ones inside (lo, hi).  Versions of
+	 * one rowid sort together, so a separator inside a run of versions
+	 * decodes to that rowid: a cut at it puts all of the rowid's
+	 * versions in the morsel that starts there.  Thinned evenly to n.
+	 *
+	 * Depth 1 (the root and its children, 1 + root-fanout page reads)
+	 * yields the boundaries of the nodes two levels down -- hundreds on
+	 * a 4 KiB page, plenty for a few dozen cuts.  Only a table that is a
+	 * narrow slice of a shared tree finds fewer; then go one level
+	 * deeper.  That costs little: depth d found < n boundaries in range
+	 * exactly when the range meets <= n + 1 nodes one level further
+	 * down, so the next pass reads at most those plus their ancestors. */
+	enum { CAP = 256 };
+	uint8_t klo[XS_VKLEN], khi[XS_VKLEN];
+	uint8_t *keys;
+	uint16_t lens[CAP];
+	uint32_t got, i;
+	int64_t *tmp;
+	int m = 0, k, depth;
+
+	if (bt == NULL || out == NULL || n <= 0 || hi <= lo + 1) return 0;
+	enc_vkey(tableid, lo, ~(uint64_t)0, klo);   /* first version of lo */
+	enc_vkey(tableid, hi, ~(uint64_t)0, khi);   /* first version of hi */
+	keys = (uint8_t *)malloc((size_t)CAP * XS_VKLEN);
+	tmp = (int64_t *)malloc(sizeof *tmp * CAP);
+	if (keys == NULL || tmp == NULL) { free(keys); free(tmp); return 0; }
+	for (depth = 1; depth <= 4 && m < n; depth++) {
+		got = 0;
+		m = 0;
+		if (bt_sample_keys(bt, klo, XS_VKLEN, khi, XS_VKLEN, depth, keys,
+		    XS_VKLEN, lens, CAP, &got) != XTC_OK)
+			break;
+		for (i = 0; i < got; i++) {
+			const uint8_t *kp = keys + (size_t)i * XS_VKLEN;
+			int64_t r;
+			/* Only whole version keys of this table carry a rowid. */
+			if (lens[i] != XS_VKLEN || dec_tableid(kp) != tableid)
+				continue;
+			r = dec_rowid(kp);
+			if (r <= lo || r >= hi || (m > 0 && r <= tmp[m - 1]))
+				continue;
+			tmp[m++] = r;
+		}
+	}
+	for (k = 0; k < n && k < m; k++)
+		out[k] = tmp[m <= n ? k : (int)(((int64_t)(k + 1) * m) / (n + 1))];
+	free(keys);
+	free(tmp);
+	return k;
+}
+
+int
 xstore_put_rec(bt_t *bt, uint32_t tableid, int64_t rowid,
                const uint8_t *rec, int reclen)
 {

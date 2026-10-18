@@ -198,6 +198,16 @@ int xstore_table_id(bt_t *bt, const char *name, uint32_t *tableid);
  * would assign to a NULL INTEGER PRIMARY KEY.  Snapshot value; callers
  * needing concurrency-safe allocation must serialize. */
 int64_t xstore_max_rowid(bt_t *bt, uint32_t tableid);
+/* Approximately equi-depth rowid cut points of `tableid` inside the
+ * rowid range [lo, hi), from the B-tree's upper separators
+ * (bt_sample_keys, O(fanout) page reads -- never a scan): up to n
+ * strictly increasing rowids in (lo, hi) written to out[], so that the
+ * rowid ranges [lo, out[0]), [out[0], out[1]), ... hold about the same
+ * number of row versions whatever the rowid distribution.  Returns the
+ * count (0 when the tree is too small to have separators in range:
+ * callers fall back to a uniform split). */
+int xstore_rowid_split_points(bt_t *bt, uint32_t tableid, int64_t lo,
+                              int64_t hi, int n, int64_t *out);
 /* Largest rowid in `tableid` including this connection's uncommitted
  * buffered writes -- the auto-rowid base for an in-txn INSERT (a
  * db-handle variant of xstore_max_rowid that also scans the wbuf). */

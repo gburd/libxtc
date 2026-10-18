@@ -154,7 +154,7 @@ clean:
 	rm -f test_btree
 	rm -f test_btree_loop
 	rm -f test_btree_mt
-	rm -f test_btree_stale_descent
+	rm -f test_btree_stale_descent test_btree_limits test_btree_sample bench_morsel_balance
 	rm -f test_btree_delete_merge test_savepoint test_isolation test_ww_conflict test_commit_visibility test_ssi_skew test_ckpt_bound test_dup_insert test_recover_fast
 	rm -f test_vfs_loop test_vfs_loop.o
 	rm -rf $(AMALG_DIR)
@@ -473,6 +473,11 @@ bench_btree_concurrent: bench_btree_concurrent.c btree.c bufmgr.o btnode.c
 bench_btree_mixed: bench_btree_mixed.c btree.c bufmgr.o btnode.c
 	$(CC) $(CFLAGS) -o $@ bench_btree_mixed.c btree.c bufmgr.o btnode.c $(LDFLAGS)
 
+# Morsel balance of the parallel scan on skewed rowids (sampled vs uniform
+# split; rows per morsel and wall time).
+bench_morsel_balance: bench_morsel_balance.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ bench_morsel_balance.c $(ENGINE_NATIVE) $(LDFLAGS)
+
 # ---- physiological redo apply (page-LSN gated image write) ----
 test_redo_page: test_redo_page.c bufmgr.o
 	$(CC) $(CFLAGS) -o $@ test_redo_page.c bufmgr.o $(LDFLAGS)
@@ -672,6 +677,15 @@ test_btree_limits: test_btree_limits.c btree.c bufmgr.o btnode.c
 
 test-btree-limits: test_btree_limits
 	./test_btree_limits
+
+# Key-distribution sample (RethinkDB get_distribution): order, range,
+# O(fanout^depth) page bound, equi-depth balance on skewed keys.
+test: test-btree-sample
+test_btree_sample: test_btree_sample.c btree.c bufmgr.o btnode.c
+	$(CC) $(CFLAGS) -o $@ test_btree_sample.c btree.c bufmgr.o btnode.c $(LDFLAGS)
+
+test-btree-sample: test_btree_sample
+	./test_btree_sample
 
 
 

@@ -7239,9 +7239,9 @@ result_dedup(struct vx_result *r)
 /* Shared context across the morsel workers. */
 struct vx_par {
 	const struct vx_stmt *plan;   /* compiled template (proj/filter/cols/table) */
-	_Atomic int64_t cursor;       /* next rowid to hand out */
-	int64_t      hi;              /* one past the max rowid */
-	int64_t      morsel;          /* rowids per morsel */
+	_Atomic int  next;            /* next morsel to hand out */
+	int          nmorsel;         /* morsel m = rowids [bound[m], bound[m+1]) */
+	int64_t     *bound;           /* nmorsel + 1 ascending rowid boundaries */
 	int          nworkers;
 	struct vx_result *parts;      /* nworkers result buffers (non-agg) */
 	vx_htab_t   *wht;             /* nworkers per-worker hash tables (agg) */
@@ -7284,13 +7284,13 @@ par_worker(xtc_task_t *self, void *user)
 	w.srcrow = srcrow;
 
 	for (;;) {
-		int64_t lo = atomic_fetch_add_explicit(&par->cursor, par->morsel,
-		                                       memory_order_relaxed);
-		int64_t mh;
+		int m = atomic_fetch_add_explicit(&par->next, 1,
+		                                  memory_order_relaxed);
+		int64_t lo, mh;
 		xstore_scan_t *ms;
-		if (lo >= par->hi) break;
-		mh = lo + par->morsel;
-		if (mh > par->hi) mh = par->hi;
+		if (m >= par->nmorsel) break;
+		lo = par->bound[m];
+		mh = par->bound[m + 1];
 
 		/* A morsel = the rowid range [lo, mh-1]. */
 		ms = xstore_scan_open(w.bt, w.table, w.snap, lo, 1, mh - 1, 1);
@@ -7351,6 +7351,46 @@ done:
 	return 0;   /* task DONE */
 }
 
+/*
+ * Morsel boundaries for a parallel scan of `tid`'s rowids [lo, hi).
+ * Each xstore_scan_open re-descends the B-tree from the root to seek the
+ * morsel's start, so morsels must be LARGE for that cost to amortize.
+ * Aim for ~2 morsels per worker (enough to load-balance, few enough that
+ * descents are negligible), and never split a span below 64K rowids per
+ * morsel.  The cuts come from the B-tree's upper separators
+ * (xstore_rowid_split_points: RethinkDB get_distribution, O(fanout) page
+ * reads), which divide the table's row versions about evenly whatever
+ * the rowid distribution; a uniform split of the rowid span (the 1.56
+ * rule, which unbalances morsels on sparse or skewed rowids) is the
+ * fallback when the tree is too small to yield enough separators.
+ * Writes a malloc'd array of nmorsel + 1 boundaries to *out (bound[0] =
+ * lo, bound[nmorsel] = hi) and returns nmorsel (0 for an empty span),
+ * or -1 on allocation failure.
+ */
+static int
+morsel_bounds(bt_t *bt, uint32_t tid, int64_t lo, int64_t hi, int n_workers,
+              int64_t **out)
+{
+	int64_t span = hi - lo, target, *b;
+	int nm, got = 0, i;
+
+	*out = NULL;
+	if (span <= 0) return 0;
+	target = span / (int64_t)(n_workers * 2 > 0 ? n_workers * 2 : 1);
+	if (target < 65536) target = 65536;   /* descents amortize over >=64K rows */
+	nm = (int)((span + target - 1) / target);
+	b = (int64_t *)malloc(sizeof *b * (size_t)(nm + 1));
+	if (b == NULL) return -1;
+	b[0] = lo;
+	if (nm > 1)
+		got = xstore_rowid_split_points(bt, tid, lo, hi, nm - 1, b + 1);
+	if (got != nm - 1)                     /* too few separators: uniform */
+		for (i = 1; i < nm; i++) b[i] = lo + (int64_t)i * target;
+	b[nm] = hi;
+	*out = b;
+	return nm;
+}
+
 /* True when a recognized plan can run on the morsel-parallel storage
  * scan: a single-table, unordered, unlimited, unjoined, storage-backed
  * scan or aggregation.  Ordered/limited/joined/non-storage plans run
@@ -7378,9 +7418,12 @@ run_parallel_plan(vx_stmt_t *plan, struct xsql *db, int n_workers,
 	struct { struct vx_par *par; int idx; } *args = NULL;
 	int i, rc = 0;
 	int64_t lo = 0, hi = 0;
+	bt_t *bt = xstore_bt_of(db);
+	uint32_t tid = 0;
 
 	(void)errmsg;
 	if (n_workers < 1) n_workers = 1;
+	memset(&par, 0, sizeof par);
 
 	/* rowid scan range [lo, hi): the morsel cursor partitions this span
 	 * across workers, each of which re-checks per-row visibility, so any
@@ -7388,14 +7431,10 @@ run_parallel_plan(vx_stmt_t *plan, struct xsql *db, int n_workers,
 	 * rowid (counts tombstones -> a safe upper bound) + 1 for hi and the
 	 * start of the table for lo -- no SQLite call.  An empty table gives
 	 * max 0 -> hi 0 -> no rows. */
-	{
-		bt_t *bt = xstore_bt_of(db);
-		uint32_t tid;
-		if (bt != NULL && xstore_table_id(bt, plan->table, &tid)) {
-			int64_t mx = xstore_max_rowid(bt, tid);
-			lo = (mx > 0) ? 1 : 0;
-			hi = (mx > 0) ? mx + 1 : 0;   /* empty -> no scan */
-		}
+	if (bt != NULL && xstore_table_id(bt, plan->table, &tid)) {
+		int64_t mx = xstore_max_rowid(bt, tid);
+		lo = (mx > 0) ? 1 : 0;
+		hi = (mx > 0) ? mx + 1 : 0;   /* empty -> no scan */
 	}
 
 	out = (struct vx_result *)calloc(1, sizeof *out);
@@ -7405,21 +7444,10 @@ run_parallel_plan(vx_stmt_t *plan, struct xsql *db, int n_workers,
 	memcpy(out->name, plan->outname, sizeof out->name);
 	memcpy(out->aff, plan->outaff, sizeof out->aff);
 
-	memset(&par, 0, sizeof par);
 	par.plan = plan;
-	atomic_store(&par.cursor, lo);
-	par.hi = hi;
-	/* Morsel size: each xstore_scan_open re-descends the B-tree from the
-	 * root to seek the morsel's start, so morsels must be LARGE for that
-	 * cost to amortize over a long scan.  Aim for ~2 morsels per worker
-	 * (enough to load-balance a skewed range, few enough that descents
-	 * are negligible), with a floor so tiny tables do not over-split. */
-	{
-		int64_t span = hi - lo;
-		int64_t target = span / (int64_t)(n_workers * 2 > 0 ? n_workers * 2 : 1);
-		if (target < 65536) target = 65536;   /* descents amortize over >=64K rows */
-		par.morsel = target > 0 ? target : 1;
-	}
+	atomic_store(&par.next, 0);
+	par.nmorsel = morsel_bounds(bt, tid, lo, hi, n_workers, &par.bound);
+	if (par.nmorsel < 0) { rc = -1; goto cleanup; }
 	par.nworkers = n_workers;
 	par.parts = (struct vx_result *)calloc((size_t)n_workers, sizeof(struct vx_result));
 	if (par.parts == NULL) { rc = -1; goto cleanup; }
@@ -7508,6 +7536,7 @@ run_parallel_plan(vx_stmt_t *plan, struct xsql *db, int n_workers,
 
 cleanup:
 	if (exec) xtc_exec_fini(exec);
+	free(par.bound);
 	if (par.parts) {
 		for (i = 0; i < n_workers; i++) {
 			arena_free(par.parts[i].arena);

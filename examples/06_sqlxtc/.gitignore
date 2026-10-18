@@ -53,6 +53,7 @@ test_inplace_redo
 test_fuzzy_checkpoint
 test_btree_delete_merge
 test_btree_limits
+test_btree_sample
 test_savepoint
 test_native_txn
 test_isolation
@@ -70,3 +71,4 @@ evict_policy_proto
 test_index
 test_quack_range
 bench_btree_mixed
+bench_morsel_balance

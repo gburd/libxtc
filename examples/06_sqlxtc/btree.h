@@ -162,6 +162,37 @@ int  bt_seek_lt(bt_t *bt, const void *hi, uint16_t hlen, void *out,
                 uint16_t cap, uint16_t *olen, void *val, uint16_t vcap,
                 uint16_t *vlen);
 
+/*
+ * Key-distribution sample (RethinkDB get_distribution, depth-limited):
+ * read the tree top-down to at most `depth` levels below the root (0 =
+ * the root alone; capped at the leaves' parent level -- leaf keys are
+ * never sampled) and return, in ascending order, the boundaries in
+ * [lo, hi) between the nodes one level below the deepest level read:
+ * its separators plus those of its ancestors.  Every subtree between
+ * two consecutive boundaries spans about the same number of pages, so
+ * the keys are approximately equi-depth split points of [lo, hi)
+ * whatever the key distribution.  If the root is a leaf its keys are
+ * the sample.  lo == NULL (or lolen 0) means
+ * -infinity, hi == NULL +infinity.  Keys are copied into `keys_out`, a
+ * max_keys x key_cap array (key i at keys_out + i * key_cap), lengths
+ * into lens_out[i]; a key longer than key_cap is skipped.  At most
+ * max_keys are returned (evenly thinned if more were found); *n_out is
+ * the count.  Cost: the nodes of the top depth+1 levels whose ranges
+ * meet [lo, hi) -- O(fanout^depth) page reads, never O(n); depth 1 (the
+ * root and its children, RethinkDB's depth 2) is 1 + fanout reads, plus
+ * one leaf read when the depth reaches the leaves' parent level.
+ * Shared latches couple top-down along the current path only (the order
+ * every descent uses), so a merge cannot free a node under the walk; a
+ * dead node or a root that moved restarts it.  A concurrent split can
+ * hide a not-yet-posted separator: the sample is approximate.
+ * Returns XTC_OK, XTC_E_INVAL, or XTC_E_NOMEM.  Pages read are counted
+ * in bt_stats_t.sample_pages.
+ */
+int  bt_sample_keys(bt_t *bt, const void *lo, uint16_t lolen,
+                    const void *hi, uint16_t hilen, int depth,
+                    void *keys_out, uint16_t key_cap, uint16_t *lens_out,
+                    int max_keys, uint32_t *n_out);
+
 /* Forward range cursor.  start == NULL positions at the first key;
  * otherwise at the first key >= start.  bt_cursor_next yields each
  * (key, val) in ascending order and returns XTC_OK, or XTC_E_NOTFOUND
@@ -187,6 +218,7 @@ typedef struct bt_stats {
 	uint64_t ovf_reads;     /* out-of-line values read back */
 	uint64_t ovf_pages;     /* data pages written for out-of-line values */
 	uint64_t ovf_freed;     /* such pages freed again (delete / replace) */
+	uint64_t sample_pages;  /* nodes read by bt_sample_keys */
 } bt_stats_t;
 void bt_get_stats(bt_t *bt, bt_stats_t *out);
 
