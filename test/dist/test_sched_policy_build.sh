@@ -53,8 +53,11 @@ int main(void) {
 SRC
     flag=
     [ "$mode" = yes ] || flag=-DEXPECT_OFF
+    # Plus the libraries configure found libxtc.a needs (FreeBSD: -lrt).
+    libs=$(sed -n 's/^LIBS[[:space:]]*=[[:space:]]*//p' "$work/$mode/Makefile")
+    # shellcheck disable=SC2086  # libs holds several flags
     "${CC:-cc}" $flag -I"$work/install-$mode/include" "$work/consumer.c" \
-        "$work/install-$mode/lib/libxtc.a" -lpthread -lm -o "$work/consumer"
+        "$work/install-$mode/lib/libxtc.a" -lpthread -lm $libs -o "$work/consumer"
     "$work/consumer"
 
     # --- sim build: dispatch-trace replay-equivalence + batch replay ---
@@ -63,17 +66,18 @@ SRC
      "$root/dist/configure" --enable-sched-policy="$mode" \
          --with-io-backend=sim --with-tls=none --without-liburing >configure.log
      make -j"$jobs" libxtc.a >build.log 2>&1)
+    simlibs=$(sed -n 's/^LIBS[[:space:]]*=[[:space:]]*//p' "$work/sim-$mode/Makefile")
     if [ "$mode" = yes ]; then
         # One deterministic async+mt replay (the feature's own DST check);
         # the full sim suite runs in the sim-dst job.
         "${CC:-cc}" -std=c11 -D_GNU_SOURCE -I"$work/sim-$mode" -I"$root/src/inc" \
             "$root/test/sim/test_sim_batch.c" "$work/sim-$mode/libxtc.a" \
-            -lpthread -ldl -lm -o "$work/batch-dst"
+            -lpthread -ldl -lm $simlibs -o "$work/batch-dst"
         "$work/batch-dst" 1 64
     fi
     "${CC:-cc}" -I"$work/sim-$mode" -I"$root/src/inc" \
         "$root/test/sim/test_sched_policy_trace.c" \
-        "$work/sim-$mode/libxtc.a" -lpthread -ldl -lm -o "$work/trace"
+        "$work/sim-$mode/libxtc.a" -lpthread -ldl -lm $simlibs -o "$work/trace"
     "$work/trace" > "$work/trace-$mode"
     "$work/trace" > "$work/replay-$mode"
     cmp "$work/trace-$mode" "$work/replay-$mode"

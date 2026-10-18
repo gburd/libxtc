@@ -27,6 +27,8 @@
 #include "aio_int.h"      /* __xtc_aio_done_set: cross-thread completion flag */
 
 #include <errno.h>
+#include <limits.h>
+#include <string.h>
 #include <signal.h>       /* SIGEV_KEVENT: must be visible to the AIO gate below */
 #include <unistd.h>
 #include <sys/event.h>
@@ -77,38 +79,49 @@ extern int __xtc_io_drain_wakeup(xtc_io_t *io);
 
 /* ----- registered-fd tracker (kqueue-only) ----------------------- */
 
+/*
+ * fd-indexed membership table: reg_fds[fd] != 0 iff fd is registered;
+ * cap_reg is the table size, n_reg the count.  O(1) per reg/mod/del, like
+ * the poll/select slot_of index.  It was a linear list, and every
+ * xtc_proc_wait_fd park does one reg + one del, so a loop holding K idle
+ * connections paid O(K) twice per wake (25 us per pair at K=30k).
+ */
 static int
 __find_reg(xtc_io_t *io, int fd)
 {
-	int i;
-	for (i = 0; i < io->n_reg; i++)
-		if (io->reg_fds[i] == fd) return i;
-	return -1;
+	return (fd < io->cap_reg && io->reg_fds[fd] != 0) ? fd : -1;
 }
 
 static int
 __add_reg(xtc_io_t *io, int fd)
 {
-	if (io->n_reg >= io->cap_reg) {
-		int new_cap = io->cap_reg == 0 ? 16 : io->cap_reg * 2;
+	if (fd >= io->cap_reg) {
+		int new_cap = io->cap_reg > 0 ? io->cap_reg : 64;
 		void *p = NULL;
-		int rc = __os_realloc(io->reg_fds,
+		int rc;
+		while (new_cap <= fd) {
+			if (new_cap > INT_MAX / 2) return XTC_E_RESOURCE;
+			new_cap *= 2;
+		}
+		rc = __os_realloc(io->reg_fds,
 		    sizeof(int) * (size_t)new_cap, &p);
 		if (rc != XTC_OK) return rc;
+		memset((int *)p + io->cap_reg, 0,
+		    sizeof(int) * (size_t)(new_cap - io->cap_reg));
 		io->reg_fds = p;
 		io->cap_reg = new_cap;
 	}
-	io->reg_fds[io->n_reg++] = fd;
+	io->reg_fds[fd] = 1;
+	io->n_reg++;
 	return XTC_OK;
 }
 
 static void
 __del_reg(xtc_io_t *io, int fd)
 {
-	int idx = __find_reg(io, fd);
-	if (idx < 0) return;
+	if (__find_reg(io, fd) < 0) return;
+	io->reg_fds[fd] = 0;
 	io->n_reg--;
-	if (idx != io->n_reg) io->reg_fds[idx] = io->reg_fds[io->n_reg];
 }
 
 int
@@ -149,6 +162,23 @@ __kev_register(xtc_io_t *io, int fd, uint32_t interest, void *udata, int del)
 		n++;
 	}
 	if (n == 0) return XTC_OK;
+	if (del) {
+		/* kevent stops at the first failing change when it has no
+		 * eventlist, so a WRITE-only registration's READ delete (ENOENT)
+		 * skipped the WRITE delete and left that knote armed with a
+		 * stale udata.  Apply every delete; ENOENT for a filter that was
+		 * never added is expected and ignored. */
+		int i;
+#if defined(EV_RECEIPT)
+		struct kevent res[2];
+		for (i = 0; i < n; i++) kev[i].flags |= EV_RECEIPT;
+		(void)kevent(io->epfd, kev, n, res, n, NULL);
+#else
+		for (i = 0; i < n; i++)
+			(void)kevent(io->epfd, &kev[i], 1, NULL, 0, NULL);
+#endif
+		return XTC_OK;
+	}
 	if (kevent(io->epfd, kev, n, NULL, 0, NULL) < 0) {
 		if (errno == ENOENT) return XTC_E_INVAL;
 		return XTC_E_INTERNAL;
@@ -195,7 +225,12 @@ xtc_io_reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 	if (__find_reg(io, fd) >= 0) return XTC_E_INVAL;   /* duplicate */
 	if ((rc = __add_reg(io, fd)) != XTC_OK) return rc;
 	rc = __kev_register(io, fd, interest, tag, 0);
-	if (rc != XTC_OK) __del_reg(io, fd);
+	if (rc != XTC_OK) {
+		/* A partial add (READ armed, then WRITE refused -- EPIPE on a
+		 * reader-less pipe) must not leave the READ knote behind. */
+		(void)__kev_register(io, fd, interest, NULL, 1);
+		__del_reg(io, fd);
+	}
 	return rc;
 }
 
