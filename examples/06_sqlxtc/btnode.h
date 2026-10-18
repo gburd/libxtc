@@ -275,6 +275,21 @@ int btnode_lo_fence(const void *page, void *out, uint16_t cap, uint16_t *len);
  * Returns 0 on success, -1 if `cap` is too small. */
 int btnode_hi_fence(const void *page, void *out, uint16_t cap, uint16_t *len);
 
+/*
+ * Structural validator (RethinkDB leaf::validate / internal_node fsck,
+ * run after every mutation in debug builds).  Checks the header bounds,
+ * that every cell and fence lies in [data_offset, page_size) with no two
+ * overlapping, space_used == live cell bytes + fence bytes, the cached
+ * slot heads, prefix_len == the fences' common prefix, keys strictly
+ * ascending, leaf keys inside (lo_fence, hi_fence], the internal-node
+ * shape (prefix 0, slot 0 the empty -infinity key, 8-byte unflagged
+ * child values, separators <= hi_fence), and that a flagged leaf value
+ * is a well-formed out-of-line ref (btovf.h).  Returns 0 if the node is
+ * well formed, else -1 with a reason in `why` (may be NULL).  Reads the
+ * page only; the caller must hold it stable (latched or private).
+ */
+int btnode_check(const void *page, char *why, size_t whylen);
+
 #ifdef __cplusplus
 }
 #endif

@@ -16,7 +16,10 @@
  */
 
 #include "btnode.h"
+#include "btovf.h"      /* out-of-line ref shape, for btnode_check */
 
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
 _Static_assert(sizeof(struct btnode_slot) == 10,
@@ -877,5 +880,204 @@ btnode_hi_fence(const void *page, void *out, uint16_t cap, uint16_t *len)
 	memcpy(out, (const uint8_t *)page + h->hi_fence_off, h->hi_fence_len);
 	if (len != NULL)
 		*len = h->hi_fence_len;
+	return 0;
+}
+
+/* ---- structural validator (btnode_check) ------------------------------ */
+
+static int
+check_fail(char *why, size_t whylen, const char *fmt, ...)
+{
+	va_list ap;
+
+	if (why != NULL && whylen > 0) {
+		va_start(ap, fmt);
+		(void)vsnprintf(why, whylen, fmt, ap);
+		va_end(ap);
+	}
+	return -1;
+}
+
+/* Mark bytes [off, off+len) in the occupancy bitmap; 1 if any was
+ * already marked (two cells overlap). */
+static int
+mark_bytes(uint8_t *map, uint32_t off, uint32_t len)
+{
+	uint32_t i;
+
+	for (i = off; i < off + len; i++) {
+		if (map[i >> 3] & (1u << (i & 7)))
+			return 1;
+		map[i >> 3] |= (uint8_t)(1u << (i & 7));
+	}
+	return 0;
+}
+
+/* Is `ref` (len bytes) a well-formed out-of-line value ref for data
+ * pages of `ps` bytes?  Mirrors btree.c ovf_write / ovf_parse. */
+static int
+ovf_ref_ok(const uint8_t *ref, uint32_t len, uint32_t ps)
+{
+	uint32_t n, total, per, i;
+
+	if (len < BT_OVF_HDR || ref[0] != BT_OVF_TAG || ref[2] != 0 ||
+	    ref[3] != 0)
+		return 0;
+	n = ref[1];
+	if (n == 0 || n > BT_OVF_MAXPAGES || len != bt_ovf_ref_len(n) ||
+	    ps <= BT_OVF_PGHDR)
+		return 0;
+	per = ps - BT_OVF_PGHDR;
+	total = bt_ovf_get32(ref + 4);
+	if (total == 0 || total > n * per || total <= (n - 1) * per)
+		return 0;       /* ovf_write uses exactly ceil(total / per) pages */
+	for (i = 0; i < n; i++)
+		if (bt_ovf_get64(ref + BT_OVF_HDR + 8u * i) == 0)
+			return 0;
+	return 1;
+}
+
+int
+btnode_check(const void *page, char *why, size_t whylen)
+{
+	const struct btnode_hdr *h = CHDR(page);
+	const struct btnode_slot *s = cslots_of(page);
+	const uint8_t *p = page;
+	uint32_t ps = h->page_size, send, sum = 0, i;
+	uint16_t pl = h->prefix_len, lim, cp = 0;
+	const uint8_t *lo = NULL, *hi = NULL;
+	/* Occupancy bitmap, one bit per page byte (512 B for 4 KiB). */
+	uint32_t mapn = (ps > sizeof(*h) && ps <= 65535) ? (ps + 7) / 8 : 1;
+	uint8_t map[mapn];
+
+	if (ps <= sizeof(*h) || ps > 65535)
+		return check_fail(why, whylen, "page_size %u out of range", ps);
+	if (h->is_leaf > 1 || h->dead > 1)
+		return check_fail(why, whylen, "is_leaf %u / dead %u not 0/1",
+		    h->is_leaf, h->dead);
+	send = (uint32_t)sizeof(*h) + (uint32_t)h->count *
+	    (uint32_t)sizeof(struct btnode_slot);
+	if (send > h->data_offset || h->data_offset > ps)
+		return check_fail(why, whylen,
+		    "slot array end %u > data_offset %u (or > page %u), count %u",
+		    send, h->data_offset, ps, h->count);
+	memset(map, 0, mapn);
+
+	/* Fences: (off == 0) iff (len == 0), inside the heap, no overlap. */
+	if ((h->lo_fence_off == 0) != (h->lo_fence_len == 0) ||
+	    (h->hi_fence_off == 0) != (h->hi_fence_len == 0))
+		return check_fail(why, whylen, "fence off/len disagree "
+		    "(lo %u/%u hi %u/%u)", h->lo_fence_off, h->lo_fence_len,
+		    h->hi_fence_off, h->hi_fence_len);
+	if (h->lo_fence_len) {
+		if (h->lo_fence_off < h->data_offset ||
+		    (uint32_t)h->lo_fence_off + h->lo_fence_len > ps)
+			return check_fail(why, whylen, "lo fence [%u,+%u) outside "
+			    "heap [%u,%u)", h->lo_fence_off, h->lo_fence_len,
+			    h->data_offset, ps);
+		lo = p + h->lo_fence_off;
+		(void)mark_bytes(map, h->lo_fence_off, h->lo_fence_len);
+	}
+	if (h->hi_fence_len) {
+		if (h->hi_fence_off < h->data_offset ||
+		    (uint32_t)h->hi_fence_off + h->hi_fence_len > ps)
+			return check_fail(why, whylen, "hi fence [%u,+%u) outside "
+			    "heap [%u,%u)", h->hi_fence_off, h->hi_fence_len,
+			    h->data_offset, ps);
+		hi = p + h->hi_fence_off;
+		if (mark_bytes(map, h->hi_fence_off, h->hi_fence_len))
+			return check_fail(why, whylen, "hi fence overlaps lo fence");
+	}
+	if (lo != NULL && hi != NULL &&
+	    cmp_bytes(lo, h->lo_fence_len, hi, h->hi_fence_len) >= 0)
+		return check_fail(why, whylen, "lo fence >= hi fence");
+
+	/* prefix_len is exactly the fences' common prefix (0 unless both). */
+	if (lo != NULL && hi != NULL) {
+		lim = h->lo_fence_len < h->hi_fence_len ? h->lo_fence_len :
+		    h->hi_fence_len;
+		while (cp < lim && lo[cp] == hi[cp])
+			cp++;
+	}
+	if (pl != cp)
+		return check_fail(why, whylen, "prefix_len %u != fence common "
+		    "prefix %u", pl, cp);
+	if (!h->is_leaf && pl != 0)
+		return check_fail(why, whylen, "internal node prefix_len %u != 0",
+		    pl);
+	if (!h->is_leaf && h->count == 0)
+		return check_fail(why, whylen, "internal node with no children");
+
+	for (i = 0; i < h->count; i++) {
+		uint32_t klen = s[i].key_len, vlen = VLEN(s[i].val_len);
+		uint32_t off = s[i].offset;
+		const uint8_t *k = p + off;
+
+		if (off < h->data_offset || off + klen + vlen > ps)
+			return check_fail(why, whylen, "slot %u cell [%u,+%u) "
+			    "outside heap [%u,%u)", i, off, klen + vlen,
+			    h->data_offset, ps);
+		if (mark_bytes(map, off, klen + vlen))
+			return check_fail(why, whylen, "slot %u cell [%u,+%u) "
+			    "overlaps another cell or a fence", i, off, klen + vlen);
+		sum += klen + vlen;
+		if (s[i].head != suffix_head(k, (uint16_t)klen))
+			return check_fail(why, whylen, "slot %u head %08x != "
+			    "suffix head %08x", i, s[i].head,
+			    suffix_head(k, (uint16_t)klen));
+		/* Strictly ascending.  Every key shares the prefix, so the
+		 * suffixes order exactly as the full keys do. */
+		if (i > 0 && cmp_bytes(p + s[i - 1].offset, s[i - 1].key_len,
+		    k, (uint16_t)klen) >= 0)
+			return check_fail(why, whylen, "slot %u key not > slot "
+			    "%u key", i, i - 1);
+		if (h->is_leaf) {
+			/* Leaf keys lie in (lo, hi].  The full key shares the
+			 * first pl bytes with both fences, so compare suffix
+			 * against the fence remainder. */
+			if (lo != NULL && cmp_bytes(k, (uint16_t)klen, lo + pl,
+			    (uint16_t)(h->lo_fence_len - pl)) <= 0)
+				return check_fail(why, whylen, "leaf slot %u key "
+				    "<= lo fence", i);
+			if (hi != NULL && cmp_bytes(k, (uint16_t)klen, hi + pl,
+			    (uint16_t)(h->hi_fence_len - pl)) > 0)
+				return check_fail(why, whylen, "leaf slot %u key "
+				    "> hi fence", i);
+			if (VFLAG(s[i].val_len) &&
+			    !ovf_ref_ok(k + klen, vlen, ps))
+				return check_fail(why, whylen, "leaf slot %u: "
+				    "flagged value (%u B) is not a well-formed "
+				    "out-of-line ref", i, vlen);
+		} else {
+			uint64_t pid;
+
+			/* Internal: slot 0 is the empty -infinity key; every
+			 * value is an unflagged nonzero 8-byte child pid; a
+			 * separator lies in (lo, hi]. */
+			if (i == 0 && klen != 0)
+				return check_fail(why, whylen, "internal slot 0 "
+				    "key is %u B, not the empty key", klen);
+			if (VFLAG(s[i].val_len) || vlen != 8)
+				return check_fail(why, whylen, "internal slot %u "
+				    "value %u B flag %x (want 8 B child pid)", i,
+				    vlen, VFLAG(s[i].val_len));
+			memcpy(&pid, k + klen, sizeof pid);
+			if (pid == 0)
+				return check_fail(why, whylen, "internal slot %u "
+				    "child pid 0", i);
+			if (i > 0 && lo != NULL && cmp_bytes(k, (uint16_t)klen,
+			    lo, h->lo_fence_len) <= 0)
+				return check_fail(why, whylen, "internal slot %u "
+				    "separator <= lo fence", i);
+			if (i > 0 && hi != NULL && cmp_bytes(k, (uint16_t)klen,
+			    hi, h->hi_fence_len) > 0)
+				return check_fail(why, whylen, "internal slot %u "
+				    "separator > hi fence", i);
+		}
+	}
+	sum += (uint32_t)h->lo_fence_len + h->hi_fence_len;
+	if (sum != h->space_used)
+		return check_fail(why, whylen, "space_used %u != cells+fences %u",
+		    h->space_used, sum);
 	return 0;
 }

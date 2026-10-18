@@ -16,6 +16,7 @@
 
 #include "btnode.h"
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -441,6 +442,151 @@ test_remove_compact(void)
 	    total, kept, added);
 }
 
+/*
+ * btnode_check (the in-debug validator): a well-formed leaf and internal
+ * node pass -- including after split, merge, remove and compaction --
+ * and each planted defect class is reported.  A validator that passes a
+ * corrupt page is decoration, so every check here must FIRE.
+ */
+static void
+corrupt_expect(const uint8_t *good, uint32_t ps, uint8_t *scratch,
+    size_t off, const void *bytes, size_t n, const char *what)
+{
+	char why[200];
+
+	memcpy(scratch, good, ps);
+	memcpy(scratch + off, bytes, n);
+	why[0] = 0;
+	CHECK(btnode_check(scratch, why, sizeof why) != 0,
+	    "btnode_check missed: %s", what);
+	printf("    caught %-34s -> %s\n", what, why);
+}
+
+static void
+test_check(void)
+{
+	const uint32_t ps = 4096;
+	uint8_t *L = malloc(ps), *R = malloc(ps), *X = malloc(ps);
+	char why[200];
+	uint8_t sep[64], b8[8];
+	uint16_t sep_len = 0, u16;
+	uint32_t u32;
+	size_t s0 = sizeof(struct btnode_hdr), sl = sizeof(struct btnode_slot);
+	struct btnode_hdr hh;
+	struct btnode_slot s1, s2;
+	int i;
+	uint64_t pid;
+	uint8_t ref[12 + 8];
+	uint8_t empty = 0;
+
+	CHECK(L != NULL && R != NULL && X != NULL, "malloc");
+	btnode_init(L, ps, 1);
+	btnode_set_fences(L, "k0000", 5, "k9999", 5);
+	CHECK(btnode_check(L, why, sizeof why) == 0, "empty leaf: %s", why);
+	for (i = 1; i < 120; i++) {
+		char key[16], val[24];
+		snprintf(key, sizeof key, "k%04d", i * 7);
+		memset(val, 'a' + i % 26, sizeof val);
+		if (btnode_insert(L, key, 5, val, (uint16_t)(i % 20)) < 0)
+			break;
+	}
+	CHECK(btnode_check(L, why, sizeof why) == 0, "filled leaf: %s", why);
+	for (i = 0; i < 30; i++)
+		CHECK(btnode_remove(L, i) == 0, "remove");
+	CHECK(btnode_check(L, why, sizeof why) == 0, "holes: %s", why);
+	btnode_init(R, ps, 1);
+	CHECK(btnode_split(L, R, sep, &sep_len) == 0, "split");
+	CHECK(btnode_check(L, why, sizeof why) == 0, "split left: %s", why);
+	CHECK(btnode_check(R, why, sizeof why) == 0, "split right: %s", why);
+	CHECK(btnode_merge(L, R) == 0, "merge");
+	CHECK(btnode_check(L, why, sizeof why) == 0, "merged: %s", why);
+
+	/* Planted defects on the good leaf L. */
+	memcpy(&hh, L, sizeof hh);
+	memcpy(&s1, L + s0, sl);
+	memcpy(&s2, L + s0 + sl, sl);
+	u16 = (uint16_t)(hh.space_used + 1);
+	corrupt_expect(L, ps, X, offsetof(struct btnode_hdr, space_used),
+	    &u16, 2, "space_used off by one");
+	u16 = (uint16_t)(s0 + (size_t)hh.count * sl - 2);
+	corrupt_expect(L, ps, X, offsetof(struct btnode_hdr, data_offset),
+	    &u16, 2, "data_offset inside slot array");
+	/* slot 0 := slot 1 (same cell, head consistent): overlap check */
+	corrupt_expect(L, ps, X, s0, &s2, sl, "two slots share one cell");
+	u16 = (uint16_t)(ps - 1);
+	corrupt_expect(L, ps, X, s0 + offsetof(struct btnode_slot, offset),
+	    &u16, 2, "cell runs past the page");
+	memcpy(X, L, ps);
+	/* swap slot 0 and 1: keys out of order */
+	memcpy(X + s0, &s2, sl);
+	memcpy(X + s0 + sl, &s1, sl);
+	CHECK(btnode_check(X, why, sizeof why) != 0, "missed: order");
+	printf("    caught %-34s -> %s\n", "keys not ascending", why);
+	u16 = (uint16_t)(hh.prefix_len + 1);
+	corrupt_expect(L, ps, X, offsetof(struct btnode_hdr, prefix_len),
+	    &u16, 2, "prefix_len != fence prefix");
+	u32 = s1.head ^ 1u;
+	corrupt_expect(L, ps, X, s0 + offsetof(struct btnode_slot, head),
+	    &u32, 4, "stale slot head");
+	u16 = (uint16_t)(s1.val_len | BTNODE_VFLAG);
+	corrupt_expect(L, ps, X, s0 + offsetof(struct btnode_slot, val_len),
+	    &u16, 2, "VFLAG on a non-ref value");
+	/* A key outside (lo, hi]: rewrite the lo fence above the keys. */
+	/* lo fence k0000 -> k8000 (common prefix with k9999 still 1) */
+	corrupt_expect(L, ps, X, (size_t)hh.lo_fence_off + 1, "8", 1,
+	    "leaf key <= lo fence");
+
+	/* A flagged, well-formed out-of-line ref passes; a bad one fails. */
+	btnode_init(L, ps, 1);
+	btnode_set_fences(L, NULL, 0, NULL, 0);
+	memset(ref, 0, sizeof ref);
+	ref[0] = 0x5F; ref[1] = 1;              /* BT_OVF_TAG, one page */
+	ref[4] = 100;                           /* total_len 100 */
+	ref[12] = 7;                            /* pid 7 */
+	CHECK(btnode_insert_f(L, "big", 3, ref, sizeof ref, BTNODE_VFLAG) == 0,
+	    "insert ref");
+	CHECK(btnode_check(L, why, sizeof why) == 0, "good ref: %s", why);
+	memcpy(&hh, L, sizeof hh);
+	memcpy(&s1, L + s0, sl);
+	corrupt_expect(L, ps, X, (size_t)s1.offset + 3, "\x5E", 1,
+	    "ovf ref with a bad tag");
+	corrupt_expect(L, ps, X, (size_t)s1.offset + 3 + 12, "\0", 1,
+	    "ovf ref with page id 0");
+
+	/* Internal node in the btree's shape. */
+	btnode_init(L, ps, 0);
+	btnode_set_fences(L, NULL, 0, NULL, 0);
+	pid = 11;
+	memcpy(b8, &pid, 8);
+	CHECK(btnode_insert(L, &empty, 0, b8, 8) == 0, "slot 0");
+	pid = 12;
+	memcpy(b8, &pid, 8);
+	CHECK(btnode_insert(L, "m", 1, b8, 8) == 0, "sep");
+	CHECK(btnode_check(L, why, sizeof why) == 0, "internal: %s", why);
+	memcpy(&s1, L + s0, sl);
+	memcpy(&s2, L + s0 + sl, sl);
+	u16 = 4;
+	corrupt_expect(L, ps, X, s0 + sl + offsetof(struct btnode_slot,
+	    val_len), &u16, 2, "internal value not 8 bytes");
+	pid = 0;
+	corrupt_expect(L, ps, X, (size_t)s2.offset + 1, &pid, 8,
+	    "internal child pid 0");
+	/* An internal node whose slot 0 is a real key. */
+	btnode_init(X, ps, 0);
+	btnode_set_fences(X, NULL, 0, NULL, 0);
+	pid = 11;
+	memcpy(b8, &pid, 8);
+	CHECK(btnode_insert(X, "a", 1, b8, 8) == 0, "slot 0 keyed");
+	CHECK(btnode_check(X, why, sizeof why) != 0, "missed: slot 0 key");
+	printf("    caught %-34s -> %s\n", "internal slot 0 not empty", why);
+
+	free(L);
+	free(R);
+	free(X);
+	printf("  test_check: ok (valid nodes pass, every planted defect "
+	    "caught)\n");
+}
+
 int
 main(void)
 {
@@ -449,6 +595,7 @@ main(void)
 	test_fill_and_split();
 	test_binary_keys();
 	test_remove_compact();
+	test_check();
 	printf("ALL PASS (%d checks)\n", g_checks);
 	return 0;
 }
