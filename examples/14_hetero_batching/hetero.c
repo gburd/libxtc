@@ -49,6 +49,7 @@
  *	the program has no OpenCL/Level-Zero dependency at all.
  */
 #define _POSIX_C_SOURCE 200112L /* posix_memalign */
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -167,7 +168,6 @@ struct device {
  * in the fake path.
  */
 #if defined(XTC_WITH_OPENCL) || defined(XTC_WITH_LEVELZERO)
-#include <stdatomic.h>
 static atomic_int g_inflight;      /* groups currently mid device op */
 static atomic_int g_overlap_peak;  /* max concurrent in-flight groups */
 #endif
@@ -236,8 +236,12 @@ struct demo {
 	int nreqs;
 	int continuous;
 	int hetero;                 /* 1 = GPU+NPU real backends */
-	/* self-test / verification bookkeeping */
-	unsigned completed, cancelled, failed;
+	/* Self-test / verification bookkeeping.  Atomic: the two groups run
+	 * on different executor loops (threads) and both complete into these
+	 * shared counters; a plain ++ lost increments (TSan: write/write race
+	 * at batch_complete), so the self-test flaked "every request completes
+	 * exactly once" although each request did complete exactly once. */
+	atomic_uint completed, cancelled, failed;
 };
 
 static void
@@ -1443,7 +1447,8 @@ main(int argc, char **argv)
 	printf("mode=%s hetero=%d reqs=%d\n",
 	    continuous ? "continuous" : "static", hetero, d->nreqs);
 	printf("completed=%u cancelled=%u failed=%u (exactly-once enforced)\n",
-	    d->completed, d->cancelled, d->failed);
+	    atomic_load(&d->completed), atomic_load(&d->cancelled),
+	    atomic_load(&d->failed));
 	printf("reqs_done=%u device_ops=%u avg_occupancy=%.2f members/op\n",
 	    rs.reqs_done, rs.total_submits, rs.avg_occupancy);
 	for (i = 0; i < 2; i++)
