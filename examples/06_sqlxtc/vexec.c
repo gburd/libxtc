@@ -34,6 +34,7 @@
 #include <string.h>
 #include <strings.h>     /* strcasecmp: SQL identifiers are case-insensitive */
 #include <ctype.h>
+#include <errno.h>
 #include <math.h>
 #include <stdatomic.h>
 
@@ -2427,7 +2428,8 @@ coerce_numeric(vx_cell_t *v)
 {
 	char buf[64];
 	char *end = NULL;
-	uint32_t n = v->nbytes;
+	uint32_t n = v->nbytes, i = 0;
+	int isreal = 0, nd = 0;
 	if (v->type != VX_TEXT || v->bytes == NULL) return;
 	if (n == 0 || n >= sizeof buf) return;
 	memcpy(buf, v->bytes, n); buf[n] = '\0';
@@ -2441,23 +2443,36 @@ coerce_numeric(vx_cell_t *v)
 		n--;
 		buf[n] = '\0';
 	}
-	if (n == 0) return;
-	{
-		int isreal = 0; uint32_t i;
-		for (i = 0; i < n; i++)
-			if (buf[i] == '.' || buf[i] == 'e' || buf[i] == 'E') { isreal = 1; break; }
-		if (isreal) {
-			double d = strtod(buf, &end);
-			if (end == buf + n) { v->type = VX_REAL; v->r = d; }
-		} else {
-			long long ll = strtoll(buf, &end, 10);
-			if (end == buf + n) { v->type = VX_INT; v->i = (int64_t)ll; }
-			else {
-				double d = strtod(buf, &end);
-				if (end == buf + n) { v->type = VX_REAL; v->r = d; }
-			}
-		}
+	/* Accept only SQLite's numeric grammar: [sign] digits [. digits]
+	 * [e [sign] digits], with a digit somewhere in the mantissa.  strtod
+	 * alone would also take inf / nan / 0x10, which SQLite keeps as text. */
+	while (i < n && isspace((unsigned char)buf[i])) i++;
+	if (i < n && (buf[i] == '+' || buf[i] == '-')) i++;
+	for (; i < n && isdigit((unsigned char)buf[i]); i++) nd++;
+	if (i < n && buf[i] == '.') {
+		isreal = 1;
+		for (i++; i < n && isdigit((unsigned char)buf[i]); i++) nd++;
 	}
+	if (nd == 0) return;
+	if (i < n && (buf[i] == 'e' || buf[i] == 'E')) {
+		isreal = 1;
+		i++;
+		if (i < n && (buf[i] == '+' || buf[i] == '-')) i++;
+		if (i >= n || !isdigit((unsigned char)buf[i])) return;
+		while (i < n && isdigit((unsigned char)buf[i])) i++;
+	}
+	if (i != n) return;
+	if (!isreal) {
+		long long ll;
+		errno = 0;
+		ll = strtoll(buf, &end, 10);
+		if (errno == 0 && end == buf + n) {
+			v->type = VX_INT; v->i = (int64_t)ll;
+			return;
+		}
+		/* Out of int64 range: SQLite keeps it as a REAL. */
+	}
+	v->type = VX_REAL; v->r = strtod(buf, NULL);
 }
 
 /* Apply SQLite column affinity to a value being stored (INSERT/UPDATE).

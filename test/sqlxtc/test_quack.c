@@ -31,6 +31,25 @@ parse(const char *line, quack_msg_t *m)
 	return quack_parse(line, strlen(line), m);
 }
 
+/* REAL +-Inf goes out as an over-range JSON number (read back as +-inf,
+ * which is what SQLite returns for e.g. 1e400); NaN stays null. */
+static int
+encode_double_specials(void)
+{
+	quack_buf_t b;
+	int ok;
+	quack_buf_init(&b, 64);
+	quack_emit_row_begin(&b);
+	quack_emit_row_double(&b, 0, 1.0 / 0.0);
+	quack_emit_row_double(&b, 1, -1.0 / 0.0);
+	quack_emit_row_double(&b, 2, 0.0 / 0.0);
+	quack_emit_row_double(&b, 3, 2.0);
+	quack_emit_row_end(&b);
+	ok = strstr(b.p, "{\"row\":[1e999,-1e999,null,2.0]}") != NULL;
+	quack_buf_free(&b);
+	return ok;
+}
+
 int
 main(void)
 {
@@ -245,6 +264,9 @@ main(void)
 		      "encode_jstring_escape");
 		quack_buf_free(&b);
 	}
+
+	/* 26: +-Inf / NaN / integral REAL */
+	CHECK(encode_double_specials(), "encode_double_specials");
 
 	printf("\nQuack tests: %d passed, %d failed\n", n_pass, n_fail);
 	return n_fail ? 1 : 0;

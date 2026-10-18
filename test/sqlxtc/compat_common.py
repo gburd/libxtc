@@ -77,7 +77,9 @@ def normalise_rows(rows, ordered=False):
                 new.append(("i", int(v)))
             elif isinstance(v, float):
                 # Integral floats compare equal to ints in SQL results.
-                if v == int(v):
+                if v != v or v in (float("inf"), float("-inf")):
+                    new.append(("num", repr(v)))   # nan / +-inf
+                elif v == int(v):
                     new.append(("num", float(v)))
                 else:
                     new.append(("num", round(v, 6)))

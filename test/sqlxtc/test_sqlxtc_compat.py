@@ -522,7 +522,12 @@ CORPUS = [
      "SELECT a, b FROM t WHERE a = ?2 AND b = ?1", {"params": ["y", 2]}),
     ("param_insert_numbered",   # the PROTOCOL.md example shape
      ["CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT)"],
-     "INSERT INTO t(id, name) VALUES(?1, ?2)", {"params": [7, "ann"]}),
+     "INSERT INTO t(id, name) VALUES(?1, ?2)", {"params": [7, "ann"]}),    ("aff_numeric_text_strict",   # strtod accepts inf/nan/0x10; SQLite does not
+     ["CREATE TABLE t(n NUMERIC, r REAL, i INTEGER)",
+      "INSERT INTO t VALUES('inf','nan','0x10'),('Infinity','1_000','1e'),"
+      "('9223372036854775808','9223372036854775807','-9223372036854775808'),"
+      "(' -7 ','.5','5.'),('+.5e2','1e400','00012')"],
+     "SELECT n, typeof(n), r, typeof(r), i, typeof(i) FROM t"),
 ]
 
 # Features sqlxtc does not yet implement.  Reported, not failed -- these

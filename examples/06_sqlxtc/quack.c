@@ -198,8 +198,12 @@ quack_emit_row_double(quack_buf_t *b, int i, double v)
 	int  rc = 0;
 	int  k;
 	if (i > 0) rc |= buf_putc(b, ',');
-	if (v != v || v == 1.0/0.0 || v == -1.0/0.0) {
-		rc |= buf_putcstr(b, "null");
+	if (v != v) {
+		rc |= buf_putcstr(b, "null");    /* NaN: SQLite has none (NULL) */
+	} else if (v == 1.0/0.0 || v == -1.0/0.0) {
+		/* +-Inf: an out-of-range JSON number, which JSON parsers read
+		 * as +-infinity (SQLite stores e.g. 1e400 as REAL Inf). */
+		rc |= buf_putcstr(b, v > 0 ? "1e999" : "-1e999");
 	} else {
 		k = snprintf(tmp, sizeof tmp, "%.17g", v);
 		/* %.17g strips trailing zeros, turning 4.0 into 4.
