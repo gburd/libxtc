@@ -4238,12 +4238,11 @@ xs_idx_clear(bt_t *bt, uint32_t idx_id)
 {
 	uint8_t prefix[5], startk[5];
 	int i;
-	/* Bounded batch of small keys on the stack (index keys are the value
-	 * prefix + 8-byte rowid; cap the copied key length).  Fixed 256-byte
-	 * key cap here; a longer indexed value's entry is skipped by
-	 * clear (the subsequent rebuild re-inserts a fresh entry regardless),
-	 * so no stale entry survives a rebuild. */
-	enum { KMAX = 256, BATCH = 128 };
+	/* Bounded batch of keys on the stack.  KMAX is the B-tree's absolute
+	 * key cap (BT_MAX_KEY; bt_max_key() <= 1024 on every page size), so
+	 * every index entry fits.  1.56 used 256 and SKIPPED longer entries,
+	 * so DROP INDEX left them behind for a later index reusing the id. */
+	enum { KMAX = 1024, BATCH = 32 };
 	uint8_t dead[BATCH][KMAX]; uint16_t deadlen[BATCH];
 	prefix[0] = XS_IDX_LEAD;
 	for (i = 3; i >= 0; i--) prefix[4 - i] = (uint8_t)((idx_id >> (8 * i)) & 0xFF);
@@ -4256,7 +4255,7 @@ xs_idx_clear(bt_t *bt, uint32_t idx_id)
 			const void *k = NULL, *vv = NULL; uint16_t klen = 0, vl = 0;
 			if (bt_cursor_next(cur, &k, &klen, &vv, &vl) != XTC_OK) break;
 			if (klen < 5 || memcmp(k, prefix, 5) != 0) break;   /* past this index */
-			if (klen > KMAX) continue;
+			if (klen > KMAX) continue;   /* unreachable: keys <= BT_MAX_KEY */
 			memcpy(dead[ndead], k, klen); deadlen[ndead] = klen;
 			if (++ndead >= BATCH) break;
 		}
@@ -4392,6 +4391,12 @@ xstore_index_seek_eq(bt_t *bt, uint32_t idx_id, int vclass,
 	startlen = xs_idx_key(idx_id, vclass, ival, rval, bytes, nbytes, 0, 0,
 	    startk, (int)sizeof startk);
 	if (startlen < 0) return -1;
+	/* An index entry is the seek prefix + an 8-byte rowid.  A value whose
+	 * entry would exceed the B-tree key limit was never indexed (the index
+	 * insert is refused), so the index cannot answer for it: return -1 and
+	 * let the caller scan.  Without this a value just under the limit
+	 * (prefix fits, entry does not) "found" zero rows. */
+	if (startlen + 8 > (int)bt_max_key(bt)) return -1;
 	if (bt_cursor_open(bt, startk, (uint16_t)startlen, &cur) != XTC_OK) return -1;
 	for (;;) {
 		const void *k = NULL, *vv = NULL; uint16_t klen = 0, vl = 0;
