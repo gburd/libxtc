@@ -65,7 +65,8 @@ typedef enum sql_expr_op {
 	SX_E_COLUMN,      /* a.b.c column reference (1..3 names in .name[]) */
 	SX_E_STAR,        /* * or t.* (table in .name[0] if qualified) */
 	SX_E_UNARY,       /* .op2 is the token; one child a */
-	SX_E_BINARY,      /* .op2 is the token; children a, b */
+	SX_E_BINARY,      /* .op2 is the token; children a, b (TK_LIKE: ESCAPE
+	                   * expr in c, or NULL) */
 	SX_E_BETWEEN,     /* a BETWEEN b AND c (three children) */
 	SX_E_IN_LIST,     /* a IN (list)  -- a in child a, list in .list */
 	SX_E_IN_SELECT,   /* a IN (select) -- a in child a, sel in .sel */
@@ -115,6 +116,7 @@ typedef struct sql_exprlist_item {
 	sql_expr_t                *expr;
 	sql_str_t                  alias;   /* AS alias for a select item, else len 0 */
 	int                        sort;    /* 0 none, 1 ASC, 2 DESC (ORDER BY) */
+	int                        nulls;   /* ORDER BY: 0 default, 1 NULLS FIRST, 2 NULLS LAST */
 	struct sql_exprlist_item  *next;
 } sql_exprlist_item_t;
 

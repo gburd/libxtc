@@ -55,19 +55,24 @@
  * match.  Recursive on the wildcard, iterative otherwise -- patterns
  * here are short. */
 static int
-xs_like(const char *p, const char *s)
+xs_like(const char *p, const char *s, char esc)
 {
 	while (*p) {
-		if (*p == '%') {
+		int lit = 0;
+		char a, b;
+		if (esc != '\0' && *p == esc) {   /* ESCAPE: next char is literal */
+			if (*++p == '\0') return 0;
+			lit = 1;
+		} else if (*p == '%') {
 			while (*p == '%') p++;          /* collapse runs */
 			if (*p == '\0') return 1;        /* trailing % matches rest */
 			for (; *s; s++)
-				if (xs_like(p, s)) return 1;
+				if (xs_like(p, s, esc)) return 1;
 			return 0;
 		}
 		if (*s == '\0') return 0;
-		if (*p != '_') {
-			char a = *p, b = *s;
+		if (lit || *p != '_') {
+			a = *p; b = *s;
 			if (a >= 'A' && a <= 'Z') a += 32;
 			if (b >= 'A' && b <= 'Z') b += 32;
 			if (a != b) return 0;
@@ -170,7 +175,9 @@ enum vx_op {
 	VXO_CASE,                            /* CASE: base in .a (NULL=searched),
 	                                      * args[]=when0,then0,when1,then1,...,
 	                                      * nargs=2*arms, ELSE in .b (NULL=none) */
-	VXO_LIKE, VXO_GLOB,                  /* a LIKE/GLOB b: operand in .a, pattern in .b */
+	VXO_LIKE, VXO_GLOB,                  /* a LIKE/GLOB b: operand in .a, pattern in .b;
+	                                      * LIKE ... ESCAPE: escape expr in args[0] */
+	VXO_IS,                              /* a IS b: NULL-safe equality, never NULL */
 	VXO_CORRSUBQ,                        /* correlated scalar subquery: the stmt
 	                                      * st->corrsql[col] re-run per row via vx_run_p, binding
 	                                      * ? from srcrow[bindcol[i]] */
@@ -489,11 +496,12 @@ struct vx_stmt {
 	/* ORDER BY / LIMIT (V4).  norder > 0 => ordered.  Each order key is
 	 * either an expression over the SOURCE columns (order_key[i]), or a
 	 * 1-based reference to an output column (order_outcol[i] > 0, key
-	 * NULL).  order_desc[i] = 1 for DESC. */
+	 * NULL).  order_desc[i]: bit0 = DESC, bit1 = NULLS FIRST/LAST
+	 * overrides the default (NULL sorts first ASC, last DESC). */
 	int           norder;
 	vx_expr_t   **order_key;    /* norder expressions, or NULL entry */
 	int          *order_outcol; /* norder: 1-based output col, or 0 */
-	int          *order_desc;   /* norder: 1 = DESC */
+	int          *order_desc;   /* norder: VX_ORD_* bits */
 	int64_t       limit;        /* -1 = no LIMIT */
 	int64_t       offset;       /* 0 if none */
 
@@ -829,7 +837,7 @@ node_class(const struct vx_compiler *c, const vx_expr_t *e)
 	case VXO_ISNULL: case VXO_NOTNULL:
 	case VXO_IN: case VXO_NOTIN:
 		return VX_AFF_NUMERIC;   /* booleans are 0/1 integers */
-	case VXO_LIKE: case VXO_GLOB:
+	case VXO_LIKE: case VXO_GLOB: case VXO_IS:
 		return VX_AFF_NUMERIC;   /* match result is a 0/1 integer */
 	case VXO_CASE:
 		return VX_AFF_BLOB;      /* dynamic result type: treat as no affinity */
@@ -1006,6 +1014,7 @@ tok_to_binop(int tok, enum vx_op *out)
 	case TK_LE: *out = VXO_LE; return 1;
 	case TK_GT: *out = VXO_GT; return 1;
 	case TK_GE: *out = VXO_GE; return 1;
+	case TK_IS: *out = VXO_IS; return 1;
 	case TK_AND: *out = VXO_AND; return 1;
 	case TK_OR: *out = VXO_OR; return 1;
 	default: return 0;
@@ -1072,6 +1081,7 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 		enum vx_op dummy;
 		if (e->op2 != TK_LIKE && !tok_to_binop(e->op2, &dummy)) return -1;
 		if (collect_columns(nv, e->a) != 0) return -1;
+		if (e->c != NULL && collect_columns(nv, e->c) != 0) return -1;   /* ESCAPE */
 		return collect_columns(nv, e->b);
 	}
 	case SX_E_IS_NULL:
@@ -1181,6 +1191,18 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 	default:
 		return -1;   /* BETWEEN/IN/CASE/subquery/param/bool/blob: not V1 */
 	}
+}
+
+/* ORDER BY key flags (vx_stmt.order_desc[]). */
+#define VX_ORD_DESC  1   /* DESC */
+#define VX_ORD_NULLS 2   /* NULLS FIRST under DESC / NULLS LAST under ASC */
+
+static int
+ord_flags(const sql_exprlist_item_t *o)
+{
+	int desc = (o->sort == 2);
+	int flip = (o->nulls == 1 && desc) || (o->nulls == 2 && !desc);
+	return (desc ? VX_ORD_DESC : 0) | (flip ? VX_ORD_NULLS : 0);
 }
 
 /* If order-key expression `e` is a bare (unqualified) column reference
@@ -2024,10 +2046,23 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 			a = compile_expr(c, e->a);   /* the value being matched */
 			b = compile_expr(c, e->b);   /* the pattern */
 			if (a == NULL || b == NULL) return NULL;
-			if (node_class(c, a) != VX_AFF_TEXT ||
-			    node_class(c, b) != VX_AFF_TEXT) { c->fail = 1; return NULL; }
+			/* A literal NULL side makes the match NULL (eval checks). */
+			if ((node_class(c, a) != VX_AFF_TEXT && !is_null_lit(a)) ||
+			    (node_class(c, b) != VX_AFF_TEXT && !is_null_lit(b))) { c->fail = 1; return NULL; }
 			n = expr_node(c, VXO_LIKE);
 			if (n) { n->a = a; n->b = b; }
+			if (n && e->c != NULL) {     /* LIKE ... ESCAPE x */
+				vx_expr_t *x = compile_expr(c, e->c);
+				if (x == NULL) return NULL;
+				/* SQLite errors on an escape that is not one character;
+				 * declining (an error here too) keeps the two in step. */
+				if (node_class(c, x) != VX_AFF_TEXT ||
+				    (x->op == VXO_LIT && x->lit.nbytes != 1)) { c->fail = 1; return NULL; }
+				n->args = (vx_expr_t **)arena_alloc(&c->st->plan_arena,
+				    sizeof(vx_expr_t *));
+				if (n->args == NULL) { c->fail = 1; return NULL; }
+				n->args[0] = x; n->nargs = 1;
+			}
 			return n;
 		}
 		if (!tok_to_binop(e->op2, &op)) { c->fail = 1; return NULL; }
@@ -2050,6 +2085,10 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 			if (node_class(c, a) == VX_AFF_BLOB ||
 			    node_class(c, b) == VX_AFF_BLOB) { c->fail = 1; return NULL; }
 			break;
+		case VXO_IS:
+			/* IS against a literal NULL is IS NULL (no coercion). */
+			if (is_null_lit(a) || is_null_lit(b)) break;
+			/* FALLTHROUGH */
 		case VXO_EQ: case VXO_NE: case VXO_LT: case VXO_LE:
 		case VXO_GT: case VXO_GE: {
 			/* No-coercion gate: both numeric, or both text.  Anything
@@ -2621,11 +2660,17 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 		return;
 	}
 
+	case VXO_IS:
 	case VXO_EQ: case VXO_NE: case VXO_LT: case VXO_LE:
 	case VXO_GT: case VXO_GE: {
 		vx_cell_t a, b; int c;
 		eval(st, e->a, row, arena, &a);
 		eval(st, e->b, row, arena, &b);
+		if (e->op == VXO_IS && (a.type == VX_NULL || b.type == VX_NULL)) {
+			out->type = VX_INT;     /* IS: NULL-safe, never NULL */
+			out->i = (a.type == VX_NULL && b.type == VX_NULL);
+			return;
+		}
 		if (a.type == VX_NULL || b.type == VX_NULL) { out->type = VX_NULL; return; }
 		/* SQLite applies numeric affinity when one side is numeric and the
 		 * other text (reachable here only via a dynamic operand -- a
@@ -2642,6 +2687,7 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 		c = cmp_vals(&a, &b);
 		out->type = VX_INT;
 		switch (e->op) {
+		case VXO_IS:
 		case VXO_EQ: out->i = (c == 0); break;
 		case VXO_NE: out->i = (c != 0); break;
 		case VXO_LT: out->i = (c < 0); break;
@@ -2828,13 +2874,21 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 		 * wildcards).  Both operands are text-classed by the
 		 * compiler; render to NUL-terminated C strings (TEXT bytes
 		 * may be a non-terminated slice). */
-		vx_cell_t val, pat;
-		char *vs, *ps;
+		vx_cell_t val, pat, ex;
+		char *vs, *ps, esc = '\0';
 		int m;
 		eval(st, e->a, row, arena, &val);
 		eval(st, e->b, row, arena, &pat);
 		if (val.type == VX_NULL || pat.type == VX_NULL) {
 			out->type = VX_NULL; return;
+		}
+		if (e->op == VXO_LIKE && e->nargs == 1) {   /* LIKE ... ESCAPE */
+			eval(st, e->args[0], row, arena, &ex);
+			if (ex.type == VX_NULL) { out->type = VX_NULL; return; }
+			/* Literal escapes are checked at compile time; a computed
+			 * one that is not a single byte yields NULL (SQLite errors). */
+			if (ex.type != VX_TEXT || ex.nbytes != 1) { out->type = VX_NULL; return; }
+			esc = (char)ex.bytes[0];
 		}
 		if (val.type != VX_TEXT || pat.type != VX_TEXT) {
 			/* The compiler kept both text-classed; a stored value of a
@@ -2849,7 +2903,7 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 		if (val.nbytes) memcpy(vs, val.bytes, val.nbytes);
 		vs[val.nbytes] = '\0';
 		if (e->op == VXO_LIKE)
-			m = xs_like(ps, vs);
+			m = xs_like(ps, vs, esc);
 		else
 			m = xs_glob(ps, vs);
 		out->type = VX_INT; out->i = m;
@@ -4168,7 +4222,7 @@ vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 		for (o = sel->order->head; o; o = o->next, oi++) {
 			const sql_expr_t *e = o->expr;
 			int apos;
-			st->order_desc[oi] = (o->sort == 2);
+			st->order_desc[oi] = ord_flags(o);
 			if (e && e->op == SX_E_NUMBER) {
 				/* ORDER BY <int>: output-column position (1-based). */
 				char buf[32]; long pos;
@@ -4668,8 +4722,15 @@ vx_try_prepare_agg(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 					ap->has_gc = 1;
 					if (e->list->head->next != NULL) {
 						const sql_expr_t *sp = e->list->head->next->expr;
+						char *sepb;
 						if (sp == NULL || sp->op != SX_E_STRING) goto fallback;
-						ap->out[oi].gc_sep = sp->lit.p;
+						/* Copy: lit may live in the parse arena (a collapsed
+						 * '' literal), which is freed when prepare returns. */
+						sepb = (char *)arena_alloc(&st->plan_arena, sp->lit.len + 1);
+						if (sepb == NULL) goto oom;
+						memcpy(sepb, sp->lit.p, sp->lit.len);
+						sepb[sp->lit.len] = '\0';
+						ap->out[oi].gc_sep = sepb;
 						ap->out[oi].gc_seplen = sp->lit.len;
 					}
 				}
@@ -4812,7 +4873,7 @@ vx_try_prepare_agg(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		if (!st->order_key || !st->order_outcol || !st->order_desc) goto oom;
 		for (o = sel->order->head; o; o = o->next, oi++) {
 			const sql_expr_t *e = o->expr;
-			st->order_desc[oi] = (o->sort == 2);
+			st->order_desc[oi] = ord_flags(o);
 			if (e && e->op == SX_E_NUMBER) {
 				char buf[32]; long pos;
 				if (e->lit.len == 0 || e->lit.len >= sizeof buf) goto fallback;
@@ -5169,7 +5230,7 @@ vx_try_prepare_join(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		if (!st->order_key || !st->order_outcol || !st->order_desc) goto oom;
 		for (o = sel->order->head; o; o = o->next, oi++) {
 			const sql_expr_t *e = o->expr;
-			st->order_desc[oi] = (o->sort == 2);
+			st->order_desc[oi] = ord_flags(o);
 			if (e && e->op == SX_E_NUMBER) {
 				char buf[32]; long pos;
 				if (e->lit.len == 0 || e->lit.len >= sizeof buf) goto fallback;
@@ -5432,7 +5493,7 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		for (o = sel->order->head; o; o = o->next, oi++) {
 			const sql_expr_t *e = o->expr;
 			int apos;
-			st->order_desc[oi] = (o->sort == 2);
+			st->order_desc[oi] = ord_flags(o);
 			if (e && e->op == SX_E_NUMBER) {
 				char buf[32]; long pos;
 				if (e->lit.len == 0 || e->lit.len >= sizeof buf) goto fallback;
@@ -5747,7 +5808,7 @@ vx_try_prepare_view(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		if (!st->order_key || !st->order_outcol || !st->order_desc) { rc = -1; goto fallback; }
 		for (o = sel->order->head; o; o = o->next, oi++) {
 			const sql_expr_t *e = o->expr;
-			st->order_desc[oi] = (o->sort == 2);
+			st->order_desc[oi] = ord_flags(o);
 			if (e && e->op == SX_E_NUMBER) {
 				char buf[32]; long pos;
 				if (e->lit.len == 0 || e->lit.len >= sizeof buf) goto fallback;
@@ -6236,6 +6297,19 @@ is_ordered(const struct vx_stmt *st)
 	       (st->norder > 0 || st->limit >= 0 || st->offset > 0 || st->distinct);
 }
 
+/* Compare two order-key cells under one key's VX_ORD_* flags.  DESC
+ * negates the value order; a NULLS clause that differs from the default
+ * (FIRST under DESC, LAST under ASC) re-places NULLs without touching the
+ * non-NULL order. */
+static int
+ord_cmp(const vx_cell_t *a, const vx_cell_t *b, int flags)
+{
+	int r = sort_cmp(a, b);
+	if ((flags & VX_ORD_NULLS) && (a->type == VX_NULL) != (b->type == VX_NULL))
+		return (flags & VX_ORD_DESC) ? r : -r;
+	return (flags & VX_ORD_DESC) ? -r : r;
+}
+
 /* qsort context: the order keys per row + directions.  Keys are stored
  * row-major: nkey cells per row, in a flat array parallel to the output
  * rows.  We sort an index array to keep the output rows paired. */
@@ -6261,8 +6335,7 @@ sort_index_cmp(const void *pa, const void *pb)
 	for (k = 0; k < c->nkey; k++) {
 		const vx_cell_t *ka = &c->keys[(size_t)ia * (size_t)c->nkey + (size_t)k];
 		const vx_cell_t *kb = &c->keys[(size_t)ib * (size_t)c->nkey + (size_t)k];
-		int r = sort_cmp(ka, kb);
-		if (c->desc[k]) r = -r;
+		int r = ord_cmp(ka, kb, c->desc[k]);
 		if (r) return r;
 	}
 	/* Stable-ish tiebreak by original index so equal-key rows keep a
@@ -6286,8 +6359,7 @@ topn_cmp(const vx_cell_t *ka, const vx_cell_t *kb, int nkey, const int *desc)
 {
 	int k;
 	for (k = 0; k < nkey; k++) {
-		int r = sort_cmp(&ka[k], &kb[k]);
-		if (desc[k]) r = -r;
+		int r = ord_cmp(&ka[k], &kb[k], desc[k]);
 		if (r) return r;
 	}
 	return 0;

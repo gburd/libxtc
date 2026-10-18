@@ -72,10 +72,12 @@ static const kw_t k_kws[] = {
 	{ "DROP",        TK_DROP },
 	{ "ELSE",        TK_ELSE },
 	{ "END",         TK_END },
+	{ "ESCAPE",      TK_ESCAPE },
 	{ "EXCEPT",      TK_EXCEPT },
 	{ "EXISTS",      TK_EXISTS },
 	{ "EXPLAIN",     TK_EXPLAIN },
 	{ "FALSE",       TK_FALSE },
+	{ "FIRST",       TK_FIRST },
 	{ "FOREIGN",     TK_FOREIGN },
 	{ "FROM",        TK_FROM },
 	{ "FULL",        TK_FULL },
@@ -91,12 +93,14 @@ static const kw_t k_kws[] = {
 	{ "IS",          TK_IS },
 	{ "JOIN",        TK_JOIN },
 	{ "KEY",         TK_KEY },
+	{ "LAST",        TK_LAST },
 	{ "LEFT",        TK_LEFT },
 	{ "LIKE",        TK_LIKE },
 	{ "LIMIT",       TK_LIMIT },
 	{ "NATURAL",     TK_NATURAL },
 	{ "NOT",         TK_NOT },
 	{ "NULL",        TK_NULL },
+	{ "NULLS",       TK_NULLS },
 	{ "OFFSET",      TK_OFFSET },
 	{ "ON",          TK_ON },
 	{ "OR",          TK_OR },
@@ -282,6 +286,18 @@ lex_next(lex_t *l, sql_token_t *tok)
 		}
 	}
 
+	/* hex integer 0x1F: at least one hex digit (the grammar converts it) */
+	if (l->p + 2 < l->end && l->p[0] == '0' &&
+	    (l->p[1] == 'x' || l->p[1] == 'X') &&
+	    isxdigit((unsigned char)l->p[2])) {
+		l->p += 2;
+		while (l->p < l->end && isxdigit((unsigned char)*l->p)) l->p++;
+		if (l->p < l->end && (isalnum((unsigned char)*l->p) || *l->p == '_'))
+			return -1;     /* 0x1g: unrecognized token, as SQLite */
+		tok->len = (int)(l->p - tok->p);
+		return TK_NUMBER;
+	}
+
 	/* number */
 	if (isdigit((unsigned char)*l->p) ||
 	    (*l->p == '.' && l->p + 1 < l->end &&
@@ -296,6 +312,9 @@ lex_next(lex_t *l, sql_token_t *tok)
 			while (l->p < l->end && isdigit((unsigned char)*l->p))
 				l->p++;
 		}
+		/* 12abc / 0x: SQLite's "unrecognized token", not 12 AS abc. */
+		if (l->p < l->end && (isalpha((unsigned char)*l->p) || *l->p == '_'))
+			return -1;
 		tok->len = (int)(l->p - tok->p);
 		return TK_NUMBER;
 	}
