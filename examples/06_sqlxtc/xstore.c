@@ -55,6 +55,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>     /* strcasecmp: SQL table names are case-insensitive */
 
 #include "btree.h"
 #include "wal.h"
@@ -934,7 +935,7 @@ xs_cat_lookup(bt_t *bt, const char *name)
 			const uint8_t *nm = vb + 1;
 			size_t nlen = (size_t)(vl >= 1 ? vl - 1 : 0), j;
 			for (j = 0; j < nlen; j++) if (nm[j] == 0) { nlen = j; break; }
-			if (nlen == want && memcmp(nm, name, want) == 0) {
+			if (nlen == want && strncasecmp((const char *)nm, name, want) == 0) {
 				found = (uint32_t)rid;
 				break;
 			}
@@ -987,7 +988,7 @@ xs_cat_find_or_create(bt_t *bt, const char *name, const char *coldefs)
 
 	xs_cat_lock();
 	for (i = 0; i < g_cat_n; i++)            /* seen in this process? */
-		if (g_cat[i].bt == bt && strcmp(g_cat[i].name, name) == 0) {
+		if (g_cat[i].bt == bt && strcasecmp(g_cat[i].name, name) == 0) {
 			id = g_cat[i].tableid;
 			xs_cat_unlock();
 			return id;
@@ -1083,7 +1084,7 @@ xstore_cat_forget_one(bt_t *bt, const char *name)
 	int i;
 	xs_cat_lock();
 	for (i = 0; i < g_cat_n; i++)
-		if (g_cat[i].bt == bt && strcmp(g_cat[i].name, name) == 0) {
+		if (g_cat[i].bt == bt && strcasecmp(g_cat[i].name, name) == 0) {
 			g_cat_n--;
 			if (i != g_cat_n) g_cat[i] = g_cat[g_cat_n];
 			break;
@@ -2033,7 +2034,7 @@ xstore_table_id(bt_t *bt, const char *name, uint32_t *tableid)
 	 * every connection on the shared bt. */
 	xs_cat_lock();
 	for (i = 0; i < g_cat_n; i++)
-		if (g_cat[i].bt == bt && strcmp(g_cat[i].name, name) == 0) {
+		if (g_cat[i].bt == bt && strcasecmp(g_cat[i].name, name) == 0) {
 			id = g_cat[i].tableid;
 			xs_cat_unlock();
 			if (tableid) *tableid = id;
@@ -2093,7 +2094,7 @@ xs_cat_value(bt_t *bt, const char *name, uint8_t *out, int cap)
 		if (vl >= 1 && (vb[0] & XS_F_DELETED)) continue;
 		nlen = (size_t)(vl >= 1 ? vl - 1 : 0);
 		for (j = 0; j < nlen; j++) if (vb[1 + j] == 0) { nlen = j; break; }
-		if (nlen == want && memcmp(vb + 1, name, want) == 0) {
+		if (nlen == want && strncasecmp((const char *)vb + 1, name, want) == 0) {
 			int n = (int)(vl >= 1 ? vl - 1 : 0);
 			if (n > cap) n = cap;
 			if (n > 0) memcpy(out, vb + 1, (size_t)n);
@@ -2122,7 +2123,7 @@ xstore_table_schema(bt_t *bt, const char *name, xstore_col_t *cols, int cap)
 	cached[0] = '\0';
 	xs_cat_lock();
 	for (i = 0; i < g_cat_n; i++)
-		if (g_cat[i].bt == bt && strcmp(g_cat[i].name, name) == 0) {
+		if (g_cat[i].bt == bt && strcasecmp(g_cat[i].name, name) == 0) {
 			if (g_cat[i].coldefs[0] != '\0')
 				snprintf(cached, sizeof cached, "%s", g_cat[i].coldefs);
 			break;
@@ -4105,7 +4106,7 @@ xstore_create_view(struct xsql *db, const char *name, const char *select_sql)
 	if (strlen(select_sql) >= sizeof g_view[0].sql) return 0;
 	xs_cat_lock();
 	for (i = 0; i < g_view_n; i++)          /* replace if redefined */
-		if (g_view[i].bt == bt && strcmp(g_view[i].name, name) == 0) {
+		if (g_view[i].bt == bt && strcasecmp(g_view[i].name, name) == 0) {
 			snprintf(g_view[i].sql, sizeof g_view[i].sql, "%s", select_sql);
 			rc = 1; break;
 		}
@@ -4129,7 +4130,7 @@ xstore_view_sql(bt_t *bt, const char *name, char *out, int cap)
 	if (bt == NULL || name == NULL || out == NULL || cap <= 0) return 0;
 	xs_cat_lock();
 	for (i = 0; i < g_view_n; i++)
-		if (g_view[i].bt == bt && strcmp(g_view[i].name, name) == 0) {
+		if (g_view[i].bt == bt && strcasecmp(g_view[i].name, name) == 0) {
 			snprintf(out, (size_t)cap, "%s", g_view[i].sql);
 			rc = 1; break;
 		}
@@ -4146,7 +4147,7 @@ xstore_drop_view(struct xsql *db, const char *name)
 	if (bt == NULL || name == NULL) return 0;
 	xs_cat_lock();
 	for (i = 0; i < g_view_n; i++)
-		if (g_view[i].bt == bt && strcmp(g_view[i].name, name) == 0) {
+		if (g_view[i].bt == bt && strcasecmp(g_view[i].name, name) == 0) {
 			g_view_n--;
 			if (i != g_view_n) g_view[i] = g_view[g_view_n];
 			break;
@@ -4531,7 +4532,7 @@ xstore_rename_table(struct xsql *db, const char *oldname, const char *newname)
 	if (coldefs == NULL) {
 		xs_cat_lock();
 		for (i = 0; i < g_cat_n; i++)
-			if (g_cat[i].bt == bt && strcmp(g_cat[i].name, oldname) == 0 &&
+			if (g_cat[i].bt == bt && strcasecmp(g_cat[i].name, oldname) == 0 &&
 			    g_cat[i].coldefs[0] != '\0') { coldefs = g_cat[i].coldefs; break; }
 		xs_cat_unlock();
 	}
@@ -4552,7 +4553,7 @@ xstore_rename_table(struct xsql *db, const char *oldname, const char *newname)
 	 * (same id + coldefs) so cross-connection lookups see it at once. */
 	xs_cat_lock();
 	for (i = 0; i < g_cat_n; i++)
-		if (g_cat[i].bt == bt && strcmp(g_cat[i].name, oldname) == 0) {
+		if (g_cat[i].bt == bt && strcasecmp(g_cat[i].name, oldname) == 0) {
 			snprintf(g_cat[i].name, sizeof g_cat[i].name, "%s", newname);
 			if (clen > 0)
 				snprintf(g_cat[i].coldefs, sizeof g_cat[i].coldefs, "%s", coldefs);

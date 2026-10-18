@@ -32,6 +32,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>     /* strcasecmp: SQL identifiers are case-insensitive */
 #include <ctype.h>
 #include <math.h>
 #include <stdatomic.h>
