@@ -513,9 +513,93 @@ def hdb_steps():
     return s
 
 
+# ---- composite keys, UNIQUE, multi-column / DESC indexes, tuple order ----
+KEYS_SCHEMA = [
+    "CREATE TABLE k(a INTEGER, b TEXT, v REAL, PRIMARY KEY(a, b))",
+    "CREATE TABLE u(id INTEGER PRIMARY KEY, e TEXT UNIQUE, x INT, y INT, "
+    "UNIQUE(x, y))",
+    "CREATE TABLE m(n BLOB, t TEXT, r REAL)",
+    "CREATE INDEX m_n ON m(n)",
+    "CREATE INDEX m_tn ON m(t DESC, n)",
+    "CREATE TABLE ip(id INT PRIMARY KEY, v)",
+]
+
+
+def keys_load():
+    st = []
+    for a in range(1, 6):
+        for b in ("n1", "n10", "n2", "", "a"):
+            st.append(("INSERT INTO k VALUES(?,?,?)", [a, b, a * 1.5]))
+    for i in range(1, 9):
+        st.append(("INSERT INTO u VALUES(?,?,?,?)",
+                   [i, "e%d" % i, i % 3, i // 3]))
+    vals = [3, 3.0, -2, 2.5, -2.75, 9007199254740993, 9007199254740992,
+            -9223372036854775807, 1e300, -1e300, 0, None, "s", "S", "", b"\x00\x01",
+            b"", "~", 2, 1.5]
+    for i, v in enumerate(vals):
+        st.append(("INSERT INTO m VALUES(?,?,?)",
+                   [v, ["x", "y", "z"][i % 3], i * 0.5]))
+    st.append(("INSERT INTO ip VALUES(?,?)", [1, "one"]))
+    return st
+
+
+def keys_steps():
+    u, o, e = "u", "o", "e"
+    s = []
+    s += [("SELECT a, b FROM k WHERE a = ? ORDER BY b", [2], o),
+          ("SELECT a, b, v FROM k WHERE a = ? AND b = ?", [3, "n1"], u),
+          ("SELECT a, b, v FROM k WHERE a = ? AND b = ?", [3, "n10"], u),
+          ("SELECT count(*) FROM k WHERE a BETWEEN ? AND ?", [2, 4], u),
+          ("INSERT INTO k VALUES(?,?,?)", [2, "n2", 0.0], e),
+          ("INSERT INTO k VALUES(?,?,?)", [2, "n3", 0.0], u),
+          ("UPDATE k SET b = ? WHERE a = ? AND b = ?", ["n1", 2, "n3"], e),
+          ("UPDATE k SET b = ? WHERE a = ? AND b = ?", ["n4", 2, "n3"], u),
+          ("SELECT a, b FROM k WHERE a = 2 ORDER BY b DESC", None, o),
+          ("INSERT INTO u VALUES(?,?,?,?)", [20, "e3", 7, 7], e),
+          ("INSERT INTO u VALUES(?,?,?,?)", [21, "e21", 1, 1], e),
+          ("INSERT INTO u VALUES(?,?,?,?)", [22, None, None, 1], u),
+          ("INSERT INTO u VALUES(?,?,?,?)", [23, None, None, 1], u),
+          ("INSERT INTO u VALUES(?,?,?,?)", [3, "e99", 9, 9], e),
+          ("UPDATE u SET e = 'e1' WHERE id = 2", None, e),
+          ("UPDATE u SET e = 'e2', x = x WHERE id = 2", None, u),
+          ("DELETE FROM u WHERE id = 1", None, u),
+          ("INSERT INTO u VALUES(?,?,?,?)", [30, "e1", 1, 0], u),
+          ("SELECT * FROM u ORDER BY id", None, o),
+          ("BEGIN", None, u),
+          ("INSERT INTO u VALUES(50,'e50',50,50)", None, u),
+          ("INSERT INTO u VALUES(51,'e50',51,51)", None, e),
+          ("SELECT id FROM u WHERE e = 'e50'", None, u),
+          ("UPDATE u SET e = 'e51' WHERE id = 50", None, u),
+          ("INSERT INTO u VALUES(51,'e50',51,51)", None, u),
+          ("COMMIT", None, u),
+          ("SELECT id, e FROM u WHERE id >= 50 ORDER BY id", None, o),
+          # tuple order: mixed INT/REAL/TEXT/BLOB/NULL through the indexes
+          ("SELECT t, r FROM m WHERE t = ? ORDER BY t DESC, n, r", ["y"], o),
+          ("SELECT t, r FROM m ORDER BY t DESC, n, r", None, o),
+          ("SELECT r FROM m WHERE typeof(n) <> 'blob' ORDER BY n, r", None, o),
+          ("CREATE UNIQUE INDEX m_un ON m(n)", None, e),
+          ("CREATE UNIQUE INDEX k_v ON k(v)", None, e),
+          ("CREATE UNIQUE INDEX m_ur ON m(r)", None, u),
+          ("INSERT INTO m VALUES(1, 'q', 0.5)", None, e),
+          # INT PRIMARY KEY is not a rowid alias: still unique
+          ("INSERT INTO ip VALUES(?,?)", [1, "dup"], e),
+          ("INSERT INTO ip VALUES(?,?)", [2, "two"], u),
+          ("SELECT * FROM ip ORDER BY id", None, o),
+          ("DROP TABLE k", None, u),
+          ("CREATE TABLE k(a, b, PRIMARY KEY(a, b))", None, u),
+          ("INSERT INTO k VALUES(1, 1)", None, u),
+          ("INSERT INTO k VALUES(1, 1)", None, e),
+          ("SELECT * FROM k", None, u)]
+    for t in ("u", "ip"):
+        s += [("SELECT * FROM %s" % t, None, u)]
+    s += [("SELECT t, r FROM m", None, u)]
+    return s
+
+
 SCRIPTS = [
     ("turso", TURSO_SCHEMA, turso_load, turso_steps),
     ("hammerdb", HDB_SCHEMA, hdb_load, hdb_steps),
+    ("keys", KEYS_SCHEMA, keys_load, keys_steps),
 ]
 
 

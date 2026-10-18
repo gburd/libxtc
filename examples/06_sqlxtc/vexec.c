@@ -4169,7 +4169,14 @@ vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 	if (sel->where && !(st->scan_has_lo && st->scan_has_hi &&
 	    st->scan_lo == st->scan_hi)) {
 		int64_t *ids = NULL; int nids = 0;
-		if (where_index_seek(db, tabbuf, sel->where, binds, nbinds, &ids, &nids)) {
+		uint32_t stid = 0;
+		/* The candidate list comes from the COMMITTED index: a txn that
+		 * wrote this table could miss its own rows (sqlite-audit gap #8
+		 * item 5), so it scans instead. */
+		if (xstore_table_id(st->bt, tabbuf, &stid) &&
+		    xstore_txn_table_dirty(db, stid)) {
+			/* fall through to the range scan */
+		} else if (where_index_seek(db, tabbuf, sel->where, binds, nbinds, &ids, &nids)) {
 			st->idx_seek = 1;
 			st->idx_rowids = ids;
 			st->idx_nrow = nids;
@@ -8288,6 +8295,22 @@ vx_unique_err(char **errmsg, const char *table, const char *pk)
 	*errmsg = strdup(m);
 }
 
+/* A refused INSERT: a UNIQUE index violation reports its own columns
+ * (xstore_uniq_err), a rowid collision the rowid column. */
+static void
+vx_write_uniq_err(struct xsql *db, char **errmsg, const char *table,
+    const char *pk)
+{
+	const char *u = xstore_uniq_err(db);
+	if (u[0] != '\0') {
+		if (errmsg == NULL) return;
+		free(*errmsg);
+		*errmsg = strdup(u);
+		return;
+	}
+	vx_unique_err(errmsg, table, pk);
+}
+
 /* Apply one INSERTed row.  REPLACE overwrites; a plain INSERT must not
  * find the key, checked atomically with the write (xstore_insert_txn),
  * so two concurrent INSERTs of one key cannot both succeed.  Returns 0,
@@ -8299,15 +8322,29 @@ vx_insert_row(struct xsql *db, uint32_t tableid, int64_t rowid,
 {
 	int rc;
 	if (replace)
-		rc = xstore_write_txn(db, tableid, rowid, rec, reclen, 0) == 0 ? 0 : -1;
+		rc = xstore_write_txn(db, tableid, rowid, rec, reclen, 0);
 	else
 		rc = xstore_insert_txn(db, tableid, rowid, rec, reclen);
 	if (rc == 0) return 0;
 	if (rc == 1)
-		vx_unique_err(errmsg, table, pk);
+		vx_write_uniq_err(db, errmsg, table, pk);
 	else if (errmsg != NULL && *errmsg == NULL)
 		*errmsg = strdup("native insert failed");
 	return -1;
+}
+
+/* Report a refused UPDATE / DELETE row write: a UNIQUE violation keeps
+ * its message, anything else gets `what`. */
+static void
+vx_write_err(struct xsql *db, int rc, char **errmsg, const char *what)
+{
+	if (errmsg == NULL) return;
+	free(*errmsg);
+	*errmsg = NULL;
+	if (rc == 1 && xstore_uniq_err(db)[0] != '\0')
+		*errmsg = strdup(xstore_uniq_err(db));
+	else
+		*errmsg = strdup(what);
 }
 
 int
@@ -8410,7 +8447,7 @@ vx_run_write_p(struct xsql *db, const char *sql,
 		for (i = 0; i < nr; i++) {
 			if (xstore_write_txn(db, tableid, rids[i], NULL, 0, 1) != 0) {
 				free(rids);
-				if (errmsg) *errmsg = strdup("native delete failed");
+				vx_write_err(db, -1, errmsg, "native delete failed");
 				rc = -1; goto done;
 			}
 		}
@@ -8583,16 +8620,21 @@ vx_run_write_p(struct xsql *db, const char *sql,
 			if (pk_reassign && pk_newval.i != rids[i]) {
 				/* Move: write the new payload at the new pk and tombstone
 				 * the old key. */
-				if (xstore_write_txn(db, tableid, pk_newval.i, rec, reclen, 0) != 0 ||
-				    xstore_write_txn(db, tableid, rids[i], NULL, 0, 1) != 0) {
+				int wr = xstore_write_txn(db, tableid, rids[i], NULL, 0, 1);
+				if (wr == 0)
+					wr = xstore_write_txn(db, tableid, pk_newval.i, rec, reclen, 0);
+				if (wr != 0) {
 					free(rids);
-					if (errmsg) *errmsg = strdup("native pk-reassign failed");
+					vx_write_err(db, wr, errmsg, "native pk-reassign failed");
 					rc = -1; goto done;
 				}
-			} else if (xstore_write_txn(db, tableid, rids[i], rec, reclen, 0) != 0) {
-				free(rids);
-				if (errmsg) *errmsg = strdup("native update failed");
-				rc = -1; goto done;
+			} else {
+				int wr = xstore_write_txn(db, tableid, rids[i], rec, reclen, 0);
+				if (wr != 0) {
+					free(rids);
+					vx_write_err(db, wr, errmsg, "native update failed");
+					rc = -1; goto done;
+				}
 			}
 			arena_free(rowarena); rowarena = NULL;
 			applied++;

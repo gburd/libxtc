@@ -773,35 +773,43 @@ sx_classify(const char *sql, int *tail_more,
 		const sql_create_t *c = root->u.create;
 		const sql_coldef_t *col, *pk = NULL;
 		size_t co = 0;
-		int npk = 0, implicit;
+		int npk = 0, implicit, has_pkidx = 0;
 		int ok;
-		/* CREATE [UNIQUE] INDEX name ON table(col): single-column only.
-		 * namebuf = index name; colbuf = "table\0col\0unique" (packed). */
+		/* CREATE [UNIQUE] INDEX name ON table(c1 [ASC|DESC], ...).
+		 * namebuf = index name; colbuf = "table\0c1,c2..\0unique\0
+		 * descmask\0" (packed). */
 		if (c != NULL && c->kind == SX_CR_INDEX && c->name.len > 0 &&
 		    (size_t)c->name.len < namecap && c->on_table.len > 0 &&
-		    c->index_cols != NULL && c->index_cols->head != NULL &&
-		    c->index_cols->head->next == NULL) {
-			const sql_expr_t *ce = c->index_cols->head->expr;
-			if (ce != NULL && ce->op == SX_E_COLUMN && ce->nname >= 1 &&
-			    ce->name[ce->nname - 1].len > 0) {
-				const sql_str_t *cn = &ce->name[ce->nname - 1];
-				size_t need = (size_t)c->on_table.len + 1 +
-				    (size_t)cn->len + 1 + 2;
-				if (need <= colcap) {
-					size_t o = 0;
-					memcpy(namebuf, c->name.p, c->name.len);
-					namebuf[c->name.len] = '\0';
-					memcpy(colbuf + o, c->on_table.p, c->on_table.len);
-					o += c->on_table.len; colbuf[o++] = '\0';
-					memcpy(colbuf + o, cn->p, cn->len);
-					o += cn->len; colbuf[o++] = '\0';
-					colbuf[o++] = c->unique ? '1' : '0';
-					colbuf[o] = '\0';
-					k = SXN_CREATE_INDEX;
-					break;
-				}
+		    c->index_cols != NULL && c->index_cols->head != NULL) {
+			const sql_exprlist_item_t *ic;
+			size_t o = 0;
+			unsigned dm = 0;
+			int ni = 0, w;
+			ok = (size_t)c->on_table.len + 2 < colcap;
+			if (ok) {
+				memcpy(colbuf, c->on_table.p, c->on_table.len);
+				o = c->on_table.len; colbuf[o++] = '\0';
 			}
-			k = SXN_NONE; break;   /* multi-column / expr index: decline */
+			for (ic = c->index_cols->head; ic && ok; ic = ic->next, ni++) {
+				const sql_expr_t *ce = ic->expr;
+				if (ni >= 16 || ce == NULL || ce->op != SX_E_COLUMN ||
+				    ce->nname != 1 || ce->name[0].len == 0) { ok = 0; break; }
+				if (ic->sort == 2) dm |= 1u << ni;
+				w = snprintf(colbuf + o, colcap - o, "%s%.*s", ni ? "," : "",
+				    (int)ce->name[0].len, ce->name[0].p);
+				if (w < 0 || o + (size_t)w + 16 >= colcap) { ok = 0; break; }
+				o += (size_t)w;
+			}
+			if (ok) {
+				colbuf[o++] = '\0';
+				w = snprintf(colbuf + o, colcap - o, "%c%c%u", c->unique ? '1' : '0',
+				    '\0', dm);
+				memcpy(namebuf, c->name.p, c->name.len);
+				namebuf[c->name.len] = '\0';
+				k = SXN_CREATE_INDEX;
+				break;
+			}
+			k = SXN_NONE; break;   /* expression index etc.: decline */
 		}
 		if (c != NULL && c->kind == SX_CR_VIEW && c->select != NULL &&
 		    c->name.len > 0 && (size_t)c->name.len < namecap &&
@@ -823,11 +831,31 @@ sx_classify(const char *sql, int *tail_more,
 		ok = (c != NULL && c->cols != NULL && c->select == NULL &&
 		      c->name.len > 0 && (size_t)c->name.len < namecap);
 		if (ok) {
+			const sql_coldef_t *pkcons = NULL;
 			memcpy(namebuf, c->name.p, c->name.len);
 			namebuf[c->name.len] = '\0';
-			for (col = c->cols; col; col = col->next)
-				if (col->primary) { npk++; pk = col; }
-			if (npk > 1) ok = 0;     /* composite PK: not yet native */
+			for (col = c->cols; col; col = col->next) {
+				if (col->cons == SX_CONS_PRIMARY) { npk++; pkcons = col; }
+				else if (col->cons == SX_CONS_NONE && col->primary) { npk++; pk = col; }
+			}
+			if (npk > 1) ok = 0;     /* two PRIMARY KEY clauses: an error */
+			/* PRIMARY KEY(x) over one column is the same as x PRIMARY KEY. */
+			if (ok && pkcons != NULL && pkcons->cons_cols != NULL &&
+			    pkcons->cons_cols->n == 1) {
+				const sql_expr_t *pe = pkcons->cons_cols->head->expr;
+				for (col = c->cols; col; col = col->next)
+					if (col->cons == SX_CONS_NONE && pe != NULL &&
+					    col->name.len == pe->name[0].len &&
+					    memcmp(col->name.p, pe->name[0].p, col->name.len) == 0)
+						pk = col;
+			}
+			/* SQLite: only a PK on one column declared exactly INTEGER is
+			 * the rowid; any other PRIMARY KEY is a UNIQUE autoindex over
+			 * an implicit rowid. */
+			if (pk != NULL && !(pk->type.len == 7 &&
+			    strncasecmp(pk->type.p, "INTEGER", 7) == 0))
+				pk = NULL;
+			if (pk == NULL && npk == 1) has_pkidx = 1;
 		}
 		implicit = ok && (pk == NULL);
 		if (ok && implicit) {
@@ -843,6 +871,7 @@ sx_classify(const char *sql, int *tail_more,
 			for (phase = 0; phase < phases && ok; phase++)
 				for (col = c->cols; col && ok; col = col->next) {
 					int w, is_pk = (!implicit && col == pk);
+					if (col->cons != SX_CONS_NONE) continue;
 					if (!implicit && (phase == 0 ? !is_pk : is_pk)) continue;
 					if (col->name.len == 0) { ok = 0; break; }
 					if (col->type.len > 0)
@@ -855,6 +884,48 @@ sx_classify(const char *sql, int *tail_more,
 					if (w < 0 || (size_t)(co + (size_t)w) >= colcap) { ok = 0; break; }
 					co += (size_t)w;
 				}
+		}
+		/* Constraint autoindexes, after the coldefs and a NUL:
+		 * "p:c1,c2;u:c3;" -- one per non-rowid PRIMARY KEY / UNIQUE, in
+		 * order of appearance (SQLite numbers sqlite_autoindex_<t>_<n>
+		 * the same way). */
+		if (ok) {
+			size_t so = co + 1;
+			if (so + 1 >= colcap) ok = 0;
+			else colbuf[co] = '\0';
+			for (col = c->cols; col && ok; col = col->next) {
+				const sql_exprlist_item_t *ci;
+				int w, isp, first = 1;
+				isp = (col->cons == SX_CONS_PRIMARY ||
+				    (col->cons == SX_CONS_NONE && col->primary));
+				if (isp && !has_pkidx) continue;   /* the rowid alias */
+				if (!isp && !(col->cons == SX_CONS_UNIQUE ||
+				    (col->cons == SX_CONS_NONE && col->unique)))
+					continue;
+				w = snprintf(colbuf + so, colcap - so, "%c:", isp ? 'p' : 'u');
+				if (w < 0 || so + (size_t)w >= colcap) { ok = 0; break; }
+				so += (size_t)w;
+				if (col->cons == SX_CONS_NONE) {
+					w = snprintf(colbuf + so, colcap - so, "%.*s",
+					    (int)col->name.len, col->name.p);
+					if (w < 0 || so + (size_t)w >= colcap) { ok = 0; break; }
+					so += (size_t)w;
+				} else {
+					for (ci = col->cons_cols ? col->cons_cols->head : NULL;
+					    ci; ci = ci->next) {
+						const sql_expr_t *ce = ci->expr;
+						if (ce == NULL || ce->nname != 1) { ok = 0; break; }
+						w = snprintf(colbuf + so, colcap - so, "%s%.*s",
+						    first ? "" : ",", (int)ce->name[0].len, ce->name[0].p);
+						if (w < 0 || so + (size_t)w >= colcap) { ok = 0; break; }
+						so += (size_t)w;
+						first = 0;
+					}
+				}
+				if (ok && so + 2 < colcap) { colbuf[so++] = ';'; colbuf[so] = '\0'; }
+				else ok = 0;
+			}
+			if (ok && so == co + 1) colbuf[so] = '\0';
 		}
 		k = ok ? SXN_CREATE : SXN_NONE;
 		break;
@@ -1039,9 +1110,13 @@ sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
 				st->ddl_name = strdup(nm);
 				if (st->ddl_name == NULL) { free(st->sql); free(st); return SX_NOMEM; }
 				if (k == SXN_CREATE) {
-					st->ddl_cols = strdup(cols);
+					/* "coldefs\0p:c1,c2;u:c3;\0": copy both parts. */
+					size_t cl = strlen(cols);
+					size_t xl = strlen(cols + cl + 1);
+					st->ddl_cols = (char *)malloc(cl + xl + 2);
 					if (st->ddl_cols == NULL) {
 						free(st->ddl_name); free(st->sql); free(st); return SX_NOMEM; }
+					memcpy(st->ddl_cols, cols, cl + xl + 2);
 				}
 			} else if (k == SXN_CREATE_VIEW) {
 				st->ddl_name = strdup(nm);
@@ -1058,12 +1133,14 @@ sx_prepare(sx_db *h, const char *sql, int n_bytes, sx_stmt **out,
 			} else if (k == SXN_CREATE_INDEX) {
 				st->ddl_name = strdup(nm);     /* index name */
 				if (st->ddl_name == NULL) { free(st->sql); free(st); return SX_NOMEM; }
-				/* cols is "table\0col\0unique\0"; strdup stops at the first
-				 * NUL, so copy the whole packed buffer explicitly. */
+				/* cols is "table\0c1,c2\0u\0descmask\0"; strdup stops at
+				 * the first NUL, so copy the whole packed buffer. */
 				{
 					size_t tl = strlen(cols);
 					size_t cl = strlen(cols + tl + 1);
-					size_t total = tl + 1 + cl + 1 + 1 + 1; /* table\0col\0u\0 */
+					size_t ul = strlen(cols + tl + cl + 2);
+					size_t dl = strlen(cols + tl + cl + ul + 3);
+					size_t total = tl + cl + ul + dl + 4;
 					st->ddl_cols = (char *)malloc(total);
 					if (st->ddl_cols == NULL) {
 						free(st->ddl_name); free(st->sql); free(st); return SX_NOMEM; }
@@ -1181,6 +1258,68 @@ nat_set_run_error(struct sx_stmt *st)
 }
 #endif
 
+#ifdef SQLXTC_HAVE_LIME
+/* CREATE INDEX (or a constraint autoindex): `csv` is the comma-joined
+ * column list.  A UNIQUE index over duplicate rows fails with SQLite's
+ * message. */
+static int
+nat_create_index(struct sx_stmt *st, const char *name, const char *table,
+    const char *csv, int unique, uint32_t descmask, int kind)
+{
+	char buf[1100], *p, *cols[16];
+	int n = 0, rc;
+	if (strlen(csv) >= sizeof buf) return SX_ERROR;
+	snprintf(buf, sizeof buf, "%s", csv);
+	for (p = buf; *p && n < 16; ) {
+		cols[n++] = p;
+		while (*p && *p != ',') p++;
+		if (*p == ',') *p++ = '\0';
+	}
+	rc = xstore_create_index_ex(st->db, name, table, (const char *const *)cols,
+	    n, descmask, unique, kind);
+	if (rc == 1) return SX_DONE;
+	if (rc < 0) {
+		char m[400];
+		size_t off;
+		int i;
+		off = (size_t)snprintf(m, sizeof m, "UNIQUE constraint failed: ");
+		for (i = 0; i < n && off < sizeof m; i++)
+			off += (size_t)snprintf(m + off, sizeof m - off, "%s%s.%s",
+			    i ? ", " : "", table, cols[i]);
+		return nat_set_err(st->db, m, SX_CONSTRAINT);
+	}
+	return SX_ERROR;
+}
+
+/* CREATE TABLE: the table, then one UNIQUE autoindex per non-rowid
+ * PRIMARY KEY / UNIQUE constraint ("p:c1,c2;u:c3;" after the coldefs),
+ * named sqlite_autoindex_<t>_<n> as SQLite does. */
+static int
+nat_create_table(struct sx_stmt *st)
+{
+	const char *ix = st->ddl_cols + strlen(st->ddl_cols) + 1;
+	char name[128], csv[1100];
+	int n = 0, rc;
+	if (xstore_create_table(st->db, st->ddl_name, st->ddl_cols) == 0)
+		return SX_ERROR;
+	while (*ix) {
+		char kind = ix[0];
+		const char *e = strchr(ix, ';');
+		size_t cl;
+		if (e == NULL || ix[1] != ':') return SX_ERROR;
+		cl = (size_t)(e - (ix + 2));
+		if (cl >= sizeof csv) return SX_ERROR;
+		memcpy(csv, ix + 2, cl);
+		csv[cl] = '\0';
+		snprintf(name, sizeof name, "sqlite_autoindex_%s_%d", st->ddl_name, ++n);
+		rc = nat_create_index(st, name, st->ddl_name, csv, 1, 0, kind);
+		if (rc != SX_DONE) return rc;
+		ix = e + 1;
+	}
+	return SX_DONE;
+}
+#endif
+
 int
 sx_step(sx_stmt *st)
 {
@@ -1203,7 +1342,7 @@ sx_step(sx_stmt *st)
 		switch (st->nkind) {
 		case SXN_WRITE: {
 			int64_t nch = 0;
-			int rc;
+			int rc, mark;
 			char *verr = NULL;
 			const char *w = st->sql;
 			while (isspace((unsigned char)*w)) w++;
@@ -1213,9 +1352,14 @@ sx_step(sx_stmt *st)
 			 * atomically with the write (xstore_insert_txn). */
 			if (sx_word(&w, "UPDATE") || sx_word(&w, "DELETE"))
 				xstore_stmt_begin(st->db);
+			/* In a transaction a failed statement undoes only its own
+			 * writes; the transaction stays open (SQLite statement
+			 * atomicity), so a harness can ROLLBACK or carry on. */
+			mark = xstore_stmt_mark(st->db);
 			rc = vx_run_write_p((struct xsql *)st->db, st->sql,
 			    st->nbind ? st->binds : NULL, st->nbind, &nch, &verr);
 			xstore_stmt_end(st->db);
+			if (rc != 1) xstore_stmt_undo(st->db, mark);
 			if (rc == 1) { free(verr); st->nchanges = nch; return SX_DONE; }
 			if (xstore_last_conflict(st->db)) {
 				free(verr);
@@ -1263,6 +1407,9 @@ sx_step(sx_stmt *st)
 			if (rc == 0) return SX_DONE;
 			if (rc == SX_BUSY)      /* serialization conflict */
 				return nat_set_err(st->db, SX_MSG_SERIALIZE, SX_BUSY);
+			if (rc == SX_CONSTRAINT)   /* a concurrent commit took the key */
+				return nat_set_err(st->db, xstore_uniq_err(st->db),
+				    SX_CONSTRAINT);
 			return nat_set_err(st->db, xstore_wal_failed() ? SX_MSG_WAL_IO
 			    : "commit failed; transaction rolled back", SX_ERROR);
 		}
@@ -1314,8 +1461,7 @@ sx_step(sx_stmt *st)
 			return SX_DONE;
 		}
 		case SXN_CREATE:
-			return xstore_create_table(st->db, st->ddl_name, st->ddl_cols) != 0
-			    ? SX_DONE : SX_ERROR;
+			return nat_create_table(st);
 		case SXN_DROP:
 			return xstore_drop_table(st->db, st->ddl_name) == 0
 			    ? SX_DONE : SX_ERROR;
@@ -1329,16 +1475,19 @@ sx_step(sx_stmt *st)
 			return xstore_rename_table(st->db, st->ddl_name, st->ddl_cols) == 0
 			    ? SX_DONE : SX_ERROR;
 		case SXN_CREATE_INDEX: {
-			/* ddl_cols packs "table\0col\0unique". */
+			/* ddl_cols packs "table\0c1,c2\0unique\0descmask". */
 			const char *table = st->ddl_cols;
-			const char *col = table + strlen(table) + 1;
-			const char *uq = col + strlen(col) + 1;
-			return xstore_create_index(st->db, st->ddl_name, table, col,
-			    uq[0] == '1') ? SX_DONE : SX_ERROR;
+			const char *cl = table + strlen(table) + 1;
+			const char *uq = cl + strlen(cl) + 1;
+			const char *dm = uq + strlen(uq) + 1;
+			return nat_create_index(st, st->ddl_name, table, cl, uq[0] == '1',
+			    (uint32_t)strtoul(dm, NULL, 10), 'i');
 		}
 		case SXN_DROP_INDEX:
 			/* Idempotent: dropping an unknown index is not an error. */
-			(void)xstore_drop_index(st->db, st->ddl_name);
+			if (xstore_drop_index(st->db, st->ddl_name) < 0)
+				return nat_set_err(st->db, "index associated with UNIQUE or "
+				    "PRIMARY KEY constraint cannot be dropped", SX_ERROR);
 			return SX_DONE;
 		case SXN_PRAGMA_NOP:
 			return SX_DONE;   /* value-setting PRAGMA: no-op, no rows */

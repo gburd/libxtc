@@ -70,6 +70,7 @@ numa_claim_probe
 evict_policy_proto
 test_index
 test_tpcc_seek
+test_dup_composite
 test_quack_range
 bench_btree_mixed
 bench_morsel_balance

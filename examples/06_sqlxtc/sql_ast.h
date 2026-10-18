@@ -215,13 +215,18 @@ typedef struct sql_delete {
 	sql_expr_t *where;
 } sql_delete_t;
 
-/* CREATE TABLE column + constraint shapes (kept structural). */
+/* CREATE TABLE column + constraint shapes (kept structural).  A table
+ * constraint PRIMARY KEY(...) / UNIQUE(...) is a node in the same chain
+ * with .cons set (name/type empty) and its columns in .cons_cols. */
+enum { SX_CONS_NONE = 0, SX_CONS_PRIMARY, SX_CONS_UNIQUE };
 typedef struct sql_coldef {
 	sql_str_t          name;
 	sql_str_t          type;     /* declared type token text, len 0 if none */
 	int                primary;  /* 1 if PRIMARY KEY on this column */
 	int                notnull;
 	int                unique;
+	int                cons;     /* SX_CONS_*: table constraint node */
+	sql_exprlist_t    *cons_cols; /* its columns (COLUMN exprs) */
 	struct sql_coldef *next;
 } sql_coldef_t;
 
@@ -238,7 +243,8 @@ typedef struct sql_create {
 	sql_coldef_t     *cols;         /* TABLE: column defs */
 	sql_select_t     *select;       /* TABLE_AS / VIEW */
 	sql_str_t         on_table;     /* INDEX: target table */
-	sql_exprlist_t   *index_cols;   /* INDEX: indexed columns (COLUMN exprs) */
+	sql_exprlist_t   *index_cols;   /* INDEX: indexed columns (COLUMN exprs;
+	                                 * item .sort 1 ASC / 2 DESC) */
 } sql_create_t;
 
 typedef enum sql_drop_kind {

@@ -546,7 +546,7 @@ create_stmt(R) ::= TK_CREATE temp_opt(TM) TK_TABLE if_not_exists(IE) qname(Q)
     }
 }
 create_stmt(R) ::= TK_CREATE unique_opt(U) TK_INDEX if_not_exists(IE) qname(Q)
-                   TK_ON TK_ID(OT) TK_LP id_list(IC) TK_RP. {
+                   TK_ON TK_ID(OT) TK_LP idx_col_list(IC) TK_RP. {
     sql_create_t *cr = AST(pstate, sql_create_t);
     R = AST(pstate, sql_stmt_t);
     if (R && cr) {
@@ -566,6 +566,28 @@ create_stmt(R) ::= TK_CREATE temp_opt(TM) TK_VIEW if_not_exists(IE) qname(Q)
         R->kind = SQL_KIND_CREATE; R->u.create = cr;
     }
 }
+
+/* CREATE INDEX column list: name [ASC|DESC] (item .sort 1 / 2). */
+%type idx_col_list {sql_exprlist_t *}
+%type idx_col {sql_exprlist_item_t *}
+idx_col_list(R) ::= idx_col(C). {
+    R = mk_list(pstate);
+    if (R && C) { R->head = R->tail = C; R->n = 1; }
+}
+idx_col_list(R) ::= idx_col_list(L) TK_COMMA idx_col(C). {
+    R = L;
+    if (R && C) { if (R->tail) R->tail->next = C; else R->head = C; R->tail = C; R->n++; }
+}
+idx_col(R) ::= TK_ID(T) sort_dir(D). {
+    sql_expr_t *c = mk_expr(pstate, SX_E_COLUMN);
+    R = AST(pstate, sql_exprlist_item_t);
+    if (c) { c->name[0] = tok_str(T); c->nname = 1; }
+    if (R) { R->expr = c; R->sort = D; }
+}
+%type sort_dir {int}
+sort_dir(R) ::= .        { R = 1; }
+sort_dir(R) ::= TK_ASC.  { R = 1; }
+sort_dir(R) ::= TK_DESC. { R = 2; }
 
 %type temp_opt {int}
 %type unique_opt {int}
@@ -598,7 +620,7 @@ table_body(R) ::= table_body(L) TK_COMMA table_elem(E). {
 }
 
 table_elem(R) ::= coldef(C). { R = C; }
-table_elem(R) ::= table_constraint. { R = NULL; }
+table_elem(R) ::= table_constraint(K). { R = K; }
 
 coldef(R) ::= TK_ID(N) type_opt(TY) col_constraints(CC). {
     R = AST(pstate, sql_coldef_t);
@@ -629,11 +651,21 @@ col_constraint(R) ::= TK_CHECK TK_LP expr TK_RP.    { R = 0; }
 col_constraint(R) ::= TK_REFERENCES qname.          { R = 0; }
 col_constraint(R) ::= TK_REFERENCES qname TK_LP id_list TK_RP. { R = 0; }
 
-table_constraint ::= TK_PRIMARY TK_KEY TK_LP id_list TK_RP.
-table_constraint ::= TK_UNIQUE TK_LP id_list TK_RP.
-table_constraint ::= TK_FOREIGN TK_KEY TK_LP id_list TK_RP TK_REFERENCES qname.
-table_constraint ::= TK_FOREIGN TK_KEY TK_LP id_list TK_RP TK_REFERENCES qname TK_LP id_list TK_RP.
-table_constraint ::= TK_CHECK TK_LP expr TK_RP.
+/* PRIMARY KEY(...) / UNIQUE(...) become a constraint node in the
+ * table_body chain (sql_coldef_t.cons, columns in .cons_cols); the
+ * other constraints are parsed and dropped (NULL). */
+%type table_constraint {sql_coldef_t *}
+table_constraint(R) ::= TK_PRIMARY TK_KEY TK_LP id_list(L) TK_RP. {
+    R = AST(pstate, sql_coldef_t);
+    if (R) { R->cons = SX_CONS_PRIMARY; R->cons_cols = L; }
+}
+table_constraint(R) ::= TK_UNIQUE TK_LP id_list(L) TK_RP. {
+    R = AST(pstate, sql_coldef_t);
+    if (R) { R->cons = SX_CONS_UNIQUE; R->cons_cols = L; }
+}
+table_constraint(R) ::= TK_FOREIGN TK_KEY TK_LP id_list TK_RP TK_REFERENCES qname. { R = NULL; }
+table_constraint(R) ::= TK_FOREIGN TK_KEY TK_LP id_list TK_RP TK_REFERENCES qname TK_LP id_list TK_RP. { R = NULL; }
+table_constraint(R) ::= TK_CHECK TK_LP expr TK_RP. { R = NULL; }
 
 /* ===== DROP ===== */
 

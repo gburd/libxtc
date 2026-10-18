@@ -340,53 +340,105 @@ int xstore_create_view(struct xsql *db, const char *name, const char *select_sql
 int xstore_view_sql(bt_t *bt, const char *name, char *out, int cap);
 int xstore_drop_view(struct xsql *db, const char *name);
 
-/* ---- secondary indexes (CREATE INDEX / DROP INDEX) --------------- *
+/* ---- secondary indexes, UNIQUE, composite PRIMARY KEY ------------ *
  *
- * A secondary index maps one indexed column's value to the base rowids
- * carrying it, so an equality WHERE on the column seeks instead of
- * full-scanning.  Entries live in the SAME B-tree as base rows, keyed
- * variable-length by [value][base_rowid] under a per-index namespace;
- * they are DERIVED data (rebuilt from the base rows at open, so a torn
- * un-WAL'd index page is never trusted).  The index catalog itself IS
- * persisted (WAL-durable version rows under a reserved table-id), so
- * the set of indexes and their target columns survive a crash.
- *
- * Scope: single-column indexes; equality (and single-type range) seek;
- * UNIQUE is parsed and recorded but NOT enforced (a duplicate does not
- * error).  Multi-column indexes decline (create returns 0).
+ * An index maps a tuple of column values (1..16 columns, each ASC or
+ * DESC) to the rowids carrying it, in an order-preserving key encoding,
+ * so an equality prefix plus an optional range on the next column is a
+ * contiguous range and walks in index order.  Entries live in the SAME
+ * B-tree as base rows under a per-index namespace; they are DERIVED
+ * data (rebuilt from the base rows at open).  The index catalog IS
+ * persisted (WAL-durable version rows), so the set of indexes survives
+ * a crash.  A UNIQUE index is enforced (statement time + re-validated at
+ * commit under the commit lock); a PRIMARY KEY that is not a rowid alias
+ * and every UNIQUE constraint are such indexes (kind 'p' / 'u', named
+ * sqlite_autoindex_<t>_<n>, as SQLite does).  See xstore.c.
  */
 
-/* Create index `name` on `table`(`col`).  `unique` records the UNIQUE
- * flag (not enforced).  Persists the catalog row and builds entries by
- * scanning the base table.  Returns 1 on success, 0 on failure /
- * unsupported (e.g. unknown table/column).  Idempotent by name. */
+/* Create index `name` on `table`(`cols[0..ncol)`), DESC per bit of
+ * descmask, unique 0/1, kind 'i' (CREATE INDEX) / 'p' (PRIMARY KEY) /
+ * 'u' (UNIQUE constraint).  Persists the catalog row and builds entries
+ * from the existing rows.  Returns 1 on success (also when an index of
+ * that name exists), 0 on failure (unknown table / column), or -1 when
+ * a UNIQUE index cannot be built because existing rows duplicate a key
+ * (nothing is created). */
+int xstore_create_index_ex(struct xsql *db, const char *name, const char *table,
+                           const char *const *cols, int ncol, uint32_t descmask,
+                           int unique, int kind);
+/* Single-column ascending CREATE INDEX (compat wrapper).  1 / 0. */
 int xstore_create_index(struct xsql *db, const char *name, const char *table,
                         const char *col, int unique);
-/* Drop index `name` (resolved to its table via the catalog).  Removes
- * the catalog row and the index entries.  Returns 1 on success, 0 if
- * the index is unknown. */
+/* Drop CREATE INDEX `name`.  1 on success, 0 if unknown, -1 if it is a
+ * constraint index (PRIMARY KEY / UNIQUE: not droppable, as SQLite). */
 int xstore_drop_index(struct xsql *db, const char *name);
 
-/* Planner support: is there an index on `table`.`col`?  On a hit fills
- * *idx_id (the index namespace) and returns 1; else 0.  Uses the
- * in-process index cache (populated at open / create). */
+/* The indexes of `table` (planner support): up to cap entries. */
+typedef struct xstore_index_info {
+	uint32_t idx_id;
+	char     name[64];
+	int      ncol;
+	char     col[16][64];
+	uint32_t descmask;
+	int      unique;
+	char     kind;
+} xstore_index_info_t;
+int xstore_index_list(bt_t *bt, const char *table, xstore_index_info_t *out,
+                      int cap);
+
+/* Is there an ascending index whose leading column is `table`.`col`?
+ * Fills *idx_id and returns 1; else 0. */
 int xstore_index_lookup(bt_t *bt, const char *table, const char *col,
                         uint32_t *idx_id);
 
-/* Seek an equality index scan: collect up to `cap` base rowids whose
- * indexed column equals the given typed value, into `out`.  `vclass`
- * is one of XSTORE_C_INT / _REAL / _TEXT / _BLOB (NULL is never
- * indexed-seekable here).  Returns the count (>= 0), or -1 on error /
- * overflow (caller falls back to a scan).  The rowids are candidates;
- * the caller re-fetches each through the normal MVCC point read so
- * snapshot visibility and read-your-writes still decide the row. */
+/* Candidate rowids whose index entry's leading column equals the typed
+ * value (XSTORE_C_*), into out (cap).  Returns the count, or -1 on
+ * overflow (caller scans).  Candidates may be stale: the caller
+ * re-fetches each through MVCC and re-applies the WHERE. */
 int xstore_index_seek_eq(bt_t *bt, uint32_t idx_id, int vclass,
                          int64_t ival, double rval,
                          const uint8_t *bytes, int nbytes,
                          int64_t *out, int cap);
 
-/* Count of index equality seeks served (metric / test evidence that the
- * planner took the index seek rather than a full table scan). */
+/* A typed value for index bounds (XSTORE_C_*; p/n for TEXT/BLOB). */
+typedef struct xstore_val {
+	int            cls;
+	int64_t        i;
+	double         r;
+	const uint8_t *p;
+	int            n;
+} xstore_val_t;
+
+/* Verified index range scan on the connection's snapshot: rows whose
+ * first neq index columns equal eq[], and (optionally) whose next
+ * column lies in [lo, hi] (inclusive per lo_incl / hi_incl; NULL bound =
+ * open; NULLs never match a range), in index order (reverse = 1:
+ * descending).  Each row returned is the version visible to the
+ * connection (its own buffered writes included) and carries the key, so
+ * the caller only needs to re-apply residual predicates.  NULL if the
+ * index or bounds are unusable (caller scans). */
+typedef struct xstore_iscan xstore_iscan_t;
+xstore_iscan_t *xstore_iscan_open(struct xsql *db, const char *table,
+                                  uint32_t idx_id, const xstore_val_t *eq,
+                                  int neq, const xstore_val_t *lo, int lo_incl,
+                                  const xstore_val_t *hi, int hi_incl,
+                                  int reverse);
+/* 1 with the row (rec valid until the next call), 0 at the end, <0 error. */
+int  xstore_iscan_next(xstore_iscan_t *s, int64_t *rowid,
+                       const uint8_t **rec, int *reclen);
+void xstore_iscan_close(xstore_iscan_t *s);
+
+/* The connection's last UNIQUE-index violation message ("UNIQUE
+ * constraint failed: t.a, t.b"), "" if none (a rowid-key conflict). */
+const char *xstore_uniq_err(struct xsql *db);
+
+/* Statement atomicity in a transaction: mark the write buffer before a
+ * statement; undo back to the mark if the statement fails (the
+ * transaction stays open, as in SQLite).  mark is -1 outside a txn. */
+int  xstore_stmt_mark(struct xsql *db);
+void xstore_stmt_undo(struct xsql *db, int mark);
+
+/* Count of index seeks served (metric / test evidence that the planner
+ * took the index rather than a full table scan). */
 uint64_t xstore_index_seek_count(void);
 
 /* Rebuild every catalog-recorded index for `bt` from its base rows.
