@@ -45,6 +45,7 @@
 #include "sql_parse_gen.h"   /* TK_* token ids */
 #include "btree.h"           /* bt_t */
 #include "xstore.h"          /* storage-native scan: the VDBE-free row source */
+#include "vxfunc.h"          /* date/time, printf, math, ... (VXF_EXT) */
 
 #include "xtc.h"             /* XTC_OK */
 #include "xtc_exec.h"        /* V2: morsel-parallel workers, one per loop */
@@ -196,7 +197,8 @@ enum vx_op {
 enum vx_func {
 	VXF_ABS = 1, VXF_LENGTH, VXF_LOWER, VXF_UPPER, VXF_COALESCE, VXF_IFNULL,
 	VXF_TYPEOF, VXF_SUBSTR, VXF_NULLIF, VXF_MIN, VXF_MAX, VXF_REPLACE,
-	VXF_TRIM, VXF_LTRIM, VXF_RTRIM, VXF_INSTR, VXF_ROUND, VXF_CAST
+	VXF_TRIM, VXF_LTRIM, VXF_RTRIM, VXF_INSTR, VXF_ROUND, VXF_CAST,
+	VXF_EXT                 /* a vxfunc.c function: its id in .col */
 };
 
 typedef struct vx_expr {
@@ -473,6 +475,7 @@ struct vx_stmt {
 	int              nbinds;
 
 	int           distinct;     /* SELECT DISTINCT: dedup the result */
+	int64_t       now_ms;       /* 'now' for this statement (unix ms), 0 = unused */
 
 	int           nout;
 	vx_expr_t   **proj;         /* nout projection expressions (non-agg path) */
@@ -876,6 +879,12 @@ node_class(const struct vx_compiler *c, const vx_expr_t *e)
 		case VXF_REPLACE: return VX_AFF_TEXT;
 		case VXF_TRIM: case VXF_LTRIM: case VXF_RTRIM: return VX_AFF_TEXT;
 		case VXF_TYPEOF: return VX_AFF_TEXT;
+		case VXF_EXT:
+			switch (vxf_class_of(e->col)) {
+			case VXF_C_TEXT: return VX_AFF_TEXT;
+			case VXF_C_NUM:  return VX_AFF_NUMERIC;
+			default:         return VX_AFF_BLOB;
+			}
 		case VXF_CAST:
 			switch ((enum vx_cast_class)e->col) {
 			case VX_CAST_TEXT: return VX_AFF_TEXT;
@@ -1012,8 +1021,8 @@ func_of(const sql_str_t *name, int *nargs_ok, int nargs)
 		*nargs_ok = 1;
 		return tbl[i].f;
 	}
-	*nargs_ok = 0;
-	return 0;
+	*nargs_ok = vxf_lookup(name->p, name->len, nargs) > 0;
+	return *nargs_ok ? VXF_EXT : 0;
 }
 
 static int
@@ -1087,6 +1096,7 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 	if (e == NULL) return -1;
 	switch (e->op) {
 	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING: case SX_E_PARAM:
+	case SX_E_BLOB:
 		return 0;
 	case SX_E_COLUMN:
 		if (e->nname < 1 || e->nname > 2) return -1;
@@ -1278,7 +1288,10 @@ item_name(const sql_exprlist_item_t *it, char *dst, size_t cap)
 	}
 }
 
-/* Compile a literal AST node into a VXO_LIT (INT/REAL/TEXT/NULL). */
+static int lit_cell(struct vx_arena_blk **arena, const sql_expr_t *e,
+                    vx_cell_t *out, const vx_cell_t *binds, int nbinds);
+
+/* Compile a literal AST node into a VXO_LIT (INT/REAL/TEXT/BLOB/NULL). */
 static vx_expr_t *
 compile_literal(struct vx_compiler *c, const sql_expr_t *e)
 {
@@ -1309,6 +1322,11 @@ compile_literal(struct vx_compiler *c, const sql_expr_t *e)
 		n->lit.type = VX_TEXT; n->lit.bytes = p; n->lit.nbytes = e->lit.len;
 		return n;
 	}
+	case SX_E_BLOB:   /* x'..': decoded into the plan arena */
+		if (lit_cell(&c->st->plan_arena, e, &n->lit, NULL, 0) != 0) {
+			c->fail = 1; return NULL;
+		}
+		return n;
 	default:
 		c->fail = 1;
 		return NULL;
@@ -1341,6 +1359,35 @@ compile_param(struct vx_compiler *c, const sql_expr_t *e)
 		n->lit = *v;   /* INT / REAL / NULL: by value */
 	}
 	return n;
+}
+
+/* Finish a VXF_EXT call node (args already compiled): record the
+ * vxfunc id in .col, decline a 'localtime'/'utc' modifier, and stamp the
+ * statement's 'now' once (SQLite: one time value per statement) when the
+ * call can read the clock.  Returns 0, or -1 to decline. */
+static int
+compile_ext(struct vx_compiler *c, const sql_expr_t *e, vx_expr_t *n)
+{
+	const vx_cell_t *lits[16];
+	int k;
+	n->col = vxf_lookup(e->name[0].p, e->name[0].len, n->nargs);
+	if (n->col <= 0 || n->nargs > 16) return -1;
+	for (k = 0; k < n->nargs; k++) {
+		/* A column or expression of numeric class may hold a REAL. */
+		lits[k] = n->args[k]->op == VXO_LIT ? &n->args[k]->lit : NULL;
+		if (!vxf_arg_ok(n->col, k, lits[k],
+		    node_class(c, n->args[k]) != VX_AFF_TEXT)) return -1;
+	}
+	if (vxf_unsupported_mod(n->col, lits, n->nargs)) return -1;
+	if (vxf_wants_now(n->col, lits, n->nargs) && c->st->now_ms == 0)
+		c->st->now_ms = vxf_now_ms();
+	return 0;
+}
+
+static void *
+ext_alloc(void *ctx, size_t n)
+{
+	return arena_alloc((struct vx_arena_blk **)ctx, n);
 }
 
 /* Compile an UNCORRELATED scalar subquery (SELECT ...) used as an
@@ -2014,7 +2061,7 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 		c->fail = save;
 		return compile_corr_in_select(c, e);
 	}
-	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING:
+	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING: case SX_E_BLOB:
 		return compile_literal(c, e);
 	case SX_E_PARAM:
 		return compile_param(c, e);
@@ -2336,6 +2383,7 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 		if (f == VXF_ABS && node_class(c, n->args[0]) != VX_AFF_NUMERIC) {
 			c->fail = 1; return NULL;
 		}
+		if (f == VXF_EXT && compile_ext(c, e, n) != 0) { c->fail = 1; return NULL; }
 		return n;
 	}
 
@@ -2395,27 +2443,13 @@ eval_bool(const struct vx_stmt *st, const vx_expr_t *e,
 }
 
 /* Render a REAL the way SQLite turns one into TEXT ("%!.15g", sqlite
- * 3.46): 15 significant digits; a value with no '.' in that form gets
- * ".0" (before the exponent, so 1e20 -> "1.0e+20"); -0.0 is "0.0";
- * +-Inf is "Inf" / "-Inf"; NaN is NULL in SQLite and never reaches here.
- * Writes at most cap bytes (cap >= 32) and returns the length. */
+ * 3.46): 15 significant digits after SQLite's own 18-digit decode, ".0"
+ * on a value with no '.', "1.0e+20" style exponent, -0.0 -> "0.0",
+ * Inf -> "Inf".  The one implementation lives in vxfunc.c. */
 static int
 real_text(double r, char *buf, size_t cap)
 {
-	char *e;
-	int n;
-	if (r == 0.0) r = 0.0;                  /* -0.0 -> 0.0 */
-	if (isinf(r)) return snprintf(buf, cap, "%s", r < 0 ? "-Inf" : "Inf");
-	n = snprintf(buf, cap, "%.15g", r);
-	if (n < 0 || (size_t)n + 3 > cap || strchr(buf, '.') != NULL) return n;
-	e = strchr(buf, 'e');
-	if (e == NULL) {
-		memcpy(buf + n, ".0", 3);
-	} else {
-		memmove(e + 2, e, strlen(e) + 1);
-		e[0] = '.'; e[1] = '0';
-	}
-	return n + 2;
+	return vxf_real_text(r, buf, cap);
 }
 
 /* SQLite numeric affinity on a TEXT cell: if the WHOLE string parses as
@@ -2978,6 +3012,14 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 	case VXO_FUNC: {
 		vx_cell_t a;
 		switch (e->func) {
+		case VXF_EXT: {
+			vx_cell_t av[16];
+			int k;
+			for (k = 0; k < e->nargs && k < 16; k++)
+				eval(st, e->args[k], row, arena, &av[k]);
+			vxf_eval(e->col, av, e->nargs, st->now_ms, ext_alloc, arena, out);
+			return;
+		}
 		case VXF_TYPEOF: {
 			/* SQLite storage-class name of the argument. */
 			const char *tn;
@@ -4526,7 +4568,7 @@ compile_having(struct vx_compiler *c, const sql_select_t *sel,
 	}
 
 	switch (e->op) {
-	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING:
+	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING: case SX_E_BLOB:
 		return compile_literal(c, e);
 	case SX_E_PARAM:
 		return compile_param(c, e);
@@ -4637,7 +4679,7 @@ compile_agg_proj(struct vx_compiler *c, const sql_select_t *sel,
 	}
 
 	switch (e->op) {
-	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING:
+	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING: case SX_E_BLOB:
 		return compile_literal(c, e);
 	case SX_E_PARAM:
 		return compile_param(c, e);
@@ -4695,6 +4737,7 @@ compile_agg_proj(struct vx_compiler *c, const sql_select_t *sel,
 			if (n->args[k] == NULL) return NULL;
 			k++;
 		}
+		if (f == VXF_EXT && compile_ext(c, e, n) != 0) { c->fail = 1; return NULL; }
 		return n;
 	}
 	case SX_E_CASE:
@@ -7412,6 +7455,7 @@ par_worker(xtc_task_t *self, void *user)
 	w.agg = par->plan->agg;        /* borrowed (immutable plan) */
 	w.bt = par->plan->bt;
 	w.snap = par->plan->snap;
+	w.now_ms = par->plan->now_ms;  /* one 'now' per statement, every worker */
 	w.nsrc_col = par->plan->nsrc_col;
 	memcpy(w.src_pay, par->plan->src_pay, sizeof w.src_pay);
 	snprintf(w.table, sizeof w.table, "%s", par->plan->table);

@@ -528,6 +528,65 @@ CORPUS = [
       "('9223372036854775808','9223372036854775807','-9223372036854775808'),"
       "(' -7 ','.5','5.'),('+.5e2','1e400','00012')"],
      "SELECT n, typeof(n), r, typeof(r), i, typeof(i) FROM t"),
+    # Date/time functions with fixed arguments (no 'now').
+    ("dt_date_time", [],
+     "SELECT date('2024-02-29'), time('12:34:56'), datetime('2024-01-31 10:00:00', '+1 month'), "
+     "julianday('2000-01-01'), unixepoch('2024-01-01'), date('2024-01-15', 'start of month', '+1 month', '-1 day')"),
+    ("dt_strftime", [],
+     "SELECT strftime('%Y/%m/%d %H:%M:%S %j %w %s %f', '2024-03-05 07:08:09.123'), "
+     "strftime('%d|%e|%F|%G|%g|%H|%I|%J|%k|%l|%M|%p|%P|%R|%T|%u|%U|%V|%W|%%', '2024-01-07 15:04:05')"),
+    ("dt_modifiers", [],
+     "SELECT datetime(1700000000, 'unixepoch'), date(2460000.5), datetime('2024-01-01T05:06'), "
+     "date('2024-01-01', 'weekday 0'), datetime('2024-01-01 10:00:00', '+90 minutes', '-30 seconds'), "
+     "datetime('2024-01-01', '+1.5 days'), date('2024-03-31', '-1 month'), date('2024-01-31', '+1 month', 'floor'), "
+     "datetime('2024-01-01 12:00:00.5', 'subsec'), date('2024-01-01', '+0001-01-01'), datetime(1700000000, 'auto')"),
+    ("dt_bad_input", [],
+     "SELECT date('bogus'), date('2024-13-01'), time('25:00'), date(NULL), date('2024-01-01', 'nonsense'), "
+     "strftime('%Q', '2024-01-01'), date('2024-02-30'), datetime(-1, 'unixepoch')"),
+    ("dt_on_column",
+     ["CREATE TABLE t(d TEXT)",
+      "INSERT INTO t VALUES('2024-01-15 10:30:00'),('2023-12-31 23:59:59'),(NULL)"],
+     "SELECT d, date(d, '+1 day'), strftime('%Y', d), julianday(d) FROM t"),
+    ("dt_now_shapes", [],
+     "SELECT typeof(date('now')), length(datetime('now')), length(time()), "
+     "length(CURRENT_TIMESTAMP), length(CURRENT_DATE), length(CURRENT_TIME), "
+     "CURRENT_DATE = date('now'), typeof(unixepoch())"),
+    # Scalar functions.
+    ("fn_iif_sign", [],
+     "SELECT iif(1, 'a', 'b'), iif(0, 'a', 'b'), iif(NULL, 'a', 'b'), iif('1abc', 'a', 'b'), "
+     "sign(-3), sign(0), sign(2.5), sign('x'), sign(NULL), sign('-3')"),
+    ("fn_hex_quote_char", [],
+     "SELECT hex('abc'), hex(255), hex(1.5), hex(NULL), hex(x'0aff'), "
+     "quote('it''s'), quote(1), quote(1.5), quote(NULL), quote(x'0a'), quote(1e20), quote(0.1), "
+     "char(72, 105), unicode('A'), unicode(''), char()"),
+    ("fn_concat", [],
+     "SELECT concat('a', NULL, 1, 2.5), concat_ws('-', 'a', NULL, 'b', 3), "
+     "concat(NULL), concat_ws(NULL, 1, 2), concat_ws(',', NULL)"),
+    ("fn_printf", [],
+     "SELECT printf('%d %5.2f %s %x %q %Q %c %%|%-5d|%05d|%e|%g', 42, 3.14159, 'hi', 255, "
+     "'a''b', 'z', 'x', 7, 7, 12345.678, 0.0001), format('%s-%s', 1, 2.0), "
+     "printf('%.0f|%.0f|%.0f|%.2f', 0.5, 1.5, 2.5, 1.005), printf('%,d|%+d|% d|%X|%o|%#x', "
+     "-1234567, 5, 5, 255, 8, 255)"),
+    ("fn_printf_edges", [],
+     "SELECT printf('%s|%5s|%-5s|%.2s|%w', 'abc', 'ab', 'ab', 'abcdef', 'a\"b'), "
+     "printf('%d', '12abc'), printf('%d', 3.9), printf('%s'), printf(NULL), printf('%*d|%-*d|%.*f', 5, 42, 5, 42, 2, 3.14159), "
+     "printf('%10.4f|%-10.2e|%010.3f|%#g', 3.14159, 31415.9, -3.14159, 1.0), printf('100%')"),
+    ("fn_math", [],
+     "SELECT ceil(1.2), ceil(-1.2), ceil(3), floor(2.7), trunc(-2.7), typeof(ceil(3)), "
+     "ln(1), log(100), log(2, 8), log10(1000), log2(8), exp(0), pow(2, 10), power(2, 0.5), "
+     "mod(7, 3), mod(7.5, 2), sqrt(4), sqrt(-1), pi(), degrees(pi()), radians(180), "
+     "sin(0), cos(0), atan2(1, 1), acos(2)"),
+    ("fn_on_columns",
+     ["CREATE TABLE t(a INT, s TEXT, r REAL)",
+      "INSERT INTO t VALUES(1, 'x', 1.5),(-2, 'y''z', NULL),(NULL, NULL, 2.0)"],
+     "SELECT quote(s), hex(s), sign(a), iif(a > 0, 'pos', 'neg'), "
+     "printf('%d:%s:%.1f', a, s, r), concat_ws('/', a, s, r), ceil(r) FROM t"),
+    ("fn_in_where",
+     ["CREATE TABLE t(d TEXT, v INT)",
+      "INSERT INTO t VALUES('2024-01-15', 1),('2024-02-20', 2),('2023-03-01', 3)"],
+     "SELECT v FROM t WHERE strftime('%Y', d) = '2024' AND sign(v) = 1"),    ("real_text_ties", [],   # SQLite's 18-digit decode then half-up (not printf's)
+     "SELECT CAST(98135134594298.25 AS TEXT), CAST(501353836885252.5 AS TEXT), "
+     "400760634880118.5 || '', CAST(0.1 + 0.2 AS TEXT)"),
 ]
 
 # Features sqlxtc does not yet implement.  Reported, not failed -- these

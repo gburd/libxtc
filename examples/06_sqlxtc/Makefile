@@ -53,13 +53,13 @@ OBJS = $(SRCS:.c=.o)
 # requires the committed sql_parse_gen.c (regenerate with 'make
 # sql_parse' only when the grammar changes).
 LIME_OBJ := sql_parse_gen.o sql_parse_drv.o sql_ast.o
-VEXEC_OBJ := vexec.o
+VEXEC_OBJ := vexec.o vxfunc.o
 CFLAGS  += -DSQLXTC_HAVE_LIME=1
 
 # The full native SQL engine, for storage-engine tests that drive the
 # B-tree through the native sx_* SQL API (sx_open_bt).  No SQLite.
 ENGINE_NATIVE = engine.c db.c quack.c metrics.c \
-    vexec.c sql_parse.c sql_parse_drv.c sql_ast.c sql_parse_gen.c \
+    vexec.c vxfunc.c sql_parse.c sql_parse_drv.c sql_ast.c sql_parse_gen.c \
     xstore.c xlog.c wal.c btree.c btnode.c bufmgr.o
 
 TARGET = sqlxtc-server
@@ -184,7 +184,7 @@ AMALG_CFLAGS = -O2 -g -std=c11 -Wall -Wextra -Wpedantic -D_GNU_SOURCE \
                -I$(AMALG_DIR)/include -I.
 # Native engine sources for the amalgamation link (server set + the
 # parser + vexec; no SQLite).
-AMALG_SRCS   = $(SRCS) vexec.c sql_parse_drv.c sql_ast.c sql_parse_gen.c
+AMALG_SRCS   = $(SRCS) vexec.c vxfunc.c sql_parse_drv.c sql_ast.c sql_parse_gen.c
 AMALG_OBJS   = $(AMALG_SRCS:.c=.amalg.o)
 
 .PHONY: amalg amalg-test

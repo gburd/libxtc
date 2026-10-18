@@ -273,6 +273,7 @@ struct limit_v { sql_expr_t *limit; sql_expr_t *offset; };
 
 %token TK_ID.       %token TK_NUMBER.  %token TK_STRING.  %token TK_BLOB.
 %token TK_ESCAPE.   %token TK_NULLS.   %token TK_FIRST.   %token TK_LAST.
+%token TK_CTIME.    /* CURRENT_DATE / CURRENT_TIME / CURRENT_TIMESTAMP */
 
 /* Non-reserved keywords: a token in this list that has no action in the
  * current parser state is retried as TK_ID, so it still works as a table,
@@ -284,7 +285,7 @@ struct limit_v { sql_expr_t *limit; sql_expr_t *offset; };
   TK_END TK_EXPLAIN TK_IF TK_KEY TK_LIKE TK_OFFSET TK_PLAN TK_PRAGMA
   TK_QUERY TK_RECURSIVE TK_RELEASE TK_RENAME TK_REPLACE TK_ROLLBACK
   TK_SAVEPOINT TK_TEMP TK_TEMPORARY TK_TRIGGER TK_VIEW TK_WITH
-  TK_NULLS TK_FIRST TK_LAST.
+  TK_NULLS TK_FIRST TK_LAST TK_CTIME.
 
 /* ===== expression precedence (low to high) ===== *
  *
@@ -1023,6 +1024,13 @@ expr_atom(R) ::= TK_NUMBER(T). { R = mk_expr(pstate, SX_E_NUMBER); if (R) { R->l
 expr_atom(R) ::= TK_STRING(T). { R = mk_expr(pstate, SX_E_STRING); if (R) { R->lit = tok_str_unquote(pstate, T); span_tok(R, T); } }
 expr_atom(R) ::= TK_BLOB(T).   { R = mk_expr(pstate, SX_E_BLOB);   if (R) { R->lit = tok_str(T); span_tok(R, T); } }
 expr_atom(R) ::= TK_NULL(T).   { R = mk_expr(pstate, SX_E_NULL); span_tok(R, T); }
+/* CURRENT_DATE / _TIME / _TIMESTAMP: a zero-argument call of the
+ * function of the same name (SQLite parse.y:1329, term ::= CTIME_KW). */
+expr_atom(R) ::= TK_CTIME(T).  {
+    R = mk_expr(pstate, SX_E_FUNC);
+    if (R) { R->name[0] = tok_str(T); R->nname = 1; }
+    span_tok(R, T);
+}
 expr_atom(R) ::= TK_TRUE(T).   { R = mk_expr(pstate, SX_E_BOOL); if (R) { R->ival = 1; span_tok(R, T); } }
 expr_atom(R) ::= TK_FALSE(T).  { R = mk_expr(pstate, SX_E_BOOL); if (R) { R->ival = 0; span_tok(R, T); } }
 expr_atom(R) ::= TK_QMARK(T).  {
