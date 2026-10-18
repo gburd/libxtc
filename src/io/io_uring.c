@@ -1103,11 +1103,21 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 				 * The re-arm was prepared just above (__node_kick);
 				 * submit it now.  If the SQ had no room it is queued
 				 * on io->pending, which the next poll flushes before
-				 * it can block -- it is never dropped. */
-				(void)__ring_submit(io);
-				rearmed = 0;
+				 * it can block -- it is never dropped.
+				 *
+				 * Only the FIRST wakeup CQE of a poll is submitted
+				 * inline (its drain follows).  A later one finds the
+				 * pipe already drained by this call, so its re-arm
+				 * waits for the end-of-poll submit: submitted here, a
+				 * still-readable pipe completes it at once and the
+				 * next peek finds another wakeup CQE -- a self-feeding
+				 * io_uring_enter chain bounded only by the reap cap
+				 * (max + CQ size, ~528 enters on the default ring). */
 				if (!wakeup_emitted) {
-					int drc = __xtc_io_drain_wakeup(io);
+					int drc;
+					(void)__ring_submit(io);
+					rearmed = 0;
+					drc = __xtc_io_drain_wakeup(io);
 					if (drc != XTC_OK) {
 						__tail_reap(io, NULL);
 						io_uring_cqe_seen(&io->ring, cqe);
