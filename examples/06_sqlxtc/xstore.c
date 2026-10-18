@@ -1397,6 +1397,7 @@ typedef struct xstore_cursor {
 	uint8_t      val[XS_VMAX];
 	uint16_t     vlen;
 	bt_cursor_t *btc;            /* persistent scan cursor, parked between calls */
+	uint64_t     visited;        /* version keys examined (metric, flushed at close) */
 } xstore_cursor_t;
 
 /*
@@ -1751,6 +1752,7 @@ xs_advance(xstore_cursor_t *c)
 			c->eof = 1;
 			break;
 		}
+		c->visited++;
 		kb = (const uint8_t *)k; vb = (const uint8_t *)vv;
 		if (dec_tableid(kb) != c->tableid) {
 			c->eof = 1;             /* ran past our table into the next */
@@ -1963,10 +1965,24 @@ xstore_scan_next(xstore_scan_t *s, int64_t *rowid,
 	}
 }
 
+/* Base-table version keys examined by storage scans (the rows-visited
+ * metric: a point read touches O(1), a full scan O(table)).  Each scan
+ * counts locally and publishes once at close. */
+static _Atomic uint64_t g_rows_visited;
+
+uint64_t
+xstore_rows_visited(void)
+{
+	return atomic_load_explicit(&g_rows_visited, memory_order_relaxed);
+}
+
 void
 xstore_scan_close(xstore_scan_t *s)
 {
 	if (s == NULL) return;
+	if (s->c.visited)
+		atomic_fetch_add_explicit(&g_rows_visited, s->c.visited,
+		    memory_order_relaxed);
 	if (s->c.btc != NULL) bt_cursor_close(s->c.btc);
 	free(s);
 }

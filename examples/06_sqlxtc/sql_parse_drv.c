@@ -367,6 +367,7 @@ sql_parse_run(const char *sql, size_t len, sql_parse_state_t *st)
  * left-to-right order they appear.  (The grammar leaves PARAM.ival 0;
  * a single post-order walk numbers them.) */
 static void number_params_expr(sql_expr_t *e, int *next);
+static void number_params_select(sql_select_t *s, int *next);
 static void number_params_list(sql_exprlist_t *l, int *next) {
 	sql_exprlist_item_t *it;
 	if (!l) return;
@@ -385,9 +386,11 @@ static void number_params_expr(sql_expr_t *e, int *next) {
 		number_params_expr(arm->then, next);
 	}
 	number_params_expr(e->els, next);
+	/* A subquery's ? are numbered in place, so ordinals follow source
+	 * order across the outer and inner statement (as SQLite does). */
+	number_params_select(e->sel, next);
 }
 
-static void number_params_select(sql_select_t *s, int *next);
 static void
 number_params_src(sql_src_t *src, int *next)
 {

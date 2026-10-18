@@ -69,6 +69,7 @@ bench_btree_concurrent
 numa_claim_probe
 evict_policy_proto
 test_index
+test_tpcc_seek
 test_quack_range
 bench_btree_mixed
 bench_morsel_balance

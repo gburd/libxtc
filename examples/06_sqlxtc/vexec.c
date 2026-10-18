@@ -695,6 +695,10 @@ struct vx_joinctx {
 	char      alias[VX_JOIN_MAX][64];   /* alias per side ("" if none) */
 	struct namevec col[VX_JOIN_MAX];    /* columns collected per side */
 	int       base[VX_JOIN_MAX];        /* combined-row offset where each side starts */
+	/* Each side's catalog schema (heap; jc_schema_load / _free), so an
+	 * UNQUALIFIED column is recorded only on the side that has it. */
+	xstore_col_t *sc[VX_JOIN_MAX];
+	int       nsc[VX_JOIN_MAX];
 };
 
 struct vx_compiler {
@@ -1734,6 +1738,81 @@ compile_exists(struct vx_compiler *c, const sql_expr_t *e)
 	return n;
 }
 
+/* The ? ordinals used inside a subquery's AST: [*lo, *hi], count in the
+ * return value (0 = none).  The parser numbers a subquery's ? in place
+ * and in the same order a standalone parse of its text would, so they
+ * are the contiguous run of the outer binds the inner run needs. */
+static int param_span_sel(const sql_select_t *q, int *lo, int *hi);
+static int
+param_span_expr(const sql_expr_t *e, int *lo, int *hi)
+{
+	const sql_exprlist_item_t *it;
+	const sql_case_arm_t *arm;
+	int n = 0;
+	if (e == NULL) return 0;
+	if (e->op == SX_E_PARAM) {
+		int o = (int)e->ival;
+		if (*lo == 0 || o < *lo) *lo = o;
+		if (o > *hi) *hi = o;
+		return 1;
+	}
+	n += param_span_expr(e->a, lo, hi);
+	n += param_span_expr(e->b, lo, hi);
+	n += param_span_expr(e->c, lo, hi);
+	n += param_span_expr(e->els, lo, hi);
+	for (it = e->list ? e->list->head : NULL; it; it = it->next)
+		n += param_span_expr(it->expr, lo, hi);
+	for (arm = e->arms; arm; arm = arm->next) {
+		n += param_span_expr(arm->when, lo, hi);
+		n += param_span_expr(arm->then, lo, hi);
+	}
+	return n + param_span_sel(e->sel, lo, hi);
+}
+static int
+param_span_list(const sql_exprlist_t *l, int *lo, int *hi)
+{
+	const sql_exprlist_item_t *it;
+	int n = 0;
+	for (it = l ? l->head : NULL; it; it = it->next)
+		n += param_span_expr(it->expr, lo, hi);
+	return n;
+}
+static int
+param_span_sel(const sql_select_t *q, int *lo, int *hi)
+{
+	const sql_src_t *f;
+	int n = 0;
+	if (q == NULL) return 0;
+	n += param_span_list(q->cols, lo, hi);
+	for (f = q->from; f; f = f->next) {
+		n += param_span_sel(f->subquery, lo, hi);
+		n += param_span_expr(f->on, lo, hi);
+	}
+	n += param_span_expr(q->where, lo, hi);
+	n += param_span_list(q->group, lo, hi);
+	n += param_span_expr(q->having, lo, hi);
+	n += param_span_list(q->order, lo, hi);
+	n += param_span_expr(q->limit, lo, hi);
+	n += param_span_expr(q->offset, lo, hi);
+	return n + param_span_sel(q->rhs, lo, hi);
+}
+
+/* The bind slice an uncorrelated subquery's standalone run needs: sets
+ * *b / *nb (NULL / 0 when it has no ?).  Returns 0, or -1 when its ?
+ * are not bound (the caller declines). */
+static int
+subq_binds(const struct vx_compiler *c, const sql_select_t *q,
+           const vx_cell_t **b, int *nb)
+{
+	int lo = 0, hi = 0;
+	*b = NULL; *nb = 0;
+	if (param_span_sel(q, &lo, &hi) == 0) return 0;
+	if (c->binds == NULL || lo < 1 || hi > c->nbinds) return -1;
+	*b = c->binds + (lo - 1);
+	*nb = hi - lo + 1;
+	return 0;
+}
+
 static vx_expr_t *
 compile_scalar_subquery(struct vx_compiler *c, const sql_expr_t *e)
 {
@@ -1741,11 +1820,13 @@ compile_scalar_subquery(struct vx_compiler *c, const sql_expr_t *e)
 	char *sub, *s;
 	size_t len;
 	vx_result_t *r = NULL;
-	int rc, nrow;
+	const vx_cell_t *sb;
+	int rc, nrow, snb;
 
 	if (c->st == NULL || c->st->db == NULL || e->src == NULL || e->srclen == 0) {
 		c->fail = 1; return NULL;
 	}
+	if (subq_binds(c, e->sel, &sb, &snb) != 0) { c->fail = 1; return NULL; }
 	/* Correlation/shape gate, NATIVE: an uncorrelated scalar subquery
 	 * projects exactly one column and references no outer column.  This
 	 * replaces the former SQLite prepare-as-gate so a subquery over a
@@ -1769,7 +1850,7 @@ compile_scalar_subquery(struct vx_compiler *c, const sql_expr_t *e)
 	 * (rc 0) or errors (rc < 0), or it returns the wrong shape, fall the
 	 * WHOLE outer query back to the VDBE -- so the result is always the
 	 * VDBE's, never a divergence. */
-	rc = vx_run(c->st->db, sub, 1, &r, NULL);
+	rc = vx_run_p(c->st->db, sub, sb, snb, 1, &r, NULL);
 	free(sub);
 	if (rc != 1 || r == NULL) { if (r) vx_result_free(r); c->fail = 1; return NULL; }
 	if (vx_result_ncol(r) != 1) { vx_result_free(r); c->fail = 1; return NULL; }
@@ -1857,9 +1938,11 @@ compile_in_select(struct vx_compiler *c, const sql_expr_t *e)
 	enum vx_aff acls;
 	char *sub, *s;
 	size_t len;
-	int cnt = 0, cap = 16, nrow, ri, rc;
+	const vx_cell_t *sb;
+	int cnt = 0, cap = 16, nrow, ri, rc, snb;
 
 	if (c->st == NULL || c->st->db == NULL) { c->fail = 1; return NULL; }
+	if (subq_binds(c, e->sel, &sb, &snb) != 0) { c->fail = 1; return NULL; }
 	a = compile_expr(c, e->a);
 	if (a == NULL) return NULL;
 	acls = node_class(c, a);
@@ -1879,7 +1962,7 @@ compile_in_select(struct vx_compiler *c, const sql_expr_t *e)
 	if (len < 2 || s[0] != '(' || s[len-1] != ')') { free(sub); c->fail = 1; return NULL; }
 	s[len-1] = '\0';
 	memmove(sub, s + 1, len - 1);
-	rc = vx_run(c->st->db, sub, 1, &r, NULL);
+	rc = vx_run_p(c->st->db, sub, sb, snb, 1, &r, NULL);
 	free(sub);
 	if (rc != 1 || r == NULL || vx_result_ncol(r) != 1) {
 		if (r) vx_result_free(r);
@@ -1930,9 +2013,14 @@ compile_in_select(struct vx_compiler *c, const sql_expr_t *e)
 	vx_result_free(r);
 
 	if (cnt == 0) {
-		/* IN (empty) is always false; NOT IN (empty) always true.  The
-		 * VXO_IN eval needs >=1 arg, so leave the empty case to the VDBE. */
-		c->fail = 1; return NULL;
+		/* IN (empty) is false and NOT IN (empty) true for every operand,
+		 * NULL included (SQLite); the stock-level IN over an empty order
+		 * range must not be rejected. */
+		n->op = VXO_LIT;
+		n->a = NULL;
+		n->lit.type = VX_INT;
+		n->lit.i = e->ival ? 1 : 0;
+		return n;
 	}
 	n->nargs = cnt;
 	build_in_index(c, n);   /* sorted membership: subquery values are literals */
@@ -2070,6 +2158,9 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 			    (cb == VX_AFF_NUMERIC || cb == VX_AFF_TEXT)) ok = 1;
 			if (!ok && b_dyn && !a_dyn &&
 			    (ca == VX_AFF_NUMERIC || ca == VX_AFF_TEXT)) ok = 1;
+			/* A NULL literal (e.g. an empty scalar subquery) makes the
+			 * comparison NULL whatever the other side: no coercion. */
+			if (!ok && (is_null_lit(a) || is_null_lit(b))) ok = 1;
 			if (!ok) { c->fail = 1; return NULL; }
 			break;
 		}
@@ -3561,15 +3652,23 @@ static int vx_prepare_select(struct xsql *db, sql_arena_t *ast,
                              const vx_cell_t *binds, int nbinds,
                              vx_stmt_t **out, char **errmsg);
 
-/* Parse a NUMBER expr (with an optional leading unary minus) as an
- * integer literal.  Returns 1 with *v set, or 0 (not an integer
- * literal). */
+/* An integer-valued literal for planning: a NUMBER (with an optional
+ * leading unary minus) or a bound ? whose value is an INTEGER.  Returns 1
+ * with *v set, or 0.  TPROC-C drives every point lookup with a bound
+ * param, so a bind-blind bound full-scans each one (sqlite-audit gap #1). */
 static int
-ast_int_lit(const sql_expr_t *e, int64_t *v)
+ast_int_lit(const sql_expr_t *e, int64_t *v, const vx_cell_t *binds, int nbinds)
 {
 	int neg = 0;
 	char buf[32]; int i;
 	if (e == NULL) return 0;
+	if (e->op == SX_E_PARAM) {
+		int ord = (int)e->ival;
+		if (binds == NULL || ord < 1 || ord > nbinds ||
+		    binds[ord - 1].type != VX_INT) return 0;
+		*v = binds[ord - 1].i;
+		return 1;
+	}
 	if (e->op == SX_E_UNARY && e->op2 == TK_MINUS) { neg = 1; e = e->a; }
 	if (e == NULL || e->op != SX_E_NUMBER || e->lit.len == 0 ||
 	    e->lit.len >= sizeof buf) return 0;
@@ -3600,17 +3699,19 @@ ast_is_named_col(const sql_expr_t *e, const char *pk)
  * read planner uses it to seek instead of full-scanning. */
 static void
 where_rowid_bound(const sql_expr_t *w, const char *pk,
-                  int64_t *lo, int *has_lo, int64_t *hi, int *has_hi)
+                  int64_t *lo, int *has_lo, int64_t *hi, int *has_hi,
+                  const vx_cell_t *binds, int nbinds)
 {
 	if (w == NULL) return;
 	if (w->op == SX_E_BINARY && w->op2 == TK_AND) {
-		where_rowid_bound(w->a, pk, lo, has_lo, hi, has_hi);
-		where_rowid_bound(w->b, pk, lo, has_lo, hi, has_hi);
+		where_rowid_bound(w->a, pk, lo, has_lo, hi, has_hi, binds, nbinds);
+		where_rowid_bound(w->b, pk, lo, has_lo, hi, has_hi, binds, nbinds);
 		return;
 	}
 	if (w->op == SX_E_BETWEEN && ast_is_named_col(w->a, pk)) {
 		int64_t b, c;
-		if (ast_int_lit(w->b, &b) && ast_int_lit(w->c, &c)) {
+		if (ast_int_lit(w->b, &b, binds, nbinds) &&
+		    ast_int_lit(w->c, &c, binds, nbinds)) {
 			if (!*has_lo || b > *lo) { *lo = b; *has_lo = 1; }
 			if (!*has_hi || c < *hi) { *hi = c; *has_hi = 1; }
 		}
@@ -3622,7 +3723,7 @@ where_rowid_bound(const sql_expr_t *w, const char *pk,
 		if (ast_is_named_col(w->a, pk)) lit = w->b;
 		else if (ast_is_named_col(w->b, pk)) { lit = w->a; swapped = 1; }
 		else return;
-		if (!ast_int_lit(lit, &v)) return;
+		if (!ast_int_lit(lit, &v, binds, nbinds)) return;
 		if (swapped) {
 			switch (op) {
 			case TK_LT: op = TK_GT; break;  case TK_GT: op = TK_LT; break;
@@ -3710,7 +3811,7 @@ where_index_seek(struct xsql *db, const char *table, const sql_expr_t *w,
 		else if (v->type == VX_TEXT) { vclass = XSTORE_C_TEXT; sp = (const char *)v->bytes; sn = (int)v->nbytes; }
 		else if (v->type == VX_BLOB) { vclass = XSTORE_C_BLOB; sp = (const char *)v->bytes; sn = (int)v->nbytes; }
 		else return 0;   /* REAL / NULL param: not seek-encoded here */
-	} else if (ast_int_lit(lit, &iv)) {
+	} else if (ast_int_lit(lit, &iv, NULL, 0)) {
 		vclass = XSTORE_C_INT;
 	} else if (ast_str_lit(lit, &sp, &sn)) {
 		vclass = XSTORE_C_TEXT;
@@ -4055,7 +4156,8 @@ vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 		if (pk >= 0 && sel->where)
 			where_rowid_bound(sel->where, nv.names[pk],
 			                  &st->scan_lo, &st->scan_has_lo,
-			                  &st->scan_hi, &st->scan_has_hi);
+			                  &st->scan_hi, &st->scan_has_hi,
+			                  binds, nbinds);
 	}
 
 	/* Secondary-index equality seek: if the WHERE has an equality on an
@@ -4948,27 +5050,70 @@ is_col_ref(const sql_expr_t *e)
  * per-side namevecs (resolving the qualifier to a side).  Returns 0 if
  * every column resolves to exactly one side, -1 otherwise.  Mirrors
  * collect_columns' supported-construct gate. */
+/* Load each side's catalog schema into jc (heap).  A side whose schema
+ * is unknown keeps nsc == 0 (unqualified names then fail to resolve
+ * there).  Pair with jc_schema_free on every exit. */
+static void
+jc_schema_load(struct xsql *db, struct vx_joinctx *jc)
+{
+	bt_t *bt = xstore_bt_of(db);
+	int side, n;
+	for (side = 0; side < jc->nside; side++) {
+		jc->sc[side] = NULL;
+		jc->nsc[side] = 0;
+		if (bt == NULL) continue;
+		jc->sc[side] = (xstore_col_t *)malloc(sizeof(xstore_col_t) * 64);
+		if (jc->sc[side] == NULL) continue;
+		n = xstore_table_schema(bt, jc->tab[side], jc->sc[side], 64);
+		jc->nsc[side] = n > 0 ? n : 0;
+	}
+}
+
+static void
+jc_schema_free(struct vx_joinctx *jc)
+{
+	int side;
+	for (side = 0; side < VX_JOIN_MAX; side++) {
+		free(jc->sc[side]);
+		jc->sc[side] = NULL;
+		jc->nsc[side] = 0;
+	}
+}
+
+/* Does join side `side` have a column named `col` (or a rowid alias)? */
+static int
+jc_side_has(const struct vx_joinctx *jc, int side, const sql_str_t *col)
+{
+	int c;
+	for (c = 0; c < jc->nsc[side]; c++)
+		if (!jc->sc[side][c].hidden && str_eq_cstr(col, jc->sc[side][c].name))
+			return 1;
+	return 0;
+}
+
 static int
 jc_collect(struct vx_joinctx *jc, const sql_expr_t *e)
 {
 	const sql_exprlist_item_t *it;
+	const sql_case_arm_t *arm;
 	if (e == NULL) return -1;
 	switch (e->op) {
-	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING: return 0;
+	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING: case SX_E_PARAM:
+		return 0;
 	case SX_E_COLUMN: {
 		const sql_str_t *qual = (e->nname == 2) ? &e->name[0] : NULL;
 		const sql_str_t *col = &e->name[e->nname - 1];
 		int side, hit = -1;
+		if (e->nname < 1 || e->nname > 2) return -1;
 		for (side = 0; side < jc->nside; side++) {
 			if (qual) {
 				const char *q = jc->alias[side][0] ? jc->alias[side] : jc->tab[side];
 				if (!str_eq_cstr(qual, q)) continue;
+			} else if (!jc_side_has(jc, side, col)) {
+				continue;   /* unqualified: only the side that has it */
 			}
-			if (hit >= 0 && !qual) {
-				/* unqualified and could match either side -> add to the
-				 * side that already has it / both; ambiguity is rejected
-				 * at resolve time, so just record on each candidate side. */
-			}
+			if (!qual && hit >= 0)
+				return -1;  /* unqualified on two sides: ambiguous */
 			if (nv_add(&jc->col[side], col) < 0) return -1;
 			hit = side;
 		}
@@ -4979,16 +5124,35 @@ jc_collect(struct vx_joinctx *jc, const sql_expr_t *e)
 		return jc_collect(jc, e->a);
 	case SX_E_BINARY: {
 		enum vx_op d;
-		if (!tok_to_binop(e->op2, &d)) return -1;
+		if (e->op2 != TK_LIKE && !tok_to_binop(e->op2, &d)) return -1;
 		if (jc_collect(jc, e->a) != 0) return -1;
 		return jc_collect(jc, e->b);
 	}
+	case SX_E_BETWEEN:
+		if (jc_collect(jc, e->a) != 0 || jc_collect(jc, e->b) != 0) return -1;
+		return jc_collect(jc, e->c);
+	case SX_E_IN_LIST:
+		if (e->a == NULL || e->sel != NULL || jc_collect(jc, e->a) != 0)
+			return -1;
+		for (it = e->list ? e->list->head : NULL; it; it = it->next)
+			if (jc_collect(jc, it->expr) != 0) return -1;
+		return 0;
+	case SX_E_CASE:
+		if (e->a != NULL && jc_collect(jc, e->a) != 0) return -1;
+		for (arm = e->arms; arm; arm = arm->next)
+			if (jc_collect(jc, arm->when) != 0 ||
+			    jc_collect(jc, arm->then) != 0) return -1;
+		if (e->els != NULL && jc_collect(jc, e->els) != 0) return -1;
+		return 0;
 	case SX_E_IS_NULL: return jc_collect(jc, e->a);
 	case SX_E_FUNC: {
 		int na = 0, ok = 0;
 		if (e->ival & 3) return -1;
 		for (it = e->list ? e->list->head : NULL; it; it = it->next) na++;
-		(void)func_of(&e->name[0], &ok, na);
+		if (e->nname == 2 && name_is(&e->name[0], "cast") && na == 1)
+			ok = 1;
+		else
+			(void)func_of(&e->name[0], &ok, na);
 		if (!ok) return -1;
 		for (it = e->list ? e->list->head : NULL; it; it = it->next)
 			if (jc_collect(jc, it->expr) != 0) return -1;
@@ -5014,6 +5178,7 @@ vx_try_prepare_join(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	int nproj = 0, i, side, rc = 0, lkey, rkey;
 
 	if (errmsg) *errmsg = NULL;
+	memset(&jc, 0, sizeof jc);
 
 	/* INNER / LEFT / RIGHT / FULL (and comma/cross) supported; ON must be
 	 * present for the outer kinds (a join key is required for hashing). */
@@ -5029,12 +5194,12 @@ vx_try_prepare_join(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	lhs = is_col_ref(on->a); rhs = is_col_ref(on->b);
 	if (lhs == NULL || rhs == NULL) goto fallback;   /* only col = col */
 
-	memset(&jc, 0, sizeof jc);
 	jc.nside = 2;
 	memcpy(jc.tab[0], s0->table.p, s0->table.len); jc.tab[0][s0->table.len] = '\0';
 	memcpy(jc.tab[1], s1->table.p, s1->table.len); jc.tab[1][s1->table.len] = '\0';
 	if (s0->alias.len && s0->alias.len < 64) { memcpy(jc.alias[0], s0->alias.p, s0->alias.len); jc.alias[0][s0->alias.len] = '\0'; }
 	if (s1->alias.len && s1->alias.len < 64) { memcpy(jc.alias[1], s1->alias.p, s1->alias.len); jc.alias[1][s1->alias.len] = '\0'; }
+	jc_schema_load(db, &jc);
 
 	/* SELECT * is not supported on the join path (column expansion +
 	 * dedup across two tables); fall back. */
@@ -5222,6 +5387,7 @@ vx_try_prepare_join(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	st->srcrow = (vx_cell_t *)calloc((size_t)st->nsrc_col, sizeof(vx_cell_t));
 	if (!st->srcrow) goto oom;
 
+	jc_schema_free(&jc);
 	sql_arena_destroy(ast);
 	*out = st;
 	return 1;
@@ -5229,6 +5395,7 @@ vx_try_prepare_join(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 oom:
 	rc = -1;
 fallback:
+	jc_schema_free(&jc);
 	if (ast) sql_arena_destroy(ast);
 	if (st) { free(st->join); st->join = NULL; vx_finalize(st); }
 	else free(jp);
@@ -5258,6 +5425,7 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	int nside = 0, nproj = 0, side, rc = 0, total = 0;
 
 	if (errmsg) *errmsg = NULL;
+	memset(&jc, 0, sizeof jc);
 
 	/* Gather the FROM sources: all base tables, all INNER / comma /
 	 * cross; each after the first carries an equi-join ON (col = col). */
@@ -5288,7 +5456,6 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	}
 	if (nside < 2) goto fallback;   /* single table goes elsewhere */
 
-	memset(&jc, 0, sizeof jc);
 	jc.nside = nside;
 	for (side = 0; side < nside; side++) {
 		memcpy(jc.tab[side], src[side]->table.p, src[side]->table.len);
@@ -5298,6 +5465,7 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 			jc.alias[side][src[side]->alias.len] = '\0';
 		}
 	}
+	jc_schema_load(db, &jc);
 
 	/* SELECT * + aggregates fall back on the join path. */
 	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
@@ -5482,6 +5650,7 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	st->srcrow = (vx_cell_t *)calloc((size_t)total, sizeof(vx_cell_t));
 	if (!st->srcrow) goto oom;
 
+	jc_schema_free(&jc);
 	sql_arena_destroy(ast);
 	*out = st;
 	return 1;
@@ -5489,6 +5658,7 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 oom:
 	rc = -1;
 fallback:
+	jc_schema_free(&jc);
 	if (ast) sql_arena_destroy(ast);
 	if (st) { free(st->njoin); st->njoin = NULL; vx_finalize(st); }
 	else free(jp);
@@ -8154,7 +8324,8 @@ vx_run_write_p(struct xsql *db, const char *sql,
 	bt_t *bt;
 	uint32_t tableid;
 	struct wschema ws;
-	struct vx_arena_blk *cell_arena = NULL;
+	struct vx_arena_blk *cell_arena = NULL, *rowarena = NULL;
+	struct vx_stmt *sst = NULL;     /* UPDATE: SET-expression plan */
 	int rc = 0, r, applied = 0;
 	int64_t maxr;
 
@@ -8261,6 +8432,9 @@ vx_run_write_p(struct xsql *db, const char *sql,
 		 * tombstone-old + insert-new move. */
 		vx_cell_t setval[64]; int setcol[64], nset = 0;
 		const sql_expr_t *setast[64];   /* non-literal RHS, evaluated per row */
+		vx_expr_t *setx[64];            /* setast compiled over the old row */
+		struct namevec snv;
+		struct vx_compiler scomp;
 		int pk_reassign = 0; vx_cell_t pk_newval;
 		int64_t *rids;
 		memset(&pk_newval, 0, sizeof pk_newval);
@@ -8270,17 +8444,17 @@ vx_run_write_p(struct xsql *db, const char *sql,
 			for (k = 0; k < ws.n; k++)
 				if (a->col.len == strlen(ws.name[k]) &&
 				    strncmp(a->col.p, ws.name[k], a->col.len) == 0) { col = k; break; }
-			if (col < 0) { sql_arena_destroy(arena); return 0; } /* unknown col -> VDBE */
+			if (col < 0) { rc = 0; goto done; } /* unknown col -> VDBE */
 			if (col == 0) {
-				if (pk_reassign) { sql_arena_destroy(arena); return 0; }  /* SET k twice */
+				if (pk_reassign) { rc = 0; goto done; }  /* SET k twice */
 				if (lit_cell(&cell_arena, a->val, &pk_newval, binds, nbinds) != 0 ||
 				    pk_newval.type != VX_INT) {
-					sql_arena_destroy(arena); return 0;  /* non-int / non-literal pk -> VDBE */
+					rc = 0; goto done;  /* non-int / non-literal pk -> VDBE */
 				}
 				pk_reassign = 1;
 				continue;
 			}
-			if (nset >= 64) { sql_arena_destroy(arena); return 0; }
+			if (nset >= 64) { rc = 0; goto done; }
 			if (lit_cell(&cell_arena, a->val, &setval[nset], binds, nbinds) == 0) {
 				setast[nset] = NULL;          /* literal: same value every row */
 			} else {
@@ -8288,6 +8462,37 @@ vx_run_write_p(struct xsql *db, const char *sql,
 			}
 			setcol[nset] = col;   /* declared index (>=1) */
 			nset++;
+		}
+		/* Compile every non-literal SET RHS once with the real
+		 * expression compiler over the table's columns (binds, CASE,
+		 * functions, %, || ...); evaluated per row against the OLD row.
+		 * A RHS the compiler's affinity gate rejects (arithmetic on an
+		 * untyped column) keeps the mini-evaluator below. */
+		memset(&snv, 0, sizeof snv);
+		sst = (struct vx_stmt *)calloc(1, sizeof *sst);
+		if (sst == NULL) { rc = -1; goto done; }
+		sst->db = db; sst->bt = bt; sst->binds = binds; sst->nbinds = nbinds;
+		snprintf(sst->table, sizeof sst->table, "%s", tabbuf);
+		scomp.st = sst; scomp.nv = &snv; scomp.jc = NULL; scomp.fail = 0;
+		scomp.binds = binds; scomp.nbinds = nbinds;
+		for (ci = 0; ci < nset && !scomp.fail; ci++)
+			if (setast[ci] != NULL && collect_columns(&snv, setast[ci]) != 0)
+				scomp.fail = 1;
+		if (!scomp.fail && snv.n > 0 &&
+		    resolve_schema(db, tabbuf, &snv, sst->src_pay) != 0)
+			scomp.fail = 1;
+		sst->nsrc_col = snv.n;
+		for (ci = 0; ci < nset && !scomp.fail; ci++) {
+			setx[ci] = NULL;
+			if (setast[ci] != NULL)
+				setx[ci] = compile_expr(&scomp, setast[ci]);
+		}
+		if (snv.n != sst->nsrc_col)
+			scomp.fail = 1;   /* compile added an unresolved column */
+		if (!scomp.fail) {
+			sst->srcrow = (vx_cell_t *)calloc((size_t)(snv.n > 0 ? snv.n : 1),
+			    sizeof(vx_cell_t));
+			if (sst->srcrow == NULL) { rc = -1; goto done; }
 		}
 		rids = (int64_t *)malloc(sizeof(int64_t) * XS_NATIVE_MAX_ROWS);
 		if (rids == NULL) { rc = -1; goto done; }
@@ -8298,7 +8503,7 @@ vx_run_write_p(struct xsql *db, const char *sql,
 			nr = collect_matching(db, bt, tabbuf, up->where,
 			                      rids, XS_NATIVE_MAX_ROWS, binds, nbinds);
 		}
-		if (nr == -1) { free(rids); sql_arena_destroy(arena); return 0; }  /* too many / not compilable -> VDBE */
+		if (nr == -1) { free(rids); rc = 0; goto done; }  /* too many / not compilable -> VDBE */
 		if (nr < 0) { free(rids); rc = -1; goto done; }
 
 		/* A pk reassign sets the primary key to a single constant.  More
@@ -8308,13 +8513,13 @@ vx_run_write_p(struct xsql *db, const char *sql,
 		 * the row being moved); a collision also falls back. */
 		if (pk_reassign) {
 			int64_t newpk = pk_newval.i;
-			if (nr > 1) { free(rids); sql_arena_destroy(arena); return 0; }
+			if (nr > 1) { free(rids); rc = 0; goto done; }
 			if (nr == 1 && newpk != rids[0]) {
 				uint8_t probe[XS_REC_MAX]; int pl;
-				if (xstore_in_txn(db)) { free(rids); sql_arena_destroy(arena); return 0; }  /* committed-scan check unsafe in txn */
+				if (xstore_in_txn(db)) { free(rids); rc = 0; goto done; }  /* committed-scan check unsafe in txn */
 				pl = read_one_row((struct xsql *)db, bt, tabbuf, newpk, probe, (int)sizeof probe);
 				if (pl < 0) { free(rids); rc = -1; goto done; }
-				if (pl > 0) { free(rids); sql_arena_destroy(arena); return 0; }  /* collision -> VDBE */
+				if (pl > 0) { free(rids); rc = 0; goto done; }  /* collision -> VDBE */
 			}
 		}
 		for (i = 0; i < nr; i++) {
@@ -8337,6 +8542,9 @@ vx_run_write_p(struct xsql *db, const char *sql,
 				default:            c->type = VX_NULL; break;
 				}
 			}
+			if (!scomp.fail)
+				decode_rec_cells(sst->src_pay, snv.n, rids[i], cur, curlen,
+				    sst->srcrow, &rowarena);
 			for (ci = 0; ci < nset; ci++) {
 				/* Evaluate against the OLD row (SQLite evaluates every
 				 * SET RHS against the pre-update values), then overlay.
@@ -8345,11 +8553,13 @@ vx_run_write_p(struct xsql *db, const char *sql,
 				vx_cell_t nvval;
 				if (setast[ci] == NULL) {
 					nvval = setval[ci];
+				} else if (!scomp.fail) {
+					eval(sst, setx[ci], sst->srcrow, &rowarena, &nvval);
 				} else if (eval_set_expr(setast[ci], cells, ws.n - 1,
 				                         rids[i], &ws, &nvval) != 0) {
 					/* Unsupported RHS shape: clean fallback only if
 					 * nothing applied yet. */
-					if (applied == 0) { free(rids); sql_arena_destroy(arena); return 0; }
+					if (applied == 0) { free(rids); rc = 0; goto done; }
 					free(rids);
 					if (errmsg) *errmsg = strdup("native update expr unsupported");
 					rc = -1; goto done;
@@ -8365,7 +8575,7 @@ vx_run_write_p(struct xsql *db, const char *sql,
 				 * back cleanly to the VDBE; otherwise it is too late to
 				 * fall back (the VDBE would re-update applied rows and
 				 * misreport changes()), so report an error. */
-				if (applied == 0) { free(rids); sql_arena_destroy(arena); return 0; }
+				if (applied == 0) { free(rids); rc = 0; goto done; }
 				free(rids);
 				if (errmsg) *errmsg = strdup("native update row too large");
 				rc = -1; goto done;
@@ -8384,6 +8594,7 @@ vx_run_write_p(struct xsql *db, const char *sql,
 				if (errmsg) *errmsg = strdup("native update failed");
 				rc = -1; goto done;
 			}
+			arena_free(rowarena); rowarena = NULL;
 			applied++;
 		}
 		free(rids);
@@ -8658,6 +8869,12 @@ vx_run_write_p(struct xsql *db, const char *sql,
 
 done:
 	arena_free(cell_arena);
+	arena_free(rowarena);
+	if (sst != NULL) {
+		arena_free(sst->plan_arena);
+		free(sst->srcrow);
+		free(sst);
+	}
 	sql_arena_destroy(arena);
 	return rc;
 }

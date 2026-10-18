@@ -167,6 +167,10 @@ int xstore_scan_next(xstore_scan_t *s, int64_t *rowid,
 
 void xstore_scan_close(xstore_scan_t *s);
 
+/* Base-table version keys examined by all storage scans so far (metric:
+ * tests assert a point statement visits O(1) rows, not O(table)). */
+uint64_t xstore_rows_visited(void);
+
 /* Storage value classes returned by xstore_rec_col. */
 enum {
 	XSTORE_C_NULL = 0, XSTORE_C_INT, XSTORE_C_REAL, XSTORE_C_TEXT, XSTORE_C_BLOB
