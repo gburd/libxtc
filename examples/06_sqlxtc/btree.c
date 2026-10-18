@@ -112,6 +112,7 @@
 
 #include "btree.h"
 #include "btnode.h"
+#include "btovf.h"
 #include "xtc_sim.h"    /* XTC_SIM_BUGGIFY -- DST eager-split (no-op in prod) */
 
 #include <pthread.h>
@@ -163,8 +164,18 @@ struct bt {
 	_Atomic uint64_t  st_height;   /* number of levels (1 == root leaf) */
 	_Atomic uint64_t  st_descents; /* full root->leaf cursor descents */
 	_Atomic uint64_t  st_resumes;  /* parked-cursor O(1) resumes */
+	_Atomic uint64_t  st_ovf_writes; /* values stored out of line */
+	_Atomic uint64_t  st_ovf_reads;  /* out-of-line values read back */
+	_Atomic uint64_t  st_ovf_pages;  /* data pages written for them */
+	_Atomic uint64_t  st_ovf_freed;  /* data pages freed (delete/replace) */
 	uint64_t          meta_clean;  /* superblock clean flag (open/close only) */
 	uint64_t          meta_clock;  /* superblock commit clock (open/close only) */
+	uint8_t          *smo_scratch; /* one page of scratch for internal split /
+	                               * merge rebuilds; used only under the SMO
+	                               * write lock (so one per tree suffices) --
+	                               * replaces an 8 KiB stack array that made
+	                               * every internal split fail on > 8 KiB
+	                               * pages */
 	xtc_arwlock_t    *smo;         /* serializes structure-modification (splits
 	                               * and root growth).  Parking-safe so a
 	                               * splitter may park on page I/O without
@@ -174,6 +185,260 @@ struct bt {
 };
 
 static int bt_merge(bt_t *bt, const void *key, uint16_t klen);
+static void smo_log_page(bt_t *bt, bm_pid_t pid, void *image);
+
+/*
+ * Entry-size bounds (RethinkDB's rule: every leaf entry is bounded by a
+ * fixed fraction of the page -- leaf_epsilon, leaf_node.cc:523-535 --
+ * so every split and merge guarantee holds by construction).
+ *
+ * BT_ENTRY_DIV: an entry (slot + full key + value) may use at most
+ * 1/BT_ENTRY_DIV of the usable page.  With 4, a node at the split point
+ * holds >= 4 such entries' worth of bytes, so a byte-balanced split
+ * always finds a cut that leaves room for one more max entry on the
+ * side that receives it, even after the separator (<= one key) is
+ * added to both halves as a fence.  Larger values belong out of line.
+ */
+/*
+ * The guarantee (proof sketch; cap = page - header, K = max key, M = max
+ * leaf entry cost incl. its 10-byte slot):
+ *   A byte-balanced cut leaves each half <= T/2 + M (entries; T <= cap)
+ *   + 2K (two fences: the old one and the separator).  The pending entry
+ *   adds <= M on its side.  So a valid cut exists whenever
+ *       cap/2 + 2M + 2K <= cap   <=>   M + K <= cap/4.
+ *   Internal entries are a separator plus an 8-byte pid (<= K + 18), and
+ *   the same argument needs 4K + 36 <= cap/2, i.e. K <= cap/8 - 9.
+ * So K = min(BT_MAX_KEY, cap/8 - 9) and M = cap/4 - K.  For 4 KiB pages
+ * that is K = 498 and M = 516 (an inline key+value of up to 506 bytes);
+ * for 16 KiB K = 1024 and M = 3062.  This is RethinkDB's leaf_epsilon
+ * (512 bytes on its 4 KiB block, MAX_KEY_SIZE 250) derived for our node.
+ * Larger values must be stored out of line.
+ */
+static uint32_t
+bt_cap(const bt_t *bt)
+{
+	return bt->page_size - (uint32_t)sizeof(struct btnode_hdr);
+}
+
+static uint32_t
+bt_key_max(const bt_t *bt)
+{
+	uint32_t k = bt_cap(bt) / 8 - 9;
+
+	return k < BT_MAX_KEY ? k : BT_MAX_KEY;
+}
+
+static uint32_t
+bt_entry_max(const bt_t *bt)
+{
+	return bt_cap(bt) / 4 - bt_key_max(bt);
+}
+
+uint16_t
+bt_max_key(const bt_t *bt)
+{
+	return (uint16_t)bt_key_max(bt);
+}
+
+uint16_t
+bt_max_inline(const bt_t *bt)
+{
+	return (uint16_t)(bt_entry_max(bt) - 10u);
+}
+
+/* ---- out-of-line values (RethinkDB blob, one level; btovf.h) ---------- */
+
+static uint32_t
+ovf_payload(const bt_t *bt)
+{
+	return bt->page_size - BT_OVF_PGHDR;
+}
+
+/* Largest value bt_insert accepts for a key of `klen` bytes. */
+static uint32_t
+bt_value_max(const bt_t *bt, uint16_t klen)
+{
+	uint32_t pages, cap, inl;
+
+	/* The ref must itself fit as an inline entry. */
+	pages = BT_OVF_MAXPAGES;
+	while (pages > 0 && btnode_entry_cost(klen,
+	    (uint16_t)bt_ovf_ref_len(pages)) > bt_entry_max(bt))
+		pages--;
+	cap = pages * ovf_payload(bt);
+	if (cap > 0xFFFFu)
+		cap = 0xFFFFu;          /* the bt_* API's 16-bit value length */
+	inl = bt_entry_max(bt) - 10u - klen;
+	return cap > inl ? cap : inl;
+}
+
+uint32_t
+bt_max_value(const bt_t *bt, uint16_t klen)
+{
+	if (bt == NULL || klen == 0 || klen > bt_key_max(bt))
+		return 0;
+	return bt_value_max(bt, klen);
+}
+
+/*
+ * Write `vlen` bytes of `val` to fresh data pages and build the ref in
+ * `ref` (capacity bt_ovf_ref_len(BT_OVF_MAXPAGES)).  The pages are left
+ * DIRTY in the pool before the caller publishes the ref, so a reader that
+ * finds the ref always finds the data (it is in memory or on disk).  On
+ * failure every page allocated so far is freed again.  Returns the ref
+ * length, or 0 on failure.
+ */
+static uint32_t
+ovf_write(bt_t *bt, const void *val, uint32_t vlen, uint8_t *ref)
+{
+	bm_t *bm = bt->bm;
+	uint32_t per = ovf_payload(bt);
+	uint32_t n = (vlen + per - 1) / per, i, off = 0;
+	bm_pid_t pids[BT_OVF_MAXPAGES];
+
+	if (n == 0 || n > BT_OVF_MAXPAGES)
+		return 0;
+	for (i = 0; i < n; i++) {
+		bm_frame_t *f;
+		uint8_t *pg;
+		uint32_t take = vlen - off < per ? vlen - off : per;
+
+		if (bm_alloc_pid(bm, &f, &pids[i]) != XTC_OK) {
+			while (i > 0)
+				(void)bm_free_pid(bm, pids[--i]);
+			return 0;
+		}
+		pg = bm_page(f);
+		memset(pg, 0, BT_OVF_PGHDR);
+		bt_ovf_put32(pg + 8, BT_OVF_MAGIC);
+		bt_ovf_put32(pg + 12, take);
+		memcpy(pg + BT_OVF_PGHDR, (const uint8_t *)val + off, take);
+		if (take < per)
+			memset(pg + BT_OVF_PGHDR + take, 0, per - take);
+		off += take;
+		bm_predirty(bm, f);
+		smo_log_page(bt, pids[i], pg);   /* physiological image, if logging */
+		bm_unfix(bm, f, 1);
+	}
+	ref[0] = BT_OVF_TAG;
+	ref[1] = (uint8_t)n;
+	ref[2] = 0;
+	ref[3] = 0;
+	bt_ovf_put32(ref + 4, vlen);
+	bt_ovf_put32(ref + 8, bt_ovf_fnv(val, vlen));
+	for (i = 0; i < n; i++)
+		bt_ovf_put64(ref + BT_OVF_HDR + 8u * i, (uint64_t)pids[i]);
+	atomic_fetch_add(&bt->st_ovf_writes, 1);
+	atomic_fetch_add(&bt->st_ovf_pages, n);
+	return bt_ovf_ref_len(n);
+}
+
+/* Parse a ref; returns the page count (0 if malformed). */
+static uint32_t
+ovf_parse(const uint8_t *ref, uint32_t rlen, uint32_t *total)
+{
+	uint32_t n;
+
+	if (rlen < BT_OVF_HDR || ref[0] != BT_OVF_TAG)
+		return 0;
+	n = ref[1];
+	if (n == 0 || n > BT_OVF_MAXPAGES || rlen != bt_ovf_ref_len(n))
+		return 0;
+	*total = bt_ovf_get32(ref + 4);
+	return n;
+}
+
+/*
+ * Read an out-of-line value into `buf` (capacity `cap`); *vlen gets the
+ * true length.  The ref was copied out of the leaf by the caller while
+ * it held the leaf (latched or version-validated), so the data pages it
+ * names are live: a concurrent replace/delete frees them only after
+ * removing the ref under the leaf's EXCLUSIVE latch, and bm_free_pid
+ * quarantines a freed id so a straggling fix gets XTC_E_AGAIN rather than
+ * another value's bytes.  The checksum in the ref is verified when the
+ * whole value was read, so a value is never returned torn.
+ * Returns XTC_OK, XTC_E_AGAIN (a page was freed under us: re-read the
+ * leaf), or XTC_E_INTERNAL (corrupt).
+ */
+static int
+ovf_read(bt_t *bt, const uint8_t *ref, uint32_t rlen, void *buf,
+    uint16_t cap, uint16_t *vlen)
+{
+	bm_t *bm = bt->bm;
+	uint32_t total = 0, n, i, off = 0, per = ovf_payload(bt);
+	uint32_t sum = 2166136261u;
+	int rc;
+
+	n = ovf_parse(ref, rlen, &total);
+	if (n == 0)
+		return XTC_E_INTERNAL;
+	for (i = 0; i < n && off < total; i++) {
+		bm_frame_t *f;
+		const uint8_t *pg;
+		uint32_t len, j;
+		bm_pid_t pid = (bm_pid_t)bt_ovf_get64(ref + BT_OVF_HDR + 8u * i);
+
+		rc = bm_fix_pid(bm, pid, &f);
+		if (rc != XTC_OK)
+			return rc == XTC_E_AGAIN ? XTC_E_AGAIN : XTC_E_INTERNAL;
+		bm_latch_shared(f);
+		pg = bm_page(f);
+		len = bt_ovf_get32(pg + 12);
+		if (bt_ovf_get32(pg + 8) != BT_OVF_MAGIC || len > per ||
+		    off + len > total) {
+			bm_unlatch(f); bm_unfix(bm, f, 0);
+			return XTC_E_AGAIN;   /* page reused: the ref is stale */
+		}
+		for (j = 0; j < len; j++) {
+			sum ^= pg[BT_OVF_PGHDR + j];
+			sum *= 16777619u;
+		}
+		if (buf != NULL && off < cap)
+			memcpy((uint8_t *)buf + off, pg + BT_OVF_PGHDR,
+			    off + len <= cap ? len : cap - off);
+		off += len;
+		bm_unlatch(f);
+		bm_unfix(bm, f, 0);
+	}
+	if (off != total || sum != bt_ovf_get32(ref + 8))
+		return XTC_E_AGAIN;           /* a page changed mid-read */
+	if (vlen != NULL)
+		*vlen = (uint16_t)total;
+	atomic_fetch_add(&bt->st_ovf_reads, 1);
+	return XTC_OK;
+}
+
+/* If slot `s` of the (exclusively latched) leaf holds an out-of-line
+ * ref, copy it into `out` and return its length; else 0. */
+static uint32_t
+take_ovf_ref(const void *pg, int s, uint8_t *out)
+{
+	const void *ov = NULL;
+	uint16_t ol = 0;
+
+	if (!btnode_vflag(pg, s) ||
+	    btnode_get(pg, s, NULL, NULL, &ov, &ol) != 0 ||
+	    ol > BT_OVF_HDR + 8u * BT_OVF_MAXPAGES)
+		return 0;
+	memcpy(out, ov, ol);
+	return ol;
+}
+
+/* Free the data pages a ref names (the ref itself is already gone from
+ * every reachable leaf). */
+static void
+ovf_free(bt_t *bt, const uint8_t *ref, uint32_t rlen)
+{
+	uint32_t total = 0, n, i;
+
+	n = ovf_parse(ref, rlen, &total);
+	for (i = 0; i < n; i++) {
+		bm_pid_t pid = (bm_pid_t)bt_ovf_get64(ref + BT_OVF_HDR + 8u * i);
+
+		if (bm_free_pid(bt->bm, pid) == XTC_OK)
+			atomic_fetch_add(&bt->st_ovf_freed, 1);
+	}
+}
 static int merge_level(bt_t *bt, bm_pid_t *path, int level,
     const void *key, uint16_t klen);
 
@@ -226,6 +491,9 @@ struct bt_cursor {
 	uint8_t        keybuf[BT_MAX_KEY];  /* scan position: last key returned, */
 	uint16_t       keylen;              /* or the start key before the first */
 	int            have_key;            /* 1 == keybuf was returned: resume after it */
+	uint8_t       *vbuf;   /* out-of-line values are assembled here (lazily
+	                        * allocated, 64 KiB); valid until the next
+	                        * next/close, like a leaf pointer */
 };
 
 /* Lexicographic compare of two byte strings as unsigned bytes. */
@@ -375,6 +643,11 @@ bt_open(bm_t *bm, bt_t **out)
 	}
 	bm_unfix(bm, sf, 0);             /* scratch becomes an orphan page */
 	bt->page_size = ps;
+	if ((bt->smo_scratch = malloc(ps)) == NULL) {
+		bm_unfix(bm, rf, 0);
+		rc = XTC_E_NOMEM;
+		goto fail;
+	}
 
 	/* Root starts as a single leaf with -inf/+inf fences (prefix 0). */
 	btnode_init(bm_page(rf), ps, 1);
@@ -390,6 +663,7 @@ bt_open(bm_t *bm, bt_t **out)
 
 fail:
 	xtc_arwlock_destroy(bt->smo);
+	free(bt->smo_scratch);
 	free(bt);
 	return rc;
 }
@@ -425,6 +699,11 @@ bt_reopen(bm_t *bm, bt_t **out)
 		return XTC_E_INVAL;          /* not an xstore B-tree store */
 	}
 	bt->page_size = s.page_size;
+	if ((bt->smo_scratch = malloc(s.page_size)) == NULL) {
+		xtc_arwlock_destroy(bt->smo);
+		free(bt);
+		return XTC_E_NOMEM;
+	}
 	atomic_store(&bt->root_pid, (bm_pid_t)s.root_pid);
 	atomic_store(&bt->st_height, s.height);
 	bt->meta_clean = s.clean;
@@ -449,6 +728,7 @@ bt_close(bt_t *bt)
 		hook(bt);              /* let xstore drop cached state for this bt */
 	if (bt->smo != NULL)
 		xtc_arwlock_destroy(bt->smo);
+	free(bt->smo_scratch);
 	free(bt);
 }
 
@@ -566,11 +846,7 @@ bt_split_internal(bt_t *bt, void *pp, void *rp, uint32_t rpid,
 	int i;
 	uint8_t empty = 0;
 	uint32_t old_right = btnode_right_sibling(pp);
-	uint8_t scratch[BT_MAX_KEY * 8];   /* one page; internals are small */
-	void *lp = scratch;
-
-	if (bt->page_size > sizeof scratch)
-		return XTC_E_INTERNAL;
+	void *lp = bt->smo_scratch;   /* one page; caller holds the SMO lock */
 
 	/* The mid key is pushed up; it becomes the boundary between the
 	 * two halves (and the left node's new upper fence). */
@@ -658,7 +934,7 @@ bt_split_internal(bt_t *bt, void *pp, void *rp, uint32_t rpid,
  */
 static int
 bt_insert_fast(bt_t *bt, const void *key, uint16_t klen, const void *val,
-    uint16_t vlen)
+    uint16_t vlen, uint16_t vflag)
 {
 	bm_t *bm = bt->bm;
 	bm_pid_t pid;
@@ -731,7 +1007,7 @@ bt_insert_fast(bt_t *bt, const void *key, uint16_t klen, const void *val,
 		bm_unlatch(f); bm_unfix(bm, f, 0);
 		return 0;
 	}
-	r = btnode_insert(pg, key, klen, val, vlen);
+	r = btnode_insert_f(pg, key, klen, val, vlen, vflag);
 	if (r == 0) {
 		atomic_fetch_add(&bt->st_inserts, 1);
 		/* Physiological redo for a plain (non-split) in-leaf insert:
@@ -852,9 +1128,52 @@ post_separator(bt_t *bt, bm_pid_t *path, int level,
 	return XTC_OK;
 }
 
+static int bt_insert_leaf(bt_t *bt, const void *key, uint16_t klen,
+    const void *val, uint16_t vlen, uint16_t vflag, uint8_t *oldref,
+    uint32_t *oldref_len);
+
+/*
+ * Insert or replace.  A value that fits the inline entry bound is stored
+ * in the leaf; a larger one (up to bt_max_value) is written out of line
+ * first and the leaf stores a bounded reference (RethinkDB blob).  When
+ * the key already held an out-of-line value, its data pages are freed
+ * only AFTER the new entry is in place, so a concurrent reader sees
+ * either the old value or the new one, never freed pages.
+ */
 int
 bt_insert(bt_t *bt, const void *key, uint16_t klen, const void *val,
     uint16_t vlen)
+{
+	uint8_t ref[BT_OVF_HDR + 8u * BT_OVF_MAXPAGES];
+	uint8_t oldref[BT_OVF_HDR + 8u * BT_OVF_MAXPAGES];
+	uint32_t rlen, oldlen = 0;
+	int rc;
+
+	if (bt == NULL || key == NULL || (val == NULL && vlen != 0))
+		return XTC_E_INVAL;
+	if (klen == 0 || klen > bt_key_max(bt))
+		return XTC_E_INVAL;
+	if (btnode_entry_cost(klen, vlen) <= bt_entry_max(bt)) {
+		rc = bt_insert_leaf(bt, key, klen, val, vlen, 0, oldref, &oldlen);
+	} else {
+		if ((uint32_t)vlen > bt_value_max(bt, klen))
+			return XTC_E_INVAL;
+		rlen = ovf_write(bt, val, vlen, ref);
+		if (rlen == 0)
+			return XTC_E_NOMEM;
+		rc = bt_insert_leaf(bt, key, klen, ref, (uint16_t)rlen,
+		    BTNODE_VFLAG, oldref, &oldlen);
+		if (rc != XTC_OK)
+			ovf_free(bt, ref, rlen);   /* never published */
+	}
+	if (rc == XTC_OK && oldlen > 0)
+		ovf_free(bt, oldref, oldlen);   /* replaced: old pages unreachable */
+	return rc;
+}
+
+static int
+bt_insert_leaf(bt_t *bt, const void *key, uint16_t klen, const void *val,
+    uint16_t vlen, uint16_t vflag, uint8_t *oldref, uint32_t *oldref_len)
 {
 	bm_t *bm;
 	bm_pid_t path[BT_MAX_HEIGHT];   /* ancestor pids, root..parent-of-leaf */
@@ -868,14 +1187,17 @@ bt_insert(bt_t *bt, const void *key, uint16_t klen, const void *val,
 	int r, found, s;
 	uint64_t nta = 0;          /* nested-top-action token for the split */
 
-	if (bt == NULL || key == NULL || (val == NULL && vlen != 0))
+	*oldref_len = 0;
+	/* Entry-size bound (see bt_entry_max): an entry that could make a
+	 * split impossible is refused here, before anything is touched. */
+	if (btnode_entry_cost(klen, vlen) > bt_entry_max(bt))
 		return XTC_E_INVAL;
 	bm = bt->bm;
 
 	/* Fast path: latch-free descent + leaf-exclusive insert, parallel
 	 * for disjoint leaves.  Falls through to the SMO path only when a
 	 * split is needed (full leaf) or the key already exists. */
-	if (bt_insert_fast(bt, key, klen, val, vlen))
+	if (bt_insert_fast(bt, key, klen, val, vlen, vflag))
 		return XTC_OK;
 
 	/*
@@ -924,8 +1246,17 @@ bt_insert(bt_t *bt, const void *key, uint16_t klen, const void *val,
 	pg = bm_page(f);
 	found = 0;
 	s = btnode_search(pg, key, klen, &found);
-	if (found)
+	/* Upsert: drop the old version first.  Safe now: with the entry
+	 * bound, the replacement always fits -- in place, or on its side of
+	 * the byte-balanced split below (which accounts for it as the
+	 * pending entry) -- so the old value can no longer be lost to an
+	 * insert that then fails. */
+	if (found) {
+		/* Remember an out-of-line old value: bt_insert frees its pages
+		 * once the replacement is published. */
+		*oldref_len = take_ovf_ref(pg, s, oldref);
 		(void)btnode_remove(pg, s);
+	}
 	/* Buggify: force a SPLIT even when the pair would fit in place.  A
 	 * B-tree may legally split a non-full node (it only wastes space --
 	 * the tree stays ordered and correct), so this deterministically
@@ -937,7 +1268,7 @@ bt_insert(bt_t *bt, const void *key, uint16_t klen, const void *val,
 	if (!(btnode_count(pg) >= 2 &&
 	      XTC_SIM_BUGGIFY("btree.split.eager") &&
 	      xtc_sim_buggify_fault(200)) &&
-	    btnode_insert(pg, key, klen, val, vlen) == 0) {
+	    btnode_insert_f(pg, key, klen, val, vlen, vflag) == 0) {
 		atomic_fetch_add(&bt->st_inserts, 1);
 		/* Non-split in-leaf insert on the SMO path (an upsert, or a
 		 * fast-path miss re-run under the lock): log the leaf image too,
@@ -960,16 +1291,20 @@ bt_insert(bt_t *bt, const void *key, uint16_t klen, const void *val,
 	if (rc != XTC_OK) { bm_unlatch(f); bm_unfix(bm, f, 0); goto unlock; }
 	bm_latch_exclusive(rf);
 	btnode_init(bm_page(rf), bt->page_size, 1);
-	if (btnode_split(pg, bm_page(rf), sep, &seplen) != 0) {
-		bm_unlatch(rf); bm_unfix(bm, rf, 1);
+	if (btnode_split_ex(pg, bm_page(rf), sep, (uint16_t)sizeof sep,
+	    &seplen, key, klen, vlen) != 0) {
+		/* Unreachable for a bounded entry (see bt_entry_max).  The page
+		 * is unchanged; return the fresh right page to the freelist. */
+		bm_unlatch(rf); bm_unfix(bm, rf, 0);
+		(void)bm_free_pid(bm, rpid);
 		bm_unlatch(f); bm_unfix(bm, f, 0);
 		rc = XTC_E_INTERNAL; goto unlock;
 	}
 	btnode_set_right_sibling(pg, (uint32_t)rpid);
 	if (key_cmp(key, klen, sep, seplen) > 0)
-		r = btnode_insert(bm_page(rf), key, klen, val, vlen);
+		r = btnode_insert_f(bm_page(rf), key, klen, val, vlen, vflag);
 	else
-		r = btnode_insert(pg, key, klen, val, vlen);
+		r = btnode_insert_f(pg, key, klen, val, vlen, vflag);
 	/*
 	 * Open the nested top action and log both leaf images (the new
 	 * right and the shrunk left) as physiological redo before they
@@ -1133,6 +1468,7 @@ bt_lookup_optimistic(bt_t *bt, const void *key, uint16_t klen,
 		bm_frame_t *f;
 		int depth = 0;
 		int conflict = 0;
+		int ovf_retry = 0;   /* leaf released; ovf page freed under us */
 
 #ifdef BM_EPOCH_FASTPATH
 		/* Pin-free epoch descent: NO pin CAS on any hop -- zero shared
@@ -1161,8 +1497,9 @@ bt_lookup_optimistic(bt_t *bt, const void *key, uint16_t klen,
 			int is_leaf, beyond_hi, dead, below_lo;
 			bm_pid_t child = BM_PID_NONE;
 			int found = 0;
-			uint16_t vl = 0, copied = 0;
-			uint8_t vcopy[BT_MAX_KEY];
+			uint16_t vl = 0;
+			uint16_t vfl = 0;
+			uint8_t oref[BT_OVF_HDR + 8u * BT_OVF_MAXPAGES];
 
 			if (++depth > BT_MAX_HEIGHT + 4) { conflict = 1; break; }
 
@@ -1186,11 +1523,34 @@ bt_lookup_optimistic(bt_t *bt, const void *key, uint16_t klen,
 						if (btnode_get(pg, s, NULL,
 						    NULL, &vp, &gl) == 0 &&
 						    vp != NULL) {
+							/* Copy straight into
+							 * the caller's buffer
+							 * (bounded by cap and
+							 * the page).  A torn
+							 * copy is discarded by
+							 * the version check
+							 * below -- the caller
+							 * sees a result only
+							 * after it validates.
+							 * (1.56 copied through a
+							 * 1024-byte stack buffer
+							 * and silently cut
+							 * larger values.) */
 							vl = gl;
-							copied = gl < sizeof vcopy
-							    ? gl
-							    : (uint16_t)sizeof vcopy;
-							memcpy(vcopy, vp, copied);
+							vfl = btnode_vflag(pg, s);
+							if (vfl) {
+								/* an out-of-line ref:
+								 * copy it; the data is
+								 * read after validate */
+								if (gl <= sizeof oref)
+									memcpy(oref, vp, gl);
+								else
+									vfl = 0, vl = 0,
+									found = 0;
+							} else if (buf != NULL &&
+							    cap > 0)
+								memcpy(buf, vp,
+								    gl < cap ? gl : cap);
 						}
 					}
 				} else {
@@ -1229,12 +1589,20 @@ bt_lookup_optimistic(bt_t *bt, const void *key, uint16_t klen,
 #endif
 				if (!found)
 					return XTC_E_NOTFOUND;
-				if (vlen != NULL) *vlen = vl;
-				if (buf != NULL && cap > 0) {
-					uint16_t n = copied < cap
-					    ? copied : cap;
-					memcpy(buf, vcopy, n);
+				if (vfl) {
+					/* Validated ref: read its pages.  A
+					 * concurrent replace may have freed them
+					 * (AGAIN): retry the descent. */
+					int orc = ovf_read(bt, oref, vl, buf,
+					    cap, vlen);
+					if (orc == XTC_E_AGAIN) {
+						/* frame already released */
+						ovf_retry = 1;
+						break;
+					}
+					return orc;
 				}
+				if (vlen != NULL) *vlen = vl;
 				return XTC_OK;
 			}
 			if (child == BM_PID_NONE) { conflict = 1; break; }
@@ -1253,6 +1621,8 @@ bt_lookup_optimistic(bt_t *bt, const void *key, uint16_t klen,
 				f = cf;
 			}
 		}
+		if (ovf_retry)
+			continue;          /* the leaf frame was already unfixed */
 #ifndef BM_EPOCH_FASTPATH
 		bm_unfix(bm, f, 0);
 #endif
@@ -1277,13 +1647,22 @@ leaf_get(bt_t *bt, bm_frame_t *f, const void *key, uint16_t klen,
 
 	if (found) {
 		(void)btnode_get(pg, s, NULL, NULL, &vp, &vl);
-		if (vlen != NULL)
-			*vlen = vl;
-		if (buf != NULL && cap > 0) {
-			uint16_t n = vl < cap ? vl : cap;
-			memcpy(buf, vp, n);
+		if (btnode_vflag(pg, s)) {
+			/* Out-of-line: read the data pages while still holding
+			 * the leaf shared, so no replace/delete can free them
+			 * (those need the leaf exclusive). */
+			rc = ovf_read(bt, vp, vl, buf, cap, vlen);
+			if (rc == XTC_E_AGAIN)
+				rc = XTC_E_INTERNAL;   /* cannot happen under the latch */
+		} else {
+			if (vlen != NULL)
+				*vlen = vl;
+			if (buf != NULL && cap > 0) {
+				uint16_t n = vl < cap ? vl : cap;
+				memcpy(buf, vp, n);
+			}
+			rc = XTC_OK;
 		}
-		rc = XTC_OK;
 	}
 	bm_unlatch(f);
 	bm_unfix(bt->bm, f, 0);
@@ -1297,7 +1676,7 @@ bt_lookup(bt_t *bt, const void *key, uint16_t klen, void *buf, uint16_t cap,
 	bm_frame_t *f = NULL;
 	int rc;
 
-	if (bt == NULL || key == NULL)
+	if (bt == NULL || key == NULL || klen > bt_key_max(bt))
 		return XTC_E_INVAL;
 	atomic_fetch_add(&bt->st_lookups, 1);
 
@@ -1487,12 +1866,8 @@ merge_level(bt_t *bt, bm_pid_t *path, int level, const void *key,
 	if (!btnode_is_leaf(lp)) {
 		uint8_t sepk[BT_MAX_KEY];
 		uint16_t seplen = 0;
-		uint8_t scratch[BT_MAX_KEY * 8];
-		void *tmp = scratch;
+		void *tmp = bt->smo_scratch;   /* under the SMO lock */
 		int i, rn;
-
-		if (cap > sizeof scratch)
-			goto done;
 		if (btnode_full_key(pp, rslot, sepk, sizeof sepk, &seplen) != 0)
 			goto done;
 		{
@@ -1697,8 +2072,10 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 	int found;
 	int s;
 	int attempt;
+	uint8_t oldref[BT_OVF_HDR + 8u * BT_OVF_MAXPAGES];
+	uint32_t oldlen = 0;
 
-	if (bt == NULL || key == NULL)
+	if (bt == NULL || key == NULL || klen > bt_key_max(bt))
 		return XTC_E_INVAL;
 	bm = bt->bm;
 
@@ -1802,6 +2179,7 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 			xtc_yield();           /* let a racing merge finish, then retry */
 			continue;
 		}
+		oldlen = take_ovf_ref(pg, s, oldref);
 		(void)btnode_remove(pg, s);
 		{
 			/* Decide whether the leaf now underflows.  We hold it
@@ -1813,6 +2191,8 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 			    ((uint32_t)used * BT_MERGE_DEN < cap * BT_MERGE_NUM);
 			bm_unlatch(f);
 			bm_unfix(bm, f, 1);
+			if (oldlen > 0)
+				ovf_free(bt, oldref, oldlen);   /* ref is gone */
 			/* Merge/reclaim on underflow is always on: the merge SMO
 			 * is concurrency-safe (the internal-split hi-fence fix
 			 * closed the last race; see the churn-gone gate in
@@ -1867,9 +2247,12 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 		(void)xtc_arwlock_unlock(bt->smo);
 		return XTC_E_NOTFOUND;   /* genuinely absent */
 	}
+	oldlen = take_ovf_ref(pg, s, oldref);
 	(void)btnode_remove(pg, s);
 	bm_unlatch(f); bm_unfix(bm, f, 1);
 	(void)xtc_arwlock_unlock(bt->smo);
+	if (oldlen > 0)
+		ovf_free(bt, oldref, oldlen);
 	return XTC_OK;
 }
 
@@ -1970,7 +2353,8 @@ bt_cursor_open(bt_t *bt, const void *start, uint16_t klen, bt_cursor_t **out)
 	bm_frame_t *leaf = NULL;
 	int rc;
 
-	if (bt == NULL || out == NULL)
+	if (bt == NULL || out == NULL ||
+	    (start != NULL && klen > bt_key_max(bt)))
 		return XTC_E_INVAL;
 
 	c = calloc(1, sizeof *c);
@@ -2040,6 +2424,22 @@ bt_cursor_next(bt_cursor_t *c, const void **key, uint16_t *klen,
 				return XTC_E_INTERNAL;
 			}
 			(void)btnode_get(pg, c->slot, NULL, NULL, &vp, &vl);
+			if (btnode_vflag(pg, c->slot)) {
+				/* Out-of-line value: assemble it while the leaf
+				 * is held shared (no replace/delete can free its
+				 * pages until we release). */
+				uint16_t tl = 0;
+				int orc;
+
+				if (c->vbuf == NULL &&
+				    (c->vbuf = malloc(0xFFFFu)) == NULL)
+					return XTC_E_NOMEM;
+				orc = ovf_read(c->bt, vp, vl, c->vbuf, 0xFFFFu, &tl);
+				if (orc != XTC_OK)
+					return XTC_E_INTERNAL;
+				vp = c->vbuf;
+				vl = tl;
+			}
 			c->slot++;
 			c->have_key = 1;
 			if (key != NULL)
@@ -2219,6 +2619,7 @@ bt_cursor_close(bt_cursor_t *c)
 		bm_unfix(c->bt->bm, c->leaf, 0);
 		c->leaf = NULL;
 	}
+	free(c->vbuf);
 	free(c);
 }
 
@@ -2243,4 +2644,8 @@ bt_get_stats(bt_t *bt, bt_stats_t *out)
 	out->height = atomic_load(&bt->st_height);
 	out->descents = atomic_load(&bt->st_descents);
 	out->resumes = atomic_load(&bt->st_resumes);
+	out->ovf_writes = atomic_load(&bt->st_ovf_writes);
+	out->ovf_reads = atomic_load(&bt->st_ovf_reads);
+	out->ovf_pages = atomic_load(&bt->st_ovf_pages);
+	out->ovf_freed = atomic_load(&bt->st_ovf_freed);
 }

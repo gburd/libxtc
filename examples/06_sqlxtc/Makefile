@@ -660,6 +660,15 @@ test_btree_delete_merge: test_btree_delete_merge.c btree.c bufmgr.o btnode.c
 test-btree-delete-merge: test_btree_delete_merge
 	./test_btree_delete_merge
 
+# Entry-size bounds + byte-balanced split (RethinkDB leaf_epsilon rule):
+# L1-L5 regressions of 1.56 and a mixed-size property run.
+test: test-btree-limits
+test_btree_limits: test_btree_limits.c btree.c bufmgr.o btnode.c
+	$(CC) $(CFLAGS) -o $@ test_btree_limits.c btree.c bufmgr.o btnode.c $(LDFLAGS)
+
+test-btree-limits: test_btree_limits
+	./test_btree_limits
+
 
 
 test-quack: ../../test/sqlxtc/test_quack

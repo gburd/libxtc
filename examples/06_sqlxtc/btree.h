@@ -114,6 +114,26 @@ typedef struct bt_smo_hook {
 } bt_smo_hook_t;
 void bt_set_smo_hook(const bt_smo_hook_t *hook);
 
+/*
+ * Entry-size bounds, derived from the page size so every split is
+ * guaranteed to succeed (RethinkDB's leaf_epsilon rule; see btree.c).
+ *   bt_max_key    -- the longest key accepted by any bt_* call.
+ *   bt_max_inline -- the largest key length + value length one leaf
+ *                    entry may have.
+ * A call with a longer key, or an insert above bt_max_value, returns
+ * XTC_E_INVAL and changes nothing.  4 KiB pages: 498 / 506 bytes;
+ * 16 KiB pages: 1024 / 3052 bytes.
+ */
+uint16_t bt_max_key(const bt_t *bt);
+uint16_t bt_max_inline(const bt_t *bt);
+/* Largest value bt_insert accepts for a key of `klen` bytes.  Values
+ * above bt_max_inline are stored OUT OF LINE (RethinkDB blob): written to
+ * dedicated pages, with a bounded reference in the leaf, so the leaf
+ * entry -- and every split/merge guarantee -- stays bounded.  Lookups and
+ * cursors return the whole value transparently.  Up to 65535 bytes
+ * (the API's 16-bit length) on pages >= 1 KiB. */
+uint32_t bt_max_value(const bt_t *bt, uint16_t klen);
+
 /* Insert or replace key -> val.  Returns XTC_OK, or an error. */
 int  bt_insert(bt_t *bt, const void *key, uint16_t klen,
                const void *val, uint16_t vlen);
@@ -155,6 +175,10 @@ typedef struct bt_stats {
 	uint64_t height;        /* number of levels (1 == root leaf) */
 	uint64_t descents;      /* full root->leaf cursor descents */
 	uint64_t resumes;       /* O(1) parked-cursor resumes (no descent) */
+	uint64_t ovf_writes;    /* values stored out of line (> bt_max_inline) */
+	uint64_t ovf_reads;     /* out-of-line values read back */
+	uint64_t ovf_pages;     /* data pages written for out-of-line values */
+	uint64_t ovf_freed;     /* such pages freed again (delete / replace) */
 } bt_stats_t;
 void bt_get_stats(bt_t *bt, bt_stats_t *out);
 

@@ -23,6 +23,10 @@ _Static_assert(sizeof(struct btnode_slot) == 10,
     "btnode_slot must pack to 10 bytes");
 
 #define HDR(p) ((struct btnode_hdr *)(p))
+/* A slot's val_len carries a flag bit (BTNODE_VFLAG, see btnode.h); the
+ * stored byte count is the low 15 bits.  Every size computation masks. */
+#define VLEN(v) ((uint16_t)((v) & 0x7FFFu))
+#define VFLAG(v) ((uint16_t)((v) & BTNODE_VFLAG))
 #define CHDR(p) ((const struct btnode_hdr *)(p))
 
 static struct btnode_slot *
@@ -101,8 +105,8 @@ free_compact(const struct btnode_hdr *h)
  * leading bytes are dropped.
  */
 static void
-node_store(void *page, uint16_t idx, const uint8_t *key, uint16_t key_len,
-    const uint8_t *val, uint16_t val_len)
+node_store_f(void *page, uint16_t idx, const uint8_t *key, uint16_t key_len,
+    const uint8_t *val, uint16_t val_len, uint16_t vflag)
 {
 	struct btnode_hdr *h = HDR(page);
 	struct btnode_slot *s = slots_of(page);
@@ -116,11 +120,12 @@ node_store(void *page, uint16_t idx, const uint8_t *key, uint16_t key_len,
 	h->space_used = (uint16_t)(h->space_used + space);
 	s[idx].offset = h->data_offset;
 	s[idx].key_len = sklen;
-	s[idx].val_len = val_len;
+	s[idx].val_len = (uint16_t)(val_len | vflag);
 	s[idx].head = suffix_head(skey, sklen);
 	memcpy(p + h->data_offset, skey, sklen);
 	memcpy(p + h->data_offset + sklen, val, val_len);
 }
+
 
 /*
  * Reclaim deleted-cell holes by rebuilding the heap into a scratch copy
@@ -149,7 +154,7 @@ node_compact(void *page)
 
 	dst = slots_of(scratch);
 	for (i = 0; i < h->count; i++) {
-		uint16_t kv = (uint16_t)(src[i].key_len + src[i].val_len);
+		uint16_t kv = (uint16_t)(src[i].key_len + VLEN(src[i].val_len));
 
 		th->data_offset = (uint16_t)(th->data_offset - kv);
 		th->space_used = (uint16_t)(th->space_used + kv);
@@ -336,6 +341,13 @@ int
 btnode_insert(void *page, const void *key, uint16_t key_len, const void *val,
     uint16_t val_len)
 {
+	return btnode_insert_f(page, key, key_len, val, val_len, 0);
+}
+
+int
+btnode_insert_f(void *page, const void *key, uint16_t key_len, const void *val,
+    uint16_t val_len, uint16_t vflag)
+{
 	struct btnode_hdr *h = HDR(page);
 	struct btnode_slot *s;
 	uint16_t pl = h->prefix_len;
@@ -354,7 +366,8 @@ btnode_insert(void *page, const void *key, uint16_t key_len, const void *val,
 	s = slots_of(page);
 	memmove(&s[idx + 1], &s[idx],
 	    sizeof(struct btnode_slot) * (size_t)(h->count - idx));
-	node_store(page, (uint16_t)idx, key, key_len, val, val_len);
+	node_store_f(page, (uint16_t)idx, key, key_len, val, val_len,
+	    VFLAG(vflag));
 	h->count++;
 	return 0;
 }
@@ -379,7 +392,7 @@ btnode_get(const void *page, int slot, const void **key_suffix,
 	 * then sees a version conflict on re-validate and retries (or the
 	 * latched caller never hits this on a well-formed page).  A
 	 * correctly-formed slot always passes. */
-	if ((size_t)s[slot].offset + s[slot].key_len + s[slot].val_len >
+	if ((size_t)s[slot].offset + s[slot].key_len + VLEN(s[slot].val_len) >
 	    (size_t)h->page_size)
 		return -1;
 	if (key_suffix != NULL)
@@ -389,8 +402,19 @@ btnode_get(const void *page, int slot, const void **key_suffix,
 	if (val != NULL)
 		*val = p + s[slot].offset + s[slot].key_len;
 	if (val_len != NULL)
-		*val_len = s[slot].val_len;
+		*val_len = VLEN(s[slot].val_len);
 	return 0;
+}
+
+uint16_t
+btnode_vflag(const void *page, int slot)
+{
+	const struct btnode_hdr *h = CHDR(page);
+	const struct btnode_slot *s = cslots_of(page);
+
+	if (slot < 0 || slot >= (int)h->count)
+		return 0;
+	return VFLAG(s[slot].val_len);
 }
 
 int
@@ -429,7 +453,7 @@ btnode_remove(void *page, int slot)
 	if (slot < 0 || slot >= (int)h->count)
 		return -1;
 	h->space_used =
-	    (uint16_t)(h->space_used - (s[slot].key_len + s[slot].val_len));
+	    (uint16_t)(h->space_used - (s[slot].key_len + VLEN(s[slot].val_len)));
 	memmove(&s[slot], &s[slot + 1],
 	    sizeof(struct btnode_slot) * (size_t)(h->count - slot - 1));
 	h->count--;
@@ -452,7 +476,8 @@ copy_slot(const void *page, uint16_t i, void *dst, uint16_t dst_slot,
 	uint16_t pl = h->prefix_len;
 	uint16_t full = (uint16_t)(pl + s[i].key_len);
 	const uint8_t *v = p + s[i].offset + s[i].key_len;
-	uint16_t vlen = s[i].val_len;
+	uint16_t vlen = VLEN(s[i].val_len);
+	uint16_t vfl = VFLAG(s[i].val_len);
 	uint16_t dsk = (uint16_t)(full - dh->prefix_len);
 	uint16_t need = (uint16_t)(sizeof(struct btnode_slot) + dsk + vlen);
 
@@ -461,13 +486,110 @@ copy_slot(const void *page, uint16_t i, void *dst, uint16_t dst_slot,
 	if (pl > 0)
 		memcpy(keybuf, p + h->lo_fence_off, pl);
 	memcpy(keybuf + pl, p + s[i].offset, s[i].key_len);
-	node_store(dst, dst_slot, keybuf, full, v, vlen);
+	node_store_f(dst, dst_slot, keybuf, full, v, vlen, vfl);
 	return 0;
 }
 
 int
 btnode_split(void *page, void *right_page, void *sep_key_out,
     uint16_t *sep_len_out)
+{
+	return btnode_split_ex(page, right_page, sep_key_out, 0xFFFFu,
+	    sep_len_out, NULL, 0, 0);
+}
+
+/*
+ * Bytes a slot's entry occupies in a node whose prefix is `npl`: the
+ * slot itself plus the (re-suffixed) key and the value.  The node's own
+ * prefix is `pl`; a split narrows fences, so `npl >= pl` in practice,
+ * but a conservative caller passes 0 to count the full key.
+ */
+static uint32_t
+slot_cost(const struct btnode_slot *s, uint16_t pl, uint16_t npl)
+{
+	uint32_t full = (uint32_t)pl + s->key_len;
+	uint32_t suf = full > npl ? full - npl : 0;
+
+	return (uint32_t)sizeof(struct btnode_slot) + suf + VLEN(s->val_len);
+}
+
+/*
+ * Byte-balanced split point (RethinkDB leaf::split, leaf_node.cc:
+ * 980-1054: split the node's bytes, not its entry count, and take the
+ * cut nearest half).  Returns the index of the LAST slot kept in the
+ * left half, in [0, count-2] so both halves are non-empty, or -1 if no
+ * cut leaves room for the pending entry.
+ *
+ * `pend` (bytes, slot included; 0 = no pending entry) is the entry the
+ * caller will insert right after the split, and `pend_key` its key: the
+ * pending entry lands LEFT iff its key <= the separator.  A cut is
+ * acceptable only if the side receiving the pending entry still has
+ * room for it, counted conservatively with the FULL key bytes (prefix
+ * 0) on both sides plus both fences.  Among acceptable cuts the one
+ * whose larger side is smallest wins (most balanced).
+ *
+ * A slot-count split (the 1.56 behaviour) could leave the receiving
+ * half too full for a large pending entry, failing the insert AFTER the
+ * split was applied; and it never ran when the leaf held one entry.
+ */
+static int
+split_point(const void *page, const uint8_t *pend_key, uint16_t pend_klen,
+    uint32_t pend)
+{
+	const struct btnode_hdr *h = CHDR(page);
+	const struct btnode_slot *s = cslots_of(page);
+	const uint8_t *p = page;
+	uint16_t pl = h->prefix_len;
+	uint32_t cap = h->page_size - (uint32_t)sizeof(struct btnode_hdr);
+	uint32_t total = 0, left = 0, best_max = UINT32_MAX;
+	int i, best = -1, n = (int)h->count;
+
+	if (n < 2)
+		return -1;
+	for (i = 0; i < n; i++)
+		total += slot_cost(&s[i], pl, 0);
+	for (i = 0; i < n - 1; i++) {
+		uint32_t sep_len, lneed, rneed, lsz, rsz, m;
+		int to_left = 1;
+
+		left += slot_cost(&s[i], pl, 0);
+		/* The separator (slot i's full key) becomes the left's hi
+		 * fence AND the right's lo fence. */
+		sep_len = (uint32_t)pl + s[i].key_len;
+		lsz = left + (uint32_t)h->lo_fence_len + sep_len;
+		rsz = (total - left) + sep_len + (uint32_t)h->hi_fence_len;
+		if (pend > 0 && pend_key != NULL) {
+			/* Compare pending key with slot i's full key. */
+			uint16_t cl = pend_klen < pl ? pend_klen : pl;
+			int c = cl ? memcmp(pend_key, p + h->lo_fence_off, cl) : 0;
+
+			if (c == 0) {
+				if (pend_klen < pl)
+					c = -1;
+				else
+					c = cmp_bytes(pend_key + pl,
+					    (uint16_t)(pend_klen - pl),
+					    p + s[i].offset, s[i].key_len);
+			}
+			to_left = c <= 0;
+		}
+		lneed = lsz + (pend > 0 && to_left ? pend : 0);
+		rneed = rsz + (pend > 0 && !to_left ? pend : 0);
+		if (lneed > cap || rneed > cap)
+			continue;
+		m = lneed > rneed ? lneed : rneed;
+		if (m < best_max) {
+			best_max = m;
+			best = i;
+		}
+	}
+	return best;
+}
+
+int
+btnode_split_ex(void *page, void *right_page, void *sep_key_out,
+    uint16_t sep_cap, uint16_t *sep_len_out, const void *pend_key,
+    uint16_t pend_klen, uint16_t pend_vlen)
 {
 	struct btnode_hdr *h = HDR(page);
 	struct btnode_slot *s = slots_of(page);
@@ -479,14 +601,22 @@ btnode_split(void *page, void *right_page, void *sep_key_out,
 	const uint8_t *lo, *hi;
 	uint16_t lo_len, hi_len;
 	uint16_t i, j;
+	uint32_t pend = 0;
+	int sp;
 
 	if (h->count < 2)
 		return -1;
-
-	sep_slot = (uint16_t)((h->count - 1) / 2);
+	if (pend_key != NULL)
+		pend = (uint32_t)sizeof(struct btnode_slot) + pend_klen + pend_vlen;
+	sp = split_point(page, pend_key, pend_klen, pend);
+	if (sp < 0)
+		return -1;
+	sep_slot = (uint16_t)sp;
 
 	/* Separator = full key of the last slot kept in the left node. */
 	sep_len = (uint16_t)(pl + s[sep_slot].key_len);
+	if (sep_len > sep_cap)
+		return -1;              /* caller's buffer cannot hold it */
 	if (pl > 0)
 		memcpy(sep, p + h->lo_fence_off, pl);
 	memcpy(sep + pl, p + s[sep_slot].offset, s[sep_slot].key_len);

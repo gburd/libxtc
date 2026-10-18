@@ -134,6 +134,19 @@ int btnode_insert(void *page, const void *key, uint16_t key_len,
     const void *val, uint16_t val_len);
 
 /*
+ * Value flag.  The top bit of a slot's 16-bit value length is a flag the
+ * B-tree uses to mark a value that is an out-of-line reference (btovf.h)
+ * rather than the value bytes themselves.  btnode never interprets it:
+ * it stores it (btnode_insert_f), preserves it across split / merge /
+ * compaction, reports it (btnode_vflag), and masks it out of every size.
+ * A stored value is therefore at most 32767 bytes.
+ */
+#define BTNODE_VFLAG 0x8000u
+int btnode_insert_f(void *page, const void *key, uint16_t key_len,
+    const void *val, uint16_t val_len, uint16_t vflag);
+uint16_t btnode_vflag(const void *page, int slot);
+
+/*
  * Borrow the stored suffix and value for `slot` (no copy).  The
  * returned `key_len` is the SUFFIX length, not the full key length.
  * Returns 0 on success, -1 if slot is out of range.
@@ -171,6 +184,31 @@ int btnode_remove(void *page, int slot);
  */
 int btnode_split(void *page, void *right_page, void *sep_key_out,
     uint16_t *sep_len_out);
+
+/*
+ * Byte-balanced split (the cut is chosen by bytes, nearest half, not by
+ * slot count -- RethinkDB leaf::split), aware of the entry the caller
+ * will insert next.  `pend_key`/`pend_klen`/`pend_vlen` describe that
+ * pending entry (pend_key NULL = none); the cut is chosen so the half
+ * that will receive it (left iff key <= separator) still has room, so
+ * the post-split insert cannot fail for any entry the caller bounded
+ * by a page-derived limit.  `sep_cap` is the capacity of sep_key_out;
+ * a separator longer than that is refused (no overflow).  Returns -1,
+ * with `page` UNCHANGED, if the node has fewer than two slots, no cut
+ * leaves room for the pending entry, or the separator does not fit.
+ * btnode_split(...) == btnode_split_ex(..., 0xFFFF, ..., NULL, 0, 0).
+ */
+int btnode_split_ex(void *page, void *right_page, void *sep_key_out,
+    uint16_t sep_cap, uint16_t *sep_len_out, const void *pend_key,
+    uint16_t pend_klen, uint16_t pend_vlen);
+
+/* Bytes an entry of the given full key and value length needs in a node
+ * (slot + key + value, counting the whole key, i.e. no prefix savings). */
+static inline uint32_t
+btnode_entry_cost(uint16_t klen, uint16_t vlen)
+{
+	return 10u + (uint32_t)klen + (uint32_t)vlen;
+}
 
 /*
  * Merge `right_page` into `page` (the inverse of btnode_split).  The
