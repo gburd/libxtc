@@ -8880,6 +8880,108 @@ sql_has_setop(const char *s)
  * non-UNION-ALL operator, mismatched arity, or a chained compound), or
  * <0 on error.  UNION / INTERSECT / EXCEPT (which dedup / intersect)
  * fall back for now. */
+/* The compound's ORDER BY must name result columns, as in SQLite: a
+ * 1-based position, or a bare name matching a column/alias of the FIRST
+ * select (any table qualifier is ignored, as SQLite does there).  Fills
+ * key[] (0-based output column) and flags[] (VX_ORD_*), and LIMIT /
+ * OFFSET from integer literals or binds.  Returns 0, or -1 with *errmsg
+ * set (SQLite's error text) or left NULL (decline). */
+static int
+setop_order_plan(const sql_select_t *first, const sql_exprlist_t *order,
+                 const sql_expr_t *limit, const sql_expr_t *offset,
+                 const vx_cell_t *binds, int nbinds, int *key, int *flags,
+                 int *nkey, int64_t *lim, int64_t *off, char **errmsg)
+{
+	const sql_exprlist_item_t *o, *c;
+	int ncol = 0, k = 0, pos, term = 0, ci;
+	int64_t v;
+	char name[64], buf[96];
+	for (c = first->cols ? first->cols->head : NULL; c; c = c->next) {
+		if (c->expr == NULL || c->expr->op == SX_E_STAR) return -1;   /* decline */
+		ncol++;
+	}
+	for (o = order ? order->head : NULL; o; o = o->next) {
+		const sql_expr_t *e = o->expr;
+		term++;
+		if (k >= 16) return -1;
+		pos = 0;
+		if (e != NULL && e->op == SX_E_NUMBER && lit_int(e, &v, NULL, 0)) {
+			if (v >= 1 && v <= ncol) pos = (int)v;
+		} else if (e != NULL && e->op == SX_E_COLUMN && e->nname >= 1) {
+			const sql_str_t *nm = &e->name[e->nname - 1];
+			ci = 0;
+			for (c = first->cols->head; c; c = c->next) {
+				ci++;
+				item_name(c, name, sizeof name);
+				if (strlen(name) == nm->len &&
+				    strncasecmp(name, nm->p, nm->len) == 0) { pos = ci; break; }
+			}
+		}
+		if (pos == 0) {
+			snprintf(buf, sizeof buf, "%d%s ORDER BY term does not match any "
+			    "column in the result set", term,
+			    term == 1 ? "st" : term == 2 ? "nd" : term == 3 ? "rd" : "th");
+			if (errmsg) *errmsg = strdup(buf);
+			return -1;
+		}
+		key[k] = pos - 1;
+		flags[k] = ord_flags(o);
+		k++;
+	}
+	*nkey = k;
+	*lim = -1; *off = 0;
+	if (limit != NULL) {
+		if (!lit_int(limit, lim, binds, nbinds)) return -1;
+		if (*lim < 0) *lim = -1;   /* a negative LIMIT is no limit (SQLite) */
+	}
+	if (offset != NULL) {
+		if (!lit_int(offset, off, binds, nbinds)) return -1;
+		if (*off < 0) *off = 0;
+	}
+	return 0;
+}
+
+/* Sort a materialized compound result by output-column keys (stable,
+ * VX_ORD_* flags) and keep rows [off, off+lim).  0, or -1 on OOM. */
+static int
+setop_sort_slice(struct vx_result *r, const int *key, const int *flags,
+                 int nkey, int64_t lim, int64_t off)
+{
+	vx_cell_t *keys = NULL, *cells = NULL;
+	int *idx = NULL, i, j, n = r->nrow, nc = r->ncol, from, to;
+	struct sort_ctx sc;
+	if (nkey > 0 && n > 1) {
+		keys = (vx_cell_t *)malloc(sizeof *keys * (size_t)n * (size_t)nkey);
+		idx = (int *)malloc(sizeof *idx * (size_t)n);
+		cells = (vx_cell_t *)malloc(sizeof *cells * (size_t)n * (size_t)nc);
+		if (keys == NULL || idx == NULL || cells == NULL) {
+			free(keys); free(idx); free(cells); return -1;
+		}
+		for (i = 0; i < n; i++) {
+			idx[i] = i;
+			for (j = 0; j < nkey; j++)
+				keys[(size_t)i * (size_t)nkey + (size_t)j] =
+				    r->cells[(size_t)i * (size_t)nc + (size_t)key[j]];
+		}
+		sc.keys = keys; sc.nkey = nkey; sc.desc = flags;
+		g_sort_ctx = &sc;
+		qsort(idx, (size_t)n, sizeof *idx, sort_index_cmp);
+		g_sort_ctx = NULL;
+		for (i = 0; i < n; i++)
+			memcpy(&cells[(size_t)i * (size_t)nc],
+			    &r->cells[(size_t)idx[i] * (size_t)nc], sizeof *cells * (size_t)nc);
+		memcpy(r->cells, cells, sizeof *cells * (size_t)n * (size_t)nc);
+		free(keys); free(idx); free(cells);
+	}
+	from = off > n ? n : (int)off;
+	to = (lim < 0 || lim > (int64_t)(n - from)) ? n : from + (int)lim;
+	if (from > 0 && to > from)
+		memmove(r->cells, &r->cells[(size_t)from * (size_t)nc],
+		    sizeof *r->cells * (size_t)(to - from) * (size_t)nc);
+	r->nrow = to - from;
+	return 0;
+}
+
 static int
 run_setop(struct xsql *db, const char *sql, const vx_cell_t *binds, int nbinds,
           vx_result_t **res, char **errmsg)
@@ -8892,7 +8994,12 @@ run_setop(struct xsql *db, const char *sql, const vx_cell_t *binds, int nbinds,
 	vx_stmt_t *lp = NULL, *rp = NULL;
 	vx_result_t *lr = NULL, *rr = NULL;
 	int rc = 0, i, j;
+	const sql_exprlist_t *corder;
+	const sql_expr_t *climit, *coffset;
+	int okey[16], oflags[16], nkey = 0;
+	int64_t lim = -1, off = 0;
 
+	if (errmsg) *errmsg = NULL;
 	if (sql_parse_ast(sql, strlen(sql), &ast, &root, &perr) != 0) return 0;
 	if (root == NULL || root->next != NULL ||
 	    root->kind != SQL_KIND_SELECT || root->u.select == NULL) {
@@ -8908,9 +9015,19 @@ run_setop(struct xsql *db, const char *sql, const vx_cell_t *binds, int nbinds,
 	}
 	rhs = lhs->rhs;
 	if (rhs->setop != SX_SET_NONE) { sql_arena_destroy(ast); return 0; }  /* chained */
-	/* An ORDER BY / LIMIT on the compound applies to the whole result;
-	 * not handled here -- fall back. */
+	/* The grammar attaches a trailing ORDER BY / LIMIT / OFFSET to the
+	 * LAST select_core, but SQL applies it to the WHOLE compound.  Detach
+	 * it from rhs (so rhs runs unordered and unlimited) and apply it to
+	 * the combined result below.  An ORDER BY on the lhs itself would be
+	 * a syntax error in SQLite and cannot reach here. */
 	if (lhs->order || lhs->limit || lhs->offset) { sql_arena_destroy(ast); return 0; }
+	corder = rhs->order; climit = rhs->limit; coffset = rhs->offset;
+	rhs->order = NULL; rhs->limit = NULL; rhs->offset = NULL;
+	if (setop_order_plan(lhs, corder, climit, coffset, binds, nbinds,
+	    okey, oflags, &nkey, &lim, &off, errmsg) != 0) {
+		sql_arena_destroy(ast);
+		return (errmsg && *errmsg) ? -1 : 0;
+	}
 
 	/* Recognize each side WITHOUT giving away the shared arena (pass
 	 * NULL so vx_prepare_select does not free it; run_setop owns it). */
@@ -8991,6 +9108,10 @@ run_setop(struct xsql *db, const char *sql, const vx_cell_t *binds, int nbinds,
 		}
 		row_index_free(&seen);
 		vx_result_free(lr); lr = outr;
+	}
+	if ((nkey > 0 || lim >= 0 || off > 0) &&
+	    setop_sort_slice(lr, okey, oflags, nkey, lim, off) != 0) {
+		rc = -1; goto out;
 	}
 	*res = lr; lr = NULL;
 	rc = 1;

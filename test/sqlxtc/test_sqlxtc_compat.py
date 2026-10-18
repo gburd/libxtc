@@ -587,6 +587,39 @@ CORPUS = [
      "SELECT v FROM t WHERE strftime('%Y', d) = '2024' AND sign(v) = 1"),    ("real_text_ties", [],   # SQLite's 18-digit decode then half-up (not printf's)
      "SELECT CAST(98135134594298.25 AS TEXT), CAST(501353836885252.5 AS TEXT), "
      "400760634880118.5 || '', CAST(0.1 + 0.2 AS TEXT)"),
+    # Compound SELECT: the trailing ORDER BY / LIMIT applies to the WHOLE
+    # compound (it used to run on the right-hand select only).
+    ("setop_order",
+     ["CREATE TABLE a(x INT, y TEXT)", "CREATE TABLE b(x INT, z TEXT)",
+      "INSERT INTO a VALUES(3,'c'),(1,'a'),(NULL,'n')",
+      "INSERT INTO b VALUES(2,'b'),(5,'e'),(1,'a')"],
+     "SELECT x FROM a UNION ALL SELECT x FROM b ORDER BY x", {"ordered": True}),
+    ("setop_order_limit",
+     ["CREATE TABLE a(x INT)", "CREATE TABLE b(x INT)",
+      "INSERT INTO a VALUES(3),(1)", "INSERT INTO b VALUES(2),(5)"],
+     "SELECT x FROM a UNION ALL SELECT x FROM b ORDER BY 1 DESC LIMIT 2",
+     {"ordered": True}),
+    ("setop_limit_no_order",
+     ["CREATE TABLE a(x INT)", "CREATE TABLE b(x INT)",
+      "INSERT INTO a VALUES(3),(1)", "INSERT INTO b VALUES(2),(5)"],
+     "SELECT x FROM a UNION ALL SELECT x FROM b LIMIT 3", {"ordered": True}),
+    ("setop_union_order_col2",
+     ["CREATE TABLE a(x INT, y TEXT)", "CREATE TABLE b(x INT, z TEXT)",
+      "INSERT INTO a VALUES(3,'c'),(1,'a'),(NULL,'n')",
+      "INSERT INTO b VALUES(2,'b'),(5,'e'),(1,'a')"],
+     "SELECT x, y FROM a UNION SELECT x, z FROM b ORDER BY y DESC", {"ordered": True}),
+    ("setop_alias_offset",
+     ["CREATE TABLE a(x INT)", "CREATE TABLE b(x INT)",
+      "INSERT INTO a VALUES(3),(1)", "INSERT INTO b VALUES(2),(5),(1)"],
+     "SELECT x AS k FROM a UNION ALL SELECT x FROM b ORDER BY k LIMIT 2 OFFSET 1",
+     {"ordered": True}),
+    ("setop_except_nulls",
+     ["CREATE TABLE a(x INT)", "CREATE TABLE b(x INT)",
+      "INSERT INTO a VALUES(3),(1),(NULL)", "INSERT INTO b VALUES(1)"],
+     "SELECT x FROM a EXCEPT SELECT x FROM b ORDER BY x NULLS LAST", {"ordered": True}),
+    ("setop_order_expr_err",   # both reject: an ORDER BY term must be a result column
+     ["CREATE TABLE a(x INT)", "CREATE TABLE b(x INT)"],
+     "SELECT x FROM a UNION ALL SELECT x FROM b ORDER BY x+1"),
 ]
 
 # Features sqlxtc does not yet implement.  Reported, not failed -- these
