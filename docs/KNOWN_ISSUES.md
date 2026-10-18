@@ -6,6 +6,46 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## RESOLVED (1.57): sqlxtc large rows, B-tree limits, and the 1.56 regressions
+
+The 1.56.0 re-review and a study of RethinkDB's B-tree found, and 1.57
+fixes:
+
+* **sqlxtc lost acknowledged rows of about 800 bytes or more** after a
+  crash, in tables that mixed small and large rows, and reported "commit
+  failed; transaction rolled back" for a transaction that was partly
+  durable (rows of about 2 KB).  The B-tree had no entry-size bound: a
+  count-based split could fail after it was linked, a one-entry leaf could
+  not split, and recovery ignored the failed insert.  Every entry is now
+  bounded by the page, leaves split by bytes, and larger values are stored
+  out of line (up to 65535 bytes); the mixed-size crash harness keeps every
+  acked row, and the transfer commits whole.
+* **B-tree limits:** an optimistic lookup returned values over 1 KiB
+  truncated; keys over 1 KiB overflowed a split buffer; pages over 8 KiB
+  could not split internal nodes.  Keys above `bt_max_key()` are now
+  refused cleanly.
+* **Every INSERT scanned the whole table** for the next rowid (9.6 ms per
+  INSERT at 100k rows); it is now one descent (0.2 ms at any size).
+* **A delete held the B-tree root exclusive** across its descent, which
+  serialized concurrent deletes and readers (47k delete+insert/s on four
+  loops, now 390k).
+* **1.56 performance regressions**, each bisected and fixed: cross-loop
+  spawn (TLB-shootdown storm from freeing stacks on the target thread;
+  now faster than 1.55), two-loop io_uring ping-pong (self-feeding
+  wakeup re-arm), idle CPU (a 1 ms steal tick on every loop even with
+  nothing stealable), off-proc `xtc_svr_call` (one global slot lock),
+  rexis SET with large values, kaka default-mode produce (helper-thread
+  cap and group commit).
+* **kaka `--fsync-interval-ms` lost acknowledged records on a process
+  crash** (they were acked from a userspace buffer); it now writes before
+  every ack, as documented.
+* **kqueue (FreeBSD, macOS, BSDs):** deleting a write-only registration
+  left the write filter armed (spurious wakeups, `XTC_E_INVAL` with
+  migratable procs), and fd lookup was linear (82% throughput loss at
+  30k idle connections); both fixed.
+* **Batch:** producers retrying `xtc_batch_submit_mt` after close kept
+  the driver from finishing.
+
 ## RESOLVED (1.56): the 1.55.0 production-readiness review
 
 An adversarial review of 1.55.0 (five areas, every BLOCKER/MAJOR
@@ -482,6 +522,11 @@ The example programs are teaching code built on libxtc's public API.
 After the 1.55.0 production-readiness review their durability and
 isolation defects were fixed (1.56); what remains is recorded here.
 
+* **sqlxtc row and key limits.**  A row value is at most 65535 bytes
+  (the B-tree API's 16-bit length; values over a quarter page are stored
+  out of line), and a key at most `bt_max_key()` bytes (498 on the
+  default 4 KiB page), so an indexed TEXT/BLOB value longer than about
+  470 bytes cannot be indexed; the index insert is refused.
 * **sqlxtc crash recovery rebuilds from the log.**  Recovery replays the
   write-ahead log onto a fresh page file; it does not yet trust the
   on-disk pages, their double-write buffer, or page LSNs

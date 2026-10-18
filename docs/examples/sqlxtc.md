@@ -93,14 +93,88 @@ textbook ones SQLite also uses.
   double-write buffer), and the pin-accounting that DST and ASan hardened
   (see [Known issues]({{ '/reference/known-issues/' | relative_url }}) for
   the pin-race history).
-- **`btree.c` / `btnode.c`** -- a B-link tree with concurrent,
-  latch-coupled descents and latch-free reads.
+- **`btree.c` / `btnode.c` / `btovf.h`** -- a B-link tree with
+  latch-free optimistic reads, leaf-only write latching, page-bounded
+  entries and out-of-line large values (see below).
 - **`wal.c` / `xlog.c`** -- write-ahead logging, group commit, and
   crash recovery (redo/undo), validated under the deterministic
   simulator and by kill -9 torture of the server.
 - **`xstore.c`** -- the catalog and MVCC record store: per-connection
   transactions, snapshot reads, first-committer-wins write-write
   conflict detection, and SSI for SERIALIZABLE.
+
+## The B-tree, and what it borrows from RethinkDB
+
+`btree.c` is a B-link tree (Lehman-Yao): every node carries fence keys
+and a right-sibling link, so a descent that loses a race with a split
+walks right instead of restarting. Readers take no latch at all on the
+common path -- an optimistic descent validated by each frame's version
+seqlock (OLC) -- and inserts latch only the leaf; splits and merges
+serialize on a per-tree structure-modification lock and post separators
+bottom-up. Nodes are slotted pages with prefix compression derived from
+the fences and a 4-byte cached key head per slot.
+
+1.57 compared this design against RethinkDB's B-tree
+(`src/btree/`, `src/buffer_cache/`) and borrowed six things.
+
+**Every entry is bounded by the page.** RethinkDB caps a leaf entry at
+1/8 of a page (`leaf_epsilon`), and every split and merge guarantee
+follows from that bound. sqlxtc had no bound: a 2 KB row could make a
+4 KiB leaf unsplittable, and an indexed TEXT value over 1 KB overflowed
+the split's separator buffer. Now `bt_max_key()` and `bt_max_inline()`
+derive the limits from the page size (4 KiB pages: 498-byte keys, 506
+bytes of key plus value inline), every call checks them before touching
+anything, and leaves split **by bytes**, choosing the cut nearest half
+that leaves room for the row being inserted (`btnode_split_ex`).
+
+**Large values live out of line.** RethinkDB's blob stores a small
+value inline and a large one in dedicated blocks referenced from the
+leaf. sqlxtc does the same in one level: a value above the inline bound
+is written to data pages first, and the leaf keeps a bounded reference
+(flagged by the high bit of the slot's length field, so inline pages are
+unchanged). Lookups and cursors reassemble it, checksum-verified; a
+replace or delete frees the old pages only after the reference is gone,
+while splits and merges only move the reference. Values go up to 65535
+bytes (the API's 16-bit length).
+
+**Writers do not hold the root.** RethinkDB's write descent keeps the
+root write-locked across a child read, which serializes every later
+operation (it compensates with page snapshots and eight shards per
+table). sqlxtc's delete did the same; it now descends with shared
+latches and takes only the leaf exclusive, which multiplied concurrent
+delete throughput across four loops by eight.
+
+**Questions about the whole tree are answered from the tree.**
+RethinkDB keeps a population block and samples separator keys for
+split points. sqlxtc's INSERT used to scan the whole table for the
+largest rowid; `bt_seek_lt` answers it in one descent, so a single
+INSERT takes the same 0.2 ms at 100k rows as at 1k (it was 9.6 ms).
+
+**Split points come from the tree's own separators.** RethinkDB's
+`get_distribution` samples the separator keys of the top levels to
+estimate a key distribution in a handful of page reads. sqlxtc's
+`bt_sample_keys` does the same, and the morsel-parallel scan cuts its
+rowid range at those points instead of uniformly, so a table with
+skewed rowids still splits into even morsels (1M rows, 90% of them in
+the top 1% of the rowid space: the largest morsel went from 14.5x the
+mean to 1.09x, and the 8-worker scan from 197 ms to 59 ms).
+
+**Every node is checked after every change, in test builds.** RethinkDB
+validates nodes after each mutation in debug builds. `btnode_check`
+verifies a node's layout, space accounting, key order, fence
+containment and out-of-line references; `-DBT_CHECK`, which is on
+automatically under the deterministic simulator, runs it at every
+mutation point, so a structural bug is reported at the operation that
+caused it and pinned by a replayable seed.
+
+What was deliberately *not* borrowed: per-entry replication timestamps
+and in-page tombstones (backfill for replicas; the WAL is sqlxtc's
+change stream), top-down proactive split/merge with root write locks
+(strictly less concurrent than B-link), page-level copy-on-write
+snapshots (sqlxtc has row-level MVCC), the log-structured serializer
+(sqlxtc has a WAL with page LSNs), and the 250-byte key cap (sqlxtc's
+16-bit keys with prefix compression are better; the page-derived bound
+replaces it).
 
 ## Transactions and isolation
 
