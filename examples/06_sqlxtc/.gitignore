@@ -69,3 +69,4 @@ numa_claim_probe
 evict_policy_proto
 test_index
 test_quack_range
+bench_btree_mixed

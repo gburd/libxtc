@@ -2110,8 +2110,13 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 		}
 		if (rc != XTC_OK)
 			return rc;
-		bm_latch_exclusive(f);
-		(void)move_right(bt, &f, key, klen, 1);
+		/* Internal levels are read SHARED: a delete only modifies the
+		 * leaf.  (1.56 took every level EXCLUSIVE, root included, which
+		 * made each in-flight delete fail every optimistic lookup at the
+		 * root and park every other loop's descent on the root latch --
+		 * the RethinkDB root-write-lock pattern; bench_btree_mixed.) */
+		bm_latch_shared(f);
+		(void)move_right(bt, &f, key, klen, 0);
 		pg = bm_page(f);
 		/* Stale-node guard at the root (see the internal-level guard
 		 * below): a concurrent merge may have unlinked it or absorbed
@@ -2137,11 +2142,11 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 				bm_unlatch(f); bm_unfix(bm, f, 0);
 				return rc;
 			}
-			bm_latch_exclusive(cf);
+			bm_latch_shared(cf);
 			bm_unlatch(f);             /* release before latching deeper */
 			bm_unfix(bm, f, 0);
 			f = cf;
-			(void)move_right(bt, &f, key, klen, 1);
+			(void)move_right(bt, &f, key, klen, 0);
 			pg = bm_page(f);
 			/* Internal-level stale-node guard.  A concurrent merge can
 			 * unlink the child (dead) or absorb its range into a LEFT
@@ -2163,6 +2168,15 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 			xtc_yield();
 			continue;
 		}
+		/* f is the leaf, held SHARED.  Upgrade: release and re-latch it
+		 * exclusive (an arwlock cannot upgrade in place), then walk right
+		 * again -- the leaf may have split in the window.  The stale
+		 * guards below re-check dead / below-lo-fence under the
+		 * exclusive latch, so a merge in the window restarts. */
+		bm_unlatch(f);
+		bm_latch_exclusive(f);
+		(void)move_right(bt, &f, key, klen, 1);
+		pg = bm_page(f);
 
 		found = 0;
 		s = btnode_search(pg, key, klen, &found);

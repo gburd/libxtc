@@ -469,6 +469,10 @@ bt_merge_bench: bt_merge_bench.c btree.c bufmgr.o btnode.c
 bench_btree_concurrent: bench_btree_concurrent.c btree.c bufmgr.o btnode.c
 	$(CC) $(CFLAGS) -o $@ bench_btree_concurrent.c btree.c bufmgr.o btnode.c $(LDFLAGS)
 
+# Read latency (p50/p99/p99.9) under a concurrent delete+insert stream.
+bench_btree_mixed: bench_btree_mixed.c btree.c bufmgr.o btnode.c
+	$(CC) $(CFLAGS) -o $@ bench_btree_mixed.c btree.c bufmgr.o btnode.c $(LDFLAGS)
+
 # ---- physiological redo apply (page-LSN gated image write) ----
 test_redo_page: test_redo_page.c bufmgr.o
 	$(CC) $(CFLAGS) -o $@ test_redo_page.c bufmgr.o $(LDFLAGS)
