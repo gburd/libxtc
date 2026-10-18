@@ -13,7 +13,7 @@
  *
  *	For a call (byte 1 selects the reply route):
  *	  'C' 's' id[8] payload  -- off-proc caller: id names an in-flight
- *	                            reply slot (see __svr_slots below)
+ *	                            reply slot (see the slot table below)
  *	  'C' 'p' pid[8] tag[8] payload -- in-proc caller: reply by mailbox
  *
  *	In-proc reply (to the caller's mailbox):
@@ -98,15 +98,16 @@ static XTC_THREAD_LOCAL struct xtc_svr *__svr_cur;
 
 /*
  * Reply slot of an off-proc (plain thread) caller.  It lives on the
- * caller's stack and is reachable ONLY through __svr_slots, by the id
+ * caller's stack and is reachable ONLY through the slot table, by the id
  * the request carries -- never by a pointer in the message.  Every
- * access (reply store, signal, caller unlink) happens under
- * __svr_slots_lock, and the caller unlinks before it returns, so a reply
+ * access (reply store, signal, caller unlink) happens under the lock of
+ * the id's bucket, and the caller unlinks before it returns, so a reply
  * that arrives after a timeout finds no slot and is discarded.  (Before
  * 1.55.1 the message carried &slot and a late reply wrote into the dead
  * frame: ASan stack-use-after-return / SEGV in xtc_notify_signal.)
- * The list holds one entry per thread blocked in a call, so a linear
- * lookup is fine.
+ * The table is hashed by id so concurrent callers do not share a lock:
+ * one global lock, held across the reply's signal, made every off-proc
+ * call queue behind every other (+60-90% per call at 8-16 threads).
  */
 struct __svr_reply_slot {
 	struct __svr_reply_slot *next;
@@ -117,9 +118,29 @@ struct __svr_reply_slot {
 	int             replied;
 };
 
-static pthread_mutex_t          __svr_slots_lock = PTHREAD_MUTEX_INITIALIZER;
-static struct __svr_reply_slot *__svr_slots;
-static uint64_t                 __svr_slot_seq;
+#define SVR_SLOT_BUCKETS 64          /* power of two */
+struct __svr_slot_bucket {
+	_Alignas(XTC_CACHE_LINE) pthread_mutex_t lock;
+	struct __svr_reply_slot *head;
+};
+static struct __svr_slot_bucket __svr_slot_tab[SVR_SLOT_BUCKETS];
+static __os_once_t              __svr_slot_once = XTC_OS_ONCE_INIT;
+static _Atomic uint64_t         __svr_slot_seq;
+
+static void
+__svr_slot_tab_init(void)
+{
+	int i;
+	for (i = 0; i < SVR_SLOT_BUCKETS; i++)
+		(void)pthread_mutex_init(&__svr_slot_tab[i].lock, NULL);
+}
+
+static struct __svr_slot_bucket *
+__svr_slot_bucket(uint64_t id)
+{
+	(void)__os_call_once(&__svr_slot_once, __svr_slot_tab_init);
+	return &__svr_slot_tab[id & (SVR_SLOT_BUCKETS - 1)];
+}
 
 struct xtc_svr_call {
 	struct xtc_svr           *svr;
@@ -143,10 +164,11 @@ __svr_gone(xtc_pid_t target)
 }
 
 static void
-__svr_slot_unlink_locked(struct __svr_reply_slot *slot)
+__svr_slot_unlink_locked(struct __svr_slot_bucket *b,
+    struct __svr_reply_slot *slot)
 {
 	struct __svr_reply_slot **pp;
-	for (pp = &__svr_slots; *pp != NULL; pp = &(*pp)->next)
+	for (pp = &b->head; *pp != NULL; pp = &(*pp)->next)
 		if (*pp == slot) {
 			*pp = slot->next;
 			return;
@@ -415,7 +437,7 @@ __svr_slice(int64_t deadline)
 }
 
 /* Off-proc wait on a registered slot.  XTC_OK when signalled; the
- * caller re-reads slot->replied under __svr_slots_lock either way. */
+ * caller re-reads slot->replied under its bucket lock either way. */
 static int
 __svr_wait_slot(struct __svr_reply_slot *slot, xtc_pid_t target,
                 int64_t timeout_ns, xtc_abort_token_t *tok)
@@ -452,6 +474,7 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
            xtc_abort_token_t *tok)
 {
 	struct __svr_reply_slot slot;
+	struct __svr_slot_bucket *b;
 	uint8_t  *buf = NULL;
 	size_t    msg_size;
 	int       rc;
@@ -500,11 +523,13 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 		xtc_notify_destroy(slot.done);
 		return XTC_E_NOMEM;
 	}
-	(void)__xtc_mtx_lock(&__svr_slots_lock);
-	slot.id = ++__svr_slot_seq;
-	slot.next = __svr_slots;
-	__svr_slots = &slot;
-	(void)__xtc_mtx_unlock(&__svr_slots_lock);
+	slot.id = atomic_fetch_add_explicit(&__svr_slot_seq, 1,
+	    memory_order_relaxed) + 1;           /* never 0 (the pid path) */
+	b = __svr_slot_bucket(slot.id);
+	(void)__xtc_mtx_lock(&b->lock);
+	slot.next = b->head;
+	b->head = &slot;
+	(void)__xtc_mtx_unlock(&b->lock);
 
 	buf[0] = 'C';
 	buf[1] = 's';
@@ -518,14 +543,14 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 	/* Unlink before the frame dies; from here the server cannot reach
 	 * the slot.  A reply that landed after the wait gave up still
 	 * wins: return it rather than drop it. */
-	(void)__xtc_mtx_lock(&__svr_slots_lock);
-	__svr_slot_unlink_locked(&slot);
+	(void)__xtc_mtx_lock(&b->lock);
+	__svr_slot_unlink_locked(b, &slot);
 	if (slot.replied) {
 		*out_reply = slot.data;
 		*out_size = slot.size;
 		rc = XTC_OK;
 	}
-	(void)__xtc_mtx_unlock(&__svr_slots_lock);
+	(void)__xtc_mtx_unlock(&b->lock);
 	xtc_notify_destroy(slot.done);
 	return rc;
 }
@@ -596,6 +621,7 @@ xtc_svr_reply(xtc_svr_call_t *call, const void *reply, size_t size)
 	}
 
 	if (call->slot_id != 0) {
+		struct __svr_slot_bucket *b = __svr_slot_bucket(call->slot_id);
 		struct __svr_reply_slot *slot;
 		void *copy = NULL;
 		if (size > 0) {
@@ -614,8 +640,8 @@ xtc_svr_reply(xtc_svr_call_t *call, const void *reply, size_t size)
 		 * server-gone check) and unlinked its slot: then there is
 		 * nobody to deliver to and the reply is discarded. */
 		rc = XTC_E_NOTFOUND;
-		(void)__xtc_mtx_lock(&__svr_slots_lock);
-		for (slot = __svr_slots; slot != NULL; slot = slot->next)
+		(void)__xtc_mtx_lock(&b->lock);
+		for (slot = b->head; slot != NULL; slot = slot->next)
 			if (slot->id == call->slot_id)
 				break;
 		if (slot != NULL && !slot->replied) {
@@ -626,7 +652,7 @@ xtc_svr_reply(xtc_svr_call_t *call, const void *reply, size_t size)
 			(void)xtc_notify_signal(slot->done);
 			rc = XTC_OK;
 		}
-		(void)__xtc_mtx_unlock(&__svr_slots_lock);
+		(void)__xtc_mtx_unlock(&b->lock);
 		if (copy != NULL) __os_free(copy);
 	} else if (!xtc_pid_is_none(call->reply_pid)) {
 		/* Encode reply for in-proc caller: magic + tag + payload. */
