@@ -58,6 +58,7 @@
 enum { REQ_PRODUCE = 1, REQ_FETCH = 2, REQ_SHUTDOWN = 3, REQ_FETCH_CONT = 4 };
 
 #define PART_BATCH       64                 /* requests per group commit */
+#define GATHER_MAX_NS    (2LL * 1000 * 1000) /* cap on the gather window */
 #define FETCH_SLICE      (1u * 1024u * 1024u)
 #define FETCH_DEFAULT    65536u
 #define FETCH_MAX        (KAKA_MAX_FRAME - 1 - 12)   /* body after base+n */
@@ -156,8 +157,39 @@ struct pstate {
 	plog_t     *log;
 	int64_t     mem_charged;   /* budget charged for RAM-resident bytes */
 	int64_t     last_sync;
+	int64_t     sync_ns;       /* duration of the last plog_sync */
+	int         expect;        /* producers seen in the last two batches */
+	int         n_prev;
+	xtc_pid_t   prev[PART_BATCH];
 	struct part_arg *pa;
 };
+
+/* Distinct producers in the previous batch plus this one: the group a
+ * gather waits for (the PostgreSQL commit_siblings idea).  A partition
+ * whose synchronous producers each have one request in flight
+ * otherwise splits them into two groups that alternate -- one syncing,
+ * one queued behind it -- and with two producers every sync covers ONE
+ * produce. */
+static void
+__note_batch(struct pstate *ps, const xtc_pid_t *to, int n)
+{
+	int i, j, d = 0;
+
+	for (i = 0; i < n; i++) {
+		for (j = 0; j < ps->n_prev; j++)
+			if (xtc_pid_eq(to[i], ps->prev[j]))
+				break;
+		if (j < ps->n_prev)
+			continue;
+		for (j = 0; j < i; j++)
+			if (xtc_pid_eq(to[i], to[j]))
+				break;
+		d += j == i;
+	}
+	ps->expect = ps->n_prev + d;
+	memcpy(ps->prev, to, (size_t)n * sizeof *to);
+	ps->n_prev = n;   /* a conn has one request in flight: no dupes */
+}
 
 /* Keep the memory budget equal to the bytes this partition holds in RAM
  * (eviction gives budget back). */
@@ -237,9 +269,11 @@ __do_produce(struct pstate *ps, const struct part_req *req,
 static void
 __do_fetch(struct pstate *ps, struct part_req *req)
 {
-	/* Consumers see acked records only: synced ones in durable mode. */
-	uint64_t end = g_fsync_ns == 0 ? plog_synced(ps->log) :
-	    plog_high_water(ps->log);
+	/* Consumers see acked records only: synced ones in durable mode,
+	 * written ones in relaxed mode (write(2) them first, so a record a
+	 * consumer has read survives a broker crash). */
+	uint64_t end = g_fsync_ns == 0 || plog_flush(ps->log) != 0 ?
+	    plog_synced(ps->log) : plog_high_water(ps->log);
 	uint8_t *buf = req->buf;
 	struct part_reply rep;
 	size_t cap = (size_t)req->max_bytes + 17;
@@ -320,13 +354,21 @@ __commit_batch(struct pstate *ps, struct part_reply *reps, xtc_pid_t *to,
 	if (any && (g_fsync_ns == 0 || now - ps->last_sync >= g_fsync_ns)) {
 		sync_ok = plog_sync(ps->log) == 0;
 		ps->last_sync = now;
+		ps->sync_ns = xtc_clock_mono() - now;
 		if (!sync_ok)
 			XTC_LOG_ERROR_F("partition %s/%u: fsync failed; "
 			    "partition is now read-only", ps->pa->topic,
 			    ps->pa->partition);
 	}
+	/* Relaxed mode acks after write(2), not after a memcpy into the
+	 * write-behind buffer: a broker crash must lose no acked record. */
+	if (any && g_fsync_ns > 0 && sync_ok && plog_flush(ps->log) != 0) {
+		sync_ok = 0;
+		XTC_LOG_ERROR_F("partition %s/%u: write failed; partition is "
+		    "now read-only", ps->pa->topic, ps->pa->partition);
+	}
 	for (i = 0; i < n; i++) {
-		if (!sync_ok && g_fsync_ns == 0 && reps[i].n_stored > 0) {
+		if (!sync_ok && reps[i].n_stored > 0) {
 			reps[i].ok = 0;
 			reps[i].err = KAKA_ERR_STORAGE;
 		}
@@ -377,7 +419,7 @@ partition_proc(void *arg)
 
 	while (!stop) {
 		int nb = 0;
-		int64_t wait = -1;
+		int64_t wait = -1, gather_end = 0, w;
 		void *msg;
 		size_t mlen;
 
@@ -423,12 +465,30 @@ partition_proc(void *arg)
 				}
 			}
 			if (msg != NULL) xtc_free(msg);
-			if (stop || nb == PART_BATCH ||
-			    xtc_recv(&msg, &mlen, 0) != XTC_OK)
+			if (stop || nb == PART_BATCH)
+				break;
+			/* Gather: before syncing, wait (at most a quarter of
+			 * the last sync, so the latency cost is bounded) for
+			 * the rest of the producers seen in the last two
+			 * batches -- the ones just acked come straight back. */
+			w = 0;
+			if (g_fsync_ns == 0 && nb > 0 && nb < ps.expect) {
+				if (gather_end == 0)
+					gather_end = xtc_clock_mono() +
+					    (ps.sync_ns / 4 < GATHER_MAX_NS ?
+					    ps.sync_ns / 4 : GATHER_MAX_NS);
+				w = gather_end - xtc_clock_mono();
+				if (w < 0)
+					w = 0;
+			}
+			if (xtc_recv(&msg, &mlen, w) != XTC_OK)
 				break;
 		}
-		if (nb > 0)
+		if (nb > 0) {
 			__commit_batch(&ps, reps, to, nb);
+			if (g_fsync_ns == 0)
+				__note_batch(&ps, to, nb);
+		}
 	}
 
 	/* Answer whatever is still queued, then close the log durably. */

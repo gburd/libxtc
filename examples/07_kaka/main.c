@@ -25,6 +25,7 @@
 
 #include "xtc.h"
 #include "xtc_app.h"
+#include "xtc_io.h"
 #include "xtc_log.h"
 #include "xtc_loop.h"
 #include "xtc_net.h"
@@ -65,6 +66,8 @@ typedef struct broker {
 	_Atomic int       conn_count;
 	_Atomic int       shutdown_requested;
 } broker_t;
+
+#define MAX_SYNC_WORKERS 64     /* concurrent partition fdatasyncs */
 
 static broker_t *g_broker;
 
@@ -236,6 +239,12 @@ main(int argc, char **argv)
 	(void)signal(SIGPIPE, SIG_IGN);
 	(void)signal(SIGINT, on_signal);
 	(void)signal(SIGTERM, on_signal);
+
+	/* One loop runs every partition, and each fdatasync is an io_uring
+	 * job on that loop's io-wq.  The library caps a ring's bounded
+	 * io-wq at 4 workers (built for many-carrier hosts), which would
+	 * cap the broker at 4 concurrent partition syncs. */
+	xtc_io_set_iowq_max_workers(MAX_SYNC_WORKERS, 0);
 
 	app_opts.name = "kaka";
 	app_opts.sup.strategy = XTC_SUP_ONE_FOR_ONE;

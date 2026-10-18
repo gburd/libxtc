@@ -74,6 +74,11 @@ int64_t plog_append(plog_t *log, const kaka_record_t *rec);
  * failure, after which the log is failed.  No-op in memory mode. */
 int   plog_sync(plog_t *log);
 
+/* write(2) every appended record (no fsync): after this a process
+ * crash loses none of them.  0 on success; -1 on a write failure,
+ * after which the log is failed.  No-op in memory mode. */
+int   plog_flush(plog_t *log);
+
 /* 1 once a write or sync has failed (no further appends accepted). */
 int   plog_failed(const plog_t *log);
 

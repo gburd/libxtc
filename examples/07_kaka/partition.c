@@ -730,6 +730,18 @@ plog_sync(plog_t *l)
 }
 
 int
+plog_flush(plog_t *l)
+{
+	if (l == NULL || l->failed) return -1;
+	if (l->dir == NULL || l->wbuf_len == 0) return 0;
+	if (__flush_wbuf(l) != 0) {
+		l->failed = 1;           /* fail-stop, as for a failed sync */
+		return -1;
+	}
+	return 0;
+}
+
+int
 plog_failed(const plog_t *l)
 {
 	return l == NULL || l->failed;

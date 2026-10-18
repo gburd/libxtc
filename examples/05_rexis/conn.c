@@ -43,6 +43,24 @@
  */
 #define OUT_SOFT           (1024 * 1024)
 
+/*
+ * Buffer hysteresis.  A buffer grown past CONN_BASE_BUF keeps the
+ * capacity it needed: it is cut back (conn_trim) at most once per
+ * CONN_TRIM_NS to the power-of-two size of its peak use in that window
+ * (Redis resizes client buffers from its 100 ms clientsCron the same
+ * way), and to what it holds now (normally CONN_BASE_BUF) once the
+ * connection has been idle that long.  Shrinking right after every command made a
+ * client whose commands or replies pass CONN_BASE_BUF realloc up and
+ * down per command (an mremap and fresh page faults above 128 KiB).
+ * The kept capacity stays charged to client_res, so --max-memory still
+ * bounds it, and an idle connection returns to the base.
+ */
+#define CONN_TRIM_NS       (100LL * 1000 * 1000)
+
+/* A recv that fills the query buffer means more is waiting: grow (read
+ * ahead, charged) up to this so a deep pipeline is parsed in one pass. */
+#define CONN_READ_AHEAD    (64UL * 1024)
+
 /* Why a reply could not be buffered (conn_state_t.out_fail). */
 #define OUT_FAIL_LIMIT     1    /* would pass max_output */
 #define OUT_FAIL_MEM       2    /* client budget (--max-memory) refused */
@@ -61,18 +79,22 @@ typedef struct conn_state {
 
 	/* Query buffer: rbuf[0..rlen) is received, unprocessed input.  It
 	 * starts at CONN_BASE_BUF and grows (doubling) to hold one command
-	 * of at most max_request bytes, then shrinks back. */
+	 * of at most max_request bytes (or to CONN_READ_AHEAD for a deep
+	 * pipeline); conn_trim shrinks it back. */
 	char       *rbuf;
 	size_t      rcap;
 	size_t      rlen;
+	size_t      rpeak;       /* largest rlen since the last trim */
 	size_t      max_request;
 
 	/* Output buffer: wbuf[wpos..wlen) is unsent reply bytes.  Grows up
-	 * to max_output; shrinks back to CONN_BASE_BUF once drained. */
+	 * to max_output; conn_trim shrinks it back once drained. */
 	char       *wbuf;
 	size_t      wcap;
 	size_t      wlen;
 	size_t      wpos;
+	size_t      wpeak;       /* largest wlen since the last trim */
+	int64_t     trim_ns;     /* last_io_ns at the last trim */
 	size_t      max_output;
 	size_t      out_soft;
 	int         out_fail;    /* OUT_FAIL_* of the last refused grow */
@@ -230,6 +252,8 @@ conn_flush(conn_state_t *st)
 {
 	ssize_t n;
 
+	if (st->wlen > st->wpeak)
+		st->wpeak = st->wlen;
 	while (st->wpos < st->wlen) {
 		n = send(st->fd, st->wbuf + st->wpos, st->wlen - st->wpos,
 		    MSG_DONTWAIT | MSG_NOSIGNAL);
@@ -246,8 +270,31 @@ conn_flush(conn_state_t *st)
 		return;
 	}
 	st->wpos = st->wlen = 0;
-	if (st->wcap > CONN_BASE_BUF)
-		(void)conn_resize(st, &st->wbuf, &st->wcap, CONN_BASE_BUF);
+}
+
+/* Hysteresis shrink (see CONN_TRIM_NS): to the peak of the last window,
+ * or, when idle, to what the buffers hold now. */
+static void
+conn_trim(conn_state_t *st, int idle)
+{
+	size_t t;
+
+	/* Not while a large command is still arriving: its buffer was
+	 * doubled ahead of rpeak and would only grow back. */
+	if (idle || st->rlen <= CONN_BASE_BUF) {
+		for (t = CONN_BASE_BUF; t < (idle ? st->rlen : st->rpeak);
+		    t *= 2)
+			;
+		if (st->rcap > t)
+			(void)conn_resize(st, &st->rbuf, &st->rcap, t);
+	}
+	for (t = CONN_BASE_BUF; !idle && t < st->wpeak; t *= 2)
+		;
+	if (st->wcap > t && st->wpos == st->wlen)
+		(void)conn_resize(st, &st->wbuf, &st->wcap, t);
+	st->rpeak = st->rlen;
+	st->wpeak = st->wlen;
+	st->trim_ns = st->last_io_ns;
 }
 
 /* One recv into the query buffer, growing it (up to max_request) when
@@ -260,7 +307,7 @@ conn_try_read(conn_state_t *st)
 	static const char oom_query[] =
 	    "-OOM client query buffer exceeds the client memory budget\r\n";
 	ssize_t n;
-	size_t ncap;
+	size_t ncap, room;
 
 	if (st->rlen == st->rcap) {
 		/* Full of complete commands not yet run: run them first.
@@ -277,11 +324,20 @@ conn_try_read(conn_state_t *st)
 			return;
 		}
 	}
-	n = recv(st->fd, st->rbuf + st->rlen, st->rcap - st->rlen,
-	    MSG_DONTWAIT);
+again:
+	room = st->rcap - st->rlen;
+	n = recv(st->fd, st->rbuf + st->rlen, room, MSG_DONTWAIT);
 	if (n > 0) {
 		st->rlen += (size_t)n;
 		st->last_io_ns = xtc_clock_mono();
+		if (st->rlen > st->rpeak)
+			st->rpeak = st->rlen;
+		/* Filled it: read ahead (optional; a refused grow only
+		 * stops reading). */
+		if ((size_t)n == room && st->rcap < CONN_READ_AHEAD &&
+		    st->rcap * 2 <= st->max_request &&
+		    conn_resize(st, &st->rbuf, &st->rcap, st->rcap * 2) == 0)
+			goto again;
 	} else if (n == 0) {
 		st->eof = 1;
 	} else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
@@ -415,8 +471,6 @@ conn_process_commands(conn_state_t *st)
 		memmove(st->rbuf, st->rbuf + parser.pos, st->rlen - parser.pos);
 		st->rlen -= parser.pos;
 	}
-	if (st->rcap > CONN_BASE_BUF && st->rlen <= CONN_BASE_BUF)
-		(void)conn_resize(st, &st->rbuf, &st->rcap, CONN_BASE_BUF);
 	if (st->quit)
 		stop = STOP_QUIT;
 	st->partial = stop == STOP_NEED_MORE;
@@ -462,7 +516,7 @@ conn_proc(void *arg)
 	int stop;
 
 	st->self = xtc_self();   /* for pub/sub group membership */
-	st->last_io_ns = xtc_clock_mono();
+	st->last_io_ns = st->trim_ns = xtc_clock_mono();
 
 	/*
 	 * Resource scope (mechanism, not manner): register the connection
@@ -553,9 +607,17 @@ conn_proc(void *arg)
 		 * clock. */
 		park_ns = stop == STOP_THROTTLED ? 10LL * 1000 * 1000 :
 		    1000LL * 1000 * 1000;
+		if (st->last_io_ns - st->trim_ns >= CONN_TRIM_NS)
+			conn_trim(st, 0);
+		if ((st->rcap > CONN_BASE_BUF || st->wcap > CONN_BASE_BUF) &&
+		    park_ns > CONN_TRIM_NS)
+			park_ns = CONN_TRIM_NS;   /* to see idleness soon */
 		revents = 0;
 		(void)xtc_proc_wait_fd(st->fd,
 		    interest | XTC_IO_HUP | XTC_IO_ERR, park_ns, &revents);
+		if ((st->rcap > CONN_BASE_BUF || st->wcap > CONN_BASE_BUF) &&
+		    xtc_clock_mono() - st->last_io_ns >= CONN_TRIM_NS)
+			conn_trim(st, 1);     /* idle: back to the base */
 		/* ERR: the socket is dead.  HUP is left to the next recv /
 		 * send to classify (kqueue reports a half-close as HUP, and
 		 * the commands buffered before it still get their replies). */
