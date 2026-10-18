@@ -176,6 +176,9 @@ __xtc_task_spare_fini(xtc_loop_t *loop)
 	atomic_store_explicit(&loop->task_spare_n, 0, memory_order_relaxed);
 }
 
+/* exec.c: count a live unpinned task (its loop's 0 -> 1 wakes sleepers). */
+extern void __xtc_exec_mig_alive(xtc_loop_t *l, int delta);
+
 /* Allocate a zeroed task struct: reuse a recycled one from the loop's
  * free list or spare if available, else malloc.  recyclable marks a free-
  * list-eligible struct (recycle on completion). */
@@ -422,6 +425,8 @@ __xtc_task_spawn_cleanup(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 		loop->all_tasks = t;
 		atomic_fetch_add_explicit(&loop->n_alive, 1,
 		    memory_order_relaxed);
+		if (!pinned && loop->exec != NULL)
+			__xtc_exec_mig_alive(loop, 1);
 		(void)__xtc_loop_enqueue(loop, t);
 		return XTC_OK;
 	}
@@ -445,6 +450,8 @@ __xtc_task_spawn_cleanup(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 	}
 
 	atomic_fetch_add_explicit(&loop->n_alive, 1, memory_order_relaxed);
+	if (!pinned && loop->exec != NULL)
+		__xtc_exec_mig_alive(loop, 1);
 	return __xtc_inbox_push(loop, XTC_INB_PUBLISH, t);
 }
 

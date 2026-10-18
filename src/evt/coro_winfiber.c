@@ -310,6 +310,13 @@ __xtc_current_coro_get(void)
 	return *slot;
 }
 
+/* Fibers own their stacks (CreateFiberEx): no loop spare to unmap. */
+void
+__xtc_coro_stack_spare_fini(xtc_loop_t *loop)
+{
+	(void)loop;
+}
+
 xtc_task_t *
 __xtc_current_task(void)
 {

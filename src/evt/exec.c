@@ -70,6 +70,12 @@ struct xtc_exec {
 	                                    * enqueuing migratable work nudges an
 	                                    * idle peer.  See
 	                                    * xtc_exec_set_eager_rebalance. */
+	_Atomic int   n_mig_loops;         /* loops whose n_mig_alive > 0,
+	                                    * moved only on a loop's 0 <-> 1
+	                                    * edges (so it is read-mostly); may
+	                                    * be transiently off by one while
+	                                    * two edges race.  <= 0: nothing in
+	                                    * the executor can be stolen. */
 	_Atomic int   n_idle;              /* workers currently in their idle
 	                                    * poll; lets a producer cheaply tell
 	                                    * whether any peer is worth nudging
@@ -541,9 +547,53 @@ __xtc_exec_steal_recheck_ns(xtc_loop_t *me)
 	xtc_exec_t *e = me->exec;
 	if (e == NULL || e->n_loops <= 1)
 		return 0;
+	/*
+	 * Only unpinned tasks can be stolen.  If there is none anywhere, a
+	 * re-check would find nothing, so block until this loop's own
+	 * deadline (1.55 behaviour for a loop holding parked pinned fibers).
+	 * Dekker with __xtc_exec_mig_alive: publish steal_sleep, then look
+	 * again; an up-edge that raises n_mig_loops after our read sees the
+	 * flag and wakes us (the wake byte persists until our poll).  A
+	 * stale flag costs at most one spurious wake.
+	 */
+	if (atomic_load_explicit(&e->n_mig_loops, memory_order_relaxed) <= 0) {
+		atomic_store(&me->steal_sleep, 1);
+		if (atomic_load(&e->n_mig_loops) <= 0)
+			return 0;
+	}
 	if (atomic_load_explicit(&e->steal_backoff, memory_order_relaxed))
 		return 32 * 1000 * 1000LL;
 	return 1000 * 1000LL;
+}
+
+/*
+ * Count a live unpinned task homed on l (delta 1 at spawn, -1 at DONE).
+ * On l's 0 -> 1 edge, wake every loop that blocked past the steal
+ * re-check because nothing was stealable (see above).
+ */
+void
+__xtc_exec_mig_alive(xtc_loop_t *l, int delta)
+{
+	xtc_exec_t *e = l->exec;
+	int i, old;
+	if (e == NULL)
+		return;
+	old = atomic_fetch_add_explicit(&l->n_mig_alive, delta,
+	    memory_order_relaxed);
+	if (delta < 0) {
+		if (old == 1)                     /* 1 -> 0: down-edge */
+			atomic_fetch_sub(&e->n_mig_loops, 1);
+		return;
+	}
+	if (old != 0)
+		return;
+	atomic_fetch_add(&e->n_mig_loops, 1);  /* 0 -> 1: up-edge */
+	for (i = 0; i < e->n_loops; i++) {
+		xtc_loop_t *p = e->loops[i];
+		if (p != l && atomic_load(&p->steal_sleep) != 0 &&
+		    atomic_exchange(&p->steal_sleep, 0) != 0)
+			(void)xtc_io_wakeup(p->io);
+	}
 }
 
 /*

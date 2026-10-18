@@ -33,6 +33,8 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include "preempt_int.h"   /* __xtc_unsafe_enter/leave around the spare lock */
+
 /* ---- Fiber-stack pool (per-thread) --------------------------------
  *
  * Every fresh fiber stack costs an mmap + an mprotect(PROT_NONE) for its
@@ -99,6 +101,101 @@ __stack_pool_put(void *base, size_t stack_sz)
 		return 0;
 	p->slots[p->n++] = base;
 	return 1;
+}
+
+/* ---- Fiber-stack spare (per loop) ---------------------------------
+ *
+ * The pool above recycles a stack only on the thread that freed it.  A
+ * proc spawned onto ANOTHER loop takes its stack on the spawner's thread
+ * and frees it on the target's (since 1.56 at DONE, not at loop_fini), so
+ * in the round-robin acceptor shape the spawner's pool is always empty
+ * (mmap + mprotect per spawn) and the target's always full (munmap per
+ * exit, which with every loop thread running is a TLB-shootdown IPI to
+ * each of them).  So a stack the finishing thread cannot pool goes to a
+ * small locked spare on its task's HOME loop, and a spawn onto that loop
+ * whose thread pool is empty takes from it.  Bounded per loop
+ * (XTC_LOOP_STACK_SPARE), filled only on a loop that other threads spawn
+ * onto, and unmapped at xtc_loop_fini, so retention stays bounded by the
+ * live count plus the pools, never by history.
+ * The spinlock is held for a few loads and stores; never across a yield,
+ * an allocation, a syscall or another lock; preemption deferred. */
+static void
+__stack_spare_lock(xtc_loop_t *l)
+{
+	__xtc_unsafe_enter();
+	while (atomic_exchange_explicit(&l->stack_spare_lock, 1,
+	    memory_order_acquire))
+		while (atomic_load_explicit(&l->stack_spare_lock,
+		    memory_order_relaxed))
+			__os_pause();
+}
+
+static void
+__stack_spare_unlock(xtc_loop_t *l)
+{
+	atomic_store_explicit(&l->stack_spare_lock, 0, memory_order_release);
+	__xtc_unsafe_leave();
+}
+
+/* Pop a spare stack of `stack_sz` from loop l, or NULL.  Any thread. */
+static void *
+__stack_spare_get(xtc_loop_t *l, size_t stack_sz)
+{
+	void *base = NULL;
+	int n;
+	if (__xtc_current_loop != l &&
+	    atomic_load_explicit(&l->stack_spare_want, memory_order_relaxed) <
+	    XTC_LOOP_STACK_SPARE)
+		atomic_fetch_add_explicit(&l->stack_spare_want, 1,
+		    memory_order_relaxed);
+	if (atomic_load_explicit(&l->stack_spare_n, memory_order_relaxed) == 0)
+		return NULL;
+	__stack_spare_lock(l);
+	n = atomic_load_explicit(&l->stack_spare_n, memory_order_relaxed);
+	if (n > 0 && l->stack_spare_sz == stack_sz) {
+		base = l->stack_spare[--n];
+		atomic_store_explicit(&l->stack_spare_n, n,
+		    memory_order_relaxed);
+	}
+	__stack_spare_unlock(l);
+	return base;
+}
+
+/* Give a stack to loop l's spare.  1 if taken, 0 if the caller must
+ * munmap it (spare full or a different size).  Any thread. */
+static int
+__stack_spare_put(xtc_loop_t *l, void *base, size_t stack_sz)
+{
+	int n, ok = 0;
+	if (atomic_load_explicit(&l->stack_spare_want, memory_order_relaxed) <
+	    XTC_LOOP_STACK_SPARE ||
+	    atomic_load_explicit(&l->stack_spare_n, memory_order_relaxed) >=
+	    XTC_LOOP_STACK_SPARE)
+		return 0;
+	__stack_spare_lock(l);
+	n = atomic_load_explicit(&l->stack_spare_n, memory_order_relaxed);
+	if (n == 0)
+		l->stack_spare_sz = stack_sz;  /* first entry sets the size */
+	if (l->stack_spare_sz == stack_sz && n < XTC_LOOP_STACK_SPARE) {
+		l->stack_spare[n++] = base;
+		atomic_store_explicit(&l->stack_spare_n, n,
+		    memory_order_relaxed);
+		ok = 1;
+	}
+	__stack_spare_unlock(l);
+	return ok;
+}
+
+/* xtc_loop_fini, after every task's cleanup has run (single-threaded). */
+void
+__xtc_coro_stack_spare_fini(xtc_loop_t *l)
+{
+	long pg = sysconf(_SC_PAGESIZE);
+	size_t guard = pg > 0 ? (size_t)pg : 4096u;
+	int n = atomic_load_explicit(&l->stack_spare_n, memory_order_relaxed);
+	while (n > 0)
+		(void)munmap(l->stack_spare[--n], l->stack_spare_sz + guard);
+	atomic_store_explicit(&l->stack_spare_n, 0, memory_order_relaxed);
 }
 
 /* ---- Lever S1: stack-memory reclamation on park -------------------

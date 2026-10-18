@@ -346,7 +346,10 @@ __coro_destroy(struct xtc_coro *c)
 		/* Recycle the stack (guard page intact) into the per-thread
 		 * pool so the next spawn skips mmap+mprotect; munmap only if
 		 * the pool is full or the size no longer matches. */
-		if (!__stack_pool_put(c->stack, c->stack_sz))
+		if (!__stack_pool_put(c->stack, c->stack_sz) &&
+		    (c->self == NULL || c->self->loop == NULL ||
+		     !__stack_spare_put(c->self->loop, c->stack,
+		     c->stack_sz)))
 			(void)munmap(c->stack, total);
 	}
 	__os_free(c);
@@ -387,6 +390,8 @@ __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
 	/* Fast path: reuse a pooled stack (guard page already installed),
 	 * skipping the mmap + the mmap_lock-serializing mprotect. */
 	base = __stack_pool_get(c->stack_sz);
+	if (base == NULL)
+		base = __stack_spare_get(loop, c->stack_sz);
 	if (base == NULL) {
 		base = mmap(NULL, total, PROT_READ | PROT_WRITE,
 		    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);

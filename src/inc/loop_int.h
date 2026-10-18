@@ -318,6 +318,10 @@ struct xtc_run_class {
  * Glommio-faithful (weighted by measured CPU time). */
 #define XTC_VRUNTIME_MIN_QUANTUM_NS 1000
 
+#ifndef XTC_LOOP_STACK_SPARE
+#define XTC_LOOP_STACK_SPARE 64
+#endif
+
 struct xtc_loop {
 #ifdef XTC_ENABLE_SCHED_POLICY
 	struct xtc_sched_state sched;
@@ -361,6 +365,15 @@ struct xtc_loop {
 	/* Live-task counter.  Atomic so cross-thread spawns/completions
 	 * can update it without lock. */
 	_Atomic int n_alive;
+	/* Of n_alive, the unpinned (stealable) ones; same accounting.  Its
+	 * 0 <-> 1 edges move the executor's n_mig_loops; while that is 0
+	 * nothing can be stolen, so a run-queue-empty loop blocks until its
+	 * own deadline instead of re-checking its peers every 1 ms
+	 * (__xtc_exec_steal_recheck_ns).  steal_sleep: set by a loop that
+	 * blocked on that basis; any loop's up-edge clears it and wakes the
+	 * loop. */
+	_Atomic int n_mig_alive;
+	_Atomic int steal_sleep;
 
 	/* Per-loop work statistics (executor observability).  tasks_run
 	 * counts task steps executed on this loop; steals counts tasks
@@ -497,6 +510,22 @@ struct xtc_loop {
 	_Atomic int                task_spare_lock;
 	struct xtc_task           *task_spare[2];
 	_Atomic int                task_spare_n;
+
+	/* --- fu156: fiber stacks shared across threads ---
+	 * Stacks of this loop's finished tasks that the finishing thread's
+	 * own pool had no room for, handed to the next spawn onto this loop
+	 * from any thread (coro_common.h __stack_spare_*).  Locked like
+	 * task_spare; stack_spare_n is written under the lock and read
+	 * relaxed as an empty/full hint.  Unmapped at xtc_loop_fini.
+	 * stack_spare_want: spawns onto this loop from another thread,
+	 * counted up to XTC_LOOP_STACK_SPARE; the spare is filled only once
+	 * it gets there, so a loop only its own thread spawns onto (startup
+	 * spawns from main aside) keeps exactly the per-thread pool. */
+	_Atomic int                stack_spare_want;
+	_Atomic int                stack_spare_lock;
+	_Atomic int                stack_spare_n;
+	size_t                     stack_spare_sz;
+	void                      *stack_spare[XTC_LOOP_STACK_SPARE];
 };
 
 #if defined(XTC_DIAGNOSTIC)

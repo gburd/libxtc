@@ -124,6 +124,10 @@ int  __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
  * primitives (e.g. xtc_amutex) find the current task to park it. */
 xtc_task_t *__xtc_current_task(void);
 
+/* xtc_loop_fini: unmap the loop's spare fiber stacks (a no-op for the
+ * winfiber substrate, which does not mmap its stacks). */
+void __xtc_coro_stack_spare_fini(xtc_loop_t *loop);
+
 /* __xtc_current_coro read through an out-of-line call on the CURRENT
  * thread.  Use this, not the variable, in code that may run after a
  * stack switch on a migratable fiber: compilers keep a thread-local's

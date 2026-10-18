@@ -403,6 +403,8 @@ xtc_loop_fini(xtc_loop_t *loop)
 	}
 	__os_free(loop->timers);
 	__xtc_inbox_fini(&loop->inbox);
+	/* After every cleanup above: those may have refilled the spare. */
+	__xtc_coro_stack_spare_fini(loop);
 	(void)xtc_io_fini(loop->io);
 	if (loop->owns_res) __os_free(loop->res);
 	__os_free(loop);
@@ -983,6 +985,10 @@ __xtc_loop_step(xtc_loop_t *loop)
 			 * loop's accountant. */
 			atomic_fetch_sub_explicit(&t->loop->n_alive, 1,
 			    memory_order_relaxed);
+			if (!t->pinned && t->loop->exec != NULL) {
+				extern void __xtc_exec_mig_alive(xtc_loop_t *, int);
+				__xtc_exec_mig_alive(t->loop, -1);
+			}
 			if (t->loop->res != NULL)
 				xtc_res_release(t->loop->res, XTC_RES_TASKS, 1);
 			/*
