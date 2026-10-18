@@ -1,3 +1,79 @@
+libxtc (1.57.0-1) unstable; urgency=medium
+
+  * MINOR release -- the sqlxtc example's B-tree adopts ideas from
+    RethinkDB's B-tree, which closes the 1.56.0 re-review's storage
+    BLOCKERs, and every 1.56 performance regression the re-review
+    measured is root-caused and fixed.  No existing public libxtc struct
+    changed; no new libxtc API.  sqlxtc's bt_* API gains bt_max_key,
+    bt_max_inline, bt_max_value, bt_seek_lt and bt_sample_keys.
+  * sqlxtc B-tree (examples/06_sqlxtc), borrowed from RethinkDB:
+    - Entry-size bound tied to the page (RethinkDB leaf_epsilon): every
+      key and inline entry is bounded so a split can always place the
+      pending row; oversize keys are refused before anything changes.
+    - Byte-balanced, pending-aware leaf split (RethinkDB leaf::split).
+    - Out-of-line values (RethinkDB blob, one level): values above a
+      quarter page live in dedicated pages behind a bounded leaf
+      reference; up to 65535 bytes; checksum-verified reads; old pages
+      freed only after their reference is gone.
+    - bt_delete descends shared and latches only the leaf exclusive
+      (RethinkDB's root write lock is the anti-pattern): delete+insert on
+      4 loops 47k -> 390k/s; read p99.9 under deletes 2048 -> 1024 ns.
+    - bt_seek_lt: the largest key below a bound in one descent; INSERT's
+      next-rowid no longer scans the table (single INSERT at 100k rows
+      9.63 ms -> 0.20 ms, flat at every size).
+    - bt_sample_keys (RethinkDB get_distribution): approximately
+      equi-depth split points from the top separators in O(fanout)
+      page reads; the morsel-parallel scan cuts there, so skewed rowids
+      still split evenly (largest morsel 14.5x -> 1.09x the mean; 8-way
+      scan of a skewed 1M-row table 197 -> 59 ms).
+    - btnode_check (RethinkDB fsck): a full node validator, run after
+      every mutation with -DBT_CHECK and always under the DST simulator.
+  * Fixed in sqlxtc (each reproduced first):
+    - Crash recovery lost acknowledged rows >= ~800 B in tables mixing row
+      sizes (0 / 81-151 lost after successive kill -9): now 3000/3000
+      kept.  A transaction with ~2 KB rows was reported "rolled back"
+      while partly durable: it now commits whole.
+    - An optimistic lookup returned values over 1 KiB truncated; a key
+      over 1 KiB overflowed the split's separator buffer (ASan); a
+      one-entry leaf could not split (and leaked a page); a count-based
+      split could fail after it was linked; pages over 8 KiB could not
+      split internal nodes; an upsert could lose the old value.
+    - An index seek for a value just under the key limit found nothing;
+      DROP INDEX left entries with keys over 256 bytes behind.
+  * 1.56 performance regressions, bisected and fixed:
+    - Cross-loop spawn+exit (stacks munmap'd on the target thread, a
+      TLB-shootdown storm): 4 loops 104k (1.55) / 83k (1.56) / 290k/s now.
+    - Two-loop io_uring ping-pong (self-feeding wakeup re-arm):
+      502k / 430k / 486k round trips/s.
+    - Idle CPU, 32 loops parking a fiber (1 ms steal tick even with
+      nothing stealable): 0.9% / 23% / 0.9% of a core.
+    - Off-proc xtc_svr_call (one global slot lock): 16 threads
+      41.2 / 75.2 / 43.4 us per call.
+    - rexis SET (buffer shrink churn): 1 KB pipelined 1.245M / 0.955M /
+      1.383M per s; 100 KB 47.7k / 19.3k / 47.5k.
+    - kaka default-mode produce (io-wq cap + group commit): 16
+      connections 1037 -> 1947 req/s.
+  * Fixed in libxtc:
+    - kqueue: deleting a write-only registration left the write filter
+      armed (spurious wakeups; XTC_E_INVAL with migratable procs); fd
+      lookup was linear (182k -> 35k round trips/s at ~27.5k idle
+      connections, now flat at 184k).  Since v0.1.0.
+    - xtc_batch_submit_mt: producers retrying after close() kept the
+      driver from finishing.
+    - kaka --fsync-interval-ms acked records still in a userspace buffer;
+      a process crash lost them (it now writes before every ack).
+    - examples/14 self-test counters raced (flaky make check).
+  * Tested on Linux x86-64 (Debian 13, 32 vCPUs, local NVMe): make check with
+    gcc and clang -Werror, --with-tls=none --without-liburing, epoll,
+    poll, select, sched-policy, forced fcontext, --enable-diagnostic,
+    clang ASan+UBSan; TSan of the concurrency suites; check-dst, DST
+    corpus, planted-bug suite 16/16, 100k swarm; check-examples,
+    check-rexis, sqlxtc make test + multi-loop load + sqlite3 oracle +
+    compat corpus; kaka tests.  Windows Server 2025 (Win11 24H2 kernel)
+    MSVC 19.44 x64: build_msvc.bat 101/0/1, IOCP suites x20.
+
+ -- Greg Burd <greg@burd.me>  Sun, 18 Oct 2026 12:00:00 -0400
+
 libxtc (1.56.0-1) unstable; urgency=medium
 
   * MINOR release -- fixes every BLOCKER and MAJOR from an adversarial
