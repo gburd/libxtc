@@ -33,11 +33,78 @@ static sql_str_t tok_str(sql_token_t t) {
     sql_str_t s; s.p = t.p; s.len = (uint32_t)(t.len < 0 ? 0 : t.len); return s;
 }
 
-/* A string-literal token '...' -- strip the surrounding quotes. */
-static sql_str_t tok_str_unquote(sql_token_t t) {
+/* A string-literal token '...': strip the surrounding quotes and collapse
+ * each doubled '' to one quote (into the arena, only when one occurs), so
+ * every consumer of SX_E_STRING .lit sees the SQL value. */
+static sql_str_t tok_str_unquote(sql_parse_state_t *ps, sql_token_t t) {
     sql_str_t s = tok_str(t);
-    if (s.len >= 2 && (s.p[0] == '\'' || s.p[0] == '"')) { s.p++; s.len -= 2; }
+    char *buf;
+    uint32_t i, o;
+    if (s.len < 2 || s.p[0] != '\'') return s;
+    s.p++; s.len -= 2;
+    if (memchr(s.p, '\'', s.len) == NULL) return s;
+    buf = (char *)sql_arena_alloc(ps->arena, s.len + 1);
+    if (buf == NULL) return s;
+    for (i = 0, o = 0; i < s.len; i++) {
+        buf[o++] = s.p[i];
+        if (s.p[i] == '\'' && i + 1 < s.len && s.p[i + 1] == '\'') i++;
+    }
+    s.p = buf; s.len = o;
     return s;
+}
+
+/* A numeric-literal token.  A hex integer (0x1F) is rewritten to its
+ * decimal text in the arena -- 64-bit two's complement, as SQLite does --
+ * so every consumer that parses SX_E_NUMBER .lit as decimal just works.
+ * More than 16 significant hex digits is a parse error. */
+static sql_str_t num_lit(sql_parse_state_t *ps, sql_token_t t) {
+    sql_str_t s = tok_str(t);
+    uint64_t v = 0;
+    int64_t sv;
+    uint32_t i, nd = 0;
+    char *buf;
+    if (s.len < 3 || s.p[0] != '0' || (s.p[1] != 'x' && s.p[1] != 'X'))
+        return s;
+    for (i = 2; i < s.len; i++) {
+        int c = s.p[i], d = (c <= '9') ? c - '0' : (c | 0x20) - 'a' + 10;
+        if (v == 0 && d == 0) continue;
+        if (++nd > 16) {
+            ps->error = 1; ps->err_msg = "hex literal too big"; return s;
+        }
+        v = (v << 4) | (uint64_t)d;
+    }
+    memcpy(&sv, &v, sizeof sv);
+    buf = (char *)sql_arena_alloc(ps->arena, 24);
+    if (buf == NULL) return s;
+    snprintf(buf, 24, "%lld", (long long)sv);
+    s.p = buf; s.len = (uint32_t)strlen(buf);
+    return s;
+}
+
+/* The 1-based ordinal of a parameter token (see sql_parse_state_t). */
+static int param_ordinal(sql_parse_state_t *ps, sql_token_t t) {
+    int i, v = 0;
+    if (t.len == 1) return ++ps->nparam;                 /* ? */
+    if (t.p[0] == '?') {                                 /* ?NNN */
+        for (i = 1; i < t.len && v <= 32766; i++) v = v * 10 + (t.p[i] - '0');
+        if (v < 1 || v > 32766) {
+            ps->error = 1;
+            ps->err_msg = "variable number must be between ?1 and ?32766";
+            return 0;
+        }
+        if (v > ps->nparam) ps->nparam = v;
+        return v;
+    }
+    for (i = 0; i < ps->npname; i++)                     /* :name @name $name */
+        if (ps->pname[i].len == t.len && memcmp(ps->pname[i].p, t.p, (size_t)t.len) == 0)
+            return ps->pname[i].ord;
+    if (ps->npname >= (int)(sizeof ps->pname / sizeof ps->pname[0])) {
+        ps->error = 1; ps->err_msg = "too many SQL variables"; return 0;
+    }
+    ps->pname[ps->npname].p = t.p;
+    ps->pname[ps->npname].len = t.len;
+    ps->pname[ps->npname].ord = ++ps->nparam;
+    return ps->pname[ps->npname++].ord;
 }
 
 /* Record an expression node's verbatim source span from a token (the
@@ -86,6 +153,9 @@ static sql_exprlist_t *list_add(sql_parse_state_t *ps, sql_exprlist_t *l,
 
 /* Carries a WITH clause up to the select it prefixes. */
 struct with_clause_v { sql_cte_t *list; int rec; };
+
+/* LIMIT and OFFSET exprs of one select (either may be NULL). */
+struct limit_v { sql_expr_t *limit; sql_expr_t *offset; };
 }
 
 %token_type {sql_token_t}
@@ -107,17 +177,15 @@ struct with_clause_v { sql_cte_t *list; int rec; };
 %start_symbol input
 
 /*
- * Expected unresolved conflicts.  All are TK_COMMA shift/reduce on
- * list continuations (from_opt / group_opt / order_opt): at a comma the
- * generator cannot tell whether the comma extends the current list or
- * ends it, and resolves in favor of shift -- which is correct, because
- * each of these lists is only ever followed by a keyword (WHERE, GROUP,
- * ORDER, LIMIT, ...), never a bare comma at the enclosing level.  The
- * differential parse oracle (test_sql_ast) confirms multi-element lists
- * parse correctly.  Pinning the count makes CI flag any NEW conflict a
- * future grammar change introduces.
+ * Expected unresolved conflicts: none.  The 104 TK_COMMA shift/reduce
+ * conflicts this grammar used to carry (from_opt / group_opt / order_opt
+ * list continuations) all came from the old "offset_part ::= TK_COMMA
+ * expr" rule, which let a bare ", expr" follow a FROM / GROUP BY / ORDER
+ * BY list when every clause in between was empty.  The comma form now
+ * only exists inside limit_opt, after LIMIT expr.  Pinning 0 makes CI
+ * flag any conflict a future grammar change introduces.
  */
-%expect 104
+%expect 0
 
 /* ===== symbol types ===== */
 
@@ -154,8 +222,7 @@ struct with_clause_v { sql_cte_t *list; int rec; };
 %type order_opt     {sql_exprlist_t *}
 %type order_list    {sql_exprlist_t *}
 %type order_item    {sql_exprlist_item_t *}
-%type limit_opt     {sql_expr_t *}
-%type offset_part   {sql_expr_t *}
+%type limit_opt     {struct limit_v}
 %type from_opt      {sql_src_t *}
 %type table_list    {sql_src_t *}
 %type table_ref     {sql_src_t *}
@@ -205,6 +272,20 @@ struct with_clause_v { sql_cte_t *list; int rec; };
 %token TK_TILDE.
 
 %token TK_ID.       %token TK_NUMBER.  %token TK_STRING.  %token TK_BLOB.
+%token TK_ESCAPE.   %token TK_NULLS.   %token TK_FIRST.   %token TK_LAST.
+%token TK_CTIME.    /* CURRENT_DATE / CURRENT_TIME / CURRENT_TIMESTAMP */
+
+/* Non-reserved keywords: a token in this list that has no action in the
+ * current parser state is retried as TK_ID, so it still works as a table,
+ * column or function name ("key", "end", "plan", like(), replace(), ...).
+ * This is SQLite's list (parse.y:272), restricted to the keywords this
+ * grammar has.  It is resolved at run time, so it adds no LALR conflicts. */
+%fallback TK_ID
+  TK_ASC TK_ATTACH TK_BEGIN TK_BY TK_CAST TK_DATABASE TK_DESC TK_DETACH
+  TK_END TK_EXPLAIN TK_IF TK_KEY TK_LIKE TK_OFFSET TK_PLAN TK_PRAGMA
+  TK_QUERY TK_RECURSIVE TK_RELEASE TK_RENAME TK_REPLACE TK_ROLLBACK
+  TK_SAVEPOINT TK_TEMP TK_TEMPORARY TK_TRIGGER TK_VIEW TK_WITH
+  TK_NULLS TK_FIRST TK_LAST TK_CTIME.
 
 /* ===== expression precedence (low to high) ===== *
  *
@@ -217,6 +298,7 @@ struct with_clause_v { sql_cte_t *list; int rec; };
 %left TK_AND.
 %right TK_NOT.
 %left TK_EQ TK_NE TK_LT TK_LE TK_GT TK_GE TK_IS TK_LIKE TK_IN TK_BETWEEN.
+%right TK_ESCAPE.   /* binds tighter than LIKE, looser than + (SQLite) */
 %left TK_PLUS TK_MINUS TK_CONCAT.
 %left TK_STAR TK_SLASH TK_PERCENT TK_AMP TK_PIPE.
 %right TK_TILDE.
@@ -286,12 +368,12 @@ select_stmt(R) ::= select_core(C) TK_EXCEPT select_stmt(T). {
 
 select_core(R) ::= TK_SELECT(KW) distinct_opt(D) sel_list(L) from_opt(F)
                    where_opt(W) group_opt(G) having_opt(H)
-                   order_opt(O) limit_opt(LM) offset_part(OF). {
+                   order_opt(O) limit_opt(LM). {
     R = AST(pstate, sql_select_t);
     if (R) {
         R->distinct = D; R->cols = L; R->from = F; R->where = W;
-        R->group = G; R->having = H; R->order = O; R->limit = LM;
-        R->offset = OF;
+        R->group = G; R->having = H; R->order = O; R->limit = LM.limit;
+        R->offset = LM.offset;
         R->src = KW.p;   /* SELECT keyword; length resolved by the consumer */
     }
 }
@@ -393,16 +475,24 @@ order_list(R) ::= order_list(L) TK_COMMA order_item(I). {
     R = L; if (R && I) { if (R->tail) R->tail->next = I; else R->head = I; R->tail = I; R->n++; }
 }
 
-order_item(R) ::= expr(E).         { R = AST(pstate, sql_exprlist_item_t); if (R) { R->expr = E; R->sort = 1; } }
-order_item(R) ::= expr(E) TK_ASC.  { R = AST(pstate, sql_exprlist_item_t); if (R) { R->expr = E; R->sort = 1; } }
-order_item(R) ::= expr(E) TK_DESC. { R = AST(pstate, sql_exprlist_item_t); if (R) { R->expr = E; R->sort = 2; } }
+%type sortorder {int}
+%type nulls_opt {int}
+order_item(R) ::= expr(E) sortorder(S) nulls_opt(N). {
+    R = AST(pstate, sql_exprlist_item_t);
+    if (R) { R->expr = E; R->sort = S; R->nulls = N; }
+}
+sortorder(R) ::= .        { R = 1; }
+sortorder(R) ::= TK_ASC.  { R = 1; }
+sortorder(R) ::= TK_DESC. { R = 2; }
+nulls_opt(R) ::= .                  { R = 0; }
+nulls_opt(R) ::= TK_NULLS TK_FIRST. { R = 1; }
+nulls_opt(R) ::= TK_NULLS TK_LAST.  { R = 2; }
 
-limit_opt(R) ::= .                  { R = NULL; }
-limit_opt(R) ::= TK_LIMIT expr(E).  { R = E; }
-
-offset_part(R) ::= .                          { R = NULL; }
-offset_part(R) ::= TK_OFFSET expr(E).         { R = E; }
-offset_part(R) ::= TK_COMMA expr(E).          { R = E; }  /* LIMIT a, b form */
+/* No OFFSET without LIMIT.  "LIMIT a, b" is OFFSET a LIMIT b (parse.y:972). */
+limit_opt(R) ::= .                  { R.limit = NULL; R.offset = NULL; }
+limit_opt(R) ::= TK_LIMIT expr(E).  { R.limit = E; R.offset = NULL; }
+limit_opt(R) ::= TK_LIMIT expr(E) TK_OFFSET expr(O). { R.limit = E; R.offset = O; }
+limit_opt(R) ::= TK_LIMIT expr(O) TK_COMMA expr(E).  { R.limit = E; R.offset = O; }
 
 /* ===== WITH / common table expressions ===== */
 
@@ -630,10 +720,16 @@ coldef(R) ::= TK_ID(N) type_opt(TY) col_constraints(CC). {
 }
 
 %type type_opt {sql_str_t}
+%type type_name {sql_str_t}
 type_opt(R) ::= .                                          { R.p = NULL; R.len = 0; }
-type_opt(R) ::= TK_ID(T).                                  { R = tok_str(T); }
-type_opt(R) ::= TK_ID(T) TK_LP TK_NUMBER TK_RP.            { R = tok_str(T); }
-type_opt(R) ::= TK_ID(T) TK_LP TK_NUMBER TK_COMMA TK_NUMBER TK_RP. { R = tok_str(T); }
+type_opt(R) ::= type_name(T).                              { R = T; }
+type_opt(R) ::= type_name(T) TK_LP TK_NUMBER TK_RP.        { R = T; }
+type_opt(R) ::= type_name(T) TK_LP TK_NUMBER TK_COMMA TK_NUMBER TK_RP. { R = T; }
+/* A type name is one or more identifiers ("DOUBLE PRECISION", "UNSIGNED
+ * BIG INT"); the slice spans them all, as SQLite's typetoken does, so the
+ * affinity rules see every word. */
+type_name(R) ::= TK_ID(T).                  { R = tok_str(T); }
+type_name(R) ::= type_name(A) TK_ID(T).     { R = A; R.len = (uint32_t)((T.p + T.len) - A.p); }
 
 %type col_constraints {int}
 %type col_constraint  {int}
@@ -839,10 +935,40 @@ expr(R) ::= expr(A) TK_CONCAT expr(B).  { R = mk_binary(pstate, TK_CONCAT, A, B)
 expr(R) ::= expr(A) TK_AMP expr(B).     { R = mk_binary(pstate, TK_AMP, A, B); }
 expr(R) ::= expr(A) TK_PIPE expr(B).    { R = mk_binary(pstate, TK_PIPE, A, B); }
 expr(R) ::= expr(A) TK_LIKE expr(B).    { R = mk_binary(pstate, TK_LIKE, A, B); }
-expr(R) ::= expr(A) TK_IS TK_NULL.      { R = mk_expr(pstate, SX_E_IS_NULL); if (R) { R->a = A; R->ival = 0; } }
-expr(R) ::= expr(A) TK_IS TK_NOT TK_NULL. { R = mk_expr(pstate, SX_E_IS_NULL); if (R) { R->a = A; R->ival = 1; } }
+/* LIKE ... ESCAPE: the escape expr rides in .c.  NOT LIKE / NOT BETWEEN /
+ * IS NOT / IS [NOT] DISTINCT FROM desugar to NOT(...) or IS: NOT keeps
+ * SQL 3-valued logic and IS is never NULL, so no new node kind. */
+expr(R) ::= expr(A) TK_LIKE expr(B) TK_ESCAPE expr(E). [TK_LIKE] {
+    R = mk_binary(pstate, TK_LIKE, A, B); if (R) R->c = E;
+}
+expr(R) ::= expr(A) TK_NOT TK_LIKE expr(B). [TK_LIKE] {
+    R = mk_unary(pstate, TK_NOT, mk_binary(pstate, TK_LIKE, A, B));
+}
+expr(R) ::= expr(A) TK_NOT TK_LIKE expr(B) TK_ESCAPE expr(E). [TK_LIKE] {
+    sql_expr_t *l = mk_binary(pstate, TK_LIKE, A, B);
+    if (l) l->c = E;
+    R = mk_unary(pstate, TK_NOT, l);
+}
 expr(R) ::= expr(A) TK_NOT TK_NULL. { R = mk_expr(pstate, SX_E_IS_NULL); if (R) { R->a = A; R->ival = 1; } }
-expr(R) ::= expr(A) TK_IS expr(B).      { R = mk_binary(pstate, TK_IS, A, B); }
+/* "x IS NULL" / "x IS NOT NULL" are the IS forms with a NULL operand;
+ * folding them here (not as separate rules) keeps the grammar free of an
+ * IS-NULL vs expr_atom-NULL reduce/reduce. */
+expr(R) ::= expr(A) TK_IS expr(B). {
+    if (B && B->op == SX_E_NULL) {
+        R = mk_expr(pstate, SX_E_IS_NULL); if (R) { R->a = A; R->ival = 0; }
+    } else R = mk_binary(pstate, TK_IS, A, B);
+}
+expr(R) ::= expr(A) TK_IS TK_NOT expr(B). [TK_IS] {
+    if (B && B->op == SX_E_NULL) {
+        R = mk_expr(pstate, SX_E_IS_NULL); if (R) { R->a = A; R->ival = 1; }
+    } else R = mk_unary(pstate, TK_NOT, mk_binary(pstate, TK_IS, A, B));
+}
+expr(R) ::= expr(A) TK_IS TK_NOT TK_DISTINCT TK_FROM expr(B). [TK_IS] {
+    R = mk_binary(pstate, TK_IS, A, B);
+}
+expr(R) ::= expr(A) TK_IS TK_DISTINCT TK_FROM expr(B). [TK_IS] {
+    R = mk_unary(pstate, TK_NOT, mk_binary(pstate, TK_IS, A, B));
+}
 expr(R) ::= expr(A) TK_IN TK_LP expr_list(L) TK_RP. {
     R = mk_expr(pstate, SX_E_IN_LIST); if (R) { R->a = A; R->list = L; }
 }
@@ -860,6 +986,11 @@ expr(R) ::= expr(A) TK_IN TK_LP(L) select_stmt(Q) TK_RP(P). {
 }
 expr(R) ::= expr(A) TK_BETWEEN expr(B) TK_AND expr(C). [TK_BETWEEN] {
     R = mk_expr(pstate, SX_E_BETWEEN); if (R) { R->a = A; R->b = B; R->c = C; }
+}
+expr(R) ::= expr(A) TK_NOT TK_BETWEEN expr(B) TK_AND expr(C). [TK_BETWEEN] {
+    sql_expr_t *bt = mk_expr(pstate, SX_E_BETWEEN);
+    if (bt) { bt->a = A; bt->b = B; bt->c = C; }
+    R = mk_unary(pstate, TK_NOT, bt);
 }
 expr(R) ::= TK_CASE(C) expr_atom(BASE) case_arms(AR) case_else(EL) TK_END(E). {
     R = mk_expr(pstate, SX_E_CASE);
@@ -886,13 +1017,6 @@ expr(R) ::= TK_ID(F) TK_LP expr_list(L) TK_RP(P). {
 expr(R) ::= TK_ID(F) TK_LP TK_DISTINCT expr_list(L) TK_RP(P). {
     R = mk_expr(pstate, SX_E_FUNC); if (R) { R->name[0] = tok_str(F); R->nname = 1; R->list = L; R->ival = 1; }
     if (R) { R->src = F.p; R->srclen = (uint32_t)((P.p + P.len) - F.p); }
-}
-expr(R) ::= TK_REPLACE(F) TK_LP expr_list(L) TK_RP(P). {
-    /* REPLACE is a keyword (INSERT OR REPLACE); allow it as the scalar
-     * replace(S,F,R) function too. */
-    R = mk_expr(pstate, SX_E_FUNC);
-    if (R) { R->name[0].p = "replace"; R->name[0].len = 7; R->nname = 1; R->list = L;
-             R->src = F.p; R->srclen = (uint32_t)((P.p + P.len) - F.p); }
 }
 expr(R) ::= TK_CAST(C) TK_LP expr(E) TK_AS type_opt(TY) TK_RP(P). {
     /* CAST(expr AS type) -- modelled as a FUNC named "cast" with the
@@ -928,13 +1052,24 @@ case_arms(R) ::= case_arms(L) TK_WHEN expr(W) TK_THEN expr(T). {
 case_else(R) ::= .                { R = NULL; }
 case_else(R) ::= TK_ELSE expr(E). { R = E; }
 
-expr_atom(R) ::= TK_NUMBER(T). { R = mk_expr(pstate, SX_E_NUMBER); if (R) { R->lit = tok_str(T); span_tok(R, T); } }
-expr_atom(R) ::= TK_STRING(T). { R = mk_expr(pstate, SX_E_STRING); if (R) { R->lit = tok_str_unquote(T); span_tok(R, T); } }
+expr_atom(R) ::= TK_NUMBER(T). { R = mk_expr(pstate, SX_E_NUMBER); if (R) { R->lit = num_lit(pstate, T); span_tok(R, T); } }
+expr_atom(R) ::= TK_STRING(T). { R = mk_expr(pstate, SX_E_STRING); if (R) { R->lit = tok_str_unquote(pstate, T); span_tok(R, T); } }
 expr_atom(R) ::= TK_BLOB(T).   { R = mk_expr(pstate, SX_E_BLOB);   if (R) { R->lit = tok_str(T); span_tok(R, T); } }
 expr_atom(R) ::= TK_NULL(T).   { R = mk_expr(pstate, SX_E_NULL); span_tok(R, T); }
+/* CURRENT_DATE / _TIME / _TIMESTAMP: a zero-argument call of the
+ * function of the same name (SQLite parse.y:1329, term ::= CTIME_KW). */
+expr_atom(R) ::= TK_CTIME(T).  {
+    R = mk_expr(pstate, SX_E_FUNC);
+    if (R) { R->name[0] = tok_str(T); R->nname = 1; }
+    span_tok(R, T);
+}
 expr_atom(R) ::= TK_TRUE(T).   { R = mk_expr(pstate, SX_E_BOOL); if (R) { R->ival = 1; span_tok(R, T); } }
 expr_atom(R) ::= TK_FALSE(T).  { R = mk_expr(pstate, SX_E_BOOL); if (R) { R->ival = 0; span_tok(R, T); } }
-expr_atom(R) ::= TK_QMARK(T).  { R = mk_expr(pstate, SX_E_PARAM); span_tok(R, T); }
+expr_atom(R) ::= TK_QMARK(T).  {
+    R = mk_expr(pstate, SX_E_PARAM);
+    if (R) R->ival = param_ordinal(pstate, T);
+    span_tok(R, T);
+}
 expr_atom(R) ::= TK_ID(T).     { R = mk_expr(pstate, SX_E_COLUMN); if (R) { R->name[0] = tok_str(T); R->nname = 1; span_tok(R, T); } }
 expr_atom(R) ::= TK_ID(A) TK_DOT TK_ID(B). {
     R = mk_expr(pstate, SX_E_COLUMN); if (R) { R->name[0] = tok_str(A); R->name[1] = tok_str(B); R->nname = 2;

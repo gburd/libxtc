@@ -109,4 +109,9 @@
 #define TK_NUMBER                      109
 #define TK_STRING                      110
 #define TK_BLOB                        111
-#define TK_UMINUS                      112
+#define TK_ESCAPE                      112
+#define TK_NULLS                       113
+#define TK_FIRST                       114
+#define TK_LAST                        115
+#define TK_CTIME                       116
+#define TK_UMINUS                      117

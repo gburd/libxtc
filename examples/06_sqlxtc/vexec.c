@@ -32,7 +32,9 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>     /* strcasecmp: SQL identifiers are case-insensitive */
 #include <ctype.h>
+#include <errno.h>
 #include <math.h>
 #include <stdatomic.h>
 
@@ -43,6 +45,7 @@
 #include "sql_parse_gen.h"   /* TK_* token ids */
 #include "btree.h"           /* bt_t */
 #include "xstore.h"          /* storage-native scan: the VDBE-free row source */
+#include "vxfunc.h"          /* date/time, printf, math, ... (VXF_EXT) */
 
 #include "xtc.h"             /* XTC_OK */
 #include "xtc_exec.h"        /* V2: morsel-parallel workers, one per loop */
@@ -55,19 +58,24 @@
  * match.  Recursive on the wildcard, iterative otherwise -- patterns
  * here are short. */
 static int
-xs_like(const char *p, const char *s)
+xs_like(const char *p, const char *s, char esc)
 {
 	while (*p) {
-		if (*p == '%') {
+		int lit = 0;
+		char a, b;
+		if (esc != '\0' && *p == esc) {   /* ESCAPE: next char is literal */
+			if (*++p == '\0') return 0;
+			lit = 1;
+		} else if (*p == '%') {
 			while (*p == '%') p++;          /* collapse runs */
 			if (*p == '\0') return 1;        /* trailing % matches rest */
 			for (; *s; s++)
-				if (xs_like(p, s)) return 1;
+				if (xs_like(p, s, esc)) return 1;
 			return 0;
 		}
 		if (*s == '\0') return 0;
-		if (*p != '_') {
-			char a = *p, b = *s;
+		if (lit || *p != '_') {
+			a = *p; b = *s;
 			if (a >= 'A' && a <= 'Z') a += 32;
 			if (b >= 'A' && b <= 'Z') b += 32;
 			if (a != b) return 0;
@@ -170,7 +178,9 @@ enum vx_op {
 	VXO_CASE,                            /* CASE: base in .a (NULL=searched),
 	                                      * args[]=when0,then0,when1,then1,...,
 	                                      * nargs=2*arms, ELSE in .b (NULL=none) */
-	VXO_LIKE, VXO_GLOB,                  /* a LIKE/GLOB b: operand in .a, pattern in .b */
+	VXO_LIKE, VXO_GLOB,                  /* a LIKE/GLOB b: operand in .a, pattern in .b;
+	                                      * LIKE ... ESCAPE: escape expr in args[0] */
+	VXO_IS,                              /* a IS b: NULL-safe equality, never NULL */
 	VXO_CORRSUBQ,                        /* correlated scalar subquery: the stmt
 	                                      * st->corrsql[col] re-run per row via vx_run_p, binding
 	                                      * ? from srcrow[bindcol[i]] */
@@ -187,7 +197,8 @@ enum vx_op {
 enum vx_func {
 	VXF_ABS = 1, VXF_LENGTH, VXF_LOWER, VXF_UPPER, VXF_COALESCE, VXF_IFNULL,
 	VXF_TYPEOF, VXF_SUBSTR, VXF_NULLIF, VXF_MIN, VXF_MAX, VXF_REPLACE,
-	VXF_TRIM, VXF_LTRIM, VXF_RTRIM, VXF_INSTR, VXF_ROUND, VXF_CAST
+	VXF_TRIM, VXF_LTRIM, VXF_RTRIM, VXF_INSTR, VXF_ROUND, VXF_CAST,
+	VXF_EXT                 /* a vxfunc.c function: its id in .col */
 };
 
 typedef struct vx_expr {
@@ -325,8 +336,12 @@ typedef struct vx_htab {
  * over which the projection and WHERE filter are evaluated.  Column
  * references in proj/filter index the combined row. */
 
-/* Column affinity (SQLite rules, three buckets). */
-enum vx_aff { VX_AFF_BLOB = 0, VX_AFF_TEXT, VX_AFF_NUMERIC };
+/* Column affinity class.  The compiler's comparison gates use three
+ * buckets (BLOB / TEXT / NUMERIC); vx_affinity() also yields the two
+ * SQLite store affinities INTEGER and REAL, which coerce_to_affinity uses
+ * and node_class() folds back to NUMERIC. */
+enum vx_aff { VX_AFF_BLOB = 0, VX_AFF_TEXT, VX_AFF_NUMERIC,
+              VX_AFF_INTEGER, VX_AFF_REAL };
 
 /* Materialized result of running a plan (also the row source when a
  * plan runs as a nested derived table / subquery).  Defined here so the
@@ -460,6 +475,7 @@ struct vx_stmt {
 	int              nbinds;
 
 	int           distinct;     /* SELECT DISTINCT: dedup the result */
+	int64_t       now_ms;       /* 'now' for this statement (unix ms), 0 = unused */
 
 	int           nout;
 	vx_expr_t   **proj;         /* nout projection expressions (non-agg path) */
@@ -489,11 +505,12 @@ struct vx_stmt {
 	/* ORDER BY / LIMIT (V4).  norder > 0 => ordered.  Each order key is
 	 * either an expression over the SOURCE columns (order_key[i]), or a
 	 * 1-based reference to an output column (order_outcol[i] > 0, key
-	 * NULL).  order_desc[i] = 1 for DESC. */
+	 * NULL).  order_desc[i]: bit0 = DESC, bit1 = NULLS FIRST/LAST
+	 * overrides the default (NULL sorts first ASC, last DESC). */
 	int           norder;
 	vx_expr_t   **order_key;    /* norder expressions, or NULL entry */
 	int          *order_outcol; /* norder: 1-based output col, or 0 */
-	int          *order_desc;   /* norder: 1 = DESC */
+	int          *order_desc;   /* norder: VX_ORD_* bits */
 	int64_t       limit;        /* -1 = no LIMIT */
 	int64_t       offset;       /* 0 if none */
 
@@ -576,15 +593,27 @@ str_contains_ci(const char *hay, const char *needle)
 	return 0;
 }
 
+/* SQLite's five affinity rules, in order (datatype3.html 3.1). */
 static enum vx_aff
 vx_affinity(const char *decltype)
 {
 	if (decltype == NULL || decltype[0] == '\0') return VX_AFF_BLOB;
+	if (str_contains_ci(decltype, "INT")) return VX_AFF_INTEGER;
 	if (str_contains_ci(decltype, "CHAR") ||
 	    str_contains_ci(decltype, "CLOB") ||
 	    str_contains_ci(decltype, "TEXT")) return VX_AFF_TEXT;
 	if (str_contains_ci(decltype, "BLOB")) return VX_AFF_BLOB;
+	if (str_contains_ci(decltype, "REAL") ||
+	    str_contains_ci(decltype, "FLOA") ||
+	    str_contains_ci(decltype, "DOUB")) return VX_AFF_REAL;
 	return VX_AFF_NUMERIC;
+}
+
+/* The comparison-gate class of an affinity (INTEGER/REAL are numeric). */
+static enum vx_aff
+aff_class(enum vx_aff a)
+{
+	return (a == VX_AFF_INTEGER || a == VX_AFF_REAL) ? VX_AFF_NUMERIC : a;
 }
 
 /* ---- recognizer: a small column-name table ----------------------- */
@@ -602,7 +631,7 @@ nv_add(struct namevec *nv, const sql_str_t *s)
 	if (s == NULL || s->len == 0 || s->len >= 64) return -1;
 	for (i = 0; i < nv->n; i++)
 		if ((int)strlen(nv->names[i]) == (int)s->len &&
-		    memcmp(nv->names[i], s->p, s->len) == 0)
+		    strncasecmp(nv->names[i], s->p, s->len) == 0)
 			return i;
 	if (nv->n >= 32) return -1;
 	memcpy(nv->names[nv->n], s->p, s->len);
@@ -634,14 +663,14 @@ resolve_schema(struct xsql *db, const char *table, struct namevec *nv, int *pay)
 			for (c = 0; c < nc; c++)
 				for (i = 0; i < nv->n; i++) {
 					if (pay[i] != -2) continue;
-					if (strcmp(nv->names[i], cols[c].name) != 0) continue;
+					if (strcasecmp(nv->names[i], cols[c].name) != 0) continue;
 					pay[i] = cols[c].is_pk ? -1 : (c - 1);
 					/* The PK is the INTEGER rowid regardless of its declared
 					 * type, matching how SQLite reports an INTEGER PRIMARY
 					 * KEY -- so its affinity is numeric, not the empty/BLOB
 					 * default a bare "k" coldef would give. */
 					nv->aff[i] = cols[c].is_pk ? VX_AFF_NUMERIC
-					                          : vx_affinity(cols[c].decltype);
+					                          : aff_class(vx_affinity(cols[c].decltype));
 					resolved++;
 				}
 			/* The special names rowid / _rowid_ / oid are aliases for the
@@ -713,13 +742,13 @@ struct vx_compiler {
 	int              nbinds;
 };
 
-/* Slice == C-string (case-sensitive for identifiers, as SQLite folds
- * case only for keywords; column-name matching here is exact). */
+/* Identifier slice == C-string.  ASCII case-insensitive: SQLite resolves
+ * table, alias and column names without regard to (ASCII) case. */
 static int
 str_eq_cstr(const sql_str_t *s, const char *cs)
 {
 	size_t n = strlen(cs);
-	return (size_t)s->len == n && memcmp(s->p, cs, n) == 0;
+	return (size_t)s->len == n && strncasecmp(s->p, cs, n) == 0;
 }
 
 /* Resolve a column reference to a combined-row index in a join context.
@@ -833,7 +862,7 @@ node_class(const struct vx_compiler *c, const vx_expr_t *e)
 	case VXO_ISNULL: case VXO_NOTNULL:
 	case VXO_IN: case VXO_NOTIN:
 		return VX_AFF_NUMERIC;   /* booleans are 0/1 integers */
-	case VXO_LIKE: case VXO_GLOB:
+	case VXO_LIKE: case VXO_GLOB: case VXO_IS:
 		return VX_AFF_NUMERIC;   /* match result is a 0/1 integer */
 	case VXO_CASE:
 		return VX_AFF_BLOB;      /* dynamic result type: treat as no affinity */
@@ -854,6 +883,12 @@ node_class(const struct vx_compiler *c, const vx_expr_t *e)
 		case VXF_REPLACE: return VX_AFF_TEXT;
 		case VXF_TRIM: case VXF_LTRIM: case VXF_RTRIM: return VX_AFF_TEXT;
 		case VXF_TYPEOF: return VX_AFF_TEXT;
+		case VXF_EXT:
+			switch (vxf_class_of(e->col)) {
+			case VXF_C_TEXT: return VX_AFF_TEXT;
+			case VXF_C_NUM:  return VX_AFF_NUMERIC;
+			default:         return VX_AFF_BLOB;
+			}
 		case VXF_CAST:
 			switch ((enum vx_cast_class)e->col) {
 			case VX_CAST_TEXT: return VX_AFF_TEXT;
@@ -990,8 +1025,8 @@ func_of(const sql_str_t *name, int *nargs_ok, int nargs)
 		*nargs_ok = 1;
 		return tbl[i].f;
 	}
-	*nargs_ok = 0;
-	return 0;
+	*nargs_ok = vxf_lookup(name->p, name->len, nargs) > 0;
+	return *nargs_ok ? VXF_EXT : 0;
 }
 
 static int
@@ -1010,6 +1045,7 @@ tok_to_binop(int tok, enum vx_op *out)
 	case TK_LE: *out = VXO_LE; return 1;
 	case TK_GT: *out = VXO_GT; return 1;
 	case TK_GE: *out = VXO_GE; return 1;
+	case TK_IS: *out = VXO_IS; return 1;
 	case TK_AND: *out = VXO_AND; return 1;
 	case TK_OR: *out = VXO_OR; return 1;
 	default: return 0;
@@ -1064,6 +1100,7 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 	if (e == NULL) return -1;
 	switch (e->op) {
 	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING: case SX_E_PARAM:
+	case SX_E_BLOB:
 		return 0;
 	case SX_E_COLUMN:
 		if (e->nname < 1 || e->nname > 2) return -1;
@@ -1076,6 +1113,7 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 		enum vx_op dummy;
 		if (e->op2 != TK_LIKE && !tok_to_binop(e->op2, &dummy)) return -1;
 		if (collect_columns(nv, e->a) != 0) return -1;
+		if (e->c != NULL && collect_columns(nv, e->c) != 0) return -1;   /* ESCAPE */
 		return collect_columns(nv, e->b);
 	}
 	case SX_E_IS_NULL:
@@ -1187,6 +1225,18 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 	}
 }
 
+/* ORDER BY key flags (vx_stmt.order_desc[]). */
+#define VX_ORD_DESC  1   /* DESC */
+#define VX_ORD_NULLS 2   /* NULLS FIRST under DESC / NULLS LAST under ASC */
+
+static int
+ord_flags(const sql_exprlist_item_t *o)
+{
+	int desc = (o->sort == 2);
+	int flip = (o->nulls == 1 && desc) || (o->nulls == 2 && !desc);
+	return (desc ? VX_ORD_DESC : 0) | (flip ? VX_ORD_NULLS : 0);
+}
+
 /* If order-key expression `e` is a bare (unqualified) column reference
  * whose name matches a SELECT-list output ALIAS (SELECT x AS q ...
  * ORDER BY q), return that output column's 1-based position; else 0.
@@ -1242,7 +1292,10 @@ item_name(const sql_exprlist_item_t *it, char *dst, size_t cap)
 	}
 }
 
-/* Compile a literal AST node into a VXO_LIT (INT/REAL/TEXT/NULL). */
+static int lit_cell(struct vx_arena_blk **arena, const sql_expr_t *e,
+                    vx_cell_t *out, const vx_cell_t *binds, int nbinds);
+
+/* Compile a literal AST node into a VXO_LIT (INT/REAL/TEXT/BLOB/NULL). */
 static vx_expr_t *
 compile_literal(struct vx_compiler *c, const sql_expr_t *e)
 {
@@ -1273,6 +1326,11 @@ compile_literal(struct vx_compiler *c, const sql_expr_t *e)
 		n->lit.type = VX_TEXT; n->lit.bytes = p; n->lit.nbytes = e->lit.len;
 		return n;
 	}
+	case SX_E_BLOB:   /* x'..': decoded into the plan arena */
+		if (lit_cell(&c->st->plan_arena, e, &n->lit, NULL, 0) != 0) {
+			c->fail = 1; return NULL;
+		}
+		return n;
 	default:
 		c->fail = 1;
 		return NULL;
@@ -1305,6 +1363,35 @@ compile_param(struct vx_compiler *c, const sql_expr_t *e)
 		n->lit = *v;   /* INT / REAL / NULL: by value */
 	}
 	return n;
+}
+
+/* Finish a VXF_EXT call node (args already compiled): record the
+ * vxfunc id in .col, decline a 'localtime'/'utc' modifier, and stamp the
+ * statement's 'now' once (SQLite: one time value per statement) when the
+ * call can read the clock.  Returns 0, or -1 to decline. */
+static int
+compile_ext(struct vx_compiler *c, const sql_expr_t *e, vx_expr_t *n)
+{
+	const vx_cell_t *lits[16];
+	int k;
+	n->col = vxf_lookup(e->name[0].p, e->name[0].len, n->nargs);
+	if (n->col <= 0 || n->nargs > 16) return -1;
+	for (k = 0; k < n->nargs; k++) {
+		/* A column or expression of numeric class may hold a REAL. */
+		lits[k] = n->args[k]->op == VXO_LIT ? &n->args[k]->lit : NULL;
+		if (!vxf_arg_ok(n->col, k, lits[k],
+		    node_class(c, n->args[k]) != VX_AFF_TEXT)) return -1;
+	}
+	if (vxf_unsupported_mod(n->col, lits, n->nargs)) return -1;
+	if (vxf_wants_now(n->col, lits, n->nargs) && c->st->now_ms == 0)
+		c->st->now_ms = vxf_now_ms();
+	return 0;
+}
+
+static void *
+ext_alloc(void *ctx, size_t n)
+{
+	return arena_alloc((struct vx_arena_blk **)ctx, n);
 }
 
 /* Compile an UNCORRELATED scalar subquery (SELECT ...) used as an
@@ -2098,7 +2185,7 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 		c->fail = save;
 		return compile_corr_in_select(c, e);
 	}
-	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING:
+	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING: case SX_E_BLOB:
 		return compile_literal(c, e);
 	case SX_E_PARAM:
 		return compile_param(c, e);
@@ -2149,10 +2236,23 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 			a = compile_expr(c, e->a);   /* the value being matched */
 			b = compile_expr(c, e->b);   /* the pattern */
 			if (a == NULL || b == NULL) return NULL;
-			if (node_class(c, a) != VX_AFF_TEXT ||
-			    node_class(c, b) != VX_AFF_TEXT) { c->fail = 1; return NULL; }
+			/* A literal NULL side makes the match NULL (eval checks). */
+			if ((node_class(c, a) != VX_AFF_TEXT && !is_null_lit(a)) ||
+			    (node_class(c, b) != VX_AFF_TEXT && !is_null_lit(b))) { c->fail = 1; return NULL; }
 			n = expr_node(c, VXO_LIKE);
 			if (n) { n->a = a; n->b = b; }
+			if (n && e->c != NULL) {     /* LIKE ... ESCAPE x */
+				vx_expr_t *x = compile_expr(c, e->c);
+				if (x == NULL) return NULL;
+				/* SQLite errors on an escape that is not one character;
+				 * declining (an error here too) keeps the two in step. */
+				if (node_class(c, x) != VX_AFF_TEXT ||
+				    (x->op == VXO_LIT && x->lit.nbytes != 1)) { c->fail = 1; return NULL; }
+				n->args = (vx_expr_t **)arena_alloc(&c->st->plan_arena,
+				    sizeof(vx_expr_t *));
+				if (n->args == NULL) { c->fail = 1; return NULL; }
+				n->args[0] = x; n->nargs = 1;
+			}
 			return n;
 		}
 		if (!tok_to_binop(e->op2, &op)) { c->fail = 1; return NULL; }
@@ -2175,6 +2275,10 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 			if (node_class(c, a) == VX_AFF_BLOB ||
 			    node_class(c, b) == VX_AFF_BLOB) { c->fail = 1; return NULL; }
 			break;
+		case VXO_IS:
+			/* IS against a literal NULL is IS NULL (no coercion). */
+			if (is_null_lit(a) || is_null_lit(b)) break;
+			/* FALLTHROUGH */
 		case VXO_EQ: case VXO_NE: case VXO_LT: case VXO_LE:
 		case VXO_GT: case VXO_GE: {
 			int g = cmp_affinity_gate(c, a, b);
@@ -2414,6 +2518,7 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 		if (f == VXF_ABS && node_class(c, n->args[0]) != VX_AFF_NUMERIC) {
 			c->fail = 1; return NULL;
 		}
+		if (f == VXF_EXT && compile_ext(c, e, n) != 0) { c->fail = 1; return NULL; }
 		return n;
 	}
 
@@ -2472,6 +2577,16 @@ eval_bool(const struct vx_stmt *st, const vx_expr_t *e,
 	return 0;
 }
 
+/* Render a REAL the way SQLite turns one into TEXT ("%!.15g", sqlite
+ * 3.46): 15 significant digits after SQLite's own 18-digit decode, ".0"
+ * on a value with no '.', "1.0e+20" style exponent, -0.0 -> "0.0",
+ * Inf -> "Inf".  The one implementation lives in vxfunc.c. */
+static int
+real_text(double r, char *buf, size_t cap)
+{
+	return vxf_real_text(r, buf, cap);
+}
+
 /* SQLite numeric affinity on a TEXT cell: if the WHOLE string parses as
  * an integer or real (optional sign, decimal, exponent), rewrite the
  * cell in place to VX_INT / VX_REAL; otherwise leave it as text.  Used
@@ -2482,7 +2597,8 @@ coerce_numeric(vx_cell_t *v)
 {
 	char buf[64];
 	char *end = NULL;
-	uint32_t n = v->nbytes;
+	uint32_t n = v->nbytes, i = 0;
+	int isreal = 0, nd = 0;
 	if (v->type != VX_TEXT || v->bytes == NULL) return;
 	if (n == 0 || n >= sizeof buf) return;
 	memcpy(buf, v->bytes, n); buf[n] = '\0';
@@ -2496,30 +2612,46 @@ coerce_numeric(vx_cell_t *v)
 		n--;
 		buf[n] = '\0';
 	}
-	if (n == 0) return;
-	{
-		int isreal = 0; uint32_t i;
-		for (i = 0; i < n; i++)
-			if (buf[i] == '.' || buf[i] == 'e' || buf[i] == 'E') { isreal = 1; break; }
-		if (isreal) {
-			double d = strtod(buf, &end);
-			if (end == buf + n) { v->type = VX_REAL; v->r = d; }
-		} else {
-			long long ll = strtoll(buf, &end, 10);
-			if (end == buf + n) { v->type = VX_INT; v->i = (int64_t)ll; }
-			else {
-				double d = strtod(buf, &end);
-				if (end == buf + n) { v->type = VX_REAL; v->r = d; }
-			}
-		}
+	/* Accept only SQLite's numeric grammar: [sign] digits [. digits]
+	 * [e [sign] digits], with a digit somewhere in the mantissa.  strtod
+	 * alone would also take inf / nan / 0x10, which SQLite keeps as text. */
+	while (i < n && isspace((unsigned char)buf[i])) i++;
+	if (i < n && (buf[i] == '+' || buf[i] == '-')) i++;
+	for (; i < n && isdigit((unsigned char)buf[i]); i++) nd++;
+	if (i < n && buf[i] == '.') {
+		isreal = 1;
+		for (i++; i < n && isdigit((unsigned char)buf[i]); i++) nd++;
 	}
+	if (nd == 0) return;
+	if (i < n && (buf[i] == 'e' || buf[i] == 'E')) {
+		isreal = 1;
+		i++;
+		if (i < n && (buf[i] == '+' || buf[i] == '-')) i++;
+		if (i >= n || !isdigit((unsigned char)buf[i])) return;
+		while (i < n && isdigit((unsigned char)buf[i])) i++;
+	}
+	if (i != n) return;
+	if (!isreal) {
+		long long ll;
+		errno = 0;
+		ll = strtoll(buf, &end, 10);
+		if (errno == 0 && end == buf + n) {
+			v->type = VX_INT; v->i = (int64_t)ll;
+			return;
+		}
+		/* Out of int64 range: SQLite keeps it as a REAL. */
+	}
+	v->type = VX_REAL; v->r = strtod(buf, NULL);
 }
 
-/* Apply SQLite column affinity to a value being stored (INSERT).  TEXT
- * affinity converts INTEGER/REAL to its text form; NUMERIC affinity
- * converts a numeric-looking TEXT to INTEGER/REAL (coerce_numeric);
- * BLOB/none affinity leaves the value as-is.  NULL is never coerced.
- * Text produced for an int/real is allocated in `arena`. */
+/* Apply SQLite column affinity to a value being stored (INSERT/UPDATE).
+ * TEXT converts INTEGER/REAL to its text form.  NUMERIC / INTEGER / REAL
+ * convert a numeric-looking TEXT to a number; NUMERIC and INTEGER also
+ * turn an integral in-range REAL into an INTEGER (3.0 -> 3, as SQLite's
+ * applyAffinity / IntegerAffinity do); REAL stores any number as REAL
+ * (3 -> 3.0, the read-back view SQLite gives a REAL column).  BLOB/none
+ * leaves the value as-is.  NULL is never coerced.  Text produced for an
+ * int/real is allocated in `arena`. */
 static void
 coerce_to_affinity(vx_cell_t *v, enum vx_aff aff, struct vx_arena_blk **arena)
 {
@@ -2530,11 +2662,9 @@ coerce_to_affinity(vx_cell_t *v, enum vx_aff aff, struct vx_arena_blk **arena)
 		if (v->type == VX_TEXT || v->type == VX_BLOB) return;
 		if (v->type == VX_INT)
 			n = snprintf(buf, sizeof buf, "%lld", (long long)v->i);
-		else if (v->type == VX_REAL) {
-			/* SQLite renders an integral real without a fraction via %!.15g;
-			 * use %g which matches for the corpus values. */
-			n = snprintf(buf, sizeof buf, "%g", v->r);
-		} else return;
+		else if (v->type == VX_REAL)
+			n = real_text(v->r, buf, sizeof buf);
+		else return;
 		if (n < 0 || n >= (int)sizeof buf) return;
 		{
 			uint8_t *p = (uint8_t *)arena_alloc(arena, (size_t)n + 1);
@@ -2542,8 +2672,16 @@ coerce_to_affinity(vx_cell_t *v, enum vx_aff aff, struct vx_arena_blk **arena)
 			memcpy(p, buf, (size_t)n + 1);
 			v->type = VX_TEXT; v->bytes = p; v->nbytes = (uint32_t)n;
 		}
-	} else if (aff == VX_AFF_NUMERIC) {
+	} else if (aff == VX_AFF_NUMERIC || aff == VX_AFF_INTEGER ||
+	           aff == VX_AFF_REAL) {
 		if (v->type == VX_TEXT) (void)coerce_numeric(v);
+		if (aff == VX_AFF_REAL && v->type == VX_INT) {
+			v->type = VX_REAL; v->r = (double)v->i;
+		} else if (aff != VX_AFF_REAL && v->type == VX_REAL &&
+		    v->r > -9223372036854775808.0 && v->r < 9223372036854775807.0 &&
+		    v->r == (double)(int64_t)v->r) {
+			v->type = VX_INT; v->i = (int64_t)v->r;
+		}
 	}
 	/* VX_AFF_BLOB (none affinity): no conversion. */
 }
@@ -2638,7 +2776,7 @@ cell_text(const vx_cell_t *v, struct vx_arena_blk **arena, uint32_t *n)
 		return v->bytes;
 	}
 	if (v->type == VX_INT) m = snprintf(tmp, sizeof tmp, "%lld", (long long)v->i);
-	else                   m = snprintf(tmp, sizeof tmp, "%g", v->r);
+	else                   m = real_text(v->r, tmp, sizeof tmp);
 	if (m < 0) { *n = 0; return (const uint8_t *)""; }
 	p = (uint8_t *)arena_alloc(arena, (size_t)m + 1);
 	if (p == NULL) { *n = 0; return NULL; }
@@ -2742,10 +2880,10 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 		if (a.type == VX_NULL || b.type == VX_NULL) { out->type = VX_NULL; return; }
 		/* Render each operand to text (SQLite TEXT coercion of numerics). */
 		if (a.type == VX_INT) { na = (uint32_t)snprintf(ta, sizeof ta, "%lld", (long long)a.i); pa = (uint8_t *)ta; }
-		else if (a.type == VX_REAL) { na = (uint32_t)snprintf(ta, sizeof ta, "%g", a.r); pa = (uint8_t *)ta; }
+		else if (a.type == VX_REAL) { na = (uint32_t)real_text(a.r, ta, sizeof ta); pa = (uint8_t *)ta; }
 		else { pa = a.bytes; na = a.nbytes; }
 		if (b.type == VX_INT) { nb = (uint32_t)snprintf(tb, sizeof tb, "%lld", (long long)b.i); pb = (uint8_t *)tb; }
-		else if (b.type == VX_REAL) { nb = (uint32_t)snprintf(tb, sizeof tb, "%g", b.r); pb = (uint8_t *)tb; }
+		else if (b.type == VX_REAL) { nb = (uint32_t)real_text(b.r, tb, sizeof tb); pb = (uint8_t *)tb; }
 		else { pb = b.bytes; nb = b.nbytes; }
 		buf = (uint8_t *)arena_alloc(arena, (size_t)na + nb + 1);
 		if (buf == NULL) { out->type = VX_NULL; return; }
@@ -2756,11 +2894,17 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 		return;
 	}
 
+	case VXO_IS:
 	case VXO_EQ: case VXO_NE: case VXO_LT: case VXO_LE:
 	case VXO_GT: case VXO_GE: {
 		vx_cell_t a, b; int c;
 		eval(st, e->a, row, arena, &a);
 		eval(st, e->b, row, arena, &b);
+		if (e->op == VXO_IS && (a.type == VX_NULL || b.type == VX_NULL)) {
+			out->type = VX_INT;     /* IS: NULL-safe, never NULL */
+			out->i = (a.type == VX_NULL && b.type == VX_NULL);
+			return;
+		}
 		if (a.type == VX_NULL || b.type == VX_NULL) { out->type = VX_NULL; return; }
 		/* SQLite applies numeric affinity when one side is numeric and the
 		 * other text (reachable here only via a dynamic operand -- a
@@ -2778,6 +2922,7 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 		c = sort_cmp(&a, &b);
 		out->type = VX_INT;
 		switch (e->op) {
+		case VXO_IS:
 		case VXO_EQ: out->i = (c == 0); break;
 		case VXO_NE: out->i = (c != 0); break;
 		case VXO_LT: out->i = (c < 0); break;
@@ -2964,13 +3109,21 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 		 * wildcards).  Both operands are text-classed by the
 		 * compiler; render to NUL-terminated C strings (TEXT bytes
 		 * may be a non-terminated slice). */
-		vx_cell_t val, pat;
-		char *vs, *ps;
+		vx_cell_t val, pat, ex;
+		char *vs, *ps, esc = '\0';
 		int m;
 		eval(st, e->a, row, arena, &val);
 		eval(st, e->b, row, arena, &pat);
 		if (val.type == VX_NULL || pat.type == VX_NULL) {
 			out->type = VX_NULL; return;
+		}
+		if (e->op == VXO_LIKE && e->nargs == 1) {   /* LIKE ... ESCAPE */
+			eval(st, e->args[0], row, arena, &ex);
+			if (ex.type == VX_NULL) { out->type = VX_NULL; return; }
+			/* Literal escapes are checked at compile time; a computed
+			 * one that is not a single byte yields NULL (SQLite errors). */
+			if (ex.type != VX_TEXT || ex.nbytes != 1) { out->type = VX_NULL; return; }
+			esc = (char)ex.bytes[0];
 		}
 		if (val.type != VX_TEXT || pat.type != VX_TEXT) {
 			/* The compiler kept both text-classed; a stored value of a
@@ -2985,7 +3138,7 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 		if (val.nbytes) memcpy(vs, val.bytes, val.nbytes);
 		vs[val.nbytes] = '\0';
 		if (e->op == VXO_LIKE)
-			m = xs_like(ps, vs);
+			m = xs_like(ps, vs, esc);
 		else
 			m = xs_glob(ps, vs);
 		out->type = VX_INT; out->i = m;
@@ -2995,6 +3148,14 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 	case VXO_FUNC: {
 		vx_cell_t a;
 		switch (e->func) {
+		case VXF_EXT: {
+			vx_cell_t av[16];
+			int k;
+			for (k = 0; k < e->nargs && k < 16; k++)
+				eval(st, e->args[k], row, arena, &av[k]);
+			vxf_eval(e->col, av, e->nargs, st->now_ms, ext_alloc, arena, out);
+			return;
+		}
 		case VXF_TYPEOF: {
 			/* SQLite storage-class name of the argument. */
 			const char *tn;
@@ -3035,7 +3196,7 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 				/* numeric: SQLite length(123) = length('123'); render. */
 				char tmp[64]; int m;
 				if (a.type == VX_INT) m = snprintf(tmp, sizeof tmp, "%lld", (long long)a.i);
-				else m = snprintf(tmp, sizeof tmp, "%g", a.r);
+				else m = real_text(a.r, tmp, sizeof tmp);
 				out->i = m;
 			}
 			return;
@@ -3523,7 +3684,7 @@ acc_step(vx_acc_t *a, enum vx_agg_kind kind, const vx_cell_t *v,
 		uint32_t seplen = a->gc_sep ? a->gc_seplen : 1;
 		if (v->type == VX_TEXT || v->type == VX_BLOB) { vp = (const char *)v->bytes; vn = v->nbytes; }
 		else if (v->type == VX_INT) { vn = (uint32_t)snprintf(tmp, sizeof tmp, "%lld", (long long)v->i); vp = tmp; }
-		else { vn = (uint32_t)snprintf(tmp, sizeof tmp, "%g", v->r); vp = tmp; }
+		else { vn = (uint32_t)real_text(v->r, tmp, sizeof tmp); vp = tmp; }
 		{
 			uint32_t add = (a->seen ? seplen : 0) + vn;
 			if (a->gc_len + add + 1 > a->gc_cap) {
@@ -3733,7 +3894,7 @@ ast_is_named_col(const sql_expr_t *e, const char *pk)
 {
 	return e && e->op == SX_E_COLUMN && e->nname >= 1 &&
 	    e->name[e->nname - 1].len == strlen(pk) &&
-	    strncmp(e->name[e->nname - 1].p, pk, strlen(pk)) == 0;
+	    strncasecmp(e->name[e->nname - 1].p, pk, strlen(pk)) == 0;
 }
 
 /* Tighten a rowid range [lo, hi] (per has_lo / has_hi) with any
@@ -4322,7 +4483,7 @@ vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 		for (o = sel->order->head; o; o = o->next, oi++) {
 			const sql_expr_t *e = o->expr;
 			int apos;
-			st->order_desc[oi] = (o->sort == 2);
+			st->order_desc[oi] = ord_flags(o);
 			if (e && e->op == SX_E_NUMBER) {
 				/* ORDER BY <int>: output-column position (1-based). */
 				char buf[32]; long pos;
@@ -4449,7 +4610,7 @@ expr_same(const sql_expr_t *a, const sql_expr_t *b)
 		if (a->nname != b->nname) return 0;
 		{ int k; for (k = 0; k < a->nname; k++)
 			if (a->name[k].len != b->name[k].len ||
-			    memcmp(a->name[k].p, b->name[k].p, a->name[k].len) != 0)
+			    strncasecmp(a->name[k].p, b->name[k].p, a->name[k].len) != 0)
 				return 0;
 		  return 1; }
 	case SX_E_NUMBER: case SX_E_STRING:
@@ -4464,7 +4625,7 @@ expr_same(const sql_expr_t *a, const sql_expr_t *b)
 		const sql_exprlist_item_t *ia, *ib;
 		if (a->ival != b->ival) return 0;
 		if (a->name[0].len != b->name[0].len ||
-		    memcmp(a->name[0].p, b->name[0].p, a->name[0].len) != 0) return 0;
+		    strncasecmp(a->name[0].p, b->name[0].p, a->name[0].len) != 0) return 0;
 		ia = a->list ? a->list->head : NULL;
 		ib = b->list ? b->list->head : NULL;
 		for (; ia && ib; ia = ia->next, ib = ib->next)
@@ -4561,7 +4722,7 @@ compile_having(struct vx_compiler *c, const sql_select_t *sel,
 	}
 
 	switch (e->op) {
-	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING:
+	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING: case SX_E_BLOB:
 		return compile_literal(c, e);
 	case SX_E_PARAM:
 		return compile_param(c, e);
@@ -4672,7 +4833,7 @@ compile_agg_proj(struct vx_compiler *c, const sql_select_t *sel,
 	}
 
 	switch (e->op) {
-	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING:
+	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING: case SX_E_BLOB:
 		return compile_literal(c, e);
 	case SX_E_PARAM:
 		return compile_param(c, e);
@@ -4730,6 +4891,7 @@ compile_agg_proj(struct vx_compiler *c, const sql_select_t *sel,
 			if (n->args[k] == NULL) return NULL;
 			k++;
 		}
+		if (f == VXF_EXT && compile_ext(c, e, n) != 0) { c->fail = 1; return NULL; }
 		return n;
 	}
 	case SX_E_CASE:
@@ -4822,8 +4984,15 @@ vx_try_prepare_agg(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 					ap->has_gc = 1;
 					if (e->list->head->next != NULL) {
 						const sql_expr_t *sp = e->list->head->next->expr;
+						char *sepb;
 						if (sp == NULL || sp->op != SX_E_STRING) goto fallback;
-						ap->out[oi].gc_sep = sp->lit.p;
+						/* Copy: lit may live in the parse arena (a collapsed
+						 * '' literal), which is freed when prepare returns. */
+						sepb = (char *)arena_alloc(&st->plan_arena, sp->lit.len + 1);
+						if (sepb == NULL) goto oom;
+						memcpy(sepb, sp->lit.p, sp->lit.len);
+						sepb[sp->lit.len] = '\0';
+						ap->out[oi].gc_sep = sepb;
 						ap->out[oi].gc_seplen = sp->lit.len;
 					}
 				}
@@ -4966,7 +5135,7 @@ vx_try_prepare_agg(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		if (!st->order_key || !st->order_outcol || !st->order_desc) goto oom;
 		for (o = sel->order->head; o; o = o->next, oi++) {
 			const sql_expr_t *e = o->expr;
-			st->order_desc[oi] = (o->sort == 2);
+			st->order_desc[oi] = ord_flags(o);
 			if (e && e->op == SX_E_NUMBER) {
 				char buf[32]; long pos;
 				if (e->lit.len == 0 || e->lit.len >= sizeof buf) goto fallback;
@@ -5386,7 +5555,7 @@ vx_try_prepare_join(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		if (!st->order_key || !st->order_outcol || !st->order_desc) goto oom;
 		for (o = sel->order->head; o; o = o->next, oi++) {
 			const sql_expr_t *e = o->expr;
-			st->order_desc[oi] = (o->sort == 2);
+			st->order_desc[oi] = ord_flags(o);
 			if (e && e->op == SX_E_NUMBER) {
 				char buf[32]; long pos;
 				if (e->lit.len == 0 || e->lit.len >= sizeof buf) goto fallback;
@@ -5652,7 +5821,7 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		for (o = sel->order->head; o; o = o->next, oi++) {
 			const sql_expr_t *e = o->expr;
 			int apos;
-			st->order_desc[oi] = (o->sort == 2);
+			st->order_desc[oi] = ord_flags(o);
 			if (e && e->op == SX_E_NUMBER) {
 				char buf[32]; long pos;
 				if (e->lit.len == 0 || e->lit.len >= sizeof buf) goto fallback;
@@ -5969,7 +6138,7 @@ vx_try_prepare_view(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		if (!st->order_key || !st->order_outcol || !st->order_desc) { rc = -1; goto fallback; }
 		for (o = sel->order->head; o; o = o->next, oi++) {
 			const sql_expr_t *e = o->expr;
-			st->order_desc[oi] = (o->sort == 2);
+			st->order_desc[oi] = ord_flags(o);
 			if (e && e->op == SX_E_NUMBER) {
 				char buf[32]; long pos;
 				if (e->lit.len == 0 || e->lit.len >= sizeof buf) goto fallback;
@@ -6199,12 +6368,12 @@ jsrc_build(struct xsql *db, const char *table, char names[][64], int ncol,
 	for (i = 0; i < ncol; i++) js->pay[i] = -2;
 	for (i = 0; i < ncol; i++)
 		for (c = 0; c < nc; c++)
-			if (strcmp(names[i], cols[c].name) == 0) {
+			if (strcasecmp(names[i], cols[c].name) == 0) {
 				js->pay[i] = cols[c].is_pk ? -1 : (c - 1);
 				/* The PK is the INTEGER rowid (numeric affinity)
 				 * regardless of its declared type, matching SQLite. */
 				js->aff[i] = cols[c].is_pk ? VX_AFF_NUMERIC
-				                          : vx_affinity(cols[c].decltype);
+				                          : aff_class(vx_affinity(cols[c].decltype));
 				break;
 			}
 	for (i = 0; i < ncol; i++) if (js->pay[i] == -2) return -1;   /* unresolved */
@@ -6458,6 +6627,19 @@ is_ordered(const struct vx_stmt *st)
 	       (st->norder > 0 || st->limit >= 0 || st->offset > 0 || st->distinct);
 }
 
+/* Compare two order-key cells under one key's VX_ORD_* flags.  DESC
+ * negates the value order; a NULLS clause that differs from the default
+ * (FIRST under DESC, LAST under ASC) re-places NULLs without touching the
+ * non-NULL order. */
+static int
+ord_cmp(const vx_cell_t *a, const vx_cell_t *b, int flags)
+{
+	int r = sort_cmp(a, b);
+	if ((flags & VX_ORD_NULLS) && (a->type == VX_NULL) != (b->type == VX_NULL))
+		return (flags & VX_ORD_DESC) ? r : -r;
+	return (flags & VX_ORD_DESC) ? -r : r;
+}
+
 /* qsort context: the order keys per row + directions.  Keys are stored
  * row-major: nkey cells per row, in a flat array parallel to the output
  * rows.  We sort an index array to keep the output rows paired. */
@@ -6483,8 +6665,7 @@ sort_index_cmp(const void *pa, const void *pb)
 	for (k = 0; k < c->nkey; k++) {
 		const vx_cell_t *ka = &c->keys[(size_t)ia * (size_t)c->nkey + (size_t)k];
 		const vx_cell_t *kb = &c->keys[(size_t)ib * (size_t)c->nkey + (size_t)k];
-		int r = sort_cmp(ka, kb);
-		if (c->desc[k]) r = -r;
+		int r = ord_cmp(ka, kb, c->desc[k]);
 		if (r) return r;
 	}
 	/* Stable-ish tiebreak by original index so equal-key rows keep a
@@ -6508,8 +6689,7 @@ topn_cmp(const vx_cell_t *ka, const vx_cell_t *kb, int nkey, const int *desc)
 {
 	int k;
 	for (k = 0; k < nkey; k++) {
-		int r = sort_cmp(&ka[k], &kb[k]);
-		if (desc[k]) r = -r;
+		int r = ord_cmp(&ka[k], &kb[k], desc[k]);
 		if (r) return r;
 	}
 	return 0;
@@ -7497,6 +7677,7 @@ par_worker(xtc_task_t *self, void *user)
 	w.agg = par->plan->agg;        /* borrowed (immutable plan) */
 	w.bt = par->plan->bt;
 	w.snap = par->plan->snap;
+	w.now_ms = par->plan->now_ms;  /* one 'now' per statement, every worker */
 	w.nsrc_col = par->plan->nsrc_col;
 	memcpy(w.src_pay, par->plan->src_pay, sizeof w.src_pay);
 	snprintf(w.table, sizeof w.table, "%s", par->plan->table);
@@ -8041,7 +8222,7 @@ is_pk_col(const sql_expr_t *e, const char *pkname)
 {
 	return e != NULL && e->op == SX_E_COLUMN && e->nname >= 1 &&
 	    e->name[e->nname - 1].len == strlen(pkname) &&
-	    strncmp(e->name[e->nname - 1].p, pkname, strlen(pkname)) == 0;
+	    strncasecmp(e->name[e->nname - 1].p, pkname, strlen(pkname)) == 0;
 }
 
 /* Evaluate a literal expression to an integer, or fail. */
@@ -8269,7 +8450,7 @@ eval_set_expr(const sql_expr_t *e, const vx_cell_t *pay, int npay,
 		}
 		for (k = 0; k < ws->n; k++)
 			if (nm->len == strlen(ws->name[k]) &&
-			    strncmp(nm->p, ws->name[k], nm->len) == 0) {
+			    strncasecmp(nm->p, ws->name[k], nm->len) == 0) {
 				if (k == 0) { out->type = VX_INT; out->i = rowid; return 0; }
 				if (k - 1 >= npay) return -1;
 				*out = pay[k - 1]; return 0;
@@ -8525,7 +8706,7 @@ vx_run_write_p(struct xsql *db, const char *sql,
 			int col = -1, k;
 			for (k = 0; k < ws.n; k++)
 				if (a->col.len == strlen(ws.name[k]) &&
-				    strncmp(a->col.p, ws.name[k], a->col.len) == 0) { col = k; break; }
+				    strncasecmp(a->col.p, ws.name[k], a->col.len) == 0) { col = k; break; }
 			if (col < 0) { rc = 0; goto done; } /* unknown col -> VDBE */
 			if (col == 0) {
 				if (pk_reassign) { rc = 0; goto done; }  /* SET k twice */
@@ -8752,7 +8933,7 @@ vx_run_write_p(struct xsql *db, const char *sql,
 				nm = &ce->name[ce->nname - 1];
 				for (k = 0; k < ws.n; k++)
 					if (nm->len == strlen(ws.name[k]) &&
-					    strncmp(nm->p, ws.name[k], nm->len) == 0) { col = k; break; }
+					    strncasecmp(nm->p, ws.name[k], nm->len) == 0) { col = k; break; }
 				if (col < 0 || ncolmap >= 64) { sql_arena_destroy(arena); return 0; }
 				colmap[ncolmap++] = col;
 			}
@@ -8812,6 +8993,9 @@ vx_run_write_p(struct xsql *db, const char *sql,
 					break; }
 				default: dst->type = VX_NULL; break;
 				}
+				/* Store affinity, exactly as INSERT VALUES applies it. */
+				coerce_to_affinity(dst, vx_affinity(ws.decltype[colmap[ci]]),
+				    &cell_arena);
 			}
 			if (cells[0].type == VX_INT) {
 				rowid = cells[0].i; if (rowid > maxr) maxr = rowid;
@@ -9000,6 +9184,108 @@ sql_has_setop(const char *s)
  * non-UNION-ALL operator, mismatched arity, or a chained compound), or
  * <0 on error.  UNION / INTERSECT / EXCEPT (which dedup / intersect)
  * fall back for now. */
+/* The compound's ORDER BY must name result columns, as in SQLite: a
+ * 1-based position, or a bare name matching a column/alias of the FIRST
+ * select (any table qualifier is ignored, as SQLite does there).  Fills
+ * key[] (0-based output column) and flags[] (VX_ORD_*), and LIMIT /
+ * OFFSET from integer literals or binds.  Returns 0, or -1 with *errmsg
+ * set (SQLite's error text) or left NULL (decline). */
+static int
+setop_order_plan(const sql_select_t *first, const sql_exprlist_t *order,
+                 const sql_expr_t *limit, const sql_expr_t *offset,
+                 const vx_cell_t *binds, int nbinds, int *key, int *flags,
+                 int *nkey, int64_t *lim, int64_t *off, char **errmsg)
+{
+	const sql_exprlist_item_t *o, *c;
+	int ncol = 0, k = 0, pos, term = 0, ci;
+	int64_t v;
+	char name[64], buf[96];
+	for (c = first->cols ? first->cols->head : NULL; c; c = c->next) {
+		if (c->expr == NULL || c->expr->op == SX_E_STAR) return -1;   /* decline */
+		ncol++;
+	}
+	for (o = order ? order->head : NULL; o; o = o->next) {
+		const sql_expr_t *e = o->expr;
+		term++;
+		if (k >= 16) return -1;
+		pos = 0;
+		if (e != NULL && e->op == SX_E_NUMBER && lit_int(e, &v, NULL, 0)) {
+			if (v >= 1 && v <= ncol) pos = (int)v;
+		} else if (e != NULL && e->op == SX_E_COLUMN && e->nname >= 1) {
+			const sql_str_t *nm = &e->name[e->nname - 1];
+			ci = 0;
+			for (c = first->cols->head; c; c = c->next) {
+				ci++;
+				item_name(c, name, sizeof name);
+				if (strlen(name) == nm->len &&
+				    strncasecmp(name, nm->p, nm->len) == 0) { pos = ci; break; }
+			}
+		}
+		if (pos == 0) {
+			snprintf(buf, sizeof buf, "%d%s ORDER BY term does not match any "
+			    "column in the result set", term,
+			    term == 1 ? "st" : term == 2 ? "nd" : term == 3 ? "rd" : "th");
+			if (errmsg) *errmsg = strdup(buf);
+			return -1;
+		}
+		key[k] = pos - 1;
+		flags[k] = ord_flags(o);
+		k++;
+	}
+	*nkey = k;
+	*lim = -1; *off = 0;
+	if (limit != NULL) {
+		if (!lit_int(limit, lim, binds, nbinds)) return -1;
+		if (*lim < 0) *lim = -1;   /* a negative LIMIT is no limit (SQLite) */
+	}
+	if (offset != NULL) {
+		if (!lit_int(offset, off, binds, nbinds)) return -1;
+		if (*off < 0) *off = 0;
+	}
+	return 0;
+}
+
+/* Sort a materialized compound result by output-column keys (stable,
+ * VX_ORD_* flags) and keep rows [off, off+lim).  0, or -1 on OOM. */
+static int
+setop_sort_slice(struct vx_result *r, const int *key, const int *flags,
+                 int nkey, int64_t lim, int64_t off)
+{
+	vx_cell_t *keys = NULL, *cells = NULL;
+	int *idx = NULL, i, j, n = r->nrow, nc = r->ncol, from, to;
+	struct sort_ctx sc;
+	if (nkey > 0 && n > 1) {
+		keys = (vx_cell_t *)malloc(sizeof *keys * (size_t)n * (size_t)nkey);
+		idx = (int *)malloc(sizeof *idx * (size_t)n);
+		cells = (vx_cell_t *)malloc(sizeof *cells * (size_t)n * (size_t)nc);
+		if (keys == NULL || idx == NULL || cells == NULL) {
+			free(keys); free(idx); free(cells); return -1;
+		}
+		for (i = 0; i < n; i++) {
+			idx[i] = i;
+			for (j = 0; j < nkey; j++)
+				keys[(size_t)i * (size_t)nkey + (size_t)j] =
+				    r->cells[(size_t)i * (size_t)nc + (size_t)key[j]];
+		}
+		sc.keys = keys; sc.nkey = nkey; sc.desc = flags;
+		g_sort_ctx = &sc;
+		qsort(idx, (size_t)n, sizeof *idx, sort_index_cmp);
+		g_sort_ctx = NULL;
+		for (i = 0; i < n; i++)
+			memcpy(&cells[(size_t)i * (size_t)nc],
+			    &r->cells[(size_t)idx[i] * (size_t)nc], sizeof *cells * (size_t)nc);
+		memcpy(r->cells, cells, sizeof *cells * (size_t)n * (size_t)nc);
+		free(keys); free(idx); free(cells);
+	}
+	from = off > n ? n : (int)off;
+	to = (lim < 0 || lim > (int64_t)(n - from)) ? n : from + (int)lim;
+	if (from > 0 && to > from)
+		memmove(r->cells, &r->cells[(size_t)from * (size_t)nc],
+		    sizeof *r->cells * (size_t)(to - from) * (size_t)nc);
+	r->nrow = to - from;
+	return 0;
+}
+
 static int
 run_setop(struct xsql *db, const char *sql, const vx_cell_t *binds, int nbinds,
           vx_result_t **res, char **errmsg)
@@ -9012,7 +9298,12 @@ run_setop(struct xsql *db, const char *sql, const vx_cell_t *binds, int nbinds,
 	vx_stmt_t *lp = NULL, *rp = NULL;
 	vx_result_t *lr = NULL, *rr = NULL;
 	int rc = 0, i, j;
+	const sql_exprlist_t *corder;
+	const sql_expr_t *climit, *coffset;
+	int okey[16], oflags[16], nkey = 0;
+	int64_t lim = -1, off = 0;
 
+	if (errmsg) *errmsg = NULL;
 	if (sql_parse_ast(sql, strlen(sql), &ast, &root, &perr) != 0) return 0;
 	if (root == NULL || root->next != NULL ||
 	    root->kind != SQL_KIND_SELECT || root->u.select == NULL) {
@@ -9028,9 +9319,19 @@ run_setop(struct xsql *db, const char *sql, const vx_cell_t *binds, int nbinds,
 	}
 	rhs = lhs->rhs;
 	if (rhs->setop != SX_SET_NONE) { sql_arena_destroy(ast); return 0; }  /* chained */
-	/* An ORDER BY / LIMIT on the compound applies to the whole result;
-	 * not handled here -- fall back. */
+	/* The grammar attaches a trailing ORDER BY / LIMIT / OFFSET to the
+	 * LAST select_core, but SQL applies it to the WHOLE compound.  Detach
+	 * it from rhs (so rhs runs unordered and unlimited) and apply it to
+	 * the combined result below.  An ORDER BY on the lhs itself would be
+	 * a syntax error in SQLite and cannot reach here. */
 	if (lhs->order || lhs->limit || lhs->offset) { sql_arena_destroy(ast); return 0; }
+	corder = rhs->order; climit = rhs->limit; coffset = rhs->offset;
+	rhs->order = NULL; rhs->limit = NULL; rhs->offset = NULL;
+	if (setop_order_plan(lhs, corder, climit, coffset, binds, nbinds,
+	    okey, oflags, &nkey, &lim, &off, errmsg) != 0) {
+		sql_arena_destroy(ast);
+		return (errmsg && *errmsg) ? -1 : 0;
+	}
 
 	/* Recognize each side WITHOUT giving away the shared arena (pass
 	 * NULL so vx_prepare_select does not free it; run_setop owns it). */
@@ -9111,6 +9412,10 @@ run_setop(struct xsql *db, const char *sql, const vx_cell_t *binds, int nbinds,
 		}
 		row_index_free(&seen);
 		vx_result_free(lr); lr = outr;
+	}
+	if ((nkey > 0 || lim >= 0 || off > 0) &&
+	    setop_sort_slice(lr, okey, oflags, nkey, lim, off) != 0) {
+		rc = -1; goto out;
 	}
 	*res = lr; lr = NULL;
 	rc = 1;

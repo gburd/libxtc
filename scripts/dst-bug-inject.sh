@@ -168,7 +168,7 @@ build_engine() {
 	_dir=$1
 	_def=$2
 	_objs=""
-	for _s in bufmgr engine db quack metrics vexec sql_parse \
+	for _s in bufmgr engine db quack metrics vexec vxfunc sql_parse \
 		sql_parse_drv sql_ast sql_parse_gen xstore xlog wal \
 		btree btnode mvcc sqlrec mem; do
 		# shellcheck disable=SC2086

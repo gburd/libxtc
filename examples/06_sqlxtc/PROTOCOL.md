@@ -78,7 +78,7 @@ Pings reply:
 
 SQLite type     -> JSON value
 INTEGER         -> number (int64)
-FLOAT           -> number (double; NaN/Inf rendered as null)
+FLOAT           -> number (double; +-Inf rendered as 1e999 / -1e999, NaN as null)
 TEXT            -> string (UTF-8; control chars escaped as `\uXXXX`)
 BLOB            -> string (base64 encoded; the `cols` description says
                   nothing about that, you have to know)

@@ -29,8 +29,14 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 from compat_common import Quack, normalise_rows, Server  # noqa: E402
 
-# Each entry: (desc, [setup_sql...], test_sql).  Both engines get the
-# setup then the test; result sets must match (or both must error).
+# Each entry: (desc, [setup_sql...], test_sql[, opts]).  Both engines get
+# the setup then the test; result sets must match (or both must error).
+# opts (optional dict): "ordered": True compares rows in ORDER (default is
+# an order-insensitive multiset compare, which cannot see a wrong ORDER BY
+# or LIMIT/OFFSET window); "params": [...] binds the test statement's
+# ? / ?NNN / :name markers (sent as Quack "params", positional);
+# "ref_params" overrides what sqlite3 gets (a dict for :name markers,
+# which python's sqlite3 will not take positionally from 3.14 on).
 CORPUS = [
     # ---- DDL ----
     ("ddl_create", [], "CREATE TABLE t(a INT, b TEXT)"),
@@ -336,6 +342,284 @@ CORPUS = [
      "SELECT x FROM a WHERE EXISTS(SELECT 1 FROM b WHERE y=x) ORDER BY x"),
     ("cte",
      [], "WITH c(n) AS (SELECT 1 UNION ALL SELECT 2) SELECT n FROM c ORDER BY n"),
+    # ---- sq158 lexfix: wrong-result + parse gaps (audit gaps 9/10/13/14) ----
+    # LIMIT a, b means OFFSET a LIMIT b (SQLite parse.y:972); ordered so a
+    # swapped window is visible.
+    ("lex_limit_comma",
+     ["CREATE TABLE t(x INT)", "INSERT INTO t VALUES(1),(2),(3),(4),(5)"],
+     "SELECT x FROM t ORDER BY x LIMIT 1, 2", {"ordered": True}),
+    ("lex_limit_offset_ordered",
+     ["CREATE TABLE t(x INT)", "INSERT INTO t VALUES(1),(2),(3),(4),(5)"],
+     "SELECT x FROM t ORDER BY x DESC LIMIT 2 OFFSET 1", {"ordered": True}),
+    ("lex_offset_without_limit", [], "SELECT 1 OFFSET 1"),   # both reject
+    # '' inside a string literal is one quote -- in results, stored data,
+    # and comparisons.
+    ("lex_quote_collapse", [], "SELECT 'it''s', '''', 'a''''b'"),
+    ("lex_quote_stored",
+     ["CREATE TABLE t(s TEXT)", "INSERT INTO t VALUES('O''Brien')"],
+     "SELECT s, length(s) FROM t"),
+    ("lex_quote_where",
+     ["CREATE TABLE t(s TEXT)",
+      "INSERT INTO t VALUES('O''Brien'),('OBrien')"],
+     "SELECT count(*) FROM t WHERE s = 'O''Brien'"),
+    ("lex_quote_update",
+     ["CREATE TABLE t(id INTEGER PRIMARY KEY, s TEXT)",
+      "INSERT INTO t VALUES(1,'x')", "UPDATE t SET s = 'don''t' WHERE id = 1"],
+     "SELECT s FROM t"),
+    # Hex integer literals (0x / 0X, 64-bit two's complement).
+    ("lex_hex", [], "SELECT 0x10, 0XFF, 0x7fffffffffffffff, 0xffffffffffffffff"),
+    ("lex_hex_arith", [], "SELECT 0x10 + 1, -0x1F, 0xa * 2"),
+    ("lex_hex_too_big", [], "SELECT 0x1ffffffffffffffff"),   # both reject
+    ("lex_hex_insert",
+     ["CREATE TABLE t(x INT)", "INSERT INTO t VALUES(0x20)"],
+     "SELECT x FROM t WHERE x = 0x20"),
+    # NOT LIKE / LIKE ... ESCAPE / NOT BETWEEN.
+    ("expr_not_like",
+     ["CREATE TABLE t(s TEXT)",
+      "INSERT INTO t VALUES('apple'),('apricot'),('banana'),('cherry')"],
+     "SELECT s FROM t WHERE s NOT LIKE 'ap%'"),
+    ("expr_like_escape",
+     ["CREATE TABLE t(s TEXT)",
+      "INSERT INTO t VALUES('10%'),('100'),('10_x'),('10%x')"],
+     "SELECT s FROM t WHERE s LIKE '10!%%' ESCAPE '!'"),
+    ("expr_like_escape_underscore",
+     ["CREATE TABLE t(s TEXT)",
+      "INSERT INTO t VALUES('a_c'),('abc'),('a!c')"],
+     "SELECT s, s LIKE 'a!_c' ESCAPE '!', s NOT LIKE 'a!!c' ESCAPE '!' FROM t"),
+    ("expr_not_between",
+     ["CREATE TABLE t(a INT)",
+      "INSERT INTO t VALUES(1),(2),(3),(4),(5),(NULL)"],
+     "SELECT a FROM t WHERE a NOT BETWEEN 2 AND 4"),
+    # IS / IS NOT / IS [NOT] DISTINCT FROM (never NULL).
+    ("expr_is",
+     ["CREATE TABLE t(a INT, b INT)",
+      "INSERT INTO t VALUES(1,1),(1,2),(NULL,1),(NULL,NULL),(2,NULL)"],
+     "SELECT a, b, a IS b, a IS NOT b FROM t"),
+    ("expr_is_where",
+     ["CREATE TABLE t(a INT, b INT)",
+      "INSERT INTO t VALUES(1,1),(1,2),(NULL,1),(NULL,NULL)"],
+     "SELECT count(*) FROM t WHERE a IS b"),
+    ("expr_is_distinct",
+     ["CREATE TABLE t(a INT, b INT)",
+      "INSERT INTO t VALUES(1,1),(1,2),(NULL,1),(NULL,NULL)"],
+     "SELECT a IS DISTINCT FROM b, a IS NOT DISTINCT FROM b FROM t"),
+    ("expr_is_null_forms",
+     ["CREATE TABLE t(a INT)", "INSERT INTO t VALUES(1),(NULL)"],
+     "SELECT a IS NULL, a IS NOT NULL, NULL IS NULL FROM t"),
+    # ORDER BY ... NULLS FIRST / NULLS LAST (ordered; NULL rows are equal).
+    ("order_nulls_last",
+     ["CREATE TABLE t(a INT)", "INSERT INTO t VALUES(3),(NULL),(1),(NULL),(2)"],
+     "SELECT a FROM t ORDER BY a NULLS LAST", {"ordered": True}),
+    ("order_desc_nulls_first",
+     ["CREATE TABLE t(a INT)", "INSERT INTO t VALUES(3),(NULL),(1),(NULL),(2)"],
+     "SELECT a FROM t ORDER BY a DESC NULLS FIRST", {"ordered": True}),
+    ("order_nulls_last_limit",
+     ["CREATE TABLE t(a INT)", "INSERT INTO t VALUES(3),(NULL),(1),(NULL),(2)"],
+     "SELECT a FROM t ORDER BY a ASC NULLS LAST LIMIT 4", {"ordered": True}),
+    # REAL -> text: SQLite "%!.15g" (15 significant digits, ".0" on an
+    # integral value, "1.0e+20" style exponent).
+    ("real_concat", [],
+     "SELECT 1.23456789 || '', 3.0 || '', 100.0 || '', 1e20 || '', "
+     "1.5e-7 || '', 0.000001 || '', 123456789012345678.0 || ''"),
+    ("real_cast_text", [],
+     "SELECT CAST(2.0 AS TEXT), CAST(0.1 AS TEXT), CAST(-0.0 AS TEXT), "
+     "CAST(1e15 AS TEXT), CAST(1.0/3 AS TEXT)"),
+    ("real_into_text_col",
+     ["CREATE TABLE t(s TEXT)",
+      "INSERT INTO t VALUES(1.23456789),(2.0),(1e20),(0.1)"],
+     "SELECT s, typeof(s) FROM t"),
+    ("real_length",
+     ["CREATE TABLE t(x REAL)", "INSERT INTO t VALUES(1.5),(2.0),(1e100)"],
+     "SELECT x, length(x) FROM t"),
+    ("real_group_concat",
+     ["CREATE TABLE t(x REAL)", "INSERT INTO t VALUES(1.5),(2.0),(1e100)"],
+     "SELECT group_concat(x) FROM t"),
+    ("real_func_text", [],
+     "SELECT substr(2.0, 1), replace(3.0, '.', ','), instr(12.5, '.')"),
+    # Affinity per SQLite's 5 rules (INTEGER / TEXT / BLOB / REAL / NUMERIC)
+    # and the coercions applied on store.
+    ("aff_real_col_int",
+     ["CREATE TABLE t(x REAL)", "INSERT INTO t VALUES(3),('4'),(5.5)"],
+     "SELECT x, typeof(x), x / 2 FROM t"),
+    ("aff_float_double_cols",
+     ["CREATE TABLE t(f FLOAT, d DOUBLE PRECISION)",
+      "INSERT INTO t VALUES(3, '2.5'),('x', ' 7 ')"],
+     "SELECT f, typeof(f), d, typeof(d) FROM t"),
+    ("aff_int_col_real",
+     ["CREATE TABLE t(i INTEGER)",
+      "INSERT INTO t VALUES(3.0),('3.0'),('1e3'),(4.5),('12abc')"],
+     "SELECT i, typeof(i) FROM t"),
+    ("aff_numeric_col",
+     ["CREATE TABLE t(n NUMERIC, dc DECIMAL(10,2))",
+      "INSERT INTO t VALUES(3.0, '1.50'),('1e3', 2.0),(' 5 ', 'x')"],
+     "SELECT n, typeof(n), dc, typeof(dc) FROM t"),
+    ("aff_text_col_real",
+     ["CREATE TABLE t(t TEXT, v VARCHAR(10))",
+      "INSERT INTO t VALUES(3.5, 1.0),(1e3, 2)"],
+     "SELECT t, typeof(t), v, typeof(v) FROM t"),
+    ("aff_blob_none_cols",
+     ["CREATE TABLE t(b BLOB, n)", "INSERT INTO t VALUES('3', '3'),(3.0, 3.0)"],
+     "SELECT b, typeof(b), n, typeof(n) FROM t"),
+    ("aff_charint_is_integer",   # rule 1 (INT) wins over rule 2 (CHAR)
+     ["CREATE TABLE t(c CHARINT, p POINT)", "INSERT INTO t VALUES('9', '99.0')"],
+     "SELECT c, typeof(c), p, typeof(p) FROM t"),
+    ("aff_update_real",
+     ["CREATE TABLE t(id INTEGER PRIMARY KEY, x REAL, i INTEGER, s TEXT)",
+      "INSERT INTO t VALUES(1, 1.5, 1, 'a')",
+      "UPDATE t SET x = 7, i = 8.0, s = 2.5 WHERE id = 1"],
+     "SELECT x, typeof(x), i, typeof(i), s, typeof(s) FROM t"),
+    ("aff_insert_select",
+     ["CREATE TABLE src(a INT, b TEXT)", "INSERT INTO src VALUES(3, '4.0')",
+      "CREATE TABLE dst(x REAL, i INTEGER)",
+      "INSERT INTO dst SELECT a, b FROM src"],
+     "SELECT x, typeof(x), i, typeof(i) FROM dst"),
+    # Identifiers: case-insensitive tables and columns, quoted names,
+    # non-reserved keywords as names (SQLite parse.y:272 %fallback ID).
+    ("id_case_select",
+     ["CREATE TABLE Tq(Aa INT, bB TEXT)", "INSERT INTO TQ VALUES(1,'x'),(2,'y')"],
+     "SELECT aa, BB FROM tq WHERE AA = 2"),
+    ("id_case_insert_cols",
+     ["CREATE TABLE Tq(Aa INT, bB TEXT)", "INSERT INTO tq(BB, aA) VALUES('z', 3)"],
+     "SELECT * FROM TQ"),
+    ("id_case_update_delete",
+     ["CREATE TABLE Tq(id INTEGER PRIMARY KEY, Aa INT)",
+      "INSERT INTO tq VALUES(1,10),(2,20),(3,30)",
+      "UPDATE TQ SET AA = aa + 1 WHERE ID = 1", "DELETE FROM tQ WHERE aA = 30"],
+     "SELECT Id, aa FROM Tq"),
+    ("id_case_join",
+     ["CREATE TABLE Tq(Aa INT, v TEXT)", "CREATE TABLE U(X INT, w TEXT)",
+      "INSERT INTO tq VALUES(1,'a'),(2,'b')", "INSERT INTO u VALUES(1,'p'),(3,'q')"],
+     "SELECT T1.v, t2.W FROM TQ AS T1 JOIN u AS T2 ON t1.AA = T2.x"),
+    ("id_case_group",
+     ["CREATE TABLE t(G INT, v INT)", "INSERT INTO t VALUES(1,1),(1,2),(2,5)"],
+     "SELECT g, SUM(V) FROM T GROUP BY G"),
+    ("id_quoted",
+     ["CREATE TABLE \"Tq\"(\"bc\" TEXT, [d] INT, `e` INT, \"q\"\"x\" INT)",
+      "INSERT INTO tq VALUES('x', 2, 3, 4)"],
+     "SELECT \"BC\", [D], `E`, \"q\"\"x\" FROM [TQ]"),
+    ("id_quoted_alias", [], "SELECT 1 AS \"My Col\", 2 AS [x y]"),
+    ("id_quoted_keyword",
+     ["CREATE TABLE t(\"select\" INT, \"from\" INT)", "INSERT INTO t VALUES(1, 2)"],
+     "SELECT \"select\", \"from\" FROM t WHERE \"select\" = 1"),
+    ("id_keyword_cols",
+     ["CREATE TABLE k(key INT, end INT, plan INT, temp INT, replace INT, "
+      "query INT, offset INT, view INT, desc INT, asc INT)",
+      "INSERT INTO k VALUES(1,2,3,4,5,6,7,8,9,10)"],
+     "SELECT key, end, plan, temp, replace, query, offset, view, desc, asc FROM k"),
+    ("id_keyword_table",
+     ["CREATE TABLE plan(key INT, first INT)", "INSERT INTO plan VALUES(1, 2)"],
+     "SELECT key, first FROM plan WHERE key = 1"),
+    ("id_keyword_funcs", [],
+     "SELECT like('a%', 'abc'), replace('abc', 'b', 'x')"),
+    # Parameter forms ?NNN / :name / @name / $name, numbered as SQLite does.
+    ("param_qmark", [], "SELECT ? + 1, ?", {"params": [41, "x"]}),
+    ("param_numbered", [], "SELECT ?2, ?1, ?2", {"params": [10, 20]}),
+    ("param_mixed", [], "SELECT ?, ?3, ?", {"params": [1, 2, 3, 4]}),
+    ("param_named", [], "SELECT :a, @b, $c, :a",
+     {"params": [1, 2, 3], "ref_params": {"a": 1, "b": 2, "c": 3}}),
+    ("param_where_numbered",
+     ["CREATE TABLE t(a INT, b TEXT)", "INSERT INTO t VALUES(1,'x'),(2,'y')"],
+     "SELECT a, b FROM t WHERE a = ?2 AND b = ?1", {"params": ["y", 2]}),
+    ("param_insert_numbered",   # the PROTOCOL.md example shape
+     ["CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT)"],
+     "INSERT INTO t(id, name) VALUES(?1, ?2)", {"params": [7, "ann"]}),    ("aff_numeric_text_strict",   # strtod accepts inf/nan/0x10; SQLite does not
+     ["CREATE TABLE t(n NUMERIC, r REAL, i INTEGER)",
+      "INSERT INTO t VALUES('inf','nan','0x10'),('Infinity','1_000','1e'),"
+      "('9223372036854775808','9223372036854775807','-9223372036854775808'),"
+      "(' -7 ','.5','5.'),('+.5e2','1e400','00012')"],
+     "SELECT n, typeof(n), r, typeof(r), i, typeof(i) FROM t"),
+    # Date/time functions with fixed arguments (no 'now').
+    ("dt_date_time", [],
+     "SELECT date('2024-02-29'), time('12:34:56'), datetime('2024-01-31 10:00:00', '+1 month'), "
+     "julianday('2000-01-01'), unixepoch('2024-01-01'), date('2024-01-15', 'start of month', '+1 month', '-1 day')"),
+    ("dt_strftime", [],
+     "SELECT strftime('%Y/%m/%d %H:%M:%S %j %w %s %f', '2024-03-05 07:08:09.123'), "
+     "strftime('%d|%e|%F|%G|%g|%H|%I|%J|%k|%l|%M|%p|%P|%R|%T|%u|%U|%V|%W|%%', '2024-01-07 15:04:05')"),
+    ("dt_modifiers", [],
+     "SELECT datetime(1700000000, 'unixepoch'), date(2460000.5), datetime('2024-01-01T05:06'), "
+     "date('2024-01-01', 'weekday 0'), datetime('2024-01-01 10:00:00', '+90 minutes', '-30 seconds'), "
+     "datetime('2024-01-01', '+1.5 days'), date('2024-03-31', '-1 month'), date('2024-01-31', '+1 month', 'floor'), "
+     "datetime('2024-01-01 12:00:00.5', 'subsec'), date('2024-01-01', '+0001-01-01'), datetime(1700000000, 'auto')"),
+    ("dt_bad_input", [],
+     "SELECT date('bogus'), date('2024-13-01'), time('25:00'), date(NULL), date('2024-01-01', 'nonsense'), "
+     "strftime('%Q', '2024-01-01'), date('2024-02-30'), datetime(-1, 'unixepoch')"),
+    ("dt_on_column",
+     ["CREATE TABLE t(d TEXT)",
+      "INSERT INTO t VALUES('2024-01-15 10:30:00'),('2023-12-31 23:59:59'),(NULL)"],
+     "SELECT d, date(d, '+1 day'), strftime('%Y', d), julianday(d) FROM t"),
+    ("dt_now_shapes", [],
+     "SELECT typeof(date('now')), length(datetime('now')), length(time()), "
+     "length(CURRENT_TIMESTAMP), length(CURRENT_DATE), length(CURRENT_TIME), "
+     "CURRENT_DATE = date('now'), typeof(unixepoch())"),
+    # Scalar functions.
+    ("fn_iif_sign", [],
+     "SELECT iif(1, 'a', 'b'), iif(0, 'a', 'b'), iif(NULL, 'a', 'b'), iif('1abc', 'a', 'b'), "
+     "sign(-3), sign(0), sign(2.5), sign('x'), sign(NULL), sign('-3')"),
+    ("fn_hex_quote_char", [],
+     "SELECT hex('abc'), hex(255), hex(1.5), hex(NULL), hex(x'0aff'), "
+     "quote('it''s'), quote(1), quote(1.5), quote(NULL), quote(x'0a'), quote(1e20), quote(0.1), "
+     "char(72, 105), unicode('A'), unicode(''), char()"),
+    ("fn_concat", [],
+     "SELECT concat('a', NULL, 1, 2.5), concat_ws('-', 'a', NULL, 'b', 3), "
+     "concat(NULL), concat_ws(NULL, 1, 2), concat_ws(',', NULL)"),
+    ("fn_printf", [],
+     "SELECT printf('%d %5.2f %s %x %q %Q %c %%|%-5d|%05d|%e|%g', 42, 3.14159, 'hi', 255, "
+     "'a''b', 'z', 'x', 7, 7, 12345.678, 0.0001), format('%s-%s', 1, 2.0), "
+     "printf('%.0f|%.0f|%.0f|%.2f', 0.5, 1.5, 2.5, 1.005), printf('%,d|%+d|% d|%X|%o|%#x', "
+     "-1234567, 5, 5, 255, 8, 255)"),
+    ("fn_printf_edges", [],
+     "SELECT printf('%s|%5s|%-5s|%.2s|%w', 'abc', 'ab', 'ab', 'abcdef', 'a\"b'), "
+     "printf('%d', '12abc'), printf('%d', 3.9), printf('%s'), printf(NULL), printf('%*d|%-*d|%.*f', 5, 42, 5, 42, 2, 3.14159), "
+     "printf('%10.4f|%-10.2e|%010.3f|%#g', 3.14159, 31415.9, -3.14159, 1.0), printf('100%')"),
+    ("fn_math", [],
+     "SELECT ceil(1.2), ceil(-1.2), ceil(3), floor(2.7), trunc(-2.7), typeof(ceil(3)), "
+     "ln(1), log(100), log(2, 8), log10(1000), log2(8), exp(0), pow(2, 10), power(2, 0.5), "
+     "mod(7, 3), mod(7.5, 2), sqrt(4), sqrt(-1), pi(), degrees(pi()), radians(180), "
+     "sin(0), cos(0), atan2(1, 1), acos(2)"),
+    ("fn_on_columns",
+     ["CREATE TABLE t(a INT, s TEXT, r REAL)",
+      "INSERT INTO t VALUES(1, 'x', 1.5),(-2, 'y''z', NULL),(NULL, NULL, 2.0)"],
+     "SELECT quote(s), hex(s), sign(a), iif(a > 0, 'pos', 'neg'), "
+     "printf('%d:%s:%.1f', a, s, r), concat_ws('/', a, s, r), ceil(r) FROM t"),
+    ("fn_in_where",
+     ["CREATE TABLE t(d TEXT, v INT)",
+      "INSERT INTO t VALUES('2024-01-15', 1),('2024-02-20', 2),('2023-03-01', 3)"],
+     "SELECT v FROM t WHERE strftime('%Y', d) = '2024' AND sign(v) = 1"),    ("real_text_ties", [],   # SQLite's 18-digit decode then half-up (not printf's)
+     "SELECT CAST(98135134594298.25 AS TEXT), CAST(501353836885252.5 AS TEXT), "
+     "400760634880118.5 || '', CAST(0.1 + 0.2 AS TEXT)"),
+    # Compound SELECT: the trailing ORDER BY / LIMIT applies to the WHOLE
+    # compound (it used to run on the right-hand select only).
+    ("setop_order",
+     ["CREATE TABLE a(x INT, y TEXT)", "CREATE TABLE b(x INT, z TEXT)",
+      "INSERT INTO a VALUES(3,'c'),(1,'a'),(NULL,'n')",
+      "INSERT INTO b VALUES(2,'b'),(5,'e'),(1,'a')"],
+     "SELECT x FROM a UNION ALL SELECT x FROM b ORDER BY x", {"ordered": True}),
+    ("setop_order_limit",
+     ["CREATE TABLE a(x INT)", "CREATE TABLE b(x INT)",
+      "INSERT INTO a VALUES(3),(1)", "INSERT INTO b VALUES(2),(5)"],
+     "SELECT x FROM a UNION ALL SELECT x FROM b ORDER BY 1 DESC LIMIT 2",
+     {"ordered": True}),
+    ("setop_limit_no_order",
+     ["CREATE TABLE a(x INT)", "CREATE TABLE b(x INT)",
+      "INSERT INTO a VALUES(3),(1)", "INSERT INTO b VALUES(2),(5)"],
+     "SELECT x FROM a UNION ALL SELECT x FROM b LIMIT 3", {"ordered": True}),
+    ("setop_union_order_col2",
+     ["CREATE TABLE a(x INT, y TEXT)", "CREATE TABLE b(x INT, z TEXT)",
+      "INSERT INTO a VALUES(3,'c'),(1,'a'),(NULL,'n')",
+      "INSERT INTO b VALUES(2,'b'),(5,'e'),(1,'a')"],
+     "SELECT x, y FROM a UNION SELECT x, z FROM b ORDER BY y DESC", {"ordered": True}),
+    ("setop_alias_offset",
+     ["CREATE TABLE a(x INT)", "CREATE TABLE b(x INT)",
+      "INSERT INTO a VALUES(3),(1)", "INSERT INTO b VALUES(2),(5),(1)"],
+     "SELECT x AS k FROM a UNION ALL SELECT x FROM b ORDER BY k LIMIT 2 OFFSET 1",
+     {"ordered": True}),
+    ("setop_except_nulls",
+     ["CREATE TABLE a(x INT)", "CREATE TABLE b(x INT)",
+      "INSERT INTO a VALUES(3),(1),(NULL)", "INSERT INTO b VALUES(1)"],
+     "SELECT x FROM a EXCEPT SELECT x FROM b ORDER BY x NULLS LAST", {"ordered": True}),
+    ("setop_order_expr_err",   # both reject: an ORDER BY term must be a result column
+     ["CREATE TABLE a(x INT)", "CREATE TABLE b(x INT)"],
+     "SELECT x FROM a UNION ALL SELECT x FROM b ORDER BY x+1"),
 ]
 
 # Features sqlxtc does not yet implement.  Reported, not failed -- these
@@ -348,24 +632,34 @@ XFAIL_CORPUS = [
 ]
 
 
-def compare(qk, ref, setup, test):
+def compare(qk, ref, setup, test, opts=None):
     """Run setup+test on both engines; return (ok, qrows, qerr, rrows, rerr)."""
+    opts = opts or {}
+    ordered = bool(opts.get("ordered"))
+    params = opts.get("params")
+    ref_params = opts.get("ref_params", params)
     for s in setup:
         qk.query(s)
         try:
             ref.execute(s)
         except sqlite3.Error:
             pass
-    qcols, qrows, qerr = qk.query(test)
+    qcols, qrows, qerr = qk.query(test, params)
     rerr = None
     rrows = []
     try:
-        rrows = ref.execute(test).fetchall()
+        if ref_params is not None:
+            if not isinstance(ref_params, dict):
+                ref_params = tuple(ref_params)
+            rrows = ref.execute(test, ref_params).fetchall()
+        else:
+            rrows = ref.execute(test).fetchall()
     except sqlite3.Error as e:
         rerr = str(e)
     if (qerr is None) != (rerr is None):
         return False, qrows, qerr, rrows, rerr
-    if qerr is None and normalise_rows(qrows) != normalise_rows(rrows):
+    if qerr is None and (normalise_rows(qrows, ordered) !=
+                         normalise_rows(rrows, ordered)):
         return False, qrows, qerr, rrows, rerr
     return True, qrows, qerr, rrows, rerr
 
@@ -380,11 +674,13 @@ def main():
     rc = 0
     try:
         passed = failed = 0
-        for desc, setup, test in CORPUS:
+        for case in CORPUS:
+            desc, setup, test = case[:3]
+            opts = case[3] if len(case) > 3 else None
             ref = sqlite3.connect(":memory:")
             ref.isolation_level = None
             qk = server.fresh()
-            ok, qr, qe, rr, re_ = compare(qk, ref, setup, test)
+            ok, qr, qe, rr, re_ = compare(qk, ref, setup, test, opts)
             ref.close()
             if ok:
                 passed += 1
@@ -400,11 +696,13 @@ def main():
         # case is a real BUG only if sqlxtc ran and gave a WRONG result
         # (neither an error nor a match) -- that we must flag.
         xfail = xpass = xbug = 0
-        for desc, setup, test in XFAIL_CORPUS:
+        for case in XFAIL_CORPUS:
+            desc, setup, test = case[:3]
+            opts = case[3] if len(case) > 3 else None
             ref = sqlite3.connect(":memory:")
             ref.isolation_level = None
             qk = server.fresh()
-            ok, qr, qe, rr, re_ = compare(qk, ref, setup, test)
+            ok, qr, qe, rr, re_ = compare(qk, ref, setup, test, opts)
             ref.close()
             if ok:
                 xpass += 1
