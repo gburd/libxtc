@@ -2176,27 +2176,29 @@ int64_t
 xstore_max_rowid(bt_t *bt, uint32_t tableid)
 {
 	/* The largest rowid in the table sorts last within the table's key
-	 * range (keys are (tableid, rowid, ~ts)).  Walk the range tracking
-	 * the max rowid seen; this counts tombstoned versions too, so a
+	 * range (keys are (tableid, rowid ^ signbit, ~ts), big-endian, so
+	 * rowids sort numerically).  Tombstoned versions count too, so a
 	 * reused rowid never collides with a deleted one's slot.  Empty
-	 * table -> 0, so the first insert is rowid 1. */
-	bt_cursor_t *cur = NULL;
-	uint8_t startk[XS_VKLEN];
-	const void *k = NULL, *vv = NULL; uint16_t klen = 0, vl = 0;
-	int64_t maxr = 0;
+	 * table (or only negative rowids) -> 0, so the first auto-rowid is 1
+	 * -- exactly the max(0, ...) the forward scan computed. */
+	/* O(log n): the largest key below [tableid][0xFF x 17] is the
+	 * table's last key -- its largest rowid (any version, tombstones
+	 * included, as before).  1.56 walked every version of the table with
+	 * a forward cursor, so every native INSERT cost O(table): 4 ms on an
+	 * empty table, 16.5 ms at 400k rows (review156 P1). */
+	uint8_t hi[XS_VKLEN + 1], k[XS_VKLEN + 8];
+	uint16_t klen = 0;
+	int i;
 
 	if (bt == NULL) return 0;
-	enc_vkey(tableid, INT64_MIN, ~(uint64_t)0, startk);
-	if (bt_cursor_open(bt, startk, XS_VKLEN, &cur) != XTC_OK) return 0;
-	while (bt_cursor_next(cur, &k, &klen, &vv, &vl) == XTC_OK) {
-		int64_t rid;
-		if (klen != XS_VKLEN ||
-		    dec_tableid((const uint8_t *)k) != tableid) break;
-		rid = dec_rowid((const uint8_t *)k);
-		if (rid > maxr) maxr = rid;
-	}
-	bt_cursor_close(cur);
-	return maxr;
+	for (i = 3; i >= 0; i--) hi[3 - i] = (uint8_t)(tableid >> (8 * i));
+	memset(hi + 4, 0xFF, sizeof hi - 4);
+	if (bt_seek_lt(bt, hi, (uint16_t)sizeof hi, k, (uint16_t)sizeof k,
+	    &klen, NULL, 0, NULL) != XTC_OK)
+		return 0;
+	if (klen != XS_VKLEN || dec_tableid(k) != tableid)
+		return 0;                    /* empty table */
+	return dec_rowid(k) > 0 ? dec_rowid(k) : 0;
 }
 
 int

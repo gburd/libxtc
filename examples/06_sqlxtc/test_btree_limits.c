@@ -412,6 +412,60 @@ t_overflow(uint32_t ps)
 	done(bt, bm, p);
 }
 
+/* P5: bt_seek_lt against an oracle over random keys, including keys that
+ * sit exactly on leaf boundaries, empty prefixes, and out-of-line values. */
+static void
+t_seek_lt(uint32_t ps)
+{
+	char p[64], k[16], q[16], got[64];
+	bm_t *bm = mk(p, ps, 2048);
+	bt_t *bt;
+	static unsigned char live[20000];
+	static unsigned char v[8192], out[8192];
+	uint64_t s = 99 + ps;
+	uint16_t gl, vl;
+	int i, wrong = 0, n = 20000;
+
+	memset(live, 0, sizeof live);
+	CHECK(bt_open(bm, &bt) == XTC_OK, "open");
+	CHECK(bt_seek_lt(bt, "z", 1, got, sizeof got, &gl, NULL, 0, NULL) ==
+	    XTC_E_NOTFOUND, "empty tree: nothing below z");
+	for (i = 0; i < n; i++) {
+		if (rnd(&s) % 3 == 0) continue;   /* holes */
+		snprintf(k, sizeof k, "s%07d", i);
+		fill(v, i % 50 == 0 ? 5000u : 20u, (uint32_t)i);
+		if (bt_insert(bt, k, 8, v, (uint16_t)(i % 50 == 0 ? 5000 : 20)) == XTC_OK)
+			live[i] = 1;
+	}
+	/* delete a run to make empty-ish leaves */
+	for (i = 5000; i < 9000; i++) {
+		snprintf(k, sizeof k, "s%07d", i);
+		if (live[i] && bt_delete(bt, k, 8) == XTC_OK) live[i] = 0;
+	}
+	for (i = 0; i <= n; i += 7) {
+		int j, rc;
+		snprintf(q, sizeof q, "s%07d", i);
+		for (j = i - 1; j >= 0 && !live[j]; j--)
+			;
+		rc = bt_seek_lt(bt, q, 8, got, sizeof got, &gl, out, sizeof out, &vl);
+		if (j < 0) {
+			if (rc != XTC_E_NOTFOUND) wrong++;
+		} else {
+			snprintf(k, sizeof k, "s%07d", j);
+			fill(v, j % 50 == 0 ? 5000u : 20u, (uint32_t)j);
+			if (rc != XTC_OK || gl != 8 || memcmp(got, k, 8) != 0 ||
+			    vl != (j % 50 == 0 ? 5000 : 20) ||
+			    memcmp(out, v, vl) != 0)
+				wrong++;
+		}
+	}
+	/* a bound past everything returns the last key */
+	CHECK(bt_seek_lt(bt, "t", 1, got, sizeof got, &gl, NULL, 0, NULL) ==
+	    XTC_OK && gl == 8, "seek below 't' finds the last key");
+	CHECK(wrong == 0, "ps=%u: bt_seek_lt wrong answers: %d", ps, wrong);
+	done(bt, bm, p);
+}
+
 int
 main(void)
 {
@@ -424,6 +478,8 @@ main(void)
 	t_mixed_split(4096);
 	t_mixed_split(16384);
 	t_refuse_oversize();
+	t_seek_lt(4096);
+	t_seek_lt(16384);
 	t_overflow(4096);
 	t_overflow(16384);
 	t_big_pages(16384);

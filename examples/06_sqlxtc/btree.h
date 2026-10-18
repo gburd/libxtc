@@ -154,6 +154,14 @@ int  bt_lookup(bt_t *bt, const void *key, uint16_t klen,
  * the latch-free, leaf-exclusive fast path. */
 int  bt_delete(bt_t *bt, const void *key, uint16_t klen);
 
+/* Largest key strictly below `hi` (O(log n)): key copied to out/cap
+ * (*olen), value to val/vcap (*vlen; whole even when out of line; val
+ * and vlen may be NULL).  Returns XTC_OK, XTC_E_NOTFOUND if no key is
+ * below `hi`, or XTC_E_INVAL. */
+int  bt_seek_lt(bt_t *bt, const void *hi, uint16_t hlen, void *out,
+                uint16_t cap, uint16_t *olen, void *val, uint16_t vcap,
+                uint16_t *vlen);
+
 /* Forward range cursor.  start == NULL positions at the first key;
  * otherwise at the first key >= start.  bt_cursor_next yields each
  * (key, val) in ascending order and returns XTC_OK, or XTC_E_NOTFOUND

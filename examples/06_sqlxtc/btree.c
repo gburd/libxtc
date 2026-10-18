@@ -2360,6 +2360,93 @@ cursor_descend(bt_t *bt, const void *start, uint16_t klen, bm_frame_t **out)
 	}
 }
 
+/*
+ * Largest key strictly less than `hi` (O(log n); there is no reverse
+ * cursor).  Descends to the leaf that would hold `hi` and takes the slot
+ * before hi's insertion point.  When that leaf has no smaller key (hi is
+ * at its front, or the leaf is empty), every smaller key lives in a leaf
+ * to the LEFT, whose keys are all <= this leaf's (exclusive) lower fence.
+ * So retry with the fence as an INCLUSIVE bound: the fence routes left
+ * (keys <= a separator descend left), and the fence itself may be a live
+ * key (the left sibling's largest key at split time), which a strict
+ * "< fence" would skip.  A leftmost leaf (lower fence -infinity) with
+ * nothing below the bound means there is no such key.  The key is copied to `out` (cap bytes); the
+ * value (if `val` != NULL) to `val` (vcap bytes), whole for out-of-line
+ * values.  Returns XTC_OK, XTC_E_NOTFOUND, or XTC_E_INVAL.
+ *
+ * RethinkDB keeps a per-table population block for this kind of
+ * question; we answer it from the tree in one or two descents.
+ */
+int
+bt_seek_lt(bt_t *bt, const void *hi, uint16_t hlen, void *out,
+    uint16_t cap, uint16_t *olen, void *val, uint16_t vcap, uint16_t *vlen)
+{
+	uint8_t bound[BT_MAX_KEY + 1];
+	uint16_t blen;
+	int guard, incl = 0;   /* 0: keys < bound; 1: keys <= bound */
+
+	if (bt == NULL || hi == NULL || out == NULL || hlen > bt_key_max(bt))
+		return XTC_E_INVAL;
+	memcpy(bound, hi, hlen);
+	blen = hlen;
+	for (guard = 0; guard < 1 << 20; guard++) {
+		bm_frame_t *f = NULL;
+		void *pg;
+		int s, found = 0, rc;
+
+		rc = descend_shared(bt, bound, blen, &f);
+		if (rc != XTC_OK)
+			return rc;
+		pg = bm_page(f);
+		s = btnode_search(pg, bound, blen, &found);
+		if (incl && found)
+			s++;                    /* the bound itself qualifies */
+		if (s > 0) {
+			const void *vp = NULL;
+			uint16_t vl = 0, kl = 0;
+
+			if (btnode_full_key(pg, s - 1, out, cap, &kl) != 0) {
+				bm_unlatch(f); bm_unfix(bt->bm, f, 0);
+				return XTC_E_INVAL;     /* caller's buffer too small */
+			}
+			if (olen != NULL)
+				*olen = kl;
+			rc = XTC_OK;
+			if (val != NULL || vlen != NULL) {
+				(void)btnode_get(pg, s - 1, NULL, NULL, &vp, &vl);
+				if (btnode_vflag(pg, s - 1)) {
+					rc = ovf_read(bt, vp, vl, val, vcap, vlen);
+				} else {
+					if (vlen != NULL)
+						*vlen = vl;
+					if (val != NULL && vcap > 0)
+						memcpy(val, vp, vl < vcap ? vl : vcap);
+				}
+			}
+			bm_unlatch(f); bm_unfix(bt->bm, f, 0);
+			return rc;
+		}
+		/* Nothing below `bound` in this leaf: move the bound to just
+		 * above this leaf's lower fence and look left. */
+		{
+			uint16_t ll = 0;
+
+			if (btnode_lo_fence(pg, bound, BT_MAX_KEY, &ll) != 0) {
+				bm_unlatch(f); bm_unfix(bt->bm, f, 0);
+				return XTC_E_INTERNAL;
+			}
+			bm_unlatch(f); bm_unfix(bt->bm, f, 0);
+			if (ll == 0)
+				return XTC_E_NOTFOUND;  /* leftmost leaf: none */
+			blen = ll;
+			incl = 1;
+			/* Progress: the next leaf's fence is strictly smaller, so
+			 * the loop terminates at the leftmost leaf. */
+		}
+	}
+	return XTC_E_INTERNAL;
+}
+
 int
 bt_cursor_open(bt_t *bt, const void *start, uint16_t klen, bt_cursor_t **out)
 {
