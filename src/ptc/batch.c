@@ -1063,6 +1063,18 @@ batch_mt_quiesced(xtc_batch_t *b)
 static int
 batch_mt_enter(xtc_batch_t *b, int limit, int count)
 {
+	/* Refuse a shut gate BEFORE announcing.  A producer that retries
+	 * submit_mt on AGAIN after close() used to bump `inflight` on every
+	 * refused attempt, so with enough retrying threads the count never
+	 * reached zero and the driver could not finish (close/destroy hung;
+	 * 1.56 regression from the "AGAIN after close" fix).  A refused
+	 * attempt now never touches `inflight`.  The announce-then-recheck
+	 * below still closes the race with a concurrent close. */
+	if (atomic_load_explicit(&b->mt.gate, memory_order_acquire) >= limit) {
+		if (count)
+			batch_inc_atomic(&b->mt.n_rejections);
+		return XTC_E_AGAIN;
+	}
 	(void)atomic_fetch_add_explicit(&b->mt.inflight, 1,
 	    memory_order_seq_cst);
 	if (atomic_load_explicit(&b->mt.gate, memory_order_seq_cst) >= limit) {
