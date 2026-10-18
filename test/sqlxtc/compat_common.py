@@ -27,8 +27,11 @@ class Quack:
         self.f = self.s.makefile("rwb", buffering=0)
         self.f.readline()          # skip hello banner
 
-    def query(self, sql):
-        self.f.write((json.dumps({"q": sql}) + "\n").encode())
+    def query(self, sql, params=None):
+        msg = {"q": sql}
+        if params is not None:
+            msg["params"] = list(params)
+        self.f.write((json.dumps(msg) + "\n").encode())
         cols = None
         rows = []
         while True:
@@ -56,8 +59,9 @@ class Quack:
             pass
 
 
-def normalise_rows(rows):
-    """Make Quack vs sqlite3 row sets comparable and order-insensitive.
+def normalise_rows(rows, ordered=False):
+    """Make Quack vs sqlite3 row sets comparable; order-insensitive unless
+    `ordered` (then row order is part of the result and is kept).
 
     SQLite returns bytes for BLOB; Quack returns a shaped string.
     Floats may differ in formatting; NULLs are tagged; ints that equal
@@ -88,7 +92,7 @@ def normalise_rows(rows):
             else:
                 new.append(("o", repr(v)))
         out.append(tuple(new))
-    return sorted(out, key=repr)
+    return out if ordered else sorted(out, key=repr)
 
 
 def split_statements(batch):

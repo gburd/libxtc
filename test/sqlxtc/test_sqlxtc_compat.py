@@ -29,8 +29,12 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 from compat_common import Quack, normalise_rows, Server  # noqa: E402
 
-# Each entry: (desc, [setup_sql...], test_sql).  Both engines get the
-# setup then the test; result sets must match (or both must error).
+# Each entry: (desc, [setup_sql...], test_sql[, opts]).  Both engines get
+# the setup then the test; result sets must match (or both must error).
+# opts (optional dict): "ordered": True compares rows in ORDER (default is
+# an order-insensitive multiset compare, which cannot see a wrong ORDER BY
+# or LIMIT/OFFSET window); "params": [...] binds the test statement's
+# ? / ?NNN / :name markers (sent as Quack "params", positional).
 CORPUS = [
     # ---- DDL ----
     ("ddl_create", [], "CREATE TABLE t(a INT, b TEXT)"),
@@ -348,24 +352,31 @@ XFAIL_CORPUS = [
 ]
 
 
-def compare(qk, ref, setup, test):
+def compare(qk, ref, setup, test, opts=None):
     """Run setup+test on both engines; return (ok, qrows, qerr, rrows, rerr)."""
+    opts = opts or {}
+    ordered = bool(opts.get("ordered"))
+    params = opts.get("params")
     for s in setup:
         qk.query(s)
         try:
             ref.execute(s)
         except sqlite3.Error:
             pass
-    qcols, qrows, qerr = qk.query(test)
+    qcols, qrows, qerr = qk.query(test, params)
     rerr = None
     rrows = []
     try:
-        rrows = ref.execute(test).fetchall()
+        if params is not None:
+            rrows = ref.execute(test, tuple(params)).fetchall()
+        else:
+            rrows = ref.execute(test).fetchall()
     except sqlite3.Error as e:
         rerr = str(e)
     if (qerr is None) != (rerr is None):
         return False, qrows, qerr, rrows, rerr
-    if qerr is None and normalise_rows(qrows) != normalise_rows(rrows):
+    if qerr is None and (normalise_rows(qrows, ordered) !=
+                         normalise_rows(rrows, ordered)):
         return False, qrows, qerr, rrows, rerr
     return True, qrows, qerr, rrows, rerr
 
@@ -380,11 +391,13 @@ def main():
     rc = 0
     try:
         passed = failed = 0
-        for desc, setup, test in CORPUS:
+        for case in CORPUS:
+            desc, setup, test = case[:3]
+            opts = case[3] if len(case) > 3 else None
             ref = sqlite3.connect(":memory:")
             ref.isolation_level = None
             qk = server.fresh()
-            ok, qr, qe, rr, re_ = compare(qk, ref, setup, test)
+            ok, qr, qe, rr, re_ = compare(qk, ref, setup, test, opts)
             ref.close()
             if ok:
                 passed += 1
@@ -400,11 +413,13 @@ def main():
         # case is a real BUG only if sqlxtc ran and gave a WRONG result
         # (neither an error nor a match) -- that we must flag.
         xfail = xpass = xbug = 0
-        for desc, setup, test in XFAIL_CORPUS:
+        for case in XFAIL_CORPUS:
+            desc, setup, test = case[:3]
+            opts = case[3] if len(case) > 3 else None
             ref = sqlite3.connect(":memory:")
             ref.isolation_level = None
             qk = server.fresh()
-            ok, qr, qe, rr, re_ = compare(qk, ref, setup, test)
+            ok, qr, qe, rr, re_ = compare(qk, ref, setup, test, opts)
             ref.close()
             if ok:
                 xpass += 1
