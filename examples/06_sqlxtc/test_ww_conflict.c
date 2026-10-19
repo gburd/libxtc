@@ -48,6 +48,35 @@ bal(sx_db *db)
 	return v;
 }
 
+static int
+run_msg(sx_db *db, const char *sql)
+{
+	return sx_exec(db, sql, NULL);
+}
+
+static int64_t
+one_int(sx_db *db, const char *sql)
+{
+	sx_stmt *st = NULL;
+	int64_t v = -1;
+	if (sx_prepare(db, sql, -1, &st, NULL) != SX_OK) return -2;
+	if (sx_step(st) == SX_ROW) v = sx_column_int64(st, 0);
+	sx_finalize(st);
+	return v;
+}
+
+static int64_t
+next_o_id(sx_db *db)
+{
+	return one_int(db, "SELECT d_next_o_id FROM district WHERE d_id = 1");
+}
+
+static int64_t
+count_orders(sx_db *db)
+{
+	return one_int(db, "SELECT count(*) FROM orders");
+}
+
 /* Two txns read bal=100 and add 10 / 20.  Returns the number of the two
  * transactions that committed; *final gets the resulting balance.  The
  * loser fails at its UPDATE (the row's write intent is A's: first-
@@ -145,6 +174,43 @@ main(void)
 	CK(bal(a) == -1);                        /* block aborted: refused */
 	CK(run(a, "COMMIT") != SX_OK);           /* nothing was committed */
 	CK(bal(a) == 132);                       /* block ended: usable */
+
+	/* TPC-C New-Order shape: both read d_next_o_id = N, one commits
+	 * N+1 and order N; the other's UPDATE district must fail as a
+	 * serialization conflict.  Before row intents that UPDATE succeeded
+	 * (it only buffered) and the conflict surfaced as "UNIQUE constraint
+	 * failed: orders..." on its INSERT of order N -- the same lost-update
+	 * attempt, reported as the wrong error (the district row itself was
+	 * still protected by the COMMIT check). */
+	CK(run(a, "CREATE TABLE district(d_id INTEGER PRIMARY KEY, d_next_o_id INTEGER)") == SX_OK);
+	CK(run(a, "CREATE TABLE orders(o_d_id INTEGER, o_id INTEGER, "
+	    "PRIMARY KEY(o_d_id, o_id))") == SX_OK);
+	CK(run(a, "INSERT INTO district VALUES(1, 3001)") == SX_OK);
+	CK(run(a, "BEGIN") == SX_OK);
+	CK(run(b, "BEGIN") == SX_OK);
+	CK(next_o_id(a) == 3001);
+	CK(next_o_id(b) == 3001);                /* both read N */
+	CK(run(a, "UPDATE district SET d_next_o_id = 3002 WHERE d_id = 1") == SX_OK);
+	CK(run(a, "INSERT INTO orders VALUES(1, 3001)") == SX_OK);
+	CK(run(a, "COMMIT") == SX_OK);
+	n = run_msg(b, "UPDATE district SET d_next_o_id = 3002 WHERE d_id = 1");
+	printf("  [New-Order shape] second UPDATE district: %s\n",
+	    n == SX_OK ? "ok" : sx_errmsg(b));
+	CK(n == SX_BUSY);
+	if (n != SX_OK) {
+		CK(strstr(sx_errmsg(b), "could not serialize") != NULL);
+		(void)run(b, "ROLLBACK");
+	} else {     /* pre-intents: the INSERT reported it, COMMIT refused */
+		n = run_msg(b, "INSERT INTO orders VALUES(1, 3001)");
+		printf("  [New-Order shape] then INSERT orders: %s\n",
+		    n == SX_OK ? "ok" : sx_errmsg(b));
+		n = run_msg(b, "COMMIT");
+		printf("  [New-Order shape] then COMMIT: %s\n",
+		    n == SX_OK ? "ok" : sx_errmsg(b));
+		CK(n != SX_OK);
+	}
+	CK(next_o_id(a) == 3002);                /* one increment, no lost update */
+	CK(count_orders(a) == 1);
 
 	/* Disjoint rows never conflict. */
 	CK(run(a, "INSERT INTO acct(id,bal) VALUES(2,0)") == SX_OK);
