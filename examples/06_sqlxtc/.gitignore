@@ -22,6 +22,7 @@ test_evict_revalidate_sampled
 test_btree_late_load
 test_btree_stale_descent
 test_flush_pin
+test_trickler_select
 test_publication_pin
 test_private_frame
 test_pid_writeback

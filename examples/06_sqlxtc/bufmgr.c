@@ -2608,6 +2608,50 @@ tr_cmp(const void *a, const void *b)
 }
 struct tr_arg { bm_t *bm; int64_t interval; };
 
+/*
+ * Keep the `k` best candidates (lowest under tr_cmp: COOL first, then
+ * oldest-dirtied) of a stream in sel[0..*n), a max-heap on tr_cmp, so
+ * sel[0] is the worst kept one.  O(log k) per offer and no copy of the
+ * whole candidate set: the trickler used to qsort every dirty frame
+ * (up to n_frames entries) each pass to take the first 16, which made
+ * it the busiest fiber in the server with a large pool -- on loop 0,
+ * next to the WAL group-commit writer.  The order of sel[] on return is
+ * heap order; tr_flush_batch re-sorts the batch by page number anyway.
+ */
+static void
+tr_heap_down(struct tr_cand *h, int n, int i)
+{
+	for (;;) {
+		int l = 2 * i + 1, r = l + 1, m = i;
+		struct tr_cand t;
+		if (l < n && tr_cmp(&h[l], &h[m]) > 0) m = l;
+		if (r < n && tr_cmp(&h[r], &h[m]) > 0) m = r;
+		if (m == i) return;
+		t = h[i]; h[i] = h[m]; h[m] = t;
+		i = m;
+	}
+}
+
+static void
+tr_topk_offer(struct tr_cand *sel, int *n, int k, const struct tr_cand *c)
+{
+	int i;
+	if (k <= 0) return;
+	if (*n < k) {
+		i = (*n)++;
+		sel[i] = *c;
+		while (i > 0 && tr_cmp(&sel[(i - 1) / 2], &sel[i]) < 0) {
+			struct tr_cand t = sel[i];
+			sel[i] = sel[(i - 1) / 2]; sel[(i - 1) / 2] = t;
+			i = (i - 1) / 2;
+		}
+		return;
+	}
+	if (tr_cmp(c, &sel[0]) >= 0) return;   /* not better than the worst kept */
+	sel[0] = *c;
+	tr_heap_down(sel, *n, 0);
+}
+
 /* Elevator ordering: sort a selected batch by on-disk page number so the
  * device sees ascending offsets (sequential, mergeable) instead of
  * dirty-recency order. */
@@ -2765,7 +2809,7 @@ tr_proc(void *arg)
 	bm_frame_t **run_f = NULL;
 	xtc_free(ta);
 	if (max_batch < 1) max_batch = 1;
-	if ((cand = xtc_calloc(bm->n_frames, sizeof *cand)) == NULL)
+	if ((cand = xtc_calloc((size_t)max_batch, sizeof *cand)) == NULL)
 		return;
 	/* Gather buffer for coalesced multi-page writes (direct-I/O aligned)
 	 * plus per-run frame scratch. */
@@ -2805,7 +2849,9 @@ tr_proc(void *arg)
 	}
 	while (atomic_load_explicit(&bm->tr_running, memory_order_acquire)) {
 		uint32_t i;
-		int n = 0, w = 0, dirty_total = 0;
+		int n = 0, w = 0, dirty_total = 0, k;
+		struct tr_cand c;
+		k = batch < max_batch ? batch : max_batch;   /* guard wbuf */
 		for (i = 0; i < bm->n_frames; i++) {
 			bm_frame_t *f = &bm->frames[i];
 			uint8_t st;
@@ -2819,19 +2865,16 @@ tr_proc(void *arg)
 			st = atomic_load_explicit(&f->state, memory_order_acquire);
 			if (st != BM_HOT && st != BM_COOL)
 				continue;
-			cand[n].f = f;
-			cand[n].cool = (st == BM_COOL);
-			cand[n].seq = atomic_load_explicit(&f->dirty_seq,
+			c.f = f;
+			c.cool = (st == BM_COOL);
+			c.seq = atomic_load_explicit(&f->dirty_seq,
 			    memory_order_relaxed);
-			n++;
+			tr_topk_offer(cand, &n, k, &c);   /* priority select */
 		}
 		atomic_store_explicit(&bm->s_dirty_backlog, (uint32_t)dirty_total,
 		    memory_order_relaxed);
 		int64_t t0 = 0, t1 = 0;
-		int nsel;
-		qsort(cand, (size_t)n, sizeof *cand, tr_cmp);   /* priority select */
-		nsel = n < batch ? n : batch;
-		if (nsel > max_batch) nsel = max_batch;         /* guard wbuf */
+		int nsel = n;
 		t0 = xtc_clock_mono();
 		/* Elevator-ordered, write-coalesced flush of the selected batch. */
 		w = tr_flush_batch(bm, cand, nsel, wbuf, run_f);

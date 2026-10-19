@@ -147,7 +147,7 @@ clean:
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o test_bufmgr_dio test_bufmgr_dio.o
 	rm -f test_bufmgr_mt
 	rm -f test_drop_reserved test_evict_revalidate_sampled
-	rm -f test_scan_resist test_sweep_bound test_evict_revalidate test_btree_late_load test_flush_pin test_publication_pin test_private_frame test_pid_writeback bm_sweep_bench
+	rm -f test_scan_resist test_sweep_bound test_evict_revalidate test_btree_late_load test_flush_pin test_trickler_select test_publication_pin test_private_frame test_pid_writeback bm_sweep_bench
 	rm -f test_persist
 	rm -f test_cursor_resume
 	rm -f test_btnode
@@ -560,7 +560,7 @@ test-drop-reserved: test_drop_reserved
 	./test_drop_reserved control
 	./test_drop_reserved
 
-test: test-evict-revalidate test-btree-late-load test-flush-pin test-publication-pin test-private-frame test-pid-writeback test-btree-stale-descent
+test: test-evict-revalidate test-btree-late-load test-flush-pin test-trickler-select test-publication-pin test-private-frame test-pid-writeback test-btree-stale-descent
 
 # A descent that keeps hitting stale nodes still returns a held leaf
 # (bufmgr.c and btree.c are #included for the test-only stale seam).
@@ -601,6 +601,12 @@ test_flush_pin: test_flush_pin.c bufmgr.c bufmgr.h
 
 test-flush-pin: test_flush_pin
 	./test_flush_pin
+
+test_trickler_select: test_trickler_select.c bufmgr.c bufmgr.h
+	$(CC) $(CFLAGS) -o $@ test_trickler_select.c $(LDFLAGS)
+
+test-trickler-select: test_trickler_select
+	./test_trickler_select
 
 test_btree_late_load: test_btree_late_load.c bufmgr.c bufmgr.h btree.c btnode.c
 	$(CC) $(CFLAGS) -o $@ test_btree_late_load.c btree.c btnode.c $(LDFLAGS)
