@@ -6680,8 +6680,8 @@ join_build(struct vx_stmt *st, vx_jht_t *bh)
 	if (bh->buckets == NULL) return -1;
 
 	if (!jp->build_src.native) goto done;
-	scan = xstore_scan_open(xstore_bt_of(st->db),
-	                        jp->build_src.table, 0, 0, 0, 0, 0);
+	scan = xstore_scan_open_txn((struct xsql *)st->db,   /* txn view */
+	                            jp->build_src.table, 0, 0, 0, 0, 0);
 	if (scan == NULL) goto done;
 	for (;;) {
 		{
@@ -7490,7 +7490,7 @@ njoin_build_side(struct vx_stmt *st, int side)
 	st->njht[side] = h;
 
 	if (!js->native) goto done;
-	scan = xstore_scan_open(xstore_bt_of(st->db), js->table, 0, 0, 0, 0, 0);
+	scan = xstore_scan_open_txn((struct xsql *)st->db, js->table, 0, 0, 0, 0, 0);
 	if (scan == NULL) goto done;
 	for (;;) {
 		vx_cell_t sentinel;
@@ -7817,7 +7817,7 @@ vx_step(vx_stmt_t *st)
 		if (st->jht == NULL) return SX_ERROR;
 		if (join_build(st, st->jht) != 0) return SX_ERROR;
 		if (!st->join->probe_src.native) return SX_ERROR;
-		st->probe_scan = xstore_scan_open(xstore_bt_of(st->db),
+		st->probe_scan = xstore_scan_open_txn((struct xsql *)st->db,
 		                  st->join->probe_src.table, 0, 0, 0, 0, 0);
 		if (st->probe_scan == NULL) return SX_ERROR;
 		st->join_built = 1;
@@ -7829,7 +7829,7 @@ vx_step(vx_stmt_t *st)
 		for (side = 1; side < st->njoin->nside; side++)
 			if (njoin_build_side(st, side) != 0) return SX_ERROR;
 		if (!st->njoin->src[0].native) return SX_ERROR;
-		st->nstream_scan = xstore_scan_open(xstore_bt_of(st->db),
+		st->nstream_scan = xstore_scan_open_txn((struct xsql *)st->db,
 		                   st->njoin->src[0].table, 0, 0, 0, 0, 0);
 		if (st->nstream_scan == NULL) return SX_ERROR;
 		st->nbuilt = 1;
@@ -9802,6 +9802,9 @@ vx_run_p(struct xsql *db, const char *sql, const vx_cell_t *binds, int nbinds,
 	 * re-prepares a range-scoped source per worker, which does not carry
 	 * the binds, so force one worker when binds are present. */
 	if (binds != NULL && nbinds > 0) n_workers = 1;
+	/* The morsel workers scan the latest committed state; a transaction
+	 * reads its own snapshot and writes: serial. */
+	if (n_workers > 1 && xstore_in_txn(db)) n_workers = 1;
 
 	/* A compound (set-op) SELECT is composed of independent sub-selects;
 	 * the set-op runner recognizes and concatenates them (UNION ALL).

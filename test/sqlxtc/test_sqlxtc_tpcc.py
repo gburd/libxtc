@@ -839,6 +839,109 @@ def run_script(server, name, schema, load, steps, verbose):
     return nstep, fails
 
 
+# ---- txn snapshot + own writes through every read executor ----
+# (sqlite-audit gap #8 items 5 and 6.)  Connection A opens a transaction,
+# reads (fixing its snapshot), writes, and re-reads through each executor:
+# index seek, rowid range, hash join (no usable index), N-way join, index
+# nested-loop join, aggregate.  Meanwhile connection B commits rows that A
+# must NOT see (A's snapshot predates them).  The oracle is one sqlite
+# connection that runs only A's statements: B's commits are invisible to
+# A until A commits, which is exactly what A's snapshot must show.
+SNAP_SCHEMA = [
+    "CREATE TABLE p(id INTEGER PRIMARY KEY, g INTEGER, v TEXT)",
+    "CREATE INDEX p_g ON p(g)",
+    "CREATE TABLE q(qid INTEGER PRIMARY KEY, pg INTEGER, w TEXT)",
+    "CREATE TABLE r(rid INTEGER PRIMARY KEY, qref INTEGER, x TEXT)",
+]
+SNAP_READS = [
+    ("SELECT id, v FROM p WHERE g = ?", [7]),
+    ("SELECT id FROM p WHERE id BETWEEN ? AND ?", [2, 30]),
+    ("SELECT count(*), max(id) FROM p WHERE g = ?", [7]),
+    ("SELECT p.id, q.w FROM p JOIN q ON q.pg = p.g", None),
+    ("SELECT q.w, p.v FROM q JOIN p ON p.g = q.pg WHERE q.qid = ?", [2]),
+    ("SELECT p.id, q.w, r.x FROM p JOIN q ON q.pg = p.g "
+     "JOIN r ON r.qref = q.qid", None),
+    ("SELECT p.v, q.w FROM p, q WHERE q.pg = p.g AND p.id = ?", [3]),
+    # no side can seek (q.pg, r.qref unindexed): the hash joins
+    ("SELECT q.w, r.x FROM q JOIN r ON r.qref = q.pg", None),
+    ("SELECT p.id, q.w, r.x FROM p JOIN q ON q.pg = p.g "
+     "JOIN r ON r.qref = q.pg", None),
+    ("SELECT q.w, r.x FROM q LEFT JOIN r ON r.qref = q.pg", None),
+    ("SELECT q.w, r.x FROM q, r WHERE r.qref = q.pg AND q.qid > ?", [0]),
+]
+
+
+def snap_script(server, verbose):
+    qa = server.fresh()
+    qb = type(qa)(server.port)
+    ref = sqlite3.connect(":memory:")
+    ref.isolation_level = None
+    fails = n = 0
+
+    def both(sql, params, mode="u"):
+        nonlocal fails, n
+        n += 1
+        _, qr, qe = qa.query(sql, params)
+        rr, re_ = ref_run(ref, sql, params)
+        ok = ((qe is None) == (re_ is None) and
+              (qe is not None or normalise_rows(qr, mode == "o") ==
+               normalise_rows(rr, mode == "o")))
+        if not ok:
+            fails += 1
+            print("  FAIL snap step %d: %s\n       params=%r\n"
+                  "       sqlxtc: rows=%r err=%r\n"
+                  "       sqlite: rows=%r err=%r"
+                  % (n, sql, params, qr[:6], qe, rr[:6], re_))
+        elif verbose:
+            print("  ok   snap step %d" % n)
+
+    for sql in SNAP_SCHEMA:
+        both(sql, None)
+    for i, g in ((1, 7), (2, 8), (4, 7), (6, 9), (10, 7)):
+        both("INSERT INTO p VALUES(?,?,?)", [i, g, "p%d" % i])
+    for i, g in ((1, 7), (2, 8), (3, 9)):
+        both("INSERT INTO q VALUES(?,?,?)", [i, g, "q%d" % i])
+    for i, qr in ((1, 1), (2, 2), (3, 1), (4, 7), (5, 8)):
+        both("INSERT INTO r VALUES(?,?,?)", [i, qr, "r%d" % i])
+    both("BEGIN", None)
+    both("SELECT count(*) FROM p", None)          # fixes A's snapshot
+    # B commits rows A's snapshot must not see.
+    for sql in ("INSERT INTO p VALUES(20, 7, 'B20')",
+                "INSERT INTO q VALUES(30, 7, 'B30')",
+                "INSERT INTO r VALUES(40, 30, 'B40')",
+                "INSERT INTO r VALUES(41, 9, 'B41')",
+                "UPDATE p SET v = 'Bupd' WHERE id = 1"):
+        _, _, e = qb.query(sql)
+        if e is not None:
+            fails += 1
+            print("  FAIL snap: connection B: %s -> %s" % (sql, e))
+    for sql, prm in SNAP_READS:
+        both(sql, prm)
+    # A's own writes (one into a rowid hole) must be seen by every read.
+    for sql in ("INSERT INTO p VALUES(3, 7, 'A3')",
+                "INSERT INTO q VALUES(5, 7, 'A5')",
+                "INSERT INTO r VALUES(6, 5, 'A6')",
+                "INSERT INTO r VALUES(0, 7, 'A0')",
+                "UPDATE p SET g = 8 WHERE id = 4",
+                "DELETE FROM q WHERE qid = 2"):
+        both(sql, None)
+    for sql, prm in SNAP_READS:
+        both(sql, prm)
+    both("COMMIT", None)
+    # After COMMIT the oracle sees B's rows too: replay them on it.
+    for sql in ("INSERT INTO p VALUES(20, 7, 'B20')",
+                "INSERT INTO q VALUES(30, 7, 'B30')",
+                "INSERT INTO r VALUES(40, 30, 'B40')",
+                "INSERT INTO r VALUES(41, 9, 'B41')",
+                "UPDATE p SET v = 'Bupd' WHERE id = 1"):
+        ref.execute(sql)
+    for sql, prm in SNAP_READS:
+        both(sql, prm)
+    qb.close()
+    ref.close()
+    return n, fails
+
+
 def main():
     verbose = "-v" in sys.argv
     server = Server(port=16457)
@@ -853,6 +956,10 @@ def main():
             total += n
             bad += f
             print("tpcc %-9s: %d steps, %d failed" % (name, n, f))
+        n, f = snap_script(server, verbose)
+        total += n
+        bad += f
+        print("tpcc %-9s: %d steps, %d failed" % ("snap", n, f))
     finally:
         server.stop()
     print("TPCC differential: %d/%d steps match sqlite" % (total - bad, total))
