@@ -39,11 +39,13 @@ Exactly one of these JSON keys is recognised per line:
              in order.  Each element is one of:
                - an integer            -> bound as INTEGER
                - a number with `.`/`e`  -> bound as REAL (e.g. `3.5`, `-2e2`)
-               - a string              -> bound as TEXT (escaped string
-                                          params are rejected)
+               - a string              -> bound as TEXT (JSON escapes
+                                          decoded; `\uXXXX` as UTF-8)
                - null                  -> bound as NULL
                - `{"hex":"deadbeef"}`   -> bound as BLOB (hex bytes)
                - `{"b64":"aGk="}`       -> bound as BLOB (base64 bytes)
+             A `?N` past the end of the array is NULL (as in SQLite, an
+             unbound parameter is NULL).
 * `ping`     Heartbeat; replies with `pong`.
 * `quit`     Graceful shutdown; the server closes the socket without
              a reply.

@@ -789,8 +789,8 @@ struct vx_compiler {
 	struct vx_joinctx *jc;    /* non-NULL on the join path */
 	int             fail;
 	/* Bound parameters (1-based by ordinal).  A SX_E_PARAM compiles to a
-	 * VXO_LIT holding binds[ordinal-1]; binds == NULL means no params
-	 * (a ? then fails the compile -> VDBE fallback). */
+	 * VXO_LIT holding binds[ordinal-1]; a ? past nbinds (or with binds ==
+	 * NULL) was never bound and is NULL, as in SQLite. */
 	const vx_cell_t *binds;
 	int              nbinds;
 };
@@ -1401,9 +1401,13 @@ compile_param(struct vx_compiler *c, const sql_expr_t *e)
 	vx_expr_t *n;
 	int ord = (int)e->ival;   /* 1-based */
 	const vx_cell_t *v;
-	if (c->binds == NULL || ord < 1 || ord > c->nbinds) { c->fail = 1; return NULL; }
+	if (ord < 1) { c->fail = 1; return NULL; }
 	n = expr_node(c, VXO_LIT);
 	if (n == NULL) { c->fail = 1; return NULL; }
+	if (c->binds == NULL || ord > c->nbinds) {
+		n->lit.type = VX_NULL;   /* an unset ? is NULL (SQLite) */
+		return n;
+	}
 	v = &c->binds[ord - 1];
 	if (v->type == VX_TEXT || v->type == VX_BLOB) {
 		uint8_t *p = (uint8_t *)arena_alloc(&c->st->plan_arena,
@@ -1947,9 +1951,10 @@ subq_binds(const struct vx_compiler *c, const sql_select_t *q,
 	int lo = 0, hi = 0;
 	*b = NULL; *nb = 0;
 	if (param_span_sel(q, &lo, &hi) == 0) return 0;
-	if (c->binds == NULL || lo < 1 || hi > c->nbinds) return -1;
+	if (lo < 1) return -1;
+	if (c->binds == NULL || lo > c->nbinds) return 0;   /* all unset: NULL */
 	*b = c->binds + (lo - 1);
-	*nb = hi - lo + 1;
+	*nb = (hi > c->nbinds ? c->nbinds : hi) - lo + 1;   /* the tail is NULL */
 	return 0;
 }
 
@@ -8532,7 +8537,11 @@ lit_cell(struct vx_arena_blk **arena, const sql_expr_t *e, vx_cell_t *out,
 	case SX_E_PARAM: {
 		int ord = (int)e->ival;   /* 1-based */
 		const vx_cell_t *v;
-		if (binds == NULL || ord < 1 || ord > nbinds) return -1;
+		if (ord < 1) return -1;
+		if (binds == NULL || ord > nbinds) {
+			out->type = VX_NULL;   /* an unset ? is NULL (SQLite) */
+			return 0;
+		}
 		v = &binds[ord - 1];
 		if (v->type == VX_TEXT || v->type == VX_BLOB) {
 			uint8_t *p = (uint8_t *)arena_alloc(arena, (size_t)v->nbytes + 1);

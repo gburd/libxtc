@@ -375,6 +375,56 @@ jp_string_span(jp_t *j, const char **out_p, size_t *out_len)
 	return -1;
 }
 
+/* Unescape a JSON string span IN PLACE (the decoded text is never
+ * longer than its escaped form, so it fits where it was); sets *n to the
+ * decoded length.  \uXXXX is the code point in UTF-8 (shortcut: no
+ * surrogate pairs, as jp_string_dup_unesc; upgrade both together).
+ * Returns 0, or -1 on a malformed escape. */
+static int
+jp_unesc_inplace(char *p, size_t *n)
+{
+	size_t i, o = 0;
+	for (i = 0; i < *n; i++) {
+		unsigned v = 0;
+		int k;
+		if (p[i] != '\\') { p[o++] = p[i]; continue; }
+		if (++i >= *n) return -1;
+		switch (p[i]) {
+		case '"': case '\\': case '/': p[o++] = p[i]; break;
+		case 'b': p[o++] = '\b'; break;
+		case 'f': p[o++] = '\f'; break;
+		case 'n': p[o++] = '\n'; break;
+		case 'r': p[o++] = '\r'; break;
+		case 't': p[o++] = '\t'; break;
+		case 'u':
+			if (i + 4 >= *n) return -1;
+			for (k = 0; k < 4; k++) {
+				char c = p[++i];
+				v <<= 4;
+				if (c >= '0' && c <= '9') v |= (unsigned)(c - '0');
+				else if (c >= 'a' && c <= 'f') v |= (unsigned)(c - 'a' + 10);
+				else if (c >= 'A' && c <= 'F') v |= (unsigned)(c - 'A' + 10);
+				else return -1;
+			}
+			if (v < 0x80) {
+				p[o++] = (char)v;
+			} else if (v < 0x800) {
+				p[o++] = (char)(0xC0 | (v >> 6));
+				p[o++] = (char)(0x80 | (v & 0x3F));
+			} else {
+				p[o++] = (char)(0xE0 | (v >> 12));
+				p[o++] = (char)(0x80 | ((v >> 6) & 0x3F));
+				p[o++] = (char)(0x80 | (v & 0x3F));
+			}
+			break;
+		default:
+			return -1;
+		}
+	}
+	*n = o;
+	return 0;
+}
+
 /* Unescape a JSON string span (which we may have copied verbatim)
  * into a freshly allocated NUL-terminated buffer.  Returns malloc'd
  * memory on success; NULL on alloc failure or invalid escape. */
@@ -571,7 +621,7 @@ jp_skip_value(jp_t *j)
 }
 
 int
-quack_parse(const char *line, size_t len, quack_msg_t *msg)
+quack_parse(char *line, size_t len, quack_msg_t *msg)
 {
 	jp_t j;
 	char c;
@@ -650,11 +700,15 @@ quack_parse(const char *line, size_t len, quack_msg_t *msg)
 						return -1;
 					}
 					for (i2 = 0; i2 < sn; i2++)
-						if (sp[i2] == '\\') {
-							msg->err = "json: escaped "
-							    "param strings unsupported";
-							return -1;
-						}
+						if (sp[i2] == '\\') break;
+					/* An escaped value is decoded in place (the
+					 * caller's line buffer is writable and lives
+					 * until the query has run). */
+					if (i2 < sn && jp_unesc_inplace((char *)(uintptr_t)sp,
+					    &sn) != 0) {
+						msg->err = "json: bad escape in param";
+						return -1;
+					}
 					prm->type = QUACK_P_TEXT;
 					prm->sval = sp;
 					prm->slen = sn;

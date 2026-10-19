@@ -23,7 +23,10 @@ static void
 expect(const char *line, int want_ok, const char *name)
 {
 	quack_msg_t m;
-	int rc = quack_parse(line, strlen(line), &m);
+	char buf[256];
+	int rc;
+	snprintf(buf, sizeof buf, "%s", line);
+	rc = quack_parse(buf, strlen(buf), &m);
 	int ok = want_ok ? rc == 0 : rc != 0;
 	printf("  %s %s (rc=%d)\n", ok ? "OK  " : "FAIL", name, rc);
 	if (!ok)
@@ -34,8 +37,9 @@ int
 main(void)
 {
 	quack_msg_t m;
-	const char *max = "{\"q\":\"x\",\"limit\":9223372036854775807}";
-	const char *min = "{\"q\":\"x\",\"params\":[-9223372036854775808]}";
+	char max[] = "{\"q\":\"x\",\"limit\":9223372036854775807}";
+	char min[] = "{\"q\":\"x\",\"params\":[-9223372036854775808]}";
+	char esc[] = "{\"q\":\"x\",\"params\":[\"a\\\"b\\\\\\u0001\\u00e9\\u20ac\"]}";
 
 	expect("{\"q\":\"x\",\"limit\":99999999999999999999999}", 0,
 	    "limit_23_digits_rejected");
@@ -60,6 +64,15 @@ main(void)
 		n_fail++;
 	} else
 		printf("  OK   param_int64_min_accepted\n");
+
+	/* An escaped TEXT param decodes in place (\uXXXX as UTF-8). */
+	if (quack_parse(esc, strlen(esc), &m) != 0 || m.n_params != 1 ||
+	    m.params[0].slen != 10 ||
+	    memcmp(m.params[0].sval, "a\"b\\\x01\xc3\xa9\xe2\x82\xac", 10) != 0) {
+		printf("  FAIL param_escaped_text_decoded\n");
+		n_fail++;
+	} else
+		printf("  OK   param_escaped_text_decoded\n");
 
 	printf("quack range: %s\n", n_fail ? "FAIL" : "OK");
 	return n_fail ? 1 : 0;

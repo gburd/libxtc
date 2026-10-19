@@ -59,9 +59,11 @@ typedef struct quack_msg {
 /* Parse one line.  `line` need NOT be NUL-terminated; `len` is the
  * length up to but not including the terminating '\n' (which the
  * caller has already stripped).  On success returns 0 and fills
- * *msg.  On JSON-level failure returns -1 with msg->err set to a
- * static string describing the failure. */
-int quack_parse(const char *line, size_t len, quack_msg_t *msg);
+ * *msg; a JSON-escaped TEXT param is decoded IN PLACE in `line`, so the
+ * buffer must be writable and outlive the message.  On JSON-level
+ * failure returns -1 with msg->err set to a static string describing
+ * the failure. */
+int quack_parse(char *line, size_t len, quack_msg_t *msg);
 
 /* ---- encoder ---- */
 

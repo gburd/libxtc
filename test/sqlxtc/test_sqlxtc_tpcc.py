@@ -18,6 +18,10 @@
 #   mode "u"  unordered compare (a multiset)
 #   mode "e"  both engines must ERROR; the sqlite message must match
 #             sqlxtc's verbatim (the UNIQUE constraint text)
+#   mode "nK" unbound parameters: sqlxtc gets only the first K params
+#             (K = 0: no "params" field, as the Turso shim sends a
+#             statement nothing was bound to); sqlite gets the full list,
+#             whose tail is NULL -- what SQLite binds to an unset ?
 # Every step runs on both engines in order, so DML results are checked
 # through the reads that follow them.  Any mismatch -- including sqlxtc
 # rejecting a statement sqlite runs -- is a FAIL.
@@ -736,6 +740,19 @@ def join_steps():
         ("SELECT count(*) FROM o", None, u),
     ]
     s = list(reads)
+    # Protocol edge cases the Turso harness hits: ordstat.c (by-id)
+    # binds an uninitialised c_last buffer, whose control bytes arrive
+    # JSON-escaped; slev.c binds stmt 34 on the wrong handle, so its ?
+    # are unbound (SQLite binds NULL).
+    s += [("SELECT name FROM c WHERE c_w = ? AND c_d = ? AND c_id = ?",
+           [1, 1, "a\"b\\c\x01\x1f\u00e9\u20ac"], u),
+          ("SELECT ?", ["q\"\n\t\x7f\u00ff"], u),
+          ("SELECT length(?), ? = 'x\"y'", ["\x01\x02", "x\"y"], u),
+          ("SELECT count(*) FROM o WHERE o_w = ? AND o_c = ? AND amt < ?",
+           [None, None, None], "n0"),
+          ("SELECT count(*) FROM o WHERE o_w = ? OR o_c IS ?",
+           [1, None], "n1"),
+          ("SELECT ? IS NULL, ?2 IS NULL", [7, None], "n1")]
     s += [("INSERT INTO c VALUES(3, 1, 2, 'new')", None, u),
           ("INSERT INTO w VALUES(4, 0.4)", None, u),
           ("INSERT INTO o VALUES(50, 1, 1, 33.0)", None, u),
@@ -791,7 +808,12 @@ def run_script(server, name, schema, load, steps, verbose):
     ref.execute("COMMIT")
     for sql, params, mode in steps():
         nstep += 1
-        _, qrows, qe = qk.query(sql, params)
+        qparams = params
+        if mode.startswith("n"):
+            k = int(mode[1:])
+            qparams = params[:k] if k > 0 else None
+            mode = "u"
+        _, qrows, qe = qk.query(sql, qparams)
         rrows, re_ = ref_run(ref, sql, params)
         ok = True
         if mode == "e":
