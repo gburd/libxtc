@@ -22,6 +22,7 @@
 #include "sql_parse.h"
 #include "vexec.h"
 #include "engine.h"
+#include "xstore.h"
 
 #define METRICS_INTERVAL_NS  (5LL * 1000 * 1000 * 1000)
 
@@ -78,13 +79,19 @@ metrics_proc(void *arg)
 			XTC_LOG_INFO_F(
 			    "metrics: conns=%d queries=%lld errors=%lld "
 			    "q_p50_ns=%lld q_p99_ns=%lld mem=%lld parses=%llu "
-			    "plans=%llu wal_commits=%llu wal_fsyncs=%llu",
+			    "plans=%llu wal_commits=%llu wal_fsyncs=%llu "
+			    "row_waits=%llu row_wait_ms=%llu row_conflicts=%llu "
+			    "row_deadlocks=%llu",
 			    atomic_load(st->conn_count),
 			    (long long)qs, (long long)errs,
 			    (long long)p50, (long long)p99,
 			    (long long)mem, sql_parse_count(),
 			    (unsigned long long)vx_plan_build_count(),
-			    (unsigned long long)wc, (unsigned long long)wf);
+			    (unsigned long long)wc, (unsigned long long)wf,
+			    (unsigned long long)xstore_intent_waits(),
+			    (unsigned long long)(xstore_intent_wait_ns() / 1000000u),
+			    (unsigned long long)xstore_intent_conflicts(),
+			    (unsigned long long)xstore_intent_deadlocks());
 		}
 	}
 }

@@ -3848,6 +3848,7 @@ static int g_ilk_free[XS_ILK_OWNERS], g_ilk_nfree;   /* recycled slots */
 static pthread_mutex_t g_ilk_free_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_ilk_seqgen = 1;
 static _Atomic uint64_t g_ilk_waits, g_ilk_conflicts, g_ilk_deadlocks;
+static _Atomic uint64_t g_ilk_wait_ns;   /* nap time spent waiting (metric) */
 
 static void
 xs_ilk_init(void)
@@ -4017,6 +4018,7 @@ xs_intent_take(xstore_ctx_t *cx, uint32_t tid, int64_t rid, uint64_t base)
 			if (r == 0) xs_ilk_drop(cx->bt, tid, rid, cx->ilk_slot, cx->ilk_seq);
 			xs_ilk_wait_clear(cx);
 			atomic_fetch_add_explicit(&g_ilk_conflicts, 1, memory_order_relaxed);
+			atomic_fetch_add_explicit(&g_ilk_wait_ns, (uint64_t)waited, memory_order_relaxed);
 			return XS_CONFL_STALE;
 		}
 		if (r == 0 || r < 0) break;        /* taken; or no room: COMMIT checks */
@@ -4032,6 +4034,7 @@ xs_intent_take(xstore_ctx_t *cx, uint32_t tid, int64_t rid, uint64_t base)
 				atomic_fetch_add_explicit(&g_ilk_deadlocks, 1, memory_order_relaxed);
 			xs_ilk_wait_clear(cx);
 			atomic_fetch_add_explicit(&g_ilk_conflicts, 1, memory_order_relaxed);
+			atomic_fetch_add_explicit(&g_ilk_wait_ns, (uint64_t)waited, memory_order_relaxed);
 			return XS_CONFL_HARD;
 		}
 		if (waited == 0)
@@ -4041,6 +4044,8 @@ xs_intent_take(xstore_ctx_t *cx, uint32_t tid, int64_t rid, uint64_t base)
 		if (nap < XS_ILK_NAPMAX_NS) nap *= 2;
 	}
 	xs_ilk_wait_clear(cx);
+	if (waited > 0)
+		atomic_fetch_add_explicit(&g_ilk_wait_ns, (uint64_t)waited, memory_order_relaxed);
 	if (r < 0) return 0;
 	if (cx->ilk_n == cx->ilk_cap) {
 		int nc = cx->ilk_cap ? cx->ilk_cap * 2 : 16;
@@ -4115,6 +4120,12 @@ uint64_t
 xstore_intent_conflicts(void)
 {
 	return atomic_load_explicit(&g_ilk_conflicts, memory_order_relaxed);
+}
+
+uint64_t
+xstore_intent_wait_ns(void)
+{
+	return atomic_load_explicit(&g_ilk_wait_ns, memory_order_relaxed);
 }
 
 uint64_t

@@ -459,6 +459,7 @@ uint64_t xstore_cat_lock_count(void);
 uint64_t xstore_intent_waits(void);
 uint64_t xstore_intent_conflicts(void);
 uint64_t xstore_intent_deadlocks(void);
+uint64_t xstore_intent_wait_ns(void);    /* total nap time of those waits */
 
 /* Count of index seeks served (metric / test evidence that the planner
  * took the index rather than a full table scan). */
