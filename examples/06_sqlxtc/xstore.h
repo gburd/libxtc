@@ -216,6 +216,9 @@ int xstore_rowid_split_points(bt_t *bt, uint32_t tableid, int64_t lo,
  * buffered writes -- the auto-rowid base for an in-txn INSERT (a
  * db-handle variant of xstore_max_rowid that also scans the wbuf). */
 int64_t xstore_max_rowid_txn(struct xsql *db, uint32_t tableid);
+/* Buffered writes examined by xstore_max_rowid_txn so far (metric: an
+ * in-txn bulk INSERT must not rescan the buffer per row). */
+uint64_t xstore_wbuf_scan_count(void);
 /* Does `rowid` exist as a live row of `tableid`, including this
  * connection's uncommitted buffered writes (a buffered tombstone hides
  * a committed row, a buffered upsert reveals one)?  Lets the native

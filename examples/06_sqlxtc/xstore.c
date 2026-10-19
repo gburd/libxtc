@@ -398,7 +398,29 @@ typedef struct xstore_ctx {
 	uint64_t         uniq_vis;    /* horizon of the txn's UNIQUE checks */
 	uint64_t         uniq_gen;    /* index generation at those checks */
 	char             uniq_err[192]; /* last UNIQUE violation message */
+	/* Largest buffered rowid per table (xstore_max_rowid_txn), kept by
+	 * wbuf_add; a truncate/clear invalidates it (wmax_ok = 0) and the
+	 * next query rebuilds it with one pass. */
+	struct { uint32_t tableid; int64_t max; } wmax[8];
+	int              wmax_n, wmax_ok;
 } xstore_ctx_t;
+
+/* Note `rowid` of `tableid` in the per-table buffered max; 0 when the
+ * table has no slot (more than 8 tables written: callers scan). */
+static int
+wmax_note(xstore_ctx_t *c, uint32_t tableid, int64_t rowid)
+{
+	int i;
+	for (i = 0; i < c->wmax_n; i++)
+		if (c->wmax[i].tableid == tableid) {
+			if (rowid > c->wmax[i].max) c->wmax[i].max = rowid;
+			return 1;
+		}
+	if (c->wmax_n == (int)(sizeof c->wmax / sizeof c->wmax[0])) return 0;
+	c->wmax[c->wmax_n].tableid = tableid;
+	c->wmax[c->wmax_n++].max = rowid;
+	return 1;
+}
 
 static void wmap_put(xstore_ctx_t *c, uint32_t tid, int64_t rid, int wi);
 static int  wmap_get(const xstore_ctx_t *c, uint32_t tid, int64_t rid);
@@ -422,6 +444,7 @@ wbuf_truncate(xstore_ctx_t *c, int mark)
 		}
 	}
 	c->wn = mark;
+	c->wmax_ok = 0;
 	wmaps_rebuild(c);
 }
 
@@ -439,6 +462,8 @@ wbuf_clear(xstore_ctx_t *c)
 	c->wmap_n = c->umap_n = 0;
 	c->wmap_bad = 0;
 	c->uniq_vis = 0;
+	c->wmax_n = 0;
+	c->wmax_ok = 1;
 }
 static int
 wbuf_add(xstore_ctx_t *c, uint32_t tableid, int64_t rowid, const void *blob, int n, int deleted)
@@ -466,6 +491,7 @@ wbuf_add(xstore_ctx_t *c, uint32_t tableid, int64_t rowid, const void *blob, int
 		c->wbuf_bytes += (size_t)n;
 	}
 	c->wn++;
+	if (c->wmax_ok && !wmax_note(c, tableid, rowid)) c->wmax_ok = 0;
 	wmap_put(c, tableid, rowid, c->wn - 1);
 	xs_umap_index(c, c->wn - 1);
 	return SX_OK;
@@ -4573,6 +4599,14 @@ xstore_rollback_to(struct xsql *db, int level)
  * buffered row's rowid is not reused (matching the vtab xUpdate auto-
  * rowid path).  Outside a txn this equals xstore_max_rowid.  Returns 0
  * for an empty table / unknown db. */
+static _Atomic uint64_t g_wmax_scanned;   /* wbuf entries scanned (metric) */
+
+uint64_t
+xstore_wbuf_scan_count(void)
+{
+	return atomic_load_explicit(&g_wmax_scanned, memory_order_relaxed);
+}
+
 int64_t
 xstore_max_rowid_txn(struct xsql *db, uint32_t tableid)
 {
@@ -4581,9 +4615,26 @@ xstore_max_rowid_txn(struct xsql *db, uint32_t tableid)
 	int i;
 	if (cx == NULL) return 0;
 	mx = xstore_max_rowid(cx->bt, tableid);
-	for (i = 0; i < cx->wn; i++)
+	if (!cx->wmax_ok) {                  /* rebuild after a truncate */
+		cx->wmax_n = 0;
+		cx->wmax_ok = 1;
+		for (i = 0; i < cx->wn && cx->wmax_ok; i++)
+			if (!wmax_note(cx, cx->wbuf[i].tableid, cx->wbuf[i].rowid))
+				cx->wmax_ok = 0;
+		atomic_fetch_add_explicit(&g_wmax_scanned, (uint64_t)i,
+		    memory_order_relaxed);
+	}
+	if (cx->wmax_ok) {
+		for (i = 0; i < cx->wmax_n; i++)
+			if (cx->wmax[i].tableid == tableid && cx->wmax[i].max > mx)
+				mx = cx->wmax[i].max;
+		return mx;
+	}
+	for (i = 0; i < cx->wn; i++)        /* shortcut: > 8 tables in one txn scans */
 		if (cx->wbuf[i].tableid == tableid && cx->wbuf[i].rowid > mx)
 			mx = cx->wbuf[i].rowid;
+	atomic_fetch_add_explicit(&g_wmax_scanned, (uint64_t)cx->wn,
+	    memory_order_relaxed);
 	return mx;
 }
 
@@ -6336,6 +6387,7 @@ xs_ctx_init_and_map(struct xsql *db, bt_t *bt, int native)
 	ctx->native_mode = native ? 1 : 0;
 	ctx->native_autocommit = 1;
 	ctx->wmap = NULL; ctx->wmap_n = ctx->wmap_cap = ctx->wmap_bad = 0;
+	ctx->wmax_n = 0; ctx->wmax_ok = 1;
 	ctx->umap = NULL; ctx->umap_n = ctx->umap_cap = 0;
 	ctx->uniq_vis = ctx->uniq_gen = 0;
 	ctx->uniq_err[0] = '\0';
