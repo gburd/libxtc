@@ -137,6 +137,12 @@ typedef enum sql_join_type {
 	SX_J_NATURAL
 } sql_join_type_t;
 
+/* A join's ON expression or USING column list (at most one is set). */
+typedef struct sql_joincons {
+	struct sql_expr        *on;
+	struct sql_exprlist    *using_cols;
+} sql_joincons_t;
+
 typedef struct sql_src {
 	/* A base table (schema.name) or a subquery; aliased optionally. */
 	sql_str_t      schema;    /* len 0 if unqualified */

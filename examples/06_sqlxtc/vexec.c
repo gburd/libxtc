@@ -944,7 +944,10 @@ node_class(const struct vx_compiler *c, const vx_expr_t *e)
 		case VXF_INSTR:  return VX_AFF_NUMERIC;
 		case VXF_ROUND:  return VX_AFF_NUMERIC;
 		case VXF_LOWER: case VXF_UPPER: return VX_AFF_TEXT;
-		case VXF_SUBSTR: return VX_AFF_TEXT;
+		case VXF_SUBSTR:         /* BLOB in -> BLOB out */
+			return (e->nargs >= 1 && e->args[0] != NULL &&
+			    node_class(c, e->args[0]) == VX_AFF_BLOB) ?
+			    VX_AFF_BLOB : VX_AFF_TEXT;
 		case VXF_REPLACE: return VX_AFF_TEXT;
 		case VXF_TRIM: case VXF_LTRIM: case VXF_RTRIM: return VX_AFF_TEXT;
 		case VXF_TYPEOF: return VX_AFF_TEXT;
@@ -3227,51 +3230,74 @@ eval(const struct vx_stmt *st, const vx_expr_t *e,
 			return;
 		}
 		case VXF_SUBSTR: {
-			/* substr(X, Y [, Z]): 1-based, character (UTF-8) semantics.
-			 * Y < 0 counts from the end; Z omitted -> to the end; Z < 0
-			 * selects |Z| chars ending just before Y (SQLite). */
-			vx_cell_t sy, sz; const uint8_t *sp; uint32_t sn; int64_t slen;
-			int64_t y, z, start, cnt; uint32_t bo, be; uint8_t *buf;
-			int to_end = 0;
+			/* substr(X, Y [, Z]): SQLite's substrFunc (func.c) step for
+			 * step, in int64 so a huge Y or Z clamps instead of
+			 * overflowing.  Characters for TEXT, bytes for BLOB (and a
+			 * BLOB in gives a BLOB out). */
+			vx_cell_t sy, sz; const uint8_t *sp, *z, *z2, *end;
+			uint32_t sn; int64_t len = 0, p1, p2; uint8_t *buf; int isblob;
+			double dv; int64_t iv; int ii;
 			eval(st, e->args[0], row, arena, &a);
 			if (a.type == VX_NULL) { out->type = VX_NULL; return; }
 			eval(st, e->args[1], row, arena, &sy);
-			if (sy.type == VX_NULL) { out->type = VX_NULL; return; }
-			sp = cell_text(&a, arena, &sn);
-			if (sp == NULL) { out->type = VX_NULL; return; }
-			slen = utf8_len(sp, sn);
-			{ double d; int64_t i; int ii; num_of(&sy, &d, &i, &ii); y = ii ? i : (int64_t)d; }
 			if (e->nargs >= 3) {
 				eval(st, e->args[2], row, arena, &sz);
 				if (sz.type == VX_NULL) { out->type = VX_NULL; return; }
-				{ double d; int64_t i; int ii; num_of(&sz, &d, &i, &ii); z = ii ? i : (int64_t)d; }
-			} else {
-				z = 0; to_end = 1;   /* 2-arg form always runs to the string end */
 			}
-			/* Resolve Y to a 1-based start; negative counts from end. */
-			if (y < 0) y = slen + y + 1;
-			if (to_end) {
-				/* From Y (clamped up to 1) to the end. */
-				start = y < 1 ? 1 : y;
-				cnt = slen - (start - 1);
-			} else {
-				if (z < 0) { start = y + z; cnt = -z; }
-				else { start = y; cnt = z; }
-				if (start < 1) { cnt -= (1 - start); start = 1; }
+			isblob = a.type == VX_BLOB;
+			if (isblob) { sp = a.bytes; sn = a.nbytes; len = sn; }
+			else {
+				sp = cell_text(&a, arena, &sn);
+				if (sp == NULL) { out->type = VX_NULL; return; }
 			}
-			if (cnt < 0) cnt = 0;
-			if (start > slen || cnt == 0) {
-				out->type = VX_TEXT; out->bytes = (const uint8_t *)""; out->nbytes = 0;
+			num_of(&sy, &dv, &iv, &ii);
+			p1 = sy.type == VX_NULL ? 0 : ii ? iv : (int64_t)dv;
+			if (!isblob && p1 < 0) len = utf8_len(sp, sn);
+			if (e->nargs >= 3) {
+				num_of(&sz, &dv, &iv, &ii);
+				p2 = ii ? iv : (int64_t)dv;
+			} else
+				p2 = INT64_C(1000000000);      /* SQLITE_LIMIT_LENGTH */
+			if (p1 == 0 && sy.type == VX_NULL) { out->type = VX_NULL; return; }
+			if (p1 < 0) {
+				p1 += len;
+				if (p1 < 0) {
+					p2 = p2 < 0 ? 0 : p2 + p1;
+					p1 = 0;
+				}
+			} else if (p1 > 0) {
+				p1--;
+			} else if (p2 > 0) {
+				p2--;
+			}
+			if (p2 < 0) {
+				p2 = p2 < -p1 ? p1 : -p2;
+				p1 -= p2;
+			}
+			if (isblob) {
+				if (p1 >= len) p1 = p2 = 0;
+				else if (p2 > len - p1) p2 = len - p1;
+				buf = (uint8_t *)arena_alloc(arena, (size_t)p2 + 1);
+				if (buf == NULL) { out->type = VX_NULL; return; }
+				if (p2 > 0) memcpy(buf, sp + p1, (size_t)p2);
+				out->type = VX_BLOB; out->bytes = buf; out->nbytes = (uint32_t)p2;
 				return;
 			}
-			if (start - 1 + cnt > slen) cnt = slen - (start - 1);
-			bo = utf8_off(sp, sn, start - 1);
-			be = utf8_off(sp, sn, start - 1 + cnt);
-			buf = (uint8_t *)arena_alloc(arena, (size_t)(be - bo) + 1);
+			/* TEXT: skip p1 characters, then take p2 characters. */
+			end = sp + sn;
+			for (z = sp; z < end && p1 > 0; p1--) {
+				z++;
+				while (z < end && (*z & 0xC0) == 0x80) z++;
+			}
+			for (z2 = z; z2 < end && p2 > 0; p2--) {
+				z2++;
+				while (z2 < end && (*z2 & 0xC0) == 0x80) z2++;
+			}
+			buf = (uint8_t *)arena_alloc(arena, (size_t)(z2 - z) + 1);
 			if (buf == NULL) { out->type = VX_NULL; return; }
-			if (be > bo) memcpy(buf, sp + bo, be - bo);
-			buf[be - bo] = '\0';
-			out->type = VX_TEXT; out->bytes = buf; out->nbytes = be - bo;
+			if (z2 > z) memcpy(buf, z, (size_t)(z2 - z));
+			buf[z2 - z] = '\0';
+			out->type = VX_TEXT; out->bytes = buf; out->nbytes = (uint32_t)(z2 - z);
 			return;
 		}
 		case VXF_INSTR: {
@@ -4417,6 +4443,18 @@ vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 		return vx_try_prepare_const(db, ast, sel, binds, nbinds, out, errmsg);
 	}
 	if (src->next != NULL) {
+		const sql_src_t *js;
+		/* NATURAL needs the common-column set from both schemas, and a
+		 * USING the grammar could not turn into an ON (no name to
+		 * qualify a side by) would otherwise run as a keyless cross
+		 * join -- a wrong result.  Refuse both; USING into a 3+-way
+		 * chain too, where its column may come from any earlier table. */
+		for (js = src->next; js != NULL; js = js->next) {
+			if (js->join == SX_J_NATURAL) goto fallback;
+			if (js->using_cols != NULL &&
+			    (js->on == NULL || src->next->next != NULL))
+				goto fallback;
+		}
 		/* Multi-table equi-join (no GROUP BY / ORDER BY / aggregates on
 		 * the join path yet -- those compose later).  A post-join ORDER BY
 		 * has the same tie-order non-reproducibility as the agg path AND

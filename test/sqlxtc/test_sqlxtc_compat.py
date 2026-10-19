@@ -620,6 +620,27 @@ CORPUS = [
     ("setop_order_expr_err",   # both reject: an ORDER BY term must be a result column
      ["CREATE TABLE a(x INT)", "CREATE TABLE b(x INT)"],
      "SELECT x FROM a UNION ALL SELECT x FROM b ORDER BY x+1"),
+    # JOIN ... USING / NATURAL JOIN: 1.58 RCs ran these as a keyless
+    # cross join (USING was parsed and dropped).  Each must equal sqlite.
+    ("join_using_count",
+     ["CREATE TABLE ja(aid INTEGER PRIMARY KEY, title TEXT)",
+      "CREATE TABLE jb(tid INTEGER PRIMARY KEY, aid INT, name TEXT)",
+      "INSERT INTO ja VALUES(1,'x'),(2,'y')",
+      "INSERT INTO jb VALUES(1,1,'p'),(2,1,'q'),(3,2,'r'),(4,7,'s')"],
+     "SELECT jb.name, title FROM ja JOIN jb USING (aid)"),
+    ("join_using_left",
+     ["CREATE TABLE ja(aid INTEGER PRIMARY KEY, title TEXT)",
+      "CREATE TABLE jb(tid INTEGER PRIMARY KEY, aid INT, name TEXT)",
+      "INSERT INTO ja VALUES(1,'x'),(2,'y'),(3,'z')",
+      "INSERT INTO jb VALUES(1,1,'p'),(2,1,'q'),(3,2,'r')"],
+     "SELECT title, name FROM ja LEFT JOIN jb USING (aid) ORDER BY title, name",
+     {"ordered": True}),
+    ("join_using_missing_col_err",   # both reject: no such column on one side
+     ["CREATE TABLE ja(aid INT, title TEXT)", "CREATE TABLE jb(bid INT, name TEXT)"],
+     "SELECT title FROM ja JOIN jb USING (aid)"),
+    # substr: a BLOB in gives a BLOB out (1.58 RCs returned TEXT).
+    ("substr_blob_type", [], "SELECT typeof(substr(x'313233',1,2)), "
+     "hex(substr(x'313233',2)), length(substr(x'3132ff',2))"),
 ]
 
 # Features sqlxtc does not yet implement.  Reported, not failed -- these
@@ -629,6 +650,40 @@ CORPUS = [
 # (All previously-listed gaps now land in the native executor and have
 # been promoted into CORPUS above; this set is intentionally empty.)
 XFAIL_CORPUS = [
+    # USING / NATURAL shapes the join executor still refuses -- exactly as
+    # it refuses their explicit-ON spellings (non-projected ORDER BY keys,
+    # a multi-key ON, an unqualified USING column).  XFAIL keeps the
+    # wrong-result guard: a silent cross join would show as an xbug.
+    ("join_using_1",
+     ["CREATE TABLE ja(aid INTEGER PRIMARY KEY, title TEXT)",
+      "CREATE TABLE jb(tid INTEGER PRIMARY KEY, aid INT, tn INT, name TEXT)",
+      "INSERT INTO ja VALUES(1,'1-one'),(2,'2-two'),(3,'3-three')",
+      "INSERT INTO jb VALUES(NULL,1,1,'one-a'),(NULL,2,2,'two-b'),"
+      "(NULL,3,3,'three-c'),(NULL,1,3,'one-c'),(NULL,2,1,'two-a'),"
+      "(NULL,3,1,'three-a'),(NULL,9,1,'orphan')"],
+     "SELECT name FROM ja JOIN jb USING (aid) ORDER BY title, tn",
+     {"ordered": True}),
+    ("join_using_unqualified_col",
+     ["CREATE TABLE ja(aid INTEGER PRIMARY KEY, title TEXT)",
+      "CREATE TABLE jb(tid INTEGER PRIMARY KEY, aid INT, name TEXT)",
+      "INSERT INTO ja VALUES(1,'x'),(2,'y')",
+      "INSERT INTO jb VALUES(1,1,'p'),(2,1,'q'),(3,2,'r')"],
+     "SELECT aid, name FROM ja JOIN jb USING (aid) ORDER BY name",
+     {"ordered": True}),
+    ("join_using_two_cols",
+     ["CREATE TABLE ja(k1 INT, k2 INT, v TEXT)",
+      "CREATE TABLE jb(k1 INT, k2 INT, w TEXT)",
+      "INSERT INTO ja VALUES(1,1,'a'),(1,2,'b'),(2,1,'c')",
+      "INSERT INTO jb VALUES(1,1,'A'),(1,2,'B'),(2,2,'D')"],
+     "SELECT v, w FROM ja JOIN jb USING (k1, k2) ORDER BY v",
+     {"ordered": True}),
+    ("join_natural",
+     ["CREATE TABLE ja(aid INTEGER PRIMARY KEY, title TEXT)",
+      "CREATE TABLE jb(tid INTEGER PRIMARY KEY, aid INT, name TEXT)",
+      "INSERT INTO ja VALUES(1,'x'),(2,'y')",
+      "INSERT INTO jb VALUES(1,1,'p'),(2,1,'q'),(3,2,'r')"],
+     "SELECT title, name FROM ja NATURAL JOIN jb ORDER BY name",
+     {"ordered": True}),
 ]
 
 

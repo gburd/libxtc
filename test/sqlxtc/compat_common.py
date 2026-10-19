@@ -14,6 +14,7 @@
 # Extracted from test_sqlxtc_oracle.py so both the wired-in CI test and
 # the opt-in ~/src/sqlite harvester share one implementation.
 
+import base64
 import json
 import os
 import socket
@@ -92,7 +93,8 @@ def normalise_rows(rows, ordered=False):
             elif v is None:
                 new.append(("n", 0))
             elif isinstance(v, bytes):
-                new.append(("s", v.decode("ascii", errors="replace")))
+                # Quack sends a BLOB as base64 text (PROTOCOL.md).
+                new.append(("s", base64.b64encode(v).decode("ascii")))
             elif isinstance(v, str):
                 new.append(("s", v))
             else:
