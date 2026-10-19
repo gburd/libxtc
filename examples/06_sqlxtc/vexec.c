@@ -396,6 +396,44 @@ typedef struct vx_joinplan {
 typedef struct vx_jht vx_jht_t;   /* join build hash table (defined later) */
 typedef struct vx_jrow vx_jrow_t;
 
+/* ---- access path (sqlite-audit gap #4) ---------------------------- *
+ *
+ * How a single source's candidate rows are fetched: a full rowid scan,
+ * a rowid range (an INTEGER PRIMARY KEY bound), or an index range (an
+ * equality prefix plus an optional range on the next column, walked
+ * through xstore_iscan: MVCC-visible versions incl. this txn's writes).
+ * The bound values are compiled expressions evaluated when the path is
+ * opened, so a path chosen once is re-openable (plan reuse, join inner
+ * sides re-opened per outer row).  The full WHERE is always re-checked
+ * on every row; a path only narrows which rows are looked at. */
+#define VX_AP_EQMAX   16
+#define VX_AP_TERMMAX 64
+
+enum vx_ap_kind { VX_AP_SCAN = 0, VX_AP_ROWID, VX_AP_INDEX };
+
+typedef struct vx_apath {
+	enum vx_ap_kind kind;
+	uint32_t        idx_id;               /* INDEX */
+	int             neq;                  /* INDEX: equality prefix */
+	const struct vx_expr *eq[VX_AP_EQMAX];
+	const struct vx_expr *lo, *hi;        /* INDEX: range on column neq */
+	int             lo_incl, hi_incl;
+	int             nrt;                  /* ROWID: rowid op value terms */
+	int             rtop[8];
+	const struct vx_expr *rtv[8];
+	int             reverse;              /* INDEX: walk descending */
+	int             ordered;              /* walk yields the wanted order */
+} vx_apath_t;
+
+/* An open row source over one table (src_open / src_next / src_close). */
+typedef struct vx_src {
+	xstore_scan_t  *scan;
+	xstore_iscan_t *iscan;
+	int             open;
+	int             empty;    /* a bound is NULL: no row can match */
+	int             ordered;  /* this walk yields the path's order */
+} vx_src_t;
+
 /* Max tables in a single native equi-join (t0 .. t[VX_JOIN_MAX-1]). */
 #define VX_JOIN_MAX 6
 
@@ -449,24 +487,14 @@ struct vx_stmt {
 	vx_result_t  *derived_res;
 	int           derived_cur;
 
-	/* Rowid-range pushdown (the minimal planner): when the WHERE pins the
-	 * primary key to a range, the scan is bounded to it instead of full,
-	 * so a point/range read seeks rather than scanning the whole table.
-	 * The WHERE filter still runs (it may carry other conjuncts); these
-	 * bounds only skip rows that cannot match the pk constraint. */
-	int64_t       scan_lo, scan_hi;
-	int           scan_has_lo, scan_has_hi;
-
-	/* Secondary-index equality seek.  When idx_seek is set the plan does
-	 * NOT open a range scan: it point-fetches each candidate rowid in
-	 * idx_rowids[] through the normal MVCC path (so visibility and
-	 * read-your-writes still decide the row), and the WHERE filter still
-	 * runs on each fetched row.  Populated at prepare time when the WHERE
-	 * has an equality on an indexed non-PK column. */
-	int           idx_seek;
-	int64_t      *idx_rowids;    /* candidate base rowids (owned) */
-	int           idx_nrow;      /* count */
-	int           idx_cur;       /* iteration cursor into idx_rowids */
+	/* The chosen access path (ap_choose) and its open state: scan or
+	 * iscan is the live cursor; src_empty when a bound evaluated to NULL
+	 * (no row can match); src_ordered when the open walk yields the
+	 * ORDER BY / MIN-MAX order (a fallback scan does not). */
+	vx_apath_t     ap;
+	vx_src_t       src;
+	int            ap_minmax;   /* agg: all MIN (or all MAX) of one column:
+	                             * on an ordered walk, the first row decides */
 
 	/* Bound ? parameters for this statement (1-based), used by the
 	 * compiler to turn SX_E_PARAM into a literal.  Borrowed (the caller's
@@ -3858,177 +3886,385 @@ static int vx_prepare_select(struct xsql *db, sql_arena_t *ast,
                              const vx_cell_t *binds, int nbinds,
                              vx_stmt_t **out, char **errmsg);
 
-/* An integer-valued literal for planning: a NUMBER (with an optional
- * leading unary minus) or a bound ? whose value is an INTEGER.  Returns 1
- * with *v set, or 0.  TPROC-C drives every point lookup with a bound
- * param, so a bind-blind bound full-scans each one (sqlite-audit gap #1). */
+/* ---- access-path chooser (sqlite-audit gap #4) -------------------- *
+ *
+ * Works on the COMPILED predicate: each AND-conjunct "col op v" where v
+ * is a constant for the scan (no column / correlated reference: a
+ * literal, a bound ?, "? - 20", a spliced uncorrelated subquery) is a
+ * sargable term.  The comparison literal has already been coerced by
+ * cmp_affinity_gate, so a bound value compares exactly as the row
+ * filter would; the full WHERE is re-checked on every fetched row, so a
+ * path can only make the scan look at fewer rows, never change the
+ * answer.  Candidate paths: the rowid (INTEGER PRIMARY KEY) bounds, and
+ * for every index of the table its longest equality prefix plus an
+ * optional range on the next column. */
+
+struct vx_apterm {
+	int                   col;    /* source column (VXO_COL index) */
+	int                   op;     /* VXO_EQ / LT / LE / GT / GE */
+	const vx_expr_t      *val;
+};
+
+/* Which compiled columns a bound value may read: in a join, the columns
+ * of the sides already placed (outer rows); single table: none.  The
+ * scanned side owns combined-row slots [base, base + n). */
+struct ap_scope {
+	int        base, n;
+	const int *side_of;     /* combined col -> side, or NULL */
+	unsigned   placed;      /* bit s: side s is bound */
+};
+
+/* Is `e` constant for one scan of the side (it reads no column of the
+ * side itself, nor of a side not yet bound)? */
 static int
-ast_int_lit(const sql_expr_t *e, int64_t *v, const vx_cell_t *binds, int nbinds)
+ap_const(const vx_expr_t *e, const struct ap_scope *sc)
 {
-	int neg = 0;
-	char buf[32]; int i;
-	if (e == NULL) return 0;
-	if (e->op == SX_E_PARAM) {
-		int ord = (int)e->ival;
-		if (binds == NULL || ord < 1 || ord > nbinds ||
-		    binds[ord - 1].type != VX_INT) return 0;
-		*v = binds[ord - 1].i;
-		return 1;
+	int i;
+	if (e == NULL) return 1;
+	switch (e->op) {
+	case VXO_COL:
+		return sc->side_of != NULL &&
+		    ((sc->placed >> sc->side_of[e->col]) & 1u) != 0;
+	case VXO_CORRSUBQ: case VXO_CORRIN: case VXO_EXISTS:
+		return 0;
+	default: break;
 	}
-	if (e->op == SX_E_UNARY && e->op2 == TK_MINUS) { neg = 1; e = e->a; }
-	if (e == NULL || e->op != SX_E_NUMBER || e->lit.len == 0 ||
-	    e->lit.len >= sizeof buf) return 0;
-	for (i = 0; i < (int)e->lit.len; i++) {
-		char c = e->lit.p[i];
-		if (c == '.' || c == 'e' || c == 'E') return 0;   /* real, not int */
-	}
-	memcpy(buf, e->lit.p, e->lit.len); buf[e->lit.len] = '\0';
-	*v = strtoll(buf, NULL, 10);
-	if (neg) *v = -*v;
+	if (!ap_const(e->a, sc) || !ap_const(e->b, sc)) return 0;
+	for (i = 0; i < e->nargs; i++)
+		if (e->args && !ap_const(e->args[i], sc)) return 0;
 	return 1;
 }
 
-/* Does `e` name the column `pk` (unqualified or table-qualified)? */
+/* Flip a comparison for "v op col" -> "col op' v". */
 static int
-ast_is_named_col(const sql_expr_t *e, const char *pk)
+ap_flip(int op)
 {
-	return e && e->op == SX_E_COLUMN && e->nname >= 1 &&
-	    e->name[e->nname - 1].len == strlen(pk) &&
-	    strncasecmp(e->name[e->nname - 1].p, pk, strlen(pk)) == 0;
+	switch (op) {
+	case VXO_LT: return VXO_GT;
+	case VXO_LE: return VXO_GE;
+	case VXO_GT: return VXO_LT;
+	case VXO_GE: return VXO_LE;
+	default: return op;
+	}
 }
 
-/* Tighten a rowid range [lo, hi] (per has_lo / has_hi) with any
- * primary-key comparison found among the AND-conjuncts of `w`: pk
- * = / < / <= / > / >= an int literal, or pk BETWEEN.  Non-pk and
- * non-recognized conjuncts are ignored (the row filter still enforces
- * them), so this is a safe pushdown -- it only narrows the scan.  The
- * read planner uses it to seek instead of full-scanning. */
-static void
-where_rowid_bound(const sql_expr_t *w, const char *pk,
-                  int64_t *lo, int *has_lo, int64_t *hi, int *has_hi,
-                  const vx_cell_t *binds, int nbinds)
+static int
+ap_own(const vx_expr_t *e, const struct ap_scope *sc)
 {
-	if (w == NULL) return;
-	if (w->op == SX_E_BINARY && w->op2 == TK_AND) {
-		where_rowid_bound(w->a, pk, lo, has_lo, hi, has_hi, binds, nbinds);
-		where_rowid_bound(w->b, pk, lo, has_lo, hi, has_hi, binds, nbinds);
+	return e->op == VXO_COL && e->col >= sc->base && e->col < sc->base + sc->n;
+}
+
+static void
+ap_terms(const vx_expr_t *e, struct vx_apterm *t, int *nt,
+         const struct ap_scope *sc)
+{
+	const vx_expr_t *col, *val;
+	int op;
+	if (e == NULL || *nt >= VX_AP_TERMMAX) return;
+	if (e->op == VXO_AND) {
+		ap_terms(e->a, t, nt, sc);
+		ap_terms(e->b, t, nt, sc);
 		return;
 	}
-	if (w->op == SX_E_BETWEEN && ast_is_named_col(w->a, pk)) {
-		int64_t b, c;
-		if (ast_int_lit(w->b, &b, binds, nbinds) &&
-		    ast_int_lit(w->c, &c, binds, nbinds)) {
-			if (!*has_lo || b > *lo) { *lo = b; *has_lo = 1; }
-			if (!*has_hi || c < *hi) { *hi = c; *has_hi = 1; }
+	op = e->op;
+	if (op != VXO_EQ && op != VXO_LT && op != VXO_LE && op != VXO_GT &&
+	    op != VXO_GE) return;
+	if (e->col) return;                 /* dynamic coercion at eval: skip */
+	if (ap_own(e->a, sc) && ap_const(e->b, sc)) { col = e->a; val = e->b; }
+	else if (ap_own(e->b, sc) && ap_const(e->a, sc)) {
+		col = e->b; val = e->a; op = ap_flip(op);
+	} else return;
+	t[*nt].col = col->col - sc->base; t[*nt].op = op; t[*nt].val = val;
+	(*nt)++;
+}
+
+/* Source-column index (srcrow slot) of a column name, or -1. */
+static int
+ap_col_of(char names[][64], int n, const char *name)
+{
+	int i;
+	for (i = 0; i < n; i++)
+		if (strcasecmp(names[i], name) == 0) return i;
+	return -1;
+}
+
+/*
+ * Choose the access path for one table scan with source columns
+ * names[0..n) (record origins pay[]) and compiled predicate `filter`.
+ * `order`/`norder`/`desc` are ORDER BY keys over the SOURCE row (NULL
+ * entries are not source columns), used to prefer -- and mark -- a path
+ * whose walk yields that order; minmax_col >= 0 asks for a walk ordered
+ * by that column (MIN/MAX).  Fills *ap.
+ */
+static int
+ap_choose_in(struct xsql *db, const char *table, char names[][64], int n,
+             const int *pay, const vx_expr_t *filter, vx_expr_t *const *order,
+             int norder, const int *desc, int minmax_col,
+             const struct ap_scope *sc, vx_apath_t *ap)
+{
+	struct vx_apterm t[VX_AP_TERMMAX];
+	xstore_index_info_t *ix = NULL;
+	bt_t *bt = xstore_bt_of(db);
+	int nt = 0, i, j, nix = 0, best_score = 0;
+	int pk = -1;
+
+	memset(ap, 0, sizeof *ap);
+	ap->kind = VX_AP_SCAN;
+	if (bt == NULL) return 0;
+	ap_terms(filter, t, &nt, sc);
+	for (i = 0; i < n; i++) if (pay[i] == -1) { pk = i; break; }
+
+	/* Rowid path: every term on the rowid column. */
+	if (pk >= 0) {
+		int has_eq = 0, has_rng = 0;
+		for (i = 0; i < nt && ap->nrt < 8; i++)
+			if (t[i].col == pk) {
+				ap->rtop[ap->nrt] = t[i].op;
+				ap->rtv[ap->nrt++] = t[i].val;
+				if (t[i].op == VXO_EQ) has_eq = 1; else has_rng = 1;
+			}
+		if (has_eq) best_score = 1000;
+		else if (has_rng) best_score = 50;
+		if (best_score > 0) {
+			ap->kind = VX_AP_ROWID;
+			/* A rowid walk is ascending: ORDER BY rowid ASC is free. */
+			ap->ordered = (norder == 1 && order[0] != NULL &&
+			    order[0]->op == VXO_COL && order[0]->col == pk &&
+			    !(desc[0] & 1));
 		}
-		return;
 	}
-	if (w->op == SX_E_BINARY && w->a && w->b) {
-		const sql_expr_t *lit; int op = w->op2, swapped = 0;
-		int64_t v;
-		if (ast_is_named_col(w->a, pk)) lit = w->b;
-		else if (ast_is_named_col(w->b, pk)) { lit = w->a; swapped = 1; }
-		else return;
-		if (!ast_int_lit(lit, &v, binds, nbinds)) return;
-		if (swapped) {
-			switch (op) {
-			case TK_LT: op = TK_GT; break;  case TK_GT: op = TK_LT; break;
-			case TK_LE: op = TK_GE; break;  case TK_GE: op = TK_LE; break;
-			default: break;
+	if (best_score >= 1000) return best_score;   /* a rowid point beats any index */
+
+	ix = (xstore_index_info_t *)malloc(sizeof *ix * 32);
+	if (ix == NULL) return best_score;
+	nix = xstore_index_list(bt, table, ix, 32);
+	for (j = 0; j < nix; j++) {
+		vx_apath_t c;
+		int k, score, neq = 0, rcol, ord = 0, rev = 0;
+		memset(&c, 0, sizeof c);
+		c.kind = VX_AP_INDEX;
+		c.idx_id = ix[j].idx_id;
+		for (k = 0; k < ix[j].ncol && k < VX_AP_EQMAX; k++) {
+			int sc = ap_col_of(names, n, ix[j].col[k]), m;
+			const vx_expr_t *v = NULL;
+			if (sc < 0) break;
+			for (m = 0; m < nt; m++)
+				if (t[m].col == sc && t[m].op == VXO_EQ) { v = t[m].val; break; }
+			if (v == NULL) break;
+			c.eq[neq++] = v;
+		}
+		c.neq = neq;
+		/* An optional range on the next (ASC) column. */
+		rcol = -1;
+		if (neq < ix[j].ncol && !((ix[j].descmask >> neq) & 1u)) {
+			int m;
+			rcol = ap_col_of(names, n, ix[j].col[neq]);
+			for (m = 0; rcol >= 0 && m < nt; m++) {
+				if (t[m].col != rcol) continue;
+				if ((t[m].op == VXO_GT || t[m].op == VXO_GE) && c.lo == NULL) {
+					c.lo = t[m].val; c.lo_incl = (t[m].op == VXO_GE);
+				} else if ((t[m].op == VXO_LT || t[m].op == VXO_LE) &&
+				    c.hi == NULL) {
+					c.hi = t[m].val; c.hi_incl = (t[m].op == VXO_LE);
+				}
 			}
 		}
-		switch (op) {
-		case TK_EQ:
-			if (!*has_lo || v > *lo) { *lo = v; *has_lo = 1; }
-			if (!*has_hi || v < *hi) { *hi = v; *has_hi = 1; }
-			break;
-		case TK_GT:
-			if (!*has_lo || v + 1 > *lo) { *lo = v + 1; *has_lo = 1; }
-			break;
-		case TK_GE:
-			if (!*has_lo || v > *lo) { *lo = v; *has_lo = 1; }
-			break;
-		case TK_LT:
-			if (!*has_hi || v - 1 < *hi) { *hi = v - 1; *has_hi = 1; }
-			break;
-		case TK_LE:
-			if (!*has_hi || v < *hi) { *hi = v; *has_hi = 1; }
-			break;
-		default: break;
+		/* Order the walk provides: index columns neq.. in key order (a
+		 * reverse walk flips every direction). */
+		if (norder > 0 && neq + norder <= ix[j].ncol) {
+			int ok = 1, dir = -1;
+			for (k = 0; k < norder && ok; k++) {
+				int ic = neq + k;
+				int kdesc = (desc[k] & 1) ^ (int)((ix[j].descmask >> ic) & 1u);
+				if (order[k] == NULL || order[k]->op != VXO_COL ||
+				    (desc[k] & 2) ||   /* explicit NULLS placement */
+				    order[k]->col != ap_col_of(names, n, ix[j].col[ic]))
+					ok = 0;
+				else if (dir < 0) dir = kdesc;
+				else if (dir != kdesc) ok = 0;
+			}
+			if (ok) { ord = 1; rev = dir; }
+		}
+		if (minmax_col >= 0 && neq < ix[j].ncol &&
+		    ap_col_of(names, n, ix[j].col[neq]) == minmax_col) {
+			ord = 1;
+			rev = (int)((ix[j].descmask >> neq) & 1u);  /* ascending value walk */
+		}
+		if (neq == 0 && c.lo == NULL && c.hi == NULL && !ord) continue;
+		/* Score: a fully bound unique key is a point; then equality
+		 * columns; a range and a provided order break ties. */
+		if (ix[j].unique && neq == ix[j].ncol) score = 900;
+		else score = 100 * neq + ((c.lo || c.hi) ? 40 : 0) + (ord ? 20 : 0) +
+		    (ix[j].unique ? 5 : 0) - ix[j].ncol;
+		if (neq == 0 && c.lo == NULL && c.hi == NULL) score = 10;  /* order only */
+		if (score > best_score) {
+			c.reverse = rev;
+			c.ordered = ord;
+			*ap = c;
+			best_score = score;
 		}
 	}
+	free(ix);
+	return best_score;
 }
 
-/* Extract a string literal's bytes from an AST expression (SX_E_STRING),
- * returning 1 with p / n set (bytes are the unquoted content, aliasing
- * the AST). */
-static int
-ast_str_lit(const sql_expr_t *e, const char **p, int *n)
+/* Single-table form: the bounds may read no column. */
+static void
+ap_choose(struct xsql *db, const char *table, char names[][64], int n,
+          const int *pay, const vx_expr_t *filter, vx_expr_t *const *order,
+          int norder, const int *desc, int minmax_col, vx_apath_t *ap)
 {
-	if (e == NULL || e->op != SX_E_STRING) return 0;
-	*p = e->lit.p; *n = (int)e->lit.len;
-	return 1;
+	struct ap_scope sc;
+	sc.base = 0; sc.n = n; sc.side_of = NULL; sc.placed = 0;
+	(void)ap_choose_in(db, table, names, n, pay, filter, order, norder, desc,
+	    minmax_col, &sc, ap);
 }
 
-/* Find an equality "col = <literal>" on an INDEXED non-PK column among
- * the AND-conjuncts of `w`, and if found seek the index for the matching
- * base rowids.  Fills *out_rowids (malloc'd, caller frees) / *out_n and
- * returns 1; returns 0 when no usable indexed equality exists (caller
- * falls back to the range scan).  `db`/`table` locate the index; the
- * WHERE filter still runs on each fetched row, so an over-broad match is
- * always corrected.  Single indexed equality, first match wins. */
+/* An expression value for a bound: evaluated against no row (it is
+ * constant for the scan).  NULL -> the comparison can never be true. */
 static int
-where_index_seek(struct xsql *db, const char *table, const sql_expr_t *w,
-                 const vx_cell_t *binds, int nbinds,
-                 int64_t **out_rowids, int *out_n)
+ap_val(const struct vx_stmt *st, const vx_expr_t *e, vx_cell_t *out,
+       struct vx_arena_blk **arena)
 {
-	bt_t *bt = xstore_bt_of(db);
-	const sql_expr_t *col = NULL, *lit = NULL;
-	char cname[64];
-	uint32_t idx_id = 0;
-	int vclass; int64_t iv = 0; double rv = 0; const char *sp = NULL; int sn = 0;
-	int cap = 4096, n;
-	int64_t *ids;
+	eval(st, e, st->srcrow, arena, out);   /* a join bound reads outer slots */
+	return out->type != VX_NULL;
+}
 
-	if (bt == NULL || w == NULL) return 0;
-	/* Recurse into AND to inspect each conjunct. */
-	if (w->op == SX_E_BINARY && w->op2 == TK_AND) {
-		if (where_index_seek(db, table, w->a, binds, nbinds, out_rowids, out_n)) return 1;
-		return where_index_seek(db, table, w->b, binds, nbinds, out_rowids, out_n);
+/* Convert a bound cell to an index value; 0 if not encodable. */
+static int
+ap_xval(const vx_cell_t *c, xstore_val_t *x)
+{
+	memset(x, 0, sizeof *x);
+	switch (c->type) {
+	case VX_INT:  x->cls = XSTORE_C_INT; x->i = c->i; return 1;
+	case VX_REAL: x->cls = XSTORE_C_REAL; x->r = c->r; return 1;
+	case VX_TEXT: x->cls = XSTORE_C_TEXT; x->p = c->bytes; x->n = (int)c->nbytes; return 1;
+	case VX_BLOB: x->cls = XSTORE_C_BLOB; x->p = c->bytes; x->n = (int)c->nbytes; return 1;
+	default: return 0;
 	}
-	if (w->op != SX_E_BINARY || w->op2 != TK_EQ || !w->a || !w->b) return 0;
-	/* Identify the column side and the literal side. */
-	if (w->a->op == SX_E_COLUMN && w->a->nname >= 1) { col = w->a; lit = w->b; }
-	else if (w->b->op == SX_E_COLUMN && w->b->nname >= 1) { col = w->b; lit = w->a; }
-	else return 0;
-	if (col->name[col->nname - 1].len == 0 ||
-	    col->name[col->nname - 1].len >= sizeof cname) return 0;
-	memcpy(cname, col->name[col->nname - 1].p, col->name[col->nname - 1].len);
-	cname[col->name[col->nname - 1].len] = '\0';
-	if (!xstore_index_lookup(bt, table, cname, &idx_id)) return 0;
-	/* Typed literal: an AST integer / string literal, or a bound ?
-	 * parameter (TPROC-C drives its lookups with bound params). */
-	if (lit->op == SX_E_PARAM) {
-		int ord = (int)lit->ival;
-		const vx_cell_t *v;
-		if (binds == NULL || ord < 1 || ord > nbinds) return 0;
-		v = &binds[ord - 1];
-		if (v->type == VX_INT) { vclass = XSTORE_C_INT; iv = v->i; }
-		else if (v->type == VX_TEXT) { vclass = XSTORE_C_TEXT; sp = (const char *)v->bytes; sn = (int)v->nbytes; }
-		else if (v->type == VX_BLOB) { vclass = XSTORE_C_BLOB; sp = (const char *)v->bytes; sn = (int)v->nbytes; }
-		else return 0;   /* REAL / NULL param: not seek-encoded here */
-	} else if (ast_int_lit(lit, &iv, NULL, 0)) {
-		vclass = XSTORE_C_INT;
-	} else if (ast_str_lit(lit, &sp, &sn)) {
-		vclass = XSTORE_C_TEXT;
-	} else return 0;
-	ids = (int64_t *)malloc((size_t)cap * sizeof *ids);
-	if (ids == NULL) return 0;
-	n = xstore_index_seek_eq(bt, idx_id, vclass, iv, rv,
-	    (const uint8_t *)sp, sn, ids, cap);
-	if (n < 0) { free(ids); return 0; }   /* overflow: fall back to a scan */
-	*out_rowids = ids; *out_n = n;
-	return 1;
+}
+
+/* Open the row source for path `ap` over st->table.  A rowid bound that
+ * is not an integer is folded conservatively (a REAL rounds outward, a
+ * TEXT/BLOB bound leaves that end open; the filter still decides). */
+static int
+src_open(struct vx_stmt *st, const char *table, const vx_apath_t *ap,
+         vx_src_t *s)
+{
+	struct vx_arena_blk *ar = NULL;
+	vx_cell_t v;
+	int i, rc = 0;
+	memset(s, 0, sizeof *s);
+	s->open = 1;
+	if (ap->kind == VX_AP_INDEX) {
+		xstore_val_t eq[VX_AP_EQMAX], lo, hi;
+		vx_cell_t eqc[VX_AP_EQMAX], loc, hic;
+		int haslo = 0, hashi = 0;
+		for (i = 0; i < ap->neq; i++) {
+			if (!ap_val(st, ap->eq[i], &eqc[i], &ar)) { s->empty = 1; goto out; }
+			if (!ap_xval(&eqc[i], &eq[i])) goto scan;
+		}
+		if (ap->lo != NULL) {
+			if (!ap_val(st, ap->lo, &loc, &ar)) { s->empty = 1; goto out; }
+			if (!ap_xval(&loc, &lo)) goto scan;
+			haslo = 1;
+		}
+		if (ap->hi != NULL) {
+			if (!ap_val(st, ap->hi, &hic, &ar)) { s->empty = 1; goto out; }
+			if (!ap_xval(&hic, &hi)) goto scan;
+			hashi = 1;
+		}
+		s->iscan = xstore_iscan_open((struct xsql *)st->db, table,
+		    ap->idx_id, eq, ap->neq, haslo ? &lo : NULL, ap->lo_incl,
+		    hashi ? &hi : NULL, ap->hi_incl, ap->reverse);
+		if (s->iscan != NULL) { s->ordered = ap->ordered; goto out; }
+		goto scan;
+	}
+	if (ap->kind == VX_AP_ROWID) {
+		int64_t lo = 0, hi = 0;
+		int has_lo = 0, has_hi = 0;
+		for (i = 0; i < ap->nrt; i++) {
+			int64_t fl, ce, nlo = 0, nhi = 0;
+			int setlo = 0, sethi = 0;
+			if (!ap_val(st, ap->rtv[i], &v, &ar)) { s->empty = 1; goto out; }
+			if (v.type == VX_INT) {
+				fl = ce = v.i;
+			} else if (v.type == VX_REAL && v.r > -9.2e18 && v.r < 9.2e18) {
+				fl = (int64_t)floor(v.r); ce = (int64_t)ceil(v.r);
+			} else continue;               /* text/blob bound: leave open */
+			switch (ap->rtop[i]) {
+			case VXO_EQ:
+				if (fl != ce) { s->empty = 1; goto out; }
+				nlo = nhi = fl; setlo = sethi = 1; break;
+			case VXO_GT:
+				if (fl == INT64_MAX) { s->empty = 1; goto out; }
+				nlo = fl + 1; setlo = 1; break;
+			case VXO_GE: nlo = ce; setlo = 1; break;
+			case VXO_LT:
+				if (ce == INT64_MIN) { s->empty = 1; goto out; }
+				nhi = ce - 1; sethi = 1; break;
+			case VXO_LE: nhi = fl; sethi = 1; break;
+			default: break;
+			}
+			if (setlo && (!has_lo || nlo > lo)) { lo = nlo; has_lo = 1; }
+			if (sethi && (!has_hi || nhi < hi)) { hi = nhi; has_hi = 1; }
+		}
+		if (has_lo && has_hi && lo > hi) { s->empty = 1; goto out; }
+		s->scan = xstore_scan_open_txn((struct xsql *)st->db, table,
+		    st->snap, lo, has_lo, hi, has_hi);
+		if (s->scan == NULL) rc = -1;
+		s->ordered = ap->ordered;   /* txn scans merge buffered rows in order */
+		goto out;
+	}
+scan:
+	s->scan = xstore_scan_open_txn((struct xsql *)st->db, table, st->snap,
+	    0, 0, 0, 0);
+	if (s->scan == NULL) rc = -1;
+out:
+	arena_free(ar);
+	return rc;
+}
+
+/* Next candidate row: 1 with the row, 0 at the end, <0 on error. */
+static int
+src_next(vx_src_t *s, int64_t *rowid, const uint8_t **rec, int *reclen)
+{
+	if (s->empty) return 0;
+	if (s->iscan != NULL) return xstore_iscan_next(s->iscan, rowid, rec, reclen);
+	if (s->scan != NULL) return xstore_scan_next(s->scan, rowid, rec, reclen);
+	return 0;
+}
+
+static void
+src_close(vx_src_t *s)
+{
+	if (s->iscan != NULL) xstore_iscan_close(s->iscan);
+	if (s->scan != NULL) xstore_scan_close(s->scan);
+	memset(s, 0, sizeof *s);
+}
+
+/* Lazily open the statement's single-table source on first use. */
+static int
+st_src_next(struct vx_stmt *st, int64_t *rowid, const uint8_t **rec, int *reclen)
+{
+	if (!st->src.open && src_open(st, st->table, &st->ap, &st->src) != 0) return -1;
+	return src_next(&st->src, rowid, rec, reclen);
+}
+
+/* The ORDER BY keys of a plain single-table plan as source-column
+ * expressions (an output-column reference resolves through its
+ * projection), for ap_choose. */
+static void
+ap_order_keys(const struct vx_stmt *st, vx_expr_t **keys)
+{
+	int k;
+	for (k = 0; k < st->norder && k < 16; k++) {
+		if (st->order_key && st->order_key[k] != NULL) keys[k] = st->order_key[k];
+		else if (st->order_outcol && st->order_outcol[k] > 0 &&
+		    st->order_outcol[k] <= st->nout)
+			keys[k] = st->proj[st->order_outcol[k] - 1];
+		else keys[k] = NULL;
+	}
 }
 
 int
@@ -4352,44 +4588,6 @@ vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 	if (resolve_schema(db, tabbuf, &nv, st->src_pay) != 0)
 		goto fallback;
 
-	/* Rowid-range pushdown (the minimal planner): if the WHERE pins the
-	 * primary key (the source column whose origin is the rowid) to a
-	 * range, bound the scan to it so a point/range read seeks instead of
-	 * full-scanning.  The WHERE filter still runs unchanged. */
-	{
-		int pk = -1, i;
-		for (i = 0; i < nv.n; i++) if (st->src_pay[i] == -1) { pk = i; break; }
-		if (pk >= 0 && sel->where)
-			where_rowid_bound(sel->where, nv.names[pk],
-			                  &st->scan_lo, &st->scan_has_lo,
-			                  &st->scan_hi, &st->scan_has_hi,
-			                  binds, nbinds);
-	}
-
-	/* Secondary-index equality seek: if the WHERE has an equality on an
-	 * indexed non-PK column (literal or bound param) AND the PK was not
-	 * already pinned to a point, seek the index for the candidate rowids
-	 * and point-fetch them instead of scanning.  The WHERE filter still
-	 * runs on each fetched row, so an index yielding extra candidates is
-	 * always corrected. */
-	if (sel->where && !(st->scan_has_lo && st->scan_has_hi &&
-	    st->scan_lo == st->scan_hi)) {
-		int64_t *ids = NULL; int nids = 0;
-		uint32_t stid = 0;
-		/* The candidate list comes from the COMMITTED index: a txn that
-		 * wrote this table could miss its own rows (sqlite-audit gap #8
-		 * item 5), so it scans instead. */
-		if (xstore_table_id(st->bt, tabbuf, &stid) &&
-		    xstore_txn_table_dirty(db, stid)) {
-			/* fall through to the range scan */
-		} else if (where_index_seek(db, tabbuf, sel->where, binds, nbinds, &ids, &nids)) {
-			st->idx_seek = 1;
-			st->idx_rowids = ids;
-			st->idx_nrow = nids;
-			st->idx_cur = 0;
-		}
-	}
-
 	st->nout = nproj;
 	if (nproj > 32) goto fallback;   /* worker out[] / result row bound */
 	st->proj = (vx_expr_t **)calloc((size_t)(nproj > 0 ? nproj : 1),
@@ -4539,6 +4737,15 @@ vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 	 * leave that to the VDBE. */
 	if (st->distinct && (st->limit >= 0 || st->offset > 0) && st->norder == 0)
 		goto fallback;
+
+	/* Access path: rowid range, or an index prefix (+ range), chosen on
+	 * the compiled WHERE; an index walk can also provide the ORDER BY. */
+	{
+		vx_expr_t *okeys[16];
+		ap_order_keys(st, okeys);
+		ap_choose(db, tabbuf, nv.names, nv.n, st->src_pay, st->filter,
+		    okeys, st->norder, st->order_desc, -1, &st->ap);
+	}
 
 	st->srcrow = (vx_cell_t *)calloc((size_t)(st->nsrc_col > 0 ? st->nsrc_col : 1),
 	                                 sizeof(vx_cell_t));
@@ -5181,6 +5388,37 @@ vx_try_prepare_agg(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	 * a bare LIMIT with no ORDER BY; fall back ORDER BY + LIMIT/OFFSET. */
 	if (st->norder > 0 && (st->limit >= 0 || st->offset > 0))
 		goto fallback;
+
+	/* MIN/MAX shortcut: no GROUP BY / HAVING, and every aggregate is
+	 * MIN(c) (or every one MAX(c)) of the same bare column c.  A walk
+	 * ordered by c (ascending for MIN, descending for MAX) stops at the
+	 * first row that passes the WHERE with a non-NULL c: it holds the
+	 * answer (SQLite's min/max optimization).  Computed outputs over the
+	 * aggregates (COALESCE(MIN(x),0)) are fine; they read the same slot. */
+	{
+		int mmcol = -1, kind = 0, ok = (ap->ngrp == 0 && ap->having == NULL &&
+		    nagg > 0), oi;
+		for (oi = 0; ok && oi < ap->nout_all; oi++) {
+			if (!ap->out[oi].is_agg) {
+				if (!ap->out[oi].computed) ok = 0;
+				continue;
+			}
+			if ((ap->out[oi].kind != VXA_MIN && ap->out[oi].kind != VXA_MAX) ||
+			    ap->out[oi].arg == NULL || ap->out[oi].arg->op != VXO_COL ||
+			    (kind && kind != (int)ap->out[oi].kind) ||
+			    (mmcol >= 0 && mmcol != ap->out[oi].arg->col))
+				ok = 0;
+			else { kind = (int)ap->out[oi].kind; mmcol = ap->out[oi].arg->col; }
+		}
+		if (!ok) mmcol = -1;
+		ap_choose(db, tabbuf, nv.names, nv.n, st->src_pay, st->filter,
+		    NULL, 0, NULL, mmcol, &st->ap);
+		if (mmcol >= 0 && st->ap.ordered) {
+			if (kind == VXA_MAX) st->ap.reverse = !st->ap.reverse;
+			st->ap_minmax = 1;
+		}
+		st->ap.ordered = (mmcol >= 0) ? st->ap.ordered : 0;
+	}
 	st->srcrow = (vx_cell_t *)calloc((size_t)(st->nsrc_col > 0 ? st->nsrc_col : 1),
 	                                 sizeof(vx_cell_t));
 	if (!st->srcrow) goto oom;
@@ -5536,7 +5774,6 @@ vx_try_prepare_join(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 			if (comp.fail) goto fallback;
 		}
 	}
-
 	/* ORDER BY / LIMIT / OFFSET: order keys reference OUTPUT columns (a
 	 * positional integer or a select item matched by expr_same), applied
 	 * as a post-collection sort in collect_serial -- deterministic for a
@@ -5799,7 +6036,6 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 			if (comp.fail) goto fallback;
 		}
 	}
-
 	/* ORDER BY / LIMIT / OFFSET over the N-way join output, applied as a
 	 * post-collection sort (join_ordered_materialize), exactly like the
 	 * 2-table join.  Order keys reference OUTPUT columns (an ordinal, an
@@ -6406,40 +6642,9 @@ next_chunk(struct vx_stmt *st, int *done)
 	                               (size_t)(c->ncol > 0 ? c->ncol : 1));
 	if (!c->cells) { free(c); return NULL; }
 
-	/* Open the storage scan lazily on first chunk (storage path only;
-	 * the derived-table path streams st->derived_res instead).  When an
-	 * index seek is active we do NOT open a range scan: rows are
-	 * point-fetched by candidate rowid in the loop below. */
-	if (st->derived_res == NULL && st->scan == NULL && !st->idx_seek) {
-		st->scan = xstore_scan_open_txn((struct xsql *)st->db, st->table, st->snap,
-		                            st->scan_lo, st->scan_has_lo,
-		                            st->scan_hi, st->scan_has_hi);
-		if (st->scan == NULL) { chunk_free(c); return NULL; }
-	}
-
 	while (c->nrow < c->cap) {
 		int j;
-		if (st->idx_seek) {
-			/* Index seek: point-fetch each candidate rowid through the
-			 * normal MVCC path (visibility + read-your-writes decide it). */
-			int64_t rowid; const uint8_t *rec = NULL; int reclen = 0;
-			xstore_scan_t *ps;
-			int got = 0;
-			if (st->idx_cur >= st->idx_nrow) { *done = 1; break; }
-			rowid = st->idx_rowids[st->idx_cur++];
-			ps = xstore_scan_open_txn((struct xsql *)st->db, st->table,
-			    st->snap, rowid, 1, rowid, 1);
-			if (ps != NULL) {
-				int64_t rr; const uint8_t *pr; int pl;
-				if (xstore_scan_next(ps, &rr, &pr, &pl) == 1) {
-					rec = pr; reclen = pl; rowid = rr; got = 1;
-				}
-				/* copy the row out before closing the point scan */
-				if (got) read_rec_row(st, rowid, rec, reclen, &c->arena);
-				xstore_scan_close(ps);
-			}
-			if (!got) continue;   /* rowid not visible: index entry was stale */
-		} else if (st->derived_res != NULL) {
+		if (st->derived_res != NULL) {
 			/* Derived table: take the next materialized inner row into
 			 * srcrow (a shallow copy; the bytes live in the inner result's
 			 * arena, which outlives this scan via st->derived_res). */
@@ -6450,7 +6655,7 @@ next_chunk(struct vx_stmt *st, int *done)
 			st->derived_cur++;
 		} else {
 			int64_t rowid; const uint8_t *rec; int reclen;
-			rc = xstore_scan_next(st->scan, &rowid, &rec, &reclen);
+			rc = st_src_next(st, &rowid, &rec, &reclen);
 			if (rc == 0) { *done = 1; break; }
 			if (rc != 1) { chunk_free(c); return NULL; }
 			read_rec_row(st, rowid, rec, reclen, &c->arena);
@@ -6492,17 +6697,11 @@ agg_materialize(struct vx_stmt *st)
 	int b;
 
 	if (htab_init(&st->ht, ap->ngrp, ap->nagg) != 0) return -1;
-	if (st->scan == NULL) {
-		st->scan = xstore_scan_open_txn((struct xsql *)st->db, st->table, st->snap,
-		                            st->scan_lo, st->scan_has_lo,
-		                            st->scan_hi, st->scan_has_hi);
-		if (st->scan == NULL) return -1;
-	}
 
 	/* Drain. */
 	for (;;) {
 		int64_t rowid; const uint8_t *rec; int reclen;
-		int step = xstore_scan_next(st->scan, &rowid, &rec, &reclen);
+		int step = st_src_next(st, &rowid, &rec, &reclen);
 		vx_cell_t keys[16];
 		vx_grp_t *grp;
 		int ai;
@@ -6536,6 +6735,9 @@ agg_materialize(struct vx_stmt *st)
 			}
 			ai++;
 		}
+		/* MIN/MAX on a walk ordered by the argument: the first non-NULL
+		 * value is the answer. */
+		if (st->ap_minmax && st->src.ordered && grp->accs[0].seen) break;
 	}
 	arena_free(rowarena);
 
@@ -6655,6 +6857,8 @@ struct sort_ctx {
  * slot was overwritten and then NULLed by a concurrent sort: SIGSEGV in
  * sort_index_cmp under a 4-loop reader workload.) */
 static _Thread_local struct sort_ctx *g_sort_ctx;
+static _Atomic uint64_t g_vx_sorts;   /* sorts run (metric) */
+uint64_t vx_sort_count(void) { return atomic_load(&g_vx_sorts); }
 
 static int
 sort_index_cmp(const void *pa, const void *pb)
@@ -6796,23 +7000,28 @@ ordered_materialize(struct vx_stmt *st)
 	int topn = (st->limit >= 0 && nkey > 0 && !st->distinct);
 	int topn_full = 0;
 	int topn_worst = -1;   /* cached worst-kept slot; -1 = recompute */
+	int presorted;
 	if (topn) {
 		topn_k = st->offset + st->limit;
 		if (topn_k < 0) topn = 0;                 /* overflow guard */
 		else if (topn_k == 0) topn_k = 1;         /* keep room for >=1 */
 	}
 
+	/* An index walk that yields the ORDER BY needs no sort, and a LIMIT
+	 * over it (or over no ORDER BY at all) stops once OFFSET + LIMIT rows
+	 * passed the WHERE. */
+	if (!st->src.open && src_open(st, st->table, &st->ap, &st->src) != 0) goto cleanup;
+	presorted = (nkey == 0 || st->src.ordered);
+	if (presorted) topn = 0;
+
 	for (;;) {
 		int64_t rowid; const uint8_t *rec; int reclen;
 		int step;
 		vx_cell_t outrow[32], keyrow[16];
-		if (st->scan == NULL) {
-			st->scan = xstore_scan_open_txn((struct xsql *)st->db, st->table, st->snap,
-		                            st->scan_lo, st->scan_has_lo,
-		                            st->scan_hi, st->scan_has_hi);
-			if (st->scan == NULL) goto cleanup;
-		}
-		step = xstore_scan_next(st->scan, &rowid, &rec, &reclen);
+		if (presorted && !st->distinct && st->limit >= 0 &&
+		    (int64_t)nrow >= st->offset + st->limit)
+			break;
+		step = st_src_next(st, &rowid, &rec, &reclen);
 		if (step == 0) break;
 		if (step != 1) goto cleanup;
 
@@ -6892,9 +7101,10 @@ ordered_materialize(struct vx_stmt *st)
 	idx = (int *)malloc(sizeof(int) * (size_t)(nrow > 0 ? nrow : 1));
 	if (!idx) goto cleanup;
 	for (j = 0; j < nrow; j++) idx[j] = j;
-	if (nkey > 0) {
+	if (nkey > 0 && !presorted) {
 		struct sort_ctx sc; sc.keys = keys; sc.nkey = nkey; sc.desc = st->order_desc;
 		g_sort_ctx = &sc;
+		atomic_fetch_add(&g_vx_sorts, 1);
 		qsort(idx, (size_t)nrow, sizeof(int), sort_index_cmp);
 		g_sort_ctx = NULL;
 	}
@@ -7330,6 +7540,7 @@ join_ordered_materialize(struct vx_stmt *st)
 				    rows[(size_t)p * (size_t)ncollect + (size_t)(st->order_outcol[j] - 1)];
 		sc.keys = keys; sc.nkey = nkey; sc.desc = st->order_desc;
 		g_sort_ctx = &sc;
+		atomic_fetch_add(&g_vx_sorts, 1);
 		qsort(idx, (size_t)nrow, sizeof(int), sort_index_cmp);
 		g_sort_ctx = NULL;
 		free(keys);
@@ -7487,7 +7698,7 @@ vx_finalize(vx_stmt_t *st)
 {
 	if (st == NULL) return;
 	if (st->scan) xstore_scan_close(st->scan);
-	if (st->idx_rowids) free(st->idx_rowids);
+	src_close(&st->src);
 	if (st->derived_res) vx_result_free(st->derived_res);
 	if (st->chunk) chunk_free(st->chunk);
 	if (st->plan_arena) arena_free(st->plan_arena);
@@ -7803,7 +8014,7 @@ is_parallelizable_plan(const vx_stmt_t *plan)
 {
 	return plan->norder == 0 && plan->limit < 0 && plan->offset <= 0 &&
 	    plan->join == NULL && plan->bt != NULL && !plan->distinct &&
-	    !plan->idx_seek &&   /* an index seek is a serial point-fetch */
+	    plan->ap.kind == VX_AP_SCAN &&   /* a seek is a serial point/range walk */
 	    (plan->agg == NULL || (plan->agg->having == NULL && !plan->agg->has_proj &&
 	                           !plan->agg->has_gc));
 }
@@ -8217,14 +8428,6 @@ encode_payload(const vx_cell_t *cells, int npay, uint8_t *out, int cap)
 #define XS_NATIVE_MAX_ROWS  100000
 
 /* Does `e` name the primary-key column (unqualified or table-qualified)? */
-static int
-is_pk_col(const sql_expr_t *e, const char *pkname)
-{
-	return e != NULL && e->op == SX_E_COLUMN && e->nname >= 1 &&
-	    e->name[e->nname - 1].len == strlen(pkname) &&
-	    strncasecmp(e->name[e->nname - 1].p, pkname, strlen(pkname)) == 0;
-}
-
 /* Evaluate a literal expression to an integer, or fail. */
 static int
 lit_int(const sql_expr_t *e, int64_t *out, const vx_cell_t *binds, int nbinds)
@@ -8239,89 +8442,15 @@ lit_int(const sql_expr_t *e, int64_t *out, const vx_cell_t *binds, int nbinds)
 	return ok;
 }
 
-/* Recognize a WHERE clause the native write path can turn into an
- * inclusive rowid range over the primary key: no WHERE (whole table),
- * pk = / pk < / pk <= / pk > / pk >= an int literal, or pk BETWEEN
- * <int> AND <int>.  Returns 1 with lo / hi set to the inclusive bound
- * and has_lo / has_hi marking which bounds are present; 0 otherwise
- * (the statement goes to the VDBE).  An equality yields lo == hi.  This
- * is a SUPERSET-safe recognizer: any predicate
- * it does not understand falls back. */
-static int
-where_pk_range(const sql_expr_t *w, const char *pkname,
-               int64_t *lo, int *has_lo, int64_t *hi, int *has_hi,
-               const vx_cell_t *binds, int nbinds)
-{
-	*has_lo = *has_hi = 0;
-	*lo = 0; *hi = 0;
-	if (w == NULL) return 1;   /* no WHERE: the whole table */
-
-	if (w->op == SX_E_BETWEEN) {
-		int64_t b, c;
-		if (!is_pk_col(w->a, pkname)) return 0;
-		if (!lit_int(w->b, &b, binds, nbinds) || !lit_int(w->c, &c, binds, nbinds)) return 0;
-		*lo = b; *has_lo = 1; *hi = c; *has_hi = 1;
-		return 1;
-	}
-	if (w->op == SX_E_BINARY && w->a && w->b) {
-		const sql_expr_t *col, *lit;
-		int op = w->op2, swapped = 0;
-		int64_t v;
-		if (is_pk_col(w->a, pkname)) { col = w->a; lit = w->b; }
-		else if (is_pk_col(w->b, pkname)) { col = w->b; lit = w->a; swapped = 1; }
-		else return 0;
-		(void)col;
-		if (!lit_int(lit, &v, binds, nbinds)) return 0;
-		/* Normalize the operator if the column was on the right. */
-		if (swapped) {
-			switch (op) {
-			case TK_LT: op = TK_GT; break;  case TK_GT: op = TK_LT; break;
-			case TK_LE: op = TK_GE; break;  case TK_GE: op = TK_LE; break;
-			default: break;   /* EQ unchanged */
-			}
-		}
-		switch (op) {
-		case TK_EQ: *lo = v; *has_lo = 1; *hi = v; *has_hi = 1; return 1;
-		case TK_LT: *hi = v - 1; *has_hi = 1; return 1;
-		case TK_LE: *hi = v;     *has_hi = 1; return 1;
-		case TK_GT: *lo = v + 1; *has_lo = 1; return 1;
-		case TK_GE: *lo = v;     *has_lo = 1; return 1;
-		default: return 0;
-		}
-	}
-	return 0;
-}
-
-/* Collect up to `cap` rowids visible in the pk range [lo,hi] (bounds per
- * has_lo/has_hi) into `out`.  Returns the count, or -1 if more than
- * `cap` rows match (the caller falls back so a huge range does not run
- * unbounded natively).  -2 on a scan error. */
-static int
-collect_rowids(struct xsql *db, bt_t *bt, const char *table, int64_t lo, int has_lo,
-               int64_t hi, int has_hi, int64_t *out, int cap)
-{
-	xstore_scan_t *s;
-	int64_t rid; const uint8_t *rec; int reclen, n = 0, step;
-	(void)bt;
-	s = xstore_scan_open_txn(db, table, 0, lo, has_lo, hi, has_hi);
-	if (s == NULL) return -2;
-	while ((step = xstore_scan_next(s, &rid, &rec, &reclen)) == 1) {
-		if (n >= cap) { xstore_scan_close(s); return -1; }
-		out[n++] = rid;
-	}
-	xstore_scan_close(s);
-	return step < 0 ? -2 : n;
-}
-
-/* Collect rowids matching an arbitrary WHERE predicate, by compiling the
- * predicate with vexec's own expression compiler and scanning the whole
- * table evaluating it per row -- the general (non-pk) DELETE/UPDATE
- * filter path.  Returns the count into `out` (<= cap), -1 if more than
- * cap rows match OR the predicate is not vexec-compilable (clean VDBE
- * fallback), or -2 on a scan/setup error.  The affinity gate inside the
- * compiler guarantees the predicate is evaluated with SQLite semantics
- * or rejected.  rowid_out, when non-NULL, also captures whether a row
- * existed at all (unused here; the scan only yields live rows). */
+/* Collect rowids matching a WHERE predicate (NULL = every row): the
+ * predicate is compiled with vexec's own expression compiler (affinity
+ * gate on: SQLite semantics or rejected), the access-path chooser picks
+ * a rowid range or index prefix from it, and every candidate row is
+ * re-checked against the full predicate.  The rows come from the
+ * read-your-writes view at the statement snapshot (xstore_stmt_begin).
+ * Returns the count into `out` (<= cap), -1 if more than cap rows match
+ * OR the predicate is not compilable (the statement is declined), or -2
+ * on a scan/setup error. */
 static int
 collect_matching(struct xsql *db, bt_t *bt, const char *table,
                  const sql_expr_t *where, int64_t *out, int cap,
@@ -8330,55 +8459,55 @@ collect_matching(struct xsql *db, bt_t *bt, const char *table,
 	struct vx_stmt *st;
 	struct vx_compiler comp;
 	struct namevec nv;
-	xstore_scan_t *s = NULL;
 	struct vx_arena_blk *rowarena = NULL;
 	int64_t rid; const uint8_t *rec; int reclen, step;
 	int n = 0, ret;
-
-	if (where == NULL) return -1;   /* no WHERE -> the pk-range path handles it */
 
 	st = (struct vx_stmt *)calloc(1, sizeof *st);
 	if (st == NULL) return -2;
 	st->db = db;
 	st->bt = bt;
 	st->snap = 0;
+	st->binds = binds; st->nbinds = nbinds;
 	snprintf(st->table, sizeof st->table, "%s", table);
 
 	memset(&nv, 0, sizeof nv);
 	comp.st = st; comp.nv = &nv; comp.jc = NULL; comp.fail = 0;
 	comp.binds = binds; comp.nbinds = nbinds;
 
-	/* Pass 1: collect the predicate's columns. */
-	if (collect_columns(&nv, where) != 0 || nv.n == 0 || nv.n > 32) {
-		ret = -1; goto out;
+	if (where != NULL) {
+		/* Pass 1: collect the predicate's columns. */
+		if (collect_columns(&nv, where) != 0 || nv.n == 0 || nv.n > 32) {
+			ret = -1; goto out;
+		}
+		st->nsrc_col = nv.n;
+		if (resolve_schema(db, table, &nv, st->src_pay) != 0) { ret = -1; goto out; }
+		/* Pass 2: compile the predicate with the affinity gate active. */
+		comp.fail = 0;
+		st->filter = compile_expr(&comp, where);
+		if (comp.fail || st->filter == NULL || nv.n != st->nsrc_col) {
+			ret = -1; goto out;
+		}
+		ap_choose(db, table, nv.names, nv.n, st->src_pay, st->filter,
+		    NULL, 0, NULL, -1, &st->ap);
 	}
-	st->nsrc_col = nv.n;
-	if (resolve_schema(db, table, &nv, st->src_pay) != 0) { ret = -1; goto out; }
-
-	/* Pass 2: compile the predicate with the affinity gate active. */
-	comp.fail = 0;
-	st->filter = compile_expr(&comp, where);
-	if (comp.fail || st->filter == NULL) { ret = -1; goto out; }
-
-	st->srcrow = (vx_cell_t *)calloc((size_t)nv.n, sizeof(vx_cell_t));
+	st->srcrow = (vx_cell_t *)calloc((size_t)(nv.n > 0 ? nv.n : 1), sizeof(vx_cell_t));
 	if (st->srcrow == NULL) { ret = -2; goto out; }
 
-	s = xstore_scan_open_txn((struct xsql *)db, table, 0, 0, 0, 0, 0);   /* whole table, read-your-writes */
-	if (s == NULL) { ret = -2; goto out; }
-	while ((step = xstore_scan_next(s, &rid, &rec, &reclen)) == 1) {
-		int b;
+	while ((step = st_src_next(st, &rid, &rec, &reclen)) == 1) {
 		arena_free(rowarena); rowarena = NULL;   /* per-row scratch */
-		read_rec_row(st, rid, rec, reclen, &rowarena);
-		b = eval_bool(st, st->filter, st->srcrow, &rowarena);
-		if (b == 1) {
-			if (n >= cap) { ret = -1; goto out; }   /* too many -> VDBE */
-			out[n++] = rid;
+		if (st->filter != NULL) {
+			read_rec_row(st, rid, rec, reclen, &rowarena);
+			if (eval_bool(st, st->filter, st->srcrow, &rowarena) != 1)
+				continue;
 		}
+		if (n >= cap) { ret = -1; goto out; }   /* too many: decline */
+		out[n++] = rid;
 	}
 	ret = (step < 0) ? -2 : n;
 
 out:
-	if (s) xstore_scan_close(s);
+	src_close(&st->src);
 	arena_free(rowarena);
 	if (st->plan_arena) arena_free(st->plan_arena);
 	free(st->srcrow);
@@ -8654,20 +8783,12 @@ vx_run_write_p(struct xsql *db, const char *sql,
 
 	/* ---- DELETE [WHERE pk-range or general predicate] ---------------- */
 	if (root->kind == SQL_KIND_DELETE) {
-		int64_t lo, hi; int has_lo, has_hi;
 		int64_t *rids;
 		int nr, i;
 		rids = (int64_t *)malloc(sizeof(int64_t) * XS_NATIVE_MAX_ROWS);
 		if (rids == NULL) { rc = -1; goto done; }
-		if (where_pk_range(root->u.del->where, ws.name[0],
-		                   &lo, &has_lo, &hi, &has_hi, binds, nbinds)) {
-			nr = collect_rowids((struct xsql *)db, bt, tabbuf, lo, has_lo, hi, has_hi,
-			                    rids, XS_NATIVE_MAX_ROWS);
-		} else {
-			/* General predicate: compile + scan-evaluate per row. */
-			nr = collect_matching(db, bt, tabbuf, root->u.del->where,
-			                      rids, XS_NATIVE_MAX_ROWS, binds, nbinds);
-		}
+		nr = collect_matching(db, bt, tabbuf, root->u.del->where,
+		                      rids, XS_NATIVE_MAX_ROWS, binds, nbinds);
 		if (nr == -1) { free(rids); sql_arena_destroy(arena); return 0; }  /* too many / not compilable -> VDBE */
 		if (nr < 0) { free(rids); rc = -1; goto done; }
 		for (i = 0; i < nr; i++) {
@@ -8686,7 +8807,6 @@ vx_run_write_p(struct xsql *db, const char *sql,
 	if (root->kind == SQL_KIND_UPDATE) {
 		sql_update_t *up = root->u.update;
 		sql_assign_t *a;
-		int64_t lo, hi; int has_lo, has_hi;
 		int nr, i, ci;
 		/* Validate the SET list ONCE up front (the same literal columns
 		 * apply to every matched row); record which payload column each
@@ -8759,13 +8879,8 @@ vx_run_write_p(struct xsql *db, const char *sql,
 		}
 		rids = (int64_t *)malloc(sizeof(int64_t) * XS_NATIVE_MAX_ROWS);
 		if (rids == NULL) { rc = -1; goto done; }
-		if (where_pk_range(up->where, ws.name[0], &lo, &has_lo, &hi, &has_hi, binds, nbinds)) {
-			nr = collect_rowids((struct xsql *)db, bt, tabbuf, lo, has_lo, hi, has_hi,
-			                    rids, XS_NATIVE_MAX_ROWS);
-		} else {
-			nr = collect_matching(db, bt, tabbuf, up->where,
-			                      rids, XS_NATIVE_MAX_ROWS, binds, nbinds);
-		}
+		nr = collect_matching(db, bt, tabbuf, up->where,
+		                      rids, XS_NATIVE_MAX_ROWS, binds, nbinds);
 		if (nr == -1) { free(rids); rc = 0; goto done; }  /* too many / not compilable -> VDBE */
 		if (nr < 0) { free(rids); rc = -1; goto done; }
 

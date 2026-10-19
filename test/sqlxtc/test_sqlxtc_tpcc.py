@@ -604,10 +604,88 @@ def keys_steps():
     return s
 
 
+# ---- access paths + read-your-writes (sqlite-audit gap #4, #8 items 5/6) ----
+# Every read shape the access-path chooser serves (rowid range, index
+# equality prefix + range, ORDER BY from the index, MIN/MAX from the
+# first/last key, UPDATE/DELETE through an index) inside a transaction
+# that has written the table -- including a buffered INSERT into a rowid
+# HOLE below the highest committed rowid, which a scan used to append
+# only past the committed range (and so missed).
+RYW_SCHEMA = [
+    "CREATE TABLE t(k INTEGER PRIMARY KEY, grp INTEGER, v TEXT)",
+    "CREATE INDEX t_grp ON t(grp)",
+    "CREATE TABLE c(a INTEGER, b INTEGER, n TEXT, x REAL, PRIMARY KEY(a, b))",
+    "CREATE INDEX c_n ON c(a, n DESC)",
+]
+
+
+def ryw_load():
+    st = []
+    for k, g in ((1, 7), (2, 8), (4, 7), (6, 9), (8, None), (9, 7)):
+        st.append(("INSERT INTO t VALUES(?,?,?)", [k, g, "v%d" % k]))
+    for a in (1, 2, 3):
+        for b in (1, 2, 4, 5):
+            st.append(("INSERT INTO c VALUES(?,?,?,?)",
+                       [a, b, None if b == 4 else "n%d" % (b * a % 5),
+                        a * 1.5 + b]))
+    return st
+
+
+def ryw_steps():
+    u, o = "u", "o"
+    reads = [
+        ("SELECT k FROM t", None, u),
+        ("SELECT k, v FROM t WHERE k < ? ORDER BY k", [5], o),
+        ("SELECT k FROM t WHERE k BETWEEN ? AND ? ORDER BY k DESC", [2, 8], o),
+        ("SELECT k FROM t WHERE grp = ?", [7], u),
+        ("SELECT k FROM t WHERE grp = ? ORDER BY k", [7], o),
+        ("SELECT count(*), sum(k) FROM t WHERE grp = ?", [7], u),
+        ("SELECT min(k), max(k) FROM t WHERE grp = ?", [7], u),
+        ("SELECT min(grp), max(grp) FROM t", None, u),
+        ("SELECT grp FROM t WHERE grp >= ? ORDER BY grp LIMIT 2", [7], o),
+        ("SELECT k FROM t WHERE grp > 7 ORDER BY grp DESC, k DESC", None, o),
+        ("SELECT a, b, n FROM c WHERE a = ? ORDER BY b", [2], o),
+        ("SELECT b FROM c WHERE a = ? AND b > ? AND b <= ?", [1, 1, 4], u),
+        ("SELECT n FROM c WHERE a = ? ORDER BY n DESC", [3], o),
+        ("SELECT n FROM c WHERE a = ? ORDER BY n", [3], o),
+        ("SELECT COALESCE(MIN(b),0), COALESCE(MAX(b),0) FROM c WHERE a = ?",
+         [2], u),
+        ("SELECT MAX(b) FROM c WHERE a = ? AND b < ?", [2, 5], u),
+        ("SELECT MIN(n) FROM c WHERE a = ?", [1], u),
+        ("SELECT MAX(n) FROM c WHERE a = ?", [1], u),
+        ("SELECT count(*) FROM c WHERE a = ? AND b = ?", [9, 9], u),
+        ("SELECT MIN(b) FROM c WHERE a = ?", [9], u),
+    ]
+    s = list(reads)
+    s += [("BEGIN", None, u),
+          ("INSERT INTO t VALUES(3, 7, 'hole')", None, u),
+          ("INSERT INTO t VALUES(5, 8, 'hole2')", None, u),
+          ("INSERT INTO t VALUES(20, 7, 'tail')", None, u),
+          ("INSERT INTO c VALUES(2, 3, 'n0', 0.5)", None, u),
+          ("INSERT INTO c VALUES(2, 0, NULL, 0.25)", None, u)]
+    s += reads
+    s += [("UPDATE t SET grp = 9 WHERE k = 1", None, u),
+          ("UPDATE t SET grp = 7 WHERE grp = 8", None, u),
+          ("DELETE FROM t WHERE k = 4", None, u),
+          ("DELETE FROM c WHERE a = 2 AND b = 5", None, u),
+          ("UPDATE c SET n = 'zz' WHERE a = 3 AND b = 2", None, u)]
+    s += reads
+    s += [("COMMIT", None, u)]
+    s += reads
+    s += [("BEGIN", None, u),
+          ("DELETE FROM t WHERE grp = 7", None, u),
+          ("INSERT INTO t VALUES(4, 7, 'back')", None, u)]
+    s += reads
+    s += [("ROLLBACK", None, u)]
+    s += reads
+    return s
+
+
 SCRIPTS = [
     ("turso", TURSO_SCHEMA, turso_load, turso_steps),
     ("hammerdb", HDB_SCHEMA, hdb_load, hdb_steps),
     ("keys", KEYS_SCHEMA, keys_load, keys_steps),
+    ("ryw", RYW_SCHEMA, ryw_load, ryw_steps),
 ]
 
 

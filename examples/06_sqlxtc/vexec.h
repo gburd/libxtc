@@ -169,6 +169,9 @@ const char    *vx_result_text(const vx_result_t *r, int row, int col);
 int            vx_result_bytes(const vx_result_t *r, int row, int col);
 /* Number of executor loops the run actually used (for the scaling gate). */
 int            vx_result_nworkers(const vx_result_t *r);
+/* Sorts run by the ORDER BY executors (metric: an ORDER BY the chosen
+ * index provides must not sort). */
+uint64_t       vx_sort_count(void);
 
 void vx_result_free(vx_result_t *r);
 

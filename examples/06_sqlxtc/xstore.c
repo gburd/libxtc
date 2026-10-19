@@ -2206,10 +2206,22 @@ struct xstore_scan {
 	int             ryw_overlay; /* 1 = overlay the write buffer (wn > 0) */
 	int             ryw_track;   /* 1 = record reads into the SSI read set */
 	int             ryw_phase; /* 0 = committed range, 1 = wbuf-only inserts */
-	int64_t         ryw_emitted_max; /* highest committed rowid already seen */
-	int             ryw_next_wi;     /* next wbuf index to consider (phase 1) */
+	/* The rowids of this txn's live buffered rows in range, ascending:
+	 * merged into the committed walk so a buffered INSERT into a rowid
+	 * hole is returned in rowid order (it was missed when it sorted below
+	 * the highest committed rowid). */
+	int64_t        *ryw_ins;
+	int             ryw_nins, ryw_ii;
+	int             ryw_held;        /* s->c holds a committed row not yet returned */
 	uint8_t         ryw_val[XS_VMAX]; /* staging for a wbuf payload */
 };
+
+static int
+xs_i64_cmp(const void *a, const void *b)
+{
+	int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+	return (x > y) - (x < y);
+}
 
 xstore_scan_t *
 xstore_scan_open(bt_t *bt, const char *table, uint64_t snap,
@@ -2275,10 +2287,46 @@ xstore_scan_open_txn(struct xsql *db, const char *table, uint64_t snap,
 		s->ryw_overlay = (ctx->wn > 0);
 		s->ryw_track = (ctx->serializable != 0);
 		s->ryw_phase = 0;
-		s->ryw_emitted_max = INT64_MIN;
-		s->ryw_next_wi = 0;
+		if (s->ryw_overlay) {
+			int i, cap = 0;
+			for (i = 0; i < ctx->wn; i++) {
+				const xs_wrec_t *w = &ctx->wbuf[i];
+				if (w->tableid != s->c.tableid || w->deleted ||
+				    (s->c.has_lo && w->rowid < s->c.lo) ||
+				    (s->c.has_hi && w->rowid > s->c.hi) ||
+				    !wbuf_is_newest(ctx, i))
+					continue;
+				if (s->ryw_nins == cap) {
+					int64_t *nb;
+					cap = cap ? cap * 2 : 16;
+					nb = realloc(s->ryw_ins, sizeof *nb * (size_t)cap);
+					if (nb == NULL) { xstore_scan_close(s); return NULL; }
+					s->ryw_ins = nb;
+				}
+				s->ryw_ins[s->ryw_nins++] = w->rowid;
+			}
+			if (s->ryw_nins > 1)
+				qsort(s->ryw_ins, (size_t)s->ryw_nins, sizeof *s->ryw_ins,
+				    xs_i64_cmp);
+		}
 	}
 	return s;
+}
+
+/* Return buffered row `rowid` (its newest write) through the scan outs;
+ * 0 if that write is a delete. */
+static int
+xs_scan_emit_buffered(xstore_scan_t *s, int64_t rid, int64_t *rowid,
+    const uint8_t **rec, int *reclen)
+{
+	const xs_wrec_t *w = wbuf_find(s->ryw_ctx, s->c.tableid, rid);
+	if (w == NULL || w->deleted) return 0;
+	(void)xs_wrec_ensure(s->ryw_ctx, (xs_wrec_t *)w);
+	if (w->len && w->data) memcpy(s->ryw_val, w->data, w->len);
+	if (rowid) *rowid = rid;
+	if (rec) *rec = s->ryw_val;
+	if (reclen) *reclen = (int)w->len;
+	return 1;
 }
 
 int
@@ -2301,18 +2349,31 @@ xstore_scan_next(xstore_scan_t *s, int64_t *rowid,
 	}
 
 	/* Phase 0: walk the committed range, overlaying the write buffer and
-	 * recording reads into the SSI read set. */
+	 * recording reads into the SSI read set; a buffered row with no
+	 * committed version that sorts before the next committed row is
+	 * returned first, so the merged stream stays in rowid order. */
 	if (s->ryw_phase == 0) {
 		for (;;) {
 			const xs_wrec_t *w;
-			s->c.eof = 0;
-			xs_advance(&s->c);
-			if (s->c.eof) { s->ryw_phase = 1; s->ryw_next_wi = 0; break; }
-			s->ryw_emitted_max = s->c.rowid;
-			if (s->ryw_track) {
-				rset_add(s->ryw_ctx, s->c.tableid, s->c.rowid);
-				ssi_record_read(s->ryw_ctx->ssi, s->c.tableid, s->c.rowid);
+			if (!s->ryw_held) {
+				s->c.eof = 0;
+				xs_advance(&s->c);
+				if (s->c.eof) { s->ryw_phase = 1; break; }
+				s->ryw_held = 1;
+				if (s->ryw_track) {
+					rset_add(s->ryw_ctx, s->c.tableid, s->c.rowid);
+					ssi_record_read(s->ryw_ctx->ssi, s->c.tableid, s->c.rowid);
+				}
 			}
+			if (s->ryw_ii < s->ryw_nins && s->ryw_ins[s->ryw_ii] < s->c.rowid) {
+				if (xs_scan_emit_buffered(s, s->ryw_ins[s->ryw_ii++], rowid,
+				    rec, reclen))
+					return 1;
+				continue;
+			}
+			while (s->ryw_ii < s->ryw_nins && s->ryw_ins[s->ryw_ii] == s->c.rowid)
+				s->ryw_ii++;                 /* overlaid below */
+			s->ryw_held = 0;
 			w = s->ryw_overlay
 			    ? wbuf_find(s->ryw_ctx, s->c.tableid, s->c.rowid) : NULL;
 			if (w == NULL) {                 /* unbuffered: committed row */
@@ -2332,42 +2393,13 @@ xstore_scan_next(xstore_scan_t *s, int64_t *rowid,
 		}
 	}
 
-	/* Phase 1: emit buffered INSERTs (rowids with no committed row), in
-	 * ascending rowid order, within the scan range.  Only when overlaying
-	 * the write buffer (a read-only serializable scan has none). */
-	if (!s->ryw_overlay) { s->done = 1; return 0; }
-	for (;;) {
-		const xstore_ctx_t *cx = s->ryw_ctx;
-		int i, best = -1; int64_t bestrid = 0;
-		/* Pick the smallest rowid > ryw_emitted_max that has a buffered
-		 * write for this table, in range, with no committed row.  Among
-		 * duplicate entries for a rowid the NEWEST wins (wbuf_find scans
-		 * from the tail), so resolve each candidate via wbuf_find and skip
-		 * those whose newest state is a delete. */
-		for (i = 0; i < cx->wn; i++) {
-			const xs_wrec_t *w = &cx->wbuf[i];
-			const xs_wrec_t *newest;
-			if (w->tableid != s->c.tableid) continue;
-			if (w->rowid <= s->ryw_emitted_max) continue;
-			if (s->c.has_lo && w->rowid < s->c.lo) continue;
-			if (s->c.has_hi && w->rowid > s->c.hi) continue;
-			if (xs_row_live(s->c.bt, s->c.tableid, w->rowid)) continue; /* committed -> already overlaid */
-			newest = wbuf_find(cx, s->c.tableid, w->rowid);
-			if (newest == NULL || newest->deleted) continue;   /* hidden */
-			if (best < 0 || w->rowid < bestrid) { best = i; bestrid = w->rowid; }
-		}
-		if (best < 0) { s->done = 1; return 0; }
-		s->ryw_emitted_max = bestrid;
-		{
-			const xs_wrec_t *w = wbuf_find(cx, s->c.tableid, bestrid);  /* newest */
-			(void)xs_wrec_ensure(s->ryw_ctx, (xs_wrec_t *)w);
-			if (w->len && w->data) memcpy(s->ryw_val, w->data, w->len);
-			if (rowid) *rowid = bestrid;
-			if (rec) *rec = s->ryw_val;
-			if (reclen) *reclen = (int)w->len;
+	/* Phase 1: the buffered rows past the last committed row, in order. */
+	while (s->ryw_ii < s->ryw_nins)
+		if (xs_scan_emit_buffered(s, s->ryw_ins[s->ryw_ii++], rowid, rec,
+		    reclen))
 			return 1;
-		}
-	}
+	s->done = 1;
+	return 0;
 }
 
 /* Base-table version keys examined by storage scans (the rows-visited
@@ -2389,6 +2421,7 @@ xstore_scan_close(xstore_scan_t *s)
 		atomic_fetch_add_explicit(&g_rows_visited, s->c.visited,
 		    memory_order_relaxed);
 	if (s->c.btc != NULL) bt_cursor_close(s->c.btc);
+	free(s->ryw_ins);
 	free(s);
 }
 
@@ -5186,7 +5219,7 @@ xstore_index_list(bt_t *bt, const char *table, xstore_index_info_t *out,
 	if (bt == NULL || table == NULL || out == NULL) return 0;
 	xs_cat_lock();
 	for (i = 0; i < g_idx_n && n < cap; i++) {
-		if (g_idx[i].bt != bt || strcmp(g_idx[i].table, table) != 0 ||
+		if (g_idx[i].bt != bt || strcasecmp(g_idx[i].table, table) != 0 ||
 		    g_idx[i].rt.tableid == 0)
 			continue;
 		memset(&out[n], 0, sizeof out[n]);
