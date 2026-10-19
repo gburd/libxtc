@@ -274,8 +274,14 @@ __coro_entry(void)
 	 * fresh pure-tight-loop fiber would run with the guard stuck at 1
 	 * and never be sliced.
 	 */
-	g_in_preempt = 0;
 	__san_switch_done(c->san_fake_stack);   /* arrived on the coro stack */
+	/* A new fiber is not a proc until __proc_entry says so: clear the
+	 * proc TLS the previous fiber on this thread left behind, or a bare
+	 * xtc_async coroutine runs (and yields) as that proc -- xtc_self()
+	 * names it, xtc_recv steals its mail, and once it is freed every
+	 * yield's kill check reads freed memory (review156 B1). */
+	if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(NULL);
+	g_in_preempt = 0;
 	c->result = c->fn(c->arg);
 	c->done = 1;
 	/* Return to the loop's context.  We will not be resumed, so the

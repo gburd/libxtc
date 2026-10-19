@@ -201,6 +201,87 @@ test_self(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---------- a bare coroutine is not a proc (review156 B1) ---------- */
+
+/*
+ * A bare xtc_async coroutine that yields while a proc is parked used to
+ * inherit that proc as its current proc (the proc TLS carried across
+ * the coroutine's yield), so xtc_self() named the proc and, once the
+ * proc exited and was freed, every later yield read freed memory in the
+ * kill check.  A non-proc fiber must always see XTC_PID_NONE.
+ */
+struct bare_state {
+	xtc_pid_t   victim;
+	int         victim_done;
+	int         n_self_before;   /* xtc_self() != NONE before the exit */
+	int         n_self_after;    /* ... and after the victim is freed */
+	int         turns;
+};
+
+static void
+bare_victim(void *arg)
+{
+	struct bare_state *s = arg;
+	void *m;
+	size_t sz;
+	s->victim = xtc_self();
+	(void)xtc_recv(&m, &sz, 3LL * 1000 * 1000);   /* park, then exit */
+	s->victim_done = 1;
+}
+
+static intptr_t
+bare_coro(void *arg)
+{
+	struct bare_state *s = arg;
+	int i;
+	for (i = 0; i < 4; i++) {
+		xtc_yield();
+		if (!xtc_pid_is_none(xtc_self())) s->n_self_before++;
+	}
+	for (i = 0; !s->victim_done && i < 100000; i++)
+		xtc_yield();
+	for (i = 0; i < 64; i++) {             /* victim exited + freed */
+		xtc_yield();
+		if (!xtc_pid_is_none(xtc_self())) s->n_self_after++;
+		s->turns++;
+	}
+	return 0;
+}
+
+static void
+bare_waiter(void *arg)
+{
+	struct bare_state *s = arg;
+	int i;
+	for (i = 0; !s->victim_done && i < 200; i++)
+		(void)xtc_proc_sleep(1LL * 1000 * 1000);
+	(void)xtc_proc_sleep(5LL * 1000 * 1000);   /* let the coro yield on */
+}
+
+static MunitResult
+test_bare_coro_not_a_proc(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	xtc_task_t *t;
+	xtc_pid_t pid;
+	struct bare_state s;
+	(void)p; (void)d;
+	memset(&s, 0, sizeof s);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, bare_victim, &s, NULL, &pid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_async(loop, bare_coro, &s, &t), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, bare_waiter, &s, NULL, &pid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(s.victim_done, ==, 1);
+	munit_assert_int(s.turns, ==, 64);
+	munit_assert_int(s.n_self_before, ==, 0);
+	munit_assert_int(s.n_self_after, ==, 0);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 /* ---------- xtc_proc_userdata ---------- */
 
 struct ud_state {
@@ -2823,6 +2904,7 @@ static MunitTest tests[] = {
 	{ "/link_semantics", test_link_semantics, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/kill_interrupts_park", test_kill_interrupts_park, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/many_loops", test_many_loops, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/bare_coro_not_a_proc", test_bare_coro_not_a_proc, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m8/proc", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

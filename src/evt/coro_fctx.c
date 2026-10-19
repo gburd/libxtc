@@ -252,6 +252,12 @@ __coro_entry(void *transfer)
 	struct xtc_coro *c = (struct xtc_coro *)transfer;
 	__san_switch_done(c->san_fake_stack);   /* arrived on the coro stack */
 	__xtc_current_coro = c;
+	/* A new fiber is not a proc until __proc_entry says so: clear the
+	 * proc TLS the previous fiber on this thread left behind, or a bare
+	 * xtc_async coroutine runs (and yields) as that proc -- xtc_self()
+	 * names it, xtc_recv steals its mail, and once it is freed every
+	 * yield's kill check reads freed memory (review156 B1). */
+	if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(NULL);
 	c->result = c->fn(c->arg);
 	c->done = 1;
 	/* Final jump back to the scheduler.  We will not be resumed, so the
