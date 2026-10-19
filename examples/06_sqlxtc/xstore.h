@@ -314,10 +314,11 @@ void xstore_stmt_begin(struct xsql *db);
 void xstore_stmt_end(struct xsql *db);
 /* 1 if the current statement's last write was refused as a conflict. */
 int  xstore_last_conflict(struct xsql *db);
-/* After a failed write statement: may it restart on a fresh snapshot
- * (a stale-read conflict under READ COMMITTED, or in autocommit before
- * any row applied)? */
-int  xstore_stmt_can_restart(struct xsql *db);
+/* After a write statement failed on a stale-read conflict: 1 if it may
+ * re-run on a fresh snapshot (READ COMMITTED; the first access of a
+ * snapshot transaction, whose snapshot then moves; autocommit before
+ * any row applied).  Prepares the re-run. */
+int  xstore_stmt_restart(struct xsql *db);
 /* Native C-API equivalents of the MVCC SQL functions. */
 int64_t xstore_clock_now(void);              /* xstore_now() */
 int xstore_as_of(struct xsql *db, int64_t ts);   /* xstore_as_of(ts) */

@@ -360,6 +360,7 @@ typedef struct xstore_ctx {
 	uint64_t         last_ts;     /* commit ts of this connection's last write */
 	int              last_conflict; /* last write's conflict: XS_CONFL_* */
 	int              stmt_puts;   /* autocommit rows applied by this statement */
+	int              stmt_first;  /* this statement is the txn's first access */
 	xs_rkey_t       *rset;        /* (table,rowid) read in this txn (serializable) */
 	int              rn, rcap;
 	int              did_scan;    /* txn did a full scan (table-level read) */
@@ -4359,9 +4360,11 @@ xstore_stmt_begin(struct xsql *db)
 {
 	xstore_ctx_t *cx = xstore_ctx_of(db);
 	if (cx == NULL) return;
+	xs_enter_ctx(cx, db);
 	cx->stmt_base = xs_visible();
 	cx->last_conflict = 0;
 	cx->stmt_puts = 0;
+	cx->stmt_first = cx->in_txn && !cx->touched && cx->wn == 0;
 }
 
 void
@@ -4378,19 +4381,33 @@ xstore_last_conflict(struct xsql *db)
 	return cx != NULL && cx->last_conflict;
 }
 
-/* May the statement that just failed on a write conflict restart on a
- * fresh snapshot (READ COMMITTED semantics, as PostgreSQL re-evaluates
- * and Oracle restarts)?  Only for a STALE conflict (a deadlock victim
- * would deadlock again), in a READ COMMITTED transaction (the caller
- * undid the statement's buffered writes) or in autocommit before the
- * statement applied any row (applied rows cannot be undone). */
+/* The write statement that just failed on a conflict: may it re-run on
+ * a fresh snapshot?  Only for a STALE conflict (a deadlock victim would
+ * deadlock again), and only where that is invisible to the client:
+ *   - a READ COMMITTED transaction (each statement has its own snapshot;
+ *     PostgreSQL re-evaluates the row, Oracle restarts the statement;
+ *     the caller undid the statement's buffered writes);
+ *   - the FIRST access of a snapshot transaction: it has read and written
+ *     nothing, so taking its snapshot now is the same as a later BEGIN
+ *     (PostgreSQL takes a REPEATABLE READ snapshot at the first
+ *     statement too).  Not SERIALIZABLE: its SSI slot holds the old one;
+ *   - autocommit before the statement applied any row (applied rows
+ *     cannot be undone).
+ * Returns 1 and prepares the re-run, or 0. */
 int
-xstore_stmt_can_restart(struct xsql *db)
+xstore_stmt_restart(struct xsql *db)
 {
 	xstore_ctx_t *cx = xstore_ctx_of(db);
 	if (cx == NULL || cx->last_conflict != XS_CONFL_STALE) return 0;
-	if (cx->in_txn) return cx->txn_iso < XS_ISO_REPEATABLE_READ;
-	return cx->stmt_puts == 0;
+	if (!cx->in_txn) return cx->stmt_puts == 0;
+	if (cx->txn_iso < XS_ISO_REPEATABLE_READ) return 1;
+	if (!cx->stmt_first || cx->serializable || cx->wn != 0) return 0;
+	cx->txn_snap = xs_visible();
+	cx->touched = 0;
+	cx->rn = 0;
+	cx->did_scan = 0;
+	xs_pin_recompute(cx);
+	return 1;
 }
 
 /* True if the connection currently has an open (non-autocommit)
@@ -6917,6 +6934,7 @@ xs_ctx_init_and_map(struct xsql *db, bt_t *bt, int native)
 	ctx->last_ts = 0;
 	ctx->last_conflict = 0;
 	ctx->stmt_puts = 0;
+	ctx->stmt_first = 0;
 	ctx->rset = NULL;
 	ctx->rn = ctx->rcap = 0;
 	ctx->did_scan = 0;

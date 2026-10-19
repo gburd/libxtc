@@ -16,6 +16,9 @@
  *	      A's commit, so B's UPDATE fails "could not serialize" -- at the
  *	      UPDATE -- and B's later statements fail "transaction is
  *	      aborted" until ROLLBACK.
+ *	  (d) wait then succeed (SNAPSHOT, the UPDATE is B's first access):
+ *	      B has observed nothing, so the UPDATE re-runs on a snapshot
+ *	      taken after A's commit (as a later BEGIN would) and succeeds.
  *	  (c) deadlock: A holds r1 and wants r2, B holds r2 and wants r1:
  *	      exactly one of the two second UPDATEs fails, quickly (well
  *	      under the intent wait cap), the other then succeeds and
@@ -87,8 +90,9 @@ worker(void *arg)
 {
 	long me = (long)arg;
 	sx_db *db = g_c[me];
-	if (g_case == 0 || g_case == 1) {
-		/* (a) READ COMMITTED / (b) SNAPSHOT: A takes row 1 first. */
+	if (g_case != 2) {
+		/* (a) READ COMMITTED / (b) SNAPSHOT / (d) SNAPSHOT, B's UPDATE
+		 * first: A takes row 1 first. */
 		const char *begin = g_case == 0
 		    ? "BEGIN ISOLATION LEVEL READ COMMITTED" : "BEGIN";
 		if (me == 0) {
@@ -101,7 +105,8 @@ worker(void *arg)
 		} else {
 			await(1);
 			CK(run(db, begin, NULL, 0) == SX_OK);
-			CK(val(db, 2) == 0);              /* fixes B's snapshot */
+			if (g_case != 3)
+				CK(val(db, 2) == 0);      /* fixes B's snapshot */
 			atomic_store(&g_step, 2);
 			g_t0[1] = xtc_clock_mono();
 			g_upd_rc[1] = run(db, "UPDATE t SET v=v+20 WHERE id=1",
@@ -204,6 +209,15 @@ one_case(int c, int nloops)
 		CK(g_commit_rc[0] == SX_OK);
 		CK(f1 == 10);                        /* A's only */
 		CK(g_t1[1] - g_t0[1] >= 2LL * 1000 * 1000);   /* it waited for A */
+	} else if (c == 3) {
+		printf("  [%d loop%s] SI first-access wait: B UPDATE rc=%d after %lld us, "
+		    "COMMIT A=%d B=%d, row1=%lld\n", nloops, nloops > 1 ? "s" : "",
+		    g_upd_rc[1], (long long)(g_t1[1] - g_t0[1]) / 1000,
+		    g_commit_rc[0], g_commit_rc[1], (long long)f1);
+		CK(g_upd_rc[1] == SX_OK);            /* re-ran on a new snapshot */
+		CK(g_commit_rc[0] == SX_OK && g_commit_rc[1] == SX_OK);
+		CK(f1 == 30);
+		CK(g_t1[1] - g_t0[1] >= 2LL * 1000 * 1000);
 	} else {
 		int lost = (g_upd_rc[0] != SX_OK) + (g_upd_rc[1] != SX_OK);
 		int w = g_upd_rc[0] == SX_OK ? 0 : 1, l = 1 - w;
@@ -236,7 +250,7 @@ main(void)
 	int nloops, c;
 	if (xtc_set_stack_size(512u * 1024u) != XTC_OK) return 1;
 	for (nloops = 1; nloops <= 4; nloops += 3)
-		for (c = 0; c < 3; c++)
+		for (c = 0; c < 4; c++)
 			if (one_case(c, nloops) != 0) return 1;
 	if (g_fail) { fprintf(stderr, "FAIL: test_row_intents\n"); return 1; }
 	printf("  ok   row write intents: conflicts surface at the statement "

@@ -1417,12 +1417,13 @@ sx_step(sx_stmt *st)
 			xstore_stmt_end(st->db);
 			if (rc != 1) xstore_stmt_undo(st->db, mark);
 			if (rc == 1) { free(verr); st->nchanges = nch; return SX_DONE; }
-			/* READ COMMITTED (and autocommit) re-run a statement whose
-			 * row was committed by the writer it waited for, on a new
-			 * snapshot, instead of failing it (PostgreSQL re-evaluates
-			 * the row; this re-runs the statement).  Bounded: a hot row
-			 * under constant churn still fails, with the error below. */
-			if (rd && restarts < 8 && xstore_stmt_can_restart(st->db)) {
+			/* A statement whose row was committed by the writer it
+			 * waited for re-runs on a new snapshot where the client
+			 * cannot tell (READ COMMITTED, autocommit, a transaction's
+			 * first access: see xstore_stmt_restart) instead of failing.
+			 * Bounded: a hot row under constant churn still fails, with
+			 * the error below. */
+			if (rd && restarts < 8 && xstore_stmt_restart(st->db)) {
 				free(verr); verr = NULL; nch = 0;
 				restarts++;
 				goto restart;
