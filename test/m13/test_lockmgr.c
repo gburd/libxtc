@@ -586,13 +586,14 @@ test_conversion_not_behind_waiter(const MunitParameter p[], void *d)
  * (xtc_lockmgr_id_set_timeout): with B never releasing its S, A's S -> X
  * upgrade returns XTC_E_AGAIN instead of waiting forever.  1.49.5: blocked
  * forever (it passed -1).  B releases after 3 s so the test cannot hang. */
-static volatile int g_up_rc = 12345;
+static _Atomic int g_up_rc = 12345;   /* read while up_thread writes it */
 static xtc_locker_t g_up_a;
 static void *
 up_thread(void *x)
 {
 	(void)x;
-	g_up_rc = xtc_lock_upgrade(g_rr_m, g_up_a, "k", 1, XTC_LOCK_X);
+	atomic_store(&g_up_rc,
+	    xtc_lock_upgrade(g_rr_m, g_up_a, "k", 1, XTC_LOCK_X));
 	return NULL;
 }
 
