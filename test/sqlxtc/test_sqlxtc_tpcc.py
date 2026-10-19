@@ -681,11 +681,78 @@ def ryw_steps():
     return s
 
 
+# ---- index nested-loop joins (sqlite-audit gap #6, #8 item 6) ----
+JOIN_SCHEMA = [
+    "CREATE TABLE w(w_id INTEGER PRIMARY KEY, tax REAL)",
+    "CREATE TABLE c(c_id INTEGER, c_w INTEGER, c_d INTEGER, name TEXT, "
+    "PRIMARY KEY(c_w, c_d, c_id))",
+    "CREATE TABLE o(o_id INTEGER PRIMARY KEY, o_c INTEGER, o_w INTEGER, "
+    "amt REAL)",
+    "CREATE INDEX o_cw ON o(o_w, o_c)",
+    "CREATE TABLE z(k INTEGER, v TEXT)",
+]
+
+
+def join_load():
+    st = []
+    for w in (1, 2, 3):
+        st.append(("INSERT INTO w VALUES(?,?)", [w, 0.1 * w]))
+    for w in (1, 2, 4):
+        for d in (1, 2):
+            for cid in (1, 2, 3):
+                st.append(("INSERT INTO c VALUES(?,?,?,?)",
+                           [cid, w, d, "n%d%d%d" % (w, d, cid)]))
+    for i in range(1, 25):
+        st.append(("INSERT INTO o VALUES(?,?,?,?)",
+                   [i, i % 4, i % 3 + 1, 1.5 * i]))
+    st.append(("INSERT INTO o VALUES(?,?,?,?)", [99, None, 1, 0.0]))
+    for k in (1, 2, 2, None):
+        st.append(("INSERT INTO z VALUES(?,?)", [k, "z%r" % k]))
+    return st
+
+
+def join_steps():
+    u, o = "u", "o"
+    reads = [
+        # Turso stmt 0 shape: unqualified, outer filtered to a point
+        ("SELECT name, tax FROM c, w WHERE w_id = ? AND c_w = w_id AND "
+         "c_d = ? AND c_id = ?", [1, 2, 3], u),
+        ("SELECT name, tax FROM c, w WHERE w_id = ? AND c_w = w_id AND "
+         "c_d = ? AND c_id = ?", [4, 1, 1], u),
+        ("SELECT name, tax FROM w, c WHERE c_w = w_id AND c_d = ?", [2], u),
+        ("SELECT w.w_id, c.name FROM w JOIN c ON c.c_w = w.w_id "
+         "WHERE c.c_id = ?", [2], u),
+        ("SELECT a.w_id, b.name FROM w a JOIN c b ON b.c_w = a.w_id "
+         "WHERE a.w_id >= ? ORDER BY b.name DESC", [2], o),
+        ("SELECT c.name, o.o_id FROM c JOIN o ON o.o_w = c.c_w "
+         "WHERE o.o_c = c.c_id AND c.c_d = ?", [1], u),
+        ("SELECT c.name, o.o_id, w.tax FROM w JOIN c ON c.c_w = w.w_id "
+         "JOIN o ON o.o_w = c.c_w WHERE c.c_d = ? AND c.c_id = ? AND "
+         "o.amt > ?", [1, 1, 20.0], u),
+        ("SELECT o.o_id, z.v FROM o JOIN z ON z.k = o.o_c", None, u),
+        ("SELECT z.v, o.o_id FROM z JOIN o ON o.o_id = z.k", None, u),
+        ("SELECT o.o_id, w.tax FROM o, w WHERE w.w_id = o.o_w AND "
+         "o.o_id BETWEEN ? AND ?", [5, 9], u),
+        ("SELECT count(*) FROM o", None, u),
+    ]
+    s = list(reads)
+    s += [("INSERT INTO c VALUES(3, 1, 2, 'new')", None, u),
+          ("INSERT INTO w VALUES(4, 0.4)", None, u),
+          ("INSERT INTO o VALUES(50, 1, 1, 33.0)", None, u),
+          ("INSERT INTO z VALUES(50, 'z50')", None, u),
+          ("UPDATE c SET name = 'upd' WHERE c_w = 1 AND c_d = 1 AND c_id = 1",
+           None, u),
+          ("DELETE FROM o WHERE o_id = 4", None, u)]
+    s += reads
+    return s
+
+
 SCRIPTS = [
     ("turso", TURSO_SCHEMA, turso_load, turso_steps),
     ("hammerdb", HDB_SCHEMA, hdb_load, hdb_steps),
     ("keys", KEYS_SCHEMA, keys_load, keys_steps),
     ("ryw", RYW_SCHEMA, ryw_load, ryw_steps),
+    ("join", JOIN_SCHEMA, join_load, join_steps),
 ]
 
 

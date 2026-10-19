@@ -464,6 +464,25 @@ typedef struct vx_njoinplan {
 	                                   * key so every probe yields them all */
 } vx_njoinplan_t;
 
+/*
+ * Index nested-loop INNER join (sqlite-audit gap #6): the sides are
+ * walked in loop order ord[0] (outermost) .. ord[nside-1], each through
+ * its own access path; an inner side's bounds read the columns of the
+ * outer sides already placed in the combined row (ON c_w_id = w_id
+ * seeks customer per warehouse row instead of hashing all of customer).
+ * The WHERE AND every ON is re-checked on each complete combined row.
+ * Chosen only when every inner side is an equality seek.
+ */
+typedef struct vx_nlplan {
+	int        nside;
+	char       table[VX_JOIN_MAX][64];
+	int        pay[VX_JOIN_MAX][16];
+	int        ncol[VX_JOIN_MAX];
+	int        base[VX_JOIN_MAX];
+	int        ord[VX_JOIN_MAX];
+	vx_apath_t ap[VX_JOIN_MAX];
+} vx_nlplan_t;
+
 /* ---- the vexec statement ----------------------------------------- */
 
 struct vx_stmt {
@@ -589,6 +608,12 @@ struct vx_stmt {
 	int           probe_done;   /* 1 once the probe cursor is drained */
 	int           bscan_b;      /* unmatched-build final scan: bucket idx */
 	vx_jrow_t    *bscan_r;      /* unmatched-build final scan: row cursor */
+
+	/* Index nested-loop join (takes precedence over join / njoin). */
+	vx_nlplan_t    *nl;
+	vx_src_t        nlsrc[VX_JOIN_MAX];
+	struct vx_arena_blk *nlar[VX_JOIN_MAX];
+	int             nl_level, nl_started;
 
 	/* N-way INNER join execution state (njoin path only). */
 	vx_njoinplan_t *njoin;            /* non-NULL => N-way INNER join */
@@ -4120,6 +4145,109 @@ ap_choose(struct xsql *db, const char *table, char names[][64], int n,
 	    minmax_col, &sc, ap);
 }
 
+/* a AND b (either may be NULL). */
+static vx_expr_t *
+ap_and(struct vx_compiler *c, vx_expr_t *a, vx_expr_t *b)
+{
+	vx_expr_t *n;
+	if (a == NULL) return b;
+	if (b == NULL) return a;
+	n = expr_node(c, VXO_AND);
+	if (n) { n->a = a; n->b = b; }
+	return n;
+}
+
+/* Does the path seek by an equality (a rowid point or an index prefix)? */
+static int
+ap_is_seek(const vx_apath_t *ap)
+{
+	int i;
+	if (ap->kind == VX_AP_INDEX) return ap->neq > 0;
+	if (ap->kind == VX_AP_ROWID)
+		for (i = 0; i < ap->nrt; i++)
+			if (ap->rtop[i] == VXO_EQ) return 1;
+	return 0;
+}
+
+/*
+ * Plan an index nested-loop INNER join over the jc sides with row
+ * sources srcs[] and full predicate `cond` (WHERE AND every ON, over the
+ * combined row).  Greedy: the outermost side is the one with the best
+ * standalone path; each next side is the one with the best path given
+ * the sides already placed, and must be an equality seek (else the hash
+ * join, which reads every side once, stays).  On success sets st->nl and
+ * st->filter = cond and returns 1.
+ */
+static int
+nl_plan(struct xsql *db, struct vx_stmt *st, struct vx_joinctx *jc,
+        const vx_jsrc_t *const *srcs, vx_expr_t *cond)
+{
+	vx_nlplan_t *nl;
+	int side_of[64], level, s, k, first;
+	unsigned placed = 0, tried = 0;
+	if (cond == NULL || jc->nside < 2 || jc->nside > VX_JOIN_MAX) return 0;
+	for (s = 0; s < jc->nside; s++)
+		for (k = 0; k < jc->col[s].n; k++) {
+			if (jc->base[s] + k >= 64) return 0;
+			side_of[jc->base[s] + k] = s;
+		}
+	nl = (vx_nlplan_t *)calloc(1, sizeof *nl);
+	if (nl == NULL) return 0;
+	nl->nside = jc->nside;
+	for (s = 0; s < jc->nside; s++) {
+		snprintf(nl->table[s], sizeof nl->table[s], "%s", jc->tab[s]);
+		memcpy(nl->pay[s], srcs[s]->pay, sizeof nl->pay[s]);
+		nl->ncol[s] = jc->col[s].n;
+		nl->base[s] = jc->base[s];
+	}
+	/* Try each side as the outermost (best standalone path first); the
+	 * rest are placed greedily and must each seek. */
+	for (first = 0; first < jc->nside; first++) {
+		int top = -1, top_score = -1, ok = 1;
+		for (s = 0; s < jc->nside; s++) {
+			struct ap_scope sc;
+			vx_apath_t a;
+			int score;
+			if ((tried >> s) & 1u) continue;
+			sc.base = jc->base[s]; sc.n = jc->col[s].n;
+			sc.side_of = side_of; sc.placed = 0;
+			score = ap_choose_in(db, jc->tab[s], jc->col[s].names, jc->col[s].n,
+			    srcs[s]->pay, cond, NULL, 0, NULL, -1, &sc, &a);
+			if (score > top_score) { top_score = score; top = s; nl->ap[s] = a; }
+		}
+		if (top < 0) break;
+		tried |= 1u << top;
+		nl->ord[0] = top;
+		placed = 1u << top;
+		for (level = 1; level < jc->nside && ok; level++) {
+			int best = -1, best_score = -1;
+			vx_apath_t best_ap;
+			memset(&best_ap, 0, sizeof best_ap);
+			for (s = 0; s < jc->nside; s++) {
+				struct ap_scope sc;
+				vx_apath_t a;
+				int score;
+				if ((placed >> s) & 1u) continue;
+				sc.base = jc->base[s]; sc.n = jc->col[s].n;
+				sc.side_of = side_of; sc.placed = placed;
+				score = ap_choose_in(db, jc->tab[s], jc->col[s].names,
+				    jc->col[s].n, srcs[s]->pay, cond, NULL, 0, NULL, -1, &sc, &a);
+				if (!ap_is_seek(&a)) continue;
+				if (score > best_score) { best_score = score; best = s; best_ap = a; }
+			}
+			if (best < 0) { ok = 0; break; }   /* an inner side would scan */
+			nl->ord[level] = best;
+			nl->ap[best] = best_ap;
+			placed |= 1u << best;
+		}
+		if (ok) break;
+	}
+	if (placed != (1u << jc->nside) - 1u) { free(nl); return 0; }
+	st->nl = nl;
+	st->filter = cond;
+	return 1;
+}
+
 /* An expression value for a bound: evaluated against no row (it is
  * constant for the scan).  NULL -> the comparison can never be true. */
 static int
@@ -5413,7 +5541,7 @@ vx_try_prepare_agg(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		if (!ok) mmcol = -1;
 		ap_choose(db, tabbuf, nv.names, nv.n, st->src_pay, st->filter,
 		    NULL, 0, NULL, mmcol, &st->ap);
-		if (mmcol >= 0 && st->ap.ordered) {
+		if (mmcol >= 0 && st->ap.ordered && st->ap.kind == VX_AP_INDEX) {
 			if (kind == VXA_MAX) st->ap.reverse = !st->ap.reverse;
 			st->ap_minmax = 1;
 		}
@@ -5774,6 +5902,19 @@ vx_try_prepare_join(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 			if (comp.fail) goto fallback;
 		}
 	}
+	/* INNER: an index nested loop when the inner side can seek by the
+	 * join key (the predicate is WHERE AND ON, re-checked per row). */
+	if (jp->join_kind == SX_J_INNER) {
+		const vx_jsrc_t *srcs[2];
+		vx_expr_t *onx;
+		srcs[0] = &jp->build_src; srcs[1] = &jp->probe_src;
+		comp.fail = 0;
+		onx = compile_expr(&comp, on);
+		if (!comp.fail && onx != NULL)
+			(void)nl_plan(db, st, &jc, srcs, ap_and(&comp, st->filter, onx));
+		comp.fail = 0;
+	}
+
 	/* ORDER BY / LIMIT / OFFSET: order keys reference OUTPUT columns (a
 	 * positional integer or a select item matched by expr_same), applied
 	 * as a post-collection sort in collect_serial -- deterministic for a
@@ -6036,6 +6177,27 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 			if (comp.fail) goto fallback;
 		}
 	}
+	/* An index nested loop when every inner side can seek: the predicate
+	 * is WHERE AND every ON (all INNER here), re-checked per row. */
+	{
+		const vx_jsrc_t *srcs[VX_JOIN_MAX];
+		vx_expr_t *cond = st->filter;
+		for (side = 0; side < nside; side++) srcs[side] = &jp->src[side];
+		for (side = 1; side < nside && !comp.fail; side++) {
+			vx_expr_t *l, *r, *eqn;
+			if (cross_side[side]) continue;
+			l = compile_expr(&comp, on_lhs[side]);
+			r = compile_expr(&comp, on_rhs[side]);
+			eqn = expr_node(&comp, VXO_EQ);
+			if (comp.fail || l == NULL || r == NULL || eqn == NULL) break;
+			eqn->a = l; eqn->b = r;
+			cond = ap_and(&comp, cond, eqn);
+		}
+		if (!comp.fail)
+			(void)nl_plan(db, st, &jc, srcs, cond);
+		comp.fail = 0;
+	}
+
 	/* ORDER BY / LIMIT / OFFSET over the N-way join output, applied as a
 	 * post-collection sort (join_ordered_materialize), exactly like the
 	 * 2-table join.  Order keys reference OUTPUT columns (an ordinal, an
@@ -7475,6 +7637,60 @@ njoin_next_chunk(struct vx_stmt *st, int *done)
 	return c;
 }
 
+/*
+ * One chunk of the index nested-loop join.  Level L walks side ord[L]
+ * through its access path, whose bounds are evaluated against the
+ * combined row as placed by levels 0 .. L-1 when the level is (re)opened.
+ * A row at the deepest level completes a combined row, which then runs
+ * the full predicate + projection (join_emit_row).
+ */
+static vx_chunk_t *
+nl_next_chunk(struct vx_stmt *st, int *done)
+{
+	vx_nlplan_t *nl = st->nl;
+	vx_chunk_t *c;
+
+	*done = 0;
+	c = (vx_chunk_t *)calloc(1, sizeof *c);
+	if (!c) return NULL;
+	c->ncol = st->join_emit > 0 ? st->join_emit : st->nout;
+	c->cap = VEXEC_VECTOR_SIZE;
+	c->cells = (vx_cell_t *)malloc(sizeof(vx_cell_t) * (size_t)c->cap *
+	                               (size_t)(c->ncol > 0 ? c->ncol : 1));
+	if (!c->cells) { free(c); return NULL; }
+	if (!st->nl_started) {
+		st->nl_started = 1;
+		st->nl_level = 0;
+		if (src_open(st, nl->table[nl->ord[0]], &nl->ap[nl->ord[0]],
+		    &st->nlsrc[0]) != 0) { chunk_free(c); return NULL; }
+	}
+	while (c->nrow < c->cap) {
+		int lv = st->nl_level, sd = nl->ord[lv], r;
+		int64_t rid; const uint8_t *rec; int reclen;
+		if (lv < 0) { *done = 1; break; }
+		r = src_next(&st->nlsrc[lv], &rid, &rec, &reclen);
+		if (r < 0) { chunk_free(c); return NULL; }
+		if (r == 0) {                       /* level exhausted: back up */
+			src_close(&st->nlsrc[lv]);
+			st->nl_level--;
+			continue;
+		}
+		arena_free(st->nlar[lv]); st->nlar[lv] = NULL;
+		decode_rec_cells(nl->pay[sd], nl->ncol[sd], rid, rec, reclen,
+		    &st->srcrow[nl->base[sd]], &st->nlar[lv]);
+		if (lv + 1 < nl->nside) {           /* descend: seek the next side */
+			int nx = nl->ord[lv + 1];
+			if (src_open(st, nl->table[nx], &nl->ap[nx], &st->nlsrc[lv + 1]) != 0) {
+				chunk_free(c); return NULL;
+			}
+			st->nl_level = lv + 1;
+			continue;
+		}
+		if (join_emit_row(st, c) < 0) { chunk_free(c); return NULL; }
+	}
+	return c;
+}
+
 /* Materialize, sort, and offset/limit a JOIN with ORDER BY into one
  * chunk.  Drains the join's streaming chunks (join_next_chunk /
  * njoin_next_chunk), copies each output row into a growable array, sorts
@@ -7499,7 +7715,8 @@ join_ordered_materialize(struct vx_stmt *st)
 	 * the two-table join, the N-way join, or -- for an ordered
 	 * derived/view query -- the standard chunk path. */
 	while (!done) {
-		vx_chunk_t *jc = st->join ? join_next_chunk(st, &done)
+		vx_chunk_t *jc = st->nl ? nl_next_chunk(st, &done)
+		              : st->join ? join_next_chunk(st, &done)
 		              : st->njoin ? njoin_next_chunk(st, &done)
 		              : next_chunk(st, &done);
 		int r;
@@ -7588,8 +7805,9 @@ vx_step(vx_stmt_t *st)
 {
 	if (st == NULL) return SX_MISUSE;
 
-	/* Join: build the hash table + open the probe cursor on first step. */
-	if (st->join != NULL && !st->join_built) {
+	/* Join: build the hash table + open the probe cursor on first step
+	 * (an index nested-loop plan, st->nl, needs neither). */
+	if (st->join != NULL && st->nl == NULL && !st->join_built) {
 		st->jht = (vx_jht_t *)calloc(1, sizeof *st->jht);
 		if (st->jht == NULL) return SX_ERROR;
 		if (join_build(st, st->jht) != 0) return SX_ERROR;
@@ -7601,7 +7819,7 @@ vx_step(vx_stmt_t *st)
 	}
 
 	/* N-way join: build every build side's hash, open the side-0 stream. */
-	if (st->njoin != NULL && !st->nbuilt) {
+	if (st->njoin != NULL && st->nl == NULL && !st->nbuilt) {
 		int side;
 		for (side = 1; side < st->njoin->nside; side++)
 			if (njoin_build_side(st, side) != 0) return SX_ERROR;
@@ -7621,7 +7839,8 @@ vx_step(vx_stmt_t *st)
 	 * drains the streaming producer); a single-table scan uses
 	 * ordered_materialize. */
 	if (is_ordered(st) && !st->ordered_built) {
-		if (st->join != NULL || st->njoin != NULL || st->derived_res != NULL) {
+		if (st->join != NULL || st->njoin != NULL || st->nl != NULL ||
+		    st->derived_res != NULL) {
 			if (join_ordered_materialize(st) != 0) return SX_ERROR;
 		} else if (ordered_materialize(st) != 0) return SX_ERROR;
 	}
@@ -7639,7 +7858,8 @@ vx_step(vx_stmt_t *st)
 		int done = 0;
 		vx_chunk_t *c;
 		if (st->done) return SX_DONE;
-		c = st->join ? join_next_chunk(st, &done) :
+		c = st->nl ? nl_next_chunk(st, &done) :
+		    st->join ? join_next_chunk(st, &done) :
 		    st->njoin ? njoin_next_chunk(st, &done) : next_chunk(st, &done);
 		if (c == NULL) return SX_ERROR;
 		if (st->chunk) chunk_free(st->chunk);
@@ -7699,6 +7919,14 @@ vx_finalize(vx_stmt_t *st)
 	if (st == NULL) return;
 	if (st->scan) xstore_scan_close(st->scan);
 	src_close(&st->src);
+	if (st->nl) {
+		int lv;
+		for (lv = 0; lv < VX_JOIN_MAX; lv++) {
+			src_close(&st->nlsrc[lv]);
+			arena_free(st->nlar[lv]);
+		}
+		free(st->nl);
+	}
 	if (st->derived_res) vx_result_free(st->derived_res);
 	if (st->chunk) chunk_free(st->chunk);
 	if (st->plan_arena) arena_free(st->plan_arena);

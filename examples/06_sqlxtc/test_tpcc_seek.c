@@ -230,7 +230,7 @@ struct tcase {
 };
 
 static const struct tcase CASES[] = {
-	{ 0,  { PI(1), PI(2), PI(3) }, 3, 1, -1, 700, INT64_MIN, 0 },   /* hash join: step B */
+	{ 0,  { PI(1), PI(2), PI(3) }, 3, 1, -1, 4, INT64_MIN, 0 },
 	{ 1,  { PI(2), PI(1) }, 2, 1, -1, 1, 31, 0 },
 	{ 2,  { PI(31), PI(2), PI(1) }, 3, -1, 1, 2, INT64_MIN, 0 },
 	{ 32, { PI(2), PI(1) }, 2, 1, -1, 1, 32, 0 },
