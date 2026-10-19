@@ -1238,6 +1238,23 @@ static struct xs_idx_ent g_idx[XS_IDX_MAX];
 static int g_idx_n;
 static _Atomic uint64_t g_idx_gen;     /* bumped by every index create */
 
+/* Catalog generation: bumped by every DDL entry point (tables, indexes,
+ * views) and index rebuild, so a cached plan built at an older one is
+ * rebuilt (it may name a dropped index or miss a new one). */
+static _Atomic uint64_t g_cat_gen = 1;
+
+uint64_t
+xstore_catalog_gen(void)
+{
+	return atomic_load_explicit(&g_cat_gen, memory_order_acquire);
+}
+
+static void
+xs_cat_gen_bump(void)
+{
+	atomic_fetch_add_explicit(&g_cat_gen, 1, memory_order_acq_rel);
+}
+
 /* Caller holds the cat lock: drop every cached index of a closing bt. */
 static void
 xs_idx_cache_forget_locked(bt_t *bt)
@@ -4698,6 +4715,7 @@ uint32_t
 xstore_create_table(struct xsql *db, const char *name, const char *coldefs)
 {
 	bt_t *bt = xstore_bt_of(db);
+	xs_cat_gen_bump();
 	if (bt == NULL || name == NULL) return 0;
 	return xs_cat_find_or_create(bt, name, coldefs);
 }
@@ -4710,6 +4728,7 @@ xstore_create_view(struct xsql *db, const char *name, const char *select_sql)
 {
 	bt_t *bt = xstore_bt_of(db);
 	int i, rc = 0;
+	xs_cat_gen_bump();
 	if (bt == NULL || name == NULL || select_sql == NULL) return 0;
 	if (strlen(select_sql) >= sizeof g_view[0].sql) return 0;
 	xs_cat_lock();
@@ -4752,6 +4771,7 @@ xstore_drop_view(struct xsql *db, const char *name)
 {
 	bt_t *bt = xstore_bt_of(db);
 	int i;
+	xs_cat_gen_bump();
 	if (bt == NULL || name == NULL) return 0;
 	xs_cat_lock();
 	for (i = 0; i < g_view_n; i++)
@@ -5150,6 +5170,7 @@ xstore_create_index_ex(struct xsql *db, const char *name, const char *table,
 	xs_idx_cache_add(bt, idx_id, name, table, e.col, ncol, descmask, unique,
 	    kind ? (char)kind : 'i');
 	atomic_fetch_add_explicit(&g_idx_gen, 1, memory_order_relaxed);
+	xs_cat_gen_bump();
 	xstore_quiesce_begin();
 	xstore_quiesce_end();
 	xs_cat_lock();
@@ -5190,6 +5211,7 @@ xstore_drop_index(struct xsql *db, const char *name)
 	uint32_t idx_id = 0;
 	int i, found = 0;
 	uint8_t vbuf[8];
+	xs_cat_gen_bump();
 	if (bt == NULL || name == NULL) return 0;
 	xs_cat_lock();
 	for (i = 0; i < g_idx_n; i++)
@@ -6008,6 +6030,7 @@ xstore_drop_table(struct xsql *db, const char *name)
 	uint32_t id;
 	uint8_t vbuf[256];
 	size_t nlen;
+	xs_cat_gen_bump();
 	if (bt == NULL || name == NULL) return -1;
 	id = xs_cat_lookup(bt, name);
 	if (id == 0) return 0;               /* not present: idempotent */
@@ -6037,6 +6060,7 @@ xstore_rename_table(struct xsql *db, const char *oldname, const char *newname)
 	int vlen, i;
 	const char *coldefs = NULL;
 	size_t nlen, clen = 0, total;
+	xs_cat_gen_bump();
 	if (bt == NULL || oldname == NULL || newname == NULL) return -1;
 	id = xs_cat_lookup(bt, oldname);
 	if (id == 0) return 0;                       /* unknown: idempotent */

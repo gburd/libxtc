@@ -440,6 +440,10 @@ const char *xstore_uniq_err(struct xsql *db);
 int  xstore_stmt_mark(struct xsql *db);
 void xstore_stmt_undo(struct xsql *db, int mark);
 
+/* Catalog generation (bumped by every CREATE / DROP / ALTER / INDEX /
+ * VIEW): a cached plan built at another generation must be rebuilt. */
+uint64_t xstore_catalog_gen(void);
+
 /* Count of index seeks served (metric / test evidence that the planner
  * took the index rather than a full table scan). */
 uint64_t xstore_index_seek_count(void);

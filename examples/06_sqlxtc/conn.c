@@ -91,12 +91,18 @@ typedef struct conn_state {
 	int        quit;
 	int        closed;
 
-	/* Prepared-statement cache (one slot): cached_stmt holds the
-	 * statement last prepared for cached_sql on the connection's handle;
-	 * reused (reset + re-bind) when the next query text matches.
-	 * Finalized when the text changes or the connection closes. */
-	char      *cached_sql;
-	sx_stmt   *cached_stmt;
+	/* Prepared-statement cache: up to CONN_STMT_CACHE statements by SQL
+	 * text, each kept (with its parse and plan) and reused -- reset +
+	 * re-bind -- when the same text arrives again.  An OLTP client cycles
+	 * through a few dozen texts (Turso's harness: 35), so one slot always
+	 * missed.  Replacement: the least recently used.  Finalized when the
+	 * connection closes. */
+	struct {
+		char     *sql;
+		sx_stmt  *stmt;
+		uint64_t  used;
+	}          cache[64];
+	uint64_t   cache_tick;
 
 	/* Connection-lifetime engine handle (opened in conn_proc, closed at
 	 * teardown).  h_owned == 1 when this is a private per-connection
@@ -158,16 +164,80 @@ try_write(conn_state_t *st)
 	return 0;
 }
 
+/* The cache slot holding `sql` (q, n), or -1. */
+static int
+conn_cache_find(conn_state_t *st, const char *q, size_t n)
+{
+	int i;
+	for (i = 0; i < (int)(sizeof st->cache / sizeof st->cache[0]); i++)
+		if (st->cache[i].sql != NULL && strlen(st->cache[i].sql) == n &&
+		    memcmp(st->cache[i].sql, q, n) == 0)
+			return i;
+	return -1;
+}
+
+/* A slot for new text `sql`: an empty one, else the least recently
+ * used (its statement finalized).  -1 on allocation failure. */
+static int
+conn_cache_take(conn_state_t *st, const char *sql)
+{
+	int i, v = 0;
+	for (i = 0; i < (int)(sizeof st->cache / sizeof st->cache[0]); i++) {
+		if (st->cache[i].sql == NULL) { v = i; break; }
+		if (st->cache[i].used < st->cache[v].used) v = i;
+	}
+	if (st->cache[v].stmt != NULL) sx_finalize(st->cache[v].stmt);
+	free(st->cache[v].sql);
+	st->cache[v].stmt = NULL;
+	st->cache[v].sql = strdup(sql);
+	return st->cache[v].sql != NULL ? v : -1;
+}
+
+/* Execute msg through cache slot `slot` (preparing on first use). */
+static void
+conn_run(conn_state_t *st, sx_db *h, int slot, const quack_msg_t *msg)
+{
+	int64_t t0 = xtc_now_ns(), rows = 0;
+	char *err = NULL;
+	int exec_rc;
+	const struct quack_param *bp = msg->n_params > 0 ? msg->params : NULL;
+	st->cache[slot].used = ++st->cache_tick;
+	exec_rc = db_exec_cached(h, &st->cache[slot].stmt, st->cache[slot].sql,
+	    bp, msg->n_params, msg->limit, &st->wbuf, &rows, &err);
+	if (sqlxtc_stat_query_total != NULL)
+		xtc_counter_inc(sqlxtc_stat_query_total);
+	if (sqlxtc_stat_query_latency != NULL)
+		xtc_hist_record(sqlxtc_stat_query_latency, xtc_now_ns() - t0);
+	if (exec_rc < 0) {
+		if (sqlxtc_stat_query_errors != NULL)
+			xtc_counter_inc(sqlxtc_stat_query_errors);
+		quack_emit_err(&st->wbuf, err ? err : "exec failed");
+		free(err);
+		/* A statement that failed to prepare is not kept: the next
+		 * arrival of the text re-validates it (a table may appear). */
+		if (st->cache[slot].stmt == NULL) {
+			free(st->cache[slot].sql);
+			st->cache[slot].sql = NULL;
+		}
+	}
+}
+
 static void
 handle_query(conn_state_t *st, const quack_msg_t *msg)
 {
 	sx_db *h = st->h_conn;
-	int64_t  rows = 0;
-	char    *err = NULL;
 	sql_info_t info;
 	char    *normalized = NULL;
 	const char *sql_to_exec = msg->q;
 	size_t      sql_len     = msg->q_len;
+	int      slot;
+
+	/* A statement text seen before skips the classifier and prepare. */
+	slot = conn_cache_find(st, msg->q, msg->q_len);
+	if (slot >= 0) {
+		conn_run(st, h, slot, msg);
+		return;
+	}
 
 	/* Pre-parse: validate and route. */
 	if (sql_parse(msg->q, msg->q_len, &info) < 0) {
@@ -193,42 +263,15 @@ handle_query(conn_state_t *st, const quack_msg_t *msg)
 		return;
 	}
 
-	{
-		int64_t t0 = xtc_now_ns();
-		int exec_rc;
-		const struct quack_param *bp =
-		    msg->n_params > 0 ? msg->params : NULL;
-		/* The connection's handle is stable for its lifetime, so the
-		 * prepared-statement cache is always valid.  Refresh the slot
-		 * when the query text changes. */
-		if (st->cached_sql == NULL ||
-		    strcmp(st->cached_sql, sql_to_exec) != 0) {
-			if (st->cached_stmt != NULL) {
-				sx_finalize(st->cached_stmt);
-				st->cached_stmt = NULL;
-			}
-			free(st->cached_sql);
-			st->cached_sql = strdup(sql_to_exec);
-		}
-		exec_rc = db_exec_cached(h, &st->cached_stmt, sql_to_exec,
-		    bp, msg->n_params, msg->limit, &st->wbuf, &rows, &err);
-		if (sqlxtc_stat_query_total != NULL)
-			xtc_counter_inc(sqlxtc_stat_query_total);
-		if (sqlxtc_stat_query_latency != NULL)
-			xtc_hist_record(sqlxtc_stat_query_latency,
-			    xtc_now_ns() - t0);
-		if (exec_rc < 0) {
-			if (sqlxtc_stat_query_errors != NULL)
-				xtc_counter_inc(sqlxtc_stat_query_errors);
-			if (err) {
-				quack_emit_err(&st->wbuf, err);
-				free(err);
-			} else {
-				quack_emit_err(&st->wbuf, "exec failed");
-			}
-		}
+	/* The connection's handle is stable for its lifetime, so a cached
+	 * statement stays valid; take the least recently used slot. */
+	slot = conn_cache_take(st, sql_to_exec);
+	if (slot < 0) {
+		quack_emit_err(&st->wbuf, "oom");
+		free(normalized);
+		return;
 	}
-
+	conn_run(st, h, slot, msg);
 	free(normalized);
 }
 
@@ -321,6 +364,7 @@ conn_proc(void *arg)
 {
 	conn_state_t *st = arg;
 	void *msg; size_t msg_len;
+	int ci;
 
 	/* Open this connection's engine handle once, for its whole life.
 	 * In connection-per-proc mode this is a private handle on the loop
@@ -382,9 +426,10 @@ conn_proc(void *arg)
 
 	/* Release the cached prepared statement and the connection handle
 	 * (finalize the statement before closing its handle). */
-	if (st->cached_stmt != NULL)
-		sx_finalize(st->cached_stmt);
-	free(st->cached_sql);
+	for (ci = 0; ci < (int)(sizeof st->cache / sizeof st->cache[0]); ci++) {
+		if (st->cache[ci].stmt != NULL) sx_finalize(st->cache[ci].stmt);
+		free(st->cache[ci].sql);
+	}
 	if (st->h_conn != NULL)
 		db_conn_close(st->db, st->h_conn, st->h_owned);
 

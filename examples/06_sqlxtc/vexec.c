@@ -219,6 +219,13 @@ typedef struct vx_expr {
 	vx_cell_t    *in_sorted;  /* nargs_sorted non-NULL elements, ascending */
 	int           in_nsorted;
 	int           in_has_null; /* a NULL element was present in the list */
+	/* VXO_LIT compiled from a bound ? (VXO_PARAM in effect): pord is its
+	 * ordinal (0 = a real literal); pcoerce the comparison-affinity
+	 * coercion cmp_affinity_gate applied (0 none, 1 numeric, 2 text).
+	 * A cached plan re-reads .lit from the new binds (vx_plan_rebind). */
+	int           pord;
+	int           pcoerce;
+	struct vx_expr *pnext;    /* the plan's chain of such nodes */
 } vx_expr_t;
 
 /* ---- aggregation (V3) -------------------------------------------- */
@@ -562,6 +569,11 @@ struct vx_stmt {
 	int64_t       offset;       /* 0 if none */
 
 	struct vx_arena_blk *plan_arena;   /* expr tree + literal bytes */
+	vx_expr_t    *params;       /* chain of bound-? literals (pnext) */
+	int           noreuse;      /* compile baked in data or a bind VALUE
+	                             * (a spliced subquery, a view, an IN index
+	                             * over ?): rebuild from the AST each run */
+	struct vx_arena_blk *bind_arena;   /* rebound TEXT/BLOB bytes */
 
 	/* Correlated-subquery sources (one per VXO_CORRSUBQ / VXO_CORRIN
 	 * node).  Each is the parameterized inner SELECT text (outer refs
@@ -1404,6 +1416,9 @@ compile_param(struct vx_compiler *c, const sql_expr_t *e)
 	if (ord < 1) { c->fail = 1; return NULL; }
 	n = expr_node(c, VXO_LIT);
 	if (n == NULL) { c->fail = 1; return NULL; }
+	n->pord = ord;
+	n->pnext = c->st->params;
+	c->st->params = n;
 	if (c->binds == NULL || ord > c->nbinds) {
 		n->lit.type = VX_NULL;   /* an unset ? is NULL (SQLite) */
 		return n;
@@ -1434,6 +1449,7 @@ compile_ext(struct vx_compiler *c, const sql_expr_t *e, vx_expr_t *n)
 	n->col = vxf_lookup(e->name[0].p, e->name[0].len, n->nargs);
 	if (n->col <= 0 || n->nargs > 16) return -1;
 	for (k = 0; k < n->nargs; k++) {
+		if (n->args[k]->pord != 0) c->st->noreuse = 1;   /* value checked below */
 		/* A column or expression of numeric class may hold a REAL. */
 		lits[k] = n->args[k]->op == VXO_LIT ? &n->args[k]->lit : NULL;
 		if (!vxf_arg_ok(n->col, k, lits[k],
@@ -1506,75 +1522,44 @@ corr_scan_expr(const sql_expr_t *e, char intab[][64], int nintab, int *corr)
  * named in the inner FROM.  Returns 0 otherwise (the caller then treats
  * it as correlated / unsupported).
  */
+/* The shape/correlation gate on an already-parsed subquery `q`: one
+ * non-compound SELECT projecting want_ncol columns, with no qualified
+ * reference to a table outside its own FROM.  1 = uncorrelated. */
 static int
-native_subquery_gate(const char *src, uint32_t srclen, int want_ncol)
+native_subquery_gate_sel(const sql_select_t *q, int want_ncol)
 {
-	char *sub, *s;
-	size_t len = srclen;
-	sql_arena_t *arena = NULL;
-	sql_stmt_t *root = NULL;
-	const char *perr = NULL;
-	int ok = 0;
-
-	if (src == NULL || srclen == 0) return 0;
-	sub = (char *)malloc((size_t)srclen + 1);
-	if (sub == NULL) return 0;
-	memcpy(sub, src, srclen); sub[srclen] = '\0';
-	s = sub;
-	while (len > 0 && (*s == ' ' || *s == '\t' || *s == '\n')) { s++; len--; }
-	while (len > 0 && (s[len-1]==' '||s[len-1]=='\t'||s[len-1]=='\n')) len--;
-	if (len < 2 || s[0] != '(' || s[len-1] != ')') { free(sub); return 0; }
-	s[len-1] = '\0';
-	memmove(sub, s + 1, len - 1);   /* drop leading '(' */
-
-	if (sql_parse_ast(sub, strlen(sub), &arena, &root, &perr) != 0 || root == NULL)
-		goto out;
-	if (root->kind != SQL_KIND_SELECT || root->u.select == NULL)
-		goto out;
-	{
-		const sql_select_t *q = root->u.select;
-		char intab[8][64]; int nintab = 0, ncol = 0, corr = 0;
-		const sql_src_t *fr;
-		const sql_exprlist_item_t *it;
-		const sql_exprlist_t *g;
-		if (q->setop != 0 || q->rhs != NULL) goto out;   /* compound */
-		/* Inner FROM table names + aliases.  An aliased source contributes
-		 * ONLY its alias (SQLite requires the alias for qualification; the
-		 * base name then refers to an outer query -- the correlated case). */
-		for (fr = q->from; fr; fr = fr->next) {
-			if (fr->subquery) goto out;   /* nested derived: not gated here */
-			if (fr->alias.len > 0 && fr->alias.len < 64 && nintab < 8) {
-				memcpy(intab[nintab], fr->alias.p, fr->alias.len);
-				intab[nintab][fr->alias.len] = '\0'; nintab++;
-			} else if (fr->table.len > 0 && fr->table.len < 64 && nintab < 8) {
-				memcpy(intab[nintab], fr->table.p, fr->table.len);
-				intab[nintab][fr->table.len] = '\0'; nintab++;
-			}
+	char intab[8][64]; int nintab = 0, ncol = 0, corr = 0;
+	const sql_src_t *fr;
+	const sql_exprlist_item_t *it;
+	const sql_exprlist_item_t *gi;
+	if (q == NULL || q->setop != 0 || q->rhs != NULL) return 0;   /* compound */
+	/* Inner FROM table names + aliases.  An aliased source contributes
+	 * ONLY its alias (SQLite requires the alias for qualification; the
+	 * base name then refers to an outer query -- the correlated case). */
+	for (fr = q->from; fr; fr = fr->next) {
+		if (fr->subquery) return 0;   /* nested derived: not gated here */
+		if (fr->alias.len > 0 && fr->alias.len < 64 && nintab < 8) {
+			memcpy(intab[nintab], fr->alias.p, fr->alias.len);
+			intab[nintab][fr->alias.len] = '\0'; nintab++;
+		} else if (fr->table.len > 0 && fr->table.len < 64 && nintab < 8) {
+			memcpy(intab[nintab], fr->table.p, fr->table.len);
+			intab[nintab][fr->table.len] = '\0'; nintab++;
 		}
-		/* Output column count (no STAR). */
-		for (it = q->cols ? q->cols->head : NULL; it; it = it->next) {
-			if (it->expr == NULL || it->expr->op == SX_E_STAR) goto out;
-			ncol++;
-		}
-		if (ncol != want_ncol) goto out;
-		/* Correlation: any qualified ref to a non-inner table -> correlated. */
-		for (it = q->cols->head; it; it = it->next)
-			corr_scan_expr(it->expr, intab, nintab, &corr);
-		corr_scan_expr(q->where, intab, nintab, &corr);
-		corr_scan_expr(q->having, intab, nintab, &corr);
-		for (g = q->group; g && g->head; ) { /* group is an exprlist */
-			const sql_exprlist_item_t *gi;
-			for (gi = g->head; gi; gi = gi->next)
-				corr_scan_expr(gi->expr, intab, nintab, &corr);
-			break;
-		}
-		if (corr) goto out;
-		ok = 1;
 	}
-out:
-	if (arena) sql_arena_destroy(arena);
-	free(sub);
-	return ok;
+	/* Output column count (no STAR). */
+	for (it = q->cols ? q->cols->head : NULL; it; it = it->next) {
+		if (it->expr == NULL || it->expr->op == SX_E_STAR) return 0;
+		ncol++;
+	}
+	if (ncol != want_ncol) return 0;
+	/* Correlation: any qualified ref to a non-inner table -> correlated. */
+	for (it = q->cols->head; it; it = it->next)
+		corr_scan_expr(it->expr, intab, nintab, &corr);
+	corr_scan_expr(q->where, intab, nintab, &corr);
+	corr_scan_expr(q->having, intab, nintab, &corr);
+	for (gi = q->group ? q->group->head : NULL; gi; gi = gi->next)
+		corr_scan_expr(gi->expr, intab, nintab, &corr);
+	return !corr;
 }
 
 /* corr_collect's unqualified-outer-ref state (cc_inner_cols /
@@ -1677,6 +1662,14 @@ build_corr_stmt(struct vx_compiler *c, const sql_expr_t *e,
 		if ((nref = corr_collect(q2->having, otab, refs, nref)) < 0) return -1;
 	}
 	if (nref == 0) return -1;   /* not actually correlated */
+	/* shortcut: the per-row re-run binds only the outer columns, so a ?
+	 * of the statement inside the subquery would read as NULL: decline
+	 * (correlated subqueries with binds are not in TPROC-C). */
+	{
+		const char *q;
+		for (q = e->src; q < e->src + e->srclen; q++)
+			if (*q == '?' || *q == ':' || *q == '@' || *q == '$') return -1;
+	}
 
 	/* Build the parameterized subquery text: strip the wrapping parens,
 	 * then splice ? in place of each outer-ref span (left to right). */
@@ -1882,122 +1875,31 @@ compile_exists(struct vx_compiler *c, const sql_expr_t *e)
 	return n;
 }
 
-/* The ? ordinals used inside a subquery's AST: [*lo, *hi], count in the
- * return value (0 = none).  The parser numbers a subquery's ? in place
- * and in the same order a standalone parse of its text would, so they
- * are the contiguous run of the outer binds the inner run needs. */
-static int param_span_sel(const sql_select_t *q, int *lo, int *hi);
-static int
-param_span_expr(const sql_expr_t *e, int *lo, int *hi)
-{
-	const sql_exprlist_item_t *it;
-	const sql_case_arm_t *arm;
-	int n = 0;
-	if (e == NULL) return 0;
-	if (e->op == SX_E_PARAM) {
-		int o = (int)e->ival;
-		if (*lo == 0 || o < *lo) *lo = o;
-		if (o > *hi) *hi = o;
-		return 1;
-	}
-	n += param_span_expr(e->a, lo, hi);
-	n += param_span_expr(e->b, lo, hi);
-	n += param_span_expr(e->c, lo, hi);
-	n += param_span_expr(e->els, lo, hi);
-	for (it = e->list ? e->list->head : NULL; it; it = it->next)
-		n += param_span_expr(it->expr, lo, hi);
-	for (arm = e->arms; arm; arm = arm->next) {
-		n += param_span_expr(arm->when, lo, hi);
-		n += param_span_expr(arm->then, lo, hi);
-	}
-	return n + param_span_sel(e->sel, lo, hi);
-}
-static int
-param_span_list(const sql_exprlist_t *l, int *lo, int *hi)
-{
-	const sql_exprlist_item_t *it;
-	int n = 0;
-	for (it = l ? l->head : NULL; it; it = it->next)
-		n += param_span_expr(it->expr, lo, hi);
-	return n;
-}
-static int
-param_span_sel(const sql_select_t *q, int *lo, int *hi)
-{
-	const sql_src_t *f;
-	int n = 0;
-	if (q == NULL) return 0;
-	n += param_span_list(q->cols, lo, hi);
-	for (f = q->from; f; f = f->next) {
-		n += param_span_sel(f->subquery, lo, hi);
-		n += param_span_expr(f->on, lo, hi);
-	}
-	n += param_span_expr(q->where, lo, hi);
-	n += param_span_list(q->group, lo, hi);
-	n += param_span_expr(q->having, lo, hi);
-	n += param_span_list(q->order, lo, hi);
-	n += param_span_expr(q->limit, lo, hi);
-	n += param_span_expr(q->offset, lo, hi);
-	return n + param_span_sel(q->rhs, lo, hi);
-}
-
-/* The bind slice an uncorrelated subquery's standalone run needs: sets
- * *b / *nb (NULL / 0 when it has no ?).  Returns 0, or -1 when its ?
- * are not bound (the caller declines). */
-static int
-subq_binds(const struct vx_compiler *c, const sql_select_t *q,
-           const vx_cell_t **b, int *nb)
-{
-	int lo = 0, hi = 0;
-	*b = NULL; *nb = 0;
-	if (param_span_sel(q, &lo, &hi) == 0) return 0;
-	if (lo < 1) return -1;
-	if (c->binds == NULL || lo > c->nbinds) return 0;   /* all unset: NULL */
-	*b = c->binds + (lo - 1);
-	*nb = (hi > c->nbinds ? c->nbinds : hi) - lo + 1;   /* the tail is NULL */
-	return 0;
-}
+static int vx_run_sel(struct xsql *db, const sql_select_t *sel,
+                      const vx_cell_t *binds, int nbinds, vx_result_t **res);
 
 static vx_expr_t *
 compile_scalar_subquery(struct vx_compiler *c, const sql_expr_t *e)
 {
 	vx_expr_t *n;
-	char *sub, *s;
-	size_t len;
 	vx_result_t *r = NULL;
-	const vx_cell_t *sb;
-	int rc, nrow, snb;
+	int rc, nrow;
 
-	if (c->st == NULL || c->st->db == NULL || e->src == NULL || e->srclen == 0) {
+	if (c->st == NULL || c->st->db == NULL || e->sel == NULL) {
 		c->fail = 1; return NULL;
 	}
-	if (subq_binds(c, e->sel, &sb, &snb) != 0) { c->fail = 1; return NULL; }
-	/* Correlation/shape gate, NATIVE: an uncorrelated scalar subquery
-	 * projects exactly one column and references no outer column.  This
-	 * replaces the former SQLite prepare-as-gate so a subquery over a
-	 * catalog-only (native DDL) table is recognized.  A correlated
-	 * subquery fails the gate and falls through to compile_corr_subquery. */
-	if (!native_subquery_gate(e->src, e->srclen, 1)) { c->fail = 1; return NULL; }
-	/* Strip the wrapping parens to get the inner SELECT text. */
-	sub = (char *)malloc((size_t)e->srclen + 1);
-	if (sub == NULL) { c->fail = 1; return NULL; }
-	memcpy(sub, e->src, e->srclen); sub[e->srclen] = '\0';
-	s = sub; len = e->srclen;
-	while (len > 0 && (*s == ' ' || *s == '\t' || *s == '\n')) { s++; len--; }
-	while (len > 0 && (s[len-1]==' '||s[len-1]=='\t'||s[len-1]=='\n')) len--;
-	if (len < 2 || s[0] != '(' || s[len-1] != ')') { free(sub); c->fail = 1; return NULL; }
-	s[len-1] = '\0';
-	memmove(sub, s + 1, len - 1);   /* drop leading '(' */
+	/* Correlation/shape gate on the parsed subquery: one column, no outer
+	 * reference.  A correlated subquery fails it and falls through to
+	 * compile_corr_subquery. */
+	if (!native_subquery_gate_sel(e->sel, 1)) { c->fail = 1; return NULL; }
 
-	/* Run the inner SELECT through vexec (no SQLite).  An uncorrelated
-	 * scalar subquery: it must produce exactly one column and at most one
-	 * row (SQLite would too).  If vexec cannot recognize the inner SELECT
-	 * (rc 0) or errors (rc < 0), or it returns the wrong shape, fall the
-	 * WHOLE outer query back to the VDBE -- so the result is always the
-	 * VDBE's, never a divergence. */
-	rc = vx_run_p(c->st->db, sub, sb, snb, 1, &r, NULL);
-	free(sub);
+	/* Run the inner SELECT from its AST (no re-parse; its ? ordinals are
+	 * the statement's, so it takes the whole bind array).  It must yield
+	 * one column and at most one row (SQLite would too); anything vexec
+	 * cannot run declines the whole statement. */
+	rc = vx_run_sel(c->st->db, e->sel, c->binds, c->nbinds, &r);
 	if (rc != 1 || r == NULL) { if (r) vx_result_free(r); c->fail = 1; return NULL; }
+	c->st->noreuse = 1;   /* its value is spliced in as a literal */
 	if (vx_result_ncol(r) != 1) { vx_result_free(r); c->fail = 1; return NULL; }
 	nrow = vx_result_nrow(r);
 	if (nrow > 1) { vx_result_free(r); c->fail = 1; return NULL; }
@@ -2056,7 +1958,9 @@ build_in_index(struct vx_compiler *c, vx_expr_t *n)
 	int k, m = 0;
 	vx_cell_t *arr;
 	for (k = 0; k < n->nargs; k++)
-		if (n->args[k] == NULL || n->args[k]->op != VXO_LIT) return;
+		if (n->args[k] == NULL || n->args[k]->op != VXO_LIT ||
+		    n->args[k]->pord != 0)   /* a bound ?: its value changes per run */
+			return;
 	if (n->nargs <= 0) return;
 	arr = (vx_cell_t *)arena_alloc(&c->st->plan_arena,
 	    sizeof(vx_cell_t) * (size_t)n->nargs);
@@ -2082,13 +1986,11 @@ compile_in_select(struct vx_compiler *c, const sql_expr_t *e)
 	vx_result_t *r = NULL;
 	vx_expr_t *n, *a;
 	enum vx_aff acls;
-	char *sub, *s;
-	size_t len;
-	const vx_cell_t *sb;
-	int cnt = 0, cap = 16, nrow, ri, rc, snb;
+	int cnt = 0, cap = 16, nrow, ri, rc;
 
-	if (c->st == NULL || c->st->db == NULL) { c->fail = 1; return NULL; }
-	if (subq_binds(c, e->sel, &sb, &snb) != 0) { c->fail = 1; return NULL; }
+	if (c->st == NULL || c->st->db == NULL || e->sel == NULL) {
+		c->fail = 1; return NULL;
+	}
 	a = compile_expr(c, e->a);
 	if (a == NULL) return NULL;
 	acls = node_class(c, a);
@@ -2097,23 +1999,13 @@ compile_in_select(struct vx_compiler *c, const sql_expr_t *e)
 	 * through vexec (no SQLite), its values materialized as a literal
 	 * list.  A correlated subquery fails the gate and the caller tries
 	 * compile_corr_subquery. */
-	if (!native_subquery_gate(e->src, e->srclen, 1)) { c->fail = 1; return NULL; }
-	if (e->src == NULL || e->srclen == 0) { c->fail = 1; return NULL; }
-	sub = (char *)malloc((size_t)e->srclen + 1);
-	if (sub == NULL) { c->fail = 1; return NULL; }
-	memcpy(sub, e->src, e->srclen); sub[e->srclen] = '\0';
-	s = sub; len = e->srclen;
-	while (len > 0 && (*s == ' ' || *s == '\t' || *s == '\n')) { s++; len--; }
-	while (len > 0 && (s[len-1]==' '||s[len-1]=='\t'||s[len-1]=='\n')) len--;
-	if (len < 2 || s[0] != '(' || s[len-1] != ')') { free(sub); c->fail = 1; return NULL; }
-	s[len-1] = '\0';
-	memmove(sub, s + 1, len - 1);
-	rc = vx_run_p(c->st->db, sub, sb, snb, 1, &r, NULL);
-	free(sub);
+	if (!native_subquery_gate_sel(e->sel, 1)) { c->fail = 1; return NULL; }
+	rc = vx_run_sel(c->st->db, e->sel, c->binds, c->nbinds, &r);
 	if (rc != 1 || r == NULL || vx_result_ncol(r) != 1) {
 		if (r) vx_result_free(r);
 		c->fail = 1; return NULL;
 	}
+	c->st->noreuse = 1;   /* its values are spliced in as literals */
 
 	n = expr_node(c, e->ival ? VXO_NOTIN : VXO_IN);   /* ival = NOT IN */
 	if (n == NULL) { vx_result_free(r); c->fail = 1; return NULL; }
@@ -2200,8 +2092,10 @@ cmp_affinity_gate(struct vx_compiler *c, vx_expr_t *a, vx_expr_t *b)
 	if (lit->lit.type == VX_NULL) return 1;
 	aff = node_class(c, col);
 	if (aff == VX_AFF_NUMERIC) {
+		lit->pcoerce = 1;
 		if (lit->lit.type == VX_TEXT) coerce_numeric(&lit->lit);
 	} else if (aff == VX_AFF_TEXT) {
+		lit->pcoerce = 2;
 		if (lit->lit.type == VX_INT || lit->lit.type == VX_REAL)
 			coerce_to_affinity(&lit->lit, VX_AFF_TEXT, &c->st->plan_arena);
 	}
@@ -2306,6 +2200,7 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 				 * declining (an error here too) keeps the two in step. */
 				if (node_class(c, x) != VX_AFF_TEXT ||
 				    (x->op == VXO_LIT && x->lit.nbytes != 1)) { c->fail = 1; return NULL; }
+				if (x->pord != 0) c->st->noreuse = 1;   /* length checked */
 				n->args = (vx_expr_t **)arena_alloc(&c->st->plan_arena,
 				    sizeof(vx_expr_t *));
 				if (n->args == NULL) { c->fail = 1; return NULL; }
@@ -6406,6 +6301,7 @@ vx_try_prepare_derived(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 	st->srcrow = (vx_cell_t *)calloc((size_t)ncol, sizeof(vx_cell_t));
 	if (!st->srcrow) { rc = -1; goto fallback; }
 	st->derived_res = ires;   /* the inner row source; vx_finalize frees it */
+	st->noreuse = 1;          /* materialized data: rebuild each run */
 	st->derived_cur = 0;
 	ires = NULL;              /* ownership transferred to st */
 
@@ -6578,6 +6474,7 @@ vx_try_prepare_view(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	st->srcrow = (vx_cell_t *)calloc((size_t)ncol, sizeof(vx_cell_t));
 	if (!st->srcrow) { rc = -1; goto fallback; }
 	st->derived_res = ires;   /* the view's row source; vx_finalize frees it */
+	st->noreuse = 1;          /* materialized data: rebuild each run */
 	st->derived_cur = 0;
 	ires = NULL;
 
@@ -7918,10 +7815,99 @@ int vx_column_bytes(vx_stmt_t *st, int i)
 { const vx_cell_t *c = cur_cell(st, i);
   return (c && (c->type == VX_TEXT || c->type == VX_BLOB)) ? (int)c->nbytes : 0; }
 
+/*
+ * Return an executed plan to its just-prepared state, keeping everything
+ * compiled (expressions, access paths, join plans): cursors closed, hash
+ * tables and result chunks freed, cursors and flags zeroed.  A plan with
+ * a cached access path re-evaluates its bounds when its source reopens.
+ */
+static void
+vx_exec_reset(vx_stmt_t *st)
+{
+	int lv;
+	if (st->scan) { xstore_scan_close(st->scan); st->scan = NULL; }
+	src_close(&st->src);
+	for (lv = 0; lv < VX_JOIN_MAX; lv++) {
+		src_close(&st->nlsrc[lv]);
+		arena_free(st->nlar[lv]); st->nlar[lv] = NULL;
+	}
+	st->nl_level = 0; st->nl_started = 0;
+	if (st->chunk) { chunk_free(st->chunk); st->chunk = NULL; }
+	st->cur = -1; st->done = 0;
+	htab_free(&st->ht);
+	memset(&st->ht, 0, sizeof st->ht);
+	st->ht_built = 0; st->ordered_built = 0;
+	if (st->jht) {
+		arena_free(st->jht->arena); free(st->jht->buckets); free(st->jht);
+		st->jht = NULL;
+	}
+	if (st->probe_scan) { xstore_scan_close(st->probe_scan); st->probe_scan = NULL; }
+	arena_free(st->probe_arena); st->probe_arena = NULL;
+	st->match = NULL;
+	st->join_built = 0; st->probe_done = 0; st->bscan_b = 0; st->bscan_r = NULL;
+	for (lv = 1; lv < VX_JOIN_MAX; lv++) {
+		if (st->njht[lv]) {
+			arena_free(st->njht[lv]->arena);
+			free(st->njht[lv]->buckets);
+			free(st->njht[lv]);
+			st->njht[lv] = NULL;
+		}
+		st->ncur[lv] = NULL;
+	}
+	if (st->nstream_scan) { xstore_scan_close(st->nstream_scan); st->nstream_scan = NULL; }
+	arena_free(st->nstream_arena); st->nstream_arena = NULL;
+	st->nbuilt = 0; st->nstream_done = 0;
+	st->derived_cur = 0;
+}
+
+/* Coerce a rebound literal the way cmp_affinity_gate coerced it. */
+static void
+vx_param_coerce(vx_expr_t *n, struct vx_arena_blk **arena)
+{
+	if (n->lit.type == VX_NULL) return;
+	if (n->pcoerce == 1 && n->lit.type == VX_TEXT) coerce_numeric(&n->lit);
+	else if (n->pcoerce == 2 && (n->lit.type == VX_INT || n->lit.type == VX_REAL))
+		coerce_to_affinity(&n->lit, VX_AFF_TEXT, arena);
+}
+
+/*
+ * Rebind a cached plan to new parameter values: every bound-? literal
+ * re-reads its value (with its comparison coercion), so the compiled
+ * plan and its access path are reused as is.  The compile-time checks
+ * that looked at a bind depend only on its storage class, which the
+ * plan cache's signature pins.
+ */
+static void
+vx_plan_rebind(vx_stmt_t *st, const vx_cell_t *binds, int nbinds)
+{
+	vx_expr_t *n;
+	arena_free(st->bind_arena); st->bind_arena = NULL;
+	st->binds = binds; st->nbinds = nbinds;
+	if (st->now_ms != 0) st->now_ms = vxf_now_ms();   /* one 'now' per run */
+	for (n = st->params; n != NULL; n = n->pnext) {
+		const vx_cell_t *v;
+		memset(&n->lit, 0, sizeof n->lit);
+		if (binds == NULL || n->pord > nbinds) { n->lit.type = VX_NULL; continue; }
+		v = &binds[n->pord - 1];
+		if (v->type == VX_TEXT || v->type == VX_BLOB) {
+			uint8_t *p = (uint8_t *)arena_alloc(&st->bind_arena,
+			    (size_t)v->nbytes + 1);
+			if (p == NULL) { n->lit.type = VX_NULL; continue; }
+			if (v->nbytes) memcpy(p, v->bytes, v->nbytes);
+			p[v->nbytes] = '\0';
+			n->lit.type = v->type; n->lit.bytes = p; n->lit.nbytes = v->nbytes;
+		} else {
+			n->lit = *v;
+		}
+		vx_param_coerce(n, &st->bind_arena);
+	}
+}
+
 void
 vx_finalize(vx_stmt_t *st)
 {
 	if (st == NULL) return;
+	arena_free(st->bind_arena);
 	if (st->scan) xstore_scan_close(st->scan);
 	src_close(&st->src);
 	if (st->nl) {
@@ -8405,17 +8391,28 @@ cleanup:
  * for plans that vexec recognizes but cannot run on the parallel storage
  * scan (ordered/limited/joined/single-table at one worker).  Takes
  * ownership of plan (finalizes it).  Returns 1 with *res, or <0. */
+static int collect_plan(vx_stmt_t *plan, vx_result_t **res);
+
 static int
 collect_serial(vx_stmt_t *plan, vx_result_t **res)
+{
+	int rc = collect_plan(plan, res);
+	vx_finalize(plan);
+	return rc;
+}
+
+/* collect_serial without the finalize (a cached plan is kept). */
+static int
+collect_plan(vx_stmt_t *plan, vx_result_t **res)
 {
 	struct vx_result *out;
 	int ncol, step, rc = 1, i, distinct = plan->distinct;
 	vx_cell_t rowbuf[64];
 
 	ncol = vx_column_count(plan);
-	if (ncol > (int)(sizeof rowbuf / sizeof rowbuf[0])) { vx_finalize(plan); return 0; }
+	if (ncol > (int)(sizeof rowbuf / sizeof rowbuf[0])) return 0;
 	out = (struct vx_result *)calloc(1, sizeof *out);
-	if (out == NULL) { vx_finalize(plan); return -1; }
+	if (out == NULL) return -1;
 	out->ncol = ncol;
 	out->nworkers = 1;
 	memcpy(out->name, plan->outname, sizeof out->name);
@@ -8447,7 +8444,6 @@ collect_serial(vx_stmt_t *plan, vx_result_t **res)
 
 	if (rc == 1) { *res = out; }
 	else { arena_free(out->arena); free(out->cells); free(out); }
-	vx_finalize(plan);
 	return rc;
 }
 
@@ -8939,6 +8935,10 @@ vx_write_err(struct xsql *db, int rc, char **errmsg, const char *what)
 		*errmsg = strdup(what);
 }
 
+static int vx_run_write_ast(struct xsql *db, sql_arena_t *arena,
+    const sql_stmt_t *root, const vx_cell_t *binds, int nbinds,
+    int64_t *nchanges, char **errmsg);
+
 int
 vx_run_write_p(struct xsql *db, const char *sql,
                const vx_cell_t *binds, int nbinds,
@@ -8947,6 +8947,22 @@ vx_run_write_p(struct xsql *db, const char *sql,
 	sql_arena_t *arena = NULL;
 	sql_stmt_t *root = NULL;
 	const char *perr = NULL;
+
+	if (nchanges) *nchanges = 0;
+	if (errmsg) *errmsg = NULL;
+	if (sql_parse_ast(sql, strlen(sql), &arena, &root, &perr) != 0)
+		return 0;                         /* unparseable -> VDBE */
+	return vx_run_write_ast(db, arena, root, binds, nbinds, nchanges, errmsg);
+}
+
+/* The write path over a parsed statement.  Takes ownership of `arena`
+ * (destroyed before returning) when it is non-NULL; a cached statement
+ * passes NULL and keeps its AST. */
+static int
+vx_run_write_ast(struct xsql *db, sql_arena_t *arena, const sql_stmt_t *root,
+                 const vx_cell_t *binds, int nbinds,
+                 int64_t *nchanges, char **errmsg)
+{
 	sql_insert_t *ins = NULL;
 	const sql_str_t *tname = NULL;
 	char tabbuf[64];
@@ -8961,8 +8977,6 @@ vx_run_write_p(struct xsql *db, const char *sql,
 	if (nchanges) *nchanges = 0;
 	if (errmsg) *errmsg = NULL;
 
-	if (sql_parse_ast(sql, strlen(sql), &arena, &root, &perr) != 0)
-		return 0;                         /* unparseable -> VDBE */
 	/* Exactly one write statement (INSERT / DELETE / UPDATE). */
 	if (root == NULL || root->next != NULL) { sql_arena_destroy(arena); return 0; }
 	switch (root->kind) {
@@ -9826,6 +9840,128 @@ vx_run_p(struct xsql *db, const char *sql, const vx_cell_t *binds, int nbinds,
 	if (n_workers > 1 && is_parallelizable_plan(plan))
 		return run_parallel_plan(plan, db, n_workers, res, errmsg);
 	return collect_serial(plan, res);
+}
+
+/* Run an already-parsed, non-compound SELECT (an uncorrelated subquery
+ * of a statement being compiled) serially, with the statement's binds;
+ * the AST stays owned by the caller.  1 with *res, 0 not runnable, <0. */
+static int
+vx_run_sel(struct xsql *db, const sql_select_t *sel, const vx_cell_t *binds,
+           int nbinds, vx_result_t **res)
+{
+	vx_stmt_t *plan = NULL;
+	int recog;
+	*res = NULL;
+	if (sel == NULL || sel->setop != SX_SET_NONE) return 0;
+	recog = vx_prepare_select(db, NULL, sel, binds, nbinds, &plan, NULL);
+	if (recog != 1) return recog;
+	return collect_serial(plan, res);
+}
+
+/* ---- plan cache ---------------------------------------------------- */
+
+struct vx_pcache {
+	char         *sql;
+	sql_arena_t  *ast;
+	sql_stmt_t   *root;
+	vx_stmt_t    *plan;          /* SELECT: kept plan, or NULL */
+	uint64_t      gen;           /* catalog generation it was built at */
+	int           nsig;
+	unsigned char sig[32];       /* bind storage classes it was built with */
+};
+
+static _Atomic uint64_t g_plan_builds;
+
+uint64_t
+vx_plan_build_count(void)
+{
+	return atomic_load_explicit(&g_plan_builds, memory_order_relaxed);
+}
+
+vx_pcache_t *
+vx_pcache_new(const char *sql)
+{
+	vx_pcache_t *pc = (vx_pcache_t *)calloc(1, sizeof *pc);
+	const char *perr = NULL;
+	if (pc == NULL) return NULL;
+	pc->sql = strdup(sql);
+	if (pc->sql == NULL ||
+	    sql_parse_ast(pc->sql, strlen(pc->sql), &pc->ast, &pc->root, &perr) != 0 ||
+	    pc->root == NULL) {
+		free(pc->sql); free(pc);
+		return NULL;
+	}
+	return pc;
+}
+
+void
+vx_pcache_free(vx_pcache_t *pc)
+{
+	if (pc == NULL) return;
+	if (pc->plan) vx_finalize(pc->plan);
+	sql_arena_destroy(pc->ast);
+	free(pc->sql);
+	free(pc);
+}
+
+static int
+vx_pcache_sig_ok(const vx_pcache_t *pc, const vx_cell_t *binds, int nbinds)
+{
+	int i;
+	if (nbinds != pc->nsig) return 0;
+	for (i = 0; i < nbinds; i++)
+		if (pc->sig[i] != (unsigned char)binds[i].type) return 0;
+	return 1;
+}
+
+int
+vx_pcache_run(vx_pcache_t *pc, struct xsql *db, const vx_cell_t *binds,
+              int nbinds, vx_result_t **res, char **errmsg)
+{
+	const sql_select_t *sel;
+	vx_stmt_t *plan = NULL;
+	int recog, i, rc;
+
+	if (res) *res = NULL;
+	if (errmsg) *errmsg = NULL;
+	if (pc->root->next != NULL || pc->root->kind != SQL_KIND_SELECT ||
+	    pc->root->explain || pc->root->u.select == NULL)
+		return 0;
+	sel = pc->root->u.select;
+	if (sel->setop != SX_SET_NONE)       /* compound: the text path */
+		return vx_run_p(db, pc->sql, binds, nbinds, 1, res, errmsg);
+	if (nbinds > 32) return vx_run_p(db, pc->sql, binds, nbinds, 1, res, errmsg);
+	/* A kept plan is reused when nothing it depends on changed. */
+	if (pc->plan != NULL && (pc->gen != xstore_catalog_gen() ||
+	    !vx_pcache_sig_ok(pc, binds, nbinds))) {
+		vx_finalize(pc->plan);
+		pc->plan = NULL;
+	}
+	if (pc->plan != NULL) {
+		vx_exec_reset(pc->plan);
+		vx_plan_rebind(pc->plan, binds, nbinds);
+		rc = collect_plan(pc->plan, res);
+		vx_exec_reset(pc->plan);
+		return rc;
+	}
+	pc->gen = xstore_catalog_gen();
+	atomic_fetch_add_explicit(&g_plan_builds, 1, memory_order_relaxed);
+	recog = vx_prepare_select(db, NULL, sel, binds, nbinds, &plan, errmsg);
+	if (recog != 1) return recog;
+	if (plan->noreuse) return collect_serial(plan, res);
+	pc->nsig = nbinds;
+	for (i = 0; i < nbinds; i++) pc->sig[i] = (unsigned char)binds[i].type;
+	pc->plan = plan;
+	rc = collect_plan(plan, res);
+	vx_exec_reset(plan);
+	return rc;
+}
+
+int
+vx_pcache_write(vx_pcache_t *pc, struct xsql *db, const vx_cell_t *binds,
+                int nbinds, int64_t *nchanges, char **errmsg)
+{
+	return vx_run_write_ast(db, NULL, pc->root, binds, nbinds, nchanges, errmsg);
 }
 
 /* ---- result accessors -------------------------------------------- */

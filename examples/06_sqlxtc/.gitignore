@@ -71,6 +71,7 @@ evict_policy_proto
 test_index
 test_tpcc_seek
 test_bulk_insert
+test_plan_cache
 test_dup_composite
 test_quack_range
 bench_btree_mixed

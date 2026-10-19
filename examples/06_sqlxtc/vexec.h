@@ -155,6 +155,27 @@ int vx_run_write_p(struct xsql *db, const char *sql,
                    const vx_cell_t *binds, int nbinds,
                    int64_t *nchanges, char **errmsg);
 
+/* ---- plan cache (sqlite-audit gap #7) ---------------------------- *
+ *
+ * A prepared statement's parse + plan, kept across executions so a
+ * statement run again with new binds is neither re-parsed nor (for a
+ * SELECT) re-planned.  The plan is reused while the catalog generation
+ * (xstore_catalog_gen) and every bind's storage class are the ones it was
+ * built with; a SELECT whose compile baked in data (a spliced
+ * uncorrelated subquery, a view or derived table) is rebuilt from the
+ * cached AST each run -- still no parse.  Owned by one statement. */
+typedef struct vx_pcache vx_pcache_t;
+/* Parse `sql` once.  NULL if it does not parse (the caller declines). */
+vx_pcache_t *vx_pcache_new(const char *sql);
+void         vx_pcache_free(vx_pcache_t *pc);
+/* vx_run_p / vx_run_write_p over the cached statement (same returns). */
+int vx_pcache_run(vx_pcache_t *pc, struct xsql *db, const vx_cell_t *binds,
+                  int nbinds, vx_result_t **res, char **errmsg);
+int vx_pcache_write(vx_pcache_t *pc, struct xsql *db, const vx_cell_t *binds,
+                    int nbinds, int64_t *nchanges, char **errmsg);
+/* Plans built (prepare runs) by the cache so far (metric). */
+uint64_t     vx_plan_build_count(void);
+
 int            vx_result_nrow(const vx_result_t *r);
 int            vx_result_ncol(const vx_result_t *r);
 /* The output column's name as derived from the AST select item (the AS

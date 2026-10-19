@@ -67,6 +67,8 @@ struct sx_stmt {
 	vx_cell_t      binds[32];
 	int            nbind;
 	vx_result_t   *vres;       /* SELECT: materialized result */
+	vx_pcache_t   *pcache;     /* SELECT / write: parse + plan, kept across
+	                            * sx_reset (built on first execution) */
 	int            cur;        /* current row in vres (-1 before first) */
 	int            ran;        /* 1 once executed (one-shot for DML/txn) */
 	int64_t        nchanges;
@@ -1202,8 +1204,13 @@ nat_select_run(struct sx_stmt *st)
 		st->ran = 1;
 		return (rc == 1 && st->vres != NULL);
 	}
-	rc = vx_run_p((struct xsql *)st->db, st->sql,
-	    st->nbind ? st->binds : NULL, st->nbind, 1, &st->vres, &verr);
+	if (st->pcache == NULL) st->pcache = vx_pcache_new(st->sql);
+	if (st->pcache != NULL)
+		rc = vx_pcache_run(st->pcache, (struct xsql *)st->db,
+		    st->nbind ? st->binds : NULL, st->nbind, &st->vres, &verr);
+	else
+		rc = vx_run_p((struct xsql *)st->db, st->sql,
+		    st->nbind ? st->binds : NULL, st->nbind, 1, &st->vres, &verr);
 	st->ran = 1;
 	if (verr) free(verr);
 	return (rc == 1 && st->vres != NULL);
@@ -1359,8 +1366,13 @@ sx_step(sx_stmt *st)
 			 * writes; the transaction stays open (SQLite statement
 			 * atomicity), so a harness can ROLLBACK or carry on. */
 			mark = xstore_stmt_mark(st->db);
-			rc = vx_run_write_p((struct xsql *)st->db, st->sql,
-			    st->nbind ? st->binds : NULL, st->nbind, &nch, &verr);
+			if (st->pcache == NULL) st->pcache = vx_pcache_new(st->sql);
+			if (st->pcache != NULL)
+				rc = vx_pcache_write(st->pcache, (struct xsql *)st->db,
+				    st->nbind ? st->binds : NULL, st->nbind, &nch, &verr);
+			else
+				rc = vx_run_write_p((struct xsql *)st->db, st->sql,
+				    st->nbind ? st->binds : NULL, st->nbind, &nch, &verr);
 			xstore_stmt_end(st->db);
 			if (rc != 1) xstore_stmt_undo(st->db, mark);
 			if (rc == 1) { free(verr); st->nchanges = nch; return SX_DONE; }
@@ -1544,6 +1556,7 @@ sx_finalize(sx_stmt *st)
 	{
 		int i;
 		if (st->vres) vx_result_free(st->vres);
+		vx_pcache_free(st->pcache);
 		for (i = 0; i < st->nbind; i++)
 			if ((st->binds[i].type == VX_TEXT || st->binds[i].type == VX_BLOB) &&
 			    st->binds[i].bytes != NULL)

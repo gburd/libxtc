@@ -18,6 +18,8 @@
 #   mode "u"  unordered compare (a multiset)
 #   mode "e"  both engines must ERROR; the sqlite message must match
 #             sqlxtc's verbatim (the UNIQUE constraint text)
+#   mode "x"  sqlxtc may decline (error) but must never return rows
+#             that differ from sqlite's (a known-unsupported shape)
 #   mode "nK" unbound parameters: sqlxtc gets only the first K params
 #             (K = 0: no "params" field, as the Turso shim sends a
 #             statement nothing was bound to); sqlite gets the full list,
@@ -752,7 +754,14 @@ def join_steps():
            [None, None, None], "n0"),
           ("SELECT count(*) FROM o WHERE o_w = ? OR o_c IS ?",
            [1, None], "n1"),
-          ("SELECT ? IS NULL, ?2 IS NULL", [7, None], "n1")]
+          ("SELECT ? IS NULL, ?2 IS NULL", [7, None], "n1"),
+          # a correlated subquery with its own ? (the inner re-run binds
+          # only the outer columns: its ? must not become NULL; sqlxtc
+          # declines it -- "x" = sqlxtc may error, never a wrong answer)
+          ("SELECT o_id FROM o WHERE amt > (SELECT min(amt) FROM o o2 "
+           "WHERE o2.o_w = o.o_w AND o2.o_c = ?)", [2], "x"),
+          ("SELECT o_id, (SELECT count(*) FROM o o2 WHERE o2.o_w = o.o_w "
+           "AND o2.amt > ?) FROM o WHERE o_id < ?", [10.0, 6], "x")]
     s += [("INSERT INTO c VALUES(3, 1, 2, 'new')", None, u),
           ("INSERT INTO w VALUES(4, 0.4)", None, u),
           ("INSERT INTO o VALUES(50, 1, 1, 33.0)", None, u),
@@ -819,6 +828,9 @@ def run_script(server, name, schema, load, steps, verbose):
         if mode == "e":
             ok = (qe is not None and re_ is not None and
                   re_ in qe)
+        elif mode == "x":
+            ok = qe is not None or (re_ is None and normalise_rows(qrows) ==
+                                    normalise_rows(rrows))
         elif (qe is None) != (re_ is None):
             ok = False
         elif qe is None:

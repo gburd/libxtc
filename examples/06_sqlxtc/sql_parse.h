@@ -58,6 +58,10 @@ int sql_parse_ast(const char *sql, size_t len,
                   struct sql_arena **arena_out, struct sql_stmt **root_out,
                   const char **err_out);
 
+/* Statements parsed so far by sql_parse_ast / the Lime classifier
+ * (metric: a cached statement must not be re-parsed per execution). */
+unsigned long long sql_parse_count(void);
+
 /* Optional: take a parsed AST and serialize it back to canonical SQL.
  * Phase 2 implementation.  Returns malloc'd string on success; caller
  * frees.  Currently passthrough. */
