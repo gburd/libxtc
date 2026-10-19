@@ -98,6 +98,9 @@ void sx_storage_abandon(void);
 /* Buffer-pool statistics of the open store (zeroed when closed). */
 struct bm_stats;
 void sx_storage_bm_stats(struct bm_stats *out);
+/* WAL records made durable and fsyncs so far (commits/fsyncs is the
+ * group-commit factor); 0 / 0 without a log. */
+void sx_storage_wal_counts(uint64_t *commits, uint64_t *fsyncs);
 
 /* 1 if the libxtc-native storage engine is open (so plain CREATE TABLE
  * is routed to it).  0 otherwise. */

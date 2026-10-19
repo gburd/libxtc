@@ -62,7 +62,7 @@ main(void)
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	char path[256];
 	unsigned long long p0;
-	uint64_t b0, v0;
+	uint64_t b0, v0, l0;
 	int64_t first;
 	char wal[300];
 	int i, n, fd;
@@ -98,6 +98,14 @@ main(void)
 		sx_bind_int64(q, 1, i % 20); sx_bind_int64(q, 2, i % 17);
 		CK(drain(q, &first) == 1 && first == i % 17);
 	}
+	/* A warm statement takes no global catalog lock (the connection's
+	 * bt/ctx and the table/index lookups are thread-local copies). */
+	l0 = xstore_cat_lock_count();
+	sx_bind_int64(q, 1, 1); sx_bind_int64(q, 2, 1);
+	CK(drain(q, NULL) == 1);
+	printf("  warm point SELECT: catalog-lock acquisitions %llu\n",
+	    (unsigned long long)(xstore_cat_lock_count() - l0));
+	CK(xstore_cat_lock_count() - l0 == 0);
 	printf("  100 re-executions: parses %llu, plan builds %llu\n",
 	    sql_parse_count() - p0,
 	    (unsigned long long)(vx_plan_build_count() - b0));

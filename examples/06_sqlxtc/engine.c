@@ -636,6 +636,16 @@ sx_storage_bm_stats(struct bm_stats *out)
 		memset(out, 0, sizeof *out);
 }
 
+void
+sx_storage_wal_counts(uint64_t *commits, uint64_t *fsyncs)
+{
+	wal_stats_t ws;
+	memset(&ws, 0, sizeof ws);
+	if (g_xwal != NULL) wal_get_stats(g_xwal, &ws);
+	*commits = ws.commits;
+	*fsyncs = ws.batches;
+}
+
 int
 sx_storage_active(void)
 {

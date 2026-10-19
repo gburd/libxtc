@@ -21,6 +21,7 @@
 #include "xtc_stats.h"
 #include "sql_parse.h"
 #include "vexec.h"
+#include "engine.h"
 
 #define METRICS_INTERVAL_NS  (5LL * 1000 * 1000 * 1000)
 
@@ -72,15 +73,18 @@ metrics_proc(void *arg)
 			    xtc_hist_quantile(sqlxtc_stat_query_latency, 0.99) : 0;
 			int64_t mem = st->res ?
 			    xtc_res_used(st->res, XTC_RES_MEM_BYTES) : 0;
+			uint64_t wc = 0, wf = 0;
+			sx_storage_wal_counts(&wc, &wf);
 			XTC_LOG_INFO_F(
 			    "metrics: conns=%d queries=%lld errors=%lld "
 			    "q_p50_ns=%lld q_p99_ns=%lld mem=%lld parses=%llu "
-			    "plans=%llu",
+			    "plans=%llu wal_commits=%llu wal_fsyncs=%llu",
 			    atomic_load(st->conn_count),
 			    (long long)qs, (long long)errs,
 			    (long long)p50, (long long)p99,
 			    (long long)mem, sql_parse_count(),
-			    (unsigned long long)vx_plan_build_count());
+			    (unsigned long long)vx_plan_build_count(),
+			    (unsigned long long)wc, (unsigned long long)wf);
 		}
 	}
 }

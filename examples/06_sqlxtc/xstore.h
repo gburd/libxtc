@@ -443,6 +443,10 @@ void xstore_stmt_undo(struct xsql *db, int mark);
 /* Catalog generation (bumped by every CREATE / DROP / ALTER / INDEX /
  * VIEW): a cached plan built at another generation must be rebuilt. */
 uint64_t xstore_catalog_gen(void);
+/* Acquisitions of the global catalog mutex so far (metric: a statement
+ * on a warm connection must not take it -- every connection contends on
+ * it, and each contended release is a cross-loop wake). */
+uint64_t xstore_cat_lock_count(void);
 
 /* Count of index seeks served (metric / test evidence that the planner
  * took the index rather than a full table scan). */

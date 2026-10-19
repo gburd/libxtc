@@ -78,7 +78,10 @@
 #define XS_LK_SSI  9u   /* SSI registry */
 #define XS_LK_SNAP 10u  /* active-snapshot set */
 #define XS_LK_COMMIT 11u /* commit validation + timestamp + in-flight registry */
-#define xs_cat_lock()    (void)xtc_amutex_lock(xtc_amutex_static(XS_LK_CAT), -1)
+static _Atomic uint64_t g_cat_locks;   /* XS_LK_CAT acquisitions (metric) */
+#define xs_cat_lock()    (atomic_fetch_add_explicit(&g_cat_locks, 1, \
+	memory_order_relaxed), \
+	(void)xtc_amutex_lock(xtc_amutex_static(XS_LK_CAT), -1))
 #define xs_cat_unlock()  (void)xtc_amutex_unlock(xtc_amutex_static(XS_LK_CAT))
 #define xs_ssi_lock()    (void)xtc_amutex_lock(xtc_amutex_static(XS_LK_SSI), -1)
 #define xs_ssi_unlock()  (void)xtc_amutex_unlock(xtc_amutex_static(XS_LK_SSI))
@@ -913,6 +916,46 @@ static struct xs_cat_ent {
 	                          * necessarily visible to xs_cat_value. */
 } g_cat[XS_CAT_MAX];
 static int g_cat_n;
+/* Bumped under the cat lock by every change to g_cat or g_idx, so a
+ * thread-local copy of a lookup (xs_tcache_*) stays valid while it is
+ * unchanged: the per-statement catalog reads then take no global lock. */
+static _Atomic uint64_t g_catc_gen = 1;
+#define XS_CATC_BUMP() \
+	atomic_fetch_add_explicit(&g_catc_gen, 1, memory_order_release)
+
+/* This thread's copies of recently used g_cat entries (see g_catc_gen). */
+#define XS_TCAT_N 16
+static _Thread_local struct {
+	uint64_t           gen;
+	struct xs_cat_ent  e;
+} t_cat[XS_TCAT_N];
+static _Thread_local unsigned t_cat_next;
+
+/* A g_cat entry for (bt, name) valid at the current generation: copies
+ * its id / coldefs (coldefs: a 512-byte buffer, "" if none).  0 = miss. */
+static int
+xs_tcat_get(bt_t *bt, const char *name, uint32_t *id, char *coldefs)
+{
+	uint64_t g = atomic_load_explicit(&g_catc_gen, memory_order_acquire);
+	int k;
+	for (k = 0; k < XS_TCAT_N; k++)
+		if (t_cat[k].gen == g && t_cat[k].e.bt == bt &&
+		    strcasecmp(t_cat[k].e.name, name) == 0) {
+			if (id) *id = t_cat[k].e.tableid;
+			if (coldefs) memcpy(coldefs, t_cat[k].e.coldefs, sizeof t_cat[k].e.coldefs);
+			return 1;
+		}
+	return 0;
+}
+
+/* Caller holds the cat lock: remember entry `e` at this generation. */
+static void
+xs_tcat_put_locked(const struct xs_cat_ent *e)
+{
+	unsigned k = t_cat_next++ % XS_TCAT_N;
+	t_cat[k].gen = atomic_load_explicit(&g_catc_gen, memory_order_relaxed);
+	t_cat[k].e = *e;
+}
 
 /* View registry: CREATE VIEW name AS <select> stored as the SELECT
  * text, keyed by (bt, name).  Views are query rewrites, not stored
@@ -934,16 +977,36 @@ static int g_view_n;
 #define XS_DBMAP_MAX 1024   /* open connections (>= the server's default max_clients) */
 static struct xs_dbmap_ent { struct xsql *db; bt_t *bt; xstore_ctx_t *ctx; } g_dbmap[XS_DBMAP_MAX];
 static int g_dbmap_n;
+/* Bumped (under the cat lock) by every map change.  The lookup below is
+ * called many times per statement by every connection; a linear search
+ * under the global catalog mutex made that mutex the server's
+ * serializer (each contended release is a cross-loop wake).  A
+ * per-thread copy of the last entry is valid while the generation is
+ * unchanged: an entry only changes at register / unregister. */
+static _Atomic uint64_t g_dbmap_gen = 1;
+static _Thread_local struct { uint64_t gen; struct xs_dbmap_ent e; } t_dbmap;
+
+static const struct xs_dbmap_ent *
+xs_dbmap_get(struct xsql *db)
+{
+	uint64_t g = atomic_load_explicit(&g_dbmap_gen, memory_order_acquire);
+	int i, found = 0;
+	if (t_dbmap.gen == g && t_dbmap.e.db == db) return &t_dbmap.e;
+	xs_cat_lock();
+	g = atomic_load_explicit(&g_dbmap_gen, memory_order_relaxed);
+	for (i = 0; i < g_dbmap_n; i++)
+		if (g_dbmap[i].db == db) { t_dbmap.e = g_dbmap[i]; found = 1; break; }
+	xs_cat_unlock();
+	if (!found) return NULL;
+	t_dbmap.gen = g;
+	return &t_dbmap.e;
+}
 
 bt_t *
 xstore_bt_of(struct xsql *db)
 {
-	int i; bt_t *bt = NULL;
-	xs_cat_lock();
-	for (i = 0; i < g_dbmap_n; i++)
-		if (g_dbmap[i].db == db) { bt = g_dbmap[i].bt; break; }
-	xs_cat_unlock();
-	return bt;
+	const struct xs_dbmap_ent *e = xs_dbmap_get(db);
+	return e != NULL ? e->bt : NULL;
 }
 
 /* The connection's transaction context (the per-connection xstore_ctx_t
@@ -954,12 +1017,8 @@ xstore_bt_of(struct xsql *db)
 static xstore_ctx_t *
 xstore_ctx_of(struct xsql *db)
 {
-	int i; xstore_ctx_t *ctx = NULL;
-	xs_cat_lock();
-	for (i = 0; i < g_dbmap_n; i++)
-		if (g_dbmap[i].db == db) { ctx = g_dbmap[i].ctx; break; }
-	xs_cat_unlock();
-	return ctx;
+	const struct xs_dbmap_ent *e = xs_dbmap_get(db);
+	return e != NULL ? e->ctx : NULL;
 }
 
 /* Look up `name` in the persisted catalog (table-id 0): the newest
@@ -1074,6 +1133,7 @@ xs_cat_find_or_create(bt_t *bt, const char *name, const char *coldefs)
 	}
 	if (g_cat_n < XS_CAT_MAX) {              /* reserve / shortcut next time */
 		struct xs_cat_ent *e = &g_cat[g_cat_n++];
+		XS_CATC_BUMP();
 		e->bt = bt;
 		snprintf(e->name, sizeof e->name, "%s", name);
 		e->tableid = id;
@@ -1138,6 +1198,7 @@ xstore_cat_forget(bt_t *bt)
 		if (g_cat[i].bt == bt) {
 			g_cat_n--;
 			if (i != g_cat_n) g_cat[i] = g_cat[g_cat_n];  /* swap-remove */
+			XS_CATC_BUMP();
 		} else {
 			i++;
 		}
@@ -1157,6 +1218,7 @@ xstore_cat_forget_one(bt_t *bt, const char *name)
 		if (g_cat[i].bt == bt && strcasecmp(g_cat[i].name, name) == 0) {
 			g_cat_n--;
 			if (i != g_cat_n) g_cat[i] = g_cat[g_cat_n];
+			XS_CATC_BUMP();
 			break;
 		}
 	xs_cat_unlock();
@@ -1244,6 +1306,12 @@ static _Atomic uint64_t g_idx_gen;     /* bumped by every index create */
 static _Atomic uint64_t g_cat_gen = 1;
 
 uint64_t
+xstore_cat_lock_count(void)
+{
+	return atomic_load_explicit(&g_cat_locks, memory_order_relaxed);
+}
+
+uint64_t
 xstore_catalog_gen(void)
 {
 	return atomic_load_explicit(&g_cat_gen, memory_order_acquire);
@@ -1261,7 +1329,7 @@ xs_idx_cache_forget_locked(bt_t *bt)
 {
 	int i;
 	for (i = 0; i < g_idx_n; ) {
-		if (g_idx[i].bt == bt) g_idx[i] = g_idx[--g_idx_n];
+		if (g_idx[i].bt == bt) { g_idx[i] = g_idx[--g_idx_n]; XS_CATC_BUMP(); }
 		else i++;
 	}
 }
@@ -1467,13 +1535,32 @@ xs_read_rec(bt_t *bt, uint32_t tableid, int64_t rowid, uint8_t *rec, int cap)
 static int
 xs_idx_for_table(bt_t *bt, uint32_t tableid, struct xs_idx_rt *hits, int cap)
 {
-	int n = 0, i;
+	static _Thread_local struct {
+		uint64_t gen; bt_t *bt; uint32_t tid; int n;
+		struct xs_idx_rt rt[16];
+	} tc[4];
+	static _Thread_local unsigned tnext;
+	uint64_t g;
+	int n = 0, i, k;
 	if (g_idx_n == 0) return 0;
+	g = atomic_load_explicit(&g_catc_gen, memory_order_acquire);
+	for (k = 0; k < 4; k++)
+		if (tc[k].gen == g && tc[k].bt == bt && tc[k].tid == tableid &&
+		    tc[k].n <= cap) {
+			memcpy(hits, tc[k].rt, sizeof hits[0] * (size_t)tc[k].n);
+			return tc[k].n;
+		}
 	xs_cat_lock();
+	g = atomic_load_explicit(&g_catc_gen, memory_order_relaxed);
 	for (i = 0; i < g_idx_n && n < cap; i++)
 		if (g_idx[i].bt == bt && g_idx[i].rt.tableid == tableid)
 			hits[n++] = g_idx[i].rt;
 	xs_cat_unlock();
+	if (n <= 16) {
+		k = (int)(tnext++ % 4u);
+		tc[k].gen = g; tc[k].bt = bt; tc[k].tid = tableid; tc[k].n = n;
+		memcpy(tc[k].rt, hits, sizeof hits[0] * (size_t)n);
+	}
 	return n;
 }
 
@@ -2530,6 +2617,10 @@ xstore_table_id(bt_t *bt, const char *name, uint32_t *tableid)
 	uint32_t id;
 	int i;
 	if (bt == NULL || name == NULL) return 0;
+	if (xs_tcat_get(bt, name, &id, NULL)) {      /* this thread's copy */
+		if (tableid) *tableid = id;
+		return 1;
+	}
 	/* Cache first: a CREATE on another connection reserves the table-id
 	 * in the in-process cache before its catalog row is persisted to the
 	 * B-tree (xs_put parks on the WAL ack), so a concurrent xs_cat_lookup
@@ -2539,6 +2630,7 @@ xstore_table_id(bt_t *bt, const char *name, uint32_t *tableid)
 	for (i = 0; i < g_cat_n; i++)
 		if (g_cat[i].bt == bt && strcasecmp(g_cat[i].name, name) == 0) {
 			id = g_cat[i].tableid;
+			xs_tcat_put_locked(&g_cat[i]);
 			xs_cat_unlock();
 			if (tableid) *tableid = id;
 			return 1;
@@ -2624,14 +2716,17 @@ xstore_table_schema(bt_t *bt, const char *name, xstore_col_t *cols, int cap)
 	 * before the persisted catalog row is necessarily visible here.  Fall
 	 * back to the persisted value (recovery / cross-process). */
 	cached[0] = '\0';
-	xs_cat_lock();
-	for (i = 0; i < g_cat_n; i++)
-		if (g_cat[i].bt == bt && strcasecmp(g_cat[i].name, name) == 0) {
-			if (g_cat[i].coldefs[0] != '\0')
-				snprintf(cached, sizeof cached, "%s", g_cat[i].coldefs);
-			break;
-		}
-	xs_cat_unlock();
+	if (!xs_tcat_get(bt, name, NULL, cached)) {
+		xs_cat_lock();
+		for (i = 0; i < g_cat_n; i++)
+			if (g_cat[i].bt == bt && strcasecmp(g_cat[i].name, name) == 0) {
+				if (g_cat[i].coldefs[0] != '\0')
+					snprintf(cached, sizeof cached, "%s", g_cat[i].coldefs);
+				xs_tcat_put_locked(&g_cat[i]);
+				break;
+			}
+		xs_cat_unlock();
+	}
 	if (cached[0] != '\0') {
 		cd = cached;
 		cdlen = (int)strlen(cached);
@@ -4868,6 +4963,7 @@ xs_idx_cache_add(bt_t *bt, uint32_t idx_id, const char *name,
 			break;
 	if (i == g_idx_n && g_idx_n < XS_IDX_MAX) g_idx_n++;
 	if (i < XS_IDX_MAX) g_idx[i] = e;
+	XS_CATC_BUMP();
 	xs_cat_unlock();
 }
 
@@ -5184,6 +5280,7 @@ xstore_create_index_ex(struct xsql *db, const char *name, const char *table,
 		for (i = 0; i < g_idx_n; i++)
 			if (g_idx[i].bt == bt && g_idx[i].rt.idx_id == idx_id) {
 				g_idx[i] = g_idx[--g_idx_n];
+				XS_CATC_BUMP();
 				break;
 			}
 		xs_cat_unlock();
@@ -5220,6 +5317,7 @@ xstore_drop_index(struct xsql *db, const char *name)
 			idx_id = g_idx[i].rt.idx_id; found = 1;
 			g_idx_n--;
 			if (i != g_idx_n) g_idx[i] = g_idx[g_idx_n];
+			XS_CATC_BUMP();
 			break;
 		}
 	xs_cat_unlock();
@@ -5242,6 +5340,7 @@ xs_idx_drop_table(bt_t *bt, const char *table)
 		if (g_idx[i].bt == bt && strcmp(g_idx[i].table, table) == 0) {
 			ids[n++] = g_idx[i].rt.idx_id;
 			g_idx[i] = g_idx[--g_idx_n];
+			XS_CATC_BUMP();
 		} else {
 			i++;
 		}
@@ -5267,6 +5366,7 @@ xs_idx_rename_table(bt_t *bt, const char *oldname, const char *newname)
 	for (i = 0; i < g_idx_n; i++)
 		if (g_idx[i].bt == bt && strcmp(g_idx[i].table, oldname) == 0) {
 			snprintf(g_idx[i].table, sizeof g_idx[i].table, "%s", newname);
+			XS_CATC_BUMP();
 			snap[n++] = g_idx[i];
 		}
 	xs_cat_unlock();
@@ -5331,17 +5431,33 @@ xs_idx_get_rt(bt_t *bt, uint32_t idx_id, struct xs_idx_rt *rt)
 	return r;
 }
 
-/* Find index `idx_id` of `bt`; copies it to *e.  Returns 1 / 0. */
+/* Find index `idx_id` of `bt`; copies it to *e.  Returns 1 / 0.  Read
+ * per index seek: served from this thread's copies while g_catc_gen is
+ * unchanged (see g_catc_gen). */
 static int
 xs_idx_get(bt_t *bt, uint32_t idx_id, struct xs_idx_ent *e)
 {
+	static _Thread_local struct { uint64_t gen; struct xs_idx_ent e; } tc[8];
+	static _Thread_local unsigned tnext;
+	uint64_t g = atomic_load_explicit(&g_catc_gen, memory_order_acquire);
 	int i, r = 0;
+	for (i = 0; i < 8; i++)
+		if (tc[i].gen == g && tc[i].e.bt == bt && tc[i].e.rt.idx_id == idx_id) {
+			*e = tc[i].e;
+			return 1;
+		}
 	xs_cat_lock();
+	g = atomic_load_explicit(&g_catc_gen, memory_order_relaxed);
 	for (i = 0; i < g_idx_n; i++)
 		if (g_idx[i].bt == bt && g_idx[i].rt.idx_id == idx_id) {
 			*e = g_idx[i]; r = 1; break;
 		}
 	xs_cat_unlock();
+	if (r) {
+		i = (int)(tnext++ % 8u);
+		tc[i].gen = g;
+		tc[i].e = *e;
+	}
 	return r;
 }
 
@@ -6100,6 +6216,7 @@ xstore_rename_table(struct xsql *db, const char *oldname, const char *newname)
 	for (i = 0; i < g_cat_n; i++)
 		if (g_cat[i].bt == bt && strcasecmp(g_cat[i].name, oldname) == 0) {
 			snprintf(g_cat[i].name, sizeof g_cat[i].name, "%s", newname);
+			XS_CATC_BUMP();
 			if (clen > 0)
 				snprintf(g_cat[i].coldefs, sizeof g_cat[i].coldefs, "%s", coldefs);
 			break;
@@ -6273,6 +6390,7 @@ xs_rename(xsql_vtab *pv, const char *newname)
 	for (i = 0; i < g_cat_n; i++)
 		if (g_cat[i].bt == v->ctx->bt && g_cat[i].tableid == id) {
 			snprintf(g_cat[i].name, sizeof g_cat[i].name, "%s", newname);
+			XS_CATC_BUMP();
 			break;
 		}
 	xs_cat_unlock();
@@ -6378,6 +6496,7 @@ xs_ctx_init_and_map(struct xsql *db, bt_t *bt, int native)
 		if (g_dbmap[i].db == db) { slot = i; break; }
 	if (slot < 0 && g_dbmap_n < XS_DBMAP_MAX) slot = g_dbmap_n++;
 	if (slot >= 0) { g_dbmap[slot].db = db; g_dbmap[slot].bt = bt; g_dbmap[slot].ctx = ctx; }
+	atomic_fetch_add_explicit(&g_dbmap_gen, 1, memory_order_release);
 	xs_cat_unlock();
 	if (slot < 0) {
 		/* Map full: refuse the connection rather than hand back a
@@ -6486,6 +6605,7 @@ xstore_unregister(struct xsql *db)
 		if (g_dbmap[i].db == db) {
 			g_dbmap_n--;
 			if (i != g_dbmap_n) g_dbmap[i] = g_dbmap[g_dbmap_n];
+			atomic_fetch_add_explicit(&g_dbmap_gen, 1, memory_order_release);
 			break;
 		}
 	xs_cat_unlock();
@@ -6508,6 +6628,7 @@ xstore_unregister_native(struct xsql *db)
 			ctx = g_dbmap[i].ctx;
 			g_dbmap_n--;
 			if (i != g_dbmap_n) g_dbmap[i] = g_dbmap[g_dbmap_n];
+			atomic_fetch_add_explicit(&g_dbmap_gen, 1, memory_order_release);
 			break;
 		}
 	xs_cat_unlock();
