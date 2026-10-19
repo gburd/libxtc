@@ -111,6 +111,14 @@ struct sx_native_db {
 	 * the name of the savepoint opened at level i; spn is the count. */
 	char       spname[32][64];
 	int        spn;
+	/* A statement failed on a write conflict inside a transaction: the
+	 * engine rolled the transaction back at once (releasing its row
+	 * write intents to the transactions waiting on them), but the client
+	 * still believes it is open.  As in PostgreSQL every statement fails
+	 * until the client ends the block: ROLLBACK succeeds, COMMIT fails
+	 * (nothing was committed).  Without this a client that went on would
+	 * run the rest of its "transaction" as autocommit statements. */
+	int        aborted;
 };
 
 static int
@@ -118,6 +126,13 @@ sx_is_native_db(const sx_db *h)
 {
 	return h != NULL &&
 	    ((const struct sx_native_db *)h)->magic == SX_NATIVE_MAGIC;
+}
+
+/* Is the connection's transaction block aborted (see sx_native_db)? */
+static int
+nat_aborted(const sx_db *h)
+{
+	return sx_is_native_db(h) && ((const struct sx_native_db *)h)->aborted;
 }
 #else
 static int sx_is_native_db(const sx_db *h) { (void)h; return 0; }
@@ -1209,6 +1224,7 @@ nat_select_run(struct sx_stmt *st)
 	char *verr = NULL;
 	int rc;
 	if (st->ran) return st->vres != NULL;
+	if (nat_aborted(st->db)) return 0;   /* sx_step reports it */
 	if (st->nkind == SXN_PRAGMA_TABLE_INFO) {
 		rc = vx_pragma_table_info((struct xsql *)st->db, st->ddl_name, &st->vres);
 		st->ran = 1;
@@ -1243,6 +1259,8 @@ nat_select_run(struct sx_stmt *st)
 	"until restart"
 #define SX_MSG_SERIALIZE "could not serialize access due to concurrent " \
 	"update; transaction rolled back"
+#define SX_MSG_ABORTED "current transaction is aborted, commands ignored " \
+	"until end of transaction block"
 
 static int
 nat_set_err(sx_db *db, const char *msg, int rc)
@@ -1346,6 +1364,18 @@ sx_step(sx_stmt *st)
 	if (st == NULL) return SX_MISUSE;
 #ifdef SQLXTC_HAVE_LIME
 	if (st->native) {
+		if (nat_aborted(st->db)) {
+			struct sx_native_db *nd = (struct sx_native_db *)st->db;
+			if (st->nkind == SXN_ROLLBACK) {
+				nd->aborted = 0;   /* already rolled back */
+				return SX_DONE;
+			}
+			if (st->nkind == SXN_COMMIT) {
+				nd->aborted = 0;
+				return nat_set_err(st->db, SX_MSG_SERIALIZE, SX_BUSY);
+			}
+			return nat_set_err(st->db, SX_MSG_ABORTED, SX_ERROR);
+		}
 		if (st->nkind == SXN_SELECT || st->nkind == SXN_PRAGMA_TABLE_INFO) {
 			/* First step: run the SELECT (or native PRAGMA table_info)
 			 * through vexec into vres; a decline is a hard error. */
@@ -1362,7 +1392,7 @@ sx_step(sx_stmt *st)
 		switch (st->nkind) {
 		case SXN_WRITE: {
 			int64_t nch = 0;
-			int rc, mark;
+			int rc, mark, rd, restarts = 0;
 			char *verr = NULL;
 			const char *w = st->sql;
 			while (isspace((unsigned char)*w)) w++;
@@ -1370,12 +1400,13 @@ sx_step(sx_stmt *st)
 			 * one snapshot and a write-write check against it.  An INSERT
 			 * reads only "the key is absent", which the insert path checks
 			 * atomically with the write (xstore_insert_txn). */
-			if (sx_word(&w, "UPDATE") || sx_word(&w, "DELETE"))
-				xstore_stmt_begin(st->db);
+			rd = sx_word(&w, "UPDATE") || sx_word(&w, "DELETE");
 			/* In a transaction a failed statement undoes only its own
 			 * writes; the transaction stays open (SQLite statement
 			 * atomicity), so a harness can ROLLBACK or carry on. */
 			mark = xstore_stmt_mark(st->db);
+		restart:
+			if (rd) xstore_stmt_begin(st->db);
 			if (st->pcache == NULL) st->pcache = vx_pcache_new(st->sql);
 			if (st->pcache != NULL)
 				rc = vx_pcache_write(st->pcache, (struct xsql *)st->db,
@@ -1386,8 +1417,28 @@ sx_step(sx_stmt *st)
 			xstore_stmt_end(st->db);
 			if (rc != 1) xstore_stmt_undo(st->db, mark);
 			if (rc == 1) { free(verr); st->nchanges = nch; return SX_DONE; }
+			/* READ COMMITTED (and autocommit) re-run a statement whose
+			 * row was committed by the writer it waited for, on a new
+			 * snapshot, instead of failing it (PostgreSQL re-evaluates
+			 * the row; this re-runs the statement).  Bounded: a hot row
+			 * under constant churn still fails, with the error below. */
+			if (rd && restarts < 8 && xstore_stmt_can_restart(st->db)) {
+				free(verr); verr = NULL; nch = 0;
+				restarts++;
+				goto restart;
+			}
 			if (xstore_last_conflict(st->db)) {
+				struct sx_native_db *nd = sx_is_native_db(st->db)
+				    ? (struct sx_native_db *)st->db : NULL;
 				free(verr);
+				/* As the message says (and PostgreSQL does): the
+				 * transaction is rolled back now, releasing its row
+				 * write intents to the transactions waiting on them;
+				 * the block stays aborted until ROLLBACK / COMMIT. */
+				if (xstore_in_txn(st->db)) {
+					(void)xstore_rollback(st->db);
+					if (nd) { nd->spn = 0; nd->aborted = 1; }
+				}
 				return nat_set_err(st->db, SX_MSG_SERIALIZE, SX_BUSY);
 			}
 			if (verr != NULL && strncmp(verr, "UNIQUE", 6) == 0) {

@@ -7,7 +7,8 @@
  * examples/06_sqlxtc/test_ww_conflict.c
  *	Write-write conflicts under SNAPSHOT (the default level): two
  *	transactions that both update a row they read from the same
- *	snapshot must not both commit (first-committer-wins), and
+ *	snapshot must not both commit, and the loser fails at its UPDATE
+ *	(the row's write intent: first-updater-wins), not at COMMIT; and
  *	SERIALIZABLE must be selectable with SQL (SET TRANSACTION
  *	ISOLATION LEVEL / BEGIN ISOLATION LEVEL / SET SESSION
  *	CHARACTERISTICS).  Before the fix both lost-update shapes below
@@ -48,12 +49,16 @@ bal(sx_db *db)
 }
 
 /* Two txns read bal=100 and add 10 / 20.  Returns the number of the two
- * COMMITs that succeeded; *final gets the resulting balance. */
+ * transactions that committed; *final gets the resulting balance.  The
+ * loser fails at its UPDATE (the row's write intent is A's: first-
+ * updater-wins, the statement error rolls B back, as PostgreSQL) --
+ * never both commit.  *b_stmt_fail reports where B failed. */
 static int
-race(sx_db *a, sx_db *b, int explicit_value, const char *begin, int64_t *final)
+race(sx_db *a, sx_db *b, int explicit_value, const char *begin, int64_t *final,
+    int *b_stmt_fail)
 {
 	char q[96];
-	int ok = 0;
+	int ok = 0, brc;
 	int64_t va, vb;
 	CK(run(a, "UPDATE acct SET bal=100 WHERE id=1") == SX_OK);
 	CK(run(a, begin) == SX_OK);
@@ -65,13 +70,14 @@ race(sx_db *a, sx_db *b, int explicit_value, const char *begin, int64_t *final)
 		snprintf(q, sizeof q, "UPDATE acct SET bal=%lld WHERE id=1", (long long)va + 10);
 		CK(run(a, q) == SX_OK);
 		snprintf(q, sizeof q, "UPDATE acct SET bal=%lld WHERE id=1", (long long)vb + 20);
-		CK(run(b, q) == SX_OK);
+		brc = run(b, q);
 	} else {
 		CK(run(a, "UPDATE acct SET bal=bal+10 WHERE id=1") == SX_OK);
-		CK(run(b, "UPDATE acct SET bal=bal+20 WHERE id=1") == SX_OK);
+		brc = run(b, "UPDATE acct SET bal=bal+20 WHERE id=1");
 	}
+	*b_stmt_fail = (brc != SX_OK);
 	if (run(a, "COMMIT") == SX_OK) ok++;
-	if (run(b, "COMMIT") == SX_OK) ok++;
+	if (run(b, "COMMIT") == SX_OK && brc == SX_OK) ok++;
 	*final = bal(a);
 	return ok;
 }
@@ -101,28 +107,44 @@ main(void)
 	CK(run(a, "INSERT INTO acct(id,bal) VALUES(1,100)") == SX_OK);
 
 	for (si = 0; si < 3; si++) {
-		n = race(a, b, 0, shapes[si], &fin);
-		printf("  [%s] bal=bal+N: %d of 2 committed, final %lld\n",
-		    shapes[si], n, (long long)fin);
+		int bsf = 0;
+		n = race(a, b, 0, shapes[si], &fin, &bsf);
+		printf("  [%s] bal=bal+N: %d of 2 committed, final %lld, B failed at %s\n",
+		    shapes[si], n, (long long)fin, bsf ? "UPDATE" : "COMMIT");
 		CK(n == 1);
-		CK(fin == 110);      /* first committer (A) wins, B aborts */
-		n = race(a, b, 1, shapes[si], &fin);
-		printf("  [%s] read-modify-write: %d of 2 committed, final %lld\n",
-		    shapes[si], n, (long long)fin);
+		CK(fin == 110);      /* first updater (A) wins, B aborts */
+		CK(bsf);             /* ... at its statement, not at COMMIT */
+		n = race(a, b, 1, shapes[si], &fin, &bsf);
+		printf("  [%s] read-modify-write: %d of 2 committed, final %lld, B failed at %s\n",
+		    shapes[si], n, (long long)fin, bsf ? "UPDATE" : "COMMIT");
 		CK(n == 1);
 		CK(fin == 110);
+		CK(bsf);
 	}
 	/* The losing transaction was rolled back: B is usable again and its
 	 * retry on fresh data commits. */
 	CK(run(b, "UPDATE acct SET bal=bal+20 WHERE id=1") == SX_OK);
 	CK(bal(b) == 130);
 
-	/* Autocommit UPDATE vs a txn that updated the same row first. */
+	/* Autocommit UPDATE vs a txn that updated the same row first: the
+	 * autocommit write meets A's intent (off a loop it cannot wait) and
+	 * fails; A commits. */
 	CK(run(a, "BEGIN") == SX_OK);
 	CK(run(a, "UPDATE acct SET bal=bal+1 WHERE id=1") == SX_OK);
-	CK(run(b, "UPDATE acct SET bal=bal+2 WHERE id=1") == SX_OK);  /* commits */
-	CK(run(a, "COMMIT") != SX_OK);           /* A's base is stale */
+	CK(run(b, "UPDATE acct SET bal=bal+2 WHERE id=1") != SX_OK);  /* A holds it */
+	CK(run(a, "COMMIT") == SX_OK);
+	CK(bal(a) == 131);
+	CK(run(b, "UPDATE acct SET bal=bal+1 WHERE id=1") == SX_OK);   /* now free */
 	CK(bal(a) == 132);
+	/* A txn whose snapshot predates a committed write of the row fails
+	 * at its UPDATE (a lost update), not at COMMIT. */
+	CK(run(a, "BEGIN") == SX_OK);
+	CK(bal(a) == 132);                       /* snapshot taken */
+	CK(run(b, "UPDATE acct SET bal=bal+0 WHERE id=1") == SX_OK);   /* commits */
+	CK(run(a, "UPDATE acct SET bal=bal+1 WHERE id=1") != SX_OK);
+	CK(bal(a) == -1);                        /* block aborted: refused */
+	CK(run(a, "COMMIT") != SX_OK);           /* nothing was committed */
+	CK(bal(a) == 132);                       /* block ended: usable */
 
 	/* Disjoint rows never conflict. */
 	CK(run(a, "INSERT INTO acct(id,bal) VALUES(2,0)") == SX_OK);

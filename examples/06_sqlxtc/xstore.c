@@ -50,6 +50,7 @@
 #include "engine.h"      /* SX_* result codes */
 #include "xstore.h"
 
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -306,6 +307,13 @@ void xstore_clock_observe(uint64_t peer_ts) { xstore_set_clock(peer_ts); }
 #define XS_ISO_REPEATABLE_READ  2
 #define XS_ISO_SNAPSHOT         3
 #define XS_ISO_SERIALIZABLE     4
+
+/* ctx->last_conflict: a write-write conflict of the last write.  STALE:
+ * the row was committed past the snapshot the write was computed
+ * against (a READ COMMITTED statement may restart on a new snapshot);
+ * HARD: a deadlock, or a wait that could not happen or hit the cap. */
+#define XS_CONFL_STALE 1
+#define XS_CONFL_HARD  2
 #define XS_VKLEN     20        /* (tableid:4) + (rowid:8) + (inverted commit_ts:8) */
 #define XS_VMAX      4096       /* max row payload bytes (one page-ish) */
 #define XS_STAGE_TID 0xFFFFFFFEu  /* reserved table-id for STEAL spill payloads */
@@ -350,7 +358,8 @@ typedef struct xstore_ctx {
 	int              touched;     /* open txn has read or written */
 	uint64_t         stmt_base;   /* snapshot the current DML statement reads */
 	uint64_t         last_ts;     /* commit ts of this connection's last write */
-	int              last_conflict; /* last write hit a write-write conflict */
+	int              last_conflict; /* last write's conflict: XS_CONFL_* */
+	int              stmt_puts;   /* autocommit rows applied by this statement */
 	xs_rkey_t       *rset;        /* (table,rowid) read in this txn (serializable) */
 	int              rn, rcap;
 	int              did_scan;    /* txn did a full scan (table-level read) */
@@ -406,7 +415,18 @@ typedef struct xstore_ctx {
 	 * next query rebuilds it with one pass. */
 	struct { uint32_t tableid; int64_t max; } wmax[8];
 	int              wmax_n, wmax_ok;
+	/* Row write intents held by this connection's transaction (see
+	 * "row write intents" below): slot in g_ilk_owner, txn sequence, and
+	 * the held keys (released by wbuf_clear). */
+	int              ilk_slot;
+	uint64_t         ilk_seq;
+	struct xs_ikey { uint32_t tid; int64_t rid; } *ilk;
+	int              ilk_n, ilk_cap;
+	int              ilk_skip;      /* this write is a fresh INSERT */
 } xstore_ctx_t;
+
+static void xs_intents_release(xstore_ctx_t *c);
+static void xs_ilk_reset(void);
 
 /* Note `rowid` of `tableid` in the per-table buffered max; 0 when the
  * table has no slot (more than 8 tables written: callers scan). */
@@ -467,6 +487,7 @@ wbuf_clear(xstore_ctx_t *c)
 	c->uniq_vis = 0;
 	c->wmax_n = 0;
 	c->wmax_ok = 1;
+	xs_intents_release(c);   /* the txn's versions are in (or discarded) */
 }
 static int
 wbuf_add(xstore_ctx_t *c, uint32_t tableid, int64_t rowid, const void *blob, int n, int deleted)
@@ -3414,6 +3435,7 @@ xs_visible(void)
 static void
 xs_commit_state_reset(void)
 {
+	xs_ilk_reset();
 	xs_commit_lock();
 	g_inflight = NULL;
 	g_ckpt_gate = 0;
@@ -3770,6 +3792,336 @@ xs_maybe_prune(bt_t *bt, uint32_t tableid, int64_t rowid, uint64_t horizon)
 	atomic_store_explicit(&g_av_countdown, iv, memory_order_relaxed);
 }
 
+/* ---- row write intents ------------------------------------------- *
+ *
+ * First-UPDATER-wins at the statement, as PostgreSQL (row locks) and
+ * SQLite (one writer) report it, instead of only first-COMMITTER-wins at
+ * COMMIT.  A transaction's write first takes the row's intent: free ->
+ * taken; held by this transaction -> fine; held by another -> wait (on a
+ * loop) until the holder ends, then re-check.  A row committed past the
+ * snapshot the write was computed against fails the statement (a lost
+ * update: waiting cannot fix it), and so does a wait-for cycle (the
+ * youngest transaction in it is the one that fails) or a wait past the
+ * cap.  The commit-time first-committer-wins check is unchanged, so
+ * correctness never depends on the intents; they only move the failure
+ * to the statement and make a second writer wait instead of doing work
+ * that is certain to be thrown away.
+ *
+ * An autocommit UPDATE/DELETE takes the row's intent for the length of
+ * its put (so it waits for a transaction holding the row, and a
+ * transaction waits for it).  A fresh INSERT takes none: it has no read
+ * to go stale, and the UNIQUE / commit checks refuse a duplicate key.
+ *
+ * The table is a fixed open-addressed hash under striped plain mutexes
+ * (leaf locks: held for a few instructions, never across a park).
+ * Owners are slots in g_ilk_owner, static and never freed, so a waiter
+ * can follow a holder's wait-for edge even after the holder's connection
+ * closed: (slot, seq) names one transaction and a stale seq reads as
+ * free.  Waits nap with xtc_proc_sleep and the cap counts nap time, so
+ * no clock or RNG is read (deterministic under the simulator).
+ */
+#define XS_ILK_STRIPE 256u
+#define XS_ILK_PER    256                 /* intents per stripe (64k in all) */
+#define XS_ILK_OWNERS 1024
+#define XS_ILK_TXN_MAX 4096               /* intents one transaction takes */
+#define XS_ILK_NAP0_NS (20LL * 1000)
+#define XS_ILK_NAPMAX_NS (1000LL * 1000)
+#define XS_ILK_WAIT_NS (10LL * 1000 * 1000 * 1000)   /* give up: conflict */
+
+struct xs_ilk_ent { const bt_t *bt; uint32_t tid; int64_t rid; int slot; uint64_t seq; };
+/* One stripe: a mutex and a compact array of held intents (a take scans
+ * the stripe's few entries; a release swap-removes). */
+static struct xs_ilk_stripe {
+	pthread_mutex_t   mu;
+	int               n;
+	struct xs_ilk_ent ent[XS_ILK_PER];
+} g_ilk[XS_ILK_STRIPE];
+static pthread_once_t g_ilk_once = PTHREAD_ONCE_INIT;
+static struct xs_ilk_owner {
+	_Atomic uint64_t seq;        /* current txn of this slot (0 = idle) */
+	_Atomic int      wait_slot;  /* the slot it waits for, or 0 */
+	_Atomic uint64_t wait_seq;
+} g_ilk_owner[XS_ILK_OWNERS + 1];
+static _Atomic int g_ilk_next_slot = 1;
+static int g_ilk_free[XS_ILK_OWNERS], g_ilk_nfree;   /* recycled slots */
+static pthread_mutex_t g_ilk_free_mu = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint64_t g_ilk_seqgen = 1;
+static _Atomic uint64_t g_ilk_waits, g_ilk_conflicts, g_ilk_deadlocks;
+
+static void
+xs_ilk_init(void)
+{
+	unsigned i;
+	for (i = 0; i < XS_ILK_STRIPE; i++)
+		(void)pthread_mutex_init(&g_ilk[i].mu, NULL);  /* leaf lock, never held across a park */
+}
+
+/* The key's stripe.  Not hashed on the bt address (ASLR would make a
+ * full stripe, and so a run, differ between replays of one seed). */
+static struct xs_ilk_stripe *
+xs_ilk_stripe(const bt_t *bt, uint32_t tid, int64_t rid)
+{
+	uint64_t x = ((uint64_t)tid << 40) ^ (uint64_t)rid;
+	(void)bt;
+	x ^= x >> 33; x *= 0xff51afd7ed558ccdull; x ^= x >> 33;
+	(void)pthread_once(&g_ilk_once, xs_ilk_init);
+	return &g_ilk[x % XS_ILK_STRIPE];
+}
+
+/* Is (slot, seq) still the live transaction of its owner slot? */
+static int
+xs_ilk_live(int slot, uint64_t seq)
+{
+	return slot > 0 && slot <= XS_ILK_OWNERS && seq != 0 &&
+	    atomic_load_explicit(&g_ilk_owner[slot].seq, memory_order_acquire) == seq;
+}
+
+/* Find or take (bt, tid, rid) for (slot, seq); slot 0 = only look.
+ * Returns 0 taken, 2 already ours, 1 held by another live transaction
+ * (*hslot / *hseq set), 3 free and not taken (look only), -1 no room. */
+static int
+xs_ilk_try(const bt_t *bt, uint32_t tid, int64_t rid, int slot, uint64_t seq,
+    int *hslot, uint64_t *hseq)
+{
+	struct xs_ilk_stripe *sp = xs_ilk_stripe(bt, tid, rid);
+	struct xs_ilk_ent *e = NULL;
+	int i, rc = 0;
+	(void)pthread_mutex_lock(&sp->mu);   /* leaf lock */
+	for (i = 0; i < sp->n; i++)
+		if (sp->ent[i].rid == rid && sp->ent[i].tid == tid &&
+		    sp->ent[i].bt == bt) {
+			e = &sp->ent[i];
+			break;
+		}
+	if (e != NULL && xs_ilk_live(e->slot, e->seq)) {
+		if (e->slot == slot && e->seq == seq) rc = 2;
+		else { *hslot = e->slot; *hseq = e->seq; rc = 1; }
+		goto out;
+	}
+	if (slot == 0) { rc = 3; goto out; }
+	/* Free, or left by a transaction that ended: (re)take it.  A full
+	 * stripe first reuses an entry whose transaction ended. */
+	for (i = 0; e == NULL && sp->n == XS_ILK_PER && i < sp->n; i++)
+		if (!xs_ilk_live(sp->ent[i].slot, sp->ent[i].seq))
+			e = &sp->ent[i];
+	if (e == NULL && sp->n == XS_ILK_PER) { rc = -1; goto out; }
+	if (e == NULL) e = &sp->ent[sp->n++];
+	e->bt = bt; e->tid = tid; e->rid = rid; e->slot = slot; e->seq = seq;
+out:
+	(void)pthread_mutex_unlock(&sp->mu);   /* leaf lock */
+	return rc;
+}
+
+static void
+xs_ilk_drop(const bt_t *bt, uint32_t tid, int64_t rid, int slot, uint64_t seq)
+{
+	struct xs_ilk_stripe *sp = xs_ilk_stripe(bt, tid, rid);
+	int i;
+	(void)pthread_mutex_lock(&sp->mu);   /* leaf lock */
+	for (i = 0; i < sp->n; i++) {
+		struct xs_ilk_ent *e = &sp->ent[i];
+		if (e->rid == rid && e->tid == tid && e->bt == bt) {
+			if (e->slot == slot && e->seq == seq)
+				*e = sp->ent[--sp->n];
+			break;
+		}
+	}
+	(void)pthread_mutex_unlock(&sp->mu);   /* leaf lock */
+}
+
+/* Waiting for (hslot, hseq): does the wait-for chain lead back to us,
+ * and is this transaction the cycle's victim?  The victim is the
+ * youngest transaction (largest seq) in the cycle; every waiter in it
+ * re-walks after each nap, so exactly one fails (the walk publishes
+ * nothing; the caller published its own edge first, so of two
+ * transactions closing a cycle at once at least one sees it). */
+static int
+xs_ilk_victim(int slot, uint64_t seq, int hslot, uint64_t hseq)
+{
+	uint64_t youngest = seq;
+	int depth;
+	for (depth = 0; depth < 64; depth++) {
+		int ns;
+		uint64_t nq;
+		if (hslot == slot)   /* back to us (a stale edge names an old seq) */
+			return hseq == seq && youngest == seq;
+		if (!xs_ilk_live(hslot, hseq)) return 0;
+		if (hseq > youngest) youngest = hseq;
+		ns = atomic_load_explicit(&g_ilk_owner[hslot].wait_slot, memory_order_seq_cst);
+		nq = atomic_load_explicit(&g_ilk_owner[hslot].wait_seq, memory_order_seq_cst);
+		if (ns == 0) return 0;
+		hslot = ns; hseq = nq;
+	}
+	return 0;   /* a cycle not through us (or a huge one: the cap ends it) */
+}
+
+/* This transaction's identity for intents (allocated on first use).
+ * Returns 0 if the process ran out of owner slots (no intents). */
+static int
+xs_ilk_self(xstore_ctx_t *cx)
+{
+	if (cx->ilk_slot == 0) {
+		int s = 0;
+		(void)pthread_mutex_lock(&g_ilk_free_mu);    /* leaf lock */
+		if (g_ilk_nfree > 0) s = g_ilk_free[--g_ilk_nfree];
+		(void)pthread_mutex_unlock(&g_ilk_free_mu);  /* leaf lock */
+		if (s == 0)
+			s = atomic_fetch_add_explicit(&g_ilk_next_slot, 1, memory_order_relaxed);
+		/* shortcut: > 1024 connections at once: the extra ones take no
+		 * intents (their conflicts surface at COMMIT, as before). */
+		if (s > XS_ILK_OWNERS) { cx->ilk_slot = -1; return 0; }
+		cx->ilk_slot = s;
+	}
+	if (cx->ilk_slot < 0) return 0;
+	if (cx->ilk_seq == 0) {
+		cx->ilk_seq = atomic_fetch_add_explicit(&g_ilk_seqgen, 1, memory_order_relaxed);
+		atomic_store_explicit(&g_ilk_owner[cx->ilk_slot].seq, cx->ilk_seq,
+		    memory_order_release);
+	}
+	return 1;
+}
+
+static void
+xs_ilk_wait_clear(xstore_ctx_t *cx)
+{
+	atomic_store_explicit(&g_ilk_owner[cx->ilk_slot].wait_slot, 0,
+	    memory_order_release);
+}
+
+/*
+ * A transaction's write of (tid, rid): take the row's write intent,
+ * waiting for another holder to finish, and check that no version was
+ * committed past `base` (the snapshot the write was computed against).
+ * Returns 0, or the conflict (XS_CONFL_STALE: a newer committed
+ * version; XS_CONFL_HARD: a deadlock, or a wait past the cap -- it never
+ * waits off a loop).
+ */
+static int
+xs_intent_take(xstore_ctx_t *cx, uint32_t tid, int64_t rid, uint64_t base)
+{
+	int hslot = 0, r, dl = 0;
+	uint64_t hseq = 0;
+	int64_t waited = 0, nap = XS_ILK_NAP0_NS;
+	if (tid == XS_CAT_TABLEID || tid >= XS_IDXCAT_TABLEID) return 0;
+	/* shortcut: a transaction past XS_ILK_TXN_MAX rows takes no more
+	 * intents (bounds its cost and the table); its later rows are
+	 * checked at COMMIT only.  Upgrade: a table-level intent. */
+	if (cx->ilk_n >= XS_ILK_TXN_MAX) return 0;
+	if (!xs_ilk_self(cx)) return 0;
+	for (;;) {
+		r = xs_ilk_try(cx->bt, tid, rid, cx->ilk_slot, cx->ilk_seq, &hslot, &hseq);
+		if (r == 2) return 0;              /* ours: checked when taken */
+		/* Committed past our read: a lost update, waiting cannot help. */
+		if (base != 0 && xs_newest_ts(cx->bt, tid, rid) > base) {
+			if (r == 0) xs_ilk_drop(cx->bt, tid, rid, cx->ilk_slot, cx->ilk_seq);
+			xs_ilk_wait_clear(cx);
+			atomic_fetch_add_explicit(&g_ilk_conflicts, 1, memory_order_relaxed);
+			return XS_CONFL_STALE;
+		}
+		if (r == 0 || r < 0) break;        /* taken; or no room: COMMIT checks */
+		/* Held by another transaction.  Publish the edge, then look for
+		 * a cycle through it. */
+		atomic_store_explicit(&g_ilk_owner[cx->ilk_slot].wait_seq, hseq,
+		    memory_order_seq_cst);
+		atomic_store_explicit(&g_ilk_owner[cx->ilk_slot].wait_slot, hslot,
+		    memory_order_seq_cst);
+		if (xtc_pid_is_none(xtc_self()) || waited >= XS_ILK_WAIT_NS ||
+		    (dl = xs_ilk_victim(cx->ilk_slot, cx->ilk_seq, hslot, hseq))) {
+			if (dl)
+				atomic_fetch_add_explicit(&g_ilk_deadlocks, 1, memory_order_relaxed);
+			xs_ilk_wait_clear(cx);
+			atomic_fetch_add_explicit(&g_ilk_conflicts, 1, memory_order_relaxed);
+			return XS_CONFL_HARD;
+		}
+		if (waited == 0)
+			atomic_fetch_add_explicit(&g_ilk_waits, 1, memory_order_relaxed);
+		(void)xtc_proc_sleep(nap);
+		waited += nap;
+		if (nap < XS_ILK_NAPMAX_NS) nap *= 2;
+	}
+	xs_ilk_wait_clear(cx);
+	if (r < 0) return 0;
+	if (cx->ilk_n == cx->ilk_cap) {
+		int nc = cx->ilk_cap ? cx->ilk_cap * 2 : 16;
+		struct xs_ikey *nk = realloc(cx->ilk, sizeof *nk * (size_t)nc);
+		if (nk == NULL) {   /* cannot remember it: give it back, COMMIT checks */
+			xs_ilk_drop(cx->bt, tid, rid, cx->ilk_slot, cx->ilk_seq);
+			return 0;
+		}
+		cx->ilk = nk; cx->ilk_cap = nc;
+	}
+	cx->ilk[cx->ilk_n].tid = tid;
+	cx->ilk[cx->ilk_n++].rid = rid;
+	return 0;
+}
+
+/* Release every intent of cx's transaction (it committed -- its versions
+ * are in the tree -- or rolled back).  Ending the owner's seq frees them
+ * all at once for every prober; the entries are cleared too so the table
+ * does not fill. */
+static void
+xs_intents_release(xstore_ctx_t *c)
+{
+	int i;
+	if (c->ilk_slot <= 0 || c->ilk_seq == 0) return;
+	atomic_store_explicit(&g_ilk_owner[c->ilk_slot].seq, 0, memory_order_release);
+	for (i = 0; i < c->ilk_n; i++)
+		xs_ilk_drop(c->bt, c->ilk[i].tid, c->ilk[i].rid, c->ilk_slot, c->ilk_seq);
+	c->ilk_n = 0;
+	c->ilk_seq = 0;
+}
+
+/* A closing connection returns its owner slot.  Safe to reuse at once: a
+ * waiter that still names the old (slot, seq) sees a different seq. */
+static void
+xs_ilk_slot_free(xstore_ctx_t *c)
+{
+	if (c->ilk_slot <= 0) return;
+	xs_intents_release(c);
+	xs_ilk_wait_clear(c);
+	(void)pthread_mutex_lock(&g_ilk_free_mu);    /* leaf lock */
+	if (g_ilk_nfree < XS_ILK_OWNERS) g_ilk_free[g_ilk_nfree++] = c->ilk_slot;
+	(void)pthread_mutex_unlock(&g_ilk_free_mu);  /* leaf lock */
+	c->ilk_slot = 0;
+}
+
+/* Engine reset (log attach/detach, recovery; no transaction can be in
+ * flight): forget every intent, so one held by a proc that was killed
+ * mid-transaction (its ctx never freed) cannot block forever. */
+static void
+xs_ilk_reset(void)
+{
+	unsigned i;
+	for (i = 1; i <= XS_ILK_OWNERS; i++) {
+		atomic_store_explicit(&g_ilk_owner[i].seq, 0, memory_order_release);
+		atomic_store_explicit(&g_ilk_owner[i].wait_slot, 0, memory_order_release);
+	}
+	(void)pthread_once(&g_ilk_once, xs_ilk_init);
+	for (i = 0; i < XS_ILK_STRIPE; i++) {
+		(void)pthread_mutex_lock(&g_ilk[i].mu);    /* leaf lock */
+		g_ilk[i].n = 0;
+		(void)pthread_mutex_unlock(&g_ilk[i].mu);  /* leaf lock */
+	}
+}
+
+uint64_t
+xstore_intent_waits(void)
+{
+	return atomic_load_explicit(&g_ilk_waits, memory_order_relaxed);
+}
+
+uint64_t
+xstore_intent_conflicts(void)
+{
+	return atomic_load_explicit(&g_ilk_conflicts, memory_order_relaxed);
+}
+
+uint64_t
+xstore_intent_deadlocks(void)
+{
+	return atomic_load_explicit(&g_ilk_deadlocks, memory_order_relaxed);
+}
+
 /* Write a version, then (if this connection enabled autovacuum) prune
  * the rowid's now-dead older versions up to the live-snapshot horizon.
  * Also maintains any secondary indexes on the table: the pre-image is
@@ -3830,8 +4182,18 @@ xstore_write_txn(struct xsql *db, uint32_t tableid, int64_t rowid,
 	if (cx == NULL) return -1;
 	xs_enter_ctx(cx, db);   /* sync in_txn with SQLite's autocommit flag */
 	cx->uniq_err[0] = '\0';
+	cx->last_conflict = 0;
 	if (cx->in_txn) {
 		cx->touched = 1;
+		/* The row's write intent: wait for a concurrent writer of the
+		 * row; a version committed past our snapshot fails the
+		 * statement (not, later, the COMMIT). */
+		if (!cx->ilk_skip && (rc = xs_intent_take(cx, tableid, rowid,
+		    cx->txn_iso >= XS_ISO_REPEATABLE_READ ? cx->txn_snap
+		    : cx->stmt_base)) != 0) {
+			cx->last_conflict = rc;
+			return -1;
+		}
 		/* UNIQUE: against committed rows and this txn's own writes now;
 		 * the commit re-validates against concurrent committers. */
 		if (!deleted && xs_uniq_check_stmt(cx, tableid, rowid, rec, reclen))
@@ -3842,13 +4204,27 @@ xstore_write_txn(struct xsql *db, uint32_t tableid, int64_t rowid,
 	}
 	/* Autocommit: an UPDATE/DELETE computed this row from its read at
 	 * stmt_base; xs_put_ts refuses it (SX_BUSY) if the row was committed
-	 * past that since, or a commit writing it is in flight. */
+	 * past that since, or a commit writing it is in flight.  Holding the
+	 * row's intent for the put makes it wait for a transaction that
+	 * holds the row (and that transaction wait for it). */
+	/* base 0: xs_put_ts makes the stale-read check under the commit lock */
+	if ((rc = xs_intent_take(cx, tableid, rowid, 0)) != 0) {
+		xs_intents_release(cx);
+		cx->last_conflict = rc;
+		return -1;
+	}
 	rc = xs_put_pruned(cx, tableid, rowid, deleted ? NULL : rec,
 	                   deleted ? 0 : reclen, deleted, 0);
 	if (rc == SX_BUSY)
-		cx->last_conflict = 1;
-	if (rc == SX_OK)
+		cx->last_conflict = XS_CONFL_STALE;
+	if (rc == SX_OK) {
+		cx->stmt_puts++;
 		xs_wait_visible(cx->last_ts);
+	}
+	/* Released once the version is visible: a waiter that re-runs on a
+	 * new snapshot then sees it (as a transaction releases in
+	 * wbuf_clear, after its commit's xs_wait_visible). */
+	xs_intents_release(cx);
 	if (rc == SX_CONSTRAINT && cx->uniq_err[0] != '\0')
 		return 1;
 	return rc == SX_OK ? 0 : -1;
@@ -3867,8 +4243,15 @@ xstore_insert_txn(struct xsql *db, uint32_t tableid, int64_t rowid,
 	int rc;
 	if (cx == NULL) return -1;
 	xs_enter_ctx(cx, db);
-	if (cx->in_txn)
-		return xstore_write_txn(db, tableid, rowid, rec, reclen, 0);
+	if (cx->in_txn) {
+		/* A new row: no snapshot read to go stale, and a concurrent
+		 * insert of the same key is refused by the commit (and UNIQUE)
+		 * checks -- no intent (a bulk load would fill the table). */
+		cx->ilk_skip = 1;
+		rc = xstore_write_txn(db, tableid, rowid, rec, reclen, 0);
+		cx->ilk_skip = 0;
+		return rc;
+	}
 	cx->uniq_err[0] = '\0';
 	rc = xs_put_pruned(cx, tableid, rowid, rec, reclen, 0, 1);
 	if (rc == SX_OK) {
@@ -3978,6 +4361,7 @@ xstore_stmt_begin(struct xsql *db)
 	if (cx == NULL) return;
 	cx->stmt_base = xs_visible();
 	cx->last_conflict = 0;
+	cx->stmt_puts = 0;
 }
 
 void
@@ -3992,6 +4376,21 @@ xstore_last_conflict(struct xsql *db)
 {
 	xstore_ctx_t *cx = xstore_ctx_of(db);
 	return cx != NULL && cx->last_conflict;
+}
+
+/* May the statement that just failed on a write conflict restart on a
+ * fresh snapshot (READ COMMITTED semantics, as PostgreSQL re-evaluates
+ * and Oracle restarts)?  Only for a STALE conflict (a deadlock victim
+ * would deadlock again), in a READ COMMITTED transaction (the caller
+ * undid the statement's buffered writes) or in autocommit before the
+ * statement applied any row (applied rows cannot be undone). */
+int
+xstore_stmt_can_restart(struct xsql *db)
+{
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	if (cx == NULL || cx->last_conflict != XS_CONFL_STALE) return 0;
+	if (cx->in_txn) return cx->txn_iso < XS_ISO_REPEATABLE_READ;
+	return cx->stmt_puts == 0;
 }
 
 /* True if the connection currently has an open (non-autocommit)
@@ -6434,7 +6833,8 @@ ctx_free(void *p)
 {
 	xstore_ctx_t *cx = p;
 	if (cx != NULL) { ssi_abort(cx->ssi); snap_set(&cx->snap_slot, 0);
-	    wbuf_clear(cx); free(cx->wbuf); free(cx->rset);
+	    wbuf_clear(cx); xs_ilk_slot_free(cx); free(cx->ilk); free(cx->wbuf);
+	    free(cx->rset);
 	    free(cx->sp_wn); free(cx->sp_rn); free(cx->wmap); free(cx->umap); }
 	free(p);
 }
@@ -6516,6 +6916,7 @@ xs_ctx_init_and_map(struct xsql *db, bt_t *bt, int native)
 	ctx->stmt_base = 0;
 	ctx->last_ts = 0;
 	ctx->last_conflict = 0;
+	ctx->stmt_puts = 0;
 	ctx->rset = NULL;
 	ctx->rn = ctx->rcap = 0;
 	ctx->did_scan = 0;
@@ -6531,6 +6932,8 @@ xs_ctx_init_and_map(struct xsql *db, bt_t *bt, int native)
 	ctx->native_autocommit = 1;
 	ctx->wmap = NULL; ctx->wmap_n = ctx->wmap_cap = ctx->wmap_bad = 0;
 	ctx->wmax_n = 0; ctx->wmax_ok = 1;
+	ctx->ilk_slot = 0; ctx->ilk_seq = 0; ctx->ilk = NULL;
+	ctx->ilk_n = ctx->ilk_cap = 0; ctx->ilk_skip = 0;
 	ctx->umap = NULL; ctx->umap_n = ctx->umap_cap = 0;
 	ctx->uniq_vis = ctx->uniq_gen = 0;
 	ctx->uniq_err[0] = '\0';

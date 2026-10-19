@@ -29,6 +29,9 @@ class Client:
         if limit is not None:
             kw["limit"] = limit
         self.send(**kw)
+        return self.result()
+
+    def result(self):
         cols = None
         rows = []
         while True:
@@ -153,22 +156,36 @@ def main():
     _, rows, _ = o.query("SELECT id, bal FROM acct ORDER BY id")
     check("txns are not merged across conns", rows == [[1, 110], [3, 7]])
 
-    # Lost update (default SNAPSHOT): both read 110, both add; the second
-    # COMMIT must fail with a serialization error, not silently win.
+    # Lost update (default SNAPSHOT): both read 110, both add.  The
+    # second UPDATE waits for the first writer's row intent (so it is
+    # only sent here; its reply comes once A ends) and, A having
+    # committed, fails with a serialization error AT THE UPDATE
+    # (first-updater-wins, as PostgreSQL).  The block then refuses every
+    # statement until it is ended; COMMIT reports the failure.
     a.query("BEGIN")
     o.query("BEGIN")
     a.query("SELECT bal FROM acct WHERE id=1")
     o.query("SELECT bal FROM acct WHERE id=1")
     a.query("UPDATE acct SET bal=bal+10 WHERE id=1")
-    o.query("UPDATE acct SET bal=bal+20 WHERE id=1")
+    o.send(q="UPDATE acct SET bal=bal+20 WHERE id=1")
     a.query("COMMIT")
     try:
-        o.query("COMMIT")
-        check("lost update is refused", False)
+        o.result()
+        check("lost update is refused at the UPDATE", False)
     except RuntimeError as e:
-        check("lost update is refused", "serialize" in str(e))
+        check("lost update is refused at the UPDATE", "serialize" in str(e))
+    try:
+        o.query("SELECT bal FROM acct WHERE id=1")
+        check("aborted block refuses statements", False)
+    except RuntimeError as e:
+        check("aborted block refuses statements", "aborted" in str(e))
+    try:
+        o.query("COMMIT")
+        check("COMMIT of an aborted block fails", False)
+    except RuntimeError as e:
+        check("COMMIT of an aborted block fails", "serialize" in str(e))
     _, rows, _ = o.query("SELECT bal FROM acct WHERE id=1")
-    check("first committer wins", rows == [[120]])
+    check("first updater wins", rows == [[120]])
     # A duplicate primary key is a UNIQUE violation, not "unsupported SQL".
     try:
         a.query("INSERT INTO acct(id,bal) VALUES(1,0)")

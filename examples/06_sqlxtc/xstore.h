@@ -314,6 +314,10 @@ void xstore_stmt_begin(struct xsql *db);
 void xstore_stmt_end(struct xsql *db);
 /* 1 if the current statement's last write was refused as a conflict. */
 int  xstore_last_conflict(struct xsql *db);
+/* After a failed write statement: may it restart on a fresh snapshot
+ * (a stale-read conflict under READ COMMITTED, or in autocommit before
+ * any row applied)? */
+int  xstore_stmt_can_restart(struct xsql *db);
 /* Native C-API equivalents of the MVCC SQL functions. */
 int64_t xstore_clock_now(void);              /* xstore_now() */
 int xstore_as_of(struct xsql *db, int64_t ts);   /* xstore_as_of(ts) */
@@ -447,6 +451,13 @@ uint64_t xstore_catalog_gen(void);
  * on a warm connection must not take it -- every connection contends on
  * it, and each contended release is a cross-loop wake). */
 uint64_t xstore_cat_lock_count(void);
+/* Row write intents (first-updater-wins): writes that waited for
+ * another transaction's intent, writes refused at the statement (a
+ * version committed past the write's snapshot, a deadlock, or a wait
+ * that could not happen / hit the cap), and of those the deadlocks. */
+uint64_t xstore_intent_waits(void);
+uint64_t xstore_intent_conflicts(void);
+uint64_t xstore_intent_deadlocks(void);
 
 /* Count of index seeks served (metric / test evidence that the planner
  * took the index rather than a full table scan). */
