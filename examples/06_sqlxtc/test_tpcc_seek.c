@@ -214,8 +214,7 @@ run(sx_db *db, const char *sql, const struct prm *p, int np, int64_t *first,
 
 /* One statement case: want_rows < 0 = any (a write: then want_chg is
  * the sx_changes count), max_vis = the visited bound (the rows SQLite's
- * plan reads; a rowid range scan also examines the one key past its end,
- * so a rowid point visits 2), want_first =
+ * plan reads), want_first =
  * INT64_MIN to skip the value check, nosort = an ORDER BY the chosen
  * index provides (no sort may run). */
 struct tcase {
@@ -230,20 +229,20 @@ struct tcase {
 };
 
 static const struct tcase CASES[] = {
-	{ 0,  { PI(1), PI(2), PI(3) }, 3, 1, -1, 4, INT64_MIN, 0 },
+	{ 0,  { PI(1), PI(2), PI(3) }, 3, 1, -1, 2, INT64_MIN, 0 },
 	{ 1,  { PI(2), PI(1) }, 2, 1, -1, 1, 31, 0 },
 	{ 2,  { PI(31), PI(2), PI(1) }, 3, -1, 1, 2, INT64_MIN, 0 },
 	{ 32, { PI(2), PI(1) }, 2, 1, -1, 1, 32, 0 },
 	{ 3,  { PI(31), PI(2), PI(1), PI(4), PS("2026-01-02"), PI(5), PI(1) },
 	      7, -1, 1, 2, INT64_MIN, 0 },
 	{ 4,  { PI(31), PI(2), PI(1) }, 3, -1, 1, 2, INT64_MIN, 0 },
-	{ 5,  { PI(77) }, 1, 1, -1, 2, INT64_MIN, 0 },
+	{ 5,  { PI(77) }, 1, 1, -1, 1, INT64_MIN, 0 },
 	{ 6,  { PI(77), PI(1) }, 2, 1, -1, 1, INT64_MIN, 0 },
 	{ 7,  { PI(50), PI(77), PI(1) }, 3, -1, 1, 2, INT64_MIN, 0 },
 	{ 8,  { PI(31), PI(2), PI(1), PI(1), PI(77), PI(1), PI(5), PR(12.5),
 	        PS("dd") }, 9, -1, 1, 2, INT64_MIN, 0 },
-	{ 9,  { PR(10.0), PI(1) }, 2, -1, 1, 3, INT64_MIN, 0 },
-	{ 10, { PI(1) }, 1, 1, -1, 3, INT64_MIN, 0 },
+	{ 9,  { PR(10.0), PI(1) }, 2, -1, 1, 2, INT64_MIN, 0 },
+	{ 10, { PI(1) }, 1, 1, -1, 1, INT64_MIN, 0 },
 	{ 11, { PR(5.0), PI(1), PI(2) }, 3, -1, 1, 2, INT64_MIN, 0 },
 	{ 12, { PI(1), PI(2) }, 2, 1, -1, 1, INT64_MIN, 0 },
 	{ 13, { PI(1), PI(2), PS("BARBARBAR") }, 3, 1, -1, 8, 7, 0 },
@@ -414,6 +413,27 @@ main(void)
 			fprintf(stderr, "FAIL stmt %d visited %llu > %llu\n", tc->stmt,
 			    (unsigned long long)vis, (unsigned long long)tc->max_vis);
 		CK(vis <= tc->max_vis);
+	}
+
+	/* A hot row: Payment updates warehouse w_ytd on every transaction,
+	 * so its row piles up versions until GC.  A point read must stop at
+	 * the visible version, not walk every older one to end the range. */
+	{
+		static const struct prm up[2] = { PR(1.0), PI(2) };
+		static const struct prm rd[1] = { PI(2) };
+		uint64_t vis = 0;
+		int i, n;
+		for (i = 0; i < 50; i++)
+			CK(run(db, T[9], up, 2, NULL, NULL, NULL) == 0);
+		n = run(db, T[10], rd, 1, NULL, &vis, NULL);
+		printf("  hot row: stmt 10 after 50 updates: rows %d visited %llu\n",
+		    n, (unsigned long long)vis);
+		CK(n == 1);
+		CK(vis <= 1);
+		n = run(db, T[9], up, 2, NULL, &vis, NULL);
+		printf("  hot row: stmt 9 (update) visited %llu\n",
+		    (unsigned long long)vis);
+		CK(vis <= 2);
 	}
 
 	sx_close(db);

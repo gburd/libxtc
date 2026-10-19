@@ -2123,6 +2123,13 @@ xs_stash(xstore_cursor_t *c, int64_t rowid, const uint8_t *val, uint16_t vl)
 static void
 xs_advance(xstore_cursor_t *c)
 {
+	/* The last row resolved is the range's upper bound: done, without
+	 * walking that row's older versions (a hot row updated N times since
+	 * the last GC has N of them; a rowid point read paid all N). */
+	if (c->have_last && c->has_hi && c->last_rowid >= c->hi) {
+		c->eof = 1;
+		return;
+	}
 	if (c->btc == NULL) {
 		uint8_t startbuf[XS_VKLEN];
 		const uint8_t *start;
