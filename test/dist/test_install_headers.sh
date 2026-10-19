@@ -105,5 +105,22 @@ if ! $CC -std=c11 -D_GNU_SOURCE $cflags "$work/consumer.c" \
 	exit 1
 fi
 
-echo "  [install-headers] OK: consumer compiles + links against the installed public headers"
+# Every installed header must be self-contained: compiles as the FIRST
+# and ONLY include (a header that leans on a type its own includes do
+# not provide -- e.g. size_t without <stddef.h> -- breaks a consumer
+# whose include order differs from ours).
+bad=0
+for h in "$prefix"/include/xtc*.h; do
+	b=$(basename "$h")
+	printf '#include <%s>\nint main(void) { return 0; }\n' "$b" > "$work/one.c"
+	if ! $CC -std=c11 -D_GNU_SOURCE $cflags -fsyntax-only "$work/one.c" \
+	    2> "$work/one.err"; then
+		echo "  [install-headers] FAIL: $b is not self-contained"
+		head -3 "$work/one.err" >&2
+		bad=1
+	fi
+done
+[ $bad -eq 0 ] || exit 1
+
+echo "  [install-headers] OK: consumer compiles + links against the installed public headers; each header is self-contained"
 exit 0

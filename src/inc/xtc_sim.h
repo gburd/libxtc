@@ -23,6 +23,7 @@
 
 #include "xtc_export.h"
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* Well-known PRNG streams.  Each scheduler-relevant random draw site

@@ -15,6 +15,7 @@
 
 #include "xtc_export.h"
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "xtc_loop.h"
