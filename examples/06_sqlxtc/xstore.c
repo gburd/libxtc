@@ -3930,8 +3930,9 @@ xs_maybe_prune(bt_t *bt, uint32_t tableid, int64_t rowid, uint64_t horizon)
  * First-UPDATER-wins at the statement, as PostgreSQL (row locks) and
  * SQLite (one writer) report it, instead of only first-COMMITTER-wins at
  * COMMIT.  A transaction's write first takes the row's intent: free ->
- * taken; held by this transaction -> fine; held by another -> wait (on a
- * loop) until the holder ends, then re-check.  A row committed past the
+ * taken; held by this transaction -> fine; held by another -> wait (a
+ * fiber parks, a plain thread naps) until the holder ends, then
+ * re-check.  A row committed past the
  * snapshot the write was computed against fails the statement (a lost
  * update: waiting cannot fix it), and so does a wait-for cycle (the
  * youngest transaction in it is the one that fails) or a wait past the
@@ -4127,9 +4128,10 @@ xs_ilk_wait_clear(xstore_ctx_t *cx)
  * waiting for another holder to finish, and check that no version was
  * committed past `base` (the snapshot the write was computed against).
  * Returns 0, or the conflict (XS_CONFL_STALE: a newer committed
- * version; XS_CONFL_HARD: a deadlock, or a wait past the cap -- it never
- * waits off a loop).
+ * version; XS_CONFL_HARD: a deadlock, or a wait past the cap).
  */
+static int xs_stmt_restartable(const xstore_ctx_t *cx);
+
 static int
 xs_intent_take(xstore_ctx_t *cx, uint32_t tid, int64_t rid, uint64_t base)
 {
@@ -4145,8 +4147,15 @@ xs_intent_take(xstore_ctx_t *cx, uint32_t tid, int64_t rid, uint64_t base)
 	for (;;) {
 		r = xs_ilk_try(cx->bt, tid, rid, cx->ilk_slot, cx->ilk_seq, &hslot, &hseq);
 		if (r == 2) return 0;              /* ours: checked when taken */
-		/* Committed past our read: a lost update, waiting cannot help. */
-		if (base != 0 && xs_newest_ts(cx->bt, tid, rid) > base) {
+		/* Committed past our read: a lost update, waiting cannot help
+		 * -- unless the statement will re-run on a fresh snapshot.
+		 * Then wait for the holder FIRST (r == 1): its version is in the
+		 * tree before it is visible, so checking now found it "past"
+		 * the snapshot the re-run had just taken, and the statement
+		 * burned its 8 re-runs without waiting once (TPC-C Payment's
+		 * warehouse UPDATE: 1.35M retries in 60 s at 32 threads). */
+		if (base != 0 && !(r == 1 && xs_stmt_restartable(cx)) &&
+		    xs_newest_ts(cx->bt, tid, rid) > base) {
 			if (r == 0) xs_ilk_drop(cx->bt, tid, rid, cx->ilk_slot, cx->ilk_seq);
 			xs_ilk_wait_clear(cx);
 			atomic_fetch_add_explicit(&g_ilk_conflicts, 1, memory_order_relaxed);
@@ -4160,7 +4169,11 @@ xs_intent_take(xstore_ctx_t *cx, uint32_t tid, int64_t rid, uint64_t base)
 		    memory_order_seq_cst);
 		atomic_store_explicit(&g_ilk_owner[cx->ilk_slot].wait_slot, hslot,
 		    memory_order_seq_cst);
-		if (xtc_pid_is_none(xtc_self()) || waited >= XS_ILK_WAIT_NS ||
+		/* Off a loop (an embedded caller on a plain thread) the wait
+		 * is a thread nap on the same schedule, not an immediate
+		 * conflict: that made a retrying client spin (2.8M Payment
+		 * retries in 60 s at 32 threads) where a fiber would wait. */
+		if (waited >= XS_ILK_WAIT_NS ||
 		    (dl = xs_ilk_victim(cx->ilk_slot, cx->ilk_seq, hslot, hseq))) {
 			if (dl)
 				atomic_fetch_add_explicit(&g_ilk_deadlocks, 1, memory_order_relaxed);
@@ -4171,7 +4184,10 @@ xs_intent_take(xstore_ctx_t *cx, uint32_t tid, int64_t rid, uint64_t base)
 		}
 		if (waited == 0)
 			atomic_fetch_add_explicit(&g_ilk_waits, 1, memory_order_relaxed);
-		(void)xtc_proc_sleep(nap);
+		if (xtc_pid_is_none(xtc_self()))
+			(void)xtc_sleep_ns(nap);
+		else
+			(void)xtc_proc_sleep(nap);
 		waited += nap;
 		if (nap < XS_ILK_NAPMAX_NS) nap *= 2;
 	}
@@ -4191,6 +4207,16 @@ xs_intent_take(xstore_ctx_t *cx, uint32_t tid, int64_t rid, uint64_t base)
 	cx->ilk[cx->ilk_n].tid = tid;
 	cx->ilk[cx->ilk_n++].rid = rid;
 	return 0;
+}
+
+/* Would a stale conflict on this transaction statement re-run it on a
+ * fresh snapshot?  The in-transaction cases of xstore_stmt_restart. */
+static int
+xs_stmt_restartable(const xstore_ctx_t *cx)
+{
+	if (!cx->in_txn) return 0;
+	if (cx->txn_iso < XS_ISO_REPEATABLE_READ) return 1;
+	return cx->stmt_first && !cx->serializable && cx->wn == 0;
 }
 
 /* Release every intent of cx's transaction (it committed -- its versions
