@@ -88,7 +88,12 @@ textbook ones SQLite also uses.
 - **`sql_parse.c`** -- the
   [Lime](https://codeberg.org/gregburd/lime)-generated parser, driven by
   `sql_parse_drv.c`, producing an AST (`sql_ast.c`).
-- **`vexec.c`** -- the vectorized executor.
+- **`vexec.c`** -- the vectorized executor and its planner: one
+  access-path chooser (rowid range, longest-equality-prefix index seek,
+  index order instead of a sort, MIN/MAX from the first or last key,
+  index nested-loop joins) shared by SELECT, aggregates, ORDER BY,
+  UPDATE and DELETE, and a per-statement plan cache. `vxfunc.c` holds
+  the date/time, printf and math functions.
 - **`bufmgr.c`** -- the buffer pool: pinning, eviction (CLOCK with a
   double-write buffer), and the pin-accounting that DST and ASan hardened
   (see [Known issues]({{ '/reference/known-issues/' | relative_url }}) for
@@ -100,8 +105,9 @@ textbook ones SQLite also uses.
   crash recovery (redo/undo), validated under the deterministic
   simulator and by kill -9 torture of the server.
 - **`xstore.c`** -- the catalog and MVCC record store: per-connection
-  transactions, snapshot reads, first-committer-wins write-write
-  conflict detection, and SSI for SERIALIZABLE.
+  transactions, snapshot reads, row write intents with deadlock
+  detection, composite primary keys and UNIQUE constraints as
+  order-preserving tuple indexes, and SSI for SERIALIZABLE.
 
 ## The B-tree, and what it borrows from RethinkDB
 
@@ -185,8 +191,8 @@ writes.
 
 | Level | Reads | Write-write conflicts | Selected by |
 | --- | --- | --- | --- |
-| SNAPSHOT (default), REPEATABLE READ | one snapshot per transaction | first committer wins; the loser's COMMIT fails | default / `BEGIN ISOLATION LEVEL REPEATABLE READ` |
-| READ COMMITTED (READ UNCOMMITTED is the same) | a fresh snapshot per statement | a row committed since the statement's snapshot fails the COMMIT | `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` |
+| SNAPSHOT (default), REPEATABLE READ | one snapshot per transaction | the second writer of a row waits for the first; if the first commits, the second's statement fails | default / `BEGIN ISOLATION LEVEL REPEATABLE READ` |
+| READ COMMITTED (READ UNCOMMITTED is the same) | a fresh snapshot per statement | the second writer waits, then re-runs its statement on a fresh snapshot (up to 8 times) | `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` |
 | SERIALIZABLE | one snapshot per transaction | as SNAPSHOT, plus SSI: a dangerous read-write pivot (write skew) fails the COMMIT | `BEGIN ISOLATION LEVEL SERIALIZABLE` |
 
 The statements accepted over the wire are
@@ -194,11 +200,27 @@ The statements accepted over the wire are
 `SET TRANSACTION ISOLATION LEVEL <level>` (inside a transaction, before
 its first query) and
 `SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL <level>`
-(the connection default). A refused COMMIT returns
-`could not serialize access due to concurrent update; transaction rolled
-back`; the transaction is gone and the client retries it. An autocommit
-`UPDATE`/`DELETE` that races a concurrent commit of the same row fails
-the same way instead of overwriting it.
+(the connection default).
+
+Since 1.58 every write takes a *row write intent* before it touches the
+row, much as PostgreSQL takes a tuple lock. A second transaction that
+writes the same row parks its fiber until the holder commits or rolls
+back. Then it either proceeds (the row did not change, or READ COMMITTED
+re-runs the statement), or fails the statement with `could not serialize
+access due to concurrent update`. A wait-for cycle (A holds r1 and wants
+r2, B the reverse) fails exactly one of them, the youngest, within
+microseconds. After such a failure the transaction is aborted, as in
+PostgreSQL: later statements fail with `current transaction is aborted`
+until ROLLBACK, and a COMMIT reports the failure rather than committing
+the rest. The commit-time first-committer-wins check stays as a backstop
+and is the only conflict check SSI adds to. Before 1.58 conflicts were
+found only at COMMIT, so a TPROC-C client lost its whole transaction
+after doing all of its work; finding them at the statement made 8 and
+32 connections faster than 1, not slower.
+
+The intent waits are fiber naps counted in nap time, with no clock read
+and no random backoff, so they replay deterministically under the
+simulator.
 
 Snapshots are taken from a *read horizon* that trails commits still
 writing their log record or applying their versions, so a snapshot
@@ -436,6 +458,106 @@ flowchart TD
   found real library bugs (a proc parking its wait fd on the wrong
   loop's ring). The engine's pressure is precisely what made those
   bugs reproducible -- an argument for building the hard example.
+
+## Benchmark: TPROC-C against SQLite and Turso
+
+Measured for 1.58 on a bare-metal host: two Xeon 8375C sockets (128
+threads), 1 TiB, and eight local NVMe drives in mdadm RAID-0 under XFS
+(`su=64k,sw=8`, `noatime,largeio`).  The OS was tuned for measurement:
+the performance governor, C-states held shallow through
+`/dev/cpu_dma_latency`, transparent hugepages and NUMA balancing off,
+swap off, irqbalance and timers stopped.  On that array a 4 KiB write
+plus `fdatasync` takes 95 us.
+
+All three engines ran the same driver: Turso's own `perf/tpc-c` (a
+tpcc-mysql derivative, 35 prepared statements, the standard 45/43/4/4/4
+mix with no think time) through the sqlite3 C API.  For sqlxtc that API
+is a small client shim speaking Quack over loopback TCP, so every
+sqlxtc statement is a network round trip; SQLite and Turso run
+in-process.  The setup was 10 warehouses (about 7 GB in SQLite), 30 s of
+ramp, 120 s measured, 3 passes per cell.  The engine was pinned to NUMA
+node 0 and, for sqlxtc, the client to node 1.  The driver was patched in
+three places so that retries are real transactions: COMMIT runs inside
+the retry loop, the transaction is re-opened before a retry, and
+Payment no longer calls `exit()` on a conflict.
+
+New-Order transactions per minute (tpmC), median of 3:
+
+| Engine, mode | 1 conn | 8 conns | 32 conns | 64 conns |
+| --- | ---: | ---: | ---: | ---: |
+| SQLite 3.53.4, WAL, `synchronous=NORMAL` (no fsync per commit) | 95,400 | 99,400 | 95,300 | -- |
+| SQLite 3.53.4, WAL, `synchronous=FULL` (fsync per commit) | 81,000 | 84,500 | 84,400 | -- |
+| **sqlxtc 1.58** (fdatasync before every ack, 32 loops) | 13,900 | **54,600** | 47,200 | 39,700 |
+| Turso 0.8.3, WAL, `synchronous=NORMAL` | 4,830 | 4,970 | -- | -- |
+| Turso 0.8.3, MVCC, `BEGIN CONCURRENT` | 1,320 | 5,790 | 10,500 | 9,200 |
+
+What the numbers say:
+
+- **SQLite wins, by a wide margin, at every connection count.**  It does
+  about 95k tpmC on one core: an in-process B-tree with no network hop,
+  under one database-wide write lock.  Connections add nothing (CPU stays
+  near 1% of the box) because every write serializes, but each one is
+  very cheap.
+- **sqlxtc scales where SQLite cannot, but from a much lower base.**  At
+  one connection a New-Order costs about 2.9 ms.  That is one TCP round
+  trip per statement (about 38 per committed transaction across the mix,
+  from the server's counters) plus one `fdatasync`; the server spends a
+  median 9.7 us per statement.  At 8 connections group commit and row-level concurrency
+  give 3.9x.  Past that the hot rows of TPC-C bound it: Payment holds its
+  warehouse row until COMMIT, and the run includes periodic log
+  checkpoints that pause commits.  sqlxtc is durable per commit in every
+  configuration; the comparable SQLite line is FULL.
+- **Turso 0.8.3 is the slowest here.**  In WAL mode it is CPU-bound in
+  B-tree seeks and plans some TPC-C lookups on a prefix or secondary index
+  where SQLite uses the full primary key (`EXPLAIN QUERY PLAN` on the same
+  file).  Its MVCC mode scales to 10.5k at 32 connections, but conflict
+  retries dominate: about 13 million write-write conflicts in 120 s.
+
+Tail latency, New-Order p99, per-10 s-interval median: SQLite 5.5-7.7 ms;
+sqlxtc 3.8 ms at 1 connection and 15 ms at 8; Turso MVCC 120 ms at 32.
+At 32 and 64 connections a sqlxtc run that catches a checkpoint shows a
+1.4 s p99 for that interval (see [Known
+issues]({{ '/reference/known-issues/' | relative_url }})).
+
+Configuration mattered as much as code.  sqlxtc's buffer pool defaults
+to 1 MiB, and these runs pass `--storage-frames=65536` (256 MiB).  The
+1.58 server also bounds the CLOCK sweep by default (`--storage-claim=128`;
+without it the 8-connection run spent 78% of the server in `evict_one`
+and did 8.4k), and the page provider walks a bounded slice per tick
+(the full-pool walk halved one-connection throughput at a 1 GiB pool).
+
+### Feature by feature
+
+The same data set (10 warehouses), the same sqlite3-API binary per
+engine, one prepared statement per row with random keys, 10 s each.
+Operations per second, 1 thread / 16 threads:
+
+| Statement shape | SQLite (WAL, NORMAL) | sqlxtc | Turso WAL | Turso MVCC |
+| --- | ---: | ---: | ---: | ---: |
+| point read, integer PK | 439k / 1.53M | 34k / 507k | 524k / 1.47M | 181k / 451k |
+| point read, 3-column PK | 255k / 1.56M | 27k / 421k | 573 / 8.1k | 110 / 974 |
+| secondary index equality + ORDER BY | 236k / 1.58M | 26k / 338k | 168k / 1.44M | 50k / 365k |
+| count(*) with an index predicate | 233k / 1.60M | 25k / 332k | 882 / 12k | 210 / 1.5k |
+| MIN over an index prefix | 420k / 1.56M | 35k / 509k | 363k / 1.46M | 142k / 441k |
+| `= (SELECT max(...))` subquery | 337k / 1.52M | 25k / 50k | 2.8k / 45k | 668 / 3.5k |
+| SUM over a PK range | 184k / 1.59M | 33k / 503k | 114k / 1.39M | 35k / 234k |
+| join on PKs (customer x warehouse) | 284k / 1.56M | 24k / 323k | 580 / 8.4k | 111 / 968 |
+| DISTINCT over a range | 14k / 223k | 35k / 521k | 7.1k / 96k | 2.6k / 21k |
+| ORDER BY ... DESC LIMIT 1 | 434k / 1.50M | 34k / 534k | 369k / 1.46M | 144k / 449k |
+| GROUP BY over 10 rows | 199k / 1.54M | 18k / 137k | 122k / 1.47M | 42k / 259k |
+| UPDATE by PK in a transaction | 91k / 61k | 3.8k / 21k | 22k / 12k | 2.1k / 45k |
+| INSERT in a transaction | 113k / 108k | 4.6k / 38k | 69k / 61k | 8.6k / 59k |
+
+At one thread, sqlxtc's floor is about 25-40 us per statement: one
+loopback TCP round trip and JSON encoding, which the in-process engines
+do not pay.  It is the only engine whose writes get faster with more
+threads (5.6x for UPDATE and 8.4x for INSERT at 16), because SQLite
+and Turso WAL take a database-wide write lock.  DISTINCT is faster than
+SQLite at every thread count (a hash set against SQLite's temporary
+B-tree).  Turso's very low rows come from its planner: for
+`c_w_id = ? AND c_d_id = ? AND c_id = ?` it seeks only the two-column
+prefix of an index, a 3000-row range, where SQLite seeks the full
+primary key (`EXPLAIN QUERY PLAN` on the same file).
 
 ## Run it
 

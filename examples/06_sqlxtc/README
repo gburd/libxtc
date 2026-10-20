@@ -1,51 +1,46 @@
 
-## Secondary indexes and TPROC-C (measured, 2026-08)
+## Indexes, access paths and TPROC-C (measured, 1.58)
 
-`CREATE INDEX` / `DROP INDEX` are implemented in the native engine: an
-index is a secondary B-tree keyed `[value][rowid]` in the same MVCC
-store, WAL-durable and rebuilt from base rows on recovery; the planner's
-`where_index_seek` turns an equality on an indexed column into a seek.
-Verified 4.4x-7.3x faster than a full scan on an index-eligible plain
-`SELECT ... WHERE col = ?` over a 50k-row table (independently measured
-three times, on NVMe).
+Every table is stored by rowid.  A composite PRIMARY KEY and every UNIQUE
+constraint become an internal UNIQUE index (`sqlite_autoindex_<t>_<n>`,
+as SQLite names them); CREATE INDEX takes any number of columns with
+ASC/DESC.  Index keys are an order-preserving tuple encoding
+(`[0xFE][index id][elements...][rowid]`, xstore.c), so a prefix is a
+range.  One access-path chooser (vexec.c) serves SELECT, aggregates,
+ORDER BY, UPDATE and DELETE: rowid range, longest-equality-prefix index
+seek with an optional range on the next column, index order instead of a
+sort, MIN/MAX from the first or last key, and index nested-loop joins.
+Statements are parsed and planned once (per-statement plan cache).
 
-It does NOT (yet) speed up HammerDB TPROC-C end to end (measured NOPM
-58 vs 59 with the index -- noise), for three reasons, all confirmed:
-  1. The by-name payment/order-status path leads with `SELECT count(c_id)
-     ... WHERE c_last = ?`; the aggregate path still full-scans (a plain
-     projection SELECT would use the index, the count() form does not).
-  2. TPROC-C keys the lookup on the composite `(c_w_id, c_d_id, c_last)`;
-     only single-column indexes exist, and the customer table's compound
-     PK prefix `(c_w_id, c_d_id)` already range-bounds the scan to one
-     district (~1000 rows), so a single-column `c_last` index adds nothing.
-  3. At 1 virtual user the workload is fsync-latency bound (~0.7 txn/s);
-     the by-name query is a negligible fraction of a transaction.
+TPROC-C runs natively under Turso's perf/tpc-c driver (35 prepared
+statements, all seeks; test_tpcc_seek asserts the rows visited) and
+HammerDB's quackoltp.tcl.  Write-write conflicts are found at the
+statement with row write intents (deadlock detection, bounded wait), so
+TPROC-C's retries are cheap.  Size the buffer pool: `--storage-frames`
+(see docs/KNOWN_ISSUES.md).  Numbers against SQLite and Turso:
+docs/examples/sqlxtc.md, "Benchmark".
 
-Roadmap to move TPROC-C: composite (multi-column) indexes, an
-index-seek path for `count()`-with-predicate, `UNIQUE` enforcement, and
-`COUNT(DISTINCT ...)` + correlated `IN (SELECT ...)` (the stock-level
-query, currently rejected).  See HammerDB PR #911 for the Quack driver.
-
-## SQL-dialect compatibility with SQLite (measured, 2026-08)
+## SQL-dialect compatibility with SQLite (measured, 1.58)
 
 sqlxtc is a from-scratch engine (no vendored sqlite3.c) speaking the
 Quack JSON-over-TCP protocol, so SQLite's own testfixture TCL suite does
 NOT apply -- it drives SQLite's C library and asserts SQLite-internal
 behavior no independent engine reproduces.  The meaningful measure is
 SQL-level result-set equivalence: statements harvested from SQLite's
-test corpus, run through both sqlxtc and python's sqlite3, asserting
-identical results.
+test corpus (test/sqlxtc/harvest_sqlite_tests.py), run through both
+sqlxtc and python's sqlite3, comparing results.
 
-Measured **79.9% (942/1179)** of harvested SQLite-corpus statements
-produce SQLite-identical results, with **zero wrong-result cases** (an
-unsupported feature is cleanly rejected, never mis-answered).  Supported
-surface includes: DDL (incl. CREATE INDEX), DML, SELECT shapes, WHERE
-predicates, ORDER BY (alias/ordinal/expression), LIMIT/OFFSET, DISTINCT,
-inner + comma/CROSS + N-way joins, scalar + correlated subqueries,
-EXISTS, single non-recursive CTEs, aggregates (incl. group_concat) and
-arithmetic over them, CAST, and the common scalar functions (substr,
-nullif, scalar min/max, replace, trim, instr, round, coalesce).
-Rejected-by-design (correct-by-rejection): WITH RECURSIVE, multiple/
-joined CTEs, CAST-to-BLOB, outer joins in the N-way path, COUNT(DISTINCT)
-combined with a correlated IN(SELECT).  Wired-in differential test:
-test/sqlxtc/test_sqlxtc_compat.py (82/82) + the oracle (32/32).
+On SQLite 3.53.4's test/*.test: 1171 of 1413 evaluated statements
+(82.9%) give SQLite-identical results; v1.57.0 gave 976 of 1248 (78.2%).
+The 2 remaining mismatches are `substr()` with hex arguments above 2^32,
+where sqlxtc follows SQLite 3.53.4 and the python oracle (SQLite 3.46.1)
+differs.  Everything else that does not match is rejected ("unsupported
+SQL"), never answered differently.  Still unsupported: NATURAL joins,
+USING with ORDER BY on a non-projected column, multi-key or 3+-way
+outer joins, window functions, recursive and multiple CTEs, triggers,
+virtual tables, ALTER TABLE ADD/DROP COLUMN, JSON.  NOT NULL, CHECK,
+DEFAULT and FOREIGN KEY clauses are parsed but not enforced (an INSERT
+that SQLite would refuse is accepted) -- the one deliberate gap in the
+"rejected, never answered differently" rule above.  Wired-in differential tests: test/sqlxtc/
+test_sqlxtc_compat.py (163 cases + 4 expected-unsupported), the oracle
+(32), and the TPC-C differential test_sqlxtc_tpcc.py (494 steps).

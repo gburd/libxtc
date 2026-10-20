@@ -6,6 +6,76 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## RESOLVED (1.58): sqlxtc SQL compatibility and TPROC-C, and a bare-coroutine UAF
+
+An audit of SQLite 3.53.4 against sqlxtc, run as differential tests
+against Python's sqlite3, found (and 1.58 fixes):
+
+* **libxtc: a bare `xtc_async` coroutine ran as the last proc on its
+  thread.**  The proc TLS was not cleared on fiber entry, so the
+  coroutine's `xtc_self()` named that proc, its `xtc_recv` took that
+  proc's mail, and once the proc exited every later yield read freed
+  memory (and `xtc_svr_call` from such a coroutine hung).  Fixed on
+  ucontext, fcontext and Windows fibers.
+* **libxtc: `xtc_async.h`, `xtc_exec.h` and `xtc_sim.h` did not compile
+  as a consumer's first include** (`size_t` without `<stddef.h>`).  The
+  install gate now compiles every installed header on its own.
+* **sqlxtc returned wrong results** for: `LIMIT a, b` (offset and limit
+  swapped); `''` inside a string literal; hex literals (`SELECT 0x10`
+  gave 0); REAL to text (`%g`, six digits, so 1.23456789 was stored as
+  "1.23457"); REAL/INTEGER column affinity; ORDER BY / LIMIT on a
+  compound SELECT (applied to its last arm only); composite PRIMARY KEY
+  and UNIQUE (parsed and ignored, so duplicates were accepted); an index
+  seek or a join inside a transaction (missed the transaction's own
+  writes, or read the latest commit instead of its snapshot); a row
+  inserted into a rowid gap inside a transaction (invisible to that
+  transaction).
+* **sqlxtc rejected** bound parameters in UPDATE SET expressions, joins
+  and subqueries; multi-column indexes; quoted identifiers, keywords as
+  names, `?NNN` / `:name` parameters, mixed-case names; NOT LIKE, NOT
+  BETWEEN, IS / IS NOT / IS DISTINCT FROM, LIKE ... ESCAPE, NULLS
+  FIRST/LAST; the date/time functions, printf/format and the common
+  scalar and math functions.  The SQLite compatibility corpus grew from
+  82 to 163 cases, plus 4 expected-unsupported (all pass; 1.57.0 passes
+  90 of the first 159).
+* **sqlxtc could not run TPROC-C** under a standard sqlite3-API driver
+  (Turso's perf/tpc-c), and every lookup was a full scan.  It now runs
+  all five transactions with one access-path chooser (primary-key and
+  index seeks for SELECT, aggregates, ORDER BY, UPDATE and DELETE;
+  MIN/MAX from the first or last key; index nested-loop joins), a plan
+  cache, O(1) in-transaction bulk INSERT, row write intents (a
+  write-write conflict fails or waits at the statement, with deadlock
+  detection, instead of failing COMMIT), and no global lock on the
+  per-statement catalog lookups.
+
+## OPEN (1.58): sqlxtc buffer-pool sizing and the hot-row hold
+
+* **The default buffer pool is 256 pages (1 MiB); size it.**  Pass
+  `--storage-frames`.  For TPROC-C at 10 warehouses (about 7 GB) on a
+  128-vCPU host, 262144 pages (1 GiB) measured best (49.8k tpmC at 8
+  connections).  Smaller pools spend most of their CPU in the CLOCK
+  sweep (65536 pages: `evict_one` 78% of the server at 8 connections,
+  8.4k tpmC).  Larger pools get slower too (1048576 pages: 13-16k): the
+  page provider (every 1 ms) and trickler (every 5 ms) walk every frame,
+  on the loop that also runs the WAL group-commit writer.
+* **A log checkpoint pauses commits.**  When the log passes
+  `--checkpoint-mb` (default 64 MiB, then twice its last post-checkpoint
+  size) every live row is dumped into a new log while commits wait.  On a
+  10-warehouse TPROC-C store (2.7 GB) that pause is about 16 s; size
+  `--checkpoint-mb` to move it, or accept it in the tail.
+* **Restart after an unclean stop replays the whole log.**  A 10-warehouse
+  store took 292 s to open after a kill; after a clean SIGTERM drain
+  (17 s) it reopens in 13 s.
+* **TPROC-C scaling is bounded by hot rows.**  A Payment holds its
+  warehouse row from its first UPDATE to COMMIT (about 9 ms at 32
+  connections), so throughput per warehouse levels off; connections
+  beyond a few per warehouse wait on row intents.
+* **Conflicts are reported, not hidden.**  SNAPSHOT and stronger fail a
+  conflicting write at the statement with "could not serialize"; the
+  transaction is then aborted (later statements fail until ROLLBACK).
+  READ COMMITTED and autocommit re-run the statement on a fresh snapshot
+  (at most 8 times).
+
 ## RESOLVED (1.57): sqlxtc large rows, B-tree limits, and the 1.56 regressions
 
 The 1.56.0 re-review and a study of RethinkDB's B-tree found, and 1.57
@@ -542,8 +612,8 @@ isolation defects were fixed (1.56); what remains is recorded here.
   single pwrite at offset 0, not double-written.  Mid-log corruption is
   treated as end-of-log and truncated on reopen without a diagnostic.
 * **sqlxtc serialization failures.**  SNAPSHOT, REPEATABLE READ and
-  SERIALIZABLE are first-committer-wins: a write-write conflict fails the
-  later COMMIT (and a racing autocommit UPDATE/DELETE) with "could not
+  SERIALIZABLE fail a write-write conflict at the conflicting statement
+  (1.58: row write intents; before 1.58, at COMMIT) with "could not
   serialize access due to concurrent update".  Clients must retry.
 * **kaka is not Kafka.**  It spawns one proc per connection, has no
   consumer-group membership/rebalancing, no time-based retention, and no
