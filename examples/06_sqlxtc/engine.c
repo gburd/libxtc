@@ -385,6 +385,19 @@ static int g_storage_direct = 0;
 static int g_storage_adaptive = 0;
 
 /* Configure direct I/O + adaptive writeback for the next sx_storage_open. */
+/* CLOCK sweep bound for the next sx_storage_open (bm_opts_t
+ * claim_threshold).  The bufmgr's default is 0 (unbounded); the server
+ * uses 128, the value bufmgr.h documents for opt-in.  TPC-C at 10
+ * warehouses, 8 connections, 65536 frames: 0 -> 11-14k tpmC with the
+ * CLOCK hand circling a hot pool (evict_one 78% of the server), 128 ->
+ * 64k; elsewhere within +-3% (1, 32 connections; 262144 frames). */
+static uint32_t g_storage_claim = 128;
+void
+sx_storage_set_claim(uint32_t threshold)
+{
+	g_storage_claim = threshold;
+}
+
 void
 sx_storage_set_io(int direct, int adaptive)
 {
@@ -411,6 +424,7 @@ sx_storage_open(const char *path, unsigned int n_frames)
 	o.lsn_off = 0;        /* ARIES page LSN: first field of every btnode */
 	o.direct = g_storage_direct;             /* cache-bypass page store */
 	o.adaptive_writeback = g_storage_adaptive;  /* GA-tuned trickler */
+	o.claim_threshold = g_storage_claim;       /* sweep bound (0 = off) */
 
 	snprintf(g_xwal_path, sizeof g_xwal_path, "%s-wal", dpath);
 

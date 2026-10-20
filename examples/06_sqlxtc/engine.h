@@ -73,6 +73,8 @@ int  sx_storage_open(const char *path, unsigned int n_frames);
 /* Configure the page store's I/O for the next sx_storage_open:
  * direct = cache-bypass (direct I/O), adaptive = GA-tuned writeback. */
 void sx_storage_set_io(int direct, int adaptive);
+/* CLOCK sweep bound (bm_opts_t.claim_threshold) for the next open. */
+void sx_storage_set_claim(uint32_t threshold);
 /* Start the background storage procs (WAL group-commit writer, page
  * provider, trickler) on `loop`.  Call after the loop exists. */
 int  sx_storage_run(struct xtc_loop *loop);
