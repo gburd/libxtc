@@ -1,3 +1,77 @@
+libxtc (1.58.0-1) unstable; urgency=medium
+
+  * MINOR release -- the sqlxtc example becomes a SQLite-compatible engine
+    that runs TPROC-C natively, measured on bare metal against SQLite
+    3.53.4 and Turso 0.8.3, and a libxtc use-after-free in bare
+    coroutines is fixed.  No existing public libxtc struct changed; no
+    new libxtc API.
+  * libxtc:
+    - A bare xtc_async coroutine no longer runs as the last proc on its
+      thread: fiber entry (ucontext, fcontext, Windows fibers) clears the
+      proc TLS.  It used to report that proc from xtc_self(), take its
+      mail in xtc_recv, and, once the proc exited, read freed memory on
+      every yield (xtc_svr_call from such a coroutine hung).  1.56.0
+      re-review B1.
+    - xtc_async.h and xtc_sim.h include <stddef.h>: xtc_async.h,
+      xtc_exec.h and xtc_sim.h failed to compile as a consumer's first
+      include.  The install gate now compiles every installed header on
+      its own.
+  * sqlxtc, wrong results fixed (each found by a differential test against
+    Python's sqlite3, shown failing first):
+    - LIMIT a, b (offset and limit were swapped); '' inside a string
+      literal; hex literals; REAL to text (six digits, so a stored
+      1.23456789 became "1.23457"); REAL/INTEGER/NUMERIC affinity;
+      ORDER BY / LIMIT on a compound SELECT (applied to its last arm).
+    - Composite PRIMARY KEY and UNIQUE were parsed and ignored
+      (duplicates accepted); they are now UNIQUE tuple indexes with
+      SQLite's "UNIQUE constraint failed: t.a, t.b".
+    - Inside a transaction, an index seek missed the transaction's own
+      writes, a join read the latest commit instead of its snapshot, and
+      a row inserted into a rowid gap was invisible.
+    - JOIN ... USING ran as a cross join (once the join path accepted
+      unqualified columns); substr() of a BLOB returned TEXT.
+  * sqlxtc, SQL newly supported: bound parameters in UPDATE SET, joins
+    and subqueries; multi-column CREATE INDEX (ASC/DESC); quoted
+    identifiers, keywords as names, ?NNN / :name / @name / $name;
+    NOT LIKE, NOT BETWEEN, IS [NOT] [DISTINCT FROM], LIKE ESCAPE,
+    NULLS FIRST/LAST; date(), time(), datetime(), julianday(),
+    unixepoch(), strftime(), CURRENT_*, printf/format, quote, hex, char,
+    unicode, concat, concat_ws, iif, sign and the math functions.
+    'now' derives from xtc_clock_mono, so it is deterministic under the
+    simulator (new DST test test_sim_sql_now).
+  * sqlxtc, TPROC-C (Turso's perf/tpc-c driver; HammerDB quackoltp):
+    - One access-path chooser for SELECT, aggregates, ORDER BY, UPDATE
+      and DELETE (rowid range, longest-equality-prefix index seek, index
+      order instead of a sort, MIN/MAX from the first or last key), index
+      nested-loop joins, and a per-statement plan cache (0 re-parses).
+    - Row write intents: a write-write conflict waits for the holder and
+      then fails the statement (or re-runs it under READ COMMITTED) with
+      deadlock detection, instead of failing COMMIT; the commit-time
+      check stays as a backstop.
+    - Per-statement catalog lookups no longer take one global mutex (a
+      contended release cost a cross-loop wake): on a disjoint-row
+      microbenchmark at 8 / 32 connections, transactions 5.8x / 4.8x,
+      point reads 6.1x / 18.4x.
+    - In-transaction bulk INSERT is O(1) per row (was O(rows buffered);
+      a 10-warehouse load went from over 45 min to 909 s).
+    - Buffer manager: the trickler selects its batch with a bounded heap,
+      the page provider walks a bounded slice per tick, and the server
+      bounds the CLOCK sweep by default (--storage-claim=128).
+  * Measured (128 vCPUs, 8 NVMe RAID-0, XFS; 10 warehouses; tpmC at 1 /
+    8 / 32 connections): SQLite WAL+FULL 81.0k / 84.5k / 84.4k; sqlxtc
+    13.9k / 54.6k / 47.2k; Turso MVCC 1.3k / 5.8k / 10.5k.
+    docs/examples/sqlxtc.md has the full matrix and method.
+  * SQLite-corpus compatibility (SQLite 3.53.4 test/*.test, harvested):
+    78.2% -> 82.9% of evaluated statements identical; 0 wrong results
+    apart from two substr() cases where the python oracle (SQLite 3.46)
+    differs from SQLite 3.53.4.
+  * Known: the default sqlxtc buffer pool is 1 MiB (pass
+    --storage-frames); log checkpoints pause commits (~16 s at 10
+    warehouses); NOT NULL, CHECK, DEFAULT and FOREIGN KEY are not
+    enforced.  See docs/KNOWN_ISSUES.md.
+
+ -- Greg Burd <greg@burd.me>  Tue, 20 Oct 2026 08:00:00 -0400
+
 libxtc (1.57.0-1) unstable; urgency=medium
 
   * MINOR release -- the sqlxtc example's B-tree adopts ideas from
