@@ -452,6 +452,8 @@ uint64_t xstore_catalog_gen(void);
  * on a warm connection must not take it -- every connection contends on
  * it, and each contended release is a cross-loop wake). */
 uint64_t xstore_cat_lock_count(void);
+/* Scans of the catalog B-tree (table-id 0) to resolve a name (metric). */
+uint64_t xstore_cat_scan_count(void);
 /* Row write intents (first-updater-wins): writes that waited for
  * another transaction's intent, writes refused at the statement (a
  * version committed past the write's snapshot, a deadlock, or a wait

@@ -80,6 +80,7 @@
 #define XS_LK_SNAP 10u  /* active-snapshot set */
 #define XS_LK_COMMIT 11u /* commit validation + timestamp + in-flight registry */
 static _Atomic uint64_t g_cat_locks;   /* XS_LK_CAT acquisitions (metric) */
+static _Atomic uint64_t g_cat_scans;   /* catalog-tree scans (metric) */
 #define xs_cat_lock()    (atomic_fetch_add_explicit(&g_cat_locks, 1, \
 	memory_order_relaxed), \
 	(void)xtc_amutex_lock(xtc_amutex_static(XS_LK_CAT), -1))
@@ -1055,6 +1056,7 @@ xs_cat_lookup(bt_t *bt, const char *name)
 	int64_t last_rowid = 0; int have_last = 0;
 	uint32_t found = 0;
 
+	atomic_fetch_add_explicit(&g_cat_scans, 1, memory_order_relaxed);
 	enc_vkey(XS_CAT_TABLEID, INT64_MIN, ~(uint64_t)0, startk);
 	if (bt_cursor_open(bt, startk, XS_VKLEN, &cur) != XTC_OK)
 		return 0;
@@ -1090,6 +1092,48 @@ xs_cat_lookup(bt_t *bt, const char *name)
 	}
 	bt_cursor_close(cur);
 	return found;
+}
+
+/*
+ * Install (bt, name) -> id with its column schema into the in-process
+ * catalog cache after a catalog-TREE hit.  Before this, g_cat was filled
+ * only by a CREATE in this process, so on any reopened store (every
+ * server start) each statement resolved its table by scanning the
+ * catalog B-tree, read the catalog value again for the schema, and
+ * re-parsed it: ~19% of a TPC-C connection's CPU (xs_cat_lookup +
+ * xs_cat_value + xstore_table_schema).  Entries are keyed and dropped
+ * exactly as CREATE's are (DROP / RENAME / bt close), so a primed entry
+ * is as authoritative as a created one.  Caller holds no cat lock.
+ */
+static int xs_cat_value(bt_t *bt, const char *name, uint8_t *out, int cap);
+static void
+xs_cat_prime(bt_t *bt, const char *name, uint32_t id)
+{
+	uint8_t val[1024];
+	int vlen, i, j;
+	if (id == 0 || strlen(name) >= sizeof g_cat[0].name) return;
+	vlen = xs_cat_value(bt, name, val, (int)sizeof val - 1);
+	xs_cat_lock();
+	for (i = 0; i < g_cat_n; i++)
+		if (g_cat[i].bt == bt && strcasecmp(g_cat[i].name, name) == 0) {
+			xs_cat_unlock();
+			return;                  /* raced: someone installed it */
+		}
+	if (g_cat_n < XS_CAT_MAX) {
+		struct xs_cat_ent *e = &g_cat[g_cat_n++];
+		e->bt = bt;
+		snprintf(e->name, sizeof e->name, "%s", name);
+		e->tableid = id;
+		e->coldefs[0] = '\0';
+		/* value = name [NUL coldefs]; cache the coldefs if they fit */
+		for (j = 0; j < vlen; j++) if (val[j] == 0) break;
+		if (j < vlen - 1 && vlen - (j + 1) < (int)sizeof e->coldefs) {
+			memcpy(e->coldefs, val + j + 1, (size_t)(vlen - (j + 1)));
+			e->coldefs[vlen - (j + 1)] = '\0';
+		}
+		XS_CATC_BUMP();
+	}
+	xs_cat_unlock();
 }
 
 /* The largest table-id present in the catalog (table-id 0), or 0 if it
@@ -1326,6 +1370,12 @@ static _Atomic uint64_t g_idx_gen;     /* bumped by every index create */
  * views) and index rebuild, so a cached plan built at an older one is
  * rebuilt (it may name a dropped index or miss a new one). */
 static _Atomic uint64_t g_cat_gen = 1;
+
+uint64_t
+xstore_cat_scan_count(void)
+{
+	return atomic_load_explicit(&g_cat_scans, memory_order_relaxed);
+}
 
 uint64_t
 xstore_cat_lock_count(void)
@@ -2389,8 +2439,8 @@ xstore_scan_open(bt_t *bt, const char *table, uint64_t snap,
 	xstore_scan_t *s;
 	uint32_t tid;
 	if (bt == NULL || table == NULL) return NULL;
-	tid = xs_cat_lookup(bt, table);
-	if (tid == 0) return NULL;             /* unknown table */
+	if (!xstore_table_id(bt, table, &tid))
+		return NULL;                       /* unknown table */
 	s = (xstore_scan_t *)calloc(1, sizeof *s);
 	if (s == NULL) return NULL;
 	s->c.bt = bt;
@@ -2660,6 +2710,7 @@ xstore_table_id(bt_t *bt, const char *name, uint32_t *tableid)
 	xs_cat_unlock();
 	id = xs_cat_lookup(bt, name);
 	if (id == 0) return 0;
+	xs_cat_prime(bt, name, id);
 	if (tableid) *tableid = id;
 	return 1;
 }
@@ -2697,6 +2748,7 @@ xs_cat_value(bt_t *bt, const char *name, uint8_t *out, int cap)
 	int64_t last_rowid = 0; int have_last = 0, got = 0;
 
 	enc_vkey(XS_CAT_TABLEID, INT64_MIN, ~(uint64_t)0, startk);
+	atomic_fetch_add_explicit(&g_cat_scans, 1, memory_order_relaxed);
 	if (bt_cursor_open(bt, startk, XS_VKLEN, &cur) != XTC_OK) return 0;
 	for (;;) {
 		const void *k = NULL, *vv = NULL; uint16_t klen = 0, vl = 0;
@@ -2723,31 +2775,94 @@ xs_cat_value(bt_t *bt, const char *name, uint8_t *out, int cap)
 	return got;
 }
 
+static int xs_table_schema_parse(bt_t *bt, const char *name,
+    xstore_col_t *cols, int cap);
+
+/*
+ * Parsed-schema cache.  Every write statement and most planner paths ask
+ * for the table's columns; parsing the coldefs string each time was ~4%
+ * of a TPC-C connection's CPU.  A thread-local copy keyed by (bt, name)
+ * stays valid while g_catc_gen is unchanged (bumped by every catalog
+ * change, as for t_cat).  Only complete schemas (ncol <= the slot) are
+ * cached, and a hit copies at most `cap` columns -- the same truncation
+ * the parse applies.
+ */
+#define XS_TSCH_N    8
+#define XS_TSCH_COLS 32
+static _Thread_local struct {
+	uint64_t     gen;
+	bt_t        *bt;
+	char         name[64];
+	int          ncol;
+	xstore_col_t cols[XS_TSCH_COLS];
+} t_sch[XS_TSCH_N];
+static _Thread_local unsigned t_sch_next;
+
 int
 xstore_table_schema(bt_t *bt, const char *name, xstore_col_t *cols, int cap)
 {
+	uint64_t g;
+	int k, n;
+	if (bt == NULL || name == NULL || cols == NULL || cap <= 0)
+		return -1;
+	g = atomic_load_explicit(&g_catc_gen, memory_order_acquire);
+	for (k = 0; k < XS_TSCH_N; k++)
+		if (t_sch[k].gen == g && t_sch[k].bt == bt &&
+		    strcasecmp(t_sch[k].name, name) == 0) {
+			n = t_sch[k].ncol < cap ? t_sch[k].ncol : cap;
+			memcpy(cols, t_sch[k].cols, (size_t)n * sizeof *cols);
+			return n;
+		}
+	n = xs_table_schema_parse(bt, name, cols, cap);
+	/* Cache only a complete parse (fewer columns than cap: not cut) at
+	 * the generation read BEFORE it, so a concurrent DDL invalidates. */
+	if (n > 0 && n < cap && n <= XS_TSCH_COLS && strlen(name) < 64) {
+		k = (int)(t_sch_next++ % XS_TSCH_N);
+		t_sch[k].gen = g;
+		t_sch[k].bt = bt;
+		snprintf(t_sch[k].name, sizeof t_sch[k].name, "%s", name);
+		t_sch[k].ncol = n;
+		memcpy(t_sch[k].cols, cols, (size_t)n * sizeof *cols);
+	}
+	return n;
+}
+
+static int
+xs_table_schema_parse(bt_t *bt, const char *name, xstore_col_t *cols, int cap)
+{
 	uint8_t val[1024];
 	char    cached[512];
-	int vlen, i, ncol = 0;
+	int vlen, i, ncol = 0, pass;
 	const char *cd; int cdlen;
 
 	if (bt == NULL || name == NULL || cols == NULL || cap <= 0) return -1;
 
 	/* Prefer the in-process cache's coldefs: a CREATE on another
 	 * connection caches the schema the instant it reserves the table-id,
-	 * before the persisted catalog row is necessarily visible here.  Fall
-	 * back to the persisted value (recovery / cross-process). */
+	 * before the persisted catalog row is necessarily visible here.  A
+	 * miss (a store reopened from disk) primes the cache from the
+	 * persisted catalog once, so later statements hit.  Fall back to the
+	 * persisted value only if the schema does not fit the cache. */
 	cached[0] = '\0';
-	if (!xs_tcat_get(bt, name, NULL, cached)) {
+	for (pass = 0; pass < 2 && cached[0] == '\0'; pass++) {
+		uint32_t pid;
+		int hit = 0;
+		if (xs_tcat_get(bt, name, NULL, cached))
+			break;
 		xs_cat_lock();
 		for (i = 0; i < g_cat_n; i++)
 			if (g_cat[i].bt == bt && strcasecmp(g_cat[i].name, name) == 0) {
 				if (g_cat[i].coldefs[0] != '\0')
 					snprintf(cached, sizeof cached, "%s", g_cat[i].coldefs);
 				xs_tcat_put_locked(&g_cat[i]);
+				hit = 1;
 				break;
 			}
 		xs_cat_unlock();
+		if (hit)
+			break;                      /* cached (coldefs may not fit) */
+		if (pass == 0 && !xstore_table_id(bt, name, &pid))
+			return 0;                   /* no such table */
 	}
 	if (cached[0] != '\0') {
 		cd = cached;
