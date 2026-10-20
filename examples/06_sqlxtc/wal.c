@@ -148,6 +148,13 @@ struct wal {
 	uint32_t           pcount;
 	uint64_t           next_lsn;
 	_Atomic uint64_t   durable_lsn;
+	/* Byte offset of the durable end of the file (always a frame
+	 * boundary), published with durable_lsn so an online checkpoint can
+	 * copy the durable tail from another thread; and a generation bumped
+	 * whenever the handle is rebound to a new file or truncated, so one
+	 * that raced a quiesced rewrite aborts instead of renaming over it. */
+	_Atomic uint64_t   durable_off;
+	_Atomic uint64_t   gen;
 	/* Fail-stop latch.  Set on the first failed or short log write or
 	 * fdatasync; once set, nothing more is written and every commit
 	 * fails with XTC_E_IO until the log is reopened (process restart).
@@ -156,7 +163,22 @@ struct wal {
 	 * durable (PostgreSQL's fsync lesson): stop instead. */
 	_Atomic int        failed;
 
-	pthread_mutex_t    sync_mu;   /* serializes wal_commit_sync appends */
+	pthread_mutex_t    sync_mu;   /* guards the group-commit state below */
+	/* Off-loop group commit (wal_commit_sync).  A committer appends its
+	 * frame to gbuf and takes the next LSN under sync_mu, then waits
+	 * until durable_lsn covers it.  The first one to find no flush in
+	 * progress becomes the leader: it swaps gbuf out, drops the mutex,
+	 * writes and fdatasyncs the whole batch, publishes durable_lsn and
+	 * wakes everyone.  Frames that arrive during a flush form the next
+	 * batch, so N concurrent committers share ~1 fsync instead of paying
+	 * N in series (the deferred-durable commit of the PostgreSQL async
+	 * WAL series, with the leader doing the flush instead of a
+	 * notifier).  A lone committer still pays exactly one fsync. */
+	pthread_cond_t     sync_cv;
+	int                g_flushing;
+	uint8_t           *gbuf, *gspare;
+	size_t             glen, gcap, gspare_cap;
+	uint32_t           gcount;     /* frames in gbuf */
 
 	/* Stats. */
 	uint64_t s_commits;
@@ -232,6 +254,7 @@ wal_open(const wal_opts_t *opts, wal_t **out)
 		w->next_lsn = maxlsn;
 		w->off = o;
 		atomic_store_explicit(&w->durable_lsn, w->next_lsn, memory_order_relaxed);
+		atomic_store_explicit(&w->durable_off, (uint64_t)o, memory_order_relaxed);
 		{
 			int tr = ftruncate(w->fd, o);  /* drop torn tail */
 			(void)tr;                      /* non-fatal: appends overwrite it */
@@ -247,6 +270,7 @@ wal_open(const wal_opts_t *opts, wal_t **out)
 		return XTC_E_NOMEM;
 	}
 	(void)pthread_mutex_init(&w->sync_mu, NULL);
+	(void)pthread_cond_init(&w->sync_cv, NULL);
 	*out = w;
 	return XTC_OK;
 }
@@ -256,7 +280,10 @@ wal_close(wal_t *w)
 {
 	if (w == NULL)
 		return;
+	(void)pthread_cond_destroy(&w->sync_cv);
 	(void)pthread_mutex_destroy(&w->sync_mu);
+	free(w->gbuf);
+	free(w->gspare);
 	if (w->fd >= 0)
 		close(w->fd);
 	free(w->bbuf);
@@ -337,6 +364,8 @@ batch_flush(wal_t *w)
 
 	if (status == XTC_OK) {
 		w->off += (off_t)w->blen;
+		atomic_store_explicit(&w->durable_off, (uint64_t)w->off,
+		    memory_order_release);
 		atomic_store_explicit(&w->durable_lsn,
 		    w->pend[w->pcount - 1].lsn, memory_order_release);
 		w->s_batches++;
@@ -511,13 +540,96 @@ wal_commit(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
 	return rc;
 }
 
+/* Caller holds sync_mu: append one framed record to gbuf, taking the
+ * next LSN.  Returns the LSN, or 0 (XTC_E_NOMEM: nothing appended). */
+static uint64_t
+wal_gbuf_add(wal_t *w, const void *record, uint32_t len)
+{
+	size_t need = WAL_REC_HDR + len + WAL_REC_CRC;
+	uint64_t lsn, crc;
+	if (w->glen + need > w->gcap) {
+		size_t ncap = w->gcap ? w->gcap : 64 * 1024;
+		uint8_t *nb;
+		while (ncap < w->glen + need)
+			ncap *= 2;
+		if ((nb = realloc(w->gbuf, ncap)) == NULL)
+			return 0;
+		w->gbuf = nb;
+		w->gcap = ncap;
+	}
+	lsn = ++w->next_lsn;
+	memcpy(w->gbuf + w->glen, &lsn, 8);
+	memcpy(w->gbuf + w->glen + 8, &len, 4);
+	if (len)
+		memcpy(w->gbuf + w->glen + WAL_REC_HDR, record, len);
+	crc = wal_rec_crc(lsn, len, record);
+	memcpy(w->gbuf + w->glen + WAL_REC_HDR + len, &crc, WAL_REC_CRC);
+	w->glen += need;
+	w->gcount++;
+	w->s_bytes += len;
+	return lsn;
+}
+
+/* Leader, entered and left holding sync_mu with g_flushing set by the
+ * caller: write + fdatasync the current batch with the mutex dropped. */
+static void
+wal_gbuf_flush(wal_t *w)
+{
+	uint8_t *buf = w->gbuf;
+	size_t blen = w->glen, done = 0, cap = w->gcap;
+	uint32_t count = w->gcount;
+	uint64_t last = w->next_lsn;
+	off_t off = w->off;
+	int ok = 1;
+
+	/* Hand the followers an empty buffer for the next batch. */
+	w->gbuf = w->gspare; w->gcap = w->gspare_cap;
+	w->gspare = NULL; w->gspare_cap = 0;
+	w->glen = 0; w->gcount = 0;
+	(void)pthread_mutex_unlock(&w->sync_mu);
+	while (ok && done < blen) {
+		ssize_t n = pwrite(w->fd, buf + done, blen - done, off + (off_t)done);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0)
+			ok = 0;
+		else
+			done += (size_t)n;
+	}
+#if XTC_DST_BUG(XTC_DST_BUG_NODURABLE)
+	/* planted bug: skip the fdatasync but still report durable */
+#else
+	if (ok && fdatasync(w->fd) != 0)
+		ok = 0;
+#endif
+	(void)pthread_mutex_lock(&w->sync_mu);
+	if (ok) {
+		w->off = off + (off_t)blen;
+		atomic_store_explicit(&w->durable_off, (uint64_t)w->off,
+		    memory_order_release);
+		atomic_store_explicit(&w->durable_lsn, last, memory_order_release);
+		w->s_batches++;
+		w->s_commits += count;
+		if (count > w->s_maxbatch)
+			w->s_maxbatch = count;
+	} else {
+		atomic_store_explicit(&w->failed, 1, memory_order_release);
+		w->s_failed += count;
+	}
+	/* Keep the flushed buffer as the next spare (no realloc churn). */
+	if (w->gspare == NULL) {
+		w->gspare = buf; w->gspare_cap = cap;
+	} else {
+		free(buf);
+	}
+	w->g_flushing = 0;
+	(void)pthread_cond_broadcast(&w->sync_cv);
+}
+
 int
 wal_commit_sync(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
 {
-	uint8_t hdr[WAL_REC_HDR];
-	uint8_t trl[WAL_REC_CRC];
-	uint64_t my_lsn, crc;
-	size_t done;
+	uint64_t my_lsn;
 	int rc = XTC_OK;
 
 	if (w == NULL || (record == NULL && len != 0))
@@ -525,43 +637,30 @@ wal_commit_sync(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
 
 	(void)pthread_mutex_lock(&w->sync_mu);
 	if (atomic_load_explicit(&w->failed, memory_order_acquire)) {
-		rc = XTC_E_IO; goto out;
+		(void)pthread_mutex_unlock(&w->sync_mu);
+		return XTC_E_IO;
 	}
-	my_lsn = w->next_lsn + 1;
-	memcpy(hdr, &my_lsn, 8);
-	memcpy(hdr + 8, &len, 4);
-	/* header + payload at the current append offset */
-	if (pwrite(w->fd, hdr, WAL_REC_HDR, w->off) != (ssize_t)WAL_REC_HDR) {
-		rc = XTC_E_IO; goto out;
+	if ((my_lsn = wal_gbuf_add(w, record, len)) == 0) {
+		(void)pthread_mutex_unlock(&w->sync_mu);
+		return XTC_E_NOMEM;
 	}
-	for (done = 0; done < len; ) {
-		ssize_t n = pwrite(w->fd, (const uint8_t *)record + done, len - done,
-		    w->off + (off_t)WAL_REC_HDR + (off_t)done);
-		if (n < 0 && errno == EINTR) continue;
-		if (n <= 0) { rc = XTC_E_IO; goto out; }
-		done += (size_t)n;
-	}
-	/* self-checking trailer so recovery can drop a torn tail */
-	crc = wal_rec_crc(my_lsn, len, record);
-	memcpy(trl, &crc, WAL_REC_CRC);
-	if (pwrite(w->fd, trl, WAL_REC_CRC,
-	    w->off + (off_t)WAL_REC_HDR + (off_t)len) != (ssize_t)WAL_REC_CRC) {
-		rc = XTC_E_IO; goto out;
-	}
-	if (fdatasync(w->fd) != 0) { rc = XTC_E_IO; goto out; }
-	w->next_lsn = my_lsn;
-	w->off += (off_t)WAL_REC_HDR + (off_t)len + (off_t)WAL_REC_CRC;
-	atomic_store_explicit(&w->durable_lsn, my_lsn, memory_order_release);
-	w->s_commits++;
-	w->s_batches++;
-	w->s_bytes += len;
-	if (lsn != NULL) *lsn = my_lsn;
-out:
-	if (rc == XTC_E_IO) {
-		atomic_store_explicit(&w->failed, 1, memory_order_release);
-		w->s_failed++;
+	for (;;) {
+		if (atomic_load_explicit(&w->durable_lsn, memory_order_acquire) >= my_lsn)
+			break;                   /* a leader flushed us */
+		if (atomic_load_explicit(&w->failed, memory_order_acquire)) {
+			rc = XTC_E_IO;           /* our batch (or an earlier one) failed */
+			break;
+		}
+		if (!w->g_flushing) {
+			w->g_flushing = 1;       /* lead: flush everything queued */
+			wal_gbuf_flush(w);
+		} else {
+			(void)pthread_cond_wait(&w->sync_cv, &w->sync_mu);
+		}
 	}
 	(void)pthread_mutex_unlock(&w->sync_mu);
+	if (rc == XTC_OK && lsn != NULL)
+		*lsn = my_lsn;
 	return rc;
 }
 
@@ -572,29 +671,87 @@ wal_failed(const wal_t *w)
 }
 
 /* Rebind an open log handle to `path` after it was replaced on disk
- * (the compaction rename): reopen the fd and resume appending past the
- * last complete record.  Caller must hold no concurrent committers. */
+ * (the compaction rename).  This layer just wrote the file, so its end
+ * offset and highest LSN are known: no rescan (a rescan cost ~0.2 s per
+ * 100 MB, all of it with commits quiesced).  Caller holds no concurrent
+ * committers. */
 static int
-wal_rebind(wal_t *w, const char *path)
+wal_rebind_at(wal_t *w, const char *path, off_t off, uint64_t lsn)
 {
-	off_t o = 0; uint64_t maxlsn = 0;
 	int fd = open(path, O_RDWR, 0600);
 	if (fd < 0)
 		return XTC_E_INTERNAL;
-	wal_scan_tail(fd, &o, &maxlsn);
 	if (w->fd >= 0) close(w->fd);
 	w->fd = fd;
-	w->off = o;
-	w->next_lsn = maxlsn;
-	atomic_store_explicit(&w->durable_lsn, maxlsn, memory_order_relaxed);
+	w->off = off;
+	w->next_lsn = lsn;
+	atomic_store_explicit(&w->durable_off, (uint64_t)off, memory_order_release);
+	atomic_store_explicit(&w->durable_lsn, lsn, memory_order_release);
+	atomic_fetch_add_explicit(&w->gen, 1, memory_order_acq_rel);
 	return XTC_OK;
+}
+
+/* fsync the directory holding `path`, so a rename into it is durable. */
+static void
+wal_sync_dir(const char *path)
+{
+	char dir[1100];
+	char *slash;
+	int dfd;
+	snprintf(dir, sizeof dir, "%s", path);
+	slash = strrchr(dir, '/');
+	if (slash != NULL) *slash = '\0'; else { dir[0] = '.'; dir[1] = '\0'; }
+	dfd = open(dir, O_RDONLY);
+	if (dfd >= 0) { (void)fsync(dfd); (void)close(dfd); }
 }
 
 /* Emit context for wal_checkpoint: appends framed records to the temp
  * compaction file, assigning fresh sequential LSNs that CONTINUE the
  * log's sequence (they start just above the handle's next_lsn), so LSNs
  * never go backwards across a checkpoint -- see wal_checkpoint. */
-struct wal_cmp_ctx { int fd; off_t off; uint64_t lsn; int err; };
+/*
+ * The records are staged in a 1 MiB buffer and written in large
+ * chunks: three pwrite()s per record (header, body, trailer) made a W=1
+ * TPC-C checkpoint ~2M syscalls and 1-3.5 s, all of it with commits
+ * quiesced.  `off` counts bytes emitted (flushed + staged).
+ */
+#define WAL_CMP_BUF (1u << 20)
+struct wal_cmp_ctx {
+	int fd; off_t off; uint64_t lsn; int err;
+	uint8_t *buf; size_t blen; off_t boff;   /* staged bytes start at boff */
+};
+
+static void
+wal_cmp_flush(struct wal_cmp_ctx *c)
+{
+	size_t done = 0;
+	while (!c->err && done < c->blen) {
+		ssize_t n = pwrite(c->fd, c->buf + done, c->blen - done,
+		    c->boff + (off_t)done);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0)
+			c->err = 1;
+		else
+			done += (size_t)n;
+	}
+	c->boff += (off_t)c->blen;
+	c->blen = 0;
+}
+
+static void
+wal_cmp_put(struct wal_cmp_ctx *c, const void *p, size_t n)
+{
+	const uint8_t *s = p;
+	while (n > 0 && !c->err) {
+		size_t room = WAL_CMP_BUF - c->blen, k = n < room ? n : room;
+		memcpy(c->buf + c->blen, s, k);
+		c->blen += k; s += k; n -= k;
+		if (c->blen == WAL_CMP_BUF)
+			wal_cmp_flush(c);
+	}
+}
+
 static void
 wal_cmp_emit(void *vctx, const void *payload, uint32_t len)
 {
@@ -609,13 +766,10 @@ wal_cmp_emit(void *vctx, const void *payload, uint32_t len)
 	memcpy(hdr + 8, &len, 4);
 	crc = wal_rec_crc(lsn, len, payload);
 	memcpy(trl, &crc, WAL_REC_CRC);
-	if (pwrite(c->fd, hdr, WAL_REC_HDR, c->off) != (ssize_t)WAL_REC_HDR ||
-	    (len && pwrite(c->fd, payload, len, c->off + WAL_REC_HDR) != (ssize_t)len) ||
-	    pwrite(c->fd, trl, WAL_REC_CRC,
-	    c->off + WAL_REC_HDR + len) != (ssize_t)WAL_REC_CRC) {
-		c->err = 1;
-		return;
-	}
+	wal_cmp_put(c, hdr, WAL_REC_HDR);
+	if (len)
+		wal_cmp_put(c, payload, len);
+	wal_cmp_put(c, trl, WAL_REC_CRC);
 	c->off += (off_t)WAL_REC_HDR + (off_t)len + (off_t)WAL_REC_CRC;
 }
 
@@ -625,7 +779,7 @@ wal_checkpoint(wal_t *w, const char *path,
 {
 	char tmp[1100];
 	struct wal_cmp_ctx c;
-	int fd, dfd;
+	int fd;
 
 	if (w == NULL || path == NULL || dump == NULL)
 		return XTC_E_INVAL;
@@ -636,6 +790,13 @@ wal_checkpoint(wal_t *w, const char *path,
 	if (fd < 0)
 		return XTC_E_INTERNAL;
 	c.fd = fd; c.off = 0; c.err = 0;
+	c.blen = 0; c.boff = 0;
+	c.buf = malloc(WAL_CMP_BUF);
+	if (c.buf == NULL) {
+		(void)close(fd);
+		(void)unlink(tmp);
+		return XTC_E_NOMEM;
+	}
 	/*
 	 * Continue the LSN sequence; do not restart it.  A data page carries
 	 * the LSN of the last change written to it, and recovery redoes a
@@ -645,7 +806,7 @@ wal_checkpoint(wal_t *w, const char *path,
 	 * the checkpoint, so in-place recovery refused their images and lost
 	 * post-checkpoint changes on exactly those pages (test_fuzzy_checkpoint
 	 * hit it once eviction order flushed tail pages differently;
-	 * test_wal_lsn_monotone pins it).  wal_rebind resumes next_lsn from
+	 * test_wal_lsn_monotone pins it).  wal_rebind_at resumes next_lsn from
 	 * the compacted file's highest LSN, which is now above every LSN the
 	 * old log handed out.
 	 */
@@ -655,6 +816,8 @@ wal_checkpoint(wal_t *w, const char *path,
 	 * its own checkpoint record -- this layer does not interpret the
 	 * record bytes. */
 	dump(wal_cmp_emit, &c, user);
+	wal_cmp_flush(&c);
+	free(c.buf);
 	/* An empty replacement cannot persist the LSN high-water mark.
 	 * Reject before rename so reopen cannot restart the sequence. */
 	if (!c.err && c.off == 0) {
@@ -674,16 +837,197 @@ wal_checkpoint(wal_t *w, const char *path,
 		return XTC_E_INTERNAL;
 	}
 	/* Make the rename durable so a crash cannot resurrect the old log. */
-	{
-		char dir[1100];
-		char *slash;
-		snprintf(dir, sizeof dir, "%s", path);
-		slash = strrchr(dir, '/');
-		if (slash != NULL) *slash = '\0'; else { dir[0] = '.'; dir[1] = '\0'; }
-		dfd = open(dir, O_RDONLY);
-		if (dfd >= 0) { (void)fsync(dfd); (void)close(dfd); }
+	wal_sync_dir(path);
+	return wal_rebind_at(w, path, c.off, c.lsn);
+}
+
+/*
+ * Online checkpoint (see wal.h).  The compacted file is written exactly
+ * as wal_checkpoint writes it (wal_cmp_emit), then the live log's
+ * durable frames after the begin point are appended to it, re-numbered
+ * so the new file's LSNs keep rising past every LSN the old file handed
+ * out (each copied frame takes one new LSN, and the dump adds at least
+ * one, so the final next_lsn exceeds the old one).
+ */
+struct wal_ock {
+	wal_t   *w;
+	char     path[1100], tmp[1100];
+	int      src_fd;              /* the live log, read side */
+	off_t    src_off;             /* next live-log byte to copy */
+	uint64_t gen;                 /* w->gen at begin */
+	uint64_t frames;              /* live-log frames copied */
+	uint8_t *rbuf;
+	size_t   rcap;
+	struct wal_cmp_ctx c;
+};
+
+int
+wal_ockpt_begin(wal_t *w, const char *path, wal_ock_t **out)
+{
+	wal_ock_t *k;
+	if (w == NULL || path == NULL || out == NULL ||
+	    (int)strlen(path) + 9 >= (int)sizeof k->tmp)
+		return XTC_E_INVAL;
+	if (atomic_load_explicit(&w->failed, memory_order_acquire))
+		return XTC_E_IO;
+	if ((k = calloc(1, sizeof *k)) == NULL)
+		return XTC_E_NOMEM;
+	k->w = w;
+	k->src_fd = -1;
+	k->c.fd = -1;
+	snprintf(k->path, sizeof k->path, "%s", path);
+	snprintf(k->tmp, sizeof k->tmp, "%s.ocompact", path);
+	k->rcap = WAL_CMP_BUF;
+	k->rbuf = malloc(k->rcap);
+	k->c.buf = malloc(WAL_CMP_BUF);
+	k->src_fd = open(path, O_RDONLY);
+	k->c.fd = open(k->tmp, O_RDWR | O_CREAT | O_TRUNC, 0600);
+	if (k->rbuf == NULL || k->c.buf == NULL || k->src_fd < 0 || k->c.fd < 0) {
+		wal_ockpt_abort(k);
+		return XTC_E_INTERNAL;
 	}
-	return wal_rebind(w, path);
+	/* Quiesced: every logged record is durable, so the durable end is
+	 * the append end and the durable LSN the last one handed out. */
+	k->src_off = (off_t)atomic_load_explicit(&w->durable_off,
+	    memory_order_acquire);
+	k->c.lsn = atomic_load_explicit(&w->durable_lsn, memory_order_acquire);
+	k->gen = atomic_load_explicit(&w->gen, memory_order_acquire);
+	*out = k;
+	return XTC_OK;
+}
+
+void
+wal_ockpt_emitter(wal_ock_t *k, wal_emit_fn *fn, void **ctx)
+{
+	*fn = wal_cmp_emit;
+	*ctx = &k->c;
+}
+
+uint64_t
+wal_ockpt_frames(const wal_ock_t *k)
+{
+	return k == NULL ? 0 : k->frames;
+}
+
+/* Copy the live log's frames in [src_off, end) to the compacted file,
+ * re-numbered.  `end` is a durable frame boundary.  Stops after about
+ * `max` bytes (0 = no limit) so a caller can check for cancellation
+ * between slices. */
+static int
+wal_ock_copy(wal_ock_t *k, off_t end, off_t max)
+{
+	off_t start = k->src_off;
+	while (k->src_off < end && !k->c.err &&
+	    (max == 0 || k->src_off - start < max)) {
+		size_t want = (size_t)(end - k->src_off), pos = 0;
+		ssize_t n;
+		if (want > k->rcap)
+			want = k->rcap;
+		n = pread(k->src_fd, k->rbuf, want, k->src_off);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n < (ssize_t)WAL_REC_HDR)
+			return XTC_E_INTERNAL;    /* end is not a frame boundary */
+		for (;;) {
+			uint64_t lsn, crc;
+			uint32_t len;
+			size_t fl;
+			if (pos + WAL_REC_HDR > (size_t)n)
+				break;
+			memcpy(&lsn, k->rbuf + pos, 8);
+			memcpy(&len, k->rbuf + pos + 8, 4);
+			if (len > WAL_MAX_REC)
+				return XTC_E_INTERNAL;
+			fl = WAL_REC_HDR + len + WAL_REC_CRC;
+			if (pos + fl > (size_t)n) {
+				if (pos == 0) {       /* one frame larger than the buffer */
+					uint8_t *nb;
+					if ((off_t)fl > end - k->src_off)
+						return XTC_E_INTERNAL;
+					if ((nb = realloc(k->rbuf, fl)) == NULL)
+						return XTC_E_NOMEM;
+					k->rbuf = nb;
+					k->rcap = fl;
+				}
+				break;
+			}
+			memcpy(&crc, k->rbuf + pos + WAL_REC_HDR + len, WAL_REC_CRC);
+			if (crc != wal_rec_crc(lsn, len, k->rbuf + pos + WAL_REC_HDR))
+				return XTC_E_INTERNAL;   /* never launder a bad frame */
+			wal_cmp_emit(&k->c, k->rbuf + pos + WAL_REC_HDR, len);
+			k->frames++;
+			pos += fl;
+		}
+		k->src_off += (off_t)pos;
+	}
+	return k->c.err ? XTC_E_INTERNAL : XTC_OK;
+}
+
+int
+wal_ockpt_catchup(wal_ock_t *k, uint64_t *left)
+{
+	off_t end;
+	int rc;
+	if (atomic_load_explicit(&k->w->gen, memory_order_acquire) != k->gen)
+		return XTC_E_AGAIN;           /* the log was rewritten under us */
+	end = (off_t)atomic_load_explicit(&k->w->durable_off, memory_order_acquire);
+	rc = wal_ock_copy(k, end, (off_t)(64u << 20));   /* bounded slice */
+	wal_cmp_flush(&k->c);
+	if (left != NULL)
+		*left = (uint64_t)atomic_load_explicit(&k->w->durable_off,
+		    memory_order_acquire) - (uint64_t)k->src_off;
+	return rc != XTC_OK ? rc : (k->c.err ? XTC_E_INTERNAL : XTC_OK);
+}
+
+int
+wal_ockpt_finish(wal_ock_t *k)
+{
+	wal_t *w = k->w;
+	int rc;
+	if (atomic_load_explicit(&w->gen, memory_order_acquire) != k->gen) {
+		wal_ockpt_abort(k);
+		return XTC_E_AGAIN;
+	}
+	if (atomic_load_explicit(&w->failed, memory_order_acquire)) {
+		wal_ockpt_abort(k);
+		return XTC_E_IO;
+	}
+	/* Quiesced: the durable end is the append end, so after this copy
+	 * the new file holds every record the old one does past the dump. */
+	rc = wal_ock_copy(k, (off_t)atomic_load_explicit(&w->durable_off,
+	    memory_order_acquire), 0);
+	wal_cmp_flush(&k->c);
+	if (rc != XTC_OK || k->c.err || k->c.off == 0 || fsync(k->c.fd) != 0) {
+		wal_ockpt_abort(k);
+		return rc != XTC_OK ? rc : XTC_E_INTERNAL;
+	}
+	(void)close(k->c.fd);
+	k->c.fd = -1;
+	if (rename(k->tmp, k->path) != 0) {
+		wal_ockpt_abort(k);
+		return XTC_E_INTERNAL;
+	}
+	wal_sync_dir(k->path);
+	rc = wal_rebind_at(w, k->path, k->c.off, k->c.lsn);
+	k->tmp[0] = '\0';                /* renamed: nothing to unlink */
+	wal_ockpt_abort(k);              /* release the rest */
+	return rc;
+}
+
+void
+wal_ockpt_abort(wal_ock_t *k)
+{
+	if (k == NULL)
+		return;
+	if (k->c.fd >= 0)
+		(void)close(k->c.fd);
+	if (k->src_fd >= 0)
+		(void)close(k->src_fd);
+	if (k->tmp[0] != '\0')
+		(void)unlink(k->tmp);
+	free(k->c.buf);
+	free(k->rbuf);
+	free(k);
 }
 
 int
@@ -748,6 +1092,8 @@ wal_truncate(wal_t *w)
 		return XTC_E_INTERNAL;
 	}
 	w->off = 0;            /* next append at offset 0; next_lsn keeps rising */
+	atomic_store_explicit(&w->durable_off, 0, memory_order_release);
+	atomic_fetch_add_explicit(&w->gen, 1, memory_order_acq_rel);
 	(void)pthread_mutex_unlock(&w->sync_mu);
 	return XTC_OK;
 }

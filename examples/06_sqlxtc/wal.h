@@ -159,6 +159,36 @@ int  wal_checkpoint(wal_t *w, const char *path,
          void (*dump)(wal_emit_fn emit, void *emit_ctx, void *user),
          void *user);
 
+/*
+ * Online checkpoint: compact the log WITHOUT holding commits for the
+ * whole rewrite.  wal_checkpoint must run quiesced from start to end;
+ * this splits it so only the two ends need the quiesce:
+ *
+ *   wal_ockpt_begin   (quiesced)  open path.ocompact; note the live log's
+ *                                 durable end -- the copy start point.
+ *   emit via wal_ockpt_emitter    write the compacted image (the caller's
+ *                                 dump, as of a snapshot taken at begin);
+ *                                 commits continue meanwhile.
+ *   wal_ockpt_catchup (any time)  append the live log's durable frames
+ *                                 past the start point, re-numbered;
+ *                                 *left = durable bytes still uncopied.
+ *   wal_ockpt_finish  (quiesced)  copy the rest, fsync, rename over path,
+ *                                 rebind; frees the handle.
+ *   wal_ockpt_abort               drop it (old log untouched).
+ *
+ * The caller owns correctness of the image (it must be the state as of
+ * the start point).  A quiesced rewrite or truncate of the log between
+ * begin and finish makes catchup/finish return XTC_E_AGAIN (and finish
+ * frees the handle).  LSNs keep rising across it (see wal_checkpoint).
+ */
+typedef struct wal_ock wal_ock_t;
+int  wal_ockpt_begin(wal_t *w, const char *path, wal_ock_t **out);
+void wal_ockpt_emitter(wal_ock_t *k, wal_emit_fn *fn, void **ctx);
+int  wal_ockpt_catchup(wal_ock_t *k, uint64_t *left);
+int  wal_ockpt_finish(wal_ock_t *k);
+void wal_ockpt_abort(wal_ock_t *k);
+uint64_t wal_ockpt_frames(const wal_ock_t *k);   /* live frames copied */
+
 /* Ask the writer to flush any pending batch and exit.  Call once all
  * committers are done so the loop can drain. */
 int  wal_writer_stop(wal_t *w);
