@@ -1254,8 +1254,65 @@ test_amutex_recursive_exit(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * A recursive amutex won by an OFF-LOOP thread on the contended (condvar)
+ * path must record that thread as its owner, so the thread can re-enter
+ * it.  __amutex_lock_thread set held = 1 but left owner/count unset, so
+ * the winner's nested lock saw "held by someone else" and waited on
+ * itself forever: sqlxtc's in-process TPC-C hung at 8 threads in
+ * vx_prepare_select (VX_LK_CC re-entered by a correlated subquery).
+ * Two threads contend; each re-enters while holding.  With the bug one
+ * of them never finishes (the timed re-entry reports it as a failure
+ * instead of hanging the suite).
+ */
+static xtc_amutex_t *g_rt_m;
+static _Atomic int g_rt_ok, g_rt_bad;
+
+static void *
+rt_thread(void *a)
+{
+	int i;
+	(void)a;
+	for (i = 0; i < 2000; i++) {
+		if (xtc_amutex_lock(g_rt_m, -1) != XTC_OK) { g_rt_bad++; continue; }
+		/* nested re-entry by the owner: must succeed at once */
+		if (xtc_amutex_lock(g_rt_m, 2LL * 1000 * 1000 * 1000) != XTC_OK) {
+			g_rt_bad++;
+			(void)xtc_amutex_unlock(g_rt_m);
+			return NULL;
+		}
+		g_rt_ok++;
+		(void)xtc_amutex_unlock(g_rt_m);
+		(void)xtc_amutex_unlock(g_rt_m);
+	}
+	return NULL;
+}
+
+static MunitResult
+test_amutex_recursive_thread(const MunitParameter p[], void *d)
+{
+	pthread_t th[4];
+	int i;
+	(void)p; (void)d;
+	g_rt_ok = 0; g_rt_bad = 0;
+	munit_assert_int(xtc_amutex_create_ex(&g_rt_m, XTC_AMUTEX_RECURSIVE),
+	    ==, XTC_OK);
+	for (i = 0; i < 4; i++)
+		munit_assert_int(pthread_create(&th[i], NULL, rt_thread, NULL), ==, 0);
+	for (i = 0; i < 4; i++)
+		(void)pthread_join(th[i], NULL);
+	munit_assert_int(g_rt_bad, ==, 0);
+	munit_assert_int(g_rt_ok, ==, 4 * 2000);
+	/* Released for good: an off-loop try_lock now succeeds. */
+	munit_assert_int(xtc_amutex_try_lock(g_rt_m), ==, XTC_OK);
+	(void)xtc_amutex_unlock(g_rt_m);
+	xtc_amutex_destroy(g_rt_m);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/amutex_recursive_exit", test_amutex_recursive_exit, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/amutex_recursive_thread", test_amutex_recursive_thread, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/notify_stored",       test_notify_stored,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/notify_cross_thread", test_notify_cross_thread, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/sem_basic",           test_sem_basic,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

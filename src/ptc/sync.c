@@ -785,14 +785,15 @@ xtc_amutex_try_lock(xtc_amutex_t *m)
 	return rc;
 }
 
-/* Thread-waiter (off-loop) slow path: classic condvar wait. */
+/* Thread-waiter (off-loop) slow path: classic condvar wait.  A
+ * recursive lock records the winning thread as its owner, as the fast
+ * and fiber paths do: without that its nested lock found the mutex
+ * "held by another" and waited on itself forever. */
 static int
 __amutex_lock_thread(xtc_amutex_t *m, int64_t timeout_ns)
 {
-	int rc = XTC_OK;
 	if (timeout_ns < 0) {
 		while (m->held) (void)pthread_cond_wait(&m->cv, &m->lock);
-		m->held = 1;
 	} else {
 		struct timespec ts;
 		deadline_from_timeout(timeout_ns, &ts);
@@ -800,9 +801,13 @@ __amutex_lock_thread(xtc_amutex_t *m, int64_t timeout_ns)
 			if (cv_wait_until(&m->cv, &m->lock, &ts))
 				return XTC_E_AGAIN;
 		}
-		m->held = 1;
 	}
-	return rc;
+	m->held = 1;
+	if (m->recursive) {
+		m->owner = amutex_self_owner();
+		m->count = 1;
+	}
+	return XTC_OK;
 }
 
 int
