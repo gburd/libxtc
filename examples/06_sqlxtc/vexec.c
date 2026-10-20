@@ -2751,20 +2751,6 @@ utf8_len(const uint8_t *p, uint32_t nbytes)
 	return nc;
 }
 
-/* Byte offset of the C-th (0-based) UTF-8 character in [p, p+nbytes);
- * returns nbytes if c is at/after the end. */
-static uint32_t
-utf8_off(const uint8_t *p, uint32_t nbytes, int64_t c)
-{
-	uint32_t k = 0; int64_t seen = 0;
-	while (k < nbytes && seen < c) {
-		k++;
-		while (k < nbytes && (p[k] & 0xc0) == 0x80) k++;
-		seen++;
-	}
-	return k;
-}
-
 static void
 eval(const struct vx_stmt *st, const vx_expr_t *e,
      const vx_cell_t *row, struct vx_arena_blk **arena, vx_cell_t *out)
