@@ -107,6 +107,11 @@ void sx_storage_wal_counts(uint64_t *commits, uint64_t *fsyncs);
 /* 1 if the libxtc-native storage engine is open (so plain CREATE TABLE
  * is routed to it).  0 otherwise. */
 int  sx_storage_active(void);
+/* The open store's tree, log and log path (NULL when closed); for tests
+ * and tools that drive the storage layer directly. */
+struct bt *sx_storage_bt(void);
+struct wal *sx_storage_wal(void);
+const char *sx_storage_wal_path(void);
 
 /* Engine configuration shims (now no-ops: the native engine has no
  * SQLite mutex/mem subsystems).  Retained on the sx_* surface for

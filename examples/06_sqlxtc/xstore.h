@@ -87,6 +87,18 @@ void xstore_register_smo(int enable);
  * of the live tree, bounding it.  Call only when commits are quiesced. */
 int xstore_checkpoint_wal(bt_t *bt, struct wal *w, const char *wal_path);
 
+/* Online in-WAL checkpoint: the same compacted log as
+ * xstore_checkpoint_wal, but commits are quiesced only to take the start
+ * point and to swap files, not for the dump (see xstore.c).  Call from a
+ * proc or off a loop, NOT quiesced.  *tail (optional) receives the live
+ * log frames copied after the dump.  The live log is unchanged on error. */
+int xstore_checkpoint_wal_online(bt_t *bt, struct wal *w, const char *wal_path,
+    uint64_t *tail);
+/* Make a running (and any later) online checkpoint give up promptly and
+ * leave the live log as it is: set before stopping the engine; cleared
+ * when the storage procs start. */
+void xstore_checkpoint_cancel(int on);
+
 /*
  * Fuzzy (ARIES-style) checkpoint -- O(dirty), not O(live-data).  Instead
  * of dumping the whole live tree (xstore_checkpoint_wal), this flushes

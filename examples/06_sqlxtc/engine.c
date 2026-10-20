@@ -226,8 +226,10 @@ static int    g_xrunning;        /* background procs spawned */
  * CHECKPOINT record plus the live rows replace the whole log) whenever
  * it grows past max(g_ckpt_min, 2 x its size after the last checkpoint)
  * -- the doubling keeps the O(live data) dump amortized against the
- * writes that triggered it.  Commits are held back (xstore_quiesce_*)
- * only while the dump runs; readers continue.  Recovery replays the
+ * writes that triggered it.  The checkpoint is online
+ * (xstore_checkpoint_wal_online): commits are held back only to take
+ * its start point and to swap the files, not while the dump runs (the
+ * frames committed meanwhile are copied after it).  Recovery replays the
  * compacted log, so its work is O(live data + writes since the last
  * checkpoint).  A failed checkpoint leaves the old (complete) log in
  * place and is retried.
@@ -269,13 +271,13 @@ sx_ckpt_proc(void *arg)
 		trig = floor * 2 > g_ckpt_min ? floor * 2 : g_ckpt_min;
 		if (sz < trig)
 			continue;
-		xstore_quiesce_begin();
-		if (xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal,
-		    g_xwal_path) == XTC_OK) {
+		/* Online: commits keep running during the dump (they used to
+		 * stop for all of it: 0.5-3.5 s at TPC-C W=1, ~16 s at W=10). */
+		if (xstore_checkpoint_wal_online(g_xbt, (struct wal *)g_xwal,
+		    g_xwal_path, NULL) == XTC_OK) {
 			floor = wal_size(g_xwal);
 			atomic_fetch_add(&g_ckpt_count, 1);
 		}
-		xstore_quiesce_end();
 	}
 	atomic_store(&g_ckpt_alive, 0);
 }
@@ -292,6 +294,7 @@ sx_ckpt_stop(void)
 	if (!atomic_load(&g_ckpt_alive))
 		return;
 	atomic_store(&g_ckpt_stop, 1);
+	xstore_checkpoint_cancel(1);            /* an online one in progress: abort */
 	(void)xtc_send(g_ckpt_pid, "s", 1);     /* end its tick wait now */
 	if (xtc_pid_is_none(xtc_self()))
 		return;
@@ -525,6 +528,7 @@ sx_storage_run(xtc_loop_t *loop)
 		xtc_pid_t cp;
 		co.name = "checkpoint";
 		atomic_store(&g_ckpt_stop, 0);
+		xstore_checkpoint_cancel(0);
 		atomic_store(&g_ckpt_alive, 1);
 		if (xtc_proc_spawn(loop, sx_ckpt_proc, NULL, &co, &cp) != XTC_OK)
 			atomic_store(&g_ckpt_alive, 0);
@@ -654,6 +658,24 @@ sx_storage_abandon(void)
 	if (g_xwal != NULL) { wal_close(g_xwal); g_xwal = NULL; }
 	if (g_xbt != NULL) { bt_close(g_xbt); g_xbt = NULL; }
 	if (g_xbm != NULL) { bm_destroy(g_xbm); g_xbm = NULL; }
+}
+
+struct bt *
+sx_storage_bt(void)
+{
+	return (struct bt *)g_xbt;
+}
+
+struct wal *
+sx_storage_wal(void)
+{
+	return (struct wal *)g_xwal;
+}
+
+const char *
+sx_storage_wal_path(void)
+{
+	return g_xwal != NULL ? g_xwal_path : NULL;
 }
 
 void

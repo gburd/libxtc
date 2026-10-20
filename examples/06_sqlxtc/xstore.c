@@ -62,6 +62,7 @@
 #include "wal.h"
 #include "xlog.h"
 #include "xtc.h"
+#include "xtc_blocking.h"
 #include "xtc_proc.h"
 #include "xtc_sync.h"
 
@@ -3198,13 +3199,22 @@ xs_gate_wait_locked(void)
  * xstore_quiesce_end; readers keep running.  Call from a proc (or off a
  * loop); never while holding an engine lock.
  */
-void
-xstore_quiesce_begin(void)
+static _Atomic int g_ock_cancel;         /* xstore_checkpoint_cancel */
+
+/* Take the checkpoint gate and drain the commits in flight.  With
+ * `cancellable`, give up (returning 0, gate not taken) once
+ * xstore_checkpoint_cancel is set: the engine is stopping and its final
+ * quiesce holds the gate for good.  Returns 1 when quiesced. */
+static int
+xs_quiesce_begin(int cancellable)
 {
 	int idle = 0;
 	xs_commit_lock();
 	while (g_ckpt_gate) {          /* one checkpoint at a time */
 		xs_commit_unlock();
+		if (cancellable &&
+		    atomic_load_explicit(&g_ock_cancel, memory_order_acquire))
+			return 0;
 		xs_nap();
 		xs_commit_lock();
 	}
@@ -3218,6 +3228,13 @@ xstore_quiesce_begin(void)
 		if (!idle)
 			xs_nap();
 	}
+	return 1;
+}
+
+void
+xstore_quiesce_begin(void)
+{
+	(void)xs_quiesce_begin(0);
 }
 
 void
@@ -7551,7 +7568,10 @@ xstore_recover_inplace(bt_t *bt, bm_t *bm, const char *wal_path,
  * regardless of how much churn preceded it, the dump -- and the log it
  * replaces -- is proportional to the live row count.  Safe only at a
  * quiesced checkpoint.  Original commit timestamps are preserved. */
-struct xs_dump_ctx { bt_t *bt; uint64_t clock; };
+/* snap != 0: dump each row as of that snapshot (the newest version
+ * with ts <= snap), for an online checkpoint; 0 = the newest version. */
+struct xs_dump_ctx { bt_t *bt; uint64_t clock; uint64_t snap; uint64_t n;
+    int cancelled; };
 
 static void
 xs_dump_tree(wal_emit_fn emit, void *ectx, void *user)
@@ -7585,8 +7605,27 @@ xs_dump_tree(wal_emit_fn emit, void *ectx, void *user)
 		uint16_t payl;
 		int n;
 
-		if (bt_cursor_next(cur, &k, &klen, &vv, &vl) != XTC_OK)
+		if (dc->snap != 0 && (++dc->n & 1023) == 0) {
+			/* Online dump: let writers at the leaf now and then, and
+			 * stop at once if the engine is shutting down. */
+			if (atomic_load_explicit(&g_ock_cancel, memory_order_acquire)) {
+				dc->cancelled = 1;
+				break;
+			}
+			if (bt_cursor_park(cur) != XTC_OK || bt_cursor_resume(cur) != XTC_OK) {
+				dc->cancelled = 1;
+				break;
+			}
+		}
+		if ((n = bt_cursor_next(cur, &k, &klen, &vv, &vl)) != XTC_OK) {
+			/* NOTFOUND is the end of the tree; anything else would
+			 * leave a truncated image, so the online checkpoint must
+			 * not swap it in.  (shortcut: the quiesced dump has no
+			 * abort path and still stops here; it runs at open/close.) */
+			if (n != XTC_E_NOTFOUND)
+				dc->cancelled = 1;
 			break;
+		}
 		/* Secondary-index entries (XS_IDX_LEAD keys, not version keys)
 		 * are derived data rebuilt at open; skip them.  They sort between
 		 * the user tables and the index catalog (table-id 0xFFFFFFFD), so
@@ -7600,11 +7639,14 @@ xs_dump_tree(wal_emit_fn emit, void *ectx, void *user)
 			continue;                  /* STEAL staging: never part of the live state */
 		if (have_last && tableid == last_tid && rowid == last_rid)
 			continue;                  /* older version of a key already dumped */
+		ts = dec_ts(kb);
+		if (dc->snap != 0 && ts > dc->snap)
+			continue;                  /* committed after the snapshot */
 		last_tid = tableid; last_rid = rowid; have_last = 1;
 		flags = (vl >= 1) ? ((const uint8_t *)vv)[0] : 0;
 		if (flags & XS_F_DELETED)
 			continue;                  /* newest is a tombstone: row is gone */
-		ts = dec_ts(kb);
+
 		payl = (vl >= 1) ? (uint16_t)(vl - 1) : 0;
 		if (payl > XS_VMAX) payl = XS_VMAX;
 		h.type = XL_UPDATE; h.txn_id = ts; h.prev_lsn = 0;
@@ -7628,9 +7670,118 @@ int
 xstore_checkpoint_wal(bt_t *bt, struct wal *w, const char *wal_path)
 {
 	struct xs_dump_ctx dc;
+	memset(&dc, 0, sizeof dc);
 	dc.bt = bt;
 	dc.clock = atomic_load_explicit(&g_xclock, memory_order_relaxed);
 	return wal_checkpoint((wal_t *)w, wal_path, xs_dump_tree, &dc);
+}
+
+/*
+ * Online log checkpoint.  xstore_checkpoint_wal rewrites the log with
+ * commits quiesced for the whole dump -- 0.5-3.5 s at TPC-C W=1, ~16 s
+ * at W=10, a third of the run with no commit.  This one quiesces only
+ * to take the start point and to swap files:
+ *
+ *   1. quiesced: snap = the clock (nothing in flight, so every commit
+ *      at or below it is applied and durable, and its log frame lies
+ *      before the live log's durable end L0); pin snap against version
+ *      GC; wal_ockpt_begin records L0.  Release.
+ *   2. not quiesced: dump the tree AS OF snap, then copy the live log's
+ *      frames after L0 (every commit after the release has ts > snap and
+ *      a frame after L0).  Rounds of copying until the uncopied tail is
+ *      small.  Version keys are immutable, so a version present in both
+ *      the dump and the tail replays harmlessly.
+ *   3. quiesced: copy the last frames, fsync, rename, rebind.
+ *
+ * Step 2 runs on a blocking-pool thread when called on a proc: the
+ * checkpoint proc shares loop 0 with the WAL writer, and a dump on the
+ * fiber would stall every commit's log ack anyway.  Under simulation the
+ * pool runs inline (deterministic).  Returns XTC_OK, or an error with
+ * the live log unchanged; *tail (optional) = live frames copied.
+ */
+static int    g_ock_slot = -1;           /* GC pin for the online dump */
+struct xs_ock_job {
+	struct xs_dump_ctx dc;
+	wal_ock_t *k;
+	int rc;
+};
+
+static int
+xs_ock_body(void *arg)
+{
+	struct xs_ock_job *j = arg;
+	wal_emit_fn fn;
+	void *ctx;
+	uint64_t left = 0;
+	int round;
+	wal_ockpt_emitter(j->k, &fn, &ctx);
+	xs_dump_tree(fn, ctx, &j->dc);
+	if (j->dc.cancelled) {
+		j->rc = XTC_E_AGAIN;
+		return 0;
+	}
+	for (round = 0; round < 64; round++) {
+		if (atomic_load_explicit(&g_ock_cancel, memory_order_acquire)) {
+			j->rc = XTC_E_AGAIN;
+			return 0;
+		}
+		if ((j->rc = wal_ockpt_catchup(j->k, &left)) != XTC_OK)
+			return 0;
+		if (left < (256u << 10))
+			break;
+	}
+	return 0;
+}
+
+void
+xstore_checkpoint_cancel(int on)
+{
+	atomic_store_explicit(&g_ock_cancel, on ? 1 : 0, memory_order_release);
+}
+
+int
+xstore_checkpoint_wal_online(bt_t *bt, struct wal *w, const char *wal_path,
+    uint64_t *tail)
+{
+	struct xs_ock_job j;
+	uint64_t frames;
+	int rc, res = 0;
+
+	if (bt == NULL || w == NULL || wal_path == NULL)
+		return XTC_E_INVAL;
+	memset(&j, 0, sizeof j);
+	j.dc.bt = bt;
+	if (!xs_quiesce_begin(1))
+		return XTC_E_AGAIN;
+	j.dc.snap = atomic_load_explicit(&g_xclock, memory_order_relaxed);
+	if (j.dc.snap == 0)
+		j.dc.snap = 1;
+	j.dc.clock = j.dc.snap;
+	snap_set(&g_ock_slot, j.dc.snap);
+	rc = wal_ockpt_begin((wal_t *)w, wal_path, &j.k);
+	xstore_quiesce_end();
+	if (rc != XTC_OK) {
+		snap_set(&g_ock_slot, 0);
+		return rc;
+	}
+	if (xtc_pid_is_none(xtc_self()) ||
+	    xtc_blocking_run(xs_ock_body, &j, &res) != XTC_OK)
+		(void)xs_ock_body(&j);
+	snap_set(&g_ock_slot, 0);
+	if (j.rc != XTC_OK) {
+		wal_ockpt_abort(j.k);
+		return j.rc;
+	}
+	if (!xs_quiesce_begin(1)) {
+		wal_ockpt_abort(j.k);
+		return XTC_E_AGAIN;
+	}
+	frames = wal_ockpt_frames(j.k);
+	rc = wal_ockpt_finish(j.k);       /* frees j.k */
+	xstore_quiesce_end();
+	if (rc == XTC_OK && tail != NULL)
+		*tail = frames;
+	return rc;
 }
 
 /*

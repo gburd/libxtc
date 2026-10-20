@@ -25,6 +25,7 @@ test_flush_pin
 test_trickler_select
 test_pp_slice
 test_cat_reopen
+test_ckpt_online
 test_wal_group_sync
 test_publication_pin
 test_private_frame
