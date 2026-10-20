@@ -58,11 +58,13 @@ against Python's sqlite3, found (and 1.58 fixes):
   8.4k tpmC).  Larger pools get slower too (1048576 pages: 13-16k): the
   page provider (every 1 ms) and trickler (every 5 ms) walk every frame,
   on the loop that also runs the WAL group-commit writer.
-* **A log checkpoint pauses commits.**  When the log passes
-  `--checkpoint-mb` (default 64 MiB, then twice its last post-checkpoint
-  size) every live row is dumped into a new log while commits wait.  On a
-  10-warehouse TPROC-C store (2.7 GB) that pause is about 16 s; size
-  `--checkpoint-mb` to move it, or accept it in the tail.
+* **A log checkpoint costs CPU and write bandwidth while it runs.**
+  When the log passes `--checkpoint-mb` (default 64 MiB, then twice its
+  last post-checkpoint size) the live rows are dumped into a new log.
+  Since 1.59 commits keep running during the dump (they used to wait
+  for all of it: about 16 s on a 10-warehouse TPROC-C store); they are
+  held only to take its start point and to swap the files.  The dump
+  itself runs on a blocking-pool thread and reads every live row.
 * **Restart after an unclean stop replays the whole log.**  A 10-warehouse
   store took 292 s to open after a kill; after a clean SIGTERM drain
   (17 s) it reopens in 13 s.
@@ -73,8 +75,14 @@ against Python's sqlite3, found (and 1.58 fixes):
 * **Conflicts are reported, not hidden.**  SNAPSHOT and stronger fail a
   conflicting write at the statement with "could not serialize"; the
   transaction is then aborted (later statements fail until ROLLBACK).
-  READ COMMITTED and autocommit re-run the statement on a fresh snapshot
-  (at most 8 times).
+  READ COMMITTED, autocommit, and a transaction's first statement re-run
+  on a fresh snapshot (at most 8 times), waiting for the row's holder
+  first.
+* **Every page written back costs a double-write `fdatasync`.**  The
+  torn-page ring syncs once per page, so a store larger than its pool
+  pays about one extra fsync per evicted dirty page on the same disks as
+  the log: at TPROC-C 10 warehouses, one connection, 4 GiB pool, about
+  1,000 a second, and one connection reaches half of SQLite FULL.
 
 ## RESOLVED (1.57): sqlxtc large rows, B-tree limits, and the 1.56 regressions
 
@@ -603,8 +611,7 @@ isolation defects were fixed (1.56); what remains is recorded here.
   (`xstore_recover_inplace` is exercised by tests only).  The log is
   compacted periodically (`--checkpoint-mb`, default 64 MiB, and at 2x
   the last post-checkpoint size), so restart time is proportional to the
-  live data plus the writes since the last checkpoint.  Commits pause
-  while a checkpoint dumps the live rows.
+  live data plus the writes since the last checkpoint.
 * **sqlxtc fail-stops on a log I/O error.**  Any write-ahead-log write or
   fsync error (ENOSPC, EIO, EFBIG) fails the transactions in that batch
   and every later write with an I/O error until the server restarts;

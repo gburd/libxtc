@@ -526,6 +526,59 @@ without it the 8-connection run spent 78% of the server in `evict_one`
 and did 8.4k), and the page provider walks a bounded slice per tick
 (the full-pool walk halved one-connection throughput at a 1 GiB pool).
 
+### In-process, after the 1.59 fixes
+
+The numbers above measure the network binding as much as the engine:
+at one connection about 70% of a transaction was Quack round trips.
+For 1.59 the same driver was linked against the engine directly (a
+sqlite3-API binding over `sx_*`, the way SQLite and Turso run), and
+five bottlenecks that the in-process profile exposed were fixed:
+
+1. **The catalog was re-read on every statement.**  The in-process table
+   cache was filled only by `CREATE` in the same process, so on any
+   reopened store each statement scanned the catalog B-tree and re-parsed
+   the column list: 19% of a connection's CPU.
+2. **The periodic log checkpoint stopped commits for the whole dump**
+   (1-3.5 s at 1 warehouse, about 16 s at 10).  It now runs online: commits
+   wait only while it takes its start point and swaps the files.
+3. **Off-loop commits did not group.**  A committer on a plain thread
+   wrote and fsynced its record alone under a mutex.  It now joins a
+   leader/follower group commit, the deferred-durable commit of
+   PostgreSQL's async WAL series.
+4. **Row intents did not wait on plain threads**, and a transaction's
+   first UPDATE checked for a newer version before waiting for the row's
+   holder, so a hot row (TPC-C's warehouse) failed after eight re-runs.
+   At 32 connections that was 2.8 million Payment retries a minute.
+5. **A recursive libxtc mutex won on its contended path by a plain
+   thread could not be re-entered** (a core libxtc bug; the server never
+   hit it because its callers are fibers).
+
+Same host, same tuning, 10 warehouses, both engines in-process
+through the same driver binary, both `fdatasync` before every commit
+returns.  sqlxtc with a 4 GiB pool, SQLite with a 16 GB page cache;
+60 s ramp, 120 s measured, 3 passes alternating the engines; tpmC,
+median of 3; no commit failures in any run:
+
+| Engine | 1 conn | 8 conns | 32 conns | 64 conns |
+| --- | ---: | ---: | ---: | ---: |
+| SQLite 3.53.4, WAL, `synchronous=FULL` | 84,500 | 85,400 | 86,400 | 84,600 |
+| **sqlxtc 1.59, in-process** | 43,900 | **98,600** | 71,700 | 64,200 |
+| sqlxtc 1.58, Quack over TCP (above) | 13,900 | 54,600 | 47,200 | 39,700 |
+
+sqlxtc passes SQLite at 8 connections (one pass reached 119k) and
+stays at 0.76-0.83x of it at 32 and 64, where SQLite's single writer
+is flat.  At one connection it reaches half of SQLite.  Each commit
+costs one WAL `fdatasync` (58 us on this array) in both engines, but
+sqlxtc also writes evicted pages back through its double-write ring:
+one ring `fdatasync` per page, about 1,000 a second, on the same disks.
+SQLite's only per-commit sync is the WAL frame; its checkpoint writes
+the database file in batches.  Batching the double-write (one sync per
+group of pages, as InnoDB does) is the next step.  The remaining
+retries at 32 and 64 connections are New-Order and Payment updating
+the district row after reading it under snapshot isolation, where
+first-committer-wins rolls one of them back.  SQLite has no such
+conflict because it serializes writers.
+
 ### Feature by feature
 
 The same data set (10 warehouses), the same sqlite3-API binary per
