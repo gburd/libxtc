@@ -534,12 +534,21 @@ CORPUS = [
      "julianday('2000-01-01'), unixepoch('2024-01-01'), date('2024-01-15', 'start of month', '+1 month', '-1 day')"),
     ("dt_strftime", [],
      "SELECT strftime('%Y/%m/%d %H:%M:%S %j %w %s %f', '2024-03-05 07:08:09.123'), "
-     "strftime('%d|%e|%F|%G|%g|%H|%I|%J|%k|%l|%M|%p|%P|%R|%T|%u|%U|%V|%W|%%', '2024-01-07 15:04:05')"),
+     "strftime('%d|%e|%F|%H|%I|%J|%k|%l|%M|%p|%R|%T|%u|%W|%%', '2024-01-07 15:04:05')"),
+    # %G %g %V (ISO week year/week), %U and %P arrived in SQLite 3.46.0;
+    # an older oracle returns NULL / 'am' for a correct answer.
+    ("dt_strftime_346", [],
+     "SELECT strftime('%G|%g|%V|%U|%P', '2024-01-07 15:04:05')",
+     {"min_sqlite": (3, 46, 0)}),
     ("dt_modifiers", [],
      "SELECT datetime(1700000000, 'unixepoch'), date(2460000.5), datetime('2024-01-01T05:06'), "
      "date('2024-01-01', 'weekday 0'), datetime('2024-01-01 10:00:00', '+90 minutes', '-30 seconds'), "
-     "datetime('2024-01-01', '+1.5 days'), date('2024-03-31', '-1 month'), date('2024-01-31', '+1 month', 'floor'), "
+     "datetime('2024-01-01', '+1.5 days'), date('2024-03-31', '-1 month'), "
      "datetime('2024-01-01 12:00:00.5', 'subsec'), date('2024-01-01', '+0001-01-01'), datetime(1700000000, 'auto')"),
+    # The 'floor' / 'ceiling' modifiers arrived in SQLite 3.46.0.
+    ("dt_modifiers_346", [],
+     "SELECT date('2024-01-31', '+1 month', 'floor'), date('2024-01-31', '+1 month', 'ceiling')",
+     {"min_sqlite": (3, 46, 0)}),
     ("dt_bad_input", [],
      "SELECT date('bogus'), date('2024-13-01'), time('25:00'), date(NULL), date('2024-01-01', 'nonsense'), "
      "strftime('%Q', '2024-01-01'), date('2024-02-30'), datetime(-1, 'unixepoch')"),
@@ -565,8 +574,13 @@ CORPUS = [
     ("fn_printf", [],
      "SELECT printf('%d %5.2f %s %x %q %Q %c %%|%-5d|%05d|%e|%g', 42, 3.14159, 'hi', 255, "
      "'a''b', 'z', 'x', 7, 7, 12345.678, 0.0001), format('%s-%s', 1, 2.0), "
-     "printf('%.0f|%.0f|%.0f|%.2f', 0.5, 1.5, 2.5, 1.005), printf('%,d|%+d|% d|%X|%o|%#x', "
+     "printf('%.2f', 1.005), printf('%,d|%+d|% d|%X|%o|%#x', "
      "-1234567, 5, 5, 255, 8, 255)"),
+    # %.0f rounds half away from zero since SQLite 3.46.0 (0.5 -> 1);
+    # older releases rounded 0.5 -> 0, 1.5 -> 1, 2.5 -> 2.
+    ("fn_printf_round_346", [],
+     "SELECT printf('%.0f|%.0f|%.0f', 0.5, 1.5, 2.5)",
+     {"min_sqlite": (3, 46, 0)}),
     ("fn_printf_edges", [],
      "SELECT printf('%s|%5s|%-5s|%.2s|%w', 'abc', 'ab', 'ab', 'abcdef', 'a\"b'), "
      "printf('%d', '12abc'), printf('%d', 3.9), printf('%s'), printf(NULL), printf('%*d|%-*d|%.*f', 5, 42, 5, 42, 2, 3.14159), "
@@ -728,10 +742,20 @@ def main():
 
     rc = 0
     try:
-        passed = failed = 0
+        passed = failed = skipped = 0
         for case in CORPUS:
             desc, setup, test = case[:3]
             opts = case[3] if len(case) > 3 else None
+            # A case whose expected result only a newer SQLite gives (a
+            # feature added in that release) needs a new-enough ORACLE;
+            # an older python sqlite3 would grade a correct answer wrong.
+            if opts and opts.get("min_sqlite") and \
+                    sqlite3.sqlite_version_info < tuple(opts["min_sqlite"]):
+                skipped += 1
+                print("  skip %s  (oracle sqlite %s < %s)" % (desc,
+                      sqlite3.sqlite_version,
+                      ".".join(map(str, opts["min_sqlite"]))))
+                continue
             ref = sqlite3.connect(":memory:")
             ref.isolation_level = None
             qk = server.fresh()
@@ -773,13 +797,14 @@ def main():
                 print("       sqlxtc: %r" % (normalise_rows(qr)[:6]))
                 print("       sqlite: %r" % (normalise_rows(rr)[:6]))
 
-        print("\nCORPUS   : %d passed, %d failed (of %d)" %
-              (passed, failed, len(CORPUS)))
+        print("\nCORPUS   : %d passed, %d failed, %d skipped (oracle too old) "
+              "(of %d)" % (passed, failed, skipped, len(CORPUS)))
         print("XFAIL set: %d still-unsupported, %d newly-working, %d bugs" %
               (xfail, xpass, xbug))
-        if len(CORPUS):
+        if len(CORPUS) - skipped:
             print("Supported-feature compat: %d/%d = %.1f%%" %
-                  (passed, len(CORPUS), 100.0 * passed / len(CORPUS)))
+                  (passed, len(CORPUS) - skipped,
+                   100.0 * passed / (len(CORPUS) - skipped)))
         if failed:
             rc = 1
     finally:
