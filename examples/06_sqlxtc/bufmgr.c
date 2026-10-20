@@ -2490,65 +2490,99 @@ bm_read_valid(const bm_frame_t *f, uint64_t v)
 /* ---- page-provider process ---- */
 struct pp_arg { bm_t *bm; int64_t interval; };
 
+/* Frames the page provider visits per tick (see pp_proc). */
+#define PP_SLICE 8192u
+
+/*
+ * One page-provider tick.  It visits at most PP_SLICE frames, resuming
+ * at *cursor, so its cost is O(PP_SLICE), not O(n_frames).  The
+ * provider shares loop 0 with the WAL group-commit writer: a 1 GiB pool
+ * (262144 frames) walked whole every 1 ms took 47% of that loop and
+ * doubled commit latency at one connection.  The clean-COOL count over
+ * the slice is scaled to the pool -- an estimate, which only steers how
+ * many HOT frames pass 2 cools.  Returns the frames visited (a test
+ * hook: the bound is the contract).
+ */
+static uint32_t
+pp_tick(bm_t *bm, uint32_t *cursor)
+{
+	uint32_t i, k, slice, cool_clean = 0, need, visited = 0;
+	pf_drain(bm, 32);     /* warm queued read-ahead pages first */
+	slice = bm->n_frames < PP_SLICE ? bm->n_frames : PP_SLICE;
+	/* Pass 1: flush dirty COOL frames (so reclaiming them later is a
+	 * cheap state flip) and count the clean cool supply. */
+	for (k = 0; k < slice; k++) {
+		bm_frame_t *f;
+		uint8_t st;
+		i = *cursor;
+		*cursor = *cursor + 1 < bm->n_frames ? *cursor + 1 : 0;
+		f = &bm->frames[i];
+		visited++;
+		st = atomic_load_explicit(&f->state, memory_order_acquire);
+		if (atomic_load_explicit(&f->pin, memory_order_acquire) != 0)
+			continue;
+		if (st != BM_COOL)
+			continue;
+		if (atomic_load_explicit(&f->dirty, memory_order_acquire))
+			(void)flush_frame(bm, f);   /* proactive write-out */
+		else
+			cool_clean++;
+	}
+	if (slice < bm->n_frames)      /* scale the slice count up */
+		cool_clean = (uint32_t)((uint64_t)cool_clean * bm->n_frames /
+		    slice);
+	/* Pass 2: top the cool stage up toward the target by cooling HOT
+	 * frames -- but only the shortfall.  An abundant supply of
+	 * probationary/scan COOL pages keeps need == 0, so a scan does not
+	 * provoke cooling of the hot working set.  It continues from the
+	 * same cursor, also bounded by PP_SLICE. */
+	need = cool_clean < bm->cool_target ? bm->cool_target - cool_clean : 0;
+	for (k = 0; k < slice && need > 0; k++) {
+		bm_frame_t *f;
+		uint8_t st;
+		i = *cursor;
+		*cursor = *cursor + 1 < bm->n_frames ? *cursor + 1 : 0;
+		f = &bm->frames[i];
+		visited++;
+		st = atomic_load_explicit(&f->state, memory_order_acquire);
+		if (atomic_load_explicit(&f->pin, memory_order_acquire) != 0)
+			continue;
+		if (st != BM_HOT)
+			continue;
+		/* Cooling is a state flip; the page table keeps naming the
+		 * page until it is reclaimed. */
+		atomic_store_explicit(&f->state, BM_COOL, memory_order_release);
+		atomic_fetch_add_explicit(&bm->s_cooled, 1, memory_order_relaxed);
+		need--;
+	}
+	/* Pass 3: keep the free list above the cool target. */
+	while (atomic_load_explicit(&bm->free_n, memory_order_relaxed)
+	    < bm->cool_target) {
+#ifdef BM_SAMPLED_EVICT
+		if (!(bm->scan_resist ? sample_evict_one(bm) : evict_one(bm))) break;
+#else
+		if (!evict_one(bm)) break;
+#endif
+	}
+#ifdef BM_CLASSIFY
+	/* Stage 5: aggregate the per-carrier sketches and re-tag every
+	 * resident frame's class on the provider cadence. */
+	bm_cls_tick(bm);
+#endif
+	return visited;
+}
+
 static void
 pp_proc(void *arg)
 {
 	struct pp_arg *pa = arg;
 	bm_t *bm = pa->bm;
 	int64_t interval = pa->interval;
+	uint32_t cursor = 0;
 	xtc_free(pa);
 
 	while (atomic_load_explicit(&bm->pp_running, memory_order_acquire)) {
-		uint32_t i, cool_clean = 0, need;
-		pf_drain(bm, 32);     /* warm queued read-ahead pages first */
-		/* Pass 1: flush dirty COOL frames (so reclaiming them later is a
-		 * cheap state flip) and count the clean cool supply. */
-		for (i = 0; i < bm->n_frames; i++) {
-			bm_frame_t *f = &bm->frames[i];
-			uint8_t st = atomic_load_explicit(&f->state, memory_order_acquire);
-			if (atomic_load_explicit(&f->pin, memory_order_acquire) != 0)
-				continue;
-			if (st != BM_COOL)
-				continue;
-			if (atomic_load_explicit(&f->dirty, memory_order_acquire))
-				(void)flush_frame(bm, f);   /* proactive write-out */
-			else
-				cool_clean++;
-		}
-		/* Pass 2: top the cool stage up toward the target by cooling
-		 * HOT frames -- but only the shortfall.  An abundant supply of
-		 * probationary/scan COOL pages keeps need == 0, so a scan does
-		 * not provoke cooling of the hot working set. */
-		need = cool_clean < bm->cool_target ? bm->cool_target - cool_clean : 0;
-		for (i = 0; i < bm->n_frames && need > 0; i++) {
-			bm_frame_t *f = &bm->frames[i];
-			uint8_t st = atomic_load_explicit(&f->state, memory_order_acquire);
-			if (atomic_load_explicit(&f->pin, memory_order_acquire) != 0)
-				continue;
-			if (st != BM_HOT)
-				continue;
-			/* Cooling is a state flip; the page table keeps naming
-			 * the page until it is reclaimed. */
-			atomic_store_explicit(&f->state, BM_COOL,
-			    memory_order_release);
-			atomic_fetch_add_explicit(&bm->s_cooled, 1,
-			    memory_order_relaxed);
-			need--;
-		}
-		/* Pass 3: keep the free list above the cool target. */
-		while (atomic_load_explicit(&bm->free_n, memory_order_relaxed)
-		    < bm->cool_target) {
-#ifdef BM_SAMPLED_EVICT
-			if (!(bm->scan_resist ? sample_evict_one(bm) : evict_one(bm))) break;
-#else
-			if (!evict_one(bm)) break;
-#endif
-		}
-#ifdef BM_CLASSIFY
-		/* Stage 5: aggregate the per-carrier sketches and re-tag every
-		 * resident frame's class on the provider cadence. */
-		bm_cls_tick(bm);
-#endif
+		(void)pp_tick(bm, &cursor);
 		if (xtc_proc_sleep(interval) != XTC_OK)
 			break;
 	}
