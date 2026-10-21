@@ -12,7 +12,8 @@
  *	    snapshot.  The registry used one global mutex for both (and the
  *	    horizon scan held it across all slots): at 8 threads 70% of the
  *	    time was futex wait/wake.  Asserted: 8 threads deliver at least
- *	    2x the 1-thread rate (they delivered 0.45x).
+ *	    2x the 1-thread rate (they delivered 0.45x); with fewer than 8
+ *	    CPUs, at least 1.5x (a 4-vCPU CI runner measures ~2.0x).
  *	(2) Safety under the race: writer threads update rows (each update
  *	    adds a version, autovacuum prunes behind the horizon) while
  *	    REPEATABLE READ readers begin, read every row twice with a
@@ -240,7 +241,9 @@ main(void)
 	r1 = rate(1);
 	r8 = rate(8);
 	printf("  read-only txns/s: 1 thread %.0f, 8 threads %.0f (%.2fx)\n", r1, r8, r8 / r1);
-	CK(r8 >= 2.0 * r1);
+	/* 8 threads cannot beat ~ncpu x on fewer CPUs; the mutex version
+	 * delivered 0.45x anywhere, so 1.5x still separates the two. */
+	CK(r8 >= (sysconf(_SC_NPROCESSORS_ONLN) >= 8 ? 2.0 : 1.5) * r1);
 
 	/* (2) */
 	atomic_store(&g_stop, 0);
