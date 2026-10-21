@@ -66,11 +66,11 @@ int  wal_writer_spawn(wal_t *w, xtc_loop_t *loop, xtc_pid_t *pid);
 xtc_pid_t wal_writer_pid(const wal_t *w);
 
 /*
- * Append `record` to the log and block (park the fiber) until it is
- * durable.  Must be called from a process (it parks on an ack message
- * from the writer).  Returns XTC_OK with the assigned durable LSN in
- * *lsn, or an error.  Many callers calling concurrently coalesce into
- * one fsync.
+ * Append `record` to the log and block until it is durable: a fiber
+ * parks, a plain thread blocks.  Callable from a proc or off a loop.
+ * Returns XTC_OK with the assigned durable LSN in *lsn, or an error.
+ * Many callers calling concurrently coalesce into one fsync (group
+ * commit); the copy into the log buffer runs in parallel.
  *
  * Fail-stop: if a log write or fdatasync fails (or is short), every
  * commit in that batch returns XTC_E_IO, durable_lsn does not advance,
@@ -82,14 +82,7 @@ xtc_pid_t wal_writer_pid(const wal_t *w);
  */
 int  wal_commit(wal_t *w, const void *record, uint32_t len, uint64_t *lsn);
 
-/*
- * Synchronous durable append, usable OFF a loop (no writer process):
- * appends one record and fdatasyncs before returning, serialized by an
- * internal mutex.  Same on-disk format as wal_commit, so wal_scan
- * replays records written by either path.  Use when the committer is
- * not running on an xtc loop; on a loop, prefer wal_commit (group
- * commit).  Do not mix with a spawned writer on the same log.
- */
+/* The same as wal_commit (kept as a name: the two paths used to differ). */
 int  wal_commit_sync(wal_t *w, const void *record, uint32_t len, uint64_t *lsn);
 
 /*

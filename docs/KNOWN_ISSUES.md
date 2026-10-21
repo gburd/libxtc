@@ -48,6 +48,20 @@ against Python's sqlite3, found (and 1.58 fixes):
   detection, instead of failing COMMIT), and no global lock on the
   per-statement catalog lookups.
 
+## FIXED (1.59): sqlxtc lost a large transaction, and every commit after it, in crash recovery
+
+Through 1.58, a transaction whose log record was larger than 16 MiB
+committed and was acknowledged, but crash recovery treated the record as a
+torn tail.  Recovery lost that transaction and every commit logged after
+it, and the reopen truncated the log at that point.  A transaction is one
+log record, so a bulk load in one transaction (TPC-C's loader commits
+100k Stock rows at once, about 33 MB) produced such a record.  A clean
+shutdown hid the bug, because the shutdown compacts the log into small
+records; only a crash before the next log checkpoint lost data.  1.59
+verifies each frame against the file size and a streamed checksum instead
+of a length cap, and writes a record bigger than the log buffer directly
+(test_wal_bigtxn).
+
 ## OPEN (1.58): sqlxtc buffer-pool sizing and the hot-row hold
 
 * **The default buffer pool is 256 pages (1 MiB); size it.**  Pass

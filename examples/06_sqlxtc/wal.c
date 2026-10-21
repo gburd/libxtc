@@ -5,29 +5,21 @@
  * SPDX-License-Identifier: ISC
  *
  * examples/06_sqlxtc/wal.c
- *	Write-ahead log with a group-commit writer process.  See wal.h
- *	and the design notes (stage 1).
- *
- *	The writer owns the file; committers send records and park on an
- *	ack.  A batch is drained from the mailbox -- the first record
- *	blocks, then more are gathered with a TIMED receive until the
- *	window closes or the batch cap is hit -- and committed with one
- *	pwrite + one fdatasync, both issued via libxtc async file I/O
- *	(xtc_aio): native io_uring completion where the writer's loop
- *	supports it, a blocking-pool offload elsewhere.  Either way the
- *	writer parks while the loop keeps running, and on io_uring the
- *	write and the fsync ride the same ring with no pool thread.
- *
- *	Dogfood note: this is implemented on raw xtc_proc send/recv, not
- *	xtc_svr, because group commit is the gen_server:reply/2 pattern
- *	(stash the requester, reply later, reply to many) and xtc_svr has
- *	no deferred reply -- its xtc_svr_call_t is stack-scoped to one
- *	handle_call.
+ *	Write-ahead log: a log buffer with parallel insert and group commit
+ *	for committers on fibers and plain threads alike.  See the comment
+ *	above struct wal for the algorithm and where each part comes from
+ *	(Berkeley DB, JE, InnoDB, the PostgreSQL async WAL series).  Writes
+ *	and fdatasyncs go through libxtc async file I/O (xtc_aio): native
+ *	io_uring completion where the leader runs on a capable loop, a
+ *	blocking-pool offload elsewhere, inline off a loop.
  */
 
 #include "wal.h"
 
 #include "xtc_aio.h"
+#include "xtc_async.h"    /* xtc_yield */
+#include "xtc_proc.h"
+#include "xtc_sync.h"     /* xtc_notify: waiters park (fiber) or block (thread) */
 #include "xtc_sim.h"      /* XTC_SIM_BUGGIFY -- DST pessimal batching (no-op in prod) */
 #include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
 
@@ -42,8 +34,7 @@
 #include <time.h>
 #include <unistd.h>
 
-/* Wire kinds for a message to the writer. */
-#define WAL_KIND_COMMIT  'C'
+/* The message that stops the writer proc. */
 #define WAL_KIND_STOP    'S'
 
 #define WAL_REC_HDR      12u     /* on-disk per-record header: u64 lsn + u32 len */
@@ -101,6 +92,55 @@ wal_rec_crc(uint64_t lsn, uint32_t len, const void *body)
 }
 
 /*
+ * Verify the frame at `off` of fd without trusting its length field:
+ * returns 1 with *lsn / *len when a COMPLETE frame with a matching
+ * checksum is there, 0 at the end of the log (EOF, a torn header, body
+ * or trailer, or a checksum mismatch).  A record body larger than
+ * WAL_MAX_REC (a big transaction) is checksummed in chunks, so a torn
+ * tail whose length field is garbage never drives an allocation -- the
+ * reason the scans used to stop at any record over 16 MiB, which LOST an
+ * acknowledged big transaction and every commit after it in recovery
+ * (test_wal_bigtxn).  The length must also fit in the file.
+ */
+static int
+wal_frame_ok(int fd, off_t off, off_t fsize, uint64_t *lsn, uint32_t *len)
+{
+	uint8_t hdr[WAL_REC_HDR], trl[WAL_REC_CRC], chunk[64 * 1024];
+	uint64_t crc, h;
+	uint32_t i, done;
+
+	if (pread(fd, hdr, WAL_REC_HDR, off) != (ssize_t)WAL_REC_HDR)
+		return 0;
+	memcpy(lsn, hdr, 8);
+	memcpy(len, hdr + 8, 4);
+	if ((uint64_t)off + WAL_REC_HDR + *len + WAL_REC_CRC > (uint64_t)fsize)
+		return 0;                    /* runs past the end: torn */
+	if (pread(fd, trl, WAL_REC_CRC, off + (off_t)WAL_REC_HDR + (off_t)*len)
+	    != (ssize_t)WAL_REC_CRC)
+		return 0;
+	memcpy(&crc, trl, WAL_REC_CRC);
+	h = 1469598103934665603ull;       /* wal_rec_crc, streamed */
+	for (i = 0; i < WAL_REC_HDR; i++)
+		h = (h ^ hdr[i]) * 1099511628211ull;
+	for (done = 0; done < *len; ) {
+		uint32_t k = *len - done < sizeof chunk ? *len - done : (uint32_t)sizeof chunk;
+		if (pread(fd, chunk, k, off + (off_t)WAL_REC_HDR + (off_t)done) != (ssize_t)k)
+			return 0;
+		for (i = 0; i < k; i++)
+			h = (h ^ chunk[i]) * 1099511628211ull;
+		done += k;
+	}
+	return h == crc;
+}
+
+static off_t
+wal_fsize(int fd)
+{
+	off_t e = lseek(fd, 0, SEEK_END);
+	return e < 0 ? 0 : e;
+}
+
+/*
  * Upper bound on a single on-disk record body.  A legitimate record is
  * assembled in the 64 KiB batch buffer (bcap), so anything far above
  * that is a torn or corrupt record whose length field is garbage.
@@ -112,41 +152,85 @@ wal_rec_crc(uint64_t lsn, uint32_t len, const void *body)
  * tail: the scan stops there, exactly as it does for a short read. */
 #define WAL_MAX_REC      (16u * 1024u * 1024u)
 
-struct wal_msg {                 /* committer -> writer */
-	uint8_t   kind;
-	xtc_pid_t reply_to;
-	uint64_t  txn_id;
-	uint32_t  len;
-	uint8_t   data[];            /* len bytes */
+/*
+ * ---- the log buffer: parallel insert + group commit ----
+ *
+ * One path for every committer, fiber or thread (the writer proc and the
+ * off-loop mutex path it replaces each copied a record twice and moved it
+ * by message or under one lock).  The design follows the engines that got
+ * this right:
+ *
+ *   reserve   under res_mu, a few instructions: the next LSN and the
+ *             record's byte range [start, end) in a ring buffer (Berkeley
+ *             DB __log_put_next's LSN/offset assignment; JE allocates log
+ *             buffer space under the LWL the same way).  If the ring has
+ *             no room the committer flushes (or waits for the flush) and
+ *             retries.
+ *   copy      OUTSIDE any lock: header, body and checksum straight into
+ *             the ring (JE: "the client computes the checksum and copies
+ *             the data into the log buffer, not holding the LWL").  Then
+ *             publish completion in the LSN's slot of a completion ring
+ *             (InnoDB's recent_written link buffer, keyed by LSN).
+ *   flush     a leader (the first committer to find no flush running --
+ *             BDB's in_flush / JE's FSyncManager leader) advances the
+ *             contiguous-completed watermark over the completion slots,
+ *             pwrites [written, copied) and fdatasyncs it, then publishes
+ *             durable (CAS-max, as noxu) and wakes exactly the waiters it
+ *             covered plus ONE uncovered waiter as the next leader (BDB
+ *             __log_flush_int's commit queue + DB_COMMIT_FLUSH baton), so
+ *             there is no thundering herd.  Records that arrive during a
+ *             flush form the next batch: the batch self-tunes to the fsync
+ *             time, a lone committer pays exactly one fsync.
+ *   wait      on an xtc_notify (a fiber parks, a thread blocks), and every
+ *             woken waiter re-verifies the durable watermark rather than
+ *             trusting the wakeup (BDB's rule).
+ *
+ * A leader on a fiber writes with xtc_aio (the fiber parks, its loop runs
+ * on); off a loop xtc_aio runs inline.  The fail-stop latch is unchanged.
+ * The on-disk record format is unchanged.  Ring positions are file
+ * offsets, so durable_off is just the durable position.
+ */
+#define WAL_RING     (8u << 20)     /* log buffer bytes (power of 2) */
+#define WAL_SLOTS    (1u << 16)     /* completion slots (power of 2) */
+
+struct wal_slot {                   /* completion of one LSN */
+	_Atomic uint64_t lsn;           /* == the record's LSN once copied */
+	uint64_t         end;           /* position just past the record */
 };
 
-struct wal_ack {                 /* writer -> committer */
-	uint64_t txn_id;
-	uint64_t lsn;
-	int32_t  status;             /* XTC_OK, or the error that failed the batch */
-};
-
-struct wal_pending {             /* one committer awaiting the current batch */
-	xtc_pid_t reply_to;
-	uint64_t  txn_id;
-	uint64_t  lsn;
+struct wal_waiter {
+	uint64_t           need;        /* position that must be durable */
+	int                baton;       /* handed the leadership */
+	xtc_notify_t      *n;
+	struct wal_waiter *next;
 };
 
 struct wal {
 	int        fd;
-	off_t      off;              /* current append offset */
+	off_t      off;              /* current append offset (== res_pos) */
 	int64_t    window_ns;
 	uint32_t   max_batch;
 	xtc_pid_t  writer_pid;
 	_Atomic int writer_alive;    /* writer proc live; cleared on its exit */
 
-	/* Batch state -- touched only by the writer process. */
-	uint8_t           *bbuf;
-	size_t             bcap;
-	size_t             blen;
-	struct wal_pending *pend;
-	uint32_t           pcount;
-	uint64_t           next_lsn;
+	/* Reservation (res_mu): the next LSN and byte position. */
+	pthread_mutex_t    res_mu;
+	uint64_t           next_lsn;     /* last LSN handed out */
+	uint64_t           res_pos;      /* next record starts here */
+	int                direct;       /* a big record is being written
+	                                  * directly: reservations wait */
+	uint8_t           *ring;         /* WAL_RING bytes: positions mod size */
+	struct wal_slot   *slot;         /* WAL_SLOTS completion slots */
+
+	/* Flush (fl_mu): the leader flag, the watermarks, the waiter queue. */
+	pthread_mutex_t    fl_mu;
+	int                flushing;     /* a leader is running */
+	uint64_t           copied_lsn;   /* every LSN <= this is in the ring */
+	uint64_t           copied_pos;   /* ... and ends here */
+	_Atomic uint64_t   written;      /* bytes below are pwritten */
+	struct wal_waiter *wq;           /* sorted by need (ascending) */
+	struct wal_waiter *wfree;        /* recycled waiters (BDB free_commits) */
+
 	_Atomic uint64_t   durable_lsn;
 	/* Byte offset of the durable end of the file (always a frame
 	 * boundary), published with durable_lsn so an online checkpoint can
@@ -163,27 +247,10 @@ struct wal {
 	 * durable (PostgreSQL's fsync lesson): stop instead. */
 	_Atomic int        failed;
 
-	pthread_mutex_t    sync_mu;   /* guards the group-commit state below */
-	/* Off-loop group commit (wal_commit_sync).  A committer appends its
-	 * frame to gbuf and takes the next LSN under sync_mu, then waits
-	 * until durable_lsn covers it.  The first one to find no flush in
-	 * progress becomes the leader: it swaps gbuf out, drops the mutex,
-	 * writes and fdatasyncs the whole batch, publishes durable_lsn and
-	 * wakes everyone.  Frames that arrive during a flush form the next
-	 * batch, so N concurrent committers share ~1 fsync instead of paying
-	 * N in series (the deferred-durable commit of the PostgreSQL async
-	 * WAL series, with the leader doing the flush instead of a
-	 * notifier).  A lone committer still pays exactly one fsync. */
-	pthread_cond_t     sync_cv;
-	int                g_flushing;
-	uint8_t           *gbuf, *gspare;
-	size_t             glen, gcap, gspare_cap;
-	uint32_t           gcount;     /* frames in gbuf */
-
-	/* Stats. */
+	/* Stats (fl_mu). */
 	uint64_t s_commits;
 	uint64_t s_batches;
-	uint64_t s_bytes;
+	_Atomic uint64_t s_bytes;
 	uint64_t s_maxbatch;
 	uint64_t s_failed;            /* commits refused by a failed log write */
 };
@@ -194,44 +261,38 @@ struct wal {
 static void
 wal_scan_tail(int fd, off_t *off_out, uint64_t *maxlsn_out)
 {
-	uint8_t *sb = NULL; size_t sbcap = 0; off_t o = 0; uint64_t maxlsn = 0;
-	for (;;) {
-		uint8_t hdr[WAL_REC_HDR];
-		uint8_t trl[WAL_REC_CRC];
-		uint64_t lsn, crc, want;
-		uint32_t len;
-		if (pread(fd, hdr, WAL_REC_HDR, o) != (ssize_t)WAL_REC_HDR)
-			break;                /* EOF or torn header */
-		memcpy(&lsn, hdr, 8); memcpy(&len, hdr + 8, 4);
-		if (len > WAL_MAX_REC)
-			break;                /* garbage length: torn tail */
-		if (len > sbcap) {
-			uint8_t *nb = realloc(sb, len);
-			if (nb == NULL) break;
-			sb = nb; sbcap = len;
-		}
-		if (len > 0 &&
-		    pread(fd, sb, len, o + (off_t)WAL_REC_HDR) != (ssize_t)len)
-			break;                /* torn body: stop at the tail */
-		if (pread(fd, trl, WAL_REC_CRC,
-		    o + (off_t)WAL_REC_HDR + (off_t)len) != (ssize_t)WAL_REC_CRC)
-			break;                /* torn trailer: stop at the tail */
-		memcpy(&crc, trl, WAL_REC_CRC);
-		want = wal_rec_crc(lsn, len, sb);
-		if (crc != want)
-			break;                /* checksum mismatch: torn tail */
+	off_t o = 0, fsize = wal_fsize(fd);
+	uint64_t maxlsn = 0, lsn;
+	uint32_t len;
+	while (wal_frame_ok(fd, o, fsize, &lsn, &len)) {
 		if (lsn > maxlsn) maxlsn = lsn;
 		o += (off_t)WAL_REC_HDR + (off_t)len + (off_t)WAL_REC_CRC;
 	}
-	free(sb);
 	*off_out = o;
 	*maxlsn_out = maxlsn;
+}
+
+/* Point every watermark at (pos, lsn): an empty buffer.  Callers hold no
+ * concurrent committers (open, rebind, truncate run quiesced). */
+static void
+wal_reset_marks(wal_t *w, uint64_t pos, uint64_t lsn)
+{
+	w->off = (off_t)pos;
+	w->res_pos = pos;
+	w->next_lsn = lsn;
+	w->copied_pos = pos;
+	w->copied_lsn = lsn;
+	atomic_store_explicit(&w->written, pos, memory_order_release);
+	atomic_store_explicit(&w->durable_off, pos, memory_order_release);
+	atomic_store_explicit(&w->durable_lsn, lsn, memory_order_release);
 }
 
 int
 wal_open(const wal_opts_t *opts, wal_t **out)
 {
 	wal_t *w;
+	off_t o = 0;
+	uint64_t maxlsn = 0;
 
 	if (opts == NULL || opts->path == NULL || out == NULL)
 		return XTC_E_INVAL;
@@ -244,33 +305,26 @@ wal_open(const wal_opts_t *opts, wal_t **out)
 		free(w);
 		return XTC_E_INTERNAL;   /* no XTC_E_IO in the core enum -- see gaps ledger */
 	}
-	w->off = 0;
 	if (opts->append) {
 		/* Continue an existing log: resume LSNs past the highest on
 		 * disk, and append after the last COMPLETE record (a torn tail
 		 * from a crash mid-append is dropped). */
-		off_t o = 0; uint64_t maxlsn = 0;
+		int tr;
 		wal_scan_tail(w->fd, &o, &maxlsn);
-		w->next_lsn = maxlsn;
-		w->off = o;
-		atomic_store_explicit(&w->durable_lsn, w->next_lsn, memory_order_relaxed);
-		atomic_store_explicit(&w->durable_off, (uint64_t)o, memory_order_relaxed);
-		{
-			int tr = ftruncate(w->fd, o);  /* drop torn tail */
-			(void)tr;                      /* non-fatal: appends overwrite it */
-		}
+		tr = ftruncate(w->fd, o);  /* drop torn tail */
+		(void)tr;                  /* non-fatal: appends overwrite it */
 	}
 	w->window_ns = opts->window_ns > 0 ? opts->window_ns : 500000;   /* 0.5ms */
 	w->max_batch = opts->max_batch > 0 ? opts->max_batch : 256;
-	w->bcap = 64 * 1024;
-	w->bbuf = malloc(w->bcap);
-	w->pend = calloc(w->max_batch, sizeof *w->pend);
-	if (w->bbuf == NULL || w->pend == NULL) {
-		free(w->bbuf); free(w->pend); close(w->fd); free(w);
+	w->ring = malloc(WAL_RING);
+	w->slot = calloc(WAL_SLOTS, sizeof *w->slot);
+	if (w->ring == NULL || w->slot == NULL) {
+		free(w->ring); free(w->slot); close(w->fd); free(w);
 		return XTC_E_NOMEM;
 	}
-	(void)pthread_mutex_init(&w->sync_mu, NULL);
-	(void)pthread_cond_init(&w->sync_cv, NULL);
+	(void)pthread_mutex_init(&w->res_mu, NULL);
+	(void)pthread_mutex_init(&w->fl_mu, NULL);
+	wal_reset_marks(w, (uint64_t)o, maxlsn);
 	*out = w;
 	return XTC_OK;
 }
@@ -278,182 +332,429 @@ wal_open(const wal_opts_t *opts, wal_t **out)
 void
 wal_close(wal_t *w)
 {
+	struct wal_waiter *q;
 	if (w == NULL)
 		return;
-	(void)pthread_cond_destroy(&w->sync_cv);
-	(void)pthread_mutex_destroy(&w->sync_mu);
-	free(w->gbuf);
-	free(w->gspare);
+	while ((q = w->wfree) != NULL) {
+		w->wfree = q->next;
+		xtc_notify_destroy(q->n);
+		free(q);
+	}
+	(void)pthread_mutex_destroy(&w->fl_mu);
+	(void)pthread_mutex_destroy(&w->res_mu);
 	if (w->fd >= 0)
 		close(w->fd);
-	free(w->bbuf);
-	free(w->pend);
+	free(w->ring);
+	free(w->slot);
 	free(w);
 }
 
-/* Append one record to the current batch buffer (writer proc only). */
-static int
-batch_add(wal_t *w, const uint8_t *data, uint32_t len,
-    xtc_pid_t reply_to, uint64_t txn_id)
+/* Copy n bytes to ring position pos (wrapping). */
+static void
+ring_put(wal_t *w, uint64_t pos, const void *src, size_t n)
 {
-	size_t need = WAL_REC_HDR + len + WAL_REC_CRC;
-	uint64_t lsn, crc;
-
-	if (w->blen + need > w->bcap) {
-		size_t ncap = w->bcap * 2;
-		uint8_t *nb;
-		while (ncap < w->blen + need)
-			ncap *= 2;
-		nb = realloc(w->bbuf, ncap);
-		if (nb == NULL)
-			return XTC_E_NOMEM;
-		w->bbuf = nb;
-		w->bcap = ncap;
+	size_t at = (size_t)(pos & (WAL_RING - 1)), k = WAL_RING - at;
+	if (n <= k) {
+		memcpy(w->ring + at, src, n);
+	} else {
+		memcpy(w->ring + at, src, k);
+		memcpy(w->ring, (const uint8_t *)src + k, n - k);
 	}
-	lsn = ++w->next_lsn;
-	memcpy(w->bbuf + w->blen, &lsn, 8);
-	memcpy(w->bbuf + w->blen + 8, &len, 4);
-	memcpy(w->bbuf + w->blen + WAL_REC_HDR, data, len);
-	crc = wal_rec_crc(lsn, len, data);
-	memcpy(w->bbuf + w->blen + WAL_REC_HDR + len, &crc, WAL_REC_CRC);
-	w->blen += need;
-	w->pend[w->pcount].reply_to = reply_to;
-	w->pend[w->pcount].txn_id = txn_id;
-	w->pend[w->pcount].lsn = lsn;
-	w->pcount++;
-	w->s_bytes += len;
-	return XTC_OK;
 }
 
-/* Durably write the current batch, then ack every committer in it.
- * On a failed or short write, or a failed fdatasync, neither the append
- * offset nor durable_lsn moves, every committer in the batch gets an
- * XTC_E_IO ack, and the log latches failed (see struct wal). */
+/* fl_mu held: advance the contiguous-completed watermark. */
 static void
-batch_flush(wal_t *w)
+wal_advance_copied(wal_t *w)
 {
-	struct wal_ack ack;
-	int rc, status = XTC_OK;
-	uint32_t i;
+	for (;;) {
+		uint64_t want = w->copied_lsn + 1;
+		struct wal_slot *s = &w->slot[want & (WAL_SLOTS - 1)];
+		if (atomic_load_explicit(&s->lsn, memory_order_acquire) != want)
+			return;
+		w->copied_lsn = want;
+		w->copied_pos = s->end;
+	}
+}
 
-	if (w->pcount == 0)
-		return;
+/* fl_mu held: wake every waiter `durable` covers and, if any waiter is
+ * left, hand ONE of them the leadership. */
+static void
+wal_wake_locked(wal_t *w, uint64_t durable, int give_baton)
+{
+	struct wal_waiter **pp = &w->wq, *q;
+	while ((q = *pp) != NULL && q->need <= durable) {
+		*pp = q->next;
+		(void)xtc_notify_signal(q->n);
+	}
+	if (give_baton && w->wq != NULL && !w->flushing) {
+		w->wq->baton = 1;
+		w->flushing = 1;             /* counted for the baton holder */
+		q = w->wq;
+		w->wq = q->next;
+		(void)xtc_notify_signal(q->n);
+	}
+}
 
-	/*
-	 * Durably write the batch via libxtc async file I/O: native
-	 * io_uring completion when the writer runs on a capable loop, the
-	 * blocking pool otherwise.  The writer parks while the loop keeps
-	 * serving other work -- and on io_uring the batch write and its
-	 * fdatasync ride the same ring with no pool thread involved.
-	 */
+/* fl_mu held on entry and exit, w->flushing set by the caller: write
+ * and fdatasync the contiguous completed prefix, up to at least `need`
+ * (the leader's own record, which its own copy has completed). */
+static void
+wal_flush_locked(wal_t *w, uint64_t need)
+{
+	uint64_t from, upto, lsn_upto;
+	uint32_t nrec;
+	int ok = 1, spins = 0;
+	for (;;) {
+		wal_advance_copied(w);
+		if (w->copied_pos >= need)
+			break;
+		/* A record before ours is mid-copy (a memcpy: it never parks):
+		 * wait for it outside the lock. */
+		(void)pthread_mutex_unlock(&w->fl_mu);
+		if (++spins > 64) {
+			if (xtc_pid_is_none(xtc_self())) (void)xtc_sleep_ns(1000);
+			else xtc_yield();
+		}
+		(void)pthread_mutex_lock(&w->fl_mu);
+	}
+	from = atomic_load_explicit(&w->written, memory_order_relaxed);
+	upto = w->copied_pos;
+	lsn_upto = w->copied_lsn;
+	/* Buggify: flush only up to our own record instead of the whole
+	 * completed prefix -- more, smaller batches and fsync boundaries for
+	 * crash recovery to cut at (legal: no batching promise is made). */
+	if (XTC_SIM_BUGGIFY("wal.flush.tiny_batch") && xtc_sim_buggify_fault(300) &&
+	    need > from && need < upto) {
+		uint64_t l = w->copied_lsn;
+		while (l > atomic_load_explicit(&w->durable_lsn, memory_order_relaxed) &&
+		    w->slot[l & (WAL_SLOTS - 1)].end > need)
+			l--;
+		upto = w->slot[l & (WAL_SLOTS - 1)].end;
+		lsn_upto = l;
+	}
+	nrec = (uint32_t)(lsn_upto - atomic_load_explicit(&w->durable_lsn,
+	    memory_order_relaxed));
+	(void)pthread_mutex_unlock(&w->fl_mu);
+
 	if (atomic_load_explicit(&w->failed, memory_order_acquire)) {
-		status = XTC_E_IO;
-	} else {
-		rc = xtc_aio_pwrite(w->fd, w->bbuf, (uint32_t)w->blen,
-		    (int64_t)w->off);
-		if (rc != (int)w->blen)
-			status = XTC_E_IO;
+		ok = 0;
+	} else if (upto > atomic_load_explicit(&w->durable_off, memory_order_relaxed)) {
+		size_t at = (size_t)(from & (WAL_RING - 1));
+		size_t n = (size_t)(upto - from), k = WAL_RING - at;
+		if (n == 0) {
+			ok = 1;               /* written directly; only sync it */
+		} else if (n <= k) {
+			ok = xtc_aio_pwrite(w->fd, w->ring + at, (uint32_t)n,
+			    (int64_t)from) == (int)n;
+		} else {
+			ok = xtc_aio_pwrite(w->fd, w->ring + at, (uint32_t)k,
+			    (int64_t)from) == (int)k &&
+			    xtc_aio_pwrite(w->fd, w->ring, (uint32_t)(n - k),
+			    (int64_t)(from + k)) == (int)(n - k);
+		}
 #if XTC_DST_BUG(XTC_DST_BUG_NODURABLE)
-		/* planted bug: skip the fdatasync but still ack below -> an
-		 * acked commit is not durable across a crash */
+		/* planted bug: skip the fdatasync but still report durable */
 #else
-		else if (xtc_aio_fdatasync(w->fd) != 0)
-			status = XTC_E_IO;
+		if (ok && xtc_aio_fdatasync(w->fd) != 0)
+			ok = 0;
 #endif
 	}
 
-	if (status == XTC_OK) {
-		w->off += (off_t)w->blen;
-		atomic_store_explicit(&w->durable_off, (uint64_t)w->off,
-		    memory_order_release);
-		atomic_store_explicit(&w->durable_lsn,
-		    w->pend[w->pcount - 1].lsn, memory_order_release);
+	(void)pthread_mutex_lock(&w->fl_mu);
+	if (ok) {
+		atomic_store_explicit(&w->written, upto, memory_order_release);
+		if (upto > atomic_load_explicit(&w->durable_off, memory_order_relaxed)) {
+			atomic_store_explicit(&w->durable_off, upto, memory_order_release);
+			atomic_store_explicit(&w->durable_lsn, lsn_upto, memory_order_release);
+		}
 		w->s_batches++;
-		w->s_commits += w->pcount;
-		if (w->pcount > w->s_maxbatch)
-			w->s_maxbatch = w->pcount;
+		w->s_commits += nrec;
+		if (nrec > w->s_maxbatch) w->s_maxbatch = nrec;
 	} else {
 		atomic_store_explicit(&w->failed, 1, memory_order_release);
-		w->s_failed += w->pcount;
+		w->s_failed += nrec;
 	}
-
-	for (i = 0; i < w->pcount; i++) {
-		ack.txn_id = w->pend[i].txn_id;
-		ack.lsn = status == XTC_OK ? w->pend[i].lsn : 0;
-		ack.status = status;
-		/* A full mailbox (XTC_E_AGAIN, soft backpressure) must not drop
-		 * the ack: the committer is parked on it forever otherwise.
-		 * Any other error means the committer is gone. */
-		while (xtc_send(w->pend[i].reply_to, &ack, sizeof ack) ==
-		    XTC_E_AGAIN)
-			(void)xtc_proc_sleep(10LL * 1000);
-	}
-	w->blen = 0;
-	w->pcount = 0;
 }
 
+/* Wait (fl_mu held; returns with it held) until `need` is durable, the
+ * log fails, or this committer is handed the leadership. */
+static void
+wal_wait_locked(wal_t *w, uint64_t need)
+{
+	struct wal_waiter *q = w->wfree, **pp;
+	if (q != NULL) {
+		w->wfree = q->next;
+	} else {
+		q = calloc(1, sizeof *q);
+		if (q == NULL || xtc_notify_create(&q->n) != XTC_OK) {
+			/* no waiter object: poll instead */
+			free(q);
+			(void)pthread_mutex_unlock(&w->fl_mu);
+			if (xtc_pid_is_none(xtc_self())) (void)xtc_sleep_ns(20000);
+			else (void)xtc_proc_sleep(20000);
+			(void)pthread_mutex_lock(&w->fl_mu);
+			return;
+		}
+	}
+	q->need = need;
+	q->baton = 0;
+	for (pp = &w->wq; *pp != NULL && (*pp)->need <= need; pp = &(*pp)->next)
+		;
+	q->next = *pp;
+	*pp = q;
+	(void)pthread_mutex_unlock(&w->fl_mu);
+	(void)xtc_notify_wait(q->n, -1);
+	(void)pthread_mutex_lock(&w->fl_mu);
+	/* A covered waiter was unlinked by the waker; a baton holder too.
+	 * Unlink defensively (a stored signal from an earlier round). */
+	for (pp = &w->wq; *pp != NULL; pp = &(*pp)->next)
+		if (*pp == q) { *pp = q->next; break; }
+	if (q->baton) {
+		q->baton = 0;
+		w->flushing = 0;             /* the caller re-claims it below */
+	}
+	q->next = w->wfree;
+	w->wfree = q;
+}
+
+/* fl_mu held: make `need` durable -- lead a flush, or wait for one. */
+static int
+wal_durable_locked(wal_t *w, uint64_t need)
+{
+	for (;;) {
+		if (atomic_load_explicit(&w->durable_off, memory_order_acquire) >= need) {
+			/* Covered.  A baton holder that turns out to be covered
+			 * (noxu's handoff) passes the leadership on, so the
+			 * waiters behind it are never left without a leader. */
+			if (!w->flushing && w->wq != NULL)
+				wal_wake_locked(w, atomic_load_explicit(&w->durable_off,
+				    memory_order_relaxed), 1);
+			return XTC_OK;
+		}
+		if (atomic_load_explicit(&w->failed, memory_order_acquire)) {
+			wal_wake_locked(w, UINT64_MAX, 0);   /* fail them all */
+			return XTC_E_IO;
+		}
+		if (!w->flushing) {
+			w->flushing = 1;
+			wal_flush_locked(w, need);
+			w->flushing = 0;
+			wal_wake_locked(w, atomic_load_explicit(&w->failed,
+			    memory_order_acquire) ? UINT64_MAX :
+			    atomic_load_explicit(&w->durable_off, memory_order_relaxed), 1);
+			continue;
+		}
+		wal_wait_locked(w, need);
+	}
+}
+
+/* Sleep briefly: park a fiber, block a thread. */
+static void
+wal_nap(void)
+{
+	if (xtc_pid_is_none(xtc_self()))
+		(void)xtc_sleep_ns(20LL * 1000);
+	else
+		(void)xtc_proc_sleep(20LL * 1000);
+}
+
+/*
+ * A record bigger than a quarter of the log buffer (a bulk transaction)
+ * is written straight to the file, as JE writes an oversized entry and
+ * WiredTiger an "unbuffered" one.  The `direct` flag (under res_mu) holds
+ * off new reservations -- they nap and retry rather than block, because
+ * the writer parks (its own flush, xtc_aio) and a fiber blocked on a
+ * pthread mutex would stall the loop that parked fiber needs.  Then:
+ * make everything reserved before it durable, reserve its range, pwrite
+ * it, and publish it like a copied record, so a leader fdatasyncs it with
+ * nothing left to write for it.  Rare (bulk loads), so serializing the log
+ * behind it is fine.
+ */
+static uint64_t
+wal_append_direct(wal_t *w, const void *record, uint32_t len, uint64_t *end,
+    int *rc)
+{
+	uint64_t need = (uint64_t)WAL_REC_HDR + len + WAL_REC_CRC, start, lsn, crc;
+	uint64_t target;
+	uint8_t hdr[WAL_REC_HDR], trl[WAL_REC_CRC];
+	struct wal_slot *s;
+	uint32_t done;
+	int ok;
+
+	for (;;) {                       /* one direct writer at a time */
+		(void)pthread_mutex_lock(&w->res_mu);
+		if (!w->direct)
+			break;
+		(void)pthread_mutex_unlock(&w->res_mu);
+		wal_nap();
+	}
+	w->direct = 1;
+	target = w->res_pos;
+	(void)pthread_mutex_unlock(&w->res_mu);
+
+	(void)pthread_mutex_lock(&w->fl_mu);
+	*rc = wal_durable_locked(w, target);   /* everything before it */
+	(void)pthread_mutex_unlock(&w->fl_mu);
+	(void)pthread_mutex_lock(&w->res_mu);
+	if (*rc != XTC_OK) {
+		w->direct = 0;
+		(void)pthread_mutex_unlock(&w->res_mu);
+		return 0;
+	}
+	lsn = ++w->next_lsn;
+	start = w->res_pos;              /* == target: nobody reserved since */
+	w->res_pos = start + need;
+	w->off = (off_t)w->res_pos;
+	(void)pthread_mutex_unlock(&w->res_mu);
+
+	memcpy(hdr, &lsn, 8);
+	memcpy(hdr + 8, &len, 4);
+	crc = wal_rec_crc(lsn, len, record);
+	memcpy(trl, &crc, WAL_REC_CRC);
+	ok = xtc_aio_pwrite(w->fd, hdr, WAL_REC_HDR, (int64_t)start) == (int)WAL_REC_HDR;
+	for (done = 0; ok && done < len; ) {
+		uint32_t k = len - done < (1u << 24) ? len - done : (1u << 24);
+		ok = xtc_aio_pwrite(w->fd, (const uint8_t *)record + done, k,
+		    (int64_t)(start + WAL_REC_HDR + done)) == (int)k;
+		done += k;
+	}
+	ok = ok && xtc_aio_pwrite(w->fd, trl, WAL_REC_CRC,
+	    (int64_t)(start + WAL_REC_HDR + len)) == (int)WAL_REC_CRC;
+
+	(void)pthread_mutex_lock(&w->fl_mu);
+	if (ok) {
+		/* in the page cache: the next leader only needs to sync it */
+		atomic_store_explicit(&w->written, start + need, memory_order_release);
+		s = &w->slot[lsn & (WAL_SLOTS - 1)];
+		s->end = start + need;
+		atomic_store_explicit(&s->lsn, lsn, memory_order_release);
+		atomic_fetch_add_explicit(&w->s_bytes, len, memory_order_relaxed);
+	} else {
+		/* fail-stop: the reserved range is never published, so no LSN
+		 * after it can become durable either */
+		atomic_store_explicit(&w->failed, 1, memory_order_release);
+		w->s_failed++;
+		wal_wake_locked(w, UINT64_MAX, 0);
+	}
+	(void)pthread_mutex_unlock(&w->fl_mu);
+	(void)pthread_mutex_lock(&w->res_mu);
+	w->direct = 0;
+	(void)pthread_mutex_unlock(&w->res_mu);
+	if (!ok) {
+		*rc = XTC_E_IO;
+		return 0;
+	}
+	*end = start + need;
+	*rc = XTC_OK;
+	return lsn;
+}
+
+/* Reserve room for one record and copy it in.  Returns its LSN and end
+ * position, or 0 (*rc set) on failure.  Never holds a lock while copying. */
+static uint64_t
+wal_append(wal_t *w, const void *record, uint32_t len, uint64_t *end, int *rc)
+{
+	uint64_t need = (uint64_t)WAL_REC_HDR + len + WAL_REC_CRC, start, lsn, crc;
+	uint8_t hdr[WAL_REC_HDR], trl[WAL_REC_CRC];
+	struct wal_slot *s;
+
+	if (need > WAL_RING / 4)
+		return wal_append_direct(w, record, len, end, rc);
+	for (;;) {
+		(void)pthread_mutex_lock(&w->res_mu);
+		if (atomic_load_explicit(&w->failed, memory_order_acquire)) {
+			(void)pthread_mutex_unlock(&w->res_mu);
+			*rc = XTC_E_IO;
+			return 0;
+		}
+		if (w->direct) {             /* a big record is being written */
+			(void)pthread_mutex_unlock(&w->res_mu);
+			wal_nap();
+			continue;
+		}
+		/* Room in the ring (the oldest unwritten byte must not be
+		 * overwritten) and a free completion slot for the LSN. */
+		if (w->res_pos + need - atomic_load_explicit(&w->written,
+		    memory_order_acquire) <= WAL_RING &&
+		    w->next_lsn + 1 - atomic_load_explicit(&w->durable_lsn,
+		    memory_order_acquire) < WAL_SLOTS)
+			break;
+		{
+			uint64_t target = w->res_pos;
+			(void)pthread_mutex_unlock(&w->res_mu);
+			/* Full: make what is reserved so far durable, then retry. */
+			(void)pthread_mutex_lock(&w->fl_mu);
+			*rc = wal_durable_locked(w, target);
+			(void)pthread_mutex_unlock(&w->fl_mu);
+			if (*rc != XTC_OK)
+				return 0;
+		}
+	}
+	lsn = ++w->next_lsn;
+	start = w->res_pos;
+	w->res_pos += need;
+	w->off = (off_t)w->res_pos;
+	(void)pthread_mutex_unlock(&w->res_mu);
+
+	memcpy(hdr, &lsn, 8);
+	memcpy(hdr + 8, &len, 4);
+	crc = wal_rec_crc(lsn, len, record);
+	memcpy(trl, &crc, WAL_REC_CRC);
+	ring_put(w, start, hdr, WAL_REC_HDR);
+	if (len)
+		ring_put(w, start + WAL_REC_HDR, record, len);
+	ring_put(w, start + WAL_REC_HDR + len, trl, WAL_REC_CRC);
+	s = &w->slot[lsn & (WAL_SLOTS - 1)];
+	s->end = start + need;
+	atomic_store_explicit(&s->lsn, lsn, memory_order_release);   /* publish */
+	atomic_fetch_add_explicit(&w->s_bytes, len, memory_order_relaxed);
+	*end = start + need;
+	*rc = XTC_OK;
+	return lsn;
+}
+
+static int
+wal_commit_any(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
+{
+	uint64_t my_lsn, end = 0;
+	int rc;
+
+	if (w == NULL || (record == NULL && len != 0))
+		return XTC_E_INVAL;
+	if ((my_lsn = wal_append(w, record, len, &end, &rc)) == 0)
+		return rc;
+	(void)pthread_mutex_lock(&w->fl_mu);
+	rc = wal_durable_locked(w, end);
+	(void)pthread_mutex_unlock(&w->fl_mu);
+	if (rc == XTC_OK && lsn != NULL)
+		*lsn = my_lsn;
+	return rc;
+}
+
+/*
+ * The writer proc no longer carries the log: every committer appends and
+ * group-commits itself.  It is kept as a proc a caller can spawn and stop
+ * (tests and the engine do), flushing whatever is reserved but not yet
+ * durable when it is told to stop.
+ */
 static void
 wal_writer_proc(void *arg)
 {
 	wal_t *w = arg;
-
 	for (;;) {
 		void *m = NULL;
 		size_t n = 0;
-		struct wal_msg *msg;
-		int stop = 0;
-
-		/* Block for the first record of a batch. */
 		if (xtc_recv(&m, &n, -1) != XTC_OK || m == NULL)
 			continue;
-		msg = m;
-		if (msg->kind == WAL_KIND_STOP) {
+		if (n >= 1 && ((const uint8_t *)m)[0] == WAL_KIND_STOP) {
 			free(m);
 			break;
 		}
-		(void)batch_add(w, msg->data, msg->len, msg->reply_to, msg->txn_id);
 		free(m);
-
-		/*
-		 * Pipelined group commit: drain everything already queued
-		 * (non-blocking) and flush it at once -- no fixed gather window.
-		 * batch_flush parks the writer on the fsync, so commits that
-		 * arrive while that fsync is in flight queue in the mailbox and
-		 * form the next batch.  The batch size therefore self-tunes to
-		 * the fsync latency x arrival rate: a lone committer pays just
-		 * one fsync (no added window latency -- which on fast storage
-		 * would otherwise make group commit lose to a direct synchronous
-		 * commit), while under load many commits coalesce per fsync.
-		 */
-		while (w->pcount < w->max_batch) {
-			/* Buggify: flush a TINY batch instead of coalescing all
-			 * queued commits.  Group commit makes no maximal-batching
-			 * promise -- each committer is still durably fsync'd -- so
-			 * stopping the drain early is legal, and it stresses
-			 * crash-recovery with more, smaller batches (more fsync /
-			 * torn-tail boundaries).  Per-call BUGGIFY coin (fixed per
-			 * site per run, replays); a no-op in production. */
-			if (XTC_SIM_BUGGIFY("wal.flush.tiny_batch") &&
-			    xtc_sim_buggify_fault(300))
-				break;
-			m = NULL; n = 0;
-			if (xtc_recv(&m, &n, 0) != XTC_OK || m == NULL)
-				break;               /* nothing more queued right now */
-			msg = m;
-			if (msg->kind == WAL_KIND_STOP) {
-				stop = 1;
-				free(m);
-				break;
-			}
-			(void)batch_add(w, msg->data, msg->len, msg->reply_to,
-			    msg->txn_id);
-			free(m);
-		}
-
-		batch_flush(w);
-		if (stop)
-			break;
 	}
+	(void)pthread_mutex_lock(&w->fl_mu);
+	(void)wal_durable_locked(w, w->res_pos);
+	(void)pthread_mutex_unlock(&w->fl_mu);
 	atomic_store_explicit(&w->writer_alive, 0, memory_order_release);
 }
 
@@ -488,180 +789,13 @@ wal_writer_pid(const wal_t *w)
 int
 wal_commit(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
 {
-	struct wal_msg *msg;
-	struct wal_ack *ack;
-	void *am = NULL;
-	size_t an = 0;
-	size_t msz;
-	uint64_t txn_id;
-	int rc;
-
-	if (w == NULL || (record == NULL && len != 0))
-		return XTC_E_INVAL;
-	if (atomic_load_explicit(&w->failed, memory_order_acquire))
-		return XTC_E_IO;          /* fail-stop: the log is poisoned */
-
-	msz = sizeof *msg + len;
-	msg = malloc(msz);
-	if (msg == NULL)
-		return XTC_E_NOMEM;
-	msg->kind = WAL_KIND_COMMIT;
-	msg->reply_to = xtc_self();
-	/* A per-committer correlation id; the writer echoes it back. */
-	txn_id = ((uint64_t)(uintptr_t)msg);
-	msg->txn_id = txn_id;
-	msg->len = len;
-	if (len)
-		memcpy(msg->data, record, len);
-
-	/* The writer's mailbox is a soft cap: retry on XTC_E_AGAIN rather
-	 * than fail the commit for backpressure. */
-	while ((rc = xtc_send(w->writer_pid, msg, msz)) == XTC_E_AGAIN)
-		(void)xtc_proc_sleep(10LL * 1000);
-	free(msg);
-	if (rc != XTC_OK)
-		return rc;
-
-	/* Park on the ack.  In this stage the committer receives only
-	 * acks, so a plain recv suffices; a committer that also receives
-	 * other traffic would use xtc_recv_correlate on txn_id. */
-	rc = xtc_recv(&am, &an, -1);
-	if (rc != XTC_OK)
-		return rc;
-	if (am == NULL || an < sizeof *ack) {
-		free(am);
-		return XTC_E_INTERNAL;
-	}
-	ack = am;
-	rc = ack->status;
-	if (rc == XTC_OK && lsn != NULL)
-		*lsn = ack->lsn;
-	free(am);
-	return rc;
-}
-
-/* Caller holds sync_mu: append one framed record to gbuf, taking the
- * next LSN.  Returns the LSN, or 0 (XTC_E_NOMEM: nothing appended). */
-static uint64_t
-wal_gbuf_add(wal_t *w, const void *record, uint32_t len)
-{
-	size_t need = WAL_REC_HDR + len + WAL_REC_CRC;
-	uint64_t lsn, crc;
-	if (w->glen + need > w->gcap) {
-		size_t ncap = w->gcap ? w->gcap : 64 * 1024;
-		uint8_t *nb;
-		while (ncap < w->glen + need)
-			ncap *= 2;
-		if ((nb = realloc(w->gbuf, ncap)) == NULL)
-			return 0;
-		w->gbuf = nb;
-		w->gcap = ncap;
-	}
-	lsn = ++w->next_lsn;
-	memcpy(w->gbuf + w->glen, &lsn, 8);
-	memcpy(w->gbuf + w->glen + 8, &len, 4);
-	if (len)
-		memcpy(w->gbuf + w->glen + WAL_REC_HDR, record, len);
-	crc = wal_rec_crc(lsn, len, record);
-	memcpy(w->gbuf + w->glen + WAL_REC_HDR + len, &crc, WAL_REC_CRC);
-	w->glen += need;
-	w->gcount++;
-	w->s_bytes += len;
-	return lsn;
-}
-
-/* Leader, entered and left holding sync_mu with g_flushing set by the
- * caller: write + fdatasync the current batch with the mutex dropped. */
-static void
-wal_gbuf_flush(wal_t *w)
-{
-	uint8_t *buf = w->gbuf;
-	size_t blen = w->glen, done = 0, cap = w->gcap;
-	uint32_t count = w->gcount;
-	uint64_t last = w->next_lsn;
-	off_t off = w->off;
-	int ok = 1;
-
-	/* Hand the followers an empty buffer for the next batch. */
-	w->gbuf = w->gspare; w->gcap = w->gspare_cap;
-	w->gspare = NULL; w->gspare_cap = 0;
-	w->glen = 0; w->gcount = 0;
-	(void)pthread_mutex_unlock(&w->sync_mu);
-	while (ok && done < blen) {
-		ssize_t n = pwrite(w->fd, buf + done, blen - done, off + (off_t)done);
-		if (n < 0 && errno == EINTR)
-			continue;
-		if (n <= 0)
-			ok = 0;
-		else
-			done += (size_t)n;
-	}
-#if XTC_DST_BUG(XTC_DST_BUG_NODURABLE)
-	/* planted bug: skip the fdatasync but still report durable */
-#else
-	if (ok && fdatasync(w->fd) != 0)
-		ok = 0;
-#endif
-	(void)pthread_mutex_lock(&w->sync_mu);
-	if (ok) {
-		w->off = off + (off_t)blen;
-		atomic_store_explicit(&w->durable_off, (uint64_t)w->off,
-		    memory_order_release);
-		atomic_store_explicit(&w->durable_lsn, last, memory_order_release);
-		w->s_batches++;
-		w->s_commits += count;
-		if (count > w->s_maxbatch)
-			w->s_maxbatch = count;
-	} else {
-		atomic_store_explicit(&w->failed, 1, memory_order_release);
-		w->s_failed += count;
-	}
-	/* Keep the flushed buffer as the next spare (no realloc churn). */
-	if (w->gspare == NULL) {
-		w->gspare = buf; w->gspare_cap = cap;
-	} else {
-		free(buf);
-	}
-	w->g_flushing = 0;
-	(void)pthread_cond_broadcast(&w->sync_cv);
+	return wal_commit_any(w, record, len, lsn);
 }
 
 int
 wal_commit_sync(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
 {
-	uint64_t my_lsn;
-	int rc = XTC_OK;
-
-	if (w == NULL || (record == NULL && len != 0))
-		return XTC_E_INVAL;
-
-	(void)pthread_mutex_lock(&w->sync_mu);
-	if (atomic_load_explicit(&w->failed, memory_order_acquire)) {
-		(void)pthread_mutex_unlock(&w->sync_mu);
-		return XTC_E_IO;
-	}
-	if ((my_lsn = wal_gbuf_add(w, record, len)) == 0) {
-		(void)pthread_mutex_unlock(&w->sync_mu);
-		return XTC_E_NOMEM;
-	}
-	for (;;) {
-		if (atomic_load_explicit(&w->durable_lsn, memory_order_acquire) >= my_lsn)
-			break;                   /* a leader flushed us */
-		if (atomic_load_explicit(&w->failed, memory_order_acquire)) {
-			rc = XTC_E_IO;           /* our batch (or an earlier one) failed */
-			break;
-		}
-		if (!w->g_flushing) {
-			w->g_flushing = 1;       /* lead: flush everything queued */
-			wal_gbuf_flush(w);
-		} else {
-			(void)pthread_cond_wait(&w->sync_cv, &w->sync_mu);
-		}
-	}
-	(void)pthread_mutex_unlock(&w->sync_mu);
-	if (rc == XTC_OK && lsn != NULL)
-		*lsn = my_lsn;
-	return rc;
+	return wal_commit_any(w, record, len, lsn);
 }
 
 int
@@ -683,10 +817,7 @@ wal_rebind_at(wal_t *w, const char *path, off_t off, uint64_t lsn)
 		return XTC_E_INTERNAL;
 	if (w->fd >= 0) close(w->fd);
 	w->fd = fd;
-	w->off = off;
-	w->next_lsn = lsn;
-	atomic_store_explicit(&w->durable_off, (uint64_t)off, memory_order_release);
-	atomic_store_explicit(&w->durable_lsn, lsn, memory_order_release);
+	wal_reset_marks(w, (uint64_t)off, lsn);
 	atomic_fetch_add_explicit(&w->gen, 1, memory_order_acq_rel);
 	return XTC_OK;
 }
@@ -936,7 +1067,9 @@ wal_ock_copy(wal_ock_t *k, off_t end, off_t max)
 				break;
 			memcpy(&lsn, k->rbuf + pos, 8);
 			memcpy(&len, k->rbuf + pos + 8, 4);
-			if (len > WAL_MAX_REC)
+			/* durable frames below `end`: a length past it is corrupt */
+			if ((off_t)WAL_REC_HDR + (off_t)len + (off_t)WAL_REC_CRC >
+			    end - (k->src_off + (off_t)pos))
 				return XTC_E_INTERNAL;
 			fl = WAL_REC_HDR + len + WAL_REC_CRC;
 			if (pos + fl > (size_t)n) {
@@ -1037,6 +1170,7 @@ wal_scan(const char *path, wal_replay_cb cb, void *user)
 	off_t off = 0;
 	uint8_t *buf = NULL;
 	size_t bufcap = 0;
+	off_t fsize;
 	int rc = XTC_OK;
 
 	if (path == NULL || cb == NULL)
@@ -1044,34 +1178,20 @@ wal_scan(const char *path, wal_replay_cb cb, void *user)
 	fd = open(path, O_RDONLY);
 	if (fd < 0)
 		return XTC_OK;                /* no log yet: nothing to replay */
+	fsize = wal_fsize(fd);
 	for (;;) {
-		uint8_t hdr[WAL_REC_HDR];
-		uint8_t trl[WAL_REC_CRC];
-		uint64_t lsn, crc, want;
+		uint64_t lsn;
 		uint32_t len;
-		ssize_t n = pread(fd, hdr, WAL_REC_HDR, off);
-		if (n != (ssize_t)WAL_REC_HDR)
-			break;                   /* EOF or torn header: stop at the tail */
-		memcpy(&lsn, hdr, 8);
-		memcpy(&len, hdr + 8, 4);
-		if (len > WAL_MAX_REC)
-			break;                /* garbage length: torn tail, stop */
+		/* Verified before anything is allocated (wal_frame_ok). */
+		if (!wal_frame_ok(fd, off, fsize, &lsn, &len))
+			break;                   /* the end, or a torn tail */
 		if (len > bufcap) {
 			uint8_t *nb = realloc(buf, len);
 			if (nb == NULL) { rc = XTC_E_NOMEM; break; }
 			buf = nb; bufcap = len;
 		}
-		n = pread(fd, buf, len, off + (off_t)WAL_REC_HDR);
-		if (n != (ssize_t)len)
-			break;                   /* torn record body: stop (crash tail) */
-		n = pread(fd, trl, WAL_REC_CRC,
-		    off + (off_t)WAL_REC_HDR + (off_t)len);
-		if (n != (ssize_t)WAL_REC_CRC)
-			break;                   /* torn trailer: stop (crash tail) */
-		memcpy(&crc, trl, WAL_REC_CRC);
-		want = wal_rec_crc(lsn, len, buf);
-		if (crc != want)
-			break;                   /* checksum mismatch: torn tail, stop */
+		if (len > 0 && pread(fd, buf, len, off + (off_t)WAL_REC_HDR) != (ssize_t)len)
+			break;
 		if (cb(lsn, buf, len, user) != 0)
 			break;
 		off += (off_t)WAL_REC_HDR + (off_t)len + (off_t)WAL_REC_CRC;
@@ -1086,15 +1206,18 @@ wal_truncate(wal_t *w)
 {
 	if (w == NULL)
 		return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&w->sync_mu);
+	(void)pthread_mutex_lock(&w->res_mu);
+	(void)pthread_mutex_lock(&w->fl_mu);
 	if (ftruncate(w->fd, 0) != 0) {
-		(void)pthread_mutex_unlock(&w->sync_mu);
+		(void)pthread_mutex_unlock(&w->fl_mu);
+		(void)pthread_mutex_unlock(&w->res_mu);
 		return XTC_E_INTERNAL;
 	}
-	w->off = 0;            /* next append at offset 0; next_lsn keeps rising */
-	atomic_store_explicit(&w->durable_off, 0, memory_order_release);
+	/* next append at offset 0; next_lsn keeps rising */
+	wal_reset_marks(w, 0, w->next_lsn);
 	atomic_fetch_add_explicit(&w->gen, 1, memory_order_acq_rel);
-	(void)pthread_mutex_unlock(&w->sync_mu);
+	(void)pthread_mutex_unlock(&w->fl_mu);
+	(void)pthread_mutex_unlock(&w->res_mu);
 	return XTC_OK;
 }
 
@@ -1158,7 +1281,7 @@ wal_get_stats(wal_t *w, wal_stats_t *out)
 		return;
 	out->commits = w->s_commits;
 	out->batches = w->s_batches;
-	out->bytes = w->s_bytes;
+	out->bytes = atomic_load_explicit(&w->s_bytes, memory_order_relaxed);
 	out->max_batch_seen = w->s_maxbatch;
 	out->durable_lsn = atomic_load_explicit(&w->durable_lsn, memory_order_relaxed);
 	out->failed = w->s_failed;
