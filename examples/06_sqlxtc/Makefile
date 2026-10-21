@@ -143,7 +143,7 @@ clean:
 	rm -f test_clean_restart test_dw_fail
 	rm -f test_steal
 	rm -f test_steal_page
-	rm -f test_wal_kill test_wal_tail test_wal_kill_engine
+	rm -f test_wal_kill test_wal_tail test_wal_kill_engine test_wal_get_tail
 	rm -f test_steal_leaf test_cat_reopen test_ckpt_online test_wal_group_sync test_intents_thread test_torn_base test_snap_registry test_rowid_minmax test_btree_fill test_wal_bigtxn test_steal_reclaim test_dio_restart test_wal_prealloc
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o test_bufmgr_dio test_bufmgr_dio.o
 	rm -f test_bufmgr_mt
@@ -567,7 +567,7 @@ test-drop-reserved: test_drop_reserved
 # is NOT in `test` yet: it hangs until xs_commit_ctx masks the commit
 # (a known engine defect in xstore.c).
 # test-wal-kill-preempt needs involuntary preemption (x86-64 glibc).
-test: test-wal-kill test-wal-tail
+test: test-wal-kill test-wal-tail test-wal-get-tail
 
 test_wal_kill: test_wal_kill.c wal.c wal.h
 	$(CC) $(CFLAGS) -o $@ test_wal_kill.c $(LDFLAGS)
@@ -584,6 +584,12 @@ test_wal_tail: test_wal_tail.c wal.c wal.h
 
 test-wal-tail: test_wal_tail
 	TMPDIR=$${TMPDIR:-/tmp} ./test_wal_tail
+
+test_wal_get_tail: test_wal_get_tail.c wal.c wal.h
+	$(CC) $(CFLAGS) -o $@ test_wal_get_tail.c wal.c $(LDFLAGS)
+
+test-wal-get-tail: test_wal_get_tail
+	TMPDIR=$${TMPDIR:-/tmp} ./test_wal_get_tail
 
 test_wal_kill_engine: test_wal_kill_engine.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
 	$(CC) $(CFLAGS) -o $@ test_wal_kill_engine.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
