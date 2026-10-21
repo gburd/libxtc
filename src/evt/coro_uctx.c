@@ -311,6 +311,80 @@ __xtc_coro_preempt_effective(void)
 #endif
 }
 
+#if defined(__x86_64__) && defined(__linux__) && !defined(__APPLE__) && !defined(XTC_AMALGAMATION)
+#include <cpuid.h>
+/*
+ * The vector state the x86-64 trampoline saves (preempt_trampoline_x86_64.S
+ * reads both words): an XSAVE feature mask and the XSAVE area size, or a
+ * zero mask for its FXSAVE path.  FXSAVE alone covers only x87 and
+ * XMM0-15's low halves, so a fiber preempted inside AVX code (glibc's
+ * memcpy on an AVX-512 host) resumed with another fiber's YMM upper
+ * halves, ZMM16-31 and opmask registers (test/m14/test_preempt_p2
+ * /vector_state: 100 of 69k checks corrupted per 0.4 s run before).
+ *
+ * The mask is XCR0 limited to x87, SSE, AVX, opmask and the two ZMM
+ * components: the state a fiber's own code can hold live across an
+ * arbitrary instruction.  AMX tile data (8 KiB) is left out on purpose
+ * -- it would put ~11 KiB on a 64 KiB fiber stack, and Linux gates AMX
+ * behind an explicit per-process permission request.  Probed once (CPUID
+ * and XGETBV are plain instructions, safe in the signal handler that
+ * calls this); the size is published before the mask so a trampoline
+ * that sees the mask also sees the size (x86 store order).
+ */
+extern uint64_t __xtc_preempt_xsave_mask __attribute__((visibility("hidden")));
+extern uint64_t __xtc_preempt_xsave_size __attribute__((visibility("hidden")));
+static _Atomic int g_xsave_probed;
+
+/*
+ * The interrupted PC, handed from the signal handler to the trampoline
+ * on the same thread (sigreturn resumes the thread that took the
+ * signal, and the trampoline reads it before its first yield).  It used
+ * to be stored on the fiber stack at orig_sp - 8 -- inside the
+ * interrupted code's red zone, which the ABI promises a signal handler
+ * never touches.  A nested tick cannot overwrite it: g_in_preempt stays
+ * raised until the trampoline's xtc_yield, and the handler declines
+ * while it is.
+ */
+static XTC_THREAD_LOCAL uintptr_t g_preempt_pc;
+__attribute__((visibility("hidden"))) uintptr_t
+__xtc_preempt_take_pc(void);              /* called from the trampoline */
+uintptr_t
+__xtc_preempt_take_pc(void)
+{
+	return g_preempt_pc;
+}
+
+#define XTC_XSAVE_WANT 0xE7ull   /* x87 SSE AVX opmask ZMM_Hi256 Hi16_ZMM */
+
+static void
+__preempt_xsave_probe(void)
+{
+	unsigned a, b, c, d, i, lo, hi;
+	uint64_t mask, size = 576;       /* legacy area + XSAVE header */
+
+	if (atomic_load_explicit(&g_xsave_probed, memory_order_acquire))
+		return;
+	mask = 0;
+	if (__get_cpuid(1, &a, &b, &c, &d) && (c & bit_OSXSAVE) != 0 &&
+	    __get_cpuid_max(0, NULL) >= 0xD) {
+		__asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+		mask = (((uint64_t)hi << 32) | lo) & XTC_XSAVE_WANT;
+		for (i = 2; i < 8; i++) {
+			if ((mask & (1ull << i)) == 0)
+				continue;
+			__cpuid_count(0xD, i, a, b, c, d);   /* a size, b offset */
+			if ((uint64_t)a + b > size)
+				size = (uint64_t)a + b;
+		}
+		size = (size + 63) & ~63ull;
+	}
+	__xtc_preempt_xsave_size = size;
+	atomic_signal_fence(memory_order_release);
+	__xtc_preempt_xsave_mask = mask;
+	atomic_store_explicit(&g_xsave_probed, 1, memory_order_release);
+}
+#endif
+
 /*
  * PUBLIC: int __xtc_coro_preempt __P((void *));
  *
@@ -375,6 +449,7 @@ __xtc_coro_preempt(void *uctx)
 		return 0;   /* not in a fiber; leave the tick pending */
 	if (g_in_preempt > 0)
 		return 0;   /* inside a swapcontext or a redirect in flight */
+	__preempt_xsave_probe();   /* once: what the trampoline must save */
 
 	orig_pc = uc->uc_mcontext.gregs[REG_RIP];
 	orig_sp = uc->uc_mcontext.gregs[REG_RSP];
@@ -392,16 +467,15 @@ __xtc_coro_preempt(void *uctx)
 		return 0;
 
 	/*
-	 * Push the original PC as the trampoline's return address, so its
-	 * terminal `ret` resumes at orig_pc with RSP == orig_sp exactly.
-	 * Entry RSP for the trampoline is orig_sp - 8; the trampoline
-	 * itself drops past the 128-byte red zone before saving anything,
-	 * so this single 8-byte store is the only write above the
-	 * interrupted RSP and it lands in the red zone (which the
-	 * interrupted code cannot rely on across an asynchronous event).
+	 * Enter the trampoline BELOW the interrupted code's 128-byte red
+	 * zone plus an 8-byte slot the trampoline fills with orig_pc, so its
+	 * terminal `ret $128` resumes at orig_pc with RSP == orig_sp
+	 * exactly.  Nothing at or above orig_sp - 128 is written: a leaf
+	 * function may keep live data there across any instruction,
+	 * asynchronous events included (SysV x86-64 ABI 3.2.2).
 	 */
-	new_sp = orig_sp - 8;
-	*(greg_t *)(uintptr_t)new_sp = orig_pc;
+	new_sp = orig_sp - 136;
+	g_preempt_pc = (uintptr_t)orig_pc;
 
 	g_in_preempt++;
 	uc->uc_mcontext.gregs[REG_RSP] = new_sp;
@@ -497,10 +571,15 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 	__san_switch_to(&__san_sched_fake, __san_coro_bottom(c), c->stack_sz);
 	__tsan_switch_into(c);
 	(void)swapcontext(&c->loop_ctx, &c->ctx);
-	g_in_preempt = 0;
 	__san_switch_done(__san_sched_fake);   /* back on the scheduler stack */
 
+	/* Restore the cursor BEFORE dropping the guard: with the guard down
+	 * and the cursor still naming c, a tick would take the scheduler
+	 * for fiber c and redirect it through the trampoline, whose yield
+	 * then saves the scheduler's context into c (a SIGSEGV here, under
+	 * test_wal_kill preempt-nokill). */
 	__xtc_current_coro = saved;
+	g_in_preempt = 0;
 
 	if (c->done) {
 		if (c->waiter != NULL) {
