@@ -200,6 +200,8 @@ enum {
 int xstore_rec_col(const uint8_t *rec, int reclen, int idx,
                    int64_t *iout, double *rout,
                    const uint8_t **pout, int *nout);
+/* Number of payload columns in a record (0 for an empty one). */
+int xstore_rec_ncol(const uint8_t *rec, int reclen);
 
 /*
  * Native autocommit write path -- the storage side of bypassing the

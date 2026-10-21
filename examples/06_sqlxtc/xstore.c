@@ -2856,6 +2856,13 @@ xstore_rec_col(const uint8_t *rec, int reclen, int idx,
 	return XSTORE_C_NULL;   /* idx beyond the record */
 }
 
+/* Number of payload columns in a record (0 for an empty / NULL one). */
+int
+xstore_rec_ncol(const uint8_t *rec, int reclen)
+{
+	return (rec == NULL || reclen < 1) ? 0 : rec[0];
+}
+
 /* ---- native autocommit write path (VDBE-free INSERT) ------------- */
 
 int

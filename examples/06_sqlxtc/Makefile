@@ -148,7 +148,7 @@ clean:
 	rm -f test_bufmgr_mt
 	rm -f test_drop_reserved test_evict_revalidate_sampled
 	rm -f test_scan_resist test_sweep_bound test_evict_revalidate test_btree_late_load test_flush_pin test_trickler_select test_pp_slice test_tr_slice test_publication_pin test_private_frame test_pid_writeback bm_sweep_bench
-	rm -f test_persist test_btree_prefix_split
+	rm -f test_persist test_btree_prefix_split sx_size
 	rm -f test_cursor_resume
 	rm -f test_btnode
 	rm -f test_btree
@@ -864,3 +864,9 @@ test_btree_prefix_split: test_btree_prefix_split.c engine.o db.o quack.o metrics
 test-btree-prefix-split: test_btree_prefix_split
 	TMPDIR=$${TMPDIR:-/tmp} ./test_btree_prefix_split
 
+# ---- store size attribution (offline, read-only) ----
+# sx_size STORE.xstore [STORE.xstore-wal]: bytes per table / index /
+# out-of-line page / unreachable page, fill factors, record encodings,
+# and the log by record type.  Run it on a closed store.
+sx_size: sx_size.c xstore.o btnode.o wal.o xlog.o engine.o db.o quack.o metrics.o btree.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ sx_size.c xstore.o btnode.o wal.o xlog.o engine.o db.o quack.o metrics.o btree.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
