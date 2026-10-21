@@ -148,7 +148,7 @@ clean:
 	rm -f test_bufmgr_mt
 	rm -f test_drop_reserved test_evict_revalidate_sampled
 	rm -f test_scan_resist test_sweep_bound test_evict_revalidate test_btree_late_load test_flush_pin test_trickler_select test_pp_slice test_tr_slice test_publication_pin test_private_frame test_pid_writeback bm_sweep_bench
-	rm -f test_persist test_btree_prefix_split sx_size
+	rm -f test_persist test_btree_prefix_split sx_size test_rec_codec
 	rm -f test_cursor_resume
 	rm -f test_btnode
 	rm -f test_btree
@@ -863,6 +863,16 @@ test_btree_prefix_split: test_btree_prefix_split.c engine.o db.o quack.o metrics
 
 test-btree-prefix-split: test_btree_prefix_split
 	TMPDIR=$${TMPDIR:-/tmp} ./test_btree_prefix_split
+
+test: test-rec-codec
+
+# The row record codec: round trip of every class and width edge, the
+# size of a TPC-C row, 1.59 records still decode, truncations in bounds.
+test_rec_codec: test_rec_codec.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ test_rec_codec.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
+
+test-rec-codec: test_rec_codec
+	./test_rec_codec
 
 # ---- store size attribution (offline, read-only) ----
 # sx_size STORE.xstore [STORE.xstore-wal]: bytes per table / index /

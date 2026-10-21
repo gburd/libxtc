@@ -55,6 +55,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>        /* signbit: the record codec keeps -0.0 */
 #include <string.h>
 #include <strings.h>     /* strcasecmp: SQL table names are case-insensitive */
 
@@ -2112,39 +2113,8 @@ typedef struct xstore_cursor {
 static const xsql_module xstore_module;   /* fwd */
 #endif
 
-/*
- * Record codec.  A version's payload is the non-key columns of one row,
- * encoded type-preserving so a multi-column table round-trips every
- * SQLite type (the old single-blob payload coerced everything to a
- * blob).  Layout:
- *
- *   [ncol:u8]  then per column  [type:u8][payload]
- *     type 0 NULL    -- no payload
- *     type 1 INTEGER -- 8 bytes, little-endian int64
- *     type 2 FLOAT   -- 8 bytes, little-endian IEEE-754 bit pattern
- *     type 3 TEXT    -- [len:u32 LE][bytes]
- *     type 4 BLOB    -- [len:u32 LE][bytes]
- *
- * The btree value is still [flag:u8][record] (xs_put prepends the
- * tombstone flag), so the deleted-version path is unchanged.
- */
-#if defined(SQLXTC_VTAB)
-static void
-put_u32(uint8_t *p, uint32_t v)
-{
-	p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
-	p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
-}
-#endif /* SQLXTC_VTAB */
-
-#if defined(SQLXTC_VTAB)
-static uint32_t
-get_u32(const uint8_t *p)
-{
-	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-	       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-#endif /* SQLXTC_VTAB */
+/* The record codec (xstore_rec_put / xstore_rec_col) is defined with the
+ * scan API below. */
 
 /* Encode `npay` payload values into `out` (capacity `cap`).  Returns the
  * encoded length, or -1 if it would overflow `cap` / 255 columns. */
@@ -2152,92 +2122,48 @@ get_u32(const uint8_t *p)
 static int
 xs_rec_encode(xsql_value **vals, int npay, uint8_t *out, int cap)
 {
-	int off = 0, i, b;
+	int off = 0, i;
 	if (npay < 0 || npay > 255 || cap < 1)
 		return -1;
 	out[off++] = (uint8_t)npay;
-	for (i = 0; i < npay; i++) {
+	for (i = 0; i < npay && off >= 0; i++) {
 		xsql_value *v = vals[i];
 		int t = xsql_value_type(v);
-		if (t == SQLITE_NULL) {
-			if (off + 1 > cap) return -1;
-			out[off++] = 0;
-		} else if (t == SQLITE_INTEGER) {
-			int64_t x = xsql_value_int64(v);
-			if (off + 9 > cap) return -1;
-			out[off++] = 1;
-			for (b = 0; b < 8; b++) out[off++] = (uint8_t)(x >> (8 * b));
-		} else if (t == SQLITE_FLOAT) {
-			double d = xsql_value_double(v);
-			uint64_t bits;
-			memcpy(&bits, &d, 8);
-			if (off + 9 > cap) return -1;
-			out[off++] = 2;
-			for (b = 0; b < 8; b++) out[off++] = (uint8_t)(bits >> (8 * b));
-		} else {
-			/* TEXT or BLOB: [type][len:u32][bytes]. */
-			int n = xsql_value_bytes(v);
-			const void *p = (t == SQLITE_TEXT)
-			    ? (const void *)xsql_value_text(v)
-			    : xsql_value_blob(v);
-			if (n < 0) n = 0;
-			if (off + 5 + n > cap) return -1;
-			out[off++] = (t == SQLITE_TEXT) ? 3 : 4;
-			put_u32(out + off, (uint32_t)n); off += 4;
-			if (n) memcpy(out + off, p, (size_t)n);
-			off += n;
-		}
+		if (t == SQLITE_NULL)
+			off = xstore_rec_put(out, off, cap, XSTORE_C_NULL, 0, 0, NULL, 0);
+		else if (t == SQLITE_INTEGER)
+			off = xstore_rec_put(out, off, cap, XSTORE_C_INT,
+			    xsql_value_int64(v), 0, NULL, 0);
+		else if (t == SQLITE_FLOAT)
+			off = xstore_rec_put(out, off, cap, XSTORE_C_REAL, 0,
+			    xsql_value_double(v), NULL, 0);
+		else if (t == SQLITE_TEXT)
+			off = xstore_rec_put(out, off, cap, XSTORE_C_TEXT, 0, 0,
+			    (const uint8_t *)xsql_value_text(v), xsql_value_bytes(v));
+		else
+			off = xstore_rec_put(out, off, cap, XSTORE_C_BLOB, 0, 0,
+			    xsql_value_blob(v), xsql_value_bytes(v));
 	}
 	return off;
 }
 #endif /* SQLXTC_VTAB */
 
 /* Decode the `idx`-th payload value (0-based) from `rec` into `ctx`.
- * Out-of-range or malformed records resolve to NULL -- defensive, so a
- * truncated/old record never reads past the buffer. */
+ * Out-of-range or malformed records resolve to NULL. */
 #if defined(SQLXTC_VTAB)
 static void
 xs_rec_result(xsql_context *ctx, const uint8_t *rec, int reclen, int idx)
 {
-	int off = 0, i, ncol;
-	if (rec == NULL || reclen < 1) { xsql_result_null(ctx); return; }
-	ncol = rec[off++];
-	for (i = 0; i < ncol; i++) {
-		uint8_t t;
-		if (off >= reclen) break;
-		t = rec[off++];
-		if (t == 0) {
-			if (i == idx) { xsql_result_null(ctx); return; }
-		} else if (t == 1) {
-			int64_t x = 0; int b;
-			if (off + 8 > reclen) break;
-			for (b = 0; b < 8; b++) x |= (int64_t)rec[off + b] << (8 * b);
-			off += 8;
-			if (i == idx) { xsql_result_int64(ctx, x); return; }
-		} else if (t == 2) {
-			uint64_t bits = 0; double d; int b;
-			if (off + 8 > reclen) break;
-			for (b = 0; b < 8; b++) bits |= (uint64_t)rec[off + b] << (8 * b);
-			off += 8; memcpy(&d, &bits, 8);
-			if (i == idx) { xsql_result_double(ctx, d); return; }
-		} else {
-			uint32_t n;
-			if (off + 4 > reclen) break;
-			n = get_u32(rec + off); off += 4;
-			if (off + (int)n > reclen) break;
-			if (i == idx) {
-				if (t == 3)
-					xsql_result_text(ctx, (const char *)(rec + off),
-					    (int)n, SQLITE_TRANSIENT);
-				else
-					xsql_result_blob(ctx, rec + off, (int)n,
-					    SQLITE_TRANSIENT);
-				return;
-			}
-			off += (int)n;
-		}
+	int64_t iv = 0; double rv = 0; const uint8_t *p = NULL; int n = 0;
+	switch (xstore_rec_col(rec, reclen, idx, &iv, &rv, &p, &n)) {
+	case XSTORE_C_INT:  xsql_result_int64(ctx, iv); break;
+	case XSTORE_C_REAL: xsql_result_double(ctx, rv); break;
+	case XSTORE_C_TEXT:
+		xsql_result_text(ctx, (const char *)p, n, SQLITE_TRANSIENT);
+		break;
+	case XSTORE_C_BLOB: xsql_result_blob(ctx, p, n, SQLITE_TRANSIENT); break;
+	default:            xsql_result_null(ctx); break;
 	}
-	xsql_result_null(ctx);   /* idx beyond the record */
 }
 #endif /* SQLXTC_VTAB */
 
@@ -2809,51 +2735,270 @@ xstore_scan_close(xstore_scan_t *s)
 	free(s);
 }
 
+/*
+ * Record codec.  A version's payload is the non-key columns of one row:
+ *
+ *   [ncol:u8] then per column [tag:u8][body]
+ *
+ * The tag says the storage class and the body's length:
+ *
+ *   0x00       NULL                          no body
+ *   0x01       INTEGER, 8 bytes LE           (1.59 format; still read)
+ *   0x02       REAL, 8 bytes LE IEEE-754     (still written for a REAL
+ *                                             that is not an integer)
+ *   0x03/0x04  TEXT/BLOB, u32 LE length      (1.59 format; still read)
+ *   0x05/0x06  TEXT/BLOB, u16 LE length + bytes (64..65535 bytes)
+ *   0x08+n     INTEGER, n = 1..7 bytes LE, sign-extended
+ *   0x10+n     REAL that is an exact integer: n = 0..7 bytes LE,
+ *              sign-extended (n = 0 is 0.0; -0.0 is kept as 0x02)
+ *   0x20+n     TEXT of n = 0..63 bytes
+ *   0x60+n     BLOB of n = 0..31 bytes
+ *   0x80+v     INTEGER v + 64 for v in -64..63 (no body)
+ *
+ * Every 1.59 record (tags 0-4 only) decodes exactly as before, so a page
+ * file or log written by 1.59 is read correctly and nothing needs
+ * migrating; a 1.59 binary reading a newer record would see an unknown
+ * tag and decode it as NULL, which is why the example does not support
+ * downgrades.  This is SQLite's idea (serial types, sqlite3VdbeSerialType)
+ * with the length folded into one byte: TPC-C's typical row of small
+ * integers and short strings is 40-50% smaller than with 9-byte integers
+ * and 5-byte string headers.  The btree value is [flag:u8][record]
+ * (xs_put prepends the tombstone flag).
+ */
+
+/* Bytes the integer needs, sign-extended (1..8). */
+static int
+xs_int_width(int64_t v)
+{
+	uint64_t u = v < 0 ? ~(uint64_t)v : (uint64_t)v;
+	int n = 1;
+
+	while (n < 8 && (u >> (8 * n - 1)) != 0)
+		n++;
+	return n;
+}
+
+int
+xstore_rec_put(uint8_t *out, int off, int cap, int cls, int64_t iv,
+    double rv, const uint8_t *p, int n)
+{
+	int w, b;
+	uint64_t u;
+
+	if (off < 0 || off >= cap)
+		return -1;
+	switch (cls) {
+	case XSTORE_C_NULL:
+		out[off++] = 0x00;
+		return off;
+	case XSTORE_C_INT:
+		if (iv >= -64 && iv <= 63) {
+			out[off++] = (uint8_t)(0x80 + (iv + 64));
+			return off;
+		}
+		w = xs_int_width(iv);
+		if (off + 1 + w > cap)
+			return -1;
+		out[off++] = (uint8_t)(w == 8 ? 0x01 : 0x08 + w);
+		u = (uint64_t)iv;
+		for (b = 0; b < w; b++)
+			out[off++] = (uint8_t)(u >> (8 * b));
+		return off;
+	case XSTORE_C_REAL:
+		/* An integral REAL in int64 range (not -0.0) keeps its value
+		 * exactly in a short integer body; the tag keeps it REAL. */
+		if (rv >= -9007199254740992.0 && rv <= 9007199254740992.0 &&
+		    rv == (double)(int64_t)rv && !(rv == 0.0 && signbit(rv))) {
+			iv = (int64_t)rv;
+			w = iv == 0 ? 0 : xs_int_width(iv);
+			if (w < 8) {
+				if (off + 1 + w > cap)
+					return -1;
+				out[off++] = (uint8_t)(0x10 + w);
+				u = (uint64_t)iv;
+				for (b = 0; b < w; b++)
+					out[off++] = (uint8_t)(u >> (8 * b));
+				return off;
+			}
+		}
+		if (off + 9 > cap)
+			return -1;
+		out[off++] = 0x02;
+		memcpy(&u, &rv, 8);
+		for (b = 0; b < 8; b++)
+			out[off++] = (uint8_t)(u >> (8 * b));
+		return off;
+	case XSTORE_C_TEXT:
+	case XSTORE_C_BLOB:
+		if (n < 0)
+			n = 0;
+		if (cls == XSTORE_C_TEXT && n <= 63) {
+			if (off + 1 + n > cap)
+				return -1;
+			out[off++] = (uint8_t)(0x20 + n);
+		} else if (cls == XSTORE_C_BLOB && n <= 31) {
+			if (off + 1 + n > cap)
+				return -1;
+			out[off++] = (uint8_t)(0x60 + n);
+		} else if (n <= 0xFFFF) {
+			if (off + 3 + n > cap)
+				return -1;
+			out[off++] = cls == XSTORE_C_TEXT ? 0x05 : 0x06;
+			out[off++] = (uint8_t)n;
+			out[off++] = (uint8_t)(n >> 8);
+		} else {
+			if (off + 5 + n > cap)
+				return -1;
+			out[off++] = cls == XSTORE_C_TEXT ? 0x03 : 0x04;
+			for (b = 0; b < 4; b++)
+				out[off++] = (uint8_t)((uint32_t)n >> (8 * b));
+		}
+		if (n > 0)
+			memcpy(out + off, p, (size_t)n);
+		return off + n;
+	default:
+		return -1;
+	}
+}
+
+/*
+ * Decode the column at `off` (its tag byte) of `rec` (length reclen).
+ * Fills the class and the value like xstore_rec_col and returns the
+ * offset just past the column, or -1 if the record is malformed or
+ * truncated there.
+ */
+static int
+xs_rec_get(const uint8_t *rec, int reclen, int off, int *cls, int64_t *iv,
+    double *rv, const uint8_t **p, int *n)
+{
+	uint8_t t;
+	uint64_t u = 0;
+	uint32_t len;
+	int w, b;
+
+	if (off >= reclen)
+		return -1;
+	t = rec[off++];
+	if (t >= 0x80) {
+		*cls = XSTORE_C_INT;
+		*iv = (int64_t)t - 0x80 - 64;
+		return off;
+	}
+	if (t >= 0x20) {
+		len = t >= 0x60 ? (uint32_t)(t - 0x60) : (uint32_t)(t - 0x20);
+		if (off + (int)len > reclen)
+			return -1;
+		*cls = t >= 0x60 ? XSTORE_C_BLOB : XSTORE_C_TEXT;
+		*p = rec + off;
+		*n = (int)len;
+		return off + (int)len;
+	}
+	switch (t) {
+	case 0x00:
+		*cls = XSTORE_C_NULL;
+		return off;
+	case 0x01:
+	case 0x02:
+		if (off + 8 > reclen)
+			return -1;
+		for (b = 0; b < 8; b++)
+			u |= (uint64_t)rec[off + b] << (8 * b);
+		if (t == 0x01) {
+			*cls = XSTORE_C_INT;
+			*iv = (int64_t)u;
+		} else {
+			*cls = XSTORE_C_REAL;
+			memcpy(rv, &u, 8);
+		}
+		return off + 8;
+	case 0x03: case 0x04: case 0x05: case 0x06:
+		w = t <= 0x04 ? 4 : 2;
+		if (off + w > reclen)
+			return -1;
+		for (len = 0, b = 0; b < w; b++)
+			len |= (uint32_t)rec[off + b] << (8 * b);
+		off += w;
+		if (len > (uint32_t)(reclen - off))
+			return -1;
+		*cls = (t == 0x03 || t == 0x05) ? XSTORE_C_TEXT : XSTORE_C_BLOB;
+		*p = rec + off;
+		*n = (int)len;
+		return off + (int)len;
+	default:
+		break;
+	}
+	if (t >= 0x09 && t <= 0x0F) {
+		w = t - 0x08;
+	} else if (t >= 0x10 && t <= 0x17) {
+		w = t - 0x10;
+	} else {
+		return -1;                     /* not a tag this codec writes */
+	}
+	if (off + w > reclen)
+		return -1;
+	for (b = 0; b < w; b++)
+		u |= (uint64_t)rec[off + b] << (8 * b);
+	if (w > 0 && w < 8 && (u >> (8 * w - 1)) & 1u)
+		u |= ~(uint64_t)0 << (8 * w);   /* sign-extend */
+	if (t < 0x10) {
+		*cls = XSTORE_C_INT;
+		*iv = (int64_t)u;
+	} else {
+		*cls = XSTORE_C_REAL;
+		*rv = (double)(int64_t)u;
+	}
+	return off + w;
+}
+
 /* Decode payload column `idx` (0-based, i.e. the non-key columns) of a
  * record produced by the scan into a typed value.  Returns the type
  * (one of XSTORE_C_*); for TEXT/BLOB the p / n outs point into rec (valid for
- * rec's lifetime).  An out-of-range idx reads as NULL. */
+ * rec's lifetime).  An out-of-range idx, or a malformed record, reads as
+ * NULL. */
 int
 xstore_rec_col(const uint8_t *rec, int reclen, int idx,
                int64_t *iout, double *rout, const uint8_t **pout, int *nout)
 {
-	int off = 0, i, ncol;
-	if (rec == NULL || reclen < 1) return XSTORE_C_NULL;
-	ncol = rec[off++];
-	for (i = 0; i < ncol; i++) {
-		uint8_t t;
-		if (off >= reclen) break;
-		t = rec[off++];
-		if (t == 0) {
-			if (i == idx) return XSTORE_C_NULL;
-		} else if (t == 1) {
-			uint64_t x = 0; int b;    /* unsigned: no signed-shift UB */
-			if (off + 8 > reclen) break;
-			for (b = 0; b < 8; b++) x |= (uint64_t)rec[off + b] << (8 * b);
-			off += 8;
-			if (i == idx) { if (iout) *iout = (int64_t)x; return XSTORE_C_INT; }
-		} else if (t == 2) {
-			uint64_t bits = 0; double d; int b;
-			if (off + 8 > reclen) break;
-			for (b = 0; b < 8; b++) bits |= (uint64_t)rec[off + b] << (8 * b);
-			off += 8; memcpy(&d, &bits, 8);
-			if (i == idx) { if (rout) *rout = d; return XSTORE_C_REAL; }
-		} else {
-			uint32_t n;
-			if (off + 4 > reclen) break;
-			n = (uint32_t)rec[off] | ((uint32_t)rec[off+1] << 8) |
-			    ((uint32_t)rec[off+2] << 16) | ((uint32_t)rec[off+3] << 24);
-			off += 4;
-			if (off + (int)n > reclen) break;
-			if (i == idx) {
-				if (pout) *pout = rec + off;
-				if (nout) *nout = (int)n;
-				return (t == 3) ? XSTORE_C_TEXT : XSTORE_C_BLOB;
-			}
-			off += (int)n;
-		}
+	int off = 1, i, ncol, cls = XSTORE_C_NULL, n = 0;
+	int64_t iv = 0;
+	double rv = 0;
+	const uint8_t *p = NULL;
+
+	if (rec == NULL || reclen < 1 || idx < 0) return XSTORE_C_NULL;
+	ncol = rec[0];
+	if (idx >= ncol) return XSTORE_C_NULL;
+	for (i = 0; i <= idx; i++)
+		if ((off = xs_rec_get(rec, reclen, off, &cls, &iv, &rv, &p, &n)) < 0)
+			return XSTORE_C_NULL;
+	switch (cls) {
+	case XSTORE_C_INT:  if (iout) *iout = iv; break;
+	case XSTORE_C_REAL: if (rout) *rout = rv; break;
+	case XSTORE_C_TEXT:
+	case XSTORE_C_BLOB: if (pout) *pout = p; if (nout) *nout = n; break;
+	default: break;
 	}
-	return XSTORE_C_NULL;   /* idx beyond the record */
+	return cls;
+}
+
+int
+xstore_rec_cols(const uint8_t *rec, int reclen, xstore_val_t *out, int cap)
+{
+	int off = 1, i, ncol;
+
+	if (rec == NULL || reclen < 1) return 0;
+	ncol = rec[0];
+	if (ncol > cap) ncol = cap;
+	for (i = 0; i < ncol; i++) {
+		out[i].i = 0; out[i].r = 0; out[i].p = NULL; out[i].n = 0;
+		if ((off = xs_rec_get(rec, reclen, off, &out[i].cls, &out[i].i,
+		    &out[i].r, &out[i].p, &out[i].n)) < 0)
+			break;
+	}
+	for (; i < ncol; i++) {        /* a malformed tail reads as NULL */
+		out[i].cls = XSTORE_C_NULL; out[i].i = 0; out[i].r = 0;
+		out[i].p = NULL; out[i].n = 0;
+	}
+	return ncol;
 }
 
 /* Number of payload columns in a record (0 for an empty / NULL one). */
