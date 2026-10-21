@@ -430,6 +430,8 @@ typedef struct vx_apath {
 	const struct vx_expr *rtv[8];
 	int             reverse;              /* INDEX: walk descending */
 	int             ordered;              /* walk yields the wanted order */
+	int             rowmax;               /* SCAN: open as the one newest live
+	                                       * rowid (MAX(rowid), no WHERE) */
 } vx_apath_t;
 
 /* An open row source over one table (src_open / src_next / src_close). */
@@ -4220,6 +4222,18 @@ src_open(struct vx_stmt *st, const char *table, const vx_apath_t *ap,
 		if (s->iscan != NULL) { s->ordered = ap->ordered; goto out; }
 		goto scan;
 	}
+	if (ap->rowmax) {
+		int64_t m;
+		if (!xstore_max_live_rowid((struct xsql *)st->db, table, st->snap, 0, 0, &m)) {
+			s->empty = 1;
+			goto out;
+		}
+		s->scan = xstore_scan_open_txn((struct xsql *)st->db, table,
+		    st->snap, m, 1, m, 1);
+		if (s->scan == NULL) rc = -1;
+		s->ordered = 1;
+		goto out;
+	}
 	if (ap->kind == VX_AP_ROWID) {
 		int64_t lo = 0, hi = 0;
 		int has_lo = 0, has_hi = 0;
@@ -4260,6 +4274,10 @@ scan:
 	s->scan = xstore_scan_open_txn((struct xsql *)st->db, table, st->snap,
 	    0, 0, 0, 0);
 	if (s->scan == NULL) rc = -1;
+	/* A full scan walks rowids ascending (txn scans merge buffered rows
+	 * in order); an index path that fell back here does not keep ITS
+	 * order. */
+	if (ap->kind == VX_AP_SCAN) s->ordered = ap->ordered;
 out:
 	arena_free(ar);
 	return rc;
@@ -5468,6 +5486,20 @@ vx_try_prepare_agg(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		if (mmcol >= 0 && st->ap.ordered && st->ap.kind == VX_AP_INDEX) {
 			if (kind == VXA_MAX) st->ap.reverse = !st->ap.reverse;
 			st->ap_minmax = 1;
+		} else if (mmcol >= 0 && st->src_pay[mmcol] == -1 &&
+		    (st->ap.kind == VX_AP_SCAN || st->ap.kind == VX_AP_ROWID)) {
+			/* MIN/MAX of the rowid: a rowid walk is ascending, so the
+			 * first passing row holds MIN; MAX with no WHERE is the
+			 * newest live rowid, one descent per rowid downward
+			 * (xstore_max_live_rowid) instead of a whole-table scan. */
+			if (kind == VXA_MIN) {
+				st->ap.ordered = 1;
+				st->ap_minmax = 1;
+			} else if (st->filter == NULL && st->ap.kind == VX_AP_SCAN) {
+				st->ap.rowmax = 1;
+				st->ap.ordered = 1;
+				st->ap_minmax = 1;
+			}
 		}
 		st->ap.ordered = (mmcol >= 0) ? st->ap.ordered : 0;
 	}

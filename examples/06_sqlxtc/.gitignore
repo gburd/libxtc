@@ -24,6 +24,7 @@ test_btree_stale_descent
 test_flush_pin
 test_trickler_select
 test_pp_slice
+test_rowid_minmax
 test_snap_registry
 test_tr_slice
 test_torn_base

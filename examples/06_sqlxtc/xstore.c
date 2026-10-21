@@ -2512,6 +2512,93 @@ xstore_scan_open(bt_t *bt, const char *table, uint64_t snap,
 }
 
 /*
+ * The highest rowid of `table` whose version visible at the
+ * connection's read snapshot is live (not a tombstone), within an
+ * optional upper bound hi (inclusive).  Walks rowids DOWNWARD with
+ * bt_seek_lt -- one descent per rowid -- and stops at the first live
+ * one, so MAX(rowid) is O(log n) instead of a scan of the whole table
+ * (403 ms at 2M rows; the ledger "recent N" slice runs it per query).
+ * A rowid whose newest visible version is a tombstone, or that has only
+ * versions newer than the snapshot, is skipped.  Inside a transaction
+ * the connection's buffered writes are merged: a buffered row above the
+ * committed answer wins, a buffered DELETE hides a committed row.
+ * `snap` 0 = the connection's read snapshot (as xstore_scan_open_txn).
+ * Returns 1 with *out, or 0 if the table has no live row (<= hi).
+ */
+static int xs_point_get(bt_t *bt, uint32_t tid, int64_t rid, uint64_t snap,
+    uint8_t *out, int cap);
+int
+xstore_max_live_rowid(struct xsql *db, const char *table, uint64_t snap,
+    int64_t hi, int has_hi, int64_t *out)
+{
+	bt_t *bt = xstore_bt_of(db);
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	uint8_t bound[XS_VKLEN], k[XS_VKLEN + 8];
+	uint32_t tid;
+	int64_t bmax = 0, rid;
+	int have_b = 0, guard, i;
+
+	if (bt == NULL || table == NULL || !xstore_table_id(bt, table, &tid))
+		return 0;
+	if (cx != NULL) {
+		uint64_t rs = atomic_load_explicit(&cx->read_snap, memory_order_relaxed);
+		/* the read snapshot, chosen exactly as xstore_scan_open_txn does */
+		if (snap != 0) { /* caller's */ }
+		else if (rs != 0) snap = rs;
+		else if (cx->in_txn && cx->txn_iso >= XS_ISO_REPEATABLE_READ) snap = cx->txn_snap;
+		else if (cx->stmt_base != 0) snap = cx->stmt_base;
+		if (cx->in_txn) {
+			cx->touched = 1;
+			for (i = 0; i < cx->wn; i++) {
+				const xs_wrec_t *w = &cx->wbuf[i];
+				if (w->tableid != tid || w->deleted || !wbuf_is_newest(cx, i) ||
+				    (has_hi && w->rowid > hi))
+					continue;
+				if (!have_b || w->rowid > bmax) { bmax = w->rowid; have_b = 1; }
+			}
+		}
+	}
+	if (snap == 0) snap = xs_visible();
+	/* Exclusive upper bound: just above the bound rowid (any version). */
+	/* Exclusive bound: the smallest key of rowid hi + 1 (its newest
+	 * version sorts first), or the first key of the next table. */
+	if (has_hi && hi < INT64_MAX)
+		enc_vkey(tid, hi + 1, ~(uint64_t)0, bound);
+	else if (tid < UINT32_MAX)
+		enc_vkey(tid + 1, INT64_MIN, ~(uint64_t)0, bound);
+	else
+		return 0;
+	for (guard = 0; guard < (1 << 20); guard++) {
+		uint16_t klen = 0;
+		uint8_t val[1 + XS_VMAX];
+		const xs_wrec_t *w;
+		int live;
+		if (bt_seek_lt(bt, bound, XS_VKLEN, k, sizeof k, &klen, NULL, 0, NULL)
+		    != XTC_OK || klen != XS_VKLEN || dec_tableid(k) != tid)
+			break;                       /* no lower rowid in this table */
+		rid = dec_rowid(k);
+		if (have_b && bmax >= rid) {     /* a buffered row is the answer */
+			*out = bmax;
+			return 1;
+		}
+		/* The row's version visible at snap (newest <= snap). */
+		live = 0;
+		w = (cx != NULL && cx->in_txn) ? wbuf_find(cx, tid, rid) : NULL;
+		if (w != NULL)
+			live = !w->deleted;
+		else
+			live = xs_point_get(bt, tid, rid, snap, val, (int)sizeof val) != 0;
+		if (live) {
+			*out = rid;
+			return 1;
+		}
+		enc_vkey(tid, rid, ~(uint64_t)0, bound);   /* below every version */
+	}
+	if (have_b) { *out = bmax; return 1; }
+	return 0;
+}
+
+/*
  * Open a scan that honours the connection's uncommitted writes
  * (read-your-writes).  Identical to xstore_scan_open when the connection
  * is not in a transaction or its write buffer is empty; otherwise the
