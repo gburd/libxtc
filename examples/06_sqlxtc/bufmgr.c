@@ -3095,27 +3095,48 @@ bm_get_stats(bm_t *bm, bm_stats_t *out)
 
 /* ---- persistence: superblock, sync, checkpoint ---- */
 
+/*
+ * The superblock is page 0, read and written as a whole page through an
+ * aligned buffer: on a direct-I/O store (O_DIRECT) Linux refuses an
+ * unaligned transfer, and the 40-byte pwrite from the caller's stack
+ * buffer failed with EINVAL -- so the clean marker never reached the
+ * file and every open of a direct store rebuilt from the log
+ * (test_dio_restart).  Page 0 holds nothing else.
+ */
 int
 bm_write_super(bm_t *bm, const void *buf, size_t len)
 {
+	uint8_t *pg;
 	ssize_t n;
 	if (bm == NULL || buf == NULL || len > bm->page_size)
 		return XTC_E_INVAL;
-	n = pwrite(bm->fd, buf, len, 0);          /* page 0 == superblock */
-	return (n == (ssize_t)len) ? XTC_OK : XTC_E_IO;
+	if ((pg = xtc_aligned_alloc(4096, bm->page_size)) == NULL)
+		return XTC_E_NOMEM;
+	memset(pg, 0, bm->page_size);
+	memcpy(pg, buf, len);
+	n = pwrite(bm->fd, pg, bm->page_size, 0);
+	xtc_aligned_free(pg);
+	return (n == (ssize_t)bm->page_size) ? XTC_OK : XTC_E_IO;
 }
 
 int
 bm_read_super(bm_t *bm, void *buf, size_t len)
 {
+	uint8_t *pg;
 	ssize_t n;
 	if (bm == NULL || buf == NULL || len > bm->page_size)
 		return XTC_E_INVAL;
-	n = pread(bm->fd, buf, len, 0);
-	if (n < 0)
+	if ((pg = xtc_aligned_alloc(4096, bm->page_size)) == NULL)
+		return XTC_E_NOMEM;
+	n = pread(bm->fd, pg, bm->page_size, 0);
+	if (n < 0) {
+		xtc_aligned_free(pg);
 		return XTC_E_INTERNAL;
-	if ((size_t)n < len)                       /* short/empty: zero-fill */
-		memset((char *)buf + n, 0, len - (size_t)n);
+	}
+	if ((size_t)n < bm->page_size)            /* short/empty: zero-fill */
+		memset(pg + n, 0, bm->page_size - (size_t)n);
+	memcpy(buf, pg, len);
+	xtc_aligned_free(pg);
 	return XTC_OK;
 }
 

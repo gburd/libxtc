@@ -24,6 +24,7 @@ test_btree_stale_descent
 test_flush_pin
 test_trickler_select
 test_pp_slice
+test_dio_restart
 test_steal_reclaim
 test_wal_bigtxn
 test_btree_fill
