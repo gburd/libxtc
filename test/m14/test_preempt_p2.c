@@ -202,11 +202,216 @@ test_p2_peers_progress_on_ucontext(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+#if defined(__x86_64__) && defined(__linux__) && \
+    (defined(__GNUC__) || defined(__clang__))
+#include <cpuid.h>
+#define P2_VEC 1
+/*
+ * /vector_state: involuntary preemption must preserve the WHOLE vector
+ * register file, not only x87 + XMM0-15's low halves.  Fibers on one loop
+ * each hold a fiber-unique pattern in ymm1 (all 256 bits) and, on an
+ * AVX-512 host, zmm17, across a yield-free spin, then read them back.
+ * The trampoline used FXSAVE, so every preemption that switched fibers
+ * mid-spin handed the resumed fiber another fiber's YMM upper half and
+ * ZMM16-31: ~100 of ~69k checks per run were corrupted (glibc's AVX
+ * memcpy corrupted sqlxtc log records the same way).  XSAVE fixes it.
+ */
+static atomic_long g_vec_bad, g_vec_checks;
+static int g_vec_avx2, g_vec_avx512;
+
+__attribute__((target("avx2"))) static int
+p2_ymm_hold(uint64_t want)
+{
+	uint64_t got[4];
+	__asm__ volatile(
+	    "vpbroadcastq %1, %%ymm1\n\t"
+	    "movl $20000, %%ecx\n"
+	    "1:\tdecl %%ecx\n\t"
+	    "jnz 1b\n\t"
+	    "vmovdqu %%ymm1, %0\n\t"
+	    "vzeroupper"
+	    : "=m"(got) : "m"(want) : "ecx", "xmm1", "cc", "memory");
+	return got[0] != want || got[1] != want || got[2] != want ||
+	    got[3] != want;
+}
+
+__attribute__((target("avx512f"))) static int
+p2_zmm_hold(uint64_t want)
+{
+	uint64_t got[8];
+	int k, bad = 0;
+	__asm__ volatile(
+	    "vpbroadcastq %1, %%zmm17\n\t"
+	    "movl $20000, %%ecx\n"
+	    "1:\tdecl %%ecx\n\t"
+	    "jnz 1b\n\t"
+	    "vmovdqu64 %%zmm17, %0\n\t"
+	    "vzeroupper"
+	    : "=m"(got) : "m"(want) : "ecx", "xmm17", "cc", "memory");
+	for (k = 0; k < 8; k++)
+		bad |= got[k] != want;
+	return bad;
+}
+
+static void
+p2_vec_spinner(void *arg)
+{
+	uint64_t want = 0x0101010101010101ull * (uint64_t)((intptr_t)arg + 1);
+	int64_t end = xtc_clock_mono() + 300LL * 1000 * 1000;
+	long n = 0;
+	while (xtc_clock_mono() < end) {
+		if (g_vec_avx2 && p2_ymm_hold(want))
+			atomic_fetch_add(&g_vec_bad, 1);
+		if (g_vec_avx512 && p2_zmm_hold(~want))
+			atomic_fetch_add(&g_vec_bad, 1);
+		n++;
+	}
+	atomic_fetch_add(&g_vec_checks, n);
+}
+
+static MunitResult
+test_p2_vector_state(const MunitParameter p[], void *d)
+{
+	extern int __xtc_coro_preempt_effective(void);
+	unsigned a, b, c, dx, lo, hi;
+	uint64_t xcr0 = 0;
+	xtc_exec_t *e = NULL;
+	int i;
+	(void)p; (void)d;
+
+	if (!xtc_preempt_supported() || !__xtc_coro_preempt_effective())
+		return MUNIT_SKIP;
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
+    __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	return MUNIT_SKIP;   /* see test_p2_preempt_tight_loop */
+#endif
+	if (!__get_cpuid(1, &a, &b, &c, &dx) || (c & bit_OSXSAVE) == 0)
+		return MUNIT_SKIP;
+	__asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+	xcr0 = ((uint64_t)hi << 32) | lo;
+	__cpuid_count(7, 0, a, b, c, dx);
+	g_vec_avx2 = (xcr0 & 0x6) == 0x6 && (b & bit_AVX2) != 0;
+	g_vec_avx512 = (xcr0 & 0xE6) == 0xE6 && (b & bit_AVX512F) != 0;
+	if (!g_vec_avx2)
+		return MUNIT_SKIP;
+	atomic_store(&g_vec_bad, 0);
+	atomic_store(&g_vec_checks, 0);
+	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_set_preempt(e, 50LL * 1000), ==, XTC_OK);
+	xtc_preempt_set_involuntary(1);
+	for (i = 0; i < 4; i++)
+		munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0),
+		    p2_vec_spinner, (void *)(intptr_t)i, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	xtc_preempt_set_involuntary(0);
+	(void)xtc_exec_fini(e);
+	munit_logf(MUNIT_LOG_INFO, "%ld checks (avx2 %d avx512 %d), %ld corrupted",
+	    atomic_load(&g_vec_checks), g_vec_avx2, g_vec_avx512,
+	    atomic_load(&g_vec_bad));
+	munit_assert_long(atomic_load(&g_vec_checks), >, 0);
+	munit_assert_long(atomic_load(&g_vec_bad), ==, 0);
+	return MUNIT_OK;
+}
+
+/*
+ * /red_zone_flags: an involuntary preemption must be invisible to the
+ * interrupted instruction stream.  p2_rz_probe is an ABI-conforming leaf
+ * that keeps two values in its red zone (below %rsp, which the SysV ABI
+ * guarantees a signal handler leaves alone) and holds a carry flag set
+ * by its own `cmp` across a yield-free spin, then checks all three.
+ * The handler used to store the resume PC at orig_sp - 8 (inside the red
+ * zone: ~100 of ~70k probes per run clobbered) and the trampoline ran
+ * `subq` before saving RFLAGS (the carry came back wrong).
+ */
+int p2_rz_probe(uint64_t v);
+__asm__(".text\n\t.type p2_rz_probe,@function\np2_rz_probe:\n\t"
+    "movq %rdi, -8(%rsp)\n\t"
+    "movq %rdi, -120(%rsp)\n\t"
+    "movq $1, %rax\n\t"
+    "cmpq $2, %rax\n\t"           /* 1 < 2 unsigned: CF = 1 */
+    "movl $20000, %ecx\n"
+    "1:\tleal -1(%rcx), %ecx\n\t"  /* flag-neutral countdown */
+    "jrcxz 2f\n\t"
+    "jmp 1b\n"
+    "2:\tmovl $0, %eax\n\t"
+    "jc 3f\n\t"
+    "orl $4, %eax\n"
+    "3:\tcmpq %rdi, -8(%rsp)\n\t"
+    "je 4f\n\t"
+    "orl $1, %eax\n"
+    "4:\tcmpq %rdi, -120(%rsp)\n\t"
+    "je 5f\n\t"
+    "orl $2, %eax\n"
+    "5:\tret\n\t"
+    ".size p2_rz_probe, .-p2_rz_probe\n");
+
+static atomic_long g_rz_bad, g_fl_bad, g_rz_n;
+
+static void
+p2_rz_spinner(void *arg)
+{
+	uint64_t v = 0x5a5a5a5a00000000ull | (uint64_t)(intptr_t)arg;
+	int64_t end = xtc_clock_mono() + 300LL * 1000 * 1000;
+	long n = 0;
+	int r;
+	while (xtc_clock_mono() < end) {
+		r = p2_rz_probe(v);
+		if (r & 3)
+			atomic_fetch_add(&g_rz_bad, 1);
+		if (r & 4)
+			atomic_fetch_add(&g_fl_bad, 1);
+		n++;
+	}
+	atomic_fetch_add(&g_rz_n, n);
+}
+
+static MunitResult
+test_p2_red_zone_flags(const MunitParameter p[], void *d)
+{
+	extern int __xtc_coro_preempt_effective(void);
+	xtc_exec_t *e = NULL;
+	int i;
+	(void)p; (void)d;
+
+	if (!xtc_preempt_supported() || !__xtc_coro_preempt_effective())
+		return MUNIT_SKIP;
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
+    __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	return MUNIT_SKIP;   /* see test_p2_preempt_tight_loop */
+#endif
+	atomic_store(&g_rz_bad, 0);
+	atomic_store(&g_fl_bad, 0);
+	atomic_store(&g_rz_n, 0);
+	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_set_preempt(e, 50LL * 1000), ==, XTC_OK);
+	xtc_preempt_set_involuntary(1);
+	for (i = 0; i < 4; i++)
+		munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0),
+		    p2_rz_spinner, (void *)(intptr_t)i, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	xtc_preempt_set_involuntary(0);
+	(void)xtc_exec_fini(e);
+	munit_logf(MUNIT_LOG_INFO, "%ld probes, red zone clobbered %ld, flags "
+	    "lost %ld", atomic_load(&g_rz_n), atomic_load(&g_rz_bad),
+	    atomic_load(&g_fl_bad));
+	munit_assert_long(atomic_load(&g_rz_n), >, 0);
+	munit_assert_long(atomic_load(&g_rz_bad), ==, 0);
+	munit_assert_long(atomic_load(&g_fl_bad), ==, 0);
+	return MUNIT_OK;
+}
+#endif /* x86-64 Linux */
+
 static MunitTest tests[] = {
 	{ "/preempt_tight_loop", test_p2_preempt_tight_loop, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/peers_progress", test_p2_peers_progress_on_ucontext, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
+#if defined(P2_VEC)
+	{ "/vector_state", test_p2_vector_state, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/red_zone_flags", test_p2_red_zone_flags, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+#endif
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 
