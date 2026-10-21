@@ -121,8 +121,8 @@ build_good_log(const char *logp)
 		}
 		CK(wal_commit_sync(wal, fr, (uint32_t)(p - fr), &lsn) == XTC_OK);
 	}
+	sz = (off_t)wal_size(wal);       /* the log's end (the file runs ahead) */
 	wal_close(wal);
-	{ int fd = open(logp, O_RDONLY); if (fd >= 0) { sz = lseek(fd, 0, SEEK_END); close(fd); } }
 	return sz;
 }
 
@@ -130,8 +130,11 @@ build_good_log(const char *logp)
  * header claiming a modest len, a full body, but a CORRUPTED trailer
  * (checksum will not match).  Without the checksum this record would be
  * decoded as a good XL_UPDATE (row 999) and leak in. */
+/* The tear helpers write at the log's END (`at`), not the file's: the
+ * log preallocates zeros past it, so an O_APPEND write would land after
+ * them where no scan reaches. */
 static void
-tear_bad_trailer(const char *logp)
+tear_bad_trailer(const char *logp, off_t at)
 {
 	uint8_t fr[128], *p;
 	uint32_t len;
@@ -141,15 +144,16 @@ tear_bad_trailer(const char *logp)
 	p = put_update(fr, sizeof fr, 20, 1, 999, 500, "leak-me");
 	CK(p != NULL);
 	len = (uint32_t)(p - fr);
-	fd = open(logp, O_WRONLY | O_APPEND);
+	fd = open(logp, O_WRONLY);
 	CK(fd >= 0);
 	if (fd >= 0) {
 		uint8_t hdr[REC_HDR];
 		memcpy(hdr, &lsn, 8); memcpy(hdr + 8, &len, 4);
-		CK(write(fd, hdr, REC_HDR) == (ssize_t)REC_HDR);
-		CK(write(fd, fr, len) == (ssize_t)len);
+		CK(pwrite(fd, hdr, REC_HDR, at) == (ssize_t)REC_HDR);
+		CK(pwrite(fd, fr, len, at + REC_HDR) == (ssize_t)len);
 		/* wrong trailer: the writer never finished (or a bit flipped) */
-		CK(write(fd, &badcrc, REC_CRC) == (ssize_t)REC_CRC);
+		CK(pwrite(fd, &badcrc, REC_CRC, at + REC_HDR + (off_t)len) ==
+		    (ssize_t)REC_CRC);
 		close(fd);
 	}
 }
@@ -157,7 +161,7 @@ tear_bad_trailer(const char *logp)
 /* Append a torn record MISSING its trailer entirely (crash between the
  * body write and the trailer write): header + full body, no crc. */
 static void
-tear_missing_trailer(const char *logp)
+tear_missing_trailer(const char *logp, off_t at)
 {
 	uint8_t fr[128], *p;
 	uint32_t len;
@@ -167,13 +171,13 @@ tear_missing_trailer(const char *logp)
 	p = put_update(fr, sizeof fr, 20, 1, 999, 500, "leak-me");
 	CK(p != NULL);
 	len = (uint32_t)(p - fr);
-	fd = open(logp, O_WRONLY | O_APPEND);
+	fd = open(logp, O_WRONLY);
 	CK(fd >= 0);
 	if (fd >= 0) {
 		uint8_t hdr[REC_HDR];
 		memcpy(hdr, &lsn, 8); memcpy(hdr + 8, &len, 4);
-		CK(write(fd, hdr, REC_HDR) == (ssize_t)REC_HDR);
-		CK(write(fd, fr, len) == (ssize_t)len);
+		CK(pwrite(fd, hdr, REC_HDR, at) == (ssize_t)REC_HDR);
+		CK(pwrite(fd, fr, len, at + REC_HDR) == (ssize_t)len);
 		/* no trailer written: torn mid-record */
 		close(fd);
 	}
@@ -319,7 +323,7 @@ main(void)
 	 * trailer makes the scan drop it. */
 	good_sz = build_good_log(logp);
 	CK(good_sz > 0);
-	tear_bad_trailer(logp);
+	tear_bad_trailer(logp, good_sz);
 	recover_and_check(logp, "bad-trailer append", N_GOOD);
 	unlink(logp);
 
@@ -327,7 +331,7 @@ main(void)
 	if ((fd = mkstemp(logp)) >= 0) close(fd);
 	good_sz = build_good_log(logp);
 	CK(good_sz > 0);
-	tear_missing_trailer(logp);
+	tear_missing_trailer(logp, good_sz);
 	recover_and_check(logp, "missing-trailer torn", N_GOOD);
 	unlink(logp);
 

@@ -45,13 +45,6 @@
 #define PAGE_SZ  4096
 
 
-static off_t
-fsize(const char *p)
-{
-	struct stat st;
-	return stat(p, &st) == 0 ? st.st_size : -1;
-}
-
 static int
 sel_v(sx_db *db, int k, char *out, size_t cap)
 {
@@ -126,11 +119,11 @@ main(void)
 			CK(sx_exec(db1, sql, NULL) == SX_OK);
 		}
 	}
-	w_churn = fsize(logp);                       /* log holds N*(N_UPD+1) records */
+	w_churn = (off_t)wal_size(wal);              /* log holds N*(N_UPD+1) records */
 
 	/* ---- in-WAL checkpoint: compact the log to the live set ---- */
 	CK(xstore_checkpoint_wal(bt1, (struct wal *)wal, logp) == XTC_OK);
-	w_compact = fsize(logp);
+	w_compact = (off_t)wal_size(wal);   /* the log's length (the file is preallocated) */
 
 	/* The compacted log must be a fraction of the churned log: it holds
 	 * ~N live rows + one checkpoint record, not the N*(N_UPD+1) history. */

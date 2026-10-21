@@ -225,6 +225,8 @@ struct wal {
 	/* Flush (fl_mu): the leader flag, the watermarks, the waiter queue. */
 	pthread_mutex_t    fl_mu;
 	int                flushing;     /* a leader is running */
+	uint64_t           pre_end;      /* file is written (zeros) to here:
+	                                  * leader-only, see wal_prealloc */
 	uint64_t           copied_lsn;   /* every LSN <= this is in the ring */
 	uint64_t           copied_pos;   /* ... and ends here */
 	_Atomic uint64_t   written;      /* bytes below are pwritten */
@@ -282,6 +284,7 @@ wal_reset_marks(wal_t *w, uint64_t pos, uint64_t lsn)
 	w->next_lsn = lsn;
 	w->copied_pos = pos;
 	w->copied_lsn = lsn;
+	w->pre_end = pos;            /* the file ends at pos (see callers) */
 	atomic_store_explicit(&w->written, pos, memory_order_release);
 	atomic_store_explicit(&w->durable_off, pos, memory_order_release);
 	atomic_store_explicit(&w->durable_lsn, lsn, memory_order_release);
@@ -395,6 +398,45 @@ wal_wake_locked(wal_t *w, uint64_t durable, int give_baton)
 	}
 }
 
+/*
+ * Keep the file written with zeros at least WAL_PRE_AHEAD past `upto`,
+ * WAL_PRE_CHUNK at a time.  The next appends then OVERWRITE written
+ * blocks inside the file instead of growing it, so a commit's fdatasync
+ * flushes data only -- no size or extent metadata to journal.  Measured
+ * on this XFS NVMe, 300-byte commits: append+fdatasync 104 us, the same
+ * into a pre-written file 34 us (an fallocate'd, unwritten range: 43 us,
+ * 120 us at 4 KiB -- it still converts extents, so real zeros).
+ * WiredTiger preallocates its log (__log_prealloc), InnoDB's redo files
+ * are fixed size.  Zeros end the log for every scan: a zero frame has
+ * length 0 and checksum 0, and a length-0 record's checksum is never 0
+ * (FNV-1a of 12 bytes from an odd basis is odd).
+ *
+ * Leader-only (w->flushing held, fl_mu NOT held): normal records reach
+ * the file only through the leader, and the direct writer takes the
+ * leadership too, so nothing else writes past `upto` meanwhile.  The
+ * fdatasync that follows also makes the zeros durable (once a chunk).
+ * Best-effort: a failed extension leaves the log appending, as before.
+ */
+#define WAL_PRE_CHUNK (8u << 20)
+#define WAL_PRE_AHEAD (4u << 20)
+static void
+wal_prealloc(wal_t *w, uint64_t upto)
+{
+	static const uint8_t zeros[1u << 20];
+	uint64_t at, end;
+	if (upto + WAL_PRE_AHEAD <= w->pre_end)
+		return;
+	at = w->pre_end > upto ? w->pre_end : upto;
+	end = at + WAL_PRE_CHUNK;
+	while (at < end) {
+		if (xtc_aio_pwrite(w->fd, zeros, (uint32_t)sizeof zeros,
+		    (int64_t)at) != (int)sizeof zeros)
+			return;
+		at += sizeof zeros;
+		w->pre_end = at;
+	}
+}
+
 /* fl_mu held on entry and exit, w->flushing set by the caller: write
  * and fdatasync the contiguous completed prefix, up to at least `need`
  * (the leader's own record, which its own copy has completed). */
@@ -441,6 +483,7 @@ wal_flush_locked(wal_t *w, uint64_t need)
 	} else if (upto > atomic_load_explicit(&w->durable_off, memory_order_relaxed)) {
 		size_t at = (size_t)(from & (WAL_RING - 1));
 		size_t n = (size_t)(upto - from), k = WAL_RING - at;
+		wal_prealloc(w, upto);
 		if (n == 0) {
 			ok = 1;               /* written directly; only sync it */
 		} else if (n <= k) {
@@ -592,8 +635,19 @@ wal_append_direct(wal_t *w, const void *record, uint32_t len, uint64_t *end,
 	target = w->res_pos;
 	(void)pthread_mutex_unlock(&w->res_mu);
 
+	/* Everything before it durable, then take the leadership: no other
+	 * leader may write (or zero-fill, wal_prealloc) while this pwrites.
+	 * Nothing new is reserved meanwhile, so a running leader has only
+	 * records below target left and soon lets go. */
 	(void)pthread_mutex_lock(&w->fl_mu);
-	*rc = wal_durable_locked(w, target);   /* everything before it */
+	*rc = wal_durable_locked(w, target);
+	while (*rc == XTC_OK && w->flushing) {
+		(void)pthread_mutex_unlock(&w->fl_mu);
+		wal_nap();
+		(void)pthread_mutex_lock(&w->fl_mu);
+	}
+	if (*rc == XTC_OK)
+		w->flushing = 1;
 	(void)pthread_mutex_unlock(&w->fl_mu);
 	(void)pthread_mutex_lock(&w->res_mu);
 	if (*rc != XTC_OK) {
@@ -620,6 +674,8 @@ wal_append_direct(wal_t *w, const void *record, uint32_t len, uint64_t *end,
 	}
 	ok = ok && xtc_aio_pwrite(w->fd, trl, WAL_REC_CRC,
 	    (int64_t)(start + WAL_REC_HDR + len)) == (int)WAL_REC_CRC;
+	if (start + need > w->pre_end)
+		w->pre_end = start + need;   /* the record grew the file */
 
 	(void)pthread_mutex_lock(&w->fl_mu);
 	if (ok) {
@@ -634,8 +690,10 @@ wal_append_direct(wal_t *w, const void *record, uint32_t len, uint64_t *end,
 		 * after it can become durable either */
 		atomic_store_explicit(&w->failed, 1, memory_order_release);
 		w->s_failed++;
-		wal_wake_locked(w, UINT64_MAX, 0);
 	}
+	w->flushing = 0;
+	wal_wake_locked(w, ok ? atomic_load_explicit(&w->durable_off,
+	    memory_order_relaxed) : UINT64_MAX, 1);
 	(void)pthread_mutex_unlock(&w->fl_mu);
 	(void)pthread_mutex_lock(&w->res_mu);
 	w->direct = 0;

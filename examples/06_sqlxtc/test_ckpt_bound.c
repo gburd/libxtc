@@ -28,6 +28,7 @@
 #include <unistd.h>
 
 #include "engine.h"
+#include "wal.h"
 #include "xtc.h"
 #include "xtc_async.h"
 #include "xtc_loop.h"
@@ -44,11 +45,13 @@ static _Atomic int  g_left;
 static _Atomic long g_max_wal, g_commits;
 static _Atomic long g_last[NROW];   /* last committed value per row */
 
+/* The log's length (the file runs up to 8 MiB ahead of it: the log
+ * preallocates, see wal_prealloc). */
 static long
 wal_bytes(void)
 {
-	struct stat sb;
-	return stat(g_wal, &sb) == 0 ? (long)sb.st_size : -1;
+	struct wal *w = sx_storage_wal();
+	return w != NULL ? (long)wal_size(w) : -1;
 }
 
 static void

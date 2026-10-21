@@ -71,11 +71,13 @@ static long         g_max_wal;
 	fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #x); \
 	g_fail = 1; } } while (0)
 
+/* The log's length (the file runs up to 8 MiB ahead of it: the log
+ * preallocates, see wal_prealloc). */
 static long
 wal_bytes(void)
 {
-	struct stat sb;
-	return stat(g_wal, &sb) == 0 ? (long)sb.st_size : -1;
+	struct wal *w = sx_storage_wal();
+	return w != NULL ? (long)wal_size(w) : -1;
 }
 
 static void
