@@ -69,6 +69,33 @@
  * requirement, so the format bump needs no version negotiation.
  */
 
+/* 64-bit FNV-1a, continued from h over n bytes.  Byte-at-a-time FNV is
+ * a serial multiply chain (~1 byte per 4 cycles), and the reopen scan ran
+ * it over every byte of the log: unrolling 8 bytes per iteration lets the
+ * compiler schedule the loads and xors ahead of the multiplies.  Same
+ * byte order, same result: the on-disk checksum is unchanged. */
+#define WAL_FNV_PRIME 1099511628211ull
+static uint64_t
+wal_fnv(uint64_t h, const uint8_t *p, size_t n)
+{
+	while (n >= 8) {
+		h = (h ^ p[0]) * WAL_FNV_PRIME;
+		h = (h ^ p[1]) * WAL_FNV_PRIME;
+		h = (h ^ p[2]) * WAL_FNV_PRIME;
+		h = (h ^ p[3]) * WAL_FNV_PRIME;
+		h = (h ^ p[4]) * WAL_FNV_PRIME;
+		h = (h ^ p[5]) * WAL_FNV_PRIME;
+		h = (h ^ p[6]) * WAL_FNV_PRIME;
+		h = (h ^ p[7]) * WAL_FNV_PRIME;
+		p += 8;
+		n -= 8;
+	}
+	while (n-- > 0)
+		h = (h ^ *p++) * WAL_FNV_PRIME;
+	return h;
+}
+#define WAL_FNV_BASIS 1469598103934665603ull
+
 /* 64-bit FNV-1a over the record header (lsn+len) and body.  Not
  * cryptographic -- it only needs to catch a torn/partial tail record,
  * where the trailing 8 bytes are either missing (short read) or do not
@@ -77,60 +104,11 @@
 static uint64_t
 wal_rec_crc(uint64_t lsn, uint32_t len, const void *body)
 {
-	const uint8_t *bp = body;
-	uint64_t h = 1469598103934665603ull;    /* FNV offset basis */
 	uint8_t hdr[WAL_REC_HDR];
-	uint32_t i;
 
 	memcpy(hdr, &lsn, 8);
 	memcpy(hdr + 8, &len, 4);
-	for (i = 0; i < WAL_REC_HDR; i++)
-		h = (h ^ hdr[i]) * 1099511628211ull;   /* FNV prime */
-	for (i = 0; i < len; i++)
-		h = (h ^ bp[i]) * 1099511628211ull;
-	return h;
-}
-
-/*
- * Verify the frame at `off` of fd without trusting its length field:
- * returns 1 with *lsn / *len when a COMPLETE frame with a matching
- * checksum is there, 0 at the end of the log (EOF, a torn header, body
- * or trailer, or a checksum mismatch).  A record body larger than
- * WAL_MAX_REC (a big transaction) is checksummed in chunks, so a torn
- * tail whose length field is garbage never drives an allocation -- the
- * reason the scans used to stop at any record over 16 MiB, which LOST an
- * acknowledged big transaction and every commit after it in recovery
- * (test_wal_bigtxn).  The length must also fit in the file.
- */
-static int
-wal_frame_ok(int fd, off_t off, off_t fsize, uint64_t *lsn, uint32_t *len)
-{
-	uint8_t hdr[WAL_REC_HDR], trl[WAL_REC_CRC], chunk[64 * 1024];
-	uint64_t crc, h;
-	uint32_t i, done;
-
-	if (pread(fd, hdr, WAL_REC_HDR, off) != (ssize_t)WAL_REC_HDR)
-		return 0;
-	memcpy(lsn, hdr, 8);
-	memcpy(len, hdr + 8, 4);
-	if ((uint64_t)off + WAL_REC_HDR + *len + WAL_REC_CRC > (uint64_t)fsize)
-		return 0;                    /* runs past the end: torn */
-	if (pread(fd, trl, WAL_REC_CRC, off + (off_t)WAL_REC_HDR + (off_t)*len)
-	    != (ssize_t)WAL_REC_CRC)
-		return 0;
-	memcpy(&crc, trl, WAL_REC_CRC);
-	h = 1469598103934665603ull;       /* wal_rec_crc, streamed */
-	for (i = 0; i < WAL_REC_HDR; i++)
-		h = (h ^ hdr[i]) * 1099511628211ull;
-	for (done = 0; done < *len; ) {
-		uint32_t k = *len - done < sizeof chunk ? *len - done : (uint32_t)sizeof chunk;
-		if (pread(fd, chunk, k, off + (off_t)WAL_REC_HDR + (off_t)done) != (ssize_t)k)
-			return 0;
-		for (i = 0; i < k; i++)
-			h = (h ^ chunk[i]) * 1099511628211ull;
-		done += k;
-	}
-	return h == crc;
+	return wal_fnv(wal_fnv(WAL_FNV_BASIS, hdr, WAL_REC_HDR), body, len);
 }
 
 static off_t
@@ -138,6 +116,123 @@ wal_fsize(int fd)
 {
 	off_t e = lseek(fd, 0, SEEK_END);
 	return e < 0 ? 0 : e;
+}
+
+/*
+ * A buffered frame reader for the sequential scans.  The scans used to
+ * issue three preads per frame (header, trailer, body in 64 KiB chunks)
+ * and a fourth to hand the body to the callback; this keeps a window of
+ * the file (WAL_RD_ONE bytes) and serves every frame that fits in it
+ * from memory, refilling with one pread when the next frame runs past
+ * the window.  A frame larger than the window is verified in chunks
+ * straight from the file, so a torn tail whose length field is garbage
+ * never drives an allocation.  buf == NULL (no memory) degrades to the
+ * chunked path for every frame.
+ */
+#define WAL_RD_ONE (1u << 20)
+struct wal_rd {
+	int      fd;
+	off_t    fsize;
+	uint8_t *buf;                 /* WAL_RD_ONE bytes, or NULL */
+	off_t    woff;                /* file offset of buf[0] */
+	size_t   wlen;                /* valid bytes in buf */
+};
+
+static void
+wal_rd_init(struct wal_rd *r, int fd, int buffered)
+{
+	r->fd = fd;
+	r->fsize = wal_fsize(fd);
+	r->buf = buffered ? malloc(WAL_RD_ONE) : NULL;
+	r->woff = 0;
+	r->wlen = 0;
+}
+
+/* A pointer to file bytes [off, off + n) if they are (or, after one
+ * refill, become) inside the window; NULL otherwise. */
+static const uint8_t *
+wal_rd_at(struct wal_rd *r, off_t off, size_t n)
+{
+	ssize_t got;
+	if (r->buf == NULL || n > WAL_RD_ONE)
+		return NULL;
+	if (off >= r->woff && (uint64_t)(off - r->woff) + n <= r->wlen)
+		return r->buf + (off - r->woff);
+	do {
+		got = pread(r->fd, r->buf, WAL_RD_ONE, off);
+	} while (got < 0 && errno == EINTR);
+	r->woff = off;
+	r->wlen = got > 0 ? (size_t)got : 0;
+	return n <= r->wlen ? r->buf : NULL;
+}
+
+/*
+ * Verify the frame at `off` of the file without trusting its length
+ * field: returns 1 with *lsn / *len when a COMPLETE frame with a
+ * matching checksum is there, 0 at the end of the log (EOF, a torn
+ * header, body or trailer, or a checksum mismatch).  *body points at the
+ * body inside the reader's window when the whole frame is there, else it
+ * is NULL (the caller preads the body).  A record body larger than
+ * WAL_MAX_REC (a big transaction) is checksummed in chunks -- the scans
+ * used to stop at any record over 16 MiB, which LOST an acknowledged big
+ * transaction and every commit after it in recovery (test_wal_bigtxn).
+ * The length must also fit in the file.
+ */
+static int
+wal_rd_frame(struct wal_rd *r, off_t off, uint64_t *lsn, uint32_t *len,
+    const uint8_t **body)
+{
+	uint8_t hdr[WAL_REC_HDR], trl[WAL_REC_CRC], chunk[64 * 1024];
+	const uint8_t *p;
+	uint64_t crc, h, fl;
+	uint32_t done;
+
+	*body = NULL;
+	if (off < 0 || off + (off_t)WAL_REC_HDR > r->fsize)
+		return 0;
+	if ((p = wal_rd_at(r, off, WAL_REC_HDR)) != NULL)
+		memcpy(hdr, p, WAL_REC_HDR);
+	else if (pread(r->fd, hdr, WAL_REC_HDR, off) != (ssize_t)WAL_REC_HDR)
+		return 0;
+	memcpy(lsn, hdr, 8);
+	memcpy(len, hdr + 8, 4);
+	fl = (uint64_t)WAL_REC_HDR + *len + WAL_REC_CRC;
+	if ((uint64_t)off + fl > (uint64_t)r->fsize)
+		return 0;                    /* runs past the end: torn */
+	if ((p = wal_rd_at(r, off, (size_t)fl)) != NULL) {
+		memcpy(&crc, p + WAL_REC_HDR + *len, WAL_REC_CRC);
+		if (wal_fnv(WAL_FNV_BASIS, p, WAL_REC_HDR + *len) != crc)
+			return 0;
+		*body = p + WAL_REC_HDR;
+		return 1;
+	}
+	if (pread(r->fd, trl, WAL_REC_CRC, off + (off_t)WAL_REC_HDR + (off_t)*len)
+	    != (ssize_t)WAL_REC_CRC)
+		return 0;
+	memcpy(&crc, trl, WAL_REC_CRC);
+	h = wal_fnv(WAL_FNV_BASIS, hdr, WAL_REC_HDR);
+	for (done = 0; done < *len; ) {
+		uint32_t k = *len - done < sizeof chunk ? *len - done : (uint32_t)sizeof chunk;
+		if (pread(r->fd, chunk, k, off + (off_t)WAL_REC_HDR + (off_t)done) != (ssize_t)k)
+			return 0;
+		h = wal_fnv(h, chunk, k);
+		done += k;
+	}
+	return h == crc;
+}
+
+/* Verify one frame with no window (the tail-hint check). */
+static int
+wal_frame_ok(int fd, off_t off, off_t fsize, uint64_t *lsn, uint32_t *len)
+{
+	struct wal_rd r;
+	const uint8_t *body;
+	r.fd = fd;
+	r.fsize = fsize;
+	r.buf = NULL;
+	r.woff = 0;
+	r.wlen = 0;
+	return wal_rd_frame(&r, off, lsn, len, &body);
 }
 
 /*
@@ -263,15 +358,43 @@ struct wal {
 static void
 wal_scan_tail(int fd, off_t *off_out, uint64_t *maxlsn_out)
 {
-	off_t o = 0, fsize = wal_fsize(fd);
+	struct wal_rd r;
+	const uint8_t *body;
+	off_t o = 0;
 	uint64_t maxlsn = 0, lsn;
 	uint32_t len;
-	while (wal_frame_ok(fd, o, fsize, &lsn, &len)) {
+	wal_rd_init(&r, fd, 1);
+	while (wal_rd_frame(&r, o, &lsn, &len, &body)) {
 		if (lsn > maxlsn) maxlsn = lsn;
 		o += (off_t)WAL_REC_HDR + (off_t)len + (off_t)WAL_REC_CRC;
 	}
+	free(r.buf);
 	*off_out = o;
 	*maxlsn_out = maxlsn;
+}
+
+/*
+ * Check a tail hint (wal_opts_t.tail) against the file in O(one frame):
+ * the frame at last_off is complete, checksums, ends at end and carries
+ * max_lsn, and no complete frame starts at end (nothing was appended
+ * after the scan that produced the hint).  1 if it holds.
+ */
+static int
+wal_tail_ok(int fd, const wal_tail_t *t)
+{
+	off_t fsize = wal_fsize(fd);
+	uint64_t lsn;
+	uint32_t len;
+	if (t == NULL || !t->valid || t->last_off > t->end ||
+	    t->end > (uint64_t)fsize)
+		return 0;
+	if (wal_frame_ok(fd, (off_t)t->end, fsize, &lsn, &len))
+		return 0;                    /* the log goes on past the hint */
+	if (t->last_off == t->end)       /* an empty log */
+		return t->end == 0 && t->max_lsn == 0;
+	return wal_frame_ok(fd, (off_t)t->last_off, fsize, &lsn, &len) &&
+	    t->last_off + WAL_REC_HDR + len + WAL_REC_CRC == t->end &&
+	    lsn == t->max_lsn;
 }
 
 /* Point every watermark at (pos, lsn): an empty buffer.  Callers hold no
@@ -313,7 +436,12 @@ wal_open(const wal_opts_t *opts, wal_t **out)
 		 * disk, and append after the last COMPLETE record (a torn tail
 		 * from a crash mid-append is dropped). */
 		int tr;
-		wal_scan_tail(w->fd, &o, &maxlsn);
+		if (wal_tail_ok(w->fd, opts->tail)) {
+			o = (off_t)opts->tail->end;   /* trusted: no scan */
+			maxlsn = opts->tail->max_lsn;
+		} else {
+			wal_scan_tail(w->fd, &o, &maxlsn);
+		}
 		tr = ftruncate(w->fd, o);  /* drop torn tail */
 		(void)tr;                  /* non-fatal: appends overwrite it */
 	}
@@ -1298,41 +1426,68 @@ wal_ockpt_abort(wal_ock_t *k)
 }
 
 int
-wal_scan(const char *path, wal_replay_cb cb, void *user)
+wal_scan_ex(const char *path, wal_replay_cb cb, void *user, wal_tail_t *tail)
 {
-	int fd;
-	off_t off = 0;
+	struct wal_rd r;
+	int fd, rc = XTC_OK, stopped = 0;
+	off_t off = 0, last = 0;
 	uint8_t *buf = NULL;
 	size_t bufcap = 0;
-	off_t fsize;
-	int rc = XTC_OK;
+	uint64_t maxlsn = 0;
 
+	if (tail != NULL)
+		memset(tail, 0, sizeof *tail);
 	if (path == NULL || cb == NULL)
 		return XTC_E_INVAL;
 	fd = open(path, O_RDONLY);
 	if (fd < 0)
 		return XTC_OK;                /* no log yet: nothing to replay */
-	fsize = wal_fsize(fd);
+	wal_rd_init(&r, fd, 1);
 	for (;;) {
 		uint64_t lsn;
 		uint32_t len;
-		/* Verified before anything is allocated (wal_frame_ok). */
-		if (!wal_frame_ok(fd, off, fsize, &lsn, &len))
+		const uint8_t *body;
+		/* Verified before anything is allocated (wal_rd_frame). */
+		if (!wal_rd_frame(&r, off, &lsn, &len, &body))
 			break;                   /* the end, or a torn tail */
-		if (len > bufcap) {
-			uint8_t *nb = realloc(buf, len);
-			if (nb == NULL) { rc = XTC_E_NOMEM; break; }
-			buf = nb; bufcap = len;
+		if (body == NULL) {
+			if (len > bufcap) {
+				uint8_t *nb = realloc(buf, len);
+				if (nb == NULL) { rc = XTC_E_NOMEM; break; }
+				buf = nb; bufcap = len;
+			}
+			if (len > 0 && pread(fd, buf, len, off + (off_t)WAL_REC_HDR) !=
+			    (ssize_t)len) {
+				stopped = 1;          /* as before: end the replay */
+				break;
+			}
+			body = buf;
 		}
-		if (len > 0 && pread(fd, buf, len, off + (off_t)WAL_REC_HDR) != (ssize_t)len)
-			break;
-		if (cb(lsn, buf, len, user) != 0)
-			break;
+		if (lsn > maxlsn)
+			maxlsn = lsn;
+		last = off;
 		off += (off_t)WAL_REC_HDR + (off_t)len + (off_t)WAL_REC_CRC;
+		if (cb(lsn, body, len, user) != 0) {
+			stopped = 1;
+			break;
+		}
 	}
+	if (tail != NULL && rc == XTC_OK && !stopped) {
+		tail->valid = 1;
+		tail->end = (uint64_t)off;
+		tail->last_off = (uint64_t)(off == 0 ? 0 : last);
+		tail->max_lsn = maxlsn;
+	}
+	free(r.buf);
 	free(buf);
 	close(fd);
 	return rc;
+}
+
+int
+wal_scan(const char *path, wal_replay_cb cb, void *user)
+{
+	return wal_scan_ex(path, cb, user, NULL);
 }
 
 int
