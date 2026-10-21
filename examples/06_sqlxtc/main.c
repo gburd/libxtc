@@ -22,8 +22,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 
 #include "xtc.h"
@@ -159,6 +161,34 @@ pin_to_cores(int n_cores)
 	(void)n_cores;
 	return 0;
 #endif
+}
+
+/*
+ * One server per store.  A second server on the same files used to start:
+ * its open found the base not marked clean, rebuilt the page file and
+ * renamed a compacted log over the first server's, which kept appending
+ * to the unlinked old log -- so commits it acknowledged afterwards were
+ * gone at the next start (test_sqlxtc_exclusive.sh).  An exclusive,
+ * non-blocking flock on <store>.lock, held for the process's life (the
+ * kernel drops it when the process dies, so kill -9 leaves nothing
+ * stale), refuses the second server before it touches the files.
+ * Returns the held fd, or -1 (errno: EWOULDBLOCK = another server).
+ */
+static int
+store_lock(const char *store)
+{
+	char p[1100];
+	int fd;
+	(void)snprintf(p, sizeof p, "%s.lock", store);
+	if ((fd = open(p, O_RDWR | O_CREAT | O_CLOEXEC, 0600)) < 0)
+		return -1;
+	if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+		int e = errno;
+		(void)close(fd);
+		errno = e;
+		return -1;
+	}
+	return fd;
 }
 
 /* Stop taking connections: unlisten so new connects are refused rather
@@ -385,7 +415,7 @@ main(int argc, char **argv)
 	xtc_tcp_opts_t tcp_opts = XTC_TCP_OPTS_DEFAULT;
 	db_opts_t db_opts = DB_OPTS_DEFAULT;
 	xtc_pid_t metrics_pid;
-	int rc, exit_rc = 0;
+	int i, rc, exit_rc = 0, mem_store = 0;
 
 	/* Parsing and execution have deeper stacks than a small actor,
 	 * particularly with sanitizer instrumentation. Set this before
@@ -438,10 +468,19 @@ main(int argc, char **argv)
 			/* in-memory db: a unique per-process store file */
 			snprintf(storage_derived, sizeof storage_derived,
 			    "/tmp/sqlxtc-mem-%ld.xstore", (long)getpid());
+			mem_store = 1;
 		}
 		cfg.storage_path = storage_derived;
 	}
 	if (cfg.storage_path != NULL) {
+		/* An in-memory database's store is private by name (pid). */
+		if (!mem_store && store_lock(cfg.storage_path) < 0) {
+			fprintf(stderr, "sqlxtc: cannot lock %s.lock: %s\n",
+			    cfg.storage_path, errno == EWOULDBLOCK ?
+			    "another sqlxtc-server is using this store" :
+			    strerror(errno));
+			return 1;
+		}
 		sx_storage_set_io(cfg.storage_direct, cfg.storage_adaptive);
 		rc = sx_storage_open(cfg.storage_path, cfg.storage_frames);
 		if (rc != SX_OK) {
@@ -470,13 +509,22 @@ main(int argc, char **argv)
 		fprintf(stderr, "db_create failed\n"); return 1;
 	}
 
-	/* Listener socket. */
-	tcp_opts.reuseport = 1;
-	if (xtc_net_listen(XTC_NET_INET, cfg.host, cfg.port,
-	                   &tcp_opts, &srv->listen_fd) != XTC_OK) {
-		fprintf(stderr, "listen %s:%d failed\n",
-		        cfg.host, cfg.port);
-		return 1;
+	/* Listener socket.  No SO_REUSEPORT: there is one listener, and with
+	 * it a second server bound the same port "successfully" and the
+	 * kernel split new connections between the two stores.  An exclusive
+	 * bind fails loudly instead (SO_REUSEADDR, the default, still allows
+	 * a restart over TIME_WAIT). */
+	tcp_opts.reuseport = 0;
+	/* A server restarted right after a kill can find the old listening
+	 * socket not yet torn down; retry for up to 2 s before giving up. */
+	for (i = 0; xtc_net_listen(XTC_NET_INET, cfg.host, cfg.port,
+	    &tcp_opts, &srv->listen_fd) != XTC_OK; i++) {
+		if (i == 40) {
+			fprintf(stderr, "listen %s:%d failed (port in use?)\n",
+			        cfg.host, cfg.port);
+			return 1;
+		}
+		(void)xtc_sleep_ns(50LL * 1000 * 1000);
 	}
 	xtc_net_setnonblock(srv->listen_fd);
 
