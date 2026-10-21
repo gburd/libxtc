@@ -605,7 +605,10 @@ scenario_autovacuum(void)
 	for (k = 1; k <= K; k++)
 		CK(sel_v(db, k, b, sizeof b) == 1 && strcmp(b, want) == 0);
 	leftover = xstore_gc_run(db);
-	CK(leftover < K);     /* vs K*N == 500 without autovacuum */
+	/* vs K*N == 500 without autovacuum.  At most one per row: the last
+	 * UPDATE's own pinned snapshot keeps each row's previous version
+	 * while that statement runs (it may still read it). */
+	CK(leftover <= K);
 
 	/* Adaptive backoff: a UNIFORM phase -- M distinct new rowids, each
 	 * written once, nothing to reclaim -- must NOT prune on every write.

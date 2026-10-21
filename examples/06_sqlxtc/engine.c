@@ -1270,12 +1270,18 @@ nat_select_run(struct sx_stmt *st)
 		return (rc == 1 && st->vres != NULL);
 	}
 	if (st->pcache == NULL) st->pcache = vx_pcache_new(st->sql);
+	/* One pinned snapshot for the whole SELECT (the result is
+	 * materialized here): without it an autocommit SELECT read each row
+	 * at the then-latest clock, unpinned, so GC could reclaim the version
+	 * it was about to read. */
+	xstore_stmt_begin((struct xsql *)st->db);
 	if (st->pcache != NULL)
 		rc = vx_pcache_run(st->pcache, (struct xsql *)st->db,
 		    st->nbind ? st->binds : NULL, st->nbind, &st->vres, &verr);
 	else
 		rc = vx_run_p((struct xsql *)st->db, st->sql,
 		    st->nbind ? st->binds : NULL, st->nbind, 1, &st->vres, &verr);
+	xstore_stmt_end((struct xsql *)st->db);
 	st->ran = 1;
 	if (verr) free(verr);
 	return (rc == 1 && st->vres != NULL);
@@ -1446,6 +1452,7 @@ sx_step(sx_stmt *st)
 			mark = xstore_stmt_mark(st->db);
 		restart:
 			if (rd) xstore_stmt_begin(st->db);
+			else xstore_stmt_pin(st->db);   /* INSERT ... SELECT reads */
 			if (st->pcache == NULL) st->pcache = vx_pcache_new(st->sql);
 			if (st->pcache != NULL)
 				rc = vx_pcache_write(st->pcache, (struct xsql *)st->db,
@@ -1885,7 +1892,9 @@ sx_vexec_try(sx_db *h, const char *sql, int n_workers, sx_vx_result **out)
 
 	if (out == NULL) return XTC_E_INVAL;
 	*out = NULL;
+	xstore_stmt_begin((struct xsql *)h);     /* one pinned snapshot */
 	rc = vx_run((struct xsql *)h, sql, n_workers, &r, &verr);
+	xstore_stmt_end((struct xsql *)h);
 	if (verr) free(verr);          /* the caller falls back; no message needed */
 	if (rc == 1) { *out = (sx_vx_result *)r; return 1; }
 	if (r) vx_result_free(r);
@@ -1902,8 +1911,10 @@ sx_vexec_try_p(sx_db *h, const char *sql, const void *binds, int nbinds,
 
 	if (out == NULL) return XTC_E_INVAL;
 	*out = NULL;
+	xstore_stmt_begin((struct xsql *)h);     /* one pinned snapshot */
 	rc = vx_run_p((struct xsql *)h, sql, (const vx_cell_t *)binds, nbinds,
 	              n_workers, &r, &verr);
+	xstore_stmt_end((struct xsql *)h);
 	if (verr) free(verr);
 	if (rc == 1) { *out = (sx_vx_result *)r; return 1; }
 	if (r) vx_result_free(r);
@@ -1949,7 +1960,10 @@ int
 sx_vexec_write(sx_db *h, const char *sql, int64_t *nchanges)
 {
 	char *verr = NULL;
-	int rc = vx_run_write((struct xsql *)h, sql, nchanges, &verr);
+	int rc;
+	xstore_stmt_pin((struct xsql *)h);
+	rc = vx_run_write((struct xsql *)h, sql, nchanges, &verr);
+	xstore_stmt_end((struct xsql *)h);
 	if (verr) free(verr);          /* caller falls back; no message surfaced */
 	return rc;
 }
@@ -1959,8 +1973,11 @@ sx_vexec_write_p(sx_db *h, const char *sql, const void *binds, int nbinds,
                  int64_t *nchanges)
 {
 	char *verr = NULL;
-	int rc = vx_run_write_p((struct xsql *)h, sql, (const vx_cell_t *)binds, nbinds,
-	                        nchanges, &verr);
+	int rc;
+	xstore_stmt_pin((struct xsql *)h);
+	rc = vx_run_write_p((struct xsql *)h, sql, (const vx_cell_t *)binds, nbinds,
+	                    nchanges, &verr);
+	xstore_stmt_end((struct xsql *)h);
 	if (verr) free(verr);
 	return rc;
 }

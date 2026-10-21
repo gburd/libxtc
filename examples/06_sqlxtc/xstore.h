@@ -326,9 +326,14 @@ int xstore_set_isolation(struct xsql *db, const char *level);
 /* Level for the current transaction only (SET TRANSACTION ISOLATION
  * LEVEL); 0 ok, -1 bad level, -2 not in a txn, -3 txn already queried. */
 int xstore_set_txn_isolation(struct xsql *db, const char *level);
-/* Mark the start of a DML statement (write-write conflict base). */
+/* Mark the start and end of a statement: its one read snapshot (the
+ * write-write conflict base for a write), pinned against GC in
+ * autocommit until xstore_stmt_end. */
 void xstore_stmt_begin(struct xsql *db);
 void xstore_stmt_end(struct xsql *db);
+/* Pin the GC horizon for an autocommit statement without giving it a
+ * statement snapshot (released by xstore_stmt_end). */
+void xstore_stmt_pin(struct xsql *db);
 /* 1 if the current statement's last write was refused as a conflict. */
 int  xstore_last_conflict(struct xsql *db);
 /* After a write statement failed on a stale-read conflict: 1 if it may

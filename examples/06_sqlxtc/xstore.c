@@ -762,11 +762,14 @@ ssi_abort(ssi_txn_t *t)
  * version, with nothing newer, is unreachable too).  This is the
  * MVCC vacuum horizon -- the oldest snapshot any live transaction can see.
  *
- * Autocommit statement reads do not register: each reads at the
- * current clock, so it sees at least the surviving newest version,
- * which GC never removes.  Only LONG-LIVED snapshots pin the horizon:
- * an open explicit transaction (txn_snap, held to commit) and an
- * xstore_as_of() time-travel pin (read_snap).  An as_of pin set below
+ * Every snapshot a reader is using pins the horizon: an open explicit
+ * transaction (txn_snap, held to commit), an xstore_as_of() time-travel
+ * pin (read_snap), and an autocommit statement's snapshot (stmt_base,
+ * for the statement, xstore_stmt_begin/_end).  An unpinned reader is NOT
+ * safe: a reader at p needs the newest version at or below p, and once a
+ * newer version commits and the horizon passes it, that version is
+ * garbage -- an autocommit UPDATE then found no row (a lost update) and
+ * a SELECT skipped it (test_snap_registry (3)).  An as_of pin set below
  * the reclaimed horizon is best-effort (its versions may already be
  * gone); explicit transactions always snapshot the current clock and
  * are never below the horizon.
@@ -4456,6 +4459,7 @@ xs_put_pruned(xstore_ctx_t *cx, uint32_t tableid, int64_t rowid, const void *blo
 			xs_uniq_msg(&e, cx->uniq_err, sizeof cx->uniq_err);
 	}
 	if (rc == SX_OK) {
+		cx->stmt_puts++;            /* an applied autocommit row */
 		if (cx->autovacuum)
 			xs_maybe_prune(cx->bt, tableid, rowid,
 			    snap_horizon(xs_visible()));
@@ -4533,7 +4537,6 @@ xstore_write_txn(struct xsql *db, uint32_t tableid, int64_t rowid,
 	if (rc == SX_BUSY)
 		cx->last_conflict = XS_CONFL_STALE;
 	if (rc == SX_OK) {
-		cx->stmt_puts++;
 		xs_wait_visible(cx->last_ts);
 	}
 	/* Released once the version is visible: a waiter that re-runs on a
@@ -4666,16 +4669,39 @@ xs_rowid_hw_forget(bt_t *bt)
 	xs_commit_unlock();
 }
 
-/* Start of a DML statement: record the snapshot its reads use, the
- * base for its write-write conflict check (READ COMMITTED and
- * autocommit; snapshot levels use txn_snap). */
+/* Start of a statement (a SELECT, UPDATE or DELETE): record the one
+ * snapshot its reads use -- the base for a write's write-write conflict
+ * check (READ COMMITTED and autocommit; snapshot levels use txn_snap) --
+ * and, in autocommit, pin it until xstore_stmt_end. */
+/* Pin the snapshot an autocommit statement reads at (a transaction's pin,
+ * txn_snap <= now, or an as_of pin already covers it); returns it. */
+static uint64_t
+xs_stmt_pin(xstore_ctx_t *cx, struct xsql *db)
+{
+	xs_enter_ctx(cx, db);
+	cx->stmt_puts = 0;
+	if (!cx->in_txn &&
+	    atomic_load_explicit(&cx->read_snap, memory_order_relaxed) == 0)
+		return snap_pin_visible(&cx->snap_slot);
+	return xs_visible();
+}
+
+/* Pin only (no statement snapshot or conflict base), for a statement
+ * that does not use one -- an INSERT, whose INSERT ... SELECT source
+ * still reads -- until xstore_stmt_end. */
+void
+xstore_stmt_pin(struct xsql *db)
+{
+	xstore_ctx_t *cx = xstore_ctx_of(db);
+	if (cx != NULL) (void)xs_stmt_pin(cx, db);
+}
+
 void
 xstore_stmt_begin(struct xsql *db)
 {
 	xstore_ctx_t *cx = xstore_ctx_of(db);
 	if (cx == NULL) return;
-	xs_enter_ctx(cx, db);
-	cx->stmt_base = xs_visible();
+	cx->stmt_base = xs_stmt_pin(cx, db);
 	cx->last_conflict = 0;
 	cx->stmt_puts = 0;
 	cx->stmt_first = cx->in_txn && !cx->touched && cx->wn == 0;
@@ -4685,7 +4711,15 @@ void
 xstore_stmt_end(struct xsql *db)
 {
 	xstore_ctx_t *cx = xstore_ctx_of(db);
-	if (cx != NULL) cx->stmt_base = 0;
+	if (cx == NULL) return;
+	cx->stmt_base = 0;
+	if (!cx->in_txn) {
+		xs_pin_recompute(cx);    /* drop the statement's pin */
+		/* A write's own commit queued index entries its pin kept
+		 * from the reap at that commit: reap them now, as before. */
+		if (cx->stmt_puts > 0 && g_idx_dead_n > 0)
+			xs_idx_reap(cx->bt);
+	}
 }
 
 int
