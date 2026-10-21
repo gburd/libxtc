@@ -870,10 +870,15 @@ smo_log_leaf(bt_t *bt, bm_pid_t pid, void *image)
  */
 static int
 bt_split_internal(bt_t *bt, void *pp, void *rp, uint32_t rpid,
-    uint8_t *pushup, uint16_t *pushuplen)
+    uint8_t *pushup, uint16_t *pushuplen, int append)
 {
 	int count = (int)btnode_count(pp);
-	int mid = count / 2;
+	/* An appended separator (the child split was an append split; see
+	 * btnode split_point) pushes up the LAST key: the left keeps all but
+	 * one child, the right starts with that child and the new one.  A
+	 * midpoint cut left every internal node of an ascending key stream
+	 * half empty, as the leaves were. */
+	int mid = (append && count >= 3) ? count - 1 : count / 2;
 	int i;
 	uint8_t empty = 0;
 	uint32_t old_right = btnode_right_sibling(pp);
@@ -1087,6 +1092,7 @@ post_separator(bt_t *bt, bm_pid_t *path, int level,
 		void *pp;
 		uint8_t pushup[BT_MAX_KEY];
 		uint16_t pushuplen = 0;
+		int append;
 
 		if (bm_fix_pid(bm, path[level], &pf) != XTC_OK)
 			return XTC_E_INTERNAL;
@@ -1108,8 +1114,16 @@ post_separator(bt_t *bt, bm_pid_t *path, int level,
 		if (rc != XTC_OK) { bm_unlatch(pf); bm_unfix(bm, pf, 0); return rc; }
 		bm_latch_exclusive(rf);
 		btnode_init(bm_page(rf), bt->page_size, 0);
+		{
+			uint8_t lk[BT_MAX_KEY];
+			uint16_t lkl = 0;
+			int cnt = (int)btnode_count(pp);
+			append = cnt >= 3 &&
+			    btnode_full_key(pp, cnt - 1, lk, BT_MAX_KEY, &lkl) == 0 &&
+			    key_cmp(cur_sep, cur_seplen, lk, lkl) > 0;
+		}
 		if (bt_split_internal(bt, pp, bm_page(rf), (uint32_t)rpid,
-		    pushup, &pushuplen) != XTC_OK) {
+		    pushup, &pushuplen, append) != XTC_OK) {
 			bm_unlatch(rf); bm_unfix(bm, rf, 1);
 			bm_unlatch(pf); bm_unfix(bm, pf, 0);
 			return XTC_E_INTERNAL;
@@ -1844,6 +1858,31 @@ merge_level(bt_t *bt, bm_pid_t *path, int level, const void *key,
 		rslot = cslot;
 	} else {
 		lslot = rslot = -1;        /* single child: nothing to merge */
+	}
+	/*
+	 * If C and its right sibling do not fit in one page, try C with its
+	 * LEFT sibling instead.  Deleting keys in ascending order (a queue:
+	 * the oldest rows go first) empties C while its right sibling is
+	 * still untouched; once append splits fill pages, that sibling is
+	 * full, the right pair never fits, and the space was never given
+	 * back.  The left sibling is the one the stream already emptied.
+	 */
+	if (lslot == cslot && cslot - 1 >= 0) {
+		bm_frame_t *tf = NULL, *tr = NULL;
+		int fits = 1;
+		if (bm_fix_pid(bm, child_pid_at(pp, cslot), &tf) == XTC_OK) {
+			bm_latch_shared(tf);
+			if (bm_fix_pid(bm, child_pid_at(pp, cslot + 1), &tr) == XTC_OK) {
+				bm_latch_shared(tr);
+				fits = btnode_merge_fits(bm_page(tf), bm_page(tr));
+				bm_unlatch(tr); bm_unfix(bm, tr, 0);
+			}
+			bm_unlatch(tf); bm_unfix(bm, tf, 0);
+		}
+		if (!fits) {
+			lslot = cslot - 1;
+			rslot = cslot;
+		}
 	}
 
 	if (lslot < 0)

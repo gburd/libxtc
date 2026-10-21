@@ -227,7 +227,9 @@ t_big_pages(uint32_t ps)
 	bt_stats_t st;
 	unsigned char out[64];
 	uint16_t vl;
-	int i, bad = 0, miss = 0, n = ps >= 32768 ? 600000 : 300000;
+	/* Sequential keys fill pages (append splits), so a 32 KiB-page
+	 * tree needs ~1.5M of them before the internal level splits. */
+	int i, bad = 0, miss = 0, n = ps >= 32768 ? 1600000 : 300000;
 
 	CHECK(bt_open(bm, &bt) == XTC_OK, "open");
 	for (i = 0; i < n; i++) {

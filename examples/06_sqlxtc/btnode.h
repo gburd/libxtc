@@ -90,6 +90,16 @@ struct btnode_hdr {
 	uint16_t lo_fence_len;  /* lower fence key length */
 	uint16_t hi_fence_off;  /* upper fence key offset (0 = +infinity) */
 	uint16_t hi_fence_len;  /* upper fence key length */
+	/* Insert history (InnoDB PAGE_LAST_INSERT / PAGE_N_DIRECTION), in
+	 * what was struct padding, so the page format is unchanged and an
+	 * old page reads as "no history": the slot of the last insert + 1
+	 * (0 = none) and how many inserts in a row landed just after the
+	 * previous one.  The split uses it to tell a sequential stream in
+	 * the middle of a node (one table's newest rows, followed by the
+	 * next table's first keys) from a random insert. */
+	uint16_t last_ins1;
+	uint8_t  ins_run;
+	uint8_t  hdr_pad_;
 };
 
 /*

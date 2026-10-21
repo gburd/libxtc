@@ -24,6 +24,8 @@
 
 _Static_assert(sizeof(struct btnode_slot) == 10,
     "btnode_slot must pack to 10 bytes");
+_Static_assert(sizeof(struct btnode_hdr) == 40,
+    "btnode_hdr is on disk: the insert history must stay in the padding");
 
 #define HDR(p) ((struct btnode_hdr *)(p))
 /* A slot's val_len carries a flag bit (BTNODE_VFLAG, see btnode.h); the
@@ -372,6 +374,13 @@ btnode_insert_f(void *page, const void *key, uint16_t key_len, const void *val,
 	node_store_f(page, (uint16_t)idx, key, key_len, val, val_len,
 	    VFLAG(vflag));
 	h->count++;
+	/* insert history: did this one land just after the previous one? */
+	if (h->last_ins1 != 0 && idx == (int)h->last_ins1) {
+		if (h->ins_run < 255) h->ins_run++;
+	} else {
+		h->ins_run = 0;
+	}
+	h->last_ins1 = (uint16_t)(idx + 1);
 	return 0;
 }
 
@@ -455,6 +464,8 @@ btnode_remove(void *page, int slot)
 
 	if (slot < 0 || slot >= (int)h->count)
 		return -1;
+	h->last_ins1 = 0;              /* a delete breaks an insert run */
+	h->ins_run = 0;
 	h->space_used =
 	    (uint16_t)(h->space_used - (s[slot].key_len + VLEN(s[slot].val_len)));
 	memmove(&s[slot], &s[slot + 1],
@@ -535,9 +546,55 @@ slot_cost(const struct btnode_slot *s, uint16_t pl, uint16_t npl)
  * half too full for a large pending entry, failing the insert AFTER the
  * split was applied; and it never ran when the leaf held one entry.
  */
+/*
+ * The tail cut for a sequential stream that ends mid-node at slot ip
+ * (see split_point): the left keeps slots [0, ip) and takes the pending
+ * entry, the right takes the tail [ip, n).  The separator is the
+ * shortest prefix of the tail's first key that sorts above the pending
+ * key (Bayer and Unterauer's prefix B-tree separator): a proper prefix
+ * of tail[0], so it is < tail[0] and > every left key, and every later
+ * key of the stream (below tail[0] in its first differing byte) routes
+ * left.  Returns the cut (ip - 1) with the separator in csep, or -1 if
+ * no proper prefix separates them or the halves do not fit.
+ */
+static int
+seq_split(const void *page, int ip, const uint8_t *pend_key, uint16_t pend_klen,
+    uint32_t pend, uint8_t *csep, uint16_t csep_cap, uint16_t *csep_len)
+{
+	const struct btnode_hdr *h = CHDR(page);
+	const struct btnode_slot *s = cslots_of(page);
+	const uint8_t *p = page;
+	uint16_t pl = h->prefix_len, tl, cp = 0, plen;
+	uint32_t cap = h->page_size - (uint32_t)sizeof(struct btnode_hdr);
+	uint32_t lneed = 0, rneed = 0;
+	uint8_t tail[h->page_size];   /* a full key is smaller than a page */
+	int i, n = (int)h->count;
+
+	tl = (uint16_t)(pl + s[ip].key_len);
+	if (tl > sizeof tail || tl > csep_cap)
+		return -1;
+	if (pl > 0) memcpy(tail, p + h->lo_fence_off, pl);
+	memcpy(tail + pl, p + s[ip].offset, s[ip].key_len);
+	while (cp < tl && cp < pend_klen && tail[cp] == pend_key[cp]) cp++;
+	if (cp >= pend_klen || cp >= tl || tail[cp] <= pend_key[cp])
+		return -1;                 /* pending is not below tail[0] */
+	plen = (uint16_t)(cp + 1);
+	if (plen >= tl)
+		return -1;                 /* no PROPER prefix: cannot route */
+	for (i = 0; i < ip; i++) lneed += slot_cost(&s[i], pl, 0);
+	for (i = ip; i < n; i++) rneed += slot_cost(&s[i], pl, 0);
+	lneed += (uint32_t)h->lo_fence_len + plen + pend;
+	rneed += (uint32_t)plen + (uint32_t)h->hi_fence_len;
+	if (lneed > cap || rneed > cap)
+		return -1;
+	memcpy(csep, tail, plen);
+	*csep_len = plen;
+	return ip - 1;
+}
+
 static int
 split_point(const void *page, const uint8_t *pend_key, uint16_t pend_klen,
-    uint32_t pend)
+    uint32_t pend, uint8_t *csep, uint16_t csep_cap, uint16_t *csep_len)
 {
 	const struct btnode_hdr *h = CHDR(page);
 	const struct btnode_slot *s = cslots_of(page);
@@ -545,12 +602,49 @@ split_point(const void *page, const uint8_t *pend_key, uint16_t pend_klen,
 	uint16_t pl = h->prefix_len;
 	uint32_t cap = h->page_size - (uint32_t)sizeof(struct btnode_hdr);
 	uint32_t total = 0, left = 0, best_max = UINT32_MAX;
-	int i, best = -1, n = (int)h->count;
+	int i, best = -1, n = (int)h->count, append = 0;
+
+	*csep_len = 0;
 
 	if (n < 2)
 		return -1;
 	for (i = 0; i < n; i++)
 		total += slot_cost(&s[i], pl, 0);
+	/*
+	 * Append split.  When the pending key sorts after every key in the
+	 * node, the insert stream is (very likely) ascending -- a table's
+	 * newest rowids, a time-ordered id, an index run's newest entry --
+	 * and a midpoint cut would leave this left page half empty for
+	 * good: every later key lands to the right.  Move as little as
+	 * possible instead, keeping the left page full (Berkeley DB
+	 * __bam_psplit moves one item for an insert at the end of the last
+	 * page; SQLite's balance_quick and InnoDB's insert-point split do the
+	 * same).  It is a guess: a wrong one leaves a full left page that
+	 * just splits normally on its next miss.
+	 */
+	if (pend_key != NULL && pend > 0) {
+		int ip = node_lower_bound(page, pend_key, pend_klen, NULL);
+		append = ip >= n;
+		/*
+		 * A sequential stream in the MIDDLE of the node: this insert
+		 * lands right after the last one, as the ones before it did
+		 * (InnoDB's PAGE_LAST_INSERT heuristic) -- one table's newest
+		 * rows, followed in the same leaf by the next table's first
+		 * keys.  A midpoint cut leaves the stream's page half empty
+		 * every time; an insertion-point cut (InnoDB) drags the other
+		 * table's keys along to every new page.  Instead (seq_split)
+		 * move the TAIL out under a truncated separator that routes the
+		 * stream's future keys LEFT: the left page then grows by append
+		 * splits and fills.
+		 */
+		if (!append && ip >= 2 && h->last_ins1 == (uint16_t)ip &&
+		    h->ins_run >= 2) {
+			int c = seq_split(page, ip, pend_key, pend_klen, pend, csep,
+			    csep_cap, csep_len);
+			if (c >= 0)
+				return c;
+		}
+	}
 	for (i = 0; i < n - 1; i++) {
 		uint32_t sep_len, lneed, rneed, lsz, rsz, m;
 		int to_left = 1;
@@ -580,6 +674,10 @@ split_point(const void *page, const uint8_t *pend_key, uint16_t pend_klen,
 		rneed = rsz + (pend > 0 && !to_left ? pend : 0);
 		if (lneed > cap || rneed > cap)
 			continue;
+		if (append) {
+			best = i;              /* the highest feasible cut wins */
+			continue;
+		}
 		m = lneed > rneed ? lneed : rneed;
 		if (m < best_max) {
 			best_max = m;
@@ -611,18 +709,21 @@ btnode_split_ex(void *page, void *right_page, void *sep_key_out,
 		return -1;
 	if (pend_key != NULL)
 		pend = (uint32_t)sizeof(struct btnode_slot) + pend_klen + pend_vlen;
-	sp = split_point(page, pend_key, pend_klen, pend);
+	sp = split_point(page, pend_key, pend_klen, pend, sep, sep_cap, &sep_len);
 	if (sp < 0)
 		return -1;
 	sep_slot = (uint16_t)sp;
 
-	/* Separator = full key of the last slot kept in the left node. */
-	sep_len = (uint16_t)(pl + s[sep_slot].key_len);
-	if (sep_len > sep_cap)
-		return -1;              /* caller's buffer cannot hold it */
-	if (pl > 0)
-		memcpy(sep, p + h->lo_fence_off, pl);
-	memcpy(sep + pl, p + s[sep_slot].offset, s[sep_slot].key_len);
+	/* Separator = full key of the last slot kept in the left node,
+	 * unless split_point chose a truncated one (seq_split). */
+	if (sep_len == 0) {
+		sep_len = (uint16_t)(pl + s[sep_slot].key_len);
+		if (sep_len > sep_cap)
+			return -1;          /* caller's buffer cannot hold it */
+		if (pl > 0)
+			memcpy(sep, p + h->lo_fence_off, pl);
+		memcpy(sep + pl, p + s[sep_slot].offset, s[sep_slot].key_len);
+	}
 	if (sep_len_out != NULL)
 		*sep_len_out = sep_len;
 
