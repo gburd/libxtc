@@ -69,6 +69,33 @@
  * requirement, so the format bump needs no version negotiation.
  */
 
+/* 64-bit FNV-1a, continued from h over n bytes.  Byte-at-a-time FNV is
+ * a serial multiply chain (~1 byte per 4 cycles), and the reopen scan ran
+ * it over every byte of the log: unrolling 8 bytes per iteration lets the
+ * compiler schedule the loads and xors ahead of the multiplies.  Same
+ * byte order, same result: the on-disk checksum is unchanged. */
+#define WAL_FNV_PRIME 1099511628211ull
+static uint64_t
+wal_fnv(uint64_t h, const uint8_t *p, size_t n)
+{
+	while (n >= 8) {
+		h = (h ^ p[0]) * WAL_FNV_PRIME;
+		h = (h ^ p[1]) * WAL_FNV_PRIME;
+		h = (h ^ p[2]) * WAL_FNV_PRIME;
+		h = (h ^ p[3]) * WAL_FNV_PRIME;
+		h = (h ^ p[4]) * WAL_FNV_PRIME;
+		h = (h ^ p[5]) * WAL_FNV_PRIME;
+		h = (h ^ p[6]) * WAL_FNV_PRIME;
+		h = (h ^ p[7]) * WAL_FNV_PRIME;
+		p += 8;
+		n -= 8;
+	}
+	while (n-- > 0)
+		h = (h ^ *p++) * WAL_FNV_PRIME;
+	return h;
+}
+#define WAL_FNV_BASIS 1469598103934665603ull
+
 /* 64-bit FNV-1a over the record header (lsn+len) and body.  Not
  * cryptographic -- it only needs to catch a torn/partial tail record,
  * where the trailing 8 bytes are either missing (short read) or do not
@@ -77,60 +104,11 @@
 static uint64_t
 wal_rec_crc(uint64_t lsn, uint32_t len, const void *body)
 {
-	const uint8_t *bp = body;
-	uint64_t h = 1469598103934665603ull;    /* FNV offset basis */
 	uint8_t hdr[WAL_REC_HDR];
-	uint32_t i;
 
 	memcpy(hdr, &lsn, 8);
 	memcpy(hdr + 8, &len, 4);
-	for (i = 0; i < WAL_REC_HDR; i++)
-		h = (h ^ hdr[i]) * 1099511628211ull;   /* FNV prime */
-	for (i = 0; i < len; i++)
-		h = (h ^ bp[i]) * 1099511628211ull;
-	return h;
-}
-
-/*
- * Verify the frame at `off` of fd without trusting its length field:
- * returns 1 with *lsn / *len when a COMPLETE frame with a matching
- * checksum is there, 0 at the end of the log (EOF, a torn header, body
- * or trailer, or a checksum mismatch).  A record body larger than
- * WAL_MAX_REC (a big transaction) is checksummed in chunks, so a torn
- * tail whose length field is garbage never drives an allocation -- the
- * reason the scans used to stop at any record over 16 MiB, which LOST an
- * acknowledged big transaction and every commit after it in recovery
- * (test_wal_bigtxn).  The length must also fit in the file.
- */
-static int
-wal_frame_ok(int fd, off_t off, off_t fsize, uint64_t *lsn, uint32_t *len)
-{
-	uint8_t hdr[WAL_REC_HDR], trl[WAL_REC_CRC], chunk[64 * 1024];
-	uint64_t crc, h;
-	uint32_t i, done;
-
-	if (pread(fd, hdr, WAL_REC_HDR, off) != (ssize_t)WAL_REC_HDR)
-		return 0;
-	memcpy(lsn, hdr, 8);
-	memcpy(len, hdr + 8, 4);
-	if ((uint64_t)off + WAL_REC_HDR + *len + WAL_REC_CRC > (uint64_t)fsize)
-		return 0;                    /* runs past the end: torn */
-	if (pread(fd, trl, WAL_REC_CRC, off + (off_t)WAL_REC_HDR + (off_t)*len)
-	    != (ssize_t)WAL_REC_CRC)
-		return 0;
-	memcpy(&crc, trl, WAL_REC_CRC);
-	h = 1469598103934665603ull;       /* wal_rec_crc, streamed */
-	for (i = 0; i < WAL_REC_HDR; i++)
-		h = (h ^ hdr[i]) * 1099511628211ull;
-	for (done = 0; done < *len; ) {
-		uint32_t k = *len - done < sizeof chunk ? *len - done : (uint32_t)sizeof chunk;
-		if (pread(fd, chunk, k, off + (off_t)WAL_REC_HDR + (off_t)done) != (ssize_t)k)
-			return 0;
-		for (i = 0; i < k; i++)
-			h = (h ^ chunk[i]) * 1099511628211ull;
-		done += k;
-	}
-	return h == crc;
+	return wal_fnv(wal_fnv(WAL_FNV_BASIS, hdr, WAL_REC_HDR), body, len);
 }
 
 static off_t
@@ -138,6 +116,123 @@ wal_fsize(int fd)
 {
 	off_t e = lseek(fd, 0, SEEK_END);
 	return e < 0 ? 0 : e;
+}
+
+/*
+ * A buffered frame reader for the sequential scans.  The scans used to
+ * issue three preads per frame (header, trailer, body in 64 KiB chunks)
+ * and a fourth to hand the body to the callback; this keeps a window of
+ * the file (WAL_RD_ONE bytes) and serves every frame that fits in it
+ * from memory, refilling with one pread when the next frame runs past
+ * the window.  A frame larger than the window is verified in chunks
+ * straight from the file, so a torn tail whose length field is garbage
+ * never drives an allocation.  buf == NULL (no memory) degrades to the
+ * chunked path for every frame.
+ */
+#define WAL_RD_ONE (1u << 20)
+struct wal_rd {
+	int      fd;
+	off_t    fsize;
+	uint8_t *buf;                 /* WAL_RD_ONE bytes, or NULL */
+	off_t    woff;                /* file offset of buf[0] */
+	size_t   wlen;                /* valid bytes in buf */
+};
+
+static void
+wal_rd_init(struct wal_rd *r, int fd, int buffered)
+{
+	r->fd = fd;
+	r->fsize = wal_fsize(fd);
+	r->buf = buffered ? malloc(WAL_RD_ONE) : NULL;
+	r->woff = 0;
+	r->wlen = 0;
+}
+
+/* A pointer to file bytes [off, off + n) if they are (or, after one
+ * refill, become) inside the window; NULL otherwise. */
+static const uint8_t *
+wal_rd_at(struct wal_rd *r, off_t off, size_t n)
+{
+	ssize_t got;
+	if (r->buf == NULL || n > WAL_RD_ONE)
+		return NULL;
+	if (off >= r->woff && (uint64_t)(off - r->woff) + n <= r->wlen)
+		return r->buf + (off - r->woff);
+	do {
+		got = pread(r->fd, r->buf, WAL_RD_ONE, off);
+	} while (got < 0 && errno == EINTR);
+	r->woff = off;
+	r->wlen = got > 0 ? (size_t)got : 0;
+	return n <= r->wlen ? r->buf : NULL;
+}
+
+/*
+ * Verify the frame at `off` of the file without trusting its length
+ * field: returns 1 with *lsn / *len when a COMPLETE frame with a
+ * matching checksum is there, 0 at the end of the log (EOF, a torn
+ * header, body or trailer, or a checksum mismatch).  *body points at the
+ * body inside the reader's window when the whole frame is there, else it
+ * is NULL (the caller preads the body).  A record body larger than
+ * WAL_MAX_REC (a big transaction) is checksummed in chunks -- the scans
+ * used to stop at any record over 16 MiB, which LOST an acknowledged big
+ * transaction and every commit after it in recovery (test_wal_bigtxn).
+ * The length must also fit in the file.
+ */
+static int
+wal_rd_frame(struct wal_rd *r, off_t off, uint64_t *lsn, uint32_t *len,
+    const uint8_t **body)
+{
+	uint8_t hdr[WAL_REC_HDR], trl[WAL_REC_CRC], chunk[64 * 1024];
+	const uint8_t *p;
+	uint64_t crc, h, fl;
+	uint32_t done;
+
+	*body = NULL;
+	if (off < 0 || off + (off_t)WAL_REC_HDR > r->fsize)
+		return 0;
+	if ((p = wal_rd_at(r, off, WAL_REC_HDR)) != NULL)
+		memcpy(hdr, p, WAL_REC_HDR);
+	else if (pread(r->fd, hdr, WAL_REC_HDR, off) != (ssize_t)WAL_REC_HDR)
+		return 0;
+	memcpy(lsn, hdr, 8);
+	memcpy(len, hdr + 8, 4);
+	fl = (uint64_t)WAL_REC_HDR + *len + WAL_REC_CRC;
+	if ((uint64_t)off + fl > (uint64_t)r->fsize)
+		return 0;                    /* runs past the end: torn */
+	if ((p = wal_rd_at(r, off, (size_t)fl)) != NULL) {
+		memcpy(&crc, p + WAL_REC_HDR + *len, WAL_REC_CRC);
+		if (wal_fnv(WAL_FNV_BASIS, p, WAL_REC_HDR + *len) != crc)
+			return 0;
+		*body = p + WAL_REC_HDR;
+		return 1;
+	}
+	if (pread(r->fd, trl, WAL_REC_CRC, off + (off_t)WAL_REC_HDR + (off_t)*len)
+	    != (ssize_t)WAL_REC_CRC)
+		return 0;
+	memcpy(&crc, trl, WAL_REC_CRC);
+	h = wal_fnv(WAL_FNV_BASIS, hdr, WAL_REC_HDR);
+	for (done = 0; done < *len; ) {
+		uint32_t k = *len - done < sizeof chunk ? *len - done : (uint32_t)sizeof chunk;
+		if (pread(r->fd, chunk, k, off + (off_t)WAL_REC_HDR + (off_t)done) != (ssize_t)k)
+			return 0;
+		h = wal_fnv(h, chunk, k);
+		done += k;
+	}
+	return h == crc;
+}
+
+/* Verify one frame with no window (the tail-hint check). */
+static int
+wal_frame_ok(int fd, off_t off, off_t fsize, uint64_t *lsn, uint32_t *len)
+{
+	struct wal_rd r;
+	const uint8_t *body;
+	r.fd = fd;
+	r.fsize = fsize;
+	r.buf = NULL;
+	r.woff = 0;
+	r.wlen = 0;
+	return wal_rd_frame(&r, off, lsn, len, &body);
 }
 
 /*
@@ -263,15 +358,43 @@ struct wal {
 static void
 wal_scan_tail(int fd, off_t *off_out, uint64_t *maxlsn_out)
 {
-	off_t o = 0, fsize = wal_fsize(fd);
+	struct wal_rd r;
+	const uint8_t *body;
+	off_t o = 0;
 	uint64_t maxlsn = 0, lsn;
 	uint32_t len;
-	while (wal_frame_ok(fd, o, fsize, &lsn, &len)) {
+	wal_rd_init(&r, fd, 1);
+	while (wal_rd_frame(&r, o, &lsn, &len, &body)) {
 		if (lsn > maxlsn) maxlsn = lsn;
 		o += (off_t)WAL_REC_HDR + (off_t)len + (off_t)WAL_REC_CRC;
 	}
+	free(r.buf);
 	*off_out = o;
 	*maxlsn_out = maxlsn;
+}
+
+/*
+ * Check a tail hint (wal_opts_t.tail) against the file in O(one frame):
+ * the frame at last_off is complete, checksums, ends at end and carries
+ * max_lsn, and no complete frame starts at end (nothing was appended
+ * after the scan that produced the hint).  1 if it holds.
+ */
+static int
+wal_tail_ok(int fd, const wal_tail_t *t)
+{
+	off_t fsize = wal_fsize(fd);
+	uint64_t lsn;
+	uint32_t len;
+	if (t == NULL || !t->valid || t->last_off > t->end ||
+	    t->end > (uint64_t)fsize)
+		return 0;
+	if (wal_frame_ok(fd, (off_t)t->end, fsize, &lsn, &len))
+		return 0;                    /* the log goes on past the hint */
+	if (t->last_off == t->end)       /* an empty log */
+		return t->end == 0 && t->max_lsn == 0;
+	return wal_frame_ok(fd, (off_t)t->last_off, fsize, &lsn, &len) &&
+	    t->last_off + WAL_REC_HDR + len + WAL_REC_CRC == t->end &&
+	    lsn == t->max_lsn;
 }
 
 /* Point every watermark at (pos, lsn): an empty buffer.  Callers hold no
@@ -313,7 +436,12 @@ wal_open(const wal_opts_t *opts, wal_t **out)
 		 * disk, and append after the last COMPLETE record (a torn tail
 		 * from a crash mid-append is dropped). */
 		int tr;
-		wal_scan_tail(w->fd, &o, &maxlsn);
+		if (wal_tail_ok(w->fd, opts->tail)) {
+			o = (off_t)opts->tail->end;   /* trusted: no scan */
+			maxlsn = opts->tail->max_lsn;
+		} else {
+			wal_scan_tail(w->fd, &o, &maxlsn);
+		}
 		tr = ftruncate(w->fd, o);  /* drop torn tail */
 		(void)tr;                  /* non-fatal: appends overwrite it */
 	}
@@ -341,7 +469,7 @@ wal_close(wal_t *w)
 	while ((q = w->wfree) != NULL) {
 		w->wfree = q->next;
 		xtc_notify_destroy(q->n);
-		free(q);
+		xtc_free(q);
 	}
 	(void)pthread_mutex_destroy(&w->fl_mu);
 	(void)pthread_mutex_destroy(&w->res_mu);
@@ -350,6 +478,46 @@ wal_close(wal_t *w)
 	free(w->ring);
 	free(w->slot);
 	free(w);
+}
+
+/*
+ * res_mu / fl_mu are held only for a few instructions and never across a
+ * park, but under involuntary preemption (xtc_preempt_set_involuntary) a
+ * fiber could still be preempted while holding one; a loop-mate that
+ * then blocks its OS thread on the same mutex can never let the holder
+ * run again (test_wal_kill preempt-nokill hung that way with no kill at
+ * all).  A proc critical section makes the preemption timer defer for
+ * the hold.  Off a proc both calls are no-ops.
+ */
+static void
+wal_lock(pthread_mutex_t *m)
+{
+	xtc_proc_critical_enter();
+	(void)pthread_mutex_lock(m);
+}
+
+static void
+wal_unlock(pthread_mutex_t *m)
+{
+	(void)pthread_mutex_unlock(m);
+	xtc_proc_critical_leave();
+}
+
+/*
+ * DST pessimal point: under the simulator with buggify on, yield the
+ * fiber here on a seeded coin.  Every site sits in a window a reviewer
+ * flagged (the copy between reservation and publication, a leader about
+ * to write, a waiter about to park, the direct big-record write): the
+ * yield lets peers run there and makes the window a kill delivery point,
+ * so test_sim_wal_kill can kill a committer at exactly that moment.  A
+ * single relaxed load in production; never called with a lock held.
+ */
+static void
+wal_buggify_yield(const char *site)
+{
+	if (XTC_SIM_BUGGIFY(site) && xtc_sim_buggify_fault(250) &&
+	    !xtc_pid_is_none(xtc_self()))
+		xtc_yield();
 }
 
 /* Copy n bytes to ring position pos (wrapping). */
@@ -452,12 +620,12 @@ wal_flush_locked(wal_t *w, uint64_t need)
 			break;
 		/* A record before ours is mid-copy (a memcpy: it never parks):
 		 * wait for it outside the lock. */
-		(void)pthread_mutex_unlock(&w->fl_mu);
+		wal_unlock(&w->fl_mu);
 		if (++spins > 64) {
 			if (xtc_pid_is_none(xtc_self())) (void)xtc_sleep_ns(1000);
 			else xtc_yield();
 		}
-		(void)pthread_mutex_lock(&w->fl_mu);
+		wal_lock(&w->fl_mu);
 	}
 	from = atomic_load_explicit(&w->written, memory_order_relaxed);
 	upto = w->copied_pos;
@@ -476,7 +644,8 @@ wal_flush_locked(wal_t *w, uint64_t need)
 	}
 	nrec = (uint32_t)(lsn_upto - atomic_load_explicit(&w->durable_lsn,
 	    memory_order_relaxed));
-	(void)pthread_mutex_unlock(&w->fl_mu);
+	wal_unlock(&w->fl_mu);
+	wal_buggify_yield("wal.flush.leader_yield");
 
 	if (atomic_load_explicit(&w->failed, memory_order_acquire)) {
 		ok = 0;
@@ -503,7 +672,7 @@ wal_flush_locked(wal_t *w, uint64_t need)
 #endif
 	}
 
-	(void)pthread_mutex_lock(&w->fl_mu);
+	wal_lock(&w->fl_mu);
 	if (ok) {
 		atomic_store_explicit(&w->written, upto, memory_order_release);
 		if (upto > atomic_load_explicit(&w->durable_off, memory_order_relaxed)) {
@@ -528,14 +697,16 @@ wal_wait_locked(wal_t *w, uint64_t need)
 	if (q != NULL) {
 		w->wfree = q->next;
 	} else {
-		q = calloc(1, sizeof *q);
+		/* xtc_calloc: the preemption-safe allocator (a fiber here
+		 * holds no lock, but could be preempted inside glibc's) */
+		q = xtc_calloc(1, sizeof *q);
 		if (q == NULL || xtc_notify_create(&q->n) != XTC_OK) {
 			/* no waiter object: poll instead */
-			free(q);
-			(void)pthread_mutex_unlock(&w->fl_mu);
+			xtc_free(q);
+			wal_unlock(&w->fl_mu);
 			if (xtc_pid_is_none(xtc_self())) (void)xtc_sleep_ns(20000);
 			else (void)xtc_proc_sleep(20000);
-			(void)pthread_mutex_lock(&w->fl_mu);
+			wal_lock(&w->fl_mu);
 			return;
 		}
 	}
@@ -545,9 +716,10 @@ wal_wait_locked(wal_t *w, uint64_t need)
 		;
 	q->next = *pp;
 	*pp = q;
-	(void)pthread_mutex_unlock(&w->fl_mu);
+	wal_unlock(&w->fl_mu);
+	wal_buggify_yield("wal.wait.queued_yield");
 	(void)xtc_notify_wait(q->n, -1);
-	(void)pthread_mutex_lock(&w->fl_mu);
+	wal_lock(&w->fl_mu);
 	/* A covered waiter was unlinked by the waker; a baton holder too.
 	 * Unlink defensively (a stored signal from an earlier round). */
 	for (pp = &w->wq; *pp != NULL; pp = &(*pp)->next)
@@ -625,41 +797,42 @@ wal_append_direct(wal_t *w, const void *record, uint32_t len, uint64_t *end,
 	int ok;
 
 	for (;;) {                       /* one direct writer at a time */
-		(void)pthread_mutex_lock(&w->res_mu);
+		wal_lock(&w->res_mu);
 		if (!w->direct)
 			break;
-		(void)pthread_mutex_unlock(&w->res_mu);
+		wal_unlock(&w->res_mu);
 		wal_nap();
 	}
 	w->direct = 1;
 	target = w->res_pos;
-	(void)pthread_mutex_unlock(&w->res_mu);
+	wal_unlock(&w->res_mu);
 
 	/* Everything before it durable, then take the leadership: no other
 	 * leader may write (or zero-fill, wal_prealloc) while this pwrites.
 	 * Nothing new is reserved meanwhile, so a running leader has only
 	 * records below target left and soon lets go. */
-	(void)pthread_mutex_lock(&w->fl_mu);
+	wal_lock(&w->fl_mu);
 	*rc = wal_durable_locked(w, target);
 	while (*rc == XTC_OK && w->flushing) {
-		(void)pthread_mutex_unlock(&w->fl_mu);
+		wal_unlock(&w->fl_mu);
 		wal_nap();
-		(void)pthread_mutex_lock(&w->fl_mu);
+		wal_lock(&w->fl_mu);
 	}
 	if (*rc == XTC_OK)
 		w->flushing = 1;
-	(void)pthread_mutex_unlock(&w->fl_mu);
-	(void)pthread_mutex_lock(&w->res_mu);
+	wal_unlock(&w->fl_mu);
+	wal_buggify_yield("wal.direct.leader_yield");
+	wal_lock(&w->res_mu);
 	if (*rc != XTC_OK) {
 		w->direct = 0;
-		(void)pthread_mutex_unlock(&w->res_mu);
+		wal_unlock(&w->res_mu);
 		return 0;
 	}
 	lsn = ++w->next_lsn;
 	start = w->res_pos;              /* == target: nobody reserved since */
 	w->res_pos = start + need;
 	w->off = (off_t)w->res_pos;
-	(void)pthread_mutex_unlock(&w->res_mu);
+	wal_unlock(&w->res_mu);
 
 	memcpy(hdr, &lsn, 8);
 	memcpy(hdr + 8, &len, 4);
@@ -677,7 +850,7 @@ wal_append_direct(wal_t *w, const void *record, uint32_t len, uint64_t *end,
 	if (start + need > w->pre_end)
 		w->pre_end = start + need;   /* the record grew the file */
 
-	(void)pthread_mutex_lock(&w->fl_mu);
+	wal_lock(&w->fl_mu);
 	if (ok) {
 		/* in the page cache: the next leader only needs to sync it */
 		atomic_store_explicit(&w->written, start + need, memory_order_release);
@@ -694,10 +867,10 @@ wal_append_direct(wal_t *w, const void *record, uint32_t len, uint64_t *end,
 	w->flushing = 0;
 	wal_wake_locked(w, ok ? atomic_load_explicit(&w->durable_off,
 	    memory_order_relaxed) : UINT64_MAX, 1);
-	(void)pthread_mutex_unlock(&w->fl_mu);
-	(void)pthread_mutex_lock(&w->res_mu);
+	wal_unlock(&w->fl_mu);
+	wal_lock(&w->res_mu);
 	w->direct = 0;
-	(void)pthread_mutex_unlock(&w->res_mu);
+	wal_unlock(&w->res_mu);
 	if (!ok) {
 		*rc = XTC_E_IO;
 		return 0;
@@ -719,14 +892,14 @@ wal_append(wal_t *w, const void *record, uint32_t len, uint64_t *end, int *rc)
 	if (need > WAL_RING / 4)
 		return wal_append_direct(w, record, len, end, rc);
 	for (;;) {
-		(void)pthread_mutex_lock(&w->res_mu);
+		wal_lock(&w->res_mu);
 		if (atomic_load_explicit(&w->failed, memory_order_acquire)) {
-			(void)pthread_mutex_unlock(&w->res_mu);
+			wal_unlock(&w->res_mu);
 			*rc = XTC_E_IO;
 			return 0;
 		}
 		if (w->direct) {             /* a big record is being written */
-			(void)pthread_mutex_unlock(&w->res_mu);
+			wal_unlock(&w->res_mu);
 			wal_nap();
 			continue;
 		}
@@ -739,11 +912,11 @@ wal_append(wal_t *w, const void *record, uint32_t len, uint64_t *end, int *rc)
 			break;
 		{
 			uint64_t target = w->res_pos;
-			(void)pthread_mutex_unlock(&w->res_mu);
+			wal_unlock(&w->res_mu);
 			/* Full: make what is reserved so far durable, then retry. */
-			(void)pthread_mutex_lock(&w->fl_mu);
+			wal_lock(&w->fl_mu);
 			*rc = wal_durable_locked(w, target);
-			(void)pthread_mutex_unlock(&w->fl_mu);
+			wal_unlock(&w->fl_mu);
 			if (*rc != XTC_OK)
 				return 0;
 		}
@@ -752,13 +925,14 @@ wal_append(wal_t *w, const void *record, uint32_t len, uint64_t *end, int *rc)
 	start = w->res_pos;
 	w->res_pos += need;
 	w->off = (off_t)w->res_pos;
-	(void)pthread_mutex_unlock(&w->res_mu);
+	wal_unlock(&w->res_mu);
 
 	memcpy(hdr, &lsn, 8);
 	memcpy(hdr + 8, &len, 4);
 	crc = wal_rec_crc(lsn, len, record);
 	memcpy(trl, &crc, WAL_REC_CRC);
 	ring_put(w, start, hdr, WAL_REC_HDR);
+	wal_buggify_yield("wal.append.copy_yield");   /* reserved, unpublished */
 	if (len)
 		ring_put(w, start + WAL_REC_HDR, record, len);
 	ring_put(w, start + WAL_REC_HDR + len, trl, WAL_REC_CRC);
@@ -779,11 +953,28 @@ wal_commit_any(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
 
 	if (w == NULL || (record == NULL && len != 0))
 		return XTC_E_INVAL;
-	if ((my_lsn = wal_append(w, record, len, &end, &rc)) == 0)
-		return rc;
-	(void)pthread_mutex_lock(&w->fl_mu);
-	rc = wal_durable_locked(w, end);
-	(void)pthread_mutex_unlock(&w->fl_mu);
+	/*
+	 * A kill (xtc_exit_pid, a linked exit) raised at a park point below
+	 * -- the waiter queue, the leader's yield or aio, a nap -- would
+	 * unwind this fiber with its waiter still queued (a leader later
+	 * hands that dead waiter the leadership), with the leadership or the
+	 * direct flag held, or with its reserved range never published; the
+	 * next flush then waits forever (test_wal_kill).  So the commit runs
+	 * with cancellation masked and the kill is delivered by
+	 * xtc_mask_leave once the record is durable or failed.  Off a proc
+	 * both calls are no-ops.
+	 */
+#if !XTC_DST_BUG(XTC_DST_BUG_WALKILL)       /* planted bug: unmasked */
+	(void)xtc_mask_enter();
+#endif
+	if ((my_lsn = wal_append(w, record, len, &end, &rc)) != 0) {
+		wal_lock(&w->fl_mu);
+		rc = wal_durable_locked(w, end);
+		wal_unlock(&w->fl_mu);
+	}
+#if !XTC_DST_BUG(XTC_DST_BUG_WALKILL)
+	(void)xtc_mask_leave();      /* may not return: a latched kill */
+#endif
 	if (rc == XTC_OK && lsn != NULL)
 		*lsn = my_lsn;
 	return rc;
@@ -795,10 +986,22 @@ wal_commit_any(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
  * (tests and the engine do), flushing whatever is reserved but not yet
  * durable when it is told to stop.
  */
+/* At-exit hook of the writer proc: runs on a normal return AND when the
+ * proc is killed (xtc_exit_pid, a link), so wal_writer_stop never waits
+ * out its timeout for a writer that is already gone. */
+static void
+wal_writer_gone(void *arg)
+{
+	wal_t *w = arg;
+	atomic_store_explicit(&w->writer_alive, 0, memory_order_release);
+}
+
 static void
 wal_writer_proc(void *arg)
 {
 	wal_t *w = arg;
+	if (xtc_proc_at_exit(wal_writer_gone, w) != XTC_OK)
+		wal_writer_gone(w);          /* no hook: stop must not wait */
 	for (;;) {
 		void *m = NULL;
 		size_t n = 0;
@@ -810,10 +1013,11 @@ wal_writer_proc(void *arg)
 		}
 		free(m);
 	}
-	(void)pthread_mutex_lock(&w->fl_mu);
+	(void)xtc_mask_enter();          /* as wal_commit_any: no torn flush */
+	wal_lock(&w->fl_mu);
 	(void)wal_durable_locked(w, w->res_pos);
-	(void)pthread_mutex_unlock(&w->fl_mu);
-	atomic_store_explicit(&w->writer_alive, 0, memory_order_release);
+	wal_unlock(&w->fl_mu);
+	(void)xtc_mask_leave();
 }
 
 int
@@ -1222,41 +1426,68 @@ wal_ockpt_abort(wal_ock_t *k)
 }
 
 int
-wal_scan(const char *path, wal_replay_cb cb, void *user)
+wal_scan_ex(const char *path, wal_replay_cb cb, void *user, wal_tail_t *tail)
 {
-	int fd;
-	off_t off = 0;
+	struct wal_rd r;
+	int fd, rc = XTC_OK, stopped = 0;
+	off_t off = 0, last = 0;
 	uint8_t *buf = NULL;
 	size_t bufcap = 0;
-	off_t fsize;
-	int rc = XTC_OK;
+	uint64_t maxlsn = 0;
 
+	if (tail != NULL)
+		memset(tail, 0, sizeof *tail);
 	if (path == NULL || cb == NULL)
 		return XTC_E_INVAL;
 	fd = open(path, O_RDONLY);
 	if (fd < 0)
 		return XTC_OK;                /* no log yet: nothing to replay */
-	fsize = wal_fsize(fd);
+	wal_rd_init(&r, fd, 1);
 	for (;;) {
 		uint64_t lsn;
 		uint32_t len;
-		/* Verified before anything is allocated (wal_frame_ok). */
-		if (!wal_frame_ok(fd, off, fsize, &lsn, &len))
+		const uint8_t *body;
+		/* Verified before anything is allocated (wal_rd_frame). */
+		if (!wal_rd_frame(&r, off, &lsn, &len, &body))
 			break;                   /* the end, or a torn tail */
-		if (len > bufcap) {
-			uint8_t *nb = realloc(buf, len);
-			if (nb == NULL) { rc = XTC_E_NOMEM; break; }
-			buf = nb; bufcap = len;
+		if (body == NULL) {
+			if (len > bufcap) {
+				uint8_t *nb = realloc(buf, len);
+				if (nb == NULL) { rc = XTC_E_NOMEM; break; }
+				buf = nb; bufcap = len;
+			}
+			if (len > 0 && pread(fd, buf, len, off + (off_t)WAL_REC_HDR) !=
+			    (ssize_t)len) {
+				stopped = 1;          /* as before: end the replay */
+				break;
+			}
+			body = buf;
 		}
-		if (len > 0 && pread(fd, buf, len, off + (off_t)WAL_REC_HDR) != (ssize_t)len)
-			break;
-		if (cb(lsn, buf, len, user) != 0)
-			break;
+		if (lsn > maxlsn)
+			maxlsn = lsn;
+		last = off;
 		off += (off_t)WAL_REC_HDR + (off_t)len + (off_t)WAL_REC_CRC;
+		if (cb(lsn, body, len, user) != 0) {
+			stopped = 1;
+			break;
+		}
 	}
+	if (tail != NULL && rc == XTC_OK && !stopped) {
+		tail->valid = 1;
+		tail->end = (uint64_t)off;
+		tail->last_off = (uint64_t)(off == 0 ? 0 : last);
+		tail->max_lsn = maxlsn;
+	}
+	free(r.buf);
 	free(buf);
 	close(fd);
 	return rc;
+}
+
+int
+wal_scan(const char *path, wal_replay_cb cb, void *user)
+{
+	return wal_scan_ex(path, cb, user, NULL);
 }
 
 int
@@ -1264,18 +1495,18 @@ wal_truncate(wal_t *w)
 {
 	if (w == NULL)
 		return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&w->res_mu);
-	(void)pthread_mutex_lock(&w->fl_mu);
+	wal_lock(&w->res_mu);
+	wal_lock(&w->fl_mu);
 	if (ftruncate(w->fd, 0) != 0) {
-		(void)pthread_mutex_unlock(&w->fl_mu);
-		(void)pthread_mutex_unlock(&w->res_mu);
+		wal_unlock(&w->fl_mu);
+		wal_unlock(&w->res_mu);
 		return XTC_E_INTERNAL;
 	}
 	/* next append at offset 0; next_lsn keeps rising */
 	wal_reset_marks(w, 0, w->next_lsn);
 	atomic_fetch_add_explicit(&w->gen, 1, memory_order_acq_rel);
-	(void)pthread_mutex_unlock(&w->fl_mu);
-	(void)pthread_mutex_unlock(&w->res_mu);
+	wal_unlock(&w->fl_mu);
+	wal_unlock(&w->res_mu);
 	return XTC_OK;
 }
 

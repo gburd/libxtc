@@ -15,22 +15,37 @@
  *
  *	The trampoline runs at an ARBITRARY instruction boundary, so
  *	every register is potentially live: it saves the full GP file,
- *	RFLAGS, and a 512-byte FXSAVE area, does a normal cooperative
- *	xtc_yield(), then restores everything and returns to the
- *	interrupted PC with the interrupted RSP EXACTLY restored.
- *	Invisible to the interrupted code.
+ *	RFLAGS, and the whole enabled vector state (XSAVE: x87, SSE, the
+ *	AVX upper halves, AVX-512 opmask and ZMM; FXSAVE where the OS has
+ *	not enabled XSAVE), does a normal cooperative xtc_yield(), then
+ *	restores everything and returns to the interrupted PC with the
+ *	interrupted RSP EXACTLY restored.  Invisible to the interrupted
+ *	code.
+ *
+ *	FXSAVE alone saves only x87 and XMM0-15's low 128 bits: a fiber
+ *	preempted inside AVX code (glibc's memcpy on an AVX-512 host)
+ *	resumed with another fiber's YMM upper halves, ZMM16-31 and k
+ *	registers -- silently corrupted copies (test/m14/test_preempt_p2
+ *	/vector_state; sqlxtc's log lost acknowledged commits that way).
+ *	__xtc_coro_preempt (coro_uctx.c) probes the XSAVE mask and area
+ *	size once (CPUID/XGETBV) into the two words below before it arms
+ *	the first redirect; a zero mask selects the FXSAVE path.
  *
  *	Entry contract (from __xtc_coro_preempt in coro_uctx.c):
- *	  RSP = orig_sp - 8, and [orig_sp - 8] = orig_pc, so a terminal
- *	        `ret` from this exact RSP lands at orig_pc with RSP ==
- *	        orig_sp.  All other registers hold interrupted values.
+ *	  RSP = orig_sp - 136 (below the interrupted code's 128-byte red
+ *	        zone, plus the 8-byte return slot); orig_pc is in a
+ *	        per-thread slot, read back via __xtc_preempt_take_pc().  All
+ *	        other registers, RFLAGS included, hold the interrupted
+ *	        values.
  *
- *	Because the trampoline runs on the interrupted fiber's own stack
- *	just below orig_sp, it first drops RSP past the 128-byte red zone
- *	(which the interrupted leaf function may still be using) BEFORE
- *	any push, so its saves never clobber live red-zone data.  No
- *	scratch register is needed: the terminal `ret` alone restores PC
- *	and RSP, so all 15 GP registers + RFLAGS are restored cleanly.
+ *	The handler used to store orig_pc at orig_sp - 8 and the trampoline
+ *	skipped the red zone with `subq $128, %rsp` -- but the store was
+ *	itself INSIDE the red zone (an ABI-conforming leaf's -8(%rsp) value
+ *	was overwritten: ~100 of ~70k probes per run), and the subq ran
+ *	before pushfq, so the RFLAGS restored at the end were the subq's,
+ *	not the interrupted code's (a preemption between a cmp and its jcc
+ *	took the wrong branch).  Now nothing touches the red zone and the
+ *	first instruction is pushfq.
  */
 
 #if defined(__x86_64__) && !defined(__APPLE__) && !defined(_WIN32)
@@ -42,26 +57,36 @@
  *   Entered via sigreturn, not a normal call.  The terminal `ret`
  *   resumes the interrupted fiber at orig_pc.
  */
+/* XSAVE feature mask (0 = use FXSAVE) and area size in bytes, written
+ * by __xtc_coro_preempt before the first redirect. */
+	.data
+	.balign 8
+	.globl __xtc_preempt_xsave_mask
+	.hidden __xtc_preempt_xsave_mask
+	.type  __xtc_preempt_xsave_mask,@object
+	.size  __xtc_preempt_xsave_mask,8
+__xtc_preempt_xsave_mask:
+	.quad 0
+	.globl __xtc_preempt_xsave_size
+	.hidden __xtc_preempt_xsave_size
+	.type  __xtc_preempt_xsave_size,@object
+	.size  __xtc_preempt_xsave_size,8
+__xtc_preempt_xsave_size:
+	.quad 0
+	.text
 	.globl __xtc_preempt_trampoline
 	.type  __xtc_preempt_trampoline,@function
 	.align 16
 __xtc_preempt_trampoline:
 	/*
-	 * Entry RSP == orig_sp - 8 (holds orig_pc).  Skip the interrupted
-	 * leaf's 128-byte red zone before saving anything.  orig_sp-8 has
-	 * unknown alignment; after "sub 128 ; and ~15" the save area is
-	 * 16-aligned, but we must not lose the orig_pc slot -- so we do
-	 * NOT realign RSP itself (that would strand the ret slot).
-	 * Instead: leave RSP at orig_sp-8, subtract a red-zone gap that
-	 * makes the fxsave area 16-aligned, and account for the odd
-	 * orig_pc slot with the push count.
-	 *
-	 * We reserve 128 (red zone) + up to 8 to reach a 16-aligned point
-	 * for the fxsave area.  Simpler and robust: save GP regs first
-	 * (their alignment does not matter), then align only for fxsave.
+	 * Entry RSP == orig_sp - 136: [orig_sp - 136, orig_sp - 128) is the
+	 * return slot, filled below; [orig_sp - 128, orig_sp) is the
+	 * interrupted red zone, never touched.  Save RFLAGS first (nothing
+	 * before it may change a flag), then every GP register, then fetch
+	 * orig_pc into the return slot (a call clobbers caller-saved
+	 * registers, all saved by then).
 	 */
-	subq    $128, %rsp                /* clear the red zone */
-
+	pushfq
 	pushq   %rax
 	pushq   %rbx
 	pushq   %rcx
@@ -77,37 +102,70 @@ __xtc_preempt_trampoline:
 	pushq   %r13
 	pushq   %r14
 	pushq   %r15
-	pushfq
+	movq    %rsp, %rbp                /* rbp = post-GP-save RSP (temp) */
+	andq    $-16, %rsp               /* SysV call alignment */
+	call    __xtc_preempt_take_pc
+	movq    %rax, 128(%rbp)           /* the return slot: 16 saves up */
 
 	/*
-	 * fxsave needs a 16-aligned destination.  RSP here has arbitrary
-	 * alignment (orig_sp-8 was arbitrary).  Save the current RSP in a
-	 * callee-saved register (rbp is already preserved on the stack),
-	 * align down, fxsave, and restore RSP afterward from the saved
-	 * copy.  Use r15's slot?  No -- use a local: push the pre-align
-	 * RSP, align, reserve 512.
+	 * The vector save area needs a 64-aligned (XSAVE) or 16-aligned
+	 * (FXSAVE) destination and RSP has arbitrary alignment (orig_sp
+	 * was arbitrary): rbp holds the post-GP-save RSP (its own value is
+	 * saved on the stack and xtc_yield preserves it); reserve, align
+	 * down, save; restore RSP from rbp.  Every GP register is saved, so
+	 * rax/rcx/rdx are free scratch.
 	 */
-	movq    %rsp, %rbp                /* rbp = post-GP-save RSP (temp) */
-	subq    $512, %rsp                /* fxsave area */
-	andq    $-16, %rsp               /* 16-align it */
-	fxsave  (%rsp)
+	movq    %rbp, %rsp
+	movq    __xtc_preempt_xsave_mask(%rip), %rax
+	testq   %rax, %rax
+	jz      .Lfxsave
+
+	subq    __xtc_preempt_xsave_size(%rip), %rsp
+	andq    $-64, %rsp               /* XSAVE area: 64-aligned */
+	/* XRSTOR faults on a nonzero reserved header byte, and XSAVE
+	 * writes only XSTATE_BV: zero the 64-byte header first. */
+	xorl    %ecx, %ecx
+	movq    %rcx, 512(%rsp)
+	movq    %rcx, 520(%rsp)
+	movq    %rcx, 528(%rsp)
+	movq    %rcx, 536(%rsp)
+	movq    %rcx, 544(%rsp)
+	movq    %rcx, 552(%rsp)
+	movq    %rcx, 560(%rsp)
+	movq    %rcx, 568(%rsp)
+	movq    %rax, %rdx
+	shrq    $32, %rdx                 /* edx:eax = the feature mask */
+	xsave   (%rsp)
 
 	call    xtc_yield                 /* cooperative switch to scheduler */
 
 	/*
-	 * Fiber resumed.  Restore FP/SSE and the GP file and return to
-	 * orig_pc.  The whole trampoline body -- including this epilogue,
-	 * where g_in_preempt is already back to 0 -- is protected against a
-	 * nested involuntary redirect by an instruction-pointer range
-	 * check in __xtc_coro_preempt (it declines when the interrupted PC
-	 * lies within [__xtc_preempt_trampoline, __xtc_preempt_trampoline_end)),
-	 * so no g_in_preempt store is needed here and there is no window in
-	 * which a tick could redirect a half-restored register file.
+	 * Fiber resumed.  Restore the vector state and the GP file and
+	 * return to orig_pc.  The whole trampoline body -- including this
+	 * epilogue, where g_in_preempt is already back to 0 -- is protected
+	 * against a nested involuntary redirect by an instruction-pointer
+	 * range check in __xtc_coro_preempt (it declines when the
+	 * interrupted PC lies within
+	 * [__xtc_preempt_trampoline, __xtc_preempt_trampoline_end)), so no
+	 * g_in_preempt store is needed here and there is no window in which
+	 * a tick could redirect a half-restored register file.
 	 */
-	fxrstor (%rsp)
-	movq    %rbp, %rsp                /* undo align+512 exactly */
+	movq    __xtc_preempt_xsave_mask(%rip), %rax
+	movq    %rax, %rdx
+	shrq    $32, %rdx
+	xrstor  (%rsp)
+	jmp     .Lrestore_gp
 
-	popfq
+.Lfxsave:
+	subq    $512, %rsp                /* fxsave area */
+	andq    $-16, %rsp               /* 16-align it */
+	fxsave  (%rsp)
+	call    xtc_yield                 /* cooperative switch to scheduler */
+	fxrstor (%rsp)
+
+.Lrestore_gp:
+	movq    %rbp, %rsp                /* undo the reserve + align exactly */
+
 	popq    %r15
 	popq    %r14
 	popq    %r13
@@ -123,9 +181,10 @@ __xtc_preempt_trampoline:
 	popq    %rcx
 	popq    %rbx
 	popq    %rax
-	addq    $128, %rsp                /* undo the red-zone gap */
-	/* RSP == orig_sp - 8, top of stack == orig_pc. */
-	ret                               /* -> orig_pc, RSP == orig_sp */
+	popfq
+	/* RSP == orig_sp - 136, top of stack == orig_pc: pop it and drop the
+	 * 128-byte gap in one flag-neutral instruction. */
+	ret     $128                      /* -> orig_pc, RSP == orig_sp */
 	.size __xtc_preempt_trampoline, .-__xtc_preempt_trampoline
 
 /* End marker so __xtc_coro_preempt can range-check the interrupted PC

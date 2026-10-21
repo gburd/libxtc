@@ -68,6 +68,10 @@
  *	                   the bounded-service invariant fails.
  *	 16  BATCHDROP -- batch.c drops an mt hand-in drained into a full
  *	                   group; an accepted request never completes.
+ *	 17  WALKILL   -- examples/06_sqlxtc/wal.c runs a commit without the
+ *	                   cancellation mask, so a killed committer leaves a
+ *	                   dead waiter (or the leadership) behind; the log
+ *	                   wedges (test_sim_wal_kill: LIVENESS).
  *
  *	NOT plantable under DST (an honest gap, recorded so it is not
  *	mistaken for missing coverage): the xtc_amutex mutual-exclusion and
@@ -118,5 +122,6 @@
 #define XTC_DST_BUG_BATCHDONE  14  /* batch.c: retain completed vector member */
 #define XTC_DST_BUG_SCHEDFAIR  15  /* sched.c: bypass mandatory fairness override */
 #define XTC_DST_BUG_BATCHDROP  16  /* batch.c: drop a held mt hand-in */
+#define XTC_DST_BUG_WALKILL    17  /* wal.c: commit not masked against kills */
 
 #endif /* XTC_DST_INJECT_H */

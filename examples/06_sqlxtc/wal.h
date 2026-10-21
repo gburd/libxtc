@@ -38,6 +38,22 @@ typedef struct wal wal_t;
 
 #define WAL_HAVE_FAILSTOP 1   /* wal_failed(); commits fail-stop on I/O error */
 
+/*
+ * Where a log ends: the offset just past its last complete frame, the
+ * offset of that frame (last_off == end when the log is empty) and the
+ * highest LSN in the log.  wal_scan_ex fills one; wal_open (append) takes
+ * one so it need not scan the whole log again.  valid is 1 only when the
+ * scan reached the end of the log -- a torn tail and the zero-filled
+ * preallocated region both count as the end; a callback that stopped the
+ * scan early, a missing file or an error leave it 0.
+ */
+typedef struct wal_tail {
+	int      valid;
+	uint64_t end;
+	uint64_t last_off;
+	uint64_t max_lsn;
+} wal_tail_t;
+
 typedef struct wal_opts {
 	const char *path;          /* log file */
 	int64_t     window_ns;     /* group-commit gather window (e.g. 500us) */
@@ -45,6 +61,12 @@ typedef struct wal_opts {
 	int         append;        /* 1: preserve an existing log and append
 	                            * (resume LSNs, drop a torn tail); 0:
 	                            * truncate to a fresh empty log */
+	const wal_tail_t *tail;    /* append only, optional: the end of THIS
+	                            * file as a scan just found it.  Verified
+	                            * (the frame at last_off checksums, ends at
+	                            * end and carries max_lsn; no frame starts
+	                            * at end), else the full scan runs.  NULL
+	                            * or !valid: scan, as before. */
 } wal_opts_t;
 
 typedef struct wal_stats {
@@ -96,6 +118,9 @@ int  wal_commit_sync(wal_t *w, const void *record, uint32_t len, uint64_t *lsn);
 typedef int (*wal_replay_cb)(uint64_t lsn, const void *rec, uint32_t len,
     void *user);
 int  wal_scan(const char *path, wal_replay_cb cb, void *user);
+/* wal_scan that also reports where the log ended (tail may be NULL). */
+int  wal_scan_ex(const char *path, wal_replay_cb cb, void *user,
+         wal_tail_t *tail);
 
 /*
  * Truncate the log to empty: discard all records and reset the append
