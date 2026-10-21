@@ -333,6 +333,7 @@ typedef struct bm_stats {
 	                         * path (no clean victim was available) */
 	uint64_t dirty_backlog; /* frames currently dirty (live gauge) */
 	uint64_t tr_passes;     /* trickler passes total */
+	uint64_t tr_visited;    /* frames those passes visited (<= TR_SLICE each) */
 	uint64_t tr_adaptive;   /* trickler passes that ran the GA tuner */
 	uint64_t dw_repaired;   /* pages restored from the double-write on reopen */
 	uint64_t dw_writes;     /* page images written to the double-write ring */

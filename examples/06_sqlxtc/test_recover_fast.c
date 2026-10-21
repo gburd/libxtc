@@ -14,9 +14,9 @@
  *	  - replay wrote no page image to the double-write ring.  Before
  *	    the fix every eviction during replay did, one fdatasync each:
  *	    about 2.5 s per MB of log on the server.
- *	  - the double-write ring is back on after recovery: a checkpoint
- *	    writes through it, so later page writes keep torn-page
- *	    protection.
+ *	  - a checkpoint after recovery still writes no page through the
+ *	    ring: the storage engine never trusts its page file after a
+ *	    crash, so it runs without one (see test_torn_base).
  */
 
 #include <stdio.h>
@@ -96,10 +96,10 @@ main(void)
 	CK(sx_storage_open(path, FRAMES) == SX_OK);
 	CK(count_ok() == NROW);
 
-	/* The ring is back on: flushing replay's dirty pages goes through it. */
+	/* Flushing replay's dirty pages writes them in place (no ring). */
 	CK(sx_storage_checkpoint() == SX_OK);
 	sx_storage_bm_stats(&bs);
-	CK(bs.dw_writes > 0);
+	CK(bs.dw_writes == 0);
 	CK(sx_storage_close() == SX_OK);
 	CK(sx_storage_open(path, FRAMES) == SX_OK);
 	CK(count_ok() == NROW);

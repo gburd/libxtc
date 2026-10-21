@@ -314,6 +314,7 @@ struct bm {
 	_Atomic uint32_t  s_dirty_backlog; /* dirty frames seen by the last
 	                                    * trickler pass (backlog gauge) */
 	_Atomic uint64_t  s_tr_passes;   /* trickler passes (total) */
+	_Atomic uint64_t  s_tr_visited;  /* frames the trickler visited (total) */
 	_Atomic uint64_t  s_tr_adaptive; /* trickler passes that ran the tuner */
 
 	/* prefetch ring: read-ahead requests, drained by the provider so a
@@ -2630,6 +2631,22 @@ bm_provider_spawn(bm_t *bm, xtc_loop_t *loop, int64_t interval_ns,
  * page is written) is already satisfied here; an explicit pageLSN
  * gate belongs with the physiological-logging stage. */
 #define TR_BATCH 16
+/*
+ * One pass visits at most TR_SLICE frames, resuming where the last pass
+ * stopped (as pp_tick does), so a pass costs O(TR_SLICE), not
+ * O(n_frames).  It walked the whole pool every 5 ms on loop 0: at a
+ * 4 GiB pool (1048576 frames) that was 40% of the in-process TPC-C
+ * profile on a metal host.  The candidates and the dirty backlog come
+ * from the slice (the backlog scaled to the pool, an estimate); the
+ * oldest-dirtied order is within the slice.  Every frame is still
+ * visited within ceil(n_frames / TR_SLICE) passes.
+ */
+#define TR_SLICE 16384u
+static uint32_t
+tr_slice_len(const bm_t *bm)
+{
+	return bm->n_frames < TR_SLICE ? bm->n_frames : TR_SLICE;
+}
 struct tr_cand { bm_frame_t *f; uint8_t cool; uint64_t seq; };
 static int
 tr_cmp(const void *a, const void *b)
@@ -2835,6 +2852,7 @@ tr_proc(void *arg)
 	double pp_ewma = 1.0;                 /* EWMA of trickler pages-per-write */
 	double ev_ewma = 1.0;                 /* EWMA of evictions per pass */
 	struct tr_cand *cand;
+	uint32_t tr_cursor = 0;               /* rotating slice start */
 	xtc_dio_sched_t *tuner = NULL;
 	int batch = TR_BATCH;
 	int cap = bm->n_frames < 256 ? (int)bm->n_frames : 256;
@@ -2882,13 +2900,17 @@ tr_proc(void *arg)
 		}
 	}
 	while (atomic_load_explicit(&bm->tr_running, memory_order_acquire)) {
-		uint32_t i;
+		uint32_t i, j, slice;
 		int n = 0, w = 0, dirty_total = 0, k;
 		struct tr_cand c;
 		k = batch < max_batch ? batch : max_batch;   /* guard wbuf */
-		for (i = 0; i < bm->n_frames; i++) {
-			bm_frame_t *f = &bm->frames[i];
+		slice = tr_slice_len(bm);
+		for (j = 0; j < slice; j++) {
+			bm_frame_t *f;
 			uint8_t st;
+			i = tr_cursor;
+			tr_cursor = tr_cursor + 1 < bm->n_frames ? tr_cursor + 1 : 0;
+			f = &bm->frames[i];
 			if (!atomic_load_explicit(&f->dirty, memory_order_acquire))
 				continue;
 			dirty_total++;          /* writeback backlog (all dirty) */
@@ -2905,6 +2927,9 @@ tr_proc(void *arg)
 			    memory_order_relaxed);
 			tr_topk_offer(cand, &n, k, &c);   /* priority select */
 		}
+		if (slice < bm->n_frames)          /* scale the slice up */
+			dirty_total = (int)((uint64_t)dirty_total * bm->n_frames / slice);
+		atomic_fetch_add_explicit(&bm->s_tr_visited, slice, memory_order_relaxed);
 		atomic_store_explicit(&bm->s_dirty_backlog, (uint32_t)dirty_total,
 		    memory_order_relaxed);
 		int64_t t0 = 0, t1 = 0;
@@ -3055,6 +3080,7 @@ bm_get_stats(bm_t *bm, bm_stats_t *out)
 	out->evict_flushes = atomic_load_explicit(&bm->s_evict_flush, memory_order_relaxed);
 	out->dirty_backlog = atomic_load_explicit(&bm->s_dirty_backlog, memory_order_relaxed);
 	out->tr_passes = atomic_load_explicit(&bm->s_tr_passes, memory_order_relaxed);
+	out->tr_visited = atomic_load_explicit(&bm->s_tr_visited, memory_order_relaxed);
 	out->tr_adaptive = atomic_load_explicit(&bm->s_tr_adaptive, memory_order_relaxed);
 	out->dw_repaired = atomic_load_explicit(&bm->s_dw_repaired, memory_order_relaxed);
 	out->dw_writes = atomic_load_explicit(&bm->s_dw_writes, memory_order_relaxed);

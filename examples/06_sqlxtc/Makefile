@@ -143,11 +143,11 @@ clean:
 	rm -f test_clean_restart test_dw_fail
 	rm -f test_steal
 	rm -f test_steal_page
-	rm -f test_steal_leaf test_cat_reopen test_ckpt_online test_wal_group_sync test_intents_thread
+	rm -f test_steal_leaf test_cat_reopen test_ckpt_online test_wal_group_sync test_intents_thread test_torn_base
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o test_bufmgr_dio test_bufmgr_dio.o
 	rm -f test_bufmgr_mt
 	rm -f test_drop_reserved test_evict_revalidate_sampled
-	rm -f test_scan_resist test_sweep_bound test_evict_revalidate test_btree_late_load test_flush_pin test_trickler_select test_pp_slice test_publication_pin test_private_frame test_pid_writeback bm_sweep_bench
+	rm -f test_scan_resist test_sweep_bound test_evict_revalidate test_btree_late_load test_flush_pin test_trickler_select test_pp_slice test_tr_slice test_publication_pin test_private_frame test_pid_writeback bm_sweep_bench
 	rm -f test_persist
 	rm -f test_cursor_resume
 	rm -f test_btnode
@@ -168,7 +168,7 @@ distclean: clean
 	-$(MAKE) -C lime clean 2>/dev/null || true
 	rm -f sql_parse_gen.c sql_parse_gen.h sql_grammar.out
 
-test: $(TARGET) test-quack test-quack-range test-sql-parse test-admin test-wal test-wal-group-sync test-wal-recover test-wal-fail test-torn-smo test-wal-compact test-wal-lsn-monotone test-shard test-mvcc test-xstore test-xstore-scan test-index test-tpcc-seek test-bulk-insert test-plan-cache test-cat-reopen test-savepoint test-isolation test-ww-conflict test-row-intents test-intents-thread test-commit-visibility test-ssi-skew test-dup-insert test-dup-composite test-ckpt-bound test-ckpt-online test-recover-fast test-native-txn test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-fuzzy-checkpoint test-bufmgr-mt test-scan-resist test-sweep-bound test-persist test-cursor-resume test-clean-restart test-dw-fail test-steal test-steal-torn test-steal-page test-steal-leaf test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
+test: $(TARGET) test-quack test-quack-range test-sql-parse test-admin test-wal test-wal-group-sync test-wal-recover test-wal-fail test-torn-smo test-wal-compact test-wal-lsn-monotone test-shard test-mvcc test-xstore test-xstore-scan test-index test-tpcc-seek test-bulk-insert test-plan-cache test-cat-reopen test-savepoint test-isolation test-ww-conflict test-row-intents test-intents-thread test-commit-visibility test-ssi-skew test-dup-insert test-dup-composite test-ckpt-bound test-ckpt-online test-torn-base test-recover-fast test-native-txn test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-fuzzy-checkpoint test-bufmgr-mt test-scan-resist test-sweep-bound test-persist test-cursor-resume test-clean-restart test-dw-fail test-steal test-steal-torn test-steal-page test-steal-leaf test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge
 	@bash ../../test/sqlxtc/test_sqlxtc_smoke.sh
 
 # ---- amalgamation build ----
@@ -560,7 +560,7 @@ test-drop-reserved: test_drop_reserved
 	./test_drop_reserved control
 	./test_drop_reserved
 
-test: test-evict-revalidate test-btree-late-load test-flush-pin test-trickler-select test-pp-slice test-publication-pin test-private-frame test-pid-writeback test-btree-stale-descent
+test: test-evict-revalidate test-btree-late-load test-flush-pin test-trickler-select test-pp-slice test-tr-slice test-publication-pin test-private-frame test-pid-writeback test-btree-stale-descent
 
 # A descent that keeps hitting stale nodes still returns a held leaf
 # (bufmgr.c and btree.c are #included for the test-only stale seam).
@@ -610,6 +610,12 @@ test-trickler-select: test_trickler_select
 
 test_pp_slice: test_pp_slice.c bufmgr.c bufmgr.h
 	$(CC) $(CFLAGS) -o $@ test_pp_slice.c $(LDFLAGS)
+
+test_tr_slice: test_tr_slice.c bufmgr.c bufmgr.h
+	$(CC) $(CFLAGS) -o $@ test_tr_slice.c $(LDFLAGS)
+
+test-tr-slice: test_tr_slice
+	TMPDIR=$${TMPDIR:-/tmp} ./test_tr_slice
 
 test-pp-slice: test_pp_slice
 	./test_pp_slice
@@ -703,6 +709,12 @@ test_cat_reopen: test_cat_reopen.c engine.o db.o quack.o metrics.o xstore.o xlog
 
 test-cat-reopen: test_cat_reopen
 	TMPDIR=$${TMPDIR:-/tmp} ./test_cat_reopen
+
+test_torn_base: test_torn_base.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ test_torn_base.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
+
+test-torn-base: test_torn_base
+	TMPDIR=$${TMPDIR:-/tmp} ./test_torn_base
 
 # ---- B-tree node (prefix compression) unit test (standalone) ----
 test_btnode: test_btnode.c btnode.c btnode.h

@@ -423,7 +423,16 @@ sx_storage_open(const char *path, unsigned int n_frames)
 	o.path = dpath;
 	if (n_frames > 0)
 		o.n_frames = n_frames;
-	o.double_write = 1;   /* torn-page protection for the persistent store */
+	/* No double-write ring.  The page file is trusted only after a CLEAN
+	 * close (every page written and fdatasynced before the superblock
+	 * says so, below and in sx_storage_close), and the flag is cleared
+	 * durably before the first change; after any crash the file is
+	 * truncated and rebuilt from the log.  A torn page can therefore
+	 * never be read, and the ring -- an image plus an fdatasync before
+	 * every page write -- cost ~1,000 fdatasyncs/s under TPC-C for no
+	 * protection (test_torn_base).  The ring stays in bufmgr for the
+	 * in-place (ARIES) recovery path, which does trust the base. */
+	o.double_write = 0;
 	o.lsn_off = 0;        /* ARIES page LSN: first field of every btnode */
 	o.direct = g_storage_direct;             /* cache-bypass page store */
 	o.adaptive_writeback = g_storage_adaptive;  /* GA-tuned trickler */
@@ -464,21 +473,15 @@ sx_storage_open(const char *path, unsigned int n_frames)
 			return SX_ERROR;
 		}
 		/*
-		 * Replay without the double-write ring.  Every page evicted
-		 * during replay used to cost a ring write plus an fdatasync
-		 * (~2.5 s per MB of log).  Torn-page protection buys nothing
-		 * here: this page file is fresh, and no open trusts it until a
-		 * clean shutdown has flushed it through the ring and set the
-		 * clean flag.  A crash during or after replay, before that,
-		 * finds the flag clear and rebuilds again from the log.  Replay
-		 * only reads the log (undo appends CLRs, which replay
-		 * idempotently), so recovery can be repeated.  The checkpoint
-		 * below makes the log compact and durable before any new
-		 * commit.
+		 * Replay.  The page file is fresh and no open trusts it until a
+		 * clean shutdown has flushed it and set the clean flag, so a
+		 * crash during or after replay finds the flag clear and rebuilds
+		 * again from the log.  Replay only reads the log (undo appends
+		 * CLRs, which replay idempotently), so recovery can be repeated.
+		 * The checkpoint below makes the log compact and durable before
+		 * any new commit.
 		 */
-		bm_set_double_write(g_xbm, 0);
 		(void)xstore_recover(g_xbt, g_xwal_path);  /* replay the log */
-		bm_set_double_write(g_xbm, 1);
 	}
 
 	/* Open the log (append past whatever is there). */
