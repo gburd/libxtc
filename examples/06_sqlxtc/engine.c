@@ -419,6 +419,14 @@ sx_storage_open(const char *path, unsigned int n_frames)
 
 	if (g_xbt != NULL)
 		return SX_OK;                 /* already open */
+	/* Prune each written row's dead versions on the write (HOT-style,
+	 * adaptive: it backs off when there is nothing to prune).  Without it
+	 * every UPDATE kept its predecessor until a full xstore_gc, and a
+	 * ledger store of 100k accounts after 2M transfers was 1.17 GB
+	 * against 693 MB with it -- and faster with it (smaller tree, fewer
+	 * evictions).  Time travel (xstore_as_of) then reaches only
+	 * snapshots someone pins, as in PostgreSQL. */
+	xstore_autovacuum_default(1);
 
 	o.path = dpath;
 	if (n_frames > 0)

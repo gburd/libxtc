@@ -5332,6 +5332,16 @@ xstore_gc_run(struct xsql *db)
 	return reclaimed;
 }
 
+/* The autovacuum setting new connections start with (see
+ * xstore_autovacuum_default in xstore.h). */
+static _Atomic int g_av_default;
+
+void
+xstore_autovacuum_default(int on)
+{
+	atomic_store_explicit(&g_av_default, on ? 1 : 0, memory_order_relaxed);
+}
+
 /* Enable/disable autovacuum for the connection (xstore_autovacuum(on)). */
 int
 xstore_autovacuum_set(struct xsql *db, int on)
@@ -7338,7 +7348,7 @@ xs_ctx_init_and_map(struct xsql *db, bt_t *bt, int native)
 	ctx->did_scan = 0;
 	ctx->ssi = NULL;
 	ctx->snap_slot = -1;
-	ctx->autovacuum = 0;
+	ctx->autovacuum = atomic_load_explicit(&g_av_default, memory_order_relaxed);
 	ctx->steal_txn = 0;
 	ctx->wbuf_bytes = 0;
 	ctx->sp_wn = NULL;

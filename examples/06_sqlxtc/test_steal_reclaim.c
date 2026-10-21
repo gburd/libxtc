@@ -10,6 +10,9 @@
  *	every bulk load left a second copy of its rows in the page file until
  *	the next crash rebuild.  Commits a big transaction and rolls back
  *	another, then counts staging keys (xstore_stage_rows): must be 0.
+ *	Also: a storage-engine connection prunes old versions by default
+ *	(autovacuum): 600 updates of one row run prune passes (the adaptive
+ *	gate backs off to one pass per 256 writes after the inserts).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,6 +86,15 @@ main(void)
 	CK(s1 == 0);
 	CK(s2 == 0);
 	CK(one(h, "SELECT count(*) FROM t") == 20000);
+	/* autovacuum is on by default for a storage-engine connection */
+	{
+		int64_t p0 = xstore_prune_count();
+		for (i = 0; i < 600; i++)
+			CK(sx_exec(h, "UPDATE t SET pad = 'x' WHERE k = 7", NULL) == SX_OK);
+		printf("  prune passes over 600 updates of one row: %lld\n",
+		    (long long)(xstore_prune_count() - p0));
+		CK(xstore_prune_count() - p0 > 0);
+	}
 	/* and a crash afterwards still recovers exactly the committed rows */
 	sx_close(h);
 	sx_storage_abandon();
