@@ -320,7 +320,8 @@ usage(FILE *fp, const char *prog)
 	    "  -d, --db=PATH         database path (default :memory:); the\n"
 	    "                        xstore engine file is derived as PATH.xstore\n"
 	    "  -c, --cores=N         pin to N cores\n"
-	    "  -m, --max-memory=N    xtc_res memory cap, bytes\n"
+	    "  -m, --max-memory=N    cap on connection buffer memory, bytes\n"
+	    "                        (a result past it gets {\"err\":\"OOM\"})\n"
 	    "  -n, --max-clients=N   max concurrent clients (default 1000)\n"
 	    "  -i, --max-iops=N      queries/sec cap (0 unlimited)\n"
 	    "  -D, --max-databases=N max ATTACHed dbs (default 16)\n"
@@ -495,7 +496,8 @@ main(int argc, char **argv)
 	/* xtc_res. */
 	srv->res = (xtc_res_t *)calloc(1, sizeof *srv->res);
 	if (!srv->res) { fprintf(stderr, "oom\n"); return 1; }
-	if (cfg.max_memory > 0) caps.mem_bytes = cfg.max_memory;
+	/* MEM_BYTES meters the connection buffers (conn.c); 0 = no cap. */
+	caps.mem_bytes = cfg.max_memory > 0 ? cfg.max_memory : 0;
 	xtc_res_init(srv->res, &caps);
 
 	rate_limit_init(srv);

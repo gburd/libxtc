@@ -87,6 +87,7 @@ typedef struct conn_state {
 	int64_t    iops_cap;
 
 	int64_t    max_memory;
+	int        mem_refused;   /* a buffer grow was refused by res */
 
 	int        quit;
 	int        closed;
@@ -117,6 +118,45 @@ extern void server_inc_conn(struct server *);
 extern void server_dec_conn(struct server *);
 extern int  server_take_iops(struct server *, int);
 
+/*
+ * Connection buffer memory is charged to the server's xtc_res
+ * MEM_BYTES budget (--max-memory): every byte either buffer grows past
+ * its initial size, given back when it shrinks or the connection
+ * closes.  The initial buffers are not charged (their total is bounded
+ * by --max-clients), as in rexis.  Nothing else in sqlxtc charges that
+ * budget, so the check before each query used to compare a counter that
+ * was always 0: a SELECT emitted its whole result, however large.
+ */
+static int
+conn_charge(void *arg, int64_t delta)
+{
+	conn_state_t *st = arg;
+	if (st->res == NULL)
+		return 0;
+	if (delta < 0) {
+		xtc_res_release(st->res, XTC_RES_MEM_BYTES, -delta);
+		return 0;
+	}
+	if (xtc_res_acquire(st->res, XTC_RES_MEM_BYTES, delta) != XTC_OK) {
+		st->mem_refused = 1;
+		return -1;
+	}
+	return 0;
+}
+
+/* A reply that the budget refused: drop all of it (a partial result
+ * would desynchronize the stream), answer {"err":"OOM"} and close once
+ * that is flushed (PROTOCOL.md).  If even the error line cannot be
+ * buffered, close without it. */
+static void
+conn_refuse(conn_state_t *st, size_t mark)
+{
+	st->wbuf.len = mark;
+	if (quack_emit_err(&st->wbuf, "OOM") < 0)
+		st->closed = 1;
+	st->quit = 1;
+}
+
 static int
 try_read(conn_state_t *st)
 {
@@ -130,8 +170,16 @@ try_read(conn_state_t *st)
 			st->closed = 1;
 			return -1;
 		}
+		if (conn_charge(st, (int64_t)(newcap - st->rcap)) != 0) {
+			conn_refuse(st, st->wbuf.len);
+			return -1;
+		}
 		nb = (char *)realloc(st->rbuf, newcap);
-		if (!nb) { st->closed = 1; return -1; }
+		if (!nb) {
+			(void)conn_charge(st, -(int64_t)(newcap - st->rcap));
+			st->closed = 1;
+			return -1;
+		}
 		st->rbuf = nb;
 		st->rcap = newcap;
 	}
@@ -283,7 +331,7 @@ process_lines(conn_state_t *st)
 {
 	while (!st->quit && !st->closed) {
 		char *nl;
-		size_t line_len;
+		size_t line_len, mark = st->wbuf.len;
 		quack_msg_t msg;
 
 		if (st->wbuf.len > 256 * 1024) break;     /* let writer drain */
@@ -330,8 +378,8 @@ process_lines(conn_state_t *st)
 				int64_t used = xtc_res_used(st->res,
 				    XTC_RES_MEM_BYTES);
 				if (used >= st->max_memory) {
-					quack_emit_err(&st->wbuf, "OOM");
-					st->closed = 1;
+					/* quit, not closed: the error is flushed */
+					conn_refuse(st, st->wbuf.len);
 					break;
 				}
 			}
@@ -344,6 +392,9 @@ process_lines(conn_state_t *st)
 			quack_emit_err(&st->wbuf, "empty message");
 			break;
 		}
+		/* The budget refused a grow somewhere in this reply. */
+		if (st->mem_refused)
+			conn_refuse(st, mark);
 
 	consume:
 		/* Compact: drop the consumed line + newline. */
@@ -390,6 +441,14 @@ conn_proc(void *arg)
 
 		if (st->quit && st->wbuf.len == st->wpos) break;
 
+		/* Nothing left to send: give a grown write buffer back to
+		 * the budget before waiting for the next request.
+		 * shortcut: a client whose every result passes 64 KiB pays a
+		 * realloc up and down per query; trim on a timer (rexis's
+		 * conn_trim) if that shows up in a profile. */
+		if (st->wbuf.len == 0)
+			quack_buf_trim(&st->wbuf);
+
 		/* Wait for inbound bytes (or the quit/shutdown signal).
 		 * Wakes exactly on fd readiness; no busy-poll. */
 		{
@@ -433,9 +492,13 @@ conn_proc(void *arg)
 	if (st->h_conn != NULL)
 		db_conn_close(st->db, st->h_conn, st->h_owned);
 
-	xtc_net_close(st->fd);   /* pairs with xtc_net_accept (fd accounting) */
+	/* Give the buffers back to the budget BEFORE the close: a client
+	 * that sees EOF and reconnects must find the bytes released. */
+	if (st->rcap > DEFAULT_READ_CAP)
+		(void)conn_charge(st, -(int64_t)(st->rcap - DEFAULT_READ_CAP));
 	free(st->rbuf);
 	quack_buf_free(&st->wbuf);
+	xtc_net_close(st->fd);   /* pairs with xtc_net_accept (fd accounting) */
 	free(st);
 }
 
@@ -462,6 +525,8 @@ conn_spawn(xtc_loop_t *loop, const conn_opts_t *opts, xtc_pid_t *out_pid)
 	if (quack_buf_init(&st->wbuf, DEFAULT_WRITE_CAP) < 0) {
 		free(st->rbuf); free(st); return XTC_E_NOMEM;
 	}
+	st->wbuf.charge = conn_charge;
+	st->wbuf.charge_arg = st;
 
 	po.name = "sqlxtc-conn";
 	return xtc_proc_spawn(loop, conn_proc, st, &po, out_pid);
