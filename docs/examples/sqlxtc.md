@@ -572,12 +572,99 @@ costs one WAL `fdatasync` (58 us on this array) in both engines, but
 sqlxtc also writes evicted pages back through its double-write ring:
 one ring `fdatasync` per page, about 1,000 a second, on the same disks.
 SQLite's only per-commit sync is the WAL frame; its checkpoint writes
-the database file in batches.  Batching the double-write (one sync per
-group of pages, as InnoDB does) is the next step.  The remaining
+the database file in batches.  The double-write ring was then removed
+(below): in this recovery mode it protected nothing.  The remaining
 retries at 32 and 64 connections are New-Order and Payment updating
 the district row after reading it under snapshot isolation, where
 first-committer-wins rolls one of them back.  SQLite has no such
 conflict because it serializes writers.
+
+### The rest of the 1.59 work: the log, the B-tree, the version GC
+
+A second round compared sqlxtc's write path with Berkeley DB, BDB JE,
+WiredTiger, LMDB, LeanStore, InnoDB and PostgreSQL's async WAL series,
+and measured it on in-process workloads of many shapes, against SQLite
+on the same disk.
+
+* **The log buffer is a ring with parallel insert.**  A committer
+  reserves its LSN and a byte range under a small lock, copies and
+  checksums its record outside it, and publishes completion in the LSN's
+  slot.  The first committer to find no flush running leads: it writes
+  and syncs the completed prefix and wakes exactly the waiters it
+  covered, plus one as the next leader (Berkeley DB's commit queue,
+  JE's copy outside the latch, InnoDB's completion links).  At 16
+  threads the group factor went from 2.7 to 8.8 commits per fsync.
+* **The log is preallocated.**  Each commit's `fdatasync` had also been
+  making the file's new size durable.  On the test host's XFS NVMe that
+  cost 104 us against 34 us for the same write into blocks already
+  written, so the log now keeps zeros 4 MiB ahead of its end (WiredTiger
+  does the same; InnoDB's redo files are fixed-size).  This one change
+  doubled single-connection commit throughput.
+* **The double-write ring is gone.**  The page file is trusted only
+  after a clean close, and after a crash it is rebuilt from the log, so
+  a torn page is never read.  The ring cost an `fdatasync` per page and
+  protected nothing.
+* **Pages fill under sequential inserts.**  An insert at the end of a
+  leaf splits at the end (LMDB's `MDB_APPEND`, InnoDB's
+  `PAGE_LAST_INSERT`), so ascending keys fill pages to 94% instead of
+  47%.  Interior levels are read optimistically (version-checked, no
+  latch), as in LeanStore.
+* **Old row versions are pruned on write by default**, and every
+  statement pins its snapshot so pruning can never take a version a
+  reader is about to use.  A ledger store of 100k accounts after 2M
+  transfers went from 1.17 GB to 685 MB.
+
+Three bugs surfaced on the way, each now with a test that failed
+before the fix: a transaction larger than 16 MiB, and every commit after
+it, was lost in crash recovery (test_wal_bigtxn); a transaction's
+spilled rows were never deleted (test_steal_reclaim); and a direct-I/O
+store never reopened trusted (test_dio_restart).
+[Known issues]({{ '/reference/known-issues/' | relative_url }}) has the details.
+
+**A ledger benchmark.**  The driver ports the schema and workload shapes
+of a PostgreSQL double-entry ledger benchmark (TigerBeetle-style
+accounts and transfers) to the sqlite3 API and runs them in one
+process: 100k accounts, 2M seeded transfers, ten shapes.  Each shape
+runs for 10 s.  An audit after every run checks that posted debits
+equal posted credits and the sum of posted transfers, and that pending
+balances match the open pending transfers.  SQLite 3.53.4 runs with WAL, `synchronous=FULL` and
+`BEGIN IMMEDIATE` above one connection; both engines `fdatasync` every
+commit.  The table shows transactions per second, median of two
+interleaved runs, on a 32-vCPU host with local NVMe; every audit passed.
+
+| Shape | What a transaction does | 1 conn SQLite / sqlxtc | 8 conns | 32 conns |
+| --- | --- | ---: | ---: | ---: |
+| transfer | debit + credit 2 accounts, insert a transfer | 3,119 / **13,477** | 4,926 / **46,031** | 4,929 / **36,801** |
+| lifecycle | a pending transfer, then post (80%) or void | 2,140 / **9,861** | 3,709 / **28,282** | 3,729 / **21,280** |
+| batch | 10 transfers in one transaction | 490 / **2,709** | 790 / **8,055** | 764 / **6,406** |
+| insert | append one event row, autocommit | 19,037 / **24,474** | 18,357 / **64,485** | 18,034 / **46,817** |
+| mixed | 60% transfer, 20% lifecycle, 20% reads | 2,780 / **13,850** | 5,584 / **48,037** | 5,687 / **37,884** |
+| blend | 40% transfer, 25% balance, the rest spread over five shapes | 2,982 / **6,959** | 6,753 / **39,098** | 7,101 / **47,339** |
+| balance | read one account | **376,010** / 340,653 | 391,075 / **2,182,646** | 294,696 / **3,800,567** |
+| history | an account's last 20 transfers (two index ranges) | **17,559** / 11,448 | **133,390** / 59,098 | 43,915 / **74,241** |
+| statement | count and sum an account's debits | **35,682** / 26,451 | **248,187** / 152,574 | 82,574 / **174,880** |
+| analytic | group the last 5,000 transfers | **1,160** / 603 | **9,259** / 3,336 | **17,986** / 5,392 |
+
+Writes are where sqlxtc leads: 4-10x on every write shape, because
+commits group across connections where SQLite has one writer.  Point
+reads match SQLite at one connection and scale with connections.  Range
+reads still lose at low concurrency.  `analytic` visits exactly the
+5,001 rows it needs, but each row costs about twice SQLite's:
+decoding 9-byte integers, advancing the cursor, and evaluating the
+expression tree.  That per-row cost is the next target.
+
+**TPROC-C in process, warm.**  The same harness on the same host, 10
+warehouses, 120 s ramp so the 4 GiB pool holds the store, 60 s
+measured, two passes alternating the engines:
+
+| Engine | 1 conn | 8 conns |
+| --- | ---: | ---: |
+| SQLite 3.53.4, WAL, `synchronous=FULL` | **93,900** | 86,700 |
+| sqlxtc 1.59 | 75,700 | **175,000** |
+
+With a 30 s ramp the pool is still filling from the cold page file, and
+sqlxtc reads 54,000 at one connection.  Count the warm-up when comparing
+with the metal table above, which used a 60 s ramp.
 
 ### Feature by feature
 

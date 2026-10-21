@@ -48,6 +48,26 @@ against Python's sqlite3, found (and 1.58 fixes):
   detection, instead of failing COMMIT), and no global lock on the
   per-statement catalog lookups.
 
+## FIXED (1.59): sqlxtc durability and snapshot bugs found by the 1.59 review
+
+* **A large transaction, and every commit after it, was lost in crash
+  recovery.**  See the next section.
+* **An autocommit statement could lose an update or skip a row.**  Its
+  snapshot was not registered with the version GC, so once a newer
+  version committed, a prune could reclaim the version the statement was
+  about to read.  The UPDATE then changed nothing and reported success,
+  and a SELECT missed the row.  Pruning was off by default, so this needed
+  `xstore_autovacuum(1)` or a concurrent `xstore_gc()`.  Every statement
+  now pins its snapshot for its duration (test_snap_registry).
+* **A transaction's spilled rows were never deleted.**  A transaction
+  that buffers more than 256 KiB of rows spills the older ones into the
+  tree; they stayed after COMMIT and ROLLBACK, so a bulk load kept a
+  second copy of its rows in the page file until the next crash rebuild
+  (test_steal_reclaim).
+* **A direct-I/O store (`--storage-direct`) never reopened trusted.**  Its
+  superblock write was unaligned, which Linux refuses under O_DIRECT, so
+  every open rebuilt from the log (test_dio_restart).
+
 ## FIXED (1.59): sqlxtc lost a large transaction, and every commit after it, in crash recovery
 
 Through 1.58, a transaction whose log record was larger than 16 MiB
@@ -69,9 +89,10 @@ of a length cap, and writes a record bigger than the log buffer directly
   128-vCPU host, 262144 pages (1 GiB) measured best (49.8k tpmC at 8
   connections).  Smaller pools spend most of their CPU in the CLOCK
   sweep (65536 pages: `evict_one` 78% of the server at 8 connections,
-  8.4k tpmC).  Larger pools get slower too (1048576 pages: 13-16k): the
-  page provider (every 1 ms) and trickler (every 5 ms) walk every frame,
-  on the loop that also runs the WAL group-commit writer.
+  8.4k tpmC).  Since 1.59 the trickler visits at most 16384 frames a
+  pass, so a large pool no longer costs a full-pool walk every 5 ms; in
+  process, TPROC-C at 10 warehouses runs best with a pool that holds the
+  store (1048576 pages, 4 GiB).
 * **A log checkpoint costs CPU and write bandwidth while it runs.**
   When the log passes `--checkpoint-mb` (default 64 MiB, then twice its
   last post-checkpoint size) the live rows are dumped into a new log.
@@ -92,11 +113,16 @@ of a length cap, and writes a record bigger than the log buffer directly
   READ COMMITTED, autocommit, and a transaction's first statement re-run
   on a fresh snapshot (at most 8 times), waiting for the row's holder
   first.
-* **Every page written back costs a double-write `fdatasync`.**  The
-  torn-page ring syncs once per page, so a store larger than its pool
-  pays about one extra fsync per evicted dirty page on the same disks as
-  the log: at TPROC-C 10 warehouses, one connection, 4 GiB pool, about
-  1,000 a second, and one connection reaches half of SQLite FULL.
+* **Rows over about 500 bytes take a whole page.**  On 4 KiB pages an
+  inline entry is at most 506 bytes; a larger value goes out of line on
+  its own pages, one 4 KiB page for a 662-byte TPROC-C customer row.  At
+  10 warehouses that is 1.2 GB for the customer table, and the store is
+  3.6 GB against SQLite's 0.9 GB.
+* **Restart after an unclean stop rebuilds from the log.**  The page file
+  is trusted only after a clean close, so a crash replays the whole
+  (compacted) log; the open also rebuilds every secondary index.  Since
+  1.59 the engine keeps no double-write ring (it protected nothing in
+  this mode and cost about 1,000 fdatasyncs a second under TPROC-C).
 
 ## RESOLVED (1.57): sqlxtc large rows, B-tree limits, and the 1.56 regressions
 
