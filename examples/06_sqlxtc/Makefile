@@ -148,7 +148,7 @@ clean:
 	rm -f test_bufmgr_mt
 	rm -f test_drop_reserved test_evict_revalidate_sampled
 	rm -f test_scan_resist test_sweep_bound test_evict_revalidate test_btree_late_load test_flush_pin test_trickler_select test_pp_slice test_tr_slice test_publication_pin test_private_frame test_pid_writeback bm_sweep_bench
-	rm -f test_persist
+	rm -f test_persist test_btree_prefix_split
 	rm -f test_cursor_resume
 	rm -f test_btnode
 	rm -f test_btree
@@ -853,3 +853,14 @@ numa_claim_probe: ../../bench/sqlxtc/numa_claim_probe.c btree.c bufmgr_probe.o b
 # self-checks the design's key properties with plain assert().
 evict_policy_proto: evict_policy_proto.c
 	$(CC) $(CFLAGS) -o $@ evict_policy_proto.c
+
+test: test-btree-prefix-split
+
+# Prefix-compressed leaves (index keys) must split, fill, and keep every
+# entry: the split used to cost entries with their full key.
+test_btree_prefix_split: test_btree_prefix_split.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ test_btree_prefix_split.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
+
+test-btree-prefix-split: test_btree_prefix_split
+	TMPDIR=$${TMPDIR:-/tmp} ./test_btree_prefix_split
+
