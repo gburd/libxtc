@@ -149,6 +149,33 @@
  * production builds compile it to 0. */
 #ifndef BT_STALE_TEST_HOOK
 #define BT_STALE_TEST_HOOK() 0
+#define BT_STALE_TEST_HOOK_PEEK() 0
+#endif
+
+/*
+ * The optimistic (seqlock) readers -- bt_lookup_optimistic and
+ * descend_optimistic -- read pages a writer may be changing and discard
+ * the result if the frame version moved.  ThreadSanitizer reports every
+ * such read as a race (it cannot see the version check), which buried
+ * the real ones (26 reports in test_btree_mt alone).  Under TSan they
+ * are compiled out, so every read takes the latched path and TSan checks
+ * the latch protocol, which must be race-free.  The optimistic paths are
+ * covered by the multi-thread tests and DST in the other builds.
+ */
+#if defined(__SANITIZE_THREAD__)
+#define BT_OLC_ENABLED 0
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define BT_OLC_ENABLED 0
+#endif
+#endif
+#ifndef BT_OLC_ENABLED
+#define BT_OLC_ENABLED 1
+#endif
+#ifndef BT_STALE_TEST_HOOK_PEEK
+/* The stale-descent test forces the LATCHED path's checks: skip the
+ * optimistic descent while it has a forced stale hit pending. */
+#define BT_STALE_TEST_HOOK_PEEK() (g_force_stale > 0)
 #endif
 
 /*
@@ -1382,6 +1409,80 @@ unlock:
 }
 
 /*
+ * Optimistic descent to the leaf for `key` (start == NULL: the leftmost
+ * leaf): the internal levels are read WITHOUT their content latch, under
+ * each frame's version seqlock (optimistic lock coupling, Leis et al.;
+ * LeanStore), and only the leaf is latched (shared), so concurrent
+ * readers write no shared cache line above the leaves.  Every descent
+ * used to take the root's and each internal node's arwlock: at 8
+ * threads a secondary-index read mix spent 36% of its time in futex
+ * wait/wake on those few latches.  The races are the latched path's
+ * (it too drops the parent before latching the child): a split moved
+ * the key right (follow the right link), a merge freed the node or
+ * absorbed its range leftward (restart).  A version change under the
+ * read -- a writer in the node -- or anything unexpected returns 0 and
+ * the caller takes the latched descent.  On 1 the leaf is fixed and
+ * shared-latched in *out and owns `key` (fence-checked under the latch).
+ */
+static int
+descend_optimistic(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
+{
+	bm_t *bm = bt->bm;
+	bm_frame_t *f;
+	int hops;
+
+	if (!BT_OLC_ENABLED)
+		return 0;
+	if (bm_fix_pid(bm, atomic_load(&bt->root_pid), &f) != XTC_OK)
+		return 0;
+	for (hops = 0; hops < 4 * BT_MAX_HEIGHT; hops++) {
+		void *pg = bm_page(f);
+		uint64_t v;
+		bm_pid_t next;
+		int leaf, beyond, bad;
+
+		if (!bm_read_begin(f, &v))
+			break;                       /* a writer holds it */
+		leaf = btnode_is_leaf(pg);
+		bad = btnode_is_dead(pg) ||
+		    (key != NULL && btnode_below_lo_fence(pg, key, klen));
+		beyond = key != NULL && btnode_beyond_hi_fence(pg, key, klen);
+		if (beyond)
+			next = (bm_pid_t)btnode_right_sibling(pg);
+		else if (leaf)
+			next = BM_PID_NONE;
+		else
+			next = key == NULL ? child_pid_at(pg, 0)
+			    : child_for_key(pg, key, klen);
+		if (!bm_read_valid(f, v) || bad || (beyond && next == 0))
+			break;
+		if (leaf && !beyond) {
+			/* The leaf: latch it and re-check under the latch. */
+			bm_latch_shared(f);
+			(void)move_right(bt, &f, key, klen, 0);
+			pg = bm_page(f);
+			if (!btnode_is_leaf(pg) || btnode_is_dead(pg) ||
+			    (key != NULL && btnode_below_lo_fence(pg, key, klen))) {
+				bm_unlatch(f);
+				bm_unfix(bm, f, 0);
+				return 0;
+			}
+			*out = f;
+			return 1;
+		}
+		{
+			bm_frame_t *nf;
+			if (next == BM_PID_NONE || bm_fix_pid(bm, next, &nf) != XTC_OK)
+				break;
+			bm_unfix(bm, f, 0);
+			f = nf;
+		}
+	}
+	bm_unfix(bm, f, 0);
+	return 0;
+}
+
+/*
  * Latch-free descent to the leaf for `key` with B-link move-right.
  * Latches one node at a time (no coupling): latch, move-right if a
  * concurrent split pushed `key`'s range to a sibling, read the child
@@ -1399,6 +1500,8 @@ descend_shared(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 	void *pg;
 	int rc;
 
+	if (!BT_STALE_TEST_HOOK_PEEK() && descend_optimistic(bt, key, klen, out))
+		return XTC_OK;
 	/* Retry until a descent lands on a live leaf.  Each stale hit means
 	 * a concurrent merge changed the path; it finishes and the next
 	 * descent routes past it.  (This was bounded at BT_DELETE_RETRIES
@@ -1516,6 +1619,8 @@ bt_lookup_optimistic(bt_t *bt, const void *key, uint16_t klen,
 	bm_t *bm = bt->bm;
 	int attempt;
 
+	if (!BT_OLC_ENABLED)
+		return XTC_E_AGAIN;              /* take the latched lookup */
 	for (attempt = 0; attempt < BT_OLC_RETRIES; attempt++) {
 		bm_pid_t pid = atomic_load(&bt->root_pid);
 		bm_frame_t *f;
@@ -2365,6 +2470,8 @@ cursor_descend(bt_t *bt, const void *start, uint16_t klen, bm_frame_t **out)
 	int rc;
 
 	atomic_fetch_add(&bt->st_descents, 1);
+	if (!BT_STALE_TEST_HOOK_PEEK() && descend_optimistic(bt, start, klen, out))
+		return XTC_OK;
 
 	/*
 	 * Latch-free retries until a live leaf (like descend_shared): a concurrent
