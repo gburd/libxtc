@@ -328,7 +328,9 @@ typedef struct xs_wrec {
 	uint16_t len;
 	uint8_t *data;        /* malloc'd; NULL for a delete or when spilled */
 	int      spilled;     /* 1: payload is in the STEAL staging area, not data */
-	int64_t  stage_id;    /* staging key suffix when spilled */
+	int64_t  stage_id;    /* staging key suffix once spilled (0 = never);
+	                       * the key stays until the entry is dropped,
+	                       * even after the payload is brought back */
 	uint64_t base;        /* snapshot the write was computed against: a
 	                       * committed version newer than this at commit
 	                       * time is a write-write conflict */
@@ -453,6 +455,29 @@ static void xs_umap_index(xstore_ctx_t *c, int wi);
 
 /* Free and truncate wbuf entries [mark, wn), restoring the byte count.
  * Used by savepoint rollback (and reused by wbuf_clear via mark 0). */
+/*
+ * Delete an entry's STEAL staging row, if it ever spilled.  Nothing did:
+ * every spilled payload stayed in the tree after its transaction ended,
+ * so a bulk load left a second copy of its rows in the page file (until a
+ * crash rebuild, whose loser undo removes them).  No log record is
+ * needed: the spill's log record belongs to a steal transaction that
+ * never commits, so recovery redoes and then undoes it anyway -- the
+ * same end state.  The key is private to this transaction.
+ */
+static void enc_vkey(uint32_t tableid, int64_t rowid, uint64_t commit_ts,
+    uint8_t out[XS_VKLEN]);
+static void
+xs_stage_drop(xstore_ctx_t *c, xs_wrec_t *w)
+{
+	uint8_t key[XS_VKLEN];
+	if (w->stage_id == 0)
+		return;
+	enc_vkey(XS_STAGE_TID, w->stage_id, 0, key);
+	(void)bt_delete(c->bt, key, XS_VKLEN);
+	w->stage_id = 0;
+	w->spilled = 0;
+}
+
 static void
 wbuf_truncate(xstore_ctx_t *c, int mark)
 {
@@ -460,6 +485,7 @@ wbuf_truncate(xstore_ctx_t *c, int mark)
 	if (mark < 0)
 		mark = 0;
 	for (i = mark; i < c->wn; i++) {
+		xs_stage_drop(c, &c->wbuf[i]);
 		if (c->wbuf[i].data != NULL) {
 			if (c->wbuf[i].len <= c->wbuf_bytes)
 				c->wbuf_bytes -= c->wbuf[i].len;
@@ -476,8 +502,10 @@ static void
 wbuf_clear(xstore_ctx_t *c)
 {
 	int i;
-	for (i = 0; i < c->wn; i++)
+	for (i = 0; i < c->wn; i++) {
+		xs_stage_drop(c, &c->wbuf[i]);
 		free(c->wbuf[i].data);
+	}
 	c->wn = 0;
 	c->wbuf_bytes = 0;
 	c->sp_n = 0;          /* all savepoints close at end of transaction */
@@ -5312,6 +5340,29 @@ xstore_autovacuum_set(struct xsql *db, int on)
 	if (c == NULL) return -1;
 	c->autovacuum = on ? 1 : 0;
 	return c->autovacuum;
+}
+
+/* STEAL staging rows in the tree (test hook: 0 once no transaction
+ * that spilled is open). */
+uint64_t
+xstore_stage_rows(bt_t *bt)
+{
+	bt_cursor_t *cur = NULL;
+	uint8_t startk[XS_VKLEN];
+	uint64_t n = 0;
+	if (bt == NULL) return 0;
+	enc_vkey(XS_STAGE_TID, INT64_MIN, ~(uint64_t)0, startk);
+	if (bt_cursor_open(bt, startk, XS_VKLEN, &cur) != XTC_OK) return 0;
+	for (;;) {
+		const void *k = NULL, *v = NULL;
+		uint16_t kl = 0, vl = 0;
+		if (bt_cursor_next(cur, &k, &kl, &v, &vl) != XTC_OK || kl != XS_VKLEN ||
+		    dec_tableid((const uint8_t *)k) != XS_STAGE_TID)
+			break;
+		n++;
+	}
+	bt_cursor_close(cur);
+	return n;
 }
 
 /* Total autovacuum prunes so far (xstore_prune_count()). */

@@ -347,6 +347,8 @@ int xstore_as_of(struct xsql *db, int64_t ts);   /* xstore_as_of(ts) */
 int xstore_gc_run(struct xsql *db);          /* xstore_gc() -> reclaimed */
 int xstore_autovacuum_set(struct xsql *db, int on); /* xstore_autovacuum(on) */
 int64_t xstore_prune_count(void);            /* xstore_prune_count() */
+/* STEAL staging rows in the tree (test hook). */
+uint64_t xstore_stage_rows(bt_t *bt);
 int xstore_native_begin(struct xsql *db);
 int xstore_savepoint(struct xsql *db, int level);
 int xstore_release(struct xsql *db, int level);
