@@ -3509,6 +3509,8 @@ num:
 static int
 key_eq(const vx_cell_t *a, const vx_cell_t *b)
 {
+	if (a->type == VX_INT && b->type == VX_INT)
+		return a->i == b->i;
 	if (a->type == VX_NULL || b->type == VX_NULL)
 		return a->type == VX_NULL && b->type == VX_NULL;
 	if ((a->type == VX_INT || a->type == VX_REAL) &&
