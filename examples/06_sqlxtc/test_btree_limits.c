@@ -18,7 +18,8 @@
  *	  L5  16 KiB pages: internal splits failed (8 KiB scratch)
  *	plus the bound itself: an entry above bt_max_inline() is refused
  *	cleanly with no change to the tree, and a byte-balanced split
- *	property run with random sizes up to the bound never fails.
+ *	property run with random sizes up to the bound never fails; and on
+ *	4 KiB pages a 700-byte row stays inline (the bound is 1010 B).
  */
 
 #include <stdint.h>
@@ -468,6 +469,45 @@ t_seek_lt(uint32_t ps)
 	done(bt, bm, p);
 }
 
+/* The inline bound on 4 KiB pages: an entry of up to (cap - 2K) / 3 =
+ * 1020 bytes (1010 of key + value) stays in its leaf.  It was cap/4 - K
+ * = 516 (506 of key + value), and every TPC-C customer row (about 660 B)
+ * took a 4 KiB out-of-line page of its own.  2,000 rows of 700 B with
+ * 20 B keys: none out of line, about 5 rows a leaf, all intact. */
+static void
+t_inline_bound(void)
+{
+	char p[64], k[24];
+	bm_t *bm = mk(p, 4096, 1024);
+	bt_t *bt;
+	bt_stats_t st;
+	static unsigned char v[1100], out[1100];
+	uint16_t vl;
+	int i, bad = 0;
+
+	CHECK(bt_open(bm, &bt) == XTC_OK, "open");
+	CHECK(bt_max_inline(bt) == 1010, "4 KiB inline bound %u (want 1010)",
+	    bt_max_inline(bt));
+	for (i = 0; i < 2000; i++) {
+		snprintf(k, sizeof k, "row%017d", (i * 7919) % 2000);
+		fill(v, 700, (uint32_t)i);
+		if (bt_insert(bt, k, 20, v, 700) != XTC_OK) bad++;
+	}
+	for (i = 0; i < 2000; i++) {
+		snprintf(k, sizeof k, "row%017d", (i * 7919) % 2000);
+		fill(v, 700, (uint32_t)i);
+		if (bt_lookup(bt, k, 20, out, sizeof out, &vl) != XTC_OK || vl != 700 ||
+		    memcmp(out, v, 700) != 0) bad++;
+	}
+	bt_get_stats(bt, &st);
+	CHECK(bad == 0, "700 B rows: %d failed", bad);
+	CHECK(st.ovf_writes == 0, "700 B rows inline: %llu out of line",
+	    (unsigned long long)st.ovf_writes);
+	CHECK(st.splits < 2000 / 3, "%llu leaves for 2000 700 B rows",
+	    (unsigned long long)st.splits + 1);
+	done(bt, bm, p);
+}
+
 int
 main(void)
 {
@@ -480,6 +520,7 @@ main(void)
 	t_mixed_split(4096);
 	t_mixed_split(16384);
 	t_refuse_oversize();
+	t_inline_bound();
 	t_seek_lt(4096);
 	t_seek_lt(16384);
 	t_overflow(4096);

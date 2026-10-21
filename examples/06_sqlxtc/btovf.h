@@ -36,7 +36,7 @@
  *	value length (BT_OVF_FLAG): an inline value is stored exactly as
  *	before (so existing pages, tests and tools are unchanged), and an
  *	inline value can never reach 32 KiB because the entry bound caps
- *	it at a quarter page (<= 16 KiB on a 64 KiB page).  The flag is
+ *	it near a third of a page (21 KiB on a 64 KiB page).  The flag is
  *	private to btree.c: callers of bt_* always see plain value bytes.
  *
  *	The data pages are written (dirty) BEFORE the leaf entry that

@@ -121,8 +121,8 @@ void bt_set_smo_hook(const bt_smo_hook_t *hook);
  *   bt_max_inline -- the largest key length + value length one leaf
  *                    entry may have.
  * A call with a longer key, or an insert above bt_max_value, returns
- * XTC_E_INVAL and changes nothing.  4 KiB pages: 498 / 506 bytes;
- * 16 KiB pages: 1024 / 3052 bytes.
+ * XTC_E_INVAL and changes nothing.  4 KiB pages: 498 / 1010 bytes;
+ * 16 KiB pages: 1024 / 4755 bytes.
  */
 uint16_t bt_max_key(const bt_t *bt);
 uint16_t bt_max_inline(const bt_t *bt);
