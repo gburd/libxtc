@@ -562,12 +562,10 @@ test-drop-reserved: test_drop_reserved
 	./test_drop_reserved
 
 # Kill committers mid-commit (exit/any/link/big/mid/writer, 0.6 s each);
-# the reopen tail hint (test-wal-tail).
-# test-wal-kill-engine (fibers killed inside COMMIT through the engine)
-# is NOT in `test` yet: it hangs until xs_commit_ctx masks the commit
-# (a known engine defect in xstore.c).
+# the reopen tail hint (test-wal-tail); fibers killed inside COMMIT
+# through the whole engine (test-wal-kill-engine, 1.5 s).
 # test-wal-kill-preempt needs involuntary preemption (x86-64 glibc).
-test: test-wal-kill test-wal-tail
+test: test-wal-kill test-wal-tail test-wal-kill-engine
 
 test_wal_kill: test_wal_kill.c wal.c wal.h
 	$(CC) $(CFLAGS) -o $@ test_wal_kill.c $(LDFLAGS)

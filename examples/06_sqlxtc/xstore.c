@@ -82,14 +82,24 @@
 #define XS_LK_COMMIT 11u /* commit validation + timestamp + in-flight registry */
 static _Atomic uint64_t g_cat_locks;   /* XS_LK_CAT acquisitions (metric) */
 static _Atomic uint64_t g_cat_scans;   /* catalog-tree scans (metric) */
+/*
+ * Every hold runs with cancellation masked: a holder parks (a B-tree
+ * latch, the WAL ack) and a kill delivered there would unwind with the
+ * lock still held -- nothing releases an amutex for a dead proc, so
+ * every later caller would wait forever (test_wal_kill_engine).  The
+ * kill is delivered at the unlock instead.  No-ops off a proc.
+ */
+#define xs_lk(slot)   ((void)xtc_mask_enter(), \
+	(void)xtc_amutex_lock(xtc_amutex_static(slot), -1))
+#define xs_unlk(slot) ((void)xtc_amutex_unlock(xtc_amutex_static(slot)), \
+	(void)xtc_mask_leave())
 #define xs_cat_lock()    (atomic_fetch_add_explicit(&g_cat_locks, 1, \
-	memory_order_relaxed), \
-	(void)xtc_amutex_lock(xtc_amutex_static(XS_LK_CAT), -1))
-#define xs_cat_unlock()  (void)xtc_amutex_unlock(xtc_amutex_static(XS_LK_CAT))
-#define xs_ssi_lock()    (void)xtc_amutex_lock(xtc_amutex_static(XS_LK_SSI), -1)
-#define xs_ssi_unlock()  (void)xtc_amutex_unlock(xtc_amutex_static(XS_LK_SSI))
-#define xs_commit_lock()   (void)xtc_amutex_lock(xtc_amutex_static(XS_LK_COMMIT), -1)
-#define xs_commit_unlock() (void)xtc_amutex_unlock(xtc_amutex_static(XS_LK_COMMIT))
+	memory_order_relaxed), xs_lk(XS_LK_CAT))
+#define xs_cat_unlock()  xs_unlk(XS_LK_CAT)
+#define xs_ssi_lock()    xs_lk(XS_LK_SSI)
+#define xs_ssi_unlock()  xs_unlk(XS_LK_SSI)
+#define xs_commit_lock()   xs_lk(XS_LK_COMMIT)
+#define xs_commit_unlock() xs_unlk(XS_LK_COMMIT)
 
 /*
  * Commit clock.  Every committed version is stamped with a unique,
@@ -3335,12 +3345,16 @@ xs_wal_emit(const uint8_t *rec, size_t sz, uint64_t *lsn)
 	*lsn = 0;
 	if (g_xwal == NULL)
 		return XTC_OK;
+	/* Masked: wal_commit delivers a latched kill at its end, which would
+	 * leave g_wal_busy raised and the checkpoint gate waiting forever. */
+	(void)xtc_mask_enter();
 	atomic_fetch_add_explicit(&g_wal_busy, 1, memory_order_acq_rel);
 	if (xtc_pid_is_none(xtc_self()))
 		rc = wal_commit_sync(g_xwal, rec, (uint32_t)sz, lsn);
 	else
 		rc = wal_commit(g_xwal, rec, (uint32_t)sz, lsn);
 	atomic_fetch_sub_explicit(&g_wal_busy, 1, memory_order_acq_rel);
+	(void)xtc_mask_leave();
 	return rc;
 }
 
@@ -3615,8 +3629,10 @@ xs_spill_payloads(xstore_ctx_t *cx)
 		/* A checkpoint is dumping the tree: keep payloads in memory. */
 		xs_commit_lock();
 		gated = g_ckpt_gate;
-		if (!gated)
+		if (!gated) {
+			(void)xtc_mask_enter();   /* until g_wal_busy drops */
 			atomic_fetch_add_explicit(&g_wal_busy, 1, memory_order_acq_rel);
+		}
 		xs_commit_unlock();
 		if (gated)
 			break;
@@ -3625,6 +3641,7 @@ xs_spill_payloads(xstore_ctx_t *cx)
 		enc_vkey(XS_STAGE_TID, sid, 0, key);
 		if (bt_insert(cx->bt, key, XS_VKLEN, w->data, w->len) != XTC_OK) {
 			atomic_fetch_sub_explicit(&g_wal_busy, 1, memory_order_acq_rel);
+			(void)xtc_mask_leave();
 			continue;                  /* keep it in memory on failure */
 		}
 		if (cx->steal_txn == 0)
@@ -3634,6 +3651,7 @@ xs_spill_payloads(xstore_ctx_t *cx)
 		atomic_fetch_sub_explicit(&g_wal_busy, 1, memory_order_acq_rel);
 		free(w->data); w->data = NULL; w->spilled = 1; w->stage_id = sid;
 		cx->wbuf_bytes -= w->len;
+		(void)xtc_mask_leave();
 	}
 }
 
@@ -3874,6 +3892,10 @@ xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n,
 			return SX_BUSY;
 		}
 	}
+	/* From registration to removal the commit is masked: its entry lives
+	 * on this stack, so a kill in between would leave g_inflight pointing
+	 * into a dead fiber and pin the read horizon (test_wal_kill_engine). */
+	(void)xtc_mask_enter();
 	xs_inflight_add_locked(&fl);
 	xs_commit_unlock();
 	ts = fl.ts;
@@ -3884,6 +3906,7 @@ xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n,
 		 * caller gets an error and the row never becomes visible. */
 		if (xs_wal_put(ts, tableid, rowid, blob, n, deleted, &lsn) != XTC_OK) {
 			xs_inflight_remove(&fl);
+			(void)xtc_mask_leave();
 			return SX_ERROR;
 		}
 		bt_set_lsn(bt, lsn);   /* stamp this change's LSN onto the page */
@@ -3906,6 +3929,7 @@ xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n,
 		    deleted ? 0 : n, deleted, prelen > 0 ? pre : NULL, prelen, ts);
 	free(pre);
 	xs_inflight_remove(&fl);
+	(void)xtc_mask_leave();      /* may not return: a latched kill */
 	if (idx) xs_idx_reap(bt);
 	return rc;
 }
@@ -5096,6 +5120,13 @@ xs_commit_ctx(xstore_ctx_t *cx)
 			(void)xs_rollback_ctx(cx);
 			return SX_CONSTRAINT;
 		}
+		/* Masked from here to the end: the in-flight entry is on this
+		 * stack, so a kill before xs_inflight_remove would leave it
+		 * linked (a dangling pointer that pins the read horizon: every
+		 * later COMMIT waits forever).  A kill is delivered once the
+		 * commit is applied and visible.  Not earlier: a kill must still
+		 * reach a committer parked at the checkpoint gate. */
+		(void)xtc_mask_enter();
 		xs_inflight_add_locked(&fl);  /* one timestamp for the txn */
 		xs_commit_unlock();
 		ts = fl.ts;
@@ -5108,6 +5139,7 @@ xs_commit_ctx(xstore_ctx_t *cx)
 			if (xs_wal_log(cx, ts, &clsn) != XTC_OK) {
 				xs_inflight_remove(&fl);
 				(void)xs_rollback_ctx(cx);
+				(void)xtc_mask_leave();
 				return SX_ERROR;
 			}
 			/* Stamp the commit LSN onto every leaf these inserts dirty,
@@ -5154,6 +5186,7 @@ xs_commit_ctx(xstore_ctx_t *cx)
 	wbuf_clear(cx);
 	cx->in_txn = 0;
 	xs_pin_recompute(cx);     /* txn done: drop (or re-pin as_of) */
+	(void)xtc_mask_leave();   /* may not return: a latched kill */
 	return rc;
 }
 #if defined(SQLXTC_VTAB)
