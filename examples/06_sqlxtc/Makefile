@@ -155,7 +155,7 @@ clean:
 	rm -f test_btree_loop
 	rm -f test_btree_mt
 	rm -f test_btree_stale_descent test_btree_limits test_btree_sample bench_morsel_balance
-	rm -f test_btree_seek test_btree_seek_latched test_point_read
+	rm -f test_btree_seek test_btree_seek_latched test_point_read test_index_walk
 	rm -f test_tpcc_seek test_dup_composite test_bulk_insert test_plan_cache
 	rm -f test_btree_delete_merge test_savepoint test_isolation test_ww_conflict test_row_intents test_commit_visibility test_ssi_skew test_ckpt_bound test_dup_insert test_recover_fast
 	rm -f test_vfs_loop test_vfs_loop.o
@@ -824,6 +824,15 @@ test_point_read: test_point_read.c $(ENGINE_NATIVE)
 
 test-point-read: test_point_read
 	./test_point_read
+
+# A secondary-index range walk reads a leaf of entries per cursor resume
+# (forward) or per descent (reverse), and agrees with an oracle.
+test: test-index-walk
+test_index_walk: test_index_walk.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_index_walk.c $(ENGINE_NATIVE) $(LDFLAGS)
+
+test-index-walk: test_index_walk
+	./test_index_walk
 
 # Key-distribution sample (RethinkDB get_distribution): order, range,
 # O(fanout^depth) page bound, equi-depth balance on skewed keys.

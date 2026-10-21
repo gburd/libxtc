@@ -6745,6 +6745,12 @@ struct xstore_iscan {
 	bt_cursor_t  *cur;
 	uint8_t       pos[XS_IDX_KMAX];  int poslen, started;
 	uint8_t       ck[XS_IDX_KMAX];   int cklen, have_ck; int64_t crid;
+	/* Read-ahead of index keys (xs_iscan_fill): in-range entries copied
+	 * from one cursor resume (forward) or one descent (reverse) instead
+	 * of a resume or a whole bt_seek_lt descent per entry.  kb_end: the
+	 * walk has passed the range's end, nothing is left after the batch. */
+	struct xs_ika *ka;
+	int           kb_n, kb_i, kb_want, kb_end;
 	/* this transaction's buffered rows in range, sorted */
 	struct xs_icand *bc;
 	int           nbc, bci;
@@ -6925,67 +6931,119 @@ xstore_iscan_open(struct xsql *db, const char *table, uint32_t idx_id,
 	return s;
 }
 
-/* Advance the committed stream to its next in-range entry whose rowid
- * has no buffered write (s->ck / s->crid).  Returns 1, or 0 at the end. */
+/* A batch of index keys: up to XS_IKA_MAX, packed in buf (a batch stops
+ * once XS_IKA_BYTES are used, so one more maximal key always fits). */
+#define XS_IKA_MAX   128
+#define XS_IKA_BYTES (8 * 1024)
+struct xs_ika {
+	uint32_t off[XS_IKA_MAX];
+	uint16_t len[XS_IKA_MAX];
+	uint8_t  buf[XS_IKA_BYTES + XS_IDX_KMAX];
+};
+
+/* Refill the key batch with the next in-range entries in walk order.
+ * Returns the count (0: the range is exhausted), or -1 on no memory. */
 static int
-xs_iscan_committed(xstore_iscan_t *s)
+xs_iscan_fill(xstore_iscan_t *s)
 {
 	const void *k = NULL, *vv = NULL;
 	uint16_t kl = 0, vl = 0;
-	int w;
-	for (;;) {
-		if (!s->reverse) {
-			if (s->cur == NULL) {
-				const uint8_t *st = s->has_lo ? s->lo : s->pfx;
-				int sl = s->has_lo ? s->lolen : s->pfxlen;
-				if (bt_cursor_open(s->bt, st, (uint16_t)sl, &s->cur) != XTC_OK)
-					return 0;
-			} else if (bt_cursor_resume(s->cur) != XTC_OK) {
+	uint32_t used = 0;
+	int w, n = 0;
+
+	s->kb_n = s->kb_i = 0;
+	if (s->kb_end) return 0;
+	if (s->ka == NULL && (s->ka = malloc(sizeof *s->ka)) == NULL) return -1;
+	s->kb_want = s->kb_want == 0 ? 16 :
+	    (s->kb_want < XS_IKA_MAX ? s->kb_want * 2 : XS_IKA_MAX);
+	if (!s->reverse) {
+		if (s->cur == NULL) {
+			const uint8_t *st = s->has_lo ? s->lo : s->pfx;
+			int sl = s->has_lo ? s->lolen : s->pfxlen;
+			if (bt_cursor_open(s->bt, st, (uint16_t)sl, &s->cur) != XTC_OK) {
+				s->kb_end = 1;
 				return 0;
 			}
-			if (bt_cursor_next(s->cur, &k, &kl, &vv, &vl) != XTC_OK) {
-				bt_cursor_park(s->cur);
-				return 0;
-			}
-			memcpy(s->ck, k, kl);
-			s->cklen = kl;
-			bt_cursor_park(s->cur);
-			w = xs_iscan_where(s, s->ck, s->cklen);
-			if (w == 2) return 0;
-			if (w == 0) continue;
-		} else {
-			uint8_t bound[XS_IDX_KMAX + 16];
-			uint16_t ol = 0;
-			int bl;
-			if (!s->started) {
-				if (s->has_hi) {
-					memcpy(bound, s->hi, (size_t)s->hilen);
-					bl = s->hilen;
-					if (s->hi_incl) { memset(bound + bl, 0xFF, 9); bl += 9; }
-				} else {
-					memcpy(bound, s->pfx, (size_t)s->pfxlen);
-					bl = s->pfxlen;
-					/* shortcut: an entry ending in 9 x 0xFF (rowid INT64_MAX
-					 * with no further column) sorts at the bound and is
-					 * missed; unreachable for real rowids. */
-					memset(bound + bl, 0xFF, 9); bl += 9;
-				}
-				s->started = 1;
-			} else {
-				memcpy(bound, s->pos, (size_t)s->poslen);
-				bl = s->poslen;
-			}
-			if (bl > (int)bt_max_key(s->bt)) bl = (int)bt_max_key(s->bt);
-			if (bt_seek_lt(s->bt, bound, (uint16_t)bl, s->ck,
-			    (uint16_t)sizeof s->ck, &ol, NULL, 0, NULL) != XTC_OK)
-				return 0;
-			s->cklen = ol;
-			memcpy(s->pos, s->ck, ol);
-			s->poslen = ol;
-			w = xs_iscan_where(s, s->ck, s->cklen);
-			if (w == 0) return 0;
-			if (w == 2) continue;
+		} else if (bt_cursor_resume(s->cur) != XTC_OK) {
+			s->kb_end = 1;
+			return 0;
 		}
+		while (n < s->kb_want && used <= XS_IKA_BYTES) {
+			if (bt_cursor_next(s->cur, &k, &kl, &vv, &vl) != XTC_OK) {
+				s->kb_end = 1;
+				break;
+			}
+			w = xs_iscan_where(s, k, kl);
+			if (w == 2) { s->kb_end = 1; break; }
+			if (w == 0) continue;
+			memcpy(s->ka->buf + used, k, kl);
+			s->ka->off[n] = used;
+			s->ka->len[n] = kl;
+			used += kl;
+			n++;
+		}
+		bt_cursor_park(s->cur);
+	} else {
+		uint8_t bound[XS_IDX_KMAX + 16];
+		int bl, got = 0, j;
+		if (!s->started) {
+			if (s->has_hi) {
+				memcpy(bound, s->hi, (size_t)s->hilen);
+				bl = s->hilen;
+				if (s->hi_incl) { memset(bound + bl, 0xFF, 9); bl += 9; }
+			} else {
+				memcpy(bound, s->pfx, (size_t)s->pfxlen);
+				bl = s->pfxlen;
+				/* shortcut: an entry ending in 9 x 0xFF (rowid INT64_MAX
+				 * with no further column) sorts at the bound and is
+				 * missed; unreachable for real rowids. */
+				memset(bound + bl, 0xFF, 9); bl += 9;
+			}
+			s->started = 1;
+		} else {
+			memcpy(bound, s->pos, (size_t)s->poslen);
+			bl = s->poslen;
+		}
+		if (bl > (int)bt_max_key(s->bt)) bl = (int)bt_max_key(s->bt);
+		if (bt_seek_lt_n(s->bt, bound, (uint16_t)bl, s->ka->buf,
+		    (uint32_t)sizeof s->ka->buf, s->ka->off, s->ka->len,
+		    s->kb_want, &got) != XTC_OK || got == 0) {
+			s->kb_end = 1;
+			return 0;
+		}
+		/* The next batch starts below the last key read. */
+		memcpy(s->pos, s->ka->buf + s->ka->off[got - 1], s->ka->len[got - 1]);
+		s->poslen = s->ka->len[got - 1];
+		for (j = 0; j < got; j++) {
+			w = xs_iscan_where(s, s->ka->buf + s->ka->off[j], s->ka->len[j]);
+			if (w == 0) { s->kb_end = 1; break; }  /* below the start: done */
+			if (w == 2) continue;                  /* above the end: skip */
+			s->ka->off[n] = s->ka->off[j];
+			s->ka->len[n] = s->ka->len[j];
+			n++;
+		}
+	}
+	s->kb_n = n;
+	return n;
+}
+
+/* Advance the committed stream to its next in-range entry whose rowid
+ * has no buffered write (s->ck / s->crid).  Returns 1, 0 at the end, or
+ * -1 on no memory. */
+static int
+xs_iscan_committed(xstore_iscan_t *s)
+{
+	for (;;) {
+		if (s->kb_i >= s->kb_n) {
+			int r = xs_iscan_fill(s);
+			if (r <= 0) {
+				if (r == 0 && !s->kb_end) continue;   /* all skipped */
+				return r;
+			}
+		}
+		s->cklen = s->ka->len[s->kb_i];
+		memcpy(s->ck, s->ka->buf + s->ka->off[s->kb_i], (size_t)s->cklen);
+		s->kb_i++;
 		if (s->cklen < s->pfxlen + 8) continue;
 		s->crid = (int64_t)(xs_get_be64(s->ck + s->cklen - 8) ^ 0x8000000000000000ull);
 		if (s->cx != NULL && s->cx->in_txn &&
@@ -7004,7 +7062,11 @@ xstore_iscan_next(xstore_iscan_t *s, int64_t *rowid, const uint8_t **rec,
 	if (s == NULL) return -1;
 	for (;;) {
 		if (s->done) return 0;
-		if (!s->have_ck) s->have_ck = xs_iscan_committed(s) ? 1 : -1;
+		if (!s->have_ck) {
+			c = xs_iscan_committed(s);
+			if (c < 0) return -1;             /* no memory */
+			s->have_ck = c ? 1 : -1;
+		}
 		/* Merge: take the buffered candidate when it sorts first. */
 		if (s->bci < s->nbc) {
 			const struct xs_icand *b = &s->bc[s->bci];
@@ -7059,6 +7121,7 @@ xstore_iscan_close(xstore_iscan_t *s)
 		atomic_fetch_add_explicit(&g_rows_visited, s->visited,
 		    memory_order_relaxed);
 	if (s->cur != NULL) bt_cursor_close(s->cur);
+	free(s->ka);
 	free(s->bc);
 	free(s->bkeys);
 	free(s);

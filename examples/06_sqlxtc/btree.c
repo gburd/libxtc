@@ -2821,6 +2821,73 @@ bt_seek_lt(bt_t *bt, const void *hi, uint16_t hlen, void *out,
 	return XTC_E_INTERNAL;
 }
 
+/*
+ * Up to `max` keys strictly below `hi`, largest first, from ONE descent
+ * (bt_seek_lt answers one key per descent; a descending range walk paid
+ * a root-to-leaf descent per entry).  Copies the leaf's keys below the
+ * bound, walking left only as bt_seek_lt does when the leaf holds none.
+ * Key i goes to buf + off[i], its length to lens[i]; the copies stop
+ * when `bcap` bytes would be exceeded.  Values are not returned (index
+ * entries carry none).  *n gets the count (0: no key below `hi`).
+ * XTC_OK, or an error.
+ */
+int
+bt_seek_lt_n(bt_t *bt, const void *hi, uint16_t hlen, void *buf,
+    uint32_t bcap, uint32_t *off, uint16_t *lens, int max, int *n)
+{
+	uint8_t bound[BT_MAX_KEY + 1];
+	uint16_t blen;
+	int guard, incl = 0;
+
+	if (bt == NULL || hi == NULL || buf == NULL || n == NULL || max < 1 ||
+	    hlen > bt_key_max(bt))
+		return XTC_E_INVAL;
+	*n = 0;
+	memcpy(bound, hi, hlen);
+	blen = hlen;
+	for (guard = 0; guard < 1 << 20; guard++) {
+		bm_frame_t *f = NULL;
+		void *pg;
+		int s, found = 0, rc;
+		uint16_t ll = 0;
+		uint32_t used = 0;
+
+		rc = descend_shared(bt, bound, blen, &f);
+		if (rc != XTC_OK)
+			return rc;
+		pg = bm_page(f);
+		s = btnode_search(pg, bound, blen, &found);
+		if (incl && found)
+			s++;                    /* the bound itself qualifies */
+		for (; s > 0 && *n < max; s--) {
+			uint16_t kl = 0;
+			if (btnode_full_key(pg, s - 1, (uint8_t *)buf + used,
+			    (uint16_t)(bcap - used > 0xFFFF ? 0xFFFF : bcap - used),
+			    &kl) != 0)
+				break;          /* buffer full */
+			off[*n] = used;
+			lens[*n] = kl;
+			used += kl;
+			(*n)++;
+		}
+		if (*n > 0 || s > 0) {
+			bm_unlatch(f); bm_unfix(bt->bm, f, 0);
+			return *n > 0 ? XTC_OK : XTC_E_INVAL;
+		}
+		/* Nothing below `bound` in this leaf: look left (bt_seek_lt). */
+		if (btnode_lo_fence(pg, bound, BT_MAX_KEY, &ll) != 0) {
+			bm_unlatch(f); bm_unfix(bt->bm, f, 0);
+			return XTC_E_INTERNAL;
+		}
+		bm_unlatch(f); bm_unfix(bt->bm, f, 0);
+		if (ll == 0)
+			return XTC_OK;          /* leftmost leaf: none (*n == 0) */
+		blen = ll;
+		incl = 1;
+	}
+	return XTC_E_INTERNAL;
+}
+
 /* ---- key-distribution sample (RethinkDB get_distribution) ---------- */
 
 struct bt_sample {
