@@ -2573,19 +2573,106 @@ pp_tick(bm_t *bm, uint32_t *cursor)
 	return visited;
 }
 
+/*
+ * Idle backoff for the provider and the trickler.  Both used to wake at
+ * a fixed cadence (1 ms, 5 ms) and walk a slice whether or not there was
+ * work, so an idle server with a 1048576-frame pool spent 15% of a core
+ * on loop 0 doing nothing.  Once a whole pool's worth of consecutive
+ * passes (ceil(n_frames / slice)) found nothing to do, each further idle
+ * pass doubles the sleep, up to BG_IDLE_MAX_NS; the first pass that sees
+ * work returns to the base interval.  The proc still visits every frame,
+ * only slower, and demand eviction never depended on it.  The sleep is a
+ * timed xtc_recv so a stop message ends it at once (bg_wake).
+ */
+#define BG_IDLE_MAX_NS (64LL * 1000 * 1000)
+
+static int64_t
+bg_idle_sleep(int64_t base, uint32_t idle, uint32_t cover)
+{
+	int64_t s = base;
+	uint32_t k;
+	for (k = cover; k < idle && s < BG_IDLE_MAX_NS; k++)
+		s *= 2;
+	return s > BG_IDLE_MAX_NS && base <= BG_IDLE_MAX_NS ? BG_IDLE_MAX_NS : s;
+}
+
+/* Park for ns or until a message arrives; 0 = keep running. */
+static int
+bg_park(int64_t ns)
+{
+	void *m = NULL;
+	size_t n = 0;
+	int rc = xtc_recv(&m, &n, ns);
+	if (rc == XTC_OK)
+		xtc_free(m);
+	return rc == XTC_OK || rc == XTC_E_AGAIN ? 0 : -1;
+}
+
+/* Wake a backed-off proc so it sees its stop flag now.  From a proc only:
+ * off a loop the proc's loop is not running and the caller does not wait. */
+static void
+bg_wake(_Atomic int *alive, xtc_pid_t pid)
+{
+	if (!xtc_pid_is_none(xtc_self()) &&
+	    atomic_load_explicit(alive, memory_order_acquire))
+		(void)xtc_send(pid, "s", 1);
+}
+
+#ifndef BM_PP_TICK_TEST_HOOK
+#define BM_PP_TICK_TEST_HOOK(bm) ((void)0)
+#endif
+
+/* Counters that move whenever the pool is used (a fix, load, dirtying,
+ * allocation, eviction, flush, cooling or prefetch); the same snapshot
+ * across a pass and its sleep means nobody touched the pool.  Compared
+ * field by field, not summed: a load moves s_loads up and free_n down. */
+struct bg_act { uint64_t v[8]; };
+
+static void
+bg_activity(bm_t *bm, struct bg_act *a)
+{
+	a->v[0] = atomic_load_explicit(&bm->s_hits, memory_order_relaxed);
+	a->v[1] = atomic_load_explicit(&bm->s_cooled, memory_order_relaxed);
+	a->v[2] = atomic_load_explicit(&bm->s_flushed, memory_order_relaxed);
+	a->v[3] = atomic_load_explicit(&bm->s_evicted, memory_order_relaxed);
+	a->v[4] = atomic_load_explicit(&bm->s_prefetched, memory_order_relaxed);
+	a->v[5] = atomic_load_explicit(&bm->s_loads, memory_order_relaxed);
+	a->v[6] = atomic_load_explicit(&bm->dirty_clock, memory_order_relaxed);
+	a->v[7] = atomic_load_explicit(&bm->free_n, memory_order_relaxed);
+}
+
+/* Refresh *a; 1 if it changed. */
+static int
+bg_moved(bm_t *bm, struct bg_act *a)
+{
+	struct bg_act now;
+	int moved;
+	bg_activity(bm, &now);
+	moved = memcmp(&now, a, sizeof now) != 0;
+	*a = now;
+	return moved;
+}
+
 static void
 pp_proc(void *arg)
 {
 	struct pp_arg *pa = arg;
 	bm_t *bm = pa->bm;
 	int64_t interval = pa->interval;
-	uint32_t cursor = 0;
+	uint32_t cursor = 0, idle = 0;
+	uint32_t cover = (bm->n_frames + PP_SLICE - 1) / PP_SLICE;
+	struct bg_act act;
 	xtc_free(pa);
 
+	bg_activity(bm, &act);
 	while (atomic_load_explicit(&bm->pp_running, memory_order_acquire)) {
 		(void)pp_tick(bm, &cursor);
-		if (xtc_proc_sleep(interval) != XTC_OK)
+		BM_PP_TICK_TEST_HOOK(bm);
+		idle = bg_moved(bm, &act) ? 0 : idle + 1;
+		if (bg_park(bg_idle_sleep(interval, idle, cover)) != 0)
 			break;
+		if (bg_moved(bm, &act))
+			idle = 0;              /* the pool was used during the sleep */
 	}
 	atomic_store_explicit(&bm->pp_alive, 0, memory_order_release);
 }
@@ -2853,6 +2940,8 @@ tr_proc(void *arg)
 	double ev_ewma = 1.0;                 /* EWMA of evictions per pass */
 	struct tr_cand *cand;
 	uint32_t tr_cursor = 0;               /* rotating slice start */
+	uint32_t idle = 0, cover = (bm->n_frames + TR_SLICE - 1) / TR_SLICE;
+	struct bg_act act;
 	xtc_dio_sched_t *tuner = NULL;
 	int batch = TR_BATCH;
 	int cap = bm->n_frames < 256 ? (int)bm->n_frames : 256;
@@ -2861,8 +2950,10 @@ tr_proc(void *arg)
 	bm_frame_t **run_f = NULL;
 	xtc_free(ta);
 	if (max_batch < 1) max_batch = 1;
-	if ((cand = xtc_calloc((size_t)max_batch, sizeof *cand)) == NULL)
+	if ((cand = xtc_calloc((size_t)max_batch, sizeof *cand)) == NULL) {
+		atomic_store_explicit(&bm->tr_alive, 0, memory_order_release);
 		return;
+	}
 	/* Gather buffer for coalesced multi-page writes (direct-I/O aligned)
 	 * plus per-run frame scratch. */
 	wbuf = xtc_aligned_alloc(4096, (size_t)max_batch * bm->page_size);
@@ -2871,6 +2962,7 @@ tr_proc(void *arg)
 		xtc_aligned_free(wbuf);
 		xtc_free(run_f);
 		xtc_free(cand);
+		atomic_store_explicit(&bm->tr_alive, 0, memory_order_release);
 		return;
 	}
 	if (bm->adaptive_writeback) {
@@ -2899,6 +2991,7 @@ tr_proc(void *arg)
 			iv = (int64_t)g[1] * 1000000;
 		}
 	}
+	bg_activity(bm, &act);
 	while (atomic_load_explicit(&bm->tr_running, memory_order_acquire)) {
 		uint32_t i, j, slice;
 		int n = 0, w = 0, dirty_total = 0, k;
@@ -3005,8 +3098,13 @@ tr_proc(void *arg)
 				iv = iv_default;
 			}
 		}
-		if (xtc_proc_sleep(iv) != XTC_OK)
+		/* Idle: nothing dirty in this slice and the pool untouched
+		 * since the last pass (see bg_idle_sleep). */
+		idle = (!bg_moved(bm, &act) && dirty_total == 0) ? idle + 1 : 0;
+		if (bg_park(bg_idle_sleep(iv, idle, cover)) != 0)
 			break;
+		if (bg_moved(bm, &act))
+			idle = 0;                  /* the pool was used during the sleep */
 	}
 	xtc_free(cand);
 	xtc_aligned_free(wbuf);
@@ -3041,6 +3139,7 @@ bm_trickler_stop(bm_t *bm)
 	int i;
 	if (bm == NULL) return;
 	atomic_store_explicit(&bm->tr_running, 0, memory_order_release);
+	bg_wake(&bm->tr_alive, bm->tr_pid);   /* it may be in a long idle sleep */
 	for (i = 0; i < 100000 &&
 	    atomic_load_explicit(&bm->tr_alive, memory_order_acquire); i++)
 		if (xtc_proc_sleep(200LL * 1000) != XTC_OK) break;
@@ -3052,6 +3151,7 @@ bm_provider_stop(bm_t *bm)
 	int i;
 	if (bm == NULL) return;
 	atomic_store_explicit(&bm->pp_running, 0, memory_order_release);
+	bg_wake(&bm->pp_alive, bm->pp_pid);   /* it may be in a long idle sleep */
 	/* Wait for the proc to observe the flag and exit before a caller
 	 * (e.g. bm_destroy) frees the buffer manager out from under it.
 	 * On a loop, parking lets the proc wake from its interval sleep,
