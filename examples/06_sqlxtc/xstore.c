@@ -6749,8 +6749,8 @@ struct xstore_iscan {
 	struct xs_icand *bc;
 	int           nbc, bci;
 	uint8_t      *bkeys;
-	/* output */
-	uint8_t       rec[XS_VMAX];
+	/* output: the stored value, flag byte first (xs_point_get) */
+	uint8_t       rec[1 + XS_VMAX];
 	uint64_t      visited;
 };
 
@@ -6799,36 +6799,29 @@ xs_eff_snap(const xstore_ctx_t *ctx)
 	return xs_visible();
 }
 
-/* The version of (tid, rid) visible at `snap`: copies its payload into
- * out (cap) and returns the length (>= 1), 0 if none is visible.
- * Ignores the write buffer (the caller handles buffered rows). */
+/* The version of (tid, rid) visible at `snap`: copies its whole stored
+ * value (the flag byte, then the payload) into buf (cap >= 1 + the
+ * payload) and returns the payload length (>= 1; -1 for a live empty
+ * record), 0 if no version is visible.  Ignores the write buffer (the
+ * caller handles buffered rows).  One probe: version keys sort newest
+ * first within a rowid (inverted commit_ts), so the first key >= the
+ * key (tid, rid, snap) is the newest version with commit_ts <= snap --
+ * no walk over newer versions, no cursor, and no latch on the OLC path
+ * (bt_seek_ge). */
 static int
 xs_point_get(bt_t *bt, uint32_t tid, int64_t rid, uint64_t snap,
-    uint8_t *out, int cap)
+    uint8_t *buf, int cap)
 {
-	bt_cursor_t *cur = NULL;
-	uint8_t startk[XS_VKLEN];
-	int got = 0;
-	enc_vkey(tid, rid, ~(uint64_t)0, startk);
-	if (bt_cursor_open(bt, startk, XS_VKLEN, &cur) != XTC_OK) return 0;
-	for (;;) {
-		const void *k = NULL, *vv = NULL; uint16_t kl = 0, vl = 0;
-		const uint8_t *kb;
-		if (bt_cursor_next(cur, &k, &kl, &vv, &vl) != XTC_OK || kl != XS_VKLEN)
-			break;
-		kb = (const uint8_t *)k;
-		if (dec_tableid(kb) != tid || dec_rowid(kb) != rid) break;
-		if (dec_ts(kb) > snap) continue;          /* newer than the snapshot */
-		if (vl >= 1 && !(((const uint8_t *)vv)[0] & XS_F_DELETED)) {
-			got = (int)vl - 1;
-			if (got > cap) got = cap;
-			if (got > 0) memcpy(out, (const uint8_t *)vv + 1, (size_t)got);
-			if (got == 0) got = -1;   /* live, empty record */
-		}
-		break;
-	}
-	bt_cursor_close(cur);
-	return got;
+	uint8_t probe[XS_VKLEN], k[XS_VKLEN + 8];
+	uint16_t kl = 0, vl = 0;
+	enc_vkey(tid, rid, snap, probe);
+	if (bt_seek_ge(bt, probe, XS_VKLEN, k, (uint16_t)sizeof k, &kl, buf,
+	    (uint16_t)(cap > 0xFFFF ? 0xFFFF : cap), &vl) != XTC_OK ||
+	    kl != XS_VKLEN || dec_tableid(k) != tid || dec_rowid(k) != rid ||
+	    vl < 1 || (buf[0] & XS_F_DELETED))
+		return 0;
+	if (vl > cap) vl = (uint16_t)cap;
+	return vl > 1 ? (int)vl - 1 : -1;   /* -1: live, empty record */
 }
 
 xstore_iscan_t *
@@ -7030,10 +7023,10 @@ xstore_iscan_next(xstore_iscan_t *s, int64_t *rowid, const uint8_t **rec,
 				if (wi < 0) continue;
 				p = xs_wrec_payload(s->cx, wi, &rl);
 				if (p == NULL) continue;
-				if (rl > (int)sizeof s->rec) rl = (int)sizeof s->rec;
-				memcpy(s->rec, p, (size_t)rl);
+				if (rl > XS_VMAX) rl = XS_VMAX;
+				memcpy(s->rec + 1, p, (size_t)rl);
 				s->visited++;
-				*rowid = b->rowid; *rec = s->rec; *reclen = rl;
+				*rowid = b->rowid; *rec = s->rec + 1; *reclen = rl;
 				return 1;
 			}
 		}
@@ -7045,15 +7038,15 @@ xstore_iscan_next(xstore_iscan_t *s, int64_t *rowid, const uint8_t **rec,
 		    (int)sizeof s->rec);
 		if (rl == 0) continue;            /* not visible at the snapshot */
 		if (rl < 0) rl = 0;
-		kl = xs_idx_rowkey(&s->e.rt, s->rec, rl, s->crid, 1, kk, (int)sizeof kk,
-		    NULL);
+		kl = xs_idx_rowkey(&s->e.rt, s->rec + 1, rl, s->crid, 1, kk,
+		    (int)sizeof kk, NULL);
 		if (kl != s->cklen || memcmp(kk, s->ck, (size_t)kl) != 0)
 			continue;                     /* stale entry */
 		if (s->cx != NULL && s->cx->in_txn && s->cx->serializable) {
 			rset_add(s->cx, s->e.rt.tableid, s->crid);
 			ssi_record_read(s->cx->ssi, s->e.rt.tableid, s->crid);
 		}
-		*rowid = s->crid; *rec = s->rec; *reclen = rl;
+		*rowid = s->crid; *rec = s->rec + 1; *reclen = rl;
 		return 1;
 	}
 }

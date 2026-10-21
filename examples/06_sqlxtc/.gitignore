@@ -69,6 +69,9 @@ test_inplace_redo
 test_fuzzy_checkpoint
 test_btree_delete_merge
 test_btree_limits
+test_btree_seek
+test_btree_seek_latched
+test_point_read
 test_btree_sample
 test_savepoint
 test_native_txn

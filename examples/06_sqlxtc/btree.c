@@ -1864,6 +1864,191 @@ bt_lookup(bt_t *bt, const void *key, uint16_t klen, void *buf, uint16_t cap,
 }
 
 /*
+ * Copy slot `slot`'s full key (node prefix + stored suffix) out of a page
+ * read optimistically: every offset is bounds-checked against the tree's
+ * page size, since a torn header can carry any value (btnode_full_key
+ * trusts the header).  0, or -1 on an out-of-page cell or a short buffer.
+ */
+static int
+olc_full_key(const bt_t *bt, const void *pg, int slot, uint8_t *out,
+    uint16_t cap, uint16_t *olen)
+{
+	const struct btnode_hdr *h = pg;
+	const void *suf = NULL;
+	uint16_t sl = 0, pl = h->prefix_len;
+
+	if (btnode_get(pg, slot, &suf, &sl, NULL, NULL) != 0 ||
+	    (uint32_t)h->lo_fence_off + pl > bt->page_size ||
+	    (uint32_t)pl + sl > cap)
+		return -1;
+	memcpy(out, (const uint8_t *)pg + h->lo_fence_off, pl);
+	memcpy(out + pl, suf, sl);
+	*olen = (uint16_t)(pl + sl);
+	return 0;
+}
+
+/*
+ * First key >= `key` with its value, read the way bt_lookup_optimistic
+ * reads (no content latch: each node under its version seqlock).  The
+ * leaf for `key` holds every key up to its upper fence; when none of
+ * them is >= `key`, the answer is the first key of the next non-empty
+ * leaf to the right, reached by the right link.  That neighbour is
+ * accepted only if its lower fence equals the upper fence just left
+ * (the B-link invariant: a split or a merge keeps the two equal), so a
+ * link that went stale under the read is never followed.  XTC_OK,
+ * XTC_E_NOTFOUND (no such key), XTC_E_INVAL (key buffer too small), or
+ * XTC_E_AGAIN (optimism failed: take the latched path).
+ */
+static int
+seek_ge_optimistic(bt_t *bt, const void *key, uint16_t klen, void *kout,
+    uint16_t kcap, uint16_t *kolen, void *val, uint16_t vcap, uint16_t *vlen)
+{
+	bm_t *bm = bt->bm;
+	uint8_t hf[BT_MAX_KEY];   /* upper fence of the leaf just left */
+	uint16_t hfl = 0;
+	int attempt;
+
+	if (!BT_OLC_ENABLED)
+		return XTC_E_AGAIN;
+	for (attempt = 0; attempt < BT_OLC_RETRIES; attempt++) {
+		bm_frame_t *f;
+		int depth = 0, first = 0, orc = XTC_E_AGAIN;
+
+		if (bm_fix_pid(bm, atomic_load(&bt->root_pid), &f) != XTC_OK)
+			return XTC_E_AGAIN;
+		for (;;) {
+			const struct btnode_hdr *h = bm_page(f);
+			const void *pg = h, *vp = NULL;
+			uint64_t v;
+			bm_pid_t next = BM_PID_NONE;
+			int leaf, s, bad, beyond = 0, hit = 0, kbad = 0;
+			uint16_t vl = 0, vfl = 0, kl = 0;
+			uint8_t oref[BT_OVF_HDR + 8u * BT_OVF_MAXPAGES];
+
+			if (++depth > 4 * BT_MAX_HEIGHT || !bm_read_begin(f, &v))
+				break;
+			leaf = btnode_is_leaf(pg);
+			if (first)   /* the right neighbour of the leaf just left */
+				bad = !leaf || h->lo_fence_len != hfl ||
+				    (uint32_t)h->lo_fence_off + hfl > bt->page_size ||
+				    memcmp((const uint8_t *)pg + h->lo_fence_off, hf,
+				    hfl) != 0;
+			else
+				bad = btnode_below_lo_fence(pg, key, klen);
+			bad |= btnode_is_dead(pg);
+			if (!first && !bad)
+				beyond = btnode_beyond_hi_fence(pg, key, klen);
+			if (bad) {
+				/* nothing to read: retry */
+			} else if (beyond) {
+				next = (bm_pid_t)btnode_right_sibling(pg);
+			} else if (!leaf) {
+				next = child_for_key(pg, key, klen);
+			} else {
+				s = first ? 0 : btnode_search(pg, key, klen, NULL);
+				if (s < (int)btnode_count(pg) &&
+				    btnode_get(pg, s, NULL, NULL, &vp, &vl) == 0) {
+					hit = 1;
+					kbad = olc_full_key(bt, pg, s, kout, kcap, &kl);
+					vfl = btnode_vflag(pg, s);
+					if (vfl && vl <= sizeof oref)
+						memcpy(oref, vp, vl);
+					else if (vfl)
+						bad = 1;
+					else if (val != NULL && vcap > 0)
+						memcpy(val, vp, vl < vcap ? vl : vcap);
+				} else {
+					/* no key >= `key` here: the next leaf's first */
+					next = (bm_pid_t)btnode_right_sibling(pg);
+					hfl = h->hi_fence_len;
+					if (next != BM_PID_NONE && (hfl > sizeof hf ||
+					    (uint32_t)h->hi_fence_off + hfl > bt->page_size))
+						bad = 1;
+					else if (next != BM_PID_NONE)
+						memcpy(hf, (const uint8_t *)pg + h->hi_fence_off,
+						    hfl);
+				}
+			}
+			if (!bm_read_valid(f, v) || bad)
+				break;
+			if (hit) {
+				bm_unfix(bm, f, 0);
+				f = NULL;
+				if (kbad)
+					return XTC_E_INVAL;
+				if (kolen != NULL)
+					*kolen = kl;
+				if (vfl) {
+					/* a validated ref: a concurrent replace may
+					 * have freed its pages (AGAIN): retry */
+					orc = ovf_read(bt, oref, vl, val, vcap, vlen);
+					break;
+				}
+				if (vlen != NULL)
+					*vlen = vl;
+				return XTC_OK;
+			}
+			if (leaf && !beyond) {
+				if (next == BM_PID_NONE) {   /* the rightmost leaf */
+					bm_unfix(bm, f, 0);
+					return XTC_E_NOTFOUND;
+				}
+				first = 1;
+			}
+			if (next == BM_PID_NONE)
+				break;
+			{
+				bm_frame_t *nf;
+				if (bm_fix_pid(bm, next, &nf) != XTC_OK)
+					break;
+				bm_unfix(bm, f, 0);
+				f = nf;
+			}
+		}
+		if (f != NULL)
+			bm_unfix(bm, f, 0);
+		if (orc != XTC_E_AGAIN)
+			return orc;
+	}
+	return XTC_E_AGAIN;
+}
+
+int
+bt_seek_ge(bt_t *bt, const void *key, uint16_t klen, void *kout,
+    uint16_t kcap, uint16_t *kolen, void *val, uint16_t vcap, uint16_t *vlen)
+{
+	bt_cursor_t *c = NULL;
+	const void *k = NULL, *vp = NULL;
+	uint16_t kl = 0, vl = 0;
+	int rc;
+
+	if (bt == NULL || key == NULL || kout == NULL || klen > bt_key_max(bt))
+		return XTC_E_INVAL;
+	atomic_fetch_add(&bt->st_lookups, 1);
+	rc = seek_ge_optimistic(bt, key, klen, kout, kcap, kolen, val, vcap,
+	    vlen);
+	if (rc != XTC_E_AGAIN)
+		return rc;
+	/* The latched path: a cursor positioned at the first key >= key. */
+	if ((rc = bt_cursor_open(bt, key, klen, &c)) != XTC_OK)
+		return rc;
+	rc = bt_cursor_next(c, &k, &kl, &vp, &vl);
+	if (rc == XTC_OK && kl > kcap)
+		rc = XTC_E_INVAL;
+	if (rc == XTC_OK) {
+		memcpy(kout, k, kl);
+		if (kolen != NULL)
+			*kolen = kl;
+		if (val != NULL && vcap > 0)
+			memcpy(val, vp, vl < vcap ? vl : vcap);
+		if (vlen != NULL)
+			*vlen = vl;
+	}
+	bt_cursor_close(c);
+	return rc;
+}
+
+/*
  * If the root is an internal node holding a single child (only the
  * slot-0 -infinity child remains after a merge cascade removed its
  * last separator), collapse it: make that child the new root and free

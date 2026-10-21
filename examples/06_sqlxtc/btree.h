@@ -162,6 +162,16 @@ int  bt_seek_lt(bt_t *bt, const void *hi, uint16_t hlen, void *out,
                 uint16_t cap, uint16_t *olen, void *val, uint16_t vcap,
                 uint16_t *vlen);
 
+/* First key >= `key`: key copied to kout/kcap (*kolen), value to
+ * val/vcap (*vlen; whole even when out of line; val/vlen may be NULL).
+ * The common case reads optimistically -- no content latch, no cursor --
+ * validated by each frame's version (as bt_lookup); a conflict falls
+ * back to a latched cursor.  Returns XTC_OK, XTC_E_NOTFOUND (no key >=
+ * `key`), or XTC_E_INVAL (bad arguments, or kcap too small). */
+int  bt_seek_ge(bt_t *bt, const void *key, uint16_t klen, void *kout,
+                uint16_t kcap, uint16_t *kolen, void *val, uint16_t vcap,
+                uint16_t *vlen);
+
 /*
  * Key-distribution sample (RethinkDB get_distribution, depth-limited):
  * read the tree top-down to at most `depth` levels below the root (0 =
