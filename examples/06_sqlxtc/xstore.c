@@ -78,7 +78,7 @@
  */
 #define XS_LK_CAT  8u   /* catalog (g_cat) + view registry */
 #define XS_LK_SSI  9u   /* SSI registry */
-#define XS_LK_SNAP 10u  /* active-snapshot set */
+/* slot 10 (XS_LK_SNAP, the snapshot registry) retired: lock-free now */
 #define XS_LK_COMMIT 11u /* commit validation + timestamp + in-flight registry */
 static _Atomic uint64_t g_cat_locks;   /* XS_LK_CAT acquisitions (metric) */
 static _Atomic uint64_t g_cat_scans;   /* catalog-tree scans (metric) */
@@ -88,8 +88,6 @@ static _Atomic uint64_t g_cat_scans;   /* catalog-tree scans (metric) */
 #define xs_cat_unlock()  (void)xtc_amutex_unlock(xtc_amutex_static(XS_LK_CAT))
 #define xs_ssi_lock()    (void)xtc_amutex_lock(xtc_amutex_static(XS_LK_SSI), -1)
 #define xs_ssi_unlock()  (void)xtc_amutex_unlock(xtc_amutex_static(XS_LK_SSI))
-#define xs_snap_lock()   (void)xtc_amutex_lock(xtc_amutex_static(XS_LK_SNAP), -1)
-#define xs_snap_unlock() (void)xtc_amutex_unlock(xtc_amutex_static(XS_LK_SNAP))
 #define xs_commit_lock()   (void)xtc_amutex_lock(xtc_amutex_static(XS_LK_COMMIT), -1)
 #define xs_commit_unlock() (void)xtc_amutex_unlock(xtc_amutex_static(XS_LK_COMMIT))
 
@@ -774,39 +772,98 @@ ssi_abort(ssi_txn_t *t)
  * are never below the horizon.
  */
 #define SNAP_MAX 256
-static uint64_t        g_holds[SNAP_MAX];   /* 0 == free slot */
+/*
+ * The registry is lock-free on the transaction path.  It used one global
+ * mutex for every pin and release -- taken at every BEGIN and COMMIT,
+ * even a read-only transaction's -- and the horizon scan held it across
+ * all 256 slots: at 8 threads a point-read transaction mix spent ~70% of
+ * its time in futex wait/wake on it (233k txn/s at 1 thread, 105k at 8).
+ * Now a connection CLAIMS a slot once (a CAS from free to "claimed, no
+ * pin"), keeps it for its lifetime, and pins or releases with one
+ * atomic store; the horizon is a lock-free scan of the slots.  This is
+ * the per-transaction read view of InnoDB's trx_sys / PostgreSQL's
+ * per-backend xmin: each owner publishes its own, the vacuum reads them
+ * all.
+ *
+ * Race: a reader reads visible = p, a scanner reads now > p and passes
+ * the reader's slot, then the reader stores p -- the horizon would pass a
+ * live snapshot.  (The mutex version had the same window: the scanner
+ * read `now` before taking the lock.)  snap_pin_visible closes it the
+ * hazard-pointer way: store the pin, then re-read visible; if it moved,
+ * pin the new value and check again.  In the seq_cst order a scanner
+ * that missed the store read its slot before it, so its `now` load came
+ * before the re-read, which returned p: now <= p.
+ */
+#define SNAP_FREE    0u
+#define SNAP_CLAIMED 1u    /* owned, no pin (pins are commit timestamps > 1) */
+static _Atomic uint64_t g_holds[SNAP_MAX];
 static _Atomic uint64_t g_gc_horizon = 0;   /* newest reclaimed commit_ts */
 
-/* Set connection slot *slotp to pin `ts` (0 releases it). */
+/* Set connection slot *slotp to pin `ts` (0 releases the pin; the slot
+ * stays claimed by the connection until snap_slot_free). */
 static void
 snap_set(int *slotp, uint64_t ts)
 {
 	int i;
-	xs_snap_lock();
-	if (ts == 0) {
-		if (*slotp >= 0) { g_holds[*slotp] = 0; *slotp = -1; }
-	} else {
-		if (*slotp < 0)
-			for (i = 0; i < SNAP_MAX; i++)
-				if (g_holds[i] == 0) { *slotp = i; break; }
-		if (*slotp >= 0) g_holds[*slotp] = ts;
+	if (*slotp < 0) {
+		if (ts == 0)
+			return;                       /* nothing to release */
+		for (i = 0; i < SNAP_MAX; i++) {
+			uint64_t want = SNAP_FREE;
+			if (atomic_compare_exchange_strong_explicit(&g_holds[i], &want,
+			    SNAP_CLAIMED, memory_order_acq_rel, memory_order_relaxed)) {
+				*slotp = i;
+				break;
+			}
+		}
 		/* registry full: leave unpinned -- horizon stays conservative
 		 * (g_xclock-bounded), so correctness holds; only an as_of pin
 		 * could then be GC'd early. */
+		if (*slotp < 0)
+			return;
 	}
-	xs_snap_unlock();
+	atomic_store_explicit(&g_holds[*slotp], ts != 0 ? ts : SNAP_CLAIMED,
+	    memory_order_seq_cst);
 }
 
-/* The GC horizon: the oldest live pinned snapshot, or `now` if none. */
+/* Pin and return a snapshot of the current visible horizon (see the
+ * race note above).  The slot must be claimable; if the registry is
+ * full the snapshot is simply unpinned (as snap_set). */
+static uint64_t
+snap_pin_visible(int *slotp)
+{
+	uint64_t p = xs_visible(), q;
+	for (;;) {
+		snap_set(slotp, p);
+		q = xs_visible();
+		if (q == p || *slotp < 0)
+			return p;
+		p = q;
+	}
+}
+
+/* Give the connection's slot back (connection close). */
+static void
+snap_slot_free(int *slotp)
+{
+	if (*slotp >= 0) {
+		atomic_store_explicit(&g_holds[*slotp], SNAP_FREE, memory_order_release);
+		*slotp = -1;
+	}
+}
+
+/* The GC horizon: the oldest live pinned snapshot, or `now` if none.
+ * `now` must have been read (xs_visible) before this call. */
 static uint64_t
 snap_horizon(uint64_t now)
 {
 	uint64_t h = now;
 	int i;
-	xs_snap_lock();
-	for (i = 0; i < SNAP_MAX; i++)
-		if (g_holds[i] != 0 && g_holds[i] < h) h = g_holds[i];
-	xs_snap_unlock();
+	atomic_thread_fence(memory_order_seq_cst);
+	for (i = 0; i < SNAP_MAX; i++) {
+		uint64_t v = atomic_load_explicit(&g_holds[i], memory_order_seq_cst);
+		if (v > SNAP_CLAIMED && v < h) h = v;
+	}
 	return h;
 }
 
@@ -1965,7 +2022,7 @@ xs_enter_ctx(xstore_ctx_t *cx, struct xsql *db)
 	}
 	if (!autocommit && !cx->in_txn) {
 		cx->in_txn = 1;
-		cx->txn_snap = xs_visible();
+		cx->txn_snap = snap_pin_visible(&cx->snap_slot);
 		wbuf_clear(cx);
 		cx->steal_txn = 0;
 		cx->rn = 0;
@@ -1974,7 +2031,6 @@ xs_enter_ctx(xstore_ctx_t *cx, struct xsql *db)
 		cx->touched = 0;
 		cx->serializable = (cx->txn_iso == XS_ISO_SERIALIZABLE);
 		cx->ssi = cx->serializable ? ssi_begin(cx->txn_snap) : NULL;
-		xs_pin_recompute(cx);     /* pin txn_snap against version GC */
 	}
 }
 
@@ -3537,7 +3593,7 @@ xs_visible_catchup_locked(void)
 		if (e->ts - 1 < v)
 			v = e->ts - 1;
 	if (v > atomic_load_explicit(&g_xvisible, memory_order_relaxed))
-		atomic_store_explicit(&g_xvisible, v, memory_order_release);
+		atomic_store_explicit(&g_xvisible, v, memory_order_seq_cst);
 }
 
 /* The commit (applied or failed) leaves the in-flight set: publish it to
@@ -3556,7 +3612,9 @@ xs_inflight_remove(struct xs_inflight *e)
 static uint64_t
 xs_visible(void)
 {
-	return atomic_load_explicit(&g_xvisible, memory_order_acquire);
+	/* seq_cst: snap_pin_visible's re-read is ordered against a GC
+	 * scanner's load of the same variable (see the snapshot registry). */
+	return atomic_load_explicit(&g_xvisible, memory_order_seq_cst);
 }
 
 /* Forget every in-flight commit and reopen the checkpoint gate.  Only for
@@ -4571,11 +4629,10 @@ xstore_stmt_restart(struct xsql *db)
 	if (!cx->in_txn) return cx->stmt_puts == 0;
 	if (cx->txn_iso < XS_ISO_REPEATABLE_READ) return 1;
 	if (!cx->stmt_first || cx->serializable || cx->wn != 0) return 0;
-	cx->txn_snap = xs_visible();
+	cx->txn_snap = snap_pin_visible(&cx->snap_slot);
 	cx->touched = 0;
 	cx->rn = 0;
 	cx->did_scan = 0;
-	xs_pin_recompute(cx);
 	return 1;
 }
 
@@ -7018,7 +7075,7 @@ static void
 ctx_free(void *p)
 {
 	xstore_ctx_t *cx = p;
-	if (cx != NULL) { ssi_abort(cx->ssi); snap_set(&cx->snap_slot, 0);
+	if (cx != NULL) { ssi_abort(cx->ssi); snap_slot_free(&cx->snap_slot);
 	    wbuf_clear(cx); xs_ilk_slot_free(cx); free(cx->ilk); free(cx->wbuf);
 	    free(cx->rset);
 	    free(cx->sp_wn); free(cx->sp_rn); free(cx->wmap); free(cx->umap); }
