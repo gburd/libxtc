@@ -341,7 +341,7 @@ wal_close(wal_t *w)
 	while ((q = w->wfree) != NULL) {
 		w->wfree = q->next;
 		xtc_notify_destroy(q->n);
-		free(q);
+		xtc_free(q);
 	}
 	(void)pthread_mutex_destroy(&w->fl_mu);
 	(void)pthread_mutex_destroy(&w->res_mu);
@@ -350,6 +350,46 @@ wal_close(wal_t *w)
 	free(w->ring);
 	free(w->slot);
 	free(w);
+}
+
+/*
+ * res_mu / fl_mu are held only for a few instructions and never across a
+ * park, but under involuntary preemption (xtc_preempt_set_involuntary) a
+ * fiber could still be preempted while holding one; a loop-mate that
+ * then blocks its OS thread on the same mutex can never let the holder
+ * run again (test_wal_kill preempt-nokill hung that way with no kill at
+ * all).  A proc critical section makes the preemption timer defer for
+ * the hold.  Off a proc both calls are no-ops.
+ */
+static void
+wal_lock(pthread_mutex_t *m)
+{
+	xtc_proc_critical_enter();
+	(void)pthread_mutex_lock(m);
+}
+
+static void
+wal_unlock(pthread_mutex_t *m)
+{
+	(void)pthread_mutex_unlock(m);
+	xtc_proc_critical_leave();
+}
+
+/*
+ * DST pessimal point: under the simulator with buggify on, yield the
+ * fiber here on a seeded coin.  Every site sits in a window a reviewer
+ * flagged (the copy between reservation and publication, a leader about
+ * to write, a waiter about to park, the direct big-record write): the
+ * yield lets peers run there and makes the window a kill delivery point,
+ * so test_sim_wal_kill can kill a committer at exactly that moment.  A
+ * single relaxed load in production; never called with a lock held.
+ */
+static void
+wal_buggify_yield(const char *site)
+{
+	if (XTC_SIM_BUGGIFY(site) && xtc_sim_buggify_fault(250) &&
+	    !xtc_pid_is_none(xtc_self()))
+		xtc_yield();
 }
 
 /* Copy n bytes to ring position pos (wrapping). */
@@ -452,12 +492,12 @@ wal_flush_locked(wal_t *w, uint64_t need)
 			break;
 		/* A record before ours is mid-copy (a memcpy: it never parks):
 		 * wait for it outside the lock. */
-		(void)pthread_mutex_unlock(&w->fl_mu);
+		wal_unlock(&w->fl_mu);
 		if (++spins > 64) {
 			if (xtc_pid_is_none(xtc_self())) (void)xtc_sleep_ns(1000);
 			else xtc_yield();
 		}
-		(void)pthread_mutex_lock(&w->fl_mu);
+		wal_lock(&w->fl_mu);
 	}
 	from = atomic_load_explicit(&w->written, memory_order_relaxed);
 	upto = w->copied_pos;
@@ -476,7 +516,8 @@ wal_flush_locked(wal_t *w, uint64_t need)
 	}
 	nrec = (uint32_t)(lsn_upto - atomic_load_explicit(&w->durable_lsn,
 	    memory_order_relaxed));
-	(void)pthread_mutex_unlock(&w->fl_mu);
+	wal_unlock(&w->fl_mu);
+	wal_buggify_yield("wal.flush.leader_yield");
 
 	if (atomic_load_explicit(&w->failed, memory_order_acquire)) {
 		ok = 0;
@@ -503,7 +544,7 @@ wal_flush_locked(wal_t *w, uint64_t need)
 #endif
 	}
 
-	(void)pthread_mutex_lock(&w->fl_mu);
+	wal_lock(&w->fl_mu);
 	if (ok) {
 		atomic_store_explicit(&w->written, upto, memory_order_release);
 		if (upto > atomic_load_explicit(&w->durable_off, memory_order_relaxed)) {
@@ -528,14 +569,16 @@ wal_wait_locked(wal_t *w, uint64_t need)
 	if (q != NULL) {
 		w->wfree = q->next;
 	} else {
-		q = calloc(1, sizeof *q);
+		/* xtc_calloc: the preemption-safe allocator (a fiber here
+		 * holds no lock, but could be preempted inside glibc's) */
+		q = xtc_calloc(1, sizeof *q);
 		if (q == NULL || xtc_notify_create(&q->n) != XTC_OK) {
 			/* no waiter object: poll instead */
-			free(q);
-			(void)pthread_mutex_unlock(&w->fl_mu);
+			xtc_free(q);
+			wal_unlock(&w->fl_mu);
 			if (xtc_pid_is_none(xtc_self())) (void)xtc_sleep_ns(20000);
 			else (void)xtc_proc_sleep(20000);
-			(void)pthread_mutex_lock(&w->fl_mu);
+			wal_lock(&w->fl_mu);
 			return;
 		}
 	}
@@ -545,9 +588,10 @@ wal_wait_locked(wal_t *w, uint64_t need)
 		;
 	q->next = *pp;
 	*pp = q;
-	(void)pthread_mutex_unlock(&w->fl_mu);
+	wal_unlock(&w->fl_mu);
+	wal_buggify_yield("wal.wait.queued_yield");
 	(void)xtc_notify_wait(q->n, -1);
-	(void)pthread_mutex_lock(&w->fl_mu);
+	wal_lock(&w->fl_mu);
 	/* A covered waiter was unlinked by the waker; a baton holder too.
 	 * Unlink defensively (a stored signal from an earlier round). */
 	for (pp = &w->wq; *pp != NULL; pp = &(*pp)->next)
@@ -625,41 +669,42 @@ wal_append_direct(wal_t *w, const void *record, uint32_t len, uint64_t *end,
 	int ok;
 
 	for (;;) {                       /* one direct writer at a time */
-		(void)pthread_mutex_lock(&w->res_mu);
+		wal_lock(&w->res_mu);
 		if (!w->direct)
 			break;
-		(void)pthread_mutex_unlock(&w->res_mu);
+		wal_unlock(&w->res_mu);
 		wal_nap();
 	}
 	w->direct = 1;
 	target = w->res_pos;
-	(void)pthread_mutex_unlock(&w->res_mu);
+	wal_unlock(&w->res_mu);
 
 	/* Everything before it durable, then take the leadership: no other
 	 * leader may write (or zero-fill, wal_prealloc) while this pwrites.
 	 * Nothing new is reserved meanwhile, so a running leader has only
 	 * records below target left and soon lets go. */
-	(void)pthread_mutex_lock(&w->fl_mu);
+	wal_lock(&w->fl_mu);
 	*rc = wal_durable_locked(w, target);
 	while (*rc == XTC_OK && w->flushing) {
-		(void)pthread_mutex_unlock(&w->fl_mu);
+		wal_unlock(&w->fl_mu);
 		wal_nap();
-		(void)pthread_mutex_lock(&w->fl_mu);
+		wal_lock(&w->fl_mu);
 	}
 	if (*rc == XTC_OK)
 		w->flushing = 1;
-	(void)pthread_mutex_unlock(&w->fl_mu);
-	(void)pthread_mutex_lock(&w->res_mu);
+	wal_unlock(&w->fl_mu);
+	wal_buggify_yield("wal.direct.leader_yield");
+	wal_lock(&w->res_mu);
 	if (*rc != XTC_OK) {
 		w->direct = 0;
-		(void)pthread_mutex_unlock(&w->res_mu);
+		wal_unlock(&w->res_mu);
 		return 0;
 	}
 	lsn = ++w->next_lsn;
 	start = w->res_pos;              /* == target: nobody reserved since */
 	w->res_pos = start + need;
 	w->off = (off_t)w->res_pos;
-	(void)pthread_mutex_unlock(&w->res_mu);
+	wal_unlock(&w->res_mu);
 
 	memcpy(hdr, &lsn, 8);
 	memcpy(hdr + 8, &len, 4);
@@ -677,7 +722,7 @@ wal_append_direct(wal_t *w, const void *record, uint32_t len, uint64_t *end,
 	if (start + need > w->pre_end)
 		w->pre_end = start + need;   /* the record grew the file */
 
-	(void)pthread_mutex_lock(&w->fl_mu);
+	wal_lock(&w->fl_mu);
 	if (ok) {
 		/* in the page cache: the next leader only needs to sync it */
 		atomic_store_explicit(&w->written, start + need, memory_order_release);
@@ -694,10 +739,10 @@ wal_append_direct(wal_t *w, const void *record, uint32_t len, uint64_t *end,
 	w->flushing = 0;
 	wal_wake_locked(w, ok ? atomic_load_explicit(&w->durable_off,
 	    memory_order_relaxed) : UINT64_MAX, 1);
-	(void)pthread_mutex_unlock(&w->fl_mu);
-	(void)pthread_mutex_lock(&w->res_mu);
+	wal_unlock(&w->fl_mu);
+	wal_lock(&w->res_mu);
 	w->direct = 0;
-	(void)pthread_mutex_unlock(&w->res_mu);
+	wal_unlock(&w->res_mu);
 	if (!ok) {
 		*rc = XTC_E_IO;
 		return 0;
@@ -719,14 +764,14 @@ wal_append(wal_t *w, const void *record, uint32_t len, uint64_t *end, int *rc)
 	if (need > WAL_RING / 4)
 		return wal_append_direct(w, record, len, end, rc);
 	for (;;) {
-		(void)pthread_mutex_lock(&w->res_mu);
+		wal_lock(&w->res_mu);
 		if (atomic_load_explicit(&w->failed, memory_order_acquire)) {
-			(void)pthread_mutex_unlock(&w->res_mu);
+			wal_unlock(&w->res_mu);
 			*rc = XTC_E_IO;
 			return 0;
 		}
 		if (w->direct) {             /* a big record is being written */
-			(void)pthread_mutex_unlock(&w->res_mu);
+			wal_unlock(&w->res_mu);
 			wal_nap();
 			continue;
 		}
@@ -739,11 +784,11 @@ wal_append(wal_t *w, const void *record, uint32_t len, uint64_t *end, int *rc)
 			break;
 		{
 			uint64_t target = w->res_pos;
-			(void)pthread_mutex_unlock(&w->res_mu);
+			wal_unlock(&w->res_mu);
 			/* Full: make what is reserved so far durable, then retry. */
-			(void)pthread_mutex_lock(&w->fl_mu);
+			wal_lock(&w->fl_mu);
 			*rc = wal_durable_locked(w, target);
-			(void)pthread_mutex_unlock(&w->fl_mu);
+			wal_unlock(&w->fl_mu);
 			if (*rc != XTC_OK)
 				return 0;
 		}
@@ -752,13 +797,14 @@ wal_append(wal_t *w, const void *record, uint32_t len, uint64_t *end, int *rc)
 	start = w->res_pos;
 	w->res_pos += need;
 	w->off = (off_t)w->res_pos;
-	(void)pthread_mutex_unlock(&w->res_mu);
+	wal_unlock(&w->res_mu);
 
 	memcpy(hdr, &lsn, 8);
 	memcpy(hdr + 8, &len, 4);
 	crc = wal_rec_crc(lsn, len, record);
 	memcpy(trl, &crc, WAL_REC_CRC);
 	ring_put(w, start, hdr, WAL_REC_HDR);
+	wal_buggify_yield("wal.append.copy_yield");   /* reserved, unpublished */
 	if (len)
 		ring_put(w, start + WAL_REC_HDR, record, len);
 	ring_put(w, start + WAL_REC_HDR + len, trl, WAL_REC_CRC);
@@ -779,11 +825,28 @@ wal_commit_any(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
 
 	if (w == NULL || (record == NULL && len != 0))
 		return XTC_E_INVAL;
-	if ((my_lsn = wal_append(w, record, len, &end, &rc)) == 0)
-		return rc;
-	(void)pthread_mutex_lock(&w->fl_mu);
-	rc = wal_durable_locked(w, end);
-	(void)pthread_mutex_unlock(&w->fl_mu);
+	/*
+	 * A kill (xtc_exit_pid, a linked exit) raised at a park point below
+	 * -- the waiter queue, the leader's yield or aio, a nap -- would
+	 * unwind this fiber with its waiter still queued (a leader later
+	 * hands that dead waiter the leadership), with the leadership or the
+	 * direct flag held, or with its reserved range never published; the
+	 * next flush then waits forever (test_wal_kill).  So the commit runs
+	 * with cancellation masked and the kill is delivered by
+	 * xtc_mask_leave once the record is durable or failed.  Off a proc
+	 * both calls are no-ops.
+	 */
+#if !XTC_DST_BUG(XTC_DST_BUG_WALKILL)       /* planted bug: unmasked */
+	(void)xtc_mask_enter();
+#endif
+	if ((my_lsn = wal_append(w, record, len, &end, &rc)) != 0) {
+		wal_lock(&w->fl_mu);
+		rc = wal_durable_locked(w, end);
+		wal_unlock(&w->fl_mu);
+	}
+#if !XTC_DST_BUG(XTC_DST_BUG_WALKILL)
+	(void)xtc_mask_leave();      /* may not return: a latched kill */
+#endif
 	if (rc == XTC_OK && lsn != NULL)
 		*lsn = my_lsn;
 	return rc;
@@ -795,10 +858,22 @@ wal_commit_any(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
  * (tests and the engine do), flushing whatever is reserved but not yet
  * durable when it is told to stop.
  */
+/* At-exit hook of the writer proc: runs on a normal return AND when the
+ * proc is killed (xtc_exit_pid, a link), so wal_writer_stop never waits
+ * out its timeout for a writer that is already gone. */
+static void
+wal_writer_gone(void *arg)
+{
+	wal_t *w = arg;
+	atomic_store_explicit(&w->writer_alive, 0, memory_order_release);
+}
+
 static void
 wal_writer_proc(void *arg)
 {
 	wal_t *w = arg;
+	if (xtc_proc_at_exit(wal_writer_gone, w) != XTC_OK)
+		wal_writer_gone(w);          /* no hook: stop must not wait */
 	for (;;) {
 		void *m = NULL;
 		size_t n = 0;
@@ -810,10 +885,11 @@ wal_writer_proc(void *arg)
 		}
 		free(m);
 	}
-	(void)pthread_mutex_lock(&w->fl_mu);
+	(void)xtc_mask_enter();          /* as wal_commit_any: no torn flush */
+	wal_lock(&w->fl_mu);
 	(void)wal_durable_locked(w, w->res_pos);
-	(void)pthread_mutex_unlock(&w->fl_mu);
-	atomic_store_explicit(&w->writer_alive, 0, memory_order_release);
+	wal_unlock(&w->fl_mu);
+	(void)xtc_mask_leave();
 }
 
 int
@@ -1264,18 +1340,18 @@ wal_truncate(wal_t *w)
 {
 	if (w == NULL)
 		return XTC_E_INVAL;
-	(void)pthread_mutex_lock(&w->res_mu);
-	(void)pthread_mutex_lock(&w->fl_mu);
+	wal_lock(&w->res_mu);
+	wal_lock(&w->fl_mu);
 	if (ftruncate(w->fd, 0) != 0) {
-		(void)pthread_mutex_unlock(&w->fl_mu);
-		(void)pthread_mutex_unlock(&w->res_mu);
+		wal_unlock(&w->fl_mu);
+		wal_unlock(&w->res_mu);
 		return XTC_E_INTERNAL;
 	}
 	/* next append at offset 0; next_lsn keeps rising */
 	wal_reset_marks(w, 0, w->next_lsn);
 	atomic_fetch_add_explicit(&w->gen, 1, memory_order_acq_rel);
-	(void)pthread_mutex_unlock(&w->fl_mu);
-	(void)pthread_mutex_unlock(&w->res_mu);
+	wal_unlock(&w->fl_mu);
+	wal_unlock(&w->res_mu);
 	return XTC_OK;
 }
 
