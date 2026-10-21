@@ -147,7 +147,7 @@ clean:
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o test_bufmgr_dio test_bufmgr_dio.o
 	rm -f test_bufmgr_mt
 	rm -f test_drop_reserved test_evict_revalidate_sampled
-	rm -f test_bg_idle test_scan_resist test_sweep_bound test_evict_revalidate test_btree_late_load test_flush_pin test_trickler_select test_pp_slice test_tr_slice test_publication_pin test_private_frame test_pid_writeback bm_sweep_bench
+	rm -f test_bg_idle test_ckpt_offloop test_scan_resist test_sweep_bound test_evict_revalidate test_btree_late_load test_flush_pin test_trickler_select test_pp_slice test_tr_slice test_publication_pin test_private_frame test_pid_writeback bm_sweep_bench
 	rm -f test_persist
 	rm -f test_cursor_resume
 	rm -f test_btnode
@@ -861,3 +861,11 @@ test_bg_idle: test_bg_idle.c bufmgr.c bufmgr.h
 
 test-bg-idle: test_bg_idle
 	TMPDIR=$${TMPDIR:-/tmp} ./test_bg_idle
+
+# ---- the periodic checkpoint runs off the loop (p160/arch) ----
+test: test-ckpt-offloop
+test_ckpt_offloop: test_ckpt_offloop.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_ckpt_offloop.c $(ENGINE_NATIVE) $(LDFLAGS)
+
+test-ckpt-offloop: test_ckpt_offloop
+	TMPDIR=$${TMPDIR:-/tmp} ./test_ckpt_offloop

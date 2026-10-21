@@ -24,6 +24,7 @@
 #include "sql_ast.h"
 #endif
 #include "xtc_async.h"     /* xtc_yield -- the fiber-yielding busy handler */
+#include "xtc_blocking.h"  /* xtc_blocking_run -- the checkpoint off the loop */
 #include "xtc_proc.h"      /* xtc_proc_sleep -- park, do not spin */
 #include "xtc_loop.h"      /* xtc_loop_t -- background storage procs */
 
@@ -251,10 +252,37 @@ sx_storage_checkpoints(void)
 	return atomic_load(&g_ckpt_count);
 }
 
+/*
+ * The checkpoint itself runs on a blocking-pool thread, not on the
+ * checkpoint fiber.  Its dump already did, but the quiesced finish --
+ * copy the log tail, fsync the new log, rename, fsync the directory,
+ * reopen -- ran on the fiber with plain syscalls, freezing the fiber's
+ * loop: 134 ms on a 100k-account ledger store, 1.1 s (one fsync) on a
+ * 10-warehouse TPC-C store.  That loop is loop 0, which also hosts the
+ * listener, the provider, the trickler and (round-robin) every Nth
+ * connection -- at -t 1, all of them: every read stalled with it.
+ * Commits wait at the checkpoint gate for the finish either way.  Off a
+ * proc xstore_checkpoint_wal_online runs its dump inline and naps the
+ * thread, so it is correct on a pool thread; under simulation
+ * xtc_blocking_run runs it inline (deterministic).
+ */
+struct sx_ckpt_job { int rc; };
+
+static int
+sx_ckpt_run(void *arg)
+{
+	struct sx_ckpt_job *j = arg;
+	j->rc = xstore_checkpoint_wal_online(g_xbt, (struct wal *)g_xwal,
+	    g_xwal_path, NULL);
+	return 0;
+}
+
 static void
 sx_ckpt_proc(void *arg)
 {
 	uint64_t floor = 0;
+	struct sx_ckpt_job job;
+	int res;
 	(void)arg;
 	while (!atomic_load(&g_ckpt_stop)) {
 		uint64_t sz, trig;
@@ -273,8 +301,10 @@ sx_ckpt_proc(void *arg)
 			continue;
 		/* Online: commits keep running during the dump (they used to
 		 * stop for all of it: 0.5-3.5 s at TPC-C W=1, ~16 s at W=10). */
-		if (xstore_checkpoint_wal_online(g_xbt, (struct wal *)g_xwal,
-		    g_xwal_path, NULL) == XTC_OK) {
+		job.rc = XTC_E_AGAIN;
+		if (xtc_blocking_run(sx_ckpt_run, &job, &res) != XTC_OK)
+			continue;                  /* pool unavailable: next tick */
+		if (job.rc == XTC_OK) {
 			floor = wal_size(g_xwal);
 			atomic_fetch_add(&g_ckpt_count, 1);
 		}
