@@ -15,6 +15,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 
+#include "xtc_blocking.h"
 #include "xtc_log.h"
 #include "xtc_proc.h"
 #include "xtc_res.h"
@@ -47,14 +48,35 @@ typedef struct metrics_state {
 	_Atomic int *conn_count;
 } metrics_state_t;
 
+static _Atomic int g_metrics_stop, g_metrics_alive;
+static xtc_pid_t   g_metrics_pid;
+
+/*
+ * Write the log ring to its sink.  Nothing else drains it while the
+ * server runs (main drains once before and once after xtc_app_run), so
+ * the metrics line, the loop stall watchdog's WARN and every other
+ * record stayed invisible until exit, and the ring (4096 records) then
+ * dropped the oldest.  The sink is a write(2), so it runs on the
+ * blocking pool, never on loop 0.
+ */
+static int
+metrics_drain_log(void *arg)
+{
+	(void)arg;
+	return xtc_log_drain(xtc_log_default());
+}
+
 static void
 metrics_proc(void *arg)
 {
 	metrics_state_t *st = arg;
 	void *msg; size_t msg_len;
-	for (;;) {
+	int drained;
+	while (!atomic_load(&g_metrics_stop)) {
 		(void)xtc_recv(&msg, &msg_len, METRICS_INTERVAL_NS);
 		if (msg) xtc_free(msg);
+		if (atomic_load(&g_metrics_stop))
+			break;
 
 		if (sqlxtc_stat_connections != NULL)
 			xtc_gauge_set(sqlxtc_stat_connections,
@@ -93,7 +115,29 @@ metrics_proc(void *arg)
 			    (unsigned long long)xstore_intent_conflicts(),
 			    (unsigned long long)xstore_intent_deadlocks());
 		}
+		/* Not queued (pool unavailable): the next tick retries; never
+		 * write on the loop. */
+		(void)xtc_blocking_run(metrics_drain_log, NULL, &drained);
 	}
+	free(st);
+	atomic_store(&g_metrics_alive, 0);
+}
+
+/* Stop the metrics proc and, on a proc, wait until it has exited, so no
+ * log drain is still running on the blocking pool when the caller goes
+ * on to stop the loops and free their fibers.  Idempotent. */
+void
+metrics_stop(void)
+{
+	int i;
+	if (!atomic_load(&g_metrics_alive))
+		return;
+	atomic_store(&g_metrics_stop, 1);
+	(void)xtc_send(g_metrics_pid, "s", 1);
+	if (xtc_pid_is_none(xtc_self()))
+		return;
+	for (i = 0; i < 2000 && atomic_load(&g_metrics_alive); i++)
+		(void)xtc_proc_sleep(1LL * 1000 * 1000);
 }
 
 int
@@ -102,6 +146,7 @@ metrics_spawn(xtc_loop_t *loop, xtc_res_t *res, _Atomic int *conn_count,
 {
 	metrics_state_t *st;
 	xtc_proc_opts_t opts = { 0 };
+	int rc;
 
 	(void)queries_total;   /* superseded by sqlxtc_stat_query_total */
 	metrics_register();
@@ -111,5 +156,15 @@ metrics_spawn(xtc_loop_t *loop, xtc_res_t *res, _Atomic int *conn_count,
 	st->res = res;
 	st->conn_count = conn_count;
 	opts.name = "sqlxtc-metrics";
-	return xtc_proc_spawn(loop, metrics_proc, st, &opts, out_pid);
+	atomic_store(&g_metrics_stop, 0);
+	atomic_store(&g_metrics_alive, 1);
+	if ((rc = xtc_proc_spawn(loop, metrics_proc, st, &opts,
+	    &g_metrics_pid)) != XTC_OK) {
+		atomic_store(&g_metrics_alive, 0);
+		free(st);
+		return rc;
+	}
+	if (out_pid != NULL)
+		*out_pid = g_metrics_pid;
+	return XTC_OK;
 }

@@ -44,6 +44,7 @@ extern int metrics_spawn(xtc_loop_t *loop, xtc_res_t *res,
                          _Atomic int *conn_count,
                          _Atomic int64_t *queries_total,
                          xtc_pid_t *out_pid);
+extern void metrics_stop(void);
 
 typedef struct server_cfg {
 	const char *host;
@@ -272,6 +273,7 @@ listener_proc(void *arg)
 	XTC_LOG_INFO_F("sqlxtc draining: no new connections; stopping the "
 	    "storage procs");
 	stop_accepting(srv);
+	metrics_stop();                  /* no log drain left on the pool */
 	sx_storage_quiesce();            /* no-op if the store is not running */
 	XTC_LOG_INFO_F("sqlxtc storage quiesced");
 }
