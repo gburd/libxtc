@@ -43,6 +43,7 @@
 
 #include "xtc_int.h"
 #include "xtc_slab.h"
+#include "preempt_int.h"   /* __xtc_mtx_lock: preemption-safe lock holds */
 #include "xtc_log.h"    /* redzone reports go through the library logger */
 
 #include <pthread.h>
@@ -799,11 +800,11 @@ xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 	{
 		struct slab_registry_entry *re = NULL;
 		if (__os_calloc(1, sizeof *re, (void **)&re) == XTC_OK) {
-			(void)pthread_mutex_lock(&__slab_reg_lock);
+			(void)__xtc_mtx_lock(&__slab_reg_lock);
 			re->slab = s;
 			re->next = __registry;
 			__registry = re;
-			(void)pthread_mutex_unlock(&__slab_reg_lock);
+			(void)__xtc_mtx_unlock(&__slab_reg_lock);
 		}
 	}
 
@@ -834,13 +835,13 @@ xtc_slab_destroy(xtc_slab_t *s)
 			for (i = 0; i < TLS_MAGS; i++)
 				if (mags[i].cache == s) {
 					struct magazine *mag = &mags[i].mag;
-					(void)pthread_mutex_lock(&s->lock);
+					(void)__xtc_mtx_lock(&s->lock);
 					while (mag->n > 0) {
 						void *sl = mag->slots[--mag->n];
 						if (!__slot_on_free_list_locked(s, sl))
 							__push_slot_locked(s, sl);
 					}
-					(void)pthread_mutex_unlock(&s->lock);
+					(void)__xtc_mtx_unlock(&s->lock);
 					__os_free(mag->slots);
 					mags[i].cache = NULL;
 					memset(mag, 0, sizeof *mag);
@@ -850,13 +851,13 @@ xtc_slab_destroy(xtc_slab_t *s)
 	for (i = 0; i < TLS_MAGS; i++) {
 		if (__tls_mags[i].cache == s) {
 			struct magazine *mag = &__tls_mags[i].mag;
-			(void)pthread_mutex_lock(&s->lock);
+			(void)__xtc_mtx_lock(&s->lock);
 			while (mag->n > 0) {
 				void *sl = mag->slots[--mag->n];
 				if (!__slot_on_free_list_locked(s, sl))
 					__push_slot_locked(s, sl);
 			}
-			(void)pthread_mutex_unlock(&s->lock);
+			(void)__xtc_mtx_unlock(&s->lock);
 			__os_free(mag->slots);
 			__tls_mags[i].cache = NULL;
 			memset(mag, 0, sizeof *mag);
@@ -900,7 +901,7 @@ xtc_slab_destroy(xtc_slab_t *s)
 	/* Unlink from global registry. */
 	{
 		struct slab_registry_entry *re, **link;
-		(void)pthread_mutex_lock(&__slab_reg_lock);
+		(void)__xtc_mtx_lock(&__slab_reg_lock);
 		for (link = &__registry; (re = *link) != NULL; link = &re->next) {
 			if (re->slab == s) {
 				*link = re->next;
@@ -908,7 +909,7 @@ xtc_slab_destroy(xtc_slab_t *s)
 				break;
 			}
 		}
-		(void)pthread_mutex_unlock(&__slab_reg_lock);
+		(void)__xtc_mtx_unlock(&__slab_reg_lock);
 	}
 
 	__os_free(s);
@@ -1032,23 +1033,23 @@ xtc_slab_alloc(xtc_slab_t *s)
 	}
 
 	/* Slow path: take cache lock and pop. */
-	(void)pthread_mutex_lock(&s->lock);
+	(void)__xtc_mtx_lock(&s->lock);
 	slot = __pop_slot_locked(s);
 	if (XTC_UNLIKELY(slot == NULL && s->opts.oom_policy == XTC_SLAB_OOM_BACKOFF)) {
-		(void)pthread_mutex_unlock(&s->lock);
+		(void)__xtc_mtx_unlock(&s->lock);
 		(void)__os_sleep_ns(100 * 1000);    /* 0.1 ms */
-		(void)pthread_mutex_lock(&s->lock);
+		(void)__xtc_mtx_lock(&s->lock);
 		slot = __pop_slot_locked(s);
 	}
 	if (XTC_UNLIKELY(slot == NULL)) {
 		atomic_fetch_add_explicit(&s->s_oom_fails, 1,
 		    memory_order_relaxed);
-		(void)pthread_mutex_unlock(&s->lock);
+		(void)__xtc_mtx_unlock(&s->lock);
 		if (s->opts.oom_policy == XTC_SLAB_OOM_ABORT) abort();
 		return NULL;
 	}
 	atomic_fetch_sub_explicit(&s->s_n_free, 1, memory_order_relaxed);
-	(void)pthread_mutex_unlock(&s->lock);
+	(void)__xtc_mtx_unlock(&s->lock);
 	atomic_fetch_add_explicit(&s->s_alloc_slow, 1, memory_order_relaxed);
 
 have_slot:
@@ -1061,11 +1062,11 @@ have_slot:
 				__shm_free_push(s, (uint64_t)
 				    ((uint8_t *)slot - (uint8_t *)s->opts.shm_base));
 			} else {
-				(void)pthread_mutex_lock(&s->lock);
+				(void)__xtc_mtx_lock(&s->lock);
 				__push_slot_locked(s, slot);
 				atomic_fetch_add_explicit(&s->s_n_free, 1,
 				    memory_order_relaxed);
-				(void)pthread_mutex_unlock(&s->lock);
+				(void)__xtc_mtx_unlock(&s->lock);
 			}
 			return NULL;
 		}
@@ -1136,9 +1137,9 @@ xtc_slab_free(xtc_slab_t *s, void *obj)
 	}
 
 slow:
-	(void)pthread_mutex_lock(&s->lock);
+	(void)__xtc_mtx_lock(&s->lock);
 	__push_slot_locked(s, slot);
-	(void)pthread_mutex_unlock(&s->lock);
+	(void)__xtc_mtx_unlock(&s->lock);
 	atomic_fetch_add_explicit(&s->s_n_free, 1, memory_order_relaxed);
 	atomic_fetch_add_explicit(&s->s_free_slow, 1, memory_order_relaxed);
 }
@@ -1158,34 +1159,34 @@ xtc_slab_reap(xtc_slab_t *s)
 			for (i = 0; i < TLS_MAGS; i++)
 				if (mags[i].cache == s) {
 					struct magazine *mag = &mags[i].mag;
-					(void)pthread_mutex_lock(&s->lock);
+					(void)__xtc_mtx_lock(&s->lock);
 					while (mag->n > 0) {
 						__push_slot_locked(s, mag->slots[--mag->n]);
 						atomic_fetch_add_explicit(&s->s_n_free, 1,
 						    memory_order_relaxed);
 						reaped++;
 					}
-					(void)pthread_mutex_unlock(&s->lock);
+					(void)__xtc_mtx_unlock(&s->lock);
 				}
 	}
 #else
 	for (i = 0; i < TLS_MAGS; i++) {
 		if (__tls_mags[i].cache == s) {
 			struct magazine *mag = &__tls_mags[i].mag;
-			(void)pthread_mutex_lock(&s->lock);
+			(void)__xtc_mtx_lock(&s->lock);
 			while (mag->n > 0) {
 				__push_slot_locked(s, mag->slots[--mag->n]);
 				atomic_fetch_add_explicit(&s->s_n_free, 1,
 				    memory_order_relaxed);
 				reaped++;
 			}
-			(void)pthread_mutex_unlock(&s->lock);
+			(void)__xtc_mtx_unlock(&s->lock);
 		}
 	}
 #endif
 
 	/* Release empty chunks. */
-	(void)pthread_mutex_lock(&s->lock);
+	(void)__xtc_mtx_lock(&s->lock);
 	for (link = &s->chunks; (c = *link) != NULL; ) {
 		if (c->n_inuse == 0) {
 			next = c->next;
@@ -1202,7 +1203,7 @@ xtc_slab_reap(xtc_slab_t *s)
 			link = &c->next;
 		}
 	}
-	(void)pthread_mutex_unlock(&s->lock);
+	(void)__xtc_mtx_unlock(&s->lock);
 	atomic_fetch_add_explicit(&s->s_reaps, 1, memory_order_relaxed);
 	return reaped;
 }
@@ -1282,10 +1283,10 @@ xtc_slab_reap_all(void)
 {
 	int total = 0;
 	struct slab_registry_entry *re;
-	(void)pthread_mutex_lock(&__slab_reg_lock);
+	(void)__xtc_mtx_lock(&__slab_reg_lock);
 	for (re = __registry; re != NULL; re = re->next)
 		total += xtc_slab_reap(re->slab);
-	(void)pthread_mutex_unlock(&__slab_reg_lock);
+	(void)__xtc_mtx_unlock(&__slab_reg_lock);
 	return total;
 }
 
