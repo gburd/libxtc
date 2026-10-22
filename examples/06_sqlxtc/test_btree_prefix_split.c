@@ -21,7 +21,10 @@
  *	(1) btree: 60,000 index-shaped keys, ascending and in a scrambled
  *	    order: every insert succeeds, every key is found, and the
  *	    ascending tree fills its leaves (>= 80%).
- *	(2) SQL: an index on (w, d, last) over 60,000 rows returns the same
+ *	(2) the open-time index rebuild (clear one index -- its leaves
+ *	    merge away -- then rebuild it with sorted inserts, index after
+ *	    index): no insert fails, no key is lost.
+ *	(3) SQL: an index on (w, d, last) over 60,000 rows returns the same
  *	    count with and without the index.
  *	Off a loop.
  */
@@ -121,6 +124,96 @@ run_btree(int scrambled, double min_fill)
 	return 0;
 }
 
+/* [0xFE][idx 4][NUM w][NUM d][NUM id][rowid 8], 46 bytes (key_of) under
+ * index id `ix`. */
+static int
+key_ix(uint8_t *k, uint32_t ix, int w, int d, int id)
+{
+	int kl = key_of(k, w, d, id);
+	k[1] = (uint8_t)(ix >> 24); k[2] = (uint8_t)(ix >> 16);
+	k[3] = (uint8_t)(ix >> 8); k[4] = (uint8_t)ix;
+	return kl;
+}
+
+/*
+ * The index rebuild of an open (xstore_index_rebuild_all, 1.59): for
+ * each index in turn, clear it (delete every entry: its leaves merge
+ * away, and the merges leave the neighbouring indexes' leaves with wide
+ * fences) and rebuild it with sorted inserts.  Several indexes of
+ * prefix-heavy 46-byte keys, interleaved in the key space with a short-
+ * key table between them.  Every insert must succeed and every key be
+ * found after each round.  On the full-key split costing this lost
+ * entries on every open of a TPC-C store (bt_insert XTC_E_INTERNAL).
+ */
+static int
+run_rebuild(void)
+{
+	enum { NIX = 6, PER = 12000, ROUNDS = 3 };
+	bm_opts_t bo = BM_OPTS_DEFAULT;
+	bm_t *bm = NULL;
+	bt_t *bt = NULL;
+	bt_stats_t st;
+	char path[256];
+	uint8_t k[64];
+	int fd, i, ix, r, kl, bad_ins = 0, bad_get = 0, bad_del = 0, rc;
+
+	t_tmpl(path, sizeof path, "sqlxtc-pfxrebuild");
+	if ((fd = mkstemp(path)) < 0) return 1;
+	close(fd);
+	bo.path = path; bo.page_size = 4096; bo.n_frames = 8192;
+	if (bm_create(&bo, &bm) != XTC_OK || bt_open(bm, &bt) != XTC_OK) return 1;
+	/* the first build: sorted, like a rebuild (so only the clear +
+	 * rebuild pattern below is under test, not scrambled inserts) */
+	for (ix = 0; ix < NIX; ix++)
+		for (i = 0; i < PER; i++) {
+			kl = key_ix(k, 5u + (uint32_t)ix, 1 + i / 6000, 1 + (i / 600) % 10,
+			    1 + i % 600);
+			if (bt_insert(bt, k, (uint16_t)kl, "", 0) != XTC_OK) bad_ins++;
+		}
+	if (bad_ins)
+		fprintf(stderr, "  rebuild: %d inserts of the first build failed\n",
+		    bad_ins);
+	for (r = 0; r < ROUNDS; r++)
+		for (ix = 0; ix < NIX; ix++) {
+			for (i = 0; i < PER; i++) {     /* clear: delete in key order */
+				kl = key_ix(k, 5u + (uint32_t)ix, 1 + i / 6000,
+				    1 + (i / 600) % 10, 1 + i % 600);
+				if (bt_delete(bt, k, (uint16_t)kl) != XTC_OK) bad_del++;
+			}
+			for (i = 0; i < PER; i++) {     /* build: sorted inserts */
+				kl = key_ix(k, 5u + (uint32_t)ix, 1 + i / 6000,
+				    1 + (i / 600) % 10, 1 + i % 600);
+				rc = bt_insert(bt, k, (uint16_t)kl, "", 0);
+				if (rc != XTC_OK && bad_ins++ == 0)
+					fprintf(stderr, "  rebuild round %d index %d insert %d "
+					    "failed: rc %d\n", r, ix, i, rc);
+			}
+		}
+	for (ix = 0; ix < NIX; ix++)
+		for (i = 0; i < PER; i++) {
+			uint8_t out[8];
+			uint16_t ol = 0;
+			kl = key_ix(k, 5u + (uint32_t)ix, 1 + i / 6000, 1 + (i / 600) % 10,
+			    1 + i % 600);
+			if (bt_lookup(bt, k, (uint16_t)kl, out, sizeof out, &ol) != XTC_OK)
+				bad_get++;
+		}
+	bt_get_stats(bt, &st);
+	printf("  rebuild    %d indexes x %d rounds: inserts failed %d, deletes "
+	    "failed %d, keys missing %d, merges %llu\n", NIX, ROUNDS, bad_ins,
+	    bad_del, bad_get, (unsigned long long)st.merges);
+	bt_close(bt);
+	bm_destroy(bm);
+	unlink(path);
+	if (bad_ins || bad_del || bad_get || st.merges == 0) {
+		fprintf(stderr, "FAIL rebuild: %d inserts failed, %d deletes failed, "
+		    "%d keys missing, %llu merges\n", bad_ins, bad_del, bad_get,
+		    (unsigned long long)st.merges);
+		return 1;
+	}
+	return 0;
+}
+
 static int64_t
 one(sx_db *h, const char *sql)
 {
@@ -187,6 +280,7 @@ main(void)
 	printf("test_btree_prefix_split\n");
 	fail |= run_btree(0, 0.80);
 	fail |= run_btree(1, 0.50);
+	fail |= run_rebuild();
 	fail |= run_sql();
 	if (fail) {
 		fprintf(stderr, "FAIL: test_btree_prefix_split\n");
