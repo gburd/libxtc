@@ -123,6 +123,26 @@ sync_spin_leave(_Atomic int *spinners)
 	atomic_fetch_sub_explicit(spinners, 1, memory_order_relaxed);
 }
 
+/*
+ * amutex / arwlock objects start on a cache line and own whole lines:
+ * sqlxtc allocates one arwlock per buffer frame, and with calloc'd
+ * 136-232 byte objects the hot words of neighbouring frames' latches
+ * shared lines, so threads reading DIFFERENT pages bounced the same
+ * lines.  Measured (test_snap_registry, 8 threads, read-only
+ * transactions, 5 reps): 1.75-1.87M txns/s packed, 2.58-2.70M aligned.
+ * Costs up to one line of padding per object.
+ */
+static int
+sync_obj_alloc(size_t sz, void **out)
+{
+	int rc;
+	sz = (sz + XTC_CACHE_LINE - 1) & ~(size_t)(XTC_CACHE_LINE - 1);
+	if ((rc = __os_aligned_alloc(XTC_CACHE_LINE, sz, out)) != XTC_OK)
+		return rc;
+	memset(*out, 0, sz);
+	return XTC_OK;
+}
+
 /* __xtc_mtx_lock's try form: 1 with *lk held (bracket balanced by
  * __xtc_mtx_unlock), 0 if busy.  A spinner never blocks on the inner
  * mutex: a busy one means another thread is about to take the lock. */
@@ -713,14 +733,18 @@ xtc_abort_token_reason(const xtc_abort_token_t *t)
  * either wakes one or has one on its way, so none is stranded.
  */
 
+/* Field order: lock .. wq.head (everything an uncontended lock/unlock
+ * touches) fit the first cache line on LP64 glibc; see struct
+ * xtc_arwlock and sync_obj_alloc. */
 struct xtc_amutex {
 	pthread_mutex_t       lock;
-	pthread_cond_t        cv;        /* thread (non-fiber) waiters */
 	_Atomic int           held;      /* written under lock; spinners peek */
 	int                   recursive; /* XTC_AMUTEX_RECURSIVE */
 	int                   cv_waiters; /* threads asleep on cv */
 	int                   cv_wake;   /* signalled, not yet re-tested */
+	struct fw_queue       wq;        /* fiber waiters */
 	_Atomic int           spinners;  /* threads in the off-loop spin */
+	int                   count;     /* recursion depth */
 	struct amutex_owner {
 		int       kind;          /* 0 none, 1 fiber, 2 thread */
 		void     *task;          /* fiber identity (kind 1) */
@@ -728,8 +752,7 @@ struct xtc_amutex {
 		void     *ploop;         /* that proc's owner loop (kind 1) */
 		pthread_t thr;           /* thread identity (kind 2) */
 	}                     owner;     /* valid while held; under lock */
-	int                   count;     /* recursion depth */
-	struct fw_queue       wq;        /* fiber waiters */
+	pthread_cond_t        cv;        /* thread (non-fiber) waiters */
 };
 
 #define AM_HELD(m) atomic_load_explicit(&(m)->held, memory_order_relaxed)
@@ -818,7 +841,8 @@ xtc_amutex_create_ex(xtc_amutex_t **out, unsigned flags)
 	xtc_amutex_t *m;
 	int rc;
 	if (out == NULL) return XTC_E_INVAL;
-	if ((rc = __os_calloc(1, sizeof *m, (void **)&m)) != XTC_OK) return rc;
+	if ((rc = sync_obj_alloc(sizeof *m, (void **)&m)) != XTC_OK)
+		return rc;
 	(void)pthread_mutex_init(&m->lock, NULL);
 	(void)pthread_cond_init(&m->cv, NULL);
 	m->recursive = (flags & XTC_AMUTEX_RECURSIVE) ? 1 : 0;
@@ -859,7 +883,7 @@ xtc_amutex_destroy(xtc_amutex_t *m)
 	if (m == NULL) return;
 	(void)pthread_cond_destroy(&m->cv);
 	(void)pthread_mutex_destroy(&m->lock);
-	__os_free(m);
+	__os_aligned_free(m);
 }
 
 int
@@ -1080,19 +1104,25 @@ xtc_amutex_unlock(xtc_amutex_t *m)
 #define ARW_SHARED 0
 #define ARW_EXCL   1
 
+/* Field order matters: an uncontended lock/unlock touches only the inner
+ * mutex, readers / writer, the waiter counts and wq.head, so they fit the
+ * first cache line (LP64 glibc: offsets 0..63); the condvars (48 bytes
+ * each) go last.  With the condvars ahead of the state words, an 8-thread
+ * read-only sqlxtc workload lost 20% (test_snap_registry: 1.89M -> 1.51M
+ * txns/s); with this order and line-aligned objects it gains 38%. */
 struct xtc_arwlock {
 	pthread_mutex_t        lock;
-	pthread_cond_t         cv;        /* off-loop shared waiters */
-	pthread_cond_t         wcv;       /* off-loop exclusive waiters */
 	_Atomic int            readers;   /* active shared holders */
 	_Atomic int            writer;    /* 1 if exclusive held */
 	int                    rd_waiters; /* threads asleep on cv */
 	int                    wr_waiters; /* threads asleep on wcv */
+	struct fw_queue        wq;        /* fiber waiters */
+	int                    last_excl; /* the last release was exclusive */
 	int                    rd_wake;   /* readers woken, none run yet */
 	int                    wr_wake;   /* a writer woken, not run yet */
-	int                    last_excl; /* the last release was exclusive */
 	_Atomic int            spinners;  /* threads in the off-loop spin */
-	struct fw_queue        wq;        /* fiber waiters */
+	pthread_cond_t         cv;        /* off-loop shared waiters */
+	pthread_cond_t         wcv;       /* off-loop exclusive waiters */
 };
 
 /* readers / writer are written under lock; spinners peek without it. */
@@ -1116,7 +1146,8 @@ xtc_arwlock_create(xtc_arwlock_t **out)
 	xtc_arwlock_t *r;
 	int rc;
 	if (out == NULL) return XTC_E_INVAL;
-	if ((rc = __os_calloc(1, sizeof *r, (void **)&r)) != XTC_OK) return rc;
+	if ((rc = sync_obj_alloc(sizeof *r, (void **)&r)) != XTC_OK)
+		return rc;
 	(void)pthread_mutex_init(&r->lock, NULL);
 	(void)pthread_cond_init(&r->cv, NULL);
 	(void)pthread_cond_init(&r->wcv, NULL);
@@ -1131,7 +1162,7 @@ xtc_arwlock_destroy(xtc_arwlock_t *r)
 	(void)pthread_cond_destroy(&r->wcv);
 	(void)pthread_cond_destroy(&r->cv);
 	(void)pthread_mutex_destroy(&r->lock);
-	__os_free(r);
+	__os_aligned_free(r);
 }
 
 /* Can `mode` be granted right now, ignoring queue order? */
@@ -1148,8 +1179,9 @@ static void
 __arw_wake_threads_locked(xtc_arwlock_t *r)
 {
 	int writer_next;
-	if (r->wq.head != NULL || ARW_W(r))
-		return;                 /* fiber waiters first; or still held X */
+	if ((r->rd_waiters | r->wr_waiters) == 0 || r->wq.head != NULL ||
+	    ARW_W(r))
+		return;   /* none asleep; fiber waiters first; or still held X */
 	if (ARW_R(r) > 0) {
 		/* Read-held: sleeping readers may join, unless a writer
 		 * sleeps (the last reader out wakes it). */
@@ -1194,7 +1226,8 @@ __arw_grant_locked(xtc_arwlock_t *r)
 static void
 __arw_release_locked(xtc_arwlock_t *r)
 {
-	r->last_excl = ARW_W(r);
+	if ((r->rd_waiters | r->wr_waiters) != 0)
+		r->last_excl = ARW_W(r);   /* only the wake phase reads it */
 	if (ARW_W(r))
 		atomic_store_explicit(&r->writer, 0, memory_order_relaxed);
 	else if (ARW_R(r) > 0)

@@ -1644,6 +1644,39 @@ test_offloop_timed_handoff(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * Readers of DIFFERENT locks must not contend.  sqlxtc keeps one arwlock
+ * per buffer frame; when these objects were packed by malloc, the hot
+ * words of neighbouring locks shared cache lines, and 8 threads each
+ * reading its own page bounced them (the off-loop rewrite's larger
+ * object made it worse: test_snap_registry 8-thread read-only rate
+ * 1.89M -> 1.51M; aligned: 2.68M).  Each object now starts on a cache
+ * line; checked directly on 64 consecutively created locks of each kind
+ * (the behaviour itself is a performance property, measured by
+ * test_snap_registry and bench_sync_offloop, not asserted here).
+ */
+static MunitResult
+test_sync_objects_line_aligned(const MunitParameter p[], void *d)
+{
+	xtc_arwlock_t *rw[64];
+	xtc_amutex_t *am[64];
+	int i;
+	(void)p; (void)d;
+	for (i = 0; i < 64; i++) {
+		munit_assert_int(xtc_arwlock_create(&rw[i]), ==, XTC_OK);
+		munit_assert_int(xtc_amutex_create(&am[i]), ==, XTC_OK);
+	}
+	for (i = 0; i < 64; i++) {
+		munit_assert_size((uintptr_t)rw[i] % 64, ==, 0);
+		munit_assert_size((uintptr_t)am[i] % 64, ==, 0);
+	}
+	for (i = 0; i < 64; i++) {
+		xtc_arwlock_destroy(rw[i]);
+		xtc_amutex_destroy(am[i]);
+	}
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/amutex_recursive_exit", test_amutex_recursive_exit, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/amutex_recursive_thread", test_amutex_recursive_thread, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1658,6 +1691,7 @@ static MunitTest tests[] = {
 	{ "/arwlock_fiber",       test_arwlock_fiber,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/arwlock_threads",     test_arwlock_threads,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/offloop_timed_handoff", test_offloop_timed_handoff, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/objects_line_aligned", test_sync_objects_line_aligned, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #if defined(__linux__) && defined(RUSAGE_THREAD)
 	{ "/offloop_no_herd",     test_offloop_no_herd,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/offloop_spin",        test_offloop_spin,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
