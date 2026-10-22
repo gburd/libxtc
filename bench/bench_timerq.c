@@ -346,11 +346,11 @@ struct dh {
 /* d must stay a constant in each instance (else every step is an idiv). */
 #define DH_INLINE static inline __attribute__((always_inline))
 
+/* Place x by sifting the hole at i up / down.  x is passed by value so a
+ * push or remove never stores a slot and reloads it at once. */
 DH_INLINE void
-dh_up(struct he *h, int i, const int d)
+dh_up(struct he *h, int i, struct he x, const int d)
 {
-	struct he x = h[i];
-
 	while (i > 0) {
 		int p = (i - 1) / d;
 		if (h[p].k <= x.k)
@@ -364,10 +364,8 @@ dh_up(struct he *h, int i, const int d)
 }
 
 DH_INLINE void
-dh_down(struct he *h, int n, int i, const int d)
+dh_down(struct he *h, int n, int i, struct he x, const int d)
 {
-	struct he x = h[i];
-
 	for (;;) {
 		int f = d * i + 1, e, c, j;
 		if (f >= n)
@@ -409,29 +407,31 @@ dh_destroy(void *p)
 DH_INLINE void
 dh_push(struct dh *s, tnode_t *t, const int d)
 {
+	struct he x;
+
 	if (s->n >= s->cap) {
 		s->cap *= 2;
 		s->h = xrealloc(s->h, sizeof *s->h * (size_t)s->cap);
 	}
-	s->h[s->n].k = t->dl;
-	s->h[s->n].t = t;
-	dh_up(s->h, s->n++, d);
+	x.k = t->dl;
+	x.t = t;
+	dh_up(s->h, s->n++, x, d);
 }
 
 DH_INLINE void
 dh_remove(struct dh *s, int i, const int d)
 {
-	struct he *h = s->h;
+	struct he *h = s->h, x;
 	int last = --s->n;
 
 	h[i].t->idx = -1;
 	if (i == last)
 		return;
-	h[i] = h[last];
-	if (i > 0 && h[i].k < h[(i - 1) / d].k)
-		dh_up(h, i, d);
+	x = h[last];
+	if (i > 0 && x.k < h[(i - 1) / d].k)
+		dh_up(h, i, x, d);
 	else
-		dh_down(h, s->n, i, d);
+		dh_down(h, s->n, i, x, d);
 }
 
 DH_INLINE tnode_t *
