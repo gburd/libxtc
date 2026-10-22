@@ -17,6 +17,8 @@
  *	  replay: then time wal_scan of the log it wrote (s, MB/s)
  *	       bench_wal scan PATH     time wal_scan of an existing log
  *	  (scan,records,bytes,seconds,MB/s,cpu_seconds)
+ *	       bench_wal copy SRC DST  re-frame SRC's records into a new log
+ *	  DST with this build's checksum (wal_commit_sync, one at a time)
  */
 
 #include <pthread.h>
@@ -100,6 +102,14 @@ count_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
 	return 0;
 }
 
+static int
+copy_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
+{
+	uint64_t l;
+	(void)lsn;
+	return wal_commit_sync(user, rec, len, &l) != XTC_OK;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -114,6 +124,19 @@ main(int argc, char **argv)
 	double el;
 	int64_t t0;
 
+	if (argc == 4 && strcmp(argv[1], "copy") == 0) {
+		memset(&wo, 0, sizeof wo);
+		wo.path = argv[3];
+		if (wal_open(&wo, &g_wal) != XTC_OK)
+			return 1;
+		if (wal_scan(argv[2], copy_cb, g_wal) != XTC_OK)
+			return 1;
+		wal_get_stats(g_wal, &st);
+		printf("copy,%llu,%llu\n", (unsigned long long)st.commits,
+		    (unsigned long long)wal_size(g_wal));
+		wal_close(g_wal);
+		return 0;
+	}
 	if (argc == 3 && strcmp(argv[1], "scan") == 0) {
 		struct rusage ru0, ru1;
 		struct stat sb;

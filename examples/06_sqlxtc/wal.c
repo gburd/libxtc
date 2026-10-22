@@ -33,6 +33,11 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#if defined(__GNUC__) && defined(__x86_64__)
+#include <nmmintrin.h>      /* _mm_crc32_* (SSE4.2, per-function target) */
+#elif defined(__GNUC__) && defined(__aarch64__) && defined(__ARM_FEATURE_CRC32)
+#include <arm_acle.h>       /* __crc32c* */
+#endif
 
 /* The message that stops the writer proc. */
 #define WAL_KIND_STOP    'S'
@@ -42,8 +47,9 @@
 
 /*
  * Per-record on-disk layout is now [u64 lsn][u32 len][body:len][u64 crc].
- * The trailer is a 64-bit FNV-1a hash over the header bytes (lsn+len)
- * and the body.  It makes every record self-checking: recovery can
+ * The trailer is a checksum over the header bytes (lsn+len) and the body
+ * (a tagged CRC32C, or the 64-bit FNV-1a of logs written before it: see
+ * wal_sum_ok).  It makes every record self-checking: recovery can
  * tell a COMPLETE record from a torn one instead of decoding garbage.
  *
  * Torn-tail detection (Increment 1, the root fix): a crash mid-append
@@ -96,11 +102,143 @@ wal_fnv(uint64_t h, const uint8_t *p, size_t n)
 }
 #define WAL_FNV_BASIS 1469598103934665603ull
 
-/* 64-bit FNV-1a over the record header (lsn+len) and body.  Not
- * cryptographic -- it only needs to catch a torn/partial tail record,
- * where the trailing 8 bytes are either missing (short read) or do not
- * match a body the writer never finished.  One pass, no table, no
- * dependency. */
+/*
+ * CRC32C (Castagnoli), the checksum of every frame written since the
+ * byte-serial FNV-1a: the TPC-C W=10 replay spent 89% of its time in
+ * wal_fnv (1.1 GB/s).  x86-64 SSE4.2 and ARMv8 have a CRC32C instruction
+ * (8 bytes per op); elsewhere slice-by-8 tables.  Same value either way
+ * (test_wal_crc), so the log bytes never depend on the host.
+ *
+ * The trailer of a CRC32C frame is (WAL_SUM_TAG << 32) | crc32c(header
+ * and body); an FNV frame's trailer is its 64-bit FNV-1a.  The header is
+ * unchanged, so the frame length, and every parser of it, is too.  A
+ * reader accepts a frame if the tagged CRC32C or the FNV-1a matches
+ * (wal_sum_ok): old logs, and logs that a newer build appended to, read
+ * frame by frame, and an FNV frame whose hash happens to carry the tag is
+ * still accepted.  A torn frame passes only if both 32-bit halves match
+ * by chance.  The preallocated zeros still end the log: their trailer is
+ * untagged and a zero-length frame's FNV-1a is never 0.  A build older
+ * than this one reads the first CRC32C frame as the end of the log.
+ */
+#define WAL_SUM_TAG 0x43524332u           /* "2CRC" */
+#if defined(WAL_C32C_HW)
+/* set by the build: test_wal_crc_sw builds with -DWAL_C32C_HW=0 */
+#elif defined(__GNUC__) && defined(__BYTE_ORDER__) && \
+    __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ && \
+    (defined(__x86_64__) || \
+    (defined(__aarch64__) && defined(__ARM_FEATURE_CRC32)))
+#define WAL_C32C_HW 1           /* a CRC32C instruction (x86: if SSE4.2) */
+#else
+#define WAL_C32C_HW 0
+#endif
+static uint32_t        wal_c32c_tab[8][256];
+static pthread_once_t  wal_c32c_once = PTHREAD_ONCE_INIT;
+static int             wal_c32c_hw;          /* set once by wal_c32c_init */
+
+static void
+wal_c32c_init(void)
+{
+	uint32_t c;
+	int i, k;
+	for (i = 0; i < 256; i++) {
+		for (c = (uint32_t)i, k = 0; k < 8; k++)
+			c = (c >> 1) ^ (c & 1 ? 0x82f63b78u : 0);
+		wal_c32c_tab[0][i] = c;
+	}
+	for (i = 0; i < 256; i++)
+		for (k = 1; k < 8; k++)
+			wal_c32c_tab[k][i] = (wal_c32c_tab[k - 1][i] >> 8) ^
+			    wal_c32c_tab[0][wal_c32c_tab[k - 1][i] & 0xff];
+#if WAL_C32C_HW && defined(__x86_64__)
+	wal_c32c_hw = __builtin_cpu_supports("sse4.2") ? 1 : 0;
+#else
+	wal_c32c_hw = WAL_C32C_HW;
+#endif
+}
+
+/* The CRC register c continued over n bytes (no pre/post inversion). */
+static uint32_t
+wal_c32c_sw(uint32_t c, const uint8_t *p, size_t n)
+{
+	uint64_t v;
+	while (n >= 8) {
+		/* bytes in stream order, whatever the host's byte order */
+		v = (uint64_t)p[0] | (uint64_t)p[1] << 8 | (uint64_t)p[2] << 16 |
+		    (uint64_t)p[3] << 24 | (uint64_t)p[4] << 32 |
+		    (uint64_t)p[5] << 40 | (uint64_t)p[6] << 48 |
+		    (uint64_t)p[7] << 56;
+		v ^= c;
+		c = wal_c32c_tab[7][v & 0xff] ^ wal_c32c_tab[6][(v >> 8) & 0xff] ^
+		    wal_c32c_tab[5][(v >> 16) & 0xff] ^ wal_c32c_tab[4][(v >> 24) & 0xff] ^
+		    wal_c32c_tab[3][(v >> 32) & 0xff] ^ wal_c32c_tab[2][(v >> 40) & 0xff] ^
+		    wal_c32c_tab[1][(v >> 48) & 0xff] ^ wal_c32c_tab[0][v >> 56];
+		p += 8;
+		n -= 8;
+	}
+	while (n-- > 0)
+		c = (c >> 8) ^ wal_c32c_tab[0][(c ^ *p++) & 0xff];
+	return c;
+}
+
+#if WAL_C32C_HW && defined(__x86_64__)
+__attribute__((target("sse4.2"))) static uint32_t
+wal_c32c_hwfn(uint32_t c, const uint8_t *p, size_t n)
+{
+	uint64_t v, c64 = c;
+	while (n >= 8) {
+		memcpy(&v, p, 8);
+		c64 = _mm_crc32_u64(c64, v);
+		p += 8;
+		n -= 8;
+	}
+	c = (uint32_t)c64;
+	while (n-- > 0)
+		c = _mm_crc32_u8(c, *p++);
+	return c;
+}
+#elif WAL_C32C_HW
+static uint32_t
+wal_c32c_hwfn(uint32_t c, const uint8_t *p, size_t n)
+{
+	uint64_t v;
+	while (n >= 8) {
+		memcpy(&v, p, 8);
+		c = __crc32cd(c, v);
+		p += 8;
+		n -= 8;
+	}
+	while (n-- > 0)
+		c = __crc32cb(c, *p++);
+	return c;
+}
+#else
+#define wal_c32c_hwfn wal_c32c_sw
+#endif
+
+static uint32_t
+wal_c32c(uint32_t c, const uint8_t *p, size_t n)
+{
+	(void)pthread_once(&wal_c32c_once, wal_c32c_init);
+	return wal_c32c_hw > 0 ? wal_c32c_hwfn(c, p, n) : wal_c32c_sw(c, p, n);
+}
+
+/* The trailer of a CRC32C frame from the CRC register over the frame. */
+#define WAL_SUM_TRL(c) (((uint64_t)WAL_SUM_TAG << 32) | (uint32_t)~(c))
+
+/* 1 if trl checks the frame f[0, WAL_REC_HDR + len) (header + body). */
+static int
+wal_sum_ok(uint64_t trl, const uint8_t *f, uint32_t len)
+{
+	if ((uint32_t)(trl >> 32) == WAL_SUM_TAG &&
+	    trl == WAL_SUM_TRL(wal_c32c(~0u, f, WAL_REC_HDR + (size_t)len)))
+		return 1;
+	return wal_fnv(WAL_FNV_BASIS, f, WAL_REC_HDR + (size_t)len) == trl;
+}
+
+/* The trailer of a new frame: CRC32C over the header (lsn+len) and the
+ * body.  Not cryptographic -- it only needs to catch a torn/partial tail
+ * record, where the trailing 8 bytes are either missing (short read) or
+ * do not match a body the writer never finished. */
 static uint64_t
 wal_rec_crc(uint64_t lsn, uint32_t len, const void *body)
 {
@@ -108,7 +246,7 @@ wal_rec_crc(uint64_t lsn, uint32_t len, const void *body)
 
 	memcpy(hdr, &lsn, 8);
 	memcpy(hdr + 8, &len, 4);
-	return wal_fnv(wal_fnv(WAL_FNV_BASIS, hdr, WAL_REC_HDR), body, len);
+	return WAL_SUM_TRL(wal_c32c(wal_c32c(~0u, hdr, WAL_REC_HDR), body, len));
 }
 
 static off_t
@@ -185,7 +323,8 @@ wal_rd_frame(struct wal_rd *r, off_t off, uint64_t *lsn, uint32_t *len,
 	uint8_t hdr[WAL_REC_HDR], trl[WAL_REC_CRC], chunk[64 * 1024];
 	const uint8_t *p;
 	uint64_t crc, h, fl;
-	uint32_t done;
+	uint32_t done, c, k;
+	int tagged, pass;
 
 	*body = NULL;
 	if (off < 0 || off + (off_t)WAL_REC_HDR > r->fsize)
@@ -201,7 +340,7 @@ wal_rd_frame(struct wal_rd *r, off_t off, uint64_t *lsn, uint32_t *len,
 		return 0;                    /* runs past the end: torn */
 	if ((p = wal_rd_at(r, off, (size_t)fl)) != NULL) {
 		memcpy(&crc, p + WAL_REC_HDR + *len, WAL_REC_CRC);
-		if (wal_fnv(WAL_FNV_BASIS, p, WAL_REC_HDR + *len) != crc)
+		if (!wal_sum_ok(crc, p, *len))
 			return 0;
 		*body = p + WAL_REC_HDR;
 		return 1;
@@ -210,15 +349,27 @@ wal_rd_frame(struct wal_rd *r, off_t off, uint64_t *lsn, uint32_t *len,
 	    != (ssize_t)WAL_REC_CRC)
 		return 0;
 	memcpy(&crc, trl, WAL_REC_CRC);
-	h = wal_fnv(WAL_FNV_BASIS, hdr, WAL_REC_HDR);
-	for (done = 0; done < *len; ) {
-		uint32_t k = *len - done < sizeof chunk ? *len - done : (uint32_t)sizeof chunk;
-		if (pread(r->fd, chunk, k, off + (off_t)WAL_REC_HDR + (off_t)done) != (ssize_t)k)
-			return 0;
-		h = wal_fnv(h, chunk, k);
-		done += k;
+	/* The tag says which sum to compute; FNV-1a only if CRC32C fails (an
+	 * old frame whose hash carries the tag, or a torn one: once a log). */
+	tagged = (uint32_t)(crc >> 32) == WAL_SUM_TAG;
+	for (pass = tagged ? 0 : 1; pass < 2; pass++) {
+		h = wal_fnv(WAL_FNV_BASIS, hdr, WAL_REC_HDR);
+		c = wal_c32c(~0u, hdr, WAL_REC_HDR);
+		for (done = 0; done < *len; done += k) {
+			k = *len - done < sizeof chunk ? *len - done :
+			    (uint32_t)sizeof chunk;
+			if (pread(r->fd, chunk, k, off + (off_t)WAL_REC_HDR +
+			    (off_t)done) != (ssize_t)k)
+				return 0;
+			if (pass == 0)
+				c = wal_c32c(c, chunk, k);
+			else
+				h = wal_fnv(h, chunk, k);
+		}
+		if (pass == 0 ? crc == WAL_SUM_TRL(c) : h == crc)
+			return 1;
 	}
-	return h == crc;
+	return 0;
 }
 
 /* Verify one frame with no window (the tail-hint check). */
@@ -1385,7 +1536,7 @@ wal_ock_copy(wal_ock_t *k, off_t end, off_t max)
 				break;
 			}
 			memcpy(&crc, k->rbuf + pos + WAL_REC_HDR + len, WAL_REC_CRC);
-			if (crc != wal_rec_crc(lsn, len, k->rbuf + pos + WAL_REC_HDR))
+			if (!wal_sum_ok(crc, k->rbuf + pos, len))
 				return XTC_E_INTERNAL;   /* never launder a bad frame */
 			wal_cmp_emit(&k->c, k->rbuf + pos + WAL_REC_HDR, len);
 			k->frames++;

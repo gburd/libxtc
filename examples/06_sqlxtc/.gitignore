@@ -29,6 +29,8 @@ test_wal_kill
 test_wal_tail
 test_wal_kill_engine
 bench_wal
+test_wal_crc
+test_wal_crc_sw
 test_dio_restart
 test_steal_reclaim
 test_wal_bigtxn
