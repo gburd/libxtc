@@ -156,6 +156,7 @@ clean:
 	rm -f test_btree_loop
 	rm -f test_btree_mt
 	rm -f test_btree_stale_descent test_btree_limits test_btree_sample bench_morsel_balance
+	rm -f test_xs_ctr
 	rm -f test_tpcc_seek test_dup_composite test_bulk_insert test_plan_cache
 	rm -f test_btree_delete_merge test_savepoint test_isolation test_ww_conflict test_row_intents test_commit_visibility test_ssi_skew test_ckpt_bound test_dup_insert test_recover_fast
 	rm -f test_vfs_loop test_vfs_loop.o
@@ -893,3 +894,11 @@ test_uniq_commit: test_uniq_commit.c engine.o db.o quack.o metrics.o xstore.o xl
 
 test-uniq-commit: test_uniq_commit
 	TMPDIR=$${TMPDIR:-/tmp} ./test_uniq_commit
+
+# xs_ctr.h: the striped statistics counter (exact sum, one line per slot).
+test: test-xs-ctr
+test_xs_ctr: test_xs_ctr.c xs_ctr.h
+	$(CC) $(CFLAGS) -o $@ test_xs_ctr.c $(LDFLAGS)
+
+test-xs-ctr: test_xs_ctr
+	./test_xs_ctr
