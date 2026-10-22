@@ -5,11 +5,17 @@
  * test/m9/test_sync.c -- verifies M9 notify + sem + abort_source.
  */
 
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE     /* RUSAGE_THREAD (the off-loop no-herd test) */
+#endif
+
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <time.h>
 
 #include "munit.h"
@@ -1310,6 +1316,367 @@ test_amutex_recursive_thread(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * OFF-LOOP (plain-thread) contention on xtc_arwlock / xtc_amutex.
+ *
+ * 1. No thundering herd (offloop_no_herd).  K threads sleep in wrlock
+ *    (then in amutex_lock) on a lock the main thread holds.
+ *    The main thread holds it ~1 ms, releases and takes it straight back,
+ *    R times; the waiters loop on lock/unlock.  A release may usefully
+ *    wake ONE waiter (which usually finds the lock taken again and
+ *    sleeps).  The arwlock used to broadcast to every off-loop waiter on
+ *    every release, so the waiters' summed voluntary context switches
+ *    came to about K per release (measured 8478-9347 for K = 8, R = 200);
+ *    a targeted wake keeps it near 1 (207-208).  Asserted bound: K/2 per
+ *    release.  Needs 2+ CPUs (on one, the main thread's release runs the
+ *    woken waiter at once and the waiters rarely all sleep).  Readers are
+ *    not tested this way: an exclusive release SHOULD wake every sleeping
+ *    reader, since they can all enter together.
+ * 2. Spin before sleep (offloop_spin).  Two threads alternate on one lock
+ *    with ~2 us holds.  A waiter that sleeps at once (the old off-loop
+ *    path) pays a context switch on most contended acquires; one that
+ *    polls the lock briefly first takes it without sleeping.  Asserted:
+ *    fewer than 1 voluntary switch per 10 acquires.  Needs 2+ CPUs.
+ * Context switches are read per thread (RUSAGE_THREAD): Linux only.
+ * 3. Liveness + exclusion (arwlock_threads, offloop_timed_handoff):
+ *    every acquire is timed, so a lost wakeup fails instead of hanging.
+ */
+#if defined(__linux__) && defined(RUSAGE_THREAD)
+#define HERD_K 8
+#define HERD_R 200
+enum { HD_WR, HD_RD, HD_AM };
+static xtc_arwlock_t *g_hd_rw;
+static xtc_amutex_t  *g_hd_m;
+static _Atomic int    g_hd_ready, g_hd_stop, g_hd_got;
+static _Atomic long   g_hd_csw;
+
+static void
+hd_lock(int kind, int64_t to)
+{
+	int rc;
+	if (kind == HD_AM) rc = xtc_amutex_lock(g_hd_m, to);
+	else if (kind == HD_RD) rc = xtc_arwlock_rdlock(g_hd_rw, to);
+	else rc = xtc_arwlock_wrlock(g_hd_rw, to);
+	munit_assert_int(rc, ==, XTC_OK);
+}
+
+static void
+hd_unlock(int kind)
+{
+	if (kind == HD_AM) (void)xtc_amutex_unlock(g_hd_m);
+	else (void)xtc_arwlock_unlock(g_hd_rw);
+}
+
+static void *
+hd_waiter(void *arg)
+{
+	struct rusage u0, u1;
+	int kind = (int)(intptr_t)arg;
+	(void)getrusage(RUSAGE_THREAD, &u0);
+	atomic_fetch_add(&g_hd_ready, 1);
+	while (!atomic_load(&g_hd_stop)) {
+		hd_lock(kind, 30LL * 1000 * 1000 * 1000);
+		atomic_fetch_add(&g_hd_got, 1);
+		hd_unlock(kind);
+	}
+	(void)getrusage(RUSAGE_THREAD, &u1);
+	atomic_fetch_add(&g_hd_csw, u1.ru_nvcsw - u0.ru_nvcsw);
+	return NULL;
+}
+
+static long
+herd_run(int kind)
+{
+	pthread_t th[HERD_K];
+	int i;
+	g_hd_ready = 0; g_hd_stop = 0; g_hd_got = 0; g_hd_csw = 0;
+	hd_lock(kind, -1);
+	for (i = 0; i < HERD_K; i++)
+		munit_assert_int(pthread_create(&th[i], NULL, hd_waiter,
+		    (void *)(intptr_t)kind), ==, 0);
+	while (atomic_load(&g_hd_ready) < HERD_K)
+		(void)__os_sleep_ns(1000 * 1000);
+	(void)__os_sleep_ns(50LL * 1000 * 1000);   /* all asleep in the lock */
+	for (i = 0; i < HERD_R; i++) {
+		(void)__os_sleep_ns(1000 * 1000);
+		hd_unlock(kind);
+		hd_lock(kind, -1);
+	}
+	atomic_store(&g_hd_stop, 1);
+	hd_unlock(kind);
+	for (i = 0; i < HERD_K; i++)
+		(void)pthread_join(th[i], NULL);
+	munit_assert_int(atomic_load(&g_hd_got), >=, HERD_K);
+	return atomic_load(&g_hd_csw);
+}
+
+static MunitResult
+test_offloop_no_herd(const MunitParameter p[], void *d)
+{
+	static const char *name[] = { "arwlock wr", "arwlock rd", "amutex" };
+	long csw;
+	int kind;
+	(void)p; (void)d;
+	if (xtc_ncpus() < 2)
+		return MUNIT_SKIP;
+	munit_assert_int(xtc_arwlock_create(&g_hd_rw), ==, XTC_OK);
+	munit_assert_int(xtc_amutex_create(&g_hd_m), ==, XTC_OK);
+	for (kind = HD_WR; kind <= HD_AM; kind += 2) {
+		csw = herd_run(kind);
+		fprintf(stderr, "  %s: %ld waiter csw over %d releases\n",
+		    name[kind], csw, HERD_R);
+		munit_assert_long(csw, <=, (long)HERD_R * HERD_K / 2);
+	}
+	xtc_arwlock_destroy(g_hd_rw);
+	xtc_amutex_destroy(g_hd_m);
+	return MUNIT_OK;
+}
+
+#define SP_N 20000
+static _Atomic int  g_sp_go;
+static _Atomic long g_sp_csw;
+static volatile long g_sp_val;
+
+static void
+sp_burn(int n)
+{
+	volatile int k = 0;
+	int i;
+	for (i = 0; i < n; i++) k += i;
+}
+
+static void *
+sp_thread(void *arg)
+{
+	struct rusage u0, u1;
+	int kind = (int)(intptr_t)arg, i;
+	while (!atomic_load(&g_sp_go))
+		;
+	(void)getrusage(RUSAGE_THREAD, &u0);
+	for (i = 0; i < SP_N; i++) {
+		hd_lock(kind, 30LL * 1000 * 1000 * 1000);
+		g_sp_val++;
+		sp_burn(2000);                     /* ~2 us hold */
+		hd_unlock(kind);
+		sp_burn(1000);
+	}
+	(void)getrusage(RUSAGE_THREAD, &u1);
+	atomic_fetch_add(&g_sp_csw, u1.ru_nvcsw - u0.ru_nvcsw);
+	return NULL;
+}
+
+static MunitResult
+test_offloop_spin(const MunitParameter p[], void *d)
+{
+	static const char *name[] = { "arwlock wr", "arwlock rd", "amutex" };
+	pthread_t th[2];
+	int kind, i;
+	(void)p; (void)d;
+	if (xtc_ncpus() < 2)
+		return MUNIT_SKIP;
+	munit_assert_int(xtc_arwlock_create(&g_hd_rw), ==, XTC_OK);
+	munit_assert_int(xtc_amutex_create(&g_hd_m), ==, XTC_OK);
+	for (kind = HD_WR; kind <= HD_AM; kind += 2) {
+		g_sp_go = 0; g_sp_csw = 0; g_sp_val = 0;
+		for (i = 0; i < 2; i++)
+			munit_assert_int(pthread_create(&th[i], NULL, sp_thread,
+			    (void *)(intptr_t)kind), ==, 0);
+		atomic_store(&g_sp_go, 1);
+		for (i = 0; i < 2; i++)
+			(void)pthread_join(th[i], NULL);
+		fprintf(stderr, "  %s: %ld csw over %d acquires\n", name[kind],
+		    atomic_load(&g_sp_csw), 2 * SP_N);
+		munit_assert_long(g_sp_val, ==, 2L * SP_N);
+		munit_assert_long(atomic_load(&g_sp_csw), <, 2L * SP_N / 10);
+	}
+	xtc_arwlock_destroy(g_hd_rw);
+	xtc_amutex_destroy(g_hd_m);
+	return MUNIT_OK;
+}
+#endif
+
+#define ART_N    3000
+#define ART_WR   8
+#define ART_RD   8
+static xtc_arwlock_t *g_art;
+static _Atomic int g_art_inw, g_art_inr, g_art_viol, g_art_lost;
+static _Atomic long g_art_wcnt, g_art_rcnt;
+static volatile long g_art_val;
+
+static void *
+art_writer(void *arg)
+{
+	int i;
+	(void)arg;
+	for (i = 0; i < ART_N; i++) {
+		if (xtc_arwlock_wrlock(g_art, 10LL * 1000 * 1000 * 1000) != XTC_OK) {
+			atomic_fetch_add(&g_art_lost, 1);
+			break;
+		}
+		if (atomic_fetch_add(&g_art_inw, 1) != 0 ||
+		    atomic_load(&g_art_inr) != 0)
+			atomic_store(&g_art_viol, 1);
+		g_art_val++;
+		g_art_val++;
+		atomic_fetch_sub(&g_art_inw, 1);
+		(void)xtc_arwlock_unlock(g_art);
+		atomic_fetch_add(&g_art_wcnt, 1);
+	}
+	return NULL;
+}
+
+static void *
+art_reader(void *arg)
+{
+	int i;
+	long v;
+	(void)arg;
+	for (i = 0; i < ART_N; i++) {
+		if (xtc_arwlock_rdlock(g_art, 10LL * 1000 * 1000 * 1000) != XTC_OK) {
+			atomic_fetch_add(&g_art_lost, 1);
+			break;
+		}
+		atomic_fetch_add(&g_art_inr, 1);
+		if (atomic_load(&g_art_inw) != 0)
+			atomic_store(&g_art_viol, 1);
+		v = g_art_val;
+		if ((v & 1) != 0)
+			atomic_store(&g_art_viol, 1);
+		atomic_fetch_sub(&g_art_inr, 1);
+		(void)xtc_arwlock_unlock(g_art);
+		atomic_fetch_add(&g_art_rcnt, 1);
+	}
+	return NULL;
+}
+
+static MunitResult
+test_arwlock_threads(const MunitParameter p[], void *d)
+{
+	pthread_t th[ART_WR + ART_RD];
+	int i;
+	(void)p; (void)d;
+	g_art_viol = 0; g_art_lost = 0; g_art_wcnt = 0; g_art_rcnt = 0;
+	g_art_val = 0;
+	munit_assert_int(xtc_arwlock_create(&g_art), ==, XTC_OK);
+	for (i = 0; i < ART_WR; i++)
+		munit_assert_int(pthread_create(&th[i], NULL, art_writer, NULL),
+		    ==, 0);
+	for (i = 0; i < ART_RD; i++)
+		munit_assert_int(pthread_create(&th[ART_WR + i], NULL,
+		    art_reader, NULL), ==, 0);
+	for (i = 0; i < ART_WR + ART_RD; i++)
+		(void)pthread_join(th[i], NULL);
+	munit_assert_int(atomic_load(&g_art_viol), ==, 0);
+	munit_assert_int(atomic_load(&g_art_lost), ==, 0);
+	munit_assert_long(atomic_load(&g_art_wcnt), ==, (long)ART_WR * ART_N);
+	munit_assert_long(atomic_load(&g_art_rcnt), ==, (long)ART_RD * ART_N);
+	munit_assert_long(g_art_val, ==, 2L * ART_WR * ART_N);
+	xtc_arwlock_destroy(g_art);
+	return MUNIT_OK;
+}
+
+/*
+ * Timed off-loop waiters that give up must not strand the rest: 6
+ * threads take the amutex / the arwlock (exclusive) with a 1 ms timeout
+ * while the holder keeps it 0-3 ms, and retry on E_AGAIN; then all of
+ * them must still get it within a 10 s bound.  A timed-out waiter that
+ * had consumed the one in-flight wake without passing it on would leave
+ * the others asleep behind a free lock until their own deadline.
+ */
+#define TT_N 6
+static xtc_amutex_t  *g_tt_m;
+static xtc_arwlock_t *g_tt_rw;
+static _Atomic int    g_tt_ok, g_tt_bad;
+
+static void *
+tt_thread(void *arg)
+{
+	int am = (int)(intptr_t)arg, i, rc;
+	int64_t t0, t1;
+	for (i = 0; i < 300; i++) {
+		rc = am ? xtc_amutex_lock(g_tt_m, 1000 * 1000)
+		        : xtc_arwlock_wrlock(g_tt_rw, 1000 * 1000);
+		if (rc == XTC_E_AGAIN)
+			continue;
+		if (rc != XTC_OK) { atomic_fetch_add(&g_tt_bad, 1); break; }
+		(void)__os_sleep_ns((int64_t)(i % 4) * 1000 * 1000 / 4);
+		if (am) (void)xtc_amutex_unlock(g_tt_m);
+		else (void)xtc_arwlock_unlock(g_tt_rw);
+	}
+	(void)__os_clock_mono(&t0);
+	rc = am ? xtc_amutex_lock(g_tt_m, 10LL * 1000 * 1000 * 1000)
+	        : xtc_arwlock_wrlock(g_tt_rw, 10LL * 1000 * 1000 * 1000);
+	(void)__os_clock_mono(&t1);
+	if (rc != XTC_OK || t1 - t0 > 2LL * 1000 * 1000 * 1000) {
+		atomic_fetch_add(&g_tt_bad, 1);
+	} else {
+		atomic_fetch_add(&g_tt_ok, 1);
+		if (am) (void)xtc_amutex_unlock(g_tt_m);
+		else (void)xtc_arwlock_unlock(g_tt_rw);
+	}
+	return NULL;
+}
+
+static MunitResult
+test_offloop_timed_handoff(const MunitParameter p[], void *d)
+{
+	pthread_t th[TT_N];
+	int am, i;
+	(void)p; (void)d;
+	munit_assert_int(xtc_amutex_create(&g_tt_m), ==, XTC_OK);
+	munit_assert_int(xtc_arwlock_create(&g_tt_rw), ==, XTC_OK);
+	for (am = 0; am < 2; am++) {
+		g_tt_ok = 0; g_tt_bad = 0;
+		for (i = 0; i < TT_N; i++)
+			munit_assert_int(pthread_create(&th[i], NULL, tt_thread,
+			    (void *)(intptr_t)am), ==, 0);
+		for (i = 0; i < TT_N; i++)
+			(void)pthread_join(th[i], NULL);
+		munit_assert_int(atomic_load(&g_tt_bad), ==, 0);
+		munit_assert_int(atomic_load(&g_tt_ok), ==, TT_N);
+	}
+	munit_assert_int(xtc_amutex_try_lock(g_tt_m), ==, XTC_OK);
+	(void)xtc_amutex_unlock(g_tt_m);
+	munit_assert_int(xtc_arwlock_wrlock(g_tt_rw, 0), ==, XTC_OK);
+	(void)xtc_arwlock_unlock(g_tt_rw);
+	xtc_amutex_destroy(g_tt_m);
+	xtc_arwlock_destroy(g_tt_rw);
+	return MUNIT_OK;
+}
+
+/*
+ * Readers of DIFFERENT locks must not contend.  sqlxtc keeps one arwlock
+ * per buffer frame; when these objects were packed by malloc, the hot
+ * words of neighbouring locks shared cache lines, and 8 threads each
+ * reading its own page bounced them (the off-loop rewrite's larger
+ * object made it worse: test_snap_registry 8-thread read-only rate
+ * 1.89M -> 1.51M; aligned: 2.68M).  Each object now starts on a cache
+ * line; checked directly on 64 consecutively created locks of each kind
+ * (the behaviour itself is a performance property, measured by
+ * test_snap_registry and bench_sync_offloop, not asserted here).
+ */
+static MunitResult
+test_sync_objects_line_aligned(const MunitParameter p[], void *d)
+{
+	xtc_arwlock_t *rw[64];
+	xtc_amutex_t *am[64];
+	int i;
+	(void)p; (void)d;
+	for (i = 0; i < 64; i++) {
+		munit_assert_int(xtc_arwlock_create(&rw[i]), ==, XTC_OK);
+		munit_assert_int(xtc_amutex_create(&am[i]), ==, XTC_OK);
+	}
+	for (i = 0; i < 64; i++) {
+		munit_assert_size((uintptr_t)rw[i] % 64, ==, 0);
+		munit_assert_size((uintptr_t)am[i] % 64, ==, 0);
+	}
+	for (i = 0; i < 64; i++) {
+		xtc_arwlock_destroy(rw[i]);
+		xtc_amutex_destroy(am[i]);
+	}
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/amutex_recursive_exit", test_amutex_recursive_exit, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/amutex_recursive_thread", test_amutex_recursive_thread, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1322,6 +1689,13 @@ static MunitTest tests[] = {
 	{ "/amutex_fiber",        test_amutex_fiber,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/rwlock_basic",        test_rwlock_basic,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/arwlock_fiber",       test_arwlock_fiber,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/arwlock_threads",     test_arwlock_threads,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/offloop_timed_handoff", test_offloop_timed_handoff, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/objects_line_aligned", test_sync_objects_line_aligned, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+#if defined(__linux__) && defined(RUSAGE_THREAD)
+	{ "/offloop_no_herd",     test_offloop_no_herd,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/offloop_spin",        test_offloop_spin,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+#endif
 	{ "/barrier",             test_barrier,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/gate",                test_gate,                NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fiber_timeout_expiry", test_fiber_timeout_expiry, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
