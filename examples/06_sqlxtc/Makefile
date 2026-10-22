@@ -156,7 +156,7 @@ clean:
 	rm -f test_btree_loop
 	rm -f test_btree_mt
 	rm -f test_btree_stale_descent test_btree_limits test_btree_sample bench_morsel_balance
-	rm -f test_xs_ctr test_bm_reuse_version test_kill_stmt
+	rm -f test_xs_ctr test_bm_reuse_version test_kill_stmt test_cat_lock_shared
 	rm -f test_tpcc_seek test_dup_composite test_bulk_insert test_plan_cache
 	rm -f test_btree_delete_merge test_savepoint test_isolation test_ww_conflict test_row_intents test_commit_visibility test_ssi_skew test_ckpt_bound test_dup_insert test_recover_fast
 	rm -f test_vfs_loop test_vfs_loop.o
@@ -921,3 +921,12 @@ test_kill_stmt: test_kill_stmt.c $(ENGINE_NATIVE)
 
 test-kill-stmt: test_kill_stmt
 	TMPDIR=$${TMPDIR:-/tmp} ./test_kill_stmt
+
+# Warm statements of several connections sharing one OS thread (fibers
+# on a server loop) take no global catalog lock.
+test: test-cat-lock-shared
+test_cat_lock_shared: test_cat_lock_shared.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_cat_lock_shared.c $(ENGINE_NATIVE) $(LDFLAGS)
+
+test-cat-lock-shared: test_cat_lock_shared
+	TMPDIR=$${TMPDIR:-/tmp} ./test_cat_lock_shared

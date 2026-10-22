@@ -76,6 +76,7 @@ test_btree_limits
 test_xs_ctr
 test_bm_reuse_version
 test_kill_stmt
+test_cat_lock_shared
 test_btree_sample
 test_savepoint
 test_native_txn

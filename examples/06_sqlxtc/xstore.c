@@ -1204,6 +1204,7 @@ static struct xs_view_ent {
 	char  sql[1024];   /* the view's SELECT text */
 } g_view[XS_VIEW_MAX];
 static int g_view_n;
+static _Atomic int g_view_any;   /* set once any view exists (sticky) */
 
 /* Connection -> B-tree association, so a from-scratch executor driven
  * from a connection handle (xstore_bt_of) can open a storage-native
@@ -1218,22 +1219,32 @@ static int g_dbmap_n;
  * per-thread copy of the last entry is valid while the generation is
  * unchanged: an entry only changes at register / unregister. */
 static _Atomic uint64_t g_dbmap_gen = 1;
-static _Thread_local struct { uint64_t gen; struct xs_dbmap_ent e; } t_dbmap;
+/* A few entries per thread: in the server a loop thread runs several
+ * connection fibers, which with a one-entry cache evicted each other on
+ * every statement -- and every miss took the catalog lock (at 32
+ * connections on 8 loops most of the parked connection fibers were
+ * queued on it, a cross-loop hand-off per statement). */
+#define XS_TDBMAP_N 16
+static _Thread_local struct { uint64_t gen; struct xs_dbmap_ent e; } t_dbmap[XS_TDBMAP_N];
+static _Thread_local unsigned t_dbmap_next;
 
 static const struct xs_dbmap_ent *
 xs_dbmap_get(struct xsql *db)
 {
 	uint64_t g = atomic_load_explicit(&g_dbmap_gen, memory_order_acquire);
-	int i, found = 0;
-	if (t_dbmap.gen == g && t_dbmap.e.db == db) return &t_dbmap.e;
+	int i, k, found = 0;
+	for (k = 0; k < XS_TDBMAP_N; k++)
+		if (t_dbmap[k].gen == g && t_dbmap[k].e.db == db)
+			return &t_dbmap[k].e;
+	k = (int)(t_dbmap_next++ % XS_TDBMAP_N);
 	xs_cat_lock();
 	g = atomic_load_explicit(&g_dbmap_gen, memory_order_relaxed);
 	for (i = 0; i < g_dbmap_n; i++)
-		if (g_dbmap[i].db == db) { t_dbmap.e = g_dbmap[i]; found = 1; break; }
+		if (g_dbmap[i].db == db) { t_dbmap[k].e = g_dbmap[i]; found = 1; break; }
 	xs_cat_unlock();
 	if (!found) return NULL;
-	t_dbmap.gen = g;
-	return &t_dbmap.e;
+	t_dbmap[k].gen = g;
+	return &t_dbmap[k].e;
 }
 
 bt_t *
@@ -1631,7 +1642,14 @@ struct xs_idx_dead {
 };
 #define XS_IDX_DEAD_MAX 4096
 static struct xs_idx_dead g_idx_dead[XS_IDX_DEAD_MAX];
-static int g_idx_dead_n;
+static int g_idx_dead_n;      /* guarded by the commit lock */
+/* Its value for the unlocked "anything queued?" fast paths (a hint: the
+ * locked code re-reads g_idx_dead_n).  Written under the commit lock. */
+static _Atomic int g_idx_dead_hint;
+#define XS_IDX_DEAD_PUBLISH() atomic_store_explicit(&g_idx_dead_hint, \
+	g_idx_dead_n, memory_order_relaxed)
+#define XS_IDX_DEAD_HINT() atomic_load_explicit(&g_idx_dead_hint, \
+	memory_order_relaxed)
 
 static void
 xs_put_be64(uint8_t *p, uint64_t v)
@@ -1856,13 +1874,14 @@ xs_idx_dead_add(bt_t *bt, const struct xs_idx_rt *rt, int64_t rowid,
     uint64_t ts, const uint8_t *key, int klen)
 {
 	uint8_t *k;
-	if (g_idx_dead_n >= XS_IDX_DEAD_MAX || klen <= 0) return;
+	if (XS_IDX_DEAD_HINT() >= XS_IDX_DEAD_MAX || klen <= 0) return;
 	k = (uint8_t *)malloc((size_t)klen);
 	if (k == NULL) return;
 	memcpy(k, key, (size_t)klen);
 	xs_commit_lock();
 	if (g_idx_dead_n < XS_IDX_DEAD_MAX) {
 		struct xs_idx_dead *d = &g_idx_dead[g_idx_dead_n++];
+		XS_IDX_DEAD_PUBLISH();
 		d->bt = bt; d->ts = ts; d->idx_id = rt->idx_id;
 		d->tableid = rt->tableid; d->rowid = rowid;
 		d->klen = (uint16_t)klen; d->key = k;
@@ -1918,7 +1937,7 @@ xs_idx_reap(bt_t *bt)
 	struct xs_idx_rt rt;
 	uint64_t hz;
 	int i, nb = 0;
-	if (g_idx_dead_n == 0) return;
+	if (XS_IDX_DEAD_HINT() == 0) return;
 	hz = snap_horizon(xs_visible());
 	xs_commit_lock();
 	for (i = 0; i < g_idx_dead_n && nb < 32; ) {
@@ -1929,6 +1948,7 @@ xs_idx_reap(bt_t *bt)
 			i++;
 		}
 	}
+	XS_IDX_DEAD_PUBLISH();
 	xs_commit_unlock();
 	for (i = 0; i < nb; i++) {
 		struct xs_idx_dead *d = &batch[i];
@@ -1970,6 +1990,7 @@ xs_idx_dead_forget(bt_t *bt)
 			i++;
 		}
 	}
+	XS_IDX_DEAD_PUBLISH();
 	xs_commit_unlock();
 }
 
@@ -5132,7 +5153,7 @@ xstore_stmt_end(struct xsql *db)
 		xs_pin_recompute(cx);    /* drop the statement's pin */
 		/* A write's own commit queued index entries its pin kept
 		 * from the reap at that commit: reap them now, as before. */
-		if (cx->stmt_puts > 0 && g_idx_dead_n > 0)
+		if (cx->stmt_puts > 0 && XS_IDX_DEAD_HINT() > 0)
 			xs_idx_reap(cx->bt);
 	}
 }
@@ -6068,6 +6089,8 @@ xstore_create_view(struct xsql *db, const char *name, const char *select_sql)
 		snprintf(v->sql, sizeof v->sql, "%s", select_sql);
 		rc = 1;
 	}
+	if (rc)
+		atomic_store_explicit(&g_view_any, 1, memory_order_release);
 	xs_cat_unlock();
 	return rc;
 }
@@ -6079,6 +6102,12 @@ xstore_view_sql(bt_t *bt, const char *name, char *out, int cap)
 {
 	int i, rc = 0;
 	if (bt == NULL || name == NULL || out == NULL || cap <= 0) return 0;
+	/* No view was ever created (the common case): no lock.  The flag is
+	 * set (under the cat lock) before CREATE VIEW returns, so a lookup
+	 * that starts after it sees the view; a lookup racing the CREATE is
+	 * equivalent to running just before it. */
+	if (atomic_load_explicit(&g_view_any, memory_order_acquire) == 0)
+		return 0;
 	xs_cat_lock();
 	for (i = 0; i < g_view_n; i++)
 		if (g_view[i].bt == bt && strcasecmp(g_view[i].name, name) == 0) {
@@ -6624,9 +6653,27 @@ int
 xstore_index_list(bt_t *bt, const char *table, xstore_index_info_t *out,
     int cap)
 {
-	int i, c, n = 0;
+	/* This thread's last few answers, valid while g_catc_gen is
+	 * unchanged (every index create / drop / rebuild bumps it): the
+	 * planner asks per write statement, and taking the catalog lock for
+	 * it queued every connection of a busy server on that lock. */
+	static _Thread_local struct {
+		uint64_t gen; bt_t *bt; char table[64]; int n;
+		xstore_index_info_t ix[8];
+	} tc[4];
+	static _Thread_local unsigned tnext;
+	uint64_t g;
+	int i, c, n = 0, k;
 	if (bt == NULL || table == NULL || out == NULL) return 0;
+	g = atomic_load_explicit(&g_catc_gen, memory_order_acquire);
+	for (k = 0; k < 4; k++)
+		if (tc[k].gen == g && tc[k].bt == bt && tc[k].n <= cap &&
+		    strcasecmp(tc[k].table, table) == 0) {
+			memcpy(out, tc[k].ix, sizeof out[0] * (size_t)tc[k].n);
+			return tc[k].n;
+		}
 	xs_cat_lock();
+	g = atomic_load_explicit(&g_catc_gen, memory_order_relaxed);
 	for (i = 0; i < g_idx_n && n < cap; i++) {
 		if (g_idx[i].bt != bt || strcasecmp(g_idx[i].table, table) != 0 ||
 		    g_idx[i].rt.tableid == 0)
@@ -6644,19 +6691,43 @@ xstore_index_list(bt_t *bt, const char *table, xstore_index_info_t *out,
 		n++;
 	}
 	xs_cat_unlock();
+	if (n <= 8 && strlen(table) < sizeof tc[0].table) {
+		k = (int)(tnext++ % 4u);
+		tc[k].gen = g; tc[k].bt = bt; tc[k].n = n;
+		snprintf(tc[k].table, sizeof tc[k].table, "%s", table);
+		memcpy(tc[k].ix, out, sizeof out[0] * (size_t)n);
+	}
 	return n;
 }
 
 static int
 xs_idx_get_rt(bt_t *bt, uint32_t idx_id, struct xs_idx_rt *rt)
 {
+	/* This thread's last few, valid while g_catc_gen is unchanged: the
+	 * reap asks once per queued entry, which took the catalog lock once
+	 * per UPDATE of an indexed row. */
+	static _Thread_local struct {
+		uint64_t gen; bt_t *bt; struct xs_idx_rt rt;
+	} tc[8];
+	static _Thread_local unsigned tnext;
+	uint64_t g = atomic_load_explicit(&g_catc_gen, memory_order_acquire);
 	int i, r = 0;
+	for (i = 0; i < 8; i++)
+		if (tc[i].gen == g && tc[i].bt == bt && tc[i].rt.idx_id == idx_id) {
+			*rt = tc[i].rt;
+			return 1;
+		}
 	xs_cat_lock();
+	g = atomic_load_explicit(&g_catc_gen, memory_order_relaxed);
 	for (i = 0; i < g_idx_n; i++)
 		if (g_idx[i].bt == bt && g_idx[i].rt.idx_id == idx_id) {
 			*rt = g_idx[i].rt; r = 1; break;
 		}
 	xs_cat_unlock();
+	if (r) {
+		i = (int)(tnext++ % 8u);
+		tc[i].gen = g; tc[i].bt = bt; tc[i].rt = *rt;
+	}
 	return r;
 }
 
