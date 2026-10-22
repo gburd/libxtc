@@ -92,6 +92,20 @@ static const struct rcase cases[] = {
 	  "WHERE h.x = g.x)", 0, { 0 }, 1, "2" },
 	{ "W8b", "SELECT sum((SELECT count(*) FROM a WHERE a.k = g.x)) FROM g",
 	  0, { 0 }, 1, "7" },
+	/* A bare column of a join / INTERSECT / EXCEPT keeps its affinity
+	 * when read as a derived table. */
+	{ "W9a", "SELECT k FROM (SELECT a.k FROM a JOIN b ON a.k = b.k) WHERE "
+	  "k = '1'", 0, { 0 }, 1, "1;1;1;1" },
+	{ "W9b", "SELECT w FROM (SELECT b.w FROM a JOIN b ON a.k = b.k) WHERE "
+	  "w > '150'", 0, { 0 }, 1, "200" },
+	{ "W9c", "SELECT q FROM (SELECT k AS q FROM a INTERSECT SELECT k FROM b) "
+	  "WHERE q = '1'", 0, { 0 }, 1, "1" },
+	{ "W9d", "SELECT q FROM (SELECT k AS q FROM a EXCEPT SELECT k FROM b) "
+	  "WHERE q = '3'", 0, { 0 }, 1, "3" },
+	/* +x and a CASE carry no affinity: no conversion against '1'. */
+	{ "W10a", "SELECT x FROM g WHERE +x = '1'", 0, { 0 }, 1, "" },
+	{ "W10b", "SELECT x FROM g WHERE CASE WHEN x > 0 THEN x END = '1'",
+	  0, { 0 }, 1, "" },
 	/* Aggregates over a derived table and over a join (were errors). */
 	{ "B1", "SELECT count(*) FROM (SELECT x FROM g GROUP BY x HAVING "
 	  "count(*) = 2)", 0, { 0 }, 1, "3" },
@@ -194,17 +208,17 @@ main(int argc, char **argv)
 		int pass = (strcmp(c->want, "ERR") == 0) ? (r != 0)
 		    : (r == 0 && strcmp(got, c->want) == 0);
 		if (pass && c->open && !strict) {
-			printf("  XPASS %-4s %s  (fixed: drop its OPEN mark)\n", c->id,
+			printf("  XPASS %-5s %s  (fixed: drop its OPEN mark)\n", c->id,
 			    c->sql);
 			nfail++;
 		} else if (pass) {
 			nok++;
 		} else if (c->open && !strict) {
-			printf("  open  %-4s %s\n        got  %s\n        want %s\n",
+			printf("  open  %-5s %s\n        got  %s\n        want %s\n",
 			    c->id, c->sql, r ? "ERR" : got, c->want);
 			nopen++;
 		} else {
-			printf("  FAIL  %-4s %s\n        got  %s\n        want %s\n",
+			printf("  FAIL  %-5s %s\n        got  %s\n        want %s\n",
 			    c->id, c->sql, r ? "ERR" : got, c->want);
 			nfail++;
 		}
