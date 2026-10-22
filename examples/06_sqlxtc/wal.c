@@ -296,6 +296,7 @@ struct wal_slot {                   /* completion of one LSN */
 struct wal_waiter {
 	uint64_t           need;        /* position that must be durable */
 	int                baton;       /* handed the leadership */
+	int                fiber;       /* waits on a proc */
 	xtc_notify_t      *n;
 	struct wal_waiter *next;
 };
@@ -547,23 +548,59 @@ wal_advance_copied(wal_t *w)
 	}
 }
 
-/* fl_mu held: wake every waiter `durable` covers and, if any waiter is
- * left, hand ONE of them the leadership. */
+/* fl_mu held on entry and exit: wake every waiter `durable` covers and,
+ * if any waiter is left, hand ONE of them the leadership.
+ *
+ * The waiters are unlinked under fl_mu and signalled after it is
+ * dropped.  Signalling every covered waiter under fl_mu (a thread's
+ * signal is a futex wake, ~3 us), the baton last, kept the log idle for
+ * most of each round: at 64 threads the gap between one fdatasync and the
+ * next pwrite was 68 us against 41 us of I/O.  Order, measured with
+ * bench_wal: fiber waiters and the first WAL_WAKE_FIRST thread waiters
+ * before the baton (they re-append in time to join the next batch: the
+ * baton first lost 15% at 4 threads and 10% at 64 fibers), then the
+ * baton, then the other threads, whose wakes no longer delay the next
+ * flush (32 threads: 282k commits/s against 125k).  An unlinked waiter is
+ * touched only by its own committer once signalled, so the lists are
+ * complete before the first signal. */
+#define WAL_WAKE_FIRST 2
 static void
 wal_wake_locked(wal_t *w, uint64_t durable, int give_baton)
 {
-	struct wal_waiter **pp = &w->wq, *q;
-	while ((q = *pp) != NULL && q->need <= durable) {
-		*pp = q->next;
-		(void)xtc_notify_signal(q->n);
+	struct wal_waiter *q, *now = NULL, *later = NULL, *bat = NULL;
+	struct wal_waiter **nt = &now, **lt = &later;
+	int k = 0;
+	while ((q = w->wq) != NULL && q->need <= durable) {
+		w->wq = q->next;
+		q->next = NULL;
+		if (q->fiber || k++ < WAL_WAKE_FIRST) {
+			*nt = q;
+			nt = &q->next;
+		} else {
+			*lt = q;
+			lt = &q->next;
+		}
 	}
 	if (give_baton && w->wq != NULL && !w->flushing) {
-		w->wq->baton = 1;
+		bat = w->wq;
+		bat->baton = 1;
 		w->flushing = 1;             /* counted for the baton holder */
-		q = w->wq;
-		w->wq = q->next;
+		w->wq = bat->next;
+	}
+	if (now == NULL && bat == NULL && later == NULL)
+		return;
+	wal_unlock(&w->fl_mu);
+	while ((q = now) != NULL) {
+		now = q->next;
 		(void)xtc_notify_signal(q->n);
 	}
+	if (bat != NULL)
+		(void)xtc_notify_signal(bat->n);
+	while ((q = later) != NULL) {
+		later = q->next;
+		(void)xtc_notify_signal(q->n);
+	}
+	wal_lock(&w->fl_mu);
 }
 
 /*
@@ -712,6 +749,7 @@ wal_wait_locked(wal_t *w, uint64_t need)
 	}
 	q->need = need;
 	q->baton = 0;
+	q->fiber = !xtc_pid_is_none(xtc_self());
 	for (pp = &w->wq; *pp != NULL && (*pp)->need <= need; pp = &(*pp)->next)
 		;
 	q->next = *pp;

@@ -143,7 +143,7 @@ clean:
 	rm -f test_clean_restart test_dw_fail
 	rm -f test_steal
 	rm -f test_steal_page
-	rm -f test_wal_kill test_wal_tail test_wal_kill_engine
+	rm -f test_wal_kill test_wal_tail test_wal_kill_engine bench_wal
 	rm -f test_steal_leaf test_cat_reopen test_ckpt_online test_wal_group_sync test_intents_thread test_torn_base test_snap_registry test_rowid_minmax test_btree_fill test_wal_bigtxn test_steal_reclaim test_dio_restart test_wal_prealloc
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o test_bufmgr_dio test_bufmgr_dio.o
 	rm -f test_bufmgr_mt
@@ -728,6 +728,10 @@ test_wal_group_sync: test_wal_group_sync.c wal.o
 
 test-wal-group-sync: test_wal_group_sync
 	TMPDIR=$${TMPDIR:-/tmp} ./test_wal_group_sync
+
+# Group-commit microbenchmark (not part of make test).
+bench_wal: bench_wal.c wal.c wal.h
+	$(CC) $(CFLAGS) -o $@ bench_wal.c wal.c $(LDFLAGS)
 
 test_intents_thread: test_intents_thread.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
 	$(CC) $(CFLAGS) -o $@ test_intents_thread.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
