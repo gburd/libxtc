@@ -2,7 +2,7 @@
  * Copyright (c) 2026, The XTC Project
  * Use of this source code is governed by the ISC License.
  *
- * test/m3/test_timer.c -- verifies M3_CLAIMS.md Tm5-Tm10.
+ * test/m3/test_timer.c -- verifies M3_CLAIMS.md Tm5-Tm10, and Tm11-Tm15.
  */
 
 #include <stdint.h>
@@ -616,6 +616,80 @@ test_future_timeout_reclaimed(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* [Tm15] The heap array holds {deadline, node} slots: after churn (arms
+ * with many equal deadlines, owner-thread cancels from the middle, fires)
+ * every slot's key must equal its node's deadline, every node's heap_idx
+ * must name its slot, and every parent must be <= its children.  A stale
+ * slot key would fire a timer at the wrong time; a wrong heap_idx would
+ * make a cancel remove the wrong node. */
+#define TM15_N 4096
+static xtc_loop_t *g_tm15_loop;
+static xtc_timer_t *g_tm15_h[TM15_N];
+static int g_tm15_fired;
+static void tm15_cb(void *u) { (void)u; g_tm15_fired++; }
+
+static void
+tm15_check(xtc_loop_t *loop)
+{
+	int i;
+	for (i = 0; i < loop->n_timers; i++) {
+		munit_assert_int(loop->timers[i].t->heap_idx, ==, i);
+		munit_assert_int64(loop->timers[i].deadline_ns, ==,
+		    loop->timers[i].t->deadline_ns);
+		if (i > 0)
+			munit_assert_int64(loop->timers[(i - 1) / 2].deadline_ns,
+			    <=, loop->timers[i].deadline_ns);
+	}
+}
+
+static void
+tm15_proc(void *a)
+{
+	int i, live = 0;
+	(void)a;
+	/* 64 distinct delays, so most deadlines tie with others; the first
+	 * 256 are due almost at once. */
+	for (i = 0; i < TM15_N; i++) {
+		int64_t d = i < 256 ? 1000 :
+		    XTC_NS_PER_SEC + (int64_t)((i * 7919) % 64) * XTC_NS_PER_MS;
+		munit_assert_int(xtc_timer_set(g_tm15_loop, d, tm15_cb, NULL,
+		    &g_tm15_h[i]), ==, XTC_OK);
+	}
+	tm15_check(g_tm15_loop);
+	for (i = 256; i < TM15_N; i += 3)
+		munit_assert_int(xtc_timer_cancel(g_tm15_h[i]), ==, XTC_OK);
+	tm15_check(g_tm15_loop);
+	(void)xtc_proc_sleep(XTC_NS_PER_MS);   /* the first 256 fire */
+	munit_assert_int(g_tm15_fired, ==, 256);
+	tm15_check(g_tm15_loop);
+	for (i = 256; i < TM15_N; i++)
+		if ((i - 256) % 3 != 0)
+			live++;
+	munit_assert_int(g_tm15_loop->n_timers, ==, live);
+	for (i = 0; i < TM15_N; i++) {
+		munit_assert_int(xtc_timer_cancel(g_tm15_h[i]), ==, XTC_OK);
+		if (i % 512 == 0)
+			tm15_check(g_tm15_loop);
+		munit_assert_int(xtc_timer_release(g_tm15_h[i]), ==, XTC_OK);
+	}
+	munit_assert_int(g_tm15_loop->n_timers, ==, 0);
+}
+
+static MunitResult
+test_heap_slots_consistent(const MunitParameter p[], void *d)
+{
+	xtc_pid_t pid;
+	(void)p; (void)d;
+	g_tm15_fired = 0;
+	munit_assert_int(xtc_loop_init(&g_tm15_loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(g_tm15_loop, tm15_proc, NULL, NULL,
+	    &pid), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(g_tm15_loop), ==, XTC_OK);
+	munit_assert_int(g_tm15_fired, ==, 256);
+	munit_assert_int(xtc_loop_fini(g_tm15_loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/Tm5_basic",            test_timer_basic,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Tm6_order",            test_order,              NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -630,6 +704,7 @@ static MunitTest tests[] = {
 	{ "/Tm13_cancel_removes_timed_recv", test_cancel_removes_timed_recv, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Tm14_timer_set_reclaimed",   test_timer_set_reclaimed,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Tm14_future_timeout_reclaimed", test_future_timeout_reclaimed, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Tm15_heap_slots_consistent", test_heap_slots_consistent, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m3/timer", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

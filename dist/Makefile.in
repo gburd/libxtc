@@ -920,6 +920,11 @@ bench_timer_scale: $(srcdir)/../bench/bench_timer_scale.c $(STATIC_LIB)
 		-o $@ $(srcdir)/../bench/bench_timer_scale.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+# Timer-queue candidates on timer traces; standalone (no libxtc link).
+bench_timerq: $(srcdir)/../bench/bench_timerq.c
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../bench/bench_timerq.c $(LDFLAGS)
+
 bench_xproc_fanout: $(srcdir)/../bench/bench_xproc_fanout.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../bench/bench_xproc_fanout.c \

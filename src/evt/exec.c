@@ -889,13 +889,18 @@ xtc_sim_check(xtc_exec_t *e)
 		 * is <= its children's, so the earliest deadline sits at index
 		 * 0 (what the scheduler reads to advance the virtual clock).  A
 		 * violated root means a broken sift, which would make the
-		 * scheduler advance the clock to the wrong time. */
+		 * scheduler advance the clock to the wrong time.  The root
+		 * slot's key must also still be its node's deadline (a node
+		 * re-timed while queued would fire at the stale key). */
+		if (l->n_timers >= 1 && l->timers != NULL &&
+		    l->timers[0].deadline_ns != l->timers[0].t->deadline_ns)
+			return XTC_E_INTERNAL;
 		if (l->n_timers >= 2 && l->timers != NULL) {
-			int64_t top = l->timers[0]->deadline_ns;
-			if (l->timers[1]->deadline_ns < top)
+			int64_t top = l->timers[0].deadline_ns;
+			if (l->timers[1].deadline_ns < top)
 				return XTC_E_INTERNAL;
 			if (l->n_timers >= 3 &&
-			    l->timers[2]->deadline_ns < top)
+			    l->timers[2].deadline_ns < top)
 				return XTC_E_INTERNAL;
 		}
 		/* Slow-path FIFO run-queue coherence: head NULL iff tail NULL
