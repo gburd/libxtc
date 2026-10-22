@@ -496,11 +496,44 @@ uint64_t xstore_intent_wait_ns(void);    /* total nap time of those waits */
  * took the index rather than a full table scan). */
 uint64_t xstore_index_seek_count(void);
 
-/* Rebuild every catalog-recorded index for `bt` from its base rows.
- * Called at storage open (after the base is recovered / trusted) so
- * derived index entries are always consistent with durable base data,
- * regardless of whether index pages were flushed before a crash.
- * Returns 0. */
+/* Rebuild every catalog-recorded index for `bt` from its base rows
+ * (clearing the old entries first).  Returns 0. */
 int xstore_index_rebuild_all(bt_t *bt);
+
+/*
+ * Index trust across a clean restart.  At a clean close the engine calls
+ * xstore_index_close (reaps the queued superseded entries; returns how
+ * many superseded entries the run left in the tree, carried over from
+ * the open) and records it with xstore_index_trust_tag in the superblock:
+ * the tag is nonzero only when every index entry insert of the run
+ * succeeded and every index was maintained, coded with the entry format.
+ * At open the engine hands both back to xstore_index_open: the matching
+ * tag on a trusted base, with little garbage, loads the index catalog and
+ * keeps the entries (returns 1); anything else -- 0 after a crash, a
+ * tainted run, another format, too many stale entries -- rebuilds every
+ * index (returns 0).  fresh = 1: the tree was rebuilt from the log on an
+ * empty page file (no entries to clear).  A rebuild runs one index per
+ * thread on up to `workers` threads (the caller and blocking-pool
+ * workers; 1 under simulation).  Each pins a few frames at a time, so
+ * size it to the buffer pool.
+ */
+uint64_t xstore_index_trust_tag(bt_t *bt);
+int      xstore_index_open(bt_t *bt, uint64_t tag, uint64_t garbage, int fresh,
+    int workers);
+uint64_t xstore_index_close(bt_t *bt);
+/* Full rebuilds run so far (metric; tests prove a trusted reopen does none). */
+uint64_t xstore_index_rebuild_count(void);
+/* Check every index against the base: *missing = live rows with no entry
+ * (wrong answers), *stale = entries no row's newest version carries
+ * (harmless).  Quiesced only.  Returns the number of indexes checked. */
+int      xstore_index_check(bt_t *bt, uint64_t *missing, uint64_t *stale);
+/* Test hook: the next n index entry inserts fail (as bt_insert can). */
+void     xstore_index_fail_inject(int n);
+
+/* xstore_recover that also reports where the log ends after recovery
+ * (wal_scan_ex form; tail->valid = 0 if unknown), so the engine's
+ * wal_open need not scan the log a second time. */
+struct wal_tail;
+int xstore_recover_ex(bt_t *bt, const char *wal_path, struct wal_tail *tail);
 
 #endif /* SQLXTC_XSTORE_H */

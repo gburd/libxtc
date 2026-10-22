@@ -422,7 +422,10 @@ sx_wal_flush_cb(void *ctx, uint64_t lsn)
  *   place, restore the commit clock from the superblock, and skip
  *   recovery entirely.  This is the ARIES clean-restart case (no
  *   losers, nothing to redo).  The flag is cleared and fsync'd before
- *   any work, so a crash from here on falls back to a rebuild.
+ *   any work, so a crash from here on falls back to a rebuild.  The
+ *   secondary indexes are trusted too when the close recorded them
+ *   complete (SX_SUP_IDX), and the log is reopened at the end the close
+ *   recorded (SX_SUP_TAIL_*) instead of being scanned.
  *
  *   Crash recovery (rebuild): otherwise the base may be structurally
  *   torn by partial mid-SMO eviction, so it is discarded and the tree
@@ -434,6 +437,22 @@ sx_wal_flush_cb(void *ctx, uint64_t lsn)
  */
 static int g_storage_direct = 0;
 static int g_storage_adaptive = 0;
+
+/* Superblock words (bt_set_ext) a clean close records and the next open
+ * reads: the index trust tag (xstore_index_trust_tag) and where the log
+ * ends (a wal_tail_t; TAIL_END 0 with TAIL_LSN 0 = none recorded).  A
+ * store from before them reads zeros: rebuild the indexes, scan the log. */
+#define SX_SUP_IDX       0
+#define SX_SUP_TAIL_END  1
+#define SX_SUP_TAIL_LAST 2
+#define SX_SUP_TAIL_LSN  3
+#define SX_SUP_TAIL_OK   4   /* 1: the three words above are a tail */
+#define SX_SUP_IDX_GARB  5   /* stale index entries left (xstore_index_close) */
+
+/* The log's last LSN once the open finished: the log is then a compacted
+ * dump of the base (the last clean close's, or the open's own after a
+ * recovery), so a close that finds no frame appended since can keep it. */
+static uint64_t g_open_lsn;
 
 /* Configure direct I/O + adaptive writeback for the next sx_storage_open. */
 /* CLOCK sweep bound for the next sx_storage_open (bm_opts_t
@@ -461,9 +480,10 @@ sx_storage_open(const char *path, unsigned int n_frames)
 {
 	bm_opts_t o = BM_OPTS_DEFAULT;
 	wal_opts_t wo;
+	wal_tail_t tail;
 	const char *dpath = (path && path[0]) ? path : "sqlxtc.xdb";
-	uint64_t clean = 0, clock = 0;
-	int trusted = 0;
+	uint64_t clean = 0, clock = 0, idxtag = 0, idxgarb = 0;
+	int trusted = 0, i;
 
 	if (g_xbt != NULL)
 		return SX_OK;                 /* already open */
@@ -508,7 +528,20 @@ sx_storage_open(const char *path, unsigned int n_frames)
 		if (!trusted) { bm_destroy(g_xbm); g_xbm = NULL; }
 	}
 
+	memset(&tail, 0, sizeof tail);
 	if (trusted) {
+		idxtag = bt_get_ext(g_xbt, SX_SUP_IDX);
+		idxgarb = bt_get_ext(g_xbt, SX_SUP_IDX_GARB);
+		if (bt_get_ext(g_xbt, SX_SUP_TAIL_OK) == 1) {
+			tail.valid = 1;
+			tail.end = bt_get_ext(g_xbt, SX_SUP_TAIL_END);
+			tail.last_off = bt_get_ext(g_xbt, SX_SUP_TAIL_LAST);
+			tail.max_lsn = bt_get_ext(g_xbt, SX_SUP_TAIL_LSN);
+		}
+		/* Cleared with the clean flag: a crash from here on must not
+		 * trust the indexes or the old tail. */
+		for (i = 0; i < BT_SUPER_EXT; i++)
+			bt_set_ext(g_xbt, i, 0);
 		xstore_set_clock(clock);          /* restore the commit clock */
 		bt_set_meta(g_xbt, 0, clock);     /* mark dirty: a crash now rebuilds */
 		/* The cleared flag MUST be durable before any change: otherwise
@@ -537,7 +570,7 @@ sx_storage_open(const char *path, unsigned int n_frames)
 		 * The checkpoint below makes the log compact and durable before
 		 * any new commit.
 		 */
-		(void)xstore_recover(g_xbt, g_xwal_path);  /* replay the log */
+		(void)xstore_recover_ex(g_xbt, g_xwal_path, &tail);  /* replay */
 	}
 
 	/* Open the log (append past whatever is there). */
@@ -546,6 +579,7 @@ sx_storage_open(const char *path, unsigned int n_frames)
 	wo.window_ns = 500LL * 1000;       /* 0.5ms group-commit window */
 	wo.max_batch = 256;
 	wo.append = 1;
+	wo.tail = &tail;                   /* verified in O(1); else a scan */
 	if (wal_open(&wo, &g_xwal) != XTC_OK) {
 		bt_close(g_xbt); g_xbt = NULL;
 		bm_destroy(g_xbm); g_xbm = NULL;
@@ -560,11 +594,19 @@ sx_storage_open(const char *path, unsigned int n_frames)
 	 * shutdown, so leave it. */
 	if (!trusted)
 		(void)xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal, g_xwal_path);
-	/* Secondary indexes are DERIVED data not carried by the WAL body:
-	 * load the persisted index catalog and rebuild every index's entries
-	 * from the (now durable) base rows, so a torn or trusted-but-stale
-	 * index page is never relied upon. */
-	(void)xstore_index_rebuild_all(g_xbt);
+	g_open_lsn = wal_failed(g_xwal) ? 0 : wal_durable_lsn(g_xwal);
+	/* Secondary indexes are DERIVED data not carried by the WAL body.  A
+	 * clean close that left them complete (the trust tag) lets the
+	 * trusted base keep them; otherwise every index is rebuilt from the
+	 * base rows (on a log rebuild the page file is fresh: nothing to
+	 * clear). */
+	/* A rebuild runs one index per thread; each pins a descent path of
+	 * frames at a time, so a small pool gets one thread. */
+	i = xtc_ncpus();
+	if (i > 16) i = 16;
+	if ((unsigned)i > o.n_frames / 1024u) i = (int)(o.n_frames / 1024u);
+	(void)xstore_index_open(g_xbt, trusted ? idxtag : 0, idxgarb, !trusted,
+	    i);
 	return SX_OK;
 }
 
@@ -655,6 +697,8 @@ sx_storage_quiesce(void)
 int
 sx_storage_close(void)
 {
+	wal_tail_t tail;
+	uint64_t garb = 0;
 	int ok = 1;
 
 	if (g_xrunning) {
@@ -675,20 +719,43 @@ sx_storage_close(void)
 	 * open rebuilds from the (complete) log -- always safe.  A crash
 	 * anywhere before the marker is durable has the same effect.
 	 */
+	memset(&tail, 0, sizeof tail);
 	if (g_xbt != NULL && g_xbm != NULL) {
 		if (g_xwal != NULL && wal_failed(g_xwal))
 			ok = 0;                    /* do not trust anything after an I/O error */
+		/* Reap the queued superseded index entries before the flush, so
+		 * the base the next open trusts carries no queued garbage. */
+		if (ok)
+			garb = xstore_index_close(g_xbt);
 		if (ok && bm_checkpoint(g_xbm) != XTC_OK)   /* flush all dirty pages + fsync */
 			ok = 0;
+		/* Compact the log -- unless nothing was logged since the open,
+		 * when it still is the compacted dump of this base: rewriting it
+		 * reads the whole base (13 s on a cold TPC-C W=10 store).  Kept
+		 * only if its end is known, so the next open need not scan it
+		 * (an open that scanned the log does not know it). */
 		if (ok && g_xwal != NULL &&
+		    (g_open_lsn == 0 || wal_durable_lsn(g_xwal) != g_open_lsn ||
+		    wal_get_tail(g_xwal, &tail) != XTC_OK) &&
 		    xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal,
 		    g_xwal_path) != XTC_OK)
 			ok = 0;
+		/* Where the compacted log ends, for the next open (no scan). */
+		if (ok && g_xwal != NULL)
+			(void)wal_get_tail(g_xwal, &tail);
 		bm_set_wal_flush(g_xbm, NULL, NULL);   /* drop the hook before closing the log */
 	}
 	xstore_set_wal(NULL);
 	if (g_xwal != NULL) { wal_close(g_xwal); g_xwal = NULL; }
 	if (ok && g_xbt != NULL && g_xbm != NULL) {
+		/* Written in the same superblock write as the clean flag, so
+		 * they are trusted exactly when it is. */
+		bt_set_ext(g_xbt, SX_SUP_IDX, xstore_index_trust_tag(g_xbt));
+		bt_set_ext(g_xbt, SX_SUP_IDX_GARB, garb);
+		bt_set_ext(g_xbt, SX_SUP_TAIL_OK, tail.valid ? 1 : 0);
+		bt_set_ext(g_xbt, SX_SUP_TAIL_END, tail.valid ? tail.end : 0);
+		bt_set_ext(g_xbt, SX_SUP_TAIL_LAST, tail.valid ? tail.last_off : 0);
+		bt_set_ext(g_xbt, SX_SUP_TAIL_LSN, tail.valid ? tail.max_lsn : 0);
 		bt_set_meta(g_xbt, 1, xstore_clock());  /* base is consistent up to here */
 		if (bt_write_super(g_xbt) != XTC_OK || bm_sync(g_xbm) != XTC_OK)
 			ok = 0;                    /* marker may be torn: next open rebuilds */

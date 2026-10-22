@@ -37,6 +37,7 @@
 typedef struct wal wal_t;
 
 #define WAL_HAVE_FAILSTOP 1   /* wal_failed(); commits fail-stop on I/O error */
+#define WAL_HAVE_TAIL 1       /* wal_tail_t, wal_scan_ex, wal_get_tail */
 
 /*
  * Where a log ends: the offset just past its last complete frame, the
@@ -136,6 +137,18 @@ int  wal_failed(const wal_t *w);
 
 /* Bytes of complete records in the log (the append offset). */
 uint64_t wal_size(const wal_t *w);
+
+/*
+ * Where an open, quiesced log ends, in the form wal_scan_ex reports and
+ * wal_opts_t.tail takes, so a clean shutdown can record it and the next
+ * open need not scan.  XTC_OK with out->valid = 1 when nothing is in
+ * flight (every reserved byte durable, no direct write, not failed) and
+ * the handle knows where its last frame starts: after an append or a
+ * compaction on it, an open of an empty log or an open with a verified
+ * hint -- not after an open that scanned a non-empty log.  Otherwise
+ * XTC_E_AGAIN with valid = 0.
+ */
+int  wal_get_tail(wal_t *w, wal_tail_t *out);
 
 /* The highest LSN on stable storage (fsync'd).  Monotonic. */
 uint64_t wal_durable_lsn(const wal_t *w);

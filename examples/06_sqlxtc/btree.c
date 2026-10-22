@@ -118,6 +118,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include "xtc_sync.h"
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -232,6 +233,7 @@ struct bt {
 	_Atomic uint64_t  st_sample_pages; /* nodes read by bt_sample_keys */
 	uint64_t          meta_clean;  /* superblock clean flag (open/close only) */
 	uint64_t          meta_clock;  /* superblock commit clock (open/close only) */
+	uint64_t          meta_ext[BT_SUPER_EXT]; /* engine-opaque superblock words */
 	uint8_t          *smo_scratch; /* one page of scratch for internal split /
 	                               * merge rebuilds; used only under the SMO
 	                               * write lock (so one per tree suffices) --
@@ -515,18 +517,40 @@ struct bt_super {
 	uint64_t height;
 	uint64_t clean;          /* 1 if the base was cleanly shut down */
 	uint64_t commit_clock;   /* persisted MVCC commit clock at clean shutdown */
+	/* Appended later: a store written before them reads zeros here (page
+	 * 0 is zero-filled past the struct), and a page too small to hold
+	 * them keeps only the fields above. */
+	uint64_t ext[BT_SUPER_EXT];   /* engine-opaque (bt_set_ext) */
 };
+#define BT_SUPER_V1 offsetof(struct bt_super, ext)   /* the original size */
+
 int
 bt_write_super(bt_t *bt)
 {
 	struct bt_super s;
+	memset(&s, 0, sizeof s);
 	s.magic = BT_SUPER_MAGIC;
 	s.page_size = bt->page_size;
 	s.root_pid = (uint64_t)atomic_load(&bt->root_pid);
 	s.height = atomic_load(&bt->st_height);
 	s.clean = bt->meta_clean;
 	s.commit_clock = bt->meta_clock;
-	return bm_write_super(bt->bm, &s, sizeof s);
+	memcpy(s.ext, bt->meta_ext, sizeof s.ext);
+	return bm_write_super(bt->bm, &s,
+	    bt->page_size >= sizeof s ? sizeof s : BT_SUPER_V1);
+}
+
+void
+bt_set_ext(bt_t *bt, int i, uint64_t v)
+{
+	if (i >= 0 && i < BT_SUPER_EXT)
+		bt->meta_ext[i] = v;
+}
+
+uint64_t
+bt_get_ext(const bt_t *bt, int i)
+{
+	return (i >= 0 && i < BT_SUPER_EXT) ? bt->meta_ext[i] : 0;
 }
 
 void
@@ -751,7 +775,13 @@ bt_reopen(bm_t *bm, bt_t **out)
 		return XTC_E_NOMEM;
 	bt->bm = bm;
 	if (xtc_arwlock_create(&bt->smo) != XTC_OK) { free(bt); return XTC_E_NOMEM; }
-	if ((rc = bm_read_super(bm, &s, sizeof s)) != XTC_OK) {
+	memset(&s, 0, sizeof s);
+	rc = bm_read_super(bm, &s, sizeof s);
+	if (rc == XTC_E_INVAL) {         /* a page smaller than the struct */
+		memset(&s, 0, sizeof s);
+		rc = bm_read_super(bm, &s, BT_SUPER_V1);
+	}
+	if (rc != XTC_OK) {
 		xtc_arwlock_destroy(bt->smo);
 		free(bt);
 		return rc;
@@ -771,6 +801,9 @@ bt_reopen(bm_t *bm, bt_t **out)
 	atomic_store(&bt->st_height, s.height);
 	bt->meta_clean = s.clean;
 	bt->meta_clock = s.commit_clock;
+	if (s.page_size < sizeof s)      /* written without the ext words */
+		memset(s.ext, 0, sizeof s.ext);
+	memcpy(bt->meta_ext, s.ext, sizeof s.ext);
 	*out = bt;
 	return XTC_OK;
 }

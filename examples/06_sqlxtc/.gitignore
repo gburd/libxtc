@@ -27,6 +27,9 @@ test_pp_slice
 test_wal_prealloc
 test_wal_kill
 test_wal_tail
+test_wal_get_tail
+test_idx_trust
+test_crash_oracle
 test_wal_kill_engine
 test_dio_restart
 test_steal_reclaim

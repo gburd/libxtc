@@ -312,6 +312,8 @@ struct wal {
 	pthread_mutex_t    res_mu;
 	uint64_t           next_lsn;     /* last LSN handed out */
 	uint64_t           res_pos;      /* next record starts here */
+	uint64_t           last_pos;     /* the last frame starts here
+	                                  * (UINT64_MAX: unknown) */
 	int                direct;       /* a big record is being written
 	                                  * directly: reservations wait */
 	uint8_t           *ring;         /* WAL_RING bytes: positions mod size */
@@ -404,6 +406,7 @@ wal_reset_marks(wal_t *w, uint64_t pos, uint64_t lsn)
 {
 	w->off = (off_t)pos;
 	w->res_pos = pos;
+	w->last_pos = pos == 0 ? 0 : UINT64_MAX;   /* see wal_get_tail */
 	w->next_lsn = lsn;
 	w->copied_pos = pos;
 	w->copied_lsn = lsn;
@@ -418,7 +421,7 @@ wal_open(const wal_opts_t *opts, wal_t **out)
 {
 	wal_t *w;
 	off_t o = 0;
-	uint64_t maxlsn = 0;
+	uint64_t maxlsn = 0, last = UINT64_MAX;
 
 	if (opts == NULL || opts->path == NULL || out == NULL)
 		return XTC_E_INVAL;
@@ -439,6 +442,7 @@ wal_open(const wal_opts_t *opts, wal_t **out)
 		if (wal_tail_ok(w->fd, opts->tail)) {
 			o = (off_t)opts->tail->end;   /* trusted: no scan */
 			maxlsn = opts->tail->max_lsn;
+			last = opts->tail->last_off;
 		} else {
 			wal_scan_tail(w->fd, &o, &maxlsn);
 		}
@@ -456,6 +460,8 @@ wal_open(const wal_opts_t *opts, wal_t **out)
 	(void)pthread_mutex_init(&w->res_mu, NULL);
 	(void)pthread_mutex_init(&w->fl_mu, NULL);
 	wal_reset_marks(w, (uint64_t)o, maxlsn);
+	if (o != 0 && last != UINT64_MAX)
+		w->last_pos = last;           /* from the verified hint */
 	*out = w;
 	return XTC_OK;
 }
@@ -830,6 +836,7 @@ wal_append_direct(wal_t *w, const void *record, uint32_t len, uint64_t *end,
 	}
 	lsn = ++w->next_lsn;
 	start = w->res_pos;              /* == target: nobody reserved since */
+	w->last_pos = start;
 	w->res_pos = start + need;
 	w->off = (off_t)w->res_pos;
 	wal_unlock(&w->res_mu);
@@ -923,6 +930,7 @@ wal_append(wal_t *w, const void *record, uint32_t len, uint64_t *end, int *rc)
 	}
 	lsn = ++w->next_lsn;
 	start = w->res_pos;
+	w->last_pos = start;
 	w->res_pos += need;
 	w->off = (off_t)w->res_pos;
 	wal_unlock(&w->res_mu);
@@ -1111,6 +1119,7 @@ wal_sync_dir(const char *path)
 #define WAL_CMP_BUF (1u << 20)
 struct wal_cmp_ctx {
 	int fd; off_t off; uint64_t lsn; int err;
+	off_t last;                              /* the last frame starts here */
 	uint8_t *buf; size_t blen; off_t boff;   /* staged bytes start at boff */
 };
 
@@ -1163,6 +1172,7 @@ wal_cmp_emit(void *vctx, const void *payload, uint32_t len)
 	if (len)
 		wal_cmp_put(c, payload, len);
 	wal_cmp_put(c, trl, WAL_REC_CRC);
+	c->last = c->off;
 	c->off += (off_t)WAL_REC_HDR + (off_t)len + (off_t)WAL_REC_CRC;
 }
 
@@ -1182,7 +1192,7 @@ wal_checkpoint(wal_t *w, const char *path,
 	fd = open(tmp, O_RDWR | O_CREAT | O_TRUNC, 0600);
 	if (fd < 0)
 		return XTC_E_INTERNAL;
-	c.fd = fd; c.off = 0; c.err = 0;
+	c.fd = fd; c.off = 0; c.err = 0; c.last = 0;
 	c.blen = 0; c.boff = 0;
 	c.buf = malloc(WAL_CMP_BUF);
 	if (c.buf == NULL) {
@@ -1231,7 +1241,10 @@ wal_checkpoint(wal_t *w, const char *path,
 	}
 	/* Make the rename durable so a crash cannot resurrect the old log. */
 	wal_sync_dir(path);
-	return wal_rebind_at(w, path, c.off, c.lsn);
+	if (wal_rebind_at(w, path, c.off, c.lsn) != XTC_OK)
+		return XTC_E_INTERNAL;
+	w->last_pos = (uint64_t)c.last;
+	return XTC_OK;
 }
 
 /*
@@ -1404,6 +1417,8 @@ wal_ockpt_finish(wal_ock_t *k)
 	}
 	wal_sync_dir(k->path);
 	rc = wal_rebind_at(w, k->path, k->c.off, k->c.lsn);
+	if (rc == XTC_OK)
+		w->last_pos = (uint64_t)k->c.last;
 	k->tmp[0] = '\0';                /* renamed: nothing to unlink */
 	wal_ockpt_abort(k);              /* release the rest */
 	return rc;
@@ -1522,6 +1537,33 @@ uint64_t
 wal_size(const wal_t *w)
 {
 	return w == NULL ? 0 : (uint64_t)w->off;
+}
+
+int
+wal_get_tail(wal_t *w, wal_tail_t *out)
+{
+	if (out == NULL)
+		return XTC_E_INVAL;
+	memset(out, 0, sizeof *out);
+	if (w == NULL)
+		return XTC_E_INVAL;
+	wal_lock(&w->res_mu);
+	wal_lock(&w->fl_mu);
+	/* Quiesced only: every reserved byte durable, no direct write, not
+	 * failed -- then the file holds exactly the frames in [0, res_pos). */
+	if (!w->direct && !w->flushing && w->last_pos != UINT64_MAX &&
+	    !atomic_load_explicit(&w->failed, memory_order_acquire) &&
+	    atomic_load_explicit(&w->durable_off, memory_order_acquire) ==
+	    w->res_pos) {
+		out->valid = 1;
+		out->end = w->res_pos;
+		out->last_off = w->last_pos;
+		/* as a scan reports it: the last frame's LSN, 0 for none */
+		out->max_lsn = w->res_pos == 0 ? 0 : w->next_lsn;
+	}
+	wal_unlock(&w->fl_mu);
+	wal_unlock(&w->res_mu);
+	return out->valid ? XTC_OK : XTC_E_AGAIN;
 }
 
 int
