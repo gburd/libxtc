@@ -9,9 +9,11 @@
  *	for committers on fibers and plain threads alike.  See the comment
  *	above struct wal for the algorithm and where each part comes from
  *	(Berkeley DB, JE, InnoDB, the PostgreSQL async WAL series).  Writes
- *	and fdatasyncs go through libxtc async file I/O (xtc_aio): native
- *	io_uring completion where the leader runs on a capable loop, a
- *	blocking-pool offload elsewhere, inline off a loop.
+ *	go through libxtc async file I/O (xtc_aio): native io_uring
+ *	completion where the leader runs on a capable loop, a blocking-pool
+ *	offload elsewhere, inline off a loop.  The log fd is O_DSYNC, so a
+ *	flush is one write (wal_open_fd); the simulator keeps
+ *	write + fdatasync for its crash model.
  */
 
 #include "wal.h"
@@ -22,6 +24,7 @@
 #include "xtc_sync.h"     /* xtc_notify: waiters park (fiber) or block (thread) */
 #include "xtc_sim.h"      /* XTC_SIM_BUGGIFY -- DST pessimal batching (no-op in prod) */
 #include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
+#include "xtc_io.h"       /* xtc_io_backend_name */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -471,6 +474,7 @@ struct wal_waiter {
 
 struct wal {
 	int        fd;
+	int        dsync;            /* fd is O_DSYNC: see wal_open_fd */
 	/* The append offset (== res_pos), for wal_size: stored under res_mu,
 	 * read with no lock (the checkpoint proc polls it), so atomic. */
 	_Atomic uint64_t off;
@@ -584,6 +588,36 @@ wal_reset_marks(wal_t *w, uint64_t pos, uint64_t lsn)
 	atomic_store_explicit(&w->durable_lsn, lsn, memory_order_release);
 }
 
+/*
+ * Open the log for appending.  Outside the simulator the fd is O_DSYNC,
+ * so every write is durable when it returns and a flush is ONE write
+ * with no fdatasync.  On a fiber that is what matters: io_uring cannot
+ * fdatasync without punting it to a worker thread, and the second op
+ * made a fiber's commit cost 47 us against 31 us for the same O_DSYNC
+ * write (32-vCPU x86-64 host, local NVMe, XFS; on a plain thread the two
+ * cost the same).  Every write to the log fd -- the flush, the zero fill
+ * and a big record's direct writes -- is then synced by itself, so
+ * skipping the fdatasync loses nothing.  Under the simulator the log
+ * keeps write + fdatasync: its crash model makes bytes durable at an
+ * fdatasync, which is what the DST crash tests (and the planted
+ * skip-the-fdatasync bug) check.  *dsync says which one this fd is.
+ */
+static int
+wal_open_fd(const char *path, int flags, int *dsync)
+{
+	int fd;
+	*dsync = 0;
+#if defined(O_DSYNC)
+	if (strcmp(xtc_io_backend_name(), "sim") != 0 &&
+	    (fd = open(path, flags | O_DSYNC, 0600)) >= 0) {
+		*dsync = 1;
+		return fd;
+	}
+#endif
+	fd = open(path, flags, 0600);
+	return fd;
+}
+
 int
 wal_open(const wal_opts_t *opts, wal_t **out)
 {
@@ -596,8 +630,8 @@ wal_open(const wal_opts_t *opts, wal_t **out)
 	w = calloc(1, sizeof *w);
 	if (w == NULL)
 		return XTC_E_NOMEM;
-	w->fd = open(opts->path,
-	    O_RDWR | O_CREAT | (opts->append ? 0 : O_TRUNC), 0600);
+	w->fd = wal_open_fd(opts->path,
+	    O_RDWR | O_CREAT | (opts->append ? 0 : O_TRUNC), &w->dsync);
 	if (w->fd < 0) {
 		free(w);
 		return XTC_E_INTERNAL;   /* no XTC_E_IO in the core enum -- see gaps ledger */
@@ -874,8 +908,8 @@ wal_flush_locked(wal_t *w, uint64_t need)
 #if XTC_DST_BUG(XTC_DST_BUG_NODURABLE)
 		/* planted bug: skip the fdatasync but still report durable */
 #else
-		if (ok && xtc_aio_fdatasync(w->fd) != 0)
-			ok = 0;
+		if (ok && !w->dsync && xtc_aio_fdatasync(w->fd) != 0)
+			ok = 0;              /* (an O_DSYNC write was the sync) */
 #endif
 	}
 
@@ -1282,11 +1316,12 @@ wal_failed(const wal_t *w)
 static int
 wal_rebind_at(wal_t *w, const char *path, off_t off, uint64_t lsn)
 {
-	int fd = open(path, O_RDWR, 0600);
+	int dsync, fd = wal_open_fd(path, O_RDWR, &dsync);
 	if (fd < 0)
 		return XTC_E_INTERNAL;
 	if (w->fd >= 0) close(w->fd);
 	w->fd = fd;
+	w->dsync = dsync;
 	wal_reset_marks(w, (uint64_t)off, lsn);
 	atomic_fetch_add_explicit(&w->gen, 1, memory_order_acq_rel);
 	return XTC_OK;
