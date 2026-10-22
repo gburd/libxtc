@@ -143,7 +143,7 @@ clean:
 	rm -f test_clean_restart test_dw_fail
 	rm -f test_steal
 	rm -f test_steal_page
-	rm -f test_wal_kill test_wal_tail test_wal_kill_engine bench_wal test_wal_crc test_wal_crc_sw test_wal_dsync
+	rm -f test_wal_kill test_wal_tail test_wal_kill_engine bench_wal test_wal_crc test_wal_crc_sw test_wal_dsync test_wal_dio
 	rm -f test_steal_leaf test_cat_reopen test_ckpt_online test_wal_group_sync test_intents_thread test_torn_base test_snap_registry test_rowid_minmax test_btree_fill test_wal_bigtxn test_steal_reclaim test_dio_restart test_wal_prealloc
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o test_bufmgr_dio test_bufmgr_dio.o
 	rm -f test_bufmgr_mt
@@ -592,6 +592,13 @@ test_wal_crc: test_wal_crc.c wal.c wal.h
 # the same test on the table CRC32C (the path of hosts without the instruction)
 test_wal_crc_sw: test_wal_crc.c wal.c wal.h
 	$(CC) $(CFLAGS) -DWAL_C32C_HW=0 -o $@ test_wal_crc.c $(LDFLAGS)
+
+test: test-wal-dio
+test_wal_dio: test_wal_dio.c wal.c wal.h
+	$(CC) $(CFLAGS) -o $@ test_wal_dio.c $(LDFLAGS)
+
+test-wal-dio: test_wal_dio
+	TMPDIR=$${TMPDIR:-/tmp} ./test_wal_dio
 
 test: test-wal-dsync
 test_wal_dsync: test_wal_dsync.c wal.c wal.h

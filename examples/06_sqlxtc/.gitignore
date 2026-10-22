@@ -32,6 +32,7 @@ bench_wal
 test_wal_crc
 test_wal_crc_sw
 test_wal_dsync
+test_wal_dio
 test_dio_restart
 test_steal_reclaim
 test_wal_bigtxn

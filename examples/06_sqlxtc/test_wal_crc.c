@@ -247,7 +247,8 @@ main(void)
 			last_off = wal_size(w);
 		CK(wal_commit_sync(w, buf, l, &lsn) == XTC_OK);
 	}
-	fd = wal_fd(w);
+	fd = open(path, O_RDWR);         /* the log's own fd may be O_DIRECT */
+	CK(fd >= 0);
 	CK(pread(fd, tmp, 1, (off_t)last_off + 15) == 1);
 	tmp[0] ^= 0x01;                   /* a body bit of frame 30 */
 	CK(pwrite(fd, tmp, 1, (off_t)last_off + 15) == 1);
@@ -271,6 +272,7 @@ main(void)
 	CK(s.n == 30 && t.end == last_off);
 	printf("  a flipped body bit, tag bit or CRC bit ends the scan at the "
 	    "frame (%u frames kept)\n", s.n);
+	close(fd);
 	wal_close(w);
 	unlink(path);
 	free(buf);

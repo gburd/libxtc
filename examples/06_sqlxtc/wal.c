@@ -25,6 +25,7 @@
 #include "xtc_sim.h"      /* XTC_SIM_BUGGIFY -- DST pessimal batching (no-op in prod) */
 #include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
 #include "xtc_io.h"       /* xtc_io_backend_name */
+#include "xtc_fs.h"       /* xtc_fs_dio_align */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -34,6 +35,7 @@
 #include <stdio.h>      /* snprintf, rename */
 #include <stdlib.h>
 #include <string.h>
+#include <sys/uio.h>    /* struct iovec: xtc_aio_pwritev */
 #include <time.h>
 #include <unistd.h>
 #if defined(__GNUC__) && defined(__x86_64__)
@@ -457,6 +459,8 @@ wal_frame_ok(int fd, off_t off, off_t fsize, uint64_t *lsn, uint32_t *len)
  * offsets, so durable_off is just the durable position.
  */
 #define WAL_RING     (8u << 20)     /* log buffer bytes (power of 2) */
+#define WAL_BLK      4096u          /* direct-I/O block (see wal_dio_setup) */
+#define WAL_STAGE    (1u << 20)     /* dio staging buffer (multiple of it) */
 #define WAL_SLOTS    (1u << 16)     /* completion slots (power of 2) */
 
 struct wal_slot {                   /* completion of one LSN */
@@ -475,6 +479,10 @@ struct wal_waiter {
 struct wal {
 	int        fd;
 	int        dsync;            /* fd is O_DSYNC: see wal_open_fd */
+	int        dio;              /* ... and O_DIRECT: see wal_dio_setup */
+	uint8_t   *stage;            /* dio: WAL_STAGE aligned bytes, leader
+	                              * only: a flush's partial last block, a
+	                              * big record on its way to the file */
 	/* The append offset (== res_pos), for wal_size: stored under res_mu,
 	 * read with no lock (the checkpoint proc polls it), so atomic. */
 	_Atomic uint64_t off;
@@ -618,6 +626,77 @@ wal_open_fd(const char *path, int flags, int *dsync)
 	return fd;
 }
 
+/*
+ * Direct I/O for the log (Linux O_DIRECT on an O_DSYNC fd): a flush is
+ * one write that goes to the device with no page-cache copy -- 26.3 us
+ * against 30.7 us for a buffered O_DSYNC write of 300 B on this disk,
+ * which has no volatile write cache -- and, unlike buffered writes, two
+ * direct writes to one file overlap in the device.  Every write then
+ * covers whole WAL_BLK blocks at aligned offsets from an aligned buffer.
+ * The frames stay contiguous, with no padding in the log: a flush writes
+ * from the start of the block that holds its first byte, rewriting that
+ * block's durable bytes with the same values, and the zeros that fill
+ * its last block are where the next frame will go (zeros end the log,
+ * as in the preallocated region).  Sub-block writes of 512 B (the
+ * device's stx_dio_offset_align) took ~145 us 7% of the time: XFS
+ * serializes direct writes inside one fs block.  So WAL_BLK is 4 KiB.
+ * The ring is WAL_BLK-aligned and a multiple of it, so ring position p
+ * and file offset p share their alignment and a flush writes straight
+ * from the ring; only the partial last block is copied (to stage), so a
+ * committer still copying into the rest of that ring block is never
+ * written mid-copy.  Off when the fs cannot do 4 KiB direct I/O, when
+ * the stage cannot be allocated, or in a build with -DWAL_DIO=0 (the
+ * buffered O_DSYNC path).  The simulator never sees it (no O_DSYNC fd
+ * there, wal_open_fd).
+ */
+#ifndef WAL_DIO
+#define WAL_DIO 1
+#endif
+static void
+wal_dio_setup(wal_t *w)
+{
+#if WAL_DIO && defined(O_DIRECT) && defined(F_GETFL)
+	size_t mem = 0, off = 0, len = 0, n;
+	uint64_t a;
+	int fl;
+	w->dio = 0;
+	if (!w->dsync)
+		return;
+	if (xtc_fs_dio_align(w->fd, &mem, &off, &len) != XTC_OK ||
+	    mem > WAL_BLK || off > WAL_BLK || len > WAL_BLK ||
+	    (WAL_BLK % (off ? off : 1)) != 0)
+		return;
+	if (w->stage == NULL &&
+	    (w->stage = xtc_aligned_alloc(WAL_BLK, WAL_STAGE)) == NULL)
+		return;
+	/* The first flush rewrites the block holding the log's end from the
+	 * ring: put the file's bytes of that block there (read before the
+	 * fd turns direct, so this read has no alignment rule). */
+	a = w->res_pos & ~(uint64_t)(WAL_BLK - 1);
+	n = (size_t)(w->res_pos - a);
+	if (n > 0 && pread(w->fd, w->ring + (a & (WAL_RING - 1)), n,
+	    (off_t)a) != (ssize_t)n)
+		return;
+	if ((fl = fcntl(w->fd, F_GETFL)) < 0 ||
+	    fcntl(w->fd, F_SETFL, fl | O_DIRECT) != 0)
+		return;
+	/* Probe: write that block back the way the first flush will (the
+	 * same bytes, zeros past the end).  A filesystem that takes the flag
+	 * but not the writes stays buffered instead of fail-stopping. */
+	memcpy(w->stage, w->ring + (a & (WAL_RING - 1)), n);
+	memset(w->stage + n, 0, WAL_BLK - n);
+	if (pwrite(w->fd, w->stage, WAL_BLK, (off_t)a) != (ssize_t)WAL_BLK) {
+		(void)fcntl(w->fd, F_SETFL, fl);
+		return;
+	}
+	if (a + WAL_BLK > w->pre_end)
+		w->pre_end = a + WAL_BLK;
+	w->dio = 1;
+#else
+	w->dio = 0;
+#endif
+}
+
 int
 wal_open(const wal_opts_t *opts, wal_t **out)
 {
@@ -652,15 +731,17 @@ wal_open(const wal_opts_t *opts, wal_t **out)
 	}
 	w->window_ns = opts->window_ns > 0 ? opts->window_ns : 500000;   /* 0.5ms */
 	w->max_batch = opts->max_batch > 0 ? opts->max_batch : 256;
-	w->ring = malloc(WAL_RING);
+	/* block-aligned: a direct write goes straight from the ring */
+	w->ring = xtc_aligned_alloc(WAL_BLK, WAL_RING);
 	w->slot = calloc(WAL_SLOTS, sizeof *w->slot);
 	if (w->ring == NULL || w->slot == NULL) {
-		free(w->ring); free(w->slot); close(w->fd); free(w);
+		xtc_aligned_free(w->ring); free(w->slot); close(w->fd); free(w);
 		return XTC_E_NOMEM;
 	}
 	(void)pthread_mutex_init(&w->res_mu, NULL);
 	(void)pthread_mutex_init(&w->fl_mu, NULL);
 	wal_reset_marks(w, (uint64_t)o, maxlsn);
+	wal_dio_setup(w);
 	*out = w;
 	return XTC_OK;
 }
@@ -680,7 +761,8 @@ wal_close(wal_t *w)
 	(void)pthread_mutex_destroy(&w->res_mu);
 	if (w->fd >= 0)
 		close(w->fd);
-	free(w->ring);
+	xtc_aligned_free(w->ring);
+	xtc_aligned_free(w->stage);
 	free(w->slot);
 	free(w);
 }
@@ -831,11 +913,13 @@ wal_wake_locked(wal_t *w, uint64_t durable, int give_baton)
 static void
 wal_prealloc(wal_t *w, uint64_t upto)
 {
-	static const uint8_t zeros[1u << 20];
+	static _Alignas(WAL_BLK) const uint8_t zeros[1u << 20];
 	uint64_t at, end;
 	if (upto + WAL_PRE_AHEAD <= w->pre_end)
 		return;
 	at = w->pre_end > upto ? w->pre_end : upto;
+	if (w->dio)                      /* blocks past upto's: no live byte */
+		at = (at + WAL_BLK - 1) & ~(uint64_t)(WAL_BLK - 1);
 	end = at + WAL_PRE_CHUNK;
 	while (at < end) {
 		if (xtc_aio_pwrite(w->fd, zeros, (uint32_t)sizeof zeros,
@@ -844,6 +928,58 @@ wal_prealloc(wal_t *w, uint64_t upto)
 		at += sizeof zeros;
 		w->pre_end = at;
 	}
+}
+
+/* Leader: write ring bytes [from, upto) to the same file offsets. */
+static int
+wal_write_ring(wal_t *w, uint64_t from, uint64_t upto)
+{
+	size_t at = (size_t)(from & (WAL_RING - 1));
+	size_t n = (size_t)(upto - from), k = WAL_RING - at;
+	if (n <= k)
+		return xtc_aio_pwrite(w->fd, w->ring + at, (uint32_t)n,
+		    (int64_t)from) == (int)n;
+	return xtc_aio_pwrite(w->fd, w->ring + at, (uint32_t)k,
+	    (int64_t)from) == (int)k &&
+	    xtc_aio_pwrite(w->fd, w->ring, (uint32_t)(n - k),
+	    (int64_t)(from + k)) == (int)(n - k);
+}
+
+/* Leader, direct I/O (wal_dio_setup): write [from, upto) as the whole
+ * blocks that hold it, in ONE write: the ring's full blocks in place
+ * (two pieces at the wrap) and the partial last block from stage, its
+ * tail zeroed.  The ring keeps every byte of the first block: a
+ * reservation needs room from that block's start (wal_append). */
+static int
+wal_write_dio(wal_t *w, uint64_t from, uint64_t upto)
+{
+	struct iovec iv[3];
+	uint64_t fa = from & ~(uint64_t)(WAL_BLK - 1);
+	uint64_t ua = upto & ~(uint64_t)(WAL_BLK - 1), tot = 0;
+	size_t at, n, k;
+	int ni = 0, i;
+	if (ua > fa) {
+		at = (size_t)(fa & (WAL_RING - 1));
+		n = (size_t)(ua - fa);
+		k = WAL_RING - at;
+		iv[ni].iov_base = w->ring + at;
+		iv[ni++].iov_len = n <= k ? n : k;
+		if (n > k) {
+			iv[ni].iov_base = w->ring;
+			iv[ni++].iov_len = n - k;
+		}
+	}
+	if (upto > ua) {
+		at = (size_t)(ua & (WAL_RING - 1));  /* a block: never wraps */
+		n = (size_t)(upto - ua);
+		memcpy(w->stage, w->ring + at, n);
+		memset(w->stage + n, 0, WAL_BLK - n);
+		iv[ni].iov_base = w->stage;
+		iv[ni++].iov_len = WAL_BLK;
+	}
+	for (i = 0; i < ni; i++)
+		tot += iv[i].iov_len;
+	return xtc_aio_pwritev(w->fd, iv, ni, (int64_t)fa) == (int)tot;
 }
 
 /* fl_mu held on entry and exit, w->flushing set by the caller: write
@@ -891,20 +1027,10 @@ wal_flush_locked(wal_t *w, uint64_t need)
 	if (atomic_load_explicit(&w->failed, memory_order_acquire)) {
 		ok = 0;
 	} else if (upto > atomic_load_explicit(&w->durable_off, memory_order_relaxed)) {
-		size_t at = (size_t)(from & (WAL_RING - 1));
-		size_t n = (size_t)(upto - from), k = WAL_RING - at;
 		wal_prealloc(w, upto);
-		if (n == 0) {
-			ok = 1;               /* written directly; only sync it */
-		} else if (n <= k) {
-			ok = xtc_aio_pwrite(w->fd, w->ring + at, (uint32_t)n,
-			    (int64_t)from) == (int)n;
-		} else {
-			ok = xtc_aio_pwrite(w->fd, w->ring + at, (uint32_t)k,
-			    (int64_t)from) == (int)k &&
-			    xtc_aio_pwrite(w->fd, w->ring, (uint32_t)(n - k),
-			    (int64_t)(from + k)) == (int)(n - k);
-		}
+		ok = from == upto ? 1 :      /* written directly; only sync it */
+		    w->dio ? wal_write_dio(w, from, upto) :
+		    wal_write_ring(w, from, upto);
 #if XTC_DST_BUG(XTC_DST_BUG_NODURABLE)
 		/* planted bug: skip the fdatasync but still report durable */
 #else
@@ -1015,6 +1141,72 @@ wal_nap(void)
 		(void)xtc_proc_sleep(20LL * 1000);
 }
 
+/* Append n bytes of the big record's stream to stage; write each full
+ * stage to the file at *at (direct I/O: wal_write_big_dio). */
+static int
+wal_big_put(wal_t *w, size_t *fill, uint64_t *at, const void *src, size_t n)
+{
+	const uint8_t *p = src;
+	while (n > 0) {
+		size_t k = WAL_STAGE - *fill < n ? WAL_STAGE - *fill : n;
+		memcpy(w->stage + *fill, p, k);
+		*fill += k;
+		p += k;
+		n -= k;
+		if (*fill == WAL_STAGE) {
+			if (xtc_aio_pwrite(w->fd, w->stage, WAL_STAGE,
+			    (int64_t)*at) != (int)WAL_STAGE)
+				return 0;
+			*at += WAL_STAGE;
+			*fill = 0;
+		}
+	}
+	return 1;
+}
+
+/*
+ * The big record at `start`, direct I/O: the whole blocks from the one
+ * holding `start` (its earlier, durable bytes come from the ring, as a
+ * flush writes them) through the record's end, staged WAL_STAGE at a
+ * time, the last block zero-padded.  Then the record's partial last
+ * block goes into the ring, where the next flush rewrites that block
+ * from.  Leader (and direct) only: nothing else is reserved meanwhile,
+ * so those ring bytes belong to no other record.
+ */
+static int
+wal_write_big_dio(wal_t *w, uint64_t start, const uint8_t *hdr,
+    const void *record, uint32_t len, const uint8_t *trl)
+{
+	uint64_t at = start & ~(uint64_t)(WAL_BLK - 1);
+	uint64_t end = start + WAL_REC_HDR + len + WAL_REC_CRC;
+	uint64_t ea = end & ~(uint64_t)(WAL_BLK - 1), b;
+	size_t fill = 0, k;
+	if (!wal_big_put(w, &fill, &at, w->ring + (at & (WAL_RING - 1)),
+	    (size_t)(start - at)) ||
+	    !wal_big_put(w, &fill, &at, hdr, WAL_REC_HDR) ||
+	    !wal_big_put(w, &fill, &at, record, len) ||
+	    !wal_big_put(w, &fill, &at, trl, WAL_REC_CRC))
+		return 0;
+	if (fill > 0) {
+		k = (fill + WAL_BLK - 1) & ~(size_t)(WAL_BLK - 1);
+		memset(w->stage + fill, 0, k - fill);
+		if (xtc_aio_pwrite(w->fd, w->stage, (uint32_t)k, (int64_t)at) !=
+		    (int)k)
+			return 0;
+	}
+	/* Its partial tail block [ea, end) into the ring, for the next
+	 * flush: byte b of the frame is header, body or trailer. */
+	for (b = ea > start ? ea : start; b < end; b++) {
+		uint64_t i = b - start;
+		uint8_t c = i < WAL_REC_HDR ? hdr[i] :
+		    i < WAL_REC_HDR + (uint64_t)len ?
+		    ((const uint8_t *)record)[i - WAL_REC_HDR] :
+		    trl[i - WAL_REC_HDR - len];
+		w->ring[b & (WAL_RING - 1)] = c;
+	}
+	return 1;
+}
+
 /*
  * A record bigger than a quarter of the log buffer (a bulk transaction)
  * is written straight to the file, as JE writes an oversized entry and
@@ -1080,17 +1272,23 @@ wal_append_direct(wal_t *w, const void *record, uint32_t len, uint64_t *end,
 	memcpy(hdr + 8, &len, 4);
 	crc = wal_rec_crc(lsn, len, record);
 	memcpy(trl, &crc, WAL_REC_CRC);
-	ok = xtc_aio_pwrite(w->fd, hdr, WAL_REC_HDR, (int64_t)start) == (int)WAL_REC_HDR;
-	for (done = 0; ok && done < len; ) {
-		uint32_t k = len - done < (1u << 24) ? len - done : (1u << 24);
-		ok = xtc_aio_pwrite(w->fd, (const uint8_t *)record + done, k,
-		    (int64_t)(start + WAL_REC_HDR + done)) == (int)k;
-		done += k;
+	if (w->dio) {
+		ok = wal_write_big_dio(w, start, hdr, record, len, trl);
+	} else {
+		ok = xtc_aio_pwrite(w->fd, hdr, WAL_REC_HDR, (int64_t)start) ==
+		    (int)WAL_REC_HDR;
+		for (done = 0; ok && done < len; ) {
+			uint32_t k = len - done < (1u << 24) ? len - done : (1u << 24);
+			ok = xtc_aio_pwrite(w->fd, (const uint8_t *)record + done, k,
+			    (int64_t)(start + WAL_REC_HDR + done)) == (int)k;
+			done += k;
+		}
+		ok = ok && xtc_aio_pwrite(w->fd, trl, WAL_REC_CRC,
+		    (int64_t)(start + WAL_REC_HDR + len)) == (int)WAL_REC_CRC;
 	}
-	ok = ok && xtc_aio_pwrite(w->fd, trl, WAL_REC_CRC,
-	    (int64_t)(start + WAL_REC_HDR + len)) == (int)WAL_REC_CRC;
-	if (start + need > w->pre_end)
-		w->pre_end = start + need;   /* the record grew the file */
+	if (start + need > w->pre_end)   /* the record grew the file */
+		w->pre_end = w->dio ? (start + need + WAL_BLK - 1) &
+		    ~(uint64_t)(WAL_BLK - 1) : start + need;
 
 	wal_lock(&w->fl_mu);
 	if (ok) {
@@ -1147,8 +1345,10 @@ wal_append(wal_t *w, const void *record, uint32_t len, uint64_t *end, int *rc)
 		}
 		/* Room in the ring (the oldest unwritten byte must not be
 		 * overwritten) and a free completion slot for the LSN. */
-		if (w->res_pos + need - atomic_load_explicit(&w->written,
-		    memory_order_acquire) <= WAL_RING &&
+		/* (from the start of the block holding the oldest unwritten
+		 * byte: a direct flush rewrites that block from the ring) */
+		if (w->res_pos + need - (atomic_load_explicit(&w->written,
+		    memory_order_acquire) & ~(uint64_t)(WAL_BLK - 1)) <= WAL_RING &&
 		    w->next_lsn + 1 - atomic_load_explicit(&w->durable_lsn,
 		    memory_order_acquire) < WAL_SLOTS)
 			break;
@@ -1323,6 +1523,7 @@ wal_rebind_at(wal_t *w, const char *path, off_t off, uint64_t lsn)
 	w->fd = fd;
 	w->dsync = dsync;
 	wal_reset_marks(w, (uint64_t)off, lsn);
+	wal_dio_setup(w);
 	atomic_fetch_add_explicit(&w->gen, 1, memory_order_acq_rel);
 	return XTC_OK;
 }
