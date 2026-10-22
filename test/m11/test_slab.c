@@ -46,6 +46,7 @@
 #include "xtc.h"
 #include "xtc_slab.h"
 #include "xtc_int.h"
+#include "preempt_int.h"   /* __xtc_unsafe_depth (internal) */
 
 /* ----- Basic alloc/free ----------------------------------------- */
 
@@ -333,6 +334,69 @@ test_oom_fail(const MunitParameter p[], void *d)
 	munit_assert_uint64(st.oom_fails, >=, 1);
 
 	xtc_slab_destroy(s);
+	return MUNIT_OK;
+}
+
+/* ----- The cache lock is a preemption-safe hold -------------------
+ *
+ * A fiber involuntarily preempted while holding a slab's cache lock,
+ * and a loop-mate on the same OS thread then taking the slow path of
+ * the same slab, deadlock that thread: the holder can only release by
+ * being rescheduled on it (test_wal_kill preempt-nokill hung this way,
+ * two fibers in xtc_slab_alloc's slow path, the mutex owned by the
+ * blocked thread).  The preemption timer declines while the thread's
+ * unsafe depth is > 0, so every hold of the cache lock must raise it.
+ * Observed from inside the lock: a res high-water alert fires in
+ * __chunk_new, which the alloc slow path runs holding the cache lock;
+ * the ctor runs after the lock is dropped (the control: depth 0). */
+static int g_depth_in_alert = -1, g_depth_in_ctor = -1;
+
+static void
+depth_alert(xtc_res_kind_t k, int64_t used, int64_t cap, void *user)
+{
+	(void)k; (void)used; (void)cap; (void)user;
+	g_depth_in_alert = __xtc_unsafe_depth();
+}
+
+static int
+depth_ctor(void *obj, void *user)
+{
+	(void)obj; (void)user;
+	g_depth_in_ctor = __xtc_unsafe_depth();
+	return XTC_OK;
+}
+
+static MunitResult
+test_lock_hold_preempt_safe(const MunitParameter p[], void *d)
+{
+	xtc_slab_t *s;
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	xtc_res_t res;
+	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+	void *o;
+	(void)p; (void)d;
+
+	munit_assert_int(xtc_res_init(&res, &caps), ==, XTC_OK);
+	munit_assert_int(xtc_res_set_alert(&res, XTC_RES_MEM_BYTES, 1e-9), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_res_set_alert_fn(&res, depth_alert, NULL), ==,
+	    XTC_OK);
+	opts.name = "preempt-safe"; opts.obj_size = 64;
+	opts.res = &res;
+	opts.flags |= XTC_SLAB_NO_MAGAZINE;   /* every alloc: the slow path */
+	opts.ctor = depth_ctor;
+	munit_assert_int(xtc_slab_create(&opts, &s), ==, XTC_OK);
+	munit_assert_int(__xtc_unsafe_depth(), ==, 0);
+	o = xtc_slab_alloc(s);                /* first chunk: alert fires */
+	munit_assert_not_null(o);
+	munit_assert_int(g_depth_in_alert, >=, 1);   /* lock held: no preempt */
+	munit_assert_int(g_depth_in_ctor, ==, 0);    /* lock dropped */
+	munit_assert_int(__xtc_unsafe_depth(), ==, 0);
+	xtc_slab_free(s, o);
+	(void)xtc_slab_reap(s);
+	munit_assert_int(__xtc_unsafe_depth(), ==, 0);   /* balanced */
+	xtc_slab_destroy(s);
+	munit_assert_int(__xtc_unsafe_depth(), ==, 0);
 	return MUNIT_OK;
 }
 
@@ -678,6 +742,7 @@ static MunitTest tests[] = {
 	{ "/destroy_dtor_once", test_destroy_dtor_once, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/word_slot_destroy", test_word_slot_destroy, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/oom_fail",         test_oom_fail,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/lock_hold_preempt_safe", test_lock_hold_preempt_safe, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reap",             test_reap,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/redzone",          test_redzone,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/redzone_alignment", test_redzone_alignment, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
