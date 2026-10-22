@@ -930,6 +930,11 @@ bench_fairness: $(srcdir)/../bench/bench_fairness.c $(STATIC_LIB)
 		-o $@ $(srcdir)/../bench/bench_fairness.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+bench_sync_offloop: $(srcdir)/../bench/bench_sync_offloop.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../bench/bench_sync_offloop.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 bench_continuous_batching: $(srcdir)/../bench/bench_continuous_batching.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ \
 	    $(srcdir)/../bench/bench_continuous_batching.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
