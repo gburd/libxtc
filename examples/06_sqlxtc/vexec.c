@@ -238,12 +238,11 @@ typedef struct vx_expr {
 	int           pord;
 	int           pcoerce;
 	struct vx_expr *pnext;    /* the plan's chain of such nodes */
+	int           noaff;      /* VX_NOAFF_* when the node's affinity is not
+	                           * what its op implies (+x; a subquery value) */
 } vx_expr_t;
 
 /* ---- aggregation (V3) -------------------------------------------- */
-
-/* Max HAVING-only aggregates (not in the SELECT list) per query. */
-#define VX_HAVING_AGG_MAX 8
 
 enum vx_agg_kind {
 	VXA_COUNT_STAR = 1,   /* count(*) */
@@ -293,41 +292,37 @@ typedef struct vx_acc {
 	uint32_t  gc_seplen;
 } vx_acc_t;
 
-/* A column of the select list under aggregation: either a GROUP BY key
- * expression (output verbatim) or an aggregate over an input expr. */
-typedef struct vx_outcol {
-	int            is_agg;
-	int            computed;  /* output is a projection over aggregates/keys
-	                          * (proj[oi] non-NULL); erow[oi] is a placeholder */
-	enum vx_agg_kind kind;   /* if is_agg */
-	vx_expr_t     *arg;      /* aggregate input expr (NULL for count(*)) */
-	vx_expr_t     *key;      /* group-key expr (if !is_agg) */
-	const sql_expr_t *ast;   /* HAVING-only agg: the AST node, so
-	                          * compile_having can match it (NULL else) */
-	const char *gc_sep;      /* GROUP_CONCAT separator bytes (NULL = ',') */
-	uint32_t    gc_seplen;
-} vx_outcol_t;
+/* One accumulator of an aggregate plan: an aggregate call over the
+ * source row.  Identical calls (expr_same) share one accumulator. */
+typedef struct vx_aggacc {
+	enum vx_agg_kind kind;
+	vx_expr_t       *arg;      /* input expr over the source row (NULL: count(*)) */
+	const sql_expr_t *ast;     /* the call, to match repeats */
+	const char      *gc_sep;   /* GROUP_CONCAT separator bytes (NULL = ',') */
+	uint32_t         gc_seplen;
+} vx_aggacc_t;
 
+/* Max GROUP BY keys plus accumulators: the GROUP ROW, a namevec. */
+#define VX_GROW_MAX 32
+
+/*
+ * An aggregate plan.  Each source row is reduced into its group (keys
+ * grp[] and accumulators acc[], both over the SOURCE row).  Each group
+ * then forms a GROUP ROW -- [key 0 .. ngrp-1 | acc final 0 .. nagg-1] --
+ * and HAVING, the outputs and the ORDER-BY-only columns are ordinary
+ * expressions over it.
+ */
 typedef struct vx_aggplan {
-	int          ngrp;       /* number of GROUP BY key expressions */
-	vx_expr_t  **grp;        /* ngrp key expressions */
-	int          nout;       /* output columns (emitted) */
-	int          nout_all;   /* outcols including HAVING-only aggregates,
-	                          * which are accumulated but not emitted;
-	                          * out[nout .. nout_all) are those. */
-	vx_outcol_t *out;        /* nout_all output column descriptors */
-	int          nagg;       /* number of aggregate outcols (all of them) */
-	vx_expr_t   *having;     /* HAVING predicate over the EXTENDED row
-	                          * (nout_all cells: emitted + HAVING aggs),
-	                          * cols resolve by index; NULL if no HAVING */
-	vx_expr_t  **proj;       /* per-output-column projection over the
-	                          * EXTENDED row: non-NULL only for a
-	                          * "computed" output (an expression OVER
-	                          * aggregates/keys, e.g. SUM(x)+1); NULL means
-	                          * emit erow[j] verbatim.  nout entries. */
-	int          has_proj;   /* any proj[] entry is non-NULL */
-	int          has_gc;     /* any outcol is group_concat (order-sensitive:
-	                          * runs serially so the scan order is stable) */
+	int          ngrp;       /* GROUP BY keys */
+	vx_expr_t  **grp;        /* ngrp key expressions over the source row */
+	int          nagg;       /* accumulators */
+	vx_aggacc_t *acc;        /* nagg accumulators */
+	int          nout;       /* output columns */
+	int          nemit;      /* nout + ORDER-BY-only columns */
+	vx_expr_t  **proj;       /* nemit expressions over the group row */
+	vx_expr_t   *having;     /* over the group row, or NULL */
+	int          has_gc;     /* a group_concat (order-sensitive: serial only) */
+	int          distinct;   /* SELECT DISTINCT over the outputs */
 } vx_aggplan_t;
 
 /* A hash-table entry: a group, its key cells, and its accumulators. */
@@ -373,6 +368,7 @@ struct vx_result {
 	char       name[64][64];   /* output column names from the plan; an
 	                            * empty entry means "use the VDBE name" */
 	enum vx_aff aff[64];       /* per-column affinity class (from the plan) */
+	unsigned char noaff[64];   /* VX_NOAFF_*: 0 the column has aff[] */
 };
 
 /*
@@ -563,8 +559,12 @@ struct vx_stmt {
 	 * can compile the OUTER query's comparison gate against these without
 	 * a SQLite prepare.  nout entries. */
 	enum vx_aff   outaff[64];
+	unsigned char outnoaff[64];   /* VX_NOAFF_* per output column */
 
 	vx_aggplan_t *agg;          /* non-NULL => aggregating statement (V3) */
+	struct vx_stmt *agg_in;     /* agg over a join: the join, emitting the
+	                             * combined row (identity projection) that
+	                             * is this plan's source row */
 	vx_joinplan_t *join;        /* non-NULL => two-table hash join (V5) */
 	int           join_emit;    /* join: columns to emit into the chunk
 	                             * (nout user cols + sort-only extras); 0
@@ -697,22 +697,66 @@ aff_class(enum vx_aff a)
 
 /* ---- recognizer: a small column-name table ----------------------- */
 
+/* A column's affinity for comparisons.  SQLite gives a column of a
+ * derived table the affinity of its expression: a bare column keeps the
+ * column's, CAST has its type's, anything else (arithmetic, a function,
+ * an aggregate, a literal, +x, CASE) has none.  UNKNOWN marks a column
+ * whose affinity vexec cannot state (a compound whose arms differ, a
+ * scalar subquery value): a comparison that could convert declines. */
+#define VX_NOAFF_NO      1   /* no affinity: never converts */
+#define VX_NOAFF_UNKNOWN 2
+
 struct namevec {
 	char names[32][64];
 	enum vx_aff aff[32];   /* filled after the source stmt is prepared */
+	unsigned char noaff[32];   /* VX_NOAFF_*, 0 = has aff[] */
 	int  n;
+	/* Live resolution (the aggregate builder): when sc is set, a new name
+	 * is resolved against that table schema as it is added -- pay[] gets
+	 * its record origin, aff[] its affinity -- and a name the table does
+	 * not have fails.  fixed: the names are a closed set (a materialized
+	 * source); nothing can be added. */
+	const xstore_col_t *sc;
+	int  nsc;
+	int *pay;
+	int  fixed;
 };
 
 static int
-nv_add(struct namevec *nv, const sql_str_t *s)
+nv_find(const struct namevec *nv, const sql_str_t *s)
 {
 	int i;
-	if (s == NULL || s->len == 0 || s->len >= 64) return -1;
 	for (i = 0; i < nv->n; i++)
 		if ((int)strlen(nv->names[i]) == (int)s->len &&
 		    strncasecmp(nv->names[i], s->p, s->len) == 0)
 			return i;
-	if (nv->n >= 32) return -1;
+	return -1;
+}
+
+static int
+nv_add(struct namevec *nv, const sql_str_t *s)
+{
+	int i, c;
+	if (s == NULL || s->len == 0 || s->len >= 64) return -1;
+	if ((i = nv_find(nv, s)) >= 0) return i;
+	if (nv->n >= 32 || nv->fixed) return -1;
+	if (nv->sc != NULL) {
+		/* Live resolution: the column's record origin and affinity now. */
+		for (c = 0; c < nv->nsc; c++)
+			if (strlen(nv->sc[c].name) == s->len &&
+			    strncasecmp(nv->sc[c].name, s->p, s->len) == 0) break;
+		if (c < nv->nsc) {
+			nv->pay[nv->n] = nv->sc[c].is_pk ? -1 : c - 1;
+			nv->aff[nv->n] = nv->sc[c].is_pk ? VX_AFF_NUMERIC
+			    : aff_class(vx_affinity(nv->sc[c].decltype));
+		} else if ((s->len == 5 && strncasecmp(s->p, "rowid", 5) == 0) ||
+		    (s->len == 7 && strncasecmp(s->p, "_rowid_", 7) == 0) ||
+		    (s->len == 3 && strncasecmp(s->p, "oid", 3) == 0)) {
+			nv->pay[nv->n] = -1;
+			nv->aff[nv->n] = VX_AFF_NUMERIC;
+		} else
+			return -1;   /* not a column of the table */
+	}
 	memcpy(nv->names[nv->n], s->p, s->len);
 	nv->names[nv->n][s->len] = '\0';
 	return nv->n++;
@@ -807,6 +851,9 @@ struct vx_joinctx {
 	 * UNQUALIFIED column is recorded only on the side that has it. */
 	xstore_col_t *sc[VX_JOIN_MAX];
 	int       nsc[VX_JOIN_MAX];
+	/* Collecting for an aggregate over the join: descend into aggregate
+	 * calls, and let an unresolvable bare name be an output alias. */
+	const sql_select_t *aggsel;
 };
 
 struct vx_compiler {
@@ -819,6 +866,30 @@ struct vx_compiler {
 	 * NULL) was never bound and is NULL, as in SQLite. */
 	const vx_cell_t *binds;
 	int              nbinds;
+	struct vx_aggctx *ag;     /* non-NULL while compiling an aggregate */
+};
+
+/*
+ * Aggregate compile context.  In "group mode" (grouping == 1) an
+ * expression compiles over the GROUP ROW [GROUP BY keys | accumulator
+ * results]: an aggregate call becomes its accumulator's slot (created on
+ * first use), a GROUP BY term or a grouped column its key's slot, and in
+ * HAVING / ORDER BY an output alias its expression.  Accumulator
+ * arguments and the keys themselves compile over the source row
+ * (grouping == 0).
+ */
+#define AGX_SEL    0
+#define AGX_HAVING 1
+#define AGX_ORDER  2
+struct vx_aggctx {
+	const sql_select_t *sel;
+	vx_aggplan_t *ap;
+	int grouping;
+	int ctx;                       /* AGX_*: the clause being compiled */
+	int depth;                     /* output-alias expansion depth */
+	const sql_expr_t *gast[16];    /* GROUP BY terms, positions/aliases resolved */
+	enum vx_aff aff[VX_GROW_MAX];  /* group-row class per slot */
+	unsigned char noaff[VX_GROW_MAX];
 };
 
 /* Identifier slice == C-string.  ASCII case-insensitive: SQLite resolves
@@ -921,6 +992,7 @@ node_class(const struct vx_compiler *c, const vx_expr_t *e)
 		if (e->lit.type == VX_TEXT) return VX_AFF_TEXT;
 		return VX_AFF_BLOB;
 	case VXO_COL:
+		if (c->ag != NULL && c->ag->grouping) return c->ag->aff[e->col];
 		if (c->jc != NULL) {
 			/* Combined index -> (side, j) -> that side's affinity.  Find
 			 * the side whose [base, base+col.n) range contains idx. */
@@ -982,6 +1054,28 @@ node_class(const struct vx_compiler *c, const vx_expr_t *e)
 		}
 	}
 	return VX_AFF_BLOB;
+}
+
+/* VX_NOAFF_* for a compiled expression as a result column, by SQLite's
+ * rule: a column reference keeps its column's affinity (or lack of one),
+ * CAST has its target type's, a bound/scalar-subquery value is unknown
+ * to vexec, and every other expression has none. */
+static int
+expr_noaff(const struct vx_compiler *c, const vx_expr_t *e)
+{
+	if (e->noaff) return e->noaff;
+	switch (e->op) {
+	case VXO_COL:
+		if (c->ag != NULL && c->ag->grouping) return c->ag->noaff[e->col];
+		if (c->jc != NULL) return 0;
+		return c->nv ? c->nv->noaff[e->col] : 0;
+	case VXO_FUNC:
+		return e->func == VXF_CAST ? 0 : VX_NOAFF_NO;
+	case VXO_CORRSUBQ:
+		return VX_NOAFF_UNKNOWN;
+	default:
+		return VX_NOAFF_NO;
+	}
 }
 
 /* Case-insensitive exact match of a name slice against a NUL keyword. */
@@ -2107,6 +2201,10 @@ cmp_affinity_gate(struct vx_compiler *c, vx_expr_t *a, vx_expr_t *b)
 	else if (b->op == VXO_COL && a->op == VXO_LIT) { col = b; lit = a; }
 	else return 0;
 	if (lit->lit.type == VX_NULL) return 1;
+	/* A column with no affinity is compared as stored (SQLite: neither
+	 * side converts); one whose affinity vexec cannot state declines. */
+	if (col->noaff == VX_NOAFF_NO) return 1;
+	if (col->noaff == VX_NOAFF_UNKNOWN) return -1;
 	aff = node_class(c, col);
 	if (aff == VX_AFF_NUMERIC) {
 		lit->pcoerce = 1;
@@ -2119,10 +2217,22 @@ cmp_affinity_gate(struct vx_compiler *c, vx_expr_t *a, vx_expr_t *b)
 	return 1;
 }
 
+static vx_expr_t *agg_resolve(struct vx_compiler *c, const sql_expr_t *e,
+                              int *handled);
+
 static vx_expr_t *
 compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 {
 	if (c->fail || e == NULL) { c->fail = 1; return NULL; }
+
+	if (c->ag != NULL && c->ag->grouping) {
+		int handled;
+		vx_expr_t *n = agg_resolve(c, e, &handled);
+		if (handled) return n;
+	} else if (is_agg_call(e)) {
+		c->fail = 1;   /* an aggregate outside an aggregate context */
+		return NULL;
+	}
 
 	switch (e->op) {
 	case SX_E_SUBQUERY: {
@@ -2172,7 +2282,10 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 		}
 		if (idx < 0) { c->fail = 1; return NULL; }
 		n = expr_node(c, VXO_COL);
-		if (n) n->col = idx;
+		if (n) {
+			n->col = idx;
+			if (c->jc == NULL) n->noaff = c->nv->noaff[idx];
+		}
 		return n;
 	}
 
@@ -2185,7 +2298,13 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 		} else if (e->op2 == TK_NOT) {
 			n = expr_node(c, VXO_NOT);
 		} else if (e->op2 == TK_PLUS) {
-			return a;   /* unary plus is identity for numerics */
+			/* Unary plus is the value, but drops a column's affinity. */
+			if (a->op == VXO_COL) {
+				n = expr_node(c, VXO_COL);
+				if (n) { n->col = a->col; n->noaff = VX_NOAFF_NO; }
+				return n;
+			}
+			return a;
 		} else {
 			c->fail = 1; return NULL;   /* ~ etc. not in V1 */
 		}
@@ -2277,6 +2396,11 @@ compile_expr(struct vx_compiler *c, const sql_expr_t *e)
 			if (!ok && (is_null_lit(a) || is_null_lit(b))) ok = 1;
 			if (!ok) { c->fail = 1; return NULL; }
 			dyn_coerce = a_dyn || b_dyn;
+			/* A CASE has no affinity; against a literal (none either)
+			 * nothing converts.  (A subquery value has its column's.) */
+			if ((a->op == VXO_CASE && b->op == VXO_LIT) ||
+			    (b->op == VXO_CASE && a->op == VXO_LIT))
+				dyn_coerce = 0;
 			break;
 		}
 		default: break;   /* AND/OR: operands are boolean-ish, fine */
@@ -3851,19 +3975,13 @@ static int vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast,
                                 const sql_select_t *sel,
                                 const vx_cell_t *binds, int nbinds,
                                 vx_stmt_t **out, char **errmsg);
-static int vx_try_prepare_derived(struct xsql *db, sql_arena_t *ast,
-                                  const sql_select_t *sel,
-                                  const vx_cell_t *binds, int nbinds,
-                                  vx_stmt_t **out, char **errmsg);
-static int vx_try_prepare_view(struct xsql *db, sql_arena_t *ast,
-                               const sql_select_t *sel, const char *view_sql,
-                               const sql_str_t *rename, int nrename,
-                               const vx_cell_t *binds, int nbinds,
-                               vx_stmt_t **out, char **errmsg);
-static int vx_try_prepare_const(struct xsql *db, sql_arena_t *ast,
-                                const sql_select_t *sel,
-                                const vx_cell_t *binds, int nbinds,
-                                vx_stmt_t **out, char **errmsg);
+static int vx_try_prepare_mat(struct xsql *db, sql_arena_t *ast,
+    const sql_select_t *sel, const sql_select_t *src_sel, const char *src_sql,
+    const sql_str_t *rename, int nrename, const vx_cell_t *binds, int nbinds,
+    vx_stmt_t **out, char **errmsg);
+static int run_setop_sel(struct xsql *db, const sql_select_t *lhs,
+    const vx_cell_t *binds, int nbinds, vx_result_t **res, char **errmsg);
+static int sel_is_agg(const sql_select_t *sel);
 static int vx_try_prepare_binds(struct xsql *db, const char *sql,
                                 const vx_cell_t *binds, int nbinds,
                                 vx_stmt_t **out, char **errmsg);
@@ -4460,20 +4578,17 @@ vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 		      strncasecmp(fsrc->table.p, cte->name.p, cte->name.len) == 0))
 			goto fallback;   /* outer FROM is not this CTE */
 		{
-			char csql[2048];
 			sql_str_t rename[32];
 			int nren = 0;
 			const sql_exprlist_item_t *ci;
-			if (cte->srclen >= sizeof csql) goto fallback;
-			memcpy(csql, cte->src, cte->srclen); csql[cte->srclen] = '\0';
 			for (ci = cte->cols ? cte->cols->head : NULL; ci; ci = ci->next) {
 				if (nren >= 32 || ci->expr == NULL ||
 				    ci->expr->op != SX_E_COLUMN) goto fallback;
 				rename[nren++] = ci->expr->name[ci->expr->nname - 1];
 			}
-			return vx_try_prepare_view(db, ast, sel, csql,
-			                           cte->cols ? rename : NULL, nren,
-			                           binds, nbinds, out, errmsg);
+			return vx_try_prepare_mat(db, ast, sel, cte->select, NULL,
+			                          cte->cols ? rename : NULL, nren,
+			                          binds, nbinds, out, errmsg);
 		}
 	}
 	if (sel->having && sel->group == NULL) {
@@ -4485,14 +4600,9 @@ vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 
 	/* FROM: one base table, or exactly two base tables joined (V5). */
 	src = sel->from;
-	if (src == NULL) {
-		/* FROM-less constant SELECT (SELECT 1+1, SELECT 'x', ...): one
-		 * row, each projection an expression over no columns. */
-		if (sel->where || sel->group || sel->having || sel->order ||
-		    sel->limit || sel->offset || sel->distinct)
-			goto fallback;
-		return vx_try_prepare_const(db, ast, sel, binds, nbinds, out, errmsg);
-	}
+	if (src == NULL)   /* no FROM: one row of no columns */
+		return vx_try_prepare_mat(db, ast, sel, NULL, NULL, NULL, 0,
+		                          binds, nbinds, out, errmsg);
 	if (src->next != NULL) {
 		const sql_src_t *js;
 		/* NATURAL needs the common-column set from both schemas, and a
@@ -4512,7 +4622,7 @@ vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 		 * two streaming join executors (2-table + N-way, native +
 		 * non-native sources) to thread it through; deferred as a distinct
 		 * step.  Falls back correctly via the VDBE today. */
-		if (sel->group || sel->distinct)
+		if (sel->distinct && !sel_is_agg(sel))
 			goto fallback;
 		/* ORDER BY / LIMIT / OFFSET on the join path are applied as a
 		 * post-collection sort over the output columns (collect_serial),
@@ -4531,13 +4641,9 @@ vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 		 * join (join_ordered_materialize threads st->njoin). */
 		return vx_try_prepare_njoin(db, ast, sel, binds, nbinds, out, errmsg);
 	}
-	if (src->subquery != NULL) {
-		/* FROM ( select ) [AS x]: a derived table.  Handled by a dedicated
-		 * recognizer that runs the inner select via SQLite as the row
-		 * source.  No GROUP BY / aggregates on the outer query yet. */
-		if (sel->group) goto fallback;
-		return vx_try_prepare_derived(db, ast, sel, binds, nbinds, out, errmsg);
-	}
+	if (src->subquery != NULL)   /* FROM ( select ) [AS x] */
+		return vx_try_prepare_mat(db, ast, sel, src->subquery, NULL, NULL, 0,
+		                          binds, nbinds, out, errmsg);
 	if (src->table.len == 0 || src->table.len >= sizeof tabbuf) goto fallback;
 	memcpy(tabbuf, src->table.p, src->table.len);
 	tabbuf[src->table.len] = '\0';
@@ -4548,8 +4654,8 @@ vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 	{
 		char vsql[1024];
 		if (xstore_view_sql(xstore_bt_of(db), tabbuf, vsql, (int)sizeof vsql))
-			return vx_try_prepare_view(db, ast, sel, vsql, NULL, 0,
-			                           binds, nbinds, out, errmsg);
+			return vx_try_prepare_mat(db, ast, sel, NULL, vsql, NULL, 0,
+			                          binds, nbinds, out, errmsg);
 	}
 
 	/* Aggregation (P3): a GROUP BY, or any select item that is an
@@ -4561,12 +4667,8 @@ vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 			if (e && expr_has_agg(e))
 				has_agg = 1;
 		}
-		if (has_agg) {
-			if (sel->distinct) goto fallback;   /* DISTINCT over aggregates: VDBE */
-			/* Hand off the AST (still alive) to the agg builder, which
-			 * destroys it before returning. */
+		if (has_agg)   /* the agg builder takes over (and frees) the AST */
 			return vx_try_prepare_agg(db, ast, sel, tabbuf, binds, nbinds, out, errmsg);
-		}
 	}
 	if (sel->group) goto fallback;   /* defensive: GROUP only on agg path */
 	if (sel->having) goto fallback;  /* HAVING only with aggregation */
@@ -4632,7 +4734,7 @@ vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 
 	memset(&nv, 0, sizeof nv);
 	comp.st = st; comp.nv = &nv; comp.jc = NULL; comp.fail = 0;
-	comp.binds = binds; comp.nbinds = nbinds;
+	comp.binds = binds; comp.nbinds = nbinds; comp.ag = NULL;
 
 	/* Pass 1: collect referenced base columns and reject unsupported
 	 * constructs, WITHOUT the affinity gate (affinities are unknown
@@ -4774,8 +4876,11 @@ vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 		}
 		/* Record each output column's affinity while the compiler is
 		 * live (for recursive execution as a nested subquery). */
-		for (k = 0; k < nproj && k < 64; k++)
+		for (k = 0; k < nproj && k < 64; k++) {
 			st->outaff[k] = st->proj[k] ? node_class(&comp, st->proj[k]) : VX_AFF_BLOB;
+			st->outnoaff[k] = st->proj[k] ?
+			    (unsigned char)expr_noaff(&comp, st->proj[k]) : VX_NOAFF_UNKNOWN;
+		}
 	}
 
 	/* ORDER BY / LIMIT / OFFSET (V4).  Order keys compile over the
@@ -4884,14 +4989,7 @@ fallback:
 	return rc;
 }
 
-/* ---- aggregation plan builder (P3) ------------------------------- *
- *
- * Validates and compiles SELECT [keys,] agg(expr)... FROM t [WHERE ...]
- * [GROUP BY keys].  Conservative: each select item is either a GROUP BY
- * key expression (which must appear in GROUP BY, compared structurally
- * to a key) or a single non-DISTINCT aggregate over a scalar argument;
- * no expressions over aggregates, no HAVING (gated earlier).  Anything
- * else falls back. */
+/* ---- aggregation plan builder ------------------------------------ */
 
 /* Map an aggregate function name + arg shape to a kind, or 0. */
 static enum vx_agg_kind
@@ -4960,271 +5058,364 @@ expr_same(const sql_expr_t *a, const sql_expr_t *b)
 	}
 }
 
-/* Compile a HAVING predicate into an expression over the aggregation
- * OUTPUT row: any sub-expression that matches a SELECT item (an
- * aggregate call or a group-key reference, by expr_same) becomes a
- * VXO_COL referencing that output column; comparisons and AND/OR/NOT
- * recurse; literals/params compile as usual.  Returns NULL with
- * *c->fail set when the HAVING references something not in the SELECT
- * list (e.g. an aggregate that is not output) -- the caller falls back.
- * This covers the common HAVING (a condition on an output aggregate or
- * key) without adding extra accumulators. */
-/* Pass 1 for HAVING: walk the HAVING AST and, for each aggregate call
- * that is NOT already a SELECT output item, append a HAVING-only
- * aggregate outcol to ap->out (past ap->nout, growing ap->nout_all and
- * counting it in *nagg) and collect its argument columns into nv.
- * Returns 0, or -1 (unsupported aggregate / too many / column-collect
- * failure -> caller falls back). */
-static int
-having_collect_aggs(const sql_select_t *sel, const sql_expr_t *e,
-                    vx_aggplan_t *ap, struct namevec *nv, int *nagg)
+/* ---- aggregation: group-mode compile ------------------------------ */
+
+static int lit_int(const sql_expr_t *e, int64_t *out, const vx_cell_t *binds,
+                   int nbinds);
+
+/* The output item named `nm` (an AS alias), or NULL. */
+static const sql_exprlist_item_t *
+agg_alias(const sql_select_t *sel, const sql_str_t *nm)
 {
 	const sql_exprlist_item_t *it;
-	if (e == NULL) return 0;
-	if (is_agg_call(e)) {
-		enum vx_agg_kind kk;
-		int matched = 0, oi = 0;
-		/* Already a SELECT output aggregate?  Then it reuses that accs. */
-		for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next, oi++)
-			if (expr_same(e, it->expr)) { matched = 1; break; }
-		if (matched) return 0;
-		kk = agg_kind_of(e);
-		if (kk == 0) return -1;
-		if (ap->nout_all - ap->nout >= VX_HAVING_AGG_MAX) return -1;
-		ap->out[ap->nout_all].is_agg = 1;
-		ap->out[ap->nout_all].kind = kk;
-		ap->out[ap->nout_all].ast = e;
-		if (kk != VXA_COUNT_STAR) {
-			if (e->list == NULL || e->list->head == NULL) return -1;
-			if (collect_columns(nv, e->list->head->expr) != 0) return -1;
-		}
-		ap->nout_all++;
-		(*nagg)++;
-		return 0;
+	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next)
+		if (it->alias.len == nm->len && nm->len > 0 &&
+		    strncasecmp(it->alias.p, nm->p, nm->len) == 0)
+			return it;
+	return NULL;
+}
+
+/* Does `e` name a column of the source?  (So a HAVING / ORDER BY name
+ * that is both a column and an output alias means the column, as in
+ * SQLite.)  Base table: the live namevec schema; join: the join sides;
+ * materialized: the closed column set. */
+static int
+agg_is_src_col(struct vx_compiler *c, const sql_expr_t *e)
+{
+	const sql_str_t *nm = &e->name[e->nname - 1];
+	int i;
+	if (c->jc != NULL) return jc_resolve(c->jc, e) >= 0;
+	if (nv_find(c->nv, nm) >= 0) return 1;
+	if (c->nv->sc != NULL) {
+		for (i = 0; i < c->nv->nsc; i++)
+			if (strlen(c->nv->sc[i].name) == nm->len &&
+			    strncasecmp(c->nv->sc[i].name, nm->p, nm->len) == 0)
+				return 1;
+		return (nm->len == 5 && strncasecmp(nm->p, "rowid", 5) == 0) ||
+		    (nm->len == 7 && strncasecmp(nm->p, "_rowid_", 7) == 0) ||
+		    (nm->len == 3 && strncasecmp(nm->p, "oid", 3) == 0);
 	}
-	/* Recurse into the predicate structure. */
-	if (having_collect_aggs(sel, e->a, ap, nv, nagg) != 0) return -1;
-	if (having_collect_aggs(sel, e->b, ap, nv, nagg) != 0) return -1;
-	if (having_collect_aggs(sel, e->c, ap, nv, nagg) != 0) return -1;
-	for (it = e->list ? e->list->head : NULL; it; it = it->next)
-		if (having_collect_aggs(sel, it->expr, ap, nv, nagg) != 0) return -1;
 	return 0;
 }
 
+static vx_expr_t *compile_expr(struct vx_compiler *c, const sql_expr_t *e);
+
 static vx_expr_t *
-compile_having(struct vx_compiler *c, const sql_select_t *sel,
-               const sql_expr_t *e)
+agg_slot(struct vx_compiler *c, int slot)
 {
-	const sql_exprlist_item_t *it;
-	int oi;
-	enum vx_op op;
-	if (c->fail || e == NULL) { c->fail = 1; return NULL; }
-
-	/* First, does this whole sub-expression match a SELECT output item?
-	 * (Matches an aggregate call like count(*) or a group key.) */
-	oi = 0;
-	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next, oi++) {
-		if (expr_same(e, it->expr)) {
-			vx_expr_t *n = expr_node(c, VXO_COL);
-			if (n == NULL) return NULL;
-			n->col = oi;   /* index into the extended output row */
-			return n;
-		}
-	}
-	/* Or a HAVING-only aggregate appended past nout (its value lands in
-	 * the extended row at its outcol index). */
-	if (c->st->agg != NULL) {
-		vx_aggplan_t *ap = c->st->agg;
-		int i;
-		for (i = ap->nout; i < ap->nout_all; i++)
-			if (ap->out[i].ast != NULL && expr_same(e, ap->out[i].ast)) {
-				vx_expr_t *n = expr_node(c, VXO_COL);
-				if (n == NULL) return NULL;
-				n->col = i;
-				return n;
-			}
-	}
-
-	switch (e->op) {
-	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING: case SX_E_BLOB:
-		return compile_literal(c, e);
-	case SX_E_PARAM:
-		return compile_param(c, e);
-	case SX_E_UNARY:
-		if (e->op2 == TK_NOT) {
-			vx_expr_t *n = expr_node(c, VXO_NOT);
-			vx_expr_t *a = compile_having(c, sel, e->a);
-			if (a == NULL) return NULL;
-			if (n) n->a = a;
-			return n;
-		}
-		c->fail = 1; return NULL;
-	case SX_E_BINARY: {
-		vx_expr_t *n, *a, *b;
-		if (!tok_to_binop(e->op2, &op)) { c->fail = 1; return NULL; }
-		a = compile_having(c, sel, e->a);
-		if (a == NULL) return NULL;
-		b = compile_having(c, sel, e->b);
-		if (b == NULL) return NULL;
-		n = expr_node(c, op);
-		if (n == NULL) return NULL;
-		n->a = a; n->b = b;
-		return n;
-	}
-	case SX_E_IS_NULL: {
-		vx_expr_t *n = expr_node(c, e->ival ? VXO_NOTNULL : VXO_ISNULL);
-		vx_expr_t *a = compile_having(c, sel, e->a);
-		if (a == NULL) return NULL;
-		if (n) n->a = a;
-		return n;
-	}
-	default:
-		c->fail = 1; return NULL;
-	}
+	vx_expr_t *n = expr_node(c, VXO_COL);
+	if (n) { n->col = slot; n->noaff = c->ag->noaff[slot]; }
+	return n;
 }
 
-/* Compile a "computed" SELECT-list expression OVER aggregates / group
- * keys (e.g. SUM(x)+1, MAX(v)-MIN(v), the sum of two columns' aggs) into
- * a projection over the EXTENDED aggregation row (erow, nout_all cells).
- * An aggregate CALL resolves to the erow slot of a matching aggregate
- * outcol (a SELECT-output aggregate or a HAVING/computed-appended one);
- * a group-key sub-expression resolves to its output-key slot.  Unlike
- * compile_having, this does NOT match the whole select item (that would
- * be a self-reference to the output slot being computed).  Falls back
- * (c->fail) on any construct outside the supported scalar set. */
+/*
+ * Group mode: resolve `e` against the group row before compile_expr
+ * looks at it.  Returns a node, or NULL with *handled = 0 (compile `e`
+ * normally: its children come back here) or *handled = 1 (an error was
+ * set in c->fail).
+ */
 static vx_expr_t *
-compile_agg_proj(struct vx_compiler *c, const sql_select_t *sel,
-                 const sql_expr_t *e)
+agg_resolve(struct vx_compiler *c, const sql_expr_t *e, int *handled)
 {
-	vx_aggplan_t *ap = c->st ? c->st->agg : NULL;
-	const sql_exprlist_item_t *it;
-	int oi;
-	if (c->fail || e == NULL || ap == NULL) { c->fail = 1; return NULL; }
+	struct vx_aggctx *ag = c->ag;
+	vx_aggplan_t *ap = ag->ap;
+	const sql_exprlist_item_t *al;
+	int k;
 
-	/* An aggregate CALL: resolve to its accumulator's erow slot -- either
-	 * a SELECT-output aggregate, or one appended past nout (HAVING-only
-	 * or by another computed column). */
+	*handled = 1;
+	/* A GROUP BY term, or a column reference to the column a key is: its
+	 * key slot. */
+	for (k = 0; k < ap->ngrp; k++)
+		if (expr_same(e, ag->gast[k]))
+			return agg_slot(c, k);
+	if (e->op == SX_E_COLUMN && e->nname >= 1 && e->nname <= 2) {
+		int col = c->jc != NULL ? jc_resolve(c->jc, e)
+		    : nv_find(c->nv, &e->name[e->nname - 1]);
+		for (k = 0; col >= 0 && k < ap->ngrp; k++)
+			if (ap->grp[k]->op == VXO_COL && ap->grp[k]->col == col &&
+			    !ap->grp[k]->noaff)
+				return agg_slot(c, k);
+	}
 	if (is_agg_call(e)) {
-		for (oi = 0; oi < ap->nout_all; oi++)
-			if (ap->out[oi].is_agg && ap->out[oi].ast != NULL &&
-			    expr_same(e, ap->out[oi].ast)) {
-				vx_expr_t *n = expr_node(c, VXO_COL);
-				if (n == NULL) return NULL;
-				n->col = oi;
-				return n;
+		enum vx_agg_kind kind = agg_kind_of(e);
+		enum vx_aff argcls = VX_AFF_BLOB;
+		vx_aggacc_t *a;
+		for (k = 0; k < ap->nagg; k++)
+			if (expr_same(e, ap->acc[k].ast))
+				return agg_slot(c, ap->ngrp + k);
+		if (kind == 0 || ap->ngrp + ap->nagg >= VX_GROW_MAX) {
+			c->fail = 1; return NULL;
+		}
+		a = &ap->acc[ap->nagg];
+		memset(a, 0, sizeof *a);
+		a->kind = kind; a->ast = e;
+		if (kind != VXA_COUNT_STAR) {
+			const sql_expr_t *arg = e->list->head->expr;
+			if (expr_has_agg(arg)) { c->fail = 1; return NULL; }   /* nested */
+			ag->grouping = 0;
+			a->arg = compile_expr(c, arg);
+			argcls = a->arg ? node_class(c, a->arg) : VX_AFF_BLOB;
+			ag->grouping = 1;
+			if (a->arg == NULL || c->fail) { c->fail = 1; return NULL; }
+		}
+		if (kind == VXA_GROUP_CONCAT) {
+			ap->has_gc = 1;
+			if (e->list->head->next != NULL) {
+				const sql_expr_t *sp = e->list->head->next->expr;
+				char *b;
+				if (sp == NULL || sp->op != SX_E_STRING) { c->fail = 1; return NULL; }
+				b = (char *)arena_alloc(&c->st->plan_arena, sp->lit.len + 1);
+				if (b == NULL) { c->fail = 1; return NULL; }
+				memcpy(b, sp->lit.p, sp->lit.len); b[sp->lit.len] = '\0';
+				a->gc_sep = b; a->gc_seplen = sp->lit.len;
 			}
-		/* Also match a plain SELECT-output aggregate (ast unset for those
-		 * appears as a direct out[oi] classified in pass 1). */
-		oi = 0;
-		for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next, oi++)
-			if (ap->out[oi].is_agg && expr_same(e, it->expr)) {
-				vx_expr_t *n = expr_node(c, VXO_COL);
-				if (n == NULL) return NULL;
-				n->col = oi;
-				return n;
-			}
-		c->fail = 1; return NULL;   /* aggregate not accumulated */
+		}
+		/* SQLite: count/sum/total/avg are numbers; min/max the argument's
+		 * value; group_concat text.  None has an affinity. */
+		k = ap->ngrp + ap->nagg;
+		ag->noaff[k] = VX_NOAFF_NO;
+		ag->aff[k] = (kind == VXA_GROUP_CONCAT) ? VX_AFF_TEXT
+		    : (kind == VXA_MIN || kind == VXA_MAX) ? argcls : VX_AFF_NUMERIC;
+		ap->nagg++;
+		return agg_slot(c, k);
 	}
-
-	/* A group-key sub-expression that is itself a SELECT output key.
-	 * Exclude a COMPUTED output slot (that would be a self-reference to
-	 * the placeholder being computed). */
-	oi = 0;
-	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next, oi++)
-		if (!ap->out[oi].is_agg && !ap->out[oi].computed &&
-		    expr_same(e, it->expr)) {
-			vx_expr_t *n = expr_node(c, VXO_COL);
-			if (n == NULL) return NULL;
-			n->col = oi;
+	if (e->op == SX_E_COLUMN) {
+		/* An output alias stands for its expression: in ORDER BY first
+		 * (SQLite resolves ORDER BY names against the result columns),
+		 * in HAVING only when no source column has the name. */
+		if (e->nname == 1 && ag->depth < 4 &&
+		    (ag->ctx == AGX_ORDER ||
+		     (ag->ctx == AGX_HAVING && !agg_is_src_col(c, e))) &&
+		    (al = agg_alias(ag->sel, &e->name[0])) != NULL) {
+			vx_expr_t *n;
+			int sctx = ag->ctx;
+			ag->depth++;
+			ag->ctx = AGX_SEL;
+			n = compile_expr(c, al->expr);
+			ag->ctx = sctx;
+			ag->depth--;
+			if (n == NULL) c->fail = 1;
 			return n;
 		}
-	/* A group key that appears in GROUP BY but not as its own output
-	 * column: resolve to the first output key with the same expression. */
-	{
-		const sql_exprlist_item_t *g;
-		for (g = sel->group ? sel->group->head : NULL; g; g = g->next)
-			if (expr_same(e, g->expr)) {
-				oi = 0;
-				for (it = sel->cols->head; it; it = it->next, oi++)
-					if (!ap->out[oi].is_agg && expr_same(g->expr, it->expr)) {
-						vx_expr_t *n = expr_node(c, VXO_COL);
-						if (n == NULL) return NULL;
-						n->col = oi;
-						return n;
-					}
-				c->fail = 1; return NULL;   /* key not projected as output */
-			}
-	}
-
-	switch (e->op) {
-	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING: case SX_E_BLOB:
-		return compile_literal(c, e);
-	case SX_E_PARAM:
-		return compile_param(c, e);
-	case SX_E_UNARY: {
-		vx_expr_t *n, *a;
-		if (e->op2 == TK_MINUS) {
-			a = compile_agg_proj(c, sel, e->a);
-			if (a == NULL) return NULL;
-			n = expr_node(c, VXO_NEG);
-		} else if (e->op2 == TK_NOT) {
-			a = compile_agg_proj(c, sel, e->a);
-			if (a == NULL) return NULL;
-			n = expr_node(c, VXO_NOT);
-		} else if (e->op2 == TK_PLUS) {
-			return compile_agg_proj(c, sel, e->a);
-		} else { c->fail = 1; return NULL; }
-		if (n) n->a = a;
-		return n;
-	}
-	case SX_E_BINARY: {
-		enum vx_op op;
-		vx_expr_t *n, *a, *b;
-		if (e->op2 == TK_LIKE || !tok_to_binop(e->op2, &op)) { c->fail = 1; return NULL; }
-		a = compile_agg_proj(c, sel, e->a);
-		if (a == NULL) return NULL;
-		b = compile_agg_proj(c, sel, e->b);
-		if (b == NULL) return NULL;
-		n = expr_node(c, op);
-		if (n) { n->a = a; n->b = b; }
-		return n;
-	}
-	case SX_E_IS_NULL: {
-		vx_expr_t *n = expr_node(c, e->ival ? VXO_NOTNULL : VXO_ISNULL);
-		vx_expr_t *a = compile_agg_proj(c, sel, e->a);
-		if (a == NULL) return NULL;
-		if (n) n->a = a;
-		return n;
-	}
-	case SX_E_FUNC: {
-		/* A scalar function over aggregates/keys (e.g. abs(sum(x))). */
-		int nargs = 0, ok = 0; enum vx_func f;
-		vx_expr_t *n; int k;
-		for (it = e->list ? e->list->head : NULL; it; it = it->next) nargs++;
-		f = func_of(&e->name[0], &ok, nargs);
-		if (!ok) { c->fail = 1; return NULL; }
-		n = expr_node(c, VXO_FUNC);
-		if (n == NULL) return NULL;
-		n->func = f; n->nargs = nargs;
-		n->args = (vx_expr_t **)arena_alloc(&c->st->plan_arena,
-		    sizeof(vx_expr_t *) * (size_t)(nargs > 0 ? nargs : 1));
-		if (n->args == NULL) { c->fail = 1; return NULL; }
-		k = 0;
-		for (it = e->list ? e->list->head : NULL; it; it = it->next) {
-			n->args[k] = compile_agg_proj(c, sel, it->expr);
-			if (n->args[k] == NULL) return NULL;
-			k++;
-		}
-		if (f == VXF_EXT && compile_ext(c, e, n) != 0) { c->fail = 1; return NULL; }
-		return n;
-	}
-	case SX_E_CASE:
-		c->fail = 1; return NULL;   /* CASE over aggregates: not yet */
-	default:
+		/* A bare column not in GROUP BY.  SQLite takes it from an
+		 * arbitrary row of the group; vexec declines (its value is not
+		 * reproducible). */
 		c->fail = 1; return NULL;
 	}
+	/* A subquery over the group row: only an uncorrelated one, run once
+	 * into a constant (a correlated one would bind source-row columns). */
+	if (e->op == SX_E_SUBQUERY) {
+		vx_expr_t *n = compile_scalar_subquery(c, e);
+		if (n == NULL || c->fail) { c->fail = 1; return NULL; }
+		return n;
+	}
+	if (e->op == SX_E_IN_SELECT) {
+		vx_expr_t *n;
+		if (e->a == NULL) { c->fail = 1; return NULL; }   /* EXISTS */
+		n = compile_in_select(c, e);
+		if (n == NULL || c->fail) { c->fail = 1; return NULL; }
+		return n;
+	}
+	*handled = 0;
+	return NULL;
 }
 
+/* Close the source schema: from here on no new source column may be
+ * referenced (a materialized source is a fixed set anyway). */
+static void
+agg_freeze(struct vx_compiler *c)
+{
+	if (c->nv) c->nv->fixed = 1;
+}
+
+/*
+ * Build the aggregate part of `st` for SELECT `sel`, whose source row is
+ * already described by the compiler (comp->nv: a base table with live
+ * schema resolution, or a materialized source's columns; comp->jc: a
+ * join).  WHERE is compiled by the caller.  Fills st->agg, outname,
+ * outaff, the ORDER BY / LIMIT, and the min/max shortcut hint.  Returns
+ * 1, 0 to decline, -1 on OOM.
+ */
+static int
+agg_build(struct vx_compiler *comp, const sql_select_t *sel, int nout)
+{
+	struct vx_stmt *st = comp->st;
+	struct vx_aggctx ag;
+	vx_aggplan_t *ap;
+	const sql_exprlist_item_t *it;
+	int k, ngrp = 0;
+
+	memset(&ag, 0, sizeof ag);
+	ag.sel = sel;
+	for (it = sel->group ? sel->group->head : NULL; it; it = it->next) {
+		const sql_expr_t *g = it->expr;
+		if (ngrp >= 16 || g == NULL) return 0;
+		/* GROUP BY <n>: the n-th output column; GROUP BY <alias>: that
+		 * output's expression (unless a source column has the name). */
+		int64_t v;
+		if (g->op == SX_E_NUMBER && lit_int(g, &v, NULL, 0)) {
+			const sql_exprlist_item_t *ci;
+			if (v < 1 || v > nout) return 0;          /* SQLite: out of range */
+			for (ci = sel->cols->head; v > 1; v--) ci = ci->next;
+			if (expr_has_agg(ci->expr)) return 0;    /* SQLite: an error */
+			g = ci->expr;
+		} else if (g->op == SX_E_UNARY && g->a != NULL && g->a->op == SX_E_NUMBER) {
+			return 0;   /* GROUP BY -1 / +1: SQLite reads a position */
+		} else if (g->op == SX_E_COLUMN && g->nname == 1 &&
+		    !agg_is_src_col(comp, g)) {
+			const sql_exprlist_item_t *al = agg_alias(sel, &g->name[0]);
+			if (al == NULL || expr_has_agg(al->expr)) return 0;
+			g = al->expr;
+		}
+		if (expr_has_agg(g)) return 0;
+		ag.gast[ngrp++] = g;
+	}
+	if (nout > 32) return 0;
+	ap = (vx_aggplan_t *)calloc(1, sizeof *ap);
+	if (ap == NULL) return -1;
+	st->agg = ap;
+	ap->ngrp = ngrp;
+	ap->nout = nout;
+	ap->grp = (vx_expr_t **)calloc((size_t)(ngrp > 0 ? ngrp : 1), sizeof(vx_expr_t *));
+	ap->acc = (vx_aggacc_t *)calloc(VX_GROW_MAX, sizeof(vx_aggacc_t));
+	ap->proj = (vx_expr_t **)calloc(32, sizeof(vx_expr_t *));
+	if (ap->grp == NULL || ap->acc == NULL || ap->proj == NULL) return -1;
+	ag.ap = ap;
+
+	/* The keys, over the source row. */
+	comp->fail = 0;
+	for (k = 0; k < ngrp; k++) {
+		ap->grp[k] = compile_expr(comp, ag.gast[k]);
+		if (comp->fail || ap->grp[k] == NULL) return 0;
+		ag.aff[k] = node_class(comp, ap->grp[k]);
+		ag.noaff[k] = (unsigned char)expr_noaff(comp, ap->grp[k]);
+	}
+
+	/* Outputs, then HAVING, over the group row. */
+	comp->ag = &ag;
+	ag.grouping = 1;
+	ag.ctx = AGX_SEL;
+	k = 0;
+	for (it = sel->cols->head; it; it = it->next, k++) {
+		if (it->expr == NULL || it->expr->op == SX_E_STAR) goto decline;
+		ap->proj[k] = compile_expr(comp, it->expr);
+		if (comp->fail || ap->proj[k] == NULL) goto decline;
+		item_name(it, st->outname[k], sizeof st->outname[0]);
+		st->outaff[k] = node_class(comp, ap->proj[k]);
+		st->outnoaff[k] = (unsigned char)expr_noaff(comp, ap->proj[k]);
+	}
+	if (sel->having) {
+		ag.ctx = AGX_HAVING;
+		ap->having = compile_expr(comp, sel->having);
+		if (comp->fail || ap->having == NULL) goto decline;
+	}
+
+	/* ORDER BY: an output position, an output alias, an expression equal
+	 * to an output, or any other group-row expression (a sort-only
+	 * column appended after the outputs). */
+	st->limit = -1;
+	st->offset = 0;
+	ap->nemit = nout;
+	ap->distinct = sel->distinct;
+	if (sel->order) {
+		const sql_exprlist_item_t *o;
+		int no = 0, oi = 0;
+		for (o = sel->order->head; o; o = o->next) no++;
+		if (no > 16) goto decline;
+		st->norder = no;
+		st->order_key = (vx_expr_t **)calloc((size_t)no, sizeof(vx_expr_t *));
+		st->order_outcol = (int *)calloc((size_t)no, sizeof(int));
+		st->order_desc = (int *)calloc((size_t)no, sizeof(int));
+		if (!st->order_key || !st->order_outcol || !st->order_desc) {
+			comp->ag = NULL; return -1;
+		}
+		ag.ctx = AGX_ORDER;
+		for (o = sel->order->head; o; o = o->next, oi++) {
+			const sql_expr_t *e = o->expr;
+			const sql_exprlist_item_t *ci;
+			int pos = 0;
+			st->order_desc[oi] = ord_flags(o);
+			if (e && e->op == SX_E_NUMBER) {
+				int64_t v;
+				if (!lit_int(e, &v, NULL, 0) || v < 1 || v > nout) goto decline;
+				pos = (int)v;
+			} else if ((pos = order_key_alias_pos(sel, e)) != 0) {
+				;   /* ORDER BY <output alias> */
+			} else {
+				k = 1;
+				for (ci = sel->cols->head; ci; ci = ci->next, k++)
+					if (expr_same(e, ci->expr)) { pos = k; break; }
+			}
+			if (pos == 0) {
+				if (ap->nemit >= 32) goto decline;
+				ap->proj[ap->nemit] = compile_expr(comp, e);
+				if (comp->fail || ap->proj[ap->nemit] == NULL) goto decline;
+				pos = ++ap->nemit;
+			}
+			st->order_outcol[oi] = pos;
+		}
+	}
+	comp->ag = NULL;
+	agg_freeze(comp);
+	/* ORDER BY + LIMIT / OFFSET picks the groups SQLite picks only under a
+	 * total order: the ORDER BY must name every GROUP BY key (groups are
+	 * unique on their keys).  Which tied groups survive is unspecified in
+	 * SQL and SQLite's sorter breaks ties differently by direction. */
+	if (st->norder > 0 && (sel->limit || sel->offset) && ap->ngrp > 0) {
+		for (k = 0; k < ap->ngrp; k++) {
+			int oi, cov = 0;
+			for (oi = 0; oi < st->norder && !cov; oi++) {
+				const vx_expr_t *ok = ap->proj[st->order_outcol[oi] - 1];
+				cov = (ok->op == VXO_COL && ok->col == k);
+			}
+			if (!cov) return 0;
+		}
+	}
+	if (sel->limit && !lit_int(sel->limit, &st->limit, comp->binds, comp->nbinds))
+		return 0;
+	if (sel->limit && st->limit < 0) st->limit = -1;   /* SQLite: no limit */
+	if (sel->offset) {
+		if (!lit_int(sel->offset, &st->offset, comp->binds, comp->nbinds)) return 0;
+		if (st->offset < 0) st->offset = 0;
+	}
+	if ((sel->limit && sel->limit->op == SX_E_PARAM) ||
+	    (sel->offset && sel->offset->op == SX_E_PARAM))
+		st->noreuse = 1;   /* the bound value is baked into the plan */
+	st->nout = nout;
+	return 1;
+
+decline:
+	comp->ag = NULL;
+	return 0;
+}
+
+/* Every output of an aggregate is evaluated over the group row, so the
+ * plan's projection slots (st->proj) are not used; the morsel-parallel
+ * path reads ap->proj.  MIN/MAX shortcut: no GROUP BY, no HAVING, every
+ * aggregate MIN(c) (or every one MAX(c)) of one bare column c. */
+static int
+agg_minmax_col(const vx_aggplan_t *ap, int *kind)
+{
+	int k, col = -1;
+	*kind = 0;
+	if (ap->ngrp != 0 || ap->having != NULL || ap->nagg == 0) return -1;
+	for (k = 0; k < ap->nagg; k++) {
+		const vx_aggacc_t *a = &ap->acc[k];
+		if ((a->kind != VXA_MIN && a->kind != VXA_MAX) || a->arg == NULL ||
+		    a->arg->op != VXO_COL || (*kind && *kind != (int)a->kind) ||
+		    (col >= 0 && col != a->arg->col))
+			return -1;
+		*kind = (int)a->kind; col = a->arg->col;
+	}
+	return col;
+}
+
+/*
+ * SELECT ... FROM <base table> with an aggregate or GROUP BY.  One
+ * compile pass with live schema resolution: each column is given its
+ * payload slot and affinity the moment anything (WHERE, a key, an
+ * aggregate argument, a correlated subquery's outer reference) names it.
+ */
 static int
 vx_try_prepare_agg(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
                    const char *tabbuf, const vx_cell_t *binds, int nbinds,
@@ -5233,301 +5424,57 @@ vx_try_prepare_agg(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	struct vx_stmt *st = NULL;
 	struct namevec nv;
 	struct vx_compiler comp;
-	vx_aggplan_t *ap = NULL;
+	xstore_col_t *sc = NULL;
 	const sql_exprlist_item_t *it;
-	char *srcsql = NULL;
-	int nout = 0, ngrp = 0, nagg = 0, rc = 0;
+	int nout = 0, rc = 0, nsc, r;
 
 	if (errmsg) *errmsg = NULL;
-
-	/* ORDER BY / LIMIT / OFFSET over aggregated output ARE supported
-	 * (sorted post-aggregation, see agg_order_limit), as long as every
-	 * ORDER BY key resolves to an OUTPUT column (a 1-based position or a
-	 * select item matched by expr_same).  An order key that is not an
-	 * output column falls back below.  DISTINCT over aggregates still
-	 * falls back (handled by the caller's gate). */
-
-	/* Count output columns and GROUP BY keys. */
 	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
-		if (it->expr == NULL || it->expr->op == SX_E_STAR) {
-			/* count(*) is SX_E_FUNC with ival bit1, not SX_E_STAR; a bare
-			 * '*' in an aggregate query is not supported. */
-			goto fallback;
-		}
+		if (it->expr == NULL || it->expr->op == SX_E_STAR) goto fallback;
 		nout++;
 	}
 	if (nout == 0 || nout > 32) goto fallback;
-	for (it = sel->group ? sel->group->head : NULL; it; it = it->next) ngrp++;
-	if (ngrp > 16) goto fallback;
 
 	st = (struct vx_stmt *)calloc(1, sizeof *st);
 	if (!st) goto oom;
 	st->db = db;
 	st->cur = -1;
-	st->limit = -1;   /* agg path has no LIMIT/ORDER BY (gated above) */
+	st->limit = -1;
 	st->binds = binds; st->nbinds = nbinds;
-	ap = (vx_aggplan_t *)calloc(1, sizeof *ap);
-	if (!ap) goto oom;
-	ap->nout = nout;
-	ap->nout_all = nout;
-	ap->ngrp = ngrp;
-	/* Over-allocate out[] to leave room for up to VX_HAVING_AGG_MAX
-	 * HAVING-only aggregates appended past nout. */
-	ap->out = (vx_outcol_t *)calloc((size_t)(nout + VX_HAVING_AGG_MAX),
-	                                sizeof(vx_outcol_t));
-	ap->grp = (vx_expr_t **)calloc((size_t)(ngrp > 0 ? ngrp : 1), sizeof(vx_expr_t *));
-	ap->proj = (vx_expr_t **)calloc((size_t)nout, sizeof(vx_expr_t *));
-	if (!ap->out || !ap->grp || !ap->proj) goto oom;
-	st->agg = ap;
-
-	memset(&nv, 0, sizeof nv);
-	comp.st = st; comp.nv = &nv; comp.jc = NULL; comp.fail = 0;
-	comp.binds = binds; comp.nbinds = nbinds;
-
-	/* Pass 1: collect referenced base columns (group keys, agg args,
-	 * WHERE), and classify each select item as key or aggregate. */
-	for (it = sel->group ? sel->group->head : NULL; it; it = it->next)
-		if (collect_columns(&nv, it->expr) != 0) goto fallback;
-	{
-		int oi = 0;
-		for (it = sel->cols->head; it; it = it->next, oi++) {
-			const sql_expr_t *e = it->expr;
-			item_name(it, st->outname[oi], sizeof st->outname[0]);
-			if (is_agg_call(e)) {
-				enum vx_agg_kind kk = agg_kind_of(e);
-				if (kk == 0) goto fallback;
-				ap->out[oi].is_agg = 1;
-				ap->out[oi].kind = kk;
-				if (kk != VXA_COUNT_STAR) {
-					const sql_expr_t *arg = e->list->head->expr;
-					if (collect_columns(&nv, arg) != 0) goto fallback;
-				}
-				if (kk == VXA_GROUP_CONCAT) {
-					/* Capture a literal separator (2nd arg); a non-literal
-					 * separator is unsupported.  Default ',' when absent. */
-					ap->has_gc = 1;
-					if (e->list->head->next != NULL) {
-						const sql_expr_t *sp = e->list->head->next->expr;
-						char *sepb;
-						if (sp == NULL || sp->op != SX_E_STRING) goto fallback;
-						/* Copy: lit may live in the parse arena (a collapsed
-						 * '' literal), which is freed when prepare returns. */
-						sepb = (char *)arena_alloc(&st->plan_arena, sp->lit.len + 1);
-						if (sepb == NULL) goto oom;
-						memcpy(sepb, sp->lit.p, sp->lit.len);
-						sepb[sp->lit.len] = '\0';
-						ap->out[oi].gc_sep = sepb;
-						ap->out[oi].gc_seplen = sp->lit.len;
-					}
-				}
-				nagg++;
-			} else {
-				/* Either a grouping-key output (matches a GROUP BY key) or a
-				 * COMPUTED expression over aggregates/keys (SUM(x)+1).  A key
-				 * emits erow[oi] verbatim; a computed column gets a projection
-				 * compiled in pass 2 (proj[oi]) and its aggregate leaves are
-				 * appended to the accumulator region here. */
-				const sql_exprlist_item_t *g;
-				int matched = 0;
-				for (g = sel->group ? sel->group->head : NULL; g; g = g->next)
-					if (expr_same(e, g->expr)) { matched = 1; break; }
-				if (matched) {
-					ap->out[oi].is_agg = 0;
-					if (collect_columns(&nv, e) != 0) goto fallback;
-				} else if (expr_has_agg(e)) {
-					/* Computed over aggregates.  Mark for a pass-2 projection
-					 * (the erow slot itself is a placeholder). */
-					ap->out[oi].is_agg = 0;
-					ap->out[oi].computed = 1;
-					ap->has_proj = 1;
-					if (having_collect_aggs(sel, e, ap, &nv, &nagg) != 0)
-						goto fallback;
-				} else {
-					goto fallback;   /* bare column not in GROUP BY */
-				}
-			}
-		}
-	}
-	/* HAVING-only aggregates (not in SELECT) get appended outcols +
-	 * accumulators, and their args collected, in this same pass. */
-	if (sel->having &&
-	    having_collect_aggs(sel, sel->having, ap, &nv, &nagg) != 0)
-		goto fallback;
-	ap->nagg = nagg;
-	if (sel->where && collect_columns(&nv, sel->where) != 0) goto fallback;
-
-	/* Build the source SELECT over the collected base columns.  A pure
-	 * count(*) references no columns; select _rowid_ so there is a row
-	 * to count (and so the source has at least one column). */
-	/* Storage-native source.  A pure count(*) references no columns
-	 * (nv.n == 0) -- the scan still yields every rowid to count, no
-	 * record decode needed. */
-	if (nv.n > 32) goto fallback;
 	st->bt = xstore_bt_of(db);
 	if (st->bt == NULL) goto fallback;
 	snprintf(st->table, sizeof st->table, "%s", tabbuf);
-	st->nsrc_col = nv.n;
-	st->snap = 0;
-	if (nv.n > 0 && resolve_schema(db, tabbuf, &nv, st->src_pay) != 0)
-		goto fallback;
+	if (sel->from->alias.len > 0 && sel->from->alias.len < sizeof st->corr_alias) {
+		memcpy(st->corr_alias, sel->from->alias.p, sel->from->alias.len);
+		st->corr_alias[sel->from->alias.len] = '\0';
+	} else
+		snprintf(st->corr_alias, sizeof st->corr_alias, "%s", tabbuf);
+	sc = (xstore_col_t *)malloc(sizeof(xstore_col_t) * 64);
+	if (sc == NULL) goto oom;
+	nsc = xstore_table_schema(st->bt, tabbuf, sc, 64);
+	if (nsc <= 0) goto fallback;
 
-	/* Pass 2: compile group-key expressions, aggregate-arg expressions,
-	 * and the filter, with the affinity gate active. */
-	comp.fail = 0;
-	{
-		int gi = 0;
-		for (it = sel->group ? sel->group->head : NULL; it; it = it->next, gi++) {
-			ap->grp[gi] = compile_expr(&comp, it->expr);
-			if (comp.fail) goto fallback;
-		}
-	}
-	{
-		int oi = 0;
-		for (it = sel->cols->head; it; it = it->next, oi++) {
-			if (ap->out[oi].is_agg) {
-				if (ap->out[oi].kind != VXA_COUNT_STAR) {
-					ap->out[oi].arg = compile_expr(&comp, it->expr->list->head->expr);
-					if (comp.fail) goto fallback;
-				}
-			} else if (ap->out[oi].computed) {
-				/* Projection over aggregates/keys, compiled over the
-				 * extended row (proj[oi]); the erow[oi] slot is unused. */
-				ap->proj[oi] = compile_agg_proj(&comp, sel, it->expr);
-				if (comp.fail || ap->proj[oi] == NULL) goto fallback;
-			} else {
-				ap->out[oi].key = compile_expr(&comp, it->expr);
-				if (comp.fail) goto fallback;
-			}
-			/* Output affinity for recursive execution: count/sum/total/avg
-			 * are numeric; min/max take their argument's class; a group
-			 * key takes the key expr's class. */
-			if (oi < 64) {
-				if (ap->out[oi].computed)
-					st->outaff[oi] = ap->proj[oi] ? node_class(&comp, ap->proj[oi]) : VX_AFF_BLOB;
-				else if (!ap->out[oi].is_agg)
-					st->outaff[oi] = ap->out[oi].key ? node_class(&comp, ap->out[oi].key) : VX_AFF_BLOB;
-				else switch (ap->out[oi].kind) {
-				case VXA_MIN: case VXA_MAX:
-					st->outaff[oi] = ap->out[oi].arg ? node_class(&comp, ap->out[oi].arg) : VX_AFF_BLOB;
-					break;
-				case VXA_GROUP_CONCAT:
-					st->outaff[oi] = VX_AFF_TEXT;
-					break;
-				default:
-					st->outaff[oi] = VX_AFF_NUMERIC;   /* count/sum/total/avg */
-					break;
-				}
-			}
-		}
-		/* Compile the appended HAVING-only aggregate args. */
-		for (oi = ap->nout; oi < ap->nout_all; oi++) {
-			if (ap->out[oi].kind != VXA_COUNT_STAR && ap->out[oi].ast != NULL) {
-				const sql_expr_t *ag = ap->out[oi].ast;
-				if (ag->list == NULL || ag->list->head == NULL) goto fallback;
-				ap->out[oi].arg = compile_expr(&comp, ag->list->head->expr);
-				if (comp.fail) goto fallback;
-			}
-		}
-	}
+	memset(&nv, 0, sizeof nv);
+	nv.sc = sc; nv.nsc = nsc; nv.pay = st->src_pay;
+	comp.st = st; comp.nv = &nv; comp.jc = NULL; comp.fail = 0;
+	comp.binds = binds; comp.nbinds = nbinds; comp.ag = NULL;
+
 	if (sel->where) {
 		st->filter = compile_expr(&comp, sel->where);
-		if (comp.fail) goto fallback;
+		if (comp.fail || st->filter == NULL) goto fallback;
 	}
-	if (sel->having) {
-		ap->having = compile_having(&comp, sel, sel->having);
-		if (comp.fail || ap->having == NULL) goto fallback;
-	}
+	r = agg_build(&comp, sel, nout);
+	if (r < 0) goto oom;
+	if (r == 0) goto fallback;
+	st->nsrc_col = nv.n;
+	st->snap = 0;
 
-	st->nout = nout;
-
-	/* ORDER BY / LIMIT / OFFSET over the aggregated output.  Each ORDER
-	 * BY key must resolve to an OUTPUT column: a 1-based position, or an
-	 * expression that matches a SELECT item (by expr_same).  Anything
-	 * else -> fall back.  Stored as order_outcol[] (1-based); the sort
-	 * runs post-aggregation in agg_order_limit. */
-	st->limit = -1;
-	st->offset = 0;
-	if (sel->order) {
-		const sql_exprlist_item_t *o;
-		int no = 0, oi = 0;
-		for (o = sel->order->head; o; o = o->next) no++;
-		if (no == 0 || no > 16) goto fallback;
-		st->norder = no;
-		st->order_key = (vx_expr_t **)calloc((size_t)no, sizeof(vx_expr_t *));
-		st->order_outcol = (int *)calloc((size_t)no, sizeof(int));
-		st->order_desc = (int *)calloc((size_t)no, sizeof(int));
-		if (!st->order_key || !st->order_outcol || !st->order_desc) goto oom;
-		for (o = sel->order->head; o; o = o->next, oi++) {
-			const sql_expr_t *e = o->expr;
-			st->order_desc[oi] = ord_flags(o);
-			if (e && e->op == SX_E_NUMBER) {
-				char buf[32]; long pos;
-				if (e->lit.len == 0 || e->lit.len >= sizeof buf) goto fallback;
-				memcpy(buf, e->lit.p, e->lit.len); buf[e->lit.len] = '\0';
-				if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E')) goto fallback;
-				pos = strtol(buf, NULL, 10);
-				if (pos < 1 || pos > nout) goto fallback;
-				st->order_outcol[oi] = (int)pos;
-			} else {
-				/* Match the key expression to a SELECT output item. */
-				const sql_exprlist_item_t *ci; int pos = 0, found = 0;
-				for (ci = sel->cols->head; ci; ci = ci->next, pos++)
-					if (expr_same(e, ci->expr)) { st->order_outcol[oi] = pos + 1; found = 1; break; }
-				if (!found) goto fallback;   /* order key not an output column */
-			}
-		}
-	}
-	if (sel->limit) {
-		char buf[32];
-		if (sel->limit->op != SX_E_NUMBER || sel->limit->lit.len >= sizeof buf) goto fallback;
-		memcpy(buf, sel->limit->lit.p, sel->limit->lit.len); buf[sel->limit->lit.len] = '\0';
-		if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E')) goto fallback;
-		st->limit = strtoll(buf, NULL, 10);
-		if (st->limit < 0) st->limit = 0;
-	}
-	if (sel->offset) {
-		char buf[32];
-		if (sel->offset->op != SX_E_NUMBER || sel->offset->lit.len >= sizeof buf) goto fallback;
-		memcpy(buf, sel->offset->lit.p, sel->offset->lit.len); buf[sel->offset->lit.len] = '\0';
-		if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E')) goto fallback;
-		st->offset = strtoll(buf, NULL, 10);
-		if (st->offset < 0) st->offset = 0;
-	}
-	/* A LIMIT/OFFSET over aggregated output is byte-reproducible only when
-	 * the ORDER BY is a TOTAL order (no ties): with a tie on the sort key,
-	 * WHICH tied groups survive the limit is unspecified in SQL and our
-	 * group-iteration order need not match the VDBE's.  We cannot prove a
-	 * total order cheaply, so an agg query with LIMIT/OFFSET falls back
-	 * unless it has no ORDER BY at all (one row, or an unspecified subset
-	 * the VDBE also leaves unspecified -- but then the differential is not
-	 * reproducible either, so require ORDER BY-free).  Net: serve ORDER BY
-	 * (full set, ties only reorder -- the corpus marks these unordered) OR
-	 * a bare LIMIT with no ORDER BY; fall back ORDER BY + LIMIT/OFFSET. */
-	if (st->norder > 0 && (st->limit >= 0 || st->offset > 0))
-		goto fallback;
-
-	/* MIN/MAX shortcut: no GROUP BY / HAVING, and every aggregate is
-	 * MIN(c) (or every one MAX(c)) of the same bare column c.  A walk
-	 * ordered by c (ascending for MIN, descending for MAX) stops at the
-	 * first row that passes the WHERE with a non-NULL c: it holds the
-	 * answer (SQLite's min/max optimization).  Computed outputs over the
-	 * aggregates (COALESCE(MIN(x),0)) are fine; they read the same slot. */
+	/* MIN/MAX shortcut: a walk ordered by c (ascending for MIN,
+	 * descending for MAX) stops at the first row that passes the WHERE
+	 * with a non-NULL c: it holds the answer (SQLite's min/max
+	 * optimization).  Outputs over the aggregates read the same slot. */
 	{
-		int mmcol = -1, kind = 0, ok = (ap->ngrp == 0 && ap->having == NULL &&
-		    nagg > 0), oi;
-		for (oi = 0; ok && oi < ap->nout_all; oi++) {
-			if (!ap->out[oi].is_agg) {
-				if (!ap->out[oi].computed) ok = 0;
-				continue;
-			}
-			if ((ap->out[oi].kind != VXA_MIN && ap->out[oi].kind != VXA_MAX) ||
-			    ap->out[oi].arg == NULL || ap->out[oi].arg->op != VXO_COL ||
-			    (kind && kind != (int)ap->out[oi].kind) ||
-			    (mmcol >= 0 && mmcol != ap->out[oi].arg->col))
-				ok = 0;
-			else { kind = (int)ap->out[oi].kind; mmcol = ap->out[oi].arg->col; }
-		}
-		if (!ok) mmcol = -1;
+		int kind, mmcol = agg_minmax_col(st->agg, &kind);
 		ap_choose(db, tabbuf, nv.names, nv.n, st->src_pay, st->filter,
 		    NULL, 0, NULL, mmcol, &st->ap);
 		if (mmcol >= 0 && st->ap.ordered && st->ap.kind == VX_AP_INDEX) {
@@ -5554,7 +5501,7 @@ vx_try_prepare_agg(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	                                 sizeof(vx_cell_t));
 	if (!st->srcrow) goto oom;
 
-	free(srcsql);
+	free(sc);
 	sql_arena_destroy(ast);
 	*out = st;
 	return 1;
@@ -5562,10 +5509,9 @@ vx_try_prepare_agg(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 oom:
 	rc = -1;
 fallback:
-	if (srcsql) free(srcsql);
+	free(sc);
 	if (ast) sql_arena_destroy(ast);
-	if (st) { free(ap ? ap->out : NULL); free(ap ? ap->grp : NULL); free(ap ? ap->proj : NULL); free(ap); st->agg = NULL; vx_finalize(st); }
-	else free(ap);
+	if (st) vx_finalize(st);
 	return rc;
 }
 
@@ -5681,12 +5627,20 @@ jc_side_has(const struct vx_joinctx *jc, int side, const sql_str_t *col)
 	return 0;
 }
 
+static const sql_exprlist_item_t *agg_alias(const sql_select_t *sel,
+                                            const sql_str_t *nm);
+
 static int
 jc_collect(struct vx_joinctx *jc, const sql_expr_t *e)
 {
 	const sql_exprlist_item_t *it;
 	const sql_case_arm_t *arm;
 	if (e == NULL) return -1;
+	if (jc->aggsel != NULL && is_agg_call(e)) {
+		if (e->ival & 2) return 0;   /* count(*) */
+		if (e->list == NULL || e->list->head == NULL) return -1;
+		return jc_collect(jc, e->list->head->expr);   /* the argument */
+	}
 	switch (e->op) {
 	case SX_E_NULL: case SX_E_NUMBER: case SX_E_STRING: case SX_E_PARAM:
 		return 0;
@@ -5707,6 +5661,9 @@ jc_collect(struct vx_joinctx *jc, const sql_expr_t *e)
 			if (nv_add(&jc->col[side], col) < 0) return -1;
 			hit = side;
 		}
+		if (hit < 0 && !qual && jc->aggsel != NULL &&
+		    agg_alias(jc->aggsel, col) != NULL)
+			return 0;   /* an output alias (its expression is collected) */
 		return hit >= 0 ? 0 : -1;
 	}
 	case SX_E_UNARY:
@@ -5752,6 +5709,87 @@ jc_collect(struct vx_joinctx *jc, const sql_expr_t *e)
 	}
 }
 
+/* Does `sel` aggregate (a GROUP BY, HAVING, or an aggregate output)? */
+static int
+sel_is_agg(const sql_select_t *sel)
+{
+	const sql_exprlist_item_t *it;
+	if (sel->group != NULL || sel->having != NULL) return 1;
+	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next)
+		if (it->expr != NULL && expr_has_agg(it->expr)) return 1;
+	return 0;
+}
+
+/* Aggregate over a join, pass 1: collect every column the outputs (and
+ * aggregate arguments), GROUP BY, HAVING and ORDER BY name.  A positional
+ * term names an output, which is collected already. */
+static int
+jc_collect_agg(struct vx_joinctx *jc, const sql_select_t *sel)
+{
+	const sql_exprlist_item_t *it;
+	jc->aggsel = sel;
+	for (it = sel->cols->head; it; it = it->next)
+		if (it->expr == NULL || it->expr->op == SX_E_STAR ||
+		    jc_collect(jc, it->expr) != 0) return -1;
+	for (it = sel->group ? sel->group->head : NULL; it; it = it->next)
+		if (it->expr->op != SX_E_NUMBER && jc_collect(jc, it->expr) != 0)
+			return -1;
+	if (sel->having && jc_collect(jc, sel->having) != 0) return -1;
+	for (it = sel->order ? sel->order->head : NULL; it; it = it->next)
+		if (it->expr->op != SX_E_NUMBER && jc_collect(jc, it->expr) != 0)
+			return -1;
+	return 0;
+}
+
+/*
+ * Aggregate over a join, the plan: `js` is the join, built to emit the
+ * whole combined row (identity projection, WHERE applied in the join);
+ * the returned statement aggregates those rows, its expressions compiled
+ * against the join context.  Takes ownership of js.  1, 0 decline, -1.
+ */
+static int
+join_agg_wrap(struct vx_stmt *js, struct vx_joinctx *jc, const sql_select_t *sel,
+              const vx_cell_t *binds, int nbinds, vx_stmt_t **out)
+{
+	struct vx_stmt *st;
+	struct vx_compiler comp;
+	const sql_exprlist_item_t *it;
+	int nout = 0, r;
+
+	for (it = sel->cols->head; it; it = it->next) nout++;
+	st = (struct vx_stmt *)calloc(1, sizeof *st);
+	if (st == NULL) { vx_finalize(js); return -1; }
+	st->db = js->db; st->cur = -1; st->limit = -1;
+	st->binds = binds; st->nbinds = nbinds;
+	st->agg_in = js;
+	comp.st = st; comp.nv = NULL; comp.jc = jc; comp.fail = 0;
+	comp.binds = binds; comp.nbinds = nbinds; comp.ag = NULL;
+	jc->aggsel = NULL;
+	r = agg_build(&comp, sel, nout);
+	if (r != 1) { vx_finalize(st); return r; }
+	/* The plan cache must not keep a plan whose join was rebound under it. */
+	st->noreuse |= js->noreuse;
+	*out = st;
+	return 1;
+}
+
+/* Give the join statement the identity projection of its combined row
+ * (total columns), for an aggregate over it. */
+static int
+join_identity_proj(struct vx_stmt *st, struct vx_compiler *comp, int total)
+{
+	int k;
+	if (total > 32) return 0;
+	for (k = 0; k < total; k++) {
+		vx_expr_t *n = expr_node(comp, VXO_COL);
+		if (n == NULL) return -1;
+		n->col = k;
+		st->proj[k] = n;
+	}
+	st->nout = total;
+	return 1;
+}
+
 static int
 vx_try_prepare_join(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
                     const vx_cell_t *binds, int nbinds,
@@ -5765,7 +5803,7 @@ vx_try_prepare_join(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	const sql_expr_t *on, *lhs, *rhs;
 	const sql_exprlist_item_t *it;
 	char bcols[1000], pcols[1000];
-	int nproj = 0, i, side, rc = 0, lkey, rkey;
+	int nproj = 0, i, side, rc = 0, lkey, rkey, agg = sel_is_agg(sel);
 
 	if (errmsg) *errmsg = NULL;
 	memset(&jc, 0, sizeof jc);
@@ -5795,18 +5833,32 @@ vx_try_prepare_join(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	 * dedup across two tables); fall back. */
 	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
 		if (it->expr == NULL || it->expr->op == SX_E_STAR) goto fallback;
-		if (is_agg_call(it->expr)) goto fallback;
 		nproj++;
 	}
 	if (nproj == 0 || nproj > 32) goto fallback;
 
 	/* Pass 1: collect referenced columns into per-side namevecs, from
-	 * the projection, the WHERE, and the ON's two columns. */
-	for (it = sel->cols->head; it; it = it->next)
-		if (jc_collect(&jc, it->expr) != 0) goto fallback;
+	 * the projection (or, aggregating, every clause), the WHERE, and the
+	 * ON's two columns. */
+	if (agg) {
+		if (jc_collect_agg(&jc, sel) != 0) goto fallback;
+	} else {
+		for (it = sel->cols->head; it; it = it->next)
+			if (jc_collect(&jc, it->expr) != 0) goto fallback;
+	}
 	if (sel->where && jc_collect(&jc, sel->where) != 0) goto fallback;
 	if (jc_collect(&jc, on->a) != 0) goto fallback;
 	if (jc_collect(&jc, on->b) != 0) goto fallback;
+	/* ORDER BY columns must be sourced too (a key that is not an output
+	 * becomes a sort-only column), unless an ordinal or output alias. */
+	if (sel->order && !agg) {
+		const sql_exprlist_item_t *o;
+		for (o = sel->order->head; o; o = o->next) {
+			if (o->expr && o->expr->op == SX_E_NUMBER) continue;
+			if (order_key_alias_pos(sel, o->expr)) continue;
+			if (jc_collect(&jc, o->expr) != 0) goto fallback;
+		}
+	}
 
 	/* Each side must contribute at least one column and have its join
 	 * key.  Determine which ON column belongs to which side. */
@@ -5856,7 +5908,8 @@ vx_try_prepare_join(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	jp->join_kind = (s1->join == SX_J_LEFT || s1->join == SX_J_RIGHT ||
 	                 s1->join == SX_J_FULL) ? s1->join : SX_J_INNER;
 	st->nout = nproj;
-	st->proj = (vx_expr_t **)calloc((size_t)nproj, sizeof(vx_expr_t *));
+	/* Room for ORDER-BY-only columns past nproj (up to 32 in all). */
+	st->proj = (vx_expr_t **)calloc(32, sizeof(vx_expr_t *));
 	if (!st->proj) goto oom;
 
 	snprintf(jp->build_sql, sizeof jp->build_sql, "SELECT %s FROM %s", bcols, jc.tab[0]);
@@ -5890,20 +5943,30 @@ vx_try_prepare_join(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	if (jp->build_key < 0 || jp->build_key >= jp->build_ncol ||
 	    jp->probe_key < 0 || jp->probe_key >= jp->probe_ncol) goto fallback;
 
-	/* Pass 2: compile projection + filter over the combined row. */
+	/* Pass 2: compile projection + filter over the combined row (an
+	 * aggregate's input: the whole combined row). */
 	comp.st = st; comp.nv = NULL; comp.jc = &jc; comp.fail = 0;
-	comp.binds = binds; comp.nbinds = nbinds;
-	{
+	comp.binds = binds; comp.nbinds = nbinds; comp.ag = NULL;
+	if (agg) {
+		int r = join_identity_proj(st, &comp, jp->build_ncol + jp->probe_ncol);
+		if (r < 0) goto oom;
+		if (r == 0) goto fallback;
+		nproj = st->nout;
+	} else {
 		int k = 0;
 		for (it = sel->cols->head; it; it = it->next, k++) {
 			st->proj[k] = compile_expr(&comp, it->expr);
 			if (comp.fail) goto fallback;
 			item_name(it, st->outname[k], sizeof st->outname[0]);
 		}
-		if (sel->where) {
-			st->filter = compile_expr(&comp, sel->where);
-			if (comp.fail) goto fallback;
-		}
+	}
+	if (sel->where) {
+		st->filter = compile_expr(&comp, sel->where);
+		if (comp.fail) goto fallback;
+	}
+	for (i = 0; i < nproj; i++) {
+		st->outaff[i] = node_class(&comp, st->proj[i]);
+		st->outnoaff[i] = (unsigned char)expr_noaff(&comp, st->proj[i]);
 	}
 	/* INNER: an index nested loop when the inner side can seek by the
 	 * join key (the predicate is WHERE AND ON, re-checked per row). */
@@ -5924,7 +5987,7 @@ vx_try_prepare_join(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	 * total order. */
 	st->limit = -1;
 	st->offset = 0;
-	if (sel->order) {
+	if (sel->order && !agg) {
 		const sql_exprlist_item_t *o;
 		int no = 0, oi = 0, nextra = 0;
 		for (o = sel->order->head; o; o = o->next) no++;
@@ -5967,7 +6030,7 @@ vx_try_prepare_join(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		if (nextra > 0)
 			st->join_emit = nproj + nextra;   /* emit user + sort-only cols */
 	}
-	if (sel->limit) {
+	if (sel->limit && !agg) {
 		char buf[32];
 		if (sel->limit->op != SX_E_NUMBER || sel->limit->lit.len >= sizeof buf) goto fallback;
 		memcpy(buf, sel->limit->lit.p, sel->limit->lit.len); buf[sel->limit->lit.len] = '\0';
@@ -5975,7 +6038,7 @@ vx_try_prepare_join(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		st->limit = strtoll(buf, NULL, 10);
 		if (st->limit < 0) st->limit = 0;
 	}
-	if (sel->offset) {
+	if (sel->offset && !agg) {
 		char buf[32];
 		if (sel->offset->op != SX_E_NUMBER || sel->offset->lit.len >= sizeof buf) goto fallback;
 		memcpy(buf, sel->offset->lit.p, sel->offset->lit.len); buf[sel->offset->lit.len] = '\0';
@@ -5989,6 +6052,14 @@ vx_try_prepare_join(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	st->srcrow = (vx_cell_t *)calloc((size_t)st->nsrc_col, sizeof(vx_cell_t));
 	if (!st->srcrow) goto oom;
 
+	if (agg) {
+		int r = join_agg_wrap(st, &jc, sel, binds, nbinds, out);
+		st = NULL; jp = NULL;   /* the wrapper owns them (freed on failure) */
+		if (r != 1) { rc = r; goto fallback; }
+		jc_schema_free(&jc);
+		sql_arena_destroy(ast);
+		return 1;
+	}
 	jc_schema_free(&jc);
 	sql_arena_destroy(ast);
 	*out = st;
@@ -5999,7 +6070,7 @@ oom:
 fallback:
 	jc_schema_free(&jc);
 	if (ast) sql_arena_destroy(ast);
-	if (st) { free(st->join); st->join = NULL; vx_finalize(st); }
+	if (st) vx_finalize(st);   /* frees st->join */
 	else free(jp);
 	return rc;
 }
@@ -6024,7 +6095,7 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	int cross_side[VX_JOIN_MAX];
 	const sql_src_t *s;
 	const sql_exprlist_item_t *it;
-	int nside = 0, nproj = 0, side, rc = 0, total = 0;
+	int nside = 0, nproj = 0, side, rc = 0, total = 0, agg = sel_is_agg(sel);
 
 	if (errmsg) *errmsg = NULL;
 	memset(&jc, 0, sizeof jc);
@@ -6072,14 +6143,18 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	/* SELECT * + aggregates fall back on the join path. */
 	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
 		if (it->expr == NULL || it->expr->op == SX_E_STAR) goto fallback;
-		if (is_agg_call(it->expr)) goto fallback;
 		nproj++;
 	}
 	if (nproj == 0 || nproj > 32) goto fallback;
 
-	/* Pass 1: collect columns from the projection, WHERE, and every ON. */
-	for (it = sel->cols->head; it; it = it->next)
-		if (jc_collect(&jc, it->expr) != 0) goto fallback;
+	/* Pass 1: collect columns from the projection (aggregating: every
+	 * clause), WHERE, and every ON. */
+	if (agg) {
+		if (jc_collect_agg(&jc, sel) != 0) goto fallback;
+	} else {
+		for (it = sel->cols->head; it; it = it->next)
+			if (jc_collect(&jc, it->expr) != 0) goto fallback;
+	}
 	if (sel->where && jc_collect(&jc, sel->where) != 0) goto fallback;
 	for (side = 1; side < nside; side++) {
 		if (cross_side[side]) continue;   /* keyless: no ON columns */
@@ -6088,10 +6163,11 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	}
 	/* ORDER BY key columns must also be sourced (unless a bare ordinal or
 	 * an output-column expression matched at build time). */
-	if (sel->order) {
+	if (sel->order && !agg) {
 		const sql_exprlist_item_t *o;
 		for (o = sel->order->head; o; o = o->next) {
 			if (o->expr && o->expr->op == SX_E_NUMBER) continue;
+			if (order_key_alias_pos(sel, o->expr)) continue;
 			if (jc_collect(&jc, o->expr) != 0) goto fallback;
 		}
 	}
@@ -6167,18 +6243,27 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 
 	/* Pass 2: compile projection + filter over the combined row. */
 	comp.st = st; comp.nv = NULL; comp.jc = &jc; comp.fail = 0;
-	comp.binds = binds; comp.nbinds = nbinds;
-	{
+	comp.binds = binds; comp.nbinds = nbinds; comp.ag = NULL;
+	if (agg) {
+		int r = join_identity_proj(st, &comp, total);
+		if (r < 0) goto oom;
+		if (r == 0) goto fallback;
+		nproj = st->nout;
+	} else {
 		int k = 0;
 		for (it = sel->cols->head; it; it = it->next, k++) {
 			st->proj[k] = compile_expr(&comp, it->expr);
 			if (comp.fail) goto fallback;
 			item_name(it, st->outname[k], sizeof st->outname[0]);
 		}
-		if (sel->where) {
-			st->filter = compile_expr(&comp, sel->where);
-			if (comp.fail) goto fallback;
-		}
+	}
+	if (sel->where) {
+		st->filter = compile_expr(&comp, sel->where);
+		if (comp.fail) goto fallback;
+	}
+	for (side = 0; side < nproj; side++) {
+		st->outaff[side] = node_class(&comp, st->proj[side]);
+		st->outnoaff[side] = (unsigned char)expr_noaff(&comp, st->proj[side]);
 	}
 	/* An index nested loop when every inner side can seek: the predicate
 	 * is WHERE AND every ON (all INNER here), re-checked per row. */
@@ -6209,7 +6294,7 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	 * appended after the user columns. */
 	st->limit = -1;
 	st->offset = 0;
-	if (sel->order) {
+	if (sel->order && !agg) {
 		const sql_exprlist_item_t *o;
 		int no = 0, oi = 0, nextra = 0;
 		for (o = sel->order->head; o; o = o->next) no++;
@@ -6251,7 +6336,7 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		if (nextra > 0)
 			st->join_emit = nproj + nextra;
 	}
-	if (sel->limit) {
+	if (sel->limit && !agg) {
 		char buf[32];
 		if (sel->limit->op != SX_E_NUMBER || sel->limit->lit.len >= sizeof buf) goto fallback;
 		memcpy(buf, sel->limit->lit.p, sel->limit->lit.len); buf[sel->limit->lit.len] = '\0';
@@ -6259,7 +6344,7 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		st->limit = strtoll(buf, NULL, 10);
 		if (st->limit < 0) st->limit = 0;
 	}
-	if (sel->offset) {
+	if (sel->offset && !agg) {
 		char buf[32];
 		if (sel->offset->op != SX_E_NUMBER || sel->offset->lit.len >= sizeof buf) goto fallback;
 		memcpy(buf, sel->offset->lit.p, sel->offset->lit.len); buf[sel->offset->lit.len] = '\0';
@@ -6272,6 +6357,14 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	st->srcrow = (vx_cell_t *)calloc((size_t)total, sizeof(vx_cell_t));
 	if (!st->srcrow) goto oom;
 
+	if (agg) {
+		int r = join_agg_wrap(st, &jc, sel, binds, nbinds, out);
+		st = NULL; jp = NULL;   /* the wrapper owns them (freed on failure) */
+		if (r != 1) { rc = r; goto fallback; }
+		jc_schema_free(&jc);
+		sql_arena_destroy(ast);
+		return 1;
+	}
 	jc_schema_free(&jc);
 	sql_arena_destroy(ast);
 	*out = st;
@@ -6282,384 +6375,217 @@ oom:
 fallback:
 	jc_schema_free(&jc);
 	if (ast) sql_arena_destroy(ast);
-	if (st) { free(st->njoin); st->njoin = NULL; vx_finalize(st); }
+	if (st) vx_finalize(st);   /* frees st->njoin */
 	else free(jp);
 	return rc;
 }
 
 /*
- * FROM-clause derived table: SELECT <outer> FROM ( <inner select> )
- * [AS x] [WHERE <pred>].  The inner select is run through vexec (vx_run,
- * no SQLite) and its result materialized as the row source; its output
- * columns become the source columns the outer projection / filter
- * reference (qualified by the alias, or unqualified).  If vexec cannot
- * run the inner select, the whole query falls back to the VDBE.
- * Conservative: a single derived table only (no join), no correlation,
- * and no outer GROUP BY / ORDER BY / LIMIT / DISTINCT (those read via
- * the storage scan, which a derived source does not have) -- anything
- * else falls back.
+ * A SELECT over a MATERIALIZED source: a derived table FROM ( select ),
+ * the single CTE or a view named in FROM (both a stored select), or no
+ * FROM at all (one row of no columns).  The source select runs once
+ * through vexec -- from its AST, with the statement's binds, so its own
+ * ? keep their ordinals -- and its result rows are the source rows.
+ * Over them the outer query is a plain projection (WHERE, DISTINCT,
+ * ORDER BY, LIMIT) or an aggregate (GROUP BY, HAVING, aggregates).
+ *
+ * src_sel != NULL: run that select (an AST owned by the caller's arena);
+ * else src_sql (a stored view text, parsed here); neither: no FROM.
+ * rename (n entries) renames the source's columns (a CTE column list).
  */
 static int
-vx_try_prepare_derived(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
-                       const vx_cell_t *binds, int nbinds,
-                       vx_stmt_t **out, char **errmsg)
+vx_try_prepare_mat(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
+                   const sql_select_t *src_sel, const char *src_sql,
+                   const sql_str_t *rename, int nrename,
+                   const vx_cell_t *binds, int nbinds,
+                   vx_stmt_t **out, char **errmsg)
 {
 	struct vx_stmt *st = NULL;
 	struct vx_compiler comp;
 	struct namevec nv;
-	const sql_src_t *src = sel->from;
 	const sql_exprlist_item_t *it;
 	vx_result_t *ires = NULL;
-	char *sub = NULL, *s;
-	size_t len;
-	int nproj = 0, i, rc = 0, ncol;
+	sql_arena_t *vast = NULL;
+	int nproj = 0, i, k, rc = 0, ncol, has_agg = (sel->group != NULL), r;
 
 	if (errmsg) *errmsg = NULL;
-
-	/* Outer query restrictions: single source, no outer ORDER BY / LIMIT
-	 * / OFFSET / DISTINCT / GROUP BY (handled by paths that need a
-	 * storage scan), no params threaded into the inner run. */
-	if (src->next != NULL || src->subquery == NULL) goto fallback;
-	if (sel->order || sel->limit || sel->offset || sel->distinct || sel->group)
-		goto fallback;
-	if (src->subsrc == NULL || src->subsrclen == 0) goto fallback;
-
-	/* No aggregates / STAR in the outer projection (compose later). */
 	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
-		if (it->expr == NULL || it->expr->op == SX_E_STAR) goto fallback;
-		if (is_agg_call(it->expr)) goto fallback;
-		nproj++;
+		if (it->expr == NULL) goto fallback;
+		if (it->expr->op == SX_E_STAR && it->expr->nname > 0) goto fallback;
+		if (expr_has_agg(it->expr)) has_agg = 1;
 	}
-	if (nproj == 0 || nproj > 32) goto fallback;
+	if (sel->having && !has_agg) goto fallback;   /* SQLite: an error */
 
-	/* Prepare the inner select standalone (strip the wrapping parens). */
-	sub = (char *)malloc((size_t)src->subsrclen + 1);
-	if (sub == NULL) { rc = -1; goto fallback; }
-	memcpy(sub, src->subsrc, src->subsrclen); sub[src->subsrclen] = '\0';
-	s = sub; len = src->subsrclen;
-	while (len > 0 && (*s == ' ' || *s == '\t' || *s == '\n')) { s++; len--; }
-	while (len > 0 && (s[len-1]==' '||s[len-1]=='\t'||s[len-1]=='\n')) len--;
-	if (len < 2 || s[0] != '(' || s[len-1] != ')') { free(sub); goto fallback; }
-	s[len-1] = '\0';
-	memmove(sub, s + 1, len - 1);
-	/* Run the inner select through vexec (no SQLite) and materialize it.
-	 * If vexec cannot run it (rc != 1), fall the whole query back. */
-	rc = vx_run(db, sub, 1, &ires, NULL);
-	free(sub);
-	if (rc != 1 || ires == NULL) { if (ires) vx_result_free(ires); rc = 0; goto fallback; }
-	rc = 0;
-	ncol = vx_result_ncol(ires);
-	if (ncol <= 0 || ncol > 32) goto fallback;
-
-	/* The inner output columns are the source columns: name them so the
-	 * outer projection / filter resolve against them.  An unnamed inner
-	 * column (vexec reports NULL -- an unaliased expression) cannot be
-	 * referenced by name, so fall back.  Affinities come from the inner
-	 * plan (recorded at its compile time), so the outer comparison gate
-	 * is exact -- no SQLite metadata needed. */
-	memset(&nv, 0, sizeof nv);
-	for (i = 0; i < ncol; i++) {
-		const char *cn = vx_result_name(ires, i);
-		sql_str_t snm;
-		if (cn == NULL) goto fallback;
-		snm.p = cn; snm.len = (uint32_t)strlen(cn);
-		if (nv_add(&nv, &snm) < 0) goto fallback;
-		nv.aff[i] = ires->aff[i];
+	/* Run the source. */
+	if (src_sel == NULL && src_sql != NULL) {
+		sql_stmt_t *root = NULL;
+		const char *perr = NULL;
+		if (sql_parse_ast(src_sql, strlen(src_sql), &vast, &root, &perr) != 0 ||
+		    root == NULL || root->next != NULL || root->kind != SQL_KIND_SELECT ||
+		    root->u.select == NULL)
+			goto fallback;
+		src_sel = root->u.select;
+		binds = NULL; nbinds = 0;   /* a view has no parameters of its own */
 	}
-	if (nv.n != ncol) goto fallback;   /* duplicate inner column names */
-
-	st = (struct vx_stmt *)calloc(1, sizeof *st);
-	if (!st) { rc = -1; goto fallback; }
-	st->db = db; st->cur = -1; st->limit = -1;
-	st->binds = binds; st->nbinds = nbinds;
-	st->nout = nproj;
-	st->nsrc_col = ncol;
-	st->proj = (vx_expr_t **)calloc((size_t)nproj, sizeof(vx_expr_t *));
-	if (!st->proj) { rc = -1; goto fallback; }
-
-	/* Compile the outer projection + filter against the inner columns.
-	 * The compiler resolves an outer column reference by name via nv;
-	 * a reference qualified by the derived-table alias resolves to the
-	 * same unqualified inner column name (nv_add ignores the qualifier),
-	 * so x.col and col both work. */
-	comp.st = st; comp.nv = &nv; comp.jc = NULL; comp.fail = 0;
-	comp.binds = binds; comp.nbinds = nbinds;
-	{
-		int k = 0;
-		for (it = sel->cols->head; it; it = it->next, k++) {
-			st->proj[k] = compile_expr(&comp, it->expr);
-			if (comp.fail) goto fallback;
-			item_name(it, st->outname[k], sizeof st->outname[0]);
-		}
-		if (sel->where) {
-			st->filter = compile_expr(&comp, sel->where);
-			if (comp.fail) goto fallback;
-		}
+	if (src_sel != NULL) {
+		r = src_sel->setop != SX_SET_NONE
+		    ? run_setop_sel(db, src_sel, binds, nbinds, &ires, NULL)
+		    : vx_run_sel(db, src_sel, binds, nbinds, &ires);
+		if (r < 0) { rc = r; goto fallback; }
+		if (r != 1 || ires == NULL) goto fallback;
+		ncol = vx_result_ncol(ires);
+	} else {
+		ires = (vx_result_t *)calloc(1, sizeof *ires);
+		if (ires == NULL) { rc = -1; goto fallback; }
+		ires->nrow = 1;   /* no FROM: one row of no columns */
+		ncol = 0;
 	}
-	/* nv may have grown past ncol if the outer query referenced a name
-	 * not produced by the inner select -- that is an unresolved column,
-	 * so fall back. */
-	if (nv.n != ncol) goto fallback;
-
-	st->srcrow = (vx_cell_t *)calloc((size_t)ncol, sizeof(vx_cell_t));
-	if (!st->srcrow) { rc = -1; goto fallback; }
-	st->derived_res = ires;   /* the inner row source; vx_finalize frees it */
-	st->noreuse = 1;          /* materialized data: rebuild each run */
-	st->derived_cur = 0;
-	ires = NULL;              /* ownership transferred to st */
-
-	sql_arena_destroy(ast);
-	*out = st;
-	return 1;
-
-fallback:
-	if (ires) vx_result_free(ires);
-	if (ast) sql_arena_destroy(ast);
-	if (st) { st->derived_res = NULL; vx_finalize(st); }
-	return rc;
-}
-
-/*
- * Expand a FROM reference to a VIEW: run the view's stored SELECT
- * (view_sql) via vexec, materialize it, and apply the outer query's
- * projection / WHERE / ORDER BY / LIMIT / OFFSET over the view's output
- * columns -- exactly a derived table whose source is the view.  Unlike
- * vx_try_prepare_derived this supports an outer ORDER BY / LIMIT /
- * OFFSET (collected + sorted by join_ordered_materialize, since the
- * source is derived_res).  GROUP BY / aggregates / a multi-table outer
- * FROM are not yet composed over a view; those decline.
- */
-static int
-vx_try_prepare_view(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
-                    const char *view_sql, const sql_str_t *rename, int nrename,
-                    const vx_cell_t *binds, int nbinds,
-                    vx_stmt_t **out, char **errmsg)
-{
-	struct vx_stmt *st = NULL;
-	struct vx_compiler comp;
-	struct namevec nv;
-	const sql_src_t *src = sel->from;
-	const sql_exprlist_item_t *it;
-	vx_result_t *ires = NULL;
-	int nproj = 0, i, rc = 0, ncol;
-	char *runsql = NULL;
-
-	if (errmsg) *errmsg = NULL;
-	if (src->next != NULL) goto fallback;       /* single (view) source only */
-	if (sel->group || sel->distinct) goto fallback;
-
-	/* No aggregates / STAR in the outer projection (compose later). */
-	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
-		if (it->expr == NULL || it->expr->op == SX_E_STAR) goto fallback;
-		if (is_agg_call(it->expr)) goto fallback;
-		nproj++;
-	}
-	if (nproj == 0 || nproj > 32) goto fallback;
-
-	/* Run the view's (or CTE's) SELECT through vexec and materialize it.
-	 * A CTE source text is wrapped in parens -- strip them first. */
-	{
-		const char *sp = view_sql;
-		size_t len = strlen(view_sql), lead = 0;
-		while (lead < len && (sp[lead]==' '||sp[lead]=='\t'||sp[lead]=='\n')) lead++;
-		while (len > lead && (sp[len-1]==' '||sp[len-1]=='\t'||sp[len-1]=='\n')) len--;
-		if (len - lead >= 2 && sp[lead]=='(' && sp[len-1]==')') {
-			runsql = (char *)malloc(len - lead - 1);
-			if (runsql == NULL) { rc = -1; goto fallback; }
-			memcpy(runsql, sp + lead + 1, len - lead - 2);
-			runsql[len - lead - 2] = '\0';
-		}
-	}
-	rc = vx_run(db, runsql ? runsql : view_sql, 1, &ires, NULL);
-	if (runsql) { free(runsql); runsql = NULL; }
-	if (rc != 1 || ires == NULL) { if (ires) vx_result_free(ires); rc = 0; goto fallback; }
-	rc = 0;
-	ncol = vx_result_ncol(ires);
-	if (ncol <= 0 || ncol > 32) goto fallback;
-
-	/* A CTE column-name list (WITH c(a,b) AS ...) renames the inner
-	 * output columns; the count must match. */
+	if (ncol > 32) goto fallback;
 	if (rename != NULL) {
 		if (nrename != ncol) goto fallback;
 		for (i = 0; i < ncol; i++) {
-			if (rename[i].len == 0 || rename[i].len >= sizeof ires->name[0]) goto fallback;
+			if (rename[i].len == 0 || rename[i].len >= sizeof ires->name[0])
+				goto fallback;
 			memcpy(ires->name[i], rename[i].p, rename[i].len);
 			ires->name[i][rename[i].len] = '\0';
 		}
 	}
 
-	/* The view's output columns are the source columns (named so the
-	 * outer projection / filter / ORDER BY resolve against them). */
+	/* The source columns, by name (a closed set), with their affinity. */
 	memset(&nv, 0, sizeof nv);
 	for (i = 0; i < ncol; i++) {
 		const char *cn = vx_result_name(ires, i);
 		sql_str_t snm;
 		if (cn == NULL) goto fallback;
 		snm.p = cn; snm.len = (uint32_t)strlen(cn);
-		if (nv_add(&nv, &snm) < 0) goto fallback;
+		if (nv_add(&nv, &snm) != i) goto fallback;   /* duplicate name */
 		nv.aff[i] = ires->aff[i];
+		nv.noaff[i] = ires->noaff[i];
 	}
-	if (nv.n != ncol) goto fallback;
+	nv.fixed = 1;
+
+	/* SELECT * / mixed with expressions: every source column, in order. */
+	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next)
+		nproj += (it->expr->op == SX_E_STAR) ? ncol : 1;
+	if (nproj == 0 || nproj > 32) goto fallback;
+	if (has_agg) {
+		for (it = sel->cols->head; it; it = it->next)
+			if (it->expr->op == SX_E_STAR) goto fallback;
+	}
 
 	st = (struct vx_stmt *)calloc(1, sizeof *st);
 	if (!st) { rc = -1; goto fallback; }
 	st->db = db; st->cur = -1; st->limit = -1;
 	st->binds = binds; st->nbinds = nbinds;
-	st->nout = nproj;
 	st->nsrc_col = ncol;
-	st->proj = (vx_expr_t **)calloc((size_t)nproj, sizeof(vx_expr_t *));
+	st->proj = (vx_expr_t **)calloc(32, sizeof(vx_expr_t *));
 	if (!st->proj) { rc = -1; goto fallback; }
-
 	comp.st = st; comp.nv = &nv; comp.jc = NULL; comp.fail = 0;
-	comp.binds = binds; comp.nbinds = nbinds;
-	{
-		int k = 0;
-		for (it = sel->cols->head; it; it = it->next, k++) {
-			st->proj[k] = compile_expr(&comp, it->expr);
-			if (comp.fail) goto fallback;
-			item_name(it, st->outname[k], sizeof st->outname[0]);
-		}
-		if (sel->where) {
-			st->filter = compile_expr(&comp, sel->where);
-			if (comp.fail) goto fallback;
-		}
-	}
-	if (nv.n != ncol) goto fallback;   /* outer referenced an unknown column */
+	comp.binds = binds; comp.nbinds = nbinds; comp.ag = NULL;
 
-	/* ORDER BY / LIMIT / OFFSET over the view's output columns (sorted
-	 * post-collection -- the source is derived_res). */
-	if (sel->order) {
-		const sql_exprlist_item_t *o;
-		int no = 0, oi = 0;
-		for (o = sel->order->head; o; o = o->next) no++;
-		if (no == 0 || no > 16) goto fallback;
-		st->norder = no;
-		st->order_key = (vx_expr_t **)calloc((size_t)no, sizeof(vx_expr_t *));
-		st->order_outcol = (int *)calloc((size_t)no, sizeof(int));
-		st->order_desc = (int *)calloc((size_t)no, sizeof(int));
-		if (!st->order_key || !st->order_outcol || !st->order_desc) { rc = -1; goto fallback; }
-		for (o = sel->order->head; o; o = o->next, oi++) {
-			const sql_expr_t *e = o->expr;
-			st->order_desc[oi] = ord_flags(o);
-			if (e && e->op == SX_E_NUMBER) {
-				char buf[32]; long pos;
-				if (e->lit.len == 0 || e->lit.len >= sizeof buf) goto fallback;
-				memcpy(buf, e->lit.p, e->lit.len); buf[e->lit.len] = '\0';
-				if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E')) goto fallback;
-				pos = strtol(buf, NULL, 10);
-				if (pos < 1 || pos > nproj) goto fallback;
-				st->order_outcol[oi] = (int)pos;
-			} else {
-				const sql_exprlist_item_t *ci; int pos = 0, found = 0;
-				for (ci = sel->cols->head; ci; ci = ci->next, pos++)
-					if (expr_same(e, ci->expr)) { st->order_outcol[oi] = pos + 1; found = 1; break; }
-				if (!found) goto fallback;
+	if (sel->where) {
+		st->filter = compile_expr(&comp, sel->where);
+		if (comp.fail || st->filter == NULL) goto fallback;
+	}
+	if (has_agg) {
+		r = agg_build(&comp, sel, nproj);
+		if (r < 0) { rc = -1; goto fallback; }
+		if (r == 0) goto fallback;
+	} else {
+		k = 0;
+		for (it = sel->cols->head; it; it = it->next) {
+			if (it->expr->op == SX_E_STAR) {
+				for (i = 0; i < ncol; i++, k++) {
+					vx_expr_t *n = expr_node(&comp, VXO_COL);
+					if (n == NULL) goto fallback;
+					n->col = i; n->noaff = nv.noaff[i];
+					st->proj[k] = n;
+					snprintf(st->outname[k], sizeof st->outname[0], "%s", nv.names[i]);
+					st->outaff[k] = nv.aff[i];
+					st->outnoaff[k] = nv.noaff[i];
+				}
+				continue;
 			}
+			st->proj[k] = compile_expr(&comp, it->expr);
+			if (comp.fail || st->proj[k] == NULL) goto fallback;
+			item_name(it, st->outname[k], sizeof st->outname[0]);
+			st->outaff[k] = node_class(&comp, st->proj[k]);
+			st->outnoaff[k] = (unsigned char)expr_noaff(&comp, st->proj[k]);
+			k++;
 		}
-	}
-	if (sel->limit) {
-		char buf[32];
-		if (sel->limit->op != SX_E_NUMBER || sel->limit->lit.len >= sizeof buf) goto fallback;
-		memcpy(buf, sel->limit->lit.p, sel->limit->lit.len); buf[sel->limit->lit.len] = '\0';
-		if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E')) goto fallback;
-		st->limit = strtoll(buf, NULL, 10);
-		if (st->limit < 0) st->limit = 0;
-	}
-	if (sel->offset) {
-		char buf[32];
-		if (sel->offset->op != SX_E_NUMBER || sel->offset->lit.len >= sizeof buf) goto fallback;
-		memcpy(buf, sel->offset->lit.p, sel->offset->lit.len); buf[sel->offset->lit.len] = '\0';
-		if (strchr(buf, '.') || strchr(buf, 'e') || strchr(buf, 'E')) goto fallback;
-		st->offset = strtoll(buf, NULL, 10);
-		if (st->offset < 0) st->offset = 0;
+		st->nout = nproj;
+		st->distinct = sel->distinct;
+		/* ORDER BY: an output position or alias, an expression equal to
+		 * an output, or any source expression (a sort-only column). */
+		if (sel->order) {
+			const sql_exprlist_item_t *o;
+			int no = 0, oi = 0, nemit = nproj;
+			for (o = sel->order->head; o; o = o->next) no++;
+			if (no > 16) goto fallback;
+			st->norder = no;
+			st->order_key = (vx_expr_t **)calloc((size_t)no, sizeof(vx_expr_t *));
+			st->order_outcol = (int *)calloc((size_t)no, sizeof(int));
+			st->order_desc = (int *)calloc((size_t)no, sizeof(int));
+			if (!st->order_key || !st->order_outcol || !st->order_desc) {
+				rc = -1; goto fallback;
+			}
+			for (o = sel->order->head; o; o = o->next, oi++) {
+				const sql_expr_t *e = o->expr;
+				const sql_exprlist_item_t *ci;
+				int64_t v;
+				int pos = 0;
+				st->order_desc[oi] = ord_flags(o);
+				if (e && e->op == SX_E_NUMBER) {
+					if (!lit_int(e, &v, NULL, 0) || v < 1 || v > nproj) goto fallback;
+					pos = (int)v;
+				} else if ((pos = order_key_alias_pos(sel, e)) == 0) {
+					k = 1;
+					for (ci = sel->cols->head; ci; ci = ci->next, k++)
+						if (ci->expr->op != SX_E_STAR && expr_same(e, ci->expr)) {
+							pos = k; break;
+						}
+				}
+				if (pos == 0) {
+					/* A sort-only column; DISTINCT would dedup on it too. */
+					if (st->distinct || nemit >= 32) goto fallback;
+					st->proj[nemit] = compile_expr(&comp, e);
+					if (comp.fail || st->proj[nemit] == NULL) goto fallback;
+					pos = ++nemit;
+				}
+				st->order_outcol[oi] = pos;
+			}
+			if (nemit > nproj) st->join_emit = nemit;
+		}
+		st->limit = -1;
+		if (sel->limit) {
+			if (!lit_int(sel->limit, &st->limit, binds, nbinds)) goto fallback;
+			if (st->limit < 0) st->limit = -1;
+		}
+		if (sel->offset) {
+			if (!lit_int(sel->offset, &st->offset, binds, nbinds)) goto fallback;
+			if (st->offset < 0) st->offset = 0;
+		}
+		/* DISTINCT + LIMIT keeps which rows survive reproducible only
+		 * under an ORDER BY (as on the base-table path). */
+		if (st->distinct && (st->limit >= 0 || st->offset > 0) && st->norder == 0)
+			goto fallback;
 	}
 
-	st->srcrow = (vx_cell_t *)calloc((size_t)ncol, sizeof(vx_cell_t));
+	st->srcrow = (vx_cell_t *)calloc((size_t)(ncol > 0 ? ncol : 1), sizeof(vx_cell_t));
 	if (!st->srcrow) { rc = -1; goto fallback; }
-	st->derived_res = ires;   /* the view's row source; vx_finalize frees it */
+	st->derived_res = ires;   /* the row source; vx_finalize frees it */
 	st->noreuse = 1;          /* materialized data: rebuild each run */
 	st->derived_cur = 0;
 	ires = NULL;
 
+	sql_arena_destroy(vast);
 	sql_arena_destroy(ast);
 	*out = st;
 	return 1;
 
 fallback:
-	if (runsql) free(runsql);
 	if (ires) vx_result_free(ires);
-	if (ast) sql_arena_destroy(ast);
-	if (st) { st->derived_res = NULL; vx_finalize(st); }
-	return rc;
-}
-
-/*
- * FROM-less constant SELECT (SELECT 1+1, SELECT 'hi', SELECT 2*3, ...):
- * exactly one output row, each projection an expression over no source
- * columns.  Built as a derived source of one empty (0-column) row so the
- * standard chunk path evaluates the projections once.  GROUP BY /
- * WHERE / ORDER BY are gated off by the caller.
- */
-static int
-vx_try_prepare_const(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
-                     const vx_cell_t *binds, int nbinds,
-                     vx_stmt_t **out, char **errmsg)
-{
-	struct vx_stmt *st = NULL;
-	struct vx_compiler comp;
-	struct namevec nv;
-	const sql_exprlist_item_t *it;
-	vx_result_t *one = NULL;
-	int nproj = 0, rc = 0;
-
-	if (errmsg) *errmsg = NULL;
-	for (it = sel->cols ? sel->cols->head : NULL; it; it = it->next) {
-		if (it->expr == NULL || it->expr->op == SX_E_STAR) goto fallback;
-		if (is_agg_call(it->expr)) goto fallback;
-		nproj++;
-	}
-	if (nproj == 0 || nproj > 32) goto fallback;
-
-	/* A single 0-column row as the source: next_chunk yields it once. */
-	one = (vx_result_t *)calloc(1, sizeof *one);
-	if (one == NULL) { rc = -1; goto fallback; }
-	one->ncol = 0; one->nrow = 1; one->cap = 0; one->cells = NULL;
-
-	st = (struct vx_stmt *)calloc(1, sizeof *st);
-	if (!st) { rc = -1; goto fallback; }
-	st->db = db; st->cur = -1; st->limit = -1;
-	st->binds = binds; st->nbinds = nbinds;
-	st->nout = nproj;
-	st->nsrc_col = 0;
-	st->proj = (vx_expr_t **)calloc((size_t)nproj, sizeof(vx_expr_t *));
-	if (!st->proj) { rc = -1; goto fallback; }
-
-	memset(&nv, 0, sizeof nv);
-	comp.st = st; comp.nv = &nv; comp.jc = NULL; comp.fail = 0;
-	comp.binds = binds; comp.nbinds = nbinds;
-	{
-		int k = 0;
-		for (it = sel->cols->head; it; it = it->next, k++) {
-			st->proj[k] = compile_expr(&comp, it->expr);
-			if (comp.fail) goto fallback;
-			item_name(it, st->outname[k], sizeof st->outname[0]);
-		}
-	}
-	/* A constant projection references no columns; any column reference
-	 * makes nv grow, which is unresolvable here -> fall back. */
-	if (nv.n != 0) goto fallback;
-
-	st->srcrow = NULL;          /* 0 source columns */
-	st->derived_res = one;      /* one empty row; vx_finalize frees it */
-	st->derived_cur = 0;
-	one = NULL;
-
-	sql_arena_destroy(ast);
-	*out = st;
-	return 1;
-
-fallback:
-	if (one) vx_result_free(one);
+	sql_arena_destroy(vast);
 	if (ast) sql_arena_destroy(ast);
 	if (st) { st->derived_res = NULL; vx_finalize(st); }
 	return rc;
@@ -6803,7 +6729,9 @@ next_chunk(struct vx_stmt *st, int *done)
 	*done = 0;
 	c = (vx_chunk_t *)calloc(1, sizeof *c);
 	if (!c) return NULL;
-	c->ncol = st->nout;
+	/* Outputs plus any sort-only columns (an ordered materialized source;
+	 * join_ordered_materialize keeps the first nout). */
+	c->ncol = st->join_emit > 0 ? st->join_emit : st->nout;
 	c->cap = VEXEC_VECTOR_SIZE;
 	c->cells = (vx_cell_t *)malloc(sizeof(vx_cell_t) * (size_t)c->cap *
 	                               (size_t)(c->ncol > 0 ? c->ncol : 1));
@@ -6837,7 +6765,7 @@ next_chunk(struct vx_stmt *st, int *done)
 		/* Project. */
 		{
 			vx_cell_t *dst = &c->cells[(size_t)c->nrow * (size_t)c->ncol];
-			for (j = 0; j < st->nout; j++)
+			for (j = 0; j < c->ncol; j++)
 				eval(st, st->proj[j], st->srcrow, &c->arena, &dst[j]);
 		}
 		c->nrow++;
@@ -6850,61 +6778,147 @@ next_chunk(struct vx_stmt *st, int *done)
  * sort machinery below. */
 static int agg_order_limit(struct vx_stmt *st, vx_chunk_t *c);
 
+/* Fold one source row into its group: evaluate the keys, find or create
+ * the group, step every accumulator.  The row's bytes are scratch in
+ * `arena`; the group copies what it keeps into ht's arena.  Returns the
+ * group, or NULL on OOM. */
+static vx_grp_t *
+agg_step_row(const struct vx_stmt *st, const vx_aggplan_t *ap, vx_htab_t *ht,
+             const vx_cell_t *row, struct vx_arena_blk **arena)
+{
+	vx_cell_t keys[16];
+	vx_grp_t *grp;
+	int k;
+	for (k = 0; k < ap->ngrp; k++)
+		eval(st, ap->grp[k], row, arena, &keys[k]);
+	grp = htab_group(ht, keys);
+	if (grp == NULL) return NULL;
+	for (k = 0; k < ap->nagg; k++) {
+		const vx_aggacc_t *a = &ap->acc[k];
+		vx_cell_t v;
+		if (a->kind == VXA_COUNT_STAR) {
+			acc_step(&grp->accs[k], VXA_COUNT_STAR, NULL, &ht->arena);
+			continue;
+		}
+		if (a->kind == VXA_GROUP_CONCAT && a->gc_sep) {
+			grp->accs[k].gc_sep = a->gc_sep;
+			grp->accs[k].gc_seplen = a->gc_seplen;
+		}
+		eval(st, a->arg, row, arena, &v);
+		acc_step(&grp->accs[k], a->kind, &v, &ht->arena);
+	}
+	return grp;
+}
+
+/* Emit group `g` into `dst` (ap->nemit cells, TEXT/BLOB copied into
+ * `keep`): its group row, HAVING over it, then the outputs.  Returns 1
+ * emitted, 0 HAVING rejected it. */
+static int
+agg_emit_group(const struct vx_stmt *st, const vx_aggplan_t *ap,
+               const vx_grp_t *g, vx_cell_t *dst, struct vx_arena_blk **keep)
+{
+	vx_cell_t grow[VX_GROW_MAX];
+	struct vx_arena_blk *tmp = NULL;
+	int k, ok = 1;
+	for (k = 0; k < ap->ngrp; k++) grow[k] = g->keys[k];
+	for (k = 0; k < ap->nagg; k++)
+		acc_final(&g->accs[k], ap->acc[k].kind, &grow[ap->ngrp + k]);
+	if (ap->having != NULL && eval_bool(st, ap->having, grow, &tmp) != 1)
+		ok = 0;
+	for (k = 0; ok && k < ap->nemit; k++) {
+		vx_cell_t v;
+		eval(st, ap->proj[k], grow, &tmp, &v);
+		if (cell_dup(keep, &v, &dst[k]) != 0) dst[k].type = VX_NULL;
+	}
+	arena_free(tmp);
+	return ok;
+}
+
+/* Groups are emitted in GROUP BY key order (sort_cmp, as SQLite's GROUP
+ * BY sorter or index walk returns them), so a LIMIT without ORDER BY, and
+ * ORDER BY ties, pick the groups SQLite picks.  qsort has no context
+ * argument; the key count is per thread (qsort does not yield). */
+static _Thread_local int g_grp_nkey;
+
+static int
+grp_key_cmp(const void *pa, const void *pb)
+{
+	const vx_grp_t *a = *(const vx_grp_t *const *)pa;
+	const vx_grp_t *b = *(const vx_grp_t *const *)pb;
+	int k, r;
+	for (k = 0; k < g_grp_nkey; k++)
+		if ((r = sort_cmp(&a->keys[k], &b->keys[k])) != 0) return r;
+	return 0;
+}
+
+static int row_cells_eq(const vx_cell_t *a, const vx_cell_t *b, int ncol);
+
+static vx_chunk_t *nl_next_chunk(struct vx_stmt *st, int *done);
+static vx_chunk_t *join_next_chunk(struct vx_stmt *st, int *done);
+static vx_chunk_t *njoin_next_chunk(struct vx_stmt *st, int *done);
+static int vx_join_open(struct vx_stmt *st);
+
 /* Drain the source into the hash table and build one result chunk with
- * one row per group.  Used by the single-threaded agg path (vx_step).
- * Returns 0 on success, -1 on error. */
+ * one row per group.  The source is the base-table scan, a materialized
+ * row set (derived table, view, CTE, no FROM), or a join's combined rows
+ * (st->agg_in).  Returns 0 on success, -1 on error. */
 static int
 agg_materialize(struct vx_stmt *st)
 {
 	vx_aggplan_t *ap = st->agg;
 	vx_chunk_t *c;
 	struct vx_arena_blk *rowarena = NULL;
-	int j;
-	vx_grp_t *g;
-	int b;
+	vx_grp_t *g, **gs;
+	int b, r, ng = 0;
 
 	if (htab_init(&st->ht, ap->ngrp, ap->nagg) != 0) return -1;
 
-	/* Drain. */
-	for (;;) {
-		int64_t rowid; const uint8_t *rec; int reclen;
-		int step = st_src_next(st, &rowid, &rec, &reclen);
-		vx_cell_t keys[16];
+	if (st->agg_in != NULL) {
+		/* A join: each chunk row is the whole combined row. */
+		struct vx_stmt *js = st->agg_in;
+		int done = 0;
+		if (vx_join_open(js) != 0) return -1;
+		while (!done) {
+			vx_chunk_t *jc = js->nl ? nl_next_chunk(js, &done)
+			    : js->join ? join_next_chunk(js, &done)
+			    : njoin_next_chunk(js, &done);
+			if (jc == NULL) return -1;
+			for (r = 0; r < jc->nrow; r++) {
+				const vx_cell_t *row = &jc->cells[(size_t)r * (size_t)jc->ncol];
+				arena_reset(&rowarena);
+				if (st->filter != NULL &&
+				    eval_bool(st, st->filter, row, &rowarena) != 1)
+					continue;
+				if (agg_step_row(st, ap, &st->ht, row, &rowarena) == NULL) {
+					chunk_free(jc); arena_free(rowarena); return -1;
+				}
+			}
+			chunk_free(jc);
+		}
+	} else for (;;) {
+		/* Per-row scratch: keys and accumulator values are copied into
+		 * the hash table's own arena (cell_dup). */
 		vx_grp_t *grp;
-		int ai;
-		if (step == 0) break;
-		if (step != 1) { arena_free(rowarena); return -1; }
-
-		/* Per-row scratch: group keys and accumulator values are copied
-		 * into the hash table's own arena (cell_dup). */
 		arena_reset(&rowarena);
-		read_rec_row(st, rowid, rec, reclen, &rowarena);
-
+		if (st->derived_res != NULL) {
+			vx_result_t *ir = st->derived_res;
+			if (st->derived_cur >= ir->nrow) break;
+			for (r = 0; r < st->nsrc_col; r++)
+				st->srcrow[r] = ir->cells[(size_t)st->derived_cur *
+				    (size_t)ir->ncol + (size_t)r];
+			st->derived_cur++;
+		} else {
+			int64_t rowid; const uint8_t *rec; int reclen;
+			int step = st_src_next(st, &rowid, &rec, &reclen);
+			if (step == 0) break;
+			if (step != 1) { arena_free(rowarena); return -1; }
+			read_rec_row(st, rowid, rec, reclen, &rowarena);
+		}
 		if (st->filter != NULL &&
 		    eval_bool(st, st->filter, st->srcrow, &rowarena) != 1)
 			continue;
-
-		for (j = 0; j < ap->ngrp; j++)
-			eval(st, ap->grp[j], st->srcrow, &rowarena, &keys[j]);
-		grp = htab_group(&st->ht, keys);
+		grp = agg_step_row(st, ap, &st->ht, st->srcrow, &rowarena);
 		if (grp == NULL) { arena_free(rowarena); return -1; }
-
-		ai = 0;
-		for (j = 0; j < ap->nout_all; j++) {
-			if (!ap->out[j].is_agg) continue;
-			if (ap->out[j].kind == VXA_COUNT_STAR) {
-				acc_step(&grp->accs[ai], VXA_COUNT_STAR, NULL, &st->ht.arena);
-			} else {
-				vx_cell_t v;
-				if (ap->out[j].kind == VXA_GROUP_CONCAT && ap->out[j].gc_sep) {
-					grp->accs[ai].gc_sep = ap->out[j].gc_sep;
-					grp->accs[ai].gc_seplen = ap->out[j].gc_seplen;
-				}
-				eval(st, ap->out[j].arg, st->srcrow, &rowarena, &v);
-				acc_step(&grp->accs[ai], ap->out[j].kind, &v, &st->ht.arena);
-			}
-			ai++;
-		}
 		/* MIN/MAX on a walk ordered by the argument: the first non-NULL
 		 * value is the answer. */
 		if (st->ap_minmax && st->src.ordered && grp->accs[0].seen) break;
@@ -6919,72 +6933,46 @@ agg_materialize(struct vx_stmt *st)
 		if (htab_group(&st->ht, nokeys) == NULL) return -1;
 	}
 
-	/* Materialize one chunk row per group. */
+	/* One chunk row per group that passes HAVING: the outputs, then any
+	 * ORDER-BY-only columns. */
 	c = (vx_chunk_t *)calloc(1, sizeof *c);
 	if (c == NULL) return -1;
-	c->ncol = ap->nout;
+	c->ncol = ap->nemit;
 	c->cap = st->ht.ngroup > 0 ? st->ht.ngroup : 1;
 	c->cells = (vx_cell_t *)malloc(sizeof(vx_cell_t) * (size_t)c->cap *
 	                               (size_t)(c->ncol > 0 ? c->ncol : 1));
 	if (c->cells == NULL) { free(c); return -1; }
-
-	for (b = 0; b < st->ht.nbucket; b++) {
-		for (g = st->ht.buckets[b]; g; g = g->next) {
-			vx_cell_t *dst = &c->cells[(size_t)c->nrow * (size_t)c->ncol];
-			vx_cell_t erow[64];   /* extended row: emitted cols + HAVING aggs */
-			int ki = 0, ai = 0;
-			/* Compute every outcol (emitted + HAVING-only) into erow; the
-			 * accumulator index ai advances over all is_agg outcols in
-			 * order, matching how they were stepped.  A COMPUTED output
-			 * (a projection over aggregates) has neither an accumulator
-			 * nor a group key at its own slot -- leave erow[j] NULL (the
-			 * projection reads the appended agg slots). */
-			for (j = 0; j < ap->nout_all && j < 64; j++) {
-				if (ap->out[j].is_agg) {
-					acc_final(&g->accs[ai], ap->out[j].kind, &erow[j]);
-					ai++;
-				} else if (j < ap->nout && ap->out[j].computed) {
-					erow[j].type = VX_NULL;
-				} else {
-					erow[j] = g->keys[ki++];
-				}
-			}
-			/* HAVING: a predicate over the extended row.  Skip the group
-			 * (do not advance c->nrow) when it is not true. */
-			if (ap->having != NULL) {
-				struct vx_arena_blk *hr = NULL;
-				int hb = eval_bool(st, ap->having, erow, &hr);
-				arena_free(hr);
-				if (hb != 1) continue;
-			}
-			/* Emit only the first nout columns; copy TEXT/BLOB into the
-			 * chunk arena (the ht arena is freed after the chunk).  A
-			 * computed column is evaluated from its projection over erow. */
-			for (j = 0; j < ap->nout; j++) {
-				vx_cell_t v;
-				if (ap->has_proj && ap->proj[j] != NULL) {
-					struct vx_arena_blk *pr = NULL;
-					eval(st, ap->proj[j], erow, &pr, &v);
-					if ((v.type == VX_TEXT || v.type == VX_BLOB) && v.nbytes)
-						(void)cell_dup(&c->arena, &v, &dst[j]);
-					else dst[j] = v;
-					arena_free(pr);
-					continue;
-				}
-				v = erow[j];
-				if ((v.type == VX_TEXT || v.type == VX_BLOB) && v.nbytes)
-					(void)cell_dup(&c->arena, &v, &dst[j]);
-				else dst[j] = v;
-			}
-			c->nrow++;
-		}
+	gs = (vx_grp_t **)malloc(sizeof *gs * (size_t)c->cap);
+	if (gs == NULL) { chunk_free(c); return -1; }
+	for (b = 0; b < st->ht.nbucket; b++)
+		for (g = st->ht.buckets[b]; g; g = g->next) gs[ng++] = g;
+	if (ap->ngrp > 0 && ng > 1) {
+		g_grp_nkey = ap->ngrp;
+		qsort(gs, (size_t)ng, sizeof *gs, grp_key_cmp);
 	}
-	/* ORDER BY / LIMIT / OFFSET over the aggregated output rows (V4 on the
-	 * agg path).  The keys reference OUTPUT columns (a positional integer
-	 * or a select item matched by expr_same -> order_outcol), so we sort
-	 * the just-built chunk rows in place, then apply OFFSET/LIMIT. */
+	for (r = 0; r < ng; r++) {
+		vx_cell_t *dst = &c->cells[(size_t)c->nrow * (size_t)c->ncol];
+		int d;
+		if (!agg_emit_group(st, ap, gs[r], dst, &c->arena)) continue;
+		/* DISTINCT over the outputs: keep a row's first occurrence. */
+		for (d = 0; ap->distinct && d < c->nrow; d++)
+			if (row_cells_eq(&c->cells[(size_t)d * (size_t)c->ncol], dst,
+			    ap->nout)) break;
+		if (ap->distinct && d < c->nrow) continue;
+		c->nrow++;
+	}
+	free(gs);
+	/* ORDER BY / LIMIT / OFFSET over the group rows (sorted in place),
+	 * then keep only the output columns. */
 	if (st->norder > 0 || st->limit >= 0 || st->offset > 0)
 		if (agg_order_limit(st, c) != 0) { chunk_free(c); return -1; }
+	if (ap->nemit > ap->nout) {
+		for (r = 0; r < c->nrow; r++)
+			memmove(&c->cells[(size_t)r * (size_t)ap->nout],
+			    &c->cells[(size_t)r * (size_t)ap->nemit],
+			    sizeof(vx_cell_t) * (size_t)ap->nout);
+		c->ncol = ap->nout;
+	}
 	st->chunk = c;
 	st->cur = -1;
 	st->ht_built = 1;
@@ -7809,35 +7797,41 @@ cleanup:
 	return rc;
 }
 
+/* Open a join for streaming (idempotent): a hash join builds its table
+ * and opens the probe cursor, an N-way join builds every build side and
+ * opens the stream; an index nested loop needs neither.  0 or -1. */
+static int
+vx_join_open(struct vx_stmt *st)
+{
+	if (st->join != NULL && st->nl == NULL && !st->join_built) {
+		st->jht = (vx_jht_t *)calloc(1, sizeof *st->jht);
+		if (st->jht == NULL) return -1;
+		if (join_build(st, st->jht) != 0) return -1;
+		if (!st->join->probe_src.native) return -1;
+		st->probe_scan = xstore_scan_open_txn((struct xsql *)st->db,
+		                  st->join->probe_src.table, 0, 0, 0, 0, 0);
+		if (st->probe_scan == NULL) return -1;
+		st->join_built = 1;
+	}
+	if (st->njoin != NULL && st->nl == NULL && !st->nbuilt) {
+		int side;
+		for (side = 1; side < st->njoin->nside; side++)
+			if (njoin_build_side(st, side) != 0) return -1;
+		if (!st->njoin->src[0].native) return -1;
+		st->nstream_scan = xstore_scan_open_txn((struct xsql *)st->db,
+		                   st->njoin->src[0].table, 0, 0, 0, 0, 0);
+		if (st->nstream_scan == NULL) return -1;
+		st->nbuilt = 1;
+	}
+	return 0;
+}
+
 int
 vx_step(vx_stmt_t *st)
 {
 	if (st == NULL) return SX_MISUSE;
 
-	/* Join: build the hash table + open the probe cursor on first step
-	 * (an index nested-loop plan, st->nl, needs neither). */
-	if (st->join != NULL && st->nl == NULL && !st->join_built) {
-		st->jht = (vx_jht_t *)calloc(1, sizeof *st->jht);
-		if (st->jht == NULL) return SX_ERROR;
-		if (join_build(st, st->jht) != 0) return SX_ERROR;
-		if (!st->join->probe_src.native) return SX_ERROR;
-		st->probe_scan = xstore_scan_open_txn((struct xsql *)st->db,
-		                  st->join->probe_src.table, 0, 0, 0, 0, 0);
-		if (st->probe_scan == NULL) return SX_ERROR;
-		st->join_built = 1;
-	}
-
-	/* N-way join: build every build side's hash, open the side-0 stream. */
-	if (st->njoin != NULL && st->nl == NULL && !st->nbuilt) {
-		int side;
-		for (side = 1; side < st->njoin->nside; side++)
-			if (njoin_build_side(st, side) != 0) return SX_ERROR;
-		if (!st->njoin->src[0].native) return SX_ERROR;
-		st->nstream_scan = xstore_scan_open_txn((struct xsql *)st->db,
-		                   st->njoin->src[0].table, 0, 0, 0, 0, 0);
-		if (st->nstream_scan == NULL) return SX_ERROR;
-		st->nbuilt = 1;
-	}
+	if (vx_join_open(st) != 0) return SX_ERROR;
 
 	/* Aggregation: build all groups on first step, then walk the chunk. */
 	if (st->agg != NULL && !st->ht_built) {
@@ -7965,6 +7959,7 @@ vx_exec_reset(vx_stmt_t *st)
 	arena_free(st->nstream_arena); st->nstream_arena = NULL;
 	st->nbuilt = 0; st->nstream_done = 0;
 	st->derived_cur = 0;
+	if (st->agg_in != NULL) vx_exec_reset(st->agg_in);
 }
 
 /* Coerce a rebound literal the way cmp_affinity_gate coerced it. */
@@ -8008,6 +8003,8 @@ vx_plan_rebind(vx_stmt_t *st, const vx_cell_t *binds, int nbinds)
 		}
 		vx_param_coerce(n, &st->bind_arena);
 	}
+	/* An aggregate over a join: the join's WHERE / ON hold their own. */
+	if (st->agg_in != NULL) vx_plan_rebind(st->agg_in, binds, nbinds);
 }
 
 void
@@ -8030,7 +8027,8 @@ vx_finalize(vx_stmt_t *st)
 	if (st->plan_arena) arena_free(st->plan_arena);
 	/* corrsql[] texts are plan_arena-owned (freed above); nothing else. */
 	htab_free(&st->ht);
-	if (st->agg) { free(st->agg->out); free(st->agg->grp); free(st->agg->proj); free(st->agg); }
+	if (st->agg) { free(st->agg->acc); free(st->agg->grp); free(st->agg->proj); free(st->agg); }
+	if (st->agg_in) vx_finalize(st->agg_in);
 	if (st->join) {
 		if (st->jht) { arena_free(st->jht->arena); free(st->jht->buckets); free(st->jht); }
 		if (st->probe_scan) xstore_scan_close(st->probe_scan);
@@ -8250,24 +8248,9 @@ par_worker(xtc_task_t *self, void *user)
 
 			if (w.agg != NULL) {
 				/* Accumulate into this worker's hash table. */
-				vx_aggplan_t *ap = w.agg;
-				vx_cell_t keys[16]; vx_grp_t *grp; int ai = 0;
-				for (j = 0; j < ap->ngrp; j++)
-					eval(&w, ap->grp[j], w.srcrow, &rowarena, &keys[j]);
-				grp = htab_group(&par->wht[widx], keys);
-				if (grp == NULL) { xstore_scan_close(ms); atomic_store(&par->error, 1); goto done; }
-				for (j = 0; j < ap->nout; j++) {
-					if (!ap->out[j].is_agg) continue;
-					if (ap->out[j].kind == VXA_COUNT_STAR)
-						acc_step(&grp->accs[ai], VXA_COUNT_STAR, NULL,
-						         &par->wht[widx].arena);
-					else {
-						vx_cell_t v;
-						eval(&w, ap->out[j].arg, w.srcrow, &rowarena, &v);
-						acc_step(&grp->accs[ai], ap->out[j].kind, &v,
-						         &par->wht[widx].arena);
-					}
-					ai++;
+				if (agg_step_row(&w, w.agg, &par->wht[widx], w.srcrow,
+				    &rowarena) == NULL) {
+					xstore_scan_close(ms); atomic_store(&par->error, 1); goto done;
 				}
 			} else {
 				vx_cell_t out[32];
@@ -8341,8 +8324,7 @@ is_parallelizable_plan(const vx_stmt_t *plan)
 	return plan->norder == 0 && plan->limit < 0 && plan->offset <= 0 &&
 	    plan->join == NULL && plan->bt != NULL && !plan->distinct &&
 	    plan->ap.kind == VX_AP_SCAN &&   /* a seek is a serial point/range walk */
-	    (plan->agg == NULL || (plan->agg->having == NULL && !plan->agg->has_proj &&
-	                           !plan->agg->has_gc));
+	    (plan->agg == NULL || (!plan->agg->has_gc && plan->ncorr == 0));
 }
 
 /* Run an already-recognized, already-checked-parallelizable plan on the
@@ -8383,6 +8365,7 @@ run_parallel_plan(vx_stmt_t *plan, struct xsql *db, int n_workers,
 	out->nworkers = n_workers;
 	memcpy(out->name, plan->outname, sizeof out->name);
 	memcpy(out->aff, plan->outaff, sizeof out->aff);
+	memcpy(out->noaff, plan->outnoaff, sizeof out->noaff);
 
 	par.plan = plan;
 	atomic_store(&par.next, 0);
@@ -8429,14 +8412,11 @@ run_parallel_plan(vx_stmt_t *plan, struct xsql *db, int n_workers,
 				vx_grp_t *g;
 				for (g = par.wht[i].buckets[b]; g; g = g->next) {
 					vx_grp_t *d = htab_group(m, g->keys);
-					int ai = 0, j;
+					int j;
 					if (d == NULL) { rc = -1; goto cleanup; }
-					for (j = 0; j < ap->nout; j++) {
-						if (!ap->out[j].is_agg) continue;
-						acc_merge(&d->accs[ai], &g->accs[ai],
-						          ap->out[j].kind, &m->arena);
-						ai++;
-					}
+					for (j = 0; j < ap->nagg; j++)
+						acc_merge(&d->accs[j], &g->accs[j], ap->acc[j].kind,
+						          &m->arena);
 				}
 			}
 		}
@@ -8449,14 +8429,12 @@ run_parallel_plan(vx_stmt_t *plan, struct xsql *db, int n_workers,
 			vx_grp_t *g;
 			for (g = m->buckets[b]; g; g = g->next) {
 				vx_cell_t row[32];
-				int ki = 0, ai = 0, j;
-				for (j = 0; j < ap->nout; j++) {
-					if (ap->out[j].is_agg)
-						acc_final(&g->accs[ai++], ap->out[j].kind, &row[j]);
-					else
-						row[j] = g->keys[ki++];
+				struct vx_arena_blk *keep = NULL;
+				int e = agg_emit_group(plan, ap, g, row, &keep);
+				if (e && result_push(out, row) != 0) {
+					arena_free(keep); rc = -1; goto cleanup;
 				}
-				if (result_push(out, row) != 0) { rc = -1; goto cleanup; }
+				arena_free(keep);
 			}
 		}
 	} else {
@@ -8526,6 +8504,7 @@ collect_plan(vx_stmt_t *plan, vx_result_t **res)
 	 * 4 KiB, copied for every point read (readers check col < ncol). */
 	memcpy(out->name, plan->outname, sizeof out->name[0] * (size_t)ncol);
 	memcpy(out->aff, plan->outaff, sizeof out->aff[0] * (size_t)ncol);
+	memcpy(out->noaff, plan->outnoaff, sizeof out->noaff[0] * (size_t)ncol);
 
 	while ((step = vx_step(plan)) == SX_ROW) {
 		/* The current chunk row as is: the cells vx_column_* would
@@ -8804,7 +8783,7 @@ collect_matching(struct xsql *db, bt_t *bt, const char *table,
 
 	memset(&nv, 0, sizeof nv);
 	comp.st = st; comp.nv = &nv; comp.jc = NULL; comp.fail = 0;
-	comp.binds = binds; comp.nbinds = nbinds;
+	comp.binds = binds; comp.nbinds = nbinds; comp.ag = NULL;
 
 	if (where != NULL) {
 		/* Pass 1: collect the predicate's columns. */
@@ -9206,7 +9185,7 @@ vx_run_write_ast(struct xsql *db, sql_arena_t *arena, const sql_stmt_t *root,
 		sst->db = db; sst->bt = bt; sst->binds = binds; sst->nbinds = nbinds;
 		snprintf(sst->table, sizeof sst->table, "%s", tabbuf);
 		scomp.st = sst; scomp.nv = &snv; scomp.jc = NULL; scomp.fail = 0;
-		scomp.binds = binds; scomp.nbinds = nbinds;
+		scomp.binds = binds; scomp.nbinds = nbinds; scomp.ag = NULL;
 		for (ci = 0; ci < nset && !scomp.fail; ci++)
 			if (setast[ci] != NULL && collect_columns(&snv, setast[ci]) != 0)
 				scomp.fail = 1;
@@ -9750,6 +9729,9 @@ setop_sort_slice(struct vx_result *r, const int *key, const int *flags,
 	return 0;
 }
 
+static int run_setop_sel(struct xsql *db, const sql_select_t *lhs,
+    const vx_cell_t *binds, int nbinds, vx_result_t **res, char **errmsg);
+
 static int
 run_setop(struct xsql *db, const char *sql, const vx_cell_t *binds, int nbinds,
           vx_result_t **res, char **errmsg)
@@ -9757,7 +9739,28 @@ run_setop(struct xsql *db, const char *sql, const vx_cell_t *binds, int nbinds,
 	sql_arena_t *ast = NULL;
 	sql_stmt_t *root = NULL;
 	const char *perr = NULL;
-	sql_select_t *lhs, *rhs;
+	int rc;
+
+	if (errmsg) *errmsg = NULL;
+	if (sql_parse_ast(sql, strlen(sql), &ast, &root, &perr) != 0) return 0;
+	if (root == NULL || root->next != NULL ||
+	    root->kind != SQL_KIND_SELECT || root->u.select == NULL) {
+		sql_arena_destroy(ast); return 0;
+	}
+	rc = run_setop_sel(db, root->u.select, binds, nbinds, res, errmsg);
+	sql_arena_destroy(ast);
+	return rc;
+}
+
+/* A compound SELECT from its AST (the caller owns it; it is not
+ * modified).  1 with *res, 0 declined, <0 error. */
+static int
+run_setop_sel(struct xsql *db, const sql_select_t *lhs,
+              const vx_cell_t *binds, int nbinds, vx_result_t **res,
+              char **errmsg)
+{
+	sql_select_t rcore;
+	const sql_select_t *rhs;
 	sql_setop_t op;
 	vx_stmt_t *lp = NULL, *rp = NULL;
 	vx_result_t *lr = NULL, *rr = NULL;
@@ -9766,54 +9769,56 @@ run_setop(struct xsql *db, const char *sql, const vx_cell_t *binds, int nbinds,
 	const sql_expr_t *climit, *coffset;
 	int okey[16], oflags[16], nkey = 0;
 	int64_t lim = -1, off = 0;
+	enum vx_aff laff[64];
+	unsigned char lnoaff[64];
 
-	if (errmsg) *errmsg = NULL;
-	if (sql_parse_ast(sql, strlen(sql), &ast, &root, &perr) != 0) return 0;
-	if (root == NULL || root->next != NULL ||
-	    root->kind != SQL_KIND_SELECT || root->u.select == NULL) {
-		sql_arena_destroy(ast); return 0;
-	}
-	lhs = root->u.select;
-	if (lhs->setop == SX_SET_NONE || lhs->rhs == NULL) {
-		sql_arena_destroy(ast); return 0;   /* not a set operation */
-	}
+	if (lhs->setop == SX_SET_NONE || lhs->rhs == NULL)
+		return 0;   /* not a set operation */
 	if (lhs->setop != SX_SET_UNION_ALL && lhs->setop != SX_SET_UNION &&
-	    lhs->setop != SX_SET_INTERSECT && lhs->setop != SX_SET_EXCEPT) {
-		sql_arena_destroy(ast); return 0;
-	}
-	rhs = lhs->rhs;
-	if (rhs->setop != SX_SET_NONE) { sql_arena_destroy(ast); return 0; }  /* chained */
+	    lhs->setop != SX_SET_INTERSECT && lhs->setop != SX_SET_EXCEPT)
+		return 0;
+	if (lhs->rhs->setop != SX_SET_NONE) return 0;   /* chained */
 	/* The grammar attaches a trailing ORDER BY / LIMIT / OFFSET to the
-	 * LAST select_core, but SQL applies it to the WHOLE compound.  Detach
-	 * it from rhs (so rhs runs unordered and unlimited) and apply it to
-	 * the combined result below.  An ORDER BY on the lhs itself would be
-	 * a syntax error in SQLite and cannot reach here. */
-	if (lhs->order || lhs->limit || lhs->offset) { sql_arena_destroy(ast); return 0; }
-	corder = rhs->order; climit = rhs->limit; coffset = rhs->offset;
-	rhs->order = NULL; rhs->limit = NULL; rhs->offset = NULL;
+	 * LAST select_core, but SQL applies it to the WHOLE compound: run rhs
+	 * as a copy without it, and apply it to the combined result below.
+	 * An ORDER BY on the lhs itself would be a syntax error in SQLite and
+	 * cannot reach here. */
+	if (lhs->order || lhs->limit || lhs->offset) return 0;
+	rcore = *lhs->rhs;
+	corder = rcore.order; climit = rcore.limit; coffset = rcore.offset;
+	rcore.order = NULL; rcore.limit = NULL; rcore.offset = NULL;
+	rhs = &rcore;
 	if (setop_order_plan(lhs, corder, climit, coffset, binds, nbinds,
-	    okey, oflags, &nkey, &lim, &off, errmsg) != 0) {
-		sql_arena_destroy(ast);
+	    okey, oflags, &nkey, &lim, &off, errmsg) != 0)
 		return (errmsg && *errmsg) ? -1 : 0;
-	}
 
 	/* Recognize each side WITHOUT giving away the shared arena (pass
-	 * NULL so vx_prepare_select does not free it; run_setop owns it). */
-	if (vx_prepare_select(db, NULL, lhs, binds, nbinds, &lp, errmsg) != 1) {
-		sql_arena_destroy(ast); return 0;
-	}
+	 * NULL so vx_prepare_select does not free it; the caller owns it).
+	 * vx_prepare_select takes a mutable view of the AST it never writes. */
+	if (vx_prepare_select(db, NULL, lhs, binds, nbinds, &lp, errmsg) != 1)
+		return 0;
 	if (vx_prepare_select(db, NULL, rhs, binds, nbinds, &rp, errmsg) != 1) {
-		vx_finalize(lp); sql_arena_destroy(ast); return 0;
+		vx_finalize(lp); return 0;
 	}
 	/* SQL requires equal arity on both sides of a compound. */
 	if (lp->nout != rp->nout) {
-		vx_finalize(lp); vx_finalize(rp); sql_arena_destroy(ast); return 0;
+		vx_finalize(lp); vx_finalize(rp); return 0;
 	}
-
-	/* The plans no longer reference the AST; capture the operator, then
-	 * free it before executing (lhs points into the arena). */
 	op = lhs->setop;
-	sql_arena_destroy(ast); ast = NULL;
+	/* The compound's column affinity (SQLite): UNION / UNION ALL take the
+	 * left arm's when it has one, else the right's; INTERSECT / EXCEPT
+	 * the left arm's.  vexec states it only where both arms agree or the
+	 * rule is unambiguous; otherwise the column is UNKNOWN. */
+	for (i = 0; i < lp->nout && i < 64; i++) {
+		laff[i] = lp->outaff[i]; lnoaff[i] = lp->outnoaff[i];
+		if ((op == SX_SET_UNION || op == SX_SET_UNION_ALL) && lnoaff[i] &&
+		    !rp->outnoaff[i]) {
+			laff[i] = rp->outaff[i]; lnoaff[i] = 0;
+		} else if ((op == SX_SET_UNION || op == SX_SET_UNION_ALL) && !lnoaff[i] &&
+		    !rp->outnoaff[i] && laff[i] != rp->outaff[i]) {
+			lnoaff[i] = VX_NOAFF_UNKNOWN;
+		}
+	}
 
 	if (collect_serial(lp, &lr) != 1) { rc = -1; goto out; }
 	if (collect_serial(rp, &rr) != 1) { rc = -1; goto out; }
@@ -9881,6 +9886,9 @@ run_setop(struct xsql *db, const char *sql, const vx_cell_t *binds, int nbinds,
 	    setop_sort_slice(lr, okey, oflags, nkey, lim, off) != 0) {
 		rc = -1; goto out;
 	}
+	for (i = 0; i < lr->ncol && i < 64; i++) {
+		lr->aff[i] = laff[i]; lr->noaff[i] = lnoaff[i];
+	}
 	*res = lr; lr = NULL;
 	rc = 1;
 
@@ -9889,7 +9897,6 @@ out:
 	if (rp) vx_finalize(rp);
 	if (lr) vx_result_free(lr);
 	if (rr) vx_result_free(rr);
-	if (ast) sql_arena_destroy(ast);
 	return rc;
 }
 
