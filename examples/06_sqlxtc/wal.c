@@ -276,11 +276,28 @@ struct wal_rd {
 	size_t   wlen;                /* valid bytes in buf */
 };
 
+/* The scans read the log front to back: POSIX_FADV_SEQUENTIAL doubles
+ * the kernel's read-ahead window for the fd, so the next reads are under
+ * way while the scan checksums and replays the window it has (TPC-C
+ * W=10 replay, cold: 0.762 s -> 0.677 s; a plain read of the file takes
+ * 0.62 s).  Advice only: no byte a read returns changes. */
+static void
+wal_rd_seq(int fd)
+{
+#if defined(POSIX_FADV_SEQUENTIAL)
+	(void)posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+#else
+	(void)fd;
+#endif
+}
+
 static void
 wal_rd_init(struct wal_rd *r, int fd, int buffered)
 {
 	r->fd = fd;
 	r->fsize = wal_fsize(fd);
+	if (buffered)
+		wal_rd_seq(fd);
 	r->buf = buffered ? malloc(WAL_RD_ONE) : NULL;
 	r->woff = 0;
 	r->wlen = 0;
@@ -1463,6 +1480,8 @@ wal_ockpt_begin(wal_t *w, const char *path, wal_ock_t **out)
 	k->rbuf = malloc(k->rcap);
 	k->c.buf = malloc(WAL_CMP_BUF);
 	k->src_fd = open(path, O_RDONLY);
+	if (k->src_fd >= 0)
+		wal_rd_seq(k->src_fd);
 	k->c.fd = open(k->tmp, O_RDWR | O_CREAT | O_TRUNC, 0600);
 	if (k->rbuf == NULL || k->c.buf == NULL || k->src_fd < 0 || k->c.fd < 0) {
 		wal_ockpt_abort(k);
