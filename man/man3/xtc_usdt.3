@@ -102,6 +102,17 @@ is, else
 .Cm no .
 .El
 .Pp
+Tested: FreeBSD with
+.Cm yes ,
+Linux with
+.Cm sdt .
+Linux with
+.Cm yes
+(the systemtap
+.Nm dtrace
+script), macOS and illumos follow the same recipe but were not run when the
+probes were added.
+.Pp
 .Ev DTRACE
 names the program and
 .Ev DTRACEFLAGS
@@ -444,7 +455,3 @@ On Linux, perf and bpftrace need
 or root.
 A program that loads libxtc as a shared library registers its probes at
 load time; one linked statically carries them in its own image.
-.Pp
-macOS and illumos builds follow the same recipe as FreeBSD (macOS skips
-.Ql dtrace -G )
-but were not run when the probes were added.
