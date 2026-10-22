@@ -63,6 +63,7 @@
 #include "xlog.h"
 #include "xtc.h"
 #include "xtc_blocking.h"
+#include "xtc_io.h"      /* xtc_io_backend_name: no pool threads under sim */
 #include "xtc_proc.h"
 #include "xtc_sync.h"
 
@@ -1393,9 +1394,13 @@ xstore_cat_forget_one(bt_t *bt, const char *name)
  * memcmp order over entries is SQLite's sort order over the tuple: an
  * equality prefix is a contiguous key range, a range on the next column
  * is a sub-range, and walking the range ascending yields ORDER BY the
- * index columns.  Entries are NOT WAL-logged; xstore_index_rebuild_all
- * reconstructs them from the durable base rows at every open, which is
- * also why the key format can change without a migration.
+ * index columns.  Entries are NOT WAL-logged.  A clean close leaves them
+ * complete in the flushed base, and the next open trusts them (no
+ * rebuild) when the superblock's trust tag says so: every index insert of
+ * the run succeeded and the key format is XS_IDX_FORMAT (xstore_index_open).
+ * Otherwise -- a crash, a failed insert, an older format -- every index is
+ * rebuilt from the base rows.  Bump XS_IDX_FORMAT whenever the entry
+ * encoding (xs_tup_elem, xs_idx_rowkey, the prefix) changes.
  *
  * Entries are ADD-ONLY at commit: a row version whose key tuple differs
  * from its predecessor adds an entry, and the predecessor's entry is
@@ -1422,6 +1427,10 @@ xstore_cat_forget_one(bt_t *bt, const char *name)
  * still parses as a one-column ascending CREATE INDEX.
  * ================================================================== */
 #define XS_IDXCAT_TABLEID 0xFFFFFFFDu   /* persisted index catalog */
+#define XS_IDX_FORMAT     1u            /* index entry encoding version */
+/* The superblock word a clean close records when the indexes are complete
+ * ("XIDX" + the format); xstore_index_open trusts only this value. */
+#define XS_IDX_TRUST_TAG  ((0x58494458ull << 32) | XS_IDX_FORMAT)
 #define XS_IDX_LEAD       0xFEu         /* index-entry key namespace lead byte */
 #define XS_IDX_MAX        128           /* in-process index cache size */
 #define XS_IDX_NCOL       16            /* columns per index */
@@ -1454,6 +1463,19 @@ struct xs_idx_ent {
 static struct xs_idx_ent g_idx[XS_IDX_MAX];
 static int g_idx_n;
 static _Atomic uint64_t g_idx_gen;     /* bumped by every index create */
+/* Set when an index entry may be missing (an insert failed, a build ran
+ * short, an index is not maintained): the indexes are then not trusted at
+ * the next open.  Cleared by xstore_index_open.  shortcut: one flag for
+ * the process (one storage engine per process); per-bt if that changes. */
+static _Atomic int g_idx_taint;
+static _Atomic uint64_t g_idx_rebuilds;   /* full index rebuilds (metric) */
+/* Superseded entries left in the tree because the dead queue could not
+ * hold or reap them, carried across trusted reopens in the superblock.
+ * Stale entries are harmless but cost readers a fetch each, so a reopen
+ * rebuilds once they pass XS_IDX_GARBAGE_MAX. */
+static _Atomic uint64_t g_idx_garbage;
+#define XS_IDX_GARBAGE_MAX (1u << 16)
+static _Atomic int g_idx_failinj;         /* test hook: inserts to fail */
 
 /* Catalog generation: bumped by every DDL entry point (tables, indexes,
  * views) and index rebuild, so a cached plan built at an older one is
@@ -1734,9 +1756,12 @@ xs_idx_dead_add(bt_t *bt, const struct xs_idx_rt *rt, int64_t rowid,
     uint64_t ts, const uint8_t *key, int klen)
 {
 	uint8_t *k;
-	if (g_idx_dead_n >= XS_IDX_DEAD_MAX || klen <= 0) return;
-	k = (uint8_t *)malloc((size_t)klen);
-	if (k == NULL) return;
+	if (klen <= 0) return;
+	if (g_idx_dead_n >= XS_IDX_DEAD_MAX ||
+	    (k = (uint8_t *)malloc((size_t)klen)) == NULL) {
+		atomic_fetch_add_explicit(&g_idx_garbage, 1, memory_order_relaxed);
+		return;
+	}
 	memcpy(k, key, (size_t)klen);
 	xs_commit_lock();
 	if (g_idx_dead_n < XS_IDX_DEAD_MAX) {
@@ -1747,6 +1772,8 @@ xs_idx_dead_add(bt_t *bt, const struct xs_idx_rt *rt, int64_t rowid,
 		k = NULL;
 	}
 	xs_commit_unlock();
+	if (k != NULL)                     /* lost the race for the last slot */
+		atomic_fetch_add_explicit(&g_idx_garbage, 1, memory_order_relaxed);
 	free(k);
 }
 
@@ -1834,7 +1861,41 @@ xs_idx_reap(bt_t *bt)
 	}
 }
 
-/* Forget queued entries of a closing tree. */
+/* Clean close: reap every queued entry of `bt` that no snapshot needs, so
+ * the trusted base carries no queued garbage (the queue lives in memory).
+ * Commits are stopped.  An entry a pinned snapshot or an in-flight commit
+ * still needs stays in the tree: stale, which readers filter. */
+static void
+xs_idx_drain(bt_t *bt)
+{
+	struct xs_idx_dead d;
+	struct xs_idx_rt rt;
+	uint64_t hz = snap_horizon(xs_visible());
+	int i;
+	for (;;) {
+		xs_commit_lock();
+		for (i = 0; i < g_idx_dead_n; i++)
+			if (g_idx_dead[i].bt == bt) break;
+		if (i == g_idx_dead_n) { xs_commit_unlock(); break; }
+		d = g_idx_dead[i];
+		g_idx_dead[i] = g_idx_dead[--g_idx_dead_n];
+		xs_commit_unlock();
+		if (!xs_idx_get_rt(bt, d.idx_id, &rt)) {
+			free(d.key);               /* index dropped: cleared already */
+			continue;
+		}
+		xs_commit_lock();
+		if (d.ts > hz || xs_inflight_writes(d.tableid, d.rowid))
+			atomic_fetch_add_explicit(&g_idx_garbage, 1,
+			    memory_order_relaxed);   /* a snapshot still needs it */
+		else if (!xs_idx_key_reused(bt, &rt, d.rowid, d.ts, d.key, d.klen))
+			(void)bt_delete(bt, d.key, d.klen);
+		xs_commit_unlock();
+		free(d.key);
+	}
+}
+
+/* Forget queued entries of a closing tree (they stay in the tree). */
 static void
 xs_idx_dead_forget(bt_t *bt)
 {
@@ -1842,6 +1903,8 @@ xs_idx_dead_forget(bt_t *bt)
 	xs_commit_lock();
 	for (i = 0; i < g_idx_dead_n; ) {
 		if (g_idx_dead[i].bt == bt) {
+			atomic_fetch_add_explicit(&g_idx_garbage, 1,
+			    memory_order_relaxed);
 			free(g_idx_dead[i].key);
 			g_idx_dead[i] = g_idx_dead[--g_idx_dead_n];
 		} else {
@@ -1849,6 +1912,28 @@ xs_idx_dead_forget(bt_t *bt)
 		}
 	}
 	xs_commit_unlock();
+}
+
+/* Insert one index entry.  A failure means the index misses a row until
+ * it is rebuilt, so it taints the indexes (see g_idx_taint). */
+static int
+xs_idx_put(bt_t *bt, const uint8_t *k, int kl)
+{
+	int rc;
+	if (atomic_load_explicit(&g_idx_failinj, memory_order_relaxed) > 0 &&
+	    atomic_fetch_sub_explicit(&g_idx_failinj, 1, memory_order_relaxed) > 0)
+		rc = XTC_E_NOMEM;              /* xstore_index_fail_inject */
+	else
+		rc = bt_insert(bt, k, (uint16_t)kl, "", 0);
+	if (rc != XTC_OK)
+		atomic_store_explicit(&g_idx_taint, 1, memory_order_release);
+	return rc;
+}
+
+void
+xstore_index_fail_inject(int n)
+{
+	atomic_store_explicit(&g_idx_failinj, n, memory_order_relaxed);
 }
 
 /*
@@ -1865,10 +1950,14 @@ xs_idx_maintain_ts(bt_t *bt, uint32_t tableid, int64_t rowid,
     const uint8_t *newrec, int newlen, int deleted,
     const uint8_t *oldrec, int oldlen, uint64_t ts)
 {
-	struct xs_idx_rt hits[16];
+	struct xs_idx_rt hits[17];
 	uint8_t nk[XS_IDX_KMAX], ok[XS_IDX_KMAX];
 	int nh, i, nkl, okl;
-	nh = xs_idx_for_table(bt, tableid, hits, 16);
+	nh = xs_idx_for_table(bt, tableid, hits, 17);
+	if (nh > 16) {                     /* the 17th+ index is not maintained */
+		atomic_store_explicit(&g_idx_taint, 1, memory_order_release);
+		nh = 16;
+	}
 	for (i = 0; i < nh; i++) {
 		nkl = okl = -1;
 		if (!deleted && newrec != NULL && newlen > 0)
@@ -1880,7 +1969,7 @@ xs_idx_maintain_ts(bt_t *bt, uint32_t tableid, int64_t rowid,
 		if (nkl > 0 && okl == nkl && memcmp(nk, ok, (size_t)nkl) == 0)
 			continue;                  /* key tuple unchanged */
 		if (nkl > 0)
-			(void)bt_insert(bt, nk, (uint16_t)nkl, "", 0);
+			(void)xs_idx_put(bt, nk, nkl);
 		if (okl > 0)
 			xs_idx_dead_add(bt, &hits[i], rowid, ts, ok, okl);
 	}
@@ -5779,8 +5868,12 @@ xs_idx_cache_add(bt_t *bt, uint32_t idx_id, const char *name,
 	for (i = 0; i < ncol; i++)
 		snprintf(e.col[i], sizeof e.col[i], "%s", col[i]);
 	if (!xstore_table_id(bt, table, &e.rt.tableid) ||
-	    xs_idx_resolve(bt, table, e.col, ncol, e.rt.pay) != 0)
+	    xs_idx_resolve(bt, table, e.col, ncol, e.rt.pay) != 0) {
+		/* Not maintained while unresolved: if its table appears later
+		 * the index would be trusted with no entries -- do not. */
 		e.rt.tableid = 0;
+		atomic_store_explicit(&g_idx_taint, 1, memory_order_release);
+	}
 	xs_cat_lock();
 	for (i = 0; i < g_idx_n; i++)
 		if (g_idx[i].bt == bt && strcmp(g_idx[i].name, name) == 0)
@@ -5936,7 +6029,7 @@ xs_kbuf_add(struct xs_kbuf *kb, const uint8_t *k, int klen)
 	return 0;
 }
 
-static const struct xs_kbuf *g_kbuf_sort;   /* qsort context (build is serial) */
+static _Thread_local const struct xs_kbuf *g_kbuf_sort;   /* qsort context */
 static int
 xs_kbuf_cmp(const void *pa, const void *pb)
 {
@@ -6006,34 +6099,206 @@ xs_idx_build_one(bt_t *bt, const struct xs_idx_ent *e)
 				}
 			}
 		for (i = 0; rc == 0 && i < kb.n; i++)
-			(void)bt_insert(bt, kb.bytes + kb.off[ord[i]],
-			    kb.len[ord[i]], "", 0);
+			(void)xs_idx_put(bt, kb.bytes + kb.off[ord[i]],
+			    kb.len[ord[i]]);
 	}
 	free(ord); free(nullf);
 	free(kb.bytes); free(kb.off); free(kb.len);
+	if (rc == -2)                      /* out of memory: built short */
+		atomic_store_explicit(&g_idx_taint, 1, memory_order_release);
 	return rc == -1 ? -1 : 0;
+}
+
+/*
+ * Rebuild work: the indexes are independent (each its own key range), so
+ * workers on the blocking pool take them one at a time -- the open then
+ * costs about the largest index instead of the sum (TPC-C W=10: 10
+ * indexes, two of them 5.9M entries each).  Under a simulation build the
+ * pool would run on real threads outside the schedule, so the work runs
+ * inline there (deterministic), as it does with one index or one CPU.
+ */
+struct xs_rb_job {
+	bt_t              *bt;
+	struct xs_idx_ent *e;
+	int                n, clear;
+	_Atomic int        next, left;
+};
+
+static int
+xs_rb_worker(void *arg)
+{
+	struct xs_rb_job *j = arg;
+	int i;
+	while ((i = atomic_fetch_add_explicit(&j->next, 1,
+	    memory_order_relaxed)) < j->n) {
+		if (j->clear)
+			xs_idx_clear(j->bt, j->e[i].rt.idx_id);
+		if (xs_idx_build_one(j->bt, &j->e[i]) != 0)   /* UNIQUE dup: empty */
+			atomic_store_explicit(&g_idx_taint, 1, memory_order_release);
+	}
+	atomic_fetch_sub_explicit(&j->left, 1, memory_order_acq_rel);
+	return 0;
+}
+
+/* Load the persisted catalog and rebuild every index of `bt` from the
+ * base rows, on up to `workers` threads.  clear = 0 when the index
+ * namespace is known empty (a tree rebuilt from the log on a fresh page
+ * file). */
+static void
+xs_idx_rebuild(bt_t *bt, int clear, int workers)
+{
+	struct xs_rb_job j;
+	int i, nw;
+	memset(&j, 0, sizeof j);
+	xs_idx_dead_forget(bt);      /* every entry is rebuilt from the base */
+	atomic_store_explicit(&g_idx_garbage, 0, memory_order_relaxed);
+	xs_idxcat_load(bt);          /* refresh cache from persisted catalog */
+	j.e = malloc(sizeof *j.e * XS_IDX_MAX);
+	if (j.e == NULL) {
+		atomic_store_explicit(&g_idx_taint, 1, memory_order_release);
+		return;
+	}
+	j.bt = bt;
+	j.clear = clear;
+	xs_cat_lock();
+	for (i = 0; i < g_idx_n && j.n < XS_IDX_MAX; i++)
+		if (g_idx[i].bt == bt) j.e[j.n++] = g_idx[i];
+	xs_cat_unlock();
+	atomic_fetch_add_explicit(&g_idx_rebuilds, 1, memory_order_relaxed);
+	nw = strcmp(xtc_io_backend_name(), "sim") == 0 ? 1 : workers;
+	if (nw > j.n) nw = j.n;
+	if (nw < 1) nw = 1;
+	atomic_store(&j.left, nw);
+	for (i = 1; i < nw; i++)
+		if (xtc_blocking_submit(xs_rb_worker, &j) != XTC_OK)
+			atomic_fetch_sub(&j.left, 1);   /* this thread does its share */
+	(void)xs_rb_worker(&j);
+	while (atomic_load_explicit(&j.left, memory_order_acquire) > 0) {
+		if (xtc_pid_is_none(xtc_self()))
+			(void)xtc_sleep_ns(1000LL * 1000);
+		else
+			(void)xtc_proc_sleep(1000LL * 1000);
+	}
+	free(j.e);
 }
 
 int
 xstore_index_rebuild_all(bt_t *bt)
 {
-	struct xs_idx_ent *snap;
-	int ns = 0, i;
 	if (bt == NULL) return 0;
-	xs_idx_dead_forget(bt);      /* every entry is rebuilt from the base */
-	xs_idxcat_load(bt);          /* refresh cache from persisted catalog */
+	xs_idx_rebuild(bt, 1, 1);
+	return 0;
+}
+
+uint64_t
+xstore_index_trust_tag(bt_t *bt)
+{
+	int i, unresolved = 0;
+	if (atomic_load_explicit(&g_idx_taint, memory_order_acquire))
+		return 0;
+	xs_cat_lock();
+	for (i = 0; i < g_idx_n; i++)
+		if (g_idx[i].bt == bt && g_idx[i].rt.tableid == 0)
+			unresolved = 1;            /* not maintained this run */
+	xs_cat_unlock();
+	return unresolved ? 0 : XS_IDX_TRUST_TAG;
+}
+
+int
+xstore_index_open(bt_t *bt, uint64_t tag, uint64_t garbage, int fresh,
+    int workers)
+{
+	if (bt == NULL) return 0;
+	atomic_store_explicit(&g_idx_taint, 0, memory_order_release);
+	if (!fresh && tag == XS_IDX_TRUST_TAG && garbage < XS_IDX_GARBAGE_MAX) {
+		xs_idx_dead_forget(bt);
+		atomic_store_explicit(&g_idx_garbage, garbage, memory_order_relaxed);
+		xs_idxcat_load(bt);        /* the entries are complete: trust them */
+		/* Loading may taint (an unresolvable index): rebuild then. */
+		if (!atomic_load_explicit(&g_idx_taint, memory_order_acquire))
+			return 1;
+		atomic_store_explicit(&g_idx_taint, 0, memory_order_release);
+	}
+	xs_idx_rebuild(bt, !fresh, workers);
+	return 0;
+}
+
+uint64_t
+xstore_index_close(bt_t *bt)
+{
+	if (bt != NULL)
+		xs_idx_drain(bt);
+	return atomic_load_explicit(&g_idx_garbage, memory_order_relaxed);
+}
+
+uint64_t
+xstore_index_rebuild_count(void)
+{
+	return atomic_load_explicit(&g_idx_rebuilds, memory_order_relaxed);
+}
+
+/*
+ * Check every cached index of `bt` against the base: *missing counts live
+ * rows whose newest committed version has no entry (a seek or a UNIQUE
+ * check would miss the row), *stale counts entries the row's newest
+ * committed version does not carry (harmless: readers filter them).  Rows
+ * whose key is too long to index are skipped, as maintenance skips them.
+ * Run quiesced (tests, tools).  Returns the number of indexes checked.
+ */
+int
+xstore_index_check(bt_t *bt, uint64_t *missing, uint64_t *stale)
+{
+	struct xs_idx_ent *snap;
+	uint8_t key[XS_IDX_KMAX], kk[XS_IDX_KMAX], pfx[5];
+	uint8_t *rec = NULL;
+	int ns = 0, i, kl, rl;
+	uint64_t miss = 0, st = 0;
+	if (bt == NULL) return 0;
 	snap = malloc(sizeof *snap * XS_IDX_MAX);
-	if (snap == NULL) return 0;
+	rec = malloc(XS_VMAX);
+	if (snap == NULL || rec == NULL) { free(snap); free(rec); return 0; }
 	xs_cat_lock();
 	for (i = 0; i < g_idx_n && ns < XS_IDX_MAX; i++)
-		if (g_idx[i].bt == bt) snap[ns++] = g_idx[i];
+		if (g_idx[i].bt == bt && g_idx[i].rt.tableid != 0)
+			snap[ns++] = g_idx[i];
 	xs_cat_unlock();
 	for (i = 0; i < ns; i++) {
-		xs_idx_clear(bt, snap[i].rt.idx_id);
-		(void)xs_idx_build_one(bt, &snap[i]);
+		xstore_scan_t *s = xstore_scan_open(bt, snap[i].table, 0, 0, 0, 0, 0);
+		bt_cursor_t *cur = NULL;
+		int64_t rowid; const uint8_t *r; int rlen;
+		uint16_t vl;
+		while (s != NULL && xstore_scan_next(s, &rowid, &r, &rlen) == 1) {
+			kl = xs_idx_rowkey(&snap[i].rt, r, rlen, rowid, 1, key,
+			    (int)bt_max_key(bt), NULL);
+			if (kl > 0 && bt_lookup(bt, key, (uint16_t)kl, kk, 0, &vl) !=
+			    XTC_OK)
+				miss++;
+		}
+		xstore_scan_close(s);
+		(void)xs_idx_prefix(snap[i].rt.idx_id, pfx);
+		if (bt_cursor_open(bt, pfx, 5, &cur) != XTC_OK) continue;
+		for (;;) {
+			const void *k = NULL, *vv = NULL; uint16_t klen = 0, vlen = 0;
+			int64_t rid;
+			if (bt_cursor_next(cur, &k, &klen, &vv, &vlen) != XTC_OK ||
+			    klen < 13 || memcmp(k, pfx, 5) != 0)
+				break;
+			memcpy(key, k, klen);
+			kl = klen;
+			rid = (int64_t)(xs_get_be64(key + kl - 8) ^ 0x8000000000000000ull);
+			bt_cursor_park(cur);
+			rl = xs_read_rec(bt, snap[i].rt.tableid, rid, rec, XS_VMAX);
+			if (rl <= 0 || xs_idx_rowkey(&snap[i].rt, rec, rl, rid, 1, kk,
+			    (int)sizeof kk, NULL) != kl || memcmp(kk, key, (size_t)kl) != 0)
+				st++;
+			if (bt_cursor_resume(cur) != XTC_OK) break;
+		}
+		bt_cursor_close(cur);
 	}
-	free(snap);
-	return 0;
+	free(snap); free(rec);
+	if (missing) *missing = miss;
+	if (stale) *stale = st;
+	return ns;
 }
 
 int
@@ -7719,28 +7984,43 @@ xs_recover_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
 int
 xstore_recover(bt_t *bt, const char *wal_path)
 {
+	return xstore_recover_ex(bt, wal_path, NULL);
+}
+
+int
+xstore_recover_ex(bt_t *bt, const char *wal_path, struct wal_tail *tail)
+{
 	struct xs_recover r;
+	wal_tail_t t;
 	int rc, i;
 
 	xs_commit_state_reset();
 	memset(&r, 0, sizeof r);
 	r.bt = bt;
-	rc = wal_scan(wal_path, xs_recover_cb, &r);
+	rc = wal_scan_ex(wal_path, xs_recover_cb, &r, &t);
 
 	/* Whatever transactions are still active are losers: undo them,
-	 * writing CLRs through an append handle on the same log.  Skipped
-	 * entirely in the NO-STEAL path (no losers). */
+	 * writing CLRs through an append handle on the same log (opened at
+	 * the tail the scan found, no second scan).  Skipped entirely in the
+	 * NO-STEAL path (no losers). */
 	if (r.n_txn > 0) {
 		wal_t *w = NULL;
 		wal_opts_t wo;
 		memset(&wo, 0, sizeof wo);
 		wo.path = wal_path; wo.append = 1;
+		wo.tail = &t;
 		if (wal_open(&wo, &w) == XTC_OK) {
 			for (i = 0; i < r.n_txn; i++)
 				xs_undo_loser(bt, w, &r.txn[i]);
+			if (wal_get_tail(w, &t) != XTC_OK)
+				t.valid = 0;           /* the CLRs moved the end */
 			wal_close(w);
+		} else {
+			t.valid = 0;
 		}
 	}
+	if (tail != NULL)
+		*tail = t;
 	for (i = 0; i < r.n_txn; i++)
 		free(r.txn[i].upd);
 	free(r.txn);

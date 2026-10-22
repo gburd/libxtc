@@ -55,6 +55,12 @@ void bt_set_close_hook(void (*fn)(bt_t *));
 int  bt_write_super(bt_t *bt);   /* XTC_OK or the bm_write_super error */
 void bt_set_meta(bt_t *bt, uint64_t clean, uint64_t commit_clock);
 void bt_get_meta(const bt_t *bt, uint64_t *clean, uint64_t *commit_clock);
+/* Engine-opaque superblock words 0..BT_SUPER_EXT-1, persisted by
+ * bt_write_super and read back by bt_reopen like the clean flag.  A store
+ * written before they existed (or a page too small to hold them) reads 0. */
+#define BT_SUPER_EXT 8
+void     bt_set_ext(bt_t *bt, int i, uint64_t v);
+uint64_t bt_get_ext(const bt_t *bt, int i);
 /* Stamp `lsn` (the log LSN of the change about to be made) onto every
  * page this tree dirties from now on -- the ARIES page LSN. */
 void bt_set_lsn(bt_t *bt, uint64_t lsn);
