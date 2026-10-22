@@ -74,6 +74,8 @@ test_btree_seek_latched
 test_point_read
 test_index_walk
 test_group_exact
+test_sql_results
+test_txn_fastpath
 test_xs_ctr
 test_btree_sample
 test_savepoint
