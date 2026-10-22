@@ -143,7 +143,7 @@ clean:
 	rm -f test_clean_restart test_dw_fail
 	rm -f test_steal
 	rm -f test_steal_page
-	rm -f test_wal_kill test_wal_tail test_wal_kill_engine
+	rm -f test_wal_kill test_wal_tail test_wal_kill_engine test_uniq_commit
 	rm -f test_steal_leaf test_cat_reopen test_ckpt_online test_wal_group_sync test_intents_thread test_torn_base test_snap_registry test_rowid_minmax test_btree_fill test_wal_bigtxn test_steal_reclaim test_dio_restart test_wal_prealloc
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o test_bufmgr_dio test_bufmgr_dio.o
 	rm -f test_bufmgr_mt
@@ -882,3 +882,14 @@ numa_claim_probe: ../../bench/sqlxtc/numa_claim_probe.c btree.c bufmgr_probe.o b
 # self-checks the design's key properties with plain assert().
 evict_policy_proto: evict_policy_proto.c
 	$(CC) $(CFLAGS) -o $@ evict_policy_proto.c
+
+# Commit-time UNIQUE re-validation: a key committed by another
+# transaction (or under an index created) after this transaction's
+# statement check must still fail the COMMIT.
+test: test-uniq-commit
+
+test_uniq_commit: test_uniq_commit.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ test_uniq_commit.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
+
+test-uniq-commit: test_uniq_commit
+	TMPDIR=$${TMPDIR:-/tmp} ./test_uniq_commit

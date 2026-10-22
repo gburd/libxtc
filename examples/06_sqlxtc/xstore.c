@@ -260,6 +260,45 @@ static struct xs_inflight *g_inflight;   /* guarded by the commit lock */
  * been skipped).  Guarded by the commit lock. */
 #define XS_TAB_TS_N 1024
 static uint64_t g_tab_cts[XS_TAB_TS_N];
+/*
+ * Row stamps: the newest timestamp registered for any (tid, rid) hashing
+ * to a slot (a collision only forces a check that could have been
+ * skipped).  Written under the commit lock at registration, read under
+ * it.  A commit probes each row's newest committed version BEFORE taking
+ * the commit lock, at a horizon v0 read first; under the lock a row
+ * needs the full check (probe again + in-flight scan) only if its stamp
+ * > v0 -- every commit not visible at v0 has ts > v0 and stamped its rows
+ * at registration, so stamp <= v0 means no in-flight writer of the row
+ * and no commit of it since the early probe.  At 64 clients these probes
+ * (a B-tree descent per row, latching hot leaves) ran under the lock.
+ */
+#define XS_ROW_TS_N 65536
+static uint64_t g_row_cts[XS_ROW_TS_N];
+/* The same for UNIQUE key tuples (hash of index id + key tuple): the
+ * newest timestamp registered by a commit carrying the key.  Stamped
+ * under the commit lock by xs_uniq_stamp_locked.  A key whose stamp is
+ * <= the horizon the transaction's statement-time check ran at
+ * (uniq_vis) skips the commit-time committed probe and the O(in-flight)
+ * scan: no commit carrying it was in flight or has committed since. */
+static uint64_t g_uk_cts[XS_ROW_TS_N];
+
+static uint64_t xs_bytes_hash(const uint8_t *p, int n);
+
+static unsigned
+xs_uk_slot(uint32_t idx_id, const uint8_t *key, int klen)
+{
+	uint64_t x = xs_bytes_hash(key, klen) ^ ((uint64_t)idx_id * 0x9e3779b97f4a7c15ull);
+	x ^= x >> 29;
+	return (unsigned)(x & (XS_ROW_TS_N - 1));
+}
+
+static unsigned
+xs_row_slot(uint32_t tid, int64_t rid)
+{
+	uint64_t x = ((uint64_t)tid << 40) ^ (uint64_t)rid;
+	x ^= x >> 33; x *= 0xff51afd7ed558ccdull; x ^= x >> 33;
+	return (unsigned)(x & (XS_ROW_TS_N - 1));
+}
 static void xs_visible_catchup_locked(void);
 /* Checkpoint gate (xstore_quiesce_begin): while set, no commit takes a
  * timestamp and no STEAL spill writes the log.  Guarded by the commit
@@ -1978,6 +2017,9 @@ static int  xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid,
     uint64_t *out_ts, uint32_t *ubad, int vis);
 static int  xs_uniq_collect(bt_t *bt, const xstore_ctx_t *cx, uint32_t tid1,
     struct xs_idx_rt *u, int cap);
+static void xs_uniq_stamp_locked(const xstore_ctx_t *cx, uint32_t tid1,
+    const uint8_t *rec1, int len1, int64_t rid1,
+    const struct xs_idx_rt *u, int nu, uint64_t ts);
 static int  xs_uniq_validate_locked(bt_t *bt, xstore_ctx_t *cx, uint32_t tid1,
     int64_t rid1, const uint8_t *rec1, int len1,
     const struct xs_idx_rt *u, int nu, uint32_t *bad);
@@ -3773,11 +3815,15 @@ xs_inflight_add_locked(struct xs_inflight *e)
 	e->ts = hlc_tick();
 	e->next = g_inflight;
 	g_inflight = e;
-	if (e->ws == NULL)
+	if (e->ws == NULL) {
 		g_tab_cts[e->tid % XS_TAB_TS_N] = e->ts;
-	else
-		for (i = 0; i < e->wn; i++)
+		g_row_cts[xs_row_slot(e->tid, e->rid)] = e->ts;
+	} else {
+		for (i = 0; i < e->wn; i++) {
 			g_tab_cts[e->ws[i].tableid % XS_TAB_TS_N] = e->ts;
+			g_row_cts[xs_row_slot(e->ws[i].tableid, e->ws[i].rowid)] = e->ts;
+		}
+	}
 }
 
 /* Caller holds the commit lock: is a commit writing (tid, rid) in flight? */
@@ -4067,6 +4113,33 @@ xs_ww_conflict_locked(bt_t *bt, const xs_wrec_t *ws, int wn)
 	return 0;
 }
 
+/* The early half of the write-write check, WITHOUT the commit lock: is
+ * any row of the write set committed past its base?  Returns 1 on a
+ * conflict (certain: committed versions never go away).  Read the
+ * horizon *v0 before calling; xs_ww_recheck_locked then finishes. */
+static int
+xs_ww_probe(bt_t *bt, const xs_wrec_t *ws, int wn)
+{
+	int i;
+	for (i = 0; i < wn; i++)
+		if (xs_newest_ts(bt, ws[i].tableid, ws[i].rowid) > ws[i].base)
+			return 1;
+	return 0;
+}
+
+/* Commit lock held, after xs_ww_probe passed at horizon v0: the full
+ * check only for rows registered (stamped) after v0 -- see g_row_cts. */
+static int
+xs_ww_recheck_locked(bt_t *bt, const xs_wrec_t *ws, int wn, uint64_t v0)
+{
+	int i;
+	for (i = 0; i < wn; i++)
+		if (g_row_cts[xs_row_slot(ws[i].tableid, ws[i].rowid)] > v0 &&
+		    xs_ww_conflict_locked(bt, &ws[i], 1))
+			return 1;
+	return 0;
+}
+
 static int xs_row_live(bt_t *bt, uint32_t tableid, int64_t rowid);
 
 static int
@@ -4115,7 +4188,8 @@ xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n,
 	uint8_t buf[1 + XS_VMAX];
 	struct xs_inflight fl;
 	struct xs_idx_rt uq[16];
-	uint64_t ts;
+	xs_wrec_t probe;
+	uint64_t ts, v0;
 	uint32_t bad = 0;
 	uint8_t *pre = NULL;
 	int rc, nuq = 0, idx, prelen = 0;
@@ -4129,6 +4203,11 @@ xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n,
 	if (!deleted && blob != NULL && g_idx_n > 0 &&
 	    tableid != XS_CAT_TABLEID && tableid < XS_IDXCAT_TABLEID)
 		nuq = xs_uniq_collect(bt, NULL, tableid, uq, 16);
+	memset(&probe, 0, sizeof probe);
+	probe.tableid = tableid; probe.rowid = rowid; probe.base = base;
+	v0 = xs_visible();             /* before the probe: see g_row_cts */
+	if (base != 0 && xs_ww_probe(bt, &probe, 1))
+		return SX_BUSY;
 	xs_commit_lock();
 	xs_gate_wait_locked();
 	if (insert && xs_key_live_locked(bt, tableid, rowid)) {
@@ -4143,20 +4222,17 @@ xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n,
 		if (ubad != NULL) *ubad = bad;
 		return SX_CONSTRAINT;
 	}
-	if (base != 0) {
-		xs_wrec_t probe;
-		memset(&probe, 0, sizeof probe);
-		probe.tableid = tableid; probe.rowid = rowid; probe.base = base;
-		if (xs_ww_conflict_locked(bt, &probe, 1)) {
-			xs_commit_unlock();
-			return SX_BUSY;
-		}
+	if (base != 0 && xs_ww_recheck_locked(bt, &probe, 1, v0)) {
+		xs_commit_unlock();
+		return SX_BUSY;
 	}
 	/* From registration to removal the commit is masked: its entry lives
 	 * on this stack, so a kill in between would leave g_inflight pointing
 	 * into a dead fiber and pin the read horizon (test_wal_kill_engine). */
 	(void)xtc_mask_enter();
 	xs_inflight_add_locked(&fl);
+	xs_uniq_stamp_locked(NULL, tableid, deleted ? NULL : (const uint8_t *)blob,
+	    n, rowid, uq, nuq, fl.ts);
 	xs_commit_unlock();
 	ts = fl.ts;
 	*out_ts = ts;
@@ -5356,7 +5432,7 @@ xs_commit_ctx(xstore_ctx_t *cx)
 {
 	struct xs_inflight fl;
 	struct xs_idx_rt uq[16];
-	uint64_t ts;
+	uint64_t ts, v0;
 	uint32_t ubad = 0;
 	int i, rc = SX_OK, nuq = 0;
 	if (!cx->in_txn)
@@ -5390,10 +5466,15 @@ xs_commit_ctx(xstore_ctx_t *cx)
 		 * in-flight registration are one atomic step under the commit
 		 * lock; a dangerous pivot or a write-write conflict rolls back
 		 * with SX_BUSY, a UNIQUE violation with SX_CONSTRAINT. */
+		v0 = xs_visible();            /* before the probe: see g_row_cts */
+		if (xs_ww_probe(cx->bt, cx->wbuf, cx->wn)) {
+			(void)xs_rollback_ctx(cx);
+			return SX_BUSY;           /* committed past our snapshot */
+		}
 		xs_commit_lock();
 		xs_gate_wait_locked();
 		if (xs_ssi_validate_locked(cx) != SX_OK ||
-		    xs_ww_conflict_locked(cx->bt, cx->wbuf, cx->wn)) {
+		    xs_ww_recheck_locked(cx->bt, cx->wbuf, cx->wn, v0)) {
 			xs_commit_unlock();
 			(void)xs_rollback_ctx(cx);
 			return SX_BUSY;           /* serialization failure */
@@ -5415,6 +5496,7 @@ xs_commit_ctx(xstore_ctx_t *cx)
 		 * reach a committer parked at the checkpoint gate. */
 		(void)xtc_mask_enter();
 		xs_inflight_add_locked(&fl);  /* one timestamp for the txn */
+		xs_uniq_stamp_locked(cx, 0, NULL, 0, 0, uq, nuq, fl.ts);
 		xs_commit_unlock();
 		ts = fl.ts;
 		if (g_xwal != NULL) {
@@ -6925,6 +7007,11 @@ xs_uniq_validate_locked(bt_t *bt, xstore_ctx_t *cx, uint32_t tid1,
 			klen = xs_idx_rowkey(&u[i], rec, rl, rid, 0, key,
 			    (int)sizeof key, &isnull);
 			if (klen < 0 || isnull) continue;
+			/* A key no commit carried since the statement check
+			 * (skipok also means no index was created since). */
+			if (skipok && g_uk_cts[xs_uk_slot(u[i].idx_id, key, klen)] <=
+			    cx->uniq_vis)
+				continue;
 			if (xs_uniq_committed_dup(bt, &u[i], key, klen, rid, cx) ||
 			    xs_uniq_inflight_dup(&u[i], key, klen, rid, cx)) {
 				*bad = u[i].idx_id;
@@ -6933,6 +7020,32 @@ xs_uniq_validate_locked(bt_t *bt, xstore_ctx_t *cx, uint32_t tid1,
 		}
 	}
 	return 0;
+}
+
+/* Commit lock held, `ts` just minted: stamp every UNIQUE key tuple the
+ * write set (cx) or the one autocommit record (tid1/rec1) carries. */
+static void
+xs_uniq_stamp_locked(const xstore_ctx_t *cx, uint32_t tid1,
+    const uint8_t *rec1, int len1, int64_t rid1,
+    const struct xs_idx_rt *u, int nu, uint64_t ts)
+{
+	uint8_t key[XS_IDX_KMAX];
+	int n = cx != NULL ? cx->wn : 1, wi, i, klen, isnull, rl;
+	for (wi = 0; wi < n && nu > 0; wi++) {
+		uint32_t tid = cx != NULL ? cx->wbuf[wi].tableid : tid1;
+		int64_t rid = cx != NULL ? cx->wbuf[wi].rowid : rid1;
+		const uint8_t *rec = cx != NULL ? cx->wbuf[wi].data : rec1;
+		if (cx != NULL && cx->wbuf[wi].deleted) continue;
+		rl = cx != NULL ? (int)cx->wbuf[wi].len : len1;
+		if (rec == NULL) continue;
+		for (i = 0; i < nu; i++) {
+			if (u[i].tableid != tid) continue;
+			klen = xs_idx_rowkey(&u[i], rec, rl, rid, 0, key,
+			    (int)sizeof key, &isnull);
+			if (klen >= 0 && !isnull)
+				g_uk_cts[xs_uk_slot(u[i].idx_id, key, klen)] = ts;
+		}
+	}
 }
 
 /* ---- verified index range scan ---------------------------------- */
