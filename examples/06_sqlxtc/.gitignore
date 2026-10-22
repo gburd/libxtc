@@ -74,6 +74,7 @@ test_fuzzy_checkpoint
 test_btree_delete_merge
 test_btree_limits
 test_xs_ctr
+test_bm_reuse_version
 test_btree_sample
 test_savepoint
 test_native_txn

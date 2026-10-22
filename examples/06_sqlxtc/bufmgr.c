@@ -2097,6 +2097,13 @@ bm_alloc_pid(bm_t *bm, bm_frame_t **out_frame, bm_pid_t *out_pid)
 	bm_frame_t *f, *dup;
 	if (bm == NULL || out_frame == NULL) return XTC_E_INVAL;
 	if ((f = get_free_frame(bm)) == NULL) return XTC_E_RESOURCE;
+	/* A new page in this frame: bump the version (+2, stays even) before
+	 * the pid and the zeroed bytes, as the load path does, so a pin-free
+	 * reader (bm_fix_pid_nopin + bm_read_valid) that sampled it before
+	 * the reuse fails validation.  The pid can be the SAME one (the
+	 * freelist reissues it into the same frame), so the pid recheck
+	 * alone does not catch it (test_bm_reuse_version). */
+	atomic_fetch_add_explicit(&f->version, 2, memory_order_release);
 	atomic_store_explicit(&f->pid, next_pid(bm), memory_order_release);
 	atomic_store_explicit(&f->dirty, 1, memory_order_relaxed);
 	atomic_store_explicit(&f->io_busy, 0, memory_order_relaxed);
@@ -2115,6 +2122,10 @@ bm_alloc_pid(bm_t *bm, bm_frame_t **out_frame, bm_pid_t *out_pid)
 	 */
 	dup = ht_insert_alloc(bm, f);
 	if (dup != NULL) {
+		/* Reinitialised in place: a new version for a pin-free reader
+		 * (it is pinned, so +2 keeps it even and never looks like a
+		 * writer's odd hold). */
+		atomic_fetch_add_explicit(&dup->version, 2, memory_order_release);
 		atomic_store_explicit(&dup->dirty, 1, memory_order_relaxed);
 		atomic_store_explicit(&dup->doomed, 0, memory_order_relaxed);
 		memset(dup->page, 0, bm->page_size);
