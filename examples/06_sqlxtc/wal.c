@@ -9,9 +9,11 @@
  *	for committers on fibers and plain threads alike.  See the comment
  *	above struct wal for the algorithm and where each part comes from
  *	(Berkeley DB, JE, InnoDB, the PostgreSQL async WAL series).  Writes
- *	and fdatasyncs go through libxtc async file I/O (xtc_aio): native
- *	io_uring completion where the leader runs on a capable loop, a
- *	blocking-pool offload elsewhere, inline off a loop.
+ *	go through libxtc async file I/O (xtc_aio): native io_uring
+ *	completion where the leader runs on a capable loop, a blocking-pool
+ *	offload elsewhere, inline off a loop.  The log fd is O_DSYNC, so a
+ *	flush is one write (wal_open_fd); the simulator keeps
+ *	write + fdatasync for its crash model.
  */
 
 #include "wal.h"
@@ -22,6 +24,8 @@
 #include "xtc_sync.h"     /* xtc_notify: waiters park (fiber) or block (thread) */
 #include "xtc_sim.h"      /* XTC_SIM_BUGGIFY -- DST pessimal batching (no-op in prod) */
 #include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
+#include "xtc_io.h"       /* xtc_io_backend_name */
+#include "xtc_fs.h"       /* xtc_fs_dio_align */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -31,8 +35,14 @@
 #include <stdio.h>      /* snprintf, rename */
 #include <stdlib.h>
 #include <string.h>
+#include <sys/uio.h>    /* struct iovec: xtc_aio_pwritev */
 #include <time.h>
 #include <unistd.h>
+#if defined(__GNUC__) && defined(__x86_64__)
+#include <nmmintrin.h>      /* _mm_crc32_* (SSE4.2, per-function target) */
+#elif defined(__GNUC__) && defined(__aarch64__) && defined(__ARM_FEATURE_CRC32)
+#include <arm_acle.h>       /* __crc32c* */
+#endif
 
 /* The message that stops the writer proc. */
 #define WAL_KIND_STOP    'S'
@@ -42,8 +52,9 @@
 
 /*
  * Per-record on-disk layout is now [u64 lsn][u32 len][body:len][u64 crc].
- * The trailer is a 64-bit FNV-1a hash over the header bytes (lsn+len)
- * and the body.  It makes every record self-checking: recovery can
+ * The trailer is a checksum over the header bytes (lsn+len) and the body
+ * (a tagged CRC32C, or the 64-bit FNV-1a of logs written before it: see
+ * wal_sum_ok).  It makes every record self-checking: recovery can
  * tell a COMPLETE record from a torn one instead of decoding garbage.
  *
  * Torn-tail detection (Increment 1, the root fix): a crash mid-append
@@ -96,11 +107,143 @@ wal_fnv(uint64_t h, const uint8_t *p, size_t n)
 }
 #define WAL_FNV_BASIS 1469598103934665603ull
 
-/* 64-bit FNV-1a over the record header (lsn+len) and body.  Not
- * cryptographic -- it only needs to catch a torn/partial tail record,
- * where the trailing 8 bytes are either missing (short read) or do not
- * match a body the writer never finished.  One pass, no table, no
- * dependency. */
+/*
+ * CRC32C (Castagnoli), the checksum of every frame written since the
+ * byte-serial FNV-1a: the TPC-C W=10 replay spent 89% of its time in
+ * wal_fnv (1.1 GB/s).  x86-64 SSE4.2 and ARMv8 have a CRC32C instruction
+ * (8 bytes per op); elsewhere slice-by-8 tables.  Same value either way
+ * (test_wal_crc), so the log bytes never depend on the host.
+ *
+ * The trailer of a CRC32C frame is (WAL_SUM_TAG << 32) | crc32c(header
+ * and body); an FNV frame's trailer is its 64-bit FNV-1a.  The header is
+ * unchanged, so the frame length, and every parser of it, is too.  A
+ * reader accepts a frame if the tagged CRC32C or the FNV-1a matches
+ * (wal_sum_ok): old logs, and logs that a newer build appended to, read
+ * frame by frame, and an FNV frame whose hash happens to carry the tag is
+ * still accepted.  A torn frame passes only if both 32-bit halves match
+ * by chance.  The preallocated zeros still end the log: their trailer is
+ * untagged and a zero-length frame's FNV-1a is never 0.  A build older
+ * than this one reads the first CRC32C frame as the end of the log.
+ */
+#define WAL_SUM_TAG 0x43524332u           /* "2CRC" */
+#if defined(WAL_C32C_HW)
+/* set by the build: test_wal_crc_sw builds with -DWAL_C32C_HW=0 */
+#elif defined(__GNUC__) && defined(__BYTE_ORDER__) && \
+    __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ && \
+    (defined(__x86_64__) || \
+    (defined(__aarch64__) && defined(__ARM_FEATURE_CRC32)))
+#define WAL_C32C_HW 1           /* a CRC32C instruction (x86: if SSE4.2) */
+#else
+#define WAL_C32C_HW 0
+#endif
+static uint32_t        wal_c32c_tab[8][256];
+static pthread_once_t  wal_c32c_once = PTHREAD_ONCE_INIT;
+static int             wal_c32c_hw;          /* set once by wal_c32c_init */
+
+static void
+wal_c32c_init(void)
+{
+	uint32_t c;
+	int i, k;
+	for (i = 0; i < 256; i++) {
+		for (c = (uint32_t)i, k = 0; k < 8; k++)
+			c = (c >> 1) ^ (c & 1 ? 0x82f63b78u : 0);
+		wal_c32c_tab[0][i] = c;
+	}
+	for (i = 0; i < 256; i++)
+		for (k = 1; k < 8; k++)
+			wal_c32c_tab[k][i] = (wal_c32c_tab[k - 1][i] >> 8) ^
+			    wal_c32c_tab[0][wal_c32c_tab[k - 1][i] & 0xff];
+#if WAL_C32C_HW && defined(__x86_64__)
+	wal_c32c_hw = __builtin_cpu_supports("sse4.2") ? 1 : 0;
+#else
+	wal_c32c_hw = WAL_C32C_HW;
+#endif
+}
+
+/* The CRC register c continued over n bytes (no pre/post inversion). */
+static uint32_t
+wal_c32c_sw(uint32_t c, const uint8_t *p, size_t n)
+{
+	uint64_t v;
+	while (n >= 8) {
+		/* bytes in stream order, whatever the host's byte order */
+		v = (uint64_t)p[0] | (uint64_t)p[1] << 8 | (uint64_t)p[2] << 16 |
+		    (uint64_t)p[3] << 24 | (uint64_t)p[4] << 32 |
+		    (uint64_t)p[5] << 40 | (uint64_t)p[6] << 48 |
+		    (uint64_t)p[7] << 56;
+		v ^= c;
+		c = wal_c32c_tab[7][v & 0xff] ^ wal_c32c_tab[6][(v >> 8) & 0xff] ^
+		    wal_c32c_tab[5][(v >> 16) & 0xff] ^ wal_c32c_tab[4][(v >> 24) & 0xff] ^
+		    wal_c32c_tab[3][(v >> 32) & 0xff] ^ wal_c32c_tab[2][(v >> 40) & 0xff] ^
+		    wal_c32c_tab[1][(v >> 48) & 0xff] ^ wal_c32c_tab[0][v >> 56];
+		p += 8;
+		n -= 8;
+	}
+	while (n-- > 0)
+		c = (c >> 8) ^ wal_c32c_tab[0][(c ^ *p++) & 0xff];
+	return c;
+}
+
+#if WAL_C32C_HW && defined(__x86_64__)
+__attribute__((target("sse4.2"))) static uint32_t
+wal_c32c_hwfn(uint32_t c, const uint8_t *p, size_t n)
+{
+	uint64_t v, c64 = c;
+	while (n >= 8) {
+		memcpy(&v, p, 8);
+		c64 = _mm_crc32_u64(c64, v);
+		p += 8;
+		n -= 8;
+	}
+	c = (uint32_t)c64;
+	while (n-- > 0)
+		c = _mm_crc32_u8(c, *p++);
+	return c;
+}
+#elif WAL_C32C_HW
+static uint32_t
+wal_c32c_hwfn(uint32_t c, const uint8_t *p, size_t n)
+{
+	uint64_t v;
+	while (n >= 8) {
+		memcpy(&v, p, 8);
+		c = __crc32cd(c, v);
+		p += 8;
+		n -= 8;
+	}
+	while (n-- > 0)
+		c = __crc32cb(c, *p++);
+	return c;
+}
+#else
+#define wal_c32c_hwfn wal_c32c_sw
+#endif
+
+static uint32_t
+wal_c32c(uint32_t c, const uint8_t *p, size_t n)
+{
+	(void)pthread_once(&wal_c32c_once, wal_c32c_init);
+	return wal_c32c_hw > 0 ? wal_c32c_hwfn(c, p, n) : wal_c32c_sw(c, p, n);
+}
+
+/* The trailer of a CRC32C frame from the CRC register over the frame. */
+#define WAL_SUM_TRL(c) (((uint64_t)WAL_SUM_TAG << 32) | (uint32_t)~(c))
+
+/* 1 if trl checks the frame f[0, WAL_REC_HDR + len) (header + body). */
+static int
+wal_sum_ok(uint64_t trl, const uint8_t *f, uint32_t len)
+{
+	if ((uint32_t)(trl >> 32) == WAL_SUM_TAG &&
+	    trl == WAL_SUM_TRL(wal_c32c(~0u, f, WAL_REC_HDR + (size_t)len)))
+		return 1;
+	return wal_fnv(WAL_FNV_BASIS, f, WAL_REC_HDR + (size_t)len) == trl;
+}
+
+/* The trailer of a new frame: CRC32C over the header (lsn+len) and the
+ * body.  Not cryptographic -- it only needs to catch a torn/partial tail
+ * record, where the trailing 8 bytes are either missing (short read) or
+ * do not match a body the writer never finished. */
 static uint64_t
 wal_rec_crc(uint64_t lsn, uint32_t len, const void *body)
 {
@@ -108,7 +251,7 @@ wal_rec_crc(uint64_t lsn, uint32_t len, const void *body)
 
 	memcpy(hdr, &lsn, 8);
 	memcpy(hdr + 8, &len, 4);
-	return wal_fnv(wal_fnv(WAL_FNV_BASIS, hdr, WAL_REC_HDR), body, len);
+	return WAL_SUM_TRL(wal_c32c(wal_c32c(~0u, hdr, WAL_REC_HDR), body, len));
 }
 
 static off_t
@@ -138,11 +281,28 @@ struct wal_rd {
 	size_t   wlen;                /* valid bytes in buf */
 };
 
+/* The scans read the log front to back: POSIX_FADV_SEQUENTIAL doubles
+ * the kernel's read-ahead window for the fd, so the next reads are under
+ * way while the scan checksums and replays the window it has (TPC-C
+ * W=10 replay, cold: 0.762 s -> 0.677 s; a plain read of the file takes
+ * 0.62 s).  Advice only: no byte a read returns changes. */
+static void
+wal_rd_seq(int fd)
+{
+#if defined(POSIX_FADV_SEQUENTIAL)
+	(void)posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+#else
+	(void)fd;
+#endif
+}
+
 static void
 wal_rd_init(struct wal_rd *r, int fd, int buffered)
 {
 	r->fd = fd;
 	r->fsize = wal_fsize(fd);
+	if (buffered)
+		wal_rd_seq(fd);
 	r->buf = buffered ? malloc(WAL_RD_ONE) : NULL;
 	r->woff = 0;
 	r->wlen = 0;
@@ -185,7 +345,8 @@ wal_rd_frame(struct wal_rd *r, off_t off, uint64_t *lsn, uint32_t *len,
 	uint8_t hdr[WAL_REC_HDR], trl[WAL_REC_CRC], chunk[64 * 1024];
 	const uint8_t *p;
 	uint64_t crc, h, fl;
-	uint32_t done;
+	uint32_t done, c, k;
+	int tagged, pass;
 
 	*body = NULL;
 	if (off < 0 || off + (off_t)WAL_REC_HDR > r->fsize)
@@ -201,7 +362,7 @@ wal_rd_frame(struct wal_rd *r, off_t off, uint64_t *lsn, uint32_t *len,
 		return 0;                    /* runs past the end: torn */
 	if ((p = wal_rd_at(r, off, (size_t)fl)) != NULL) {
 		memcpy(&crc, p + WAL_REC_HDR + *len, WAL_REC_CRC);
-		if (wal_fnv(WAL_FNV_BASIS, p, WAL_REC_HDR + *len) != crc)
+		if (!wal_sum_ok(crc, p, *len))
 			return 0;
 		*body = p + WAL_REC_HDR;
 		return 1;
@@ -210,15 +371,27 @@ wal_rd_frame(struct wal_rd *r, off_t off, uint64_t *lsn, uint32_t *len,
 	    != (ssize_t)WAL_REC_CRC)
 		return 0;
 	memcpy(&crc, trl, WAL_REC_CRC);
-	h = wal_fnv(WAL_FNV_BASIS, hdr, WAL_REC_HDR);
-	for (done = 0; done < *len; ) {
-		uint32_t k = *len - done < sizeof chunk ? *len - done : (uint32_t)sizeof chunk;
-		if (pread(r->fd, chunk, k, off + (off_t)WAL_REC_HDR + (off_t)done) != (ssize_t)k)
-			return 0;
-		h = wal_fnv(h, chunk, k);
-		done += k;
+	/* The tag says which sum to compute; FNV-1a only if CRC32C fails (an
+	 * old frame whose hash carries the tag, or a torn one: once a log). */
+	tagged = (uint32_t)(crc >> 32) == WAL_SUM_TAG;
+	for (pass = tagged ? 0 : 1; pass < 2; pass++) {
+		h = wal_fnv(WAL_FNV_BASIS, hdr, WAL_REC_HDR);
+		c = wal_c32c(~0u, hdr, WAL_REC_HDR);
+		for (done = 0; done < *len; done += k) {
+			k = *len - done < sizeof chunk ? *len - done :
+			    (uint32_t)sizeof chunk;
+			if (pread(r->fd, chunk, k, off + (off_t)WAL_REC_HDR +
+			    (off_t)done) != (ssize_t)k)
+				return 0;
+			if (pass == 0)
+				c = wal_c32c(c, chunk, k);
+			else
+				h = wal_fnv(h, chunk, k);
+		}
+		if (pass == 0 ? crc == WAL_SUM_TRL(c) : h == crc)
+			return 1;
 	}
-	return h == crc;
+	return 0;
 }
 
 /* Verify one frame with no window (the tail-hint check). */
@@ -286,6 +459,8 @@ wal_frame_ok(int fd, off_t off, off_t fsize, uint64_t *lsn, uint32_t *len)
  * offsets, so durable_off is just the durable position.
  */
 #define WAL_RING     (8u << 20)     /* log buffer bytes (power of 2) */
+#define WAL_BLK      4096u          /* direct-I/O block (see wal_dio_setup) */
+#define WAL_STAGE    (1u << 20)     /* dio staging buffer (multiple of it) */
 #define WAL_SLOTS    (1u << 16)     /* completion slots (power of 2) */
 
 struct wal_slot {                   /* completion of one LSN */
@@ -296,13 +471,21 @@ struct wal_slot {                   /* completion of one LSN */
 struct wal_waiter {
 	uint64_t           need;        /* position that must be durable */
 	int                baton;       /* handed the leadership */
+	int                fiber;       /* waits on a proc */
 	xtc_notify_t      *n;
 	struct wal_waiter *next;
 };
 
 struct wal {
 	int        fd;
-	off_t      off;              /* current append offset (== res_pos) */
+	int        dsync;            /* fd is O_DSYNC: see wal_open_fd */
+	int        dio;              /* ... and O_DIRECT: see wal_dio_setup */
+	uint8_t   *stage;            /* dio: WAL_STAGE aligned bytes, leader
+	                              * only: a flush's partial last block, a
+	                              * big record on its way to the file */
+	/* The append offset (== res_pos), for wal_size: stored under res_mu,
+	 * read with no lock (the checkpoint proc polls it), so atomic. */
+	_Atomic uint64_t off;
 	int64_t    window_ns;
 	uint32_t   max_batch;
 	xtc_pid_t  writer_pid;
@@ -404,7 +587,7 @@ wal_tail_ok(int fd, const wal_tail_t *t)
 static void
 wal_reset_marks(wal_t *w, uint64_t pos, uint64_t lsn)
 {
-	w->off = (off_t)pos;
+	atomic_store_explicit(&w->off, pos, memory_order_relaxed);
 	w->res_pos = pos;
 	w->last_pos = pos == 0 ? 0 : UINT64_MAX;   /* see wal_get_tail */
 	w->next_lsn = lsn;
@@ -414,6 +597,107 @@ wal_reset_marks(wal_t *w, uint64_t pos, uint64_t lsn)
 	atomic_store_explicit(&w->written, pos, memory_order_release);
 	atomic_store_explicit(&w->durable_off, pos, memory_order_release);
 	atomic_store_explicit(&w->durable_lsn, lsn, memory_order_release);
+}
+
+/*
+ * Open the log for appending.  Outside the simulator the fd is O_DSYNC,
+ * so every write is durable when it returns and a flush is ONE write
+ * with no fdatasync.  On a fiber that is what matters: io_uring cannot
+ * fdatasync without punting it to a worker thread, and the second op
+ * made a fiber's commit cost 47 us against 31 us for the same O_DSYNC
+ * write (32-vCPU x86-64 host, local NVMe, XFS; on a plain thread the two
+ * cost the same).  Every write to the log fd -- the flush, the zero fill
+ * and a big record's direct writes -- is then synced by itself, so
+ * skipping the fdatasync loses nothing.  Under the simulator the log
+ * keeps write + fdatasync: its crash model makes bytes durable at an
+ * fdatasync, which is what the DST crash tests (and the planted
+ * skip-the-fdatasync bug) check.  *dsync says which one this fd is.
+ */
+static int
+wal_open_fd(const char *path, int flags, int *dsync)
+{
+	int fd;
+	*dsync = 0;
+#if defined(O_DSYNC)
+	if (strcmp(xtc_io_backend_name(), "sim") != 0 &&
+	    (fd = open(path, flags | O_DSYNC, 0600)) >= 0) {
+		*dsync = 1;
+		return fd;
+	}
+#endif
+	fd = open(path, flags, 0600);
+	return fd;
+}
+
+/*
+ * Direct I/O for the log (Linux O_DIRECT on an O_DSYNC fd): a flush is
+ * one write that goes to the device with no page-cache copy -- 26.3 us
+ * against 30.7 us for a buffered O_DSYNC write of 300 B on this disk,
+ * which has no volatile write cache -- and, unlike buffered writes, two
+ * direct writes to one file overlap in the device.  Every write then
+ * covers whole WAL_BLK blocks at aligned offsets from an aligned buffer.
+ * The frames stay contiguous, with no padding in the log: a flush writes
+ * from the start of the block that holds its first byte, rewriting that
+ * block's durable bytes with the same values, and the zeros that fill
+ * its last block are where the next frame will go (zeros end the log,
+ * as in the preallocated region).  Sub-block writes of 512 B (the
+ * device's stx_dio_offset_align) took ~145 us 7% of the time: XFS
+ * serializes direct writes inside one fs block.  So WAL_BLK is 4 KiB.
+ * The ring is WAL_BLK-aligned and a multiple of it, so ring position p
+ * and file offset p share their alignment and a flush writes straight
+ * from the ring; only the partial last block is copied (to stage), so a
+ * committer still copying into the rest of that ring block is never
+ * written mid-copy.  Off when the fs cannot do 4 KiB direct I/O, when
+ * the stage cannot be allocated, or in a build with -DWAL_DIO=0 (the
+ * buffered O_DSYNC path).  The simulator never sees it (no O_DSYNC fd
+ * there, wal_open_fd).
+ */
+#ifndef WAL_DIO
+#define WAL_DIO 1
+#endif
+static void
+wal_dio_setup(wal_t *w)
+{
+#if WAL_DIO && defined(O_DIRECT) && defined(F_GETFL)
+	size_t mem = 0, off = 0, len = 0, n;
+	uint64_t a;
+	int fl;
+	w->dio = 0;
+	if (!w->dsync)
+		return;
+	if (xtc_fs_dio_align(w->fd, &mem, &off, &len) != XTC_OK ||
+	    mem > WAL_BLK || off > WAL_BLK || len > WAL_BLK ||
+	    (WAL_BLK % (off ? off : 1)) != 0)
+		return;
+	if (w->stage == NULL &&
+	    (w->stage = xtc_aligned_alloc(WAL_BLK, WAL_STAGE)) == NULL)
+		return;
+	/* The first flush rewrites the block holding the log's end from the
+	 * ring: put the file's bytes of that block there (read before the
+	 * fd turns direct, so this read has no alignment rule). */
+	a = w->res_pos & ~(uint64_t)(WAL_BLK - 1);
+	n = (size_t)(w->res_pos - a);
+	if (n > 0 && pread(w->fd, w->ring + (a & (WAL_RING - 1)), n,
+	    (off_t)a) != (ssize_t)n)
+		return;
+	if ((fl = fcntl(w->fd, F_GETFL)) < 0 ||
+	    fcntl(w->fd, F_SETFL, fl | O_DIRECT) != 0)
+		return;
+	/* Probe: write that block back the way the first flush will (the
+	 * same bytes, zeros past the end).  A filesystem that takes the flag
+	 * but not the writes stays buffered instead of fail-stopping. */
+	memcpy(w->stage, w->ring + (a & (WAL_RING - 1)), n);
+	memset(w->stage + n, 0, WAL_BLK - n);
+	if (pwrite(w->fd, w->stage, WAL_BLK, (off_t)a) != (ssize_t)WAL_BLK) {
+		(void)fcntl(w->fd, F_SETFL, fl);
+		return;
+	}
+	if (a + WAL_BLK > w->pre_end)
+		w->pre_end = a + WAL_BLK;
+	w->dio = 1;
+#else
+	w->dio = 0;
+#endif
 }
 
 int
@@ -428,8 +712,8 @@ wal_open(const wal_opts_t *opts, wal_t **out)
 	w = calloc(1, sizeof *w);
 	if (w == NULL)
 		return XTC_E_NOMEM;
-	w->fd = open(opts->path,
-	    O_RDWR | O_CREAT | (opts->append ? 0 : O_TRUNC), 0600);
+	w->fd = wal_open_fd(opts->path,
+	    O_RDWR | O_CREAT | (opts->append ? 0 : O_TRUNC), &w->dsync);
 	if (w->fd < 0) {
 		free(w);
 		return XTC_E_INTERNAL;   /* no XTC_E_IO in the core enum -- see gaps ledger */
@@ -451,10 +735,11 @@ wal_open(const wal_opts_t *opts, wal_t **out)
 	}
 	w->window_ns = opts->window_ns > 0 ? opts->window_ns : 500000;   /* 0.5ms */
 	w->max_batch = opts->max_batch > 0 ? opts->max_batch : 256;
-	w->ring = malloc(WAL_RING);
+	/* block-aligned: a direct write goes straight from the ring */
+	w->ring = xtc_aligned_alloc(WAL_BLK, WAL_RING);
 	w->slot = calloc(WAL_SLOTS, sizeof *w->slot);
 	if (w->ring == NULL || w->slot == NULL) {
-		free(w->ring); free(w->slot); close(w->fd); free(w);
+		xtc_aligned_free(w->ring); free(w->slot); close(w->fd); free(w);
 		return XTC_E_NOMEM;
 	}
 	(void)pthread_mutex_init(&w->res_mu, NULL);
@@ -462,6 +747,7 @@ wal_open(const wal_opts_t *opts, wal_t **out)
 	wal_reset_marks(w, (uint64_t)o, maxlsn);
 	if (o != 0 && last != UINT64_MAX)
 		w->last_pos = last;           /* from the verified hint */
+	wal_dio_setup(w);
 	*out = w;
 	return XTC_OK;
 }
@@ -481,7 +767,8 @@ wal_close(wal_t *w)
 	(void)pthread_mutex_destroy(&w->res_mu);
 	if (w->fd >= 0)
 		close(w->fd);
-	free(w->ring);
+	xtc_aligned_free(w->ring);
+	xtc_aligned_free(w->stage);
 	free(w->slot);
 	free(w);
 }
@@ -553,23 +840,59 @@ wal_advance_copied(wal_t *w)
 	}
 }
 
-/* fl_mu held: wake every waiter `durable` covers and, if any waiter is
- * left, hand ONE of them the leadership. */
+/* fl_mu held on entry and exit: wake every waiter `durable` covers and,
+ * if any waiter is left, hand ONE of them the leadership.
+ *
+ * The waiters are unlinked under fl_mu and signalled after it is
+ * dropped.  Signalling every covered waiter under fl_mu (a thread's
+ * signal is a futex wake, ~3 us), the baton last, kept the log idle for
+ * most of each round: at 64 threads the gap between one fdatasync and the
+ * next pwrite was 68 us against 41 us of I/O.  Order, measured with
+ * bench_wal: fiber waiters and the first WAL_WAKE_FIRST thread waiters
+ * before the baton (they re-append in time to join the next batch: the
+ * baton first lost 15% at 4 threads and 10% at 64 fibers), then the
+ * baton, then the other threads, whose wakes no longer delay the next
+ * flush (32 threads: 282k commits/s against 125k).  An unlinked waiter is
+ * touched only by its own committer once signalled, so the lists are
+ * complete before the first signal. */
+#define WAL_WAKE_FIRST 2
 static void
 wal_wake_locked(wal_t *w, uint64_t durable, int give_baton)
 {
-	struct wal_waiter **pp = &w->wq, *q;
-	while ((q = *pp) != NULL && q->need <= durable) {
-		*pp = q->next;
-		(void)xtc_notify_signal(q->n);
+	struct wal_waiter *q, *now = NULL, *later = NULL, *bat = NULL;
+	struct wal_waiter **nt = &now, **lt = &later;
+	int k = 0;
+	while ((q = w->wq) != NULL && q->need <= durable) {
+		w->wq = q->next;
+		q->next = NULL;
+		if (q->fiber || k++ < WAL_WAKE_FIRST) {
+			*nt = q;
+			nt = &q->next;
+		} else {
+			*lt = q;
+			lt = &q->next;
+		}
 	}
 	if (give_baton && w->wq != NULL && !w->flushing) {
-		w->wq->baton = 1;
+		bat = w->wq;
+		bat->baton = 1;
 		w->flushing = 1;             /* counted for the baton holder */
-		q = w->wq;
-		w->wq = q->next;
+		w->wq = bat->next;
+	}
+	if (now == NULL && bat == NULL && later == NULL)
+		return;
+	wal_unlock(&w->fl_mu);
+	while ((q = now) != NULL) {
+		now = q->next;
 		(void)xtc_notify_signal(q->n);
 	}
+	if (bat != NULL)
+		(void)xtc_notify_signal(bat->n);
+	while ((q = later) != NULL) {
+		later = q->next;
+		(void)xtc_notify_signal(q->n);
+	}
+	wal_lock(&w->fl_mu);
 }
 
 /*
@@ -596,11 +919,13 @@ wal_wake_locked(wal_t *w, uint64_t durable, int give_baton)
 static void
 wal_prealloc(wal_t *w, uint64_t upto)
 {
-	static const uint8_t zeros[1u << 20];
+	static _Alignas(WAL_BLK) const uint8_t zeros[1u << 20];
 	uint64_t at, end;
 	if (upto + WAL_PRE_AHEAD <= w->pre_end)
 		return;
 	at = w->pre_end > upto ? w->pre_end : upto;
+	if (w->dio)                      /* blocks past upto's: no live byte */
+		at = (at + WAL_BLK - 1) & ~(uint64_t)(WAL_BLK - 1);
 	end = at + WAL_PRE_CHUNK;
 	while (at < end) {
 		if (xtc_aio_pwrite(w->fd, zeros, (uint32_t)sizeof zeros,
@@ -609,6 +934,58 @@ wal_prealloc(wal_t *w, uint64_t upto)
 		at += sizeof zeros;
 		w->pre_end = at;
 	}
+}
+
+/* Leader: write ring bytes [from, upto) to the same file offsets. */
+static int
+wal_write_ring(wal_t *w, uint64_t from, uint64_t upto)
+{
+	size_t at = (size_t)(from & (WAL_RING - 1));
+	size_t n = (size_t)(upto - from), k = WAL_RING - at;
+	if (n <= k)
+		return xtc_aio_pwrite(w->fd, w->ring + at, (uint32_t)n,
+		    (int64_t)from) == (int)n;
+	return xtc_aio_pwrite(w->fd, w->ring + at, (uint32_t)k,
+	    (int64_t)from) == (int)k &&
+	    xtc_aio_pwrite(w->fd, w->ring, (uint32_t)(n - k),
+	    (int64_t)(from + k)) == (int)(n - k);
+}
+
+/* Leader, direct I/O (wal_dio_setup): write [from, upto) as the whole
+ * blocks that hold it, in ONE write: the ring's full blocks in place
+ * (two pieces at the wrap) and the partial last block from stage, its
+ * tail zeroed.  The ring keeps every byte of the first block: a
+ * reservation needs room from that block's start (wal_append). */
+static int
+wal_write_dio(wal_t *w, uint64_t from, uint64_t upto)
+{
+	struct iovec iv[3];
+	uint64_t fa = from & ~(uint64_t)(WAL_BLK - 1);
+	uint64_t ua = upto & ~(uint64_t)(WAL_BLK - 1), tot = 0;
+	size_t at, n, k;
+	int ni = 0, i;
+	if (ua > fa) {
+		at = (size_t)(fa & (WAL_RING - 1));
+		n = (size_t)(ua - fa);
+		k = WAL_RING - at;
+		iv[ni].iov_base = w->ring + at;
+		iv[ni++].iov_len = n <= k ? n : k;
+		if (n > k) {
+			iv[ni].iov_base = w->ring;
+			iv[ni++].iov_len = n - k;
+		}
+	}
+	if (upto > ua) {
+		at = (size_t)(ua & (WAL_RING - 1));  /* a block: never wraps */
+		n = (size_t)(upto - ua);
+		memcpy(w->stage, w->ring + at, n);
+		memset(w->stage + n, 0, WAL_BLK - n);
+		iv[ni].iov_base = w->stage;
+		iv[ni++].iov_len = WAL_BLK;
+	}
+	for (i = 0; i < ni; i++)
+		tot += iv[i].iov_len;
+	return xtc_aio_pwritev(w->fd, iv, ni, (int64_t)fa) == (int)tot;
 }
 
 /* fl_mu held on entry and exit, w->flushing set by the caller: write
@@ -656,25 +1033,15 @@ wal_flush_locked(wal_t *w, uint64_t need)
 	if (atomic_load_explicit(&w->failed, memory_order_acquire)) {
 		ok = 0;
 	} else if (upto > atomic_load_explicit(&w->durable_off, memory_order_relaxed)) {
-		size_t at = (size_t)(from & (WAL_RING - 1));
-		size_t n = (size_t)(upto - from), k = WAL_RING - at;
 		wal_prealloc(w, upto);
-		if (n == 0) {
-			ok = 1;               /* written directly; only sync it */
-		} else if (n <= k) {
-			ok = xtc_aio_pwrite(w->fd, w->ring + at, (uint32_t)n,
-			    (int64_t)from) == (int)n;
-		} else {
-			ok = xtc_aio_pwrite(w->fd, w->ring + at, (uint32_t)k,
-			    (int64_t)from) == (int)k &&
-			    xtc_aio_pwrite(w->fd, w->ring, (uint32_t)(n - k),
-			    (int64_t)(from + k)) == (int)(n - k);
-		}
+		ok = from == upto ? 1 :      /* written directly; only sync it */
+		    w->dio ? wal_write_dio(w, from, upto) :
+		    wal_write_ring(w, from, upto);
 #if XTC_DST_BUG(XTC_DST_BUG_NODURABLE)
 		/* planted bug: skip the fdatasync but still report durable */
 #else
-		if (ok && xtc_aio_fdatasync(w->fd) != 0)
-			ok = 0;
+		if (ok && !w->dsync && xtc_aio_fdatasync(w->fd) != 0)
+			ok = 0;              /* (an O_DSYNC write was the sync) */
 #endif
 	}
 
@@ -718,6 +1085,7 @@ wal_wait_locked(wal_t *w, uint64_t need)
 	}
 	q->need = need;
 	q->baton = 0;
+	q->fiber = !xtc_pid_is_none(xtc_self());
 	for (pp = &w->wq; *pp != NULL && (*pp)->need <= need; pp = &(*pp)->next)
 		;
 	q->next = *pp;
@@ -779,6 +1147,72 @@ wal_nap(void)
 		(void)xtc_proc_sleep(20LL * 1000);
 }
 
+/* Append n bytes of the big record's stream to stage; write each full
+ * stage to the file at *at (direct I/O: wal_write_big_dio). */
+static int
+wal_big_put(wal_t *w, size_t *fill, uint64_t *at, const void *src, size_t n)
+{
+	const uint8_t *p = src;
+	while (n > 0) {
+		size_t k = WAL_STAGE - *fill < n ? WAL_STAGE - *fill : n;
+		memcpy(w->stage + *fill, p, k);
+		*fill += k;
+		p += k;
+		n -= k;
+		if (*fill == WAL_STAGE) {
+			if (xtc_aio_pwrite(w->fd, w->stage, WAL_STAGE,
+			    (int64_t)*at) != (int)WAL_STAGE)
+				return 0;
+			*at += WAL_STAGE;
+			*fill = 0;
+		}
+	}
+	return 1;
+}
+
+/*
+ * The big record at `start`, direct I/O: the whole blocks from the one
+ * holding `start` (its earlier, durable bytes come from the ring, as a
+ * flush writes them) through the record's end, staged WAL_STAGE at a
+ * time, the last block zero-padded.  Then the record's partial last
+ * block goes into the ring, where the next flush rewrites that block
+ * from.  Leader (and direct) only: nothing else is reserved meanwhile,
+ * so those ring bytes belong to no other record.
+ */
+static int
+wal_write_big_dio(wal_t *w, uint64_t start, const uint8_t *hdr,
+    const void *record, uint32_t len, const uint8_t *trl)
+{
+	uint64_t at = start & ~(uint64_t)(WAL_BLK - 1);
+	uint64_t end = start + WAL_REC_HDR + len + WAL_REC_CRC;
+	uint64_t ea = end & ~(uint64_t)(WAL_BLK - 1), b;
+	size_t fill = 0, k;
+	if (!wal_big_put(w, &fill, &at, w->ring + (at & (WAL_RING - 1)),
+	    (size_t)(start - at)) ||
+	    !wal_big_put(w, &fill, &at, hdr, WAL_REC_HDR) ||
+	    !wal_big_put(w, &fill, &at, record, len) ||
+	    !wal_big_put(w, &fill, &at, trl, WAL_REC_CRC))
+		return 0;
+	if (fill > 0) {
+		k = (fill + WAL_BLK - 1) & ~(size_t)(WAL_BLK - 1);
+		memset(w->stage + fill, 0, k - fill);
+		if (xtc_aio_pwrite(w->fd, w->stage, (uint32_t)k, (int64_t)at) !=
+		    (int)k)
+			return 0;
+	}
+	/* Its partial tail block [ea, end) into the ring, for the next
+	 * flush: byte b of the frame is header, body or trailer. */
+	for (b = ea > start ? ea : start; b < end; b++) {
+		uint64_t i = b - start;
+		uint8_t c = i < WAL_REC_HDR ? hdr[i] :
+		    i < WAL_REC_HDR + (uint64_t)len ?
+		    ((const uint8_t *)record)[i - WAL_REC_HDR] :
+		    trl[i - WAL_REC_HDR - len];
+		w->ring[b & (WAL_RING - 1)] = c;
+	}
+	return 1;
+}
+
 /*
  * A record bigger than a quarter of the log buffer (a bulk transaction)
  * is written straight to the file, as JE writes an oversized entry and
@@ -838,24 +1272,30 @@ wal_append_direct(wal_t *w, const void *record, uint32_t len, uint64_t *end,
 	start = w->res_pos;              /* == target: nobody reserved since */
 	w->last_pos = start;
 	w->res_pos = start + need;
-	w->off = (off_t)w->res_pos;
+	atomic_store_explicit(&w->off, w->res_pos, memory_order_relaxed);
 	wal_unlock(&w->res_mu);
 
 	memcpy(hdr, &lsn, 8);
 	memcpy(hdr + 8, &len, 4);
 	crc = wal_rec_crc(lsn, len, record);
 	memcpy(trl, &crc, WAL_REC_CRC);
-	ok = xtc_aio_pwrite(w->fd, hdr, WAL_REC_HDR, (int64_t)start) == (int)WAL_REC_HDR;
-	for (done = 0; ok && done < len; ) {
-		uint32_t k = len - done < (1u << 24) ? len - done : (1u << 24);
-		ok = xtc_aio_pwrite(w->fd, (const uint8_t *)record + done, k,
-		    (int64_t)(start + WAL_REC_HDR + done)) == (int)k;
-		done += k;
+	if (w->dio) {
+		ok = wal_write_big_dio(w, start, hdr, record, len, trl);
+	} else {
+		ok = xtc_aio_pwrite(w->fd, hdr, WAL_REC_HDR, (int64_t)start) ==
+		    (int)WAL_REC_HDR;
+		for (done = 0; ok && done < len; ) {
+			uint32_t k = len - done < (1u << 24) ? len - done : (1u << 24);
+			ok = xtc_aio_pwrite(w->fd, (const uint8_t *)record + done, k,
+			    (int64_t)(start + WAL_REC_HDR + done)) == (int)k;
+			done += k;
+		}
+		ok = ok && xtc_aio_pwrite(w->fd, trl, WAL_REC_CRC,
+		    (int64_t)(start + WAL_REC_HDR + len)) == (int)WAL_REC_CRC;
 	}
-	ok = ok && xtc_aio_pwrite(w->fd, trl, WAL_REC_CRC,
-	    (int64_t)(start + WAL_REC_HDR + len)) == (int)WAL_REC_CRC;
-	if (start + need > w->pre_end)
-		w->pre_end = start + need;   /* the record grew the file */
+	if (start + need > w->pre_end)   /* the record grew the file */
+		w->pre_end = w->dio ? (start + need + WAL_BLK - 1) &
+		    ~(uint64_t)(WAL_BLK - 1) : start + need;
 
 	wal_lock(&w->fl_mu);
 	if (ok) {
@@ -912,8 +1352,10 @@ wal_append(wal_t *w, const void *record, uint32_t len, uint64_t *end, int *rc)
 		}
 		/* Room in the ring (the oldest unwritten byte must not be
 		 * overwritten) and a free completion slot for the LSN. */
-		if (w->res_pos + need - atomic_load_explicit(&w->written,
-		    memory_order_acquire) <= WAL_RING &&
+		/* (from the start of the block holding the oldest unwritten
+		 * byte: a direct flush rewrites that block from the ring) */
+		if (w->res_pos + need - (atomic_load_explicit(&w->written,
+		    memory_order_acquire) & ~(uint64_t)(WAL_BLK - 1)) <= WAL_RING &&
 		    w->next_lsn + 1 - atomic_load_explicit(&w->durable_lsn,
 		    memory_order_acquire) < WAL_SLOTS)
 			break;
@@ -932,7 +1374,7 @@ wal_append(wal_t *w, const void *record, uint32_t len, uint64_t *end, int *rc)
 	start = w->res_pos;
 	w->last_pos = start;
 	w->res_pos += need;
-	w->off = (off_t)w->res_pos;
+	atomic_store_explicit(&w->off, w->res_pos, memory_order_relaxed);
 	wal_unlock(&w->res_mu);
 
 	memcpy(hdr, &lsn, 8);
@@ -1082,12 +1524,14 @@ wal_failed(const wal_t *w)
 static int
 wal_rebind_at(wal_t *w, const char *path, off_t off, uint64_t lsn)
 {
-	int fd = open(path, O_RDWR, 0600);
+	int dsync, fd = wal_open_fd(path, O_RDWR, &dsync);
 	if (fd < 0)
 		return XTC_E_INTERNAL;
 	if (w->fd >= 0) close(w->fd);
 	w->fd = fd;
+	w->dsync = dsync;
 	wal_reset_marks(w, (uint64_t)off, lsn);
+	wal_dio_setup(w);
 	atomic_fetch_add_explicit(&w->gen, 1, memory_order_acq_rel);
 	return XTC_OK;
 }
@@ -1137,6 +1581,15 @@ wal_cmp_flush(struct wal_cmp_ctx *c)
 		else
 			done += (size_t)n;
 	}
+#if defined(SYNC_FILE_RANGE_WRITE)
+	/* Start the chunk's write-back now (advisory, no wait): the dump
+	 * of the live set is hundreds of MB, and left to the kernel it was
+	 * written back in one burst that the log's own syncs queued behind
+	 * (PostgreSQL's checkpoint_flush_after does the same). */
+	if (!c->err && c->blen > 0)
+		(void)sync_file_range(c->fd, c->boff, (off_t)c->blen,
+		    SYNC_FILE_RANGE_WRITE);
+#endif
 	c->boff += (off_t)c->blen;
 	c->blen = 0;
 }
@@ -1287,6 +1740,8 @@ wal_ockpt_begin(wal_t *w, const char *path, wal_ock_t **out)
 	k->rbuf = malloc(k->rcap);
 	k->c.buf = malloc(WAL_CMP_BUF);
 	k->src_fd = open(path, O_RDONLY);
+	if (k->src_fd >= 0)
+		wal_rd_seq(k->src_fd);
 	k->c.fd = open(k->tmp, O_RDWR | O_CREAT | O_TRUNC, 0600);
 	if (k->rbuf == NULL || k->c.buf == NULL || k->src_fd < 0 || k->c.fd < 0) {
 		wal_ockpt_abort(k);
@@ -1360,7 +1815,7 @@ wal_ock_copy(wal_ock_t *k, off_t end, off_t max)
 				break;
 			}
 			memcpy(&crc, k->rbuf + pos + WAL_REC_HDR + len, WAL_REC_CRC);
-			if (crc != wal_rec_crc(lsn, len, k->rbuf + pos + WAL_REC_HDR))
+			if (!wal_sum_ok(crc, k->rbuf + pos, len))
 				return XTC_E_INTERNAL;   /* never launder a bad frame */
 			wal_cmp_emit(&k->c, k->rbuf + pos + WAL_REC_HDR, len);
 			k->frames++;
@@ -1381,6 +1836,16 @@ wal_ockpt_catchup(wal_ock_t *k, uint64_t *left)
 	end = (off_t)atomic_load_explicit(&k->w->durable_off, memory_order_acquire);
 	rc = wal_ock_copy(k, end, (off_t)(64u << 20));   /* bounded slice */
 	wal_cmp_flush(&k->c);
+	/*
+	 * Write the new log back now, while commits run: wal_ockpt_finish's
+	 * fsync runs with commits quiesced, and with the whole dump still
+	 * dirty it took 109-175 ms on a 100k-account ledger and 455-506 ms on
+	 * a TPC-C W=10 store -- every commit waited for it.  After this it
+	 * flushes only the last slice.  Correctness does not depend on it
+	 * (finish still fsyncs); a failure here is left for finish to see.
+	 */
+	if (rc == XTC_OK && !k->c.err)
+		(void)fdatasync(k->c.fd);
 	if (left != NULL)
 		*left = (uint64_t)atomic_load_explicit(&k->w->durable_off,
 		    memory_order_acquire) - (uint64_t)k->src_off;
@@ -1536,7 +2001,8 @@ wal_durable_lsn(const wal_t *w)
 uint64_t
 wal_size(const wal_t *w)
 {
-	return w == NULL ? 0 : (uint64_t)w->off;
+	return w == NULL ? 0 :
+	    atomic_load_explicit(&w->off, memory_order_relaxed);
 }
 
 int
@@ -1610,10 +2076,13 @@ wal_get_stats(wal_t *w, wal_stats_t *out)
 {
 	if (w == NULL || out == NULL)
 		return;
+	/* the counters are written under fl_mu (by the flush leader) */
+	wal_lock(&w->fl_mu);
 	out->commits = w->s_commits;
 	out->batches = w->s_batches;
-	out->bytes = atomic_load_explicit(&w->s_bytes, memory_order_relaxed);
 	out->max_batch_seen = w->s_maxbatch;
-	out->durable_lsn = atomic_load_explicit(&w->durable_lsn, memory_order_relaxed);
 	out->failed = w->s_failed;
+	wal_unlock(&w->fl_mu);
+	out->bytes = atomic_load_explicit(&w->s_bytes, memory_order_relaxed);
+	out->durable_lsn = atomic_load_explicit(&w->durable_lsn, memory_order_relaxed);
 }

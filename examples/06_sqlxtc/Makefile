@@ -144,6 +144,7 @@ clean:
 	rm -f test_steal
 	rm -f test_steal_page
 	rm -f test_wal_kill test_wal_tail test_wal_kill_engine test_wal_get_tail test_idx_trust test_crash_oracle
+	rm -f bench_wal test_wal_crc test_wal_crc_sw test_wal_dsync test_wal_dio
 	rm -f test_steal_leaf test_cat_reopen test_ckpt_online test_wal_group_sync test_intents_thread test_torn_base test_snap_registry test_rowid_minmax test_btree_fill test_wal_bigtxn test_steal_reclaim test_dio_restart test_wal_prealloc
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o test_bufmgr_dio test_bufmgr_dio.o
 	rm -f test_bufmgr_mt
@@ -609,6 +610,32 @@ test-crash-oracle: test_crash_oracle
 test-crash-oracle-long: test_crash_oracle
 	TMPDIR=$${TMPDIR:-/tmp} ./test_crash_oracle $${ORACLE_SEEDS:-200} $${ORACLE_FIRST:-1000}
 
+test: test-wal-crc
+test_wal_crc: test_wal_crc.c wal.c wal.h
+	$(CC) $(CFLAGS) -o $@ test_wal_crc.c $(LDFLAGS)
+
+# the same test on the table CRC32C (the path of hosts without the instruction)
+test_wal_crc_sw: test_wal_crc.c wal.c wal.h
+	$(CC) $(CFLAGS) -DWAL_C32C_HW=0 -o $@ test_wal_crc.c $(LDFLAGS)
+
+test: test-wal-dio
+test_wal_dio: test_wal_dio.c wal.c wal.h
+	$(CC) $(CFLAGS) -o $@ test_wal_dio.c $(LDFLAGS)
+
+test-wal-dio: test_wal_dio
+	TMPDIR=$${TMPDIR:-/tmp} ./test_wal_dio
+
+test: test-wal-dsync
+test_wal_dsync: test_wal_dsync.c wal.c wal.h
+	$(CC) $(CFLAGS) -o $@ test_wal_dsync.c wal.c $(LDFLAGS)
+
+test-wal-dsync: test_wal_dsync
+	TMPDIR=$${TMPDIR:-/tmp} ./test_wal_dsync
+
+test-wal-crc: test_wal_crc test_wal_crc_sw
+	TMPDIR=$${TMPDIR:-/tmp} ./test_wal_crc
+	TMPDIR=$${TMPDIR:-/tmp} ./test_wal_crc_sw
+
 test_wal_kill_engine: test_wal_kill_engine.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
 	$(CC) $(CFLAGS) -o $@ test_wal_kill_engine.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
 
@@ -752,6 +779,10 @@ test_wal_group_sync: test_wal_group_sync.c wal.o
 
 test-wal-group-sync: test_wal_group_sync
 	TMPDIR=$${TMPDIR:-/tmp} ./test_wal_group_sync
+
+# Group-commit microbenchmark (not part of make test).
+bench_wal: bench_wal.c wal.c wal.h
+	$(CC) $(CFLAGS) -o $@ bench_wal.c wal.c $(LDFLAGS)
 
 test_intents_thread: test_intents_thread.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
 	$(CC) $(CFLAGS) -o $@ test_intents_thread.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
