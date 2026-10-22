@@ -25,3 +25,5 @@ alternatives that were considered and set aside.
 - [Thinking in libxtc]({{ '/guide/transitioning/' | relative_url }}) -- the mental shifts and
   anti-patterns
 - [Debugging and observing]({{ '/guide/debugging/' | relative_url }})
+- [Tracing with DTrace, perf and bpftrace]({{ '/guide/12-tracing/' | relative_url }}) -- the
+  USDT probes: attach to a live process, find a lock convoy or a lost wake

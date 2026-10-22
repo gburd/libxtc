@@ -1,0 +1,6 @@
+convoy
+*.o
+core
+core.*
+*.core
+vgcore.*

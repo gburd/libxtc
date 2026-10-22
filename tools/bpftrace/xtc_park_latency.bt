@@ -1,0 +1,39 @@
+#!/usr/bin/env bpftrace
+/*
+ * xtc_park_latency.bt -- how long fibers stay parked, by park reason.
+ * The bpftrace twin of tools/dtrace/xtc_park_latency.d.
+ *
+ * Usage:  bpftrace xtc_park_latency.bt -c ./prog
+ *         bpftrace xtc_park_latency.bt -p PID         (Ctrl-C to print)
+ *
+ * The probes live in the binary for a static libxtc, or in libxtc.so for
+ * a shared one: point the usdt paths at whichever holds them (-p resolves
+ * them against the running process).  Build libxtc with
+ * --enable-dtrace=sdt (or =yes with systemtap's dtrace).
+ *
+ * Keyed on the fiber's task pointer (arg0), not the thread: a migratable
+ * fiber can resume on a different OS thread.  Reasons: 1 mbox 2 sleep
+ * 3 fd 4 aio 5 blocking 6 sync 7 lwlock 8 lockmgr 9 future.
+ */
+
+usdt:*:xtc:fiber__park
+{
+	@parks[arg1] = count();
+	@ts[arg0] = nsecs;
+	@why[arg0] = arg1;
+}
+
+usdt:*:xtc:fiber__resume
+/@ts[arg0]/
+{
+	@lat_ns[@why[arg0]] = hist(nsecs - @ts[arg0]);
+	@max_ns[@why[arg0]] = max(nsecs - @ts[arg0]);
+	delete(@ts[arg0]);
+	delete(@why[arg0]);
+}
+
+END
+{
+	clear(@ts);
+	clear(@why);
+}

@@ -336,6 +336,7 @@ Configure flags worth knowing:
 | `--with-tls=auto|openssl|libressl|boringssl|gnutls|wolfssl|mbedtls|schannel|none` | TLS backend (default `auto`) |
 | `--with-liburing=PATH` | Use a specific liburing install |
 | `--with-hegel[=PREFIX]` | Property-based tests via `libhegel` (in-process C ABI).  With no PREFIX, found by pkg-config; `nix develop` supplies it |
+| `--enable-dtrace[=yes\|sdt\|auto]` | Static (USDT) probes for DTrace on FreeBSD/illumos/macOS and perf/bpftrace/SystemTap on Linux (default off; the off build is the same machine code).  See `man xtc_usdt`, `tools/dtrace/`, `tools/bpftrace/` |
 
 The meson build (`meson.build` + `meson_options.txt`) is at parity with
 the autotools build: it compiles the full static (and, with
@@ -349,7 +350,8 @@ against `make check`'s 118-entry C tier.  The exported
 the `./configure` flags:  `-Dio-backend=` (auto/poll/epoll/uring/kqueue/
 iocp/solaris/aix/select/sim), `-Dtls=` (auto/openssl/libressl/boringssl/
 mbedtls/gnutls/wolfssl/schannel/none), `-Daccel=` (auto/yes/no),
-`-Dliburing=PATH`, `-Dshared=`, and `-Ddiagnostic=`.  configure.ac /
+`-Dliburing=PATH`, `-Dshared=`, `-Ddiagnostic=`, and `-Ddtrace=`
+(no/auto/yes/sdt).  configure.ac /
 dist/Makefile.in remain the reference for WHAT is built; meson tracks
 them.  Not yet wired here: the shell-gate tests (`TESTS_SH`), the
 property-based tier (`TESTS_PBT`, needs `--with-hegel`), and the

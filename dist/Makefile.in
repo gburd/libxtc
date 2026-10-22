@@ -1033,15 +1033,16 @@ examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_brea
 # (The TLS doc snippet, docs/_includes/snippets/14_tls_echo.c, is gated by
 # test/docs/test_doc_snippets.sh like every other snippet; that gate links
 # the build's XTC_TLS_LIBS.)
-check-examples: check-continuous-batching check-gpu-batching check-hetero-batching 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker tnt_echo
+check-examples: check-continuous-batching check-gpu-batching check-hetero-batching 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker tnt_echo usdt_convoy
 	@for t in 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo \
-	          10_circuit_breaker; do \
+	          10_circuit_breaker 'usdt_convoy convoy' 'usdt_convoy fixed' \
+	          'usdt_convoy lostwake'; do \
 		printf 'running example: %s\n' "$$t"; \
 		./$$t >/dev/null || { echo "  [examples] FAIL: $$t exited non-zero"; exit 1; }; \
 	done; \
 	sh $(srcdir)/../examples/check_help.sh ./01_hello ./02_pingpong \
 	    ./03_supervised_app ./04_lockmgr_demo ./10_circuit_breaker \
-	    ./tnt_echo || exit 1; \
+	    ./tnt_echo ./usdt_convoy || exit 1; \
 	echo "  [examples] OK: teaching examples build and run clean"
 
 .PHONY: check-continuous-batching
@@ -1115,6 +1116,12 @@ hetero: $(srcdir)/../examples/14_hetero_batching/hetero.c $(STATIC_LIB)
 04_lockmgr_demo: $(srcdir)/../examples/04_lockmgr_demo.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../examples/04_lockmgr_demo.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# examples/15_usdt: the lock-convoy / lost-reply demo for the USDT probes.
+usdt_convoy: $(srcdir)/../examples/15_usdt/convoy.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../examples/15_usdt/convoy.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 10_circuit_breaker: $(srcdir)/../examples/10_circuit_breaker.c $(STATIC_LIB)
@@ -2209,7 +2216,7 @@ uninstall:
 clean:
 	$(RM) $(LIB_OBJS) $(STATIC_LIB) $(TESTS_C) $(TESTS_PBT) compile_commands.json
 	$(RM) check-skips-c.txt check-skips-sh.txt check-skips-pbt.txt .tests-c.out .tests-sh.out .tests-c.rc .tests-sh.rc
-	$(RM) soak_mem_bound continuous_batching bench_continuous_batching mandel hetero
+	$(RM) soak_mem_bound continuous_batching bench_continuous_batching mandel hetero usdt_convoy
 	$(RM) $(SHARED_LIB_REAL) $(SHARED_LIB_SONAME) $(SHARED_LIB_LINKNAME)
 	$(RM) libxtc.exp xtc_probes.o xtc_probes_dtrace.h
 	rm -rf *.dSYM

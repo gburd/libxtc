@@ -1,0 +1,46 @@
+#!/usr/bin/env bpftrace
+/*
+ * xtc_lock_contention.bt -- which libxtc locks make callers wait, how
+ * long, and from where.  The bpftrace twin of
+ * tools/dtrace/xtc_lock_contention.d.
+ *
+ * Usage:  bpftrace xtc_lock_contention.bt -c ./prog
+ *
+ * arg0 lock (lock manager: the lock object), arg1 kind (1 amutex
+ * 2 arwlock 3 lwlock 4 lockmgr), arg2 mode, arg3 waiting fiber's task
+ * (0 for an OS-thread waiter).  @stacks is flame-graph input: pipe the
+ * output through stackcollapse-bpftrace.pl and flamegraph.pl.
+ */
+
+usdt:*:xtc:lock__wait__start
+{
+	@waits[arg1, arg0] = count();
+	@stacks[ustack(32)] = count();
+	if (arg3 != 0) {
+		@fw[arg3, arg0] = nsecs;
+	} else {
+		@tw[tid, arg0] = nsecs;
+	}
+}
+
+usdt:*:xtc:lock__wait__done
+/arg3 != 0 && @fw[arg3, arg0]/
+{
+	@wait_ns[arg1, arg0] = sum(nsecs - @fw[arg3, arg0]);
+	@dist[arg1] = hist(nsecs - @fw[arg3, arg0]);
+	delete(@fw[arg3, arg0]);
+}
+
+usdt:*:xtc:lock__wait__done
+/arg3 == 0 && @tw[tid, arg0]/
+{
+	@wait_ns[arg1, arg0] = sum(nsecs - @tw[tid, arg0]);
+	@dist[arg1] = hist(nsecs - @tw[tid, arg0]);
+	delete(@tw[tid, arg0]);
+}
+
+END
+{
+	clear(@fw);
+	clear(@tw);
+}

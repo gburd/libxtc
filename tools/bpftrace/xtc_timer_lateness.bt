@@ -1,0 +1,18 @@
+#!/usr/bin/env bpftrace
+/*
+ * xtc_timer_lateness.bt -- how late libxtc timers fire.  The bpftrace
+ * twin of tools/dtrace/xtc_timer_lateness.d.
+ *
+ * timer-fire: arg1 deadline, arg2 the loop's clock when it fired, both on
+ * the libxtc monotonic clock (virtual under the simulator).
+ */
+
+usdt:*:xtc:timer__arm    { @n["armed"] = count(); }
+usdt:*:xtc:timer__cancel { @n["cancelled"] = count(); }
+
+usdt:*:xtc:timer__fire
+{
+	@n["fired"] = count();
+	@late_ns = hist(arg2 - arg1);
+	@worst_ns = max(arg2 - arg1);
+}

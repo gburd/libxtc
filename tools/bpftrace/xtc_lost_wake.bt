@@ -1,0 +1,31 @@
+#!/usr/bin/env bpftrace
+/*
+ * xtc_lost_wake.bt -- fibers that parked and never came back, and which
+ * half of the wake chain broke.  The bpftrace twin of
+ * tools/dtrace/xtc_lost_wake.d.
+ *
+ * At exit, @stranded lists every fiber (task pointer) still parked with
+ * its state: 1 PARKED, never woken (the wake source never fired);
+ * 2 WOKEN (a waker claimed it, fiber-wake how 0 or 1) but never resumed
+ * (lost after the wake).  @reason and @object say what it parked on.
+ */
+
+usdt:*:xtc:fiber__park
+{
+	@stranded[arg0] = 1;
+	@reason[arg0] = arg1;
+	@object[arg0] = arg2;
+}
+
+usdt:*:xtc:fiber__wake
+/@stranded[arg0] == 1 && arg2 != 2/
+{
+	@stranded[arg0] = 2;
+}
+
+usdt:*:xtc:fiber__resume
+{
+	delete(@stranded[arg0]);
+	delete(@reason[arg0]);
+	delete(@object[arg0]);
+}
