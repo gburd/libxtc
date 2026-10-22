@@ -724,6 +724,55 @@ sx_close(sx_db *h)
 	free(nd);
 }
 
+#ifdef SQLXTC_HAVE_LIME
+/*
+ * The bare transaction-control statements, recognized without a parse:
+ * BEGIN [DEFERRED|IMMEDIATE|EXCLUSIVE] [TRANSACTION], COMMIT
+ * [TRANSACTION], END [TRANSACTION], ROLLBACK [TRANSACTION], in any
+ * ASCII case, with leading blanks and trailing blanks / ';' (sx_exec's
+ * split drops those anyway).  Blanks are the lexer's: space, tab, CR,
+ * LF.  Anything else -- a comment, ROLLBACK TO, a second statement --
+ * returns SXN_NONE and takes the full parse.
+ */
+static enum sx_native_kind
+sx_txn_fast(const char *s)
+{
+	char w[3][12];
+	int nw = 0, n;
+
+	for (;;) {
+		while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+		if (*s == '\0' || *s == ';') break;
+		if (nw == 3) return SXN_NONE;
+		for (n = 0; (*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z'); s++) {
+			if (n == 11) return SXN_NONE;
+			w[nw][n++] = (char)(*s & ~0x20);
+		}
+		if (n == 0 || !(*s == '\0' || *s == ';' || *s == ' ' ||
+		    *s == '\t' || *s == '\r' || *s == '\n'))
+			return SXN_NONE;   /* not a whole keyword */
+		w[nw++][n] = '\0';
+	}
+	for (; *s != '\0'; s++)
+		if (!(*s == ';' || *s == ' ' || *s == '\t' || *s == '\r' || *s == '\n'))
+			return SXN_NONE;
+	if (nw == 0) return SXN_NONE;
+	if (strcmp(w[0], "BEGIN") == 0) {
+		int mode = nw > 1 && (strcmp(w[1], "DEFERRED") == 0 ||
+		    strcmp(w[1], "IMMEDIATE") == 0 || strcmp(w[1], "EXCLUSIVE") == 0);
+		if (nw == 1 || (nw == 2 && (mode || strcmp(w[1], "TRANSACTION") == 0)) ||
+		    (nw == 3 && mode && strcmp(w[2], "TRANSACTION") == 0))
+			return SXN_BEGIN;
+		return SXN_NONE;
+	}
+	if (nw == 2 && strcmp(w[1], "TRANSACTION") != 0) return SXN_NONE;
+	if (nw > 2) return SXN_NONE;
+	if (strcmp(w[0], "COMMIT") == 0 || strcmp(w[0], "END") == 0) return SXN_COMMIT;
+	if (strcmp(w[0], "ROLLBACK") == 0) return SXN_ROLLBACK;
+	return SXN_NONE;
+}
+#endif
+
 int
 sx_exec(sx_db *h, const char *sql, char **errmsg)
 {
@@ -732,6 +781,21 @@ sx_exec(sx_db *h, const char *sql, char **errmsg)
 	 * prepare/step/finalize each statement through the native driver. */
 	const char *p = sql;
 	if (errmsg) *errmsg = NULL;
+#ifdef SQLXTC_HAVE_LIME
+	/* BEGIN / COMMIT / ROLLBACK: run the native kind on a stack statement
+	 * (the same sx_step code), with no copy, no prepare and no parse. */
+	if (g_native_driver && sql != NULL) {
+		struct sx_stmt ts;
+		int sc;
+		memset(&ts, 0, sizeof ts);
+		ts.nkind = sx_txn_fast(sql);
+		if (ts.nkind != SXN_NONE) {
+			ts.native = 1; ts.db = h; ts.cur = -1;
+			sc = sx_step(&ts);
+			return sc == SX_DONE ? SX_OK : sc;
+		}
+	}
+#endif
 	while (p != NULL && *p != '\0') {
 		const char *q = p;
 			int in_str = 0;

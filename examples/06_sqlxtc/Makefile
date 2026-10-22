@@ -852,6 +852,14 @@ test_sql_results: test_sql_results.c $(ENGINE_NATIVE)
 test-sql-results: test_sql_results
 	./test_sql_results
 
+# sx_exec runs a bare BEGIN / COMMIT / END / ROLLBACK with no parse.
+test: test-txn-fastpath
+test_txn_fastpath: test_txn_fastpath.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_txn_fastpath.c $(ENGINE_NATIVE) $(LDFLAGS)
+
+test-txn-fastpath: test_txn_fastpath
+	./test_txn_fastpath
+
 # xs_ctr.h: the striped statistics counter (exact sum, one line per slot).
 test: test-xs-ctr
 test_xs_ctr: test_xs_ctr.c xs_ctr.h
