@@ -93,12 +93,13 @@ was stalled 20% of the time; the scheduled-start client reported 194 ms.
 |---|---:|---:|---:|
 | p50 | 21 us | 20 us | 22 us |
 | p99 | 34 us | 34 us | 34 us |
-| p99.99 | 140-440 us | 140-980 us | 100-200 us |
+| p99.99, range of 3 runs | 88-528 us | 142-5,400 us | 103-1,020 us |
 
 Inside capacity, all three have the same body: the loopback round trip.
-They differ in the far tail. DragonFly runs a busy-polling loop and idle
-tasks on the shard's own thread, and its p99.99 is the widest. rexis,
-like Valkey, sleeps in the kernel when idle.
+They differ in the far tail, which also varies from run to run on a
+shared host, so read it as a range. DragonFly runs a busy-polling loop
+and idle tasks on the shard's own thread, and its p99.99 is the widest.
+rexis, like Valkey, sleeps in the kernel when idle.
 
 ### Persistence and memory (1M keys, 100-byte values)
 
