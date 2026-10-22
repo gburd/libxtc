@@ -28,7 +28,10 @@
  *	  5. an index entry deleted behind the engine's back IS reported by
  *	     the check (the check is not vacuous);
  *	  6. the log tail recorded at the clean close is used: the reopen
- *	     accepts it (no scan), and new commits after it are durable.
+ *	     accepts it (no scan), and new commits after it are durable;
+ *	  7. a clean open + close with no commit in between leaves the log
+ *	     byte for byte as it was (the close does not rewrite it: that
+ *	     read the whole base, 13 s on a cold TPC-C store of 10 warehouses).
  *	Off a loop (synchronous I/O), as test_clean_restart.
  */
 
@@ -76,6 +79,24 @@ ex(const char *sql)
 	return rc;
 }
 
+/* The whole file, or NULL; *n = its length. */
+static unsigned char *
+slurp(const char *path, long *n)
+{
+	FILE *f = fopen(path, "rb");
+	unsigned char *b = NULL;
+	*n = -1;
+	if (f == NULL) return NULL;
+	if (fseek(f, 0, SEEK_END) == 0 && (*n = ftell(f)) >= 0 &&
+	    fseek(f, 0, SEEK_SET) == 0 && (b = malloc((size_t)*n + 1)) != NULL &&
+	    fread(b, 1, (size_t)*n, f) != (size_t)*n) {
+		free(b);
+		b = NULL;
+	}
+	fclose(f);
+	return b;
+}
+
 /* Indexes complete?  Returns the missing count (-1: nothing checked). */
 static long
 missing(uint64_t *stale)
@@ -114,7 +135,8 @@ main(void)
 {
 	char path[256], wal[300], sql[200];
 	uint64_t r0, stale = 0;
-	long m;
+	long m, n0, n1;
+	unsigned char *wa, *wb;
 	int i, fd;
 	sx_db *h = NULL;
 	sx_stmt *st = NULL;
@@ -205,6 +227,22 @@ main(void)
 	r0 = xstore_index_rebuild_count();
 	CK(sx_storage_open(path, FRAMES) == SX_OK);
 	CK(xstore_index_rebuild_count() == r0);
+
+	/* 7: an idle open + close keeps the log as it is */
+	CK(sx_storage_close() == SX_OK);
+	wa = slurp(wal, &n0);
+	CK(sx_storage_open(path, FRAMES) == SX_OK);
+	CK(sx_storage_close() == SX_OK);
+	wb = slurp(wal, &n1);
+	CK(wa != NULL && wb != NULL && n0 == n1 &&
+	    memcmp(wa, wb, (size_t)n0) == 0);
+	printf("  idle open+close: log %ld -> %ld bytes, %s\n", n0, n1,
+	    wa && wb && n0 == n1 && memcmp(wa, wb, (size_t)n0) == 0 ?
+	    "unchanged" : "REWRITTEN");
+	free(wa); free(wb);
+	CK(sx_storage_open(path, FRAMES) == SX_OK);
+	CK(q1("SELECT count(*) FROM t WHERE grp = ?", 9) > 0);
+	CK(missing(NULL) == 0);
 
 	/* 5: the check sees a dropped entry */
 	xstore_index_fail_inject(1);

@@ -8174,11 +8174,24 @@ xs_dump_tree(wal_emit_fn emit, void *ectx, void *user)
 			break;
 		}
 		/* Secondary-index entries (XS_IDX_LEAD keys, not version keys)
-		 * are derived data rebuilt at open; skip them.  They sort between
+		 * are derived data, not logged; skip them.  They sort between
 		 * the user tables and the index catalog (table-id 0xFFFFFFFD), so
 		 * stopping here -- as this loop used to -- dropped the index
-		 * catalog from every compacted log. */
-		if (klen != XS_VKLEN || ((const uint8_t *)k)[0] == XS_IDX_LEAD)
+		 * catalog from every compacted log.  Seek past the whole
+		 * namespace rather than read it: after a trusted reopen the
+		 * index pages are not in memory, and walking them made a TPC-C
+		 * W=10 shutdown read ~1.5 GB of them (close 3.9 s -> 16 s). */
+		if (klen >= 1 && ((const uint8_t *)k)[0] == XS_IDX_LEAD) {
+			uint8_t past = XS_IDX_LEAD + 1;
+			bt_cursor_close(cur);
+			cur = NULL;
+			if (bt_cursor_open(bt, &past, 1, &cur) != XTC_OK) {
+				dc->cancelled = 1;    /* a truncated image: not swapped in */
+				return;
+			}
+			continue;
+		}
+		if (klen != XS_VKLEN)
 			continue;
 		kb = (const uint8_t *)k;
 		tableid = dec_tableid(kb); rowid = dec_rowid(kb);

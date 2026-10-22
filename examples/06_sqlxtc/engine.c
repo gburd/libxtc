@@ -401,6 +401,11 @@ static int g_storage_adaptive = 0;
 #define SX_SUP_TAIL_OK   4   /* 1: the three words above are a tail */
 #define SX_SUP_IDX_GARB  5   /* stale index entries left (xstore_index_close) */
 
+/* The log's last LSN once the open finished: the log is then a compacted
+ * dump of the base (the last clean close's, or the open's own after a
+ * recovery), so a close that finds no frame appended since can keep it. */
+static uint64_t g_open_lsn;
+
 /* Configure direct I/O + adaptive writeback for the next sx_storage_open. */
 /* CLOCK sweep bound for the next sx_storage_open (bm_opts_t
  * claim_threshold).  The bufmgr's default is 0 (unbounded); the server
@@ -541,6 +546,7 @@ sx_storage_open(const char *path, unsigned int n_frames)
 	 * shutdown, so leave it. */
 	if (!trusted)
 		(void)xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal, g_xwal_path);
+	g_open_lsn = wal_failed(g_xwal) ? 0 : wal_durable_lsn(g_xwal);
 	/* Secondary indexes are DERIVED data not carried by the WAL body.  A
 	 * clean close that left them complete (the trust tag) lets the
 	 * trusted base keep them; otherwise every index is rebuilt from the
@@ -675,7 +681,14 @@ sx_storage_close(void)
 			garb = xstore_index_close(g_xbt);
 		if (ok && bm_checkpoint(g_xbm) != XTC_OK)   /* flush all dirty pages + fsync */
 			ok = 0;
+		/* Compact the log -- unless nothing was logged since the open,
+		 * when it still is the compacted dump of this base: rewriting it
+		 * reads the whole base (13 s on a cold TPC-C W=10 store).  Kept
+		 * only if its end is known, so the next open need not scan it
+		 * (an open that scanned the log does not know it). */
 		if (ok && g_xwal != NULL &&
+		    (g_open_lsn == 0 || wal_durable_lsn(g_xwal) != g_open_lsn ||
+		    wal_get_tail(g_xwal, &tail) != XTC_OK) &&
 		    xstore_checkpoint_wal(g_xbt, (struct wal *)g_xwal,
 		    g_xwal_path) != XTC_OK)
 			ok = 0;
