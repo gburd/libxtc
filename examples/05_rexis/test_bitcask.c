@@ -17,6 +17,7 @@
 
 #include "bitcask.h"
 #include "t_assert.h"
+#include "xtc.h"
 
 
 static char *
@@ -259,6 +260,74 @@ test_compaction(void)
 	printf("  ok   compaction\n");
 }
 
+/*
+ * The in-memory index must grow with the key count.  A fixed 4,096-bucket
+ * chained index walked ~N/4096 entries on EVERY put (to find the old
+ * record), so a 5M-key load fell from 254k to 7.6k puts/s.  Time a fixed
+ * batch of overwrites at 4k keys and at 400k keys; the index must keep
+ * it within 8x (the working set is 100x larger, so some cache misses are
+ * expected), and every key must survive the growth and a reopen.
+ */
+static void
+test_index_grows(void)
+{
+	const char *dir = mkdir_temp();
+	bitcask_t *bc;
+	bitcask_stats_t st;
+	char key[32], buf[64];
+	size_t n;
+	int i, r, kl;
+	int64_t t0, small_ns, big_ns;
+
+	ASSERT(bitcask_open(dir, &bc) == 0);
+	for (i = 0; i < 4000; i++) {
+		kl = snprintf(key, sizeof key, "ik-%d", i);
+		ASSERT(bitcask_put(bc, key, (size_t)kl, "v", 1) == 0);
+	}
+	t0 = xtc_clock_mono();
+	for (r = 0; r < 10; r++)
+		for (i = 0; i < 4000; i++) {
+			kl = snprintf(key, sizeof key, "ik-%d", i);
+			ASSERT(bitcask_size(bc, key, (size_t)kl, &n) == 0);
+		}
+	small_ns = xtc_clock_mono() - t0;
+	for (i = 4000; i < 400000; i++) {
+		kl = snprintf(key, sizeof key, "ik-%d", i);
+		ASSERT(bitcask_put(bc, key, (size_t)kl, "v", 1) == 0);
+	}
+	t0 = xtc_clock_mono();
+	for (r = 0; r < 10; r++)
+		for (i = 0; i < 4000; i++) {
+			kl = snprintf(key, sizeof key, "ik-%d",
+			    (int)(((long)i * 97) % 400000));
+			ASSERT(bitcask_size(bc, key, (size_t)kl, &n) == 0);
+		}
+	big_ns = xtc_clock_mono() - t0;
+	printf("  40k index lookups: %.1f ms at 4k keys, %.1f ms at 400k "
+	    "keys (%.1fx)\n", (double)small_ns / 1e6, (double)big_ns / 1e6,
+	    (double)big_ns / (double)(small_ns > 0 ? small_ns : 1));
+	ASSERT(big_ns < 8 * small_ns);
+	bitcask_stat(bc, &st);
+	ASSERT(st.n_keys == 400000);
+	bitcask_close(bc);
+
+	ASSERT(bitcask_open(dir, &bc) == 0);
+	bitcask_stat(bc, &st);
+	ASSERT(st.n_keys == 400000);
+	for (i = 0; i < 400000; i += 7) {
+		kl = snprintf(key, sizeof key, "ik-%d", i);
+		ASSERT(bitcask_get(bc, key, (size_t)kl, buf, sizeof buf,
+		    &n) == 0);
+		ASSERT(n == 1 && buf[0] == 'v');
+	}
+	ASSERT(bitcask_compact(bc) == 0);
+	kl = snprintf(key, sizeof key, "ik-%d", 399999);
+	ASSERT(bitcask_get(bc, key, (size_t)kl, buf, sizeof buf, &n) == 0);
+	bitcask_close(bc);
+	rmrf(dir);
+	printf("  ok   index_grows\n");
+}
+
 int
 main(void)
 {
@@ -269,6 +338,7 @@ main(void)
 	test_recovery_with_deletes_and_overwrites();
 	test_iterate_and_stats();
 	test_compaction();
+	test_index_grows();
 	printf("All bitcask tests passed.\n");
 	return 0;
 }

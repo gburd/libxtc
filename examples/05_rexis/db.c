@@ -30,12 +30,21 @@ fnv1a(const char *data, size_t len)
 	return h;
 }
 
-/* Hash table stored in the lrlock data */
+/*
+ * Hash table stored in the lrlock data.  The buckets are a linear hash
+ * (lhash.h): one bucket split per insert past load factor 1, so chains
+ * stay ~1 entry however many keys arrive.  The table used to be a FIXED
+ * array of n_buckets (65,536) chains: at 1M keys every lookup walked
+ * ~15 entries (12.7% of server CPU in db_lookup) and a 5M-key load ran
+ * 3.7x slower than Valkey's.
+ *
+ * shortcut: the table never shrinks (DEL/FLUSHDB keep the peak's 8 B per
+ * bucket); add an lh_shrink when a workload needs that memory back.
+ */
 typedef struct db_table {
-	size_t       n_buckets;
+	lh_t         lh;
 	size_t       n_keys;
 	size_t       mem_used;
-	db_entry_t **buckets;
 	size_t       expire_cursor;  /* next bucket db_expire_stale scans */
 } db_table_t;
 
@@ -45,6 +54,7 @@ struct db {
 	xtc_lrlock_t *lr;
 	db_opts_t     opts;
 	bitcask_t    *bc;          /* persistence; NULL if disabled */
+	int           refused;     /* last db_malloc failed on the budget */
 };
 
 /* ----- Memory tracking ----- */
@@ -54,12 +64,16 @@ db_malloc(db_t *db, db_table_t *tbl, size_t sz)
 {
 	void *p;
 	if (db->opts.max_mem_bytes > 0 &&
-	    tbl->mem_used + sz > (size_t)db->opts.max_mem_bytes)
+	    tbl->mem_used + sz > (size_t)db->opts.max_mem_bytes) {
+		db->refused = 1;
 		return NULL;
+	}
 	if (db->opts.res) {
 		if (xtc_res_acquire(db->opts.res, XTC_RES_MEM_BYTES,
-		                    (int64_t)sz) != XTC_OK)
+		                    (int64_t)sz) != XTC_OK) {
+			db->refused = 1;
 			return NULL;
+		}
 	}
 	p = xtc_malloc(sz);
 	if (p)
@@ -81,6 +95,26 @@ db_free(db_t *db, db_table_t *tbl, void *p, size_t sz)
 		xtc_res_release(db->opts.res, XTC_RES_MEM_BYTES, (int64_t)sz);
 }
 
+/* The table's own memory (directory + bucket segments) is keyspace
+ * memory too: charged to the same budget, and a refusal only stops the
+ * table growing (lhash.h). */
+static void *
+db_lh_alloc(void *ctx, size_t sz)
+{
+	db_t *db = ctx;
+	void *p = db_malloc(db, xtc_lrlock_write_data(db->lr), sz);
+	if (p != NULL)
+		memset(p, 0, sz);
+	return p;
+}
+
+static void
+db_lh_free(void *ctx, void *p, size_t sz)
+{
+	db_t *db = ctx;
+	db_free(db, xtc_lrlock_write_data(db->lr), p, sz);
+}
+
 /* ----- Entry helpers ----- */
 
 static size_t
@@ -92,14 +126,28 @@ entry_size(size_t key_len)
 static db_entry_t *
 entry_find(db_table_t *tbl, const char *key, size_t key_len, uint64_t h)
 {
+	lh_node_t *n;
 	db_entry_t *e;
-	size_t idx = h % tbl->n_buckets;
-	for (e = tbl->buckets[idx]; e; e = e->next) {
-		if (e->hash == h && e->key_len == key_len &&
+	for (n = *lh_slot(&tbl->lh, h); n; n = n->next) {
+		e = (db_entry_t *)n;
+		if (n->hash == h && e->key_len == key_len &&
 		    memcmp(e->key, key, key_len) == 0)
 			return e;
 	}
 	return NULL;
+}
+
+/* Link a new entry (key set, hash h) and grow the table past load 1. */
+static void
+entry_link(db_t *db, db_table_t *tbl, db_entry_t *e, uint64_t h)
+{
+	lh_node_t **slot = lh_slot(&tbl->lh, h);
+
+	e->node.hash = h;
+	e->node.next = *slot;
+	*slot = &e->node;
+	if (++tbl->n_keys > lh_buckets(&tbl->lh))
+		(void)lh_grow(&tbl->lh, db_lh_alloc, db_lh_free, db);
 }
 
 static void
@@ -134,12 +182,11 @@ entry_free_value(db_t *db, db_table_t *tbl, db_entry_t *e)
 static void
 entry_remove(db_t *db, db_table_t *tbl, db_entry_t *e)
 {
-	size_t idx = e->hash % tbl->n_buckets;
-	db_entry_t **pp;
+	lh_node_t **pp;
 
-	for (pp = &tbl->buckets[idx]; *pp; pp = &(*pp)->next) {
-		if (*pp == e) {
-			*pp = e->next;
+	for (pp = lh_slot(&tbl->lh, e->node.hash); *pp; pp = &(*pp)->next) {
+		if (*pp == &e->node) {
+			*pp = e->node.next;
 			break;
 		}
 	}
@@ -221,7 +268,7 @@ db_create(const db_opts_t *opts, db_t **out)
 	db_t *db;
 	xtc_lrlock_opts_t lr_opts = { 0 };
 	db_table_t *tbl;
-	size_t bucket_bytes;
+	int rc;
 
 	if (!out)
 		return XTC_E_INVAL;
@@ -243,39 +290,27 @@ db_create(const db_opts_t *opts, db_t **out)
 		return XTC_E_NOMEM;
 	}
 
-	/* Initialize the table in the write copy, then mark ready */
+	/* Initialize the table in the write copy, then mark ready.  The
+	 * bucket table is charged to the shared budget (db_lh_alloc), so the
+	 * budget's total is exactly what INFO reports as used_memory
+	 * (keyspace + client buffers).  A cap below it cannot hold an empty
+	 * keyspace: XTC_E_RESOURCE. */
 	tbl = xtc_lrlock_write_begin(db->lr);
-	tbl->n_buckets = db->opts.n_buckets;
-	tbl->n_keys = 0;
-	tbl->mem_used = 0;
-	tbl->expire_cursor = 0;
-	bucket_bytes = tbl->n_buckets * sizeof(db_entry_t *);
-	if ((tbl->buckets = xtc_calloc(tbl->n_buckets, sizeof(db_entry_t *))) == NULL) {
+	memset(tbl, 0, sizeof(*tbl));
+	if (lh_init(&tbl->lh, db->opts.n_buckets, db_lh_alloc, db_lh_free,
+	    db) != 0) {
+		rc = db->refused ? XTC_E_RESOURCE : XTC_E_NOMEM;
 		xtc_lrlock_write_end(db->lr);
 		xtc_lrlock_destroy(db->lr);
 		xtc_free(db);
-		return XTC_E_NOMEM;
-	}
-	tbl->mem_used = bucket_bytes;
-	/* Charge the bucket array to the shared budget too, so the budget's
-	 * total is exactly what INFO reports as used_memory (keyspace +
-	 * client buffers).  A cap below it cannot hold an empty keyspace. */
-	if (db->opts.res != NULL &&
-	    xtc_res_acquire(db->opts.res, XTC_RES_MEM_BYTES,
-	    (int64_t)bucket_bytes) != XTC_OK) {
-		xtc_free(tbl->buckets);
-		tbl->buckets = NULL;
-		xtc_lrlock_write_end(db->lr);
-		xtc_lrlock_destroy(db->lr);
-		xtc_free(db);
-		return XTC_E_RESOURCE;
+		return rc;
 	}
 	xtc_lrlock_publish_full_sync(db->lr);
 	xtc_lrlock_write_end(db->lr);
 
 	/* publish_full_sync copied the table struct into the other copy, so
-	 * both copies now share this one bucket array (every write_end does
-	 * the same full sync).  A second array used to be allocated here and
+	 * both copies now share this one bucket table (every write_end does
+	 * the same full sync).  A second table used to be allocated here and
 	 * the next full sync overwrote one copy's pointer with the other's,
 	 * leaking 512 KiB per db_create (ASan, test_db_persist). */
 
@@ -310,26 +345,24 @@ db_destroy(db_t *db)
 {
 	db_table_t *tbl;
 	size_t i;
-	db_entry_t *e, *e_next;
+	lh_node_t *n, *n_next;
+	db_entry_t *e;
 
 	if (!db)
 		return;
 
-	/* Free all entries in the write copy */
+	/* Free all entries in the write copy, then the table (both release
+	 * their budget charge). */
 	tbl = xtc_lrlock_write_begin(db->lr);
-	if (tbl->buckets) {
-		for (i = 0; i < tbl->n_buckets; i++) {
-			for (e = tbl->buckets[i]; e; e = e_next) {
-				e_next = e->next;
-				entry_free_value(db, tbl, e);
-				db_free(db, tbl, e, entry_size(e->key_len));
-			}
+	for (i = 0; i < lh_buckets(&tbl->lh); i++) {
+		for (n = *lh_bucket(&tbl->lh, i); n; n = n_next) {
+			n_next = n->next;
+			e = (db_entry_t *)n;
+			entry_free_value(db, tbl, e);
+			db_free(db, tbl, e, entry_size(e->key_len));
 		}
-		xtc_free(tbl->buckets);
-		if (db->opts.res != NULL)
-			xtc_res_release(db->opts.res, XTC_RES_MEM_BYTES,
-			    (int64_t)(tbl->n_buckets * sizeof(db_entry_t *)));
 	}
+	lh_destroy(&tbl->lh, db_lh_free, db);
 	xtc_lrlock_write_end(db->lr);
 
 	xtc_lrlock_destroy(db->lr);
@@ -355,11 +388,12 @@ db_lookup(db_t *db, const char *key, size_t key_len)
 {
 	const db_table_t *tbl = xtc_lrlock_read_data(db->lr);
 	uint64_t h = fnv1a(key, key_len);
+	const lh_node_t *n;
 	const db_entry_t *e;
-	size_t idx = h % tbl->n_buckets;
 
-	for (e = tbl->buckets[idx]; e; e = e->next) {
-		if (e->hash == h && e->key_len == key_len &&
+	for (n = *lh_slot(&tbl->lh, h); n; n = n->next) {
+		e = (const db_entry_t *)n;
+		if (n->hash == h && e->key_len == key_len &&
 		    memcmp(e->key, key, key_len) == 0)
 			return e;
 	}
@@ -536,6 +570,7 @@ db_keys(db_t *db, const char *pattern, size_t pattern_len,
 {
 	const db_table_t *tbl = xtc_lrlock_read_data(db->lr);
 	int64_t now = xtc_now_ns();
+	const lh_node_t *n;
 	const db_entry_t *e;
 	size_t i, count = 0;
 	int pass;
@@ -545,8 +580,9 @@ db_keys(db_t *db, const char *pattern, size_t pattern_len,
 	for (pass = 0; pass < 2; pass++) {
 		if (pass == 1)
 			fn(NULL, count, NULL, 0, user);
-		for (i = 0; i < tbl->n_buckets; i++) {
-			for (e = tbl->buckets[i]; e; e = e->next) {
+		for (i = 0; i < lh_buckets(&tbl->lh); i++) {
+			for (n = *lh_bucket(&tbl->lh, i); n; n = n->next) {
+				e = (const db_entry_t *)n;
 				if (e->expire_at_ns > 0 && now >= e->expire_at_ns)
 					continue;
 				if (!glob_match(pattern, pattern_len, e->key,
@@ -605,7 +641,6 @@ db_set_inmem(db_t *db, const char *key, size_t key_len,
 	uint64_t h = fnv1a(key, key_len);
 	db_entry_t *e;
 	char *val_copy;
-	size_t idx;
 
 	if (key_len > DB_MAX_KEY_LEN)
 		return -1;
@@ -646,16 +681,12 @@ db_set_inmem(db_t *db, const char *key, size_t key_len,
 	memcpy(e->key, key, key_len);
 	e->key[key_len] = '\0';
 	e->key_len = key_len;
-	e->hash = h;
 	e->type = DB_VAL_STRING;
 	e->expire_at_ns = 0;
 	e->val.str.data = val_copy;
 	e->val.str.len = val_len;
 
-	idx = h % tbl->n_buckets;
-	e->next = tbl->buckets[idx];
-	tbl->buckets[idx] = e;
-	tbl->n_keys++;
+	entry_link(db, tbl, e, h);
 
 	return 0;
 }
@@ -668,7 +699,6 @@ db_set_ex(db_t *db, const char *key, size_t key_len,
 	uint64_t h = fnv1a(key, key_len);
 	db_entry_t *e;
 	char *val_copy;
-	size_t idx;
 
 	if (key_len > DB_MAX_KEY_LEN)
 		return -1;
@@ -709,16 +739,12 @@ db_set_ex(db_t *db, const char *key, size_t key_len,
 	memcpy(e->key, key, key_len);
 	e->key[key_len] = '\0';
 	e->key_len = key_len;
-	e->hash = h;
 	e->type = DB_VAL_STRING;
 	e->expire_at_ns = expire_ns;
 	e->val.str.data = val_copy;
 	e->val.str.len = val_len;
 
-	idx = h % tbl->n_buckets;
-	e->next = tbl->buckets[idx];
-	tbl->buckets[idx] = e;
-	tbl->n_keys++;
+	entry_link(db, tbl, e, h);
 
 persist:
 	/* Persist to bitcask if enabled.  TTLs are not persisted in v1
@@ -826,7 +852,6 @@ db_get_or_create_list(db_t *db, const char *key, size_t key_len)
 	db_table_t *tbl = db_write_table(db);
 	uint64_t h = fnv1a(key, key_len);
 	db_entry_t *e = entry_find(tbl, key, key_len, h);
-	size_t idx;
 
 	if (e) {
 		if (e->type != DB_VAL_LIST)
@@ -845,17 +870,13 @@ db_get_or_create_list(db_t *db, const char *key, size_t key_len)
 	memcpy(e->key, key, key_len);
 	e->key[key_len] = '\0';
 	e->key_len = key_len;
-	e->hash = h;
 	e->type = DB_VAL_LIST;
 	e->expire_at_ns = 0;
 	e->val.list.head = NULL;
 	e->val.list.tail = NULL;
 	e->val.list.count = 0;
 
-	idx = h % tbl->n_buckets;
-	e->next = tbl->buckets[idx];
-	tbl->buckets[idx] = e;
-	tbl->n_keys++;
+	entry_link(db, tbl, e, h);
 
 	return e;
 }
@@ -990,7 +1011,6 @@ db_get_or_create_hash(db_t *db, const char *key, size_t key_len)
 	db_table_t *tbl = db_write_table(db);
 	uint64_t h = fnv1a(key, key_len);
 	db_entry_t *e = entry_find(tbl, key, key_len, h);
-	size_t idx;
 
 	if (e) {
 		if (e->type != DB_VAL_HASH)
@@ -1009,16 +1029,12 @@ db_get_or_create_hash(db_t *db, const char *key, size_t key_len)
 	memcpy(e->key, key, key_len);
 	e->key[key_len] = '\0';
 	e->key_len = key_len;
-	e->hash = h;
 	e->type = DB_VAL_HASH;
 	e->expire_at_ns = 0;
 	e->val.hash.head = NULL;
 	e->val.hash.count = 0;
 
-	idx = h % tbl->n_buckets;
-	e->next = tbl->buckets[idx];
-	tbl->buckets[idx] = e;
-	tbl->n_keys++;
+	entry_link(db, tbl, e, h);
 
 	return e;
 }
@@ -1114,15 +1130,17 @@ db_flushdb(db_t *db)
 {
 	db_table_t *tbl = db_write_table(db);
 	size_t i;
-	db_entry_t *e, *e_next;
+	lh_node_t *n, *n_next;
+	db_entry_t *e;
 
-	for (i = 0; i < tbl->n_buckets; i++) {
-		for (e = tbl->buckets[i]; e; e = e_next) {
-			e_next = e->next;
+	for (i = 0; i < lh_buckets(&tbl->lh); i++) {
+		for (n = *lh_bucket(&tbl->lh, i); n; n = n_next) {
+			n_next = n->next;
+			e = (db_entry_t *)n;
 			entry_free_value(db, tbl, e);
 			db_free(db, tbl, e, entry_size(e->key_len));
 		}
-		tbl->buckets[i] = NULL;
+		*lh_bucket(&tbl->lh, i) = NULL;
 	}
 	tbl->n_keys = 0;
 }
@@ -1132,7 +1150,7 @@ db_expire_stale(db_t *db, int64_t now_ns, int max_scan)
 {
 	db_table_t *tbl = db_write_table(db);
 	int removed = 0, scanned = 0;
-	size_t i, visited;
+	size_t i, visited, nb;
 
 	/* Resume where the last pass stopped and wrap, so successive passes
 	 * sweep the whole table (Redis's active-expire cursor; DragonFly's
@@ -1140,22 +1158,23 @@ db_expire_stale(db_t *db, int64_t now_ns, int max_scan)
 	 * rescanning the same first max_scan entries: expired keys behind
 	 * them were never reclaimed.  A bucket is always finished, so a pass
 	 * may look at up to one chain more than max_scan. */
-	i = tbl->expire_cursor % tbl->n_buckets;
-	for (visited = 0; visited < tbl->n_buckets && scanned < max_scan;
-	    visited++, i = (i + 1) % tbl->n_buckets) {
-		db_entry_t **pp = &tbl->buckets[i];
+	nb = lh_buckets(&tbl->lh);
+	i = tbl->expire_cursor % nb;
+	for (visited = 0; visited < nb && scanned < max_scan;
+	    visited++, i = (i + 1) % nb) {
+		lh_node_t **pp = lh_bucket(&tbl->lh, i);
 		while (*pp) {
-			db_entry_t *e = *pp;
+			db_entry_t *e = (db_entry_t *)*pp;
 			scanned++;
 			if (e->expire_at_ns > 0 && now_ns >= e->expire_at_ns) {
-				*pp = e->next;
+				*pp = e->node.next;
 				entry_free_value(db, tbl, e);
 				db_free(db, tbl, e, entry_size(e->key_len));
 				if (tbl->n_keys > 0)
 					tbl->n_keys--;
 				removed++;
 			} else {
-				pp = &e->next;
+				pp = &e->node.next;
 			}
 		}
 	}
