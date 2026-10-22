@@ -1814,6 +1814,16 @@ wal_ockpt_catchup(wal_ock_t *k, uint64_t *left)
 	end = (off_t)atomic_load_explicit(&k->w->durable_off, memory_order_acquire);
 	rc = wal_ock_copy(k, end, (off_t)(64u << 20));   /* bounded slice */
 	wal_cmp_flush(&k->c);
+	/*
+	 * Write the new log back now, while commits run: wal_ockpt_finish's
+	 * fsync runs with commits quiesced, and with the whole dump still
+	 * dirty it took 109-175 ms on a 100k-account ledger and 455-506 ms on
+	 * a TPC-C W=10 store -- every commit waited for it.  After this it
+	 * flushes only the last slice.  Correctness does not depend on it
+	 * (finish still fsyncs); a failure here is left for finish to see.
+	 */
+	if (rc == XTC_OK && !k->c.err)
+		(void)fdatasync(k->c.fd);
 	if (left != NULL)
 		*left = (uint64_t)atomic_load_explicit(&k->w->durable_off,
 		    memory_order_acquire) - (uint64_t)k->src_off;
