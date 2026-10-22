@@ -111,14 +111,6 @@ server_inc_conn(server_t *s) { atomic_fetch_add(&s->conn_count, 1); }
 void
 server_dec_conn(server_t *s) { atomic_fetch_sub(&s->conn_count, 1); }
 
-int
-server_take_iops(server_t *s, int n)
-{
-	if (s->cfg.max_iops <= 0) return 0;
-	int64_t v = atomic_fetch_sub(&s->iops_tokens, (int64_t)n);
-	return v >= n ? 0 : -1;
-}
-
 static void
 rate_limit_init(server_t *s)
 {
@@ -264,9 +256,13 @@ listener_proc(void *arg)
 				cl = xtc_exec_loop(srv->exec,
 				    (int)(atomic_fetch_add(&srv->next_loop, 1) %
 				          (unsigned)srv->n_loops));
-			if (conn_spawn(cl, &opts, &pid) == XTC_OK) {
-				server_inc_conn(srv);
-			} else {
+			/* Count it BEFORE the spawn (as rexis does): the proc
+			 * runs on another loop and can exit -- and decrement --
+			 * before conn_spawn returns, which drove the count
+			 * below zero for a moment. */
+			server_inc_conn(srv);
+			if (conn_spawn(cl, &opts, &pid) != XTC_OK) {
+				server_dec_conn(srv);
 				xtc_net_close(fd);
 			}
 		}
