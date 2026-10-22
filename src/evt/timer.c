@@ -8,6 +8,14 @@
  *	marks it, and the owner drops marked nodes when they reach the root
  *	or when a full heap is swept before it would grow.
  *	See M3_CLAIMS.md, Tm5-Tm13.
+ *
+ *	The heap array holds {deadline, node} slots, so a sift reads keys
+ *	from the array instead of two scattered nodes per level, and moves
+ *	a hole instead of swapping.  It makes the same comparisons as the
+ *	pointer heap it replaced, so equal deadlines (common under DST's
+ *	virtual clock) fire in the same order.  bench/bench_timerq.c
+ *	compares it with d-ary heaps, a timing wheel, a radix heap and a
+ *	QuickHeap.
  */
 
 #include "xtc_int.h"
@@ -38,45 +46,44 @@ __timer_slab_ensure(xtc_loop_t *loop)
 
 /* --- Heap manipulation. -------------------------------------------- */
 
-/* XTC_NOALLOC_BEGIN: heap swap helper (PLAN.md 19.23) -- shared by
- * both the insert-side sift-up and the per-tick dequeue-side
- * sift-down; never itself allocates. */
+/* XTC_NOALLOC_BEGIN: heap sift helpers (PLAN.md 19.23) -- shared by the
+ * insert-side sift-up and the per-tick dequeue-side sift-down; never
+ * allocate.  Each places slot x by moving the hole at i; x comes by
+ * value so a push or remove does not store a slot only to reload it. */
 static void
-__swap(xtc_timer_t **a, xtc_timer_t **b)
-{
-	xtc_timer_t *tmp = *a;
-	int idx_a = (*a)->heap_idx;
-	int idx_b = (*b)->heap_idx;
-	*a = *b; (*a)->heap_idx = idx_a;
-	*b = tmp; (*b)->heap_idx = idx_b;
-}
-/* XTC_NOALLOC_END */
-
-static void
-__sift_up(xtc_timer_t **h, int i)
+__sift_up(struct xtc_timer_slot *h, int i, struct xtc_timer_slot x)
 {
 	while (i > 0) {
 		int parent = (i - 1) / 2;
-		if (h[parent]->deadline_ns <= h[i]->deadline_ns) break;
-		__swap(&h[parent], &h[i]);
+		if (h[parent].deadline_ns <= x.deadline_ns) break;
+		h[i] = h[parent];
+		h[i].t->heap_idx = i;
 		i = parent;
 	}
+	h[i] = x;
+	x.t->heap_idx = i;
 }
 
 static void
-__sift_down(xtc_timer_t **h, int n, int i)
+__sift_down(struct xtc_timer_slot *h, int n, int i, struct xtc_timer_slot x)
 {
 	for (;;) {
 		int l = 2 * i + 1;
-		int r = 2 * i + 2;
-		int best = i;
-		if (l < n && h[l]->deadline_ns < h[best]->deadline_ns) best = l;
-		if (r < n && h[r]->deadline_ns < h[best]->deadline_ns) best = r;
-		if (best == i) break;
-		__swap(&h[i], &h[best]);
-		i = best;
+		int r = l + 1;
+		int c;
+		if (l >= n) break;
+		/* The smaller child, the left on a tie: the old swap-based
+		 * sift's choice, so ties pop in the same order. */
+		c = r < n && h[r].deadline_ns < h[l].deadline_ns ? r : l;
+		if (h[c].deadline_ns >= x.deadline_ns) break;
+		h[i] = h[c];
+		h[i].t->heap_idx = i;
+		i = c;
 	}
+	h[i] = x;
+	x.t->heap_idx = i;
 }
+/* XTC_NOALLOC_END */
 
 static void __sweep_cancelled(xtc_loop_t *loop);
 
@@ -96,6 +103,7 @@ __grow(xtc_loop_t *loop)
 int
 __xtc_timer_heap_push(xtc_loop_t *loop, xtc_timer_t *t)
 {
+	struct xtc_timer_slot x;
 	int rc;
 	XTC_ASSERT_LOOP_OWNER(loop, "timer min-heap (push)");
 	if (loop->n_timers >= loop->cap_timers) {
@@ -115,9 +123,9 @@ __xtc_timer_heap_push(xtc_loop_t *loop, xtc_timer_t *t)
 	if (atomic_load_explicit(&t->fired, memory_order_relaxed) ==
 	    XTC_TIMER_FIRED)
 		atomic_store_explicit(&t->fired, 0, memory_order_relaxed);
-	t->heap_idx = loop->n_timers;
-	loop->timers[loop->n_timers++] = t;
-	__sift_up(loop->timers, t->heap_idx);
+	x.deadline_ns = t->deadline_ns;
+	x.t = t;
+	__sift_up(loop->timers, loop->n_timers++, x);
 	return XTC_OK;
 }
 
@@ -157,38 +165,36 @@ __is_cancelled(xtc_timer_t *t)
 static void
 __heap_remove_at(xtc_loop_t *loop, int i)
 {
-	xtc_timer_t **h = loop->timers;
+	struct xtc_timer_slot *h = loop->timers;
 	int last = --loop->n_timers;
-	h[i]->heap_idx = -1;
+	h[i].t->heap_idx = -1;
 	if (i == last)
 		return;
-	h[i] = h[last];
-	h[i]->heap_idx = i;
-	if (i > 0 && h[i]->deadline_ns < h[(i - 1) / 2]->deadline_ns)
-		__sift_up(h, i);
+	if (i > 0 && h[last].deadline_ns < h[(i - 1) / 2].deadline_ns)
+		__sift_up(h, i, h[last]);
 	else
-		__sift_down(h, loop->n_timers, i);
+		__sift_down(h, loop->n_timers, i, h[last]);
 }
 
 /* Drop every cancelled node from the heap and rebuild it (owner only). */
 static void
 __sweep_cancelled(xtc_loop_t *loop)
 {
-	xtc_timer_t **h = loop->timers;
+	struct xtc_timer_slot *h = loop->timers;
 	int i, n = 0;
 	for (i = 0; i < loop->n_timers; i++) {
-		xtc_timer_t *t = h[i];
+		xtc_timer_t *t = h[i].t;
 		if (__is_cancelled(t)) {
 			t->heap_idx = -1;
 			__xtc_timer_park_release(t);   /* the heap's reference */
 			continue;
 		}
 		t->heap_idx = n;
-		h[n++] = t;
+		h[n++] = h[i];
 	}
 	loop->n_timers = n;
 	for (i = n / 2 - 1; i >= 0; i--)
-		__sift_down(h, n, i);
+		__sift_down(h, n, i, h[i]);
 }
 
 /* XTC_NOALLOC_BEGIN: per-tick timer dequeue/peek path (PLAN.md 19.23) --
@@ -203,7 +209,7 @@ __sweep_cancelled(xtc_loop_t *loop)
 static xtc_timer_t *
 __heap_top_unsafe(xtc_loop_t *loop)
 {
-	return loop->n_timers == 0 ? NULL : loop->timers[0];
+	return loop->n_timers == 0 ? NULL : loop->timers[0].t;
 }
 
 static xtc_timer_t *
@@ -211,14 +217,12 @@ __heap_pop_unsafe(xtc_loop_t *loop)
 {
 	xtc_timer_t *top;
 	if (loop->n_timers == 0) return NULL;
-	top = loop->timers[0];
+	top = loop->timers[0].t;
 	top->heap_idx = -1;
 	loop->n_timers--;
-	if (loop->n_timers > 0) {
-		loop->timers[0] = loop->timers[loop->n_timers];
-		loop->timers[0]->heap_idx = 0;
-		__sift_down(loop->timers, loop->n_timers, 0);
-	}
+	if (loop->n_timers > 0)
+		__sift_down(loop->timers, loop->n_timers, 0,
+		    loop->timers[loop->n_timers]);
 	return top;
 }
 
@@ -239,7 +243,7 @@ __xtc_timer_heap_pop_due(xtc_loop_t *loop, int64_t now_ns)
 		if (top == NULL) return NULL;
 		int expect = 0;
 		if (!__is_cancelled(top)) {
-			if (top->deadline_ns > now_ns) return NULL;
+			if (loop->timers[0].deadline_ns > now_ns) return NULL;
 			/* Claim it to fire; a concurrent cancel that got there
 			 * first wins, and the node is dropped below. */
 			if (atomic_compare_exchange_strong_explicit(&top->fired,
@@ -255,12 +259,12 @@ __xtc_timer_heap_pop_due(xtc_loop_t *loop, int64_t now_ns)
 int64_t
 __xtc_timer_heap_next_deadline(xtc_loop_t *loop)
 {
-	while (loop->n_timers > 0 && __is_cancelled(loop->timers[0])) {
-		xtc_timer_t *dead = loop->timers[0];
+	while (loop->n_timers > 0 && __is_cancelled(loop->timers[0].t)) {
+		xtc_timer_t *dead = loop->timers[0].t;
 		(void)__heap_pop_unsafe(loop);
 		__xtc_timer_park_release(dead);  /* XTC_NOALLOC_OK: bounded free of one popped timer */
 	}
-	return loop->n_timers == 0 ? -1 : loop->timers[0]->deadline_ns;
+	return loop->n_timers == 0 ? -1 : loop->timers[0].deadline_ns;
 }
 /* XTC_NOALLOC_END */
 

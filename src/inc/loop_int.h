@@ -205,7 +205,10 @@ struct xtc_task {
 };
 
 /*
- * Timer record.  Kept in a binary min-heap inside the loop.
+ * Timer record.  Kept in a binary min-heap inside the loop: an array of
+ * {deadline, node} slots (struct xtc_timer_slot), so a sift compares
+ * keys in the array instead of dereferencing two scattered nodes per
+ * level.  heap_idx is the node's slot.
  *
  * `fired` decides a cancel racing a fire: it leaves 0 exactly once, to
  * XTC_TIMER_FIRED (the owner's pop claimed it) or XTC_TIMER_CANCELLED.
@@ -219,6 +222,10 @@ struct xtc_task {
  */
 #define XTC_TIMER_FIRED      1
 #define XTC_TIMER_CANCELLED  2
+struct xtc_timer_slot {
+	int64_t           deadline_ns;   /* == t->deadline_ns while queued */
+	struct xtc_timer *t;
+};
 struct xtc_timer {
 	int64_t      deadline_ns;
 	xtc_timer_fn cb;
@@ -335,10 +342,10 @@ struct xtc_loop {
 	struct xtc_task *q_head;
 	struct xtc_task *q_tail;
 
-	/* Timer min-heap. */
-	xtc_timer_t **timers;
-	int           n_timers;
-	int           cap_timers;
+	/* Timer min-heap (timer.c). */
+	struct xtc_timer_slot *timers;
+	int                    n_timers;
+	int                    cap_timers;
 
 	/* All tasks ever spawned, for cleanup.  Owner-only after init. */
 	struct xtc_task *all_tasks;

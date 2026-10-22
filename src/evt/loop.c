@@ -377,7 +377,7 @@ xtc_loop_fini(xtc_loop_t *loop)
 	{
 		int i;
 		for (i = 0; i < loop->n_timers; i++) {
-			xtc_timer_t *ht = loop->timers[i];
+			xtc_timer_t *ht = loop->timers[i].t;
 			if (ht != NULL &&
 			    atomic_load_explicit(&ht->refs,
 			    memory_order_relaxed) > 0)
