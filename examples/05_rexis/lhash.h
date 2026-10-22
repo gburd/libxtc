@@ -35,7 +35,8 @@
 #include <string.h>
 
 #define LH_SEG_SHIFT 10
-#define LH_SEG       ((size_t)1 << LH_SEG_SHIFT)   /* bucket heads per segment */
+/* Bucket heads per segment. */
+#define LH_SEG       ((size_t)1 << LH_SEG_SHIFT)
 
 typedef struct lh_node {
 	struct lh_node *next;
@@ -114,7 +115,8 @@ lh_init(lh_t *t, size_t min_buckets, lh_alloc_fn a, lh_free_fn f, void *ctx)
 	for (i = 0; i < low / LH_SEG; i++) {
 		if (lh_add_segment(t, a, f, ctx) != 0) {
 			while (t->ndir > 0)
-				f(ctx, t->dir[--t->ndir], LH_SEG * sizeof **t->dir);
+				f(ctx, t->dir[--t->ndir],
+				    LH_SEG * sizeof **t->dir);
 			f(ctx, t->dir, t->dircap * sizeof *t->dir);
 			t->dir = NULL;
 			return -1;
@@ -131,7 +133,8 @@ lh_grow(lh_t *t, lh_alloc_fn a, lh_free_fn f, void *ctx)
 	size_t nb = t->low + t->split, mask = 2 * t->low - 1;
 	lh_node_t **from, **to, *n;
 
-	if ((nb >> LH_SEG_SHIFT) >= t->ndir && lh_add_segment(t, a, f, ctx) != 0)
+	if ((nb >> LH_SEG_SHIFT) >= t->ndir &&
+	    lh_add_segment(t, a, f, ctx) != 0)
 		return -1;
 	from = lh_bucket(t, t->split);
 	to = lh_bucket(t, nb);

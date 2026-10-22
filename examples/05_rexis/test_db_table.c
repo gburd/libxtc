@@ -76,7 +76,8 @@ test_grows_and_stays_fast(void)
 	t0 = xtc_clock_mono();
 	for (r = 0; r < 50; r++)
 		for (i = 0; i < 4000; i++) {
-			n = mk(k, sizeof k, "key:", (int)(((long)i * 97) % N_BIG));
+			n = mk(k, sizeof k, "key:",
+			    (int)(((long)i * 97) % N_BIG));
 			ASSERT(db_get(db, k, (size_t)n, &v, &vl) == 0);
 		}
 	big_ns = xtc_clock_mono() - t0;
@@ -103,7 +104,8 @@ test_grows_and_stays_fast(void)
 	db_read_begin(db);
 	for (i = 0; i < N_BIG; i++) {
 		n = mk(k, sizeof k, "key:", i);
-		ASSERT((db_get(db, k, (size_t)n, &v, &vl) == 0) == (i % 2 == 1));
+		ASSERT((db_get(db, k, (size_t)n, &v, &vl) == 0) ==
+		    (i % 2 == 1));
 	}
 	db_read_end(db);
 	db_destroy(db);
