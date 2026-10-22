@@ -27,8 +27,15 @@ serves two families of tools:
 | --- | --- | --- |
 | FreeBSD, illumos, macOS | `dtrace` | `xtc$target:::fiber-park` |
 | Linux | `bpftrace`, `bcc` | `usdt:./prog:xtc:fiber__park` |
-| Linux | `perf` | `sdt_xtc:fiber__park` |
+| Linux | `perf` | `sdt_xtc:msg_send` (single-site probes only; see below) |
 | Linux | SystemTap | `process("./prog").mark("fiber__park")` |
+
+`perf probe` collapses each double underscore in the event name, so the
+probe `msg__send` is recorded as `sdt_xtc:msg_send`. perf 7.2 also cannot
+enable a probe with more than one site in the binary (`fiber__park`,
+`lock__wait__start` and others fire from several places): the second site
+collides with the first's event name. bpftrace and SystemTap handle every
+probe; use them for those.
 
 The definitive list of probes, their arguments and their stability is the
 [`xtc_usdt(3)`]({{ '/reference/man-pages/' | relative_url }}) man page; this

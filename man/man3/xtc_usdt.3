@@ -427,13 +427,25 @@ built with
 bpftrace -e 'usdt:./server:xtc:fiber__park { @[arg1] = count(); }'
 .Ed
 .Pp
-List the probes perf sees and record one:
+List the probes perf sees and record one.
+.Ql perf probe
+names the event with each double underscore collapsed to one, so record
+.Ql sdt_xtc:msg_send ,
+not
+.Ql sdt_xtc:msg__send :
 .Bd -literal -offset indent
 perf buildid-cache --add ./server
 perf list 'sdt_xtc:*'
-perf probe sdt_xtc:lock__wait__start
-perf record -e sdt_xtc:lock__wait__start -g ./server
+perf probe -x ./server sdt_xtc:msg__send
+perf record -e sdt_xtc:msg_send -g ./server
 .Ed
+.Pp
+perf 7.2 cannot enable a probe that has more than one site in the
+binary (for example
+.Ql lock__wait__start ,
+which fires from four lock paths): the second site gets the same
+collapsed event name and the kernel refuses it.
+Use bpftrace or SystemTap for those probes.
 .Sh SEE ALSO
 .Xr dtrace 1 ,
 .Xr xtc_stats 3 ,
