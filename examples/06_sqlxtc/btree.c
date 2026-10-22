@@ -210,7 +210,12 @@ bt_check_node(const void *pg, const char *fn, int line)
 struct bt {
 	bm_t             *bm;
 	uint32_t          page_size;
-	_Atomic bm_pid_t  root_pid;
+	_Atomic bm_pid_t  root_pid;    /* read by every descent */
+	/* Keep the statistics below off root_pid's cache line: every reader
+	 * loads root_pid, and a counter write by any thread on the same line
+	 * would invalidate it in every other core's cache.  (Padding, not
+	 * _Alignas: the struct comes from calloc.) */
+	char              pad_root[64];
 
 	_Atomic uint64_t  st_inserts;
 	_Atomic uint64_t  st_lookups;
@@ -2024,7 +2029,8 @@ bt_seek_ge(bt_t *bt, const void *key, uint16_t klen, void *kout,
 
 	if (bt == NULL || key == NULL || kout == NULL || klen > bt_key_max(bt))
 		return XTC_E_INVAL;
-	atomic_fetch_add(&bt->st_lookups, 1);
+	/* Not counted in st_lookups (as bt_seek_lt is not): one shared
+	 * counter write per point read was 2% of a busy 8-reader profile. */
 	rc = seek_ge_optimistic(bt, key, klen, kout, kcap, kolen, val, vcap,
 	    vlen);
 	if (rc != XTC_E_AGAIN)
