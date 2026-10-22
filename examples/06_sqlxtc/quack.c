@@ -30,7 +30,9 @@ quack_buf_init(quack_buf_t *b, size_t initial_cap)
 	b->p = (char *)malloc(initial_cap);
 	if (!b->p) return -1;
 	b->len = 0;
-	b->cap = initial_cap;
+	b->cap = b->base = initial_cap;
+	b->charge = NULL;
+	b->charge_arg = NULL;
 	return 0;
 }
 
@@ -38,9 +40,24 @@ void
 quack_buf_free(quack_buf_t *b)
 {
 	if (!b) return;
+	if (b->charge != NULL && b->cap > b->base)
+		(void)b->charge(b->charge_arg, -(int64_t)(b->cap - b->base));
 	free(b->p);
 	b->p = NULL;
 	b->len = b->cap = 0;
+}
+
+void
+quack_buf_trim(quack_buf_t *b)
+{
+	char *np;
+	b->len = 0;
+	if (b->cap <= b->base || (np = (char *)realloc(b->p, b->base)) == NULL)
+		return;
+	if (b->charge != NULL)
+		(void)b->charge(b->charge_arg, -(int64_t)(b->cap - b->base));
+	b->p = np;
+	b->cap = b->base;
 }
 
 void
@@ -58,8 +75,15 @@ buf_grow(quack_buf_t *b, size_t need)
 		return 0;
 	newcap = b->cap ? b->cap : 64;
 	while (newcap < b->len + need) newcap *= 2;
+	if (b->charge != NULL &&
+	    b->charge(b->charge_arg, (int64_t)(newcap - b->cap)) != 0)
+		return -1;
 	np = (char *)realloc(b->p, newcap);
-	if (!np) return -1;
+	if (!np) {
+		if (b->charge != NULL)
+			(void)b->charge(b->charge_arg, -(int64_t)(newcap - b->cap));
+		return -1;
+	}
 	b->p = np;
 	b->cap = newcap;
 	return 0;

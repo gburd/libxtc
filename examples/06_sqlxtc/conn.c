@@ -65,6 +65,7 @@ sql_text_is(const char *q, size_t n, const char *kw)
 #define DEFAULT_READ_CAP   (16 * 1024)
 #define DEFAULT_WRITE_CAP  (64 * 1024)
 #define DEFAULT_MAX_LINE   (1024 * 1024)
+#define CONN_OUT_SOFT      (256 * 1024)  /* stop running requests past this */
 
 typedef struct conn_state {
 	int        fd;
@@ -87,8 +88,10 @@ typedef struct conn_state {
 	int64_t    iops_cap;
 
 	int64_t    max_memory;
+	int        mem_refused;   /* a buffer grow was refused by res */
 
 	int        quit;
+	int        eof;           /* the peer shut its write side */
 	int        closed;
 
 	/* Prepared-statement cache: up to CONN_STMT_CACHE statements by SQL
@@ -115,7 +118,45 @@ typedef struct conn_state {
 struct server;
 extern void server_inc_conn(struct server *);
 extern void server_dec_conn(struct server *);
-extern int  server_take_iops(struct server *, int);
+
+/*
+ * Connection buffer memory is charged to the server's xtc_res
+ * MEM_BYTES budget (--max-memory): every byte either buffer grows past
+ * its initial size, given back when it shrinks or the connection
+ * closes.  The initial buffers are not charged (their total is bounded
+ * by --max-clients), as in rexis.  Nothing else in sqlxtc charges that
+ * budget, so the check before each query used to compare a counter that
+ * was always 0: a SELECT emitted its whole result, however large.
+ */
+static int
+conn_charge(void *arg, int64_t delta)
+{
+	conn_state_t *st = arg;
+	if (st->res == NULL)
+		return 0;
+	if (delta < 0) {
+		xtc_res_release(st->res, XTC_RES_MEM_BYTES, -delta);
+		return 0;
+	}
+	if (xtc_res_acquire(st->res, XTC_RES_MEM_BYTES, delta) != XTC_OK) {
+		st->mem_refused = 1;
+		return -1;
+	}
+	return 0;
+}
+
+/* A reply that the budget refused: drop all of it (a partial result
+ * would desynchronize the stream), answer {"err":"OOM"} and close once
+ * that is flushed (PROTOCOL.md).  If even the error line cannot be
+ * buffered, close without it. */
+static void
+conn_refuse(conn_state_t *st, size_t mark)
+{
+	st->wbuf.len = mark;
+	if (quack_emit_err(&st->wbuf, "OOM") < 0)
+		st->closed = 1;
+	st->quit = 1;
+}
 
 static int
 try_read(conn_state_t *st)
@@ -130,8 +171,16 @@ try_read(conn_state_t *st)
 			st->closed = 1;
 			return -1;
 		}
+		if (conn_charge(st, (int64_t)(newcap - st->rcap)) != 0) {
+			conn_refuse(st, st->wbuf.len);
+			return -1;
+		}
 		nb = (char *)realloc(st->rbuf, newcap);
-		if (!nb) { st->closed = 1; return -1; }
+		if (!nb) {
+			(void)conn_charge(st, -(int64_t)(newcap - st->rcap));
+			st->closed = 1;
+			return -1;
+		}
 		st->rbuf = nb;
 		st->rcap = newcap;
 	}
@@ -139,7 +188,9 @@ try_read(conn_state_t *st)
 	avail = st->rcap - st->rlen;
 	n = recv(st->fd, st->rbuf + st->rlen, avail, MSG_DONTWAIT);
 	if (n > 0) { st->rlen += (size_t)n; return 0; }
-	if (n == 0) { st->closed = 1; return 0; }
+	/* EOF is a half-close, not an error: the requests already
+	 * buffered still get their whole replies. */
+	if (n == 0) { st->eof = 1; return 0; }
 	if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
 	st->closed = 1;
 	return -1;
@@ -283,10 +334,10 @@ process_lines(conn_state_t *st)
 {
 	while (!st->quit && !st->closed) {
 		char *nl;
-		size_t line_len;
+		size_t line_len, mark = st->wbuf.len;
 		quack_msg_t msg;
 
-		if (st->wbuf.len > 256 * 1024) break;     /* let writer drain */
+		if (st->wbuf.len > CONN_OUT_SOFT) break;  /* let writer drain */
 
 		nl = (char *)memchr(st->rbuf, '\n', st->rlen);
 		if (!nl) break;
@@ -314,24 +365,22 @@ process_lines(conn_state_t *st)
 				admin_show_processes(&st->wbuf);
 				break;
 			}
-			/* Rate limit */
-			if (st->iops_cap > 0 && st->iops_tokens) {
-				int64_t t = xtc_atomic_i64_load(st->iops_tokens);
-				if (t <= 0) {
-					quack_emit_err(&st->wbuf,
-					    "OVER_LIMIT");
-					break;
-				}
-				xtc_atomic_i64_add(st->iops_tokens,
-				                          -1);
+			/* Rate limit: take a token in one atomic step (a
+			 * load, then a decrement, let two loops spend the
+			 * last token); no token: give it back. */
+			if (st->iops_cap > 0 && st->iops_tokens &&
+			    xtc_atomic_i64_add(st->iops_tokens, -1) <= 0) {
+				(void)xtc_atomic_i64_add(st->iops_tokens, 1);
+				quack_emit_err(&st->wbuf, "OVER_LIMIT");
+				break;
 			}
 			/* Memory check */
 			if (st->res && st->max_memory > 0) {
 				int64_t used = xtc_res_used(st->res,
 				    XTC_RES_MEM_BYTES);
 				if (used >= st->max_memory) {
-					quack_emit_err(&st->wbuf, "OOM");
-					st->closed = 1;
+					/* quit, not closed: the error is flushed */
+					conn_refuse(st, st->wbuf.len);
 					break;
 				}
 			}
@@ -344,6 +393,9 @@ process_lines(conn_state_t *st)
 			quack_emit_err(&st->wbuf, "empty message");
 			break;
 		}
+		/* The budget refused a grow somewhere in this reply. */
+		if (st->mem_refused)
+			conn_refuse(st, mark);
 
 	consume:
 		/* Compact: drop the consumed line + newline. */
@@ -364,7 +416,8 @@ conn_proc(void *arg)
 {
 	conn_state_t *st = arg;
 	void *msg; size_t msg_len;
-	int ci;
+	uint32_t want, revents;
+	int ci, more;
 
 	/* Open this connection's engine handle once, for its whole life.
 	 * In connection-per-proc mode this is a private handle on the loop
@@ -381,8 +434,9 @@ conn_proc(void *arg)
 		try_write(st);
 		if (st->closed) break;
 
-		try_read(st);
-		if (st->closed && st->rlen == 0) break;
+		if (!st->eof)
+			try_read(st);
+		if (st->closed) break;
 
 		process_lines(st);
 
@@ -390,35 +444,63 @@ conn_proc(void *arg)
 
 		if (st->quit && st->wbuf.len == st->wpos) break;
 
-		/* Wait for inbound bytes (or the quit/shutdown signal).
-		 * Wakes exactly on fd readiness; no busy-poll. */
-		{
-			uint32_t revents = 0;
-			uint32_t want = XTC_IO_READABLE | XTC_IO_HUP | XTC_IO_ERR;
-			if (st->wbuf.len > st->wpos)
-				want |= XTC_IO_WRITABLE;
-			(void)xtc_proc_wait_fd(st->fd, want,
-			    1000LL * 1000 * 1000,
-			    &revents);
-			if (revents & XTC_WAIT_MAILBOX) {
-				while (xtc_recv(&msg, &msg_len, 0) == XTC_OK) {
-					if (msg) xtc_free(msg);
-				}
+		/* A complete request still buffered (a pass stops past
+		 * CONN_OUT_SOFT of output): with room to answer, run it now
+		 * -- the client may have sent everything already, so no
+		 * READABLE would come and only the park timeout woke us
+		 * (1 s per stop).  Yield first, so one pipeline does not
+		 * starve the other connections on this loop. */
+		more = memchr(st->rbuf, '\n', st->rlen) != NULL;
+		if (more && st->wbuf.len <= CONN_OUT_SOFT) {
+			xtc_yield();
+			continue;
+		}
+		/* Half-closed and every request answered: done. */
+		if (st->eof && !more && st->wbuf.len == st->wpos) break;
+
+		/* Nothing left to send: give a grown write buffer back to
+		 * the budget before waiting for the next request.
+		 * shortcut: a client whose every result passes 64 KiB pays a
+		 * realloc up and down per query; trim on a timer (rexis's
+		 * conn_trim) if that shows up in a profile. */
+		if (st->wbuf.len == 0)
+			quack_buf_trim(&st->wbuf);
+
+		/* Wait for inbound bytes, room to send, or a message.
+		 * Wakes exactly on fd readiness; no busy-poll.  Once the
+		 * peer has half-closed, only writability matters (a
+		 * readable EOF, or a HUP on kqueue, would wake at once). */
+		want = XTC_IO_ERR;
+		if (!st->eof)
+			want |= XTC_IO_READABLE | XTC_IO_HUP;
+		if (st->wbuf.len > st->wpos)
+			want |= XTC_IO_WRITABLE;
+		revents = 0;
+		(void)xtc_proc_wait_fd(st->fd, want, 1000LL * 1000 * 1000,
+		    &revents);
+		if (revents & XTC_WAIT_MAILBOX) {
+			while (xtc_recv(&msg, &msg_len, 0) == XTC_OK) {
+				if (msg) xtc_free(msg);
 			}
 		}
 	}
 
-	/* Final flush. */
-	{
-		int spins = 0;
-		while (st->wbuf.len > st->wpos && !st->closed && spins < 50) {
-			try_write(st);
-			if (st->wbuf.len > st->wpos) {
-				(void)xtc_recv(&msg, &msg_len,
-				    5LL * 1000 * 1000);
+	/* Final flush (QUIT, or an OOM refusal): wait for writability,
+	 * not a fixed sleep, giving up once the client has read nothing
+	 * for a second -- one that stops reading cannot hold the proc. */
+	while (st->wbuf.len > st->wpos && !st->closed) {
+		try_write(st);
+		if (st->wbuf.len <= st->wpos || st->closed)
+			break;
+		revents = 0;
+		if (xtc_proc_wait_fd(st->fd, XTC_IO_WRITABLE | XTC_IO_ERR,
+		    1000LL * 1000 * 1000, &revents) != XTC_OK ||
+		    (revents & XTC_IO_ERR))
+			break;
+		if (revents & XTC_WAIT_MAILBOX) {   /* else it wakes at once */
+			while (xtc_recv(&msg, &msg_len, 0) == XTC_OK) {
 				if (msg) xtc_free(msg);
 			}
-			spins++;
 		}
 	}
 
@@ -433,9 +515,13 @@ conn_proc(void *arg)
 	if (st->h_conn != NULL)
 		db_conn_close(st->db, st->h_conn, st->h_owned);
 
-	xtc_net_close(st->fd);   /* pairs with xtc_net_accept (fd accounting) */
+	/* Give the buffers back to the budget BEFORE the close: a client
+	 * that sees EOF and reconnects must find the bytes released. */
+	if (st->rcap > DEFAULT_READ_CAP)
+		(void)conn_charge(st, -(int64_t)(st->rcap - DEFAULT_READ_CAP));
 	free(st->rbuf);
 	quack_buf_free(&st->wbuf);
+	xtc_net_close(st->fd);   /* pairs with xtc_net_accept (fd accounting) */
 	free(st);
 }
 
@@ -444,6 +530,7 @@ conn_spawn(xtc_loop_t *loop, const conn_opts_t *opts, xtc_pid_t *out_pid)
 {
 	conn_state_t *st;
 	xtc_proc_opts_t po = { 0 };
+	int rc;
 
 	st = (conn_state_t *)calloc(1, sizeof *st);
 	if (!st) return XTC_E_NOMEM;
@@ -462,7 +549,14 @@ conn_spawn(xtc_loop_t *loop, const conn_opts_t *opts, xtc_pid_t *out_pid)
 	if (quack_buf_init(&st->wbuf, DEFAULT_WRITE_CAP) < 0) {
 		free(st->rbuf); free(st); return XTC_E_NOMEM;
 	}
+	st->wbuf.charge = conn_charge;
+	st->wbuf.charge_arg = st;
 
 	po.name = "sqlxtc-conn";
-	return xtc_proc_spawn(loop, conn_proc, st, &po, out_pid);
+	if ((rc = xtc_proc_spawn(loop, conn_proc, st, &po, out_pid)) != XTC_OK) {
+		quack_buf_free(&st->wbuf);     /* the proc never ran: ours */
+		free(st->rbuf);
+		free(st);
+	}
+	return rc;
 }

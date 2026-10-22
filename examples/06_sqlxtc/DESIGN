@@ -74,10 +74,12 @@ native engine:
                                               send() back to client
 
   - main.c brings up an xtc_app and a supervisor, applies the xtc_res
-    caps, opens the storage engine, and spawns the listener.
+    caps, takes an exclusive lock on the store (<store>.lock: one server
+    per store), opens the storage engine, and spawns the listener.
 
-  - The listener xtc_proc owns the listening socket (xtc_net, with
-    SO_REUSEPORT) and spawns one conn_proc per accepted connection.
+  - The listener xtc_proc owns the listening socket (xtc_net, an
+    exclusive bind: a second server on the port fails to start) and
+    spawns one conn_proc per accepted connection.
 
   - Each conn_proc is the client's session: its prepared statements, its
     transaction state, and its connection handle are the proc's private

@@ -68,16 +68,25 @@ int quack_parse(char *line, size_t len, quack_msg_t *msg);
 /* ---- encoder ---- */
 
 /* A grow-on-demand line buffer used by the connection's write side.
- * Backed by realloc; capacity is a soft hint. */
+ * Backed by realloc; capacity is a soft hint.  With `charge` set (after
+ * quack_buf_init), capacity past the initial one is charged through it:
+ * charge(arg, +n) before a grow (nonzero refuses it, and the grow fails
+ * like an allocation failure), charge(arg, -n) when capacity is given
+ * back.  The connection charges its xtc_res budget this way. */
 typedef struct quack_buf {
 	char  *p;
 	size_t len;
 	size_t cap;
+	size_t base;                 /* the initial capacity: never charged */
+	int  (*charge)(void *arg, int64_t delta);
+	void  *charge_arg;
 } quack_buf_t;
 
 int  quack_buf_init(quack_buf_t *b, size_t initial_cap);
 void quack_buf_free(quack_buf_t *b);
 void quack_buf_reset(quack_buf_t *b);
+/* Empty b and give back capacity past the initial one. */
+void quack_buf_trim(quack_buf_t *b);
 
 /* Append helpers: each ends the message with a newline.  Returns 0
  * on success or -1 on allocation failure. */

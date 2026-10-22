@@ -148,7 +148,7 @@ clean:
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o test_bufmgr_dio test_bufmgr_dio.o
 	rm -f test_bufmgr_mt
 	rm -f test_drop_reserved test_evict_revalidate_sampled
-	rm -f test_scan_resist test_sweep_bound test_evict_revalidate test_btree_late_load test_flush_pin test_trickler_select test_pp_slice test_tr_slice test_publication_pin test_private_frame test_pid_writeback bm_sweep_bench
+	rm -f test_bg_idle test_bg_kill test_ckpt_offloop test_scan_resist test_sweep_bound test_evict_revalidate test_btree_late_load test_flush_pin test_trickler_select test_pp_slice test_tr_slice test_publication_pin test_private_frame test_pid_writeback bm_sweep_bench
 	rm -f test_persist
 	rm -f test_cursor_resume
 	rm -f test_btnode
@@ -884,3 +884,27 @@ numa_claim_probe: ../../bench/sqlxtc/numa_claim_probe.c btree.c bufmgr_probe.o b
 # self-checks the design's key properties with plain assert().
 evict_policy_proto: evict_policy_proto.c
 	$(CC) $(CFLAGS) -o $@ evict_policy_proto.c
+
+# ---- idle backoff of the page provider and trickler (p160/arch) ----
+test: test-bg-idle
+test_bg_idle: test_bg_idle.c bufmgr.c bufmgr.h
+	$(CC) $(CFLAGS) -o $@ test_bg_idle.c $(LDFLAGS)
+
+test-bg-idle: test_bg_idle
+	TMPDIR=$${TMPDIR:-/tmp} ./test_bg_idle
+
+# ---- the periodic checkpoint runs off the loop (p160/arch) ----
+test: test-ckpt-offloop
+test_ckpt_offloop: test_ckpt_offloop.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_ckpt_offloop.c $(ENGINE_NATIVE) $(LDFLAGS)
+
+test-ckpt-offloop: test_ckpt_offloop
+	TMPDIR=$${TMPDIR:-/tmp} ./test_ckpt_offloop
+
+# ---- a killed background proc does not hold up its stop (p160/arch) ----
+test: test-bg-kill
+test_bg_kill: test_bg_kill.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_bg_kill.c $(ENGINE_NATIVE) $(LDFLAGS)
+
+test-bg-kill: test_bg_kill
+	TMPDIR=$${TMPDIR:-/tmp} ./test_bg_kill
