@@ -1396,7 +1396,10 @@ xstore_cat_forget_one(bt_t *bt, const char *name)
  * is a sub-range, and walking the range ascending yields ORDER BY the
  * index columns.  Entries are NOT WAL-logged; xstore_index_rebuild_all
  * reconstructs them from the durable base rows at every open, which is
- * also why the key format can change without a migration.
+ * also why the key format can change without a migration.  A store that
+ * keeps entries across a reopen must rebuild them when XS_IDX_FORMAT
+ * (the entry encoding: xs_tup_elem, xs_idx_rowkey, the prefix) differs
+ * from the one that wrote them.  Format 2: compact numbers (xs_tup_num).
  *
  * Entries are ADD-ONLY at commit: a row version whose key tuple differs
  * from its predecessor adds an entry, and the predecessor's entry is
@@ -1423,16 +1426,20 @@ xstore_cat_forget_one(bt_t *bt, const char *name)
  * still parses as a one-column ascending CREATE INDEX.
  * ================================================================== */
 #define XS_IDXCAT_TABLEID 0xFFFFFFFDu   /* persisted index catalog */
+#define XS_IDX_FORMAT     2u            /* index entry encoding version (1: 1.59) */
 #define XS_IDX_LEAD       0xFEu         /* index-entry key namespace lead byte */
 #define XS_IDX_MAX        128           /* in-process index cache size */
 #define XS_IDX_NCOL       16            /* columns per index */
 #define XS_IDX_KMAX       1024          /* >= BT_MAX_KEY on every page size */
 
-/* Element type tags, in SQLite's cross-class order. */
+/* Element type tags, in SQLite's cross-class order.  A number's tag is
+ * XS_TUP_NUM plus (minus, if negative) its magnitude class 0..9
+ * (xs_tup_num), so numbers take 0x0C..0x1E, between NULL and TEXT. */
 #define XS_TUP_NULL 0x05u
 #define XS_TUP_NUM  0x15u
 #define XS_TUP_TEXT 0x25u
 #define XS_TUP_BLOB 0x35u
+#define XS_TUP_HUGE 9          /* magnitude class of |v| >= 2^63 */
 
 /* The runtime part of an index: what key encoding and maintenance
  * need, resolved once when the index enters the cache. */
@@ -1528,28 +1535,74 @@ xs_get_be64(const uint8_t *p)
 	return v;
 }
 
-/* Order-preserving bits of a double: sign-flipped IEEE-754, so memcmp
- * order of the big-endian bytes is numeric order (-0.0 folds to 0.0). */
-static uint64_t
-xs_dbl_key(double d)
+/*
+ * The order-preserving element of a number (INTEGER, or REAL: 3 and 3.0
+ * are one key, and a mixed column orders by exact value, as in SQLite).
+ * With a = |v| < 2^63, m = 2 * floor(a) + (a has a fraction): the tag is
+ * XS_TUP_NUM + n for the n = 0..8 big-endian bytes of m (no leading zero
+ * byte; zero is the bare tag), then the fraction's 8 IEEE-754 bytes when
+ * m is odd.  |v| >= 2^63 (only a REAL, or INT64_MIN) is class 9: the 8
+ * bytes of |v|.  A negative number takes XS_TUP_NUM - class and the
+ * complement of its magnitude's bytes, so a larger magnitude sorts first.
+ * Within a class the bytes order by m and then the fraction, and an
+ * element's length follows from its tag and m's low bit, so no element
+ * is a prefix of another (the scans compare a bound as a byte prefix).
+ * Integers below 64 take 2 bytes, below 2^15 3 bytes, a microsecond
+ * timestamp 8: the old form was 11 bytes for every number (an 8-byte
+ * sign-flipped double plus a 2-byte residual for integers beyond 2^53),
+ * and gave INT64_MAX and the REAL 2^63 the same key -- a false UNIQUE
+ * conflict.  Returns the new offset, or -1 if it does not fit in `cap`.
+ */
+static int
+xs_tup_num(uint8_t *out, int off, int cap, int cls, int64_t iv, double rv)
 {
-	uint64_t u;
-	if (d == 0.0) d = 0.0;
-	memcpy(&u, &d, 8);
-	return (u & 0x8000000000000000ull) ? ~u : (u | 0x8000000000000000ull);
+	uint8_t body[16];
+	uint64_t m = 0, u;
+	double a, f = 0;
+	int neg, k, nb = 0, i;
+
+	if (cls == XSTORE_C_INT && iv != INT64_MIN) {
+		neg = iv < 0;
+		m = 2u * (neg ? 0u - (uint64_t)iv : (uint64_t)iv);
+		k = 0;
+	} else {
+		a = cls == XSTORE_C_INT ? (double)iv : rv;   /* INT64_MIN: exact */
+		neg = a < 0;                                  /* NaN: not negative */
+		if (neg) a = -a;
+		if (a < 9223372036854775808.0) {              /* false for NaN */
+			u = (uint64_t)a;
+			f = a - (double)u;           /* exact: u is a's integer part */
+			m = 2u * u + (f != 0);
+			k = 0;
+		} else {
+			k = XS_TUP_HUGE;
+			memcpy(&u, &a, 8);               /* a >= 0: bits order as values */
+			for (i = 7; i >= 0; i--) body[nb++] = (uint8_t)(u >> (8 * i));
+		}
+	}
+	if (k == 0) {
+		while (k < 8 && (m >> (8 * k)) != 0)
+			k++;
+		for (i = k - 1; i >= 0; i--) body[nb++] = (uint8_t)(m >> (8 * i));
+		if (m & 1u) {
+			memcpy(&u, &f, 8);               /* 0 < f < 1 */
+			for (i = 7; i >= 0; i--) body[nb++] = (uint8_t)(u >> (8 * i));
+		}
+	}
+	if (off + 1 + nb > cap) return -1;
+	out[off++] = (uint8_t)(neg ? XS_TUP_NUM - (unsigned)k : XS_TUP_NUM + (unsigned)k);
+	for (i = 0; i < nb; i++)
+		out[off++] = neg ? (uint8_t)~body[i] : body[i];
+	return off;
 }
 
 /*
  * Append one order-preserving tuple element for a value of storage
- * class `cls` (XSTORE_C_*).  INTEGER and REAL share one numeric
- * encoding, so 3 and 3.0 compare equal and a mixed INT/REAL column
- * orders numerically (SQLite): the sign-flipped double, then a residual
- * byte pair that orders integers which round to the same double (beyond
- * 2^53), 0x80 0x00 for a REAL or an exactly representable INT.  TEXT and
- * BLOB escape 0x00 as 0x00 0xFF and end with 0x00 0x00, so a value is
- * never a byte prefix of a longer one ("n1" < "n10").  `desc`
- * complements the element's bytes.  Returns the new offset, or -1 if
- * the element does not fit in `cap`.
+ * class `cls` (XSTORE_C_*): a number as xs_tup_num.  TEXT and BLOB
+ * escape 0x00 as 0x00 0xFF and end with 0x00 0x00, so a value is never
+ * a byte prefix of a longer one ("n1" < "n10").  `desc` complements the
+ * element's bytes.  Returns the new offset, or -1 if the element does
+ * not fit in `cap`.
  */
 static int
 xs_tup_elem(uint8_t *out, int off, int cap, int cls, int64_t iv, double rv,
@@ -1558,24 +1611,10 @@ xs_tup_elem(uint8_t *out, int off, int cap, int cls, int64_t iv, double rv,
 	int start = off, i;
 	if (off < 0) return -1;
 	switch (cls) {
-	case XSTORE_C_INT: case XSTORE_C_REAL: {
-		double d = cls == XSTORE_C_INT ? (double)iv : rv;
-		int64_t resid = 0;
-		if (cls == XSTORE_C_INT && (iv > (1LL << 53) || iv < -(1LL << 53))) {
-			/* (double)iv rounds; order ties by the exact remainder.
-			 * The remainder is within +-2^11 for |iv| < 2^63. */
-			if (d >= 9223372036854775807.0) resid = iv - INT64_MAX;
-			else resid = iv - (int64_t)d;
-		}
-		if (off + 11 > cap) return -1;
-		out[off++] = XS_TUP_NUM;
-		xs_put_be64(out + off, xs_dbl_key(d));
-		off += 8;
-		resid += 0x8000;
-		out[off++] = (uint8_t)((uint64_t)resid >> 8);
-		out[off++] = (uint8_t)resid;
+	case XSTORE_C_INT: case XSTORE_C_REAL:
+		if ((off = xs_tup_num(out, off, cap, cls, iv, rv)) < 0)
+			return -1;
 		break;
-	}
 	case XSTORE_C_TEXT: case XSTORE_C_BLOB:
 		if (off + 1 > cap) return -1;
 		out[off++] = cls == XSTORE_C_TEXT ? XS_TUP_TEXT : XS_TUP_BLOB;
@@ -1595,6 +1634,12 @@ xs_tup_elem(uint8_t *out, int off, int cap, int cls, int64_t iv, double rv,
 	if (desc)
 		for (i = start; i < off; i++) out[i] = (uint8_t)~out[i];
 	return off;
+}
+
+int
+xstore_index_elem(uint8_t *out, int cap, const xstore_val_t *v, int desc)
+{
+	return xs_tup_elem(out, 0, cap, v->cls, v->i, v->r, v->p, v->n, desc);
 }
 
 /* The 5-byte namespace prefix of index `idx_id`. */

@@ -224,6 +224,11 @@ int xstore_rec_cols(const uint8_t *rec, int reclen, xstore_val_t *out, int cap);
  * same way whichever path writes it. */
 int xstore_rec_put(uint8_t *out, int off, int cap, int cls, int64_t iv,
                    double rv, const uint8_t *p, int n);
+/* The order-preserving index key element of one value: the bytes an
+ * index entry stores for it (desc != 0 complements them).  memcmp order
+ * of two elements is SQLite's order of the values, and no element is a
+ * prefix of another.  Returns the length, or -1 if it exceeds cap. */
+int xstore_index_elem(uint8_t *out, int cap, const xstore_val_t *v, int desc);
 
 /*
  * Native autocommit write path -- the storage side of bypassing the

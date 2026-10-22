@@ -206,9 +206,16 @@ note_index(struct cat *c, const uint8_t *k, int kl)
 
 		c->idx_elems++;
 		t ^= d;
-		if (t == 0x15) {
+		if (t >= 0x0C && t <= 0x1E) {
+			/* a number (xstore.c xs_tup_num): tag 0x15 +- class k;
+			 * k bytes of m, then 8 more if m is odd; class 9 is 8 */
+			int cl = t >= 0x15 ? t - 0x15 : 0x15 - t, nb = cl == 9 ? 8 : cl;
+			/* m's low byte, un-complemented (DESC and negative) */
+			uint8_t lo = (nb > 0 && off + nb < kl) ?
+			    (uint8_t)(k[off + nb] ^ d ^ (t < 0x15 ? 0xFF : 0)) : 0;
+
 			c->idx_num++;
-			off += 11;
+			off += 1 + nb + ((cl < 9 && (lo & 1u)) ? 8 : 0);
 			c->idx_num_b += (uint64_t)(off - start);
 		} else if (t == 0x25 || t == 0x35) {
 			off++;

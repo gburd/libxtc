@@ -95,3 +95,4 @@ bench_morsel_balance
 sx_size
 test_btree_prefix_split
 test_rec_codec
+test_idx_elem
