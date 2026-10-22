@@ -27,11 +27,20 @@
 /* The DST determinism guard (no-op in production).  See os_time.c. */
 void __xtc_sim_nondeterminism(const char *what);
 
+/* The env lock may be taken on a fiber (xtc_fs_tmpdir, osproc's PATH
+ * lookup), so a hold raises the unsafe depth like every __os_mutex:
+ * a fiber preempted holding it would deadlock a loop-mate that reads the
+ * environment too.  Forward-declared, as os_mutex.c does. */
+void __xtc_unsafe_enter(void);
+void __xtc_unsafe_leave(void);
+
 #if !defined(_WIN32)
 #include <pthread.h>
 static pthread_mutex_t __env_lock = PTHREAD_MUTEX_INITIALIZER;
-#define ENV_LOCK()    (void)pthread_mutex_lock(&__env_lock)
-#define ENV_UNLOCK()  (void)pthread_mutex_unlock(&__env_lock)
+#define ENV_LOCK()    do { __xtc_unsafe_enter(); \
+	(void)pthread_mutex_lock(&__env_lock); } while (0)
+#define ENV_UNLOCK()  do { (void)pthread_mutex_unlock(&__env_lock); \
+	__xtc_unsafe_leave(); } while (0)
 #else
 #include <windows.h>
 static SRWLOCK __env_lock = SRWLOCK_INIT;

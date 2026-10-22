@@ -19,6 +19,7 @@
 #include "xtc_int.h"       /* __os_malloc / __os_free */
 #include "xtc_preempt.h"
 #include "preempt_int.h"    /* __xtc_unsafe_enter/leave/depth (internal) */
+#include "os_sharp.h"       /* __os_env_get / __os_env_set (internal) */
 
 /* Outside any allocator call, the unsafe depth is 0. */
 static MunitResult
@@ -75,8 +76,52 @@ test_alloc_balanced(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* An __os_rwlock hold raises the depth, as an __os_mutex hold does: a
+ * fiber preempted while holding one would deadlock a loop-mate that
+ * blocks its OS thread on the same rwlock.  Read and write holds, and
+ * the depth returns to 0 on release. */
+static MunitResult
+test_rwlock_hold(const MunitParameter p[], void *d)
+{
+	__os_rwlock_t rw;
+	(void)p; (void)d;
+	munit_assert_int(__os_rwlock_init(&rw), ==, XTC_OK);
+	munit_assert_int(__os_rwlock_rdlock(&rw), ==, XTC_OK);
+	munit_assert_int(__xtc_unsafe_depth(), ==, 1);
+	munit_assert_int(__os_rwlock_rdunlock(&rw), ==, XTC_OK);
+	munit_assert_int(__xtc_unsafe_depth(), ==, 0);
+	munit_assert_int(__os_rwlock_wrlock(&rw), ==, XTC_OK);
+	munit_assert_int(__xtc_unsafe_depth(), ==, 1);
+	munit_assert_int(__os_rwlock_wrunlock(&rw), ==, XTC_OK);
+	munit_assert_int(__xtc_unsafe_depth(), ==, 0);
+	munit_assert_int(__os_rwlock_destroy(&rw), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* The env lock brackets too (it is taken on fibers: xtc_fs_tmpdir, the
+ * osproc PATH lookup); the hold itself is inside libc, so this checks
+ * the bracket is balanced on every path (found, missing, set). */
+static MunitResult
+test_env_balanced(const MunitParameter p[], void *d)
+{
+	char buf[64];
+	(void)p; (void)d;
+	munit_assert_int(__os_env_set("XTC_UNSAFE_DEPTH_T", "1", 1), ==, XTC_OK);
+	munit_assert_int(__xtc_unsafe_depth(), ==, 0);
+	munit_assert_int(__os_env_get("XTC_UNSAFE_DEPTH_T", buf, sizeof buf),
+	    ==, XTC_OK);
+	munit_assert_int(__xtc_unsafe_depth(), ==, 0);
+	(void)__os_env_get("XTC_UNSAFE_DEPTH_NONE_T", buf, sizeof buf);
+	munit_assert_int(__xtc_unsafe_depth(), ==, 0);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/zero_at_rest", test_zero_at_rest, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/rwlock_hold", test_rwlock_hold, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/env_balanced", test_env_balanced, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/nesting", test_nesting, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/alloc_balanced", test_alloc_balanced, NULL, NULL,

@@ -124,23 +124,37 @@ int __os_rwlock_destroy(__os_rwlock_t *r) {
 }
 /* PUBLIC: int __os_rwlock_rdlock __P((__os_rwlock_t *)); */
 int __os_rwlock_rdlock(__os_rwlock_t *r) {
+	int e;
 	if (r == NULL) return XTC_E_INVAL;
-	return pthread_rwlock_rdlock(RW(r)) == 0 ? XTC_OK : XTC_E_INTERNAL;
+	__xtc_unsafe_enter();               /* as __os_mutex_lock: no preempt */
+	e = pthread_rwlock_rdlock(RW(r));
+	if (e != 0) __xtc_unsafe_leave();   /* not held; balance the enter */
+	return e == 0 ? XTC_OK : XTC_E_INTERNAL;
 }
 /* PUBLIC: int __os_rwlock_wrlock __P((__os_rwlock_t *)); */
 int __os_rwlock_wrlock(__os_rwlock_t *r) {
+	int e;
 	if (r == NULL) return XTC_E_INVAL;
-	return pthread_rwlock_wrlock(RW(r)) == 0 ? XTC_OK : XTC_E_INTERNAL;
+	__xtc_unsafe_enter();
+	e = pthread_rwlock_wrlock(RW(r));
+	if (e != 0) __xtc_unsafe_leave();
+	return e == 0 ? XTC_OK : XTC_E_INTERNAL;
 }
 /* PUBLIC: int __os_rwlock_rdunlock __P((__os_rwlock_t *)); */
 int __os_rwlock_rdunlock(__os_rwlock_t *r) {
+	int e;
 	if (r == NULL) return XTC_E_INVAL;
-	return pthread_rwlock_unlock(RW(r)) == 0 ? XTC_OK : XTC_E_INTERNAL;
+	e = pthread_rwlock_unlock(RW(r));
+	__xtc_unsafe_leave();               /* balances the rdlock enter */
+	return e == 0 ? XTC_OK : XTC_E_INTERNAL;
 }
 /* PUBLIC: int __os_rwlock_wrunlock __P((__os_rwlock_t *)); */
 int __os_rwlock_wrunlock(__os_rwlock_t *r) {
+	int e;
 	if (r == NULL) return XTC_E_INVAL;
-	return pthread_rwlock_unlock(RW(r)) == 0 ? XTC_OK : XTC_E_INTERNAL;
+	e = pthread_rwlock_unlock(RW(r));
+	__xtc_unsafe_leave();               /* balances the wrlock enter */
+	return e == 0 ? XTC_OK : XTC_E_INTERNAL;
 }
 
 /* --- cond --- */
