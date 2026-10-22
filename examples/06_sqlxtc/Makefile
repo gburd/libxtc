@@ -537,7 +537,7 @@ test_fuzzy_checkpoint: test_fuzzy_checkpoint.c $(ENGINE_NATIVE)
 test-fuzzy-checkpoint: test_fuzzy_checkpoint
 	./test_fuzzy_checkpoint
 
-bufmgr.o: bufmgr.c bufmgr.h
+bufmgr.o: bufmgr.c bufmgr.h xs_ctr.h
 
 # ---- buffer-manager multi-threaded stress test (executor; no daemon) ----
 test_bufmgr_mt: test_bufmgr_mt.c bufmgr.o
