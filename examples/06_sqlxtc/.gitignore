@@ -94,3 +94,4 @@ bench_btree_mixed
 bench_morsel_balance
 test_bg_idle
 test_ckpt_offloop
+test_bg_kill

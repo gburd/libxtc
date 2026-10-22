@@ -2608,6 +2608,18 @@ bg_park(int64_t ns)
 	return rc == XTC_OK || rc == XTC_E_AGAIN ? 0 : -1;
 }
 
+/* At-exit hook: clear a background proc's alive flag on EVERY exit
+ * path.  Cleared only on a normal return, a proc that was killed
+ * (xtc_exit_pid) or exited from a callee left it set, and its stop
+ * function then polled for its whole bound (about 20 s) at shutdown.
+ * Registered first thing in a fresh proc, so it cannot hit the
+ * per-proc hook limit. */
+static void
+bg_dead(void *alive)
+{
+	atomic_store_explicit((_Atomic int *)alive, 0, memory_order_release);
+}
+
 /* Wake a backed-off proc so it sees its stop flag now.  From a proc only:
  * off a loop the proc's loop is not running and the caller does not wait. */
 static void
@@ -2663,6 +2675,7 @@ pp_proc(void *arg)
 	uint32_t cover = (bm->n_frames + PP_SLICE - 1) / PP_SLICE;
 	struct bg_act act;
 	xtc_free(pa);
+	(void)xtc_proc_at_exit(bg_dead, &bm->pp_alive);
 
 	bg_activity(bm, &act);
 	while (atomic_load_explicit(&bm->pp_running, memory_order_acquire)) {
@@ -2674,7 +2687,6 @@ pp_proc(void *arg)
 		if (bg_moved(bm, &act))
 			idle = 0;              /* the pool was used during the sleep */
 	}
-	atomic_store_explicit(&bm->pp_alive, 0, memory_order_release);
 }
 
 int
@@ -2949,11 +2961,10 @@ tr_proc(void *arg)
 	uint8_t *wbuf = NULL;
 	bm_frame_t **run_f = NULL;
 	xtc_free(ta);
+	(void)xtc_proc_at_exit(bg_dead, &bm->tr_alive);
 	if (max_batch < 1) max_batch = 1;
-	if ((cand = xtc_calloc((size_t)max_batch, sizeof *cand)) == NULL) {
-		atomic_store_explicit(&bm->tr_alive, 0, memory_order_release);
+	if ((cand = xtc_calloc((size_t)max_batch, sizeof *cand)) == NULL)
 		return;
-	}
 	/* Gather buffer for coalesced multi-page writes (direct-I/O aligned)
 	 * plus per-run frame scratch. */
 	wbuf = xtc_aligned_alloc(4096, (size_t)max_batch * bm->page_size);
@@ -2962,7 +2973,6 @@ tr_proc(void *arg)
 		xtc_aligned_free(wbuf);
 		xtc_free(run_f);
 		xtc_free(cand);
-		atomic_store_explicit(&bm->tr_alive, 0, memory_order_release);
 		return;
 	}
 	if (bm->adaptive_writeback) {
@@ -3110,7 +3120,6 @@ tr_proc(void *arg)
 	xtc_aligned_free(wbuf);
 	xtc_free(run_f);
 	xtc_dio_sched_destroy(tuner);
-	atomic_store_explicit(&bm->tr_alive, 0, memory_order_release);
 }
 
 int

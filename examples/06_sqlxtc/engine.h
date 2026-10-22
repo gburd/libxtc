@@ -87,6 +87,10 @@ int  sx_storage_checkpoint(void);
 #define SX_HAVE_PERIODIC_CHECKPOINT 1
 void sx_storage_set_checkpoint(uint64_t min_bytes);
 uint64_t sx_storage_checkpoints(void);   /* checkpoints completed */
+/* The checkpoint proc's pid in *out: 1, or 0 when none is running.
+ * For tests that kill it. */
+struct xtc_pid;
+int  sx_storage_ckpt_pid(struct xtc_pid *out);
 void sx_storage_quiesce(void);
 /* Clean shutdown: flush, compact the log, mark the base clean.  Returns
  * SX_OK, or SX_ERROR if any flush/sync/compaction failed -- the base is

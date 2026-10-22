@@ -252,6 +252,15 @@ sx_storage_checkpoints(void)
 	return atomic_load(&g_ckpt_count);
 }
 
+int
+sx_storage_ckpt_pid(xtc_pid_t *out)
+{
+	if (!atomic_load(&g_ckpt_alive))
+		return 0;
+	*out = g_ckpt_pid;
+	return 1;
+}
+
 /*
  * The checkpoint itself runs on a blocking-pool thread, not on the
  * checkpoint fiber.  Its dump already did, but the quiesced finish --
@@ -277,6 +286,15 @@ sx_ckpt_run(void *arg)
 	return 0;
 }
 
+/* At-exit hook: clear the alive flag on every exit path (a killed
+ * checkpoint proc left it set, and sx_ckpt_stop waited 2 s for it). */
+static void
+sx_ckpt_dead(void *arg)
+{
+	(void)arg;
+	atomic_store(&g_ckpt_alive, 0);
+}
+
 static void
 sx_ckpt_proc(void *arg)
 {
@@ -284,6 +302,7 @@ sx_ckpt_proc(void *arg)
 	struct sx_ckpt_job job;
 	int res;
 	(void)arg;
+	(void)xtc_proc_at_exit(sx_ckpt_dead, NULL);
 	while (!atomic_load(&g_ckpt_stop)) {
 		uint64_t sz, trig;
 		void *m = NULL;
@@ -309,7 +328,6 @@ sx_ckpt_proc(void *arg)
 			atomic_fetch_add(&g_ckpt_count, 1);
 		}
 	}
-	atomic_store(&g_ckpt_alive, 0);
 }
 
 /* Stop the checkpoint proc and, on a proc, wait for it to finish any

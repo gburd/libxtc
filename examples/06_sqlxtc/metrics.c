@@ -66,12 +66,26 @@ metrics_drain_log(void *arg)
 	return xtc_log_drain(xtc_log_default());
 }
 
+/* At-exit hook: free the state and clear the alive flag on every exit
+ * path (a killed metrics proc left the flag set, so metrics_stop
+ * polled 2 s for it). */
+static void
+metrics_dead(void *arg)
+{
+	free(arg);
+	atomic_store(&g_metrics_alive, 0);
+}
+
 static void
 metrics_proc(void *arg)
 {
 	metrics_state_t *st = arg;
 	void *msg; size_t msg_len;
 	int drained;
+	if (xtc_proc_at_exit(metrics_dead, st) != XTC_OK) {
+		metrics_dead(st);
+		return;
+	}
 	while (!atomic_load(&g_metrics_stop)) {
 		(void)xtc_recv(&msg, &msg_len, METRICS_INTERVAL_NS);
 		if (msg) xtc_free(msg);
@@ -119,8 +133,6 @@ metrics_proc(void *arg)
 		 * write on the loop. */
 		(void)xtc_blocking_run(metrics_drain_log, NULL, &drained);
 	}
-	free(st);
-	atomic_store(&g_metrics_alive, 0);
 }
 
 /* Stop the metrics proc and, on a proc, wait until it has exited, so no
