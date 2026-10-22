@@ -63,6 +63,24 @@ Project-specific rules for AI agents (Claude Code, Kiro CLI, Pi, Maki).
    note's content deserves to ship, it becomes consumer-facing docs
    under `docs/` on its own merits, not a force-added `.agent/` file.
 
+## Worktrees and agent scratch space
+
+- **Git worktrees live in `/scratch/libxtc/<worktree>`**, never inside the
+  repository or elsewhere under the home directory.  Remove a worktree as
+  soon as its branch is merged or abandoned (`git worktree list` should not
+  grow without bound).  This repo has a submodule
+  (`examples/06_sqlxtc/lime`), so `git worktree remove` refuses an
+  initialized worktree: confirm `git status` is clean, then
+  `git worktree remove --force --force`.  `git worktree move` cannot move
+  such a worktree at all: remove it and `git worktree add` it at the new
+  path.
+- **`.agent/` holds notes, not build output.**  Keep reports, scripts and
+  small result files; do not leave build trees, binaries, object files,
+  git bundles, cores or raw multi-hundred-MB driver logs there (compact a
+  raw log to its counts, or delete it once its numbers are in a report).
+  A git bundle of history taken before a rewrite still contains what the
+  rewrite removed: delete it once the rewrite is confirmed on the remote.
+
 ## Recovering from a bad commit (history rewrite)
 
 If a core dump, build artifact, or secret reaches the remote, it must
