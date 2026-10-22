@@ -289,8 +289,14 @@ db_create(const db_opts_t *opts, db_t **out)
 		/* Replay live keys from the bitcask into the in-memory
 		 * table.  We use bitcask_iterate to visit each key; for
 		 * each, we read the value and call db_set without writing
-		 * back to bitcask. */
+		 * back to bitcask.  The replay mutates the write copy, so
+		 * it is a write transaction like any other: without the
+		 * publish in db_write_end the readers kept the empty
+		 * header (DBSIZE 0 after every restart until the first
+		 * write command). */
+		db_write_begin(db);
 		db_persist_replay(db);
+		db_write_end(db);
 	}
 
 	*out = db;
