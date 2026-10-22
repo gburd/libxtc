@@ -162,6 +162,7 @@ clean:
 	rm -f test_btree_stale_descent test_btree_limits test_btree_sample bench_morsel_balance
 	rm -f test_btree_seek test_btree_seek_latched test_point_read test_index_walk test_group_exact test_xs_ctr
 	rm -f test_xs_ctr test_bm_reuse_version test_kill_stmt test_cat_lock_shared
+	rm -f test_sql_results test_txn_fastpath
 	rm -f test_tpcc_seek test_dup_composite test_bulk_insert test_plan_cache
 	rm -f test_btree_delete_merge test_savepoint test_isolation test_ww_conflict test_row_intents test_commit_visibility test_ssi_skew test_ckpt_bound test_dup_insert test_recover_fast
 	rm -f test_vfs_loop test_vfs_loop.o
@@ -929,6 +930,23 @@ test_group_exact: test_group_exact.c $(ENGINE_NATIVE)
 
 test-group-exact: test_group_exact
 	./test_group_exact
+
+# SELECT shapes whose answers must equal SQLite's (wrong results / spurious
+# errors found by SQLFIX; OPEN cases are known defects, reported only).
+test: test-sql-results
+test_sql_results: test_sql_results.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_sql_results.c $(ENGINE_NATIVE) $(LDFLAGS)
+
+test-sql-results: test_sql_results
+	./test_sql_results
+
+# sx_exec runs a bare BEGIN / COMMIT / END / ROLLBACK with no parse.
+test: test-txn-fastpath
+test_txn_fastpath: test_txn_fastpath.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_txn_fastpath.c $(ENGINE_NATIVE) $(LDFLAGS)
+
+test-txn-fastpath: test_txn_fastpath
+	./test_txn_fastpath
 
 # xs_ctr.h: the striped statistics counter (exact sum, one line per slot).
 test: test-xs-ctr
