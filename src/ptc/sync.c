@@ -60,6 +60,83 @@ cv_wait_until(pthread_cond_t *cv, pthread_mutex_t *lock,
 }
 
 /* -------------------------------------------------------------------------
+ * Off-loop spin-then-park (xtc_amutex, xtc_arwlock).
+ *
+ * A plain thread that finds the lock held used to sleep on the condvar at
+ * once.  With short holds that is a convoy: the lock is free again long
+ * before the sleeper is scheduled, so it is handed only to threads that
+ * pay a futex sleep + wake each (measured, bench_sync_offloop, 16
+ * threads: 6 context switches per arwlock acquire, 10x slower than a
+ * pthread rwlock).  Now a waiter first polls the lock's state words
+ * without taking the inner mutex (test-and-test-and-set: a spinner never
+ * writes the line the holder needs), for at most SYNC_SPIN_ROUNDS pauses
+ * (512: about 6 us on a current x86 core; measured best of 128..2048 for
+ * holds of 50 ns to 5 us), then parks.  At most sync_spin_cap() threads spin on one lock at a time
+ * (a quarter of the CPUs): more would only steal CPU from the holder when
+ * threads outnumber CPUs.  No spinning on a single CPU or under the
+ * simulator (one thread: nothing can release the lock while we poll).
+ * The spin reads no clock and no RNG, so it is deterministic.
+ *
+ * shortcut: the spin is bounded by a count, not by "the holder is still
+ * running" (the lock does not record which thread holds it); upgrade to
+ * an owner-on-CPU check if holders that sleep while latched show up as
+ * wasted spin in a profile.
+ * ----------------------------------------------------------------------- */
+#ifndef SYNC_SPIN_ROUNDS
+#define SYNC_SPIN_ROUNDS 512
+#endif
+
+static _Atomic int g_sync_spin_cap = -1;
+
+static int
+sync_spin_cap(void)
+{
+	int v;
+	if (__xtc_sim_active())
+		return 0;
+	v = atomic_load_explicit(&g_sync_spin_cap, memory_order_relaxed);
+	if (v < 0) {
+		v = __os_ncpus();
+		v = v > 1 ? (v / 4 > 0 ? v / 4 : 1) : 0;
+		atomic_store_explicit(&g_sync_spin_cap, v, memory_order_relaxed);
+	}
+	return v;
+}
+
+/* Enter the spin if fewer than the cap are spinning; 1 if admitted. */
+static int
+sync_spin_enter(_Atomic int *spinners)
+{
+	int cap = sync_spin_cap();
+	if (cap == 0)
+		return 0;
+	if (atomic_fetch_add_explicit(spinners, 1, memory_order_relaxed) >= cap) {
+		atomic_fetch_sub_explicit(spinners, 1, memory_order_relaxed);
+		return 0;
+	}
+	return 1;
+}
+
+static void
+sync_spin_leave(_Atomic int *spinners)
+{
+	atomic_fetch_sub_explicit(spinners, 1, memory_order_relaxed);
+}
+
+/* __xtc_mtx_lock's try form: 1 with *lk held (bracket balanced by
+ * __xtc_mtx_unlock), 0 if busy.  A spinner never blocks on the inner
+ * mutex: a busy one means another thread is about to take the lock. */
+static int
+sync_mtx_trylock(pthread_mutex_t *lk)
+{
+	__xtc_unsafe_enter();
+	if (pthread_mutex_trylock(lk) == 0)
+		return 1;
+	__xtc_unsafe_leave();
+	return 0;
+}
+
+/* -------------------------------------------------------------------------
  * Fiber-park path for the blocking primitives (notify, semaphore, amutex,
  * arwlock, barrier, gate).
  *
@@ -627,16 +704,23 @@ xtc_abort_token_reason(const xtc_abort_token_t *t)
  * Fiber waiters use a FIFO queue with direct hand-off: unlock grants
  * the lock to the head waiter (held stays 1) and wakes it, so there
  * is no thundering herd and ordering is fair.  Thread waiters share
- * the same `held` flag via the condvar.  When both kinds wait, unlock
+ * the same `held` flag via the condvar: they spin briefly, then sleep
+ * (see "Off-loop spin-then-park").  When both kinds wait, unlock
  * prefers a fiber waiter; a later release with no fiber waiters wakes
- * a thread waiter.
+ * ONE sleeping thread unless an earlier wake has not run yet (cv_wake):
+ * at most one woken-but-not-yet-running thread per mutex, so releases
+ * never stack wakes into a herd, and every release while sleepers wait
+ * either wakes one or has one on its way, so none is stranded.
  */
 
 struct xtc_amutex {
 	pthread_mutex_t       lock;
 	pthread_cond_t        cv;        /* thread (non-fiber) waiters */
-	int                   held;
+	_Atomic int           held;      /* written under lock; spinners peek */
 	int                   recursive; /* XTC_AMUTEX_RECURSIVE */
+	int                   cv_waiters; /* threads asleep on cv */
+	int                   cv_wake;   /* signalled, not yet re-tested */
+	_Atomic int           spinners;  /* threads in the off-loop spin */
 	struct amutex_owner {
 		int       kind;          /* 0 none, 1 fiber, 2 thread */
 		void     *task;          /* fiber identity (kind 1) */
@@ -647,6 +731,24 @@ struct xtc_amutex {
 	int                   count;     /* recursion depth */
 	struct fw_queue       wq;        /* fiber waiters */
 };
+
+#define AM_HELD(m) atomic_load_explicit(&(m)->held, memory_order_relaxed)
+#define AM_SET(m, v) \
+	atomic_store_explicit(&(m)->held, (v), memory_order_relaxed)
+
+/* Wake ONE sleeping thread waiter unless an earlier wake is still on its
+ * way (under lock).  The woken thread re-tests: a running thread may
+ * have taken the lock first (barging, which keeps the lock busy while the
+ * sleeper is being scheduled); then it sleeps again and that thread's
+ * release wakes the next one. */
+static void
+amutex_wake_thread_locked(xtc_amutex_t *m)
+{
+	if (m->cv_waiters > 0 && !m->cv_wake) {
+		m->cv_wake = 1;
+		(void)pthread_cond_signal(&m->cv);
+	}
+}
 
 /*
  * Release a held (non-recursive-nested) mutex: hand it to the head fiber
@@ -667,8 +769,8 @@ amutex_release_locked(xtc_amutex_t *m)
 		w->granted = 1;
 		(void)xtc_waker_wake(&w->waker);
 	} else {
-		m->held = 0;
-		(void)pthread_cond_signal(&m->cv);
+		AM_SET(m, 0);
+		amutex_wake_thread_locked(m);
 	}
 }
 
@@ -768,41 +870,71 @@ xtc_amutex_try_lock(xtc_amutex_t *m)
 	(void)__xtc_mtx_lock(&m->lock);
 	if (m->recursive) {
 		struct amutex_owner self = amutex_self_owner();
-		if (m->held && amutex_owner_eq(&m->owner, &self)) {
+		if (AM_HELD(m) && amutex_owner_eq(&m->owner, &self)) {
 			m->count++;
 			rc = XTC_OK;
-		} else if (!m->held) {
-			m->held = 1;
+		} else if (!AM_HELD(m)) {
+			AM_SET(m, 1);
 			m->owner = self;
 			m->count = 1;
 			rc = XTC_OK;
 		}
-	} else if (!m->held) {
-		m->held = 1;
+	} else if (!AM_HELD(m)) {
+		AM_SET(m, 1);
 		rc = XTC_OK;
 	}
 	(void)__xtc_mtx_unlock(&m->lock);
 	return rc;
 }
 
-/* Thread-waiter (off-loop) slow path: classic condvar wait.  A
- * recursive lock records the winning thread as its owner, as the fast
- * and fiber paths do: without that its nested lock found the mutex
- * "held by another" and waited on itself forever. */
+/* Thread-waiter (off-loop) slow path, called and returning with m->lock
+ * held: spin (TTAS on `held`, the inner mutex dropped) once per sleep,
+ * then sleep on the condvar.  Barging is allowed, as before: a running
+ * thread may take a free lock ahead of a sleeper, which re-sleeps; the
+ * barger's release wakes the next one.  A recursive lock records the
+ * winning thread as its owner, as the fast and fiber paths do: without
+ * that its nested lock found the mutex "held by another" and waited on
+ * itself forever. */
 static int
 __amutex_lock_thread(xtc_amutex_t *m, int64_t timeout_ns)
 {
-	if (timeout_ns < 0) {
-		while (m->held) (void)pthread_cond_wait(&m->cv, &m->lock);
-	} else {
-		struct timespec ts;
+	struct timespec ts;
+	int i, got, spun = 0, expired;
+
+	if (timeout_ns > 0)
 		deadline_from_timeout(timeout_ns, &ts);
-		while (m->held) {
-			if (cv_wait_until(&m->cv, &m->lock, &ts))
-				return XTC_E_AGAIN;
+	while (AM_HELD(m)) {
+		if (!spun && sync_spin_enter(&m->spinners)) {
+			spun = 1;
+			got = 0;
+			(void)__xtc_mtx_unlock(&m->lock);
+			for (i = 0; i < SYNC_SPIN_ROUNDS && !got; i++) {
+				__os_pause();
+				if (AM_HELD(m) || !sync_mtx_trylock(&m->lock))
+					continue;
+				if (!AM_HELD(m))
+					got = 1;        /* exit with m->lock held */
+				else
+					(void)__xtc_mtx_unlock(&m->lock);
+			}
+			sync_spin_leave(&m->spinners);
+			if (!got)
+				(void)__xtc_mtx_lock(&m->lock);
+			continue;
 		}
+		m->cv_waiters++;
+		expired = 0;
+		if (timeout_ns < 0)
+			(void)pthread_cond_wait(&m->cv, &m->lock);
+		else
+			expired = cv_wait_until(&m->cv, &m->lock, &ts);
+		m->cv_waiters--;
+		m->cv_wake = 0;         /* any waiter's return consumes the wake */
+		spun = 0;
+		if (expired && AM_HELD(m))
+			return XTC_E_AGAIN; /* the holder's release wakes the next */
 	}
-	m->held = 1;
+	AM_SET(m, 1);
 	if (m->recursive) {
 		m->owner = amutex_self_owner();
 		m->count = 1;
@@ -823,20 +955,20 @@ xtc_amutex_lock(xtc_amutex_t *m, int64_t timeout_ns)
 	(void)__xtc_mtx_lock(&m->lock);
 	if (m->recursive) {
 		struct amutex_owner self = amutex_self_owner();
-		if (m->held && amutex_owner_eq(&m->owner, &self)) {
+		if (AM_HELD(m) && amutex_owner_eq(&m->owner, &self)) {
 			m->count++;                 /* recursive re-entry */
 			(void)__xtc_mtx_unlock(&m->lock);
 			return XTC_OK;
 		}
-		if (!m->held) {
-			m->held = 1;
+		if (!AM_HELD(m)) {
+			AM_SET(m, 1);
 			m->owner = self;
 			m->count = 1;
 			(void)__xtc_mtx_unlock(&m->lock);
 			return XTC_OK;
 		}
-	} else if (!m->held) {
-		m->held = 1;
+	} else if (!AM_HELD(m)) {
+		AM_SET(m, 1);
 		(void)__xtc_mtx_unlock(&m->lock);
 		return XTC_OK;
 	}
@@ -872,7 +1004,7 @@ xtc_amutex_lock(xtc_amutex_t *m, int64_t timeout_ns)
 		}
 		if (!w.granted && !w.queued) {
 			/* First pass, or back from a deferred kill. */
-			if (!m->held) { m->held = 1; w.granted = 1; }
+			if (!AM_HELD(m)) { AM_SET(m, 1); w.granted = 1; }
 			else fw_enqueue(&m->wq, &w);
 		}
 		if (w.granted) { rc = XTC_OK; break; }
@@ -928,18 +1060,55 @@ xtc_amutex_unlock(xtc_amutex_t *m)
  * re-check the grant condition themselves and yield to queued fiber
  * waiters; under heavy fiber contention an off-loop waiter may wait
  * (the documented tradeoff -- real contention here is between procs).
+ *
+ * Off-loop waiters spin briefly, then sleep: shared ones on cv, exclusive
+ * ones on wcv.  A release wakes only waiters that can enter, and at most
+ * one wake per class is in flight (rd_wake / wr_wake: set by the waker,
+ * cleared by the first woken thread to run).  It used to broadcast to
+ * every off-loop waiter on every release, even while readers still held
+ * the latch; with N threads queued on a hot B-tree leaf each release
+ * woke all N, one won and the rest slept again (about 6 context switches
+ * per acquire at 16 threads).  The phases alternate: a free latch after
+ * an exclusive release wakes the readers (else one writer); after a
+ * shared release, one writer (else the readers); a read-held latch wakes
+ * sleeping readers, who can join, only while no writer sleeps (so the
+ * readers drain and the last one out wakes the writer).  A woken waiter
+ * that finds the latch taken (a running thread got there first) sleeps
+ * again, and that holder's release runs the wake again with the token
+ * cleared, so a sleeper is never left behind a latch nobody releases.
  */
 #define ARW_SHARED 0
 #define ARW_EXCL   1
 
 struct xtc_arwlock {
 	pthread_mutex_t        lock;
-	pthread_cond_t         cv;        /* off-loop waiters */
-	int                    readers;   /* active shared holders */
-	int                    writer;    /* 1 if exclusive held */
-	int                    cv_waiters;
+	pthread_cond_t         cv;        /* off-loop shared waiters */
+	pthread_cond_t         wcv;       /* off-loop exclusive waiters */
+	_Atomic int            readers;   /* active shared holders */
+	_Atomic int            writer;    /* 1 if exclusive held */
+	int                    rd_waiters; /* threads asleep on cv */
+	int                    wr_waiters; /* threads asleep on wcv */
+	int                    rd_wake;   /* readers woken, none run yet */
+	int                    wr_wake;   /* a writer woken, not run yet */
+	int                    last_excl; /* the last release was exclusive */
+	_Atomic int            spinners;  /* threads in the off-loop spin */
 	struct fw_queue        wq;        /* fiber waiters */
 };
+
+/* readers / writer are written under lock; spinners peek without it. */
+#define ARW_R(r) atomic_load_explicit(&(r)->readers, memory_order_relaxed)
+#define ARW_W(r) atomic_load_explicit(&(r)->writer, memory_order_relaxed)
+
+/* Take one hold in `mode` (under r->lock). */
+static void
+__arw_take(xtc_arwlock_t *r, int mode)
+{
+	if (mode == ARW_EXCL)
+		atomic_store_explicit(&r->writer, 1, memory_order_relaxed);
+	else
+		atomic_store_explicit(&r->readers, ARW_R(r) + 1,
+		    memory_order_relaxed);
+}
 
 int
 xtc_arwlock_create(xtc_arwlock_t **out)
@@ -950,6 +1119,7 @@ xtc_arwlock_create(xtc_arwlock_t **out)
 	if ((rc = __os_calloc(1, sizeof *r, (void **)&r)) != XTC_OK) return rc;
 	(void)pthread_mutex_init(&r->lock, NULL);
 	(void)pthread_cond_init(&r->cv, NULL);
+	(void)pthread_cond_init(&r->wcv, NULL);
 	*out = r;
 	return XTC_OK;
 }
@@ -958,6 +1128,7 @@ void
 xtc_arwlock_destroy(xtc_arwlock_t *r)
 {
 	if (r == NULL) return;
+	(void)pthread_cond_destroy(&r->wcv);
 	(void)pthread_cond_destroy(&r->cv);
 	(void)pthread_mutex_destroy(&r->lock);
 	__os_free(r);
@@ -967,8 +1138,35 @@ xtc_arwlock_destroy(xtc_arwlock_t *r)
 static int
 __arw_compatible(xtc_arwlock_t *r, int mode)
 {
-	return mode == ARW_EXCL ? (!r->writer && r->readers == 0)
-	                        : (!r->writer);
+	return mode == ARW_EXCL ? (!ARW_W(r) && ARW_R(r) == 0)
+	                        : (!ARW_W(r));
+}
+
+/* Wake the off-loop waiters that can enter now, at most one wake per
+ * class in flight (see the arwlock comment).  Under r->lock. */
+static void
+__arw_wake_threads_locked(xtc_arwlock_t *r)
+{
+	int writer_next;
+	if (r->wq.head != NULL || ARW_W(r))
+		return;                 /* fiber waiters first; or still held X */
+	if (ARW_R(r) > 0) {
+		/* Read-held: sleeping readers may join, unless a writer
+		 * sleeps (the last reader out wakes it). */
+		if (r->wr_waiters == 0 && r->rd_waiters > 0 && !r->rd_wake) {
+			r->rd_wake = 1;
+			(void)pthread_cond_broadcast(&r->cv);
+		}
+		return;
+	}
+	writer_next = r->wr_waiters > 0 && (r->rd_waiters == 0 || !r->last_excl);
+	if (writer_next && !r->wr_wake) {
+		r->wr_wake = 1;
+		(void)pthread_cond_signal(&r->wcv);
+	} else if (!writer_next && r->rd_waiters > 0 && !r->rd_wake) {
+		r->rd_wake = 1;
+		(void)pthread_cond_broadcast(&r->cv);
+	}
 }
 
 /* Grant as many head fiber waiters as the current state allows and wake
@@ -983,22 +1181,86 @@ __arw_grant_locked(xtc_arwlock_t *r)
 		if (!__arw_compatible(r, w->mode))
 			break;
 		fw_remove(&r->wq, w);
-		if (w->mode == ARW_EXCL) r->writer = 1; else r->readers++;
+		__arw_take(r, w->mode);
 		w->granted = 1;
 		(void)xtc_waker_wake(&w->waker);
 		if (w->mode == ARW_EXCL)
 			break;          /* exclusive: nothing after can join */
 	}
-	if (r->cv_waiters > 0 && r->wq.head == NULL)
-		(void)pthread_cond_broadcast(&r->cv);
+	__arw_wake_threads_locked(r);
 }
 
 /* Drop one hold of the latch (under r->lock). */
 static void
 __arw_release_locked(xtc_arwlock_t *r)
 {
-	if (r->writer) r->writer = 0;
-	else if (r->readers > 0) r->readers--;
+	r->last_excl = ARW_W(r);
+	if (ARW_W(r))
+		atomic_store_explicit(&r->writer, 0, memory_order_relaxed);
+	else if (ARW_R(r) > 0)
+		atomic_store_explicit(&r->readers, ARW_R(r) - 1,
+		    memory_order_relaxed);
+}
+
+/* Can an off-loop waiter take `mode` now (under r->lock)? */
+#define ARW_THREAD_OK(r, mode) \
+	((r)->wq.head == NULL && __arw_compatible((r), (mode)))
+
+/* Off-loop slow path, called and returning with r->lock held: spin (TTAS
+ * on readers / writer, the inner mutex dropped) once per sleep, then
+ * sleep on the mode's condvar.  A timed-out waiter leaves only while the
+ * latch is held (else it takes it), so the holder's release passes on
+ * any wake it consumed. */
+static int
+__arw_lock_thread(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
+{
+	struct timespec ts;
+	pthread_cond_t *cv = mode == ARW_EXCL ? &r->wcv : &r->cv;
+	int *nwait = mode == ARW_EXCL ? &r->wr_waiters : &r->rd_waiters;
+	int *wake = mode == ARW_EXCL ? &r->wr_wake : &r->rd_wake;
+	int i, got, spun = 0, expired;
+
+	if (timeout_ns > 0)
+		deadline_from_timeout(timeout_ns, &ts);
+	while (!ARW_THREAD_OK(r, mode)) {
+		if (!spun && r->wq.head == NULL &&
+		    sync_spin_enter(&r->spinners)) {
+			spun = 1;
+			got = 0;
+			(void)__xtc_mtx_unlock(&r->lock);
+			for (i = 0; i < SYNC_SPIN_ROUNDS && !got; i++) {
+				__os_pause();
+				if (!__arw_compatible(r, mode) ||
+				    !sync_mtx_trylock(&r->lock))
+					continue;
+				if (ARW_THREAD_OK(r, mode))
+					got = 1;        /* exit with r->lock held */
+				else
+					(void)__xtc_mtx_unlock(&r->lock);
+			}
+			sync_spin_leave(&r->spinners);
+			if (!got)
+				(void)__xtc_mtx_lock(&r->lock);
+			continue;
+		}
+		(*nwait)++;
+		expired = 0;
+		if (timeout_ns < 0)
+			(void)pthread_cond_wait(cv, &r->lock);
+		else
+			expired = cv_wait_until(cv, &r->lock, &ts);
+		(*nwait)--;
+		*wake = 0;              /* the first woken waiter to run */
+		spun = 0;
+		if (expired && !ARW_THREAD_OK(r, mode))
+			return XTC_E_AGAIN;
+	}
+	__arw_take(r, mode);
+	/* A reader that got in lets in readers that fell asleep after the
+	 * broadcast that woke it (no-op if a writer sleeps). */
+	if (mode == ARW_SHARED)
+		__arw_wake_threads_locked(r);
+	return XTC_OK;
 }
 
 static int
@@ -1014,7 +1276,7 @@ __arwlock_lock(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
 	(void)__xtc_mtx_lock(&r->lock);
 	/* Fast path: compatible AND nobody queued ahead (FIFO fairness). */
 	if (r->wq.head == NULL && __arw_compatible(r, mode)) {
-		if (mode == ARW_EXCL) r->writer = 1; else r->readers++;
+		__arw_take(r, mode);
 		(void)__xtc_mtx_unlock(&r->lock);
 		return XTC_OK;
 	}
@@ -1025,25 +1287,9 @@ __arwlock_lock(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
 
 	cur = __xtc_current_task();
 	if (cur == NULL) {
-		/* Off-loop: condvar wait, yielding to any queued fiber waiter. */
-		rc = XTC_OK;
-		r->cv_waiters++;
-		if (timeout_ns < 0) {
-			while (!(r->wq.head == NULL && __arw_compatible(r, mode)))
-				(void)pthread_cond_wait(&r->cv, &r->lock);
-		} else {
-			struct timespec ts;
-			deadline_from_timeout(timeout_ns, &ts);
-			while (!(r->wq.head == NULL && __arw_compatible(r, mode))) {
-				if (cv_wait_until(&r->cv, &r->lock, &ts)) {
-					rc = XTC_E_AGAIN; break;
-				}
-			}
-		}
-		if (rc == XTC_OK) {
-			if (mode == ARW_EXCL) r->writer = 1; else r->readers++;
-		}
-		r->cv_waiters--;
+		/* Off-loop: spin, then condvar wait, yielding to any queued
+		 * fiber waiter. */
+		rc = __arw_lock_thread(r, mode, timeout_ns);
 		(void)__xtc_mtx_unlock(&r->lock);
 		return rc;
 	}
@@ -1071,8 +1317,7 @@ __arwlock_lock(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
 		if (!w.granted && !w.queued) {
 			/* First pass, or back from a deferred kill. */
 			if (r->wq.head == NULL && __arw_compatible(r, mode)) {
-				if (mode == ARW_EXCL) r->writer = 1;
-				else r->readers++;
+				__arw_take(r, mode);
 				w.granted = 1;
 			} else {
 				fw_enqueue(&r->wq, &w);
