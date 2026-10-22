@@ -19,6 +19,11 @@
  *	    carry its own key's value, so a seek that followed a stale
  *	    right link or skipped a live key is caught.
  *
+ *	S3  in the same churn, readers take reverse batches (bt_seek_lt_n,
+ *	    the descending index walk): every batch is strictly descending,
+ *	    below its bound, and skips no stable key between the bound and
+ *	    its last key.
+ *
  *	Built twice: test_btree_seek (the optimistic, version-validated
  *	path) and test_btree_seek_latched (-DBT_OLC_ENABLED=0: the latched
  *	cursor fallback).
@@ -178,6 +183,7 @@ static bm_t        *g_bm;
 static bt_t        *g_bt;
 static _Atomic int  g_active;
 static _Atomic long g_reads, g_bad_range, g_bad_val, g_bad_rc;
+static _Atomic long g_lt_reads, g_lt_bad;
 
 static void
 s2_key(int i, char *k)
@@ -277,6 +283,63 @@ next:
 	free(want);
 }
 
+/* S3: a reverse batch below a random bound.  The answer must be the
+ * largest keys below the bound in descending order: strictly
+ * descending, all below it, and no stable key (never deleted) may lie
+ * between the bound and the batch's last key without being in it. */
+static void
+reader_lt(void *arg)
+{
+	uint64_t s = (uint64_t)(uintptr_t)arg * 0xD1B54A32D192ED03ull + 7;
+	uint8_t *buf = malloc(4096);   /* per reader: a seek can park */
+	uint32_t off[64];
+	uint16_t lens[64];
+	char q[16];
+	long n = 0;
+
+	if (buf == NULL) {
+		atomic_fetch_add(&g_lt_bad, 1);
+		return;
+	}
+	while (atomic_load(&g_active) > 0 || n < 2000) {
+		int i = 1 + (int)(rnd(&s) % (S2_N - 1)), got = 0, j, lo, bad = 0;
+		int want = 1 + (int)(rnd(&s) % 40);
+		s2_key(i, q);
+		if (bt_seek_lt_n(g_bt, q, 8, buf, 4096, off, lens, want,
+		    &got) != XTC_OK || got < 1 || got > want) {
+			atomic_fetch_add(&g_lt_bad, 1);    /* key 0 is stable: >= 1 */
+			goto next;
+		}
+		for (j = 0; j < got; j++) {
+			const char *k = (const char *)buf + off[j];
+			if (lens[j] != 8 || memcmp(k, q, 8) >= 0 ||
+			    (j > 0 && memcmp(k, (const char *)buf + off[j - 1], 8) >= 0))
+				bad = 1;
+		}
+		if (!bad) {
+			/* Every stable key in [last returned, bound) is present. */
+			lo = atoi((const char *)buf + off[got - 1] + 1);
+			for (j = lo; j < i && !bad; j++) {
+				int t, hit = 0;
+				char k[16];
+				if (!STABLE(j)) continue;
+				s2_key(j, k);
+				for (t = 0; t < got && !hit; t++)
+					hit = memcmp(buf + off[t], k, 8) == 0;
+				bad = !hit;
+			}
+		}
+		if (bad)
+			atomic_fetch_add(&g_lt_bad, 1);
+next:
+		n++;
+		if ((n & 15) == 0)
+			xtc_yield();
+	}
+	atomic_fetch_add(&g_lt_reads, n);
+	free(buf);
+}
+
 static void
 t_concurrent(void)
 {
@@ -305,6 +368,9 @@ t_concurrent(void)
 	for (r = 0; r < N_READERS; r++)
 		CK(xtc_proc_spawn(xtc_exec_loop(ex, (int)((r + 1) % N_LOOPS)),
 		    reader, (void *)(r + 1), NULL, NULL) == XTC_OK);
+	for (r = 0; r < N_READERS; r++)
+		CK(xtc_proc_spawn(xtc_exec_loop(ex, (int)((r + 2) % N_LOOPS)),
+		    reader_lt, (void *)(r + 1), NULL, NULL) == XTC_OK);
 	CK(xtc_exec_run(ex) == XTC_OK);
 	bm_provider_stop(g_bm);
 	(void)xtc_exec_fini(ex);
@@ -314,6 +380,7 @@ t_concurrent(void)
 	CK(atomic_load(&g_bad_range) == 0);
 	CK(atomic_load(&g_bad_val) == 0);
 	CK(atomic_load(&g_bad_rc) == 0);
+	CK(atomic_load(&g_lt_bad) == 0);
 	CK(ts.splits > 0 && ts.merges > 0);           /* both SMOs raced */
 	printf("  %s   S2: %ld concurrent seeks vs %d churners on %d threads "
 	    "(splits=%llu merges=%llu evicted=%llu): %ld out of range, %ld bad "
@@ -322,6 +389,9 @@ t_concurrent(void)
 	    (unsigned long long)ts.splits, (unsigned long long)ts.merges,
 	    (unsigned long long)bs.evicted, atomic_load(&g_bad_range),
 	    atomic_load(&g_bad_val), atomic_load(&g_bad_rc));
+	printf("  %s   S3: %ld concurrent reverse batches (bt_seek_lt_n) in the "
+	    "same churn: %ld wrong\n", atomic_load(&g_lt_bad) ? "FAIL" : "ok",
+	    atomic_load(&g_lt_reads), atomic_load(&g_lt_bad));
 	done(g_bt, g_bm, p);
 }
 
