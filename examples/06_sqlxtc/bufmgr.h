@@ -308,6 +308,13 @@ void bm_trickler_stop(bm_t *bm);
  * reflects all committed data, so the WAL prefix may be truncated. */
 int  bm_read_super(bm_t *bm, void *buf, size_t len);
 int  bm_write_super(bm_t *bm, const void *buf, size_t len);
+/* bm_write_super for a CLEAN superblock (clean != 0): the base is final
+ * and the store quiesced.  The freed page ids are then saved in free
+ * pages and named in page 0, and the next reopen (bm_create, reopen != 0)
+ * reissues them instead of growing the file.  Any other superblock write
+ * drops the saved list, so a list is only ever loaded for the untouched
+ * base it was saved with. */
+int  bm_write_super_clean(bm_t *bm, const void *buf, size_t len, int clean);
 int  bm_sync(bm_t *bm);
 /* Flush every dirty page and fdatasync.  XTC_OK only if every dirty
  * page reached the file (through the double-write slot when enabled);
@@ -340,6 +347,8 @@ typedef struct bm_stats {
 	uint64_t freed;         /* page ids put on the reclaim freelist */
 	uint64_t reissued;      /* allocations served from the reclaim freelist */
 	uint64_t free_pids;     /* page ids currently on the reclaim freelist */
+	uint64_t fl_loaded;     /* free page ids a reopen loaded from the store */
+	uint64_t fl_pages;      /* chain pages that held them */
 	/* CLOCK sweep cost (see bm_opts_t.claim_threshold). Only successful
 	 * evict_one calls are counted, including provider calls. Failed calls
 	 * and get_free_frame retries are excluded: advances/allocs is scan

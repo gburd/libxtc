@@ -254,29 +254,32 @@ static void smo_log_page(bt_t *bt, bm_pid_t pid, void *image);
 /*
  * Entry-size bounds (RethinkDB's rule: every leaf entry is bounded by a
  * fixed fraction of the page -- leaf_epsilon, leaf_node.cc:523-535 --
- * so every split and merge guarantee holds by construction).
+ * so every split and merge guarantee holds by construction).  Larger
+ * values belong out of line.
  *
- * BT_ENTRY_DIV: an entry (slot + full key + value) may use at most
- * 1/BT_ENTRY_DIV of the usable page.  With 4, a node at the split point
- * holds >= 4 such entries' worth of bytes, so a byte-balanced split
- * always finds a cut that leaves room for one more max entry on the
- * side that receives it, even after the separator (<= one key) is
- * added to both halves as a fence.  Larger values belong out of line.
- */
-/*
- * The guarantee (proof sketch; cap = page - header, K = max key, M = max
- * leaf entry cost incl. its 10-byte slot):
- *   A byte-balanced cut leaves each half <= T/2 + M (entries; T <= cap)
- *   + 2K (two fences: the old one and the separator).  The pending entry
- *   adds <= M on its side.  So a valid cut exists whenever
- *       cap/2 + 2M + 2K <= cap   <=>   M + K <= cap/4.
- *   Internal entries are a separator plus an 8-byte pid (<= K + 18), and
- *   the same argument needs 4K + 36 <= cap/2, i.e. K <= cap/8 - 9.
- * So K = min(BT_MAX_KEY, cap/8 - 9) and M = cap/4 - K.  For 4 KiB pages
- * that is K = 498 and M = 516 (an inline key+value of up to 506 bytes);
- * for 16 KiB K = 1024 and M = 3062.  This is RethinkDB's leaf_epsilon
- * (512 bytes on its 4 KiB block, MAX_KEY_SIZE 250) derived for our node.
- * Larger values must be stored out of line.
+ * The guarantee (cap = page - header, K = max key, M = max leaf entry
+ * cost incl. its 10-byte slot; btnode's split costs each half exactly as
+ * it will be stored, so a half never costs more than its entries do in
+ * the full node).  A full leaf holds E + Llo + Lhi <= cap (entries, both
+ * fences); the pending entry P <= M.  Over the sequence of the entries
+ * with P in place (total S = E + P) every boundary is a usable cut except
+ * the one right after P (the separator is an existing key).  Take the
+ * last boundary whose left part fits with the old lo fence and a
+ * separator (left <= cap - Llo - K).  Its right part is < P + M + K -
+ * Lhi, so it fits with the separator and the old hi fence when
+ * 2M + 2K <= cap.  If that boundary is the one after P, step back over
+ * P: the right part grows by P, and fits when 3M + 2K <= cap.  (P first
+ * cannot be that case: then P + e0 + Llo + K > cap, impossible.)
+ * Internal entries are a separator plus an 8-byte pid (<= K + 18); with
+ * M = K + 18 the same rule bounds K, and the internal split (a midpoint
+ * by count) needs 4K + 36 <= cap/2, i.e. K <= cap/8 - 9.
+ * So K = min(BT_MAX_KEY, cap/8 - 9) and M = (cap - 2K) / 3.  For 4 KiB
+ * pages that is K = 498 and M = 1020 (an inline key + value of up to
+ * 1010 bytes, so a 700-byte row stays in its leaf); 16 KiB: K = 1024 and
+ * M = 4765; 64 KiB: M = 21149, below the 32 KiB the slot's 15-bit length
+ * holds.  The rule used to be M + K <= cap/4 (M = 516 on 4 KiB), derived
+ * when the split costed every key in full; every TPC-C customer row
+ * (about 660 B) then went out of line on a page of its own.
  */
 static uint32_t
 bt_cap(const bt_t *bt)
@@ -295,7 +298,7 @@ bt_key_max(const bt_t *bt)
 static uint32_t
 bt_entry_max(const bt_t *bt)
 {
-	return bt_cap(bt) / 4 - bt_key_max(bt);
+	return (bt_cap(bt) - 2u * bt_key_max(bt)) / 3u;
 }
 
 uint16_t
@@ -536,8 +539,9 @@ bt_write_super(bt_t *bt)
 	s.clean = bt->meta_clean;
 	s.commit_clock = bt->meta_clock;
 	memcpy(s.ext, bt->meta_ext, sizeof s.ext);
-	return bm_write_super(bt->bm, &s,
-	    bt->page_size >= sizeof s ? sizeof s : BT_SUPER_V1);
+	/* A clean superblock also saves the freed page ids (bufmgr.h). */
+	return bm_write_super_clean(bt->bm, &s,
+	    bt->page_size >= sizeof s ? sizeof s : BT_SUPER_V1, s.clean == 1);
 }
 
 void

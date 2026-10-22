@@ -6722,30 +6722,47 @@ decode_rec_cells(const int *pay, int ncol, int64_t rowid,
                  const uint8_t *rec, int reclen,
                  vx_cell_t *out, struct vx_arena_blk **arena)
 {
-	int i;
+	xstore_val_t col[64], far;  /* bounded: this runs on fiber stacks */
+	int i, nrec, need = 0;
+
+	/* One pass over the record's first `need` columns (the highest one
+	 * the map reads, at most 64); the map then picks them.  A column
+	 * past col[] (a table that wide is rare) is decoded on its own. */
+	for (i = 0; i < ncol; i++)
+		if (pay[i] >= need) need = pay[i] + 1;
+	nrec = xstore_rec_cols(rec, reclen, col, need < 64 ? need : 64);
 	for (i = 0; i < ncol; i++) {
 		vx_cell_t *cell = &out[i];
+		const xstore_val_t *v;
 		memset(cell, 0, sizeof *cell);
 		if (pay[i] < 0) {
 			cell->type = VX_INT; cell->i = rowid;
 			continue;
 		}
-		{
-			int64_t iv = 0; double dv = 0; const uint8_t *p = NULL; int n = 0;
-			int cls = xstore_rec_col(rec, reclen, pay[i], &iv, &dv, &p, &n);
-			switch (cls) {
-			case XSTORE_C_INT:  cell->type = VX_INT; cell->i = iv; break;
-			case XSTORE_C_REAL: cell->type = VX_REAL; cell->r = dv; break;
-			case XSTORE_C_TEXT:
-			case XSTORE_C_BLOB: {
-				uint8_t *b = (uint8_t *)arena_alloc(arena, (size_t)(n > 0 ? n : 1) + 1);
-				if (b) { if (n) memcpy(b, p, (size_t)n); b[n > 0 ? n : 0] = '\0'; }
-				cell->type = (cls == XSTORE_C_TEXT) ? VX_TEXT : VX_BLOB;
-				cell->bytes = b; cell->nbytes = (uint32_t)(n > 0 ? n : 0);
-				break;
-			}
-			default: cell->type = VX_NULL; break;
-			}
+		if (pay[i] >= 64) {
+			memset(&far, 0, sizeof far);
+			far.cls = xstore_rec_col(rec, reclen, pay[i], &far.i,
+			    &far.r, &far.p, &far.n);
+			v = &far;
+		} else if (pay[i] >= nrec) {
+			cell->type = VX_NULL;
+			continue;
+		} else {
+			v = &col[pay[i]];
+		}
+		switch (v->cls) {
+		case XSTORE_C_INT:  cell->type = VX_INT; cell->i = v->i; break;
+		case XSTORE_C_REAL: cell->type = VX_REAL; cell->r = v->r; break;
+		case XSTORE_C_TEXT:
+		case XSTORE_C_BLOB: {
+			int n = v->n;
+			uint8_t *b = (uint8_t *)arena_alloc(arena, (size_t)(n > 0 ? n : 1) + 1);
+			if (b) { if (n) memcpy(b, v->p, (size_t)n); b[n > 0 ? n : 0] = '\0'; }
+			cell->type = (v->cls == XSTORE_C_TEXT) ? VX_TEXT : VX_BLOB;
+			cell->bytes = b; cell->nbytes = (uint32_t)(n > 0 ? n : 0);
+			break;
+		}
+		default: cell->type = VX_NULL; break;
 		}
 	}
 }
@@ -8707,42 +8724,26 @@ lit_cell(struct vx_arena_blk **arena, const sql_expr_t *e, vx_cell_t *out,
 }
 
 /* Encode a row's payload cells into the xstore record format
- * ([npay:u8] then per-column [type][payload]) -- the SAME format the
- * vtab xUpdate path writes via xs_rec_encode, so a native insert and a
- * VDBE insert are byte-identical.  Returns the record length or -1. */
+ * ([npay:u8] then one column per cell, xstore_rec_put) -- the SAME
+ * encoder the vtab xUpdate path uses, so a native insert and a VDBE
+ * insert are byte-identical.  Returns the record length or -1. */
 static int
 encode_payload(const vx_cell_t *cells, int npay, uint8_t *out, int cap)
 {
-	int off = 0, i, b;
+	int off = 0, i, cls;
 	if (npay < 0 || npay > 255 || cap < 1) return -1;
 	out[off++] = (uint8_t)npay;
-	for (i = 0; i < npay; i++) {
+	for (i = 0; i < npay && off >= 0; i++) {
 		const vx_cell_t *c = &cells[i];
-		if (c->type == VX_NULL) {
-			if (off + 1 > cap) return -1;
-			out[off++] = 0;
-		} else if (c->type == VX_INT) {
-			int64_t x = c->i;
-			if (off + 9 > cap) return -1;
-			out[off++] = 1;
-			for (b = 0; b < 8; b++) out[off++] = (uint8_t)(x >> (8 * b));
-		} else if (c->type == VX_REAL) {
-			uint64_t bits; memcpy(&bits, &c->r, 8);
-			if (off + 9 > cap) return -1;
-			out[off++] = 2;
-			for (b = 0; b < 8; b++) out[off++] = (uint8_t)(bits >> (8 * b));
-		} else {
-			int n = c->nbytes;
-			if (n < 0) n = 0;
-			if (off + 5 + n > cap) return -1;
-			out[off++] = (c->type == VX_TEXT) ? 3 : 4;
-			out[off++] = (uint8_t)(n & 0xff);
-			out[off++] = (uint8_t)((n >> 8) & 0xff);
-			out[off++] = (uint8_t)((n >> 16) & 0xff);
-			out[off++] = (uint8_t)((n >> 24) & 0xff);
-			if (n) memcpy(out + off, c->bytes, (size_t)n);
-			off += n;
+		switch (c->type) {
+		case VX_NULL: cls = XSTORE_C_NULL; break;
+		case VX_INT:  cls = XSTORE_C_INT; break;
+		case VX_REAL: cls = XSTORE_C_REAL; break;
+		case VX_TEXT: cls = XSTORE_C_TEXT; break;
+		default:      cls = XSTORE_C_BLOB; break;
 		}
+		off = xstore_rec_put(out, off, cap, cls, c->i, c->r, c->bytes,
+		    (int)c->nbytes);
 	}
 	return off;
 }

@@ -515,8 +515,7 @@ btnode_split(void *page, void *right_page, void *sep_key_out,
 /*
  * Bytes a slot's entry occupies in a node whose prefix is `npl`: the
  * slot itself plus the (re-suffixed) key and the value.  The node's own
- * prefix is `pl`; a split narrows fences, so `npl >= pl` in practice,
- * but a conservative caller passes 0 to count the full key.
+ * prefix is `pl`; a caller that passes npl == 0 counts the full key.
  */
 static uint32_t
 slot_cost(const struct btnode_slot *s, uint16_t pl, uint16_t npl)
@@ -525,6 +524,34 @@ slot_cost(const struct btnode_slot *s, uint16_t pl, uint16_t npl)
 	uint32_t suf = full > npl ? full - npl : 0;
 
 	return (uint32_t)sizeof(struct btnode_slot) + suf + VLEN(s->val_len);
+}
+
+/* Length of the common prefix of two byte strings. */
+static uint16_t
+lcp_bytes(const uint8_t *a, uint16_t al, const uint8_t *b, uint16_t bl)
+{
+	uint16_t n = 0, lim = al < bl ? al : bl;
+
+	while (n < lim && a[n] == b[n])
+		n++;
+	return n;
+}
+
+/*
+ * The prefix a split half will have: btnode_set_fences derives it from
+ * the half's two fences, one of them `fence` (the node's own lo or hi
+ * fence; len 0 = infinite, which gives prefix 0), the other the
+ * separator, the node prefix (pl bytes, equal to every fence's first pl
+ * bytes) followed by `sfx`.
+ */
+static uint16_t
+half_prefix(const uint8_t *fence, uint16_t flen, uint16_t pl,
+    const uint8_t *sfx, uint16_t slen)
+{
+	if (flen == 0)
+		return 0;
+	return (uint16_t)(pl + lcp_bytes(fence + pl, (uint16_t)(flen - pl), sfx,
+	    slen));
 }
 
 /*
@@ -538,9 +565,20 @@ slot_cost(const struct btnode_slot *s, uint16_t pl, uint16_t npl)
  * caller will insert right after the split, and `pend_key` its key: the
  * pending entry lands LEFT iff its key <= the separator.  A cut is
  * acceptable only if the side receiving the pending entry still has
- * room for it, counted conservatively with the FULL key bytes (prefix
- * 0) on both sides plus both fences.  Among acceptable cuts the one
- * whose larger side is smallest wins (most balanced).
+ * room for it.  Each half is costed EXACTLY as it will be stored: its
+ * keys re-suffixed against the prefix of its own fences (half_prefix,
+ * never shorter than the node's), plus both fences; the pending entry
+ * is counted with its full key.  Among acceptable cuts the one whose
+ * larger side is smallest wins (most balanced).
+ *
+ * The costs used to count every key in full ("conservatively").  That
+ * is not conservative for a node with a long shared prefix: an index
+ * leaf ([0xFE][id][elem...][rowid], ~30 shared bytes) holds about twice
+ * page / (slot + full key) entries, so its full-key total exceeded two
+ * pages, NO cut passed, and the split failed (test_btree_prefix_split:
+ * 44,687 of 60,000 scrambled index inserts were refused and the index
+ * missed those rows).  With exact costs the total is <= the page, which
+ * is what the entry bound's proof (btree.c bt_entry_max) assumes.
  *
  * A slot-count split (the 1.56 behaviour) could leave the receiving
  * half too full for a large pending entry, failing the insert AFTER the
@@ -564,7 +602,7 @@ seq_split(const void *page, int ip, const uint8_t *pend_key, uint16_t pend_klen,
 	const struct btnode_hdr *h = CHDR(page);
 	const struct btnode_slot *s = cslots_of(page);
 	const uint8_t *p = page;
-	uint16_t pl = h->prefix_len, tl, cp = 0, plen;
+	uint16_t pl = h->prefix_len, tl, cp = 0, plen, lpl, rpl;
 	uint32_t cap = h->page_size - (uint32_t)sizeof(struct btnode_hdr);
 	uint32_t lneed = 0, rneed = 0;
 	uint8_t tail[h->page_size];   /* a full key is smaller than a page */
@@ -581,8 +619,12 @@ seq_split(const void *page, int ip, const uint8_t *pend_key, uint16_t pend_klen,
 	plen = (uint16_t)(cp + 1);
 	if (plen >= tl)
 		return -1;                 /* no PROPER prefix: cannot route */
-	for (i = 0; i < ip; i++) lneed += slot_cost(&s[i], pl, 0);
-	for (i = ip; i < n; i++) rneed += slot_cost(&s[i], pl, 0);
+	lpl = h->lo_fence_len ? lcp_bytes(p + h->lo_fence_off, h->lo_fence_len,
+	    tail, plen) : 0;
+	rpl = h->hi_fence_len ? lcp_bytes(tail, plen, p + h->hi_fence_off,
+	    h->hi_fence_len) : 0;
+	for (i = 0; i < ip; i++) lneed += slot_cost(&s[i], pl, lpl);
+	for (i = ip; i < n; i++) rneed += slot_cost(&s[i], pl, rpl);
 	lneed += (uint32_t)h->lo_fence_len + plen + pend;
 	rneed += (uint32_t)plen + (uint32_t)h->hi_fence_len;
 	if (lneed > cap || rneed > cap)
@@ -609,7 +651,7 @@ split_point(const void *page, const uint8_t *pend_key, uint16_t pend_klen,
 	if (n < 2)
 		return -1;
 	for (i = 0; i < n; i++)
-		total += slot_cost(&s[i], pl, 0);
+		total += slot_cost(&s[i], pl, pl);
 	/*
 	 * Append split.  When the pending key sorts after every key in the
 	 * node, the insert stream is (very likely) ascending -- a table's
@@ -647,14 +689,22 @@ split_point(const void *page, const uint8_t *pend_key, uint16_t pend_klen,
 	}
 	for (i = 0; i < n - 1; i++) {
 		uint32_t sep_len, lneed, rneed, lsz, rsz, m;
+		uint16_t lpl, rpl;
 		int to_left = 1;
 
-		left += slot_cost(&s[i], pl, 0);
+		left += slot_cost(&s[i], pl, pl);
 		/* The separator (slot i's full key) becomes the left's hi
-		 * fence AND the right's lo fence. */
+		 * fence AND the right's lo fence; each half's keys are stored
+		 * as suffixes of that half's prefix (>= pl). */
 		sep_len = (uint32_t)pl + s[i].key_len;
-		lsz = left + (uint32_t)h->lo_fence_len + sep_len;
-		rsz = (total - left) + sep_len + (uint32_t)h->hi_fence_len;
+		lpl = half_prefix(p + h->lo_fence_off, h->lo_fence_len, pl,
+		    p + s[i].offset, s[i].key_len);
+		rpl = half_prefix(p + h->hi_fence_off, h->hi_fence_len, pl,
+		    p + s[i].offset, s[i].key_len);
+		lsz = left - (uint32_t)(i + 1) * (uint32_t)(lpl - pl) +
+		    (uint32_t)h->lo_fence_len + sep_len;
+		rsz = (total - left) - (uint32_t)(n - 1 - i) * (uint32_t)(rpl - pl) +
+		    sep_len + (uint32_t)h->hi_fence_len;
 		if (pend > 0 && pend_key != NULL) {
 			/* Compare pending key with slot i's full key. */
 			uint16_t cl = pend_klen < pl ? pend_klen : pl;

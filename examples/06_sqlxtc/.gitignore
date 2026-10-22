@@ -112,3 +112,8 @@ bench_morsel_balance
 test_bg_idle
 test_ckpt_offloop
 test_bg_kill
+sx_size
+test_btree_prefix_split
+test_rec_codec
+test_idx_elem
+test_freelist_persist

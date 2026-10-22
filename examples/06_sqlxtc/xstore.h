@@ -200,6 +200,35 @@ enum {
 int xstore_rec_col(const uint8_t *rec, int reclen, int idx,
                    int64_t *iout, double *rout,
                    const uint8_t **pout, int *nout);
+/* Number of payload columns in a record (0 for an empty one). */
+int xstore_rec_ncol(const uint8_t *rec, int reclen);
+/* A typed value: one decoded payload column (xstore_rec_cols), or an
+ * index bound (xstore_iscan_open). */
+typedef struct xstore_val {
+	int            cls;   /* XSTORE_C_* */
+	int64_t        i;     /* INT */
+	double         r;     /* REAL */
+	const uint8_t *p;     /* TEXT / BLOB, into the record */
+	int            n;
+} xstore_val_t;
+/* Decode every payload column of a record in one pass (xstore_rec_col
+ * re-walks the record from its start for each column).  Fills
+ * out[0..min(ncol, cap)) and returns that count; a malformed tail reads
+ * as NULL. */
+int xstore_rec_cols(const uint8_t *rec, int reclen, xstore_val_t *out, int cap);
+/* Append one payload column of class `cls` (XSTORE_C_*; iv for INT, rv
+ * for REAL, p/n for TEXT and BLOB) to a record being built in out[0..cap)
+ * at offset `off` (the column count byte at out[0] is the caller's).
+ * Returns the new offset, or -1 if it does not fit.  The one encoder of
+ * the record format, shared by every write path so a row is encoded the
+ * same way whichever path writes it. */
+int xstore_rec_put(uint8_t *out, int off, int cap, int cls, int64_t iv,
+                   double rv, const uint8_t *p, int n);
+/* The order-preserving index key element of one value: the bytes an
+ * index entry stores for it (desc != 0 complements them).  memcmp order
+ * of two elements is SQLite's order of the values, and no element is a
+ * prefix of another.  Returns the length, or -1 if it exceeds cap. */
+int xstore_index_elem(uint8_t *out, int cap, const xstore_val_t *v, int desc);
 
 /*
  * Native autocommit write path -- the storage side of bypassing the
@@ -436,14 +465,8 @@ int xstore_index_seek_eq(bt_t *bt, uint32_t idx_id, int vclass,
                          const uint8_t *bytes, int nbytes,
                          int64_t *out, int cap);
 
-/* A typed value for index bounds (XSTORE_C_*; p/n for TEXT/BLOB). */
-typedef struct xstore_val {
-	int            cls;
-	int64_t        i;
-	double         r;
-	const uint8_t *p;
-	int            n;
-} xstore_val_t;
+/* xstore_val_t (a typed value: XSTORE_C_*, p/n for TEXT/BLOB) is
+ * defined with the record codec above; it also carries index bounds. */
 
 /* Verified index range scan on the connection's snapshot: rows whose
  * first neq index columns equal eq[], and (optionally) whose next

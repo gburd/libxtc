@@ -587,6 +587,108 @@ test_check(void)
 	    "caught)\n");
 }
 
+
+/*
+ * The split guarantee behind btree.c's entry bound: with keys of at most
+ * K = cap/8 - 9 bytes and entries (slot + key + value) of at most
+ * M = (cap - 2K) / 3 bytes, a byte-balanced split of ANY full leaf finds a
+ * cut that leaves room for ANY pending entry, and the pending entry then
+ * fits on its side.  Random leaves: fences with a shared prefix of 0..60
+ * bytes (or infinite), keys of random length that share it, values up to
+ * the bound; filled until the pending entry no longer fits in place.
+ * With m_over the bound is exceeded on purpose, to show the check bites.
+ */
+static uint64_t g_rs = 0x9E3779B97F4A7C15ull;
+static uint32_t
+rnd32(void)
+{
+	g_rs ^= g_rs << 13; g_rs ^= g_rs >> 7; g_rs ^= g_rs << 17;
+	return (uint32_t)g_rs;
+}
+
+static int
+split_trial(uint32_t ps, uint32_t K, uint32_t M, int quiet)
+{
+	uint8_t *L = malloc(ps), *R = malloc(ps), *keys = malloc((size_t)ps * 2);
+	uint8_t lo[1100], hi[1100], k[1100], sep[1100], v[22000], pk[1100];  /* K <= 1024 */
+	uint32_t pl = rnd32() % 61, cap = ps - (uint32_t)sizeof(struct btnode_hdr);
+	uint16_t lol = 0, hil = 0, sl = 0, pkl, pvl;
+	int inf_lo = rnd32() % 4 == 0, inf_hi = rnd32() % 4 == 0, n = 0, rc = 0, i;
+
+	if (pl + 18 > K) pl = K - 18;
+	memset(v, 'v', sizeof v);
+	/* fences: [pl shared bytes][0x10 ...] and [pl shared bytes][0xF0 ...] */
+	for (i = 0; i < (int)pl; i++) lo[i] = hi[i] = (uint8_t)(0x41 + rnd32() % 20);
+	lo[pl] = 0x10; hi[pl] = 0xF0;
+	lol = (uint16_t)(pl + 1 + rnd32() % 8); hil = (uint16_t)(pl + 1 + rnd32() % 8);
+	for (i = (int)pl + 1; i < lol; i++) lo[i] = 0x00;
+	for (i = (int)pl + 1; i < hil; i++) hi[i] = 0xFF;
+	btnode_init(L, ps, 1);
+	btnode_set_fences(L, inf_lo ? NULL : lo, inf_lo ? 0 : lol, inf_hi ? NULL : hi,
+	    inf_hi ? 0 : hil);
+	(void)cap;
+	for (;;) {
+		uint32_t kl = pl + 2 + rnd32() % (K - pl - 1), vl, emax;
+		emax = M - 10 - kl;
+		vl = (rnd32() % 3 == 0) ? rnd32() % (emax + 1) : rnd32() % (emax / 8 + 1);
+		memcpy(k, lo, pl);
+		k[pl] = (uint8_t)(0x20 + rnd32() % 0xC0);
+		for (i = (int)pl + 1; i < (int)kl; i++) k[i] = (uint8_t)rnd32();
+		if (btnode_insert(L, k, (uint16_t)kl, v, (uint16_t)vl) != 0) {
+			/* this entry did not fit: it is the pending one */
+			memcpy(pk, k, kl); pkl = (uint16_t)kl; pvl = (uint16_t)vl;
+			break;
+		}
+		n++;
+	}
+	/* a pending entry of the maximum size half the time */
+	if (rnd32() % 2) pvl = (uint16_t)(M - 10 - pkl);
+	if (n >= 2) {
+		btnode_init(R, ps, 1);
+		if (btnode_split_ex(L, R, sep, sizeof sep, &sl, pk, pkl, pvl) != 0) {
+			rc = 1;
+		} else {
+			int c = memcmp(pk, sep, pkl < sl ? pkl : sl);
+			void *dst = (c < 0 || (c == 0 && pkl <= sl)) ? L : R;
+			char why[200];
+			if (btnode_insert(dst, pk, pkl, v, pvl) != 0) rc = 2;
+			else if (btnode_check(L, why, sizeof why) != 0 ||
+			    btnode_check(R, why, sizeof why) != 0) rc = 3;
+		}
+		if (rc && !quiet)
+			fprintf(stderr, "    split_trial ps=%u K=%u M=%u pl=%u n=%d pend %u+%u "
+			    "-> %s\n", ps, K, M, pl, n, pkl, pvl,
+			    rc == 1 ? "no cut" : rc == 2 ? "pending did not fit" : "bad node");
+	}
+	free(L); free(R); free(keys);
+	return rc;
+}
+
+static void
+test_split_bound(void)
+{
+	static const uint32_t pss[] = { 1024, 4096, 16384 };
+	int p, t, bad_ok = 0, bad_over = 0;
+
+	for (p = 0; p < 3; p++) {
+		uint32_t ps = pss[p], cap = ps - (uint32_t)sizeof(struct btnode_hdr);
+		uint32_t K = cap / 8 - 9, M;
+		if (K > 1024) K = 1024;
+		M = (cap - 2 * K) / 3;
+		for (t = 0; t < 4000; t++)
+			bad_ok += split_trial(ps, K, M, 0) != 0;
+		/* Over the bound (an entry up to cap/2), failures must appear,
+		 * or this test proves nothing. */
+		for (t = 0; t < 4000; t++)
+			bad_over += split_trial(ps, K, cap / 2, 1) != 0;
+	}
+	CHECK(bad_ok == 0, "split failed within the bound in %d trials", bad_ok);
+	CHECK(bad_over > 0, "no failure above the bound: the trial is not "
+	    "exercising the split");
+	printf("  test_split_bound: ok (12000 random full leaves split for a "
+	    "pending entry up to M = (cap - 2K)/3; %d failures above it)\n", bad_over);
+}
+
 int
 main(void)
 {
@@ -596,6 +698,7 @@ main(void)
 	test_binary_keys();
 	test_remove_compact();
 	test_check();
+	test_split_bound();
 	printf("ALL PASS (%d checks)\n", g_checks);
 	return 0;
 }

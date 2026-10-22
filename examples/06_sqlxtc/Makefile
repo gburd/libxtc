@@ -151,6 +151,8 @@ clean:
 	rm -f test_drop_reserved test_evict_revalidate_sampled
 	rm -f test_bg_idle test_bg_kill test_ckpt_offloop test_scan_resist test_sweep_bound test_evict_revalidate test_btree_late_load test_flush_pin test_trickler_select test_pp_slice test_tr_slice test_publication_pin test_private_frame test_pid_writeback bm_sweep_bench
 	rm -f test_persist
+	rm -f test_scan_resist test_sweep_bound test_evict_revalidate test_btree_late_load test_flush_pin test_trickler_select test_pp_slice test_tr_slice test_publication_pin test_private_frame test_pid_writeback bm_sweep_bench
+	rm -f test_persist test_btree_prefix_split sx_size test_rec_codec test_idx_elem test_freelist_persist
 	rm -f test_cursor_resume
 	rm -f test_btnode
 	rm -f test_btree
@@ -1010,3 +1012,51 @@ test_bg_kill: test_bg_kill.c $(ENGINE_NATIVE)
 
 test-bg-kill: test_bg_kill
 	TMPDIR=$${TMPDIR:-/tmp} ./test_bg_kill
+test: test-btree-prefix-split
+
+# Prefix-compressed leaves (index keys) must split, fill, and keep every
+# entry: the split used to cost entries with their full key.
+test_btree_prefix_split: test_btree_prefix_split.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ test_btree_prefix_split.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
+
+test-btree-prefix-split: test_btree_prefix_split
+	TMPDIR=$${TMPDIR:-/tmp} ./test_btree_prefix_split
+
+test: test-rec-codec
+
+# The row record codec: round trip of every class and width edge, the
+# size of a TPC-C row, 1.59 records still decode, truncations in bounds.
+test_rec_codec: test_rec_codec.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ test_rec_codec.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
+
+test-rec-codec: test_rec_codec
+	./test_rec_codec
+
+test: test-idx-elem
+
+# Index key elements of numbers: memcmp order == SQLite's numeric order
+# (INT and REAL, every width edge, asc and DESC), the element sizes, a
+# UNIQUE index keeping INT64_MAX and 2^63 apart, seeks == SQLite's rows.
+test_idx_elem: test_idx_elem.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ test_idx_elem.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
+
+test-idx-elem: test_idx_elem
+	TMPDIR=$${TMPDIR:-/tmp} ./test_idx_elem
+
+test: test-freelist-persist
+
+# Freed page ids survive a clean close: reloaded and reused (lowest
+# first) by the next open, dropped by any later superblock write, never
+# loaded from a corrupt chain; the free pages are punched out on disk.
+test_freelist_persist: test_freelist_persist.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ test_freelist_persist.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
+
+test-freelist-persist: test_freelist_persist
+	TMPDIR=$${TMPDIR:-/tmp} ./test_freelist_persist
+
+# ---- store size attribution (offline, read-only) ----
+# sx_size STORE.xstore [STORE.xstore-wal]: bytes per table / index /
+# out-of-line page / unreachable page, fill factors, record encodings,
+# and the log by record type.  Run it on a closed store.
+sx_size: sx_size.c xstore.o btnode.o wal.o xlog.o engine.o db.o quack.o metrics.o btree.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ sx_size.c xstore.o btnode.o wal.o xlog.o engine.o db.o quack.o metrics.o btree.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
