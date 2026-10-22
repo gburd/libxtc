@@ -4622,7 +4622,9 @@ vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 		 * two streaming join executors (2-table + N-way, native +
 		 * non-native sources) to thread it through; deferred as a distinct
 		 * step.  Falls back correctly via the VDBE today. */
-		if (sel->distinct && !sel_is_agg(sel))
+		/* DISTINCT dedups the collected rows (collect_plan), which is
+		 * after any LIMIT: only without one. */
+		if (sel->distinct && !sel_is_agg(sel) && (sel->limit || sel->offset))
 			goto fallback;
 		/* ORDER BY / LIMIT / OFFSET on the join path are applied as a
 		 * post-collection sort over the output columns (collect_serial),
@@ -4794,7 +4796,17 @@ vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 
 	/* Storage-native source.  SELECT * is expanded above into the column
 	 * list; explicit-column queries scan the B-tree directly. */
-	if (nv.n == 0 || nv.n > 32) goto fallback;
+	if (nv.n == 0) {
+		/* SELECT 1 FROM t: no column is read, but every row counts.
+		 * (proj_scols is free here: a star would have added columns.) */
+		bt_t *sbt = xstore_bt_of(db);
+		sql_str_t nm;
+		if (sbt == NULL || xstore_table_schema(sbt, tabbuf, proj_scols, 64) <= 0)
+			goto fallback;
+		nm.p = proj_scols[0].name; nm.len = (uint32_t)strlen(proj_scols[0].name);
+		if (nv_add(&nv, &nm) < 0) goto fallback;
+	}
+	if (nv.n > 32) goto fallback;
 
 	st->bt = xstore_bt_of(db);
 	if (st->bt == NULL) goto fallback;   /* not an xstore-backed connection */
@@ -5709,6 +5721,23 @@ jc_collect(struct vx_joinctx *jc, const sql_expr_t *e)
 	}
 }
 
+/* A join side the query names no column of (SELECT count(*) FROM a, b)
+ * still produces rows: read its rowid (schema column 0) so it has one.
+ * 0, or -1 if the side's schema is unknown. */
+static int
+jc_fill_empty(struct vx_joinctx *jc)
+{
+	int side;
+	sql_str_t nm;
+	for (side = 0; side < jc->nside; side++) {
+		if (jc->col[side].n > 0) continue;
+		if (jc->nsc[side] <= 0) return -1;
+		nm.p = jc->sc[side][0].name; nm.len = (uint32_t)strlen(nm.p);
+		if (nv_add(&jc->col[side], &nm) < 0) return -1;
+	}
+	return 0;
+}
+
 /* Does `sel` aggregate (a GROUP BY, HAVING, or an aggregate output)? */
 static int
 sel_is_agg(const sql_select_t *sel)
@@ -5766,6 +5795,9 @@ join_agg_wrap(struct vx_stmt *js, struct vx_joinctx *jc, const sql_select_t *sel
 	comp.binds = binds; comp.nbinds = nbinds; comp.ag = NULL;
 	jc->aggsel = NULL;
 	r = agg_build(&comp, sel, nout);
+	/* group_concat concatenates in row order, and a join's row order is
+	 * its executor's (hash build / probe), not SQLite's loop nest. */
+	if (r == 1 && st->agg->has_gc) r = 0;
 	if (r != 1) { vx_finalize(st); return r; }
 	/* The plan cache must not keep a plan whose join was rebound under it. */
 	st->noreuse |= js->noreuse;
@@ -5883,7 +5915,7 @@ vx_try_prepare_join(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		(void)tmp;
 		if (sa < 0 || sb < 0 || sa == sb) goto fallback;   /* one col per side */
 	}
-	if (jc.col[0].n == 0 || jc.col[1].n == 0) goto fallback;
+	if (jc_fill_empty(&jc) != 0) goto fallback;
 
 	/* Build the per-side source SELECTs. */
 	for (side = 0; side < 2; side++) {
@@ -5901,6 +5933,7 @@ vx_try_prepare_join(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 	if (!st) goto oom;
 	st->db = db; st->cur = -1; st->limit = -1;
 	st->binds = binds; st->nbinds = nbinds;
+	st->distinct = !agg && sel->distinct;
 	jp = (vx_joinplan_t *)calloc(1, sizeof *jp);
 	if (!jp) goto oom;
 	st->join = jp;
@@ -6029,6 +6062,9 @@ vx_try_prepare_join(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		}
 		if (nextra > 0)
 			st->join_emit = nproj + nextra;   /* emit user + sort-only cols */
+		/* DISTINCT ordered by a column it drops: which row's value orders
+		 * a duplicate is unspecified. */
+		if (nextra > 0 && st->distinct) goto fallback;
 	}
 	if (sel->limit && !agg) {
 		char buf[32];
@@ -6171,13 +6207,15 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 			if (jc_collect(&jc, o->expr) != 0) goto fallback;
 		}
 	}
+	if (jc_fill_empty(&jc) != 0) goto fallback;
 	for (side = 0; side < nside; side++)
-		if (jc.col[side].n == 0 || jc.col[side].n > 16) goto fallback;
+		if (jc.col[side].n > 16) goto fallback;
 
 	st = (struct vx_stmt *)calloc(1, sizeof *st);
 	if (!st) goto oom;
 	st->db = db; st->cur = -1; st->limit = -1;
 	st->binds = binds; st->nbinds = nbinds;
+	st->distinct = !agg && sel->distinct;
 	jp = (vx_njoinplan_t *)calloc(1, sizeof *jp);
 	if (!jp) goto oom;
 	st->njoin = jp;
@@ -6335,6 +6373,7 @@ vx_try_prepare_njoin(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
 		}
 		if (nextra > 0)
 			st->join_emit = nproj + nextra;
+		if (nextra > 0 && st->distinct) goto fallback;   /* see the 2-way join */
 	}
 	if (sel->limit && !agg) {
 		char buf[32];

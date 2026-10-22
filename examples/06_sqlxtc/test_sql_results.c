@@ -112,6 +112,16 @@ static const struct rcase cases[] = {
 	/* A 2-table join ordered by a column it does not output. */
 	{ "J1", "SELECT a.v FROM a JOIN b ON a.k = b.k ORDER BY b.w, a.v",
 	  0, { 0 }, 0, "a1;a1;a1b;a1b;a2;a5" },
+	/* Shapes that were declined: a join side with no named column, a
+	 * table read for no column, DISTINCT over a join. */
+	{ "D1", "SELECT count(*) FROM a, b", 0, { 0 }, 0, "36" },
+	{ "D2", "SELECT a.k, count(*) FROM a, b GROUP BY a.k", 0, { 0 }, 0,
+	  "1|12;2|6;3|6;5|6;NULL|6" },
+	{ "D3", "SELECT 1, 'x' FROM g", 0, { 0 }, 0,
+	  "1|x;1|x;1|x;1|x;1|x;1|x;1|x;1|x" },
+	{ "D4", "SELECT DISTINCT a.k FROM a JOIN b ON a.k = b.k", 0, { 0 }, 0,
+	  "1;2;5" },
+	{ "D5", "SELECT count(*) FROM a, b, g", 0, { 0 }, 0, "288" },
 	/* Aggregates over a derived table and over a join (were errors). */
 	{ "B1", "SELECT count(*) FROM (SELECT x FROM g GROUP BY x HAVING "
 	  "count(*) = 2)", 0, { 0 }, 0, "3" },
