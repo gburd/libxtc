@@ -34,6 +34,7 @@
 #endif
 
 #include "bitcask.h"
+#include "lhash.h"
 
 #include "xtc.h"     /* public clock + alloc API */
 
@@ -116,25 +117,29 @@ now_ns(void)
 
 /* ---- in-memory index ----------------------------------------- */
 
+/* Starting size; the index grows (lhash.h) with the key count.  It
+ * used to be a FIXED 4,096-bucket chain table: at 4M keys every put
+ * walked a ~1,000-entry chain to find the old record and a 5M-key load
+ * fell from 254k to 7.6k puts/s. */
 #define IDX_BUCKETS 4096
 
 struct idx_entry {
+	lh_node_t           node;      /* chain link + hash; first member */
 	uint8_t            *key;       /* malloc'd copy */
 	size_t              key_len;
 	uint64_t            offset;    /* file offset of value */
 	uint32_t            val_len;   /* on-disk length */
 	uint64_t            timestamp;
-	struct idx_entry   *next;
 };
 
-static uint32_t
+static uint64_t
 __hash_key(const void *key, size_t len)
 {
 	const uint8_t *p = key;
-	uint32_t h = 2166136261u;
+	uint64_t h = 14695981039346656037ULL;
 	size_t i;
-	for (i = 0; i < len; i++) { h ^= p[i]; h *= 16777619u; }
-	return h ? h : 1;
+	for (i = 0; i < len; i++) { h ^= p[i]; h *= 1099511628211ULL; }
+	return h;
 }
 
 struct bitcask {
@@ -142,22 +147,38 @@ struct bitcask {
 	int                  fd;
 	char                 dir[480];
 	uint64_t             write_offset;
-	struct idx_entry    *buckets[IDX_BUCKETS];
+	lh_t                 idx;
 	uint64_t             n_keys;
 	uint64_t             bytes_used;
 	uint64_t             bytes_dead;
 	uint64_t             puts, gets, dels, hits, misses;
 };
 
+static void *
+__idx_alloc(void *ctx, size_t sz)
+{
+	(void)ctx;
+	return calloc(1, sz);
+}
+
+static void
+__idx_mfree(void *ctx, void *p, size_t sz)
+{
+	(void)ctx; (void)sz;
+	free(p);
+}
+
 static struct idx_entry *
 __idx_lookup(struct bitcask *bc, const void *key, size_t key_len)
 {
-	uint32_t h = __hash_key(key, key_len) % IDX_BUCKETS;
-	struct idx_entry *e = bc->buckets[h];
-	while (e != NULL) {
-		if (e->key_len == key_len && memcmp(e->key, key, key_len) == 0)
+	uint64_t h = __hash_key(key, key_len);
+	lh_node_t *n;
+	struct idx_entry *e;
+	for (n = *lh_slot(&bc->idx, h); n != NULL; n = n->next) {
+		e = (struct idx_entry *)n;
+		if (n->hash == h && e->key_len == key_len &&
+		    memcmp(e->key, key, key_len) == 0)
 			return e;
-		e = e->next;
 	}
 	return NULL;
 }
@@ -168,17 +189,16 @@ static int
 __idx_put(struct bitcask *bc, const void *key, size_t key_len,
           uint64_t offset, uint32_t val_len, uint64_t ts)
 {
-	uint32_t h = __hash_key(key, key_len) % IDX_BUCKETS;
-	struct idx_entry *e, **link;
-	for (link = &bc->buckets[h], e = *link; e != NULL;
-	     link = &e->next, e = *link) {
-		if (e->key_len == key_len && memcmp(e->key, key, key_len) == 0) {
-			bc->bytes_dead += HDR_SIZE + e->key_len + e->val_len;
-			e->offset = offset;
-			e->val_len = val_len;
-			e->timestamp = ts;
-			return 0;
-		}
+	uint64_t h = __hash_key(key, key_len);
+	struct idx_entry *e = __idx_lookup(bc, key, key_len);
+	lh_node_t **slot;
+
+	if (e != NULL) {
+		bc->bytes_dead += HDR_SIZE + e->key_len + e->val_len;
+		e->offset = offset;
+		e->val_len = val_len;
+		e->timestamp = ts;
+		return 0;
 	}
 	e = calloc(1, sizeof *e);
 	if (e == NULL) return -1;
@@ -189,20 +209,29 @@ __idx_put(struct bitcask *bc, const void *key, size_t key_len,
 	e->offset = offset;
 	e->val_len = val_len;
 	e->timestamp = ts;
-	e->next = bc->buckets[h];
-	bc->buckets[h] = e;
-	bc->n_keys++;
+	e->node.hash = h;
+	slot = lh_slot(&bc->idx, h);
+	e->node.next = *slot;
+	*slot = &e->node;
+	/* Load factor 1: one bucket split per insert past it.  A refused
+	 * split (out of memory) only leaves the chains a little longer. */
+	if (++bc->n_keys > lh_buckets(&bc->idx))
+		(void)lh_grow(&bc->idx, __idx_alloc, __idx_mfree, NULL);
 	return 0;
 }
 
 static int
 __idx_del(struct bitcask *bc, const void *key, size_t key_len)
 {
-	uint32_t h = __hash_key(key, key_len) % IDX_BUCKETS;
-	struct idx_entry *e, **link;
-	for (link = &bc->buckets[h]; (e = *link) != NULL; link = &e->next) {
-		if (e->key_len == key_len && memcmp(e->key, key, key_len) == 0) {
-			*link = e->next;
+	uint64_t h = __hash_key(key, key_len);
+	lh_node_t **link, *n;
+	struct idx_entry *e;
+	for (link = lh_slot(&bc->idx, h); (n = *link) != NULL;
+	    link = &n->next) {
+		e = (struct idx_entry *)n;
+		if (n->hash == h && e->key_len == key_len &&
+		    memcmp(e->key, key, key_len) == 0) {
+			*link = n->next;
 			bc->bytes_dead += HDR_SIZE + e->key_len + e->val_len;
 			free(e->key); free(e);
 			bc->n_keys--;
@@ -215,16 +244,18 @@ __idx_del(struct bitcask *bc, const void *key, size_t key_len)
 static void
 __idx_free_all(struct bitcask *bc)
 {
-	int i;
-	for (i = 0; i < IDX_BUCKETS; i++) {
-		struct idx_entry *e = bc->buckets[i], *n;
-		while (e != NULL) {
-			n = e->next;
-			free(e->key); free(e);
-			e = n;
+	size_t i;
+	lh_node_t *n, *next;
+	if (bc->idx.dir == NULL) return;
+	for (i = 0; i < lh_buckets(&bc->idx); i++) {
+		for (n = *lh_bucket(&bc->idx, i); n != NULL; n = next) {
+			next = n->next;
+			free(((struct idx_entry *)n)->key);
+			free(n);
 		}
-		bc->buckets[i] = NULL;
+		*lh_bucket(&bc->idx, i) = NULL;
 	}
+	lh_destroy(&bc->idx, __idx_mfree, NULL);
 }
 
 /* ---- recovery ----------------------------------------------- */
@@ -312,13 +343,22 @@ bitcask_open(const char *dir, bitcask_t **out)
 	if (dir == NULL || out == NULL) return -1;
 	bc = calloc(1, sizeof *bc);
 	if (bc == NULL) return -1;
+	if (lh_init(&bc->idx, IDX_BUCKETS, __idx_alloc, __idx_mfree,
+	    NULL) != 0) {
+		free(bc);
+		return -1;
+	}
 	pthread_mutex_init(&bc->lock, NULL);
 	snprintf(bc->dir, sizeof bc->dir, "%s", dir);
 	snprintf(path, sizeof path, "%s/bitcask.data", dir);
 	bc->fd = open(path, O_RDWR | O_CREAT, 0644);
-	if (bc->fd < 0) { free(bc); return -1; }
+	if (bc->fd < 0) {
+		lh_destroy(&bc->idx, __idx_mfree, NULL);
+		free(bc);
+		return -1;
+	}
 	if (__recover(bc) != 0) {
-		(void)close(bc->fd); free(bc); return -1;
+		(void)close(bc->fd); __idx_free_all(bc); free(bc); return -1;
 	}
 	*out = bc;
 	return 0;
@@ -470,7 +510,7 @@ bitcask_del(bitcask_t *bc, const void *key, size_t key_len)
 int
 bitcask_iterate(bitcask_t *bc, bitcask_iter_fn fn, void *user)
 {
-	int i;
+	size_t i;
 	size_t nkeys = 0, capacity = 0;
 	struct snap { uint8_t *key; size_t key_len; };
 	struct snap *snap = NULL;
@@ -490,10 +530,12 @@ bitcask_iterate(bitcask_t *bc, bitcask_iter_fn fn, void *user)
 			pthread_mutex_unlock(&bc->lock);
 			return -1;
 		}
-		for (i = 0; i < IDX_BUCKETS && nkeys < capacity; i++) {
+		for (i = 0; i < lh_buckets(&bc->idx) && nkeys < capacity;
+		    i++) {
 			struct idx_entry *e;
-			for (e = bc->buckets[i]; e != NULL && nkeys < capacity;
-			     e = e->next) {
+			for (e = (struct idx_entry *)*lh_bucket(&bc->idx, i);
+			    e != NULL && nkeys < capacity;
+			    e = (struct idx_entry *)e->node.next) {
 				snap[nkeys].key = malloc(e->key_len);
 				if (snap[nkeys].key == NULL) {
 					size_t j;
@@ -512,7 +554,7 @@ bitcask_iterate(bitcask_t *bc, bitcask_iter_fn fn, void *user)
 	pthread_mutex_unlock(&bc->lock);
 
 	/* Phase 2: dispatch callbacks without holding the lock. */
-	for (i = 0; (size_t)i < nkeys; i++) {
+	for (i = 0; i < nkeys; i++) {
 		if (rc == 0 && fn(snap[i].key, snap[i].key_len, user) != 0)
 			rc = 0; /* user requested early stop; not an error */
 		free(snap[i].key);
@@ -545,7 +587,7 @@ bitcask_compact(bitcask_t *bc)
 	char tmp_path[512], data_path[512];
 	int tfd;
 	uint64_t new_off = 0;
-	uint32_t i;
+	size_t i;
 	int rc = -1;
 
 	if (bc == NULL) return -1;
@@ -558,9 +600,10 @@ bitcask_compact(bitcask_t *bc)
 	tfd = open(tmp_path, O_RDWR | O_CREAT | O_TRUNC, 0644);
 	if (tfd < 0) goto out;
 
-	for (i = 0; i < IDX_BUCKETS; i++) {
+	for (i = 0; i < lh_buckets(&bc->idx); i++) {
 		struct idx_entry *e;
-		for (e = bc->buckets[i]; e != NULL; e = e->next) {
+		for (e = (struct idx_entry *)*lh_bucket(&bc->idx, i); e != NULL;
+		    e = (struct idx_entry *)e->node.next) {
 			uint8_t hdr[HDR_SIZE], hdr_for_crc[HDR_SIZE - 4];
 			uint8_t *val = NULL;
 			uint32_t crc;

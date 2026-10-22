@@ -117,9 +117,9 @@ bulk and under an fd flood, and the idle timeout.  Run with
         |
         v
 +------------------------+
-| xtc_lrlock-protected   |  Hash table (FNV-1a) keyed by string;
-|       database         |  values are tagged unions (string/list/hash);
-|                        |  reads are wait-free, writes coalesce via apply_op
+| xtc_lrlock-protected   |  Linear-hash table (FNV-1a, lhash.h) keyed by
+|       database         |  string; grows one bucket per insert; values
+|                        |  are tagged unions (string/list/hash)
 +------------------------+
 ```
 
@@ -129,7 +129,6 @@ xtc primitives used:
 * **xtc_net_listen** -- listening socket with the standard knobs
 * **xtc_proc** -- one BEAM-style process per accepted connection
 * **xtc_lrlock** -- wait-free reads on the database
-* **xtc_slab** -- per-DB-table memory allocator (read/write copies of bucket arrays)
 * **xtc_res** -- the resource accountant; the centerpiece
 * **xtc_log** -- structured operational logging
 * **xtc_cfg** -- runtime configuration knobs
@@ -143,7 +142,8 @@ xtc primitives used:
 | `main.c` | 486 | Entry point, arg parsing, app bringup |
 | `proto.c` | 387 | RESP2/RESP3 parser + response builder |
 | `proto.h` | 149 | Protocol type definitions |
-| `db.c` | 1,048 | Database (FNV-1a hash table + lrlock + slab) |
+| `db.c` | 1,183 | Database (linear-hash table + lrlock) |
+| `lhash.h` | 166 | Linear hashing: the growing table under db.c and the bitcask index |
 | `db.h` | 209 | Database API |
 | `cmd.c` | 741 | Command dispatch + 35 handlers |
 | `cmd.h` | 64 | Command type definitions |
@@ -196,9 +196,13 @@ shaped the library:
 1. ~~**No built-in hash map / dict primitive.**~~  **SHIPPED.**  Both
    `xtc_chash` (concurrent, RCU-protected, `<xtc_chash.h>`) and
    `xtc_pdict` (per-proc dictionary, `<xtc_pdict.h>`) exist now.  rexis
-   still uses its own FNV-1a bucket hash in `db.c` because the example
-   predates them and the hand-rolled version is useful to read; a new
-   consumer should reach for `xtc_chash`.
+   still uses its own table (`lhash.h`, linear hashing over intrusive
+   chains): one loop owns the keyspace, so it needs no locking or RCU,
+   and it grows one bucket at a time with no whole-table rehash.  Until
+   2026-10 it was a FIXED 65,536-bucket array that never resized -- at 1M
+   keys that cost 40% of its pipelined throughput, at 5M a 4.4x slower
+   load.  A consumer that shares a table across loops should reach for
+   `xtc_chash`.
 
 2. **No token-bucket rate limiter.**  Still true.  The IOPS cap is
    implemented inline with atomics (~30 LOC).  `xtc_credit`
@@ -247,8 +251,13 @@ shaped the library:
   the `xtc_aio_*` alternative.
 * `KEYS pattern` is O(n) like real Redis -- documented, not a bug.
 * Single-threaded: one event loop serves every connection (see
-  `--cores` above).  A multi-loop rexis would need the keyspace's
-  writers serialized across loops; not done.
+  `--cores` above).  Spreading the connection procs over an `xtc_exec`
+  is NOT a small change: the lrlock guards only the table header, both
+  copies share the buckets and entries, and writers free entries in
+  place, so a reader on another thread would race those frees.  The
+  scalable shape is DragonFly's: one keyspace shard per loop, each
+  command run on (or sent to) the loop that owns its key -- see
+  `docs/examples/rexis-vs-dragonfly.md`.
 * A client that pipelines an unbounded stream and never reads stalls
   once the socket buffers fill (backpressure, above); Redis instead
   buffers replies without limit for normal clients by default.
@@ -256,23 +265,27 @@ shaped the library:
   hundreds of metrics; we expose ~30.
 * `CLUSTER NODES` returns a single-node response unconditionally.
 
-## Comparison vs real `redis-server`
+## Comparison vs Valkey and DragonFly
 
-Honest microbenchmarks on a single client, no pipelining, on this
-host (Linux x86_64, AMD EPYC):
+Measured 2026-10 on a 64-vCPU x86-64 host (32 cores x 2 SMT, one NUMA
+node), loopback, memtier_benchmark GET:SET 10:1, 32 B values, 1M keys
+prefilled, one server thread each, client on separate cores, medians
+of 3 runs (method and the open-loop tails in
+`docs/examples/rexis-vs-dragonfly.md`):
 
-| Metric | redis-server (7.x) | rexis-server-xtc |
-|---|---|---|
-| GET ops/sec | ~115,000 | ~85,000 |
-| SET ops/sec | ~110,000 | ~78,000 |
-| GET p99 latency | 12 us | 18 us |
+| | Valkey 9.0 | DragonFly (1 thread) | rexis-server-xtc |
+|---|---:|---:|---:|
+| ops/s, no pipelining | 219,000 | 195,000 | 153,000 |
+| ops/s, pipeline 16 | 1,262,000 | 707,000 | 1,130,000 |
+| open-loop p99 at 100k ops/s | 34 us | 34 us | 34 us |
+| load 5M keys (pipelined SET) | 6.0 s | 7.0 s | 5.0 s |
 
-xtc is ~25% slower in steady-state in these numbers.  **Treat the table
-as historical:** it was measured when the per-connection proc busy-polled
-(the old "gap #8"), and rexis has since been converted to park on
-`xtc_proc_wait_fd` for real fd readiness -- the exact change this note
-used to predict would close the gap.  The comparison has not been re-run
-since, so the current deficit is unknown and probably smaller.
+Without pipelining rexis pays for ~7 syscalls per request (a one-shot
+poll re-armed per park, and two `rt_sigprocmask` per fiber switch from
+glibc's `swapcontext`) against Valkey's 2.  DragonFly's strength is the
+other axis: it shards the keyspace over threads and scales to 2.7M
+ops/s (8.4M pipelined) at 32 threads, where Valkey peaks near 1.1M and
+rexis cannot use a second core.
 
 We are NOT claiming faster than real Redis here; the value is in the
 **bounded behaviour under stress** (all 5 caps hold; real Redis lets you

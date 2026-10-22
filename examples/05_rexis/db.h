@@ -18,6 +18,8 @@
 #include "xtc_slab.h"
 #include "xtc_lrlock.h"
 
+#include "lhash.h"
+
 /* Maximum key length */
 #define DB_MAX_KEY_LEN   1024
 
@@ -47,8 +49,7 @@ typedef struct db_hash_field {
 
 /* Database entry */
 typedef struct db_entry {
-	struct db_entry *next;         /* hash collision chain */
-	uint64_t         hash;
+	lh_node_t        node;         /* chain link + hash; first member */
 	size_t           key_len;
 	db_val_type_t    type;
 	int64_t          expire_at_ns; /* 0 = no expiry */
@@ -72,7 +73,8 @@ typedef struct db_entry {
 
 /* Database configuration */
 typedef struct db_opts {
-	size_t       n_buckets;        /* hash table size; default 65536 */
+	size_t       n_buckets;        /* initial table size (it grows with
+	                                * the key count); default 65536 */
 	size_t       max_keys;         /* 0 = unlimited */
 	int64_t      max_mem_bytes;    /* 0 = unlimited */
 	xtc_res_t   *res;              /* optional resource accountant */

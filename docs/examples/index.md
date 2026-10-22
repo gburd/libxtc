@@ -43,6 +43,11 @@ cd examples/05_rexis && make XTC_BUILD=../../build
 | [tnt]({{ '/examples/tnt/' | relative_url }}) | Seastar / Tina | The stackless Isolate layer -- the deliberate alternative to fibers. |
 | [pgmock]({{ '/examples/pgmock/' | relative_url }}) | PostgreSQL | A mock PG backend proving the no-fork runtime seam, with zero PG source. |
 
+[rexis vs DragonFly and Valkey]({{ '/examples/rexis-vs-dragonfly/' | relative_url }})
+compares rexis with a shard-per-thread server and a single-executor one,
+measured on the same host, and sketches the shard-per-loop shape on
+libxtc.
+
 ## The teaching programs (01--04)
 
 These four are small and map directly onto the [Guide]({{ '/guide/' | relative_url }})

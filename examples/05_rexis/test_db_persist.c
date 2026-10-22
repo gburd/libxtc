@@ -135,6 +135,37 @@ test_delete_persists(void)
 	printf("  ok   delete_persists\n");
 }
 
+/*
+ * A reopened keyspace must be visible to READERS at once.  The replay
+ * writes the lrlock's write copy; without a publish the read copy kept
+ * the empty header, so DBSIZE read 0 until the first write command.
+ */
+static void
+test_replay_visible_to_readers(void)
+{
+	db_t *db = NULL;
+	db_opts_t opts = DB_OPTS_DEFAULT;
+	char k[16];
+	int i, n;
+
+	opts.persist_dir = dir;
+	ASSERT(db_create(&opts, &db) == 0);
+	db_write_begin(db);
+	for (i = 0; i < 1000; i++) {
+		n = snprintf(k, sizeof k, "k%d", i);
+		ASSERT(db_set(db, k, (size_t)n, k, (size_t)n) == 0);
+	}
+	db_write_end(db);
+	ASSERT(db_key_count(db) == 1000);
+	db_destroy(db);
+
+	ASSERT(db_create(&opts, &db) == 0);
+	ASSERT(db_key_count(db) == 1000);
+	ASSERT(db_mem_used(db) > 1000 * 2);
+	db_destroy(db);
+	printf("  ok   replay_visible_to_readers\n");
+}
+
 static void
 test_persist_disabled(void)
 {
@@ -165,6 +196,10 @@ main(void)
 
 	setup_dir();
 	test_delete_persists();
+	teardown_dir();
+
+	setup_dir();
+	test_replay_visible_to_readers();
 	teardown_dir();
 
 	test_persist_disabled();

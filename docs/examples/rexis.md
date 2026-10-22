@@ -142,7 +142,14 @@ CPUs 0..N-1).
   connection processes see the keyspace. The example keeps this simple
   (a single owning structure) rather than pretending it solved
   distributed sharding -- see the code for exactly where the line is
-  drawn.
+  drawn, and
+  [rexis vs DragonFly and Valkey]({{ '/examples/rexis-vs-dragonfly/' | relative_url }})
+  for the shard-per-loop design that would take it to many cores.
+- **A table that does not grow is a time bomb.** Until 2026-10 the
+  keyspace was a fixed 65,536-bucket chained hash and the persistence
+  index a fixed 4,096: fine in every test, 40% of pipelined throughput
+  lost at 1M keys, and a 5M-key load that slowed to a crawl. Both are
+  now linear hashes (`lhash.h`) that split one bucket per insert.
 - **RESP is deceptively fiddly** (inline vs. multibulk, partial reads
   across socket boundaries); the parser has to resume cleanly when a
   command spans two `read`s, which is exactly the kind of state that
