@@ -39,6 +39,7 @@
 #include "xtc_sim.h"       /* XTC_SIM_BUGGIFY / xtc_sim_fault (DST) */
 #include "coro_int.h"      /* __xtc_current_task */
 #include "loop_int.h"      /* xtc_task::park_requested / park_timer */
+#include "xtc_probes.h"
 
 #include <stdatomic.h>
 #include <string.h>
@@ -462,7 +463,19 @@ xtc_lwlock_acquire(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 					(void)xtc_task_waker(cur, &w.waker);
 					(void)__xtc_mtx_unlock(&lock->wait_mu);
 					proc_ctx = __xtc_proc_ctx_save();
+					XTC_PROBE_LOCK_WAIT_START((uintptr_t)lock,
+					    XTC_PROBE_LOCK_LWLOCK, (int)mode,
+					    (uintptr_t)cur);
+					XTC_PROBE_FIBER_PARK((uintptr_t)cur,
+					    XTC_PROBE_PARK_LWLOCK,
+					    (uintptr_t)lock);
 					xtc_yield();
+					XTC_PROBE_FIBER_RESUME((uintptr_t)cur,
+					    XTC_PROBE_PARK_LWLOCK,
+					    (uintptr_t)lock);
+					XTC_PROBE_LOCK_WAIT_DONE((uintptr_t)lock,
+					    XTC_PROBE_LOCK_LWLOCK, (int)mode,
+					    (uintptr_t)cur);
 					__xtc_proc_ctx_restore(proc_ctx);
 					(void)__xtc_mtx_lock(&lock->wait_mu);
 				}
@@ -484,7 +497,11 @@ xtc_lwlock_acquire(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 			}
 		}
 
+		XTC_PROBE_LOCK_WAIT_START((uintptr_t)lock, XTC_PROBE_LOCK_LWLOCK,
+		    (int)mode, (uintptr_t)0);
 		(void)pthread_cond_wait(&lock->wait_cv, &lock->wait_mu);
+		XTC_PROBE_LOCK_WAIT_DONE((uintptr_t)lock, XTC_PROBE_LOCK_LWLOCK,
+		    (int)mode, (uintptr_t)0);
 		lock->n_waiters--;
 		(void)__xtc_mtx_unlock(&lock->wait_mu);
 		/* Loop: try CAS again.  Spurious wakeups are harmless; a

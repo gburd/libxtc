@@ -239,6 +239,27 @@ Build with `-g` (the default build does).  The tools work on a live
 process (run / attach / breakpoint) and on a core dump.  Run them while
 stopped so the file-static registry symbols resolve.
 
+## DTrace and bpftrace scripts (tools/dtrace, tools/bpftrace)
+
+For a libxtc built with `--enable-dtrace` (see `man xtc_usdt`), these
+attach to a running program through its static probes -- no debug info,
+no restart, no code change:
+
+| script | answers |
+|---|---|
+| `xtc_park_latency` | how long fibers stay parked, by reason |
+| `xtc_lock_contention` | which locks make callers wait, how long, from which stacks |
+| `xtc_timer_lateness` | how late timers fire; armed-vs-cancelled churn |
+| `xtc_aio_latency` | native AIO latency per op; blocking-pool queue/run time |
+| `xtc_lost_wake` | fibers parked and never resumed, and whether a wake was generated |
+
+    dtrace -qs tools/dtrace/xtc_park_latency.d -c ./prog       # FreeBSD, illumos, macOS
+    sudo bpftrace tools/bpftrace/xtc_park_latency.bt -c ./prog  # Linux
+
+Scope D scripts with `xtc$target` (they do): `xtc*` matches every libxtc
+process on the machine.  `docs/guide/12-tracing.md` walks through finding a
+lock convoy and a lost reply with them (`examples/15_usdt/`).
+
 ## MSVC / WinDbg
 
 Native MSVC support (a NatVis file for the value views plus an

@@ -29,6 +29,7 @@
 #include "proc_int.h"      /* __xtc_proc_ctx_save/restore */
 #include "coro_int.h"      /* __xtc_current_task */
 #include "loop_int.h"      /* __xtc_current_loop, __xtc_task_cancel_park_timer */
+#include "xtc_probes.h"
 #include "os_alloc.h"
 #include "os_time.h"
 
@@ -410,7 +411,11 @@ future_get(xtc_future_t *fut, intptr_t *out, int64_t timeout_ns)
 			(void)xtc_task_waker(cur, &w.waker);
 			(void)__xtc_mtx_unlock(&c->lock);
 			proc_ctx = __xtc_proc_ctx_save();
+			XTC_PROBE_FIBER_PARK((uintptr_t)cur, XTC_PROBE_PARK_FUTURE,
+			    (uintptr_t)fut);
 			xtc_yield();
+			XTC_PROBE_FIBER_RESUME((uintptr_t)cur,
+			    XTC_PROBE_PARK_FUTURE, (uintptr_t)fut);
 			__xtc_proc_ctx_restore(proc_ctx);
 			(void)__xtc_mtx_lock(&c->lock);
 		}

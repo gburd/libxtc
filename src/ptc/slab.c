@@ -45,6 +45,7 @@
 #include "xtc_slab.h"
 #include "preempt_int.h"   /* __xtc_mtx_lock: preemption-safe lock holds */
 #include "xtc_log.h"    /* redzone reports go through the library logger */
+#include "xtc_probes.h"
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -551,6 +552,7 @@ __chunk_new(xtc_slab_t *s)
 	}
 	c->base = base;
 	c->size = total;
+	XTC_PROBE_SLAB_GROW((uintptr_t)s, total);
 	c->owns_mmap = (s->opts.mode == XTC_SLAB_PROCESS_LOCAL);
 	c->n_total = s->objs_per_chunk;
 	c->n_inuse = 0;

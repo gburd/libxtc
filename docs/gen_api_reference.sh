@@ -32,7 +32,7 @@ io|I/O, files, and network (L1)|xtc_io xtc_aio xtc_net xtc_fs xtc_bdev xtc_tls x
 mem|Memory and resources|xtc_slab xtc_mctx xtc_res xtc_blocking
 ds|Concurrent data structures|xtc_chash xtc_cskip xtc_prob
 accel|Attached compute (GPU/NPU)|xtc_accel
-obs|Observability and debugging|xtc_inspect xtc_trace xtc_dump xtc_pdict xtc_alloc_audit xtc_tail
+obs|Observability and debugging|xtc_inspect xtc_trace xtc_dump xtc_pdict xtc_alloc_audit xtc_tail xtc_usdt
 test|Testing and fault injection|xtc_inject xtc_preempt xtc_stack_reclaim
 '
 

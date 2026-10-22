@@ -17,6 +17,7 @@
 #include "xtc_proc.h"
 #include "xtc_sync.h"
 #include "proc_int.h"      /* __xtc_proc_loop_contains: owner-qualified presence */
+#include "xtc_probes.h"
 
 #include <stdio.h>
 #include <pthread.h>
@@ -540,6 +541,8 @@ __sup_entry(void *arg)
 			continue;
 		}
 
+		XTC_PROBE_SUP_RESTART((uintptr_t)sup, XTC_PROBE_PID(d.pid),
+		    d.reason);
 		(void)__os_clock_mono(&now);
 		__record_restart(sup, now);
 		if (__intensity_exceeded(sup, now)) {

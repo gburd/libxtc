@@ -10,6 +10,7 @@
 #include "xtc_int.h"
 #include "xtc_tail.h"     /* SCHED: dispatch (WAKE) hook */
 #include "tail_int.h"     /* __xtc_tail_emit / __xtc_tail_on */
+#include "xtc_probes.h"
 #include "loop_int.h"
 #include "preempt_int.h"  /* __xtc_unsafe_enter/leave around the spare lock */
 
@@ -565,8 +566,13 @@ xtc_waker_wake(const xtc_waker_t *w)
 		 * RUNNING-and-not-parking is harmless: the flag is consumed only
 		 * by the PENDING verdict, and a stale flag is cleared by the
 		 * exchange the next time it parks. */
-		if (__task_wake_claim(w->task))
+		if (__task_wake_claim(w->task)) {
+			XTC_PROBE_FIBER_WAKE((uintptr_t)w->task,
+			    w->loop->exec_id, XTC_PROBE_WAKE_LOCAL);
 			return __xtc_loop_enqueue(w->loop, w->task);
+		}
+		XTC_PROBE_FIBER_WAKE((uintptr_t)w->task, w->loop->exec_id,
+		    XTC_PROBE_WAKE_UNPARKED);
 		return XTC_OK;
 	}
 
@@ -585,8 +591,13 @@ xtc_waker_wake(const xtc_waker_t *w)
 	{
 		xtc_loop_t *loop = w->loop;
 		xtc_task_t *task = w->task;
-		if (__task_wake_claim(task))
+		if (__task_wake_claim(task)) {
+			XTC_PROBE_FIBER_WAKE((uintptr_t)task, loop->exec_id,
+			    XTC_PROBE_WAKE_REMOTE);
 			return __xtc_inbox_push(loop, XTC_INB_WAKE, task);
+		}
+		XTC_PROBE_FIBER_WAKE((uintptr_t)task, loop->exec_id,
+		    XTC_PROBE_WAKE_UNPARKED);
 		return XTC_OK;
 	}
 }
@@ -643,6 +654,8 @@ xtc_task_park_on_timer(xtc_task_t *self, int64_t delay_ns)
 			__os_free(t);
 			return rc;
 		}
+		XTC_PROBE_TIMER_ARM((uintptr_t)t, t->deadline_ns,
+		    (uintptr_t)self);
 		/*
 		 * A park timer is refcounted (refs == 2): the heap holds one
 		 * reference, the task's park_timer slot the other, and the last
@@ -721,6 +734,7 @@ __xtc_loop_dispatch_event(xtc_loop_t *loop, xtc_io_event_t *ev)
 		return XTC_OK;
 
 	t = (xtc_task_t *)ev->tag;
+	XTC_PROBE_IO_DISPATCH(loop->exec_id, ev->fd, ev->flags, (uintptr_t)t);
 	/* Record the io flags so the parker knows what fired. */
 	atomic_fetch_or_explicit(&t->wake_revents, ev->flags,
 	    memory_order_relaxed);

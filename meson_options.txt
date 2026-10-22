@@ -42,3 +42,6 @@ option('diagnostic',
 
 option('sched_policy', type : 'boolean', value : false,
   description : 'Enable optional runtime lane policies.')
+
+option('dtrace', type : 'combo', choices : ['no', 'auto', 'yes', 'sdt'], value : 'no',
+  description : 'USDT probes for DTrace / perf / bpftrace (mirrors --enable-dtrace; see xtc_usdt(3)).')

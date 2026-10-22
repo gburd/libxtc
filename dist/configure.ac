@@ -716,6 +716,91 @@ AC_SUBST([XTC_HEGEL_CFLAGS], [$xtc_hegel_cflags])
 AC_SUBST([XTC_HEGEL_LIBS],   [$xtc_hegel_libs])
 AC_SUBST([XTC_HEGEL_PBT],    [$xtc_hegel_pbt])
 
+# -------------------------------------------------------------------------
+# Static (USDT) probes: src/xtc_probes.d, src/inc/xtc_probes.h, xtc_usdt(3).
+#
+#   no    (default) every probe macro expands to nothing: no code, no notes.
+#   yes   a `dtrace` program is required.  `dtrace -h` makes the header;
+#         except on macOS, `dtrace -G` post-processes the objects into
+#         xtc_probes.o, which is archived into libxtc.a / linked into the
+#         shared library.  FreeBSD, illumos, macOS; Linux with systemtap's
+#         `dtrace` script (which adds is-enabled semaphores).
+#   sdt   header-only: systemtap's <sys/sdt.h> STAP_PROBE notes, no tool and
+#         no post-link step.  Linux; readable by perf, bpftrace, bcc and
+#         SystemTap.  XTC_PROBE_ENABLED() is then always 1.
+#   auto  yes if a working `dtrace` is found, else sdt if a systemtap
+#         <sys/sdt.h> is, else no.
+#
+# DTRACE and DTRACEFLAGS are precious, as in PostgreSQL's configure
+# (e.g. DTRACEFLAGS=-64 for a 64-bit build on illumos).
+# -------------------------------------------------------------------------
+AC_ARG_VAR([DTRACE], [DTrace program used by --enable-dtrace])
+AC_ARG_VAR([DTRACEFLAGS], [Flags passed to $DTRACE -h / -G])
+AC_ARG_ENABLE([dtrace],
+  [AS_HELP_STRING([--enable-dtrace@<:@=yes|sdt|auto|no@:>@],
+    [Build the USDT probes for DTrace, perf, bpftrace and SystemTap (default: no).])],
+  [xtc_enable_dtrace=$enableval], [xtc_enable_dtrace=no])
+xtc_probes_mode=no
+xtc_probes_hdr=
+xtc_probes_obj=
+case "$host_os" in
+  *mingw*|*cygwin*|*msys*)
+    AS_IF([test "x$xtc_enable_dtrace" = xyes || test "x$xtc_enable_dtrace" = xsdt],
+      [AC_MSG_ERROR([--enable-dtrace: no USDT support on Windows (ETW is the analogue)])])
+    xtc_enable_dtrace=no
+    ;;
+esac
+AS_CASE([$xtc_enable_dtrace],
+  [yes|auto],
+  [AS_IF([test -z "$DTRACE"], [AC_PATH_PROGS([DTRACE], [dtrace], [], [$PATH:/usr/sbin])])
+   xtc_dt_ok=no
+   AS_IF([test -n "$DTRACE"],
+     [AC_MSG_CHECKING([whether $DTRACE -h works])
+      printf 'provider xtcconftest { probe p(int); };\n' > conftest.d
+      AS_IF([$DTRACE $DTRACEFLAGS -h -s conftest.d -o conftest_probes.h >/dev/null 2>&1 &&
+             test -s conftest_probes.h], [xtc_dt_ok=yes])
+      rm -f conftest.d conftest_probes.h
+      AC_MSG_RESULT([$xtc_dt_ok])])
+   AS_IF([test "x$xtc_dt_ok" = xyes],
+     [xtc_probes_mode=dtrace],
+     [test "x$xtc_enable_dtrace" = xyes],
+     [AC_MSG_ERROR([--enable-dtrace: no working dtrace program (set DTRACE=/path/to/dtrace)])],
+     [xtc_enable_dtrace=sdt-auto])])
+AS_CASE([$xtc_enable_dtrace],
+  [sdt|sdt-auto],
+  [AC_MSG_CHECKING([for a systemtap <sys/sdt.h>])
+   AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <sys/sdt.h>
+#ifndef STAP_PROBE2
+#error not the systemtap sdt.h
+#endif]], [[int a = 1; long b = 2; DTRACE_PROBE2(xtcconftest, p, a, b);]])],
+     [AC_MSG_RESULT([yes]); xtc_probes_mode=sdt],
+     [AC_MSG_RESULT([no])
+      AS_IF([test "x$xtc_enable_dtrace" = xsdt],
+        [AC_MSG_ERROR([--enable-dtrace=sdt: no systemtap <sys/sdt.h> (install systemtap-sdt-dev or systemtap-sdt-devel)])])])],
+  [yes|auto|no], [],
+  [AC_MSG_ERROR([--enable-dtrace accepts only yes, sdt, auto or no])])
+AS_CASE([$xtc_probes_mode],
+  [dtrace],
+  [AC_DEFINE([XTC_HAVE_DTRACE], 1,
+     [Define to 1 to build the USDT probes from dtrace -h (src/xtc_probes.d).])
+   xtc_probes_hdr=xtc_probes_dtrace.h
+   case "$host_os" in
+     *darwin*) ;;
+     *)
+       AC_DEFINE([XTC_PROBES_ANCHOR], 1,
+         [Define to 1 when dtrace -G builds xtc_probes.o, which every probe object references.])
+       xtc_probes_obj=xtc_probes.o
+       ;;
+   esac],
+  [sdt],
+  [AC_DEFINE([XTC_PROBES_SDT], 1,
+     [Define to 1 to build the USDT probes from <sys/sdt.h> alone.])])
+AC_MSG_CHECKING([which USDT probes to build])
+AC_MSG_RESULT([$xtc_probes_mode])
+AC_SUBST([XTC_PROBES_MODE], [$xtc_probes_mode])
+AC_SUBST([XTC_PROBES_HDR], [$xtc_probes_hdr])
+AC_SUBST([XTC_PROBES_OBJ], [$xtc_probes_obj])
+
 # Require C11.  PG18 raised the floor; PG19 inherits.
 AC_MSG_CHECKING([whether the C compiler accepts -std=c11])
 saved_CFLAGS=$CFLAGS

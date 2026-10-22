@@ -56,6 +56,9 @@
 /* Define to enable runtime diagnostic assertions. */
 #undef XTC_DIAGNOSTIC
 
+/* Define to enable optional runtime lane policies. */
+#undef XTC_ENABLE_SCHED_POLICY
+
 /* Define to 1 if the platform has the DRM/accel subsystem for
    attached-compute (GPU/NPU) fence-wait + device probe support */
 #undef XTC_HAVE_ACCEL
@@ -69,6 +72,9 @@
 /* Define to 1 if DPDK (libdpdk) is available for the optional
    userspace-networking backend */
 #undef XTC_HAVE_DPDK
+
+/* Define to 1 to build the USDT probes from dtrace -h (src/xtc_probes.d). */
+#undef XTC_HAVE_DTRACE
 
 /* Define to 1 if <execinfo.h> backtrace() is available */
 #undef XTC_HAVE_EXECINFO
@@ -113,6 +119,13 @@
 /* Linux io_uring backend */
 #undef XTC_IO_BACKEND_URING
 
+/* Define to 1 when dtrace -G builds xtc_probes.o, which every probe object
+   references. */
+#undef XTC_PROBES_ANCHOR
+
+/* Define to 1 to build the USDT probes from <sys/sdt.h> alone. */
+#undef XTC_PROBES_SDT
+
 /* GnuTLS TLS backend */
 #undef XTC_TLS_BACKEND_GNUTLS
 
@@ -142,6 +155,3 @@
 
 /* Library version as SemVer string */
 #undef XTC_VERSION_STRING
-
-/* Optional runtime lane policies. */
-#undef XTC_ENABLE_SCHED_POLICY

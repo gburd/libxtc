@@ -29,7 +29,11 @@ if [ -z "$defined" ]; then
 	exit 0
 fi
 
-bad=$(echo "$defined" | grep -v -E '^(xtc_|__xtc_|_)' || true)
+# `dtrace -G` (configure --enable-dtrace on FreeBSD / illumos) adds one
+# global `$dtraceNNN.<function>` alias per function with a probe site; the
+# probe table in xtc_probes.o relocates against them, so they must stay
+# global in the archive.  The shared library's version script hides them.
+bad=$(echo "$defined" | grep -v -E '^(xtc_|__xtc_|_|\$dtrace[0-9]+\.)' || true)
 if [ -n "$bad" ]; then
 	echo "  [C5] FAIL: non-xtc symbols exported:" >&2
 	echo "$bad" >&2

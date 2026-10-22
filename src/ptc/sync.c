@@ -19,6 +19,7 @@
 #include "xtc_sim.h"       /* XTC_SIM_BUGGIFY / xtc_sim_fault (DST) */
 #include "loop_int.h"
 #include "coro_int.h"
+#include "xtc_probes.h"
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -295,7 +296,10 @@ fw_park(pthread_mutex_t *lk, xtc_task_t *cur, xtc_waker_t *wk,
 	}
 	(void)__xtc_mtx_unlock(lk);
 	proc_ctx = __xtc_proc_ctx_save();
+	XTC_PROBE_FIBER_PARK((uintptr_t)cur, XTC_PROBE_PARK_SYNC, (uintptr_t)lk);
 	xtc_yield();
+	XTC_PROBE_FIBER_RESUME((uintptr_t)cur, XTC_PROBE_PARK_SYNC,
+	    (uintptr_t)lk);
 	__xtc_proc_ctx_restore(proc_ctx);
 	(void)__xtc_mtx_lock(lk);
 }
@@ -948,10 +952,14 @@ __amutex_lock_thread(xtc_amutex_t *m, int64_t timeout_ns)
 		}
 		m->cv_waiters++;
 		expired = 0;
+		XTC_PROBE_LOCK_WAIT_START((uintptr_t)m, XTC_PROBE_LOCK_AMUTEX, 0,
+		    (uintptr_t)0);
 		if (timeout_ns < 0)
 			(void)pthread_cond_wait(&m->cv, &m->lock);
 		else
 			expired = cv_wait_until(&m->cv, &m->lock, &ts);
+		XTC_PROBE_LOCK_WAIT_DONE((uintptr_t)m, XTC_PROBE_LOCK_AMUTEX, 0,
+		    (uintptr_t)0);
 		m->cv_waiters--;
 		m->cv_wake = 0;         /* any waiter's return consumes the wake */
 		spun = 0;
@@ -1037,7 +1045,11 @@ xtc_amutex_lock(xtc_amutex_t *m, int64_t timeout_ns)
 			rc = XTC_E_AGAIN;
 			break;
 		}
+		XTC_PROBE_LOCK_WAIT_START((uintptr_t)m, XTC_PROBE_LOCK_AMUTEX, 0,
+		    (uintptr_t)cur);
 		fw_park(&m->lock, cur, &w.waker, deadline, now);
+		XTC_PROBE_LOCK_WAIT_DONE((uintptr_t)m, XTC_PROBE_LOCK_AMUTEX, 0,
+		    (uintptr_t)cur);
 	}
 	if (rc == XTC_OK && m->recursive) {
 		m->owner = amutex_self_owner();
@@ -1278,10 +1290,14 @@ __arw_lock_thread(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
 		}
 		(*nwait)++;
 		expired = 0;
+		XTC_PROBE_LOCK_WAIT_START((uintptr_t)r, XTC_PROBE_LOCK_ARWLOCK,
+		    mode, (uintptr_t)0);
 		if (timeout_ns < 0)
 			(void)pthread_cond_wait(cv, &r->lock);
 		else
 			expired = cv_wait_until(cv, &r->lock, &ts);
+		XTC_PROBE_LOCK_WAIT_DONE((uintptr_t)r, XTC_PROBE_LOCK_ARWLOCK,
+		    mode, (uintptr_t)0);
 		(*nwait)--;
 		*wake = 0;              /* the first woken waiter to run */
 		spun = 0;
@@ -1363,7 +1379,11 @@ __arwlock_lock(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
 			rc = XTC_E_AGAIN;
 			break;
 		}
+		XTC_PROBE_LOCK_WAIT_START((uintptr_t)r, XTC_PROBE_LOCK_ARWLOCK,
+		    mode, (uintptr_t)cur);
 		fw_park(&r->lock, cur, &w.waker, deadline, now);
+		XTC_PROBE_LOCK_WAIT_DONE((uintptr_t)r, XTC_PROBE_LOCK_ARWLOCK,
+		    mode, (uintptr_t)cur);
 	}
 	/* Every exit cancels the park timer (see xtc_amutex_lock). */
 	__xtc_task_cancel_park_timer(cur);

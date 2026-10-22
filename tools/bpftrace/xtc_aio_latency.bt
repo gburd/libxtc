@@ -1,0 +1,36 @@
+#!/usr/bin/env bpftrace
+/*
+ * xtc_aio_latency.bt -- native file AIO latency per operation, and the
+ * blocking-pool queue and run times.  The bpftrace twin of
+ * tools/dtrace/xtc_aio_latency.d.
+ *
+ * aio op: 0 pread 1 pwrite 2 fsync 3 fdatasync 4 preadv 5 pwritev.
+ */
+
+usdt:*:xtc:aio__submit { @a[arg0] = nsecs; @bytes[arg1] = sum(arg3); }
+
+usdt:*:xtc:aio__done
+/@a[arg0]/
+{
+	@lat_ns[arg1] = hist(nsecs - @a[arg0]);
+	@ops[arg1] = count();
+	if ((int32)arg2 < 0) { @errors[arg1] = count(); }
+	delete(@a[arg0]);
+}
+
+usdt:*:xtc:blocking__enqueue { @q[arg0] = nsecs; }
+usdt:*:xtc:blocking__start
+/@q[arg0]/
+{
+	@queue_wait_ns = hist(nsecs - @q[arg0]);
+	delete(@q[arg0]);
+	@r[arg0] = nsecs;
+}
+usdt:*:xtc:blocking__done
+/@r[arg0]/
+{
+	@run_ns = hist(nsecs - @r[arg0]);
+	delete(@r[arg0]);
+}
+
+END { clear(@a); clear(@q); clear(@r); }

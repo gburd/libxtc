@@ -231,7 +231,10 @@ def public_headers(incdir):
     # friends as opaque.
     names = sorted(n for n in os.listdir(incdir)
                    if n.startswith("xtc_") and n.endswith(".h")
-                   and n not in ("xtc_int.h", "xtc_ext.h"))
+                   and n not in ("xtc_int.h", "xtc_ext.h",
+                                 # probe macros: internal, so they go
+                                 # into xtc.c, not the consumer's xtc.h
+                                 "xtc_probes.h"))
     out = []
     if os.path.isfile(os.path.join(incdir, "xtc.h")):
         out.append("xtc.h")

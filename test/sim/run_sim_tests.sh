@@ -56,9 +56,12 @@ mkdir -p "$build"
 # probabilistically under real threads.
 (
 	cd "$build"
+	# XTC_SIM_CONFIGURE_EXTRA: more configure flags, e.g.
+	# --enable-dtrace to run the DST tier with the USDT probes compiled in.
+	# shellcheck disable=SC2086  # a word list
 	"$XTC_SRC_DIR/dist/configure" --with-io-backend=sim \
 		--with-tls=none --without-liburing --enable-diagnostic \
-		--enable-sched-policy >/dev/null 2>&1
+		--enable-sched-policy ${XTC_SIM_CONFIGURE_EXTRA:-} >/dev/null 2>&1
 	make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)" >/dev/null 2>&1
 ) || { echo "  [sim] FAIL: sim-backend build errored"; exit 1; }
 

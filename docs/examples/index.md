@@ -100,6 +100,18 @@ late-short completion order under both scheduling policies. It requires
 `--enable-sched-policy`; in an enabled build, root `make check` and the
 CI `sched-policy` job run its self-test.
 
+## Finding a lock convoy and a lost reply with probes
+
+`examples/15_usdt/convoy.c` is buggy on purpose. In `convoy` mode eight fibers
+sleep while holding one `xtc_amutex`; `fixed` does the same work with the sleep
+outside the lock; `lostwake` has a server that drops one reply in ten. Each
+mode exits 0 and differs only in how long it takes, which is the kind of bug a
+tracer finds and a debugger does not. The
+[tracing guide]({{ '/guide/12-tracing/' | relative_url }}) runs
+`tools/dtrace/xtc_lock_contention.d` and `xtc_park_latency.d` against it.
+Source:
+[`examples/15_usdt/convoy.c`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/15_usdt/convoy.c).
+
 ## Reading suggestion
 
 Read **01--04** alongside the [Guide]({{ '/guide/' | relative_url }}) --
