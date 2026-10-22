@@ -8522,8 +8522,10 @@ collect_plan(vx_stmt_t *plan, vx_result_t **res)
 	if (out == NULL) return -1;
 	out->ncol = ncol;
 	out->nworkers = 1;
-	memcpy(out->name, plan->outname, sizeof out->name);
-	memcpy(out->aff, plan->outaff, sizeof out->aff);
+	/* Only the result's own columns: the whole 64 x 64 name table is
+	 * 4 KiB, copied for every point read (readers check col < ncol). */
+	memcpy(out->name, plan->outname, sizeof out->name[0] * (size_t)ncol);
+	memcpy(out->aff, plan->outaff, sizeof out->aff[0] * (size_t)ncol);
 
 	while ((step = vx_step(plan)) == SX_ROW) {
 		/* The current chunk row as is: the cells vx_column_* would

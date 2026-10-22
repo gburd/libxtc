@@ -12,6 +12,9 @@
  *
  *	P1  an index seek returning 40 rows costs O(1) cursor descents
  *	    (the index walk itself), not one descent per fetched row.
+ *	P3  a rowid point SELECT (WHERE k = ?) is one seek too: no cursor
+ *	    descent at all, and it returns the version of its snapshot, or
+ *	    nothing for a deleted or absent rowid.
  *	P2  a row updated N times, read through its index at each of the
  *	    N snapshots, returns that snapshot's version; after an update
  *	    of the indexed column the old entry returns nothing at the
@@ -141,6 +144,27 @@ main(void)
 	    (unsigned long long)descents, n + 1,
 	    T_OLC ? "" : " [no OLC in this build: bound not checked]");
 
+	/* P3: rowid point reads.  Before: one cursor (descent) per read. */
+	bt_get_stats(bt, &s0);
+	for (i = 1; i <= 200; i++) {
+		char want3[32];
+		int64_t k = 1 + (i * 37) % N_ROWS;
+		snprintf(want3, sizeof want3, "r%lld", (long long)k);
+		if (rows_v(db, "SELECT v FROM t WHERE k = ?", k, got, sizeof got)
+		    != 1 || strcmp(got, want3) != 0)
+			n = -1;
+	}
+	bt_get_stats(bt, &s1);
+	descents = s1.descents - s0.descents;
+	CK(n != -1);
+	CK(rows_v(db, "SELECT v FROM t WHERE k = ?", N_ROWS + 77, got, sizeof got)
+	    == 0);
+	CK(!T_OLC || descents == 0);
+	printf("  %s   P3: 200 rowid point SELECTs, %llu cursor descents (one "
+	    "per read would be 200)%s\n", (!T_OLC || descents == 0) && n != -1 ?
+	    "ok" : "FAIL", (unsigned long long)descents,
+	    T_OLC ? "" : " [no OLC in this build: bound not checked]");
+
 	/* P2: versions.  Row 5000 in its own group 1000; version j has
 	 * v = "vj", snapshot ts[j] taken after writing it. */
 	CK(sx_exec(db, "INSERT INTO t(k,grp,v) VALUES(5000,1000,'v0')", NULL)
@@ -156,6 +180,8 @@ main(void)
 		snprintf(want, sizeof want, "v%d", i);
 		CK(rows_v(db, "SELECT v FROM t WHERE grp = ?", 1000, got, sizeof got)
 		    == 1 && strcmp(got, want) == 0);
+		CK(rows_v(db, "SELECT v FROM t WHERE k = ?", 5000, got, sizeof got)
+		    == 1 && strcmp(got, want) == 0);
 	}
 	(void)xstore_as_of(db, 0);
 	/* Move the row to group 1001: the old index entry stays behind. */
@@ -169,10 +195,24 @@ main(void)
 	 * xstore.h "time travel reaches only snapshots someone pins".) */
 	CK(sx_exec(db, "DELETE FROM t WHERE k=5000", NULL) == SX_OK);
 	CK(rows_v(db, "SELECT v FROM t WHERE grp = ?", 1001, got, sizeof got) == 0);
+	CK(rows_v(db, "SELECT v FROM t WHERE k = ?", 5000, got, sizeof got) == 0);
+	(void)xstore_as_of(db, ts[N_VER - 1]);    /* before the delete */
+	CK(rows_v(db, "SELECT v FROM t WHERE k = ?", 5000, got, sizeof got) == 1 &&
+	    strcmp(got, "v5") == 0);
+	(void)xstore_as_of(db, 0);
+	/* A point read inside a transaction sees its own buffered write. */
+	CK(sx_exec(db, "BEGIN", NULL) == SX_OK);
+	CK(sx_exec(db, "UPDATE t SET v='mine' WHERE k=7", NULL) == SX_OK);
+	CK(rows_v(db, "SELECT v FROM t WHERE k = ?", 7, got, sizeof got) == 1 &&
+	    strcmp(got, "mine") == 0);
+	CK(sx_exec(db, "ROLLBACK", NULL) == SX_OK);
+	CK(rows_v(db, "SELECT v FROM t WHERE k = ?", 7, got, sizeof got) == 1 &&
+	    strcmp(got, "r7") == 0);
 	if (!g_fail)
 		printf("  ok   P2: a row with %d versions read through its index "
-		    "at each snapshot; a moved row found by its new key only; a "
-		    "deleted row gone\n", N_VER);
+		    "and its rowid at each snapshot; a moved row found by its new "
+		    "key only; a deleted row gone; a txn reads its own write\n",
+		    N_VER);
 
 	sx_close(db);
 	bt_close(bt);

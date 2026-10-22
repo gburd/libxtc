@@ -2799,6 +2799,32 @@ xs_scan_fill(xstore_scan_t *s)
 	return s->ra_n;
 }
 
+/* A plain committed scan of ONE rowid (lo == hi): the version visible
+ * at the snapshot is one first-key->= seek (xs_point_get), no cursor.
+ * xs_advance would open a B-tree cursor (an allocation, a latched
+ * descent, a close) and walk the row's newer versions.  Kept out of
+ * line: its value buffer is a page, and the per-row scan path should
+ * not carry that frame.  Fills s->c (rowid, val); 0 at none. */
+#if defined(__GNUC__) || defined(__clang__)
+#define XS_NOINLINE __attribute__((noinline))
+#else
+#define XS_NOINLINE
+#endif
+static int XS_NOINLINE
+xs_scan_point(xstore_scan_t *s)
+{
+	uint8_t v[1 + XS_VMAX];
+	int n;
+
+	s->c.visited++;
+	n = xs_point_get(s->c.bt, s->c.tableid, s->c.lo, s->c.snap, v,
+	    (int)sizeof v);
+	if (n == 0)
+		return 0;
+	xs_stash(&s->c, s->c.lo, v, (uint16_t)(n < 0 ? 1 : n + 1));
+	return 1;
+}
+
 int
 xstore_scan_next(xstore_scan_t *s, int64_t *rowid,
                  const uint8_t **rec, int *reclen)
@@ -2814,6 +2840,15 @@ xstore_scan_next(xstore_scan_t *s, int64_t *rowid,
 			if (rowid) *rowid = s->ra->rowid[i];
 			if (rec) *rec = s->ra->buf + s->ra->off[i];
 			if (reclen) *reclen = (int)s->ra->len[i];
+			return 1;
+		}
+		if (s->ra_want == 0 && s->c.has_lo && s->c.has_hi &&
+		    s->c.lo == s->c.hi) {             /* a point: one seek */
+			s->done = 1;                     /* the only row */
+			if (!xs_scan_point(s)) return 0;
+			if (rowid) *rowid = s->c.rowid;
+			if (rec) *rec = s->c.val;
+			if (reclen) *reclen = (int)s->c.vlen;
 			return 1;
 		}
 		if (s->ra_want == 0) {               /* the first row: alone */
