@@ -4666,8 +4666,10 @@ xstore_stmt_undo(struct xsql *db, int mark)
  * Auto-assigned rowids.  The highest rowid handed out per (bt, table) in
  * this process, so concurrent INSERTs that omit the key never pick the
  * same one (each would otherwise compute the same committed max + 1).
- * A rolled-back reservation leaves a gap, as SQLite may.  Guarded by the
- * commit lock; entries for a bt are dropped when it closes.  If the table
+ * A rolled-back reservation leaves a gap, as SQLite may.  Guarded by its
+ * own leaf lock (it was the commit lock: every auto-rowid INSERT then
+ * queued behind the committers -- 70 of 384 client stacks at 64 clients
+ * waited there); entries for a bt are dropped when it closes.  If the table
  * is full the old max + 1 is used, and a collision is then refused by the
  * INSERT's uniqueness check rather than lost.
  */
@@ -4678,6 +4680,23 @@ static struct xs_rowid_hw {
 	int64_t  hw;
 } g_rowid_hw[XS_ROWID_HW_MAX];
 static int g_rowid_hw_n;
+static pthread_mutex_t g_rowid_hw_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/* Leaf lock (never held across a park), a proc critical section so
+ * involuntary preemption never parks a holder. */
+static void
+xs_rowid_hw_lock(void)
+{
+	xtc_proc_critical_enter();
+	(void)pthread_mutex_lock(&g_rowid_hw_mu);
+}
+
+static void
+xs_rowid_hw_unlock(void)
+{
+	(void)pthread_mutex_unlock(&g_rowid_hw_mu);
+	xtc_proc_critical_leave();
+}
 
 int64_t
 xstore_next_rowid(struct xsql *db, uint32_t tableid, int64_t floor)
@@ -4686,7 +4705,7 @@ xstore_next_rowid(struct xsql *db, uint32_t tableid, int64_t floor)
 	int64_t r = floor + 1;
 	int i;
 	if (cx == NULL) return r;
-	xs_commit_lock();
+	xs_rowid_hw_lock();
 	for (i = 0; i < g_rowid_hw_n; i++)
 		if (g_rowid_hw[i].bt == cx->bt && g_rowid_hw[i].tableid == tableid)
 			break;
@@ -4701,7 +4720,7 @@ xstore_next_rowid(struct xsql *db, uint32_t tableid, int64_t floor)
 			r = g_rowid_hw[i].hw + 1;
 		g_rowid_hw[i].hw = r;
 	}
-	xs_commit_unlock();
+	xs_rowid_hw_unlock();
 	return r;
 }
 
@@ -4709,7 +4728,7 @@ static void
 xs_rowid_hw_forget(bt_t *bt)
 {
 	int i;
-	xs_commit_lock();
+	xs_rowid_hw_lock();
 	for (i = 0; i < g_rowid_hw_n; ) {
 		if (g_rowid_hw[i].bt == bt) {
 			g_rowid_hw_n--;
@@ -4718,7 +4737,7 @@ xs_rowid_hw_forget(bt_t *bt)
 			i++;
 		}
 	}
-	xs_commit_unlock();
+	xs_rowid_hw_unlock();
 }
 
 /* Start of a statement (a SELECT, UPDATE or DELETE): record the one
