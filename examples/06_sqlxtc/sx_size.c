@@ -488,6 +488,25 @@ main(int argc, char **argv)
 	    g_ovf_pages ? 100.0 * (double)g_ovf_used / ((double)g_ovf_pages * g_ps) : 0);
 	printf("  unreachable (free/leaked) %" PRIu64 " pages %.1f MB\n",
 	    g_npages - reach, mb((g_npages - reach) * g_ps));
+	/* The freelist a clean close saved (bufmgr.c fl_save): page 0's
+	 * trailer [magic "XFL1"][page size][head][ids][chain pages]. */
+	if (g_ps >= 256) {
+		uint8_t tr[32];
+		uint32_t mg = 0, tps = 0;
+		uint64_t nfree = 0;
+
+		if (pread(g_fd, tr, sizeof tr, (off_t)g_ps - 32) == (ssize_t)sizeof tr) {
+			memcpy(&mg, tr, 4);
+			memcpy(&tps, tr + 4, 4);
+			memcpy(&nfree, tr + 16, 8);
+		}
+		if (mg == 0x58464C31u && tps == g_ps)
+			printf("    of which on the saved freelist %" PRIu64 " pages %.1f MB "
+			    "(reused before the file grows)\n", nfree, mb(nfree * g_ps));
+		else
+			printf("    no saved freelist (leaked until a rebuild)\n");
+	}
+	printf("  on disk (allocated blocks) %.1f MB\n", mb((uint64_t)st.st_blocks * 512u));
 
 	printf("\n%-26s %10s %9s %9s %7s %7s %7s %8s %8s %8s %6s\n", "object", "entries",
 	    "rows", "live", "keyfull", "keysfx", "val", "leaf_pg", "ovf_pg", "MB", "fill%");

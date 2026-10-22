@@ -524,7 +524,8 @@ bt_write_super(bt_t *bt)
 	s.height = atomic_load(&bt->st_height);
 	s.clean = bt->meta_clean;
 	s.commit_clock = bt->meta_clock;
-	return bm_write_super(bt->bm, &s, sizeof s);
+	/* A clean superblock also saves the freed page ids (bufmgr.h). */
+	return bm_write_super_clean(bt->bm, &s, sizeof s, s.clean == 1);
 }
 
 void

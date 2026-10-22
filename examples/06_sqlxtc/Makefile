@@ -148,7 +148,7 @@ clean:
 	rm -f test_bufmgr_mt
 	rm -f test_drop_reserved test_evict_revalidate_sampled
 	rm -f test_scan_resist test_sweep_bound test_evict_revalidate test_btree_late_load test_flush_pin test_trickler_select test_pp_slice test_tr_slice test_publication_pin test_private_frame test_pid_writeback bm_sweep_bench
-	rm -f test_persist test_btree_prefix_split sx_size test_rec_codec test_idx_elem
+	rm -f test_persist test_btree_prefix_split sx_size test_rec_codec test_idx_elem test_freelist_persist
 	rm -f test_cursor_resume
 	rm -f test_btnode
 	rm -f test_btree
@@ -884,6 +884,17 @@ test_idx_elem: test_idx_elem.c engine.o db.o quack.o metrics.o xstore.o xlog.o w
 
 test-idx-elem: test_idx_elem
 	TMPDIR=$${TMPDIR:-/tmp} ./test_idx_elem
+
+test: test-freelist-persist
+
+# Freed page ids survive a clean close: reloaded and reused (lowest
+# first) by the next open, dropped by any later superblock write, never
+# loaded from a corrupt chain; the free pages are punched out on disk.
+test_freelist_persist: test_freelist_persist.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ test_freelist_persist.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
+
+test-freelist-persist: test_freelist_persist
+	TMPDIR=$${TMPDIR:-/tmp} ./test_freelist_persist
 
 # ---- store size attribution (offline, read-only) ----
 # sx_size STORE.xstore [STORE.xstore-wal]: bytes per table / index /

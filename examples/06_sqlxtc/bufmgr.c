@@ -241,11 +241,10 @@ struct bm {
 	 * before the file is grown.  An in-memory stack guarded by pid_mu
 	 * -- the same lock that hands out next_pid -- so allocation pops a
 	 * freed pid or bumps next_pid under one lock and a pid is never
-	 * issued twice.  Not persisted: a crash leaks the freed pages
+	 * issued twice.  A clean close saves it in the store (fl_save) and
+	 * a reopen reloads it (freelist_load); a crash leaks the freed pages
 	 * (the file does not shrink) but never double-allocates one, which
-	 * is the only unsafe outcome.  On a clean reopen the file's tail
-	 * pages are simply not on the freelist and stay leaked until the
-	 * tree reuses them through fresh splits. */
+	 * is the only unsafe outcome. */
 	bm_pid_t         *free_pids;     /* stack of reclaimed page ids */
 	uint32_t          free_pids_n;   /* live entries */
 	uint32_t          free_pids_cap; /* allocated slots */
@@ -344,6 +343,15 @@ struct bm {
 	_Atomic uint64_t  cur_lsn;       /* LSN stamped on the next clean->dirty edge */
 	int             (*wal_flush)(void *ctx, uint64_t lsn);  /* write-ahead hook */
 	void             *wal_ctx;
+
+	/* Cold: freed page ids saved at the last clean close and reloaded by
+	 * a trusted reopen (bm_write_super_clean / freelist_load): how many
+	 * came back, and how many chain pages held the list.  At the END of
+	 * the struct on purpose: inserted after pending_pid_drops they moved
+	 * every hot field below by 8 bytes, and the ledger's read shapes at
+	 * 32 connections fell 25-38% (balance 3.7M -> 2.4M lookups/s). */
+	uint64_t          s_fl_loaded;
+	uint32_t          s_fl_pages;
 };
 
 /* ---- page I/O via libxtc async file ops (xtc_aio): native io_uring
@@ -1454,6 +1462,8 @@ pf_drain(bm_t *bm, int max)
 }
 
 /* ---- public API ---- */
+static void freelist_load(bm_t *bm, bm_pid_t npid);
+
 int
 bm_create(const bm_opts_t *opts, bm_t **out)
 {
@@ -1596,6 +1606,8 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 		if (end > 0) {
 			bm_pid_t n = (bm_pid_t)(end / (off_t)bm->page_size);
 			if (n > bm->next_pid) bm->next_pid = n;
+			/* The page ids a clean close left free (fl_save). */
+			freelist_load(bm, n);
 		}
 	}
 	*out = bm;
@@ -3087,6 +3099,8 @@ bm_get_stats(bm_t *bm, bm_stats_t *out)
 	out->freed = atomic_load_explicit(&bm->s_freed, memory_order_relaxed);
 	out->reissued = atomic_load_explicit(&bm->s_reissued, memory_order_relaxed);
 	out->free_pids = bm->free_pids_n;   /* approximate (read without the pid lock) */
+	out->fl_loaded = bm->s_fl_loaded;
+	out->fl_pages = bm->s_fl_pages;
 	out->allocs = atomic_load_explicit(&bm->s_allocs, memory_order_relaxed);
 	out->advances = atomic_load_explicit(&bm->s_advances, memory_order_relaxed);
 	out->adv_max = atomic_load_explicit(&bm->s_adv_max, memory_order_relaxed);
@@ -3106,6 +3120,267 @@ bm_get_stats(bm_t *bm, bm_stats_t *out)
 int
 bm_write_super(bm_t *bm, const void *buf, size_t len)
 {
+	return bm_write_super_clean(bm, buf, len, 0);
+}
+
+/*
+ * Freed page ids across a clean close.  The id freelist (free_pids and
+ * the quarantine) lives in memory; a clean close used to drop it, and the
+ * next trusted open resumed allocation at the file's end, so every page
+ * free at close was lost for good (a TPC-C W=10 load leaves about 72,000
+ * of them -- 294 MB of a 1.5 GB file -- from its STEAL staging).
+ *
+ * A clean superblock write (bm_write_super_clean, clean != 0) stores the
+ * list in some of the free pages themselves, a chain of pages
+ *     [page LSN, all ones][magic:u32][count:u32][next:u64][pid:u64 x count]
+ * and records the chain head, the number of ids and the page size in a
+ * trailer at the end of page 0, in the same page write as the caller's
+ * superblock -- after the chain pages are durable (written, fdatasync),
+ * so a durable trailer always names a durable chain.  Every other
+ * superblock write (bm_write_super, which the engine uses to mark the
+ * base dirty right after a trusted open) writes a zero trailer, so a list
+ * survives exactly while the base it describes is untouched: a store that
+ * is opened, written and then crashes has no list, and a base trusted in
+ * place after a crash cannot reissue a page the run reused.
+ *
+ * A reopen (bm_create, reopen != 0) loads the list into free_pids --
+ * the chain pages too, which are free -- and clears nothing on disk: the
+ * trailer is dropped by the next superblock write.  A malformed trailer
+ * or chain (wrong magic or page size, an id outside the file or repeated,
+ * a cycle) loads nothing: the pages stay leaked, never double-issued.
+ */
+#define BM_FL_MAGIC 0x58464C31u   /* "XFL1" */
+#define BM_FL_TRAILER 32u          /* bytes at the end of page 0 */
+
+static void
+fl_put32(uint8_t *p, uint32_t v)
+{
+	int i;
+	for (i = 0; i < 4; i++) p[i] = (uint8_t)(v >> (8 * i));
+}
+
+static void
+fl_put64(uint8_t *p, uint64_t v)
+{
+	int i;
+	for (i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (8 * i));
+}
+
+static uint32_t
+fl_get32(const uint8_t *p)
+{
+	uint32_t v = 0;
+	int i;
+	for (i = 3; i >= 0; i--) v = (v << 8) | p[i];
+	return v;
+}
+
+static uint64_t
+fl_get64(const uint8_t *p)
+{
+	uint64_t v = 0;
+	int i;
+	for (i = 7; i >= 0; i--) v = (v << 8) | p[i];
+	return v;
+}
+
+/* Chain page: [page LSN slot:8][magic:4][count:4][next:8][pid:8 x count].
+ * The LSN slot (bm opts lsn_off 0, the engine's layout) is all ones, so
+ * a page-LSN-gated redo never writes an old image over a chain page. */
+#define BM_FL_HDR 24u
+static uint32_t
+fl_per_page(const bm_t *bm)
+{
+	return (bm->page_size - BM_FL_HDR) / 8u;
+}
+
+static int
+fl_cmp_asc(const void *a, const void *b)
+{
+	bm_pid_t x = *(const bm_pid_t *)a, y = *(const bm_pid_t *)b;
+	return x < y ? -1 : x > y ? 1 : 0;
+}
+
+static int
+fl_cmp_desc(const void *a, const void *b)
+{
+	return fl_cmp_asc(b, a);
+}
+
+/*
+ * Write the freelist chain for a clean close and fill the page-0 trailer
+ * `tr`.  The ids are free_pids plus the quarantine (no reader survives a
+ * close).  They LEAVE the in-memory lists here, under the lock, whatever
+ * the outcome: a saved id is never reissued by this process, so it is
+ * still free in whatever base a later open finds, even if the caller
+ * keeps writing after a "clean" superblock (a fuzzy checkpoint does).
+ * Chain pages are taken from the list itself.  Returns XTC_OK with the
+ * trailer set (zero: nothing to save), or an error with a zero trailer
+ * (the ids are then leaked, never double-issued).
+ */
+static int
+fl_save(bm_t *bm, uint8_t *tr)
+{
+	bm_pid_t *ids = NULL, head = BM_PID_NONE;
+	uint32_t n, i, per = fl_per_page(bm), npages, k, take;
+	uint8_t *pg = NULL;
+	off_t end;
+	int rc = XTC_OK;
+
+	memset(tr, 0, BM_FL_TRAILER);
+	(void)pthread_mutex_lock(&bm->pid_mu);
+	n = bm->free_pids_n + bm->quar_pids_n;
+	if (n > 0 && (ids = xtc_malloc((size_t)n * sizeof *ids)) != NULL) {
+		memcpy(ids, bm->free_pids, (size_t)bm->free_pids_n * sizeof *ids);
+		memcpy(ids + bm->free_pids_n, bm->quar_pids,
+		    (size_t)bm->quar_pids_n * sizeof *ids);
+	}
+	bm->free_pids_n = 0;
+	bm->quar_pids_n = 0;   /* still retired (quar_set): never fixed again */
+	(void)pthread_mutex_unlock(&bm->pid_mu);
+	if (n == 0)
+		return XTC_OK;
+	if (ids == NULL)
+		return XTC_E_NOMEM;
+	/* Keep the ids inside the file, lowest first.  An id at or past the
+	 * end was issued but never written; a reopen resumes allocation at
+	 * the end, so it would be issued twice if it were also on the list.
+	 * The chain pages are the lowest ids, inside the file, so writing
+	 * them does not grow it. */
+	end = lseek(bm->fd, 0, SEEK_END);
+	qsort(ids, (size_t)n, sizeof *ids, fl_cmp_asc);
+	while (n > 0 && (end <= 0 ||
+	    (off_t)ids[n - 1] >= end / (off_t)bm->page_size))
+		n--;
+	if (n == 0) {
+		xtc_free(ids);
+		return XTC_OK;
+	}
+	/* npages chain pages hold the other n - npages ids. */
+	npages = (n + per) / (per + 1u);
+	if ((pg = xtc_aligned_alloc(4096, bm->page_size)) == NULL) {
+		xtc_free(ids);
+		return XTC_E_NOMEM;
+	}
+	/* The chain pages are ids[0 .. npages); page k lists its share of
+	 * ids[npages ..) and links to page k + 1.  Written last-first, so
+	 * each page's link is known when it is written. */
+	for (k = npages; k-- > 0;) {
+		uint32_t base = npages + k * per;
+		take = n - base < per ? n - base : per;
+		memset(pg, 0, bm->page_size);
+		fl_put64(pg, UINT64_MAX);
+		fl_put32(pg + 8, BM_FL_MAGIC);
+		fl_put32(pg + 12, take);
+		fl_put64(pg + 16, (uint64_t)head);
+		for (i = 0; i < take; i++)
+			fl_put64(pg + BM_FL_HDR + 8u * i, (uint64_t)ids[base + i]);
+		if (pwrite(bm->fd, pg, bm->page_size,
+		    (off_t)ids[k] * (off_t)bm->page_size) != (ssize_t)bm->page_size) {
+			rc = XTC_E_IO;
+			break;
+		}
+		head = ids[k];
+	}
+	if (rc == XTC_OK)
+		rc = bm_sync(bm);             /* the chain is durable first */
+#if defined(FALLOC_FL_PUNCH_HOLE) && defined(FALLOC_FL_KEEP_SIZE)
+	/* Give the listed pages' blocks back to the filesystem (the file's
+	 * size is kept): a free page holds nothing, and a reissued one is
+	 * written whole.  Runs of consecutive ids are one call each.  A
+	 * failure (a filesystem without holes) changes nothing. */
+	for (i = npages; rc == XTC_OK && i < n; i = k) {
+		for (k = i + 1; k < n && ids[k] == ids[k - 1] + 1; k++)
+			;
+		(void)fallocate(bm->fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+		    (off_t)ids[i] * (off_t)bm->page_size,
+		    (off_t)(k - i) * (off_t)bm->page_size);
+	}
+#endif
+	if (rc == XTC_OK) {
+		fl_put32(tr, BM_FL_MAGIC);
+		fl_put32(tr + 4, bm->page_size);
+		fl_put64(tr + 8, (uint64_t)head);
+		fl_put64(tr + 16, (uint64_t)n);
+		fl_put64(tr + 24, (uint64_t)npages);
+	}
+	xtc_aligned_free(pg);
+	xtc_free(ids);
+	return rc;
+}
+
+/*
+ * Reopen: load the list a clean close saved (page 0's trailer) into
+ * free_pids.  `npid` is the file's page count.  Any inconsistency loads
+ * nothing.  Single-threaded (inside bm_create).
+ */
+static void
+freelist_load(bm_t *bm, bm_pid_t npid)
+{
+	uint8_t *pg;
+	bm_pid_t *ids = NULL, at;
+	uint64_t n, npages, got = 0, pages = 0;
+	uint32_t take, i;
+	uint8_t *seen = NULL;
+	const uint8_t *tr;
+
+	if (bm->page_size < 256u || (pg = xtc_aligned_alloc(4096,
+	    bm->page_size)) == NULL)
+		return;
+	if (pread(bm->fd, pg, bm->page_size, 0) != (ssize_t)bm->page_size)
+		goto out;
+	tr = pg + bm->page_size - BM_FL_TRAILER;
+	if (fl_get32(tr) != BM_FL_MAGIC || fl_get32(tr + 4) != bm->page_size)
+		goto out;
+	at = (bm_pid_t)fl_get64(tr + 8);
+	n = fl_get64(tr + 16);
+	npages = fl_get64(tr + 24);
+	if (n == 0 || n >= npid || npages == 0 || npages > n)
+		goto out;
+	if ((ids = xtc_malloc((size_t)n * sizeof *ids)) == NULL ||
+	    (seen = xtc_calloc((size_t)(npid / 8u) + 1u, 1)) == NULL)
+		goto out;
+	while (at != BM_PID_NONE) {
+		if (at >= npid || pages >= npages || (seen[at / 8] >> (at % 8)) & 1u)
+			goto out;                  /* outside the file, or a cycle */
+		seen[at / 8] |= (uint8_t)(1u << (at % 8));
+		ids[got++] = at;
+		pages++;
+		if (pread(bm->fd, pg, bm->page_size, (off_t)at * (off_t)bm->page_size)
+		    != (ssize_t)bm->page_size || fl_get32(pg + 8) != BM_FL_MAGIC)
+			goto out;
+		take = fl_get32(pg + 12);
+		if (take > fl_per_page(bm) || got + take > n)
+			goto out;
+		for (i = 0; i < take; i++) {
+			bm_pid_t p = (bm_pid_t)fl_get64(pg + BM_FL_HDR + 8u * i);
+			if (p == BM_PID_NONE || p >= npid || (seen[p / 8] >> (p % 8)) & 1u)
+				goto out;
+			seen[p / 8] |= (uint8_t)(1u << (p % 8));
+			ids[got++] = p;
+		}
+		at = (bm_pid_t)fl_get64(pg + 16);
+	}
+	if (got != n || pages != npages)
+		goto out;
+	/* Reissue lowest id first (next_pid pops the stack top), so the
+	 * file's low pages are reused before its high ones. */
+	qsort(ids, (size_t)n, sizeof *ids, fl_cmp_desc);
+	bm->free_pids = ids;
+	bm->free_pids_n = (uint32_t)n;
+	bm->free_pids_cap = (uint32_t)n;
+	ids = NULL;
+	bm->s_fl_loaded = n;
+	bm->s_fl_pages = (uint32_t)npages;
+out:
+	xtc_free(seen);
+	xtc_free(ids);
+	xtc_aligned_free(pg);
+}
+
+int
+bm_write_super_clean(bm_t *bm, const void *buf, size_t len, int clean)
+{
 	uint8_t *pg;
 	ssize_t n;
 	if (bm == NULL || buf == NULL || len > bm->page_size)
@@ -3114,6 +3389,10 @@ bm_write_super(bm_t *bm, const void *buf, size_t len)
 		return XTC_E_NOMEM;
 	memset(pg, 0, bm->page_size);
 	memcpy(pg, buf, len);
+	/* The trailer, when it fits past the caller's bytes (a 4 KiB page
+	 * holds a 40-byte superblock and the 32-byte trailer). */
+	if (clean && len + BM_FL_TRAILER <= bm->page_size)
+		(void)fl_save(bm, pg + bm->page_size - BM_FL_TRAILER);
 	n = pwrite(bm->fd, pg, bm->page_size, 0);
 	xtc_aligned_free(pg);
 	return (n == (ssize_t)bm->page_size) ? XTC_OK : XTC_E_IO;
