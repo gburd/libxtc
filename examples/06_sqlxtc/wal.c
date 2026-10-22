@@ -471,7 +471,9 @@ struct wal_waiter {
 
 struct wal {
 	int        fd;
-	off_t      off;              /* current append offset (== res_pos) */
+	/* The append offset (== res_pos), for wal_size: stored under res_mu,
+	 * read with no lock (the checkpoint proc polls it), so atomic. */
+	_Atomic uint64_t off;
 	int64_t    window_ns;
 	uint32_t   max_batch;
 	xtc_pid_t  writer_pid;
@@ -571,7 +573,7 @@ wal_tail_ok(int fd, const wal_tail_t *t)
 static void
 wal_reset_marks(wal_t *w, uint64_t pos, uint64_t lsn)
 {
-	w->off = (off_t)pos;
+	atomic_store_explicit(&w->off, pos, memory_order_relaxed);
 	w->res_pos = pos;
 	w->next_lsn = lsn;
 	w->copied_pos = pos;
@@ -1037,7 +1039,7 @@ wal_append_direct(wal_t *w, const void *record, uint32_t len, uint64_t *end,
 	lsn = ++w->next_lsn;
 	start = w->res_pos;              /* == target: nobody reserved since */
 	w->res_pos = start + need;
-	w->off = (off_t)w->res_pos;
+	atomic_store_explicit(&w->off, w->res_pos, memory_order_relaxed);
 	wal_unlock(&w->res_mu);
 
 	memcpy(hdr, &lsn, 8);
@@ -1130,7 +1132,7 @@ wal_append(wal_t *w, const void *record, uint32_t len, uint64_t *end, int *rc)
 	lsn = ++w->next_lsn;
 	start = w->res_pos;
 	w->res_pos += need;
-	w->off = (off_t)w->res_pos;
+	atomic_store_explicit(&w->off, w->res_pos, memory_order_relaxed);
 	wal_unlock(&w->res_mu);
 
 	memcpy(hdr, &lsn, 8);
@@ -1729,7 +1731,8 @@ wal_durable_lsn(const wal_t *w)
 uint64_t
 wal_size(const wal_t *w)
 {
-	return w == NULL ? 0 : (uint64_t)w->off;
+	return w == NULL ? 0 :
+	    atomic_load_explicit(&w->off, memory_order_relaxed);
 }
 
 int
@@ -1776,10 +1779,13 @@ wal_get_stats(wal_t *w, wal_stats_t *out)
 {
 	if (w == NULL || out == NULL)
 		return;
+	/* the counters are written under fl_mu (by the flush leader) */
+	wal_lock(&w->fl_mu);
 	out->commits = w->s_commits;
 	out->batches = w->s_batches;
-	out->bytes = atomic_load_explicit(&w->s_bytes, memory_order_relaxed);
 	out->max_batch_seen = w->s_maxbatch;
-	out->durable_lsn = atomic_load_explicit(&w->durable_lsn, memory_order_relaxed);
 	out->failed = w->s_failed;
+	wal_unlock(&w->fl_mu);
+	out->bytes = atomic_load_explicit(&w->s_bytes, memory_order_relaxed);
+	out->durable_lsn = atomic_load_explicit(&w->durable_lsn, memory_order_relaxed);
 }
