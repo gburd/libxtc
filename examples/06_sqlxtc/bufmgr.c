@@ -2671,7 +2671,7 @@ struct bg_act { uint64_t v[8]; };
 static void
 bg_activity(bm_t *bm, struct bg_act *a)
 {
-	a->v[0] = atomic_load_explicit(&bm->s_hits, memory_order_relaxed);
+	a->v[0] = xs_ctr_sum(&bm->s_hits);     /* striped: summed once per pass */
 	a->v[1] = atomic_load_explicit(&bm->s_cooled, memory_order_relaxed);
 	a->v[2] = atomic_load_explicit(&bm->s_flushed, memory_order_relaxed);
 	a->v[3] = atomic_load_explicit(&bm->s_evicted, memory_order_relaxed);
