@@ -1122,13 +1122,14 @@ REXIS_HDRS = $(REXIS_DIR)/proto.h $(REXIS_DIR)/db.h $(REXIS_DIR)/cmd.h \
 	     $(REXIS_DIR)/conn.h $(REXIS_DIR)/bitcask.h
 M99_NET    = test_rexis_loopback test_rexis_budgets test_rexis_pbt
 REXIS_BINS = rexis-server-xtc rexis_test_bitcask rexis_test_metrics \
-	     rexis_test_db_persist test_resp_parser $(M99_NET)
+	     rexis_test_db_persist rexis_test_db_table test_resp_parser \
+	     $(M99_NET)
 
 check-rexis: $(REXIS_BINS)
 	@set -e; \
 	to=''; command -v timeout >/dev/null 2>&1 && to='timeout 300'; \
 	for t in rexis_test_bitcask rexis_test_metrics rexis_test_db_persist \
-	         test_resp_parser $(M99_NET); do \
+	         rexis_test_db_table test_resp_parser $(M99_NET); do \
 		printf 'running rexis test: %s\n' "$$t"; \
 		REXIS_SERVER=./rexis-server-xtc $$to ./$$t >$$t.log 2>&1 || { \
 			echo "  [rexis] FAIL: $$t (log follows)"; cat $$t.log; exit 1; }; \
@@ -1153,6 +1154,12 @@ rexis_test_metrics: $(REXIS_DIR)/test_metrics.c $(STATIC_LIB)
 rexis_test_db_persist: $(REXIS_DIR)/test_db_persist.c $(REXIS_SRCS) $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -D_GNU_SOURCE -I$(REXIS_DIR) -o $@ \
 		$(REXIS_DIR)/test_db_persist.c $(REXIS_DIR)/db.c \
+		$(REXIS_DIR)/proto.c $(REXIS_DIR)/expire.c \
+		$(REXIS_DIR)/bitcask.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+rexis_test_db_table: $(REXIS_DIR)/test_db_table.c $(REXIS_SRCS) $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -D_GNU_SOURCE -I$(REXIS_DIR) -o $@ \
+		$(REXIS_DIR)/test_db_table.c $(REXIS_DIR)/db.c \
 		$(REXIS_DIR)/proto.c $(REXIS_DIR)/expire.c \
 		$(REXIS_DIR)/bitcask.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 

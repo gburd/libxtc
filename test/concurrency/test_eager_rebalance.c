@@ -69,6 +69,7 @@ worker(void *arg)
 		for (j = 0; j < 200000UL; j++) spin += j;   /* a little CPU */
 		xtc_yield();
 	}
+	(void)spin;	/* read it: gcc 16 -Wunused-but-set-variable */
 	atomic_fetch_add_explicit(&g_workers_done, 1, memory_order_relaxed);
 }
 
