@@ -17,6 +17,7 @@
 
 #include "xtc_int.h"
 #include "xtc_sim.h"
+#include "xtc_probes.h"
 
 #include <stdatomic.h>
 #include <pthread.h>
@@ -97,6 +98,7 @@ __xtc_sim_nondeterminism(const char *what)
 {
 	if (!__xtc_sim_active())
 		return;
+	XTC_PROBE_SIM_NONDETERMINISM(what);
 	atomic_fetch_add_explicit(&g_nondet_count, 1, memory_order_relaxed);
 	if (atomic_load_explicit(&g_nondet_strict, memory_order_relaxed)) {
 		fprintf(stderr, "xtc DST determinism violation: %s called on a "
@@ -481,6 +483,7 @@ xtc_sim_buggify(const char *name)
 	g_bug_decided[n] = (signed char)decision;
 	atomic_store_explicit(&g_bug_n, n + 1, memory_order_relaxed);
 	(void)pthread_mutex_unlock(&g_bug_lock);
+	XTC_PROBE_SIM_BUGGIFY(name, decision);
 	return decision;
 }
 

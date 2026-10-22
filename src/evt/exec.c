@@ -11,6 +11,7 @@
 #include "xtc_log.h"     /* worker step errors */
 #include "xtc_tail.h"     /* SCHED: idle-poll liveness */
 #include "tail_int.h"     /* __xtc_tail_emit / __xtc_tail_on */
+#include "xtc_probes.h"
 #include "loop_int.h"
 #include "xtc_exec.h"
 #include "xtc_async.h"
@@ -156,7 +157,10 @@ __xtc_exec_try_steal(xtc_loop_t *me)
 		 * seeded run perturb/observe the steal-vs-pop interleaving. */
 		XTC_SIM_FAULT_POINT("sched.steal.pre_cas");
 		t = xtc_deque_steal(&victim->deque);
-		if (t != NULL) return t;
+		if (t != NULL) {
+			XTC_PROBE_SCHED_STEAL(me->exec_id, idx, (uintptr_t)t);
+			return t;
+		}
 	}
 	/* Pass 2: any node. */
 	for (i = 0; i < n; i++) {
@@ -167,7 +171,10 @@ __xtc_exec_try_steal(xtc_loop_t *me)
 		victim = exec->loops[idx];
 		if (xtc_deque_len(&victim->deque) == 0) continue;
 		t = xtc_deque_steal(&victim->deque);
-		if (t != NULL) return t;
+		if (t != NULL) {
+			XTC_PROBE_SCHED_STEAL(me->exec_id, idx, (uintptr_t)t);
+			return t;
+		}
 	}
 	return NULL;
 }
@@ -301,6 +308,7 @@ __xtc_exec_worker(void *arg)
 			    idle_poll_ns, &n_out);
 			atomic_fetch_sub_explicit(&exec->n_idle, 1,
 			    memory_order_relaxed);
+			XTC_PROBE_LOOP_POLL(loop->exec_id, idle_poll_ns, n_out);
 			/*
 			 * Dispatch the events this poll reaped.  This poll is
 			 * NOT just a sleep interrupted by the wakeup fd: a real

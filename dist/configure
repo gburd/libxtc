@@ -644,6 +644,11 @@ ac_header_c_list=
 ac_subst_vars='LTLIBOBJS
 LIBOBJS
 XTC_PC_LIBS_PRIVATE
+XTC_PROBES_OBJ
+XTC_PROBES_HDR
+XTC_PROBES_MODE
+DTRACEFLAGS
+DTRACE
 XTC_HEGEL_PBT
 XTC_HEGEL_LIBS
 XTC_HEGEL_CFLAGS
@@ -745,6 +750,7 @@ with_accel
 with_libunwind
 with_tls
 with_hegel
+enable_dtrace
 '
       ac_precious_vars='build_alias
 host_alias
@@ -753,7 +759,9 @@ CC
 CFLAGS
 LDFLAGS
 LIBS
-CPPFLAGS'
+CPPFLAGS
+DTRACE
+DTRACEFLAGS'
 
 
 # Initialize some variables set by options.
@@ -1381,6 +1389,9 @@ Optional Features:
   --enable-sched-policy   Enable optional runtime lane policies (default: no).
   --enable-diagnostic     Enable runtime DIAGNOSTIC assertions (aborts on
                           violations; default: no).
+  --enable-dtrace[=yes|sdt|auto|no]
+                          Build the USDT probes for DTrace, perf, bpftrace and
+                          SystemTap (default: no).
 
 Optional Packages:
   --with-PACKAGE[=ARG]    use PACKAGE [ARG=yes]
@@ -1417,6 +1428,8 @@ Some influential environment variables:
   LIBS        libraries to pass to the linker, e.g. -l<library>
   CPPFLAGS    (Objective) C/C++ preprocessor flags, e.g. -I<include dir> if
               you have headers in a nonstandard directory <include dir>
+  DTRACE      DTrace program used by --enable-dtrace
+  DTRACEFLAGS Flags passed to $DTRACE -h / -G
 
 Use these variables to override the choices made by 'configure' or to help
 it to find libraries and programs with nonstandard names/locations.
@@ -5783,6 +5796,202 @@ XTC_HEGEL_CFLAGS=$xtc_hegel_cflags
 XTC_HEGEL_LIBS=$xtc_hegel_libs
 
 XTC_HEGEL_PBT=$xtc_hegel_pbt
+
+
+# -------------------------------------------------------------------------
+# Static (USDT) probes: src/xtc_probes.d, src/inc/xtc_probes.h, xtc_usdt(3).
+#
+#   no    (default) every probe macro expands to nothing: no code, no notes.
+#   yes   a `dtrace` program is required.  `dtrace -h` makes the header;
+#         except on macOS, `dtrace -G` post-processes the objects into
+#         xtc_probes.o, which is archived into libxtc.a / linked into the
+#         shared library.  FreeBSD, illumos, macOS; Linux with systemtap's
+#         `dtrace` script (which adds is-enabled semaphores).
+#   sdt   header-only: systemtap's <sys/sdt.h> STAP_PROBE notes, no tool and
+#         no post-link step.  Linux; readable by perf, bpftrace, bcc and
+#         SystemTap.  XTC_PROBE_ENABLED() is then always 1.
+#   auto  yes if a working `dtrace` is found, else sdt if a systemtap
+#         <sys/sdt.h> is, else no.
+#
+# DTRACE and DTRACEFLAGS are precious, as in PostgreSQL's configure
+# (e.g. DTRACEFLAGS=-64 for a 64-bit build on illumos).
+# -------------------------------------------------------------------------
+
+
+# Check whether --enable-dtrace was given.
+if test ${enable_dtrace+y}
+then :
+  enableval=$enable_dtrace; xtc_enable_dtrace=$enableval
+else case e in #(
+  e) xtc_enable_dtrace=no ;;
+esac
+fi
+
+xtc_probes_mode=no
+xtc_probes_hdr=
+xtc_probes_obj=
+case "$host_os" in
+  *mingw*|*cygwin*|*msys*)
+    if test "x$xtc_enable_dtrace" = xyes || test "x$xtc_enable_dtrace" = xsdt
+then :
+  as_fn_error $? "--enable-dtrace: no USDT support on Windows (ETW is the analogue)" "$LINENO" 5
+fi
+    xtc_enable_dtrace=no
+    ;;
+esac
+case $xtc_enable_dtrace in #(
+  yes|auto) :
+    if test -z "$DTRACE"
+then :
+  for ac_prog in dtrace
+do
+  # Extract the first word of "$ac_prog", so it can be a program name with args.
+set dummy $ac_prog; ac_word=$2
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for $ac_word" >&5
+printf %s "checking for $ac_word... " >&6; }
+if test ${ac_cv_path_DTRACE+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) case $DTRACE in
+  [\\/]* | ?:[\\/]*)
+  ac_cv_path_DTRACE="$DTRACE" # Let the user override the test with a path.
+  ;;
+  *)
+  as_save_IFS=$IFS; IFS=$PATH_SEPARATOR
+as_dummy="$PATH:/usr/sbin"
+for as_dir in $as_dummy
+do
+  IFS=$as_save_IFS
+  case $as_dir in #(((
+    '') as_dir=./ ;;
+    */) ;;
+    *) as_dir=$as_dir/ ;;
+  esac
+    for ac_exec_ext in '' $ac_executable_extensions; do
+  if as_fn_executable_p "$as_dir$ac_word$ac_exec_ext"; then
+    ac_cv_path_DTRACE="$as_dir$ac_word$ac_exec_ext"
+    printf "%s\n" "$as_me:${as_lineno-$LINENO}: found $as_dir$ac_word$ac_exec_ext" >&5
+    break 2
+  fi
+done
+  done
+IFS=$as_save_IFS
+
+  ;;
+esac ;;
+esac
+fi
+DTRACE=$ac_cv_path_DTRACE
+if test -n "$DTRACE"; then
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $DTRACE" >&5
+printf "%s\n" "$DTRACE" >&6; }
+else
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: no" >&5
+printf "%s\n" "no" >&6; }
+fi
+
+
+  test -n "$DTRACE" && break
+done
+
+fi
+   { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether $DTRACE -h works" >&5
+printf %s "checking whether $DTRACE -h works... " >&6; }
+   xtc_dt_ok=no
+   if test -n "$DTRACE"
+then :
+  printf 'provider xtcconftest { probe p(int); };\n' > conftest.d
+      if $DTRACE $DTRACEFLAGS -h -s conftest.d -o conftest_probes.h >/dev/null 2>&1 &&
+             test -s conftest_probes.h
+then :
+  xtc_dt_ok=yes
+fi
+      rm -f conftest.d conftest_probes.h
+fi
+   { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $xtc_dt_ok" >&5
+printf "%s\n" "$xtc_dt_ok" >&6; }
+   if test "x$xtc_dt_ok" = xyes
+then :
+  xtc_probes_mode=dtrace
+elif test "x$xtc_enable_dtrace" = xyes
+then :
+  as_fn_error $? "--enable-dtrace: no working dtrace program (set DTRACE=/path/to/dtrace)" "$LINENO" 5
+else case e in #(
+  e) xtc_enable_dtrace=sdt-auto ;;
+esac
+fi ;; #(
+  *) :
+     ;;
+esac
+case $xtc_enable_dtrace in #(
+  sdt|sdt-auto) :
+    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for a systemtap <sys/sdt.h>" >&5
+printf %s "checking for a systemtap <sys/sdt.h>... " >&6; }
+   cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+#include <sys/sdt.h>
+#ifndef STAP_PROBE2
+#error not the systemtap sdt.h
+#endif
+int
+main (void)
+{
+int a = 1; long b = 2; DTRACE_PROBE2(xtcconftest, p, a, b);
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_compile "$LINENO"
+then :
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: yes" >&5
+printf "%s\n" "yes" >&6; }; xtc_probes_mode=sdt
+else case e in #(
+  e) { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: no" >&5
+printf "%s\n" "no" >&6; }
+      if test "x$xtc_enable_dtrace" = xsdt
+then :
+  as_fn_error $? "--enable-dtrace=sdt: no systemtap <sys/sdt.h> (install systemtap-sdt-dev or systemtap-sdt-devel)" "$LINENO" 5
+fi ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam conftest.$ac_ext ;; #(
+  yes|auto|no) :
+     ;; #(
+  *) :
+    as_fn_error $? "--enable-dtrace accepts only yes, sdt, auto or no" "$LINENO" 5 ;;
+esac
+case $xtc_probes_mode in #(
+  dtrace) :
+
+printf "%s\n" "#define XTC_HAVE_DTRACE 1" >>confdefs.h
+
+   xtc_probes_hdr=xtc_probes_dtrace.h
+   case "$host_os" in
+     *darwin*) ;;
+     *)
+
+printf "%s\n" "#define XTC_PROBES_ANCHOR 1" >>confdefs.h
+
+       xtc_probes_obj=xtc_probes.o
+       ;;
+   esac ;; #(
+  sdt) :
+
+printf "%s\n" "#define XTC_PROBES_SDT 1" >>confdefs.h
+ ;; #(
+  *) :
+     ;;
+esac
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking which USDT probes to build" >&5
+printf %s "checking which USDT probes to build... " >&6; }
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $xtc_probes_mode" >&5
+printf "%s\n" "$xtc_probes_mode" >&6; }
+XTC_PROBES_MODE=$xtc_probes_mode
+
+XTC_PROBES_HDR=$xtc_probes_hdr
+
+XTC_PROBES_OBJ=$xtc_probes_obj
 
 
 # Require C11.  PG18 raised the floor; PG19 inherits.

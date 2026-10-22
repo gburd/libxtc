@@ -11,6 +11,7 @@
 #include "xtc_int.h"
 #include "xtc_tail.h"     /* SCHED: per-loop poll liveness */
 #include "tail_int.h"     /* __xtc_tail_emit / __xtc_tail_on */
+#include "xtc_probes.h"
 #include "loop_int.h"
 #include "xtc_slab.h"
 #include "coro_int.h"
@@ -769,6 +770,8 @@ __xtc_drain_due_timers(xtc_loop_t *loop)
 				/* push failed (OOM): fall through, fire now. */
 			}
 			due->fired = 1;
+			XTC_PROBE_TIMER_FIRE((uintptr_t)due, due->deadline_ns,
+			    now_ns);
 			if (due->cb != NULL) due->cb(due->user);
 			if (due->waiter != NULL) {
 				xtc_task_t *waiter = due->waiter;
@@ -911,7 +914,10 @@ __xtc_loop_step(xtc_loop_t *loop)
 		}
 		atomic_store_explicit(&t->state, XTC_TS_RUNNING,
 		    memory_order_release);
+		XTC_PROBE_TASK_RUN_START((uintptr_t)t, loop->exec_id,
+		    t->sched_class);
 		verdict = t->fn(t, t->user);
+		XTC_PROBE_TASK_RUN_DONE((uintptr_t)t, loop->exec_id, verdict);
 		/*
 		 * L1 + L3 run-end time accounting.  Read the clock ONCE at the
 		 * verdict boundary and use it for both the proportional-share
@@ -1225,6 +1231,7 @@ __xtc_loop_step(xtc_loop_t *loop)
 	rc = xtc_io_poll(loop->io, evs,
 	    (int)(sizeof evs / sizeof evs[0]), timeout_ns, &n_out);
 	if (rc != XTC_OK) return rc;
+	XTC_PROBE_LOOP_POLL(loop->exec_id, timeout_ns, n_out);
 
 	/*
 	 * xtc_tail SCHED: this loop completed an IDLE poll on its OWN ring

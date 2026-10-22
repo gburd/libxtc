@@ -32,6 +32,7 @@
 #include "proc_int.h"   /* __xtc_proc_ctx_save/restore (internal) */
 #include "coro_int.h"     /* __xtc_current_task */
 #include "loop_int.h"     /* xtc_task::park_requested */
+#include "xtc_probes.h"
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -698,7 +699,15 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 			(void)xtc_task_waker(cur, &e->waker);
 			(void)__xtc_mtx_unlock(&p->lock);
 			proc_ctx = __xtc_proc_ctx_save();
+			XTC_PROBE_LOCK_WAIT_START((uintptr_t)o,
+			    XTC_PROBE_LOCK_LOCKMGR, (int)mode, (uintptr_t)cur);
+			XTC_PROBE_FIBER_PARK((uintptr_t)cur,
+			    XTC_PROBE_PARK_LOCKMGR, (uintptr_t)m);
 			xtc_yield();
+			XTC_PROBE_FIBER_RESUME((uintptr_t)cur,
+			    XTC_PROBE_PARK_LOCKMGR, (uintptr_t)m);
+			XTC_PROBE_LOCK_WAIT_DONE((uintptr_t)o,
+			    XTC_PROBE_LOCK_LOCKMGR, (int)mode, (uintptr_t)cur);
 			__xtc_proc_ctx_restore(proc_ctx);
 			(void)__xtc_mtx_lock(&p->lock);
 			/* Loop: recheck granted / aborted / deadline. */
@@ -712,6 +721,8 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 		if (masked != 0 && rc != XTC_E_ABORTED)
 			(void)xtc_mask_leave();
 	} else {
+		XTC_PROBE_LOCK_WAIT_START((uintptr_t)o, XTC_PROBE_LOCK_LOCKMGR,
+		    (int)mode, (uintptr_t)0);
 		for (;;) {
 			if (atomic_load_explicit(&e->aborted,
 			    memory_order_acquire)) {
@@ -743,6 +754,8 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 				}
 			}
 		}
+		XTC_PROBE_LOCK_WAIT_DONE((uintptr_t)o, XTC_PROBE_LOCK_LOCKMGR,
+		    (int)mode, (uintptr_t)0);
 	}
 
 	/* Killed after the grant: account the grant as usual, then release

@@ -32,6 +32,7 @@
 #include "xtc_mctx.h"
 #include "xtc_fs.h"     /* xtc_fs_close: portable fd close for recovery */
 #include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
+#include "xtc_probes.h"
 #include <stdio.h>
 #include <pthread.h>
 #include <setjmp.h>
@@ -1459,6 +1460,7 @@ __proc_entry(void *arg)
 	 */
 	if (p->coro != NULL)
 		p->coro->proc = p;
+	XTC_PROBE_PROC_START(XTC_PROBE_PID(p->pid), (uintptr_t)p->task);
 
 	/* L1: apply the spawn-time scheduling class on THIS loop's thread
 	 * (the class array is per-loop; the handle was created on this same
@@ -1553,6 +1555,7 @@ proc_exit:
 	reason = p->exit_reason;
 	__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_EXIT, p->pid,
 	    (uint64_t)(unsigned)reason);
+	XTC_PROBE_PROC_EXIT(XTC_PROBE_PID(p->pid), reason);
 	__notify_links_and_monitors(p);
 
 	__current_proc = NULL;
@@ -1807,6 +1810,8 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	(void)t;   /* p->task / p->coro are set by __proc_entry, not here */
 
 	__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_SPAWN, spawned_pid, 0);
+	XTC_PROBE_PROC_SPAWN(XTC_PROBE_PID(spawned_pid),
+	    __current_proc != NULL ? XTC_PROBE_PID(__current_proc->pid) : 0);
 	if (out_pid) *out_pid = spawned_pid;
 	return XTC_OK;
 
@@ -2243,9 +2248,13 @@ xtc_proc_sleep(int64_t ns)
 		(void)xtc_task_park_on_timer(self->task, deadline - now);
 		ctx = __xtc_proc_ctx_save();
 		__xtc_trace_causal(XTC_CAUSAL_PARK_TIMER, __func__);
+		XTC_PROBE_FIBER_PARK((uintptr_t)self->task,
+		    XTC_PROBE_PARK_SLEEP, 0);
 		xtc_yield();
 		__xtc_proc_ctx_restore(ctx);
 		__current_proc = self;
+		XTC_PROBE_FIBER_RESUME((uintptr_t)self->task,
+		    XTC_PROBE_PARK_SLEEP, 0);
 		__xtc_trace_causal(XTC_CAUSAL_RESUME, __func__);
 		/* Woken early (a kill, a spurious wake): release the park
 		 * timer before anything else so a kill never leaves it behind;
@@ -2430,6 +2439,7 @@ __send_ex(xtc_loop_t *owner, xtc_pid_t to, const void *data, size_t size,
 	/* xtc_tail MSG source: record the send (target pid, payload bytes).
 	 * One relaxed mask load when the source is off. */
 	__xtc_tail_emit(XTC_TAIL_MSG, XTC_TAIL_SEND, to, (uint64_t)size);
+	XTC_PROBE_MSG_SEND(XTC_PROBE_PID(e->from), XTC_PROBE_PID(to), size);
 
 	rc = __mbox_deliver(p, e, sys);
 	__proc_release(p);
@@ -2470,6 +2480,7 @@ __exit_pid_on(xtc_loop_t *owner, xtc_pid_t target, int reason)
 	if (XTC_UNLIKELY(!atomic_load_explicit(&p->alive,
 	    memory_order_relaxed))) { __proc_release(p); return XTC_E_INVAL; }
 
+	XTC_PROBE_PROC_KILL(XTC_PROBE_PID(target), reason);
 	/* Encode reason so 0 means "no kill pending".  Negative reasons
 	 * are clamped to -1 so the encoded value stays nonzero. */
 	desired = (reason == 0) ? 1 : reason + 1;
@@ -2893,7 +2904,11 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 				(void)__os_clock_mono(&__park_ns);
 			}
 			__xtc_trace_causal(XTC_CAUSAL_PARK_MAILBOX, __func__);
+			XTC_PROBE_FIBER_PARK((uintptr_t)self->task,
+			    XTC_PROBE_PARK_MAILBOX, 0);
 			xtc_yield();
+			XTC_PROBE_FIBER_RESUME((uintptr_t)self->task,
+			    XTC_PROBE_PARK_MAILBOX, 0);
 			__xtc_trace_causal(XTC_CAUSAL_RESUME, __func__);
 			if (__tail_sched) {
 				int64_t __run_ns = 0;
@@ -2967,6 +2982,8 @@ deliver:
 		/* xtc_tail MSG source: record the receive (receiver pid, bytes). */
 		__xtc_tail_emit(XTC_TAIL_MSG, XTC_TAIL_RECV, self->pid,
 		    (uint64_t)e->size);
+		XTC_PROBE_MSG_RECV(XTC_PROBE_PID(self->pid),
+		    XTC_PROBE_PID(e->from), e->size);
 		__env_free(e);
 	}
 	return XTC_OK;
@@ -3392,9 +3409,13 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	 * DEFERRED report a supervisor sees cannot persist.
 	 */
 	__mask_depth_inc(self);
+	XTC_PROBE_FIBER_PARK((uintptr_t)self->task, XTC_PROBE_PARK_FD,
+	    (uintptr_t)fd);
 	xtc_yield();
 	/* Restore __current_proc -- another fiber may have clobbered it. */
 	__current_proc = self;
+	XTC_PROBE_FIBER_RESUME((uintptr_t)self->task, XTC_PROBE_PARK_FD,
+	    (uintptr_t)fd);
 	__xtc_trace_causal(XTC_CAUSAL_RESUME, __func__);
 	if (tail_sched) {
 		int64_t run_ns = 0;

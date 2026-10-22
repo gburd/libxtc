@@ -283,13 +283,53 @@ if tls_backend != 'none'
   lib_deps += tls_dep
 endif
 
+# -- USDT probes (mirrors configure --enable-dtrace; see xtc_usdt(3)) ---------
+# 'yes' needs a dtrace program: dtrace -h makes the header and, except on
+# macOS, dtrace -G post-processes the objects into xtc_probes.o.  'sdt' uses
+# the systemtap <sys/sdt.h> alone.  'auto' picks yes, else sdt, else no.
+dtrace_opt = get_option('dtrace')
+probes_mode = 'no'
+dtrace_prog = disabler()
+if dtrace_opt != 'no' and host_sys == 'windows'
+  if dtrace_opt in ['yes', 'sdt']
+    error('-Ddtrace: no USDT support on Windows (ETW is the analogue)')
+  endif
+elif dtrace_opt in ['yes', 'auto']
+  dtrace_prog = find_program('dtrace', dirs : ['/usr/sbin'],
+    required : dtrace_opt == 'yes')
+  if dtrace_prog.found()
+    probes_mode = 'dtrace'
+  endif
+endif
+if probes_mode == 'no' and dtrace_opt in ['sdt', 'auto'] and host_sys != 'windows'
+  if cc.compiles('''#include <sys/sdt.h>
+      #ifndef STAP_PROBE2
+      #error not the systemtap sdt.h
+      #endif
+      int f(int a) { DTRACE_PROBE1(xtcconftest, p, a); return a; }''',
+      name : 'systemtap <sys/sdt.h>')
+    probes_mode = 'sdt'
+  elif dtrace_opt == 'sdt'
+    error('-Ddtrace=sdt: no systemtap <sys/sdt.h> (systemtap-sdt-dev / -devel)')
+  endif
+endif
+probes_g = probes_mode == 'dtrace' and host_sys != 'darwin'
+if probes_mode == 'dtrace'
+  cdata.set('XTC_HAVE_DTRACE', 1)
+  if probes_g
+    cdata.set('XTC_PROBES_ANCHOR', 1)
+  endif
+elif probes_mode == 'sdt'
+  cdata.set('XTC_PROBES_SDT', 1)
+endif
+
 xtc_config_h = configure_file(
   output : 'xtc_config.h',
   configuration : cdata,
 )
 
 message('xtc meson: io-backend=' + io_backend + ' tls=' + tls_backend
-  + ' accel=' + (have_accel ? 'yes' : 'no'))
+  + ' accel=' + (have_accel ? 'yes' : 'no') + ' usdt=' + probes_mode)
 
 # -----------------------------------------------------------------------------
 # Library sources.  Mirrors dist/Makefile.in LIB_SRCS.  All io/coro/asm files
@@ -420,9 +460,45 @@ if build_shared and host_sys not in ['darwin', 'windows']
     meson.project_source_root() / 'dist' / 'libxtc.map')
 endif
 
+probes_sh = files('dist/xtc_probes.sh')
+probes_d = files('src/xtc_probes.d')
+lib_gen = [xtc_config_h]
+if probes_mode == 'dtrace'
+  lib_gen += custom_target('xtc_probes_dtrace.h',
+    input : probes_d,
+    output : 'xtc_probes_dtrace.h',
+    command : ['sh', probes_sh, 'header', dtrace_prog, '@INPUT@', '@OUTPUT@'],
+  )
+endif
+
+# With dtrace -G the probe objects must be post-processed before they are
+# archived or linked, so compile them once into an internal library, run
+# dtrace -G over its objects, and build the real libraries from those
+# objects plus xtc_probes.o (PostgreSQL's meson build does the same).
+lib_objects = []
+lib_srcs_final = [lib_sources, lib_gen]
+if probes_g
+  xtc_objlib = static_library('xtc_probes_objs',
+    sources : [lib_sources, lib_gen],
+    include_directories : inc,
+    c_args : xtc_c_args,
+    dependencies : lib_deps,
+  )
+  xtc_probes_o = custom_target('xtc_probes.o',
+    input : xtc_objlib.extract_all_objects(recursive : false),
+    depend_files : probes_d,
+    output : 'xtc_probes.o',
+    command : ['env', 'CC=' + cc.cmd_array()[0], 'sh', probes_sh, 'object',
+      dtrace_prog, probes_d, '@OUTPUT@', '@INPUT@'],
+  )
+  lib_objects = [xtc_objlib.extract_all_objects(recursive : false), xtc_probes_o]
+  lib_srcs_final = [xtc_probes_o, lib_gen]
+endif
+
 if build_shared
   xtc_lib = both_libraries('xtc',
-    sources : [lib_sources, xtc_config_h],
+    sources : lib_srcs_final,
+    objects : lib_objects,
     include_directories : inc,
     c_args : xtc_c_args,
     link_args : xtc_shared_link_args,
@@ -434,7 +510,8 @@ if build_shared
   xtc_static = xtc_lib.get_static_lib()
 else
   xtc_lib = static_library('xtc',
-    sources : [lib_sources, xtc_config_h],
+    sources : lib_srcs_final,
+    objects : lib_objects,
     include_directories : inc,
     c_args : xtc_c_args,
     dependencies : lib_deps,

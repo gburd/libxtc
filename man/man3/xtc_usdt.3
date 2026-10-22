@@ -1,0 +1,450 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd October 22, 2026
+.Dt XTC_USDT 3
+.Os
+.Sh NAME
+.Nm xtc_usdt
+.Nd static probes for DTrace, perf, bpftrace and SystemTap
+.Sh LIBRARY
+.Lb libxtc
+.Sh SYNOPSIS
+.Nm ./dist/configure
+.Op Fl -enable-dtrace Ns Op = Ns Ar yes | sdt | auto | no
+.Op Ev DTRACE Ns = Ns Ar path
+.Op Ev DTRACEFLAGS Ns = Ns Ar flags
+.Pp
+.Nm meson setup
+.Fl Ddtrace Ns = Ns Ar no | auto | yes | sdt
+.Pp
+.Nm dtrace
+.Fl n
+.Sq xtc$target:::probe-name { ... }
+.Fl c
+.Ar program
+.Pp
+.Nm bpftrace
+.Fl e
+.Sq usdt:./program:xtc:probe__name { ... }
+.Sh DESCRIPTION
+libxtc can be built with a set of user-level statically defined tracing
+(USDT) probes in its scheduler, mailbox, timer, I/O, lock and supervision
+paths.
+The probes are defined once, as the
+.Sy xtc
+provider in
+.Pa src/xtc_probes.d ,
+and serve two tracer families from one build:
+.Bl -bullet -width 2n
+.It
+DTrace on FreeBSD, illumos (OmniOS, SmartOS) and macOS, which see them as
+.Sy xtc Ns Em PID Ns Sy ::: Ns Em probe-name .
+.It
+perf, bpftrace, bcc and SystemTap on Linux, which read the
+.Sy .note.stapsdt
+ELF notes the same probes produce and see them as
+.Sy xtc:probe__name
+(double underscores; DTrace shows each
+.Ql __
+as a hyphen).
+.El
+.Pp
+The probes are off by default.
+In a build without them every probe macro expands to nothing and none of
+its arguments is evaluated: the library's machine code is identical to a
+build that has no probe sites at all.
+.Ss Build modes
+.Bl -tag -width "--enable-dtrace=auto"
+.It Fl -enable-dtrace Ns = Ns Cm no
+The default.
+No probes.
+.It Fl -enable-dtrace Ns = Ns Cm yes
+Requires a
+.Xr dtrace 1
+program.
+.Ql dtrace -h
+generates the probe header.
+Except on macOS,
+.Ql dtrace -G
+then rewrites each probe call site in the library objects to no-ops and
+emits the probe table into
+.Pa xtc_probes.o ,
+which is archived into
+.Pa libxtc.a
+and linked into the shared library.
+Every object with a probe site references an anchor symbol in
+.Pa xtc_probes.o ,
+so a program linked statically against
+.Pa libxtc.a
+always carries the probe table.
+On Linux this mode works with the systemtap
+.Nm dtrace
+script, which also emits the is-enabled semaphores.
+.It Fl -enable-dtrace Ns = Ns Cm sdt
+Linux, header-only: the systemtap
+.In sys/sdt.h
+(package systemtap-sdt-dev or systemtap-sdt-devel) emits the notes
+directly; no tool runs at build time.
+There are no semaphores, so
+.Fn XTC_PROBE_ENABLED
+is always true and probe arguments are computed at every site; they are
+cheap by design (see
+.Sx Cost ) .
+.It Fl -enable-dtrace Ns = Ns Cm auto
+.Cm yes
+if a working
+.Nm dtrace
+is found, else
+.Cm sdt
+if a systemtap
+.In sys/sdt.h
+is, else
+.Cm no .
+.El
+.Pp
+.Ev DTRACE
+names the program and
+.Ev DTRACEFLAGS
+passes flags to it (for example
+.Ql DTRACEFLAGS=-64
+on illumos), as in PostgreSQL's configure.
+On Windows the option is refused; ETW is the analogue there and is not
+provided.
+.Pp
+The single-file amalgamation
+.Pq Pa xtc.c
+has no configure step.
+Compile it with
+.Fl DXTC_PROBES_SDT
+on Linux to get the notes.
+For DTrace, run
+.Ql dtrace -h -s src/xtc_probes.d
+into
+.Pa xtc_probes_gen.h ,
+rename its
+.Dv XTC_
+macros to
+.Dv XTC_DT_
+the way
+.Pa dist/xtc_probes.sh
+does, save it as
+.Pa xtc_probes_dtrace.h ,
+compile with
+.Fl DXTC_HAVE_DTRACE ,
+and on FreeBSD or illumos run
+.Ql dtrace -G -s src/xtc_probes.d -o probes.o xtc.o
+and link
+.Pa probes.o
+next to
+.Pa xtc.o .
+.Ss Argument conventions
+.Bl -tag -width "object"
+.It Fa pid
+A libxtc pid in one 64-bit argument:
+.Ql loop_id << 48 | local_id << 32 | gen .
+.It Fa task
+The fiber's
+.Vt xtc_task_t *
+as an integer.
+It is stable for the fiber's life and is the key that joins
+.Sy fiber-park ,
+.Sy fiber-wake ,
+.Sy fiber-resume
+and the run probes.
+Key D variables on it rather than on the thread: a migratable fiber can
+park on one OS thread and resume on another.
+.It Fa loop
+The executor loop index, or \-1 for a loop that is not part of an
+.Xr xtc_exec 3
+executor.
+.El
+.Pp
+No probe argument reads a clock.
+Take time from the tracer
+.Po D
+.Va timestamp ,
+bpftrace
+.Va nsecs
+.Pc .
+That keeps the probes out of the deterministic simulator's determinism
+guard, and under the simulator the
+.Fa deadline_ns
+and
+.Fa now_ns
+arguments of the timer probes are virtual time.
+.Ss Probes
+.Bl -tag -width 2n
+.It Sy proc-spawn Ns Pq Fa pid , parent
+A process was created
+.Pq Xr xtc_proc_spawn 3 .
+.Fa parent
+is the spawning process, 0 if it was spawned from outside one.
+.It Sy proc-start Ns Pq Fa pid , task
+The process began running on its fiber.
+.It Sy proc-exit Ns Pq Fa pid , reason
+The process finished with exit
+.Fa reason ,
+before links and monitors are notified.
+.It Sy proc-kill Ns Pq Fa target , reason
+.Xr xtc_exit_pid 3
+was called on a live process.
+.It Sy msg-send Ns Pq Fa from , to , bytes
+A message was queued for delivery
+.Pq Xr xtc_send 3 .
+.It Sy msg-recv Ns Pq Fa pid , from , bytes
+A process took a message from its mailbox.
+.It Sy fiber-park Ns Pq Fa task , reason , object
+A fiber is about to yield because it must wait.
+.Fa reason
+is one of 1 mailbox
+.Pq Xr xtc_recv 3 ,
+2 sleep
+.Pq Xr xtc_proc_sleep 3 ,
+3 fd
+.Pq Xr xtc_proc_wait_fd 3 ,
+.Fa object
+is the fd), 4 aio
+.Pq Xr xtc_aio 3 ;
+.Fa object
+is the request, matching
+.Sy aio-submit ) ,
+5 blocking pool
+.Pq Fa object No is the work item ,
+matching
+.Sy blocking-start ) ,
+6 sync primitive (amutex, arwlock, semaphore, notify, barrier, gate;
+.Fa object
+is the primitive's internal lock), 7 lwlock
+.Pq Fa object No is the lock ,
+8 lock manager
+.Pq Fa object No is the manager ,
+9 future
+.Pq Fa object No is the future .
+A fiber may park and resume several times for one wait: it rechecks its
+condition after every resume.
+.It Sy fiber-resume Ns Pq Fa task , reason , object
+The fiber is running again after the matching
+.Sy fiber-park .
+The time between the two is time spent parked plus time spent runnable
+but not yet scheduled.
+.It Sy fiber-wake Ns Pq Fa task , loop , how
+A waker targeted the fiber.
+.Fa how
+is 0 when the waker made it runnable on this thread's loop, 1 when it
+posted it to another loop's inbox, and 2 when the fiber was not parked
+(the wake was latched for a park still in progress, or the fiber was
+already runnable).
+A
+.Sy fiber-park
+followed by no
+.Sy fiber-wake
+means the wake source never fired; one followed by a wake with
+.Fa how
+0 or 1 and no
+.Sy fiber-resume
+means the wake was lost after it was generated.
+.It Sy task-run-start Ns Pq Fa task , loop , lane
+The scheduler is about to run a task quantum.
+.Fa lane
+is its scheduling class, \-1 for the default lane.
+.It Sy task-run-done Ns Pq Fa task , loop , verdict
+The quantum returned: 0 done, 1 rescheduled (yield), 2 parked.
+.It Sy loop-poll Ns Pq Fa loop , timeout_ns , nevents
+A blocking poll of the loop's I/O backend returned
+.Fa nevents
+events; \-1
+.Fa timeout_ns
+waits forever.
+Non-blocking fairness polls are not reported.
+.It Sy io-dispatch Ns Pq Fa loop , fd , flags , task
+An I/O event was dispatched to the task waiting for it
+.Pf ( Fa fd
+is \-1 for an AIO completion).
+.It Sy sched-steal Ns Pq Fa thief , victim , task
+A loop took a migratable task from another loop's queue.
+.It Sy timer-arm Ns Pq Fa timer , deadline_ns , task
+A timer was armed:
+.Fa task
+is the fiber a park timer will wake, 0 for an
+.Xr xtc_timer_set 3
+callback timer.
+.It Sy timer-fire Ns Pq Fa timer , deadline_ns , now_ns
+A timer fired;
+.Fa now_ns No \- Fa deadline_ns
+is its lateness on the libxtc monotonic clock.
+.It Sy timer-cancel Ns Pq Fa timer
+A pending timer was cancelled before it fired.
+.It Sy aio-submit Ns Pq Fa aio , op , fd , len
+A file operation reached the native AIO backend.
+.Fa op :
+0 pread, 1 pwrite, 2 fsync, 3 fdatasync, 4 preadv, 5 pwritev.
+.Fa len
+is 0 for the vector and sync operations.
+An operation the backend refused falls back to the blocking pool and
+fires the blocking probes instead.
+.It Sy aio-done Ns Pq Fa aio , op , res
+The submitting fiber saw the result: bytes, or a negative errno.
+.It Sy blocking-enqueue Ns Pq Fa work , qlen
+Work was queued for the blocking pool
+.Pq Xr xtc_blocking_run 3 ;
+.Fa qlen
+is the queue length after it.
+.It Sy blocking-start Ns Pq Fa work
+A pool thread began running it.
+.It Sy blocking-done Ns Pq Fa work , result
+The pool thread finished it.
+.It Sy lock-wait-start Ns Pq Fa lock , kind , mode , waiter
+A caller blocked on a contended lock: it is about to sleep on a condition
+variable or park its fiber.
+.Fa kind :
+1
+.Xr xtc_amutex 3 ,
+2 arwlock, 3
+.Xr xtc_lwlock 3 ,
+4
+.Xr xtc_lockmgr 3
+(then
+.Fa lock
+is the locked object, not the manager).
+.Fa mode :
+0 for an amutex; 0 shared, 1 exclusive for an arwlock; the
+.Vt xtc_lwlock_mode_t
+or
+.Vt xtc_lock_mode_t
+otherwise.
+.Fa waiter
+is the parking fiber's task, 0 for a waiting OS thread.
+Uncontended acquisitions do not fire; trace those with the pid provider
+or a uprobe on the function.
+.It Sy lock-wait-done Ns Pq Fa lock , kind , mode , waiter
+The caller woke up: it holds the lock, will recheck and may wait again
+(one start/done pair per sleep), or timed out.
+.It Sy sup-restart Ns Pq Fa sup , child , reason
+A supervisor is restarting after
+.Fa child
+exited with
+.Fa reason
+.Pq Xr xtc_sup 3 .
+.It Sy preempt-tick Ns Pq Fa involuntary
+A preemption timer tick arrived
+.Pq Xr xtc_preempt 3 :
+1 if it preempted the running fiber in signal context, 0 if it was
+deferred to the next cooperative yield check.
+Fires in a signal handler.
+.It Sy alloc-fail Ns Pq Fa bytes
+A libxtc heap allocation failed.
+.It Sy slab-grow Ns Pq Fa slab , bytes
+A slab cache mapped a new chunk
+.Pq Xr xtc_slab 3 .
+.It Sy sim-nondeterminism Ns Pq Fa what
+Under the deterministic simulator, a sim-reachable path called a
+nondeterministic primitive
+.Fa ( what
+is a string naming it).
+The run aborts right after unless strict mode is off.
+.It Sy sim-buggify Ns Pq Fa site , fired
+Under the simulator, a buggify site was reached for the first time in the
+run and its seeded decision made
+.Fa ( site
+is a string).
+.El
+.Ss Stability
+The provider name, probe names, argument order and the numeric codes
+above are an interface: they change only in a minor release, with a note
+in the release notes, and an existing probe's arguments are never
+reordered.
+New probes and new codes may be added.
+The module and function components of a probe (the
+.Xr dtrace 1
+.Ar mod
+and
+.Ar func
+fields) are private: they name libxtc's internal functions and can change
+in any release.
+The D stability attributes in
+.Pa src/xtc_probes.d
+say the same: Evolving for the provider, names and arguments, Private for
+module and function.
+.Ss Cost
+Disabled, a DTrace probe is a few no-op instructions where the call used
+to be, plus the argument setup the compiler emitted for it; an SDT probe
+is one
+.Sy nop .
+Probes sit on the slow paths: park, wake, a contended lock, a timer
+firing, a failed allocation, a supervisor restart.
+Fast paths (an uncontended lock, a send to a running process, a slab
+hit) carry none.
+Arguments are registers and plain loads, never a call or a clock read;
+wrap anything more expensive in
+.Fn XTC_PROBE_ENABLED NAME .
+A build without probes contains none of this.
+.Sh FILES
+.Bl -tag -width "tools/bpftrace/*.bt" -compact
+.It Pa src/xtc_probes.d
+The probe definitions.
+.It Pa src/inc/xtc_probes.h
+The macros at each probe site (library-internal).
+.It Pa dist/xtc_probes.sh
+The
+.Ql dtrace -h
+and
+.Ql dtrace -G
+steps.
+.It Pa tools/dtrace/*.d
+D scripts: park latency by reason, lock contention by lock with stacks,
+timer lateness, AIO latency per operation, stranded fibers.
+.It Pa tools/bpftrace/*.bt
+The same for bpftrace on Linux.
+.El
+.Sh EXAMPLES
+Count messages and park reasons in a running program:
+.Bd -literal -offset indent
+dtrace -qn 'xtc$target:::msg-send { @["sent"] = count(); }
+    xtc$target:::fiber-park { @why[arg1] = count(); }' -p 1234
+.Ed
+.Pp
+Park-to-resume latency by reason:
+.Bd -literal -offset indent
+dtrace -qs tools/dtrace/xtc_park_latency.d -c ./server
+.Ed
+.Pp
+The same on Linux with bpftrace, the binary linked against
+.Pa libxtc.a
+built with
+.Fl -enable-dtrace=sdt :
+.Bd -literal -offset indent
+bpftrace -e 'usdt:./server:xtc:fiber__park { @[arg1] = count(); }'
+.Ed
+.Pp
+List the probes perf sees and record one:
+.Bd -literal -offset indent
+perf buildid-cache --add ./server
+perf list 'sdt_xtc:*'
+perf probe sdt_xtc:lock__wait__start
+perf record -e sdt_xtc:lock__wait__start -g ./server
+.Ed
+.Sh SEE ALSO
+.Xr dtrace 1 ,
+.Xr xtc_stats 3 ,
+.Xr xtc_tail 3 ,
+.Xr xtc_trace 3 ,
+.Xr xtc 7
+.Sh HISTORY
+The probes first appeared in libxtc 1.59.0.
+.Sh CAVEATS
+On FreeBSD and illumos,
+.Ql dtrace -l
+and
+.Ql dtrace -n
+on a user process need root, or the dtrace_user privilege on illumos.
+On macOS, System Integrity Protection restricts DTrace on system
+binaries; your own programs are traceable once DTrace is allowed.
+On Linux, perf and bpftrace need
+.Dv CAP_PERFMON
+or root.
+A program that loads libxtc as a shared library registers its probes at
+load time; one linked statically carries them in its own image.
+.Pp
+macOS and illumos builds follow the same recipe as FreeBSD (macOS skips
+.Ql dtrace -G )
+but were not run when the probes were added.

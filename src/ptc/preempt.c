@@ -65,6 +65,7 @@
 #include "xtc_int.h"
 #include "xtc_preempt.h"
 #include "preempt_int.h"
+#include "xtc_probes.h"
 
 #include <signal.h>
 #include <pthread.h>
@@ -211,8 +212,10 @@ preempt_handler(int sig, siginfo_t *si, void *uctx)
 	    __xtc_coro_preempt(uctx)) {
 		/* The involuntary yield is armed: on sigreturn the scheduler
 		 * resumes and re-queues this fiber.  No pending flag needed. */
+		XTC_PROBE_PREEMPT_TICK(1);
 		return;
 	}
+	XTC_PROBE_PREEMPT_TICK(0);
 	/* Unsafe, disabled, or no fiber to preempt: defer to the next
 	 * cooperative yield-check (Phase 1). */
 	atomic_store_explicit(&g_pt.pending, 1, memory_order_relaxed);

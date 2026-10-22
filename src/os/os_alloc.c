@@ -11,6 +11,7 @@
  */
 
 #include "xtc_int.h"
+#include "xtc_probes.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -163,8 +164,10 @@ __os_malloc(size_t sz, void **out)
 	 * rc and *out == NULL. */
 	p = __hook()->malloc(sz != 0 ? sz : 1);
 	__xtc_unsafe_leave();
-	if (p == NULL)
+	if (p == NULL) {
+		XTC_PROBE_ALLOC_FAIL(sz);
 		return XTC_E_NOMEM;
+	}
 	*out = p;
 	return XTC_OK;
 }
@@ -185,8 +188,10 @@ __os_calloc(size_t n, size_t sz, void **out)
 	 * non-NULL pointer (see __os_malloc). */
 	p = __hook()->calloc(n != 0 ? n : 1, sz != 0 ? sz : 1);
 	__xtc_unsafe_leave();
-	if (p == NULL)
+	if (p == NULL) {
+		XTC_PROBE_ALLOC_FAIL(n * sz);
 		return XTC_E_NOMEM;
+	}
 	*out = p;
 	return XTC_OK;
 }
@@ -204,8 +209,10 @@ __os_realloc(void *p, size_t sz, void **out)
 	/* At least 1 byte so XTC_OK always yields a non-NULL pointer. */
 	q = __hook()->realloc(p, sz != 0 ? sz : 1);
 	__xtc_unsafe_leave();
-	if (q == NULL)
+	if (q == NULL) {
+		XTC_PROBE_ALLOC_FAIL(sz);
 		return XTC_E_NOMEM;
+	}
 	*out = q;
 	return XTC_OK;
 }

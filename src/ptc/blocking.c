@@ -39,6 +39,7 @@
 #include "loop_int.h"   /* struct xtc_task: park_requested */
 #include "coro_int.h"   /* __xtc_current_task */
 #include "xtc_sim.h"   /* __xtc_sim_active: run inline under simulation */
+#include "xtc_probes.h"
 
 #include "os_thread.h"
 #include "os_cpu.h"
@@ -138,7 +139,9 @@ blk_worker(void *unused)
 		(void)__xtc_mtx_unlock(&g_lock);
 
 		/* Run the user's blocking call on this pool thread. */
+		XTC_PROBE_BLOCKING_START((uintptr_t)w);
 		r = w->fn(w->arg);
+		XTC_PROBE_BLOCKING_DONE((uintptr_t)w, r);
 		if (w->detached) {
 			/* Fire-and-forget: the submitter never waits and does
 			 * not own w, so we free the heap work item here and
@@ -250,6 +253,7 @@ blk_enqueue(struct blk_work *w)
 		g_head = w;
 	g_tail = w;
 	g_qlen++;
+	XTC_PROBE_BLOCKING_ENQUEUE((uintptr_t)w, g_qlen);
 	blk_grow_locked();
 	(void)pthread_cond_signal(&g_cv);
 	(void)__xtc_mtx_unlock(&g_lock);
@@ -341,7 +345,11 @@ xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result)
 		if (done)
 			break;
 		proc_ctx = __xtc_proc_ctx_save();
+		XTC_PROBE_FIBER_PARK((uintptr_t)cur, XTC_PROBE_PARK_BLOCKING,
+		    (uintptr_t)&w);
 		xtc_yield();
+		XTC_PROBE_FIBER_RESUME((uintptr_t)cur, XTC_PROBE_PARK_BLOCKING,
+		    (uintptr_t)&w);
 		__xtc_proc_ctx_restore(proc_ctx);
 		/* The fiber may have been work-stolen while parked; re-aim the
 		 * waker at the loop it now runs on (under the lock the worker

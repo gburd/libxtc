@@ -13,6 +13,7 @@
 #include "xtc_int.h"
 #include "loop_int.h"
 #include "xtc_slab.h"
+#include "xtc_probes.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -305,6 +306,7 @@ xtc_timer_set(xtc_loop_t *loop, int64_t delay_ns, xtc_timer_fn fn, void *user,
 		xtc_slab_free((struct xtc_slab *)loop->timer_slab, t);
 		return rc;
 	}
+	XTC_PROBE_TIMER_ARM((uintptr_t)t, t->deadline_ns, (uintptr_t)0);
 	/* Not on all_timers: a handle that is never released is freed with
 	 * the timer slab at loop_fini. */
 	if (out_timer) *out_timer = t;
@@ -327,6 +329,7 @@ __xtc_timer_try_cancel(xtc_timer_t *timer)
 	    XTC_TIMER_CANCELLED, memory_order_acq_rel, memory_order_acquire))
 		return 0;
 	atomic_store_explicit(&timer->cancelled, 1, memory_order_release);
+	XTC_PROBE_TIMER_CANCEL((uintptr_t)timer);
 	/*
 	 * On the loop's own thread, take the node out of the heap now (Tm13):
 	 * leaving it until it reached the root let one earlier live timer pin

@@ -26,6 +26,7 @@
 #include "coro_int.h"
 #include "xtc_tail.h"     /* SCHED source: the aio park/resume pair */
 #include "tail_int.h"     /* __xtc_tail_emit / __xtc_tail_on (internal) */
+#include "xtc_probes.h"
 
 #include <errno.h>
 #include <string.h>
@@ -235,6 +236,7 @@ aio_do(int op, int fd, void *buf, uint32_t len, int64_t off)
 	rc = xtc_io_aio_submit(loop->io, &a);
 	if (rc != XTC_OK)
 		return aio_offload(op, fd, buf, len, off);   /* NOSYS/AGAIN: offload */
+	XTC_PROBE_AIO_SUBMIT((uintptr_t)&a, op, fd, len);
 
 	/* Park until THIS op completes.  The completion is the only thing
 	 * targeting this task (no other waker is armed), so the loop is
@@ -284,7 +286,11 @@ aio_do(int op, int fd, void *buf, uint32_t len, int64_t off)
 			t->park_requested = 1;
 			atomic_store_explicit(&t->wake_revents, 0,
 			    memory_order_relaxed);
+			XTC_PROBE_FIBER_PARK((uintptr_t)t, XTC_PROBE_PARK_AIO,
+			    (uintptr_t)&a);
 			xtc_yield();
+			XTC_PROBE_FIBER_RESUME((uintptr_t)t, XTC_PROBE_PARK_AIO,
+			    (uintptr_t)&a);
 			/*
 			 * Nudge the loop that OWNS this completion.
 			 *
@@ -316,6 +322,7 @@ aio_do(int op, int fd, void *buf, uint32_t len, int64_t off)
 			    __xtc_current_loop_get() != loop)
 				(void)xtc_loop_wake(loop);
 		}
+		XTC_PROBE_AIO_DONE((uintptr_t)&a, op, a.res);
 		if (tail_on && park_ns != 0) {
 			int64_t run_ns = 0;
 			(void)__os_clock_mono(&run_ns);
@@ -414,18 +421,24 @@ aio_do_v(int op, int fd, const struct iovec *iov, int iovcnt, int64_t off)
 	rc = xtc_io_aio_submit(loop->io, &a);
 	if (rc != XTC_OK)
 		return aio_offload_v(op, fd, iov, iovcnt, off);
+	XTC_PROBE_AIO_SUBMIT((uintptr_t)&a, op, fd, 0);
 
 	/* Acquire on done pairs with the reaper's release store (see
 	 * __xtc_aio_done_get), so a.res below is visible once done is set. */
 	while (!__xtc_aio_done_get(&a)) {
 		t->park_requested = 1;
 		atomic_store_explicit(&t->wake_revents, 0, memory_order_relaxed);
+		XTC_PROBE_FIBER_PARK((uintptr_t)t, XTC_PROBE_PARK_AIO,
+		    (uintptr_t)&a);
 		xtc_yield();
+		XTC_PROBE_FIBER_RESUME((uintptr_t)t, XTC_PROBE_PARK_AIO,
+		    (uintptr_t)&a);
 		/* Nudge the submitting loop so a migrated fiber's completion
 		 * is reaped -- see the identical guard in aio_do. */
 		if (!__xtc_aio_done_get(&a) && __xtc_current_loop_get() != loop)
 			(void)xtc_loop_wake(loop);
 	}
+	XTC_PROBE_AIO_DONE((uintptr_t)&a, op, a.res);
 	return a.res;
 }
 
