@@ -3533,8 +3533,19 @@ cell_hash(const vx_cell_t *c)
 	}
 num:
 	{
-		uint64_t bits; memcpy(&bits, &d, 8);
-		return bits * 0x9e3779b97f4a7c15ULL + 0x1234567ULL;
+		/* Mix every bit down (splitmix64's finalizer): a small integer
+		 * as a double has all-zero low mantissa bits, so a bare multiply
+		 * left the low bits -- the bucket index of every table here --
+		 * constant, and all integer keys shared ONE bucket (a 20,000-key
+		 * count(DISTINCT) cost 440 ms, quadratic).  -0.0 hashes as 0.0:
+		 * they compare equal. */
+		uint64_t bits;
+		if (d == 0.0) d = 0.0;
+		memcpy(&bits, &d, 8);
+		bits ^= bits >> 30; bits *= 0xbf58476d1ce4e5b9ULL;
+		bits ^= bits >> 27; bits *= 0x94d049bb133111ebULL;
+		bits ^= bits >> 31;
+		return bits;
 	}
 }
 
