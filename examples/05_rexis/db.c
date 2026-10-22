@@ -36,6 +36,7 @@ typedef struct db_table {
 	size_t       n_keys;
 	size_t       mem_used;
 	db_entry_t **buckets;
+	size_t       expire_cursor;  /* next bucket db_expire_stale scans */
 } db_table_t;
 
 #include "bitcask.h"
@@ -247,6 +248,7 @@ db_create(const db_opts_t *opts, db_t **out)
 	tbl->n_buckets = db->opts.n_buckets;
 	tbl->n_keys = 0;
 	tbl->mem_used = 0;
+	tbl->expire_cursor = 0;
 	bucket_bytes = tbl->n_buckets * sizeof(db_entry_t *);
 	if ((tbl->buckets = xtc_calloc(tbl->n_buckets, sizeof(db_entry_t *))) == NULL) {
 		xtc_lrlock_write_end(db->lr);
@@ -1130,11 +1132,19 @@ db_expire_stale(db_t *db, int64_t now_ns, int max_scan)
 {
 	db_table_t *tbl = db_write_table(db);
 	int removed = 0, scanned = 0;
-	size_t i;
+	size_t i, visited;
 
-	for (i = 0; i < tbl->n_buckets && scanned < max_scan; i++) {
+	/* Resume where the last pass stopped and wrap, so successive passes
+	 * sweep the whole table (Redis's active-expire cursor; DragonFly's
+	 * DbTable::expire_cursor).  Restarting at bucket 0 every time kept
+	 * rescanning the same first max_scan entries: expired keys behind
+	 * them were never reclaimed.  A bucket is always finished, so a pass
+	 * may look at up to one chain more than max_scan. */
+	i = tbl->expire_cursor % tbl->n_buckets;
+	for (visited = 0; visited < tbl->n_buckets && scanned < max_scan;
+	    visited++, i = (i + 1) % tbl->n_buckets) {
 		db_entry_t **pp = &tbl->buckets[i];
-		while (*pp && scanned < max_scan) {
+		while (*pp) {
 			db_entry_t *e = *pp;
 			scanned++;
 			if (e->expire_at_ns > 0 && now_ns >= e->expire_at_ns) {
@@ -1149,5 +1159,6 @@ db_expire_stale(db_t *db, int64_t now_ns, int max_scan)
 			}
 		}
 	}
+	tbl->expire_cursor = i;
 	return removed;
 }

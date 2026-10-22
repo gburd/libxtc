@@ -71,6 +71,7 @@ examples/05_rexis/rexis-server-xtc
 # rexis bitcask test binary
 examples/05_rexis/test_bitcask
 examples/05_rexis/test_db_persist
+examples/05_rexis/test_db_table
 examples/05_rexis/test_metrics
 
 # m99 example test binaries and objects
