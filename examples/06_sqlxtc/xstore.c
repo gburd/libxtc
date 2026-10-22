@@ -6111,16 +6111,19 @@ xs_idx_build_one(bt_t *bt, const struct xs_idx_ent *e)
 
 /*
  * Rebuild work: the indexes are independent (each its own key range), so
- * workers on the blocking pool take them one at a time -- the open then
+ * workers on the blocking pool build them one at a time -- the open then
  * costs about the largest index instead of the sum (TPC-C W=10: 10
- * indexes, two of them 5.9M entries each).  Under a simulation build the
- * pool would run on real threads outside the schedule, so the work runs
- * inline there (deterministic), as it does with one index or one CPU.
+ * indexes, two of them 5.9M entries each).  Clearing the old entries runs
+ * first and serially: deletes merge leaves under the tree's one SMO lock,
+ * and 16 clearing threads took 27 s where one takes 8 s.  Under a
+ * simulation build the pool would run on real threads outside the
+ * schedule, so the work runs inline there (deterministic), as it does
+ * with one index or one CPU.
  */
 struct xs_rb_job {
 	bt_t              *bt;
 	struct xs_idx_ent *e;
-	int                n, clear;
+	int                n;
 	_Atomic int        next, left;
 };
 
@@ -6131,8 +6134,6 @@ xs_rb_worker(void *arg)
 	int i;
 	while ((i = atomic_fetch_add_explicit(&j->next, 1,
 	    memory_order_relaxed)) < j->n) {
-		if (j->clear)
-			xs_idx_clear(j->bt, j->e[i].rt.idx_id);
 		if (xs_idx_build_one(j->bt, &j->e[i]) != 0)   /* UNIQUE dup: empty */
 			atomic_store_explicit(&g_idx_taint, 1, memory_order_release);
 	}
@@ -6159,11 +6160,12 @@ xs_idx_rebuild(bt_t *bt, int clear, int workers)
 		return;
 	}
 	j.bt = bt;
-	j.clear = clear;
 	xs_cat_lock();
 	for (i = 0; i < g_idx_n && j.n < XS_IDX_MAX; i++)
 		if (g_idx[i].bt == bt) j.e[j.n++] = g_idx[i];
 	xs_cat_unlock();
+	for (i = 0; clear && i < j.n; i++)
+		xs_idx_clear(bt, j.e[i].rt.idx_id);
 	atomic_fetch_add_explicit(&g_idx_rebuilds, 1, memory_order_relaxed);
 	nw = strcmp(xtc_io_backend_name(), "sim") == 0 ? 1 : workers;
 	if (nw > j.n) nw = j.n;
