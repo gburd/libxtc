@@ -753,14 +753,14 @@ esac
 AS_CASE([$xtc_enable_dtrace],
   [yes|auto],
   [AS_IF([test -z "$DTRACE"], [AC_PATH_PROGS([DTRACE], [dtrace], [], [$PATH:/usr/sbin])])
-   AC_MSG_CHECKING([whether $DTRACE -h works])
    xtc_dt_ok=no
    AS_IF([test -n "$DTRACE"],
-     [printf 'provider xtcconftest { probe p(int); };\n' > conftest.d
+     [AC_MSG_CHECKING([whether $DTRACE -h works])
+      printf 'provider xtcconftest { probe p(int); };\n' > conftest.d
       AS_IF([$DTRACE $DTRACEFLAGS -h -s conftest.d -o conftest_probes.h >/dev/null 2>&1 &&
              test -s conftest_probes.h], [xtc_dt_ok=yes])
-      rm -f conftest.d conftest_probes.h])
-   AC_MSG_RESULT([$xtc_dt_ok])
+      rm -f conftest.d conftest_probes.h
+      AC_MSG_RESULT([$xtc_dt_ok])])
    AS_IF([test "x$xtc_dt_ok" = xyes],
      [xtc_probes_mode=dtrace],
      [test "x$xtc_enable_dtrace" = xyes],

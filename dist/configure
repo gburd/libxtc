@@ -5896,21 +5896,21 @@ fi
 done
 
 fi
-   { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether $DTRACE -h works" >&5
-printf %s "checking whether $DTRACE -h works... " >&6; }
    xtc_dt_ok=no
    if test -n "$DTRACE"
 then :
-  printf 'provider xtcconftest { probe p(int); };\n' > conftest.d
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether $DTRACE -h works" >&5
+printf %s "checking whether $DTRACE -h works... " >&6; }
+      printf 'provider xtcconftest { probe p(int); };\n' > conftest.d
       if $DTRACE $DTRACEFLAGS -h -s conftest.d -o conftest_probes.h >/dev/null 2>&1 &&
              test -s conftest_probes.h
 then :
   xtc_dt_ok=yes
 fi
       rm -f conftest.d conftest_probes.h
-fi
-   { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $xtc_dt_ok" >&5
+      { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $xtc_dt_ok" >&5
 printf "%s\n" "$xtc_dt_ok" >&6; }
+fi
    if test "x$xtc_dt_ok" = xyes
 then :
   xtc_probes_mode=dtrace
