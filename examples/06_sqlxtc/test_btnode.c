@@ -610,7 +610,7 @@ static int
 split_trial(uint32_t ps, uint32_t K, uint32_t M, int quiet)
 {
 	uint8_t *L = malloc(ps), *R = malloc(ps), *keys = malloc((size_t)ps * 2);
-	uint8_t lo[600], hi[600], k[600], sep[1100], v[22000], pk[600];
+	uint8_t lo[1100], hi[1100], k[1100], sep[1100], v[22000], pk[1100];  /* K <= 1024 */
 	uint32_t pl = rnd32() % 61, cap = ps - (uint32_t)sizeof(struct btnode_hdr);
 	uint16_t lol = 0, hil = 0, sl = 0, pkl, pvl;
 	int inf_lo = rnd32() % 4 == 0, inf_hi = rnd32() % 4 == 0, n = 0, rc = 0, i;
