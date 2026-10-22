@@ -11,7 +11,8 @@
  *	for its commit to be durable, as plain threads (the in-process
  *	binding's client threads) or as procs on an L-loop executor (the
  *	server).  Prints one CSV line:
- *	  mode,C,len,commits_per_s,fsyncs_per_s,group,p50_us,p99_us
+ *	  mode,C,len,commits_per_s,fsyncs_per_s,group,p50_us,p99_us,
+ *	  p999_us,p9999_us,max_us
  *
  *	usage: bench_wal thread|fiber C LEN SECS [LOOPS] [replay]
  *	  replay: then time wal_scan of the log it wrote (s, MB/s)
@@ -214,10 +215,13 @@ main(int argc, char **argv)
 		k += nl;
 	}
 	qsort(all, (size_t)k, sizeof(uint32_t), cmpu);
-	printf("%s,%d,%d,%.0f,%.0f,%.2f,%u,%u\n", fiber ? "fiber" : "thread", c,
-	    g_len, (double)st.commits / el, (double)st.batches / el,
+	printf("%s,%d,%d,%.0f,%.0f,%.2f,%u,%u,%u,%u,%u\n",
+	    fiber ? "fiber" : "thread", c, g_len, (double)st.commits / el,
+	    (double)st.batches / el,
 	    st.batches ? (double)st.commits / (double)st.batches : 0.0,
-	    k ? all[k / 2] : 0, k ? all[k * 99 / 100] : 0);
+	    k ? all[k / 2] : 0, k ? all[k * 99 / 100] : 0,
+	    k ? all[k * 999 / 1000] : 0, k ? all[k * 9999 / 10000] : 0,
+	    k ? all[k - 1] : 0);
 	wal_close(g_wal);
 	if (argc > 6 && strcmp(argv[6], "replay") == 0) {
 		long nrec = 0;

@@ -1572,6 +1572,15 @@ wal_cmp_flush(struct wal_cmp_ctx *c)
 		else
 			done += (size_t)n;
 	}
+#if defined(SYNC_FILE_RANGE_WRITE)
+	/* Start the chunk's write-back now (advisory, no wait): the dump
+	 * of the live set is hundreds of MB, and left to the kernel it was
+	 * written back in one burst that the log's own syncs queued behind
+	 * (PostgreSQL's checkpoint_flush_after does the same). */
+	if (!c->err && c->blen > 0)
+		(void)sync_file_range(c->fd, c->boff, (off_t)c->blen,
+		    SYNC_FILE_RANGE_WRITE);
+#endif
 	c->boff += (off_t)c->blen;
 	c->blen = 0;
 }
