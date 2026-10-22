@@ -36,6 +36,7 @@ test_wal_crc
 test_wal_crc_sw
 test_wal_dsync
 test_wal_dio
+test_uniq_commit
 test_dio_restart
 test_steal_reclaim
 test_wal_bigtxn
@@ -86,6 +87,10 @@ test_point_read
 test_index_walk
 test_group_exact
 test_xs_ctr
+test_xs_ctr
+test_bm_reuse_version
+test_kill_stmt
+test_cat_lock_shared
 test_btree_sample
 test_savepoint
 test_native_txn

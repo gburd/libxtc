@@ -21,6 +21,7 @@
 #endif
 
 #include "bufmgr.h"
+#include "xs_ctr.h"
 
 #include "xtc_aio.h"
 #include "xtc_stats.h"
@@ -323,8 +324,12 @@ struct bm {
 	uint32_t          pf_head, pf_tail;
 	_Atomic uint64_t  s_prefetched;
 
-	/* stats */
-	_Atomic uint64_t  s_hits, s_rescues, s_loads, s_cooled, s_flushed, s_evicted;
+	/* stats.  s_hits is bumped by every fix of a resident page (every
+	 * level of every descent, every thread): one shared atomic there was
+	 * 20-28% of all samples at 8 readers, so it is striped (xs_ctr.h).
+	 * The others count misses / evictions / flushes: rare, plain. */
+	xs_ctr_t          s_hits;
+	_Atomic uint64_t  s_rescues, s_loads, s_cooled, s_flushed, s_evicted;
 	_Atomic uint64_t  resident;
 
 	/* double-write buffer (torn-page protection); dw_fd < 0 == disabled */
@@ -2104,6 +2109,13 @@ bm_alloc_pid(bm_t *bm, bm_frame_t **out_frame, bm_pid_t *out_pid)
 	bm_frame_t *f, *dup;
 	if (bm == NULL || out_frame == NULL) return XTC_E_INVAL;
 	if ((f = get_free_frame(bm)) == NULL) return XTC_E_RESOURCE;
+	/* A new page in this frame: bump the version (+2, stays even) before
+	 * the pid and the zeroed bytes, as the load path does, so a pin-free
+	 * reader (bm_fix_pid_nopin + bm_read_valid) that sampled it before
+	 * the reuse fails validation.  The pid can be the SAME one (the
+	 * freelist reissues it into the same frame), so the pid recheck
+	 * alone does not catch it (test_bm_reuse_version). */
+	atomic_fetch_add_explicit(&f->version, 2, memory_order_release);
 	atomic_store_explicit(&f->pid, next_pid(bm), memory_order_release);
 	atomic_store_explicit(&f->dirty, 1, memory_order_relaxed);
 	atomic_store_explicit(&f->io_busy, 0, memory_order_relaxed);
@@ -2122,6 +2134,10 @@ bm_alloc_pid(bm_t *bm, bm_frame_t **out_frame, bm_pid_t *out_pid)
 	 */
 	dup = ht_insert_alloc(bm, f);
 	if (dup != NULL) {
+		/* Reinitialised in place: a new version for a pin-free reader
+		 * (it is pinned, so +2 keeps it even and never looks like a
+		 * writer's odd hold). */
+		atomic_fetch_add_explicit(&dup->version, 2, memory_order_release);
 		atomic_store_explicit(&dup->dirty, 1, memory_order_relaxed);
 		atomic_store_explicit(&dup->doomed, 0, memory_order_relaxed);
 		memset(dup->page, 0, bm->page_size);
@@ -2274,12 +2290,12 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 		 * genuine miss OR a raced reissue (rare; always correct
 		 * either way -- see ht_lookup_pin_fast's comment). */
 		if ((f = ht_lookup_pin_fast(bm, pid)) != NULL) {
-			atomic_fetch_add_explicit(&bm->s_hits, 1, memory_order_relaxed);
+			xs_ctr_add(&bm->s_hits, 1);
 			*out_frame = f;
 			return XTC_OK;
 		}
 		if ((f = ht_lookup_pin(bm, pid, &generation)) != NULL) {
-			atomic_fetch_add_explicit(&bm->s_hits, 1, memory_order_relaxed);
+			xs_ctr_add(&bm->s_hits, 1);
 			*out_frame = f;
 			return XTC_OK;
 		}
@@ -2333,7 +2349,7 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 				if (!pinned)
 					continue;            /* being evicted: retry the lookup */
 				*out_frame = e;
-				atomic_fetch_add_explicit(&bm->s_hits, 1, memory_order_relaxed);
+				xs_ctr_add(&bm->s_hits, 1);
 				return XTC_OK;
 			}
 			/* Re-check quarantine UNDER the bucket lock: a concurrent
@@ -3187,7 +3203,7 @@ void
 bm_get_stats(bm_t *bm, bm_stats_t *out)
 {
 	if (bm == NULL || out == NULL) return;
-	out->hits = atomic_load_explicit(&bm->s_hits, memory_order_relaxed);
+	out->hits = xs_ctr_sum(&bm->s_hits);
 	out->rescues = atomic_load_explicit(&bm->s_rescues, memory_order_relaxed);
 	out->loads = atomic_load_explicit(&bm->s_loads, memory_order_relaxed);
 	out->cooled = atomic_load_explicit(&bm->s_cooled, memory_order_relaxed);

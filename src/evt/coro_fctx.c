@@ -293,6 +293,16 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 	__san_switch_done(__san_sched_fake);   /* back on the scheduler stack */
 
 	__xtc_current_coro = saved;
+	/* The scheduler has control again: the per-thread current-proc TLS
+	 * still names the fiber that just yielded (or stopped the executor
+	 * and yielded).  Give it back to whoever runs here -- the outer
+	 * coroutine's proc when this step is nested, else NO proc -- or
+	 * xtc_self() / xtc_mask_enter / xtc_proc_critical_enter on this
+	 * thread act on that fiber's proc, which a later xtc_exec_fini
+	 * frees (test_sim_stop_tls; the heap corruption in
+	 * test_sim_compose_crash). */
+	if (__xtc_fiber_ctx_restore)
+		__xtc_fiber_ctx_restore(saved != NULL ? saved->proc : NULL);
 
 	if (c->done) {
 		if (c->waiter != NULL) {

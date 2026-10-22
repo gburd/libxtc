@@ -1397,6 +1397,7 @@ nat_select_run(struct sx_stmt *st)
 	 * materialized here): without it an autocommit SELECT read each row
 	 * at the then-latest clock, unpinned, so GC could reclaim the version
 	 * it was about to read. */
+	(void)xtc_mask_enter();      /* also reached from sx_column_*: see sx_step */
 	xstore_stmt_begin((struct xsql *)st->db);
 	if (st->pcache != NULL)
 		rc = vx_pcache_run(st->pcache, (struct xsql *)st->db,
@@ -1406,6 +1407,7 @@ nat_select_run(struct sx_stmt *st)
 		    st->nbind ? st->binds : NULL, st->nbind, 1, &st->vres, &verr);
 	xstore_stmt_end((struct xsql *)st->db);
 	st->ran = 1;
+	(void)xtc_mask_leave();
 	if (verr) free(verr);
 	return (rc == 1 && st->vres != NULL);
 }
@@ -1526,8 +1528,33 @@ nat_create_table(struct sx_stmt *st)
 }
 #endif
 
+static int sx_step_body(sx_stmt *st);
+
+/*
+ * A statement is the unit of kill delivery.  Its B-tree work holds page
+ * latches, pins, cursors and the tree's SMO lock across yields (lock
+ * coupling, the eviction wait, a stale-descent retry, a log ack), and a
+ * kill delivered at one of those points would unwind the fiber with
+ * them held: nothing releases a latch for a dead proc, so the next
+ * writer of that page waits forever (test_wal_kill_engine: a killed
+ * connection leaked a shared latch on an internal node, a splitter
+ * holding the SMO lock waited on it, and every commit behind it).  So a
+ * step runs with cancellation masked and a kill raised meanwhile is
+ * delivered when it returns -- kill latency is one statement.  Off a
+ * proc both calls are no-ops.
+ */
 int
 sx_step(sx_stmt *st)
+{
+	int rc;
+	(void)xtc_mask_enter();
+	rc = sx_step_body(st);
+	(void)xtc_mask_leave();      /* may not return: a latched kill */
+	return rc;
+}
+
+static int
+sx_step_body(sx_stmt *st)
 {
 	if (st == NULL) return SX_MISUSE;
 #ifdef SQLXTC_HAVE_LIME

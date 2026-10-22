@@ -145,6 +145,7 @@ clean:
 	rm -f test_steal_page
 	rm -f test_wal_kill test_wal_tail test_wal_kill_engine test_wal_get_tail test_idx_trust test_crash_oracle
 	rm -f bench_wal test_wal_crc test_wal_crc_sw test_wal_dsync test_wal_dio
+	rm -f test_wal_kill test_wal_tail test_wal_kill_engine test_uniq_commit
 	rm -f test_steal_leaf test_cat_reopen test_ckpt_online test_wal_group_sync test_intents_thread test_torn_base test_snap_registry test_rowid_minmax test_btree_fill test_wal_bigtxn test_steal_reclaim test_dio_restart test_wal_prealloc
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o test_bufmgr_dio test_bufmgr_dio.o
 	rm -f test_bufmgr_mt
@@ -160,6 +161,7 @@ clean:
 	rm -f test_btree_mt
 	rm -f test_btree_stale_descent test_btree_limits test_btree_sample bench_morsel_balance
 	rm -f test_btree_seek test_btree_seek_latched test_point_read test_index_walk test_group_exact test_xs_ctr
+	rm -f test_xs_ctr test_bm_reuse_version test_kill_stmt test_cat_lock_shared
 	rm -f test_tpcc_seek test_dup_composite test_bulk_insert test_plan_cache
 	rm -f test_btree_delete_merge test_savepoint test_isolation test_ww_conflict test_row_intents test_commit_visibility test_ssi_skew test_ckpt_bound test_dup_insert test_recover_fast
 	rm -f test_vfs_loop test_vfs_loop.o
@@ -540,7 +542,7 @@ test_fuzzy_checkpoint: test_fuzzy_checkpoint.c $(ENGINE_NATIVE)
 test-fuzzy-checkpoint: test_fuzzy_checkpoint
 	./test_fuzzy_checkpoint
 
-bufmgr.o: bufmgr.c bufmgr.h
+bufmgr.o: bufmgr.c bufmgr.h xs_ctr.h
 
 # ---- buffer-manager multi-threaded stress test (executor; no daemon) ----
 test_bufmgr_mt: test_bufmgr_mt.c bufmgr.o
@@ -566,12 +568,11 @@ test-drop-reserved: test_drop_reserved
 	./test_drop_reserved
 
 # Kill committers mid-commit (exit/any/link/big/mid/writer, 0.6 s each);
-# the reopen tail hint (test-wal-tail).
-# test-wal-kill-engine (fibers killed inside COMMIT through the engine)
-# is NOT in `test` yet: it hangs until xs_commit_ctx masks the commit
-# (a known engine defect in xstore.c).
+# the reopen tail hint (test-wal-tail); fibers killed inside COMMIT
+# through the whole engine (test-wal-kill-engine, 1.5 s).
 # test-wal-kill-preempt needs involuntary preemption (x86-64 glibc).
 test: test-wal-kill test-wal-tail test-wal-get-tail test-idx-trust test-crash-oracle
+test: test-wal-kill test-wal-tail test-wal-kill-engine
 
 test_wal_kill: test_wal_kill.c wal.c wal.h
 	$(CC) $(CFLAGS) -o $@ test_wal_kill.c $(LDFLAGS)
@@ -1060,3 +1061,49 @@ test-freelist-persist: test_freelist_persist
 # and the log by record type.  Run it on a closed store.
 sx_size: sx_size.c xstore.o btnode.o wal.o xlog.o engine.o db.o quack.o metrics.o btree.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
 	$(CC) $(CFLAGS) -o $@ sx_size.c xstore.o btnode.o wal.o xlog.o engine.o db.o quack.o metrics.o btree.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
+# Commit-time UNIQUE re-validation: a key committed by another
+# transaction (or under an index created) after this transaction's
+# statement check must still fail the COMMIT.
+test: test-uniq-commit
+
+test_uniq_commit: test_uniq_commit.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ test_uniq_commit.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
+
+test-uniq-commit: test_uniq_commit
+	TMPDIR=$${TMPDIR:-/tmp} ./test_uniq_commit
+
+# xs_ctr.h: the striped statistics counter (exact sum, one line per slot).
+test: test-xs-ctr
+test_xs_ctr: test_xs_ctr.c xs_ctr.h
+	$(CC) $(CFLAGS) -o $@ test_xs_ctr.c $(LDFLAGS)
+
+test-xs-ctr: test_xs_ctr
+	./test_xs_ctr
+
+# A frame reused for a new page (bm_alloc_pid) changes its version, so a
+# pin-free optimistic reader that sampled it before cannot validate.
+test: test-bm-reuse-version
+test_bm_reuse_version: test_bm_reuse_version.c bufmgr.o
+	$(CC) $(CFLAGS) -o $@ test_bm_reuse_version.c bufmgr.o $(LDFLAGS)
+
+test-bm-reuse-version: test_bm_reuse_version
+	TMPDIR=$${TMPDIR:-/tmp} ./test_bm_reuse_version
+
+# Procs killed anywhere in a statement (scans and splitting inserts over a
+# pool far smaller than the table, so every statement evicts and yields)
+# leave no page latch or SMO lock behind: the statement runs masked.
+test: test-kill-stmt
+test_kill_stmt: test_kill_stmt.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_kill_stmt.c $(ENGINE_NATIVE) $(LDFLAGS)
+
+test-kill-stmt: test_kill_stmt
+	TMPDIR=$${TMPDIR:-/tmp} ./test_kill_stmt
+
+# Warm statements of several connections sharing one OS thread (fibers
+# on a server loop) take no global catalog lock.
+test: test-cat-lock-shared
+test_cat_lock_shared: test_cat_lock_shared.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_cat_lock_shared.c $(ENGINE_NATIVE) $(LDFLAGS)
+
+test-cat-lock-shared: test_cat_lock_shared
+	TMPDIR=$${TMPDIR:-/tmp} ./test_cat_lock_shared

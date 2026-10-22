@@ -84,14 +84,23 @@
 #define XS_LK_COMMIT 11u /* commit validation + timestamp + in-flight registry */
 static _Atomic uint64_t g_cat_locks;   /* XS_LK_CAT acquisitions (metric) */
 static _Atomic uint64_t g_cat_scans;   /* catalog-tree scans (metric) */
+/*
+ * Every hold runs with cancellation masked: a holder parks (a B-tree
+ * latch, the WAL ack) and a kill delivered there would unwind with the
+ * lock still held -- nothing releases an amutex for a dead proc, so
+ * every later caller would wait forever (test_wal_kill_engine).  The
+ * kill is delivered at the unlock instead.  No-ops off a proc.
+ */
+static xtc_amutex_t *xs_lk_get(unsigned slot);
+static void xs_lk(unsigned slot);
+static void xs_unlk(unsigned slot);
+static void xs_commit_unlock(void);
 #define xs_cat_lock()    (atomic_fetch_add_explicit(&g_cat_locks, 1, \
-	memory_order_relaxed), \
-	(void)xtc_amutex_lock(xtc_amutex_static(XS_LK_CAT), -1))
-#define xs_cat_unlock()  (void)xtc_amutex_unlock(xtc_amutex_static(XS_LK_CAT))
-#define xs_ssi_lock()    (void)xtc_amutex_lock(xtc_amutex_static(XS_LK_SSI), -1)
-#define xs_ssi_unlock()  (void)xtc_amutex_unlock(xtc_amutex_static(XS_LK_SSI))
-#define xs_commit_lock()   (void)xtc_amutex_lock(xtc_amutex_static(XS_LK_COMMIT), -1)
-#define xs_commit_unlock() (void)xtc_amutex_unlock(xtc_amutex_static(XS_LK_COMMIT))
+	memory_order_relaxed), xs_lk(XS_LK_CAT))
+#define xs_cat_unlock()  xs_unlk(XS_LK_CAT)
+#define xs_ssi_lock()    xs_lk(XS_LK_SSI)
+#define xs_ssi_unlock()  xs_unlk(XS_LK_SSI)
+#define xs_commit_lock()   xs_lk(XS_LK_COMMIT)
 
 /*
  * Commit clock.  Every committed version is stamped with a unique,
@@ -133,6 +142,7 @@ static _Atomic uint64_t g_xclock = 1;
  */
 static _Atomic uint64_t g_xvisible = 1;
 static uint64_t xs_visible(void);
+static void xs_vis_wake(void);
 
 /*
  * Wall-clock milliseconds since the epoch, the HLC physical component.
@@ -252,6 +262,45 @@ static struct xs_inflight *g_inflight;   /* guarded by the commit lock */
  * been skipped).  Guarded by the commit lock. */
 #define XS_TAB_TS_N 1024
 static uint64_t g_tab_cts[XS_TAB_TS_N];
+/*
+ * Row stamps: the newest timestamp registered for any (tid, rid) hashing
+ * to a slot (a collision only forces a check that could have been
+ * skipped).  Written under the commit lock at registration, read under
+ * it.  A commit probes each row's newest committed version BEFORE taking
+ * the commit lock, at a horizon v0 read first; under the lock a row
+ * needs the full check (probe again + in-flight scan) only if its stamp
+ * > v0 -- every commit not visible at v0 has ts > v0 and stamped its rows
+ * at registration, so stamp <= v0 means no in-flight writer of the row
+ * and no commit of it since the early probe.  At 64 clients these probes
+ * (a B-tree descent per row, latching hot leaves) ran under the lock.
+ */
+#define XS_ROW_TS_N 65536
+static uint64_t g_row_cts[XS_ROW_TS_N];
+/* The same for UNIQUE key tuples (hash of index id + key tuple): the
+ * newest timestamp registered by a commit carrying the key.  Stamped
+ * under the commit lock by xs_uniq_stamp_locked.  A key whose stamp is
+ * <= the horizon the transaction's statement-time check ran at
+ * (uniq_vis) skips the commit-time committed probe and the O(in-flight)
+ * scan: no commit carrying it was in flight or has committed since. */
+static uint64_t g_uk_cts[XS_ROW_TS_N];
+
+static uint64_t xs_bytes_hash(const uint8_t *p, int n);
+
+static unsigned
+xs_uk_slot(uint32_t idx_id, const uint8_t *key, int klen)
+{
+	uint64_t x = xs_bytes_hash(key, klen) ^ ((uint64_t)idx_id * 0x9e3779b97f4a7c15ull);
+	x ^= x >> 29;
+	return (unsigned)(x & (XS_ROW_TS_N - 1));
+}
+
+static unsigned
+xs_row_slot(uint32_t tid, int64_t rid)
+{
+	uint64_t x = ((uint64_t)tid << 40) ^ (uint64_t)rid;
+	x ^= x >> 33; x *= 0xff51afd7ed558ccdull; x ^= x >> 33;
+	return (unsigned)(x & (XS_ROW_TS_N - 1));
+}
 static void xs_visible_catchup_locked(void);
 /* Checkpoint gate (xstore_quiesce_begin): while set, no commit takes a
  * timestamp and no STEAL spill writes the log.  Guarded by the commit
@@ -259,6 +308,79 @@ static void xs_visible_catchup_locked(void);
 static int g_ckpt_gate;
 static _Atomic int g_wal_busy;
 static void xs_gate_wait_locked(void);
+
+/* The static engine amutexes, cached: xtc_amutex_static takes a global
+ * mutex on every call, so resolving it per lock and unlock put a second
+ * process-wide mutex on every commit (seen in the 64-client stacks). */
+static _Atomic(xtc_amutex_t *) g_lk[XTC_AMUTEX_STATIC_MAX];
+
+static xtc_amutex_t *
+xs_lk_get(unsigned slot)
+{
+	xtc_amutex_t *m = atomic_load_explicit(&g_lk[slot], memory_order_acquire);
+	if (m == NULL) {
+		m = xtc_amutex_static(slot);     /* idempotent: a race is benign */
+		atomic_store_explicit(&g_lk[slot], m, memory_order_release);
+	}
+	return m;
+}
+
+/* Take an engine lock (masked: see above).  Holding the commit lock
+ * starts by unlinking the in-flight entries marked done meanwhile. */
+static int  xs_inflight_prune_locked(int force);
+static int  g_commit_depth;          /* commit-lock nesting (holder only) */
+static int  g_vis_adv;               /* horizon advanced; wake at release */
+static _Atomic int g_ndone;          /* in-flight entries marked done */
+
+static void
+xs_lk(unsigned slot)
+{
+	(void)xtc_mask_enter();
+	(void)xtc_amutex_lock(xs_lk_get(slot), -1);
+	if (slot == XS_LK_COMMIT && g_commit_depth++ == 0)
+		(void)xs_inflight_prune_locked(0);  /* start from a clean registry */
+}
+
+static void
+xs_unlk(unsigned slot)
+{
+	(void)xtc_amutex_unlock(xs_lk_get(slot));
+	(void)xtc_mask_leave();
+}
+
+/*
+ * Release the commit lock.  The outermost release first unlinks the
+ * in-flight entries marked done meanwhile (advancing the horizon), and
+ * after it re-checks g_ndone: a remover that marked an entry done while
+ * we held the lock found it busy and left the prune to us (see
+ * xs_inflight_remove), so take the lock back and prune if one is
+ * pending.  Waiters the horizon now covers are woken outside the lock.
+ */
+static void
+xs_commit_unlock(void)
+{
+	xtc_amutex_t *m = xs_lk_get(XS_LK_COMMIT);
+	int adv = 0;
+	if (--g_commit_depth > 0) {
+		(void)xtc_amutex_unlock(m);   /* nested: still held */
+		(void)xtc_mask_leave();
+		return;
+	}
+	for (;;) {
+		(void)xs_inflight_prune_locked(0);
+		adv |= g_vis_adv;        /* any advance under this hold */
+		g_vis_adv = 0;
+		g_commit_depth = 0;
+		(void)xtc_amutex_unlock(m);
+		if (atomic_load_explicit(&g_ndone, memory_order_seq_cst) <= 0 ||
+		    xtc_amutex_try_lock(m) != XTC_OK)
+			break;           /* none pending, or the new holder prunes */
+		g_commit_depth = 1;
+	}
+	if (adv)
+		xs_vis_wake();
+	(void)xtc_mask_leave();
+}
 
 void
 xstore_set_clock(uint64_t v)
@@ -1084,6 +1206,7 @@ static struct xs_view_ent {
 	char  sql[1024];   /* the view's SELECT text */
 } g_view[XS_VIEW_MAX];
 static int g_view_n;
+static _Atomic int g_view_any;   /* set once any view exists (sticky) */
 
 /* Connection -> B-tree association, so a from-scratch executor driven
  * from a connection handle (xstore_bt_of) can open a storage-native
@@ -1098,22 +1221,32 @@ static int g_dbmap_n;
  * per-thread copy of the last entry is valid while the generation is
  * unchanged: an entry only changes at register / unregister. */
 static _Atomic uint64_t g_dbmap_gen = 1;
-static _Thread_local struct { uint64_t gen; struct xs_dbmap_ent e; } t_dbmap;
+/* A few entries per thread: in the server a loop thread runs several
+ * connection fibers, which with a one-entry cache evicted each other on
+ * every statement -- and every miss took the catalog lock (at 32
+ * connections on 8 loops most of the parked connection fibers were
+ * queued on it, a cross-loop hand-off per statement). */
+#define XS_TDBMAP_N 16
+static _Thread_local struct { uint64_t gen; struct xs_dbmap_ent e; } t_dbmap[XS_TDBMAP_N];
+static _Thread_local unsigned t_dbmap_next;
 
 static const struct xs_dbmap_ent *
 xs_dbmap_get(struct xsql *db)
 {
 	uint64_t g = atomic_load_explicit(&g_dbmap_gen, memory_order_acquire);
-	int i, found = 0;
-	if (t_dbmap.gen == g && t_dbmap.e.db == db) return &t_dbmap.e;
+	int i, k, found = 0;
+	for (k = 0; k < XS_TDBMAP_N; k++)
+		if (t_dbmap[k].gen == g && t_dbmap[k].e.db == db)
+			return &t_dbmap[k].e;
+	k = (int)(t_dbmap_next++ % XS_TDBMAP_N);
 	xs_cat_lock();
 	g = atomic_load_explicit(&g_dbmap_gen, memory_order_relaxed);
 	for (i = 0; i < g_dbmap_n; i++)
-		if (g_dbmap[i].db == db) { t_dbmap.e = g_dbmap[i]; found = 1; break; }
+		if (g_dbmap[i].db == db) { t_dbmap[k].e = g_dbmap[i]; found = 1; break; }
 	xs_cat_unlock();
 	if (!found) return NULL;
-	t_dbmap.gen = g;
-	return &t_dbmap.e;
+	t_dbmap[k].gen = g;
+	return &t_dbmap[k].e;
 }
 
 bt_t *
@@ -1536,7 +1669,14 @@ struct xs_idx_dead {
 };
 #define XS_IDX_DEAD_MAX 4096
 static struct xs_idx_dead g_idx_dead[XS_IDX_DEAD_MAX];
-static int g_idx_dead_n;
+static int g_idx_dead_n;      /* guarded by the commit lock */
+/* Its value for the unlocked "anything queued?" fast paths (a hint: the
+ * locked code re-reads g_idx_dead_n).  Written under the commit lock. */
+static _Atomic int g_idx_dead_hint;
+#define XS_IDX_DEAD_PUBLISH() atomic_store_explicit(&g_idx_dead_hint, \
+	g_idx_dead_n, memory_order_relaxed)
+#define XS_IDX_DEAD_HINT() atomic_load_explicit(&g_idx_dead_hint, \
+	memory_order_relaxed)
 
 static void
 xs_put_be64(uint8_t *p, uint64_t v)
@@ -1800,7 +1940,7 @@ xs_idx_dead_add(bt_t *bt, const struct xs_idx_rt *rt, int64_t rowid,
 {
 	uint8_t *k;
 	if (klen <= 0) return;
-	if (g_idx_dead_n >= XS_IDX_DEAD_MAX ||
+	if (XS_IDX_DEAD_HINT() >= XS_IDX_DEAD_MAX ||
 	    (k = (uint8_t *)malloc((size_t)klen)) == NULL) {
 		atomic_fetch_add_explicit(&g_idx_garbage, 1, memory_order_relaxed);
 		return;
@@ -1809,6 +1949,7 @@ xs_idx_dead_add(bt_t *bt, const struct xs_idx_rt *rt, int64_t rowid,
 	xs_commit_lock();
 	if (g_idx_dead_n < XS_IDX_DEAD_MAX) {
 		struct xs_idx_dead *d = &g_idx_dead[g_idx_dead_n++];
+		XS_IDX_DEAD_PUBLISH();
 		d->bt = bt; d->ts = ts; d->idx_id = rt->idx_id;
 		d->tableid = rt->tableid; d->rowid = rowid;
 		d->klen = (uint16_t)klen; d->key = k;
@@ -1866,7 +2007,7 @@ xs_idx_reap(bt_t *bt)
 	struct xs_idx_rt rt;
 	uint64_t hz;
 	int i, nb = 0;
-	if (g_idx_dead_n == 0) return;
+	if (XS_IDX_DEAD_HINT() == 0) return;
 	hz = snap_horizon(xs_visible());
 	xs_commit_lock();
 	for (i = 0; i < g_idx_dead_n && nb < 32; ) {
@@ -1877,6 +2018,7 @@ xs_idx_reap(bt_t *bt)
 			i++;
 		}
 	}
+	XS_IDX_DEAD_PUBLISH();
 	xs_commit_unlock();
 	for (i = 0; i < nb; i++) {
 		struct xs_idx_dead *d = &batch[i];
@@ -1922,6 +2064,7 @@ xs_idx_drain(bt_t *bt)
 		if (i == g_idx_dead_n) { xs_commit_unlock(); break; }
 		d = g_idx_dead[i];
 		g_idx_dead[i] = g_idx_dead[--g_idx_dead_n];
+		XS_IDX_DEAD_PUBLISH();
 		xs_commit_unlock();
 		if (!xs_idx_get_rt(bt, d.idx_id, &rt)) {
 			free(d.key);               /* index dropped: cleared already */
@@ -1954,6 +2097,7 @@ xs_idx_dead_forget(bt_t *bt)
 			i++;
 		}
 	}
+	XS_IDX_DEAD_PUBLISH();
 	xs_commit_unlock();
 }
 
@@ -2024,9 +2168,12 @@ xs_idx_maintain_ts(bt_t *bt, uint32_t tableid, int64_t rowid,
 struct xs_inflight;
 static int  xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid,
     const void *blob, int n, int deleted, uint64_t base, int insert,
-    uint64_t *out_ts, uint32_t *ubad);
+    uint64_t *out_ts, uint32_t *ubad, int vis);
 static int  xs_uniq_collect(bt_t *bt, const xstore_ctx_t *cx, uint32_t tid1,
     struct xs_idx_rt *u, int cap);
+static void xs_uniq_stamp_locked(const xstore_ctx_t *cx, uint32_t tid1,
+    const uint8_t *rec1, int len1, int64_t rid1,
+    const struct xs_idx_rt *u, int nu, uint64_t ts);
 static int  xs_uniq_validate_locked(bt_t *bt, xstore_ctx_t *cx, uint32_t tid1,
     int64_t rid1, const uint8_t *rec1, int len1,
     const struct xs_idx_rt *u, int nu, uint32_t *bad);
@@ -3602,7 +3749,7 @@ xstore_put_rec(bt_t *bt, uint32_t tableid, int64_t rowid,
 	uint64_t ts = 0;
 	int rc;
 	if (bt == NULL || rec == NULL || reclen < 1) return -1;
-	rc = xs_put_ts(bt, tableid, rowid, rec, reclen, 0, 0, 0, &ts, NULL);
+	rc = xs_put_ts(bt, tableid, rowid, rec, reclen, 0, 0, 0, &ts, NULL, 0);
 	return rc == SX_OK ? 0 : -1;
 }
 
@@ -3614,7 +3761,7 @@ xstore_delete_rec(bt_t *bt, uint32_t tableid, int64_t rowid)
 	uint64_t ts = 0;
 	int rc;
 	if (bt == NULL) return -1;
-	rc = xs_put_ts(bt, tableid, rowid, NULL, 0, 1, 0, 0, &ts, NULL);
+	rc = xs_put_ts(bt, tableid, rowid, NULL, 0, 1, 0, 0, &ts, NULL, 0);
 	return rc == SX_OK ? 0 : -1;
 }
 
@@ -3761,12 +3908,16 @@ xs_wal_emit(const uint8_t *rec, size_t sz, uint64_t *lsn)
 	*lsn = 0;
 	if (g_xwal == NULL)
 		return XTC_OK;
+	/* Masked: wal_commit delivers a latched kill at its end, which would
+	 * leave g_wal_busy raised and the checkpoint gate waiting forever. */
+	(void)xtc_mask_enter();
 	atomic_fetch_add_explicit(&g_wal_busy, 1, memory_order_acq_rel);
 	if (xtc_pid_is_none(xtc_self()))
 		rc = wal_commit_sync(g_xwal, rec, (uint32_t)sz, lsn);
 	else
 		rc = wal_commit(g_xwal, rec, (uint32_t)sz, lsn);
 	atomic_fetch_sub_explicit(&g_wal_busy, 1, memory_order_acq_rel);
+	(void)xtc_mask_leave();
 	return rc;
 }
 
@@ -4041,8 +4192,10 @@ xs_spill_payloads(xstore_ctx_t *cx)
 		/* A checkpoint is dumping the tree: keep payloads in memory. */
 		xs_commit_lock();
 		gated = g_ckpt_gate;
-		if (!gated)
+		if (!gated) {
+			(void)xtc_mask_enter();   /* until g_wal_busy drops */
 			atomic_fetch_add_explicit(&g_wal_busy, 1, memory_order_acq_rel);
+		}
 		xs_commit_unlock();
 		if (gated)
 			break;
@@ -4051,6 +4204,7 @@ xs_spill_payloads(xstore_ctx_t *cx)
 		enc_vkey(XS_STAGE_TID, sid, 0, key);
 		if (bt_insert(cx->bt, key, XS_VKLEN, w->data, w->len) != XTC_OK) {
 			atomic_fetch_sub_explicit(&g_wal_busy, 1, memory_order_acq_rel);
+			(void)xtc_mask_leave();
 			continue;                  /* keep it in memory on failure */
 		}
 		if (cx->steal_txn == 0)
@@ -4060,6 +4214,7 @@ xs_spill_payloads(xstore_ctx_t *cx)
 		atomic_fetch_sub_explicit(&g_wal_busy, 1, memory_order_acq_rel);
 		free(w->data); w->data = NULL; w->spilled = 1; w->stage_id = sid;
 		cx->wbuf_bytes -= w->len;
+		(void)xtc_mask_leave();
 	}
 }
 
@@ -4084,6 +4239,7 @@ struct xs_inflight {
 	int64_t             rid;
 	const uint8_t      *rec;    /* its record (NULL for a delete) */
 	int                 reclen;
+	_Atomic int         done;   /* applied or failed; unlink pending */
 	struct xs_inflight *next;
 };
 static int
@@ -4107,11 +4263,15 @@ xs_inflight_add_locked(struct xs_inflight *e)
 	e->ts = hlc_tick();
 	e->next = g_inflight;
 	g_inflight = e;
-	if (e->ws == NULL)
+	if (e->ws == NULL) {
 		g_tab_cts[e->tid % XS_TAB_TS_N] = e->ts;
-	else
-		for (i = 0; i < e->wn; i++)
+		g_row_cts[xs_row_slot(e->tid, e->rid)] = e->ts;
+	} else {
+		for (i = 0; i < e->wn; i++) {
 			g_tab_cts[e->ws[i].tableid % XS_TAB_TS_N] = e->ts;
+			g_row_cts[xs_row_slot(e->ws[i].tableid, e->ws[i].rowid)] = e->ts;
+		}
+	}
 }
 
 /* Caller holds the commit lock: is a commit writing (tid, rid) in flight? */
@@ -4136,22 +4296,83 @@ xs_visible_catchup_locked(void)
 	for (e = g_inflight; e != NULL; e = e->next)
 		if (e->ts - 1 < v)
 			v = e->ts - 1;
-	if (v > atomic_load_explicit(&g_xvisible, memory_order_relaxed))
+	if (v > atomic_load_explicit(&g_xvisible, memory_order_relaxed)) {
 		atomic_store_explicit(&g_xvisible, v, memory_order_seq_cst);
+		g_vis_adv = 1;           /* xs_commit_unlock wakes the waiters */
+	}
 }
 
-/* The commit (applied or failed) leaves the in-flight set: publish it to
- * readers by advancing the horizon past every completed commit. */
+/* Commit lock held: unlink every entry marked done and advance the
+ * horizon.  Returns 1 if it advanced.  g_ndone is only a hint (a pruner
+ * can unlink an entry before its remover counts it, so the count can
+ * read 0 for a moment while one is pending -- that remover's own try
+ * then prunes); `force` walks the list regardless. */
+static int
+xs_inflight_prune_locked(int force)
+{
+	struct xs_inflight **pp, *e;
+	int n = 0;
+	if (!force && atomic_load_explicit(&g_ndone, memory_order_seq_cst) <= 0)
+		return 0;
+	for (pp = &g_inflight; (e = *pp) != NULL; ) {
+		if (atomic_load_explicit(&e->done, memory_order_acquire)) {
+			*pp = e->next;
+			/* Last touch: once it reads 2 its owner may return. */
+			atomic_store_explicit(&e->done, 2, memory_order_release);
+			n++;
+		} else {
+			pp = &e->next;
+		}
+	}
+	if (n == 0)
+		return 0;
+	atomic_fetch_sub_explicit(&g_ndone, n, memory_order_seq_cst);
+	xs_visible_catchup_locked();
+	return 1;
+}
+
+/*
+ * The commit (applied or failed) leaves the in-flight set.  It no longer
+ * waits for the commit lock: at 64 clients the oldest commit's removal
+ * queued behind dozens of registrations, and every younger commit's
+ * visibility waited on it.  The entry is marked done, and whoever holds
+ * the lock unlinks it and advances the horizon (at its acquire and its
+ * outermost release, xs_commit_unlock).  No lost prune: we raise g_ndone
+ * and then try the lock; a holder releases and then re-reads g_ndone,
+ * and both go through the amutex's own mutex, so one of us sees the
+ * other.  The entry lives on the caller's stack: the caller must not
+ * return before it is unlinked, i.e. before xs_visible() >= e->ts (the
+ * horizon never passes a linked entry) -- xs_wait_visible.
+ */
 static void
 xs_inflight_remove(struct xs_inflight *e)
 {
-	struct xs_inflight **pp;
+	xtc_amutex_t *m = xs_lk_get(XS_LK_COMMIT);
+	/* done before the count: a pruner that sees done may drive the count
+	 * briefly negative, never spuriously positive. */
+	atomic_store_explicit(&e->done, 1, memory_order_release);
+	atomic_fetch_add_explicit(&g_ndone, 1, memory_order_seq_cst);
+	if (xtc_amutex_try_lock(m) == XTC_OK) {
+		(void)xtc_mask_enter();
+		g_commit_depth++;
+		xs_commit_unlock();       /* prunes, wakes the covered waiters */
+	}
+}
+
+/* Return once `e` (removed) is unlinked, for a caller that will not wait
+ * for its visibility: an acquire of the commit lock prunes it. */
+static void
+xs_inflight_unlinked(struct xs_inflight *e)
+{
+	if (atomic_load_explicit(&e->done, memory_order_acquire) == 2)
+		return;
 	xs_commit_lock();
-	for (pp = &g_inflight; *pp != NULL; pp = &(*pp)->next)
-		if (*pp == e) { *pp = e->next; break; }
-	xs_visible_catchup_locked();
+	if (atomic_load_explicit(&e->done, memory_order_acquire) != 2)
+		(void)xs_inflight_prune_locked(1);
 	xs_commit_unlock();
 }
+
+static void xs_vis_forget(void);
 
 static uint64_t
 xs_visible(void)
@@ -4173,27 +4394,149 @@ xs_commit_state_reset(void)
 	xs_ilk_reset();
 	xs_commit_lock();
 	g_inflight = NULL;
+	atomic_store_explicit(&g_ndone, 0, memory_order_seq_cst);
 	g_ckpt_gate = 0;
 	atomic_store_explicit(&g_wal_busy, 0, memory_order_relaxed);
 	atomic_store_explicit(&g_xvisible,
 	    atomic_load_explicit(&g_xclock, memory_order_relaxed),
-	    memory_order_release);
+	    memory_order_seq_cst);
 	xs_commit_unlock();
+	xs_vis_forget();
+}
+
+/*
+ * Visibility waiters.  A commit returns only once its timestamp is
+ * visible (xs_wait_visible), which waits for every OLDER commit still in
+ * flight.  This was a 20 us sleep poll: at 64 clients it was 18% of the
+ * client threads' stacks and a syscall + timer per poll.  Now a waiter
+ * queues (sorted by ts) on an xtc_notify, and whoever advances
+ * g_xvisible wakes exactly the waiters it covers (xs_vis_wake).
+ *
+ * No lost wake: a waiter raises g_vw_n and then re-reads g_xvisible; an
+ * advancer stores g_xvisible and then reads g_vw_n (all seq_cst), so one
+ * of them sees the other; both re-check under g_vw_mu.  g_vw_mu is a
+ * leaf lock (never held across a park), held as a proc critical section
+ * so involuntary preemption never parks a fiber holding it.  Waiter
+ * objects are recycled on g_vw_free and only ever returned by their own
+ * waiter, after its wake.
+ */
+struct xs_vwait {
+	uint64_t         ts;
+	int              queued;       /* linked on g_vw (under g_vw_mu) */
+	xtc_notify_t    *n;
+	struct xs_vwait *next;
+};
+static pthread_mutex_t  g_vw_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct xs_vwait *g_vw;          /* queued, ascending ts */
+static struct xs_vwait *g_vw_free;
+static _Atomic int      g_vw_n;        /* waiters inside xs_wait_visible */
+
+static void
+xs_vw_lock(void)
+{
+	xtc_proc_critical_enter();
+	(void)pthread_mutex_lock(&g_vw_mu);   /* leaf lock */
+}
+
+static void
+xs_vw_unlock(void)
+{
+	(void)pthread_mutex_unlock(&g_vw_mu);
+	xtc_proc_critical_leave();
+}
+
+/* g_xvisible advanced: wake every queued waiter it covers.  Call with no
+ * engine lock held (the wakes are futex syscalls off a loop). */
+static void
+xs_vis_wake(void)
+{
+	struct xs_vwait *chain = NULL, *q;
+	uint64_t v;
+	if (atomic_load_explicit(&g_vw_n, memory_order_seq_cst) == 0)
+		return;
+	xs_vw_lock();
+	v = xs_visible();
+	while ((q = g_vw) != NULL && q->ts <= v) {
+		g_vw = q->next;
+		q->queued = 0;
+		q->next = chain;
+		chain = q;
+	}
+	xs_vw_unlock();
+	/* Unlinked waiters stay parked until signalled, so they cannot
+	 * recycle q before the signal below. */
+	while ((q = chain) != NULL) {
+		chain = q->next;
+		(void)xtc_notify_signal(q->n);
+	}
+}
+
+/* Engine reset (no commit can be running): drop waiters an abandoned run
+ * left queued -- their notify queues point into dead fiber stacks, so they
+ * must never be signalled.  Leaks those few objects. */
+static void
+xs_vis_forget(void)
+{
+	xs_vw_lock();
+	g_vw = NULL;
+	atomic_store_explicit(&g_vw_n, 0, memory_order_seq_cst);
+	xs_vw_unlock();
 }
 
 /* Return only once commit `ts` is visible to new snapshots, so a session
  * always reads its own commit.  The horizon waits only on OLDER commits
  * still in flight (logging or applying), which never wait on younger
- * ones, so this terminates.  Must be called holding no engine lock. */
+ * ones, so this terminates.  Must be called holding no engine lock.
+ * Masked: a waiter killed while queued would leave its object linked. */
 static void
 xs_wait_visible(uint64_t ts)
 {
+	struct xs_vwait *q = NULL, **pp;
+	if (xs_visible() >= ts)
+		return;
+	(void)xtc_mask_enter();
+	xs_vw_lock();
+	atomic_fetch_add_explicit(&g_vw_n, 1, memory_order_seq_cst);
 	while (xs_visible() < ts) {
-		if (xtc_pid_is_none(xtc_self()))
-			(void)xtc_sleep_ns(20LL * 1000);
-		else
-			(void)xtc_proc_sleep(20LL * 1000);
+		if (q == NULL && (q = g_vw_free) != NULL) {
+			g_vw_free = q->next;
+		} else if (q == NULL) {
+			/* xtc_calloc: the preemption-safe allocator */
+			q = xtc_calloc(1, sizeof *q);
+			if (q == NULL || xtc_notify_create(&q->n) != XTC_OK) {
+				xtc_free(q);         /* no waiter object: poll */
+				q = NULL;
+				xs_vw_unlock();
+				if (xtc_pid_is_none(xtc_self()))
+					(void)xtc_sleep_ns(20LL * 1000);
+				else
+					(void)xtc_proc_sleep(20LL * 1000);
+				xs_vw_lock();
+				continue;
+			}
+		}
+		if (!q->queued) {
+			q->ts = ts;
+			for (pp = &g_vw; *pp != NULL && (*pp)->ts <= ts;
+			    pp = &(*pp)->next)
+				;
+			q->next = *pp;
+			*pp = q;
+			q->queued = 1;
+		}
+		xs_vw_unlock();
+		(void)xtc_notify_wait(q->n, -1);
+		xs_vw_lock();
+		/* The waker unlinked q before signalling it; a stray stored
+		 * signal finds it still queued and it simply waits again. */
 	}
+	atomic_fetch_sub_explicit(&g_vw_n, 1, memory_order_seq_cst);
+	if (q != NULL) {
+		q->next = g_vw_free;
+		g_vw_free = q;
+	}
+	xs_vw_unlock();
+	(void)xtc_mask_leave();
 }
 
 /*
@@ -4218,13 +4561,40 @@ xs_ww_conflict_locked(bt_t *bt, const xs_wrec_t *ws, int wn)
 	return 0;
 }
 
+/* The early half of the write-write check, WITHOUT the commit lock: is
+ * any row of the write set committed past its base?  Returns 1 on a
+ * conflict (certain: committed versions never go away).  Read the
+ * horizon *v0 before calling; xs_ww_recheck_locked then finishes. */
+static int
+xs_ww_probe(bt_t *bt, const xs_wrec_t *ws, int wn)
+{
+	int i;
+	for (i = 0; i < wn; i++)
+		if (xs_newest_ts(bt, ws[i].tableid, ws[i].rowid) > ws[i].base)
+			return 1;
+	return 0;
+}
+
+/* Commit lock held, after xs_ww_probe passed at horizon v0: the full
+ * check only for rows registered (stamped) after v0 -- see g_row_cts. */
+static int
+xs_ww_recheck_locked(bt_t *bt, const xs_wrec_t *ws, int wn, uint64_t v0)
+{
+	int i;
+	for (i = 0; i < wn; i++)
+		if (g_row_cts[xs_row_slot(ws[i].tableid, ws[i].rowid)] > v0 &&
+		    xs_ww_conflict_locked(bt, &ws[i], 1))
+			return 1;
+	return 0;
+}
+
 static int xs_row_live(bt_t *bt, uint32_t tableid, int64_t rowid);
 
 static int
 xs_put(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n, int deleted)
 {
 	uint64_t ts;
-	return xs_put_ts(bt, tableid, rowid, blob, n, deleted, 0, 0, &ts, NULL);
+	return xs_put_ts(bt, tableid, rowid, blob, n, deleted, 0, 0, &ts, NULL, 0);
 }
 
 /* An INSERT reads "the key is absent".  Caller holds the commit lock.
@@ -4254,16 +4624,20 @@ xs_key_live_locked(bt_t *bt, uint32_t tableid, int64_t rowid)
  * flight) return SX_BUSY and write nothing (first-committer-wins).
  * insert: the key must not exist; if it does (once any in-flight writer
  * of it has finished) return SX_CONSTRAINT and write nothing.  The
- * check and the registration are one step under the commit lock. */
+ * check and the registration are one step under the commit lock.
+ * vis: return only once the write is visible (the caller holds no
+ * engine lock); else only once its in-flight entry is unlinked. */
 static int
 xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n,
-    int deleted, uint64_t base, int insert, uint64_t *out_ts, uint32_t *ubad)
+    int deleted, uint64_t base, int insert, uint64_t *out_ts, uint32_t *ubad,
+    int vis)
 {
 	uint8_t key[XS_VKLEN];
 	uint8_t buf[1 + XS_VMAX];
 	struct xs_inflight fl;
 	struct xs_idx_rt uq[16];
-	uint64_t ts;
+	xs_wrec_t probe;
+	uint64_t ts, v0;
 	uint32_t bad = 0;
 	uint8_t *pre = NULL;
 	int rc, nuq = 0, idx, prelen = 0;
@@ -4277,6 +4651,11 @@ xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n,
 	if (!deleted && blob != NULL && g_idx_n > 0 &&
 	    tableid != XS_CAT_TABLEID && tableid < XS_IDXCAT_TABLEID)
 		nuq = xs_uniq_collect(bt, NULL, tableid, uq, 16);
+	memset(&probe, 0, sizeof probe);
+	probe.tableid = tableid; probe.rowid = rowid; probe.base = base;
+	v0 = xs_visible();             /* before the probe: see g_row_cts */
+	if (base != 0 && xs_ww_probe(bt, &probe, 1))
+		return SX_BUSY;
 	xs_commit_lock();
 	xs_gate_wait_locked();
 	if (insert && xs_key_live_locked(bt, tableid, rowid)) {
@@ -4291,16 +4670,17 @@ xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n,
 		if (ubad != NULL) *ubad = bad;
 		return SX_CONSTRAINT;
 	}
-	if (base != 0) {
-		xs_wrec_t probe;
-		memset(&probe, 0, sizeof probe);
-		probe.tableid = tableid; probe.rowid = rowid; probe.base = base;
-		if (xs_ww_conflict_locked(bt, &probe, 1)) {
-			xs_commit_unlock();
-			return SX_BUSY;
-		}
+	if (base != 0 && xs_ww_recheck_locked(bt, &probe, 1, v0)) {
+		xs_commit_unlock();
+		return SX_BUSY;
 	}
+	/* From registration to removal the commit is masked: its entry lives
+	 * on this stack, so a kill in between would leave g_inflight pointing
+	 * into a dead fiber and pin the read horizon (test_wal_kill_engine). */
+	(void)xtc_mask_enter();
 	xs_inflight_add_locked(&fl);
+	xs_uniq_stamp_locked(NULL, tableid, deleted ? NULL : (const uint8_t *)blob,
+	    n, rowid, uq, nuq, fl.ts);
 	xs_commit_unlock();
 	ts = fl.ts;
 	*out_ts = ts;
@@ -4310,6 +4690,8 @@ xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n,
 		 * caller gets an error and the row never becomes visible. */
 		if (xs_wal_put(ts, tableid, rowid, blob, n, deleted, &lsn) != XTC_OK) {
 			xs_inflight_remove(&fl);
+			xs_inflight_unlinked(&fl);
+			(void)xtc_mask_leave();
 			return SX_ERROR;
 		}
 		bt_set_lsn(bt, lsn);   /* stamp this change's LSN onto the page */
@@ -4332,6 +4714,14 @@ xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n,
 		    deleted ? 0 : n, deleted, prelen > 0 ? pre : NULL, prelen, ts);
 	free(pre);
 	xs_inflight_remove(&fl);
+	/* fl is on this stack: return only once it is unlinked.  A caller
+	 * that waits for the commit's visibility (out_vis) waits here, which
+	 * implies it (the horizon never passes a linked entry). */
+	if (vis && rc == SX_OK)
+		xs_wait_visible(ts);
+	else
+		xs_inflight_unlinked(&fl);
+	(void)xtc_mask_leave();      /* may not return: a latched kill */
 	if (idx) xs_idx_reap(bt);
 	return rc;
 }
@@ -4906,7 +5296,7 @@ xs_put_pruned(xstore_ctx_t *cx, uint32_t tableid, int64_t rowid, const void *blo
 	uint32_t ubad = 0;
 	int rc;
 	rc = xs_put_ts(cx->bt, tableid, rowid, blob, n, deleted, cx->stmt_base,
-	    insert, &cx->last_ts, &ubad);
+	    insert, &cx->last_ts, &ubad, 1);
 	if (rc == SX_CONSTRAINT && ubad != 0) {
 		struct xs_idx_ent e;
 		if (xs_idx_get(cx->bt, ubad, &e))
@@ -5068,8 +5458,10 @@ xstore_stmt_undo(struct xsql *db, int mark)
  * Auto-assigned rowids.  The highest rowid handed out per (bt, table) in
  * this process, so concurrent INSERTs that omit the key never pick the
  * same one (each would otherwise compute the same committed max + 1).
- * A rolled-back reservation leaves a gap, as SQLite may.  Guarded by the
- * commit lock; entries for a bt are dropped when it closes.  If the table
+ * A rolled-back reservation leaves a gap, as SQLite may.  Guarded by its
+ * own leaf lock (it was the commit lock: every auto-rowid INSERT then
+ * queued behind the committers -- 70 of 384 client stacks at 64 clients
+ * waited there); entries for a bt are dropped when it closes.  If the table
  * is full the old max + 1 is used, and a collision is then refused by the
  * INSERT's uniqueness check rather than lost.
  */
@@ -5080,6 +5472,23 @@ static struct xs_rowid_hw {
 	int64_t  hw;
 } g_rowid_hw[XS_ROWID_HW_MAX];
 static int g_rowid_hw_n;
+static pthread_mutex_t g_rowid_hw_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/* Leaf lock (never held across a park), a proc critical section so
+ * involuntary preemption never parks a holder. */
+static void
+xs_rowid_hw_lock(void)
+{
+	xtc_proc_critical_enter();
+	(void)pthread_mutex_lock(&g_rowid_hw_mu);
+}
+
+static void
+xs_rowid_hw_unlock(void)
+{
+	(void)pthread_mutex_unlock(&g_rowid_hw_mu);
+	xtc_proc_critical_leave();
+}
 
 int64_t
 xstore_next_rowid(struct xsql *db, uint32_t tableid, int64_t floor)
@@ -5088,7 +5497,7 @@ xstore_next_rowid(struct xsql *db, uint32_t tableid, int64_t floor)
 	int64_t r = floor + 1;
 	int i;
 	if (cx == NULL) return r;
-	xs_commit_lock();
+	xs_rowid_hw_lock();
 	for (i = 0; i < g_rowid_hw_n; i++)
 		if (g_rowid_hw[i].bt == cx->bt && g_rowid_hw[i].tableid == tableid)
 			break;
@@ -5103,7 +5512,7 @@ xstore_next_rowid(struct xsql *db, uint32_t tableid, int64_t floor)
 			r = g_rowid_hw[i].hw + 1;
 		g_rowid_hw[i].hw = r;
 	}
-	xs_commit_unlock();
+	xs_rowid_hw_unlock();
 	return r;
 }
 
@@ -5111,7 +5520,7 @@ static void
 xs_rowid_hw_forget(bt_t *bt)
 {
 	int i;
-	xs_commit_lock();
+	xs_rowid_hw_lock();
 	for (i = 0; i < g_rowid_hw_n; ) {
 		if (g_rowid_hw[i].bt == bt) {
 			g_rowid_hw_n--;
@@ -5120,7 +5529,7 @@ xs_rowid_hw_forget(bt_t *bt)
 			i++;
 		}
 	}
-	xs_commit_unlock();
+	xs_rowid_hw_unlock();
 }
 
 /* Start of a statement (a SELECT, UPDATE or DELETE): record the one
@@ -5171,7 +5580,7 @@ xstore_stmt_end(struct xsql *db)
 		xs_pin_recompute(cx);    /* drop the statement's pin */
 		/* A write's own commit queued index entries its pin kept
 		 * from the reap at that commit: reap them now, as before. */
-		if (cx->stmt_puts > 0 && g_idx_dead_n > 0)
+		if (cx->stmt_puts > 0 && XS_IDX_DEAD_HINT() > 0)
 			xs_idx_reap(cx->bt);
 	}
 }
@@ -5471,7 +5880,7 @@ xs_commit_ctx(xstore_ctx_t *cx)
 {
 	struct xs_inflight fl;
 	struct xs_idx_rt uq[16];
-	uint64_t ts;
+	uint64_t ts, v0;
 	uint32_t ubad = 0;
 	int i, rc = SX_OK, nuq = 0;
 	if (!cx->in_txn)
@@ -5505,10 +5914,15 @@ xs_commit_ctx(xstore_ctx_t *cx)
 		 * in-flight registration are one atomic step under the commit
 		 * lock; a dangerous pivot or a write-write conflict rolls back
 		 * with SX_BUSY, a UNIQUE violation with SX_CONSTRAINT. */
+		v0 = xs_visible();            /* before the probe: see g_row_cts */
+		if (xs_ww_probe(cx->bt, cx->wbuf, cx->wn)) {
+			(void)xs_rollback_ctx(cx);
+			return SX_BUSY;           /* committed past our snapshot */
+		}
 		xs_commit_lock();
 		xs_gate_wait_locked();
 		if (xs_ssi_validate_locked(cx) != SX_OK ||
-		    xs_ww_conflict_locked(cx->bt, cx->wbuf, cx->wn)) {
+		    xs_ww_recheck_locked(cx->bt, cx->wbuf, cx->wn, v0)) {
 			xs_commit_unlock();
 			(void)xs_rollback_ctx(cx);
 			return SX_BUSY;           /* serialization failure */
@@ -5522,7 +5936,15 @@ xs_commit_ctx(xstore_ctx_t *cx)
 			(void)xs_rollback_ctx(cx);
 			return SX_CONSTRAINT;
 		}
+		/* Masked from here to the end: the in-flight entry is on this
+		 * stack, so a kill before xs_inflight_remove would leave it
+		 * linked (a dangling pointer that pins the read horizon: every
+		 * later COMMIT waits forever).  A kill is delivered once the
+		 * commit is applied and visible.  Not earlier: a kill must still
+		 * reach a committer parked at the checkpoint gate. */
+		(void)xtc_mask_enter();
 		xs_inflight_add_locked(&fl);  /* one timestamp for the txn */
+		xs_uniq_stamp_locked(cx, 0, NULL, 0, 0, uq, nuq, fl.ts);
 		xs_commit_unlock();
 		ts = fl.ts;
 		if (g_xwal != NULL) {
@@ -5533,7 +5955,9 @@ xs_commit_ctx(xstore_ctx_t *cx)
 			 * committed). */
 			if (xs_wal_log(cx, ts, &clsn) != XTC_OK) {
 				xs_inflight_remove(&fl);
+				xs_inflight_unlinked(&fl);   /* fl is on this stack */
 				(void)xs_rollback_ctx(cx);
+				(void)xtc_mask_leave();
 				return SX_ERROR;
 			}
 			/* Stamp the commit LSN onto every leaf these inserts dirty,
@@ -5574,12 +5998,15 @@ xs_commit_ctx(xstore_ctx_t *cx)
 		ssi_commit(cx->ssi, ts);     /* publish commit_ts for SSI peers */
 		xs_inflight_remove(&fl);
 		xs_idx_reap(cx->bt);
-		xs_wait_visible(ts);         /* COMMIT returns once it is visible */
+		/* COMMIT returns once it is visible -- which also means fl (on
+		 * this stack) is unlinked: the horizon never passes it. */
+		xs_wait_visible(ts);
 	}
 	cx->ssi = NULL;
 	wbuf_clear(cx);
 	cx->in_txn = 0;
 	xs_pin_recompute(cx);     /* txn done: drop (or re-pin as_of) */
+	(void)xtc_mask_leave();   /* may not return: a latched kill */
 	return rc;
 }
 #if defined(SQLXTC_VTAB)
@@ -6089,6 +6516,8 @@ xstore_create_view(struct xsql *db, const char *name, const char *select_sql)
 		snprintf(v->sql, sizeof v->sql, "%s", select_sql);
 		rc = 1;
 	}
+	if (rc)
+		atomic_store_explicit(&g_view_any, 1, memory_order_release);
 	xs_cat_unlock();
 	return rc;
 }
@@ -6100,6 +6529,12 @@ xstore_view_sql(bt_t *bt, const char *name, char *out, int cap)
 {
 	int i, rc = 0;
 	if (bt == NULL || name == NULL || out == NULL || cap <= 0) return 0;
+	/* No view was ever created (the common case): no lock.  The flag is
+	 * set (under the cat lock) before CREATE VIEW returns, so a lookup
+	 * that starts after it sees the view; a lookup racing the CREATE is
+	 * equivalent to running just before it. */
+	if (atomic_load_explicit(&g_view_any, memory_order_acquire) == 0)
+		return 0;
 	xs_cat_lock();
 	for (i = 0; i < g_view_n; i++)
 		if (g_view[i].bt == bt && strcasecmp(g_view[i].name, name) == 0) {
@@ -6823,9 +7258,27 @@ int
 xstore_index_list(bt_t *bt, const char *table, xstore_index_info_t *out,
     int cap)
 {
-	int i, c, n = 0;
+	/* This thread's last few answers, valid while g_catc_gen is
+	 * unchanged (every index create / drop / rebuild bumps it): the
+	 * planner asks per write statement, and taking the catalog lock for
+	 * it queued every connection of a busy server on that lock. */
+	static _Thread_local struct {
+		uint64_t gen; bt_t *bt; char table[64]; int n;
+		xstore_index_info_t ix[8];
+	} tc[4];
+	static _Thread_local unsigned tnext;
+	uint64_t g;
+	int i, c, n = 0, k;
 	if (bt == NULL || table == NULL || out == NULL) return 0;
+	g = atomic_load_explicit(&g_catc_gen, memory_order_acquire);
+	for (k = 0; k < 4; k++)
+		if (tc[k].gen == g && tc[k].bt == bt && tc[k].n <= cap &&
+		    strcasecmp(tc[k].table, table) == 0) {
+			memcpy(out, tc[k].ix, sizeof out[0] * (size_t)tc[k].n);
+			return tc[k].n;
+		}
 	xs_cat_lock();
+	g = atomic_load_explicit(&g_catc_gen, memory_order_relaxed);
 	for (i = 0; i < g_idx_n && n < cap; i++) {
 		if (g_idx[i].bt != bt || strcasecmp(g_idx[i].table, table) != 0 ||
 		    g_idx[i].rt.tableid == 0)
@@ -6843,19 +7296,43 @@ xstore_index_list(bt_t *bt, const char *table, xstore_index_info_t *out,
 		n++;
 	}
 	xs_cat_unlock();
+	if (n <= 8 && strlen(table) < sizeof tc[0].table) {
+		k = (int)(tnext++ % 4u);
+		tc[k].gen = g; tc[k].bt = bt; tc[k].n = n;
+		snprintf(tc[k].table, sizeof tc[k].table, "%s", table);
+		memcpy(tc[k].ix, out, sizeof out[0] * (size_t)n);
+	}
 	return n;
 }
 
 static int
 xs_idx_get_rt(bt_t *bt, uint32_t idx_id, struct xs_idx_rt *rt)
 {
+	/* This thread's last few, valid while g_catc_gen is unchanged: the
+	 * reap asks once per queued entry, which took the catalog lock once
+	 * per UPDATE of an indexed row. */
+	static _Thread_local struct {
+		uint64_t gen; bt_t *bt; struct xs_idx_rt rt;
+	} tc[8];
+	static _Thread_local unsigned tnext;
+	uint64_t g = atomic_load_explicit(&g_catc_gen, memory_order_acquire);
 	int i, r = 0;
+	for (i = 0; i < 8; i++)
+		if (tc[i].gen == g && tc[i].bt == bt && tc[i].rt.idx_id == idx_id) {
+			*rt = tc[i].rt;
+			return 1;
+		}
 	xs_cat_lock();
+	g = atomic_load_explicit(&g_catc_gen, memory_order_relaxed);
 	for (i = 0; i < g_idx_n; i++)
 		if (g_idx[i].bt == bt && g_idx[i].rt.idx_id == idx_id) {
 			*rt = g_idx[i].rt; r = 1; break;
 		}
 	xs_cat_unlock();
+	if (r) {
+		i = (int)(tnext++ % 8u);
+		tc[i].gen = g; tc[i].bt = bt; tc[i].rt = *rt;
+	}
 	return r;
 }
 
@@ -7206,6 +7683,11 @@ xs_uniq_validate_locked(bt_t *bt, xstore_ctx_t *cx, uint32_t tid1,
 			klen = xs_idx_rowkey(&u[i], rec, rl, rid, 0, key,
 			    (int)sizeof key, &isnull);
 			if (klen < 0 || isnull) continue;
+			/* A key no commit carried since the statement check
+			 * (skipok also means no index was created since). */
+			if (skipok && g_uk_cts[xs_uk_slot(u[i].idx_id, key, klen)] <=
+			    cx->uniq_vis)
+				continue;
 			if (xs_uniq_committed_dup(bt, &u[i], key, klen, rid, cx) ||
 			    xs_uniq_inflight_dup(&u[i], key, klen, rid, cx)) {
 				*bad = u[i].idx_id;
@@ -7214,6 +7696,32 @@ xs_uniq_validate_locked(bt_t *bt, xstore_ctx_t *cx, uint32_t tid1,
 		}
 	}
 	return 0;
+}
+
+/* Commit lock held, `ts` just minted: stamp every UNIQUE key tuple the
+ * write set (cx) or the one autocommit record (tid1/rec1) carries. */
+static void
+xs_uniq_stamp_locked(const xstore_ctx_t *cx, uint32_t tid1,
+    const uint8_t *rec1, int len1, int64_t rid1,
+    const struct xs_idx_rt *u, int nu, uint64_t ts)
+{
+	uint8_t key[XS_IDX_KMAX];
+	int n = cx != NULL ? cx->wn : 1, wi, i, klen, isnull, rl;
+	for (wi = 0; wi < n && nu > 0; wi++) {
+		uint32_t tid = cx != NULL ? cx->wbuf[wi].tableid : tid1;
+		int64_t rid = cx != NULL ? cx->wbuf[wi].rowid : rid1;
+		const uint8_t *rec = cx != NULL ? cx->wbuf[wi].data : rec1;
+		if (cx != NULL && cx->wbuf[wi].deleted) continue;
+		rl = cx != NULL ? (int)cx->wbuf[wi].len : len1;
+		if (rec == NULL) continue;
+		for (i = 0; i < nu; i++) {
+			if (u[i].tableid != tid) continue;
+			klen = xs_idx_rowkey(&u[i], rec, rl, rid, 0, key,
+			    (int)sizeof key, &isnull);
+			if (klen >= 0 && !isnull)
+				g_uk_cts[xs_uk_slot(u[i].idx_id, key, klen)] = ts;
+		}
+	}
 }
 
 /* ---- verified index range scan ---------------------------------- */
