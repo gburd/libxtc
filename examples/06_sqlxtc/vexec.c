@@ -153,6 +153,18 @@ arena_free(struct vx_arena_blk *b)
 	while (b) { struct vx_arena_blk *n = b->next; free(b); b = n; }
 }
 
+/* Empty an arena but keep its newest block for reuse: a per-row scratch
+ * arena otherwise costs a 64 KiB malloc + free for every row that has a
+ * TEXT or BLOB column. */
+static void
+arena_reset(struct vx_arena_blk **head)
+{
+	if (*head == NULL) return;
+	arena_free((*head)->next);
+	(*head)->next = NULL;
+	(*head)->used = 0;
+}
+
 /* ---- chunk (row-major) ------------------------------------------- */
 
 struct vx_chunk {
@@ -2525,6 +2537,25 @@ eval_bool(const struct vx_stmt *st, const vx_expr_t *e,
 		int x = eval_bool(st, e->a, row, arena);
 		return (x < 0) ? -1 : !x;
 	}
+	if (e->op >= VXO_EQ && e->op <= VXO_GE && e->col == 0 &&
+	    (e->a->op == VXO_COL || e->a->op == VXO_LIT) &&
+	    (e->b->op == VXO_COL || e->b->op == VXO_LIT)) {
+		/* The common filter term "col op literal": two leaves.  Both
+		 * INTEGER compares the values directly (what sort_cmp does for
+		 * two INTs); anything else takes the general path. */
+		const vx_cell_t *x = e->a->op == VXO_COL ? &row[e->a->col] : &e->a->lit;
+		const vx_cell_t *y = e->b->op == VXO_COL ? &row[e->b->col] : &e->b->lit;
+		if (x->type == VX_INT && y->type == VX_INT) {
+			switch (e->op) {
+			case VXO_EQ: return x->i == y->i;
+			case VXO_NE: return x->i != y->i;
+			case VXO_LT: return x->i < y->i;
+			case VXO_LE: return x->i <= y->i;
+			case VXO_GT: return x->i > y->i;
+			default:     return x->i >= y->i;
+			}
+		}
+	}
 	eval(st, e, row, arena, &v);
 	if (v.type == VX_NULL) return -1;
 	if (v.type == VX_INT) return v.i != 0;
@@ -2757,11 +2788,12 @@ static void
 eval(const struct vx_stmt *st, const vx_expr_t *e,
      const vx_cell_t *row, struct vx_arena_blk **arena, vx_cell_t *out)
 {
+	/* The two leaf kinds overwrite *out whole: no clearing first. */
+	if (e->op == VXO_COL) { *out = row[e->col]; return; }
+	if (e->op == VXO_LIT) { *out = e->lit; return; }
 	memset(out, 0, sizeof *out);
 
 	switch (e->op) {
-	case VXO_COL:   *out = row[e->col]; return;
-	case VXO_LIT:   *out = e->lit; return;
 
 	case VXO_NEG: {
 		vx_cell_t a; eval(st, e->a, row, arena, &a);
@@ -3501,14 +3533,27 @@ cell_hash(const vx_cell_t *c)
 	}
 num:
 	{
-		uint64_t bits; memcpy(&bits, &d, 8);
-		return bits * 0x9e3779b97f4a7c15ULL + 0x1234567ULL;
+		/* Mix every bit down (splitmix64's finalizer): a small integer
+		 * as a double has all-zero low mantissa bits, so a bare multiply
+		 * left the low bits -- the bucket index of every table here --
+		 * constant, and all integer keys shared ONE bucket (a 20,000-key
+		 * count(DISTINCT) cost 440 ms, quadratic).  -0.0 hashes as 0.0:
+		 * they compare equal. */
+		uint64_t bits;
+		if (d == 0.0) d = 0.0;
+		memcpy(&bits, &d, 8);
+		bits ^= bits >> 30; bits *= 0xbf58476d1ce4e5b9ULL;
+		bits ^= bits >> 27; bits *= 0x94d049bb133111ebULL;
+		bits ^= bits >> 31;
+		return bits;
 	}
 }
 
 static int
 key_eq(const vx_cell_t *a, const vx_cell_t *b)
 {
+	if (a->type == VX_INT && b->type == VX_INT)
+		return a->i == b->i;
 	if (a->type == VX_NULL || b->type == VX_NULL)
 		return a->type == VX_NULL && b->type == VX_NULL;
 	if ((a->type == VX_INT || a->type == VX_REAL) &&
@@ -3526,7 +3571,7 @@ static int
 htab_init(vx_htab_t *h, int ngrp_key, int nagg)
 {
 	memset(h, 0, sizeof *h);
-	h->nbucket = 1024;
+	h->nbucket = 1024;             /* a power of two: htab_group masks */
 	h->ngrp_key = ngrp_key;
 	h->nagg = nagg;
 	h->buckets = (vx_grp_t **)calloc((size_t)h->nbucket, sizeof(vx_grp_t *));
@@ -3566,7 +3611,9 @@ htab_group(vx_htab_t *h, const vx_cell_t *keys)
 	vx_grp_t *g;
 	for (k = 0; k < h->ngrp_key; k++)
 		hv ^= cell_hash(&keys[k]) * (uint64_t)(k + 1) * 0x100000001b3ULL;
-	b = (uint32_t)(hv % (uint64_t)h->nbucket);
+	/* nbucket is a power of two (htab_init); fold the high bits in, as
+	 * the multiplicative cell hash puts its entropy there. */
+	b = (uint32_t)((hv ^ (hv >> 32)) & (uint64_t)(h->nbucket - 1));
 	for (g = h->buckets[b]; g; g = g->next) {
 		if (g->hash != hv) continue;
 		for (k = 0; k < h->ngrp_key; k++)
@@ -6828,6 +6875,9 @@ agg_materialize(struct vx_stmt *st)
 		if (step == 0) break;
 		if (step != 1) { arena_free(rowarena); return -1; }
 
+		/* Per-row scratch: group keys and accumulator values are copied
+		 * into the hash table's own arena (cell_dup). */
+		arena_reset(&rowarena);
 		read_rec_row(st, rowid, rec, reclen, &rowarena);
 
 		if (st->filter != NULL &&
@@ -7145,6 +7195,7 @@ ordered_materialize(struct vx_stmt *st)
 		if (step == 0) break;
 		if (step != 1) goto cleanup;
 
+		arena_reset(&rowarena);   /* a row the WHERE dropped kept its bytes */
 		read_rec_row(st, rowid, rec, reclen, &rowarena);
 		if (st->filter != NULL &&
 		    eval_bool(st, st->filter, st->srcrow, &rowarena) != 1)
@@ -7183,7 +7234,7 @@ ordered_materialize(struct vx_stmt *st)
 			}
 			if (topn_cmp(keyrow, &keys[(size_t)topn_worst * (size_t)nkey],
 			             nkey, st->order_desc) >= 0) {
-				arena_free(rowarena); rowarena = NULL;
+				arena_reset(&rowarena);
 				continue;   /* not better than the worst kept */
 			}
 			for (j = 0; j < st->nout; j++)
@@ -7193,7 +7244,7 @@ ordered_materialize(struct vx_stmt *st)
 				if (cell_dup(&keep, &keyrow[j],
 				    &keys[(size_t)topn_worst * (size_t)nkey + (size_t)j]) != 0) goto cleanup;
 			topn_worst = -1;   /* worst was overwritten; recompute next time */
-			arena_free(rowarena); rowarena = NULL;
+			arena_reset(&rowarena);
 			continue;
 		}
 
@@ -7214,7 +7265,7 @@ ordered_materialize(struct vx_stmt *st)
 			if (cell_dup(&keep, &keyrow[j], &keys[(size_t)nrow * (size_t)nkey + (size_t)j]) != 0) goto cleanup;
 		nrow++;
 		if (topn && (int64_t)nrow >= topn_k) topn_full = 1;
-		arena_free(rowarena); rowarena = NULL;
+		arena_reset(&rowarena);
 	}
 
 	/* Sort the index array by keys (if any ORDER BY). */
@@ -8471,29 +8522,20 @@ collect_plan(vx_stmt_t *plan, vx_result_t **res)
 	if (out == NULL) return -1;
 	out->ncol = ncol;
 	out->nworkers = 1;
-	memcpy(out->name, plan->outname, sizeof out->name);
-	memcpy(out->aff, plan->outaff, sizeof out->aff);
+	/* Only the result's own columns: the whole 64 x 64 name table is
+	 * 4 KiB, copied for every point read (readers check col < ncol). */
+	memcpy(out->name, plan->outname, sizeof out->name[0] * (size_t)ncol);
+	memcpy(out->aff, plan->outaff, sizeof out->aff[0] * (size_t)ncol);
 
 	while ((step = vx_step(plan)) == SX_ROW) {
-		for (i = 0; i < ncol; i++) {
-			vx_cell_t c; memset(&c, 0, sizeof c);
-			switch (vx_column_type(plan, i)) {
-			case VX_INT:  c.type = VX_INT;  c.i = vx_column_int64(plan, i); break;
-			case VX_REAL: c.type = VX_REAL; c.r = vx_column_double(plan, i); break;
-			case VX_TEXT: {
-				const char *t = vx_column_text(plan, i);
-				c.type = VX_TEXT; c.bytes = (const uint8_t *)t;
-				c.nbytes = vx_column_bytes(plan, i);
-				break; }
-			case VX_BLOB:
-				c.type = VX_BLOB; c.bytes = vx_column_blob(plan, i);
-				c.nbytes = vx_column_bytes(plan, i);
-				break;
-			default: c.type = VX_NULL; break;
-			}
-			rowbuf[i] = c;
+		/* The current chunk row as is: the cells vx_column_* would
+		 * rebuild one call per cell (result_push copies the bytes). */
+		const vx_cell_t *row = cur_cell(plan, 0);
+		if (row == NULL) {
+			for (i = 0; i < ncol; i++) rowbuf[i].type = VX_NULL;
+			row = rowbuf;
 		}
-		if (result_push(out, rowbuf) != 0) { rc = -1; break; }
+		if (result_push(out, row) != 0) { rc = -1; break; }
 	}
 	if (step != SX_DONE && rc == 1) rc = -1;
 	if (rc == 1 && distinct && result_dedup(out) != 0) rc = -1;

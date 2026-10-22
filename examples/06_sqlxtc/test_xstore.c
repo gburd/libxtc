@@ -766,9 +766,12 @@ scenario_o1_sql(void)
 	CK(rows == NROW);
 	/* One descent for the whole scan (cursor opened once); the old
 	 * re-open-per-row path cost NROW descents.  Allow a tiny slack for
-	 * planner probes, but it must be O(1), not O(rows). */
+	 * planner probes, but it must be O(1), not O(rows).  And the scan
+	 * reads ahead: one cursor resume per batch of rows (16, 32, .. 128),
+	 * not one resume (pin, latch, leaf search) per row. */
 	CK(s1.descents - s0.descents <= 4);
-	CK(s1.resumes - s0.resumes >= (uint64_t)(NROW - 4));
+	CK(s1.resumes - s0.resumes > 0);
+	CK(s1.resumes - s0.resumes <= (uint64_t)(NROW / 32));
 
 	sx_close(db);
 	bt_close(bt); bm_destroy(bm); unlink(path);

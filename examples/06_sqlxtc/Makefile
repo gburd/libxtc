@@ -156,6 +156,7 @@ clean:
 	rm -f test_btree_loop
 	rm -f test_btree_mt
 	rm -f test_btree_stale_descent test_btree_limits test_btree_sample bench_morsel_balance
+	rm -f test_btree_seek test_btree_seek_latched test_point_read test_index_walk test_group_exact test_xs_ctr
 	rm -f test_tpcc_seek test_dup_composite test_bulk_insert test_plan_cache
 	rm -f test_btree_delete_merge test_savepoint test_isolation test_ww_conflict test_row_intents test_commit_visibility test_ssi_skew test_ckpt_bound test_dup_insert test_recover_fast
 	rm -f test_vfs_loop test_vfs_loop.o
@@ -832,6 +833,53 @@ test_btree_limits: test_btree_limits.c btree.c bufmgr.o btnode.c
 
 test-btree-limits: test_btree_limits
 	./test_btree_limits
+
+# bt_seek_ge (the cursor-free point read): an oracle and concurrent seeks
+# vs splits + merges, on the optimistic path and on the latched fallback.
+test: test-btree-seek
+test_btree_seek: test_btree_seek.c btree.c bufmgr.o btnode.c
+	$(CC) $(CFLAGS) -o $@ test_btree_seek.c btree.c bufmgr.o btnode.c $(LDFLAGS)
+
+test_btree_seek_latched: test_btree_seek.c btree.c bufmgr.o btnode.c
+	$(CC) $(CFLAGS) -DBT_OLC_ENABLED=0 -o $@ test_btree_seek.c btree.c bufmgr.o btnode.c $(LDFLAGS)
+
+test-btree-seek: test_btree_seek test_btree_seek_latched
+	./test_btree_seek
+	./test_btree_seek_latched
+
+# A rowid point read at a snapshot is one seek: no cursor descent per
+# index match, the right version at every snapshot.
+test: test-point-read
+test_point_read: test_point_read.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_point_read.c $(ENGINE_NATIVE) $(LDFLAGS)
+
+test-point-read: test_point_read
+	./test_point_read
+
+# A secondary-index range walk reads a leaf of entries per cursor resume
+# (forward) or per descent (reverse), and agrees with an oracle.
+test: test-index-walk
+test_index_walk: test_index_walk.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_index_walk.c $(ENGINE_NATIVE) $(LDFLAGS)
+
+test-index-walk: test_index_walk
+	./test_index_walk
+
+# GROUP BY / DISTINCT keep integer keys exact (2^53 vs 2^53+1).
+test: test-group-exact
+test_group_exact: test_group_exact.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_group_exact.c $(ENGINE_NATIVE) $(LDFLAGS)
+
+test-group-exact: test_group_exact
+	./test_group_exact
+
+# xs_ctr.h: the striped statistics counter (exact sum, one line per slot).
+test: test-xs-ctr
+test_xs_ctr: test_xs_ctr.c xs_ctr.h
+	$(CC) $(CFLAGS) -o $@ test_xs_ctr.c $(LDFLAGS)
+
+test-xs-ctr: test_xs_ctr
+	./test_xs_ctr
 
 # Key-distribution sample (RethinkDB get_distribution): order, range,
 # O(fanout^depth) page bound, equi-depth balance on skewed keys.

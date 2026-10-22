@@ -2402,28 +2402,15 @@ xs_stash(xstore_cursor_t *c, int64_t rowid, const uint8_t *val, uint16_t vl)
 	if (c->vlen) memcpy(c->val, val + 1, c->vlen);
 }
 
-/* Advance a full scan to the next visible row.  The scan cursor is
- * persistent: opened once with a full descent, then resumed in O(1)
- * past the last key consumed.  The leaf latch is held only for the
- * duration of this call -- the cursor is PARKED (latch released)
- * before control returns to the VDBE, so an interleaved xUpdate cannot
- * self-deadlock against a held content latch.  Visible = the newest
- * non-tombstone version of each rowid with commit_ts <= snap
- * (PostgreSQL HeapTupleSatisfiesMVCC). */
-static void
-xs_advance(xstore_cursor_t *c)
+/* Position the scan's B-tree cursor for the next step: open it (one
+ * descent to the table's first key, or the lo bound) or resume it past
+ * the last key consumed.  0, or -1 at the end (c->eof set). */
+static int
+xs_cur_resume(xstore_cursor_t *c)
 {
-	/* The last row resolved is the range's upper bound: done, without
-	 * walking that row's older versions (a hot row updated N times since
-	 * the last GC has N of them; a rowid point read paid all N). */
-	if (c->have_last && c->has_hi && c->last_rowid >= c->hi) {
-		c->eof = 1;
-		return;
-	}
 	if (c->btc == NULL) {
 		uint8_t startbuf[XS_VKLEN];
 		const uint8_t *start;
-		uint16_t startlen = XS_VKLEN;
 		if (c->have_last) {
 			start = c->last_key;
 		} else {
@@ -2434,13 +2421,32 @@ xs_advance(xstore_cursor_t *c)
 			    ~(uint64_t)0, startbuf);
 			start = startbuf;
 		}
-		if (bt_cursor_open(c->bt, start, startlen, &c->btc) != XTC_OK) {
+		if (bt_cursor_open(c->bt, start, XS_VKLEN, &c->btc) != XTC_OK) {
 			c->eof = 1;
-			return;
+			return -1;
 		}
 	} else if (bt_cursor_resume(c->btc) != XTC_OK) {
 		c->eof = 1;
-		return;
+		return -1;
+	}
+	return 0;
+}
+
+/* One step of the visibility walk on a positioned cursor (latch held):
+ * 1 with the next visible row -- its rowid and stored value (flag byte
+ * first; valid until the next cursor call) -- or 0 at the end (c->eof
+ * set).  Visible = the newest non-tombstone version of each rowid with
+ * commit_ts <= snap (PostgreSQL HeapTupleSatisfiesMVCC). */
+static int
+xs_cur_step(xstore_cursor_t *c, int64_t *rid_out, const uint8_t **val,
+    uint16_t *vlen)
+{
+	/* The last row resolved is the range's upper bound: done, without
+	 * walking that row's older versions (a hot row updated N times since
+	 * the last GC has N of them; a rowid point read paid all N). */
+	if (c->have_last && c->has_hi && c->last_rowid >= c->hi) {
+		c->eof = 1;
+		return 0;
 	}
 	for (;;) {
 		const void *k = NULL, *vv = NULL;
@@ -2452,19 +2458,19 @@ xs_advance(xstore_cursor_t *c)
 		if (bt_cursor_next(c->btc, &k, &klen, &vv, &vl) != XTC_OK ||
 		    klen != XS_VKLEN) {
 			c->eof = 1;
-			break;
+			return 0;
 		}
 		c->visited++;
 		kb = (const uint8_t *)k; vb = (const uint8_t *)vv;
 		if (dec_tableid(kb) != c->tableid) {
 			c->eof = 1;             /* ran past our table into the next */
-			break;
+			return 0;
 		}
 		rid = dec_rowid(kb);
 		ts = dec_ts(kb);
 		if (c->has_hi && rid > c->hi) {
 			c->eof = 1;             /* past the upper bound: range exhausted */
-			break;
+			return 0;
 		}
 		if (c->have_last && rid == c->last_rowid)
 			continue;              /* the resume key, or an older version */
@@ -2475,10 +2481,35 @@ xs_advance(xstore_cursor_t *c)
 		memcpy(c->last_key, kb, XS_VKLEN);
 		if (vl >= 1 && (vb[0] & XS_F_DELETED))
 			continue;              /* deleted at the snapshot */
-		xs_stash(c, rid, vb, vl);
+		*rid_out = rid;
+		*val = vb;
+		*vlen = vl;
 		c->eof = 0;
-		break;
+		return 1;
 	}
+}
+
+/* Advance a scan to the next visible row (into c->rowid / c->val).  The
+ * scan cursor is persistent: opened once with a full descent, then
+ * resumed in O(1) past the last key consumed.  The leaf latch is held
+ * only for the duration of this call -- the cursor is PARKED (latch
+ * released) before control returns to the caller, so an interleaved
+ * write cannot self-deadlock against a held content latch. */
+static void
+xs_advance(xstore_cursor_t *c)
+{
+	int64_t rid;
+	const uint8_t *vb;
+	uint16_t vl;
+
+	if (c->have_last && c->has_hi && c->last_rowid >= c->hi) {
+		c->eof = 1;
+		return;
+	}
+	if (xs_cur_resume(c) != 0)
+		return;
+	if (xs_cur_step(c, &rid, &vb, &vl))
+		xs_stash(c, rid, vb, vl);
 	bt_cursor_park(c->btc);            /* release the latch before returning */
 }
 
@@ -2511,6 +2542,24 @@ struct xstore_scan {
 	int             ryw_nins, ryw_ii;
 	int             ryw_held;        /* s->c holds a committed row not yet returned */
 	uint8_t         ryw_val[XS_VMAX]; /* staging for a wbuf payload */
+	/* Read-ahead (plain committed scans): visible rows copied out of the
+	 * tree in batches, each from ONE cursor resume, instead of one resume
+	 * (pin, shared latch, leaf binary search) and park per row.  The
+	 * first row is read alone (a point or LIMIT 1 read never fills a
+	 * batch); then batches grow 16, 32, .. XS_RA_MAX rows. */
+	struct xs_ra   *ra;
+	int             ra_n, ra_i, ra_want;
+};
+
+/* A read-ahead batch: up to XS_RA_MAX rows, their payloads packed in
+ * buf (a full batch always has room for one more XS_VMAX payload). */
+#define XS_RA_MAX   128
+#define XS_RA_BYTES (16 * 1024)
+struct xs_ra {
+	int64_t  rowid[XS_RA_MAX];
+	uint32_t off[XS_RA_MAX];
+	uint16_t len[XS_RA_MAX];
+	uint8_t  buf[XS_RA_BYTES + XS_VMAX];
 };
 
 static int
@@ -2713,6 +2762,69 @@ xs_scan_emit_buffered(xstore_scan_t *s, int64_t rid, int64_t *rowid,
 	return 1;
 }
 
+/* Refill the read-ahead batch from one cursor resume: up to ra_want
+ * visible rows.  Returns the row count (0 at the end of the scan), or
+ * -1 when the batch cannot be allocated. */
+static int
+xs_scan_fill(xstore_scan_t *s)
+{
+	xstore_cursor_t *c = &s->c;
+	uint32_t used = 0;
+	int64_t rid;
+	const uint8_t *vb;
+	uint16_t vl, n;
+
+	s->ra_n = s->ra_i = 0;
+	if (c->have_last && c->has_hi && c->last_rowid >= c->hi) {
+		c->eof = 1;                    /* a point range ends unallocated */
+		return 0;
+	}
+	if (s->ra == NULL && (s->ra = malloc(sizeof *s->ra)) == NULL)
+		return -1;
+	if (xs_cur_resume(c) != 0)
+		return 0;
+	while (s->ra_n < s->ra_want && used <= XS_RA_BYTES &&
+	    xs_cur_step(c, &rid, &vb, &vl)) {
+		n = vl > 1 ? (uint16_t)(vl - 1) : 0;
+		if (n > XS_VMAX) n = XS_VMAX;
+		if (n) memcpy(s->ra->buf + used, vb + 1, n);
+		s->ra->rowid[s->ra_n] = rid;
+		s->ra->off[s->ra_n] = used;
+		s->ra->len[s->ra_n] = n;
+		used += n;
+		s->ra_n++;
+	}
+	bt_cursor_park(c->btc);            /* release the latch before returning */
+	if (s->ra_want < XS_RA_MAX) s->ra_want *= 2;
+	return s->ra_n;
+}
+
+/* A plain committed scan of ONE rowid (lo == hi): the version visible
+ * at the snapshot is one first-key->= seek (xs_point_get), no cursor.
+ * xs_advance would open a B-tree cursor (an allocation, a latched
+ * descent, a close) and walk the row's newer versions.  Kept out of
+ * line: its value buffer is a page, and the per-row scan path should
+ * not carry that frame.  Fills s->c (rowid, val); 0 at none. */
+#if defined(__GNUC__) || defined(__clang__)
+#define XS_NOINLINE __attribute__((noinline))
+#else
+#define XS_NOINLINE
+#endif
+static int XS_NOINLINE
+xs_scan_point(xstore_scan_t *s)
+{
+	uint8_t v[1 + XS_VMAX];
+	int n;
+
+	s->c.visited++;
+	n = xs_point_get(s->c.bt, s->c.tableid, s->c.lo, s->c.snap, v,
+	    (int)sizeof v);
+	if (n == 0)
+		return 0;
+	xs_stash(&s->c, s->c.lo, v, (uint16_t)(n < 0 ? 1 : n + 1));
+	return 1;
+}
+
 int
 xstore_scan_next(xstore_scan_t *s, int64_t *rowid,
                  const uint8_t **rec, int *reclen)
@@ -2723,12 +2835,42 @@ xstore_scan_next(xstore_scan_t *s, int64_t *rowid,
 	/* Plain committed scan: no txn, or a txn that needs neither the
 	 * write-buffer overlay nor SSI read tracking. */
 	if (s->ryw_ctx == NULL || (!s->ryw_overlay && !s->ryw_track)) {
-		s->c.eof = 0;
-		xs_advance(&s->c);
+		if (s->ra_i < s->ra_n) {
+			int i = s->ra_i++;
+			if (rowid) *rowid = s->ra->rowid[i];
+			if (rec) *rec = s->ra->buf + s->ra->off[i];
+			if (reclen) *reclen = (int)s->ra->len[i];
+			return 1;
+		}
+		if (s->ra_want == 0 && s->c.has_lo && s->c.has_hi &&
+		    s->c.lo == s->c.hi) {             /* a point: one seek */
+			s->done = 1;                     /* the only row */
+			if (!xs_scan_point(s)) return 0;
+			if (rowid) *rowid = s->c.rowid;
+			if (rec) *rec = s->c.val;
+			if (reclen) *reclen = (int)s->c.vlen;
+			return 1;
+		}
+		if (s->ra_want == 0) {               /* the first row: alone */
+			s->ra_want = 16;
+			s->c.eof = 0;
+			xs_advance(&s->c);
+			if (s->c.eof) { s->done = 1; return 0; }
+			if (rowid) *rowid = s->c.rowid;
+			if (rec) *rec = s->c.val;
+			if (reclen) *reclen = (int)s->c.vlen;
+			return 1;
+		}
 		if (s->c.eof) { s->done = 1; return 0; }
-		if (rowid) *rowid = s->c.rowid;
-		if (rec) *rec = s->c.val;
-		if (reclen) *reclen = (int)s->c.vlen;
+		switch (xs_scan_fill(s)) {
+		case -1: return -1;                   /* no memory for a batch */
+		case 0: s->done = 1; return 0;
+		default: break;
+		}
+		s->ra_i = 1;
+		if (rowid) *rowid = s->ra->rowid[0];
+		if (rec) *rec = s->ra->buf + s->ra->off[0];
+		if (reclen) *reclen = (int)s->ra->len[0];
 		return 1;
 	}
 
@@ -2806,6 +2948,7 @@ xstore_scan_close(xstore_scan_t *s)
 		    memory_order_relaxed);
 	if (s->c.btc != NULL) bt_cursor_close(s->c.btc);
 	free(s->ryw_ins);
+	free(s->ra);
 	free(s);
 }
 
@@ -6637,12 +6780,18 @@ struct xstore_iscan {
 	bt_cursor_t  *cur;
 	uint8_t       pos[XS_IDX_KMAX];  int poslen, started;
 	uint8_t       ck[XS_IDX_KMAX];   int cklen, have_ck; int64_t crid;
+	/* Read-ahead of index keys (xs_iscan_fill): in-range entries copied
+	 * from one cursor resume (forward) or one descent (reverse) instead
+	 * of a resume or a whole bt_seek_lt descent per entry.  kb_end: the
+	 * walk has passed the range's end, nothing is left after the batch. */
+	struct xs_ika *ka;
+	int           kb_n, kb_i, kb_want, kb_end;
 	/* this transaction's buffered rows in range, sorted */
 	struct xs_icand *bc;
 	int           nbc, bci;
 	uint8_t      *bkeys;
-	/* output */
-	uint8_t       rec[XS_VMAX];
+	/* output: the stored value, flag byte first (xs_point_get) */
+	uint8_t       rec[1 + XS_VMAX];
 	uint64_t      visited;
 };
 
@@ -6691,36 +6840,29 @@ xs_eff_snap(const xstore_ctx_t *ctx)
 	return xs_visible();
 }
 
-/* The version of (tid, rid) visible at `snap`: copies its payload into
- * out (cap) and returns the length (>= 1), 0 if none is visible.
- * Ignores the write buffer (the caller handles buffered rows). */
+/* The version of (tid, rid) visible at `snap`: copies its whole stored
+ * value (the flag byte, then the payload) into buf (cap >= 1 + the
+ * payload) and returns the payload length (>= 1; -1 for a live empty
+ * record), 0 if no version is visible.  Ignores the write buffer (the
+ * caller handles buffered rows).  One probe: version keys sort newest
+ * first within a rowid (inverted commit_ts), so the first key >= the
+ * key (tid, rid, snap) is the newest version with commit_ts <= snap --
+ * no walk over newer versions, no cursor, and no latch on the OLC path
+ * (bt_seek_ge). */
 static int
 xs_point_get(bt_t *bt, uint32_t tid, int64_t rid, uint64_t snap,
-    uint8_t *out, int cap)
+    uint8_t *buf, int cap)
 {
-	bt_cursor_t *cur = NULL;
-	uint8_t startk[XS_VKLEN];
-	int got = 0;
-	enc_vkey(tid, rid, ~(uint64_t)0, startk);
-	if (bt_cursor_open(bt, startk, XS_VKLEN, &cur) != XTC_OK) return 0;
-	for (;;) {
-		const void *k = NULL, *vv = NULL; uint16_t kl = 0, vl = 0;
-		const uint8_t *kb;
-		if (bt_cursor_next(cur, &k, &kl, &vv, &vl) != XTC_OK || kl != XS_VKLEN)
-			break;
-		kb = (const uint8_t *)k;
-		if (dec_tableid(kb) != tid || dec_rowid(kb) != rid) break;
-		if (dec_ts(kb) > snap) continue;          /* newer than the snapshot */
-		if (vl >= 1 && !(((const uint8_t *)vv)[0] & XS_F_DELETED)) {
-			got = (int)vl - 1;
-			if (got > cap) got = cap;
-			if (got > 0) memcpy(out, (const uint8_t *)vv + 1, (size_t)got);
-			if (got == 0) got = -1;   /* live, empty record */
-		}
-		break;
-	}
-	bt_cursor_close(cur);
-	return got;
+	uint8_t probe[XS_VKLEN], k[XS_VKLEN + 8];
+	uint16_t kl = 0, vl = 0;
+	enc_vkey(tid, rid, snap, probe);
+	if (bt_seek_ge(bt, probe, XS_VKLEN, k, (uint16_t)sizeof k, &kl, buf,
+	    (uint16_t)(cap > 0xFFFF ? 0xFFFF : cap), &vl) != XTC_OK ||
+	    kl != XS_VKLEN || dec_tableid(k) != tid || dec_rowid(k) != rid ||
+	    vl < 1 || (buf[0] & XS_F_DELETED))
+		return 0;
+	if (vl > cap) vl = (uint16_t)cap;
+	return vl > 1 ? (int)vl - 1 : -1;   /* -1: live, empty record */
 }
 
 xstore_iscan_t *
@@ -6824,67 +6966,119 @@ xstore_iscan_open(struct xsql *db, const char *table, uint32_t idx_id,
 	return s;
 }
 
-/* Advance the committed stream to its next in-range entry whose rowid
- * has no buffered write (s->ck / s->crid).  Returns 1, or 0 at the end. */
+/* A batch of index keys: up to XS_IKA_MAX, packed in buf (a batch stops
+ * once XS_IKA_BYTES are used, so one more maximal key always fits). */
+#define XS_IKA_MAX   128
+#define XS_IKA_BYTES (8 * 1024)
+struct xs_ika {
+	uint32_t off[XS_IKA_MAX];
+	uint16_t len[XS_IKA_MAX];
+	uint8_t  buf[XS_IKA_BYTES + XS_IDX_KMAX];
+};
+
+/* Refill the key batch with the next in-range entries in walk order.
+ * Returns the count (0: the range is exhausted), or -1 on no memory. */
 static int
-xs_iscan_committed(xstore_iscan_t *s)
+xs_iscan_fill(xstore_iscan_t *s)
 {
 	const void *k = NULL, *vv = NULL;
 	uint16_t kl = 0, vl = 0;
-	int w;
-	for (;;) {
-		if (!s->reverse) {
-			if (s->cur == NULL) {
-				const uint8_t *st = s->has_lo ? s->lo : s->pfx;
-				int sl = s->has_lo ? s->lolen : s->pfxlen;
-				if (bt_cursor_open(s->bt, st, (uint16_t)sl, &s->cur) != XTC_OK)
-					return 0;
-			} else if (bt_cursor_resume(s->cur) != XTC_OK) {
+	uint32_t used = 0;
+	int w, n = 0;
+
+	s->kb_n = s->kb_i = 0;
+	if (s->kb_end) return 0;
+	if (s->ka == NULL && (s->ka = malloc(sizeof *s->ka)) == NULL) return -1;
+	s->kb_want = s->kb_want == 0 ? 16 :
+	    (s->kb_want < XS_IKA_MAX ? s->kb_want * 2 : XS_IKA_MAX);
+	if (!s->reverse) {
+		if (s->cur == NULL) {
+			const uint8_t *st = s->has_lo ? s->lo : s->pfx;
+			int sl = s->has_lo ? s->lolen : s->pfxlen;
+			if (bt_cursor_open(s->bt, st, (uint16_t)sl, &s->cur) != XTC_OK) {
+				s->kb_end = 1;
 				return 0;
 			}
-			if (bt_cursor_next(s->cur, &k, &kl, &vv, &vl) != XTC_OK) {
-				bt_cursor_park(s->cur);
-				return 0;
-			}
-			memcpy(s->ck, k, kl);
-			s->cklen = kl;
-			bt_cursor_park(s->cur);
-			w = xs_iscan_where(s, s->ck, s->cklen);
-			if (w == 2) return 0;
-			if (w == 0) continue;
-		} else {
-			uint8_t bound[XS_IDX_KMAX + 16];
-			uint16_t ol = 0;
-			int bl;
-			if (!s->started) {
-				if (s->has_hi) {
-					memcpy(bound, s->hi, (size_t)s->hilen);
-					bl = s->hilen;
-					if (s->hi_incl) { memset(bound + bl, 0xFF, 9); bl += 9; }
-				} else {
-					memcpy(bound, s->pfx, (size_t)s->pfxlen);
-					bl = s->pfxlen;
-					/* shortcut: an entry ending in 9 x 0xFF (rowid INT64_MAX
-					 * with no further column) sorts at the bound and is
-					 * missed; unreachable for real rowids. */
-					memset(bound + bl, 0xFF, 9); bl += 9;
-				}
-				s->started = 1;
-			} else {
-				memcpy(bound, s->pos, (size_t)s->poslen);
-				bl = s->poslen;
-			}
-			if (bl > (int)bt_max_key(s->bt)) bl = (int)bt_max_key(s->bt);
-			if (bt_seek_lt(s->bt, bound, (uint16_t)bl, s->ck,
-			    (uint16_t)sizeof s->ck, &ol, NULL, 0, NULL) != XTC_OK)
-				return 0;
-			s->cklen = ol;
-			memcpy(s->pos, s->ck, ol);
-			s->poslen = ol;
-			w = xs_iscan_where(s, s->ck, s->cklen);
-			if (w == 0) return 0;
-			if (w == 2) continue;
+		} else if (bt_cursor_resume(s->cur) != XTC_OK) {
+			s->kb_end = 1;
+			return 0;
 		}
+		while (n < s->kb_want && used <= XS_IKA_BYTES) {
+			if (bt_cursor_next(s->cur, &k, &kl, &vv, &vl) != XTC_OK) {
+				s->kb_end = 1;
+				break;
+			}
+			w = xs_iscan_where(s, k, kl);
+			if (w == 2) { s->kb_end = 1; break; }
+			if (w == 0) continue;
+			memcpy(s->ka->buf + used, k, kl);
+			s->ka->off[n] = used;
+			s->ka->len[n] = kl;
+			used += kl;
+			n++;
+		}
+		bt_cursor_park(s->cur);
+	} else {
+		uint8_t bound[XS_IDX_KMAX + 16];
+		int bl, got = 0, j;
+		if (!s->started) {
+			if (s->has_hi) {
+				memcpy(bound, s->hi, (size_t)s->hilen);
+				bl = s->hilen;
+				if (s->hi_incl) { memset(bound + bl, 0xFF, 9); bl += 9; }
+			} else {
+				memcpy(bound, s->pfx, (size_t)s->pfxlen);
+				bl = s->pfxlen;
+				/* shortcut: an entry ending in 9 x 0xFF (rowid INT64_MAX
+				 * with no further column) sorts at the bound and is
+				 * missed; unreachable for real rowids. */
+				memset(bound + bl, 0xFF, 9); bl += 9;
+			}
+			s->started = 1;
+		} else {
+			memcpy(bound, s->pos, (size_t)s->poslen);
+			bl = s->poslen;
+		}
+		if (bl > (int)bt_max_key(s->bt)) bl = (int)bt_max_key(s->bt);
+		if (bt_seek_lt_n(s->bt, bound, (uint16_t)bl, s->ka->buf,
+		    (uint32_t)sizeof s->ka->buf, s->ka->off, s->ka->len,
+		    s->kb_want, &got) != XTC_OK || got == 0) {
+			s->kb_end = 1;
+			return 0;
+		}
+		/* The next batch starts below the last key read. */
+		memcpy(s->pos, s->ka->buf + s->ka->off[got - 1], s->ka->len[got - 1]);
+		s->poslen = s->ka->len[got - 1];
+		for (j = 0; j < got; j++) {
+			w = xs_iscan_where(s, s->ka->buf + s->ka->off[j], s->ka->len[j]);
+			if (w == 0) { s->kb_end = 1; break; }  /* below the start: done */
+			if (w == 2) continue;                  /* above the end: skip */
+			s->ka->off[n] = s->ka->off[j];
+			s->ka->len[n] = s->ka->len[j];
+			n++;
+		}
+	}
+	s->kb_n = n;
+	return n;
+}
+
+/* Advance the committed stream to its next in-range entry whose rowid
+ * has no buffered write (s->ck / s->crid).  Returns 1, 0 at the end, or
+ * -1 on no memory. */
+static int
+xs_iscan_committed(xstore_iscan_t *s)
+{
+	for (;;) {
+		if (s->kb_i >= s->kb_n) {
+			int r = xs_iscan_fill(s);
+			if (r <= 0) {
+				if (r == 0 && !s->kb_end) continue;   /* all skipped */
+				return r;
+			}
+		}
+		s->cklen = s->ka->len[s->kb_i];
+		memcpy(s->ck, s->ka->buf + s->ka->off[s->kb_i], (size_t)s->cklen);
+		s->kb_i++;
 		if (s->cklen < s->pfxlen + 8) continue;
 		s->crid = (int64_t)(xs_get_be64(s->ck + s->cklen - 8) ^ 0x8000000000000000ull);
 		if (s->cx != NULL && s->cx->in_txn &&
@@ -6903,7 +7097,11 @@ xstore_iscan_next(xstore_iscan_t *s, int64_t *rowid, const uint8_t **rec,
 	if (s == NULL) return -1;
 	for (;;) {
 		if (s->done) return 0;
-		if (!s->have_ck) s->have_ck = xs_iscan_committed(s) ? 1 : -1;
+		if (!s->have_ck) {
+			c = xs_iscan_committed(s);
+			if (c < 0) return -1;             /* no memory */
+			s->have_ck = c ? 1 : -1;
+		}
 		/* Merge: take the buffered candidate when it sorts first. */
 		if (s->bci < s->nbc) {
 			const struct xs_icand *b = &s->bc[s->bci];
@@ -6922,10 +7120,10 @@ xstore_iscan_next(xstore_iscan_t *s, int64_t *rowid, const uint8_t **rec,
 				if (wi < 0) continue;
 				p = xs_wrec_payload(s->cx, wi, &rl);
 				if (p == NULL) continue;
-				if (rl > (int)sizeof s->rec) rl = (int)sizeof s->rec;
-				memcpy(s->rec, p, (size_t)rl);
+				if (rl > XS_VMAX) rl = XS_VMAX;
+				memcpy(s->rec + 1, p, (size_t)rl);
 				s->visited++;
-				*rowid = b->rowid; *rec = s->rec; *reclen = rl;
+				*rowid = b->rowid; *rec = s->rec + 1; *reclen = rl;
 				return 1;
 			}
 		}
@@ -6937,15 +7135,15 @@ xstore_iscan_next(xstore_iscan_t *s, int64_t *rowid, const uint8_t **rec,
 		    (int)sizeof s->rec);
 		if (rl == 0) continue;            /* not visible at the snapshot */
 		if (rl < 0) rl = 0;
-		kl = xs_idx_rowkey(&s->e.rt, s->rec, rl, s->crid, 1, kk, (int)sizeof kk,
-		    NULL);
+		kl = xs_idx_rowkey(&s->e.rt, s->rec + 1, rl, s->crid, 1, kk,
+		    (int)sizeof kk, NULL);
 		if (kl != s->cklen || memcmp(kk, s->ck, (size_t)kl) != 0)
 			continue;                     /* stale entry */
 		if (s->cx != NULL && s->cx->in_txn && s->cx->serializable) {
 			rset_add(s->cx, s->e.rt.tableid, s->crid);
 			ssi_record_read(s->cx->ssi, s->e.rt.tableid, s->crid);
 		}
-		*rowid = s->crid; *rec = s->rec; *reclen = rl;
+		*rowid = s->crid; *rec = s->rec + 1; *reclen = rl;
 		return 1;
 	}
 }
@@ -6958,6 +7156,7 @@ xstore_iscan_close(xstore_iscan_t *s)
 		atomic_fetch_add_explicit(&g_rows_visited, s->visited,
 		    memory_order_relaxed);
 	if (s->cur != NULL) bt_cursor_close(s->cur);
+	free(s->ka);
 	free(s->bc);
 	free(s->bkeys);
 	free(s);

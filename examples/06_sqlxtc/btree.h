@@ -162,6 +162,25 @@ int  bt_seek_lt(bt_t *bt, const void *hi, uint16_t hlen, void *out,
                 uint16_t cap, uint16_t *olen, void *val, uint16_t vcap,
                 uint16_t *vlen);
 
+/* Up to `max` keys strictly below `hi`, largest first, from one descent:
+ * key i at buf + off[i], length lens[i] (copies stop before `bcap` bytes
+ * would be exceeded); *n the count, 0 if no key is below `hi`.  Values
+ * are not returned.  A descending range walk calls it once per batch
+ * instead of bt_seek_lt once per key.  XTC_OK or an error. */
+int  bt_seek_lt_n(bt_t *bt, const void *hi, uint16_t hlen, void *buf,
+                  uint32_t bcap, uint32_t *off, uint16_t *lens, int max,
+                  int *n);
+
+/* First key >= `key`: key copied to kout/kcap (*kolen), value to
+ * val/vcap (*vlen; whole even when out of line; val/vlen may be NULL).
+ * The common case reads optimistically -- no content latch, no cursor --
+ * validated by each frame's version (as bt_lookup); a conflict falls
+ * back to a latched cursor.  Returns XTC_OK, XTC_E_NOTFOUND (no key >=
+ * `key`), or XTC_E_INVAL (bad arguments, or kcap too small). */
+int  bt_seek_ge(bt_t *bt, const void *key, uint16_t klen, void *kout,
+                uint16_t kcap, uint16_t *kolen, void *val, uint16_t vcap,
+                uint16_t *vlen);
+
 /*
  * Key-distribution sample (RethinkDB get_distribution, depth-limited):
  * read the tree top-down to at most `depth` levels below the root (0 =
