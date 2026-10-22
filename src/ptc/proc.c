@@ -2186,7 +2186,12 @@ __proc_reanchor(struct xtc_proc *self)
 	 * address computed before this function's caller yielded, i.e. the
 	 * previous carrier's coro after a migration (see __current_proc). */
 	c = __xtc_current_coro_get();
-	rt = c != NULL ? c->self : NULL;
+	/* No coroutine running: this is a scheduler or a plain thread, not a
+	 * proc, whatever the TLS says (a stale pointer here wrote into a
+	 * freed proc: test_sim_stop_tls). */
+	if (c == NULL)
+		return NULL;
+	rt = c->self;
 	if (rt != NULL && rt != self->task && c->proc != NULL) {
 		self = (struct xtc_proc *)c->proc;
 		__current_proc = self;
