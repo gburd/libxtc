@@ -22,6 +22,7 @@
 #include "os_backtrace.h"
 #include "xtc_log.h"
 #include "xtc_sim.h"
+#include "xtc_inject.h"   /* loop.enqueue.fifo_link test hook */
 
 #include <stdint.h>
 #include <unistd.h>
@@ -521,7 +522,13 @@ __xtc_loop_enqueue(xtc_loop_t *loop, xtc_task_t *t)
 
 	t->q_next = NULL;
 	if (loop->q_tail == NULL) loop->q_head = loop->q_tail = t;
-	else { loop->q_tail->q_next = t; loop->q_tail = t; }
+	else {
+		loop->q_tail->q_next = t;
+		/* Test hook: a preemption signal raised here lands between
+		 * the link and the tail store (test_preempt_p2 /runq_*). */
+		XTC_INJECTION_POINT("loop.enqueue.fifo_link");
+		loop->q_tail = t;
+	}
 	return XTC_OK;
 }
 

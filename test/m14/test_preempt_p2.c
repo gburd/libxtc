@@ -603,6 +603,173 @@ test_p2_sqe_window_lost_completion(const MunitParameter p[], void *d)
 	return sw_run(1);
 }
 
+/*
+ * /runq_*: an involuntary preemption must never land inside a fiber's
+ * update of its loop's run queue.  A fiber that wakes a same-loop task
+ * (xtc_waker_wake) or spawns onto its own loop enqueues on the owner-
+ * only FIFO: `q_tail->q_next = t; q_tail = t`.  A tick between the two
+ * stores hands the thread to the scheduler, whose RESCHED re-enqueue of
+ * the preempted fiber links itself through the SAME stale q_tail,
+ * overwriting the link to t; the fiber then resumes and stores
+ * q_tail = t.  t is SCHEDULED but unreachable, and later enqueues chain
+ * off it: the loop idles with runnable tasks and q_head NULL (seen as a
+ * core in the test_wal_kill preempt sweep).  "loop.enqueue.fifo_link"
+ * fires between the two stores; the callback raises the real
+ * preemption signal there.  Control: the same raise from plain fiber
+ * code does preempt.  A watchdog turns the lost task into an abort.
+ *
+ *   lost_wake   the woken task must run (phase 1), and a child spawned
+ *               onto the waker's own loop must run (phase 2)
+ */
+static atomic_long g_rq_peer_runs;
+static atomic_int  g_rq_arm, g_rq_hits, g_rq_stop, g_rq_done;
+static atomic_int  g_rq_ctrl_preempted, g_rq_win_preempted;
+static atomic_int  g_rq_target_runs, g_rq_child_ran;
+static xtc_task_t *g_rq_target;
+static xtc_loop_t *g_rq_loop;
+
+static void
+rq_raise_in_window(const char *name, void *user)
+{
+	long before;
+	(void)name; (void)user;
+	if (!atomic_exchange(&g_rq_arm, 0))
+		return;                          /* one shot per arm */
+	atomic_fetch_add(&g_rq_hits, 1);
+	before = atomic_load(&g_rq_peer_runs);
+	(void)raise(SIGVTALRM);              /* a preemption tick, here */
+	if (atomic_load(&g_rq_peer_runs) != before)
+		atomic_store(&g_rq_win_preempted, 1);
+}
+
+static int
+rq_target(xtc_task_t *self, void *user)
+{
+	(void)self; (void)user;
+	if (atomic_fetch_add(&g_rq_target_runs, 1) == 0)
+		return XTC_TASK_PENDING;          /* park; the waker wakes it */
+	return XTC_TASK_DONE;
+}
+
+static void
+rq_peer(void *arg)
+{
+	(void)arg;
+	while (!atomic_load(&g_rq_stop)) {   /* keeps the FIFO non-empty */
+		atomic_fetch_add(&g_rq_peer_runs, 1);
+		xtc_yield();
+	}
+}
+
+static void
+rq_child(void *arg)
+{
+	(void)arg;
+	atomic_store(&g_rq_child_ran, 1);
+}
+
+static void
+rq_waker(void *arg)
+{
+	xtc_waker_t w;
+	long before;
+	(void)arg;
+	while (atomic_load(&g_rq_target_runs) == 0)
+		xtc_yield();                      /* target parked, peer queued */
+	before = atomic_load(&g_rq_peer_runs);
+	(void)raise(SIGVTALRM);               /* control: plain fiber code */
+	if (atomic_load(&g_rq_peer_runs) != before)
+		atomic_store(&g_rq_ctrl_preempted, 1);
+	xtc_yield();                          /* re-queue the peer first */
+	/* Phase 1: a same-loop wake. */
+	munit_assert_int(xtc_task_waker(g_rq_target, &w), ==, XTC_OK);
+	atomic_store(&g_rq_arm, 1);
+	(void)xtc_waker_wake(&w);
+	while (atomic_load(&g_rq_target_runs) < 2)
+		xtc_yield();
+	/* Phase 2: a spawn onto this fiber's own loop. */
+	xtc_yield();
+	atomic_store(&g_rq_arm, 1);
+	munit_assert_int(xtc_proc_spawn(g_rq_loop, rq_child, NULL, NULL,
+	    NULL), ==, XTC_OK);
+	while (!atomic_load(&g_rq_child_ran))
+		xtc_yield();
+	atomic_store(&g_rq_stop, 1);
+}
+
+static void *
+rq_watchdog(void *arg)
+{
+	int i;
+	(void)arg;
+	for (i = 0; i < 1000 && !atomic_load(&g_rq_done); i++)
+		usleep(10000);
+	if (!atomic_load(&g_rq_done)) {
+		fprintf(stderr, "runq: a woken/spawned task never ran (target "
+		    "runs %d, child %d, preempted inside the enqueue: %d)\n",
+		    atomic_load(&g_rq_target_runs),
+		    atomic_load(&g_rq_child_ran),
+		    atomic_load(&g_rq_win_preempted));
+		abort();
+	}
+	return NULL;
+}
+
+static MunitResult
+test_p2_runq_lost_wake(const MunitParameter p[], void *d)
+{
+	extern int __xtc_coro_preempt_effective(void);
+	xtc_exec_t *e = NULL;
+	pthread_t wd;
+	(void)p; (void)d;
+
+	if (!xtc_preempt_supported() || !__xtc_coro_preempt_effective())
+		return MUNIT_SKIP;
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
+    __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	return MUNIT_SKIP;   /* see test_p2_preempt_tight_loop */
+#endif
+	atomic_store(&g_rq_peer_runs, 0);
+	atomic_store(&g_rq_arm, 0);
+	atomic_store(&g_rq_hits, 0);
+	atomic_store(&g_rq_stop, 0);
+	atomic_store(&g_rq_done, 0);
+	atomic_store(&g_rq_ctrl_preempted, 0);
+	atomic_store(&g_rq_win_preempted, 0);
+	atomic_store(&g_rq_target_runs, 0);
+	atomic_store(&g_rq_child_ran, 0);
+	munit_assert_int(xtc_inject_attach("loop.enqueue.fifo_link",
+	    rq_raise_in_window, NULL), ==, XTC_OK);
+
+	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	g_rq_loop = xtc_exec_loop(e, 0);
+	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
+	    ==, XTC_OK);
+	xtc_preempt_set_involuntary(1);
+	munit_assert_int(xtc_exec_spawn_on(e, 0, rq_target, NULL,
+	    &g_rq_target), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(g_rq_loop, rq_peer, NULL, NULL,
+	    NULL), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(g_rq_loop, rq_waker, NULL, NULL,
+	    NULL), ==, XTC_OK);
+	munit_assert_int(pthread_create(&wd, NULL, rq_watchdog, NULL), ==, 0);
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	atomic_store(&g_rq_done, 1);
+	(void)pthread_join(wd, NULL);
+	xtc_preempt_set_involuntary(0);
+	(void)xtc_exec_fini(e);
+	(void)xtc_inject_detach("loop.enqueue.fifo_link");
+
+	if (atomic_load(&g_rq_hits) == 0)
+		return MUNIT_SKIP;   /* injection points compiled out */
+	munit_assert_int(atomic_load(&g_rq_ctrl_preempted), ==, 1);
+	munit_assert_int(atomic_load(&g_rq_win_preempted), ==, 0);
+	munit_assert_int(atomic_load(&g_rq_hits), ==, 2);   /* wake + spawn */
+	munit_assert_int(atomic_load(&g_rq_target_runs), ==, 2);
+	munit_assert_int(atomic_load(&g_rq_child_ran), ==, 1);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/preempt_tight_loop", test_p2_preempt_tight_loop, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
@@ -612,6 +779,8 @@ static MunitTest tests[] = {
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/sqe_window_lost_completion", test_p2_sqe_window_lost_completion,
 	    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/runq_lost_wake", test_p2_runq_lost_wake, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
 #if defined(P2_VEC)
 	{ "/vector_state", test_p2_vector_state, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
