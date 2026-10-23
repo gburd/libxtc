@@ -411,6 +411,204 @@ test_p2_red_zone_flags(const MunitParameter p[], void *d)
 }
 #endif /* x86-64 Linux */
 
+#if defined(__aarch64__) && defined(__linux__) && \
+    (defined(__GNUC__) || defined(__clang__))
+#include <sys/auxv.h>
+#define P2_A64 1
+#ifndef HWCAP_SVE
+#define HWCAP_SVE (1UL << 22)
+#endif
+/*
+ * /a64_sve_state: the aarch64 twin of /vector_state.  Fibers on one loop
+ * each hold a fiber-unique pattern across the FULL width of z1 and a
+ * fiber-unique predicate in p1 through a yield-free spin, then read both
+ * back.  glibc's memcpy/memset are SVE on an SVE core, so a fiber can be
+ * preempted with live SVE state.  Skips without SVE.
+ */
+static atomic_long g_sve_bad, g_sve_checks;
+/* Fiber changes between consecutive probes on the loop: > 0 proves the
+ * yield-free spinners were sliced, so a pass is not vacuous. */
+static atomic_int  g_a64_last;
+static atomic_long g_a64_slices;
+
+static void
+p2_a64_note(int i)
+{
+	if (atomic_exchange(&g_a64_last, i) != i)
+		atomic_fetch_add(&g_a64_slices, 1);
+}
+
+__attribute__((target("+sve"))) static int
+p2_sve_hold(uint64_t want, int i)
+{
+	uint64_t got[32];   /* up to 2048-bit vectors */
+	uint8_t pg[32];
+	uint64_t vl, k;
+	int bad = 0;
+	__asm__ volatile("cntd %0" : "=r"(vl));
+	__asm__ volatile(
+	    "mov z1.d, %2\n\t"
+	    "cmp %w3, #0\n\t"
+	    "b.eq 3f\n\t"
+	    "ptrue p1.d, vl1\n\t"
+	    "b 4f\n"
+	    "3:\tptrue p1.b\n"
+	    "4:\tmov w9, #20000\n"
+	    "1:\tsubs w9, w9, #1\n\t"
+	    "b.ne 1b\n\t"
+	    "ptrue p0.d\n\t"
+	    "st1d { z1.d }, p0, [%0]\n\t"
+	    "str p1, [%1]"
+	    :
+	    : "r"(got), "r"(pg), "r"(want), "r"(i & 1)
+	    : "x9", "z1", "p0", "p1", "cc", "memory");
+	for (k = 0; k < vl && k < 32; k++)
+		bad |= got[k] != want;
+	/* p1: ptrue .d,vl1 sets bit 0 only; ptrue .b sets every bit. */
+	bad |= (i & 1) ? (pg[0] != 0x01) : (pg[0] != 0xff);
+	return bad;
+}
+
+static void
+p2_sve_spinner(void *arg)
+{
+	int i = (int)(intptr_t)arg;
+	uint64_t want = 0x0101010101010101ull * (uint64_t)(i + 1);
+	int64_t end = xtc_clock_mono() + 300LL * 1000 * 1000;
+	long n = 0;
+	while (xtc_clock_mono() < end) {
+		if (p2_sve_hold(want, i))
+			atomic_fetch_add(&g_sve_bad, 1);
+		p2_a64_note(i);
+		n++;
+	}
+	atomic_fetch_add(&g_sve_checks, n);
+}
+
+/*
+ * /a64_x16_preserved: an involuntary preemption must be invisible to the
+ * interrupted code's registers.  x16/x17 are "intra-procedure-call"
+ * scratch, but between calls they are ordinary registers the compiler
+ * and hand-written code use (glibc's string functions keep data in
+ * them).  The probe holds a fiber-unique value in x16 and x17 and a
+ * condition-flag result across a yield-free, flag-neutral spin and
+ * checks all three.
+ */
+static atomic_long g_x16_bad, g_x17_bad, g_nzcv_bad, g_x16_n;
+
+static int
+p2_x16_hold(uint64_t want)
+{
+	uint64_t a, b, lt;
+	__asm__ volatile(
+	    "mov x16, %3\n\t"
+	    "mov x17, %3\n\t"
+	    "mov w9, #1\n\t"
+	    "cmp w9, #2\n\t"             /* 1 - 2: N = 1, V = 0 -> lt */
+	    "mov w9, #20000\n"
+	    "1:\tsub w9, w9, #1\n\t"      /* flag-neutral countdown */
+	    "cbnz w9, 1b\n\t"
+	    "cset %2, lt\n\t"
+	    "mov %0, x16\n\t"
+	    "mov %1, x17"
+	    : "=&r"(a), "=&r"(b), "=&r"(lt)
+	    : "r"(want)
+	    : "x9", "x16", "x17", "cc");
+	return (a != want) | ((b != want) << 1) | ((lt != 1) << 2);
+}
+
+static void
+p2_x16_spinner(void *arg)
+{
+	uint64_t want = 0x5a5a5a5a00000000ull | (uint64_t)(intptr_t)arg;
+	int64_t end = xtc_clock_mono() + 300LL * 1000 * 1000;
+	long n = 0;
+	int r;
+	while (xtc_clock_mono() < end) {
+		r = p2_x16_hold(want);
+		if (r & 1)
+			atomic_fetch_add(&g_x16_bad, 1);
+		if (r & 2)
+			atomic_fetch_add(&g_x17_bad, 1);
+		if (r & 4)
+			atomic_fetch_add(&g_nzcv_bad, 1);
+		p2_a64_note((int)(intptr_t)arg);
+		n++;
+	}
+	atomic_fetch_add(&g_x16_n, n);
+}
+
+/* Run four `fn` spinners on one loop with 50 us involuntary slices. */
+static MunitResult
+p2_a64_run(void (*fn)(void *))
+{
+	extern int __xtc_coro_preempt_effective(void);
+	xtc_exec_t *e = NULL;
+	int i;
+
+	if (!xtc_preempt_supported() || !__xtc_coro_preempt_effective())
+		return MUNIT_SKIP;
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
+    __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	return MUNIT_SKIP;   /* see test_p2_preempt_tight_loop */
+#endif
+	atomic_store(&g_a64_last, -1);
+	atomic_store(&g_a64_slices, 0);
+	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_set_preempt(e, 50LL * 1000), ==, XTC_OK);
+	xtc_preempt_set_involuntary(1);
+	for (i = 0; i < 4; i++)
+		munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0), fn,
+		    (void *)(intptr_t)i, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	xtc_preempt_set_involuntary(0);
+	(void)xtc_exec_fini(e);
+	munit_logf(MUNIT_LOG_INFO, "%ld involuntary slices",
+	    atomic_load(&g_a64_slices));
+	munit_assert_long(atomic_load(&g_a64_slices), >, 4);
+	return MUNIT_OK;
+}
+
+static MunitResult
+test_p2_a64_sve_state(const MunitParameter p[], void *d)
+{
+	MunitResult r;
+	(void)p; (void)d;
+	if ((getauxval(AT_HWCAP) & HWCAP_SVE) == 0)
+		return MUNIT_SKIP;
+	atomic_store(&g_sve_bad, 0);
+	atomic_store(&g_sve_checks, 0);
+	if ((r = p2_a64_run(p2_sve_spinner)) != MUNIT_OK)
+		return r;
+	munit_logf(MUNIT_LOG_INFO, "%ld checks, %ld corrupted",
+	    atomic_load(&g_sve_checks), atomic_load(&g_sve_bad));
+	munit_assert_long(atomic_load(&g_sve_checks), >, 0);
+	munit_assert_long(atomic_load(&g_sve_bad), ==, 0);
+	return MUNIT_OK;
+}
+
+static MunitResult
+test_p2_a64_x16_preserved(const MunitParameter p[], void *d)
+{
+	MunitResult r;
+	(void)p; (void)d;
+	atomic_store(&g_x16_bad, 0);
+	atomic_store(&g_x17_bad, 0);
+	atomic_store(&g_nzcv_bad, 0);
+	atomic_store(&g_x16_n, 0);
+	if ((r = p2_a64_run(p2_x16_spinner)) != MUNIT_OK)
+		return r;
+	munit_logf(MUNIT_LOG_INFO, "%ld probes, x16 lost %ld, x17 lost %ld, "
+	    "flags lost %ld", atomic_load(&g_x16_n), atomic_load(&g_x16_bad),
+	    atomic_load(&g_x17_bad), atomic_load(&g_nzcv_bad));
+	munit_assert_long(atomic_load(&g_x16_n), >, 0);
+	munit_assert_long(atomic_load(&g_x16_bad), ==, 0);
+	munit_assert_long(atomic_load(&g_x17_bad), ==, 0);
+	munit_assert_long(atomic_load(&g_nzcv_bad), ==, 0);
+	return MUNIT_OK;
+}
+#endif /* aarch64 Linux */
+
 /*
  * /sqe_window_*: an involuntary preemption must never land inside the
  * io_uring SQE reservation window.  io_uring_get_sqe advances the SQ's
@@ -1053,6 +1251,12 @@ static MunitTest tests[] = {
 	{ "/vector_state", test_p2_vector_state, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/red_zone_flags", test_p2_red_zone_flags, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+#endif
+#if defined(P2_A64)
+	{ "/a64_sve_state", test_p2_a64_sve_state, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/a64_x16_preserved", test_p2_a64_x16_preserved, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 #endif
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }

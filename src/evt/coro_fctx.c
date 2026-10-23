@@ -651,15 +651,18 @@ xtc_yield(void)
  * and returns to the interrupted instruction.  Nothing in that path
  * depends on how the scheduler switch saves its context.  It declines
  * (returns 0) while a switch is in flight (g_in_preempt), inside the
- * trampoline, and off a fiber.  Elsewhere (aarch64, musl, macOS) it
- * declines, and the timer falls back to Phase 1 cooperative-assisted
- * preemption.
+ * trampoline, and off a fiber.  On aarch64 Linux (glibc) it is likewise
+ * the shared redirect (rt_sigreturn on the kernel's in-place signal
+ * frame).  Elsewhere (musl, macOS) it declines, and the timer falls
+ * back to Phase 1 cooperative-assisted preemption.
  */
 int
 __xtc_coro_preempt(void *uctx)
 {
 #if defined(XTC_CORO_REDIRECT_X86_64)
 	return __coro_preempt_redirect_x86_64(uctx);
+#elif defined(XTC_CORO_REDIRECT_AARCH64)
+	return __coro_preempt_redirect_aarch64(uctx);
 #else
 	(void)uctx;
 	return 0;
@@ -671,7 +674,7 @@ __xtc_coro_preempt(void *uctx)
 int
 __xtc_coro_preempt_effective(void)
 {
-#if defined(XTC_CORO_REDIRECT_X86_64)
+#if defined(XTC_CORO_REDIRECT_X86_64) || defined(XTC_CORO_REDIRECT_AARCH64)
 	return 1;
 #else
 	return 0;

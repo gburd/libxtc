@@ -5,10 +5,10 @@
  * src/inc/coro_preempt.h
  *	The involuntary-preemption pieces both mmap-stack coroutine
  *	substrates share (coro_uctx.c, coro_fctx.c): the per-thread
- *	in-switch guard, the x86-64 vector-state probe, and the x86-64
- *	Linux signal-context PC redirect into the substrate-agnostic
- *	trampoline (src/os/asm/preempt_trampoline_x86_64.S, which only
- *	saves the interrupted register file, calls xtc_yield and returns).
+ *	in-switch guard, the x86-64 vector-state probe, and the x86-64 and
+ *	AArch64 Linux signal-context PC redirects into the substrate-
+ *	agnostic trampolines (src/os/asm/preempt_trampoline_*.S, which only
+ *	preserve the interrupted state, call xtc_yield and resume it).
  *	Moved here verbatim from coro_uctx.c.  Exactly one substrate is
  *	compiled per build, so the `static` definitions are instantiated
  *	once.  Include after coro_int.h.
@@ -33,7 +33,18 @@
     (!defined(XTC_CORO_FCTX) || defined(__GLIBC__))
 # define XTC_CORO_REDIRECT_X86_64 1
 #endif
-#if defined(XTC_CORO_REDIRECT_X86_64)
+/*
+ * XTC_CORO_REDIRECT_AARCH64: the AArch64 Linux redirect (rt_sigreturn
+ * on the kernel's in-place signal frame; preempt_trampoline_aarch64.S).
+ * Both substrates on glibc; musl declines until verified there, as on
+ * x86-64.
+ */
+#if defined(__aarch64__) && defined(__linux__) && !defined(__APPLE__) && \
+    !defined(XTC_AMALGAMATION) && \
+    (!defined(XTC_CORO_FCTX) || defined(__GLIBC__))
+# define XTC_CORO_REDIRECT_AARCH64 1
+#endif
+#if defined(XTC_CORO_REDIRECT_X86_64) || defined(XTC_CORO_REDIRECT_AARCH64)
 #include <signal.h>
 #include <ucontext.h>    /* the signal-delivered ucontext_t (mcontext) */
 #endif
@@ -218,6 +229,75 @@ __coro_preempt_redirect_x86_64(void *uctx)
 	uc->uc_mcontext.gregs[REG_RSP] = new_sp;
 	uc->uc_mcontext.gregs[REG_RIP] =
 	    (greg_t)(uintptr_t)&__xtc_preempt_trampoline;
+	return 1;   /* armed: sigreturn lands in the trampoline */
+}
+#endif
+
+#if defined(XTC_CORO_REDIRECT_AARCH64)
+#include <stddef.h>   /* offsetof */
+/*
+ * The AArch64 Linux redirect.  The kernel built the signal frame
+ * (struct rt_sigframe: siginfo_t, then the ucontext_t `uctx` whose
+ * uc_mcontext carries the FP/SIMD and SVE records) on the interrupted
+ * fiber's stack, just below its sp, holding the WHOLE interrupted
+ * state.  Leave the frame there: the handler's sigreturn then enters
+ * __xtc_preempt_trampoline with sp = the frame; it calls xtc_yield and
+ * issues a second rt_sigreturn on the same frame, which restores
+ * everything exactly (preempt_trampoline_aarch64.S says why registers
+ * are not saved by hand, and what it refreshes in the frame first).
+ * The interrupted pc / sp / pstate wait in the frame's siginfo, which
+ * rt_sigreturn never reads (stash[0..2]).  The trampoline is
+ * entered with PSTATE.BTYPE cleared (a tick between an indirect branch
+ * and its landing pad must not demand one at the trampoline); its
+ * second sigreturn puts the interrupted pstate back.  It addresses the
+ * frame with the offsets asserted here.
+ */
+_Static_assert(sizeof(siginfo_t) == 128, "rt_sigframe: siginfo size");
+_Static_assert(offsetof(ucontext_t, uc_stack) == 16, "uc_stack");
+_Static_assert(offsetof(ucontext_t, uc_sigmask) == 40, "uc_sigmask");
+_Static_assert(offsetof(ucontext_t, uc_mcontext.sp) == 432, "mc sp");
+_Static_assert(offsetof(ucontext_t, uc_mcontext.pc) == 440, "mc pc");
+_Static_assert(offsetof(ucontext_t, uc_mcontext.pstate) == 448, "mc pstate");
+
+#define CORO_A64_PSR_BTYPE 0xC00ull   /* PSTATE.BTYPE, bits 10-11 */
+
+static int
+__coro_preempt_redirect_aarch64(void *uctx)
+{
+	extern void __xtc_preempt_trampoline(void);
+	extern void __xtc_preempt_trampoline_end(void);
+	ucontext_t *uc = (ucontext_t *)uctx;
+	struct xtc_coro *c = __xtc_current_coro;
+	unsigned long long pc, frame, lo, hi, *stash;
+
+	if (c == NULL)
+		return 0;   /* not in a fiber; leave the tick pending */
+	if (g_in_preempt > 0)
+		return 0;   /* inside a switch or a redirect in flight */
+	pc = uc->uc_mcontext.pc;
+	if (pc >= (unsigned long long)(uintptr_t)&__xtc_preempt_trampoline &&
+	    pc < (unsigned long long)(uintptr_t)&__xtc_preempt_trampoline_end)
+		return 0;
+	/* The frame starts with the siginfo; the ucontext follows it.  It
+	 * must be the kernel's frame on THIS fiber's stack, below the
+	 * interrupted sp (anything else, say a handler on an alternate
+	 * stack, declines). */
+	frame = (unsigned long long)(uintptr_t)uctx - sizeof(siginfo_t);
+	lo = (unsigned long long)(uintptr_t)c->stack;
+	hi = lo + c->stack_sz + 65536;   /* + the guard: at most a 64 KiB page */
+	if ((frame & 15) != 0 || frame >= uc->uc_mcontext.sp || frame <= lo ||
+	    frame >= hi)
+		return 0;
+	stash = (unsigned long long *)(uintptr_t)frame;
+	stash[0] = pc;
+	stash[1] = uc->uc_mcontext.sp;
+	stash[2] = uc->uc_mcontext.pstate;
+
+	g_in_preempt++;   /* the trampoline's xtc_yield clears it on resume */
+	uc->uc_mcontext.pstate &= ~CORO_A64_PSR_BTYPE;
+	uc->uc_mcontext.sp = frame;
+	uc->uc_mcontext.pc =
+	    (unsigned long long)(uintptr_t)&__xtc_preempt_trampoline;
 	return 1;   /* armed: sigreturn lands in the trampoline */
 }
 #endif

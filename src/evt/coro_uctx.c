@@ -264,8 +264,7 @@ __coro_entry(void)
 int
 __xtc_coro_preempt_effective(void)
 {
-#if (defined(__x86_64__) || defined(__aarch64__)) && \
-    defined(__linux__) && !defined(__APPLE__) && !defined(XTC_AMALGAMATION)
+#if defined(XTC_CORO_REDIRECT_X86_64) || defined(XTC_CORO_REDIRECT_AARCH64)
 	return 1;
 #else
 	return 0;
@@ -298,57 +297,22 @@ __xtc_coro_preempt_effective(void)
  * if there is no current fiber (nothing to preempt; the handler leaves
  * the tick pending for a cooperative yield instead).
  *
- * The fctx substrate (coro_fctx.c) provides its own version that
- * declines (returns 0), so on musl the timer falls back to Phase 1
- * cooperative-assisted preemption.
+ * The fctx substrate (coro_fctx.c) provides its own version with the
+ * same redirects on glibc; it declines (returns 0) on musl, where the
+ * timer falls back to Phase 1 cooperative-assisted preemption.
  */
 int
 __xtc_coro_preempt(void *uctx)
 {
-#if defined(__x86_64__) && defined(__linux__) && !defined(__APPLE__) && !defined(XTC_AMALGAMATION)
+#if defined(XTC_CORO_REDIRECT_X86_64)
 	return __coro_preempt_redirect_x86_64(uctx);
-#elif defined(__aarch64__) && defined(__linux__) && !defined(__APPLE__) && !defined(XTC_AMALGAMATION)
-	/*
-	 * Phase 2b-arch, AArch64 (AAPCS64): the same Go-style PC redirect
-	 * as x86-64.  aarch64 has no red zone, so we place orig_pc in a
-	 * 16-aligned scratch slot just below the interrupted sp and set the
-	 * trampoline's entry sp there; the trampoline recovers orig_pc and
-	 * orig_sp from that slot on resume.  See
-	 * preempt_trampoline_aarch64.S for the register-file save/restore
-	 * and the x16/x17 caveat.
-	 */
-	extern void __xtc_preempt_trampoline(void);
-	extern void __xtc_preempt_trampoline_end(void);
-	ucontext_t *uc = (ucontext_t *)uctx;
-	unsigned long orig_pc, orig_sp, scratch;
-
-	if (__xtc_current_coro == NULL)
-		return 0;
-	if (g_in_preempt > 0)
-		return 0;
-
-	orig_pc = (unsigned long)uc->uc_mcontext.pc;
-	orig_sp = (unsigned long)uc->uc_mcontext.sp;
-
-	if (orig_pc >= (unsigned long)(uintptr_t)&__xtc_preempt_trampoline &&
-	    orig_pc <  (unsigned long)(uintptr_t)&__xtc_preempt_trampoline_end)
-		return 0;
-
-	/* 16-aligned scratch below the interrupted sp; stash orig_pc there.
-	 * orig_sp is already 16-aligned per AAPCS64, so orig_sp - 16 is
-	 * 16-aligned.  The trampoline reads orig_pc from [scratch] and
-	 * recovers orig_sp == scratch + 16. */
-	scratch = orig_sp - 16;
-	*(unsigned long *)(uintptr_t)scratch = orig_pc;
-
-	g_in_preempt++;
-	uc->uc_mcontext.sp = (unsigned long long)scratch;
-	uc->uc_mcontext.pc =
-	    (unsigned long long)(uintptr_t)&__xtc_preempt_trampoline;
-	return 1;   /* armed: sigreturn lands in the trampoline */
+#elif defined(XTC_CORO_REDIRECT_AARCH64)
+	/* Phase 2b-arch, AArch64 Linux: rt_sigreturn on the kernel's
+	 * in-place signal frame (coro_preempt.h). */
+	return __coro_preempt_redirect_aarch64(uctx);
 #else
 	/*
-	 * Other architectures (aarch64, ...) and the single-file
+	 * Other architectures and the single-file
 	 * amalgamation (which cannot carry the trampoline's .S assembly)
 	 * decline, so the timer falls back to Phase 1 cooperative-assisted
 	 * preemption.  A resumable preemption needs the fiber's

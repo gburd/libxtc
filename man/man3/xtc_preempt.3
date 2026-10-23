@@ -91,7 +91,9 @@ interrupted instruction pointer to (Go's async-preemption method).  It
 does so on both coroutine substrates there: fcontext with glibc (the
 default build) and ucontext
 .Pq Fl -with-coro=ucontext ;
-aarch64 Linux has it on ucontext only.  Elsewhere (the fcontext
+aarch64 Linux has it on both too (with glibc), resuming the fiber
+through the kernel's own signal frame so every register, the SVE
+state and the condition flags come back exact.  Elsewhere (the fcontext
 substrate on musl or macOS, the Windows fiber substrate, the
 single-file amalgamation) it declines and falls back to the cooperative
 path.
