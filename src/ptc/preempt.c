@@ -165,6 +165,33 @@ extern int __xtc_proc_crit_depth(void);
  * this same thread (a transient value only ever errs toward "defer"). */
 static XTC_THREAD_LOCAL volatile int g_unsafe_depth;
 
+#if !defined(_WIN32)
+/*
+ * The x86-64 preemption trampoline's interrupted-PC slot (written by
+ * __xtc_coro_preempt in coro_uctx.c, read back by the trampoline through
+ * __xtc_preempt_take_pc).  Defined HERE, in a file every build links,
+ * not beside its only writer: the trampoline .S is assembled on every
+ * x86-64 ELF platform and coro substrate, but the writer exists only
+ * where the redirect is implemented (Linux + ucontext).  Defined there
+ * alone, FreeBSD's libxtc.so (and a Linux fctx build's) carried an
+ * undefined reference to __xtc_preempt_take_pc, so nothing could link
+ * against it.  test/dist/test_lib_closure.sh keeps it that way.
+ */
+#if defined(__ELF__)
+#define XTC_PREEMPT_HIDDEN __attribute__((visibility("hidden")))
+#else
+#define XTC_PREEMPT_HIDDEN
+#endif
+XTC_PREEMPT_HIDDEN XTC_THREAD_LOCAL uintptr_t __xtc_preempt_pc;
+XTC_PREEMPT_HIDDEN uintptr_t __xtc_preempt_take_pc(void);
+
+uintptr_t
+__xtc_preempt_take_pc(void)
+{
+	return __xtc_preempt_pc;
+}
+#endif
+
 #if defined(XTC_HAVE_POSIX_TIMERS) || defined(XTC_HAVE_KQUEUE_TIMER)
 
 /*

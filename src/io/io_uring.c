@@ -23,7 +23,8 @@
 #include "xtc_tail.h"    /* xtc_pid_t, XTC_TAIL_REAP */
 #include "tail_int.h"   /* XTC_TAIL_REAP: the CQE-consumed event */
 #include "aio_int.h"      /* __xtc_aio_done_set: cross-thread completion flag */
-#include "xtc_inject.h"   /* io.uring.sq_full test hook */
+#include "xtc_inject.h"   /* io.uring.sq_full / sqe_reserved test hooks */
+#include "preempt_int.h"  /* __xtc_unsafe_*, __xtc_mtx_* (preemption) */
 
 #include <errno.h>
 #include <limits.h>
@@ -246,8 +247,23 @@ __ring_submit(xtc_io_t *io)
  * the kernel will keep firing CQEs as the fd becomes ready, until we
  * cancel.  user_data is the uring_fd pointer.
  */
-/* An SQE, flushing the SQ once if it is full.  NULL if still none.
- * "io.uring.sq_full" forces the NULL (tests drive the pending queue). */
+/*
+ * An SQE, flushing the SQ once if it is full.  NULL if still none.
+ * "io.uring.sq_full" forces the NULL (tests drive the pending queue).
+ *
+ * The caller MUST hold the preemption-unsafe bracket (__xtc_unsafe_enter)
+ * from here until the SQE is prepared and submitted.  io_uring_get_sqe
+ * advances the userspace sqe_tail BEFORE the slot is written, and the SQ
+ * is single-producer with no lock: an involuntary preemption tick landing
+ * between the reserve and the prep runs other fibers on this same thread,
+ * and the first of them to submit publishes the reserved slot with its
+ * STALE contents (the op that used the slot SQ-size submits ago: an old
+ * write to an old offset, its user_data naming a dead stack frame).  The
+ * preempted fiber then fills a slot the kernel already consumed and its
+ * own submit finds nothing to send, so its completion never comes (the
+ * test_wal_kill preempt-nokill hang).  "io.uring.sqe_reserved" fires
+ * inside that window so a test can raise the preemption signal there.
+ */
 static struct io_uring_sqe *
 __get_sqe(xtc_io_t *io)
 {
@@ -259,6 +275,8 @@ __get_sqe(xtc_io_t *io)
 		(void)__ring_submit(io);
 		sqe = io_uring_get_sqe(&io->ring);
 	}
+	if (sqe != NULL)
+		XTC_INJECTION_POINT("io.uring.sqe_reserved");
 	return sqe;
 }
 
@@ -576,10 +594,11 @@ int
 __xtc_io_register_wakeup(xtc_io_t *io, int fd)
 {
 	int rc;
-	if ((rc = __add_fd(io, fd, XTC_IO_READABLE, NULL, 1)) != XTC_OK)
-		return rc;
-	(void)__ring_submit(io);
-	return XTC_OK;
+	__xtc_unsafe_enter();   /* an SQ producer: see __get_sqe */
+	if ((rc = __add_fd(io, fd, XTC_IO_READABLE, NULL, 1)) == XTC_OK)
+		(void)__ring_submit(io);
+	__xtc_unsafe_leave();
+	return rc;
 }
 
 /*
@@ -622,7 +641,7 @@ __apply_pending_del_for(xtc_io_t *io, int fd)
 	if (atomic_load_explicit(&io->has_pending_del,
 	    memory_order_acquire) == 0)
 		return;
-	(void)pthread_mutex_lock(&io->del_lock);
+	(void)__xtc_mtx_lock(&io->del_lock);
 	for (i = 0; i < io->n_pending_del; i++) {
 		if (io->pending_del[i] != fd)
 			continue;
@@ -635,14 +654,75 @@ __apply_pending_del_for(xtc_io_t *io, int fd)
 	if (io->n_pending_del == 0)
 		atomic_store_explicit(&io->has_pending_del, 0,
 		    memory_order_relaxed);
-	(void)pthread_mutex_unlock(&io->del_lock);
+	(void)__xtc_mtx_unlock(&io->del_lock);
 	if (found)
 		(void)xtc_io_del_fd(io, fd);
 }
 
+/*
+ * The fiber-reachable SQ producers (reg/mod/del fd, aio submit) and the
+ * poll/reap path all mutate state that only this io's owner thread may
+ * touch and that has no lock: the SQ ring (liburing's sqe_tail/sqe_head
+ * bookkeeping and the slot being filled), io->tab, io->pending and the
+ * zombie list.  Under involuntary preemption a fiber can be redirected
+ * to the scheduler at ANY instruction, and the scheduler then runs other
+ * fibers -- and its own xtc_io_poll -- on this same thread, interleaving
+ * with the half-done update.  So each public entry point holds the
+ * preemption-unsafe bracket for its whole body: a tick that lands inside
+ * defers to the next cooperative yield-check instead of redirecting.
+ * None of these bodies yields, so the bracket never spans a park.
+ */
+static int __reg_fd(xtc_io_t *, int, uint32_t, void *);
+static int __aio_submit(xtc_io_t *, xtc_aio_t *);
+static int __mod_fd(xtc_io_t *, int, uint32_t, void *);
+static int __del_fd(xtc_io_t *, int);
+
 /* PUBLIC: int xtc_io_reg_fd __P((xtc_io_t *, int, uint32_t, void *)); */
 int
 xtc_io_reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
+{
+	int rc;
+	__xtc_unsafe_enter();
+	rc = __reg_fd(io, fd, interest, tag);
+	__xtc_unsafe_leave();
+	return rc;
+}
+
+/* PUBLIC: int xtc_io_aio_submit __P((xtc_io_t *, xtc_aio_t *)); */
+int
+xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
+{
+	int rc;
+	__xtc_unsafe_enter();
+	rc = __aio_submit(io, a);
+	__xtc_unsafe_leave();
+	return rc;
+}
+
+/* PUBLIC: int xtc_io_mod_fd __P((xtc_io_t *, int, uint32_t, void *)); */
+int
+xtc_io_mod_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
+{
+	int rc;
+	__xtc_unsafe_enter();
+	rc = __mod_fd(io, fd, interest, tag);
+	__xtc_unsafe_leave();
+	return rc;
+}
+
+/* PUBLIC: int xtc_io_del_fd __P((xtc_io_t *, int)); */
+int
+xtc_io_del_fd(xtc_io_t *io, int fd)
+{
+	int rc;
+	__xtc_unsafe_enter();
+	rc = __del_fd(io, fd);
+	__xtc_unsafe_leave();
+	return rc;
+}
+
+static int
+__reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 {
 	int rc;
 	if (io == NULL || fd < 0 || interest == 0)
@@ -662,19 +742,19 @@ xtc_io_reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 	return XTC_OK;
 }
 
-/* PUBLIC: int xtc_io_aio_submit __P((xtc_io_t *, xtc_aio_t *)); */
-int
-xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
+static int
+__aio_submit(xtc_io_t *io, xtc_aio_t *a)
 {
 	struct io_uring_sqe *sqe;
 	if (io == NULL || a == NULL || a->fd < 0)
 		return XTC_E_INVAL;
-	sqe = io_uring_get_sqe(&io->ring);
-	if (sqe == NULL) {
-		(void)__ring_submit(io);
-		sqe = io_uring_get_sqe(&io->ring);
-		if (sqe == NULL) return XTC_E_AGAIN;
-	}
+	/* Reject an unknown op BEFORE reserving a slot: io_uring_get_sqe
+	 * cannot be undone, so a reserved-then-abandoned slot would be
+	 * published, with its stale contents, by the next submit. */
+	if (a->op < XTC_AIO_PREAD || a->op > XTC_AIO_PWRITEV)
+		return XTC_E_INVAL;
+	if ((sqe = __get_sqe(io)) == NULL)
+		return XTC_E_AGAIN;
 	switch (a->op) {
 	case XTC_AIO_PREAD:
 		io_uring_prep_read(sqe, a->fd, a->buf, a->len,
@@ -700,7 +780,9 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	case XTC_AIO_FDATASYNC:
 		io_uring_prep_fsync(sqe, a->fd, IORING_FSYNC_DATASYNC);
 		break;
-	default:
+	default:   /* unreachable: the range check above */
+		io_uring_prep_nop(sqe);
+		io_uring_sqe_set_data(sqe, NULL);
 		return XTC_E_INVAL;
 	}
 	a->done = 0;   /* plain: our own thread, before the SQE is visible */
@@ -722,9 +804,8 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	return XTC_OK;
 }
 
-/* PUBLIC: int xtc_io_mod_fd __P((xtc_io_t *, int, uint32_t, void *)); */
-int
-xtc_io_mod_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
+static int
+__mod_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 {
 	struct __xtc_uring_fd *uf;
 	int rc;
@@ -756,9 +837,8 @@ xtc_io_mod_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 	return XTC_OK;
 }
 
-/* PUBLIC: int xtc_io_del_fd __P((xtc_io_t *, int)); */
-int
-xtc_io_del_fd(xtc_io_t *io, int fd)
+static int
+__del_fd(xtc_io_t *io, int fd)
 {
 	struct __xtc_uring_fd *uf;
 	if (io == NULL || fd < 0) return XTC_E_INVAL;
@@ -843,13 +923,13 @@ __xtc_io_defer_del_fd(xtc_io_t *io, int fd)
 	if (!atomic_load_explicit(&io->owner_set, memory_order_acquire) ||
 	    pthread_equal(pthread_self(), io->owner_tid))
 		return xtc_io_del_fd(io, fd);
-	(void)pthread_mutex_lock(&io->del_lock);
+	(void)__xtc_mtx_lock(&io->del_lock);
 	if (io->n_pending_del >= io->cap_pending_del) {
 		int newcap = io->cap_pending_del ? io->cap_pending_del * 2 : 16;
 		int *np = NULL;
 		if (__os_realloc(io->pending_del,
 		    (size_t)newcap * sizeof(int), (void **)&np) != XTC_OK) {
-			(void)pthread_mutex_unlock(&io->del_lock);
+			(void)__xtc_mtx_unlock(&io->del_lock);
 			return XTC_E_NOMEM;
 		}
 		io->pending_del = np;
@@ -857,7 +937,7 @@ __xtc_io_defer_del_fd(xtc_io_t *io, int fd)
 	}
 	io->pending_del[io->n_pending_del++] = fd;
 	atomic_store_explicit(&io->has_pending_del, 1, memory_order_release);
-	(void)pthread_mutex_unlock(&io->del_lock);
+	(void)__xtc_mtx_unlock(&io->del_lock);
 	/* Nudge the owner out of its I/O wait so it drains promptly. */
 	return xtc_io_wakeup(io);
 }
@@ -877,7 +957,7 @@ __drain_pending_del(xtc_io_t *io)
 	    memory_order_acquire) == 0)
 		return;
 	for (;;) {
-		(void)pthread_mutex_lock(&io->del_lock);
+		(void)__xtc_mtx_lock(&io->del_lock);
 		n = io->n_pending_del;
 		if (n > (int)(sizeof local / sizeof local[0]))
 			n = (int)(sizeof local / sizeof local[0]);
@@ -894,7 +974,7 @@ __drain_pending_del(xtc_io_t *io)
 			atomic_store_explicit(&io->has_pending_del, 0,
 			    memory_order_relaxed);
 		}
-		(void)pthread_mutex_unlock(&io->del_lock);
+		(void)__xtc_mtx_unlock(&io->del_lock);
 		for (i = 0; i < n; i++)
 			(void)xtc_io_del_fd(io, local[i]);
 		if (n < (int)(sizeof local / sizeof local[0]))
@@ -902,7 +982,6 @@ __drain_pending_del(xtc_io_t *io)
 	}
 }
 
-/* PUBLIC: int xtc_io_poll __P((xtc_io_t *, xtc_io_event_t *, int, int64_t, int *)); */
 /* XTC_NOALLOC_BEGIN: io_uring per-poll CQE reap path (PLAN.md 19.23).
  * KNOWN GAP (flagged in the s_noalloc rollout report, not silenced):
  * the zombie-reap branch a few lines below (the `if (uf != NULL &&
@@ -935,9 +1014,9 @@ __tail_reap(xtc_io_t *io, void *tag)
 	    (uint64_t)(uintptr_t)tag);
 }
 
-int
-xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
-            int64_t timeout_ns, int *n_out)
+static int
+__poll(xtc_io_t *io, xtc_io_event_t *events, int max,
+       int64_t timeout_ns, int *n_out)
 {
 	struct __kernel_timespec ts, *tsp;
 	int got = 0;
@@ -1179,6 +1258,26 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 }
 /* XTC_NOALLOC_END */
 
+/* PUBLIC: int xtc_io_poll __P((xtc_io_t *, xtc_io_event_t *, int, int64_t, int *)); */
+/*
+ * The reap path is an SQ producer too (wakeup / multishot re-arms, the
+ * pending flush, zombie frees), so it holds the same bracket as the
+ * fiber-side producers above.  The loop polls from the scheduler, where
+ * no fiber is current and a tick cannot redirect anyway; the bracket is
+ * for a fiber that polls directly.  It spans the blocking wait, which is
+ * harmless: the tick source is per-thread CPU time, idle while blocked.
+ */
+int
+xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
+            int64_t timeout_ns, int *n_out)
+{
+	int rc;
+	__xtc_unsafe_enter();
+	rc = __poll(io, events, max, timeout_ns, n_out);
+	__xtc_unsafe_leave();
+	return rc;
+}
+
 /*
  * ---- L2: io_uring ring-pointer preempt ---------------------------
  *
@@ -1317,11 +1416,15 @@ __xtc_io_uring_preempt_due(xtc_io_t *io)
 	/* Due: drain the timeout CQE(s) and rearm.  A timeout posts one
 	 * CQE per interval; drain whatever is present (normally 1) so a
 	 * caller that consulted late does not see a backlog of "due". */
+	/* Fiber context (xtc_yield_check): the reap + re-arm is a
+	 * preempt-ring producer, so bracket it like the main ring's. */
+	__xtc_unsafe_enter();
 	io_uring_for_each_cqe(&io->preempt_ring, head, cqe)
 		seen++;
 	if (seen > 0)
 		io_uring_cq_advance(&io->preempt_ring, seen);
 	(void)__preempt_arm_timeout(io);
+	__xtc_unsafe_leave();
 	return 1;
 }
 

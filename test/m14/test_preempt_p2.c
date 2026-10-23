@@ -20,6 +20,12 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
 
 #include "munit.h"
 #include "xtc.h"
@@ -28,6 +34,10 @@
 #include "xtc_proc.h"
 #include "xtc_async.h"
 #include "xtc_preempt.h"
+#include "xtc_aio.h"
+#include "xtc_fs.h"
+#include "xtc_inject.h"
+#include "xtc_io.h"
 
 #if !defined(__has_feature)
 #  define __has_feature(x) 0
@@ -401,11 +411,207 @@ test_p2_red_zone_flags(const MunitParameter p[], void *d)
 }
 #endif /* x86-64 Linux */
 
+/*
+ * /sqe_window_*: an involuntary preemption must never land inside the
+ * io_uring SQE reservation window.  io_uring_get_sqe advances the SQ's
+ * userspace tail before the slot is written; a fiber redirected to the
+ * scheduler there lets any same-thread submitter publish the reserved
+ * slot with its STALE contents, and the preempted fiber's own op then
+ * never reaches the kernel (test_wal_kill preempt-nokill hung this way,
+ * ~0.2% of runs).  The "io.uring.sqe_reserved" injection point fires
+ * inside the window; its callback raises the REAL preemption signal on
+ * the fiber's own thread, so the handler takes exactly the decision a
+ * timer tick there would.  Control: the same raise from plain fiber
+ * code DOES preempt (a peer runs before raise returns), so a deferred
+ * raise inside the window is not vacuous.
+ *
+ *   no_preempt     no peer may run while the fiber is inside the window
+ *                  (an aio submit, then an fd registration's POLL_ADD)
+ *   lost_completion a peer that submits while the fiber is preempted in
+ *                  the window must not cost the fiber its completion
+ *                  (before the fix: the fiber parks forever; a watchdog
+ *                  aborts after 10 s)
+ */
+#define SW_LEN 4096
+static atomic_long g_sw_peer_runs;
+static atomic_int  g_sw_arm, g_sw_window, g_sw_hits, g_sw_stop, g_sw_done;
+static atomic_int  g_sw_ctrl_preempted, g_sw_win_preempted, g_sw_peer_wrote;
+static int         g_sw_fd, g_sw_peer_submits, g_sw_a_ok, g_sw_b_rc, g_sw_fd_ok;
+
+static void
+sw_raise_in_window(const char *name, void *user)
+{
+	long before;
+	(void)name; (void)user;
+	if (!atomic_exchange(&g_sw_arm, 0))
+		return;                          /* one shot: the first SQE */
+	atomic_fetch_add(&g_sw_hits, 1);
+	before = atomic_load(&g_sw_peer_runs);
+	atomic_store(&g_sw_window, 1);
+	(void)raise(SIGVTALRM);              /* a preemption tick, here */
+	atomic_store(&g_sw_window, 0);
+	if (atomic_load(&g_sw_peer_runs) != before)
+		atomic_store(&g_sw_win_preempted, 1);
+}
+
+static void
+sw_peer(void *arg)
+{
+	static unsigned char b[SW_LEN];
+	(void)arg;
+	memset(b, 0xbb, sizeof b);
+	while (!atomic_load(&g_sw_stop)) {
+		atomic_fetch_add(&g_sw_peer_runs, 1);
+		if (g_sw_peer_submits && atomic_load(&g_sw_window) &&
+		    !atomic_load(&g_sw_peer_wrote)) {
+			atomic_store(&g_sw_peer_wrote, 1);
+			g_sw_b_rc = xtc_aio_pwrite(g_sw_fd, b, SW_LEN, SW_LEN);
+		}
+		xtc_yield();
+	}
+}
+
+static void
+sw_writer(void *arg)
+{
+	static unsigned char out[SW_LEN], in[SW_LEN];
+	long before;
+	int pfd[2];
+	uint32_t rev = 0;
+	(void)arg;
+	memset(out, 0xaa, sizeof out);
+	xtc_yield();                          /* let the peer start */
+	before = atomic_load(&g_sw_peer_runs);
+	(void)raise(SIGVTALRM);               /* control: plain fiber code */
+	if (atomic_load(&g_sw_peer_runs) != before)
+		atomic_store(&g_sw_ctrl_preempted, 1);
+	atomic_store(&g_sw_arm, 1);
+	if (xtc_aio_pwrite(g_sw_fd, out, SW_LEN, 0) == SW_LEN &&
+	    xtc_aio_pread(g_sw_fd, in, SW_LEN, 0) == SW_LEN)
+		g_sw_a_ok = memcmp(in, out, SW_LEN) == 0;
+	/* The fd-registration producer (POLL_ADD from xtc_io_reg_fd): a
+	 * readable pipe, so the wait returns at once. */
+	if (pipe(pfd) == 0) {
+		if (write(pfd[1], "x", 1) == 1) {
+			atomic_store(&g_sw_arm, 1);
+			if (xtc_proc_wait_fd(pfd[0], XTC_IO_READABLE, -1,
+			    &rev) == XTC_OK && (rev & XTC_IO_READABLE))
+				g_sw_fd_ok = 1;
+		}
+		(void)close(pfd[0]);
+		(void)close(pfd[1]);
+	}
+	atomic_store(&g_sw_stop, 1);
+}
+
+static void *
+sw_watchdog(void *arg)
+{
+	int i;
+	(void)arg;
+	for (i = 0; i < 1000 && !atomic_load(&g_sw_done); i++)
+		usleep(10000);
+	if (!atomic_load(&g_sw_done)) {
+		fprintf(stderr, "sqe_window: the fiber's io completion never "
+		    "came (preempted inside the SQE window: %d)\n",
+		    atomic_load(&g_sw_win_preempted));
+		abort();
+	}
+	return NULL;
+}
+
+static MunitResult
+sw_run(int peer_submits)
+{
+	extern int __xtc_coro_preempt_effective(void);
+	xtc_exec_t *e = NULL;
+	xtc_loop_t *l;
+	pthread_t wd;
+	char dir[512], path[600];
+
+	if (!xtc_preempt_supported() || !__xtc_coro_preempt_effective() ||
+	    strcmp(xtc_io_backend_name(), "uring") != 0)
+		return MUNIT_SKIP;   /* the window is io_uring's */
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
+    __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	return MUNIT_SKIP;   /* see test_p2_preempt_tight_loop */
+#endif
+	munit_assert_int(xtc_fs_tmpdir(dir, sizeof dir), ==, XTC_OK);
+	snprintf(path, sizeof path, "%s/xtc_sqe_window_XXXXXX", dir);
+	g_sw_fd = mkstemp(path);
+	munit_assert_int(g_sw_fd, >=, 0);
+	(void)unlink(path);
+	atomic_store(&g_sw_peer_runs, 0);
+	atomic_store(&g_sw_arm, 0);
+	atomic_store(&g_sw_window, 0);
+	atomic_store(&g_sw_hits, 0);
+	atomic_store(&g_sw_stop, 0);
+	atomic_store(&g_sw_done, 0);
+	atomic_store(&g_sw_ctrl_preempted, 0);
+	atomic_store(&g_sw_win_preempted, 0);
+	atomic_store(&g_sw_peer_wrote, 0);
+	g_sw_peer_submits = peer_submits;
+	g_sw_a_ok = 0;
+	g_sw_b_rc = 0;
+	g_sw_fd_ok = 0;
+	munit_assert_int(xtc_inject_attach("io.uring.sqe_reserved",
+	    sw_raise_in_window, NULL), ==, XTC_OK);
+
+	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	l = xtc_exec_loop(e, 0);
+	/* Arms the handler + unblocks the signal on the worker; the 10 s
+	 * CPU-time interval never elapses, so every tick is our raise. */
+	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
+	    ==, XTC_OK);
+	xtc_preempt_set_involuntary(1);
+	munit_assert_int(xtc_proc_spawn(l, sw_writer, NULL, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_proc_spawn(l, sw_peer, NULL, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(pthread_create(&wd, NULL, sw_watchdog, NULL), ==, 0);
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	atomic_store(&g_sw_done, 1);
+	(void)pthread_join(wd, NULL);
+	xtc_preempt_set_involuntary(0);
+	(void)xtc_exec_fini(e);
+	(void)xtc_inject_detach("io.uring.sqe_reserved");
+	(void)close(g_sw_fd);
+
+	if (atomic_load(&g_sw_hits) == 0)
+		return MUNIT_SKIP;   /* injection points compiled out */
+	munit_assert_int(atomic_load(&g_sw_ctrl_preempted), ==, 1);
+	munit_assert_int(atomic_load(&g_sw_win_preempted), ==, 0);
+	munit_assert_int(g_sw_a_ok, ==, 1);
+	munit_assert_int(g_sw_fd_ok, ==, 1);
+	munit_assert_int(atomic_load(&g_sw_hits), ==, 2);   /* aio + POLL_ADD */
+	if (peer_submits && atomic_load(&g_sw_peer_wrote))
+		munit_assert_int(g_sw_b_rc, ==, SW_LEN);
+	return MUNIT_OK;
+}
+
+static MunitResult
+test_p2_sqe_window_no_preempt(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return sw_run(0);
+}
+
+static MunitResult
+test_p2_sqe_window_lost_completion(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return sw_run(1);
+}
+
 static MunitTest tests[] = {
 	{ "/preempt_tight_loop", test_p2_preempt_tight_loop, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/peers_progress", test_p2_peers_progress_on_ucontext, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/sqe_window_no_preempt", test_p2_sqe_window_no_preempt, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/sqe_window_lost_completion", test_p2_sqe_window_lost_completion,
+	    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #if defined(P2_VEC)
 	{ "/vector_state", test_p2_vector_state, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },

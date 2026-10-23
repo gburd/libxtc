@@ -91,6 +91,7 @@
 #if defined(XTC_IO_BACKEND_IOCP)
 
 #include "io_int.h"
+#include "preempt_int.h"   /* __xtc_mtx_*: del_lock is taken from fibers */
 #include "aio_int.h"      /* __xtc_aio_done_set: cross-thread completion flag */
 
 /* winsock2.h MUST precede windows.h on MinGW.  WIN32_NO_STATUS keeps
@@ -858,7 +859,7 @@ __drain_pending_del(xtc_io_t *io)
 	if (!atomic_load_explicit(&io->has_pending_del, memory_order_acquire))
 		return;
 	for (;;) {
-		(void)pthread_mutex_lock(&io->del_lock);
+		(void)__xtc_mtx_lock(&io->del_lock);
 		n = io->n_pending_del;
 		if (n > (int)(sizeof local / sizeof local[0]))
 			n = (int)(sizeof local / sizeof local[0]);
@@ -870,7 +871,7 @@ __drain_pending_del(xtc_io_t *io)
 		if (io->n_pending_del == 0)
 			atomic_store_explicit(&io->has_pending_del, 0,
 			    memory_order_relaxed);
-		(void)pthread_mutex_unlock(&io->del_lock);
+		(void)__xtc_mtx_unlock(&io->del_lock);
 		for (i = 0; i < n; i++)
 			(void)xtc_io_del_fd(io, local[i]);
 		if (n < (int)(sizeof local / sizeof local[0]))
@@ -886,7 +887,7 @@ __apply_pending_del_for(xtc_io_t *io, int fd)
 	int i, found = 0;
 	if (!atomic_load_explicit(&io->has_pending_del, memory_order_acquire))
 		return;
-	(void)pthread_mutex_lock(&io->del_lock);
+	(void)__xtc_mtx_lock(&io->del_lock);
 	for (i = 0; i < io->n_pending_del; i++) {
 		if (io->pending_del[i] != fd)
 			continue;
@@ -897,7 +898,7 @@ __apply_pending_del_for(xtc_io_t *io, int fd)
 	if (io->n_pending_del == 0)
 		atomic_store_explicit(&io->has_pending_del, 0,
 		    memory_order_relaxed);
-	(void)pthread_mutex_unlock(&io->del_lock);
+	(void)__xtc_mtx_unlock(&io->del_lock);
 	if (found)
 		(void)xtc_io_del_fd(io, fd);
 }
@@ -921,12 +922,12 @@ __xtc_io_defer_del_fd(xtc_io_t *io, int fd)
 	if (io == NULL || fd < 0) return XTC_E_INVAL;
 	if (__is_owner(io))
 		return xtc_io_del_fd(io, fd);
-	(void)pthread_mutex_lock(&io->del_lock);
+	(void)__xtc_mtx_lock(&io->del_lock);
 	if (io->n_pending_del == io->cap_pending_del) {
 		int nc = io->cap_pending_del ? io->cap_pending_del * 2 : 16;
 		if (__os_realloc(io->pending_del, (size_t)nc * sizeof(int),
 		    (void **)&np) != XTC_OK) {
-			(void)pthread_mutex_unlock(&io->del_lock);
+			(void)__xtc_mtx_unlock(&io->del_lock);
 			return XTC_E_NOMEM;
 		}
 		io->pending_del = np;
@@ -934,7 +935,7 @@ __xtc_io_defer_del_fd(xtc_io_t *io, int fd)
 	}
 	io->pending_del[io->n_pending_del++] = fd;
 	atomic_store_explicit(&io->has_pending_del, 1, memory_order_release);
-	(void)pthread_mutex_unlock(&io->del_lock);
+	(void)__xtc_mtx_unlock(&io->del_lock);
 	(void)xtc_io_wakeup(io);
 	return XTC_OK;
 }
