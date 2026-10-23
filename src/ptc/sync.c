@@ -104,6 +104,17 @@ cv_wait_until(pthread_cond_t *cv, pthread_mutex_t *lock,
 #define SYNC_REF_POLL_NS 11     /* ns per poll where the counts were tuned */
 #define SYNC_CAL_POLLS   256    /* polls per calibration trial */
 #define SYNC_CAL_TRIALS  3
+/*
+ * Floor of the scale, x1000.  x86-64 keeps at least the tuned counts: a
+ * slower PAUSE there spins longer, not fewer polls (the shorter spin cost
+ * 4-9% at 4 threads on a 64-vCPU Icelake host, where PAUSE + load takes
+ * ~20 ns).  Elsewhere the spin may shrink to 1/16 of the counts.
+ */
+#if defined(__x86_64__) || defined(__i386__)
+#define SYNC_SCALE_MIN_PM 1000
+#else
+#define SYNC_SCALE_MIN_PM (1000 / 16)
+#endif
 
 /*
  * The spin hint.  aarch64: ISB, not YIELD.  YIELD is a hint for SMT
@@ -172,10 +183,10 @@ sync_spin_calibrate(void)
 	}
 	if (best < 1)
 		best = 1;
-	/* scale = REF / (best / POLLS), x1000, kept within [1/16, 64]. */
+	/* scale = REF / (best / POLLS), x1000, kept within [MIN, 64]. */
 	pm = (int)((int64_t)SYNC_REF_POLL_NS * SYNC_CAL_POLLS * 1000 / best);
-	if (pm < 1000 / 16)
-		pm = 1000 / 16;
+	if (pm < SYNC_SCALE_MIN_PM)
+		pm = SYNC_SCALE_MIN_PM;
 	if (pm > 64 * 1000)
 		pm = 64 * 1000;
 	atomic_store_explicit(&g_sync_spin_scale_pm, pm, memory_order_relaxed);
