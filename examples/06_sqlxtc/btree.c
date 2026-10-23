@@ -2092,6 +2092,150 @@ bt_seek_ge(bt_t *bt, const void *key, uint16_t klen, void *kout,
 }
 
 /*
+ * bt_seek_ge_n: the probes descend together.  Sorted by key, they
+ * share their upper nodes, so each round visits every distinct node on
+ * the probes' current level once: one fix, one version bracket, then a
+ * binary search per probe of the run that sits there.  One pin is held
+ * at a time (a node is released before the next is fixed), as in the
+ * single-probe optimistic read; a node is only trusted once the version
+ * re-check after the run passes, and anything the fast path does not
+ * settle -- a writer in the node, a dead node, a key outside the node's
+ * fences (a concurrent split or merge), an out-of-line value, an answer
+ * past the leaf's last key, a full buffer -- is left XTC_E_AGAIN for
+ * bt_seek_ge.  So the batch is never less correct than one bt_seek_ge
+ * per probe; it is that read with the shared levels read once.
+ */
+/* Prefetch the lines a node search reads first: the header and the
+ * slot directory after it (10-byte slots: 512 bytes hold ~47, about a
+ * full leaf's directory). */
+static void
+bt_prefetch_node(const void *pg)
+{
+#if defined(__GNUC__) || defined(__clang__)
+	const char *c = pg;
+	int i;
+	for (i = 0; i < 512; i += 64)
+		__builtin_prefetch(c + i, 0, 3);
+#else
+	(void)pg;
+#endif
+}
+
+int
+bt_seek_ge_n(bt_t *bt, bt_probe_t *p, int n, void *buf, uint32_t bcap)
+{
+	bm_t *bm;
+	int ord[BT_SEEKN_MAX], nord[BT_SEEKN_MAX];
+	bm_pid_t at[BT_SEEKN_MAX], nat[BT_SEEKN_MAX];
+	uint8_t *out = buf;
+	uint32_t used = 0;
+	int live = 0, i, j, k, e, round, nl;
+
+	if (bt == NULL || p == NULL || n < 0 || n > BT_SEEKN_MAX ||
+	    (buf == NULL && bcap > 0))
+		return XTC_E_INVAL;
+	for (i = 0; i < n; i++) {
+		p[i].rc = XTC_E_AGAIN;
+		p[i].kolen = p[i].vlen = 0;
+		p[i].koff = p[i].voff = 0;
+		if (p[i].key == NULL || p[i].klen > bt_key_max(bt)) {
+			p[i].rc = XTC_E_INVAL;
+			continue;
+		}
+		for (j = live; j > 0 && key_cmp(p[ord[j - 1]].key,
+		    p[ord[j - 1]].klen, p[i].key, p[i].klen) > 0; j--)
+			ord[j] = ord[j - 1];
+		ord[j] = i;
+		live++;
+	}
+	if (!BT_OLC_ENABLED || live == 0)
+		return XTC_OK;
+	bm = bt->bm;
+	at[0] = atomic_load(&bt->root_pid);
+	for (i = 1; i < live; i++)
+		at[i] = at[0];
+	for (round = 0; live > 0 && round <= BT_MAX_HEIGHT; round++) {
+		nl = 0;
+		/* Start every node of this level loading before reading any:
+		 * the probes' leaves are scattered, so the misses overlap
+		 * instead of queueing.  The pin-free lookup only names an
+		 * address to prefetch -- nothing is read through it. */
+		for (i = 0; round > 0 && i < live; i = e) {
+			bm_frame_t *pf = bm_fix_pid_nopin(bm, at[i]);
+			for (e = i + 1; e < live && at[e] == at[i]; e++)
+				;
+			if (pf != NULL)
+				bt_prefetch_node(bm_page(pf));
+		}
+		for (i = 0; i < live; i = e) {
+			bm_frame_t *f;
+			const void *pg;
+			uint64_t v;
+			uint32_t mark = used;
+			int leaf, dead, mnl = nl;
+
+			for (e = i + 1; e < live && at[e] == at[i]; e++)
+				;                   /* the run [i, e) on this node */
+			if (bm_fix_pid(bm, at[i], &f) != XTC_OK)
+				continue;           /* left AGAIN */
+			pg = bm_page(f);
+			if (!bm_read_begin(f, &v)) {
+				bm_unfix(bm, f, 0);
+				continue;
+			}
+			leaf = btnode_is_leaf(pg);
+			dead = btnode_is_dead(pg);
+			for (k = i; k < e; k++) {
+				bt_probe_t *q = &p[ord[k]];
+				const void *vp = NULL;
+				uint16_t vl = 0, kl = 0;
+				int s;
+
+				if (dead || btnode_below_lo_fence(pg, q->key, q->klen) ||
+				    btnode_beyond_hi_fence(pg, q->key, q->klen))
+					continue;       /* moved: bt_seek_ge */
+				if (!leaf) {
+					bm_pid_t c = child_for_key(pg, q->key, q->klen);
+					if (c == BM_PID_NONE)
+						continue;
+					nord[nl] = ord[k];
+					nat[nl++] = c;
+					continue;
+				}
+				s = btnode_search(pg, q->key, q->klen, NULL);
+				if (s >= (int)btnode_count(pg) ||
+				    btnode_get(pg, s, NULL, NULL, &vp, &vl) != 0 ||
+				    btnode_vflag(pg, s) || used > bcap ||
+				    olc_full_key(bt, pg, s, out + used,
+				    (uint16_t)(bcap - used > 0xFFFF ? 0xFFFF :
+				    bcap - used), &kl) != 0 ||
+				    (uint32_t)vl > bcap - used - kl)
+					continue;       /* past the leaf, ovf, full */
+				memcpy(out + used + kl, vp, vl);
+				q->koff = used;
+				q->kolen = kl;
+				q->voff = used + kl;
+				q->vlen = vl;
+				q->rc = XTC_OK;
+				used += (uint32_t)kl + vl;
+			}
+			if (!bm_read_valid(f, v)) {
+				/* A writer was in the node: nothing read here holds. */
+				for (k = i; k < e; k++)
+					p[ord[k]].rc = XTC_E_AGAIN;
+				used = mark;
+				nl = mnl;
+			}
+			bm_unfix(bm, f, 0);
+		}
+		memcpy(ord, nord, sizeof ord[0] * (size_t)nl);
+		memcpy(at, nat, sizeof at[0] * (size_t)nl);
+		live = nl;
+	}
+	return XTC_OK;
+}
+
+/*
  * If the root is an internal node holding a single child (only the
  * slot-0 -infinity child remains after a merge cascade removed its
  * last separator), collapse it: make that child the new root and free

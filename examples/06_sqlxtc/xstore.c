@@ -7762,6 +7762,14 @@ struct xstore_iscan {
 	/* output: the stored value, flag byte first (xs_point_get) */
 	uint8_t       rec[1 + XS_VMAX];
 	uint64_t      visited;
+	/* Row read-ahead (xs_iscan_rows): the visible versions of the next
+	 * committed candidates, fetched by one batched seek (bt_seek_ge_n)
+	 * instead of a root-to-leaf seek per row.  A hint (xstore_iscan_hint:
+	 * LIMIT, MIN/MAX) sizes the first batches so a short walk does not
+	 * read rows it never returns. */
+	struct xs_ira *ra;
+	int           ra_n, ra_i, ra_end;
+	int           ra_left;   /* hinted rows not yet read (0: no hint) */
 };
 
 /* Is entry key `k` (length kl) inside the scan's bounds?  Returns 1 in
@@ -8057,17 +8065,130 @@ xs_iscan_committed(xstore_iscan_t *s)
 	}
 }
 
+/* The row read-ahead batch: up to XS_IRA_MAX committed candidates (key
+ * and rowid), each with the stored value (flag byte first) of its
+ * version visible at the snapshot: rc 1 visible, 0 none, -1 not settled
+ * by the batch (xs_point_get decides when the row is taken). */
+#define XS_IRA_MAX    16
+#define XS_IRA_KBYTES 2048   /* packed keys; one more maximal key fits */
+struct xs_ira {
+	int64_t  rid[XS_IRA_MAX];
+	int      rc[XS_IRA_MAX];
+	uint32_t voff[XS_IRA_MAX];
+	uint16_t vlen[XS_IRA_MAX];
+	uint16_t koff[XS_IRA_MAX], klen[XS_IRA_MAX];
+	uint8_t  probe[XS_IRA_MAX][XS_VKLEN];
+	uint8_t  kbuf[XS_IRA_KBYTES + XS_IDX_KMAX];
+	uint8_t  vbuf[16 * 1024];    /* a row that does not fit: xs_point_get */
+};
+
+/* Refill the row batch with the next committed candidates -- XS_IRA_MAX
+ * at a time, or under a hint (xstore_iscan_hint) the rows it still
+ * expects, then 2, 4, .. -- and read their visible versions with one
+ * bt_seek_ge_n.  Returns the count (0: the committed stream is done),
+ * or -1 on no memory. */
+static int
+xs_iscan_rows(xstore_iscan_t *s)
+{
+	struct xs_ira *a = s->ra;
+	bt_probe_t pr[XS_IRA_MAX];
+	uint32_t ku = 0;
+	int i, n = 0, c = 0, want;
+
+	if (a == NULL && (a = s->ra = malloc(sizeof *a)) == NULL)
+		return -1;
+	/* A hinted walk reads exactly its budget first; past it (rows the
+	 * WHERE or the snapshot dropped) it starts small again. */
+	if (s->ra_left > 0) want = s->ra_left;
+	else if (s->ra_left == 0) want = XS_IRA_MAX;
+	else want = s->ra_n > 0 ? s->ra_n * 2 : 2;
+	if (want > XS_IRA_MAX) want = XS_IRA_MAX;
+	s->ra_n = s->ra_i = 0;
+	while (n < want && ku <= XS_IRA_KBYTES &&
+	    (c = xs_iscan_committed(s)) == 1) {
+		memcpy(a->kbuf + ku, s->ck, (size_t)s->cklen);
+		a->koff[n] = (uint16_t)ku;
+		a->klen[n] = (uint16_t)s->cklen;
+		ku += (uint32_t)s->cklen;
+		a->rid[n] = s->crid;
+		enc_vkey(s->e.rt.tableid, s->crid, s->snap, a->probe[n]);
+		pr[n].key = a->probe[n];
+		pr[n].klen = XS_VKLEN;
+		n++;
+	}
+	if (n == 0)
+		return c < 0 ? -1 : 0;
+	if (s->ra_left > 0 && (s->ra_left -= n) <= 0)
+		s->ra_left = -1;
+	(void)bt_seek_ge_n(s->bt, pr, n, a->vbuf, (uint32_t)sizeof a->vbuf);
+	for (i = 0; i < n; i++) {
+		const uint8_t *k = a->vbuf + pr[i].koff, *v = a->vbuf + pr[i].voff;
+		a->voff[i] = pr[i].voff;
+		a->vlen[i] = pr[i].vlen;
+		/* As xs_point_get: the first version key >= (tid, rid, snap) is
+		 * the newest one committed at or before snap, if it is this
+		 * row's and not a tombstone. */
+		if (pr[i].rc == XTC_OK)
+			a->rc[i] = pr[i].kolen == XS_VKLEN &&
+			    dec_tableid(k) == s->e.rt.tableid &&
+			    dec_rowid(k) == a->rid[i] && pr[i].vlen >= 1 &&
+			    !(v[0] & XS_F_DELETED);
+		else
+			a->rc[i] = -1;
+	}
+	s->ra_n = n;
+	return n;
+}
+
+/* Expect about `nrows` rows to be taken (a LIMIT, 1 for MIN/MAX): the
+ * first batches read that many rows in all, then small ones. */
+void
+xstore_iscan_hint(xstore_iscan_t *s, int64_t nrows)
+{
+	if (s != NULL && s->ra == NULL)
+		s->ra_left = nrows < 1 ? 1 : nrows > 1 << 20 ? 1 << 20 :
+		    (int)nrows;
+}
+
+/* The next committed candidate from the row batch into s->ck / s->crid
+ * (s->ra_i - 1 is its slot): 1, 0 at the end, -1 on no memory. */
+static int
+xs_iscan_cand(xstore_iscan_t *s)
+{
+	int r, i;
+	for (;;) {
+		if (s->ra == NULL || s->ra_i >= s->ra_n) {
+			if (s->ra_end) return 0;
+			if ((r = xs_iscan_rows(s)) <= 0) {
+				if (r == 0) s->ra_end = 1;
+				return r;
+			}
+		}
+		i = s->ra_i++;
+		/* The buffered write decides (checked again here: a write
+		 * since the batch was read must win, as it did per row). */
+		if (s->cx != NULL && s->cx->in_txn &&
+		    wbuf_find(s->cx, s->e.rt.tableid, s->ra->rid[i]) != NULL)
+			continue;
+		s->cklen = s->ra->klen[i];
+		memcpy(s->ck, s->ra->kbuf + s->ra->koff[i], (size_t)s->cklen);
+		s->crid = s->ra->rid[i];
+		return 1;
+	}
+}
+
 int
 xstore_iscan_next(xstore_iscan_t *s, int64_t *rowid, const uint8_t **rec,
     int *reclen)
 {
 	uint8_t kk[XS_IDX_KMAX];
-	int c, rl, kl;
+	const uint8_t *v;
+	int c, rl, kl, vr;
 	if (s == NULL) return -1;
 	for (;;) {
 		if (s->done) return 0;
 		if (!s->have_ck) {
-			c = xs_iscan_committed(s);
+			c = xs_iscan_cand(s);
 			if (c < 0) return -1;             /* no memory */
 			s->have_ck = c ? 1 : -1;
 		}
@@ -8100,11 +8221,20 @@ xstore_iscan_next(xstore_iscan_t *s, int64_t *rowid, const uint8_t **rec,
 		s->have_ck = 0;
 		/* Verify: the candidate's visible version still carries this key. */
 		s->visited++;
-		rl = xs_point_get(s->bt, s->e.rt.tableid, s->crid, s->snap, s->rec,
-		    (int)sizeof s->rec);
-		if (rl == 0) continue;            /* not visible at the snapshot */
-		if (rl < 0) rl = 0;
-		kl = xs_idx_rowkey(&s->e.rt, s->rec + 1, rl, s->crid, 1, kk,
+		vr = s->ra->rc[s->ra_i - 1];
+		if (vr == 0) continue;            /* not visible at the snapshot */
+		if (vr > 0) {
+			v = s->ra->vbuf + s->ra->voff[s->ra_i - 1];
+			rl = (int)s->ra->vlen[s->ra_i - 1] - 1;
+			if (rl > XS_VMAX) rl = XS_VMAX;
+		} else {
+			v = s->rec;
+			rl = xs_point_get(s->bt, s->e.rt.tableid, s->crid, s->snap,
+			    s->rec, (int)sizeof s->rec);
+			if (rl == 0) continue;
+			if (rl < 0) rl = 0;
+		}
+		kl = xs_idx_rowkey(&s->e.rt, v + 1, rl, s->crid, 1, kk,
 		    (int)sizeof kk, NULL);
 		if (kl != s->cklen || memcmp(kk, s->ck, (size_t)kl) != 0)
 			continue;                     /* stale entry */
@@ -8112,7 +8242,7 @@ xstore_iscan_next(xstore_iscan_t *s, int64_t *rowid, const uint8_t **rec,
 			rset_add(s->cx, s->e.rt.tableid, s->crid);
 			ssi_record_read(s->cx->ssi, s->e.rt.tableid, s->crid);
 		}
-		*rowid = s->crid; *rec = s->rec + 1; *reclen = rl;
+		*rowid = s->crid; *rec = v + 1; *reclen = rl;
 		return 1;
 	}
 }
@@ -8126,6 +8256,7 @@ xstore_iscan_close(xstore_iscan_t *s)
 		    memory_order_relaxed);
 	if (s->cur != NULL) bt_cursor_close(s->cur);
 	free(s->ka);
+	free(s->ra);
 	free(s->bc);
 	free(s->bkeys);
 	free(s);

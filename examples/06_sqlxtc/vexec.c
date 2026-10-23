@@ -4384,7 +4384,18 @@ src_open(struct vx_stmt *st, const char *table, const vx_apath_t *ap,
 		s->iscan = xstore_iscan_open((struct xsql *)st->db, table,
 		    ap->idx_id, eq, ap->neq, haslo ? &lo : NULL, ap->lo_incl,
 		    hashi ? &hi : NULL, ap->hi_incl, ap->reverse);
-		if (s->iscan != NULL) { s->ordered = ap->ordered; goto out; }
+		if (s->iscan != NULL) {
+			s->ordered = ap->ordered;
+			/* A walk that stops early (MIN/MAX, or LIMIT over the
+			 * index order) should not read rows ahead it never takes. */
+			if (ap == &st->ap && st->ap_minmax)
+				xstore_iscan_hint(s->iscan, 1);
+			else if (ap == &st->ap && st->agg == NULL &&
+			    st->limit >= 0 && !st->distinct &&
+			    (ap->ordered || st->norder == 0))
+				xstore_iscan_hint(s->iscan, st->offset + st->limit);
+			goto out;
+		}
 		goto scan;
 	}
 	if (ap->rowmax) {
