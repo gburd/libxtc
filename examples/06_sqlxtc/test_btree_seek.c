@@ -23,6 +23,10 @@
  *	    the descending index walk): every batch is strictly descending,
  *	    below its bound, and skips no stable key between the bound and
  *	    its last key.
+ *	S4  bt_seek_ge_n, the batched seek behind an index walk's row
+ *	    fetches: in S1 every settled answer equals the oracle's and most
+ *	    probes are settled by the batch; in the S2 churn every settled
+ *	    answer obeys S2's bounds and carries its own key's value.
  *
  *	Built twice: test_btree_seek (the optimistic, version-validated
  *	path) and test_btree_seek_latched (-DBT_OLC_ENABLED=0: the latched
@@ -43,6 +47,22 @@
 #include "xtc_exec.h"
 #include "xtc_proc.h"
 #include "t_tmp.h"
+
+/* The optimistic reads are compiled out of the latched build and under
+ * TSan (btree.c BT_OLC_ENABLED): there the batch settles nothing. */
+#if defined(__SANITIZE_THREAD__)
+#define T_OLC 0
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define T_OLC 0
+#endif
+#endif
+#if !defined(T_OLC) && defined(BT_OLC_ENABLED)
+#define T_OLC BT_OLC_ENABLED
+#endif
+#ifndef T_OLC
+#define T_OLC 1
+#endif
 
 static uint32_t
 rnd(uint64_t *s)
@@ -157,6 +177,51 @@ t_oracle(uint32_t ps)
 			}
 		}
 	}
+	/* S4 (oracle half): the same probes in shuffled batches of 1..64
+	 * through bt_seek_ge_n.  A settled answer must equal bt_seek_ge's;
+	 * an unsettled one (XTC_E_AGAIN) is allowed but must be rare on a
+	 * quiet tree. */
+	{
+		static unsigned char nb[64 * 8192];
+		bt_probe_t pr[BT_SEEKN_MAX];
+		char qk[BT_SEEKN_MAX][16];
+		int nq, settled = 0, total = 0, nwrong = 0;
+		for (i = 0; i < S1_N; i += nq) {
+			int j2;
+			nq = 1 + (int)(rnd(&s) % BT_SEEKN_MAX);
+			for (j2 = 0; j2 < nq; j2++) {
+				int x = (int)(rnd(&s) % (S1_N + 10));
+				snprintf(qk[j2], sizeof qk[j2], "s%07d", x);
+				pr[j2].key = qk[j2];
+				pr[j2].klen = (uint16_t)((rnd(&s) & 1) ? 8 : 9);
+				if (pr[j2].klen == 9) qk[j2][8] = '!';
+			}
+			CK(bt_seek_ge_n(bt, pr, nq, nb, sizeof nb) == XTC_OK);
+			for (j2 = 0; j2 < nq; j2++) {
+				int rc2;
+				total++;
+				if (pr[j2].rc == XTC_E_AGAIN) continue;
+				settled++;
+				rc2 = bt_seek_ge(bt, pr[j2].key, pr[j2].klen, got,
+				    sizeof got, &gl, out, sizeof out, &vl);
+				if (pr[j2].rc != XTC_OK || rc2 != XTC_OK ||
+				    pr[j2].kolen != gl || pr[j2].vlen != vl ||
+				    memcmp(nb + pr[j2].koff, got, gl) != 0 ||
+				    memcmp(nb + pr[j2].voff, out, vl) != 0)
+					nwrong++;
+			}
+		}
+		/* Unsettled: the answer is in the next leaf (the deleted run,
+		 * past the last key) or out of line -- a quarter of these
+		 * probes; the rest must be settled where the batch can read. */
+		CK(nwrong == 0);
+		CK(!T_OLC || settled * 2 >= total);
+		printf("  %s   S4 ps=%u: %d batched probes, %d settled by the "
+		    "batch, %d wrong\n", nwrong == 0 && (!T_OLC ||
+		    settled * 2 >= total) ? "ok" : "FAIL", ps, total, settled,
+		    nwrong);
+	}
+
 	/* Past every key; a NULL value buffer; a key buffer too small. */
 	CK(bt_seek_ge(bt, "t", 1, got, sizeof got, &gl, NULL, 0, NULL) ==
 	    XTC_E_NOTFOUND);
@@ -283,6 +348,75 @@ next:
 	free(want);
 }
 
+/* S4: batches of probes through bt_seek_ge_n in the churn.  Each
+ * settled answer obeys S2's bound check; unsettled ones are counted. */
+static _Atomic long g_n_reads, g_n_settled, g_n_bad;
+
+static void
+reader_n(void *arg)
+{
+	uint64_t s = (uint64_t)(uintptr_t)arg * 0xA0761D6478BD642Full + 3;
+	/* Per reader: a seek can park on page I/O. */
+	unsigned char *nb = malloc(64 * 4096), *want = malloc(4096);
+	bt_probe_t pr[BT_SEEKN_MAX];
+	char q[BT_SEEKN_MAX][16], hi[16];
+	long n = 0, settled = 0, bad = 0;
+
+	if (nb == NULL || want == NULL) {
+		atomic_fetch_add(&g_n_bad, 1);
+		free(nb); free(want);
+		return;
+	}
+	while (atomic_load(&g_active) > 0 || n < 2000) {
+		int nq = 1 + (int)(rnd(&s) % BT_SEEKN_MAX), k, j, gi;
+		for (k = 0; k < nq; k++) {
+			s2_key((int)(rnd(&s) % S2_N), q[k]);
+			pr[k].key = q[k];
+			pr[k].klen = 8;
+			if (rnd(&s) & 1) { q[k][8] = '!'; pr[k].klen = 9; }
+		}
+		if (bt_seek_ge_n(g_bt, pr, nq, nb, 64 * 4096) != XTC_OK) {
+			bad++;
+			goto next;
+		}
+		for (k = 0; k < nq; k++) {
+			const char *got = (const char *)nb + pr[k].koff;
+			int i = atoi(q[k] + 1);
+			n++;
+			if (pr[k].rc == XTC_E_AGAIN) continue;
+			settled++;
+			for (j = pr[k].klen == 9 ? i + 1 : i; !STABLE(j); j++)
+				;
+			if (pr[k].rc != XTC_OK || pr[k].kolen != 8 || j >= S2_N) {
+				bad++;              /* a stable key bounds every probe */
+				continue;
+			}
+			s2_key(j, hi);
+			if (memcmp(got, q[k], 8) < 0 ||
+			    (memcmp(got, q[k], 8) == 0 && pr[k].klen == 9) ||
+			    memcmp(got, hi, 8) > 0) {
+				bad++;
+				continue;
+			}
+			memcpy(hi, got, 8);         /* the value follows the key */
+			hi[8] = '\0';
+			gi = atoi(hi + 1);
+			s2_val(gi, want);
+			if (pr[k].vlen != s2_vlen(gi) ||
+			    memcmp(nb + pr[k].voff, want, pr[k].vlen) != 0)
+				bad++;
+		}
+next:
+		if ((n & 63) < nq)
+			xtc_yield();
+	}
+	atomic_fetch_add(&g_n_reads, n);
+	atomic_fetch_add(&g_n_settled, settled);
+	atomic_fetch_add(&g_n_bad, bad);
+	free(nb);
+	free(want);
+}
+
 /* S3: a reverse batch below a random bound.  The answer must be the
  * largest keys below the bound in descending order: strictly
  * descending, all below it, and no stable key (never deleted) may lie
@@ -371,6 +505,9 @@ t_concurrent(void)
 	for (r = 0; r < N_READERS; r++)
 		CK(xtc_proc_spawn(xtc_exec_loop(ex, (int)((r + 2) % N_LOOPS)),
 		    reader_lt, (void *)(r + 1), NULL, NULL) == XTC_OK);
+	for (r = 0; r < N_READERS; r++)
+		CK(xtc_proc_spawn(xtc_exec_loop(ex, (int)((r + 3) % N_LOOPS)),
+		    reader_n, (void *)(r + 1), NULL, NULL) == XTC_OK);
 	CK(xtc_exec_run(ex) == XTC_OK);
 	bm_provider_stop(g_bm);
 	(void)xtc_exec_fini(ex);
@@ -381,6 +518,7 @@ t_concurrent(void)
 	CK(atomic_load(&g_bad_val) == 0);
 	CK(atomic_load(&g_bad_rc) == 0);
 	CK(atomic_load(&g_lt_bad) == 0);
+	CK(atomic_load(&g_n_bad) == 0);
 	CK(ts.splits > 0 && ts.merges > 0);           /* both SMOs raced */
 	printf("  %s   S2: %ld concurrent seeks vs %d churners on %d threads "
 	    "(splits=%llu merges=%llu evicted=%llu): %ld out of range, %ld bad "
@@ -392,6 +530,10 @@ t_concurrent(void)
 	printf("  %s   S3: %ld concurrent reverse batches (bt_seek_lt_n) in the "
 	    "same churn: %ld wrong\n", atomic_load(&g_lt_bad) ? "FAIL" : "ok",
 	    atomic_load(&g_lt_reads), atomic_load(&g_lt_bad));
+	printf("  %s   S4: %ld batched probes (bt_seek_ge_n) in the same churn, "
+	    "%ld settled by the batch: %ld wrong\n",
+	    atomic_load(&g_n_bad) ? "FAIL" : "ok", atomic_load(&g_n_reads),
+	    atomic_load(&g_n_settled), atomic_load(&g_n_bad));
 	done(g_bt, g_bm, p);
 }
 

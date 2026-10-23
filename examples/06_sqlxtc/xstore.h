@@ -486,6 +486,11 @@ xstore_iscan_t *xstore_iscan_open(struct xsql *db, const char *table,
 int  xstore_iscan_next(xstore_iscan_t *s, int64_t *rowid,
                        const uint8_t **rec, int *reclen);
 void xstore_iscan_close(xstore_iscan_t *s);
+/* Expect about `nrows` rows to be taken (LIMIT; 1 for MIN/MAX): the
+ * scan reads rows ahead in batches, and the first batch is capped at
+ * this so a short walk does not read rows it never returns.  Call
+ * before the first xstore_iscan_next. */
+void xstore_iscan_hint(xstore_iscan_t *s, int64_t nrows);
 
 /* The connection's last UNIQUE-index violation message ("UNIQUE
  * constraint failed: t.a, t.b"), "" if none (a rowid-key conflict). */

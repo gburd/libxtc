@@ -17,6 +17,13 @@
  *	    prefix of 0 or 1 column, and this transaction's buffered
  *	    inserts / updates / deletes merged in, agree with a brute-force
  *	    oracle over the same rows.
+ *	W4  the rows behind the entries are fetched in batches that share
+ *	    their upper levels (bt_seek_ge_n): about one page fix per row,
+ *	    where a root-to-leaf seek per row costs the tree height.
+ *	W5  a walk that stops early (LIMIT 1, min()) does not read rows
+ *	    ahead that it never returns.
+ *	W6  a forward LIMIT 20 walk reads its 20 index keys in one batch:
+ *	    no cursor resume after the open.
  */
 
 #include <stdint.h>
@@ -31,6 +38,21 @@
 #include "xstore.h"
 #include "xtc.h"
 #include "t_tmp.h"
+
+/* ThreadSanitizer builds compile the optimistic B-tree reads out
+ * (btree.c BT_OLC_ENABLED): the batched row fetch then settles nothing
+ * and every row takes the latched per-row seek, so W4's bound holds
+ * only with OLC. */
+#if defined(__SANITIZE_THREAD__)
+#define T_OLC 0
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define T_OLC 0
+#endif
+#endif
+#ifndef T_OLC
+#define T_OLC 1
+#endif
 
 #define PAGE_SZ  4096
 #define N_FRAMES 512
@@ -237,6 +259,59 @@ main(void)
 	    fixes <= (uint64_t)n * (s1.height + 1) + (uint64_t)n / 4 ? "ok" : "FAIL",
 	    n, (unsigned long long)fixes, (unsigned long long)s1.height,
 	    (unsigned long long)((uint64_t)n * (2 * s1.height)));
+
+	/* W4: page fixes per fetched row, both directions.  A seek per row
+	 * is height fixes per row on top of the walk; batched, about one. */
+	for (i = 0; i < 2; i++) {
+		const char *q = i ? "SELECT k FROM t WHERE acct = 0 ORDER BY ts DESC"
+		    : "SELECT k FROM t WHERE acct = 0 ORDER BY ts";
+		n = run_k(db, q, got, 4000);
+		bm_get_stats(bm, &b0);
+		n = run_k(db, q, got, 4000);
+		bm_get_stats(bm, &b1);
+		fixes = (b1.hits + b1.rescues + b1.loads) -
+		    (b0.hits + b0.rescues + b0.loads);
+		CK(n == 2400);
+		CK(!T_OLC || fixes <= 2 * (uint64_t)n);
+		printf("  %s   W4 %s: %d rows fetched with %llu page fixes "
+		    "(a seek per row: >= %llu)%s\n", !T_OLC ||
+		    fixes <= 2 * (uint64_t)n ? "ok" : "FAIL", i ? "reverse" :
+		    "forward", n, (unsigned long long)fixes,
+		    (unsigned long long)((uint64_t)n * s1.height),
+		    T_OLC ? "" : " [no OLC in this build: bound not checked]");
+	}
+
+	/* W5: LIMIT 1 and min() read one row, not a batch of 16. */
+	for (i = 0; i < 2; i++) {
+		const char *q = i ? "SELECT min(ts) FROM t WHERE acct = 0"
+		    : "SELECT k FROM t WHERE acct = 0 ORDER BY ts LIMIT 1";
+		n = run_k(db, q, got, 4000);
+		bm_get_stats(bm, &b0);
+		n = run_k(db, q, got, 4000);
+		bm_get_stats(bm, &b1);
+		fixes = (b1.hits + b1.rescues + b1.loads) -
+		    (b0.hits + b0.rescues + b0.loads);
+		CK(n == 1);
+		CK(fixes <= 3 * s1.height);
+		printf("  %s   W5 %s: %llu page fixes (bound %llu; 16 rows ahead "
+		    "would be > 16)\n", fixes <= 3 * s1.height ? "ok" : "FAIL",
+		    i ? "min()" : "LIMIT 1", (unsigned long long)fixes,
+		    (unsigned long long)(3 * s1.height));
+	}
+
+	/* W6: LIMIT 20 forward: one key batch of the hinted size. */
+	n = run_k(db, "SELECT k FROM t WHERE acct = 0 ORDER BY ts LIMIT 20", got,
+	    4000);
+	bt_get_stats(bt, &s0);
+	n = run_k(db, "SELECT k FROM t WHERE acct = 0 ORDER BY ts LIMIT 20", got,
+	    4000);
+	bt_get_stats(bt, &s1);
+	resumes = s1.resumes - s0.resumes;
+	CK(n == 20);
+	CK(!T_OLC || resumes == 0);
+	printf("  %s   W6 LIMIT 20: %llu cursor resumes after the open%s\n",
+	    !T_OLC || resumes == 0 ? "ok" : "FAIL", (unsigned long long)resumes,
+	    T_OLC ? "" : " [no OLC in this build: bound not checked]");
 
 	/* W3: committed only, then with buffered writes merged in. */
 	check_all(db, "committed");

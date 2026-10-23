@@ -187,6 +187,30 @@ int  bt_seek_ge(bt_t *bt, const void *key, uint16_t klen, void *kout,
                 uint16_t kcap, uint16_t *kolen, void *val, uint16_t vcap,
                 uint16_t *vlen);
 
+/* One probe of bt_seek_ge_n: key/klen in; the rest out. */
+typedef struct bt_probe {
+	const void *key;
+	uint16_t    klen;
+	uint16_t    kolen;   /* the key found: buf + koff, kolen bytes */
+	uint16_t    vlen;    /* its value: buf + voff, vlen bytes */
+	int         rc;      /* XTC_OK, XTC_E_INVAL, or XTC_E_AGAIN */
+	uint32_t    koff;
+	uint32_t    voff;
+} bt_probe_t;
+#define BT_SEEKN_MAX 64
+
+/* bt_seek_ge for up to BT_SEEKN_MAX probes at once, in any order: the
+ * probes descend together, level by level in key order, so a node on
+ * several probes' paths (the root, the upper levels) is fixed and read
+ * once per batch instead of once per probe.  Probe i gets XTC_OK with
+ * the first key >= its key and that key's value copied into buf, or
+ * XTC_E_INVAL (key too long), or XTC_E_AGAIN when the batch did not
+ * settle it (a writer in a node, a node that moved, an out-of-line
+ * value, an answer beyond the leaf, buf full, a build without the
+ * optimistic reads): ask bt_seek_ge for that one.  Returns XTC_OK or
+ * XTC_E_INVAL (bad arguments). */
+int  bt_seek_ge_n(bt_t *bt, bt_probe_t *p, int n, void *buf, uint32_t bcap);
+
 /*
  * Key-distribution sample (RethinkDB get_distribution, depth-limited):
  * read the tree top-down to at most `depth` levels below the root (0 =
