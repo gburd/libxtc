@@ -213,7 +213,27 @@ XTC_THREAD_LOCAL struct xtc_coro *__xtc_current_coro = NULL;
 
 /* Per-thread scheduler resume point.  Set by __xtc_coro_step's jump
  * into a coroutine; the coroutine jumps back here to yield/await/finish. */
-static XTC_THREAD_LOCAL void *g_sched_fctx = NULL;
+static XTC_THREAD_LOCAL void *g_sched_fctx_tls = NULL;
+/*
+ * Read through a non-inlinable accessor so a fiber always jumps back to
+ * the scheduler of the thread it is running on NOW.  A migratable fiber
+ * can finish (or re-park, in xtc_await's loop) on another OS thread than
+ * the one it started on, and on aarch64 the compiler keeps the thread
+ * pointer (tpidr_el0) in a callee-saved register across calls:
+ * __coro_entry read it at entry and, after the fiber body returned on
+ * another thread, jumped to the first thread's scheduler context
+ * (test_exec /Blk1../Blk8 and test_steal /M9 SIGSEGV on aarch64 fctx).
+ * Same hazard and fix as g_in_preempt (coro_preempt.h) and
+ * __current_proc (src/ptc/proc.c).
+ */
+__attribute__((noinline))
+static void **
+__sched_fctx_slot(void)
+{
+	void **volatile slot = &g_sched_fctx_tls;
+	return slot;
+}
+#define g_sched_fctx (*__sched_fctx_slot())
 
 /* Fiber-stack pool + S1 stack-reclaim lever: shared with coro_uctx.c
  * (both mmap their stacks).  See src/inc/coro_common.h. */
