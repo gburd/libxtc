@@ -16,6 +16,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#if defined(__linux__)
+#include <sys/syscall.h>  /* SYS_gettid (offloop_release_wakes) */
+#include <unistd.h>
+#endif
 #include <time.h>
 
 #include "munit.h"
@@ -1337,8 +1341,26 @@ test_amutex_recursive_thread(const MunitParameter p[], void *d)
  *    path) pays a context switch on most contended acquires; one that
  *    polls the lock briefly first takes it without sleeping.  Asserted:
  *    fewer than 1 voluntary switch per 10 acquires.  Needs 2+ CPUs.
- * Context switches are read per thread (RUSAGE_THREAD): Linux only.
- * 3. Liveness + exclusion (arwlock_threads, offloop_timed_handoff):
+ * 3. Every release wakes (offloop_release_wakes).  HERD_K threads sleep
+ *    in wrlock (then amutex_lock) on a lock the main thread holds; the
+ *    main thread releases and re-takes it HERD_K times back to back
+ *    (far faster than a woken thread can run), then holds it.  Each of
+ *    those releases freed the lock with sleepers, so each must wake one:
+ *    HERD_K distinct waiters run.  A version that kept at most one wake
+ *    in flight per lock woke ONE here; on a host where a woken thread
+ *    needs ~100 us to leave a deep CPU idle state, the lock then sat free
+ *    with sleepers for that long.  Asserted: at least HERD_K/2 woke.
+ * 4. Notify spin (offloop_notify_spin).  One thread waits on a notify
+ *    NS_N times; another signals it ~2 us after each wait starts (it
+ *    busy-waits for the waiter's ack, so only one thread ever waits on
+ *    a notify and the process-wide spin cap of 1 on a 2-4 CPU host
+ *    suffices).  A waiter that sleeps at once pays a futex sleep + wake
+ *    per signal; one that polls first takes it without sleeping.
+ *    Asserted: fewer than 1 voluntary switch per 10 waits.  Needs 2+
+ *    CPUs.
+ * Context switches are read per thread (RUSAGE_THREAD, and
+ * /proc/self/task/TID/status for another thread's): Linux only.
+ * 5. Liveness + exclusion (arwlock_threads, offloop_timed_handoff):
  *    every acquire is timed, so a lost wakeup fails instead of hanging.
  */
 #if defined(__linux__) && defined(RUSAGE_THREAD)
@@ -1491,6 +1513,129 @@ test_offloop_spin(const MunitParameter p[], void *d)
 	}
 	xtc_arwlock_destroy(g_hd_rw);
 	xtc_amutex_destroy(g_hd_m);
+	return MUNIT_OK;
+}
+
+static _Atomic int g_rw_tid[HERD_K];
+
+/* Voluntary context switches of thread `tid` of this process, or -1. */
+static long
+task_vcsw(int tid)
+{
+	char path[64], ln[128];
+	long v = -1;
+	FILE *f;
+	(void)snprintf(path, sizeof path, "/proc/self/task/%d/status", tid);
+	if ((f = fopen(path, "r")) == NULL)
+		return -1;
+	while (fgets(ln, sizeof ln, f) != NULL)
+		if (sscanf(ln, "voluntary_ctxt_switches: %ld", &v) == 1)
+			break;
+	(void)fclose(f);
+	return v;
+}
+
+static void *
+rw_waiter(void *arg)
+{
+	int kind = (int)((intptr_t)arg & 0xff), idx = (int)((intptr_t)arg >> 8);
+	atomic_store(&g_rw_tid[idx], (int)syscall(SYS_gettid));
+	atomic_fetch_add(&g_hd_ready, 1);
+	while (!atomic_load(&g_hd_stop)) {
+		hd_lock(kind, 30LL * 1000 * 1000 * 1000);
+		hd_unlock(kind);
+	}
+	return NULL;
+}
+
+static MunitResult
+test_offloop_release_wakes(const MunitParameter p[], void *d)
+{
+	static const char *name[] = { "arwlock wr", "arwlock rd", "amutex" };
+	pthread_t th[HERD_K];
+	long v0[HERD_K], v1;
+	int kind, i, woke;
+	(void)p; (void)d;
+	if (xtc_ncpus() < 2)
+		return MUNIT_SKIP;
+	munit_assert_int(xtc_arwlock_create(&g_hd_rw), ==, XTC_OK);
+	munit_assert_int(xtc_amutex_create(&g_hd_m), ==, XTC_OK);
+	for (kind = HD_WR; kind <= HD_AM; kind += 2) {
+		g_hd_ready = 0; g_hd_stop = 0;
+		hd_lock(kind, -1);
+		for (i = 0; i < HERD_K; i++)
+			munit_assert_int(pthread_create(&th[i], NULL, rw_waiter,
+			    (void *)(intptr_t)(kind | (i << 8))), ==, 0);
+		while (atomic_load(&g_hd_ready) < HERD_K)
+			(void)__os_sleep_ns(1000 * 1000);
+		(void)__os_sleep_ns(50LL * 1000 * 1000);   /* all asleep */
+		for (i = 0; i < HERD_K; i++)
+			v0[i] = task_vcsw(atomic_load(&g_rw_tid[i]));
+		for (i = 0; i < HERD_K; i++) {
+			hd_unlock(kind);
+			hd_lock(kind, -1);
+		}
+		(void)__os_sleep_ns(50LL * 1000 * 1000);   /* woken ones ran */
+		for (woke = 0, i = 0; i < HERD_K; i++) {
+			v1 = task_vcsw(atomic_load(&g_rw_tid[i]));
+			munit_assert_long(v1, >=, 0);
+			woke += v1 > v0[i];
+		}
+		atomic_store(&g_hd_stop, 1);
+		hd_unlock(kind);
+		for (i = 0; i < HERD_K; i++)
+			(void)pthread_join(th[i], NULL);
+		fprintf(stderr, "  %s: %d of %d sleepers woke over %d releases\n",
+		    name[kind], woke, HERD_K, HERD_K);
+		munit_assert_int(woke, >=, HERD_K / 2);
+	}
+	xtc_arwlock_destroy(g_hd_rw);
+	xtc_amutex_destroy(g_hd_m);
+	return MUNIT_OK;
+}
+
+#define NS_N 20000
+static xtc_notify_t *g_ns;
+static _Atomic int   g_ns_ack;
+
+static void *
+ns_waiter(void *arg)
+{
+	struct rusage u0, u1;
+	int i;
+	(void)arg;
+	(void)getrusage(RUSAGE_THREAD, &u0);
+	for (i = 0; i < NS_N; i++) {
+		munit_assert_int(xtc_notify_wait(g_ns, -1), ==, XTC_OK);
+		atomic_store(&g_ns_ack, i + 1);
+	}
+	(void)getrusage(RUSAGE_THREAD, &u1);
+	atomic_store(&g_sp_csw, u1.ru_nvcsw - u0.ru_nvcsw);
+	return NULL;
+}
+
+static MunitResult
+test_offloop_notify_spin(const MunitParameter p[], void *d)
+{
+	pthread_t th;
+	int i;
+	(void)p; (void)d;
+	if (xtc_ncpus() < 2)
+		return MUNIT_SKIP;
+	munit_assert_int(xtc_notify_create(&g_ns), ==, XTC_OK);
+	g_sp_csw = 0; g_ns_ack = 0;
+	munit_assert_int(pthread_create(&th, NULL, ns_waiter, NULL), ==, 0);
+	for (i = 0; i < NS_N; i++) {
+		sp_burn(2000);                     /* ~2 us into the wait */
+		munit_assert_int(xtc_notify_signal(g_ns), ==, XTC_OK);
+		while (atomic_load(&g_ns_ack) <= i)
+			;                          /* the waiter took it */
+	}
+	(void)pthread_join(th, NULL);
+	fprintf(stderr, "  notify: %ld waiter csw over %d waits\n",
+	    atomic_load(&g_sp_csw), NS_N);
+	munit_assert_long(atomic_load(&g_sp_csw), <, (long)NS_N / 10);
+	xtc_notify_destroy(g_ns);
 	return MUNIT_OK;
 }
 #endif
@@ -1695,6 +1840,8 @@ static MunitTest tests[] = {
 #if defined(__linux__) && defined(RUSAGE_THREAD)
 	{ "/offloop_no_herd",     test_offloop_no_herd,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/offloop_spin",        test_offloop_spin,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/offloop_release_wakes", test_offloop_release_wakes, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/offloop_notify_spin", test_offloop_notify_spin, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #endif
 	{ "/barrier",             test_barrier,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/gate",                test_gate,                NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
