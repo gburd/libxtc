@@ -23,6 +23,13 @@
  *	     failure prints a reproducible case.
  *	  3. input orders that drive the eviction path hardest: ascending,
  *	     descending and all-equal keys, against the unlimited query.
+ *	  4. memory: ORDER BY x DESC LIMIT 10 over rows arriving ascending
+ *	     (every row beats the kept ones) with a 4 KB TEXT per row must
+ *	     not hold every admitted row's bytes until the statement ends:
+ *	     peak RSS growth during the query stays far below the ~100 MB
+ *	     the 24,000 admitted rows' text would take (Linux: resets
+ *	     VmHWM through /proc/self/clear_refs; skipped elsewhere, and
+ *	     under ASan/TSan, whose allocators keep freed blocks resident).
  */
 
 #include <stdint.h>
@@ -157,6 +164,42 @@ slice(const char *all, int off, int lim, struct buf *out)
 	}
 }
 
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define T_SANITIZER 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define T_SANITIZER 1
+#endif
+#endif
+
+/* Reset VmHWM (clear_refs "5"): 0, or -1 if the platform cannot. */
+static long
+hwm_reset(void)
+{
+	FILE *f;
+#ifdef T_SANITIZER
+	return -1;   /* quarantined frees stay resident: RSS says nothing */
+#endif
+	f = fopen("/proc/self/clear_refs", "w");
+	if (f == NULL) return -1;
+	if (fputs("5", f) < 0) { fclose(f); return -1; }
+	fclose(f);
+	return 0;
+}
+
+static long
+hwm_kb(void)
+{
+	char line[128];
+	long v = -1;
+	FILE *f = fopen("/proc/self/status", "r");
+	if (f == NULL) return -1;
+	while (fgets(line, sizeof line, f) != NULL)
+		if (sscanf(line, "VmHWM: %ld", &v) == 1) break;
+	fclose(f);
+	return v;
+}
+
 static uint64_t g_rng = 0x9E3779B97F4A7C15ull;
 
 static uint32_t
@@ -193,7 +236,9 @@ main(void)
 	const char *sfx[] = { "-wal", ".dwb" };
 	sx_db *db = NULL;
 	struct buf got = { 0 }, want = { 0 }, all = { 0 };
-	int fd, i, nok = 0, nfail = 0, round;
+	int fd, i, nok = 0, nfail = 0, round, off;
+	long before = 0, after = 0;
+	static char bigq[4400];
 	static const char *const dir[] = { "", " DESC", " NULLS LAST",
 	    " DESC NULLS FIRST" };
 
@@ -295,6 +340,36 @@ main(void)
 				nfail++;
 		}
 	}
+
+	/* 4. Bytes of rows the cut drops are released during the scan. */
+	CK(sx_exec(db, "CREATE TABLE big(id INTEGER PRIMARY KEY, up INTEGER)", NULL)
+	    == SX_OK);
+	CK(sx_exec(db, "BEGIN", NULL) == SX_OK);
+	for (i = 1; i <= 24000; i++) {
+		snprintf(sql, sizeof sql, "INSERT INTO big VALUES(%d, %d)", i, i);
+		CK(sx_exec(db, sql, NULL) == SX_OK);
+	}
+	CK(sx_exec(db, "COMMIT", NULL) == SX_OK);
+	off = snprintf(bigq, sizeof bigq, "SELECT id, id || '");
+	memset(bigq + off, 'z', 4096);
+	snprintf(bigq + off + 4096, sizeof bigq - (size_t)off - 4096,
+	    "' FROM big ORDER BY up DESC LIMIT 10");
+	if (render(db, "SELECT count(*) FROM big", &got) == 0 &&
+	    hwm_reset() == 0 && (before = hwm_kb()) > 0) {
+		int r = render(db, bigq, &got);
+		after = hwm_kb();
+		printf("  top-10 of 24000 rows x 4 KB text: peak RSS +%ld KB\n",
+		    after - before);
+		if (r == 0 && got.nrow == 10 && after - before < 32 * 1024)
+			nok++;
+		else {
+			printf("  FAIL  top-N held %ld KB of dropped rows' bytes "
+			    "(bound 32768 KB), rows %d\n", after - before, got.nrow);
+			nfail++;
+		}
+	} else
+		printf("  skip  memory check (no /proc/self/clear_refs, or a "
+		    "sanitizer build)\n");
 
 	sx_close(db);
 	CK(sx_storage_close() == SX_OK);

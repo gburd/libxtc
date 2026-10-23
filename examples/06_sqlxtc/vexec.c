@@ -7141,6 +7141,26 @@ topn_index_cmp(const void *pa, const void *pb)
 	    (void *)(uintptr_t)g_topn_ctx);
 }
 
+/* Bytes held by an arena's blocks, and the TEXT/BLOB bytes n cells
+ * reference (cell_dup's rounded footprint). */
+static size_t
+arena_bytes(const struct vx_arena_blk *b)
+{
+	size_t n = 0;
+	for (; b != NULL; b = b->next) n += b->cap;
+	return n;
+}
+
+static size_t
+topn_bytes(const vx_cell_t *c, size_t n)
+{
+	size_t t = 0, i;
+	for (i = 0; i < n; i++)
+		if ((c[i].type == VX_TEXT || c[i].type == VX_BLOB) && c[i].nbytes)
+			t += ((size_t)c[i].nbytes + 8u) & ~(size_t)7u;
+	return t;
+}
+
 /* Slot of the last row under (keys, arrival) among slots 0..nrow. */
 static int
 topn_worst(const struct topn_ctx *tc, int nrow)
@@ -7340,9 +7360,7 @@ ordered_materialize(struct vx_stmt *st)
 
 		nseen++;
 		/* Top-N: being the latest arrival, this row sorts ahead of the
-		 * threshold only if it is strictly smaller on the keys.  The
-		 * dropped rows' bytes stay in the keep arena (freed as a unit at
-		 * statement end), as with any row the cut drops. */
+		 * threshold only if it is strictly smaller on the keys. */
 		if (topn && topn_thr >= 0 &&
 		    topn_cmp(keyrow, &keys[(size_t)topn_thr * (size_t)nkey], nkey,
 		    st->order_desc) >= 0) {
@@ -7350,10 +7368,25 @@ ordered_materialize(struct vx_stmt *st)
 			continue;
 		}
 		if (topn && nrow == topn_cap) {
+			struct vx_arena_blk *fresh = NULL;
+			size_t nro = (size_t)topn_k * (size_t)st->nout, nke = (size_t)topn_k * (size_t)nkey, q;
 			tcx.keys = keys; tcx.seq = seq; tcx.nkey = nkey; tcx.desc = st->order_desc;
 			topn_thr = topn_cut(&tcx, rows, st->nout, keys, seq, nrow,
 			    (int)topn_k, topn_v, &topn_rng);
 			nrow = (int)topn_k;
+			/* Once the keep arena holds more than twice the survivors'
+			 * bytes, move them to a fresh arena and drop the cut rows'
+			 * bytes with the old one: live bytes stay O(K), and the
+			 * copying is amortized O(1) per admitted byte. */
+			if (arena_bytes(keep) > 2 * topn_bytes(rows, nro) +
+			    2 * topn_bytes(keys, nke) + VX_ARENA_BLK) {
+				for (q = 0; q < nro; q++)
+					if (cell_dup(&fresh, &rows[q], &rows[q]) != 0) { arena_free(fresh); goto cleanup; }
+				for (q = 0; q < nke; q++)
+					if (cell_dup(&fresh, &keys[q], &keys[q]) != 0) { arena_free(fresh); goto cleanup; }
+				arena_free(keep);
+				keep = fresh;
+			}
 			if (topn_cmp(keyrow, &keys[(size_t)topn_thr * (size_t)nkey], nkey,
 			    st->order_desc) >= 0) {
 				arena_reset(&rowarena);
