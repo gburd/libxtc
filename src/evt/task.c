@@ -149,16 +149,19 @@ static xtc_task_t *
 __task_freelist_pop(xtc_loop_t *loop, int pinned)
 {
 	xtc_task_t **head;
-	xtc_task_t *t;
+	xtc_task_t *t = NULL;
+	/* A spawning fiber preempted between the load and the head store
+	 * would let a same-loop spawn pop the same struct. */
+	__xtc_unsafe_enter();
 	if (__xtc_current_loop == loop) {    /* home thread owns the list */
 		head = __task_freelist(loop, pinned);
 		if ((t = *head) != NULL) {
 			*head = t->q_next;
 			loop->task_free_n--;
-			return t;
 		}
 	}
-	return __task_spare_pop(loop, pinned);
+	__xtc_unsafe_leave();
+	return t != NULL ? t : __task_spare_pop(loop, pinned);
 }
 
 /* xtc_loop_fini: move the spares onto the free lists, which fini frees.
@@ -418,6 +421,10 @@ __xtc_task_spawn_cleanup(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 
 	if (out_task) *out_task = t;
 
+	/* all_tasks and the run queue are single-owner state the scheduler
+	 * on this thread also mutates: hold preemption off from the loop
+	 * check to the enqueue (see xtc_waker_wake). */
+	__xtc_unsafe_enter();
 	if (__xtc_current_loop == loop) {
 		t->all_next = loop->all_tasks;
 		t->all_prev = NULL;
@@ -429,8 +436,10 @@ __xtc_task_spawn_cleanup(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 		if (!pinned && loop->exec != NULL)
 			__xtc_exec_mig_alive(loop, 1);
 		(void)__xtc_loop_enqueue(loop, t);
+		__xtc_unsafe_leave();
 		return XTC_OK;
 	}
+	__xtc_unsafe_leave();
 
 	/* Cross-thread publish.  Charge an inbox slot too; the drain
 	 * releases exactly one per PUBLISH it takes. */
@@ -550,7 +559,15 @@ xtc_waker_wake(const xtc_waker_t *w)
 	if (w == NULL || w->loop == NULL || w->task == NULL)
 		return XTC_E_INVAL;
 
+	/* The run queue is single-owner state that the scheduler on this
+	 * thread also mutates: an involuntary preemption inside the enqueue
+	 * lets the RESCHED re-queue of the preempted fiber relink through a
+	 * stale q_tail and drop t (test_preempt_p2 /runq_lost_wake).  Defer
+	 * preemption from the loop check (a migratable caller must not move
+	 * carriers between it and the enqueue) to the end of the enqueue. */
+	__xtc_unsafe_enter();
 	if (__xtc_current_loop == w->loop) {
+		int rc = XTC_OK;
 		/* Same-loop wake.  Still claim the PARKED->SCHEDULED transition
 		 * atomically: a migratable task can be running on another loop
 		 * or targeted by a cross-loop wake concurrently, so a plain
@@ -569,12 +586,15 @@ xtc_waker_wake(const xtc_waker_t *w)
 		if (__task_wake_claim(w->task)) {
 			XTC_PROBE_FIBER_WAKE((uintptr_t)w->task,
 			    w->loop->exec_id, XTC_PROBE_WAKE_LOCAL);
-			return __xtc_loop_enqueue(w->loop, w->task);
+			rc = __xtc_loop_enqueue(w->loop, w->task);
+		} else {
+			XTC_PROBE_FIBER_WAKE((uintptr_t)w->task,
+			    w->loop->exec_id, XTC_PROBE_WAKE_UNPARKED);
 		}
-		XTC_PROBE_FIBER_WAKE((uintptr_t)w->task, w->loop->exec_id,
-		    XTC_PROBE_WAKE_UNPARKED);
-		return XTC_OK;
+		__xtc_unsafe_leave();
+		return rc;
 	}
+	__xtc_unsafe_leave();
 
 	/* Cross-thread.  Claim the transition here, then hand the task to
 	 * its loop's inbox.  Winning the claim is what entitles this waker
@@ -646,11 +666,16 @@ xtc_task_park_on_timer(xtc_task_t *self, int64_t delay_ns)
 	 * is drained on that same loop, which wakes the waiter.  Fall back to
 	 * self->loop only off any loop (defensive; a park needs a loop). */
 	{
-		xtc_loop_t *wl = __xtc_current_loop != NULL
-		    ? __xtc_current_loop : self->loop;
+		xtc_loop_t *wl;
+		/* A migratable fiber preempted between reading the running loop
+		 * and the push could resume on a thief and push onto this
+		 * loop's single-owner heap from a foreign thread. */
+		__xtc_unsafe_enter();
+		wl = __xtc_current_loop != NULL ? __xtc_current_loop : self->loop;
 		t->loop = wl;
-
-		if ((rc = __xtc_timer_heap_push(wl, t)) != XTC_OK) {
+		rc = __xtc_timer_heap_push(wl, t);
+		__xtc_unsafe_leave();
+		if (rc != XTC_OK) {
 			__os_free(t);
 			return rc;
 		}
