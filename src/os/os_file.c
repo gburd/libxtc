@@ -616,37 +616,49 @@ xtc_fs_dir_close(xtc_fs_dir_t *d)
 static int             g_dio_reg[DIO_REG_MAX];
 static int             g_dio_reg_n;
 static pthread_mutex_t g_dio_reg_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Taken from fibers (xtc_aio's alignment check, xtc_fs_open): hold the
+ * preemption-unsafe bracket across it, as __os_mutex_lock does, so an
+ * involuntary tick cannot strand the holder while a loop-mate on this
+ * thread blocks on the lock.  Forward-declared to keep L0 off the
+ * preemption header (see os_mutex.c). */
+void __xtc_unsafe_enter(void);
+void __xtc_unsafe_leave(void);
+#define DIO_REG_LOCK()   do { __xtc_unsafe_enter(); \
+	(void)pthread_mutex_lock(&g_dio_reg_lock); } while (0)
+#define DIO_REG_UNLOCK() do { \
+	(void)pthread_mutex_unlock(&g_dio_reg_lock); \
+	__xtc_unsafe_leave(); } while (0)
 
 void
 __xtc_dio_register(int fd)
 {
-	(void)pthread_mutex_lock(&g_dio_reg_lock);
+	DIO_REG_LOCK();
 	if (g_dio_reg_n < DIO_REG_MAX)
 		g_dio_reg[g_dio_reg_n++] = fd;
-	(void)pthread_mutex_unlock(&g_dio_reg_lock);
+	DIO_REG_UNLOCK();
 }
 
 void
 __xtc_dio_unregister(int fd)
 {
 	int i;
-	(void)pthread_mutex_lock(&g_dio_reg_lock);
+	DIO_REG_LOCK();
 	for (i = 0; i < g_dio_reg_n; i++)
 		if (g_dio_reg[i] == fd) {
 			g_dio_reg[i] = g_dio_reg[--g_dio_reg_n];
 			break;
 		}
-	(void)pthread_mutex_unlock(&g_dio_reg_lock);
+	DIO_REG_UNLOCK();
 }
 
 static int
 dio_registered(int fd)
 {
 	int i, hit = 0;
-	(void)pthread_mutex_lock(&g_dio_reg_lock);
+	DIO_REG_LOCK();
 	for (i = 0; i < g_dio_reg_n; i++)
 		if (g_dio_reg[i] == fd) { hit = 1; break; }
-	(void)pthread_mutex_unlock(&g_dio_reg_lock);
+	DIO_REG_UNLOCK();
 	return hit;
 }
 #endif /* XTC_DIAGNOSTIC */
