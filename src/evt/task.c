@@ -666,11 +666,16 @@ xtc_task_park_on_timer(xtc_task_t *self, int64_t delay_ns)
 	 * is drained on that same loop, which wakes the waiter.  Fall back to
 	 * self->loop only off any loop (defensive; a park needs a loop). */
 	{
-		xtc_loop_t *wl = __xtc_current_loop != NULL
-		    ? __xtc_current_loop : self->loop;
+		xtc_loop_t *wl;
+		/* A migratable fiber preempted between reading the running loop
+		 * and the push could resume on a thief and push onto this
+		 * loop's single-owner heap from a foreign thread. */
+		__xtc_unsafe_enter();
+		wl = __xtc_current_loop != NULL ? __xtc_current_loop : self->loop;
 		t->loop = wl;
-
-		if ((rc = __xtc_timer_heap_push(wl, t)) != XTC_OK) {
+		rc = __xtc_timer_heap_push(wl, t);
+		__xtc_unsafe_leave();
+		if (rc != XTC_OK) {
 			__os_free(t);
 			return rc;
 		}

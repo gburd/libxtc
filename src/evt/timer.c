@@ -22,6 +22,8 @@
 #include "loop_int.h"
 #include "xtc_slab.h"
 #include "xtc_probes.h"
+#include "xtc_inject.h"   /* timer.heap.sift_up test hook */
+#include "preempt_int.h"  /* __xtc_unsafe_enter/leave: heap updates */
 
 #include <stdint.h>
 #include <string.h>
@@ -59,6 +61,9 @@ __sift_up(struct xtc_timer_slot *h, int i, struct xtc_timer_slot x)
 		if (h[parent].deadline_ns <= x.deadline_ns) break;
 		h[i] = h[parent];
 		h[i].t->heap_idx = i;
+		/* Test hook: h[parent] is duplicated until the hole is
+		 * filled (test_preempt_p2 /timer_heap_*). */
+		XTC_INJECTION_POINT("timer.heap.sift_up");
 		i = parent;
 	}
 	h[i] = x;
@@ -101,12 +106,18 @@ __grow(xtc_loop_t *loop)
 	return XTC_OK;
 }
 
-int
-__xtc_timer_heap_push(xtc_loop_t *loop, xtc_timer_t *t)
+/*
+ * The heap is single-owner state that the scheduler on this thread also
+ * mutates (pop_due), and fibers push and cancel: every fiber-reachable
+ * update holds preemption off, or a tick mid-sift lets another fiber's
+ * push land in a half-sifted heap and be overwritten (test_preempt_p2
+ * /timer_heap_lost_timer).
+ */
+static int
+__heap_push(xtc_loop_t *loop, xtc_timer_t *t)
 {
 	struct xtc_timer_slot x;
 	int rc;
-	XTC_ASSERT_LOOP_OWNER(loop, "timer min-heap (push)");
 	if (loop->n_timers >= loop->cap_timers) {
 		/* Full: first drop the nodes cancelled from other threads, and
 		 * grow only if the heap is still more than half full, so the
@@ -128,6 +139,17 @@ __xtc_timer_heap_push(xtc_loop_t *loop, xtc_timer_t *t)
 	x.t = t;
 	__sift_up(loop->timers, loop->n_timers++, x);
 	return XTC_OK;
+}
+
+int
+__xtc_timer_heap_push(xtc_loop_t *loop, xtc_timer_t *t)
+{
+	int rc;
+	XTC_ASSERT_LOOP_OWNER(loop, "timer min-heap (push)");
+	__xtc_unsafe_enter();
+	rc = __heap_push(loop, t);
+	__xtc_unsafe_leave();
+	return rc;
 }
 
 /*
@@ -283,7 +305,11 @@ xtc_timer_set(xtc_loop_t *loop, int64_t delay_ns, xtc_timer_fn fn, void *user,
 	if (loop == NULL || delay_ns < 0)
 		return XTC_E_INVAL;
 
-	if ((rc = __timer_slab_ensure(loop)) != XTC_OK)
+	/* Lazy create: two fibers racing it would each store a slab. */
+	__xtc_unsafe_enter();
+	rc = __timer_slab_ensure(loop);
+	__xtc_unsafe_leave();
+	if (rc != XTC_OK)
 		return rc;
 	t = xtc_slab_alloc((struct xtc_slab *)loop->timer_slab);
 	if (t == NULL) return XTC_E_RESOURCE;
@@ -343,11 +369,13 @@ __xtc_timer_try_cancel(xtc_timer_t *timer)
 	 * the heap grows.  __xtc_current_loop_get is the out-of-line read, so
 	 * a fiber that migrated cannot see its previous thread's binding.
 	 */
+	__xtc_unsafe_enter();   /* check through removal: see the push */
 	if (__xtc_current_loop_get() == loop && timer->heap_idx >= 0) {
 		XTC_ASSERT_LOOP_OWNER(loop, "timer min-heap (cancel)");
 		__heap_remove_at(loop, timer->heap_idx);
 		__xtc_timer_park_release(timer);   /* the heap's reference */
 	}
+	__xtc_unsafe_leave();
 	return 1;
 }
 

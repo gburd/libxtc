@@ -770,6 +770,153 @@ test_p2_runq_lost_wake(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * /timer_heap_*: an involuntary preemption must never land inside a
+ * fiber's update of its loop's timer min-heap.  Arming a timer from a
+ * fiber (xtc_timer_set, xtc_proc_sleep, any timed park) sifts the new
+ * node up; between moving a parent down and filling the hole, the
+ * parent slot is duplicated.  A tick there lets another fiber on the
+ * thread push its own timer into the half-sifted heap; the preempted
+ * fiber then fills the hole over it, so that timer never fires (its
+ * sleeper hangs) and a node is in the heap twice.  "timer.heap.sift_up"
+ * fires after the parent move; the callback raises the real preemption
+ * signal there.  Control: the same raise from plain fiber code does
+ * preempt.
+ *
+ *   lost_timer   the peer's timer, armed while the arming fiber is
+ *                inside the sift, must fire
+ */
+static atomic_int  g_th_arm, g_th_hits, g_th_in, g_th_ctrl_preempted;
+static atomic_int  g_th_win_preempted, g_th_peer_armed, g_th_stop;
+static atomic_int  g_th_x_fired, g_th_y_fired;
+static atomic_long g_th_peer_runs;
+static xtc_loop_t *g_th_loop;
+
+static void
+th_fire_x(void *u) { (void)u; atomic_store(&g_th_x_fired, 1); }
+
+static void
+th_fire_y(void *u) { (void)u; atomic_store(&g_th_y_fired, 1); }
+
+static void
+th_fire_never(void *u) { (void)u; }
+
+static void
+th_raise_in_window(const char *name, void *user)
+{
+	long before;
+	(void)name; (void)user;
+	if (!atomic_exchange(&g_th_arm, 0))
+		return;                          /* one shot */
+	atomic_fetch_add(&g_th_hits, 1);
+	before = atomic_load(&g_th_peer_runs);
+	atomic_store(&g_th_in, 1);
+	(void)raise(SIGVTALRM);              /* a preemption tick, here */
+	atomic_store(&g_th_in, 0);
+	if (atomic_load(&g_th_peer_runs) != before)
+		atomic_store(&g_th_win_preempted, 1);
+}
+
+static void
+th_peer(void *arg)
+{
+	(void)arg;
+	while (!atomic_load(&g_th_stop)) {
+		atomic_fetch_add(&g_th_peer_runs, 1);
+		if (atomic_load(&g_th_in) && !atomic_load(&g_th_peer_armed)) {
+			atomic_store(&g_th_peer_armed, 1);
+			munit_assert_int(xtc_timer_set(g_th_loop, 0, th_fire_y,
+			    NULL, NULL), ==, XTC_OK);
+		}
+		xtc_yield();
+	}
+}
+
+static void
+th_armer(void *arg)
+{
+	xtc_timer_t *far = NULL;
+	long before;
+	int i;
+	(void)arg;
+	xtc_yield();                          /* let the peer start */
+	before = atomic_load(&g_th_peer_runs);
+	(void)raise(SIGVTALRM);               /* control: plain fiber code */
+	if (atomic_load(&g_th_peer_runs) != before)
+		atomic_store(&g_th_ctrl_preempted, 1);
+	/* A far root, then a due timer that sifts above it. */
+	munit_assert_int(xtc_timer_set(g_th_loop, 10LL * 1000 * 1000 * 1000,
+	    th_fire_never, NULL, &far), ==, XTC_OK);
+	atomic_store(&g_th_arm, 1);
+	munit_assert_int(xtc_timer_set(g_th_loop, 0, th_fire_x, NULL, NULL),
+	    ==, XTC_OK);
+	for (i = 0; i < 100000 && !(atomic_load(&g_th_x_fired) &&
+	    (atomic_load(&g_th_y_fired) || !atomic_load(&g_th_peer_armed)));
+	    i++)
+		xtc_yield();
+	if (atomic_load(&g_th_peer_armed) && !atomic_load(&g_th_y_fired)) {
+		/* The heap now holds a duplicated node; tearing it down would
+		 * double-release it, so stop here. */
+		fprintf(stderr, "timer_heap: the peer's timer never fired "
+		    "(preempted inside the sift: %d)\n",
+		    atomic_load(&g_th_win_preempted));
+		abort();
+	}
+	(void)xtc_timer_cancel(far);
+	(void)xtc_timer_release(far);
+	atomic_store(&g_th_stop, 1);
+}
+
+static MunitResult
+test_p2_timer_heap_lost_timer(const MunitParameter p[], void *d)
+{
+	extern int __xtc_coro_preempt_effective(void);
+	xtc_exec_t *e = NULL;
+	(void)p; (void)d;
+
+	if (!xtc_preempt_supported() || !__xtc_coro_preempt_effective())
+		return MUNIT_SKIP;
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
+    __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	return MUNIT_SKIP;   /* see test_p2_preempt_tight_loop */
+#endif
+	atomic_store(&g_th_arm, 0);
+	atomic_store(&g_th_hits, 0);
+	atomic_store(&g_th_in, 0);
+	atomic_store(&g_th_ctrl_preempted, 0);
+	atomic_store(&g_th_win_preempted, 0);
+	atomic_store(&g_th_peer_armed, 0);
+	atomic_store(&g_th_stop, 0);
+	atomic_store(&g_th_x_fired, 0);
+	atomic_store(&g_th_y_fired, 0);
+	atomic_store(&g_th_peer_runs, 0);
+	munit_assert_int(xtc_inject_attach("timer.heap.sift_up",
+	    th_raise_in_window, NULL), ==, XTC_OK);
+
+	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	g_th_loop = xtc_exec_loop(e, 0);
+	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
+	    ==, XTC_OK);
+	xtc_preempt_set_involuntary(1);
+	munit_assert_int(xtc_proc_spawn(g_th_loop, th_armer, NULL, NULL,
+	    NULL), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(g_th_loop, th_peer, NULL, NULL,
+	    NULL), ==, XTC_OK);
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	xtc_preempt_set_involuntary(0);
+	(void)xtc_exec_fini(e);
+	(void)xtc_inject_detach("timer.heap.sift_up");
+
+	if (atomic_load(&g_th_hits) == 0)
+		return MUNIT_SKIP;   /* injection points compiled out */
+	munit_assert_int(atomic_load(&g_th_ctrl_preempted), ==, 1);
+	munit_assert_int(atomic_load(&g_th_win_preempted), ==, 0);
+	munit_assert_int(atomic_load(&g_th_x_fired), ==, 1);
+	if (atomic_load(&g_th_peer_armed))
+		munit_assert_int(atomic_load(&g_th_y_fired), ==, 1);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/preempt_tight_loop", test_p2_preempt_tight_loop, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
@@ -781,6 +928,8 @@ static MunitTest tests[] = {
 	    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/runq_lost_wake", test_p2_runq_lost_wake, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/timer_heap_lost_timer", test_p2_timer_heap_lost_timer, NULL,
+	    NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #if defined(P2_VEC)
 	{ "/vector_state", test_p2_vector_state, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
