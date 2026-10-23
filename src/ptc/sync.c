@@ -70,13 +70,28 @@ cv_wait_until(pthread_cond_t *cv, pthread_mutex_t *lock,
  * threads: 6 context switches per arwlock acquire, 10x slower than a
  * pthread rwlock).  Now a waiter first polls the lock's state words
  * without taking the inner mutex (test-and-test-and-set: a spinner never
- * writes the line the holder needs), for at most SYNC_SPIN_ROUNDS pauses
- * (512: about 6 us on a current x86 core; measured best of 128..2048 for
- * holds of 50 ns to 5 us), then parks.  At most sync_spin_cap() threads spin on one lock at a time
+ * writes the line the holder needs), for at most sync_spin_rounds()
+ * polls (about 5.6 us; measured best of 1.4..22 us for holds of 50 ns to
+ * 5 us), then parks.  At most sync_spin_cap() threads spin on one lock at a time
  * (a quarter of the CPUs): more would only steal CPU from the holder when
  * threads outnumber CPUs.  No spinning on a single CPU or under the
  * simulator (one thread: nothing can release the lock while we poll).
  * The spin reads no clock and no RNG, so it is deterministic.
+ *
+ * The bound is a TIME, converted once per process into a poll count.
+ * SYNC_SPIN_ROUNDS / SYNC_NOTIFY_SPIN_ROUNDS were tuned as counts on an
+ * x86-64 host whose PAUSE took 11 ns (SYNC_REF_POLL_NS), but a poll's
+ * cost differs widely between cores: PAUSE + load measured 20 ns on
+ * another x86-64 core (and Intel documents PAUSE at about 140 cycles
+ * from Skylake on, ~10 before), while aarch64's YIELD retires as a NOP
+ * (0.4 ns on a 16-vCPU Neoverse-V1 host).  There 512 polls lasted about
+ * a microsecond, so every 2 us hold parked its waiter (test_sync
+ * /offloop_spin: 39,581 context switches for 40,000 acquires).  The
+ * first spin times the poll loop (sync_spin_calibrate) and scales both
+ * counts by SYNC_REF_POLL_NS / measured, so the spin lasts the same time
+ * on every core.  The calibration reads the monotonic clock once per
+ * process, and only where spinning is allowed: never under the simulator
+ * (sync_spin_cap() is 0 there), so DST stays clock-free.
  *
  * shortcut: the spin is bounded by a count, not by "the holder is still
  * running" (the lock does not record which thread holds it); upgrade to
@@ -86,8 +101,32 @@ cv_wait_until(pthread_cond_t *cv, pthread_mutex_t *lock,
 #ifndef SYNC_SPIN_ROUNDS
 #define SYNC_SPIN_ROUNDS 512
 #endif
+#define SYNC_REF_POLL_NS 11     /* ns per poll where the counts were tuned */
+#define SYNC_CAL_POLLS   256    /* polls per calibration trial */
+#define SYNC_CAL_TRIALS  3
+
+/*
+ * The spin hint.  aarch64: ISB, not YIELD.  YIELD is a hint for SMT
+ * cores; on Neoverse-V1 it retires at once (0.4 ns), so for the same
+ * time a YIELD loop polls the lock word 7x as often as an ISB loop
+ * (1.9 vs 13.7 ns per hint + load), which drains the pipeline like x86
+ * PAUSE.  Measured with the calibrated budget on a 16-vCPU aarch64 host
+ * (bench_sync_offloop, 5 reps): ISB is ahead on every exclusive
+ * short-hold case (amutex 4 threads 1.29M vs 1.09M acquires/s, arwlock
+ * 1.37M vs 1.10M), and only ISB kept test_sync /offloop_spin passing
+ * (YIELD: 2 of 12 runs parked every amutex acquire).  Rust's
+ * core::hint::spin_loop is ISB on aarch64 too.  Elsewhere the shared
+ * hint.
+ */
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+#define sync_spin_hint() __asm__ __volatile__("isb" ::: "memory")
+#else
+#define sync_spin_hint() __os_pause()
+#endif
 
 static _Atomic int g_sync_spin_cap = -1;
+static _Atomic int g_sync_spin_scale_pm;   /* polls per tuned poll, x1000 */
+static _Atomic int g_sync_cal_word;
 
 static int
 sync_spin_cap(void)
@@ -102,6 +141,56 @@ sync_spin_cap(void)
 		atomic_store_explicit(&g_sync_spin_cap, v, memory_order_relaxed);
 	}
 	return v;
+}
+
+/*
+ * Time SYNC_CAL_POLLS polls of the spin loop's shape (hint + relaxed
+ * load), best of SYNC_CAL_TRIALS so an interrupt in one trial cannot
+ * shorten every later spin, and set the scale.  One-off cost about
+ * 3 x 256 polls (10 us at 13 ns, 110 us at 140 ns).  Racing first
+ * spinners may each calibrate; any of their results is fine.
+ */
+static int
+sync_spin_calibrate(void)
+{
+	int64_t t0, t1, ns, best = INT64_MAX;
+	int i, k, sink = 0, pm;
+
+	for (k = 0; k < SYNC_CAL_TRIALS; k++) {
+		if (__os_clock_mono(&t0) != XTC_OK)
+			return 1000;
+		for (i = 0; i < SYNC_CAL_POLLS; i++) {
+			sync_spin_hint();
+			sink += atomic_load_explicit(&g_sync_cal_word,
+			    memory_order_relaxed);
+		}
+		if (__os_clock_mono(&t1) != XTC_OK)
+			return 1000;
+		ns = t1 - t0 + (sink != 0);
+		if (ns < best)
+			best = ns;
+	}
+	if (best < 1)
+		best = 1;
+	/* scale = REF / (best / POLLS), x1000, kept within [1/16, 64]. */
+	pm = (int)((int64_t)SYNC_REF_POLL_NS * SYNC_CAL_POLLS * 1000 / best);
+	if (pm < 1000 / 16)
+		pm = 1000 / 16;
+	if (pm > 64 * 1000)
+		pm = 64 * 1000;
+	atomic_store_explicit(&g_sync_spin_scale_pm, pm, memory_order_relaxed);
+	return pm;
+}
+
+/* `tuned` polls of the reference core, in polls of this one. */
+static int
+sync_spin_rounds(int tuned)
+{
+	int pm = atomic_load_explicit(&g_sync_spin_scale_pm,
+	    memory_order_relaxed);
+	if (pm == 0)
+		pm = sync_spin_calibrate();
+	return (int)((int64_t)tuned * pm / 1000);
 }
 
 /* Enter the spin if fewer than the cap are spinning; 1 if admitted. */
@@ -372,8 +461,8 @@ struct xtc_notify {
  * signal usually comes within tens of microseconds, and a futex sleep +
  * wake on a CPU that has dropped into a deep idle state costs ~100 us
  * (measured, 64-vCPU x86-64 host with C6 enabled: wake-to-run 80-130 us
- * from C6, 2-3 us otherwise).  4096 pauses is about 45 us on a current
- * x86 core.  The spinners share one process-wide cap (sync_spin_cap(),
+ * from C6, 2-3 us otherwise).  4096 polls of the reference core is about
+ * 45 us (scaled per core; see sync_spin_rounds).  The spinners share one process-wide cap (sync_spin_cap(),
  * which is 0 on one CPU and under the simulator); timed waits do not spin.
  */
 #ifndef SYNC_NOTIFY_SPIN_ROUNDS
@@ -439,7 +528,7 @@ xtc_notify_wait(xtc_notify_t *n, int64_t timeout_ns)
 	xtc_task_t *cur;
 	struct fiber_waiter w;
 	int64_t deadline, now = 0;
-	int masked, i;
+	int masked, i, rounds;
 
 	if (n == NULL) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&n->lock);
@@ -491,8 +580,9 @@ xtc_notify_wait(xtc_notify_t *n, int64_t timeout_ns)
 		 * only means we sleep. */
 		if (sync_spin_enter(&g_notify_spinners)) {
 			(void)__xtc_mtx_unlock(&n->lock);
-			for (i = 0; i < SYNC_NOTIFY_SPIN_ROUNDS && !NT_STORED(n); i++)
-				__os_pause();
+			rounds = sync_spin_rounds(SYNC_NOTIFY_SPIN_ROUNDS);
+			for (i = 0; i < rounds && !NT_STORED(n); i++)
+				sync_spin_hint();
 			sync_spin_leave(&g_notify_spinners);
 			(void)__xtc_mtx_lock(&n->lock);
 		}
@@ -958,7 +1048,7 @@ static int
 __amutex_lock_thread(xtc_amutex_t *m, int64_t timeout_ns)
 {
 	struct timespec ts;
-	int i, got, spun = 0, expired;
+	int i, got, spun = 0, expired, rounds;
 
 	if (timeout_ns > 0)
 		deadline_from_timeout(timeout_ns, &ts);
@@ -967,8 +1057,9 @@ __amutex_lock_thread(xtc_amutex_t *m, int64_t timeout_ns)
 			spun = 1;
 			got = 0;
 			(void)__xtc_mtx_unlock(&m->lock);
-			for (i = 0; i < SYNC_SPIN_ROUNDS && !got; i++) {
-				__os_pause();
+			rounds = sync_spin_rounds(SYNC_SPIN_ROUNDS);
+			for (i = 0; i < rounds && !got; i++) {
+				sync_spin_hint();
 				if (AM_HELD(m) || !sync_mtx_trylock(&m->lock))
 					continue;
 				if (!AM_HELD(m))
@@ -1288,7 +1379,7 @@ __arw_lock_thread(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
 	struct timespec ts;
 	pthread_cond_t *cv = mode == ARW_EXCL ? &r->wcv : &r->cv;
 	int *nwait = mode == ARW_EXCL ? &r->wr_waiters : &r->rd_waiters;
-	int i, got, spun = 0, expired;
+	int i, got, spun = 0, expired, rounds;
 
 	if (timeout_ns > 0)
 		deadline_from_timeout(timeout_ns, &ts);
@@ -1298,8 +1389,9 @@ __arw_lock_thread(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
 			spun = 1;
 			got = 0;
 			(void)__xtc_mtx_unlock(&r->lock);
-			for (i = 0; i < SYNC_SPIN_ROUNDS && !got; i++) {
-				__os_pause();
+			rounds = sync_spin_rounds(SYNC_SPIN_ROUNDS);
+			for (i = 0; i < rounds && !got; i++) {
+				sync_spin_hint();
 				if (!__arw_compatible(r, mode) ||
 				    !sync_mtx_trylock(&r->lock))
 					continue;
