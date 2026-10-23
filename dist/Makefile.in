@@ -952,6 +952,12 @@ bench_timerq: $(srcdir)/../bench/bench_timerq.c
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../bench/bench_timerq.c $(LDFLAGS)
 
+# Bounded top-K selection candidates (scalar / AVX2 / AVX-512 QuickSelect
+# cuts, bounded heap, SimdQuickHeap, full sort); standalone.
+bench_topk: $(srcdir)/../bench/bench_topk.c
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../bench/bench_topk.c $(LDFLAGS)
+
 bench_xproc_fanout: $(srcdir)/../bench/bench_xproc_fanout.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../bench/bench_xproc_fanout.c \
