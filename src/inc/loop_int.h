@@ -271,6 +271,11 @@ enum xtc_inbox_kind {
 struct xtc_inbox {
 	_Atomic(struct xtc_task *) pub_head;
 	_Atomic(struct xtc_task *) wake_head;
+	/* 1 while the owner is in (or entering) a BLOCKING poll: a producer
+	 * writes the loop's wakeup fd only then (see __xtc_inbox_push and
+	 * __xtc_inbox_sleep_begin).  On the heads' line on purpose: a
+	 * producer has just CASed it, so the read is free. */
+	_Atomic int                sleeping;
 	int                        inited;
 };
 
@@ -636,6 +641,11 @@ void __xtc_inbox_fini(struct xtc_inbox *ib);
 int  __xtc_inbox_push(xtc_loop_t *loop, enum xtc_inbox_kind k, xtc_task_t *t);
 int  __xtc_inbox_nonempty(const struct xtc_inbox *ib);
 int  __xtc_inbox_drain(xtc_loop_t *loop);  /* owner-only; drains into local queue */
+/* Owner-only bracket around a BLOCKING xtc_io_poll: begin returns 1 if
+ * the inbox already holds work (do not block; the bracket is closed),
+ * else 0 (block, then call end). */
+int  __xtc_inbox_sleep_begin(xtc_loop_t *loop);
+void __xtc_inbox_sleep_end(xtc_loop_t *loop);
 
 /* Per-thread cursor: which loop the calling thread is running.
  * NULL on threads that aren't loop owners. */

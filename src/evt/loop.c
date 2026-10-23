@@ -93,6 +93,7 @@ __xtc_inbox_init(struct xtc_inbox *ib)
 {
 	atomic_store_explicit(&ib->pub_head, NULL, memory_order_relaxed);
 	atomic_store_explicit(&ib->wake_head, NULL, memory_order_relaxed);
+	atomic_store_explicit(&ib->sleeping, 0, memory_order_relaxed);
 	ib->inited = 1;
 	return XTC_OK;
 }
@@ -161,19 +162,56 @@ __xtc_inbox_push(xtc_loop_t *loop, enum xtc_inbox_kind k, xtc_task_t *t)
 	XTC_SIM_FAULT_POINT("sched.inbox.pre_push");
 	__inbox_stack_push(k == XTC_INB_PUBLISH ? &loop->inbox.pub_head :
 	    &loop->inbox.wake_head, t);
-	/* The task is queued whatever the nudge returns; a failed nudge only
-	 * delays it to the loop's next turn (an executor loop re-polls every
+	/*
+	 * Nudge the loop only if its owner is blocked (or about to block) in
+	 * its poller.  A running owner drains the inbox at the top of its
+	 * next step and re-checks it before it blocks, so writing the wakeup
+	 * fd to a running loop was a wasted write(2) per cross-loop wake --
+	 * one per message under load, ~10% of all cycles in a cross-loop
+	 * ping-pong at 2-16 loops (helio's WakeupIfNeeded skips it the same
+	 * way).  Dekker with __xtc_inbox_sleep_begin: the push above and the
+	 * owner's sleeping store are seq_cst, then each side reads the
+	 * other's, so either the owner sees this task or we see sleeping.
+	 * The exchange lets one producer per sleep write; the owner drains
+	 * everything pushed meanwhile when that write wakes it.  The task is
+	 * queued whatever the nudge returns; a failed nudge only delays it
+	 * to the loop's next turn (an executor loop re-polls every
 	 * millisecond), so it must not be reported as a failed wake/spawn.
-	 *
-	 * Not coalesced: a "nudge pending" flag that skips the write while a
-	 * nudge is outstanding was tried and measured slower (pp.c 8 loops x
-	 * 1000 pairs: 0.9-1.3M vs 1.57-1.74M round trips/s).  An idle loop
-	 * then really sleeps and each wake pays a kernel wakeup; with every
-	 * wake writing, a loop going idle usually finds a byte pending and
-	 * polls again at once.  The pipe's EAGAIN when full still bounds the
-	 * writes a stalled loop can accumulate. */
-	(void)xtc_io_wakeup(loop->io);
+	 */
+	if (atomic_load(&loop->inbox.sleeping) != 0 &&
+	    atomic_exchange(&loop->inbox.sleeping, 0) != 0 &&
+	    xtc_io_wakeup(loop->io) != XTC_OK)
+		atomic_store(&loop->inbox.sleeping, 1);   /* next push retries */
 	return XTC_OK;
+}
+
+/*
+ * Owner side of the nudge elision (see __xtc_inbox_push).  Publish
+ * "about to block", then look at the inbox once more: a producer that
+ * pushed before the store is seen here, one that pushes after it sees
+ * sleeping == 1 and writes the wakeup fd.  Returns 1 (and withdraws
+ * the flag) if work is already queued, so the caller must not block.
+ */
+int
+__xtc_inbox_sleep_begin(xtc_loop_t *loop)
+{
+	atomic_store(&loop->inbox.sleeping, 1);
+	if (atomic_load(&loop->inbox.pub_head) != NULL ||
+	    atomic_load(&loop->inbox.wake_head) != NULL) {
+		atomic_store_explicit(&loop->inbox.sleeping, 0,
+		    memory_order_relaxed);
+		return 1;
+	}
+	return 0;
+}
+
+/* The blocking poll returned: producers need not nudge until the next
+ * __xtc_inbox_sleep_begin.  A producer that already took the flag wrote
+ * the fd; that byte at most makes a later poll return early. */
+void
+__xtc_inbox_sleep_end(xtc_loop_t *loop)
+{
+	atomic_store_explicit(&loop->inbox.sleeping, 0, memory_order_relaxed);
 }
 
 /* Reverse a LIFO-pushed chain into arrival order. */
@@ -1217,13 +1255,15 @@ __xtc_loop_step(xtc_loop_t *loop)
 		if (rk > 0 && (timeout_ns < 0 || timeout_ns > rk))
 			timeout_ns = rk;
 	}
-	if (timeout_ns != 0 && __xtc_inbox_nonempty(&loop->inbox))
+	if (timeout_ns != 0 && __xtc_inbox_sleep_begin(loop))
 		return XTC_OK;   /* a wake/spawn arrived: drain it first */
 
 	for (i = 0; i < (int)(sizeof evs / sizeof evs[0]); i++)
 		evs[i].fd = -1;
 	rc = xtc_io_poll(loop->io, evs,
 	    (int)(sizeof evs / sizeof evs[0]), timeout_ns, &n_out);
+	if (timeout_ns != 0)
+		__xtc_inbox_sleep_end(loop);
 	if (rc != XTC_OK) return rc;
 
 	/*

@@ -11,7 +11,11 @@
  * delivery added in M5.
  */
 
+#include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "munit.h"
 #include "xtc.h"
@@ -287,6 +291,94 @@ test_inbox_res_wake_symmetric(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * [Cw6] A cross-loop wake of a task on a loop that is RUNNING must not
+ * write the loop's wakeup fd: the owner drains its inbox at the top of
+ * every step and re-checks it before it blocks, so the nudge is only
+ * needed when the owner is asleep in its poller.  Loop 0 here never
+ * sleeps (a spinner keeps its run queue non-empty) and loop 1 wakes a
+ * parked task on it CW6_WAKES times.  Before the elision every wake was
+ * a write(2) (>= CW6_WAKES in /proc/self/io syscw over the window); now
+ * none is needed.  The bound leaves room for unrelated writes.  Linux
+ * only (the counter is /proc/self/io); a work count, not a timing.
+ */
+#define CW6_WAKES 200
+static _Atomic int  g_cw6_done;
+static long         g_cw6_writes = -1;
+
+static long
+cw6_syscw(void)
+{
+#if defined(__linux__)
+	char buf[512];
+	FILE *f = fopen("/proc/self/io", "r");
+	long v = -1;
+	if (f == NULL)
+		return -1;
+	while (fgets(buf, sizeof buf, f) != NULL)
+		if (strncmp(buf, "syscw:", 6) == 0)
+			v = atol(buf + 6);
+	fclose(f);
+	return v;
+#else
+	return -1;
+#endif
+}
+
+static int cw6_spinner_fn(xtc_task_t *self, void *u) {
+	(void)self; (void)u;
+	return atomic_load(&g_cw6_done) ? XTC_TASK_DONE : XTC_TASK_RESCHED;
+}
+
+static int cw6_waker_fn(xtc_task_t *self, void *u) {
+	struct shared *s = u;
+	long w0;
+	int i;
+	(void)self;
+	while (__os_atomic_load_i32(&s->init_done) == 0)
+		;
+	w0 = cw6_syscw();
+	for (i = 0; i < CW6_WAKES; i++) {
+		(void)xtc_waker_wake(&s->parker_waker);
+		/* Wait for the parker to run and re-park, so the next wake is
+		 * a real inbox push, not a latch on a SCHEDULED task. */
+		while (__os_atomic_load_i32(&s->parker_runs) < i + 2)
+			;
+	}
+	if (w0 >= 0)
+		g_cw6_writes = cw6_syscw() - w0;
+	atomic_store(&g_cw6_done, 1);
+	return XTC_TASK_DONE;
+}
+
+static MunitResult
+test_wake_running_loop_no_write(const MunitParameter p[], void *d)
+{
+	xtc_exec_t *e;
+	static struct shared s;
+	(void)p; (void)d;
+	if (cw6_syscw() < 0)
+		return MUNIT_SKIP;
+	s.parker_runs = 0; s.init_done = 0; s.max_runs = CW6_WAKES + 1;
+	s.wake_calls = 0;
+	atomic_store(&g_cw6_done, 0);
+	g_cw6_writes = -1;
+	munit_assert_int(xtc_exec_init(&e, 2), ==, XTC_OK);
+	munit_assert_int(xtc_exec_spawn_on(e, 0, cw6_spinner_fn, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_exec_spawn_on(e, 0, parker_fn, &s, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_exec_spawn_on(e, 1, cw6_waker_fn, &s, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	munit_assert_int(__os_atomic_load_i32(&s.parker_runs), ==, CW6_WAKES + 1);
+	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	munit_logf(MUNIT_LOG_INFO, "%d wakes to a running loop: %ld write(2)s",
+	    CW6_WAKES, g_cw6_writes);
+	munit_assert_long(g_cw6_writes, >=, 0);
+	munit_assert_long(g_cw6_writes, <, CW6_WAKES / 4);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/Cw1_Cw2_basic",   test_basic,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Cw3_after_done",  test_after_done, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -294,6 +386,7 @@ static MunitTest tests[] = {
 	{ "/Cw5_loop_wake_foreign", test_loop_wake_foreign, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/M11_wake_no_alloc", test_wake_no_alloc, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/m1_inbox_res_wake_symmetric", test_inbox_res_wake_symmetric, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Cw6_wake_running_loop_no_write", test_wake_running_loop_no_write, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m5/cross_wake", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

@@ -297,8 +297,15 @@ __xtc_exec_worker(void *arg)
 			 * rebalance); cleared the instant we wake. */
 			atomic_fetch_add_explicit(&exec->n_idle, 1,
 			    memory_order_relaxed);
-			(void)xtc_io_poll(loop->io, evs, 8,
-			    idle_poll_ns, &n_out);
+			/* Producers nudge only a sleeping loop: publish it and
+			 * re-check the inbox, or a wake pushed since the step's
+			 * idle check would wait out the whole poll. */
+			n_out = 0;
+			if (!__xtc_inbox_sleep_begin(loop)) {
+				(void)xtc_io_poll(loop->io, evs, 8,
+				    idle_poll_ns, &n_out);
+				__xtc_inbox_sleep_end(loop);
+			}
 			atomic_fetch_sub_explicit(&exec->n_idle, 1,
 			    memory_order_relaxed);
 			/*

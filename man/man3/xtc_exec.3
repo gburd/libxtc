@@ -346,6 +346,11 @@ fires are routed through the target loop's inbox plus an
 ping that breaks the target out of
 .Xr xtc_io 3
 .Sy poll .
+The ping is sent only when the target is blocked
+.Pq or about to block
+in its poller: a running loop drains its inbox at the top of every
+step and checks it again before it blocks, so waking a busy loop costs
+no system call.
 The wake remains idempotent: many concurrent wakes collapse to at
 most one re-queue per yielded run.
 .Sh THREAD AFFINITY
