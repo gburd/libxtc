@@ -19,7 +19,7 @@
 #  [P6] dtrace build: every tools/dtrace/*.d script compiles and runs
 #       against the workload.  Needs root.
 #
-# Env (from make check): XTC_SRC_DIR, XTC_BUILD_DIR, CC.
+# Env (from make check): XTC_SRC_DIR, XTC_BUILD_DIR, CC, XTC_SNIPPET_CFLAGS/LDFLAGS.
 set -eu
 
 : "${XTC_SRC_DIR:?}"
@@ -81,10 +81,14 @@ libs=$(sed -n 's/^LIBS[[:space:]]*=[[:space:]]*//p' "$B/Makefile" | head -1)
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/xtc-probes.XXXXXX")
 trap 'find "$work" -mindepth 1 -delete 2>/dev/null; rmdir "$work" 2>/dev/null || :' EXIT
-# shellcheck disable=SC2086  # $libs is a word list
-$CC -std=c11 -D_DEFAULT_SOURCE -I"$B" -I"$XTC_SRC_DIR/src/inc" \
+# The build's CFLAGS/LDFLAGS (make check passes them as XTC_SNIPPET_*, as
+# for the doc snippets): a sanitizer libxtc.a needs its runtime at link.
+# shellcheck disable=SC2086  # $libs and the flag lists are word lists
+$CC -std=c11 -D_DEFAULT_SOURCE ${XTC_SNIPPET_CFLAGS:-} -I"$B" \
+    -I"$XTC_SRC_DIR/src/inc" \
     -o "$work/probe_workload" "$XTC_SRC_DIR/test/dist/probe_workload.c" \
-    "$B/libxtc.a" -pthread $libs || fail P2 "probe_workload did not link"
+    "$B/libxtc.a" ${XTC_SNIPPET_LDFLAGS:-} -pthread $libs || \
+    fail P2 "probe_workload did not link"
 "$work/probe_workload" || fail P2 "probe_workload failed without a tracer"
 
 # ---- P2 -----------------------------------------------------------------
