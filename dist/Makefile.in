@@ -386,6 +386,7 @@ TESTS_SH	= \
 	$(abs_top_srcdir)/../test/dist/test_s_perm.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_async.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_layer.sh \
+	$(abs_top_srcdir)/../test/dist/test_lib_closure.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_noalloc.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_cfg.sh \
 	$(abs_top_srcdir)/../test/dist/test_m17_smoke.sh \
