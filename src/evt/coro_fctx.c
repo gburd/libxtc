@@ -107,7 +107,20 @@
 /* The scheduler thread's own fiber, captured once per thread on first
  * use so __tsan_switch_to_fiber has a valid "back to the scheduler"
  * target. */
-static XTC_THREAD_LOCAL void *__tsan_sched_fiber;
+static XTC_THREAD_LOCAL void *__tsan_sched_fiber_tls;
+/* Through a non-inlinable accessor, like g_in_preempt: a fiber that
+ * finishes on another OS thread must switch to THAT thread's scheduler
+ * fiber.  aarch64 clang kept tpidr_el0 in a callee-saved register
+ * across c->fn() and handed TSan the first thread's (test_exec /Blk*,
+ * test_steal /M9: CHECK thr->proc1 == nullptr, SEGV). */
+__attribute__((noinline))
+static void **
+__tsan_sched_slot(void)
+{
+	void **volatile slot = &__tsan_sched_fiber_tls;
+	return slot;
+}
+#define __tsan_sched_fiber (*__tsan_sched_slot())
 
 static inline void
 __tsan_sched_capture(void)
