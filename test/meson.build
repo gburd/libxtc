@@ -45,13 +45,13 @@ munit_tests = [
   ['chan', 'm7'], ['chan_mpmc_bcast', 'm7'], ['future', 'm7'],
   ['res_meter', 'm7'], ['res_contract', 'm7'],
   # M8
-  ['proc_wait_fd', 'm8'], ['recv_correlate', 'm8'],
+  ['proc_wait_fd', 'm8'], ['recv_correlate', 'm8'], ['send_owned', 'm8'],
   ['proc_link_race', 'm8'],
   # M9
   ['sync', 'm9'], ['amutex_xloop', 'm9'], ['dio_sched', 'm9'],
   ['iosched', 'm9'], ['blocking', 'm9'], ['alloc_audit', 'm9'],
   # M10
-  ['sup', 'm10'], ['reg', 'm10'], ['svr', 'm10'], ['svr_edge', 'm10'],
+  ['sup', 'm10'], ['reg', 'm10'], ['svr', 'm10'], ['svr_edge', 'm10'], ['svr_copies', 'm10'],
   ['fsm', 'm10'], ['saga', 'm10'], ['pg', 'm10'], ['pool', 'm10'],
   ['stream', 'm10'], ['credit', 'm10'], ['xproc', 'm10'], ['app', 'm10'],
   ['osproc', 'm10'], ['isolated', 'm10'],

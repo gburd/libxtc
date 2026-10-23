@@ -1,6 +1,6 @@
 .\" Copyright (c) 2026, The XTC Project
 .\" Use of this source code is governed by the ISC License.
-.Dd May 28, 2026
+.Dd October 23, 2026
 .Dt XTC_PROC 3
 .Os
 .Sh NAME
@@ -12,6 +12,7 @@
 .Nm xtc_proc_userdata ,
 .Nm xtc_proc_set_class ,
 .Nm xtc_send ,
+.Nm xtc_send_owned ,
 .Nm xtc_recv ,
 .Nm xtc_recv_match ,
 .Nm xtc_recv_correlate ,
@@ -46,6 +47,8 @@
 .Fn xtc_self "void"
 .Ft int
 .Fn xtc_send "xtc_pid_t target" "const void *data" "size_t size"
+.Ft int
+.Fn xtc_send_owned "xtc_pid_t target" "void *buf" "size_t size"
 .Ft int
 .Fn xtc_recv "void **out" "size_t *out_size" "int64_t timeout_ns"
 .Ft int
@@ -167,6 +170,9 @@ appends an envelope holding a copy of
 .Fa data\^\& [ 0 .. size )
 to the mailbox of
 .Fa target .
+It copies the payload once: a payload of at most 256 bytes into a
+pooled envelope (copied out again by the receive), a larger one into a
+buffer the receive then hands over without a second copy.
 Returns
 .Dv XTC_OK
 on success,
@@ -184,6 +190,47 @@ rather than
 the message IS delivered, so do not resend it; call
 .Fn xtc_proc_wake
 to retry the wake.
+.Pp
+.Fn xtc_send_owned
+sends without copying: it moves
+.Fa buf
+itself into the mailbox, and the receiver's
+.Fn xtc_recv
+(or
+.Fn xtc_recv_match ,
+.Fn xtc_recv_correlate )
+returns that same pointer.
+.Fa buf
+must come from libxtc's allocator
+.Po Fn xtc_malloc ,
+.Fn xtc_calloc ,
+.Fn xtc_realloc ,
+or a buffer libxtc handed out to be freed with
+.Fn xtc_free ,
+such as a received message
+.Pc .
+On
+.Dv XTC_OK
+the buffer belongs to the library and then to the receiver, who frees
+it with
+.Fn xtc_free ;
+the sender must not touch it again.
+On any error the sender still owns it, unchanged, so a full mailbox
+.Pq Dv XTC_E_AGAIN
+can be retried with the same buffer.
+.Fa buf
+may be
+.Dv NULL
+only with a zero
+.Fa size .
+Use it for payloads above a few kilobytes, or whenever the sender
+builds the message in a fresh buffer anyway: on one loop it moves a
+4 KiB message about 4x faster than
+.Fn xtc_send ,
+and a 64 KiB one about 10x.
+Across loops a small owned message costs a little more than a copied
+one (two allocations freed on another thread); the crossover is
+between 4 KiB and 64 KiB.
 .Pp
 Mailboxes are bounded by
 .Fa mailbox_cap
@@ -215,6 +262,13 @@ on timeout.
 .El
 The delivered buffer is owned by the caller and must be released
 with
+.Fn xtc_free .
+It is the sender's own buffer for an
+.Fn xtc_send_owned
+message and the envelope's payload buffer for an
+.Fn xtc_send
+above 256 bytes (no copy at receive); a smaller payload is copied out.
+Release it with
 .Fn xtc_free ,
 NOT
 .Xr free 3 :

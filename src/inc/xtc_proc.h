@@ -125,6 +125,7 @@ typedef struct xtc_mailbox_stats {
  * PUBLIC: void *xtc_proc_userdata __P((void));
  * PUBLIC: int   xtc_proc_set_class __P((xtc_exec_class_t));
  * PUBLIC: int       xtc_send __P((xtc_pid_t, const void *, size_t));
+ * PUBLIC: int       xtc_send_owned __P((xtc_pid_t, void *, size_t));
  * PUBLIC: int       xtc_recv __P((void **, size_t *, int64_t));
  * PUBLIC: int       xtc_recv_match __P((xtc_match_fn, void *, void **, size_t *, int64_t));
  * PUBLIC: int       xtc_recv_correlate __P((const void *, size_t, int, xtc_msg_t *, int *, int64_t));
@@ -337,8 +338,11 @@ XTC_API void *xtc_proc_userdata(void);
 XTC_API int   xtc_proc_set_class(xtc_exec_class_t cls);
 
 /*
- * Send a message.  Copies `size` bytes from `data` into a mailbox
- * envelope; the caller retains ownership of `data`.  Returns:
+ * Send a message.  Copies `size` bytes from `data` (once: into a pooled
+ * envelope up to 256 bytes, else into a buffer the receiver is then handed
+ * without a second copy); the caller retains ownership of `data`.  To send
+ * without any copy, build the message in an xtc_malloc'd buffer and use
+ * xtc_send_owned below.  Returns:
  *   XTC_OK            queued successfully
  *   XTC_E_INVAL       NULL data with non-zero size, or stale/unknown pid
  *   XTC_E_AGAIN       target mailbox at capacity
@@ -383,9 +387,33 @@ XTC_API int   xtc_proc_set_class(xtc_exec_class_t cls);
 XTC_API int       xtc_send(xtc_pid_t to, const void *data, size_t size);
 
 /*
- * Receive the next envelope from this process's mailbox.  Allocates
- * a new buffer for the caller (via the library allocator); the caller
- * frees it with xtc_free.  Blocks (yields the coroutine) up to
+ * Send a message WITHOUT copying it: move `buf` itself into the target's
+ * mailbox.  `buf` must come from libxtc's allocator (xtc_malloc /
+ * xtc_calloc / xtc_realloc, or a buffer libxtc handed you to free with
+ * xtc_free, e.g. one from xtc_recv); the receiver gets the same pointer
+ * from xtc_recv / xtc_recv_match / xtc_recv_correlate and frees it with
+ * xtc_free.  Zero copies end to end, at any size, same-loop or
+ * cross-thread.
+ *
+ * OWNERSHIP: on XTC_OK the buffer belongs to the library (and then to
+ * the receiver); the caller must not touch it again.  On ANY error the
+ * caller still owns it, unchanged, and must free or retry it -- the same
+ * XTC_E_AGAIN backpressure contract as xtc_send.  buf == NULL is allowed
+ * only with size == 0 (an empty message).
+ *
+ * Returns the same codes as xtc_send.  Unlike xtc_send it never returns
+ * XTC_E_NOMEM for the payload (there is nothing to allocate but the
+ * fixed-size envelope header, which may still fail).
+ */
+XTC_API int       xtc_send_owned(xtc_pid_t to, void *buf, size_t size);
+
+/*
+ * Receive the next envelope from this process's mailbox.  The caller
+ * owns the returned buffer and frees it with xtc_free.  A message from
+ * xtc_send_owned, or an xtc_send larger than 256 bytes, is handed over
+ * in the buffer it already travels in (no copy, no allocation here); a
+ * small xtc_send payload is copied out of its pooled envelope.  Blocks
+ * (yields the coroutine) up to
  * timeout_ns; -1 is
  * indefinite, 0 is non-blocking.
  *
