@@ -162,7 +162,7 @@ clean:
 	rm -f test_btree_stale_descent test_btree_limits test_btree_sample bench_morsel_balance
 	rm -f test_btree_seek test_btree_seek_latched test_point_read test_index_walk test_group_exact test_xs_ctr
 	rm -f test_xs_ctr test_bm_reuse_version test_kill_stmt test_cat_lock_shared
-	rm -f test_sql_results test_txn_fastpath
+	rm -f test_sql_results test_txn_fastpath test_wal_crc_once
 	rm -f test_tpcc_seek test_dup_composite test_bulk_insert test_plan_cache
 	rm -f test_btree_delete_merge test_savepoint test_isolation test_ww_conflict test_row_intents test_commit_visibility test_ssi_skew test_ckpt_bound test_dup_insert test_recover_fast
 	rm -f test_vfs_loop test_vfs_loop.o
@@ -617,6 +617,13 @@ test-crash-oracle-long: test_crash_oracle
 test: test-wal-crc
 test_wal_crc: test_wal_crc.c wal.c wal.h
 	$(CC) $(CFLAGS) -o $@ test_wal_crc.c $(LDFLAGS)
+
+test: test-wal-crc-once
+test_wal_crc_once: test_wal_crc_once.c wal.c wal.h
+	$(CC) $(CFLAGS) -o $@ test_wal_crc_once.c $(LDFLAGS)
+
+test-wal-crc-once: test_wal_crc_once
+	./test_wal_crc_once
 
 # the same test on the table CRC32C (the path of hosts without the instruction)
 test_wal_crc_sw: test_wal_crc.c wal.c wal.h

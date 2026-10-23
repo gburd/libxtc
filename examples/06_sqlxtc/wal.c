@@ -220,10 +220,31 @@ wal_c32c_hwfn(uint32_t c, const uint8_t *p, size_t n)
 #define wal_c32c_hwfn wal_c32c_sw
 #endif
 
+#ifndef WAL_C32C_INIT_HOOK
+#define WAL_C32C_INIT_HOOK()    ((void)0)   /* test_wal_crc_once */
+#endif
+
+static void
+wal_c32c_init_crit(void)
+{
+	WAL_C32C_INIT_HOOK();
+	wal_c32c_init();
+}
+
+/*
+ * The table is built once, by whichever fiber checksums first.  Under
+ * involuntary preemption a fiber preempted inside the init would leave
+ * every other fiber of its loop blocking that loop's OS thread in
+ * pthread_once, so the init can never finish: the whole loop wedges.  A
+ * proc critical section defers the preemption tick for the call (as
+ * wal_lock does); off a proc it is a no-op.
+ */
 static uint32_t
 wal_c32c(uint32_t c, const uint8_t *p, size_t n)
 {
-	(void)pthread_once(&wal_c32c_once, wal_c32c_init);
+	xtc_proc_critical_enter();
+	(void)pthread_once(&wal_c32c_once, wal_c32c_init_crit);
+	xtc_proc_critical_leave();
 	return wal_c32c_hw > 0 ? wal_c32c_hwfn(c, p, n) : wal_c32c_sw(c, p, n);
 }
 

@@ -34,6 +34,7 @@ test_wal_kill_engine
 bench_wal
 test_wal_crc
 test_wal_crc_sw
+test_wal_crc_once
 test_wal_dsync
 test_wal_dio
 test_uniq_commit
