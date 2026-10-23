@@ -514,7 +514,7 @@ TESTS_C		= test_sched_policy test_sched_continuous test_batch test_version test_
 		  test_pgmock_smoke \
 		  test_inject_races
 
-TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_scope pbt_slab pbt_chash pbt_cskip pbt_lrlock pbt_lwlock pbt_chan pbt_sim pbt_sched_shares pbt_saga
+TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_scope pbt_slab pbt_chash pbt_cskip pbt_lrlock pbt_lwlock pbt_chan pbt_sim pbt_sched_shares pbt_saga pbt_qsel
 
 # -------------------------------------------------------------------------
 # Default goal.
@@ -2159,6 +2159,10 @@ pbt_sched_shares: $(srcdir)/../test/pbt/pbt_sched_shares.c $(STATIC_LIB)
 
 pbt_saga: $(srcdir)/../test/pbt/pbt_saga.c $(STATIC_LIB)
 	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_saga.c $(PBT_LIBS)
+
+# sqlxtc's header-only QuickSelect (examples/06_sqlxtc/qsel.h).
+pbt_qsel: $(srcdir)/../test/pbt/pbt_qsel.c $(srcdir)/../examples/06_sqlxtc/qsel.h $(STATIC_LIB)
+	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_qsel.c $(PBT_LIBS)
 
 pbt_slab: $(srcdir)/../test/pbt/pbt_slab.c $(STATIC_LIB)
 	$(CC) $(PBT_CFLAGS) -o $@ $(srcdir)/../test/pbt/pbt_slab.c $(PBT_LIBS)
