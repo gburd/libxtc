@@ -45,6 +45,7 @@
 #include "xtc_slab.h"
 #include "preempt_int.h"   /* __xtc_mtx_lock: preemption-safe lock holds */
 #include "xtc_log.h"    /* redzone reports go through the library logger */
+#include "xtc_inject.h"   /* slab.magazine_window test hook */
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -1081,14 +1082,30 @@ xtc_slab_alloc(xtc_slab_t *s)
 		goto have_slot;
 	}
 
-	/* Magazine fast path. */
+	/*
+	 * Magazine fast path.  The magazine and the stats stripe are per
+	 * THREAD, not per fiber, so the lookup + pop + count must not be
+	 * involuntarily preempted: a fiber redirected between `--mag->n` and
+	 * the slot read lets another fiber on this thread pop the same slot
+	 * (one object, two owners), and one resumed on another thread
+	 * finishes on the wrong thread's magazine.  The unsafe bracket makes
+	 * the preemption tick defer to the next cooperative yield; it is two
+	 * thread-local increments.  (The cache-lock paths below already hold
+	 * the bracket through __xtc_mtx_lock.)
+	 */
 	if (XTC_LIKELY(!(s->opts.flags & XTC_SLAB_NO_MAGAZINE))) {
+		__xtc_unsafe_enter();
 		mag = __tls_mag_for(s);
 		if (XTC_LIKELY(mag != NULL && mag->n > 0)) {
 			slot = mag->slots[--mag->n];
+			/* Test hook inside the window (one relaxed load when
+			 * nothing is attached); see test_slab /magazine_preempt. */
+			XTC_INJECTION_POINT("slab.magazine_window");
 			__STAT_INC(s, alloc_fast);
+			__xtc_unsafe_leave();
 			goto have_slot;
 		}
+		__xtc_unsafe_leave();
 	}
 
 	/* Slow path: take cache lock and pop. */
@@ -1170,13 +1187,15 @@ xtc_slab_free(xtc_slab_t *s, void *obj)
 		return;
 	}
 
-	/* Magazine fast path. */
+	/* Magazine fast path: bracketed as in xtc_slab_alloc. */
 	if (XTC_LIKELY(!(s->opts.flags & XTC_SLAB_NO_MAGAZINE))) {
+		__xtc_unsafe_enter();
 		mag = __tls_mag_for(s);
 		if (XTC_LIKELY(mag != NULL)) {
 			if (XTC_UNLIKELY(mag->slots == NULL)) {
 				if (__os_calloc((size_t)s->opts.magazine_size,
 				    sizeof(void *), (void **)&mag->slots) != XTC_OK) {
+					__xtc_unsafe_leave();
 					goto slow;
 				}
 				mag->cap = s->opts.magazine_size;
@@ -1187,9 +1206,11 @@ xtc_slab_free(xtc_slab_t *s, void *obj)
 			if (XTC_LIKELY(mag->n < mag->cap)) {
 				mag->slots[mag->n++] = slot;
 				__STAT_INC(s, free_fast);
+				__xtc_unsafe_leave();
 				return;
 			}
 		}
+		__xtc_unsafe_leave();
 	}
 
 slow:

@@ -48,6 +48,10 @@
 #include "xtc_int.h"
 #include "preempt_int.h"   /* __xtc_unsafe_depth (internal) */
 
+#ifndef __has_feature
+#  define __has_feature(x) 0     /* gcc: sanitizers via __SANITIZE_* */
+#endif
+
 /* ----- Basic alloc/free ----------------------------------------- */
 
 /* Overflow guard: obj_size near SIZE_MAX must be rejected, not wrapped
@@ -635,6 +639,123 @@ test_concurrent(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ----- Magazine fast path vs involuntary preemption ---------- */
+
+/*
+ * The magazine is per THREAD, not per fiber.  An involuntary preemption
+ * between the magazine pop and its completion hands the thread to
+ * another fiber that pops from the same magazine: one slot, two owners
+ * (seen as a corrupted free list, a SEGV in __pop_slot_locked, and an
+ * underflowed mailbox counter under test_wal_kill preempt -- every
+ * message envelope is a slab object).  The "slab.magazine_window"
+ * injection point fires inside the window; its callback raises the REAL
+ * preemption signal on the fiber's own thread, so the handler takes the
+ * decision a timer tick there would.  Control: the same raise from
+ * plain fiber code does preempt (the peer runs before raise returns),
+ * so a declined raise inside the window is not vacuous.  Skipped where
+ * the involuntary redirect is not implemented and under sanitizers.
+ */
+#include <signal.h>
+#include "xtc_exec.h"
+#include "xtc_inject.h"
+#include "xtc_preempt.h"
+#include "xtc_proc.h"
+
+static atomic_long g_mp_peer_runs;
+static atomic_int  g_mp_arm, g_mp_hits, g_mp_stop;
+static atomic_int  g_mp_ctrl_preempted, g_mp_win_preempted;
+static void       *g_mp_obj;
+
+static void
+mp_raise_in_window(const char *name, void *user)
+{
+	long before;
+	(void)name; (void)user;
+	if (!atomic_exchange(&g_mp_arm, 0))
+		return;
+	atomic_fetch_add(&g_mp_hits, 1);
+	before = atomic_load(&g_mp_peer_runs);
+	(void)raise(SIGVTALRM);              /* a preemption tick, here */
+	if (atomic_load(&g_mp_peer_runs) != before)
+		atomic_store(&g_mp_win_preempted, 1);
+}
+
+static void
+mp_peer(void *arg)
+{
+	(void)arg;
+	while (!atomic_load(&g_mp_stop)) {
+		atomic_fetch_add(&g_mp_peer_runs, 1);
+		xtc_yield();
+	}
+}
+
+static void
+mp_owner(void *arg)
+{
+	long before;
+	void *o;
+	(void)arg;
+	xtc_yield();                          /* let the peer start */
+	before = atomic_load(&g_mp_peer_runs);
+	(void)raise(SIGVTALRM);               /* control: plain fiber code */
+	if (atomic_load(&g_mp_peer_runs) != before)
+		atomic_store(&g_mp_ctrl_preempted, 1);
+	o = xtc_slab_alloc(g_slab);           /* fill this thread's magazine */
+	xtc_slab_free(g_slab, o);
+	atomic_store(&g_mp_arm, 1);
+	g_mp_obj = xtc_slab_alloc(g_slab);    /* magazine hit: the window */
+	xtc_slab_free(g_slab, g_mp_obj);
+	atomic_store(&g_mp_stop, 1);
+}
+
+static MunitResult
+test_magazine_preempt(const MunitParameter p[], void *d)
+{
+	extern int __xtc_coro_preempt_effective(void);
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	xtc_exec_t *e = NULL;
+	xtc_loop_t *l;
+	(void)p; (void)d;
+	if (!xtc_preempt_supported() || !__xtc_coro_preempt_effective())
+		return MUNIT_SKIP;
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
+    __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	return MUNIT_SKIP;   /* see test/m14/test_preempt_p2.c */
+#endif
+	opts.name = "mag-preempt"; opts.obj_size = 64;
+	munit_assert_int(xtc_slab_create(&opts, &g_slab), ==, XTC_OK);
+	atomic_store(&g_mp_peer_runs, 0);
+	atomic_store(&g_mp_arm, 0);
+	atomic_store(&g_mp_hits, 0);
+	atomic_store(&g_mp_stop, 0);
+	atomic_store(&g_mp_ctrl_preempted, 0);
+	atomic_store(&g_mp_win_preempted, 0);
+	munit_assert_int(xtc_inject_attach("slab.magazine_window",
+	    mp_raise_in_window, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	l = xtc_exec_loop(e, 0);
+	/* Arms the handler + unblocks the signal on the worker; the 10 s
+	 * CPU-time interval never elapses, so every tick is our raise. */
+	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
+	    ==, XTC_OK);
+	xtc_preempt_set_involuntary(1);
+	munit_assert_int(xtc_proc_spawn(l, mp_owner, NULL, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_proc_spawn(l, mp_peer, NULL, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	xtc_preempt_set_involuntary(0);
+	(void)xtc_exec_fini(e);
+	(void)xtc_inject_detach("slab.magazine_window");
+	xtc_slab_destroy(g_slab);
+	if (atomic_load(&g_mp_hits) == 0)
+		return MUNIT_SKIP;   /* injection points compiled out */
+	munit_assert_int(atomic_load(&g_mp_ctrl_preempted), ==, 1);
+	munit_assert_int(atomic_load(&g_mp_win_preempted), ==, 0);
+	return MUNIT_OK;
+}
+
 /* ----- Striped statistics ------------------------------------ */
 
 /*
@@ -751,9 +872,6 @@ test_stats_ctor_refused(const MunitParameter p[], void *d)
  * 4 free CPUs; skipped under sanitizers/valgrind, whose instrumentation
  * of every access swamps the line-bouncing being measured.
  */
-#ifndef __has_feature
-#  define __has_feature(x) 0     /* gcc: sanitizers via __SANITIZE_* */
-#endif
 #define SC_THREADS 4
 #define SC_ROUNDS  200000
 static _Atomic int g_sc_go;
@@ -936,6 +1054,7 @@ static MunitTest tests[] = {
 	{ "/stats_cross_thread", test_stats_cross_thread, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/stats_ctor_refused", test_stats_ctor_refused, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/stats_scale",      test_stats_scale,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/magazine_preempt", test_magazine_preempt, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/backtrace",        test_backtrace,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
