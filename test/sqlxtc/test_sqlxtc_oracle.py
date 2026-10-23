@@ -122,7 +122,16 @@ def normalise_rows(rows):
             else:
                 new.append(("o", repr(v)))
         out.append(tuple(new))
-    return sorted(out)
+    return out
+
+
+def ordered(sql):
+    """An ORDER BY result is compared row by row in the order returned:
+    SQLite keeps equal keys in scan order (its sorter ties on an arrival
+    counter), so LIMIT K is the first K rows of the unlimited query.
+    Sorting both sides first hid a top-N tie-order bug.  Anything else
+    is compared as a multiset."""
+    return "ORDER BY" in sql.upper()
 
 
 # --- corpus -----------------------------------------------------
@@ -180,6 +189,22 @@ CORPUS = [
         ["CREATE TABLE ol(x INT)",
          "INSERT INTO ol VALUES (3),(1),(4),(1),(5),(9),(2),(6),(5),(3)"],
         "SELECT x FROM ol ORDER BY x DESC LIMIT 3"),
+    # Ties under LIMIT keep scan order, compared in order (the second
+    # and third once returned 5|b and NULL|g out of place).
+    ("order_limit_ties",
+        ["CREATE TABLE ot(k INT, v TEXT)",
+         "INSERT INTO ot VALUES (5,'a'),(5,'b'),(3,'c'),(5,'d'),(1,'e')"],
+        "SELECT k, v FROM ot ORDER BY k LIMIT 3"),
+    ("order_limit_ties_offset",
+        ["CREATE TABLE oo(k INT, j INT, v TEXT)",
+         "INSERT INTO oo VALUES (5,1,'a'),(3,2,'b'),(5,1,'c'),(NULL,3,'d'),"
+         "(3,1,'e'),(5,2,'f'),(NULL,1,'g'),(1,9,'h'),(5,1,'i'),(3,2,'j')"],
+        "SELECT k, v FROM oo ORDER BY k DESC LIMIT 3 OFFSET 3"),
+    ("order_limit_nonoutput_key",
+        ["CREATE TABLE on1(k INT, j INT, v TEXT)",
+         "INSERT INTO on1 VALUES (5,1,'a'),(3,2,'b'),(5,1,'c'),(NULL,3,'d'),"
+         "(3,1,'e'),(5,2,'f'),(NULL,1,'g'),(1,9,'h'),(5,1,'i'),(3,2,'j')"],
+        "SELECT k, v FROM on1 ORDER BY j LIMIT 4"),
     ("distinct",
         ["CREATE TABLE ds(v INT)",
          "INSERT INTO ds VALUES (1),(2),(2),(3),(3),(3)"],
@@ -381,7 +406,10 @@ def main():
             if (qerr is None) != (ref_err is None):
                 ok = False
             elif qerr is None:
-                if normalise_rows(qrows) != normalise_rows(ref_rows):
+                qn, rn = normalise_rows(qrows), normalise_rows(ref_rows)
+                if not ordered(test):
+                    qn, rn = sorted(qn), sorted(rn)
+                if qn != rn:
                     ok = False
 
             if ok:

@@ -127,3 +127,7 @@ test_btree_prefix_split
 test_rec_codec
 test_idx_elem
 test_freelist_persist
+
+# ORDER BY ... LIMIT (top-N)
+test_order_limit
+test_qsel

@@ -1150,3 +1150,28 @@ test_cat_lock_shared: test_cat_lock_shared.c $(ENGINE_NATIVE)
 
 test-cat-lock-shared: test_cat_lock_shared
 	TMPDIR=$${TMPDIR:-/tmp} ./test_cat_lock_shared
+
+# ---- ORDER BY ... LIMIT (top-N) ----
+# LIMIT K is the first K rows of the unlimited ORDER BY, ties in scan
+# order (SQLite's rule), compared in returned order.
+test: test-order-limit
+test_order_limit: test_order_limit.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_order_limit.c $(ENGINE_NATIVE) $(LDFLAGS)
+
+test-order-limit: test_order_limit
+	TMPDIR=$${TMPDIR:-/tmp} ./test_order_limit
+
+# qsel.h QuickSelect (the top-N cut) against a sort, adversarial inputs.
+test: test-qsel
+test_qsel: test_qsel.c qsel.h
+	$(CC) $(CFLAGS) -o $@ test_qsel.c
+
+test-qsel: test_qsel
+	./test_qsel
+
+vexec.o: qsel.h
+
+clean: clean-order-limit
+clean-order-limit:
+	rm -f test_order_limit test_qsel
+.PHONY: test-order-limit test-qsel clean-order-limit
