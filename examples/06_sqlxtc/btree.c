@@ -152,6 +152,17 @@
 #define BT_STALE_TEST_HOOK() 0
 #define BT_STALE_TEST_HOOK_PEEK() 0
 #endif
+/* Test-only seam: called once per pass of a latched descent's retry
+ * loop (test_btree_smo_stress bounds a run of restarts). */
+#ifndef BT_RESTART_TEST_HOOK
+#define BT_RESTART_TEST_HOOK() ((void)0)
+#endif
+/* Test-only seam: a cursor hopping to its right sibling, after it let
+ * go of the leaf it left and before it fixes the sibling's pid
+ * (test_btree_cursor_hop merges, frees and reissues that pid here). */
+#ifndef BT_HOP_TEST_HOOK
+#define BT_HOP_TEST_HOOK(c, pid) ((void)0)
+#endif
 
 /*
  * The optimistic (seqlock) readers -- bt_lookup_optimistic and
@@ -1450,6 +1461,18 @@ unlock:
 	return rc;
 }
 
+/* A descent with no routing key (to the leftmost leaf) has no fence to
+ * check a page against, but only the leftmost leaf has a -infinity lower
+ * fence: any other leaf was reached through a stale page id (a root
+ * pid loaded before collapse_root freed it and the id was reissued). */
+static int
+not_leftmost_leaf(const void *pg)
+{
+	uint16_t l = 0;
+
+	return btnode_is_leaf(pg) && btnode_lo_fence(pg, NULL, 0, &l) != 0;
+}
+
 /*
  * Optimistic descent to the leaf for `key` (start == NULL: the leftmost
  * leaf): the internal levels are read WITHOUT their content latch, under
@@ -1486,8 +1509,8 @@ descend_optimistic(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 		if (!bm_read_begin(f, &v))
 			break;                       /* a writer holds it */
 		leaf = btnode_is_leaf(pg);
-		bad = btnode_is_dead(pg) ||
-		    (key != NULL && btnode_below_lo_fence(pg, key, klen));
+		bad = btnode_is_dead(pg) || (key != NULL ?
+		    btnode_below_lo_fence(pg, key, klen) : not_leftmost_leaf(pg));
 		beyond = key != NULL && btnode_beyond_hi_fence(pg, key, klen);
 		if (beyond)
 			next = (bm_pid_t)btnode_right_sibling(pg);
@@ -1504,7 +1527,8 @@ descend_optimistic(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 			(void)move_right(bt, &f, key, klen, 0);
 			pg = bm_page(f);
 			if (!btnode_is_leaf(pg) || btnode_is_dead(pg) ||
-			    (key != NULL && btnode_below_lo_fence(pg, key, klen))) {
+			    (key != NULL ? btnode_below_lo_fence(pg, key, klen) :
+			    not_leftmost_leaf(pg))) {
 				bm_unlatch(f);
 				bm_unfix(bm, f, 0);
 				return 0;
@@ -1552,6 +1576,7 @@ descend_shared(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 	for (;;) {
 		int stale = 0;
 
+		BT_RESTART_TEST_HOOK();
 		pid = atomic_load(&bt->root_pid);
 		rc = bm_fix_pid(bm, pid, &f);
 		if (rc == XTC_E_AGAIN) {   /* root pid quarantined: retry */
@@ -2089,6 +2114,150 @@ bt_seek_ge(bt_t *bt, const void *key, uint16_t klen, void *kout,
 	}
 	bt_cursor_close(c);
 	return rc;
+}
+
+/*
+ * bt_seek_ge_n: the probes descend together.  Sorted by key, they
+ * share their upper nodes, so each round visits every distinct node on
+ * the probes' current level once: one fix, one version bracket, then a
+ * binary search per probe of the run that sits there.  One pin is held
+ * at a time (a node is released before the next is fixed), as in the
+ * single-probe optimistic read; a node is only trusted once the version
+ * re-check after the run passes, and anything the fast path does not
+ * settle -- a writer in the node, a dead node, a key outside the node's
+ * fences (a concurrent split or merge), an out-of-line value, an answer
+ * past the leaf's last key, a full buffer -- is left XTC_E_AGAIN for
+ * bt_seek_ge.  So the batch is never less correct than one bt_seek_ge
+ * per probe; it is that read with the shared levels read once.
+ */
+/* Prefetch the lines a node search reads first: the header and the
+ * slot directory after it (10-byte slots: 512 bytes hold ~47, about a
+ * full leaf's directory). */
+static void
+bt_prefetch_node(const void *pg)
+{
+#if defined(__GNUC__) || defined(__clang__)
+	const char *c = pg;
+	int i;
+	for (i = 0; i < 512; i += 64)
+		__builtin_prefetch(c + i, 0, 3);
+#else
+	(void)pg;
+#endif
+}
+
+int
+bt_seek_ge_n(bt_t *bt, bt_probe_t *p, int n, void *buf, uint32_t bcap)
+{
+	bm_t *bm;
+	int ord[BT_SEEKN_MAX], nord[BT_SEEKN_MAX];
+	bm_pid_t at[BT_SEEKN_MAX], nat[BT_SEEKN_MAX];
+	uint8_t *out = buf;
+	uint32_t used = 0;
+	int live = 0, i, j, k, e, round, nl;
+
+	if (bt == NULL || p == NULL || n < 0 || n > BT_SEEKN_MAX ||
+	    (buf == NULL && bcap > 0))
+		return XTC_E_INVAL;
+	for (i = 0; i < n; i++) {
+		p[i].rc = XTC_E_AGAIN;
+		p[i].kolen = p[i].vlen = 0;
+		p[i].koff = p[i].voff = 0;
+		if (p[i].key == NULL || p[i].klen > bt_key_max(bt)) {
+			p[i].rc = XTC_E_INVAL;
+			continue;
+		}
+		for (j = live; j > 0 && key_cmp(p[ord[j - 1]].key,
+		    p[ord[j - 1]].klen, p[i].key, p[i].klen) > 0; j--)
+			ord[j] = ord[j - 1];
+		ord[j] = i;
+		live++;
+	}
+	if (!BT_OLC_ENABLED || live == 0)
+		return XTC_OK;
+	bm = bt->bm;
+	at[0] = atomic_load(&bt->root_pid);
+	for (i = 1; i < live; i++)
+		at[i] = at[0];
+	for (round = 0; live > 0 && round <= BT_MAX_HEIGHT; round++) {
+		nl = 0;
+		/* Start every node of this level loading before reading any:
+		 * the probes' leaves are scattered, so the misses overlap
+		 * instead of queueing.  The pin-free lookup only names an
+		 * address to prefetch -- nothing is read through it. */
+		for (i = 0; round > 0 && i < live; i = e) {
+			bm_frame_t *pf = bm_fix_pid_nopin(bm, at[i]);
+			for (e = i + 1; e < live && at[e] == at[i]; e++)
+				;
+			if (pf != NULL)
+				bt_prefetch_node(bm_page(pf));
+		}
+		for (i = 0; i < live; i = e) {
+			bm_frame_t *f;
+			const void *pg;
+			uint64_t v;
+			uint32_t mark = used;
+			int leaf, dead, mnl = nl;
+
+			for (e = i + 1; e < live && at[e] == at[i]; e++)
+				;                   /* the run [i, e) on this node */
+			if (bm_fix_pid(bm, at[i], &f) != XTC_OK)
+				continue;           /* left AGAIN */
+			pg = bm_page(f);
+			if (!bm_read_begin(f, &v)) {
+				bm_unfix(bm, f, 0);
+				continue;
+			}
+			leaf = btnode_is_leaf(pg);
+			dead = btnode_is_dead(pg);
+			for (k = i; k < e; k++) {
+				bt_probe_t *q = &p[ord[k]];
+				const void *vp = NULL;
+				uint16_t vl = 0, kl = 0;
+				int s;
+
+				if (dead || btnode_below_lo_fence(pg, q->key, q->klen) ||
+				    btnode_beyond_hi_fence(pg, q->key, q->klen))
+					continue;       /* moved: bt_seek_ge */
+				if (!leaf) {
+					bm_pid_t c = child_for_key(pg, q->key, q->klen);
+					if (c == BM_PID_NONE)
+						continue;
+					nord[nl] = ord[k];
+					nat[nl++] = c;
+					continue;
+				}
+				s = btnode_search(pg, q->key, q->klen, NULL);
+				if (s >= (int)btnode_count(pg) ||
+				    btnode_get(pg, s, NULL, NULL, &vp, &vl) != 0 ||
+				    btnode_vflag(pg, s) || used > bcap ||
+				    olc_full_key(bt, pg, s, out + used,
+				    (uint16_t)(bcap - used > 0xFFFF ? 0xFFFF :
+				    bcap - used), &kl) != 0 ||
+				    (uint32_t)vl > bcap - used - kl)
+					continue;       /* past the leaf, ovf, full */
+				memcpy(out + used + kl, vp, vl);
+				q->koff = used;
+				q->kolen = kl;
+				q->voff = used + kl;
+				q->vlen = vl;
+				q->rc = XTC_OK;
+				used += (uint32_t)kl + vl;
+			}
+			if (!bm_read_valid(f, v)) {
+				/* A writer was in the node: nothing read here holds. */
+				for (k = i; k < e; k++)
+					p[ord[k]].rc = XTC_E_AGAIN;
+				used = mark;
+				nl = mnl;
+			}
+			bm_unfix(bm, f, 0);
+		}
+		memcpy(ord, nord, sizeof ord[0] * (size_t)nl);
+		memcpy(at, nat, sizeof at[0] * (size_t)nl);
+		live = nl;
+	}
+	return XTC_OK;
 }
 
 /*
@@ -2707,14 +2876,15 @@ cursor_descend(bt_t *bt, const void *start, uint16_t klen, bm_frame_t **out)
 	 * range into a LEFT sibling -- which move_right cannot follow.  We
 	 * revalidate dead/lo-fence at EVERY level and restart from the root
 	 * on a hit so the cursor never opens onto a merged-away page.  With
-	 * start == NULL there is no routing key, so only the dead flag can
-	 * fire (the leftmost child is never absorbed leftward).  Unbounded
+	 * start == NULL there is no routing key: the dead flag, and a leaf
+	 * that is not the leftmost (a reissued pid), fire.  Unbounded
 	 * for the reason given in descend_shared: the frame handed back must
 	 * be the one this descent still holds.
 	 */
 	for (;;) {
 		int stale = 0;
 
+		BT_RESTART_TEST_HOOK();
 		pid = atomic_load(&bt->root_pid);
 		rc = bm_fix_pid(bm, pid, &f);
 		if (rc == XTC_E_AGAIN) {   /* root pid quarantined: retry */
@@ -2727,7 +2897,8 @@ cursor_descend(bt_t *bt, const void *start, uint16_t klen, bm_frame_t **out)
 		(void)move_right(bt, &f, start, klen, 0);
 		pg = bm_page(f);
 		if (BT_STALE_TEST_HOOK() || btnode_is_dead(pg) ||
-		    (start != NULL && btnode_below_lo_fence(pg, start, klen))) {
+		    (start != NULL ? btnode_below_lo_fence(pg, start, klen) :
+		    not_leftmost_leaf(pg))) {
 			bm_unlatch(f); bm_unfix(bm, f, 0);
 			xtc_yield();
 			continue;
@@ -2760,9 +2931,9 @@ cursor_descend(bt_t *bt, const void *start, uint16_t klen, bm_frame_t **out)
 			(void)move_right(bt, &f, start, klen, 0);
 			pg = bm_page(f);
 			/* Internal-level stale-node guard (see descend_shared). */
-			if (btnode_is_dead(pg) ||
-			    (start != NULL &&
-			    btnode_below_lo_fence(pg, start, klen))) {
+			if (btnode_is_dead(pg) || (start != NULL ?
+			    btnode_below_lo_fence(pg, start, klen) :
+			    not_leftmost_leaf(pg))) {
 				stale = 1;
 				break;
 			}
@@ -3208,6 +3379,19 @@ bt_cursor_open(bt_t *bt, const void *start, uint16_t klen, bt_cursor_t **out)
 
 static int cursor_seek(bt_cursor_t *c, bm_frame_t *f);
 
+/* Is `pg` (latched) the live leaf that follows a leaf whose upper fence
+ * is hf/hfl? */
+static int
+cursor_hop_ok(const void *pg, const uint8_t *hf, uint16_t hfl)
+{
+	uint8_t lo[BT_MAX_KEY];
+	uint16_t lol = 0;
+
+	return btnode_is_leaf(pg) && !btnode_is_dead(pg) &&
+	    btnode_lo_fence(pg, lo, sizeof lo, &lol) == 0 && lol == hfl &&
+	    memcmp(lo, hf, hfl) == 0;
+}
+
 int
 bt_cursor_next(bt_cursor_t *c, const void **key, uint16_t *klen,
     const void **val, uint16_t *vlen)
@@ -3272,7 +3456,19 @@ bt_cursor_next(bt_cursor_t *c, const void **key, uint16_t *klen,
 			uint32_t rs = btnode_right_sibling(pg);
 			bm_frame_t *nf;
 			int frc;
+			uint8_t hf[BT_MAX_KEY];
+			uint16_t hfl = 0;
 
+			/* The leaf is released before the sibling is fixed, so
+			 * the link can go stale in between: a merge can absorb
+			 * the sibling into this leaf and free it, and its id can
+			 * be reissued as any node.  Its lower fence must equal
+			 * this leaf's upper fence (seek_ge_optimistic checks the
+			 * same), else the scan would read a dead or unrelated
+			 * page: rows skipped, repeated or out of order. */
+			if (rs != 0 && btnode_hi_fence(pg, hf, sizeof hf,
+			    &hfl) != 0)
+				hfl = UINT16_MAX;         /* cannot check: re-descend */
 			bm_unlatch(c->leaf);
 			bm_unfix(bm, c->leaf, 0);
 			c->leaf = NULL;
@@ -3280,12 +3476,23 @@ bt_cursor_next(bt_cursor_t *c, const void **key, uint16_t *klen,
 				c->done = 1;
 				return XTC_E_NOTFOUND;
 			}
-			frc = bm_fix_pid(bm, (bm_pid_t)rs, &nf);
+			BT_HOP_TEST_HOOK(c, (bm_pid_t)rs);
+			frc = hfl == UINT16_MAX ? XTC_E_AGAIN :
+			    bm_fix_pid(bm, (bm_pid_t)rs, &nf);
+			if (frc == XTC_OK) {
+				bm_latch_shared(nf);
+				if (!cursor_hop_ok(bm_page(nf), hf, hfl)) {
+					bm_unlatch(nf);
+					bm_unfix(bm, nf, 0);
+					frc = XTC_E_AGAIN;
+				}
+			}
 			if (frc == XTC_E_AGAIN) {
 				/* The right sibling pid was quarantined by a
-				 * concurrent merge: the link is stale.  Re-descend
-				 * from the scan position to find the leaf that now
-				 * owns the next key, then continue the scan. */
+				 * concurrent merge, or no longer names the next
+				 * leaf: the link is stale.  Re-descend from the
+				 * scan position to find the leaf that now owns the
+				 * next key, then continue the scan. */
 				bm_frame_t *rf = NULL;
 
 				if (cursor_descend(c->bt,
@@ -3300,7 +3507,6 @@ bt_cursor_next(bt_cursor_t *c, const void **key, uint16_t *klen,
 				c->done = 1;
 				return XTC_E_INTERNAL;
 			}
-			bm_latch_shared(nf);
 			c->leaf = nf;
 			c->slot = 0;
 			/* Read-ahead: warm the NEXT leaf while we scan this one,
@@ -3348,7 +3554,8 @@ bt_cursor_park(bt_cursor_t *c)
  *     separator and the position.  Walk right (move_right) instead.
  *   - a merge may have freed the page, and its pid been reissued as any
  *     node.  If it is not a live leaf, or the position is at/below its
- *     lower fence (its range moved left), re-descend from the root.
+ *     lower fence (its range moved left), or -- no position yet, a scan
+ *     from the start -- it is not the leftmost leaf, re-descend.
  * Takes ownership of `f`.  Returns XTC_OK, or XTC_E_NOTFOUND (done) if
  * a needed re-descent fails.
  */
@@ -3361,7 +3568,8 @@ cursor_seek(bt_cursor_t *c, bm_frame_t *f)
 	int slot, found = 0;
 
 	if (!btnode_is_leaf(pg) || btnode_is_dead(pg) ||
-	    (k != NULL && btnode_below_lo_fence(pg, k, c->keylen))) {
+	    (k != NULL ? btnode_below_lo_fence(pg, k, c->keylen) :
+	    not_leftmost_leaf(pg))) {
 		bm_unlatch(f);
 		bm_unfix(bm, f, 0);
 		if (cursor_descend(c->bt, k, c->keylen, &f) != XTC_OK) {
