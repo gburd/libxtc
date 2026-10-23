@@ -351,9 +351,31 @@ fw_kill_deliver(int *masked)
 struct xtc_notify {
 	pthread_mutex_t lock;
 	pthread_cond_t  cv;
-	int             stored;       /* one-shot stored signal */
+	_Atomic int     stored;       /* one-shot stored signal; under lock,
+	                               * peeked by off-loop spinners */
 	struct fw_queue wq;           /* fiber waiters */
 };
+
+#define NT_STORED(n) atomic_load_explicit(&(n)->stored, memory_order_relaxed)
+#define NT_SET(n, v) \
+	atomic_store_explicit(&(n)->stored, (v), memory_order_relaxed)
+
+/*
+ * An off-loop thread that waits on a notify without a deadline first polls
+ * `stored` (inner mutex dropped) for up to SYNC_NOTIFY_SPIN_ROUNDS pauses,
+ * then sleeps on the condvar.  sqlxtc's committers wait here for the WAL
+ * group-commit leader's fdatasync and for the visibility horizon; the
+ * signal usually comes within tens of microseconds, and a futex sleep +
+ * wake on a CPU that has dropped into a deep idle state costs ~100 us
+ * (measured, 64-vCPU x86-64 host with C6 enabled: wake-to-run 80-130 us
+ * from C6, 2-3 us otherwise).  4096 pauses is about 45 us on a current
+ * x86 core.  The spinners share one process-wide cap (sync_spin_cap(),
+ * which is 0 on one CPU and under the simulator); timed waits do not spin.
+ */
+#ifndef SYNC_NOTIFY_SPIN_ROUNDS
+#define SYNC_NOTIFY_SPIN_ROUNDS 4096
+#endif
+static _Atomic int g_notify_spinners;
 
 /* Hand one signal to the oldest fiber waiter, else store it for the next
  * wait (under the lock).  Direct hand-off, so N signals reach N parked
@@ -364,7 +386,7 @@ notify_give_locked(xtc_notify_t *n)
 {
 	struct fiber_waiter *w = n->wq.head;
 	if (w == NULL) {
-		n->stored = 1;
+		NT_SET(n, 1);
 		(void)pthread_cond_broadcast(&n->cv);
 		return;
 	}
@@ -413,12 +435,12 @@ xtc_notify_wait(xtc_notify_t *n, int64_t timeout_ns)
 	xtc_task_t *cur;
 	struct fiber_waiter w;
 	int64_t deadline, now = 0;
-	int masked;
+	int masked, i;
 
 	if (n == NULL) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&n->lock);
-	if (n->stored) {
-		n->stored = 0;
+	if (NT_STORED(n)) {
+		NT_SET(n, 0);
 		(void)__xtc_mtx_unlock(&n->lock);
 		return XTC_OK;
 	}
@@ -447,7 +469,7 @@ xtc_notify_wait(xtc_notify_t *n, int64_t timeout_ns)
 				continue;
 			}
 			if (w.granted) { rc = XTC_OK; break; }
-			if (n->stored) { n->stored = 0; rc = XTC_OK; break; }
+			if (NT_STORED(n)) { NT_SET(n, 0); rc = XTC_OK; break; }
 			if (fw_expired(deadline, &now)) { rc = XTC_E_AGAIN; break; }
 			fw_enqueue(&n->wq, &w);
 			fw_park(&n->lock, cur, &w.waker, deadline, now);
@@ -460,19 +482,29 @@ xtc_notify_wait(xtc_notify_t *n, int64_t timeout_ns)
 	}
 
 	if (timeout_ns < 0) {
-		while (!n->stored)
+		/* Spin first (see g_notify_spinners); the locked re-test
+		 * below decides, so a signal taken by another waiter meanwhile
+		 * only means we sleep. */
+		if (sync_spin_enter(&g_notify_spinners)) {
+			(void)__xtc_mtx_unlock(&n->lock);
+			for (i = 0; i < SYNC_NOTIFY_SPIN_ROUNDS && !NT_STORED(n); i++)
+				__os_pause();
+			sync_spin_leave(&g_notify_spinners);
+			(void)__xtc_mtx_lock(&n->lock);
+		}
+		while (!NT_STORED(n))
 			(void)pthread_cond_wait(&n->cv, &n->lock);
-		n->stored = 0;
+		NT_SET(n, 0);
 	} else {
 		struct timespec ts;
 		deadline_from_timeout(timeout_ns, &ts);
-		while (!n->stored) {
+		while (!NT_STORED(n)) {
 			if (cv_wait_until(&n->cv, &n->lock, &ts)) {
 				rc = XTC_E_AGAIN;
 				break;
 			}
 		}
-		if (n->stored) { n->stored = 0; rc = XTC_OK; }
+		if (NT_STORED(n)) { NT_SET(n, 0); rc = XTC_OK; }
 	}
 	(void)__xtc_mtx_unlock(&n->lock);
 	return rc;
@@ -726,11 +758,14 @@ xtc_abort_token_reason(const xtc_abort_token_t *t)
  * is no thundering herd and ordering is fair.  Thread waiters share
  * the same `held` flag via the condvar: they spin briefly, then sleep
  * (see "Off-loop spin-then-park").  When both kinds wait, unlock
- * prefers a fiber waiter; a later release with no fiber waiters wakes
- * ONE sleeping thread unless an earlier wake has not run yet (cv_wake):
- * at most one woken-but-not-yet-running thread per mutex, so releases
- * never stack wakes into a herd, and every release while sleepers wait
- * either wakes one or has one on its way, so none is stranded.
+ * prefers a fiber waiter; a release with no fiber waiters wakes ONE
+ * sleeping thread (cond_signal, as before).  An earlier version held
+ * that wake back while a previously woken thread had not run yet (at
+ * most one wake in flight per mutex); on a host with deep CPU idle
+ * states the woken thread takes ~100 us to run, and the mutex sat free
+ * with sleepers for that long (measured, 64-vCPU x86-64 host: 22 us
+ * mean free-with-sleepers interval, sqlxtc ledger transfer at 64
+ * clients), so every release now signals.
  */
 
 /* Field order: lock .. wq.head (everything an uncontended lock/unlock
@@ -741,7 +776,6 @@ struct xtc_amutex {
 	_Atomic int           held;      /* written under lock; spinners peek */
 	int                   recursive; /* XTC_AMUTEX_RECURSIVE */
 	int                   cv_waiters; /* threads asleep on cv */
-	int                   cv_wake;   /* signalled, not yet re-tested */
 	struct fw_queue       wq;        /* fiber waiters */
 	_Atomic int           spinners;  /* threads in the off-loop spin */
 	int                   count;     /* recursion depth */
@@ -759,18 +793,15 @@ struct xtc_amutex {
 #define AM_SET(m, v) \
 	atomic_store_explicit(&(m)->held, (v), memory_order_relaxed)
 
-/* Wake ONE sleeping thread waiter unless an earlier wake is still on its
- * way (under lock).  The woken thread re-tests: a running thread may
- * have taken the lock first (barging, which keeps the lock busy while the
- * sleeper is being scheduled); then it sleeps again and that thread's
- * release wakes the next one. */
+/* Wake ONE sleeping thread waiter (under lock).  The woken thread
+ * re-tests: a running thread may have taken the lock first (barging,
+ * which keeps the lock busy while the sleeper is being scheduled); then
+ * it sleeps again and that thread's release wakes the next one. */
 static void
 amutex_wake_thread_locked(xtc_amutex_t *m)
 {
-	if (m->cv_waiters > 0 && !m->cv_wake) {
-		m->cv_wake = 1;
+	if (m->cv_waiters > 0)
 		(void)pthread_cond_signal(&m->cv);
-	}
 }
 
 /*
@@ -953,7 +984,6 @@ __amutex_lock_thread(xtc_amutex_t *m, int64_t timeout_ns)
 		else
 			expired = cv_wait_until(&m->cv, &m->lock, &ts);
 		m->cv_waiters--;
-		m->cv_wake = 0;         /* any waiter's return consumes the wake */
 		spun = 0;
 		if (expired && AM_HELD(m))
 			return XTC_E_AGAIN; /* the holder's release wakes the next */
@@ -1086,9 +1116,12 @@ xtc_amutex_unlock(xtc_amutex_t *m)
  * (the documented tradeoff -- real contention here is between procs).
  *
  * Off-loop waiters spin briefly, then sleep: shared ones on cv, exclusive
- * ones on wcv.  A release wakes only waiters that can enter, and at most
- * one wake per class is in flight (rd_wake / wr_wake: set by the waker,
- * cleared by the first woken thread to run).  It used to broadcast to
+ * ones on wcv.  A release wakes only waiters that can enter.  (An earlier
+ * version also kept at most one wake per class in flight; on a host with
+ * deep CPU idle states the latch then sat free with sleepers ~20-38 us
+ * per release while the one woken thread left C6 -- measured, 64-vCPU
+ * x86-64 host, sqlxtc ledger transfer at 16-64 clients -- so every
+ * release that frees the latch now wakes.)  It used to broadcast to
  * every off-loop waiter on every release, even while readers still held
  * the latch; with N threads queued on a hot B-tree leaf each release
  * woke all N, one won and the rest slept again (about 6 context switches
@@ -1098,8 +1131,8 @@ xtc_amutex_unlock(xtc_amutex_t *m)
  * sleeping readers, who can join, only while no writer sleeps (so the
  * readers drain and the last one out wakes the writer).  A woken waiter
  * that finds the latch taken (a running thread got there first) sleeps
- * again, and that holder's release runs the wake again with the token
- * cleared, so a sleeper is never left behind a latch nobody releases.
+ * again, and that holder's release runs the wake again, so a sleeper is
+ * never left behind a latch nobody releases.
  */
 #define ARW_SHARED 0
 #define ARW_EXCL   1
@@ -1118,8 +1151,6 @@ struct xtc_arwlock {
 	int                    wr_waiters; /* threads asleep on wcv */
 	struct fw_queue        wq;        /* fiber waiters */
 	int                    last_excl; /* the last release was exclusive */
-	int                    rd_wake;   /* readers woken, none run yet */
-	int                    wr_wake;   /* a writer woken, not run yet */
 	_Atomic int            spinners;  /* threads in the off-loop spin */
 	pthread_cond_t         cv;        /* off-loop shared waiters */
 	pthread_cond_t         wcv;       /* off-loop exclusive waiters */
@@ -1173,8 +1204,8 @@ __arw_compatible(xtc_arwlock_t *r, int mode)
 	                        : (!ARW_W(r));
 }
 
-/* Wake the off-loop waiters that can enter now, at most one wake per
- * class in flight (see the arwlock comment).  Under r->lock. */
+/* Wake the off-loop waiters that can enter now (see the arwlock
+ * comment).  Under r->lock. */
 static void
 __arw_wake_threads_locked(xtc_arwlock_t *r)
 {
@@ -1185,20 +1216,15 @@ __arw_wake_threads_locked(xtc_arwlock_t *r)
 	if (ARW_R(r) > 0) {
 		/* Read-held: sleeping readers may join, unless a writer
 		 * sleeps (the last reader out wakes it). */
-		if (r->wr_waiters == 0 && r->rd_waiters > 0 && !r->rd_wake) {
-			r->rd_wake = 1;
+		if (r->wr_waiters == 0 && r->rd_waiters > 0)
 			(void)pthread_cond_broadcast(&r->cv);
-		}
 		return;
 	}
 	writer_next = r->wr_waiters > 0 && (r->rd_waiters == 0 || !r->last_excl);
-	if (writer_next && !r->wr_wake) {
-		r->wr_wake = 1;
+	if (writer_next)
 		(void)pthread_cond_signal(&r->wcv);
-	} else if (!writer_next && r->rd_waiters > 0 && !r->rd_wake) {
-		r->rd_wake = 1;
+	else if (r->rd_waiters > 0)
 		(void)pthread_cond_broadcast(&r->cv);
-	}
 }
 
 /* Grant as many head fiber waiters as the current state allows and wake
@@ -1250,7 +1276,6 @@ __arw_lock_thread(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
 	struct timespec ts;
 	pthread_cond_t *cv = mode == ARW_EXCL ? &r->wcv : &r->cv;
 	int *nwait = mode == ARW_EXCL ? &r->wr_waiters : &r->rd_waiters;
-	int *wake = mode == ARW_EXCL ? &r->wr_wake : &r->rd_wake;
 	int i, got, spun = 0, expired;
 
 	if (timeout_ns > 0)
@@ -1283,7 +1308,6 @@ __arw_lock_thread(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
 		else
 			expired = cv_wait_until(cv, &r->lock, &ts);
 		(*nwait)--;
-		*wake = 0;              /* the first woken waiter to run */
 		spun = 0;
 		if (expired && !ARW_THREAD_OK(r, mode))
 			return XTC_E_AGAIN;
