@@ -16,8 +16,8 @@ Configuration: a fresh out-of-source build per libc / platform.
 
 | libc / platform | Version | OS layer | Full suite | Notes |
 |-----------------|---------|:--------:|:----------:|-------|
-| glibc (Linux x86_64) | 2.40 | pass | pass | Canonical build; runtime-verified every commit in CI (gcc + clang, ASan, UBSan) |
-| musl (Linux x86_64) | 1.2.5 | pass | pass (forced-fcontext CI) | musl omits ucontext; the hand-written fcontext substrate covers it and the forced-fcontext CI job runs the suite every commit |
+| glibc (Linux x86_64) | 2.40 | pass | pass | Canonical build (fcontext substrate by default since 1.59); runtime-verified every commit in CI (gcc + clang, ASan, UBSan); the ucontext CI job (--with-coro=ucontext) keeps that substrate tested |
+| musl (Linux x86_64) | 1.2.5 | pass | pass (musl CI) | musl omits ucontext; the hand-written fcontext substrate covers it (the glibc default build runs the same substrate every commit) |
 | FreeBSD libc (15.0, clang, amd64) | 15.0 | pass | pass (gmake check) | Native kqueue file-AIO exercised |
 | illumos libc (SunOS 5.11, gcc, UltraSPARC v9) | illumos-31d3d510d0 | pass | pass (gmake check) | Big-endian sparcv9 -- validates byte order in codecs/hashing/atomics; event-ports backend, OpenSSL 3 |
 | macOS libSystem (Apple Silicon, clang) | -- | pass | pass | kqueue + ucontext; runtime-verified every commit in CI |
@@ -62,12 +62,16 @@ selected at compile time, presenting an identical surface
 `xtc_stack_size`):
 
   * `src/evt/coro_uctx.c` -- the ucontext implementation, used when
-    `XTC_HAVE_UCONTEXT` is defined (glibc, the BSDs, illumos).
+    `XTC_HAVE_UCONTEXT` is defined and fcontext is not the platform
+    default (the BSDs, illumos, macOS x86-64, the amalgamation), or with
+    `--with-coro=ucontext`.
   * `src/evt/coro_fctx.c` -- built on the hand-written
     `make_fcontext` / `jump_fcontext` assembly in
-    `src/os/asm/fctx_x86_64_sysv.S`, used when ucontext is absent
-    (musl).  A coroutine's resume point is a single saved stack
-    pointer; the scheduler's return point is a per-thread cursor.
+    `src/os/asm/fctx_*.S`, used on Linux x86-64 with glibc, Apple
+    Silicon, and where ucontext is absent (musl), or with
+    `--with-coro=fctx`.  A coroutine's resume point is a single saved
+    stack pointer; the scheduler's return point is a per-thread cursor.
+    The rule lives in one place, `src/inc/coro_select.h`.
 
 Exactly one of the two compiles to live code; the other becomes an
 empty translation unit.  Both are always in the source list, so no

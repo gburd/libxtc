@@ -603,6 +603,123 @@ test_p2_sqe_window_lost_completion(const MunitParameter p[], void *d)
 	return sw_run(1);
 }
 
+/*
+ * /switch_window_declines: a preemption tick that lands while a fiber
+ * switch is saving or restoring a context must decline (and leave the
+ * tick pending for the next cooperative yield).  Both sides are probed:
+ * the fiber's xtc_yield (context save in flight) and the scheduler's
+ * step (the current-coro cursor already names the fiber, the jump not
+ * yet taken -- a redirect there would yield the SCHEDULER's own
+ * registers into the fiber's context).  The fcontext substrate's
+ * "coro.switch_window" injection point sits inside each guarded window;
+ * its callback raises the real preemption signal on the fiber's thread
+ * and reads the handler's decision back (xtc_preempt_tick_pending is
+ * set only when the handler declines).  Control: the same raise from
+ * plain fiber code IS redirected (a peer runs, no tick left pending).
+ * Skipped where the hook is absent (the ucontext substrate guards its
+ * swapcontexts the same way, with no hook) and where the redirect is
+ * not implemented.
+ */
+static atomic_long g_swd_peer_runs;
+static atomic_int  g_swd_arm, g_swd_hits, g_swd_stop, g_swd_redirected;
+static atomic_int  g_swd_ctrl_preempted, g_swd_ctrl_pending;
+
+static void
+swd_raise_in_window(const char *name, void *user)
+{
+	(void)name; (void)user;
+	if (atomic_load(&g_swd_arm) <= 0)
+		return;
+	atomic_fetch_sub(&g_swd_arm, 1);
+	atomic_fetch_add(&g_swd_hits, 1);
+	(void)xtc_preempt_tick_pending();    /* clear any stale tick */
+	(void)raise(SIGVTALRM);              /* a preemption tick, here */
+	if (!xtc_preempt_tick_pending())     /* not declined: redirected */
+		atomic_fetch_add(&g_swd_redirected, 1);
+}
+
+static void
+swd_peer(void *arg)
+{
+	(void)arg;
+	while (!atomic_load(&g_swd_stop)) {
+		atomic_fetch_add(&g_swd_peer_runs, 1);
+		xtc_yield();
+	}
+}
+
+static void
+swd_target(void *arg)
+{
+	long before;
+	int i;
+	(void)arg;
+	xtc_yield();                          /* let the peer start */
+	(void)xtc_preempt_tick_pending();
+	before = atomic_load(&g_swd_peer_runs);
+	(void)raise(SIGVTALRM);               /* control: plain fiber code */
+	if (atomic_load(&g_swd_peer_runs) != before)
+		atomic_store(&g_swd_ctrl_preempted, 1);
+	if (xtc_preempt_tick_pending())
+		atomic_store(&g_swd_ctrl_pending, 1);
+	/* Each armed hit is one switch window: this fiber's yield, then the
+	 * scheduler's steps of the peer and of this fiber. */
+	for (i = 0; i < 8; i++) {
+		atomic_store(&g_swd_arm, 1);
+		xtc_yield();
+	}
+	atomic_store(&g_swd_arm, 0);
+	atomic_store(&g_swd_stop, 1);
+}
+
+static MunitResult
+test_p2_switch_window_declines(const MunitParameter p[], void *d)
+{
+	extern int __xtc_coro_preempt_effective(void);
+	xtc_exec_t *e = NULL;
+	xtc_loop_t *l;
+	(void)p; (void)d;
+
+	if (!xtc_preempt_supported() || !__xtc_coro_preempt_effective())
+		return MUNIT_SKIP;
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
+    __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	return MUNIT_SKIP;   /* see test_p2_preempt_tight_loop */
+#endif
+	atomic_store(&g_swd_peer_runs, 0);
+	atomic_store(&g_swd_arm, 0);
+	atomic_store(&g_swd_hits, 0);
+	atomic_store(&g_swd_stop, 0);
+	atomic_store(&g_swd_redirected, 0);
+	atomic_store(&g_swd_ctrl_preempted, 0);
+	atomic_store(&g_swd_ctrl_pending, 0);
+	munit_assert_int(xtc_inject_attach("coro.switch_window",
+	    swd_raise_in_window, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	l = xtc_exec_loop(e, 0);
+	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
+	    ==, XTC_OK);
+	xtc_preempt_set_involuntary(1);
+	munit_assert_int(xtc_proc_spawn(l, swd_target, NULL, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_proc_spawn(l, swd_peer, NULL, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	xtc_preempt_set_involuntary(0);
+	(void)xtc_exec_fini(e);
+	(void)xtc_inject_detach("coro.switch_window");
+
+	if (atomic_load(&g_swd_hits) == 0)
+		return MUNIT_SKIP;   /* no hook: ucontext, or points compiled out */
+	munit_logf(MUNIT_LOG_INFO, "%d in-switch ticks, %d redirected",
+	    atomic_load(&g_swd_hits), atomic_load(&g_swd_redirected));
+	munit_assert_int(atomic_load(&g_swd_ctrl_preempted), ==, 1);
+	munit_assert_int(atomic_load(&g_swd_ctrl_pending), ==, 0);
+	munit_assert_int(atomic_load(&g_swd_hits), >=, 8);
+	munit_assert_int(atomic_load(&g_swd_redirected), ==, 0);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/preempt_tight_loop", test_p2_preempt_tight_loop, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
@@ -612,6 +729,8 @@ static MunitTest tests[] = {
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/sqe_window_lost_completion", test_p2_sqe_window_lost_completion,
 	    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/switch_window_declines", test_p2_switch_window_declines, NULL,
+	    NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #if defined(P2_VEC)
 	{ "/vector_state", test_p2_vector_state, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },

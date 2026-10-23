@@ -13,31 +13,44 @@
  *
  *	jump_fcontext is itself a normal C-callable function.  It is
  *	entered with %rsp % 16 == 8.  We push 6 callee-saved regs (48
- *	bytes), so the saved %rsp we record has %rsp % 16 == 8.  When
- *	control later resumes here (i.e., somebody jumps back into us),
- *	we pop the 6 regs and ret; the ret-target sees %rsp % 16 == 0,
- *	which is the correct alignment for the post-call return site
- *	in the caller of jump_fcontext.
+ *	bytes) and an 8-byte FP-control slot, so the saved %rsp we
+ *	record has %rsp % 16 == 0.  When control later resumes here
+ *	(i.e., somebody jumps back into us), we drop the slot, pop the 6
+ *	regs and ret (64 bytes); the ret-target sees %rsp % 16 == 0,
+ *	which is the correct alignment for the post-call return site in
+ *	the caller of jump_fcontext.
  *
  *	make_fcontext sets up a frame that, when used as `to` for the
  *	first jump_fcontext, runs `fn(transfer_arg)` with the proper
- *	function-entry alignment.  To make the pop+ret sequence land
+ *	function-entry alignment.  To make the same 64-byte unwind land
  *	at %rsp % 16 == 8 (function-entry rule) instead of % 16 == 0
- *	(post-call rule), we choose a saved-sp with %16 == 0 instead
- *	of 8.  The same pop+ret instructions produce different
- *	post-ret alignments depending on the alignment of the
- *	loaded-from sp -- which is exactly what we need.
+ *	(post-call rule), we choose a saved-sp with %16 == 8 instead
+ *	of 0.  The same instructions produce different post-ret
+ *	alignments depending on the alignment of the loaded-from sp --
+ *	which is exactly what we need.
  *
  *	Layout of a saved context (offsets from the saved %rsp):
- *	  +0   rbx
- *	  +8   rbp
- *	  +16  r12
- *	  +24  r13
- *	  +32  r14
- *	  +40  r15
- *	  +48  saved RIP   (= fn for a fresh make_fcontext context;
+ *	  +0   MXCSR (4 bytes) + x87 control word (2 bytes) + pad
+ *	  +8   rbx
+ *	  +16  rbp
+ *	  +24  r12
+ *	  +32  r13
+ *	  +40  r14
+ *	  +48  r15
+ *	  +56  saved RIP   (= fn for a fresh make_fcontext context;
  *	                    = post-call return site for a saved
  *	                      jump_fcontext context)
+ *
+ *	MXCSR's control bits and the x87 control word are callee-saved in
+ *	the System V ABI (rounding mode, exception masks, precision), so a
+ *	jump must hand each fiber back the ones it left with, as glibc's
+ *	swapcontext and Boost.Context do: without this, a fiber that set
+ *	FE_UPWARD and yielded leaked it to every fiber the scheduler ran
+ *	next.  A fresh context starts with its creator's settings
+ *	(makecontext's getcontext captures them the same way).  The extra
+ *	8-byte slot flips the saved sp's alignment, so a fresh context's
+ *	sp is 8 (mod 16) and a saved one's 0 (mod 16); the pop + ret below
+ *	still land each on the alignment its resume site needs.
  */
 
 #if defined(__x86_64__) && !defined(__APPLE__) && !defined(_WIN32)
@@ -55,19 +68,22 @@
 	.align 16
 __xtc_make_fcontext:
 	movq    %rdi, %rax
-	andq    $-16, %rax               /* %rax % 16 == 0           */
-	subq    $64, %rax                /* still % 16 == 0; we use  */
-	                                  /* offsets 0..48 (56 bytes) */
-	                                  /* and leave the top 8 as  */
-	                                  /* slack.                  */
-	movq    %rdx, 48(%rax)           /* saved RIP = fn */
+	andq    $-16, %rax               /* %rax % 16 == 0            */
+	subq    $72, %rax                /* % 16 == 8; offsets 0..56  */
+	                                  /* (64 bytes), top 8 slack.  */
+	                                  /* pop 6 + 8 + ret = +72, so  */
+	                                  /* fn is entered at % 16 == 8 */
+	movq    %rdx, 56(%rax)           /* saved RIP = fn */
 	xorq    %rcx, %rcx
-	movq    %rcx, 0(%rax)            /* rbx */
-	movq    %rcx, 8(%rax)            /* rbp */
-	movq    %rcx, 16(%rax)           /* r12 */
-	movq    %rcx, 24(%rax)           /* r13 */
-	movq    %rcx, 32(%rax)           /* r14 */
-	movq    %rcx, 40(%rax)           /* r15 */
+	movq    %rcx, 0(%rax)            /* clear the pad bytes too */
+	stmxcsr 0(%rax)                  /* the creator's MXCSR ...  */
+	fnstcw  4(%rax)                  /* ... and x87 control word */
+	movq    %rcx, 8(%rax)            /* rbx */
+	movq    %rcx, 16(%rax)           /* rbp */
+	movq    %rcx, 24(%rax)           /* r12 */
+	movq    %rcx, 32(%rax)           /* r13 */
+	movq    %rcx, 40(%rax)           /* r14 */
+	movq    %rcx, 48(%rax)           /* r15 */
 	ret
 	.size __xtc_make_fcontext, .-__xtc_make_fcontext
 
@@ -87,10 +103,16 @@ __xtc_jump_fcontext:
 	pushq   %r12
 	pushq   %rbp
 	pushq   %rbx
+	leaq    -8(%rsp), %rsp           /* FP control slot */
+	stmxcsr (%rsp)
+	fnstcw  4(%rsp)
 
 	movq    %rsp, (%rdi)             /* *from = current sp */
 	movq    %rsi, %rsp               /* sp = to            */
 
+	ldmxcsr (%rsp)
+	fldcw   4(%rsp)
+	leaq    8(%rsp), %rsp
 	popq    %rbx
 	popq    %rbp
 	popq    %r12

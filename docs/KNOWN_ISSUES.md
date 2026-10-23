@@ -6,6 +6,44 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## CHANGED (1.59): fcontext is the default coroutine substrate on Linux x86-64 (glibc)
+
+**What changed.**  The hand-written fcontext substrate (`src/evt/coro_fctx.c`,
+already the default on musl and Apple Silicon) is now the default on Linux
+x86-64 with glibc; `--with-coro=ucontext` (or `-DXTC_CORO_FORCE_UCONTEXT`)
+keeps ucontext, and CI tests both.  ucontext's `swapcontext` makes a
+`rt_sigprocmask` system call on every switch, and on Linux that call takes the
+process-wide signal-handler lock, so with many loops every fiber switch in the
+process serializes on one kernel spinlock.  Measured on a 64-vCPU x86-64 host:
+16 loops of cross-loop request/reply 2.2M round trips/s on ucontext (56% of
+cycles spinning on that lock) against 12.1M on fcontext; one fiber switch 550
+-> 145 ns.
+
+**Behaviour differences, and what was done about them:**
+
+* *Signal mask.*  ucontext restored each fiber's saved mask on every switch;
+  fcontext does not touch it, so a fiber runs with its thread's mask.  An
+  `xtc_exec` worker blocks everything except the synchronous faults, SIGABRT
+  and the preemption signal -- the same set a ucontext fiber unblocked.  A fiber
+  on a loop the application runs on its own thread runs with that thread's
+  mask.  See `xtc_preempt(3)`.
+* *Fault containment on executor workers* (a latent fcontext bug, also on musl
+  and Apple Silicon before this release): workers start with every signal
+  blocked, and a SIGSEGV raised while blocked is delivered with the default
+  action, so a contained fault (`xtc_fault_guard_install`) in a proc on an
+  `xtc_exec` worker killed the process.  The fcontext substrate now unblocks
+  the synchronous fault signals on each scheduler thread.
+* *Floating-point control state.*  `jump_fcontext` now saves and restores MXCSR
+  and the x87 control word (callee-saved in the System V ABI), as
+  `swapcontext` does; before, a fiber's `fesetround` leaked to the next fiber on
+  the thread.
+* *Involuntary preemption* works on fcontext there too (the same signal-context
+  redirect and trampoline; `test_preempt_p2` passes on both substrates).  It
+  remains opt-in, with known residual hangs on BOTH substrates (about 1 run in
+  2000 of the `test_wal_kill` preempt sweep: a woken task lost from a loop's
+  run queue, a fiber parked in a notification wait with no wake source, and an
+  example's `pthread_once` called from a fiber).
+
 ## RESOLVED (1.58): sqlxtc SQL compatibility and TPROC-C, and a bare-coroutine UAF
 
 An audit of SQLite 3.53.4 against sqlxtc, run as differential tests

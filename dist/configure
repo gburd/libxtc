@@ -743,6 +743,7 @@ with_liburing
 with_dpdk
 with_accel
 with_libunwind
+with_coro
 with_tls
 with_hegel
 '
@@ -1402,6 +1403,8 @@ Optional Packages:
                           execinfo and the builtin _Unwind_Backtrace are
                           unavailable. yes forces it above the builtin tier
                           (but still below execinfo).
+  --with-coro=auto|fctx|ucontext
+                          Coroutine substrate (default: auto).
   --with-tls=openssl|libressl|boringssl|mbedtls|gnutls|wolfssl|schannel|none|auto
                           Select the TLS backend (default: auto).
   --with-hegel[=PATH]     Enable property-based tests against libhegel
@@ -4971,6 +4974,42 @@ else case e in #(
 esac
 fi
 
+
+# Coroutine substrate.  auto (default): the hand-written fcontext on
+# Linux x86-64 and Apple arm64 (ucontext's swapcontext makes a
+# rt_sigprocmask system call per fiber switch, and on Linux that call
+# takes one process-wide kernel lock, so multi-loop switching serializes
+# on it), and wherever the libc has no ucontext (musl); ucontext
+# elsewhere.  fctx / ucontext force one (same as -DXTC_CORO_FORCE_FCTX /
+# -DXTC_CORO_FORCE_UCONTEXT).  See src/inc/coro_select.h.
+
+# Check whether --with-coro was given.
+if test ${with_coro+y}
+then :
+  withval=$with_coro; xtc_coro=$withval
+else case e in #(
+  e) xtc_coro=auto ;;
+esac
+fi
+
+case $xtc_coro in #(
+  auto) :
+     ;; #(
+  fctx) :
+
+printf "%s\n" "#define XTC_CORO_FORCE_FCTX 1" >>confdefs.h
+ ;; #(
+  ucontext) :
+    if test "x$xtc_have_ucontext" != xyes
+then :
+  as_fn_error $? "--with-coro=ucontext: this libc has no swapcontext" "$LINENO" 5
+fi
+
+printf "%s\n" "#define XTC_CORO_FORCE_UCONTEXT 1" >>confdefs.h
+ ;; #(
+  *) :
+    as_fn_error $? "--with-coro must be auto, fctx or ucontext (got $xtc_coro)" "$LINENO" 5 ;;
+esac
 if test "x$xtc_with_liburing" != xno
 then :
   if test "x$xtc_with_liburing" = xauto

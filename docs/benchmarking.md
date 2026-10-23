@@ -60,11 +60,13 @@ apples-to-apples.
   others?), `bench_disk` / `bench_uring_disk` / `bench_net` (I/O paths).
   The fiber context switch measures about **7.6 ns** on x86-64 -- a
   micro-number that is honest precisely because it measures one narrow
-  thing and says so. On Apple Silicon (macOS arm64) there is no Mach-O
-  fcontext substrate yet, so the portable `ucontext`-based fallback is
-  used instead; it saves/restores the signal mask on every switch (a
-  `sigprocmask` syscall), which measures in the tens of microseconds
-  rather than nanoseconds (see [Known issues]({{ '/reference/known-issues/' | relative_url }})).
+  thing and says so.  That is the hand-written fcontext substrate, the
+  default on Linux x86-64 (glibc), Apple Silicon and musl.  Elsewhere,
+  or with `--with-coro=ucontext`, the portable `ucontext` substrate is
+  used; it saves/restores the signal mask on every switch (a
+  `rt_sigprocmask` system call, two per round trip), which costs a few
+  hundred nanoseconds per switch and, on Linux, serializes switches
+  across threads on one kernel lock (see [Known issues]({{ '/reference/known-issues/' | relative_url }})).
 - **Application benchmarks** run the [example servers]({{ '/examples/' | relative_url }})
   under realistic load: the [rexis](  {{ '/examples/rexis/' | relative_url }})
   Redis work-alike against `redis-benchmark`, and the

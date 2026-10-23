@@ -83,19 +83,48 @@ unchanged when unused.
 .Pp
 The involuntary path (enabled by
 .Fn xtc_preempt_set_involuntary )
-is EXPERIMENTAL and off by default.  On x86-64 with the ucontext
-coroutine substrate (the default build on glibc) it performs a true
-resumable involuntary yield -- a fiber in a pure CPU loop with no
+is EXPERIMENTAL and off by default.  On x86-64 Linux it performs a
+true resumable involuntary yield -- a fiber in a pure CPU loop with no
 cooperative yield points is time-sliced so its loop-mates make progress
 -- using an on-stack trampoline that the signal handler redirects the
-interrupted instruction pointer to (Go's async-preemption method).  On
-other substrates (the fcontext substrate used on musl, the Windows
-fiber substrate) and in the single-file amalgamation it declines and
-falls back to the cooperative path.  It is opt-in because a rare
-livelock has been observed under pathological all-CPU-bound load;
-untrusted pure-CPU work can alternatively run on
+interrupted instruction pointer to (Go's async-preemption method).  It
+does so on both coroutine substrates there: fcontext with glibc (the
+default build) and ucontext
+.Pq Fl -with-coro=ucontext ;
+aarch64 Linux has it on ucontext only.  Elsewhere (the fcontext
+substrate on musl or macOS, the Windows fiber substrate, the
+single-file amalgamation) it declines and falls back to the cooperative
+path.
+It is opt-in because it still has known residual hangs, on both
+substrates: in a seed sweep of a write-ahead-log stress test with
+50-microsecond involuntary slicing, about 1 run in 2000 hangs (a
+woken task lost from a loop's run queue; a fiber parked in a
+notification wait with no wake source; and application code that calls
+a blocking primitive such as
+.Xr pthread_once 3
+from a fiber, which deadlocks the thread when the fiber holding it is
+preempted).  A rare livelock has also been observed under pathological
+all-CPU-bound load.  Untrusted pure-CPU work can alternatively run on
 .Xr xtc_osproc 3 ,
 an operating-system thread the kernel preempts.
+.Pp
+Signal masks: the ucontext substrate restores each fiber's saved signal
+mask on every switch; the fcontext substrate does not touch the mask,
+so a fiber runs with the mask of the thread it is on.  On an
+.Xr xtc_exec 3
+worker that is every signal blocked except the synchronous faults
+.Pq Dv SIGSEGV , SIGBUS , SIGFPE , SIGILL ,
+.Dv SIGABRT
+and the preemption signal, the same set a ucontext fiber unblocks.  A
+fiber on a loop the application runs on its own thread
+.Pq Xr xtc_loop_run 3
+runs with that thread's mask under fcontext, so a process-directed
+signal that thread leaves unblocked can be handled on the fiber's
+stack; ucontext blocked those inside fibers.  A fiber that changes its
+thread's mask with
+.Xr pthread_sigmask 3
+changes it for every fiber that later runs on that thread under
+fcontext; restore it before yielding.
 .Pp
 On macOS the involuntary path (Phase 2, the signal-context redirect)
 remains Linux-only: it needs the fiber's interrupted machine state
