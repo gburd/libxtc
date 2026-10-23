@@ -47,7 +47,7 @@ TESTS   = test_frame test_partition test_broker test_group
 
 .PHONY: all clean test
 
-all: $(TARGET) $(TESTS)
+all: $(TARGET) $(TESTS) kaka_load
 
 test: $(TESTS)
 	@for t in $(TESTS); do ./$$t || exit 1; done
@@ -64,6 +64,10 @@ test_broker: test_broker.c broker.c frame.c partition.c metrics.c group.c broker
 test_group: test_group.c group.c group.h partition.c frame.c
 	$(CC) $(CFLAGS) -o $@ test_group.c group.c partition.c frame.c $(LDFLAGS)
 
+# Produce/consume load driver (a plain socket client, no libxtc).
+kaka_load: kaka_load.c
+	$(CC) -O2 -g -std=c11 -Wall -Wextra -o $@ kaka_load.c
+
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS)
 
@@ -71,5 +75,5 @@ $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(TESTS)
+	rm -f $(OBJS) $(TARGET) $(TESTS) kaka_load
 	rm -rf *.dSYM

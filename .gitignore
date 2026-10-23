@@ -56,6 +56,7 @@ dist/xtc_config.h.in~
 bench/audit/false_sharing_mpsc
 bench/audit/false_sharing_proc
 bench/bench_win_scale
+bench/bench_msg_copy
 bench/bench_win_scale.exe
 bench/conformance/w*/tokio/target/
 
@@ -92,6 +93,7 @@ examples/07_kaka/test_frame
 examples/07_kaka/test_partition
 examples/07_kaka/test_broker
 examples/07_kaka/test_group
+examples/07_kaka/kaka_load
 build_unix/test_inject_races
 test/m2/test_bdev
 
