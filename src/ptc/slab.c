@@ -343,6 +343,45 @@ struct slab_chunk {
 	int             owns_mmap;   /* 1 = munmap on reap; 0 = shm-backed */
 };
 
+/*
+ * Hot-path statistics, striped per thread.  One shared set of counters
+ * made every alloc/free a locked RMW on ONE cache line per cache, and
+ * the envelope cache behind every xtc_send is process-wide, so with N
+ * loops all N bounced that line: cross-loop send/recv round trips
+ * stopped scaling at ~3.3M/s at 8-16 loops, ~75% of the CPU on the
+ * lock add/sub (3.0x with the RMWs compiled out).  Each thread now
+ * counts into its own cache-line-sized stripe (index handed out
+ * round-robin on the thread's first alloc/free -- no thread id or clock
+ * read, so the simulator stays deterministic; the sums do not depend on
+ * which stripe a thread got anyway).  Threads beyond XTC_SLAB_STRIPES
+ * share stripes, which stays correct (the RMWs are atomic).
+ *
+ * n_inuse is not stored: every successful alloc bumps exactly one of
+ * alloc_fast/alloc_slow (a ctor refusal is backed out by ctor_fail) and
+ * every free bumps exactly one of free_fast/free_slow, so
+ *   n_inuse = alloc_fast + alloc_slow - ctor_fail - free_fast - free_slow
+ * which halves the hot-path RMWs.  Exact when no alloc/free is in
+ * flight; a concurrent reader sums stripes at slightly different times
+ * and is clamped at 0.
+ */
+#ifndef XTC_SLAB_STRIPES
+#define XTC_SLAB_STRIPES  64     /* power of two */
+#endif
+
+struct slab_stripe {
+	_Alignas(XTC_CACHE_LINE) _Atomic uint64_t alloc_fast;
+	_Atomic uint64_t alloc_slow;
+	_Atomic uint64_t free_fast;
+	_Atomic uint64_t free_slow;
+	_Atomic uint64_t ctor_fail;
+};
+
+static _Atomic unsigned           __slab_stripe_next;
+static XTC_THREAD_LOCAL unsigned  __slab_stripe_tls;   /* 0 = unassigned */
+
+static struct slab_stripe *
+__stripe(xtc_slab_t *s);
+
 struct xtc_slab {
 	xtc_slab_opts_t  opts;
 	size_t           slot_size;     /* obj_size + redzone + alignment pad */
@@ -354,12 +393,8 @@ struct xtc_slab {
 	struct slab_chunk    *chunks;
 	int              n_chunks;
 
-	/* Stats (atomic for lock-free read). */
-	_Atomic uint64_t s_alloc_fast;
-	_Atomic uint64_t s_alloc_slow;
-	_Atomic uint64_t s_free_fast;
-	_Atomic uint64_t s_free_slow;
-	_Atomic uint64_t s_n_inuse;
+	/* Stats (atomic for lock-free read).  The per-alloc/free counters
+	 * live in `stripes` below; these are slow-path or rare. */
 	_Atomic uint64_t s_n_free;
 	_Atomic uint64_t s_n_chunks;
 	_Atomic uint64_t s_reaps;
@@ -374,9 +409,30 @@ struct xtc_slab {
 	struct xtc_slab_shm_header *shm_hdr;
 	uint8_t *shm_base;     /* start of usable region (after header) */
 	uint8_t *shm_end;
+
+	/* Per-thread hot-path counters, summed by xtc_slab_stat (see
+	 * struct slab_stripe).  Over-aligned: the struct is allocated with
+	 * __os_aligned_alloc. */
+	struct slab_stripe stripes[XTC_SLAB_STRIPES];
 };
 
 /* ---- helpers ---- */
+
+/* This thread's stats stripe in s (assigned on first use). */
+static struct slab_stripe *
+__stripe(xtc_slab_t *s)
+{
+	unsigned i = __slab_stripe_tls;
+	if (XTC_UNLIKELY(i == 0)) {
+		i = atomic_fetch_add_explicit(&__slab_stripe_next, 1,
+		    memory_order_relaxed) % XTC_SLAB_STRIPES + 1;
+		__slab_stripe_tls = i;
+	}
+	return &s->stripes[(i - 1) & (XTC_SLAB_STRIPES - 1)];
+}
+
+#define __STAT_INC(s, f) \
+	atomic_fetch_add_explicit(&__stripe(s)->f, 1, memory_order_relaxed)
 
 static int64_t
 __now_ns_slab(void)
@@ -683,7 +739,11 @@ xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 	 */
 	if (opts->obj_size > (size_t)1 << 30) return XTC_E_INVAL;
 
-	if ((rc = __os_calloc(1, sizeof *s, (void **)&s)) != XTC_OK) return rc;
+	/* Over-aligned (the stats stripes): aligned alloc, zeroed. */
+	if ((rc = __os_aligned_alloc(XTC_CACHE_LINE, sizeof *s,
+	    (void **)&s)) != XTC_OK)
+		return rc;
+	memset(s, 0, sizeof *s);
 	s->opts = *opts;
 	if (s->opts.align == 0)         s->opts.align = 64;
 	if (s->opts.chunk_size == 0)    s->opts.chunk_size = 64 * 1024;
@@ -716,7 +776,7 @@ xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 	s->slot_size = slot;
 	s->objs_per_chunk = (int)(s->opts.chunk_size / slot);
 	if (s->objs_per_chunk < 1) {
-		__os_free(s);
+		__os_aligned_free(s);
 		return XTC_E_INVAL;
 	}
 
@@ -726,7 +786,7 @@ xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 		struct xtc_slab_shm_header *hdr;
 		if (s->opts.shm_base == NULL || s->opts.shm_size == 0) {
 			(void)pthread_mutex_destroy(&s->lock);
-			__os_free(s);
+			__os_aligned_free(s);
 			return XTC_E_INVAL;
 		}
 		if (s->opts.shm_size < (size_t)XTC_SHM_HDR_SIZE ||
@@ -735,7 +795,7 @@ xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 			 * subtraction so a huge chunk_size cannot wrap the
 			 * HDR + chunk_size addition past shm_size. */
 			(void)pthread_mutex_destroy(&s->lock);
-			__os_free(s);
+			__os_aligned_free(s);
 			return XTC_E_RESOURCE;
 		}
 		hdr = (struct xtc_slab_shm_header *)s->opts.shm_base;
@@ -770,7 +830,7 @@ xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 		}
 		if (hdr->version != XTC_SHM_VERSION) {
 			(void)pthread_mutex_destroy(&s->lock);
-			__os_free(s);
+			__os_aligned_free(s);
 			return XTC_E_VERSION;
 		}
 		/* All attachers must agree on the slot stride, or the shared
@@ -778,7 +838,7 @@ xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 		 * size.  The initializer wrote it; everyone else verifies. */
 		if (hdr->slot_size != (uint64_t)s->slot_size) {
 			(void)pthread_mutex_destroy(&s->lock);
-			__os_free(s);
+			__os_aligned_free(s);
 			return XTC_E_INVAL;
 		}
 		s->shm_hdr = hdr;
@@ -912,7 +972,7 @@ xtc_slab_destroy(xtc_slab_t *s)
 		(void)__xtc_mtx_unlock(&__slab_reg_lock);
 	}
 
-	__os_free(s);
+	__os_aligned_free(s);
 }
 
 /* ---- shared-memory cross-process offset free list ----------------
@@ -1017,7 +1077,7 @@ xtc_slab_alloc(xtc_slab_t *s)
 			return NULL;
 		}
 		slot = (uint8_t *)s->opts.shm_base + off;
-		atomic_fetch_add_explicit(&s->s_alloc_slow, 1, memory_order_relaxed);
+		__STAT_INC(s, alloc_slow);
 		goto have_slot;
 	}
 
@@ -1026,8 +1086,7 @@ xtc_slab_alloc(xtc_slab_t *s)
 		mag = __tls_mag_for(s);
 		if (XTC_LIKELY(mag != NULL && mag->n > 0)) {
 			slot = mag->slots[--mag->n];
-			atomic_fetch_add_explicit(&s->s_alloc_fast, 1,
-			    memory_order_relaxed);
+			__STAT_INC(s, alloc_fast);
 			goto have_slot;
 		}
 	}
@@ -1050,7 +1109,7 @@ xtc_slab_alloc(xtc_slab_t *s)
 	}
 	atomic_fetch_sub_explicit(&s->s_n_free, 1, memory_order_relaxed);
 	(void)__xtc_mtx_unlock(&s->lock);
-	atomic_fetch_add_explicit(&s->s_alloc_slow, 1, memory_order_relaxed);
+	__STAT_INC(s, alloc_slow);
 
 have_slot:
 	if (s->opts.flags & XTC_SLAB_REDZONE) __rz_paint(s, slot);
@@ -1068,10 +1127,10 @@ have_slot:
 				    memory_order_relaxed);
 				(void)__xtc_mtx_unlock(&s->lock);
 			}
+			__STAT_INC(s, ctor_fail);   /* back out the alloc */
 			return NULL;
 		}
 	}
-	atomic_fetch_add_explicit(&s->s_n_inuse, 1, memory_order_relaxed);
 	__audit_record(s, obj, 'A');
 	return obj;
 }
@@ -1097,7 +1156,6 @@ xtc_slab_free(xtc_slab_t *s, void *obj)
 	}
 
 	if (s->opts.dtor != NULL) s->opts.dtor(obj, s->opts.cb_user);
-	atomic_fetch_sub_explicit(&s->s_n_inuse, 1, memory_order_relaxed);
 	__audit_record(s, obj, 'F');
 
 	/*
@@ -1108,8 +1166,7 @@ xtc_slab_free(xtc_slab_t *s, void *obj)
 	if (s->opts.mode == XTC_SLAB_SHARED_MEMORY) {
 		__shm_free_push(s, (uint64_t)
 		    ((uint8_t *)slot - (uint8_t *)s->opts.shm_base));
-		atomic_fetch_add_explicit(&s->s_free_slow, 1,
-		    memory_order_relaxed);
+		__STAT_INC(s, free_slow);
 		return;
 	}
 
@@ -1129,8 +1186,7 @@ xtc_slab_free(xtc_slab_t *s, void *obj)
 			}
 			if (XTC_LIKELY(mag->n < mag->cap)) {
 				mag->slots[mag->n++] = slot;
-				atomic_fetch_add_explicit(&s->s_free_fast, 1,
-				    memory_order_relaxed);
+				__STAT_INC(s, free_fast);
 				return;
 			}
 		}
@@ -1141,7 +1197,7 @@ slow:
 	__push_slot_locked(s, slot);
 	(void)__xtc_mtx_unlock(&s->lock);
 	atomic_fetch_add_explicit(&s->s_n_free, 1, memory_order_relaxed);
-	atomic_fetch_add_explicit(&s->s_free_slow, 1, memory_order_relaxed);
+	__STAT_INC(s, free_slow);
 }
 
 int
@@ -1211,12 +1267,28 @@ xtc_slab_reap(xtc_slab_t *s)
 int
 xtc_slab_stat(const xtc_slab_t *s, xtc_slab_stats_t *out)
 {
+	uint64_t ctor_fail = 0, live;
+	int i;
 	if (s == NULL || out == NULL) return XTC_E_INVAL;
-	out->alloc_fast    = atomic_load_explicit(&s->s_alloc_fast, memory_order_relaxed);
-	out->alloc_slow    = atomic_load_explicit(&s->s_alloc_slow, memory_order_relaxed);
-	out->free_fast     = atomic_load_explicit(&s->s_free_fast,  memory_order_relaxed);
-	out->free_slow     = atomic_load_explicit(&s->s_free_slow,  memory_order_relaxed);
-	out->n_inuse       = atomic_load_explicit(&s->s_n_inuse,    memory_order_relaxed);
+	out->alloc_fast = out->alloc_slow = out->free_fast = out->free_slow = 0;
+	for (i = 0; i < XTC_SLAB_STRIPES; i++) {
+		const struct slab_stripe *st = &s->stripes[i];
+		out->alloc_fast += atomic_load_explicit(&st->alloc_fast,
+		    memory_order_relaxed);
+		out->alloc_slow += atomic_load_explicit(&st->alloc_slow,
+		    memory_order_relaxed);
+		out->free_fast += atomic_load_explicit(&st->free_fast,
+		    memory_order_relaxed);
+		out->free_slow += atomic_load_explicit(&st->free_slow,
+		    memory_order_relaxed);
+		ctor_fail += atomic_load_explicit(&st->ctor_fail,
+		    memory_order_relaxed);
+	}
+	live = out->alloc_fast + out->alloc_slow - ctor_fail;
+	/* Clamp: a concurrent free counted before its alloc's stripe was
+	 * read must not wrap n_inuse to ~2^64. */
+	out->n_inuse = live > out->free_fast + out->free_slow ?
+	    live - (out->free_fast + out->free_slow) : 0;
 	out->n_free        = atomic_load_explicit(&s->s_n_free,     memory_order_relaxed);
 	out->n_chunks      = atomic_load_explicit(&s->s_n_chunks,   memory_order_relaxed);
 	out->bytes_inuse   = out->n_inuse * s->opts.obj_size;

@@ -635,6 +635,189 @@ test_concurrent(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ----- Striped statistics ------------------------------------ */
+
+/*
+ * The hot-path counters are per-thread stripes summed on read, and
+ * n_inuse is derived (allocs - ctor refusals - frees).  An object
+ * allocated on one thread and freed on another lands its +1 and -1 in
+ * DIFFERENT stripes; the sums must still be exact once both threads
+ * are quiescent.
+ */
+#define XS_N 1000
+static void *g_xs_objs[XS_N];
+
+static void *
+xs_alloc_worker(void *arg)
+{
+	int i;
+	(void)arg;
+	for (i = 0; i < XS_N; i++)
+		g_xs_objs[i] = xtc_slab_alloc(g_slab);
+	return NULL;
+}
+
+static void *
+xs_free_worker(void *arg)
+{
+	int i;
+	(void)arg;
+	for (i = 0; i < XS_N / 2; i++)
+		xtc_slab_free(g_slab, g_xs_objs[i]);
+	return NULL;
+}
+
+static MunitResult
+test_stats_cross_thread(const MunitParameter p[], void *d)
+{
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	pthread_t th;
+	xtc_slab_stats_t st;
+	int i;
+	(void)p; (void)d;
+	opts.name = "xs"; opts.obj_size = 48;
+	munit_assert_int(xtc_slab_create(&opts, &g_slab), ==, XTC_OK);
+	munit_assert_int(pthread_create(&th, NULL, xs_alloc_worker, NULL), ==, 0);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+	for (i = 0; i < XS_N; i++)
+		munit_assert_not_null(g_xs_objs[i]);
+	munit_assert_int(pthread_create(&th, NULL, xs_free_worker, NULL), ==, 0);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+
+	(void)xtc_slab_stat(g_slab, &st);
+	munit_assert_uint64(st.alloc_fast + st.alloc_slow, ==, XS_N);
+	munit_assert_uint64(st.free_fast + st.free_slow, ==, XS_N / 2);
+	munit_assert_uint64(st.n_inuse, ==, XS_N / 2);
+	munit_assert_uint64(st.bytes_inuse, ==, (uint64_t)(XS_N / 2) * 48);
+
+	/* This thread frees the rest: a third stripe. */
+	for (i = XS_N / 2; i < XS_N; i++)
+		xtc_slab_free(g_slab, g_xs_objs[i]);
+	(void)xtc_slab_stat(g_slab, &st);
+	munit_assert_uint64(st.n_inuse, ==, 0);
+	munit_assert_uint64(st.free_fast + st.free_slow, ==, XS_N);
+	xtc_slab_destroy(g_slab);
+	return MUNIT_OK;
+}
+
+/* A refused constructor hands back no object, so it must not count as
+ * in use (n_inuse is derived from the alloc counters, which the refusal
+ * path backs out). */
+static int g_refuse_every_other;
+
+static int
+refusing_ctor(void *obj, void *user)
+{
+	(void)obj; (void)user;
+	return (g_refuse_every_other++ & 1) ? XTC_E_INVAL : XTC_OK;
+}
+
+static MunitResult
+test_stats_ctor_refused(const MunitParameter p[], void *d)
+{
+	xtc_slab_t *s;
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	xtc_slab_stats_t st;
+	void *got[8];
+	int i, n = 0;
+	(void)p; (void)d;
+	g_refuse_every_other = 0;
+	opts.name = "refuse"; opts.obj_size = 32; opts.ctor = refusing_ctor;
+	munit_assert_int(xtc_slab_create(&opts, &s), ==, XTC_OK);
+	for (i = 0; i < 8; i++) {
+		void *o = xtc_slab_alloc(s);
+		if (o != NULL)
+			got[n++] = o;
+	}
+	munit_assert_int(n, ==, 4);
+	(void)xtc_slab_stat(s, &st);
+	munit_assert_uint64(st.n_inuse, ==, 4);
+	for (i = 0; i < n; i++)
+		xtc_slab_free(s, got[i]);
+	(void)xtc_slab_stat(s, &st);
+	munit_assert_uint64(st.n_inuse, ==, 0);
+	xtc_slab_destroy(s);
+	return MUNIT_OK;
+}
+
+/*
+ * Threads allocating and freeing on ONE shared cache must scale.  With a
+ * single shared set of stats counters every alloc/free was a locked RMW
+ * on the same cache line, so 4 threads together did LESS than one thread
+ * alone (measured on a 64-vCPU x86-64 host: aggregate 0.28x of a single
+ * thread at 2, 4 and 8 threads); the magazine was per-thread but its
+ * statistics were not.  Striped per thread: 3.98x at 4 threads.  The
+ * bound (aggregate >= 1.5x single) leaves wide margin both ways.  Needs
+ * 4 free CPUs; skipped under sanitizers/valgrind, whose instrumentation
+ * of every access swamps the line-bouncing being measured.
+ */
+#ifndef __has_feature
+#  define __has_feature(x) 0     /* gcc: sanitizers via __SANITIZE_* */
+#endif
+#define SC_THREADS 4
+#define SC_ROUNDS  200000
+static _Atomic int g_sc_go;
+
+static void *
+sc_worker(void *arg)
+{
+	void *o[8];
+	long r;
+	int j;
+	(void)arg;
+	while (!atomic_load(&g_sc_go))
+		;
+	for (r = 0; r < SC_ROUNDS; r++) {
+		for (j = 0; j < 8; j++)
+			o[j] = xtc_slab_alloc(g_slab);
+		for (j = 0; j < 8; j++)
+			xtc_slab_free(g_slab, o[j]);
+	}
+	return NULL;
+}
+
+static double
+sc_run(int n)
+{
+	pthread_t th[SC_THREADS];
+	int64_t t0, t1;
+	int i;
+	atomic_store(&g_sc_go, 0);
+	for (i = 0; i < n; i++)
+		munit_assert_int(pthread_create(&th[i], NULL, sc_worker, NULL),
+		    ==, 0);
+	t0 = xtc_clock_mono();
+	atomic_store(&g_sc_go, 1);
+	for (i = 0; i < n; i++)
+		(void)pthread_join(th[i], NULL);
+	t1 = xtc_clock_mono();
+	return (double)n * SC_ROUNDS * 16 / (double)(t1 - t0 > 0 ? t1 - t0 : 1);
+}
+
+static MunitResult
+test_stats_scale(const MunitParameter p[], void *d)
+{
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	double one, all;
+	(void)p; (void)d;
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
+    __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	return MUNIT_SKIP;
+#endif
+	if (getenv("XTC_UNDER_VALGRIND") != NULL || __os_ncpus() < SC_THREADS)
+		return MUNIT_SKIP;
+	opts.name = "scale"; opts.obj_size = 64;
+	munit_assert_int(xtc_slab_create(&opts, &g_slab), ==, XTC_OK);
+	(void)sc_run(1);                  /* warm: magazines, chunks */
+	one = sc_run(1);
+	all = sc_run(SC_THREADS);
+	xtc_slab_destroy(g_slab);
+	munit_logf(MUNIT_LOG_INFO, "1 thread %.1f M/s, %d threads %.1f M/s "
+	    "(%.2fx)", one * 1e3, SC_THREADS, all * 1e3, all / one);
+	munit_assert_double(all, >=, 1.5 * one);
+	return MUNIT_OK;
+}
+
 /* ----- Backtrace + reaper ------------------------------------- */
 
 static MunitResult
@@ -750,6 +933,9 @@ static MunitTest tests[] = {
 	{ "/shm_offset_single_process", test_shm_offset_resolve_single_process, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/shm_reclaim_single_process", test_shm_reclaim_single_process, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/concurrent",       test_concurrent,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/stats_cross_thread", test_stats_cross_thread, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/stats_ctor_refused", test_stats_ctor_refused, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/stats_scale",      test_stats_scale,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/backtrace",        test_backtrace,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
