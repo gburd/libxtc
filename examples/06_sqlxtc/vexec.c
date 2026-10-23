@@ -7097,11 +7097,8 @@ sort_index_cmp(const void *pa, const void *pb)
 
 /* Compare two key-rows (nkey cells each) under the ORDER BY direction
  * vector, returning <0 if row A sorts before row B, >0 if after, 0 if
- * equal on every key.  Used by the bounded top-N path, which has no
- * stable per-row index to tiebreak on (it streams), so equal keys
- * compare equal here -- correctness for the LIMIT cut does not depend
- * on the tiebreak, since the row kept is then re-sorted by the full
- * sort_index_cmp before emit. */
+ * equal on every key.  The bounded top-N path breaks the ties on the
+ * rows' arrival numbers (topn_index_cmp), not here. */
 static int
 topn_cmp(const vx_cell_t *ka, const vx_cell_t *kb, int nkey, const int *desc)
 {
@@ -7111,6 +7108,29 @@ topn_cmp(const vx_cell_t *ka, const vx_cell_t *kb, int nkey, const int *desc)
 		if (r) return r;
 	}
 	return 0;
+}
+
+/* The top-N buffer reuses slots, so a slot number is not the arrival
+ * order; equal keys tie on the row's arrival sequence instead, which is
+ * SQLite's sorter rule: LIMIT K is the first K rows of the unlimited
+ * ORDER BY, ties in scan order. */
+struct topn_ctx {
+	const vx_cell_t *keys;
+	const int64_t   *seq;
+	int              nkey;
+	const int       *desc;
+};
+static _Thread_local const struct topn_ctx *g_topn_ctx;
+
+static int
+topn_index_cmp(const void *pa, const void *pb)
+{
+	int ia = *(const int *)pa, ib = *(const int *)pb;
+	const struct topn_ctx *c = g_topn_ctx;
+	int r = topn_cmp(&c->keys[(size_t)ia * (size_t)c->nkey],
+	    &c->keys[(size_t)ib * (size_t)c->nkey], c->nkey, c->desc);
+	if (r) return r;
+	return c->seq[ia] < c->seq[ib] ? -1 : c->seq[ia] > c->seq[ib];
 }
 
 /* Sort an aggregated result chunk (c->nrow rows, c->ncol cells each, in
@@ -7200,6 +7220,8 @@ ordered_materialize(struct vx_stmt *st)
 	struct vx_arena_blk *keep = NULL;        /* output + key bytes (kept) */
 	vx_cell_t *rows = NULL;   /* cap * nout */
 	vx_cell_t *keys = NULL;   /* cap * nkey */
+	int64_t *seq = NULL, *ns; /* cap: arrival number of each kept row (top-N) */
+	int64_t nseen = 0;        /* rows that passed the WHERE so far */
 	int *idx = NULL;
 	int nkey = st->norder;
 	int cap = 0, nrow = 0, j, rc = -1;
@@ -7256,11 +7278,14 @@ ordered_materialize(struct vx_stmt *st)
 				eval(st, st->order_key[j], st->srcrow, &rowarena, &keyrow[j]);
 		}
 
+		nseen++;
 		if (topn && topn_full) {
 			/* Buffer holds K rows.  Replace the current worst (sorts
-			 * last) only if this row sorts ahead of it; otherwise drop
-			 * this row.  The worst slot is cached and recomputed lazily
-			 * only after it is replaced, so the common "row is not good
+			 * last under (keys, arrival)) only if this row sorts ahead
+			 * of it: being the latest arrival, it must be strictly
+			 * smaller on the keys.  Otherwise drop this row.  The
+			 * worst slot is cached and recomputed lazily only after
+			 * it is replaced, so the common "row is not good
 			 * enough" case is a single compare, not an O(K) rescan.
 			 * Kept slots are reused in place; a replaced row's old bytes
 			 * are abandoned in the keep arena (freed as a unit at
@@ -7270,11 +7295,13 @@ ordered_materialize(struct vx_stmt *st)
 			int r;
 			if (topn_worst < 0) {
 				topn_worst = 0;
-				for (r = 1; r < nrow; r++)
-					if (topn_cmp(&keys[(size_t)r * (size_t)nkey],
-					             &keys[(size_t)topn_worst * (size_t)nkey],
-					             nkey, st->order_desc) > 0)
+				for (r = 1; r < nrow; r++) {
+					int d = topn_cmp(&keys[(size_t)r * (size_t)nkey],
+					    &keys[(size_t)topn_worst * (size_t)nkey],
+					    nkey, st->order_desc);
+					if (d > 0 || (d == 0 && seq[r] > seq[topn_worst]))
 						topn_worst = r;
+				}
 			}
 			if (topn_cmp(keyrow, &keys[(size_t)topn_worst * (size_t)nkey],
 			             nkey, st->order_desc) >= 0) {
@@ -7287,6 +7314,7 @@ ordered_materialize(struct vx_stmt *st)
 			for (j = 0; j < nkey; j++)
 				if (cell_dup(&keep, &keyrow[j],
 				    &keys[(size_t)topn_worst * (size_t)nkey + (size_t)j]) != 0) goto cleanup;
+			seq[topn_worst] = nseen;
 			topn_worst = -1;   /* worst was overwritten; recompute next time */
 			arena_reset(&rowarena);
 			continue;
@@ -7298,8 +7326,14 @@ ordered_materialize(struct vx_stmt *st)
 			if (topn && nc > (int)topn_k) nc = (int)topn_k;
 			vx_cell_t *nr = realloc(rows, sizeof(vx_cell_t) * (size_t)nc * (size_t)(st->nout > 0 ? st->nout : 1));
 			vx_cell_t *nk = realloc(keys, sizeof(vx_cell_t) * (size_t)nc * (size_t)(nkey > 0 ? nkey : 1));
-			if (!nr || !nk) { free(nr); free(nk); goto cleanup; }
-			rows = nr; keys = nk; cap = nc;
+			if (nr) rows = nr;
+			if (nk) keys = nk;
+			if (!nr || !nk) goto cleanup;
+			if (topn) {
+				if ((ns = realloc(seq, sizeof *seq * (size_t)nc)) == NULL) goto cleanup;
+				seq = ns;
+			}
+			cap = nc;
 		}
 		/* Copy output + key cells into the kept arena (row bytes are
 		 * transient -- the next scan step reuses the source row). */
@@ -7307,6 +7341,7 @@ ordered_materialize(struct vx_stmt *st)
 			if (cell_dup(&keep, &outrow[j], &rows[(size_t)nrow * (size_t)st->nout + (size_t)j]) != 0) goto cleanup;
 		for (j = 0; j < nkey; j++)
 			if (cell_dup(&keep, &keyrow[j], &keys[(size_t)nrow * (size_t)nkey + (size_t)j]) != 0) goto cleanup;
+		if (topn) seq[nrow] = nseen;
 		nrow++;
 		if (topn && (int64_t)nrow >= topn_k) topn_full = 1;
 		arena_reset(&rowarena);
@@ -7316,7 +7351,14 @@ ordered_materialize(struct vx_stmt *st)
 	idx = (int *)malloc(sizeof(int) * (size_t)(nrow > 0 ? nrow : 1));
 	if (!idx) goto cleanup;
 	for (j = 0; j < nrow; j++) idx[j] = j;
-	if (nkey > 0 && !presorted) {
+	if (nkey > 0 && !presorted && topn) {
+		struct topn_ctx tc;
+		tc.keys = keys; tc.seq = seq; tc.nkey = nkey; tc.desc = st->order_desc;
+		g_topn_ctx = &tc;
+		atomic_fetch_add(&g_vx_sorts, 1);
+		qsort(idx, (size_t)nrow, sizeof(int), topn_index_cmp);
+		g_topn_ctx = NULL;
+	} else if (nkey > 0 && !presorted) {
 		struct sort_ctx sc; sc.keys = keys; sc.nkey = nkey; sc.desc = st->order_desc;
 		g_sort_ctx = &sc;
 		atomic_fetch_add(&g_vx_sorts, 1);
@@ -7383,7 +7425,7 @@ ordered_materialize(struct vx_stmt *st)
 cleanup:
 	arena_free(rowarena);
 	arena_free(keep);
-	free(rows); free(keys); free(idx);
+	free(rows); free(keys); free(seq); free(idx);
 	if (c) chunk_free(c);
 	return rc;
 }
