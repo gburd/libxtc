@@ -128,3 +128,4 @@ test_freelist_persist
 
 # ORDER BY ... LIMIT (top-N)
 test_order_limit
+test_qsel

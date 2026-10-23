@@ -1143,7 +1143,17 @@ test_order_limit: test_order_limit.c $(ENGINE_NATIVE)
 test-order-limit: test_order_limit
 	TMPDIR=$${TMPDIR:-/tmp} ./test_order_limit
 
+# qsel.h QuickSelect (the top-N cut) against a sort, adversarial inputs.
+test: test-qsel
+test_qsel: test_qsel.c qsel.h
+	$(CC) $(CFLAGS) -o $@ test_qsel.c
+
+test-qsel: test_qsel
+	./test_qsel
+
+vexec.o: qsel.h
+
 clean: clean-order-limit
 clean-order-limit:
-	rm -f test_order_limit
-.PHONY: test-order-limit clean-order-limit
+	rm -f test_order_limit test_qsel
+.PHONY: test-order-limit test-qsel clean-order-limit
