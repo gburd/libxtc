@@ -14,13 +14,16 @@
  *	  - .p2align (log2) instead of ELF .align.
  *
  *	Callee-saved state preserved across a switch (AAPCS64): x19-x28,
- *	x29 (fp), x30 (lr), and d8-d15 (low 64 bits).  160-byte context
- *	block, 16-byte aligned.  See fctx_aarch64_aapcs.S for the full
- *	layout and rationale.
+ *	x29 (fp), x30 (lr), d8-d15 (low 64 bits), and the per-fiber FPCR
+ *	and FPSR.  176-byte context block, 16-byte aligned.  See
+ *	fctx_aarch64_aapcs.S for the full layout and rationale.
  *
- *	Selected only when a build forces the fcontext substrate on Apple
- *	arm64 (XTC_CORO_FORCE_FCTX); the default substrate on macOS remains
- *	ucontext until this path is promoted.  Empty TU elsewhere.
+ *	Status of the FPCR/FPSR save: changed identically to the ELF file
+ *	(which is built and tested on Linux aarch64) but NOT assembled or
+ *	run on macOS: no Apple host was available.
+ *
+ *	The default substrate on Apple arm64 (src/inc/coro_select.h).
+ *	Empty TU elsewhere.
  */
 
 #if defined(__aarch64__) && defined(__APPLE__)
@@ -36,10 +39,10 @@
 	.globl ___xtc_make_fcontext
 	.p2align 2
 ___xtc_make_fcontext:
-	/* Align the stack top down to 16, then reserve a 160-byte
+	/* Align the stack top down to 16, then reserve a 176-byte
 	 * context block. */
 	and     x0, x0, #~15
-	sub     x0, x0, #160
+	sub     x0, x0, #176
 
 	/* Zero the callee-saved integer slots (x19-x28, x29). */
 	stp     xzr, xzr, [x0, #64]      /* x19, x20 */
@@ -54,6 +57,12 @@ ___xtc_make_fcontext:
 	stp     xzr, xzr, [x0, #16]      /* d10, d11 */
 	stp     xzr, xzr, [x0, #32]      /* d12, d13 */
 	stp     xzr, xzr, [x0, #48]      /* d14, d15 */
+
+	/* The creator's FPCR and FPSR, as getcontext + makecontext (and
+	 * a new thread) would start with. */
+	mrs     x9,  fpcr
+	mrs     x10, fpsr
+	stp     x9,  x10, [x0, #160]
 
 	/* Saved resume address = fn. */
 	str     x2, [x0, #152]
@@ -70,7 +79,7 @@ ___xtc_make_fcontext:
 	.p2align 2
 ___xtc_jump_fcontext:
 	/* Reserve and fill our context block below the current sp. */
-	sub     sp, sp, #160
+	sub     sp, sp, #176
 
 	stp     d8,  d9,  [sp, #0]
 	stp     d10, d11, [sp, #16]
@@ -83,15 +92,29 @@ ___xtc_jump_fcontext:
 	stp     x25, x26, [sp, #112]
 	stp     x27, x28, [sp, #128]
 	stp     x29, x30, [sp, #144]     /* fp, resume address (lr) */
+	mrs     x9,  fpcr
+	mrs     x10, fpsr
+	stp     x9,  x10, [sp, #160]
 
 	/* *from = current sp. */
-	mov     x9, sp
-	str     x9, [x0]
+	mov     x11, sp
+	str     x11, [x0]
 
 	/* sp = to. */
 	mov     sp, x1
 
-	/* Restore callee-saved state from the target context. */
+	/* Restore the target's FPCR / FPSR, writing each only when it
+	 * differs from the live value still in x9 / x10 (the usual case
+	 * is equal, and an msr costs more than the compare). */
+	ldp     x11, x12, [sp, #160]
+	cmp     x11, x9
+	b.eq    1f
+	msr     fpcr, x11
+1:	cmp     x12, x10
+	b.eq    2f
+	msr     fpsr, x12
+2:
+	/* Then the target's callee-saved registers. */
 	ldp     d8,  d9,  [sp, #0]
 	ldp     d10, d11, [sp, #16]
 	ldp     d12, d13, [sp, #32]
@@ -104,7 +127,7 @@ ___xtc_jump_fcontext:
 	ldp     x27, x28, [sp, #128]
 	ldp     x29, x30, [sp, #144]     /* fp, resume address */
 
-	add     sp, sp, #160
+	add     sp, sp, #176
 
 	/* Hand the transfer arg to the resumed code. */
 	mov     x0, x2

@@ -16,7 +16,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(__x86_64__) && !defined(__APPLE__)
+#if (defined(__x86_64__) || defined(__aarch64__)) && !defined(__APPLE__) && \
+    !defined(_WIN32)
 # define HAVE_FCTX 1
 #else
 # define HAVE_FCTX 0

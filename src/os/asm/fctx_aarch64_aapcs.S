@@ -6,9 +6,10 @@
  *	make_fcontext / jump_fcontext for AArch64 (ARM64) AAPCS64.
  *	Linux, *BSD, illumos ELF.  No Boost.Context dependency.
  *
- * Status: written, assembles with aarch64 cross gcc, and RUNTIME
- *	VERIFIED under qemu-aarch64 user-mode (round-trip fiber harness,
- *	callee-saved int + d8-d15 FP preserved across switches).
+ * Status: runtime verified natively on Linux aarch64 (glibc; make
+ *	check with --with-coro=fctx) and earlier under qemu-aarch64
+ *	user-mode (round-trip fiber harness, callee-saved int + d8-d15 FP
+ *	preserved across switches).
  *
  *	AAPCS64 callee-saved state that must survive a switch:
  *	  x19-x28 (10 integer regs), x29 (frame pointer), x30 (link reg),
@@ -32,7 +33,25 @@
  *	  +112  x25       +120  x26
  *	  +128  x27       +136  x28
  *	  +144  x29 (fp)  +152  x30/pc  (resume address)
- *	Total: 160 bytes (multiple of 16).
+ *	  +160  FPCR      +168  FPSR
+ *	Total: 176 bytes (multiple of 16).
+ *
+ *	FPCR and FPSR are per fiber, as glibc's swapcontext keeps them
+ *	(it saves and restores both) and as the x86-64 variant keeps
+ *	MXCSR: AAPCS64 makes FPCR's rounding mode, FZ, DN and trap
+ *	enables global state that only support functions (fesetround)
+ *	change, so they belong to the thread of control that set them.
+ *	Before, a fiber that set FE_UPWARD or flush-to-zero and yielded
+ *	handed it to every fiber the scheduler ran next, and got theirs
+ *	back (test/m4/test_async /C10_fp_env_per_fiber).  FPSR's
+ *	cumulative exception flags travel with the fiber for the same
+ *	reason (fetestexcept after a yield reports the fiber's own
+ *	operations), matching ucontext and MXCSR's flag bits on x86-64.
+ *	A fresh context starts with its creator's FPCR / FPSR, as
+ *	getcontext + makecontext does.  Each msr is skipped when the
+ *	target's value equals the live one (the usual case): a raw round
+ *	trip costs 22.6 ns that way against 24.9 ns writing both always
+ *	(22.0 ns saving neither; 16-vCPU aarch64 host).
  *
  *	On a resumed jump_fcontext the saved x30 is the return site in
  *	the caller of jump_fcontext (a "ret" lands there).  For a fresh
@@ -54,10 +73,10 @@
 	.type  __xtc_make_fcontext,%function
 	.align 4
 __xtc_make_fcontext:
-	/* Align the stack top down to 16, then reserve a 160-byte
+	/* Align the stack top down to 16, then reserve a 176-byte
 	 * context block. */
 	and     x0, x0, #~15
-	sub     x0, x0, #160
+	sub     x0, x0, #176
 
 	/* Zero the callee-saved integer slots (x19-x28, x29). */
 	stp     xzr, xzr, [x0, #64]      /* x19, x20 */
@@ -72,6 +91,12 @@ __xtc_make_fcontext:
 	stp     xzr, xzr, [x0, #16]      /* d10, d11 */
 	stp     xzr, xzr, [x0, #32]      /* d12, d13 */
 	stp     xzr, xzr, [x0, #48]      /* d14, d15 */
+
+	/* The creator's FPCR and FPSR, as getcontext + makecontext (and
+	 * a new thread) would start with. */
+	mrs     x9,  fpcr
+	mrs     x10, fpsr
+	stp     x9,  x10, [x0, #160]
 
 	/* Saved resume address = fn. */
 	str     x2, [x0, #152]
@@ -90,7 +115,7 @@ __xtc_make_fcontext:
 	.align 4
 __xtc_jump_fcontext:
 	/* Reserve and fill our context block below the current sp. */
-	sub     sp, sp, #160
+	sub     sp, sp, #176
 
 	stp     d8,  d9,  [sp, #0]
 	stp     d10, d11, [sp, #16]
@@ -103,15 +128,29 @@ __xtc_jump_fcontext:
 	stp     x25, x26, [sp, #112]
 	stp     x27, x28, [sp, #128]
 	stp     x29, x30, [sp, #144]     /* fp, resume address (lr) */
+	mrs     x9,  fpcr
+	mrs     x10, fpsr
+	stp     x9,  x10, [sp, #160]
 
 	/* *from = current sp. */
-	mov     x9, sp
-	str     x9, [x0]
+	mov     x11, sp
+	str     x11, [x0]
 
 	/* sp = to. */
 	mov     sp, x1
 
-	/* Restore callee-saved state from the target context. */
+	/* Restore the target's FPCR / FPSR, writing each only when it
+	 * differs from the live value still in x9 / x10 (the usual case
+	 * is equal, and an msr costs more than the compare). */
+	ldp     x11, x12, [sp, #160]
+	cmp     x11, x9
+	b.eq    1f
+	msr     fpcr, x11
+1:	cmp     x12, x10
+	b.eq    2f
+	msr     fpsr, x12
+2:
+	/* Then the target's callee-saved registers. */
 	ldp     d8,  d9,  [sp, #0]
 	ldp     d10, d11, [sp, #16]
 	ldp     d12, d13, [sp, #32]
@@ -124,7 +163,7 @@ __xtc_jump_fcontext:
 	ldp     x27, x28, [sp, #128]
 	ldp     x29, x30, [sp, #144]     /* fp, resume address */
 
-	add     sp, sp, #160
+	add     sp, sp, #176
 
 	/* Hand the transfer arg to the resumed code.  x0 serves both as
 	 * arg0 for the first-jump-into-fn case and as the return value

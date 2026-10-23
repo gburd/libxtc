@@ -287,7 +287,109 @@ test_yield_watchdog(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * [C10] floating-point control and status are per fiber, as they are per
+ * thread: a fiber that changes the rounding mode / flush-to-zero, or
+ * raises an exception flag, and yields must not hand that to the next
+ * fiber on the thread, and must get its own back on resume.  ucontext
+ * (glibc saves MXCSR + x87 env / FPCR + FPSR) always did; the fcontext
+ * switch did not until it saved them too.  Registers are read directly
+ * (no libm): x86-64 MXCSR + x87 control word, aarch64 FPCR + FPSR.
+ */
+#if defined(__GNUC__) && (defined(__x86_64__) || defined(__aarch64__))
+#define FPE_TEST 1
+#if defined(__x86_64__)
+static uint32_t fpe_mx(void) { uint32_t m; __asm__ volatile("stmxcsr %0" : "=m"(m)); return m; }
+static void fpe_set_mx(uint32_t m) { __asm__ volatile("ldmxcsr %0" :: "m"(m)); }
+static uint64_t
+fpe_ctl(void)
+{
+	uint16_t cw;
+	__asm__ volatile("fnstcw %0" : "=m"(cw));
+	return ((uint64_t)cw << 32) | (fpe_mx() & ~0x3fu);
+}
+static void
+fpe_set_ctl(uint64_t v)
+{
+	uint16_t cw = (uint16_t)(v >> 32);
+	fpe_set_mx(((uint32_t)v & ~0x3fu) | (fpe_mx() & 0x3fu));
+	__asm__ volatile("fldcw %0" :: "m"(cw));
+}
+static uint64_t fpe_flags(void) { return fpe_mx() & 0x3fu; }
+static void fpe_set_flags(uint64_t f) { fpe_set_mx((fpe_mx() & ~0x3fu) | (uint32_t)f); }
+/* MXCSR RC (13-14) and x87 CW RC (10-11): up = 10b, down = 01b; FTZ 15. */
+#define FPE_UP		((0x0800ull << 32) | 0x4000u | 0x8000u)
+#define FPE_DOWN	((0x0400ull << 32) | 0x2000u)
+#else
+static uint64_t fpe_ctl(void) { uint64_t v; __asm__ volatile("mrs %0, fpcr" : "=r"(v)); return v; }
+static void fpe_set_ctl(uint64_t v) { __asm__ volatile("msr fpcr, %0" :: "r"(v)); }
+static uint64_t fpe_flags(void) { uint64_t v; __asm__ volatile("mrs %0, fpsr" : "=r"(v)); return v & 0x9fu; }
+static void fpe_set_flags(uint64_t f) { __asm__ volatile("msr fpsr, %0" :: "r"(f)); }
+/* FPCR RMode (22-23): up = 01b, down = 10b; FZ 24, DN 25. */
+#define FPE_UP		((1ull << 22) | (1ull << 24))
+#define FPE_DOWN	((2ull << 22) | (1ull << 25))
+#endif
+
+static uint64_t g_fpe_def, g_fpe_b_start, g_fpe_b_flags, g_fpe_a_end,
+    g_fpe_b_end;
+
+static intptr_t
+fpe_a(void *arg)
+{
+	(void)arg;
+	fpe_set_ctl(g_fpe_def | FPE_UP);
+	xtc_yield();			/* B starts: must not inherit FPE_UP */
+	fpe_set_flags(1);		/* invalid-operation flag */
+	xtc_yield();			/* B resumes: must not see the flag */
+	g_fpe_a_end = fpe_ctl();
+	fpe_set_ctl(g_fpe_def);
+	return 0;
+}
+
+static intptr_t
+fpe_b(void *arg)
+{
+	(void)arg;
+	g_fpe_b_start = fpe_ctl();
+	fpe_set_ctl(g_fpe_def | FPE_DOWN);
+	fpe_set_flags(0);
+	xtc_yield();
+	g_fpe_b_flags = fpe_flags();
+	g_fpe_b_end = fpe_ctl();
+	fpe_set_ctl(g_fpe_def);
+	return 0;
+}
+
+static MunitResult
+test_fp_env_per_fiber(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	(void)p; (void)d;
+	g_fpe_def = fpe_ctl();
+	if ((g_fpe_def & (FPE_UP | FPE_DOWN)) != 0)
+		return MUNIT_SKIP;   /* not started in the default modes */
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_async(loop, fpe_a, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_async(loop, fpe_b, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_logf(MUNIT_LOG_INFO, "default %#llx: B start %#llx end %#llx "
+	    "flags %#llx, A end %#llx", (unsigned long long)g_fpe_def,
+	    (unsigned long long)g_fpe_b_start, (unsigned long long)g_fpe_b_end,
+	    (unsigned long long)g_fpe_b_flags, (unsigned long long)g_fpe_a_end);
+	munit_assert_uint64(g_fpe_b_start, ==, g_fpe_def);   /* fresh: default */
+	munit_assert_uint64(g_fpe_b_end, ==, g_fpe_def | FPE_DOWN);
+	munit_assert_uint64(g_fpe_b_flags, ==, 0);           /* not A's flag */
+	munit_assert_uint64(g_fpe_a_end, ==, g_fpe_def | FPE_UP);
+	munit_assert_uint64(fpe_ctl(), ==, g_fpe_def);       /* scheduler's */
+	return MUNIT_OK;
+}
+#endif
+
 static MunitTest tests[] = {
+#if defined(FPE_TEST)
+	{ "/C10_fp_env_per_fiber", test_fp_env_per_fiber, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+#endif
 	{ "/C1_C2_basic",       test_basic,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/C3_nested",         test_nested,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/C4_yield",          test_yield,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
