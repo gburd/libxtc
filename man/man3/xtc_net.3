@@ -1,6 +1,6 @@
 .\" Copyright (c) 2026, The XTC Project
 .\" Use of this source code is governed by the ISC License.
-.Dd May 28, 2026
+.Dd October 23, 2026
 .Dt XTC_NET 3
 .Os
 .Sh NAME
@@ -16,6 +16,7 @@
 .Nm xtc_net_unix_send_creds ,
 .Nm xtc_net_unix_recv_creds ,
 .Nm xtc_net_send_frame ,
+.Nm xtc_net_send_framev ,
 .Nm xtc_net_recv_frame ,
 .Nm xtc_net_udp_socket ,
 .Nm xtc_net_udp_sendto ,
@@ -50,6 +51,8 @@
 .Ft int
 .Fn xtc_net_send_frame "int fd" "const void *buf" "size_t len"
 .Ft int
+.Fn xtc_net_send_framev "int fd" "const struct iovec *iov" "int iovcnt"
+.Ft int
 .Fn xtc_net_recv_frame "int fd" "void **out" "size_t *out_len" "size_t max_len" "int64_t timeout_ns"
 .Ft int
 .Fn xtc_net_udp_socket "xtc_net_family_t fam" "const char *host" "int port" "int *out_fd"
@@ -77,7 +80,7 @@ a loop they fall back to
 .Xr poll 2 .
 .Fn xtc_net_recv_frame
 allocates the frame (free it with
-.Fn __os_free ) ,
+.Fn xtc_free ) ,
 and rejects a claimed length above
 .Fa max_len
 (0 = no cap) with
@@ -91,6 +94,28 @@ if the peer closed mid-frame.  A zero-length frame yields
 with
 .Fa *out
 set to NULL.
+Neither copies the payload in user space:
+.Fn xtc_net_send_frame
+hands the caller's buffer to the kernel with the prefix in the same
+.Xr sendmsg 2
+(one TCP segment for a small frame), and
+.Fn xtc_net_recv_frame
+reads straight into the frame it returns.
+.Pp
+.Fn xtc_net_send_framev
+sends one frame whose payload is the concatenation of
+.Fa iov Ns Bq 0 .. iovcnt ,
+straight from those buffers, so a header and a body that live apart
+need no assembly copy.
+The receiver sees an ordinary frame.
+Zero-length pieces are skipped,
+.Fa iovcnt
+0 sends an empty frame, and the caller's iovec array is not modified.
+.Fa iovcnt
+is at most 63
+.Pq Dv XTC_E_INVAL No above that
+and the total at most 0xFFFFFFFF bytes.
+It is not available on Windows.
 these helpers handle socket creation, address resolution, knob
 setting, and credential passing.
 .Pp

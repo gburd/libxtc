@@ -1034,10 +1034,91 @@ __net_wait_fd(int fd, uint32_t interest, int64_t deadline_ns)
 #endif
 }
 
+#if !defined(_WIN32)
+#include <sys/uio.h>     /* struct iovec, sendmsg */
+/* Payload pieces per frame: the prefix + 63 fit one 1 KiB on-stack
+ * vector (fiber stacks are small), and every POSIX IOV_MAX is >= 16
+ * (_XOPEN_IOV_MAX); Linux/BSD/macOS are 1024. */
+#define __NET_FRAMEV_MAX  63
+
+/* PUBLIC: int xtc_net_send_framev __P((int, const struct iovec *, int)); */
+/*
+ * One frame whose payload is the concatenation of iov[0..iovcnt), sent
+ * straight from the caller's buffers: the 4-byte prefix and the payload
+ * go out in the same sendmsg(2) (one TCP segment for a small frame), a
+ * short write advances a private copy of the vector, EAGAIN parks.
+ */
+int
+xtc_net_send_framev(int fd, const struct iovec *iov, int iovcnt)
+{
+	struct iovec w[__NET_FRAMEV_MAX + 1];
+	struct msghdr mh;
+	uint8_t hdr[4];
+	size_t len = 0, left;
+	int i, n = 1, at = 0;
+
+	if (fd < 0 || iovcnt < 0 || iovcnt > __NET_FRAMEV_MAX ||
+	    (iovcnt > 0 && iov == NULL))
+		return XTC_E_INVAL;
+	for (i = 0; i < iovcnt; i++) {
+		if (iov[i].iov_len == 0)
+			continue;
+		if (iov[i].iov_base == NULL ||
+		    iov[i].iov_len > 0xFFFFFFFFu - len)
+			return XTC_E_INVAL;
+		len += iov[i].iov_len;
+		w[n++] = iov[i];
+	}
+	hdr[0] = (uint8_t)(len >> 24); hdr[1] = (uint8_t)(len >> 16);
+	hdr[2] = (uint8_t)(len >> 8);  hdr[3] = (uint8_t)(len);
+	w[0].iov_base = hdr;
+	w[0].iov_len = 4;
+	for (left = len + 4; left > 0; ) {
+		ssize_t r;
+		memset(&mh, 0, sizeof mh);
+		mh.msg_iov = w + at;
+		mh.msg_iovlen = (size_t)(n - at);
+		r = sendmsg(fd, &mh, __NET_NOSIG);
+		if (r > 0) {
+			size_t done = (size_t)r;
+			left -= done;
+			while (done > 0) {
+				if (done >= w[at].iov_len) {
+					done -= w[at++].iov_len;
+				} else {
+					w[at].iov_base = (char *)w[at].iov_base +
+					    done;
+					w[at].iov_len -= done;
+					done = 0;
+				}
+			}
+			continue;
+		}
+		if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			if (__net_wait_fd(fd, XTC_IO_WRITABLE, -1) != 0)
+				return XTC_E_INTERNAL;
+			continue;
+		}
+		if (r < 0 && errno == EINTR)
+			continue;
+		return XTC_E_INTERNAL;
+	}
+	return XTC_OK;
+}
+#endif /* !_WIN32 */
+
 /* PUBLIC: int xtc_net_send_frame __P((int, const void *, size_t)); */
 int
 xtc_net_send_frame(int fd, const void *buf, size_t len)
 {
+#if !defined(_WIN32)
+	struct iovec v;
+	if (fd < 0 || (len > 0 && buf == NULL) || len > 0xFFFFFFFFu)
+		return XTC_E_INVAL;
+	v.iov_base = (void *)(uintptr_t)buf;
+	v.iov_len = len;
+	return xtc_net_send_framev(fd, &v, 1);
+#else
 	uint8_t hdr[4];
 	const uint8_t *p = (const uint8_t *)buf;
 	size_t off;
@@ -1070,6 +1151,7 @@ xtc_net_send_frame(int fd, const void *buf, size_t len)
 		return XTC_E_INTERNAL;
 	}
 	return XTC_OK;
+#endif
 }
 
 /* PUBLIC: int xtc_net_recv_frame __P((int, void **, size_t *, size_t, int64_t)); */

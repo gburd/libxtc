@@ -6,12 +6,22 @@
  *	Two processes on one loop exchange length-framed messages over a
  *	socketpair (the loop-aware yield path), and a peer's oversized
  *	claimed length is rejected without allocating.
+ *
+ *	framev: xtc_net_send_framev frames assembled from pieces (with
+ *	empty pieces and a 1 MiB piece that forces partial writes and
+ *	parks) arrive as ordinary frames; bad vectors are refused.
+ *	one_segment: a small frame's prefix and payload leave in ONE send
+ *	-- on a SOCK_SEQPACKET pair every send is one record, so the
+ *	receiver's first recv must return 4 + len bytes (the old
+ *	send-prefix-then-payload code delivered a 4-byte record first).
  */
 
 #define _GNU_SOURCE
 #include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
+#include <unistd.h>
 
 #include "munit.h"
 #include "xtc.h"
@@ -229,10 +239,119 @@ test_frame_truncated(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- framev: scatter-gather frames ---- */
+#define FV_BIG (1u << 20)
+static uint8_t g_fv_big[FV_BIG];
+
+static void
+fv_sender(void *arg)
+{
+	struct fr_state *s = arg;
+	struct iovec v[4];
+	size_t i;
+	for (i = 0; i < FV_BIG; i++)
+		g_fv_big[i] = (uint8_t)(i * 13);
+	v[0].iov_base = "head:"; v[0].iov_len = 5;
+	v[1].iov_base = NULL;    v[1].iov_len = 0;      /* skipped */
+	v[2].iov_base = "body";  v[2].iov_len = 4;
+	(void)xtc_net_send_framev(s->sv0, v, 3);
+	(void)xtc_net_send_framev(s->sv0, NULL, 0);     /* empty frame */
+	v[0].iov_base = "<";       v[0].iov_len = 1;
+	v[1].iov_base = g_fv_big;  v[1].iov_len = FV_BIG;
+	v[2].iov_base = ">";       v[2].iov_len = 1;
+	(void)xtc_net_send_framev(s->sv0, v, 3);
+}
+
+static void
+fv_receiver(void *arg)
+{
+	struct fr_state *s = arg;
+	void *m = NULL; size_t n = 0, i;
+	if (xtc_net_recv_frame(s->sv1, &m, &n, 0, 5LL * 1000000000) ==
+	    XTC_OK && n == 9 && memcmp(m, "head:body", 9) == 0)
+		s->ok++;
+	if (m) { __os_free(m); m = NULL; }
+	if (xtc_net_recv_frame(s->sv1, &m, &n, 0, 5LL * 1000000000) ==
+	    XTC_OK && n == 0 && m == NULL)
+		s->ok++;
+	if (xtc_net_recv_frame(s->sv1, &m, &n, 0, 5LL * 1000000000) ==
+	    XTC_OK && n == FV_BIG + 2) {
+		const uint8_t *b = m;
+		int good = b[0] == '<' && b[FV_BIG + 1] == '>';
+		for (i = 0; good && i < FV_BIG; i++)
+			good = b[1 + i] == (uint8_t)(i * 13);
+		s->ok += good;
+	}
+	if (m) __os_free(m);
+}
+
+static MunitResult
+test_frame_framev(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	struct fr_state s;
+	struct iovec bad[64];
+	int sv[2];
+	(void)p; (void)d;
+
+	memset(&s, 0, sizeof s);
+	munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), ==, 0);
+	(void)xtc_net_setnonblock(sv[0]);
+	(void)xtc_net_setnonblock(sv[1]);
+	s.sv0 = sv[0]; s.sv1 = sv[1];
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, fv_receiver, &s, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, fv_sender, &s, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_assert_int(s.ok, ==, 3);
+
+	/* Refused before anything is sent. */
+	memset(bad, 0, sizeof bad);
+	munit_assert_int(xtc_net_send_framev(sv[0], bad, 64), ==,
+	    XTC_E_INVAL);                                 /* > 63 pieces */
+	bad[0].iov_len = 3;                               /* NULL base */
+	munit_assert_int(xtc_net_send_framev(sv[0], bad, 1), ==,
+	    XTC_E_INVAL);
+	munit_assert_int(xtc_net_send_framev(sv[0], NULL, 1), ==,
+	    XTC_E_INVAL);
+	munit_assert_int(xtc_net_send_framev(-1, NULL, 0), ==, XTC_E_INVAL);
+	xtc_net_close(sv[0]); xtc_net_close(sv[1]);
+	return MUNIT_OK;
+}
+
+/* ---- one_segment: prefix + payload in one send ---- */
+static MunitResult
+test_frame_one_segment(const MunitParameter p[], void *d)
+{
+	uint8_t rec[64];
+	ssize_t r;
+	int sv[2];
+	struct iovec v[2];
+	(void)p; (void)d;
+	munit_assert_int(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv), ==, 0);
+	munit_assert_int(xtc_net_send_frame(sv[0], "hello", 5), ==, XTC_OK);
+	r = recv(sv[1], rec, sizeof rec, 0);
+	munit_assert_int((int)r, ==, 4 + 5);
+	munit_assert_memory_equal(5, rec + 4, "hello");
+	v[0].iov_base = "ab"; v[0].iov_len = 2;
+	v[1].iov_base = "cde"; v[1].iov_len = 3;
+	munit_assert_int(xtc_net_send_framev(sv[0], v, 2), ==, XTC_OK);
+	r = recv(sv[1], rec, sizeof rec, 0);
+	munit_assert_int((int)r, ==, 4 + 5);
+	munit_assert_memory_equal(5, rec + 4, "abcde");
+	close(sv[0]); close(sv[1]);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/roundtrip", test_frame_roundtrip, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/cap",       test_frame_cap,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/truncated", test_frame_truncated, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/framev",    test_frame_framev,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/one_segment", test_frame_one_segment, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = {

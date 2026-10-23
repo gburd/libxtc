@@ -168,9 +168,33 @@ XTC_API int xtc_dns_resolve(const char *hostname, int port,
  * unbounded allocation.  Returns XTC_E_AGAIN on timeout, XTC_E_INVAL
  * if the peer closed mid-frame.  A zero-length frame returns XTC_OK
  * with *out == NULL.
+ *
+ * Neither copies the payload in user space: send_frame hands the
+ * caller's buffer to the kernel together with the 4-byte prefix in one
+ * sendmsg(2) (one TCP segment for a small frame), and recv_frame reads
+ * straight into the frame it returns.
  */
 int xtc_net_send_frame(int fd, const void *buf, size_t len);
 int xtc_net_recv_frame(int fd, void **out, size_t *out_len,
                        size_t max_len, int64_t timeout_ns);
+
+#if !defined(_WIN32)
+#include <sys/uio.h>    /* struct iovec */
+/*
+ * PUBLIC: int xtc_net_send_framev __P((int, const struct iovec *, int));
+ *
+ * Scatter-gather send_frame: one frame whose payload is the
+ * concatenation of iov[0..iovcnt), sent straight from those buffers
+ * (no assembly copy into a contiguous message).  Use it for a header
+ * plus a body that live apart -- a reply header on the stack and a
+ * value in a cache, a record batch in several slabs.  The receiver sees
+ * an ordinary frame (xtc_net_recv_frame).  Zero-length pieces are
+ * skipped; iovcnt 0 sends an empty frame.  The caller's iovec array is
+ * not modified.  iovcnt is at most 63 (XTC_E_INVAL above that); the
+ * total at most 0xFFFFFFFF bytes.  Same waiting and return codes as
+ * xtc_net_send_frame.  POSIX only.
+ */
+XTC_API int xtc_net_send_framev(int fd, const struct iovec *iov, int iovcnt);
+#endif
 
 #endif /* XTC_NET_H */

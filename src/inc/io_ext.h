@@ -44,6 +44,7 @@ int xtc_net_accept __P((int, int *));
 int xtc_net_listen_backlog __P((xtc_net_family_t, const char *, int, const xtc_tcp_opts_t *, int, int *));
 int xtc_net_recv_frame __P((int, void **, size_t *, size_t, int64_t));
 int xtc_net_send_frame __P((int, const void *, size_t));
+int xtc_net_send_framev __P((int, const struct iovec *, int));
 int64_t __xtc_io_sim_next_due __P((xtc_io_t *));
 ssize_t xtc_bdev_pread __P((xtc_bdev_t *, void *, size_t, uint64_t));
 ssize_t xtc_bdev_pwrite __P((xtc_bdev_t *, const void *, size_t, uint64_t));
