@@ -3091,6 +3091,20 @@ __wait_fd_disarm_waker(struct xtc_proc *self)
 	(void) __proc_mtx_unlock(&self->mbox_lock);
 }
 
+/* 1 iff fd is not an open descriptor (wait_fd's closed-fd verdict).
+ * Called only when a registration failed or a park ended in an error or
+ * a timeout, never on the common park. */
+static int
+__wait_fd_closed(int fd)
+{
+#if !defined(_WIN32)
+	return fcntl(fd, F_GETFD) == -1 && errno == EBADF; /* XTC_BLOCKING_OK: fd validity probe */
+#else
+	(void)fd;
+	return 0;
+#endif
+}
+
 int
 xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
                  uint32_t *out_revents)
@@ -3252,17 +3266,22 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		 * completes it with an error CQE (XTC_E_AGAIN + TIMEOUT when
 		 * the deadline won the race, else XTC_OK + XTC_IO_ERR), and
 		 * select would fail its whole poll set.  None of those says
-		 * "bad fd".  One syscall (~0.1 us) on the slow path only: the
-		 * mailbox fast path above has already returned.  Windows fds
-		 * here are SOCKETs, which fcntl cannot probe.
+		 * "bad fd".  The fcntl probe used to run before EVERY
+		 * registration: one extra system call per park, on the hot path
+		 * of every socket server (1 of rexis's 7 per request).  A
+		 * readiness backend reports a closed fd at registration (epoll's
+		 * EBADF) or in its readiness (POLLNVAL, select's EBADF); io_uring
+		 * accepts the POLL_ADD and fails it, so the error surfaces as an
+		 * XTC_IO_ERR wake or -- with a timeout racing it -- a timeout.
+		 * Only those outcomes are probed now (__wait_fd_closed below);
+		 * the common park pays nothing.  Windows fds here are SOCKETs,
+		 * which fcntl cannot probe.
 		 */
-#if !defined(_WIN32)
-		if (fcntl(fd, F_GETFD) == -1 && errno == EBADF) { /* XTC_BLOCKING_OK: fd validity probe */
+		reg_rc = xtc_io_reg_fd(wl->io, fd, interest, self->task);
+		if (reg_rc != XTC_OK && __wait_fd_closed(fd)) {
 			__wait_fd_disarm_waker(self);
 			return XTC_E_INVAL;
 		}
-#endif
-		reg_rc = xtc_io_reg_fd(wl->io, fd, interest, self->task);
 		if (reg_rc != XTC_OK) {
 			/* The waker was armed above (before this registration),
 			 * so it must be disarmed on every path that returns
@@ -3551,6 +3570,14 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	 * XTC_OK.  timeout_ns is no longer consulted: the timer fire is the
 	 * only producer of XTC_WAIT_TIMEOUT, so the bit implies one was armed.
 	 */
+	/* A closed fd that the backend accepted (io_uring) ends the park in
+	 * an error or, when the deadline won the race, a timeout: report it
+	 * as the caller bug it is, with no revents (see the registration). */
+	if ((revents & (XTC_IO_ERR | XTC_WAIT_TIMEOUT)) != 0 &&
+	    (revents & XTC_WAIT_MAILBOX) == 0 && __wait_fd_closed(fd)) {
+		*out_revents = 0;
+		return XTC_E_INVAL;
+	}
 	if (revents == (uint32_t)XTC_WAIT_TIMEOUT)
 		return XTC_E_AGAIN;
 	return XTC_OK;

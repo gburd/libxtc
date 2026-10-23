@@ -35,29 +35,31 @@
  *	so one cursor per worker thread suffices.
  */
 
+/* REG_RIP / REG_RSP / greg_t for the x86-64 redirect (coro_preempt.h)
+ * live behind __USE_GNU on glibc; request _GNU_SOURCE before any header
+ * pulls <ucontext.h> in, as coro_uctx.c does. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+
 #include "xtc_int.h"
 
 /*
- * Substrate selection (kept IDENTICAL across all four sites: this file,
- * coro_uctx.c, and coro_int.h's two guards -- they must agree or
- * struct xtc_coro's layout drifts between translation units).  fcontext
- * is live when: not Windows AND (no ucontext, OR fcontext forced, OR
- * Apple arm64 by default).  Apple Silicon defaults to the hand-written
- * Mach-O fcontext (fctx_aarch64_aapcs_macho.S) -- macOS ucontext's
- * swapcontext does a sigprocmask syscall per switch.  Excluded in the
- * amalgamation (the single-file xtc.c cannot carry the .S, so it stays
- * on ucontext); -DXTC_CORO_FORCE_UCONTEXT pins ucontext back.
+ * Substrate selection: src/inc/coro_select.h (one rule for every site,
+ * so struct xtc_coro's layout never drifts between translation units).
+ * This TU is live exactly when XTC_CORO_FCTX is defined.
  */
-#if !defined(_WIN32) && \
-    (!defined(XTC_HAVE_UCONTEXT) || defined(XTC_CORO_FORCE_FCTX) || \
-     (defined(__APPLE__) && defined(__aarch64__) && \
-      !defined(XTC_CORO_FORCE_UCONTEXT) && !defined(XTC_AMALGAMATION)))
+#include "coro_select.h"
+#if defined(XTC_CORO_FCTX)
 
 #include "xtc_async.h"
 #include "loop_int.h"
 #include "coro_int.h"
+#include "xtc_inject.h"   /* coro.switch_window test hook */
 
 #include <errno.h>
+#include <pthread.h>     /* pthread_sigmask: __coro_open_sync_signals */
+#include <signal.h>
 #include <string.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -217,6 +219,14 @@ static XTC_THREAD_LOCAL void *g_sched_fctx = NULL;
  * (both mmap their stacks).  See src/inc/coro_common.h. */
 #include "coro_common.h"
 
+/* The in-switch guard (g_in_preempt), the x86-64 vector-state probe and
+ * the x86-64 signal-context redirect, shared with coro_uctx.c.  Every
+ * __xtc_jump_fcontext below is guarded exactly as coro_uctx.c guards its
+ * swapcontexts: the redirect declines while a switch is saving or
+ * restoring a context, or the scheduler is between its cursor update
+ * and the jump.  See coro_preempt.h. */
+#include "coro_preempt.h"
+
 /* Default stack size; configurable via xtc_set_stack_size(). */
 static size_t __xtc_stack_size = 64 * 1024;
 
@@ -258,14 +268,48 @@ __coro_entry(void *transfer)
 	 * names it, xtc_recv steals its mail, and once it is freed every
 	 * yield's kill check reads freed memory (review156 B1). */
 	if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(NULL);
+	/* Receiver-side clear: __xtc_coro_step raised the guard before the
+	 * jump that landed here; the fiber body may now be preempted. */
+	g_in_preempt = 0;
 	c->result = c->fn(c->arg);
 	c->done = 1;
 	/* Final jump back to the scheduler.  We will not be resumed, so the
 	 * outgoing fake stack is discarded (save slot NULL) and the
 	 * destination is the scheduler stack. */
+	g_in_preempt = 1;
 	__san_switch_to(NULL, __san_sched_bottom, __san_sched_size);
 	__tsan_switch_out();
 	(void)__xtc_jump_fcontext(&c->fctx, g_sched_fctx, NULL);
+}
+
+/*
+ * The signals a fiber must be able to take wherever it runs, unblocked
+ * once per scheduler thread (first step).  ucontext carried them in
+ * every fiber's uc_sigmask (coro_uctx.c, __xtc_async_ex), restored on
+ * each swapcontext; fcontext touches no mask, so a fiber runs with its
+ * thread's.  Runtime threads start with EVERY signal blocked
+ * (__os_pthread_create_masked), and a fault raised while blocked is
+ * force-delivered with the default action: a contained fault (the R1
+ * guard, xtc_fault_guard_install) on an xtc_exec worker killed the
+ * process instead of the proc.  The set is exactly the ucontext fiber
+ * mask's exemptions: the synchronous faults, SIGABRT, and the
+ * preemption signal.  Process-directed signals stay blocked.
+ */
+static XTC_THREAD_LOCAL int g_sync_sigs_open;
+
+static void
+__coro_open_sync_signals(void)
+{
+	sigset_t s;
+	g_sync_sigs_open = 1;
+	(void)sigemptyset(&s);
+	(void)sigaddset(&s, SIGSEGV);
+	(void)sigaddset(&s, SIGBUS);
+	(void)sigaddset(&s, SIGFPE);
+	(void)sigaddset(&s, SIGILL);
+	(void)sigaddset(&s, SIGABRT);
+	(void)sigaddset(&s, SIGVTALRM);
+	(void)pthread_sigmask(SIG_UNBLOCK, &s, NULL);
 }
 
 /*
@@ -280,9 +324,16 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 	struct xtc_coro *saved;
 
 	c->self = self;   /* bind on the running thread; see coro_uctx.c */
+	if (XTC_UNLIKELY(!g_sync_sigs_open))
+		__coro_open_sync_signals();
 
+	/* Guard from here: once __xtc_current_coro == c a tick would take
+	 * the scheduler's own execution for fiber c.  The fiber clears the
+	 * guard when it lands (__coro_entry, or after its own jump). */
+	g_in_preempt = 1;
 	saved = __xtc_current_coro;
 	__xtc_current_coro = c;
+	XTC_INJECTION_POINT("coro.switch_window");   /* see xtc_yield */
 
 	/* Save OUR (scheduler) fake stack into the per-thread slot -- NOT
 	 * into c->san_fake_stack, which the coro overwrites when it parks;
@@ -292,7 +343,9 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 	(void)__xtc_jump_fcontext(&g_sched_fctx, c->fctx, c);
 	__san_switch_done(__san_sched_fake);   /* back on the scheduler stack */
 
+	/* Restore the cursor BEFORE dropping the guard (see coro_uctx.c). */
 	__xtc_current_coro = saved;
+	g_in_preempt = 0;
 	/* The scheduler has control again: the per-thread current-proc TLS
 	 * still names the fiber that just yielded (or stopped the executor
 	 * and yielded).  Give it back to whoever runs here -- the outer
@@ -517,6 +570,7 @@ xtc_await(xtc_task_t *t, intptr_t *result)
 		target->waiter = me->self;
 		me->self->q_next = NULL;
 		me->_parked_on = target;
+		g_in_preempt = 1;
 		pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
 		__san_switch_to(&me->san_fake_stack, __san_sched_bottom,
 		    __san_sched_size);
@@ -524,6 +578,7 @@ xtc_await(xtc_task_t *t, intptr_t *result)
 		(void)__xtc_jump_fcontext(&me->fctx, g_sched_fctx, NULL);
 		__san_switch_done(me->san_fake_stack);   /* resumed on our stack */
 		if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
+		g_in_preempt = 0;
 	}
 	if (result) *result = target->result;
 	return XTC_OK;
@@ -546,12 +601,18 @@ xtc_yield(void)
 	 * the scheduler runs other fibers (which overwrite it) before we
 	 * resume.  Without this a proc resumes running as whatever proc
 	 * ran last, then registers I/O and parks the WRONG task. */
+	g_in_preempt = 1;   /* the whole save/jump/restore; see coro_uctx.c */
+	/* Test hook inside the guarded window (one relaxed load when nothing
+	 * is attached): test_preempt_p2 /switch_window_declines raises the
+	 * preemption signal here and on the scheduler side below. */
+	XTC_INJECTION_POINT("coro.switch_window");
 	pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;
 	__san_switch_to(&c->san_fake_stack, __san_sched_bottom, __san_sched_size);
 	__tsan_switch_out();
 	(void)__xtc_jump_fcontext(&c->fctx, g_sched_fctx, NULL);
 	__san_switch_done(c->san_fake_stack);   /* resumed on our stack */
 	if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(pctx);
+	g_in_preempt = 0;
 	/* Universal resume point: honor a kill/cancel requested while we
 	 * were away (e.g. an involuntary preemption of a pure CPU loop that
 	 * never reaches a cooperative kill-check).  xtc_launch's cancel
@@ -561,28 +622,40 @@ xtc_yield(void)
 
 /* PUBLIC: int __xtc_coro_preempt __P((void *)); */
 /*
- * Signal-context involuntary yield (M_PREEMPTION Phase 2b).  The fctx
- * substrate CANNOT do a resumable in-handler stack swap portably (its
- * saved context is a raw stack pointer, not a kernel-restorable
- * ucontext, so redirecting sigreturn is arch-specific asm), so it
- * declines: the preemption timer falls back to Phase 1 cooperative-
- * assisted preemption on this substrate (notably musl).  The ucontext
- * substrate provides the real resumable version.
+ * Signal-context involuntary yield (M_PREEMPTION Phase 2b), fcontext
+ * substrate.  On x86-64 Linux (glibc) this is the SAME redirect the
+ * ucontext substrate uses: the handler rewrites the interrupted RIP/RSP
+ * so sigreturn resumes the fiber, on its own stack, in
+ * __xtc_preempt_trampoline, which saves the interrupted register file
+ * and vector state, calls xtc_yield() -- here a guarded jump_fcontext --
+ * and returns to the interrupted instruction.  Nothing in that path
+ * depends on how the scheduler switch saves its context.  It declines
+ * (returns 0) while a switch is in flight (g_in_preempt), inside the
+ * trampoline, and off a fiber.  Elsewhere (aarch64, musl, macOS) it
+ * declines, and the timer falls back to Phase 1 cooperative-assisted
+ * preemption.
  */
 int
 __xtc_coro_preempt(void *uctx)
 {
+#if defined(XTC_CORO_REDIRECT_X86_64)
+	return __coro_preempt_redirect_x86_64(uctx);
+#else
 	(void)uctx;
 	return 0;
+#endif
 }
 
 /* PUBLIC: int __xtc_coro_preempt_effective __P((void)); */
-/* The fctx substrate always declines the involuntary redirect (see
- * above), so involuntary preemption is never effective here. */
+/* 1 iff __xtc_coro_preempt above can redirect (tracks its #if). */
 int
 __xtc_coro_preempt_effective(void)
 {
+#if defined(XTC_CORO_REDIRECT_X86_64)
+	return 1;
+#else
 	return 0;
+#endif
 }
 
 __attribute__((noinline))

@@ -223,11 +223,99 @@ test_wait_fd_bad_args(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * [wait_fd/no_probe_per_park] A park on a healthy fd must not pay an
+ * fd-validity probe.  xtc_proc_wait_fd used to call fcntl(F_GETFD)
+ * before every registration -- one extra system call per park on every
+ * socket server's request path (rexis: 1 of 7 per request).  The probe
+ * now runs only when a registration fails or a park ends in an error or
+ * a timeout (the closed-fd verdict; see test_proc
+ * /wait_fd_closed_fd_is_inval for the behaviour it must keep).  This
+ * test counts fcntl calls through an interposed definition (libxtc.a is
+ * linked statically, so its fcntl reference binds here): two procs on
+ * one loop ping-pong a byte over a socketpair WF_ROUNDS times, each
+ * round one park per side.  Before: >= 2 * WF_ROUNDS probes; after: 0.
+ */
+#define WF_ROUNDS 200
+#if defined(__linux__)
+static _Atomic long g_wf_fcntl_calls;
+static int g_wf_count_on;
+
+#include <stdarg.h>
+#include <sys/syscall.h>
+int
+fcntl(int fd, int cmd, ...)
+{
+	va_list ap;
+	long arg;
+	va_start(ap, cmd);
+	arg = va_arg(ap, long);
+	va_end(ap);
+	if (g_wf_count_on)
+		atomic_fetch_add(&g_wf_fcntl_calls, 1);
+	return (int)syscall(SYS_fcntl, fd, cmd, arg);
+}
+
+#include <sys/socket.h>
+static int g_wf_sv[2];
+
+static void
+wf_side(void *arg)
+{
+	int me = (int)(intptr_t)arg, fd = g_wf_sv[me], i;
+	char c = 'x';
+	uint32_t rev;
+	if (me == 0 && write(fd, &c, 1) != 1)
+		return;
+	for (i = 0; i < WF_ROUNDS; i++) {
+		rev = 0;
+		if (xtc_proc_wait_fd(fd, XTC_IO_READABLE, -1, &rev) != XTC_OK)
+			return;
+		if (read(fd, &c, 1) != 1)
+			return;
+		if ((me == 0 && i == WF_ROUNDS - 1) || write(fd, &c, 1) != 1)
+			return;
+	}
+}
+
+static MunitResult
+test_wait_fd_no_probe_per_park(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	(void)p; (void)d;
+	munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, g_wf_sv), ==, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, wf_side, (void *)(intptr_t)0,
+	    NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, wf_side, (void *)(intptr_t)1,
+	    NULL, NULL), ==, XTC_OK);
+	atomic_store(&g_wf_fcntl_calls, 0);
+	g_wf_count_on = 1;
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	g_wf_count_on = 0;
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	(void)close(g_wf_sv[0]);
+	(void)close(g_wf_sv[1]);
+	munit_logf(MUNIT_LOG_INFO, "%d round trips: %ld fcntl calls",
+	    WF_ROUNDS, atomic_load(&g_wf_fcntl_calls));
+	munit_assert_long(atomic_load(&g_wf_fcntl_calls), <, WF_ROUNDS / 4);
+	return MUNIT_OK;
+}
+#else
+static MunitResult
+test_wait_fd_no_probe_per_park(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return MUNIT_SKIP;   /* the fcntl interposer is Linux-only */
+}
+#endif
+
 static MunitTest tests[] = {
 	{ "/wait_fd_readable",     test_wait_fd_readable,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/wait_fd_timeout",      test_wait_fd_timeout,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/wait_fd_idle_low_cpu", test_wait_fd_idle_low_cpu, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/wait_fd_bad_args",     test_wait_fd_bad_args,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/wait_fd_no_probe_per_park", test_wait_fd_no_probe_per_park, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 

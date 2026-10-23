@@ -366,6 +366,28 @@ AC_CHECK_FUNC([swapcontext],
      [Define to 1 if swapcontext / getcontext / makecontext are available])
    xtc_have_ucontext=yes],
   [xtc_have_ucontext=no])
+
+# Coroutine substrate.  auto (default): the hand-written fcontext on
+# Linux x86-64 and Apple arm64 (ucontext's swapcontext makes a
+# rt_sigprocmask system call per fiber switch, and on Linux that call
+# takes one process-wide kernel lock, so multi-loop switching serializes
+# on it), and wherever the libc has no ucontext (musl); ucontext
+# elsewhere.  fctx / ucontext force one (same as -DXTC_CORO_FORCE_FCTX /
+# -DXTC_CORO_FORCE_UCONTEXT).  See src/inc/coro_select.h.
+AC_ARG_WITH([coro],
+  [AS_HELP_STRING([--with-coro=auto|fctx|ucontext],
+    [Coroutine substrate (default: auto).])],
+  [xtc_coro=$withval], [xtc_coro=auto])
+AS_CASE([$xtc_coro],
+  [auto], [],
+  [fctx], [AC_DEFINE([XTC_CORO_FORCE_FCTX], 1,
+     [Define to 1 to force the fcontext coroutine substrate])],
+  [ucontext],
+    [AS_IF([test "x$xtc_have_ucontext" != xyes],
+       [AC_MSG_ERROR([--with-coro=ucontext: this libc has no swapcontext])])
+     AC_DEFINE([XTC_CORO_FORCE_UCONTEXT], 1,
+       [Define to 1 to force the ucontext coroutine substrate])],
+  [AC_MSG_ERROR([--with-coro must be auto, fctx or ucontext (got $xtc_coro)])])
 AS_IF([test "x$xtc_with_liburing" != xno],
   [AS_IF([test "x$xtc_with_liburing" = xauto],
      [# Try pkg-config first; it knows about Nix-style split outputs.

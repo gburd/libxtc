@@ -136,6 +136,19 @@ returns it to the cache.
 drops magazines and returns empty chunks to the OS.  Useful under
 memory pressure.
 .Pp
+.Fn xtc_slab_stat
+fills
+.Fa out
+with the cache's counters.  The per-operation counters
+.Pq alloc_fast, alloc_slow, free_fast, free_slow
+are kept per thread, on separate cache lines, and summed on read, so
+threads allocating from one shared cache do not contend on a statistics
+line;
+.Va n_inuse
+is derived from them.  The figures are exact when no alloc or free is in
+flight; a read concurrent with other threads' traffic is a near-instant
+snapshot.
+.Pp
 .Fn xtc_slab_pressure_listen
 attaches a callback that fires when Linux PSI memory pressure is
 detected.  When triggered, all registered slab caches are reaped.

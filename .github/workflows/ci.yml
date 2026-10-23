@@ -102,10 +102,12 @@ jobs:
               { echo "test_batch --mt-only failed on iteration $i"; exit 1; }
           done
 
-  coro-fctx:
-    # Force the fcontext coroutine substrate (the musl path) on a
-    # glibc runner so it is exercised every commit without a musl
-    # toolchain.
+  coro-ucontext:
+    # Force the ucontext coroutine substrate.  fcontext is the default
+    # on Linux x86-64 glibc (and the musl path), so every other job runs
+    # it; this keeps the ucontext substrate -- still the default on the
+    # BSDs, illumos, macOS x86-64 and in the amalgamation, and selectable
+    # with --with-coro=ucontext -- tested every commit.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -116,15 +118,17 @@ jobs:
       - name: Autoreconf
         working-directory: dist
         run: autoreconf -i
-      - name: Configure (force fcontext)
+      - name: Configure (force ucontext)
         run: |
-          mkdir -p build_fctx
-          cd build_fctx
-          CPPFLAGS=-DXTC_CORO_FORCE_FCTX ../dist/configure --with-tls=auto
+          mkdir -p build_uctx
+          cd build_uctx
+          ../dist/configure --with-tls=auto --with-coro=ucontext
+      - name: Confirm the ucontext substrate is selected
+        run: grep -q 'define XTC_CORO_FORCE_UCONTEXT 1' build_uctx/xtc_config.h
       - name: Build
-        run: make -C build_fctx -j"$(nproc)"
+        run: make -C build_uctx -j"$(nproc)"
       - name: Test
-        run: make -C build_fctx check
+        run: make -C build_uctx check
 
   musl:
     # Build and test against musl libc -- the real execinfo-less,
@@ -804,9 +808,10 @@ jobs:
     # Substrate choices that matter for Valgrind:
     #   * epoll I/O backend (NOT io_uring -- Valgrind does not model
     #     io_uring and the runner may lack it).
-    #   * ucontext coroutine substrate (configure's default on glibc):
-    #     Valgrind's stack-change tracking copes with ucontext far
-    #     better than with the raw fcontext assembly.
+    #   * ucontext coroutine substrate (--with-coro=ucontext; fcontext
+    #     is the default on x86-64 glibc): Valgrind's stack-change
+    #     tracking copes with ucontext far better than with the raw
+    #     fcontext assembly.
     #
     # Gating policy:
     #   * memcheck GATES the job (--error-exitcode=1): a leak or invalid
@@ -858,7 +863,8 @@ jobs:
         run: |
           mkdir -p build_vg
           cd build_vg
-          ../dist/configure --with-tls=auto --with-io-backend=epoll
+          ../dist/configure --with-tls=auto --with-io-backend=epoll \
+            --with-coro=ucontext
 
       - name: Build the memcheck + race-detector test subsets
         run: |

@@ -53,6 +53,12 @@
    backward compatibility; new code need not use it. */
 #undef STDC_HEADERS
 
+/* Define to 1 to force the fcontext coroutine substrate */
+#undef XTC_CORO_FORCE_FCTX
+
+/* Define to 1 to force the ucontext coroutine substrate */
+#undef XTC_CORO_FORCE_UCONTEXT
+
 /* Define to enable runtime diagnostic assertions. */
 #undef XTC_DIAGNOSTIC
 
