@@ -22,6 +22,8 @@
  *	    where a root-to-leaf seek per row costs the tree height.
  *	W5  a walk that stops early (LIMIT 1, min()) does not read rows
  *	    ahead that it never returns.
+ *	W6  a forward LIMIT 20 walk reads its 20 index keys in one batch:
+ *	    no cursor resume after the open.
  */
 
 #include <stdint.h>
@@ -296,6 +298,20 @@ main(void)
 		    i ? "min()" : "LIMIT 1", (unsigned long long)fixes,
 		    (unsigned long long)(3 * s1.height));
 	}
+
+	/* W6: LIMIT 20 forward: one key batch of the hinted size. */
+	n = run_k(db, "SELECT k FROM t WHERE acct = 0 ORDER BY ts LIMIT 20", got,
+	    4000);
+	bt_get_stats(bt, &s0);
+	n = run_k(db, "SELECT k FROM t WHERE acct = 0 ORDER BY ts LIMIT 20", got,
+	    4000);
+	bt_get_stats(bt, &s1);
+	resumes = s1.resumes - s0.resumes;
+	CK(n == 20);
+	CK(!T_OLC || resumes == 0);
+	printf("  %s   W6 LIMIT 20: %llu cursor resumes after the open%s\n",
+	    !T_OLC || resumes == 0 ? "ok" : "FAIL", (unsigned long long)resumes,
+	    T_OLC ? "" : " [no OLC in this build: bound not checked]");
 
 	/* W3: committed only, then with buffered writes merged in. */
 	check_all(db, "committed");

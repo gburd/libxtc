@@ -1846,14 +1846,28 @@ xs_idx_rowkey(const struct xs_idx_rt *e, const uint8_t *rec,
     int reclen, int64_t rowid, int with_rowid, uint8_t *out, int cap,
     int *has_null)
 {
-	int off, i;
+	/* The record is decoded once (xstore_rec_cols), up to the highest
+	 * payload column the index names; xstore_rec_col per column
+	 * re-parsed it from the start for each one. */
+	xstore_val_t cv[XS_IDX_NCOL];
+	int off, i, need = 0, got;
 	if (has_null) *has_null = 0;
+	for (i = 0; i < e->ncol; i++)
+		if (e->pay[i] >= need) need = e->pay[i] + 1;
+	got = need <= XS_IDX_NCOL ? xstore_rec_cols(rec, reclen, cv, need) : -1;
 	off = xs_idx_prefix(e->idx_id, out);
 	for (i = 0; i < e->ncol && off >= 0; i++) {
 		int64_t iv = 0; double rv = 0; const uint8_t *p = NULL; int np = 0;
 		int cls;
 		if (e->pay[i] < 0) { cls = XSTORE_C_INT; iv = rowid; }
-		else cls = xstore_rec_col(rec, reclen, e->pay[i], &iv, &rv, &p, &np);
+		else if (got < 0)
+			cls = xstore_rec_col(rec, reclen, e->pay[i], &iv, &rv, &p, &np);
+		else if (e->pay[i] >= got)
+			cls = XSTORE_C_NULL;      /* as xstore_rec_col past the end */
+		else {
+			const xstore_val_t *x = &cv[e->pay[i]];
+			cls = x->cls; iv = x->i; rv = x->r; p = x->p; np = x->n;
+		}
 		if (cls == XSTORE_C_NULL && has_null) *has_null = 1;
 		off = xs_tup_elem(out, off, cap, cls, iv, rv, p, np,
 		    (int)((e->descmask >> i) & 1u));
@@ -7966,8 +7980,11 @@ xs_iscan_fill(xstore_iscan_t *s)
 	s->kb_n = s->kb_i = 0;
 	if (s->kb_end) return 0;
 	if (s->ka == NULL && (s->ka = malloc(sizeof *s->ka)) == NULL) return -1;
-	s->kb_want = s->kb_want == 0 ? 16 :
-	    (s->kb_want < XS_IKA_MAX ? s->kb_want * 2 : XS_IKA_MAX);
+	/* First batch: the hinted row count (LIMIT 20 is one batch, not
+	 * 16 then 32), else 16; then doubling. */
+	s->kb_want = s->kb_want == 0 ? (s->ra_left > 0 ? s->ra_left : 16) :
+	    s->kb_want * 2;
+	if (s->kb_want > XS_IKA_MAX) s->kb_want = XS_IKA_MAX;
 	if (!s->reverse) {
 		if (s->cur == NULL) {
 			const uint8_t *st = s->has_lo ? s->lo : s->pfx;
@@ -8069,7 +8086,7 @@ xs_iscan_committed(xstore_iscan_t *s)
  * and rowid), each with the stored value (flag byte first) of its
  * version visible at the snapshot: rc 1 visible, 0 none, -1 not settled
  * by the batch (xs_point_get decides when the row is taken). */
-#define XS_IRA_MAX    16
+#define XS_IRA_MAX    32
 #define XS_IRA_KBYTES 2048   /* packed keys; one more maximal key fits */
 struct xs_ira {
 	int64_t  rid[XS_IRA_MAX];
