@@ -338,21 +338,16 @@ static _Atomic int g_xsave_probed;
 /*
  * The interrupted PC, handed from the signal handler to the trampoline
  * on the same thread (sigreturn resumes the thread that took the
- * signal, and the trampoline reads it before its first yield).  It used
- * to be stored on the fiber stack at orig_sp - 8 -- inside the
- * interrupted code's red zone, which the ABI promises a signal handler
- * never touches.  A nested tick cannot overwrite it: g_in_preempt stays
- * raised until the trampoline's xtc_yield, and the handler declines
- * while it is.
+ * signal, and the trampoline reads it, via __xtc_preempt_take_pc,
+ * before its first yield).  It used to be stored on the fiber stack at
+ * orig_sp - 8 -- inside the interrupted code's red zone, which the ABI
+ * promises a signal handler never touches.  A nested tick cannot
+ * overwrite it: g_in_preempt stays raised until the trampoline's
+ * xtc_yield, and the handler declines while it is.  The slot and its
+ * reader live in preempt.c (see there for why).
  */
-static XTC_THREAD_LOCAL uintptr_t g_preempt_pc;
-__attribute__((visibility("hidden"))) uintptr_t
-__xtc_preempt_take_pc(void);              /* called from the trampoline */
-uintptr_t
-__xtc_preempt_take_pc(void)
-{
-	return g_preempt_pc;
-}
+extern XTC_THREAD_LOCAL uintptr_t __xtc_preempt_pc
+    __attribute__((visibility("hidden")));
 
 #define XTC_XSAVE_WANT 0xE7ull   /* x87 SSE AVX opmask ZMM_Hi256 Hi16_ZMM */
 
@@ -475,7 +470,7 @@ __xtc_coro_preempt(void *uctx)
 	 * asynchronous events included (SysV x86-64 ABI 3.2.2).
 	 */
 	new_sp = orig_sp - 136;
-	g_preempt_pc = (uintptr_t)orig_pc;
+	__xtc_preempt_pc = (uintptr_t)orig_pc;
 
 	g_in_preempt++;
 	uc->uc_mcontext.gregs[REG_RSP] = new_sp;

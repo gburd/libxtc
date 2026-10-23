@@ -16,6 +16,7 @@
 #if defined(XTC_IO_BACKEND_POLL)
 
 #include "io_int.h"
+#include "preempt_int.h"   /* __xtc_unsafe_*, __xtc_mtx_* (preemption) */
 
 #include <errno.h>
 #include <limits.h>
@@ -48,7 +49,7 @@ __drain_pending_del(xtc_io_t *io)
 	if (!atomic_load_explicit(&io->has_pending_del, memory_order_acquire))
 		return;
 	for (;;) {
-		(void)pthread_mutex_lock(&io->del_lock);
+		(void)__xtc_mtx_lock(&io->del_lock);
 		n = io->n_pending_del;
 		if (n > (int)(sizeof local / sizeof local[0]))
 			n = (int)(sizeof local / sizeof local[0]);
@@ -60,7 +61,7 @@ __drain_pending_del(xtc_io_t *io)
 		if (io->n_pending_del == 0)
 			atomic_store_explicit(&io->has_pending_del, 0,
 			    memory_order_relaxed);
-		(void)pthread_mutex_unlock(&io->del_lock);
+		(void)__xtc_mtx_unlock(&io->del_lock);
 		for (i = 0; i < n; i++)
 			(void)xtc_io_del_fd(io, local[i]);
 		if (n < (int)(sizeof local / sizeof local[0]))
@@ -77,7 +78,7 @@ __apply_pending_del_for(xtc_io_t *io, int fd)
 	int i, found = 0;
 	if (!atomic_load_explicit(&io->has_pending_del, memory_order_acquire))
 		return;
-	(void)pthread_mutex_lock(&io->del_lock);
+	(void)__xtc_mtx_lock(&io->del_lock);
 	for (i = 0; i < io->n_pending_del; i++) {
 		if (io->pending_del[i] != fd)
 			continue;
@@ -88,7 +89,7 @@ __apply_pending_del_for(xtc_io_t *io, int fd)
 	if (io->n_pending_del == 0)
 		atomic_store_explicit(&io->has_pending_del, 0,
 		    memory_order_relaxed);
-	(void)pthread_mutex_unlock(&io->del_lock);
+	(void)__xtc_mtx_unlock(&io->del_lock);
 	if (found)
 		(void)xtc_io_del_fd(io, fd);
 }
@@ -113,12 +114,12 @@ __xtc_io_defer_del_fd(xtc_io_t *io, int fd)
 	if (io == NULL || fd < 0) return XTC_E_INVAL;
 	if (__is_owner(io))
 		return xtc_io_del_fd(io, fd);
-	(void)pthread_mutex_lock(&io->del_lock);
+	(void)__xtc_mtx_lock(&io->del_lock);
 	if (io->n_pending_del == io->cap_pending_del) {
 		int nc = io->cap_pending_del ? io->cap_pending_del * 2 : 16;
 		if (__os_realloc(io->pending_del, (size_t)nc * sizeof(int),
 		    (void **)&np) != XTC_OK) {
-			(void)pthread_mutex_unlock(&io->del_lock);
+			(void)__xtc_mtx_unlock(&io->del_lock);
 			return XTC_E_NOMEM;
 		}
 		io->pending_del = np;
@@ -126,7 +127,7 @@ __xtc_io_defer_del_fd(xtc_io_t *io, int fd)
 	}
 	io->pending_del[io->n_pending_del++] = fd;
 	atomic_store_explicit(&io->has_pending_del, 1, memory_order_release);
-	(void)pthread_mutex_unlock(&io->del_lock);
+	(void)__xtc_mtx_unlock(&io->del_lock);
 	(void)xtc_io_wakeup(io);
 	return XTC_OK;
 }
@@ -265,8 +266,8 @@ __xtc_io_register_wakeup(xtc_io_t *io, int fd)
 /*
  * PUBLIC: int xtc_io_reg_fd __P((xtc_io_t *, int, uint32_t, void *));
  */
-int
-xtc_io_reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
+static int
+__reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 {
 	int rc;
 	if (io == NULL || fd < 0 || interest == 0)
@@ -291,8 +292,8 @@ xtc_io_reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 /*
  * PUBLIC: int xtc_io_mod_fd __P((xtc_io_t *, int, uint32_t, void *));
  */
-int
-xtc_io_mod_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
+static int
+__mod_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 {
 	int slot;
 	if (io == NULL || fd < 0 || interest == 0)
@@ -309,8 +310,8 @@ xtc_io_mod_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 /*
  * PUBLIC: int xtc_io_del_fd __P((xtc_io_t *, int));
  */
-int
-xtc_io_del_fd(xtc_io_t *io, int fd)
+static int
+__del_fd(xtc_io_t *io, int fd)
 {
 	int slot;
 	if (io == NULL || fd < 0)
@@ -339,6 +340,45 @@ xtc_io_del_fd(xtc_io_t *io, int fd)
  * an eagerly-recorded owner thread; this backend is kernel-synchronized
  * or keeps its own registry.  Provided so every backend links. */
 
+
+/*
+ * The registry (the fd array, slot_of, n) is owner-thread state with no
+ * lock, mutated in place (grow, append, swap-with-last on delete) by the
+ * fibers that park on fds.  Under involuntary preemption a tick could
+ * redirect a fiber mid-update and let the scheduler poll a torn
+ * registry, or let a same-loop fiber update it concurrently on this
+ * thread.  Hold the preemption-unsafe bracket across each update; none
+ * of them yields.
+ */
+int
+xtc_io_reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
+{
+	int rc;
+	__xtc_unsafe_enter();
+	rc = __reg_fd(io, fd, interest, tag);
+	__xtc_unsafe_leave();
+	return rc;
+}
+
+int
+xtc_io_mod_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
+{
+	int rc;
+	__xtc_unsafe_enter();
+	rc = __mod_fd(io, fd, interest, tag);
+	__xtc_unsafe_leave();
+	return rc;
+}
+
+int
+xtc_io_del_fd(xtc_io_t *io, int fd)
+{
+	int rc;
+	__xtc_unsafe_enter();
+	rc = __del_fd(io, fd);
+	__xtc_unsafe_leave();
+	return rc;
+}
 
 /*
  * PUBLIC: int xtc_io_poll __P((xtc_io_t *, xtc_io_event_t *, int, int64_t, int *));

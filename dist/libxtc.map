@@ -17,8 +17,14 @@
  *            to, so they must stay callable from inlined consumer
  *            code.  (POSIX uses __xtc_proc_recovery_slot via
  *            sigsetjmp; the other three are the Windows RtlCaptureContext
- *            path -- listed so the allowlist is complete and
- *            platform-independent.)
+ *            path.  They are matched by the __xtc_recovery_* pattern, not
+ *            named: lld -- FreeBSD's default linker -- rejects a version
+ *            script that names an undefined symbol ("version script
+ *            assignment ... failed: symbol not defined"), and those
+ *            three are never defined in an ELF build; a pattern that
+ *            matches nothing is not an error.  The pattern is exactly
+ *            the three Windows names' prefix, so it cannot widen the
+ *            ELF export set.)
  *   local:   EVERYTHING else -- the whole __os_* OS-abstraction layer
  *            AND every other __xtc_* internal (sim hooks, the
  *            async-signal-unsafe bracket, tail hook points, fcontext
@@ -43,9 +49,7 @@
 	global:
 		xtc_*;
 		__xtc_proc_recovery_slot;
-		__xtc_recovery_prep;
-		__xtc_recovery_ctx;
-		__xtc_recovery_result;
+		__xtc_recovery_*;
 	local:
 		*;
 };
