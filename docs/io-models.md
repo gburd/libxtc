@@ -56,8 +56,8 @@ file, not a textbook description of the underlying kernel API.
   * **Completion backends** (io_uring's `IORING_OP_POLL_ADD`, IOCP's
     AFD poll) tell you "an operation you submitted has finished."
     xtc's io_uring backend actually submits a POLL, not a read -- it
-    still reports readiness, using `POLL_MULTISHOT` so one submission
-    keeps delivering CQEs (no re-arm needed until the fd is removed).
+    still reports readiness, using a ONE-SHOT poll that the kernel ends
+    when it fires (re-armed by the next poll if the registration stays).
     IOCP has no multishot poll primitive at all, so xtc's backend
     re-arms one AFD poll per completion (true completion semantics,
     one-shot by construction).
@@ -114,15 +114,18 @@ which is `EPOLL_CTL_MOD`.
 Scenario: the same socket-readable-then-read-one-buffer case.
 io_uring has no native "readiness" op, so xtc's backend submits an
 `IORING_OP_POLL_ADD` (a completion-style wrapper around the same
-readiness question) with `POLL_MULTISHOT` so a single submission keeps
-producing CQEs -- the re-arm epoll does implicitly, io_uring does via
-one flag at registration time instead of per-poll.
+readiness question).  It is ONE-SHOT: the kernel ends the poll when it
+fires, which is what lets the usual fiber pattern -- park on an fd, wake
+on readiness, delete the registration -- run without ever cancelling a
+poll.  (A cancel, `IORING_OP_POLL_REMOVE`, walks the kernel's
+poll-cancel hash, which has only 16 buckets on a default-sized ring: at
+30k armed polls an idle-connection server spent 96% of its loop there.)
 
 Register (`src/io/io_uring.c`, `xtc_io_reg_fd` -> `__submit_poll_add`):
 
 ```c
 struct io_uring_sqe *sqe = io_uring_get_sqe(&io->ring);
-io_uring_prep_poll_multishot(sqe, uf->fd,
+io_uring_prep_poll_add(sqe, uf->fd,
     __interest_to_pollmask(uf->interest));   /* POLLIN for XTC_IO_READABLE */
 io_uring_sqe_set_data(sqe, uf);               /* uf carries the tag */
 io_uring_submit(&io->ring);
@@ -143,17 +146,27 @@ io_uring_cqe_seen(&io->ring, cqe);
 Read one buffer: same as epoll -- a plain `read(2)` in application
 code, once `xtc_io_poll` reports `XTC_IO_READABLE`.
 
-Re-arm: because the poll was submitted `MULTISHOT`, the SAME
-submission keeps delivering a CQE every time the fd becomes readable
-again; the backend does not resubmit per-event.  It only resubmits
-(`__submit_poll_add` again) on an explicit `xtc_io_mod_fd` (interest
-change: cancel via `__submit_poll_remove` then re-submit) or when a
-multishot auto-disarms.  Deregistration (`xtc_io_del_fd`) issues
-`IORING_OP_POLL_REMOVE` and moves the registration to a zombie list
-until its terminal (non-`IORING_CQE_F_MORE`) CQE is drained, because
-the kernel may still have CQEs in flight referencing it -- freeing
-early is a use-after-free the epoll backend simply has no equivalent
-danger for (epoll's `epoll_ctl(EPOLL_CTL_DEL)` is synchronous).
+Re-arm: the one-shot poll ended when it fired.  If the registration
+is still there at the next `xtc_io_poll` (a caller that keeps it, as a
+raw `xtc_io_reg_fd` user may), the backend arms it again, so a fd that
+stays readable keeps being reported -- level-triggered, like epoll.
+An interest change (`xtc_io_mod_fd`) retires the old node and arms a
+new one.
+
+Deregistration (`xtc_io_del_fd`) of a node whose poll already fired
+frees it: nothing is in flight.  A node whose poll is still armed (the
+waiter woke for another reason -- a timeout, a message) is usually a
+socket about to be waited on again, so its poll LINGERS: a
+re-registration of the same socket before the loop's next poll adopts
+it, with no submission at all, and if none comes that next poll
+cancels it (`IORING_OP_POLL_REMOVE`).  A cancelled node waits on a
+zombie list until its terminal CQE drains, because the kernel may still
+have a CQE in flight referencing it -- freeing early is a
+use-after-free the epoll backend simply has no equivalent danger for
+(epoll's `epoll_ctl(EPOLL_CTL_DEL)` is synchronous).  Adoption checks
+the socket's inode, not just the fd number: a lingering poll pins its
+file, so the inode cannot be reused while it lingers, but the number
+can (close, then a new socket).
 
 ---
 
@@ -213,7 +226,8 @@ readiness primitive in the completion-port API, so xtc's backend opens
 the AFD poll IS the completion whose arrival IS the readiness
 notification, and because AFD polls are inherently one-shot, the
 backend re-arms explicitly after every single completion (there is no
-multishot analog on this backend the way io_uring has one).
+multishot poll on this backend; io_uring has one, which libxtc does not
+use: see the io_uring example).
 
 Register (`src/io/io_iocp.c`, `xtc_io_reg_fd` -> `__arm_poll`):
 
@@ -273,12 +287,12 @@ doesn't actually offer a native readiness completion."
 
 | Step in the xtc_io_op pattern | epoll (`io_epoll.c`) | io_uring (`io_uring.c`) | kqueue (`io_kqueue.c`) | IOCP (`io_iocp.c`) |
 |---|---|---|---|---|
-| Register | `epoll_ctl(EPOLL_CTL_ADD)`, tag in `epoll_data.ptr` | `IORING_OP_POLL_ADD` with `POLL_MULTISHOT`, tag in SQE `user_data` | `kevent(EV_ADD\|EV_CLEAR)`, tag in `kevent.udata` | `IOCTL_AFD_POLL` via `NtDeviceIoControlFile`, tag on the reg node the OVERLAPPED points back to |
+| Register | `epoll_ctl(EPOLL_CTL_ADD)`, tag in `epoll_data.ptr` | one-shot `IORING_OP_POLL_ADD`, tag in SQE `user_data` (or adopt the socket's lingering poll: no SQE) | `kevent(EV_ADD\|EV_CLEAR)`, tag in `kevent.udata` | `IOCTL_AFD_POLL` via `NtDeviceIoControlFile`, tag on the reg node the OVERLAPPED points back to |
 | Wait | `epoll_wait` | `io_uring_wait_cqe_timeout` + `io_uring_peek_cqe` to drain the rest | `kevent` with an output array | `GetQueuedCompletionStatusEx` |
 | Reap | walk `struct epoll_event[]`, tag = `data.ptr` | walk `struct io_uring_cqe`, tag = `io_uring_cqe_get_data(cqe)` | walk `struct kevent[]`, tag = `udata` | walk `OVERLAPPED_ENTRY[]`, tag = `((iocp_overlapped *)lpOverlapped)->back->tag` |
 | Change interest | `epoll_ctl(EPOLL_CTL_MOD)` | cancel (`IORING_OP_POLL_REMOVE`) then re-submit `POLL_ADD` | clear both filters then re-register the requested one(s) | cancel (`NtCancelIoFileEx`) then `__arm_poll` again |
-| Deregister | `epoll_ctl(EPOLL_CTL_DEL)`, synchronous, safe to free immediately | `IORING_OP_POLL_REMOVE`, then park on a zombie list until the terminal CQE drains | `EV_DELETE`, synchronous, safe to free immediately | cancel, then park on a dead list until the (canceled) completion drains |
-| Level-triggered re-arm | automatic (plain `EPOLLIN`, no `EPOLLET`) | automatic while `POLL_MULTISHOT` stays armed | automatic between edges on an already-`EV_ADD`ed filter; explicit only on a mask change | explicit, EVERY completion (`__arm_poll` called again at the bottom of the reap loop), plus a periodic force-refresh sweep for a driver bug |
+| Deregister | `epoll_ctl(EPOLL_CTL_DEL)`, synchronous, safe to free immediately | poll already fired: free; still armed: linger (adoptable until the next poll, then `IORING_OP_POLL_REMOVE`), zombie list until the terminal CQE drains | `EV_DELETE`, synchronous, safe to free immediately | cancel, then park on a dead list until the (canceled) completion drains |
+| Level-triggered re-arm | automatic (plain `EPOLLIN`, no `EPOLLET`) | the next `xtc_io_poll` re-arms a live registration whose one-shot poll fired | automatic between edges on an already-`EV_ADD`ed filter; explicit only on a mask change | explicit, EVERY completion (`__arm_poll` called again at the bottom of the reap loop), plus a periodic force-refresh sweep for a driver bug |
 | Cross-thread wakeup | write end of a self-pipe registered with `EPOLLIN` | single-shot `POLL_ADD` on the wakeup pipe, re-armed before draining (not after -- closes a lost-wakeup race) | `EVFILT_USER` with `NOTE_TRIGGER`, no pipe/fd at all | `PostQueuedCompletionStatus` with a sentinel key, no pipe/fd at all |
 | Async file I/O | not supported (`XTC_E_NOSYS`; offload to the blocking pool) | `IORING_OP_READ`/`WRITE`/`READV`/`WRITEV`/`FSYNC`, tag's low bit set to distinguish from a poll CQE | `POSIX aio_read`/`aio_write` completing via `SIGEV_KEVENT` as `EVFILT_AIO` (FreeBSD/DragonFly only; macOS offloads) | native overlapped `ReadFile`/`WriteFile` on the same port; `FlushFileBuffers` has no async form so fsync offloads |
 

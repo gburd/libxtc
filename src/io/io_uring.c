@@ -29,6 +29,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <liburing.h>
 #include <poll.h>
@@ -97,7 +98,8 @@ __find_fd(xtc_io_t *io, int fd)
 static int
 __tab_reserve(xtc_io_t *io, int fd)
 {
-	struct __xtc_uring_fd **nt;
+	struct __xtc_uring_fd **nt, **nl;
+	unsigned char *ni;
 	int ncap, rc;
 
 	if (fd < io->tab_cap)
@@ -108,6 +110,18 @@ __tab_reserve(xtc_io_t *io, int fd)
 			return XTC_E_RESOURCE;
 		ncap *= 2;
 	}
+	/* ltab and idle first: a failure then leaves tab (and tab_cap) as
+	 * they were, and a grown side table is harmless. */
+	if ((rc = __os_realloc(io->ltab, (size_t)ncap * sizeof *nl,
+	    (void **)&nl)) != XTC_OK)
+		return rc;
+	memset(nl + io->tab_cap, 0,
+	    (size_t)(ncap - io->tab_cap) * sizeof *nl);
+	io->ltab = nl;
+	if ((rc = __os_realloc(io->idle, (size_t)ncap, (void **)&ni)) != XTC_OK)
+		return rc;
+	memset(ni + io->tab_cap, 0, (size_t)(ncap - io->tab_cap));
+	io->idle = ni;
 	if ((rc = __os_realloc(io->tab, (size_t)ncap * sizeof *nt,
 	    (void **)&nt)) != XTC_OK)
 		return rc;
@@ -116,6 +130,78 @@ __tab_reserve(xtc_io_t *io, int fd)
 	io->tab = nt;
 	io->tab_cap = ncap;
 	return XTC_OK;
+}
+
+/*
+ * Lingering nodes (see linger in io_int.h): deleted while their one-shot
+ * poll was still armed, kept so that a re-registration of the same
+ * socket can adopt the poll instead of cancelling it and arming a new
+ * one.  Linked on io->lingers and indexed by fd in io->ltab.
+ */
+static void
+__linger_link(xtc_io_t *io, struct __xtc_uring_fd *uf)
+{
+	uf->linger = 1;
+	uf->lprev = NULL;
+	uf->lnext = io->lingers;
+	if (io->lingers != NULL)
+		io->lingers->lprev = uf;
+	io->lingers = uf;
+	io->ltab[uf->fd] = uf;
+	io->n_lingers++;
+}
+
+static void
+__linger_unlink(xtc_io_t *io, struct __xtc_uring_fd *uf)
+{
+	if (uf->lprev != NULL)
+		uf->lprev->lnext = uf->lnext;
+	else
+		io->lingers = uf->lnext;
+	if (uf->lnext != NULL)
+		uf->lnext->lprev = uf->lprev;
+	if (io->ltab[uf->fd] == uf)
+		io->ltab[uf->fd] = NULL;
+	uf->lnext = uf->lprev = NULL;
+	uf->linger = 0;
+	io->n_lingers--;
+}
+
+static void __zombie_link(xtc_io_t *, struct __xtc_uring_fd *);
+static void __node_kick(xtc_io_t *, struct __xtc_uring_fd *);
+static void __fd_identity(int, uint64_t *, uint64_t *);
+
+/*
+ * Cancel every lingering node nobody adopted.  Called at the top of each
+ * poll, so a linger lives at most until its loop polls again: a fiber
+ * that re-parks on its socket does so within the same run (del and reg
+ * with no poll between), and anything else -- the connection is being
+ * closed -- must not keep the socket's file pinned by our poll for long.
+ */
+static void
+__linger_cancel_all(xtc_io_t *io)
+{
+	struct __xtc_uring_fd *uf;
+
+	while ((uf = io->lingers) != NULL) {
+		__linger_unlink(io, uf);
+		__zombie_link(io, uf);
+		__node_kick(io, uf);   /* sends, or queues, the cancel */
+	}
+}
+
+/* Drop every lingering node without a cancel (their ring is gone). */
+static void
+__linger_free_all(xtc_io_t *io)
+{
+	struct __xtc_uring_fd *uf;
+
+	while ((uf = io->lingers) != NULL) {
+		__linger_unlink(io, uf);
+		uf->armed = 0;
+		if (!uf->pending)
+			__os_free(uf);
+	}
 }
 
 static void
@@ -284,20 +370,23 @@ __submit_poll_add(xtc_io_t *io, struct __xtc_uring_fd *uf)
 	if (sqe == NULL)
 		return XTC_E_AGAIN;
 	/*
-	 * MULTISHOT for user fds (continuous notification, epoll-EPOLLET /
-	 * kqueue-EV_CLEAR semantics).  Single-shot for the internal wakeup
-	 * pipe so a drained poll reports no stale wakeup on the next poll
-	 * (the W3 coalesce contract).  The lost-wakeup window a naive
-	 * single-shot has (drain-then-rearm: a cross-thread write landing
-	 * between draining the pipe and re-arming is missed) is closed in
-	 * the drain path by RE-ARMING BEFORE draining -- see the wakeup
-	 * branch of xtc_io_poll. */
-	if (uf->is_wakeup)
-		io_uring_prep_poll_add(sqe, uf->fd,
-		    __interest_to_pollmask(uf->interest));
-	else
-		io_uring_prep_poll_multishot(sqe, uf->fd,
-		    __interest_to_pollmask(uf->interest));
+	 * ONE-SHOT for every fd.  The kernel ends a one-shot poll when it
+	 * fires, so the common shape -- a fiber parks on an fd, the fd
+	 * becomes ready, the dispatcher deletes the registration -- needs no
+	 * POLL_REMOVE (it used to: the poll was multishot, 0.80 cancels per
+	 * rexis request), and the kernel's poll-cancel hash, which a
+	 * POLL_REMOVE walks in O(armed polls / buckets), is not touched.  A
+	 * registration that stays (a raw xtc_io_reg_fd user) is re-armed by
+	 * the next poll, so it keeps reporting while the fd is ready: level-
+	 * triggered, as the epoll backend is.
+	 *
+	 * The wakeup pipe's re-arm is immediate, BEFORE draining (the lost-
+	 * wakeup window of drain-then-rearm), see the wakeup branch of
+	 * xtc_io_poll; a drained pipe then reports no stale wakeup on the
+	 * next poll (the W3 coalesce contract).
+	 */
+	io_uring_prep_poll_add(sqe, uf->fd,
+	    __interest_to_pollmask(uf->interest));
 	io_uring_sqe_set_data(sqe, uf);
 	/* The fd-readiness ASK, keyed by the parked task (uf->tag).  The
 	 * wakeup pipe has no task and reports 0; a re-arm of an existing
@@ -321,6 +410,7 @@ __submit_poll_remove(xtc_io_t *io, struct __xtc_uring_fd *uf)
 		return XTC_E_AGAIN;
 	io_uring_prep_poll_remove(sqe, (__u64)(uintptr_t)uf);
 	io_uring_sqe_set_data(sqe, NULL);   /* discard the cancel CQE */
+	io->n_cancels++;
 	return XTC_OK;
 }
 
@@ -667,6 +757,7 @@ __ring_rebind(xtc_io_t *io, int want_defer)
 	io->ring_flags = got;
 	io->ring_single = (got & IORING_SETUP_SINGLE_ISSUER) != 0;
 	io->n_rebinds++;
+	__linger_free_all(io);
 	for (p = io->zombies; p != NULL; p = n) {
 		n = p->next;
 		p->armed = 0;
@@ -680,6 +771,21 @@ __ring_rebind(xtc_io_t *io, int want_defer)
 		p->armed = 0;
 		__node_defer(io, p);
 	}
+	return XTC_OK;
+}
+
+/* POLL_REMOVEs submitted and re-registrations served by a lingering
+ * poll, since xtc_io_init (tests). */
+int
+__xtc_io_uring_poll_stats(xtc_io_t *io, unsigned long *cancels,
+    unsigned long *adopted)
+{
+	if (io == NULL)
+		return XTC_E_INVAL;
+	if (cancels != NULL)
+		*cancels = io->n_cancels;
+	if (adopted != NULL)
+		*adopted = io->n_adopted;
 	return XTC_OK;
 }
 
@@ -730,10 +836,15 @@ __xtc_io_backend_init(xtc_io_t *io)
 	 */
 	__ring_cap_iowq(&io->ring);
 	io->tab = NULL;
+	io->ltab = NULL;
+	io->idle = NULL;
 	io->tab_cap = 0;
 	io->zombies = NULL;
 	io->pending = NULL;
 	io->n_zombies = 0;
+	io->lingers = NULL;
+	io->n_lingers = 0;
+	io->n_adopted = io->n_cancels = 0;
 	io->n_aio = 0;
 	io->ring_dead = 0;
 	io->carry = NULL;
@@ -767,11 +878,16 @@ __xtc_io_backend_fini(xtc_io_t *io)
 			__node_free(p);
 	}
 	io->pending = NULL;
+	__linger_free_all(io);
 	for (i = 0; i < io->tab_cap; i++)
 		if (io->tab[i] != NULL)
 			__node_free(io->tab[i]);
 	__os_free(io->tab);
+	__os_free(io->ltab);
+	__os_free(io->idle);
 	io->tab = NULL;
+	io->ltab = NULL;
+	io->idle = NULL;
 	io->tab_cap = 0;
 	/* Free any zombies whose terminal CQE never arrived; the ring is
 	 * being torn down so no CQE can reference them after this. */
@@ -824,6 +940,11 @@ __add_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag, int is_wakeup)
 	uf->interest = interest;
 	uf->tag = tag;
 	uf->is_wakeup = is_wakeup;
+	/* Only an fd that went idle last time (its waiter woke without
+	 * readiness) may linger, so only it pays the fstat: a busy socket,
+	 * woken by readiness every time, never does. */
+	if (!is_wakeup && io->idle[fd])
+		__fd_identity(fd, &uf->ino, &uf->dev);
 	io->tab[fd] = uf;
 	if (is_wakeup)
 		__node_defer(io, uf);  /* the first poll arms it */
@@ -851,18 +972,79 @@ __add_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag, int is_wakeup)
  * installed (the xtc_io_mod_fd sequence).  Does not flush the SQ.
  */
 static void
-__retire_fd(xtc_io_t *io, struct __xtc_uring_fd *uf)
+__retire_fd(xtc_io_t *io, struct __xtc_uring_fd *uf, int may_linger)
 {
 	if (io->tab[uf->fd] == uf)
 		io->tab[uf->fd] = NULL;
 	uf->dead = 1;
-	if (uf->armed) {
+	if (uf->armed && may_linger && uf->ino != 0 && !uf->pending &&
+	    io->ltab[uf->fd] == NULL) {
+		__linger_link(io, uf);   /* see __adopt_linger */
+	} else if (uf->armed) {
 		__zombie_link(io, uf);
 		__node_kick(io, uf);   /* sends, or queues, the cancel */
 	} else if (!uf->pending) {
 		__node_free(uf);
 	}
 	/* else: unarmed and queued; __flush_pending frees it. */
+}
+
+/*
+ * A socket's identity, for adopting a lingering poll: the fd number
+ * alone is not one, because a closed number is reused by the next open.
+ * A lingering poll holds a reference to its file, so while it lingers
+ * the inode it watches stays allocated and cannot be handed to another
+ * socket: same (dev, ino) now means the same socket.  Only sockets
+ * linger -- pipes and eventfds can share an inode (an eventfd's is the
+ * one anonymous inode), so they always take the cancel path.  0 = not
+ * a socket (or fstat failed).
+ */
+static void
+__fd_identity(int fd, uint64_t *ino, uint64_t *dev)
+{
+	struct stat st;
+
+	*ino = *dev = 0;
+	if (fstat(fd, &st) == 0 && S_ISSOCK(st.st_mode)) {
+		*ino = (uint64_t)st.st_ino;
+		*dev = (uint64_t)st.st_dev;
+	}
+}
+
+/*
+ * Re-register fd by adopting its lingering poll, if it has one with the
+ * same interest on the same socket: no SQE at all -- the poll the last
+ * waiter left armed is simply the new registration's.  This is the
+ * re-park of a connection that timed out (an idle connection waking once
+ * a second to check its idle clock), which used to cost a POLL_REMOVE
+ * plus a POLL_ADD, and the POLL_REMOVE walks the kernel's poll-cancel
+ * hash: O(armed polls / 16) per cancel on the default ring, the
+ * io_poll_find collapse of an idle-connection server (96% of the loop's
+ * CPU at 30k idle connections, Linux 6.12).
+ *
+ * Returns 1 if adopted, 0 if not (the linger, if any, is cancelled).
+ */
+static int
+__adopt_linger(xtc_io_t *io, int fd, uint32_t interest, void *tag)
+{
+	struct __xtc_uring_fd *uf;
+	uint64_t ino, dev;
+
+	if (fd >= io->tab_cap || (uf = io->ltab[fd]) == NULL)
+		return 0;   /* (an fd past the table was never registered) */
+	__fd_identity(fd, &ino, &dev);
+	__linger_unlink(io, uf);
+	if (uf->interest != interest || ino == 0 || ino != uf->ino ||
+	    dev != uf->dev) {
+		__zombie_link(io, uf);
+		__node_kick(io, uf);
+		return 0;
+	}
+	uf->dead = 0;
+	uf->tag = tag;
+	io->tab[fd] = uf;
+	io->n_adopted++;
+	return 1;
 }
 
 /*
@@ -1028,6 +1210,8 @@ __reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 	__apply_pending_del_for(io, fd);
 	if (__find_fd(io, fd) != NULL)
 		return XTC_E_INVAL;        /* duplicate: genuinely live */
+	if (__adopt_linger(io, fd, interest, tag))
+		return XTC_OK;             /* its poll is still armed */
 	if ((rc = __add_fd(io, fd, interest, tag, 0)) != XTC_OK)
 		return rc;
 	(void)__ring_submit(io);
@@ -1125,7 +1309,7 @@ __mod_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 	 */
 	if ((rc = __add_fd(io, fd, interest, tag, 0)) != XTC_OK)
 		return rc;
-	__retire_fd(io, uf);
+	__retire_fd(io, uf, 0);
 	(void)__ring_submit(io);
 	return XTC_OK;
 }
@@ -1137,8 +1321,15 @@ __del_fd(xtc_io_t *io, int fd)
 	if (io == NULL || fd < 0) return XTC_E_INVAL;
 	uf = __find_fd(io, fd);
 	if (uf == NULL || uf->is_wakeup) return XTC_E_INVAL;
-	__retire_fd(io, uf);
-	(void)__ring_submit(io);
+	/* An armed socket poll lingers instead of being cancelled: the
+	 * caller is usually a fiber that will park on it again before the
+	 * loop polls (see __adopt_linger).  Nothing to submit then.  An
+	 * armed node without an identity (the fd was busy before) is
+	 * cancelled, and its next registration takes one. */
+	io->idle[fd] = (unsigned char)(uf->armed != 0);
+	__retire_fd(io, uf, 1);
+	if (io_uring_sq_ready(&io->ring) > 0)
+		(void)__ring_submit(io);
 	return XTC_OK;
 }
 
@@ -1160,8 +1351,8 @@ __xtc_io_reg_stats(xtc_io_t *io, int *live, int *zombies, int *pending)
 			n++;
 	if (live != NULL)
 		*live = n;
-	if (zombies != NULL)
-		*zombies = io->n_zombies;
+	if (zombies != NULL)   /* retired with a poll still in the kernel */
+		*zombies = io->n_zombies + io->n_lingers;
 	n = 0;
 	for (p = io->pending; p != NULL; p = p->pnext)
 		if (!p->is_wakeup)
@@ -1381,10 +1572,16 @@ __poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 	 * by foreign threads (see __xtc_io_defer_del_fd).  Done here so the
 	 * fd table + SQ ring are only ever mutated by this io's own loop. */
 	__drain_pending_del(io);
+	/* Lingering polls nobody re-registered since the last poll: cancel
+	 * them (see __linger_cancel_all).  */
+	if (io->lingers != NULL)
+		__linger_cancel_all(io);
 	/* Any arm/re-arm/cancel the SQ had no room for goes in now, before
 	 * this poll can block on its outcome. */
 	if (io->pending != NULL)
 		__flush_pending(io);   /* may free a retired node: bounded per del */
+	else if (io_uring_sq_ready(&io->ring) > 0)
+		(void)__ring_submit(io);
 
 	if (timeout_ns < 0) {
 		tsp = NULL;
@@ -1456,15 +1653,20 @@ __poll(xtc_io_t *io, xtc_io_event_t *events, int max,
  * not per-poll) allocator touch left OUT of the marked region rather
  * than hidden behind an exception marker. */
 			/* Registration was deleted.  Do not dispatch to it.
-			 * Once its multishot poll delivers the terminal CQE
-			 * (no IORING_CQE_F_MORE -- e.g. the -ECANCELED from
-			 * poll_remove), no further CQE can reference uf, so it
-			 * is safe to free (or, if it is still queued for a
-			 * cancel the SQ had no room for, __flush_pending
-			 * frees it). */
+			 * Once its poll delivers the terminal CQE (no
+			 * IORING_CQE_F_MORE: the -ECANCELED from poll_remove,
+			 * or a lingering poll that fired with nobody parked),
+			 * no further CQE can reference uf, so it is safe to
+			 * free (or, if it is still queued for a cancel the SQ
+			 * had no room for, __flush_pending frees it).  A
+			 * lingering socket's readiness is not lost: the next
+			 * registration's poll is level-checked when armed. */
 			if (!(cqe->flags & IORING_CQE_F_MORE)) {
 				uf->armed = 0;
-				__zombie_unlink(io, uf);
+				if (uf->linger)
+					__linger_unlink(io, uf);
+				else
+					__zombie_unlink(io, uf);
 				if (!uf->pending)
 					__node_free(uf);
 			}
@@ -1501,9 +1703,15 @@ __poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 			 * re-arm silently, nothing to report. */
 			drop = !uf->is_wakeup && (cqe->res == -ECANCELED ||
 			    cqe->res == -EOVERFLOW);
-			if (cqe->res >= 0 || drop || uf->is_wakeup) {
+			if (uf->is_wakeup) {
 				__node_kick(io, uf);
 				rearmed = 1;
+			} else if (cqe->res >= 0 || drop) {
+				/* One-shot: re-arm at the NEXT poll, after the
+				 * caller has handled (and normally deleted)
+				 * this one -- re-armed now, a still-ready fd
+				 * would complete again inside this reap. */
+				__node_defer(io, uf);
 			}
 		}
 		if (uf != NULL && !drop) {
@@ -1858,6 +2066,14 @@ void
 __xtc_io_owner_leave(xtc_io_t *io)
 {
 	(void)io;
+}
+
+int
+__xtc_io_uring_poll_stats(xtc_io_t *io, unsigned long *cancels,
+    unsigned long *adopted)
+{
+	(void)io; (void)cancels; (void)adopted;
+	return XTC_E_NOSYS;
 }
 #endif /* !XTC_IO_BACKEND_URING */
 

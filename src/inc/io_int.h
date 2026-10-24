@@ -110,9 +110,14 @@ struct __xtc_aix_reg {
  *   dead     retired by del/mod; no longer in io->tab.
  *   pending  on io->pending: needs an SQE the SQ had no room for (a
  *            re-arm for a live node, a cancel for a dead armed one).
+ *   linger   retired by del while its one-shot poll was still armed, and
+ *            NOT cancelled: it waits on io->lingers (lnext/lprev) for a
+ *            re-registration of the same socket to adopt it, or for the
+ *            end of the next poll to cancel it.  ino/dev identify the
+ *            socket (a closed fd's number can be reused).
  *
- * A node is on io->zombies exactly while dead && armed, and is freed
- * once dead && !armed && !pending.
+ * A node is on io->zombies exactly while dead && armed && !linger, and
+ * is freed once dead && !armed && !pending.
  */
 struct __xtc_uring_fd {
 	int        fd;
@@ -122,9 +127,14 @@ struct __xtc_uring_fd {
 	int        dead;
 	int        armed;
 	int        pending;
+	int        linger;
+	uint64_t   ino;            /* socket identity (0 = not a socket) */
+	uint64_t   dev;
 	struct __xtc_uring_fd *next;   /* io->zombies linkage */
 	struct __xtc_uring_fd *prev;   /* io->zombies linkage */
 	struct __xtc_uring_fd *pnext;  /* io->pending linkage */
+	struct __xtc_uring_fd *lnext;  /* io->lingers linkage */
+	struct __xtc_uring_fd *lprev;
 };
 #elif defined(XTC_IO_BACKEND_POLL)
 #include <poll.h>
@@ -200,6 +210,12 @@ struct xtc_io {
 	struct __xtc_uring_fd *zombies;  /* deleted fds awaiting terminal CQE */
 	struct __xtc_uring_fd *pending;  /* nodes awaiting an SQE (SQ was full) */
 	int              n_zombies;      /* length of zombies (diagnostics) */
+	struct __xtc_uring_fd *lingers;  /* deleted, still armed, adoptable */
+	struct __xtc_uring_fd **ltab;    /* fd -> lingering node; sized as tab */
+	unsigned char   *idle;           /* fd -> 1: last del found it armed */
+	int              n_lingers;
+	unsigned long    n_adopted;      /* re-registrations served by a linger */
+	unsigned long    n_cancels;      /* POLL_REMOVEs submitted (tests) */
 	/*
 	 * Cross-loop deferred unregister queue.  io->tab / io->zombies and
 	 * the SQ ring are single-producer, owned by this io's loop thread.
@@ -378,5 +394,13 @@ int __xtc_io_uring_info(xtc_io_t *io, unsigned *flags, unsigned *sq_consumed,
  * other backends and when the caller is not the owner.
  */
 void __xtc_io_owner_leave(xtc_io_t *io);
+
+/*
+ * io_uring (XTC_E_NOSYS elsewhere): POLL_REMOVEs submitted, and
+ * re-registrations served by adopting a lingering poll, since xtc_io_init.
+ * Tests.  Out pointers may be NULL.
+ */
+int __xtc_io_uring_poll_stats(xtc_io_t *io, unsigned long *cancels,
+    unsigned long *adopted);
 
 #endif /* XTC_IO_INT_H */
