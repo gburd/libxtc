@@ -134,6 +134,7 @@ plain_tests = [
   ['concurrency/aio_migrate_wake',          'concurrency/test_aio_migrate_wake.c'],
   ['m12/tail_dial9',                        'm12/test_tail_dial9.c'],
   ['tnt/tnt',                               'tnt/test_tnt.c'],
+  ['tnt/tnt_zcopy',                         'tnt/test_tnt_zcopy.c'],
 ]
 foreach spec : plain_tests
   tname = spec[0]

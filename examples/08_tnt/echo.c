@@ -46,15 +46,16 @@
 /* ---- The EchoConnection Isolate ----------------------------------- */
 
 #define ECHO_TYPE 0
-#define ECHO_BUFSZ 256
+#ifndef ECHO_BUFSZ
+#define ECHO_BUFSZ 256          /* reactor (recv) buffer bytes */
+#endif
 
 /* The Isolate's state -- a typed struct living in a dense arena.  The
- * buffer must live inside the struct so a staged send reads stable
- * memory at commit time. */
+ * echoed bytes never land here: the handler keeps the reactor buffer
+ * (xtc_tnt_recv_take) and sends that block back (xtc_tnt_io_send_owned,
+ * the runtime frees it after the send), so there is no copy. */
 typedef struct echo_conn {
 	int     fd;
-	uint8_t buffer[ECHO_BUFSZ];
-	int     bytes;
 } echo_conn_t;
 
 /* Init args: the accepted client fd. */
@@ -71,7 +72,6 @@ echo_init(void *self_raw, const void *args, size_t args_size)
 
 	(void)args_size;
 	self->fd = a->client_fd;
-	self->bytes = 0;
 
 	if (xtc_tnt_submit_recv(self->fd) != XTC_TNT_IO_OK)
 		return xtc_tnt_transition_to_crash(XTC_TNT_FAULT_CONTRACT_VIOLATION);
@@ -84,6 +84,7 @@ static xtc_tnt_transition_t
 echo_handler(void *self_raw, xtc_tnt_message_t *msg)
 {
 	echo_conn_t *self = xtc_tnt_self_as(echo_conn_t, self_raw);
+	void *buf;
 
 	switch (msg->tag) {
 	case XTC_TNT_IO_TAG_RECV_COMPLETE:
@@ -92,15 +93,15 @@ echo_handler(void *self_raw, xtc_tnt_message_t *msg)
 			(void)xtc_tnt_submit_close(self->fd);
 			return XTC_TNT_TRANSITION_WAIT_IO;
 		}
-		/* copy the received bytes into our stable buffer, then send */
-		self->bytes = msg->body.io.result;
-		if (self->bytes > ECHO_BUFSZ)
-			self->bytes = ECHO_BUFSZ;
-		memcpy(self->buffer, msg->body.io.buffer, self->bytes);
-		if (xtc_tnt_io_send(self->fd, self->buffer, self->bytes)
-		    != XTC_TNT_IO_OK)
+		/* Keep the reactor buffer and send it straight back: no
+		 * copy.  On a staging failure the buffer is still ours. */
+		buf = xtc_tnt_recv_take(msg);
+		if (buf == NULL || xtc_tnt_io_send_owned(self->fd, buf,
+		    (size_t)msg->body.io.result) != XTC_TNT_IO_OK) {
+			xtc_free(buf);
 			return xtc_tnt_transition_to_crash(
 			    XTC_TNT_FAULT_CONTRACT_VIOLATION);
+		}
 		return XTC_TNT_TRANSITION_WAIT_IO;
 
 	case XTC_TNT_IO_TAG_SEND_COMPLETE:

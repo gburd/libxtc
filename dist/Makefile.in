@@ -473,6 +473,7 @@ TESTS_C		= test_sched_policy test_sched_continuous test_batch test_version test_
 		  test_xproc \
 		  test_app \
 		  test_tnt \
+		  test_tnt_zcopy \
 		  test_osproc \
 		  test_isolated \
 		  test_mctx \
@@ -1872,6 +1873,11 @@ test_app: $(srcdir)/../test/m10/test_app.c \
 test_tnt: $(srcdir)/../test/tnt/test_tnt.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../test/tnt/test_tnt.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_tnt_zcopy: $(srcdir)/../test/tnt/test_tnt_zcopy.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../test/tnt/test_tnt_zcopy.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_osproc: $(srcdir)/../test/m10/test_osproc.c \

@@ -132,7 +132,8 @@ typedef struct xtc_tnt_completion {
 	uint16_t     tag;
 	int          fd;
 	int32_t      result;
-	void        *buffer;        /* recv only; freed after delivery */
+	void        *buffer;        /* recv only; freed after delivery unless
+	                             * the handler took it (xtc_tnt_recv_take) */
 	uint32_t     buffer_len;
 } xtc_tnt_completion_t;
 
@@ -143,6 +144,7 @@ typedef struct xtc_tnt_staged_io {
 	int           fd;
 	const void   *send_buf;      /* for send: points into the Isolate */
 	size_t        send_len;
+	void         *owned;         /* io_send_owned: freed by the runtime */
 } xtc_tnt_staged_io_t;
 
 /* Shard: one per loop, owns everything it touches. */
@@ -243,6 +245,19 @@ typedef struct xtc_tnt_frame {
  * accessor (see __current_proc in src/ptc/proc.c). */
 static _Thread_local xtc_tnt_frame_t *tl_frame = NULL;
 static _Thread_local xtc_tnt_shard_t *tl_shard = NULL;
+
+/* The handler did not return XTC_TNT_WAIT_IO: its staged ops are never
+ * committed.  Free the buffers xtc_tnt_io_send_owned handed over. */
+static void
+frame_drop_staged(xtc_tnt_frame_t *fr)
+{
+	int i;
+	for (i = 0; i < fr->n_staged; i++)
+		if (fr->staged[i].owned != NULL) {
+			__os_free(fr->staged[i].owned);
+			fr->staged[i].owned = NULL;
+		}
+}
 
 /* ---- Forward decls ------------------------------------------------ */
 static void xtc_tnt_shard_main(void *arg);
@@ -377,6 +392,7 @@ slot_spawn(xtc_tnt_shard_t *sh, xtc_tnt_arena_t *ar, const void *args,
 
 	if (tr.kind == XTC_TNT_CRASH) {
 		/* init failed: reclaim the slot, bump gen. */
+		frame_drop_staged(&frame);
 		meta->state = XTC_TNT_SLOT_FREE;
 		meta->gen = (meta->gen + 1) & XTC_TNT_GEN_MASK;
 		ar->free_list[ar->free_top++] = slot;
@@ -454,6 +470,7 @@ typedef struct xtc_tnt_courier_arg {
 	int           fd;
 	const void   *send_buf;
 	size_t        send_len;
+	void         *owned;         /* io_send_owned buffer: freed at post */
 } xtc_tnt_courier_arg_t;
 
 /* Commit a single staged op by spawning a courier. */
@@ -465,18 +482,24 @@ xtc_tnt_commit_one_io(xtc_tnt_shard_t *sh, xtc_tnt_handle_t target, xtc_tnt_stag
 	xtc_proc_opts_t popts = { 0 };
 	xtc_pid_t pid;
 
-	if (__os_calloc(1, sizeof(*ca), (void **)&ca) != XTC_OK)
+	if (__os_calloc(1, sizeof(*ca), (void **)&ca) != XTC_OK) {
+		if (s->owned != NULL)
+			__os_free(s->owned);
 		return;
+	}
 	ca->shard = sh;
 	ca->target = target;
 	ca->kind = s->kind;
 	ca->fd = s->fd;
 	ca->send_buf = s->send_buf;
 	ca->send_len = s->send_len;
+	ca->owned = s->owned;
 
 	popts.name = "tnt-io";
 	if (xtc_proc_spawn(sh->loop, xtc_tnt_courier_main, ca, &popts, &pid)
 	    != XTC_OK) {
+		if (ca->owned != NULL)
+			__os_free(ca->owned);
 		__os_free(ca);
 		return;
 	}
@@ -583,6 +606,8 @@ xtc_tnt_courier_main(void *arg)
 	}
 
 post:
+	if (ca->owned != NULL)
+		__os_free(ca->owned);              /* io_send_owned: sent */
 	(void)comp_push(sh, &c);
 	shard_wake(sh);
 	__os_free(ca);
@@ -599,6 +624,8 @@ post:
  * PUBLIC: xtc_tnt_spawn_error_t xtc_tnt_spawn __P((uint8_t, const void *, size_t, xtc_tnt_handle_t *));
  * PUBLIC: xtc_tnt_io_result_t xtc_tnt_submit_recv __P((int));
  * PUBLIC: xtc_tnt_io_result_t xtc_tnt_io_send __P((int, const void *, size_t));
+ * PUBLIC: xtc_tnt_io_result_t xtc_tnt_io_send_owned __P((int, void *, size_t));
+ * PUBLIC: void *xtc_tnt_recv_take __P((xtc_tnt_message_t *));
  * PUBLIC: xtc_tnt_io_result_t xtc_tnt_submit_close __P((int));
  * PUBLIC: void xtc_tnt_register_timer __P((uint64_t, uint16_t));
  * PUBLIC: xtc_tnt_handle_t xtc_tnt_self __P((void));
@@ -776,6 +803,7 @@ xtc_tnt_submit_recv(int fd)
 	s->fd = fd;
 	s->send_buf = NULL;
 	s->send_len = 0;
+	s->owned = NULL;
 	return XTC_TNT_IO_OK;
 }
 
@@ -793,7 +821,33 @@ xtc_tnt_io_send(int fd, const void *buffer, size_t len)
 	s->fd = fd;
 	s->send_buf = buffer;
 	s->send_len = len;
+	s->owned = NULL;
 	return XTC_TNT_IO_OK;
+}
+
+xtc_tnt_io_result_t
+xtc_tnt_io_send_owned(int fd, void *buffer, size_t len)
+{
+	xtc_tnt_io_result_t r;
+
+	if (buffer == NULL && len > 0)
+		return XTC_TNT_IO_BAD_FD;
+	r = xtc_tnt_io_send(fd, buffer, len);
+	if (r == XTC_TNT_IO_OK)
+		tl_frame->staged[tl_frame->n_staged - 1].owned = buffer;
+	return r;
+}
+
+void *
+xtc_tnt_recv_take(xtc_tnt_message_t *msg)
+{
+	void *b;
+
+	if (msg == NULL || msg->tag != XTC_TNT_IO_TAG_RECV_COMPLETE)
+		return NULL;
+	b = msg->body.io.buffer;
+	msg->body.io.buffer = NULL;            /* the shard no longer frees it */
+	return b;
 }
 
 xtc_tnt_io_result_t
@@ -810,6 +864,7 @@ xtc_tnt_submit_close(int fd)
 	s->fd = fd;
 	s->send_buf = NULL;
 	s->send_len = 0;
+	s->owned = NULL;
 	return XTC_TNT_IO_OK;
 }
 
@@ -934,6 +989,8 @@ dispatch_slot(xtc_tnt_shard_t *sh, xtc_tnt_arena_t *ar, uint32_t slot,
 	tr = ar->type->handler_fn(iso, msg);
 
 	tl_frame = saved;
+	if (tr.kind != XTC_TNT_WAIT_IO)
+		frame_drop_staged(&frame);
 
 	switch (tr.kind) {
 	case XTC_TNT_DONE:
@@ -1044,9 +1101,12 @@ drain_completions(xtc_tnt_shard_t *sh)
 			sh->scratch_off = 0;
 			tr = ar->type->handler_fn(iso, &m);
 			tl_frame = saved;
+			if (tr.kind != XTC_TNT_WAIT_IO)
+				frame_drop_staged(&frame);
 
-			if (c.buffer)
-				__os_free(c.buffer);
+			/* NULL when the handler kept it (xtc_tnt_recv_take). */
+			if (m.body.io.buffer != NULL)
+				__os_free(m.body.io.buffer);
 
 			switch (tr.kind) {
 			case XTC_TNT_DONE:
@@ -1618,6 +1678,13 @@ xtc_tnt_submit_recv(int fd) { (void)fd; return XTC_TNT_IO_BAD_FD; }
 xtc_tnt_io_result_t
 xtc_tnt_io_send(int fd, const void *buffer, size_t len)
 { (void)fd; (void)buffer; (void)len; return XTC_TNT_IO_BAD_FD; }
+
+xtc_tnt_io_result_t
+xtc_tnt_io_send_owned(int fd, void *buffer, size_t len)
+{ (void)fd; (void)buffer; (void)len; return XTC_TNT_IO_BAD_FD; }
+
+void *
+xtc_tnt_recv_take(xtc_tnt_message_t *msg) { (void)msg; return NULL; }
 
 xtc_tnt_io_result_t
 xtc_tnt_submit_close(int fd) { (void)fd; return XTC_TNT_IO_BAD_FD; }
