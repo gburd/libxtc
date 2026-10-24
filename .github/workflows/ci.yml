@@ -970,6 +970,16 @@ jobs:
         working-directory: examples/06_sqlxtc
         run: |
           make XTC_BUILD=../../build_ci test-quack test-quack-range test-sql-parse test-admin test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xstore-scan test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-clean-restart test-steal test-steal-torn test-steal-page test-steal-leaf test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge test-savepoint test-isolation test-native-txn test-cat-reopen test-wal-group-sync test-ckpt-online test-intents-thread test-torn-base test-tr-slice test-snap-registry test-rowid-minmax test-btree-fill test-wal-bigtxn test-steal-reclaim test-dio-restart test-wal-prealloc
+          # the tests added in 1.59 (measured: about 7.5 min serially on 4 CPUs)
+          make XTC_BUILD=../../build_ci \
+            test-bg-idle test-bg-kill test-bm-reuse-version test-btree-cursor-hop test-btree-late-load test-btree-limits test-btree-prefix-split test-btree-sample \
+            test-btree-seek test-btree-smo-stress test-btree-stale-descent test-bulk-insert test-cat-lock-shared test-ckpt-bound test-ckpt-offloop test-commit-visibility \
+            test-crash-oracle test-drop-reserved test-dup-composite test-dup-insert test-dw-fail test-evict-revalidate test-flush-pin test-freelist-persist \
+            test-fuzzy-checkpoint test-group-exact test-idx-elem test-idx-trust test-index test-index-walk test-kill-stmt test-order-limit \
+            test-pid-writeback test-plan-cache test-point-read test-pp-slice test-private-frame test-publication-pin test-qsel test-rec-codec \
+            test-recover-fast test-row-intents test-sql-results test-ssi-skew test-sweep-bound test-tpcc-seek test-trickler-select test-txn-fastpath \
+            test-uniq-commit test-wal-crc test-wal-crc-once test-wal-dio test-wal-dsync test-wal-fail test-wal-get-tail test-wal-kill \
+            test-wal-kill-engine test-wal-lsn-monotone test-wal-tail test-ww-conflict test-xs-ctr
           make XTC_BUILD=../../build_ci amalg
       - name: sqlxtc Lime parser is regenerable + committed copy is current
         working-directory: examples/06_sqlxtc
