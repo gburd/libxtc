@@ -4,9 +4,17 @@
   inputs = {
     nixpkgs.url      = "github:NixOS/nixpkgs/nixos-24.11";
     flake-utils.url  = "github:numtide/flake-utils";
+    # uringscope: eBPF tracer/analyzer for io_uring (per-op latency, io-wq
+    # punts, SQEs per enter, CQ overflow, leaks, buffer hazards).  Used by
+    # scripts/uring-gate.sh during development and as a release gate; see
+    # AGENTS.md "io_uring use is a release gate".  Linux only.
+    uringscope = {
+      url = "github:rch0wdhury/uringscope/v0.3.0";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
+  outputs = { self, nixpkgs, flake-utils, uringscope }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
@@ -199,6 +207,12 @@
           # DPDK is Linux-only; make it available in the dev shell so
           # `configure --with-dpdk` can find it.  liburing too.
           ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ liburing dpdk ]
+          # io_uring tracing: uringscope (needs root or CAP_BPF+CAP_PERFMON
+          # and a BTF kernel at run time) plus jq to read its JSON reports.
+          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            uringscope.packages.${system}.uringscope
+            pkgs.jq
+          ]
           # Attached-compute (GPU/NPU) dev resources, Linux-only.  The
           # xtc_accel base path needs none of these at build time (the
           # device probe is POSIX opendir + sysfs and the fence wait is

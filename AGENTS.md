@@ -313,6 +313,61 @@ green run:
 State the qualification precisely and name what was NOT run.  "Green"
 without the tier list is how a release claims more than it tested.
 
+4. **PERFORMANCE, against the previous release.**  `make check` cannot
+   see a slowdown.  Run `scripts/perf-gate.sh vPREV HEAD OUTDIR` on one
+   dedicated, measurement-grade host (deep CPU idle states off: the
+   script refuses otherwise).  It builds both releases and A/Bs 19 hot
+   path cells; a cell fails when its median is worse by more than its
+   threshold AND the ranges do not overlap.  A regression that ships on
+   purpose is passed by name (`PERF_GATE_ACCEPT=cell`) and named in the
+   release notes.  See bench/PERF_GATE.md.  Never accept an agent's
+   speedup measured on one host without re-running the cell on the
+   gate host: a +70% on 16 vCPUs was -45% on 64 in 1.59.
+
+5. **io_uring use**, with `scripts/uring-gate.sh` (below).
+
+## io_uring use is a release gate (uringscope)
+
+libxtc's Linux performance rests on io_uring, and io_uring fails quietly:
+a request that falls off the fast path onto an io-wq worker thread, a
+CQ that overflows, a request that never completes, or two in-flight
+requests on one buffer all return success.  `strace` cannot see inside
+the rings.  uringscope (in the nix dev shell; github.com/rch0wdhury/
+uringscope) traces the kernel's io_uring tracepoints and names these.
+
+- **During development**, run the test or example you are changing
+  under it whenever the change touches src/io/, src/ptc/aio.c, the
+  loop's poll path, sqlxtc's WAL or page I/O, or an example's socket
+  handling:
+
+  ```sh
+  sudo uringscope -f --json=r.json -- ./test_x
+  jq -r '.findings[] | "\(.severity) \(.tag): \(.message)"' r.json
+  ```
+
+  Use `-f` (libxtc runs one ring per loop thread), an absolute path
+  (sudo's PATH drops `.`), and a run long enough to observe:
+  uringscope polls every 100 ms and a test that ends sooner reports
+  NODATA, which is not a pass.  `--check` adds buffer-hazard detection
+  (overlapping in-flight buffers, registered-buffer lifetime, unmap
+  while in flight); run it over the io tests the way you would ASan.
+
+- **As a release gate**, `sudo scripts/uring-gate.sh BUILD_DIR OUTDIR`
+  (CHECK=1 for the hazard pass) runs the aio, exec, WAL, crash-oracle
+  and rexis workloads.  A WARN/CRIT finding fails it unless the
+  workload's row in the script lists the tag as understood (and says
+  why, with a control measured on plain liburing).  NODATA fails a
+  workload that should use io_uring.  INFO findings never fail; BATCH
+  (SQEs per io_uring_enter) is reported so a release can show it
+  moving.  Quote its table in the release qualification.
+
+- **Adding an allowance is a decision, not a fix.**  Before allowing a
+  PUNT, reproduce it with plain liburing (no libxtc) on the same kernel
+  and filesystem; if liburing does not punt, libxtc is doing something
+  wrong.  The current allowances (FSYNC, buffered writes contending on
+  one inode from many rings, page-file extension) were each measured
+  that way.
+
 ## Allocation alignment
 
 Any struct with an over-aligned member (`_Alignas(XTC_CACHE_LINE)`,

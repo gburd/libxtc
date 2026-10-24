@@ -37,7 +37,8 @@
     "root": {
       "inputs": {
         "flake-utils": "flake-utils",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "uringscope": "uringscope"
       }
     },
     "systems": {
@@ -52,6 +53,27 @@
       "original": {
         "owner": "nix-systems",
         "repo": "default",
+        "type": "github"
+      }
+    },
+    "uringscope": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1788032941,
+        "narHash": "sha256-XDX1LLxL8BqluUuj1PdLg20eUNdOh3JhGjAXnTR8HnI=",
+        "owner": "rch0wdhury",
+        "repo": "uringscope",
+        "rev": "cdd23e3e405e658f92e4e5c2627a04720d4e58c5",
+        "type": "github"
+      },
+      "original": {
+        "owner": "rch0wdhury",
+        "ref": "v0.3.0",
+        "repo": "uringscope",
         "type": "github"
       }
     }
