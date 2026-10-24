@@ -24,7 +24,7 @@ it -- along with the trade it makes, which is not free.
 ## Why libxtc ships no code for this
 
 libxtc's network path never hands work to io_uring's kernel worker pool
-(io-wq). The only operations it submits are `poll_add` / `poll_multishot` /
+(io-wq). The only operations it submits are `poll_add` (one-shot) /
 `poll_remove`, a preempt timeout, and file `read`/`write`/`fsync`. Sockets
 are *polled* for readiness and then read and written **inline, on the fiber's
 own thread**.
