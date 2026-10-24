@@ -246,8 +246,11 @@ be its cause, so it stays open.
   allocated blocks (1.58: 3.61x) and the ledger page file 1.83x (1.58:
   2.56x), not counting the log.
 * **The WAL frame checksum is now CRC32C.**  1.59 reads logs written by
-  1.58 (FNV-1a frames) and mixed logs, but 1.58 cannot read a 1.59 log:
-  there is no downgrade path once a 1.59 server has written to a store.
+  1.58 (FNV-1a frames) and mixed logs, but 1.58 cannot read a 1.59 log.
+  That is expected: downgrades are supported only between LTS releases,
+  to the previous LTS, and there are no LTS releases yet (see
+  [ABI stability]({{ '/reference/abi-stability/' | relative_url }}),
+  "Long-term support").
 
 ## OPEN (1.58): sqlxtc buffer-pool sizing and the hot-row hold
 

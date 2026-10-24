@@ -194,6 +194,15 @@ defined if and when there is a second major.  There is no
 `xtc-security@` list, no published embargo policy, and no backport
 branch in this tree yet.
 
+**Downgrades (POLICY).**  A downgrade -- running an older release
+against data or state a newer one has written (for example a sqlxtc
+store) -- is supported only between LTS releases, and only to the
+immediately previous LTS.  There are no LTS releases yet, so no
+downgrade is supported: an on-disk format may change in any minor, and
+the release that changes it says so in KNOWN_ISSUES.  Upgrades are
+supported: a release reads what earlier releases wrote unless its notes
+say otherwise.
+
 ## See also
 
 - [Known issues]({{ '/reference/known-issues/' | relative_url }}) --
