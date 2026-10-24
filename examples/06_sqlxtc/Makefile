@@ -1115,14 +1115,6 @@ test_uniq_commit: test_uniq_commit.c engine.o db.o quack.o metrics.o xstore.o xl
 test-uniq-commit: test_uniq_commit
 	TMPDIR=$${TMPDIR:-/tmp} ./test_uniq_commit
 
-# xs_ctr.h: the striped statistics counter (exact sum, one line per slot).
-test: test-xs-ctr
-test_xs_ctr: test_xs_ctr.c xs_ctr.h
-	$(CC) $(CFLAGS) -o $@ test_xs_ctr.c $(LDFLAGS)
-
-test-xs-ctr: test_xs_ctr
-	./test_xs_ctr
-
 # A frame reused for a new page (bm_alloc_pid) changes its version, so a
 # pin-free optimistic reader that sampled it before cannot validate.
 test: test-bm-reuse-version

@@ -61,7 +61,11 @@ sx="$src/examples/06_sqlxtc"
 (
 	cd "$build"
 	make bench_aio_fibers bench_exec_scale > "$out/build.log" 2>&1 || true
+	# The example Makefiles do not depend on libxtc.a: drop the
+	# binaries so they relink against THIS build, never a stale one.
 	cd "$sx"
+	rm -f test_wal_kill test_crash_oracle test_wal_group_sync \
+	    sqlxtc-server ../07_kaka/kaka-broker ../07_kaka/kaka_soak
 	make XTC_BUILD="$build" test_wal_kill test_crash_oracle \
 	    test_wal_group_sync sqlxtc-server >> "$out/build.log" 2>&1 || true
 	cd "$src/examples/07_kaka"
