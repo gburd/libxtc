@@ -188,5 +188,5 @@ First appeared in xtc 0.0.1 (M4).
 The ucontext substrate is the M4 default; per-architecture fiber asm
 .Po Em make_fcontext / jump_fcontext Pc
 arrives in M4.5 for ~30\u00a0ns context switches, and became the default
-on x86-64 Linux with glibc in 1.59
+on x86-64 and aarch64 Linux with glibc in 1.59
 .Pq ucontext stays selectable with Fl -with-coro=ucontext .

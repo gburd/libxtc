@@ -368,7 +368,7 @@ AC_CHECK_FUNC([swapcontext],
   [xtc_have_ucontext=no])
 
 # Coroutine substrate.  auto (default): the hand-written fcontext on
-# Linux x86-64 and Apple arm64 (ucontext's swapcontext makes a
+# Linux x86-64 and aarch64 (glibc) and Apple arm64 (ucontext's swapcontext makes a
 # rt_sigprocmask system call per fiber switch, and on Linux that call
 # takes one process-wide kernel lock, so multi-loop switching serializes
 # on it), and wherever the libc has no ucontext (musl); ucontext

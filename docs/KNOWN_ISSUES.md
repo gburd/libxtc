@@ -6,6 +6,46 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## CHANGED (1.59): fcontext is the default on Linux aarch64 (glibc) too; aarch64 fixes
+
+**What changed.**  Linux aarch64 with glibc now defaults to the fcontext
+substrate, as Linux x86-64 does from 1.59 (`--with-coro=ucontext` keeps
+ucontext).  glibc's aarch64 `swapcontext` costs more than on x86-64 (the
+`rt_sigprocmask` call plus the FP/SIMD file): on a 16-vCPU aarch64 host
+(Neoverse-V1) one fiber switch is 1091 ns on ucontext and 136 ns on fcontext,
+and 16 loops of cross-loop request/reply run 2.08M round trips/s on ucontext
+(down from 2.45M at 8 loops: the same process-wide signal-lock wall) against
+8.91M on fcontext.
+
+This is the first release qualified on aarch64.  Fixed on the way, each with a
+test that fails before the fix:
+
+* *FPCR / FPSR per fiber* (fcontext): `jump_fcontext` did not save them, so a
+  fiber's `fesetround` or flush-to-zero leaked to the next fiber on the thread,
+  as MXCSR did on x86-64 (`test_async /C10_fp_env_per_fiber`).
+  Also on musl/aarch64 and Apple Silicon, where fcontext was already the
+  default.
+* *Migrating fibers* (fcontext): a migratable fiber that finished on another
+  OS thread jumped to the first thread's scheduler, because the compiler kept
+  the thread pointer in a register across the fiber body (`test_exec /Blk*`,
+  `test_steal /M9` crashed).  Also live on musl/aarch64.
+* *Involuntary preemption* (both substrates): the preemption trampoline lost
+  x16 and the upper SVE register state (z, p, FFR) of a preempted fiber; glibc
+  runs SVE `memcpy` / `memset` on SVE cores.  A preempted fiber now resumes
+  through the kernel's own signal frame (`test_preempt_p2 /a64_x16_preserved`,
+  `/a64_sve_state`).  aarch64 fcontext gained the preemption redirect too.
+* *Off-loop spin* (`xtc_amutex`, `xtc_arwlock`, `xtc_notify`): the spin budget
+  counted hint instructions, and the aarch64 `yield` hint is about 0.4 ns
+  against x86 `pause` at 11-20 ns, so a waiter spun for a fraction of a
+  microsecond and parked.  The budget is now time-calibrated.
+* *Backtraces in a fiber* (fcontext): a fiber's outermost frame claimed its
+  own entry as the return address, and the DWARF unwinder walked off the stack
+  (`xtc_dump` crashed on clang builds).  A CFI-terminated start trampoline
+  ends the unwind (`test_fctx /fctx_unwind_ends`).
+
+Not verified: Apple Silicon (the Mach-O fcontext file carries the same
+changes but was not assembled) and big-endian or 32-bit Arm.
+
 ## CHANGED (1.59): fcontext is the default coroutine substrate on Linux x86-64 (glibc)
 
 **What changed.**  The hand-written fcontext substrate (`src/evt/coro_fctx.c`,

@@ -61,7 +61,7 @@ apples-to-apples.
   The fiber context switch measures about **7.6 ns** on x86-64 -- a
   micro-number that is honest precisely because it measures one narrow
   thing and says so.  That is the hand-written fcontext substrate, the
-  default on Linux x86-64 (glibc), Apple Silicon and musl.  Elsewhere,
+  default on Linux x86-64 and aarch64 (glibc), Apple Silicon and musl.  Elsewhere,
   or with `--with-coro=ucontext`, the portable `ucontext` substrate is
   used; it saves/restores the signal mask on every switch (a
   `rt_sigprocmask` system call, two per round trip), which costs a few

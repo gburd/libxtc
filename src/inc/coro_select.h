@@ -14,15 +14,19 @@
  *	fcontext is live when not Windows and:
  *	  - the libc has no ucontext (musl), or
  *	  - forced: -DXTC_CORO_FORCE_FCTX / configure --with-coro=fctx, or
- *	  - by default on Linux x86-64 with glibc, and on Apple arm64.
- *	    ucontext's swapcontext makes a rt_sigprocmask system call on
- *	    every switch (two per round trip), and on Linux that call takes
- *	    the PROCESS-wide sighand lock: with many loops every fiber switch
- *	    in the process serializes on one kernel spinlock.  Measured on a
- *	    64-vCPU x86-64 host: 16 loops of cross-loop request/reply 2.2M
- *	    round trips/s on ucontext (56% of cycles spinning on that lock),
- *	    12.1M on fcontext; one fiber switch 550 -> 145 ns.  fcontext has
- *	    the same involuntary-preemption redirect there (coro_preempt.h).
+ *	  - by default on Linux x86-64 and aarch64 with glibc, and on
+ *	    Apple arm64.  ucontext's swapcontext makes a rt_sigprocmask
+ *	    system call on every switch (two per round trip), and on Linux
+ *	    that call takes the PROCESS-wide sighand lock: with many loops
+ *	    every fiber switch in the process serializes on one kernel
+ *	    spinlock.  Measured on a 64-vCPU x86-64 host: 16 loops of
+ *	    cross-loop request/reply 2.2M round trips/s on ucontext (56% of
+ *	    cycles spinning on that lock), 12.1M on fcontext; one fiber
+ *	    switch 550 -> 145 ns.  On a 16-vCPU aarch64 host (Neoverse-V1):
+ *	    one switch 1091 -> 136 ns, 16 loops 2.08M -> 8.91M round
+ *	    trips/s (ucontext fell from 2.45M at 8 loops).  fcontext has
+ *	    the same involuntary-preemption redirect on both
+ *	    (coro_preempt.h).
  *	ucontext is kept by -DXTC_CORO_FORCE_UCONTEXT / --with-coro=ucontext
  *	and in the single-file amalgamation (it cannot carry the .S files).
  */
@@ -36,7 +40,9 @@
     (!defined(XTC_HAVE_UCONTEXT) || defined(XTC_CORO_FORCE_FCTX) || \
      (!defined(XTC_CORO_FORCE_UCONTEXT) && !defined(XTC_AMALGAMATION) && \
       ((defined(__APPLE__) && defined(__aarch64__)) || \
-       (defined(__linux__) && defined(__x86_64__) && defined(__GLIBC__)))))
+       (defined(__linux__) && \
+        (defined(__x86_64__) || defined(__aarch64__)) && \
+        defined(__GLIBC__)))))
 # define XTC_CORO_FCTX 1
 #endif
 
