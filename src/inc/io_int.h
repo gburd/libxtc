@@ -231,30 +231,11 @@ struct xtc_io {
 #if defined(XTC_DIAGNOSTIC)
 	/*
 	 * DIAGNOSTIC-only: the thread that CREATED this ring, recorded in
-	 * __xtc_io_backend_init.
-	 *
-	 * The ring is created by whoever calls xtc_loop_init -- for an
-	 * executor that is the exec-init thread (xtc_exec_init), not the
-	 * worker that will own and submit to it -- and the wakeup POLL_ADD
-	 * is submitted right there on the creating thread
-	 * (__xtc_io_register_wakeup).  Every later submit comes from the
-	 * owner.  So one thread touches the SQ before another takes it over.
-	 *
-	 * That is BENIGN TODAY only because of an ORDERING that nothing
-	 * enforces: creation completes before any worker starts, so the two
-	 * touches never overlap.  It is also the exact shape of eight fixed
-	 * cross-loop defects (one thread touching a structure another owns),
-	 * and it is the hard blocker for IORING_SETUP_SINGLE_ISSUER, which
-	 * requires the creator and the submitter to be the same task.
-	 *
-	 * Rather than restructure loop init to chase that flag -- 88 of the
-	 * 90 files calling xtc_loop_init also call xtc_loop_run on the SAME
-	 * thread, so deferring ring creation would churn the most-used
-	 * lifecycle in the tree for a gain the measured reap headroom says is
-	 * noise -- record the creator and ASSERT the ordering holds.  If a
-	 * future change ever submits from the creator AFTER an owner is
-	 * established, this fires immediately and locates it, instead of the
-	 * property silently rotting.
+	 * __xtc_io_backend_init.  The ring is created by whoever calls
+	 * xtc_loop_init -- for an executor the exec-init thread, not the
+	 * worker that will own and submit to it.  The creator submits
+	 * nothing (the wakeup POLL_ADD is armed by the first poll), so every
+	 * submit comes from the owner; __ring_submit asserts it.
 	 */
 	pthread_t        creator_tid;
 #endif
@@ -355,5 +336,12 @@ void __xtc_io_set_tail_loop_id(xtc_io_t *io, int id);
  * an SQE.  Tests assert no node leaks.  Any out pointer may be NULL.
  */
 int __xtc_io_reg_stats(xtc_io_t *io, int *live, int *zombies, int *pending);
+
+/*
+ * io_uring (XTC_E_NOSYS elsewhere): the IORING_SETUP_* flags the main ring
+ * was created with (after any fallback for an older kernel), and how many
+ * SQEs the kernel has consumed from it.  Tests.  Out pointers may be NULL.
+ */
+int __xtc_io_uring_info(xtc_io_t *io, unsigned *flags, unsigned *sq_consumed);
 
 #endif /* XTC_IO_INT_H */

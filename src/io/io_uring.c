@@ -173,21 +173,16 @@ __pollres_to_flags(uint32_t res)
  * check lives in exactly ONE place instead of nine.
  *
  * The invariant: a ring is created on one thread (xtc_loop_init's
- * caller, which for an executor is the exec-init thread) and thereafter
- * submitted to only by its owning worker.  The creator's own submit --
- * the wakeup POLL_ADD in __xtc_io_register_wakeup -- is legitimate
- * because it happens BEFORE any worker exists.  What must never happen
- * is a submit from the creator (or any other thread) once an owner has
- * been established: the SQ is single-producer, so that is a data race,
- * and it is the same shape as the eight fixed cross-loop defects.
+ * caller, which for an executor is the exec-init thread) and submitted
+ * to only by the thread that polls it.  The creator submits nothing: the
+ * wakeup POLL_ADD is queued at init and armed by the first poll (see
+ * __xtc_io_register_wakeup).  What must never happen is a submit from
+ * any other thread once an owner has been established: the SQ is
+ * single-producer, so that is a data race, and it is the same shape as
+ * the eight fixed cross-loop defects.
  *
  * Zero cost in a normal build; XTC_DIAGNOSTIC turns it into an immediate,
- * located abort.  This is what makes the ordering ENFORCED rather than
- * merely true-for-now -- and it is why IORING_SETUP_SINGLE_ISSUER was
- * NOT adopted: the flag would demand restructuring loop init (88 of 90
- * xtc_loop_init callers also run the loop on the creating thread) to buy
- * a per-SQE saving the measured reap headroom says is noise.  Assert the
- * property instead of chasing the flag.
+ * located abort.
  */
 static int
 __ring_submit(xtc_io_t *io)
@@ -346,6 +341,17 @@ __node_free(struct __xtc_uring_fd *uf)
 	__os_free(uf);
 }
 
+/* Queue a node for the next xtc_io_poll's __flush_pending. */
+static void
+__node_defer(xtc_io_t *io, struct __xtc_uring_fd *uf)
+{
+	if (!uf->pending) {
+		uf->pending = 1;
+		uf->pnext = io->pending;
+		io->pending = uf;
+	}
+}
+
 static void
 __node_kick(xtc_io_t *io, struct __xtc_uring_fd *uf)
 {
@@ -357,11 +363,8 @@ __node_kick(xtc_io_t *io, struct __xtc_uring_fd *uf)
 	} else if (uf->dead && uf->armed) {
 		rc = __submit_poll_remove(io, uf);
 	}
-	if (rc != XTC_OK && !uf->pending) {
-		uf->pending = 1;
-		uf->pnext = io->pending;
-		io->pending = uf;
-	}
+	if (rc != XTC_OK)
+		__node_defer(io, uf);
 }
 
 /*
@@ -409,24 +412,69 @@ __flush_pending(xtc_io_t *io)
  */
 #define XTC_URING_INIT_RETRIES 200    /* x 1 ms */
 
+/*
+ * Optional setup flags, tried first and dropped if the kernel refuses
+ * them (an unknown flag fails the whole setup with -EINVAL).
+ *
+ * COOP_TASKRUN (Linux 5.19): a completion's task_work no longer IPIs the
+ * submitting thread out of user mode; it runs at that thread's next
+ * kernel entry, or wakes it if it sleeps.  The loop enters the kernel to
+ * collect completions anyway, so the forced interrupt bought nothing.
+ * TASKRUN_FLAG makes the kernel raise IORING_SQ_TASKRUN while such work
+ * is pending, which is what lets the non-blocking peek in the reap loop
+ * (io_uring_peek_cqe -> cq_ring_needs_flush) enter and run it instead of
+ * reporting an empty CQ.  Measured, rexis memtier, one loop: +12.3%
+ * pipe 1, +6.9% pipe 16 on Linux 7.2, same SQE mix and syscall count.
+ *
+ * NOT applied to the preempt ring: its timeout CQE is read with no
+ * kernel entry at all (__xtc_io_uring_preempt_due), so it depends on the
+ * IPI to post it while a fiber computes.
+ */
+#define XTC_URING_OPT_FLAGS \
+	(IORING_SETUP_COOP_TASKRUN | IORING_SETUP_TASKRUN_FLAG)
+
 static int
 __ring_setup(struct io_uring *ring, unsigned cq_entries, int retries)
 {
 	struct io_uring_params prm;
+	unsigned opt = XTC_URING_OPT_FLAGS;
 	int rc, k;
 
 	for (k = 0; ; k++) {
 		memset(&prm, 0, sizeof prm);
+		prm.flags = opt;
 		if (cq_entries != 0) {
-			prm.flags = IORING_SETUP_CQSIZE;
+			prm.flags |= IORING_SETUP_CQSIZE;
 			prm.cq_entries = cq_entries;
 		}
-		rc = io_uring_queue_init_params(XTC_URING_SQ_ENTRIES, ring,
-		    &prm);
+		/* "io.uring.setup_einval": act as a kernel without them. */
+		if (opt != 0 && xtc_inject_check("io.uring.setup_einval"))
+			rc = -EINVAL;
+		else
+			rc = io_uring_queue_init_params(XTC_URING_SQ_ENTRIES,
+			    ring, &prm);
+		if (rc == -EINVAL && opt != 0) {
+			opt = 0;      /* older kernel: plain ring */
+			k--;
+			continue;
+		}
 		if (rc != -ENOMEM || k >= retries)
 			return rc;
 		(void)__os_sleep_ns(1000LL * 1000);   /* XTC_BLOCKING_OK: ring setup, once per loop */
 	}
+}
+
+/* Main-ring setup flags and SQEs the kernel has consumed (tests). */
+int
+__xtc_io_uring_info(xtc_io_t *io, unsigned *flags, unsigned *sq_consumed)
+{
+	if (io == NULL)
+		return XTC_E_INVAL;
+	if (flags != NULL)
+		*flags = io->ring.flags;
+	if (sq_consumed != NULL)
+		*sq_consumed = io_uring_smp_load_acquire(io->ring.sq.khead);
+	return XTC_OK;
 }
 
 int
@@ -553,7 +601,10 @@ __add_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag, int is_wakeup)
 	uf->tag = tag;
 	uf->is_wakeup = is_wakeup;
 	io->tab[fd] = uf;
-	__node_kick(io, uf);   /* arms now, or queues the arm */
+	if (is_wakeup)
+		__node_defer(io, uf);  /* the first poll arms it */
+	else
+		__node_kick(io, uf);   /* arms now, or queues the arm */
 	return XTC_OK;
 }
 
@@ -590,15 +641,20 @@ __retire_fd(xtc_io_t *io, struct __xtc_uring_fd *uf)
 	/* else: unarmed and queued; __flush_pending frees it. */
 }
 
+/*
+ * The wakeup poll is NOT submitted here, on the creating thread: it is
+ * queued, and the first xtc_io_poll -- run by the thread that owns the
+ * loop -- arms it.  A poll's completion task_work runs on the task that
+ * SUBMITTED it, so a creator-submitted wakeup poll made the first
+ * cross-thread wake of every loop depend on the creator: under
+ * COOP_TASKRUN a creator computing in user mode held the owner's wake
+ * until its next tick or system call.  A byte written before the arm is
+ * not lost: the poll is level-checked when armed.
+ */
 int
 __xtc_io_register_wakeup(xtc_io_t *io, int fd)
 {
-	int rc;
-	__xtc_unsafe_enter();   /* an SQ producer: see __get_sqe */
-	if ((rc = __add_fd(io, fd, XTC_IO_READABLE, NULL, 1)) == XTC_OK)
-		(void)__ring_submit(io);
-	__xtc_unsafe_leave();
-	return rc;
+	return __add_fd(io, fd, XTC_IO_READABLE, NULL, 1);
 }
 
 /*
@@ -871,7 +927,8 @@ __xtc_io_reg_stats(xtc_io_t *io, int *live, int *zombies, int *pending)
 		*zombies = io->n_zombies;
 	n = 0;
 	for (p = io->pending; p != NULL; p = p->pnext)
-		n++;
+		if (!p->is_wakeup)
+			n++;
 	if (pending != NULL)
 		*pending = n;
 	return XTC_OK;
@@ -1476,6 +1533,13 @@ int
 __xtc_io_reg_stats(xtc_io_t *io, int *live, int *zombies, int *pending)
 {
 	(void)io; (void)live; (void)zombies; (void)pending;
+	return XTC_E_NOSYS;
+}
+
+int
+__xtc_io_uring_info(xtc_io_t *io, unsigned *flags, unsigned *sq_consumed)
+{
+	(void)io; (void)flags; (void)sq_consumed;
 	return XTC_E_NOSYS;
 }
 #endif /* !XTC_IO_BACKEND_URING */
