@@ -14,6 +14,7 @@
 # Exit 0 = no regression, 1 = at least one regression, 2 = no data.
 
 import csv
+import os
 import statistics
 import sys
 
@@ -28,8 +29,14 @@ def main():
     data = {}
     qual = "qualified"
     for r in rows:
-        data.setdefault(r["cell"], {}).setdefault(r["side"], []).append(
-            float(r["value"]))
+        v = float(r["value"])
+        # A zero or negative reading is not a measurement: the bench did
+        # not run that path on this side (e.g. a WAL mode the base
+        # release does not have).  Leave the side out; the cell is then
+        # reported as one-sided, not judged.
+        if v <= 0:
+            continue
+        data.setdefault(r["cell"], {}).setdefault(r["side"], []).append(v)
         if r["qual"] != "qualified":
             qual = r["qual"]
     if not data:
@@ -39,7 +46,12 @@ def main():
           "delta = candidate vs base, + is better" % qual)
     print("%-22s %-28s %-28s %8s  %s" % ("cell", "base", "candidate",
                                          "delta", "verdict"))
+    # PERF_GATE_ACCEPT="cell ...": regressions the maintainer has decided
+    # to ship.  They are still printed, as ACCEPTED, so the release notes
+    # can name each one with its cause; they do not fail the gate.
+    accept = set(os.environ.get("PERF_GATE_ACCEPT", "").split())
     regress = 0
+    accepted = []
     for name in spec:
         if name not in data:
             continue
@@ -47,8 +59,8 @@ def main():
         b = data[name].get("base", [])
         c = data[name].get("cand", [])
         if not b or not c:
-            print("%-22s %s" % (name, "only one side has this cell: "
-                                "not judged"))
+            print("%-22s %s" % (name, "only one side measured this "
+                                "cell: not judged"))
             continue
         mb, mc = statistics.median(b), statistics.median(c)
         # delta > 0 means the candidate is better, whatever the unit
@@ -57,7 +69,10 @@ def main():
             apart = max(c) < min(b)
         else:
             apart = min(c) > max(b)
-        if delta < -th and apart:
+        if delta < -th and apart and name in accept:
+            verdict = "ACCEPTED regression"
+            accepted.append(name)
+        elif delta < -th and apart:
             verdict = "REGRESSION"
             regress += 1
         elif delta > th and (min(c) > max(b) if hib else max(c) < min(b)):
@@ -67,6 +82,9 @@ def main():
         print("%-22s %9.4g [%9.4g-%9.4g] %9.4g [%9.4g-%9.4g] %+7.1f%%  %s"
               % (name, mb, min(b), max(b), mc, min(c), max(c),
                  100 * delta, verdict))
+    if accepted:
+        print("perf-gate: accepted (name each in the release notes): %s"
+              % " ".join(accepted))
     print("perf-gate: %d regression(s)" % regress)
     return 1 if regress else 0
 

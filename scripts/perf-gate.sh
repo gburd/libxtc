@@ -31,6 +31,8 @@
 #   e.g. scripts/perf-gate.sh v1.58.0 HEAD /tmp/perf-1.59
 # env:   REPS (default 5)  THRESH (default 0.05)  JOBS (default nproc)
 #        CELLS="name ..." to run a subset; PERF_GATE_FORCE=1 (see above)
+#        PERF_GATE_ACCEPT="name ..." regressions decided to ship: printed as
+#        ACCEPTED, not failing; name each in the release notes
 # exit:  0 no regression, 1 a regression, 2 setup/build error,
 #        3 host not measurement-grade
 #

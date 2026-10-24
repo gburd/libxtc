@@ -56,6 +56,12 @@ by chance with probability 2/252, about 0.8%, so a regression verdict is
 worth investigating every time; rerun the cell (`CELLS=...`) before
 calling it.
 
+A regression that is understood and decided on (a trade-off the release
+makes on purpose) is passed by name: `PERF_GATE_ACCEPT="lock_amutex_w64"`.
+The verdict still prints it as `ACCEPTED regression`, and the release
+notes must name it with its cause.  There is no way to accept a cell
+silently.
+
 The gate compares against the previous release live, never against a
 stored number.  A stored baseline goes stale when the host, kernel,
 compiler or idle-state settings change, and during the 1.59
@@ -96,7 +102,9 @@ Use that only to debug the gate itself.
 | `wal_fiber_c8`, `wal_thread_c1` | sqlxtc `bench_wal`: group commit | the durable-commit path |
 
 A bench that the base release predates (for example `bench_hop` before
-1.59) is reported as "only one side has this cell: not judged".
+1.59) is reported as "only one side measured this cell: not judged", and so
+is a cell whose bench reads zero on one side (for example the WAL
+cells against 1.58, whose WAL has no thread-mode commit path).
 
 To guard a new path, add one line to `cells()` in `scripts/perf-gate.sh`:
 the name, 1 if higher is better (throughput) or 0 if lower is better
