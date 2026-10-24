@@ -15,7 +15,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/resource.h>
+#if !defined(_WIN32)
+#include <sys/resource.h>   /* getrusage (the off-loop no-herd tests) */
+#endif
 #if defined(__linux__)
 #include <sys/syscall.h>  /* SYS_gettid (offloop_release_wakes) */
 #include <unistd.h>

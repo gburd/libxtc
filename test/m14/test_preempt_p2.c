@@ -23,6 +23,12 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
+/* No preemption signal on Windows (the preemption tests skip there). */
+#if defined(SIGVTALRM)
+#define PREEMPT_TICK() ((void)raise(SIGVTALRM))
+#else
+#define PREEMPT_TICK() ((void)0)
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -646,7 +652,7 @@ sw_raise_in_window(const char *name, void *user)
 	atomic_fetch_add(&g_sw_hits, 1);
 	before = atomic_load(&g_sw_peer_runs);
 	atomic_store(&g_sw_window, 1);
-	(void)raise(SIGVTALRM);              /* a preemption tick, here */
+	PREEMPT_TICK();              /* a preemption tick, here */
 	atomic_store(&g_sw_window, 0);
 	if (atomic_load(&g_sw_peer_runs) != before)
 		atomic_store(&g_sw_win_preempted, 1);
@@ -680,7 +686,7 @@ sw_writer(void *arg)
 	memset(out, 0xaa, sizeof out);
 	xtc_yield();                          /* let the peer start */
 	before = atomic_load(&g_sw_peer_runs);
-	(void)raise(SIGVTALRM);               /* control: plain fiber code */
+	PREEMPT_TICK();               /* control: plain fiber code */
 	if (atomic_load(&g_sw_peer_runs) != before)
 		atomic_store(&g_sw_ctrl_preempted, 1);
 	atomic_store(&g_sw_arm, 1);
@@ -831,7 +837,7 @@ swd_raise_in_window(const char *name, void *user)
 	atomic_fetch_sub(&g_swd_arm, 1);
 	atomic_fetch_add(&g_swd_hits, 1);
 	(void)xtc_preempt_tick_pending();    /* clear any stale tick */
-	(void)raise(SIGVTALRM);              /* a preemption tick, here */
+	PREEMPT_TICK();              /* a preemption tick, here */
 	if (!xtc_preempt_tick_pending())     /* not declined: redirected */
 		atomic_fetch_add(&g_swd_redirected, 1);
 }
@@ -855,7 +861,7 @@ swd_target(void *arg)
 	xtc_yield();                          /* let the peer start */
 	(void)xtc_preempt_tick_pending();
 	before = atomic_load(&g_swd_peer_runs);
-	(void)raise(SIGVTALRM);               /* control: plain fiber code */
+	PREEMPT_TICK();               /* control: plain fiber code */
 	if (atomic_load(&g_swd_peer_runs) != before)
 		atomic_store(&g_swd_ctrl_preempted, 1);
 	if (xtc_preempt_tick_pending())
@@ -952,7 +958,7 @@ rq_raise_in_window(const char *name, void *user)
 		return;                          /* one shot per arm */
 	atomic_fetch_add(&g_rq_hits, 1);
 	before = atomic_load(&g_rq_peer_runs);
-	(void)raise(SIGVTALRM);              /* a preemption tick, here */
+	PREEMPT_TICK();              /* a preemption tick, here */
 	if (atomic_load(&g_rq_peer_runs) != before)
 		atomic_store(&g_rq_win_preempted, 1);
 }
@@ -992,7 +998,7 @@ rq_waker(void *arg)
 	while (atomic_load(&g_rq_target_runs) == 0)
 		xtc_yield();                      /* target parked, peer queued */
 	before = atomic_load(&g_rq_peer_runs);
-	(void)raise(SIGVTALRM);               /* control: plain fiber code */
+	PREEMPT_TICK();               /* control: plain fiber code */
 	if (atomic_load(&g_rq_peer_runs) != before)
 		atomic_store(&g_rq_ctrl_preempted, 1);
 	xtc_yield();                          /* re-queue the peer first */
@@ -1126,7 +1132,7 @@ th_raise_in_window(const char *name, void *user)
 	atomic_fetch_add(&g_th_hits, 1);
 	before = atomic_load(&g_th_peer_runs);
 	atomic_store(&g_th_in, 1);
-	(void)raise(SIGVTALRM);              /* a preemption tick, here */
+	PREEMPT_TICK();              /* a preemption tick, here */
 	atomic_store(&g_th_in, 0);
 	if (atomic_load(&g_th_peer_runs) != before)
 		atomic_store(&g_th_win_preempted, 1);
@@ -1150,18 +1156,18 @@ th_peer(void *arg)
 static void
 th_armer(void *arg)
 {
-	xtc_timer_t *far = NULL;
+	xtc_timer_t *far_tm = NULL;
 	long before;
 	int i;
 	(void)arg;
 	xtc_yield();                          /* let the peer start */
 	before = atomic_load(&g_th_peer_runs);
-	(void)raise(SIGVTALRM);               /* control: plain fiber code */
+	PREEMPT_TICK();               /* control: plain fiber code */
 	if (atomic_load(&g_th_peer_runs) != before)
 		atomic_store(&g_th_ctrl_preempted, 1);
-	/* A far root, then a due timer that sifts above it. */
+	/* A far_tm root, then a due timer that sifts above it. */
 	munit_assert_int(xtc_timer_set(g_th_loop, 10LL * 1000 * 1000 * 1000,
-	    th_fire_never, NULL, &far), ==, XTC_OK);
+	    th_fire_never, NULL, &far_tm), ==, XTC_OK);
 	atomic_store(&g_th_arm, 1);
 	munit_assert_int(xtc_timer_set(g_th_loop, 0, th_fire_x, NULL, NULL),
 	    ==, XTC_OK);
@@ -1177,8 +1183,8 @@ th_armer(void *arg)
 		    atomic_load(&g_th_win_preempted));
 		abort();
 	}
-	(void)xtc_timer_cancel(far);
-	(void)xtc_timer_release(far);
+	(void)xtc_timer_cancel(far_tm);
+	(void)xtc_timer_release(far_tm);
 	atomic_store(&g_th_stop, 1);
 }
 

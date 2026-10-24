@@ -657,6 +657,12 @@ test_concurrent(const MunitParameter p[], void *d)
  */
 #include <signal.h>
 #include "xtc_exec.h"
+/* No preemption signal on Windows (the preemption tests skip there). */
+#if defined(SIGVTALRM)
+#define PREEMPT_TICK() ((void)raise(SIGVTALRM))
+#else
+#define PREEMPT_TICK() ((void)0)
+#endif
 #include "xtc_inject.h"
 #include "xtc_preempt.h"
 #include "xtc_proc.h"
@@ -675,7 +681,7 @@ mp_raise_in_window(const char *name, void *user)
 		return;
 	atomic_fetch_add(&g_mp_hits, 1);
 	before = atomic_load(&g_mp_peer_runs);
-	(void)raise(SIGVTALRM);              /* a preemption tick, here */
+	PREEMPT_TICK();              /* a preemption tick, here */
 	if (atomic_load(&g_mp_peer_runs) != before)
 		atomic_store(&g_mp_win_preempted, 1);
 }
@@ -698,7 +704,7 @@ mp_owner(void *arg)
 	(void)arg;
 	xtc_yield();                          /* let the peer start */
 	before = atomic_load(&g_mp_peer_runs);
-	(void)raise(SIGVTALRM);               /* control: plain fiber code */
+	PREEMPT_TICK();               /* control: plain fiber code */
 	if (atomic_load(&g_mp_peer_runs) != before)
 		atomic_store(&g_mp_ctrl_preempted, 1);
 	o = xtc_slab_alloc(g_slab);           /* fill this thread's magazine */
