@@ -95,7 +95,11 @@ dd if=/dev/zero of="$dat" bs=1M count=256 status=none
 #     and kaka raises the bounded io-wq cap to 64 on purpose
 #     (MAX_SYNC_WORKERS in examples/07_kaka/main.c), hence WORKERS.
 #     sqlxtc: its evicting buffer pool writes pages back and extends the
-#     page file (WRITE/WRITEV punt).
+#     page file (WRITE/WRITEV punt).  The server runs one loop per CPU,
+#     each ring capped at 4 bounded io-wq workers (XTC_IOWQ_BOUND_DEFAULT;
+#     bpftrace on io_wq_max_workers shows [4,0] on every ring), so the
+#     punts fan out to up to 4 x CPUs workers in all: 33 on a 64-CPU host,
+#     past uringscope's fixed WORKERS threshold, hence WORKERS.
 # ERRORS is judged per opcode: a cancelled POLL_ADD completes -ECANCELED
 # and uringscope counts it as an error; libxtc cancels polls routinely
 # (one-shot re-arm, unregister).  Errors on any other opcode fail.
@@ -110,7 +114,7 @@ wal_kill||$sx/test_wal_kill
 crash_oracle|PUNT|$sx/test_crash_oracle 4 1
 rexis||make -C $build check-rexis
 kaka_soak|PUNT,WORKERS|@wrap env KAKA_BROKER=$src/examples/07_kaka/kaka-broker KAKA_SOAK=$src/examples/07_kaka/kaka_soak SECS=15 bash $src/examples/07_kaka/test_kaka_soak.sh
-sqlxtc_iosoak|PUNT|@wrap env SQLXTC_SERVER=$sx/sqlxtc-server SECS=20 CLIENTS=32 bash $src/test/sqlxtc/test_sqlxtc_iosoak.sh
+sqlxtc_iosoak|PUNT,WORKERS|@wrap env SQLXTC_SERVER=$sx/sqlxtc-server SECS=20 CLIENTS=32 bash $src/test/sqlxtc/test_sqlxtc_iosoak.sh
 EOF
 }
 
