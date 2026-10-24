@@ -17,9 +17,12 @@
  *	  'C' 'p' pid[8] tag[8] payload -- in-proc caller: reply by mailbox
  *
  *	In-proc reply (to the caller's mailbox):
- *	  SVR_REPLY_MAGIC[8] tag[8] payload
+ *	  payload tag[8] SVR_REPLY_MAGIC[8]
  *	The magic keeps an ordinary application message from being taken
- *	as a reply; the 64-bit tag is never reused.
+ *	as a reply; the 64-bit tag is never reused.  The header TRAILS the
+ *	payload so the caller is handed the received block itself (frame
+ *	moved with xtc_send_owned, header dropped by just the size): a
+ *	reply crosses with one copy, the server's into the frame.
  *
  *	For a cast:
  *	  byte 0:    'X'
@@ -507,9 +510,9 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 		memcpy(buf + 10, &tag, 8);
 		if (req_size > 0) memcpy(buf + 18, req, req_size);
 
-		rc = xtc_send(target, buf, msg_size);
-		__os_free(buf);
-		if (rc != XTC_OK) return rc;
+		/* Move the frame (no second copy); ours again on error. */
+		rc = xtc_send_owned(target, buf, msg_size);
+		if (rc != XTC_OK) { __os_free(buf); return rc; }
 
 		return __recv_reply_for_tag(tag, target, out_reply, out_size,
 		    timeout_ns, tok);
@@ -535,8 +538,9 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 	buf[1] = 's';
 	memcpy(buf + 2, &slot.id, 8);
 	if (req_size > 0) memcpy(buf + 10, req, req_size);
-	rc = xtc_send(target, buf, msg_size);
-	__os_free(buf);
+	rc = xtc_send_owned(target, buf, msg_size);
+	if (rc != XTC_OK)
+		__os_free(buf);
 	if (rc == XTC_OK)
 		rc = __svr_wait_slot(&slot, target, timeout_ns, tok);
 
@@ -586,8 +590,9 @@ xtc_svr_cast(xtc_pid_t target, const void *msg, size_t size)
 	if (__os_malloc(size + 1, (void **)&buf) != XTC_OK) return XTC_E_NOMEM;
 	buf[0] = 'X';
 	if (size > 0) memcpy(buf + 1, msg, size);
-	rc = xtc_send(target, buf, size + 1);
-	__os_free(buf);
+	rc = xtc_send_owned(target, buf, size + 1);
+	if (rc != XTC_OK)
+		__os_free(buf);
 	return rc;
 }
 
@@ -655,7 +660,7 @@ xtc_svr_reply(xtc_svr_call_t *call, const void *reply, size_t size)
 		(void)__xtc_mtx_unlock(&b->lock);
 		if (copy != NULL) __os_free(copy);
 	} else if (!xtc_pid_is_none(call->reply_pid)) {
-		/* Encode reply for in-proc caller: magic + tag + payload. */
+		/* Encode reply for in-proc caller: payload + tag + magic. */
 		uint8_t *buf;
 		size_t msg_size;
 		if (size > SIZE_MAX - SVR_REPLY_HDR) return XTC_E_INVAL;
@@ -663,11 +668,12 @@ xtc_svr_reply(xtc_svr_call_t *call, const void *reply, size_t size)
 		buf = NULL;
 		if (__os_malloc(msg_size, (void **)&buf) != XTC_OK)
 			return XTC_E_NOMEM;
-		memcpy(buf, SVR_REPLY_MAGIC, 8);
-		memcpy(buf + 8, &call->reply_tag, 8);
-		if (size > 0) memcpy(buf + SVR_REPLY_HDR, reply, size);
-		rc = xtc_send(call->reply_pid, buf, msg_size);
-		__os_free(buf);
+		if (size > 0) memcpy(buf, reply, size);
+		memcpy(buf + size, &call->reply_tag, 8);
+		memcpy(buf + size + 8, SVR_REPLY_MAGIC, 8);
+		rc = xtc_send_owned(call->reply_pid, buf, msg_size);
+		if (rc != XTC_OK)
+			__os_free(buf);
 	}
 
 	/* A handle from xtc_svr_call_save outlived its handle_call and is
@@ -691,7 +697,7 @@ xtc_svr_call_save(const xtc_svr_call_t *call)
 }
 
 /* In-proc receive helper.  The predicate takes ANY svr reply (magic
- * prefix); other messages stay queued for the proc.  A proc has at most
+ * suffix); other messages stay queued for the proc.  A proc has at most
  * one in-proc call outstanding (the caller waits here), so a reply whose
  * tag is not the current one answers an earlier call that already gave
  * up (timeout, abort, server exit): it is dropped here, so late replies
@@ -701,7 +707,8 @@ __match_svr_reply(const void *data, size_t size, void *u)
 {
 	(void)u;
 	return size >= SVR_REPLY_HDR &&
-	    memcmp(data, SVR_REPLY_MAGIC, sizeof SVR_REPLY_MAGIC) == 0;
+	    memcmp((const uint8_t *)data + size - sizeof SVR_REPLY_MAGIC,
+	    SVR_REPLY_MAGIC, sizeof SVR_REPLY_MAGIC) == 0;
 }
 
 static int
@@ -726,7 +733,8 @@ __recv_reply_for_tag(uint64_t tag, xtc_pid_t target, void **out,
 		rc = xtc_recv_match(__match_svr_reply, NULL, &msg, &size,
 		    w < 0 ? 0 : w);
 		if (rc == XTC_OK) {
-			memcpy(&got, (uint8_t *)msg + 8, sizeof got);
+			memcpy(&got, (uint8_t *)msg + size - SVR_REPLY_HDR,
+			    sizeof got);
 			if (got == tag) break;
 			__os_free(msg);                /* late reply: drop */
 			msg = NULL;
@@ -737,18 +745,14 @@ __recv_reply_for_tag(uint64_t tag, xtc_pid_t target, void **out,
 		if (w < 0) return XTC_E_AGAIN;         /* timed out */
 		if (__svr_gone(target)) gone = 1;
 	}
-	/* Strip the header. */
+	/* Drop the trailing header: the caller gets the received block
+	 * itself (an xtc_free-able __os_malloc block), no copy. */
 	*out_size = size - SVR_REPLY_HDR;
 	if (*out_size > 0) {
-		void *copy = NULL;
-		if (__os_malloc(*out_size, &copy) != XTC_OK) {
-			__os_free(msg); return XTC_E_NOMEM;
-		}
-		memcpy(copy, (uint8_t *)msg + SVR_REPLY_HDR, *out_size);
-		*out = copy;
+		*out = msg;
 	} else {
 		*out = NULL;
+		__os_free(msg);
 	}
-	__os_free(msg);
 	return XTC_OK;
 }

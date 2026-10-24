@@ -736,7 +736,10 @@ conn_partition_req(int fd, uint8_t type, const uint8_t *body,
 		topic = p.topic; topic_len = p.topic_len;
 		partition = p.partition;
 		msg_len += (size_t)(p.records_end - p.records_cur);
-		if ((msg = malloc(msg_len)) == NULL)
+		/* xtc_malloc: the message is MOVED to the partition with
+		 * xtc_send_owned (its records are copied once, here, out of
+		 * the connection's receive buffer, which is reused). */
+		if ((msg = xtc_malloc(msg_len)) == NULL)
 			return conn_send_error(fd, KAKA_ERR_MEMORY,
 			    __err_text(KAKA_ERR_MEMORY));
 		memcpy(msg + sizeof req, p.records_cur,
@@ -754,16 +757,20 @@ conn_partition_req(int fd, uint8_t type, const uint8_t *body,
 		msg = (uint8_t *)&req;
 	}
 	if (partition_for(topic, topic_len, partition, &ppid) != 0) {
-		if (msg != (uint8_t *)&req) free(msg);
+		if (msg != (uint8_t *)&req) xtc_free(msg);
 		return conn_send_error(fd, atomic_load(&g_stopping) ?
 		    KAKA_ERR_SHUTDOWN : KAKA_ERR_BAD_REQUEST,
 		    atomic_load(&g_stopping) ? "broker shutting down" :
 		    "bad topic or too many partitions");
 	}
-	if (msg != (uint8_t *)&req)
+	if (msg != (uint8_t *)&req) {
 		memcpy(msg, &req, sizeof req);
-	rc = xtc_send(ppid, msg, msg_len);
-	if (msg != (uint8_t *)&req) free(msg);
+		/* Ours again on any error (xtc_send_owned's contract). */
+		if ((rc = xtc_send_owned(ppid, msg, msg_len)) != XTC_OK)
+			xtc_free(msg);
+	} else {
+		rc = xtc_send(ppid, msg, msg_len);
+	}
 	if (rc != XTC_OK)
 		return conn_send_error(fd, KAKA_ERR_TIMEOUT, "partition busy");
 	if (await_reply(tag, &rep, sizeof rep) != 0)

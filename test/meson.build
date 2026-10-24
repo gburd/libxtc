@@ -45,13 +45,13 @@ munit_tests = [
   ['chan', 'm7'], ['chan_mpmc_bcast', 'm7'], ['future', 'm7'],
   ['res_meter', 'm7'], ['res_contract', 'm7'],
   # M8
-  ['proc_wait_fd', 'm8'], ['recv_correlate', 'm8'],
+  ['proc_wait_fd', 'm8'], ['recv_correlate', 'm8'], ['send_owned', 'm8'],
   ['proc_link_race', 'm8'],
   # M9
   ['sync', 'm9'], ['amutex_xloop', 'm9'], ['dio_sched', 'm9'],
   ['iosched', 'm9'], ['blocking', 'm9'], ['alloc_audit', 'm9'],
   # M10
-  ['sup', 'm10'], ['reg', 'm10'], ['svr', 'm10'], ['svr_edge', 'm10'],
+  ['sup', 'm10'], ['reg', 'm10'], ['svr', 'm10'], ['svr_edge', 'm10'], ['svr_copies', 'm10'],
   ['fsm', 'm10'], ['saga', 'm10'], ['pg', 'm10'], ['pool', 'm10'],
   ['stream', 'm10'], ['credit', 'm10'], ['xproc', 'm10'], ['app', 'm10'],
   ['osproc', 'm10'], ['isolated', 'm10'],
@@ -72,7 +72,7 @@ munit_tests = [
   ['otp_proc_lib', 'otp'], ['otp_gen_server', 'otp'],
   ['otp_gen_server_phase2', 'otp'], ['otp_supervisor', 'otp'],
   # M18 TLS
-  ['tls_basic', 'm18'], ['tls_server', 'm18'], ['tls_client', 'm18'],
+  ['tls_basic', 'm18'], ['tls_server', 'm18'], ['tls_ktls', 'm18'], ['tls_client', 'm18'],
 ]
 
 # Tests that additionally need -I test/include (io backends' pipe compat,
@@ -134,6 +134,7 @@ plain_tests = [
   ['concurrency/aio_migrate_wake',          'concurrency/test_aio_migrate_wake.c'],
   ['m12/tail_dial9',                        'm12/test_tail_dial9.c'],
   ['tnt/tnt',                               'tnt/test_tnt.c'],
+  ['tnt/tnt_zcopy',                         'tnt/test_tnt_zcopy.c'],
 ]
 foreach spec : plain_tests
   tname = spec[0]

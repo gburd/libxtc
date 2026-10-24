@@ -107,4 +107,21 @@ xtc_tls_clear_wants(struct xtc_tls *tls)
 	    unsigned char *b, size_t n, size_t *ol)                      \
 	{ (void)t; (void)b; (void)n; if (ol) *ol = 0; return XTC_E_NOSYS; }
 
+/*
+ * Kernel TLS stubs for a backend without kTLS support (every backend but
+ * OpenSSL): enable and sendfile report XTC_E_NOSYS, active reports 0, so
+ * a caller falls back to xtc_tls_write.  No struct dependency.
+ */
+#define XTC_TLS_DEFINE_KTLS_STUBS                                         \
+	int xtc_tls_enable_ktls(xtc_tls_t *t)                            \
+	{ return t == NULL ? XTC_E_INVAL : XTC_E_NOSYS; }                \
+	int xtc_tls_ktls_active(const xtc_tls_t *t)                      \
+	{ (void)t; return 0; }                                           \
+	int xtc_tls_sendfile(xtc_tls_t *t, int fd, int64_t off,          \
+	    size_t len, size_t *o)                                       \
+	{ (void)t; (void)fd; (void)off; (void)len;                       \
+	  if (o != NULL)                                                 \
+	          *o = 0;                                                \
+	  return XTC_E_NOSYS; }
+
 #endif /* XTC_TLS_COMMON_H */

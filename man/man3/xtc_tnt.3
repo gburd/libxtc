@@ -11,6 +11,8 @@
 .Nm xtc_tnt_send ,
 .Nm xtc_tnt_submit_recv ,
 .Nm xtc_tnt_io_send ,
+.Nm xtc_tnt_io_send_owned ,
+.Nm xtc_tnt_recv_take ,
 .Nm xtc_tnt_submit_close ,
 .Nm xtc_tnt_register_timer ,
 .Nm xtc_tnt_self ,
@@ -34,6 +36,10 @@
 .Fn xtc_tnt_submit_recv "int fd"
 .Ft xtc_tnt_io_result_t
 .Fn xtc_tnt_io_send "int fd" "const void *buffer" "size_t len"
+.Ft xtc_tnt_io_result_t
+.Fn xtc_tnt_io_send_owned "int fd" "void *buffer" "size_t len"
+.Ft void *
+.Fn xtc_tnt_recv_take "xtc_tnt_message_t *msg"
 .Ft xtc_tnt_io_result_t
 .Fn xtc_tnt_submit_close "int fd"
 .Ft void
@@ -136,7 +142,34 @@ only if the handler then returns
 A staged
 .Fn xtc_tnt_io_send
 buffer must live inside the Isolate struct, since it is read at commit
-time after the handler returns.  On completion the Isolate receives a
+time after the handler returns.
+.Pp
+Zero copy: the reactor buffer of a
+.Dv XTC_TNT_IO_TAG_RECV_COMPLETE
+message is freed when the handler returns, unless the handler calls
+.Fn xtc_tnt_recv_take "msg" ,
+which returns
+.Fa msg Ns -> Ns Va body.io.buffer
+.Pq Dv NULL No for another tag or an empty recv ,
+clears it in the message, and makes the caller its owner (release it with
+.Xr xtc_free 3 ) .
+.Fn xtc_tnt_io_send_owned
+stages a send like
+.Fn xtc_tnt_io_send
+of a buffer from libxtc's allocator
+.Pq Xr xtc_malloc 3 , No or one from Fn xtc_tnt_recv_take
+that need not live in the Isolate: on
+.Dv XTC_TNT_IO_OK
+the runtime owns it and frees it once the send completes, or when the
+handler does not return
+.Dv XTC_TNT_WAIT_IO
+.Pq the op is never committed ;
+on any other result the caller still owns it.
+Echoing a received chunk is then
+.Fn xtc_tnt_recv_take
+plus
+.Fn xtc_tnt_io_send_owned ,
+with no copy.  On completion the Isolate receives a
 message tagged
 .Dv XTC_TNT_IO_TAG_RECV_COMPLETE ,
 .Dv XTC_TNT_IO_TAG_SEND_COMPLETE ,
@@ -227,8 +260,6 @@ A TCP echo Isolate, one per connection:
 .Bd -literal -offset indent
 typedef struct echo_conn {
     int     fd;
-    uint8_t buffer[256];
-    int     bytes;
 } echo_conn_t;
 
 static xtc_tnt_transition_t
@@ -248,15 +279,18 @@ static xtc_tnt_transition_t
 echo_handler(void *self_raw, xtc_tnt_message_t *msg)
 {
     echo_conn_t *self = xtc_tnt_self_as(echo_conn_t, self_raw);
+    void *buf;
     switch (msg->tag) {
     case XTC_TNT_IO_TAG_RECV_COMPLETE:
         if (msg->body.io.result <= 0) {
             (void)xtc_tnt_submit_close(self->fd);
             return XTC_TNT_TRANSITION_WAIT_IO;
         }
-        self->bytes = msg->body.io.result;
-        memcpy(self->buffer, msg->body.io.buffer, self->bytes);
-        (void)xtc_tnt_io_send(self->fd, self->buffer, self->bytes);
+        /* keep the reactor buffer and send it back: no copy */
+        buf = xtc_tnt_recv_take(msg);
+        if (xtc_tnt_io_send_owned(self->fd, buf,
+            (size_t)msg->body.io.result) != XTC_TNT_IO_OK)
+            xtc_free(buf);
         return XTC_TNT_TRANSITION_WAIT_IO;
     case XTC_TNT_IO_TAG_SEND_COMPLETE:
         (void)xtc_tnt_submit_recv(self->fd);

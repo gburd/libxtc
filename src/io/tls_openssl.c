@@ -39,6 +39,7 @@
 
 #include "xtc_int.h"
 #include "xtc_tls.h"
+#include "preempt_int.h"   /* __xtc_unsafe_*: kTLS SIGPIPE bracket */
 
 #if defined(XTC_TLS_BACKEND_OPENSSL)
 
@@ -49,10 +50,21 @@
 #include <limits.h>
 #include <sys/types.h>
 #include <sys/socket.h>   /* send/recv MSG_NOSIGNAL in the fd BIO */
-
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/tls1.h>
+
+/* Kernel TLS: OpenSSL built with it (Linux, FreeBSD).  Everything kTLS
+ * -- including the SIGPIPE bracket, which needs sigtimedwait (absent on
+ * macOS, whose OpenSSL has no kTLS) -- compiles only under this. */
+#if defined(SSL_OP_ENABLE_KTLS) && !defined(OPENSSL_NO_KTLS) && \
+    !defined(_WIN32)
+#define XTC_OSSL_KTLS 1
+#include <signal.h>       /* kTLS mode: SIGPIPE bracket */
+#include <time.h>
+#else
+#define XTC_OSSL_KTLS 0
+#endif
 
 /* -------------------------------------------------------------------------
  * Portable read/write shim.
@@ -115,9 +127,14 @@ struct xtc_tls {
 	xtc_tls_transport_t transport;
 	int              have_transport;   /* 1 = transport, 0 = fd */
 	int              host_set;         /* xtc_tls_set_hostname armed a name */
+	int              ktls;             /* xtc_tls_enable_ktls: socket BIO */
+	int              ktls_sigpipe;     /* ktls on a socket without
+	                                    * SO_NOSIGPIPE: bracket the calls */
 };
 
 #include "tls_common.h"   /* after struct xtc_tls: shared want-flag accessors */
+
+void __xtc_net_ktls_seen(void);   /* io_net.c: arm xtc_net_close's kTLS bracket */
 
 /* -------------------------------------------------------------------------
  * One-time library initialisation.
@@ -1075,6 +1092,105 @@ tls_op_begin(xtc_tls_t *tls)
 	xtc_tls_clear_wants(tls);
 }
 
+/* -------------------------------------------------------------------------
+ * kTLS mode (xtc_tls_enable_ktls).
+ *
+ * OpenSSL installs kernel TLS only on its own socket BIO, which writes
+ * with send(fd, buf, n, 0): no MSG_NOSIGNAL, so a write to a dead peer
+ * would raise SIGPIPE -- the reason fd mode has its own BIO.  Where the
+ * socket can opt out (SO_NOSIGPIPE: the BSDs, macOS) enable sets it; on
+ * Linux every OpenSSL call that can write is bracketed: SIGPIPE blocked
+ * on this thread for the call, and a SIGPIPE the call raised consumed
+ * before the mask is restored and reported as XTC_E_IO (see
+ * ktls_sig_leave).  The bracket holds off preemption: the mask is this OS
+ * thread's, so the fiber must not move or switch inside it.  close(2)
+ * of the socket can raise SIGPIPE too (the kernel flushes queued
+ * records): xtc_net_close brackets that (io_net.c).
+ * ----------------------------------------------------------------------- */
+struct ktls_sig {
+	int      armed;
+	int      pre;            /* a SIGPIPE was already pending: not ours */
+#if XTC_OSSL_KTLS
+	sigset_t old;
+#endif
+};
+
+#if XTC_OSSL_KTLS
+static int
+sigpipe_pending(void)
+{
+	sigset_t pend;
+	return sigpending(&pend) == 0 && sigismember(&pend, SIGPIPE) == 1;
+}
+#endif
+
+static void
+ktls_sig_enter(xtc_tls_t *t, struct ktls_sig *k)
+{
+	k->armed = 0;
+	k->pre = 0;
+#if XTC_OSSL_KTLS
+	if (t->ktls_sigpipe) {
+		sigset_t pipe;
+		__xtc_unsafe_enter();
+		(void)sigemptyset(&pipe);
+		(void)sigaddset(&pipe, SIGPIPE);
+		(void)pthread_sigmask(SIG_BLOCK, &pipe, &k->old);
+		/* Only a thread that already blocked it can have one queued. */
+		k->pre = sigismember(&k->old, SIGPIPE) == 1 &&
+		    sigpipe_pending();
+		k->armed = 1;
+	}
+#else
+	(void)t;
+#endif
+}
+
+/*
+ * Returns 1 when the call raised SIGPIPE: the peer is gone and the
+ * bytes did not leave, whatever OpenSSL reported.  Checked after every
+ * call, success included: the kernel TLS send path accepts plaintext
+ * into an open record and returns the count even when pushing it to the
+ * dead socket fails with EPIPE (the SIGPIPE is the only trace), so
+ * write / sendfile / shutdown turn it into XTC_E_IO.  The handshake and
+ * read keep OpenSSL's verdict (it ignores an EPIPE on the TLS 1.3
+ * session-ticket write; a read may have returned data).  A SIGPIPE that
+ * was already pending before the call is left alone (not ours).
+ */
+static int
+ktls_sig_leave(struct ktls_sig *k)
+{
+#if XTC_OSSL_KTLS
+	sigset_t pipe;
+	struct timespec zero = { 0, 0 };
+	int saved, hit = 0;
+
+	if (!k->armed)
+		return 0;
+	saved = errno;
+	if (!k->pre && sigpipe_pending()) {
+		(void)sigemptyset(&pipe);
+		(void)sigaddset(&pipe, SIGPIPE);
+		hit = sigtimedwait(&pipe, NULL, &zero) == SIGPIPE;
+	}
+	errno = saved;
+	(void)pthread_sigmask(SIG_SETMASK, &k->old, NULL);
+	__xtc_unsafe_leave();
+	return hit;
+#else
+	(void)k;
+	return 0;
+#endif
+}
+
+/* A kTLS call raised SIGPIPE (ktls_sig_leave): a transport failure. */
+static int
+tls_peer_gone(void)
+{
+	ERR_clear_error();
+	return XTC_E_IO;
+}
+
 static int
 tls_fail(xtc_tls_t *tls, int err)
 {
@@ -1132,6 +1248,7 @@ tls_fail(xtc_tls_t *tls, int err)
 int
 xtc_tls_handshake(xtc_tls_t *tls)
 {
+	struct ktls_sig ks;
 	int rc, err;
 
 	if (tls == NULL)
@@ -1139,7 +1256,9 @@ xtc_tls_handshake(xtc_tls_t *tls)
 
 	tls_op_begin(tls);
 
+	ktls_sig_enter(tls, &ks);
 	rc = SSL_do_handshake(tls->ssl);
+	(void)ktls_sig_leave(&ks);   /* OpenSSL's verdict stands (tickets) */
 	if (rc == 1)
 		return XTC_OK;   /* handshake complete */
 
@@ -1155,6 +1274,7 @@ xtc_tls_handshake(xtc_tls_t *tls)
 int
 xtc_tls_read(xtc_tls_t *tls, void *buf, size_t buflen, size_t *out_n)
 {
+	struct ktls_sig ks;
 	size_t nread;
 	int    rc, err;
 
@@ -1164,7 +1284,9 @@ xtc_tls_read(xtc_tls_t *tls, void *buf, size_t buflen, size_t *out_n)
 	*out_n           = 0;
 	tls_op_begin(tls);
 
+	ktls_sig_enter(tls, &ks);           /* a read may write an alert */
 	rc = xtc_ssl_read_ex(tls->ssl, buf, buflen, &nread);
+	(void)ktls_sig_leave(&ks);   /* keep data a read returned */
 	if (rc == 1) {
 		*out_n = nread;
 		return XTC_OK;
@@ -1182,6 +1304,7 @@ xtc_tls_read(xtc_tls_t *tls, void *buf, size_t buflen, size_t *out_n)
 int
 xtc_tls_write(xtc_tls_t *tls, const void *buf, size_t buflen, size_t *out_n)
 {
+	struct ktls_sig ks;
 	size_t nwritten;
 	int    rc, err;
 
@@ -1191,7 +1314,10 @@ xtc_tls_write(xtc_tls_t *tls, const void *buf, size_t buflen, size_t *out_n)
 	*out_n           = 0;
 	tls_op_begin(tls);
 
+	ktls_sig_enter(tls, &ks);
 	rc = xtc_ssl_write_ex(tls->ssl, buf, buflen, &nwritten);
+	if (ktls_sig_leave(&ks))
+		return tls_peer_gone();
 	if (rc == 1) {
 		*out_n = nwritten;
 		return XTC_OK;
@@ -1225,6 +1351,7 @@ XTC_TLS_DEFINE_WANTS_ACCESSORS
 int
 xtc_tls_shutdown(xtc_tls_t *tls)
 {
+	struct ktls_sig ks;
 	int rc, err;
 
 	if (tls == NULL)
@@ -1232,12 +1359,110 @@ xtc_tls_shutdown(xtc_tls_t *tls)
 
 	tls_op_begin(tls);
 
+	ktls_sig_enter(tls, &ks);
 	rc = SSL_shutdown(tls->ssl);
+	if (ktls_sig_leave(&ks))
+		return tls_peer_gone();
 	if (rc >= 0)
 		return XTC_OK;   /* rc==1: bidirectional; rc==0: half-done */
 
 	err = SSL_get_error(tls->ssl, rc);
 	return tls_fail(tls, err);
+}
+
+/* -------------------------------------------------------------------------
+ * Kernel TLS.
+ *
+ * PUBLIC: int  xtc_tls_enable_ktls __P((xtc_tls_t *));
+ * PUBLIC: int  xtc_tls_ktls_active __P((const xtc_tls_t *));
+ * PUBLIC: int  xtc_tls_sendfile __P((xtc_tls_t *, int, int64_t, size_t, size_t *));
+ * ----------------------------------------------------------------------- */
+
+int
+xtc_tls_enable_ktls(xtc_tls_t *tls)
+{
+#if XTC_OSSL_KTLS
+	BIO *bio;
+#if defined(SO_NOSIGPIPE)
+	int one = 1;
+#endif
+	if (tls == NULL)
+		return XTC_E_INVAL;
+	if (tls->have_transport)
+		return XTC_E_NOSYS;              /* no socket to hand the kernel */
+	if (tls->ktls)
+		return XTC_OK;
+	if (!SSL_in_before(tls->ssl))
+		return XTC_E_INVAL;              /* only before the handshake */
+	if ((bio = BIO_new_socket(tls->fd, BIO_NOCLOSE)) == NULL)
+		return XTC_E_NOMEM;
+	SSL_set_bio(tls->ssl, bio, bio);     /* frees the fd-mode BIO */
+	(void)SSL_set_options(tls->ssl, SSL_OP_ENABLE_KTLS);
+	tls->ktls = 1;
+	__xtc_net_ktls_seen();               /* xtc_net_close: see io_net.c */
+#if defined(SO_NOSIGPIPE)
+	tls->ktls_sigpipe = setsockopt(tls->fd, SOL_SOCKET, SO_NOSIGPIPE,
+	    &one, sizeof one) != 0;
+#else
+	tls->ktls_sigpipe = 1;
+#endif
+	return XTC_OK;
+#else
+	(void)tls;
+	return XTC_E_NOSYS;                  /* this OpenSSL has no kTLS */
+#endif
+}
+
+int
+xtc_tls_ktls_active(const xtc_tls_t *tls)
+{
+	int r = 0;
+	if (tls == NULL || !tls->ktls)
+		return 0;
+	if (BIO_get_ktls_send(SSL_get_wbio(tls->ssl)))
+		r |= XTC_TLS_KTLS_TX;
+	if (BIO_get_ktls_recv(SSL_get_rbio(tls->ssl)))
+		r |= XTC_TLS_KTLS_RX;
+	return r;
+}
+
+int
+xtc_tls_sendfile(xtc_tls_t *tls, int fd, int64_t off, size_t len,
+    size_t *out_n)
+{
+#if XTC_OSSL_KTLS
+	struct ktls_sig ks;
+	ossl_ssize_t n;
+	int err;
+
+	if (tls == NULL || fd < 0 || off < 0 || out_n == NULL)
+		return XTC_E_INVAL;
+	*out_n = 0;
+	if ((xtc_tls_ktls_active(tls) & XTC_TLS_KTLS_TX) == 0)
+		return XTC_E_NOSYS;              /* no kernel TX: read + write */
+	if (len == 0)
+		return XTC_OK;
+	if (len > (size_t)INT_MAX)
+		len = (size_t)INT_MAX;           /* a short count, like write */
+	tls_op_begin(tls);
+	ktls_sig_enter(tls, &ks);
+	n = SSL_sendfile(tls->ssl, fd, (off_t)off, len, 0);
+	if (ktls_sig_leave(&ks))
+		return tls_peer_gone();
+	if (n >= 0) {
+		*out_n = (size_t)n;
+		return XTC_OK;
+	}
+	err = SSL_get_error(tls->ssl, (int)n);
+	if (err == SSL_ERROR_SYSCALL && BIO_should_retry(SSL_get_wbio(tls->ssl)))
+		err = SSL_ERROR_WANT_WRITE;      /* EAGAIN from sendfile */
+	return tls_fail(tls, err);
+#else
+	(void)tls; (void)fd; (void)off; (void)len;
+	if (out_n != NULL)
+		*out_n = 0;
+	return XTC_E_NOSYS;
+#endif
 }
 
 /* -------------------------------------------------------------------------

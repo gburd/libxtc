@@ -14,12 +14,14 @@ int xtc_svr_call_abortable __P((xtc_pid_t, const void *, size_t, void **, size_t
 int xtc_svr_continue __P((void *));
 int xtc_tnt_start __P((const xtc_tnt_spec_t *));
 uint8_t xtc_tnt_shard_id __P((void));
+void *xtc_tnt_recv_take __P((xtc_tnt_message_t *));
 void *xtc_tnt_scratch_arena __P((size_t));
 void xtc_tnt_register_timer __P((uint64_t, uint16_t));
 void xtc_tnt_stop __P((void));
 xtc_svr_call_t *xtc_svr_call_save __P((const xtc_svr_call_t *));
 xtc_tnt_handle_t xtc_tnt_self __P((void));
 xtc_tnt_io_result_t xtc_tnt_io_send __P((int, const void *, size_t));
+xtc_tnt_io_result_t xtc_tnt_io_send_owned __P((int, void *, size_t));
 xtc_tnt_io_result_t xtc_tnt_submit_close __P((int));
 xtc_tnt_io_result_t xtc_tnt_submit_recv __P((int));
 xtc_tnt_send_result_t xtc_tnt_send __P((xtc_tnt_handle_t, uint16_t, const void *, size_t));

@@ -771,5 +771,6 @@ xtc_tls_shutdown(xtc_tls_t *tls)
 }
 
 XTC_TLS_DEFINE_INTROSPECT_STUBS   /* introspection not yet ported to SChannel */
+XTC_TLS_DEFINE_KTLS_STUBS         /* kernel TLS: OpenSSL backend only */
 
 #endif /* XTC_TLS_BACKEND_SCHANNEL */

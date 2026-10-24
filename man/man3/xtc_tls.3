@@ -27,7 +27,10 @@
 .Nm xtc_tls_get_peer_common_name ,
 .Nm xtc_tls_get_peer_issuer_dn ,
 .Nm xtc_tls_get_peer_serial ,
-.Nm xtc_tls_get_server_cert_hash
+.Nm xtc_tls_get_server_cert_hash ,
+.Nm xtc_tls_enable_ktls ,
+.Nm xtc_tls_ktls_active ,
+.Nm xtc_tls_sendfile
 .Nd TLS over async sockets
 .Sh SYNOPSIS
 .In xtc.h
@@ -324,6 +327,108 @@ A backend that has not implemented these returns
 .Dv 0 ,
 or
 .Dv XTC_E_NOSYS .
+.Sh KERNEL TLS
+.Ft int
+.Fn xtc_tls_enable_ktls "xtc_tls_t *tls"
+.Ft int
+.Fn xtc_tls_ktls_active "const xtc_tls_t *tls"
+.Ft int
+.Fn xtc_tls_sendfile "xtc_tls_t *tls" "int fd" "int64_t off" "size_t len" "size_t *out_n"
+.Pp
+By default every TLS byte is encrypted or decrypted in user space and
+copied between the caller's buffer, the backend's record buffer and the
+socket.
+.Fn xtc_tls_enable_ktls
+opts one fd-mode connection into kernel TLS (Linux
+.Pa tls.ko ,
+FreeBSD KTLS): after the handshake the backend hands the session keys to
+the socket, so
+.Fn xtc_tls_write
+and
+.Fn xtc_tls_read
+pass plaintext straight to and from the kernel, and
+.Fn xtc_tls_sendfile
+sends
+.Fa len
+bytes of file
+.Fa fd
+from offset
+.Fa off
+encrypted by the kernel without the file ever entering user space.
+Call it after
+.Fn xtc_tls_create
+and before the first
+.Fn xtc_tls_handshake .
+It returns
+.Dv XTC_OK
+when the request is armed; whether the kernel takes over is decided at
+the end of the handshake (module loaded, negotiated cipher: AES-GCM or
+ChaCha20-Poly1305 on Linux) and reported by
+.Fn xtc_tls_ktls_active
+as
+.Dv XTC_TLS_KTLS_TX
+and/or
+.Dv XTC_TLS_KTLS_RX
+(0 = user space, or
+.Fa tls
+is
+.Dv NULL ) .
+A connection the kernel declines stays a fully working user-space TLS
+connection.
+.Fn xtc_tls_enable_ktls
+returns
+.Dv XTC_E_NOSYS
+when the backend or library build has no kernel TLS (only OpenSSL
+implements it) or the connection uses a custom transport, and
+.Dv XTC_E_INVAL
+when
+.Fa tls
+is
+.Dv NULL
+or the handshake has started.
+.Pp
+.Fn xtc_tls_sendfile
+returns
+.Dv XTC_OK
+with
+.Fa *out_n
+set to the bytes sent (possibly fewer than
+.Fa len ,
+like
+.Fn xtc_tls_write ;
+loop on it),
+.Dv XTC_E_AGAIN
+with
+.Fn xtc_tls_wants_write
+set when the socket is full,
+.Dv XTC_E_NOSYS
+when kernel TX is not active (fall back to reading the file and
+.Fn xtc_tls_write ) ,
+and
+.Dv XTC_E_IO
+or
+.Dv XTC_E_INTERNAL
+like
+.Fn xtc_tls_write .
+.Pp
+A kernel-TLS connection keeps fd mode's no-SIGPIPE guarantee: the
+socket gets
+.Dv SO_NOSIGPIPE
+where the OS has it; elsewhere SIGPIPE is held off on the calling thread
+for each TLS call, and a write the kernel accepted but could not deliver
+because the peer has gone returns
+.Dv XTC_E_IO
+(the kernel itself reports the byte count).
+Close the socket with
+.Xr xtc_net_close 3 :
+on Linux,
+.Xr close 2
+of a kernel-TLS socket whose peer has gone can raise SIGPIPE while the
+kernel flushes a queued record, and
+.Fn xtc_net_close
+holds it off; a raw
+.Xr close 2
+does not.
 .Sh SEE ALSO
 .Xr xtc_io 3 ,
 .Xr xtc_net 3 ,

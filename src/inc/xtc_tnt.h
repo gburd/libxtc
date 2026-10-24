@@ -287,6 +287,21 @@ xtc_tnt_io_result_t xtc_tnt_submit_recv(int fd);
  * returns).  On completion: XTC_TNT_IO_TAG_SEND_COMPLETE. */
 xtc_tnt_io_result_t xtc_tnt_io_send(int fd, const void *buffer, size_t len);
 
+/* Zero-copy I/O.  The reactor buffer of a RECV_COMPLETE message is
+ * freed when the handler returns; xtc_tnt_recv_take(msg), called in the
+ * handler, keeps it: it returns msg->body.io.buffer (NULL if msg is not
+ * a RECV_COMPLETE or has no buffer), clears it in msg, and the caller
+ * owns it from then on (release with xtc_free, or hand it to
+ * xtc_tnt_io_send_owned).  xtc_tnt_io_send_owned stages a send like
+ * xtc_tnt_io_send of a buffer from libxtc's allocator (xtc_malloc, or
+ * one from xtc_tnt_recv_take) that need not live in the Isolate: on
+ * XTC_TNT_IO_OK the runtime owns it and frees it once the send has
+ * completed, or when the handler does not return XTC_TNT_WAIT_IO (the
+ * op is never committed); on any other result the caller still owns it.
+ * Echoing a received chunk is then recv_take + io_send_owned: no copy. */
+xtc_tnt_io_result_t xtc_tnt_io_send_owned(int fd, void *buffer, size_t len);
+void *xtc_tnt_recv_take(xtc_tnt_message_t *msg);
+
 /* Stage a close of fd; on completion: XTC_TNT_IO_TAG_CLOSE_COMPLETE. */
 xtc_tnt_io_result_t xtc_tnt_submit_close(int fd);
 

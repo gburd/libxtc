@@ -453,6 +453,7 @@ TESTS_C		= test_sched_policy test_sched_continuous test_batch test_version test_
 		  test_aio_migrate_wake \
 		  test_proc_link_race \
 		  test_recv_correlate \
+		  test_send_owned \
 		  test_sync \
 		  test_amutex_xloop \
 		  test_dio_sched \
@@ -460,7 +461,7 @@ TESTS_C		= test_sched_policy test_sched_continuous test_batch test_version test_
 		  test_blocking test_alloc_audit \
 		  test_sup \
 		  test_reg \
-		  test_svr test_svr_edge \
+		  test_svr test_svr_edge test_svr_copies \
 		  test_fsm \
 		  test_saga \
 		  test_pg \
@@ -472,6 +473,7 @@ TESTS_C		= test_sched_policy test_sched_continuous test_batch test_version test_
 		  test_xproc \
 		  test_app \
 		  test_tnt \
+		  test_tnt_zcopy \
 		  test_osproc \
 		  test_isolated \
 		  test_mctx \
@@ -510,6 +512,7 @@ TESTS_C		= test_sched_policy test_sched_continuous test_batch test_version test_
 		  test_backtrace \
 		  test_tls_basic \
 		  test_tls_server \
+		  test_tls_ktls \
 		  test_tls_client \
 		  test_pgmock_smoke \
 		  test_inject_races
@@ -897,6 +900,16 @@ bench_disk: $(srcdir)/../bench/bench_disk.c $(STATIC_LIB)
 bench_net: $(srcdir)/../bench/bench_net.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../bench/bench_net.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+bench_msg_copy: $(srcdir)/../bench/bench_msg_copy.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../bench/bench_msg_copy.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+bench_tls_sendfile: $(srcdir)/../bench/bench_tls_sendfile.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../bench/bench_tls_sendfile.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 bench_aio_fibers: $(srcdir)/../bench/bench_aio_fibers.c $(STATIC_LIB)
@@ -1739,6 +1752,12 @@ test_recv_correlate: $(srcdir)/../test/m8/test_recv_correlate.c \
 		-o $@ $(srcdir)/../test/m8/test_recv_correlate.c \
 		$(srcdir)/../test/m8/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+test_send_owned: $(srcdir)/../test/m8/test_send_owned.c \
+		$(srcdir)/../test/m8/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m8 \
+		-o $@ $(srcdir)/../test/m8/test_send_owned.c \
+		$(srcdir)/../test/m8/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 test_proc_link_race: $(srcdir)/../test/m8/test_proc_link_race.c \
 		$(srcdir)/../test/m8/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m8 \
@@ -1856,6 +1875,12 @@ test_svr_edge: $(srcdir)/../test/m10/test_svr_edge.c \
 		-o $@ $(srcdir)/../test/m10/test_svr_edge.c \
 		$(srcdir)/../test/m10/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+test_svr_copies: $(srcdir)/../test/m10/test_svr_copies.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m10 \
+		-o $@ $(srcdir)/../test/m10/test_svr_copies.c \
+		$(srcdir)/../test/m10/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 test_app: $(srcdir)/../test/m10/test_app.c \
 		$(srcdir)/../test/m10/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m10 \
@@ -1866,6 +1891,11 @@ test_app: $(srcdir)/../test/m10/test_app.c \
 test_tnt: $(srcdir)/../test/tnt/test_tnt.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../test/tnt/test_tnt.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_tnt_zcopy: $(srcdir)/../test/tnt/test_tnt_zcopy.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../test/tnt/test_tnt_zcopy.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_osproc: $(srcdir)/../test/m10/test_osproc.c \
@@ -2128,6 +2158,12 @@ test_tls_server: $(srcdir)/../test/m18/test_tls_server.c \
 		$(srcdir)/../test/m18/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m18 \
 		-o $@ $(srcdir)/../test/m18/test_tls_server.c \
+		$(srcdir)/../test/m18/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_tls_ktls: $(srcdir)/../test/m18/test_tls_ktls.c \
+		$(srcdir)/../test/m18/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m18 \
+		-o $@ $(srcdir)/../test/m18/test_tls_ktls.c \
 		$(srcdir)/../test/m18/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_tls_client: $(srcdir)/../test/m18/test_tls_client.c \

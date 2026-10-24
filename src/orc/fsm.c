@@ -367,8 +367,9 @@ xtc_fsm_send(xtc_pid_t target, const void *ev, size_t len)
 	if (__os_malloc(len + 1, (void **)&buf) != XTC_OK) return XTC_E_NOMEM;
 	buf[0] = 'E';
 	if (len > 0) memcpy(buf + 1, ev, len);
-	rc = xtc_send(target, buf, len + 1);
-	__os_free(buf);
+	rc = xtc_send_owned(target, buf, len + 1);   /* moved, not copied */
+	if (rc != XTC_OK)
+		__os_free(buf);
 	return rc;
 }
 
@@ -395,9 +396,8 @@ xtc_fsm_call(xtc_pid_t target, const void *req, size_t req_size,
 	memcpy(buf + 1, &self, 8);
 	memcpy(buf + 9, &tag, 4);
 	if (req_size > 0) memcpy(buf + 13, req, req_size);
-	rc = xtc_send(target, buf, msg_size);
-	__os_free(buf);
-	if (rc != XTC_OK) return rc;
+	rc = xtc_send_owned(target, buf, msg_size);
+	if (rc != XTC_OK) { __os_free(buf); return rc; }
 
 	/* Wait for a reply tagged with our tag: <tag:4><payload>. */
 	{
@@ -419,17 +419,14 @@ xtc_fsm_call(xtc_pid_t target, const void *req, size_t req_size,
 			if (rc != XTC_OK) return rc;
 			if (rsize >= 4) {
 				uint32_t rtag;
-				memcpy(&rtag, rmsg, 4);
+				/* Reply = payload + tag[4]: hand the received
+				 * block over as is (no strip copy). */
+				memcpy(&rtag, (uint8_t *)rmsg + rsize - 4, 4);
 				if (rtag == tag) {
 					size_t plen = rsize - 4;
 					if (out_reply != NULL && plen > 0) {
-						void *copy;
-						if (__os_malloc(plen, &copy) != XTC_OK) {
-							__os_free(rmsg);
-							return XTC_E_NOMEM;
-						}
-						memcpy(copy, (uint8_t *)rmsg + 4, plen);
-						*out_reply = copy;
+						*out_reply = rmsg;
+						rmsg = NULL;
 					} else if (out_reply != NULL) {
 						*out_reply = NULL;
 					}
@@ -459,10 +456,11 @@ xtc_fsm_reply(xtc_fsm_call_t *call, const void *reply, size_t size)
 
 	msg_size = 4 + size;
 	if (__os_malloc(msg_size, (void **)&buf) != XTC_OK) return XTC_E_NOMEM;
-	memcpy(buf, &call->reply_tag, 4);
-	if (size > 0) memcpy(buf + 4, reply, size);
-	rc = xtc_send(call->reply_pid, buf, msg_size);
-	__os_free(buf);
+	if (size > 0) memcpy(buf, reply, size);
+	memcpy(buf + size, &call->reply_tag, 4);   /* trailer: see fsm_call */
+	rc = xtc_send_owned(call->reply_pid, buf, msg_size);
+	if (rc != XTC_OK)
+		__os_free(buf);
 	call->replied = 1;
 	return rc;
 }

@@ -71,6 +71,8 @@ __net_io_chunk(size_t remaining)
 #  include <arpa/inet.h>
 #  include <netdb.h>
 #  include <fcntl.h>
+#  include <signal.h>     /* xtc_net_close: kTLS SIGPIPE bracket */
+#  include <time.h>
 #  include <unistd.h>
 #endif
 
@@ -223,6 +225,54 @@ __net_settle(xtc_res_t *r, int rc, const int *out_fd)
 	return XTC_OK;
 }
 
+/*
+ * kTLS close.  close(2) of a socket carrying the kernel TLS ULP flushes
+ * any record still queued with the flags of the send that queued it --
+ * no MSG_NOSIGNAL for OpenSSL's socket BIO -- so when the peer has gone
+ * the CLOSING thread gets SIGPIPE (Linux 6.12, reproduced: exit 141 in
+ * test_tls_ktls no_sigpipe).  xtc_net_close holds SIGPIPE off for the
+ * close of such a socket and consumes the one it raised.  Off unless a
+ * connection ever called xtc_tls_enable_ktls (__xtc_net_ktls_seen), so
+ * a process without kTLS pays nothing; with it, one getsockopt(TCP_ULP)
+ * per close.
+ */
+static _Atomic int __net_ktls_seen;
+
+/* PUBLIC: void __xtc_net_ktls_seen __P((void)); */
+void
+__xtc_net_ktls_seen(void)
+{
+	atomic_store_explicit(&__net_ktls_seen, 1, memory_order_relaxed);
+}
+
+static void
+__net_close_raw(int fd)
+{
+#if defined(TCP_ULP) && !defined(_WIN32)
+	sigset_t pipe, old, pend;
+	struct timespec zero = { 0, 0 };
+	char ulp[16];
+	socklen_t ul = sizeof ulp;
+
+	if (atomic_load_explicit(&__net_ktls_seen, memory_order_relaxed) &&
+	    getsockopt(fd, IPPROTO_TCP, TCP_ULP, ulp, &ul) == 0 && ul >= 3 &&
+	    memcmp(ulp, "tls", 3) == 0) {
+		__xtc_unsafe_enter();    /* the mask is this OS thread's */
+		(void)sigemptyset(&pipe);
+		(void)sigaddset(&pipe, SIGPIPE);
+		(void)pthread_sigmask(SIG_BLOCK, &pipe, &old);
+		(void)close(fd);
+		if (sigismember(&old, SIGPIPE) == 0 &&
+		    sigpending(&pend) == 0 && sigismember(&pend, SIGPIPE) == 1)
+			(void)sigtimedwait(&pipe, NULL, &zero);
+		(void)pthread_sigmask(SIG_SETMASK, &old, NULL);
+		__xtc_unsafe_leave();
+		return;
+	}
+#endif
+	(void)close(fd);
+}
+
 void
 xtc_net_close(int fd)
 {
@@ -238,7 +288,7 @@ xtc_net_close(int fd)
 	(void)__xtc_mtx_unlock(&__net_fd_lock);
 	if (r != NULL)
 		xtc_res_release(r, XTC_RES_FDS, 1);
-	(void)close(fd);
+	__net_close_raw(fd);
 }
 
 /* ----- TCP knobs ----------------------------------------- */
@@ -1034,10 +1084,91 @@ __net_wait_fd(int fd, uint32_t interest, int64_t deadline_ns)
 #endif
 }
 
+#if !defined(_WIN32)
+#include <sys/uio.h>     /* struct iovec, sendmsg */
+/* Payload pieces per frame: the prefix + 63 fit one 1 KiB on-stack
+ * vector (fiber stacks are small), and every POSIX IOV_MAX is >= 16
+ * (_XOPEN_IOV_MAX); Linux/BSD/macOS are 1024. */
+#define __NET_FRAMEV_MAX  63
+
+/* PUBLIC: int xtc_net_send_framev __P((int, const struct iovec *, int)); */
+/*
+ * One frame whose payload is the concatenation of iov[0..iovcnt), sent
+ * straight from the caller's buffers: the 4-byte prefix and the payload
+ * go out in the same sendmsg(2) (one TCP segment for a small frame), a
+ * short write advances a private copy of the vector, EAGAIN parks.
+ */
+int
+xtc_net_send_framev(int fd, const struct iovec *iov, int iovcnt)
+{
+	struct iovec w[__NET_FRAMEV_MAX + 1];
+	struct msghdr mh;
+	uint8_t hdr[4];
+	size_t len = 0, left;
+	int i, n = 1, at = 0;
+
+	if (fd < 0 || iovcnt < 0 || iovcnt > __NET_FRAMEV_MAX ||
+	    (iovcnt > 0 && iov == NULL))
+		return XTC_E_INVAL;
+	for (i = 0; i < iovcnt; i++) {
+		if (iov[i].iov_len == 0)
+			continue;
+		if (iov[i].iov_base == NULL ||
+		    iov[i].iov_len > 0xFFFFFFFFu - len)
+			return XTC_E_INVAL;
+		len += iov[i].iov_len;
+		w[n++] = iov[i];
+	}
+	hdr[0] = (uint8_t)(len >> 24); hdr[1] = (uint8_t)(len >> 16);
+	hdr[2] = (uint8_t)(len >> 8);  hdr[3] = (uint8_t)(len);
+	w[0].iov_base = hdr;
+	w[0].iov_len = 4;
+	for (left = len + 4; left > 0; ) {
+		ssize_t r;
+		memset(&mh, 0, sizeof mh);
+		mh.msg_iov = w + at;
+		mh.msg_iovlen = (size_t)(n - at);
+		r = sendmsg(fd, &mh, __NET_NOSIG);
+		if (r > 0) {
+			size_t done = (size_t)r;
+			left -= done;
+			while (done > 0) {
+				if (done >= w[at].iov_len) {
+					done -= w[at++].iov_len;
+				} else {
+					w[at].iov_base = (char *)w[at].iov_base +
+					    done;
+					w[at].iov_len -= done;
+					done = 0;
+				}
+			}
+			continue;
+		}
+		if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			if (__net_wait_fd(fd, XTC_IO_WRITABLE, -1) != 0)
+				return XTC_E_INTERNAL;
+			continue;
+		}
+		if (r < 0 && errno == EINTR)
+			continue;
+		return XTC_E_INTERNAL;
+	}
+	return XTC_OK;
+}
+#endif /* !_WIN32 */
+
 /* PUBLIC: int xtc_net_send_frame __P((int, const void *, size_t)); */
 int
 xtc_net_send_frame(int fd, const void *buf, size_t len)
 {
+#if !defined(_WIN32)
+	struct iovec v;
+	if (fd < 0 || (len > 0 && buf == NULL) || len > 0xFFFFFFFFu)
+		return XTC_E_INVAL;
+	v.iov_base = (void *)(uintptr_t)buf;
+	v.iov_len = len;
+	return xtc_net_send_framev(fd, &v, 1);
+#else
 	uint8_t hdr[4];
 	const uint8_t *p = (const uint8_t *)buf;
 	size_t off;
@@ -1070,6 +1201,7 @@ xtc_net_send_frame(int fd, const void *buf, size_t len)
 		return XTC_E_INTERNAL;
 	}
 	return XTC_OK;
+#endif
 }
 
 /* PUBLIC: int xtc_net_recv_frame __P((int, void **, size_t *, size_t, int64_t)); */

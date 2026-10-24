@@ -155,8 +155,11 @@ child_pump_proc(void *a)
 		frc = xtc_net_recv_frame(pp->ctrl_fd, &frame, &flen, 0,
 		    50LL * 1000 * 1000);
 		if (frc == XTC_OK) {
-			if (frame != NULL && flen > 0)
-				(void)xtc_send(pp->root, frame, flen);
+			/* The frame is an xtc_free-able block: move it into the
+			 * root's mailbox rather than copying it there. */
+			if (frame != NULL && flen > 0 &&
+			    xtc_send_owned(pp->root, frame, flen) == XTC_OK)
+				frame = NULL;
 			if (frame != NULL)
 				__os_free(frame);
 			continue;
@@ -1162,9 +1165,10 @@ win_reader_thread(LPVOID a)
 			if (n <= 0) { __os_free(buf); goto done; }
 			off += (size_t)n;
 		}
-		/* Deliver to the root proc (cross-thread; wakes its loop). */
-		(void)xtc_send(r->root, buf, len);
-		__os_free(buf);
+		/* Deliver to the root proc (cross-thread; wakes its loop),
+		 * moving the frame rather than copying it. */
+		if (xtc_send_owned(r->root, buf, len) != XTC_OK)
+			__os_free(buf);
 	}
 done:
 	/* Socket closed: nudge the root so it can observe end-of-input if it

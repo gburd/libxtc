@@ -60,13 +60,31 @@ static inline int __xtc_io_sim_defer_cb(xtc_io_t *io, int64_t due_ns,
 { (void)io; (void)due_ns; (void)fn; (void)arg; return XTC_E_NOSYS; }
 #endif
 
+/*
+ * A message.  The payload is either inline (data[], ext == NULL: a copy
+ * of at most ENV_POOL_PAYLOAD bytes) or a library-allocator block at ext
+ * that xtc_recv hands to the receiver as is, with no copy.  A larger
+ * xtc_send makes ONE block, payload first and this header after it
+ * (ENV_F_TRAIL), so the receiver's xtc_free(payload) releases both; an
+ * xtc_send_owned moves the caller's buffer in under a small malloc'd
+ * header.  (A pooled header for those cost a cross-thread slab depot
+ * round trip per message: 2 loops x 4 KiB ran 0.81x the old one-malloc
+ * envelope.)  data[] stays 16-aligned (offset 48).
+ */
 struct envelope {
 	struct envelope *next;
 	xtc_pid_t        from;
 	size_t           size;
 	uint64_t         hlc;        /* sender's HLC stamp (causal tracing) */
-	unsigned char    data[];     /* flexible */
+	void            *ext;        /* payload handed to the receiver, or NULL */
+	uint32_t         flags;      /* ENV_F_* */
+	uint32_t         pad_;
+	unsigned char    data[];     /* inline payload (ext == NULL) */
 };
+#define ENV_F_SLAB  1u           /* header came from __env_slab */
+#define ENV_F_OWNED 2u           /* ext is the xtc_send_owned caller's buffer */
+#define ENV_F_TRAIL 4u           /* header lives inside the ext block */
+#define ENV_TRAIL_OFF(n)  (((n) + 15) & ~(size_t)15)
 
 /* ---------- proc ---------- */
 
@@ -162,32 +180,82 @@ __proc_slabs_ensure(void)
 	(void) __proc_mtx_unlock(&__proc_slab_init_lock);
 }
 
-/* Allocate an envelope for a `size`-byte payload, from the pool when
- * it fits, else from malloc. */
+/* Allocate an envelope with room for `inline_size` inline payload bytes,
+ * from the pool when it fits, else from malloc.  ext is NULL. */
 static struct envelope *
-__env_alloc(size_t size)
+__env_alloc(size_t inline_size)
 {
+	struct envelope *e = NULL;
 	void *p = NULL;
-	if (size <= ENV_POOL_PAYLOAD) {
+	if (inline_size <= ENV_POOL_PAYLOAD) {
 		__proc_slabs_ensure();
-		if (XTC_LIKELY(__env_slab != NULL))
-			return xtc_slab_alloc(__env_slab);
+		if (XTC_LIKELY(__env_slab != NULL) &&
+		    (e = xtc_slab_alloc(__env_slab)) != NULL) {
+			e->flags = ENV_F_SLAB;
+			e->ext = NULL;
+			return e;
+		}
 	}
-	if (__os_malloc(sizeof(struct envelope) + size, &p) != XTC_OK)
+	if (__os_malloc(sizeof(struct envelope) + inline_size, &p) != XTC_OK)
 		return NULL;
-	return p;
+	e = p;
+	e->flags = 0;
+	e->ext = NULL;
+	return e;
 }
 
-/* Free an envelope, routing by its payload size (the same predicate
- * __env_alloc used). */
+/* An xtc_send copy of size > ENV_POOL_PAYLOAD bytes: one block holding
+ * the payload at its start and the header after it. */
+static struct envelope *
+__env_alloc_trail(const void *data, size_t size)
+{
+	struct envelope *e;
+	void *p = NULL;
+	if (__os_malloc(ENV_TRAIL_OFF(size) + sizeof *e, &p) != XTC_OK)
+		return NULL;
+	memcpy(p, data, size);
+	e = (struct envelope *)((unsigned char *)p + ENV_TRAIL_OFF(size));
+	e->flags = ENV_F_TRAIL;
+	e->ext = p;
+	return e;
+}
+
+/* Free an envelope and the payload it still owns (ext). */
 static void
 __env_free(struct envelope *e)
 {
 	if (e == NULL) return;
-	if (e->size <= ENV_POOL_PAYLOAD && __env_slab != NULL)
+	if ((e->flags & ENV_F_TRAIL) != 0) {
+		/* The header is inside ext; once a receiver took ext it is
+		 * the receiver's, header and all. */
+		if (e->ext != NULL)
+			__os_free(e->ext);
+		return;
+	}
+	if (e->ext != NULL)
+		__os_free(e->ext);
+	if ((e->flags & ENV_F_SLAB) != 0)
 		xtc_slab_free(__env_slab, e);
 	else
 		__os_free(e);
+}
+
+/* Free an envelope the mailbox refused (dead target, full, partition).
+ * An xtc_send_owned buffer goes back to its caller, who still owns it on
+ * any error, so it is detached rather than freed. */
+static void
+__env_reject(struct envelope *e)
+{
+	if ((e->flags & ENV_F_OWNED) != 0)
+		e->ext = NULL;
+	__env_free(e);
+}
+
+/* The payload bytes a match predicate / receiver sees. */
+static inline const void *
+__env_payload(const struct envelope *e)
+{
+	return e->ext != NULL ? e->ext : (const void *)e->data;
 }
 
 /* ---------- causal tracing + hybrid logical clock (xtc_trace.h) ---------- */
@@ -1238,8 +1306,13 @@ __mbox_pop_locked(struct xtc_proc *p)
 	return e;
 }
 
+/* queued != NULL: a synchronous send, told whether e was queued; a
+ * refused e is then handed back (__env_reject: an owned buffer returns
+ * to its caller).  queued == NULL: a deferred delivery the sender was
+ * already told succeeded, so a refused e is the library's to free. */
 static int
-__mbox_deliver_locked(struct xtc_proc *p, struct envelope *e, int sys)
+__mbox_deliver_locked(struct xtc_proc *p, struct envelope *e, int sys,
+    int *queued)
 {
 	int armed, rc = XTC_OK;
 	int wm_fire = 0;
@@ -1275,7 +1348,12 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e, int sys)
 	     xtc_sim_fault(250))) {
 		p->mbox_drop_total++;
 		(void) __proc_mtx_unlock(&p->mbox_lock);
-		__env_free(e);
+		if (queued != NULL) {
+			*queued = 0;
+			__env_reject(e);
+		} else {
+			__env_free(e);
+		}
 		return XTC_E_AGAIN;
 	}
 	/* Race window: the alive/capacity check passed but the envelope
@@ -1284,6 +1362,8 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e, int sys)
 	 * observes a consistent mailbox state under the lock. */
 	XTC_INJECTION_POINT("proc.mbox.pre_push");
 	__mbox_push_locked(p, e);
+	if (queued != NULL)
+		*queued = 1;
 	/* Watermark rising edge: fire once when the depth first reaches
 	 * the level; capture under the lock, invoke after releasing it
 	 * (the callback must be free to call back into proc APIs). */
@@ -1356,7 +1436,7 @@ __mbox_deferred_run(void *arg)
 	struct __mbox_deferred *d = arg;
 	struct xtc_proc *p = __resolve(d->pid, NULL);
 	if (p != NULL) {
-		(void)__mbox_deliver_locked(p, d->e, d->sys);
+		(void)__mbox_deliver_locked(p, d->e, d->sys, NULL);
 		__proc_release(p);
 	} else
 		__env_free(d->e);   /* target gone: drop the delayed message */
@@ -1364,7 +1444,7 @@ __mbox_deferred_run(void *arg)
 }
 
 static int
-__mbox_deliver(struct xtc_proc *p, struct envelope *e, int sys)
+__mbox_deliver(struct xtc_proc *p, struct envelope *e, int sys, int *queued)
 {
 	/*
 	 * DST cross-loop network model (sim only; a single relaxed load
@@ -1390,7 +1470,8 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e, int sys)
 			(void) __proc_mtx_lock(&p->mbox_lock);
 			p->mbox_drop_total++;
 			(void) __proc_mtx_unlock(&p->mbox_lock);
-			__env_free(e);
+			*queued = 0;
+			__env_reject(e);
 			return XTC_E_AGAIN;
 		}
 		if (cross && dst->io != NULL) {
@@ -1405,8 +1486,10 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e, int sys)
 					d->sys = sys;
 					if (__xtc_io_sim_defer_cb(dst->io,
 					    now + lat, __mbox_deferred_run,
-					    d) == XTC_OK)
+					    d) == XTC_OK) {
+						*queued = 1;  /* in flight: ours */
 						return XTC_OK;
+					}
 					__os_free(d);
 				}
 				/* alloc/defer failed: deliver inline (correct,
@@ -1414,7 +1497,7 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e, int sys)
 			}
 		}
 	}
-	return __mbox_deliver_locked(p, e, sys);
+	return __mbox_deliver_locked(p, e, sys, queued);
 }
 
 /* ---------- spawn entry trampoline ---------- */
@@ -2369,15 +2452,25 @@ __xtc_proc_self_loop(xtc_pid_t *out_pid)
 	return self != NULL ? self->loop : NULL;
 }
 
-static int __send_ex(xtc_loop_t *, xtc_pid_t, const void *, size_t, int);
-#define __send_on(o, t, d, n)  __send_ex((o), (t), (d), (n), 0)
-#define __send_sys(t, d, n)    __send_ex(NULL, (t), (d), (n), 1)
+static int __send_ex(xtc_loop_t *, xtc_pid_t, const void *, size_t, void *,
+    int);
+#define __send_on(o, t, d, n)  __send_ex((o), (t), (d), (n), NULL, 0)
+#define __send_sys(t, d, n)    __send_ex(NULL, (t), (d), (n), NULL, 1)
 
 /* PUBLIC: int xtc_send __P((xtc_pid_t, const void *, size_t)); */
 int
 xtc_send(xtc_pid_t to, const void *data, size_t size)
 {
 	return __send_on(NULL, to, data, size);
+}
+
+/* PUBLIC: int xtc_send_owned __P((xtc_pid_t, void *, size_t)); */
+int
+xtc_send_owned(xtc_pid_t to, void *buf, size_t size)
+{
+	if (buf == NULL)
+		return size == 0 ? __send_on(NULL, to, NULL, 0) : XTC_E_INVAL;
+	return __send_ex(NULL, to, buf, size, buf, 0);
 }
 
 /* Owner-qualified xtc_send (see __resolve_on); owner NULL -> XTC_E_INVAL. */
@@ -2390,15 +2483,17 @@ __xtc_send_on(xtc_loop_t *owner, xtc_pid_t to, const void *data, size_t size)
 }
 
 /* xtc_send resolved in `owner`'s table (NULL: by pid alone).  sys = 1
- * for a DOWN / link EXIT (bypasses mailbox_cap, see __mbox_deliver_locked). */
+ * for a DOWN / link EXIT (bypasses mailbox_cap, see __mbox_deliver_locked).
+ * owned != NULL (== data): xtc_send_owned -- the buffer itself becomes the
+ * payload; it is the library's only if the message is queued. */
 static int
 __send_ex(xtc_loop_t *owner, xtc_pid_t to, const void *data, size_t size,
-    int sys)
+    void *owned, int sys)
 {
 	struct xtc_proc *p;
 	xtc_loop_t *target;
 	struct envelope *e;
-	int rc;
+	int rc, queued = 0;
 
 	if (XTC_UNLIKELY(size > 0 && data == NULL)) return XTC_E_INVAL;
 	if (XTC_UNLIKELY(xtc_pid_is_none(to))) return XTC_E_INVAL;
@@ -2414,16 +2509,29 @@ __send_ex(xtc_loop_t *owner, xtc_pid_t to, const void *data, size_t size,
 	 * a size near SIZE_MAX would wrap sizeof *e + size to a small
 	 * value, malloc would succeed, and the memcpy below would
 	 * overflow the heap.  Reject before allocating. */
-	if (XTC_UNLIKELY(size > SIZE_MAX - sizeof *e)) {
+	if (XTC_UNLIKELY(size > SIZE_MAX - sizeof *e - 16)) {
 		__proc_release(p); return XTC_E_INVAL;
 	}
 
-	e = __env_alloc(size);
+	/* A payload above the inline size travels in a block xtc_recv hands
+	 * to the receiver as is: one copy (here) for xtc_send, none for
+	 * xtc_send_owned. */
+	if (owned != NULL) {
+		if ((e = __env_alloc(0)) != NULL) {
+			e->flags |= ENV_F_OWNED;
+			e->ext = owned;
+		}
+	} else if (size > ENV_POOL_PAYLOAD) {
+		e = __env_alloc_trail(data, size);
+	} else {
+		e = __env_alloc(size);
+		if (XTC_LIKELY(e != NULL) && size > 0)
+			memcpy(e->data, data, size);
+	}
 	if (XTC_UNLIKELY(e == NULL)) { __proc_release(p); return XTC_E_NOMEM; }
 	e->next = NULL;
 	e->from = xtc_self();
 	e->size = size;
-	if (size > 0) memcpy(e->data, data, size);
 
 	/* Causal tracing: stamp the envelope with the sender's HLC and
 	 * record the send.  Off the hot path entirely when tracing is
@@ -2441,8 +2549,13 @@ __send_ex(xtc_loop_t *owner, xtc_pid_t to, const void *data, size_t size,
 	__xtc_tail_emit(XTC_TAIL_MSG, XTC_TAIL_SEND, to, (uint64_t)size);
 	XTC_PROBE_MSG_SEND(XTC_PROBE_PID(e->from), XTC_PROBE_PID(to), size);
 
-	rc = __mbox_deliver(p, e, sys);
+	rc = __mbox_deliver(p, e, sys, &queued);
 	__proc_release(p);
+	/* xtc_send_owned reports the ownership outcome: XTC_OK iff queued.
+	 * (Both wake paths behind a queued message are infallible today, so
+	 * this differs from xtc_send only in a case that cannot occur.) */
+	if (owned != NULL && queued)
+		return XTC_OK;
 	return rc;
 }
 
@@ -2787,7 +2900,7 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 		/* Walk the save queue after the mark. */
 		link = (mark != NULL) ? &mark->next : &self->save_head;
 		while ((e = *link) != NULL) {
-			if (match(e->data, e->size, u)) {
+			if (match(__env_payload(e), e->size, u)) {
 				*link = e->next;
 				atomic_fetch_sub_explicit(&self->mbox_saved, 1,
 				    memory_order_relaxed);
@@ -2839,7 +2952,7 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 				break;
 			}
 			(void) __proc_mtx_unlock(&self->mbox_lock);
-			if (match(e->data, e->size, u))
+			if (match(__env_payload(e), e->size, u))
 				goto deliver;
 			/* Append to save queue. */
 			e->next = NULL;
@@ -2953,7 +3066,13 @@ deliver:
 	__xtc_task_cancel_park_timer(self->task);
 	{
 		void *buf = NULL;
-		if (e->size > 0) {
+		if (e->ext != NULL) {
+			/* A separate payload buffer (a large xtc_send, or any
+			 * xtc_send_owned): hand it over as is, no copy.  It is a
+			 * library-allocator block, as xtc_free requires. */
+			buf = e->ext;
+			e->ext = NULL;
+		} else if (e->size > 0) {
 			/* Handed to the caller as *out; the recv contract says free
 			 * it with xtc_free (== __os_free == the installed alloc
 			 * hook), so it MUST be __os_malloc'd or an embedder with a

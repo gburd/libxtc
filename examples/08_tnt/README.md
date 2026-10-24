@@ -35,8 +35,6 @@ shared socket table, no lock.
 
 typedef struct echo_conn {
 	int     fd;
-	uint8_t buffer[256];
-	int     bytes;
 } echo_conn_t;
 
 /* Initialize: record the fd and submit the first recv. */
@@ -57,15 +55,21 @@ static xtc_tnt_transition_t
 echo_handler(void *self_raw, xtc_tnt_message_t *msg)
 {
 	echo_conn_t *self = xtc_tnt_self_as(echo_conn_t, self_raw);
+	void *buf;
 	switch (msg->tag) {
 	case XTC_TNT_IO_TAG_RECV_COMPLETE:
 		if (msg->body.io.result <= 0) {
 			(void)xtc_tnt_submit_close(self->fd);
 			return XTC_TNT_TRANSITION_WAIT_IO;
 		}
-		self->bytes = msg->body.io.result;
-		memcpy(self->buffer, msg->body.io.buffer, self->bytes);
-		(void)xtc_tnt_io_send(self->fd, self->buffer, self->bytes);
+		/* Keep the reactor buffer and send it back: no copy. */
+		buf = xtc_tnt_recv_take(msg);
+		if (buf == NULL || xtc_tnt_io_send_owned(self->fd, buf,
+		    (size_t)msg->body.io.result) != XTC_TNT_IO_OK) {
+			xtc_free(buf);
+			return xtc_tnt_transition_to_crash(
+			    XTC_TNT_FAULT_CONTRACT_VIOLATION);
+		}
 		return XTC_TNT_TRANSITION_WAIT_IO;
 	case XTC_TNT_IO_TAG_SEND_COMPLETE:
 		(void)xtc_tnt_submit_recv(self->fd);
@@ -77,6 +81,12 @@ echo_handler(void *self_raw, xtc_tnt_message_t *msg)
 	}
 }
 ```
+
+The echoed bytes are never copied: `xtc_tnt_recv_take` keeps the
+courier's receive buffer (otherwise freed when the handler returns) and
+`xtc_tnt_io_send_owned` sends that block, which the runtime frees once
+the send completes.  The plain `xtc_tnt_io_send` instead needs a buffer
+inside the Isolate, which would mean copying each chunk into it.
 
 A plain listener proc accepts connections and spawns one EchoConnection
 Isolate per connection (round-robin across shards) via

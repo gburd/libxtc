@@ -161,7 +161,10 @@ All functions are in
   [`xtc_tnt_submit_recv`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_tnt.3),
   [`xtc_tnt_io_send`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_tnt.3),
   [`xtc_tnt_submit_close`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_tnt.3):
-  stage socket I/O whose completion arrives as a message.
+  stage socket I/O whose completion arrives as a message;
+  [`xtc_tnt_recv_take`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_tnt.3) /
+  [`xtc_tnt_io_send_owned`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_tnt.3)
+  keep a received buffer and send it without copying.
 - **Timers** --
   [`xtc_tnt_register_timer`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_tnt.3):
   a timer that fires as a tagged message.

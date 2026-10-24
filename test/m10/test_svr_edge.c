@@ -201,7 +201,7 @@ test_reply_when_stopped(const MunitParameter p[], void *d)
  * server then stops, so the caller fails with XTC_E_NOTFOUND.
  * ================================================================ */
 
-/* The in-proc reply frame is a 16-byte header (reply magic + 64-bit tag)
+/* The in-proc reply frame is 16 bytes of framing (64-bit tag + reply magic)
  * plus the payload (src/orc/svr.c, SVR_REPLY_HDR). */
 #define OOM_REPLY_SIZE   4081              /* distinctive; 16 + this = 4097 */
 #define OOM_MSG_SIZE     (16 + OOM_REPLY_SIZE)
