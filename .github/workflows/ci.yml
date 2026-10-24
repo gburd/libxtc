@@ -1238,6 +1238,7 @@ jobs:
       - name: Build + test under riscv64 emulation
         run: |
           docker run --rm --platform linux/riscv64 \
+            -e XTC_TEST_EMULATED=1 \
             -v "$PWD":/src -w /src riscv64/ubuntu:24.04 \
             bash -c '
               apt-get update &&

@@ -1511,7 +1511,14 @@ test_offloop_spin(const MunitParameter p[], void *d)
 		fprintf(stderr, "  %s: %ld csw over %d acquires\n", name[kind],
 		    atomic_load(&g_sp_csw), 2 * SP_N);
 		munit_assert_long(g_sp_val, ==, 2L * SP_N);
-		munit_assert_long(atomic_load(&g_sp_csw), <, 2L * SP_N / 10);
+		/* The switch bound is a property of real cores: under CPU
+		 * emulation (CI's riscv64 qemu-user job sets
+		 * XTC_TEST_EMULATED) an amutex hand-off outlasts the
+		 * time-bounded spin and 50-100% of acquires park.  Mutual
+		 * exclusion (above) is still checked there. */
+		if (getenv("XTC_TEST_EMULATED") == NULL)
+			munit_assert_long(atomic_load(&g_sp_csw), <,
+			    2L * SP_N / 10);
 	}
 	xtc_arwlock_destroy(g_hd_rw);
 	xtc_amutex_destroy(g_hd_m);
