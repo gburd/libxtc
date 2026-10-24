@@ -388,11 +388,19 @@ flowchart TD
 ```
 
 - **Supervision.** The server is an `xtc_app` with a root supervisor; the
-  connection front door is a supervised listener proc that accepts with
-  `xtc_net_accept` (backing off on EMFILE). A connection proc
-  that crashes is contained and does not take the server down --
-  [let it crash]({{ '/philosophy/let-it-crash/' | relative_url }}) at the
-  connection granularity.
+  connection front door is a supervised listener proc (one_for_one,
+  permanent, at most 10 restarts a minute) that accepts with
+  `xtc_net_accept` (backing off on EMFILE). Connection procs and the
+  storage procs are not supervised, and faults are not contained:
+  sqlxtc installs no `xtc_fault_guard`, so a fault in any fiber ends the
+  process. That is deliberate for a storage engine -- a fault taken while
+  holding a page latch or the commit lock leaves shared state that cannot
+  be unwound safely -- and recovery is a restart that replays the log.
+  (Contrast [let it crash]({{ '/philosophy/let-it-crash/' | relative_url }}),
+  which fits stateless connection handlers, not a shared page cache.) A
+  connection proc releases its socket, buffers and engine handle only
+  when it returns normally; one killed with `xtc_exit_pid` leaks them
+  until the server restarts.
 - **The executor and the B-tree run on fibers, not threads.** Each
   connection is a fiber (`xtc_proc_spawn`) on the multi-loop `xtc_exec`
   executor; the vectorized executor and the B-link-tree descent run

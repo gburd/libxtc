@@ -112,6 +112,187 @@ cycles spinning on that lock) against 12.1M on fcontext; one fiber switch 550
   run queue, a fiber parked in a notification wait with no wake source, and an
   example's `pthread_once` called from a fiber).
 
+## FIXED (1.59): sqlxtc durability and snapshot bugs found by the 1.59 review
+
+* **A large transaction, and every commit after it, was lost in crash
+  recovery.**  See the next section.
+* **An autocommit statement could lose an update or skip a row.**  Its
+  snapshot was not registered with the version GC, so once a newer
+  version committed, a prune could reclaim the version the statement was
+  about to read.  The UPDATE then changed nothing and reported success,
+  and a SELECT missed the row.  Pruning was off by default, so this needed
+  `xstore_autovacuum(1)` or a concurrent `xstore_gc()`.  Every statement
+  now pins its snapshot for its duration (test_snap_registry).
+* **A transaction's spilled rows were never deleted.**  A transaction
+  that buffers more than 256 KiB of rows spills the older ones into the
+  tree; they stayed after COMMIT and ROLLBACK, so a bulk load kept a
+  second copy of its rows in the page file until the next crash rebuild
+  (test_steal_reclaim).
+* **A direct-I/O store (`--storage-direct`) never reopened trusted.**  Its
+  superblock write was unaligned, which Linux refuses under O_DIRECT, so
+  every open rebuilt from the log (test_dio_restart).
+
+## FIXED (1.59): sqlxtc lost a large transaction, and every commit after it, in crash recovery
+
+Through 1.58, a transaction whose log record was larger than 16 MiB
+committed and was acknowledged, but crash recovery treated the record as a
+torn tail.  Recovery lost that transaction and every commit logged after
+it, and the reopen truncated the log at that point.  A transaction is one
+log record, so a bulk load in one transaction (TPC-C's loader commits
+100k Stock rows at once, about 33 MB) produced such a record.  A clean
+shutdown hid the bug, because the shutdown compacts the log into small
+records; only a crash before the next log checkpoint lost data.  1.59
+verifies each frame against the file size and a streamed checksum instead
+of a length cap, and writes a record bigger than the log buffer directly
+(test_wal_bigtxn).
+
+## FIXED (1.59): sqlxtc silent wrong results found during the 1.59 work
+
+Each of these returned a wrong answer with no error.  All were present
+in 1.58.0.
+
+* **Secondary-index entries were lost at every storage open.**  The open
+  rebuilt every index, and inserting an index entry next to a range that
+  deletes had emptied could fail in the leaf split on prefix-compressed
+  leaves; the failure was discarded, so the entry was silently dropped.
+  Base rows were never lost, but a query through the index returned too
+  few rows and a UNIQUE check could miss a duplicate, until the next open
+  rebuilt -- and lost again.  On a 10-warehouse TPROC-C store one open
+  dropped 4,567 index entries; TPROC-C's Delivery, which picks the oldest
+  new order through such an index, then skipped the lost orders forever.
+  1.59 fixes the split, never trusts an index build that saw a failed
+  insert, and clears every index before building any
+  (test_btree_limits, test_crash_oracle).
+* **A range scan could skip rows or return them out of order** under
+  concurrent merges.  A forward scan released the leaf it had finished
+  before it fixed the page id in that leaf's right link; a delete could
+  merge the sibling away in the gap and the page id be reissued to
+  another key range, and the scan carried on from the first slot of that
+  page.  Every forward scan used this path: SELECT range and full scans,
+  the row selection of UPDATE and DELETE, version garbage collection, the
+  unique-constraint check and the online checkpoint's dump.  A scan from
+  the first key had a related hole through a stale root page id.  The
+  scan now accepts the next page only if it is the live leaf whose lower
+  fence equals the upper fence of the one it left, and a scan from the
+  first key only on the leftmost leaf; otherwise it re-descends
+  (test_btree_cursor_hop, test_btree_smo_stress).
+* **`ORDER BY ... LIMIT` kept the last of tied rows, not the first.**
+  SQLite returns the first K rows of the unlimited query, ties in scan
+  order; sqlxtc differed on 9 of 19 such query shapes.  The comparison
+  oracle sorted both results before comparing, so it could not see this;
+  it now compares ORDER BY results row by row (test_order_limit).
+* **Fifteen SELECT shapes returned wrong answers**: a bound parameter
+  inside a derived table or CTE read NULL; GROUP BY output columns were
+  mapped to the wrong key; HAVING over a computed output never matched;
+  derived-table, HAVING, join and CASE comparisons applied the wrong type
+  affinity against a string literal; `GROUP BY 1` grouped by the constant
+  1; a correlated subquery inside an aggregate query read past the end of
+  a buffer; and a two-table join ordered by a column it did not output
+  wrote past the end of one.  1.59 runs every aggregate through one
+  operator over any row source (test_sql_results).
+* **Two servers could open one store.**  Nothing stopped a second
+  `sqlxtc-server` (or one with `SO_REUSEPORT` on the same port) from
+  opening a store a running server held, and the two then overwrote each
+  other's pages.  The store is now locked for the life of the open
+  (test_sqlxtc_exclusive.sh).
+
+## FIXED (1.59): involuntary preemption could hang, corrupt or lose work
+
+Involuntary preemption is opt-in (`xtc_preempt_set_involuntary(1)`).
+With it on, a preemption tick hands the OS thread to the scheduler in
+the middle of whatever the fiber was doing, so every per-loop structure
+a fiber updates must be bracketed against it.  1.58 missed several:
+
+* **io_uring SQE reservation.**  A tick between reserving a submission
+  slot and filling it let the next submitter publish the half-filled
+  slot: the preempted fiber's own operation never reached the kernel (a
+  hang), and the kernel could re-execute a stale earlier write at an old
+  file offset into a buffer that no longer belonged to it.
+* **The run queue and the timer heap.**  A tick inside a same-loop wake's
+  two-pointer enqueue lost the woken task; one inside a timer-heap sift
+  lost a timer another fiber armed.
+* **The slab magazine.**  A tick inside the per-thread magazine's pop or
+  push gave one object two owners.
+* **aarch64 registers.**  The preemption trampoline used x16 for its final
+  branch and saved only the low 128 bits of the vector registers, so a
+  preempted fiber could lose x16 and its SVE state (glibc's memcpy uses
+  SVE on current Arm cores).  It now resumes through the kernel's own
+  signal frame.
+* **The sqlxtc WAL's CRC table init**, built with `pthread_once` from
+  whichever fiber checksummed first, wedged the whole loop if that fiber
+  was preempted inside it.
+
+Each has a test that raises the real preemption signal inside the
+window (test_preempt_p2, test_slab, test_wal_crc_once).  The
+test_wal_kill preemption sweep went from 8 hangs in 4,000 runs to none
+in 28,000.  The opt-in item below ("involuntary preemption corrupts a busy
+same-loop pair") no longer reproduces, but these fixes are not proven to
+be its cause, so it stays open.
+
+## OPEN (1.59): known costs of the 1.59 performance work
+
+* **One hot `xtc_amutex` shared by many plain threads is slower.**  With
+  16-128 OS threads (not fibers) contending for one mutex, throughput is
+  36-52% below 1.58 (`bench_sync_offloop amutex w`).  1.59 wakes a
+  sleeper on every release instead of keeping one wake in flight, because
+  the in-flight rule left the lock free while the woken thread was still
+  leaving a deep CPU idle state; that made the sqlxtc ledger workloads
+  35-50% slower on hosts with deep idle states enabled.  The woken thread
+  now often loses the mutex to a spinning one and sleeps again.
+  `xtc_arwlock` and workloads over several locks are 1.6-12x faster than
+  1.58.  Workaround: fewer threads on one mutex, or fibers.
+* **The store is larger than SQLite's.**  After 1.59's compact record and
+  index formats a 10-warehouse TPROC-C page file takes 1.36x SQLite's
+  allocated blocks (1.58: 3.61x) and the ledger page file 1.83x (1.58:
+  2.56x), not counting the log.
+* **The WAL frame checksum is now CRC32C.**  1.59 reads logs written by
+  1.58 (FNV-1a frames) and mixed logs, but 1.58 cannot read a 1.59 log:
+  there is no downgrade path once a 1.59 server has written to a store.
+
+## OPEN (1.58): sqlxtc buffer-pool sizing and the hot-row hold
+
+* **The default buffer pool is 256 pages (1 MiB); size it.**  Pass
+  `--storage-frames`.  For TPROC-C at 10 warehouses (about 7 GB) on a
+  128-vCPU host, 262144 pages (1 GiB) measured best (49.8k tpmC at 8
+  connections).  Smaller pools spend most of their CPU in the CLOCK
+  sweep (65536 pages: `evict_one` 78% of the server at 8 connections,
+  8.4k tpmC).  Since 1.59 the trickler visits at most 16384 frames a
+  pass, so a large pool no longer costs a full-pool walk every 5 ms; in
+  process, TPROC-C at 10 warehouses runs best with a pool that holds the
+  store (1048576 pages, 4 GiB).
+* **A log checkpoint costs CPU and write bandwidth while it runs.**
+  When the log passes `--checkpoint-mb` (default 64 MiB, then twice its
+  last post-checkpoint size) the live rows are dumped into a new log.
+  Since 1.59 commits keep running during the dump (they used to wait
+  for all of it: about 16 s on a 10-warehouse TPROC-C store); they are
+  held only to take its start point and to swap the files.  The dump
+  itself runs on a blocking-pool thread and reads every live row.
+* **Restart after an unclean stop replays the whole log.**  A 10-warehouse
+  TPROC-C store killed after 150 s of load at 8 connections takes 47 s to
+  reopen (1.58: 71 s; 1.59 scans the log once instead of twice and builds
+  the indexes in parallel); after a clean SIGTERM drain it reopens in
+  0.12 s (1.58: 24.7 s), because the page file and its indexes are
+  trusted.
+* **TPROC-C scaling is bounded by hot rows.**  A Payment holds its
+  warehouse row from its first UPDATE to COMMIT (about 9 ms at 32
+  connections), so throughput per warehouse levels off; connections
+  beyond a few per warehouse wait on row intents.
+* **Conflicts are reported, not hidden.**  SNAPSHOT and stronger fail a
+  conflicting write at the statement with "could not serialize"; the
+  transaction is then aborted (later statements fail until ROLLBACK).
+  READ COMMITTED, autocommit, and a transaction's first statement re-run
+  on a fresh snapshot (at most 8 times), waiting for the row's holder
+  first.
+* **Rows over about 1,000 bytes go out of line.**  Since 1.59 an inline
+  entry on 4 KiB pages holds up to 1,010 bytes (1.58: 506), so TPROC-C's
+  662-byte customer row stays inline; a larger value goes out of line on
+  its own pages.
+* **A crash rebuilds the indexes.**  After an unclean stop the store
+  replays its (compacted) log and rebuilds every secondary index (see
+  above).  Since 1.59 the engine keeps no double-write ring (it protected
+  nothing in this mode and cost about 1,000 fdatasyncs a second under
+  TPROC-C).
+
 ## RESOLVED (1.58): sqlxtc SQL compatibility and TPROC-C, and a bare-coroutine UAF
 
 An audit of SQLite 3.53.4 against sqlxtc, run as differential tests
@@ -153,82 +334,6 @@ against Python's sqlite3, found (and 1.58 fixes):
   write-write conflict fails or waits at the statement, with deadlock
   detection, instead of failing COMMIT), and no global lock on the
   per-statement catalog lookups.
-
-## FIXED (1.59): sqlxtc durability and snapshot bugs found by the 1.59 review
-
-* **A large transaction, and every commit after it, was lost in crash
-  recovery.**  See the next section.
-* **An autocommit statement could lose an update or skip a row.**  Its
-  snapshot was not registered with the version GC, so once a newer
-  version committed, a prune could reclaim the version the statement was
-  about to read.  The UPDATE then changed nothing and reported success,
-  and a SELECT missed the row.  Pruning was off by default, so this needed
-  `xstore_autovacuum(1)` or a concurrent `xstore_gc()`.  Every statement
-  now pins its snapshot for its duration (test_snap_registry).
-* **A transaction's spilled rows were never deleted.**  A transaction
-  that buffers more than 256 KiB of rows spills the older ones into the
-  tree; they stayed after COMMIT and ROLLBACK, so a bulk load kept a
-  second copy of its rows in the page file until the next crash rebuild
-  (test_steal_reclaim).
-* **A direct-I/O store (`--storage-direct`) never reopened trusted.**  Its
-  superblock write was unaligned, which Linux refuses under O_DIRECT, so
-  every open rebuilt from the log (test_dio_restart).
-
-## FIXED (1.59): sqlxtc lost a large transaction, and every commit after it, in crash recovery
-
-Through 1.58, a transaction whose log record was larger than 16 MiB
-committed and was acknowledged, but crash recovery treated the record as a
-torn tail.  Recovery lost that transaction and every commit logged after
-it, and the reopen truncated the log at that point.  A transaction is one
-log record, so a bulk load in one transaction (TPC-C's loader commits
-100k Stock rows at once, about 33 MB) produced such a record.  A clean
-shutdown hid the bug, because the shutdown compacts the log into small
-records; only a crash before the next log checkpoint lost data.  1.59
-verifies each frame against the file size and a streamed checksum instead
-of a length cap, and writes a record bigger than the log buffer directly
-(test_wal_bigtxn).
-
-## OPEN (1.58): sqlxtc buffer-pool sizing and the hot-row hold
-
-* **The default buffer pool is 256 pages (1 MiB); size it.**  Pass
-  `--storage-frames`.  For TPROC-C at 10 warehouses (about 7 GB) on a
-  128-vCPU host, 262144 pages (1 GiB) measured best (49.8k tpmC at 8
-  connections).  Smaller pools spend most of their CPU in the CLOCK
-  sweep (65536 pages: `evict_one` 78% of the server at 8 connections,
-  8.4k tpmC).  Since 1.59 the trickler visits at most 16384 frames a
-  pass, so a large pool no longer costs a full-pool walk every 5 ms; in
-  process, TPROC-C at 10 warehouses runs best with a pool that holds the
-  store (1048576 pages, 4 GiB).
-* **A log checkpoint costs CPU and write bandwidth while it runs.**
-  When the log passes `--checkpoint-mb` (default 64 MiB, then twice its
-  last post-checkpoint size) the live rows are dumped into a new log.
-  Since 1.59 commits keep running during the dump (they used to wait
-  for all of it: about 16 s on a 10-warehouse TPROC-C store); they are
-  held only to take its start point and to swap the files.  The dump
-  itself runs on a blocking-pool thread and reads every live row.
-* **Restart after an unclean stop replays the whole log.**  A 10-warehouse
-  store took 292 s to open after a kill; after a clean SIGTERM drain
-  (17 s) it reopens in 13 s.
-* **TPROC-C scaling is bounded by hot rows.**  A Payment holds its
-  warehouse row from its first UPDATE to COMMIT (about 9 ms at 32
-  connections), so throughput per warehouse levels off; connections
-  beyond a few per warehouse wait on row intents.
-* **Conflicts are reported, not hidden.**  SNAPSHOT and stronger fail a
-  conflicting write at the statement with "could not serialize"; the
-  transaction is then aborted (later statements fail until ROLLBACK).
-  READ COMMITTED, autocommit, and a transaction's first statement re-run
-  on a fresh snapshot (at most 8 times), waiting for the row's holder
-  first.
-* **Rows over about 500 bytes take a whole page.**  On 4 KiB pages an
-  inline entry is at most 506 bytes; a larger value goes out of line on
-  its own pages, one 4 KiB page for a 662-byte TPROC-C customer row.  At
-  10 warehouses that is 1.2 GB for the customer table, and the store is
-  3.6 GB against SQLite's 0.9 GB.
-* **Restart after an unclean stop rebuilds from the log.**  The page file
-  is trusted only after a clean close, so a crash replays the whole
-  (compacted) log; the open also rebuilds every secondary index.  Since
-  1.59 the engine keeps no double-write ring (it protected nothing in
-  this mode and cost about 1,000 fdatasyncs a second under TPROC-C).
 
 ## RESOLVED (1.57): sqlxtc large rows, B-tree limits, and the 1.56 regressions
 
