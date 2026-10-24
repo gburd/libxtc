@@ -72,7 +72,7 @@ munit_tests = [
   ['otp_proc_lib', 'otp'], ['otp_gen_server', 'otp'],
   ['otp_gen_server_phase2', 'otp'], ['otp_supervisor', 'otp'],
   # M18 TLS
-  ['tls_basic', 'm18'], ['tls_server', 'm18'], ['tls_client', 'm18'],
+  ['tls_basic', 'm18'], ['tls_server', 'm18'], ['tls_ktls', 'm18'], ['tls_client', 'm18'],
 ]
 
 # Tests that additionally need -I test/include (io backends' pipe compat,

@@ -464,6 +464,61 @@ XTC_API int  xtc_tls_create_transport(xtc_tls_ctx_t *ctx,
  */
 XTC_API int  xtc_tls_set_hostname(xtc_tls_t *tls, const char *name);
 
+/* -------------------------------------------------------------------------
+ * Kernel TLS (zero-copy TLS): let the kernel do the record crypto.
+ *
+ * By default every TLS byte is encrypted / decrypted in user space and
+ * copied between the application buffer, the TLS library's record
+ * buffer and the socket.  With kernel TLS (Linux tls.ko, FreeBSD KTLS)
+ * the library hands the session keys to the socket after the handshake,
+ * xtc_tls_write / xtc_tls_read then pass plaintext straight to and from
+ * the kernel, and xtc_tls_sendfile sends a file region encrypted without
+ * it ever entering user space.
+ *
+ * xtc_tls_enable_ktls opts ONE fd-mode connection in.  Call it after
+ * xtc_tls_create and before the first xtc_tls_handshake.  It returns
+ * XTC_OK when the request is armed -- whether the kernel actually takes
+ * over is decided at the end of the handshake (kernel support, module
+ * loaded, negotiated cipher: AES-GCM / ChaCha20-Poly1305 on Linux) and
+ * reported by xtc_tls_ktls_active; a connection the kernel declines
+ * stays an ordinary, fully working user-space TLS connection.
+ * XTC_E_NOSYS: this backend or library build has no kTLS (only the
+ * OpenSSL backend implements it), or the connection uses a custom
+ * transport; XTC_E_INVAL: tls is NULL or the handshake has started.
+ * The connection keeps the no-SIGPIPE guarantee of fd mode (SO_NOSIGPIPE
+ * where the OS has it, else SIGPIPE is held off for the duration of each
+ * TLS call on the calling thread), provided the socket is closed with
+ * xtc_net_close: on Linux, close(2) of a kTLS socket whose peer has gone
+ * can raise SIGPIPE while the kernel flushes a queued record, and
+ * xtc_net_close holds it off; a raw close(2) does not.  A write the
+ * kernel accepted but could not deliver because the peer has gone is
+ * reported as XTC_E_IO (the kernel itself returns the byte count).
+ *
+ * xtc_tls_ktls_active returns XTC_TLS_KTLS_TX and/or XTC_TLS_KTLS_RX for
+ * the directions the kernel handles (0 = none, or tls NULL).  Meaningful
+ * after the handshake.
+ *
+ * xtc_tls_sendfile sends up to len bytes of file fd starting at off over
+ * the connection, encrypted by the kernel, the file pages never copied
+ * to user space.  Returns XTC_OK with *out_n = bytes sent (may be < len,
+ * like xtc_tls_write), XTC_E_AGAIN (wants_write set) when the socket is
+ * full, XTC_E_NOSYS when kernel TX is not active (fall back to reading
+ * the file and xtc_tls_write), XTC_E_IO / XTC_E_INTERNAL like
+ * xtc_tls_write.  The socket is non-blocking in fd mode, so a large len
+ * returns short; loop on it.
+ *
+ * PUBLIC: int  xtc_tls_enable_ktls __P((xtc_tls_t *));
+ * PUBLIC: int  xtc_tls_ktls_active __P((const xtc_tls_t *));
+ * PUBLIC: int  xtc_tls_sendfile __P((xtc_tls_t *, int, int64_t, size_t, size_t *));
+ * ----------------------------------------------------------------------- */
+#define XTC_TLS_KTLS_TX  1
+#define XTC_TLS_KTLS_RX  2
+
+XTC_API int  xtc_tls_enable_ktls(xtc_tls_t *tls);
+XTC_API int  xtc_tls_ktls_active(const xtc_tls_t *tls);
+XTC_API int  xtc_tls_sendfile(xtc_tls_t *tls, int fd, int64_t off,
+                              size_t len, size_t *out_n);
+
 /*
  * xtc_tls_destroy --
  *	Release per-connection TLS state.  Does not close the underlying fd,

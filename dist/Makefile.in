@@ -511,6 +511,7 @@ TESTS_C		= test_sched_policy test_sched_continuous test_batch test_version test_
 		  test_backtrace \
 		  test_tls_basic \
 		  test_tls_server \
+		  test_tls_ktls \
 		  test_tls_client \
 		  test_pgmock_smoke \
 		  test_inject_races
@@ -903,6 +904,11 @@ bench_net: $(srcdir)/../bench/bench_net.c $(STATIC_LIB)
 bench_msg_copy: $(srcdir)/../bench/bench_msg_copy.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../bench/bench_msg_copy.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+bench_tls_sendfile: $(srcdir)/../bench/bench_tls_sendfile.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../bench/bench_tls_sendfile.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 bench_aio_fibers: $(srcdir)/../bench/bench_aio_fibers.c $(STATIC_LIB)
@@ -2128,6 +2134,12 @@ test_tls_server: $(srcdir)/../test/m18/test_tls_server.c \
 		$(srcdir)/../test/m18/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m18 \
 		-o $@ $(srcdir)/../test/m18/test_tls_server.c \
+		$(srcdir)/../test/m18/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_tls_ktls: $(srcdir)/../test/m18/test_tls_ktls.c \
+		$(srcdir)/../test/m18/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m18 \
+		-o $@ $(srcdir)/../test/m18/test_tls_ktls.c \
 		$(srcdir)/../test/m18/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_tls_client: $(srcdir)/../test/m18/test_tls_client.c \

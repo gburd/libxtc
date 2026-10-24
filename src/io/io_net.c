@@ -71,6 +71,8 @@ __net_io_chunk(size_t remaining)
 #  include <arpa/inet.h>
 #  include <netdb.h>
 #  include <fcntl.h>
+#  include <signal.h>     /* xtc_net_close: kTLS SIGPIPE bracket */
+#  include <time.h>
 #  include <unistd.h>
 #endif
 
@@ -223,6 +225,54 @@ __net_settle(xtc_res_t *r, int rc, const int *out_fd)
 	return XTC_OK;
 }
 
+/*
+ * kTLS close.  close(2) of a socket carrying the kernel TLS ULP flushes
+ * any record still queued with the flags of the send that queued it --
+ * no MSG_NOSIGNAL for OpenSSL's socket BIO -- so when the peer has gone
+ * the CLOSING thread gets SIGPIPE (Linux 6.12, reproduced: exit 141 in
+ * test_tls_ktls no_sigpipe).  xtc_net_close holds SIGPIPE off for the
+ * close of such a socket and consumes the one it raised.  Off unless a
+ * connection ever called xtc_tls_enable_ktls (__xtc_net_ktls_seen), so
+ * a process without kTLS pays nothing; with it, one getsockopt(TCP_ULP)
+ * per close.
+ */
+static _Atomic int __net_ktls_seen;
+
+/* PUBLIC: void __xtc_net_ktls_seen __P((void)); */
+void
+__xtc_net_ktls_seen(void)
+{
+	atomic_store_explicit(&__net_ktls_seen, 1, memory_order_relaxed);
+}
+
+static void
+__net_close_raw(int fd)
+{
+#if defined(TCP_ULP) && !defined(_WIN32)
+	sigset_t pipe, old, pend;
+	struct timespec zero = { 0, 0 };
+	char ulp[16];
+	socklen_t ul = sizeof ulp;
+
+	if (atomic_load_explicit(&__net_ktls_seen, memory_order_relaxed) &&
+	    getsockopt(fd, IPPROTO_TCP, TCP_ULP, ulp, &ul) == 0 && ul >= 3 &&
+	    memcmp(ulp, "tls", 3) == 0) {
+		__xtc_unsafe_enter();    /* the mask is this OS thread's */
+		(void)sigemptyset(&pipe);
+		(void)sigaddset(&pipe, SIGPIPE);
+		(void)pthread_sigmask(SIG_BLOCK, &pipe, &old);
+		(void)close(fd);
+		if (sigismember(&old, SIGPIPE) == 0 &&
+		    sigpending(&pend) == 0 && sigismember(&pend, SIGPIPE) == 1)
+			(void)sigtimedwait(&pipe, NULL, &zero);
+		(void)pthread_sigmask(SIG_SETMASK, &old, NULL);
+		__xtc_unsafe_leave();
+		return;
+	}
+#endif
+	(void)close(fd);
+}
+
 void
 xtc_net_close(int fd)
 {
@@ -238,7 +288,7 @@ xtc_net_close(int fd)
 	(void)__xtc_mtx_unlock(&__net_fd_lock);
 	if (r != NULL)
 		xtc_res_release(r, XTC_RES_FDS, 1);
-	(void)close(fd);
+	__net_close_raw(fd);
 }
 
 /* ----- TCP knobs ----------------------------------------- */

@@ -57,6 +57,7 @@ bench/audit/false_sharing_mpsc
 bench/audit/false_sharing_proc
 bench/bench_win_scale
 bench/bench_msg_copy
+bench/bench_tls_sendfile
 bench/bench_win_scale.exe
 bench/conformance/w*/tokio/target/
 

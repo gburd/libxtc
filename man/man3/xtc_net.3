@@ -235,6 +235,11 @@ and the connection stays in the kernel backlog;
 refunds it.
 Releases before 1.51 had no accept here, so inbound connections could
 not be metered.
+.Fn xtc_net_close
+also closes a socket carrying kernel TLS
+.Pq Xr xtc_tls_enable_ktls 3
+without letting the kernel's flush of a queued record to a departed peer
+raise SIGPIPE in the caller.
 .Pp
 .Fn xtc_net_apply_tcp_opts
 applies the knobs to an already-open socket.  Useful for sockets
