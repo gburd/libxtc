@@ -1,3 +1,79 @@
+libxtc (1.59.0-1) unstable; urgency=medium
+
+  * MINOR release -- preemption and aarch64 correctness, faster fibers and
+    io_uring, zero-copy sends, USDT probes, two new release gates
+    (performance and io_uring use), and a sqlxtc storage engine that beats
+    SQLite at 8+ connections on every ledger and TPROC-C shape tested.
+    New public API (below); no existing public struct changed; lock ABI
+    unchanged.
+  * libxtc, fixed:
+    - Involuntary preemption could hang, corrupt or lose work: a fiber
+      preempted inside an io_uring SQE producer, the run-queue enqueue,
+      the timer-heap update or the slab magazine left that structure
+      half-updated.  Each is now held preemption-safe; the sweep that
+      found them went from 3 failures in 28,000 runs to 0 in 28,000.
+    - aarch64: a preempted fiber resumed with x16 and the SVE registers
+      clobbered (it now resumes through the kernel's signal frame); FPCR
+      and FPSR are per fiber; an fcontext fiber that migrated loops could
+      crash; the loop could hang a fiber whose completion was queued but
+      never polled (also x86-64: the loop now polls the ring every 64
+      runs).
+    - sqlxtc's CRC32C table init is no longer preemptible half-built.
+    - An idle executor worker with nothing stealable now blocks instead
+      of waking every 1 ms: an idle 32-loop server used 145 CPU ticks per
+      5 s and made ~1,900 io_uring_enter calls per second per loop; now 2
+      ticks and ~3 calls per second per loop.
+  * libxtc, changed:
+    - fcontext is the default coroutine substrate on Linux x86-64 and
+      aarch64 (glibc); --with-coro=ucontext keeps the old one.  Fiber
+      switch 552 -> 153 ns.
+    - io_uring: COOP_TASKRUN (probed), DEFER_TASKRUN + SINGLE_ISSUER for a
+      running loop, and one-shot polls.  A rexis server holding 30k idle
+      connections: 199 -> 173k SET/s; 60k: 0 -> 157k.
+    - Off-loop amutex/arwlock wake on every release and spin, bounded by
+      time, before sleeping.  Many-lock and reader workloads are 1.6-12x
+      faster; ONE hot amutex shared by 16-128 plain OS threads is up to
+      52% slower (perf gate cell lock_amutex_w64 -49.8%, accepted).
+      Fibers on one loop are 10x the plain-thread rate; see KNOWN_ISSUES.
+    - Wake elision and per-thread slab statistics: a 16-loop message hop
+      3.12M -> 11.67M/s.
+  * libxtc, new API: xtc_send_owned (zero-copy send of an owned buffer);
+    xtc_net_send_framev; xtc_tls_enable_ktls, xtc_tls_ktls_active and
+    xtc_tls_sendfile (kernel TLS for fd-mode connections); tnt
+    xtc_tnt_recv_take and xtc_tnt_io_send_owned.  --enable-dtrace: 30
+    USDT probes for DTrace, perf, bpftrace and SystemTap (xtc_usdt(3),
+    docs/guide/12-tracing.md; on Linux use =sdt, or --enable-dtrace
+    with SystemTap's dtrace script).  docs/guide/13-zero-copy.md.
+  * Release gates: scripts/perf-gate.sh (19 cells, live A/B against the
+    previous tag, refuses hosts with deep idle states) and
+    scripts/uring-gate.sh (uringscope over 9 workloads, including two new
+    concurrent network + disk soaks: a kaka broker with 8 producers and
+    8 consumers, and a sqlxtc server under 32 clients with a buffer pool
+    smaller than the store).
+  * sqlxtc (example):
+    - Fixed: 15 silent wrong SELECT results (two of them memory-safety
+      bugs); a cursor scan that hopped onto a reused page after a merge;
+      ORDER BY ... LIMIT ties; rows missing from an index right after an
+      open; a large transaction lost in crash recovery; two servers on
+      one store.
+    - Faster: online checkpoint, group commit, parallel log insert,
+      CRC32C frames, row write intents, QuickSelect top-N (1M rows,
+      K=10k: 53 s -> 141 ms), batched index walks, version GC by default.
+      Clean reopen of the ledger store 13.6 s -> 0.03 s.
+    - A row over 4096 bytes is refused as "row too large" (it was
+      "unsupported SQL"); the documented 65535 was the B-tree's limit.
+    - Measured in process against SQLite 3.53.4 (WAL, synchronous=FULL),
+      64 vCPUs, deep idle states off: TPROC-C wins 10 of 12 cells (W=50,
+      32 connections: 7.6x); the ledger wins 65 of 70.  Losses: one
+      connection at W=10 (0.88x) and W=50 (0.98x), and history /
+      statement at 1-2 connections (0.82-0.98x).
+  * Known (docs/KNOWN_ISSUES.md): the hot-amutex cost above; sqlxtc
+    stores are 1.34-1.83x SQLite's page file (2.5-2.9x with the log);
+    1.58 cannot read a 1.59 log (downgrades are supported only between
+    LTS releases, and there are none yet).
+
+ -- Greg Burd <greg@burd.me>  Sat, 24 Oct 2026 20:00:00 -0400
+
 libxtc (1.58.0-1) unstable; urgency=medium
 
   * MINOR release -- the sqlxtc example becomes a SQLite-compatible engine

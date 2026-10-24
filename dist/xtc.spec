@@ -12,7 +12,7 @@
 %global sover 0
 
 Name:           libxtc
-Version:        1.58.0
+Version:        1.59.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
