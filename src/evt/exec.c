@@ -180,6 +180,8 @@ __xtc_exec_try_steal(xtc_loop_t *me)
 }
 
 /* Worker entry function.  arg is the xtc_loop the worker owns. */
+int64_t __xtc_exec_steal_recheck_ns(xtc_loop_t *);
+
 static void *
 __xtc_exec_worker(void *arg)
 {
@@ -299,6 +301,12 @@ __xtc_exec_worker(void *arg)
 			}
 			if (idle_streak < (1 << 30))
 				idle_streak++;
+			/* Nothing stealable anywhere: block until a wake (the
+			 * inbox, an fd/CQE, stop, or the mig_alive up-edge),
+			 * not a 1ms tick -- the tick cost an idle 32-loop
+			 * server ~2,000 io_uring_enter/s per loop. */
+			if (__xtc_exec_steal_recheck_ns(loop) == 0)
+				idle_poll_ns = -1;
 			/* Mark this worker idle across the poll so a peer
 			 * producing migratable work can nudge us (eager
 			 * rebalance); cleared the instant we wake. */
