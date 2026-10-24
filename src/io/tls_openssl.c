@@ -50,14 +50,21 @@
 #include <limits.h>
 #include <sys/types.h>
 #include <sys/socket.h>   /* send/recv MSG_NOSIGNAL in the fd BIO */
-#if !defined(_WIN32)
-#include <signal.h>       /* kTLS mode: SIGPIPE bracket */
-#include <time.h>
-#endif
-
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/tls1.h>
+
+/* Kernel TLS: OpenSSL built with it (Linux, FreeBSD).  Everything kTLS
+ * -- including the SIGPIPE bracket, which needs sigtimedwait (absent on
+ * macOS, whose OpenSSL has no kTLS) -- compiles only under this. */
+#if defined(SSL_OP_ENABLE_KTLS) && !defined(OPENSSL_NO_KTLS) && \
+    !defined(_WIN32)
+#define XTC_OSSL_KTLS 1
+#include <signal.h>       /* kTLS mode: SIGPIPE bracket */
+#include <time.h>
+#else
+#define XTC_OSSL_KTLS 0
+#endif
 
 /* -------------------------------------------------------------------------
  * Portable read/write shim.
@@ -1103,12 +1110,12 @@ tls_op_begin(xtc_tls_t *tls)
 struct ktls_sig {
 	int      armed;
 	int      pre;            /* a SIGPIPE was already pending: not ours */
-#if !defined(_WIN32)
+#if XTC_OSSL_KTLS
 	sigset_t old;
 #endif
 };
 
-#if !defined(_WIN32)
+#if XTC_OSSL_KTLS
 static int
 sigpipe_pending(void)
 {
@@ -1122,7 +1129,7 @@ ktls_sig_enter(xtc_tls_t *t, struct ktls_sig *k)
 {
 	k->armed = 0;
 	k->pre = 0;
-#if !defined(_WIN32)
+#if XTC_OSSL_KTLS
 	if (t->ktls_sigpipe) {
 		sigset_t pipe;
 		__xtc_unsafe_enter();
@@ -1153,7 +1160,7 @@ ktls_sig_enter(xtc_tls_t *t, struct ktls_sig *k)
 static int
 ktls_sig_leave(struct ktls_sig *k)
 {
-#if !defined(_WIN32)
+#if XTC_OSSL_KTLS
 	sigset_t pipe;
 	struct timespec zero = { 0, 0 };
 	int saved, hit = 0;
@@ -1374,9 +1381,11 @@ xtc_tls_shutdown(xtc_tls_t *tls)
 int
 xtc_tls_enable_ktls(xtc_tls_t *tls)
 {
-#if defined(SSL_OP_ENABLE_KTLS) && !defined(OPENSSL_NO_KTLS) && \
-    !defined(_WIN32)
+#if XTC_OSSL_KTLS
 	BIO *bio;
+#if defined(SO_NOSIGPIPE)
+	int one = 1;
+#endif
 	if (tls == NULL)
 		return XTC_E_INVAL;
 	if (tls->have_transport)
@@ -1392,11 +1401,8 @@ xtc_tls_enable_ktls(xtc_tls_t *tls)
 	tls->ktls = 1;
 	__xtc_net_ktls_seen();               /* xtc_net_close: see io_net.c */
 #if defined(SO_NOSIGPIPE)
-	{
-		int one = 1;
-		tls->ktls_sigpipe = setsockopt(tls->fd, SOL_SOCKET,
-		    SO_NOSIGPIPE, &one, sizeof one) != 0;
-	}
+	tls->ktls_sigpipe = setsockopt(tls->fd, SOL_SOCKET, SO_NOSIGPIPE,
+	    &one, sizeof one) != 0;
 #else
 	tls->ktls_sigpipe = 1;
 #endif
@@ -1424,8 +1430,7 @@ int
 xtc_tls_sendfile(xtc_tls_t *tls, int fd, int64_t off, size_t len,
     size_t *out_n)
 {
-#if defined(SSL_OP_ENABLE_KTLS) && !defined(OPENSSL_NO_KTLS) && \
-    !defined(_WIN32)
+#if XTC_OSSL_KTLS
 	struct ktls_sig ks;
 	ossl_ssize_t n;
 	int err;
