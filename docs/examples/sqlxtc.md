@@ -575,7 +575,7 @@ median of 3; no commit failures in any run:
 | **sqlxtc 1.59, in-process** | 43,900 | **98,600** | 71,700 | 64,200 |
 | sqlxtc 1.58, Quack over TCP (above) | 13,900 | 54,600 | 47,200 | 39,700 |
 
-sqlxtc passes SQLite at 8 connections (one pass reached 119k) and
+sqlxtc passes SQLite at 8 connections and
 stays at 0.76-0.83x of it at 32 and 64, where SQLite's single writer
 is flat.  At one connection it reaches half of SQLite.  Each commit
 costs one WAL `fdatasync` (58 us on this array) in both engines, but
@@ -670,7 +670,7 @@ measured, two passes alternating the engines:
 | Engine | 1 conn | 8 conns |
 | --- | ---: | ---: |
 | SQLite 3.53.4, WAL, `synchronous=FULL` | **93,900** | 86,700 |
-| sqlxtc 1.59 | 75,700 | **175,000** |
+| sqlxtc 1.59 | 75,700 | **150,000** |
 
 With a 30 s ramp the pool is still filling from the cold page file, and
 sqlxtc reads 54,000 at one connection.  Count the warm-up when comparing
