@@ -27,7 +27,7 @@
 #
 # usage: sudo scripts/uring-gate.sh BUILD_DIR [OUTDIR]
 #   BUILD_DIR: a configured, built libxtc tree (dist/configure; io_uring
-#   backend).  Needs root (or CAP_BPF + CAP_PERFMON) and a BTF kernel.
+#   backend).  The examples (sqlxtc, kaka) are built against it here.  Needs root (or CAP_BPF + CAP_PERFMON) and a BTF kernel.
 #   CHECK=1 also runs each workload under --check (buffer hazards; slower).
 # exit: 0 clean, 1 a FAIL, 2 setup error.
 
@@ -63,7 +63,10 @@ sx="$src/examples/06_sqlxtc"
 	make bench_aio_fibers bench_exec_scale > "$out/build.log" 2>&1 || true
 	cd "$sx"
 	make XTC_BUILD="$build" test_wal_kill test_crash_oracle \
-	    test_wal_group_sync >> "$out/build.log" 2>&1 || true
+	    test_wal_group_sync sqlxtc-server >> "$out/build.log" 2>&1 || true
+	cd "$src/examples/07_kaka"
+	make XTC_BUILD="$build" kaka-broker kaka_soak \
+	    >> "$out/build.log" 2>&1 || true
 )
 dat="$scratch/aio.dat"
 dd if=/dev/zero of="$dat" bs=1M count=256 status=none
@@ -80,6 +83,18 @@ dd if=/dev/zero of="$dat" bs=1M count=256 status=none
 #   crash_oracle: buffered page writes punt when they extend or fill a
 #     hole in the page file (XFS allocates on io-wq).  sqlxtc's WAL
 #     commits do not (O_DSYNC + preallocated log): wal_kill shows <1%.
+#   kaka_soak, sqlxtc_iosoak: the concurrent network + storage soaks.  A
+#     command starting with "@wrap " is a test script that runs its
+#     SERVER under $SOAK_WRAP, so uringscope traces the server only (the
+#     clients' own socket and disk I/O stay out of the report).  kaka:
+#     FSYNC always punts, segment appends extend a new file (WRITE punts),
+#     and kaka raises the bounded io-wq cap to 64 on purpose
+#     (MAX_SYNC_WORKERS in examples/07_kaka/main.c), hence WORKERS.
+#     sqlxtc: its evicting buffer pool writes pages back and extends the
+#     page file (WRITE/WRITEV punt).
+# ERRORS is judged per opcode: a cancelled POLL_ADD completes -ECANCELED
+# and uringscope counts it as an error; libxtc cancels polls routinely
+# (one-shot re-arm, unregister).  Errors on any other opcode fail.
 # Anything else at WARN or above fails.
 workloads() {
 	cat <<EOF
@@ -90,6 +105,8 @@ exec_scale||$build/bench_exec_scale 8 2000000 spawn
 wal_kill||$sx/test_wal_kill
 crash_oracle|PUNT|$sx/test_crash_oracle 4 1
 rexis||make -C $build check-rexis
+kaka_soak|PUNT,WORKERS|@wrap env KAKA_BROKER=$src/examples/07_kaka/kaka-broker KAKA_SOAK=$src/examples/07_kaka/kaka_soak SECS=15 bash $src/examples/07_kaka/test_kaka_soak.sh
+sqlxtc_iosoak|PUNT|@wrap env SQLXTC_SERVER=$sx/sqlxtc-server SECS=20 CLIENTS=32 bash $src/test/sqlxtc/test_sqlxtc_iosoak.sh
 EOF
 }
 
@@ -98,9 +115,25 @@ printf '%-14s %-9s %10s %10s %8s %7s  %s\n' workload verdict sqes enters \
     sqe/enter punt% findings
 workloads | while IFS='|' read -r name allow cmd; do
 	j="$out/$name.json"
-	# shellcheck disable=SC2086
-	( cd "$scratch" && TMPDIR="$scratch" uringscope -f --json="$j" -- $cmd \
-	    > "$out/$name.out" 2>&1 ) || true
+	case $cmd in
+	"@wrap "*)
+		# the script wraps its own server: trace that process tree only;
+		# a failing soak (bad data, a crash) fails the gate
+		# shellcheck disable=SC2086
+		( cd "$scratch" && TMPDIR="$scratch" \
+		    SOAK_WRAP="uringscope -f --json=$j --" ${cmd#@wrap } \
+		    > "$out/$name.out" 2>&1 ) || {
+			printf '%-14s %-9s (the soak itself failed; see %s)\n' \
+			    "$name" FAIL "$out/$name.out"
+			echo 1 > "$out/.fail"
+		}
+		;;
+	*)
+		# shellcheck disable=SC2086
+		( cd "$scratch" && TMPDIR="$scratch" uringscope -f --json="$j" \
+		    -- $cmd > "$out/$name.out" 2>&1 ) || true
+		;;
+	esac
 	if [ ! -s "$j" ]; then
 		printf '%-14s %-9s (no report; see %s)\n' "$name" ERROR "$out/$name.out"
 		echo 1 > "$out/.fail"
@@ -117,6 +150,11 @@ workloads | while IFS='|' read -r name allow cmd; do
 	allowed=$(jq -r --arg allow ",$allow," '[.findings[]?
 	    | select(.severity == "WARN" or .severity == "CRIT") | .tag as $t
 	    | select($allow | contains("," + $t + ",")) | $t] | length' "$j")
+	# ERRORS only from cancelled polls is not a failure (see above)
+	nperr=$(jq '[.ops[]? | select(.op != "POLL_ADD") | .errors] | add // 0' "$j")
+	if [ "$nperr" = 0 ]; then
+		bad=$(printf '%s' "$bad" | tr ',' '\n' | grep -v '^ERRORS$' | paste -sd, -)
+	fi
 	if jq -e '[.findings[]? | select(.tag == "NODATA")] | length > 0' "$j" > /dev/null; then
 		verdict=NODATA
 		echo 1 > "$out/.fail"
@@ -133,9 +171,20 @@ workloads | while IFS='|' read -r name allow cmd; do
 	printf '%-14s %-9s %10s %10s %8s %7s  %s\n' "$name" "$verdict" "$sub" "$ent" \
 	    "$ratio" "$ppct" "${tags:-none}"
 	if [ "${CHECK:-0}" = 1 ]; then
-		# shellcheck disable=SC2086
-		( cd "$scratch" && TMPDIR="$scratch" uringscope -f --check \
-		    --json="$out/$name.check.json" -- $cmd > "$out/$name.check.out" 2>&1 ) || true
+		cj="$out/$name.check.json"
+		case $cmd in
+		"@wrap "*)
+			# shellcheck disable=SC2086
+			( cd "$scratch" && TMPDIR="$scratch" \
+			    SOAK_WRAP="uringscope -f --check --json=$cj --" \
+			    ${cmd#@wrap } > "$out/$name.check.out" 2>&1 ) || true
+			;;
+		*)
+			# shellcheck disable=SC2086
+			( cd "$scratch" && TMPDIR="$scratch" uringscope -f --check \
+			    --json="$cj" -- $cmd > "$out/$name.check.out" 2>&1 ) || true
+			;;
+		esac
 		h=$(jq -r '[.findings[]? | select(.tag | startswith("HAZARD")) | .tag] | unique | join(",")' \
 		    "$out/$name.check.json" 2>/dev/null || echo "?")
 		if [ -n "$h" ]; then
