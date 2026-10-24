@@ -315,6 +315,88 @@ test_aio_short_read(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * A completion is reaped while fibers churn on short timers.  Two
+ * spinners alternate: each spins SPIN_NS, then sleeps SLEEP_NS < SPIN_NS,
+ * so whenever the run queue drains the OTHER one's deadline is already
+ * due.  The loop used to poll its ring only when no timer was due or
+ * (the fairness poll) when the run queue was non-empty after a run --
+ * here neither ever holds, so the aio fiber's completed write sat in the
+ * CQ unreaped (sqlxtc test_commit_visibility: 6 readers on 300 us sleeps
+ * starved the WAL writer to ~1 commit/s).  Every fiber stops after
+ * CHURN_BOUND_NS, so a starved run fails (few writes) instead of hanging.
+ */
+#define CHURN_WRITES   20
+#define CHURN_SPIN_NS  (50LL * 1000)
+#define CHURN_SLEEP_NS (20LL * 1000)
+#define CHURN_BOUND_NS (3LL * 1000 * 1000 * 1000)
+static atomic_int g_churn_done, g_churn_wrote;
+static int64_t    g_churn_start;
+
+static void
+churn_spinner(void *arg)
+{
+	int64_t t0;
+	(void)arg;
+	while (!atomic_load(&g_churn_done) &&
+	    xtc_clock_mono() - g_churn_start < CHURN_BOUND_NS) {
+		t0 = xtc_clock_mono();
+		while (xtc_clock_mono() - t0 < CHURN_SPIN_NS)
+			;
+		(void)xtc_proc_sleep(CHURN_SLEEP_NS);
+	}
+}
+
+static void
+churn_writer(void *arg)
+{
+	int fd = *(int *)arg, i;
+	unsigned char buf[4096];
+	memset(buf, 0x5a, sizeof buf);
+	for (i = 0; i < CHURN_WRITES &&
+	    xtc_clock_mono() - g_churn_start < CHURN_BOUND_NS; i++)
+		if (xtc_aio_pwrite(fd, buf, (uint32_t)sizeof buf,
+		    (int64_t)i * (int64_t)sizeof buf) == (int)sizeof buf)
+			atomic_fetch_add(&g_churn_wrote, 1);
+	atomic_store(&g_churn_done, 1);
+}
+
+static MunitResult
+test_aio_timer_churn(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t o = { 0 };
+	xtc_pid_t a;
+	char tmpdir[512], tmpl[600];
+	int fd;
+	int64_t took;
+	(void)p; (void)d;
+
+	munit_assert_int(xtc_fs_tmpdir(tmpdir, sizeof tmpdir), ==, XTC_OK);
+	snprintf(tmpl, sizeof tmpl, "%s/xtc_aio3_XXXXXX", tmpdir);
+	fd = mkstemp(tmpl);
+	munit_assert_int(fd, >=, 0);
+	atomic_store(&g_churn_done, 0);
+	atomic_store(&g_churn_wrote, 0);
+	g_churn_start = xtc_clock_mono();
+
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, churn_spinner, NULL, &o, &a), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, churn_spinner, NULL, &o, &a), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, churn_writer, &fd, &o, &a), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+	took = xtc_clock_mono() - g_churn_start;
+	close(fd);
+	unlink(tmpl);
+
+	munit_logf(MUNIT_LOG_INFO, "%d of %d writes in %lld ms",
+	    atomic_load(&g_churn_wrote), CHURN_WRITES,
+	    (long long)(took / 1000000));
+	munit_assert_int(atomic_load(&g_churn_wrote), ==, CHURN_WRITES);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/roundtrip",         test_aio_roundtrip,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/roundtrip_offload", test_aio_roundtrip_offload, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -324,6 +406,7 @@ static MunitTest tests[] = {
 	{ "/vec_bounds",        test_aiov_bounds,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #endif
 	{ "/short_read",        test_aio_short_read,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/timer_churn",       test_aio_timer_churn,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/aio", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

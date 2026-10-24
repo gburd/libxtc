@@ -1174,11 +1174,19 @@ __xtc_loop_step(xtc_loop_t *loop)
 		 * starving the very I/O completion that would break the spin.
 		 * Interleave a non-blocking poll every IO_FAIRNESS_QUANTUM
 		 * runs so parked completions are dispatched under load.
+		 *
+		 * Whether or not the run queue is empty right now: fibers
+		 * that alternate on short timers (each parks with its peer's
+		 * deadline already due) leave it empty after every run, and
+		 * step 2 refills it before the blocking poll below is ever
+		 * reached, so no poll ran at all -- a 1-loop sqlxtc test
+		 * (6 readers on 300 us sleeps) reaped its writer's completed
+		 * aio about once a second (test_aio /timer_churn).  The blocking
+		 * poll resets the count, so a loop that reaches it pays
+		 * nothing here.
 		 */
 #define IO_FAIRNESS_QUANTUM 64u
-		if (++loop->runs_since_poll >= IO_FAIRNESS_QUANTUM &&
-		    (loop->q_head != NULL ||
-		     xtc_deque_len(&loop->deque) > 0)) {
+		if (++loop->runs_since_poll >= IO_FAIRNESS_QUANTUM) {
 			xtc_io_event_t fevs[16];
 			int fn_out = 0, fi;
 			for (fi = 0; fi < (int)(sizeof fevs / sizeof fevs[0]);
@@ -1273,6 +1281,7 @@ __xtc_loop_step(xtc_loop_t *loop)
 
 	for (i = 0; i < (int)(sizeof evs / sizeof evs[0]); i++)
 		evs[i].fd = -1;
+	loop->runs_since_poll = 0;
 	rc = xtc_io_poll(loop->io, evs,
 	    (int)(sizeof evs / sizeof evs[0]), timeout_ns, &n_out);
 	if (timeout_ns != 0)
