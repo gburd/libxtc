@@ -371,6 +371,9 @@ __xtc_exec_worker(void *arg)
 		__xtc_io_uring_preempt_disarm(loop->io);
 		(void)xtc_preempt_disarm();
 	}
+	/* Hand the io back: in-flight AIO on a SINGLE_ISSUER io_uring ring
+	 * can only be reaped by this thread (see __xtc_io_owner_leave). */
+	__xtc_io_owner_leave(loop->io);
 	__xtc_current_loop = NULL;
 	return NULL;
 }

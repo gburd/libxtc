@@ -110,9 +110,14 @@ struct __xtc_aix_reg {
  *   dead     retired by del/mod; no longer in io->tab.
  *   pending  on io->pending: needs an SQE the SQ had no room for (a
  *            re-arm for a live node, a cancel for a dead armed one).
+ *   linger   retired by del while its one-shot poll was still armed, and
+ *            NOT cancelled: it waits on io->lingers (lnext/lprev) for a
+ *            re-registration of the same socket to adopt it, or for the
+ *            end of the next poll to cancel it.  ino/dev identify the
+ *            socket (a closed fd's number can be reused).
  *
- * A node is on io->zombies exactly while dead && armed, and is freed
- * once dead && !armed && !pending.
+ * A node is on io->zombies exactly while dead && armed && !linger, and
+ * is freed once dead && !armed && !pending.
  */
 struct __xtc_uring_fd {
 	int        fd;
@@ -122,9 +127,14 @@ struct __xtc_uring_fd {
 	int        dead;
 	int        armed;
 	int        pending;
+	int        linger;
+	uint64_t   ino;            /* socket identity (0 = not a socket) */
+	uint64_t   dev;
 	struct __xtc_uring_fd *next;   /* io->zombies linkage */
 	struct __xtc_uring_fd *prev;   /* io->zombies linkage */
 	struct __xtc_uring_fd *pnext;  /* io->pending linkage */
+	struct __xtc_uring_fd *lnext;  /* io->lingers linkage */
+	struct __xtc_uring_fd *lprev;
 };
 #elif defined(XTC_IO_BACKEND_POLL)
 #include <poll.h>
@@ -200,6 +210,12 @@ struct xtc_io {
 	struct __xtc_uring_fd *zombies;  /* deleted fds awaiting terminal CQE */
 	struct __xtc_uring_fd *pending;  /* nodes awaiting an SQE (SQ was full) */
 	int              n_zombies;      /* length of zombies (diagnostics) */
+	struct __xtc_uring_fd *lingers;  /* deleted, still armed, adoptable */
+	struct __xtc_uring_fd **ltab;    /* fd -> lingering node; sized as tab */
+	unsigned char   *idle;           /* fd -> 1: last del found it armed */
+	int              n_lingers;
+	unsigned long    n_adopted;      /* re-registrations served by a linger */
+	unsigned long    n_cancels;      /* POLL_REMOVEs submitted (tests) */
 	/*
 	 * Cross-loop deferred unregister queue.  io->tab / io->zombies and
 	 * the SQ ring are single-producer, owned by this io's loop thread.
@@ -226,38 +242,42 @@ struct xtc_io {
 	 * owning loop publishes it; never used for control flow.
 	 */
 	int              tail_loop_id;
+	/*
+	 * The owner: the thread that polls this io and the only one that
+	 * may submit to its ring.  A per-thread token, never reused (not a
+	 * pthread_t: glibc reuses a dead thread's descriptor, so a second
+	 * xtc_exec_run's worker can compare EQUAL to the first run's).  0 =
+	 * no owner yet.  owner_active: the owner declared itself
+	 * (__xtc_io_set_owner, at the start of a loop run) and has not left
+	 * (__xtc_io_owner_leave, at its end).  A thread touching an io that
+	 * has no active owner takes it over (__own); on a SINGLE_ISSUER ring
+	 * that rebuilds the ring for it (__ring_rebind), and a loop run
+	 * upgrades a COOP ring to SINGLE_ISSUER the same way.
+	 * owner_tid/owner_set mirror the owner for the debugger (xtc-rings).
+	 */
+	_Atomic uint64_t owner_tok;
+	_Atomic int      owner_active;    /* owner declared (set_owner), not left */
 	pthread_t        owner_tid;       /* the thread that polls this io */
 	_Atomic int      owner_set;       /* 1 once owner_tid is recorded */
-#if defined(XTC_DIAGNOSTIC)
 	/*
-	 * DIAGNOSTIC-only: the thread that CREATED this ring, recorded in
-	 * __xtc_io_backend_init.
-	 *
-	 * The ring is created by whoever calls xtc_loop_init -- for an
-	 * executor that is the exec-init thread (xtc_exec_init), not the
-	 * worker that will own and submit to it -- and the wakeup POLL_ADD
-	 * is submitted right there on the creating thread
-	 * (__xtc_io_register_wakeup).  Every later submit comes from the
-	 * owner.  So one thread touches the SQ before another takes it over.
-	 *
-	 * That is BENIGN TODAY only because of an ORDERING that nothing
-	 * enforces: creation completes before any worker starts, so the two
-	 * touches never overlap.  It is also the exact shape of eight fixed
-	 * cross-loop defects (one thread touching a structure another owns),
-	 * and it is the hard blocker for IORING_SETUP_SINGLE_ISSUER, which
-	 * requires the creator and the submitter to be the same task.
-	 *
-	 * Rather than restructure loop init to chase that flag -- 88 of the
-	 * 90 files calling xtc_loop_init also call xtc_loop_run on the SAME
-	 * thread, so deferring ring creation would churn the most-used
-	 * lifecycle in the tree for a gain the measured reap headroom says is
-	 * noise -- record the creator and ASSERT the ordering holds.  If a
-	 * future change ever submits from the creator AFTER an owner is
-	 * established, this fires immediately and locates it, instead of the
-	 * property silently rotting.
+	 * Ring mode.  ring_flags: the IORING_SETUP_* the ring was built with
+	 * (rebuilds reuse them).  ring_single: SINGLE_ISSUER (the DEFER
+	 * tier), so only the creating thread may submit or reap and an owner
+	 * change rebuilds the ring.  n_aio: file-AIO SQEs in the kernel; a
+	 * rebuild needs 0 (see __xtc_io_owner_leave).
+	 * carry: events a leaving owner reaped while it waited for its AIO,
+	 * returned by the next poll before anything else.  ring_dead: a
+	 * rebuild found no memory for the new ring; the io is unusable.
 	 */
-	pthread_t        creator_tid;
-#endif
+	unsigned         ring_flags;
+	int              ring_single;
+	int              ring_try_defer;  /* a loop run may upgrade to DEFER */
+	int              n_aio;
+	int              ring_dead;
+	xtc_io_event_t  *carry;
+	int              n_carry;
+	int              cap_carry;
+	unsigned         n_rebinds;       /* ring rebuilds (tests) */
 	/*
 	 * L2 ring-pointer preempt (INSPIRED BY Glommio's need_preempt():
 	 * reactor.rs / sys/uring.rs preempt_pointers).  A dedicated tiny
@@ -355,5 +375,32 @@ void __xtc_io_set_tail_loop_id(xtc_io_t *io, int id);
  * an SQE.  Tests assert no node leaks.  Any out pointer may be NULL.
  */
 int __xtc_io_reg_stats(xtc_io_t *io, int *live, int *zombies, int *pending);
+
+/*
+ * io_uring (XTC_E_NOSYS elsewhere): the IORING_SETUP_* flags the main ring
+ * has now (after any fallback for an older kernel), how many SQEs the
+ * kernel has consumed from the current ring, and how many times the ring
+ * was rebuilt (a loop run upgrading it to DEFER, a new owner thread).
+ * Tests.  Out pointers may be NULL.
+ */
+int __xtc_io_uring_info(xtc_io_t *io, unsigned *flags, unsigned *sq_consumed,
+    unsigned *rebinds);
+
+/*
+ * The calling thread stops running this io's loop (an executor worker
+ * exiting, xtc_loop_run returning).  On a SINGLE_ISSUER io_uring ring it
+ * reaps every file-AIO completion still in the kernel, because only this
+ * thread can, and keeps them for the next owner's first poll.  No-op on
+ * other backends and when the caller is not the owner.
+ */
+void __xtc_io_owner_leave(xtc_io_t *io);
+
+/*
+ * io_uring (XTC_E_NOSYS elsewhere): POLL_REMOVEs submitted, and
+ * re-registrations served by adopting a lingering poll, since xtc_io_init.
+ * Tests.  Out pointers may be NULL.
+ */
+int __xtc_io_uring_poll_stats(xtc_io_t *io, unsigned long *cancels,
+    unsigned long *adopted);
 
 #endif /* XTC_IO_INT_H */

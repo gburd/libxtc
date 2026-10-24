@@ -58,8 +58,9 @@ The Linux
 .Xr epoll 7
 backend.
 .It Sy uring
-The Linux io_uring backend (multishot poll); the default when
-liburing is found.
+The Linux io_uring backend (one-shot poll; COOP_TASKRUN, and
+DEFER_TASKRUN with SINGLE_ISSUER on the ring of a running loop, when
+the kernel has them); the default when liburing is found.
 .It Sy select
 The
 .Xr select 2

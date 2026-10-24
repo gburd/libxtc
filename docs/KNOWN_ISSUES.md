@@ -46,6 +46,34 @@ test that fails before the fix:
 Not verified: Apple Silicon (the Mach-O fcontext file carries the same
 changes but was not assembled) and big-endian or 32-bit Arm.
 
+## CHANGED (1.59): io_uring ring modes and one-shot polls
+
+**Status:** behavior change, measured on a 64-vCPU x86-64 host, Linux 6.12.
+
+* A loop's ring is created with `IORING_SETUP_COOP_TASKRUN` (Linux 5.19+;
+  a plain ring on older kernels), and when a thread starts RUNNING the loop
+  it is rebuilt on that thread with `DEFER_TASKRUN` + `SINGLE_ISSUER`
+  (6.1+).  A later run on a different thread (a second `xtc_exec_run`, a
+  loop created on one thread and run on another) rebuilds it again; file
+  AIO still in flight when a run ends is reaped by the leaving thread and
+  delivered to the next run.  Single-loop rexis, requests/s: COOP +10.4%
+  (pipeline 1) / +7.0% (pipeline 16) over a plain ring, DEFER a further
+  +4.3% / +2.5%.
+* Cost to know about: the kernel frees a `DEFER_TASKRUN` ring only after
+  an RCU grace period.  Creating and destroying RUNNING loops at more than
+  ~1,000 rings/s grows unreclaimable kernel memory (4,000/s: +152 MB;
+  unpaced: +3 GB in 8 s, still +2.4 GB a minute later).  A loop that is
+  created and destroyed without running stays on `COOP_TASKRUN` and does
+  not pay this.  Keep executors alive across operations rather than
+  creating one per request.
+* Readiness polls are one-shot, and a timed-out socket's poll is kept
+  armed for the waiter's next park.  The idle-connection collapse is gone
+  (each re-park used to cancel a poll, and a cancel walks a 16-bucket
+  kernel hash: at 30k idle connections rexis served 199 requests/s, now
+  173k).  A registration that is not deleted is now re-reported while the
+  fd stays ready (level-triggered, as on epoll); before, a multishot poll
+  reported it once.
+
 ## CHANGED (1.59): fcontext is the default coroutine substrate on Linux x86-64 (glibc)
 
 **What changed.**  The hand-written fcontext substrate (`src/evt/coro_fctx.c`,
