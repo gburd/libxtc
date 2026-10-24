@@ -233,18 +233,61 @@ be its cause, so it stays open.
 
 * **One hot `xtc_amutex` shared by many plain threads is slower.**  With
   16-128 OS threads (not fibers) contending for one mutex, throughput is
-  36-52% below 1.58 (`bench_sync_offloop amutex w`).  1.59 wakes a
-  sleeper on every release instead of keeping one wake in flight, because
-  the in-flight rule left the lock free while the woken thread was still
-  leaving a deep CPU idle state; that made the sqlxtc ledger workloads
-  35-50% slower on hosts with deep idle states enabled.  The woken thread
-  now often loses the mutex to a spinning one and sleeps again.
-  `xtc_arwlock` and workloads over several locks are 1.6-12x faster than
-  1.58.  Workaround: fewer threads on one mutex, or fibers.
-* **The store is larger than SQLite's.**  After 1.59's compact record and
-  index formats a 10-warehouse TPROC-C page file takes 1.36x SQLite's
-  allocated blocks (1.58: 3.61x) and the ledger page file 1.83x (1.58:
-  2.56x), not counting the log.
+  up to 52% below 1.58 (`bench_sync_offloop amutex w`).  1.59 wakes a
+  sleeper on every release instead of keeping one wake in flight,
+  because the in-flight rule left the lock free while the woken thread
+  was still leaving a deep CPU idle state; that made the sqlxtc ledger
+  workloads 35-50% slower on hosts with deep idle states enabled.  The
+  woken thread now often loses the mutex to a spinning one and sleeps
+  again.  `xtc_arwlock` and workloads over several locks are 1.6-12x
+  faster than 1.58.
+
+  **Workaround: fewer threads on one mutex, or fibers.**  Measured on a
+  64-vCPU x86-64 host (deep idle states off, 5 reps, median ops/s, one
+  short critical section per acquire):
+
+  | contenders | plain OS threads | fibers, all on 1 loop | fibers over 8 loops |
+  | --- | --- | --- | --- |
+  | 4 | 1.04M | 2.45M | 0.20M |
+  | 16 | 0.26M | 2.48M | 0.25M |
+  | 64 | 0.25M | 2.49M | 0.31M |
+
+  Fibers on one loop never block an OS thread: a contended fiber parks
+  and the release hands the mutex to it in the same thread, 10x the
+  plain-thread rate at 16-64 contenders.  Fibers spread over many loops
+  bring the cross-thread hand-off back, so co-locate the fibers that
+  share one hot lock on one loop (`xtc_proc_spawn` on that loop), or
+  shard the lock.  If they must be plain threads, keep the number that
+  contend for one mutex small (4 above: 1.04M).  `bench_amutex_fibers`
+  measures the fiber cases.
+* **The store is larger than SQLite's on disk.**  Measured on stores
+  each engine built from the same load (allocated blocks, XFS):
+
+  | store | SQLite | sqlxtc page file | sqlxtc page file + log |
+  | --- | --- | --- | --- |
+  | ledger, 100k accounts, 2M transfers | 267 MB | 488 MB (1.83x) | 761 MB (2.85x) |
+  | TPROC-C, 10 warehouses | 899 MB | 1,219 MB (1.36x) | 2,306 MB (2.56x) |
+  | TPROC-C, 50 warehouses | 4,498 MB | 6,040 MB (1.34x) | 11,413 MB (2.54x) |
+
+  (1.58: 2.56x and 3.61x for the page file.)  Where the rest goes:
+  * **The log.**  SQLite in WAL mode checkpoints its log back into the
+    database and truncates it; sqlxtc keeps a compacted log of the live
+    rows next to the page file (crash recovery replays it).  It is
+    rewritten, not grown, once it passes `--checkpoint-mb` (default
+    64 MiB) and twice its size after the last checkpoint, so the
+    steady-state log is about the size of the live data.
+  * **Per-entry overhead.**  Every table row carries a 20-byte version
+    key (table id, rowid, inverted commit timestamp; about 9 bytes
+    stored after prefix compression) and every entry a 10-byte slot,
+    against about 4-6 bytes of cell overhead in SQLite.
+  * **Index fill.**  Index leaves split at 70% full (SQLite's
+    redistribute-before-split keeps about 90%).
+  * **Old versions.**  Versions no snapshot can see are reclaimed by
+    autovacuum while the server runs, not at load time: right after the
+    ledger load its accounts table holds about 5 versions per row.
+
+  The remaining levers (redistribution on split, pruning at clean close,
+  a narrower slot) are tracked for a later release.
 * **The WAL frame checksum is now CRC32C.**  1.59 reads logs written by
   1.58 (FNV-1a frames) and mixed logs, but 1.58 cannot read a 1.59 log.
   That is expected: downgrades are supported only between LTS releases,

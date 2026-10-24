@@ -987,6 +987,12 @@ bench_fairness: $(srcdir)/../bench/bench_fairness.c $(STATIC_LIB)
 		-o $@ $(srcdir)/../bench/bench_fairness.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+# One hot xtc_amutex contended by fibers (the KNOWN_ISSUES workaround).
+bench_amutex_fibers: $(srcdir)/../bench/bench_amutex_fibers.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../bench/bench_amutex_fibers.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 bench_sync_offloop: $(srcdir)/../bench/bench_sync_offloop.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../bench/bench_sync_offloop.c \
