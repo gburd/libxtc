@@ -8,6 +8,11 @@ so CI or the developer is told before the release ships.
 This is **not** in `make check` (too noisy/slow for per-commit).  It is
 an on-demand + release-time gate:
 
+For the release itself use `scripts/perf-gate.sh` (see
+`bench/PERF_GATE.md`): it A/Bs these cases, and the cross-loop, lock,
+timer, spawn and WAL cells, against the previous release built on the
+same host, instead of against this machine-relative baseline.
+
 ```sh
 make bench-micro          # build the driver, run the checker, gate on regressions
 ```

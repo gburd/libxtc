@@ -955,6 +955,12 @@ bench_proc_table: $(srcdir)/../bench/bench_proc_table.c $(STATIC_LIB)
 		-o $@ $(srcdir)/../bench/bench_proc_table.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+# Cross-loop request/reply hops (a scripts/perf-gate.sh cell).
+bench_hop: $(srcdir)/../bench/bench_hop.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../bench/bench_hop.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 bench_timer_scale: $(srcdir)/../bench/bench_timer_scale.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../bench/bench_timer_scale.c \
