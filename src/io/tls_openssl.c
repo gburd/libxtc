@@ -1419,10 +1419,12 @@ xtc_tls_ktls_active(const xtc_tls_t *tls)
 	int r = 0;
 	if (tls == NULL || !tls->ktls)
 		return 0;
+#if XTC_OSSL_KTLS   /* tls->ktls is never set otherwise (BoringSSL, ...) */
 	if (BIO_get_ktls_send(SSL_get_wbio(tls->ssl)))
 		r |= XTC_TLS_KTLS_TX;
 	if (BIO_get_ktls_recv(SSL_get_rbio(tls->ssl)))
 		r |= XTC_TLS_KTLS_RX;
+#endif
 	return r;
 }
 
