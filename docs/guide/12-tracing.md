@@ -60,9 +60,10 @@ into no-ops and writes the probe table into `xtc_probes.o`, which goes into
 table. On Linux, `=sdt` is the recommended mode: it needs nothing but the
 `<sys/sdt.h>` header from `systemtap-sdt-dev` (Debian) or
 `systemtap-sdt-devel` (Fedora), and no build-time tool. `--enable-dtrace` on
-Linux would use SystemTap's `dtrace` script instead, which adds is-enabled
-semaphores; that combination follows the same recipe but has not yet been
-run in libxtc's testing.
+Linux finds SystemTap's `dtrace` script instead (the same package), which
+builds the same notes plus is-enabled semaphores; it cannot list or trace
+(`dtrace -l` is not supported), so trace that build with bpftrace or perf
+exactly as the `=sdt` one.
 
 A static-library pitfall is handled for you: the probe table lives in an
 object nothing calls, so a linker pulling members out of `libxtc.a` would

@@ -108,7 +108,18 @@ fi
 echo "  [P2] SKIP: probes are on (--enable-dtrace=$mode)"
 
 # ---- P5 -----------------------------------------------------------------
-if [ "$mode" = sdt ]; then
+# On Linux, --enable-dtrace can find SystemTap's dtrace script
+# (systemtap-sdt-dev): it builds the same stapsdt notes as =sdt (plus
+# is-enabled semaphores) but cannot list or trace (no -l, no -s with -c),
+# so it is checked like =sdt.
+stap_dtrace=no
+if [ "$mode" = dtrace ]; then
+	DT0=$(sed -n 's/^DTRACE[[:space:]]*=[[:space:]]*//p' "$B/Makefile" | head -1)
+	if "$DT0" --help 2>&1 | grep -qi systemtap; then
+		stap_dtrace=yes
+	fi
+fi
+if [ "$mode" = sdt ] || [ "$stap_dtrace" = yes ]; then
 	if ! command -v readelf >/dev/null 2>&1; then
 		echo "  [P5] SKIP: no readelf"
 		exit 0
@@ -120,7 +131,7 @@ if [ "$mode" = sdt ]; then
 		    fail P5 "no stapsdt note for $p"
 	done
 	echo "  [P5] OK: stapsdt notes present for the workload's probes"
-	echo "  [P3] SKIP: sdt build has no dtrace -l; P5 checked the notes"
+	echo "  [P3] SKIP: $mode build with no tracing dtrace (sdt notes only); P5 checked the notes"
 	exit 0
 fi
 
