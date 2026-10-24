@@ -8913,6 +8913,10 @@ encode_payload(const vx_cell_t *cells, int npay, uint8_t *out, int cap)
  * never exceeds this, and a SET / VALUES literal that would not fit is
  * rejected by encode_payload (-> VDBE fallback) rather than truncated. */
 #define XS_REC_MAX  4096
+/* The error a write gets for a row over XS_REC_MAX (engine.c passes it
+ * through instead of "unsupported SQL"). */
+#define VX_MSG_TOOBIG "row too large: the native engine stores at most " \
+	"4096 bytes per row (all columns, encoded)"
 
 /* Upper bound on rows a single native DELETE / UPDATE will touch.  A
  * range matching more than this falls back to the VDBE rather than run
@@ -9463,10 +9467,9 @@ vx_run_write_ast(struct xsql *db, sql_arena_t *arena, const sql_stmt_t *root,
 				 * back cleanly to the VDBE; otherwise it is too late to
 				 * fall back (the VDBE would re-update applied rows and
 				 * misreport changes()), so report an error. */
-				if (applied == 0) { free(rids); rc = 0; goto done; }
 				free(rids);
-				if (errmsg) *errmsg = strdup("native update row too large");
-				rc = -1; goto done;
+				vx_write_err(db, 0, errmsg, VX_MSG_TOOBIG);
+				rc = applied == 0 ? 0 : -1; goto done;
 			}
 			if (pk_reassign && pk_newval.i != rids[i]) {
 				/* Move: write the new payload at the new pk and tombstone
@@ -9514,7 +9517,10 @@ vx_run_write_ast(struct xsql *db, sql_arena_t *arena, const sql_stmt_t *root,
 		int64_t rowid = xstore_next_rowid(db, tableid, maxr);
 		for (ci = 0; ci < ws.n; ci++) { cells[ci].type = VX_NULL; cells[ci].nbytes = 0; }
 		reclen = encode_payload(&cells[1], ws.n - 1, rec, (int)sizeof rec);
-		if (reclen < 0) { rc = 0; goto done; }   /* unexpected -> VDBE */
+		if (reclen < 0) {   /* unexpected */
+			vx_write_err(db, 0, errmsg, VX_MSG_TOOBIG);
+			rc = 0; goto done;
+		}
 		if (vx_insert_row(db, tableid, rowid, rec, reclen, 0, tabbuf,
 		    ws.name[0], errmsg) != 0) {
 			rc = -1; goto done;
@@ -9649,7 +9655,11 @@ vx_run_write_ast(struct xsql *db, sql_arena_t *arena, const sql_stmt_t *root,
 			}
 			if (nb2 >= XS_NATIVE_MAX_ROWS) { free(buf2); vx_result_free(sres); rc = 0; goto done; }
 			reclen = encode_payload(&cells[1], ws.n - 1, buf2[nb2].rec, (int)sizeof buf2[nb2].rec);
-			if (reclen < 0) { free(buf2); vx_result_free(sres); rc = 0; goto done; }
+			if (reclen < 0) {
+				free(buf2); vx_result_free(sres);
+				vx_write_err(db, 0, errmsg, VX_MSG_TOOBIG);
+				rc = 0; goto done;
+			}
 			buf2[nb2].rowid = rowid; buf2[nb2].reclen = reclen; nb2++;
 		}
 		vx_result_free(sres);
@@ -9738,7 +9748,11 @@ vx_run_write_ast(struct xsql *db, sql_arena_t *arena, const sql_stmt_t *root,
 
 			reclen = encode_payload(&cells[1], ws.n - 1, buf[nb].rec,
 			                        (int)sizeof buf[nb].rec);
-			if (reclen < 0) { free(buf); rc = 0; goto done; }   /* too big -> VDBE */
+			if (reclen < 0) {   /* too big: VDBE, or the error */
+				free(buf);
+				vx_write_err(db, 0, errmsg, VX_MSG_TOOBIG);
+				rc = 0; goto done;
+			}
 			buf[nb].rowid = rowid;
 			buf[nb].reclen = reclen;
 			nb++;

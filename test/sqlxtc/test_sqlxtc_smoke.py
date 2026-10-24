@@ -128,6 +128,23 @@ def main():
     cols, rows, n = c.query("SELECT 42")
     check("survive after err", rows == [[42]])
 
+    # Row size limit: a row just under it stores and reads back; one over
+    # it is refused with an error that names the limit (not "unsupported
+    # SQL"), and the connection survives.
+    c.query("CREATE TABLE big(id INTEGER PRIMARY KEY, v TEXT)")
+    c.query("INSERT INTO big VALUES (1, '%s')" % ("a" * 4000))
+    cols, rows, n = c.query("SELECT length(v) FROM big WHERE id = 1")
+    check("row under limit", rows == [[4000]])
+    for sql in ("INSERT INTO big VALUES (2, '%s')" % ("b" * 5000),
+                "UPDATE big SET v = '%s' WHERE id = 1" % ("c" * 5000)):
+        try:
+            c.query(sql)
+            check("row over limit refused", False)
+        except RuntimeError as e:
+            check("row over limit refused", "row too large" in str(e))
+    cols, rows, n = c.query("SELECT id, length(v) FROM big ORDER BY id")
+    check("row over limit left table intact", rows == [[1, 4000]])
+
     # Per-connection transactions (default --threads 1).  Each client owns
     # its own transaction: another client's uncommitted writes are
     # invisible, COMMIT/ROLLBACK affect only the issuing client, and an

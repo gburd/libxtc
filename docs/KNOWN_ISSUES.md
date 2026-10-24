@@ -897,11 +897,17 @@ The example programs are teaching code built on libxtc's public API.
 After the 1.55.0 production-readiness review their durability and
 isolation defects were fixed (1.56); what remains is recorded here.
 
-* **sqlxtc row and key limits.**  A row value is at most 65535 bytes
-  (the B-tree API's 16-bit length; values over a quarter page are stored
-  out of line), and a key at most `bt_max_key()` bytes (498 on the
-  default 4 KiB page), so an indexed TEXT/BLOB value longer than about
-  470 bytes cannot be indexed; the index insert is refused.
+* **sqlxtc row and key limits.**  A row (all its columns, encoded) is at
+  most 4096 bytes in sqlxtc's native SQL engine (`XS_VMAX` in xstore.c,
+  `XS_REC_MAX` in vexec.c).  A longer INSERT or UPDATE is refused with
+  "row too large: the native engine stores at most 4096 bytes per row";
+  before 1.59 it was refused as "unsupported SQL (native engine)", and
+  until 1.59 this entry wrongly gave 65535.  65535 bytes is the B-tree
+  layer's limit (its 16-bit value length; values over a quarter page go
+  out of line), which the SQL layer does not reach yet.  A key is at most
+  `bt_max_key()` bytes (498 on the default 4 KiB page), so an indexed
+  TEXT/BLOB value longer than about 470 bytes cannot be indexed; the
+  index insert is refused.
 * **sqlxtc crash recovery rebuilds from the log.**  Recovery replays the
   write-ahead log onto a fresh page file; it does not yet trust the
   on-disk pages, their double-write buffer, or page LSNs

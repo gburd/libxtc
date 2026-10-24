@@ -140,8 +140,10 @@ is written to data pages first, and the leaf keeps a bounded reference
 (flagged by the high bit of the slot's length field, so inline pages are
 unchanged). Lookups and cursors reassemble it, checksum-verified; a
 replace or delete frees the old pages only after the reference is gone,
-while splits and merges only move the reference. Values go up to 65535
-bytes (the API's 16-bit length).
+while splits and merges only move the reference. B-tree values go up to
+65535 bytes (the API's 16-bit length); the SQL engine above it stores at
+most 4096 bytes per row and refuses a longer one with "row too large"
+(see KNOWN_ISSUES).
 
 **Writers do not hold the root.** RethinkDB's write descent keeps the
 root write-locked across a child read, which serializes every later

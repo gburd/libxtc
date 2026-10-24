@@ -1702,8 +1702,10 @@ sx_step_body(sx_stmt *st)
 				}
 				return nat_set_err(st->db, SX_MSG_SERIALIZE, SX_BUSY);
 			}
-			if (verr != NULL && strncmp(verr, "UNIQUE", 6) == 0) {
-				rc = nat_set_err(st->db, verr, SX_CONSTRAINT);
+			if (verr != NULL && (strncmp(verr, "UNIQUE", 6) == 0 ||
+			    strncmp(verr, "row too large", 13) == 0)) {
+				rc = nat_set_err(st->db, verr, verr[0] == 'U'
+				    ? SX_CONSTRAINT : SX_ERROR);
 				free(verr);
 				return rc;
 			}
