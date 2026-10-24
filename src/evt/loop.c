@@ -1357,12 +1357,15 @@ xtc_loop_run(xtc_loop_t *loop)
 		    __xtc_timer_heap_next_deadline(loop) >= 0;
 		if (!has_tasks && !has_timers) break;
 		if ((rc = __xtc_loop_step(loop)) != XTC_OK) {
+			__xtc_io_owner_leave(loop->io);
 			__xtc_current_loop = saved;
 			return rc;
 		}
 	}
 
 	atomic_store_explicit(&loop->stop_requested, 0, memory_order_relaxed);
+	/* Hand the io back (see the matching call in the exec worker). */
+	__xtc_io_owner_leave(loop->io);
 	__xtc_current_loop = saved;
 	return XTC_OK;
 }

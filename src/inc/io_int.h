@@ -226,19 +226,42 @@ struct xtc_io {
 	 * owning loop publishes it; never used for control flow.
 	 */
 	int              tail_loop_id;
+	/*
+	 * The owner: the thread that polls this io and the only one that
+	 * may submit to its ring.  A per-thread token, never reused (not a
+	 * pthread_t: glibc reuses a dead thread's descriptor, so a second
+	 * xtc_exec_run's worker can compare EQUAL to the first run's).  0 =
+	 * no owner yet.  owner_active: the owner declared itself
+	 * (__xtc_io_set_owner, at the start of a loop run) and has not left
+	 * (__xtc_io_owner_leave, at its end).  A thread touching an io that
+	 * has no active owner takes it over (__own); on a SINGLE_ISSUER ring
+	 * that rebuilds the ring for it (__ring_rebind), and a loop run
+	 * upgrades a COOP ring to SINGLE_ISSUER the same way.
+	 * owner_tid/owner_set mirror the owner for the debugger (xtc-rings).
+	 */
+	_Atomic uint64_t owner_tok;
+	_Atomic int      owner_active;    /* owner declared (set_owner), not left */
 	pthread_t        owner_tid;       /* the thread that polls this io */
 	_Atomic int      owner_set;       /* 1 once owner_tid is recorded */
-#if defined(XTC_DIAGNOSTIC)
 	/*
-	 * DIAGNOSTIC-only: the thread that CREATED this ring, recorded in
-	 * __xtc_io_backend_init.  The ring is created by whoever calls
-	 * xtc_loop_init -- for an executor the exec-init thread, not the
-	 * worker that will own and submit to it.  The creator submits
-	 * nothing (the wakeup POLL_ADD is armed by the first poll), so every
-	 * submit comes from the owner; __ring_submit asserts it.
+	 * Ring mode.  ring_flags: the IORING_SETUP_* the ring was built with
+	 * (rebuilds reuse them).  ring_single: SINGLE_ISSUER (the DEFER
+	 * tier), so only the creating thread may submit or reap and an owner
+	 * change rebuilds the ring.  n_aio: file-AIO SQEs in the kernel; a
+	 * rebuild needs 0 (see __xtc_io_owner_leave).
+	 * carry: events a leaving owner reaped while it waited for its AIO,
+	 * returned by the next poll before anything else.  ring_dead: a
+	 * rebuild found no memory for the new ring; the io is unusable.
 	 */
-	pthread_t        creator_tid;
-#endif
+	unsigned         ring_flags;
+	int              ring_single;
+	int              ring_try_defer;  /* a loop run may upgrade to DEFER */
+	int              n_aio;
+	int              ring_dead;
+	xtc_io_event_t  *carry;
+	int              n_carry;
+	int              cap_carry;
+	unsigned         n_rebinds;       /* ring rebuilds (tests) */
 	/*
 	 * L2 ring-pointer preempt (INSPIRED BY Glommio's need_preempt():
 	 * reactor.rs / sys/uring.rs preempt_pointers).  A dedicated tiny
@@ -339,9 +362,21 @@ int __xtc_io_reg_stats(xtc_io_t *io, int *live, int *zombies, int *pending);
 
 /*
  * io_uring (XTC_E_NOSYS elsewhere): the IORING_SETUP_* flags the main ring
- * was created with (after any fallback for an older kernel), and how many
- * SQEs the kernel has consumed from it.  Tests.  Out pointers may be NULL.
+ * has now (after any fallback for an older kernel), how many SQEs the
+ * kernel has consumed from the current ring, and how many times the ring
+ * was rebuilt (a loop run upgrading it to DEFER, a new owner thread).
+ * Tests.  Out pointers may be NULL.
  */
-int __xtc_io_uring_info(xtc_io_t *io, unsigned *flags, unsigned *sq_consumed);
+int __xtc_io_uring_info(xtc_io_t *io, unsigned *flags, unsigned *sq_consumed,
+    unsigned *rebinds);
+
+/*
+ * The calling thread stops running this io's loop (an executor worker
+ * exiting, xtc_loop_run returning).  On a SINGLE_ISSUER io_uring ring it
+ * reaps every file-AIO completion still in the kernel, because only this
+ * thread can, and keeps them for the next owner's first poll.  No-op on
+ * other backends and when the caller is not the owner.
+ */
+void __xtc_io_owner_leave(xtc_io_t *io);
 
 #endif /* XTC_IO_INT_H */

@@ -629,6 +629,8 @@ int  __xtc_loop_dispatch_event(xtc_loop_t *loop, xtc_io_event_t *ev);
 int  __xtc_io_uring_preempt_arm(xtc_io_t *io, int64_t interval_ns);
 int  __xtc_io_uring_preempt_due(xtc_io_t *io);
 void __xtc_io_uring_preempt_disarm(xtc_io_t *io);
+/* The calling thread stops running loop->io's loop (io_int.h). */
+void __xtc_io_owner_leave(xtc_io_t *io);
 
 /* Implemented in proc.c.  Called from loop_fini to release the
  * proc-table side struct hashed against this loop pointer.  Must be

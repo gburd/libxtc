@@ -174,24 +174,26 @@ __pollres_to_flags(uint32_t res)
  *
  * The invariant: a ring is created on one thread (xtc_loop_init's
  * caller, which for an executor is the exec-init thread) and submitted
- * to only by the thread that polls it.  The creator submits nothing: the
- * wakeup POLL_ADD is queued at init and armed by the first poll (see
- * __xtc_io_register_wakeup).  What must never happen is a submit from
- * any other thread once an owner has been established: the SQ is
- * single-producer, so that is a data race, and it is the same shape as
- * the eight fixed cross-loop defects.
+ * to only by its owner, the thread that polls it (__own makes the caller
+ * the owner on every entry point, so this holds by construction).  The
+ * creator submits nothing: the wakeup POLL_ADD is queued at init and
+ * armed by the first poll (see __xtc_io_register_wakeup).  A submit from
+ * any other thread would be a data race on the single-producer SQ, the
+ * same shape as the eight fixed cross-loop defects.
  *
  * Zero cost in a normal build; XTC_DIAGNOSTIC turns it into an immediate,
  * located abort.
  */
+static uint64_t __self_tok(void);
+
 static int
 __ring_submit(xtc_io_t *io)
 {
 	int rc;
 	unsigned queued;
 #if defined(XTC_DIAGNOSTIC)
-	if (atomic_load_explicit(&io->owner_set, memory_order_acquire) &&
-	    !pthread_equal(pthread_self(), io->owner_tid)) {
+	if (atomic_load_explicit(&io->owner_tok, memory_order_acquire) !=
+	    __self_tok()) {
 		fprintf(stderr, "XTC DIAGNOSTIC: io_uring SQ submit from a "
 		    "non-owner thread (io=%p): the submission queue is "
 		    "single-producer and this ring already has an owner. "
@@ -413,67 +415,288 @@ __flush_pending(xtc_io_t *io)
 #define XTC_URING_INIT_RETRIES 200    /* x 1 ms */
 
 /*
- * Optional setup flags, tried first and dropped if the kernel refuses
- * them (an unknown flag fails the whole setup with -EINVAL).
+ * Setup tiers, best first.  An unknown flag fails the whole setup with
+ * -EINVAL, so on EINVAL the next tier is tried; the ring keeps the first
+ * tier the kernel accepts.
  *
- * COOP_TASKRUN (Linux 5.19): a completion's task_work no longer IPIs the
- * submitting thread out of user mode; it runs at that thread's next
- * kernel entry, or wakes it if it sleeps.  The loop enters the kernel to
- * collect completions anyway, so the forced interrupt bought nothing.
- * TASKRUN_FLAG makes the kernel raise IORING_SQ_TASKRUN while such work
- * is pending, which is what lets the non-blocking peek in the reap loop
- * (io_uring_peek_cqe -> cq_ring_needs_flush) enter and run it instead of
- * reporting an empty CQ.  Measured, rexis memtier, one loop: +12.3%
- * pipe 1, +6.9% pipe 16 on Linux 7.2, same SQE mix and syscall count.
+ * DEFER_TASKRUN + SINGLE_ISSUER (Linux 6.1; the paper's recommended
+ * mode, "High-Performance DBMSs with io_uring", PVLDB 19(9) 2026, sec.
+ * 2/5.1): completion task_work is queued on the ring and run only when
+ * the issuer enters the kernel to wait for completions -- never by an
+ * interrupt, never on an unrelated system call.  A loop polls its ring
+ * from one thread, so it IS a single issuer; but SINGLE_ISSUER binds the
+ * ring to one task, and a loop's thread can change (xtc_exec_run starts
+ * new workers on every call; xtc_loop_init and xtc_loop_run may run on
+ * different threads).  So a DEFER ring is created ON the thread that
+ * runs the loop, and rebuilt for a new one (__own, __ring_rebind).
+ *
+ * COOP_TASKRUN (5.19): task_work no longer IPIs a submitter running in
+ * user mode; it runs at that thread's next kernel entry, or wakes it if
+ * it sleeps.  No binding.
+ *
+ * TASKRUN_FLAG (both): the kernel raises IORING_SQ_TASKRUN while such
+ * work is pending, which is what makes the non-blocking peek in the reap
+ * loop (io_uring_peek_cqe -> cq_ring_needs_flush) enter and run it
+ * instead of reporting an empty CQ.
+ *
+ * Measured, rexis one loop, memtier 4x16 10:1 (64-vCPU x86-64, Linux
+ * 6.12): COOP +10.4% pipe 1 / +7.0% pipe 16 over flags 0; DEFER a further
+ * +5.5% / +2.7%.  Same SQE mix and syscall count: it is all completion
+ * signalling (task_work_add per request 1.84 -> 0.007).
+ *
+ * WHEN each tier is used.  xtc_io_init builds the ring at the best NON-
+ * binding tier (COOP, else plain).  The DEFER tier is taken only when a
+ * thread starts RUNNING the loop (__xtc_io_set_owner -> __own): the ring
+ * is rebuilt then, with nothing on it yet.  Two reasons.  First, a DEFER
+ * ring must be bound to its one thread anyway.  Second, freeing a DEFER
+ * ring costs a full RCU grace period in the kernel's ring-exit worker
+ * (io_ring_exit_work -> synchronize_rcu, Linux 6.1-6.12 at least), and
+ * those frees queue up: 8 threads creating and destroying loops in a
+ * tight loop (test_xproc /entry_mt_parent) left 64 exit workers blocked
+ * and 25 GB of kernel memory unreclaimable until the OOM killer ran.  A
+ * loop that is created and destroyed without running -- and every bare
+ * xtc_io_t -- never becomes DEFER, so it never pays that.
  *
  * NOT applied to the preempt ring: its timeout CQE is read with no
  * kernel entry at all (__xtc_io_uring_preempt_due), so it depends on the
  * IPI to post it while a fiber computes.
+ *
+ * "io.uring.setup_einval" makes every optional tier fail as an older
+ * kernel would, "io.uring.no_defer" only the DEFER tier.
  */
-#define XTC_URING_OPT_FLAGS \
+#define XTC_URING_DEFER \
+	(IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | \
+	 IORING_SETUP_TASKRUN_FLAG)
+#define XTC_URING_COOP \
 	(IORING_SETUP_COOP_TASKRUN | IORING_SETUP_TASKRUN_FLAG)
 
+/* What xtc_io_init asks for, best first. */
+static const unsigned __xtc_uring_init_tiers[] = { XTC_URING_COOP, 0u };
+#define XTC_URING_N_INIT_TIERS \
+	((int)(sizeof __xtc_uring_init_tiers / sizeof __xtc_uring_init_tiers[0]))
+
+/* The DEFER tier, once refused by this kernel, is not tried again. */
+static _Atomic int __xtc_uring_no_defer;
+
+/* Is this optional flag set refused by a test injection? */
 static int
-__ring_setup(struct io_uring *ring, unsigned cq_entries, int retries)
+__tier_injected(unsigned fl)
+{
+	if (fl == 0u)
+		return 0;
+	if (xtc_inject_check("io.uring.setup_einval"))
+		return 1;
+	return (fl & IORING_SETUP_DEFER_TASKRUN) != 0 &&
+	    xtc_inject_check("io.uring.no_defer");
+}
+
+/*
+ * Create *ring with the first of tiers[0..n-1] the kernel accepts
+ * (EINVAL = an unknown flag: try the next); *got returns the set used.
+ */
+static int
+__ring_setup(struct io_uring *ring, unsigned cq_entries, int retries,
+    const unsigned *tiers, int n, unsigned *got)
 {
 	struct io_uring_params prm;
-	unsigned opt = XTC_URING_OPT_FLAGS;
-	int rc, k;
+	int rc, k, t = 0;
 
 	for (k = 0; ; k++) {
 		memset(&prm, 0, sizeof prm);
-		prm.flags = opt;
+		prm.flags = tiers[t];
 		if (cq_entries != 0) {
 			prm.flags |= IORING_SETUP_CQSIZE;
 			prm.cq_entries = cq_entries;
 		}
-		/* "io.uring.setup_einval": act as a kernel without them. */
-		if (opt != 0 && xtc_inject_check("io.uring.setup_einval"))
+		if (__tier_injected(tiers[t]))
 			rc = -EINVAL;
 		else
 			rc = io_uring_queue_init_params(XTC_URING_SQ_ENTRIES,
 			    ring, &prm);
-		if (rc == -EINVAL && opt != 0) {
-			opt = 0;      /* older kernel: plain ring */
+		if (rc == -EINVAL && t + 1 < n) {
+			t++;          /* older kernel: next tier */
 			k--;
 			continue;
 		}
+		if (rc == 0)
+			*got = tiers[t];
 		if (rc != -ENOMEM || k >= retries)
 			return rc;
 		(void)__os_sleep_ns(1000LL * 1000);   /* XTC_BLOCKING_OK: ring setup, once per loop */
 	}
 }
 
+/* Cap a ring's io-wq pool; see XTC_IOWQ_BOUND_DEFAULT.  Best-effort: a
+ * kernel without the register op (< 5.15) returns -ENOSYS. */
+static void
+__ring_cap_iowq(struct io_uring *ring)
+{
+	unsigned vals[2];
+
+	vals[0] = atomic_load_explicit(&__xtc_iowq_bound,
+	    memory_order_relaxed);
+	vals[1] = atomic_load_explicit(&__xtc_iowq_unbound,
+	    memory_order_relaxed);
+	if (vals[0] != 0u || vals[1] != 0u)
+		(void)io_uring_register_iowq_max_workers(ring, vals);
+}
+
+/*
+ * A per-thread owner token: unique for the life of the process, so a
+ * thread that reuses a dead thread's pthread_t still reads as new.
+ */
+static _Atomic uint64_t __xtc_uring_tok_next = 1;
+static XTC_THREAD_LOCAL uint64_t __xtc_uring_tok;
+
+static uint64_t
+__self_tok(void)
+{
+	if (__xtc_uring_tok == 0)
+		__xtc_uring_tok = atomic_fetch_add_explicit(
+		    &__xtc_uring_tok_next, 1, memory_order_relaxed);
+	return __xtc_uring_tok;
+}
+
+static int __ring_rebind(xtc_io_t *, int);
+static int __poll(xtc_io_t *, xtc_io_event_t *, int, int64_t, int *);
+
+/*
+ * Make the calling thread this io's owner before it touches the ring.
+ * Every ring entry point (poll, reg/mod/del, aio submit) calls it with
+ * run == 0; __xtc_io_set_owner, at the start of a loop run, with run ==
+ * 1.
+ *
+ * Fast path: the caller already owns the ring (a relaxed load and a TLS
+ * read).  Otherwise the caller takes the io over, which is legal only
+ * when no other thread is running its loop: the io is single-owner, and
+ * a foreign thread reaches it only through xtc_io_wakeup and
+ * __xtc_io_defer_del_fd.  owner_active says whether one is (set by
+ * __xtc_io_set_owner, cleared by __xtc_io_owner_leave); a takeover while
+ * it is set is refused, which is what a DIAGNOSTIC build used to abort
+ * on.
+ *
+ * The ring follows the owner.  A SINGLE_ISSUER (DEFER) ring is bound to
+ * the thread that created it, so a new owner gets a new ring
+ * (__ring_rebind).  A loop run (run == 1) also upgrades a COOP ring to
+ * DEFER the same way, on the kernels that have it (see
+ * __xtc_uring_tiers' comment for why that waits until the loop runs).
+ */
+static int
+__own(xtc_io_t *io, int run)
+{
+	uint64_t me = __self_tok(), cur;
+	int rc, defer;
+
+	cur = atomic_load_explicit(&io->owner_tok, memory_order_relaxed);
+	defer = run && !io->ring_single && io->ring_try_defer &&
+	    !atomic_load_explicit(&__xtc_uring_no_defer, memory_order_relaxed);
+	if (cur == me && !defer)
+		return XTC_OK;
+	if (io->ring_dead)
+		return XTC_E_NOMEM;
+	if (cur != me && cur != 0 &&
+	    atomic_load_explicit(&io->owner_active, memory_order_acquire)) {
+#if defined(XTC_DIAGNOSTIC)
+		fprintf(stderr, "XTC DIAGNOSTIC: io_uring ring touched by a "
+		    "non-owner thread (io=%p) while its owner runs the loop: "
+		    "the ring is single-producer.\n", (void *)io);
+		abort();
+#endif
+		return XTC_E_INTERNAL;
+	}
+	if ((io->ring_single || defer) &&
+	    (rc = __ring_rebind(io, defer)) != XTC_OK)
+		return rc;
+	io->owner_tid = pthread_self();
+	atomic_store_explicit(&io->owner_set, 1, memory_order_relaxed);
+	atomic_store_explicit(&io->owner_tok, me, memory_order_release);
+	return XTC_OK;
+}
+
+/*
+ * Rebuild the ring on the calling thread (see __own): as DEFER if
+ * want_defer (falling back to the current flags if the kernel refuses
+ * DEFER), else with the current flags.
+ *
+ * Polls are moved, not lost: every live registration is re-armed on the
+ * new ring, and a poll is level-checked when armed, so readiness that
+ * arrived while the old ring was idle -- or that a leaving owner reaped
+ * but could not deliver -- is reported by the new one.  Retired nodes
+ * waiting for a terminal CQE are freed: io_uring_queue_exit cancels
+ * their polls, and no CQE of the old ring can be reaped any more.
+ *
+ * File AIO cannot move: a read or write in flight belongs to the old
+ * ring.  The previous owner reaps it before leaving
+ * (__xtc_io_owner_leave), so n_aio is 0 here on every path the library
+ * drives; if it is not, the rebuild is refused rather than strand the
+ * parked fiber's completion.  A ring whose only submit so far is to be
+ * re-sent (the wakeup poll, queued at init) loses nothing.
+ *
+ * Out of memory for the new ring leaves the io without one (ring_dead):
+ * every later entry point reports XTC_E_NOMEM.
+ */
+static int
+__ring_rebind(xtc_io_t *io, int want_defer)
+{
+	struct io_uring nr;
+	struct __xtc_uring_fd *p, *n;
+	unsigned tiers[2], got = 0;
+	int i, rc, nt = 0;
+
+	if (io->n_aio != 0)
+		return XTC_E_INTERNAL;
+	if (want_defer)
+		tiers[nt++] = XTC_URING_DEFER;
+	tiers[nt++] = io->ring_flags;
+	/* Old ring first: the memlock budget may not fit two. */
+	io_uring_queue_exit(&io->ring);
+	rc = __ring_setup(&nr, XTC_URING_CQ_ENTRIES, XTC_URING_INIT_RETRIES,
+	    tiers, nt, &got);
+	if (rc < 0) {
+		io->ring_dead = 1;
+		memset(&io->ring, 0, sizeof io->ring);
+		return rc == -ENOMEM ? XTC_E_NOMEM : XTC_E_INTERNAL;
+	}
+	/* A pre-6.1 kernel: stop asking (but not for a test's refusal). */
+	if (want_defer && got != XTC_URING_DEFER &&
+	    !__tier_injected(XTC_URING_DEFER))
+		atomic_store_explicit(&__xtc_uring_no_defer, 1,
+		    memory_order_relaxed);
+	__ring_cap_iowq(&nr);
+	io->ring = nr;
+	io->ring_flags = got;
+	io->ring_single = (got & IORING_SETUP_SINGLE_ISSUER) != 0;
+	io->n_rebinds++;
+	for (p = io->zombies; p != NULL; p = n) {
+		n = p->next;
+		p->armed = 0;
+		__zombie_unlink(io, p);
+		if (!p->pending)
+			__node_free(p);
+	}
+	for (i = 0; i < io->tab_cap; i++) {
+		if ((p = io->tab[i]) == NULL)
+			continue;
+		p->armed = 0;
+		__node_defer(io, p);
+	}
+	return XTC_OK;
+}
+
 /* Main-ring setup flags and SQEs the kernel has consumed (tests). */
 int
-__xtc_io_uring_info(xtc_io_t *io, unsigned *flags, unsigned *sq_consumed)
+__xtc_io_uring_info(xtc_io_t *io, unsigned *flags, unsigned *sq_consumed,
+    unsigned *rebinds)
 {
 	if (io == NULL)
 		return XTC_E_INVAL;
 	if (flags != NULL)
-		*flags = io->ring.flags;
+		*flags = io->ring_dead ? 0u : io->ring.flags;
 	if (sq_consumed != NULL)
-		*sq_consumed = io_uring_smp_load_acquire(io->ring.sq.khead);
+		*sq_consumed = io->ring_dead ? 0u :
+		    io_uring_smp_load_acquire(io->ring.sq.khead);
+	if (rebinds != NULL)
+		*rebinds = io->n_rebinds;
 	return XTC_OK;
 }
 
@@ -490,37 +713,34 @@ __xtc_io_backend_init(xtc_io_t *io)
 	 * loop must start on a 96-core host.  CQ overflow is not lossy (the
 	 * reap path re-arms a poll the kernel ended), only slower. */
 	rc = __ring_setup(&io->ring, XTC_URING_CQ_ENTRIES,
-	    XTC_URING_INIT_RETRIES);
+	    XTC_URING_INIT_RETRIES, __xtc_uring_init_tiers,
+	    XTC_URING_N_INIT_TIERS, &io->ring_flags);
 	if (rc < 0) {
 		errno = -rc;
 		return rc == -ENOMEM ? XTC_E_NOMEM : XTC_E_INTERNAL;
 	}
+	io->ring_single = 0;
+	/* DEFER is 6.1+, COOP 5.19+: a kernel that refused COOP lacks it. */
+	io->ring_try_defer = io->ring_flags != 0;
 	/*
 	 * Cap this ring's kernel io-wq worker pool so N carriers on an
 	 * M-core box do not accumulate N*M idle io-wq threads (see the
-	 * XTC_IOWQ_BOUND_DEFAULT comment).  Best-effort: an older kernel
-	 * without the register op returns -ENOSYS -- ignore it and keep
-	 * the previous (uncapped) behavior. */
-	{
-		unsigned vals[2];
-		vals[0] = atomic_load_explicit(&__xtc_iowq_bound,
-		    memory_order_relaxed);
-		vals[1] = atomic_load_explicit(&__xtc_iowq_unbound,
-		    memory_order_relaxed);
-		if (vals[0] != 0u || vals[1] != 0u)
-			(void)io_uring_register_iowq_max_workers(&io->ring,
-			    vals);
-	}
+	 * XTC_IOWQ_BOUND_DEFAULT comment).  The register op works on a
+	 * disabled ring (no submitter bound yet).
+	 */
+	__ring_cap_iowq(&io->ring);
 	io->tab = NULL;
 	io->tab_cap = 0;
 	io->zombies = NULL;
 	io->pending = NULL;
 	io->n_zombies = 0;
-#if defined(XTC_DIAGNOSTIC)
-	/* Record who built this ring; the submit path asserts against it.
-	 * See the creator_tid comment in io_int.h. */
-	io->creator_tid = pthread_self();
-#endif
+	io->n_aio = 0;
+	io->ring_dead = 0;
+	io->carry = NULL;
+	io->n_carry = io->cap_carry = 0;
+	io->n_rebinds = 0;
+	atomic_store_explicit(&io->owner_tok, 0, memory_order_relaxed);
+	atomic_store_explicit(&io->owner_active, 0, memory_order_relaxed);
 	io->pending_del = NULL;
 	io->n_pending_del = 0;
 	io->cap_pending_del = 0;
@@ -567,8 +787,12 @@ __xtc_io_backend_fini(xtc_io_t *io)
 	}
 	io->n_pending_del = 0;
 	io->cap_pending_del = 0;
+	__os_free(io->carry);
+	io->carry = NULL;
+	io->n_carry = io->cap_carry = 0;
 	(void)pthread_mutex_destroy(&io->del_lock);
-	io_uring_queue_exit(&io->ring);
+	if (!io->ring_dead)
+		io_uring_queue_exit(&io->ring);
 }
 
 /*
@@ -738,8 +962,11 @@ int
 xtc_io_reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 {
 	int rc;
+	if (io == NULL)
+		return XTC_E_INVAL;
 	__xtc_unsafe_enter();
-	rc = __reg_fd(io, fd, interest, tag);
+	if ((rc = __own(io, 0)) == XTC_OK)
+		rc = __reg_fd(io, fd, interest, tag);
 	__xtc_unsafe_leave();
 	return rc;
 }
@@ -749,8 +976,11 @@ int
 xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 {
 	int rc;
+	if (io == NULL)
+		return XTC_E_INVAL;
 	__xtc_unsafe_enter();
-	rc = __aio_submit(io, a);
+	if ((rc = __own(io, 0)) == XTC_OK)
+		rc = __aio_submit(io, a);
 	__xtc_unsafe_leave();
 	return rc;
 }
@@ -760,8 +990,11 @@ int
 xtc_io_mod_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 {
 	int rc;
+	if (io == NULL)
+		return XTC_E_INVAL;
 	__xtc_unsafe_enter();
-	rc = __mod_fd(io, fd, interest, tag);
+	if ((rc = __own(io, 0)) == XTC_OK)
+		rc = __mod_fd(io, fd, interest, tag);
 	__xtc_unsafe_leave();
 	return rc;
 }
@@ -771,8 +1004,11 @@ int
 xtc_io_del_fd(xtc_io_t *io, int fd)
 {
 	int rc;
+	if (io == NULL)
+		return XTC_E_INVAL;
 	__xtc_unsafe_enter();
-	rc = __del_fd(io, fd);
+	if ((rc = __own(io, 0)) == XTC_OK)
+		rc = __del_fd(io, fd);
 	__xtc_unsafe_leave();
 	return rc;
 }
@@ -843,6 +1079,7 @@ __aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	}
 	a->done = 0;   /* plain: our own thread, before the SQE is visible */
 	a->res = 0;
+	io->n_aio++;   /* until its CQE is reaped; see __ring_rebind */
 	/* Low-bit tag distinguishes this completion from a poll-add CQE. */
 	io_uring_sqe_set_data(sqe, (void *)((uintptr_t)a | 1u));
 	/* Record the ASK, keyed by the task, so a later "no REAP" can be told
@@ -945,40 +1182,99 @@ __xtc_io_reg_stats(xtc_io_t *io, int *live, int *zombies, int *pending)
  * real unregister on its own thread.  Internal (declared in io_int.h).
  */
 /*
- * Record the calling thread as this io's owner.  See __xtc_io_set_owner
- * in io_int.h's rationale: called eagerly at the owning loop's worker /
- * run-loop startup so the inline-vs-defer decision below is correct from
- * the first cross-loop del, not only after this io's first poll (a home
- * loop that had all its fibers work-stolen can run its own run queue for
- * a long window without ever blocking in xtc_io_poll -- owner_set would
- * stay 0, and every foreign del would race the fd table inline).
+ * The calling thread starts running this io's loop (an executor worker at
+ * startup, xtc_loop_run on entry): it becomes the owner now, before any
+ * fiber runs, so a cross-loop cleanup on a peer thread always defers its
+ * unregister to it (a home loop whose fibers were all work-stolen can
+ * run its own queue for a long window without polling).  On a
+ * SINGLE_ISSUER ring this is also where the ring is bound to the thread,
+ * or rebuilt for it if a previous run's thread owned it (see __own).  A
+ * failure is reported by the loop's next poll.
  */
 void
 __xtc_io_set_owner(xtc_io_t *io)
 {
-	if (io != NULL &&
-	    !atomic_load_explicit(&io->owner_set, memory_order_relaxed)) {
-		io->owner_tid = pthread_self();
-		atomic_store_explicit(&io->owner_set, 1, memory_order_release);
+	if (io == NULL)
+		return;
+	__xtc_unsafe_enter();
+	if (__own(io, 1) == XTC_OK)
+		atomic_store_explicit(&io->owner_active, 1,
+		    memory_order_release);
+	__xtc_unsafe_leave();
+}
+
+/*
+ * The calling thread stops running this io's loop.  See io_int.h.
+ *
+ * Only a SINGLE_ISSUER ring needs work here.  Its completions are posted
+ * only when its issuer waits for them, and the next owner gets a NEW ring
+ * (__ring_rebind) -- so a file-AIO op still in the kernel would never
+ * complete for the fiber parked on it.  Reap until none is left (this
+ * waits for the I/O itself: a read or fsync in flight when the loop was
+ * stopped), keeping everything the reap returns -- the AIO completions
+ * and any readiness reaped alongside -- for the next owner's first poll.
+ * A loop that ran to idle has nothing in flight: the common case is one
+ * comparison.  The io stays owned by this thread, so a peer's cleanup
+ * still queues to it, and a later run on this same thread keeps the ring.
+ *
+ * shortcut: the wait is unbounded, so an AIO op that never completes (a
+ * read on an empty pipe: xtc_aio_* is for files) holds the loop's exit;
+ * add an IORING_OP_ASYNC_CANCEL after a deadline if a consumer needs it.
+ */
+void
+__xtc_io_owner_leave(xtc_io_t *io)
+{
+	xtc_io_event_t ev[64];
+	xtc_io_event_t *nc;
+	int n;
+
+	if (io == NULL || atomic_load_explicit(&io->owner_tok,
+	    memory_order_relaxed) != __self_tok())
+		return;
+	__xtc_unsafe_enter();
+	while (io->ring_single && io->n_aio > 0 && !io->ring_dead) {
+		n = 0;
+		if (__poll(io, ev, (int)(sizeof ev / sizeof ev[0]),
+		    100LL * 1000 * 1000, &n) != XTC_OK)
+			break;
+		if (n == 0)
+			continue;
+		if (io->n_carry + n > io->cap_carry) {
+			int nc_cap = (io->n_carry + n) * 2;
+			if (__os_realloc(io->carry, (size_t)nc_cap * sizeof *nc,
+			    (void **)&nc) != XTC_OK)
+				break;   /* shortcut: no memory loses these wakes; a parked fiber stays parked */
+			io->carry = nc;
+			io->cap_carry = nc_cap;
+		}
+		memcpy(io->carry + io->n_carry, ev, (size_t)n * sizeof *ev);
+		io->n_carry += n;
 	}
+	atomic_store_explicit(&io->owner_active, 0, memory_order_release);
+	__xtc_unsafe_leave();
 }
 
 int
 __xtc_io_defer_del_fd(xtc_io_t *io, int fd)
 {
+	uint64_t cur;
+
 	if (io == NULL || fd < 0) return XTC_E_INVAL;
 	/*
-	 * If we ARE the io's owning (poll) thread, unregister inline -- this
-	 * is the common case (a fiber re-parking on the same fd on its own
-	 * loop) and MUST be synchronous: deferring it would leave the old
-	 * registration in io->tab so the immediate re-register in the next
-	 * xtc_proc_wait_fd sees a duplicate and fails, stranding the fiber.
-	 * We can only cross-loop-defer when we are genuinely on a different
-	 * OS thread than the owner.  owner_tid is recorded by the owner in
-	 * xtc_io_poll; until it is set (before the loop has ever polled)
-	 * there is no concurrent poller, so inline is safe. */
-	if (!atomic_load_explicit(&io->owner_set, memory_order_acquire) ||
-	    pthread_equal(pthread_self(), io->owner_tid))
+	 * If we ARE the io's owner, unregister inline -- this is the common
+	 * case (a fiber re-parking on the same fd on its own loop) and MUST
+	 * be synchronous: deferring it would leave the old registration in
+	 * io->tab so the immediate re-register in the next xtc_proc_wait_fd
+	 * sees a duplicate and fails, stranding the fiber.  Only a genuinely
+	 * different thread defers.  An io nobody has touched has no fd
+	 * registered (registering makes the caller the owner), so there is
+	 * nothing to delete: answer as __del_fd would, without binding the
+	 * ring to this thread.
+	 */
+	cur = atomic_load_explicit(&io->owner_tok, memory_order_acquire);
+	if (cur == 0)
+		return XTC_E_INVAL;
+	if (cur == __self_tok())
 		return xtc_io_del_fd(io, fd);
 	(void)__xtc_mtx_lock(&io->del_lock);
 	if (io->n_pending_del >= io->cap_pending_del) {
@@ -1081,18 +1377,6 @@ __poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 	struct io_uring_cqe *cqe;
 	int rc;
 
-	if (io == NULL || events == NULL || max <= 0 || n_out == NULL)
-		return XTC_E_INVAL;
-	*n_out = 0;
-
-	/* Record the owning (poll) thread on first poll, so a cross-loop
-	 * __xtc_io_defer_del_fd caller can tell whether it is us (del inline)
-	 * or a foreign thread (defer to us). */
-	if (!atomic_load_explicit(&io->owner_set, memory_order_relaxed)) {
-		io->owner_tid = pthread_self();
-		atomic_store_explicit(&io->owner_set, 1, memory_order_release);
-	}
-
 	/* Owner-thread drain of any cross-loop deferred unregisters queued
 	 * by foreign threads (see __xtc_io_defer_del_fd).  Done here so the
 	 * fd table + SQ ring are only ever mutated by this io's own loop. */
@@ -1148,6 +1432,7 @@ __poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		 * __xtc_uring_fd pointers are calloc-aligned, so bit 0 is 0. */
 		if (((uintptr_t)data & 1u) != 0) {
 			xtc_aio_t *a = (xtc_aio_t *)((uintptr_t)data & ~(uintptr_t)1);
+			io->n_aio--;
 			a->res = cqe->res;
 			/* Release: publish res BEFORE the done flag the parked
 			 * fiber acquires, so a fiber that sees done sees res.
@@ -1315,6 +1600,23 @@ __poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 }
 /* XTC_NOALLOC_END */
 
+/*
+ * Events a leaving owner reaped (__xtc_io_owner_leave) come first, and
+ * alone: they are already consumed from the ring.  Rare.
+ */
+static int
+__poll_carry(xtc_io_t *io, xtc_io_event_t *events, int max, int *n_out)
+{
+	int got = io->n_carry < max ? io->n_carry : max;
+
+	memcpy(events, io->carry, (size_t)got * sizeof *events);
+	memmove(io->carry, io->carry + got,
+	    (size_t)(io->n_carry - got) * sizeof *events);
+	io->n_carry -= got;
+	*n_out = got;
+	return XTC_OK;
+}
+
 /* PUBLIC: int xtc_io_poll __P((xtc_io_t *, xtc_io_event_t *, int, int64_t, int *)); */
 /*
  * The reap path is an SQ producer too (wakeup / multishot re-arms, the
@@ -1329,8 +1631,16 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
             int64_t timeout_ns, int *n_out)
 {
 	int rc;
+	if (io == NULL || events == NULL || max <= 0 || n_out == NULL)
+		return XTC_E_INVAL;
+	*n_out = 0;
 	__xtc_unsafe_enter();
-	rc = __poll(io, events, max, timeout_ns, n_out);
+	if ((rc = __own(io, 0)) == XTC_OK) {
+		if (io->n_carry > 0)
+			rc = __poll_carry(io, events, max, n_out);
+		else
+			rc = __poll(io, events, max, timeout_ns, n_out);
+	}
 	__xtc_unsafe_leave();
 	return rc;
 }
@@ -1537,10 +1847,17 @@ __xtc_io_reg_stats(xtc_io_t *io, int *live, int *zombies, int *pending)
 }
 
 int
-__xtc_io_uring_info(xtc_io_t *io, unsigned *flags, unsigned *sq_consumed)
+__xtc_io_uring_info(xtc_io_t *io, unsigned *flags, unsigned *sq_consumed,
+    unsigned *rebinds)
 {
-	(void)io; (void)flags; (void)sq_consumed;
+	(void)io; (void)flags; (void)sq_consumed; (void)rebinds;
 	return XTC_E_NOSYS;
+}
+
+void
+__xtc_io_owner_leave(xtc_io_t *io)
+{
+	(void)io;
 }
 #endif /* !XTC_IO_BACKEND_URING */
 
