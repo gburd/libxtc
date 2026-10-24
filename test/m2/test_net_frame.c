@@ -11,9 +11,10 @@
  *	empty pieces and a 1 MiB piece that forces partial writes and
  *	parks) arrive as ordinary frames; bad vectors are refused.
  *	one_segment: a small frame's prefix and payload leave in ONE send
- *	-- on a SOCK_SEQPACKET pair every send is one record, so the
+ *	-- on a SOCK_DGRAM pair every send is one record, so the
  *	receiver's first recv must return 4 + len bytes (the old
  *	send-prefix-then-payload code delivered a 4-byte record first).
+ *	(DGRAM, not SEQPACKET: macOS has no AF_UNIX SOCK_SEQPACKET.)
  */
 
 #define _GNU_SOURCE
@@ -331,7 +332,7 @@ test_frame_one_segment(const MunitParameter p[], void *d)
 	int sv[2];
 	struct iovec v[2];
 	(void)p; (void)d;
-	munit_assert_int(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv), ==, 0);
+	munit_assert_int(socketpair(AF_UNIX, SOCK_DGRAM, 0, sv), ==, 0);
 	munit_assert_int(xtc_net_send_frame(sv[0], "hello", 5), ==, XTC_OK);
 	r = recv(sv[1], rec, sizeof rec, 0);
 	munit_assert_int((int)r, ==, 4 + 5);
