@@ -55,13 +55,36 @@
  *
  *	On a resumed jump_fcontext the saved x30 is the return site in
  *	the caller of jump_fcontext (a "ret" lands there).  For a fresh
- *	make_fcontext the saved x30 is `fn`, so the first jump's "ret"
- *	enters fn with the transfer value already loaded into x0.
+ *	make_fcontext the saved x30 is the start trampoline and the x19
+ *	slot holds `fn`: the first jump's "ret" lands in the trampoline,
+ *	which calls fn with the transfer value already loaded into x0, so
+ *	fn has a real caller frame that ends the unwind.
  */
 
 #if defined(__aarch64__) && !defined(__APPLE__) && !defined(_WIN32)
 
 	.text
+
+/*
+ * The outermost frame of every fcontext fiber, as glibc's __startcontext
+ * is for makecontext.  Entered by the first jump's "ret" with x19 = fn,
+ * x29 = 0, x0 = transfer; calls fn, which never returns (__coro_entry
+ * jumps away).  CFI marks x30 undefined, so an unwinder stops here.
+ * Before, the first jump entered fn with x30 = fn itself: the frame
+ * above fn claimed a return address of fn+0, the DWARF unwinder looked
+ * up the FDE of fn-1 -- the function laid out before fn -- and applied
+ * its CFI to memory above the stack top (clang -O2: SIGSEGV in
+ * _Unwind_Backtrace from xtc_dump; test_fctx /fctx_unwind_ends).
+ */
+	.type  __xtc_fctx_start,%function
+	.align 4
+__xtc_fctx_start:
+	.cfi_startproc
+	.cfi_undefined x30
+	blr     x19
+	brk     #0                       /* fn returned: unreachable */
+	.cfi_endproc
+	.size __xtc_fctx_start, .-__xtc_fctx_start
 
 /*
  * void *__xtc_make_fcontext(void *stack_top, size_t size,
@@ -98,8 +121,11 @@ __xtc_make_fcontext:
 	mrs     x10, fpsr
 	stp     x9,  x10, [x0, #160]
 
-	/* Saved resume address = fn. */
-	str     x2, [x0, #152]
+	/* The first jump "ret"s into the start trampoline, which
+	 * calls fn (kept in the x19 slot) with x0 = transfer. */
+	str     x2, [x0, #64]            /* x19 = fn */
+	adr     x9, __xtc_fctx_start
+	str     x9, [x0, #152]           /* x30 = start trampoline */
 	ret
 	.size __xtc_make_fcontext, .-__xtc_make_fcontext
 

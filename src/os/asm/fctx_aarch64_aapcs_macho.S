@@ -12,15 +12,19 @@
  *	    symbols ___xtc_make_fcontext / ___xtc_jump_fcontext.
  *	  - no .type / .size / .note.GNU-stack (ELF-only directives).
  *	  - .p2align (log2) instead of ELF .align.
+ *	  - adrp/@PAGE + add/@PAGEOFF for the start trampoline's address.
  *
  *	Callee-saved state preserved across a switch (AAPCS64): x19-x28,
  *	x29 (fp), x30 (lr), d8-d15 (low 64 bits), and the per-fiber FPCR
  *	and FPSR.  176-byte context block, 16-byte aligned.  See
  *	fctx_aarch64_aapcs.S for the full layout and rationale.
  *
- *	Status of the FPCR/FPSR save: changed identically to the ELF file
- *	(which is built and tested on Linux aarch64) but NOT assembled or
- *	run on macOS: no Apple host was available.
+ *	Status of the FPCR/FPSR save and of the start trampoline
+ *	(___xtc_fctx_start, the CFI-terminated outermost fiber frame):
+ *	changed identically to the ELF file (which is built and tested on
+ *	Linux aarch64) but NOT assembled or run on macOS: no Apple host was
+ *	available.  On Apple, libunwind reads compact unwind; the .cfi_*
+ *	directives generate it there too.
  *
  *	The default substrate on Apple arm64 (src/inc/coro_select.h).
  *	Empty TU elsewhere.
@@ -29,6 +33,25 @@
 #if defined(__aarch64__) && defined(__APPLE__)
 
 	.text
+
+/*
+ * The outermost frame of every fcontext fiber, as glibc's __startcontext
+ * is for makecontext.  Entered by the first jump's "ret" with x19 = fn,
+ * x29 = 0, x0 = transfer; calls fn, which never returns (__coro_entry
+ * jumps away).  CFI marks x30 undefined, so an unwinder stops here.
+ * Before, the first jump entered fn with x30 = fn itself: the frame
+ * above fn claimed a return address of fn+0, the DWARF unwinder looked
+ * up the FDE of fn-1 -- the function laid out before fn -- and applied
+ * its CFI to memory above the stack top (clang -O2: SIGSEGV in
+ * _Unwind_Backtrace from xtc_dump; test_fctx /fctx_unwind_ends).
+ */
+	.p2align 2
+___xtc_fctx_start:
+	.cfi_startproc
+	.cfi_undefined x30
+	blr     x19
+	brk     #0                       /* fn returned: unreachable */
+	.cfi_endproc
 
 /*
  * void *__xtc_make_fcontext(void *stack_top, size_t size,
@@ -64,8 +87,12 @@ ___xtc_make_fcontext:
 	mrs     x10, fpsr
 	stp     x9,  x10, [x0, #160]
 
-	/* Saved resume address = fn. */
-	str     x2, [x0, #152]
+	/* The first jump "ret"s into the start trampoline, which
+	 * calls fn (kept in the x19 slot) with x0 = transfer. */
+	str     x2, [x0, #64]            /* x19 = fn */
+	adrp    x9, ___xtc_fctx_start@PAGE
+	add     x9, x9, ___xtc_fctx_start@PAGEOFF
+	str     x9, [x0, #152]           /* x30 = start trampoline */
 	ret
 
 
