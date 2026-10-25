@@ -19,7 +19,10 @@
  *	  superblock  page 0 damaged: the open rebuilds from the log;
  *	  oldformat   a store whose superblock says "XBT1" (1.59, no page
  *	              checksums) opens and serves every row (rebuilt from
- *	              the log, which 1.60 reads unchanged).
+ *	              the log, which 1.60 reads unchanged);
+ *	  fence       a leaf's right link and upper fence damaged: 1.59
+ *	              livelocked in move_right, now the read fails at once.
+ *	The run is bounded by alarm(120): a hang is a failure, not a wait.
  *	A refused read must be an error naming the checksum, never data.
  */
 
@@ -341,15 +344,46 @@ t_oldformat(void)
 	teardown();
 }
 
+/* A leaf's routing bytes damaged: its right link and the length of its
+ * upper fence.  1.59 livelocked here (move_right followed the bad link
+ * forever, test hung for hours); the checksum refuses the page before
+ * any routing reads it, so the read fails at once. */
+static void
+t_fence(void)
+{
+	static unsigned char p[PS];
+	off_t pg;
+	uint32_t rs;
+	uint16_t hl;
+
+	setup("ckfence");
+	CK((pg = victim_page("ROW%05d-", VICTIM)) > 0);
+	if (pg <= 0) { teardown(); return; }
+	CK(rw_page(pg, p, 0) == 0);
+	memcpy(&rs, p + 12, 4);           /* btnode_hdr.right_sibling */
+	rs = rs == 0 ? (uint32_t)pg : 0;  /* point it back at itself, or cut it */
+	memcpy(p + 12, &rs, 4);
+	memcpy(&hl, p + 32, 2);           /* btnode_hdr.hi_fence_len */
+	hl ^= 0x0101;
+	memcpy(p + 32, &hl, 2);
+	CK(rw_page(pg, p, 1) == 0);
+	expect_refused("fence + right link");
+	teardown();
+}
+
 int
 main(void)
 {
+	/* A damaged page must fail a read, not hang it: bound the whole run
+	 * (all six cases take well under a second here). */
+	alarm(120);
 	CK(sx_init() == SX_OK);
 	t_torn();
 	t_misdirect();
 	t_repair();
 	t_superblock();
 	t_oldformat();
+	t_fence();
 	if (!g_fail)
 		printf("ok test_page_cksum_more\n");
 	return g_fail;
