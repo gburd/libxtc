@@ -432,6 +432,7 @@ TESTS_C		= test_sched_policy test_sched_continuous test_batch test_version test_
 		  test_loop test_task test_waker test_timer test_io_integration \
 		  test_async \
 		  test_aio \
+		  test_uring_batch \
 		  test_fctx \
 		  test_stack_guard \
 		  test_exec test_cross_wake test_deque test_steal \
@@ -1600,6 +1601,12 @@ test_aio: $(srcdir)/../test/m4/test_aio.c \
 		$(srcdir)/../test/m4/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m4 \
 		-o $@ $(srcdir)/../test/m4/test_aio.c \
+		$(srcdir)/../test/m4/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_uring_batch: $(srcdir)/../test/m4/test_uring_batch.c \
+		$(srcdir)/../test/m4/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m4 -I$(srcdir)/../test/include \
+		-o $@ $(srcdir)/../test/m4/test_uring_batch.c \
 		$(srcdir)/../test/m4/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_fctx: $(srcdir)/../test/m4/test_fctx.c \

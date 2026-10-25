@@ -81,6 +81,7 @@ io_include_tests = {
   'io_register'    : 'm2',
   'io_events'      : 'm2',
   'io_wakeup'      : 'm2',
+  'uring_batch'    : 'm4',
   'io_integration' : 'm3',
   'exec'           : 'm5',
   'proc'           : 'm8',

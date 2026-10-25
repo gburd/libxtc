@@ -273,11 +273,14 @@ struct xtc_io {
 	int              ring_single;
 	int              ring_try_defer;  /* a loop run may upgrade to DEFER */
 	int              n_aio;
+	int              n_aio_queued;    /* of n_aio: prepared, not yet submitted */
 	int              ring_dead;
 	xtc_io_event_t  *carry;
 	int              n_carry;
 	int              cap_carry;
 	unsigned         n_rebinds;       /* ring rebuilds (tests) */
+	unsigned long    n_enter_submit;  /* enters that carried SQEs (tests) */
+	unsigned long    n_enter_wait;    /* enters that only waited (tests) */
 	/*
 	 * L2 ring-pointer preempt (INSPIRED BY Glommio's need_preempt():
 	 * reactor.rs / sys/uring.rs preempt_pointers).  A dedicated tiny
@@ -402,5 +405,15 @@ void __xtc_io_owner_leave(xtc_io_t *io);
  */
 int __xtc_io_uring_poll_stats(xtc_io_t *io, unsigned long *cancels,
     unsigned long *adopted);
+
+/*
+ * io_uring (XTC_E_NOSYS elsewhere): io_uring_enter calls since xtc_io_init
+ * that handed SQEs to the kernel, those that only waited for a completion
+ * (a poll's wait; not the reap loop's task-work flush), and the SQEs
+ * prepared but not yet submitted (see __submit_wait).  Tests.  Out
+ * pointers may be NULL.
+ */
+int __xtc_io_uring_enter_stats(xtc_io_t *io, unsigned long *submits,
+    unsigned long *waits, unsigned *queued);
 
 #endif /* XTC_IO_INT_H */

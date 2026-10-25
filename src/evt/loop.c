@@ -1186,7 +1186,9 @@ __xtc_loop_step(xtc_loop_t *loop)
 		 * nothing here.
 		 */
 #define IO_FAIRNESS_QUANTUM 64u
+#ifndef IO_SUBMIT_QUANTUM
 #define IO_SUBMIT_QUANTUM 8u   /* a power of two */
+#endif
 		if (++loop->runs_since_poll >= IO_FAIRNESS_QUANTUM) {
 			xtc_io_event_t fevs[16];
 			int fn_out = 0, fi;
@@ -1208,16 +1210,21 @@ __xtc_loop_step(xtc_loop_t *loop)
 			 * busy-yielding-reader bench that hung a timer on a
 			 * saturated single loop.) */
 			(void)__xtc_drain_due_timers(loop);
-		} else if (verdict == XTC_TASK_RESCHED ||
-		    (loop->runs_since_poll & (IO_SUBMIT_QUANTUM - 1u)) == 0) {
-			/* Start queued I/O.  Producers leave their SQEs for the
-			 * next poll (io_uring.c __submit_wait), which comes when
-			 * the run queue drains -- but a yielder stays runnable,
-			 * and long runs of fibers that park keep the queue full,
-			 * so submit after a yield and every IO_SUBMIT_QUANTUM
-			 * runs.  A no-op unless something is queued. */
-			__xtc_io_flush(loop->io);
 		}
+#if defined(XTC_IO_BACKEND_URING)
+		else {
+			/* Start queued file AIO.  Producers leave their SQEs for
+			 * the next poll (io_uring.c __submit_wait), which comes
+			 * when the run queue drains; until then AIO is submitted
+			 * at once if nothing else of this ring's is in flight
+			 * (the device would idle), and otherwise after a yield
+			 * (a yielder keeps the queue from draining) or every
+			 * IO_SUBMIT_QUANTUM runs. */
+			__xtc_io_flush(loop->io, verdict == XTC_TASK_RESCHED ||
+			    (loop->runs_since_poll &
+			    (IO_SUBMIT_QUANTUM - 1u)) == 0);
+		}
+#endif
 		return XTC_OK;
 	}
 
