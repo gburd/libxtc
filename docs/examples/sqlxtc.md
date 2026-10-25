@@ -392,17 +392,35 @@ flowchart TD
 - **Supervision.** The server is an `xtc_app` with a root supervisor; the
   connection front door is a supervised listener proc (one_for_one,
   permanent, at most 10 restarts a minute) that accepts with
-  `xtc_net_accept` (backing off on EMFILE). Connection procs and the
-  storage procs are not supervised, and faults are not contained:
+  `xtc_net_accept` (backing off on EMFILE). The four storage procs (WAL
+  writer, checkpoint, page provider, trickler) run on loop 0 under a
+  small `storage-watch` proc that holds a monitor on each. The provider
+  and trickler are pure background work and are restarted when they
+  exit, at most 10 times a minute each. The WAL writer and checkpoint
+  are not restarted -- one that died mid-flight cannot be trusted to
+  resume -- so their exit, like a provider or trickler past its budget,
+  stops the server: it logs `storage proc <name> exited` and drains
+  exactly as on SIGTERM (stop accepting, quiesce the storage procs in
+  order, close the store), then exits 1. This is not an `xtc_sup` tree:
+  exhausting its restart intensity exits with nothing to escalate from,
+  and its stop kills children that need their graceful stop. Shutdown
+  stops the watcher first, so nothing is restarted mid-drain.
+  Connection procs are not restarted (a client reconnects), but a
+  connection proc killed with `xtc_exit_pid` cleans up like a client
+  disconnect: its teardown is an `xtc_proc_at_exit` hook, so the socket,
+  buffers, `--max-clients` slot and engine handle are released, and
+  with the handle the open transaction is rolled back, freeing its
+  snapshot (the version-GC horizon) and row intents. Each request runs
+  with cancellation masked, so the kill takes effect between
+  statements, never with a page latch held. Faults are not contained:
   sqlxtc installs no `xtc_fault_guard`, so a fault in any fiber ends the
   process. That is deliberate for a storage engine -- a fault taken while
   holding a page latch or the commit lock leaves shared state that cannot
   be unwound safely -- and recovery is a restart that replays the log.
   (Contrast [let it crash]({{ '/philosophy/let-it-crash/' | relative_url }}),
-  which fits stateless connection handlers, not a shared page cache.) A
-  connection proc releases its socket, buffers and engine handle only
-  when it returns normally; one killed with `xtc_exit_pid` leaks them
-  until the server restarts.
+  which fits stateless connection handlers, not a shared page cache.)
+  `test_conn_sup`, `test_storage_sup` and `test/sqlxtc/test_sqlxtc_kill.sh`
+  check each of these.
 - **The executor and the B-tree run on fibers, not threads.** Each
   connection is a fiber (`xtc_proc_spawn`) on the multi-loop `xtc_exec`
   executor; the vectorized executor and the B-link-tree descent run
