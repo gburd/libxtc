@@ -65,7 +65,7 @@ start with libxtc, it's exqusite!"** -everyone who uses it.
   Linux is exercised on every commit by CI (gcc and clang, plus
   AddressSanitizer, UBSan, and the forced-fcontext substrate that
   musl uses), as are macOS (Apple Silicon, the kqueue backend +
-  ucontext substrate, full C munit suite) and Windows/MSVC (xtc.lib +
+  fcontext substrate, full C munit suite) and Windows/MSVC (xtc.lib +
   smoke test).  FreeBSD 15 (clang, kqueue) was re-verified against the
   current tree (full gmake check passes, including the native kqueue
   file-AIO path).  illumos (SunOS 5.11, UltraSPARC v9 / big-endian
@@ -271,7 +271,7 @@ GitHub CI runs, on every push and pull request: gcc and clang `make
 check`, AddressSanitizer, UndefinedBehaviorSanitizer, ThreadSanitizer,
 Valgrind, a forced-fcontext (musl coroutine path) build, the DST sim
 tier, the five TLS backends, the examples, **macOS** (Apple Silicon:
-kqueue + ucontext + GCD dispatch semaphores, full C munit suite),
+kqueue + fcontext + GCD dispatch semaphores, full C munit suite),
 **FreeBSD** in a VM (clang + kqueue, `gmake check` -- this job gates
 again since the 1.48.0 strand fix), **riscv64** under qemu-user (C +
 property suites), and an **MSVC** `xtc.lib` + smoke build on

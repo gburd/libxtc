@@ -1214,11 +1214,13 @@ jobs:
           ( cd build_tls && ./test_tls_server && ./test_tls_client )
 
   macos:
-    # macOS runtime coverage: kqueue I/O backend + ucontext coroutine
-    # substrate (the x86-64 fcontext .S files self-gate to empty on
-    # macOS / Apple Silicon).  Runs the FULL `make check` (an external
-    # Apple-Silicon reviewer confirmed it is green on a stock macOS box
-    # once the autoreconf skip-guards landed), under -Werror, plus a
+    # macOS runtime coverage: kqueue I/O backend + the fcontext coroutine
+    # substrate (macos-latest is arm64, and src/inc/coro_select.h picks
+    # fcontext on Apple arm64: fctx_aarch64_aapcs_macho.S; the other
+    # fcontext .S files self-gate to empty).  Runs the FULL `make check`
+    # (an external Apple-Silicon reviewer confirmed it is green on a
+    # stock macOS box once the autoreconf skip-guards landed), under
+    # -Werror, plus a
     # make-install + consumer-link smoke -- so macOS-only build/
     # packaging regressions (a warning, a shell gate, an install-header
     # gap) are caught in CI instead of by a human on a Mac.
@@ -1238,6 +1240,24 @@ jobs:
             ../dist/configure --with-tls=auto
       - name: Build
         run: make -C build_ci -j3
+      - name: Coroutine substrate is fcontext
+        # Fails if the build fell back to ucontext: the selector says
+        # fcontext, the archive defines the Mach-O jump_fcontext, and
+        # nothing in it calls swapcontext.
+        run: |
+          printf '%s\n' '#include "coro_select.h"' '#include <stdio.h>' \
+            'int main(void) {' '#if defined(XTC_CORO_FCTX)' \
+            '	puts("coroutine substrate: fcontext (XTC_CORO_FCTX)"); return 0;' \
+            '#else' '	puts("coroutine substrate: ucontext"); return 1;' '#endif' \
+            '}' > build_ci/coro_sub.c
+          cc -std=c11 -D_DEFAULT_SOURCE -Ibuild_ci -Isrc/inc build_ci/coro_sub.c \
+            -o build_ci/coro_sub
+          uname -m
+          build_ci/coro_sub
+          nm build_ci/libxtc.a 2>/dev/null | grep -E ' T _*__xtc_jump_fcontext$'
+          if nm build_ci/libxtc.a 2>/dev/null | grep -E ' U _?swapcontext($|@)'; then
+            echo "libxtc.a calls swapcontext: not the fcontext substrate"; exit 1
+          fi
       - name: Check (full C + shell suite)
         run: make -C build_ci check
       - name: Install + consumer-link smoke

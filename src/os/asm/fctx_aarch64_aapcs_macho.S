@@ -21,10 +21,10 @@
  *
  *	Status of the FPCR/FPSR save and of the start trampoline
  *	(___xtc_fctx_start, the CFI-terminated outermost fiber frame):
- *	changed identically to the ELF file (which is built and tested on
- *	Linux aarch64) but NOT assembled or run on macOS: no Apple host was
- *	available.  On Apple, libunwind reads compact unwind; the .cfi_*
- *	directives generate it there too.
+ *	changed identically to the ELF file, and assembled, linked and run
+ *	by the full test suite on CI's arm64 macOS runner (test_async
+ *	/C10_fp_env_per_fiber covers FPCR).  On Apple, libunwind reads
+ *	compact unwind; the .cfi_* directives generate it there too.
  *
  *	The default substrate on Apple arm64 (src/inc/coro_select.h).
  *	Empty TU elsewhere.
