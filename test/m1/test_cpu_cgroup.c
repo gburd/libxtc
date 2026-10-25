@@ -48,6 +48,20 @@ write_fixture(char *path, size_t pathsize, const char *contents)
 
 /* --- __os_ncpus() cgroup cases ------------------------------------- */
 
+/* The schedulable count with NO cgroup quota applied: the seam pointed at
+ * a file that does not exist.  Not "seam off": inside a CPU-capped
+ * container (CI runners) the real /sys/fs/cgroup/cpu.max caps it, and the
+ * uncapped-fixture cases below must compare against the uncapped count. */
+static int
+uncapped_ncpus(void)
+{
+	int n;
+	__xtc_os_cgroup_cpu_path_override("/tmp/xtc_cgroup_fixture_does_not_exist");
+	n = __os_ncpus();
+	__xtc_os_cgroup_cpu_path_override(NULL);
+	return n;
+}
+
 /* "100000 100000" (100ms quota / 100ms period) -> exactly 1 CPU. */
 static MunitResult
 test_ncpus_cgroup_one(const MunitParameter p[], void *d)
@@ -71,8 +85,7 @@ test_ncpus_cgroup_max(const MunitParameter p[], void *d)
 	int hw;
 	(void)p; (void)d;
 
-	__xtc_os_cgroup_cpu_path_override(NULL);
-	hw = __os_ncpus();   /* the uncapped baseline, seam off */
+	hw = uncapped_ncpus();
 
 	write_fixture(path, sizeof path, "max 100000\n");
 	__xtc_os_cgroup_cpu_path_override(path);
@@ -89,8 +102,7 @@ test_ncpus_cgroup_missing(const MunitParameter p[], void *d)
 	int hw;
 	(void)p; (void)d;
 
-	__xtc_os_cgroup_cpu_path_override(NULL);
-	hw = __os_ncpus();
+	hw = uncapped_ncpus();
 
 	__xtc_os_cgroup_cpu_path_override("/tmp/xtc_cgroup_fixture_does_not_exist");
 	munit_assert_int(__os_ncpus(), ==, hw);
@@ -107,8 +119,7 @@ test_ncpus_cgroup_ceil(const MunitParameter p[], void *d)
 	int hw, want;
 	(void)p; (void)d;
 
-	__xtc_os_cgroup_cpu_path_override(NULL);
-	hw = __os_ncpus();
+	hw = uncapped_ncpus();
 	want = hw < 3 ? hw : 3;
 
 	write_fixture(path, sizeof path, "250000 100000\n");
