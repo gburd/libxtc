@@ -244,6 +244,30 @@ cannot be made durable blocks the page's home write, and a clean
 shutdown whose flush fails does not mark the store clean, so the next
 start replays the log.
 
+**Page checksums (1.60).**  After a clean shutdown the next start trusts
+the page file and does not replay the log, so the page file must not
+lie.  Every page carries a CRC32C of its bytes and the low 32 bits of
+its own page id, in 8 bytes of the node header (PostgreSQL's
+`data_checksums`, InnoDB's page checksum).  The buffer manager writes
+them into the image it writes out and checks them on every read from
+disk, before the page is used for anything, including routing a B-tree
+descent.  So a flipped bit, a torn write, or a page written at another
+page's offset (a misdirected write) is refused, never served.  The
+statement gets an error, `page checksum mismatch at pid N`, never the
+data, and the engine fail-stops its log exactly as for a failed log
+write: later writes are refused, no checkpoint replaces the log, and the
+shutdown does not mark the store clean.  The next start rebuilds the
+page file from the log.  After a clean shutdown the log holds the whole
+live tree plus every commit since, so the restart repairs the damage.
+The CRC32C is the log's (hardware-accelerated on x86-64 SSE4.2 and
+ARMv8).  A header checksum does not catch a *lost* write, a page that
+still holds an older, intact image of itself.  That would take a
+checksum held by the parent (TigerBeetle, ZFS), which an update-in-place
+tree pays for with a parent write on every page write-back.
+`test_page_checksum` and `test_page_cksum_more` cover a bad byte, a
+torn write, a misdirected write, a damaged fence and right link, a
+damaged superblock, the restart that repairs it, and a 1.59 store.
+
 The log is compacted while the server runs: a background checkpoint
 replaces it with a checkpoint record plus the live rows whenever it
 passes `max(--checkpoint-mb, 2 x its size after the last checkpoint)`

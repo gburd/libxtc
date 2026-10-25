@@ -21,7 +21,9 @@
  *	              checksums) opens and serves every row (rebuilt from
  *	              the log, which 1.60 reads unchanged);
  *	  fence       a leaf's right link and upper fence damaged: 1.59
- *	              livelocked in move_right, now the read fails at once.
+ *	              livelocked in move_right, now the read fails at once;
+ *	  root        the root page damaged: the open itself reads it, and
+ *	              rebuilds from the log at once (writable, not stopped).
  *	The run is bounded by alarm(120): a hang is a failure, not a wait.
  *	A refused read must be an error naming the checksum, never data.
  */
@@ -371,6 +373,45 @@ t_fence(void)
 	teardown();
 }
 
+/* The root page damaged.  The open reads it itself (the index catalog
+ * load descends from the root), so the open must notice and rebuild from
+ * the log at once -- coming up fail-stopped, refusing every write until
+ * another restart, would be the wrong answer. */
+static void
+t_root(void)
+{
+	static unsigned char p[PS];
+	struct bm_stats bs;
+	sx_db *h = NULL;
+	uint64_t root = 0;
+
+	setup("ckroot");
+	CK(rw_page(0, p, 0) == 0);
+	memcpy(&root, p + 8, 8);          /* bt_super.root_pid */
+	CK(root > 0);
+	if (root == 0) { teardown(); return; }
+	CK(rw_page((off_t)root, p, 0) == 0);
+	p[100] ^= 0x10;
+	CK(rw_page((off_t)root, p, 1) == 0);
+	CK(sx_storage_open(g_path, 256) == SX_OK);
+	sx_storage_bm_stats(&bs);
+	/* The trusted open saw the failure (2, the catalog load and its
+	 * retry, checked with a probe in sx_storage_open) and reopened on a
+	 * fresh page file: its counters start at zero. */
+	CK(bs.cksum_failures == 0);
+	CK(all_rows_ok());
+	CK(sx_open(":memory:", &h) == SX_OK);
+	if (h != NULL) {
+		CK(sx_exec(h, "INSERT INTO t VALUES(100000, 'x')", NULL) ==
+		    SX_OK);           /* not fail-stopped */
+		sx_close(h);
+	}
+	CK(sx_storage_close() == SX_OK);
+	printf("  root: damaged root page -> the open rebuilt from the log, "
+	    "writable\n");
+	teardown();
+}
+
 int
 main(void)
 {
@@ -384,6 +425,7 @@ main(void)
 	t_superblock();
 	t_oldformat();
 	t_fence();
+	t_root();
 	if (!g_fail)
 		printf("ok test_page_cksum_more\n");
 	return g_fail;
