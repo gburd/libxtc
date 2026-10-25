@@ -190,10 +190,11 @@ boss(void *arg)
 	} else {
 		/* The trickler past its budget escalates; then the WAL
 		 * writer, which is never restarted. */
-		for (i = 0; i <= BUDGET; i++) {
-			kill_one(SX_PROC_TRICKLER);
-			(void)xtc_proc_sleep(5LL * 1000 * 1000);
-		}
+		for (i = 0; i < BUDGET; i++)
+			g_restarts[1] += kill_restart(SX_PROC_TRICKLER);
+		CK(g_restarts[1] == BUDGET);
+		CK(atomic_load(&g_hook_tr) == 0);
+		kill_one(SX_PROC_TRICKLER);
 		CK(await_hook(&g_hook_tr, 1));
 		kill_one(SX_PROC_WAL);
 		CK(await_hook(&g_hook_wal, 1));
@@ -249,6 +250,7 @@ session(int s)
 	int64_t rows;
 
 	g_session = s;
+	g_restarts[0] = g_restarts[1] = 0;
 	atomic_store(&g_stop, 0);
 	atomic_store(&g_done, 0);
 	if (sx_storage_open(g_path, 64) != SX_OK)
@@ -265,7 +267,7 @@ session(int s)
 	(void)xtc_exec_fini(g_exec);
 	CK(sx_storage_close() == SX_OK);
 	rows = count_rows();
-	printf("  session %d: restarts pp %d/4 tr %d/4  hooks ckpt %d wal %d "
+	printf("  session %d: restarts pp %d tr %d  hooks ckpt %d wal %d "
 	    "pp %d tr %d  quiesce %lld ms  acked %lld rows %lld\n", s,
 	    g_restarts[0], g_restarts[1], atomic_load(&g_hook_ckpt),
 	    atomic_load(&g_hook_wal), atomic_load(&g_hook_pp),

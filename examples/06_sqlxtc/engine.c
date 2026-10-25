@@ -648,6 +648,124 @@ sx_storage_open(const char *path, unsigned int n_frames)
 }
 
 /*
+ * Storage supervision.  The four background storage procs run on one
+ * loop; a "storage-watch" proc there holds a monitor on each and acts on
+ * a DOWN that arrives while the store runs (any exit then is
+ * unexpected: they leave only when sx_storage_quiesce stops them, and
+ * it stops the watcher first):
+ *   - page provider, trickler: pure background work holding nothing
+ *     across passes, so they are restarted, up to SX_SW_RESTARTS times
+ *     in SX_SW_PERIOD_NS each; past that the next exit escalates;
+ *   - checkpoint, WAL writer: not restarted (one that died mid-flight
+ *     cannot be trusted to resume), the exit escalates at once.
+ * Escalating calls the sx_storage_on_failure hook (the server drains
+ * on it exactly as on SIGTERM and exits non-zero), else logs to stderr.
+ * Not xtc_sup: its restart-intensity exhaustion exits with no hook to
+ * escalate from, xtc_sup_stop kills children where these need their
+ * graceful stop, and the drain runs on the loop it would have to join.
+ */
+#define SX_SW_RESTARTS  10
+#define SX_SW_PERIOD_NS (60LL * 1000 * 1000 * 1000)
+
+static xtc_loop_t  *g_sw_loop;
+static xtc_pid_t    g_sw_pid;
+static _Atomic int  g_sw_alive, g_sw_stop;
+
+static void
+sx_storage_failed(const char *what)
+{
+	if (g_fail_fn != NULL)
+		g_fail_fn(what, g_fail_arg);
+	else
+		fprintf(stderr, "sqlxtc storage: the %s proc exited while the "
+		    "store was running\n", what);
+}
+
+/* At-exit hook of the watcher: a watcher that dies while the store runs
+ * leaves the storage procs unsupervised, so that escalates too. */
+static void
+sx_sw_dead(void *arg)
+{
+	(void)arg;
+	atomic_store(&g_sw_alive, 0);
+	if (!atomic_load(&g_sw_stop))
+		sx_storage_failed("storage-watch");
+}
+
+static void
+sx_sw_proc(void *arg)
+{
+	static const char *const name[4] = { "wal", "checkpoint",
+	    "bm-provider", "bm-trickler" };
+	xtc_pid_t pid[4], who;
+	int64_t win[4] = { 0, 0, 0, 0 }, now;
+	int nrs[4] = { 0, 0, 0, 0 }, i;
+	uint64_t ref;
+	void *m;
+	size_t n;
+
+	(void)arg;
+	if (xtc_proc_at_exit(sx_sw_dead, NULL) != XTC_OK) {
+		atomic_store(&g_sw_alive, 0);
+		return;                      /* no hook: run unsupervised */
+	}
+	pid[0] = g_xwal != NULL ? wal_writer_pid(g_xwal) : XTC_PID_NONE;
+	pid[1] = atomic_load(&g_ckpt_alive) ? g_ckpt_pid : XTC_PID_NONE;
+	pid[2] = g_pp_pid;
+	pid[3] = g_tr_pid;
+	for (i = 0; i < 4; i++)
+		if (!xtc_pid_is_none(pid[i]))
+			(void)xtc_monitor(pid[i], &ref);   /* dead: DOWN at once */
+	while (!atomic_load(&g_sw_stop)) {
+		if (xtc_recv(&m, &n, -1) != XTC_OK)
+			continue;
+		if (m == NULL || xtc_down_decode(m, n, &who, NULL) != XTC_OK) {
+			xtc_free(m);             /* sx_sw_stop's wake-up */
+			continue;
+		}
+		xtc_free(m);
+		if (atomic_load(&g_sw_stop))
+			break;
+		for (i = 0; i < 4 && !xtc_pid_eq(pid[i], who); i++)
+			;
+		if (i == 4)
+			continue;
+		pid[i] = XTC_PID_NONE;
+		now = xtc_clock_mono();
+		if (now - win[i] > SX_SW_PERIOD_NS) {
+			win[i] = now;
+			nrs[i] = 0;
+		}
+		if (i >= 2 && nrs[i] < SX_SW_RESTARTS &&
+		    (i == 2 ? bm_provider_spawn(g_xbm, g_sw_loop,
+		    1LL * 1000 * 1000, &g_pp_pid) : bm_trickler_spawn(g_xbm,
+		    g_sw_loop, 5LL * 1000 * 1000, &g_tr_pid)) == XTC_OK) {
+			nrs[i]++;
+			pid[i] = i == 2 ? g_pp_pid : g_tr_pid;
+			(void)xtc_monitor(pid[i], &ref);
+			continue;
+		}
+		sx_storage_failed(name[i]);
+	}
+}
+
+/* Stop the watcher (first, so nothing restarts during a drain) and, on
+ * a proc, wait for it to leave. */
+static void
+sx_sw_stop(void)
+{
+	int i;
+	atomic_store(&g_sw_stop, 1);
+	if (!atomic_load(&g_sw_alive))
+		return;
+	(void)xtc_send(g_sw_pid, "q", 1);
+	if (xtc_pid_is_none(xtc_self()))
+		return;
+	for (i = 0; i < 2000 && atomic_load(&g_sw_alive); i++)
+		(void)xtc_proc_sleep(1LL * 1000 * 1000);
+}
+
+/*
  * Start the background storage procs on `loop`: the WAL group-commit
  * writer (one fsync for many commits), the page provider (refills the
  * free/cool list ahead of demand), and the trickler (writes dirty
@@ -657,6 +775,8 @@ sx_storage_open(const char *path, unsigned int n_frames)
 int
 sx_storage_run(xtc_loop_t *loop)
 {
+	xtc_proc_opts_t so = { 0 };
+
 	if (g_xbt == NULL || g_xrunning || loop == NULL)
 		return SX_OK;
 	if (g_xwal != NULL)
@@ -675,6 +795,12 @@ sx_storage_run(xtc_loop_t *loop)
 	}
 	(void)bm_provider_spawn(g_xbm, loop, 1LL * 1000 * 1000, &g_pp_pid);  /* 1ms */
 	(void)bm_trickler_spawn(g_xbm, loop, 5LL * 1000 * 1000, &g_tr_pid);  /* 5ms */
+	g_sw_loop = loop;
+	atomic_store(&g_sw_stop, 0);
+	atomic_store(&g_sw_alive, 1);
+	so.name = "storage-watch";
+	if (xtc_proc_spawn(loop, sx_sw_proc, NULL, &so, &g_sw_pid) != XTC_OK)
+		atomic_store(&g_sw_alive, 0);
 	g_xrunning = 1;
 	return SX_OK;
 }
@@ -722,6 +848,7 @@ sx_storage_quiesce(void)
 {
 	if (!g_xrunning)
 		return;
+	sx_sw_stop();                      /* first: no restart mid-drain */
 	sx_ckpt_stop();
 	if (g_xwal != NULL)
 		xstore_quiesce_begin();        /* closed until the next open */
@@ -739,6 +866,7 @@ sx_storage_close(void)
 	int ok = 1;
 
 	if (g_xrunning) {
+		sx_sw_stop();
 		sx_ckpt_stop();
 		if (g_xwal != NULL) wal_writer_stop(g_xwal);
 		bm_trickler_stop(g_xbm);
@@ -811,6 +939,7 @@ sx_storage_abandon(void)
 	 * so it keeps the full durable history.  The next open finds no
 	 * marker and rebuilds the tree from the log. */
 	if (g_xrunning) {
+		sx_sw_stop();
 		sx_ckpt_stop();
 		if (g_xwal != NULL) wal_writer_stop(g_xwal);
 		bm_trickler_stop(g_xbm);
