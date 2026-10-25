@@ -29,17 +29,31 @@ on:
 
 jobs:
   build-and-test:
+    # make check, split: codeberg-small cancels a job at 5:00, and run
+    # 8014685 spent 3:49 of build-and-test just building (make check
+    # compiles its ~150 test binaries serially) before the first test.
+    # Each job builds the library and only its slice of the tests, in
+    # parallel, and runs them (scripts/ci-check-part.sh).  The slices
+    # c1 c2 c3 exec xproc reclaim sh1 sh2 together are exactly make
+    # check, cut from the Makefile's own lists, so a new test needs no
+    # edit here.  Measured per slice on 2 host CPUs (gcc, clang, fctx,
+    # asan, ubsan alike): setup ~6 s, then 10-44 s per slice; Codeberg
+    # runs ~3.3x slower, so the longest is ~2:30 plus ~1 min of install.
+    # fctx is the fcontext substrate on glibc (was the coro-fctx job).
+    name: build-and-test (${{ matrix.cfg }}, ${{ matrix.part }})
     runs-on: codeberg-small
+    timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:
-        compiler: [gcc, clang]
+        cfg: [gcc, clang, fctx]
+        part: [c1, c2, c3, exec, xproc, reclaim, sh1, sh2]
     steps:
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            ${{ matrix.compiler }} make autoconf automake \
+            gcc clang make autoconf automake \
             pkg-config libssl-dev liburing-dev gawk openssl
 
       - name: Checkout
@@ -49,45 +63,39 @@ jobs:
         working-directory: dist
         run: autoreconf -i
 
-      - name: Configure
+      - name: Configure (${{ matrix.cfg }})
         run: |
           mkdir -p build_ci
           cd build_ci
-          CC=${{ matrix.compiler }} ../dist/configure --with-tls=auto --with-io-backend=epoll
+          case "${{ matrix.cfg }}" in
+            gcc|clang) CC=${{ matrix.cfg }} ../dist/configure --with-tls=auto --with-io-backend=epoll ;;
+            fctx) CPPFLAGS=-DXTC_CORO_FORCE_FCTX ../dist/configure --with-tls=auto --with-io-backend=epoll ;;
+          esac
 
-      - name: Build
-        run: make -C build_ci -j"$(nproc)"
+      - name: Build the library
+        run: make -C build_ci -j"$(nproc)" libxtc.a
 
-      - name: Test
-        run: make -C build_ci check
+      - name: Test (make check slice ${{ matrix.part }})
+        run: sh scripts/ci-check-part.sh build_ci ${{ matrix.part }}
 
-      - name: Install + compile a consumer against the installed headers
-        run: XTC_SRC_DIR="$PWD" sh test/dist/test_install_headers.sh
-
-  coro-fctx:
-    # Force the fcontext coroutine substrate (the musl path) on a
-    # glibc runner so it is exercised on every commit without needing
-    # a musl toolchain.
+  install-headers:
+    # Install + compile a consumer against the installed headers (was
+    # the last step of build-and-test).
     runs-on: codeberg-small
+    timeout-minutes: 5
     steps:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc make autoconf automake pkg-config libssl-dev liburing-dev gawk openssl
+          sudo apt-get install -y gcc make autoconf automake \
+            pkg-config libssl-dev liburing-dev gawk openssl
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
       - name: Autoreconf
         working-directory: dist
         run: autoreconf -i
-      - name: Configure (force fcontext)
-        run: |
-          mkdir -p build_fctx
-          cd build_fctx
-          CPPFLAGS=-DXTC_CORO_FORCE_FCTX ../dist/configure --with-tls=auto --with-io-backend=epoll
-      - name: Build
-        run: make -C build_fctx -j"$(nproc)"
-      - name: Test
-        run: make -C build_fctx check
+      - name: Install + compile a consumer against the installed headers
+        run: XTC_SRC_DIR="$PWD" sh test/dist/test_install_headers.sh
 
   musl:
     # Build and test against musl libc -- the real execinfo-less,
@@ -96,7 +104,15 @@ jobs:
     # the C unit + property tests; the dist/amalgamation shell tests are
     # skipped (the single-file amalgamation requires ucontext and
     # #errors on musl by design -- the library build is the musl path).
+    # Split like build-and-test (5:00 job cap); the slices c1 c2 c3 exec
+    # xproc reclaim pbt are exactly tests-c + tests-pbt.
+    name: musl (${{ matrix.part }})
     runs-on: codeberg-small
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [c1, c2, c3, exec, xproc, reclaim, pbt]
     steps:
       - name: Install dependencies
         run: |
@@ -112,16 +128,23 @@ jobs:
           mkdir -p build_musl
           cd build_musl
           CC=musl-gcc ../dist/configure --with-tls=none --without-liburing
-      - name: Build
-        run: make -C build_musl -j"$(nproc)"
-      - name: Test (unit + property)
-        run: make -C build_musl tests-c tests-pbt
+      - name: Build the library
+        run: make -C build_musl -j"$(nproc)" libxtc.a
+      - name: Test (tests-c + tests-pbt slice ${{ matrix.part }})
+        run: sh scripts/ci-check-part.sh build_musl ${{ matrix.part }}
 
   sim-dst:
     # Deterministic Simulation Testing: sim I/O backend + the multi-loop
     # deterministic scheduler + cross-loop park/wake replay tests.
     # See test/sim/ for the deterministic scheduler + replay tests.
+    #
+    # codeberg-small cancels a job at 5:00, so the three DST gates are
+    # separate jobs.  Measured on run 8014685: install ~20 s, the sim
+    # tests ~2:55 (this job, ~3:15 in all).  scripts/dst-bug-inject.sh
+    # is GitHub-only: it rebuilds the sim library per planted bug,
+    # ~50 s + 17 x ~37 s = ~11 min here, and has no way to run a subset.
     runs-on: codeberg-small
+    timeout-minutes: 5
     steps:
       - name: Install dependencies
         run: |
@@ -135,9 +158,21 @@ jobs:
       - name: DST sim-backend tests
         run: XTC_SRC_DIR="$PWD" CC=gcc sh test/sim/run_sim_tests.sh
 
-      - name: DST bug-injection (prove DST catches planted safety bugs)
-        run: CC=gcc sh scripts/dst-bug-inject.sh
-
+  sim-dst-corpus:
+    # The pinned failing seeds (test/sim/corpus): 13 s on 2 host CPUs,
+    # about 1 min here.
+    runs-on: codeberg-small
+    timeout-minutes: 5
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc make autoconf automake pkg-config libssl-dev gawk openssl
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
       - name: DST regression corpus (pinned failing seeds cannot silently regress)
         run: CC=gcc sh scripts/dst-corpus.sh
 
@@ -181,7 +216,7 @@ jobs:
           wait
           for base in 0 $N $((N*2)) $((N*3)); do
             echo "--- shard base=$base ---"; tail -3 "swarm-$base.log"
-            read -r code b < "swarm-$base.rc"
+            read -r code _ < "swarm-$base.rc"
             [ "$code" = 0 ] || { echo "shard base=$base FAILED (rc=$code)"; rc=1; }
           done
           exit $rc
@@ -215,11 +250,16 @@ jobs:
           done
 
   sanitizers:
+    # make check under ASan / UBSan, split like build-and-test (5:00 job
+    # cap).  Sanitized tests run ~1.1x the plain ones on 2 host CPUs.
+    name: sanitizers (${{ matrix.sanitizer }}, ${{ matrix.part }})
     runs-on: codeberg-small
+    timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:
         sanitizer: [address, undefined]
+        part: [c1, c2, c3, exec, xproc, reclaim, sh1, sh2]
     steps:
       - name: Install dependencies
         run: |
@@ -242,22 +282,26 @@ jobs:
           LDFLAGS="-fsanitize=${{ matrix.sanitizer }}" \
             ../dist/configure --with-tls=auto --with-io-backend=epoll
 
-      - name: Build
-        run: make -C build_san -j"$(nproc)"
+      - name: Build the library
+        run: make -C build_san -j"$(nproc)" libxtc.a
 
-      - name: Test under sanitizer
+      - name: Test under sanitizer (make check slice ${{ matrix.part }})
         env:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:strict_string_checks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-        run: make -C build_san check
+        run: sh scripts/ci-check-part.sh build_san ${{ matrix.part }}
 
   examples:
-    # Build the examples and run their in-process tests (no daemons,
-    # so nothing hangs CI).  The examples exercise the public API
-    # broadly -- including the single-file amalgamation drop-in -- and
-    # would otherwise rot unnoticed since the library make check does
-    # not build them.
+    # Build the examples and run kaka's in-process tests, the sqlxtc
+    # multi-thread load and the two network + storage soaks.  The sqlxtc
+    # in-process tests are the examples-sqlxtc matrix below: codeberg-small
+    # cancels a job at 5:00 and run 8014685 measured them at ~37-43 s
+    # each (every engine test recompiles the engine), ~12 min in all.
+    # This job, measured on 2 host CPUs (Codeberg is ~3.5x slower on
+    # compile-bound steps): install ~20 s, lib 5.5 s, kaka 4.3 s, soaks
+    # 2 x SECS + ~25 s of builds -> ~2:30 here.
     runs-on: codeberg-small
+    timeout-minutes: 5
     steps:
       - name: Install dependencies
         run: |
@@ -283,17 +327,80 @@ jobs:
           ./test_partition
           ./test_broker
           ./test_group
-      - name: sqlxtc in-process tests + amalgamation
-        working-directory: examples/06_sqlxtc
-        run: |
-          make XTC_BUILD=../../build_ci test-quack test-sql-parse test-admin test-wal test-wal-recover test-torn-smo test-wal-compact test-shard test-mvcc test-xstore test-xstore-scan test-xlog test-recover-undo test-bufmgr test-redo-page test-inplace-redo test-bufmgr-mt test-scan-resist test-persist test-cursor-resume test-clean-restart test-steal test-steal-torn test-steal-page test-steal-leaf test-btnode test-btree test-btree-loop test-btree-mt test-btree-delete-merge test-savepoint test-isolation test-native-txn test-cat-reopen test-wal-group-sync test-ckpt-online test-intents-thread test-torn-base test-tr-slice test-snap-registry test-rowid-minmax test-btree-fill test-wal-bigtxn test-steal-reclaim test-dio-restart test-wal-prealloc
-          make XTC_BUILD=../../build_ci amalg
-          make XTC_BUILD=../../build_ci test-vfs-amalg test-pcache-amalg
       - name: sqlxtc multi-thread load (one loop per CPU; cross-loop regression)
         working-directory: examples/06_sqlxtc
         run: |
           make XTC_BUILD=../../build_ci sqlxtc-server
           bash ../../test/sqlxtc/test_sqlxtc_mt.sh
+      - name: kaka network + storage soak, and its planted-bug control
+        # See the GitHub examples job.  SECS=5 keeps the data written
+        # under ~1 GB on a small runner; the soak's segment checks still
+        # bite at 500 IOPS (measured: 420 segments in 20 s).
+        timeout-minutes: 2
+        working-directory: examples/07_kaka
+        run: |
+          make XTC_BUILD=../../build_ci kaka-broker kaka_soak kaka-broker-plant
+          SECS=5 make XTC_BUILD=../../build_ci soak
+          SECS=3 make XTC_BUILD=../../build_ci soak-plant
+      - name: sqlxtc network + storage soak, and its planted-bug control
+        timeout-minutes: 3
+        working-directory: examples/06_sqlxtc
+        run: |
+          make -j"$(nproc)" XTC_BUILD=../../build_ci sqlxtc-server sqlxtc-server-plant
+          SECS=5 make XTC_BUILD=../../build_ci soak
+          SECS=3 make XTC_BUILD=../../build_ci soak-plant
+
+  examples-sqlxtc:
+    # The sqlxtc in-process tests (the GitHub examples job's 1.58 list),
+    # in 6 shards.  Each test was timed alone on 2 host CPUs and in this
+    # runner's image (docker --cpus=2); run 8014685 ran its first 15
+    # tests 3.3x slower than either.  A shard's estimate is the larger of
+    # 3.4 x host and 1.4 x image (the image's disk is slow, so the two
+    # disagree on the fsync-bound tests): at most ~110 s of tests per
+    # shard, plus ~50 s of setup.  The tests added in 1.59 run on GitHub only, and
+    # so does test-wal-bigtxn: its racing writers commit for as long as
+    # the big transaction runs, so its time is fsync latency x ~500k
+    # commits (2 CPUs: 5 s on tmpfs, 34 s on local NVMe, 791 s in this
+    # image).  A new test goes in the shard with the fewest seconds.
+    name: examples-sqlxtc (shard ${{ matrix.shard }})
+    runs-on: codeberg-small
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: 1
+            tests: test-xlog test-recover-undo test-bufmgr test-redo-page test-cursor-resume test-steal-torn test-btnode amalg
+          - shard: 2
+            tests: test-isolation test-steal-reclaim
+          - shard: 3
+            tests: test-quack test-sql-parse test-wal-recover test-xstore-scan test-scan-resist test-clean-restart test-wal-group-sync test-rowid-minmax test-dio-restart
+          - shard: 4
+            tests: test-wal test-wal-compact test-xstore test-steal-page test-btree test-btree-delete-merge test-ckpt-online test-intents-thread test-btree-fill test-wal-prealloc
+          - shard: 5
+            tests: test-torn-smo test-native-txn test-snap-registry
+          - shard: 6
+            tests: test-admin test-shard test-mvcc test-inplace-redo test-bufmgr-mt test-persist test-steal test-steal-leaf test-btree-loop test-btree-mt test-savepoint test-cat-reopen test-torn-base test-tr-slice
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc make autoconf automake pkg-config libssl-dev liburing-dev gawk openssl python3
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: Build libxtc
+        run: |
+          mkdir -p build_ci
+          cd build_ci
+          ../dist/configure --with-tls=auto --with-io-backend=epoll
+          make -j"$(nproc)"
+      - name: sqlxtc in-process tests, shard ${{ matrix.shard }}
+        working-directory: examples/06_sqlxtc
+        run: make XTC_BUILD=../../build_ci ${{ matrix.tests }}
 
   tls-backends:
     # Build against each TLS backend that works with the apt packages
