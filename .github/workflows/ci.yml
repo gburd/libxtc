@@ -102,6 +102,45 @@ jobs:
               { echo "test_batch --mt-only failed on iteration $i"; exit 1; }
           done
 
+  usdt-sdt:
+    # The USDT probes from systemtap's <sys/sdt.h> (--enable-dtrace=sdt):
+    # the probe-enabled library must pass make check, and test_probes.sh
+    # must run its sdt checks, not skip them: P1 (xtc_probes.d, the
+    # header and xtc_usdt(3) agree) and P5 (readelf finds the stapsdt
+    # notes perf and bpftrace attach to).  Measured on 2 host CPUs: the
+    # build and make check take about as long as build-and-test.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc make autoconf automake pkg-config \
+            libssl-dev liburing-dev gawk systemtap-sdt-dev binutils
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: Configure --enable-dtrace=sdt
+        run: |
+          mkdir -p build_sdt && cd build_sdt
+          ../dist/configure --enable-dtrace=sdt --with-tls=auto
+          grep -qx 'XTC_PROBES_MODE *= *sdt' Makefile ||
+            { echo "configure did not select the sdt probes"; exit 1; }
+      - name: Build
+        run: make -C build_sdt -j"$(nproc)"
+      - name: The probes are in the library (stapsdt notes)
+        run: |
+          n=$(readelf -n build_sdt/libxtc.a | grep -c 'Provider: xtc')
+          echo "stapsdt notes for provider xtc in libxtc.a: $n"
+          [ "$n" -gt 0 ]
+      - name: Test (test_probes P1 + P5 must run, not skip)
+        run: |
+          set -o pipefail   # the default bash -e alone would hide make's status
+          make -C build_sdt check 2>&1 | tee check.log
+          grep -q '\[P1\] OK' check.log
+          grep -q '\[P5\] OK: stapsdt notes present' check.log
+
   coro-ucontext:
     # Force the ucontext coroutine substrate.  fcontext is the default
     # on Linux x86-64 glibc (and the musl path), so every other job runs
@@ -178,6 +217,35 @@ jobs:
           echo "musl: execinfo + ucontext absent (fctx substrate active); backtrace tier:"
           grep -E 'define XTC_HAVE_(BUILTIN_UNWIND|LIBUNWIND) 1' build_musl/xtc_config.h \
             || echo "  (stub backtrace -- toolchain did not link an unwinder in the probe)"
+
+  musl-aarch64:
+    # musl libc on aarch64, natively: Alpine in docker on GitHub's arm64
+    # runner (free for public repositories; docker run, not `container:`,
+    # because JavaScript actions such as checkout do not run inside an
+    # Alpine container on arm64).  The x86-64 musl job covers the
+    # execinfo-less / ucontext-less build; this one adds the aarch64
+    # fcontext assembly and atomics under musl.  Checked first under
+    # qemu-user on an x86-64 host (Alpine, gcc 15): configure + build
+    # OK, tests-c + tests-pbt rc=0, 132 C tests, 212 s emulated.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build + test (musl, aarch64, Alpine)
+        run: |
+          docker run --rm -v "$PWD":/src -w /src alpine:latest sh -euc '
+            apk add --no-cache gcc musl-dev make autoconf automake pkgconf \
+              gawk linux-headers bash > /dev/null
+            uname -m
+            cd dist && autoreconf -i && cd ..
+            mkdir -p build_musl && cd build_musl
+            ../dist/configure --with-tls=none --without-liburing
+            if grep -qE "define XTC_HAVE_(EXECINFO|UCONTEXT) 1" xtc_config.h; then
+              echo "musl build has execinfo or ucontext: not fctx"; exit 1
+            fi
+            make -j"$(nproc)"
+            make tests-c tests-pbt
+          '
 
   pbt-hegel:
     # ADVISORY (continue-on-error) until the Ubuntu-runner failure below is
@@ -1258,6 +1326,24 @@ jobs:
             # step until the job ceiling.  A timeout here still surfaces
             # every test that ran before it.
             timeout 1200 gmake check
+            # USDT probes with the real DTrace (the VM runs as root): a
+            # second build with --enable-dtrace, then test_probes.sh's
+            # dtrace checks, which need root and must run, not skip:
+            # P3 dtrace -l lists every probe, P4 a D script counts the
+            # workload's events exactly, P6 every tools/dtrace/*.d runs.
+            kldstat -q -m dtraceall || kldload dtraceall
+            cd .. && mkdir -p build_dtrace && cd build_dtrace
+            ../dist/configure --with-tls=none --enable-dtrace
+            gmake -j$(sysctl -n hw.ncpu) libxtc.a
+            # (sh -eu, no pipefail: test_probes' own status, not a tee's)
+            XTC_SRC_DIR=$(cd .. && pwd) XTC_BUILD_DIR=$(pwd) CC=cc \
+              sh ../test/dist/test_probes.sh > probes.log 2>&1 ||
+              { cat probes.log; exit 1; }
+            cat probes.log
+            for p in P1 P3 P4 P6; do
+              grep -q "\\[$p\\] OK" probes.log ||
+                { echo "test_probes $p did not pass"; exit 1; }
+            done
 
   riscv64-qemu:
     # RISC-V 64 cross-arch coverage via QEMU user-mode emulation.
