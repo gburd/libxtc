@@ -44,14 +44,27 @@ fi
 ${SOAK_WRAP:-} "$SVR_BIN" -p "$PORT" -d "$DBFILE" -t "$CORES" -n 256 \
     --storage-frames="$FRAMES" < /dev/null > "$LOGFILE" 2>&1 &
 WRAP_PID=$!
-( sleep $((SECS + 120)); kill -9 "$WRAP_PID" 2>/dev/null ) &
+# The watchdog polls, so it exits with the server, and keeps no stdout:
+# a lone `sleep` holding it would stall a reader of this script (a CI
+# step log, `| tail`) for the full bound after the run ended.
+( n=$((SECS + 120))
+  while [ "$n" -gt 0 ] && kill -0 "$WRAP_PID" 2>/dev/null; do
+	sleep 1
+	n=$((n - 1))
+  done
+  [ "$n" -eq 0 ] && kill -9 "$WRAP_PID" ) > /dev/null 2>&1 &
 WD_PID=$!
 
 # The server process: WRAP_PID itself, or under a SOAK_WRAP wrapper a
-# descendant of it (pgrep -P works on Linux, macOS and the BSDs).
+# descendant of it (pgrep -P works on Linux, macOS and the BSDs), found
+# by the name of the binary actually run (SQLXTC_SERVER may be a -plant
+# build), cut to 15 characters as Linux's comm is.
+SVR_NAME=$(basename "$SVR_BIN" | cut -c1-15)
 server_pid() {
 	p=$WRAP_PID
-	while [ -n "$p" ] && [ "$(ps -o comm= -p "$p" 2>/dev/null)" != sqlxtc-server ]; do
+	while [ -n "$p" ]; do
+		c=$(ps -o comm= -p "$p" 2>/dev/null)
+		[ "$(basename "${c:-/}" | cut -c1-15)" = "$SVR_NAME" ] && break
 		p=$(pgrep -P "$p" 2>/dev/null | head -1)
 	done
 	echo "$p"

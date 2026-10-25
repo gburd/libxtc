@@ -2,13 +2,16 @@
 # examples/07_kaka/test_kaka_soak.sh
 #   Concurrent network + storage soak: a real kaka-broker on a durable
 #   data directory (fdatasync before every produce ack, small segments so
-#   segments roll and cold FETCHes read them back through xtc_aio), with
+#   segments roll, and a memory cap below the ~2 segments per partition
+#   the broker keeps in RAM, so the RAM window is evicted and FETCHes read
+#   segment files back through xtc_aio), with
 #   PRODUCERS producers and CONSUMERS consumers on TOPICS topics running
 #   AT THE SAME TIME over TCP.  kaka_soak checks every offset, sequence
 #   and value byte, and that each consumer ends at exactly what was acked.
 #
 #   Env: SECS (10) TOPICS (4) PRODUCERS (8) CONSUMERS (8) VALUE (512)
-#        BATCH (32) SEGMENT (262144) PORT (20000 + pid % 20000) TMPDIR
+#        BATCH (32) SEGMENT (262144) MEMORY (1048576; -m, bytes)
+#        PORT (20000 + pid % 20000) TMPDIR
 #        SOAK_WRAP: a command prefix for the broker, e.g. the io_uring
 #        gate runs it as SOAK_WRAP="uringscope -f --json=r.json --".
 #   Portable (Linux + macOS); never uses setsid or `timeout`.  A watchdog
@@ -24,6 +27,7 @@ CONSUMERS=${CONSUMERS:-8}
 VALUE=${VALUE:-512}
 BATCH=${BATCH:-32}
 SEGMENT=${SEGMENT:-262144}
+MEMORY=${MEMORY:-1048576}
 PORT=${PORT:-$((20000 + $$ % 20000))}
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/kaka-soak.XXXXXX")
 DATA=$WORK/data
@@ -47,16 +51,29 @@ fi
 
 # shellcheck disable=SC2086  # SOAK_WRAP is a word list
 ${SOAK_WRAP:-} "$BROKER" -h 127.0.0.1 -p "$PORT" -d "$DATA" \
-    --segment-bytes="$SEGMENT" < /dev/null > "$LOG" 2>&1 &
+    --segment-bytes="$SEGMENT" -m "$MEMORY" < /dev/null > "$LOG" 2>&1 &
 WRAP_PID=$!
-( sleep $((SECS + 60)); kill -9 "$WRAP_PID" 2>/dev/null ) &
+# The watchdog polls, so it exits with the server, and keeps no stdout:
+# a lone `sleep` holding it would stall a reader of this script (a CI
+# step log, `| tail`) for the full bound after the run ended.
+( n=$((SECS + 60))
+  while [ "$n" -gt 0 ] && kill -0 "$WRAP_PID" 2>/dev/null; do
+	sleep 1
+	n=$((n - 1))
+  done
+  [ "$n" -eq 0 ] && kill -9 "$WRAP_PID" ) > /dev/null 2>&1 &
 WD_PID=$!
 
 # The server process: WRAP_PID itself, or under a SOAK_WRAP wrapper a
-# descendant of it (pgrep -P works on Linux, macOS and the BSDs).
+# descendant of it (pgrep -P works on Linux, macOS and the BSDs), found
+# by the name of the binary actually run (KAKA_BROKER may be a -plant
+# build), cut to 15 characters as Linux's comm is.
+SVR_NAME=$(basename "$BROKER" | cut -c1-15)
 server_pid() {
 	p=$WRAP_PID
-	while [ -n "$p" ] && [ "$(ps -o comm= -p "$p" 2>/dev/null)" != kaka-broker ]; do
+	while [ -n "$p" ]; do
+		c=$(ps -o comm= -p "$p" 2>/dev/null)
+		[ "$(basename "${c:-/}" | cut -c1-15)" = "$SVR_NAME" ] && break
 		p=$(pgrep -P "$p" 2>/dev/null | head -1)
 	done
 	echo "$p"
@@ -90,6 +107,13 @@ done
     "$VALUE" "$BATCH"
 ST=$?
 SEGS=$(find "$DATA" -name '*.log' 2>/dev/null | wc -l | tr -d ' ')
+# The fewest segments any topic has: every topic must have rolled (the
+# total alone counts __offsets and each topic's first segment).
+MINSEG=
+for t in "$DATA"/soak*-0; do
+	n=$(find "$t" -name '*.log' 2>/dev/null | wc -l | tr -d ' ')
+	[ -z "$MINSEG" ] || [ "$n" -lt "$MINSEG" ] && MINSEG=$n
+done
 BYTES=$(du -sk "$DATA" 2>/dev/null | cut -f1)
 
 # Stop the broker cleanly (SIGTERM drains) and let any wrapper (sudo,
@@ -104,9 +128,9 @@ if [ "$ST" -ne 0 ]; then
 	tail -20 "$LOG"
 	exit 1
 fi
-if [ "$SEGS" -lt 2 ]; then
-	echo "FAIL: only $SEGS segment file(s): segments never rolled," \
-	    "so no cold read was exercised"
+if [ "${MINSEG:-0}" -lt 2 ]; then
+	echo "FAIL: a topic has only ${MINSEG:-0} segment file(s): segments" \
+	    "never rolled there"
 	exit 1
 fi
 if [ -n "${SOAK_WRAP:-}" ] && [ "$WST" -ne 0 ] && [ "$WST" -ne 143 ]; then
