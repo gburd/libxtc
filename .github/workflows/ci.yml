@@ -980,6 +980,8 @@ jobs:
             test-recover-fast test-row-intents test-sql-results test-ssi-skew test-sweep-bound test-tpcc-seek test-trickler-select test-txn-fastpath \
             test-uniq-commit test-wal-crc test-wal-crc-once test-wal-dio test-wal-dsync test-wal-fail test-wal-get-tail test-wal-kill \
             test-wal-kill-engine test-wal-lsn-monotone test-wal-tail test-ww-conflict test-xs-ctr
+          # supervision: killed conn procs clean up, storage procs restart or escalate
+          make XTC_BUILD=../../build_ci test-conn-sup test-storage-sup test-sqlxtc-kill
           make XTC_BUILD=../../build_ci amalg
       - name: sqlxtc Lime parser is regenerable + committed copy is current
         working-directory: examples/06_sqlxtc
