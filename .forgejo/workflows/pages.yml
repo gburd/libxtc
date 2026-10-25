@@ -21,7 +21,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y doxygen mandoc ruby-full build-essential
+          # ruby-full stopped pulling in bundler (Ubuntu 24.04): name it.
+          sudo apt-get install -y doxygen mandoc ruby-full ruby-bundler build-essential
 
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4

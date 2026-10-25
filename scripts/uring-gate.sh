@@ -100,6 +100,10 @@ dd if=/dev/zero of="$dat" bs=1M count=256 status=none
 #     bpftrace on io_wq_max_workers shows [4,0] on every ring), so the
 #     punts fan out to up to 4 x CPUs workers in all: 33 on a 64-CPU host,
 #     past uringscope's fixed WORKERS threshold, hence WORKERS.
+#     Control, plain liburing (no libxtc), Linux 6.12, XFS, 32 CPUs, the
+#     same caps: 1 ring at bound 64 doing writes + fdatasync over 64 files
+#     made 121 distinct io-wq workers (64 alive at once); 32 rings at
+#     bound 4 made 128.  The fan-out is the kernel's, not libxtc's.
 # ERRORS is judged per opcode: a cancelled POLL_ADD completes -ECANCELED
 # and uringscope counts it as an error; libxtc cancels polls routinely
 # (one-shot re-arm, unregister).  Errors on any other opcode fail.
