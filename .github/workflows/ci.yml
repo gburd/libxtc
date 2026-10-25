@@ -898,7 +898,7 @@ jobs:
           # the report is printed but does not gate (see job comment).
           for t in test_cross_wake test_sync test_lockmgr; do
             echo "===== helgrind $t ====="
-            valgrind --tool=helgrind \
+            XTC_UNDER_VALGRIND=1 valgrind --tool=helgrind \
               --suppressions=../.github/valgrind.supp \
               ./$t || echo "helgrind $t reported issues (informational)"
           done
@@ -908,7 +908,7 @@ jobs:
         run: |
           for t in test_cross_wake test_sync test_lockmgr; do
             echo "===== drd $t ====="
-            valgrind --tool=drd \
+            XTC_UNDER_VALGRIND=1 valgrind --tool=drd \
               --suppressions=../.github/valgrind.supp \
               ./$t || echo "drd $t reported issues (informational)"
           done
