@@ -1454,7 +1454,10 @@ test_offloop_no_herd(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	if (getenv("XTC_UNDER_VALGRIND") != NULL)
 		return MUNIT_SKIP;   /* timing: see offloop_valgrind_note */
-	if (xtc_ncpus() < 2)
+	/* HERD_K sleepers + the releasing thread: with fewer CPUs the woken
+	 * waiters cannot all run, re-sleep and are counted as a herd (2 CPUs:
+	 * 1167 and 7987 switches against the 800 bound). */
+	if (xtc_ncpus() < HERD_K / 2)
 		return MUNIT_SKIP;
 	munit_assert_int(xtc_arwlock_create(&g_hd_rw), ==, XTC_OK);
 	munit_assert_int(xtc_amutex_create(&g_hd_m), ==, XTC_OK);

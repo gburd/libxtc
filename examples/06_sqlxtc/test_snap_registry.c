@@ -243,7 +243,11 @@ main(void)
 	printf("  read-only txns/s: 1 thread %.0f, 8 threads %.0f (%.2fx)\n", r1, r8, r8 / r1);
 	/* 8 threads cannot beat ~ncpu x on fewer CPUs; the mutex version
 	 * delivered 0.45x anywhere, so 1.5x still separates the two. */
-	CK(r8 >= (sysconf(_SC_NPROCESSORS_ONLN) >= 8 ? 2.0 : 1.5) * r1);
+	/* xtc_ncpus: the CPUs this process may use (affinity and cgroup
+	 * quota), not the host's online count -- a 2-CPU container on a
+	 * 32-CPU host measured ~1.7x against the 2.0x the online count
+	 * demanded. */
+	CK(r8 >= (xtc_ncpus() >= 8 ? 2.0 : 1.5) * r1);
 
 	/* (2) */
 	atomic_store(&g_stop, 0);
