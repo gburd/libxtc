@@ -33,17 +33,20 @@ SPAN = 1 << 20          # keys per client
 class Client:
     def __init__(self):
         self.s = socket.create_connection(("127.0.0.1", PORT), timeout=60)
-        self.f = self.s.makefile("rwb", buffering=0)
-        json.loads(self.f.readline())
+        # A BUFFERED reader: an unbuffered readline() is one recv(2) per
+        # byte, which throttled 32 clients to ~300 ops/s in total.
+        self.r = self.s.makefile("rb")
+        self.w = self.s.makefile("wb", buffering=0)
+        json.loads(self.r.readline())
 
     def q(self, sql, params=None):
         msg = {"q": sql}
         if params is not None:
             msg["params"] = params
-        self.f.write((json.dumps(msg) + "\n").encode())
+        self.w.write((json.dumps(msg) + "\n").encode())
         rows = []
         while True:
-            line = self.f.readline()
+            line = self.r.readline()
             if not line:
                 raise RuntimeError("server closed")
             m = json.loads(line)
@@ -56,7 +59,7 @@ class Client:
 
     def close(self):
         try:
-            self.f.write(b'{"quit":1}\n')
+            self.w.write(b'{"quit":1}\n')
         except OSError:
             pass
         self.s.close()

@@ -74,6 +74,26 @@ $(TARGET): $(OBJS) $(LIME_OBJ) $(VEXEC_OBJ)
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# Test-only: the server with SQLXTC_TEST_PLANT (an env-armed lost write,
+# SQLXTC_PLANT_DROP=N; see xstore.c), the io soak's negative control.
+sqlxtc-server-plant: $(filter-out xstore.o,$(OBJS)) xstore.plant.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+xstore.plant.o: xstore.c
+	$(CC) $(CFLAGS) -DSQLXTC_TEST_PLANT -c -o $@ xstore.c
+
+# The io soak (test/sqlxtc/test_sqlxtc_iosoak.sh), and its negative
+# control: with the planted lost write armed the soak must FAIL.
+.PHONY: soak soak-plant
+soak: $(TARGET)
+	bash ../../test/sqlxtc/test_sqlxtc_iosoak.sh
+soak-plant: sqlxtc-server-plant
+	@if env SQLXTC_PLANT_DROP=1000 SQLXTC_SERVER=./sqlxtc-server-plant \
+	    SECS=$${SECS:-3} bash ../../test/sqlxtc/test_sqlxtc_iosoak.sh \
+	    > soak-plant.out 2>&1; then cat soak-plant.out; \
+	    echo "FAIL: the io soak passed with SQLXTC_PLANT_DROP=1000"; exit 1; fi
+	@grep -m3 'FAIL' soak-plant.out; rm -f soak-plant.out
+	@echo "OK: the io soak caught SQLXTC_PLANT_DROP=1000"
+
 # ---- Lime parser generator ----
 lime: lime/bin/lime
 lime/bin/lime:
@@ -119,7 +139,7 @@ sql_parse.o: sql_parse.c sql_parse.h
 sql_parse_drv.o: sql_parse_drv.c sql_parse.h sql_parse_lime.h sql_parse_gen.h
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(OBJS) $(TARGET) sqlxtc-server-plant xstore.plant.o soak-plant.out
 	rm -f $(AMALG_OBJS) sqlxtc-server-amalg
 	rm -f test_vfs test_vfs_amalg test_vfs.o
 	rm -f test_pcache test_pcache_amalg test_pcache.o

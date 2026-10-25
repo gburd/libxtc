@@ -5303,12 +5303,33 @@ xstore_intent_deadlocks(void)
  * Also maintains any secondary indexes on the table: the pre-image is
  * captured before the write (to remove its old index entry) and the new
  * value's entry is added after. */
+#ifdef SQLXTC_TEST_PLANT
+/* A planted bug for the io soak's negative control, compiled only into
+ * sqlxtc-server-plant (make sqlxtc-server-plant), never into the server:
+ * SQLXTC_PLANT_DROP=N reports every Nth autocommit row write applied
+ * without writing it (a lost acknowledged write).
+ * test/sqlxtc/test_sqlxtc_iosoak.sh must fail on it. */
+static _Atomic unsigned long g_plant_drop_n;
+static int
+xs_plant_drop(void)
+{
+	const char *e = getenv("SQLXTC_PLANT_DROP");
+	unsigned long every = e != NULL ? strtoul(e, NULL, 10) : 0;
+	return every > 0 &&
+	    (atomic_fetch_add(&g_plant_drop_n, 1) + 1) % every == 0;
+}
+#endif
+
 static int
 xs_put_pruned(xstore_ctx_t *cx, uint32_t tableid, int64_t rowid, const void *blob, int n,
     int deleted, int insert)
 {
 	uint32_t ubad = 0;
 	int rc;
+#ifdef SQLXTC_TEST_PLANT
+	if (!deleted && xs_plant_drop())
+		return SX_OK;
+#endif
 	rc = xs_put_ts(cx->bt, tableid, rowid, blob, n, deleted, cx->stmt_base,
 	    insert, &cx->last_ts, &ubad, 1);
 	if (rc == SX_CONSTRAINT && ubad != 0) {

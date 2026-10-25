@@ -2,6 +2,8 @@
 *.d
 sqlxtc-server
 sqlxtc-server-amalg
+sqlxtc-server-plant
+soak-plant.out
 amalg/
 test_admin
 test_wal

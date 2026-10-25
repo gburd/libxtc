@@ -102,6 +102,45 @@ jobs:
               { echo "test_batch --mt-only failed on iteration $i"; exit 1; }
           done
 
+  usdt-sdt:
+    # The USDT probes from systemtap's <sys/sdt.h> (--enable-dtrace=sdt):
+    # the probe-enabled library must pass make check, and test_probes.sh
+    # must run its sdt checks, not skip them: P1 (xtc_probes.d, the
+    # header and xtc_usdt(3) agree) and P5 (readelf finds the stapsdt
+    # notes perf and bpftrace attach to).  Measured on 2 host CPUs: the
+    # build and make check take about as long as build-and-test.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc make autoconf automake pkg-config \
+            libssl-dev liburing-dev gawk systemtap-sdt-dev binutils
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: Configure --enable-dtrace=sdt
+        run: |
+          mkdir -p build_sdt && cd build_sdt
+          ../dist/configure --enable-dtrace=sdt --with-tls=auto
+          grep -qx 'XTC_PROBES_MODE *= *sdt' Makefile ||
+            { echo "configure did not select the sdt probes"; exit 1; }
+      - name: Build
+        run: make -C build_sdt -j"$(nproc)"
+      - name: The probes are in the library (stapsdt notes)
+        run: |
+          n=$(readelf -n build_sdt/libxtc.a | grep -c 'Provider: xtc')
+          echo "stapsdt notes for provider xtc in libxtc.a: $n"
+          [ "$n" -gt 0 ]
+      - name: Test (test_probes P1 + P5 must run, not skip)
+        run: |
+          set -o pipefail   # the default bash -e alone would hide make's status
+          make -C build_sdt check 2>&1 | tee check.log
+          grep -q '\[P1\] OK' check.log
+          grep -q '\[P5\] OK: stapsdt notes present' check.log
+
   coro-ucontext:
     # Force the ucontext coroutine substrate.  fcontext is the default
     # on Linux x86-64 glibc (and the musl path), so every other job runs
@@ -171,11 +210,42 @@ jobs:
           # the stub (an acceptable degradation -- the dump still works
           # without a C stack).  So assert only the invariants that hold
           # on every musl: execinfo + ucontext absent (fctx active).
-          ! grep -q 'define XTC_HAVE_EXECINFO 1' build_musl/xtc_config.h
-          ! grep -q 'define XTC_HAVE_UCONTEXT 1' build_musl/xtc_config.h
+          # (`! grep` alone does not trip bash -e: test it explicitly)
+          if grep -qE 'define XTC_HAVE_(EXECINFO|UCONTEXT) 1' build_musl/xtc_config.h; then
+            echo "musl build has execinfo or ucontext: not the fctx substrate"; exit 1
+          fi
           echo "musl: execinfo + ucontext absent (fctx substrate active); backtrace tier:"
           grep -E 'define XTC_HAVE_(BUILTIN_UNWIND|LIBUNWIND) 1' build_musl/xtc_config.h \
             || echo "  (stub backtrace -- toolchain did not link an unwinder in the probe)"
+
+  musl-aarch64:
+    # musl libc on aarch64, natively: Alpine in docker on GitHub's arm64
+    # runner (free for public repositories; docker run, not `container:`,
+    # because JavaScript actions such as checkout do not run inside an
+    # Alpine container on arm64).  The x86-64 musl job covers the
+    # execinfo-less / ucontext-less build; this one adds the aarch64
+    # fcontext assembly and atomics under musl.  Checked first under
+    # qemu-user on an x86-64 host (Alpine, gcc 15): configure + build
+    # OK, tests-c + tests-pbt rc=0, 132 C tests, 212 s emulated.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build + test (musl, aarch64, Alpine)
+        run: |
+          docker run --rm -v "$PWD":/src -w /src alpine:latest sh -euc '
+            apk add --no-cache gcc musl-dev make autoconf automake pkgconf \
+              gawk linux-headers bash > /dev/null
+            uname -m
+            cd dist && autoreconf -i && cd ..
+            mkdir -p build_musl && cd build_musl
+            ../dist/configure --with-tls=none --without-liburing
+            if grep -qE "define XTC_HAVE_(EXECINFO|UCONTEXT) 1" xtc_config.h; then
+              echo "musl build has execinfo or ucontext: not fctx"; exit 1
+            fi
+            make -j"$(nproc)"
+            make tests-c tests-pbt
+          '
 
   pbt-hegel:
     # ADVISORY (continue-on-error) until the Ubuntu-runner failure below is
@@ -439,7 +509,7 @@ jobs:
           wait
           for base in 0 $N $((N*2)) $((N*3)); do
             echo "--- shard base=$base ---"; tail -3 "swarm-$base.log"
-            read -r code b < "swarm-$base.rc"
+            read -r code _ < "swarm-$base.rc"
             if [ "$code" != 0 ]; then
               echo "shard base=$base FAILED (rc=$code); complete log is in"
               echo "the swarm-logs artifact.  Tail and seed lines follow."
@@ -1004,6 +1074,39 @@ jobs:
         run: |
           make XTC_BUILD=../../build_ci sqlxtc-server
           bash ../../test/sqlxtc/test_sqlxtc_mt.sh
+      - name: kaka network + storage soak (8 producers + 8 consumers, durable, cold reads)
+        # A real broker on a durable dir (fdatasync before each ack, 256 KiB
+        # segments, a 1 MiB memory cap so FETCHes read segment files back)
+        # under 16 TCP clients; every offset, sequence and byte is checked.
+        # 4 CPUs, SECS=15: ~16 s, ~5M records, ~11k segments, under 3 GB
+        # written (deleted at exit; a slow disk writes less, and at 500
+        # IOPS the run still rolled 420 segments in 20 s).  soak-plant
+        # is the negative control: a broker that drops every 1000th acked
+        # record, and one that corrupts every 1000th cold read, must each
+        # FAIL the soak (built only into kaka-broker-plant).
+        timeout-minutes: 4
+        working-directory: examples/07_kaka
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          make XTC_BUILD=../../build_ci kaka-broker kaka_soak kaka-broker-plant
+          SECS=15 make XTC_BUILD=../../build_ci soak
+          SECS=3 make XTC_BUILD=../../build_ci soak-plant
+      - name: sqlxtc network + storage soak (32 clients, 2 MiB pool, model-checked)
+        # sqlxtc-server, one loop per CPU, a durable store that outgrows a
+        # 2 MiB buffer pool (eviction, write-back and page reads under the
+        # WAL's fsyncs); 32 TCP clients insert/update/read 1-3.9 KiB rows
+        # against per-client models, then every row is read back.  4 CPUs,
+        # SECS=20: ~25 s, ~230k ops, a ~790 MB store.  soak-plant: a server
+        # that acks every 1000th row write without writing it must FAIL.
+        timeout-minutes: 5
+        working-directory: examples/06_sqlxtc
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          make XTC_BUILD=../../build_ci sqlxtc-server sqlxtc-server-plant
+          SECS=20 make XTC_BUILD=../../build_ci soak
+          SECS=3 make XTC_BUILD=../../build_ci soak-plant
       - name: every example server/driver answers --help (exit 0, < 2s, usage)
         # The dist-built examples are linted by make check (check-examples)
         # and rexis by check-rexis; these four are built by their own
@@ -1153,9 +1256,11 @@ jobs:
           # ${includedir}/${libdir}; PKG_CONFIG_PATH also carries the
           # Homebrew openssl .pc so the TLS transitive deps resolve.
           export PKG_CONFIG_SYSROOT_DIR="$dest"
-          export PKG_CONFIG_PATH="$lib/pkgconfig:$(brew --prefix openssl@3)/lib/pkgconfig"
+          ossl_pc="$(brew --prefix openssl@3)/lib/pkgconfig"
+          export PKG_CONFIG_PATH="$lib/pkgconfig:$ossl_pc"
           echo "xtc.pc resolves to:"; pkg-config --cflags --libs --static xtc
           printf '%s\n' '#include <stdio.h>' '#include "xtc.h"' '#include "xtc_loop.h"' 'int main(void){printf("libxtc %s\n", xtc_version_string());return 0;}' > /tmp/xtc_consumer.c
+          # shellcheck disable=SC2046  # pkg-config prints a word list
           cc $(pkg-config --cflags xtc) /tmp/xtc_consumer.c $(pkg-config --libs --static xtc) -o /tmp/xtc_consumer
           /tmp/xtc_consumer
       - name: Shared-library build + dynamic-link smoke (Darwin dylib branch)
@@ -1221,6 +1326,24 @@ jobs:
             # step until the job ceiling.  A timeout here still surfaces
             # every test that ran before it.
             timeout 1200 gmake check
+            # USDT probes with the real DTrace (the VM runs as root): a
+            # second build with --enable-dtrace, then test_probes.sh's
+            # dtrace checks, which need root and must run, not skip:
+            # P3 dtrace -l lists every probe, P4 a D script counts the
+            # workload's events exactly, P6 every tools/dtrace/*.d runs.
+            kldstat -q -m dtraceall || kldload dtraceall
+            cd .. && mkdir -p build_dtrace && cd build_dtrace
+            ../dist/configure --with-tls=none --enable-dtrace
+            gmake -j$(sysctl -n hw.ncpu) libxtc.a
+            # (sh -eu, no pipefail: test_probes' own status, not a tee's)
+            XTC_SRC_DIR=$(cd .. && pwd) XTC_BUILD_DIR=$(pwd) CC=cc \
+              sh ../test/dist/test_probes.sh > probes.log 2>&1 ||
+              { cat probes.log; exit 1; }
+            cat probes.log
+            for p in P1 P3 P4 P6; do
+              grep -q "\\[$p\\] OK" probes.log ||
+                { echo "test_probes $p did not pass"; exit 1; }
+            done
 
   riscv64-qemu:
     # RISC-V 64 cross-arch coverage via QEMU user-mode emulation.
