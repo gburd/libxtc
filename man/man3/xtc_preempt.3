@@ -91,10 +91,10 @@ interrupted instruction pointer to (Go's async-preemption method).  It
 does so on both coroutine substrates there: fcontext with glibc (the
 default build) and ucontext
 .Pq Fl -with-coro=ucontext ;
-aarch64 Linux has it on both too (with glibc), resuming the fiber
-through the kernel's own signal frame so every register, the SVE
+aarch64 Linux has it on both too, with glibc or musl, resuming the
+fiber through the kernel's own signal frame so every register, the SVE
 state and the condition flags come back exact.  Elsewhere (the fcontext
-substrate on musl or macOS, the Windows fiber substrate, the
+substrate on x86-64 musl or macOS, the Windows fiber substrate, the
 single-file amalgamation) it declines and falls back to the cooperative
 path.
 It is opt-in because it still has known residual hangs, on both

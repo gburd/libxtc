@@ -36,12 +36,13 @@
 /*
  * XTC_CORO_REDIRECT_AARCH64: the AArch64 Linux redirect (rt_sigreturn
  * on the kernel's in-place signal frame; preempt_trampoline_aarch64.S).
- * Both substrates on glibc; musl declines until verified there, as on
- * x86-64.
+ * Any libc: it reads only the kernel's frame (offsets asserted below
+ * against the libc's <ucontext.h>) and the trampoline makes raw
+ * syscalls.  Tested on glibc (both substrates) and on musl (fcontext,
+ * its only substrate there): test/m14/test_preempt*.
  */
 #if defined(__aarch64__) && defined(__linux__) && !defined(__APPLE__) && \
-    !defined(XTC_AMALGAMATION) && \
-    (!defined(XTC_CORO_FCTX) || defined(__GLIBC__))
+    !defined(XTC_AMALGAMATION)
 # define XTC_CORO_REDIRECT_AARCH64 1
 #endif
 #if defined(XTC_CORO_REDIRECT_X86_64) || defined(XTC_CORO_REDIRECT_AARCH64)
