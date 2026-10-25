@@ -384,7 +384,14 @@ process_lines(conn_state_t *st)
 					break;
 				}
 			}
+			/* The whole request is the unit of kill delivery, not
+			 * only sx_step (which masks itself): prepare, reset and
+			 * the cache's finalize run unmasked, and a kill landing
+			 * in one of them with a latch held leaves it held -- no
+			 * teardown can release it. */
+			(void)xtc_mask_enter();
 			handle_query(st, &msg);
+			(void)xtc_mask_leave();
 			break;
 		case QUACK_MSG_UNKNOWN:
 			quack_emit_err(&st->wbuf, "unknown message");
@@ -411,21 +418,70 @@ process_lines(conn_state_t *st)
 	return 0;
 }
 
+/*
+ * Connection teardown: finalize the cached statements, close the engine
+ * handle (sx_close discards an open transaction's write set and frees
+ * its snapshot slot and row intents, as a client disconnect does), give
+ * the buffers back to the budget, close the socket, free the --max-
+ * clients slot.  Registered with xtc_proc_at_exit, so it runs exactly
+ * once on EVERY exit path: a normal return, and an xtc_exit_pid kill.
+ * Before, it was straight-line code at the end of conn_proc and a kill
+ * unwound past it: the transaction stayed open for the life of the
+ * server (version GC pinned behind its snapshot, its rows' writers
+ * waiting out the 10 s intent wait), and the fd, the buffers' budget
+ * and the conn slot leaked.  A kill reaches the fiber only between
+ * statements (handle_query runs masked), so this always runs from the
+ * state a disconnect tears down from.
+ */
+static void
+conn_teardown(void *arg)
+{
+	conn_state_t *st = arg;
+	int ci;
+
+	if (st->server) server_dec_conn(st->server);
+
+	/* Finalize the cached statements before closing their handle. */
+	for (ci = 0; ci < (int)(sizeof st->cache / sizeof st->cache[0]); ci++) {
+		if (st->cache[ci].stmt != NULL) sx_finalize(st->cache[ci].stmt);
+		free(st->cache[ci].sql);
+	}
+	if (st->h_conn != NULL)
+		db_conn_close(st->db, st->h_conn, st->h_owned);
+
+	/* Give the buffers back to the budget BEFORE the close: a client
+	 * that sees EOF and reconnects must find the bytes released. */
+	if (st->rcap > DEFAULT_READ_CAP)
+		(void)conn_charge(st, -(int64_t)(st->rcap - DEFAULT_READ_CAP));
+	free(st->rbuf);
+	quack_buf_free(&st->wbuf);
+	xtc_net_close(st->fd);   /* pairs with xtc_net_accept (fd accounting) */
+	free(st);
+}
+
 static void
 conn_proc(void *arg)
 {
 	conn_state_t *st = arg;
 	void *msg; size_t msg_len;
 	uint32_t want, revents;
-	int ci, more;
+	int more, hooked;
+
+	/* First, so a kill anywhere below still tears down (see
+	 * conn_teardown); without the hook, tear down on return. */
+	hooked = xtc_proc_at_exit(conn_teardown, st) == XTC_OK;
 
 	/* Open this connection's engine handle once, for its whole life.
 	 * In connection-per-proc mode this is a private handle on the loop
-	 * the proc runs on, so connections execute SQL in parallel. */
+	 * the proc runs on, so connections execute SQL in parallel.
+	 * Masked: a kill inside the open would leak a half-registered
+	 * handle. */
+	(void)xtc_mask_enter();
 	if (db_conn_open(st->db, &st->h_conn, &st->h_owned) != XTC_OK) {
 		st->h_conn = NULL;
 		quack_emit_err(&st->wbuf, "no db handle");
 	}
+	(void)xtc_mask_leave();
 
 	/* Send banner. */
 	quack_emit_hello(&st->wbuf, SQLXTC_VERSION);
@@ -504,25 +560,8 @@ conn_proc(void *arg)
 		}
 	}
 
-	if (st->server) server_dec_conn(st->server);
-
-	/* Release the cached prepared statement and the connection handle
-	 * (finalize the statement before closing its handle). */
-	for (ci = 0; ci < (int)(sizeof st->cache / sizeof st->cache[0]); ci++) {
-		if (st->cache[ci].stmt != NULL) sx_finalize(st->cache[ci].stmt);
-		free(st->cache[ci].sql);
-	}
-	if (st->h_conn != NULL)
-		db_conn_close(st->db, st->h_conn, st->h_owned);
-
-	/* Give the buffers back to the budget BEFORE the close: a client
-	 * that sees EOF and reconnects must find the bytes released. */
-	if (st->rcap > DEFAULT_READ_CAP)
-		(void)conn_charge(st, -(int64_t)(st->rcap - DEFAULT_READ_CAP));
-	free(st->rbuf);
-	quack_buf_free(&st->wbuf);
-	xtc_net_close(st->fd);   /* pairs with xtc_net_accept (fd accounting) */
-	free(st);
+	if (!hooked)
+		conn_teardown(st);   /* else the at-exit hook runs it */
 }
 
 int

@@ -27,7 +27,11 @@
  *	the client sees EOF, the fd count and the conn count are back to
  *	baseline, the memory budget is back to 0, GC reclaims the pinned
  *	versions, the uncommitted UPDATE is gone, and another writer takes
- *	row 1 at once (well under the 10 s intent wait).
+ *	row 1 at once (well under the 10 s intent wait).  (c) checks that a
+ *	kill is delivered at a statement boundary on every execution path
+ *	(see mid_statement).
+ *
+ *	usage: test_conn_sup [cases]   (default "abc")
  */
 
 #include <errno.h>
@@ -47,6 +51,7 @@
 #include "xstore.h"
 #include "xtc.h"
 #include "xtc_exec.h"
+#include "xtc_inspect.h"
 #include "xtc_io.h"
 #include "xtc_proc.h"
 #include "t_tmp.h"
@@ -64,6 +69,7 @@ static xtc_exec_t   *g_exec;
 static db_t         *g_db;
 static xtc_res_t     g_res;
 static _Atomic int   g_done;
+static const char   *g_which = "abc";   /* argv[1]: the cases to run */
 
 typedef struct cli {
 	int    fd;
@@ -277,12 +283,85 @@ scenario(int kill, const char *name)
 	    (long long)wait_ms);
 }
 
+/*
+ * (c) The statement is the unit of kill delivery on every path.  The
+ * boss holds row 2's intent in an open transaction; the connection's
+ * autocommit UPDATE of row 2 waits for it; the boss kills the
+ * connection while it waits.  The kill must wait for the statement:
+ * the proc is still alive 300 ms later, the UPDATE completes once the
+ * holder commits, and only then does the proc exit -- and tear down
+ * (EOF, conn slot), which a kill used to skip.
+ */
+static void
+mid_statement(void)
+{
+	static const char upd[] = "{\"q\":\"UPDATE t SET v = 5 WHERE k = 2\"}\n";
+	conn_opts_t o;
+	xtc_proc_info_t pi;
+	xtc_pid_t pid;
+	uint64_t ref;
+	cli_t *c;
+	sx_db *h = NULL;
+	char line[256];
+	int sv[2], alive = -1, down_early, down, eof;
+	int64_t v2 = -9;
+
+	CK(sx_open(":memory:", &h) == SX_OK);
+	if (h == NULL || (c = calloc(1, sizeof *c)) == NULL) {
+		g_fail = 1;
+		return;
+	}
+	CK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	c->fd = sv[1];
+	memset(&o, 0, sizeof o);
+	o.fd = sv[0];
+	o.db = g_db;
+	o.res = &g_res;
+	o.server = &g_srv;
+	server_inc_conn(&g_srv);
+	CK(conn_spawn(xtc_exec_loop(g_exec, 1), &o, &pid) == XTC_OK);
+	CK(xtc_monitor(pid, &ref) == XTC_OK);
+	CK(cli_line(c, line, sizeof line, 2000) == 1);
+
+	CK(sx_exec(h, "BEGIN", NULL) == SX_OK);
+	CK(sx_exec(h, "UPDATE t SET v = 50 WHERE k = 2", NULL) == SX_OK);
+	CK(send(c->fd, upd, sizeof upd - 1, MSG_NOSIGNAL) ==
+	    (ssize_t)(sizeof upd - 1));
+	(void)xtc_proc_sleep(100LL * 1000 * 1000);    /* it waits on row 2 */
+	CK(xtc_exit_pid(pid, 9) == XTC_OK);
+	down_early = await_down(pid, 300);
+	if (xtc_proc_info(pid, &pi) == XTC_OK)
+		alive = pi.alive;
+	CK(!down_early);
+	CK(alive == 1);
+	CK(sx_exec(h, "COMMIT", NULL) == SX_OK);
+	down = down_early || await_down(pid, 3000);
+	CK(down);
+	eof = cli_line(c, line, sizeof line, 1000);
+	while (eof == 1)
+		eof = cli_line(c, line, sizeof line, 1000);
+	CK(eof == 0);
+	close(sv[1]);
+	CK(atomic_load(&g_srv.n) == 0);
+	v2 = one(h, "SELECT v FROM t WHERE k = 2");
+	CK(v2 == 5);                    /* the statement ran to its end */
+	CK(sx_exec(h, "UPDATE t SET v = 1 WHERE k = 2", NULL) == SX_OK);
+	sx_close(h);
+	free(c);
+	printf("  %-12s down at 300 ms %d alive %d down %d eof %d row2 %lld\n",
+	    "mid-stmt", down_early, alive, down, eof, (long long)v2);
+}
+
 static void
 boss(void *arg)
 {
 	(void)arg;
-	scenario(0, "client close");
-	scenario(1, "kill");
+	if (strchr(g_which, 'a') != NULL)
+		scenario(0, "client close");
+	if (strchr(g_which, 'b') != NULL)
+		scenario(1, "kill");
+	if (strchr(g_which, 'c') != NULL)
+		mid_statement();
 	db_destroy(g_db);
 	sx_storage_quiesce();
 }
@@ -303,7 +382,7 @@ watchdog(void *arg)
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
 	const char *sfx[] = { "", "-wal", ".dwb", "-wal.ocompact", "-wal.compact" };
 	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
@@ -315,6 +394,8 @@ main(void)
 	sx_db *h = NULL;
 	int fd, i;
 
+	if (argc > 1)
+		g_which = argv[1];
 	if (xtc_set_stack_size(512u * 1024u) != XTC_OK)
 		return 1;
 	t_tmpl(g_path, sizeof g_path, "sqlxtc-connsup");
