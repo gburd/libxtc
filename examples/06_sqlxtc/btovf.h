@@ -56,7 +56,7 @@
 #define BT_OVF_MAGIC    0x4F564631u   /* "OVF1" */
 #define BT_OVF_MAXPAGES 64u           /* 64 x (1 KiB - 16) >= 64 KiB - 1 */
 #define BT_OVF_HDR      12u           /* tag, npages, rsvd, total, sum */
-#define BT_OVF_PGHDR    16u           /* LSN slot + magic + len per data page */
+#define BT_OVF_PGHDR    48u           /* LSN slot, magic, len, checksum (btnode.h) */
 
 static inline uint32_t
 bt_ovf_ref_len(uint32_t npages)

@@ -140,7 +140,7 @@ clean:
 	rm -f test_redo_page
 	rm -f test_inplace_redo
 	rm -f test_fuzzy_checkpoint
-	rm -f test_clean_restart test_dw_fail test_page_checksum
+	rm -f test_clean_restart test_dw_fail test_page_checksum test_page_cksum_more
 	rm -f test_steal
 	rm -f test_steal_page
 	rm -f test_wal_kill test_wal_tail test_wal_kill_engine test_wal_get_tail test_idx_trust test_crash_oracle
@@ -1168,10 +1168,18 @@ clean-order-limit:
 	rm -f test_order_limit test_qsel
 .PHONY: test-order-limit test-qsel clean-order-limit
 
-# A corrupted data page must not be returned as committed data (no page
-# checksum today: EXPECTED TO FAIL until one lands; not in `test`).
+# A corrupted data page must not be returned as committed data (page
+# checksums, 1.60); torn and misdirected writes, the restart that repairs
+# the damage from the log, a damaged superblock, a 1.59-format store.
+test: test-page-checksum test-page-cksum-more
 test_page_checksum: test_page_checksum.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
 	$(CC) $(CFLAGS) -o $@ test_page_checksum.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
 
 test-page-checksum: test_page_checksum
-	./test_page_checksum
+	TMPDIR=$${TMPDIR:-/tmp} ./test_page_checksum
+
+test_page_cksum_more: test_page_cksum_more.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ test_page_cksum_more.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
+
+test-page-cksum-more: test_page_cksum_more
+	TMPDIR=$${TMPDIR:-/tmp} ./test_page_cksum_more

@@ -248,6 +248,14 @@ wal_c32c(uint32_t c, const uint8_t *p, size_t n)
 	return wal_c32c_hw > 0 ? wal_c32c_hwfn(c, p, n) : wal_c32c_sw(c, p, n);
 }
 
+/* CRC32C for other layers (the page checksum, bufmgr), so the engine has
+ * one implementation: crc 0 starts a sum, a returned value continues one. */
+uint32_t
+wal_crc32c(uint32_t crc, const void *p, size_t n)
+{
+	return ~wal_c32c(~crc, p, n);
+}
+
 /* The trailer of a CRC32C frame from the CRC register over the frame. */
 #define WAL_SUM_TRL(c) (((uint64_t)WAL_SUM_TAG << 32) | (uint32_t)~(c))
 
@@ -1531,6 +1539,13 @@ wal_commit_sync(wal_t *w, const void *record, uint32_t len, uint64_t *lsn)
 	return wal_commit_any(w, record, len, lsn);
 }
 
+void
+wal_fail_stop(wal_t *w)
+{
+	if (w != NULL)
+		atomic_store_explicit(&w->failed, 1, memory_order_release);
+}
+
 int
 wal_failed(const wal_t *w)
 {
@@ -1662,6 +1677,8 @@ wal_checkpoint(wal_t *w, const char *path,
 		return XTC_E_INVAL;
 	if ((int)strlen(path) + 9 >= (int)sizeof tmp)
 		return XTC_E_INVAL;
+	if (atomic_load_explicit(&w->failed, memory_order_acquire))
+		return XTC_E_IO;
 	snprintf(tmp, sizeof tmp, "%s.compact", path);
 	fd = open(tmp, O_RDWR | O_CREAT | O_TRUNC, 0600);
 	if (fd < 0)
@@ -1709,6 +1726,12 @@ wal_checkpoint(wal_t *w, const char *path,
 		return XTC_E_INTERNAL;
 	}
 	(void)close(fd);
+	/* Failed during the dump (wal_fail_stop: a page it read was damaged,
+	 * so the dump may be cut short): never replace the complete log. */
+	if (atomic_load_explicit(&w->failed, memory_order_acquire)) {
+		(void)unlink(tmp);
+		return XTC_E_IO;
+	}
 	if (rename(tmp, path) != 0) {     /* atomic replace of the live log */
 		(void)unlink(tmp);
 		return XTC_E_INTERNAL;

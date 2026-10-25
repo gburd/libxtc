@@ -24,8 +24,12 @@
 
 _Static_assert(sizeof(struct btnode_slot) == 10,
     "btnode_slot must pack to 10 bytes");
-_Static_assert(sizeof(struct btnode_hdr) == 40,
+_Static_assert(sizeof(struct btnode_hdr) == 48,
     "btnode_hdr is on disk: the insert history must stay in the padding");
+_Static_assert(offsetof(struct btnode_hdr, page_cksum) == BTNODE_CKSUM_OFF,
+    "the buffer manager writes the page checksum at BTNODE_CKSUM_OFF");
+_Static_assert(BT_OVF_PGHDR >= BTNODE_CKSUM_OFF + 8,
+    "an out-of-line value page keeps its payload past the checksum");
 
 #define HDR(p) ((struct btnode_hdr *)(p))
 /* A slot's val_len carries a flag bit (BTNODE_VFLAG, see btnode.h); the
