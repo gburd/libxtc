@@ -38,7 +38,7 @@ fi
 
 cleanup() {
     [ -n "$SVR_PID" ] && kill -9 "$SVR_PID" 2>/dev/null
-    rm -f "$WORK"/t.db* "$WORK"/s.db* "$WORK"/log "$WORK"/client.py
+    find "$WORK" -mindepth 1 -delete 2>/dev/null
     rmdir "$WORK" 2>/dev/null || true
 }
 trap cleanup EXIT
