@@ -11,7 +11,8 @@
 #
 #   Env: SECS (10) TOPICS (4) PRODUCERS (8) CONSUMERS (8) VALUE (512)
 #        BATCH (32) SEGMENT (262144) MEMORY (1048576; -m, bytes)
-#        PORT (20000 + pid % 20000) TMPDIR
+#        PORT (10000 + pid % 20000; another on a collision unless set)
+#        TMPDIR
 #        SOAK_WRAP: a command prefix for the broker, e.g. the io_uring
 #        gate runs it as SOAK_WRAP="uringscope -f --json=r.json --".
 #   Portable (Linux + macOS); never uses setsid or `timeout`.  A watchdog
@@ -28,7 +29,12 @@ VALUE=${VALUE:-512}
 BATCH=${BATCH:-32}
 SEGMENT=${SEGMENT:-262144}
 MEMORY=${MEMORY:-1048576}
-PORT=${PORT:-$((20000 + $$ % 20000))}
+# Below the ephemeral ranges (Linux 32768-60999, macOS 49152-): an
+# outgoing connection holding the port made the listen fail under the
+# io_uring gate (20000 + pid % 20000 reaches 39999).  FreeBSD's range
+# starts at 10000, so a collision still moves to another port.
+FIXED_PORT=${PORT:+1}
+PORT=${PORT:-$((10000 + $$ % 20000))}
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/kaka-soak.XXXXXX")
 DATA=$WORK/data
 LOG=$WORK/broker.log
@@ -40,35 +46,13 @@ for b in "$BROKER" "$SOAK"; do
 		exit 0
 	fi
 done
-mkdir -p "$DATA"
-# Refuse a port something already listens on: a stale broker there would
-# answer this run's clients with another run's topics.
-if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
-	echo "FAIL: port $PORT is already in use (a stale broker?); set PORT"
-	rmdir "$DATA" "$WORK" 2>/dev/null
-	exit 1
-fi
-
-# shellcheck disable=SC2086  # SOAK_WRAP is a word list
-${SOAK_WRAP:-} "$BROKER" -h 127.0.0.1 -p "$PORT" -d "$DATA" \
-    --segment-bytes="$SEGMENT" -m "$MEMORY" < /dev/null > "$LOG" 2>&1 &
-WRAP_PID=$!
-# The watchdog polls, so it exits with the server, and keeps no stdout:
-# a lone `sleep` holding it would stall a reader of this script (a CI
-# step log, `| tail`) for the full bound after the run ended.
-( n=$((SECS + 60))
-  while [ "$n" -gt 0 ] && kill -0 "$WRAP_PID" 2>/dev/null; do
-	sleep 1
-	n=$((n - 1))
-  done
-  [ "$n" -eq 0 ] && kill -9 "$WRAP_PID" ) > /dev/null 2>&1 &
-WD_PID=$!
-
 # The server process: WRAP_PID itself, or under a SOAK_WRAP wrapper a
 # descendant of it (pgrep -P works on Linux, macOS and the BSDs), found
 # by the name of the binary actually run (KAKA_BROKER may be a -plant
 # build), cut to 15 characters as Linux's comm is.
 SVR_NAME=$(basename "$BROKER" | cut -c1-15)
+WRAP_PID=
+WD_PID=
 server_pid() {
 	p=$WRAP_PID
 	while [ -n "$p" ]; do
@@ -83,25 +67,66 @@ cleanup() {
 	# every exit path, a failed one too, stops the server it started
 	sp=$(server_pid)
 	[ -n "$sp" ] && kill -TERM "$sp" 2>/dev/null
-	wait "$WRAP_PID" 2>/dev/null
-	kill "$WD_PID" 2>/dev/null
-	wait "$WD_PID" 2>/dev/null
+	[ -n "$WRAP_PID" ] && wait "$WRAP_PID" 2>/dev/null
+	[ -n "$WD_PID" ] && kill "$WD_PID" 2>/dev/null
+	[ -n "$WD_PID" ] && wait "$WD_PID" 2>/dev/null
 	find "$WORK" -mindepth 1 -delete 2>/dev/null
 	rmdir "$WORK" 2>/dev/null
 }
 trap cleanup EXIT
 
-# Wait for the listener (up to 10 s).
-i=0
-until (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; do
-	i=$((i + 1))
-	if [ "$i" -ge 100 ] || ! kill -0 "$WRAP_PID" 2>/dev/null; then
-		echo "FAIL: kaka-broker did not start"
-		cat "$LOG"
+# Start the broker on $PORT on an empty data dir and wait (up to 10 s)
+# for its listener.  1: the port is taken (something answers there, or
+# the broker exited without listening); 2: it never came up.
+start_server() {
+	find "$WORK" -mindepth 1 -delete 2>/dev/null
+	mkdir -p "$DATA"
+	# A listener already there would answer this run's clients.
+	if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
+		return 1
+	fi
+	# shellcheck disable=SC2086  # SOAK_WRAP is a word list
+	${SOAK_WRAP:-} "$BROKER" -h 127.0.0.1 -p "$PORT" -d "$DATA" \
+	    --segment-bytes="$SEGMENT" -m "$MEMORY" < /dev/null > "$LOG" 2>&1 &
+	WRAP_PID=$!
+	i=0
+	until (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; do
+		if ! kill -0 "$WRAP_PID" 2>/dev/null; then
+			wait "$WRAP_PID" 2>/dev/null
+			WRAP_PID=
+			return 1
+		fi
+		i=$((i + 1))
+		[ "$i" -ge 100 ] && return 2
+		sleep 0.1
+	done
+	return 0
+}
+tries=0
+until start_server; do
+	st=$?
+	tries=$((tries + 1))
+	if [ "$st" -eq 2 ] || [ -n "$FIXED_PORT" ] || [ "$tries" -ge 5 ]; then
+		echo "FAIL: kaka-broker did not start on port $PORT" \
+		    "(attempt $tries; a port in use, or a stale broker?)"
+		cat "$LOG" 2>/dev/null
 		exit 1
 	fi
-	sleep 0.1
+	n=$((10000 + (PORT - 10000 + 7919) % 20000))
+	echo "note: port $PORT is in use; trying $n"
+	PORT=$n
 done
+
+# The watchdog polls, so it exits with the server, and keeps no stdout:
+# a lone `sleep` holding it would stall a reader of this script (a CI
+# step log, `| tail`) for the full bound after the run ended.
+( n=$((SECS + 60))
+  while [ "$n" -gt 0 ] && kill -0 "$WRAP_PID" 2>/dev/null; do
+	sleep 1
+	n=$((n - 1))
+  done
+  [ "$n" -eq 0 ] && kill -9 "$WRAP_PID" ) > /dev/null 2>&1 &
+WD_PID=$!
 
 "$SOAK" 127.0.0.1 "$PORT" "$TOPICS" "$PRODUCERS" "$CONSUMERS" "$SECS" \
     "$VALUE" "$BATCH"
