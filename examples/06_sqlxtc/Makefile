@@ -161,7 +161,7 @@ clean:
 	rm -f test_btree_mt
 	rm -f test_btree_stale_descent test_btree_limits test_btree_sample bench_morsel_balance
 	rm -f test_btree_seek test_btree_seek_latched test_point_read test_index_walk test_group_exact test_xs_ctr
-	rm -f test_xs_ctr test_bm_reuse_version test_kill_stmt test_cat_lock_shared test_conn_sup
+	rm -f test_xs_ctr test_bm_reuse_version test_kill_stmt test_cat_lock_shared test_conn_sup test_storage_sup
 	rm -f test_sql_results test_txn_fastpath test_wal_crc_once
 	rm -f test_btree_cursor_hop test_btree_smo_stress
 	rm -f test_tpcc_seek test_dup_composite test_bulk_insert test_plan_cache
@@ -1142,6 +1142,15 @@ test_conn_sup: test_conn_sup.c conn.c admin.c conn.h $(ENGINE_NATIVE)
 
 test-conn-sup: test_conn_sup
 	TMPDIR=$${TMPDIR:-/tmp} ./test_conn_sup
+
+# The storage procs are supervised: a killed provider/trickler is
+# restarted (budgeted), a killed WAL writer/checkpointer escalates.
+test: test-storage-sup
+test_storage_sup: test_storage_sup.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_storage_sup.c $(ENGINE_NATIVE) $(LDFLAGS)
+
+test-storage-sup: test_storage_sup
+	TMPDIR=$${TMPDIR:-/tmp} ./test_storage_sup
 
 # Warm statements of several connections sharing one OS thread (fibers
 # on a server loop) take no global catalog lock.

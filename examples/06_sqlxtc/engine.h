@@ -91,6 +91,16 @@ uint64_t sx_storage_checkpoints(void);   /* checkpoints completed */
  * For tests that kill it. */
 struct xtc_pid;
 int  sx_storage_ckpt_pid(struct xtc_pid *out);
+/* The live pid of a background storage proc in *out: 1, or 0 when that
+ * proc is not running.  For tests that kill them. */
+enum { SX_PROC_WAL, SX_PROC_CKPT, SX_PROC_PROVIDER, SX_PROC_TRICKLER };
+int  sx_storage_proc_pid(int which, struct xtc_pid *out);
+/* Called (from a proc on the storage loop) when a storage proc that
+ * cannot be restarted exits while the store runs, or one that can has
+ * used up its restart budget: `what` names it.  The embedder should stop
+ * (the server drains as on SIGTERM).  Without a hook it is logged. */
+void sx_storage_on_failure(void (*fn)(const char *what, void *arg),
+    void *arg);
 void sx_storage_quiesce(void);
 /* Clean shutdown: flush, compact the log, mark the base clean.  Returns
  * SX_OK, or SX_ERROR if any flush/sync/compaction failed -- the base is

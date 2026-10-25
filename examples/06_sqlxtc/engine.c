@@ -26,6 +26,7 @@
 #include "xtc_async.h"     /* xtc_yield -- the fiber-yielding busy handler */
 #include "xtc_blocking.h"  /* xtc_blocking_run -- the checkpoint off the loop */
 #include "xtc_proc.h"      /* xtc_proc_sleep -- park, do not spin */
+#include "xtc_inspect.h"   /* xtc_proc_info -- sx_storage_proc_pid */
 #include "xtc_loop.h"      /* xtc_loop_t -- background storage procs */
 
 #include <assert.h>
@@ -250,6 +251,42 @@ uint64_t
 sx_storage_checkpoints(void)
 {
 	return atomic_load(&g_ckpt_count);
+}
+
+static xtc_pid_t g_pp_pid, g_tr_pid;   /* provider, trickler */
+static void (*g_fail_fn)(const char *, void *);
+static void *g_fail_arg;
+
+void
+sx_storage_on_failure(void (*fn)(const char *what, void *arg), void *arg)
+{
+	g_fail_fn = fn;
+	g_fail_arg = arg;
+}
+
+int
+sx_storage_proc_pid(int which, xtc_pid_t *out)
+{
+	xtc_proc_info_t pi;
+	xtc_pid_t p;
+
+	if (!g_xrunning)
+		return 0;
+	switch (which) {
+	case SX_PROC_WAL:
+		if (g_xwal == NULL)
+			return 0;
+		p = wal_writer_pid(g_xwal);
+		break;
+	case SX_PROC_CKPT:      p = g_ckpt_pid; break;
+	case SX_PROC_PROVIDER:  p = g_pp_pid; break;
+	case SX_PROC_TRICKLER:  p = g_tr_pid; break;
+	default:                return 0;
+	}
+	if (xtc_proc_info(p, &pi) != XTC_OK || !pi.alive)
+		return 0;
+	*out = p;
+	return 1;
 }
 
 int
@@ -636,8 +673,8 @@ sx_storage_run(xtc_loop_t *loop)
 		else
 			g_ckpt_pid = cp;
 	}
-	(void)bm_provider_spawn(g_xbm, loop, 1LL * 1000 * 1000, NULL);  /* 1ms */
-	(void)bm_trickler_spawn(g_xbm, loop, 5LL * 1000 * 1000, NULL);  /* 5ms */
+	(void)bm_provider_spawn(g_xbm, loop, 1LL * 1000 * 1000, &g_pp_pid);  /* 1ms */
+	(void)bm_trickler_spawn(g_xbm, loop, 5LL * 1000 * 1000, &g_tr_pid);  /* 5ms */
 	g_xrunning = 1;
 	return SX_OK;
 }
