@@ -1152,6 +1152,12 @@ test_storage_sup: test_storage_sup.c $(ENGINE_NATIVE)
 test-storage-sup: test_storage_sup
 	TMPDIR=$${TMPDIR:-/tmp} ./test_storage_sup
 
+# The same, on a running server under load: a killed provider/trickler
+# is restarted, a killed WAL writer/checkpoint stops the server (exit 1).
+test: test-sqlxtc-kill
+test-sqlxtc-kill: $(TARGET)
+	TMPDIR=$${TMPDIR:-/tmp} bash ../../test/sqlxtc/test_sqlxtc_kill.sh
+
 # Warm statements of several connections sharing one OS thread (fibers
 # on a server loop) take no global catalog lock.
 test: test-cat-lock-shared

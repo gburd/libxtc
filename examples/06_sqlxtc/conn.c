@@ -326,6 +326,43 @@ handle_query(conn_state_t *st, const quack_msg_t *msg)
 	free(normalized);
 }
 
+/*
+ * Test hook, off unless the server starts with SQLXTC_TEST_KILL=1:
+ * "KILL <storage proc>" (wal, checkpoint, bm-provider, bm-trickler)
+ * kills that proc with xtc_exit_pid, so a script can check the storage
+ * supervision of a running server (test_sqlxtc_kill.sh).  1 if the
+ * request was this command.
+ */
+static int
+conn_test_kill(conn_state_t *st, const quack_msg_t *msg)
+{
+	static const char *const nm[] = { "WAL", "CHECKPOINT", "BM-PROVIDER",
+	    "BM-TRICKLER" };            /* sql_text_is folds to upper case */
+	static const int which[] = { SX_PROC_WAL, SX_PROC_CKPT,
+	    SX_PROC_PROVIDER, SX_PROC_TRICKLER };
+	const char *e;
+	char kw[32];
+	xtc_pid_t pid;
+	int i;
+
+	if (msg->q_len < 5 || strncmp(msg->q, "KILL ", 5) != 0 ||
+	    (e = getenv("SQLXTC_TEST_KILL")) == NULL || strcmp(e, "1") != 0)
+		return 0;
+	for (i = 0; i < 4; i++) {
+		snprintf(kw, sizeof kw, "KILL %s", nm[i]);
+		if (!sql_text_is(msg->q, msg->q_len, kw))
+			continue;
+		if (!sx_storage_proc_pid(which[i], &pid) ||
+		    xtc_exit_pid(pid, 9) != XTC_OK)
+			quack_emit_err(&st->wbuf, "not running");
+		else
+			quack_emit_done(&st->wbuf, 1);
+		return 1;
+	}
+	quack_emit_err(&st->wbuf, "KILL: unknown proc");
+	return 1;
+}
+
 /* Process as many full lines as available in rbuf.  Returns 0
  * on success.  Stops early if the write buffer grows large; the
  * conn loop will flush before continuing. */
@@ -365,6 +402,8 @@ process_lines(conn_state_t *st)
 				admin_show_processes(&st->wbuf);
 				break;
 			}
+			if (conn_test_kill(st, &msg))
+				break;
 			/* Rate limit: take a token in one atomic step (a
 			 * load, then a decrement, let two loops spend the
 			 * last token); no token: give it back. */
