@@ -121,22 +121,25 @@ start() {
     SVR_PID=$!
 }
 
+# Milliseconds on a monotonic clock (BSD date has no %N).
+now_ms() {
+    python3 -c 'import time; print(int(time.monotonic() * 1000))'
+}
+
 # wait_exit MS: wait up to MS ms for SVR_PID to exit; sets MS_TAKEN to
 # the elapsed ms and RC to its exit status (255 if it did not exit)
 wait_exit() {
-    local t0 t1
-    t0=$(date +%s%N)
+    local t0
+    t0=$(now_ms)
     RC=255
     while kill -0 "$SVR_PID" 2>/dev/null; do
-        t1=$(date +%s%N)
-        MS_TAKEN=$(( (t1 - t0) / 1000000 ))
+        MS_TAKEN=$(( $(now_ms) - t0 ))
         [ "$MS_TAKEN" -ge "$1" ] && return
         sleep 0.02
     done
     wait "$SVR_PID"; RC=$?
-    t1=$(date +%s%N)
     SVR_PID=
-    MS_TAKEN=$(( (t1 - t0) / 1000000 ))
+    MS_TAKEN=$(( $(now_ms) - t0 ))
 }
 
 for victim in bm-provider bm-trickler checkpoint wal; do

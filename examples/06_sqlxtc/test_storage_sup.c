@@ -214,7 +214,7 @@ watchdog(void *arg)
 	int64_t t0 = ms();
 	(void)arg;
 	while (!atomic_load(&g_done)) {
-		if (ms() - t0 > 60000) {
+		if (ms() - t0 > 120 * g_bound_ms) {   /* 60 s; x20 if slow */
 			fprintf(stderr, "FAIL: test_storage_sup: hang (session %d)\n",
 			    g_session);
 			_exit(3);

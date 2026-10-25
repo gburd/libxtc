@@ -70,6 +70,7 @@ static db_t         *g_db;
 static xtc_res_t     g_res;
 static _Atomic int   g_done;
 static const char   *g_which = "abc";   /* argv[1]: the cases to run */
+static int           g_slow = 1;        /* x20 under valgrind / emulation */
 
 typedef struct cli {
 	int    fd;
@@ -254,7 +255,7 @@ scenario(int kill, const char *name)
 		close(sv[1]);
 		c->fd = sv[1] = -1;
 	}
-	down = await_down(pid, 3000);
+	down = await_down(pid, 3000 * g_slow);
 	CK(down);
 	if (kill) {
 		eof = cli_line(c, line, sizeof line, 1000);
@@ -273,7 +274,7 @@ scenario(int kill, const char *name)
 	rc = sx_exec(h, "UPDATE t SET v = 7 WHERE k = 1", NULL);
 	wait_ms = ms_since(t0);
 	CK(rc == SX_OK);
-	CK(wait_ms < 1000);                       /* no intent left to wait out */
+	CK(wait_ms < 1000 * g_slow);              /* no intent left to wait out */
 	CK(sx_exec(h, "UPDATE t SET v = 1 WHERE k = 1", NULL) == SX_OK);
 	sx_close(h);
 	free(c);
@@ -304,7 +305,8 @@ mid_statement(void)
 	sx_db *h = NULL;
 	char line[256];
 	int sv[2], alive = -1, down_early, down, eof;
-	int64_t v2 = -9;
+	int64_t v2 = -9, t0;
+	uint64_t w0;
 
 	CK(sx_open(":memory:", &h) == SX_OK);
 	if (h == NULL || (c = calloc(1, sizeof *c)) == NULL) {
@@ -325,9 +327,13 @@ mid_statement(void)
 
 	CK(sx_exec(h, "BEGIN", NULL) == SX_OK);
 	CK(sx_exec(h, "UPDATE t SET v = 50 WHERE k = 2", NULL) == SX_OK);
+	w0 = xstore_intent_waits();
 	CK(send(c->fd, upd, sizeof upd - 1, MSG_NOSIGNAL) ==
 	    (ssize_t)(sizeof upd - 1));
-	(void)xtc_proc_sleep(100LL * 1000 * 1000);    /* it waits on row 2 */
+	for (t0 = xtc_clock_mono(); xstore_intent_waits() == w0 &&
+	    ms_since(t0) < 5000 * g_slow;)            /* it waits on row 2 */
+		(void)xtc_proc_sleep(1000LL * 1000);
+	CK(xstore_intent_waits() > w0);
 	CK(xtc_exit_pid(pid, 9) == XTC_OK);
 	down_early = await_down(pid, 300);
 	if (xtc_proc_info(pid, &pi) == XTC_OK)
@@ -335,7 +341,7 @@ mid_statement(void)
 	CK(!down_early);
 	CK(alive == 1);
 	CK(sx_exec(h, "COMMIT", NULL) == SX_OK);
-	down = down_early || await_down(pid, 3000);
+	down = down_early || await_down(pid, 3000 * g_slow);
 	CK(down);
 	eof = cli_line(c, line, sizeof line, 1000);
 	while (eof == 1)
@@ -372,7 +378,7 @@ watchdog(void *arg)
 	int64_t t0 = xtc_clock_mono();
 	(void)arg;
 	while (!atomic_load(&g_done)) {
-		if (ms_since(t0) > 60000) {
+		if (ms_since(t0) > 60000 * g_slow) {
 			fprintf(stderr, "FAIL: test_conn_sup: hang\n");
 			_exit(3);
 		}
@@ -396,6 +402,9 @@ main(int argc, char **argv)
 
 	if (argc > 1)
 		g_which = argv[1];
+	if (getenv("XTC_UNDER_VALGRIND") != NULL ||
+	    getenv("XTC_TEST_EMULATED") != NULL)
+		g_slow = 20;
 	if (xtc_set_stack_size(512u * 1024u) != XTC_OK)
 		return 1;
 	t_tmpl(g_path, sizeof g_path, "sqlxtc-connsup");
