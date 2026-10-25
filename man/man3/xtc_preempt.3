@@ -163,11 +163,8 @@ the cooperative path only for Phase 2 -- a fiber that never reaches a
 yield point will not be involuntarily interrupted on macOS.  This
 Phase-2 gap is a real limitation, not merely an untested corner; do not
 rely on involuntary fairness for uncooperative CPU-bound work on macOS.
-The Phase 1 kqueue tick source has been reviewed and cross-compiled for
-macOS but not yet runtime-verified on real Apple hardware by the change
-that introduced it; see
-.Pa docs/KNOWN_ISSUES.md
-for the current verification status.
+The Phase 1 kqueue tick source runs on Apple Silicon in CI on every
+push (test_preempt /macos_kqueue_timer, test_preempt_p1 /timeslice).
 .Pp
 On the io_uring backend the executor drives the cooperative (Phase 1)
 tick source from the ring itself rather than from this per-thread
