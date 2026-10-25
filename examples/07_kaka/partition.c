@@ -105,6 +105,27 @@ struct plog {
 	size_t       wbuf_cap;
 };
 
+#ifdef KAKA_TEST_PLANT
+/* Planted bugs for the soak's negative control, compiled only into
+ * kaka-broker-plant (make kaka-broker-plant), never into kaka-broker.
+ * KAKA_PLANT_DROP=N acks every Nth record without storing it;
+ * KAKA_PLANT_COLD_FLIP=N flips a byte of every Nth record a FETCH reads
+ * back from a segment file.  test_kaka_soak.sh must fail on each. */
+#include <stdatomic.h>
+static _Atomic unsigned long g_plant_n[2];
+static int
+__plant(int which, const char *env)
+{
+	const char *e = getenv(env);
+	unsigned long every = e != NULL ? strtoul(e, NULL, 10) : 0;
+	return every > 0 &&
+	    (atomic_fetch_add(&g_plant_n[which], 1) + 1) % every == 0;
+}
+#define PLANT(which, env) __plant((which), (env))
+#else
+#define PLANT(which, env) 0
+#endif
+
 static int (*g_sync_fn)(int fd);
 
 void
@@ -699,6 +720,8 @@ plog_append(plog_t *l, const kaka_record_t *rec)
 	if (rec->key_len > REC_MAX || rec->value_len > REC_MAX) return -1;
 	off = l->hw;
 	if (l->dir != NULL) {
+		if (PLANT(0, "KAKA_PLANT_DROP"))
+			return (int64_t)off;     /* acked, never stored */
 		if (__seg_write(l, off, rec) != 0) {
 			l->failed = 1;           /* fail-stop: state unknown */
 			return -1;
@@ -827,6 +850,8 @@ __fetch_cold(plog_t *l, uint64_t *offp, uint64_t stop, uint8_t *dst,
 				if (crc32(r + 4, wire, 0) != __get32(r))
 					return -1;
 				memcpy(dst + used, r + 4, wire);
+				if (PLANT(1, "KAKA_PLANT_COLD_FLIP"))
+					dst[used + wire - 1] ^= 0xff;
 				used += wire;
 				(*n)++;
 				off = cur + 1;
