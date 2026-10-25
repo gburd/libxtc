@@ -1365,6 +1365,17 @@ test_amutex_recursive_thread(const MunitParameter p[], void *d)
  * 5. Liveness + exclusion (arwlock_threads, offloop_timed_handoff):
  *    every acquire is timed, so a lost wakeup fails instead of hanging.
  */
+/*
+ * offloop_valgrind_note: the off-loop tests below measure scheduling --
+ * context switches, wake latency, a spin that must outlast a ~2 us hold.
+ * Valgrind runs one thread at a time and switches between them on its
+ * own schedule, so those measurements mean nothing there and a busy-wait
+ * on a peer can starve it (offloop_notify_spin hung the CI memcheck step
+ * for its 45 minutes; with --fair-sched=yes it reported 22,230 switches).
+ * The CI memcheck job sets XTC_UNDER_VALGRIND: they skip there; the
+ * lock semantics they exercise are covered under memcheck by the other
+ * amutex/arwlock tests in this file.
+ */
 #if defined(__linux__) && defined(RUSAGE_THREAD)
 #define HERD_K 8
 #define HERD_R 200
@@ -1441,6 +1452,8 @@ test_offloop_no_herd(const MunitParameter p[], void *d)
 	long csw;
 	int kind;
 	(void)p; (void)d;
+	if (getenv("XTC_UNDER_VALGRIND") != NULL)
+		return MUNIT_SKIP;   /* timing: see offloop_valgrind_note */
 	if (xtc_ncpus() < 2)
 		return MUNIT_SKIP;
 	munit_assert_int(xtc_arwlock_create(&g_hd_rw), ==, XTC_OK);
@@ -1496,6 +1509,8 @@ test_offloop_spin(const MunitParameter p[], void *d)
 	pthread_t th[2];
 	int kind, i;
 	(void)p; (void)d;
+	if (getenv("XTC_UNDER_VALGRIND") != NULL)
+		return MUNIT_SKIP;   /* timing: see offloop_valgrind_note */
 	if (xtc_ncpus() < 2)
 		return MUNIT_SKIP;
 	munit_assert_int(xtc_arwlock_create(&g_hd_rw), ==, XTC_OK);
@@ -1565,6 +1580,8 @@ test_offloop_release_wakes(const MunitParameter p[], void *d)
 	long v0[HERD_K], v1;
 	int kind, i, woke;
 	(void)p; (void)d;
+	if (getenv("XTC_UNDER_VALGRIND") != NULL)
+		return MUNIT_SKIP;   /* timing: see offloop_valgrind_note */
 	if (xtc_ncpus() < 2)
 		return MUNIT_SKIP;
 	munit_assert_int(xtc_arwlock_create(&g_hd_rw), ==, XTC_OK);
@@ -1629,6 +1646,8 @@ test_offloop_notify_spin(const MunitParameter p[], void *d)
 	pthread_t th;
 	int i;
 	(void)p; (void)d;
+	if (getenv("XTC_UNDER_VALGRIND") != NULL)
+		return MUNIT_SKIP;   /* timing: see offloop_valgrind_note */
 	if (xtc_ncpus() < 2)
 		return MUNIT_SKIP;
 	munit_assert_int(xtc_notify_create(&g_ns), ==, XTC_OK);
