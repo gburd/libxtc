@@ -97,7 +97,14 @@
 #define SIM_NAME   "open/close"
 #endif
 /* SIM_CKPT (test_sim_sqlxtc_ckpt.c): a checkpointer fiber runs online log
- * checkpoints back to back while the lanes commit. */
+ * checkpoints back to back while the lanes commit.  SIM_GC
+ * (test_sim_sqlxtc_gc.c): a reader fiber holds snapshot transactions open
+ * across the lanes' commits and a collector fiber runs xstore_gc. */
+#ifdef SIM_GC
+#define N_EXTRA   2               /* reader + collector */
+#else
+#define N_EXTRA   0
+#endif
 #define N_SITES   32
 #define N_IDX     2               /* u UNIQUE + t_g */
 #define MAX_STEPS 20000000L
@@ -120,6 +127,7 @@ struct shared {
 	uint64_t    idx_trusted;      /* trusted opens that kept the indexes */
 	uint64_t    evicted, loads;   /* buffer pool, summed over segments */
 	uint64_t    ckpts, ckpt_again, ckpt_frames, crash_after_ckpt;
+	uint64_t    snaps, snaps_spanning, gc_runs, gc_reclaimed, prunes;
 	int         failed;
 };
 
@@ -136,7 +144,7 @@ static xtc_exec_t *g_exec;
 static uint64_t   g_seed;
 static int        g_round, g_seg;
 static _Atomic long g_step, g_crash_at;
-static _Atomic int  g_crashed, g_left;
+static _Atomic int  g_crashed, g_left, g_lanes;
 static int        g_ops;
 
 static uint64_t
@@ -282,6 +290,7 @@ lane_proc(void *arg)
 	}
 	sx_close(h);
 out:
+	atomic_fetch_sub(&g_lanes, 1);
 	if (atomic_fetch_sub(&g_left, 1) == 1 && !atomic_load(&g_crashed))
 		sx_storage_quiesce();
 }
@@ -308,6 +317,135 @@ ckpt_proc(void *arg)
 		(void)xtc_proc_sleep((int64_t)(100 +
 		    __xtc_sim_rng_range(XTC_SIM_RNG_APP, 2000)) * 1000);
 	}
+}
+#endif
+
+#ifdef SIM_GC
+/* One read of the table in the reader's snapshot: a hash of every (k, g,
+ * w), the row count, and the per-g counts -- by the scan, or through the
+ * t_g index (via_index).  0, or -1 if a statement failed. */
+static int
+snap_read(sx_db *h, int via_index, uint64_t *hash, int64_t *n, int64_t gc[NG])
+{
+	sx_stmt *st = NULL;
+	int g;
+	*hash = 0xCBF29CE484222325ull;
+	*n = 0;
+	for (g = 0; g < NG; g++)
+		gc[g] = 0;
+	if (via_index) {
+		for (g = 0; g < NG; g++) {
+			if (sx_prepare(h, "SELECT count(*) FROM t WHERE g = ?", -1,
+			    &st, NULL) != SX_OK)
+				return -1;
+			sx_bind_int64(st, 1, g);
+			if (sx_step(st) == SX_ROW)
+				gc[g] = sx_column_int64(st, 0);
+			sx_finalize(st);
+			*n += gc[g];
+		}
+		return 0;
+	}
+	if (sx_prepare(h, "SELECT k, g, w FROM t ORDER BY k", -1, &st,
+	    NULL) != SX_OK)
+		return -1;
+	while (sx_step(st) == SX_ROW) {
+		int64_t gg = sx_column_int64(st, 1);
+		*hash = (*hash ^ (uint64_t)sx_column_int64(st, 0)) * 0x100000001B3ull;
+		*hash = (*hash ^ (uint64_t)gg) * 0x100000001B3ull;
+		*hash = (*hash ^ (uint64_t)sx_column_int64(st, 2)) * 0x100000001B3ull;
+		if (gg >= 0 && gg < NG)
+			gc[gg]++;
+		(*n)++;
+	}
+	sx_finalize(st);
+	return 0;
+}
+
+/*
+ * Snapshot reader: BEGIN, read the table, sleep while the lanes commit
+ * (updates and deletes make new versions, pruned on write and by the
+ * collector), read it again by scan and through the index, COMMIT.  A
+ * snapshot must read exactly its versions: any difference is a version
+ * reclaimed while a snapshot still needed it.
+ */
+static void
+reader_proc(void *arg)
+{
+	sx_db *h = NULL;
+	uint64_t h1, h2, h3, a0;
+	int64_t n1, n2, n3, c1[NG], c2[NG], c3[NG];
+	int g;
+	(void)arg;
+	if (sx_open(":memory:", &h) != SX_OK) {
+		FAILF("reader: sx_open failed");
+		goto out;
+	}
+	while (atomic_load(&g_lanes) > 0) {
+		if (sx_exec(h, "BEGIN", NULL) != SX_OK) {
+			FAILF("reader: BEGIN failed");
+			break;
+		}
+		a0 = g_sh->acked;
+		if (snap_read(h, 0, &h1, &n1, c1) != 0) {
+			FAILF("reader: first read failed");
+			break;
+		}
+		(void)xtc_proc_sleep((int64_t)(200 +
+		    __xtc_sim_rng_range(XTC_SIM_RNG_APP, 3000)) * 1000);
+		if (snap_read(h, 0, &h2, &n2, c2) != 0 ||
+		    snap_read(h, 1, &h3, &n3, c3) != 0) {
+			FAILF("reader: second read failed");
+			break;
+		}
+		if (h1 != h2 || n1 != n2)
+			FAILF("SNAPSHOT: a snapshot read %lld rows (hash %016llx), "
+			    "then %lld (hash %016llx)", (long long)n1,
+			    (unsigned long long)h1, (long long)n2,
+			    (unsigned long long)h2);
+		for (g = 0; g < NG; g++)
+			if (c1[g] != c3[g])
+				FAILF("SNAPSHOT: g=%d: %lld rows by the scan, then %lld "
+				    "through the index", g, (long long)c1[g],
+				    (long long)c3[g]);
+		(void)sx_exec(h, "COMMIT", NULL);
+		g_sh->snaps++;
+		if (g_sh->acked != a0)
+			g_sh->snaps_spanning++;
+		if (g_sh->failed)
+			break;
+	}
+	sx_close(h);
+out:
+	if (atomic_fetch_sub(&g_left, 1) == 1 && !atomic_load(&g_crashed))
+		sx_storage_quiesce();
+}
+
+/* Collector: xstore_gc (below the snapshot horizon) now and then. */
+static void
+gc_proc(void *arg)
+{
+	sx_db *h = NULL;
+	int r;
+	(void)arg;
+	if (sx_open(":memory:", &h) != SX_OK) {
+		FAILF("gc: sx_open failed");
+		goto out;
+	}
+	while (atomic_load(&g_lanes) > 0) {
+		(void)xtc_proc_sleep((int64_t)(300 +
+		    __xtc_sim_rng_range(XTC_SIM_RNG_APP, 3000)) * 1000);
+		if ((r = xstore_gc_run(h)) < 0) {
+			FAILF("gc: xstore_gc_run failed");
+			break;
+		}
+		g_sh->gc_runs++;
+		g_sh->gc_reclaimed += (uint64_t)r;
+	}
+	sx_close(h);
+out:
+	if (atomic_fetch_sub(&g_left, 1) == 1 && !atomic_load(&g_crashed))
+		sx_storage_quiesce();
 }
 #endif
 
@@ -520,11 +658,15 @@ segment(uint64_t rs, int crash)
 	uint64_t miss = 0, stale = 0;
 	struct bm_stats bs;
 	int l, rc, n;
+#ifdef SIM_GC
+	int64_t p0;
+#endif
 
 	g_ops = OPS_MIN + (int)(mix(rs ^ 0x6F7073ull) % OPS_SPAN);
 	atomic_store(&g_step, 0);
 	atomic_store(&g_crashed, 0);
-	atomic_store(&g_left, NW);
+	atomic_store(&g_left, NW + N_EXTRA);
+	atomic_store(&g_lanes, NW);
 	atomic_store(&g_crash_at, crash ?
 	    (long)(mix(rs ^ 0x637574ull) % (uint64_t)(NW * g_ops + 1)) : -1L);
 	if (xtc_exec_init(&g_exec, N_LOOPS) != XTC_OK) {
@@ -542,6 +684,16 @@ segment(uint64_t rs, int crash)
 			FAILF("spawn lane %d failed", l);
 			return -1;
 		}
+#ifdef SIM_GC
+	p0 = xstore_prune_count();
+	if (xtc_proc_spawn(xtc_exec_loop(g_exec, 1), reader_proc, NULL, &po,
+	    &pid) != XTC_OK ||
+	    xtc_proc_spawn(xtc_exec_loop(g_exec, 2), gc_proc, NULL, &po,
+	    &pid) != XTC_OK) {
+		FAILF("spawn reader/collector failed");
+		return -1;
+	}
+#endif
 #ifdef SIM_CKPT
 	g_seg_ckpts = 0;
 	if (xtc_proc_spawn(xtc_exec_loop(g_exec, 0), ckpt_proc, NULL, &po,
@@ -556,6 +708,9 @@ segment(uint64_t rs, int crash)
 	sites_note();
 	xtc_sim_buggify_disable();
 	xtc_sim_io_faults_disable();
+#ifdef SIM_GC
+	g_sh->prunes += (uint64_t)(xstore_prune_count() - p0);
+#endif
 	if (rc != XTC_OK) {
 		FAILF("LIVENESS: sim run returned %d (%s)", rc,
 		    rc == XTC_E_DEADLK ? "deadlock: every proc parked" :
@@ -750,6 +905,7 @@ main(int argc, char **argv)
 	int count = argc > 2 ? atoi(argv[2]) : 6, k;
 	uint64_t acked = 0, crashes = 0, cleans = 0, tr = 0, rec = 0, it = 0;
 	uint64_t ev = 0, ld = 0, ck = 0, cka = 0, ckf = 0, cac = 0;
+	uint64_t sn = 0, sns = 0, gcr = 0, gcv = 0, pr = 0;
 
 	memset(g_pad, 'x', SIM_PAD);
 	g_sh = mmap(NULL, sizeof *g_sh, PROT_READ | PROT_WRITE,
@@ -774,6 +930,11 @@ main(int argc, char **argv)
 		cka += g_sh->ckpt_again;
 		ckf += g_sh->ckpt_frames;
 		cac += g_sh->crash_after_ckpt;
+		sn += g_sh->snaps;
+		sns += g_sh->snaps_spanning;
+		gcr += g_sh->gc_runs;
+		gcv += g_sh->gc_reclaimed;
+		pr += g_sh->prunes;
 		if (run_seed(seed, &f2) != 0)
 			return 1;
 		if (f1 != f2) {
@@ -795,6 +956,18 @@ main(int argc, char **argv)
 		    "\n", g_cov->site[k].name,
 		    (unsigned long long)g_cov->site[k].reached,
 		    (unsigned long long)g_cov->site[k].active);
+#ifdef SIM_GC
+	printf("snapshots: %llu held (%llu across commits); xstore_gc: %llu "
+	    "runs, %llu versions reclaimed; %llu prune-on-write passes\n",
+	    (unsigned long long)sn, (unsigned long long)sns,
+	    (unsigned long long)gcr, (unsigned long long)gcv,
+	    (unsigned long long)pr);
+	if (count >= 4 && (sns == 0 || gcr == 0 || pr == 0)) {
+		printf("FAIL: the sweep held no snapshot across commits, or ran "
+		    "no GC / prune\n");
+		return 1;
+	}
+#endif
 #ifdef SIM_CKPT
 	printf("online checkpoints: %llu done (%llu live frames copied), %llu "
 	    "gave up; %llu crashes after a checkpoint in the same segment\n",

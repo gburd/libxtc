@@ -4889,6 +4889,11 @@ xs_prune_rowid(bt_t *bt, uint32_t tableid, int64_t rowid, uint64_t horizon)
 			if (ts <= horizon) {
 				survivor_found = 1;
 				if (deleted && first) memcpy(dead[ndead++], k, XS_VKLEN);
+#if XTC_DST_BUG(XTC_DST_BUG_PRUNEHZN)
+				/* planted: prune the horizon's own version, not
+				 * only the ones below it */
+				else if (!first) memcpy(dead[ndead++], k, XS_VKLEN);
+#endif
 			}
 		} else {
 			memcpy(dead[ndead++], k, XS_VKLEN);

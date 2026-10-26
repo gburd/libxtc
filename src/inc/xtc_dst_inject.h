@@ -85,6 +85,10 @@
  *	                   a commit acked during the checkpoint is missing
  *	                   from the new log (test_sim_sqlxtc_ckpt: a lost
  *	                   or wrong row after crash recovery).
+ *	 21  PRUNEHZN  -- examples/06_sqlxtc/xstore.c's prune-on-write
+ *	                   deletes the version AT the snapshot horizon (the
+ *	                   one the oldest snapshot reads) when a newer one
+ *	                   exists (test_sim_sqlxtc_gc: SNAPSHOT).
  *
  *	NOT plantable under DST (an honest gap, recorded so it is not
  *	mistaken for missing coverage): the xtc_amutex mutual-exclusion and
@@ -139,5 +143,6 @@
 #define XTC_DST_BUG_IDXSKIP    18  /* xstore.c: an index rebuild skips one index */
 #define XTC_DST_BUG_EVICTNOWB  19  /* bufmgr.c: evict a dirty page unwritten */
 #define XTC_DST_BUG_OCKDROP    20  /* wal.c: an online-checkpoint copy round drops its last frame */
+#define XTC_DST_BUG_PRUNEHZN   21  /* xstore.c: prune-on-write deletes the version at the horizon */
 
 #endif /* XTC_DST_INJECT_H */
