@@ -170,7 +170,10 @@ something reads it:
 - **Histograms** (`xtc_hist`) are per-CPU sharded fixed-bucket log-linear
   histograms. `xtc_hist_record` hits one shard; `xtc_hist_quantile` merges
   shards on read. The buckets are allocation-free *and* mergeable, which is
-  the property that matters below.
+  the property that matters below. They span 1 ns to 2^40 ns (about 18
+  minutes) at 16 buckets per power of two; a quantile is its bucket's upper
+  bound, so it is never below the true value and at most 1/16 above it, and
+  `xtc_hist_max` is exact.
 - **Gauges** are a single `_Atomic int64_t`: wait-free reads, atomic-store
   writes, for a value that moves up and down (queue depth, live connections).
 - **`xtc_dist`** adds mergeable online mean/variance: each shard keeps a
