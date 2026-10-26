@@ -3825,6 +3825,7 @@ bt_get_stats(bt_t *bt, bt_stats_t *out)
 	out->splits = atomic_load(&bt->st_splits);
 	out->merges = atomic_load(&bt->st_merges);
 	out->reclaimed = atomic_load(&bt->st_reclaimed);
+	out->stuck = atomic_load(&bt->st_stuck);
 	out->height = atomic_load(&bt->st_height);
 	out->descents = atomic_load(&bt->st_descents);
 	out->resumes = atomic_load(&bt->st_resumes);
