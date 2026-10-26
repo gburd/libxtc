@@ -148,9 +148,12 @@ int btnode_search(const void *page, const void *key, uint16_t key_len,
 
 /*
  * Insert key/value, keeping slots sorted.  `key` is the FULL key; only
- * its suffix (key_len - prefix_len bytes) is stored.  Returns 0 on
- * success, -1 if the node lacks room even after compaction (the caller
- * must split).
+ * its suffix (key_len - prefix_len bytes) is stored.  The empty key
+ * (key_len 0) is an internal node's -infinity slot 0: it goes to slot 0
+ * with an empty suffix under any prefix.  Returns 0 on success, -1 if
+ * the node lacks room even after compaction (the caller must split), -2
+ * if a non-empty key does not start with the node prefix (it is outside
+ * the node's fences: a caller bug).
  */
 int btnode_insert(void *page, const void *key, uint16_t key_len,
     const void *val, uint16_t val_len);
@@ -223,6 +226,11 @@ int btnode_split(void *page, void *right_page, void *sep_key_out,
 int btnode_split_ex(void *page, void *right_page, void *sep_key_out,
     uint16_t sep_cap, uint16_t *sep_len_out, const void *pend_key,
     uint16_t pend_klen, uint16_t pend_vlen);
+
+/* An internal node's child page id: the value of every internal slot,
+ * a little-endian uint32_t (the same width as right_sibling; a store
+ * holds at most 2^32 - 1 pages, 16 TiB of 4 KiB pages). */
+#define BTNODE_CHILD_LEN 4u
 
 /* Bytes an entry of the given full key and value length needs in a node
  * (slot + key + value, counting the whole key, i.e. no prefix savings). */
@@ -303,9 +311,10 @@ int btnode_hi_fence(const void *page, void *out, uint16_t cap, uint16_t *len);
  * that every cell and fence lies in [data_offset, page_size) with no two
  * overlapping, space_used == live cell bytes + fence bytes, the cached
  * slot heads, prefix_len == the fences' common prefix, keys strictly
- * ascending, leaf keys inside (lo_fence, hi_fence], the internal-node
- * shape (prefix 0, slot 0 the empty -infinity key, 8-byte unflagged
- * child values, separators <= hi_fence), and that a flagged leaf value
+ * ascending, leaf keys and internal separators inside (lo_fence,
+ * hi_fence], the internal-node shape (slot 0 the -infinity child with an
+ * empty stored suffix, 4-byte unflagged nonzero child values), and that
+ * a flagged leaf value
  * is a well-formed out-of-line ref (btovf.h).  Returns 0 if the node is
  * well formed, else -1 with a reason in `why` (may be NULL).  Reads the
  * page only; the caller must hold it stable (latched or private).

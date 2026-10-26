@@ -26,6 +26,7 @@ test_btree_stale_descent
 test_btree_cursor_hop
 test_btree_smo_stress
 test_btree_bounded_descent
+test_btree_inner
 test_flush_pin
 test_trickler_select
 test_pp_slice

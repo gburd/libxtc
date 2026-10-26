@@ -158,7 +158,7 @@ test_shrink_and_reclaim(void)
 {
 	char path[64];
 	const uint32_t PAGE_SZ = 512;       /* tiny pages: deep tree fast */
-	const int N = 4000;
+	const int N = 12000;                /* height 4 at 2.0's fanout */
 	bm_t *bm = make_bm(path, PAGE_SZ, 64);
 	bt_t *bt = NULL;
 	bt_stats_t s_built, s_after;

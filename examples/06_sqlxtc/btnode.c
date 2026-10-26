@@ -108,21 +108,17 @@ free_compact(const struct btnode_hdr *h)
 }
 
 /*
- * Write the suffix of `key` plus `val` into slot `idx`'s cell and fill
- * in the slot fields.  Does NOT touch count or shift slots -- the
- * caller positions the slot first.  `key` is the full key; prefix_len
- * leading bytes are dropped.
+ * Write the key SUFFIX `skey` (the full key minus the node prefix) plus
+ * `val` into slot `idx`'s cell and fill in the slot fields.  Does NOT
+ * touch count or shift slots -- the caller positions the slot first.
  */
 static void
-node_store_f(void *page, uint16_t idx, const uint8_t *key, uint16_t key_len,
+node_store_f(void *page, uint16_t idx, const uint8_t *skey, uint16_t sklen,
     const uint8_t *val, uint16_t val_len, uint16_t vflag)
 {
 	struct btnode_hdr *h = HDR(page);
 	struct btnode_slot *s = slots_of(page);
 	uint8_t *p = page;
-	uint16_t pl = h->prefix_len;
-	const uint8_t *skey = key + pl;
-	uint16_t sklen = (uint16_t)(key_len - pl);
 	uint16_t space = (uint16_t)(sklen + val_len);
 
 	h->data_offset = (uint16_t)(h->data_offset - space);
@@ -360,23 +356,31 @@ btnode_insert_f(void *page, const void *key, uint16_t key_len, const void *val,
 	struct btnode_hdr *h = HDR(page);
 	struct btnode_slot *s;
 	uint16_t pl = h->prefix_len;
-	uint16_t sklen = (uint16_t)(key_len - pl);
-	uint16_t need =
-	    (uint16_t)(sizeof(struct btnode_slot) + sklen + val_len);
+	uint16_t sklen;
+	uint16_t need;
 	int idx;
 
+	/* The empty key (an inner node's -infinity slot 0) is stored with
+	 * an empty suffix whatever the prefix; any other key must carry the
+	 * node prefix (the caller routes only in-range keys here). */
+	if (key_len != 0 && (key_len < pl ||
+	    (pl > 0 && memcmp(key, (const uint8_t *)page + h->lo_fence_off,
+	    pl) != 0)))
+		return -2;
+	sklen = key_len == 0 ? 0 : (uint16_t)(key_len - pl);
+	need = (uint16_t)(sizeof(struct btnode_slot) + sklen + val_len);
 	if (need > free_contig(h)) {
 		if (need > free_compact(h))
 			return -1; /* caller must split */
 		node_compact(page);
 	}
 
-	idx = node_lower_bound(page, key, key_len, NULL);
+	idx = key_len == 0 ? 0 : node_lower_bound(page, key, key_len, NULL);
 	s = slots_of(page);
 	memmove(&s[idx + 1], &s[idx],
 	    sizeof(struct btnode_slot) * (size_t)(h->count - idx));
-	node_store_f(page, (uint16_t)idx, key, key_len, val, val_len,
-	    VFLAG(vflag));
+	node_store_f(page, (uint16_t)idx, (const uint8_t *)key + (key_len ?
+	    pl : 0), sklen, val, val_len, VFLAG(vflag));
 	h->count++;
 	/* insert history: did this one land just after the previous one? */
 	if (h->last_ins1 != 0 && idx == (int)h->last_ins1) {
@@ -496,15 +500,18 @@ copy_slot(const void *page, uint16_t i, void *dst, uint16_t dst_slot,
 	const uint8_t *v = p + s[i].offset + s[i].key_len;
 	uint16_t vlen = VLEN(s[i].val_len);
 	uint16_t vfl = VFLAG(s[i].val_len);
-	uint16_t dsk = (uint16_t)(full - dh->prefix_len);
+	/* An inner node's slot 0 (the -infinity child) keeps its empty
+	 * suffix under any prefix. */
+	int minf = !h->is_leaf && i == 0 && s[i].key_len == 0;
+	uint16_t dsk = minf ? 0 : (uint16_t)(full - dh->prefix_len);
 	uint16_t need = (uint16_t)(sizeof(struct btnode_slot) + dsk + vlen);
 
-	if (need > free_contig(dh))
+	if (need > free_contig(dh) || (!minf && full < dh->prefix_len))
 		return -1;
 	if (pl > 0)
 		memcpy(keybuf, p + h->lo_fence_off, pl);
 	memcpy(keybuf + pl, p + s[i].offset, s[i].key_len);
-	node_store_f(dst, dst_slot, keybuf, full, v, vlen, vfl);
+	node_store_f(dst, dst_slot, keybuf + (full - dsk), dsk, v, vlen, vfl);
 	return 0;
 }
 
@@ -638,6 +645,61 @@ seq_split(const void *page, int ip, const uint8_t *pend_key, uint16_t pend_klen,
 	return ip - 1;
 }
 
+/*
+ * The separator of a cut between two adjacent keys of a node (Bayer and
+ * Unterauer's simple prefix B-tree: suffix truncation).  `a` and `b` are
+ * the stored suffixes of the last key kept left and the first key moved
+ * right; `lo`/`lol` the node's lower fence past the node prefix (lol 0
+ * with lo NULL: -infinity).  Writes the separator's suffix into `out`
+ * (cap bytes) and returns its length, or -1 if it does not fit.
+ *
+ * Keys <= the separator route left, so it must lie in [a, b).  The
+ * shortest such string is the shorter of `a` itself and b's first
+ * lcp(a, b) + 1 bytes (a proper prefix of b, above a at the byte where
+ * they differ); nothing shorter exists (a shorter string either is a
+ * prefix of a, so below it, or differs from a and b where they agree).
+ * The separator becomes the left half's upper fence, and the left
+ * half's prefix is lcp(lower fence, separator): when the left keys share
+ * more with the lower fence (q bytes) than a and b share, b's prefix
+ * would cut the left prefix down to lcp(a, b) and cost every left key
+ * those bytes.  Then take a's first q bytes and a's next byte plus one
+ * (above a, still below b, and q bytes in common with the fence), or
+ * `a` when that byte is 0xFF.  Either way neither half's prefix is
+ * shorter than with `a` as the separator (for x < y < z, lcp(x, z) =
+ * min(lcp(x, y), lcp(y, z))), so a half never costs more than it did
+ * under the full-key separator, which the entry bound (btree.c
+ * bt_entry_max) relies on.
+ */
+static int
+cut_separator(const uint8_t *lo, uint16_t lol, const uint8_t *a, uint16_t al,
+    const uint8_t *b, uint16_t bl, uint8_t *out, uint16_t cap)
+{
+	uint16_t cp = lcp_bytes(a, al, b, bl);
+	uint16_t q = lo != NULL ? lcp_bytes(lo, lol, a, al) : 0;
+	uint16_t n;
+
+	if (q > cp) {
+		if (q + 1 < al && a[q] != 0xFF) {
+			if (q + 1 > cap)
+				return -1;
+			memcpy(out, a, q);
+			out[q] = (uint8_t)(a[q] + 1);
+			return q + 1;
+		}
+		n = al;
+	} else if (cp < al && cp + 1 < bl) {
+		if (cp + 1 > cap)
+			return -1;
+		memcpy(out, b, (size_t)cp + 1);
+		return cp + 1;
+	} else
+		n = al;
+	if (n > cap)
+		return -1;
+	memcpy(out, a, n);
+	return n;
+}
+
 static int
 split_point(const void *page, const uint8_t *pend_key, uint16_t pend_klen,
     uint32_t pend, uint8_t *csep, uint16_t csep_cap, uint16_t *csep_len)
@@ -691,39 +753,38 @@ split_point(const void *page, const uint8_t *pend_key, uint16_t pend_klen,
 				return c;
 		}
 	}
+	if (csep_cap < pl)
+		return -1;
+	if (pl > 0)
+		memcpy(csep, p + h->lo_fence_off, pl);
 	for (i = 0; i < n - 1; i++) {
 		uint32_t sep_len, lneed, rneed, lsz, rsz, m;
 		uint16_t lpl, rpl;
-		int to_left = 1;
+		int to_left = 1, tl;
 
 		left += slot_cost(&s[i], pl, pl);
-		/* The separator (slot i's full key) becomes the left's hi
-		 * fence AND the right's lo fence; each half's keys are stored
-		 * as suffixes of that half's prefix (>= pl). */
-		sep_len = (uint32_t)pl + s[i].key_len;
+		/* The separator (the shortest key between slot i and slot
+		 * i + 1, cut_separator) becomes the left's hi fence AND the
+		 * right's lo fence; each half's keys are stored as suffixes of
+		 * that half's prefix (>= pl). */
+		tl = cut_separator(h->lo_fence_len ? p + h->lo_fence_off + pl :
+		    NULL, (uint16_t)(h->lo_fence_len - (h->lo_fence_len ? pl : 0)),
+		    p + s[i].offset, s[i].key_len, p + s[i + 1].offset,
+		    s[i + 1].key_len, csep + pl, (uint16_t)(csep_cap - pl));
+		if (tl < 0)
+			continue;
+		sep_len = (uint32_t)pl + (uint32_t)tl;
 		lpl = half_prefix(p + h->lo_fence_off, h->lo_fence_len, pl,
-		    p + s[i].offset, s[i].key_len);
+		    csep + pl, (uint16_t)tl);
 		rpl = half_prefix(p + h->hi_fence_off, h->hi_fence_len, pl,
-		    p + s[i].offset, s[i].key_len);
+		    csep + pl, (uint16_t)tl);
 		lsz = left - (uint32_t)(i + 1) * (uint32_t)(lpl - pl) +
 		    (uint32_t)h->lo_fence_len + sep_len;
 		rsz = (total - left) - (uint32_t)(n - 1 - i) * (uint32_t)(rpl - pl) +
 		    sep_len + (uint32_t)h->hi_fence_len;
-		if (pend > 0 && pend_key != NULL) {
-			/* Compare pending key with slot i's full key. */
-			uint16_t cl = pend_klen < pl ? pend_klen : pl;
-			int c = cl ? memcmp(pend_key, p + h->lo_fence_off, cl) : 0;
-
-			if (c == 0) {
-				if (pend_klen < pl)
-					c = -1;
-				else
-					c = cmp_bytes(pend_key + pl,
-					    (uint16_t)(pend_klen - pl),
-					    p + s[i].offset, s[i].key_len);
-			}
-			to_left = c <= 0;
-		}
+		if (pend > 0 && pend_key != NULL)
+			to_left = cmp_bytes(pend_key, pend_klen, csep,
+			    (uint16_t)sep_len) <= 0;
 		lneed = lsz + (pend > 0 && to_left ? pend : 0);
 		rneed = rsz + (pend > 0 && !to_left ? pend : 0);
 		if (lneed > cap || rneed > cap)
@@ -738,6 +799,14 @@ split_point(const void *page, const uint8_t *pend_key, uint16_t pend_klen,
 			best = i;
 		}
 	}
+	if (best < 0)
+		return -1;
+	/* Rebuild the chosen cut's separator (csep held the last one tried). */
+	*csep_len = (uint16_t)(pl + cut_separator(h->lo_fence_len ?
+	    p + h->lo_fence_off + pl : NULL,
+	    (uint16_t)(h->lo_fence_len - (h->lo_fence_len ? pl : 0)),
+	    p + s[best].offset, s[best].key_len, p + s[best + 1].offset,
+	    s[best + 1].key_len, csep + pl, (uint16_t)(csep_cap - pl)));
 	return best;
 }
 
@@ -747,10 +816,8 @@ btnode_split_ex(void *page, void *right_page, void *sep_key_out,
     uint16_t pend_klen, uint16_t pend_vlen)
 {
 	struct btnode_hdr *h = HDR(page);
-	struct btnode_slot *s = slots_of(page);
 	uint8_t *p = page;
 	uint8_t *sep = sep_key_out;
-	uint16_t pl = h->prefix_len;
 	uint32_t ps = h->page_size;
 	uint16_t sep_slot, sep_len;
 	const uint8_t *lo, *hi;
@@ -768,16 +835,9 @@ btnode_split_ex(void *page, void *right_page, void *sep_key_out,
 		return -1;
 	sep_slot = (uint16_t)sp;
 
-	/* Separator = full key of the last slot kept in the left node,
-	 * unless split_point chose a truncated one (seq_split). */
-	if (sep_len == 0) {
-		sep_len = (uint16_t)(pl + s[sep_slot].key_len);
-		if (sep_len > sep_cap)
-			return -1;          /* caller's buffer cannot hold it */
-		if (pl > 0)
-			memcpy(sep, p + h->lo_fence_off, pl);
-		memcpy(sep + pl, p + s[sep_slot].offset, s[sep_slot].key_len);
-	}
+	/* split_point wrote the separator: the shortest key between the
+	 * last slot kept left and the first moved right (cut_separator), or
+	 * seq_split's.  Both lie in [left's last key, right's first key). */
 	if (sep_len_out != NULL)
 		*sep_len_out = sep_len;
 
@@ -1157,9 +1217,6 @@ btnode_check(const void *page, char *why, size_t whylen)
 	if (pl != cp)
 		return check_fail(why, whylen, "prefix_len %u != fence common "
 		    "prefix %u", pl, cp);
-	if (!h->is_leaf && pl != 0)
-		return check_fail(why, whylen, "internal node prefix_len %u != 0",
-		    pl);
 	if (!h->is_leaf && h->count == 0)
 		return check_fail(why, whylen, "internal node with no children");
 
@@ -1186,48 +1243,40 @@ btnode_check(const void *page, char *why, size_t whylen)
 		    k, (uint16_t)klen) >= 0)
 			return check_fail(why, whylen, "slot %u key not > slot "
 			    "%u key", i, i - 1);
+		/* Keys (leaf) and separators (internal, past slot 0) lie in
+		 * (lo, hi].  The full key shares the first pl bytes with both
+		 * fences, so compare suffix against the fence remainder. */
+		if ((h->is_leaf || i > 0) && lo != NULL && cmp_bytes(k,
+		    (uint16_t)klen, lo + pl, (uint16_t)(h->lo_fence_len - pl)) <= 0)
+			return check_fail(why, whylen, "%s slot %u key <= lo fence",
+			    h->is_leaf ? "leaf" : "internal", i);
+		if ((h->is_leaf || i > 0) && hi != NULL && cmp_bytes(k,
+		    (uint16_t)klen, hi + pl, (uint16_t)(h->hi_fence_len - pl)) > 0)
+			return check_fail(why, whylen, "%s slot %u key > hi fence",
+			    h->is_leaf ? "leaf" : "internal", i);
 		if (h->is_leaf) {
-			/* Leaf keys lie in (lo, hi].  The full key shares the
-			 * first pl bytes with both fences, so compare suffix
-			 * against the fence remainder. */
-			if (lo != NULL && cmp_bytes(k, (uint16_t)klen, lo + pl,
-			    (uint16_t)(h->lo_fence_len - pl)) <= 0)
-				return check_fail(why, whylen, "leaf slot %u key "
-				    "<= lo fence", i);
-			if (hi != NULL && cmp_bytes(k, (uint16_t)klen, hi + pl,
-			    (uint16_t)(h->hi_fence_len - pl)) > 0)
-				return check_fail(why, whylen, "leaf slot %u key "
-				    "> hi fence", i);
 			if (VFLAG(s[i].val_len) &&
 			    !ovf_ref_ok(k + klen, vlen, ps))
 				return check_fail(why, whylen, "leaf slot %u: "
 				    "flagged value (%u B) is not a well-formed "
 				    "out-of-line ref", i, vlen);
 		} else {
-			uint64_t pid;
+			uint32_t pid;
 
-			/* Internal: slot 0 is the empty -infinity key; every
-			 * value is an unflagged nonzero 8-byte child pid; a
-			 * separator lies in (lo, hi]. */
+			/* Internal: slot 0 is the -infinity child, stored with
+			 * an empty suffix; every value is an unflagged nonzero
+			 * 4-byte child pid (BTNODE_CHILD_LEN). */
 			if (i == 0 && klen != 0)
 				return check_fail(why, whylen, "internal slot 0 "
 				    "key is %u B, not the empty key", klen);
-			if (VFLAG(s[i].val_len) || vlen != 8)
+			if (VFLAG(s[i].val_len) || vlen != BTNODE_CHILD_LEN)
 				return check_fail(why, whylen, "internal slot %u "
-				    "value %u B flag %x (want 8 B child pid)", i,
-				    vlen, VFLAG(s[i].val_len));
+				    "value %u B flag %x (want %u B child pid)", i,
+				    vlen, VFLAG(s[i].val_len), BTNODE_CHILD_LEN);
 			memcpy(&pid, k + klen, sizeof pid);
 			if (pid == 0)
 				return check_fail(why, whylen, "internal slot %u "
 				    "child pid 0", i);
-			if (i > 0 && lo != NULL && cmp_bytes(k, (uint16_t)klen,
-			    lo, h->lo_fence_len) <= 0)
-				return check_fail(why, whylen, "internal slot %u "
-				    "separator <= lo fence", i);
-			if (i > 0 && hi != NULL && cmp_bytes(k, (uint16_t)klen,
-			    hi, h->hi_fence_len) > 0)
-				return check_fail(why, whylen, "internal slot %u "
-				    "separator > hi fence", i);
 		}
 	}
 	sum += (uint32_t)h->lo_fence_len + h->hi_fence_len;

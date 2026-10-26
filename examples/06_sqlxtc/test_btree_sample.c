@@ -255,9 +255,13 @@ t_skewed(void)
 	CHECK(n > root_children && n < MAXS, "depth 1 keys %u > root's %u", n,
 	    root_children);
 	CHECK(ascending(keys, lens, n), "depth 1 strictly ascending");
-	for (i = 0; i < n; i++)
-		CHECK(lens[i] == 8, "separator %u is a whole key (%u B)", i,
-		    lens[i]);
+	/* Separators are truncated (2.0): 1..8 bytes, read zero-padded
+	 * (a padded separator still lies between the keys it separates). */
+	for (i = 0; i < n; i++) {
+		CHECK(lens[i] >= 1 && lens[i] <= 8, "separator %u is 1..8 B "
+		    "(%u B)", i, lens[i]);
+		memset(keys + i * KCAP + lens[i], 0, KCAP - lens[i]);
+	}
 	printf("  ok   200k skewed keys, height %llu: depth 0 = 1 page (%u "
 	    "children), depth 1 = %llu pages -> %u split points\n",
 	    (unsigned long long)st.height, root_children,
@@ -292,8 +296,9 @@ t_skewed(void)
 	for (i = 0; i < n; i++)
 		if (kcmp(keys + i * KCAP, 8, lo, 8) >= 0 &&
 		    kcmp(keys + i * KCAP, 8, hi, 8) < 0) {
-			CHECK(j < rn && memcmp(rkeys + j * KCAP, keys + i * KCAP,
-			    8) == 0, "range sample key %u matches", j);
+			CHECK(j < rn && rlens[j] == lens[i] && memcmp(rkeys +
+			    j * KCAP, keys + i * KCAP, lens[i]) == 0,
+			    "range sample key %u matches", j);
 			j++;
 		}
 	CHECK(j == rn, "range sample has %u keys, full sample in range %u",

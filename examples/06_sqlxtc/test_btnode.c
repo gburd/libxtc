@@ -475,7 +475,6 @@ test_check(void)
 	struct btnode_hdr hh;
 	struct btnode_slot s1, s2;
 	int i;
-	uint64_t pid;
 	uint8_t ref[12 + 8];
 	uint8_t empty = 0;
 
@@ -553,30 +552,38 @@ test_check(void)
 	corrupt_expect(L, ps, X, (size_t)s1.offset + 3 + 12, "\0", 1,
 	    "ovf ref with page id 0");
 
-	/* Internal node in the btree's shape. */
+	/* Internal node in the btree's shape (XBT3): real fences and their
+	 * prefix, slot 0 the -infinity child with an empty stored suffix,
+	 * 4-byte child ids. */
 	btnode_init(L, ps, 0);
-	btnode_set_fences(L, NULL, 0, NULL, 0);
-	pid = 11;
-	memcpy(b8, &pid, 8);
-	CHECK(btnode_insert(L, &empty, 0, b8, 8) == 0, "slot 0");
-	pid = 12;
-	memcpy(b8, &pid, 8);
-	CHECK(btnode_insert(L, "m", 1, b8, 8) == 0, "sep");
+	btnode_set_fences(L, "ka", 2, "kz", 2);
+	CHECK(btnode_prefix_len(L) == 1, "internal prefix %u",
+	    btnode_prefix_len(L));
+	u32 = 11;
+	memcpy(b8, &u32, 4);
+	CHECK(btnode_insert(L, &empty, 0, b8, 4) == 0, "slot 0");
+	u32 = 12;
+	memcpy(b8, &u32, 4);
+	CHECK(btnode_insert(L, "km", 2, b8, 4) == 0, "sep");
+	CHECK(btnode_insert(L, "m", 1, b8, 4) == -2, "a key outside the "
+	    "prefix is refused");
 	CHECK(btnode_check(L, why, sizeof why) == 0, "internal: %s", why);
 	memcpy(&s1, L + s0, sl);
 	memcpy(&s2, L + s0 + sl, sl);
-	u16 = 4;
+	u16 = 8;
 	corrupt_expect(L, ps, X, s0 + sl + offsetof(struct btnode_slot,
-	    val_len), &u16, 2, "internal value not 8 bytes");
-	pid = 0;
-	corrupt_expect(L, ps, X, (size_t)s2.offset + 1, &pid, 8,
+	    val_len), &u16, 2, "internal value not 4 bytes");
+	u32 = 0;
+	corrupt_expect(L, ps, X, (size_t)s2.offset + s2.key_len, &u32, 4,
 	    "internal child pid 0");
+	corrupt_expect(L, ps, X, (size_t)s2.offset, "a", 1,
+	    "internal separator <= lo fence");
 	/* An internal node whose slot 0 is a real key. */
 	btnode_init(X, ps, 0);
 	btnode_set_fences(X, NULL, 0, NULL, 0);
-	pid = 11;
-	memcpy(b8, &pid, 8);
-	CHECK(btnode_insert(X, "a", 1, b8, 8) == 0, "slot 0 keyed");
+	u32 = 11;
+	memcpy(b8, &u32, 4);
+	CHECK(btnode_insert(X, "a", 1, b8, 4) == 0, "slot 0 keyed");
 	CHECK(btnode_check(X, why, sizeof why) != 0, "missed: slot 0 key");
 	printf("    caught %-34s -> %s\n", "internal slot 0 not empty", why);
 

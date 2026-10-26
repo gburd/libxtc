@@ -40,31 +40,40 @@
  *	    empty-key probe.  test_btree.c exercises this rule directly,
  *	    including keys that sit exactly on a separator boundary.
  *
- *	    Internal nodes are kept with wide-open (-inf/+inf) fences,
- *	    hence prefix_len 0: separators are stored verbatim and are
- *	    never constrained by a fence.  That is essential -- a node's
- *	    fence (which bounds its stored separators) is generally
- *	    tighter than its subtree, so a key routed *through* the node
- *	    can exceed the fence; with prefix_len 0 that is harmless,
- *	    and storing a later separator that exceeds the old fence is
- *	    likewise safe.  The slot-0 empty key (zero length) is also
- *	    only well-defined with prefix_len 0.
+ *	    Internal nodes carry real fences (2.0, format XBT3): a node
+ *	    owns (lo, hi], the range its parent routes to it -- lo is the
+ *	    parent's separator to its left (-inf for a leftmost node), hi
+ *	    the one to its right (+inf for a rightmost) -- and, like a
+ *	    leaf, stores its separators as suffixes of lcp(lo, hi).  That
+ *	    is safe because every key that reaches a node is inside its
+ *	    fences once the descent has passed the fence checks it already
+ *	    makes (move_right while beyond hi; restart when at or below
+ *	    lo), and every separator posted into a node lies inside the
+ *	    range of one of its children.  (Up to 1.60 internal nodes kept
+ *	    -inf lower fences and so prefix 0: every separator of a table's
+ *	    region began with the same table id, every slot head was equal
+ *	    and every binary-search step fell through to a 20-byte memcmp.)
+ *	    Slot 0, the -infinity child, is stored with an EMPTY suffix
+ *	    under any prefix (btnode_insert with key_len 0); its full key
+ *	    reads back as the prefix, which sorts before every in-range
+ *	    key, so the child rule below is unchanged.  A child id is a
+ *	    4-byte value (BTNODE_CHILD_LEN).
  *
  *	SPLIT / SEPARATOR
  *	-----------------
  *	LEAF split uses btnode_split(): it keeps the lower half of the
  *	slots in the original page, moves the upper half into a freshly
  *	allocated right page, narrows both fences (left's hi fence ==
- *	right's lo fence == the left's largest key, "esep"), and
- *	maintains the sibling chain (right inherits the old
- *	right_sibling; the caller rewires left -> right pid).  We push
- *	esep UP as the separator and route the triggering key by esep:
- *	keys <= esep stay left, keys > esep go right.  Because esep is
- *	exactly the left's hi fence, the parent's routing boundary
- *	coincides with the child fences -- no key can land in an unowned
- *	gap, and the buggy alternative of pushing the right page's first
- *	key (its lo fence is esep, but its first key is larger) is
- *	avoided.
+ *	right's lo fence == the separator, "esep"), and maintains the
+ *	sibling chain (right inherits the old right_sibling; the caller
+ *	rewires left -> right pid).  esep is the SHORTEST key in [left's
+ *	largest key, right's smallest key) (suffix truncation, Bayer and
+ *	Unterauer; btnode.c cut_separator), usually a few bytes of the
+ *	right's first key.  We push esep UP as the separator and route
+ *	the triggering key by esep: keys <= esep stay left, keys > esep
+ *	go right.  Because esep is exactly the left's hi fence and the
+ *	right's lo fence, the parent's routing boundary coincides with
+ *	the child fences -- no key can land in an unowned gap.
  *
  *	INTERNAL split is done manually (split_internal): the middle
  *	separator is pushed up and removed from the node, the left node
@@ -548,10 +557,13 @@ static int merge_level(bt_t *bt, bm_pid_t *path, int level,
 /* On-disk superblock (buffer-manager page 0), recording where the tree
  * lives so a restart can find the root instead of building a fresh
  * one.  Rewritten on create and whenever the root pid changes. */
-/* "XBT2" since 1.60 (page checksums, a 48-byte node header); "XBT1"
- * stores (1.59 and before) are not reopened in place: the engine rebuilds
- * them from the log, and a 1.59 build does the same with an XBT2 store. */
-#define BT_SUPER_MAGIC 0x58425432u   /* "XBT2" */
+/* The page format.  "XBT3" since 2.0: truncated separators, internal
+ * nodes with real fences and prefix compression, 4-byte child ids.
+ * "XBT2" (1.60: page checksums, a 48-byte node header) and "XBT1" (1.59
+ * and before) are not reopened in place: the engine rebuilds them from
+ * the log, and an older build does the same with a newer store.  Any
+ * change to the node layout (btnode.h) or its rules bumps it. */
+#define BT_SUPER_MAGIC 0x58425433u   /* "XBT3" */
 struct bt_super {
 	uint32_t magic;
 	uint32_t page_size;
@@ -641,19 +653,21 @@ key_cmp(const void *a, uint16_t alen, const void *b, uint16_t blen)
 	return 0;
 }
 
-/* Read the 8-byte child page id stored as the value of `slot`. */
+/* Read the child page id stored as the value of `slot` (a 4-byte
+ * uint32_t, BTNODE_CHILD_LEN). */
 static bm_pid_t
 child_pid_at(const void *page, int slot)
 {
 	const void *vp = NULL;
 	uint16_t vl = 0;
-	bm_pid_t pid = BM_PID_NONE;
+	uint32_t pid;
 
-	if (btnode_get(page, slot, NULL, NULL, &vp, &vl) != 0 || vp == NULL)
+	if (btnode_get(page, slot, NULL, NULL, &vp, &vl) != 0 || vp == NULL ||
+	    vl != BTNODE_CHILD_LEN)
 		return BM_PID_NONE;
-	/* Value bytes are unaligned; copy out a whole uint64_t. */
-	memcpy(&pid, vp, sizeof pid < (size_t)vl ? sizeof pid : (size_t)vl);
-	return pid;
+	/* Value bytes are unaligned: copy them out. */
+	memcpy(&pid, vp, sizeof pid);
+	return (bm_pid_t)pid;
 }
 
 /* Child to descend into from an internal node for search key K.
@@ -677,13 +691,33 @@ child_for_key(const void *page, const void *key, uint16_t klen)
 	return child_pid_at(page, idx);
 }
 
-/* Store an 8-byte child pid value into an internal slot via insert. */
+/* Store a child pid into an internal slot via insert (seplen 0: the
+ * -infinity slot 0).  Node pids fit 32 bits (bt_alloc_node). */
 static int
 internal_insert(void *page, const void *sep, uint16_t seplen, bm_pid_t child)
 {
-	uint64_t v = (uint64_t)child;
+	uint32_t v = (uint32_t)child;
 
+	if ((bm_pid_t)v != child)
+		return -2;
 	return btnode_insert(page, sep, seplen, &v, (uint16_t)sizeof v);
+}
+
+/* Allocate a page for a B-tree node.  A node's id is stored in 32 bits
+ * (right_sibling, an internal child), so a store holds at most 2^32 - 1
+ * pages (16 TiB of 4 KiB pages); past that the allocation is refused
+ * rather than wrapped onto a live page. */
+static int
+bt_alloc_node(bm_t *bm, bm_frame_t **f, bm_pid_t *pid)
+{
+	int rc = bm_alloc_pid(bm, f, pid);
+
+	if (rc == XTC_OK && *pid > (bm_pid_t)UINT32_MAX) {
+		bm_unfix(bm, *f, 0);
+		(void)bm_free_pid(bm, *pid);
+		return XTC_E_RESOURCE;
+	}
+	return rc;
 }
 
 /*
@@ -834,7 +868,7 @@ bt_open(bm_t *bm, bt_t **out)
 	 * page.  The scratch page is left as a never-referenced orphan
 	 * (cheap, and freed with the pool at bm_destroy).
 	 */
-	rc = bm_alloc_pid(bm, &rf, &rpid);
+	rc = bt_alloc_node(bm, &rf, &rpid);
 	if (rc != XTC_OK)
 		goto fail;
 	rc = bm_alloc_pid(bm, &sf, &spid);
@@ -1099,7 +1133,10 @@ bt_split_internal(bt_t *bt, void *pp, void *rp, uint32_t rpid,
 		if (btnode_hi_fence(pp, ohi, sizeof ohi, &ohilen) == 0 &&
 		    ohilen > 0)
 			ohip = ohi;
-		btnode_set_fences(rp, NULL, 0, ohip, ohilen);
+		/* The lower fence is the pushed-up separator: the right half
+		 * owns (pushup, old hi], exactly what the parent will route to
+		 * it, so its prefix is the bytes every such key shares. */
+		btnode_set_fences(rp, pushup, *pushuplen, ohip, ohilen);
 	}
 	if (internal_insert(rp, &empty, 0, child_pid_at(pp, mid)) != 0)
 		return XTC_E_INTERNAL;
@@ -1127,7 +1164,9 @@ bt_split_internal(bt_t *bt, void *pp, void *rp, uint32_t rpid,
 			lo = lof;
 		btnode_init(lp, bt->page_size, 0);
 		btnode_set_fences(lp, lo, loflen, pushup, *pushuplen);
-		for (i = 0; i < mid; i++) {
+		if (internal_insert(lp, &empty, 0, child_pid_at(pp, 0)) != 0)
+			return XTC_E_INTERNAL;
+		for (i = 1; i < mid; i++) {
 			uint8_t kb[BT_MAX_KEY];
 			uint16_t kl = 0;
 
@@ -1297,7 +1336,12 @@ post_separator(bt_t *bt, bm_pid_t *path, int level,
 		}
 		pp = bm_page(pf);
 
-		if (internal_insert(pp, cur_sep, cur_seplen, cur_right) == 0) {
+		r = internal_insert(pp, cur_sep, cur_seplen, cur_right);
+		if (r == -2) {               /* outside the parent's fences */
+			bm_unlatch(pf); bm_unfix(bm, pf, 0);
+			return XTC_E_INTERNAL;
+		}
+		if (r == 0) {
 			BT_CHECK_NODE(pp);
 			bm_predirty(bm, pf); smo_log_page(bt, path[level], bm_page(pf));
 			bm_unlatch(pf); bm_unfix(bm, pf, 1);   /* absorbed */
@@ -1305,7 +1349,7 @@ post_separator(bt_t *bt, bm_pid_t *path, int level,
 		}
 		/* Parent full: split it, link the new right internal, carry
 		 * the push-up further up. */
-		rc = bm_alloc_pid(bm, &rf, &rpid);
+		rc = bt_alloc_node(bm, &rf, &rpid);
 		if (rc != XTC_OK) { bm_unlatch(pf); bm_unfix(bm, pf, 0); return rc; }
 		bm_latch_exclusive(rf);
 		btnode_init(bm_page(rf), bt->page_size, 0);
@@ -1352,7 +1396,7 @@ post_separator(bt_t *bt, bm_pid_t *path, int level,
 		uint8_t empty = 0;
 		bm_pid_t oldroot = atomic_load(&bt->root_pid);
 
-		rc = bm_alloc_pid(bm, &nf, &npid);
+		rc = bt_alloc_node(bm, &nf, &npid);
 		if (rc != XTC_OK)
 			return rc;
 		bm_latch_exclusive(nf);
@@ -1537,7 +1581,7 @@ bt_insert_leaf(bt_t *bt, const void *key, uint16_t klen, const void *val,
 	 * reader/writer move-right before the separator reaches the
 	 * parent.
 	 */
-	rc = bm_alloc_pid(bm, &rf, &rpid);
+	rc = bt_alloc_node(bm, &rf, &rpid);
 	if (rc != XTC_OK) { bm_unlatch(f); bm_unfix(bm, f, 0); goto unlock; }
 	bm_latch_exclusive(rf);
 	btnode_init(bm_page(rf), bt->page_size, 1);
@@ -2583,15 +2627,22 @@ merge_level(bt_t *bt, bm_pid_t *path, int level, const void *key,
 		if (btnode_full_key(pp, rslot, sepk, sizeof sepk, &seplen) != 0)
 			goto done;
 		{
-			uint8_t rhi[BT_MAX_KEY];
-			uint16_t rhilen = 0;
-			const uint8_t *hip = NULL;
+			uint8_t rhi[BT_MAX_KEY], llo[BT_MAX_KEY];
+			uint16_t rhilen = 0, llolen = 0;
+			const uint8_t *hip = NULL, *lop = NULL;
 
 			if (btnode_hi_fence(rp, rhi, sizeof rhi, &rhilen) == 0 &&
 			    rhilen > 0)
 				hip = rhi;
+			if (btnode_lo_fence(lp, llo, sizeof llo, &llolen) == 0 &&
+			    llolen > 0)
+				lop = llo;
+			/* The merged node's fences, so R's separators are stored
+			 * under the merged prefix (as they will be in L) and the
+			 * re-keyed slot 0 (sepk > L's lo fence) keeps a non-empty
+			 * suffix: it is a separator, not a -infinity slot. */
 			btnode_init(tmp, cap, 0);
-			btnode_set_fences(tmp, NULL, 0, hip, rhilen);
+			btnode_set_fences(tmp, lop, llolen, hip, rhilen);
 		}
 		if (internal_insert(tmp, sepk, seplen, child_pid_at(rp, 0)) != 0)
 			goto done;

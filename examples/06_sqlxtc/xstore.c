@@ -3745,10 +3745,17 @@ xstore_rowid_split_points(bt_t *bt, uint32_t tableid, int64_t lo, int64_t hi,
 		    XS_VKLEN, lens, CAP, &got) != XTC_OK)
 			break;
 		for (i = 0; i < got; i++) {
-			const uint8_t *kp = keys + (size_t)i * XS_VKLEN;
+			uint8_t *kp = keys + (size_t)i * XS_VKLEN;
 			int64_t r;
-			/* Only whole version keys of this table carry a rowid. */
-			if (lens[i] != XS_VKLEN || dec_tableid(kp) != tableid)
+			/* Separators are truncated (the shortest key between two
+			 * leaves, 2.0), so most are shorter than a version key.
+			 * Zero-padded, a separator still lies between the keys it
+			 * separates, so its rowid is a cut point; one too short to
+			 * name the table carries none. */
+			if (lens[i] < 4 || lens[i] > XS_VKLEN)
+				continue;
+			memset(kp + lens[i], 0, XS_VKLEN - lens[i]);
+			if (dec_tableid(kp) != tableid)
 				continue;
 			r = dec_rowid(kp);
 			if (r <= lo || r >= hi || (m > 0 && r <= tmp[m - 1]))
