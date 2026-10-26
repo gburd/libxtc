@@ -2797,6 +2797,16 @@ pp_tick(bm_t *bm, uint32_t *cursor)
 	uint32_t i, k, slice, cool_clean = 0, need, visited = 0;
 	pf_drain(bm, 32);     /* warm queued read-ahead pages first */
 	slice = bm->n_frames < PP_SLICE ? bm->n_frames : PP_SLICE;
+	/* A miss takes the free list first, so while it holds the target no
+	 * cool or clean frame can be needed: cool nothing, write nothing.
+	 * Passes 1-2 used to run regardless, and with a pool larger than the
+	 * store (no eviction at all) they cycled every page through cool ->
+	 * buffered write -> re-dirty, 7k-42k writes a second that the
+	 * kernel's 30 s dirty expiry flushed in one ~550 MB burst the log's
+	 * O_DSYNC commits queued behind (test_pp_idle_writes). */
+	if (atomic_load_explicit(&bm->free_n, memory_order_relaxed) >=
+	    bm->cool_target)
+		goto classify;
 	/* Pass 1: flush dirty COOL frames (so reclaiming them later is a
 	 * cheap state flip) and count the clean cool supply. */
 	for (k = 0; k < slice; k++) {
@@ -2852,6 +2862,7 @@ pp_tick(bm_t *bm, uint32_t *cursor)
 		if (!evict_one(bm)) break;
 #endif
 	}
+classify:
 #ifdef BM_CLASSIFY
 	/* Stage 5: aggregate the per-carrier sketches and re-tag every
 	 * resident frame's class on the provider cadence. */

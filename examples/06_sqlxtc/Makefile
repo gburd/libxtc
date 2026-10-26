@@ -170,7 +170,7 @@ clean:
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o test_bufmgr_dio test_bufmgr_dio.o
 	rm -f test_bufmgr_mt
 	rm -f test_drop_reserved test_evict_revalidate_sampled
-	rm -f test_bg_idle test_bg_kill test_ckpt_offloop test_scan_resist test_sweep_bound test_evict_revalidate test_btree_late_load test_flush_pin test_trickler_select test_pp_slice test_tr_slice test_publication_pin test_private_frame test_pid_writeback bm_sweep_bench
+	rm -f test_bg_idle test_bg_kill test_ckpt_offloop test_scan_resist test_sweep_bound test_evict_revalidate test_btree_late_load test_flush_pin test_trickler_select test_pp_slice test_pp_idle_writes test_tr_slice test_publication_pin test_private_frame test_pid_writeback bm_sweep_bench
 	rm -f test_persist
 	rm -f test_scan_resist test_sweep_bound test_evict_revalidate test_btree_late_load test_flush_pin test_trickler_select test_pp_slice test_tr_slice test_publication_pin test_private_frame test_pid_writeback bm_sweep_bench
 	rm -f test_persist test_btree_prefix_split sx_size test_rec_codec test_idx_elem test_freelist_persist
@@ -184,8 +184,8 @@ clean:
 	rm -f test_xs_ctr test_bm_reuse_version test_kill_stmt test_cat_lock_shared test_conn_sup test_storage_sup
 	rm -f test_sql_results test_txn_fastpath test_wal_crc_once
 	rm -f test_btree_cursor_hop test_btree_smo_stress test_btree_bounded_descent
-	rm -f test_tpcc_seek test_dup_composite test_bulk_insert test_plan_cache
-	rm -f test_btree_delete_merge test_savepoint test_isolation test_ww_conflict test_row_intents test_commit_visibility test_ssi_skew test_ckpt_bound test_dup_insert test_recover_fast
+	rm -f test_tpcc_seek test_dup_composite test_bulk_insert test_plan_cache test_prepare_concurrent test_prune_horizon
+	rm -f test_wal_zero_step test_btree_delete_merge test_savepoint test_isolation test_ww_conflict test_row_intents test_commit_visibility test_ssi_skew test_ckpt_bound test_dup_insert test_recover_fast
 	rm -f test_vfs_loop test_vfs_loop.o
 	rm -rf $(AMALG_DIR)
 	rm -f sql_parse_gen.o sql_parse_drv.o
@@ -389,6 +389,24 @@ test_plan_cache: test_plan_cache.c $(ENGINE_NATIVE)
 
 test-plan-cache: test_plan_cache
 	./test_plan_cache
+
+# ---- SELECT prepares of different connections run concurrently ----
+# (vexec.c is #included for the test-only prepare hook)
+test: test-prepare-concurrent
+test_prepare_concurrent: test_prepare_concurrent.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_prepare_concurrent.c $(filter-out vexec.c,$(ENGINE_NATIVE)) $(LDFLAGS)
+
+test-prepare-concurrent: test_prepare_concurrent
+	TMPDIR=$${TMPDIR:-/tmp} ./test_prepare_concurrent
+
+# ---- a write computes the GC horizon only when it prunes ----
+# (xstore.c is #included for the horizon counter)
+test: test-prune-horizon
+test_prune_horizon: test_prune_horizon.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_prune_horizon.c $(filter-out xstore.c,$(ENGINE_NATIVE)) $(LDFLAGS)
+
+test-prune-horizon: test_prune_horizon
+	TMPDIR=$${TMPDIR:-/tmp} ./test_prune_horizon
 
 # ---- Lime SQL parser: differential AST oracle vs the reference engine ----
 
@@ -599,6 +617,14 @@ test: test-wal-kill test-wal-tail test-wal-kill-engine
 test_wal_kill: test_wal_kill.c wal.c wal.h
 	$(CC) $(CFLAGS) -o $@ test_wal_kill.c $(LDFLAGS)
 
+# The log zero-fills ahead 1 MiB at a time (wal.c is #included).
+test: test-wal-zero-step
+test_wal_zero_step: test_wal_zero_step.c wal.c wal.h
+	$(CC) $(CFLAGS) -o $@ test_wal_zero_step.c $(LDFLAGS)
+
+test-wal-zero-step: test_wal_zero_step
+	TMPDIR=$${TMPDIR:-/tmp} ./test_wal_zero_step
+
 test-wal-kill: test_wal_kill
 	TMPDIR=$${TMPDIR:-/tmp} ./test_wal_kill
 
@@ -760,6 +786,14 @@ test-tr-slice: test_tr_slice
 
 test-pp-slice: test_pp_slice
 	./test_pp_slice
+
+# The page provider writes nothing while the free list holds its target.
+test: test-pp-idle-writes
+test_pp_idle_writes: test_pp_idle_writes.c bufmgr.c bufmgr.h
+	$(CC) $(CFLAGS) -o $@ test_pp_idle_writes.c $(LDFLAGS)
+
+test-pp-idle-writes: test_pp_idle_writes
+	TMPDIR=$${TMPDIR:-/tmp} ./test_pp_idle_writes
 
 test_btree_late_load: test_btree_late_load.c bufmgr.c bufmgr.h btree.c btnode.c
 	$(CC) $(CFLAGS) -o $@ test_btree_late_load.c btree.c btnode.c $(LDFLAGS)

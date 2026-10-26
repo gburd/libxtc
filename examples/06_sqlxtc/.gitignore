@@ -29,7 +29,9 @@ test_btree_bounded_descent
 test_flush_pin
 test_trickler_select
 test_pp_slice
+test_pp_idle_writes
 test_wal_prealloc
+test_wal_zero_step
 test_wal_kill
 test_wal_tail
 test_wal_get_tail
@@ -125,6 +127,8 @@ test_index
 test_tpcc_seek
 test_bulk_insert
 test_plan_cache
+test_prepare_concurrent
+test_prune_horizon
 test_dup_composite
 test_quack_range
 bench_btree_mixed
