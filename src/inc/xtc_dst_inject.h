@@ -80,6 +80,11 @@
  *	                   4th dirty victim without writing it back; the
  *	                   page reloads stale (test_sim_sqlxtc_evict: a lost
  *	                   or wrong row).
+ *	 20  OCKDROP   -- examples/06_sqlxtc/wal.c's online checkpoint drops
+ *	                   the last frame of each catch-up / finish copy, so
+ *	                   a commit acked during the checkpoint is missing
+ *	                   from the new log (test_sim_sqlxtc_ckpt: a lost
+ *	                   or wrong row after crash recovery).
  *
  *	NOT plantable under DST (an honest gap, recorded so it is not
  *	mistaken for missing coverage): the xtc_amutex mutual-exclusion and
@@ -133,5 +138,6 @@
 #define XTC_DST_BUG_WALKILL    17  /* wal.c: commit not masked against kills */
 #define XTC_DST_BUG_IDXSKIP    18  /* xstore.c: an index rebuild skips one index */
 #define XTC_DST_BUG_EVICTNOWB  19  /* bufmgr.c: evict a dirty page unwritten */
+#define XTC_DST_BUG_OCKDROP    20  /* wal.c: an online-checkpoint copy round drops its last frame */
 
 #endif /* XTC_DST_INJECT_H */

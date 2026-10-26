@@ -82,6 +82,7 @@ write_cases() {
 		"17;test_sim_wal_kill;0;1;FAIL LIVENESS" \
 		"18;test_sim_sqlxtc_reopen;1;1;after crash recovery: INDEX: " \
 		"19;test_sim_sqlxtc_evict;1;1;(DURABILITY: row [0-9]+ lost|row [0-9]+ is \\(g|INDEX: )" \
+		"20;test_sim_sqlxtc_ckpt;1;1;after crash recovery: (DURABILITY: row [0-9]+ lost|row [0-9]+ is \\(g|row [0-9]+ present, oracle|ATOMICITY)" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -103,6 +104,7 @@ write_cases() {
 # 17 WALKILL    wal.c commit not kill-masked    -> liveness (no wedged log after kills)
 # 18 IDXSKIP    xstore.c rebuild skips an index -> index complete after an open
 # 19 EVICTNOWB  bufmgr.c evicts dirty unwritten -> acked rows exact across eviction
+# 20 OCKDROP    wal.c ckpt copy drops last frame -> acked commit survives an online checkpoint
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

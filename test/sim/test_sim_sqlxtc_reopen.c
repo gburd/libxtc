@@ -96,6 +96,9 @@
 #ifndef SIM_NAME
 #define SIM_NAME   "open/close"
 #endif
+/* SIM_CKPT (test_sim_sqlxtc_ckpt.c): a checkpointer fiber runs online log
+ * checkpoints back to back while the lanes commit. */
+#define N_SITES   32
 #define N_IDX     2               /* u UNIQUE + t_g */
 #define MAX_STEPS 20000000L
 
@@ -116,10 +119,18 @@ struct shared {
 	uint64_t    acked, crashes, cleans, trusted_opens, recover_opens;
 	uint64_t    idx_trusted;      /* trusted opens that kept the indexes */
 	uint64_t    evicted, loads;   /* buffer pool, summed over segments */
+	uint64_t    ckpts, ckpt_again, ckpt_frames, crash_after_ckpt;
 	int         failed;
 };
 
+/* Buggify sites reached over the whole sweep (yardstick 3). */
+struct cover {
+	struct { char name[48]; uint64_t reached, active; } site[N_SITES];
+	int         nsite;
+};
+
 static struct shared *g_sh;
+static struct cover *g_cov;
 static char       g_path[512];
 static xtc_exec_t *g_exec;
 static uint64_t   g_seed;
@@ -273,6 +284,56 @@ lane_proc(void *arg)
 out:
 	if (atomic_fetch_sub(&g_left, 1) == 1 && !atomic_load(&g_crashed))
 		sx_storage_quiesce();
+}
+
+#ifdef SIM_CKPT
+static uint64_t g_seg_ckpts;      /* online checkpoints done this segment */
+
+/* Online checkpoints back to back until the lanes are done (the last
+ * lane's sx_storage_quiesce cancels one in progress). */
+static void
+ckpt_proc(void *arg)
+{
+	(void)arg;
+	while (atomic_load(&g_left) > 0) {
+		uint64_t tail = 0;
+		int rc = xstore_checkpoint_wal_online(sx_storage_bt(),
+		    sx_storage_wal(), sx_storage_wal_path(), &tail);
+		if (rc == XTC_OK) {
+			g_sh->ckpts++;
+			g_sh->ckpt_frames += tail;
+			g_seg_ckpts++;
+		} else
+			g_sh->ckpt_again++;
+		(void)xtc_proc_sleep((int64_t)(100 +
+		    __xtc_sim_rng_range(XTC_SIM_RNG_APP, 2000)) * 1000);
+	}
+}
+#endif
+
+/* Fold this run's buggify sites into the sweep's coverage table. */
+static void
+sites_note(void)
+{
+	char nm[48];
+	int i, j, act, n = xtc_sim_buggify_reached_count();
+	for (i = 0; i < n; i++) {
+		act = 0;
+		if (xtc_sim_buggify_site(i, nm, sizeof nm, &act) != XTC_OK)
+			continue;
+		for (j = 0; j < g_cov->nsite; j++)
+			if (strcmp(g_cov->site[j].name, nm) == 0)
+				break;
+		if (j == g_cov->nsite) {
+			if (j == N_SITES)
+				continue;
+			snprintf(g_cov->site[j].name, sizeof g_cov->site[j].name,
+			    "%s", nm);
+			g_cov->nsite++;
+		}
+		g_cov->site[j].reached++;
+		g_cov->site[j].active += act ? 1 : 0;
+	}
 }
 
 /* Observed table state (child-local). */
@@ -481,8 +542,19 @@ segment(uint64_t rs, int crash)
 			FAILF("spawn lane %d failed", l);
 			return -1;
 		}
+#ifdef SIM_CKPT
+	g_seg_ckpts = 0;
+	if (xtc_proc_spawn(xtc_exec_loop(g_exec, 0), ckpt_proc, NULL, &po,
+	    &pid) != XTC_OK) {
+		FAILF("spawn checkpointer failed");
+		return -1;
+	}
+#endif
 	xtc_sim_io_faults_enable(20 * 1000LL, 300 * 1000LL, 0);
+	xtc_sim_buggify_enable(500);
 	rc = xtc_sim_exec_run(g_exec, rs, MAX_STEPS);
+	sites_note();
+	xtc_sim_buggify_disable();
 	xtc_sim_io_faults_disable();
 	if (rc != XTC_OK) {
 		FAILF("LIVENESS: sim run returned %d (%s)", rc,
@@ -499,6 +571,10 @@ segment(uint64_t rs, int crash)
 			return -1;
 		}
 		g_sh->crashes++;
+#ifdef SIM_CKPT
+		if (g_seg_ckpts > 0)
+			g_sh->crash_after_ckpt++;
+#endif
 		g_sh->last_clean = 0;
 		return 1;                  /* the process dies here: no close */
 	}
@@ -592,7 +668,7 @@ round_child(int last)
 
 	if (xtc_set_stack_size(512u * 1024u) != XTC_OK || sx_init() != SX_OK)
 		return 3;
-	sx_storage_set_checkpoint(1ull << 40);   /* no online checkpoint here */
+	sx_storage_set_checkpoint(1ull << 40);   /* no periodic checkpoint proc */
 	for (g_seg = 0; g_seg < nseg; g_seg++) {
 		if (open_store(&kind) != 0 || verify(kind) != 0)
 			return 3;
@@ -661,6 +737,8 @@ run_seed(uint64_t seed, uint64_t *fp)
 	}
 	h = (h ^ g_sh->acked) * 0x100000001B3ull;
 	h = (h ^ g_sh->crashes) * 0x100000001B3ull;
+	h = (h ^ g_sh->ckpts) * 0x100000001B3ull;
+	h = (h ^ g_sh->ckpt_frames) * 0x100000001B3ull;
 	*fp = h;
 	return ok ? 0 : 1;
 }
@@ -671,12 +749,14 @@ main(int argc, char **argv)
 	uint64_t base = argc > 1 ? strtoull(argv[1], NULL, 0) : 1;
 	int count = argc > 2 ? atoi(argv[2]) : 6, k;
 	uint64_t acked = 0, crashes = 0, cleans = 0, tr = 0, rec = 0, it = 0;
-	uint64_t ev = 0, ld = 0;
+	uint64_t ev = 0, ld = 0, ck = 0, cka = 0, ckf = 0, cac = 0;
 
 	memset(g_pad, 'x', SIM_PAD);
 	g_sh = mmap(NULL, sizeof *g_sh, PROT_READ | PROT_WRITE,
 	    MAP_SHARED | MAP_ANON, -1, 0);
-	if (g_sh == MAP_FAILED)
+	g_cov = mmap(NULL, sizeof *g_cov, PROT_READ | PROT_WRITE,
+	    MAP_SHARED | MAP_ANON, -1, 0);
+	if (g_sh == MAP_FAILED || g_cov == MAP_FAILED)
 		return 1;
 	for (k = 0; k < count; k++) {
 		uint64_t seed = base + (uint64_t)k, f1 = 0, f2 = 0;
@@ -690,6 +770,10 @@ main(int argc, char **argv)
 		it += g_sh->idx_trusted;
 		ev += g_sh->evicted;
 		ld += g_sh->loads;
+		ck += g_sh->ckpts;
+		cka += g_sh->ckpt_again;
+		ckf += g_sh->ckpt_frames;
+		cac += g_sh->crash_after_ckpt;
 		if (run_seed(seed, &f2) != 0)
 			return 1;
 		if (f1 != f2) {
@@ -706,6 +790,22 @@ main(int argc, char **argv)
 	    (unsigned long long)cleans, (unsigned long long)tr,
 	    (unsigned long long)it, (unsigned long long)rec, SIM_FRAMES,
 	    (unsigned long long)ev, (unsigned long long)ld);
+	for (k = 0; k < g_cov->nsite; k++)
+		printf("buggify site %-28s reached in %llu runs, active in %llu"
+		    "\n", g_cov->site[k].name,
+		    (unsigned long long)g_cov->site[k].reached,
+		    (unsigned long long)g_cov->site[k].active);
+#ifdef SIM_CKPT
+	printf("online checkpoints: %llu done (%llu live frames copied), %llu "
+	    "gave up; %llu crashes after a checkpoint in the same segment\n",
+	    (unsigned long long)ck, (unsigned long long)ckf,
+	    (unsigned long long)cka, (unsigned long long)cac);
+	if (count >= 4 && (ck == 0 || ckf == 0 || cac == 0)) {
+		printf("FAIL: the sweep did not checkpoint under commits and "
+		    "crash after it\n");
+		return 1;
+	}
+#endif
 	/* Non-vacuity: the sweep must have exercised every open kind. */
 	if (count >= 4 && (crashes == 0 || it == 0 || rec == 0 ||
 	    (SIM_FRAMES < 128 && (ev == 0 || ld == 0)))) {

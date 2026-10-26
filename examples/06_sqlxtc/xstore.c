@@ -68,6 +68,7 @@
 #include "xtc_proc.h"
 #include "xtc_sync.h"
 #include "xtc_dst_inject.h" /* DST planted bugs (no-op in prod) */
+#include "xtc_sim.h"      /* XTC_SIM_BUGGIFY: DST pessimal points (no-op in prod) */
 
 /*
  * Process-global engine locks.  These were pthread mutexes; they are
@@ -9335,6 +9336,19 @@ xstore_checkpoint_wal(bt_t *bt, struct wal *w, const char *wal_path)
  * the live log unchanged; *tail (optional) = live frames copied.
  */
 static int    g_ock_slot = -1;           /* GC pin for the online dump */
+
+/* DST pessimal point between the online checkpoint's phases: under the
+ * simulator with buggify on, stall the checkpoint 1 ms (virtual) on a
+ * seeded coin -- a slow dump or a slow disk -- so commits, and a
+ * simulated crash, land between the dump, the catch-up rounds and the
+ * quiesced finish.  A single relaxed load in production. */
+static void
+xs_ock_yield(const char *site)
+{
+	if (XTC_SIM_BUGGIFY(site) && xtc_sim_buggify_fault(500) &&
+	    !xtc_pid_is_none(xtc_self()))
+		(void)xtc_proc_sleep(1000LL * 1000);
+}
 struct xs_ock_job {
 	struct xs_dump_ctx dc;
 	wal_ock_t *k;
@@ -9356,6 +9370,7 @@ xs_ock_body(void *arg)
 		return 0;
 	}
 	for (round = 0; round < 64; round++) {
+		xs_ock_yield("xstore.ockpt.catchup");
 		if (atomic_load_explicit(&g_ock_cancel, memory_order_acquire)) {
 			j->rc = XTC_E_AGAIN;
 			return 0;
@@ -9399,6 +9414,7 @@ xstore_checkpoint_wal_online(bt_t *bt, struct wal *w, const char *wal_path,
 		snap_set(&g_ock_slot, 0);
 		return rc;
 	}
+	xs_ock_yield("xstore.ockpt.dump");
 	if (xtc_pid_is_none(xtc_self()) ||
 	    xtc_blocking_run(xs_ock_body, &j, &res) != XTC_OK)
 		(void)xs_ock_body(&j);
@@ -9407,6 +9423,7 @@ xstore_checkpoint_wal_online(bt_t *bt, struct wal *w, const char *wal_path,
 		wal_ockpt_abort(j.k);
 		return j.rc;
 	}
+	xs_ock_yield("xstore.ockpt.finish");
 	if (!xs_quiesce_begin(1)) {
 		wal_ockpt_abort(j.k);
 		return XTC_E_AGAIN;
