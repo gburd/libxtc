@@ -723,6 +723,74 @@ With a 30 s ramp the pool is still filling from the cold page file, and
 sqlxtc reads 54,000 at one connection.  Count the warm-up when comparing
 with the metal table above, which used a 60 s ramp.
 
+### In-process at 1.60, on a 64-vCPU host
+
+The ledger and TPROC-C numbers above were taken on a 32-vCPU host.  For
+1.60 the whole matrix ran again on a 64-vCPU x86-64 host (one socket),
+local NVMe (two devices in RAID 0), XFS, Debian 13, deep CPU idle states
+off: SQLite 3.53.4 against sqlxtc, both in-process through the same
+driver binaries, both `fdatasync` before every commit returns.  The
+driver is pinned to 56 of the 64 vCPUs, the page cache is dropped
+before every run, and each engine runs on a fresh copy of its own
+store.  Ledger cells run 10 s after a 5 s warm-up (every audit passed);
+TPROC-C cells run 60 s after a 120 s ramp.  Each cell ran twice with
+the engines interleaved; the tables show the median, transactions per
+second for the ledger and New-Order transactions per minute for
+TPROC-C.
+
+| Shape | What a transaction does | 1 conn SQLite / sqlxtc | 8 conns | 32 conns | 64 conns |
+| --- | --- | ---: | ---: | ---: | ---: |
+| transfer | debit + credit 2 accounts, insert a transfer | 5,721 / **15,521** | 8,530 / **70,512** | 9,056 / **107,728** | 9,045 / **95,109** |
+| lifecycle | a pending transfer, then post (80%) or void | 3,758 / **11,309** | 6,156 / **52,224** | 6,808 / **60,972** | 6,709 / **54,356** |
+| batch | 10 transfers in one transaction | 984 / **2,912** | 1,498 / **16,355** | 1,595 / **13,928** | 1,574 / **12,777** |
+| insert | append one event row, autocommit | 19,786 / **28,508** | 19,687 / **114,246** | 19,290 / **161,253** | 19,292 / **166,597** |
+| mixed | 60% transfer, 20% lifecycle, 20% reads | 5,320 / **16,764** | 9,891 / **86,558** | 10,190 / **114,233** | 10,167 / **101,149** |
+| blend | 40% transfer, 25% balance, the rest spread over five shapes | 5,927 / **11,682** | 11,092 / **77,880** | 12,132 / **197,283** | 11,754 / **136,844** |
+| balance | read one account | 377,094 / **726,336** | 391,841 / **4,449,227** | 326,407 / **7,815,686** | 283,022 / **6,092,968** |
+| history | an account's last 20 transfers (two index ranges) | **29,038** / 23,958 | 167,917 / **180,759** | 143,244 / **616,784** | 40,540 / **692,210** |
+| statement | count and sum an account's debits | **53,951** / 48,076 | 302,135 / **360,833** | 230,465 / **1,218,139** | 73,926 / **1,401,540** |
+| analytic | group the last 5,000 transfers | 1,134 / **1,242** | 9,280 / **9,738** | 31,964 / **33,140** | 31,078 / **33,471** |
+
+| Warehouses | Engine | 1 conn | 8 conns | 32 conns | 64 conns |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1 | SQLite 3.53.4 | 75,485 | 100,581 | 105,531 | 105,867 |
+| 1 | sqlxtc 1.60 | **95,723** | **147,854** | **146,809** | **139,844** |
+| 10 | SQLite 3.53.4 | **100,689** | 92,804 | 98,406 | 98,576 |
+| 10 | sqlxtc 1.60 | 87,858 | **329,254** | **387,536** | **383,718** |
+| 50 | SQLite 3.53.4 | 93,907 | 91,228 | 93,708 | 93,989 |
+| 50 | sqlxtc 1.60 | **94,076** | **439,746** | **739,450** | **667,183** |
+
+What the 64-vCPU matrix shows:
+
+* **Writes scale with connections; SQLite's do not.**  SQLite's write
+  shapes stay on about two-thirds of a core at every connection count
+  (one writer).  sqlxtc's transfer uses 7 cores at 8 connections and 29
+  at 64, for 8-12x SQLite's rate; TPROC-C at 50 warehouses reaches 7.9x
+  at 32 connections.
+* **`blend` at 32 and 64 connections was a lock.**  Until 1.60 every
+  SELECT prepare in the process ran under one lock, because a prepare
+  kept its correlated-subquery state in four file-scope variables.
+  `analytic`'s query keeps a scalar subquery's value in its plan, so its
+  plan is rebuilt at every execution, and the subquery ran inside the
+  prepare, under the lock.  The statement's snapshot is taken before it
+  waits for the lock, and every row inserted while it waits is one more
+  row the subquery has to skip, so the longer the queue, the longer each
+  holder held it.  At 64 connections 299 of 320 sampled client stacks
+  were waiting for that lock and the mix ran at 34k transactions a
+  second on four cores; at 32 connections it settled at either 70k or
+  197k from one run to the next.  The state is now per prepare and the
+  lock is gone: 137k at 64 connections, 197k at 32 in every run.
+* **One connection still loses on range reads and on TPROC-C at 10
+  warehouses** (history 0.83x, statement 0.89x, TPROC-C 0.87x; even at
+  50 warehouses).  Both engines' connection threads are on CPU 90-95%
+  of the time there, so the difference is path length.  sqlxtc keeps
+  every table and index in one B-tree, four levels for this store
+  against SQLite's three, and an index walk spends a quarter of its time
+  comparing keys (node searches and fence checks).  Closing it needs a change to the
+  tree's layout, which 1.60 does not make.  A write no longer computes
+  the version-GC horizon when it is not going to prune, which was 4.5%
+  of a TPROC-C connection's CPU.
+
 ### Latency at a fixed offered load
 
 The ledger numbers above are closed loop: each connection starts its
@@ -736,7 +804,8 @@ was actually sent.  If the engine falls behind, the queue it builds
 shows up in the latency.
 
 **Method.**  A 64-vCPU x86-64 host (one socket), local NVMe (two
-devices in RAID 0), XFS, Debian 13, deep CPU idle states off.  The
+devices in RAID 0), XFS, Debian 13, deep CPU idle states off; the 1.60
+tree, measured after the write-tail fixes described below.  The
 ledger store of 100k accounts and 2M seeded transfers is copied fresh
 for every run; an audit after every run passed.  SQLite 3.53.4 runs
 with WAL, `synchronous=FULL`, a 4 GB page cache per connection and
@@ -766,68 +835,82 @@ the same stalls, which showed only in its maximum.
 
 | Engine | Conns | Load | Offered/s | p50 | p99 | p99.9 | max, ms: median (range) |
 | --- | ---: | --- | ---: | ---: | ---: | ---: | --- |
-| SQLite | 8 | closed loop | 8,760 | 81 | 3,231 | 129 ms | 3,831 (2,730-5,732) |
-| SQLite | 8 | 25% | 2,190 | 143 | 1,631 | 2,271 | 2.4 (2.4-3.3) |
-| SQLite | 8 | 50% | 4,380 | 227 | 52 ms | 99 ms | 129 (129-229) |
-| SQLite | 8 | 75% | 6,570 | 18 ms | 496 ms | 885 ms | 1,029 (929-1,129) |
-| SQLite | 8 | 90% | 7,884 | 87 ms | 1,229 ms | 1,655 ms | 1,855 (1,595-1,972) |
-| SQLite, serialized writers | 8 | closed loop | 6,884 | 81 | 671 | 3,615 | 13,941 (7,216-15,995) |
-| SQLite, serialized writers | 8 | 25% | 1,721 | 143 | 3,007 | 3,487 | 3.6 (3.6-3.7) |
-| SQLite, serialized writers | 8 | 50% | 3,442 | 143 | 3,743 | 4,223 | 4.7 (4.3-36) |
-| SQLite, serialized writers | 8 | 75% | 5,163 | 145 | 4,287 | 5,375 | 6.2 (6.1-7.5) |
-| SQLite, serialized writers | 8 | 90% | 6,195 | 161 | 5,055 | 6,271 | 6.9 (6.8-6.9) |
-| sqlxtc | 8 | closed loop | 70,797 | 116 | 159 | 451 | 4.6 (4.5-5.2) |
-| sqlxtc | 8 | 25% | 17,699 | 126 | 169 | 2,399 | 5.8 (4.0-5.8) |
-| sqlxtc | 8 | 50% | 35,398 | 143 | 363 | 13 ms | 22 (21-24) |
-| sqlxtc | 8 | 75% | 53,097 | 139 | 3,615 | 39 ms | 50 (47-61) |
-| sqlxtc | 8 | 90% | 63,717 | 135 | 52 ms | 79 ms | 84 (75-91) |
-| SQLite | 32 | closed loop | 9,393 | 77 | 3,455 | 1,032 ms | 5,732 (4,732-6,933) |
-| SQLite | 32 | 25% | 2,348 | 147 | 1,663 | 2,303 | 8.3 (3.6-8.4) |
-| SQLite | 32 | 50% | 4,696 | 165 | 18 ms | 49 ms | 104 (80-179) |
-| SQLite | 32 | 75% | 7,044 | 35 ms | 909 ms | 1,425 ms | 2,230 (1,650-2,330) |
-| SQLite | 32 | 90% | 8,453 | 197 ms | 2,015 ms | 3,408 ms | 3,783 (3,427-3,925) |
-| SQLite, serialized writers | 32 | closed loop | 6,900 | 83 | 703 | 3,519 | 26,764 (26,033-30,104) |
-| SQLite, serialized writers | 32 | 25% | 1,724 | 151 | 3,071 | 3,519 | 3.7 (3.7-9.6) |
-| SQLite, serialized writers | 32 | 50% | 3,449 | 149 | 3,359 | 3,583 | 4.8 (4.7-4.8) |
-| SQLite, serialized writers | 32 | 75% | 5,174 | 149 | 3,487 | 4,607 | 25 (5.7-33) |
-| SQLite, serialized writers | 32 | 90% | 6,209 | 171 | 3,583 | 5,247 | 7.2 (6.8-75) |
-| sqlxtc | 32 | closed loop | 108,521 | 307 | 519 | 2,879 | 5.1 (5.0-5.3) |
-| sqlxtc | 32 | 25% | 27,130 | 157 | 207 | 2,143 | 3.5 (3.5-3.6) |
-| sqlxtc | 32 | 50% | 54,260 | 149 | 919 | 14 ms | 21 (17-23) |
-| sqlxtc | 32 | 75% | 81,390 | 159 | 2,879 | 41 ms | 49 (47-57) |
-| sqlxtc | 32 | 90% | 97,668 | 165 | 58 ms | 88 ms | 97 (76-109) |
+| SQLite | 8 | closed loop | 8,790 | 80 | 3,263 | 129 ms | 3,231 (2,030-3,731) |
+| SQLite | 8 | 25% | 2,197 | 143 | 1,647 | 2,303 | 3.3 (2.5-31) |
+| SQLite | 8 | 50% | 4,394 | 283 | 40 ms | 93 ms | 129 (104-329) |
+| SQLite | 8 | 75% | 6,592 | 20 ms | 451 ms | 705 ms | 829 (729-835) |
+| SQLite | 8 | 90% | 7,910 | 85 ms | 1,130 ms | 1,475 ms | 1,530 (1,530-1,772) |
+| SQLite, serialized writers | 8 | closed loop | 7,066 | 82 | 607 | 3,615 | 11,796 (11,504-12,224) |
+| SQLite, serialized writers | 8 | 25% | 1,766 | 143 | 3,039 | 3,487 | 25 (3.7-27) |
+| SQLite, serialized writers | 8 | 50% | 3,532 | 143 | 3,775 | 4,095 | 4.6 (4.5-4.7) |
+| SQLite, serialized writers | 8 | 75% | 5,299 | 149 | 4,479 | 5,695 | 6.1 (6.1-27) |
+| SQLite, serialized writers | 8 | 90% | 6,359 | 161 | 5,311 | 6,271 | 7.4 (7.1-30) |
+| sqlxtc | 8 | closed loop | 70,166 | 118 | 163 | 507 | 2.8 (2.7-28) |
+| sqlxtc | 8 | 25% | 17,541 | 123 | 153 | 535 | 34 (1.8-59) |
+| sqlxtc | 8 | 50% | 35,083 | 145 | 279 | 631 | 4.7 (4.7-4.9) |
+| sqlxtc | 8 | 75% | 52,624 | 141 | 439 | 3,967 | 8.8 (7.8-9.1) |
+| sqlxtc | 8 | 90% | 63,149 | 135 | 15 ms | 31 ms | 39 (35-70) |
+| SQLite | 32 | closed loop | 9,380 | 77 | 3,551 | 1,130 ms | 4,334 (4,332-4,632) |
+| SQLite | 32 | 25% | 2,345 | 149 | 1,695 | 2,335 | 8.4 (8.3-8.4) |
+| SQLite | 32 | 50% | 4,690 | 193 | 27 ms | 79 ms | 206 (182-229) |
+| SQLite | 32 | 75% | 7,035 | 41 ms | 950 ms | 1,409 ms | 1,929 (1,630-2,336) |
+| SQLite | 32 | 90% | 8,442 | 203 ms | 2,097 ms | 2,851 ms | 3,344 (2,786-4,632) |
+| SQLite, serialized writers | 32 | closed loop | 6,819 | 83 | 695 | 3,551 | 29,443 (27,613-30,010) |
+| SQLite, serialized writers | 32 | 25% | 1,704 | 151 | 3,071 | 3,551 | 3.8 (3.7-24) |
+| SQLite, serialized writers | 32 | 50% | 3,409 | 151 | 3,391 | 3,615 | 4.9 (4.9-30) |
+| SQLite, serialized writers | 32 | 75% | 5,114 | 149 | 3,487 | 4,543 | 6.2 (5.9-24) |
+| SQLite, serialized writers | 32 | 90% | 6,136 | 165 | 3,583 | 5,247 | 7.3 (7.2-18) |
+| sqlxtc | 32 | closed loop | 107,045 | 311 | 583 | 839 | 4.4 (3.5-28) |
+| sqlxtc | 32 | 25% | 26,761 | 149 | 199 | 567 | 2.0 (2.0-31) |
+| sqlxtc | 32 | 50% | 53,522 | 151 | 403 | 831 | 4.6 (3.5-33) |
+| sqlxtc | 32 | 75% | 80,283 | 161 | 655 | 3,711 | 9.5 (7.2-35) |
+| sqlxtc | 32 | 90% | 96,340 | 167 | 3,327 | 22 ms | 37 (34-39) |
 
 How to read it:
 
-* **sqlxtc's write tail is worse than SQLite's when SQLite's writers
-  are serialized.**  Serialized SQLite holds p99.9 at 3.5-6.3 ms up to
-  90% of its own maximum.  sqlxtc's p99.9 is 13-14 ms at half load and
-  79-88 ms at 90%.  It comes from one dip per 30 s run, about 26 s into
-  the window on every run: for 30-120 ms commits complete at 13-44% of
-  the offered rate, then the queue drains.  No single commit waits long
-  (the service-time maximum stays near 5 ms in most runs, 11-27 ms in a
-  few); the queue is the tail.  What causes the dip is not found yet.
-  Controls on a 16-vCPU host rule out the log checkpoint (with
-  checkpoints disabled the tail is the same) and show that kernel
-  writeback makes it worse but is not the cause: the largest dip lines
-  up with the kernel writing back about 700 MB of dirty page cache in
-  one burst, and with writeback made continuous
-  (`vm.dirty_expire_centisecs` and `vm.dirty_writeback_centisecs` at
-  100) p99.9 fell from 150-369 ms to 94-118 ms, but the dip remained.
-* At 25% load sqlxtc's p99 (169-207 us) is 8-18x lower than either
-  SQLite's.  At the same percentage of its own maximum, sqlxtc is
-  carrying 8-12x the load of SQLite and 10-16x the load of serialized
-  SQLite.
+* **sqlxtc's write tail is now below serialized SQLite's up to half
+  load.**  sqlxtc's p99.9 is 535-631 us at 25-50% at 8 connections and
+  567-831 us at 32, where serialized SQLite holds 3.5-4.1 ms; at 75% it
+  is 3.7-4.0 ms against 4.5-5.7 ms, at 8-16x the load.  At 90% sqlxtc's
+  p99.9 rises to 22-31 ms; serialized SQLite stays at 5.2-6.3 ms, at a
+  tenth of the rate.  At 25% load sqlxtc's p99 (153-199 us) is 8-20x
+  lower than either SQLite's.
+* **How the 1.59 write tail was fixed.**  In 1.59 sqlxtc's p99.9 was
+  13-14 ms at half load and 79-88 ms at 90%.  It had three causes,
+  found by tracing the kernel's writeback, the engine's log writes and
+  the scheduler against each run's 10 ms series:
+  1. *A writeback burst every 30 s.*  The page provider cooled pages and
+     wrote them out whenever its clean cool supply was below target,
+     with the free list full.  With a pool larger than the store, where
+     nothing is ever evicted, it rewrote the whole store through the
+     page cache: 7k-42k page writes a second that nothing needed.  The
+     kernel's 30 s dirty expiry wrote about 550 MB of them back in one
+     160 ms burst, and the log's synchronous writes queued behind it.
+     Turning the provider off, or opening the page file with direct
+     I/O, removed the dip; now the provider does nothing while the free
+     list holds its target.
+  2. *A 3 ms pause every 0.6-0.9 s.*  The log leader kept the file
+     zero-filled ahead of its end 8 MiB at a time, inside its flush, so
+     every commit queued behind it waited for eight 1 MiB synchronous
+     writes.  It now writes 1 MiB at a time.
+  3. *Late timer wake-ups on the host*, still present.  A transaction
+     that waits 20-200 us for a row another transaction holds, or for
+     the checkpoint gate, sleeps.  A few times a minute this host woke
+     such a sleep about 27 ms late, and the commits queued behind it
+     waited too.  The same late wake-ups show in a plain
+     `clock_nanosleep` loop with no engine running, on two of the 64
+     vCPUs.  This is the 24-59 ms in some runs' maximum; serialized
+     SQLite shows single 24-30 ms maxima in the same runs.
 * **SQLite's busy handler makes its tail.**  With several writers and
   no application lock, waiting writers sleep 1, 2, 5, 10 ... 100 ms.  At
-  half its maximum that is a p99 of 18-52 ms, at 90% 1.2-2 s.
-  Serializing the writers removes it and costs 21-27% of closed-loop
-  throughput.  Its closed-loop maximum (7-30 s) is starvation: a plain
+  half its maximum that is a p99 of 27-40 ms, at 90% 1.1-2.1 s.
+  Serializing the writers removes it and costs 20-27% of closed-loop
+  throughput.  Its closed-loop maximum (12-29 s) is starvation: a plain
   mutex is not fair, so one connection can lose every handoff while the
   rest run.
 * **A closed-loop p99 hides all of this.**  sqlxtc's closed-loop p99
-  is 159 us at 8 connections; offered 90% of that rate, its p99 is
-  52 ms.
+  is 163 us at 8 connections; offered 90% of that rate, its p99 is
+  15 ms.
 
 **history** (an account's last 20 transfers: two index range scans,
 read only):
