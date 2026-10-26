@@ -185,7 +185,7 @@ clean:
 	rm -f test_sql_results test_txn_fastpath test_wal_crc_once
 	rm -f test_btree_cursor_hop test_btree_smo_stress test_btree_bounded_descent
 	rm -f test_tpcc_seek test_dup_composite test_bulk_insert test_plan_cache test_prepare_concurrent
-	rm -f test_btree_delete_merge test_savepoint test_isolation test_ww_conflict test_row_intents test_commit_visibility test_ssi_skew test_ckpt_bound test_dup_insert test_recover_fast
+	rm -f test_wal_zero_step test_btree_delete_merge test_savepoint test_isolation test_ww_conflict test_row_intents test_commit_visibility test_ssi_skew test_ckpt_bound test_dup_insert test_recover_fast
 	rm -f test_vfs_loop test_vfs_loop.o
 	rm -rf $(AMALG_DIR)
 	rm -f sql_parse_gen.o sql_parse_drv.o
@@ -607,6 +607,14 @@ test: test-wal-kill test-wal-tail test-wal-kill-engine
 
 test_wal_kill: test_wal_kill.c wal.c wal.h
 	$(CC) $(CFLAGS) -o $@ test_wal_kill.c $(LDFLAGS)
+
+# The log zero-fills ahead 1 MiB at a time (wal.c is #included).
+test: test-wal-zero-step
+test_wal_zero_step: test_wal_zero_step.c wal.c wal.h
+	$(CC) $(CFLAGS) -o $@ test_wal_zero_step.c $(LDFLAGS)
+
+test-wal-zero-step: test_wal_zero_step
+	TMPDIR=$${TMPDIR:-/tmp} ./test_wal_zero_step
 
 test-wal-kill: test_wal_kill
 	TMPDIR=$${TMPDIR:-/tmp} ./test_wal_kill

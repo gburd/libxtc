@@ -933,7 +933,12 @@ wal_wake_locked(wal_t *w, uint64_t durable, int give_baton)
  * into a pre-written file 34 us (an fallocate'd, unwritten range: 43 us,
  * 120 us at 4 KiB -- it still converts extents, so real zeros).
  * WiredTiger preallocates its log (__log_prealloc), InnoDB's redo files
- * are fixed size.  Zeros end the log for every scan: a zero frame has
+ * are fixed size.  The leader writes the zeros inside its flush, so
+ * every commit queued behind it waits for them: WAL_PRE_CHUNK is one
+ * 1 MiB write (~0.3-0.5 ms), once per MiB of log.  It was 8 MiB (8 such
+ * writes, ~3 ms): the top latency slots of an open-loop ledger run at
+ * 35k commits/s, p99.9 2.9 ms against 0.6 ms at 1 MiB (64-vCPU host;
+ * 512 KiB was no better, 256 KiB cost p99).  Zeros end the log for every scan: a zero frame has
  * length 0 and checksum 0, and a length-0 record's checksum is never 0
  * (FNV-1a of 12 bytes from an odd basis is odd).
  *
@@ -943,12 +948,16 @@ wal_wake_locked(wal_t *w, uint64_t durable, int give_baton)
  * fdatasync that follows also makes the zeros durable (once a chunk).
  * Best-effort: a failed extension leaves the log appending, as before.
  */
-#define WAL_PRE_CHUNK (8u << 20)
+#define WAL_PRE_CHUNK (1u << 20)
 #define WAL_PRE_AHEAD (4u << 20)
+/* test_wal_zero_step sees each call's zero bytes (it #includes wal.c). */
+#ifndef WAL_ZERO_TEST_HOOK
+#define WAL_ZERO_TEST_HOOK(n) ((void)0)
+#endif
 static void
 wal_prealloc(wal_t *w, uint64_t upto)
 {
-	static _Alignas(WAL_BLK) const uint8_t zeros[1u << 20];
+	static _Alignas(WAL_BLK) const uint8_t zeros[WAL_PRE_CHUNK];
 	uint64_t at, end;
 	if (upto + WAL_PRE_AHEAD <= w->pre_end)
 		return;
@@ -956,6 +965,7 @@ wal_prealloc(wal_t *w, uint64_t upto)
 	if (w->dio)                      /* blocks past upto's: no live byte */
 		at = (at + WAL_BLK - 1) & ~(uint64_t)(WAL_BLK - 1);
 	end = at + WAL_PRE_CHUNK;
+	WAL_ZERO_TEST_HOOK(end - at);
 	while (at < end) {
 		if (xtc_aio_pwrite(w->fd, zeros, (uint32_t)sizeof zeros,
 		    (int64_t)at) != (int)sizeof zeros)

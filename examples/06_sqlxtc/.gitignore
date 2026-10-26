@@ -31,6 +31,7 @@ test_trickler_select
 test_pp_slice
 test_pp_idle_writes
 test_wal_prealloc
+test_wal_zero_step
 test_wal_kill
 test_wal_tail
 test_wal_get_tail
