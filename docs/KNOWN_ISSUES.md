@@ -885,15 +885,26 @@ against a reproducer or validated without regressing the one backend it
 would touch.  Deliberately left un-patched rather than changing the
 EVFILT_USER wake path on a guess.
 
-## OPEN: xspawn_entry children may fail to start on small hosts under ring churn
+## RESOLVED (1.51, 1.55): xspawn_entry children failed to start on small hosts under ring churn
 
-**Status:** OPEN as of 1.50.0; behavior, not a correctness defect.  A
-re-exec'd `xtc_xspawn_entry` child that cannot create its own io_uring
-ring exits at once with 246 (240 minus `XTC_E_INTERNAL`, see
-`xtc_xproc_child_main`), so its monitor gets a prompt `XTC_DOWN_KIND_EXIT`
-rather than a hang.  On 4-vCPU CI runners with 8 threads continuously
-creating and destroying rings, up to 73 of 400 children did; 0 on a
-32-vCPU host.  Retry the spawn, or reserve ring capacity on small hosts.
+**What it was.**  A re-exec'd `xtc_xspawn_entry` child that could not
+create its own io_uring ring exited at once with 246 (240 minus
+`XTC_E_INTERNAL`, see `xtc_xproc_child_main`).  On 4-vCPU CI runners with
+8 threads continuously creating and destroying rings, up to 73 of 400
+children did.  The cause is the kernel tearing a ring down
+asynchronously: the next setup can fail until the earlier ring's memory
+is released.  It needs a kernel that charges ring memory to the locked-
+memory budget: on a 4-CPU Linux 7.2 host, v1.50.0 loses 300 to 345 of the
+400 children of `/m10.10/xproc/entry_mt_parent`; Linux 6.12 never
+reproduced it.
+
+**Now.**  The child retries `xtc_loop_init` for about 2 s with a doubling
+back-off (1.51), and ring setup itself retries a transient `ENOMEM`
+(1.55); only a failure that persists exits 240 minus `XTC_E_*`.  Same
+host and test: 0 of 400 in each of 15 runs (pinned to 4 CPUs, and with
+only 4 CPUs online).  The test fails if more than 4 of 400 cannot start.
+A child cannot fall back to the epoll backend instead: the I/O backend is
+chosen at configure time.  See xtc_xproc(3).
 
 ## RESOLVED (1.51): timed waits reclaim their timer when it fires or cancels
 
