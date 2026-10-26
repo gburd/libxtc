@@ -5,9 +5,16 @@
 #
 #     clang-format -i src/**/*.[ch] test/**/*.[ch] bench/**/*.[ch]
 #
-# A few KNF rules clang-format cannot express precisely (e.g. function
-# return type on its own line) are documented in docs/CONTRIBUTING.md
-# and enforced by review rather than tooling.
+# Parses on clang-format 17 through 21.  It used to set both
+# AlwaysBreakAfterDefinitionReturnType and AlwaysBreakAfterReturnType;
+# the first is deprecated and does not accept AllDefinitions, so every
+# clang-format from 17 to 21 rejected the whole file.  The return type on
+# its own line is AlwaysBreakAfterReturnType: AllDefinitions (named
+# BreakAfterReturnType from 19; the old key is still read).
+#
+# The tree is NOT formatted to this file and is not to be reformatted
+# wholesale.  CI checks only the lines a change touches (the style job:
+# git clang-format --diff against the merge base, clang-format 18).
 
 BasedOnStyle: WebKit
 Language: Cpp
@@ -30,7 +37,6 @@ AllowShortCaseLabelsOnASingleLine: false
 AllowShortFunctionsOnASingleLine: None
 AllowShortIfStatementsOnASingleLine: false
 AllowShortLoopsOnASingleLine: false
-AlwaysBreakAfterDefinitionReturnType: AllDefinitions
 AlwaysBreakAfterReturnType: AllDefinitions
 AlwaysBreakBeforeMultilineStrings: false
 BinPackArguments: true
