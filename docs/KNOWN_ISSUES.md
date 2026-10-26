@@ -100,6 +100,43 @@ test_sim_btree_scan.
   the full test suite runs on it on every push.  The job now fails if
   the build selects anything else.
 
+## CHANGED (1.60): io_uring submission is deferred to the loop's poll
+
+**Status:** behavior change, io_uring backend only; measured on a 32-vCPU
+x86-64 host, local NVMe, XFS, Debian 13 (Linux 6.12, liburing 2.9).
+
+* `xtc_io_reg_fd`, `_mod_fd`, `_del_fd` and `xtc_io_aio_submit` used to
+  enter the kernel once per submission queue entry.  They now leave the
+  entry queued, and the next `xtc_io_poll` submits everything in the
+  same `io_uring_enter` that waits (liburing 2.4 or later; with older
+  liburing the poll submits, then waits).  A file AIO submit with none
+  of its ring's AIO in flight still goes in at once, and a loop submits
+  what is queued after a fiber yields and every 8 runs.  A zero-timeout
+  poll with nothing queued and no file AIO in flight no longer enters
+  the kernel.  See `xtc_io(3)` SUBMISSION.
+* Who must change: only a caller that drives an `xtc_io_t` itself and
+  waits for `xtc_aio_t.done` without calling `xtc_io_poll`.  That never
+  worked portably (only a poll delivers the completion), and it can
+  now hang on io_uring when other AIO of the same ring is in flight,
+  because the operation is not submitted until the poll.
+  `xtc_aio_*` and every library path poll; nothing in the tree did
+  this.
+* Measured against 1.59.0 (5 interleaved runs each, medians): the
+  fiber switch (`bench_micro fiber_switch`) 156 -> 83 ns, because the
+  loop's every-64-runs poll no longer enters the kernel when nothing is
+  pending; spawn throughput (`bench_exec_scale 8`) +8%; 64 fibers of
+  page-cache reads on 16 loops +12% IOPS at 10% less CPU per op;
+  64 O_DIRECT readers on one loop with 5 us of work per read +11% IOPS,
+  p99 -7%; 16 loops each doing an fdatasync, p99 79 -> 57 us.  SQEs
+  per `io_uring_enter` (`scripts/uring-gate.sh`): aio_read 1.00 -> 1.75,
+  rexis 0.50 -> 0.97, kaka 0.97 -> 2.42.
+* Unchanged: WAL group commit (`bench_wal`), the sqlxtc I/O soak, the
+  kaka soak and single-loop rexis throughput are within run-to-run
+  spread: they are bound by the device and fsync, not by system calls.
+* Cost: a fiber whose AIO is queued behind other AIO in flight waits up
+  to 8 runs of other fibers to be submitted.  One loop with 32-64
+  readers that compute 10-20 us between reads: p99 +2.5% to +4%.
+
 ## CHANGED (1.59): fcontext is the default on Linux aarch64 (glibc) too; aarch64 fixes
 
 **What changed.**  Linux aarch64 with glibc now defaults to the fcontext
