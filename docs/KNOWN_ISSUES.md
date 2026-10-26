@@ -32,26 +32,6 @@ connections on one 32-vCPU x86-64 host.
 so widening `local_id` has to wait for 2.0.  See
 [xtc_proc(3)](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_proc.3).
 
-## FIXED (2.0): a fired park timer could release a newer timer of a migrated fiber
-
-**What was wrong.**  When a park timer fired, the loop cleared the
-waiting fiber's timer slot unconditionally and dropped the reference it
-found there.  A migratable fiber woken and stolen by another loop in the
-window between the fire and that clear had already cancelled the fired
-timer and armed a new one on the thief loop, so the firing loop dropped
-the NEW timer's reference: that timer lost its owner (it was never
-cancelled and woke the fiber spuriously later), and the firing loop read
-its reference count with nothing ordering the read after its allocation
-on the other thread.  ThreadSanitizer reported it in
-`/m5/exec/Blk4_cross_loop_state_timer` under load: 14 of 40 and 40 of
-100 runs on a 32-vCPU host.
-
-**The fix.**  The fire clears the slot only if it still holds the fired
-timer (a compare-and-swap) and otherwise leaves it to the fiber, which
-already released it.  0 of 100 TSan runs.  `/m3/timer/Tm16_fire_clears_own_slot`
-reproduces the interleaving deterministically on one loop.  It is not
-reachable under DST: the simulator runs no fiber inside a timer drain.
-
 ## FIXED (1.60): sqlxtc served a damaged page as committed data; CHANGED: page format
 
 **What was wrong.**  After a clean shutdown sqlxtc trusts its page file
@@ -117,6 +97,26 @@ the stderr report ("sqlxtc btree: ... gave up"), keep the store and the
 report and file an issue: the page id in the report is where to look.
 New DST coverage of scans racing merges and page-id reuse:
 test_sim_btree_scan.
+
+## FIXED (2.0): a fired park timer could release a newer timer of a migrated fiber
+
+**What was wrong.**  When a park timer fired, the loop cleared the
+waiting fiber's timer slot unconditionally and dropped the reference it
+found there.  A migratable fiber woken and stolen by another loop in the
+window between the fire and that clear had already cancelled the fired
+timer and armed a new one on the thief loop, so the firing loop dropped
+the NEW timer's reference: that timer lost its owner (it was never
+cancelled and woke the fiber spuriously later), and the firing loop read
+its reference count with nothing ordering the read after its allocation
+on the other thread.  ThreadSanitizer reported it in
+`/m5/exec/Blk4_cross_loop_state_timer` under load: 14 of 40 and 40 of
+100 runs on a 32-vCPU host.
+
+**The fix.**  The fire clears the slot only if it still holds the fired
+timer (a compare-and-swap) and otherwise leaves it to the fiber, which
+already released it.  0 of 100 TSan runs.  `/m3/timer/Tm16_fire_clears_own_slot`
+reproduces the interleaving deterministically on one loop.  It is not
+reachable under DST: the simulator runs no fiber inside a timer drain.
 
 ## CHANGED (1.60): involuntary preemption on musl/aarch64; platform checks
 
