@@ -374,6 +374,11 @@ int  xstore_stmt_restart(struct xsql *db);
 int64_t xstore_clock_now(void);              /* xstore_now() */
 int xstore_as_of(struct xsql *db, int64_t ts);   /* xstore_as_of(ts) */
 int xstore_gc_run(struct xsql *db);          /* xstore_gc() -> reclaimed */
+/* xstore_gc_run for the engine's clean close (no connection needed):
+ * reclaims every version behind the live-snapshot horizon, so a closed
+ * store keeps one version per live row and none of a deleted one.
+ * Returns the number reclaimed. */
+uint64_t xstore_gc_close(bt_t *bt);
 int xstore_autovacuum_set(struct xsql *db, int on); /* xstore_autovacuum(on) */
 /* The autovacuum setting new connections start with (default 0 for a
  * bare tree; sx_storage_open turns it on).  On, a write prunes its row's

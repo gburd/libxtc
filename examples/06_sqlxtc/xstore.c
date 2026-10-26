@@ -4806,8 +4806,12 @@ xs_gc(bt_t *bt, uint64_t horizon, int *out_reclaimed)
 			int64_t rid; uint64_t ts; int deleted, first_in_group;
 			uint32_t tid;
 
+			/* The tables end at the index namespace; an index key can
+			 * be 20 bytes long too, so stop on its lead byte, not only
+			 * on the first key of another length. */
 			if (bt_cursor_next(cur, &k, &klen, &vv, &vl) != XTC_OK ||
-			    klen != XS_VKLEN)
+			    klen != XS_VKLEN ||
+			    ((const uint8_t *)k)[0] == XS_IDX_LEAD)
 				break;
 			/* Skip the resume key itself (already processed). */
 			if (have_resume && memcmp(k, resume, XS_VKLEN) == 0)
@@ -6225,6 +6229,20 @@ xstore_gc_run(struct xsql *db)
 	if (horizon > atomic_load_explicit(&g_gc_horizon, memory_order_relaxed))
 		atomic_store_explicit(&g_gc_horizon, horizon, memory_order_relaxed);
 	return reclaimed;
+}
+
+/* Version GC for a clean close (xstore.h). */
+uint64_t
+xstore_gc_close(bt_t *bt)
+{
+	uint64_t horizon;
+	int reclaimed = 0;
+	if (bt == NULL) return 0;
+	horizon = snap_horizon(xs_visible());
+	(void)xs_gc(bt, horizon, &reclaimed);
+	if (horizon > atomic_load_explicit(&g_gc_horizon, memory_order_relaxed))
+		atomic_store_explicit(&g_gc_horizon, horizon, memory_order_relaxed);
+	return (uint64_t)reclaimed;
 }
 
 /* The autovacuum setting new connections start with (see

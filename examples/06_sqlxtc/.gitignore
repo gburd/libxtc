@@ -79,6 +79,9 @@ test_cursor_resume
 test_clean_restart
 test_page_checksum
 test_page_cksum_more
+test_page_prealloc
+test_close_prune
+test_gc_index
 test_steal
 test_steal_leaf
 test_steal_page

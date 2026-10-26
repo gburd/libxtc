@@ -24,6 +24,7 @@
 #include "xs_ctr.h"
 
 #include "xtc_aio.h"
+#include "xtc_blocking.h"   /* xtc_blocking_run: page-file growth off the loop */
 #include "xtc_stats.h"
 #include "xtc_sync.h"
 #include "xtc_dio_sched.h"
@@ -366,7 +367,124 @@ struct bm {
 	void             *cksum_ctx;
 	_Atomic uint64_t  s_cksum_bad;   /* loads refused by the checksum */
 	_Atomic uint64_t  cksum_bad_pid; /* the last page refused */
+
+	/* Cold: page-file preallocation (pf_extend).  Bytes. */
+	_Atomic uint64_t  wr_end;        /* end of the highest page written */
+	_Atomic uint64_t  pre_end;       /* the file covers [0, pre_end) */
+	_Atomic int       pre_busy;      /* a fiber is growing the file */
+	_Atomic int       pre_on;        /* 0: growth failed once, stop trying */
 };
+
+/* ---- page-file preallocation ----
+ *
+ * A buffered io_uring write that moves the end of file runs on an io-wq
+ * worker, not inline: the filesystem takes the inode lock to update the
+ * size (measured with plain liburing, Linux 6.12, XFS: 40,000 4 KiB
+ * writes, each past the end, punted 2,440 times; the same writes into a
+ * file grown ahead of them 75).  A page file grown one page per
+ * write-back punted most write-backs (the uring gate's crash_oracle and
+ * sqlxtc_iosoak).  So the file is grown ahead and a write-back lands
+ * inside it.  The step is an eighth of the file, between 1 and 8 MiB:
+ * a large store grows 8 MiB at a time, a small one never carries more
+ * than an eighth of itself (or 1 MiB) past its pages.
+ *
+ * fallocate(mode 0): allocated but unwritten blocks and the new size, no
+ * data written, and it never shrinks the file, so a writer racing past
+ * the grower is safe.  Not real zeros as the WAL does (wal_prealloc):
+ * the WAL measured the unwritten-extent conversion on every COMMIT's
+ * fdatasync; the page file is only synced at a checkpoint or close.
+ * Not FALLOC_FL_KEEP_SIZE: the write still moves the size, and punts.
+ * Not ftruncate: it can shrink a file a concurrent writer just grew.
+ * Elsewhere (no fallocate) the file grows as it is written, as before.
+ *
+ * A clean close (bm_destroy) trims the unused tail, so a closed store
+ * is the size of its pages and a reopen resumes allocation at the true
+ * end.  A crash leaves the tail (at most one step past the pages): the
+ * reopen issues ids past it, so none is issued twice.
+ */
+#define BM_PRE_MIN (1ull << 20)
+#define BM_PRE_MAX (8ull << 20)
+
+static uint64_t
+pf_step(uint64_t end)
+{
+	uint64_t s = (end / 8u) & ~(BM_PRE_MIN - 1u);   /* whole MiB */
+	return s < BM_PRE_MIN ? BM_PRE_MIN : s > BM_PRE_MAX ? BM_PRE_MAX : s;
+}
+
+struct pf_job {
+	int      fd;
+	uint64_t off, len;
+};
+
+static int
+pf_fallocate(void *arg)
+{
+	struct pf_job *j = arg;
+#if defined(__linux__) && defined(FALLOC_FL_KEEP_SIZE)
+	return fallocate(j->fd, 0, (off_t)j->off, (off_t)j->len) == 0 ? 0 : -1;
+#else
+	(void)j;
+	return -1;
+#endif
+}
+
+/* Grow the file to the next step boundary past `end`.  One grower at a
+ * time; a writer that finds one running writes on (and extends the file
+ * itself, as before).  Off the loop: xtc_blocking_run parks the fiber
+ * (inline off a loop and under the simulator). */
+static void
+pf_grow(bm_t *bm, uint64_t end)
+{
+	struct pf_job j;
+	uint64_t pre, step;
+	int expect = 0, res = -1;
+
+	if (!atomic_load_explicit(&bm->pre_on, memory_order_relaxed) ||
+	    !atomic_compare_exchange_strong(&bm->pre_busy, &expect, 1))
+		return;
+	pre = atomic_load_explicit(&bm->pre_end, memory_order_acquire);
+	if (end > pre) {
+		j.fd = bm->fd;
+		j.off = pre;
+		step = pf_step(end);
+		j.len = (end / step + 1u) * step - pre;
+		if (xtc_blocking_run(pf_fallocate, &j, &res) == XTC_OK) {
+			if (res == 0)
+				atomic_store_explicit(&bm->pre_end, pre + j.len,
+				    memory_order_release);
+			else      /* unsupported, or no space: grow as written */
+				atomic_store_explicit(&bm->pre_on, 0,
+				    memory_order_relaxed);
+		}
+	}
+	atomic_store_explicit(&bm->pre_busy, 0, memory_order_release);
+}
+
+/* Before a write of the page file ending at byte `end`. */
+static void
+pf_extend(bm_t *bm, uint64_t end)
+{
+	uint64_t w = atomic_load_explicit(&bm->wr_end, memory_order_relaxed);
+	while (end > w && !atomic_compare_exchange_weak_explicit(&bm->wr_end,
+	    &w, end, memory_order_relaxed, memory_order_relaxed))
+		;
+	if (end > atomic_load_explicit(&bm->pre_end, memory_order_acquire))
+		pf_grow(bm, end);
+}
+
+/* bm_destroy: drop the preallocated tail no page was written to. */
+static void
+pf_trim(bm_t *bm)
+{
+	uint64_t keep = atomic_load_explicit(&bm->wr_end, memory_order_relaxed);
+	off_t end;
+	if (atomic_load_explicit(&bm->pre_end, memory_order_relaxed) <= keep)
+		return;                   /* nothing preallocated past the pages */
+	end = lseek(bm->fd, 0, SEEK_END);
+	if (end > 0 && (uint64_t)end > keep)
+		(void)ftruncate(bm->fd, (off_t)keep);   /* a failure keeps the tail */
+}
 
 /* ---- page I/O via libxtc async file ops (xtc_aio): native io_uring
  * completion where available, a blocking-pool offload elsewhere.  The
@@ -377,6 +495,7 @@ do_io(bm_t *bm, void *buf, bm_pid_t pid, int write)
 	off_t off = (off_t)pid * (off_t)bm->page_size;
 	int n;
 	if (write) {
+		pf_extend(bm, (uint64_t)off + bm->page_size);
 		n = xtc_aio_pwrite(bm->fd, buf, bm->page_size, off);
 		return (n == (int)bm->page_size) ? 0 : -1;
 	}
@@ -1717,12 +1836,23 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 	bm->free_pids_cap = 0;
 	atomic_store_explicit(&bm->s_freed, 0, memory_order_relaxed);
 	atomic_store_explicit(&bm->s_reissued, 0, memory_order_relaxed);
+	atomic_store_explicit(&bm->pre_busy, 0, memory_order_relaxed);
+#if defined(__linux__) && defined(FALLOC_FL_KEEP_SIZE)
+	atomic_store_explicit(&bm->pre_on, 1, memory_order_relaxed);
+#else
+	atomic_store_explicit(&bm->pre_on, 0, memory_order_relaxed);
+#endif
 	if (opts->reopen) {
 		/* Resume page-id allocation past the file's existing pages
-		 * (page 0 is the superblock; data pages are 1..N-1). */
+		 * (page 0 is the superblock; data pages are 1..N-1).  A tail a
+		 * crash left preallocated is skipped: never-written ids. */
 		off_t end = lseek(bm->fd, 0, SEEK_END);
 		if (end > 0) {
 			bm_pid_t n = (bm_pid_t)(end / (off_t)bm->page_size);
+			atomic_store_explicit(&bm->wr_end, (uint64_t)end,
+			    memory_order_relaxed);
+			atomic_store_explicit(&bm->pre_end, (uint64_t)end,
+			    memory_order_relaxed);
 			if (n > bm->next_pid) bm->next_pid = n;
 			/* The page ids a clean close left free (fl_save). */
 			freelist_load(bm, n);
@@ -1738,7 +1868,10 @@ bm_destroy(bm_t *bm)
 	if (bm == NULL) return;
 	bm_provider_stop(bm);
 	bm_trickler_stop(bm);
-	if (bm->fd >= 0) close(bm->fd);
+	if (bm->fd >= 0) {
+		pf_trim(bm);
+		close(bm->fd);
+	}
 	if (bm->dw_fd >= 0) close(bm->dw_fd);
 	(void)pthread_mutex_destroy(&bm->dw_mu);
 	if (bm->frames != NULL) {
@@ -3042,6 +3175,7 @@ tr_emit_run(bm_t *bm, uint8_t *base, int run_len, bm_pid_t pid0,
 {
 	off_t off = (off_t)pid0 * (off_t)bm->page_size;
 	int len = run_len * (int)bm->page_size, k, ok, written = 0;
+	pf_extend(bm, (uint64_t)off + (uint64_t)len);
 	ok = xtc_aio_pwrite(bm->fd, base, len, off) == len;
 	atomic_fetch_add_explicit(&bm->s_tr_writes, 1, memory_order_relaxed);
 	for (k = 0; k < run_len; k++) {
@@ -3506,8 +3640,13 @@ fl_save(bm_t *bm, uint8_t *tr)
 	 * end was issued but never written; a reopen resumes allocation at
 	 * the end, so it would be issued twice if it were also on the list.
 	 * The chain pages are the lowest ids, inside the file, so writing
-	 * them does not grow it. */
+	 * them does not grow it.  The end is the last page written, not the
+	 * file's: a preallocated tail holds no page (pf_trim drops it). */
 	end = lseek(bm->fd, 0, SEEK_END);
+	if (end > 0 && (uint64_t)end > atomic_load_explicit(&bm->wr_end,
+	    memory_order_relaxed))
+		end = (off_t)atomic_load_explicit(&bm->wr_end,
+		    memory_order_relaxed);
 	qsort(ids, (size_t)n, sizeof *ids, fl_cmp_asc);
 	while (n > 0 && (end <= 0 ||
 	    (off_t)ids[n - 1] >= end / (off_t)bm->page_size))
@@ -3659,6 +3798,7 @@ bm_write_super_clean(bm_t *bm, const void *buf, size_t len, int clean)
 		(void)fl_save(bm, pg + bm->page_size - BM_FL_TRAILER);
 	if (bm->cksum_off >= 0)
 		ck_seal(bm, pg, 0, bm->page_size - BM_SUPER_CK_TAIL);
+	pf_extend(bm, bm->page_size);    /* page 0 is a page too (pf_trim) */
 	n = pwrite(bm->fd, pg, bm->page_size, 0);
 	xtc_aligned_free(pg);
 	return (n == (ssize_t)bm->page_size) ? XTC_OK : XTC_E_IO;

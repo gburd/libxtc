@@ -164,6 +164,12 @@ def split_statements(batch):
     return stmts
 
 
+# Every file a server run leaves next to its db path: the server's own
+# store (<db>.xstore, its log and lock) and SQLite-style names.
+DB_SUFFIXES = ("", "-wal", "-shm", ".xstore", ".xstore-wal",
+               ".xstore.lock")
+
+
 class Server:
     """One sqlxtc-server process.  fresh() returns a brand-new Quack
     connection backed by a fresh DB file, giving each caller an empty
@@ -178,6 +184,7 @@ class Server:
         self.log = None
         self._n = 0
         self._cur = None
+        self._db = None
 
     def available(self):
         return os.access(self.bin, os.X_OK)
@@ -223,7 +230,7 @@ class Server:
         self._spawn(db)
         # clean up the prior db file
         prev = "/tmp/sqlxtc-compat-%d-%d.db" % (os.getpid(), self._n - 1)
-        for p in (prev, prev + "-wal", prev + "-shm"):
+        for p in [prev + suf for suf in DB_SUFFIXES]:
             if os.path.exists(p):
                 try:
                     os.unlink(p)
@@ -239,9 +246,10 @@ class Server:
             os.killpg(os.getpgid(self.proc.pid), 9)
         except Exception:
             pass
-        for suf in ("", "-wal", "-shm"):
-            for k in range(self._n + 1):
-                p = "/tmp/sqlxtc-compat-%d-%d.db%s" % (os.getpid(), k, suf)
+        for suf in DB_SUFFIXES:
+            for p in ([self._db + suf] if self._db else []) + [
+                    "/tmp/sqlxtc-compat-%d-%d.db%s" % (os.getpid(), k, suf)
+                    for k in range(self._n + 1)]:
                 if os.path.exists(p):
                     try:
                         os.unlink(p)

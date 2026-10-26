@@ -929,6 +929,14 @@ sx_storage_close(void)
 		 * the base the next open trusts carries no queued garbage. */
 		if (ok)
 			garb = xstore_index_close(g_xbt);
+		/* Drop the versions no snapshot can reach (autovacuum backs off
+		 * when prunes stop paying, so a load leaves several per row):
+		 * the closed store keeps one per live row.  Only when the log
+		 * is compacted below -- that dump reads the same pages anyway;
+		 * a close that logged nothing does not read the cold base. */
+		if (ok && g_xwal != NULL &&
+		    (g_open_lsn == 0 || wal_durable_lsn(g_xwal) != g_open_lsn))
+			(void)xstore_gc_close(g_xbt);
 		if (ok && bm_checkpoint(g_xbm) != XTC_OK)   /* flush all dirty pages + fsync */
 			ok = 0;
 		/* Compact the log -- unless nothing was logged since the open,
