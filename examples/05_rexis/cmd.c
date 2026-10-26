@@ -101,7 +101,21 @@ cmd_get(cmd_ctx_t *ctx)
 	db_read_begin(ctx->db);
 	if (db_get(ctx->db, ctx->argv[1].u.str.data, ctx->argv[1].u.str.len,
 	           &data, &len) == 0) {
-		resp_write_bulk(ctx->out, data, len);
+		/* A large value is sent from the keyspace's own memory: the
+		 * hold keeps it alive after this read section, until the
+		 * reply's bytes have left, even if a SET or DEL replaces it
+		 * meanwhile (a partial send parks the fiber).  Copying it
+		 * into the output buffer cost 31.6% of server CPU at 64 KiB. */
+		if (len >= DB_REF_MIN && ctx->out_ref != NULL) {
+			if (resp_write_bulk_hdr(ctx->out, len) == 0) {
+				db_value_hold(data);
+				if (ctx->out_ref(ctx->out_ref_arg, ctx->out, data,
+				    len) == 0)
+					(void)resp_write_crlf(ctx->out);
+			}
+		} else {
+			resp_write_bulk(ctx->out, data, len);
+		}
 	} else {
 		resp_write_bulk_null(ctx->out);
 	}
@@ -573,8 +587,8 @@ cmd_hlen(cmd_ctx_t *ctx)
 static int
 cmd_info(cmd_ctx_t *ctx)
 {
-	char buf[2048];
-	int n;
+	char buf[2048 + 32 * CONN_MAX_LOOPS];
+	int n, i;
 	size_t keys, mem, clients;
 	long long cmd_total = 0, cmd_p50 = 0, cmd_p99 = 0;
 
@@ -596,6 +610,11 @@ cmd_info(cmd_ctx_t *ctx)
 	    "redis_version:xtc-0.1\r\n"
 	    "redis_mode:standalone\r\n"
 	    "# Clients\r\n"
+	    "connected_clients:%d\r\n"
+	    "rejected_connections:%lld\r\n"
+	    "event_loops:%d\r\n"
+	    "idle_wakeups:%lld\r\n"
+	    "reply_bytes_by_ref:%lld\r\n"
 	    "# Memory\r\n"
 	    "used_memory:%zu\r\n"
 	    "used_memory_dataset:%zu\r\n"
@@ -605,10 +624,19 @@ cmd_info(cmd_ctx_t *ctx)
 	    "cmd_latency_p50_ns:%lld\r\n"
 	    "cmd_latency_p99_ns:%lld\r\n"
 	    "# Keyspace\r\n"
-	    "db0:keys=%zu,expires=0\r\n",
+	    "db0:keys=%zu,expires=0\r\n"
+	    "# Loops\r\n",
+	    conn_census_total(), (long long)conn_census_rejected(),
+	    conn_census_loops(), (long long)conn_idle_wakeups(),
+	    (long long)conn_ref_bytes(),
 	    mem + clients, mem, clients, cmd_total, cmd_p50, cmd_p99, keys);
-
-	(void)ctx;
+	/* Clients per loop: the per-loop proc ceiling applies to each. */
+	for (i = 0; i < conn_census_loops() && n > 0 &&
+	    (size_t)n < sizeof buf; i++)
+		n += snprintf(buf + n, sizeof buf - (size_t)n,
+		    "loop%d_clients:%d\r\n", i, conn_census_live(i));
+	if (n < 0 || (size_t)n >= sizeof buf)
+		n = (int)strlen(buf);
 	resp_write_bulk(ctx->out, buf, (size_t)n);
 	return 0;
 }

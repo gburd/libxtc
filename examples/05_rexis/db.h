@@ -83,6 +83,11 @@ typedef struct db_opts {
 	                                * v1: only string SET/DEL are
 	                                * logged.  Other types remain
 	                                * memory-only. */
+	int          shared;           /* 1 = used from more than one loop
+	                                * (OS thread): db_read_begin /
+	                                * db_write_begin also take a parking
+	                                * reader/writer latch.  0 (one loop)
+	                                * costs nothing extra. */
 } db_opts_t;
 
 #define DB_OPTS_DEFAULT { \
@@ -90,7 +95,8 @@ typedef struct db_opts {
 	.max_keys      = 0, \
 	.max_mem_bytes = 0, \
 	.res           = NULL, \
-	.persist_dir   = NULL \
+	.persist_dir   = NULL, \
+	.shared        = 0 \
 }
 
 /* Operation codes for xtc_lrlock apply_op */
@@ -125,6 +131,21 @@ void db_read_end(db_t *db);
  * db_read_begin/end.  data/len are filled for string values. */
 int  db_get(db_t *db, const char *key, size_t key_len,
             const char **data, size_t *len);
+
+/*
+ * Values that outlive the read section.  A string value of at least
+ * DB_REF_MIN bytes is reference counted: db_value_hold(data), called
+ * inside the read section on a value db_get returned, keeps its bytes
+ * alive after a SET / DEL / expiry replaces or removes it, until the
+ * matching db_value_release.  The keyspace stops counting it against
+ * the memory budget at that SET / DEL; the holder charges what it holds.
+ * Smaller values are plain allocations (copying them is cheaper than
+ * the reference) and must not be held.  Hold and release are atomic, so
+ * they may run on different loops.
+ */
+#define DB_REF_MIN  4096
+void db_value_hold(const char *data);
+void db_value_release(const char *data);
 
 /* Check existence (1=exists, 0=not found) */
 int  db_exists(db_t *db, const char *key, size_t key_len);

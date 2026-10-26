@@ -1176,6 +1176,10 @@ usdt_convoy: $(srcdir)/../examples/15_usdt/convoy.c $(STATIC_LIB)
 # kernel-chosen free loopback ports (test/m99/rexis_harness.h), so
 # parallel runs on a shared host cannot collide.
 #
+# The network suites run twice: on the default one-loop server and with
+# REXIS_ARGS=--loops=2 (connections spread over two loops, the keyspace
+# shared between two threads).
+#
 # Not a dependency of `make check`: it forks servers and takes ~15 s, and
 # two of its budget checks read /proc (Linux).  CI runs it in the
 # examples job.
@@ -1200,6 +1204,13 @@ check-rexis: $(REXIS_BINS)
 		REXIS_SERVER=./rexis-server-xtc $$to ./$$t >$$t.log 2>&1 || { \
 			echo "  [rexis] FAIL: $$t (log follows)"; cat $$t.log; exit 1; }; \
 		grep -E '^  (memory|keys|clients|iops|cores):' $$t.log || true; \
+	done; \
+	for t in $(M99_NET); do \
+		printf 'running rexis test: %s (--loops=2)\n' "$$t"; \
+		REXIS_ARGS=--loops=2 REXIS_SERVER=./rexis-server-xtc $$to ./$$t \
+		    >$$t.l2.log 2>&1 || { \
+			echo "  [rexis] FAIL: $$t --loops=2 (log follows)"; \
+			cat $$t.l2.log; exit 1; }; \
 	done; \
 	sh $(srcdir)/../examples/check_help.sh ./rexis-server-xtc; \
 	echo "  [rexis] OK: 05_rexis server + test/m99 suite"
