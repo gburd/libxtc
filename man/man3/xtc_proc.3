@@ -125,6 +125,25 @@ only raw
 tasks are stealable.  Embedders that pin a worker to one loop (e.g. a
 PostgreSQL backend per loop) can rely on it.
 .Pp
+A loop holds at most 65,536 live processes.
+.Vt xtc_pid_t
+names a process by its loop and a 16-bit slot on that loop
+.Pq Fa local_id ,
+so
+.Fn xtc_proc_spawn
+on a loop that already runs 65,536 processes (every proc, including a
+supervisor and its children, counts) fails with
+.Dv XTC_E_RESOURCE
+and spawns nothing; a slot frees when its process exits.  The ceiling
+is per loop, not per process tree: a server that runs one process per
+connection serves more than about 65,500 connections only by spreading
+them over several loops of an
+.Xr xtc_exec 3
+executor (examples/05_rexis does this with
+.Fl \-loops ) .
+The pid layout is part of the ABI, so the ceiling cannot be raised
+within 1.x.
+.Pp
 .Fn xtc_proc_spawn_link
 and
 .Fn xtc_proc_spawn_monitor

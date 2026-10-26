@@ -48,7 +48,7 @@ flowchart LR
         P1["conn proc 1"] --> KS[("keyspace")]
         P2["conn proc 2"] --> KS
         PN["conn proc N"] --> KS
-        EX["one xtc_loop<br/>(one thread)"] -.->|runs| P1 & P2 & PN
+        EX["one xtc_loop per thread<br/>(--loops=N)"] -.->|runs| P1 & P2 & PN
     end
 ```
 
@@ -60,12 +60,23 @@ Redis uses RDB/AOF).
 **Different:** where Redis runs a hand-written reactor with a client
 table, rexis runs **one lightweight process per connection**. Each
 connection process parses its own commands and owns its own protocol
-state and buffers -- there is no shared connection table to lock. Today
-all of them run on ONE `xtc_loop` (one OS thread), like Redis; the
-per-connection-process shape is what would let them spread across an
-`xtc_exec` executor, but that needs the keyspace's writers serialized
-across loops and is not done (`--cores=N` only pins the one thread to
-CPUs 0..N-1).
+state and buffers -- there is no shared connection table to lock. By
+default all of them run on ONE `xtc_loop` (one OS thread), like Redis.
+`--loops=N` spreads the connection processes over the N loops of an
+`xtc_exec` executor: each connection goes to the least-loaded loop, and
+the keyspace, now shared by N threads, takes one parking reader/writer
+latch (`xtc_arwlock`) per command, so writes are still serialized.
+
+Spreading is also how rexis gets past a hard per-loop limit. A pid
+names its process by loop and a 16-bit slot (`xtc_pid_t.local_id`), so
+one loop runs at most 65,536 processes (see
+[xtc_proc(3)](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_proc.3)
+and the [known issues]({{ '/reference/known-issues/' | relative_url }})).
+rexis 1.59 ran one loop and stopped at 65,532 clients, closing every
+later connection without a reply. Now one loop takes 65,520 clients, a
+client over any limit gets Redis's `-ERR max number of clients reached`,
+and `--loops=2` held 100,000 idle connections in a measurement on one
+32-vCPU host.
 
 ## How it works
 

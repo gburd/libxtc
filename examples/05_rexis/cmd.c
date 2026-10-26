@@ -573,8 +573,8 @@ cmd_hlen(cmd_ctx_t *ctx)
 static int
 cmd_info(cmd_ctx_t *ctx)
 {
-	char buf[2048];
-	int n;
+	char buf[2048 + 32 * CONN_MAX_LOOPS];
+	int n, i;
 	size_t keys, mem, clients;
 	long long cmd_total = 0, cmd_p50 = 0, cmd_p99 = 0;
 
@@ -596,6 +596,9 @@ cmd_info(cmd_ctx_t *ctx)
 	    "redis_version:xtc-0.1\r\n"
 	    "redis_mode:standalone\r\n"
 	    "# Clients\r\n"
+	    "connected_clients:%d\r\n"
+	    "rejected_connections:%lld\r\n"
+	    "event_loops:%d\r\n"
 	    "# Memory\r\n"
 	    "used_memory:%zu\r\n"
 	    "used_memory_dataset:%zu\r\n"
@@ -605,10 +608,18 @@ cmd_info(cmd_ctx_t *ctx)
 	    "cmd_latency_p50_ns:%lld\r\n"
 	    "cmd_latency_p99_ns:%lld\r\n"
 	    "# Keyspace\r\n"
-	    "db0:keys=%zu,expires=0\r\n",
+	    "db0:keys=%zu,expires=0\r\n"
+	    "# Loops\r\n",
+	    conn_census_total(), (long long)conn_census_rejected(),
+	    conn_census_loops(),
 	    mem + clients, mem, clients, cmd_total, cmd_p50, cmd_p99, keys);
-
-	(void)ctx;
+	/* Clients per loop: the per-loop proc ceiling applies to each. */
+	for (i = 0; i < conn_census_loops() && n > 0 &&
+	    (size_t)n < sizeof buf; i++)
+		n += snprintf(buf + n, sizeof buf - (size_t)n,
+		    "loop%d_clients:%d\r\n", i, conn_census_live(i));
+	if (n < 0 || (size_t)n >= sizeof buf)
+		n = (int)strlen(buf);
 	resp_write_bulk(ctx->out, buf, (size_t)n);
 	return 0;
 }

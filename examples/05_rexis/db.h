@@ -83,6 +83,11 @@ typedef struct db_opts {
 	                                * v1: only string SET/DEL are
 	                                * logged.  Other types remain
 	                                * memory-only. */
+	int          shared;           /* 1 = used from more than one loop
+	                                * (OS thread): db_read_begin /
+	                                * db_write_begin also take a parking
+	                                * reader/writer latch.  0 (one loop)
+	                                * costs nothing extra. */
 } db_opts_t;
 
 #define DB_OPTS_DEFAULT { \
@@ -90,7 +95,8 @@ typedef struct db_opts {
 	.max_keys      = 0, \
 	.max_mem_bytes = 0, \
 	.res           = NULL, \
-	.persist_dir   = NULL \
+	.persist_dir   = NULL, \
+	.shared        = 0 \
 }
 
 /* Operation codes for xtc_lrlock apply_op */

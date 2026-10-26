@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
 #include "munit.h"
 #include "rexis_harness.h"
@@ -259,6 +260,8 @@ test_key_limit(const MunitParameter p[], void *d)
 
 /* ----- clients ----- */
 
+static int closed_by_server(int fd, int ms);
+
 /* 1 if the connection answers PING, 0 if the server dropped it. */
 static int
 served(int fd)
@@ -315,6 +318,156 @@ test_connection_limit(const MunitParameter p[], void *d)
 	for (i = 0; i < 15; i++)
 		if (fds[i] >= 0)
 			close(fds[i]);
+	STOP_CLEAN();
+	return MUNIT_OK;
+}
+
+/* A connection over --max-clients is answered with Redis's own error and
+ * then closed, so a client can tell "the server is full" from a crash.
+ * It used to be closed without a byte (a reset). */
+static MunitResult
+test_connection_refusal_says_why(const MunitParameter p[], void *d)
+{
+	static const char want[] = "-ERR max number of clients reached\r\n";
+	char buf[128];
+	int fds[3], i, extra;
+	size_t got;
+	(void)p; (void)d;
+
+	START("--max-clients=3");
+	for (i = 0; i < 3; i++) {
+		munit_assert_int((fds[i] = rexis_connect(&g_srv, 2000)), >=, 0);
+		munit_assert_true(served(fds[i]));
+	}
+	extra = rexis_connect(&g_srv, 2000);
+	munit_assert_int(extra, >=, 0);
+	got = rexis_read_n(extra, buf, sizeof want - 1, 2000);
+	buf[got] = '\0';
+	printf("\n  clients: 4th of --max-clients=3 got \"%.*s\"\n",
+	    (int)strcspn(buf, "\r"), buf);
+	munit_assert_string_equal(buf, want);
+	munit_assert_true(closed_by_server(extra, 2000));
+	close(extra);
+	for (i = 0; i < 3; i++)
+		close(fds[i]);
+	STOP_CLEAN();
+	return MUNIT_OK;
+}
+
+/* The per-loop ceiling is a configured number, not a hidden constant.
+ * --loop-clients=4 with --loops=2 serves exactly 8 connections, 4 on each
+ * loop (INFO reports the census), and refuses the rest with the error.
+ * One loop holds at most 65,536 procs (xtc_pid_t.local_id is 16 bits);
+ * --loop-clients lowers that so a test can reach it with a handful of
+ * sockets. */
+static MunitResult
+test_loop_ceiling_configured(const MunitParameter p[], void *d)
+{
+	char buf[128];
+	int fds[10], i, n_served = 0, n_refused = 0;
+	long long c0, c1, total, rejected;
+	(void)p; (void)d;
+
+	START("--loops=2", "--loop-clients=4", "--max-clients=100");
+	for (i = 0; i < 10; i++) {
+		munit_assert_int((fds[i] = rexis_connect(&g_srv, 2000)), >=, 0);
+		if (served(fds[i])) {
+			n_served++;
+			continue;
+		}
+		/* served() swallowed the first bytes of the error reply;
+		 * the connection must still be closed by the server. */
+		n_refused++;
+		munit_assert_true(closed_by_server(fds[i], 2000));
+		close(fds[i]);
+		fds[i] = -1;
+	}
+	munit_assert_int(n_served, ==, 8);
+	munit_assert_int(n_refused, ==, 2);
+	for (i = 0; i < 10 && fds[i] < 0; i++)
+		;
+	munit_assert_int(i, <, 10);
+	c0 = info_field(fds[i], "loop0_clients:");
+	c1 = info_field(fds[i], "loop1_clients:");
+	total = info_field(fds[i], "connected_clients:");
+	rejected = info_field(fds[i], "rejected_connections:");
+	printf("\n  clients: --loops=2 --loop-clients=4: %d served, %d refused; "
+	    "INFO loop0 %lld loop1 %lld connected %lld rejected %lld\n",
+	    n_served, n_refused, c0, c1, total, rejected);
+	munit_assert_llong(c0, ==, 4);
+	munit_assert_llong(c1, ==, 4);
+	munit_assert_llong(total, ==, 8);
+	munit_assert_llong(rejected, ==, 2);
+	(void)buf;
+	for (i = 0; i < 10; i++)
+		if (fds[i] >= 0)
+			close(fds[i]);
+	STOP_CLEAN();
+	return MUNIT_OK;
+}
+
+/* Asking for more clients than the loops can hold is refused at startup
+ * with a message that names the fix, rather than accepted and then
+ * failing at connection 65,533. */
+static MunitResult
+test_max_clients_over_ceiling_refused(const MunitParameter p[], void *d)
+{
+	const char *bin = getenv("REXIS_SERVER");
+	char cmd[512], line[512] = "";
+	FILE *f;
+	int st;
+	(void)p; (void)d;
+
+	if (bin == NULL || *bin == '\0')
+		bin = REXIS_DEFAULT_BIN;
+	snprintf(cmd, sizeof cmd, "%s --host=127.0.0.1 -p 1 --loops=1 "
+	    "--max-clients=100000 2>&1", bin);
+	munit_assert_ptr_not_null((f = popen(cmd, "r")));
+	while (fgets(line, sizeof line, f) != NULL &&
+	    strstr(line, "per-loop") == NULL)
+		;
+	st = pclose(f);
+	printf("\n  clients: --max-clients=100000 --loops=1: exit %d: %s",
+	    WIFEXITED(st) ? WEXITSTATUS(st) : -1, line);
+	munit_assert_true(WIFEXITED(st));
+	munit_assert_int(WEXITSTATUS(st), ==, 2);
+	/* The message names the ceiling and the option that lifts it. */
+	munit_assert_ptr_not_null(strstr(line, "per-loop"));
+	munit_assert_ptr_not_null(strstr(line, "--loops=2"));
+	return MUNIT_OK;
+}
+
+/* --max-fds caps the server's sockets through the xtc_res FDS budget
+ * (xtc_res_attach_net), listener included: --max-fds=4 leaves 3 client
+ * sockets.  The 4th client waits in the kernel backlog instead of being
+ * accepted and dropped, and is served once a slot frees. */
+static MunitResult
+test_max_fds(const MunitParameter p[], void *d)
+{
+	char cmd[32], buf[16];
+	int fds[4], i, n, waiting;
+	(void)p; (void)d;
+
+	START("--max-fds=4");
+	for (i = 0; i < 3; i++) {
+		munit_assert_int((fds[i] = rexis_connect(&g_srv, 2000)), >=, 0);
+		munit_assert_true(served(fds[i]));
+	}
+	munit_assert_int((waiting = rexis_connect(&g_srv, 500)), >=, 0);
+	n = rexis_build(cmd, sizeof cmd, 1, "PING");
+	munit_assert_int(rexis_send_all(waiting, cmd, (size_t)n), ==, 0);
+	/* Not accepted: no reply (and no reset) within 500 ms. */
+	munit_assert_size(rexis_read_n(waiting, buf, 7, 500), ==, 0);
+	close(fds[0]);
+	/* Accepted once a slot frees; the queued PING is answered. */
+	munit_assert_size(rexis_read_n(waiting, buf, 7, 3000), ==, 7);
+	buf[7] = '\0';
+	munit_assert_string_equal(buf, "+PONG\r\n");
+	printf("\n  clients: --max-fds=4: 3 served, the 4th queued, then "
+	    "served after a close\n");
+	close(waiting);
+	for (i = 1; i < 3; i++)
+		close(fds[i]);
 	STOP_CLEAN();
 	return MUNIT_OK;
 }
@@ -704,6 +857,10 @@ static MunitTest tests[] = {
 	{ "/memory_budget",    test_memory_budget,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/key_limit",        test_key_limit,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/connection_limit", test_connection_limit, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/connection_refusal_says_why", test_connection_refusal_says_why, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/loop_ceiling_configured", test_loop_ceiling_configured, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/max_clients_over_ceiling_refused", test_max_clients_over_ceiling_refused, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/max_fds",          test_max_fds,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/iops_limit",       test_iops_limit,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/core_pinning",     test_core_pinning,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/sigterm_with_client", test_sigterm_with_client, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

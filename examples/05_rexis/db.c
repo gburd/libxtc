@@ -11,6 +11,7 @@
 #include <stdio.h>
 
 #include "db.h"
+#include "xtc_sync.h"
 
 /* Local helper wrapping xtc_clock_mono(). */
 static inline int64_t xtc_now_ns(void) {
@@ -50,8 +51,19 @@ typedef struct db_table {
 
 #include "bitcask.h"
 
+/*
+ * Exclusion across loops.  The lrlock double-buffers only the table
+ * HEADER (db_table_t); the entries, chains and values are one shared
+ * copy that writers change in place.  On one loop that is safe because no
+ * reader or writer parks inside its section, so they never overlap.  With
+ * connections on several loops (OS threads) a reader on one thread could
+ * walk a chain while a writer on another frees it, so a shared db also
+ * holds a parking reader/writer latch (xtc_arwlock: a waiter parks its
+ * fiber, FIFO, a writer is not starved) for every section.
+ */
 struct db {
 	xtc_lrlock_t *lr;
+	xtc_arwlock_t *mt;         /* NULL unless opts.shared */
 	db_opts_t     opts;
 	bitcask_t    *bc;          /* persistence; NULL if disabled */
 	int           refused;     /* last db_malloc failed on the budget */
@@ -289,6 +301,11 @@ db_create(const db_opts_t *opts, db_t **out)
 		xtc_free(db);
 		return XTC_E_NOMEM;
 	}
+	if (db->opts.shared && xtc_arwlock_create(&db->mt) != XTC_OK) {
+		xtc_lrlock_destroy(db->lr);
+		xtc_free(db);
+		return XTC_E_NOMEM;
+	}
 
 	/* Initialize the table in the write copy, then mark ready.  The
 	 * bucket table is charged to the shared budget (db_lh_alloc), so the
@@ -302,6 +319,7 @@ db_create(const db_opts_t *opts, db_t **out)
 		rc = db->refused ? XTC_E_RESOURCE : XTC_E_NOMEM;
 		xtc_lrlock_write_end(db->lr);
 		xtc_lrlock_destroy(db->lr);
+		xtc_arwlock_destroy(db->mt);
 		xtc_free(db);
 		return rc;
 	}
@@ -320,6 +338,7 @@ db_create(const db_opts_t *opts, db_t **out)
 	if (db->opts.persist_dir != NULL) {
 		if (bitcask_open(db->opts.persist_dir, &db->bc) != 0) {
 			xtc_lrlock_destroy(db->lr);
+			xtc_arwlock_destroy(db->mt);
 			xtc_free(db);
 			return XTC_E_INTERNAL;
 		}
@@ -366,19 +385,42 @@ db_destroy(db_t *db)
 	xtc_lrlock_write_end(db->lr);
 
 	xtc_lrlock_destroy(db->lr);
+	xtc_arwlock_destroy(db->mt);
 	if (db->bc != NULL) bitcask_close(db->bc);
 	xtc_free(db);
 }
 
-void db_read_begin(db_t *db) { (void)xtc_lrlock_read_begin(db->lr); }
-void db_read_end(db_t *db)   { xtc_lrlock_read_end(db->lr); }
-void db_write_begin(db_t *db){ (void)xtc_lrlock_write_begin(db->lr); }
+void
+db_read_begin(db_t *db)
+{
+	if (db->mt != NULL)
+		(void)xtc_arwlock_rdlock(db->mt, -1);
+	(void)xtc_lrlock_read_begin(db->lr);
+}
+
+void
+db_read_end(db_t *db)
+{
+	xtc_lrlock_read_end(db->lr);
+	if (db->mt != NULL)
+		(void)xtc_arwlock_unlock(db->mt);
+}
+
+void
+db_write_begin(db_t *db)
+{
+	if (db->mt != NULL)
+		(void)xtc_arwlock_wrlock(db->mt, -1);
+	(void)xtc_lrlock_write_begin(db->lr);
+}
 
 void
 db_write_end(db_t *db)
 {
 	xtc_lrlock_publish_full_sync(db->lr);
 	xtc_lrlock_write_end(db->lr);
+	if (db->mt != NULL)
+		(void)xtc_arwlock_unlock(db->mt);
 }
 
 /* ----- Read operations ----- */

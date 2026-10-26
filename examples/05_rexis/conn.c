@@ -119,6 +119,7 @@ typedef struct conn_state {
 	/* Server-wide state */
 	_Atomic int *conn_count;
 	_Atomic int *shutdown;
+	int          loop_idx;   /* census slot (g_loop_live) */
 
 	/* Pub/sub: this connection's own pid + the shared channel registry
 	 * (an xtc_reg_t used as a duplicate-key process-group set).  A
@@ -142,6 +143,85 @@ int64_t
 conn_client_bytes(void)
 {
 	return atomic_load(&g_client_bytes);
+}
+
+/* ----- per-loop census (conn.h) ----- */
+
+static int              g_n_loops = 1;
+static int              g_loop_cap = CONN_LOOP_MAX;
+static _Atomic int      g_loop_live[CONN_MAX_LOOPS];
+static _Atomic int64_t  g_rejected;
+
+void
+conn_census_init(int n_loops, int per_loop_cap)
+{
+	g_n_loops = n_loops < 1 ? 1 : n_loops > CONN_MAX_LOOPS ?
+	    CONN_MAX_LOOPS : n_loops;
+	g_loop_cap = per_loop_cap < 1 || per_loop_cap > CONN_LOOP_MAX ?
+	    CONN_LOOP_MAX : per_loop_cap;
+}
+
+int
+conn_pick_loop(void)
+{
+	int i, best = -1, n, best_n = g_loop_cap;
+
+	for (i = 0; i < g_n_loops; i++) {
+		n = atomic_load(&g_loop_live[i]);
+		if (n < best_n) {
+			best = i;
+			best_n = n;
+		}
+	}
+	return best;
+}
+
+int
+conn_census_loops(void)
+{
+	return g_n_loops;
+}
+
+int
+conn_census_live(int loop_idx)
+{
+	return loop_idx >= 0 && loop_idx < g_n_loops ?
+	    atomic_load(&g_loop_live[loop_idx]) : 0;
+}
+
+int
+conn_census_total(void)
+{
+	int i, t = 0;
+
+	for (i = 0; i < g_n_loops; i++)
+		t += atomic_load(&g_loop_live[i]);
+	return t;
+}
+
+void
+conn_census_reject(void)
+{
+	atomic_fetch_add(&g_rejected, 1);
+}
+
+int64_t
+conn_census_rejected(void)
+{
+	return atomic_load(&g_rejected);
+}
+
+void
+conn_refuse(int fd, const char *msg)
+{
+	char line[160];
+	int n;
+
+	n = snprintf(line, sizeof line, "-ERR %s\r\n", msg);
+	if (n > 0 && (size_t)n < sizeof line)
+		(void)send(fd, line, (size_t)n, MSG_DONTWAIT | MSG_NOSIGNAL);
+	xtc_net_close(fd);
+	conn_census_reject();
 }
 
 static int
@@ -497,6 +577,7 @@ conn_teardown(void *arg)
 		xtc_net_close(st->fd);
 	if (st->conn_count != NULL)
 		atomic_fetch_sub(st->conn_count, 1);   /* frees a --max-clients slot */
+	atomic_fetch_sub(&g_loop_live[st->loop_idx], 1);
 	conn_refund(st, st->rcap + st->wcap - 2 * CONN_BASE_BUF);
 	xtc_free(st->rbuf);
 	xtc_free(st->wbuf);
@@ -708,11 +789,17 @@ conn_spawn(xtc_loop_t *loop, const conn_opts_t *opts, xtc_pid_t *out_pid)
 	st->iops_cap = opts->iops_cap;
 	st->conn_count = opts->conn_count;
 	st->shutdown = opts->shutdown;
+	st->loop_idx = opts->loop_idx >= 0 && opts->loop_idx < CONN_MAX_LOOPS ?
+	    opts->loop_idx : 0;
 
 	proc_opts.name = "rexis-conn";
 
+	/* Count BEFORE the spawn: the proc may run (and exit) on its own
+	 * loop's thread before xtc_proc_spawn returns. */
+	atomic_fetch_add(&g_loop_live[st->loop_idx], 1);
 	rc = xtc_proc_spawn(loop, conn_proc, st, &proc_opts, out_pid);
 	if (rc != XTC_OK) {
+		atomic_fetch_sub(&g_loop_live[st->loop_idx], 1);
 		/* Never ran, so conn_teardown never will: free here.  The fd
 		 * stays the caller's (see conn.h). */
 		xtc_free(st->rbuf);
