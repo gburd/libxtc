@@ -4806,8 +4806,12 @@ xs_gc(bt_t *bt, uint64_t horizon, int *out_reclaimed)
 			int64_t rid; uint64_t ts; int deleted, first_in_group;
 			uint32_t tid;
 
+			/* The tables end at the index namespace; an index key can
+			 * be 20 bytes long too, so stop on its lead byte, not only
+			 * on the first key of another length. */
 			if (bt_cursor_next(cur, &k, &klen, &vv, &vl) != XTC_OK ||
-			    klen != XS_VKLEN)
+			    klen != XS_VKLEN ||
+			    ((const uint8_t *)k)[0] == XS_IDX_LEAD)
 				break;
 			/* Skip the resume key itself (already processed). */
 			if (have_resume && memcmp(k, resume, XS_VKLEN) == 0)
