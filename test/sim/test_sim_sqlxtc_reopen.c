@@ -96,6 +96,9 @@
 #ifndef SIM_NAME
 #define SIM_NAME   "open/close"
 #endif
+#ifndef SIM_TEST
+#define SIM_TEST   "test_sim_sqlxtc_reopen"
+#endif
 /* SIM_CKPT (test_sim_sqlxtc_ckpt.c): a checkpointer fiber runs online log
  * checkpoints back to back while the lanes commit.  SIM_GC
  * (test_sim_sqlxtc_gc.c): a reader fiber holds snapshot transactions open
@@ -916,8 +919,11 @@ main(int argc, char **argv)
 		return 1;
 	for (k = 0; k < count; k++) {
 		uint64_t seed = base + (uint64_t)k, f1 = 0, f2 = 0;
-		if (run_seed(seed, &f1) != 0)
+		if (run_seed(seed, &f1) != 0) {
+			printf("corpus row: %s %llu 1 <fixing commit>: <what failed>\n",
+			    SIM_TEST, (unsigned long long)seed);
 			return 1;
+		}
 		acked += g_sh->acked;
 		crashes += g_sh->crashes;
 		cleans += g_sh->cleans;

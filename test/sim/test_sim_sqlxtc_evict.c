@@ -19,4 +19,5 @@
 #define SIM_FRAMES 32
 #define SIM_PAD    1000
 #define SIM_NAME   "eviction (32-frame pool)"
+#define SIM_TEST   "test_sim_sqlxtc_evict"
 #include "test_sim_sqlxtc_reopen.c"

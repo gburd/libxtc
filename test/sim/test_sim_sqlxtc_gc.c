@@ -20,4 +20,5 @@
  */
 #define SIM_GC     1
 #define SIM_NAME   "version GC with snapshots held"
+#define SIM_TEST   "test_sim_sqlxtc_gc"
 #include "test_sim_sqlxtc_reopen.c"
