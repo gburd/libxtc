@@ -136,7 +136,9 @@ def main():
     cols, rows, n = c.query("SELECT length(v) FROM big WHERE id = 1")
     check("row under limit", rows == [[4000]])
     for sql in ("INSERT INTO big VALUES (2, '%s')" % ("b" * 5000),
-                "UPDATE big SET v = '%s' WHERE id = 1" % ("c" * 5000)):
+                "UPDATE big SET v = '%s' WHERE id = 1" % ("c" * 5000),
+                "INSERT INTO big VALUES (3, zeroblob(5000))",
+                "UPDATE big SET v = zeroblob(5000) WHERE id = 1"):
         try:
             c.query(sql)
             check("row over limit refused", False)
