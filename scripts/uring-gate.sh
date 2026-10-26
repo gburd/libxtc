@@ -20,10 +20,12 @@
 #             A workload that is supposed to use io_uring and shows
 #             NODATA is a FAIL (it may have picked another backend, or
 #             uringscope attached after it finished: rerun longer)
-# INFO findings (BATCH, SHORT-WRITE) are reported, never fail: BATCH is
-# libxtc's known gap (each xtc_aio_* submits its own SQE; see
-# docs/KNOWN_ISSUES.md), and the counters are printed so a release can
-# show it moving.
+# INFO findings (BATCH, SHORT-WRITE) are reported, never fail.  Since
+# 1.60 producers leave SQEs queued and the loop's poll submits them in
+# the enter that waits (docs/io-models.md, xtc_io(3) SUBMISSION), so
+# BATCH should be rare; the counters are printed so a release can show
+# SQEs per enter moving (1.60 vs 1.59: aio_read 1.00 -> 1.75, rexis
+# 0.50 -> 0.97, kaka 0.97 -> 2.42; the WAL and sqlxtc are fsync-bound).
 #
 # usage: sudo scripts/uring-gate.sh BUILD_DIR [OUTDIR]
 #   BUILD_DIR: a configured, built libxtc tree (dist/configure; io_uring
