@@ -184,7 +184,7 @@ clean:
 	rm -f test_xs_ctr test_bm_reuse_version test_kill_stmt test_cat_lock_shared test_conn_sup test_storage_sup
 	rm -f test_sql_results test_txn_fastpath test_wal_crc_once
 	rm -f test_btree_cursor_hop test_btree_smo_stress test_btree_bounded_descent
-	rm -f test_tpcc_seek test_dup_composite test_bulk_insert test_plan_cache
+	rm -f test_tpcc_seek test_dup_composite test_bulk_insert test_plan_cache test_prepare_concurrent
 	rm -f test_btree_delete_merge test_savepoint test_isolation test_ww_conflict test_row_intents test_commit_visibility test_ssi_skew test_ckpt_bound test_dup_insert test_recover_fast
 	rm -f test_vfs_loop test_vfs_loop.o
 	rm -rf $(AMALG_DIR)
@@ -389,6 +389,15 @@ test_plan_cache: test_plan_cache.c $(ENGINE_NATIVE)
 
 test-plan-cache: test_plan_cache
 	./test_plan_cache
+
+# ---- SELECT prepares of different connections run concurrently ----
+# (vexec.c is #included for the test-only prepare hook)
+test: test-prepare-concurrent
+test_prepare_concurrent: test_prepare_concurrent.c $(ENGINE_NATIVE)
+	$(CC) $(CFLAGS) -o $@ test_prepare_concurrent.c $(filter-out vexec.c,$(ENGINE_NATIVE)) $(LDFLAGS)
+
+test-prepare-concurrent: test_prepare_concurrent
+	TMPDIR=$${TMPDIR:-/tmp} ./test_prepare_concurrent
 
 # ---- Lime SQL parser: differential AST oracle vs the reference engine ----
 

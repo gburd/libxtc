@@ -51,7 +51,6 @@
 
 #include "xtc.h"             /* XTC_OK */
 #include "xtc_exec.h"        /* V2: morsel-parallel workers, one per loop */
-#include "xtc_sync.h"        /* xtc_amutex_static: VX_LK_CC */
 
 /* Native ASCII pattern matchers (no SQLite).  xs_like: '%' matches any
  * run, '_' any one byte, ASCII case-insensitive (SQLite's default LIKE).
@@ -722,6 +721,14 @@ struct namevec {
 	int  nsc;
 	int *pay;
 	int  fixed;
+	/* Correlation (a single-table prepare's pass 1 only, else NULL):
+	 * collect_columns also gathers the OUTER-column references inside a
+	 * correlated subquery -- columns qualified by otab, the outer table
+	 * name or alias -- so they get srcrow slots; bt is the connection's
+	 * tree, for an EXISTS inner table's column names.  Per prepare, not
+	 * file-scoped: see vx_prepare_select. */
+	const char *otab;
+	bt_t       *bt;
 };
 
 static int
@@ -1237,38 +1244,13 @@ static vx_expr_t *compile_expr(struct vx_compiler *c, const sql_expr_t *e);
  * gate, which needs column affinities not known until the source is
  * prepared.  Returns 0 if the whole expression is compilable in
  * principle, -1 if it contains an unsupported construct. */
-/* When non-NULL during a single-table prepare's pass 1, collect_columns
- * also gathers the OUTER-column references inside a correlated subquery
- * (a 2-part column qualified by this outer table) so they get srcrow
- * slots.  Set around the single-table pass-1 collection and cleared
- * after; NULL on the join path (correlated subqueries fall back there).
- * These file-scoped variables (cc_otab, cc_bt, cc_inner_cols,
- * cc_inner_ncol) are shared by every loop, and a prepare can park
- * (catalog lock, page I/O) and resume on another thread, so every
- * vx_prepare_select runs under the recursive static amutex VX_LK_CC
- * (recursive: correlated-subquery trial prepares re-enter it on the same
- * fiber).  Found by TSan under a 4-loop, 8-client load; without it two
- * concurrent correlated EXISTS queries crashed the server (NULL
- * cc_inner_cols entry -> SIGSEGV in strlen from corr_collect). */
-#define VX_LK_CC 12u
-static const char *cc_otab;
-
-/* Optional inner-table schema access for EXISTS correlation during
- * pass-1 collect_columns and pass-2 compile: the connection's B-tree
- * (so an inner table's columns can be looked up to classify an
- * unqualified subquery name as an outer ref).  Set/cleared around the
- * EXISTS collection, like cc_otab. */
-static bt_t *cc_bt;
-/* When set, corr_collect also treats an UNQUALIFIED subquery column NOT
- * in this inner-column set as an outer reference. */
-static const char *const *cc_inner_cols;
-static int cc_inner_ncol;
 
 /* An outer-column reference inside a correlated subquery (defined with
  * its collector below); forward-declared for collect_columns. */
 struct corr_ref { const char *p; uint32_t len; const sql_str_t *col; };
 #define VX_CORR_MAX 8
 static int corr_collect(const sql_expr_t *e, const char *otab,
+                        const char *const *inner, int ninner,
                         struct corr_ref *refs, int n);
 
 static int
@@ -1312,18 +1294,18 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 	}
 	case SX_E_SUBQUERY:
 		/* An uncorrelated scalar subquery references no OUTER column.  A
-		 * correlated one (single-table path, cc_otab set) references the
+		 * correlated one (single-table path, nv->otab set) references the
 		 * outer table's columns -- collect those so they get srcrow slots;
 		 * the compiler later rewrites them to ? binds. */
-		if (cc_otab != NULL && e->sel != NULL) {
+		if (nv->otab != NULL && e->sel != NULL) {
 			struct corr_ref refs[VX_CORR_MAX];
 			int nr = 0, i;
 			const sql_select_t *q = e->sel;
 			const sql_exprlist_item_t *it;
 			for (it = q->cols ? q->cols->head : NULL; it; it = it->next)
-				if ((nr = corr_collect(it->expr, cc_otab, refs, nr)) < 0) return 0;
-			if ((nr = corr_collect(q->where, cc_otab, refs, nr)) < 0) return 0;
-			if ((nr = corr_collect(q->having, cc_otab, refs, nr)) < 0) return 0;
+				if ((nr = corr_collect(it->expr, nv->otab, NULL, 0, refs, nr)) < 0) return 0;
+			if ((nr = corr_collect(q->where, nv->otab, NULL, 0, refs, nr)) < 0) return 0;
+			if ((nr = corr_collect(q->having, nv->otab, NULL, 0, refs, nr)) < 0) return 0;
 			for (i = 0; i < nr; i++)
 				if (nv_add(nv, refs[i].col) < 0) return -1;
 		}
@@ -1331,18 +1313,19 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 	case SX_E_IN_SELECT:
 		/* a IN (SELECT ...): collect the operand's columns.  An
 		 * uncorrelated subquery contributes none (materialized as a
-		 * literal list); a correlated one (cc_otab set) references the
+		 * literal list); a correlated one (nv->otab set) references the
 		 * outer table's columns -- collect those so they get srcrow slots
 		 * (the compiler later rewrites them to ? binds), exactly as the
 		 * scalar-subquery case does.  EXISTS (a == NULL, ival bit1) has no
 		 * operand -- only its correlated outer refs matter. */
 		if (e->a != NULL && collect_columns(nv, e->a) != 0) return -1;
-		if (cc_otab != NULL && e->sel != NULL) {
+		if (nv->otab != NULL && e->sel != NULL) {
 			struct corr_ref refs[VX_CORR_MAX];
 			int nr = 0, i;
 			const sql_select_t *q = e->sel;
 			const sql_exprlist_item_t *it;
 			const char *innames[64];
+			const char *const *inner = NULL;
 			xstore_col_t *icols = NULL;
 			int inc = 0;
 			int is_exists = (e->a == NULL && (e->ival & 2));
@@ -1351,7 +1334,7 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 			 * schema buffer is heap-allocated -- collect_columns recurses
 			 * over a small fiber stack, so a 64-entry stack array here
 			 * risks overflow on a deep expression. */
-			if (is_exists && cc_bt != NULL && q->from != NULL &&
+			if (is_exists && nv->bt != NULL && q->from != NULL &&
 			    q->from->next == NULL && q->from->subquery == NULL &&
 			    q->from->table.len > 0 && q->from->table.len < 64) {
 				char itab[64];
@@ -1359,16 +1342,14 @@ collect_columns(struct namevec *nv, const sql_expr_t *e)
 				if (icols == NULL) return -1;
 				memcpy(itab, q->from->table.p, q->from->table.len);
 				itab[q->from->table.len] = '\0';
-				inc = xstore_table_schema(cc_bt, itab, icols, 64);
+				inc = xstore_table_schema(nv->bt, itab, icols, 64);
 				for (i = 0; i < inc && i < 64; i++) innames[i] = icols[i].name;
-				cc_inner_cols = inc > 0 ? innames : NULL;
-				cc_inner_ncol = inc;
+				if (inc > 0) inner = innames;
 			}
 			for (it = q->cols ? q->cols->head : NULL; it; it = it->next)
-				if ((nr = corr_collect(it->expr, cc_otab, refs, nr)) < 0) { cc_inner_cols = NULL; cc_inner_ncol = 0; free(icols); return 0; }
-			if ((nr = corr_collect(q->where, cc_otab, refs, nr)) < 0) { cc_inner_cols = NULL; cc_inner_ncol = 0; free(icols); return 0; }
-			if ((nr = corr_collect(q->having, cc_otab, refs, nr)) < 0) { cc_inner_cols = NULL; cc_inner_ncol = 0; free(icols); return 0; }
-			cc_inner_cols = NULL; cc_inner_ncol = 0;
+				if ((nr = corr_collect(it->expr, nv->otab, inner, inc, refs, nr)) < 0) { free(icols); return 0; }
+			if ((nr = corr_collect(q->where, nv->otab, inner, inc, refs, nr)) < 0) { free(icols); return 0; }
+			if ((nr = corr_collect(q->having, nv->otab, inner, inc, refs, nr)) < 0) { free(icols); return 0; }
 			free(icols);
 			for (i = 0; i < nr; i++)
 				if (nv_add(nv, refs[i].col) < 0) return -1;
@@ -1675,28 +1656,28 @@ native_subquery_gate_sel(const sql_select_t *q, int want_ncol)
 	return !corr;
 }
 
-/* corr_collect's unqualified-outer-ref state (cc_inner_cols /
- * cc_inner_ncol) is declared up near cc_otab.
- *
- * Walk a subquery expression collecting outer-column references: an
+/* Walk a subquery expression collecting outer-column references: an
  * SX_E_COLUMN qualified by `otab` (the outer table name).  Appends to
  * refs[] (cap VX_CORR_MAX).  Returns the count, or -1 on overflow /
  * unsupported shape.  A column qualified by anything else is assumed to
- * belong to the subquery's own FROM (left alone). */
+ * belong to the subquery's own FROM (left alone).  When inner is
+ * non-NULL (an EXISTS: the inner table's ninner column names), an
+ * UNQUALIFIED column that is not one of them is an outer reference too. */
 static int
 corr_collect(const sql_expr_t *e, const char *otab,
+             const char *const *inner, int ninner,
              struct corr_ref *refs, int n)
 {
 	const sql_exprlist_item_t *it;
 	const sql_case_arm_t *arm;
 	if (e == NULL) return n;
 	if (e->op == SX_E_COLUMN && e->nname == 1 && e->src && e->srclen &&
-	    cc_inner_cols != NULL) {
+	    inner != NULL) {
 		/* Unqualified column: an outer ref iff it is not an inner column. */
-		int i, inner = 0;
-		for (i = 0; i < cc_inner_ncol; i++)
-			if (str_eq_cstr(&e->name[0], cc_inner_cols[i])) { inner = 1; break; }
-		if (!inner) {
+		int i, isin = 0;
+		for (i = 0; i < ninner; i++)
+			if (str_eq_cstr(&e->name[0], inner[i])) { isin = 1; break; }
+		if (!isin) {
 			if (n >= VX_CORR_MAX) return -1;
 			refs[n].p = e->src; refs[n].len = e->srclen;
 			refs[n].col = &e->name[0];
@@ -1713,16 +1694,16 @@ corr_collect(const sql_expr_t *e, const char *otab,
 		}
 		return n;
 	}
-	if ((n = corr_collect(e->a, otab, refs, n)) < 0) return -1;
-	if ((n = corr_collect(e->b, otab, refs, n)) < 0) return -1;
-	if ((n = corr_collect(e->c, otab, refs, n)) < 0) return -1;
+	if ((n = corr_collect(e->a, otab, inner, ninner, refs, n)) < 0) return -1;
+	if ((n = corr_collect(e->b, otab, inner, ninner, refs, n)) < 0) return -1;
+	if ((n = corr_collect(e->c, otab, inner, ninner, refs, n)) < 0) return -1;
 	for (it = e->list ? e->list->head : NULL; it; it = it->next)
-		if ((n = corr_collect(it->expr, otab, refs, n)) < 0) return -1;
+		if ((n = corr_collect(it->expr, otab, inner, ninner, refs, n)) < 0) return -1;
 	for (arm = e->arms; arm; arm = arm->next) {
-		if ((n = corr_collect(arm->when, otab, refs, n)) < 0) return -1;
-		if ((n = corr_collect(arm->then, otab, refs, n)) < 0) return -1;
+		if ((n = corr_collect(arm->when, otab, inner, ninner, refs, n)) < 0) return -1;
+		if ((n = corr_collect(arm->then, otab, inner, ninner, refs, n)) < 0) return -1;
 	}
-	if ((n = corr_collect(e->els, otab, refs, n)) < 0) return -1;
+	if ((n = corr_collect(e->els, otab, inner, ninner, refs, n)) < 0) return -1;
 	if (e->sel != NULL) return -1;   /* nested subquery: not handled */
 	return n;
 }
@@ -1747,6 +1728,7 @@ static int corr_ref_cmp(const void *a, const void *b)
  * shape.  ncol_want is the required result column count (1). */
 static int
 build_corr_stmt(struct vx_compiler *c, const sql_expr_t *e,
+                const char *const *inner, int ninner,
                 int ncol_want, int *pidx, int **pbindcol, int *pnref)
 {
 	struct corr_ref refs[VX_CORR_MAX];
@@ -1770,9 +1752,9 @@ build_corr_stmt(struct vx_compiler *c, const sql_expr_t *e,
 		const sql_select_t *q2 = e->sel;
 		const sql_exprlist_item_t *it;
 		for (it = q2->cols ? q2->cols->head : NULL; it; it = it->next)
-			if ((nref = corr_collect(it->expr, otab, refs, nref)) < 0) return -1;
-		if ((nref = corr_collect(q2->where, otab, refs, nref)) < 0) return -1;
-		if ((nref = corr_collect(q2->having, otab, refs, nref)) < 0) return -1;
+			if ((nref = corr_collect(it->expr, otab, inner, ninner, refs, nref)) < 0) return -1;
+		if ((nref = corr_collect(q2->where, otab, inner, ninner, refs, nref)) < 0) return -1;
+		if ((nref = corr_collect(q2->having, otab, inner, ninner, refs, nref)) < 0) return -1;
 	}
 	if (nref == 0) return -1;   /* not actually correlated */
 	/* shortcut: the per-row re-run binds only the outer columns, so a ?
@@ -1835,10 +1817,6 @@ build_corr_stmt(struct vx_compiler *c, const sql_expr_t *e,
 		vx_cell_t tb[VX_CORR_MAX];
 		vx_result_t *tr = NULL;
 		int trc, tnc;
-		const char *const *save_inner = cc_inner_cols;
-		int save_ninner = cc_inner_ncol;
-		const char *save_otab = cc_otab;
-		bt_t *save_bt = cc_bt;
 		for (i = 0; i < nref; i++) {
 			memset(&tb[i], 0, sizeof tb[i]);
 			switch (c->nv->aff[bindcol[i]]) {
@@ -1848,14 +1826,7 @@ build_corr_stmt(struct vx_compiler *c, const sql_expr_t *e,
 			default:             tb[i].type = VX_NULL; break;
 			}
 		}
-		/* The nested trial prepare must not see this frame's EXISTS
-		 * unqualified-outer-ref state (cc_inner_cols) or the outer
-		 * correlation state -- clear them across the re-entrant vx_run_p
-		 * and restore after (corr_collect, which needs them, already ran). */
-		cc_inner_cols = NULL; cc_inner_ncol = 0; cc_otab = NULL; cc_bt = NULL;
 		trc = vx_run_p(c->st->db, out, tb, nref, 1, &tr, NULL);
-		cc_inner_cols = save_inner; cc_inner_ncol = save_ninner;
-		cc_otab = save_otab; cc_bt = save_bt;
 		if (trc != 1 || tr == NULL) { if (tr) vx_result_free(tr); free(out); return -1; }
 		tnc = vx_result_ncol(tr);
 		vx_result_free(tr);
@@ -1893,7 +1864,7 @@ compile_corr_subquery(struct vx_compiler *c, const sql_expr_t *e)
 	int idx, nref, *bindcol;
 	vx_expr_t *n;
 
-	if (build_corr_stmt(c, e, 1, &idx, &bindcol, &nref) != 0) {
+	if (build_corr_stmt(c, e, NULL, 0, 1, &idx, &bindcol, &nref) != 0) {
 		c->fail = 1; return NULL;
 	}
 	n = expr_node(c, VXO_CORRSUBQ);
@@ -1926,7 +1897,7 @@ compile_corr_in_select(struct vx_compiler *c, const sql_expr_t *e)
 	acls = node_class(c, a);
 	if (acls != VX_AFF_NUMERIC && acls != VX_AFF_TEXT) { c->fail = 1; return NULL; }
 
-	if (build_corr_stmt(c, e, 1, &idx, &bindcol, &nref) != 0) {
+	if (build_corr_stmt(c, e, NULL, 0, 1, &idx, &bindcol, &nref) != 0) {
 		c->fail = 1; return NULL;
 	}
 	n = expr_node(c, VXO_CORRIN);
@@ -1974,10 +1945,8 @@ compile_exists(struct vx_compiler *c, const sql_expr_t *e)
 		for (i = 0; i < inc && i < 64; i++) innames[i] = icols[i].name;
 	}
 
-	cc_inner_cols = inc > 0 ? innames : NULL;
-	cc_inner_ncol = inc;
-	rc = build_corr_stmt(c, e, -1, &idx, &bindcol, &nref);
-	cc_inner_cols = NULL; cc_inner_ncol = 0;
+	rc = build_corr_stmt(c, e, inc > 0 ? innames : NULL, inc, -1, &idx,
+	    &bindcol, &nref);
 	free(icols);
 	if (rc != 0) { c->fail = 1; return NULL; }
 	n = expr_node(c, VXO_EXISTS);
@@ -4542,17 +4511,25 @@ static int vx_prepare_select_body(struct xsql *db, sql_arena_t *ast,
     const sql_select_t *sel, const vx_cell_t *binds, int nbinds,
     vx_stmt_t **out, char **errmsg);
 
+/* A prepare keeps all of its state in its own frames (the correlation
+ * state is in struct namevec), so prepares run concurrently.  They ran
+ * under one global recursive amutex while that state was file-scoped,
+ * which serialized every SELECT prepare in the process, including the
+ * scalar subquery a noreuse plan runs at each execution: at 64 clients
+ * the ledger blend's analytic query held it 0.5-2 ms per run and 299 of
+ * 320 sampled client stacks waited on it (34k txn/s; 135k without). */
 static int
 vx_prepare_select(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
                   const vx_cell_t *binds, int nbinds,
                   vx_stmt_t **out, char **errmsg)
 {
-	int rc;
-	(void)xtc_amutex_lock(xtc_amutex_static(VX_LK_CC), -1);
-	rc = vx_prepare_select_body(db, ast, sel, binds, nbinds, out, errmsg);
-	(void)xtc_amutex_unlock(xtc_amutex_static(VX_LK_CC));
-	return rc;
+	return vx_prepare_select_body(db, ast, sel, binds, nbinds, out, errmsg);
 }
+
+/* test_prepare_concurrent parks one prepare here (it #includes this file). */
+#ifndef VX_PREPARE_TEST_HOOK
+#define VX_PREPARE_TEST_HOOK() ((void)0)
+#endif
 
 static int
 vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *sel,
@@ -4568,6 +4545,7 @@ vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 	char *srcsql = NULL;
 	int nproj = 0, rc = 0, proj_star = 0;
 
+	VX_PREPARE_TEST_HOOK();
 	if (out) *out = NULL;
 	if (errmsg) *errmsg = NULL;
 	if (sel == NULL) goto fallback;
@@ -4758,11 +4736,11 @@ vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 	 * WHERE column names must resolve against the source columns, which
 	 * we do by name after preparing "SELECT *". */
 	if (!proj_has_star) {
-		cc_otab = st->corr_alias;   /* collect correlated-subquery outer refs */
-		cc_bt = xstore_bt_of(db);   /* inner-schema access for EXISTS refs */
+		nv.otab = st->corr_alias;   /* collect correlated-subquery outer refs */
+		nv.bt = xstore_bt_of(db);   /* inner-schema access for EXISTS refs */
 		for (it = sel->cols->head; it; it = it->next)
-			if (collect_columns(&nv, it->expr) != 0) { cc_otab = NULL; cc_bt = NULL; goto fallback; }
-		if (sel->where && collect_columns(&nv, sel->where) != 0) { cc_otab = NULL; cc_bt = NULL; goto fallback; }
+			if (collect_columns(&nv, it->expr) != 0) goto fallback;
+		if (sel->where && collect_columns(&nv, sel->where) != 0) goto fallback;
 		/* ORDER BY key columns must be in the source too.  A bare integer
 		 * key is an output-column position (collected via the output);
 		 * any other key expression is collected here. */
@@ -4771,11 +4749,11 @@ vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 			for (o = sel->order->head; o; o = o->next) {
 				if (o->expr && o->expr->op == SX_E_NUMBER) continue;
 				if (order_key_alias_pos(sel, o->expr)) continue;
-				if (collect_columns(&nv, o->expr) != 0) { cc_otab = NULL; goto fallback; }
+				if (collect_columns(&nv, o->expr) != 0) goto fallback;
 			}
 		}
-		cc_otab = NULL;   /* pass 1 done: stop collecting outer refs */
-		cc_bt = NULL;
+		nv.otab = NULL;   /* pass 1 done: stop collecting outer refs */
+		nv.bt = NULL;
 	} else {
 		/* A star (bare "*", possibly mixed with expressions) expands to
 		 * every visible table column, in declared order, from the native
@@ -5006,8 +4984,6 @@ vx_prepare_select_body(struct xsql *db, sql_arena_t *ast, const sql_select_t *se
 oom:
 	rc = -1;
 fallback:
-	cc_otab = NULL;
-	cc_bt = NULL;
 	if (srcsql) free(srcsql);
 	if (ast) sql_arena_destroy(ast);
 	if (st) vx_finalize(st);
