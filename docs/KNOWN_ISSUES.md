@@ -32,6 +32,28 @@ connections on one 32-vCPU x86-64 host.
 so widening `local_id` has to wait for 2.0.  See
 [xtc_proc(3)](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_proc.3).
 
+## FIXED (1.60): sqlxtc SELECT prepares serialized on one lock; write-tail stalls
+
+**Prepares.**  Every SELECT prepare ran under one process-wide lock, because a prepare's
+correlated-subquery state lived in four file-scope variables.  A plan that keeps a scalar
+subquery's value (`WHERE seq > (SELECT max(seq) FROM t) - 5000`) is prepared at every execution
+and runs the subquery inside the prepare, so one such query at a time could run.  The ledger
+blend mix fell from 135k to 34k transactions/s at 64 connections and swung between 70k and 197k
+at 32.  The state is now per prepare and the lock is gone (test_prepare_concurrent).
+
+**Write tail.**  Two sources of sqlxtc's open-loop write tail are fixed.  The page provider
+cooled and wrote pages while the free list held its target, so with a pool larger than the
+store it rewrote the whole store through the page cache, and the kernel's 30 s dirty expiry
+flushed about 550 MB in one burst that the log's synchronous writes queued behind
+(test_pp_idle_writes).  The flush leader zero-filled the log 8 MiB at a time inside its flush, a
+roughly 3 ms pause once per 8 MiB of log; it is now 1 MiB (test_wal_zero_step).  Open-loop transfer at
+half load, 64-vCPU host: p99.9 13-18 ms -> 0.6-0.8 ms.
+
+**Still open.**  A thread that naps inside the commit path (a row-intent or checkpoint-gate
+wait, 20-200 us) and is woken late by the host (measured: about 27 ms timer wake-ups on 2 of 64
+vCPUs of a virtualized host, reproduced by a plain clock_nanosleep loop with no engine) stalls
+the commits queued behind it: a 25-35 ms spike in some 30 s runs.
+
 ## FIXED (1.60): sqlxtc served a damaged page as committed data; CHANGED: page format
 
 **What was wrong.**  After a clean shutdown sqlxtc trusts its page file
