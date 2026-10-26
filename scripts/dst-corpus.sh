@@ -63,8 +63,28 @@ esac
 # Plus the libraries configure found libxtc.a needs (FreeBSD: -lrt).
 libs="$libs $(sed -n 's/^LIBS[[:space:]]*=[[:space:]]*//p' "$build/Makefile")"
 
+# The sqlxtc engine sim tiers (test_sim_sqlxtc_*, test_sim_crash_recover,
+# ...) drive examples/06_sqlxtc under the sim backend and link its engine
+# objects -- the same set test/sim/run_sim_tests.sh builds.  Built once, on
+# first need, so a corpus of library-only tests pays nothing.
+BMDIR="$ROOT/examples/06_sqlxtc"
+engobjs=""
+build_engine() {
+	[ -n "$engobjs" ] && return 0
+	for _s in bufmgr engine db quack metrics vexec vxfunc sql_parse \
+		sql_parse_drv sql_ast sql_parse_gen xstore xlog wal btree btnode; do
+		# shellcheck disable=SC2086
+		$CC -g -O1 -std=c11 -D_GNU_SOURCE -DSQLXTC_HAVE_LIME=1 \
+			-I"$build" $INC -I"$BMDIR" -c "$BMDIR/$_s.c" \
+			-o "$work/eng-$_s.o" 2>/dev/null || return 1
+		engobjs="$engobjs $work/eng-$_s.o"
+	done
+}
+
 # Compile a distinct pinned test once, caching the executable in $work.
-# Prints the exe path on stdout, or nothing on a build failure.
+# A library-only link first; a test that needs the sqlxtc engine (it does
+# not link alone) is retried with the engine objects.  Prints the exe path
+# on stdout, or nothing on a build failure.
 compile_test() {
 	_t=$1
 	_exe="$work/$_t"
@@ -73,6 +93,14 @@ compile_test() {
 	# shellcheck disable=SC2086
 	if $CC -g -O1 -std=c11 -D_GNU_SOURCE -I"$build" $INC \
 		"$ROOT/test/sim/$_t.c" "$lib" $libs -o "$_exe" 2>/dev/null; then
+		echo "$_exe"
+		return 0
+	fi
+	build_engine || return 0
+	# shellcheck disable=SC2086
+	if $CC -g -O1 -std=c11 -D_GNU_SOURCE -DSQLXTC_HAVE_LIME=1 -I"$build" \
+		$INC -I"$BMDIR" "$ROOT/test/sim/$_t.c" $engobjs "$lib" $libs \
+		-o "$_exe" 2>/dev/null; then
 		echo "$_exe"
 	fi
 }

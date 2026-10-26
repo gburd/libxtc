@@ -79,3 +79,7 @@ test_sim_wal_kill       1          1   bug17 WALKILL: unmasked commit wedges the
 # f990a57 btree.c (the cursor hop onto a reissued page, fixed by 8894276):
 # skipped=1 bad_order=1 at the first seed.
 test_sim_btree_scan     0          16  p161/bthang: cursor hop + keyless open vs merge/pid reuse; FAILS on f990a57 btree.c (fixed 8894276)
+# p161/sxstore: xstore_gc read a 20-byte secondary-index entry as a 20-byte
+# version key and deleted it (an index key with 7 value bytes, rowids near
+# INT64_MAX): index lookups lost rows.  FAILED 8/8 seeds before 071053b.
+test_sim_sqlxtc_gcidx   1          8   p161/sxstore: GC must not delete 20-byte index entries; FAILS before 071053b (fixed 071053b)
