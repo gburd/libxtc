@@ -76,6 +76,10 @@
  *	                   open skips the last index, so after a crash
  *	                   recovery that index misses rows
  *	                   (test_sim_sqlxtc_reopen: INDEX).
+ *	 19  EVICTNOWB -- examples/06_sqlxtc/bufmgr.c's evictor drops every
+ *	                   4th dirty victim without writing it back; the
+ *	                   page reloads stale (test_sim_sqlxtc_evict: a lost
+ *	                   or wrong row).
  *
  *	NOT plantable under DST (an honest gap, recorded so it is not
  *	mistaken for missing coverage): the xtc_amutex mutual-exclusion and
@@ -128,5 +132,6 @@
 #define XTC_DST_BUG_BATCHDROP  16  /* batch.c: drop a held mt hand-in */
 #define XTC_DST_BUG_WALKILL    17  /* wal.c: commit not masked against kills */
 #define XTC_DST_BUG_IDXSKIP    18  /* xstore.c: an index rebuild skips one index */
+#define XTC_DST_BUG_EVICTNOWB  19  /* bufmgr.c: evict a dirty page unwritten */
 
 #endif /* XTC_DST_INJECT_H */

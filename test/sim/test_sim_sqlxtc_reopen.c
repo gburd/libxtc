@@ -84,7 +84,18 @@
 #define MAXSEQ    256             /* lane sequence numbers per seed */
 #define MAXID     (MAXSEQ * NW)
 #define NG        7               /* distinct g values (the indexed column) */
-#define FRAMES    512
+/* A wrapper (test_sim_sqlxtc_evict.c) includes this file with a pool far
+ * smaller than the store and padded rows, so pages are evicted, written
+ * back and reloaded between the opens. */
+#ifndef SIM_FRAMES
+#define SIM_FRAMES 512            /* the whole store stays resident */
+#endif
+#ifndef SIM_PAD
+#define SIM_PAD    0              /* bytes of padding per row (column p) */
+#endif
+#ifndef SIM_NAME
+#define SIM_NAME   "open/close"
+#endif
 #define N_IDX     2               /* u UNIQUE + t_g */
 #define MAX_STEPS 20000000L
 
@@ -104,6 +115,7 @@ struct shared {
 	int         last_clean;       /* the last segment closed cleanly */
 	uint64_t    acked, crashes, cleans, trusted_opens, recover_opens;
 	uint64_t    idx_trusted;      /* trusted opens that kept the indexes */
+	uint64_t    evicted, loads;   /* buffer pool, summed over segments */
 	int         failed;
 };
 
@@ -174,23 +186,25 @@ model_apply(int64_t id)
 	}
 }
 
+static char g_pad[SIM_PAD + 1];
+
 static int
 run_op(sx_db *h, int kind, int64_t id, int64_t tgt)
 {
-	char sql[200];
+	char sql[200 + SIM_PAD];
 	int rc;
 	switch (kind) {
 	case K_INS:
-		snprintf(sql, sizeof sql, "INSERT INTO t(k, u, g, w) VALUES(%lld, "
-		    "'u%lld', %lld, 0)", (long long)id, (long long)id,
-		    (long long)(id % NG));
+		snprintf(sql, sizeof sql, "INSERT INTO t(k, u, g, w, p) VALUES(%lld, "
+		    "'u%lld', %lld, 0, '%s')", (long long)id, (long long)id,
+		    (long long)(id % NG), g_pad);
 		return sx_exec(h, sql, NULL);
 	case K_TXN:
 		if ((rc = sx_exec(h, "BEGIN", NULL)) != SX_OK)
 			return rc;
-		snprintf(sql, sizeof sql, "INSERT INTO t(k, u, g, w) VALUES(%lld, "
-		    "'u%lld', %lld, 0)", (long long)id, (long long)id,
-		    (long long)(id % NG));
+		snprintf(sql, sizeof sql, "INSERT INTO t(k, u, g, w, p) VALUES(%lld, "
+		    "'u%lld', %lld, 0, '%s')", (long long)id, (long long)id,
+		    (long long)(id % NG), g_pad);
 		if ((rc = sx_exec(h, sql, NULL)) == SX_OK) {
 			snprintf(sql, sizeof sql, "UPDATE t SET w = %lld WHERE k = %lld",
 			    (long long)id, (long long)tgt);
@@ -299,7 +313,7 @@ verify(const char *kind)
 		FAILF("%s: sx_open failed", kind);
 		return -1;
 	}
-	if (sx_prepare(h, "SELECT k, u, g, w FROM t ORDER BY k", -1, &st,
+	if (sx_prepare(h, "SELECT k, u, g, w, length(p) FROM t ORDER BY k", -1, &st,
 	    NULL) != SX_OK) {
 		FAILF("%s: table t is gone", kind);
 		sx_close(h);
@@ -320,6 +334,9 @@ verify(const char *kind)
 		if (u == NULL || strcmp(u, want) != 0)
 			FAILF("%s: row k=%lld has u=%s", kind, (long long)id,
 			    u ? u : "NULL");
+		if (sx_column_int64(st, 4) != SIM_PAD)
+			FAILF("%s: row k=%lld has a %lld-byte pad, want %d", kind,
+			    (long long)id, (long long)sx_column_int64(st, 4), SIM_PAD);
 		g_obs[id].present = 1;
 		g_obs[id].g = (int32_t)sx_column_int64(st, 2);
 		g_obs[id].w = (int32_t)sx_column_int64(st, 3);
@@ -440,6 +457,7 @@ segment(uint64_t rs, int crash)
 	xtc_proc_opts_t po = { 0 };
 	xtc_pid_t pid;
 	uint64_t miss = 0, stale = 0;
+	struct bm_stats bs;
 	int l, rc, n;
 
 	g_ops = OPS_MIN + (int)(mix(rs ^ 0x6F7073ull) % OPS_SPAN);
@@ -486,6 +504,9 @@ segment(uint64_t rs, int crash)
 	}
 	(void)xtc_exec_fini(g_exec);
 	g_exec = NULL;
+	sx_storage_bm_stats(&bs);
+	g_sh->evicted += bs.evicted;
+	g_sh->loads += bs.loads;
 	n = xstore_index_check(sx_storage_bt(), &miss, &stale);
 	if (n != N_IDX || miss != 0)
 		FAILF("in run, before a clean close: INDEX: %llu rows missing "
@@ -534,7 +555,7 @@ open_store(const char **kind)
 	*kind = g_sh->last_clean ? "after a clean reopen" : "after crash recovery";
 	if (!g_sh->created)
 		*kind = "after create";
-	if (sx_storage_open(g_path, FRAMES) != SX_OK) {
+	if (sx_storage_open(g_path, SIM_FRAMES) != SX_OK) {
 		FAILF("%s: sx_storage_open failed", *kind);
 		return -1;
 	}
@@ -548,7 +569,7 @@ open_store(const char **kind)
 		sx_db *h = NULL;
 		if (sx_open(":memory:", &h) != SX_OK ||
 		    sx_exec(h, "CREATE TABLE t(k INTEGER PRIMARY KEY, u TEXT UNIQUE, "
-		    "g INTEGER, w INTEGER)", NULL) != SX_OK ||
+		    "g INTEGER, w INTEGER, p TEXT)", NULL) != SX_OK ||
 		    sx_exec(h, "CREATE INDEX t_g ON t(g)", NULL) != SX_OK) {
 			FAILF("create failed");
 			return -1;
@@ -650,7 +671,9 @@ main(int argc, char **argv)
 	uint64_t base = argc > 1 ? strtoull(argv[1], NULL, 0) : 1;
 	int count = argc > 2 ? atoi(argv[2]) : 6, k;
 	uint64_t acked = 0, crashes = 0, cleans = 0, tr = 0, rec = 0, it = 0;
+	uint64_t ev = 0, ld = 0;
 
+	memset(g_pad, 'x', SIM_PAD);
 	g_sh = mmap(NULL, sizeof *g_sh, PROT_READ | PROT_WRITE,
 	    MAP_SHARED | MAP_ANON, -1, 0);
 	if (g_sh == MAP_FAILED)
@@ -665,6 +688,8 @@ main(int argc, char **argv)
 		tr += g_sh->trusted_opens;
 		rec += g_sh->recover_opens;
 		it += g_sh->idx_trusted;
+		ev += g_sh->evicted;
+		ld += g_sh->loads;
 		if (run_seed(seed, &f2) != 0)
 			return 1;
 		if (f1 != f2) {
@@ -676,18 +701,20 @@ main(int argc, char **argv)
 	}
 	printf("sweep: %d seeds x2 (replayed): %llu acked ops, %llu crashes, "
 	    "%llu clean closes, %llu trusted reopens (%llu kept the indexes), "
-	    "%llu recoveries\n", count,
-	    (unsigned long long)acked, (unsigned long long)crashes,
+	    "%llu recoveries; pool %d frames: %llu evictions, %llu page loads\n",
+	    count, (unsigned long long)acked, (unsigned long long)crashes,
 	    (unsigned long long)cleans, (unsigned long long)tr,
-	    (unsigned long long)it, (unsigned long long)rec);
+	    (unsigned long long)it, (unsigned long long)rec, SIM_FRAMES,
+	    (unsigned long long)ev, (unsigned long long)ld);
 	/* Non-vacuity: the sweep must have exercised every open kind. */
-	if (count >= 4 && (crashes == 0 || it == 0 || rec == 0)) {
+	if (count >= 4 && (crashes == 0 || it == 0 || rec == 0 ||
+	    (SIM_FRAMES < 128 && (ev == 0 || ld == 0)))) {
 		printf("FAIL: the sweep did not exercise every open kind\n");
 		return 1;
 	}
-	printf("OK: sqlxtc open/close under DST -- clean close + trusted reopen "
+	printf("OK: sqlxtc %s under DST -- clean close + trusted reopen "
 	    "and crash recovery interleaved; every acked op durable, in-flight "
 	    "ops all-or-nothing, rows exact, 0 index entries missing, replayed "
-	    "(%d seeds from %llu)\n", count, (unsigned long long)base);
+	    "(%d seeds from %llu)\n", SIM_NAME, count, (unsigned long long)base);
 	return 0;
 }
