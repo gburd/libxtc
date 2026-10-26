@@ -12,8 +12,11 @@ from pathlib import Path
 # Directories to process
 INCLUDE_DIRS = ['src', 'test', 'bench', 'docs', 'man', 'dist', 'examples']
 
-# Directories to skip
-SKIP_DIRS = ['.git', 'build_unix', 'build_cov', 'target', 'autom4te.cache']
+# Directories to skip.  'lime' is the examples/06_sqlxtc/lime submodule:
+# third-party source this repo does not own -- a sweep must never rewrite
+# it (one did: 55 files, reverted by hand).  Use --dry-run to only report.
+SKIP_DIRS = ['.git', 'build_unix', 'build_cov', 'target', 'autom4te.cache',
+             'lime', '.jekyll-cache', '_site']
 
 # Files to skip
 SKIP_FILES = ['LICENSE']
