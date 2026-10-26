@@ -917,42 +917,44 @@ read only):
 
 | Engine | Conns | Load | Offered/s | p50 | p99 | p99.9 | max, ms: median (range) |
 | --- | ---: | --- | ---: | ---: | ---: | ---: | --- |
-| SQLite | 8 | closed loop | 167,127 | 48 | 64 | 72 | 0.5 (0.5-3.0) |
-| SQLite | 8 | 25% | 41,781 | 100 | 112 | 121 | 0.8 (0.6-28) |
-| SQLite | 8 | 50% | 83,563 | 93 | 111 | 119 | 0.8 (0.8-1.0) |
-| SQLite | 8 | 75% | 125,345 | 79 | 111 | 119 | 1.6 (1.5-1.6) |
-| SQLite | 8 | 90% | 150,414 | 78 | 118 | 21 ms | 25 (23-26) |
-| sqlxtc | 8 | closed loop | 181,681 | 44 | 58 | 64 | 0.5 (0.5-0.5) |
-| sqlxtc | 8 | 25% | 45,420 | 99 | 111 | 125 | 0.7 (0.6-0.8) |
-| sqlxtc | 8 | 50% | 90,840 | 86 | 111 | 131 | 0.8 (0.7-4.0) |
-| sqlxtc | 8 | 75% | 136,260 | 75 | 105 | 26 ms | 32 (1.7-40) |
-| sqlxtc | 8 | 90% | 163,513 | 75 | 9,727 | 56 ms | 67 (39-69) |
-| SQLite | 32 | closed loop | 209,547 | 147 | 315 | 383 | 1.0 (0.9-1.2) |
-| SQLite | 32 | 25% | 52,386 | 107 | 124 | 135 | 1.5 (1.1-1.8) |
-| SQLite | 32 | 50% | 104,773 | 107 | 125 | 137 | 1.4 (1.3-11) |
-| SQLite | 32 | 75% | 157,160 | 107 | 127 | 145 | 27 (1.5-35) |
-| SQLite | 32 | 90% | 188,592 | 108 | 135 | 159 | 4.0 (1.3-23) |
-| sqlxtc | 32 | closed loop | 649,002 | 49 | 68 | 82 | 0.8 (0.8-0.9) |
-| sqlxtc | 32 | 25% | 162,250 | 99 | 121 | 135 | 1.3 (0.8-4.4) |
-| sqlxtc | 32 | 50% | 324,501 | 95 | 120 | 137 | 6.9 (5.4-27) |
-| sqlxtc | 32 | 75% | 486,751 | 80 | 17 ms | 41 ms | 67 (62-98) |
-| sqlxtc | 32 | 90% | 584,101 | 78 | 49 ms | 92 ms | 123 (119-357) |
+| SQLite | 8 | closed loop | 166,930 | 48 | 64 | 71 | 0.7 (0.5-3.7) |
+| SQLite | 8 | 25% | 41,732 | 101 | 114 | 123 | 0.6 (0.6-35) |
+| SQLite | 8 | 50% | 83,465 | 93 | 111 | 118 | 1.0 (1.0-33) |
+| SQLite | 8 | 75% | 125,197 | 79 | 111 | 120 | 2.2 (1.6-4.7) |
+| SQLite | 8 | 90% | 150,237 | 78 | 113 | 16 ms | 23 (3.0-26) |
+| sqlxtc | 8 | closed loop | 181,480 | 44 | 58 | 64 | 27 (0.6-28) |
+| sqlxtc | 8 | 25% | 45,370 | 98 | 110 | 116 | 0.6 (0.6-0.7) |
+| sqlxtc | 8 | 50% | 90,740 | 85 | 107 | 123 | 1.0 (0.9-1.0) |
+| sqlxtc | 8 | 75% | 136,110 | 75 | 107 | 807 | 13 (3.9-40) |
+| sqlxtc | 8 | 90% | 163,332 | 74 | 129 | 47 ms | 57 (3.1-60) |
+| SQLite | 32 | closed loop | 211,873 | 145 | 311 | 379 | 27 (1.0-27) |
+| SQLite | 32 | 25% | 52,968 | 106 | 121 | 131 | 1.6 (1.6-33) |
+| SQLite | 32 | 50% | 105,936 | 107 | 123 | 135 | 28 (1.3-35) |
+| SQLite | 32 | 75% | 158,904 | 107 | 129 | 145 | 27 (1.5-35) |
+| SQLite | 32 | 90% | 190,685 | 108 | 135 | 159 | 1.6 (1.6-28) |
+| sqlxtc | 32 | closed loop | 644,159 | 50 | 66 | 77 | 27 (0.8-27) |
+| sqlxtc | 32 | 25% | 161,039 | 100 | 114 | 131 | 1.2 (0.9-4.5) |
+| sqlxtc | 32 | 50% | 322,079 | 96 | 115 | 135 | 1.8 (1.7-7.7) |
+| sqlxtc | 32 | 75% | 483,119 | 80 | 16 ms | 29 ms | 46 (40-69) |
+| sqlxtc | 32 | 90% | 579,743 | 78 | 54 ms | 126 ms | 158 (87-170) |
 
-* **Up to 50% load both engines are flat**: p99 108-126 us, p99.9
-  118-137 us, at 8 and at 32 connections.  sqlxtc carries 1.1x
-  SQLite's rate at 8 connections and 3.1x at 32.
+* **Up to 50% load both engines are flat**: p99 107-123 us, p99.9
+  116-135 us, at 8 and at 32 connections.  sqlxtc carries 1.1x
+  SQLite's rate at 8 connections and 3.0x at 32.
 * **sqlxtc's read tail rises first.**  At 75% of its maximum its p99.9
-  is 26 ms at 8 connections and 41 ms at 32, where SQLite's is 119 and
-  145 us; at 90% sqlxtc's p99 reaches 10-49 ms.  SQLite at 8
-  connections also pauses at 90% (p99.9 21 ms); at 32 it keeps p99.9 at
-  or under 161 us at every load, with rare 4-27 ms pauses in its
-  maximum.  sqlxtc's service time does not move (p99 56-75 us): its
-  throughput dips briefly, about every 4 s at 32 connections, and the
-  queue drains over the next 100-300 ms.  The dips are periodic, absent
-  from the closed-loop runs, and not the single log checkpoint a run of
-  this read-only shape performs; they are not explained yet.  At 75%
-  load and 32 connections sqlxtc is still serving 3.1x SQLite's 75%
-  rate.
+  is 807 us at 8 connections and 29 ms at 32, where SQLite's is 120 and
+  145 us; at 90% sqlxtc's p99.9 is 47 ms and 126 ms.  SQLite at 8
+  connections also pauses at 90% (p99.9 16 ms); at 32 it keeps p99.9 at
+  or under 159 us at every load.  Single 23-35 ms maxima in both
+  engines' runs at every load are the host's late timer wake-ups (see
+  transfer).  sqlxtc's service time does not move: its throughput dips
+  for 200-600 ms about every 4 s at 32 connections and 75% load (650-
+  1,500 ms at 90%), and the queue drains after each dip.  The dips are
+  periodic, absent from the closed-loop runs, and not the log
+  checkpoint; their cause is not found yet (a trace of page faults, TLB
+  flushes, involuntary switches, futex and memory-map calls found no
+  event that precedes every dip).  At 75% load and 32 connections
+  sqlxtc is serving 3.0x SQLite's 75% rate.
 * SQLite at 32 connections needs 10-15 s after opening before it
   reaches full speed (each connection fills its own page cache), hence
   the 20 s warm-up for this shape.
