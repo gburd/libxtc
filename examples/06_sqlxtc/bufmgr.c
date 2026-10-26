@@ -3476,9 +3476,14 @@ fl_save(bm_t *bm, uint8_t *tr)
 	(void)pthread_mutex_lock(&bm->pid_mu);
 	n = bm->free_pids_n + bm->quar_pids_n;
 	if (n > 0 && (ids = xtc_malloc((size_t)n * sizeof *ids)) != NULL) {
-		memcpy(ids, bm->free_pids, (size_t)bm->free_pids_n * sizeof *ids);
-		memcpy(ids + bm->free_pids_n, bm->quar_pids,
-		    (size_t)bm->quar_pids_n * sizeof *ids);
+		/* Either list may be empty and never allocated (NULL): memcpy
+		 * from NULL is undefined even for 0 bytes (UBSan). */
+		if (bm->free_pids_n > 0)
+			memcpy(ids, bm->free_pids,
+			    (size_t)bm->free_pids_n * sizeof *ids);
+		if (bm->quar_pids_n > 0)
+			memcpy(ids + bm->free_pids_n, bm->quar_pids,
+			    (size_t)bm->quar_pids_n * sizeof *ids);
 	}
 	bm->free_pids_n = 0;
 	bm->quar_pids_n = 0;   /* still retired (quar_set): never fixed again */
