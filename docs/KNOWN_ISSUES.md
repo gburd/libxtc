@@ -32,6 +32,53 @@ connections on one 32-vCPU x86-64 host.
 so widening `local_id` has to wait for 2.0.  See
 [xtc_proc(3)](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_proc.3).
 
+## FIXED (2.0): one hot `xtc_amutex` shared by many plain threads
+
+**The problem (1.59).**  With 16-128 OS threads (not fibers) contending
+for one `xtc_amutex`, throughput was up to 52% below 1.58 (perf gate
+cell `lock_amutex_w64`, accepted for 1.59).  1.59 woke a sleeper on
+every release, so the lock never sat free while a woken thread left a
+deep CPU idle state (that had cost the sqlxtc ledger 35-50%), but on a
+hot mutex the woken thread lost it to a spinning thread and slept again:
+3.2 context switches per acquire.
+
+**The fix.**  A release that frees the mutex while another thread is
+spinning on it no longer wakes a sleeper: the spinner takes the mutex
+within its spin, so the mutex is not left free.  At most 8 releases in
+a row skip the wake, so a sleeper still gets a turn on a mutex that
+always has a spinner.  `xtc_arwlock` is unchanged.  Measured on a
+64-vCPU x86-64 host, 3 reps x 3 s interleaved, median acquires/s
+(`bench_sync_offloop amutex w N`, the perf gate's arguments):
+
+| threads | 1.58 | 1.59 | 2.0 | 2.0, C1E+C6 on |
+| --- | --- | --- | --- | --- |
+| 4 | 794k | 947k | 989k | 1,018k |
+| 16 | 484k | 252k | 519k | 512k |
+| 64 | 486k | 247k | 523k | 411k |
+| 128 | 485k | 243k | 538k | 427k |
+
+The first three columns ran with the deep idle states C1E and C6
+disabled, as the perf gate requires; the last with them enabled (1.58
+there: 491k / 383k / 326k at 16 / 64 / 128, 1.59: 252k / 213k / 204k).
+Context switches per 1,000 acquires at 64 threads: 1.58 1,814, 1.59
+3,249, 2.0 678.  The arwlock cells did not move.
+
+**What it costs.**  The sqlxtc ledger (transfer and blend, 8 and 64
+clients) is unchanged with the deep idle states off (every cell within
+1%, ranges overlapping).  With C1E and C6 on, transfer at 64 clients is
+4.5% lower (45.0k vs 47.1k txn/s, median of 10 runs each, ranges
+overlapping) and blend at 64 2% lower: a sleeper whose wake was skipped
+later needs ~100 us to come out of C6.  Acquire p99 at 64 threads is
+1.2 ms (1.59: 1.4 ms, 1.58: 0.75 ms).
+
+**If many plain threads must share one mutex, fibers are still faster.**
+Fibers on one loop never block an OS thread: a contended fiber parks and
+the release hands the mutex to it in the same thread (1.59, same host:
+2.45-2.49M acquires/s at 4-64 fibers, `bench_amutex_fibers`).  Fibers
+spread over many loops bring the cross-thread hand-off back, so
+co-locate the fibers that share one hot lock on one loop, or shard the
+lock.
+
 ## FIXED (1.60): sqlxtc served a damaged page as committed data; CHANGED: page format
 
 **What was wrong.**  After a clean shutdown sqlxtc trusts its page file
@@ -387,35 +434,6 @@ be its cause, so it stays open.
 
 ## OPEN (1.59): known costs of the 1.59 performance work
 
-* **One hot `xtc_amutex` shared by many plain threads is slower.**  With
-  16-128 OS threads (not fibers) contending for one mutex, throughput is
-  up to 52% below 1.58 (`bench_sync_offloop amutex w`).  1.59 wakes a
-  sleeper on every release instead of keeping one wake in flight,
-  because the in-flight rule left the lock free while the woken thread
-  was still leaving a deep CPU idle state; that made the sqlxtc ledger
-  workloads 35-50% slower on hosts with deep idle states enabled.  The
-  woken thread now often loses the mutex to a spinning one and sleeps
-  again.  `xtc_arwlock` and workloads over several locks are 1.6-12x
-  faster than 1.58.
-
-  **Workaround: fewer threads on one mutex, or fibers.**  Measured on a
-  64-vCPU x86-64 host (deep idle states off, 5 reps, median ops/s, one
-  short critical section per acquire):
-
-  | contenders | plain OS threads | fibers, all on 1 loop | fibers over 8 loops |
-  | --- | --- | --- | --- |
-  | 4 | 1.04M | 2.45M | 0.20M |
-  | 16 | 0.26M | 2.48M | 0.25M |
-  | 64 | 0.25M | 2.49M | 0.31M |
-
-  Fibers on one loop never block an OS thread: a contended fiber parks
-  and the release hands the mutex to it in the same thread, 10x the
-  plain-thread rate at 16-64 contenders.  Fibers spread over many loops
-  bring the cross-thread hand-off back, so co-locate the fibers that
-  share one hot lock on one loop (`xtc_proc_spawn` on that loop), or
-  shard the lock.  If they must be plain threads, keep the number that
-  contend for one mutex small (4 above: 1.04M).  `bench_amutex_fibers`
-  measures the fiber cases.
 * **The store is larger than SQLite's on disk.**  Measured on stores
   each engine built from the same load (allocated blocks, XFS):
 
