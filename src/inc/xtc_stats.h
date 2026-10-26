@@ -19,10 +19,12 @@
  *	store.  For low-frequency-update gauges this is fine.
  *
  *	A histogram tracks a value distribution and answers quantile
- *	queries (p50/p99/p999).  The current implementation wraps the
- *	HDR-style hist used by the conformance bench, with per-CPU
- *	shards so concurrent record() calls don't contend.  Quantile
- *	queries merge shards under a read lock.
+ *	queries (p50/p99/p999) and the exact max.  Log-linear buckets
+ *	from 1 ns to 2^40 ns (~18 min), 16 per octave; a quantile is the
+ *	upper bound of its bucket (HdrHistogram's convention), so it is
+ *	never below the true value and at most 1/16 above it.  Per-CPU
+ *	shards so concurrent record() calls don't contend; quantile
+ *	queries merge the shards with relaxed loads, no lock.
  *
  *	A dist is a mergeable online mean/variance aggregator.
  *	Welford's single-pass update runs on the current CPU's shard;
@@ -78,6 +80,7 @@ typedef int (*xtc_metric_visit_fn)(const char *name,
  * PUBLIC: void      xtc_hist_record __P((xtc_hist_t *, int64_t));
  * PUBLIC: int64_t   xtc_hist_quantile __P((const xtc_hist_t *, double));
  * PUBLIC: uint64_t  xtc_hist_count __P((const xtc_hist_t *));
+ * PUBLIC: int64_t   xtc_hist_max __P((const xtc_hist_t *));
  *
  * PUBLIC: int       xtc_dist_create __P((const char *, xtc_dist_t **));
  * PUBLIC: void      xtc_dist_destroy __P((xtc_dist_t *));
@@ -110,6 +113,7 @@ XTC_API void      xtc_hist_destroy(xtc_hist_t *h);
 XTC_API void      xtc_hist_record(xtc_hist_t *h, int64_t value_ns);
 XTC_API int64_t   xtc_hist_quantile(const xtc_hist_t *h, double q);
 XTC_API uint64_t  xtc_hist_count(const xtc_hist_t *h);
+XTC_API int64_t   xtc_hist_max(const xtc_hist_t *h);
 
 XTC_API int       xtc_dist_create(const char *name, xtc_dist_t **out);
 XTC_API void      xtc_dist_destroy(xtc_dist_t *d);

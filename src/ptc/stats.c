@@ -263,19 +263,24 @@ xtc_gauge_read(const xtc_gauge_t *g)
 }
 
 /* ---- histogram ----
- * Simple log-linear histogram for nanosecond latencies: 24 powers
- * of two from 1ns to ~16ms, with 16 sub-buckets each = 384 buckets.
- * Per-CPU sharded for record; merged on quantile query.
+ * Log-linear histogram for nanosecond latencies: 40 powers of two
+ * (1 ns .. 2^40 ns, about 18 minutes) with 16 sub-buckets each = 640
+ * buckets, so a bucket is at most 1/16 of its value wide (values below
+ * 16 ns are exact).  Values >= 2^40 are counted in the top bucket.
+ * Each shard also keeps the exact largest value it recorded.  Per-CPU
+ * sharded for record; merged on query.  A record is ONE atomic add (its
+ * bucket) plus a relaxed load of the shard's max; the count is the sum
+ * of the buckets, computed by the reader.
  */
 
-#define XTC_HIST_BASE_BITS  24
+#define XTC_HIST_BASE_BITS  40
 #define XTC_HIST_SUB_BITS   4
 #define XTC_HIST_SUBS       (1 << XTC_HIST_SUB_BITS)
 #define XTC_HIST_BUCKETS    (XTC_HIST_BASE_BITS * XTC_HIST_SUBS)
 
 struct hist_shard {
 	_Alignas(XTC_CACHE_LINE) _Atomic uint64_t buckets[XTC_HIST_BUCKETS];
-	_Atomic uint64_t count;
+	_Atomic int64_t  max;
 };
 
 struct xtc_hist {
@@ -292,34 +297,40 @@ __hist_bucket(int64_t value_ns)
 	if (value_ns <= 0) return 0;
 	v = (uint64_t)value_ns;
 	if (v >= (1ULL << XTC_HIST_BASE_BITS)) v = (1ULL << XTC_HIST_BASE_BITS) - 1;
-	/* Find highest set bit. */
-#if defined(__GNUC__) || defined(__clang__)
-	base = 63 - XTC_CLZLL(v);
-#else
-	base = 0; { uint64_t x = v; while (x >>= 1) base++; }
-#endif
-	if (base < 0) base = 0;
-	if (base >= XTC_HIST_BASE_BITS) base = XTC_HIST_BASE_BITS - 1;
-	/* Sub-bucket: top XTC_HIST_SUB_BITS bits below the base. */
-	if (base >= XTC_HIST_SUB_BITS) {
+	base = 63 - XTC_CLZLL(v);   /* highest set bit; v >= 1 */
+	/* Sub-bucket: the XTC_HIST_SUB_BITS bits below the base.  Below
+	 * 2^SUB_BITS there are fewer bits than sub-buckets, so the value
+	 * is shifted up and each bucket holds exactly one value. */
+	if (base >= XTC_HIST_SUB_BITS)
 		sub = (int)((v >> (base - XTC_HIST_SUB_BITS)) & (XTC_HIST_SUBS - 1));
-	} else {
-		sub = 0;
-	}
+	else
+		sub = (int)((v << (XTC_HIST_SUB_BITS - base)) & (XTC_HIST_SUBS - 1));
 	return base * XTC_HIST_SUBS + sub;
 }
 
+/* The smallest value bucket idx holds. */
 static int64_t
 __hist_bucket_lower_bound(int idx)
 {
 	int base = idx / XTC_HIST_SUBS;
 	int sub = idx % XTC_HIST_SUBS;
-	int64_t v;
 	if (base >= XTC_HIST_SUB_BITS)
-		v = ((int64_t)1 << base) | ((int64_t)sub << (base - XTC_HIST_SUB_BITS));
-	else
-		v = (int64_t)1 << base;
-	return v;
+		return ((int64_t)1 << base) |
+		    ((int64_t)sub << (base - XTC_HIST_SUB_BITS));
+	return ((int64_t)1 << base) | (sub >> (XTC_HIST_SUB_BITS - base));
+}
+
+/* The largest value bucket idx holds (inclusive). */
+static int64_t
+__hist_bucket_upper_bound(int idx)
+{
+	int base = idx / XTC_HIST_SUBS;
+	int sub = idx % XTC_HIST_SUBS;
+	if (base >= XTC_HIST_SUB_BITS)
+		return (((int64_t)1 << base) |
+		    ((int64_t)sub << (base - XTC_HIST_SUB_BITS))) +
+		    ((int64_t)1 << (base - XTC_HIST_SUB_BITS)) - 1;
+	return ((int64_t)1 << base) | (sub >> (XTC_HIST_SUB_BITS - base));
 }
 
 int
@@ -359,47 +370,98 @@ xtc_hist_record(xtc_hist_t *h, int64_t value_ns)
 {
 	int b;
 	struct hist_shard *s;
+	int64_t cur;
 	if (XTC_UNLIKELY(h == NULL)) return;
 	b = __hist_bucket(value_ns);
 	s = &h->shards[__current_cpu(h->n_cpus)];
 	atomic_fetch_add_explicit(&s->buckets[b], 1, memory_order_relaxed);
-	atomic_fetch_add_explicit(&s->count, 1, memory_order_relaxed);
+	/* Exact max: a plain load; a CAS only for a new max. */
+	cur = atomic_load_explicit(&s->max, memory_order_relaxed);
+	while (XTC_UNLIKELY(value_ns > cur) &&
+	    !atomic_compare_exchange_weak_explicit(&s->max, &cur, value_ns,
+	    memory_order_relaxed, memory_order_relaxed))
+		;
+}
+
+static uint64_t
+__hist_bucket_total(const xtc_hist_t *h, int b)
+{
+	uint64_t total = 0;
+	int i;
+	for (i = 0; i < h->n_cpus; i++)
+		total += atomic_load_explicit(&h->shards[i].buckets[b],
+		    memory_order_relaxed);
+	return total;
 }
 
 uint64_t
 xtc_hist_count(const xtc_hist_t *h)
 {
 	uint64_t total = 0;
-	int i;
+	int b;
 	if (h == NULL) return 0;
-	for (i = 0; i < h->n_cpus; i++)
-		total += atomic_load_explicit(&h->shards[i].count,
-		    memory_order_relaxed);
+	for (b = 0; b < XTC_HIST_BUCKETS; b++)
+		total += __hist_bucket_total(h, b);
 	return total;
 }
 
 int64_t
+xtc_hist_max(const xtc_hist_t *h)
+{
+	int64_t m = 0, v;
+	int i;
+	if (h == NULL) return 0;
+	for (i = 0; i < h->n_cpus; i++) {
+		v = atomic_load_explicit(&h->shards[i].max,
+		    memory_order_relaxed);
+		if (v > m) m = v;
+	}
+	return m;
+}
+
+/*
+ * Nearest rank: the smallest recorded value v with at least ceil(q *
+ * count) values <= v, reported as the upper bound of v's bucket (as
+ * HdrHistogram does) and never above the exact max.  So the answer is
+ * >= the true quantile and within one sub-bucket (1/16) of it.  The
+ * buckets are read twice (count, then the walk); they only grow, so the
+ * walk always reaches the target.
+ */
+int64_t
 xtc_hist_quantile(const xtc_hist_t *h, double q)
 {
 	uint64_t total, target, running = 0;
-	int b, i;
+	double want;
+	int64_t max, lb, ub;
+	int b;
 	if (h == NULL) return 0;
 	total = xtc_hist_count(h);
 	if (total == 0) return 0;
-	if (q < 0.0) q = 0.0; else if (q > 1.0) q = 1.0;
-	target = (uint64_t)((double)total * q);
+	if (!(q > 0.0)) q = 0.0; else if (q > 1.0) q = 1.0;   /* NaN -> 0 */
+	want = (double)total * q;
+	target = (uint64_t)want;
+	/* ceil, without turning a rounding error (0.07 * 100 =
+	 * 7.000000000000001) into the next rank. */
+	if (want - (double)target > want * 1e-12) target++;
 	if (target < 1) target = 1;
+	if (target > total) target = total;
 	for (b = 0; b < XTC_HIST_BUCKETS; b++) {
-		uint64_t bucket_total = 0;
-		for (i = 0; i < h->n_cpus; i++)
-			bucket_total += atomic_load_explicit(
-			    &h->shards[i].buckets[b],
-			    memory_order_relaxed);
-		running += bucket_total;
+		running += __hist_bucket_total(h, b);
 		if (running >= target)
-			return __hist_bucket_lower_bound(b);
+			break;
 	}
-	return __hist_bucket_lower_bound(XTC_HIST_BUCKETS - 1);
+	if (b == XTC_HIST_BUCKETS) b--;   /* unreachable: buckets only grow */
+	/* The max is read after the buckets, so it covers every value they
+	 * counted, except a record still between its add and its max
+	 * update: a max below this bucket is that one, and is ignored.  The
+	 * top bucket also holds every value >= 2^40: it answers the max. */
+	max = xtc_hist_max(h);
+	if (b == 0) return max > 0 ? 1 : 0;   /* values <= 1; max is never < 0 */
+	lb = __hist_bucket_lower_bound(b);
+	ub = __hist_bucket_upper_bound(b);
+	if (max >= lb && (max < ub || b == XTC_HIST_BUCKETS - 1))
+		return max;
+	return ub;
 }
 
 /* ---- dist (mergeable online mean/variance) ----
@@ -618,7 +680,7 @@ __dump_prom_visit(const char *name, xtc_metric_kind_t kind,
     const void *handle, void *user)
 {
 	int fd = (int)(intptr_t)user;
-	char buf[256];
+	char buf[1024];   /* 6 lines of a 63-byte name + a number each */
 	int n = 0;
 	switch (kind) {
 	case XTC_METRIC_COUNTER:
@@ -639,16 +701,19 @@ __dump_prom_visit(const char *name, xtc_metric_kind_t kind,
 		int64_t p50 = xtc_hist_quantile(h, 0.50);
 		int64_t p99 = xtc_hist_quantile(h, 0.99);
 		int64_t p999 = xtc_hist_quantile(h, 0.999);
+		int64_t max = xtc_hist_max(h);
 		n = snprintf(buf, sizeof buf,
 		    "# TYPE %s histogram\n"
 		    "%s_count %llu\n"
 		    "%s_p50 %lld\n"
 		    "%s_p99 %lld\n"
-		    "%s_p999 %lld\n",
+		    "%s_p999 %lld\n"
+		    "%s_max %lld\n",
 		    name, name, (unsigned long long)cnt,
 		    name, (long long)p50,
 		    name, (long long)p99,
-		    name, (long long)p999);
+		    name, (long long)p999,
+		    name, (long long)max);
 		break;
 	}
 	case XTC_METRIC_DIST: {
@@ -667,6 +732,7 @@ __dump_prom_visit(const char *name, xtc_metric_kind_t kind,
 		break;
 	}
 	}
+	if (n >= (int)sizeof buf) n = (int)sizeof buf - 1;   /* never write past buf */
 	if (n > 0 && fd >= 0) {
 		ssize_t w = write(fd, buf, (size_t)n);  /* XTC_BLOCKING_OK: dump path */
 		(void)w;

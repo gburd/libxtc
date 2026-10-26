@@ -15,6 +15,8 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 
 /* ---- counter ---- */
@@ -301,6 +303,12 @@ test_hist_edges(const MunitParameter p[], void *d)
 	/* Empty histogram: quantile is well-defined (0), count is 0. */
 	munit_assert_uint64(xtc_hist_count(h), ==, 0);
 	munit_assert_int64(xtc_hist_quantile(h, 0.5), >=, 0);
+	/* Only zeros: no quantile above the max (0). */
+	xtc_hist_record(h, 0);
+	munit_assert_int64(xtc_hist_quantile(h, 1.0), ==, 0);
+	munit_assert_int64(xtc_hist_max(h), ==, 0);
+	xtc_hist_destroy(h);
+	munit_assert_int(xtc_hist_create("edge.h", &h), ==, XTC_OK);
 
 	/* Small values (1..8) live in low base buckets -- exercises the
 	 * small-base bucket-index and lower-bound arms. */
@@ -322,6 +330,146 @@ test_hist_edges(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* A latency far above the old 2^24 ns (16.8 ms) top bucket must be
+ * reported as itself, not clamped: 99 x 1 ms + 1 x 500 ms, the shape of
+ * a checkpoint stall in a stream of fast commits. */
+static MunitResult
+test_hist_range(const MunitParameter p[], void *d)
+{
+	xtc_hist_t *h;
+	int64_t ms = 1000000, q50, q99, q995, q100;
+	int i;
+	(void)p; (void)d;
+	munit_assert_int(xtc_hist_create("range.h", &h), ==, XTC_OK);
+	munit_assert_int64(xtc_hist_max(h), ==, 0);
+	for (i = 0; i < 99; i++)
+		xtc_hist_record(h, 1 * ms);
+	xtc_hist_record(h, 500 * ms);
+	q50 = xtc_hist_quantile(h, 0.50);
+	q99 = xtc_hist_quantile(h, 0.99);
+	q995 = xtc_hist_quantile(h, 0.995);
+	q100 = xtc_hist_quantile(h, 1.0);
+	/* Quantiles are bucket UPPER bounds (never below the true value),
+	 * within one sub-bucket (1/16 of the octave) of it. */
+	munit_assert_int64(q50, >=, 1 * ms);
+	munit_assert_int64(q50, <=, 1 * ms + ms / 16);
+	munit_assert_int64(q99, >=, 1 * ms);
+	munit_assert_int64(q99, <=, 1 * ms + ms / 16);
+	munit_assert_int64(q995, >=, 500 * ms);
+	/* ... and never above the largest value recorded. */
+	munit_assert_int64(q995, <=, 500 * ms);
+	munit_assert_int64(q100, ==, 500 * ms);
+	munit_assert_int64(xtc_hist_max(h), ==, 500 * ms);
+
+	/* A value past the widest bucket is still counted and is the max. */
+	xtc_hist_record(h, (int64_t)1 << 60);
+	munit_assert_uint64(xtc_hist_count(h), ==, 101);
+	munit_assert_int64(xtc_hist_max(h), ==, (int64_t)1 << 60);
+	munit_assert_int64(xtc_hist_quantile(h, 1.0), ==, (int64_t)1 << 60);
+	munit_assert_int64(xtc_hist_quantile(h, 0.995), >=, 500 * ms);
+	munit_assert_int64(xtc_hist_quantile(h, 0.50), <=, 1 * ms + ms / 16);
+	xtc_hist_destroy(h);
+	munit_assert_int64(xtc_hist_max(NULL), ==, 0);
+	return MUNIT_OK;
+}
+
+/* Every recorded value v satisfies v <= quantile(rank(v)) <= v + v/8,
+ * at every octave the histogram covers (1 ns .. 2^40 ns ~ 18 min). */
+static MunitResult
+test_hist_upper_bound(const MunitParameter p[], void *d)
+{
+	xtc_hist_t *h;
+	int k;
+	int64_t v, q;
+	(void)p; (void)d;
+	for (k = 0; k < 40; k++) {
+		munit_assert_int(xtc_hist_create("ub.h", &h), ==, XTC_OK);
+		v = ((int64_t)1 << k) + ((int64_t)1 << k) / 3;
+		xtc_hist_record(h, 1);
+		xtc_hist_record(h, v);
+		xtc_hist_record(h, v * 2);
+		q = xtc_hist_quantile(h, 0.5);   /* rank 2 of 3: v */
+		munit_assert_int64(q, >=, v);
+		munit_assert_int64(q, <=, v + v / 8);
+		munit_assert_int64(xtc_hist_quantile(h, 1.0), ==, v * 2);
+		xtc_hist_destroy(h);
+	}
+	return MUNIT_OK;
+}
+
+#define N_HIST_THREADS  8
+#define N_HIST_REC      50000
+
+static xtc_hist_t *g_concurrent_h;
+
+static void *
+hist_worker(void *arg)
+{
+	int id = (int)(intptr_t)arg;
+	int i;
+	for (i = 0; i < N_HIST_REC; i++)
+		xtc_hist_record(g_concurrent_h, (int64_t)(id * N_HIST_REC + i));
+	return NULL;
+}
+
+/* The max is exact under concurrent recorders on many shards. */
+static MunitResult
+test_hist_max_concurrent(const MunitParameter p[], void *d)
+{
+	pthread_t th[N_HIST_THREADS];
+	int i;
+	(void)p; (void)d;
+	munit_assert_int(xtc_hist_create("test.hc", &g_concurrent_h), ==,
+	    XTC_OK);
+	for (i = 0; i < N_HIST_THREADS; i++)
+		pthread_create(&th[i], NULL, hist_worker, (void *)(intptr_t)i);
+	for (i = 0; i < N_HIST_THREADS; i++) pthread_join(th[i], NULL);
+	munit_assert_uint64(xtc_hist_count(g_concurrent_h), ==,
+	    (uint64_t)N_HIST_THREADS * N_HIST_REC);
+	munit_assert_int64(xtc_hist_max(g_concurrent_h), ==,
+	    (int64_t)N_HIST_THREADS * N_HIST_REC - 1);
+	xtc_hist_destroy(g_concurrent_h);
+	return MUNIT_OK;
+}
+
+/* A 63-byte metric name (the longest the registry keeps) still dumps
+ * every histogram line, including the max. */
+static MunitResult
+test_dump_prometheus_long_name(const MunitParameter p[], void *d)
+{
+	static const char name[] =
+	    "a_metric_name_that_is_exactly_sixty_three_bytes_long_0123456789";
+	xtc_hist_t *h;
+	xtc_dist_t *dd;
+	int pipefd[2];
+	char buf[4096] = {0}, want[128];
+	size_t got = 0;
+	ssize_t n;
+	(void)p; (void)d;
+	munit_assert_size(sizeof name - 1, ==, 63);
+	munit_assert_int(pipe(pipefd), ==, 0);
+	munit_assert_int(xtc_hist_create(name, &h), ==, XTC_OK);
+	munit_assert_int(xtc_dist_create("long.d", &dd), ==, XTC_OK);
+	xtc_hist_record(h, 123456789);
+	xtc_dist_record(dd, 1.0);
+	munit_assert_int(xtc_metrics_dump_prometheus(pipefd[1]), >, 0);
+	close(pipefd[1]);
+	while (got < sizeof buf - 1 &&
+	    (n = read(pipefd[0], buf + got, sizeof buf - 1 - got)) > 0)
+		got += (size_t)n;
+	close(pipefd[0]);
+	snprintf(want, sizeof want, "%s_p999 ", name);
+	munit_assert_ptr_not_null(strstr(buf, want));
+	snprintf(want, sizeof want, "%s_max 123456789\n", name);
+	munit_assert_ptr_not_null(strstr(buf, want));
+	/* The next metric's lines are intact (no garbage, no NUL). */
+	munit_assert_size(strlen(buf), ==, got);
+	munit_assert_ptr_not_null(strstr(buf, "long.d_stddev "));
+	xtc_hist_destroy(h);
+	xtc_dist_destroy(dd);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/counter_basic",      test_counter_basic,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/counter_concurrent", test_counter_concurrent, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -333,6 +481,10 @@ static MunitTest tests[] = {
 	{ "/dump_prometheus",    test_dump_prometheus,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/dump_prom_hist",     test_dump_prometheus_hist, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/hist_edges",         test_hist_edges,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/hist_range",         test_hist_range,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/hist_upper_bound",   test_hist_upper_bound,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/hist_max_concurrent", test_hist_max_concurrent, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/dump_prom_long_name", test_dump_prometheus_long_name, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = {
