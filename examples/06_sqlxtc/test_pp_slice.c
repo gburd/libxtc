@@ -29,6 +29,10 @@ run(uint32_t n_frames)
 	bo.path = path;
 	bo.n_frames = n_frames;
 	if (bm_create(&bo, &bm) != XTC_OK) { unlink(path); return 1; }
+	/* A fresh pool is all free, and a tick with the free list at its
+	 * target does nothing (test_pp_idle_writes): ask for more than the
+	 * pool so every tick runs its passes. */
+	bm->cool_target = n_frames + 1;
 	ticks = (n_frames + PP_SLICE - 1) / PP_SLICE;
 	for (t = 0; t < ticks; t++) {
 		v = pp_tick(bm, &cursor);

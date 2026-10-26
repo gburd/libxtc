@@ -170,7 +170,7 @@ clean:
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o test_bufmgr_dio test_bufmgr_dio.o
 	rm -f test_bufmgr_mt
 	rm -f test_drop_reserved test_evict_revalidate_sampled
-	rm -f test_bg_idle test_bg_kill test_ckpt_offloop test_scan_resist test_sweep_bound test_evict_revalidate test_btree_late_load test_flush_pin test_trickler_select test_pp_slice test_tr_slice test_publication_pin test_private_frame test_pid_writeback bm_sweep_bench
+	rm -f test_bg_idle test_bg_kill test_ckpt_offloop test_scan_resist test_sweep_bound test_evict_revalidate test_btree_late_load test_flush_pin test_trickler_select test_pp_slice test_pp_idle_writes test_tr_slice test_publication_pin test_private_frame test_pid_writeback bm_sweep_bench
 	rm -f test_persist
 	rm -f test_scan_resist test_sweep_bound test_evict_revalidate test_btree_late_load test_flush_pin test_trickler_select test_pp_slice test_tr_slice test_publication_pin test_private_frame test_pid_writeback bm_sweep_bench
 	rm -f test_persist test_btree_prefix_split sx_size test_rec_codec test_idx_elem test_freelist_persist
@@ -769,6 +769,14 @@ test-tr-slice: test_tr_slice
 
 test-pp-slice: test_pp_slice
 	./test_pp_slice
+
+# The page provider writes nothing while the free list holds its target.
+test: test-pp-idle-writes
+test_pp_idle_writes: test_pp_idle_writes.c bufmgr.c bufmgr.h
+	$(CC) $(CFLAGS) -o $@ test_pp_idle_writes.c $(LDFLAGS)
+
+test-pp-idle-writes: test_pp_idle_writes
+	TMPDIR=$${TMPDIR:-/tmp} ./test_pp_idle_writes
 
 test_btree_late_load: test_btree_late_load.c bufmgr.c bufmgr.h btree.c btnode.c
 	$(CC) $(CFLAGS) -o $@ test_btree_late_load.c btree.c btnode.c $(LDFLAGS)
