@@ -163,7 +163,7 @@ clean:
 	rm -f test_btree_seek test_btree_seek_latched test_point_read test_index_walk test_group_exact test_xs_ctr
 	rm -f test_xs_ctr test_bm_reuse_version test_kill_stmt test_cat_lock_shared
 	rm -f test_sql_results test_txn_fastpath test_wal_crc_once
-	rm -f test_btree_cursor_hop test_btree_smo_stress
+	rm -f test_btree_cursor_hop test_btree_smo_stress test_btree_bounded_descent
 	rm -f test_tpcc_seek test_dup_composite test_bulk_insert test_plan_cache
 	rm -f test_btree_delete_merge test_savepoint test_isolation test_ww_conflict test_row_intents test_commit_visibility test_ssi_skew test_ckpt_bound test_dup_insert test_recover_fast
 	rm -f test_vfs_loop test_vfs_loop.o
@@ -680,6 +680,16 @@ test_btree_smo_stress: test_btree_smo_stress.c bufmgr.c bufmgr.h btree.c btnode.
 
 test-btree-smo-stress: test_btree_smo_stress
 	./test_btree_smo_stress
+
+# A damaged tree (a right-link cycle, a lo fence above routed keys) makes
+# a descent fail with an error and a report instead of spinning forever.
+test: test-btree-bounded-descent
+
+test_btree_bounded_descent: test_btree_bounded_descent.c bufmgr.c bufmgr.h btree.c btnode.c
+	$(CC) $(CFLAGS) -o $@ test_btree_bounded_descent.c btnode.c $(LDFLAGS)
+
+test-btree-bounded-descent: test_btree_bounded_descent
+	./test_btree_bounded_descent
 
 test_pid_writeback: test_pid_writeback.c bufmgr.c bufmgr.h
 	$(CC) $(CFLAGS) -o $@ test_pid_writeback.c $(LDFLAGS)

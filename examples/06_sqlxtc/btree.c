@@ -120,6 +120,7 @@
 #include "xtc_sync.h"
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -162,6 +163,29 @@
  * (test_btree_cursor_hop merges, frees and reissues that pid here). */
 #ifndef BT_HOP_TEST_HOOK
 #define BT_HOP_TEST_HOOK(c, pid) ((void)0)
+#endif
+
+/*
+ * Bounded descents.  A B-link descent restarts from the root when it
+ * meets a node a concurrent merge changed, and move_right walks right
+ * links while the key is beyond a node's upper fence.  Both loops end
+ * because SMOs end; on a structurally damaged tree (a right-link
+ * cycle, a hi fence below its parent's separator, a linked node that
+ * is dead, a page torn on disk) they never do, and the thread spins
+ * forever with nothing reported.  So past these bounds the operation
+ * fails with XTC_E_INTERNAL, after printing the path once per process
+ * (bt_stuck_report).  Legitimate traffic stays far below them: a
+ * move_right chain is as long as the splits that raced one descent
+ * (test_btree_smo_stress: longest restart run 2 under 48 threads).
+ * Restarts yield, so 1M of them is seconds of a stuck thread, not a
+ * transient.  Tests lower them to drive the error path; -DBT_STUCK_ABORT
+ * aborts at the report instead, for a core.
+ */
+#ifndef BT_RESTART_MAX
+#define BT_RESTART_MAX 1000000L
+#endif
+#ifndef BT_MOVE_RIGHT_MAX
+#define BT_MOVE_RIGHT_MAX 1000000L
 #endif
 
 /*
@@ -234,6 +258,7 @@ struct bt {
 	_Atomic uint64_t  st_splits;
 	_Atomic uint64_t  st_merges;   /* node merges (right sibling pulled left) */
 	_Atomic uint64_t  st_reclaimed;/* pages returned to the bufmgr freelist */
+	_Atomic uint64_t  st_stuck;    /* descents failed on a damaged tree */
 	_Atomic uint64_t  st_height;   /* number of levels (1 == root leaf) */
 	_Atomic uint64_t  st_descents; /* full root->leaf cursor descents */
 	_Atomic uint64_t  st_resumes;  /* parked-cursor O(1) resumes */
@@ -659,6 +684,61 @@ internal_insert(void *page, const void *sep, uint16_t seplen, bm_pid_t child)
 }
 
 /*
+ * Report a descent that hit BT_RESTART_MAX / BT_MOVE_RIGHT_MAX: the
+ * key, the root, and the node it was on (pid, leaf, dead, count, right
+ * link, fences), so a field recurrence leaves evidence.  Once per
+ * process: every thread routed through the damage reports the same.
+ */
+static void
+bt_hex(const char *tag, const void *p, uint16_t n)
+{
+	const uint8_t *b = p;
+	uint16_t i;
+
+	fprintf(stderr, " %s[%u]=", tag, (unsigned)n);
+	for (i = 0; i < n && i < 48; i++)
+		fprintf(stderr, "%02x", b[i]);
+}
+
+static void
+bt_stuck_report(bt_t *bt, const char *who, long n, const void *key,
+    uint16_t klen, bm_frame_t *f, const char *why, bm_pid_t at)
+{
+	static atomic_int once;
+	uint8_t fb[BT_MAX_KEY];
+	uint16_t fl = 0;
+	void *pg;
+
+	atomic_fetch_add(&bt->st_stuck, 1);
+	if (atomic_exchange(&once, 1) != 0)
+		return;
+	fprintf(stderr, "sqlxtc btree: %s gave up after %ld steps (root %llu,"
+	    " height %llu); the tree is damaged:", who, n,
+	    (unsigned long long)atomic_load(&bt->root_pid),
+	    (unsigned long long)atomic_load(&bt->st_height));
+	if (key != NULL)
+		bt_hex("key", key, klen);
+	if (why != NULL)
+		fprintf(stderr, "\n  last failure: %s (pid %llu)", why,
+		    (unsigned long long)at);
+	if (f != NULL) {
+		pg = bm_page(f);
+		fprintf(stderr, "\n  at pid %llu leaf=%d dead=%d count=%u right=%u",
+		    (unsigned long long)bm_frame_pid(f), btnode_is_leaf(pg),
+		    btnode_is_dead(pg), (unsigned)btnode_count(pg),
+		    (unsigned)btnode_right_sibling(pg));
+		if (btnode_lo_fence(pg, fb, sizeof fb, &fl) == 0)
+			bt_hex("lo", fb, fl);
+		if (btnode_hi_fence(pg, fb, sizeof fb, &fl) == 0)
+			bt_hex("hi", fb, fl);
+	}
+	fprintf(stderr, "\n");
+#ifdef BT_STUCK_ABORT
+	abort();      /* opt-in: a core with the process state */
+#endif
+}
+
+/*
  * Move-right (the B-link recovery step).  *fp is a fixed+latched node
  * (shared or exclusive per `excl`).  While `key` lies strictly beyond
  * the node's upper fence -- meaning a concurrent split moved `key`'s
@@ -671,13 +751,17 @@ internal_insert(void *page, const void *sep, uint16_t seplen, bm_pid_t child)
  * node that owns `key`.  Internal and leaf nodes both carry fences,
  * so this works at every level.  Latch coupling is never held during
  * the hop (only one node latched at a time), so move-right cannot
- * deadlock against a splitter posting a separator upward.
+ * deadlock against a splitter posting a separator upward.  XTC_OK, or
+ * XTC_E_INTERNAL past BT_MOVE_RIGHT_MAX hops (a damaged level); *fp is
+ * fixed and latched either way.
  */
 static int
 move_right(bt_t *bt, bm_frame_t **fp, const void *key, uint16_t klen, int excl)
 {
 	bm_t *bm = bt->bm;
 	bm_frame_t *f = *fp;
+	long hops = 0;
+	int rc = XTC_OK;
 
 	while (key != NULL && btnode_beyond_hi_fence(bm_page(f), key, klen)) {
 		uint32_t rs = btnode_right_sibling(bm_page(f));
@@ -685,6 +769,16 @@ move_right(bt_t *bt, bm_frame_t **fp, const void *key, uint16_t klen, int excl)
 
 		if (rs == 0)
 			break;            /* rightmost: key belongs here */
+		/* A link to itself would latch this frame twice; a longer
+		 * cycle, or hi fences that never reach the key, never ends.
+		 * Either way the level is damaged.  *fp stays latched. */
+		if (rs == (uint32_t)bm_frame_pid(f) || ++hops > BT_MOVE_RIGHT_MAX) {
+			bt_stuck_report(bt, "move_right", hops, key, klen, f,
+			    rs == (uint32_t)bm_frame_pid(f) ? "right link to itself"
+			    : "right links never pass the key", (bm_pid_t)rs);
+			rc = XTC_E_INTERNAL;
+			break;
+		}
 		if (bm_fix_pid(bm, (bm_pid_t)rs, &nf) != XTC_OK)
 			break;
 		if (excl)
@@ -696,7 +790,19 @@ move_right(bt_t *bt, bm_frame_t **fp, const void *key, uint16_t klen, int excl)
 		f = nf;
 	}
 	*fp = f;
-	return XTC_OK;
+	return rc;
+}
+
+/* Count one restart of a latched descent; 1 once BT_RESTART_MAX is
+ * reached (reported: `why` at pid `at`, the node `f` if still held). */
+static int
+descent_give_up(bt_t *bt, long *n, const char *who, const void *key,
+    uint16_t klen, bm_frame_t *f, const char *why, bm_pid_t at)
+{
+	if (++*n < BT_RESTART_MAX)
+		return 0;
+	bt_stuck_report(bt, who, *n, key, klen, f, why, at);
+	return 1;
 }
 
 int
@@ -1056,7 +1162,7 @@ bt_insert_fast(bt_t *bt, const void *key, uint16_t klen, const void *val,
 	bm_pid_t pid;
 	bm_frame_t *f;
 	void *pg;
-	int found, r;
+	int found, r, mr;
 
 	pid = atomic_load(&bt->root_pid);
 	if (bm_fix_pid(bm, pid, &f) != XTC_OK)
@@ -1066,12 +1172,13 @@ bt_insert_fast(bt_t *bt, const void *key, uint16_t klen, const void *val,
 		bm_unlatch(f); bm_unfix(bm, f, 0);
 		return 0;
 	}
-	(void)move_right(bt, &f, key, klen, 0);
+	mr = move_right(bt, &f, key, klen, 0);
 	pg = bm_page(f);
 	/* Stale-node guard at the root: a concurrent merge may have
 	 * unlinked it (dead) or absorbed its range leftward (key at/below
 	 * lo fence -- move_right cannot follow); bail to the SMO path. */
-	if (btnode_is_dead(pg) || btnode_below_lo_fence(pg, key, klen)) {
+	if (mr != XTC_OK || btnode_is_dead(pg) ||
+	    btnode_below_lo_fence(pg, key, klen)) {
 		bm_unlatch(f); bm_unfix(bm, f, 0);
 		return 0;
 	}
@@ -1086,7 +1193,7 @@ bt_insert_fast(bt_t *bt, const void *key, uint16_t klen, const void *val,
 		bm_latch_shared(cf);
 		bm_unlatch(f); bm_unfix(bm, f, 0);   /* release before child */
 		f = cf;
-		(void)move_right(bt, &f, key, klen, 0);
+		mr = move_right(bt, &f, key, klen, 0);
 		pg = bm_page(f);
 		/* Internal-level stale-node guard: the child we just latched
 		 * may itself have been merged away (dead) or had its range
@@ -1095,7 +1202,8 @@ bt_insert_fast(bt_t *bt, const void *key, uint16_t klen, const void *val,
 		 * latching the child.  move_right handles only the rightward
 		 * (split) direction; a leftward absorb the SMO path settles.
 		 * Bail and let bt_insert re-descend under the SMO lock. */
-		if (btnode_is_dead(pg) || btnode_below_lo_fence(pg, key, klen)) {
+		if (mr != XTC_OK || btnode_is_dead(pg) ||
+		    btnode_below_lo_fence(pg, key, klen)) {
 			bm_unlatch(f); bm_unfix(bm, f, 0);
 			return 0;
 		}
@@ -1105,7 +1213,7 @@ bt_insert_fast(bt_t *bt, const void *key, uint16_t klen, const void *val,
 	 * shared unlatch and the exclusive latch the leaf may have split. */
 	bm_unlatch(f);
 	bm_latch_exclusive(f);
-	(void)move_right(bt, &f, key, klen, 1);
+	mr = move_right(bt, &f, key, klen, 1);
 	pg = bm_page(f);
 
 	/* Stale-leaf guard: if this leaf was unlinked by a concurrent
@@ -1113,7 +1221,8 @@ bt_insert_fast(bt_t *bt, const void *key, uint16_t klen, const void *val,
 	 * key's range moved LEFT, which move_right cannot follow), bail to
 	 * the SMO path, which re-descends under the SMO lock and so never
 	 * races a merge. */
-	if (btnode_is_dead(pg) || btnode_below_lo_fence(pg, key, klen)) {
+	if (mr != XTC_OK || btnode_is_dead(pg) ||
+	    btnode_below_lo_fence(pg, key, klen)) {
 		bm_unlatch(f); bm_unfix(bm, f, 0);
 		return 0;
 	}
@@ -1179,7 +1288,10 @@ post_separator(bt_t *bt, bm_pid_t *path, int level,
 		bm_latch_exclusive(pf);
 		/* The captured parent may have split since descent: walk
 		 * right to the internal node that now owns cur_sep. */
-		(void)move_right(bt, &pf, cur_sep, cur_seplen, 1);
+		if (move_right(bt, &pf, cur_sep, cur_seplen, 1) != XTC_OK) {
+			bm_unlatch(pf); bm_unfix(bm, pf, 0);
+			return XTC_E_INTERNAL;
+		}
 		pp = bm_page(pf);
 
 		if (internal_insert(pp, cur_sep, cur_seplen, cur_right) == 0) {
@@ -1350,8 +1462,8 @@ bt_insert_leaf(bt_t *bt, const void *key, uint16_t klen, const void *val,
 	if ((rc = bm_fix_pid(bm, pid, &f)) != XTC_OK)
 		goto unlock;
 	bm_latch_exclusive(f);
-	(void)move_right(bt, &f, key, klen, 1);
-	while (!btnode_is_leaf(bm_page(f))) {
+	rc = move_right(bt, &f, key, klen, 1);
+	while (rc == XTC_OK && !btnode_is_leaf(bm_page(f))) {
 		bm_pid_t child;
 		bm_frame_t *cf;
 
@@ -1367,7 +1479,11 @@ bt_insert_leaf(bt_t *bt, const void *key, uint16_t klen, const void *val,
 		bm_latch_exclusive(cf);
 		bm_unlatch(f); bm_unfix(bm, f, 0);
 		f = cf;
-		(void)move_right(bt, &f, key, klen, 1);
+		rc = move_right(bt, &f, key, klen, 1);
+	}
+	if (rc != XTC_OK) {             /* a damaged level (reported) */
+		bm_unlatch(f); bm_unfix(bm, f, 0);
+		goto unlock;
 	}
 
 	/* f is the leaf, exclusive-latched.  Upsert, then re-check space:
@@ -1494,7 +1610,7 @@ descend_optimistic(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 {
 	bm_t *bm = bt->bm;
 	bm_frame_t *f;
-	int hops;
+	int hops, mr;
 
 	if (!BT_OLC_ENABLED)
 		return 0;
@@ -1524,9 +1640,9 @@ descend_optimistic(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 		if (leaf && !beyond) {
 			/* The leaf: latch it and re-check under the latch. */
 			bm_latch_shared(f);
-			(void)move_right(bt, &f, key, klen, 0);
+			mr = move_right(bt, &f, key, klen, 0);
 			pg = bm_page(f);
-			if (!btnode_is_leaf(pg) || btnode_is_dead(pg) ||
+			if (mr != XTC_OK || !btnode_is_leaf(pg) || btnode_is_dead(pg) ||
 			    (key != NULL ? btnode_below_lo_fence(pg, key, klen) :
 			    not_leftmost_leaf(pg))) {
 				bm_unlatch(f);
@@ -1564,6 +1680,9 @@ descend_shared(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 	bm_pid_t pid;
 	bm_frame_t *f;
 	void *pg;
+	const char *why;
+	bm_pid_t at = BM_PID_NONE;
+	long restarts = 0;
 	int rc;
 
 	if (!BT_STALE_TEST_HOOK_PEEK() && descend_optimistic(bt, key, klen, out))
@@ -1572,33 +1691,36 @@ descend_shared(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 	 * a concurrent merge changed the path; it finishes and the next
 	 * descent routes past it.  (This was bounded at BT_DELETE_RETRIES
 	 * and then returned the last frame -- which the stale branch had
-	 * already unlatched and unfixed, so the caller released it twice.) */
-	for (;;) {
-		int stale = 0;
-
+	 * already unlatched and unfixed, so the caller released it twice.)
+	 * A tree that keeps failing the same check for BT_RESTART_MAX
+	 * passes is damaged, not busy: report it and fail. */
+	for (;; xtc_yield()) {
+		why = NULL;
 		BT_RESTART_TEST_HOOK();
 		pid = atomic_load(&bt->root_pid);
 		rc = bm_fix_pid(bm, pid, &f);
 		if (rc == XTC_E_AGAIN) {   /* root pid quarantined: retry */
-			xtc_yield();
+			if (descent_give_up(bt, &restarts, "descend_shared", key,
+			    klen, NULL, "root pid retired", pid))
+				return XTC_E_INTERNAL;
 			continue;
 		}
 		if (rc != XTC_OK)
 			return rc;
 		bm_latch_shared(f);
-		(void)move_right(bt, &f, key, klen, 0);
+		rc = move_right(bt, &f, key, klen, 0);
 		pg = bm_page(f);
 		/* Stale-node guard at the root (see the internal-level guard
 		 * below): a concurrent merge may have unlinked it or absorbed
 		 * its range leftward; restart the descent. */
+		if (rc != XTC_OK)
+			goto fail;
 		if (BT_STALE_TEST_HOOK() || btnode_is_dead(pg) ||
 		    btnode_below_lo_fence(pg, key, klen)) {
-			bm_unlatch(f);
-			bm_unfix(bm, f, 0);
-			xtc_yield();
-			continue;
+			why = "root dead or below its lo fence";
+			at = pid;
 		}
-		while (!btnode_is_leaf(pg)) {
+		while (why == NULL && !btnode_is_leaf(pg)) {
 			bm_pid_t child = child_for_key(pg, key, klen);
 			bm_frame_t *cf;
 
@@ -1606,20 +1728,20 @@ descend_shared(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 			if (rc == XTC_E_AGAIN) {
 				/* Child pid quarantined by a concurrent merge:
 				 * restart from the root. */
-				stale = 1;
+				why = "child pid retired";
+				at = child;
 				break;
 			}
-			if (rc != XTC_OK) {
-				bm_unlatch(f);
-				bm_unfix(bm, f, 0);
-				return rc;
-			}
+			if (rc != XTC_OK)
+				goto fail;
 			bm_latch_shared(cf);
 			bm_unlatch(f);             /* release before latching deeper */
 			bm_unfix(bm, f, 0);
 			f = cf;
-			(void)move_right(bt, &f, key, klen, 0);
+			rc = move_right(bt, &f, key, klen, 0);
 			pg = bm_page(f);
+			if (rc != XTC_OK)
+				goto fail;
 			/* Internal-level stale-node guard.  Between reading the
 			 * parent's child pointer and latching the child, a
 			 * concurrent merge can unlink the child (dead) or absorb
@@ -1630,27 +1752,31 @@ descend_shared(bt_t *bt, const void *key, uint16_t klen, bm_frame_t **out)
 			 * from the root. */
 			if (btnode_is_dead(pg) ||
 			    btnode_below_lo_fence(pg, key, klen)) {
-				stale = 1;
-				break;
+				why = "node dead or below its lo fence";
+				at = bm_frame_pid(f);
 			}
-		}
-		if (stale) {
-			bm_unlatch(f);
-			bm_unfix(bm, f, 0);
-			xtc_yield();
-			continue;
 		}
 		/* If this leaf was merged away (marked dead, or the key is
 		 * at/below its lower fence -- absorbed leftward where
-		 * move_right cannot follow), restart from the root. */
-		if (!btnode_is_dead(pg) && !btnode_below_lo_fence(pg, key, klen)) {
+		 * move_right cannot follow), restart from the root.  (The
+		 * loop above already checked the leaf it latched; a root leaf
+		 * was checked before it.) */
+		if (why == NULL) {
 			*out = f;
 			return XTC_OK;
 		}
+		if (descent_give_up(bt, &restarts, "descend_shared", key, klen,
+		    f, why, at)) {
+			rc = XTC_E_INTERNAL;
+			goto fail;
+		}
 		bm_unlatch(f);
 		bm_unfix(bm, f, 0);
-		xtc_yield();
 	}
+fail:
+	bm_unlatch(f);
+	bm_unfix(bm, f, 0);
+	return rc;
 }
 
 /*
@@ -2337,7 +2463,10 @@ merge_level(bt_t *bt, bm_pid_t *path, int level, const void *key,
 	if (bm_fix_pid(bm, path[level], &pf) != XTC_OK)
 		return XTC_OK;
 	bm_latch_exclusive(pf);
-	(void)move_right(bt, &pf, key, klen, 1);
+	if (move_right(bt, &pf, key, klen, 1) != XTC_OK) {
+		bm_unlatch(pf); bm_unfix(bm, pf, 0);
+		return XTC_OK;             /* best effort: leave it */
+	}
 	pp = bm_page(pf);
 
 	/*
@@ -2596,8 +2725,8 @@ bt_merge(bt_t *bt, const void *key, uint16_t klen)
 	if ((rc = bm_fix_pid(bm, pid, &f)) != XTC_OK)
 		goto unlock;
 	bm_latch_exclusive(f);
-	(void)move_right(bt, &f, key, klen, 1);
-	while (!btnode_is_leaf(bm_page(f))) {
+	rc = move_right(bt, &f, key, klen, 1);
+	while (rc == XTC_OK && !btnode_is_leaf(bm_page(f))) {
 		bm_pid_t child;
 		bm_frame_t *cf;
 
@@ -2613,7 +2742,11 @@ bt_merge(bt_t *bt, const void *key, uint16_t klen)
 		bm_latch_exclusive(cf);
 		bm_unlatch(f); bm_unfix(bm, f, 0);
 		f = cf;
-		(void)move_right(bt, &f, key, klen, 1);
+		rc = move_right(bt, &f, key, klen, 1);
+	}
+	if (rc != XTC_OK) {             /* a damaged level (reported) */
+		bm_unlatch(f); bm_unfix(bm, f, 0);
+		goto unlock;
 	}
 
 	/*
@@ -2698,7 +2831,8 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 		 * root and park every other loop's descent on the root latch --
 		 * the RethinkDB root-write-lock pattern; bench_btree_mixed.) */
 		bm_latch_shared(f);
-		(void)move_right(bt, &f, key, klen, 0);
+		if (move_right(bt, &f, key, klen, 0) != XTC_OK)
+			goto damaged;
 		pg = bm_page(f);
 		/* Stale-node guard at the root (see the internal-level guard
 		 * below): a concurrent merge may have unlinked it or absorbed
@@ -2728,7 +2862,8 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 			bm_unlatch(f);             /* release before latching deeper */
 			bm_unfix(bm, f, 0);
 			f = cf;
-			(void)move_right(bt, &f, key, klen, 0);
+			if (move_right(bt, &f, key, klen, 0) != XTC_OK)
+				goto damaged;
 			pg = bm_page(f);
 			/* Internal-level stale-node guard.  A concurrent merge can
 			 * unlink the child (dead) or absorb its range into a LEFT
@@ -2757,7 +2892,8 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 		 * exclusive latch, so a merge in the window restarts. */
 		bm_unlatch(f);
 		bm_latch_exclusive(f);
-		(void)move_right(bt, &f, key, klen, 1);
+		if (move_right(bt, &f, key, klen, 1) != XTC_OK)
+			goto damaged;
 		pg = bm_page(f);
 
 		found = 0;
@@ -2820,9 +2956,9 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 		return XTC_E_NOTFOUND;
 	}
 	bm_latch_exclusive(f);
-	(void)move_right(bt, &f, key, klen, 1);
+	rc = move_right(bt, &f, key, klen, 1);
 	pg = bm_page(f);
-	while (!btnode_is_leaf(pg)) {
+	while (rc == XTC_OK && !btnode_is_leaf(pg)) {
 		bm_pid_t child = child_for_key(pg, key, klen);
 		bm_frame_t *cf;
 
@@ -2834,8 +2970,13 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 		bm_latch_exclusive(cf);
 		bm_unlatch(f); bm_unfix(bm, f, 0);
 		f = cf;
-		(void)move_right(bt, &f, key, klen, 1);
+		rc = move_right(bt, &f, key, klen, 1);
 		pg = bm_page(f);
+	}
+	if (rc != XTC_OK) {             /* a damaged level (reported) */
+		bm_unlatch(f); bm_unfix(bm, f, 0);
+		(void)xtc_arwlock_unlock(bt->smo);
+		return rc;
 	}
 	found = 0;
 	s = btnode_search(pg, key, klen, &found);
@@ -2852,6 +2993,11 @@ bt_delete(bt_t *bt, const void *key, uint16_t klen)
 	if (oldlen > 0)
 		ovf_free(bt, oldref, oldlen);
 	return XTC_OK;
+
+damaged:                            /* move_right gave up (reported) */
+	bm_unlatch(f);
+	bm_unfix(bm, f, 0);
+	return XTC_E_INTERNAL;
 }
 
 /* Shared-latched descent for the cursor.  If start == NULL, take the
@@ -2861,9 +3007,11 @@ static int
 cursor_descend(bt_t *bt, const void *start, uint16_t klen, bm_frame_t **out)
 {
 	bm_t *bm = bt->bm;
-	bm_pid_t pid;
+	bm_pid_t pid, at = BM_PID_NONE;
 	bm_frame_t *f;
 	void *pg;
+	const char *why;
+	long restarts = 0;
 	int rc;
 
 	atomic_fetch_add(&bt->st_descents, 1);
@@ -2877,34 +3025,35 @@ cursor_descend(bt_t *bt, const void *start, uint16_t klen, bm_frame_t **out)
 	 * revalidate dead/lo-fence at EVERY level and restart from the root
 	 * on a hit so the cursor never opens onto a merged-away page.  With
 	 * start == NULL there is no routing key: the dead flag, and a leaf
-	 * that is not the leftmost (a reissued pid), fire.  Unbounded
-	 * for the reason given in descend_shared: the frame handed back must
-	 * be the one this descent still holds.
+	 * that is not the leftmost (a reissued pid), fire.  Restarts until
+	 * BT_RESTART_MAX, for the reason given in descend_shared: the frame
+	 * handed back must be the one this descent still holds.
 	 */
-	for (;;) {
-		int stale = 0;
-
+	for (;; xtc_yield()) {
+		why = NULL;
 		BT_RESTART_TEST_HOOK();
 		pid = atomic_load(&bt->root_pid);
 		rc = bm_fix_pid(bm, pid, &f);
 		if (rc == XTC_E_AGAIN) {   /* root pid quarantined: retry */
-			xtc_yield();
+			if (descent_give_up(bt, &restarts, "cursor_descend", start,
+			    klen, NULL, "root pid retired", pid))
+				return XTC_E_INTERNAL;
 			continue;
 		}
 		if (rc != XTC_OK)
 			return rc;
 		bm_latch_shared(f);
-		(void)move_right(bt, &f, start, klen, 0);
+		rc = move_right(bt, &f, start, klen, 0);
 		pg = bm_page(f);
+		if (rc != XTC_OK)
+			goto fail;
 		if (BT_STALE_TEST_HOOK() || btnode_is_dead(pg) ||
 		    (start != NULL ? btnode_below_lo_fence(pg, start, klen) :
 		    not_leftmost_leaf(pg))) {
-			bm_unlatch(f); bm_unfix(bm, f, 0);
-			xtc_yield();
-			continue;
+			why = "root dead, below its lo fence, or not leftmost";
+			at = pid;
 		}
-
-		while (!btnode_is_leaf(pg)) {
+		while (why == NULL && !btnode_is_leaf(pg)) {
 			bm_pid_t child;
 			bm_frame_t *cf;
 
@@ -2916,36 +3065,44 @@ cursor_descend(bt_t *bt, const void *start, uint16_t klen, bm_frame_t **out)
 			if (rc == XTC_E_AGAIN) {
 				/* Child pid quarantined by a concurrent merge:
 				 * restart from the root. */
-				stale = 1;
+				why = "child pid retired";
+				at = child;
 				break;
 			}
-			if (rc != XTC_OK) {
-				bm_unlatch(f);
-				bm_unfix(bm, f, 0);
-				return rc;
-			}
+			if (rc != XTC_OK)
+				goto fail;
 			bm_latch_shared(cf);
 			bm_unlatch(f);             /* release before latching deeper */
 			bm_unfix(bm, f, 0);
 			f = cf;
-			(void)move_right(bt, &f, start, klen, 0);
+			rc = move_right(bt, &f, start, klen, 0);
 			pg = bm_page(f);
+			if (rc != XTC_OK)
+				goto fail;
 			/* Internal-level stale-node guard (see descend_shared). */
 			if (btnode_is_dead(pg) || (start != NULL ?
 			    btnode_below_lo_fence(pg, start, klen) :
 			    not_leftmost_leaf(pg))) {
-				stale = 1;
-				break;
+				why = "node dead, below its lo fence, or not leftmost";
+				at = bm_frame_pid(f);
 			}
 		}
-		if (stale) {
-			bm_unlatch(f); bm_unfix(bm, f, 0);
-			xtc_yield();
-			continue;
+		if (why == NULL) {
+			*out = f;
+			return XTC_OK;
 		}
-		*out = f;
-		return XTC_OK;
+		if (descent_give_up(bt, &restarts, "cursor_descend", start, klen,
+		    f, why, at)) {
+			rc = XTC_E_INTERNAL;
+			goto fail;
+		}
+		bm_unlatch(f);
+		bm_unfix(bm, f, 0);
 	}
+fail:
+	bm_unlatch(f);
+	bm_unfix(bm, f, 0);
+	return rc;
 }
 
 /*
@@ -3577,7 +3734,12 @@ cursor_seek(bt_cursor_t *c, bm_frame_t *f)
 			return XTC_E_NOTFOUND;
 		}
 	}
-	(void)move_right(c->bt, &f, k, c->keylen, 0);
+	if (move_right(c->bt, &f, k, c->keylen, 0) != XTC_OK) {
+		bm_unlatch(f);
+		bm_unfix(bm, f, 0);
+		c->done = 1;
+		return XTC_E_INTERNAL;
+	}
 	if (k != NULL && btnode_beyond_hi_fence(bm_page(f), k, c->keylen) &&
 	    btnode_right_sibling(bm_page(f)) != 0) {
 		/* move_right could not fix the sibling (merged away):
