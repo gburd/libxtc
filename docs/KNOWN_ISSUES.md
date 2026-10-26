@@ -42,6 +42,34 @@ in reverse.  Downgrades are not supported (see
 "Downgrades"), but nothing is misread either way.  `sx_size` refuses
 a 1.59 page file.
 
+## CHANGED (1.60): involuntary preemption on musl/aarch64; platform checks
+
+* **musl on aarch64 now has involuntary preemption.**  1.59 compiled
+  the aarch64 signal-context redirect only for glibc, so on musl (where
+  fcontext is the only substrate) `xtc_preempt_set_involuntary(1)`
+  silently fell back to cooperative ticks: a fiber that never reached a
+  yield point was not sliced.  Nothing in the redirect is glibc-specific
+  (it rewrites the kernel's own signal frame, whose layout musl's
+  `<ucontext.h>` matches, and the trampoline makes raw system calls), so
+  the gate is gone.  On a 16-vCPU aarch64 host with SVE, Alpine (musl
+  1.2.6, gcc 15.2), `test_preempt`, `_p1`, `_p2` and `_ring` ran 200
+  times each with no failure, `/a64_sve_state` and `/a64_x16_preserved`
+  included; they used to skip.  `test_preempt_p2` now fails, rather than
+  skips, on an aarch64 Linux build without the redirect.  x86-64 musl
+  still declines (not yet verified there).
+* **DTrace, verified on FreeBSD 15.1.**  An `--enable-dtrace` build's
+  `gmake check` passes, and `test_probes` there checks the real thing
+  (as root, or through passwordless `sudo`): `dtrace -l` lists all 30
+  probes in a statically linked program, a D script counts the
+  workload's events exactly, and every `tools/dtrace/*.d` script runs.
+  Also checked by hand: the probes in `libxtc.so` (`--enable-shared`),
+  `dtrace -p` on a program already running, and the numbers in the
+  tracing guide's two worked examples.
+* **Apple Silicon runs fcontext in CI.**  The `macos` job's runner is
+  arm64, so `fctx_aarch64_aapcs_macho.S` is assembled and linked and
+  the full test suite runs on it on every push.  The job now fails if
+  the build selects anything else.
+
 ## CHANGED (1.59): fcontext is the default on Linux aarch64 (glibc) too; aarch64 fixes
 
 **What changed.**  Linux aarch64 with glibc now defaults to the fcontext
@@ -79,8 +107,7 @@ test that fails before the fix:
   (`xtc_dump` crashed on clang builds).  A CFI-terminated start trampoline
   ends the unwind (`test_fctx /fctx_unwind_ends`).
 
-Not verified: Apple Silicon (the Mach-O fcontext file carries the same
-changes but was not assembled) and big-endian or 32-bit Arm.
+Not verified: big-endian or 32-bit Arm.  (Apple Silicon: see 1.60 above.)
 
 ## CHANGED (1.59): io_uring ring modes and one-shot polls
 
@@ -2214,11 +2241,11 @@ decision, not a TODO.
 ## RESOLVED: macOS now in CI
 
 The `macos` GitHub Actions job (macos-latest, Apple Silicon) builds and
-runs the full C munit suite every commit -- kqueue backend, ucontext
-substrate, GCD dispatch semaphores.  Standing it up fixed six real
-portability bugs (Darwin feature macro, rwlock storage size, unnamed
-semaphores, _SC_NPROCESSORS_ONLN, hardcoded -lrt, lrlock slot
-reclamation teardown order).
+runs the full C munit suite every commit -- kqueue backend, fcontext
+substrate (the runner is arm64), GCD dispatch semaphores.  Standing it
+up fixed six real portability bugs (Darwin feature macro, rwlock
+storage size, unnamed semaphores, _SC_NPROCESSORS_ONLN, hardcoded -lrt,
+lrlock slot reclamation teardown order).
 
 
 ## Apple Silicon (macOS arm64): now defaults to the fcontext substrate (macOS x86-64 still ucontext)

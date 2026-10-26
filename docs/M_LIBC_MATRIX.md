@@ -20,7 +20,7 @@ Configuration: a fresh out-of-source build per libc / platform.
 | musl (Linux x86_64) | 1.2.5 | pass | pass (musl CI) | musl omits ucontext; the hand-written fcontext substrate covers it (the glibc default build runs the same substrate every commit) |
 | FreeBSD libc (15.0, clang, amd64) | 15.0 | pass | pass (gmake check) | Native kqueue file-AIO exercised |
 | illumos libc (SunOS 5.11, gcc, UltraSPARC v9) | illumos-31d3d510d0 | pass | pass (gmake check) | Big-endian sparcv9 -- validates byte order in codecs/hashing/atomics; event-ports backend, OpenSSL 3 |
-| macOS libSystem (Apple Silicon, clang) | -- | pass | pass | kqueue + ucontext; runtime-verified every commit in CI |
+| macOS libSystem (Apple Silicon, clang) | -- | pass | pass | kqueue + fcontext (Mach-O aarch64 assembly); runtime-verified every commit in CI |
 | Windows ucrt (MinGW gcc 13.2) | UCRT | pass | IOCP runtime-verified on a host | loop/task/timer/wakeup/socket-poll/file-AIO; per-commit Windows CI is an MSVC xtc.lib + smoke build |
 | Windows MSVC (cl) | 14.x | builds (xtc.lib) | smoke | The munit harness uses GCC-isms cl rejects; a standalone smoke test stands in |
 
