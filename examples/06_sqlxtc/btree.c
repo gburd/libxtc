@@ -523,7 +523,10 @@ static int merge_level(bt_t *bt, bm_pid_t *path, int level,
 /* On-disk superblock (buffer-manager page 0), recording where the tree
  * lives so a restart can find the root instead of building a fresh
  * one.  Rewritten on create and whenever the root pid changes. */
-#define BT_SUPER_MAGIC 0x58425431u   /* "XBT1" */
+/* "XBT2" since 1.60 (page checksums, a 48-byte node header); "XBT1"
+ * stores (1.59 and before) are not reopened in place: the engine rebuilds
+ * them from the log, and a 1.59 build does the same with an XBT2 store. */
+#define BT_SUPER_MAGIC 0x58425432u   /* "XBT2" */
 struct bt_super {
 	uint32_t magic;
 	uint32_t page_size;

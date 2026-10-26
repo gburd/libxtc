@@ -100,7 +100,19 @@ struct btnode_hdr {
 	uint16_t last_ins1;
 	uint8_t  ins_run;
 	uint8_t  hdr_pad_;
+	/* Page checksum (1.60).  Written by the buffer manager into the
+	 * image it writes to disk (bm_opts.cksum_off), never maintained in
+	 * memory: CRC32C of the whole page with this word taken out, and the
+	 * low 32 bits of the page's own id, so a page read back with a bad
+	 * byte, torn, or written at another page's offset is refused. */
+	uint32_t page_cksum;
+	uint32_t page_pid;
 };
+
+/* Where the buffer manager keeps the page checksum (bm_opts.cksum_off):
+ * the same offset in every page the engine writes, B-tree node or
+ * out-of-line value page (btovf.h keeps its payload past it). */
+#define BTNODE_CKSUM_OFF 40
 
 /*
  * One slot.  Packed so the on-page layout is exactly 10 bytes

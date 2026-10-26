@@ -76,6 +76,8 @@ test_wal_lsn_monotone
 test_persist
 test_cursor_resume
 test_clean_restart
+test_page_checksum
+test_page_cksum_more
 test_steal
 test_steal_leaf
 test_steal_page

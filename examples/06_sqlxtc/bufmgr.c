@@ -357,6 +357,14 @@ struct bm {
 	 * 32 connections fell 25-38% (balance 3.7M -> 2.4M lookups/s). */
 	uint64_t          s_fl_loaded;
 	uint32_t          s_fl_pages;
+
+	/* Cold: page checksums (bm_opts.cksum_off; -1 = off). */
+	int               cksum_off;
+	uint32_t        (*cksum)(uint32_t crc, const void *p, size_t n);
+	void            (*cksum_hook)(void *ctx, bm_pid_t pid);
+	void             *cksum_ctx;
+	_Atomic uint64_t  s_cksum_bad;   /* loads refused by the checksum */
+	_Atomic uint64_t  cksum_bad_pid; /* the last page refused */
 };
 
 /* ---- page I/O via libxtc async file ops (xtc_aio): native io_uring
@@ -379,6 +387,92 @@ do_io(bm_t *bm, void *buf, bm_pid_t pid, int write)
 		return 0;
 	}
 	return -1;
+}
+
+/* Page 0's checksum slot: the 8 bytes before the freelist trailer at
+ * the end of the superblock page (BM_FL_TRAILER, 32).  A page checksum
+ * needs a page that holds the superblock, the slot and the trailer. */
+#define BM_SUPER_CK_TAIL 40u       /* slot + trailer, from the page end */
+#define BM_SUPER_CK_MIN  256u
+
+/* ---- page checksums (bm_opts.cksum_off) ----
+ *
+ * The 8-byte slot at `off` holds [crc32c:4][pid:4], little-endian.  The
+ * CRC covers the whole page with its own 4 bytes taken as zero, so the
+ * pid word is covered too: a page written at another page's offset (a
+ * misdirected write) fails, as do a bad byte and a torn write.  Data
+ * pages keep the slot at cksum_off; page 0 at the end of the superblock
+ * page, before the freelist trailer (BM_SUPER_CK_TAIL). */
+static void
+ck_put32(uint8_t *p, uint32_t v)
+{
+	p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
+	p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+
+static uint32_t
+ck_get32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 |
+	    (uint32_t)p[3] << 24;
+}
+
+static uint32_t
+ck_sum(const bm_t *bm, const uint8_t *pg, uint32_t off)
+{
+	static const uint8_t zero4[4];
+	uint32_t c = bm->cksum(0, pg, off);
+
+	c = bm->cksum(c, zero4, 4);
+	return bm->cksum(c, pg + off + 4, bm->page_size - off - 4);
+}
+
+/* Seal the image about to be written as page `pid`. */
+static void
+ck_seal(const bm_t *bm, uint8_t *pg, bm_pid_t pid, uint32_t off)
+{
+	ck_put32(pg + off + 4, (uint32_t)pid);
+	ck_put32(pg + off, ck_sum(bm, pg, off));
+}
+
+/* 1 if the image read back as page `pid` is the one sealed for it.  An
+ * all-zero page fails too: every page the engine reads was written whole
+ * first, so zeros are a lost or never-written block, not a page. */
+static int
+ck_ok(const bm_t *bm, const uint8_t *pg, bm_pid_t pid, uint32_t off)
+{
+	return ck_get32(pg + off + 4) == (uint32_t)pid &&
+	    ck_get32(pg + off) == ck_sum(bm, pg, off);
+}
+
+/* A load was refused: count it, remember the page, tell the owner. */
+static void
+ck_fail(bm_t *bm, bm_pid_t pid)
+{
+	atomic_fetch_add_explicit(&bm->s_cksum_bad, 1, memory_order_relaxed);
+	atomic_store_explicit(&bm->cksum_bad_pid, pid, memory_order_relaxed);
+	if (bm->cksum_hook != NULL)
+		bm->cksum_hook(bm->cksum_ctx, pid);
+}
+
+void
+bm_set_cksum_hook(bm_t *bm, void (*hook)(void *ctx, bm_pid_t pid), void *ctx)
+{
+	if (bm == NULL)
+		return;
+	bm->cksum_ctx = ctx;
+	bm->cksum_hook = hook;
+}
+
+uint64_t
+bm_cksum_failures(bm_t *bm, bm_pid_t *bad_pid)
+{
+	if (bm == NULL)
+		return 0;
+	if (bad_pid != NULL)
+		*bad_pid = atomic_load_explicit(&bm->cksum_bad_pid,
+		    memory_order_relaxed);
+	return atomic_load_explicit(&bm->s_cksum_bad, memory_order_relaxed);
 }
 
 /* ---- pin protocol ----
@@ -624,6 +718,8 @@ flush_frame(bm_t *bm, bm_frame_t *f)
 		goto release;
 	}
 	memcpy(snap, f->page, bm->page_size);
+	if (bm->cksum_off >= 0)
+		ck_seal(bm, snap, f->pid, (uint32_t)bm->cksum_off);
 	/* Write-ahead rule: never write a dirty page to disk until the log
 	 * is durable through that page's LSN.  If it is not yet, abort this
 	 * flush (the page stays dirty) and let a later pass retry once the
@@ -1511,6 +1607,13 @@ bm_create(const bm_opts_t *opts, bm_t **out)
 	}
 #endif
 	bm->lsn_off = opts->lsn_off;       /* -1 disables page-LSN handling */
+	bm->cksum_off = -1;                /* -1: no page checksum */
+	if (opts->cksum_off >= 0 && opts->cksum != NULL &&
+	    (uint32_t)opts->cksum_off + 8u <= opts->page_size &&
+	    opts->page_size >= BM_SUPER_CK_MIN) {
+		bm->cksum_off = opts->cksum_off;
+		bm->cksum = opts->cksum;
+	}
 	atomic_store_explicit(&bm->cur_lsn, 0, memory_order_relaxed);
 	bm->wal_flush = NULL;
 	bm->wal_ctx = NULL;
@@ -2264,6 +2367,7 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 {
 	bm_frame_t *f;
 	uint64_t generation;
+	int ck_bad;
 	if (bm == NULL || out_frame == NULL || pid == BM_PID_NONE)
 		return XTC_E_INVAL;
 #ifdef BM_CLASSIFY
@@ -2328,6 +2432,11 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 		atomic_store_explicit(&f->doomed, 0, memory_order_relaxed);
 		atomic_store_explicit(&f->io_busy, 0, memory_order_relaxed);
 		if (do_io(bm, f->page, pid, 0) != 0) { free_push(bm, f); return XTC_E_INTERNAL; }
+		/* Checked now, acted on only after the race checks below: a
+		 * read that overlapped a concurrent write-back of this pid can
+		 * be torn, and the generation check retries it. */
+		ck_bad = bm->cksum_off >= 0 &&
+		    !ck_ok(bm, f->page, pid, (uint32_t)bm->cksum_off);
 		/* Publish: under the bucket's stripe lock, re-check no one beat us. */
 		{
 			uint32_t b = (uint32_t)(pid % bm->nbucket);
@@ -2377,6 +2486,13 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 				free_push(bm, f);
 				xtc_yield();
 				continue;
+			}
+			/* The image on disk is damaged: never publish it. */
+			if (ck_bad) {
+				(void)pthread_mutex_unlock(lk);
+				free_push(bm, f);
+				ck_fail(bm, pid);
+				return XTC_E_IO;
 			}
 			/* Establish ownership/state before bucket publication. */
 			atomic_store_explicit(&f->state,
@@ -2870,6 +2986,8 @@ tr_prepare(bm_t *bm, bm_frame_t *f, void *dst)
 		goto release;
 	}
 	memcpy(dst, f->page, bm->page_size);
+	if (bm->cksum_off >= 0)
+		ck_seal(bm, dst, f->pid, (uint32_t)bm->cksum_off);
 	if (bm->lsn_off >= 0 && bm->wal_flush != NULL && f->pid != 0) {
 		uint64_t plsn;
 		memcpy(&plsn, (uint8_t *)dst + bm->lsn_off, sizeof plsn);
@@ -3230,6 +3348,8 @@ bm_get_stats(bm_t *bm, bm_stats_t *out)
 	out->advances = atomic_load_explicit(&bm->s_advances, memory_order_relaxed);
 	out->adv_max = atomic_load_explicit(&bm->s_adv_max, memory_order_relaxed);
 	out->forced_claims = atomic_load_explicit(&bm->s_forced, memory_order_relaxed);
+	out->cksum_failures = atomic_load_explicit(&bm->s_cksum_bad,
+	    memory_order_relaxed);
 }
 
 /* ---- persistence: superblock, sync, checkpoint ---- */
@@ -3356,9 +3476,14 @@ fl_save(bm_t *bm, uint8_t *tr)
 	(void)pthread_mutex_lock(&bm->pid_mu);
 	n = bm->free_pids_n + bm->quar_pids_n;
 	if (n > 0 && (ids = xtc_malloc((size_t)n * sizeof *ids)) != NULL) {
-		memcpy(ids, bm->free_pids, (size_t)bm->free_pids_n * sizeof *ids);
-		memcpy(ids + bm->free_pids_n, bm->quar_pids,
-		    (size_t)bm->quar_pids_n * sizeof *ids);
+		/* Either list may be empty and never allocated (NULL): memcpy
+		 * from NULL is undefined even for 0 bytes (UBSan). */
+		if (bm->free_pids_n > 0)
+			memcpy(ids, bm->free_pids,
+			    (size_t)bm->free_pids_n * sizeof *ids);
+		if (bm->quar_pids_n > 0)
+			memcpy(ids + bm->free_pids_n, bm->quar_pids,
+			    (size_t)bm->quar_pids_n * sizeof *ids);
 	}
 	bm->free_pids_n = 0;
 	bm->quar_pids_n = 0;   /* still retired (quar_set): never fixed again */
@@ -3512,12 +3637,18 @@ bm_write_super_clean(bm_t *bm, const void *buf, size_t len, int clean)
 		return XTC_E_INVAL;
 	if ((pg = xtc_aligned_alloc(4096, bm->page_size)) == NULL)
 		return XTC_E_NOMEM;
+	if (bm->cksum_off >= 0 && len + BM_SUPER_CK_TAIL > bm->page_size) {
+		xtc_aligned_free(pg);
+		return XTC_E_INVAL;           /* would overlap the checksum slot */
+	}
 	memset(pg, 0, bm->page_size);
 	memcpy(pg, buf, len);
 	/* The trailer, when it fits past the caller's bytes (a 4 KiB page
 	 * holds a 40-byte superblock and the 32-byte trailer). */
 	if (clean && len + BM_FL_TRAILER <= bm->page_size)
 		(void)fl_save(bm, pg + bm->page_size - BM_FL_TRAILER);
+	if (bm->cksum_off >= 0)
+		ck_seal(bm, pg, 0, bm->page_size - BM_SUPER_CK_TAIL);
 	n = pwrite(bm->fd, pg, bm->page_size, 0);
 	xtc_aligned_free(pg);
 	return (n == (ssize_t)bm->page_size) ? XTC_OK : XTC_E_IO;
@@ -3539,6 +3670,15 @@ bm_read_super(bm_t *bm, void *buf, size_t len)
 	}
 	if ((size_t)n < bm->page_size)            /* short/empty: zero-fill */
 		memset(pg + n, 0, bm->page_size - (size_t)n);
+	/* A superblock that fails its checksum is refused like a page.  A
+	 * store written without checksums fails here too (its magic would
+	 * be refused by the B-tree anyway): the engine rebuilds it. */
+	if (bm->cksum_off >= 0 && n > 0 &&
+	    !ck_ok(bm, pg, 0, bm->page_size - BM_SUPER_CK_TAIL)) {
+		xtc_aligned_free(pg);
+		ck_fail(bm, 0);
+		return XTC_E_IO;
+	}
 	memcpy(buf, pg, len);
 	xtc_aligned_free(pg);
 	return XTC_OK;

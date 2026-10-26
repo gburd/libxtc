@@ -29,6 +29,7 @@
 #define SQLXTC_WAL_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -134,6 +135,17 @@ int  wal_truncate(wal_t *w);
 
 /* 1 once a log write/fsync has failed (the log is fail-stopped). */
 int  wal_failed(const wal_t *w);
+
+/* Fail-stop the log as a failed write does: every later commit is
+ * refused and no compaction replaces the log (the engine calls it when a
+ * page of the page file fails its checksum, so the base is not trusted
+ * again and the next open rebuilds it from the log). */
+void wal_fail_stop(wal_t *w);
+
+/* CRC32C (Castagnoli), hardware-accelerated where the host has it: the
+ * log's frame checksum, for the page checksum too.  crc = 0 starts a sum;
+ * passing a returned value continues it over the next bytes. */
+uint32_t wal_crc32c(uint32_t crc, const void *p, size_t n);
 
 /* Bytes of complete records in the log (the append offset). */
 uint64_t wal_size(const wal_t *w);

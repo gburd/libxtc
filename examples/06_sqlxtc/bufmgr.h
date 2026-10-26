@@ -110,6 +110,25 @@ typedef struct bm_opts {
 	 * It can sacrifice hit rate. 0 preserves the legacy sweep. Applies
 	 * to CLOCK only, not the optional BM_SAMPLED_EVICT policy. */
 	uint32_t    claim_threshold;
+
+	/* Page checksum (1.60).  cksum_off >= 0 is the byte offset of an
+	 * 8-byte slot in every page the manager writes and reads back --
+	 * [crc32c:4][pid:4], both little-endian -- and cksum the CRC32C to
+	 * use (crc 0 starts a sum: the engine passes wal_crc32c).  On every
+	 * write-back the manager seals the written IMAGE (never the live
+	 * frame): the pid's low 32 bits, then the CRC of the whole page with
+	 * the CRC word as zero.  On every load it checks both, and a page
+	 * that fails is never published: bm_fix_pid returns XTC_E_IO (see
+	 * bm_set_cksum_hook).  An all-zero page fails too (unlike
+	 * PostgreSQL, which accepts one): a crash discards the page file,
+	 * so every page a trusted base references was written whole, and
+	 * zeros mean a lost write or a freed block.  Page 0 is sealed too,
+	 * at the end of the superblock page (which must be >= 256 bytes).
+	 * The in-place recovery path (bm_apply_page_image) reads pages that
+	 * may never have been written: run it without a checksum.  -1 (the
+	 * default) = no checksum. */
+	int         cksum_off;
+	uint32_t  (*cksum)(uint32_t crc, const void *p, size_t n);
 } bm_opts_t;
 
 /* Opt in with 128 after measuring the workload's hit-rate trade-off. */
@@ -119,7 +138,8 @@ typedef struct bm_opts {
 	{ .path = NULL, .page_size = 4096, .n_frames = 256, .cool_pct = 10, \
 	  .scan_resist = 1, .reopen = 0, .double_write = 0, .lsn_off = -1, \
 	  .direct = 0, .adaptive_writeback = 0, \
-	  .claim_threshold = BM_CLAIM_THRESHOLD_DEFAULT }
+	  .claim_threshold = BM_CLAIM_THRESHOLD_DEFAULT, \
+	  .cksum_off = -1, .cksum = NULL }
 
 /* Lifecycle. */
 int  bm_create(const bm_opts_t *opts, bm_t **out);
@@ -198,6 +218,16 @@ int  bm_alloc_pid(bm_t *bm, bm_frame_t **out_frame, bm_pid_t *out_pid);
  * A retired miss returns XTC_E_AGAIN: re-descend through current tree
  * links rather than retrying the same dead id indefinitely. */
 int  bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame);
+
+/* Page checksums (bm_opts.cksum_off).  A load that fails its checksum
+ * makes bm_fix_pid return XTC_E_IO, counts it, and calls hook(ctx, pid)
+ * on the loading thread (the engine fail-stops its log there: the page
+ * file is then never trusted again and the next open rebuilds it).
+ * bm_cksum_failures is the count since bm_create; *bad_pid (optional)
+ * gets the last page that failed. */
+void bm_set_cksum_hook(bm_t *bm, void (*hook)(void *ctx, bm_pid_t pid),
+    void *ctx);
+uint64_t bm_cksum_failures(bm_t *bm, bm_pid_t *bad_pid);
 
 /* Reclaim a page id.  The caller guarantees the page is no longer
  * reachable from any live page (its parent separator and any sibling
@@ -357,6 +387,7 @@ typedef struct bm_stats {
 	uint64_t advances;      /* frames visited by those calls (sum) */
 	uint64_t adv_max;       /* most frames visited by any ONE call */
 	uint64_t forced_claims; /* successful reclaims after protection budget */
+	uint64_t cksum_failures; /* loads refused by the page checksum */
 } bm_stats_t;
 void bm_get_stats(bm_t *bm, bm_stats_t *out);
 

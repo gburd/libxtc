@@ -16,6 +16,7 @@
 #include "xstore.h"
 #include "btree.h"
 #include "bufmgr.h"
+#include "btnode.h"     /* BTNODE_CKSUM_OFF */
 #include "wal.h"
 
 #ifdef SQLXTC_HAVE_LIME
@@ -452,6 +453,24 @@ sx_wal_flush_cb(void *ctx, uint64_t lsn)
 }
 
 /*
+ * Buffer-manager checksum hook: a page of the page file failed its
+ * checksum on load.  Fail-stop the log, as a failed log write does.  The
+ * reader gets an error, not the page.  A commit's log frame is durable
+ * before it is applied, so a commit whose apply hit the bad page is in
+ * the log but not in the base, and the base must never be trusted again:
+ * with the log failed, every later commit is refused, no checkpoint
+ * replaces the log, and sx_storage_close sets no clean flag.  The next
+ * open rebuilds the page file from the complete log, which repairs the
+ * damage.
+ */
+static void
+sx_cksum_cb(void *ctx, bm_pid_t pid)
+{
+	(void)pid;
+	wal_fail_stop((wal_t *)ctx);
+}
+
+/*
  * Open (or reopen) the libxtc-native storage engine.  Two paths:
  *
  *   Clean restart (fast): if the base was cleanly shut down (its
@@ -550,10 +569,16 @@ sx_storage_open(const char *path, unsigned int n_frames)
 	o.direct = g_storage_direct;             /* cache-bypass page store */
 	o.adaptive_writeback = g_storage_adaptive;  /* GA-tuned trickler */
 	o.claim_threshold = g_storage_claim;       /* sweep bound (0 = off) */
+	o.cksum_off = BTNODE_CKSUM_OFF;  /* page checksum: every node + ovf page */
+	o.cksum = wal_crc32c;
 
 	snprintf(g_xwal_path, sizeof g_xwal_path, "%s-wal", dpath);
 
-	/* Try to trust a cleanly-shut-down base. */
+	/* Try to trust a cleanly-shut-down base.  A superblock that fails
+	 * its checksum, or one of an older format (1.59 and before: no page
+	 * checksums, superblock "XBT1"), is refused by bt_reopen: the page
+	 * file is then rebuilt from the log, which after a clean close holds
+	 * the whole live tree (the compacted dump plus every commit since). */
 	o.reopen = 1;
 	if (bm_create(&o, &g_xbm) == XTC_OK) {
 		if (bt_reopen(g_xbm, &g_xbt) == XTC_OK) {
@@ -626,6 +651,8 @@ sx_storage_open(const char *path, unsigned int n_frames)
 	/* Write-ahead enforcement: before the buffer manager writes a dirty
 	 * page it flushes the log through that page's LSN via this hook. */
 	bm_set_wal_flush(g_xbm, sx_wal_flush_cb, g_xwal);
+	/* A page that fails its checksum fail-stops the log (sx_cksum_cb). */
+	bm_set_cksum_hook(g_xbm, sx_cksum_cb, g_xwal);
 	/* On a rebuild, compact the log so this run starts bounded; on a
 	 * trusted reopen the log is already the compacted log from the clean
 	 * shutdown, so leave it. */
@@ -644,6 +671,16 @@ sx_storage_open(const char *path, unsigned int n_frames)
 	if ((unsigned)i > o.n_frames / 1024u) i = (int)(o.n_frames / 1024u);
 	(void)xstore_index_open(g_xbt, trusted ? idxtag : 0, idxgarb, !trusted,
 	    i);
+	/* A trusted base that failed a page checksum while the open read it
+	 * (the index catalog load): drop it and rebuild from the log now,
+	 * rather than run fail-stopped until the next restart.  The log is
+	 * complete (sx_cksum_cb kept it from being compacted). */
+	if (trusted && bm_cksum_failures(g_xbm, NULL) > 0) {
+		sx_storage_abandon();
+		/* Not a loop: this open made the clean flag durably 0 above,
+		 * so the next one takes the rebuild path. */
+		return sx_storage_open(path, n_frames);
+	}
 	return SX_OK;
 }
 
@@ -1614,9 +1651,11 @@ static int
 nat_select_run(struct sx_stmt *st)
 {
 	char *verr = NULL;
+	uint64_t ck0;
 	int rc;
 	if (st->ran) return st->vres != NULL;
 	if (nat_aborted(st->db)) return 0;   /* sx_step reports it */
+	ck0 = g_xbm != NULL ? bm_cksum_failures(g_xbm, NULL) : 0;
 	if (st->nkind == SXN_PRAGMA_TABLE_INFO) {
 		rc = vx_pragma_table_info((struct xsql *)st->db, st->ddl_name, &st->vres);
 		st->ran = 1;
@@ -1639,6 +1678,14 @@ nat_select_run(struct sx_stmt *st)
 	st->ran = 1;
 	(void)xtc_mask_leave();
 	if (verr) free(verr);
+	/* A page failed its checksum during the run: the scan stopped there
+	 * or skipped it, so the result may be missing rows.  Never return
+	 * it (nat_set_run_error names the page). */
+	if (g_xbm != NULL && bm_cksum_failures(g_xbm, NULL) != ck0 &&
+	    st->vres != NULL) {
+		vx_result_free(st->vres);
+		st->vres = NULL;
+	}
 	return (rc == 1 && st->vres != NULL);
 }
 
@@ -1662,6 +1709,21 @@ nat_select_run(struct sx_stmt *st)
 #define SX_MSG_ABORTED "current transaction is aborted, commands ignored " \
 	"until end of transaction block"
 
+/* The page file failed a checksum (sx_cksum_cb): the error a statement
+ * gets, naming the page.  Every later write is refused (the log is
+ * fail-stopped); a restart rebuilds the page file from the log. */
+static const char *
+sx_cksum_msg(char *buf, size_t cap)
+{
+	bm_pid_t pid = 0;
+	if (g_xbm == NULL || bm_cksum_failures(g_xbm, &pid) == 0)
+		return NULL;
+	snprintf(buf, cap, "page checksum mismatch at pid %llu: the page file "
+	    "is damaged; the database is read-only until restart, which "
+	    "rebuilds it from the log", (unsigned long long)pid);
+	return buf;
+}
+
 static int
 nat_set_err(sx_db *db, const char *msg, int rc)
 {
@@ -1680,6 +1742,8 @@ nat_set_run_error(struct sx_stmt *st)
 	char buf[160];
 	const char *tab = NULL;
 	if (!sx_is_native_db(st->db)) return SX_ERROR;
+	if ((tab = sx_cksum_msg(buf, sizeof buf)) != NULL)
+		return nat_set_err(st->db, tab, SX_ERROR);
 	if (xstore_wal_failed())
 		return nat_set_err(st->db, SX_MSG_WAL_IO, SX_ERROR);
 	nd = (struct sx_native_db *)st->db;
@@ -1820,6 +1884,8 @@ sx_step_body(sx_stmt *st)
 			int rc, mark, rd, restarts = 0;
 			char *verr = NULL;
 			const char *w = st->sql;
+			uint64_t ck0 = g_xbm != NULL ?
+			    bm_cksum_failures(g_xbm, NULL) : 0;
 			while (isspace((unsigned char)*w)) w++;
 			/* UPDATE/DELETE compute rows from a read: give the statement
 			 * one snapshot and a write-write check against it.  An INSERT
@@ -1841,6 +1907,14 @@ sx_step_body(sx_stmt *st)
 				rc = vx_run_write_p((struct xsql *)st->db, st->sql,
 				    st->nbind ? st->binds : NULL, st->nbind, &nch, &verr);
 			xstore_stmt_end(st->db);
+			/* A page failed its checksum: a read may have missed rows
+			 * (an UPDATE that found none would say "0 changed").  Undo
+			 * the statement and report the damage. */
+			if (g_xbm != NULL && bm_cksum_failures(g_xbm, NULL) != ck0) {
+				xstore_stmt_undo(st->db, mark);
+				free(verr);
+				return nat_set_run_error(st);
+			}
 			if (rc != 1) xstore_stmt_undo(st->db, mark);
 			if (rc == 1) { free(verr); st->nchanges = nch; return SX_DONE; }
 			/* A statement whose row was committed by the writer it
@@ -1906,6 +1980,7 @@ sx_step_body(sx_stmt *st)
 		case SXN_COMMIT: {
 			struct sx_native_db *nd = sx_is_native_db(st->db)
 			    ? (struct sx_native_db *)st->db : NULL;
+			char ckbuf[192];
 			int rc;
 			if (nd) nd->spn = 0;
 			rc = xstore_commit(st->db);
@@ -1915,7 +1990,9 @@ sx_step_body(sx_stmt *st)
 			if (rc == SX_CONSTRAINT)   /* a concurrent commit took the key */
 				return nat_set_err(st->db, xstore_uniq_err(st->db),
 				    SX_CONSTRAINT);
-			return nat_set_err(st->db, xstore_wal_failed() ? SX_MSG_WAL_IO
+			const char *ck = sx_cksum_msg(ckbuf, sizeof ckbuf);
+			return nat_set_err(st->db, ck != NULL ? ck :
+			    xstore_wal_failed() ? SX_MSG_WAL_IO
 			    : "commit failed; transaction rolled back", SX_ERROR);
 		}
 		case SXN_ROLLBACK: {

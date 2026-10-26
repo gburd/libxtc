@@ -452,7 +452,12 @@ main(int argc, char **argv)
 		perror(argv[1]);
 		return 1;
 	}
-	if (be32(sb) != 0 && *(uint32_t *)sb != 0x58425431u) {
+	if (*(uint32_t *)sb == 0x58425431u) {   /* XBT1: 40-byte node headers */
+		fprintf(stderr, "%s: a sqlxtc 1.59 page file; open it with the "
+		    "server once (it is rebuilt from the log)\n", argv[1]);
+		return 1;
+	}
+	if (be32(sb) != 0 && *(uint32_t *)sb != 0x58425432u) {   /* XBT2 */
 		fprintf(stderr, "%s: not a sqlxtc page file\n", argv[1]);
 		return 1;
 	}

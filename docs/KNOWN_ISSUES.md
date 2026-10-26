@@ -6,6 +6,42 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## FIXED (1.60): sqlxtc served a damaged page as committed data; CHANGED: page format
+
+**What was wrong.**  After a clean shutdown sqlxtc trusts its page file
+and skips the log, and data pages carried no checksum.  One bad byte in
+the page file -- a latent sector error, a torn or misdirected write --
+was returned as committed data (`test_page_checksum`: `ROW00123-AAAAAAAB...`).
+A damaged right link or fence could also send a read into a loop:
+`test_page_cksum_more`'s misdirected-write case hung on 1.59 until it
+was killed (40 minutes and 2 h 11 min, in `move_right` <- `cursor_descend`).
+
+**The fix.**  Every page carries a CRC32C and its own page id, written
+on every write-back and checked on every read from disk, before the
+page is used.  A page that fails is refused: the statement gets
+`page checksum mismatch at pid N`, never the data, and the log
+fail-stops as for a failed log write (later writes are refused; reads of
+other pages work), so the damaged page file is never trusted again.
+Restart the server: it rebuilds the page file from the log, which after
+a clean shutdown holds the whole live tree.  A write that got this error
+may still have committed (its log record is written before it is
+applied): after the restart, read it back before retrying it.  A damaged superblock is
+rebuilt the same way at open.  See the
+[sqlxtc durability notes]({{ '/examples/sqlxtc/' | relative_url }}).
+Not caught: a lost write (a page that still holds an older, intact
+image of itself).
+
+**CHANGED: the page format.**  The B-tree node header grew from 40 to
+48 bytes, and the superblock says `XBT2` (was `XBT1`).  The largest value
+kept inline on a 4 KiB page is 2 bytes smaller (1008 bytes of key and
+value).  **Upgrade:** the first start of 1.60 on a 1.59 store rebuilds
+the page file from the log (as slow as crash recovery, once); the log
+format is unchanged.  **Downgrade:** 1.59 on a 1.60 store does the same
+in reverse.  Downgrades are not supported (see
+[ABI stability]({{ '/reference/abi-stability/' | relative_url }}),
+"Downgrades"), but nothing is misread either way.  `sx_size` refuses
+a 1.59 page file.
+
 ## CHANGED (1.59): fcontext is the default on Linux aarch64 (glibc) too; aarch64 fixes
 
 **What changed.**  Linux aarch64 with glibc now defaults to the fcontext
