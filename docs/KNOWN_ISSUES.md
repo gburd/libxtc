@@ -32,6 +32,26 @@ connections on one 32-vCPU x86-64 host.
 so widening `local_id` has to wait for 2.0.  See
 [xtc_proc(3)](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_proc.3).
 
+## FIXED (2.0): a fired park timer could release a newer timer of a migrated fiber
+
+**What was wrong.**  When a park timer fired, the loop cleared the
+waiting fiber's timer slot unconditionally and dropped the reference it
+found there.  A migratable fiber woken and stolen by another loop in the
+window between the fire and that clear had already cancelled the fired
+timer and armed a new one on the thief loop, so the firing loop dropped
+the NEW timer's reference: that timer lost its owner (it was never
+cancelled and woke the fiber spuriously later), and the firing loop read
+its reference count with nothing ordering the read after its allocation
+on the other thread.  ThreadSanitizer reported it in
+`/m5/exec/Blk4_cross_loop_state_timer` under load: 14 of 40 and 40 of
+100 runs on a 32-vCPU host.
+
+**The fix.**  The fire clears the slot only if it still holds the fired
+timer (a compare-and-swap) and otherwise leaves it to the fiber, which
+already released it.  0 of 100 TSan runs.  `/m3/timer/Tm16_fire_clears_own_slot`
+reproduces the interleaving deterministically on one loop.  It is not
+reachable under DST: the simulator runs no fiber inside a timer drain.
+
 ## FIXED (1.60): sqlxtc served a damaged page as committed data; CHANGED: page format
 
 **What was wrong.**  After a clean shutdown sqlxtc trusts its page file
@@ -857,33 +877,39 @@ sole cause of the specific Linux failure.  The fix is safe regardless:
 rounding a sub-microsecond wait up to 1 us cannot strand a fiber or
 over-sleep a deadline meaningfully.
 
-## OPEN: FreeBSD CI -- intermittent test_exec hang in the kqueue VM job
+## RESOLVED (1.51): FreeBSD -- intermittent test_exec hang in Blk4
 
-**Status:** OPEN as of 1.50.0.  Seen on the GitHub FreeBSD 15.1 VM job
-(`vmactions/freebsd-vm`), in `test/m5/test_exec.c` around
-`/m5/exec/Blk4_cross_loop_state_timer` -- migratable fibers parked in
-`xtc_recv` with a 1 ms timeout while a foreign thread wakes them, work
-stealing across loops.  It hit 7fa2340 and 47443de (1.48, before this
-release) and 4 of the 8 CI runs of the 1.50 candidate; it passed on the
-others including the 0283ac1 commit the v1.50.0 tag points at.  Not
-reproduced on Linux: Blk4 is 0/30 bad on poll (the closest kqueue proxy),
-epoll and io_uring, on both 1.49.5 and 1.50.  None of 1.50's source
-changes touch the timer, recv, wake or kqueue paths this test drives.
+**What it was.**  The GitHub FreeBSD 15.1 VM job (`vmactions/freebsd-vm`)
+timed out inside `test/m5/test_exec.c` in 1.48 and in two of the eight
+CI runs of the 1.50 candidate; the one log that named a test showed
+`/m5/exec/Blk4_cross_loop_state_timer` passing and the run stopping
+after it.  Blk4 runs migratable fibers in a 1 ms timed `xtc_recv` while
+a foreign thread wakes them and peers steal them.
 
-**Workaround:** none needed on Linux.  On FreeBSD, fibers that do not
-set `migratable = 1` are not affected by the stealing path this stresses.
+**Cause.**  `xtc_recv` took the calling proc from `__current_proc`, a
+thread-local that fiber context save/restore carries across a park, and
+that a migration can leave naming a different proc than the fiber
+running.  The receive then popped from, armed the waker of, and parked
+on another proc's mailbox, and could block forever on that proc's
+mailbox lock, taken on the other fiber's behalf by a thread that went
+idle.  Linux never hit it in testing.  1.51 (`d4df0bd3`) re-anchors the
+proc from the running fiber at receive entry and after every resume, as
+`xtc_proc_sleep` and `xtc_proc_wait_fd` already did.
 
-**Not the same cause as the select strand above.**  The select
-truncation-to-zero bug does not apply here: the kqueue backend converts
-`timeout_ns` to a `struct timespec` at full nanosecond resolution
-(`tv_nsec = timeout_ns % 1e9`), so a positive sub-microsecond deadline
-is preserved exactly and cannot collapse to a non-blocking `kevent`.
-This remains OPEN and un-root-caused: it has not reproduced on any
-available host (Linux poll/epoll/io_uring, macOS kqueue), only
-intermittently on the FreeBSD VM job, so a fix cannot be developed
-against a reproducer or validated without regressing the one backend it
-would touch.  Deliberately left un-patched rather than changing the
-EVFILT_USER wake path on a guess.
+**Evidence.**  On a native FreeBSD 15.1 host (8 CPUs, kqueue, clang),
+full `/m5/exec` runs, each bounded at 3 minutes: v1.50.0 hung in Blk4 in
+1 of 100 runs on 2 CPUs (`cpuset -l 4-5`) and 1 of 123 on all 8.  The
+captured stack: seven executor threads idle in `kevent`, the eighth
+blocked for good in `blk4_proc -> xtc_recv -> __do_recv ->
+__xtc_mtx_lock`.  v1.51.0: 0 of 100 on 2 CPUs.  Blk4 alone on v1.50.0
+did not hang in 1,000 runs (`cpuset -l 0-1`), nor Blk5 in 300; the full
+suite's earlier tests are part of the shape.  CI's FreeBSD job has passed
+every run since (57 of 57, September 24 to October 26).
+
+The Blk4 timer race fixed in 2.0 ("a fired park timer could release a
+newer timer of a migrated fiber", above) is a different defect: it
+cannot block a thread on a lock, and this hang did not recur while it
+was still present (1.51 to 1.59).
 
 ## RESOLVED (1.51, 1.55): xspawn_entry children failed to start on small hosts under ring churn
 
