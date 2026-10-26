@@ -16,6 +16,12 @@
  *	           measured rate <= 1.5x the limit (analytic worst case
  *	           1.33x -- see test_iops_limit)
  *	  cores    the server's CPU affinity mask has exactly N CPUs
+ *	  loops    --loops=2 --loop-clients=4 serves exactly 8 (4 per loop by
+ *	           INFO) and refuses the rest with "-ERR max number of
+ *	           clients reached"; a --max-clients the loops cannot hold
+ *	           is refused at startup
+ *	  fds      --max-fds=4 serves 3 clients and queues the 4th
+ *	  idle     idle connections cause no timer wakes
  *
  *	Every test also requires a CLEAN shutdown: SIGTERM must make the
  *	server exit 0 within REXIS_STOP_MS (rexis_harness.h).  Before this
