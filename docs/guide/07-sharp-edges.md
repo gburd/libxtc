@@ -51,7 +51,9 @@ state, so there is no shared-state race and no contention. `xtc_rand_seed`
 makes the calling thread's stream reproducible -- the same seed replays the
 same sequence, which is exactly what you want for tests and for
 deterministic jitter/backoff. An un-seeded thread auto-seeds from the clock
-so distinct threads get distinct default streams.
+so distinct threads get distinct default streams. Under the deterministic
+simulator an un-seeded thread draws from the run's own stream instead, so
+the same seed replays the same values there too.
 
 ```c
 xtc_rand_seed(42);

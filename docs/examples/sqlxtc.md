@@ -93,7 +93,7 @@ textbook ones SQLite also uses.
   index order instead of a sort, MIN/MAX from the first or last key,
   index nested-loop joins) shared by SELECT, aggregates, ORDER BY,
   UPDATE and DELETE, and a per-statement plan cache. `vxfunc.c` holds
-  the date/time, printf and math functions.
+  the date/time, printf, math and random()/randomblob() functions.
 - **`bufmgr.c`** -- the buffer pool: pinning, eviction (CLOCK with a
   double-write buffer), and the pin-accounting that DST and ASan hardened
   (see [Known issues]({{ '/reference/known-issues/' | relative_url }}) for

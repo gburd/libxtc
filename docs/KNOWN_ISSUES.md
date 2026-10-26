@@ -32,6 +32,30 @@ connections on one 32-vCPU x86-64 host.
 so widening `local_id` has to wait for 2.0.  See
 [xtc_proc(3)](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_proc.3).
 
+## CHANGED (2.0): `xtc_rand_u64` replays under the simulator; sqlxtc `random()`, `randomblob()`
+
+**Before.**  A thread that never called `xtc_rand_seed` seeded its
+stream from the clock and the address of its state cell, which no seed
+reproduces, so under the deterministic simulator the determinism guard
+trapped every such draw and a sim-reachable path could not use the
+RNG.  sqlxtc declined `randomblob()` and `random()` for that reason.
+
+**Now.**  Under the simulator an un-seeded thread draws from the run's
+own stream (`XTC_SIM_RNG_RAND`, reset by every `xtc_sim_activate`), so
+its values are a function of the run's seed and replay, the way
+`xtc_clock_mono` is virtualized.  A thread that called
+`xtc_rand_seed` keeps the sequence it asked for.  Off the simulator
+nothing changed.  The RNG is no longer a guarded class:
+`test_sim_determinism_guard` now asserts that an un-seeded draw does
+not trip the guard and replays, and `test_sim_rand` checks replay over
+8 seeds x 4 fibers on 2 loops.
+
+sqlxtc implements `random()` (a 64-bit value, never -2^63, as SQLite)
+and `randomblob(N)` (N random bytes, at least 1; N must be a constant
+of at most 1 MiB, as for `zeroblob`).  A `random()` in a WHERE clause is
+evaluated per row, never used as an index seek bound.  Both replay
+under the simulator (`test_sim_sql_now`).  They are not cryptographic.
+
 ## FIXED (2.0): one hot `xtc_amutex` shared by many plain threads
 
 **The problem (1.59).**  With 16-128 OS threads (not fibers) contending
