@@ -774,16 +774,18 @@ How to read it:
 * **sqlxtc's write tail is worse than SQLite's when SQLite's writers
   are serialized.**  Serialized SQLite holds p99.9 at 3.5-6.3 ms up to
   90% of its own maximum.  sqlxtc's p99.9 is 13-14 ms at half load and
-  79-88 ms at 90%.  The cause is one dip per 30 s run, about 26 s into
+  79-88 ms at 90%.  It comes from one dip per 30 s run, about 26 s into
   the window on every run: for 30-120 ms commits complete at 13-44% of
   the offered rate, then the queue drains.  No single commit waits long
   (the service-time maximum stays near 5 ms in most runs, 11-27 ms in a
-  few); the queue is the tail.  It is not the log checkpoint: with
-  checkpoints disabled (on a 16-vCPU host) the tail is the same.  There
-  the largest dip lines up with the kernel writing back about 700 MB of
-  dirty page-cache data in one burst, which competes with the commits'
-  `fdatasync`s; smaller dips have no such burst and are not explained
-  yet.
+  few); the queue is the tail.  What causes the dip is not found yet.
+  Controls on a 16-vCPU host rule out the log checkpoint (with
+  checkpoints disabled the tail is the same) and show that kernel
+  writeback makes it worse but is not the cause: the largest dip lines
+  up with the kernel writing back about 700 MB of dirty page cache in
+  one burst, and with writeback made continuous
+  (`vm.dirty_expire_centisecs` and `vm.dirty_writeback_centisecs` at
+  100) p99.9 fell from 150-369 ms to 94-118 ms, but the dip remained.
 * At 25% load sqlxtc's p99 (169-207 us) is 8-18x lower than either
   SQLite's.  At the same percentage of its own maximum, sqlxtc is
   carrying 8-12x the load of SQLite and 10-16x the load of serialized
