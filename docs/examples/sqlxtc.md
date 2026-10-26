@@ -307,8 +307,9 @@ At 16K frames, p99 **worsened from 2 us to 608 us** as misses crossed
 one percent, despite higher throughput and lower p99.9. These are
 read-only buffer-manager measurements, not SQL transaction results.
 They do not establish write-heavy performance or device-level read
-amplification. Quantiles are histogram bucket lower bounds, sampled in
-microseconds. Independent fixed-duration arms execute different request
+amplification. Quantiles in this table are histogram bucket lower
+bounds, sampled in microseconds (the 1.59 benchmark; it now reports
+bucket upper bounds in nanoseconds and the exact maximum). Independent fixed-duration arms execute different request
 counts, not a lockstep request trace.
 
 The added `bm_stats_t` counters describe successful CLOCK reclamations:
