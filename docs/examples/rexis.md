@@ -48,7 +48,7 @@ flowchart LR
         P1["conn proc 1"] --> KS[("keyspace")]
         P2["conn proc 2"] --> KS
         PN["conn proc N"] --> KS
-        EX["one xtc_loop<br/>(one thread)"] -.->|runs| P1 & P2 & PN
+        EX["one xtc_loop per thread<br/>(--loops=N)"] -.->|runs| P1 & P2 & PN
     end
 ```
 
@@ -60,12 +60,31 @@ Redis uses RDB/AOF).
 **Different:** where Redis runs a hand-written reactor with a client
 table, rexis runs **one lightweight process per connection**. Each
 connection process parses its own commands and owns its own protocol
-state and buffers -- there is no shared connection table to lock. Today
-all of them run on ONE `xtc_loop` (one OS thread), like Redis; the
-per-connection-process shape is what would let them spread across an
-`xtc_exec` executor, but that needs the keyspace's writers serialized
-across loops and is not done (`--cores=N` only pins the one thread to
-CPUs 0..N-1).
+state and buffers -- there is no shared connection table to lock. By
+default all of them run on ONE `xtc_loop` (one OS thread), like Redis.
+`--loops=N` spreads the connection processes over the N loops of an
+`xtc_exec` executor: each connection goes to the least-loaded loop, and
+the keyspace, now shared by N threads, takes one parking reader/writer
+latch (`xtc_arwlock`) per command, so writes are still serialized.
+
+Spreading is also how rexis gets past a hard per-loop limit. A pid
+names its process by loop and a 16-bit slot (`xtc_pid_t.local_id`), so
+one loop runs at most 65,536 processes (see
+[xtc_proc(3)](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_proc.3)
+and the [known issues]({{ '/reference/known-issues/' | relative_url }})).
+rexis 1.59 ran one loop and stopped at 65,532 clients, closing every
+later connection without a reply. Now one loop takes 65,520 clients, a
+client over any limit gets Redis's `-ERR max number of clients reached`,
+and `--loops=2` held 100,000 idle connections in a measurement on one
+32-vCPU host.
+
+An idle connection must also cost nothing while it waits. Each connection
+process used to wake once a second to look at the shutdown flag: 100,000
+idle connections then took half a core and a third of the throughput
+left for the active clients. Now an idle process parks on its socket with
+no deadline, and shutdown wakes each one explicitly. That costs one
+`xtc_proc_wake` per connection at exit instead of 100,000 timer wakes per
+second.
 
 ## How it works
 
@@ -94,6 +113,23 @@ CPUs 0..N-1).
   charge, so a client flood is *rejected* at a cap rather than driving
   the server to OOM -- something Redis controls with `maxmemory`, an
   eviction policy, and `client-output-buffer-limit`.
+- **Zero-copy GET, and why the value needs a lifetime.** A GET used to
+  copy the value into the connection's output buffer while it held the
+  keyspace's read section. At 64 KiB that copy was 28-32% of the
+  server's CPU. Sending the value's own bytes (`sendmsg` with the reply
+  header, the value and the CRLF as three pieces) is easy; the hard part
+  is that the send can be partial. The fiber then parks in
+  `xtc_proc_wait_fd`, the read section is long gone, and a SET or DEL
+  from another connection, or from a later command in the same pipeline,
+  frees the value while its bytes are still queued. So a value of 4 KiB
+  or more carries a reference count: the keyspace holds one, a GET reply
+  takes another before it leaves the read section, and the last of the
+  two to let go frees it. `xtc_rcu` was the other candidate, and it was
+  rejected: an RCU read section must be short, and a slow client can
+  hold a reply for seconds. A planted bug that skips the reference is
+  caught by `test_rexis_loopback` and the PBT pipeline property as wrong
+  bytes, and as a heap-use-after-free under ASan. Result: 64 KiB GETs
+  +35%, 1 KiB unchanged.
 - **Output backpressure.** A reply is built into a per-connection output
   buffer that grows up to `--max-output`; a reply that would pass it is
   replaced *whole* by an error (a truncated reply would desynchronize

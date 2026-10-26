@@ -440,6 +440,24 @@ resp_write_bulk(resp_buf_t *b, const char *data, size_t len)
 }
 
 int
+resp_write_bulk_hdr(resp_buf_t *b, size_t len)
+{
+	char hdr[32];
+	int n;
+
+	n = snprintf(hdr, sizeof hdr, "$%zu\r\n", len);
+	if (n <= 0 || (size_t)n >= sizeof hdr)
+		return -1;
+	return buf_append(b, hdr, (size_t)n);
+}
+
+int
+resp_write_crlf(resp_buf_t *b)
+{
+	return buf_append_crlf(b);
+}
+
+int
 resp_write_bulk_null(resp_buf_t *b)
 {
 	return buf_append(b, "$-1\r\n", 5);

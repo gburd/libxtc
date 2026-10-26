@@ -548,6 +548,221 @@ test_slow_reader_pipeline(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ----- GET of a large value sends it by reference (no copy) ----- */
+
+/* A connection whose receive buffer is small, so the server's replies
+ * stay unsent (its fiber parks mid-reply) until the test reads. */
+static int
+connect_small_rcvbuf(void)
+{
+	struct sockaddr_in a;
+	struct timeval tv = { 10, 0 };
+	int fd, rb = 4096;
+
+	if ((fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+		return -1;
+	(void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rb, sizeof rb);
+	(void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+	memset(&a, 0, sizeof a);
+	a.sin_family = AF_INET;
+	a.sin_port = htons((uint16_t)g_srv.port);
+	a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	if (connect(fd, (struct sockaddr *)&a, sizeof a) < 0) {
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
+
+/* Append one RESP command to buf at *off (buf has room). */
+static void
+put_cmd3(char *buf, size_t *off, const char *a0, const char *a1,
+    const char *a2, size_t a2len)
+{
+	int n;
+
+	if (a2 == NULL) {
+		n = sprintf(buf + *off, "*2\r\n$%zu\r\n%s\r\n$%zu\r\n%s\r\n",
+		    strlen(a0), a0, strlen(a1), a1);
+		*off += (size_t)n;
+		return;
+	}
+	n = sprintf(buf + *off, "*3\r\n$%zu\r\n%s\r\n$%zu\r\n%s\r\n$%zu\r\n",
+	    strlen(a0), a0, strlen(a1), a1, a2len);
+	*off += (size_t)n;
+	memcpy(buf + *off, a2, a2len);
+	*off += a2len;
+	memcpy(buf + *off, "\r\n", 2);
+	*off += 2;
+}
+
+/* Read one bulk reply of exactly n bytes of c (or "$-1" when n == 0 and
+ * c == 0); 0 if it matched. */
+static int
+expect_bulk(int fd, size_t n, char c)
+{
+	char hdr[32], *got;
+	size_t i, hl;
+	int bad = 0;
+
+	if (c == 0) {
+		if (rexis_read_n(fd, hdr, 5, 10000) != 5)
+			return -1;
+		return memcmp(hdr, "$-1\r\n", 5) == 0 ? 0 : -1;
+	}
+	hl = (size_t)snprintf(hdr, sizeof hdr, "$%zu\r\n", n);
+	got = malloc(hl + n + 2);
+	munit_assert_ptr_not_null(got);
+	if (rexis_read_n(fd, got, hl + n + 2, 20000) != hl + n + 2 ||
+	    memcmp(got, hdr, hl) != 0 || memcmp(got + hl + n, "\r\n", 2) != 0)
+		bad = 1;
+	for (i = 0; !bad && i < n; i++)
+		if (got[hl + i] != c)
+			bad = 1;
+	free(got);
+	return bad ? -1 : 0;
+}
+
+static int
+expect_line(int fd, const char *want)
+{
+	char got[32];
+	size_t n = strlen(want);
+
+	return rexis_read_n(fd, got, n, 10000) == n &&
+	    memcmp(got, want, n) == 0 ? 0 : -1;
+}
+
+/*
+ * The lifetime race behind the zero-copy GET.  A GET of a large value
+ * sends the value's own bytes (no copy into the output buffer), so the
+ * value must outlive the read section until those bytes have left: a
+ * partial send parks the fiber, and in the meantime a SET or DEL frees
+ * the value.  Both ways in: (1) the same connection pipelines SET, GET,
+ * SET, GET, DEL, GET before reading anything, so each GET's reply is
+ * still unsent when the next SET replaces the value; (2) a second
+ * connection DELs and re-SETs the key while the first is parked
+ * mid-reply.  Every byte must be the value as of the GET.  Run under
+ * ASan, a reply that kept a dangling pointer is a heap-use-after-free;
+ * without ASan, a reused chunk shows up as the wrong bytes.
+ */
+static MunitResult
+test_get_ref_outlives_overwrite(const MunitParameter p[], void *d)
+{
+	/* Larger than any loopback send buffer and than the server's 1 MiB
+	 * output backpressure mark, so every GET reply is still partly
+	 * unsent when the next command runs.  (At 256 KiB the kernel took
+	 * each reply whole, and a planted no-reference build passed without
+	 * ASan.) */
+	enum { V = 8 * 1024 * 1024 };
+	char *va, *vb, *vc, *pipe_buf, cmd[64];
+	size_t off = 0;
+	int fd, other, i, len;
+	struct pipe_send ps;
+	pthread_t th;
+	(void)p; (void)d;
+
+	va = build_value(V, 'a');
+	vb = build_value(V, 'b');
+	vc = build_value(V, 'c');
+	pipe_buf = malloc(4 * V + 1024);
+	munit_assert_ptr_not_null(pipe_buf);
+
+	/* (1) one connection, everything pipelined. */
+	fd = connect_small_rcvbuf();
+	munit_assert_int(fd, >=, 0);
+	put_cmd3(pipe_buf, &off, "SET", "rk", va, V);
+	put_cmd3(pipe_buf, &off, "GET", "rk", NULL, 0);
+	put_cmd3(pipe_buf, &off, "SET", "rk", vb, V);
+	put_cmd3(pipe_buf, &off, "GET", "rk", NULL, 0);
+	put_cmd3(pipe_buf, &off, "DEL", "rk", NULL, 0);
+	put_cmd3(pipe_buf, &off, "GET", "rk", NULL, 0);
+	put_cmd3(pipe_buf, &off, "SET", "rk", vc, V);
+	ps.fd = fd; ps.buf = pipe_buf; ps.len = off; ps.rc = -1;
+	munit_assert_int(pthread_create(&th, NULL, pipe_send_fn, &ps), ==, 0);
+	usleep(500 * 1000);               /* let the server run ahead */
+	munit_assert_int(expect_line(fd, "+OK\r\n"), ==, 0);
+	munit_assert_int(expect_bulk(fd, V, 'a'), ==, 0);
+	munit_assert_int(expect_line(fd, "+OK\r\n"), ==, 0);
+	munit_assert_int(expect_bulk(fd, V, 'b'), ==, 0);
+	munit_assert_int(expect_line(fd, ":1\r\n"), ==, 0);
+	munit_assert_int(expect_bulk(fd, 0, 0), ==, 0);
+	munit_assert_int(expect_line(fd, "+OK\r\n"), ==, 0);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+	munit_assert_int(ps.rc, ==, 0);
+
+	/* (2) the value is replaced from ANOTHER connection (another loop
+	 * with --loops=2) while this one is parked mid-reply. */
+	len = build_cmd(cmd, sizeof cmd, 2, "GET", "rk");
+	munit_assert_int(rexis_send_all(fd, cmd, (size_t)len), ==, 0);
+	usleep(200 * 1000);               /* reply now partly sent, parked */
+	other = connect_server();
+	munit_assert_int(other, >=, 0);
+	for (i = 0; i < 4; i++) {
+		len = build_cmd(cmd, sizeof cmd, 2, "DEL", "rk");
+		munit_assert_int(rexis_send_all(other, cmd, (size_t)len), ==, 0);
+		munit_assert_int(expect_line(other, ":1\r\n"), ==, 0);
+		set_big(other, "rk", V);           /* 'y' bytes, same size */
+	}
+	munit_assert_int(expect_bulk(fd, V, 'c'), ==, 0);
+	/* and the new value is what a fresh GET sees */
+	munit_assert_int(rexis_send_all(fd, cmd, (size_t)build_cmd(cmd,
+	    sizeof cmd, 2, "GET", "rk")), ==, 0);
+	munit_assert_int(expect_bulk(fd, V, 'y'), ==, 0);
+	close(other);
+	close(fd);
+	free(va);
+	free(vb);
+	free(vc);
+	free(pipe_buf);
+	return MUNIT_OK;
+}
+
+/* A GET of a large value is answered without copying it: INFO's
+ * reply_bytes_by_ref counts the value bytes sent from the keyspace's own
+ * memory.  (The value used to be copied into the connection's output
+ * buffer under the read section: 31.6% of server CPU at 64 KiB.)  A
+ * small value is still copied (the copy is cheaper than the reference). */
+static MunitResult
+test_get_large_value_not_copied(const MunitParameter p[], void *d)
+{
+	char cmd[64], resp[4096];
+	long long r0, r1, r2;
+	const char *f;
+	int fd, n;
+	(void)p; (void)d;
+
+	fd = connect_server();
+	munit_assert_int(fd, >=, 0);
+	set_big(fd, "big", 65536);
+	set_big(fd, "small", 1024);
+	n = build_cmd(cmd, sizeof cmd, 1, "INFO");
+	munit_assert_int(send_cmd(fd, cmd, (size_t)n, resp, sizeof resp), >, 0);
+	f = strstr(resp, "reply_bytes_by_ref:");
+	munit_assert_ptr_not_null(f);
+	r0 = atoll(f + strlen("reply_bytes_by_ref:"));
+	n = build_cmd(cmd, sizeof cmd, 2, "GET", "big");
+	munit_assert_int(rexis_send_all(fd, cmd, (size_t)n), ==, 0);
+	munit_assert_int(expect_bulk(fd, 65536, 'y'), ==, 0);
+	n = build_cmd(cmd, sizeof cmd, 1, "INFO");
+	munit_assert_int(send_cmd(fd, cmd, (size_t)n, resp, sizeof resp), >, 0);
+	r1 = atoll(strstr(resp, "reply_bytes_by_ref:") +
+	    strlen("reply_bytes_by_ref:"));
+	n = build_cmd(cmd, sizeof cmd, 2, "GET", "small");
+	munit_assert_int(rexis_send_all(fd, cmd, (size_t)n), ==, 0);
+	munit_assert_int(expect_bulk(fd, 1024, 'y'), ==, 0);
+	n = build_cmd(cmd, sizeof cmd, 1, "INFO");
+	munit_assert_int(send_cmd(fd, cmd, (size_t)n, resp, sizeof resp), >, 0);
+	r2 = atoll(strstr(resp, "reply_bytes_by_ref:") +
+	    strlen("reply_bytes_by_ref:"));
+	printf("\n  get: by-ref bytes +%lld for a 64 KiB GET, +%lld for 1 KiB\n",
+	    r1 - r0, r2 - r1);
+	munit_assert_llong(r1 - r0, ==, 65536);
+	munit_assert_llong(r2 - r1, ==, 0);
+	close(fd);
+	return MUNIT_OK;
+}
+
 /* Count "$<n>\r\n" bulk headers for exactly-n-byte elements. */
 static int
 count_bulks(const char *buf, size_t len, const char *hdr)
@@ -689,6 +904,8 @@ static MunitTest tests[] = {
 	{ "/slow_reader_pipeline", test_slow_reader_pipeline, setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/multi_element_replies_uncapped", test_multi_element_replies_uncapped, setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/inline_commands",  test_inline_commands,  setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/get_ref_outlives_overwrite", test_get_ref_outlives_overwrite, setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/get_large_value_not_copied", test_get_large_value_not_copied, setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 

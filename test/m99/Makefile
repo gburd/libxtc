@@ -83,4 +83,7 @@ check: all
 	$(TIMEOUT) ./test_rexis_loopback
 	$(TIMEOUT) ./test_rexis_budgets
 	$(TIMEOUT) ./test_rexis_pbt
+	REXIS_ARGS=--loops=2 $(TIMEOUT) ./test_rexis_loopback
+	REXIS_ARGS=--loops=2 $(TIMEOUT) ./test_rexis_budgets
+	REXIS_ARGS=--loops=2 $(TIMEOUT) ./test_rexis_pbt
 	XTC_SRC_DIR=$(abspath ../..) sh ./test_rexis_persist.sh

@@ -71,14 +71,35 @@ hold under stress:
 
 | Flag | What it bounds | How |
 |---|---|---|
-| `--cores=N` | Which CPUs the process may run on | `sched_setaffinity(2)` restricts it to CPUs 0..N-1.  rexis runs ONE event loop on ONE thread, so this pins; it does not add threads (`--cores=4` is still one busy core) |
+| `--cores=N` | Which CPUs the process may run on | `sched_setaffinity(2)` restricts it to CPUs 0..N-1.  It pins; it does not add threads (that is `--loops`) |
+| `--loops=N` | Event loops (OS threads) | Connections go to the least-loaded of N `xtc_exec` loops.  One loop holds at most 65,520 clients: a pid has a 16-bit per-loop slot, so a loop runs at most 65,536 procs, and rexis keeps 16 for itself.  100k clients need `--loops=2`.  With N > 1 the keyspace is shared by N threads and every command takes a parking reader/writer latch (`xtc_arwlock`); with 1 it takes none |
 | `--max-memory=N` | Keyspace + client buffers | One `xtc_res` `XTC_RES_MEM_BYTES` budget charged by every keyspace allocation (including the bucket array) AND by every client query/output buffer's growth above a fixed 16 KiB each.  A write that would pass it gets `-OOM`; a client whose buffer would pass it gets `-OOM` and is closed.  `INFO` `used_memory` is the budget's total (`used_memory_dataset` + `used_memory_clients`).  Not covered: the fixed 32 KiB of buffers per connection (bounded by `--max-clients`), proc stacks, allocator overhead.  0 = no cap |
 | `--max-keys=N` | DB key count | Per-DB counter; SET/HSET/LPUSH refused above cap |
-| `--max-clients=N` | Concurrent connections | Listener checks the live count before spawning a per-conn proc; over-limit connections are closed |
+| `--max-clients=N` | Concurrent connections (default 10000; 0 = all the loops hold) | Listener checks the live count before spawning a per-conn proc.  An over-limit client gets `-ERR max number of clients reached` (Redis's reply) and a close, as does one that finds every loop full (`--loop-clients=N` lowers the per-loop cap; INFO shows `connected_clients`, `rejected_connections`, `loopN_clients`).  A cap above `--loops` x 65,520 is refused at startup with the `--loops` value that fits |
+| `--max-fds=N` | Sockets, listener included (default: `--max-clients` + 64) | The `xtc_res` `XTC_RES_FDS` budget, attached with `xtc_res_attach_net`, so `xtc_net_accept` refuses BEFORE accepting: a client past it waits in the kernel backlog and is served when a socket closes.  The soft `RLIMIT_NOFILE` is raised to fit |
 | `--max-iops=N` | Commands/sec | Token bucket refilled every second; excess commands are DELAYED (held in the connection's buffer until tokens return), not rejected |
 | `--max-request=N` | Largest command (default 64 MiB) | Redis `proto-max-bulk-len`: a bulk whose header announces more is refused at once (`-ERR Protocol error: ...`) and the connection closed; the query buffer grows only to hold one command |
 | `--max-output=N` | Unsent reply bytes per client (default 128 MiB) | Redis `client-output-buffer-limit`: a reply that would pass it is replaced WHOLE by `-ERR reply exceeds the client output limit` (never truncated); a pub/sub subscriber that falls that far behind is disconnected |
 | `--timeout=SECS` | Idle connections (default 0 = never) | Redis `timeout`: no byte in either direction for SECS closes the connection; subscribers are exempt |
+
+Zero-copy GET: a string value of 4 KiB or more is stored behind a
+reference count, and GET sends it straight from the keyspace with
+`sendmsg` (the reply header and CRLF come from the output buffer)
+instead of copying it into the output buffer.  The reply holds a
+reference until its last byte has left, so a SET, DEL or expiry that
+replaces the value while a partial send has the fiber parked frees
+nothing that is still being sent: the old value is freed by whichever
+of the two finishes last.  The bytes held this way count toward
+`--max-output`, the 1 MiB backpressure mark and the `--max-memory`
+client budget exactly as a copy would.  Smaller values are still
+copied; the copy is cheaper than the reference.  Measured (one loop,
+memtier GET-only, 32 connections, pipeline 8, 3 interleaved runs):
+64 KiB GETs 55.7k -> 75.2k per second (+35%; the copy was 28% of the
+server's CPU samples, now 0.1%), 1 KiB unchanged within noise (592.6k ->
+635.4k).  `INFO` `reply_bytes_by_ref` counts the value bytes sent this
+way.  `xtc_rcu` was considered for the lifetime and not used: a slow
+client can keep a reply unsent for seconds, and an RCU read section held
+across that park would delay every reclamation in the process.
 
 Backpressure: once more than 1 MiB of a client's replies are unsent, its
 connection stops reading and running commands until the client drains
@@ -250,14 +271,23 @@ shaped the library:
   the note in `bitcask.h` about why, and `examples/06_sqlxtc/wal.c` for
   the `xtc_aio_*` alternative.
 * `KEYS pattern` is O(n) like real Redis -- documented, not a bug.
-* Single-threaded: one event loop serves every connection (see
-  `--cores` above).  Spreading the connection procs over an `xtc_exec`
-  is NOT a small change: the lrlock guards only the table header, both
-  copies share the buckets and entries, and writers free entries in
-  place, so a reader on another thread would race those frees.  The
-  scalable shape is DragonFly's: one keyspace shard per loop, each
-  command run on (or sent to) the loop that owns its key -- see
-  `docs/examples/rexis-vs-dragonfly.md`.
+* `--loops=N` spreads CONNECTIONS, not the keyspace.  The lrlock guards
+  only the table header; both copies share the buckets and entries, and
+  writers free entries in place, so with N > 1 every command also takes
+  one `xtc_arwlock` (readers share it, writers serialize).  That buys
+  connection capacity (65,520 clients per loop) and parallel parsing and
+  I/O, not parallel writes.  The scalable shape is DragonFly's: one
+  keyspace shard per loop, each command run on (or sent to) the loop that
+  owns its key -- see `docs/examples/rexis-vs-dragonfly.md`.
+* An idle connection costs ~15.6 KB of RSS (its fiber stack and two
+  16 KiB base buffers; Valkey: 0.9 KB).  It does not wake: with no
+  `--timeout` and nothing buffered its proc parks on the socket with no
+  deadline, and shutdown wakes it explicitly (an fd -> pid table in
+  `conn.c`).  Each idle proc used to wake once a second to look at the
+  shutdown flag; with 100,000 idle connections on `--loops=2` that cost
+  526 CPU ticks per 10 s with no traffic and held memtier to 134k ops/s.
+  Now: 8 ticks (the same as with no connections) and 179k ops/s (medians
+  of 3 interleaved runs).
 * A client that pipelines an unbounded stream and never reads stalls
   once the socket buffers fill (backpressure, above); Redis instead
   buffers replies without limit for normal clients by default.

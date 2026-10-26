@@ -11,6 +11,10 @@
  *	  P3: INCR atomic: N concurrent INCRs -> final value = sum of INCRs
  *	  P4: LPUSH+RPOP preserves FIFO across messages
  *	  P5: Random command stress: no crash or corruption
+ *	  P6: a pipelined mix of SET/GET/DEL over values either side of the
+ *	      by-reference GET threshold returns, for every GET, exactly the
+ *	      bytes the model says (a later SET/DEL in the pipeline must not
+ *	      reach a reply still queued)
  */
 
 #include <errno.h>
@@ -457,6 +461,167 @@ test_prop_random_stress(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ----- Property 6: pipelined SET/GET/DEL of values around the
+ * by-reference threshold match a model ----- */
+
+/* Sizes either side of the server's DB_REF_MIN (4096): a GET of a value
+ * at or above it is sent from the keyspace's memory by reference, so a
+ * later SET / DEL in the same pipeline must not change or free the bytes
+ * of a reply that is still queued. */
+static const size_t P6_SIZES[] = { 0, 1, 4095, 4096, 4097, 20000, 70000 };
+#define P6_N_SIZES  (sizeof P6_SIZES / sizeof P6_SIZES[0])
+#define P6_KEYS     3
+#define P6_OPS      40
+#define P6_ROUNDS   15
+
+struct p6_send { int fd; const char *buf; size_t len; int rc; };
+
+static void *
+p6_send_fn(void *arg)
+{
+	struct p6_send *ps = arg;
+	size_t off = 0;
+	ssize_t r;
+
+	ps->rc = 0;
+	while (off < ps->len) {
+		r = send(ps->fd, ps->buf + off, ps->len - off, MSG_NOSIGNAL);
+		if (r <= 0) {
+			ps->rc = -1;
+			break;
+		}
+		off += (size_t)r;
+	}
+	return NULL;
+}
+
+/* Value bytes are a function of (round, op, offset), so a reply carrying
+ * another op's bytes, or freed-and-reused memory, does not match. */
+static char
+p6_byte(int round, int op, size_t i)
+{
+	return (char)('A' + (unsigned)(round * 131 + op * 31 + (int)(i % 7)) %
+	    26);
+}
+
+static MunitResult
+test_prop_pipelined_overwrite(const MunitParameter p[], void *d)
+{
+	/* model: size of each key's value (-1 = absent) and the op that
+	 * wrote it */
+	long msize[P6_KEYS];
+	int mop[P6_KEYS], kind[P6_OPS], wop[P6_OPS];
+	long esize[P6_OPS];
+	char *buf, *got, hdr[64], key[8];
+	size_t off, cap = (size_t)P6_OPS * (70000 + 64), sz, i, hl;
+	int fd, round, op, k, n;
+	struct p6_send ps;
+	pthread_t th;
+	(void)p; (void)d;
+
+	pbt_init_seed();
+	buf = malloc(cap);
+	got = malloc(70000 + 64);
+	munit_assert_ptr_not_null(buf);
+	munit_assert_ptr_not_null(got);
+	munit_assert_int(start_server(), ==, 0);
+	fd = connect_server();
+	munit_assert_int(fd, >=, 0);
+
+	for (round = 0; round < P6_ROUNDS; round++) {
+		for (k = 0; k < P6_KEYS; k++) {
+			msize[k] = -1;
+			mop[k] = -1;
+		}
+		off = 0;
+		/* DEL every key first, so the model starts empty. */
+		for (k = 0; k < P6_KEYS; k++) {
+			snprintf(key, sizeof key, "p6k%d", k);
+			off += (size_t)sprintf(buf + off, "*2\r\n$3\r\nDEL\r\n"
+			    "$%zu\r\n%s\r\n", strlen(key), key);
+		}
+		for (op = 0; op < P6_OPS; op++) {
+			k = pbt_rand() % P6_KEYS;
+			kind[op] = pbt_rand() % 5;  /* 0,1 SET; 2,3 GET; 4 DEL */
+			snprintf(key, sizeof key, "p6k%d", k);
+			if (kind[op] <= 1) {
+				sz = P6_SIZES[pbt_rand() % P6_N_SIZES];
+				off += (size_t)sprintf(buf + off, "*3\r\n$3\r\nSET"
+				    "\r\n$%zu\r\n%s\r\n$%zu\r\n", strlen(key),
+				    key, sz);
+				for (i = 0; i < sz; i++)
+					buf[off + i] = p6_byte(round, op, i);
+				off += sz;
+				memcpy(buf + off, "\r\n", 2);
+				off += 2;
+				msize[k] = (long)sz;
+				mop[k] = op;
+			} else {
+				off += (size_t)sprintf(buf + off, "*2\r\n$3\r\n%s"
+				    "\r\n$%zu\r\n%s\r\n", kind[op] == 4 ?
+				    "DEL" : "GET", strlen(key), key);
+				esize[op] = msize[k];
+				wop[op] = mop[k];
+				if (kind[op] == 4) {
+					msize[k] = -1;
+					mop[k] = -1;
+				}
+			}
+		}
+		/* Send the whole pipeline from a thread while this one reads
+		 * slowly, so replies pile up unsent on the server. */
+		ps.fd = fd; ps.buf = buf; ps.len = off; ps.rc = -1;
+		munit_assert_int(pthread_create(&th, NULL, p6_send_fn, &ps),
+		    ==, 0);
+		usleep(20 * 1000);
+		for (k = 0; k < P6_KEYS; k++) {     /* the DELs */
+			munit_assert_size(rexis_read_n(fd, got, 4, 10000), ==, 4);
+			munit_assert_true(got[0] == ':');
+		}
+		for (op = 0; op < P6_OPS; op++) {
+			if (kind[op] <= 1) {
+				munit_assert_size(rexis_read_n(fd, got, 5, 10000),
+				    ==, 5);
+				munit_assert_memory_equal(5, got, "+OK\r\n");
+			} else if (kind[op] == 4) {
+				munit_assert_size(rexis_read_n(fd, got, 4, 10000),
+				    ==, 4);
+				munit_assert_memory_equal(4, got,
+				    esize[op] >= 0 ? ":1\r\n" : ":0\r\n");
+			} else if (esize[op] < 0) {
+				munit_assert_size(rexis_read_n(fd, got, 5, 10000),
+				    ==, 5);
+				munit_assert_memory_equal(5, got, "$-1\r\n");
+			} else {
+				hl = (size_t)snprintf(hdr, sizeof hdr, "$%ld\r\n",
+				    esize[op]);
+				n = (int)(hl + (size_t)esize[op] + 2);
+				munit_assert_size(rexis_read_n(fd, got, (size_t)n,
+				    20000), ==, (size_t)n);
+				munit_assert_memory_equal(hl, got, hdr);
+				for (i = 0; i < (size_t)esize[op]; i++)
+					if (got[hl + i] != p6_byte(round,
+					    wop[op], i))
+						munit_errorf("round %d op %d: GET "
+						    "byte %zu of %ld wrong (seed "
+						    "%u)", round, op, i,
+						    esize[op], g_seed);
+				munit_assert_memory_equal(2, got + hl +
+				    (size_t)esize[op], "\r\n");
+			}
+		}
+		munit_assert_int(pthread_join(th, NULL), ==, 0);
+		munit_assert_int(ps.rc, ==, 0);
+	}
+	printf("\n  P6 pipelined overwrite: %d rounds x %d ops passed\n",
+	    P6_ROUNDS, P6_OPS);
+	close(fd);
+	free(buf);
+	free(got);
+	munit_assert_int(stop_server(), ==, 0);
+	return MUNIT_OK;
+}
+
 /* ----- Test suite ----- */
 
 static MunitTest tests[] = {
@@ -465,6 +630,7 @@ static MunitTest tests[] = {
 	{ "/incr_atomic",       test_prop_incr_atomic,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/list_fifo",         test_prop_list_fifo,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/random_stress",     test_prop_random_stress,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/pipelined_overwrite", test_prop_pipelined_overwrite, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 

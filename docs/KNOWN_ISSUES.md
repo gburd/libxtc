@@ -6,6 +6,32 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## OPEN (libxtc): at most 65,536 live processes per loop
+
+**The limit.**  `xtc_pid_t` names a process by its loop and a 16-bit
+slot on that loop (`local_id`), so one loop can hold at most 65,536 live
+processes.  `xtc_proc_spawn` on a full loop returns `XTC_E_RESOURCE` and
+spawns nothing.  Every process counts, supervisors included.  A server
+that runs one process per connection therefore stops accepting at about
+65,500 clients per loop.  rexis 1.59 stopped at exactly 65,532 clients
+(65,536 minus its supervisor, listener, expiry and metrics procs) and
+closed each connection after that without a reply.  On the same host,
+with the same client harness, Valkey held 70,002, so neither the client's
+ports nor the file-descriptor limits were the cause.
+
+**Workaround.**  Spread the processes over the loops of an `xtc_exec`
+executor: each loop has its own 65,536 slots.  rexis does this with
+`--loops=N`.  It puts each connection on the least-loaded loop with room
+and refuses startup when `--max-clients` is more than its loops can hold.
+A client over the limit gets `-ERR max number of clients reached` and a
+close, as Redis sends.  Measured: `--loops=2` held 100,000 idle
+connections on one 32-vCPU x86-64 host.
+
+**Why it stays open.**  `xtc_pid_t` is a public struct passed by value
+(see [ABI stability]({{ '/reference/abi-stability/' | relative_url }})),
+so widening `local_id` has to wait for 2.0.  See
+[xtc_proc(3)](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_proc.3).
+
 ## FIXED (1.60): sqlxtc served a damaged page as committed data; CHANGED: page format
 
 **What was wrong.**  After a clean shutdown sqlxtc trusts its page file
@@ -1060,8 +1086,13 @@ isolation defects were fixed (1.56); what remains is recorded here.
   METADATA request.  Produces are acknowledged only after a group-commit
   fdatasync (`--fsync-interval-ms` relaxes this).
 * **rexis `--cores` pins; it does not add threads.**  The server runs one
-  event loop.  `--max-memory` bounds the keyspace and every client's
-  query/output buffers; a client over its output limit is disconnected.
+  event loop unless `--loops=N` is given; with N > 1 the connections
+  spread over N loops but every command still takes one keyspace latch,
+  so writes do not run in parallel.  `--max-memory` bounds the keyspace
+  and every client's query/output buffers; a client over its output
+  limit is disconnected.  A value of 4 KiB or more that a GET reply is
+  still sending stays allocated (and charged to the client's budget)
+  after a SET or DEL replaces it, until the reply has left.
 * **lorb `test_lob` leaks under LeakSanitizer** (pre-existing):
   `lob_book_destroy` does not free its `xtc_chash` nodes.
 * **sqlxtc restart after kill -9.**  For about 50 ms after the killed
