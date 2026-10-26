@@ -138,13 +138,21 @@ and its result is in that struct's
 queues a native file operation
 .Pq an Vt xtc_aio_t : Dv XTC_AIO_PREAD , XTC_AIO_PWRITE , No or Dv XTC_AIO_FSYNC
 and returns immediately.
-On the io_uring backend it submits the matching
+On the io_uring backend it prepares the matching
 .Dv IORING_OP
 and the completion is delivered as an
 .Dv XTC_IO_AIO
 event that wakes the tagged task, which then reads
 .Va res
 .Pq bytes transferred, or a negative errno .
+The operation reaches the kernel at once if no other file I/O of
+.Fa io
+is in flight, and otherwise no later than the next
+.Fn xtc_io_poll ,
+which submits everything queued in the same system call that waits
+.Pq see Sx SUBMISSION ;
+a caller that drives the engine itself must poll, not spin on
+.Va done .
 A regular file is not pollable, so on a readiness-only backend
 .Pq epoll, kqueue, poll
 this returns
@@ -152,6 +160,30 @@ this returns
 and the caller offloads the operation to the blocking pool instead;
 .Xr xtc_aio 3
 wraps both paths.
+.Sh SUBMISSION
+On the io_uring backend
+.Fn xtc_io_reg_fd ,
+.Fn xtc_io_mod_fd ,
+.Fn xtc_io_del_fd
+and
+.Fn xtc_io_aio_submit
+leave their submission queue entries queued; the next
+.Fn xtc_io_poll
+submits all of them and waits in one
+.Fn io_uring_enter
+.Pq with liburing 2.4 or later; older liburing submits, then waits .
+A completion can be reaped only by a poll, and every poll submits
+first, so a caller that polls never waits on an operation the kernel
+has not seen.
+.Fn xtc_io_aio_submit
+submits at once when none of the engine's file I/O is in flight, and an
+event loop submits what is queued after a task yields and every eight
+task runs.
+A zero-timeout
+.Fn xtc_io_poll
+with nothing queued, no file I/O in flight and no completion pending
+returns without a system call.
+The other backends act at once, as before.
 .Sh REGISTRATION
 .Fn xtc_io_reg_fd
 registers a file descriptor with the engine.
