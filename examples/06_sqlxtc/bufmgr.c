@@ -402,7 +402,7 @@ do_io(bm_t *bm, void *buf, bm_pid_t pid, int write)
  * pid word is covered too: a page written at another page's offset (a
  * misdirected write) fails, as do a bad byte and a torn write.  Data
  * pages keep the slot at cksum_off; page 0 at the end of the superblock
- * page, before the freelist trailer (BM_SUPER_CK_OFF). */
+ * page, before the freelist trailer (BM_SUPER_CK_TAIL). */
 static void
 ck_put32(uint8_t *p, uint32_t v)
 {
