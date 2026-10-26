@@ -27,6 +27,7 @@
 #include "xtc_stats.h"
 #include "xtc_sync.h"
 #include "xtc_dio_sched.h"
+#include "xtc_dst_inject.h" /* DST planted bugs (no-op in prod) */
 #include <stdlib.h>
 #include <fcntl.h>
 
@@ -1404,6 +1405,15 @@ evict_one(bm_t *bm)
 			             * checks below then reclaim this frame */
 		}
 		if (st != BM_COOL) continue;
+#if XTC_DST_BUG(XTC_DST_BUG_EVICTNOWB)
+		/* planted: every 4th dirty victim is dropped unwritten */
+		if (atomic_load_explicit(&f->dirty, memory_order_acquire) &&
+		    atomic_load_explicit(&f->io_busy, memory_order_acquire) == 0) {
+			static _Atomic unsigned bug_n;
+			if (atomic_fetch_add(&bug_n, 1) % 4 == 3)
+				atomic_store_explicit(&f->dirty, 0, memory_order_release);
+		}
+#endif
 		if (atomic_load_explicit(&f->dirty, memory_order_acquire) &&
 		    claim) {
 			/*
