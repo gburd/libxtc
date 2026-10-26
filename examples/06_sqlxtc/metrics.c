@@ -108,19 +108,22 @@ metrics_proc(void *arg)
 			    xtc_hist_quantile(sqlxtc_stat_query_latency, 0.50) : 0;
 			int64_t p99 = sqlxtc_stat_query_latency ?
 			    xtc_hist_quantile(sqlxtc_stat_query_latency, 0.99) : 0;
+			int64_t qmax = sqlxtc_stat_query_latency ?
+			    xtc_hist_max(sqlxtc_stat_query_latency) : 0;
 			int64_t mem = st->res ?
 			    xtc_res_used(st->res, XTC_RES_MEM_BYTES) : 0;
 			uint64_t wc = 0, wf = 0;
 			sx_storage_wal_counts(&wc, &wf);
 			XTC_LOG_INFO_F(
 			    "metrics: conns=%d queries=%lld errors=%lld "
-			    "q_p50_ns=%lld q_p99_ns=%lld mem=%lld parses=%llu "
+			    "q_p50_ns=%lld q_p99_ns=%lld q_max_ns=%lld mem=%lld "
+			    "parses=%llu "
 			    "plans=%llu wal_commits=%llu wal_fsyncs=%llu "
 			    "row_waits=%llu row_wait_ms=%llu row_conflicts=%llu "
 			    "row_deadlocks=%llu",
 			    atomic_load(st->conn_count),
 			    (long long)qs, (long long)errs,
-			    (long long)p50, (long long)p99,
+			    (long long)p50, (long long)p99, (long long)qmax,
 			    (long long)mem, sql_parse_count(),
 			    (unsigned long long)vx_plan_build_count(),
 			    (unsigned long long)wc, (unsigned long long)wf,

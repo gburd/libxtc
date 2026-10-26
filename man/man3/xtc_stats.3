@@ -18,6 +18,7 @@
 .Nm xtc_hist_record ,
 .Nm xtc_hist_quantile ,
 .Nm xtc_hist_count ,
+.Nm xtc_hist_max ,
 .Nm xtc_hist_destroy ,
 .Nm xtc_dist_create ,
 .Nm xtc_dist_record ,
@@ -57,6 +58,10 @@
 .Fn xtc_hist_record "xtc_hist_t *h" "int64_t value_ns"
 .Ft int64_t
 .Fn xtc_hist_quantile "const xtc_hist_t *h" "double q"
+.Ft uint64_t
+.Fn xtc_hist_count "const xtc_hist_t *h"
+.Ft int64_t
+.Fn xtc_hist_max "const xtc_hist_t *h"
 .Ft void
 .Fn xtc_hist_destroy "xtc_hist_t *h"
 .Ft int
@@ -91,7 +96,8 @@ Current value, can move up or down
 .Po active connections, queue depth Pc .
 .It histogram
 Distribution; supports quantile queries
-.Pq p50, p99, p999 .
+.Pq p50, p99, p999
+and keeps the exact maximum.
 For latency tracking.
 .It dist
 Online mergeable mean and population variance of a stream of
@@ -119,10 +125,52 @@ gauges should be modeled as a counter pair instead.
 Histograms are per-CPU sharded
 .Pq one log-linear bucket array per CPU ;
 .Fn xtc_hist_record
-hits one shard's atomic counter.
+hits one shard's bucket counter.
 .Fn xtc_hist_quantile
 merges shards under no lock
 .Pq relaxed atomic loads .
+The buckets are log-linear: 40 powers of two from 1 ns to
+2^40 ns
+.Pq about 18 minutes ,
+16 sub-buckets each
+.Pq 640 buckets, 5 KiB per CPU shard .
+Values below 16 are exact; a larger value's bucket is at most 1/16 of
+the value wide.
+Each shard also keeps the exact largest value it recorded.
+A record is one atomic add to its bucket and one relaxed load of the
+shard's maximum
+.Pq a compare-and-swap only for a new maximum ;
+the count is the sum of the buckets, computed on read.
+.Fn xtc_hist_quantile
+returns the nearest-rank quantile: the smallest recorded value
+.Fa v
+with at least ceil(q * count) values at or below it, reported as the
+.Em upper
+bound of
+.Fa v Ns 's
+bucket
+.Pq HdrHistogram's convention
+and never more than the maximum.
+So a quantile is never below the true value and at most 1/16 above it.
+.Fa q
+is clamped to [0, 1];
+.Fa q
+= 1 returns the maximum.
+Values of 2^40 ns and more are counted in the top bucket, whose
+quantile is the maximum.
+A value of 0 or less is counted in the lowest bucket and does not
+raise the maximum.
+.Fn xtc_hist_max
+returns the largest value recorded
+.Pq 0 for an empty histogram ,
+and
+.Fn xtc_hist_count
+the number of values.
+In 1.59 and earlier the top bucket was 2^24 ns
+.Pq 16.8 ms ,
+every larger value was counted there, a quantile was the bucket's
+.Em lower
+bound, and there was no maximum: a 500 ms stall read as about 16 ms.
 .It
 Dists are per-CPU sharded.
 Each shard holds a Welford triple
@@ -225,6 +273,7 @@ rexis.req_latency_ns_count 12345
 rexis.req_latency_ns_p50 1500
 rexis.req_latency_ns_p99 9800
 rexis.req_latency_ns_p999 24000
+rexis.req_latency_ns_max 183167000
 # TYPE rexis.batch_size summary
 rexis.batch_size_count 12345
 rexis.batch_size_mean 37.5

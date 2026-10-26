@@ -5,9 +5,9 @@
  * A/B eviction-sweep benchmark. theta=0 selects the legacy sweep.
  * Dataset must exceed the pool. Zipf ranks are shuffled across page ids.
  * No provider/trickler is spawned. Use a disposable path on local NVMe.
- * CSV quantiles are histogram bucket lower bounds, sampled in us and
- * reported in ns; max_ns is exact. tail_adv includes warm-up and covers
- * successful evict_one calls only, not whole bm_fix_pid operations.
+ * CSV quantiles are histogram bucket upper bounds in ns (at most 1/16
+ * above the true value); max_ns is exact. tail_adv includes warm-up and
+ * covers successful evict_one calls only, not whole bm_fix_pid operations.
  */
 #include <errno.h>
 #include <math.h>
@@ -30,7 +30,7 @@ static uint32_t g_n_pages;
 static int64_t g_deadline_ns;
 static double *g_cdf;
 static uint32_t *g_rank_pid;
-static _Atomic uint64_t g_ops, g_errs, g_max_ns;
+static _Atomic uint64_t g_ops, g_errs;
 static xtc_hist_t *g_lat;
 static uint64_t *g_rng;
 
@@ -67,8 +67,7 @@ worker(void *arg)
 	uint64_t n = 0;
 	while (xtc_clock_mono() < g_deadline_ns) {
 		uint32_t pid = g_rank_pid[zipf_rank(rng)];
-		int64_t t0 = xtc_clock_mono(), dt;
-		uint64_t cur;
+		int64_t t0 = xtc_clock_mono();
 		if (bm_fix_pid(g_bm, (bm_pid_t)pid, &f) != XTC_OK) {
 			atomic_fetch_add(&g_errs, 1);
 			return;
@@ -76,14 +75,7 @@ worker(void *arg)
 		if (((const uint32_t *)bm_page(f))[0] != pid)
 			atomic_fetch_add(&g_errs, 1);
 		bm_unfix(g_bm, f, 0);
-		dt = xtc_clock_mono() - t0;
-		/* Histogram clamps at 2^24 units: us spans 16 s, ns only 16 ms. */
-		xtc_hist_record(g_lat, dt / 1000);
-		cur = atomic_load_explicit(&g_max_ns, memory_order_relaxed);
-		while ((uint64_t)dt > cur && !atomic_compare_exchange_weak_explicit(
-		    &g_max_ns, &cur, (uint64_t)dt, memory_order_relaxed,
-		    memory_order_relaxed))
-			;
+		xtc_hist_record(g_lat, xtc_clock_mono() - t0);
 		if ((++n & 63) == 0)
 			xtc_yield();
 	}
@@ -216,7 +208,7 @@ main(int argc, char **argv)
 	bo.direct = (uint8_t)direct;
 	bo.claim_threshold = theta;
 	if (bm_create(&bo, &g_bm) != XTC_OK ||
-	    xtc_hist_create("bm_sweep_fix_us", &g_lat) != XTC_OK ||
+	    xtc_hist_create("bm_sweep_fix_ns", &g_lat) != XTC_OK ||
 	    xtc_exec_init(&e, (int)loops) != XTC_OK)
 		return 1;
 
@@ -235,10 +227,9 @@ main(int argc, char **argv)
 		return 1;
 	}
 	xtc_hist_destroy(g_lat);
-	if (xtc_hist_create("bm_sweep_fix_us", &g_lat) != XTC_OK)
+	if (xtc_hist_create("bm_sweep_fix_ns", &g_lat) != XTC_OK)
 		return 1;
 	atomic_store(&g_ops, 0);
-	atomic_store(&g_max_ns, 0);
 	start = xtc_clock_mono();
 	if (window(e, loops, fibers, secs) != 0)
 		return 1;
@@ -251,17 +242,17 @@ main(int argc, char **argv)
 	loads = s1.loads - s0.loads;
 	if (ops == 0 || allocs == 0)
 		return 1;
-	printf("%u,%u,%u,%u,%u,%u,%llu,%.0f,%.4f,%llu,%.3f,%llu,%llu,%lld,%lld,%lld,%llu\n",
+	printf("%u,%u,%u,%u,%u,%u,%llu,%.0f,%.4f,%llu,%.3f,%llu,%llu,%lld,%lld,%lld,%lld\n",
 	    theta, frames, pages, loops, fibers, secs, (unsigned long long)ops,
 	    (double)ops * 1e9 / (double)elapsed,
 	    hits + loads ? 100.0 * (double)hits / (double)(hits + loads) : 0.0,
 	    (unsigned long long)allocs, (double)adv / (double)allocs,
 	    (unsigned long long)s1.adv_max,
 	    (unsigned long long)(s1.forced_claims - s0.forced_claims),
-	    (long long)xtc_hist_quantile(g_lat, 0.50) * 1000,
-	    (long long)xtc_hist_quantile(g_lat, 0.99) * 1000,
-	    (long long)xtc_hist_quantile(g_lat, 0.999) * 1000,
-	    (unsigned long long)atomic_load(&g_max_ns));
+	    (long long)xtc_hist_quantile(g_lat, 0.50),
+	    (long long)xtc_hist_quantile(g_lat, 0.99),
+	    (long long)xtc_hist_quantile(g_lat, 0.999),
+	    (long long)xtc_hist_max(g_lat));
 	xtc_exec_fini(e);
 	bm_destroy(g_bm);
 	xtc_hist_destroy(g_lat);
