@@ -208,7 +208,7 @@ static int
 m8_run_pair(int migratable0, int migratable1)
 {
 	xtc_exec_t *e;
-	xtc_proc_opts_t o0 = { 0 }, o1 = { 0 };
+	xtc_proc_opts_t o0 = XTC_PROC_OPTS_INIT, o1 = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	o0.migratable = migratable0;
 	o1.migratable = migratable1;
@@ -272,7 +272,7 @@ static MunitResult
 test_steal_with_pending_timer(const MunitParameter p[], void *d)
 {
 	xtc_exec_t *e;
-	xtc_proc_opts_t mo = { 0 };
+	xtc_proc_opts_t mo = XTC_PROC_OPTS_INIT;
 	xtc_loop_stats_t s1;
 	xtc_pid_t pid;
 	int i;

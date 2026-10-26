@@ -253,7 +253,7 @@ spawn_all(xtc_loop_t *ts_loop, xtc_loop_t **shard_loops, xtc_loop_t **client_loo
 
 	atomic_store(&g_clients_left, N_CLIENTS);
 	for (c = 0; c < N_CLIENTS; c++) {
-		xtc_proc_opts_t po = { .name = "cli" };
+		xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "cli" };
 		xtc_pid_t pid;
 		if (xtc_proc_spawn(client_loops[c % N_CLIENTS], client_proc,
 		    (void *)c, &po, &pid) != XTC_OK)

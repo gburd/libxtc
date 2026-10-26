@@ -599,7 +599,7 @@ static MunitResult
 test_recv_inf_parks(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	struct inf_state s = { XTC_PID_NONE, 0 };
 	xtc_pid_t sp;
 	double c0, c1, w0, w1;
@@ -662,7 +662,7 @@ static MunitResult
 test_mailbox_stats(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	xtc_mailbox_stats_t st;
 	int i, v = 7;
@@ -770,7 +770,7 @@ static MunitResult
 test_save_queue_cap(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	struct sqc_state s = { XTC_PID_NONE, 0, 0, 0, 0 };
 	xtc_pid_t fl;
 	(void)p; (void)d;
@@ -1139,7 +1139,7 @@ test_fault_escalate(const MunitParameter p[], void *d)
 		/* Child: a single-loop process that faults in a critical
 		 * section.  Containment is armed but must be overridden. */
 		xtc_loop_t *loop = NULL;
-		xtc_proc_opts_t opts = { 0 };
+		xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 		xtc_pid_t fp;
 		(void)xtc_fault_guard_install();
 		if (xtc_loop_init(&loop) != XTC_OK) _exit(97);
@@ -1176,7 +1176,7 @@ static MunitResult
 test_proc_at_exit(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	(void)p; (void)d;
 	atomic_store(&g_atx_order, 0);
@@ -1251,6 +1251,7 @@ test_pid_local_id_ceiling(const MunitParameter p[], void *d)
 
 	for (i = 0; i < A1_PROBE_TARGET; i++) {
 		memset(&o, 0, sizeof o);
+		o.size = sizeof o;
 		o.name = "a1";
 		rc = xtc_proc_spawn(lp, a1_parker, NULL, &o, &pids[i]);
 		if (rc != XTC_OK)
@@ -1391,7 +1392,7 @@ static MunitResult
 test_cancel_poll(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	(void)p; (void)d;
 
@@ -1499,7 +1500,7 @@ static void
 kd_proc_supervisor(void *arg)
 {
 	struct kd_targets *t = arg;
-	xtc_proc_info_t info;
+	xtc_proc_info_t info = XTC_PROC_INFO_INIT;
 	int status = -1;
 
 	/* Killing yourself is xtc_exit_self, not this. */
@@ -1548,7 +1549,7 @@ static MunitResult
 test_exit_pid_deadline(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	struct kd_targets t;
 	xtc_pid_t sup;
 	(void)p; (void)d;
@@ -1642,7 +1643,7 @@ static void
 mk_sup_proc(void *arg)
 {
 	struct mk_sup *s = arg;
-	xtc_proc_info_t info;
+	xtc_proc_info_t info = XTC_PROC_INFO_INIT;
 	int status = -1;
 
 	while (!atomic_load(&g_mk_in_mask))
@@ -1667,7 +1668,7 @@ static MunitResult
 test_mask_enter_leave(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	struct mk_sup s;
 	xtc_pid_t sup;
 	(void)p; (void)d;
@@ -1727,7 +1728,7 @@ static MunitResult
 test_mask_nesting(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	(void)p; (void)d;
 
@@ -1829,7 +1830,7 @@ static MunitResult
 test_cross_thread_send_wakes(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	pthread_t th;
 	int i;
 	(void)p; (void)d;
@@ -1931,7 +1932,7 @@ static MunitResult
 ag_run(int wedge, int expect_all_gone, int expect_chunks_zero)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	struct ag_sup s;
 	xtc_pid_t p;
 
@@ -2018,7 +2019,7 @@ ku_victim_proc(void *arg)
 static void
 ku_checker_proc(void *arg)
 {
-	xtc_proc_info_t info;
+	xtc_proc_info_t info = XTC_PROC_INFO_INIT;
 	xtc_pid_t bogus;
 	int st, spins = 0;
 	(void)arg;
@@ -2061,7 +2062,7 @@ static MunitResult
 test_exit_pid_deadline_unknown(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t checker;
 	(void)p; (void)d;
 
@@ -2144,7 +2145,7 @@ static MunitResult
 test_wait_fd_wake_is_not_timeout(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t other;
 	int pipefd[2];
 	(void)p; (void)d;
@@ -2221,7 +2222,7 @@ static MunitResult
 test_wait_fd_kill_releases_registration(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t reuser;
 	int pipefd[2];
 	(void)p; (void)d;
@@ -2324,7 +2325,7 @@ static MunitResult
 wnl_run(int mode)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	pthread_t racer;
 	int pipefd[2];
 
@@ -2507,7 +2508,7 @@ static MunitResult
 pak_run(int killed)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t killer;
 
 	atomic_store(&g_pak_entered, 0);
@@ -2656,6 +2657,7 @@ test_down_bypasses_full_mailbox(const MunitParameter p[], void *d)
 	xtc_proc_opts_t o;
 	(void)p; (void)d;
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.mailbox_cap = 8;
 	m1_got_down = 0;
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);

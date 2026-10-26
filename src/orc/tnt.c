@@ -479,7 +479,7 @@ xtc_tnt_commit_one_io(xtc_tnt_shard_t *sh, xtc_tnt_handle_t target, xtc_tnt_stag
                   xtc_tnt_slot_t *meta)
 {
 	xtc_tnt_courier_arg_t *ca = NULL;
-	xtc_proc_opts_t popts = { 0 };
+	xtc_proc_opts_t popts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 
 	if (__os_calloc(1, sizeof(*ca), (void **)&ca) != XTC_OK) {
@@ -899,7 +899,7 @@ xtc_tnt_register_timer(uint64_t duration_ns, uint16_t tag)
 {
 	xtc_tnt_shard_t *sh = cur_shard();
 	xtc_tnt_timer_arg_t *ta = NULL;
-	xtc_proc_opts_t popts = { 0 };
+	xtc_proc_opts_t popts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 
 	if (sh == NULL)
@@ -1422,7 +1422,7 @@ static int
 shard_bootstrap(xtc_task_t *self, void *arg)
 {
 	xtc_tnt_shard_t *sh = arg;
-	xtc_proc_opts_t popts = { 0 };
+	xtc_proc_opts_t popts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	xtc_loop_t *loop;
 

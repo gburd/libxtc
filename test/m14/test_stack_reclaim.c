@@ -457,6 +457,7 @@ life_mig_spawner(void *arg)
 	long i;
 
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.migratable = 1;
 	for (i = 0; i < life_n; i++) {
 		while (atomic_load(&life_live) >= LIFE_LIVE)
@@ -647,6 +648,7 @@ xs_acceptor(void *arg)
 	(void)arg;
 
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.migratable = (xs_mode == 2);
 	xs_acc = xtc_self();
 	for (i = 0; i < XS_N; i++) {

@@ -294,6 +294,7 @@ xtc_fsm_start(xtc_loop_t *loop, const xtc_fsm_callbacks_t *cb, void *state,
 	r->timeout_ns = -1;
 
 	memset(&pop, 0, sizeof pop);
+	pop.size = sizeof pop;
 	if (opts != NULL) {
 		pop.name = opts->name;
 		pop.mailbox_cap = opts->mailbox_cap;

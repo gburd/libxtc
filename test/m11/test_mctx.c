@@ -314,6 +314,7 @@ test_arena_group_join_during_discard(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	memset(&opts, 0, sizeof opts);
+	opts.size = sizeof opts;
 	atomic_store(&g_ag_member_ready, 0);
 	atomic_store(&g_ag_verdict, 0);
 	atomic_store(&g_ag_late_rc, 999);

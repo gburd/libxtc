@@ -99,6 +99,7 @@ spawner(void *arg)
 		    NULL, NULL, NULL);
 
 	memset(&mopts, 0, sizeof mopts);
+	mopts.size = sizeof mopts;
 	mopts.migratable = 1;
 	for (i = 0; i < WORKERS; i++)
 		(void)xtc_proc_spawn(xtc_exec_loop(e, 0), worker, NULL,

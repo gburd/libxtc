@@ -334,7 +334,7 @@ test_simple_one_for_one(const MunitParameter p[], void *d)
 	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
 	xtc_supervisor_t *sup = NULL;
 	struct sofo_state st = { NULL, 0 };
-	xtc_proc_opts_t popts = { 0 };
+	xtc_proc_opts_t popts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t mgr;
 	(void)p; (void)d;
 
@@ -396,7 +396,7 @@ test_pool_max_children(const MunitParameter p[], void *d)
 	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
 	xtc_supervisor_t *sup = NULL;
 	struct pool_state st = { NULL, XTC_OK, 0 };
-	xtc_proc_opts_t popts = { 0 };
+	xtc_proc_opts_t popts = XTC_PROC_OPTS_INIT;
 	(void)p; (void)d;
 	atomic_store(&g_pool_alive, 0);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);

@@ -128,7 +128,7 @@ test_wait_fence_signalled(const MunitParameter p[], void *d)
 #if HAVE_EVENTFD
 	{
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t w, s;
 	int fd;
 
@@ -181,7 +181,7 @@ test_wait_fence_timeout(const MunitParameter p[], void *d)
 #if HAVE_EVENTFD
 	{
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t t;
 	int fd;
 

@@ -119,6 +119,7 @@ main(int argc, char **argv)
 
 	snprintf(g_dir, sizeof g_dir, "%s", argc > 1 ? argv[1] : ".");
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.migratable = 1;
 	if (xtc_exec_init(&e, 3) != XTC_OK)
 		return 1;

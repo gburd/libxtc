@@ -183,6 +183,7 @@ __spawn_child(struct xtc_supervisor *sup, struct child *c)
 	xtc_loop_t *target = __child_loop(sup, c);
 	int rc;
 	memset(&pop, 0, sizeof pop);
+	pop.size = sizeof pop;
 	pop.name = c->spec.name;
 	pop.mailbox_cap = c->spec.mailbox_cap;
 	/*

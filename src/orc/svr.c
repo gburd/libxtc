@@ -338,7 +338,7 @@ xtc_svr_start(xtc_loop_t *loop, const xtc_svr_callbacks_t *cb, void *state,
               const xtc_svr_opts_t *opts, xtc_svr_t **out)
 {
 	struct xtc_svr *s;
-	xtc_proc_opts_t pop = {0};
+	xtc_proc_opts_t pop = XTC_PROC_OPTS_INIT;
 	int rc;
 	xtc_pid_t pid;
 

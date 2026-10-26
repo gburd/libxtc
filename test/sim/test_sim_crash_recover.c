@@ -322,7 +322,7 @@ static int
 run_once_inproc(uint64_t seed, long *out_crash_at, int *out_acked,
     int *out_recovered, uint64_t *out_hash)
 {
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	wal_opts_t wo = { 0 };
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	bm_t *bm1 = NULL, *bm2 = NULL;

@@ -86,6 +86,7 @@ xtc_launch(xtc_loop_t *loop, xtc_launch_fn fn, void *arg,
 	atomic_init(&box->finished, 0);
 
 	memset(&popts, 0, sizeof popts);
+	popts.size = sizeof popts;
 	popts.name = (opts != NULL && opts->name != NULL) ? opts->name
 	    : "xtc-launch";
 	if (opts != NULL && opts->mailbox_cap > 0)

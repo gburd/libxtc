@@ -212,7 +212,7 @@ listen_thread(void *arg)
 {
 	(void)arg;
 	xtc_pid_t pid;
-	xtc_proc_opts_t popts = { 0 };
+	xtc_proc_opts_t popts = XTC_PROC_OPTS_INIT;
 
 	if (xtc_loop_init(&g_listen_loop) != XTC_OK)
 		return NULL;

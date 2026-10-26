@@ -528,7 +528,7 @@ insp_driver(void *a)
 		atomic_store(&g_insp_loop_procs, lp);
 	}
 	{
-		xtc_proc_info_t info;
+		xtc_proc_info_t info = XTC_PROC_INFO_INIT;
 		int rc = xtc_proc_info(g_insp_sleeper, &info);
 		if (rc == XTC_OK && info.mbox_len == 2 &&
 		    info.run_state == XTC_PROC_PARKED)
@@ -541,7 +541,7 @@ static MunitResult
 test_inspect_procs(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_pid_t dpid;
 	(void)p; (void)d;
 
@@ -610,7 +610,7 @@ pr_timer_proc(void *a)
 static void
 pr_probe(void *a)
 {
-	xtc_proc_info_t info;
+	xtc_proc_info_t info = XTC_PROC_INFO_INIT;
 	(void)a;
 	/* Let both targets reach their parks. */
 	(void)xtc_proc_sleep(30LL * 1000 * 1000);
@@ -631,7 +631,7 @@ static MunitResult
 test_inspect_park_reason(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_pid_t probe;
 	(void)p; (void)d;
 
@@ -664,7 +664,7 @@ test_inspect_park_reason(const MunitParameter p[], void *d)
 static MunitResult
 test_inspect_notfound(const MunitParameter p[], void *d)
 {
-	xtc_proc_info_t info;
+	xtc_proc_info_t info = XTC_PROC_INFO_INIT;
 	xtc_pid_t nobody = { 9, 9, 9 };
 	(void)p; (void)d;
 	munit_assert_int(xtc_proc_info(nobody, &info), ==, XTC_E_NOTFOUND);
@@ -694,7 +694,7 @@ static MunitResult
 test_trace_causal(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_pid_t ap;
 	int dumped, i, j, sends = 0, recvs = 0, edges_ok = 0;
 	(void)p; (void)d;

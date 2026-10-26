@@ -298,7 +298,7 @@ mid_statement(void)
 {
 	static const char upd[] = "{\"q\":\"UPDATE t SET v = 5 WHERE k = 2\"}\n";
 	conn_opts_t o;
-	xtc_proc_info_t pi;
+	xtc_proc_info_t pi = XTC_PROC_INFO_INIT;
 	xtc_pid_t pid;
 	uint64_t ref;
 	cli_t *c;
@@ -393,7 +393,7 @@ main(int argc, char **argv)
 	const char *sfx[] = { "", "-wal", ".dwb", "-wal.ocompact", "-wal.compact" };
 	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
 	db_opts_t dopt = DB_OPTS_DEFAULT;
-	xtc_proc_opts_t bo = { .name = "boss" };
+	xtc_proc_opts_t bo = { .size = sizeof(xtc_proc_opts_t), .name = "boss" };
 	char side[320], sql[96];
 	xtc_pid_t bp;
 	pthread_t wd;

@@ -173,7 +173,7 @@ main(void)
 	bm_t *bm = NULL;
 	sx_db *ddl = NULL;
 	xtc_exec_t *ex = NULL;
-	xtc_proc_opts_t po = { .name = "cv" };
+	xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "cv" };
 	xtc_pid_t pid;
 	int fd, i, nloops;
 

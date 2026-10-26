@@ -483,7 +483,7 @@ main(int argc, char **argv)
 	/* --- fault containment (Windows SEH / VEH) --- */
 	{
 		xtc_loop_t *loop = NULL;
-		xtc_proc_opts_t po = { 0 };
+		xtc_proc_opts_t po = XTC_PROC_OPTS_INIT;
 		xtc_pid_t pid;
 		s_fault_recovered = 0;
 		CHECK(xtc_fault_guard_install() == XTC_OK);
@@ -502,7 +502,7 @@ main(int argc, char **argv)
 	/* --- native IOCP file AIO (overlapped ReadFile/WriteFile) --- */
 	{
 		xtc_loop_t *loop = NULL;
-		xtc_proc_opts_t po = { 0 };
+		xtc_proc_opts_t po = XTC_PROC_OPTS_INIT;
 		xtc_pid_t pid;
 		char path[MAX_PATH], dir[MAX_PATH];
 		HANDLE fh;
@@ -569,7 +569,7 @@ main(int argc, char **argv)
 	{
 		xtc_loop_t *loop = NULL;
 		xtc_pid_t pid;
-		xtc_proc_opts_t po; memset(&po, 0, sizeof po);
+		xtc_proc_opts_t po = XTC_PROC_OPTS_INIT;
 		int i;
 		s_sel_n = 0;
 		memset(s_sel_seen, 0, sizeof s_sel_seen);
@@ -595,7 +595,7 @@ main(int argc, char **argv)
 	 * from the port in one run, at distinct offsets) --- */
 	{
 		xtc_loop_t *loop = NULL;
-		xtc_proc_opts_t po; memset(&po, 0, sizeof po);
+		xtc_proc_opts_t po = XTC_PROC_OPTS_INIT;
 		xtc_pid_t pid;
 		char path[MAX_PATH], dir[MAX_PATH];
 		HANDLE fh;
@@ -627,7 +627,7 @@ main(int argc, char **argv)
 	 * wakeup path) --- */
 	{
 		xtc_loop_t *loop = NULL;
-		xtc_proc_opts_t po; memset(&po, 0, sizeof po);
+		xtc_proc_opts_t po = XTC_PROC_OPTS_INIT;
 		HANDLE thr;
 		int i;
 		s_xt_recv_count = 0;
@@ -681,7 +681,7 @@ main(int argc, char **argv)
 			    " 127.0.0.1 (rc=%d)\n", rc);
 		} else {
 			xtc_loop_t *loop = NULL;
-			xtc_proc_opts_t po; memset(&po, 0, sizeof po);
+			xtc_proc_opts_t po = XTC_PROC_OPTS_INIT;
 			xtc_pid_t sp, cp;
 			int client_fd = -1;
 			s_sock_listen_fd = listen_fd;
@@ -807,7 +807,7 @@ main(int argc, char **argv)
 	/* --- cross-process spawn/monitor (xtc_xproc on Windows) --- */
 	{
 		xtc_loop_t *loop = NULL;
-		xtc_proc_opts_t po = { 0 };
+		xtc_proc_opts_t po = XTC_PROC_OPTS_INIT;
 		CHECK(xtc_loop_init(&loop) == XTC_OK);
 		s_xproc_loop = loop;
 		s_xproc_reason = -1;

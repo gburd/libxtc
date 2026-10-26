@@ -193,7 +193,7 @@ static void
 err_proc(void *arg)
 {
 	xtc_loop_t *loop = g_loop;
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_pid_t full, dead;
 	uint8_t *b;
 	int i;

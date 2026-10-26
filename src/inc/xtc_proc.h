@@ -71,9 +71,9 @@ typedef int (*xtc_match_fn)(const void *data, size_t size, void *user_data);
 typedef void (*xtc_proc_fn)(void *arg);
 
 typedef struct xtc_proc_opts {
+	size_t      size;          /* sizeof(xtc_proc_opts_t): XTC_PROC_OPTS_INIT */
 	const char *name;          /* optional, for debug */
 	size_t      mailbox_cap;   /* 0 = default */
-	int         link_to;       /* if != 0, this is a pid index to link to */
 	/* Mailbox watermark: when an accepted message brings the depth to
 	 * this percent of mailbox_cap (1..100; 0 = disabled), the callback
 	 * fires once on the rising edge, so the app can shed load before
@@ -81,29 +81,33 @@ typedef struct xtc_proc_opts {
 	 * sender's thread, outside the mailbox lock; keep it cheap and do
 	 * not block. */
 	int         mailbox_watermark_pct;
+	/*
+	 * Work-stealing: 0 (default) pins the proc's coroutine to its
+	 * spawn loop.  1 makes the coroutine work-stealable: an idle loop
+	 * may steal it (only while parked/scheduled, never mid-instruction)
+	 * to rebalance runnable work across a multi-loop executor.  The
+	 * proc's identity (pid), supervision (links/monitors/DOWN), recovery
+	 * frame, and mailbox are unaffected -- only the carrier loop can
+	 * change, and only at a yield point.  See xtc_proc(3) MIGRATION.
+	 */
+	int         migratable;
 	void      (*mailbox_watermark_fn)(xtc_pid_t self, size_t depth,
 	                                  size_t cap, void *user);
 	void       *mailbox_watermark_user;
 	/*
-	 * Work-stealing: 0 (default) pins the proc's coroutine to its
-	 * spawn loop -- today's behavior, and what a zeroed opts gives.
-	 * 1 makes the coroutine work-stealable: an idle loop may steal it
-	 * (only while parked/scheduled, never mid-instruction) to rebalance
-	 * runnable work across a multi-loop executor.  The proc's identity
-	 * (pid), supervision (links/monitors/DOWN), recovery frame, and
-	 * mailbox are unaffected -- only the carrier loop can change, and
-	 * only at a yield point.  See xtc_proc(3) MIGRATION.
-	 */
-	int         migratable;
-	/*
 	 * L1 proportional-share scheduler: place this proc's task in a
 	 * scheduling CLASS created with xtc_exec_class_create.  NULL (the
-	 * default, and what a zeroed opts gives) is the implicit plain-FIFO
-	 * class -- zero overhead.  A non-NULL handle weights the proc's CPU
-	 * share against the other classes on its loop.  INSPIRED BY Glommio.
+	 * default) is the implicit plain-FIFO class -- zero overhead.  A
+	 * non-NULL handle weights the proc's CPU share against the other
+	 * classes on its loop.  INSPIRED BY Glommio.
 	 */
 	xtc_exec_class_t sched_class;
 } xtc_proc_opts_t;
+
+/* All defaults.  Add fields with a designated initializer that sets .size
+ * too: { .size = sizeof(xtc_proc_opts_t), .name = "w" }.  A NULL opts
+ * pointer also means all defaults. */
+#define XTC_PROC_OPTS_INIT { .size = sizeof(xtc_proc_opts_t) }
 
 /* Mailbox statistics snapshot (see xtc_proc_mailbox_stats). */
 typedef struct xtc_mailbox_stats {

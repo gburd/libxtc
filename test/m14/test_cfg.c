@@ -924,7 +924,7 @@ test_session_per_fiber(const MunitParameter p[], void *d)
 	xtc_cfg_spec_t spec = { 0 };
 	xtc_cfg_session_t *a = NULL, *b = NULL;
 	struct fiber_ssn_arg aa = { 0 }, ba = { 0 };
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_loop_t *loop = NULL;
 	xtc_pid_t pid;
 	int v;
