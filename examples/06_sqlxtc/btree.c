@@ -3554,6 +3554,7 @@ bt_cursor_next(bt_cursor_t *c, const void **key, uint16_t *klen,
     const void **val, uint16_t *vlen)
 {
 	bm_t *bm;
+	long stale = 0;
 
 	if (c == NULL)
 		return XTC_E_INVAL;
@@ -3649,14 +3650,27 @@ bt_cursor_next(bt_cursor_t *c, const void **key, uint16_t *klen,
 				 * concurrent merge, or no longer names the next
 				 * leaf: the link is stale.  Re-descend from the
 				 * scan position to find the leaf that now owns the
-				 * next key, then continue the scan. */
+				 * next key, then continue the scan.  A link that is
+				 * stale on every pass (a damaged next leaf) is
+				 * bounded like a descent. */
 				bm_frame_t *rf = NULL;
 
-				if (cursor_descend(c->bt,
-				    c->keylen ? c->keybuf : NULL, c->keylen,
-				    &rf) != XTC_OK || cursor_seek(c, rf) != XTC_OK) {
+				if (descent_give_up(c->bt, &stale, "bt_cursor_next",
+				    c->keylen ? c->keybuf : NULL, c->keylen, NULL,
+				    "right link stale on every hop", (bm_pid_t)rs)) {
 					c->done = 1;
-					return XTC_E_NOTFOUND;
+					return XTC_E_INTERNAL;
+				}
+
+				/* A failed descent is an error, not the end of the
+				 * scan: a caller that takes NOTFOUND as "all rows
+				 * read" (the checkpoint dump) must not see it. */
+				if ((frc = cursor_descend(c->bt,
+				    c->keylen ? c->keybuf : NULL, c->keylen,
+				    &rf)) != XTC_OK ||
+				    (frc = cursor_seek(c, rf)) != XTC_OK) {
+					c->done = 1;
+					return frc;
 				}
 				continue;
 			}
@@ -3713,8 +3727,8 @@ bt_cursor_park(bt_cursor_t *c)
  *     node.  If it is not a live leaf, or the position is at/below its
  *     lower fence (its range moved left), or -- no position yet, a scan
  *     from the start -- it is not the leftmost leaf, re-descend.
- * Takes ownership of `f`.  Returns XTC_OK, or XTC_E_NOTFOUND (done) if
- * a needed re-descent fails.
+ * Takes ownership of `f`.  Returns XTC_OK, or the error of a needed
+ * re-descent that failed (the cursor is then done).
  */
 static int
 cursor_seek(bt_cursor_t *c, bm_frame_t *f)
@@ -3722,16 +3736,16 @@ cursor_seek(bt_cursor_t *c, bm_frame_t *f)
 	bm_t *bm = c->bt->bm;
 	const void *k = c->keylen ? c->keybuf : NULL;
 	void *pg = bm_page(f);
-	int slot, found = 0;
+	int slot, found = 0, rc;
 
 	if (!btnode_is_leaf(pg) || btnode_is_dead(pg) ||
 	    (k != NULL ? btnode_below_lo_fence(pg, k, c->keylen) :
 	    not_leftmost_leaf(pg))) {
 		bm_unlatch(f);
 		bm_unfix(bm, f, 0);
-		if (cursor_descend(c->bt, k, c->keylen, &f) != XTC_OK) {
+		if ((rc = cursor_descend(c->bt, k, c->keylen, &f)) != XTC_OK) {
 			c->done = 1;
-			return XTC_E_NOTFOUND;
+			return rc;
 		}
 	}
 	if (move_right(c->bt, &f, k, c->keylen, 0) != XTC_OK) {
@@ -3746,9 +3760,9 @@ cursor_seek(bt_cursor_t *c, bm_frame_t *f)
 		 * re-descend, which retries past the merge. */
 		bm_unlatch(f);
 		bm_unfix(bm, f, 0);
-		if (cursor_descend(c->bt, k, c->keylen, &f) != XTC_OK) {
+		if ((rc = cursor_descend(c->bt, k, c->keylen, &f)) != XTC_OK) {
 			c->done = 1;
-			return XTC_E_NOTFOUND;
+			return rc;
 		}
 	}
 	slot = btnode_search(bm_page(f), c->keybuf, c->keylen, &found);
@@ -3781,10 +3795,10 @@ bt_cursor_resume(bt_cursor_t *c)
 		/* The parked leaf was reclaimed (its pid quarantined) by a
 		 * concurrent merge, or could not be re-fixed: fall back to a
 		 * fresh root-to-leaf descent from the scan position. */
-		if (cursor_descend(c->bt, c->keylen ? c->keybuf : NULL,
-		    c->keylen, &nf) != XTC_OK) {
+		if ((rc = cursor_descend(c->bt, c->keylen ? c->keybuf : NULL,
+		    c->keylen, &nf)) != XTC_OK) {
 			c->done = 1;
-			return XTC_E_NOTFOUND;
+			return rc;
 		}
 	} else
 		bm_latch_shared(nf);

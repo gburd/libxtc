@@ -18,7 +18,11 @@
  *	  1. a leaf linked to itself (the shortest right-link cycle),
  *	  2. two leaves linked to each other, every hi fence below the key,
  *	  3. a leaf whose lower fence is raised above keys its parent routes
- *	     to it (the latched descent restarts forever).
+ *	     to it (the latched descent restarts forever),
+ *	  4. a leaf whose right link names the wrong leaf: a scan's hop
+ *	     rejects it and re-descends to the same leaf, forever.  The scan
+ *	     must end with an error, NOT with XTC_E_NOTFOUND: the online
+ *	     checkpoint reads NOTFOUND as "every row dumped".
  *	In case 3 the writes may succeed: under the SMO lock no merge runs,
  *	so the locked insert/delete paths take the routed leaf without the
  *	fence check and do not loop; they only must return.
@@ -230,6 +234,39 @@ main(void)
 	expect_ok(bt, 0);
 	expect_ok(bt, N_KEYS - 1);
 	TCK(atomic_load(&bt->st_stuck) > 0);
+	teardown(bm, bt, path);
+
+	/* 4. a right link to the wrong (leftmost) leaf: point reads are
+	 * fine, a scan across the link must fail, not end early. */
+	TCK(build("sqlxtc-bnd4", &bm, &bt, path, sizeof path) == 0);
+	if (g_fail) return 1;
+	leaf_span(bt, mid, &lo, &hi);
+	a = leaf_of(bt, mid);
+	b = leaf_of(bt, 0);
+	TCK(bm_frame_pid(a) != bm_frame_pid(b));
+	btnode_set_right_sibling(bm_page(a), (uint32_t)bm_frame_pid(b));
+	bm_unfix(bm, b, 0);
+	bm_unfix(bm, a, 0);
+	{
+		bt_cursor_t *c = NULL;
+		const void *ck, *cv;
+		uint16_t ckl, cvl, kl;
+		char k[16];
+		int rows = 0, rc;
+
+		kl = mkkey(lo, k);
+		alarm(20);
+		TCK(bt_cursor_open(bt, k, kl, &c) == XTC_OK);
+		while ((rc = bt_cursor_next(c, &ck, &ckl, &cv, &cvl)) == XTC_OK)
+			rows++;
+		bt_cursor_close(c);
+		alarm(0);
+		printf("  %-34s %d rows, then rc=%d\n",
+		    "4. right link to the wrong leaf:", rows, rc);
+		TCK(rows == hi - lo);       /* the leaf's own rows */
+		TCK(rc != XTC_OK && rc != XTC_E_NOTFOUND);
+	}
+	expect_ok(bt, hi);
 	teardown(bm, bt, path);
 
 	if (g_fail) {
