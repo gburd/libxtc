@@ -72,6 +72,23 @@
  *	                   cancellation mask, so a killed committer leaves a
  *	                   dead waiter (or the leadership) behind; the log
  *	                   wedges (test_sim_wal_kill: LIVENESS).
+ *	 18  IDXSKIP   -- examples/06_sqlxtc/xstore.c's index rebuild at an
+ *	                   open skips the last index, so after a crash
+ *	                   recovery that index misses rows
+ *	                   (test_sim_sqlxtc_reopen: INDEX).
+ *	 19  EVICTNOWB -- examples/06_sqlxtc/bufmgr.c's evictor drops every
+ *	                   4th dirty victim without writing it back; the
+ *	                   page reloads stale (test_sim_sqlxtc_evict: a lost
+ *	                   or wrong row).
+ *	 20  OCKDROP   -- examples/06_sqlxtc/wal.c's online checkpoint drops
+ *	                   the last frame of each catch-up / finish copy, so
+ *	                   a commit acked during the checkpoint is missing
+ *	                   from the new log (test_sim_sqlxtc_ckpt: a lost
+ *	                   or wrong row after crash recovery).
+ *	 21  PRUNEHZN  -- examples/06_sqlxtc/xstore.c's prune-on-write
+ *	                   deletes the version AT the snapshot horizon (the
+ *	                   one the oldest snapshot reads) when a newer one
+ *	                   exists (test_sim_sqlxtc_gc: SNAPSHOT).
  *
  *	NOT plantable under DST (an honest gap, recorded so it is not
  *	mistaken for missing coverage): the xtc_amutex mutual-exclusion and
@@ -123,5 +140,9 @@
 #define XTC_DST_BUG_SCHEDFAIR  15  /* sched.c: bypass mandatory fairness override */
 #define XTC_DST_BUG_BATCHDROP  16  /* batch.c: drop a held mt hand-in */
 #define XTC_DST_BUG_WALKILL    17  /* wal.c: commit not masked against kills */
+#define XTC_DST_BUG_IDXSKIP    18  /* xstore.c: an index rebuild skips one index */
+#define XTC_DST_BUG_EVICTNOWB  19  /* bufmgr.c: evict a dirty page unwritten */
+#define XTC_DST_BUG_OCKDROP    20  /* wal.c: an online-checkpoint copy round drops its last frame */
+#define XTC_DST_BUG_PRUNEHZN   21  /* xstore.c: prune-on-write deletes the version at the horizon */
 
 #endif /* XTC_DST_INJECT_H */

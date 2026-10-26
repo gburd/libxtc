@@ -69,7 +69,7 @@ if [ -f "$BUILD/Makefile" ] && ! nm "$LIB" 2>/dev/null | grep -q '^tls_none\.o:'
 fi
 # libdl is folded into libc on modern glibc; add it only if present.
 printf 'int main(void){return 0;}\n' > "$tmp/dltest.c"
-if "$CC" "$tmp/dltest.c" -ldl -o "$tmp/dltest" >/dev/null 2>&1; then
+if $CC "$tmp/dltest.c" -ldl -o "$tmp/dltest" >/dev/null 2>&1; then
 	LIBS="$LIBS -ldl"
 fi
 # librt likewise: on glibc timer_create/clock_* are in libc, but on FreeBSD
@@ -77,7 +77,7 @@ fi
 # without this EVERY snippet failed to link there, so the gate reported
 # "10 of 10 broken" on a healthy library.  Probe rather than hardcode, so a
 # platform without librt is unaffected.
-if "$CC" "$tmp/dltest.c" -lrt -o "$tmp/dltest" >/dev/null 2>&1; then
+if $CC "$tmp/dltest.c" -lrt -o "$tmp/dltest" >/dev/null 2>&1; then
 	LIBS="$LIBS -lrt"
 fi
 
@@ -90,7 +90,7 @@ for f in "$SNIP"/*.c; do
 	bin="$tmp/$base"
 	# $LIBS is a deliberate multi-flag string; word-splitting is intended.
 	# shellcheck disable=SC2086
-	if ! "$CC" -std=c11 -D_GNU_SOURCE -Wall -Wextra $SNIP_CFLAGS -I"$INC" \
+	if ! $CC -std=c11 -D_GNU_SOURCE -Wall -Wextra $SNIP_CFLAGS -I"$INC" \
 		-o "$bin" "$f" "$LIB" $SNIP_LDFLAGS $LIBS >"$tmp/$base.log" 2>&1; then
 		echo "[docs] FAIL: $base did not compile" >&2
 		sed 's/^/    /' "$tmp/$base.log" >&2

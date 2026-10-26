@@ -1861,6 +1861,13 @@ wal_ock_copy(wal_ock_t *k, off_t end, off_t max)
 			memcpy(&crc, k->rbuf + pos + WAL_REC_HDR + len, WAL_REC_CRC);
 			if (!wal_sum_ok(crc, k->rbuf + pos, len))
 				return XTC_E_INTERNAL;   /* never launder a bad frame */
+#if XTC_DST_BUG(XTC_DST_BUG_OCKDROP)
+			/* planted: a copy round drops its last frame */
+			if (k->src_off + (off_t)(pos + fl) == end) {
+				pos += fl;
+				continue;
+			}
+#endif
 			wal_cmp_emit(&k->c, k->rbuf + pos + WAL_REC_HDR, len);
 			k->frames++;
 			pos += fl;

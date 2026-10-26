@@ -272,11 +272,9 @@ __pollres_to_flags(uint32_t res)
  */
 static uint64_t __self_tok(void);
 
-static int
-__ring_submit(xtc_io_t *io)
+static void
+__owner_check(xtc_io_t *io)
 {
-	int rc;
-	unsigned queued;
 #if defined(XTC_DIAGNOSTIC)
 	if (atomic_load_explicit(&io->owner_tok, memory_order_acquire) !=
 	    __self_tok()) {
@@ -286,9 +284,45 @@ __ring_submit(xtc_io_t *io)
 		    "A cross-thread submit corrupts the SQ.\n", (void *)io);
 		abort();
 	}
+#else
+	(void)io;
 #endif
+}
+
+static void __submit_note(xtc_io_t *, int, unsigned);
+static void __aio_queued_trim(xtc_io_t *);
+
+static int
+__ring_submit(xtc_io_t *io)
+{
+	int rc;
+	unsigned queued;
+
+	__owner_check(io);
 	queued = io_uring_sq_ready(&io->ring);
+	if (queued > 0)
+		io->n_enter_submit++;
 	rc = io_uring_submit(&io->ring);
+	__aio_queued_trim(io);
+	__submit_note(io, rc, queued);
+	return rc;
+}
+
+/* After a submit: whatever left the SQ is in the kernel.  The SQ is
+ * FIFO, so the AIO still queued is at most what is still in the SQ. */
+static void
+__aio_queued_trim(xtc_io_t *io)
+{
+	unsigned left = io_uring_sq_ready(&io->ring);
+
+	if ((unsigned)io->n_aio_queued > left)
+		io->n_aio_queued = (int)left;
+}
+
+/* Record a submit of `queued` SQEs that returned rc, if it fell short. */
+static void
+__submit_note(xtc_io_t *io, int rc, unsigned queued)
+{
 	/*
 	 * A submit that does not reach the kernel leaves any fiber parked on
 	 * one of these SQEs waiting for a completion that will never be
@@ -322,7 +356,104 @@ __ring_submit(xtc_io_t *io)
 		    (uint64_t)XTC_TAIL_SHORT_SUBMIT_BASE +
 		    (uint64_t)(queued - (unsigned)rc));
 	}
-	return rc;
+}
+
+/*
+ * Submission is DEFERRED.  A producer (xtc_io_reg_fd / _mod_fd / _del_fd,
+ * xtc_io_aio_submit) prepares its SQE and leaves it in the SQ; the next
+ * xtc_io_poll hands everything queued to the kernel in the same
+ * io_uring_enter that waits for completions (__submit_wait).  N fibers
+ * that each park on an fd or an aio in one loop turn cost one enter, not
+ * N + 1: uringscope measured ~1 SQE per enter on every workload when each
+ * producer submitted its own (scripts/uring-gate.sh).
+ *
+ * Nothing waits on an SQE that is still queued, because every poll
+ * submits before it waits or reaps: a completion can only be reaped by a
+ * poll, and the poll that reaps it is preceded by the submit.  The cost
+ * would be start latency for file AIO, so a producer submits at once
+ * when none of this ring's AIO is in flight (the device would otherwise
+ * idle: a lone read, a WAL fdatasync), and only an op queued behind
+ * others in flight waits for the poll or for __xtc_io_flush, which the
+ * loop calls after a fiber yields and every IO_SUBMIT_QUANTUM runs.  A
+ * full SQ is submitted by __get_sqe.  Readiness (POLL_ADD / POLL_REMOVE)
+ * loses nothing by waiting: a poll is level-checked when it is armed.
+ *
+ * liburing before 2.4 waits the timeout a second time after a submit
+ * that consumed every SQE (its io_uring_submit_and_wait_timeout loops
+ * without the has_ts check), so there the poll submits and then waits:
+ * the producers still batch, the poll costs two enters.
+ */
+#if defined(IO_URING_VERSION_MAJOR) && (IO_URING_VERSION_MAJOR > 2 || \
+    (IO_URING_VERSION_MAJOR == 2 && IO_URING_VERSION_MINOR >= 4))
+#define XTC_URING_SUBMIT_AND_WAIT 1
+#endif
+
+/*
+ * Submit what is queued and wait for one CQE (or the timeout), in one
+ * enter.  Returns what io_uring_wait_cqe_timeout would: 0 (with *cqe
+ * NULL if nothing completed in time) or -errno.  A zero timeout with
+ * nothing queued and no file AIO in flight does not enter at all: the
+ * reap loop's peek enters only when the kernel holds completions it has
+ * not posted (IORING_SQ_TASKRUN on a COOP or DEFER ring, CQ overflow); a
+ * plain ring's completions are posted by task work that interrupts the
+ * thread.
+ */
+static int
+__submit_wait(xtc_io_t *io, struct io_uring_cqe **cqe,
+    struct __kernel_timespec *tsp)
+{
+	unsigned queued = io_uring_sq_ready(&io->ring);
+	int zero = tsp != NULL && tsp->tv_sec == 0 && tsp->tv_nsec == 0;
+#if defined(XTC_URING_SUBMIT_AND_WAIT)
+	unsigned left;
+	int rc;
+#endif
+
+	*cqe = NULL;
+	if (queued == 0) {
+		/* No enter: nothing to submit, and no file AIO in flight whose
+		 * completion an enter would post (readiness CQEs are flagged
+		 * IORING_SQ_TASKRUN, so the reap loop's peek enters for them).
+		 * With AIO in flight the zero-timeout enter stays, as in 1.59:
+		 * skipping it too made 16 loops x 1 fdatasync each slower,
+		 * p50 10.4 -> 15.6 us, p99 ~80 -> ~300 us (XFS, Linux 6.12). */
+		if (zero && io->n_aio == 0)
+			return 0;
+		if (io_uring_cq_ready(&io->ring) == 0)
+			io->n_enter_wait++;   /* liburing enters only then */
+		return io_uring_wait_cqe_timeout(&io->ring, cqe, tsp);
+	}
+#if defined(XTC_URING_SUBMIT_AND_WAIT)
+	__owner_check(io);
+	io->n_enter_submit++;
+	if (zero)   /* submit, and run completions (GETEVENTS): no wait */
+		rc = io_uring_submit_and_get_events(&io->ring);
+	else
+		rc = io_uring_submit_and_wait_timeout(&io->ring, cqe, 1, tsp,
+		    NULL);
+	/*
+	 * What the kernel consumed is what left the SQ.  rc does not say:
+	 * liburing returns 0, not the count, when a CQE was already
+	 * waiting, and the kernel drops the wait's -ETIME / -EINTR once it
+	 * consumed any SQE.  A short submit skipped the wait.
+	 */
+	left = io_uring_sq_ready(&io->ring);
+	__aio_queued_trim(io);
+	if (left > 0)
+		__submit_note(io, rc < 0 ? rc : (int)(queued - left), queued);
+	if (zero || *cqe != NULL || (rc >= 0 && left == 0))
+		return 0;
+	if (rc == -ETIME || rc == -EINTR)
+		return rc;   /* nothing consumed and the wait ran: do not repeat it */
+#else
+	(void)__ring_submit(io);
+	if (zero)
+		return 0;
+#endif
+	/* As before deferral: a refused submit is recorded, then we wait. */
+	if (io_uring_cq_ready(&io->ring) == 0)
+		io->n_enter_wait++;
+	return io_uring_wait_cqe_timeout(&io->ring, cqe, tsp);
 }
 
 /*
@@ -479,7 +610,7 @@ __flush_pending(xtc_io_t *io)
 		else
 			__node_kick(io, uf);
 	}
-	(void)__ring_submit(io);
+	/* The caller's __submit_wait submits these. */
 }
 
 /*
@@ -789,6 +920,22 @@ __xtc_io_uring_poll_stats(xtc_io_t *io, unsigned long *cancels,
 	return XTC_OK;
 }
 
+/* io_uring_enter calls that submitted, and that only waited (tests). */
+int
+__xtc_io_uring_enter_stats(xtc_io_t *io, unsigned long *submits,
+    unsigned long *waits, unsigned *queued)
+{
+	if (io == NULL)
+		return XTC_E_INVAL;
+	if (submits != NULL)
+		*submits = io->n_enter_submit;
+	if (waits != NULL)
+		*waits = io->n_enter_wait;
+	if (queued != NULL)
+		*queued = io->ring_dead ? 0u : io_uring_sq_ready(&io->ring);
+	return XTC_OK;
+}
+
 /* Main-ring setup flags and SQEs the kernel has consumed (tests). */
 int
 __xtc_io_uring_info(xtc_io_t *io, unsigned *flags, unsigned *sq_consumed,
@@ -845,11 +992,12 @@ __xtc_io_backend_init(xtc_io_t *io)
 	io->lingers = NULL;
 	io->n_lingers = 0;
 	io->n_adopted = io->n_cancels = 0;
-	io->n_aio = 0;
+	io->n_aio = io->n_aio_queued = 0;
 	io->ring_dead = 0;
 	io->carry = NULL;
 	io->n_carry = io->cap_carry = 0;
 	io->n_rebinds = 0;
+	io->n_enter_submit = io->n_enter_wait = 0;
 	atomic_store_explicit(&io->owner_tok, 0, memory_order_relaxed);
 	atomic_store_explicit(&io->owner_active, 0, memory_order_relaxed);
 	io->pending_del = NULL;
@@ -1198,7 +1346,6 @@ xtc_io_del_fd(xtc_io_t *io, int fd)
 static int
 __reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 {
-	int rc;
 	if (io == NULL || fd < 0 || interest == 0)
 		return XTC_E_INVAL;
 	/* A delete for this fd may be QUEUED but not yet drained (a
@@ -1212,10 +1359,8 @@ __reg_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 		return XTC_E_INVAL;        /* duplicate: genuinely live */
 	if (__adopt_linger(io, fd, interest, tag))
 		return XTC_OK;             /* its poll is still armed */
-	if ((rc = __add_fd(io, fd, interest, tag, 0)) != XTC_OK)
-		return rc;
-	(void)__ring_submit(io);
-	return XTC_OK;
+	/* The POLL_ADD stays queued for the next poll (see __submit_wait). */
+	return __add_fd(io, fd, interest, tag, 0);
 }
 
 static int
@@ -1264,6 +1409,7 @@ __aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	a->done = 0;   /* plain: our own thread, before the SQE is visible */
 	a->res = 0;
 	io->n_aio++;   /* until its CQE is reaped; see __ring_rebind */
+	io->n_aio_queued++;   /* until a submit hands it over */
 	/* Low-bit tag distinguishes this completion from a poll-add CQE. */
 	io_uring_sqe_set_data(sqe, (void *)((uintptr_t)a | 1u));
 	/* Record the ASK, keyed by the task, so a later "no REAP" can be told
@@ -1277,7 +1423,11 @@ __aio_submit(xtc_io_t *io, xtc_aio_t *a)
 		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_SUBMIT, lp,
 		    (uint64_t)(uintptr_t)a->tag);
 	}
-	(void)__ring_submit(io);
+	/* None of this ring's AIO in flight: the device is idle, start it
+	 * now (and whatever is queued with it).  Otherwise it waits for the
+	 * next poll or flush (see __submit_wait). */
+	if (io->n_aio == io->n_aio_queued)
+		(void)__ring_submit(io);
 	return XTC_OK;
 }
 
@@ -1310,7 +1460,6 @@ __mod_fd(xtc_io_t *io, int fd, uint32_t interest, void *tag)
 	if ((rc = __add_fd(io, fd, interest, tag, 0)) != XTC_OK)
 		return rc;
 	__retire_fd(io, uf, 0);
-	(void)__ring_submit(io);
 	return XTC_OK;
 }
 
@@ -1327,10 +1476,28 @@ __del_fd(xtc_io_t *io, int fd)
 	 * armed node without an identity (the fd was busy before) is
 	 * cancelled, and its next registration takes one. */
 	io->idle[fd] = (unsigned char)(uf->armed != 0);
-	__retire_fd(io, uf, 1);
-	if (io_uring_sq_ready(&io->ring) > 0)
-		(void)__ring_submit(io);
+	__retire_fd(io, uf, 1);   /* a cancel stays queued for the poll */
 	return XTC_OK;
+}
+
+/*
+ * Submit everything queued, now, without waiting (see __submit_wait).
+ * The loop calls it after a fiber yields (a yielder stays runnable, so
+ * the run queue does not drain and the loop's poll does not come) and
+ * every IO_SUBMIT_QUANTUM runs, so neither queued AIO nor a parked
+ * fiber's POLL_ADD waits for the 64-run fairness poll on a busy loop.
+ * Only the owner submits.
+ */
+void
+__xtc_io_flush(xtc_io_t *io)
+{
+	if (io == NULL || io->ring_dead ||
+	    atomic_load_explicit(&io->owner_tok, memory_order_relaxed) !=
+	    __self_tok() || io_uring_sq_ready(&io->ring) == 0)
+		return;
+	__xtc_unsafe_enter();
+	(void)__ring_submit(io);
+	__xtc_unsafe_leave();
 }
 
 /*
@@ -1441,6 +1608,13 @@ __xtc_io_owner_leave(xtc_io_t *io)
 		memcpy(io->carry + io->n_carry, ev, (size_t)n * sizeof *ev);
 		io->n_carry += n;
 	}
+	/* SQEs still queued (submission is deferred, see __submit_wait) stay
+	 * for the next owner's poll.  On a SINGLE_ISSUER ring queued AIO is
+	 * in n_aio, so the reap above submitted it; a rebuild re-arms every
+	 * live poll and frees the retired nodes.  On a COOP ring the next
+	 * owner submits them: from here they would belong to a thread that
+	 * may be about to exit, and the kernel cancels an exiting task's
+	 * requests. */
 	atomic_store_explicit(&io->owner_active, 0, memory_order_release);
 	__xtc_unsafe_leave();
 }
@@ -1580,8 +1754,6 @@ __poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 	 * this poll can block on its outcome. */
 	if (io->pending != NULL)
 		__flush_pending(io);   /* may free a retired node: bounded per del */
-	else if (io_uring_sq_ready(&io->ring) > 0)
-		(void)__ring_submit(io);
 
 	if (timeout_ns < 0) {
 		tsp = NULL;
@@ -1591,8 +1763,9 @@ __poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		tsp = &ts;
 	}
 
-	/* Wait for at least one CQE (or timeout). */
-	rc = io_uring_wait_cqe_timeout(&io->ring, &cqe, tsp);
+	/* Submit everything queued and wait for at least one CQE (or the
+	 * timeout), in one enter. */
+	rc = __submit_wait(io, &cqe, tsp);
 	if (rc == -ETIME || rc == -EINTR) return XTC_OK;
 	if (rc < 0) {
 		errno = -rc;
@@ -2066,6 +2239,14 @@ void
 __xtc_io_owner_leave(xtc_io_t *io)
 {
 	(void)io;
+}
+
+int
+__xtc_io_uring_enter_stats(xtc_io_t *io, unsigned long *submits,
+    unsigned long *waits, unsigned *queued)
+{
+	(void)io; (void)submits; (void)waits; (void)queued;
+	return XTC_E_NOSYS;
 }
 
 int

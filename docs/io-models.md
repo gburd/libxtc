@@ -128,14 +128,32 @@ struct io_uring_sqe *sqe = io_uring_get_sqe(&io->ring);
 io_uring_prep_poll_add(sqe, uf->fd,
     __interest_to_pollmask(uf->interest));   /* POLLIN for XTC_IO_READABLE */
 io_uring_sqe_set_data(sqe, uf);               /* uf carries the tag */
-io_uring_submit(&io->ring);
+/* no io_uring_submit: the SQE waits in the SQ for the next poll */
 ```
+
+Submission is deferred (1.60).  `xtc_io_reg_fd`, `_mod_fd`, `_del_fd`
+and `xtc_io_aio_submit` only prepare their SQE; the next `xtc_io_poll`
+hands every queued SQE to the kernel in the same `io_uring_enter` that
+waits.  Sixty-four fibers that each park on a socket in one loop turn
+cost a handful of system calls, not sixty-five.  Nothing can wait on
+an unsubmitted SQE, because a completion is only ever reaped by a poll
+and every poll submits first.  Two exceptions keep latency where it
+was: a file AIO submit with none of its ring's AIO in flight goes to the
+kernel at once (the device would otherwise sit idle: a lone read, a WAL
+fdatasync), and a loop whose run queue stays busy submits what is
+queued after a fiber yields and every 8 runs, so a parked connection's
+`POLL_ADD` does not wait for the 64-run fairness poll.  The alternative
+not chosen is `IORING_SETUP_SQPOLL`: a kernel thread per ring that
+polls the SQ removes the enter entirely, but costs a spinning core per
+loop.
 
 Wait + reap (`xtc_io_poll`):
 
 ```c
 struct io_uring_cqe *cqe;
-io_uring_wait_cqe_timeout(&io->ring, &cqe, tsp);
+/* submit what is queued and wait for one CQE, in one enter
+ * (liburing >= 2.4; older liburing submits, then waits) */
+io_uring_submit_and_wait_timeout(&io->ring, &cqe, 1, tsp, NULL);
 /* ... for each CQE: */
 uf = (struct __xtc_uring_fd *)io_uring_cqe_get_data(cqe);
 events[got].tag   = uf->tag;

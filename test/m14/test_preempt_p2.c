@@ -10,8 +10,10 @@
  *	assisted) cannot handle.  Resumable: the runaway finishes its
  *	full computation, it was just time-sliced.
  *
- *	Only the ucontext coroutine substrate supports the involuntary
- *	yield; on fctx (musl) / winfiber the redirect declines and this
+ *	The involuntary yield needs the substrate's signal-context redirect
+ *	(src/inc/coro_preempt.h): x86-64 Linux on ucontext or glibc
+ *	fcontext, aarch64 Linux on either substrate and libc.  Where it
+ *	declines (x86-64 musl, macOS, winfiber, the amalgamation) this
  *	test asserts the safe fallback (the runaway still completes; it
  *	just is not preempted -- so we skip the "peers ran" assertion
  *	there).
@@ -552,12 +554,15 @@ p2_a64_run(void (*fn)(void *))
 	xtc_exec_t *e = NULL;
 	int i;
 
-	if (!xtc_preempt_supported() || !__xtc_coro_preempt_effective())
+	if (!xtc_preempt_supported())
 		return MUNIT_SKIP;
 #if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
     __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
 	return MUNIT_SKIP;   /* see test_p2_preempt_tight_loop */
 #endif
+	/* Every aarch64 Linux build has the redirect, whatever the libc and
+	 * substrate: musl/fcontext used to compile it out and skip here. */
+	munit_assert_int(__xtc_coro_preempt_effective(), ==, 1);
 	atomic_store(&g_a64_last, -1);
 	atomic_store(&g_a64_slices, 0);
 	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);

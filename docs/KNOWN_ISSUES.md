@@ -42,6 +42,101 @@ in reverse.  Downgrades are not supported (see
 "Downgrades"), but nothing is misread either way.  `sx_size` refuses
 a 1.59 page file.
 
+## FIXED (1.60): a damaged sqlxtc B-tree made readers spin forever
+
+A descent through the B-tree restarts from the root when it meets a node
+that a concurrent merge changed, and follows right links while the key
+is past a node's upper fence.  Neither loop had a bound.  Concurrent
+splits and merges finish, so on a sound tree both loops end.  On a
+damaged one (a right-link cycle, a leaf whose fences no longer match its
+parent, a page with one corrupted byte) they never ended: every reader
+and writer routed to that page spun at 100% CPU and reported nothing.
+Both loops are now bounded.  Past the bound the statement fails with an
+internal error, and the first failure in the process prints the key,
+the root page, the reason for the last restart and the page it was on
+(id, flags, fences) to stderr.  A scan that hits the damage also fails,
+with an error rather than an early end, so the online checkpoint does not
+write a log image that is missing the rest of the tree.  No measurable
+cost.  Test: test_btree_bounded_descent.
+
+Seen once in about 400 runs of a ledger benchmark in the 1.59 cycle
+(lifecycle mix, 16 clients, on an experimental lock build that was never
+released): 12 client threads spun inside the descent for 537 s.  It did
+not reproduce in about 2,300 further runs of that build or in 249 runs of
+1.59 (with the new bound) at 16, 32 and 64 clients, and the cause is NOT
+known.  The stack
+traces need a page that was damaged and stayed damaged.  A single
+flipped byte in the page file produces the same livelock.  If you see
+the stderr report ("sqlxtc btree: ... gave up"), keep the store and the
+report and file an issue: the page id in the report is where to look.
+New DST coverage of scans racing merges and page-id reuse:
+test_sim_btree_scan.
+
+## CHANGED (1.60): involuntary preemption on musl/aarch64; platform checks
+
+* **musl on aarch64 now has involuntary preemption.**  1.59 compiled
+  the aarch64 signal-context redirect only for glibc, so on musl (where
+  fcontext is the only substrate) `xtc_preempt_set_involuntary(1)`
+  silently fell back to cooperative ticks: a fiber that never reached a
+  yield point was not sliced.  Nothing in the redirect is glibc-specific
+  (it rewrites the kernel's own signal frame, whose layout musl's
+  `<ucontext.h>` matches, and the trampoline makes raw system calls), so
+  the gate is gone.  On a 16-vCPU aarch64 host with SVE, Alpine (musl
+  1.2.6, gcc 15.2), `test_preempt`, `_p1`, `_p2` and `_ring` ran 200
+  times each with no failure, `/a64_sve_state` and `/a64_x16_preserved`
+  included; they used to skip.  `test_preempt_p2` now fails, rather than
+  skips, on an aarch64 Linux build without the redirect.  x86-64 musl
+  still declines (not yet verified there).
+* **DTrace, verified on FreeBSD 15.1.**  An `--enable-dtrace` build's
+  `gmake check` passes, and `test_probes` there checks the real thing
+  (as root, or through passwordless `sudo`): `dtrace -l` lists all 30
+  probes in a statically linked program, a D script counts the
+  workload's events exactly, and every `tools/dtrace/*.d` script runs.
+  Also checked by hand: the probes in `libxtc.so` (`--enable-shared`),
+  `dtrace -p` on a program already running, and the numbers in the
+  tracing guide's two worked examples.
+* **Apple Silicon runs fcontext in CI.**  The `macos` job's runner is
+  arm64, so `fctx_aarch64_aapcs_macho.S` is assembled and linked and
+  the full test suite runs on it on every push.  The job now fails if
+  the build selects anything else.
+
+## CHANGED (1.60): io_uring submission is deferred to the loop's poll
+
+**Status:** behavior change, io_uring backend only; measured on a 32-vCPU
+x86-64 host, local NVMe, XFS, Debian 13 (Linux 6.12, liburing 2.9).
+
+* `xtc_io_reg_fd`, `_mod_fd`, `_del_fd` and `xtc_io_aio_submit` used to
+  enter the kernel once per submission queue entry.  They now leave the
+  entry queued, and the next `xtc_io_poll` submits everything in the
+  same `io_uring_enter` that waits (liburing 2.4 or later; with older
+  liburing the poll submits, then waits).  A file AIO submit with none
+  of its ring's AIO in flight still goes in at once, and a loop submits
+  what is queued after a fiber yields and every 8 runs.  A zero-timeout
+  poll with nothing queued and no file AIO in flight no longer enters
+  the kernel.  See `xtc_io(3)` SUBMISSION.
+* Who must change: only a caller that drives an `xtc_io_t` itself and
+  waits for `xtc_aio_t.done` without calling `xtc_io_poll`.  That never
+  worked portably (only a poll delivers the completion), and it can
+  now hang on io_uring when other AIO of the same ring is in flight,
+  because the operation is not submitted until the poll.
+  `xtc_aio_*` and every library path poll; nothing in the tree did
+  this.
+* Measured against 1.59.0 (5 interleaved runs each, medians): the
+  fiber switch (`bench_micro fiber_switch`) 156 -> 83 ns, because the
+  loop's every-64-runs poll no longer enters the kernel when nothing is
+  pending; spawn throughput (`bench_exec_scale 8`) +8%; 64 fibers of
+  page-cache reads on 16 loops +12% IOPS at 10% less CPU per op;
+  64 O_DIRECT readers on one loop with 5 us of work per read +11% IOPS,
+  p99 -7%; 16 loops each doing an fdatasync, p99 79 -> 57 us.  SQEs
+  per `io_uring_enter` (`scripts/uring-gate.sh`): aio_read 1.00 -> 1.75,
+  rexis 0.50 -> 0.97, kaka 0.97 -> 2.42.
+* Unchanged: WAL group commit (`bench_wal`), the sqlxtc I/O soak, the
+  kaka soak and single-loop rexis throughput are within run-to-run
+  spread: they are bound by the device and fsync, not by system calls.
+* Cost: a fiber whose AIO is queued behind other AIO in flight waits up
+  to 8 runs of other fibers to be submitted.  One loop with 32-64
+  readers that compute 10-20 us between reads: p99 +2.5% to +4%.
+
 ## CHANGED (1.59): fcontext is the default on Linux aarch64 (glibc) too; aarch64 fixes
 
 **What changed.**  Linux aarch64 with glibc now defaults to the fcontext
@@ -79,8 +174,7 @@ test that fails before the fix:
   (`xtc_dump` crashed on clang builds).  A CFI-terminated start trampoline
   ends the unwind (`test_fctx /fctx_unwind_ends`).
 
-Not verified: Apple Silicon (the Mach-O fcontext file carries the same
-changes but was not assembled) and big-endian or 32-bit Arm.
+Not verified: big-endian or 32-bit Arm.  (Apple Silicon: see 1.60 above.)
 
 ## CHANGED (1.59): io_uring ring modes and one-shot polls
 
@@ -2214,11 +2308,11 @@ decision, not a TODO.
 ## RESOLVED: macOS now in CI
 
 The `macos` GitHub Actions job (macos-latest, Apple Silicon) builds and
-runs the full C munit suite every commit -- kqueue backend, ucontext
-substrate, GCD dispatch semaphores.  Standing it up fixed six real
-portability bugs (Darwin feature macro, rwlock storage size, unnamed
-semaphores, _SC_NPROCESSORS_ONLN, hardcoded -lrt, lrlock slot
-reclamation teardown order).
+runs the full C munit suite every commit -- kqueue backend, fcontext
+substrate (the runner is arm64), GCD dispatch semaphores.  Standing it
+up fixed six real portability bugs (Darwin feature macro, rwlock
+storage size, unnamed semaphores, _SC_NPROCESSORS_ONLN, hardcoded -lrt,
+lrlock slot reclamation teardown order).
 
 
 ## Apple Silicon (macOS arm64): now defaults to the fcontext substrate (macOS x86-64 still ucontext)

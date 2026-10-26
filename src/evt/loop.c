@@ -1186,6 +1186,9 @@ __xtc_loop_step(xtc_loop_t *loop)
 		 * nothing here.
 		 */
 #define IO_FAIRNESS_QUANTUM 64u
+#ifndef IO_SUBMIT_QUANTUM
+#define IO_SUBMIT_QUANTUM 8u   /* a power of two */
+#endif
 		if (++loop->runs_since_poll >= IO_FAIRNESS_QUANTUM) {
 			xtc_io_event_t fevs[16];
 			int fn_out = 0, fi;
@@ -1208,6 +1211,15 @@ __xtc_loop_step(xtc_loop_t *loop)
 			 * saturated single loop.) */
 			(void)__xtc_drain_due_timers(loop);
 		}
+#if defined(XTC_IO_BACKEND_URING)
+		else if (verdict == XTC_TASK_RESCHED ||
+		    (loop->runs_since_poll & (IO_SUBMIT_QUANTUM - 1u)) == 0)
+			/* Producers leave SQEs queued for the next poll, which
+			 * a busy run queue postpones: submit them after a yield
+			 * and every IO_SUBMIT_QUANTUM runs (io_uring.c
+			 * __submit_wait). */
+			__xtc_io_flush(loop->io);
+#endif
 		return XTC_OK;
 	}
 

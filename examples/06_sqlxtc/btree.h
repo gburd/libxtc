@@ -268,6 +268,7 @@ typedef struct bt_stats {
 	uint64_t ovf_pages;     /* data pages written for out-of-line values */
 	uint64_t ovf_freed;     /* such pages freed again (delete / replace) */
 	uint64_t sample_pages;  /* nodes read by bt_sample_keys */
+	uint64_t stuck;         /* descents that gave up on a damaged tree */
 } bt_stats_t;
 void bt_get_stats(bt_t *bt, bt_stats_t *out);
 

@@ -74,3 +74,8 @@ test_sim_lockmgr        0x5EED0000 1   same-locker re-request granted over a con
 # took the leadership baton); base 0x77616c6b is the default sweep's first.
 test_sim_wal_kill       0x77616c6b 24  p160/hang: wal_commit_any kill mask; FAILS on 059ef8e wal.c (step budget, dead baton holder)
 test_sim_wal_kill       1          1   bug17 WALKILL: unmasked commit wedges the log
+# sqlxtc B-tree scan opens / hops / park-resume vs merge + page-id reuse
+# (examples/06_sqlxtc/btree.c, included by the test).  Base 0 FAILS on
+# f990a57 btree.c (the cursor hop onto a reissued page, fixed by 8894276):
+# skipped=1 bad_order=1 at the first seed.
+test_sim_btree_scan     0          16  p161/bthang: cursor hop + keyless open vs merge/pid reuse; FAILS on f990a57 btree.c (fixed 8894276)
