@@ -827,19 +827,26 @@ __xtc_drain_due_timers(xtc_loop_t *loop)
 				    XTC_WAIT_TIMEOUT, memory_order_relaxed);
 				(void)xtc_waker_wake(&w);
 				/*
-				 * Clear the waiter's park_timer slot with an
-				 * EXCHANGE so exactly one side (this drain or a
-				 * concurrent task-side cancel) observes the
-				 * non-NULL->NULL transition and drops the slot's
-				 * reference; the other side sees NULL and does
-				 * not.  The heap's reference is dropped
-				 * unconditionally below (we popped it).
+				 * Clear the waiter's park_timer slot only if it
+				 * still names THIS timer, so exactly one side
+				 * (this drain or the task-side cancel) drops the
+				 * slot's reference.  If the slot holds another
+				 * timer, the fiber already took this one out and
+				 * released it, then re-armed -- typically after
+				 * being stolen, on another loop's thread.  An
+				 * unconditional exchange took THAT timer's slot
+				 * reference: it could free a timer still in a
+				 * peer's heap and read a node nothing published
+				 * to this thread (the TSan report at timer.c's
+				 * refs load, m5 Blk4).  The heap's reference is
+				 * dropped unconditionally below (we popped it),
+				 * and holding it rules out ABA on `due`.
 				 */
-				slot = atomic_exchange_explicit(
-				    &waiter->park_timer, NULL,
-				    memory_order_relaxed);
-				if (slot != NULL)
-					__xtc_timer_park_release(slot);  /* XTC_NOALLOC_OK: bounded free of one park timer */
+				slot = due;
+				if (atomic_compare_exchange_strong_explicit(
+				    &waiter->park_timer, &slot, NULL,
+				    memory_order_relaxed, memory_order_relaxed))
+					__xtc_timer_park_release(due);  /* XTC_NOALLOC_OK: bounded free of one park timer */
 			}
 			__xtc_timer_park_release(due);  /* XTC_NOALLOC_OK: drop the heap reference of the fired timer */
 		} else {
