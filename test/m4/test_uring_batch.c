@@ -376,13 +376,15 @@ test_zero_poll(const MunitParameter p[], void *d)
  * A fiber that busy-waits with xtc_yield for a peer's write keeps the
  * run queue from draining, so the loop's blocking poll -- where queued
  * SQEs are normally submitted -- does not come.  Preemption is off (the
- * default).  The write must still be started (the loop flushes after a
- * yield, and when nothing else is in flight) and reaped (the 64-run
- * fairness poll).  Several spinners, so the queue is never empty.  A
- * deadline turns a hang into a failure.
+ * default).  The write must still be started (it is the ring's only
+ * AIO, so it goes in at once; a yield and every 8 runs flush too; the
+ * 64-run fairness poll submits as well as reaps) and reaped (that same
+ * fairness poll, as in 1.59: 67 spinner yields either way).  Several
+ * spinners, so the queue is never empty.  A spinner that reaches the
+ * deadline fails the test.
  */
 #define SPIN_BOUND_NS (10LL * 1000 * 1000 * 1000)
-static atomic_int g_spin_done, g_spin_wrote;
+static atomic_int g_spin_done, g_spin_wrote, g_spin_timed_out;
 static atomic_long g_spin_yields;
 static int64_t g_spin_t0;
 static int g_spin_fd;
@@ -402,8 +404,11 @@ static void
 spinner(void *arg)
 {
 	(void)arg;
-	while (!atomic_load(&g_spin_done) &&
-	    xtc_clock_mono() - g_spin_t0 < SPIN_BOUND_NS) {
+	while (!atomic_load(&g_spin_done)) {
+		if (xtc_clock_mono() - g_spin_t0 >= SPIN_BOUND_NS) {
+			atomic_store(&g_spin_timed_out, 1);
+			return;
+		}
 		atomic_fetch_add(&g_spin_yields, 1);
 		xtc_yield();
 	}
@@ -421,6 +426,7 @@ test_spin_on_peer(const MunitParameter p[], void *d)
 	atomic_store(&g_spin_done, 0);
 	atomic_store(&g_spin_wrote, 0);
 	atomic_store(&g_spin_yields, 0);
+	atomic_store(&g_spin_timed_out, 0);
 	g_spin_t0 = xtc_clock_mono();
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	for (i = 0; i < 4; i++)
@@ -436,7 +442,8 @@ test_spin_on_peer(const MunitParameter p[], void *d)
 	    "completed in %lld us", atomic_load(&g_spin_yields),
 	    (long long)((xtc_clock_mono() - g_spin_t0) / 1000));
 	munit_assert_int(atomic_load(&g_spin_wrote), ==, 1);
-	munit_assert_int(atomic_load(&g_spin_done), ==, 1);
+	/* The write finished while they spun, not after they gave up. */
+	munit_assert_int(atomic_load(&g_spin_timed_out), ==, 0);
 	return MUNIT_OK;
 }
 
