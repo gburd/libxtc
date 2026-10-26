@@ -97,6 +97,8 @@ test_xs_ctr
 test_xs_ctr
 test_bm_reuse_version
 test_kill_stmt
+test_conn_sup
+test_storage_sup
 test_cat_lock_shared
 test_btree_sample
 test_savepoint

@@ -105,6 +105,23 @@ typedef struct server {
 
 static server_t g_server;
 
+/* A storage proc that cannot be restarted exited, or one that can ran
+ * out of restarts (sx_storage_on_failure; runs on a proc on loop 0).
+ * Stop the server through the SIGTERM path -- the drain_on_signal
+ * handler only writes its self-pipe -- and exit non-zero. */
+static _Atomic int g_storage_failed;
+
+static void
+storage_failed(const char *what, void *arg)
+{
+	(void)arg;
+	if (atomic_exchange(&g_storage_failed, 1))
+		return;
+	XTC_LOG_ERROR_F("sqlxtc: storage proc %s exited; stopping the server",
+	    what);
+	(void)kill(getpid(), SIGTERM);
+}
+
 void
 server_inc_conn(server_t *s) { atomic_fetch_add(&s->conn_count, 1); }
 
@@ -585,8 +602,10 @@ main(int argc, char **argv)
 
 	/* Start the storage engine's background procs (group-commit WAL
 	 * writer, page provider, trickler) on loop 0. */
-	if (cfg.storage_path != NULL)
+	if (cfg.storage_path != NULL) {
+		sx_storage_on_failure(storage_failed, NULL);
 		(void)sx_storage_run(srv->loop);
+	}
 
 	(void)metrics_spawn(srv->loop, srv->res, &srv->conn_count,
 	                    &srv->queries_total, &metrics_pid);
@@ -607,6 +626,8 @@ main(int argc, char **argv)
 		    "NOT marked clean (the next start replays the log)\n");
 		exit_rc = 1;
 	}
+	if (atomic_load(&g_storage_failed))
+		exit_rc = 1;
 	xtc_app_destroy(srv->app);   /* joins the supervisor + frees the exec */
 	free(srv->res);
 	xtc_log_destroy(log);
