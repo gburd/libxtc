@@ -260,11 +260,15 @@ shaped the library:
   I/O, not parallel writes.  The scalable shape is DragonFly's: one
   keyspace shard per loop, each command run on (or sent to) the loop that
   owns its key -- see `docs/examples/rexis-vs-dragonfly.md`.
-* An idle connection costs ~15.7 KB of RSS (its fiber stack and two
-  16 KiB base buffers; Valkey: 0.9 KB) and wakes once a second to check
-  shutdown and the idle clock.  Measured with 100,000 idle connections on
-  `--loops=2`: 0.53 of a core with no traffic, and 21% less memtier
-  throughput (Valkey: 6%).
+* An idle connection costs ~15.6 KB of RSS (its fiber stack and two
+  16 KiB base buffers; Valkey: 0.9 KB).  It does not wake: with no
+  `--timeout` and nothing buffered its proc parks on the socket with no
+  deadline, and shutdown wakes it explicitly (an fd -> pid table in
+  `conn.c`).  Each idle proc used to wake once a second to look at the
+  shutdown flag; with 100,000 idle connections on `--loops=2` that cost
+  526 CPU ticks per 10 s with no traffic and held memtier to 134k ops/s.
+  Now: 8 ticks (the same as with no connections) and 179k ops/s (medians
+  of 3 interleaved runs).
 * A client that pipelines an unbounded stream and never reads stalls
   once the socket buffers fill (backpressure, above); Redis instead
   buffers replies without limit for normal clients by default.

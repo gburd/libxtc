@@ -811,6 +811,40 @@ test_idle_timeout(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* An idle connection does not wake: with no --timeout and nothing
+ * buffered its proc parks on the socket with no deadline, and shutdown
+ * wakes it explicitly.  Every idle proc used to wake once a second (to
+ * look at the shutdown flag): 100,000 idle connections cost 0.53 of a
+ * core and 21% of the load throughput.  INFO idle_wakeups counts conn
+ * proc wakes that only the park timer caused. */
+#define IDLE_CONNS 50
+
+static MunitResult
+test_idle_conns_do_not_wake(const MunitParameter p[], void *d)
+{
+	int fds[IDLE_CONNS], i, ctl;
+	long long w0, w1;
+	(void)p; (void)d;
+
+	START("--max-clients=100");
+	for (i = 0; i < IDLE_CONNS; i++) {
+		munit_assert_int((fds[i] = rexis_connect(&g_srv, 2000)), >=, 0);
+		munit_assert_true(served(fds[i]));
+	}
+	ctl = fds[0];
+	w0 = info_field(ctl, "idle_wakeups:");
+	usleep(3 * 1000 * 1000);
+	w1 = info_field(ctl, "idle_wakeups:");
+	printf("\n  idle: %d idle conns, %lld timer wakes in 3 s\n",
+	    IDLE_CONNS, w1 - w0);
+	munit_assert_llong(w0, >=, 0);
+	munit_assert_llong(w1 - w0, <, 10);   /* was ~150 (1/s each) */
+	for (i = 0; i < IDLE_CONNS; i++)
+		close(fds[i]);
+	STOP_CLEAN();
+	return MUNIT_OK;
+}
+
 /* fd exhaustion: with RLIMIT_NOFILE low, a flood of connections used to
  * spin the listener at 100% CPU (raw accept() -> EMFILE -> park on the
  * still-readable listen fd -> repeat).  With xtc_net_accept + back-off
@@ -868,6 +902,7 @@ static MunitTest tests[] = {
 	{ "/client_buffers_bounded", test_client_buffers_bounded, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/output_limit",     test_output_limit,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/idle_timeout",     test_idle_timeout,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/idle_conns_do_not_wake", test_idle_conns_do_not_wake, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/emfile_no_spin",   test_emfile_no_spin,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

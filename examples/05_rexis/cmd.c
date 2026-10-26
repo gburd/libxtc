@@ -599,6 +599,7 @@ cmd_info(cmd_ctx_t *ctx)
 	    "connected_clients:%d\r\n"
 	    "rejected_connections:%lld\r\n"
 	    "event_loops:%d\r\n"
+	    "idle_wakeups:%lld\r\n"
 	    "# Memory\r\n"
 	    "used_memory:%zu\r\n"
 	    "used_memory_dataset:%zu\r\n"
@@ -611,7 +612,7 @@ cmd_info(cmd_ctx_t *ctx)
 	    "db0:keys=%zu,expires=0\r\n"
 	    "# Loops\r\n",
 	    conn_census_total(), (long long)conn_census_rejected(),
-	    conn_census_loops(),
+	    conn_census_loops(), (long long)conn_idle_wakeups(),
 	    mem + clients, mem, clients, cmd_total, cmd_p50, cmd_p99, keys);
 	/* Clients per loop: the per-loop proc ceiling applies to each. */
 	for (i = 0; i < conn_census_loops() && n > 0 &&

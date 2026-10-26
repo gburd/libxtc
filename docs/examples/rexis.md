@@ -78,6 +78,14 @@ client over any limit gets Redis's `-ERR max number of clients reached`,
 and `--loops=2` held 100,000 idle connections in a measurement on one
 32-vCPU host.
 
+An idle connection must also cost nothing while it waits. Each connection
+process used to wake once a second to look at the shutdown flag: 100,000
+idle connections then took half a core and a third of the throughput
+left for the active clients. Now an idle process parks on its socket with
+no deadline, and shutdown wakes each one explicitly. That costs one
+`xtc_proc_wake` per connection at exit instead of 100,000 timer wakes per
+second.
+
 ## How it works
 
 - **`main.c`** stands up an `xtc_app` with a supervised TCP listener.

@@ -91,6 +91,16 @@ int     conn_census_live(int loop_idx);   /* clients on that loop */
 int     conn_census_total(void);          /* clients on all loops */
 void    conn_census_reject(void);         /* count a refused connection */
 int64_t conn_census_rejected(void);
+/* Conn proc wakes caused only by its park timer (INFO idle_wakeups). */
+int64_t conn_idle_wakeups(void);
+
+/* Idle conn procs park with no deadline.  conn_wake_init(max_fd) sizes
+ * the fd -> pid table (before the first connection); conn_wake_all wakes
+ * every recorded conn proc (shutdown: each then sees the flag).  A proc
+ * between its flag check and its park misses one call, so shutdown
+ * repeats it until the procs are gone. */
+void    conn_wake_init(int max_fd);
+void    conn_wake_all(void);
 
 /* Refuse a connection the way Redis does: send "-ERR <msg>" (best
  * effort, never blocking) and close it, counting it in the census. */

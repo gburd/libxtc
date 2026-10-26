@@ -333,12 +333,16 @@ listener_proc(void *arg)
 	 * returns in main(). */
 	(void)xtc_send(srv->expire_pid, "x", 1);
 	(void)xtc_send(srv->metrics_pid, "x", 1);
-	/* With several loops the executor stops when the supervisor does,
-	 * freezing whatever is still running; give the connection procs
-	 * (they see the flag within a second) up to 2 s to finish. */
-	for (waited = 0; srv->exec != NULL && waited < 200 &&
-	    atomic_load(&srv->conn_count) > 0; waited++)
+	/* Idle connection procs park with no deadline: wake them so they
+	 * see the flag, and repeat (one between its flag check and its park
+	 * misses a round) until they are gone, for up to 2 s.  With several
+	 * loops this wait also matters because the executor stops when the
+	 * supervisor does, freezing whatever is still running. */
+	for (waited = 0; waited < 200 &&
+	    atomic_load(&srv->conn_count) > 0; waited++) {
+		conn_wake_all();
 		(void)xtc_proc_sleep(SHUTDOWN_POLL_NS);
+	}
 	(void)xtc_app_stop(srv->app);
 }
 
@@ -671,6 +675,9 @@ main(int argc, char **argv)
 	xtc_res_init(srv->res, &res_caps);
 	(void)xtc_res_attach_net(srv->res);
 	conn_census_init(cfg.loops, cfg.loop_clients);
+	/* The fd -> pid wake table: the sockets plus the few fds the
+	 * backend, the log and the store hold. */
+	conn_wake_init((int)res_caps.fds + 1024);
 
 	/* Initialize rate limiter */
 	rate_limit_init(srv);

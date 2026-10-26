@@ -151,6 +151,60 @@ static int              g_n_loops = 1;
 static int              g_loop_cap = CONN_LOOP_MAX;
 static _Atomic int      g_loop_live[CONN_MAX_LOOPS];
 static _Atomic int64_t  g_rejected;
+static _Atomic int64_t  g_idle_wakes;     /* park timer was the only cause */
+
+/*
+ * fd -> pid of the conn proc that owns it, so shutdown can wake procs
+ * parked with no deadline (conn_wake_all).  A proc stores its pid when it
+ * starts and clears it in teardown BEFORE closing the fd, so a later
+ * connection that reuses the number cannot be clobbered.  An fd at or
+ * above g_fd_cap (or a failed allocation) is not recorded, and its proc
+ * keeps a 1 s park deadline instead.
+ */
+static _Atomic uint64_t *g_fd_pid;
+static int               g_fd_cap;
+
+static uint64_t
+pid_pack(xtc_pid_t p)
+{
+	return (uint64_t)p.loop_id << 48 | (uint64_t)p.local_id << 32 | p.gen;
+}
+
+static xtc_pid_t
+pid_unpack(uint64_t v)
+{
+	xtc_pid_t p;
+
+	p.loop_id = (uint16_t)(v >> 48);
+	p.local_id = (uint16_t)(v >> 32);
+	p.gen = (uint32_t)v;
+	return p;
+}
+
+void
+conn_wake_init(int max_fd)
+{
+	if (max_fd > 0 && (g_fd_pid = xtc_calloc((size_t)max_fd,
+	    sizeof *g_fd_pid)) != NULL)
+		g_fd_cap = max_fd;
+}
+
+void
+conn_wake_all(void)
+{
+	uint64_t v;
+	int i;
+
+	for (i = 0; i < g_fd_cap; i++)
+		if ((v = atomic_load(&g_fd_pid[i])) != 0)
+			(void)xtc_proc_wake(pid_unpack(v));
+}
+
+int64_t
+conn_idle_wakeups(void)
+{
+	return atomic_load(&g_idle_wakes);
+}
 
 void
 conn_census_init(int n_loops, int per_loop_cap)
@@ -573,6 +627,8 @@ conn_teardown(void *arg)
 		return;
 	if (st->pubsub != NULL && st->sub_count > 0)
 		(void)xtc_reg_drop_pid(st->pubsub, st->self);
+	if (st->fd >= 0 && st->fd < g_fd_cap)
+		atomic_store(&g_fd_pid[st->fd], 0);    /* before the close */
 	if (st->fd >= 0)
 		xtc_net_close(st->fd);
 	if (st->conn_count != NULL)
@@ -598,6 +654,8 @@ conn_proc(void *arg)
 
 	st->self = xtc_self();   /* for pub/sub group membership */
 	st->last_io_ns = st->trim_ns = xtc_clock_mono();
+	if (st->fd < g_fd_cap)
+		atomic_store(&g_fd_pid[st->fd], pid_pack(st->self));
 
 	/*
 	 * Resource scope (mechanism, not manner): register the connection
@@ -684,18 +742,32 @@ conn_proc(void *arg)
 				xtc_yield();
 			continue;
 		}
-		/* Wake at least once a second to see shutdown and the idle
-		 * clock. */
+		/* No deadline unless something is due: a socket event, a
+		 * published message or the shutdown scan (conn_wake_all)
+		 * wakes the proc.  Every idle proc used to wake once a second
+		 * to look at the shutdown flag: 100,000 idle connections cost
+		 * half a core.  Deadlines: --max-iops re-checks in 10 ms,
+		 * --timeout at the idle deadline, grown buffers at the trim
+		 * window, and an fd the wake table cannot hold once a second. */
 		park_ns = stop == STOP_THROTTLED ? 10LL * 1000 * 1000 :
-		    1000LL * 1000 * 1000;
+		    st->fd < g_fd_cap ? -1 : 1000LL * 1000 * 1000;
+		if (st->idle_timeout_ns > 0 && st->sub_count == 0) {
+			now = st->last_io_ns + st->idle_timeout_ns -
+			    xtc_clock_mono();
+			if (now < 0)
+				now = 0;
+			if (park_ns < 0 || now < park_ns)
+				park_ns = now;
+		}
 		if (st->last_io_ns - st->trim_ns >= CONN_TRIM_NS)
 			conn_trim(st, 0);
 		if ((st->rcap > CONN_BASE_BUF || st->wcap > CONN_BASE_BUF) &&
-		    park_ns > CONN_TRIM_NS)
+		    (park_ns < 0 || park_ns > CONN_TRIM_NS))
 			park_ns = CONN_TRIM_NS;   /* to see idleness soon */
 		revents = 0;
-		(void)xtc_proc_wait_fd(st->fd,
-		    interest | XTC_IO_HUP | XTC_IO_ERR, park_ns, &revents);
+		if (xtc_proc_wait_fd(st->fd, interest | XTC_IO_HUP | XTC_IO_ERR,
+		    park_ns, &revents) == XTC_E_AGAIN)
+			atomic_fetch_add(&g_idle_wakes, 1);
 		if ((st->rcap > CONN_BASE_BUF || st->wcap > CONN_BASE_BUF) &&
 		    xtc_clock_mono() - st->last_io_ns >= CONN_TRIM_NS)
 			conn_trim(st, 1);     /* idle: back to the base */
