@@ -1011,11 +1011,16 @@ snap_slot_free(int *slotp)
 
 /* The GC horizon: the oldest live pinned snapshot, or `now` if none.
  * `now` must have been read (xs_visible) before this call. */
+/* test_prune_horizon counts the computations (it #includes xstore.c). */
+#ifndef XS_HORIZON_TEST_HOOK
+#define XS_HORIZON_TEST_HOOK() ((void)0)
+#endif
 static uint64_t
 snap_horizon(uint64_t now)
 {
 	uint64_t h = now;
 	int i;
+	XS_HORIZON_TEST_HOOK();
 	atomic_thread_fence(memory_order_seq_cst);
 	for (i = 0; i < SNAP_MAX; i++) {
 		uint64_t v = atomic_load_explicit(&g_holds[i], memory_order_seq_cst);
@@ -4924,13 +4929,18 @@ xs_prune_rowid(bt_t *bt, uint32_t tableid, int64_t rowid, uint64_t horizon)
 static _Atomic int g_av_interval = 1;
 static _Atomic int g_av_countdown = 1;
 static _Atomic uint64_t g_av_prunes = 0;   /* prune passes actually run */
+/* The horizon is computed only for a write that prunes: snap_horizon is
+ * a seq_cst fence plus a load of each of the SNAP_MAX pin slots, and
+ * every written row paid it before the countdown skipped the prune
+ * (4.5% of a TPC-C connection's CPU at one connection). */
 static void
-xs_maybe_prune(bt_t *bt, uint32_t tableid, int64_t rowid, uint64_t horizon)
+xs_maybe_prune(bt_t *bt, uint32_t tableid, int64_t rowid)
 {
 	int reclaimed, iv;
 	if (atomic_fetch_sub_explicit(&g_av_countdown, 1, memory_order_relaxed) > 1)
 		return;                               /* not this write */
-	reclaimed = xs_prune_rowid(bt, tableid, rowid, horizon);
+	reclaimed = xs_prune_rowid(bt, tableid, rowid,
+	    snap_horizon(xs_visible()));
 	atomic_fetch_add_explicit(&g_av_prunes, 1, memory_order_relaxed);
 	if (reclaimed > 0) {
 		iv = 1;                               /* productive: prune every write */
@@ -5351,8 +5361,7 @@ xs_put_pruned(xstore_ctx_t *cx, uint32_t tableid, int64_t rowid, const void *blo
 	if (rc == SX_OK) {
 		cx->stmt_puts++;            /* an applied autocommit row */
 		if (cx->autovacuum)
-			xs_maybe_prune(cx->bt, tableid, rowid,
-			    snap_horizon(xs_visible()));
+			xs_maybe_prune(cx->bt, tableid, rowid);
 	}
 	return rc;
 }
@@ -6037,8 +6046,7 @@ xs_commit_ctx(xstore_ctx_t *cx)
 				    w->data, w->deleted ? 0 : (int)w->len, w->deleted,
 				    prelen > 0 ? pre : NULL, prelen, ts);
 				if (cx->autovacuum)
-					xs_maybe_prune(cx->bt, w->tableid, w->rowid,
-					    snap_horizon(xs_visible()));
+					xs_maybe_prune(cx->bt, w->tableid, w->rowid);
 			}
 		}
 		ssi_commit(cx->ssi, ts);     /* publish commit_ts for SSI peers */
