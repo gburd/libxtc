@@ -26,7 +26,10 @@
  *	killed by a timeout cannot leave servers holding ports behind.
  *
  *	The binary is $REXIS_SERVER, else ../../examples/05_rexis/rexis-server-xtc
- *	relative to the current directory (test/m99).
+ *	relative to the current directory (test/m99).  $REXIS_ARGS (words
+ *	split on spaces) is appended to every server's arguments: check-rexis
+ *	runs the suites a second time with REXIS_ARGS=--loops=2 so the
+ *	multi-loop server answers the same tests.
  */
 
 #ifndef REXIS_HARNESS_H
@@ -62,7 +65,7 @@ typedef struct rexis_srv {
 	int   port;
 } rexis_srv_t;
 
-/* If > 0, the next started server runs with RLIMIT_NOFILE soft = this
+/* If > 0, the next started server runs with RLIMIT_NOFILE (soft and hard) = this
  * (set in the child only, so the test process keeps its own limit). */
 static int rexis_child_nofile;
 
@@ -100,8 +103,9 @@ rexis_try_start(rexis_srv_t *s, int port, const char *const *extra,
     int n_extra)
 {
 	const char *bin = getenv("REXIS_SERVER");
-	char port_s[16], line[256];
-	char *argv[40];
+	const char *more = getenv("REXIS_ARGS");
+	char port_s[16], line[256], more_s[256];
+	char *argv[40], *w, *save = NULL;
 	int pfd[2], argc = 0, i;
 	size_t used = 0;
 	int64_t deadline;
@@ -116,6 +120,12 @@ rexis_try_start(rexis_srv_t *s, int port, const char *const *extra,
 	argv[argc++] = port_s;
 	for (i = 0; i < n_extra && argc < 38; i++)
 		argv[argc++] = (char *)extra[i];
+	if (more != NULL) {
+		snprintf(more_s, sizeof more_s, "%s", more);
+		for (w = strtok_r(more_s, " ", &save); w != NULL && argc < 38;
+		    w = strtok_r(NULL, " ", &save))
+			argv[argc++] = w;
+	}
 	argv[argc] = NULL;
 
 	if (pipe(pfd) != 0)
@@ -136,7 +146,11 @@ rexis_try_start(rexis_srv_t *s, int port, const char *const *extra,
 		if (rexis_child_nofile > 0) {
 			struct rlimit rl;
 			if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+				/* Hard too: rexis raises its soft limit to fit
+				 * its client cap, which would undo a soft-only
+				 * limit. */
 				rl.rlim_cur = (rlim_t)rexis_child_nofile;
+				rl.rlim_max = (rlim_t)rexis_child_nofile;
 				(void)setrlimit(RLIMIT_NOFILE, &rl);
 			}
 		}

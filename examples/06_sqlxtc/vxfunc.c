@@ -14,7 +14,10 @@
  *
  *	NOT implemented (the caller declines): the 'localtime' and 'utc'
  *	modifiers (they need the TZ database / environment, a
- *	nondeterminism source), timediff(), and printf's %n.
+ *	nondeterminism source), timediff(), printf's %n, and randomblob()
+ *	(no RNG the simulator owns is public yet: xtc_rand_u64 auto-seeds
+ *	from the clock, which the determinism guard traps).  zeroblob()
+ *	takes a constant argument of at most VXF_ZEROBLOB_MAX bytes.
  */
 
 #include <ctype.h>
@@ -40,7 +43,7 @@ enum vxf_id {
 	F_CEIL, F_FLOOR, F_TRUNC, F_LN, F_LOG, F_LOG10, F_LOG2, F_EXP,
 	F_POW, F_MOD, F_SQRT, F_SIN, F_COS, F_TAN, F_ASIN, F_ACOS, F_ATAN,
 	F_ATAN2, F_SINH, F_COSH, F_TANH, F_ASINH, F_ACOSH, F_ATANH,
-	F_RADIANS, F_DEGREES, F_PI
+	F_RADIANS, F_DEGREES, F_PI, F_ZEROBLOB
 };
 
 static const struct vxf_def {
@@ -95,7 +98,8 @@ static const struct vxf_def {
 	{ "atanh", F_ATANH, 1, 1, VXF_C_NUM },
 	{ "radians", F_RADIANS, 1, 1, VXF_C_NUM },
 	{ "degrees", F_DEGREES, 1, 1, VXF_C_NUM },
-	{ "pi", F_PI, 0, 0, VXF_C_NUM }
+	{ "pi", F_PI, 0, 0, VXF_C_NUM },
+	{ "zeroblob", F_ZEROBLOB, 1, 1, VXF_C_DYN }   /* always a BLOB */
 };
 #define N_FUNCS ((int)(sizeof k_funcs / sizeof k_funcs[0]))
 
@@ -306,6 +310,61 @@ as_double(const vx_cell_t *c)
 		return v;
 	}
 	return 0.0;
+}
+
+/* sqlite3_value_int64 exactly: a REAL saturates, TEXT / BLOB take the
+ * longest integer prefix (sqlite3Atoi64: '1e3' is 1, '4.9' is 4) and
+ * saturate on overflow, NULL is 0.  (as_int64 below goes through a
+ * double instead, so '1e3' is 1000 there.) */
+static int64_t
+sql_int64(const vx_cell_t *c)
+{
+	const unsigned char *z;
+	uint64_t u = 0;
+	uint32_t i = 0, n;
+	int neg = 0;
+	if (c->type == VX_INT) return c->i;
+	if (c->type == VX_REAL) {
+		if (c->r != c->r) return 0;
+		if (c->r <= -9.2233720368547758e18) return INT64_MIN;
+		if (c->r >= 9.2233720368547758e18) return INT64_MAX;
+		return (int64_t)c->r;
+	}
+	if (c->type != VX_TEXT && c->type != VX_BLOB) return 0;
+	z = c->bytes;
+	n = c->nbytes;
+	while (i < n && isspace(z[i])) i++;
+	if (i < n && (z[i] == '-' || z[i] == '+')) neg = z[i++] == '-';
+	for (; i < n && isdigit(z[i]); i++) {
+		if (u > (UINT64_C(1) << 63) / 10u) { u = UINT64_C(1) << 63; break; }
+		u = u * 10u + (uint64_t)(z[i] - '0');
+		if (u > (UINT64_C(1) << 63)) { u = UINT64_C(1) << 63; break; }
+	}
+	if (neg) return u >= (UINT64_C(1) << 63) ? INT64_MIN : -(int64_t)u;
+	return u > (uint64_t)INT64_MAX ? INT64_MAX : (int64_t)u;
+}
+
+/* zeroblob(N): N zero bytes (N < 0 is 0).  Its argument must be a
+ * constant no larger than this (vxf_arg_ok): the native engine has no
+ * run-time error, so SQLite's "string or blob too big" (past 1e9) and an
+ * unbounded allocation are both declined at compile time.  1 MiB is far
+ * past the 4096-byte row the native engine stores. */
+#define VXF_ZEROBLOB_MAX (1 << 20)
+
+static void
+fn_zeroblob(const vx_cell_t *a, struct sbuf *b, vx_cell_t *out)
+{
+	int64_t n = sql_int64(a);
+	if (n < 0) n = 0;
+	if (n > VXF_ZEROBLOB_MAX) { out->type = VX_NULL; return; }  /* declined */
+	sb_reserve(b, (size_t)n);
+	if (b->oom) { out->type = VX_NULL; return; }
+	if (b->p == NULL) sb_put(b, "", 0);    /* a 0-byte blob still has bytes */
+	if (b->oom) { out->type = VX_NULL; return; }
+	memset(b->p, 0, (size_t)n);
+	out->type = VX_BLOB;
+	out->bytes = (const uint8_t *)b->p;
+	out->nbytes = (uint32_t)n;
 }
 
 static int64_t
@@ -1655,6 +1714,7 @@ vxf_eval(int id, const vx_cell_t *args, int nargs, int64_t now_ms,
 	case F_CONCAT: fn_concat(args, nargs, NULL, &b, out); return;
 	case F_CONCAT_WS: fn_concat(args + 1, nargs - 1, &args[0], &b, out); return;
 	case F_IIF: *out = truthy(&args[0]) ? args[1] : args[2]; return;
+	case F_ZEROBLOB: fn_zeroblob(&args[0], &b, out); return;
 	case F_SIGN:
 		if (!num_val(&args[0], &d, &ii, &iv)) { out->type = VX_NULL; return; }
 		out->type = VX_INT; out->i = d < 0 ? -1 : d > 0 ? 1 : 0;
@@ -1669,6 +1729,8 @@ int
 vxf_arg_ok(int id, int argi, const vx_cell_t *lit, int maybe_real)
 {
 	char tmp[64];
+	if (id == F_ZEROBLOB)        /* a constant, within the cap */
+		return lit != NULL && sql_int64(lit) <= VXF_ZEROBLOB_MAX;
 	if (id != F_QUOTE || argi != 0) return 1;
 	if (lit != NULL) {
 		if (lit->type != VX_REAL) return 1;

@@ -568,6 +568,26 @@ CORPUS = [
      "SELECT hex('abc'), hex(255), hex(1.5), hex(NULL), hex(x'0aff'), "
      "quote('it''s'), quote(1), quote(1.5), quote(NULL), quote(x'0a'), quote(1e20), quote(0.1), "
      "char(72, 105), unicode('A'), unicode(''), char()"),
+    # zeroblob(N): SQLite's integer conversion of N (a prefix of a text,
+    # '1e3' is 1; a REAL truncates; < 0 and NULL are 0), always a BLOB.
+    ("fn_zeroblob", [],
+     "SELECT typeof(zeroblob(3)), length(zeroblob(3)), hex(zeroblob(3)), "
+     "zeroblob(2), hex(zeroblob(0)), length(zeroblob(-5)), "
+     "length(zeroblob(2.9)), length(zeroblob('4')), length(zeroblob('x')), "
+     "length(zeroblob('1e3')), length(zeroblob(' 7z')), length(zeroblob(x'34')), "
+     "typeof(zeroblob(NULL)), length(zeroblob(NULL)), length(zeroblob(-1e300))"),
+    ("fn_zeroblob_bind", [],
+     "SELECT length(zeroblob(?)), hex(zeroblob(?))", {"params": [5, 2]}),
+    # Past SQLite's 1e9-byte limit both engines refuse the statement.
+    ("fn_zeroblob_too_big", [], "SELECT zeroblob(2000000000)"),
+    ("fn_zeroblob_too_big_real", [], "SELECT length(zeroblob(1e300))"),
+    ("fn_zeroblob_args", [], "SELECT zeroblob(1, 2)"),
+    ("dml_insert_zeroblob",
+     ["CREATE TABLE zb(id INTEGER PRIMARY KEY, v BLOB)",
+      "INSERT INTO zb VALUES(1, zeroblob(100)), (2, zeroblob(0)), (3, zeroblob(NULL))",
+      "UPDATE zb SET v = zeroblob(10) WHERE id = 3"],
+     "SELECT id, typeof(v), length(v), hex(v) FROM zb ORDER BY id",
+     {"ordered": True}),
     ("fn_concat", [],
      "SELECT concat('a', NULL, 1, 2.5), concat_ws('-', 'a', NULL, 'b', 3), "
      "concat(NULL), concat_ws(NULL, 1, 2), concat_ws(',', NULL)"),

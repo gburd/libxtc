@@ -1539,13 +1539,28 @@ static int
 compile_ext(struct vx_compiler *c, const sql_expr_t *e, vx_expr_t *n)
 {
 	const vx_cell_t *lits[16];
+	vx_cell_t negs[16];
+	const vx_expr_t *x;
 	int k;
 	n->col = vxf_lookup(e->name[0].p, e->name[0].len, n->nargs);
 	if (n->col <= 0 || n->nargs > 16) return -1;
 	for (k = 0; k < n->nargs; k++) {
-		if (n->args[k]->pord != 0) c->st->noreuse = 1;   /* value checked below */
+		x = n->args[k];
+		if (x->pord != 0) c->st->noreuse = 1;   /* value checked below */
 		/* A column or expression of numeric class may hold a REAL. */
-		lits[k] = n->args[k]->op == VXO_LIT ? &n->args[k]->lit : NULL;
+		lits[k] = x->op == VXO_LIT ? &x->lit : NULL;
+		/* A negated numeric literal (-5, -1e300) is a constant too. */
+		if (x->op == VXO_NEG && x->a->op == VXO_LIT) {
+			if (x->a->pord != 0) c->st->noreuse = 1;
+			negs[k] = x->a->lit;
+			if (negs[k].type == VX_INT && negs[k].i != INT64_MIN) {
+				negs[k].i = -negs[k].i;
+				lits[k] = &negs[k];
+			} else if (negs[k].type == VX_REAL) {
+				negs[k].r = -negs[k].r;
+				lits[k] = &negs[k];
+			}
+		}
 		if (!vxf_arg_ok(n->col, k, lits[k],
 		    node_class(c, n->args[k]) != VX_AFF_TEXT)) return -1;
 	}
@@ -8844,6 +8859,21 @@ lit_cell(struct vx_arena_blk **arena, const sql_expr_t *e, vx_cell_t *out,
 		}
 		out->type = VX_BLOB; out->bytes = p; out->nbytes = nb;
 		return 0;
+	}
+	case SX_E_FUNC: {
+		/* zeroblob(<literal>) is a constant (INSERT ... VALUES
+		 * (zeroblob(N))); vxfunc caps N (vxf_arg_ok). */
+		vx_cell_t arg;
+		int id;
+		if (e->nname != 1 || !name_is(&e->name[0], "zeroblob") ||
+		    e->list == NULL || e->list->head == NULL ||
+		    e->list->head->next != NULL ||
+		    (id = vxf_lookup(e->name[0].p, e->name[0].len, 1)) <= 0 ||
+		    lit_cell(arena, e->list->head->expr, &arg, binds, nbinds) != 0 ||
+		    !vxf_arg_ok(id, 0, &arg, 0))
+			return -1;
+		vxf_eval(id, &arg, 1, 0, ext_alloc, arena, out);
+		return out->type == VX_BLOB ? 0 : -1;
 	}
 	case SX_E_UNARY:
 		/* a leading minus on a numeric literal (-5) */

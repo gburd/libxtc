@@ -6,6 +6,32 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## OPEN (libxtc): at most 65,536 live processes per loop
+
+**The limit.**  `xtc_pid_t` names a process by its loop and a 16-bit
+slot on that loop (`local_id`), so one loop can hold at most 65,536 live
+processes.  `xtc_proc_spawn` on a full loop returns `XTC_E_RESOURCE` and
+spawns nothing.  Every process counts, supervisors included.  A server
+that runs one process per connection therefore stops accepting at about
+65,500 clients per loop.  rexis 1.59 stopped at exactly 65,532 clients
+(65,536 minus its supervisor, listener, expiry and metrics procs) and
+closed each connection after that without a reply.  On the same host,
+with the same client harness, Valkey held 70,002, so neither the client's
+ports nor the file-descriptor limits were the cause.
+
+**Workaround.**  Spread the processes over the loops of an `xtc_exec`
+executor: each loop has its own 65,536 slots.  rexis does this with
+`--loops=N`.  It puts each connection on the least-loaded loop with room
+and refuses startup when `--max-clients` is more than its loops can hold.
+A client over the limit gets `-ERR max number of clients reached` and a
+close, as Redis sends.  Measured: `--loops=2` held 100,000 idle
+connections on one 32-vCPU x86-64 host.
+
+**Why it stays open.**  `xtc_pid_t` is a public struct passed by value
+(see [ABI stability]({{ '/reference/abi-stability/' | relative_url }})),
+so widening `local_id` has to wait for 2.0.  See
+[xtc_proc(3)](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_proc.3).
+
 ## FIXED (1.60): sqlxtc served a damaged page as committed data; CHANGED: page format
 
 **What was wrong.**  After a clean shutdown sqlxtc trusts its page file
@@ -395,11 +421,13 @@ be its cause, so it stays open.
 
   | store | SQLite | sqlxtc page file | sqlxtc page file + log |
   | --- | --- | --- | --- |
-  | ledger, 100k accounts, 2M transfers | 267 MB | 488 MB (1.83x) | 761 MB (2.85x) |
+  | ledger, 100k accounts, 2M transfers | 267 MB | 459 MB (1.72x) | 732 MB (2.74x) |
   | TPROC-C, 10 warehouses | 899 MB | 1,219 MB (1.36x) | 2,306 MB (2.56x) |
   | TPROC-C, 50 warehouses | 4,498 MB | 6,040 MB (1.34x) | 11,413 MB (2.54x) |
 
-  (1.58: 2.56x and 3.61x for the page file.)  Where the rest goes:
+  (1.58: 2.56x and 3.61x for the page file; 1.59: 488 MB, 1.83x, for the
+  ledger.  The TPROC-C rows are 1.59's, not re-measured.)  Where the
+  rest goes:
   * **The log.**  SQLite in WAL mode checkpoints its log back into the
     database and truncates it; sqlxtc keeps a compacted log of the live
     rows next to the page file (crash recovery replays it).  It is
@@ -409,15 +437,33 @@ be its cause, so it stays open.
   * **Per-entry overhead.**  Every table row carries a 20-byte version
     key (table id, rowid, inverted commit timestamp; about 9 bytes
     stored after prefix compression) and every entry a 10-byte slot,
-    against about 4-6 bytes of cell overhead in SQLite.
+    against about 4-6 bytes of cell overhead in SQLite.  A narrower
+    slot (6-8 bytes for leaves whose values are empty, as index leaves'
+    are) would save 16-32 MB on the ledger, but its 4-byte head is the
+    search accelerator of every node lookup, and it is a page-format
+    change; it is left for a later format bump.
   * **Index fill.**  Index leaves split at 70% full (SQLite's
-    redistribute-before-split keeps about 90%).
+    redistribute-before-split keeps about 90%).  Moving entries into a
+    sibling before splitting raises it (modelled on random inserts: 70%
+    -> 74-76% shifting into the right sibling only, 81-86% into either
+    sibling, for 2-8x the structure changes), about 10 MB and 60 MB on
+    the ledger.  Not done: a move into the LEFT sibling moves keys left,
+    and readers and parked cursors only chase right, so every hop and
+    resume would need a lower-fence check; that is a later release.
   * **Old versions.**  Versions no snapshot can see are reclaimed by
-    autovacuum while the server runs, not at load time: right after the
-    ledger load its accounts table holds about 5 versions per row.
-
-  The remaining levers (redistribution on split, pruning at clean close,
-  a narrower slot) are tracked for a later release.
+    autovacuum while the server runs, and the rest at a clean close (it
+    leaves one version per live row): a load used to leave about 5 per
+    updated row (the ledger's accounts table: 512k versions for 100k
+    rows, 31 MB).  A store that crashes keeps them until the rows are
+    written again or the next clean close.  The pages freed are holes
+    on the saved freelist: allocated size drops, the file's apparent
+    size does not until they are reused.
+  * **Growth steps.**  An open store's page file is grown ahead of its
+    pages, an eighth of its size at a time (1 to 8 MiB), so a page
+    write-back never extends the file (an io_uring write that extends
+    a file runs on an io-wq worker).  A clean close trims the unused
+    tail; a store that crashes keeps it (at most one step) until its
+    next clean close.
 * **The WAL frame checksum is now CRC32C.**  1.59 reads logs written by
   1.58 (FNV-1a frames) and mixed logs, but 1.58 cannot read a 1.59 log.
   That is expected: downgrades are supported only between LTS releases,
@@ -1060,8 +1106,13 @@ isolation defects were fixed (1.56); what remains is recorded here.
   METADATA request.  Produces are acknowledged only after a group-commit
   fdatasync (`--fsync-interval-ms` relaxes this).
 * **rexis `--cores` pins; it does not add threads.**  The server runs one
-  event loop.  `--max-memory` bounds the keyspace and every client's
-  query/output buffers; a client over its output limit is disconnected.
+  event loop unless `--loops=N` is given; with N > 1 the connections
+  spread over N loops but every command still takes one keyspace latch,
+  so writes do not run in parallel.  `--max-memory` bounds the keyspace
+  and every client's query/output buffers; a client over its output
+  limit is disconnected.  A value of 4 KiB or more that a GET reply is
+  still sending stays allocated (and charged to the client's budget)
+  after a SET or DEL replaces it, until the reply has left.
 * **lorb `test_lob` leaks under LeakSanitizer** (pre-existing):
   `lob_book_destroy` does not free its `xtc_chash` nodes.
 * **sqlxtc restart after kill -9.**  For about 50 ms after the killed

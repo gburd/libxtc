@@ -109,14 +109,16 @@ test_shutdown_failure(void)
 		CHECK(sx_exec(h, sql, NULL) == SX_OK);
 	}
 	sx_close(h);
-	/* Make every page write that grows a file fail (EFBIG): cap the
-	 * file size at the page file's current size.  Nothing was evicted,
-	 * so every dirty page lies past EOF and its flush fails, while the
-	 * superblock rewrite at offset 0 would still succeed -- exactly the
-	 * case where marking the base clean loses the data. */
+	/* Make every page write past the superblock fail (EFBIG): cap the
+	 * file size at one page.  The limit is checked against the write's
+	 * offset, not the file's size, so a page inside the preallocated
+	 * file (bufmgr.c pf_grow) fails too.  Every dirty page's flush
+	 * fails, while the superblock rewrite at offset 0 would still
+	 * succeed -- exactly the case where marking the base clean loses
+	 * the data. */
 	snprintf(side, sizeof side, "%s.dwb", path);
-	CHECK(stat(path, &sb) == 0);
-	rl.rlim_cur = (rlim_t)sb.st_size;
+	CHECK(stat(path, &sb) == 0 && sb.st_size >= 4096);
+	rl.rlim_cur = 4096;
 	rl.rlim_max = RLIM_INFINITY;
 	CHECK(setrlimit(RLIMIT_FSIZE, &rl) == 0);
 	CHECK(sx_storage_close() != SX_OK);   /* failure reported */

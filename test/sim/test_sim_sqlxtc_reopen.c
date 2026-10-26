@@ -285,8 +285,8 @@ lane_proc(void *arg)
 			model_apply(id);
 		} else {
 			g_sh->st[id] = S_FAILED;
-			FAILF("op %lld (kind %d) refused by the engine (rc %d)",
-			    (long long)id, kind, rc);
+			FAILF("op %lld (kind %d) refused by the engine (rc %d: %s)",
+			    (long long)id, kind, rc, sx_errmsg(h));
 		}
 		if ((k & 3) == 0)
 			xtc_yield();
