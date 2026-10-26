@@ -134,10 +134,10 @@ so
 on a loop that already runs 65,536 processes (every proc, including a
 supervisor and its children, counts) fails with
 .Dv XTC_E_RESOURCE
-and spawns nothing; a slot frees when its process exits.  The ceiling
-is per loop, not per process tree: a server that runs one process per
-connection serves more than about 65,500 connections only by spreading
-them over several loops of an
+and spawns nothing; a slot frees when its process exits.
+The ceiling is per loop, not per process tree: a server that runs one
+process per connection serves more than about 65,500 connections only
+by spreading them over several loops of an
 .Xr xtc_exec 3
 executor (examples/05_rexis does this with
 .Fl \-loops ) .
