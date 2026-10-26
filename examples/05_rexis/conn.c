@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 
 #include "conn.h"
 #include "proto.h"
@@ -71,6 +72,21 @@
 #define STOP_THROTTLED     2    /* --max-iops bucket empty */
 #define STOP_QUIT          3
 
+/*
+ * A reply piece sent by reference: len bytes of a held keyspace value
+ * (db_value_hold) that go out after wbuf[..at) and before wbuf[at..).
+ * The hold and a client-budget charge of len are dropped when its last
+ * byte has left (seg_done).
+ */
+typedef struct out_seg {
+	size_t      at;          /* wbuf offset the bytes go before */
+	const char *data;
+	size_t      len;
+	size_t      sent;
+} out_seg_t;
+
+#define SEG_IOV_MAX  64          /* iovecs per sendmsg */
+
 /* Connection state */
 typedef struct conn_state {
 	int         fd;
@@ -98,6 +114,15 @@ typedef struct conn_state {
 	size_t      max_output;
 	size_t      out_soft;
 	int         out_fail;    /* OUT_FAIL_* of the last refused grow */
+
+	/* By-reference reply pieces, FIFO segs[seg_head..seg_head+nseg).
+	 * seg_pending = their unsent bytes; the pending output is
+	 * wlen - wpos + seg_pending. */
+	out_seg_t  *segs;
+	size_t      seg_cap;
+	size_t      seg_head;
+	size_t      nseg;
+	size_t      seg_pending;
 	int         throttled;   /* last pass stopped on --max-iops */
 	int         partial;     /* rbuf holds no complete command */
 
@@ -152,6 +177,13 @@ static int              g_loop_cap = CONN_LOOP_MAX;
 static _Atomic int      g_loop_live[CONN_MAX_LOOPS];
 static _Atomic int64_t  g_rejected;
 static _Atomic int64_t  g_idle_wakes;     /* park timer was the only cause */
+static _Atomic int64_t  g_ref_bytes;      /* value bytes sent by reference */
+
+int64_t
+conn_ref_bytes(void)
+{
+	return atomic_load(&g_ref_bytes);
+}
 
 /*
  * fd -> pid of the conn proc that owns it, so shutdown can wake procs
@@ -332,7 +364,7 @@ conn_out_grow(resp_buf_t *b, size_t need)
 	conn_state_t *st = b->grow_arg;
 	size_t ncap = st->wcap;
 
-	if (need > st->max_output) {
+	if (need + st->seg_pending > st->max_output) {
 		st->out_fail = OUT_FAIL_LIMIT;
 		return -1;
 	}
@@ -349,11 +381,168 @@ conn_out_grow(resp_buf_t *b, size_t need)
 static void
 conn_out_compact(conn_state_t *st)
 {
+	size_t i;
+
 	if (st->wpos == 0)
 		return;
 	memmove(st->wbuf, st->wbuf + st->wpos, st->wlen - st->wpos);
+	for (i = 0; i < st->nseg; i++)
+		st->segs[st->seg_head + i].at -= st->wpos;
 	st->wlen -= st->wpos;
 	st->wpos = 0;
+}
+
+/* Unsent reply bytes, by-reference pieces included. */
+static size_t
+conn_pending(const conn_state_t *st)
+{
+	return st->wlen - st->wpos + st->seg_pending;
+}
+
+static int
+conn_has_output(const conn_state_t *st)
+{
+	return st->wpos < st->wlen || st->nseg > 0;
+}
+
+/* Drop a by-reference piece: the value hold, the charge, the bytes it
+ * had not sent. */
+static void
+seg_drop(conn_state_t *st, out_seg_t *g)
+{
+	st->seg_pending -= g->len - g->sent;
+	conn_refund(st, g->len);
+	db_value_release(g->data);
+}
+
+/* The head piece has been sent whole. */
+static void
+seg_done(conn_state_t *st)
+{
+	out_seg_t *g = &st->segs[st->seg_head];
+
+	atomic_fetch_add(&g_ref_bytes, (int64_t)g->len);
+	seg_drop(st, g);
+	st->seg_head++;
+	if (--st->nseg == 0)
+		st->seg_head = 0;
+}
+
+/* cmd_ctx_t.out_ref: queue len bytes of a held value at out's end.  The
+ * pending output (max_output) and the client budget (--max-memory) count
+ * it as if it were copied. */
+static int
+conn_out_ref(void *arg, resp_buf_t *out, const char *data, size_t len)
+{
+	conn_state_t *st = arg;
+	out_seg_t *ns;
+	size_t ncap;
+
+	if (out->len + st->seg_pending + len > st->max_output) {
+		st->out_fail = OUT_FAIL_LIMIT;
+		goto refuse;
+	}
+	if (st->seg_head + st->nseg == st->seg_cap) {
+		if (st->seg_head > 0) {
+			memmove(st->segs, st->segs + st->seg_head,
+			    st->nseg * sizeof *st->segs);
+			st->seg_head = 0;
+		} else {
+			ncap = st->seg_cap == 0 ? 8 : st->seg_cap * 2;
+			if ((ns = xtc_realloc(st->segs, ncap * sizeof *ns)) ==
+			    NULL) {
+				st->out_fail = OUT_FAIL_MEM;
+				goto refuse;
+			}
+			st->segs = ns;
+			st->seg_cap = ncap;
+		}
+	}
+	if (conn_charge(st, len) != 0) {
+		st->out_fail = OUT_FAIL_MEM;
+		goto refuse;
+	}
+	ns = &st->segs[st->seg_head + st->nseg++];
+	ns->at = out->len;
+	ns->data = data;
+	ns->len = len;
+	ns->sent = 0;
+	st->seg_pending += len;
+	return 0;
+refuse:
+	db_value_release(data);
+	out->err = 1;
+	return -1;
+}
+
+/* Drop the pieces queued after the first `keep` (a refused reply). */
+static void
+seg_truncate(conn_state_t *st, size_t keep)
+{
+	while (st->nseg > keep)
+		seg_drop(st, &st->segs[st->seg_head + --st->nseg]);
+	if (st->nseg == 0)
+		st->seg_head = 0;
+}
+
+/* sendmsg over wbuf and the by-reference pieces, in stream order.
+ * Returns what send() would. */
+static ssize_t
+conn_sendv(conn_state_t *st)
+{
+	struct iovec iov[SEG_IOV_MAX];
+	struct msghdr mh;
+	size_t pos = st->wpos, i;
+	int n = 0;
+	out_seg_t *g;
+	ssize_t r;
+
+	for (i = 0; i < st->nseg && n < SEG_IOV_MAX - 1; i++) {
+		g = &st->segs[st->seg_head + i];
+		if (g->at > pos) {
+			iov[n].iov_base = st->wbuf + pos;
+			iov[n++].iov_len = g->at - pos;
+			pos = g->at;
+		}
+		iov[n].iov_base = (void *)(uintptr_t)(g->data + g->sent);
+		iov[n++].iov_len = g->len - g->sent;
+	}
+	if (i == st->nseg && pos < st->wlen && n < SEG_IOV_MAX) {
+		iov[n].iov_base = st->wbuf + pos;
+		iov[n++].iov_len = st->wlen - pos;
+	}
+	memset(&mh, 0, sizeof mh);
+	mh.msg_iov = iov;
+	mh.msg_iovlen = (size_t)n;
+	r = sendmsg(st->fd, &mh, MSG_DONTWAIT | MSG_NOSIGNAL);
+	return r;
+}
+
+/* Account n sent bytes against wbuf and the pieces, in stream order. */
+static void
+conn_sent(conn_state_t *st, size_t n)
+{
+	out_seg_t *g;
+	size_t lim, k;
+
+	while (n > 0) {
+		g = st->nseg > 0 ? &st->segs[st->seg_head] : NULL;
+		lim = g != NULL ? g->at : st->wlen;
+		if (st->wpos < lim) {
+			k = lim - st->wpos < n ? lim - st->wpos : n;
+			st->wpos += k;
+			n -= k;
+			continue;
+		}
+		if (g == NULL)
+			break;           /* cannot happen: more sent than given */
+		k = g->len - g->sent < n ? g->len - g->sent : n;
+		g->sent += k;
+		st->seg_pending -= k;
+		n -= k;
+		if (g->sent == g->len)
+			seg_done(st);
+	}
 }
 
 /* Append already-encoded RESP bytes (a pub/sub push) to the output.  A
@@ -388,11 +577,13 @@ conn_flush(conn_state_t *st)
 
 	if (st->wlen > st->wpeak)
 		st->wpeak = st->wlen;
-	while (st->wpos < st->wlen) {
-		n = send(st->fd, st->wbuf + st->wpos, st->wlen - st->wpos,
-		    MSG_DONTWAIT | MSG_NOSIGNAL);
+	while (conn_has_output(st)) {
+		/* No by-reference pieces: the one-buffer send, as before. */
+		n = st->nseg == 0 ? send(st->fd, st->wbuf + st->wpos,
+		    st->wlen - st->wpos, MSG_DONTWAIT | MSG_NOSIGNAL) :
+		    conn_sendv(st);
 		if (n > 0) {
-			st->wpos += (size_t)n;
+			conn_sent(st, (size_t)n);
 			st->last_io_ns = xtc_clock_mono();
 			continue;
 		}
@@ -424,8 +615,13 @@ conn_trim(conn_state_t *st, int idle)
 	}
 	for (t = CONN_BASE_BUF; !idle && t < st->wpeak; t *= 2)
 		;
-	if (st->wcap > t && st->wpos == st->wlen)
+	if (st->wcap > t && !conn_has_output(st))
 		(void)conn_resize(st, &st->wbuf, &st->wcap, t);
+	if (idle && st->nseg == 0 && st->segs != NULL) {
+		xtc_free(st->segs);
+		st->segs = NULL;
+		st->seg_cap = st->seg_head = 0;
+	}
 	st->rpeak = st->rlen;
 	st->wpeak = st->wlen;
 	st->trim_ns = st->last_io_ns;
@@ -497,7 +693,7 @@ conn_process_commands(conn_state_t *st)
 	resp_parser_t parser;
 	resp_value_t argv[MAX_ARGS];
 	int argc, stop = STOP_NEED_MORE;
-	size_t consumed, mark;
+	size_t consumed, mark, mark_seg;
 	resp_err_t rc;
 	resp_buf_t out;
 	cmd_ctx_t ctx;
@@ -512,7 +708,7 @@ conn_process_commands(conn_state_t *st)
 	out.grow_arg = st;
 
 	while (!st->quit && !st->closed) {
-		if (st->wlen >= st->out_soft) {
+		if (st->wlen + st->seg_pending >= st->out_soft) {
 			stop = STOP_BACKPRESSURE;
 			break;
 		}
@@ -576,8 +772,11 @@ conn_process_commands(conn_state_t *st)
 		ctx.self = st->self;
 		ctx.pubsub = st->pubsub;
 		ctx.sub_count = &st->sub_count;
+		ctx.out_ref = conn_out_ref;
+		ctx.out_ref_arg = st;
 
 		mark = out.len;
+		mark_seg = st->nseg;
 		XTC_INJECTION_POINT("rexis:before_cmd");
 		(void)cmd_execute(&ctx);
 		XTC_INJECTION_POINT("rexis:after_cmd");
@@ -587,6 +786,7 @@ conn_process_commands(conn_state_t *st)
 			 * without its body desynchronizes every reply after
 			 * it) and answer with an error instead. */
 			out.len = mark;
+			seg_truncate(st, mark_seg);
 			if (st->out_fail == OUT_FAIL_LIMIT) {
 				snprintf(msg, sizeof msg, "reply exceeds the "
 				    "client output limit (%zu bytes)",
@@ -634,6 +834,8 @@ conn_teardown(void *arg)
 	if (st->conn_count != NULL)
 		atomic_fetch_sub(st->conn_count, 1);   /* frees a --max-clients slot */
 	atomic_fetch_sub(&g_loop_live[st->loop_idx], 1);
+	seg_truncate(st, 0);
+	xtc_free(st->segs);
 	conn_refund(st, st->rcap + st->wcap - 2 * CONN_BASE_BUF);
 	xtc_free(st->rbuf);
 	xtc_free(st->wbuf);
@@ -682,13 +884,13 @@ conn_proc(void *arg)
 		conn_flush(st);
 		if (st->closed)
 			break;
-		if (st->quit && st->wpos == st->wlen)
+		if (st->quit && !conn_has_output(st))
 			break;
 
 		/* Read only when there is room to answer: not under output
 		 * backpressure, and not while --max-iops holds buffered
 		 * commands (the query buffer would only grow). */
-		if (!st->quit && !st->eof && st->wlen - st->wpos < st->out_soft &&
+		if (!st->quit && !st->eof && conn_pending(st) < st->out_soft &&
 		    !st->throttled)
 			conn_try_read(st);
 		if (st->closed)
@@ -703,7 +905,7 @@ conn_proc(void *arg)
 		conn_flush(st);
 		if (st->closed)
 			break;
-		if (st->quit && st->wpos == st->wlen)
+		if (st->quit && !conn_has_output(st))
 			break;
 
 		/* Peer done sending and every complete command answered:
@@ -712,7 +914,7 @@ conn_proc(void *arg)
 		 * and a full query buffer stopped the recvs, so a client
 		 * that hung up mid-way through a big bulk left its proc
 		 * spinning on a readable, closed socket forever. */
-		if (st->eof && stop == STOP_NEED_MORE && st->wpos == st->wlen)
+		if (st->eof && stop == STOP_NEED_MORE && !conn_has_output(st))
 			break;
 
 		/* Backpressure pass ended and the socket took enough of the
@@ -720,14 +922,14 @@ conn_proc(void *arg)
 		 * client may have sent everything already, so no READABLE
 		 * would ever come).  Yield first so one deep pipeline does not
 		 * starve the other connections on this loop. */
-		if (stop == STOP_BACKPRESSURE && st->wlen - st->wpos < st->out_soft) {
+		if (stop == STOP_BACKPRESSURE && conn_pending(st) < st->out_soft) {
 			xtc_yield();
 			continue;
 		}
 		interest = 0;
-		if (st->wpos < st->wlen)
+		if (conn_has_output(st))
 			interest |= XTC_IO_WRITABLE;
-		if (!st->quit && !st->eof && st->wlen - st->wpos < st->out_soft &&
+		if (!st->quit && !st->eof && conn_pending(st) < st->out_soft &&
 		    stop != STOP_THROTTLED)
 			interest |= XTC_IO_READABLE;
 		if (interest == 0) {
@@ -798,9 +1000,9 @@ conn_proc(void *arg)
 	/* Final flush on shutdown / QUIT -- wait for actual writability
 	 * rather than poll, bounded so a client that never reads cannot
 	 * hold the shutdown. */
-	while (st->wpos < st->wlen && !st->closed) {
+	while (conn_has_output(st) && !st->closed) {
 		conn_flush(st);
-		if (st->wpos < st->wlen && !st->closed) {
+		if (conn_has_output(st) && !st->closed) {
 			revents = 0;
 			if (xtc_proc_wait_fd(st->fd,
 			    XTC_IO_WRITABLE | XTC_IO_HUP | XTC_IO_ERR,

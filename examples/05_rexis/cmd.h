@@ -37,6 +37,14 @@ typedef struct cmd_ctx {
 	xtc_pid_t    self;
 	xtc_reg_t   *pubsub;
 	int         *sub_count;
+
+	/* Send `len` bytes of a held keyspace value (db_value_hold) at the
+	 * current end of `out`, without copying them; the connection drops
+	 * the hold once they have left.  -1 (and out->err set): refused, the
+	 * hold is dropped.  NULL: the connection cannot, copy instead. */
+	int        (*out_ref)(void *arg, resp_buf_t *out, const char *data,
+	                      size_t len);
+	void        *out_ref_arg;
 } cmd_ctx_t;
 
 /* Command flags */

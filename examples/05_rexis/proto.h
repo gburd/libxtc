@@ -155,6 +155,10 @@ int resp_write_int(resp_buf_t *b, int64_t val);
 
 /* Append bulk string: $len\r\ndata\r\n  (or $-1\r\n for NULL) */
 int resp_write_bulk(resp_buf_t *b, const char *data, size_t len);
+/* Just the "$len\r\n" header of a bulk whose body the caller supplies
+ * (by reference, cmd_get) followed by resp_write_crlf. */
+int resp_write_bulk_hdr(resp_buf_t *b, size_t len);
+int resp_write_crlf(resp_buf_t *b);
 int resp_write_bulk_null(resp_buf_t *b);
 
 /* Append array header: *count\r\n */

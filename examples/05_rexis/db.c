@@ -6,6 +6,8 @@
  *	Key-value database with xtc_lrlock protection.
  */
 
+#include <stdatomic.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -96,15 +98,109 @@ db_malloc(db_t *db, db_table_t *tbl, size_t sz)
 }
 
 static void
+db_uncharge(db_t *db, db_table_t *tbl, size_t sz)
+{
+	if (tbl->mem_used >= sz)
+		tbl->mem_used -= sz;
+	if (db->opts.res)
+		xtc_res_release(db->opts.res, XTC_RES_MEM_BYTES, (int64_t)sz);
+}
+
+static void
 db_free(db_t *db, db_table_t *tbl, void *p, size_t sz)
 {
 	if (!p)
 		return;
 	xtc_free(p);
-	if (tbl->mem_used >= sz)
-		tbl->mem_used -= sz;
-	if (db->opts.res)
-		xtc_res_release(db->opts.res, XTC_RES_MEM_BYTES, (int64_t)sz);
+	db_uncharge(db, tbl, sz);
+}
+
+/* ----- String values (DB_REF_MIN, db.h) -----
+ *
+ * A value of DB_REF_MIN bytes or more is a db_blob: a reference count in
+ * front of the bytes, so e->val.str.data (and every reader of it) is
+ * unchanged.  The keyspace holds one reference; a reply that sends the
+ * bytes straight from here (cmd_get) holds another until they leave. */
+typedef struct db_blob {
+	_Atomic uint32_t refs;
+	uint32_t         pad;
+	uint64_t         pad2;      /* data stays 16-byte aligned */
+	char             data[];
+} db_blob_t;
+
+static db_blob_t *
+blob_of(const char *data)
+{
+	return (db_blob_t *)(void *)(data - offsetof(db_blob_t, data));
+}
+
+static size_t
+val_size(size_t len)
+{
+	return len >= DB_REF_MIN ? sizeof(db_blob_t) + len + 1 : len + 1;
+}
+
+/* Room for a len-byte value (plus its NUL), charged; NULL if refused. */
+static char *
+val_alloc(db_t *db, db_table_t *tbl, size_t len)
+{
+	db_blob_t *b;
+
+	if (len < DB_REF_MIN)
+		return db_malloc(db, tbl, len + 1);
+	if ((b = db_malloc(db, tbl, val_size(len))) == NULL)
+		return NULL;
+	atomic_init(&b->refs, 1);
+	return b->data;
+}
+
+static void
+blob_release(const char *data)
+{
+	db_blob_t *b = blob_of(data);
+
+	if (atomic_fetch_sub_explicit(&b->refs, 1, memory_order_acq_rel) == 1)
+		xtc_free(b);
+}
+
+/* The keyspace lets go of a value: its charge now, its memory once the
+ * last holder has released it. */
+static void
+val_free(db_t *db, db_table_t *tbl, char *data, size_t len)
+{
+	if (data == NULL)
+		return;
+	if (len < DB_REF_MIN) {
+		db_free(db, tbl, data, len + 1);
+		return;
+	}
+	db_uncharge(db, tbl, val_size(len));
+	blob_release(data);
+}
+
+/* REXIS_PLANT_NOREF is a planted bug for the test suite: holds and
+ * releases do nothing, so a SET / DEL frees a value a parked reply is
+ * still sending.  test_rexis_loopback /get_ref_outlives_overwrite must
+ * fail with it (a heap-use-after-free under ASan, wrong bytes without). */
+void
+db_value_hold(const char *data)
+{
+#ifndef REXIS_PLANT_NOREF
+	atomic_fetch_add_explicit(&blob_of(data)->refs, 1,
+	    memory_order_relaxed);
+#else
+	(void)data;
+#endif
+}
+
+void
+db_value_release(const char *data)
+{
+#ifndef REXIS_PLANT_NOREF
+	blob_release(data);
+#else
+	(void)data;
+#endif
 }
 
 /* The table's own memory (directory + bucket segments) is keyspace
@@ -170,7 +266,7 @@ entry_free_value(db_t *db, db_table_t *tbl, db_entry_t *e)
 
 	switch (e->type) {
 	case DB_VAL_STRING:
-		db_free(db, tbl, e->val.str.data, e->val.str.len + 1);
+		val_free(db, tbl, e->val.str.data, e->val.str.len);
 		break;
 	case DB_VAL_LIST:
 		for (ln = e->val.list.head; ln; ln = ln_next) {
@@ -691,7 +787,7 @@ db_set_inmem(db_t *db, const char *key, size_t key_len,
 	if (e) {
 		/* Replace existing */
 		entry_free_value(db, tbl, e);
-		val_copy = db_malloc(db, tbl, val_len + 1);
+		val_copy = val_alloc(db, tbl, val_len);
 		if (!val_copy)
 			return -1;
 		memcpy(val_copy, val, val_len);
@@ -712,7 +808,7 @@ db_set_inmem(db_t *db, const char *key, size_t key_len,
 	if (!e)
 		return -1;
 
-	val_copy = db_malloc(db, tbl, val_len + 1);
+	val_copy = val_alloc(db, tbl, val_len);
 	if (!val_copy) {
 		db_free(db, tbl, e, entry_size(key_len));
 		return -1;
@@ -749,7 +845,7 @@ db_set_ex(db_t *db, const char *key, size_t key_len,
 	if (e) {
 		/* Replace existing */
 		entry_free_value(db, tbl, e);
-		val_copy = db_malloc(db, tbl, val_len + 1);
+		val_copy = val_alloc(db, tbl, val_len);
 		if (!val_copy)
 			return -1;
 		memcpy(val_copy, val, val_len);
@@ -770,7 +866,7 @@ db_set_ex(db_t *db, const char *key, size_t key_len,
 	if (!e)
 		return -1;
 
-	val_copy = db_malloc(db, tbl, val_len + 1);
+	val_copy = val_alloc(db, tbl, val_len);
 	if (!val_copy) {
 		db_free(db, tbl, e, entry_size(key_len));
 		return -1;
@@ -873,8 +969,8 @@ db_incr(db_t *db, const char *key, size_t key_len, int64_t delta)
 
 	/* Update */
 	n = snprintf(buf, sizeof buf, "%lld", (long long)val);
-	db_free(db, tbl, e->val.str.data, e->val.str.len + 1);
-	e->val.str.data = db_malloc(db, tbl, (size_t)n + 1);
+	val_free(db, tbl, e->val.str.data, e->val.str.len);
+	e->val.str.data = db_malloc(db, tbl, (size_t)n + 1);   /* < DB_REF_MIN */
 	if (!e->val.str.data) {
 		/* Entry is now corrupted; remove it */
 		entry_remove(db, tbl, e);

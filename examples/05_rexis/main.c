@@ -215,7 +215,9 @@ static void
 listener_proc(void *arg)
 {
 	server_t *srv = arg;
-	int rc, backing_off = 0, waited;
+	int rc, backing_off = 0, waited, n_bg;
+	uint64_t ref;
+	xtc_down_info_t down;
 	uint32_t revents;
 	void *msg;
 	size_t msg_len;
@@ -331,17 +333,29 @@ listener_proc(void *arg)
 	 * us.  Connection procs see the flag on their next wake (<= 1s).
 	 * Once every proc has returned the loop is empty and xtc_app_run
 	 * returns in main(). */
+	/* Watch the two background procs exit (a DOWN each). */
+	n_bg = 0;
+	if (xtc_monitor(srv->expire_pid, &ref) == XTC_OK)
+		n_bg++;
+	if (xtc_monitor(srv->metrics_pid, &ref) == XTC_OK)
+		n_bg++;
 	(void)xtc_send(srv->expire_pid, "x", 1);
 	(void)xtc_send(srv->metrics_pid, "x", 1);
 	/* Idle connection procs park with no deadline: wake them so they
 	 * see the flag, and repeat (one between its flag check and its park
-	 * misses a round) until they are gone, for up to 2 s.  With several
-	 * loops this wait also matters because the executor stops when the
-	 * supervisor does, freezing whatever is still running. */
+	 * misses a round) until they and the background procs are gone, for
+	 * up to 2 s.  With several loops the wait also matters because the
+	 * executor stops when the supervisor does, freezing whatever is
+	 * still running (LSan caught the background procs' state leaking). */
 	for (waited = 0; waited < 200 &&
-	    atomic_load(&srv->conn_count) > 0; waited++) {
+	    (atomic_load(&srv->conn_count) > 0 || n_bg > 0); waited++) {
 		conn_wake_all();
-		(void)xtc_proc_sleep(SHUTDOWN_POLL_NS);
+		if (xtc_recv(&msg, &msg_len, SHUTDOWN_POLL_NS) == XTC_OK) {
+			if (msg != NULL && xtc_down_decode_ex(msg, msg_len,
+			    &down) == XTC_OK)
+				n_bg--;
+			xtc_free(msg);
+		}
 	}
 	(void)xtc_app_stop(srv->app);
 }

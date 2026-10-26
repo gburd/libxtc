@@ -1049,8 +1049,13 @@ isolation defects were fixed (1.56); what remains is recorded here.
   METADATA request.  Produces are acknowledged only after a group-commit
   fdatasync (`--fsync-interval-ms` relaxes this).
 * **rexis `--cores` pins; it does not add threads.**  The server runs one
-  event loop.  `--max-memory` bounds the keyspace and every client's
-  query/output buffers; a client over its output limit is disconnected.
+  event loop unless `--loops=N` is given; with N > 1 the connections
+  spread over N loops but every command still takes one keyspace latch,
+  so writes do not run in parallel.  `--max-memory` bounds the keyspace
+  and every client's query/output buffers; a client over its output
+  limit is disconnected.  A value of 4 KiB or more that a GET reply is
+  still sending stays allocated (and charged to the client's budget)
+  after a SET or DEL replaces it, until the reply has left.
 * **lorb `test_lob` leaks under LeakSanitizer** (pre-existing):
   `lob_book_destroy` does not free its `xtc_chash` nodes.
 * **sqlxtc restart after kill -9.**  For about 50 ms after the killed

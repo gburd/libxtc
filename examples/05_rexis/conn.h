@@ -93,6 +93,8 @@ void    conn_census_reject(void);         /* count a refused connection */
 int64_t conn_census_rejected(void);
 /* Conn proc wakes caused only by its park timer (INFO idle_wakeups). */
 int64_t conn_idle_wakeups(void);
+/* Value bytes sent by reference, not copied (INFO reply_bytes_by_ref). */
+int64_t conn_ref_bytes(void);
 
 /* Idle conn procs park with no deadline.  conn_wake_init(max_fd) sizes
  * the fd -> pid table (before the first connection); conn_wake_all wakes

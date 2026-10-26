@@ -113,6 +113,23 @@ second.
   charge, so a client flood is *rejected* at a cap rather than driving
   the server to OOM -- something Redis controls with `maxmemory`, an
   eviction policy, and `client-output-buffer-limit`.
+- **Zero-copy GET, and why the value needs a lifetime.** A GET used to
+  copy the value into the connection's output buffer while it held the
+  keyspace's read section. At 64 KiB that copy was 28-32% of the
+  server's CPU. Sending the value's own bytes (`sendmsg` with the reply
+  header, the value and the CRLF as three pieces) is easy; the hard part
+  is that the send can be partial. The fiber then parks in
+  `xtc_proc_wait_fd`, the read section is long gone, and a SET or DEL
+  from another connection, or from a later command in the same pipeline,
+  frees the value while its bytes are still queued. So a value of 4 KiB
+  or more carries a reference count: the keyspace holds one, a GET reply
+  takes another before it leaves the read section, and the last of the
+  two to let go frees it. `xtc_rcu` was the other candidate, and it was
+  rejected: an RCU read section must be short, and a slow client can
+  hold a reply for seconds. A planted bug that skips the reference is
+  caught by `test_rexis_loopback` and the PBT pipeline property as wrong
+  bytes, and as a heap-use-after-free under ASan. Result: 64 KiB GETs
+  +35%, 1 KiB unchanged.
 - **Output backpressure.** A reply is built into a per-connection output
   buffer that grows up to `--max-output`; a reply that would pass it is
   replaced *whole* by an error (a truncated reply would desynchronize
