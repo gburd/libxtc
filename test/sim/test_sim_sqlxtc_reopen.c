@@ -103,6 +103,7 @@ struct shared {
 	int         created;
 	int         last_clean;       /* the last segment closed cleanly */
 	uint64_t    acked, crashes, cleans, trusted_opens, recover_opens;
+	uint64_t    idx_trusted;      /* trusted opens that kept the indexes */
 	int         failed;
 };
 
@@ -529,6 +530,7 @@ warm_clock(void)
 static int
 open_store(const char **kind)
 {
+	uint64_t rb = xstore_index_rebuild_count();
 	*kind = g_sh->last_clean ? "after a clean reopen" : "after crash recovery";
 	if (!g_sh->created)
 		*kind = "after create";
@@ -536,9 +538,11 @@ open_store(const char **kind)
 		FAILF("%s: sx_storage_open failed", *kind);
 		return -1;
 	}
-	if (g_sh->last_clean)
+	if (g_sh->last_clean) {
 		g_sh->trusted_opens++;
-	else
+		if (xstore_index_rebuild_count() == rb)
+			g_sh->idx_trusted++;
+	} else
 		g_sh->recover_opens++;
 	if (!g_sh->created) {
 		sx_db *h = NULL;
@@ -645,7 +649,7 @@ main(int argc, char **argv)
 {
 	uint64_t base = argc > 1 ? strtoull(argv[1], NULL, 0) : 1;
 	int count = argc > 2 ? atoi(argv[2]) : 6, k;
-	uint64_t acked = 0, crashes = 0, cleans = 0, tr = 0, rec = 0;
+	uint64_t acked = 0, crashes = 0, cleans = 0, tr = 0, rec = 0, it = 0;
 
 	g_sh = mmap(NULL, sizeof *g_sh, PROT_READ | PROT_WRITE,
 	    MAP_SHARED | MAP_ANON, -1, 0);
@@ -660,6 +664,7 @@ main(int argc, char **argv)
 		cleans += g_sh->cleans;
 		tr += g_sh->trusted_opens;
 		rec += g_sh->recover_opens;
+		it += g_sh->idx_trusted;
 		if (run_seed(seed, &f2) != 0)
 			return 1;
 		if (f1 != f2) {
@@ -670,10 +675,16 @@ main(int argc, char **argv)
 		}
 	}
 	printf("sweep: %d seeds x2 (replayed): %llu acked ops, %llu crashes, "
-	    "%llu clean closes, %llu trusted reopens, %llu recoveries\n", count,
+	    "%llu clean closes, %llu trusted reopens (%llu kept the indexes), "
+	    "%llu recoveries\n", count,
 	    (unsigned long long)acked, (unsigned long long)crashes,
 	    (unsigned long long)cleans, (unsigned long long)tr,
-	    (unsigned long long)rec);
+	    (unsigned long long)it, (unsigned long long)rec);
+	/* Non-vacuity: the sweep must have exercised every open kind. */
+	if (count >= 4 && (crashes == 0 || it == 0 || rec == 0)) {
+		printf("FAIL: the sweep did not exercise every open kind\n");
+		return 1;
+	}
 	printf("OK: sqlxtc open/close under DST -- clean close + trusted reopen "
 	    "and crash recovery interleaved; every acked op durable, in-flight "
 	    "ops all-or-nothing, rows exact, 0 index entries missing, replayed "

@@ -72,6 +72,10 @@
  *	                   cancellation mask, so a killed committer leaves a
  *	                   dead waiter (or the leadership) behind; the log
  *	                   wedges (test_sim_wal_kill: LIVENESS).
+ *	 18  IDXSKIP   -- examples/06_sqlxtc/xstore.c's index rebuild at an
+ *	                   open skips the last index, so after a crash
+ *	                   recovery that index misses rows
+ *	                   (test_sim_sqlxtc_reopen: INDEX).
  *
  *	NOT plantable under DST (an honest gap, recorded so it is not
  *	mistaken for missing coverage): the xtc_amutex mutual-exclusion and
@@ -123,5 +127,6 @@
 #define XTC_DST_BUG_SCHEDFAIR  15  /* sched.c: bypass mandatory fairness override */
 #define XTC_DST_BUG_BATCHDROP  16  /* batch.c: drop a held mt hand-in */
 #define XTC_DST_BUG_WALKILL    17  /* wal.c: commit not masked against kills */
+#define XTC_DST_BUG_IDXSKIP    18  /* xstore.c: an index rebuild skips one index */
 
 #endif /* XTC_DST_INJECT_H */

@@ -67,6 +67,7 @@
 #include "xtc_io.h"      /* xtc_io_backend_name: no pool threads under sim */
 #include "xtc_proc.h"
 #include "xtc_sync.h"
+#include "xtc_dst_inject.h" /* DST planted bugs (no-op in prod) */
 
 /*
  * Process-global engine locks.  These were pthread mutexes; they are
@@ -6941,6 +6942,10 @@ xs_rb_worker(void *arg)
 	int i;
 	while ((i = atomic_fetch_add_explicit(&j->next, 1,
 	    memory_order_relaxed)) < j->n) {
+#if XTC_DST_BUG(XTC_DST_BUG_IDXSKIP)
+		if (j->n > 1 && i == j->n - 1)
+			continue;               /* planted: one index never rebuilt */
+#endif
 		if (xs_idx_build_one(j->bt, &j->e[i]) != 0)   /* UNIQUE dup: empty */
 			atomic_store_explicit(&g_idx_taint, 1, memory_order_release);
 	}

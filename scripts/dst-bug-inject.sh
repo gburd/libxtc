@@ -80,6 +80,7 @@ write_cases() {
 		"15;test_sim_sched_policy;0;1;FAIL: scheduler fairness bound: gap=[0-9]+ bound=7" \
 		"16;test_sim_batch;0;1;mt accepted hand-in never completed" \
 		"17;test_sim_wal_kill;0;1;FAIL LIVENESS" \
+		"18;test_sim_sqlxtc_reopen;1;1;after crash recovery: INDEX: " \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -99,6 +100,7 @@ write_cases() {
 # 15 SCHEDFAIR  sched.c skips fairness override -> bounded service
 # 16 BATCHDROP  batch.c drops a held hand-in  -> accepted => completed
 # 17 WALKILL    wal.c commit not kill-masked    -> liveness (no wedged log after kills)
+# 18 IDXSKIP    xstore.c rebuild skips an index -> index complete after an open
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.
