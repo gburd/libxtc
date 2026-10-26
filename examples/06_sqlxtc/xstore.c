@@ -6231,6 +6231,20 @@ xstore_gc_run(struct xsql *db)
 	return reclaimed;
 }
 
+/* Version GC for a clean close (xstore.h). */
+uint64_t
+xstore_gc_close(bt_t *bt)
+{
+	uint64_t horizon;
+	int reclaimed = 0;
+	if (bt == NULL) return 0;
+	horizon = snap_horizon(xs_visible());
+	(void)xs_gc(bt, horizon, &reclaimed);
+	if (horizon > atomic_load_explicit(&g_gc_horizon, memory_order_relaxed))
+		atomic_store_explicit(&g_gc_horizon, horizon, memory_order_relaxed);
+	return (uint64_t)reclaimed;
+}
+
 /* The autovacuum setting new connections start with (see
  * xstore_autovacuum_default in xstore.h). */
 static _Atomic int g_av_default;

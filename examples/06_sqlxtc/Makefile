@@ -160,7 +160,7 @@ clean:
 	rm -f test_redo_page
 	rm -f test_inplace_redo
 	rm -f test_fuzzy_checkpoint
-	rm -f test_clean_restart test_dw_fail test_page_checksum test_page_cksum_more test_page_prealloc test_gc_index
+	rm -f test_clean_restart test_dw_fail test_page_checksum test_page_cksum_more test_page_prealloc test_close_prune test_gc_index
 	rm -f test_steal
 	rm -f test_steal_page
 	rm -f test_wal_kill test_wal_tail test_wal_kill_engine test_wal_get_tail test_idx_trust test_crash_oracle
@@ -1148,6 +1148,16 @@ test_gc_index: test_gc_index.c engine.o db.o quack.o metrics.o xstore.o xlog.o w
 
 test-gc-index: test_gc_index
 	TMPDIR=$${TMPDIR:-/tmp} ./test_gc_index
+
+test: test-close-prune
+
+# A clean close leaves one version per live row (version GC before the
+# final flush): no snapshot can need the older ones.
+test_close_prune: test_close_prune.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ test_close_prune.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
+
+test-close-prune: test_close_prune
+	TMPDIR=$${TMPDIR:-/tmp} ./test_close_prune
 
 # ---- store size attribution (offline, read-only) ----
 # sx_size STORE.xstore [STORE.xstore-wal]: bytes per table / index /
