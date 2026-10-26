@@ -7,20 +7,22 @@
  * Producers (xtc_io_reg_fd / _mod_fd / _del_fd, xtc_io_aio_submit) leave
  * their SQEs queued; the loop's poll submits them in the enter that
  * waits, and the loop starts queued file AIO early when the device would
- * otherwise idle (see src/io/io_uring.c __submit_wait, __xtc_io_flush).
+ * otherwise idle (see src/io/io_uring.c __submit_wait).
  * The counts come from __xtc_io_uring_enter_stats: io_uring_enter calls
  * that carried SQEs ("submits") and calls that only waited ("waits").
  *
  *   /aio_burst      N fibers on one loop, one write each: ~N/8 submitting
- *                   enters, not N (1.59: one per write)
+ *                   enters, not N (1.59: one per write); the first write
+ *                   goes in at once (nothing else in flight)
  *   /fd_burst       N fibers each park on a ready pipe: their N POLL_ADDs
- *                   go in at most a few enters, not N
+ *                   go in ~N/8 enters, not N
  *   /zero_poll      a zero-timeout poll with nothing queued does not enter
  *                   (1.59: every one waited in the kernel)
  *   /spin_on_peer   a fiber that spins on xtc_yield until a peer's write
  *                   completes must not wait on an unsubmitted SQE
- *   /sq_full_burst  more writes in one loop turn than the SQ holds (256):
- *                   none lost, none stuck, every byte reads back
+ *   /sq_full_burst  more registrations than the SQ holds (256) with no
+ *                   poll between: the full SQ is submitted, every fd is
+ *                   reported; then 600 fibers write + read back a page
  *
  * On a DEFER_TASKRUN ring (Linux 6.1+, a running loop) the counts are
  * taken on that ring: the owner thread submits and waits in one enter.
@@ -260,32 +262,68 @@ test_fd_burst(const MunitParameter p[], void *d)
 		return MUNIT_OK;
 	munit_logf(MUNIT_LOG_INFO, "%d fd parks, %ld submitting enters", N, s);
 	/* 1.59: one enter per POLL_ADD (>= N).  Now the parks' polls go in
-	 * with the poll that waits for them. */
-	munit_assert_long(s, <=, 4);
+	 * every 8 runs (the loop's submit quantum) or with the poll. */
+	munit_assert_long(s, <=, N / 4);
 	return MUNIT_OK;
 }
 
 /*
- * More SQEs queued in one loop turn than the 256-entry SQ holds: FD_MAX
- * fibers park on ready pipes before the loop polls (polls are never
- * flushed early), so the SQ fills and __get_sqe submits it.  Then 600
- * fibers each write and read back a page.  Nothing may be lost or stuck.
- * Off io_uring the fd part runs small (macOS's default fd limit).
+ * More SQEs queued than the 256-entry SQ holds: FD_MAX registrations on
+ * one xtc_io_t with no poll in between.  The SQ fills and __get_sqe
+ * submits it, so a submit happens before any poll; then polling must
+ * report every fd.  Then 600 fibers on one loop each write and read back
+ * a page.  Nothing may be lost or stuck.  Off io_uring the fd part runs
+ * small (macOS's default fd limit) and checks only the delivery.
  */
 static MunitResult
 test_sq_full_burst(const MunitParameter p[], void *d)
 {
 	enum { N = 600 };
+	xtc_io_t *io = NULL;
+	xtc_io_event_t ev[64];
+	static char seen[FD_MAX];
+	unsigned long s0 = 0;
 	long s;
 	int nfd = strcmp(xtc_io_backend_name(), "uring") == 0 ? FD_MAX : 32;
+	int i, k, n, got = 0, tries;
 	(void)p; (void)d;
 
-	s = run_fd_burst(&g_fdb, nfd);
-	if (s >= 0) {
-		munit_logf(MUNIT_LOG_INFO, "%d fd parks, %ld submitting enters",
-		    nfd, s);
-		munit_assert_long(s, >=, 2);   /* the full SQ was submitted */
+	memset(&g_fdb, 0, sizeof g_fdb);
+	memset(seen, 0, sizeof seen);
+	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	for (i = 0; i < nfd; i++) {
+		munit_assert_int(xtc_test_make_pipe(&g_fdb.rp[i], &g_fdb.wp[i]),
+		    ==, 0);
+		munit_assert_int(xtc_test_pipe_write(g_fdb.wp[i], "x", 1), ==,
+		    1);
+		munit_assert_int(xtc_io_reg_fd(io, g_fdb.rp[i], XTC_IO_READABLE,
+		    (void *)(intptr_t)(i + 1)), ==, XTC_OK);
 	}
+	if (__xtc_io_uring_enter_stats(io, &s0, NULL, NULL) == XTC_OK) {
+		munit_logf(MUNIT_LOG_INFO, "%d registrations, %lu submits "
+		    "before the first poll", nfd, s0);
+		munit_assert_ulong(s0, >=, 1);   /* the full SQ went in */
+	}
+	for (tries = 0; tries < 200 && got < nfd; tries++) {
+		n = 0;
+		munit_assert_int(xtc_io_poll(io, ev, 64, 100LL * 1000000, &n),
+		    ==, XTC_OK);
+		for (k = 0; k < n; k++) {
+			intptr_t t = (intptr_t)ev[k].tag;
+			if (t >= 1 && t <= nfd && !seen[t - 1] &&
+			    (ev[k].flags & XTC_IO_READABLE)) {
+				seen[t - 1] = 1;
+				got++;
+			}
+		}
+	}
+	munit_assert_int(got, ==, nfd);
+	for (i = 0; i < nfd; i++) {
+		munit_assert_int(xtc_io_del_fd(io, g_fdb.rp[i]), ==, XTC_OK);
+		xtc_test_close_pipe(g_fdb.rp[i], g_fdb.wp[i]);
+	}
+	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+
 	s = run_burst(N, 1);
 	if (s >= 0)
 		munit_logf(MUNIT_LOG_INFO, "%d writes + reads, %ld submitting "

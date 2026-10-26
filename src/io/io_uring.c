@@ -370,12 +370,13 @@ __submit_note(xtc_io_t *io, int rc, unsigned queued)
  * Nothing waits on an SQE that is still queued, because every poll
  * submits before it waits or reaps: a completion can only be reaped by a
  * poll, and the poll that reaps it is preceded by the submit.  The cost
- * is start latency for file AIO: the device starts an op when the loop
- * next polls (its run queue drained, the I/O-fairness poll every 64 runs,
- * or a full SQ, which __get_sqe flushes) instead of at once.  A fiber
- * that YIELDS keeps the queue from draining, so the loop flushes after a
- * yield (__xtc_io_flush).  Readiness (POLL_ADD / POLL_REMOVE) loses
- * nothing: a poll is level-checked when it is armed.
+ * would be start latency for file AIO, so a producer submits at once
+ * when none of this ring's AIO is in flight (the device would otherwise
+ * idle: a lone read, a WAL fdatasync), and only an op queued behind
+ * others in flight waits for the poll or for __xtc_io_flush, which the
+ * loop calls after a fiber yields and every IO_SUBMIT_QUANTUM runs.  A
+ * full SQ is submitted by __get_sqe.  Readiness (POLL_ADD / POLL_REMOVE)
+ * loses nothing by waiting: a poll is level-checked when it is armed.
  *
  * liburing before 2.4 waits the timeout a second time after a submit
  * that consumed every SQE (its io_uring_submit_and_wait_timeout loops
@@ -391,10 +392,11 @@ __submit_note(xtc_io_t *io, int rc, unsigned queued)
  * Submit what is queued and wait for one CQE (or the timeout), in one
  * enter.  Returns what io_uring_wait_cqe_timeout would: 0 (with *cqe
  * NULL if nothing completed in time) or -errno.  A zero timeout with
- * nothing queued does not enter at all: the reap loop's peek enters only
- * when the kernel holds completions it has not posted (IORING_SQ_TASKRUN
- * on a COOP or DEFER ring, CQ overflow); a plain ring's completions are
- * posted by task work that interrupts the thread.
+ * nothing queued and no file AIO in flight does not enter at all: the
+ * reap loop's peek enters only when the kernel holds completions it has
+ * not posted (IORING_SQ_TASKRUN on a COOP or DEFER ring, CQ overflow); a
+ * plain ring's completions are posted by task work that interrupts the
+ * thread.
  */
 static int
 __submit_wait(xtc_io_t *io, struct io_uring_cqe **cqe,
@@ -409,7 +411,13 @@ __submit_wait(xtc_io_t *io, struct io_uring_cqe **cqe,
 
 	*cqe = NULL;
 	if (queued == 0) {
-		if (zero)
+		/* No enter: nothing to submit, and no file AIO in flight whose
+		 * completion an enter would post (readiness CQEs are flagged
+		 * IORING_SQ_TASKRUN, so the reap loop's peek enters for them).
+		 * With AIO in flight the zero-timeout enter stays, as in 1.59:
+		 * skipping it too made 16 loops x 1 fdatasync each slower,
+		 * p50 10.4 -> 15.6 us, p99 ~80 -> ~300 us (XFS, Linux 6.12). */
+		if (zero && io->n_aio == 0)
 			return 0;
 		if (io_uring_cq_ready(&io->ring) == 0)
 			io->n_enter_wait++;   /* liburing enters only then */
@@ -1401,7 +1409,7 @@ __aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	a->done = 0;   /* plain: our own thread, before the SQE is visible */
 	a->res = 0;
 	io->n_aio++;   /* until its CQE is reaped; see __ring_rebind */
-	io->n_aio_queued++;   /* until a submit hands it over (__xtc_io_flush) */
+	io->n_aio_queued++;   /* until a submit hands it over */
 	/* Low-bit tag distinguishes this completion from a poll-add CQE. */
 	io_uring_sqe_set_data(sqe, (void *)((uintptr_t)a | 1u));
 	/* Record the ASK, keyed by the task, so a later "no REAP" can be told
@@ -1415,7 +1423,11 @@ __aio_submit(xtc_io_t *io, xtc_aio_t *a)
 		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_SUBMIT, lp,
 		    (uint64_t)(uintptr_t)a->tag);
 	}
-	/* Queued: the next poll or flush submits it (see __submit_wait). */
+	/* None of this ring's AIO in flight: the device is idle, start it
+	 * now (and whatever is queued with it).  Otherwise it waits for the
+	 * next poll or flush (see __submit_wait). */
+	if (io->n_aio == io->n_aio_queued)
+		(void)__ring_submit(io);
 	return XTC_OK;
 }
 
@@ -1469,27 +1481,19 @@ __del_fd(xtc_io_t *io, int fd)
 }
 
 /*
- * Start queued file AIO before the loop's next poll (see __submit_wait).
- * The loop calls this after every run.  It submits when AIO is queued
- * and either nothing of this ring's AIO is in flight -- the device would
- * sit idle until the poll, which on a busy loop can be many runs away (a
- * WAL write behind a run of SQL fibers) -- or `force`: the fiber just
- * yielded (it stays runnable, so the queue does not drain) or the loop's
- * submit quantum came round.  With AIO already in flight, waiting adds
- * no device idle time and lets the next ops join the same enter.  Queued
- * polls alone never force it: a POLL_ADD is level-checked when armed,
- * and nothing can reap before the poll that submits it.  Only the owner
- * submits.
+ * Submit everything queued, now, without waiting (see __submit_wait).
+ * The loop calls it after a fiber yields (a yielder stays runnable, so
+ * the run queue does not drain and the loop's poll does not come) and
+ * every IO_SUBMIT_QUANTUM runs, so neither queued AIO nor a parked
+ * fiber's POLL_ADD waits for the 64-run fairness poll on a busy loop.
+ * Only the owner submits.
  */
 void
-__xtc_io_flush(xtc_io_t *io, int force)
+__xtc_io_flush(xtc_io_t *io)
 {
-	if (io == NULL || io->n_aio_queued == 0)
-		return;   /* the per-run cost: one load */
-	if (!force && io->n_aio > io->n_aio_queued)
-		return;   /* some in flight: batch */
-	if (io->ring_dead || atomic_load_explicit(&io->owner_tok,
-	    memory_order_relaxed) != __self_tok())
+	if (io == NULL || io->ring_dead ||
+	    atomic_load_explicit(&io->owner_tok, memory_order_relaxed) !=
+	    __self_tok() || io_uring_sq_ready(&io->ring) == 0)
 		return;
 	__xtc_unsafe_enter();
 	(void)__ring_submit(io);

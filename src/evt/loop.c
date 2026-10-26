@@ -1212,18 +1212,13 @@ __xtc_loop_step(xtc_loop_t *loop)
 			(void)__xtc_drain_due_timers(loop);
 		}
 #if defined(XTC_IO_BACKEND_URING)
-		else {
-			/* Start queued file AIO.  Producers leave their SQEs for
-			 * the next poll (io_uring.c __submit_wait), which comes
-			 * when the run queue drains; until then AIO is submitted
-			 * at once if nothing else of this ring's is in flight
-			 * (the device would idle), and otherwise after a yield
-			 * (a yielder keeps the queue from draining) or every
-			 * IO_SUBMIT_QUANTUM runs. */
-			__xtc_io_flush(loop->io, verdict == XTC_TASK_RESCHED ||
-			    (loop->runs_since_poll &
-			    (IO_SUBMIT_QUANTUM - 1u)) == 0);
-		}
+		else if (verdict == XTC_TASK_RESCHED ||
+		    (loop->runs_since_poll & (IO_SUBMIT_QUANTUM - 1u)) == 0)
+			/* Producers leave SQEs queued for the next poll, which
+			 * a busy run queue postpones: submit them after a yield
+			 * and every IO_SUBMIT_QUANTUM runs (io_uring.c
+			 * __submit_wait). */
+			__xtc_io_flush(loop->io);
 #endif
 		return XTC_OK;
 	}

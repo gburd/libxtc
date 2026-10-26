@@ -632,10 +632,9 @@ void __xtc_io_uring_preempt_disarm(xtc_io_t *io);
 /* The calling thread stops running loop->io's loop (io_int.h). */
 void __xtc_io_owner_leave(xtc_io_t *io);
 /* io_uring only (submission is deferred to the poll): submit the io's
- * queued SQEs now if file AIO is among them and either `force` or none
- * of this ring's AIO is in flight.  Owner thread only; a no-op otherwise.
- * The loop calls it after every run (io_uring.c __submit_wait). */
-void __xtc_io_flush(xtc_io_t *io, int force);
+ * queued SQEs now.  Owner thread only; a no-op otherwise.  The loop calls
+ * it after a yield and every few runs (io_uring.c __submit_wait). */
+void __xtc_io_flush(xtc_io_t *io);
 
 /* Implemented in proc.c.  Called from loop_fini to release the
  * proc-table side struct hashed against this loop pointer.  Must be
