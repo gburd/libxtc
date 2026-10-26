@@ -1168,14 +1168,6 @@ test_kill_after_park_while_running(const MunitParameter p[], void *d)
 	(void)d;
 	g_kw_kind = !strcmp(k, "amutex") ? 0 : !strcmp(k, "future") ? 1
 	    : !strcmp(k, "sem") ? 2 : 3;
-	/* Valgrind memcheck flags every access on a libxtc fiber stack once
-	 * a fiber resumes after a cross-loop amutex hand-off (the stacks are
-	 * plain mmap regions it does not know about); the same two-loop
-	 * amutex shape reports thousands of errors on 1.55.0 with no kill at
-	 * all.  The CI memcheck job sets XTC_UNDER_VALGRIND; skip only this
-	 * kind there.  Every other build runs it. */
-	if (g_kw_kind == 0 && getenv("XTC_UNDER_VALGRIND") != NULL)
-		return MUNIT_SKIP;
 	g_kr_ns = -1;
 	munit_assert_int(xtc_sem_create(0, &g_kw_sem), ==, XTC_OK);
 	munit_assert_int(xtc_notify_create(&g_kw_n), ==, XTC_OK);

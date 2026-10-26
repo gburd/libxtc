@@ -1169,18 +1169,36 @@ GitHub CI's sched-policy job hit it in `/m7/chan/mpsc_involuntary_preempt`.
 The test is opt-in (`XTC_TEST_INVOLUNTARY=1`) until the signal-context
 redirect path is fixed.
 
-## OPEN: valgrind memcheck reports libxtc fiber stacks as invalid
+## RESOLVED (2.0): valgrind memcheck reported libxtc fiber stacks as invalid
 
-**Status:** OPEN, tooling limitation; not a memory error in libxtc.
+**What it was.**  libxtc allocates fiber stacks with `mmap` and did not
+register them with valgrind, so once a fiber resumed on another loop's
+thread after a cross-loop `xtc_amutex` hand-off, memcheck reported its
+stack accesses as errors: 1,629 (ucontext) and 1,678 (fcontext) in
+`/m9/sync/kill_after_park_while_running`, with "client switching
+stacks?" warnings.  It was not a memory error in libxtc (ASan, which
+libxtc annotates for fiber switches, reported nothing), but CI's memcheck
+job had to skip that case.
 
-libxtc allocates fiber stacks with `mmap` and does not register them with
-`VALGRIND_STACK_REGISTER`, so once a fiber resumes on another loop's
-thread after a cross-loop `xtc_amutex` hand-off, memcheck flags its stack
-accesses (thousands of "invalid read/write" reports for a two-loop
-amutex test on 1.55.0 and 1.56).  ASan, which libxtc annotates for fiber
-switches, reports nothing for the same tests.  CI's memcheck job sets
-`XTC_UNDER_VALGRIND=1`, which skips the amutex case of
-`/m9/sync/kill_after_park_while_running`; use ASan for fiber code.
+**Now.**  When configure finds `<valgrind/valgrind.h>` (header-only; the
+`valgrind-devel` / `valgrind` package), every fiber stack is registered
+with `VALGRIND_STACK_REGISTER` when its coroutine is created and
+deregistered before the stack is pooled or unmapped.  Outside valgrind
+the requests are skipped after one `RUNNING_ON_VALGRIND` check per process:
+spawn+exit throughput is within 0.4% of a build without the header
+(medians of 15 interleaved runs, ranges overlapping).  The same test runs
+with 0 errors on both substrates, and the skip is gone; CI's memcheck
+list (test_sync, test_chan, test_mctx, test_timer, test_loop, test_svr,
+test_lockmgr) is 0 errors with no stack-switch warnings.
+
+**Still not memcheck targets.**  `test_proc`'s fault-containment cases
+write to address 0x10 on purpose; its `pid_local_id_ceiling` case holds
+65,536 fiber stacks, more mappings than valgrind tracks (`VG_N_SEGMENTS
+is too low`).  `test_exec`'s `Blk2_concurrent_commit` spins on a shared
+lock across a blocking offload and does not finish in 15 minutes under
+valgrind.  The timing tests in `test_sync` still skip under
+`XTC_UNDER_VALGRIND` (valgrind serializes threads; those tests measure
+scheduling, not memory).
 
 ## RESOLVED (1.56): a finished proc fiber is reclaimed at once
 
