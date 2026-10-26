@@ -597,15 +597,18 @@ parse_args(int argc, char **argv, server_cfg_t *cfg)
 /* The fd budget: --max-fds, else what --max-clients needs (clients, the
  * listener, and the backend's own fds).  The soft RLIMIT_NOFILE is raised
  * to fit (an fd past it fails accept with EMFILE, which the listener
- * survives but which is not the configured cap). */
+ * survives but which is not the configured cap).  *out_fd_max gets the
+ * bound on fd numbers the process can now hold (the soft limit), which
+ * sizes the shutdown wake table. */
 static int64_t
-fd_budget(const server_cfg_t *cfg)
+fd_budget(const server_cfg_t *cfg, int64_t *out_fd_max)
 {
 	int64_t want = cfg->max_fds > 0 ? cfg->max_fds :
 	    (int64_t)cfg->max_clients + 64;
 #if !defined(_WIN32)
 	struct rlimit rl;
 
+	*out_fd_max = want + 1024;
 	if (getrlimit(RLIMIT_NOFILE, &rl) == 0 &&
 	    rl.rlim_cur != RLIM_INFINITY && (int64_t)rl.rlim_cur < want + 64) {
 		rl.rlim_cur = rl.rlim_max == RLIM_INFINITY ||
@@ -613,6 +616,11 @@ fd_budget(const server_cfg_t *cfg)
 		    rl.rlim_max;
 		(void)setrlimit(RLIMIT_NOFILE, &rl);
 	}
+	if (getrlimit(RLIMIT_NOFILE, &rl) == 0 &&
+	    rl.rlim_cur != RLIM_INFINITY && (int64_t)rl.rlim_cur < *out_fd_max)
+		*out_fd_max = (int64_t)rl.rlim_cur;
+#else
+	*out_fd_max = want + 1024;
 #endif
 	return want;
 }
@@ -631,6 +639,7 @@ main(int argc, char **argv)
 	xtc_res_caps_t res_caps = XTC_RES_CAPS_DEFAULT;
 	xtc_tcp_opts_t tcp_opts = XTC_TCP_OPTS_DEFAULT;
 	db_opts_t db_opts = DB_OPTS_DEFAULT;
+	int64_t fd_max;
 	int rc;
 
 	/* Parse command line: 1 = --help (success), -1 = bad argument. */
@@ -685,13 +694,13 @@ main(int argc, char **argv)
 	 * out (xtc_res_attach_net); at the cap a client waits in the kernel
 	 * backlog.  Before, rexis never attached it, so the 65536 default
 	 * fds cap bounded nothing. */
-	res_caps.fds = fd_budget(&cfg);
+	res_caps.fds = fd_budget(&cfg, &fd_max);
 	xtc_res_init(srv->res, &res_caps);
 	(void)xtc_res_attach_net(srv->res);
 	conn_census_init(cfg.loops, cfg.loop_clients);
-	/* The fd -> pid wake table: the sockets plus the few fds the
-	 * backend, the log and the store hold. */
-	conn_wake_init((int)res_caps.fds + 1024);
+	/* The fd -> pid wake table: one slot per fd number the process can
+	 * hold (sockets plus the backend's, the log's and the store's fds). */
+	conn_wake_init(fd_max > INT32_MAX ? INT32_MAX : (int)fd_max);
 
 	/* Initialize rate limiter */
 	rate_limit_init(srv);

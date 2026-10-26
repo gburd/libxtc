@@ -513,7 +513,7 @@ conn_sendv(conn_state_t *st)
 	}
 	memset(&mh, 0, sizeof mh);
 	mh.msg_iov = iov;
-	mh.msg_iovlen = (size_t)n;
+	mh.msg_iovlen = n;           /* size_t on glibc, int on BSD/musl */
 	r = sendmsg(st->fd, &mh, MSG_DONTWAIT | MSG_NOSIGNAL);
 	return r;
 }
