@@ -42,6 +42,36 @@ in reverse.  Downgrades are not supported (see
 "Downgrades"), but nothing is misread either way.  `sx_size` refuses
 a 1.59 page file.
 
+## FIXED (1.60): a damaged sqlxtc B-tree made readers spin forever
+
+A descent through the B-tree restarts from the root when it meets a node
+that a concurrent merge changed, and follows right links while the key
+is past a node's upper fence.  Neither loop had a bound.  Concurrent
+splits and merges finish, so on a sound tree both loops end.  On a
+damaged one (a right-link cycle, a leaf whose fences no longer match its
+parent, a page with one corrupted byte) they never ended: every reader
+and writer routed to that page spun at 100% CPU and reported nothing.
+Both loops are now bounded.  Past the bound the statement fails with an
+internal error, and the first failure in the process prints the key,
+the root page, the reason for the last restart and the page it was on
+(id, flags, fences) to stderr.  A scan that hits the damage also fails,
+with an error rather than an early end, so the online checkpoint does not
+write a log image that is missing the rest of the tree.  No measurable
+cost.  Test: test_btree_bounded_descent.
+
+Seen once in about 400 runs of a ledger benchmark in the 1.59 cycle
+(lifecycle mix, 16 clients, on an experimental lock build that was never
+released): 12 client threads spun inside the descent for 537 s.  It did
+not reproduce in about 2,300 further runs of that build or in 249 runs of
+1.59 (with the new bound) at 16, 32 and 64 clients, and the cause is NOT
+known.  The stack
+traces need a page that was damaged and stayed damaged.  A single
+flipped byte in the page file produces the same livelock.  If you see
+the stderr report ("sqlxtc btree: ... gave up"), keep the store and the
+report and file an issue: the page id in the report is where to look.
+New DST coverage of scans racing merges and page-id reuse:
+test_sim_btree_scan.
+
 ## CHANGED (1.60): involuntary preemption on musl/aarch64; platform checks
 
 * **musl on aarch64 now has involuntary preemption.**  1.59 compiled
