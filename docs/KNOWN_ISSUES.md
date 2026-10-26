@@ -23,7 +23,9 @@ page is used.  A page that fails is refused: the statement gets
 fail-stops as for a failed log write (later writes are refused; reads of
 other pages work), so the damaged page file is never trusted again.
 Restart the server: it rebuilds the page file from the log, which after
-a clean shutdown holds the whole live tree.  A damaged superblock is
+a clean shutdown holds the whole live tree.  A write that got this error
+may still have committed (its log record is written before it is
+applied): after the restart, read it back before retrying it.  A damaged superblock is
 rebuilt the same way at open.  See the
 [sqlxtc durability notes]({{ '/examples/sqlxtc/' | relative_url }}).
 Not caught: a lost write (a page that still holds an older, intact

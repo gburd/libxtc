@@ -259,6 +259,10 @@ write: later writes are refused, no checkpoint replaces the log, and the
 shutdown does not mark the store clean.  The next start rebuilds the
 page file from the log.  After a clean shutdown the log holds the whole
 live tree plus every commit since, so the restart repairs the damage.
+A commit is logged before it is applied, so a commit whose apply reached
+the damaged page reports the error but is in the log, and it is there
+after the restart (an error that is not a "not committed" answer, as
+with a failed log fsync).
 The CRC32C is the log's (hardware-accelerated on x86-64 SSE4.2 and
 ARMv8).  A header checksum does not catch a *lost* write, a page that
 still holds an older, intact image of itself.  That would take a
