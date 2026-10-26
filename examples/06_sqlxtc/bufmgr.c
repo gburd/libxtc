@@ -383,8 +383,10 @@ struct bm {
  * writes, each past the end, punted 2,440 times; the same writes into a
  * file grown ahead of them 75).  A page file grown one page per
  * write-back punted most write-backs (the uring gate's crash_oracle and
- * sqlxtc_iosoak).  So the file is grown ahead, BM_PRE_STEP at a time,
- * and a write-back lands inside it.
+ * sqlxtc_iosoak).  So the file is grown ahead and a write-back lands
+ * inside it.  The step is an eighth of the file, between 1 and 8 MiB:
+ * a large store grows 8 MiB at a time, a small one never carries more
+ * than an eighth of itself (or 1 MiB) past its pages.
  *
  * fallocate(mode 0): allocated but unwritten blocks and the new size, no
  * data written, and it never shrinks the file, so a writer racing past
@@ -400,7 +402,15 @@ struct bm {
  * end.  A crash leaves the tail (at most one step past the pages): the
  * reopen issues ids past it, so none is issued twice.
  */
-#define BM_PRE_STEP (8ull << 20)
+#define BM_PRE_MIN (1ull << 20)
+#define BM_PRE_MAX (8ull << 20)
+
+static uint64_t
+pf_step(uint64_t end)
+{
+	uint64_t s = (end / 8u) & ~(BM_PRE_MIN - 1u);   /* whole MiB */
+	return s < BM_PRE_MIN ? BM_PRE_MIN : s > BM_PRE_MAX ? BM_PRE_MAX : s;
+}
 
 struct pf_job {
 	int      fd;
@@ -427,7 +437,7 @@ static void
 pf_grow(bm_t *bm, uint64_t end)
 {
 	struct pf_job j;
-	uint64_t pre;
+	uint64_t pre, step;
 	int expect = 0, res = -1;
 
 	if (!atomic_load_explicit(&bm->pre_on, memory_order_relaxed) ||
@@ -437,7 +447,8 @@ pf_grow(bm_t *bm, uint64_t end)
 	if (end > pre) {
 		j.fd = bm->fd;
 		j.off = pre;
-		j.len = (end / BM_PRE_STEP + 1u) * BM_PRE_STEP - pre;
+		step = pf_step(end);
+		j.len = (end / step + 1u) * step - pre;
 		if (xtc_blocking_run(pf_fallocate, &j, &res) == XTC_OK) {
 			if (res == 0)
 				atomic_store_explicit(&bm->pre_end, pre + j.len,

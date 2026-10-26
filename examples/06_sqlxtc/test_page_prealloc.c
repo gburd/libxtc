@@ -14,15 +14,16 @@
  *	page file grown one page at a time punted every extending
  *	write-back (the uring gate's crash_oracle and sqlxtc_iosoak PUNT).
  *	(1) 4096 pages written through a 16-frame pool: the file size
- *	    changes at most a few times (Linux; once per step), and while
- *	    open it is never more than one step past the written pages.
+ *	    changes once per step (Linux), not once per write-back, and
+ *	    while open it is never more than one step past the written
+ *	    pages (a step is an eighth of the file, 1 to 8 MiB).
  *	(2) Free 100 pages, clean superblock, close: the file is exactly
  *	    the written pages again (no preallocated tail).
  *	(3) Reopen: the 100 freed ids come back, every page reads back,
  *	    and the first new id after them is the next one past the end.
- *	(4) A crash (no close) leaves the tail; a reopen skips it: every
- *	    page reads back and new ids start past it, so none is issued
- *	    twice.
+ *	(4) A crash (no close) leaves the tail, at most 1 MiB on a small
+ *	    store; a reopen skips it: every page reads back and new ids
+ *	    start past it, so none is issued twice.
  *	Off a loop (synchronous bufmgr I/O).
  */
 
@@ -40,7 +41,7 @@
 
 #define PS      4096
 #define NPAGES  4096          /* 16 MiB: two preallocation steps */
-#define STEP    (8LL << 20)   /* bufmgr.c BM_PRE_STEP */
+#define MIB     (1LL << 20)   /* bufmgr.c BM_PRE_MIN */
 
 static bm_pid_t g_pid[NPAGES];
 static const char super[40] = "test superblock";
@@ -139,9 +140,9 @@ main(void)
 	printf("  %d pages written: the file size changed %d times, at most "
 	    "%lld KiB past the pages\n", NPAGES, changes, worst >> 10);
 #if defined(__linux__)
-	CK(changes <= 4);          /* was one per extending write-back */
+	CK(changes <= 20);         /* was one per extending write-back: 255 */
 #endif
-	CK(worst <= STEP);
+	CK(worst <= MIB + end / 8);
 	CK(fsz(path) >= end);
 
 	/* (2) */
@@ -190,7 +191,7 @@ main(void)
 	sz = fsz(path);
 	end = 1001LL * PS;             /* the superblock + 1000 pages */
 	printf("  crash: %lld bytes on disk for %lld of pages\n", sz, end);
-	CK(sz >= end && sz <= end + STEP);
+	CK(sz >= end && sz <= end + MIB);
 	CK((bm = open_bm(path, 1)) != NULL);
 	if (bm == NULL)
 		return 1;
