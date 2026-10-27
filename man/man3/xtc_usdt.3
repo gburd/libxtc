@@ -438,6 +438,15 @@ built with
 bpftrace -e 'usdt:./server:xtc:fiber__park { @[arg1] = count(); }'
 .Ed
 .Pp
+Print each message's sender and receiver as loop.slot.gen pids (each pid
+is two arguments):
+.Bd -literal -offset indent
+bpftrace -e 'usdt:./server:xtc:msg__send {
+    printf("%d.%d.%d -> %d.%d.%d %d bytes\\n",
+        arg0 >> 32, arg0 & 0xffffffff, arg1,
+        arg2 >> 32, arg2 & 0xffffffff, arg3, arg4); }'
+.Ed
+.Pp
 List the probes perf sees and record one.
 .Ql perf probe
 names the event with each double underscore collapsed to one, so record
