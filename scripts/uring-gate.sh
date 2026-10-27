@@ -106,6 +106,18 @@ dd if=/dev/zero of="$dat" bs=1M count=256 status=none
 #     same caps: 1 ring at bound 64 doing writes + fdatasync over 64 files
 #     made 121 distinct io-wq workers (64 alive at once); 32 rings at
 #     bound 4 made 128.  The fan-out is the kernel's, not libxtc's.
+# wal_kill runs one mode per process.  All six modes in one process build
+#   and tear down an 8-loop executor six times, and uringscope 0.3.0 then
+#   reported REAP-LAG in 11 of 32 runs (1/16 on v1.59.0 too) with a p99 of
+#   4-8.6 s -- longer than any ring in the run lived (each mode's executor
+#   exists 0.6-1.5 s; the whole run spans 11 s), so it is not a CQE left
+#   unreaped.  The likely cause is uringscope's own bookkeeping: its
+#   CQE-position stamps (cqe_pos_ts) are keyed by the kernel ring address
+#   and never cleared at ring exit, so a ring at a reused address may be
+#   measured against an older ring's stamps.  Unconfirmed: plain-liburing
+#   controls that recreate 8 rings 6 times (with NOP, armed-poll and
+#   submit_and_get_events reaps) did not reproduce it, 0 of 52.  One mode
+#   per process: 0 of 92 (72 at 1.5 s per mode, 20 at the default 600 ms).
 # ERRORS is judged per opcode: a cancelled POLL_ADD completes -ECANCELED
 # and uringscope counts it as an error; libxtc cancels polls routinely
 # (one-shot re-arm, unregister).  Errors on any other opcode fail.
@@ -116,7 +128,12 @@ aio_read||$build/bench_aio_fibers $dat 64 4000 4096
 aio_write|PUNT,WORKERS|$build/bench_aio_fibers $dat 64 4000 4096 write
 aio_fsync|PUNT|$build/bench_aio_fibers $dat 16 200 4096 fdatasync
 exec_scale||$build/bench_exec_scale 8 2000000 spawn
-wal_kill||$sx/test_wal_kill
+wal_kill_exit||$sx/test_wal_kill exit
+wal_kill_any||$sx/test_wal_kill any
+wal_kill_link||$sx/test_wal_kill link
+wal_kill_big||$sx/test_wal_kill big
+wal_kill_mid||$sx/test_wal_kill mid
+wal_kill_writer||$sx/test_wal_kill writer
 crash_oracle|PUNT|$sx/test_crash_oracle 4 1
 rexis||make -C $build check-rexis
 kaka_soak|PUNT,WORKERS|@wrap env KAKA_BROKER=$src/examples/07_kaka/kaka-broker KAKA_SOAK=$src/examples/07_kaka/kaka_soak SECS=15 bash $src/examples/07_kaka/test_kaka_soak.sh
