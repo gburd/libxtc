@@ -19,9 +19,16 @@
 #include "sql_parse.h"
 #include "sql_ast.h"
 
+/* p/len is the token's value: for a quoted identifier the bare name,
+ * which may be an arena copy (a doubled quote collapsed).  src/srclen is
+ * always the token's verbatim slice of the SQL text, quotes included:
+ * every source span the grammar records is built from src/srclen, never
+ * from p, so a span cannot mix an arena pointer with a source pointer. */
 typedef struct sql_token {
 	const char *p;
 	int         len;
+	const char *src;
+	int         srclen;
 } sql_token_t;
 
 typedef struct sql_parse_state {

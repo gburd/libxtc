@@ -72,7 +72,13 @@ DETAIL = {
 }
 
 
-LOOP_NONE = 0xFFFF
+# XTC_TAIL_LOOP_NONE.  Version 3 (libxtc 2.0, the 16-byte pid: u32 loop,
+# u32 local, u64 gen) uses 0xFFFFFFFF; version 2 (1.x, 16-bit loop id) used
+# 0xFFFF.  parse() maps a v2 sentinel to the v3 one, so the rest of this
+# file sees one value.
+LOOP_NONE = 0xFFFFFFFF
+LOOP_NONE_V2 = 0xFFFF
+VERSIONS = (2, 3)
 
 
 class Event:
@@ -84,7 +90,7 @@ class Event:
 
     @property
     def pid(self):
-        # 0xFFFF is XTC_TAIL_LOOP_NONE: a ring with no exec-relative loop id
+        # LOOP_NONE is XTC_TAIL_LOOP_NONE: a ring with no exec-relative loop id
         # (a bare xtc_loop_init loop).  Rendered "none" rather than as a
         # number, because the old code reported it as 0 and a consumer read
         # those events as belonging to the executor's REAL loop 0.
@@ -127,6 +133,9 @@ def parse(path):
     if not (flags & FLAG_LE):
         raise ValueError("trace is not little-endian canonical (flags=0x%x)"
                          % flags)
+    if version not in VERSIONS:
+        raise ValueError("unsupported trace version %d (this reader knows %s)"
+                         % (version, ", ".join(str(v) for v in VERSIONS)))
     off = 24
     prev = base_ts
     events = []
@@ -135,6 +144,8 @@ def parse(path):
         source = data[off]; off += 1
         dts, off = _read_leb128(data, off)
         loop, off = _read_leb128(data, off)
+        if version == 2 and loop == LOOP_NONE_V2:
+            loop = LOOP_NONE
         local, off = _read_leb128(data, off)
         gen, off = _read_leb128(data, off)
         detail, off = _read_leb128(data, off)

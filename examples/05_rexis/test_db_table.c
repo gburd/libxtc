@@ -6,9 +6,14 @@
  *	Keyspace table behaviour at scale: the table grows with the key
  *	count (lookups stay O(1) instead of walking ever-longer chains),
  *	every key stays reachable across growth, growth is charged to the
- *	memory budget, and active expiry visits the whole table.
+ *	memory budget, and active expiry visits the whole table.  A shared
+ *	(multi-loop) keyspace is sharded: writers to keys in different
+ *	shards run at once, writers to one shard exclude each other, and
+ *	the keyspace-wide key limit still holds across shards.
  */
 
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -239,12 +244,119 @@ test_expiry_covers_table(void)
 	printf("  ok   expiry_covers_table\n");
 }
 
+/* Two OS threads, each holding the write section of one key's shard.
+ * Keys in different shards must be held at the same time (sharded
+ * latches); keys in the same shard must not (exclusion).  The holder
+ * spins until the other thread is inside too, bounded; with one latch
+ * for the whole keyspace (1.59) the different-shard case never
+ * overlaps.  Then the keyspace-wide --max-keys limit across shards. */
+struct sh_arg {
+	db_t           *db;
+	const char     *key;
+	_Atomic int    *inside;
+	_Atomic int    *maxin;
+};
+
+static void *
+sh_writer(void *arg)
+{
+	struct sh_arg *a = arg;
+	db_keyset_t ks = db_key_shard(a->db, a->key, strlen(a->key));
+	int64_t end;
+	int n;
+
+	db_lock(a->db, ks, 1);
+	n = atomic_fetch_add(a->inside, 1) + 1;
+	if (n > atomic_load(a->maxin))
+		atomic_store(a->maxin, n);
+	end = xtc_clock_mono() + 200LL * 1000 * 1000;
+	while (atomic_load(a->inside) < 2 && xtc_clock_mono() < end)
+		;                       /* wait for the other writer, bounded */
+	(void)db_set(a->db, a->key, strlen(a->key), "v", 1);
+	atomic_fetch_sub(a->inside, 1);
+	db_unlock(a->db, ks, 1);
+	return NULL;
+}
+
+static int
+sh_overlap(db_t *db, const char *k1, const char *k2)
+{
+	_Atomic int inside = 0, maxin = 0;
+	struct sh_arg a = { db, k1, &inside, &maxin };
+	struct sh_arg b = { db, k2, &inside, &maxin };
+	pthread_t t1, t2;
+
+	ASSERT(pthread_create(&t1, NULL, sh_writer, &a) == 0);
+	ASSERT(pthread_create(&t2, NULL, sh_writer, &b) == 0);
+	(void)pthread_join(t1, NULL);
+	(void)pthread_join(t2, NULL);
+	return atomic_load(&maxin);
+}
+
+static void
+test_shards_write_in_parallel(void)
+{
+	db_t *db = NULL;
+	db_opts_t o = DB_OPTS_DEFAULT;
+	char k1[32], k2[32];
+	int i, n, ok = 0, refused = 0;
+
+	o.shared = 1;
+	o.max_keys = 100;
+	ASSERT(db_create(&o, &db) == 0);
+	/* Two keys in different shards, and one more in k1's shard. */
+	(void)mk(k1, sizeof k1, "a", 0);
+	for (i = 1; i < 1000; i++) {
+		(void)mk(k2, sizeof k2, "a", i);
+		if (db_key_shard(db, k2, strlen(k2)) !=
+		    db_key_shard(db, k1, strlen(k1)))
+			break;
+	}
+	ASSERT(db_key_shard(db, k1, strlen(k1)) !=
+	    db_key_shard(db, k2, strlen(k2)));
+	n = sh_overlap(db, k1, k2);
+	printf("  different shards: %d writer(s) inside at once\n", n);
+	ASSERT(n == 2);
+	for (i = 1; i < 100000; i++) {
+		(void)mk(k2, sizeof k2, "b", i);
+		if (db_key_shard(db, k2, strlen(k2)) ==
+		    db_key_shard(db, k1, strlen(k1)))
+			break;
+	}
+	ASSERT(db_key_shard(db, k1, strlen(k1)) ==
+	    db_key_shard(db, k2, strlen(k2)));
+	n = sh_overlap(db, k1, k2);
+	printf("  same shard: %d writer(s) inside at once\n", n);
+	ASSERT(n == 1);
+	/* The key limit is keyspace-wide, not per shard. */
+	db_write_begin(db);
+	db_flushdb(db);
+	db_write_end(db);
+	for (i = 0; i < 150; i++) {
+		db_keyset_t ks;
+		n = mk(k2, sizeof k2, "lim", i);
+		ks = db_key_shard(db, k2, (size_t)n);
+		db_lock(db, ks, 1);
+		if (db_set(db, k2, (size_t)n, "v", 1) == 0)
+			ok++;
+		else
+			refused++;
+		db_unlock(db, ks, 1);
+	}
+	printf("  key limit 100 over shards: %d set, %d refused, %zu keys\n",
+	    ok, refused, db_key_count(db));
+	ASSERT(ok == 100 && refused == 50 && db_key_count(db) == 100);
+	db_destroy(db);
+	printf("  ok   shards_write_in_parallel\n");
+}
+
 int
 main(void)
 {
 	test_grows_and_stays_fast();
 	test_growth_is_budgeted();
 	test_expiry_covers_table();
+	test_shards_write_in_parallel();
 	printf("All db table tests passed.\n");
 	return 0;
 }

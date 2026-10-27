@@ -5,9 +5,16 @@
 #
 #     clang-format -i src/**/*.[ch] test/**/*.[ch] bench/**/*.[ch]
 #
-# A few KNF rules clang-format cannot express precisely (e.g. function
-# return type on its own line) are documented in docs/CONTRIBUTING.md
-# and enforced by review rather than tooling.
+# Parses on clang-format 17 through 21.  It used to set both
+# AlwaysBreakAfterDefinitionReturnType and AlwaysBreakAfterReturnType;
+# the first is deprecated and does not accept AllDefinitions, so every
+# clang-format from 17 to 21 rejected the whole file.  The return type on
+# its own line is AlwaysBreakAfterReturnType: AllDefinitions (named
+# BreakAfterReturnType from 19; the old key is still read).
+#
+# The tree is NOT formatted to this file and is not to be reformatted
+# wholesale.  CI checks only the lines a change touches (the style job:
+# git clang-format --diff against the merge base, clang-format 18).
 
 BasedOnStyle: WebKit
 Language: Cpp
@@ -17,11 +24,13 @@ TabWidth: 8
 UseTab: ForIndentation
 ColumnLimit: 80
 ContinuationIndentWidth: 4
-AlignAfterOpenBracket: Align
+# style(9): second-level indents are four spaces, not aligned to the
+# open bracket; a wrapped line ends with its operator.
+AlignAfterOpenBracket: DontAlign
 AlignConsecutiveAssignments: false
 AlignConsecutiveDeclarations: false
 AlignEscapedNewlines: Right
-AlignOperands: true
+AlignOperands: false
 AlignTrailingComments: true
 AllowAllArgumentsOnNextLine: false
 AllowAllParametersOfDeclarationOnNextLine: false
@@ -30,7 +39,6 @@ AllowShortCaseLabelsOnASingleLine: false
 AllowShortFunctionsOnASingleLine: None
 AllowShortIfStatementsOnASingleLine: false
 AllowShortLoopsOnASingleLine: false
-AlwaysBreakAfterDefinitionReturnType: AllDefinitions
 AlwaysBreakAfterReturnType: AllDefinitions
 AlwaysBreakBeforeMultilineStrings: false
 BinPackArguments: true
@@ -46,7 +54,7 @@ BraceWrapping:
   BeforeElse: false
   IndentBraces: false
   SplitEmptyFunction: true
-BreakBeforeBinaryOperators: NonAssignment
+BreakBeforeBinaryOperators: None
 BreakBeforeBraces: Custom
 BreakBeforeTernaryOperators: false
 BreakStringLiterals: false

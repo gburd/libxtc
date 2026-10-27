@@ -94,17 +94,20 @@ typedef struct conn_state {
 	xtc_res_t  *res;
 
 	/* Query buffer: rbuf[0..rlen) is received, unprocessed input.  It
-	 * starts at CONN_BASE_BUF and grows (doubling) to hold one command
-	 * of at most max_request bytes (or to CONN_READ_AHEAD for a deep
-	 * pipeline); conn_trim shrinks it back. */
+	 * is allocated (CONN_BASE_BUF) by the first read, grows (doubling)
+	 * to hold one command of at most max_request bytes (or to
+	 * CONN_READ_AHEAD for a deep pipeline), and conn_trim shrinks it
+	 * back.  NULL with rcap 0 until the first read: a connection that
+	 * never sends holds no buffer. */
 	char       *rbuf;
 	size_t      rcap;
 	size_t      rlen;
 	size_t      rpeak;       /* largest rlen since the last trim */
 	size_t      max_request;
 
-	/* Output buffer: wbuf[wpos..wlen) is unsent reply bytes.  Grows up
-	 * to max_output; conn_trim shrinks it back once drained. */
+	/* Output buffer: wbuf[wpos..wlen) is unsent reply bytes.  Allocated
+	 * by the first reply (conn_out_grow), grows up to max_output;
+	 * conn_trim shrinks it back once drained. */
 	char       *wbuf;
 	size_t      wcap;
 	size_t      wlen;
@@ -193,25 +196,8 @@ conn_ref_bytes(void)
  * above g_fd_cap (or a failed allocation) is not recorded, and its proc
  * keeps a 1 s park deadline instead.
  */
-static _Atomic uint64_t *g_fd_pid;
+static xtc_atomic_pid_t *g_fd_pid;
 static int               g_fd_cap;
-
-static uint64_t
-pid_pack(xtc_pid_t p)
-{
-	return (uint64_t)p.loop_id << 48 | (uint64_t)p.local_id << 32 | p.gen;
-}
-
-static xtc_pid_t
-pid_unpack(uint64_t v)
-{
-	xtc_pid_t p;
-
-	p.loop_id = (uint16_t)(v >> 48);
-	p.local_id = (uint16_t)(v >> 32);
-	p.gen = (uint32_t)v;
-	return p;
-}
 
 void
 conn_wake_init(int max_fd)
@@ -224,12 +210,12 @@ conn_wake_init(int max_fd)
 void
 conn_wake_all(void)
 {
-	uint64_t v;
+	xtc_pid_t v;
 	int i;
 
 	for (i = 0; i < g_fd_cap; i++)
-		if ((v = atomic_load(&g_fd_pid[i])) != 0)
-			(void)xtc_proc_wake(pid_unpack(v));
+		if (!xtc_pid_is_none(v = xtc_atomic_pid_load(&g_fd_pid[i])))
+			(void)xtc_proc_wake(v);
 }
 
 int64_t
@@ -329,29 +315,37 @@ conn_refund(conn_state_t *st, size_t n)
 	atomic_fetch_sub(&g_client_bytes, (int64_t)n);
 }
 
+/* The charged part of a buffer of cap bytes: only bytes above
+ * CONN_BASE_BUF are charged (see client_res). */
+static size_t
+conn_charged(size_t cap)
+{
+	return cap > CONN_BASE_BUF ? cap - CONN_BASE_BUF : 0;
+}
+
 /* Resize *buf to ncap bytes (contents kept up to the smaller size),
  * charging or refunding the difference.  -1: budget or allocator said
  * no; *buf is unchanged. */
 static int
 conn_resize(conn_state_t *st, char **buf, size_t *cap, size_t ncap)
 {
+	size_t c0 = conn_charged(*cap), c1 = conn_charged(ncap);
 	char *nb;
 
 	if (ncap == *cap)
 		return 0;
-	/* Only bytes above CONN_BASE_BUF are charged (see client_res). */
-	if (ncap > *cap && conn_charge(st, ncap - *cap) != 0) {
+	if (c1 > c0 && conn_charge(st, c1 - c0) != 0) {
 		st->out_fail = OUT_FAIL_MEM;
 		return -1;
 	}
 	if ((nb = xtc_realloc(*buf, ncap)) == NULL) {
-		if (ncap > *cap)
-			conn_refund(st, ncap - *cap);
+		if (c1 > c0)
+			conn_refund(st, c1 - c0);
 		st->out_fail = OUT_FAIL_MEM;
 		return -1;
 	}
-	if (ncap < *cap)
-		conn_refund(st, *cap - ncap);
+	if (c1 < c0)
+		conn_refund(st, c0 - c1);
 	*buf = nb;
 	*cap = ncap;
 	return 0;
@@ -368,6 +362,8 @@ conn_out_grow(resp_buf_t *b, size_t need)
 		st->out_fail = OUT_FAIL_LIMIT;
 		return -1;
 	}
+	if (ncap == 0)
+		ncap = CONN_BASE_BUF;        /* the first reply (lazy base) */
 	while (ncap < need)
 		ncap = ncap > st->max_output / 2 ? st->max_output : ncap * 2;
 	if (conn_resize(st, &st->wbuf, &st->wcap, ncap) != 0)
@@ -638,13 +634,30 @@ conn_try_read(conn_state_t *st)
 	    "-OOM client query buffer exceeds the client memory budget\r\n";
 	ssize_t n;
 	size_t ncap, room;
+	char c;
 
+	/* No query buffer yet: allocate it only when a byte is there (a
+	 * peek; one extra recv in the connection's life). */
+	if (st->rcap == 0) {
+		n = recv(st->fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
+		if (n == 0) {
+			st->eof = 1;
+			return;
+		}
+		if (n < 0) {
+			if (errno != EAGAIN && errno != EWOULDBLOCK &&
+			    errno != EINTR)
+				st->closed = 1;
+			return;
+		}
+	}
 	if (st->rlen == st->rcap) {
 		/* Full of complete commands not yet run: run them first.
 		 * Grow only for a single command larger than the buffer. */
 		if (!st->partial)
 			return;
-		ncap = st->rcap > st->max_request / 2 ? st->max_request :
+		ncap = st->rcap == 0 ? CONN_BASE_BUF :   /* first read */
+		    st->rcap > st->max_request / 2 ? st->max_request :
 		    st->rcap * 2;
 		if (ncap <= st->rcap)
 			return;      /* at max_request: conn_process rejects */
@@ -827,8 +840,8 @@ conn_teardown(void *arg)
 		return;
 	if (st->pubsub != NULL && st->sub_count > 0)
 		(void)xtc_reg_drop_pid(st->pubsub, st->self);
-	if (st->fd >= 0 && st->fd < g_fd_cap)
-		atomic_store(&g_fd_pid[st->fd], 0);    /* before the close */
+	if (st->fd >= 0 && st->fd < g_fd_cap)          /* before the close */
+		xtc_atomic_pid_store(&g_fd_pid[st->fd], XTC_PID_NONE);
 	if (st->fd >= 0)
 		xtc_net_close(st->fd);
 	if (st->conn_count != NULL)
@@ -836,7 +849,7 @@ conn_teardown(void *arg)
 	atomic_fetch_sub(&g_loop_live[st->loop_idx], 1);
 	seg_truncate(st, 0);
 	xtc_free(st->segs);
-	conn_refund(st, st->rcap + st->wcap - 2 * CONN_BASE_BUF);
+	conn_refund(st, conn_charged(st->rcap) + conn_charged(st->wcap));
 	xtc_free(st->rbuf);
 	xtc_free(st->wbuf);
 	xtc_free(st);
@@ -857,7 +870,7 @@ conn_proc(void *arg)
 	st->self = xtc_self();   /* for pub/sub group membership */
 	st->last_io_ns = st->trim_ns = xtc_clock_mono();
 	if (st->fd < g_fd_cap)
-		atomic_store(&g_fd_pid[st->fd], pid_pack(st->self));
+		xtc_atomic_pid_store(&g_fd_pid[st->fd], st->self);
 
 	/*
 	 * Resource scope (mechanism, not manner): register the connection
@@ -1051,13 +1064,11 @@ conn_spawn(xtc_loop_t *loop, const conn_opts_t *opts, xtc_pid_t *out_pid)
 	st->idle_timeout_ns = opts->idle_timeout_ns;
 	st->partial = 1;
 
-	st->rcap = st->wcap = CONN_BASE_BUF;
-	if ((st->rbuf = xtc_malloc(st->rcap)) == NULL ||
-	    (st->wbuf = xtc_malloc(st->wcap)) == NULL) {
-		xtc_free(st->rbuf);
-		xtc_free(st);
-		return XTC_E_NOMEM;
-	}
+	/* rbuf / wbuf start NULL (rcap = wcap = 0): the first read and
+	 * the first reply allocate them, so an idle connection that never
+	 * sent a byte holds no buffer (measured: 100,000 idle connections
+	 * held 15.6 KB each, about 8 KB of it these buffers' touched
+	 * pages). */
 
 	st->iops_tokens = opts->iops_tokens;
 	st->iops_cap = opts->iops_cap;

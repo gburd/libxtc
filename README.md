@@ -370,6 +370,8 @@ follow-up).
 * `docs/abi-stability.md` -- the compatibility contract, split into what
   is mechanically enforced and what is only stated policy.
 * `docs/KNOWN_ISSUES.md` -- everything I know about that's not perfect.
+* `SECURITY.md` -- supported versions (the 2.0 LTS and the current
+  release) and how to report a vulnerability privately.
 
 ## License
 
@@ -377,8 +379,10 @@ ISC.  See [LICENSE](LICENSE).
 
 ## Contributing
 
-Issues and patches welcome.  Code style is BSD KNF as encoded in
-`.clang-format`.  All contributions must be ASCII-only in source,
+Issues and patches welcome; report a security issue privately as
+SECURITY.md describes, not in a public issue.  Code style is BSD KNF as
+encoded in `.clang-format` (CI checks the lines a change touches, not
+the whole tree).  All contributions must be ASCII-only in source,
 docs, comments, and commit messages.  Run `dist/s_async` and
 `dist/s_cfg` lints before submitting.  Property-based tests
 (via hegel-c) are encouraged for any new primitive.

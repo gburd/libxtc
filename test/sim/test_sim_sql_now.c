@@ -15,7 +15,9 @@
  *	    determinism guard tripped, so no real clock was read on the path;
  *	  - a second run of the same seed yields byte-identical result text;
  *	  - 'now' is one value per statement (two references agree), and it
- *	    advances with the virtual clock between statements.
+ *	    advances with the virtual clock between statements;
+ *	  - random() / randomblob() replay too (xtc_rand_u64 takes the run's
+ *	    stream under the simulator), and differ between seeds.
  *
  *	The epoch offset is sampled once per process (outside the runs, by
  *	a warm-up query), as xstore's HLC does.
@@ -42,7 +44,7 @@
 #include "xstore.h"
 
 #define N_LOOPS 2
-#define N_Q     3
+#define N_Q     4
 #define OUTCAP  1024
 
 static bt_t *g_bt;
@@ -54,7 +56,9 @@ static const char *const k_q[N_Q] = {
 	"CURRENT_TIMESTAMP = datetime('now'), strftime('%s', 'now') = "
 	"CAST(unixepoch() AS TEXT)",
 	"SELECT unixepoch('now', 'subsec'), date('now', '+1 day'), time()",
-	"SELECT datetime('now', 'start of day', '+90 minutes')"
+	"SELECT datetime('now', 'start of day', '+90 minutes')",
+	/* random() / randomblob() draw xtc_rand_u64: the run's stream. */
+	"SELECT random(), hex(randomblob(12)), random() <> random()"
 };
 
 /* Run one query and append its row(s) as text to g_out. */
@@ -130,7 +134,7 @@ main(void)
 	bm_t *bm = NULL;
 	sx_db *warm = NULL;
 	char btf[] = "/tmp/xtc-sqlnow-bt-XXXXXX";
-	char a[OUTCAP], b[OUTCAP];
+	char a[OUTCAP], b[OUTCAP], prev[OUTCAP];
 	int i, fd, fails = 0;
 
 	fd = mkstemp(btf);
@@ -172,6 +176,16 @@ main(void)
 			    "statement): %s\n", (unsigned long long)seed, a);
 			fails++;
 		}
+		/* q3's draws: two calls differ, and another seed draws others
+		 * (the clock part is seed-independent, so a whole-output match
+		 * with the previous seed means the draws did not move). */
+		if (strlen(a) < 8 || strcmp(a + strlen(a) - 2, "1|") != 0 ||
+		    (i > 0 && strcmp(a, prev) == 0)) {
+			printf("  seed 0x%016llx: FAIL (random() / randomblob() "
+			    "draws): %s\n", (unsigned long long)seed, a);
+			fails++;
+		}
+		snprintf(prev, sizeof prev, "%s", a);
 	}
 	bt_close(g_bt);
 	bm_destroy(bm);
@@ -180,8 +194,9 @@ main(void)
 		printf("FAIL: %d seed(s)\n", fails);
 		return 1;
 	}
-	printf("OK: sqlxtc 'now' under DST -- 8 seeds, date/time functions read "
-	    "the virtualized clock (no determinism-guard trip), one 'now' per "
-	    "statement, and every run replays byte-identically from its seed\n");
+	printf("OK: sqlxtc 'now' and random() under DST -- 8 seeds, date/time "
+	    "functions read the virtualized clock and random()/randomblob() the "
+	    "run's stream (no determinism-guard trip), one 'now' per statement, "
+	    "and every run replays byte-identically from its seed\n");
 	return 0;
 }

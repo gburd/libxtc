@@ -30,6 +30,7 @@
 #include "xtc_inspect.h"   /* xtc_proc_info: supervisor-side mask state */
 #include "xtc_mctx.h"
 #include "xtc_int.h"
+#include "proc_int.h"   /* __xtc_proc_slot_gen_set: the gen-wrap seam */
 #include "xtc_res.h"
 #include "xtc_inject.h"   /* drive the wait_fd check/arm window deterministically */
 #include "xtc_exec.h"     /* >64-loop executor (M10) */
@@ -1195,105 +1196,163 @@ test_proc_at_exit(const MunitParameter p[], void *d)
 }
 
 /*
- * [A1] pid uniqueness at the local_id ceiling.
+ * [A1] More than 65,536 live procs on ONE loop, each reachable by its pid.
  *
- * xtc_pid_t.local_id is uint16_t, so slot 65536 would truncate to 0 and
- * hand out a pid byte-identical to the live proc in slot 0 (gen is
- * per-slot, so it cannot disambiguate either) -- wrong-proc send/wake/
- * DOWN delivery and a release that clears someone else's slot.  Before
- * the fix this was masked only incidentally by the default fds cap
- * (65536) while the tasks cap defaults to 100000, i.e. ABOVE it; an
- * embedder that legitimately raised fds hit the collision.
+ * Through 1.x, xtc_pid_t.local_id was 16 bits: a loop held at most 65,536
+ * live procs and xtc_proc_spawn refused the next with XTC_E_RESOURCE
+ * (before that refusal existed, slot 65,536 truncated to 0 and handed out
+ * a pid identical to a live one).  2.0 widens local_id to 32 bits.
  *
- * The proc table now refuses past the ceiling with XTC_E_RESOURCE.
- * This test raises EVERY relevant cap well past 65536 -- the exact
- * configuration that used to collide -- and asserts that (a) spawning
- * stops with XTC_E_RESOURCE rather than wrapping, and (b) every pid
- * handed out is unique.
- *
- * Procs park forever (they only exit when released), so no slot is
- * recycled and the run genuinely walks the table to its ceiling.
+ * Spawn A1_PROBE_TARGET (100,000) procs that park in xtc_recv; then send
+ * proc i its own index and have it check the message names itself -- a
+ * pid aliasing another live proc (a truncated slot) delivers to the wrong
+ * proc and the check fails.  Every cap that could stop the spawns earlier
+ * is raised.  Each fiber stack is two mappings (stack + guard), so the
+ * stock vm.max_map_count (65,530) stops a process near 32 K fibers: that
+ * surfaces as XTC_E_NOMEM and the test then SKIPs, naming the knob.
+ * 16 KiB stacks keep the run near 2 GB of address space and ~1 GB RSS.
  */
-#define A1_PROBE_TARGET 66000            /* > 65536, so we cross it */
-static _Atomic int g_a1_release;
+#define A1_PROBE_TARGET 100000
+static _Atomic int g_a1_ok, g_a1_bad;
 static void
 a1_parker(void *arg)
 {
-	(void)arg;
-	while (!atomic_load(&g_a1_release))
-		xtc_yield();
+	void *m = NULL;
+	size_t sz = 0;
+	uint32_t want = (uint32_t)(uintptr_t)arg, got;
+
+	if (xtc_recv(&m, &sz, -1) != XTC_OK || sz != sizeof got) {
+		atomic_fetch_add(&g_a1_bad, 1);
+		xtc_free(m);
+		return;
+	}
+	memcpy(&got, m, sizeof got);
+	xtc_free(m);
+	atomic_fetch_add(got == want ? &g_a1_ok : &g_a1_bad, 1);
 }
 
 static MunitResult
 test_pid_local_id_ceiling(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *lp = NULL;
-	xtc_proc_opts_t o;
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_pid_t *pids;
 	struct xtc_res *res;
-	int i, n = 0, rc = XTC_OK;
+	size_t old_stack = xtc_stack_size();
+	uint32_t i, n = 0, max_local = 0;
+	int rc = XTC_OK;
 	(void)p; (void)d;
 
-	atomic_store(&g_a1_release, 0);
+	/* 100,000 fiber stacks: more mappings than valgrind tracks. */
+	if (getenv("XTC_UNDER_VALGRIND") != NULL)
+		return MUNIT_SKIP;
+	atomic_store(&g_a1_ok, 0);
+	atomic_store(&g_a1_bad, 0);
+	munit_assert_int(xtc_set_stack_size(16 * 1024), ==, XTC_OK);
 	munit_assert_int(xtc_loop_init(&lp), ==, XTC_OK);
-
-	/* Raise every cap that could stop us BEFORE the pid ceiling, so the
-	 * proc table's own limit is what we are testing. */
 	res = xtc_loop_res(lp);
 	munit_assert_ptr_not_null(res);
 	xtc_res_set_cap(res, XTC_RES_TASKS,      2 * A1_PROBE_TARGET);
 	xtc_res_set_cap(res, XTC_RES_FDS,        2 * A1_PROBE_TARGET);
 	xtc_res_set_cap(res, XTC_RES_INBOX_MSGS, 2 * A1_PROBE_TARGET);
-	xtc_res_set_cap(res, XTC_RES_MEM_BYTES,  8LL * 1024 * 1024 * 1024);
+	xtc_res_set_cap(res, XTC_RES_MEM_BYTES,  16LL * 1024 * 1024 * 1024);
 
-	pids = calloc((size_t)A1_PROBE_TARGET, sizeof *pids);
+	pids = calloc(A1_PROBE_TARGET, sizeof *pids);
 	munit_assert_ptr_not_null(pids);
-
+	o.name = "a1";
 	for (i = 0; i < A1_PROBE_TARGET; i++) {
-		memset(&o, 0, sizeof o);
-		o.size = sizeof o;
-		o.name = "a1";
-		rc = xtc_proc_spawn(lp, a1_parker, NULL, &o, &pids[i]);
+		rc = xtc_proc_spawn(lp, a1_parker, (void *)(uintptr_t)i, &o,
+		    &pids[i]);
 		if (rc != XTC_OK)
 			break;
+		if (pids[i].local_id > max_local)
+			max_local = pids[i].local_id;
 		n = i + 1;
 	}
-
-	/* (a) We must be refused -- cleanly -- rather than wrapping.
-	 *
-	 * The host may run out of address-space mappings first: every fiber
-	 * stack is two VMAs (the stack + its PROT_NONE guard page), so the
-	 * stock Linux vm.max_map_count of 65530 caps a process near 32 K
-	 * live fibers, well short of 65536.  That exhaustion must surface as
-	 * XTC_E_NOMEM (releases before 1.50 reported XTC_E_INTERNAL, i.e.
-	 * "a bug in xtc", for an ordinary out-of-mappings condition).  The
-	 * pid ceiling itself is only reachable on a host whose map limit
-	 * admits > 65536 stacks, and there it must be XTC_E_RESOURCE. */
-	if (rc == XTC_E_NOMEM && n < 65536) {
-		munit_logf(MUNIT_LOG_INFO, "host mapping limit hit at %d procs "
-		    "(raise vm.max_map_count to reach the pid ceiling)", n);
-	} else {
-		munit_assert_int(rc, ==, XTC_E_RESOURCE);
-		munit_assert_int(n, <=, 65536);
+	if (rc == XTC_E_NOMEM && n < A1_PROBE_TARGET) {
+		munit_logf(MUNIT_LOG_INFO, "host mapping limit hit at %u procs "
+		    "(raise vm.max_map_count to run this test)", n);
+		/* Release the spawned procs before skipping. */
+		for (i = 0; i < n; i++)
+			(void)xtc_send(pids[i], &i, sizeof i);
+		(void)xtc_loop_run(lp);
+		(void)xtc_loop_fini(lp);
+		(void)xtc_set_stack_size(old_stack);
+		free(pids);
+		return MUNIT_SKIP;
 	}
+	munit_assert_int(rc, ==, XTC_OK);
+	munit_assert_uint32(n, ==, A1_PROBE_TARGET);
+	munit_assert_uint32(max_local, >=, 65536);   /* past the 1.x ceiling */
 
-	/* (b) No two live pids may share (loop_id, local_id).  Check via a
-	 * direct-indexed table rather than O(n^2) comparison. */
-	{
-		unsigned char *seen = calloc(65536, 1);
-		int dup = 0;
-		munit_assert_ptr_not_null(seen);
-		for (i = 0; i < n; i++) {
-			if (seen[pids[i].local_id]) { dup = 1; break; }
-			seen[pids[i].local_id] = 1;
-		}
-		free(seen);
-		munit_assert_int(dup, ==, 0);
-	}
-
-	atomic_store(&g_a1_release, 1);
-	free(pids);
+	/* Every pid reaches exactly its own proc. */
+	for (i = 0; i < n; i++)
+		munit_assert_int(xtc_send(pids[i], &i, sizeof i), ==, XTC_OK);
 	(void)xtc_loop_run(lp);
+	munit_assert_int(atomic_load(&g_a1_bad), ==, 0);
+	munit_assert_int(atomic_load(&g_a1_ok), ==, (int)n);
+	(void)xtc_loop_fini(lp);
+	(void)xtc_set_stack_size(old_stack);
+	free(pids);
+	return MUNIT_OK;
+}
+
+
+/*
+ * [A2] A pid held across 2^32 reuses of its slot never names the new
+ * occupant.
+ *
+ * A slot's generation is bumped on every hand-out, and a pid is stale
+ * when its gen differs from the slot's.  Through 1.x gen was 32 bits:
+ * the slot of a churning server (LIFO free list, so ONE slot takes every
+ * spawn) wrapped after 2^32 reuses -- 72 minutes at 1M spawns/s -- and a
+ * pid kept that long (a cached worker, a registry entry, a mailbox
+ * `from`) then named whatever ran in the slot.  2.0's gen is 64 bits.
+ *
+ * Proc A runs and exits; the test seam advances A's free slot by
+ * 2^32 - 1 generations; proc B then takes the slot (gen = A's + 2^32).
+ * With a 32-bit gen B's pid equals A's and a send to A's stale pid lands
+ * in B's mailbox; with 64 bits the pids differ, the send is refused
+ * (XTC_E_INVAL) and B's mailbox stays empty.
+ */
+static _Atomic int g_a2_got;
+static void a2_exits(void *arg) { (void)arg; }
+static void
+a2_occupant(void *arg)
+{
+	void *m = NULL;
+	size_t sz = 0;
+	(void)arg;
+	if (xtc_recv(&m, &sz, 0) == XTC_OK) {
+		atomic_store(&g_a2_got, 1);
+		xtc_free(m);
+	}
+}
+
+static MunitResult
+test_pid_gen_no_wrap(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *lp = NULL;
+	xtc_pid_t a, b;
+	xtc_proc_info_t info = XTC_PROC_INFO_INIT;
+	(void)p; (void)d;
+
+	atomic_store(&g_a2_got, 0);
+	munit_assert_int(xtc_loop_init(&lp), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(lp, a2_exits, NULL, NULL, &a), ==,
+	    XTC_OK);
+	(void)xtc_loop_run(lp);                       /* A runs and exits */
+	munit_assert_int(__xtc_proc_slot_gen_set(lp, a.local_id,
+	    (uint64_t)a.gen + 0xFFFFFFFFull), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(lp, a2_occupant, NULL, NULL, &b), ==,
+	    XTC_OK);
+	munit_assert_uint32(b.local_id, ==, a.local_id);   /* same slot */
+	munit_assert_uint64(b.gen, ==, (uint64_t)a.gen + 0x100000000ull);
+	munit_assert_false(xtc_pid_eq(a, b));
+	munit_assert_int(xtc_send(a, "x", 1), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_proc_info(a, &info), !=, XTC_OK);
+	(void)xtc_loop_run(lp);
+	munit_assert_int(atomic_load(&g_a2_got), ==, 0);
 	(void)xtc_loop_fini(lp);
 	return MUNIT_OK;
 }
@@ -2882,6 +2941,7 @@ static MunitTest tests[] = {
 	{ "/fault_escalate",    test_fault_escalate,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/proc_at_exit",      test_proc_at_exit,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/pid_local_id_ceiling", test_pid_local_id_ceiling, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/pid_gen_no_wrap", test_pid_gen_no_wrap, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/cancel_poll",       test_cancel_poll,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/mask_enter_leave",  test_mask_enter_leave, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/mask_nesting",      test_mask_nesting,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

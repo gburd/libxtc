@@ -12,12 +12,15 @@
  *	and func.c.  Every behaviour here is differential-tested against
  *	python's sqlite3 (3.46) by test/sqlxtc/test_sqlxtc_compat.py.
  *
+ *	random() and randomblob(N) draw from xtc_rand_u64, which replays
+ *	from the run's seed under the simulator (its per-thread stream is
+ *	seeded from the clock off it), so they are as replayable as 'now'.
+ *
  *	NOT implemented (the caller declines): the 'localtime' and 'utc'
  *	modifiers (they need the TZ database / environment, a
- *	nondeterminism source), timediff(), printf's %n, and randomblob()
- *	(no RNG the simulator owns is public yet: xtc_rand_u64 auto-seeds
- *	from the clock, which the determinism guard traps).  zeroblob()
- *	takes a constant argument of at most VXF_ZEROBLOB_MAX bytes.
+ *	nondeterminism source), timediff() and printf's %n.  zeroblob()
+ *	and randomblob() take a constant argument of at most
+ *	VXF_ZEROBLOB_MAX bytes.
  */
 
 #include <ctype.h>
@@ -43,7 +46,7 @@ enum vxf_id {
 	F_CEIL, F_FLOOR, F_TRUNC, F_LN, F_LOG, F_LOG10, F_LOG2, F_EXP,
 	F_POW, F_MOD, F_SQRT, F_SIN, F_COS, F_TAN, F_ASIN, F_ACOS, F_ATAN,
 	F_ATAN2, F_SINH, F_COSH, F_TANH, F_ASINH, F_ACOSH, F_ATANH,
-	F_RADIANS, F_DEGREES, F_PI, F_ZEROBLOB
+	F_RADIANS, F_DEGREES, F_PI, F_ZEROBLOB, F_RANDOM, F_RANDOMBLOB
 };
 
 static const struct vxf_def {
@@ -99,7 +102,9 @@ static const struct vxf_def {
 	{ "radians", F_RADIANS, 1, 1, VXF_C_NUM },
 	{ "degrees", F_DEGREES, 1, 1, VXF_C_NUM },
 	{ "pi", F_PI, 0, 0, VXF_C_NUM },
-	{ "zeroblob", F_ZEROBLOB, 1, 1, VXF_C_DYN }   /* always a BLOB */
+	{ "zeroblob", F_ZEROBLOB, 1, 1, VXF_C_DYN },  /* always a BLOB */
+	{ "random", F_RANDOM, 0, 0, VXF_C_NUM },
+	{ "randomblob", F_RANDOMBLOB, 1, 1, VXF_C_DYN }   /* always a BLOB */
 };
 #define N_FUNCS ((int)(sizeof k_funcs / sizeof k_funcs[0]))
 
@@ -362,6 +367,40 @@ fn_zeroblob(const vx_cell_t *a, struct sbuf *b, vx_cell_t *out)
 	if (b->p == NULL) sb_put(b, "", 0);    /* a 0-byte blob still has bytes */
 	if (b->oom) { out->type = VX_NULL; return; }
 	memset(b->p, 0, (size_t)n);
+	out->type = VX_BLOB;
+	out->bytes = (const uint8_t *)b->p;
+	out->nbytes = (uint32_t)n;
+}
+
+/* random(): SQLite's randomFunc -- a 64-bit draw, with a negative value
+ * folded so it is never INT64_MIN (abs() of that would overflow). */
+static void
+fn_random(vx_cell_t *out)
+{
+	int64_t r = (int64_t)xtc_rand_u64();
+	if (r < 0)
+		r = -(r & INT64_MAX);
+	out->type = VX_INT;
+	out->i = r;
+}
+
+/* randomblob(N): N random bytes, at least 1 (SQLite's randomBlob: N < 1
+ * is 1).  The same constant-argument cap as zeroblob. */
+static void
+fn_randomblob(const vx_cell_t *a, struct sbuf *b, vx_cell_t *out)
+{
+	int64_t n = sql_int64(a), i;
+	uint64_t r = 0;
+	if (n < 1) n = 1;
+	if (n > VXF_ZEROBLOB_MAX) { out->type = VX_NULL; return; }  /* declined */
+	sb_reserve(b, (size_t)n);
+	if (b->oom) { out->type = VX_NULL; return; }
+	for (i = 0; i < n; i++) {
+		if ((i & 7) == 0)
+			r = xtc_rand_u64();
+		b->p[i] = (char)(r & 0xff);
+		r >>= 8;
+	}
 	out->type = VX_BLOB;
 	out->bytes = (const uint8_t *)b->p;
 	out->nbytes = (uint32_t)n;
@@ -1715,6 +1754,8 @@ vxf_eval(int id, const vx_cell_t *args, int nargs, int64_t now_ms,
 	case F_CONCAT_WS: fn_concat(args + 1, nargs - 1, &args[0], &b, out); return;
 	case F_IIF: *out = truthy(&args[0]) ? args[1] : args[2]; return;
 	case F_ZEROBLOB: fn_zeroblob(&args[0], &b, out); return;
+	case F_RANDOM: fn_random(out); return;
+	case F_RANDOMBLOB: fn_randomblob(&args[0], &b, out); return;
 	case F_SIGN:
 		if (!num_val(&args[0], &d, &ii, &iv)) { out->type = VX_NULL; return; }
 		out->type = VX_INT; out->i = d < 0 ? -1 : d > 0 ? 1 : 0;
@@ -1729,7 +1770,7 @@ int
 vxf_arg_ok(int id, int argi, const vx_cell_t *lit, int maybe_real)
 {
 	char tmp[64];
-	if (id == F_ZEROBLOB)        /* a constant, within the cap */
+	if (id == F_ZEROBLOB || id == F_RANDOMBLOB)   /* a constant, within the cap */
 		return lit != NULL && sql_int64(lit) <= VXF_ZEROBLOB_MAX;
 	if (id != F_QUOTE || argi != 0) return 1;
 	if (lit != NULL) {
@@ -1738,6 +1779,12 @@ vxf_arg_ok(int id, int argi, const vx_cell_t *lit, int maybe_real)
 		return strtod(tmp, NULL) == lit->r || isinf(lit->r);
 	}
 	return !maybe_real;
+}
+
+int
+vxf_volatile(int id)
+{
+	return id == F_RANDOM || id == F_RANDOMBLOB;
 }
 
 int

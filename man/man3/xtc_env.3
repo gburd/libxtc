@@ -89,6 +89,11 @@ makes the calling thread's stream reproducible: seeding with the same
 yields the same sequence.
 A thread that has not been seeded auto-seeds from the monotonic clock on
 first draw, so distinct threads get distinct default streams.
+Under the deterministic simulator a thread that has not been seeded draws from the run's own stream
+instead, so its values are a function of the run's seed and replay;
+a thread that called
+.Fn xtc_rand_seed
+keeps the sequence it asked for.
 This is NOT a cryptographic generator; do not use it for keys or
 security tokens.
 .Ss Bounded string copy

@@ -1661,7 +1661,81 @@ test_offloop_notify_spin(const MunitParameter p[], void *d)
 	xtc_notify_destroy(g_ns);
 	return MUNIT_OK;
 }
+/*
+ * 6. A hot mutex does not wake sleepers only to lose (offloop_hot_mutex).
+ *    HM_T threads hammer one amutex with short holds.  A release that
+ *    frees it while another thread is spinning on it should leave the
+ *    sleepers asleep: the spinner takes the free lock within its spin, so
+ *    a sleeper woken now only finds it re-taken and sleeps again.  1.59
+ *    woke one on every release (measured, bench_sync_offloop amutex w 64:
+ *    3.2 context switches per acquire and half the 1.58 rate on a 64-vCPU
+ *    host).  Asserted: the threads' summed voluntary switches stay below
+ *    HM_BOUND per 100 acquires.  Measured on a 32-vCPU host, 4 runs per
+ *    CPU count: 1.59 272-283 (8 CPUs), 303-306 (12), 312-318 (32); the
+ *    gate 98-105, 88-93, 83-85 (158 with a second copy of the test
+ *    running on the same 8 CPUs).  Needs 8+ CPUs: the spin cap is a quarter
+ *    of them, and with one spinner allowed (4-6 CPUs) the gate saves less
+ *    (4 CPUs: 192-202 vs 132-135; 6: 259-262 vs 145-148).
+ */
+#define HM_T     16
+#define HM_N     20000
+#define HM_BOUND 200
+static xtc_amutex_t *g_hm;
+static _Atomic int   g_hm_go;
+static _Atomic long  g_hm_csw;
+static volatile long g_hm_val;
+
+static void *
+hm_thread(void *arg)
+{
+	struct rusage u0, u1;
+	int i;
+	(void)arg;
+	while (!atomic_load(&g_hm_go))
+		;
+	(void)getrusage(RUSAGE_THREAD, &u0);
+	for (i = 0; i < HM_N; i++) {
+		munit_assert_int(xtc_amutex_lock(g_hm, 30LL * 1000 * 1000 * 1000),
+		    ==, XTC_OK);
+		g_hm_val++;
+		sp_burn(20);
+		(void)xtc_amutex_unlock(g_hm);
+		sp_burn(200);
+	}
+	(void)getrusage(RUSAGE_THREAD, &u1);
+	atomic_fetch_add(&g_hm_csw, u1.ru_nvcsw - u0.ru_nvcsw);
+	return NULL;
+}
+
+static MunitResult
+test_offloop_hot_mutex(const MunitParameter p[], void *d)
+{
+	pthread_t th[HM_T];
+	long per100;
+	int i;
+	(void)p; (void)d;
+	if (getenv("XTC_UNDER_VALGRIND") != NULL)
+		return MUNIT_SKIP;   /* timing: see offloop_valgrind_note */
+	if (xtc_ncpus() < 8)
+		return MUNIT_SKIP;
+	munit_assert_int(xtc_amutex_create(&g_hm), ==, XTC_OK);
+	g_hm_go = 0; g_hm_csw = 0; g_hm_val = 0;
+	for (i = 0; i < HM_T; i++)
+		munit_assert_int(pthread_create(&th[i], NULL, hm_thread, NULL),
+		    ==, 0);
+	atomic_store(&g_hm_go, 1);
+	for (i = 0; i < HM_T; i++)
+		(void)pthread_join(th[i], NULL);
+	munit_assert_long(g_hm_val, ==, (long)HM_T * HM_N);
+	per100 = atomic_load(&g_hm_csw) * 100 / ((long)HM_T * HM_N);
+	fprintf(stderr, "  amutex: %ld voluntary csw per 100 acquires\n", per100);
+	if (getenv("XTC_TEST_EMULATED") == NULL)
+		munit_assert_long(per100, <, HM_BOUND);
+	xtc_amutex_destroy(g_hm);
+	return MUNIT_OK;
+}
 #endif
+
 
 #define ART_N    3000
 #define ART_WR   8
@@ -1865,6 +1939,7 @@ static MunitTest tests[] = {
 	{ "/offloop_spin",        test_offloop_spin,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/offloop_release_wakes", test_offloop_release_wakes, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/offloop_notify_spin", test_offloop_notify_spin, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/offloop_hot_mutex",   test_offloop_hot_mutex,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #endif
 	{ "/barrier",             test_barrier,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/gate",                test_gate,                NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

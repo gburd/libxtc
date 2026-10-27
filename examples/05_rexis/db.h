@@ -84,10 +84,11 @@ typedef struct db_opts {
 	                                * logged.  Other types remain
 	                                * memory-only. */
 	int          shared;           /* 1 = used from more than one loop
-	                                * (OS thread): db_read_begin /
-	                                * db_write_begin also take a parking
-	                                * reader/writer latch.  0 (one loop)
-	                                * costs nothing extra. */
+	                                * (OS thread): the keyspace is split
+	                                * into shards, each with a parking
+	                                * reader/writer latch that db_lock
+	                                * takes.  0 (one loop) costs nothing
+	                                * extra. */
 } db_opts_t;
 
 #define DB_OPTS_DEFAULT { \
@@ -121,9 +122,29 @@ typedef struct db db_t;
 int  db_create(const db_opts_t *opts, db_t **out);
 void db_destroy(db_t *db);
 
+/* ----- Sections ----- */
+
+/*
+ * A shared db (opts.shared) is split into shards by key hash, each with
+ * its own latch; a command holds only the shards of the keys it names.
+ * A db_keyset_t is a bit set of shards: db_key_shard gives a key's, OR
+ * them for a multi-key command.  db_lock / db_unlock take / release a
+ * set's shards in a fixed order (no deadlock between overlapping sets);
+ * every keyed call below must be inside a section that holds its key's
+ * shard.  db_read_begin / db_write_begin hold every shard (the
+ * whole-keyspace commands: KEYS, FLUSHDB, expiry).  One loop (not
+ * shared): one shard, no latch.
+ */
+typedef uint64_t db_keyset_t;
+#define DB_ALL_SHARDS (~(db_keyset_t)0)
+
+db_keyset_t db_key_shard(db_t *db, const char *key, size_t key_len);
+void db_lock(db_t *db, db_keyset_t set, int write);
+void db_unlock(db_t *db, db_keyset_t set, int write);
+
 /* ----- Read operations (wait-free under lrlock) ----- */
 
-/* Begin/end read transaction.  Must be paired. */
+/* Begin/end read transaction over the whole keyspace.  Must be paired. */
 void db_read_begin(db_t *db);
 void db_read_end(db_t *db);
 
@@ -188,14 +209,14 @@ size_t db_hscan(db_t *db, const char *key, size_t key_len,
 size_t db_keys(db_t *db, const char *pattern, size_t pattern_len,
                db_visit_fn fn, void *user);
 
-/* Statistics */
+/* Statistics (keyspace-wide; callable outside a section) */
 size_t db_key_count(db_t *db);
 size_t db_mem_used(db_t *db);
 
 /* ----- Write operations (serialized, applied to both copies) ----- */
 
-/* Begin/end write transaction.  Must be paired.  Blocks until
- * the writer mutex is acquired. */
+/* Begin/end write transaction over the whole keyspace.  Must be
+ * paired.  Blocks until every shard's writer side is acquired. */
 void db_write_begin(db_t *db);
 void db_write_end(db_t *db);
 

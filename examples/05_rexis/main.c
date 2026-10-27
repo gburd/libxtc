@@ -16,9 +16,9 @@
  *	  --max-clients=N  concurrent connection limit; over it a client gets
  *	                   "-ERR max number of clients reached" and a close
  *	  --loops=N        run N event loops (OS threads) and spread the
- *	                   connections over them.  One loop holds at most
- *	                   65,520 clients (the per-loop proc ceiling, see
- *	                   conn.h), so 100k clients need --loops=2.
+ *	                   connections over them (see conn.h; libxtc 2.0
+ *	                   has no per-loop proc ceiling, 1.x stopped at
+ *	                   65,536).
  *	  --max-fds=N      XTC_RES_FDS cap on the server's sockets (listener
  *	                   included), via xtc_res_attach_net; RLIMIT_NOFILE
  *	                   is raised to fit.  A client past it waits in the
@@ -407,8 +407,8 @@ usage(FILE *fp, const char *prog)
 	    "                        0 = all the loops hold);\n"
 	    "                        over it: \"-ERR max number of clients reached\"\n"
 	    "      --loops=N         Event loops (threads) to spread clients over\n"
-	    "                        (default 1; one loop holds at most 65520)\n"
-	    "      --loop-clients=N  Per-loop client cap (default and max 65520)\n"
+	    "                        (default 1)\n"
+	    "      --loop-clients=N  Per-loop client cap (default, max 4194304)\n"
 	    "      --max-fds=N       Socket cap, listener included (default: fit\n"
 	    "                        --max-clients); raises RLIMIT_NOFILE to fit\n"
 	    "  -i, --max-iops=N      Rate limit commands/sec (0 = unlimited)\n"
@@ -575,23 +575,43 @@ parse_args(int argc, char **argv, server_cfg_t *cfg)
 		usage(stderr, argv[0]);
 		return -1;
 	}
-	/* The per-loop proc ceiling is hard (conn.h): refuse a client cap
-	 * the loops cannot hold now, not at connection 65,521.
-	 * (--loop-clients only lowers the per-loop cap; past it a client is
-	 * refused at run time with the same error the ceiling gives.) */
+	/* Refuse a client cap the loops cannot hold (CONN_LOOP_MAX each)
+	 * now, not at run time.  (--loop-clients only lowers the per-loop
+	 * cap; past it a client is refused at run time with the same
+	 * error.) */
 	if (rc == 0 && cfg->max_clients == 0)
 		cfg->max_clients = cfg->loops * cfg->loop_clients;  /* 0 = all */
 	if (rc == 0 && (long long)cfg->max_clients >
 	    (long long)cfg->loops * CONN_LOOP_MAX) {
 		fprintf(stderr, "rexis: --max-clients=%d needs more than %d "
 		    "loop%s: one loop holds at most %d clients (the per-loop "
-		    "proc ceiling); use --loops=%lld\n", cfg->max_clients,
+		    "client cap); use --loops=%lld\n", cfg->max_clients,
 		    cfg->loops, cfg->loops == 1 ? "" : "s", CONN_LOOP_MAX,
 		    ((long long)cfg->max_clients + CONN_LOOP_MAX - 1) /
 		    CONN_LOOP_MAX);
 		return -1;
 	}
 	return rc;
+}
+
+/* Every connection is a proc, i.e. a task: raise each loop's
+ * XTC_RES_TASKS cap (default 100,000) when the clients one loop may hold
+ * plus rexis's own procs do not fit under it. */
+static void
+loop_tasks_fit(server_t *srv, const server_cfg_t *cfg)
+{
+	int64_t want = (int64_t)cfg->loop_clients;
+	int i, n = srv->exec != NULL ? xtc_exec_n_loops(srv->exec) : 1;
+
+	if (cfg->max_clients > 0 && cfg->max_clients < cfg->loop_clients)
+		want = cfg->max_clients;
+	want += CONN_LOOP_RESERVE;
+	for (i = 0; i < n; i++) {
+		xtc_res_t *r = xtc_loop_res(srv->exec != NULL ?
+		    xtc_exec_loop(srv->exec, i) : srv->loop);
+		if (r != NULL && want > r->caps.tasks)
+			xtc_res_set_cap(r, XTC_RES_TASKS, want);
+	}
 }
 
 /* The fd budget: --max-fds, else what --max-clients needs (clients, the
@@ -759,6 +779,7 @@ main(int argc, char **argv)
 	}
 	srv->loop = xtc_app_loop(srv->app);
 	srv->exec = xtc_app_exec(srv->app);   /* NULL with one loop */
+	loop_tasks_fit(srv, &cfg);
 
 	/* Setup supervised children.  xtc_sup_start requires at least
 	 * one initial child; the listener is the natural choice. */

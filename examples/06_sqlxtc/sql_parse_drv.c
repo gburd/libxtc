@@ -412,6 +412,8 @@ sql_parse_run(const char *sql, size_t len, sql_parse_state_t *st)
 			st->err_msg = "lex error";
 			break;
 		}
+		tok.src = tok.p;
+		tok.srclen = tok.len;
 		if (t == TK_ID && tok.len >= 2 &&
 		    (tok.p[0] == '"' || tok.p[0] == '[' || tok.p[0] == '`')) {
 			dequote_id(&tok, st);
@@ -421,7 +423,7 @@ sql_parse_run(const char *sql, size_t len, sql_parse_state_t *st)
 		if (st->error) break;
 	}
 	if (!st->error) {
-		sql_token_t z = { NULL, 0 };
+		sql_token_t z = { NULL, 0, NULL, 0 };
 		SqlParse(parser, 0, z, st);   /* end-of-input */
 	}
 	SqlParseFree(parser, free);

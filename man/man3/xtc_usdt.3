@@ -1,6 +1,6 @@
 .\" Copyright (c) 2026, The XTC Project
 .\" Use of this source code is governed by the ISC License.
-.Dd October 22, 2026
+.Dd October 27, 2026
 .Dt XTC_USDT 3
 .Os
 .Sh NAME
@@ -150,9 +150,20 @@ next to
 .Pa xtc.o .
 .Ss Argument conventions
 .Bl -tag -width "object"
-.It Fa pid
-A libxtc pid in one 64-bit argument:
-.Ql loop_id << 48 | local_id << 32 | gen .
+.It Fa pid , gen
+A libxtc pid in two 64-bit arguments:
+.Fa pid
+is
+.Ql loop_id << 32 | local_id
+and the next argument is its 64-bit generation
+.Pq Fa gen , from_gen , to_gen , parent_gen , child_gen .
+The pair is the identity: the slot of an exited process is reused, with
+a higher generation.
+Both 0 is
+.Dv XTC_PID_NONE .
+Through libxtc 1.x the pid was one argument,
+.Ql loop_id << 48 | local_id << 32 | gen ;
+2.0 widened the pid to 16 bytes.
 .It Fa task
 The fiber's
 .Vt xtc_task_t *
@@ -185,24 +196,24 @@ and
 arguments of the timer probes are virtual time.
 .Ss Probes
 .Bl -tag -width 2n
-.It Sy proc-spawn Ns Pq Fa pid , parent
+.It Sy proc-spawn Ns Pq Fa pid , gen , parent , parent_gen
 A process was created
 .Pq Xr xtc_proc_spawn 3 .
 .Fa parent
 is the spawning process, 0 if it was spawned from outside one.
-.It Sy proc-start Ns Pq Fa pid , task
+.It Sy proc-start Ns Pq Fa pid , gen , task
 The process began running on its fiber.
-.It Sy proc-exit Ns Pq Fa pid , reason
+.It Sy proc-exit Ns Pq Fa pid , gen , reason
 The process finished with exit
 .Fa reason ,
 before links and monitors are notified.
-.It Sy proc-kill Ns Pq Fa target , reason
+.It Sy proc-kill Ns Pq Fa target , gen , reason
 .Xr xtc_exit_pid 3
 was called on a live process.
-.It Sy msg-send Ns Pq Fa from , to , bytes
+.It Sy msg-send Ns Pq Fa from , from_gen , to , to_gen , bytes
 A message was queued for delivery
 .Pq Xr xtc_send 3 .
-.It Sy msg-recv Ns Pq Fa pid , from , bytes
+.It Sy msg-recv Ns Pq Fa pid , gen , from , from_gen , bytes
 A process took a message from its mailbox.
 .It Sy fiber-park Ns Pq Fa task , reason , object
 A fiber is about to yield because it must wait.
@@ -330,7 +341,7 @@ or a uprobe on the function.
 .It Sy lock-wait-done Ns Pq Fa lock , kind , mode , waiter
 The caller woke up: it holds the lock, will recheck and may wait again
 (one start/done pair per sleep), or timed out.
-.It Sy sup-restart Ns Pq Fa sup , child , reason
+.It Sy sup-restart Ns Pq Fa sup , child , child_gen , reason
 A supervisor is restarting after
 .Fa child
 exited with
@@ -425,6 +436,15 @@ built with
 .Fl -enable-dtrace=sdt :
 .Bd -literal -offset indent
 bpftrace -e 'usdt:./server:xtc:fiber__park { @[arg1] = count(); }'
+.Ed
+.Pp
+Print each message's sender and receiver as loop.slot.gen pids (each pid
+is two arguments):
+.Bd -literal -offset indent
+bpftrace -e 'usdt:./server:xtc:msg__send {
+    printf("%d.%d.%d -> %d.%d.%d %d bytes\\n",
+        arg0 >> 32, arg0 & 0xffffffff, arg1,
+        arg2 >> 32, arg2 & 0xffffffff, arg3, arg4); }'
 .Ed
 .Pp
 List the probes perf sees and record one.

@@ -29,9 +29,9 @@ knob.
 
 | Limit | Value | Why |
 |---|---|---|
-| Loops per process (`pid.loop_id`) | 65,536 (`uint16_t`) | A process id is `{loop_id, local_id, gen}`; 16 bits of loop id covers one loop per core on any machine that will exist for a long time. |
-| Live processes per loop (`pid.local_id`) | 65,536 (`uint16_t`) | Per-loop slot index. With one loop per core this is 64K procs *per core*; the generation counter (below) makes reused slots safe. |
-| Process-generation counter (`pid.gen`) | 4.29 billion (`uint32_t`) | Bumped each time a slot is reused, so a stale pid to an exited process is recognized as stale rather than aliasing a new one. Wraps only after 4 billion reuses of the same slot. |
+| Loops per process (`pid.loop_id`) | 1,024 with processes at once (`LOOP_TABLE_MAX`); the id is `uint32_t` | A process id is `{loop_id, local_id, gen}`, 16 bytes since 2.0. The id itself has 32 bits; the loop registry admits 1,024 live loops hosting processes. |
+| Live processes per loop (`pid.local_id`) | 4,294,967,294 (`uint32_t`); in practice `XTC_RES_TASKS` and memory | Per-loop slot index; the table grows on demand. Through 1.x it was 16 bits, 65,536 per loop. Each live process costs a fiber stack, and a stack is two memory mappings, so more than about 32,000 per process needs `vm.max_map_count` raised on Linux. |
+| Process-generation counter (`pid.gen`) | 2^64 (`uint64_t`) | Bumped each time a slot is reused, so a stale pid to an exited process is recognized as stale rather than aliasing a new one. Does not wrap (1.x's 32 bits wrapped after 4 billion reuses of one slot: 72 minutes at a million spawns a second). |
 | Per-loop run-queue depth (`XTC_DEQUE_CAP`) | 256 (power of two) | The work-stealing deque of *immediately runnable* fibers. Not a cap on total fibers -- parked fibers are not in it. 256 is generous; a backend-shaped workload typically has under 128 in flight. |
 | lwlock backends (`XTC_LWLOCK_MAX_BACKENDS`) | 4,096 | The lightweight-lock shared/exclusive counter packs the shared count into the low 12 bits, so at most 4,096 concurrent holders -- matched to a large-but-bounded backend population. |
 | lrlock reader slots | 64 per lock (default), 4,096 global | Each left-right lock has a fixed pool of wait-free reader slots; if more distinct reader threads than slots appear, `read_begin` returns NULL ("retry later"). Size `max_readers` to your concurrent-reader count. |
@@ -80,11 +80,11 @@ you are *approaching* a limit before you hit it. See
 
 - **Total fibers/processes** has no single hard number -- it is bounded
   by the `XTC_RES_TASKS` cap and by memory, not by a structural limit
-  below 64K-per-loop. The [Isolate layer]({{ '/tnt/' | relative_url }})
+  (since 2.0; 1.x stopped at 65,536 per loop). The [Isolate layer]({{ '/tnt/' | relative_url }})
   exists precisely for populations larger than a fiber-per-entity model
   fits in memory.
 - **Cores** -- libxtc runs one loop per core via the executor; the only
-  ceiling is the 65,536 loop-id encoding, far beyond any real core count.
+  ceiling is the 1,024-loop registry, far beyond any real core count.
 
 ## Changing a structural limit
 

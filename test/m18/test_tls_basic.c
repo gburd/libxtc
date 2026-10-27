@@ -270,6 +270,57 @@ test_version_constants(const MunitParameter params[], void *data)
 }
 
 /* -------------------------------------------------------------------------
+ * Test: alpn_protos must be a well-formed wire list ("\x02h2..."), on both
+ * roles: a length byte that overstates the bytes left, or a zero length,
+ * is XTC_E_INVAL.  The mbedTLS / GnuTLS / wolfSSL decoders used to step
+ * past the string's NUL on such a list (a heap read overrun; found by
+ * test/fuzz/fuzz_tls.c), and OpenSSL's server role accepted it.  The
+ * list is an exact-size heap copy so ASan sees any read past the NUL.
+ * ----------------------------------------------------------------------- */
+static MunitResult
+test_ctx_bad_alpn(const MunitParameter params[], void *data)
+{
+	static const char *const bad[] = { "\x05h2", "\x02h2\x09http/1.1",
+	    "\x02h2\x01", "\xffx" };
+	static const char *const good[] = { "\x02h2", "\x02h2\x08http/1.1" };
+	xtc_tls_opts_t opts;
+	xtc_tls_ctx_t *ctx;
+	char *w;
+	size_t i, n;
+	int role, rc;
+
+	(void)params;
+	(void)data;
+	for (role = 0; role < 2; role++) {
+		for (i = 0; i < sizeof bad / sizeof bad[0] + 2; i++) {
+			const char *src = i < 4 ? bad[i] : good[i - 4];
+			n = strlen(src);
+			w = malloc(n + 1);
+			munit_assert_not_null(w);
+			memcpy(w, src, n + 1);
+			__builtin_memset(&opts, 0, sizeof(opts));
+			opts.size = sizeof opts;
+			opts.alpn_protos = w;
+			opts.verify_peer_mode = XTC_TLS_VERIFY_NONE;
+			ctx = NULL;
+			rc = xtc_tls_ctx_create(role ? XTC_TLS_CLIENT
+			    : XTC_TLS_SERVER, &opts, &ctx);
+			free(w);
+			if (rc == XTC_E_NOSYS)
+				return MUNIT_SKIP;      /* no TLS, or no ALPN */
+			if (i < 4) {
+				munit_assert_int(rc, ==, XTC_E_INVAL);
+				munit_assert_null(ctx);
+			} else {
+				munit_assert_int(rc, ==, XTC_OK);
+				xtc_tls_ctx_destroy(ctx);
+			}
+		}
+	}
+	return MUNIT_OK;
+}
+
+/* -------------------------------------------------------------------------
  * Suite.
  * ----------------------------------------------------------------------- */
 static MunitTest tests[] = {
@@ -290,6 +341,8 @@ static MunitTest tests[] = {
 	{ "/null_guards",          test_null_tls_guards,    NULL, NULL,
 	  MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/version_constants",    test_version_constants,  NULL, NULL,
+	  MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/ctx_bad_alpn",         test_ctx_bad_alpn,       NULL, NULL,
 	  MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

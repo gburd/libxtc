@@ -52,27 +52,16 @@ struct xtc_supervisor {
 	_Atomic int            alive;
 	_Atomic int            stop_requested;
 	_Atomic int            abandon_wait;   /* __xtc_sup_abandon_wait */
-	/* Packed xtc_pid_t. Stored by xtc_sup_start and again (same value)
+	/* Stored by xtc_sup_start and again (same value)
 	 * by the supervisor proc itself, read from any thread. */
-	_Atomic uint64_t       sup_pid;
+	xtc_atomic_pid_t       sup_pid;
 	xtc_notify_t          *stopped;
 };
-
-static uint64_t
-__sup_pid_pack(xtc_pid_t p)
-{
-	uint64_t v;
-	memcpy(&v, &p, sizeof v);
-	return v;
-}
 
 static xtc_pid_t
 __sup_pid_load(struct xtc_supervisor *sup)
 {
-	uint64_t v = atomic_load_explicit(&sup->sup_pid, memory_order_acquire);
-	xtc_pid_t p;
-	memcpy(&p, &v, sizeof p);
-	return p;
+	return xtc_atomic_pid_load(&sup->sup_pid);
 }
 
 /* The DOWN signal envelope shape we emit in xtc_proc_exit cleanup. */
@@ -464,8 +453,7 @@ __sup_entry(void *arg)
 	struct xtc_supervisor *sup = arg;
 	int i;
 
-	atomic_store_explicit(&sup->sup_pid, __sup_pid_pack(xtc_self()),
-	    memory_order_release);
+	xtc_atomic_pid_store(&sup->sup_pid, xtc_self());
 
 	for (i = 0; i < sup->n_children; i++) {
 		if (__spawn_child(sup, &sup->children[i]) != XTC_OK) {
@@ -542,8 +530,8 @@ __sup_entry(void *arg)
 			continue;
 		}
 
-		XTC_PROBE_SUP_RESTART((uintptr_t)sup, XTC_PROBE_PID(d.pid),
-		    d.reason);
+		XTC_PROBE_SUP_RESTART((uintptr_t)sup, XTC_PROBE_PID_ID(d.pid),
+		    XTC_PROBE_PID_GEN(d.pid), d.reason);
 		(void)__os_clock_mono(&now);
 		__record_restart(sup, now);
 		if (__intensity_exceeded(sup, now)) {
@@ -705,8 +693,7 @@ xtc_sup_start(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
 	 */
 	if ((rc = xtc_proc_spawn(loop, __sup_entry, sup, NULL, &pid)) != XTC_OK)
 		goto fail3;
-	atomic_store_explicit(&sup->sup_pid, __sup_pid_pack(pid),
-	    memory_order_release);
+	xtc_atomic_pid_store(&sup->sup_pid, pid);
 	*out_sup = sup;
 	return XTC_OK;
 

@@ -83,3 +83,4 @@ test_sim_btree_scan     0          16  p161/bthang: cursor hop + keyless open vs
 # version key and deleted it (an index key with 7 value bytes, rowids near
 # INT64_MAX): index lookups lost rows.  FAILED 8/8 seeds before 071053b.
 test_sim_sqlxtc_gcidx   1          8   p161/sxstore: GC must not delete 20-byte index entries; FAILS before 071053b (fixed 071053b)
+test_sim_sqlxtc_gcidx   2          1   p162: GC batch boundary resurrected a deleted row without its index entries; FAILS before 32935ea (fixed 32935ea)

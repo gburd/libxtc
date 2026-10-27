@@ -1,6 +1,6 @@
 .\" Copyright (c) 2026, The XTC Project
 .\" Use of this source code is governed by the ISC License.
-.Dd October 23, 2026
+.Dd October 27, 2026
 .Dt XTC_PROC 3
 .Os
 .Sh NAME
@@ -31,8 +31,10 @@
 .Nm xtc_proc_recovery_arm ,
 .Nm xtc_proc_critical_enter ,
 .Nm xtc_proc_at_exit ,
-.Nm xtc_down_decode
-.Nm xtc_down_decode_ex
+.Nm xtc_down_decode ,
+.Nm xtc_down_decode_ex ,
+.Nm xtc_atomic_pid_load ,
+.Nm xtc_atomic_pid_store
 .Nd BEAM-style lightweight processes with mailboxes
 .Sh SYNOPSIS
 .In xtc.h
@@ -95,6 +97,10 @@
 .Fn xtc_down_decode "const void *msg" "size_t len" "xtc_pid_t *out_pid" "int *out_reason"
 .Ft int
 .Fn xtc_down_decode_ex "const void *msg" "size_t len" "xtc_down_info_t *out"
+.Ft xtc_pid_t
+.Fn xtc_atomic_pid_load "const xtc_atomic_pid_t *a"
+.Ft void
+.Fn xtc_atomic_pid_store "xtc_atomic_pid_t *a" "xtc_pid_t pid"
 .Sh DESCRIPTION
 xtc processes are BEAM-style lightweight actors: each has an
 identity
@@ -137,24 +143,52 @@ only raw
 tasks are stealable.  Embedders that pin a worker to one loop (e.g. a
 PostgreSQL backend per loop) can rely on it.
 .Pp
-A loop holds at most 65,536 live processes.
 .Vt xtc_pid_t
-names a process by its loop and a 16-bit slot on that loop
-.Pq Fa local_id ,
-so
-.Fn xtc_proc_spawn
-on a loop that already runs 65,536 processes (every proc, including a
-supervisor and its children, counts) fails with
+is 16 bytes: a 32-bit
+.Fa loop_id
+(0 for a standalone loop, else the executor slot + 1),
+a 32-bit
+.Fa local_id
+(the process's slot on that loop) and a 64-bit
+.Fa gen
+(the slot's generation).
+A slot is reused after its process exits, with the next generation, so
+a pid kept after its process exits never names the new occupant (the
+generation does not wrap).
+Compare pids with
+.Fn xtc_pid_eq .
+A loop holds as many live processes as memory and its
+.Xr xtc_res 3
+caps
+.Pq Dv XTC_RES_TASKS , No 100,000 by default
+allow; each costs a fiber stack
+.Pq Fn xtc_set_stack_size , Xr xtc_async 3 .
+A spawn the caps refuse fails with
 .Dv XTC_E_RESOURCE
-and spawns nothing; a slot frees when its process exits.
-The ceiling is per loop, not per process tree: a server that runs one
-process per connection serves more than about 65,500 connections only
-by spreading them over several loops of an
-.Xr xtc_exec 3
-executor (examples/05_rexis does this with
-.Fl \-loops ) .
-The pid layout is part of the ABI, so the ceiling cannot be raised
-within 1.x.
+and spawns nothing.
+Through libxtc 1.x the pid was 8 bytes with a 16-bit slot, and a loop
+held at most 65,536 live processes.
+.Pp
+A pid does not fit one lock-free atomic word.
+To publish one from one thread to others, store it in an
+.Vt xtc_atomic_pid_t
+(initialize with
+.Dv XTC_ATOMIC_PID_INIT
+or zeroed memory, which holds
+.Dv XTC_PID_NONE )
+with
+.Fn xtc_atomic_pid_store
+and read it with
+.Fn xtc_atomic_pid_load .
+A load never returns a torn pid; stores from several threads are safe.
+Both are sequentially consistent, like C11
+.Fn atomic_store
+and
+.Fn atomic_load .
+Do not use
+.Vt _Atomic xtc_pid_t :
+a 16-byte C11 atomic is a call into libatomic, and is not available
+in MSVC C.
 .Pp
 .Fn xtc_proc_spawn_link
 and

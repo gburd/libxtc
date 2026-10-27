@@ -164,7 +164,7 @@ in priority order:
 1. DETERMINISM: 100%, ENFORCED (binary, not a percent).  Same seed +
    same config => byte-identical execution, every time.  Enforced by
    the determinism guard (__xtc_sim_nondeterminism traps any
-   sim-reachable real clock / unseeded RNG / env read / raw thread id)
+   sim-reachable real clock / env read / raw thread id)
    plus xtc_sim_exec_run refusing XTC_OK if a run hit one -- so every
    sim test proves its own determinism.  Any new sim-reachable
    nondeterministic primitive MUST call the guard.  Never regress this.
@@ -175,11 +175,13 @@ in priority order:
      - real/monotonic clock  -- src/os/os_time.c (__os_clock_mono's
        non-virtualized fallbacks, and __os_clock_real on BOTH the POSIX
        and Windows branches; the WALL clock is never virtualized)
-     - unseeded RNG          -- src/os/os_rand.c (__os_rand_u64's
-       auto-seed path: it mixes the clock with an ASLR-dependent
-       address, so it is unreplayable even under a virtual clock)
      - environment read      -- src/os/os_env.c (__os_env_get)
      - raw OS thread id      -- src/os/os_thread.c (__os_thread_self)
+
+   The RNG is not on the list: it is VIRTUALIZED instead (2.0).  An
+   un-seeded __os_rand_u64 / xtc_rand_u64 draw under the simulator
+   takes the run's XTC_SIM_RNG_RAND stream (src/os/os_rand.c), so it
+   replays; the guard test asserts it does not trip and does replay.
 
    CONSUMER-VISIBLE COROLLARY: xtc_clock_mono is virtualized by the
    simulator and is the clock to use on any sim-reachable path;

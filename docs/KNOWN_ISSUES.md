@@ -18,9 +18,9 @@ sizeof(T)`).  A zeroed struct (`= { 0 }`, `memset`) is now REJECTED with
 | struct | initializer | bytes | also |
 |---|---|---|---|
 | `xtc_proc_opts_t` | `XTC_PROC_OPTS_INIT` | 56 -> 56 | `link_to` removed (never read); regrouped |
-| `xtc_proc_info_t` | `XTC_PROC_INFO_INIT` | 80 -> 88 | |
+| `xtc_proc_info_t` | `XTC_PROC_INFO_INIT` | 80 -> 96 | 16-byte pid (below) |
 | `xtc_mailbox_stats_t` | `XTC_MAILBOX_STATS_INIT` | 48 -> 56 | |
-| `xtc_down_info_t` | `XTC_DOWN_INFO_INIT` | 32 -> 40 | now has a struct tag |
+| `xtc_down_info_t` | `XTC_DOWN_INFO_INIT` | 32 -> 48 | now has a struct tag; 16-byte pid (below) |
 | `xtc_runtime_info_t` | `XTC_RUNTIME_INFO_INIT` | 40 -> 48 | |
 | `xtc_loop_info_t` | (library-sized) | 32 -> 40 | read newer fields under `XTC_FIELD_OK` |
 | `xtc_loop_stats_t` | `XTC_LOOP_STATS_INIT` | 16 -> 24 | |
@@ -47,7 +47,7 @@ sizeof(T)`).  A zeroed struct (`= { 0 }`, `memset`) is now REJECTED with
 Unchanged on purpose: the frozen lock-layer structs, array element types
 the library strides at its own `sizeof` (`xtc_io_event_t`,
 `xtc_accel_dev_t`, `xtc_msg_t`, batch items/results, scheduler lanes),
-value types (`xtc_pid_t` -- which a separate 2.0 change widens --
+value types (`xtc_pid_t` -- widened to 16 bytes, see the next entry --
 `xtc_pt_t`, `xtc_waker_t`, the trace/tail records), and the experimental
 batch / scheduler-policy structs, which already carry `size, version`.
 
@@ -68,31 +68,203 @@ ones; `opts.sup.X = ...` becomes a separate `xtc_sup_opts_t` and
 `opts.sup = &it;`; `st.size` of an `xtc_fs_stat_t` becomes `st.bytes`.
 
 ---
-## OPEN (libxtc): at most 65,536 live processes per loop
+## CHANGED (2.0): the pid is 16 bytes; trace and probe formats versioned
 
-**The limit.**  `xtc_pid_t` names a process by its loop and a 16-bit
-slot on that loop (`local_id`), so one loop can hold at most 65,536 live
-processes.  `xtc_proc_spawn` on a full loop returns `XTC_E_RESOURCE` and
-spawns nothing.  Every process counts, supervisors included.  A server
-that runs one process per connection therefore stops accepting at about
-65,500 clients per loop.  rexis 1.59 stopped at exactly 65,532 clients
-(65,536 minus its supervisor, listener, expiry and metrics procs) and
-closed each connection after that without a reply.  On the same host,
-with the same client harness, Valkey held 70,002, so neither the client's
-ports nor the file-descriptor limits were the cause.
+**What changed.**  `xtc_pid_t` is `{ uint32_t loop_id; uint32_t
+local_id; uint64_t gen; }`, 16 bytes (1.x: `{ uint16_t, uint16_t,
+uint32_t }`, 8 bytes).  Source compatible for code that treats a pid as
+an opaque value and compares it with `xtc_pid_eq`; positional
+initializers `{ loop, local, gen }` keep their order.  Binary
+incompatible, and so is everything that embeds a pid: `xtc_proc_info_t`
+88 -> 96 bytes, `xtc_down_info_t` 40 -> 48, `xtc_tail_rec_t` 32 -> 40,
+`xtc_trace_rec_t`, `xtc_xpid_t` (sizes x86-64; `test/abi/layout.txt`).
 
-**Workaround.**  Spread the processes over the loops of an `xtc_exec`
-executor: each loop has its own 65,536 slots.  rexis does this with
-`--loops=N`.  It puts each connection on the least-loaded loop with room
-and refuses startup when `--max-clients` is more than its loops can hold.
-A client over the limit gets `-ERR max number of clients reached` and a
-close, as Redis sends.  Measured: `--loops=2` held 100,000 idle
-connections on one 32-vCPU x86-64 host.
+- **A pid no longer fits one 64-bit word.**  Code that published a pid
+  through an `_Atomic uint64_t` (packing `loop << 48 | local << 32 |
+  gen`) or declared `_Atomic xtc_pid_t` must use the new
+  `xtc_atomic_pid_t` with `xtc_atomic_pid_load` / `xtc_atomic_pid_store`
+  (a seqlock; a load never sees a torn pid; sequentially consistent; see
+  xtc_proc(3)).  `_Atomic xtc_pid_t` is a 16-byte C11 atomic: a call
+  into libatomic, so it fails to link without `-latomic`, and MSVC C
+  has none.  The library's own publication sites (`xtc_app` children,
+  the supervisor, gen_server) and rexis's per-fd wake table use it.
+- **USDT probes: every pid is two arguments,** `id = loop_id << 32 |
+  local_id`, then the 64-bit `gen`.  `proc-spawn(pid, gen, parent,
+  parent_gen)`, `proc-start(pid, gen, task)`, `proc-exit(pid, gen,
+  reason)`, `proc-kill(target, gen, reason)`, `msg-send(from, from_gen,
+  to, to_gen, bytes)`, `msg-recv(pid, gen, from, from_gen, bytes)`,
+  `sup-restart(sup, child, child_gen, reason)`.  A D or bpftrace script
+  that read `arg1` of `msg-send` as the destination now reads the
+  sender's generation; see xtc_usdt(3).
+- **xtc_tail binary dump: version 3** (`XTC_TAIL_VERSION`).  The stream
+  layout is the same LEB128 sequence; the values are wider, and
+  `XTC_TAIL_LOOP_NONE` is `0xFFFFFFFF` (was `0xFFFF`).
+  `tools/xtc-tail.py` reads versions 2 and 3 and refuses others; the gdb
+  `xtc-tail-dump` labels the dump by the inferior's pid width.  The
+  dial9 export keeps dial9's container version 1 and adds
+  `xtc_format = 3` to its `SegmentMetadataEvent`; its 64-bit `task_id`
+  is a grouping key, `(gen & 0xFFFF) << 48 | (loop_id & 0xFFFF) << 32 |
+  local_id`, not a pid (xtc_tail(3)).
+- `xtc_dump` and the sqlxtc admin view print the generation with
+  `%llu`.
 
-**Why it stays open.**  `xtc_pid_t` is a public struct passed by value
-(see [ABI stability]({{ '/reference/abi-stability/' | relative_url }})),
-so widening `local_id` has to wait for 2.0.  See
-[xtc_proc(3)](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_proc.3).
+**Why.**  The two limits below.  The cost was measured before deciding:
+the same tree with the 8-byte and the 16-byte pid, 5 interleaved
+repetitions on one 32-vCPU x86-64 host, changed bench_micro
+`proc_send_recv` by +1.0% (843 -> 852 ns per round trip) and the
+bench_hop cells by -1.9% to +5.2% with overlapping ranges, the same
+size as `fiber_switch`, which carries no pid.
+
+## FIXED (2.0): at most 65,536 live processes per loop
+
+**Was.**  `xtc_pid_t` named a process by its loop and a 16-bit slot on
+that loop (`local_id`), so one loop held at most 65,536 live processes
+and `xtc_proc_spawn` on a full loop returned `XTC_E_RESOURCE`.  Every
+process counted, supervisors included, so a server that ran one process
+per connection stopped accepting at about 65,500 clients per loop.
+rexis 1.59 stopped at exactly 65,532 clients (65,536 minus its
+supervisor, listener, expiry and metrics procs) and closed each
+connection after that without a reply, where Valkey held 70,002 with
+the same client harness on the same host.  The 1.x workaround was to
+spread the processes over the loops of an `xtc_exec` executor (rexis
+`--loops=N`).
+
+**Now.**  `local_id` is 32 bits.  A loop holds as many live processes as
+memory and its `xtc_res` caps allow (`XTC_RES_TASKS`, 100,000 by
+default); each costs a fiber stack.  `test_proc /pid_local_id_ceiling`
+holds 100,000 parked processes on one loop and sends each its own index
+(v1.59: `XTC_E_RESOURCE` at 65,536; 2.0: all 100,000 delivered; with
+16 KiB stacks 0.95 s and 651 MB peak RSS on a 32-vCPU x86-64 host).
+One million parked processes on one loop took 6.5 GB (6,651 bytes each,
+16 KiB stacks) and every one received its own message.  rexis on ONE
+loop held 100,000 idle connections (7.3 KB of RSS each, PING answered),
+where the 1.x build refused every client past 65,520.  A fiber stack is
+two memory mappings, so a process with more than about 32,000 live
+fibers needs `vm.max_map_count` raised above the Linux default of
+65,530.
+
+## FIXED (2.0): a pid held across 2^32 reuses of its slot named the new occupant
+
+**Was.**  A slot's generation was 32 bits.  The free list is LIFO, so
+under churn one slot takes every spawn: at a million spawns a second it
+wrapped in 72 minutes, and a pid kept that long (a cached worker pid, a
+registry entry, a message's sender) then compared equal to the process
+in that slot, so a send, link, monitor or kill reached the wrong process.
+
+**Now.**  The generation is 64 bits per slot and does not wrap.
+`test_proc /pid_gen_no_wrap` advances a free slot by 2^32 - 1
+generations through a test seam and spawns into it: on 1.x the new pid
+equals the stale one; on 2.0 they differ and a send to the stale pid
+fails with `XTC_E_INVAL`.
+
+## CHANGED (2.0): `xtc_pg_send_owned`, process-group fan-out with one copy fewer
+
+`xtc_pg_send` copies a `const` buffer once per member, so rexis
+PUBLISH, which built the frame in a heap buffer, copied it again even
+for a channel with one subscriber.  `xtc_pg_send_owned(reg, group, buf,
+size)` takes an `xtc_malloc`'d buffer and moves it to the last member
+(`xtc_send_owned`): N - 1 copies for N members, none for one.  The
+buffer is the library's on return (moved, or freed if nobody took it).
+Measured on a 32-vCPU x86-64 host, one loop, 100,000 messages, 5 runs:
+one subscriber at 64 KiB 338k -> 685k messages/s, at 4 KiB 1.74M ->
+1.94M; four subscribers at 64 KiB 121k -> 147k (with glibc's trim
+threshold pinned; with the defaults the copying publisher's
+allocate-free cycle page-faults on every message and runs at 15k).
+rexis PUBLISH uses it.
+
+## CHANGED (2.0): a kernel-TLS `xtc_tls_write` is one system call, not one per record
+
+**Before.**  With kernel TLS TX active, `xtc_tls_write` went through
+OpenSSL, whose kernel-TLS record layer issues one `write(2)` per 16 KiB
+record: 16 system calls for a 256 KiB write, and 0.71x the user-space
+TLS rate for plain writes (1329 vs 1837 MiB/s, `bench_tls_sendfile`,
+32-vCPU x86-64 host, Linux 6.12, OpenSSL 3.5.7).  The kernel's AES-GCM
+was not the cost (it uses the same vector instructions OpenSSL does),
+nor the SIGPIPE bracket (0.1% of the sender's samples).
+
+**Now.**  When OpenSSL has nothing of its own to send (handshake done,
+no close_notify sent, no KeyUpdate pending, no `SSL_write` waiting to
+be retried), `xtc_tls_write` writes the plaintext to the socket itself
+and the kernel frames the records: one `write(2)` for 256 KiB
+(`test_tls_ktls` /roundtrip asserts at most 4; before: 16).  Measured,
+5 runs interleaved: 1593 MiB/s (1523..1681), sender CPU 0.639 s/GiB
+(0.769 before), 0.87x user-space TLS.  A `write(2)` of the same
+plaintext to the kernel-TLS socket with neither libxtc nor OpenSSL in
+the path measures the same (1525 MiB/s, 1503..1796), so the remaining
+gap is the kernel's.  A dead peer is reported as before (`XTC_E_IO`).
+`xtc_tls_sendfile` is unchanged (2106 MiB/s) and remains the reason to
+enable kernel TLS.
+
+## CHANGED (2.0): `xtc_rand_u64` replays under the simulator; sqlxtc `random()`, `randomblob()`
+
+**Before.**  A thread that never called `xtc_rand_seed` seeded its
+stream from the clock and the address of its state cell, which no seed
+reproduces, so under the deterministic simulator the determinism guard
+trapped every such draw and a sim-reachable path could not use the
+RNG.  sqlxtc declined `randomblob()` and `random()` for that reason.
+
+**Now.**  Under the simulator an un-seeded thread draws from the run's
+own stream (`XTC_SIM_RNG_RAND`, reset by every `xtc_sim_activate`), so
+its values are a function of the run's seed and replay, the way
+`xtc_clock_mono` is virtualized.  A thread that called
+`xtc_rand_seed` keeps the sequence it asked for.  Off the simulator
+nothing changed.  The RNG is no longer a guarded class:
+`test_sim_determinism_guard` now asserts that an un-seeded draw does
+not trip the guard and replays, and `test_sim_rand` checks replay over
+8 seeds x 4 fibers on 2 loops.
+
+sqlxtc implements `random()` (a 64-bit value, never -2^63, as SQLite)
+and `randomblob(N)` (N random bytes, at least 1; N must be a constant
+of at most 1 MiB, as for `zeroblob`).  A `random()` in a WHERE clause is
+evaluated per row, never used as an index seek bound.  Both replay
+under the simulator (`test_sim_sql_now`).  They are not cryptographic.
+
+## FIXED (2.0): one hot `xtc_amutex` shared by many plain threads
+
+**The problem (1.59).**  With 16-128 OS threads (not fibers) contending
+for one `xtc_amutex`, throughput was up to 52% below 1.58 (perf gate
+cell `lock_amutex_w64`, accepted for 1.59).  1.59 woke a sleeper on
+every release, so the lock never sat free while a woken thread left a
+deep CPU idle state (that had cost the sqlxtc ledger 35-50%), but on a
+hot mutex the woken thread lost it to a spinning thread and slept again:
+3.2 context switches per acquire.
+
+**The fix.**  A release that frees the mutex while another thread is
+spinning on it no longer wakes a sleeper: the spinner takes the mutex
+within its spin, so the mutex is not left free.  At most 8 releases in
+a row skip the wake, so a sleeper still gets a turn on a mutex that
+always has a spinner.  `xtc_arwlock` is unchanged.  Measured on a
+64-vCPU x86-64 host, 3 reps x 3 s interleaved, median acquires/s
+(`bench_sync_offloop amutex w N`, the perf gate's arguments):
+
+| threads | 1.58 | 1.59 | 2.0 | 2.0, C1E+C6 on |
+| --- | --- | --- | --- | --- |
+| 4 | 794k | 947k | 989k | 1,018k |
+| 16 | 484k | 252k | 519k | 512k |
+| 64 | 486k | 247k | 523k | 411k |
+| 128 | 485k | 243k | 538k | 427k |
+
+The first three columns ran with the deep idle states C1E and C6
+disabled, as the perf gate requires; the last with them enabled (1.58
+there: 491k / 383k / 326k at 16 / 64 / 128, 1.59: 252k / 213k / 204k).
+Context switches per 1,000 acquires at 64 threads: 1.58 1,814, 1.59
+3,249, 2.0 678.  The arwlock cells did not move.
+
+**What it costs.**  The sqlxtc ledger (transfer and blend, 8 and 64
+clients) is unchanged with the deep idle states off (every cell within
+1%, ranges overlapping).  With C1E and C6 on, transfer at 64 clients is
+4.5% lower (45.0k vs 47.1k txn/s, median of 10 runs each, ranges
+overlapping) and blend at 64 2% lower: a sleeper whose wake was skipped
+later needs ~100 us to come out of C6.  Acquire p99 at 64 threads is
+1.2 ms (1.59: 1.4 ms, 1.58: 0.75 ms).
+
+**If many plain threads must share one mutex, fibers are still faster.**
+Fibers on one loop never block an OS thread: a contended fiber parks and
+the release hands the mutex to it in the same thread (1.59, same host:
+2.45-2.49M acquires/s at 4-64 fibers, `bench_amutex_fibers`).  Fibers
+spread over many loops bring the cross-thread hand-off back, so
+co-locate the fibers that share one hot lock on one loop, or shard the
+lock.
 
 ## FIXED (1.60): sqlxtc SELECT prepares serialized on one lock; write-tail stalls
 
@@ -181,6 +353,36 @@ the stderr report ("sqlxtc btree: ... gave up"), keep the store and the
 report and file an issue: the page id in the report is where to look.
 New DST coverage of scans racing merges and page-id reuse:
 test_sim_btree_scan.
+
+## FIXED (2.0): sqlxtc ALTER TABLE RENAME could corrupt the table's schema
+
+Since ALTER TABLE RENAME was added (1.x, 2026-06), the rename read the
+old catalog value into a stack buffer that was not NUL-terminated and
+took the column list with strlen, so stale stack bytes could be
+appended to the renamed table's schema.  When that happened, every
+INSERT into the renamed table failed with "unsupported SQL (native
+engine)", and the damaged schema was persisted.  Whether it happened
+depended on the stack's contents (`test_cat_reopen` failed about 1 run
+in 200 under CPU contention).  Fixed; the test now poisons the stack
+before the rename and fails deterministically without the fix.  The
+fix does not repair a schema an affected build already persisted (the
+row data itself was never touched); such a table must be recreated.
+
+## FIXED (2.0): the clean-close version GC could bring back a deleted sqlxtc row
+
+Never in a release: introduced by the 1.60 candidate's clean-close
+version GC (31d1ef8) and fixed before 2.0.  The version GC (xs_gc)
+collects dead version keys in batches of 512 and restarted its per-row
+state at every batch, so a batch that ended right after a deleted row's
+tombstone treated that row's older versions as a new row and kept one:
+the deleted row came back, without its secondary-index entries.  The
+GC had always had the flaw; a GC pass rarely held 512 dead keys until
+the clean close ran it over a whole store.  `test_crash_oracle` caught
+it under CPU contention ("rows missing from an index" after an open);
+unloaded it passed.  Fixed by keeping the row state across batches;
+`test_close_prune` and `test_sim_sqlxtc_gcidx` (now with small GC
+batches) fail without the fix, planted bug 23 (GCBATCH) is caught by
+DST, and `test_sim_sqlxtc_gcidx 2 1` is pinned in the seed corpus.
 
 ## FIXED (2.0): a fired park timer could release a newer timer of a migrated fiber
 
@@ -491,35 +693,6 @@ be its cause, so it stays open.
 
 ## OPEN (1.59): known costs of the 1.59 performance work
 
-* **One hot `xtc_amutex` shared by many plain threads is slower.**  With
-  16-128 OS threads (not fibers) contending for one mutex, throughput is
-  up to 52% below 1.58 (`bench_sync_offloop amutex w`).  1.59 wakes a
-  sleeper on every release instead of keeping one wake in flight,
-  because the in-flight rule left the lock free while the woken thread
-  was still leaving a deep CPU idle state; that made the sqlxtc ledger
-  workloads 35-50% slower on hosts with deep idle states enabled.  The
-  woken thread now often loses the mutex to a spinning one and sleeps
-  again.  `xtc_arwlock` and workloads over several locks are 1.6-12x
-  faster than 1.58.
-
-  **Workaround: fewer threads on one mutex, or fibers.**  Measured on a
-  64-vCPU x86-64 host (deep idle states off, 5 reps, median ops/s, one
-  short critical section per acquire):
-
-  | contenders | plain OS threads | fibers, all on 1 loop | fibers over 8 loops |
-  | --- | --- | --- | --- |
-  | 4 | 1.04M | 2.45M | 0.20M |
-  | 16 | 0.26M | 2.48M | 0.25M |
-  | 64 | 0.25M | 2.49M | 0.31M |
-
-  Fibers on one loop never block an OS thread: a contended fiber parks
-  and the release hands the mutex to it in the same thread, 10x the
-  plain-thread rate at 16-64 contenders.  Fibers spread over many loops
-  bring the cross-thread hand-off back, so co-locate the fibers that
-  share one hot lock on one loop (`xtc_proc_spawn` on that loop), or
-  shard the lock.  If they must be plain threads, keep the number that
-  contend for one mutex small (4 above: 1.04M).  `bench_amutex_fibers`
-  measures the fiber cases.
 * **The store is larger than SQLite's on disk.**  Measured on stores
   each engine built from the same load (allocated blocks, XFS):
 
@@ -1248,7 +1421,7 @@ test_lockmgr) is 0 errors with no stack-switch warnings.
 
 **Still not memcheck targets.**  `test_proc`'s fault-containment cases
 write to address 0x10 on purpose; its `pid_local_id_ceiling` case holds
-65,536 fiber stacks, more mappings than valgrind tracks (`VG_N_SEGMENTS
+100,000 fiber stacks, more mappings than valgrind tracks (`VG_N_SEGMENTS
 is too low`).  `test_exec`'s `Blk2_concurrent_commit` spins on a shared
 lock across a blocking offload and does not finish in 15 minutes under
 valgrind.  The timing tests in `test_sync` still skip under
@@ -2869,38 +3042,19 @@ support SIGEV_KEVENT completion on regular files anyway.  The macOS CI
 job (macos-latest, Apple Silicon) builds and runs the full C suite
 green on every commit.
 
-## pbt-hegel CI job fails on ubuntu-24.04 with no output (OPEN, advisory)
+## RESOLVED: pbt-hegel CI job failed on ubuntu-24.04 with no output
 
-**Status:** OPEN. The job is `continue-on-error: true` so it does not block
-merges; the property tier itself is verified and passing.
+**Status:** RESOLVED (2.0); the job is a merge gate again (no longer
+`continue-on-error`).
 
-The property tier works. All 36 properties across 17 suites build and pass
-under `--with-hegel`, verified locally in several configurations:
+The job once exited 2 printing nothing, which could not be reproduced
+locally.  The cause was the job itself: `out=$(make ...)` under `set -e`
+aborted the step before the captured output was printed.  Once the step
+captured the status explicitly and always printed, the last failing runs
+(2026-09-15) showed a real property failure (`[PBT] alloc/hook_balanced
+FAIL`), fixed that day by a1c57151 (the allocator hook vtable is copied
+and all six callbacks are required).  From then to 2026-10-26 the job
+passed 54 of 54 GitHub runs (one more was cancelled together with its
+whole run), all 36 properties across 17 suites, so `continue-on-error`
+was removed: a property failure blocks a merge again.
 
-- `--with-hegel` via pkg-config (the `nix develop` path);
-- `--with-hegel=PREFIX` with a hand-assembled prefix (header + `.so` copied
-  in), which is exactly what the CI job constructs;
-- with `LD_LIBRARY_PATH` unset, confirming `configure`'s `-Wl,-rpath` for the
-  explicit-prefix case is sufficient;
-- under CI's `-Werror -Wall -Wextra -Wpedantic`, in both the hegel-enabled
-  and default (SKIP-stub) builds.
-
-On the `ubuntu-24.04` runner, `make -C build_pbt tests-pbt` exits **2 with no
-output whatsoever** -- not a compile error, not a property failure, not a SKIP.
-The job now always prints the captured output before deciding (an earlier
-version lost it to `set -e` around `out=$(make ...)`), and there is still
-nothing to print, which suggests make itself fails before running a recipe.
-
-Unverified hypotheses, in the order worth testing:
-
-1. The `Build the library` step and this step disagree about the build
-   directory or a generated file, so make has nothing to do and errors.
-2. Something in the runner image's `make`/`sh` differs enough that the
-   `tests-pbt` recipe's `$$((...))` arithmetic or `case` fails immediately.
-3. The libhegel `.so` fetched by `curl` is fine to link against but the
-   runner's loader rejects it at first use in a way that kills make's
-   subshell without output.
-
-Anyone picking this up: reproduce on an actual ubuntu-24.04 container rather
-than a nix shell, which is where every local attempt succeeded and therefore
-where the difference is invisible.

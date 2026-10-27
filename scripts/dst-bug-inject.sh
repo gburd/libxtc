@@ -85,6 +85,7 @@ write_cases() {
 		"20;test_sim_sqlxtc_ckpt;1;1;after crash recovery: (DURABILITY: row [0-9]+ lost|row [0-9]+ is \\(g|row [0-9]+ present, oracle|ATOMICITY)" \
 		"21;test_sim_sqlxtc_gc;1;1;SNAPSHOT: " \
 		"22;test_sim_btree_scan;0;1;FAIL: seed 0x[0-9a-f]+ \\((benign|adversarial)\\): .* skipped=[1-9]" \
+		"23;test_sim_sqlxtc_gcidx;1;1;(index [0-9]+, scan [0-9]+|entries missing)" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -112,6 +113,7 @@ write_cases() {
 # 21 PRUNEHZN   xstore.c prunes AT the horizon   -> a snapshot reads exactly its versions
 # 22 SHIFTLO    btree.c resume skips lo-fence chk -> a scan skips no live key across a left shift
 #               (test_sim_btree_scan #includes btree.c, so no engine objects are needed)
+# 23 GCBATCH    xstore.c GC restarts a row per batch -> no deleted row comes back
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

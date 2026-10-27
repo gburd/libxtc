@@ -64,19 +64,24 @@ state and buffers -- there is no shared connection table to lock. By
 default all of them run on ONE `xtc_loop` (one OS thread), like Redis.
 `--loops=N` spreads the connection processes over the N loops of an
 `xtc_exec` executor: each connection goes to the least-loaded loop, and
-the keyspace, now shared by N threads, takes one parking reader/writer
-latch (`xtc_arwlock`) per command, so writes are still serialized.
+the keyspace, now shared by N threads, is cut into 64 shards by key hash,
+each with its own parking reader/writer latch (`xtc_arwlock`). A command
+latches only its keys' shards, so writes to different keys run in
+parallel: SET at `--loops=4` measured 1.60M/s, against 0.14M/s with one
+latch for the whole keyspace (one loop: 0.89M/s).
 
-Spreading is also how rexis gets past a hard per-loop limit. A pid
-names its process by loop and a 16-bit slot (`xtc_pid_t.local_id`), so
-one loop runs at most 65,536 processes (see
+Through libxtc 1.x, spreading was also the only way past a hard
+per-loop limit: a pid named its process by loop and a 16-bit slot, so
+one loop ran at most 65,536 processes, and rexis 1.59 on one loop
+stopped at 65,532 clients, closing every later connection without a
+reply. libxtc 2.0's pid has a 32-bit slot (see
 [xtc_proc(3)](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_proc.3)
-and the [known issues]({{ '/reference/known-issues/' | relative_url }})).
-rexis 1.59 ran one loop and stopped at 65,532 clients, closing every
-later connection without a reply. Now one loop takes 65,520 clients, a
-client over any limit gets Redis's `-ERR max number of clients reached`,
-and `--loops=2` held 100,000 idle connections in a measurement on one
-32-vCPU host.
+and the [known issues]({{ '/reference/known-issues/' | relative_url }})),
+so the per-loop client cap is a configured number (`--loop-clients`), and
+ONE loop held 100,000 idle connections (7.3 KB of RSS each, 5 CPU ticks
+per 10 s idle, PING answered) on one 32-vCPU host, where the 1.x build
+refused every client past 65,520. A client over any limit gets Redis's
+`-ERR max number of clients reached`.
 
 An idle connection must also cost nothing while it waits. Each connection
 process used to wake once a second to look at the shutdown flag: 100,000
@@ -84,7 +89,10 @@ idle connections then took half a core and a third of the throughput
 left for the active clients. Now an idle process parks on its socket with
 no deadline, and shutdown wakes each one explicitly. That costs one
 `xtc_proc_wake` per connection at exit instead of 100,000 timer wakes per
-second.
+second. Nor does it hold buffers it has not used: the 16 KiB query and
+output buffers are allocated by the first read and the first reply, so a
+connection that has sent nothing costs about 7.3 KB of RSS (15.7 KB when
+both were allocated at accept; 20,000 idle connections, `--loops=2`).
 
 ## How it works
 

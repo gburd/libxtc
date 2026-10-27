@@ -207,8 +207,10 @@ alpn_decode(const char *wire, char ***out)
 	size_t               i;
 
 	*out = NULL;
+	if (!xtc_tls_alpn_wire_ok(wire))
+		return XTC_E_INVAL;
 
-	/* First pass: count protocols and validate framing. */
+	/* First pass: count protocols. */
 	while (wire[off] != '\0') {
 		size_t l = (unsigned char)wire[off];
 		if (l == 0)

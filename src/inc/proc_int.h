@@ -42,6 +42,10 @@ int __xtc_exit_pid_on(xtc_loop_t *owner, xtc_pid_t target, int reason);
 int __xtc_send_on(xtc_loop_t *owner, xtc_pid_t to, const void *data,
     size_t size);
 
+/* Test seam: set the generation of a FREE slot on `loop` (see proc.c). */
+int __xtc_proc_slot_gen_set(xtc_loop_t *loop, uint32_t local_id,
+    uint64_t gen);
+
 /*
  * Save / restore the current-proc context across a yield done by a
  * lower-level primitive (e.g. xtc_amutex parking the fiber), so the

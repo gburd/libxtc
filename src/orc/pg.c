@@ -66,14 +66,15 @@ pg_collect_cb(xtc_pid_t pid, void *user)
 	return 0;
 }
 
-int
-xtc_pg_send(xtc_reg_t *reg, const char *group, const void *msg, size_t size)
+/* Send to every member; `owned` (== msg) moves to the last member the
+ * message reaches instead of being copied for it.  *taken = 1 when it
+ * did (else the caller still owns it). */
+static int
+pg_send(xtc_reg_t *reg, const char *group, const void *msg, size_t size,
+    void *owned, int *taken)
 {
 	struct pg_collect c;
 	int i, sent = 0;
-
-	if (reg == NULL || group == NULL) return 0;
-	if (size > 0 && msg == NULL) return 0;
 
 	c.pids = NULL;
 	c.n = 0;
@@ -82,11 +83,47 @@ xtc_pg_send(xtc_reg_t *reg, const char *group, const void *msg, size_t size)
 	(void)xtc_reg_members(reg, group, pg_collect_cb, &c);
 
 	for (i = 0; i < c.n; i++) {
-		if (xtc_send(c.pids[i], msg, size) == XTC_OK)
+		/* Copies for all but the last member; it gets the buffer
+		 * itself.  A dead last member refuses the move, so the
+		 * buffer stays the caller's (and the previous members
+		 * already have their copies). */
+		if (owned != NULL && i == c.n - 1) {
+			if (xtc_send_owned(c.pids[i], owned, size) == XTC_OK) {
+				*taken = 1;
+				sent++;
+			}
+		} else if (xtc_send(c.pids[i], msg, size) == XTC_OK) {
 			sent++;
+		}
 		/* a dead member's send fails harmlessly; skip it */
 	}
 	if (c.pids != NULL)
 		__os_free(c.pids);
+	return sent;
+}
+
+int
+xtc_pg_send(xtc_reg_t *reg, const char *group, const void *msg, size_t size)
+{
+	int taken = 0;
+
+	if (reg == NULL || group == NULL) return 0;
+	if (size > 0 && msg == NULL) return 0;
+	return pg_send(reg, group, msg, size, NULL, &taken);
+}
+
+int
+xtc_pg_send_owned(xtc_reg_t *reg, const char *group, void *buf, size_t size)
+{
+	int taken = 0, sent;
+
+	if (reg == NULL || group == NULL || buf == NULL) {
+		if (buf != NULL)
+			__os_free(buf);
+		return 0;
+	}
+	sent = pg_send(reg, group, buf, size, buf, &taken);
+	if (!taken)
+		__os_free(buf);
 	return sent;
 }
