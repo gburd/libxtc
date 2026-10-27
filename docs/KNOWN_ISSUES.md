@@ -68,6 +68,75 @@ ones; `opts.sup.X = ...` becomes a separate `xtc_sup_opts_t` and
 `opts.sup = &it;`; `st.size` of an `xtc_fs_stat_t` becomes `st.bytes`.
 
 ---
+## CHANGED (2.0): involuntary preemption is EXPERIMENTAL, in its own header, and yields only at safe points
+
+**What changed.**  `xtc_preempt_set_involuntary` moved from
+`xtc_preempt.h` (stable) to `xtc_preempt_involuntary.h` (`@stability
+experimental`), and now returns `int`.  New in that header:
+`xtc_preempt_involuntary_supported()`, `xtc_preempt_region_add()` and the
+`XTC_PREEMPTIBLE` function attribute.  See `xtc_preempt_involuntary(3)`.
+
+**Safe points.**  A tick now yields a fiber only at a PC inside a
+preemptible range: the main executable's code (when libc is a shared
+object), `XTC_PREEMPTIBLE` functions, and added regions.  Never libc,
+other shared libraries or libxtc.  Before, any instruction was fair game,
+and code compiled for a thread broke when a loop-mate ran in the middle of
+it: 4 fibers doing plain `malloc`/`free` under a 5 us forced tick aborted
+("malloc(): unaligned tcache chunk detected") or crashed within a second,
+every run, on both substrates; 4 fibers `fprintf`-ing to one `FILE` tore
+936 of 600,000 lines.  Both are clean now (`test_preempt_safe
+/libc_malloc`, `/libc_stdio`).  A runaway that spends most of its time in
+`memset` is still sliced (`/fairness`).  The check costs about 3 ns per
+tick (`/tick_cost`), against microseconds for the signal itself; compute
+throughput with the timer at 20 us is unchanged (5 interleaved runs each,
+before 980,535 [980,229-982,727] iterations, after 980,668
+[980,361-981,071]; the CPU-time timer fired about 250 times a second, the
+host's scheduler tick).
+
+**Static executables.**  libc then lies in the main text, which is not
+trusted: with no `XTC_PREEMPTIBLE` function and no added region, enabling
+returns `XTC_E_NOSYS` and says why on stderr (`test_preempt_static.sh`).
+libxtc's own code inside a static link is excluded by section: the build
+renames `libxtc.a`'s text to `xtc_text` with objcopy (configure finds it;
+a build without it refuses to enable).
+
+**What to do.**  Check the return of `xtc_preempt_set_involuntary(1)`.
+Include `xtc_preempt_involuntary.h`.  A fiber whose hot loop lives in a
+shared library is sliced only by the ticks that land in its own code; mark
+its own compute functions `XTC_PREEMPTIBLE` or keep a yield point in the
+loop.
+
+## FIXED (2.0): an involuntary yield leaked machine state between fibers
+
+The preemption trampoline restored the interrupted state exactly, but
+the scheduler and every fiber it ran in the slice inherited whatever the
+interrupted code had live in the state the ABI fixes at a call, and the
+interrupted code lost per-thread state a loop-mate changed.  Each case is
+forced by a tick at a chosen instruction (`test_preempt_p2 /tick_*`,
+`/a64_tick_*`, 64 ticks each):
+
+* **x86-64 DF.**  A tick inside a backward copy (`std; rep movsb`, glibc's
+  `memmove`) left DF set for the scheduler and its fibers: their forward
+  `memcpy`/`memset` ran backwards from the destination (64 of 64 ticks).
+* **x86-64 AC.**  AC set at the tick made the scheduler's first misaligned
+  access a SIGBUS.
+* **x86-64 x87 stack (fcontext).**  `jump_fcontext` reloads only the x87
+  control word, so the next fiber started with the interrupted code's
+  loaded x87 slots and its x87 math overflowed to NaN (64 of 64).
+* **errno (x86-64 and aarch64).**  A loop-mate's `errno` replaced the
+  preempted code's own between its failed call and its errno test (64 of
+  64).
+* **x86-64 PKRU.**  The preempted code resumed with the protection-key
+  rights (`xtc_pkey`) a loop-mate set (64 of 64): PKRU is now in the
+  XSAVE mask.
+* **aarch64 SME.**  A tick in streaming mode or with ZA live ran the
+  scheduler and its fibers in streaming mode; their first Advanced SIMD
+  instruction faults without FEAT_SME_FA64.  The trampoline now leaves
+  streaming mode and turns ZA off before yielding (tested under qemu-user
+  only: no SME hardware was available).
+* Clean AVX upper halves (`vzeroupper`) are handed to the scheduler too:
+  not an ABI rule, but dirty upper state taxes SSE code.
+
 ## OPEN (libxtc): at most 65,536 live processes per loop
 
 **The limit.**  `xtc_pid_t` names a process by its loop and a 16-bit
@@ -501,9 +570,29 @@ a fiber updates must be bracketed against it.  1.58 missed several:
 Each has a test that raises the real preemption signal inside the
 window (test_preempt_p2, test_slab, test_wal_crc_once).  The
 test_wal_kill preemption sweep went from 8 hangs in 4,000 runs to none
-in 28,000.  The opt-in item below ("involuntary preemption corrupts a busy
-same-loop pair") no longer reproduces, but these fixes are not proven to
-be its cause, so it stays open.
+in 28,000.
+
+* **The x86-64 trampoline clobbered the condition flags** (a98816b6).  Its
+  first instruction was `subq $128, %rsp`, BEFORE the `pushfq` that saved
+  RFLAGS, and its last was `addq $128, %rsp`, AFTER the `popfq`: the
+  preempted code resumed with the flags of an add/sub of 128 (ZF, CF, SF,
+  OF all clear) instead of its own.  A tick between a flag-setting
+  instruction and its conditional jump took the wrong branch.  This was the
+  "busy same-loop pair" of 1.55/1.56 (an mpsc producer and consumer on one
+  loop, both preempted): no shared structure was corrupted; the stalls were
+  a producer re-sending after a successful `try_send` (its rc test flipped)
+  or a consumer not counting a received message, and the "stack smashing
+  detected" aborts were the canary epilogue's `sub %fs:0x28,%reg; jne
+  __stack_chk_fail` taking the jump.  Proven on the v1.56.0 tag with a
+  kicker thread forcing a tick every 5 us (4 rounds x 30 runs x 100
+  iterations): v1.56.0 18/120 runs failed, v1.56.0 with only those two
+  instructions made flag-neutral (`leaq`) 0/120; with
+  `-fstack-protector-strong` 30/120 (18 "stack smashing") against 0/120.
+  The parent of a98816b6 failed 17/120, a98816b6 0/120.
+  `/m7/chan/mpsc_involuntary_preempt` stays opt-in only because its natural
+  CPU-time ticks almost never land between a flag set and its jump;
+  `test_preempt_p2 /red_zone_flags` and the forced-tick guards below are the
+  sensitive checks, in `make check`.
 
 ## OPEN (1.59): known costs of the 1.59 performance work
 
@@ -1220,25 +1309,6 @@ isolation defects were fixed (1.56); what remains is recorded here.
   io_uring for many mostly-idle connections.
 * There is no built-in TLS handshake or idle timeout.  Bound them with
   `xtc_proc_wait_fd` timeouts; `xtc_tls(3)` DEADLINES shows the pattern.
-
-## OPEN: involuntary preemption corrupts a busy same-loop pair (x86-64 ucontext)
-
-**Status:** OPEN, pre-existing (1.55.0 identical).  Involuntary
-preemption is opt-in (`xtc_preempt_set_involuntary(1)`); the default,
-cooperative preemption, is not affected.
-
-**What happens.**  A producer and consumer on ONE loop, both preempted by
-the signal timer (`xtc_preempt_arm(20000)`) while they spin on an mpsc
-channel, either stall (the loop thread runs, the channel is empty, the
-consumer never sees the last message) or abort with "stack smashing
-detected" inside `xtc_yield` (`coro_uctx.c`).  On floki (x86-64 glibc
-ucontext) a 1-loop reproducer stalled 9/12 and aborted 3/12 on the 1.56
-candidate and 10/12 and 2/12 on 1.55.0; `-mno-red-zone` does not help.
-GitHub CI's sched-policy job hit it in `/m7/chan/mpsc_involuntary_preempt`.
-
-**What to do.**  Do not enable involuntary preemption in production.
-The test is opt-in (`XTC_TEST_INVOLUNTARY=1`) until the signal-context
-redirect path is fixed.
 
 ## RESOLVED (2.0): valgrind memcheck reported libxtc fiber stacks as invalid
 

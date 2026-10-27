@@ -38,6 +38,7 @@
 
 #include "xtc_exec.h"
 #include "xtc_preempt.h"
+#include "xtc_preempt_involuntary.h"
 #include "t_tmp.h"
 
 #define NL        4

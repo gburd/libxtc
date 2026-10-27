@@ -26,6 +26,7 @@
 
 #include "xtc.h"
 #include "xtc_preempt.h"   /* xtc_preempt_ticks, used inside the hook */
+#include "xtc_preempt_involuntary.h"
 
 static volatile unsigned long g_spin;
 static atomic_int g_in_init;

@@ -7,6 +7,7 @@
 #include "xtc_accel.h"
 #include "xtc_inspect.h"
 #include "xtc_preempt.h"
+#include "xtc_preempt_involuntary.h"
 #include "preempt_int.h"
 #include "xtc_async.h"
 #include "xtc_blocking.h"

@@ -62,6 +62,16 @@ AC_PROG_CC
 AC_PROG_INSTALL
 AC_PROG_RANLIB
 AC_PROG_AWK
+# objcopy renames libxtc.a's text to the xtc_text section so involuntary
+# preemption can exclude libxtc's own code in a static link (Linux ELF
+# only, where the redirect exists; see src/ptc/preempt.c SAFE POINTS).
+# Without it a static-libxtc program cannot enable involuntary
+# preemption (XTC_E_NOSYS); a shared libxtc does not need it.
+XTC_OBJCOPY=
+case "$host_os" in
+  linux*) AC_CHECK_TOOL([XTC_OBJCOPY], [objcopy], []) ;;
+esac
+AC_SUBST([XTC_OBJCOPY])
 
 # -------------------------------------------------------------------------
 # Optional shared library.  Default off so the historical static-only

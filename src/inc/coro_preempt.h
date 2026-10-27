@@ -48,6 +48,8 @@
 #if defined(XTC_CORO_REDIRECT_X86_64) || defined(XTC_CORO_REDIRECT_AARCH64)
 #include <signal.h>
 #include <ucontext.h>    /* the signal-delivered ucontext_t (mcontext) */
+/* 1 if an involuntary yield may land at pc (preempt.c, SAFE POINTS). */
+extern int __xtc_preempt_pc_ok(uintptr_t pc);
 #endif
 
 /*
@@ -218,6 +220,9 @@ __coro_preempt_redirect_x86_64(void *uctx)
 	if (orig_pc >= (greg_t)(uintptr_t)&__xtc_preempt_trampoline &&
 	    orig_pc <  (greg_t)(uintptr_t)&__xtc_preempt_trampoline_end)
 		return 0;
+	/* Not a safe point: libc, another library, libxtc (preempt.c). */
+	if (!__xtc_preempt_pc_ok((uintptr_t)orig_pc))
+		return 0;
 
 	/*
 	 * Enter the trampoline BELOW the interrupted code's 128-byte red
@@ -283,6 +288,8 @@ __coro_preempt_redirect_aarch64(void *uctx)
 	if (pc >= (unsigned long long)(uintptr_t)&__xtc_preempt_trampoline &&
 	    pc < (unsigned long long)(uintptr_t)&__xtc_preempt_trampoline_end)
 		return 0;
+	if (!__xtc_preempt_pc_ok((uintptr_t)pc))
+		return 0;   /* not a safe point (preempt.c) */
 	/* The frame starts with the siginfo; the ucontext follows it.  It
 	 * must be the kernel's frame on THIS fiber's stack, below the
 	 * interrupted sp (anything else, say a handler on an alternate

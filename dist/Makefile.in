@@ -51,6 +51,12 @@ XTC_VERSION_FULL  = @XTC_VERSION_FULL@
 XTC_VERSION_MAJOR = @XTC_VERSION_MAJOR@
 AR		= ar
 RANLIB		= @RANLIB@
+# objcopy (empty where configure found none, or off Linux): renames the
+# archive's text to the xtc_text section, bounded by __start_xtc_text /
+# __stop_xtc_text, so involuntary preemption can tell libxtc's own code
+# from the application's in a static link (src/ptc/preempt.c, SAFE
+# POINTS).  The shared library needs no rename: it is a separate object.
+XTC_OBJCOPY	= @XTC_OBJCOPY@
 INSTALL		= @INSTALL@
 INSTALL_DATA	= @INSTALL_DATA@
 INSTALL_PROGRAM	= @INSTALL_PROGRAM@
@@ -331,6 +337,7 @@ LIB_HDRS_PUBLIC	= \
 	$(srcdir)/../src/inc/xtc_osproc.h \
 	$(srcdir)/../src/inc/xtc_pdict.h \
 	$(srcdir)/../src/inc/xtc_preempt.h \
+	$(srcdir)/../src/inc/xtc_preempt_involuntary.h \
 	$(srcdir)/../src/inc/xtc_pkey.h \
 	$(srcdir)/../src/inc/xtc_proc.h \
 	$(srcdir)/../src/inc/xtc_rcu.h \
@@ -401,6 +408,7 @@ TESTS_SH	= \
 	$(abs_top_srcdir)/../test/dist/test_s_async.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_layer.sh \
 	$(abs_top_srcdir)/../test/dist/test_lib_closure.sh \
+	$(abs_top_srcdir)/../test/m14/test_preempt_static.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_noalloc.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_cfg.sh \
 	$(abs_top_srcdir)/../test/dist/test_m17_smoke.sh \
@@ -496,6 +504,7 @@ TESTS_C		= test_sched_policy test_sched_continuous test_batch test_version test_
 		  test_preempt_p1 \
 		  test_preempt_ring \
 		  test_preempt_p2 \
+		  test_preempt_safe \
 		  test_launch \
 		  test_cfg \
 		  test_stall \
@@ -564,6 +573,13 @@ compile_commands.json: Makefile
 
 $(STATIC_LIB): $(LIB_OBJS) $(XTC_PROBES_OBJ)
 	$(AR) rcs $@ $(LIB_OBJS) $(XTC_PROBES_OBJ)
+	if test -n "$(XTC_OBJCOPY)"; then \
+		$(XTC_OBJCOPY) --rename-section .text=xtc_text \
+		    --rename-section .text.unlikely=xtc_text \
+		    --rename-section .text.hot=xtc_text \
+		    --rename-section .text.startup=xtc_text \
+		    --rename-section .text.exit=xtc_text $@ || exit 1; \
+	fi
 	$(RANLIB) $@
 
 # The probe header, from src/xtc_probes.d.  Only named as a prerequisite
@@ -2113,6 +2129,12 @@ test_preempt_p2: $(srcdir)/../test/m14/test_preempt_p2.c \
 		$(srcdir)/../test/m14/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m14 \
 		-o $@ $(srcdir)/../test/m14/test_preempt_p2.c \
+		$(srcdir)/../test/m14/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_preempt_safe: $(srcdir)/../test/m14/test_preempt_safe.c \
+		$(srcdir)/../test/m14/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m14 \
+		-o $@ $(srcdir)/../test/m14/test_preempt_safe.c \
 		$(srcdir)/../test/m14/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_stack_reclaim: $(srcdir)/../test/m14/test_stack_reclaim.c \

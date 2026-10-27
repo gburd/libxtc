@@ -81,34 +81,11 @@ path is enabled, via a signal-context involuntary yield.  Nothing arms
 the timer unless a caller opts in, so the cooperative fast path is
 unchanged when unused.
 .Pp
-The involuntary path (enabled by
-.Fn xtc_preempt_set_involuntary )
-is EXPERIMENTAL and off by default.  On x86-64 Linux it performs a
-true resumable involuntary yield -- a fiber in a pure CPU loop with no
-cooperative yield points is time-sliced so its loop-mates make progress
--- using an on-stack trampoline that the signal handler redirects the
-interrupted instruction pointer to (Go's async-preemption method).  It
-does so on both coroutine substrates there: fcontext with glibc (the
-default build) and ucontext
-.Pq Fl -with-coro=ucontext ;
-aarch64 Linux has it on both too, with glibc or musl, resuming the
-fiber through the kernel's own signal frame so every register, the SVE
-state and the condition flags come back exact.  Elsewhere (the fcontext
-substrate on x86-64 musl or macOS, the Windows fiber substrate, the
-single-file amalgamation) it declines and falls back to the cooperative
-path.
-It is opt-in because it still has known residual hangs, on both
-substrates: in a seed sweep of a write-ahead-log stress test with
-50-microsecond involuntary slicing, about 1 run in 2000 hangs (a
-woken task lost from a loop's run queue; a fiber parked in a
-notification wait with no wake source; and application code that calls
-a blocking primitive such as
-.Xr pthread_once 3
-from a fiber, which deadlocks the thread when the fiber holding it is
-preempted).  A rare livelock has also been observed under pathological
-all-CPU-bound load.  Untrusted pure-CPU work can alternatively run on
-.Xr xtc_osproc 3 ,
-an operating-system thread the kernel preempts.
+The involuntary path, which yields a fiber at the interrupted
+instruction, is EXPERIMENTAL, off by default, and documented in
+.Xr xtc_preempt_involuntary 3
+(its own header,
+.In xtc_preempt_involuntary.h ) .
 .Pp
 Signal masks: the ucontext substrate restores each fiber's saved signal
 mask on every switch; the fcontext substrate does not touch the mask,
@@ -194,6 +171,7 @@ head/tail.
 .Sh SEE ALSO
 .Xr xtc_async 3 ,
 .Xr xtc_exec 3 ,
-.Xr xtc_osproc 3
+.Xr xtc_osproc 3 ,
+.Xr xtc_preempt_involuntary 3
 .Sh AUTHORS
 .An The XTC Project .

@@ -21,6 +21,7 @@
 #include "xtc_async.h"
 #include "xtc_exec.h"
 #include "xtc_preempt.h"
+#include "xtc_preempt_involuntary.h"
 #include "xtc_proc.h"
 
 /* ----- oneshot ---------------------------------------------------- */
@@ -500,16 +501,15 @@ test_mpsc_involuntary_preempt(const MunitParameter p[], void *d)
 #endif
 	if (!xtc_preempt_supported() || !__xtc_coro_preempt_effective())
 		return MUNIT_SKIP;
-	/* Opt-in only.  Signal-context involuntary preemption (Phase 2b) is
-	 * experimental: a busy same-loop producer/consumer pair under it
-	 * stalls or trips the stack protector on 1.55.0 as well (see
-	 * docs/KNOWN_ISSUES.md), so this case is not a default gate.  Run it
-	 * with XTC_TEST_INVOLUNTARY=1 when working on that path. */
-	if (getenv("XTC_TEST_INVOLUNTARY") == NULL)
-		return MUNIT_SKIP;
+	/* The 1.55/1.56 "busy same-loop pair": this stalled or tripped the
+	 * stack protector because the x86-64 trampoline clobbered RFLAGS
+	 * (fixed in 1.59, a98816b6; docs/KNOWN_ISSUES.md).  Natural CPU-time
+	 * ticks rarely land between a flag set and its jump, so this is a
+	 * smoke test (bounded: 1.5 s, and the watchdog aborts on a 3 s
+	 * stall); test_preempt_p2 /red_zone_flags is the sensitive guard. */
 	memset(&x, 0, sizeof x);
 	munit_assert_int(xtc_chan_mpsc_create(NULL, 64, &x.c), ==, XTC_OK);
-	xtc_preempt_set_involuntary(1);
+	munit_assert_int(xtc_preempt_set_involuntary(1), ==, XTC_OK);
 	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0), pr_consumer, &x,
 	    NULL, NULL), ==, XTC_OK);
@@ -519,7 +519,7 @@ test_mpsc_involuntary_preempt(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	atomic_store(&x.done, 1);
 	(void)pthread_join(w, NULL);
-	xtc_preempt_set_involuntary(0);
+	(void)xtc_preempt_set_involuntary(0);
 	munit_assert_int(atomic_load(&x.bad), ==, 0);
 	munit_assert_uint64(atomic_load(&x.recvd), ==, atomic_load(&x.sent));
 	munit_assert_uint64(atomic_load(&x.sent), >, 0);

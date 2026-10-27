@@ -658,14 +658,51 @@ test_concurrent(const MunitParameter p[], void *d)
  */
 #include <signal.h>
 #include "xtc_exec.h"
-/* No preemption signal on Windows (the preemption tests skip there). */
-#if defined(SIGVTALRM)
+/* No preemption signal on Windows (the preemption tests skip there).
+ * The tick must land in THIS file's code: the safe-point check declines a
+ * tick whose PC is in libc (raise) or libxtc.  So on Linux x86-64 and
+ * aarch64 it is a raw tgkill from inline asm; the signal is delivered on
+ * the syscall's return, at the next instruction of the caller. */
+#if defined(__linux__) && defined(__x86_64__) && \
+    (defined(__GNUC__) || defined(__clang__))
+#include <sys/syscall.h>
+#include <unistd.h>
+static void
+preempt_tick_raw(void)
+{
+	long pid = getpid(), tid = syscall(SYS_gettid), rc;
+	__asm__ volatile("syscall" : "=a"(rc)
+	    : "0"(234L), "D"(pid), "S"(tid), "d"((long)SIGVTALRM)
+	    : "rcx", "r11", "memory");
+	(void)rc;
+}
+#define PREEMPT_TICK() preempt_tick_raw()
+#elif defined(__linux__) && defined(__aarch64__) && \
+    (defined(__GNUC__) || defined(__clang__))
+#include <sys/syscall.h>
+#include <unistd.h>
+static void
+preempt_tick_raw(void)
+{
+	long pid = getpid(), tid = syscall(SYS_gettid);
+	/* Load the register variables only after the calls: a call may
+	 * clobber them. */
+	register long x0 __asm__("x0") = pid;
+	register long x1 __asm__("x1") = tid;
+	register long x2 __asm__("x2") = SIGVTALRM;
+	register long x8 __asm__("x8") = 131;   /* __NR_tgkill */
+	__asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x8)
+	    : "memory");
+}
+#define PREEMPT_TICK() preempt_tick_raw()
+#elif defined(SIGVTALRM)
 #define PREEMPT_TICK() ((void)raise(SIGVTALRM))
 #else
 #define PREEMPT_TICK() ((void)0)
 #endif
 #include "xtc_inject.h"
 #include "xtc_preempt.h"
+#include "xtc_preempt_involuntary.h"
 #include "xtc_proc.h"
 
 static atomic_long g_mp_peer_runs;
