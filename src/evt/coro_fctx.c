@@ -597,12 +597,11 @@ xtc_await(xtc_task_t *t, intptr_t *result)
 	}
 
 	/* Inside a coroutine: register as the target's waiter, set the
-	 * "stay parked" hint, and jump back to the scheduler. */
-	/* Re-park until the target is done: any other wake (a reclaimed
-	 * task's late waker landing on this reused task, a kill wake) is
-	 * spurious here.  See coro_uctx.c. */
+	 * "stay parked" hint, and jump back to the scheduler.  Re-park until
+	 * the target is done; a kill wake delivers the kill (coro_uctx.c). */
 	while (!target->done) {
 		void *pctx;
+		AWAIT_KILL_POLL(me, target);
 		target->waiter = me->self;
 		me->self->q_next = NULL;
 		me->_parked_on = target;

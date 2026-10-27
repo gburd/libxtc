@@ -461,6 +461,7 @@ TESTS_C		= test_sched_policy test_sched_continuous test_batch test_version test_
 		  test_wake_after_migration \
 		  test_aio_migrate_wake \
 		  test_proc_link_race \
+		  test_kill_late \
 		  test_recv_correlate \
 		  test_send_owned \
 		  test_sync \
@@ -1868,6 +1869,12 @@ test_proc_link_race: $(srcdir)/../test/m8/test_proc_link_race.c \
 		$(srcdir)/../test/m8/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m8 \
 		-o $@ $(srcdir)/../test/m8/test_proc_link_race.c \
+		$(srcdir)/../test/m8/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_kill_late: $(srcdir)/../test/m8/test_kill_late.c \
+		$(srcdir)/../test/m8/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m8 \
+		-o $@ $(srcdir)/../test/m8/test_kill_late.c \
 		$(srcdir)/../test/m8/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # M7.5 tests.

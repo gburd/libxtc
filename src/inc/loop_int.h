@@ -688,6 +688,13 @@ extern void  (*__xtc_fiber_ctx_restore)(void *);
  * kill is pending. */
 extern void  (*__xtc_fiber_kill_check)(void);
 
+/* Deliver a pending kill now, at a park site that has undone its own
+ * state (xtc_await, after unregistering as the target's waiter): unwinds
+ * via xtc_exit_self, or latches the kill if the proc is masked and
+ * returns.  Installed by proc.c (__xtc_proc_kill_poll); NULL without a
+ * process layer. */
+extern void  (*__xtc_fiber_kill_poll)(void);
+
 /* Loop-fini hook.  Installed by the process layer (proc.c) on first
  * spawn; lets xtc_loop_fini release the loop's per-loop proc table
  * without the L2 loop depending on the L3 proc layer directly (the

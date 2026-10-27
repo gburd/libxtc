@@ -141,6 +141,36 @@ forced by a tick at a chosen instruction (`test_preempt_p2 /tick_*`,
 * Clean AVX upper halves (`vzeroupper`) are handed to the scheduler too:
   not an ABI rule, but dirty upper state taxes SSE code.
 
+## CHANGED (2.0): late kills -- xtc_await at once, aio after the op in flight
+
+**What changed.**  Where a killed proc dies (`xtc_proc(3)` KILL
+DELIVERY):
+
+* **`xtc_await`: at once.**  `xtc_exit_pid` used to skip a proc parked in
+  `xtc_await`, and the await re-parked on any wake, so the kill landed
+  only when the awaited task finished: a proc awaiting a task that ran
+  2 s more got its DOWN 1,980 ms after the kill.  Now 0.1 ms.  The awaited
+  task is not touched and can be awaited by another task; under
+  `xtc_mask_enter` the kill is latched until the mask is left, as for
+  every other park (`test_kill_late /await`, `/await_masked`, both
+  substrates).
+* **`xtc_aio_*`: when the operation in flight completes, then at once.**
+  Before, a proc doing back-to-back operations was never killed: the
+  woken park re-parked until its op was done, nothing delivered the kill
+  after it, and the next op parked again (no DOWN in 10 s,
+  `test_kill_late /aio`).  The frame cannot unwind earlier because the
+  kernel owns the buffer and the request until the completion, and
+  `IORING_OP_ASYNC_CANCEL` does not help for files: a plain-liburing
+  control on the same host (Linux 6.12, XFS on NVMe) got `-EALREADY` for
+  an fsync of 1 GiB of dirty data (365-540 ms) and for a 64 MiB O_DIRECT
+  write (22-55 ms).  The delay is the operation's own latency: 0.1-0.2 ms
+  for a 1 MiB write+fsync loop, 11 ms for 64 MiB.  The result of the
+  interrupted operation is lost.
+* **`xtc_blocking_run`: unchanged, when the function returns** (380 ms
+  for a 400 ms offload killed 20 ms in).  The window is masked by design:
+  the pool worker writes the caller's frame until then, and
+  `xtc_exit_pid_deadline` reports the proc as `XTC_KILL_DEFERRED`.
+
 ## CHANGED (2.0): the pid is 16 bytes; trace and probe formats versioned
 
 **What changed.**  `xtc_pid_t` is `{ uint32_t loop_id; uint32_t
@@ -1455,12 +1485,11 @@ isolation defects were fixed (1.56); what remains is recorded here.
 
 ## OPEN (1.56): late or deferred kills, and poll/select scaling
 
-* `xtc_exit_pid` wakes a proc parked anywhere, and the sync, future,
-  lwlock and lockmgr waits deliver the kill at once.  A proc parked in
-  `xtc_await`, an `xtc_aio_*` operation, or an `xtc_blocking_run`
-  offload receives it only when that operation completes (memory-safe,
-  but late; the offload is MASKED by design so the pool worker never
-  writes into a dead frame).
+* `xtc_exit_pid` reaching a proc in an `xtc_aio_*` operation or an
+  `xtc_blocking_run` offload is delivered when that operation returns
+  (the kernel, or the pool worker, owns the frame until then); see
+  "CHANGED (2.0): late kills" for the measured delays.  `xtc_await` and
+  every other park deliver at once.
 * `xtc_timer_set` with a non-NULL `out_timer`: a handle that is never
   passed to `xtc_timer_release` stays allocated (~128 B) until
   `xtc_loop_fini`.  Pass NULL when no handle is needed.

@@ -19,6 +19,7 @@
 #include "xtc_int.h"
 #include "xtc_aio.h"
 #include "aio_int.h"     /* __xtc_aio_force_offload; __xtc_aio_done_get */
+#include "proc_int.h"    /* __xtc_proc_kill_poll: the kill point after an op */
 #include "xtc_io.h"
 #include "xtc_fs.h"
 #include "xtc_blocking.h"
@@ -189,6 +190,18 @@ aio_offload_v(int op, int fd, const struct iovec *iov, int iovcnt,
 }
 #endif
 
+/*
+ * The kill point of a native op: the kernel owned `a` (on this frame) and
+ * the caller's buffer until the completion, so an xtc_exit_pid that woke
+ * the park could not unwind there (the park loop re-parks until done).
+ * Now the frame is ours again: deliver the kill (does not return), or
+ * latch it under a mask.  Without this a proc doing back-to-back aio was
+ * never killed at all: the resume hook skips a park, and the next op
+ * parked again.  The op's result is dropped with the frame.  The offload
+ * path delivers in xtc_blocking_run's mask leave instead.
+ */
+#define AIO_KILL_POINT() __xtc_proc_kill_poll()
+
 static int
 aio_do(int op, int fd, void *buf, uint32_t len, int64_t off)
 {
@@ -332,6 +345,7 @@ aio_do(int op, int fd, void *buf, uint32_t len, int64_t off)
 			    ? run_ns - park_ns : 0));
 		}
 	}
+	AIO_KILL_POINT();
 	return a.res;
 }
 
@@ -441,6 +455,7 @@ aio_do_v(int op, int fd, const struct iovec *iov, int iovcnt, int64_t off)
 			(void)xtc_loop_wake(loop);
 	}
 	XTC_PROBE_AIO_DONE((uintptr_t)&a, op, a.res);
+	AIO_KILL_POINT();
 	return a.res;
 }
 
