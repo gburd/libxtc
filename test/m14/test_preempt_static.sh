@@ -13,11 +13,21 @@
 #        executable's code is preemptible by default, no mark needed.
 # Linux x86-64 / aarch64 only (where the redirect exists); [P4] skips
 # without a static libc, [P5] without libxtc.so.
-# Env: XTC_BUILD_DIR (holds libxtc.a), XTC_SRC_DIR, CC.
+# Env: XTC_BUILD_DIR (holds libxtc.a), XTC_SRC_DIR, CC, and the build's
+# XTC_SNIPPET_CFLAGS / XTC_SNIPPET_LDFLAGS (sanitizer builds need them).
 set -u
 B=${XTC_BUILD_DIR:-.}
 S=${XTC_SRC_DIR:-..}
 CC=${CC:-cc}
+SCF=${XTC_SNIPPET_CFLAGS:-}
+SLF=${XTC_SNIPPET_LDFLAGS:-}
+case "$SCF" in
+*-fsanitize=*)
+	# Under a sanitizer the redirect is not exercised and a -static link
+	# is not possible; the involuntary tests skip there too.
+	echo "[pstatic] SKIP: sanitizer build"
+	exit 0 ;;
+esac
 case "$(uname -s)-$(uname -m)" in
 Linux-x86_64 | Linux-aarch64) ;;
 *) echo "[pstatic] SKIP: no involuntary redirect on $(uname -s)-$(uname -m)"
@@ -64,9 +74,9 @@ LIBS=$(sed -n 's/^LIBS[[:space:]]*=[[:space:]]*//p' "$B/Makefile")
 build() {   # build OUT EXTRA-FLAGS...
 	o=$1
 	shift
-	# shellcheck disable=SC2086  # LIBS is a flag list
-	$CC -O1 "$@" -I"$B" -I"$S/src/inc" -o "$T/$o" "$T/p.c" \
-	    "$B/libxtc.a" -pthread $LIBS >"$T/cc.log" 2>&1
+	# shellcheck disable=SC2086  # LIBS and the snippet flags are lists
+	$CC -O1 $SCF "$@" -I"$B" -I"$S/src/inc" -o "$T/$o" "$T/p.c" \
+	    "$B/libxtc.a" $SLF -pthread $LIBS >"$T/cc.log" 2>&1
 }
 if ! build p; then
 	echo "[pstatic] FAIL: could not build the probe: $(head -3 "$T/cc.log")"

@@ -399,7 +399,20 @@ test_ps_tick_cost(const MunitParameter p[], void *d)
 #endif /* !PS_BEFORE */
 #endif /* PS_ON */
 
+#if !defined(PS_ON)
+static MunitResult
+test_ps_unsupported(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return MUNIT_SKIP;   /* no redirect here, or a sanitizer build */
+}
+#endif
+
 static MunitTest tests[] = {
+#if !defined(PS_ON)
+	{ "/unsupported", test_ps_unsupported, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+#endif
 #if defined(PS_ON)
 	{ "/libc_malloc", test_ps_libc_malloc, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },

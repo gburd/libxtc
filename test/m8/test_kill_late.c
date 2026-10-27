@@ -108,10 +108,10 @@ static void
 aio_victim(void *arg)
 {
 	static char buf[1 << 20];
-	int k, j;
+	int j;
 	(void)arg;
 	atomic_store(&g_victim_parked, 1);
-	for (k = 0; !atomic_load(&g_stop); k++) {
+	while (!atomic_load(&g_stop)) {
 		for (j = 0; j < g_aio_mib; j++)
 			(void)xtc_aio_pwrite(g_aio_fd, buf, sizeof buf,
 			    (int64_t)j * (int64_t)sizeof buf);

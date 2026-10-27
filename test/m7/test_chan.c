@@ -501,6 +501,11 @@ test_mpsc_involuntary_preempt(const MunitParameter p[], void *d)
 #endif
 	if (!xtc_preempt_supported() || !__xtc_coro_preempt_effective())
 		return MUNIT_SKIP;
+	/* valgrind cannot follow the signal-context redirect onto a fiber
+	 * stack (it reports the trampoline's own pushes as invalid writes);
+	 * like a sanitizer, not a supported combination. */
+	if (getenv("XTC_UNDER_VALGRIND") != NULL)
+		return MUNIT_SKIP;
 	/* The 1.55/1.56 "busy same-loop pair": this stalled or tripped the
 	 * stack protector because the x86-64 trampoline clobbered RFLAGS
 	 * (fixed in 1.59, a98816b6; docs/KNOWN_ISSUES.md).  Natural CPU-time
