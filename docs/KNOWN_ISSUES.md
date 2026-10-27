@@ -135,9 +135,13 @@ default); each costs a fiber stack.  `test_proc /pid_local_id_ceiling`
 holds 100,000 parked processes on one loop and sends each its own index
 (v1.59: `XTC_E_RESOURCE` at 65,536; 2.0: all 100,000 delivered; with
 16 KiB stacks 0.95 s and 651 MB peak RSS on a 32-vCPU x86-64 host).
-A fiber stack is two memory mappings, so a process with more than about
-32,000 live fibers needs `vm.max_map_count` raised above the Linux
-default of 65,530.
+One million parked processes on one loop took 6.5 GB (6,651 bytes each,
+16 KiB stacks) and every one received its own message.  rexis on ONE
+loop held 100,000 idle connections (7.3 KB of RSS each, PING answered),
+where the 1.x build refused every client past 65,520.  A fiber stack is
+two memory mappings, so a process with more than about 32,000 live
+fibers needs `vm.max_map_count` raised above the Linux default of
+65,530.
 
 ## FIXED (2.0): a pid held across 2^32 reuses of its slot named the new occupant
 
