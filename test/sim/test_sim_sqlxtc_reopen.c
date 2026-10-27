@@ -656,7 +656,7 @@ wal_cut_durable(const char *path, uint64_t durable_lsn)
 static int
 segment(uint64_t rs, int crash)
 {
-	xtc_proc_opts_t po = { 0 };
+	xtc_proc_opts_t po = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	uint64_t miss = 0, stale = 0;
 	struct bm_stats bs;

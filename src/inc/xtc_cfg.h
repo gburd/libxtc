@@ -1,5 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project
+ * @stability stable
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_cfg.h
@@ -72,6 +73,7 @@ typedef struct xtc_cfg_var *xtc_cfg_ref_t;
 
 /* Spec used at registration time. */
 typedef struct xtc_cfg_spec {
+	size_t              size;             /* sizeof(xtc_cfg_spec_t) */
 	const char         *name;
 	const char         *short_desc;       /* ops-friendly description */
 	xtc_cfg_kind_t      kind;
@@ -102,6 +104,11 @@ typedef struct xtc_cfg_spec {
 	xtc_cfg_changed_fn    on_change;
 	void                 *cb_user;
 } xtc_cfg_spec_t;
+
+/* Set .size in every spec: { .size = sizeof(xtc_cfg_spec_t), .name = ... }
+ * or start from XTC_CFG_SPEC_INIT.  name and kind are required, so a size
+ * must cover them. */
+#define XTC_CFG_SPEC_INIT { .size = sizeof(xtc_cfg_spec_t) }
 
 /*
  * PUBLIC: int  xtc_cfg_register __P((const xtc_cfg_spec_t *));

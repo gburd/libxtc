@@ -216,7 +216,7 @@ listener_proc(void *arg)
 {
 	server_t *srv = arg;
 	void *msg; size_t msg_len;
-	xtc_tcp_opts_t nodelay = { .nodelay = 1 };
+	xtc_tcp_opts_t nodelay = { .size = sizeof(xtc_tcp_opts_t), .nodelay = 1 };
 
 	while (!atomic_load(&srv->shutdown_requested)) {
 		rate_limit_refill(srv);
@@ -553,12 +553,14 @@ main(int argc, char **argv)
 	 * the listener if it crashes. */
 	{
 		xtc_app_opts_t app_opts = XTC_APP_OPTS_DEFAULT;
+		xtc_sup_opts_t app_opts_sup = XTC_SUP_OPTS_DEFAULT;
 		xtc_child_spec_t kids[1];
 		app_opts.name = "sqlxtc";
 		app_opts.n_loops = cfg.threads > 1 ? cfg.threads : 1;
-		app_opts.sup.strategy = XTC_SUP_ONE_FOR_ONE;
-		app_opts.sup.max_restarts = 10;
-		app_opts.sup.period_ns = 60LL * 1000 * 1000 * 1000;
+		app_opts_sup.strategy = XTC_SUP_ONE_FOR_ONE;
+		app_opts_sup.max_restarts = 10;
+		app_opts_sup.period_ns = 60LL * 1000 * 1000 * 1000;
+		app_opts.sup = &app_opts_sup;
 		if (xtc_app_create(&app_opts, &srv->app) != XTC_OK) {
 			fprintf(stderr, "app create failed\n"); return 1;
 		}
@@ -581,6 +583,7 @@ main(int argc, char **argv)
 			xtc_loop_set_stall_budget(srv->loop, 250LL * 1000 * 1000);
 
 		memset(kids, 0, sizeof kids);
+		kids[0].size = sizeof kids[0];
 		kids[0].name   = "listener";
 		kids[0].fn     = listener_proc;
 		kids[0].arg    = srv;

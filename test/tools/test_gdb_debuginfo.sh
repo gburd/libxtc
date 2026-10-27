@@ -80,6 +80,7 @@ main(void)
 	pthread_t th;
 	int i;
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.migratable = 1;
 	if (xtc_exec_init(&e, 3) != XTC_OK) return 1;
 	if (pthread_create(&th, NULL, stopper, NULL) != 0) return 1;

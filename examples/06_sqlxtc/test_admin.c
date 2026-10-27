@@ -86,7 +86,7 @@ int
 main(void)
 {
 	xtc_loop_t     *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t       pid;
 	int             i;
 

@@ -157,6 +157,7 @@ run_scenario(uint64_t seed, xtc_restart_strategy_t strat,
 
 	for (i = 0; i < N_KIDS; i++) {
 		memset(&kids[i], 0, sizeof(kids[i]));
+		kids[i].size = sizeof kids[i];
 		kids[i].name = "kid";
 		kids[i].fn = kid;
 		kids[i].arg = (void *)(intptr_t)i;

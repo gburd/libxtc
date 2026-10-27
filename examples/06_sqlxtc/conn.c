@@ -607,7 +607,7 @@ int
 conn_spawn(xtc_loop_t *loop, const conn_opts_t *opts, xtc_pid_t *out_pid)
 {
 	conn_state_t *st;
-	xtc_proc_opts_t po = { 0 };
+	xtc_proc_opts_t po = XTC_PROC_OPTS_INIT;
 	int rc;
 
 	st = (conn_state_t *)calloc(1, sizeof *st);

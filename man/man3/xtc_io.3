@@ -138,6 +138,14 @@ and its result is in that struct's
 queues a native file operation
 .Pq an Vt xtc_aio_t : Dv XTC_AIO_PREAD , XTC_AIO_PWRITE , No or Dv XTC_AIO_FSYNC
 and returns immediately.
+The library keeps the
+.Vt xtc_aio_t
+until the completion is reaped and reads and writes it in place, so its
+.Va size
+member
+.Pq set by Dv XTC_AIO_INIT
+must cover the whole 2.0 layout; a smaller one is
+.Dv XTC_E_INVAL .
 On the io_uring backend it prepares the matching
 .Dv IORING_OP
 and the completion is delivered as an

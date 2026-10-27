@@ -1,5 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project
+ * @stability stable
  *
  * Use of this source code is governed by the ISC License,
  * a copy of which is in the file LICENSE in the top-level directory
@@ -68,6 +69,24 @@ typedef enum xtc_err {
 	XTC_E_NOTFOUND		= -11,	/* requested item does not exist */
 	XTC_E_IO		= -12	/* I/O error (read/write/fsync failed) */
 } xtc_err_t;
+
+/*
+ * Size-first structs (docs/abi-stability.md, "Caller-allocated structs").
+ * Every public option / info / stats struct the caller allocates starts
+ * with `size_t size`, which the caller sets to sizeof its view of the
+ * struct -- the struct's XTC_*_INIT / *_DEFAULT initializer does it.  The
+ * library reads an input struct only up to `size` (fields past it take
+ * their defaults) and writes an output struct only up to `size`; size 0 is
+ * XTC_E_INVAL.  Fields are only ever APPENDED in a minor release.
+ *
+ * XTC_FIELD_OK(p, field) -- nonzero when `field` lies inside p's declared
+ * size.  A consumer reading a struct the LIBRARY sized (one handed to a
+ * callback) checks it before using a field newer than its oldest supported
+ * library: `if (XTC_FIELD_OK(info, mask_depth)) use(info->mask_depth);`.
+ */
+#define XTC_FIELD_OK(p, field) \
+	((size_t)((const char *)&(p)->field - (const char *)(p)) + \
+	 sizeof((p)->field) <= (p)->size)
 
 /*
  * xtc_version_string --

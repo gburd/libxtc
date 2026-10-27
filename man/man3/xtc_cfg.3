@@ -144,7 +144,24 @@ Supported types:
 There is ONE registration entry point,
 .Fn xtc_cfg_register ,
 taking a
-.Vt xtc_cfg_spec_t :
+.Vt xtc_cfg_spec_t
+whose
+.Va size
+member is the caller's
+.Fn sizeof
+.Po
+.Dv XTC_CFG_SPEC_INIT ;
+the library reads no further than
+.Va size ,
+fields past it are 0, and a
+.Va size
+that does not cover
+.Va name
+and
+.Va kind
+is
+.Dv XTC_E_INVAL
+.Pc :
 .Bl -bullet -compact -offset indent
 .It
 .Va name ,
@@ -392,6 +409,7 @@ knob is rejected as invalid rather than silently truncated to 1.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 static const xtc_cfg_spec_t spec = {
+	.size       = sizeof(xtc_cfg_spec_t),
 	.name       = "rexis.max_clients",
 	.short_desc = "Maximum concurrent client connections",
 	.kind       = XTC_CFG_INT,

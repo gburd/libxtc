@@ -174,7 +174,7 @@ static int
 worker(int64_t round_start, const int64_t *cuts, int ncut, int create)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t po = { .name = "lane" };
+	xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "lane" };
 	xtc_pid_t pid;
 	uint64_t miss, stale;
 	int i, l, n;

@@ -63,17 +63,19 @@ A process registry where children can find each other by name
 Typical usage:
 .Bd -literal -offset indent
 xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+xtc_sup_opts_t sup = XTC_SUP_OPTS_DEFAULT;
+sup.strategy = XTC_SUP_ONE_FOR_ONE;
 opts.name = "my_service";
-opts.sup.strategy = XTC_SUP_ONE_FOR_ONE;
+opts.sup = &sup;               /* NULL = XTC_SUP_OPTS_DEFAULT */
 
 xtc_app_t *app;
 xtc_app_create(&opts, &app);
 
 xtc_child_spec_t kids[] = {
-    { .name = "listener",  .fn = listener_proc, .arg = NULL,
-      .policy = XTC_RESTART_PERMANENT },
-    { .name = "metrics",   .fn = metrics_proc,  .arg = NULL,
-      .policy = XTC_RESTART_TRANSIENT },
+    { .size = sizeof(xtc_child_spec_t), .name = "listener",
+      .fn = listener_proc, .policy = XTC_RESTART_PERMANENT },
+    { .size = sizeof(xtc_child_spec_t), .name = "metrics",
+      .fn = metrics_proc, .policy = XTC_RESTART_TRANSIENT },
 };
 xtc_app_start(app, kids, 2);
 xtc_app_run(app);              /* blocks until app stops */
@@ -88,6 +90,26 @@ its process registry.
 returns the underlying
 .Xr xtc_exec 3
 executor the application runs its loop on.
+.Pp
+Every struct passed in carries a
+.Va size
+member that the caller sets to the size of its own view
+.Po the
+.Dv XTC_APP_OPTS_DEFAULT ,
+.Dv XTC_SUP_OPTS_DEFAULT
+and
+.Dv XTC_CHILD_SPEC_INIT
+initializers do it
+.Pc ;
+the library reads only that many bytes, a field past it takes its
+default, and a
+.Va size
+of 0 is
+.Dv XTC_E_INVAL .
+Each element of the
+.Fa children
+array carries the same
+.Va size .
 .Pp
 Setting
 .Fa opts.n_loops

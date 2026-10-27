@@ -295,8 +295,10 @@ __pidfd_open(pid_t pid)
 }
 
 int
-xtc_osproc_spawn(const xtc_osproc_opts_t *opts, xtc_osproc_t **out)
+xtc_osproc_spawn(const xtc_osproc_opts_t *uopts, xtc_osproc_t **out)
 {
+	xtc_osproc_opts_t o;
+	const xtc_osproc_opts_t *opts = &o;
 	struct xtc_osproc *p;
 	struct exec_prep xp;
 	int sv[2] = { -1, -1 };
@@ -304,9 +306,11 @@ xtc_osproc_spawn(const xtc_osproc_opts_t *opts, xtc_osproc_t **out)
 	pid_t pid;
 
 	memset(&xp, 0, sizeof xp);
-	if (out == NULL || opts == NULL)
+	if (out == NULL || uopts == NULL)
 		return XTC_E_INVAL;
 	*out = NULL;
+	if ((rc = __xtc_sized_in(&o, NULL, sizeof o, uopts, 0)) != XTC_OK)
+		return rc;
 	/* Exactly one of argv / fn. */
 	if ((opts->argv == NULL) == (opts->fn == NULL))
 		return XTC_E_INVAL;
@@ -614,6 +618,7 @@ xtc_osproc_isolated_spawn(const char *name, int (*fn)(int, void *),
 {
 	xtc_osproc_opts_t o;
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.name = name;
 	o.fn = fn;
 	o.arg = arg;
@@ -662,7 +667,11 @@ xtc_osproc_serve(int ctrl_fd, xtc_osproc_handler_fn handler, void *arg)
 #else  /* _WIN32 -- fork/exec + pidfd have no Windows equivalent yet */
 
 int  xtc_osproc_spawn(const xtc_osproc_opts_t *opts, xtc_osproc_t **out)
-{ (void)opts; if (out) *out = NULL; return XTC_E_NOSYS; }
+{
+	if (out) *out = NULL;
+	if (opts == NULL || opts->size < sizeof(size_t)) return XTC_E_INVAL;
+	return XTC_E_NOSYS;
+}
 long xtc_osproc_pid(const xtc_osproc_t *p) { (void)p; return -1; }
 int  xtc_osproc_ctrl_fd(const xtc_osproc_t *p) { (void)p; return -1; }
 int  xtc_osproc_signal(const xtc_osproc_t *p, int sig) { (void)p; (void)sig; return XTC_E_NOSYS; }

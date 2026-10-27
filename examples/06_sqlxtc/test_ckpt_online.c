@@ -157,7 +157,7 @@ static void
 stop_during_checkpoint(void)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t po = { .name = "ock" };
+	xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "ock" };
 	xtc_pid_t pid;
 	sx_db *h = NULL;
 	int64_t t0;
@@ -199,7 +199,7 @@ main(void)
 {
 	char sql[200], side[320];
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t po = { .name = "cmt" };
+	xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "cmt" };
 	xtc_pid_t pid;
 	sx_db *h = NULL;
 	long bad = 0;

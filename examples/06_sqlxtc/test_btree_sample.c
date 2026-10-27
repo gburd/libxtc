@@ -384,7 +384,7 @@ t_concurrent(void)
 {
 	char p[64];
 	xtc_exec_t *exec = NULL;
-	xtc_proc_opts_t po = { 0 };
+	xtc_proc_opts_t po = XTC_PROC_OPTS_INIT;
 	long w;
 
 	g_bm = mk(p, 48);

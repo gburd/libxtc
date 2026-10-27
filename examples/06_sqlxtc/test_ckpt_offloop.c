@@ -124,7 +124,7 @@ main(void)
 {
 	char path[256], sql[128], side[320];
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t po = { .name = "cmt" };
+	xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "cmt" };
 	xtc_pid_t pid;
 	sx_db *h = NULL;
 	long bad = 0;

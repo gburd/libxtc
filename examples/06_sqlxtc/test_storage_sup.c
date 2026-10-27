@@ -158,7 +158,7 @@ kill_one(int which)
 static void
 boss(void *arg)
 {
-	xtc_proc_opts_t o = { .name = "writer" };
+	xtc_proc_opts_t o = { .size = sizeof(xtc_proc_opts_t), .name = "writer" };
 	uint64_t r = g_seed;
 	xtc_pid_t wp;
 	int64_t a;
@@ -244,7 +244,7 @@ count_rows(void)
 static int
 session(int s)
 {
-	xtc_proc_opts_t bo = { .name = "boss" };
+	xtc_proc_opts_t bo = { .size = sizeof(xtc_proc_opts_t), .name = "boss" };
 	xtc_pid_t bp;
 	pthread_t wd;
 	int64_t rows;

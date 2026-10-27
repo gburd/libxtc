@@ -71,6 +71,7 @@ spawner(void *arg)
 	int i;
 	for (i = 0; i < N_WORKERS; i++) {
 		memset(&opts, 0, sizeof opts);
+		opts.size = sizeof opts;
 		opts.name = "w";
 		opts.migratable = 1;
 		/* All on loop 0 so the pessimal scheduler steals them onto

@@ -61,7 +61,7 @@ run(uint32_t n_frames, uint32_t ndirty)
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	char path[256];
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t po = { .name = "drv" };
+	xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "drv" };
 	xtc_pid_t pid;
 	uint32_t i;
 	int fd;

@@ -302,7 +302,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	struct kq_aio *w;
 	int rc;
 
-	if (io == NULL || a == NULL || a->fd < 0)
+	if (io == NULL || !__XTC_AIO_OK(a) || a->fd < 0)
 		return XTC_E_INVAL;
 	if (__os_calloc(1, sizeof *w, (void **)&w) != XTC_OK)
 		return XTC_E_AGAIN;          /* offload */
@@ -345,7 +345,9 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 int
 xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 {
-	(void)io; (void)a;
+	(void)io;
+	if (!__XTC_AIO_OK(a))
+		return XTC_E_INVAL;
 	return XTC_E_NOSYS;          /* xtc_aio offloads to the blocking pool */
 }
 #endif

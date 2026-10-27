@@ -82,7 +82,10 @@ ts_event(void *st, int cur, const void *msg, size_t len, xtc_fsm_call_t *call)
 	return r;
 }
 
-static const xtc_fsm_callbacks_t TS_CB = { NULL, ts_event, NULL };
+static const xtc_fsm_callbacks_t TS_CB = {
+	.size = sizeof(xtc_fsm_callbacks_t),
+	.event = ts_event
+};
 
 /* A sender fires PER events, alternating coin/push, then finishes. */
 static void

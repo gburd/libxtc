@@ -80,10 +80,17 @@ int
 xtc_app_create(const xtc_app_opts_t *opts, xtc_app_t **out)
 {
 	xtc_app_t *a;
-	xtc_app_opts_t defaults = XTC_APP_OPTS_DEFAULT;
+	xtc_app_opts_t defaults = XTC_APP_OPTS_DEFAULT, o = defaults;
+	xtc_sup_opts_t sdef = XTC_SUP_OPTS_DEFAULT, so = sdef;
 	int rc;
 	if (out == NULL) return XTC_E_INVAL;
-	if (opts == NULL) opts = &defaults;
+	if (opts != NULL &&
+	    (rc = __xtc_sized_in(&o, &defaults, sizeof o, opts, 0)) != XTC_OK)
+		return rc;
+	if (o.sup != NULL &&
+	    (rc = __xtc_sized_in(&so, &sdef, sizeof so, o.sup, 0)) != XTC_OK)
+		return rc;
+	opts = &o;
 	if ((rc = __os_calloc(1, sizeof *a, (void **)&a)) != XTC_OK) return rc;
 
 	if (opts->name != NULL &&
@@ -111,7 +118,7 @@ xtc_app_create(const xtc_app_opts_t *opts, xtc_app_t **out)
 
 	if ((rc = xtc_reg_create(&a->reg)) != XTC_OK) goto fail;
 
-	a->sup_opts = opts->sup;
+	a->sup_opts = so;
 	a->sup_opts.exec = a->exec;   /* NULL for single-loop; drives stop */
 	a->no_tuning_check = opts->no_tuning_check;
 	*out = a;
@@ -208,9 +215,13 @@ int
 xtc_app_start(xtc_app_t *a, const xtc_child_spec_t *children, int n)
 {
 	int i, rc;
+	size_t stride;
 	if (a == NULL || n < 0 || (n > 0 && children == NULL))
 		return XTC_E_INVAL;
 	if (a->root != NULL) return XTC_E_INVAL;     /* already started */
+	stride = n > 0 ? children[0].size : 0;
+	if (n > 0 && stride < sizeof(size_t))
+		return XTC_E_INVAL;
 	if (!a->no_tuning_check)
 		__os_tuning_check();   /* PLAN.md 19.21: advisory NOTICE(s) */
 	if ((rc = __os_calloc(1, sizeof *a->kids +
@@ -221,11 +232,20 @@ xtc_app_start(xtc_app_t *a, const xtc_child_spec_t *children, int n)
 	    (void **)&a->specs)) != XTC_OK)
 		goto fail;
 	for (i = 0; i < n; i++) {
-		a->kids->k[i].fn = children[i].fn;
-		a->kids->k[i].arg = children[i].arg;
-		a->kids->k[i].policy = children[i].policy;
+		const xtc_child_spec_t *c = (const xtc_child_spec_t *)
+		    (const void *)((const char *)children + (size_t)i * stride);
+		/* Every element carries the same size (see xtc_sup_start). */
+		if (c->size != stride) {
+			rc = XTC_E_INVAL;
+			goto fail;
+		}
+		if ((rc = __xtc_sized_in(&a->specs[i], NULL,
+		    sizeof a->specs[i], c, 0)) != XTC_OK)
+			goto fail;
+		a->kids->k[i].fn = a->specs[i].fn;
+		a->kids->k[i].arg = a->specs[i].arg;
+		a->kids->k[i].policy = a->specs[i].policy;
 		a->kids->k[i].kids = a->kids;
-		a->specs[i] = children[i];
 		a->specs[i].fn = __kid_trampoline;
 		a->specs[i].arg = &a->kids->k[i];
 	}

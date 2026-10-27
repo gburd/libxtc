@@ -6,6 +6,68 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## CHANGED (2.0): every caller-allocated public struct is size-first
+
+**What changed.**  Source and binary incompatible with 1.x, by design
+(libxtc 2.0 is the first LTS candidate; nothing consumes 1.x structs in
+the wild).  Each struct below now starts with `size_t size`; initialize
+it with the named macro (or a designated initializer that sets `.size =
+sizeof(T)`).  A zeroed struct (`= { 0 }`, `memset`) is now REJECTED with
+`XTC_E_INVAL` -- set the size.  Sizes are x86-64, v1.59.0 -> 2.0:
+
+| struct | initializer | bytes | also |
+|---|---|---|---|
+| `xtc_proc_opts_t` | `XTC_PROC_OPTS_INIT` | 56 -> 56 | `link_to` removed (never read); regrouped |
+| `xtc_proc_info_t` | `XTC_PROC_INFO_INIT` | 80 -> 88 | |
+| `xtc_mailbox_stats_t` | `XTC_MAILBOX_STATS_INIT` | 48 -> 56 | |
+| `xtc_down_info_t` | `XTC_DOWN_INFO_INIT` | 32 -> 40 | now has a struct tag |
+| `xtc_runtime_info_t` | `XTC_RUNTIME_INFO_INIT` | 40 -> 48 | |
+| `xtc_loop_info_t` | (library-sized) | 32 -> 40 | read newer fields under `XTC_FIELD_OK` |
+| `xtc_loop_stats_t` | `XTC_LOOP_STATS_INIT` | 16 -> 24 | |
+| `xtc_sup_opts_t` | `XTC_SUP_OPTS_DEFAULT` | 32 -> 40 | |
+| `xtc_child_spec_t` | `XTC_CHILD_SPEC_INIT` | 48 -> 56 | arrays stride by element 0's size; all elements equal |
+| `xtc_app_opts_t` | `XTC_APP_OPTS_DEFAULT` | 64 -> 40 | `sup` is now `const xtc_sup_opts_t *` (NULL = defaults), not embedded |
+| `xtc_svr_callbacks_t` | `XTC_SVR_CALLBACKS_INIT` | 48 -> 56 | `terminate` before `handle_continue` again |
+| `xtc_svr_opts_t` | `XTC_SVR_OPTS_INIT` | 16 -> 24 | |
+| `xtc_fsm_callbacks_t` | `XTC_FSM_CALLBACKS_INIT` | 24 -> 32 | copied at start (1.x borrowed the pointer) |
+| `xtc_fsm_opts_t` | `XTC_FSM_OPTS_INIT` | 16 -> 24 | |
+| `xtc_launch_opts_t` | `XTC_LAUNCH_OPTS_INIT` | 24 -> 24 | `loop` removed (never read) |
+| `xtc_tls_opts_t` | `XTC_TLS_OPTS_INIT` | 120 -> 120 | regrouped |
+| `xtc_tls_transport_t` | `XTC_TLS_TRANSPORT_INIT` | 24 -> 32 | |
+| `xtc_tcp_opts_t` | `XTC_TCP_OPTS_DEFAULT` | 32 -> 40 | |
+| `xtc_aio_t` | `XTC_AIO_INIT` | 64 -> 64 | size must cover the whole 2.0 layout; regrouped |
+| `xtc_fs_stat_t` | `XTC_FS_STAT_INIT` | 24 -> 32 | file size renamed `size` -> `bytes` |
+| `xtc_slab_opts_t` | `XTC_SLAB_OPTS_DEFAULT` | 104 -> 112 | size must cover `name`, `obj_size` |
+| `xtc_slab_stats_t` | `XTC_SLAB_STATS_INIT` | 96 -> 104 | |
+| `xtc_res_caps_t` | `XTC_RES_CAPS_DEFAULT` | 48 -> 56 | `xtc_res_t` embeds it: 280 -> 288 |
+| `xtc_log_opts_t` | `XTC_LOG_OPTS_DEFAULT` | 32 -> 40 | |
+| `xtc_cfg_spec_t` | `XTC_CFG_SPEC_INIT` | 104 -> 112 | size must cover `name`, `kind` |
+| `xtc_osproc_opts_t` | `XTC_OSPROC_OPTS_INIT` | 40 -> 48 | |
+
+Unchanged on purpose: the frozen lock-layer structs, array element types
+the library strides at its own `sizeof` (`xtc_io_event_t`,
+`xtc_accel_dev_t`, `xtc_msg_t`, batch items/results, scheduler lanes),
+value types (`xtc_pid_t` -- which a separate 2.0 change widens --
+`xtc_pt_t`, `xtc_waker_t`, the trace/tail records), and the experimental
+batch / scheduler-policy structs, which already carry `size, version`.
+
+**Also new in 2.0** (`docs/abi-stability.md`): `XTC_FIELD_OK(p, field)`
+in `xtc.h`; the `XTC_2.0` symbol version on every export
+(`dist/libxtc.map`, gated by `test/m0/test_symbols.sh [C9]`); a
+`@stability stable|experimental` tier on every installed header (gated
+by `test/dist/test_stability_tiers.sh`; 9 headers are experimental); the
+`XTC_DEPRECATED(msg)` macro (`xtc_export.h`); the struct-layout gate
+`test/dist/test_abi_layout.sh` with its table `test/abi/layout.txt`; and
+`scripts/abi-check.sh BASE_TAG` for release-time abidiff.
+
+**Migrating.**  Replace `T v = { 0 };` / `memset(&v, 0, sizeof v)` by
+`T v = T_INIT;` (or add `v.size = sizeof v;` after the memset); add
+`.size = sizeof(T),` to designated initializers and to each element of a
+child-spec array; rewrite positional callback initializers as designated
+ones; `opts.sup.X = ...` becomes a separate `xtc_sup_opts_t` and
+`opts.sup = &it;`; `st.size` of an `xtc_fs_stat_t` becomes `st.bytes`.
+
+---
 ## OPEN (libxtc): at most 65,536 live processes per loop
 
 **The limit.**  `xtc_pid_t` names a process by its loop and a 16-bit
@@ -119,6 +181,26 @@ the stderr report ("sqlxtc btree: ... gave up"), keep the store and the
 report and file an issue: the page id in the report is where to look.
 New DST coverage of scans racing merges and page-id reuse:
 test_sim_btree_scan.
+
+## FIXED (2.0): a fired park timer could release a newer timer of a migrated fiber
+
+**What was wrong.**  When a park timer fired, the loop cleared the
+waiting fiber's timer slot unconditionally and dropped the reference it
+found there.  A migratable fiber woken and stolen by another loop in the
+window between the fire and that clear had already cancelled the fired
+timer and armed a new one on the thief loop, so the firing loop dropped
+the NEW timer's reference: that timer lost its owner (it was never
+cancelled and woke the fiber spuriously later), and the firing loop read
+its reference count with nothing ordering the read after its allocation
+on the other thread.  ThreadSanitizer reported it in
+`/m5/exec/Blk4_cross_loop_state_timer` under load: 14 of 40 and 40 of
+100 runs on a 32-vCPU host.
+
+**The fix.**  The fire clears the slot only if it still holds the fired
+timer (a compare-and-swap) and otherwise leaves it to the fiber, which
+already released it.  0 of 100 TSan runs.  `/m3/timer/Tm16_fire_clears_own_slot`
+reproduces the interleaving deterministically on one loop.  It is not
+reachable under DST: the simulator runs no fiber inside a timer drain.
 
 ## CHANGED (1.60): involuntary preemption on musl/aarch64; platform checks
 
@@ -879,43 +961,60 @@ sole cause of the specific Linux failure.  The fix is safe regardless:
 rounding a sub-microsecond wait up to 1 us cannot strand a fiber or
 over-sleep a deadline meaningfully.
 
-## OPEN: FreeBSD CI -- intermittent test_exec hang in the kqueue VM job
+## RESOLVED (1.51): FreeBSD -- intermittent test_exec hang in Blk4
 
-**Status:** OPEN as of 1.50.0.  Seen on the GitHub FreeBSD 15.1 VM job
-(`vmactions/freebsd-vm`), in `test/m5/test_exec.c` around
-`/m5/exec/Blk4_cross_loop_state_timer` -- migratable fibers parked in
-`xtc_recv` with a 1 ms timeout while a foreign thread wakes them, work
-stealing across loops.  It hit 7fa2340 and 47443de (1.48, before this
-release) and 4 of the 8 CI runs of the 1.50 candidate; it passed on the
-others including the 0283ac1 commit the v1.50.0 tag points at.  Not
-reproduced on Linux: Blk4 is 0/30 bad on poll (the closest kqueue proxy),
-epoll and io_uring, on both 1.49.5 and 1.50.  None of 1.50's source
-changes touch the timer, recv, wake or kqueue paths this test drives.
+**What it was.**  The GitHub FreeBSD 15.1 VM job (`vmactions/freebsd-vm`)
+timed out inside `test/m5/test_exec.c` in 1.48 and in two of the eight
+CI runs of the 1.50 candidate; the one log that named a test showed
+`/m5/exec/Blk4_cross_loop_state_timer` passing and the run stopping
+after it.  Blk4 runs migratable fibers in a 1 ms timed `xtc_recv` while
+a foreign thread wakes them and peers steal them.
 
-**Workaround:** none needed on Linux.  On FreeBSD, fibers that do not
-set `migratable = 1` are not affected by the stealing path this stresses.
+**Cause.**  `xtc_recv` took the calling proc from `__current_proc`, a
+thread-local that fiber context save/restore carries across a park, and
+that a migration can leave naming a different proc than the fiber
+running.  The receive then popped from, armed the waker of, and parked
+on another proc's mailbox, and could block forever on that proc's
+mailbox lock, taken on the other fiber's behalf by a thread that went
+idle.  Linux never hit it in testing.  1.51 (`d4df0bd3`) re-anchors the
+proc from the running fiber at receive entry and after every resume, as
+`xtc_proc_sleep` and `xtc_proc_wait_fd` already did.
 
-**Not the same cause as the select strand above.**  The select
-truncation-to-zero bug does not apply here: the kqueue backend converts
-`timeout_ns` to a `struct timespec` at full nanosecond resolution
-(`tv_nsec = timeout_ns % 1e9`), so a positive sub-microsecond deadline
-is preserved exactly and cannot collapse to a non-blocking `kevent`.
-This remains OPEN and un-root-caused: it has not reproduced on any
-available host (Linux poll/epoll/io_uring, macOS kqueue), only
-intermittently on the FreeBSD VM job, so a fix cannot be developed
-against a reproducer or validated without regressing the one backend it
-would touch.  Deliberately left un-patched rather than changing the
-EVFILT_USER wake path on a guess.
+**Evidence.**  On a native FreeBSD 15.1 host (8 CPUs, kqueue, clang),
+full `/m5/exec` runs, each bounded at 3 minutes: v1.50.0 hung in Blk4 in
+1 of 100 runs on 2 CPUs (`cpuset -l 4-5`) and 1 of 123 on all 8.  The
+captured stack: seven executor threads idle in `kevent`, the eighth
+blocked for good in `blk4_proc -> xtc_recv -> __do_recv ->
+__xtc_mtx_lock`.  v1.51.0: 0 of 100 on 2 CPUs.  Blk4 alone on v1.50.0
+did not hang in 1,000 runs (`cpuset -l 0-1`), nor Blk5 in 300; the full
+suite's earlier tests are part of the shape.  CI's FreeBSD job has passed
+every run since (57 of 57, September 24 to October 26).
 
-## OPEN: xspawn_entry children may fail to start on small hosts under ring churn
+The Blk4 timer race fixed in 2.0 ("a fired park timer could release a
+newer timer of a migrated fiber", above) is a different defect: it
+cannot block a thread on a lock, and this hang did not recur while it
+was still present (1.51 to 1.59).
 
-**Status:** OPEN as of 1.50.0; behavior, not a correctness defect.  A
-re-exec'd `xtc_xspawn_entry` child that cannot create its own io_uring
-ring exits at once with 246 (240 minus `XTC_E_INTERNAL`, see
-`xtc_xproc_child_main`), so its monitor gets a prompt `XTC_DOWN_KIND_EXIT`
-rather than a hang.  On 4-vCPU CI runners with 8 threads continuously
-creating and destroying rings, up to 73 of 400 children did; 0 on a
-32-vCPU host.  Retry the spawn, or reserve ring capacity on small hosts.
+## RESOLVED (1.51, 1.55): xspawn_entry children failed to start on small hosts under ring churn
+
+**What it was.**  A re-exec'd `xtc_xspawn_entry` child that could not
+create its own io_uring ring exited at once with 246 (240 minus
+`XTC_E_INTERNAL`, see `xtc_xproc_child_main`).  On 4-vCPU CI runners with
+8 threads continuously creating and destroying rings, up to 73 of 400
+children did.  The cause is the kernel tearing a ring down
+asynchronously: the next setup can fail until the earlier ring's memory
+is released.  It needs a kernel that charges ring memory to the locked-
+memory budget: on a 4-CPU Linux 7.2 host, v1.50.0 loses 300 to 345 of the
+400 children of `/m10.10/xproc/entry_mt_parent`; Linux 6.12 never
+reproduced it.
+
+**Now.**  The child retries `xtc_loop_init` for about 2 s with a doubling
+back-off (1.51), and ring setup itself retries a transient `ENOMEM`
+(1.55); only a failure that persists exits 240 minus `XTC_E_*`.  Same
+host and test: 0 of 400 in each of 15 runs (pinned to 4 CPUs, and with
+only 4 CPUs online).  The test fails if more than 4 of 400 cannot start.
+A child cannot fall back to the epoll backend instead: the I/O backend is
+chosen at configure time.  See xtc_xproc(3).
 
 ## RESOLVED (1.51): timed waits reclaim their timer when it fires or cancels
 
@@ -996,97 +1095,42 @@ control messages in that loop's table only. Public `xtc_send`,
 procs: an arena group until discard reports `all_gone` or the group is
 destroyed, an fsm until `xtc_fsm_join` returns `XTC_OK`.
 
-## OPEN (ABI): caller-allocated structs grew during 1.x -- do not mix minors
+## FIXED (2.0): caller-allocated structs grew during 1.x -- do not mix minors
 
-**Status:** OPEN, and the most consequential item on this page for a
-packager.  It cannot be fixed without an API change, so it is documented
-rather than papered over.
+**Status:** FIXED in 2.0 by an API change (see CHANGED (2.0) below).
+What follows is the 1.x defect, kept so a packager of a 1.x release
+knows the rule for it.
 
-**The claim that is broken.** `docs/abi-stability.md` says a MINOR bump is
-additive-only, with no behaviour change for code compiled against the
-prior minor.  For function signatures that holds -- no `xtc_*` function
-has been removed, renamed, or resignatured in 1.x.  For
-**caller-allocated option and info structs it does not**, and appending
-to one is NOT binary compatible merely because zero is the intended
-default for the new field: the caller allocates the struct, so it
-allocates the OLD, SMALLER size, and the library reads (or writes) the
-new size.
+**The 1.x defect.**  `docs/abi-stability.md` said a MINOR bump was
+additive-only.  For function signatures that held; for caller-allocated
+option and info structs it did not: the caller allocates the struct at
+its OWN header's size, and the 1.x library read (or wrote) its own,
+larger size.  Measured between v1.0.0 and v1.59.0 (x86-64, gcc):
+`xtc_proc_opts_t` 40 -> 56, `xtc_sup_opts_t` 24 -> 32, `xtc_app_opts_t`
+48 -> 64, `xtc_tls_opts_t` 48 -> 120, `xtc_proc_info_t` 72 -> 80 with
+`mask_depth`/`mask_deferred` INSERTED at offset 24 (`__fill_proc_info`
+then wrote 80 bytes into an old caller's 72-byte, typically stack,
+object), `xtc_svr_callbacks_t` 40 -> 48 with `handle_continue` INSERTED
+before `terminate` (an old caller's `terminate` was called through the
+`handle_continue` prototype), `xtc_aio_t` 48 -> 64.
 
-**Measured.**  Both header trees were extracted (`git archive v1.0.0
-src/inc` vs `HEAD`) and the same probe compiled against each, x86-64,
-gcc:
+**1.x consumer rule (still true for every 1.x release).**  Recompile
+consumers against the headers of the exact minor whose library they
+link; the SONAME `libxtc.so.1` is not licence to swap 1.x minors.
 
-| struct | v1.0.0 | HEAD | what changed |
-|---|---|---|---|
-| `xtc_proc_opts_t` | 40 | 56 | appended `migratable`@40, `sched_class`@48 |
-| `xtc_sup_opts_t` | 24 | 32 | appended `max_children`@24 |
-| `xtc_app_opts_t` | 48 | 64 | appended `no_tuning_check`@56; also embeds `xtc_sup_opts_t`, which grew |
-| `xtc_tls_opts_t` | 48 | 120 | appended nine fields (`verify_peer_mode`, `cipher_list`, `ciphersuites_13`, `groups`, `crl_file`, `crl_dir`, `prefer_server_ciphers`, `passphrase_cb`, `passphrase_userdata`) |
-| `xtc_proc_info_t` | 72 | 80 | **INSERTED** `mask_depth`/`mask_deferred` at offset 24 |
-| `xtc_svr_callbacks_t` | 40 | 48 | **INSERTED** `handle_continue` before `terminate` |
-| `xtc_aio_t` | 48 | 64 | appended `iov`, `iovcnt` |
-| `xtc_io_event_t` | 16 | 16 | `fd` landed in existing tail padding -- **no change**, the shape that IS compatible |
-
-Two severity classes:
-
-**(1) Appended field, out-of-bounds READ.**  The library reads a field
-past the end of the caller's object.  `src/ptc/proc.c:1218` reads
-`opts->sched_class` and `:1303` reads `opts->migratable`, with no size or
-version negotiation anywhere.  `src/orc/sup.c:453` does
-`sup->opts = *opts`, a 32-byte copy out of a 24-byte caller object.
-`src/io/tls_openssl.c` reads `opts->passphrase_cb`, `verify_peer_mode`,
-and `crl_file`.  What the caller gets is whatever follows its struct in
-memory, interpreted as a scheduling class handle or a callback pointer.
-(`xtc_aio_t` is the benign case in this class: the library reads
-`iov`/`iovcnt` only for the `PREADV`/`PWRITEV` ops, which did not exist
-at v1.0.0, so an old caller cannot reach the read.)
-
-**(2) Inserted field -- existing offsets MOVED.**  Worse, and not merely
-a read:
-
-- `xtc_proc_info_t`: inserting two fields at offset 24 shifted every
-  mailbox counter by 8 bytes (`mbox_len` 24->32, `mbox_peak` 32->40,
-  `mbox_cap` 40->48, `mbox_saved` 48->56, `mbox_recv_total` 56->64,
-  `mbox_drop_total` 64->72).  `__fill_proc_info` (`src/ptc/proc.c:4099`)
-  opens with `memset(info, 0, sizeof *info)` -- 80 bytes into an old
-  caller's 72-byte buffer, an **out-of-bounds WRITE** that smashes 8
-  bytes past a typically stack-allocated object -- and then writes every
-  `mbox_*` field where the old caller does not read it.  An old consumer
-  gets a corrupted frame AND garbage mailbox numbers.
-- `xtc_svr_callbacks_t`: `handle_continue` was inserted BEFORE
-  `terminate`, moving `terminate` 32->40.  `src/orc/svr.c:230` does
-  `s->cb = *cb` (48 bytes out of 40), and thereafter the old caller's
-  `terminate` pointer sits where the library looks for
-  `handle_continue` -- so it is **called through the wrong prototype**
-  (`int (*)(void *, void *)` vs `void (*)(void *, int)`), while
-  `s->cb.terminate` is whatever followed the caller's struct.
-
-**Consequence for a consumer / packager.**  Recompile consumers against
-the headers of the exact minor whose library they link.  Do NOT ship a
-shared libxtc that a consumer built against a different minor's headers,
-and do not treat the SONAME (`libxtc.so.1`) as licence to swap minors
-underneath a compiled consumer -- the symbols resolve, the program
-links, and then it reads or writes past the end of its own structs.
-A source rebuild is always safe; only mixing is not.
-
-**The proper fix (deferred -- it is an API change).**  Either:
-
-1. a `size_t size` (or version) as the FIRST member of every
-   caller-allocated struct, set by the caller to `sizeof` its own view,
-   with the library reading a field only after checking the size covers
-   it -- the `struct sockaddr`/`getrandom` approach; or
-2. versioned `_ex` entry points taking a new struct, leaving the old
-   struct and the old function byte-for-byte frozen -- which is what
-   `docs/abi-stability.md` already prescribes for the frozen lock-layer
-   surface, and what should have been done here.
-
-Until one of those lands, the additive-ABI promise applies to function
-signatures only, and `docs/abi-stability.md` says so.  There is also no
-gate that would have caught this: nothing in `make check` or CI diffs
-struct layouts between tags.  A layout check (`pahole`/`abidiff` against
-the previous tag, or a table of `_Static_assert(sizeof(T) == N)` that a
-maintainer must consciously update) is the cheap mechanical guard and
-does not exist yet.
+**The 2.0 fix.**  Every such struct now starts with `size_t size`, set
+by its initializer to the caller's `sizeof`; the library reads an input
+and writes an output only up to that size (a field past it takes its
+default; size 0 is `XTC_E_INVAL`).  Fields are only ever appended in a
+minor.  Three gates hold it: `test/abi/test_abi_sized.c` (an N-1
+consumer under ASan: before the fix, `xtc_proc_info` "WRITE of size 88"
+into a 24-byte prefix, `xtc_sup_start` "READ of size 56" from a 40-byte
+child-spec stride, `xtc_svr_start` and `xtc_slab_create` reads past the
+caller's object; all pass after), `test/dist/test_abi_layout.sh` (the
+committed sizeof/offsetof table, so no layout change is silent), and
+`scripts/abi-check.sh` (abidiff against the previous tag, release-time).
+Symbol versions (`XTC_2.0`) and stability tiers complete the contract;
+see `docs/abi-stability.md`.
 
 ---
 ## OPEN (1.56): sqlxtc recovery, kaka scope, and other example limits
@@ -1180,18 +1224,36 @@ GitHub CI's sched-policy job hit it in `/m7/chan/mpsc_involuntary_preempt`.
 The test is opt-in (`XTC_TEST_INVOLUNTARY=1`) until the signal-context
 redirect path is fixed.
 
-## OPEN: valgrind memcheck reports libxtc fiber stacks as invalid
+## RESOLVED (2.0): valgrind memcheck reported libxtc fiber stacks as invalid
 
-**Status:** OPEN, tooling limitation; not a memory error in libxtc.
+**What it was.**  libxtc allocates fiber stacks with `mmap` and did not
+register them with valgrind, so once a fiber resumed on another loop's
+thread after a cross-loop `xtc_amutex` hand-off, memcheck reported its
+stack accesses as errors: 1,629 (ucontext) and 1,678 (fcontext) in
+`/m9/sync/kill_after_park_while_running`, with "client switching
+stacks?" warnings.  It was not a memory error in libxtc (ASan, which
+libxtc annotates for fiber switches, reported nothing), but CI's memcheck
+job had to skip that case.
 
-libxtc allocates fiber stacks with `mmap` and does not register them with
-`VALGRIND_STACK_REGISTER`, so once a fiber resumes on another loop's
-thread after a cross-loop `xtc_amutex` hand-off, memcheck flags its stack
-accesses (thousands of "invalid read/write" reports for a two-loop
-amutex test on 1.55.0 and 1.56).  ASan, which libxtc annotates for fiber
-switches, reports nothing for the same tests.  CI's memcheck job sets
-`XTC_UNDER_VALGRIND=1`, which skips the amutex case of
-`/m9/sync/kill_after_park_while_running`; use ASan for fiber code.
+**Now.**  When configure finds `<valgrind/valgrind.h>` (header-only; the
+`valgrind-devel` / `valgrind` package), every fiber stack is registered
+with `VALGRIND_STACK_REGISTER` when its coroutine is created and
+deregistered before the stack is pooled or unmapped.  Outside valgrind
+the requests are skipped after one `RUNNING_ON_VALGRIND` check per process:
+spawn+exit throughput is within 0.4% of a build without the header
+(medians of 15 interleaved runs, ranges overlapping).  The same test runs
+with 0 errors on both substrates, and the skip is gone; CI's memcheck
+list (test_sync, test_chan, test_mctx, test_timer, test_loop, test_svr,
+test_lockmgr) is 0 errors with no stack-switch warnings.
+
+**Still not memcheck targets.**  `test_proc`'s fault-containment cases
+write to address 0x10 on purpose; its `pid_local_id_ceiling` case holds
+65,536 fiber stacks, more mappings than valgrind tracks (`VG_N_SEGMENTS
+is too low`).  `test_exec`'s `Blk2_concurrent_commit` spins on a shared
+lock across a blocking offload and does not finish in 15 minutes under
+valgrind.  The timing tests in `test_sync` still skip under
+`XTC_UNDER_VALGRIND` (valgrind serializes threads; those tests measure
+scheduling, not memory).
 
 ## RESOLVED (1.56): a finished proc fiber is reclaimed at once
 

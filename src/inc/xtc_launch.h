@@ -1,5 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project -- All rights reserved.
+ * @stability stable
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_launch.h
@@ -51,11 +52,12 @@ typedef intptr_t (*xtc_launch_fn)(void *arg);
 #define XTC_LAUNCH_CANCEL_REASON  0x4c43   /* 'LC' */
 
 typedef struct xtc_launch_opts {
+	size_t      size;        /* sizeof(xtc_launch_opts_t): XTC_LAUNCH_OPTS_INIT */
 	const char *name;        /* child proc label (logs); may be NULL */
 	size_t      mailbox_cap; /* child mailbox cap; 0 = default */
-	int         loop;        /* exec loop index when launched on an exec
-	                          * loop (via xtc_exec_loop); 0 default */
 } xtc_launch_opts_t;
+
+#define XTC_LAUNCH_OPTS_INIT { .size = sizeof(xtc_launch_opts_t) }
 
 /*
  * Launch fn(arg) on `loop` with a `timeout_ns` deadline (< 0 = no

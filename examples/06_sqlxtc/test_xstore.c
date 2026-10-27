@@ -165,7 +165,7 @@ scenario_onloop(void)
 	xtc_loop_t *loop = NULL;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	char path[256]; t_tmpl(path, sizeof path, "sqlxtc-xstore2");
-	xtc_proc_opts_t po = { .name = "sql" };
+	xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "sql" };
 	xtc_pid_t pid;
 	int fd;
 

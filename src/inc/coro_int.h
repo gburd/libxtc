@@ -98,6 +98,10 @@ struct xtc_coro {
 	 * XTC_TSAN_FIBERS in coro_fctx.c / coro_uctx.c.
 	 */
 	void        *tsan_fiber;
+
+	/* Valgrind stack id from VALGRIND_STACK_REGISTER for this coro's
+	 * stack, set whenever `stack` is (coro_common.h). */
+	unsigned     vg_stack_id;
 };
 
 /* Shared by loop.c -- the currently-running coroutine on this loop.  */

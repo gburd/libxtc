@@ -78,7 +78,17 @@ Cross-loop inbox messages in flight
 Caps are supplied as an
 .Vt xtc_res_caps_t ;
 .Dv XTC_RES_CAPS_DEFAULT
-gives reasonable values for a multi-loop executor on a workstation.
+gives reasonable values for a multi-loop executor on a workstation,
+and sets the
+.Va size
+member to the caller's
+.Fn sizeof :
+a cap past
+.Va size
+takes its default, and a
+.Va size
+of 0 is
+.Dv XTC_E_INVAL .
 A
 cap of zero means
 .Sq no cap

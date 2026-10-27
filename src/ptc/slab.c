@@ -724,12 +724,17 @@ int
 xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 {
 	xtc_slab_t *s;
-	xtc_slab_opts_t defaults = XTC_SLAB_OPTS_DEFAULT;
+	xtc_slab_opts_t defaults = XTC_SLAB_OPTS_DEFAULT, o;
 	int rc;
 	size_t slot;
 
 	if (out == NULL) return XTC_E_INVAL;
-	if (opts == NULL) opts = &defaults;
+	if (opts == NULL) return XTC_E_INVAL;   /* obj_size is required */
+	/* name and obj_size are required: the size must cover them. */
+	if ((rc = __xtc_sized_in(&o, &defaults, sizeof o, opts,
+	    offsetof(xtc_slab_opts_t, obj_size) + sizeof o.obj_size)) != XTC_OK)
+		return rc;
+	opts = &o;
 	if (opts->obj_size == 0) return XTC_E_INVAL;
 	/*
 	 * Overflow guard: slot_size is obj_size + redzones, then rounded up
@@ -1288,11 +1293,13 @@ xtc_slab_reap(xtc_slab_t *s)
 }
 
 int
-xtc_slab_stat(const xtc_slab_t *s, xtc_slab_stats_t *out)
+xtc_slab_stat(const xtc_slab_t *s, xtc_slab_stats_t *uout)
 {
+	xtc_slab_stats_t full, *out = &full;
 	uint64_t ctor_fail = 0, live;
 	int i;
-	if (s == NULL || out == NULL) return XTC_E_INVAL;
+	if (s == NULL || !__XTC_SIZED_OUT_OK(uout)) return XTC_E_INVAL;
+	full.size = sizeof full;
 	out->alloc_fast = out->alloc_slow = out->free_fast = out->free_slow = 0;
 	for (i = 0; i < XTC_SLAB_STRIPES; i++) {
 		const struct slab_stripe *st = &s->stripes[i];
@@ -1320,7 +1327,7 @@ xtc_slab_stat(const xtc_slab_t *s, xtc_slab_stats_t *out)
 	out->oom_fails     = atomic_load_explicit(&s->s_oom_fails,  memory_order_relaxed);
 	out->redzone_violations = atomic_load_explicit(&s->s_rz_violations,
 	    memory_order_relaxed);
-	return XTC_OK;
+	return __xtc_sized_out(uout, &full, sizeof full);
 }
 
 xtc_slab_off_t

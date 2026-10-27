@@ -1,5 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project
+ * @stability stable
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_fs.h
@@ -42,10 +43,13 @@
 
 /* Metadata returned by xtc_fs_stat. */
 typedef struct xtc_fs_stat {
-	int64_t size;        /* size in bytes */
+	size_t  size;        /* sizeof(xtc_fs_stat_t): XTC_FS_STAT_INIT */
+	int64_t bytes;       /* file size in bytes (1.x: `size`) */
 	int64_t mtime_ns;    /* last-modified time, nanoseconds since the epoch */
 	int     is_dir;      /* 1 if a directory, 0 otherwise */
 } xtc_fs_stat_t;
+
+#define XTC_FS_STAT_INIT { .size = sizeof(xtc_fs_stat_t) }
 
 /* Opaque directory iterator (xtc_fs_dir_open/next/close). */
 typedef struct xtc_fs_dir xtc_fs_dir_t;

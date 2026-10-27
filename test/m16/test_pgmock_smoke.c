@@ -357,6 +357,7 @@ main(void)
 	g_listener.pids_cap = (int)(sizeof pid_slots / sizeof pid_slots[0]);
 
 	memset(kids, 0, sizeof kids);
+	kids[0].size = sizeof kids[0];
 	kids[0].name = "postmaster";
 	kids[0].fn = pgmock_listener_proc;
 	kids[0].arg = &g_listener;

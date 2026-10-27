@@ -89,7 +89,7 @@ static MunitResult
 test_in_proc_liveness(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t a, b;
 	(void)p; (void)d;
 
@@ -148,7 +148,7 @@ static MunitResult
 test_concurrent(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	int i;
 	(void)p; (void)d;
@@ -205,7 +205,7 @@ static MunitResult
 test_file_offload(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	char tmpdir[512], path[600];
 	char pattern[512];
@@ -316,7 +316,7 @@ static MunitResult
 test_off_loop(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	int out = -1;
 	(void)p; (void)d;
@@ -380,7 +380,7 @@ static MunitResult
 test_pool_grows(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	int64_t t1 = 0;
 	int64_t elapsed_ms;
@@ -447,7 +447,7 @@ static MunitResult
 test_pool_size(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	(void)p; (void)d;
 
@@ -523,7 +523,7 @@ static MunitResult
 test_no_fd_per_call(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 #if !defined(_WIN32)
 	struct rlimit old, lim;
 	int before, top = 0;

@@ -235,7 +235,7 @@ run_once(uint64_t seed, uint64_t *out_verified, uint64_t *out_mismatch,
     uint64_t *out_state)
 {
 	xtc_exec_t *exec = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	xtc_pid_t pp, w;
 	char path[] = "/tmp/sim_bufmgr_XXXXXX";

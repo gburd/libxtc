@@ -84,6 +84,7 @@ spawner(void *arg)
 		    NULL, NULL, NULL);
 
 	memset(&mopts, 0, sizeof mopts);
+	mopts.size = sizeof mopts;
 	mopts.migratable = 1;
 	for (i = 0; i < WORKERS; i++)
 		(void)xtc_proc_spawn(xtc_exec_loop(e, 0), worker, NULL,
@@ -117,7 +118,7 @@ run_once(uint64_t seed, int eager, uint64_t *out_state, int *out_done)
 	}
 
 	for (i = 0; i < LOOPS; i++) {
-		xtc_loop_stats_t st;
+		xtc_loop_stats_t st = XTC_LOOP_STATS_INIT;
 		if (xtc_exec_loop_stats(e, i, &st) == XTC_OK)
 			total_steals += (long)st.steals;
 	}

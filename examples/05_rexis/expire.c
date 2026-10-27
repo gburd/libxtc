@@ -59,7 +59,7 @@ expire_spawn(xtc_loop_t *loop, db_t *db, _Atomic int *stop,
              xtc_pid_t *out_pid)
 {
 	expire_state_t *st;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	int rc;
 
 	if ((st = xtc_malloc(sizeof(*st))) == NULL)

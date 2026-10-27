@@ -136,7 +136,7 @@ test_wal_level(void)
 	if (xtc_loop_init(&loop) != XTC_OK) return 1;
 	if (wal_writer_spawn(g_wal, loop, NULL) != XTC_OK) return 1;
 	for (c = 0; c < N_CMT; c++) {
-		xtc_proc_opts_t po = { .name = "cmt" };
+		xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "cmt" };
 		xtc_pid_t pid;
 		if (xtc_proc_spawn(loop, committer, (void *)c, &po, &pid) != XTC_OK)
 			return 1;
@@ -243,7 +243,7 @@ test_engine_level(void)
 	bt_t *bt = NULL, *bt2 = NULL;
 	sx_db *db2 = NULL;
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t po = { .name = "eng" };
+	xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "eng" };
 	xtc_pid_t pid;
 	int fd, i, lost = 0, present = 0;
 

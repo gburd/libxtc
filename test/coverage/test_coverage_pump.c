@@ -492,6 +492,9 @@ test_sup_n_children(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 
 	memset(kids, 0, sizeof kids);
+	kids[0].size = sizeof kids[0];
+	kids[1].size = sizeof kids[1];
+	kids[2].size = sizeof kids[2];
 	kids[0].name = "a"; kids[0].fn = noop_proc; kids[0].policy = XTC_RESTART_TEMPORARY;
 	kids[1].name = "b"; kids[1].fn = noop_proc; kids[1].policy = XTC_RESTART_TEMPORARY;
 	kids[2].name = "c"; kids[2].fn = noop_proc; kids[2].policy = XTC_RESTART_TEMPORARY;

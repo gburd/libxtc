@@ -655,7 +655,7 @@ test_concurrent_merge(void)
 	    "provider cmerge");
 	for (w = 0; w < CM_CHURNERS; w++) {
 		xtc_loop_t *lp = xtc_exec_loop(exec, (int)(w % CM_LOOPS));
-		xtc_proc_opts_t po = { .name = "churn" };
+		xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "churn" };
 		xtc_pid_t pid;
 		CHECK(xtc_proc_spawn(lp, cm_churner, (void *)w, &po, &pid) ==
 		    XTC_OK, "spawn churner %ld", w);

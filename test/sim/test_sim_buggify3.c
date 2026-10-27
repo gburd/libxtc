@@ -256,7 +256,7 @@ run_b(uint64_t seed, unsigned bug_pct, int *out_calls, int *out_timeouts,
     int *out_errs, long *out_hash, int *out_bug)
 {
 	xtc_exec_t *e = NULL;
-	xtc_svr_callbacks_t cb = {0};
+	xtc_svr_callbacks_t cb = XTC_SVR_CALLBACKS_INIT;
 	static struct acc_state st;
 	int i, rc;
 

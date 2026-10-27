@@ -231,6 +231,7 @@ aio_do(int op, int fd, void *buf, uint32_t len, int64_t off)
 		return aio_offload(op, fd, buf, len, off);
 
 	memset(&a, 0, sizeof a);
+	a.size = sizeof a;
 	a.fd = fd; a.op = op; a.buf = buf; a.len = len; a.off = off;
 	a.tag = t;
 	rc = xtc_io_aio_submit(loop->io, &a);
@@ -415,6 +416,7 @@ aio_do_v(int op, int fd, const struct iovec *iov, int iovcnt, int64_t off)
 		return aio_offload_v(op, fd, iov, iovcnt, off);
 
 	memset(&a, 0, sizeof a);
+	a.size = sizeof a;
 	a.fd = fd; a.op = op; a.off = off;
 	a.iov = (void *)(uintptr_t)iov; a.iovcnt = iovcnt;
 	a.tag = t;

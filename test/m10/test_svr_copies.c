@@ -91,6 +91,7 @@ svr_call_cb(void *st, const void *req, size_t sz, xtc_svr_call_t *call)
 }
 
 static const xtc_svr_callbacks_t svr_cb = {
+	.size = sizeof(xtc_svr_callbacks_t),
 	.init = NULL, .handle_call = svr_call_cb,
 	.handle_cast = NULL, .handle_info = NULL, .terminate = NULL
 };
@@ -153,7 +154,10 @@ fsm_event(void *st, int cur, const void *msg, size_t len,
 	return r;
 }
 
-static const xtc_fsm_callbacks_t fsm_cb = { NULL, fsm_event, NULL };
+static const xtc_fsm_callbacks_t fsm_cb = {
+	.size = sizeof(xtc_fsm_callbacks_t),
+	.event = fsm_event
+};
 
 static void
 fsm_caller(void *arg)

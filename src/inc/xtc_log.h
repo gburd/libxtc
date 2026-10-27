@@ -1,5 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project
+ * @stability stable
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_log.h
@@ -55,6 +56,7 @@ typedef int (*xtc_log_sink_fn)(void *user, xtc_log_level_t lvl,
                                const char *buf, size_t len);
 
 typedef struct xtc_log_opts {
+	size_t           size;             /* sizeof(xtc_log_opts_t) */
 	int              ring_size;        /* records, default 4096 */
 	int              record_max;       /* per-record bytes, default 256 */
 	xtc_log_level_t  floor;            /* default INFO */
@@ -64,6 +66,7 @@ typedef struct xtc_log_opts {
 } xtc_log_opts_t;
 
 #define XTC_LOG_OPTS_DEFAULT { \
+	.size       = sizeof(xtc_log_opts_t), \
 	.ring_size  = 4096, \
 	.record_max = 256, \
 	.floor      = XTC_LOG_INFO, \
