@@ -111,7 +111,7 @@ static int param_ordinal(sql_parse_state_t *ps, sql_token_t t) {
  * slice covering this leaf in the original SQL).  The whole-expression
  * span is unioned over the tree by sql_expr_span(). */
 static void span_tok(sql_expr_t *e, sql_token_t t) {
-    if (e && t.p && t.len > 0) { e->src = t.p; e->srclen = (uint32_t)t.len; }
+    if (e && t.src && t.srclen > 0) { e->src = t.src; e->srclen = (uint32_t)t.srclen; }
 }
 
 static sql_expr_t *mk_expr(sql_parse_state_t *ps, sql_expr_op_t op) {
@@ -205,6 +205,15 @@ struct limit_v { sql_expr_t *limit; sql_expr_t *offset; };
 %parse_failure {
     pstate->error = 1;
     if (!pstate->err_msg) pstate->err_msg = "parse failure";
+}
+
+/* The parser stack is YYSTACKDEPTH (100) deep and does not grow.  On
+ * overflow Lime empties the stack and, without this action, the parse
+ * CONTINUED from the empty stack: "SELECT" + 98 '(' + "DELETE FROM t"
+ * parsed as one DELETE.  An overflow is an error. */
+%stack_overflow {
+    pstate->error = 1;
+    pstate->err_msg = "statement nested too deeply";
 }
 
 %start_symbol input
@@ -407,7 +416,7 @@ select_core(R) ::= TK_SELECT(KW) distinct_opt(D) sel_list(L) from_opt(F)
         R->distinct = D; R->cols = L; R->from = F; R->where = W;
         R->group = G; R->having = H; R->order = O; R->limit = LM.limit;
         R->offset = LM.offset;
-        R->src = KW.p;   /* SELECT keyword; length resolved by the consumer */
+        R->src = KW.src;   /* SELECT keyword; length resolved by the consumer */
     }
 }
 
@@ -485,12 +494,12 @@ table_ref(R) ::= TK_ID(T) TK_ID(A). {
 }
 table_ref(R) ::= TK_LP(L) select_stmt(Q) TK_RP(P). {
     R = AST(pstate, sql_src_t);
-    if (R) { R->subquery = Q; R->subsrc = L.p; R->subsrclen = (uint32_t)((P.p + P.len) - L.p); }
+    if (R) { R->subquery = Q; R->subsrc = L.src; R->subsrclen = (uint32_t)((P.src + P.srclen) - L.src); }
 }
 table_ref(R) ::= TK_LP(L) select_stmt(Q) TK_RP(P) TK_AS TK_ID(A). {
     R = AST(pstate, sql_src_t);
     if (R) { R->subquery = Q; R->alias = tok_str(A);
-             R->subsrc = L.p; R->subsrclen = (uint32_t)((P.p + P.len) - L.p); }
+             R->subsrc = L.src; R->subsrclen = (uint32_t)((P.src + P.srclen) - L.src); }
 }
 
 where_opt(R) ::= .               { R = NULL; }
@@ -547,12 +556,12 @@ cte_list(R) ::= cte_list(L) TK_COMMA cte(C). {
 cte(R) ::= TK_ID(N) TK_AS TK_LP(L) select_stmt(S) TK_RP(P). {
     R = AST(pstate, sql_cte_t);
     if (R) { R->name = tok_str(N); R->select = S;
-             R->src = L.p; R->srclen = (uint32_t)((P.p + P.len) - L.p); }
+             R->src = L.src; R->srclen = (uint32_t)((P.src + P.srclen) - L.src); }
 }
 cte(R) ::= TK_ID(N) TK_LP id_list(IC) TK_RP TK_AS TK_LP(L) select_stmt(S) TK_RP(P). {
     R = AST(pstate, sql_cte_t);
     if (R) { R->name = tok_str(N); R->cols = IC; R->select = S;
-             R->src = L.p; R->srclen = (uint32_t)((P.p + P.len) - L.p); }
+             R->src = L.src; R->srclen = (uint32_t)((P.src + P.srclen) - L.src); }
 }
 
 /* ===== INSERT ===== */
@@ -755,16 +764,21 @@ coldef(R) ::= TK_ID(N) type_opt(TY) col_constraints(CC). {
 }
 
 %type type_opt {sql_str_t}
-%type type_name {sql_str_t}
+%type type_name {sql_token_t}
 type_opt(R) ::= .                                          { R.p = NULL; R.len = 0; }
-type_opt(R) ::= type_name(T).                              { R = T; }
-type_opt(R) ::= type_name(T) TK_LP TK_NUMBER TK_RP.        { R = T; }
-type_opt(R) ::= type_name(T) TK_LP TK_NUMBER TK_COMMA TK_NUMBER TK_RP. { R = T; }
+type_opt(R) ::= type_name(T).                              { R = tok_str(T); }
+type_opt(R) ::= type_name(T) TK_LP TK_NUMBER TK_RP.        { R = tok_str(T); }
+type_opt(R) ::= type_name(T) TK_LP TK_NUMBER TK_COMMA TK_NUMBER TK_RP. { R = tok_str(T); }
 /* A type name is one or more identifiers ("DOUBLE PRECISION", "UNSIGNED
  * BIG INT"); the slice spans them all, as SQLite's typetoken does, so the
  * affinity rules see every word. */
-type_name(R) ::= TK_ID(T).                  { R = tok_str(T); }
-type_name(R) ::= type_name(A) TK_ID(T).     { R = A; R.len = (uint32_t)((T.p + T.len) - A.p); }
+type_name(R) ::= TK_ID(T).                  { R = T; }
+type_name(R) ::= type_name(A) TK_ID(T).     {
+    /* Several words: the verbatim source slice over all of them (a
+     * dequoted word's value may live in the arena, not in the text). */
+    R.src = A.src; R.srclen = (int)((T.src + T.srclen) - A.src);
+    R.p = R.src; R.len = R.srclen;
+}
 
 %type col_constraints {int}
 %type col_constraint  {int}
@@ -943,11 +957,11 @@ expr(R) ::= TK_LP(L) expr(E) TK_RP(P). {
     R = E;
     /* Grow the span to include the parentheses so a parenthesized
      * select item is named with them, as SQLite does ((a+1)*2). */
-    if (R) { R->src = L.p; R->srclen = (uint32_t)((P.p + P.len) - L.p); }
+    if (R) { R->src = L.src; R->srclen = (uint32_t)((P.src + P.srclen) - L.src); }
 }
 expr(R) ::= TK_LP(L) select_stmt(Q) TK_RP(P). {
     R = mk_expr(pstate, SX_E_SUBQUERY);
-    if (R) { R->sel = Q; R->src = L.p; R->srclen = (uint32_t)((P.p + P.len) - L.p); }
+    if (R) { R->sel = Q; R->src = L.src; R->srclen = (uint32_t)((P.src + P.srclen) - L.src); }
 }
 expr(R) ::= TK_NOT expr(E).             { R = mk_unary(pstate, TK_NOT, E); }
 expr(R) ::= TK_MINUS expr(E). [TK_UMINUS] { R = mk_unary(pstate, TK_MINUS, E); }
@@ -1013,11 +1027,11 @@ expr(R) ::= expr(A) TK_NOT TK_IN TK_LP expr_list(L) TK_RP. {
 expr(R) ::= expr(A) TK_NOT TK_IN TK_LP(L) select_stmt(Q) TK_RP(P). {
     R = mk_expr(pstate, SX_E_IN_SELECT);
     if (R) { R->a = A; R->sel = Q; R->ival = 1;
-             R->src = L.p; R->srclen = (uint32_t)((P.p + P.len) - L.p); }
+             R->src = L.src; R->srclen = (uint32_t)((P.src + P.srclen) - L.src); }
 }
 expr(R) ::= expr(A) TK_IN TK_LP(L) select_stmt(Q) TK_RP(P). {
     R = mk_expr(pstate, SX_E_IN_SELECT);
-    if (R) { R->a = A; R->sel = Q; R->src = L.p; R->srclen = (uint32_t)((P.p + P.len) - L.p); }
+    if (R) { R->a = A; R->sel = Q; R->src = L.src; R->srclen = (uint32_t)((P.src + P.srclen) - L.src); }
 }
 expr(R) ::= expr(A) TK_BETWEEN expr(B) TK_AND expr(C). [TK_BETWEEN] {
     R = mk_expr(pstate, SX_E_BETWEEN); if (R) { R->a = A; R->b = B; R->c = C; }
@@ -1030,28 +1044,28 @@ expr(R) ::= expr(A) TK_NOT TK_BETWEEN expr(B) TK_AND expr(C). [TK_BETWEEN] {
 expr(R) ::= TK_CASE(C) expr_atom(BASE) case_arms(AR) case_else(EL) TK_END(E). {
     R = mk_expr(pstate, SX_E_CASE);
     if (R) { R->a = BASE; R->arms = AR; R->els = EL;
-             R->src = C.p; R->srclen = (uint32_t)((E.p + E.len) - C.p); }
+             R->src = C.src; R->srclen = (uint32_t)((E.src + E.srclen) - C.src); }
 }
 expr(R) ::= TK_CASE(C) case_arms(AR) case_else(EL) TK_END(E). {
     R = mk_expr(pstate, SX_E_CASE);
     if (R) { R->arms = AR; R->els = EL;
-             R->src = C.p; R->srclen = (uint32_t)((E.p + E.len) - C.p); }
+             R->src = C.src; R->srclen = (uint32_t)((E.src + E.srclen) - C.src); }
 }
 expr(R) ::= TK_ID(F) TK_LP TK_RP(P). {
     R = mk_expr(pstate, SX_E_FUNC); if (R) { R->name[0] = tok_str(F); R->nname = 1; }
-    if (R) { R->src = F.p; R->srclen = (uint32_t)((P.p + P.len) - F.p); }
+    if (R) { R->src = F.src; R->srclen = (uint32_t)((P.src + P.srclen) - F.src); }
 }
 expr(R) ::= TK_ID(F) TK_LP TK_STAR TK_RP(P). {
     R = mk_expr(pstate, SX_E_FUNC); if (R) { R->name[0] = tok_str(F); R->nname = 1; R->ival = 2; }
-    if (R) { R->src = F.p; R->srclen = (uint32_t)((P.p + P.len) - F.p); }
+    if (R) { R->src = F.src; R->srclen = (uint32_t)((P.src + P.srclen) - F.src); }
 }
 expr(R) ::= TK_ID(F) TK_LP expr_list(L) TK_RP(P). {
     R = mk_expr(pstate, SX_E_FUNC); if (R) { R->name[0] = tok_str(F); R->nname = 1; R->list = L; }
-    if (R) { R->src = F.p; R->srclen = (uint32_t)((P.p + P.len) - F.p); }
+    if (R) { R->src = F.src; R->srclen = (uint32_t)((P.src + P.srclen) - F.src); }
 }
 expr(R) ::= TK_ID(F) TK_LP TK_DISTINCT expr_list(L) TK_RP(P). {
     R = mk_expr(pstate, SX_E_FUNC); if (R) { R->name[0] = tok_str(F); R->nname = 1; R->list = L; R->ival = 1; }
-    if (R) { R->src = F.p; R->srclen = (uint32_t)((P.p + P.len) - F.p); }
+    if (R) { R->src = F.src; R->srclen = (uint32_t)((P.src + P.srclen) - F.src); }
 }
 expr(R) ::= TK_CAST(C) TK_LP expr(E) TK_AS type_opt(TY) TK_RP(P). {
     /* CAST(expr AS type) -- modelled as a FUNC named "cast" with the
@@ -1063,7 +1077,7 @@ expr(R) ::= TK_CAST(C) TK_LP expr(E) TK_AS type_opt(TY) TK_RP(P). {
         item->expr = E; l->head = item; l->n = 1;
         R->name[0].p = "cast"; R->name[0].len = 4;
         R->name[1] = TY; R->nname = 2; R->list = l;
-        R->src = C.p; R->srclen = (uint32_t)((P.p + P.len) - C.p);
+        R->src = C.src; R->srclen = (uint32_t)((P.src + P.srclen) - C.src);
     }
 }
 expr(R) ::= TK_EXISTS TK_LP(L) select_stmt(Q) TK_RP(P). {
@@ -1071,7 +1085,7 @@ expr(R) ::= TK_EXISTS TK_LP(L) select_stmt(Q) TK_RP(P). {
      * executor tests whether the subquery returns any row. */
     R = mk_expr(pstate, SX_E_IN_SELECT);
     if (R) { R->a = NULL; R->sel = Q; R->ival = 2;   /* ival bit1 = EXISTS */
-             R->src = L.p; R->srclen = (uint32_t)((P.p + P.len) - L.p); }
+             R->src = L.src; R->srclen = (uint32_t)((P.src + P.srclen) - L.src); }
 }
 
 case_arms(R) ::= TK_WHEN expr(W) TK_THEN expr(T). {
@@ -1108,9 +1122,9 @@ expr_atom(R) ::= TK_QMARK(T).  {
 expr_atom(R) ::= TK_ID(T).     { R = mk_expr(pstate, SX_E_COLUMN); if (R) { R->name[0] = tok_str(T); R->nname = 1; span_tok(R, T); } }
 expr_atom(R) ::= TK_ID(A) TK_DOT TK_ID(B). {
     R = mk_expr(pstate, SX_E_COLUMN); if (R) { R->name[0] = tok_str(A); R->name[1] = tok_str(B); R->nname = 2;
-                                              R->src = A.p; R->srclen = (uint32_t)((B.p + B.len) - A.p); }
+                                              R->src = A.src; R->srclen = (uint32_t)((B.src + B.srclen) - A.src); }
 }
 expr_atom(R) ::= TK_ID(A) TK_DOT TK_ID(B) TK_DOT TK_ID(C). {
     R = mk_expr(pstate, SX_E_COLUMN); if (R) { R->name[0] = tok_str(A); R->name[1] = tok_str(B); R->name[2] = tok_str(C); R->nname = 3;
-                                              R->src = A.p; R->srclen = (uint32_t)((C.p + C.len) - A.p); }
+                                              R->src = A.src; R->srclen = (uint32_t)((C.src + C.srclen) - A.src); }
 }
