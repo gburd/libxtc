@@ -79,6 +79,14 @@ return value to
 When called from the main thread, it drives the loop until the target
 completes; when called from inside another coroutine, it parks the
 caller and resumes it once the target is done.
+A proc killed
+.Pq Xr xtc_exit_pid 3
+while it awaits dies at once; the target is not affected
+.Po see
+.Sx KILL DELIVERY
+in
+.Xr xtc_proc 3
+.Pc .
 .Pp
 .Fn xtc_yield
 returns control to the loop.  The next loop step resumes the coroutine

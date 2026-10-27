@@ -137,4 +137,22 @@ void __xtc_coro_stack_spare_fini(xtc_loop_t *loop);
  * on another carrier sees the previous thread's slot. */
 struct xtc_coro *__xtc_current_coro_get(void);
 
+/*
+ * xtc_await's kill point, at the top of each park round (all three
+ * substrates).  The first round has nothing pending unless the kill came
+ * first, and a later round runs only after a wake: if that wake was not
+ * the target's completion and a kill is pending, stop being the target's
+ * waiter (the target's DONE path reads target->waiter on this loop, so
+ * this is single-threaded with it) and deliver.  __xtc_fiber_kill_poll
+ * unwinds (does not return), or latches the kill under a mask and
+ * returns, and the await then re-registers and waits on.
+ */
+#define AWAIT_KILL_POLL(me, target) do {                                 \
+	if (__xtc_fiber_kill_poll != NULL) {                             \
+		if ((target)->waiter == (me)->self)                      \
+			(target)->waiter = NULL;                         \
+		__xtc_fiber_kill_poll();                                 \
+	}                                                                \
+} while (0)
+
 #endif /* XTC_CORO_INT_H */

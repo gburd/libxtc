@@ -64,10 +64,14 @@
 
 #include "xtc_int.h"
 #include "xtc_preempt.h"
+#include "xtc_preempt_involuntary.h"
+#include "xtc_log.h"
 #include "preempt_int.h"
 #include "xtc_probes.h"
 
+#include <errno.h>
 #include <signal.h>
+#include <stdio.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <string.h>
@@ -75,6 +79,9 @@
 #if defined(__linux__)
 #include <sys/syscall.h>   /* SYS_gettid for SIGEV_THREAD_ID targeting */
 #include <unistd.h>
+#endif
+#if defined(__linux__)
+#include <sys/auxv.h>      /* getauxval: the SME probe, the vDSO base */
 #endif
 
 #if defined(__linux__) || defined(__FreeBSD__) || defined(__NetBSD__) || \
@@ -191,7 +198,264 @@ __xtc_preempt_take_pc(void)
 {
 	return __xtc_preempt_pc;
 }
+
+/*
+ * errno across an involuntary yield (the x86-64 trampoline calls these
+ * around its xtc_yield).  errno is per THREAD: the fibers the scheduler
+ * runs in the slice may set it, and a migratable fiber may resume on
+ * another thread, so the interrupted code would see a foreign errno
+ * between, say, a failed read() and its errno test.  Functions, not an
+ * inline TLS access, because errno's TLS layout is the libc's.
+ */
+XTC_PREEMPT_HIDDEN int __xtc_preempt_errno_get(void);
+XTC_PREEMPT_HIDDEN void __xtc_preempt_errno_set(int e);
+
+int
+__xtc_preempt_errno_get(void)
+{
+	return errno;
+}
+
+void
+__xtc_preempt_errno_set(int e)
+{
+	errno = e;
+}
+
+#if defined(__aarch64__) && defined(__linux__)
+/* 1 when the CPU has SME: the aarch64 trampoline then leaves streaming
+ * mode, turns ZA off and clears TPIDR2_EL0 before its xtc_yield.  Set by
+ * xtc_preempt_set_involuntary before the first redirect can happen. */
+XTC_PREEMPT_HIDDEN int __xtc_preempt_a64_sme;
 #endif
+#endif
+
+/*
+ * SAFE POINTS.  An involuntary yield may land on any instruction the
+ * redirect accepts, and the code there must tolerate another fiber of the
+ * same thread running before its next instruction.  Code compiled for a
+ * thread does not: glibc's malloc tcache, stdio's per-FILE recursive lock
+ * (owned by the THREAD, so a loop-mate walks straight in), any libc or
+ * third-party per-thread state.  libxtc brackets its own such regions,
+ * but cannot bracket libc's.  So the redirect accepts only a PC inside a
+ * PREEMPTIBLE range:
+ *   - the main executable's executable segments, but only when neither
+ *     libxtc nor libc lies inside them (both are shared objects);
+ *   - the xtc_preemptible section of the object that links libxtc
+ *     (functions marked XTC_PREEMPTIBLE);
+ *   - ranges added with xtc_preempt_region_add.
+ * A static libxtc or a static libc cannot be told apart from the
+ * program's own code by segment, so then the main executable is not
+ * trusted and only marked code and added ranges are: a static build must
+ * mark its preemptible code, and enabling with none fails.  Elsewhere the
+ * tick stays pending and the fiber yields cooperatively at its next yield
+ * point.
+ *
+ * The table only grows (an entry, once published, never changes), so the
+ * handler reads it lock-free: acquire the count, then scan.
+ */
+#if defined(__ELF__) && defined(__linux__)
+/* The bounds of the xtc_preemptible section in the object that links
+ * this file (the executable, for a static libxtc).  Weak: NULL when no
+ * function there carries XTC_PREEMPTIBLE. */
+extern char __start_xtc_preemptible[]
+    __attribute__((weak, visibility("hidden")));
+extern char __stop_xtc_preemptible[]
+    __attribute__((weak, visibility("hidden")));
+#endif
+
+#define XTC_PREEMPT_REGIONS 32
+struct preempt_region {
+	uintptr_t lo, hi;
+};
+static struct preempt_region g_regions[XTC_PREEMPT_REGIONS];
+static _Atomic int  g_nregions;
+static pthread_mutex_t g_regions_mu = PTHREAD_MUTEX_INITIALIZER;
+static int          g_regions_init;   /* under g_regions_mu */
+static int          g_regions_rc;     /* the init's verdict */
+static int          g_regions_norange;   /* refused only for want of a range */
+/* A libc PC a region must never cover (preempt_libc_pc). */
+static uintptr_t    g_guard_libc;
+
+/* A PC inside libc, wherever libc is linked: the return address of a
+ * qsort comparator.  (Not &qsort: in a non-PIE executable a function's
+ * address can be a canonical PLT stub inside the executable.) */
+#if defined(__GNUC__) || defined(__clang__)
+static uintptr_t g_libc_pc_probe;
+
+__attribute__((noinline)) static int
+preempt_libc_cmp(const void *a, const void *b)
+{
+	g_libc_pc_probe = (uintptr_t)__builtin_return_address(0);
+	return *(const int *)a - *(const int *)b;
+}
+
+static uintptr_t
+preempt_libc_pc(void)
+{
+	int v[2] = { 2, 1 };
+	qsort(v, 2, sizeof v[0], preempt_libc_cmp);
+	return g_libc_pc_probe;
+}
+#else
+static uintptr_t
+preempt_libc_pc(void)
+{
+	return 0;   /* no redirect on these compilers' targets anyway */
+}
+#endif
+
+static int
+region_push(uintptr_t lo, uintptr_t hi)
+{
+	int n = atomic_load_explicit(&g_nregions, memory_order_relaxed);
+	if (n >= XTC_PREEMPT_REGIONS)
+		return XTC_E_RESOURCE;
+	g_regions[n].lo = lo;
+	g_regions[n].hi = hi;
+	atomic_store_explicit(&g_nregions, n + 1, memory_order_release);
+	return XTC_OK;
+}
+
+#if defined(__ELF__) && defined(__linux__)
+#include <link.h>
+
+struct preempt_scan {
+	int       seen;          /* objects visited */
+	uintptr_t libc_pc;       /* a PC inside libc (preempt_libc_pc) */
+	uintptr_t lo[4], hi[4];  /* the main executable's PF_X segments */
+	int       nx;
+};
+
+/*
+ * The first object dl_iterate_phdr reports is the main executable.  (The
+ * question is dladdr's -- which object holds libxtc, which holds libc --
+ * asked without dladdr, which needs -ldl before glibc 2.34.)
+ */
+__attribute__((noinline)) static int
+preempt_scan_cb(struct dl_phdr_info *i, size_t sz, void *arg)
+{
+	struct preempt_scan *s = arg;
+	int k;
+	(void)sz;
+	if (s->seen++ != 0)
+		return 1;   /* only the main executable is needed */
+	for (k = 0; k < i->dlpi_phnum && s->nx < 4; k++) {
+		if (i->dlpi_phdr[k].p_type != PT_LOAD ||
+		    (i->dlpi_phdr[k].p_flags & PF_X) == 0)
+			continue;
+		s->lo[s->nx] = i->dlpi_addr + i->dlpi_phdr[k].p_vaddr;
+		s->hi[s->nx] = s->lo[s->nx] + i->dlpi_phdr[k].p_memsz;
+		s->nx++;
+	}
+	return 1;
+}
+
+static int
+preempt_in_main(const struct preempt_scan *s, uintptr_t pc)
+{
+	int k;
+	for (k = 0; k < s->nx; k++)
+		if (pc >= s->lo[k] && pc < s->hi[k])
+			return 1;
+	return 0;
+}
+
+/* Fill the table once.  XTC_OK, or XTC_E_NOSYS when no range can be
+ * trusted (the caller logs why). */
+static int
+preempt_regions_init(const char **why)
+{
+	struct preempt_scan s;
+	int k, self_in_main, libc_in_main;
+
+	memset(&s, 0, sizeof s);
+	(void)dl_iterate_phdr(preempt_scan_cb, &s);
+	s.libc_pc = g_guard_libc = preempt_libc_pc();
+	/* A static (non-inlinable) function of this file stands for libxtc
+	 * (dladdr's question: is libxtc in the main executable?); its
+	 * address is never a PLT stub. */
+	self_in_main = preempt_in_main(&s, (uintptr_t)&preempt_scan_cb);
+	libc_in_main = s.libc_pc == 0 || preempt_in_main(&s, s.libc_pc);
+	if (!self_in_main && !libc_in_main)
+		for (k = 0; k < s.nx; k++)
+			(void)region_push(s.lo[k], s.hi[k]);
+	if (__start_xtc_preemptible != NULL &&
+	    (uintptr_t)__stop_xtc_preemptible >
+	    (uintptr_t)__start_xtc_preemptible)
+		(void)region_push((uintptr_t)__start_xtc_preemptible,
+		    (uintptr_t)__stop_xtc_preemptible);
+	if (atomic_load_explicit(&g_nregions, memory_order_relaxed) == 0) {
+		g_regions_norange = 1;
+		*why = self_in_main ?
+		    "libxtc is linked statically into the executable, which "
+		    "is then not preemptible by default: mark preemptible "
+		    "code XTC_PREEMPTIBLE or add it with "
+		    "xtc_preempt_region_add" :
+		    "libc is linked statically into the executable, which "
+		    "is then not preemptible by default: mark preemptible "
+		    "code XTC_PREEMPTIBLE or add it with "
+		    "xtc_preempt_region_add";
+		return XTC_E_NOSYS;
+	}
+	return XTC_OK;
+}
+#else
+static int
+preempt_regions_init(const char **why)
+{
+	*why = "no involuntary redirect on this platform";
+	return XTC_E_NOSYS;
+}
+#endif
+
+/*
+ * __xtc_preempt_pc_ok: 1 if an involuntary yield may land at `pc`.
+ * Called by the arch redirects (coro_preempt.h) in the signal handler:
+ * async-signal-safe (plain loads of a published, immutable table).
+ * PUBLIC: int __xtc_preempt_pc_ok __P((uintptr_t));
+ */
+int
+__xtc_preempt_pc_ok(uintptr_t pc)
+{
+	int n = atomic_load_explicit(&g_nregions, memory_order_acquire), k;
+	for (k = 0; k < n; k++)
+		if (pc >= g_regions[k].lo && pc < g_regions[k].hi)
+			return 1;
+	return 0;
+}
+
+/* PUBLIC: int xtc_preempt_involuntary_supported __P((void)); */
+int
+xtc_preempt_involuntary_supported(void)
+{
+	extern int __xtc_coro_preempt_effective(void);
+	return __xtc_coro_preempt_effective();
+}
+
+/* PUBLIC: int xtc_preempt_region_add __P((const void *, const void *)); */
+int
+xtc_preempt_region_add(const void *start, const void *end)
+{
+	uintptr_t lo = (uintptr_t)start, hi = (uintptr_t)end;
+	int rc;
+	if (start == NULL || hi <= lo)
+		return XTC_E_INVAL;
+	/* A cheap guard, not a proof: refuse a range that covers this file
+	 * (a static function: its address is never a PLT stub) or a libc
+	 * PC (the return address into qsort's caller-of-comparator). */
+	if ((uintptr_t)&region_push >= lo && (uintptr_t)&region_push < hi)
+		return XTC_E_INVAL;
+	(void)__xtc_mtx_lock(&g_regions_mu);
+	if (g_guard_libc == 0)
+		g_guard_libc = preempt_libc_pc();
+	if (g_guard_libc != 0 && g_guard_libc >= lo && g_guard_libc < hi)
+		rc = XTC_E_INVAL;
+	else
+		rc = region_push(lo, hi);
+	(void)__xtc_mtx_unlock(&g_regions_mu);
+	return rc;
+}
 
 #if defined(XTC_HAVE_POSIX_TIMERS) || defined(XTC_HAVE_KQUEUE_TIMER)
 
@@ -622,22 +886,73 @@ xtc_preempt_supported(void)
 
 #endif
 
-/* PUBLIC: void xtc_preempt_set_involuntary __P((int)); */
+/* PUBLIC: int xtc_preempt_set_involuntary __P((int)); */
 /*
  * Enable (on != 0) or disable signal-context involuntary yield (Phase
  * 2).  When enabled AND a per-worker timer is armed, a tick preempts
- * the running fiber in the handler -- resumably, and only when safe
- * (crit_depth == 0, unsafe_depth == 0) -- on the ucontext substrate;
- * on the fctx/winfiber substrate the involuntary yield declines and
- * the timer falls back to Phase 1 cooperative-assisted preemption.
- * Process-global (it flips the shared handler's behavior).  Off by
- * default; Phase 1 users are never exposed to signal-context stack
- * redirection unless they opt in here. */
-void
+ * the running fiber in the handler -- resumably, and only at a safe
+ * point (crit_depth == 0, unsafe_depth == 0, and a PC in a preemptible
+ * range; see SAFE POINTS above); elsewhere the tick falls back to Phase
+ * 1 cooperative-assisted preemption.  Process-global (it flips the
+ * shared handler's behavior).  Off by default.
+ *
+ * Enabling returns XTC_E_NOSYS, and leaves involuntary preemption off,
+ * where this build has no redirect or no preemptible range can be
+ * trusted (a static executable with neither an XTC_PREEMPTIBLE function
+ * nor an xtc_preempt_region_add range); the reason goes to the default
+ * log once.  Disabling always succeeds.
+ */
+int
 xtc_preempt_set_involuntary(int on)
 {
-	atomic_store_explicit(&g_involuntary_on, on ? 1 : 0,
-	    memory_order_relaxed);
+	extern int __xtc_coro_preempt_effective(void);
+	const char *why = NULL;
+	int rc;
+
+	if (!on) {
+		atomic_store_explicit(&g_involuntary_on, 0,
+		    memory_order_relaxed);
+		return XTC_OK;
+	}
+	(void)__xtc_mtx_lock(&g_regions_mu);
+	if (!g_regions_init) {
+		g_regions_init = 1;
+		if (!__xtc_coro_preempt_effective()) {
+			why = "no involuntary redirect on this platform and "
+			    "substrate";
+			g_regions_rc = XTC_E_NOSYS;
+		} else {
+			g_regions_rc = preempt_regions_init(&why);
+		}
+		if (g_regions_rc != XTC_OK) {
+			/* The default logger may not be set: say it on
+			 * stderr too, once (a refused opt-in must not be
+			 * silent). */
+			xtc_log_write(xtc_log_default(), XTC_LOG_ERROR,
+			    "xtc_preempt_set_involuntary: involuntary "
+			    "preemption stays off: %s", why);
+			fprintf(stderr, "XTC DIAGNOSTIC: "
+			    "xtc_preempt_set_involuntary: involuntary "
+			    "preemption stays off: %s\n", why);
+		}
+	}
+	/* A static executable refused for want of a range is accepted once
+	 * xtc_preempt_region_add has supplied one. */
+	if (g_regions_rc != XTC_OK && g_regions_norange &&
+	    atomic_load_explicit(&g_nregions, memory_order_relaxed) > 0) {
+		g_regions_rc = XTC_OK;
+		g_regions_norange = 0;
+	}
+	rc = g_regions_rc;
+	(void)__xtc_mtx_unlock(&g_regions_mu);
+	if (rc != XTC_OK)
+		return rc;
+#if defined(__aarch64__) && defined(__linux__)
+	__xtc_preempt_a64_sme =
+	    (getauxval(AT_HWCAP2) & (1UL << 23)) != 0;   /* HWCAP2_SME */
+#endif
+	atomic_store_explicit(&g_involuntary_on, 1, memory_order_relaxed);
+	return XTC_OK;
 }
 
 /*

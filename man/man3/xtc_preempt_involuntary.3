@@ -1,0 +1,174 @@
+.\" Copyright (c) 2026, The XTC Project -- All rights reserved.
+.\" Use of this source code is governed by the ISC License.
+.Dd October 27, 2026
+.Dt XTC_PREEMPT_INVOLUNTARY 3
+.Os
+.Sh NAME
+.Nm xtc_preempt_set_involuntary ,
+.Nm xtc_preempt_involuntary_supported ,
+.Nm xtc_preempt_region_add ,
+.Nm XTC_PREEMPTIBLE
+.Nd involuntary (signal-context) preemption, EXPERIMENTAL
+.Sh SYNOPSIS
+.In xtc_preempt_involuntary.h
+.Ft int
+.Fn xtc_preempt_set_involuntary "int on"
+.Ft int
+.Fn xtc_preempt_involuntary_supported "void"
+.Ft int
+.Fn xtc_preempt_region_add "const void *start" "const void *end"
+.Fd #define XTC_PREEMPTIBLE
+.Sh DESCRIPTION
+Involuntary preemption lets a timer tick yield a running fiber at the
+instruction it interrupted, so its loop-mates run even while it never
+reaches a yield point.
+The tick source is the per-thread timer of
+.Xr xtc_preempt 3
+.Pq Fn xtc_preempt_arm , Xr xtc_exec_set_preempt 3 ;
+without involuntary preemption a tick only marks the fiber due for its
+next cooperative yield.
+This header is
+.Sy experimental
+.Pq docs/abi-stability.md :
+its contract may change in any minor release.
+.Pp
+.Fn xtc_preempt_set_involuntary
+turns it on
+.Pq Fa on No != 0
+or off, process-wide.
+.Fn xtc_preempt_involuntary_supported
+reports whether this build has the redirect: Linux x86-64 (ucontext, or
+fcontext with glibc) and Linux aarch64 (either substrate and libc).
+.Ss Safe points
+A tick yields the fiber only at a
+.Em safe point :
+outside a critical section
+.Pq Fn xtc_proc_critical_enter , Xr xtc_proc 3 ,
+outside libxtc's own internal regions, and at a program counter inside a
+.Em preemptible range .
+The preemptible ranges are:
+.Bl -bullet
+.It
+the main executable's own code, but only when libxtc and libc are both
+shared objects (neither lies inside it);
+.It
+every function marked
+.Dv XTC_PREEMPTIBLE
+(it is placed in the
+.Li xtc_preemptible
+section, which is trusted even in a static executable);
+.It
+every range added with
+.Fn xtc_preempt_region_add .
+.El
+.Pp
+Never libc, any other shared library, or libxtc itself.
+Code compiled for a thread is not safe to interleave with a loop-mate
+on the same thread: glibc's per-thread malloc cache, a
+.Vt FILE Ns 's
+per-thread recursive lock, any library's thread-local scratch.
+Before this check a fiber preempted inside
+.Xr malloc 3
+let a loop-mate into the same cache (heap corruption within a second),
+and loop-mates writing one
+.Vt FILE
+tore each other's lines.
+A tick elsewhere stays pending, and the fiber yields at its next yield
+point.
+So a fiber that spends a fraction
+.Va f
+of its time outside preemptible code is sliced only by the ticks that
+land in its own code: its slices are about
+.Va interval No / (1 \- Va f )
+long.
+.Ss Static builds must mark their preemptible code
+When libxtc
+.Pq Pa libxtc.a
+or libc is linked statically, its code lies inside the main executable's
+text and cannot be told apart from the program's by segment, so the main
+executable is not preemptible by default: only
+.Dv XTC_PREEMPTIBLE
+functions and added ranges are.
+With neither, enabling fails with
+.Dv XTC_E_NOSYS
+and says why.
+The rule is the same on every platform; the only question asked is which
+object holds libxtc and which holds libc.
+.Pp
+.Fn xtc_preempt_region_add
+adds
+.Bq Fa start , Fa end
+to the preemptible ranges: code the application vouches for, such as a
+JIT buffer or a static build's own objects.
+Call it before enabling (a later call lifts a static executable's
+refusal); ranges cannot be removed.
+.Ss What the interrupted code and the scheduler see
+The preempted code resumes with its whole register file, condition
+flags, vector state (XSAVE on x86-64; the kernel's signal frame,
+including SVE and SME state, on aarch64), x87 state, PKRU and
+.Va errno ,
+exactly as at the tick.
+The scheduler and the fibers it runs in the slice start from a
+call-boundary state: on x86-64 DF and AC clear, an empty x87 stack and
+clean AVX upper halves; on aarch64 SME streaming mode and ZA off and
+TPIDR2_EL0 clear.
+MXCSR, the x87 control word and FPCR are per fiber on both substrates.
+.Ss Contract for code in a preemptible range
+It must not hold per-thread state that a loop-mate on the same thread
+could disturb across an instruction boundary (a thread-local buffer
+another fiber also uses, a non-recursive lock taken by spinning)
+without a critical section.
+It may call anything: a tick inside a callee outside the preemptible
+ranges is deferred.
+.Ss Not supported
+CET shadow stacks (the trampoline returns to the interrupted PC with a
+plain
+.Li ret ) ,
+AMX tile state (not saved), and the aarch64 guarded control stack.
+macOS, Windows, x86-64 musl and the single-file amalgamation have no
+redirect: there a tick always falls back to the cooperative path.
+.Sh RETURN VALUES
+.Fn xtc_preempt_set_involuntary
+returns
+.Dv XTC_OK ;
+enabling returns
+.Dv XTC_E_NOSYS ,
+and leaves involuntary preemption off, where
+.Fn xtc_preempt_involuntary_supported
+is 0 or no preemptible range can be trusted.
+The reason is reported once, at
+.Dv XTC_LOG_ERROR
+on the default log and on standard error.
+.Pp
+.Fn xtc_preempt_involuntary_supported
+returns 1 or 0.
+.Pp
+.Fn xtc_preempt_region_add
+returns
+.Dv XTC_OK ,
+.Dv XTC_E_INVAL
+for a NULL
+.Fa start ,
+an empty range, or one that overlaps libxtc's own text, or
+.Dv XTC_E_RESOURCE
+when the table (32 ranges) is full.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+#include "xtc_preempt_involuntary.h"
+
+XTC_PREEMPTIBLE static void
+crunch(double *v, size_t n)     /* pure computation */
+{
+	...
+}
+
+if (xtc_preempt_set_involuntary(1) != XTC_OK)
+	/* cooperative preemption only: yield in long loops */;
+.Ed
+.Sh SEE ALSO
+.Xr xtc_exec 3 ,
+.Xr xtc_osproc 3 ,
+.Xr xtc_preempt 3 ,
+.Xr xtc_proc 3
+.Sh AUTHORS
+.An The XTC Project .

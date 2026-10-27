@@ -461,10 +461,10 @@ has released what it holds; one that does not, delivers it at the
 target's next
 .Fn xtc_recv ,
 .Fn xtc_proc_sleep ,
-or plain yield.  A proc parked in
-.Fn xtc_await
-is not woken; it sees the kill after the await returns.  A kill inside a
-masked region is latched as before.
+or plain yield.
+.Sx KILL DELIVERY
+says when each park site acts on it.
+A kill inside a masked region is latched as before.
 It is fire-and-forget:
 .Dv XTC_OK
 means the kill flag was set, not that the target ever acted on it.
@@ -526,6 +526,55 @@ The caller must not be the target
 it returns
 .Dv XTC_E_INVAL
 if it is.
+.Ss KILL DELIVERY
+Where a proc is parked when
+.Fn xtc_exit_pid
+reaches it decides when it dies:
+.Bl -tag -width "xtc_blocking_run" -offset indent
+.It Fn xtc_recv , Fn xtc_proc_sleep , Fn xtc_proc_wait_fd
+at once.
+.It sync primitives, futures, lwlock, lock manager
+at once, after the wait has unlinked its waiter (the future stays valid
+for its other holders).
+.It Fn xtc_await
+at once (2.0; before, only when the awaited task finished).
+The awaiting proc stops being the task's waiter and dies; the awaited
+task runs on and can be awaited by another task.
+.It Xo
+.Fn xtc_aio_pread ,
+.Fn xtc_aio_pwrite ,
+.Fn xtc_aio_fsync
+and the rest
+.Xc
+when the operation in flight completes, then at once (2.0; before, a
+proc doing back-to-back operations was never killed: each new operation
+parked again).
+The kernel owns the buffer, and the request on the parked fiber's
+stack, until the completion, so the frame cannot unwind earlier.
+Cancelling the request
+.Pq Dv IORING_OP_ASYNC_CANCEL
+does not shorten that: a file read, write or fsync the kernel has
+started cannot be cancelled
+.Pq Dv -EALREADY ,
+measured on Linux 6.12 for an fsync of 1 GiB of dirty data (365-540
+ms) and a 64 MiB O_DIRECT write (22-55 ms).
+The delay is the operation's own latency: with a 1 MiB write and fsync
+loop the DOWN arrived 0.1-0.2 ms after the kill, with 64 MiB 11 ms
+(local NVMe).
+The operation's result is lost with the frame.
+.It Fn xtc_blocking_run
+when the offloaded function returns.
+The window is masked by design: a pool worker reads and writes the
+caller's frame until then.
+.Fn xtc_exit_pid_deadline
+reports such a proc as
+.Dv XTC_KILL_DEFERRED .
+.El
+.Pp
+A kill inside
+.Fn xtc_mask_enter
+is latched at each of these and delivered at the outermost
+.Fn xtc_mask_leave .
 .Ss Killing a fiber that mutates shared state
 Cancellation in libxtc guarantees
 .Em resource release :

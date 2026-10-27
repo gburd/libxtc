@@ -85,8 +85,20 @@ __xtc_preempt_trampoline:
 	 * before it may change a flag), then every GP register, then fetch
 	 * orig_pc into the return slot (a call clobbers caller-saved
 	 * registers, all saved by then).
+	 *
+	 * Then clear DF and AC in the live RFLAGS.  The ABI requires DF = 0
+	 * at every call, and the interrupted code may be inside a backward
+	 * string copy (`std; rep movsb; cld`): without this the scheduler
+	 * and every fiber it ran inherited DF = 1 (neither swapcontext nor
+	 * jump_fcontext touches RFLAGS), so their memcpy/memset ran
+	 * backwards.  AC = 1 would make every misaligned access the
+	 * scheduler does a SIGBUS.  The closing popfq gives the interrupted
+	 * code its own flags back, DF and AC included.
 	 */
 	pushfq
+	pushq   (%rsp)
+	andl    $0xfffbfbff, (%rsp)       /* ~(AC | DF) */
+	popfq
 	pushq   %rax
 	pushq   %rbx
 	pushq   %rcx
@@ -136,8 +148,31 @@ __xtc_preempt_trampoline:
 	movq    %rax, %rdx
 	shrq    $32, %rdx                 /* edx:eax = the feature mask */
 	xsave   (%rsp)
+	/*
+	 * Hand the scheduler a call-boundary machine state (the restore
+	 * below reloads the interrupted one exactly):
+	 *  - an empty x87 stack (x87 mode, not MMX).  fcontext's switch
+	 *    reloads only the x87 control word, not the tag word, so the
+	 *    scheduler and its fibers inherited the interrupted code's
+	 *    loaded slots and their x87 math overflowed to NaN.
+	 *  - clean AVX upper halves (vzeroupper; only if AVX is enabled):
+	 *    not an ABI rule, but dirty upper state taxes the SSE code the
+	 *    scheduler runs with transition penalties.
+	 *  - errno is per thread, and the next fiber on this thread may set
+	 *    it: keep the interrupted value in callee-saved %ebx across the
+	 *    yield and put it back on the thread the fiber resumes on.
+	 */
+	fninit
+	testl   $4, %eax                  /* the mask's AVX bit */
+	jz      1f
+	vzeroupper
+1:	call    __xtc_preempt_errno_get
+	movl    %eax, %ebx
 
 	call    xtc_yield                 /* cooperative switch to scheduler */
+
+	movl    %ebx, %edi
+	call    __xtc_preempt_errno_set
 
 	/*
 	 * Fiber resumed.  Restore the vector state and the GP file and
@@ -160,7 +195,12 @@ __xtc_preempt_trampoline:
 	subq    $512, %rsp                /* fxsave area */
 	andq    $-16, %rsp               /* 16-align it */
 	fxsave  (%rsp)
+	fninit                            /* empty x87 stack; see above */
+	call    __xtc_preempt_errno_get   /* (no AVX without XSAVE) */
+	movl    %eax, %ebx
 	call    xtc_yield                 /* cooperative switch to scheduler */
+	movl    %ebx, %edi
+	call    __xtc_preempt_errno_set
 	fxrstor (%rsp)
 
 .Lrestore_gp:

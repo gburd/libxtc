@@ -7,6 +7,7 @@
 #include "xtc_accel.h"
 #include "xtc_inspect.h"
 #include "xtc_preempt.h"
+#include "xtc_preempt_involuntary.h"
 #include "preempt_int.h"
 #include "xtc_async.h"
 #include "xtc_blocking.h"
@@ -46,7 +47,7 @@ parking_hook(void *arg)
 	c->hook_done = 1;
 }
 
-static int
+XTC_PREEMPTIBLE static int
 step(const xtc_batch_item_t *items, xtc_batch_result_t *results, size_t n,
      void *arg)
 {

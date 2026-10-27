@@ -72,6 +72,7 @@ __xtc_loop_owner_violation(const struct xtc_loop *loop, const char *site)
 void *(*__xtc_fiber_ctx_save)(void) = NULL;
 void  (*__xtc_fiber_ctx_restore)(void *) = NULL;
 void  (*__xtc_fiber_kill_check)(void) = NULL;
+void  (*__xtc_fiber_kill_poll)(void) = NULL;
 
 /* Loop-fini hook; installed by the process layer (proc.c) so the loop
  * can release its per-loop proc table at fini without depending on the

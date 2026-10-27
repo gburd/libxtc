@@ -58,7 +58,37 @@ __xtc_preempt_trampoline:
 	 * interrupted value, sp = the kernel's signal frame, the frame's
 	 * siginfo holds the interrupted pc, sp, pstate (coro_preempt.h). */
 	mov     x19, sp                   /* the frame (sigreturn restores x19) */
+	/*
+	 * Hand the scheduler a call-boundary state; the closing rt_sigreturn
+	 * restores the interrupted one from the frame.
+	 *  - SME (only where HWCAP2_SME, probed by the redirect): leave
+	 *    streaming mode and turn ZA off, and clear TPIDR2_EL0.  The
+	 *    interrupted code may be in streaming mode or hold ZA live, and
+	 *    xtc_yield is a normal function: in streaming mode the scheduler
+	 *    and its fibers ran with the streaming vector length and, without
+	 *    FEAT_SME_FA64, faulted on their first Advanced SIMD instruction;
+	 *    with ZA live they ran in a state the ABI forbids at a call to a
+	 *    private-ZA function.  The frame holds SVCR, ZA and TPIDR2.
+	 *  - errno is per thread: keep the interrupted value in callee-saved
+	 *    x20 across the yield (the next fiber on this thread may set it;
+	 *    a migrated fiber resumes on another thread).
+	 */
+	adrp    x9, __xtc_preempt_a64_sme
+	ldr     w9, [x9, :lo12:__xtc_preempt_a64_sme]
+	cbz     w9, 1f
+	.inst   0xd503467f                /* smstop (SM and ZA) */
+	mrs     x21, S3_3_C13_C0_5        /* TPIDR2_EL0 (kernels before 6.3 */
+	msr     S3_3_C13_C0_5, xzr        /*   do not restore it: by hand) */
+1:	bl      __xtc_preempt_errno_get
+	mov     w20, w0
 	bl      xtc_yield                 /* cooperative switch to scheduler */
+	mov     w0, w20
+	bl      __xtc_preempt_errno_set
+	adrp    x9, __xtc_preempt_a64_sme
+	ldr     w9, [x9, :lo12:__xtc_preempt_a64_sme]
+	cbz     w9, 2f
+	msr     S3_3_C13_C0_5, x21
+2:
 
 	/*
 	 * Resumed, possibly on another OS thread.  rt_sigreturn installs

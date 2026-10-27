@@ -331,6 +331,7 @@ LIB_HDRS_PUBLIC	= \
 	$(srcdir)/../src/inc/xtc_osproc.h \
 	$(srcdir)/../src/inc/xtc_pdict.h \
 	$(srcdir)/../src/inc/xtc_preempt.h \
+	$(srcdir)/../src/inc/xtc_preempt_involuntary.h \
 	$(srcdir)/../src/inc/xtc_pkey.h \
 	$(srcdir)/../src/inc/xtc_proc.h \
 	$(srcdir)/../src/inc/xtc_rcu.h \
@@ -401,6 +402,7 @@ TESTS_SH	= \
 	$(abs_top_srcdir)/../test/dist/test_s_async.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_layer.sh \
 	$(abs_top_srcdir)/../test/dist/test_lib_closure.sh \
+	$(abs_top_srcdir)/../test/m14/test_preempt_static.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_noalloc.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_cfg.sh \
 	$(abs_top_srcdir)/../test/dist/test_m17_smoke.sh \
@@ -459,6 +461,7 @@ TESTS_C		= test_sched_policy test_sched_continuous test_batch test_version test_
 		  test_wake_after_migration \
 		  test_aio_migrate_wake \
 		  test_proc_link_race \
+		  test_kill_late \
 		  test_recv_correlate \
 		  test_send_owned \
 		  test_sync \
@@ -498,6 +501,7 @@ TESTS_C		= test_sched_policy test_sched_continuous test_batch test_version test_
 		  test_preempt_p1 \
 		  test_preempt_ring \
 		  test_preempt_p2 \
+		  test_preempt_safe \
 		  test_launch \
 		  test_cfg \
 		  test_stall \
@@ -1867,6 +1871,12 @@ test_proc_link_race: $(srcdir)/../test/m8/test_proc_link_race.c \
 		-o $@ $(srcdir)/../test/m8/test_proc_link_race.c \
 		$(srcdir)/../test/m8/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
+test_kill_late: $(srcdir)/../test/m8/test_kill_late.c \
+		$(srcdir)/../test/m8/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m8 \
+		-o $@ $(srcdir)/../test/m8/test_kill_late.c \
+		$(srcdir)/../test/m8/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
 # M7.5 tests.
 test_chan_mpmc_bcast: $(srcdir)/../test/m7/test_chan_mpmc_bcast.c \
 		$(srcdir)/../test/m7/munit.c $(STATIC_LIB)
@@ -2121,6 +2131,12 @@ test_preempt_p2: $(srcdir)/../test/m14/test_preempt_p2.c \
 		$(srcdir)/../test/m14/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m14 \
 		-o $@ $(srcdir)/../test/m14/test_preempt_p2.c \
+		$(srcdir)/../test/m14/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_preempt_safe: $(srcdir)/../test/m14/test_preempt_safe.c \
+		$(srcdir)/../test/m14/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m14 \
+		-o $@ $(srcdir)/../test/m14/test_preempt_safe.c \
 		$(srcdir)/../test/m14/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_stack_reclaim: $(srcdir)/../test/m14/test_stack_reclaim.c \

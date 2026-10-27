@@ -515,12 +515,9 @@ struct xtc_proc {
 
 	/* Kill-wake target: the task this proc's fiber runs as and the loop
 	 * it last yielded on, recorded by __xtc_proc_ctx_save at every yield
-	 * so xtc_exit_pid can make the proc runnable wherever it is parked.
-	 * park_await is 1 while the fiber is parked in xtc_await, which has
-	 * no kill check and must not be woken early. */
+	 * so xtc_exit_pid can make the proc runnable wherever it is parked. */
 	_Atomic(xtc_task_t *) run_task;
 	_Atomic(xtc_loop_t *) run_loop;
-	_Atomic int           park_await;
 	int                   yield_park;   /* last yield was a park (owner) */
 
 	/* xtc_proc_trap_exit: 1 = a linked peer's exit arrives as an 'E'
@@ -1673,6 +1670,7 @@ __proc_hooks_install(void)
 	__xtc_fiber_ctx_save = __xtc_proc_ctx_save;
 	__xtc_fiber_ctx_restore = __xtc_proc_ctx_restore;
 	__xtc_fiber_kill_check = __xtc_proc_kill_check;
+	__xtc_fiber_kill_poll = __xtc_proc_kill_poll;
 	__xtc_loop_fini_hook = __xtc_proc_loop_unregister;
 }
 
@@ -2110,8 +2108,6 @@ __xtc_proc_ctx_save(void)
 		    memory_order_relaxed) != NULL ||
 		    atomic_load_explicit(&t->park_fd, memory_order_relaxed) >= 0 ||
 		    c->_parked_on != NULL;
-		atomic_store_explicit(&rp->park_await, c->_parked_on != NULL,
-		    memory_order_relaxed);
 		l = __xtc_current_loop_get();
 		if (l != NULL && atomic_load_explicit(&rp->run_loop,
 		    memory_order_relaxed) != l)
@@ -2698,8 +2694,8 @@ __exit_pid_on(xtc_loop_t *owner, xtc_pid_t target, int reason)
 	 * the PARKED->SCHEDULED CAS, or latches wake_pending if the target is
 	 * still RUNNING.  Done under mbox_lock: the exit path clears run_task
 	 * under the same lock before the task can complete, so a non-NULL
-	 * run_task names a live task.  xtc_await parks are skipped (await
-	 * treats any wake as completion); that kill lands after the await.
+	 * run_task names a live task.  xtc_await delivers it once it has
+	 * stopped being its target's waiter (AWAIT_KILL_POLL, coro_int.h).
 	 * A woken park is never unwound inside xtc_yield (see
 	 * __xtc_proc_kill_check), so this wake is safe for every park site.
 	 */
@@ -2713,8 +2709,7 @@ __exit_pid_on(xtc_loop_t *owner, xtc_pid_t target, int reason)
 		    memory_order_relaxed);
 		wk.loop = atomic_load_explicit(&p->run_loop,
 		    memory_order_relaxed);
-		if (wk.task != NULL && wk.loop != NULL &&
-		    !atomic_load_explicit(&p->park_await, memory_order_relaxed))
+		if (wk.task != NULL && wk.loop != NULL)
 			rc = xtc_waker_wake(&wk);
 	}
 	(void) __proc_mtx_unlock(&p->mbox_lock);

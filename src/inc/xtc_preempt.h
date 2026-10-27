@@ -40,17 +40,8 @@ XTC_API int      xtc_preempt_arm(int64_t interval_ns);
 /* Stop + delete this thread's preemption timer.  Safe if not armed. */
 XTC_API int      xtc_preempt_disarm(void);
 
-/* Enable (on != 0) / disable signal-context involuntary yield (Phase
- * 2).  When on and the timer is armed, a tick preempts the running
- * fiber in the handler -- resumably and only when safe (crit_depth ==
- * 0, unsafe_depth == 0) -- on Linux x86-64 (ucontext, or fcontext with
- * glibc) and Linux aarch64 (either substrate, glibc or musl); elsewhere
- * it declines and falls back to cooperative-assisted preemption.
- * Off by default.
- *
- * PUBLIC: void xtc_preempt_set_involuntary __P((int));
- */
-XTC_API void     xtc_preempt_set_involuntary(int on);
+/* Involuntary (signal-context) preemption is EXPERIMENTAL and lives in
+ * "xtc_preempt_involuntary.h". */
 
 /* 1 if per-thread CPU-time preemption timers are available on this
  * platform, 0 otherwise (arm returns NOSYS then). */

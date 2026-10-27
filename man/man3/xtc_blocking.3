@@ -132,6 +132,17 @@ stops the pool, joining its threads.  It is idempotent, for orderly
 shutdown and leak-checked test runs.  A new
 .Fn xtc_blocking_run
 after shutdown restarts the pool.
+.Pp
+.Fn xtc_blocking_run
+masks cancellation for the whole offload: a pool worker reads and
+writes the caller's frame until the function returns, so a kill
+.Pq Xr xtc_exit_pid 3
+is delivered only then
+.Po
+.Sx KILL DELIVERY
+in
+.Xr xtc_proc 3
+.Pc .
 .Sh RETURN VALUES
 .Fn xtc_blocking_run
 and
