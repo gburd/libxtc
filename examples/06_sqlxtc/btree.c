@@ -123,6 +123,7 @@
 #include "btnode.h"
 #include "btovf.h"
 #include "xtc_sim.h"    /* XTC_SIM_BUGGIFY -- DST eager-split (no-op in prod) */
+#include "xtc_dst_inject.h" /* DST planted bugs (no-op in prod) */
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -276,10 +277,13 @@ struct bt {
 	_Atomic uint64_t  st_ovf_pages;  /* data pages written for them */
 	_Atomic uint64_t  st_ovf_freed;  /* data pages freed (delete/replace) */
 	_Atomic uint64_t  st_sample_pages; /* nodes read by bt_sample_keys */
+	_Atomic uint64_t  st_shifts;   /* splits avoided by a sibling shift */
+	_Atomic uint64_t  st_shifts_left; /* ... of them, into the LEFT sibling */
 	uint64_t          meta_clean;  /* superblock clean flag (open/close only) */
 	uint64_t          meta_clock;  /* superblock commit clock (open/close only) */
 	uint64_t          meta_ext[BT_SUPER_EXT]; /* engine-opaque superblock words */
-	uint8_t          *smo_scratch; /* one page of scratch for internal split /
+	uint8_t          *smo_scratch; /* three pages of scratch for internal split /
+	                               * redistribution (bt_shift: two pages) /
 	                               * merge rebuilds; used only under the SMO
 	                               * write lock (so one per tree suffices) --
 	                               * replaces an 8 KiB stack array that made
@@ -887,7 +891,7 @@ bt_open(bm_t *bm, bt_t **out)
 	}
 	bm_unfix(bm, sf, 0);             /* scratch becomes an orphan page */
 	bt->page_size = ps;
-	if ((bt->smo_scratch = malloc(ps)) == NULL) {
+	if ((bt->smo_scratch = malloc(3u * ps)) == NULL) {
 		bm_unfix(bm, rf, 0);
 		rc = XTC_E_NOMEM;
 		goto fail;
@@ -950,7 +954,7 @@ bt_reopen(bm_t *bm, bt_t **out)
 		return XTC_E_INVAL;          /* not an xstore B-tree store */
 	}
 	bt->page_size = s.page_size;
-	if ((bt->smo_scratch = malloc(s.page_size)) == NULL) {
+	if ((bt->smo_scratch = malloc(3u * s.page_size)) == NULL) {
 		xtc_arwlock_destroy(bt->smo);
 		free(bt);
 		return XTC_E_NOMEM;
@@ -1417,6 +1421,182 @@ post_separator(bt_t *bt, bm_pid_t *path, int level,
 	return XTC_OK;
 }
 
+/*
+ * Redistribution before a split (2.0).  A random insert stream leaves
+ * leaves about 70% full when every full leaf splits in two; moving
+ * entries into a sibling that has room first keeps them about 80-86%
+ * full (SQLite's balance_nonroot, B*-trees).  Called under the SMO write
+ * lock, from bt_insert_leaf with the full leaf `f` exclusively latched
+ * and the parent's pid in `ppid`: so no split, merge or other shift runs,
+ * and the parent's children cannot change.
+ *
+ * Latch order: the leaf is released, then the parent is latched
+ * exclusive and the pair of siblings left to right -- top-down and
+ * left-to-right, the order merge_level uses, so it adds no deadlock.  The
+ * sibling must be under the same parent (one parent latch; no cousins)
+ * and less than BT_SHIFT_PCT full.  btnode_shift evens the pair and picks
+ * the shortest separator between them; the parent's separator for the
+ * pair is replaced (if the new one does not fit the parent, nothing
+ * changes and the caller splits).  The three pages are logged in one
+ * nested top action, like a split's.
+ *
+ * Readers.  A shift into the RIGHT sibling shrinks the leaf from the top:
+ * a reader holding a moved key on the leaf sees it beyond the hi fence
+ * and moves right, as after a split.  A shift into the LEFT sibling
+ * shrinks the leaf from the BOTTOM, a direction move_right cannot
+ * follow: a key that moved is now at or below the leaf's lower fence.
+ * Every unlatched path that can land on the leaf -- the descents, the
+ * optimistic reads, bt_seek_ge_n, a cursor hopping onto it (its lower
+ * fence no longer equals the upper fence it left: cursor_hop_ok), and a
+ * parked cursor resuming on it (cursor_seek) -- checks the lower fence
+ * and restarts or re-descends, which routes it to the left sibling.
+ * (The DST planted bug SHIFTLO removes the parked cursor's check.)
+ *
+ * Returns 1 if the shift happened -- the leaf (still `*fp`, latched
+ * exclusive) or its sibling now has room for the entry, which the
+ * caller inserts on the side the new separator routes it to: *fp is
+ * replaced by that side's frame -- or 0 if not (nothing changed; *fp is
+ * still the leaf, latched exclusive).
+ */
+#ifndef BT_SHIFT_PCT
+#define BT_SHIFT_PCT 80
+#endif
+static int
+bt_shift(bt_t *bt, bm_pid_t ppid, bm_frame_t **fp, const void *key,
+    uint16_t klen, uint16_t vlen)
+{
+	bm_t *bm = bt->bm;
+	bm_frame_t *f = *fp, *pf = NULL, *sf = NULL, *lf, *rf;
+	bm_pid_t lpid = bm_frame_pid(f), spid, opid;
+	void *pp, *lp, *rp;
+	uint8_t sep[BT_MAX_KEY], osep[BT_MAX_KEY];
+	uint16_t seplen = 0, oseplen = 0;
+	uint32_t ps = bt->page_size, sfill, best_fill = BT_SHIFT_PCT;
+	uint8_t *out = bt->smo_scratch;
+	int c, n, side = 0, cand, sslot, i;
+	uint64_t nta;
+
+	if (ppid == BM_PID_NONE)
+		return 0;
+	/* Buggify: shift into any sibling that is not full, so DST drives
+	 * many more shifts (left ones especially) than a natural fill. */
+	if (XTC_SIM_BUGGIFY("btree.shift.eager") && xtc_sim_buggify_fault(500))
+		best_fill = 100;
+	bm_unlatch(f);
+	if (bm_fix_pid(bm, ppid, &pf) != XTC_OK) {
+		bm_latch_exclusive(f);
+		return 0;
+	}
+	bm_latch_exclusive(pf);
+	pp = bm_page(pf);
+	/* Find the leaf among the parent's children (the SMO lock keeps
+	 * them stable; a mismatch -- it cannot happen -- just splits). */
+	n = (int)btnode_count(pp);
+	c = child_for_key(pp, key, klen) == lpid ?
+	    btnode_search(pp, key, klen, NULL) - 1 : -2;
+	if (c == -1)
+		c = 0;
+	if (c < 0 || c >= n || child_pid_at(pp, c) != lpid) {
+		bm_unlatch(pf); bm_unfix(bm, pf, 0);
+		bm_latch_exclusive(f);
+		return 0;
+	}
+	/* The emptier of the two siblings under this parent, if below the
+	 * threshold (read under a shared latch; re-read exclusive below). */
+	for (cand = -1; cand <= 1; cand += 2) {
+		bm_frame_t *tf;
+		int cs = c + cand;
+
+		if (cs < 0 || cs >= n ||
+		    bm_fix_pid(bm, child_pid_at(pp, cs), &tf) != XTC_OK)
+			continue;
+		bm_latch_shared(tf);
+		sfill = btnode_is_leaf(bm_page(tf)) ? btnode_fill(bm_page(tf)) : 100;
+		bm_unlatch(tf); bm_unfix(bm, tf, 0);
+		if (sfill < best_fill) {
+			best_fill = sfill;
+			side = cand;
+		}
+	}
+	if (side == 0) {
+		bm_unlatch(pf); bm_unfix(bm, pf, 0);
+		bm_latch_exclusive(f);
+		return 0;
+	}
+	sslot = side < 0 ? c : c + 1;          /* the pair's separator slot */
+	spid = child_pid_at(pp, c + side);
+	if (btnode_full_key(pp, sslot, osep, sizeof osep, &oseplen) != 0 ||
+	    bm_fix_pid(bm, spid, &sf) != XTC_OK) {
+		bm_unlatch(pf); bm_unfix(bm, pf, 0);
+		bm_latch_exclusive(f);
+		return 0;
+	}
+	/* Left to right. */
+	if (side < 0) {
+		bm_latch_exclusive(sf);
+		bm_latch_exclusive(f);
+		lf = sf; rf = f;
+	} else {
+		bm_latch_exclusive(f);
+		bm_latch_exclusive(sf);
+		lf = f; rf = sf;
+	}
+	lp = bm_page(lf);
+	rp = bm_page(rf);
+	opid = bm_frame_pid(rf);
+	/* Under the latches: still adjacent leaves, the leaf still full
+	 * for the entry, and the separator fits the parent in its place. */
+	if (!btnode_is_leaf(lp) || !btnode_is_leaf(rp) ||
+	    btnode_right_sibling(lp) != (uint32_t)opid ||
+	    btnode_entry_cost(klen, vlen) <= btnode_room(bm_page(f)) ||
+	    btnode_shift(lp, rp, key, klen, vlen, sep, (uint16_t)(oseplen +
+	    btnode_room(pp) < sizeof sep ? oseplen + btnode_room(pp) :
+	    sizeof sep), &seplen, out) != 0) {
+		bm_unlatch(sf); bm_unfix(bm, sf, 0);
+		bm_unlatch(pf); bm_unfix(bm, pf, 0);
+		*fp = f;
+		return 0;
+	}
+	/* Parent: replace the pair's separator.  It fits: removing the old
+	 * one frees a slot and its suffix, and the new one is no longer
+	 * than the old plus the parent's room (the cap above); it lies
+	 * between a key of each sibling, so inside the parent's fences. */
+	(void)btnode_remove(pp, sslot);
+	if (internal_insert(pp, sep, seplen, opid) != 0) {
+		/* Cannot happen (room checked); put the old one back and
+		 * leave the leaves as they were. */
+		(void)internal_insert(pp, osep, oseplen, opid);
+		bm_unlatch(sf); bm_unfix(bm, sf, 0);
+		bm_unlatch(pf); bm_unfix(bm, pf, 1);
+		*fp = f;
+		return 0;
+	}
+	memcpy(lp, out, ps);
+	memcpy(rp, out + ps, ps);
+	BT_CHECK_NODE(lp);
+	BT_CHECK_NODE(rp);
+	BT_CHECK_NODE(pp);
+	nta = smo_begin();
+	bm_predirty(bm, lf); smo_log_page(bt, bm_frame_pid(lf), lp);
+	bm_predirty(bm, rf); smo_log_page(bt, opid, rp);
+	bm_predirty(bm, pf); smo_log_page(bt, ppid, pp);
+	smo_end(nta);
+	atomic_fetch_add(&bt->st_shifts, 1);
+	if (side < 0)
+		atomic_fetch_add(&bt->st_shifts_left, 1);
+	bm_unlatch(pf); bm_unfix(bm, pf, 1);
+	/* Keep the side the entry goes to (keys <= sep go left). */
+	i = key_cmp(key, klen, sep, seplen) <= 0;
+	if (i) {
+		bm_unlatch(rf); bm_unfix(bm, rf, 1);
+		*fp = lf;
+	} else {
+		bm_unlatch(lf); bm_unfix(bm, lf, 1);
+		*fp = rf;
+	}
+	return 1;
+}
+
 static int bt_insert_leaf(bt_t *bt, const void *key, uint16_t klen,
     const void *val, uint16_t vlen, uint16_t vflag, uint8_t *oldref,
     uint32_t *oldref_len);
@@ -1570,6 +1750,36 @@ bt_insert_leaf(bt_t *bt, const void *key, uint16_t klen, const void *val,
 		bm_predirty(bm, f); smo_log_leaf(bt, bm_frame_pid(f), pg);
 		bm_unlatch(f); bm_unfix(bm, f, 1);
 		rc = XTC_OK; goto unlock;
+	}
+
+	/* Leaf full: first try moving entries into a sibling with room
+	 * (bt_shift); the entry then goes in place, no new page. */
+	/* Only for a leaf that is really full (not one the eager-split
+	 * buggify chose to split), not for an upsert (bt_shift lets go of
+	 * the leaf, which must not be seen without the key), nor for an
+	 * insert past the leaf's last key or in a sequential run (the
+	 * split's append / tail cuts fill those better). */
+	if (depth > 0 && !found && btnode_ins_run(pg) < 2 &&
+	    btnode_entry_cost(klen, vlen) > btnode_room(pg) &&
+	    btnode_search(pg, key, klen, NULL) < (int)btnode_count(pg)) {
+		(void)bt_shift(bt, path[depth - 1], &f, key, klen, vlen);
+		/* bt_shift let go of the leaf for a while: a fast-path insert
+		 * of the same key (after a delete made room) may have landed.
+		 * Replace it, as an upsert; then insert in place if it fits
+		 * now (after a shift it does), else split below. */
+		pg = bm_page(f);
+		s = btnode_search(pg, key, klen, &found);
+		if (found) {
+			*oldref_len = take_ovf_ref(pg, s, oldref);
+			(void)btnode_remove(pg, s);
+		}
+		if (btnode_insert_f(pg, key, klen, val, vlen, vflag) == 0) {
+			BT_CHECK_NODE(pg);
+			atomic_fetch_add(&bt->st_inserts, 1);
+			bm_predirty(bm, f); smo_log_leaf(bt, bm_frame_pid(f), pg);
+			bm_unlatch(f); bm_unfix(bm, f, 1);
+			rc = XTC_OK; goto unlock;
+		}
 	}
 
 	/*
@@ -3778,9 +3988,13 @@ bt_cursor_park(bt_cursor_t *c)
  *     sibling's slot 0, yielding again every key between the split
  *     separator and the position.  Walk right (move_right) instead.
  *   - a merge may have freed the page, and its pid been reissued as any
- *     node.  If it is not a live leaf, or the position is at/below its
- *     lower fence (its range moved left), or -- no position yet, a scan
- *     from the start -- it is not the leftmost leaf, re-descend.
+ *     node, or a shift into the LEFT sibling (bt_shift) moved the
+ *     position and the keys after it out of the page's bottom.  If it is
+ *     not a live leaf, or the position is at/below its lower fence (its
+ *     range moved left), or -- no position yet, a scan from the start --
+ *     it is not the leftmost leaf, re-descend.  (Planted bug SHIFTLO
+ *     skips the lower-fence test: the scan then resumes at the page's
+ *     first key and skips every key that moved left.)
  * Takes ownership of `f`.  Returns XTC_OK, or the error of a needed
  * re-descent that failed (the cursor is then done).
  */
@@ -3793,7 +4007,8 @@ cursor_seek(bt_cursor_t *c, bm_frame_t *f)
 	int slot, found = 0, rc;
 
 	if (!btnode_is_leaf(pg) || btnode_is_dead(pg) ||
-	    (k != NULL ? btnode_below_lo_fence(pg, k, c->keylen) :
+	    (k != NULL ? (!XTC_DST_BUG(XTC_DST_BUG_SHIFTLO) &&
+	    btnode_below_lo_fence(pg, k, c->keylen)) :
 	    not_leftmost_leaf(pg))) {
 		bm_unlatch(f);
 		bm_unfix(bm, f, 0);
@@ -3902,4 +4117,6 @@ bt_get_stats(bt_t *bt, bt_stats_t *out)
 	out->ovf_pages = atomic_load(&bt->st_ovf_pages);
 	out->ovf_freed = atomic_load(&bt->st_ovf_freed);
 	out->sample_pages = atomic_load(&bt->st_sample_pages);
+	out->shifts = atomic_load(&bt->st_shifts);
+	out->shifts_left = atomic_load(&bt->st_shifts_left);
 }

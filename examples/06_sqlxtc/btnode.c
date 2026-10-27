@@ -892,6 +892,184 @@ btnode_split_ex(void *page, void *right_page, void *sep_key_out,
 	return 0;
 }
 
+unsigned
+btnode_ins_run(const void *page)
+{
+	return CHDR(page)->ins_run;
+}
+
+uint32_t
+btnode_room(const void *page)
+{
+	return free_compact(CHDR(page));
+}
+
+/* Bytes a node holds, header excluded: slots + cells + fences. */
+static uint32_t
+node_bytes(const struct btnode_hdr *h)
+{
+	return (uint32_t)h->count * (uint32_t)sizeof(struct btnode_slot) +
+	    h->space_used;
+}
+
+uint32_t
+btnode_fill(const void *page)
+{
+	const struct btnode_hdr *h = CHDR(page);
+
+	return node_bytes(h) * 100u / (h->page_size -
+	    (uint32_t)sizeof(struct btnode_hdr));
+}
+
+/* Entry i of the pair (left's slots, then right's): its node, slot and
+ * the node prefix its stored suffix is relative to. */
+struct pair {
+	const struct btnode_hdr *h[2];
+	const struct btnode_slot *s[2];
+	uint16_t n0, n;
+};
+
+static void
+pair_at(const struct pair *pr, int i, const uint8_t **sfx, uint16_t *sl,
+    const struct btnode_slot **sp, const uint8_t **pfx, uint16_t *pl)
+{
+	int side = i >= pr->n0;
+	const struct btnode_hdr *h = pr->h[side];
+	const struct btnode_slot *s = &pr->s[side][side ? i - pr->n0 : i];
+
+	*sfx = (const uint8_t *)h + s->offset;
+	*sl = s->key_len;
+	*sp = s;
+	*pfx = (const uint8_t *)h + h->lo_fence_off;
+	*pl = h->prefix_len;
+}
+
+/* Full key of pair entry i into out (cap >= a page). */
+static uint16_t
+pair_key(const struct pair *pr, int i, uint8_t *out)
+{
+	const uint8_t *sfx, *pfx;
+	const struct btnode_slot *sp;
+	uint16_t sl, pl;
+
+	pair_at(pr, i, &sfx, &sl, &sp, &pfx, &pl);
+	memcpy(out, pfx, pl);
+	memcpy(out + pl, sfx, sl);
+	return (uint16_t)(pl + sl);
+}
+
+/* Build a leaf from pair entries [a, b) under fences lo/hi into dst. */
+static int
+pair_build(const struct pair *pr, int a, int b, const uint8_t *lo,
+    uint16_t lol, const uint8_t *hi, uint16_t hil, void *dst, uint32_t ps,
+    uint8_t *keybuf)
+{
+	struct btnode_hdr *dh = HDR(dst);
+	int i, j = 0;
+
+	btnode_init(dst, ps, 1);
+	btnode_set_fences(dst, lo, lol, hi, hil);
+	for (i = a; i < b; i++, j++) {
+		int side = i >= pr->n0;
+
+		if (copy_slot(pr->h[side], (uint16_t)(side ? i - pr->n0 : i), dst,
+		    (uint16_t)j, keybuf) != 0)
+			return -1;
+	}
+	dh->count = (uint16_t)j;
+	return 0;
+}
+
+int
+btnode_shift(const void *left, const void *right, const void *pend_key,
+    uint16_t pend_klen, uint16_t pend_vlen, void *sep_out, uint16_t sep_cap,
+    uint16_t *sep_len_out, void *out)
+{
+	const struct btnode_hdr *lh = CHDR(left), *rh = CHDR(right);
+	uint32_t ps = lh->page_size;
+	uint32_t cap = ps - (uint32_t)sizeof(struct btnode_hdr);
+	uint32_t pend = (uint32_t)sizeof(struct btnode_slot) + pend_klen +
+	    pend_vlen;
+	uint32_t total = 0, left_b = 0, best_max = UINT32_MAX;
+	struct pair pr;
+	const uint8_t *lo, *hi, *sfx, *pfx;
+	const struct btnode_slot *sp;
+	uint16_t lol, hil, sl, plx, al, bl, lpl, rpl;
+	uint8_t a[ps], b[ps];
+	uint8_t *sep = sep_out, *sc = out;
+	int i, best = -1, n;
+
+	if (rh->page_size != ps || !lh->is_leaf || !rh->is_leaf ||
+	    lh->hi_fence_len == 0 || lh->hi_fence_len != rh->lo_fence_len ||
+	    memcmp((const uint8_t *)left + lh->hi_fence_off,
+	    (const uint8_t *)right + rh->lo_fence_off, lh->hi_fence_len) != 0)
+		return -1;
+	pr.h[0] = lh; pr.h[1] = rh;
+	pr.s[0] = cslots_of(left); pr.s[1] = cslots_of(right);
+	pr.n0 = lh->count;
+	pr.n = (uint16_t)(lh->count + rh->count);
+	n = pr.n;
+	if (n < 2)
+		return -1;
+	lo = lh->lo_fence_len ? (const uint8_t *)left + lh->lo_fence_off : NULL;
+	lol = lh->lo_fence_len;
+	hi = rh->hi_fence_len ? (const uint8_t *)right + rh->hi_fence_off : NULL;
+	hil = rh->hi_fence_len;
+	/* Each half is costed exactly as it will be stored: an entry costs
+	 * its slot, its full key less the half's prefix (the common prefix
+	 * of the half's fences), and its value; plus the two fences.  The
+	 * pending entry is counted with its full key. */
+	for (i = 0; i < n; i++) {
+		pair_at(&pr, i, &sfx, &sl, &sp, &pfx, &plx);
+		total += slot_cost(sp, plx, 0);
+	}
+	for (i = 0; i < n - 1; i++) {
+		uint32_t lneed, rneed, m;
+		int tl;
+
+		pair_at(&pr, i, &sfx, &sl, &sp, &pfx, &plx);
+		left_b += slot_cost(sp, plx, 0);
+		al = pair_key(&pr, i, a);
+		bl = pair_key(&pr, i + 1, b);
+		tl = cut_separator(lo, lol, a, al, b, bl, sep, sep_cap);
+		if (tl < 0)
+			continue;
+		lpl = lo != NULL ? lcp_bytes(lo, lol, sep, (uint16_t)tl) : 0;
+		rpl = hi != NULL ? lcp_bytes(sep, (uint16_t)tl, hi, hil) : 0;
+		lneed = left_b - (uint32_t)(i + 1) * lpl + lol + (uint32_t)tl;
+		rneed = (total - left_b) - (uint32_t)(n - 1 - i) * rpl +
+		    (uint32_t)tl + hil;
+		if (cmp_bytes(pend_key, pend_klen, sep, (uint16_t)tl) <= 0)
+			lneed += pend;      /* keys <= the separator go left */
+		else
+			rneed += pend;
+		if (lneed > cap || rneed > cap)
+			continue;
+		m = lneed > rneed ? lneed : rneed;
+		if (m < best_max) {
+			best_max = m;
+			best = i;
+		}
+	}
+	/* No feasible cut, or the best one is the current boundary: no
+	 * change (the caller splits instead). */
+	if (best < 0 || best == pr.n0 - 1)
+		return -1;
+	al = pair_key(&pr, best, a);
+	bl = pair_key(&pr, best + 1, b);
+	*sep_len_out = (uint16_t)cut_separator(lo, lol, a, al, b, bl, sep,
+	    sep_cap);
+	/* Build both into `out` (a is the key scratch now). */
+	if (pair_build(&pr, 0, best + 1, lo, lol, sep, *sep_len_out, sc, ps,
+	    a) != 0 ||
+	    pair_build(&pr, best + 1, n, sep, *sep_len_out, hi, hil, sc + ps, ps,
+	    a) != 0)
+		return -1;
+	HDR(sc)->right_sibling = lh->right_sibling;
+	HDR(sc + ps)->right_sibling = rh->right_sibling;
+	return 0;
+}
+
 uint16_t
 btnode_used_bytes(const void *page)
 {

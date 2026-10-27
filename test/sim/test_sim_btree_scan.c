@@ -15,6 +15,9 @@
  *	onto a reissued page, a keyless open on a mid-tree leaf), and once a
  *	run hung with every reader inside cursor_descend.  This test drives
  *	that mix under the simulator, so a failing interleaving is a seed.
+ *	Since 2.0 a full leaf first shifts entries into a sibling (bt_shift),
+ *	so keys also move LEFT under parked and hopping cursors; the sweep
+ *	must see such shifts (planted bug SHIFTLO is caught here).
  *
  *	Churners each own a key stride: insert it, delete it all back out
  *	(merges, frees), with interleaved inserts of a second stride after
@@ -160,8 +163,15 @@ one_scan(int a)
 			next_anchor = idx + 1;
 		}
 		if (++rows % 3 == 0) {
-			if (bt_cursor_park(c) != XTC_OK ||
-			    bt_cursor_resume(c) != XTC_OK) {
+			if (bt_cursor_park(c) != XTC_OK) {
+				atomic_fetch_add(&g_errors, 1);
+				break;
+			}
+			/* Every other park stays parked across a yield, so the
+			 * churners can split, merge or shift its leaf. */
+			if (rows % 6 == 0)
+				xtc_yield();
+			if (bt_cursor_resume(c) != XTC_OK) {
 				atomic_fetch_add(&g_errors, 1);
 				break;
 			}
@@ -188,7 +198,7 @@ scanner(void *arg)
 struct run_out {
 	int      missing, churn_surv, scan_count, scan_bad;
 	long     bad_order, skipped, errors, scans;
-	uint64_t stuck, reissued, merges;
+	uint64_t stuck, reissued, merges, shifts_left;
 	uint64_t result, state;
 	int      bug_active;
 };
@@ -297,6 +307,7 @@ run_once(uint64_t seed, int adversarial, struct run_out *out)
 	bm_get_stats(g_bm, &ms);
 	out->stuck = bs.stuck;
 	out->merges = bs.merges;
+	out->shifts_left = bs.shifts_left;
 	out->reissued = ms.reissued;
 	out->bad_order = atomic_load(&g_bad_order);
 	out->skipped = atomic_load(&g_skipped);
@@ -312,6 +323,7 @@ run_once(uint64_t seed, int adversarial, struct run_out *out)
 	out->result = mix(out->result, (uint64_t)out->scans);
 	out->result = mix(out->result, out->merges);
 	out->result = mix(out->result, out->reissued);
+	out->result = mix(out->result, out->shifts_left);
 	bt_close(g_bt);
 	bm_destroy(g_bm);
 	unlink(path);
@@ -339,7 +351,7 @@ main(int argc, char **argv)
 	long base = argc > 1 ? strtol(argv[1], NULL, 0) : 0;
 	long n = argc > 2 ? strtol(argv[2], NULL, 10) : 64;
 	long s, scans = 0;
-	uint64_t merges = 0, reissued = 0;
+	uint64_t merges = 0, reissued = 0, shifts_left = 0;
 	int fails = 0, adv = 0, bugs = 0, rc;
 
 	for (s = 0; s < n; s++) {
@@ -360,6 +372,7 @@ main(int argc, char **argv)
 		scans += o1.scans;
 		merges += o1.merges;
 		reissued += o1.reissued;
+		shifts_left += o1.shifts_left;
 		adv += a;
 		bugs += o1.bug_active;
 		if (s % 16 == 0) {      /* (d) replay, on a sample of seeds */
@@ -381,10 +394,14 @@ main(int argc, char **argv)
 		if (fails > 0)
 			break;
 	}
-	if (fails == 0 && (merges == 0 || reissued == 0)) {
-		printf("FAIL: the storm never merged (%llu) or reissued a page id "
-		    "(%llu): the race under test was not reached\n",
-		    (unsigned long long)merges, (unsigned long long)reissued);
+	/* Coverage of the sweep (a single seed may legitimately miss one). */
+	if (fails == 0 && n >= 8 && (merges == 0 || reissued == 0 ||
+	    shifts_left == 0)) {
+		printf("FAIL: the storm never merged (%llu), reissued a page id "
+		    "(%llu) or shifted entries into a left sibling (%llu): the "
+		    "race under test was not reached\n",
+		    (unsigned long long)merges, (unsigned long long)reissued,
+		    (unsigned long long)shifts_left);
 		fails++;
 	}
 	if (fails == 0 && adv >= 4 && bugs == 0) {   /* 30% per site per seed */
@@ -396,9 +413,10 @@ main(int argc, char **argv)
 	if (fails != 0)
 		return 1;
 	printf("OK: sqlxtc B-tree scan-vs-merge DST -- %ld seeds (%d "
-	    "adversarial), %ld scans, %llu merges, %llu page ids reissued: every "
-	    "scan ascending with no skipped anchor, no descent gave up, every "
-	    "sampled seed replays\n", n, adv, scans, (unsigned long long)merges,
-	    (unsigned long long)reissued);
+	    "adversarial), %ld scans, %llu merges, %llu page ids reissued, %llu "
+	    "left shifts: every scan ascending with no skipped anchor, no "
+	    "descent gave up, every sampled seed replays\n", n, adv, scans,
+	    (unsigned long long)merges, (unsigned long long)reissued,
+	    (unsigned long long)shifts_left);
 	return 0;
 }

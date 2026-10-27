@@ -263,6 +263,37 @@ int btnode_merge(void *page, const void *right_page);
  */
 int btnode_merge_fits(const void *page, const void *right_page);
 
+/*
+ * Redistribute two adjacent LEAVES (left's upper fence == right's lower
+ * fence) before a split: move entries across their boundary so both end
+ * up about evenly full, with room for the pending entry (pend_key, whose
+ * full key and value length are given) on the side it will go to (left
+ * iff its key <= the new separator).  The new separator -- the shortest
+ * key between the two halves' boundary keys -- is written to sep_out
+ * (sep_cap bytes) and becomes left's upper and right's lower fence; the
+ * outer fences and both right links are kept.  The two rebuilt pages go
+ * to `out` (two pages: left, then right); `left` and `right` are only
+ * read, so the caller commits (copies) them once the parent's separator
+ * is known to fit.  Returns 0, or -1 if the pair cannot be evened with
+ * room for the entry, the best cut is the current one, or the separator
+ * would exceed sep_cap.  The caller owns the readers' safety: entries
+ * can move LEFT (btree.c bt_shift).
+ */
+int btnode_shift(const void *left, const void *right, const void *pend_key,
+    uint16_t pend_klen, uint16_t pend_vlen, void *sep_out, uint16_t sep_cap,
+    uint16_t *sep_len_out, void *out);
+
+/* How full a node is, percent of the page past the header (slots, cells
+ * and fences). */
+uint32_t btnode_fill(const void *page);
+
+/* Free bytes after compaction (what an insert may use). */
+uint32_t btnode_room(const void *page);
+
+/* How many inserts in a row landed just after the previous one (the
+ * insert history the split uses; 0 after a remove). */
+unsigned btnode_ins_run(const void *page);
+
 /* Heap bytes currently in use (key suffixes, values, and fence keys).
  * A node "underflows" when this drops well below the page capacity;
  * the B-tree uses it to decide when to attempt a merge. */

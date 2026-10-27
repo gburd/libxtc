@@ -89,6 +89,12 @@
  *	                   deletes the version AT the snapshot horizon (the
  *	                   one the oldest snapshot reads) when a newer one
  *	                   exists (test_sim_sqlxtc_gc: SNAPSHOT).
+ *	 22  SHIFTLO   -- examples/06_sqlxtc/btree.c's cursor_seek skips the
+ *	                   lower-fence re-check when a parked cursor resumes,
+ *	                   so after a redistribution moved its position into
+ *	                   the LEFT sibling it resumes at the page's first key
+ *	                   and skips the keys that moved
+ *	                   (test_sim_btree_scan: skipped anchor).
  *
  *	NOT plantable under DST (an honest gap, recorded so it is not
  *	mistaken for missing coverage): the xtc_amutex mutual-exclusion and
@@ -144,5 +150,6 @@
 #define XTC_DST_BUG_EVICTNOWB  19  /* bufmgr.c: evict a dirty page unwritten */
 #define XTC_DST_BUG_OCKDROP    20  /* wal.c: an online-checkpoint copy round drops its last frame */
 #define XTC_DST_BUG_PRUNEHZN   21  /* xstore.c: prune-on-write deletes the version at the horizon */
+#define XTC_DST_BUG_SHIFTLO    22  /* btree.c: a resumed cursor skips the lo-fence re-check */
 
 #endif /* XTC_DST_INJECT_H */
