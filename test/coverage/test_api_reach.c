@@ -634,7 +634,18 @@ test_sim_knobs(const MunitParameter p[], void *d)
 	xtc_sim_swizzle_disable();
 	munit_assert_int(__xtc_sim_swizzle_pct(), ==, 0);
 
+	/* clock_active follows the virtual clock, and while it is on
+	 * xtc_clock_mono is the virtual time (the property code that
+	 * derives a wall-clock-like value relies on). */
+	munit_assert_int(xtc_sim_clock_active(), ==, 0);
+	xtc_sim_clock_enable(7000000);
+	munit_assert_int(xtc_sim_clock_active(), ==, 1);
+	munit_assert_int64(xtc_clock_mono(), ==, 7000000);
+	xtc_sim_clock_disable();
+	munit_assert_int(xtc_sim_clock_active(), ==, 0);
+
 	xtc_sim_deactivate();
+	munit_assert_int64(xtc_clock_mono(), !=, 7000000);   /* the host clock */
 	return MUNIT_OK;
 }
 
