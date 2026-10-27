@@ -186,24 +186,94 @@ stable across minors, new event kinds may be added in a minor,
 renaming or removing one is a major change.  **No suite captures or
 diffs trace shape**, so this rests on review.
 
-## Long-term support (POLICY)
+## Long-term support and the 2.0 LTS (POLICY)
 
-Informal, and stated as intent rather than commitment: security fixes
-go to the current release; an LTS window on a previous major will be
-defined if and when there is a second major.  There is no
-`xtc-security@` list, no published embargo policy, and no backport
-branch in this tree yet.
+This section is the support contract for the first long-term-support
+release.  It is POLICY: the dates are commitments, but nothing in the
+tree enforces them; the compat job in CI (below) is the one mechanical
+piece.  The ABI rules a 2.x release must keep, and the tiers that say
+which headers they cover, are in the sections above.
 
-**Downgrades (POLICY).**  A downgrade -- running an older release
-against data or state a newer one has written (for example a sqlxtc
-store) -- is supported only between LTS releases, and only to the
-immediately previous LTS.  There are no LTS releases yet, so no
-downgrade is supported: an on-disk format may change in any minor, and
-the release that changes it says so in KNOWN_ISSUES.  Upgrades are
-supported: a release reads what earlier releases wrote unless its notes
-say otherwise.
+**The 2.0 LTS line.**  2.0.0 is the first LTS release.  The line is
+2.0.0, 2.0.1, 2.0.2, ...; it is supported until the LATER of
+
+- 18 months after 3.0.0 is released, and
+- 2.0.0's release date plus 3 years.
+
+"Supported" means security fixes and fixes for data loss, crashes,
+hangs and wrong results, released as 2.0.x.  The end date is printed in
+SECURITY.md's table once 3.0.0 has a date.  Minors after 2.0 (2.1, 2.2,
+...) are not LTS: each is supported until the next minor ships, and a
+consumer moves forward within 2.x without a rebuild (the 2.x ABI
+promise above).  A later major may name its own LTS; the next one is
+announced with the major, never retroactively.
+
+**What a 2.0.x patch may change.**  Fixes only.  A patch release:
+
+- adds, removes or renames no exported symbol and changes no function
+  signature, enum value, macro value, or struct layout (layout gate,
+  test/abi/layout.txt, must be unchanged);
+- keeps every on-disk, wire, trace and probe format byte for byte
+  (below);
+- changes no documented default, no configuration name, and no error
+  code a function returns for a given condition -- unless the old
+  behaviour was the bug, and then the release notes say so;
+- adds no dependency and raises no minimum compiler, kernel or TLS
+  library version;
+- may change behaviour that contradicts the documentation, close a
+  security hole, fix a leak, a race or a hang, and change performance
+  when the fix needs it (the release notes name any such cell from
+  scripts/perf-gate.sh).
+
+A fix that needs more than this ships in the next minor, and only the
+minimal safe part (if any) is backported.
+
+**Backports.**  The 2.0 line lives on the branch `lts/2.0`, cut from the
+2.0.0 tag.  Every fix lands on `main` first, then is cherry-picked
+(`git cherry-pick -x`, so the `main` commit is named) to `lts/2.0`; a
+fix that does not apply cleanly is rewritten on the branch and its
+message says why.  Tags `v2.0.N` are cut from `lts/2.0` only.  The
+release procedure for a patch release is in `docs/PUBLISHING.md`
+("Patch releases on an LTS branch").
+
+**Downgrades.**  A downgrade -- running an older release against data or
+state a newer one has written (for example a sqlxtc store) -- is
+supported only between LTS releases, and only to the immediately
+previous LTS.  Within the 2.0 line every 2.0.x reads and writes the same
+formats, so moving between any two 2.0.x is supported in both
+directions.  Upgrades are supported: a release reads what earlier
+releases of the same major wrote, unless its notes say otherwise.
+Before 2.0.0 there is no LTS release, so no downgrade is supported: a
+format may change in any 1.x minor or 2.0 pre-release, and the release
+that changes it says so in KNOWN_ISSUES.
+
+**Format, trace and probe versions.**  Every format libxtc writes
+carries a version: the `xtc_tail` dump header, its dial9 form, and the
+USDT probe set (its provider and argument lists).  The rule:
+
+- a 2.0.x patch never changes a format's version or its bytes;
+- a 2.x minor may ADD to a format only in a way an older reader of the
+  same major skips (a new event kind, a trailing field), and bumps the
+  minor part of the version where the format has one; it may add a new
+  probe, never change an existing probe's arguments;
+- removing or reinterpreting anything is a major change;
+- a reader in any 2.x release accepts every version a 2.x release
+  wrote.
+
+**The compat job.**  CI's `compat` job builds the N-1 consumer under
+test/abi against the PREVIOUS release's installed headers and runs it
+against the current library -- a consumer compiled for 2.0.0 must keep
+working against every later 2.x.  It skips, saying why, until a 2.x
+tag exists (a 1.x consumer is not expected to work against 2.0:
+1.x -> 2.0 is the major break).
+
+**Security fixes** follow the process in SECURITY.md: private report,
+fix on every supported line, coordinated release.
 
 ## See also
+
+- [SECURITY.md](https://codeberg.org/gregburd/libxtc/src/branch/main/SECURITY.md)
+  -- supported versions and how to report a vulnerability.
 
 - [Known issues]({{ '/reference/known-issues/' | relative_url }}) --
   the struct-growth ABI defect, in detail, with measurements.
