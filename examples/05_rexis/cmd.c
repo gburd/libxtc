@@ -823,8 +823,10 @@ cmd_publish(cmd_ctx_t *ctx)
 		return 0;
 	}
 
-	/* Build the RESP push frame in a heap buffer; xtc_pg_send copies it
-	 * into each subscriber's mailbox, so we free our copy afterward.
+	/* Build the RESP push frame in a heap buffer and give it away:
+	 * xtc_pg_send_owned moves it to the last subscriber and copies it
+	 * for the others (a channel with one subscriber costs no copy), and
+	 * frees it if nobody took it.
 	 * Sizing: array header + "message" + channel + payload, each bulk
 	 * costs len + a small envelope ("$<len>\r\n...\r\n"). */
 	cap = 64 + clen + plen;
@@ -838,8 +840,7 @@ cmd_publish(cmd_ctx_t *ctx)
 	resp_write_bulk(&fb, ch, clen);
 	resp_write_bulk(&fb, payload, plen);
 
-	n = xtc_pg_send(ctx->pubsub, key, frame, fb.len);
-	xtc_free(frame);
+	n = xtc_pg_send_owned(ctx->pubsub, key, frame, fb.len);
 
 	resp_write_int(ctx->out, n);
 	return 0;

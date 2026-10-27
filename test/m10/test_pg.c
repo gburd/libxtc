@@ -117,9 +117,75 @@ test_pg_broadcast(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---------- owned broadcast: N - 1 copies ---------- */
+
+/* xtc_pg_send_owned hands the caller's buffer itself to the last member
+ * and copies it for the others: with one member no copy at all.  A
+ * plain xtc_pg_send copies for every member, so a group of one cost a
+ * copy of the whole payload (rexis PUBLISH built the frame, then copied
+ * it again).  Checked by address: the single subscriber must receive
+ * the very block the publisher allocated; with 3 subscribers exactly
+ * one of them does. */
+#define OWN_SZ 4096
+static void *g_own_buf;
+static _Atomic int g_own_same, g_own_got;
+
+static void
+own_sub(void *arg)
+{
+	void *msg = NULL;
+	size_t sz = 0;
+	(void)arg;
+	if (xtc_recv(&msg, &sz, 2LL * 1000 * 1000 * 1000) == XTC_OK) {
+		if (sz == OWN_SZ && ((unsigned char *)msg)[OWN_SZ - 1] == 0x5a)
+			atomic_fetch_add(&g_own_got, 1);
+		if (msg == g_own_buf)
+			atomic_fetch_add(&g_own_same, 1);
+		xtc_free(msg);
+	}
+}
+
+static MunitResult
+test_pg_send_owned(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_reg_t *r = NULL;
+	xtc_pid_t pid;
+	int n, i, sent;
+	(void)p; (void)d;
+
+	for (n = 1; n <= 3; n += 2) {
+		munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+		munit_assert_int(xtc_reg_create(&r), ==, XTC_OK);
+		for (i = 0; i < n; i++) {
+			munit_assert_int(xtc_proc_spawn(loop, own_sub, NULL,
+			    NULL, &pid), ==, XTC_OK);
+			munit_assert_int(xtc_pg_join(r, "t", pid), ==, XTC_OK);
+		}
+		atomic_store(&g_own_same, 0);
+		atomic_store(&g_own_got, 0);
+		munit_assert_not_null(g_own_buf = xtc_malloc(OWN_SZ));
+		memset(g_own_buf, 0x5a, OWN_SZ);
+		sent = xtc_pg_send_owned(r, "t", g_own_buf, OWN_SZ);
+		munit_assert_int(sent, ==, n);
+		munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+		munit_assert_int(atomic_load(&g_own_got), ==, n);
+		munit_assert_int(atomic_load(&g_own_same), ==, 1);
+		xtc_reg_destroy(r);
+		munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	}
+	/* No member: the buffer is freed, 0 sent (ASan/valgrind: no leak). */
+	munit_assert_int(xtc_reg_create(&r), ==, XTC_OK);
+	munit_assert_int(xtc_pg_send_owned(r, "none", xtc_malloc(64), 64), ==,
+	    0);
+	xtc_reg_destroy(r);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/membership", test_pg_membership, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/broadcast",  test_pg_broadcast,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/send_owned", test_pg_send_owned, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10.6/pg", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

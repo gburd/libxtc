@@ -32,6 +32,21 @@ connections on one 32-vCPU x86-64 host.
 so widening `local_id` has to wait for 2.0.  See
 [xtc_proc(3)](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_proc.3).
 
+## CHANGED (2.0): `xtc_pg_send_owned`, process-group fan-out with one copy fewer
+
+`xtc_pg_send` copies a `const` buffer once per member, so rexis
+PUBLISH, which built the frame in a heap buffer, copied it again even
+for a channel with one subscriber.  `xtc_pg_send_owned(reg, group, buf,
+size)` takes an `xtc_malloc`'d buffer and moves it to the last member
+(`xtc_send_owned`): N - 1 copies for N members, none for one.  The
+buffer is the library's on return (moved, or freed if nobody took it).
+Measured on a 32-vCPU x86-64 host, one loop, 100,000 messages, 5 runs:
+one subscriber at 64 KiB 338k -> 685k messages/s, at 4 KiB 1.74M ->
+1.94M; four subscribers at 64 KiB 121k -> 147k (with glibc's trim
+threshold pinned; with the defaults the copying publisher's
+allocate-free cycle page-faults on every message and runs at 15k).
+rexis PUBLISH uses it.
+
 ## CHANGED (2.0): a kernel-TLS `xtc_tls_write` is one system call, not one per record
 
 **Before.**  With kernel TLS TX active, `xtc_tls_write` went through

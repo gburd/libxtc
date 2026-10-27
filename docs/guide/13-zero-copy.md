@@ -69,11 +69,16 @@ server built.  (Before the zero-copy work a call round trip copied the
 payload seven times.)
 
 **Process groups** (`xtc_pg_send`) send one copy per member: a
-fan-out of a `const` buffer.  Zero-copy fan-out would need shared,
-reference-counted, immutable messages with their own release call --
-deliberately not added; if you fan out large payloads, send each member
-an `xtc_send_owned` block, or share one immutable buffer by pointer over
-a channel and count references yourself.
+fan-out of a `const` buffer.  `xtc_pg_send_owned` takes an
+`xtc_malloc`'d buffer instead and moves it to the last member, so a
+group of N costs N - 1 copies and a group of one costs none (rexis
+PUBLISH uses it).  Measured, one loop, 100,000 messages: one subscriber
+at 64 KiB 338k -> 685k messages/s, 4 KiB 1.74M -> 1.94M; four
+subscribers at 64 KiB 121k -> 147k.  Zero-copy fan-out to every member
+would need shared, reference-counted, immutable messages with their own
+release call -- deliberately not added; if you fan out large payloads,
+share one immutable buffer by pointer over a channel and count
+references yourself.
 
 ## Sockets and framing
 
@@ -167,7 +172,7 @@ examples show both styles: one reads results back with a copy
 | `xtc_send` <= 256 B | 2 (in, out) | inline pooled envelope; at this size the copy costs about the same as moving (measured) |
 | `xtc_send` > 256 B | 1 | the buffer is `const` and stays yours; use `xtc_send_owned` |
 | `xtc_svr_call` / `xtc_fsm_call` | 1 per direction | header + `const` payload become one message |
-| `xtc_pg_send` | 1 per member | fan-out of a `const` buffer |
+| `xtc_pg_send` | 1 per member | fan-out of a `const` buffer; `xtc_pg_send_owned`: 1 per member but the last |
 | `xtc_log_write` | 1 | formatting is the copy |
 | user-space TLS | record copy + crypto | use kernel TLS + `xtc_tls_sendfile` where it pays |
 
