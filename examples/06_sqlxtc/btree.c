@@ -893,7 +893,7 @@ bt_open(bm_t *bm, bt_t **out)
 	}
 	bm_unfix(bm, sf, 0);             /* scratch becomes an orphan page */
 	bt->page_size = ps;
-	if ((bt->smo_scratch = malloc(3u * ps)) == NULL) {
+	if ((bt->smo_scratch = calloc(3u, ps)) == NULL) {
 		bm_unfix(bm, rf, 0);
 		rc = XTC_E_NOMEM;
 		goto fail;
@@ -956,7 +956,7 @@ bt_reopen(bm_t *bm, bt_t **out)
 		return XTC_E_INVAL;          /* not an xstore B-tree store */
 	}
 	bt->page_size = s.page_size;
-	if ((bt->smo_scratch = malloc(3u * s.page_size)) == NULL) {
+	if ((bt->smo_scratch = calloc(3u, s.page_size)) == NULL) {
 		xtc_arwlock_destroy(bt->smo);
 		free(bt);
 		return XTC_E_NOMEM;
@@ -1460,8 +1460,14 @@ post_separator(bt_t *bt, bm_pid_t *path, int level,
  * replaced by that side's frame -- or 0 if not (nothing changed; *fp is
  * still the leaf, latched exclusive).
  */
+/* Off by default (0): measured on a 64-vCPU host (ledger, 3 interleaved
+ * runs), shifting at 80% cut the ledger page file 10% (leaf fill 75% ->
+ * 82%) but cost the C=64 write shapes 5-14% (transfer 90.7k -> 81.7k
+ * ops/s at 4 KiB): the shift holds the parent exclusive for two page
+ * rebuilds, where a split holds it for one separator insert.  A build
+ * that prefers size sets -DBT_SHIFT_PCT=80 (the tests and DST do). */
 #ifndef BT_SHIFT_PCT
-#define BT_SHIFT_PCT 80
+#define BT_SHIFT_PCT 0
 #endif
 static int
 bt_shift(bt_t *bt, bm_pid_t ppid, bm_frame_t **fp, const void *key,
@@ -1481,9 +1487,12 @@ bt_shift(bt_t *bt, bm_pid_t ppid, bm_frame_t **fp, const void *key,
 	if (ppid == BM_PID_NONE)
 		return 0;
 	/* Buggify: shift into any sibling that is not full, so DST drives
-	 * many more shifts (left ones especially) than a natural fill. */
+	 * many more shifts (left ones especially) than a natural fill, also
+	 * in a build where shifting is off. */
 	if (XTC_SIM_BUGGIFY("btree.shift.eager") && xtc_sim_buggify_fault(500))
 		best_fill = 100;
+	if (best_fill == 0)
+		return 0;               /* off: split, without touching the parent */
 	bm_unlatch(f);
 	if (bm_fix_pid(bm, ppid, &pf) != XTC_OK) {
 		bm_latch_exclusive(f);

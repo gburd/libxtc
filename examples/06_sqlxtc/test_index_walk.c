@@ -252,8 +252,14 @@ main(void)
 	bt_get_stats(bt, &s1);
 	fixes = (b1.hits + b1.rescues + b1.loads) - (b0.hits + b0.rescues + b0.loads);
 	CK(n == 2400);
-	CK(s1.height >= 3);
+	/* A descent per entry fixes >= 2 x height pages per entry; the bound
+	 * must stay below that.  (The tree was 3 levels when this was written;
+	 * 2.0's denser internal nodes make it 2, where the bound is 3n against
+	 * 4n: still apart.) */
+	CK(s1.height >= 2);
 	CK(fixes <= (uint64_t)n * (s1.height + 1) + (uint64_t)n / 4);
+	CK((uint64_t)n * (s1.height + 1) + (uint64_t)n / 4 <
+	    (uint64_t)n * (2 * s1.height));
 	printf("  %s   W2 reverse: %d index entries, %llu page fixes, height "
 	    "%llu (a descent per entry: >= %llu)\n",
 	    fixes <= (uint64_t)n * (s1.height + 1) + (uint64_t)n / 4 ? "ok" : "FAIL",

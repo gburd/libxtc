@@ -57,6 +57,7 @@
 #include "xtc_proc.h"
 #include "xtc_async.h"
 #include "xtc_sim.h"
+#define BT_SHIFT_PCT 80   /* redistribution on (off by default in btree.c) */
 /* The storage engine is included, so the test builds against the sim
  * library alone (scripts/dst-corpus.sh compiles corpus tests that way). */
 #include "../../examples/06_sqlxtc/bufmgr.c"

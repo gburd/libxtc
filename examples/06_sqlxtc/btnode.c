@@ -282,7 +282,13 @@ btnode_init(void *page, uint32_t page_size, int is_leaf)
 {
 	struct btnode_hdr *h = HDR(page);
 
-	memset(h, 0, sizeof(*h));
+	/* The whole page, not only the header: the gap between the slot
+	 * array and the cell heap is written to the page file and the log
+	 * as it is, and every node rebuild builds into a stack buffer
+	 * (node_compact, the splits, the merge), so an unzeroed gap carried
+	 * stack bytes -- other rows' keys and values, pointers -- into the
+	 * store (2.0, test_btnode test_page_bytes). */
+	memset(page, 0, page_size);
 	h->page_size = page_size;
 	h->right_sibling = 0;
 	h->count = 0;
@@ -473,9 +479,17 @@ btnode_remove(void *page, int slot)
 	h->ins_run = 0;
 	h->space_used =
 	    (uint16_t)(h->space_used - (s[slot].key_len + VLEN(s[slot].val_len)));
+	/* Zero the removed cell and the slot the array gives up: a deleted
+	 * entry's bytes stayed in the page (and every image of it written
+	 * to the page file and the log) until the node was rebuilt. */
+	if ((size_t)s[slot].offset + s[slot].key_len + VLEN(s[slot].val_len) <=
+	    h->page_size)
+		memset((uint8_t *)page + s[slot].offset, 0,
+		    (size_t)s[slot].key_len + VLEN(s[slot].val_len));
 	memmove(&s[slot], &s[slot + 1],
 	    sizeof(struct btnode_slot) * (size_t)(h->count - slot - 1));
 	h->count--;
+	memset(&s[h->count], 0, sizeof(struct btnode_slot));
 	return 0;
 }
 

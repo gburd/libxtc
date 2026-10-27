@@ -25,6 +25,7 @@
  *	re-descends; test_sim_btree_scan drives both under the simulator.
  */
 #define BT_CHECK 1
+#define BT_SHIFT_PCT 80   /* redistribution on (off by default) */
 #include "bufmgr.c"
 #include "btree.c"
 #include "t_tmp.h"
