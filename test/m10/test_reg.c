@@ -356,6 +356,7 @@ rm_driver(void *a)
 	int i;
 
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.mailbox_cap = 1;
 	(void)xtc_proc_spawn(loop, xtc_reg_reaper, g_rm_reg, &o, &reaper);
 	(void)xtc_proc_sleep(1LL * 1000 * 1000);   /* let it publish itself */

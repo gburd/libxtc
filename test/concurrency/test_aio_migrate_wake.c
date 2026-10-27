@@ -122,6 +122,7 @@ main(void)
 	xtc_exec_set_eager_rebalance(e, 1);
 
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.migratable = 1;
 	for (i = 0; i < WORKERS; i++) {
 		xtc_pid_t p;

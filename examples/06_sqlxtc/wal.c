@@ -1512,7 +1512,7 @@ wal_writer_proc(void *arg)
 int
 wal_writer_spawn(wal_t *w, xtc_loop_t *loop, xtc_pid_t *pid)
 {
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_pid_t p;
 	int rc;
 

@@ -97,6 +97,7 @@ manager(void *arg)
 		{
 			xtc_osproc_opts_t o;
 			memset(&o, 0, sizeof o);
+			o.size = sizeof o;
 			o.name = "worker";
 			o.fn = worker_fn;
 			o.arg = (void *)(intptr_t)want;
@@ -117,6 +118,7 @@ manager(void *arg)
 		xtc_osproc_t *p = NULL;
 		int st = 0;
 		memset(&o, 0, sizeof o);
+		o.size = sizeof o;
 		o.name = "stuck";
 		o.fn = stuck_fn;
 		o.ctrl_socket = 0;

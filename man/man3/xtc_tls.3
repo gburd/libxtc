@@ -50,7 +50,23 @@ profile.  Created once via
 .Fn xtc_tls_ctx_create
 with role
 .Pq Dv XTC_TLS_SERVER or Dv XTC_TLS_CLIENT
-plus opts.
+plus an
+.Vt xtc_tls_opts_t
+.Pq Dv NULL No for defaults .
+Initialize the opts with
+.Dv XTC_TLS_OPTS_INIT
+or a designated initializer that sets
+.Va .size = sizeof(xtc_tls_opts_t) :
+the library reads only
+.Va size
+bytes, so an option the caller's header does not have takes its
+default, and a
+.Va size
+of 0 is
+.Dv XTC_E_INVAL .
+.Vt xtc_tls_transport_t
+follows the same rule
+.Pq Dv XTC_TLS_TRANSPORT_INIT .
 .It Vt xtc_tls_t
 Per-connection state.  Wraps a single fd.  Created via
 .Fn xtc_tls_create "ctx" "fd" "&out" .

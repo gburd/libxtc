@@ -242,7 +242,7 @@ static MunitResult
 test_accessors_errors(const MunitParameter p[], void *d)
 {
 	xtc_exec_t *e = NULL;
-	xtc_loop_stats_t st;
+	xtc_loop_stats_t st = XTC_LOOP_STATS_INIT;
 	(void)p; (void)d;
 
 	/* NULL exec on every accessor. */
@@ -385,7 +385,7 @@ static MunitResult
 test_blocking_resume_on_exec(const MunitParameter p[], void *d)
 {
 	xtc_exec_t *e;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	int i;
 	(void)p; (void)d;
@@ -489,7 +489,7 @@ static MunitResult
 test_concurrent_commit_resume(const MunitParameter p[], void *d)
 {
 	xtc_exec_t *e;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	int i;
 	(void)p; (void)d;
@@ -585,7 +585,7 @@ static MunitResult
 test_cross_loop_del_fd(const MunitParameter p[], void *d)
 {
 	xtc_exec_t *e;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	__os_thread_t poker = {0};
 	int i;
@@ -685,7 +685,7 @@ static MunitResult
 test_cross_loop_state_timer(const MunitParameter p[], void *d)
 {
 	xtc_exec_t *e;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	__os_thread_t poker = {0};
 	int i;
@@ -778,7 +778,7 @@ test_migratable_timer_resume(const MunitParameter p[], void *d)
 	return MUNIT_SKIP;
 #else
 	xtc_exec_t *e;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	int i, nloops;
 	atomic_store(&g_blk5_done, 0);
@@ -908,7 +908,7 @@ test_migratable_waitfd_resume(const MunitParameter p[], void *d)
 	return MUNIT_SKIP;
 #else
 	xtc_exec_t *e;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	int i;
 	atomic_store(&g_blk6_done, 0);
@@ -1009,7 +1009,7 @@ static MunitResult
 test_blocking_kill_no_frame_escape(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t killer;
 	(void)p; (void)d;
 
@@ -1098,7 +1098,7 @@ test_migratable_self_identity(const MunitParameter p[], void *d)
 	return MUNIT_SKIP;
 #else
 	xtc_exec_t *e;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	int i, nloops;
 	atomic_store(&g_blk8_done, 0);

@@ -166,7 +166,7 @@ my_changed(const char *name, const void *o, const void *n, void *u)
 static MunitResult
 test_cfg_int(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t spec = {0};
+	xtc_cfg_spec_t spec = XTC_CFG_SPEC_INIT;
 	int v;
 	(void)p; (void)d;
 	g_changed_count = 0;
@@ -206,7 +206,7 @@ test_cfg_int(const MunitParameter p[], void *d)
 static MunitResult
 test_cfg_string(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t spec = {0};
+	xtc_cfg_spec_t spec = XTC_CFG_SPEC_INIT;
 	const char *s;
 	(void)p; (void)d;
 	spec.name = "test.label";
@@ -227,7 +227,7 @@ test_cfg_string(const MunitParameter p[], void *d)
 static MunitResult
 test_cfg_load_file(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t spec = {0};
+	xtc_cfg_spec_t spec = XTC_CFG_SPEC_INIT;
 	static const char *levels[] = { "quiet", "normal", "loud" };
 	char tmpdir[512];
 	char path[640];
@@ -244,12 +244,15 @@ test_cfg_load_file(const MunitParameter p[], void *d)
 	spec.dflt.d_int = 4; spec.min_int = 1; spec.max_int = 64;
 	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
 	memset(&spec, 0, sizeof spec);
+	spec.size = sizeof spec;
 	spec.name = "t.tls"; spec.kind = XTC_CFG_BOOL; spec.dflt.d_bool = 0;
 	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
 	memset(&spec, 0, sizeof spec);
+	spec.size = sizeof spec;
 	spec.name = "t.banner"; spec.kind = XTC_CFG_STRING; spec.dflt.d_string = "x";
 	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
 	memset(&spec, 0, sizeof spec);
+	spec.size = sizeof spec;
 	spec.name = "t.level"; spec.kind = XTC_CFG_ENUM; spec.dflt.d_enum = 0;
 	spec.enum_labels = levels; spec.n_enum_labels = 3;
 	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
@@ -528,7 +531,7 @@ insp_driver(void *a)
 		atomic_store(&g_insp_loop_procs, lp);
 	}
 	{
-		xtc_proc_info_t info;
+		xtc_proc_info_t info = XTC_PROC_INFO_INIT;
 		int rc = xtc_proc_info(g_insp_sleeper, &info);
 		if (rc == XTC_OK && info.mbox_len == 2 &&
 		    info.run_state == XTC_PROC_PARKED)
@@ -541,7 +544,7 @@ static MunitResult
 test_inspect_procs(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_pid_t dpid;
 	(void)p; (void)d;
 
@@ -610,7 +613,7 @@ pr_timer_proc(void *a)
 static void
 pr_probe(void *a)
 {
-	xtc_proc_info_t info;
+	xtc_proc_info_t info = XTC_PROC_INFO_INIT;
 	(void)a;
 	/* Let both targets reach their parks. */
 	(void)xtc_proc_sleep(30LL * 1000 * 1000);
@@ -631,7 +634,7 @@ static MunitResult
 test_inspect_park_reason(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_pid_t probe;
 	(void)p; (void)d;
 
@@ -664,7 +667,7 @@ test_inspect_park_reason(const MunitParameter p[], void *d)
 static MunitResult
 test_inspect_notfound(const MunitParameter p[], void *d)
 {
-	xtc_proc_info_t info;
+	xtc_proc_info_t info = XTC_PROC_INFO_INIT;
 	xtc_pid_t nobody = { 9, 9, 9 };
 	(void)p; (void)d;
 	munit_assert_int(xtc_proc_info(nobody, &info), ==, XTC_E_NOTFOUND);
@@ -694,7 +697,7 @@ static MunitResult
 test_trace_causal(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_pid_t ap;
 	int dumped, i, j, sends = 0, recvs = 0, edges_ok = 0;
 	(void)p; (void)d;

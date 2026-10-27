@@ -963,7 +963,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	BOOL ok;
 	DWORD err;
 
-	if (io == NULL || a == NULL)
+	if (io == NULL || !__XTC_AIO_OK(a))
 		return XTC_E_INVAL;
 	if (a->op != XTC_AIO_PREAD && a->op != XTC_AIO_PWRITE)
 		return XTC_E_NOSYS;             /* fsync/fdatasync: offload */

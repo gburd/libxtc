@@ -93,7 +93,10 @@ door_terminate(void *st, int reason)
 }
 
 static const xtc_fsm_callbacks_t DOOR_CB = {
-	door_enter, door_event, door_terminate
+	.size = sizeof(xtc_fsm_callbacks_t),
+	.enter = door_enter,
+	.event = door_event,
+	.terminate = door_terminate
 };
 
 /* ---- driver proc: runs the scenario, then stops the fsm ---- */
@@ -201,7 +204,11 @@ timer_enter(void *st, int old_state, int new_state)
 	return XTC_OK;
 }
 
-static const xtc_fsm_callbacks_t TIMER_CB = { timer_enter, timer_event, NULL };
+static const xtc_fsm_callbacks_t TIMER_CB = {
+	.size = sizeof(xtc_fsm_callbacks_t),
+	.enter = timer_enter,
+	.event = timer_event
+};
 
 struct timer_scn { xtc_fsm_t *fsm; xtc_pid_t pid; };
 
@@ -251,7 +258,9 @@ timer_enter_arm(void *st, int old_state, int new_state)
 }
 
 static const xtc_fsm_callbacks_t TIMER_CB2 = {
-	timer_enter_arm, timer_event_arm, NULL
+	.size = sizeof(xtc_fsm_callbacks_t),
+	.enter = timer_enter_arm,
+	.event = timer_event_arm
 };
 
 static void
@@ -367,6 +376,7 @@ test_fsm_join_equal_pid_other_loop(const MunitParameter p[], void *d)
 
 	feq_by_start(&lb, by, 4, &th);
 	memset(&cb, 0, sizeof cb);
+	cb.size = sizeof cb;
 	cb.event = feq_event;
 	munit_assert_int(xtc_loop_init(&la), ==, XTC_OK);
 	munit_assert_int(xtc_fsm_start(la, &cb, NULL, 0, NULL, &fsm), ==, XTC_OK);

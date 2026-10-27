@@ -129,6 +129,7 @@ monitor(void *arg)
 		xtc_loop_t *l = xtc_exec_loop(e, (unsigned)(i % N_LOOPS));
 		xtc_pid_t child = XTC_PID_NONE;
 		memset(&opts, 0, sizeof opts);
+		opts.size = sizeof opts;
 		opts.migratable = 1;               /* THE knob under test */
 		refs[i] = 0;
 		(void)xtc_proc_spawn_monitor(l, worker, (void *)(intptr_t)i,

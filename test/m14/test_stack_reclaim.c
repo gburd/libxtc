@@ -457,6 +457,7 @@ life_mig_spawner(void *arg)
 	long i;
 
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.migratable = 1;
 	for (i = 0; i < life_n; i++) {
 		while (atomic_load(&life_live) >= LIFE_LIVE)
@@ -500,7 +501,7 @@ test_reclaim_migratable(const MunitParameter p[], void *d)
 	    XTC_OK);
 	munit_assert_int(xtc_exec_run(life_exec), ==, XTC_OK);
 	for (i = 0; i < LIFE_LOOPS; i++) {
-		xtc_loop_stats_t st;
+		xtc_loop_stats_t st = XTC_LOOP_STATS_INIT;
 		if (xtc_exec_loop_stats(life_exec, i, &st) == XTC_OK)
 			steals += (int64_t)st.steals;
 	}
@@ -647,6 +648,7 @@ xs_acceptor(void *arg)
 	(void)arg;
 
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.migratable = (xs_mode == 2);
 	xs_acc = xtc_self();
 	for (i = 0; i < XS_N; i++) {

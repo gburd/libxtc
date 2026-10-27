@@ -589,6 +589,7 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
                    const xtc_tls_opts_t *opts,
                    xtc_tls_ctx_t **out)
 {
+	xtc_tls_opts_t        opts_full;
 	struct xtc_tls_ctx    *c;
 	const SSL_METHOD      *method;
 	xtc_tls_verify_mode_t  vm;
@@ -597,6 +598,8 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 	if (out == NULL)
 		return XTC_E_INVAL;
 	*out = NULL;
+	if ((rc = __xtc_tls_opts_in(&opts, &opts_full)) != XTC_OK)
+		return rc;
 
 	/*
 	 * One-time library init.  pthread_once is XTC_BLOCKING_OK: it
@@ -971,9 +974,13 @@ xtc_tls_create_transport(xtc_tls_ctx_t *ctx,
 	struct xtc_tls *t;
 	BIO            *bio;
 	int             rc;
+	xtc_tls_transport_t tp;
 
 	if (ctx == NULL || transport == NULL || out == NULL ||
-	    transport->read_cb == NULL || transport->write_cb == NULL)
+	    __xtc_sized_in(&tp, NULL, sizeof tp, transport, 0) != XTC_OK)
+		return XTC_E_INVAL;
+	transport = &tp;
+	if (transport->read_cb == NULL || transport->write_cb == NULL)
 		return XTC_E_INVAL;
 	*out = NULL;
 

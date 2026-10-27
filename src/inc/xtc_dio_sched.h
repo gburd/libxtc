@@ -1,5 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project
+ * @stability experimental
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_dio_sched.h

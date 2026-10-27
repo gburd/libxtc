@@ -1,5 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project
+ * @stability stable
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_proc.h
@@ -71,9 +72,9 @@ typedef int (*xtc_match_fn)(const void *data, size_t size, void *user_data);
 typedef void (*xtc_proc_fn)(void *arg);
 
 typedef struct xtc_proc_opts {
+	size_t      size;          /* sizeof(xtc_proc_opts_t): XTC_PROC_OPTS_INIT */
 	const char *name;          /* optional, for debug */
 	size_t      mailbox_cap;   /* 0 = default */
-	int         link_to;       /* if != 0, this is a pid index to link to */
 	/* Mailbox watermark: when an accepted message brings the depth to
 	 * this percent of mailbox_cap (1..100; 0 = disabled), the callback
 	 * fires once on the rising edge, so the app can shed load before
@@ -81,32 +82,37 @@ typedef struct xtc_proc_opts {
 	 * sender's thread, outside the mailbox lock; keep it cheap and do
 	 * not block. */
 	int         mailbox_watermark_pct;
+	/*
+	 * Work-stealing: 0 (default) pins the proc's coroutine to its
+	 * spawn loop.  1 makes the coroutine work-stealable: an idle loop
+	 * may steal it (only while parked/scheduled, never mid-instruction)
+	 * to rebalance runnable work across a multi-loop executor.  The
+	 * proc's identity (pid), supervision (links/monitors/DOWN), recovery
+	 * frame, and mailbox are unaffected -- only the carrier loop can
+	 * change, and only at a yield point.  See xtc_proc(3) MIGRATION.
+	 */
+	int         migratable;
 	void      (*mailbox_watermark_fn)(xtc_pid_t self, size_t depth,
 	                                  size_t cap, void *user);
 	void       *mailbox_watermark_user;
 	/*
-	 * Work-stealing: 0 (default) pins the proc's coroutine to its
-	 * spawn loop -- today's behavior, and what a zeroed opts gives.
-	 * 1 makes the coroutine work-stealable: an idle loop may steal it
-	 * (only while parked/scheduled, never mid-instruction) to rebalance
-	 * runnable work across a multi-loop executor.  The proc's identity
-	 * (pid), supervision (links/monitors/DOWN), recovery frame, and
-	 * mailbox are unaffected -- only the carrier loop can change, and
-	 * only at a yield point.  See xtc_proc(3) MIGRATION.
-	 */
-	int         migratable;
-	/*
 	 * L1 proportional-share scheduler: place this proc's task in a
 	 * scheduling CLASS created with xtc_exec_class_create.  NULL (the
-	 * default, and what a zeroed opts gives) is the implicit plain-FIFO
-	 * class -- zero overhead.  A non-NULL handle weights the proc's CPU
-	 * share against the other classes on its loop.  INSPIRED BY Glommio.
+	 * default) is the implicit plain-FIFO class -- zero overhead.  A
+	 * non-NULL handle weights the proc's CPU share against the other
+	 * classes on its loop.  INSPIRED BY Glommio.
 	 */
 	xtc_exec_class_t sched_class;
 } xtc_proc_opts_t;
 
+/* All defaults.  Add fields with a designated initializer that sets .size
+ * too: { .size = sizeof(xtc_proc_opts_t), .name = "w" }.  A NULL opts
+ * pointer also means all defaults. */
+#define XTC_PROC_OPTS_INIT { .size = sizeof(xtc_proc_opts_t) }
+
 /* Mailbox statistics snapshot (see xtc_proc_mailbox_stats). */
 typedef struct xtc_mailbox_stats {
+	size_t   size;         /* sizeof(xtc_mailbox_stats_t): XTC_MAILBOX_STATS_INIT */
 	size_t   depth;        /* messages currently in the mailbox */
 	size_t   saved;        /* messages held in the selective-receive
 	                        * save queue (inspected, not yet matched) */
@@ -115,6 +121,8 @@ typedef struct xtc_mailbox_stats {
 	uint64_t recv_total;   /* messages accepted over the proc's life */
 	uint64_t drop_total;   /* messages rejected (full / dead) */
 } xtc_mailbox_stats_t;
+
+#define XTC_MAILBOX_STATS_INIT { .size = sizeof(xtc_mailbox_stats_t) }
 
 /*
  * PUBLIC: int       xtc_proc_spawn __P((xtc_loop_t *, xtc_proc_fn, void *, const xtc_proc_opts_t *, xtc_pid_t *));
@@ -949,7 +957,8 @@ typedef enum {
 	                                 * control socket closed) */
 } xtc_down_kind_t;
 
-typedef struct {
+typedef struct xtc_down_info {
+	size_t          size;       /* sizeof(xtc_down_info_t): XTC_DOWN_INFO_INIT */
 	xtc_pid_t       pid;        /* the target that went DOWN */
 	xtc_down_kind_t kind;       /* how it ended (never ambiguous) */
 	int             signal;     /* signal number iff kind == SIGNAL, else 0 */
@@ -957,6 +966,8 @@ typedef struct {
 	int             reason;     /* the legacy xtc_down_decode reason value */
 	uint64_t        ref;        /* the monitor reference (0 for a link EXIT) */
 } xtc_down_info_t;
+
+#define XTC_DOWN_INFO_INIT { .size = sizeof(xtc_down_info_t) }
 
 /*
  * Decode a DOWN or EXIT signal into a fully-classified xtc_down_info_t.

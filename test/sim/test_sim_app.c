@@ -144,6 +144,7 @@ static int
 run_one(uint64_t seed, int *out_replies, uint64_t *out_state)
 {
 	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+	xtc_sup_opts_t sup_opts = XTC_SUP_OPTS_DEFAULT;
 	xtc_child_spec_t children[1 + N_CLIENTS];
 	xtc_exec_t *exec;
 	int i, rc;
@@ -159,8 +160,9 @@ run_one(uint64_t seed, int *out_replies, uint64_t *out_state)
 	/* Children are long-running services; keep them alive (permanent),
 	 * but if one exits we do not want infinite restarts to perturb the
 	 * count -- give a generous budget. */
-	opts.sup.strategy = XTC_SUP_ONE_FOR_ONE;
-	opts.sup.max_restarts = 100;
+	sup_opts.strategy = XTC_SUP_ONE_FOR_ONE;
+	sup_opts.max_restarts = 100;
+	opts.sup = &sup_opts;
 
 	if (xtc_app_create(&opts, &g_app) != XTC_OK)
 		return -1;
@@ -168,11 +170,13 @@ run_one(uint64_t seed, int *out_replies, uint64_t *out_state)
 
 	/* child 0 = server on loop 0; clients spread across loops 1..N. */
 	memset(children, 0, sizeof(children));
+	children[0].size = sizeof children[0];
 	children[0].name = "server";
 	children[0].fn = server;
 	children[0].policy = XTC_RESTART_PERMANENT;
 	children[0].loop = 0;
 	for (i = 0; i < N_CLIENTS; i++) {
+		children[1 + i].size = sizeof children[1 + i];
 		children[1 + i].name = "client";
 		children[1 + i].fn = client;
 		children[1 + i].arg = (void *)(intptr_t)i;

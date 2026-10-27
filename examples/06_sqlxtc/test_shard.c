@@ -227,9 +227,19 @@ static struct ts_state    *g_ts_state;
 static int
 spawn_all(xtc_loop_t *ts_loop, xtc_loop_t **shard_loops, xtc_loop_t **client_loops)
 {
-	xtc_svr_callbacks_t ts_cb = { NULL, ts_handle_call, NULL, NULL, NULL };
-	xtc_svr_callbacks_t sh_cb = { NULL, shard_handle_call, NULL, NULL, NULL };
-	xtc_svr_opts_t opts = { .name = "ts", .mailbox_cap = 0 };
+	xtc_svr_callbacks_t ts_cb = {
+		.size = sizeof(xtc_svr_callbacks_t),
+		.handle_call = ts_handle_call
+	};
+	xtc_svr_callbacks_t sh_cb = {
+		.size = sizeof(xtc_svr_callbacks_t),
+		.handle_call = shard_handle_call
+	};
+	xtc_svr_opts_t opts = {
+		.size = sizeof(xtc_svr_opts_t),
+		.name = "ts",
+		.mailbox_cap = 0
+	};
 	int i;
 	long c;
 
@@ -241,7 +251,11 @@ spawn_all(xtc_loop_t *ts_loop, xtc_loop_t **shard_loops, xtc_loop_t **client_loo
 
 	for (i = 0; i < N_SHARDS; i++) {
 		struct shard_state *ss = calloc(1, sizeof *ss);
-		xtc_svr_opts_t so = { .name = "shard", .mailbox_cap = 0 };
+		xtc_svr_opts_t so = {
+			.size = sizeof(xtc_svr_opts_t),
+			.name = "shard",
+			.mailbox_cap = 0
+		};
 		if (ss == NULL) return XTC_E_NOMEM;
 		ss->reorders = 0;
 		g_shard_state[i] = ss;
@@ -253,7 +267,10 @@ spawn_all(xtc_loop_t *ts_loop, xtc_loop_t **shard_loops, xtc_loop_t **client_loo
 
 	atomic_store(&g_clients_left, N_CLIENTS);
 	for (c = 0; c < N_CLIENTS; c++) {
-		xtc_proc_opts_t po = { .name = "cli" };
+		xtc_proc_opts_t po = {
+			.size = sizeof(xtc_proc_opts_t),
+			.name = "cli"
+		};
 		xtc_pid_t pid;
 		if (xtc_proc_spawn(client_loops[c % N_CLIENTS], client_proc,
 		    (void *)c, &po, &pid) != XTC_OK)

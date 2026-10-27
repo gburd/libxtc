@@ -85,7 +85,7 @@ static MunitResult
 test_roundtrip(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_pid_t a;
 	struct ctx c;
 	(void)p; (void)d;

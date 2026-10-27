@@ -134,6 +134,7 @@ run_slab(uint64_t seed, int *out_done, int *out_dbl,
 	*out_dbl = atomic_load(&g_dbl);
 	*out_null = atomic_load(&g_null);
 	memset(&st, 0, sizeof st);
+	st.size = sizeof st;
 	(void)xtc_slab_stat(g_slab, &st);
 	*out_inuse = st.n_inuse;
 	*out_hash = atomic_load(&g_hash);

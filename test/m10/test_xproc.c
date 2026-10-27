@@ -104,7 +104,7 @@ monitor_fiber(void *a)
 
 	/* Wait for the DOWN the shadow proc delivers on the child's exit. */
 	if (xtc_recv(&msg, &n, 3000LL * 1000 * 1000) == XTC_OK) {
-		xtc_down_info_t di;
+		xtc_down_info_t di = XTC_DOWN_INFO_INIT;
 		if (xtc_down_decode_ex(msg, n, &di) == XTC_OK) {
 			m->down_seen = 1;
 			m->down_reason = di.reason;
@@ -197,7 +197,7 @@ linker_fiber(void *a)
 	(void)xtc_xsend(child, &exit_code, sizeof exit_code);
 	/* A link EXIT arrives as a decodable signal in our mailbox. */
 	if (xtc_recv(&msg, &n, 3000LL * 1000 * 1000) == XTC_OK) {
-		xtc_down_info_t di;
+		xtc_down_info_t di = XTC_DOWN_INFO_INIT;
 		if (xtc_down_decode_ex(msg, n, &di) == XTC_OK) {
 			m->exit_seen = 1;
 			m->exit_reason = di.reason;
@@ -336,7 +336,7 @@ kind_fiber(void *a)
 	uint64_t ref = 0;
 	void *msg = NULL;
 	size_t n = 0;
-	xtc_down_info_t di;
+	xtc_down_info_t di = XTC_DOWN_INFO_INIT;
 
 	if (xtc_xspawn(k->loop, "kind", kind_child_root, &k->c->mode,
 	    sizeof k->c->mode, &child) != XTC_OK)
@@ -452,7 +452,7 @@ fh_fiber(void *a)
 		uint64_t ref = 0;
 		void *m = NULL;
 		size_t n = 0;
-		xtc_down_info_t di;
+		xtc_down_info_t di = XTC_DOWN_INFO_INIT;
 		if (xtc_xspawn_entry(c->loop, "fh", "fh_root", NULL, 0,
 		    &ch) != XTC_OK) {
 			c->other++;

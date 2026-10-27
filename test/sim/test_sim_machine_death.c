@@ -305,6 +305,7 @@ run_part_b(uint64_t seed, int *out_restarts, int *out_spawns,
 
 	memset(kids, 0, sizeof kids);
 	for (i = 0; i < N_KIDS; i++) {
+		kids[i].size = sizeof kids[i];
 		kids[i].name = "kid";
 		kids[i].fn = kid;
 		kids[i].arg = (void *)(intptr_t)i;

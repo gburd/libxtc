@@ -1,5 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project
+ * @stability stable
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_runtime.h
@@ -36,6 +37,7 @@
  * bytes currently charged against it, if such accounting is in force.
  */
 typedef struct xtc_runtime_info {
+	size_t   size;             /* sizeof(xtc_runtime_info_t): XTC_RUNTIME_INFO_INIT */
 	int      n_loops;          /* event loops in the running app/exec, or 1 standalone */
 	int      n_cpus_online;    /* __os_ncpus() */
 	int      n_cpus_perf;      /* __os_ncpus_perf() -- performance cores */
@@ -44,6 +46,8 @@ typedef struct xtc_runtime_info {
 	int64_t  mem_cap_bytes;    /* configured memory cap, or 0 if none/unknown */
 	int64_t  mem_used_bytes;   /* currently accounted memory in use, or 0 */
 } xtc_runtime_info_t;
+
+#define XTC_RUNTIME_INFO_INIT { .size = sizeof(xtc_runtime_info_t) }
 
 /*
  * PUBLIC: int xtc_runtime_info __P((xtc_runtime_info_t *));

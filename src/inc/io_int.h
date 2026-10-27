@@ -416,4 +416,13 @@ int __xtc_io_uring_poll_stats(xtc_io_t *io, unsigned long *cancels,
 int __xtc_io_uring_enter_stats(xtc_io_t *io, unsigned long *submits,
     unsigned long *waits, unsigned *queued);
 
+/*
+ * An xtc_aio_t is read and written in place for its whole flight, so it
+ * must cover the 2.0 layout (through `res`).  A constant, not sizeof: a
+ * field a later minor appends is read under XTC_FIELD_OK, and a 2.0
+ * caller's struct stays valid.
+ */
+#define __XTC_AIO_SIZE_2_0 (offsetof(xtc_aio_t, res) + sizeof(int32_t))
+#define __XTC_AIO_OK(a) ((a) != NULL && (a)->size >= __XTC_AIO_SIZE_2_0)
+
 #endif /* XTC_IO_INT_H */

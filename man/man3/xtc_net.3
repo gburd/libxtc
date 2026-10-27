@@ -155,6 +155,19 @@ allowed to block.
 .Sy TCP knobs
 controlled by
 .Vt xtc_tcp_opts_t
+.Po start from
+.Dv XTC_TCP_OPTS_DEFAULT ,
+which also sets the
+.Fa size
+member to the caller's
+.Fn sizeof ;
+a knob past
+.Fa size
+is left at the OS default, and a
+.Fa size
+of 0 is
+.Dv XTC_E_INVAL
+.Pc
 include:
 .Bl -tag -width "user_timeout_ms" -offset indent
 .It Fa nodelay

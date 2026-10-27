@@ -82,7 +82,9 @@ spawner(void *arg)
 	int i;
 
 	memset(&oa, 0, sizeof oa);
+	oa.size = sizeof oa;
 	memset(&ob, 0, sizeof ob);
+	ob.size = sizeof ob;
 	if (c->use_classes) {
 		oa.sched_class = c->ca;
 		ob.sched_class = c->cb;
@@ -189,7 +191,9 @@ lat_spawner(void *arg)
 	int i;
 
 	memset(&oh, 0, sizeof oh);
+	oh.size = sizeof oh;
 	memset(&ol, 0, sizeof ol);
+	ol.size = sizeof ol;
 	oh.sched_class = c->hogc;
 	ol.sched_class = c->latc;
 	/* A backlog of hog procs first, then one latency proc.  Under

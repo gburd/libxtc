@@ -514,11 +514,17 @@ coord_handle_cast(void *st, const void *msg, size_t sz)
 int
 mvcc_start(xtc_loop_t **shard_loops, int n_shards, xtc_loop_t *coord_loop)
 {
-	xtc_svr_callbacks_t sh_cb = { NULL, shard_handle_call,
-	    shard_handle_cast, NULL, NULL };
-	xtc_svr_callbacks_t co_cb = { NULL, coord_handle_call,
-	    coord_handle_cast, NULL, NULL };
-	xtc_svr_opts_t opts = { 0 };
+	xtc_svr_callbacks_t sh_cb = {
+		.size = sizeof(xtc_svr_callbacks_t),
+		.handle_call = shard_handle_call,
+		.handle_cast = shard_handle_cast
+	};
+	xtc_svr_callbacks_t co_cb = {
+		.size = sizeof(xtc_svr_callbacks_t),
+		.handle_call = coord_handle_call,
+		.handle_cast = coord_handle_cast
+	};
+	xtc_svr_opts_t opts = XTC_SVR_OPTS_INIT;
 	struct mv_coord *cs;
 	int i;
 

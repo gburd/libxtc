@@ -277,7 +277,7 @@ static MunitResult
 test_amutex_fiber(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	int i;
 	(void)p; (void)d;
@@ -363,7 +363,7 @@ static MunitResult
 test_arwlock_fiber(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	int i;
 	(void)p; (void)d;
@@ -511,7 +511,7 @@ test_fiber_timeout_expiry(const MunitParameter p[], void *d)
 	return MUNIT_SKIP;
 #else
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	(void)p; (void)d;
 

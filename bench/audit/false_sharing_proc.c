@@ -101,7 +101,7 @@ main(void)
 		return 1;
 	}
 
-	xtc_proc_opts_t opts = { .mailbox_cap = 8192 };
+	xtc_proc_opts_t opts = { .size = sizeof(xtc_proc_opts_t), .mailbox_cap = 8192 };
 	if (xtc_proc_spawn(g_loop, receiver_proc, NULL, &opts, &g_receiver) != XTC_OK) {
 		fprintf(stderr, "failed to spawn receiver\n");
 		return 1;

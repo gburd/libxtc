@@ -2992,7 +2992,7 @@ bm_provider_spawn(bm_t *bm, xtc_loop_t *loop, int64_t interval_ns,
                   xtc_pid_t *out_pid)
 {
 	struct pp_arg *pa;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	int rc;
 	if (bm == NULL || loop == NULL) return XTC_E_INVAL;
 	if ((pa = xtc_calloc(1, sizeof *pa)) == NULL) return XTC_E_NOMEM;
@@ -3428,7 +3428,7 @@ bm_trickler_spawn(bm_t *bm, xtc_loop_t *loop, int64_t interval_ns,
                   xtc_pid_t *out_pid)
 {
 	struct tr_arg *ta;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	int rc;
 	if (bm == NULL || loop == NULL) return XTC_E_INVAL;
 	if ((ta = xtc_calloc(1, sizeof *ta)) == NULL) return XTC_E_NOMEM;

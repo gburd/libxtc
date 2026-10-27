@@ -68,11 +68,16 @@ means no deadline (a plain awaited spawn).
 .Fa opts ,
 if non-NULL, may set the child proc
 .Fa name
-(for logs),
-.Fa mailbox_cap ,
-and the
-.Fa loop
-index when launched on an executor loop.
+(for logs) and
+.Fa mailbox_cap .
+Initialize it with
+.Dv XTC_LAUNCH_OPTS_INIT ;
+its
+.Fa size
+member must be the size of the caller's struct (0 is
+.Dv XTC_E_INVAL ) .
+The child runs on
+.Fa loop .
 .Pp
 .Nm
 is composable: a launched function may itself call

@@ -136,7 +136,7 @@ committer(void *arg)
 	(void)xtc_proc_at_exit(free, buf);
 	while (g_slot[slot].seq < QUOTA) {
 		if (g_link && draw(4) == 0) {
-			xtc_proc_opts_t o = { .name = "lnk" };
+			xtc_proc_opts_t o = { .size = sizeof(xtc_proc_opts_t), .name = "lnk" };
 			xtc_pid_t c;
 			(void)xtc_proc_spawn_link(xtc_exec_loop(g_exec,
 			    (int)draw(N_LOOPS)), linked_child,
@@ -149,7 +149,7 @@ committer(void *arg)
 static int
 spawn_slot(int i)
 {
-	xtc_proc_opts_t o = { .name = "cmt" };
+	xtc_proc_opts_t o = { .size = sizeof(xtc_proc_opts_t), .name = "cmt" };
 	uint64_t ref;
 	if (xtc_proc_spawn_monitor(xtc_exec_loop(g_exec, 1 + i % (N_LOOPS - 1)),
 	    committer, (void *)(intptr_t)i, &o, &g_slot[i].pid, &ref) != XTC_OK)
@@ -283,7 +283,7 @@ run_one(uint64_t seed, struct result *res)
 	char path[256];
 	const char *td = getenv("TMPDIR");
 	wal_opts_t wo;
-	xtc_proc_opts_t ko = { .name = "killer" };
+	xtc_proc_opts_t ko = { .size = sizeof(xtc_proc_opts_t), .name = "killer" };
 	xtc_pid_t kp;
 	uint64_t fp = 0xCBF29CE484222325ull, durable;
 	int fd, i, rc, lost = 0;
