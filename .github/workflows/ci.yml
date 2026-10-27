@@ -869,7 +869,7 @@ jobs:
         run: |
           cd build_tsan
           rc=0
-          for t in test_fctx test_async test_proc test_svr test_chan test_proc_table_stress test_blocking; do
+          for t in test_fctx test_async test_proc test_svr test_chan test_proc_table_stress test_atomic_pid test_blocking; do
             # A test that does not BUILD is a FAILURE, not a skip.  This
             # loop used to `|| continue`, so a test that stopped compiling
             # under clang+TSan vanished from the gate silently and the job
@@ -1074,7 +1074,7 @@ jobs:
           # Fiber-heavy suites, one memcheck per test (fiber stacks are
           # registered with valgrind, so cross-loop resumes are clean).
           # Excluded: test_proc's deliberate faults (a write to 0x10 that
-          # R1 contains) and its 65,536-proc ceiling (more mappings than
+          # R1 contains) and its 100,000-live-proc case (more mappings than
           # valgrind tracks), and test_exec's Blk2, which spins across a
           # blocking offload and does not finish under valgrind.
           for t in test_exec test_proc; do

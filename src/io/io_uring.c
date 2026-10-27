@@ -343,7 +343,7 @@ __submit_note(xtc_io_t *io, int rc, unsigned queued)
 	    (rc < 0 || (unsigned)rc < queued)) {
 		xtc_pid_t lp;
 		memset(&lp, 0, sizeof lp);
-		lp.loop_id = (uint16_t)(io->tail_loop_id >= 0 ?
+		lp.loop_id = (uint32_t)(io->tail_loop_id >= 0 ?
 		    (unsigned)io->tail_loop_id : XTC_TAIL_LOOP_NONE);
 		/*
 		 * detail: the negated errno for an error, or -- for a short
@@ -525,7 +525,7 @@ __submit_poll_add(xtc_io_t *io, struct __xtc_uring_fd *uf)
 	if (__xtc_tail_on(XTC_TAIL_SCHED)) {
 		xtc_pid_t lp;
 		memset(&lp, 0, sizeof lp);
-		lp.loop_id = (uint16_t)(io->tail_loop_id >= 0 ?
+		lp.loop_id = (uint32_t)(io->tail_loop_id >= 0 ?
 		    (unsigned)io->tail_loop_id : XTC_TAIL_LOOP_NONE);
 		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_SUBMIT, lp,
 		    uf->is_wakeup ? 0 : (uint64_t)(uintptr_t)uf->tag);
@@ -1418,7 +1418,7 @@ __aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	if (__xtc_tail_on(XTC_TAIL_SCHED)) {
 		xtc_pid_t lp;
 		memset(&lp, 0, sizeof lp);
-		lp.loop_id = (uint16_t)(io->tail_loop_id >= 0 ?
+		lp.loop_id = (uint32_t)(io->tail_loop_id >= 0 ?
 		    (unsigned)io->tail_loop_id : XTC_TAIL_LOOP_NONE);
 		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_SUBMIT, lp,
 		    (uint64_t)(uintptr_t)a->tag);
@@ -1726,7 +1726,7 @@ __tail_reap(xtc_io_t *io, void *tag)
 	if (!__xtc_tail_on(XTC_TAIL_SCHED))
 		return;
 	memset(&lp, 0, sizeof lp);
-	lp.loop_id = (uint16_t)(io->tail_loop_id >= 0 ?
+	lp.loop_id = (uint32_t)(io->tail_loop_id >= 0 ?
 	    (unsigned)io->tail_loop_id : XTC_TAIL_LOOP_NONE);
 	__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_REAP, lp,
 	    (uint64_t)(uintptr_t)tag);
@@ -1972,7 +1972,7 @@ __poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 	if (got >= max && __xtc_tail_on(XTC_TAIL_SCHED)) {
 		xtc_pid_t lp;
 		memset(&lp, 0, sizeof lp);
-		lp.loop_id = (uint16_t)(io->tail_loop_id >= 0 ?
+		lp.loop_id = (uint32_t)(io->tail_loop_id >= 0 ?
 		    (unsigned)io->tail_loop_id : XTC_TAIL_LOOP_NONE);
 		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_POLL_FULL, lp,
 		    (uint64_t)max);

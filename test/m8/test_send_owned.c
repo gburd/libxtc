@@ -327,7 +327,7 @@ test_large_send_one_copy(const MunitParameter p[], void *d)
 /* ---- owned_crossthread ----------------------------------------------- */
 
 #define XT_N 2000
-static _Atomic xtc_pid_t g_xt_rx;
+static xtc_atomic_pid_t g_xt_rx;
 static _Atomic int g_xt_ready, g_xt_ok, g_xt_got;
 
 static void
@@ -335,7 +335,7 @@ xt_rx(void *arg)
 {
 	int i;
 	(void)arg;
-	atomic_store(&g_xt_rx, xtc_self());
+	xtc_atomic_pid_store(&g_xt_rx, xtc_self());
 	atomic_store(&g_xt_ready, 1);
 	for (i = 0; i < XT_N; i++) {
 		void *m = NULL;
@@ -365,8 +365,8 @@ xt_tx(void *arg)
 			return;
 		memcpy(b, &i, sizeof i);
 		fill(b + 4, 3000 - 4, (uint8_t)i);
-		while ((rc = xtc_send_owned(atomic_load(&g_xt_rx), b, 3000)) ==
-		    XTC_E_AGAIN)
+		while ((rc = xtc_send_owned(xtc_atomic_pid_load(&g_xt_rx), b,
+		    3000)) == XTC_E_AGAIN)
 			(void)xtc_yield();
 		if (rc != XTC_OK) {
 			xtc_free(b);

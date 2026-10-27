@@ -991,10 +991,15 @@ class XtcTailDump(gdb.Command):
         start = 0 if seq < cap else seq % cap
         recs = [ring[(start + i) % cap] for i in range(n)]
         base = int(recs[0]["ts_ns"]) if recs else 0
-        # header: magic "XTCL", version 2, flags LE(1), count, base_ts u64
+        # header: magic "XTCL", version, flags LE(1), count, base_ts u64.
+        # Version 3 is the 16-byte pid (libxtc 2.0: u32 loop with
+        # XTC_TAIL_LOOP_NONE 0xFFFFFFFF); a 1.x inferior's 8-byte pid
+        # (u16 loop, NONE 0xFFFF) is version 2.  The varints carry the
+        # values as the inferior stored them, so only the number differs.
         import struct
+        ver = 3 if gdb.lookup_type("xtc_pid_t").sizeof >= 16 else 2
         blob = bytearray()
-        blob += struct.pack("<IIII", 0x5854434C, 2, 1, n)
+        blob += struct.pack("<IIII", 0x5854434C, ver, 1, n)
         blob += struct.pack("<Q", base)
         prev = base
         for r in recs:

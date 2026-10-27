@@ -30,14 +30,19 @@
 #include "xtc_exec.h"   /* xtc_exec_class_t for xtc_proc_opts_t.sched_class */
 
 /*
- * Process identifier.  Encodes the loop ID, a per-loop slot index,
- * and a generation counter so a stale pid (after a process exits and
- * its slot is reused) is recognisably stale on lookup.
+ * Process identifier (16 bytes; 2.0).  Encodes the loop ID, a per-loop
+ * slot index, and the slot's generation, so a stale pid (after a
+ * process exits and its slot is reused) is recognisably stale on
+ * lookup.  The slot index is 32 bits (a loop holds as many live procs as
+ * memory and the xtc_res caps allow), and the generation is 64 bits per
+ * slot, so it never wraps: a pid held across any number of reuses of
+ * its slot never names the new occupant.  Compare with xtc_pid_eq, not
+ * memcmp (padding-free today, but that is not part of the contract).
  */
 typedef struct xtc_pid {
-	uint16_t loop_id;
-	uint16_t local_id;
-	uint32_t gen;
+	uint32_t loop_id;   /* 0 standalone loop, else xtc_exec slot + 1 */
+	uint32_t local_id;  /* slot in the loop's proc table */
+	uint64_t gen;       /* slot generation, 1.. (0 only in XTC_PID_NONE) */
 } xtc_pid_t;
 
 #define XTC_PID_NONE ((xtc_pid_t){0, 0, 0})
@@ -55,6 +60,21 @@ xtc_pid_is_none(xtc_pid_t p)
 {
 	return p.loop_id == 0 && p.local_id == 0 && p.gen == 0;
 }
+
+/*
+ * A pid published from one thread and read on others.  A 16-byte pid
+ * does not fit one lock-free atomic word (C11 _Atomic of 16 bytes is a
+ * libatomic call, and MSVC C has none), so this is a seqlock: a reader
+ * never sees a torn pid.  Initialize with XTC_ATOMIC_PID_INIT (or zero
+ * memory: it then holds XTC_PID_NONE).  Stores from several threads are
+ * safe (they serialize on the sequence word); a load spins only while a
+ * store is in progress.  The fields are private.
+ */
+typedef struct xtc_atomic_pid {
+	uint64_t seq_;
+	uint64_t w_[2];
+} xtc_atomic_pid_t;
+#define XTC_ATOMIC_PID_INIT { 0, { 0, 0 } }
 
 /*
  * Match callback for selective receive.  Inspects an envelope's
@@ -129,6 +149,8 @@ typedef struct xtc_mailbox_stats {
  * PUBLIC: int       xtc_proc_spawn_link __P((xtc_loop_t *, xtc_proc_fn, void *, const xtc_proc_opts_t *, xtc_pid_t *));
  * PUBLIC: int       xtc_proc_spawn_monitor __P((xtc_loop_t *, xtc_proc_fn, void *, const xtc_proc_opts_t *, xtc_pid_t *, uint64_t *));
  * PUBLIC: xtc_pid_t xtc_self __P((void));
+ * PUBLIC: xtc_pid_t xtc_atomic_pid_load __P((const xtc_atomic_pid_t *));
+ * PUBLIC: void      xtc_atomic_pid_store __P((xtc_atomic_pid_t *, xtc_pid_t));
  * PUBLIC: int   xtc_proc_set_userdata __P((void *));
  * PUBLIC: void *xtc_proc_userdata __P((void));
  * PUBLIC: int   xtc_proc_set_class __P((xtc_exec_class_t));
@@ -308,6 +330,13 @@ XTC_API int xtc_exit_pid_deadline(xtc_pid_t target, int reason,
 XTC_API int xtc_proc_wake(xtc_pid_t target);
 
 XTC_API xtc_pid_t xtc_self(void);
+
+/* Load / store an xtc_atomic_pid_t (see above).  At least acquire /
+ * release (what the storing thread wrote before the store is visible to
+ * a thread whose load returned that pid), and both take part in the
+ * single seq_cst total order, like an atomic_store / atomic_load. */
+XTC_API xtc_pid_t xtc_atomic_pid_load(const xtc_atomic_pid_t *a);
+XTC_API void      xtc_atomic_pid_store(xtc_atomic_pid_t *a, xtc_pid_t p);
 
 /*
  * Per-proc opaque consumer pointer, on the CALLING proc.

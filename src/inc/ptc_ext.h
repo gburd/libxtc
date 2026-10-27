@@ -105,6 +105,7 @@ void __xtc_unsafe_enter __P((void));
 void __xtc_unsafe_leave __P((void));
 void xtc_alloc_audit_proc_leaks __P((xtc_pid_t, size_t *, size_t *));
 void xtc_alloc_audit_stats __P((size_t *, size_t *));
+void xtc_atomic_pid_store __P((xtc_atomic_pid_t *, xtc_pid_t));
 void xtc_batch_router_destroy __P((xtc_batch_router_t *));
 void xtc_dispatch_handle_free __P((xtc_dispatch_handle_t *));
 void xtc_dump __P((int));
@@ -121,6 +122,7 @@ void xtc_res_set_cap __P((xtc_res_t *, xtc_res_kind_t, int64_t));
 void xtc_scope_close __P((xtc_scope_t *));
 void xtc_tuning_check __P((void));
 xtc_batch_t *xtc_batch_route __P((xtc_batch_router_t *, uint64_t));
+xtc_pid_t xtc_atomic_pid_load __P((const xtc_atomic_pid_t *));
 xtc_pid_t xtc_self __P((void));
 xtc_scope_t *xtc_scope_open __P((void));
 

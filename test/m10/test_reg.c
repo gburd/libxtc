@@ -103,7 +103,7 @@ test_reg_collisions(const MunitParameter p[], void *d)
 			(void)snprintf(names[found], sizeof names[found],
 			    "%s", cand);
 			pids[found].loop_id = 0;
-			pids[found].local_id = (uint16_t)(found + 1);
+			pids[found].local_id = (uint32_t)(found + 1);
 			pids[found].gen = 1;
 			found++;
 		}

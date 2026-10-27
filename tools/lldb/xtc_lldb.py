@@ -175,8 +175,21 @@ def _loop_tables(target):
         loop = e.GetChildMemberWithName("loop")
         tbl = e.GetChildMemberWithName("tbl")
         if _u(loop) != 0 and _u(tbl) != 0:
-            out.append((loop, tbl.Dereference()))
+            # The registry fields are _Atomic(T *): lldb cannot
+            # Dereference() an _Atomic pointer (it returned an invalid
+            # value, so every census read "0 procs").  Strip the
+            # qualifier by re-reading each as its plain pointer type.
+            out.append((_plain_ptr(target, loop, "xtc_loop_t"),
+                        _plain_ptr(target, tbl, "struct xtc_proc_table")
+                        .Dereference()))
     return out
+
+
+def _plain_ptr(target, v, tname):
+    t = target.FindFirstType(tname)
+    if not t.IsValid():
+        return v
+    return v.Cast(t.GetPointerType())
 
 
 def _procs_in(target, tbl):

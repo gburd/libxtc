@@ -363,9 +363,9 @@ test_connection_refusal_says_why(const MunitParameter p[], void *d)
 /* The per-loop ceiling is a configured number, not a hidden constant.
  * --loop-clients=4 with --loops=2 serves exactly 8 connections, 4 on each
  * loop (INFO reports the census), and refuses the rest with the error.
- * One loop holds at most 65,536 procs (xtc_pid_t.local_id is 16 bits);
- * --loop-clients lowers that so a test can reach it with a handful of
- * sockets. */
+ * --loop-clients is how a test reaches a full loop with a handful of
+ * sockets (libxtc 2.0 has no per-loop proc ceiling; 1.x stopped at
+ * 65,536 procs per loop). */
 static MunitResult
 test_loop_ceiling_configured(const MunitParameter p[], void *d)
 {
@@ -412,9 +412,11 @@ test_loop_ceiling_configured(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
-/* Asking for more clients than the loops can hold is refused at startup
- * with a message that names the fix, rather than accepted and then
- * failing at connection 65,533. */
+/* Asking for more clients than the loops can hold (CONN_LOOP_MAX, 4M,
+ * each) is refused at startup with a message that names the fix, rather
+ * than accepted and then refused at run time.  (In 1.x the per-loop limit
+ * was the 65,536-proc ceiling, so --max-clients=100000 on one loop was
+ * refused; 2.0 holds 100,000 on one loop, see docs/KNOWN_ISSUES.md.) */
 static MunitResult
 test_max_clients_over_ceiling_refused(const MunitParameter p[], void *d)
 {
@@ -427,13 +429,13 @@ test_max_clients_over_ceiling_refused(const MunitParameter p[], void *d)
 	if (bin == NULL || *bin == '\0')
 		bin = REXIS_DEFAULT_BIN;
 	snprintf(cmd, sizeof cmd, "%s --host=127.0.0.1 -p 1 --loops=1 "
-	    "--max-clients=100000 2>&1", bin);
+	    "--max-clients=5000000 2>&1", bin);
 	munit_assert_ptr_not_null((f = popen(cmd, "r")));
 	while (fgets(line, sizeof line, f) != NULL &&
 	    strstr(line, "per-loop") == NULL)
 		;
 	st = pclose(f);
-	printf("\n  clients: --max-clients=100000 --loops=1: exit %d: %s",
+	printf("\n  clients: --max-clients=5000000 --loops=1: exit %d: %s",
 	    WIFEXITED(st) ? WEXITSTATUS(st) : -1, line);
 	munit_assert_true(WIFEXITED(st));
 	munit_assert_int(WEXITSTATUS(st), ==, 2);

@@ -76,10 +76,10 @@ admin_proc_row(const xtc_proc_info_t *info, void *user)
 	const char        *state;
 	int                n;
 
-	n = snprintf(pidbuf, sizeof pidbuf, "%u.%u.%u",
+	n = snprintf(pidbuf, sizeof pidbuf, "%u.%u.%llu",
 	    (unsigned)info->pid.loop_id,
 	    (unsigned)info->pid.local_id,
-	    (unsigned)info->pid.gen);
+	    (unsigned long long)info->pid.gen);
 	if (n < 0)
 		n = 0;
 

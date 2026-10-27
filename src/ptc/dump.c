@@ -127,10 +127,10 @@ dump_proc_cb(const xtc_proc_info_t *pi, void *user)
 {
 	int fd = *(int *)user;
 	dump_fmt(fd,
-	    "  <%u.%u.%u> %-9s park=%-7s mbox=%zu/%zu peak=%zu "
+	    "  <%u.%u.%llu> %-9s park=%-7s mbox=%zu/%zu peak=%zu "
 	    "recv=%llu drop=%llu%s%s%s\n",
 	    (unsigned)pi->pid.loop_id, (unsigned)pi->pid.local_id,
-	    (unsigned)pi->pid.gen,
+	    (unsigned long long)pi->pid.gen,
 	    run_state_name(pi->run_state),
 	    pi->run_state == XTC_PROC_PARKED ? park_name(pi->park_reason) : "-",
 	    pi->mbox_len, pi->mbox_cap, pi->mbox_peak,
