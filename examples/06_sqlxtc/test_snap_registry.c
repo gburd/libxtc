@@ -13,7 +13,8 @@
  *	    horizon scan held it across all slots): at 8 threads 70% of the
  *	    time was futex wait/wake.  Asserted: 8 threads deliver at least
  *	    2x the 1-thread rate (they delivered 0.45x); with fewer than 8
- *	    CPUs, at least 1.5x (a 4-vCPU CI runner measures ~2.0x).
+ *	    CPUs, at least 1.5x (a 4-vCPU CI runner measures ~2.0x) -- when
+ *	    8 spinning threads get >= 1.6 CPUs (a shared host can give less).
  *	(2) Safety under the race: writer threads update rows (each update
  *	    adds a version, autovacuum prunes behind the horizon) while
  *	    REPEATABLE READ readers begin, read every row twice with a
@@ -84,6 +85,44 @@ reader_tx(void *arg)
 	sx_finalize(q);
 	sx_close(h);
 	return NULL;
+}
+
+/* The process's CPU time (all threads), in seconds. */
+static double
+cpu_s(void)
+{
+	struct timespec t;
+	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t);
+	return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
+}
+
+static void *
+spin(void *arg)
+{
+	volatile unsigned long n = 0;
+	(void)arg;
+	while (!atomic_load_explicit(&g_stop, memory_order_relaxed))
+		n++;
+	return NULL;
+}
+
+/* How many CPUs 8 compute-bound threads of this process actually get
+ * right now (CPU-seconds per second): no library code, so a lock in it
+ * cannot lower the figure. */
+static double
+capacity8(void)
+{
+	pthread_t th[8];
+	double t0, c0;
+	int i;
+	atomic_store(&g_stop, 0);
+	t0 = now_s();
+	c0 = cpu_s();
+	for (i = 0; i < 8; i++) pthread_create(&th[i], NULL, spin, NULL);
+	usleep(400 * 1000);
+	atomic_store(&g_stop, 1);
+	for (i = 0; i < 8; i++) pthread_join(th[i], NULL);
+	return (cpu_s() - c0) / (now_s() - t0);
 }
 
 static double
@@ -218,7 +257,7 @@ main(void)
 	const char *sfx[] = { "", "-wal", ".dwb" };
 	sx_db *h = NULL;
 	pthread_t th[12];
-	double r1, r8;
+	double r1, r8, cap;
 	int64_t v0, v1;
 	int fd, i;
 
@@ -238,16 +277,27 @@ main(void)
 	sx_close(h);
 
 	/* (1) */
+	cap = capacity8();
 	r1 = rate(1);
 	r8 = rate(8);
-	printf("  read-only txns/s: 1 thread %.0f, 8 threads %.0f (%.2fx)\n", r1, r8, r8 / r1);
+	printf("  read-only txns/s: 1 thread %.0f, 8 threads %.0f (%.2fx); "
+	    "8 spinning threads get %.2f CPUs\n", r1, r8, r8 / r1, cap);
 	/* 8 threads cannot beat ~ncpu x on fewer CPUs; the mutex version
-	 * delivered 0.45x anywhere, so 1.5x still separates the two. */
-	/* xtc_ncpus: the CPUs this process may use (affinity and cgroup
+	 * delivered 0.45x anywhere, so 1.5x still separates the two.
+	 * xtc_ncpus: the CPUs this process may use (affinity and cgroup
 	 * quota), not the host's online count -- a 2-CPU container on a
 	 * 32-CPU host measured ~1.7x against the 2.0x the online count
-	 * demanded. */
-	CK(r8 >= (xtc_ncpus() >= 8 ? 2.0 : 1.5) * r1);
+	 * demanded.  But a host that shares those CPUs with other jobs (a
+	 * loaded CI runner: its cgroup gets ~1 CPU however many threads it
+	 * runs) caps any scaling near 1x, so the bound is checked only when
+	 * 8 plain spinning threads get >= 1.6 CPUs -- measured with no
+	 * library code, so the regression this guards cannot hide behind
+	 * it. */
+	if (cap >= 1.6)
+		CK(r8 >= (xtc_ncpus() >= 8 ? 2.0 : 1.5) * r1);
+	else
+		printf("  scaling bound not checked: this host gives 8 threads "
+		    "%.2f CPUs (< 1.6)\n", cap);
 
 	/* (2) */
 	atomic_store(&g_stop, 0);
