@@ -30,6 +30,8 @@ if [ ! -x "$XTC_SRC_DIR/dist/configure" ]; then
 	exit 0
 fi
 
+# XTC_SIM_RUNNER="<cmd>" runs each test under <cmd> (memcheck in CI);
+# XTC_SIM_ONLY="t1 t2" runs only those tests.
 # XTC_SIM_KEEP_BUILD=<dir> keeps the sim-backend build (and its .gcda
 # coverage data) instead of using a throwaway mktemp dir that the trap
 # removes.  Needed to MEASURE this tier's coverage: `check` and `check-dst`
@@ -116,6 +118,9 @@ for t in test_sim_sched test_sim_sched_policy test_sim_batch test_sim_cross_loop
 	exe="$work/$t"
 	# test_sim_bufmgr additionally needs the bufmgr object + its include;
 	# test_sim_crash_recover needs the whole native engine object set.
+	if [ -n "${XTC_SIM_ONLY:-}" ]; then   # XTC_SIM_ONLY="t1 t2"
+		case " $XTC_SIM_ONLY " in *" $t "*) ;; *) continue ;; esac
+	fi
 	extra_obj=""
 	extra_inc=""
 	if [ "$t" = test_sim_bufmgr ]; then
@@ -135,7 +140,12 @@ for t in test_sim_sched test_sim_sched_policy test_sim_batch test_sim_cross_loop
 		fail=1
 		continue
 	fi
-	if "$exe" > "$work/out" 2>&1; then
+	# XTC_SIM_RUNNER (e.g. "valgrind --error-exitcode=99 ...") wraps each
+	# test: an uninitialised byte that reaches a replayed decision, a
+	# page image or a hash is a determinism hole the replay check only
+	# sees by chance.
+	# shellcheck disable=SC2086
+	if ${XTC_SIM_RUNNER:-} "$exe" > "$work/out" 2>&1; then
 		echo "  [sim] OK: $t -- $(grep '^OK' "$work/out" | head -1)"
 	else
 		echo "  [sim] FAIL: $t"
