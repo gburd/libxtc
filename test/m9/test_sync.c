@@ -1437,11 +1437,48 @@ herd_run(int kind)
 	return atomic_load(&g_hd_csw);
 }
 
+static void *
+hd_spin(void *arg)
+{
+	volatile unsigned long n = 0;
+	(void)arg;
+	while (!atomic_load_explicit(&g_hd_stop, memory_order_relaxed))
+		n++;
+	return NULL;
+}
+
+/* CPUs that HERD_K spinning threads of this process get right now
+ * (CPU-seconds per second; no library code involved). */
+static double
+hd_capacity(void)
+{
+	pthread_t th[HERD_K];
+	struct timespec w0, w1, c0, c1;
+	int i;
+	atomic_store(&g_hd_stop, 0);
+	clock_gettime(CLOCK_MONOTONIC, &w0);  /* XTC_RAW_OK: test measurement */
+	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &c0);  /* XTC_RAW_OK: test measurement */
+	for (i = 0; i < HERD_K; i++)
+		munit_assert_int(pthread_create(&th[i], NULL, hd_spin, NULL),
+		    ==, 0);
+	(void)__os_sleep_ns(200LL * 1000 * 1000);
+	atomic_store(&g_hd_stop, 1);
+	for (i = 0; i < HERD_K; i++)
+		(void)pthread_join(th[i], NULL);
+	clock_gettime(CLOCK_MONOTONIC, &w1);  /* XTC_RAW_OK: test measurement */
+	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &c1);  /* XTC_RAW_OK: test measurement */
+	return ((double)(c1.tv_sec - c0.tv_sec) +
+	    (double)(c1.tv_nsec - c0.tv_nsec) / 1e9) /
+	    ((double)(w1.tv_sec - w0.tv_sec) +
+	    (double)(w1.tv_nsec - w0.tv_nsec) / 1e9);
+}
+
 static MunitResult
 test_offloop_no_herd(const MunitParameter p[], void *d)
 {
 	static const char *name[] = { "arwlock wr", "arwlock rd", "amutex" };
 	long csw;
+	double cap;
 	int kind;
 	(void)p; (void)d;
 	if (getenv("XTC_UNDER_VALGRIND") != NULL)
@@ -1451,6 +1488,16 @@ test_offloop_no_herd(const MunitParameter p[], void *d)
 	 * 1167 and 7987 switches against the 800 bound). */
 	if (xtc_ncpus() < HERD_K / 2)
 		return MUNIT_SKIP;
+	/* The same holds when other jobs share the CPUs (a CI runner): the
+	 * herd bound measures the lock only when the waiters can all run.
+	 * 4 CPUs + 4 busy loops: 1.59.0 and 2.0 both fail it (1,360 and
+	 * 3,155 switches) with 2.0 CPUs left to the process. */
+	cap = hd_capacity();
+	if (cap < HERD_K / 2 - 0.5) {   /* a quiet 4-CPU host measures ~4.0 */
+		fprintf(stderr, "  skipped: %d spinning threads get %.2f CPUs "
+		    "here (a shared host)\n", HERD_K, cap);
+		return MUNIT_SKIP;
+	}
 	munit_assert_int(xtc_arwlock_create(&g_hd_rw), ==, XTC_OK);
 	munit_assert_int(xtc_amutex_create(&g_hd_m), ==, XTC_OK);
 	for (kind = HD_WR; kind <= HD_AM; kind += 2) {
