@@ -92,7 +92,7 @@ test_basic_alloc_free(const MunitParameter p[], void *d)
 	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
 	void *objs[100];
 	int i;
-	xtc_slab_stats_t st;
+	xtc_slab_stats_t st = XTC_SLAB_STATS_INIT;
 	(void)p; (void)d;
 	opts.name = "basic"; opts.obj_size = 64;
 	munit_assert_int(xtc_slab_create(&opts, &s), ==, XTC_OK);
@@ -123,7 +123,7 @@ test_magazine_fastpath(const MunitParameter p[], void *d)
 	xtc_slab_t *s;
 	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
 	void *objs[32];
-	xtc_slab_stats_t st;
+	xtc_slab_stats_t st = XTC_SLAB_STATS_INIT;
 	int i;
 	(void)p; (void)d;
 	opts.name = "mag"; opts.obj_size = 64; opts.magazine_size = 16;
@@ -314,7 +314,7 @@ test_oom_fail(const MunitParameter p[], void *d)
 	xtc_res_t res;
 	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
 	void *o;
-	xtc_slab_stats_t st;
+	xtc_slab_stats_t st = XTC_SLAB_STATS_INIT;
 	(void)p; (void)d;
 
 	caps.mem_bytes = 64 * 1024;            /* one chunk worth */
@@ -413,7 +413,8 @@ test_reap(const MunitParameter p[], void *d)
 	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
 	void *objs[200];
 	int i;
-	xtc_slab_stats_t st_before, st_after;
+	xtc_slab_stats_t st_before = XTC_SLAB_STATS_INIT;
+	xtc_slab_stats_t st_after = XTC_SLAB_STATS_INIT;
 	(void)p; (void)d;
 	opts.name = "reap"; opts.obj_size = 64;
 	munit_assert_int(xtc_slab_create(&opts, &s), ==, XTC_OK);
@@ -441,7 +442,7 @@ test_redzone(const MunitParameter p[], void *d)
 	xtc_slab_t *s;
 	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
 	uint8_t *o;
-	xtc_slab_stats_t st;
+	xtc_slab_stats_t st = XTC_SLAB_STATS_INIT;
 	(void)p; (void)d;
 	opts.name = "rz"; opts.obj_size = 16; opts.flags = XTC_SLAB_REDZONE;
 	munit_assert_int(xtc_slab_create(&opts, &s), ==, XTC_OK);
@@ -479,7 +480,7 @@ test_redzone_alignment(const MunitParameter p[], void *d)
 	static const size_t sizes[] = { 1, 8, 17, 64, 100 };
 	xtc_slab_t *s;
 	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
-	xtc_slab_stats_t st;
+	xtc_slab_stats_t st = XTC_SLAB_STATS_INIT;
 	uint8_t *o[3];
 	size_t ai, si;
 	int i;
@@ -623,7 +624,7 @@ test_concurrent(const MunitParameter p[], void *d)
 	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
 	pthread_t th[TC_THREADS];
 	int i;
-	xtc_slab_stats_t st;
+	xtc_slab_stats_t st = XTC_SLAB_STATS_INIT;
 	(void)p; (void)d;
 	opts.name = "conc"; opts.obj_size = 96;
 	munit_assert_int(xtc_slab_create(&opts, &g_slab), ==, XTC_OK);
@@ -799,7 +800,7 @@ test_stats_cross_thread(const MunitParameter p[], void *d)
 {
 	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
 	pthread_t th;
-	xtc_slab_stats_t st;
+	xtc_slab_stats_t st = XTC_SLAB_STATS_INIT;
 	int i;
 	(void)p; (void)d;
 	opts.name = "xs"; opts.obj_size = 48;
@@ -844,7 +845,7 @@ test_stats_ctor_refused(const MunitParameter p[], void *d)
 {
 	xtc_slab_t *s;
 	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
-	xtc_slab_stats_t st;
+	xtc_slab_stats_t st = XTC_SLAB_STATS_INIT;
 	void *got[8];
 	int i, n = 0;
 	(void)p; (void)d;
@@ -1005,7 +1006,7 @@ test_shm_reclaim_single_process(const MunitParameter pa[], void *d)
 	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
 	size_t shm_size = 256 * 1024;
 	void *shm_base, *a, *b, *c;
-	xtc_slab_stats_t st;
+	xtc_slab_stats_t st = XTC_SLAB_STATS_INIT;
 	(void)pa; (void)d;
 
 	shm_base = mmap(NULL, shm_size, PROT_READ | PROT_WRITE,

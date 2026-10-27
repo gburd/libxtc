@@ -112,10 +112,14 @@ ld version script `dist/libxtc.map` controls the exported ABI:
   * local: everything else, notably the internal `__os_*`
     OS-abstraction layer.
 
-Verified with `nm -D`: the built `libxtc.so` exports 401 symbols, all
-`xtc_*`/`__xtc_*`, with zero `__os_*` symbols leaking.  The SONAME
-carries only the SemVer major; the SemVer policy in
-`docs/abi-stability.md` governs compatibility.
+Every export carries the symbol version `XTC_2.0` (`nm -D` shows
+`xtc_foo@@XTC_2.0`; checked by `test/m0/test_symbols.sh` [C8]/[C9]), and
+no `__os_*` symbol leaks (755 exported symbols at this writing, all
+`xtc_*` plus the one macro-backed `__xtc_proc_recovery_slot`).  The
+SONAME carries only the SemVer major; `docs/abi-stability.md` gives the
+policy for adding `XTC_2.N` nodes in later minors.  At release time,
+`scripts/abi-check.sh PREV_TAG` runs `abidiff` between the previous
+release and the candidate.
 
 ## Debian / Ubuntu
 

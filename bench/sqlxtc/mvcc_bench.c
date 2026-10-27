@@ -138,7 +138,7 @@ main(int argc, char **argv)
 	atomic_store(&g_left, g_clients);
 	wall0 = now_ns();
 	for (c = 0; c < g_clients; c++) {
-		xtc_proc_opts_t po = { .name = "bench" };
+		xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "bench" };
 		xtc_pid_t pid;
 		if (xtc_proc_spawn(xtc_exec_loop(exec, c % g_cores), client_proc,
 		    (void *)(long)c, &po, &pid) != XTC_OK) { fprintf(stderr, "spawn\n"); return 1; }

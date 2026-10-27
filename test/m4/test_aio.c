@@ -76,7 +76,7 @@ static MunitResult
 run_roundtrip(int force_offload)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_pid_t a, b;
 	struct aio_ctx c;
 	char tmpdir[512], tmpl[600];
@@ -198,7 +198,7 @@ static MunitResult
 run_vec_roundtrip(int force_offload)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_pid_t a, b;
 	struct vec_ctx c;
 	char tmpl[] = "/tmp/xtc_aiov_XXXXXX";
@@ -256,7 +256,7 @@ static MunitResult
 test_aiov_bounds(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_pid_t a;
 	char tmpl[] = "/tmp/xtc_aiovb_XXXXXX";
 	(void)p; (void)d;
@@ -292,7 +292,7 @@ static MunitResult
 test_aio_short_read(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_pid_t a;
 	char tmpdir[512], tmpl[600];
 	(void)p; (void)d;
@@ -365,7 +365,7 @@ static MunitResult
 test_aio_timer_churn(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_pid_t a;
 	char tmpdir[512], tmpl[600];
 	int fd;

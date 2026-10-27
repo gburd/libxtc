@@ -98,6 +98,9 @@
 /* Define to 1 if swapcontext / getcontext / makecontext are available */
 #undef XTC_HAVE_UCONTEXT
 
+/* Define to 1 if <valgrind/valgrind.h> is available */
+#undef XTC_HAVE_VALGRIND_H
+
 /* AIX pollset backend (stub) */
 #undef XTC_IO_BACKEND_AIX
 

@@ -317,6 +317,7 @@ main(int argc, char **argv)
 	for (i = 0; i < g_nfibers; i++) {
 		xtc_proc_opts_t o;
 		memset(&o, 0, sizeof o);
+		o.size = sizeof o;
 		o.name = "aio";
 		o.migratable = 1;
 		if (xtc_proc_spawn(xtc_exec_loop(e, i % nloops), aio_fiber,

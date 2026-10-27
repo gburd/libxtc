@@ -72,6 +72,11 @@ if have_execinfo
   cdata.set('XTC_HAVE_EXECINFO', 1)
 endif
 
+# Valgrind client requests for fiber stacks (configure.ac: valgrind/valgrind.h).
+if cc.has_header('valgrind/valgrind.h')
+  cdata.set('XTC_HAVE_VALGRIND_H', 1)
+endif
+
 have_builtin_unwind = cc.links('''#include <unwind.h>
   static _Unwind_Reason_Code cb(struct _Unwind_Context *c, void *a)
   { (void)a; (void)_Unwind_GetIP(c); return _URC_NO_REASON; }

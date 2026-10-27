@@ -1,5 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project
+ * @stability stable
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_app.h
@@ -37,30 +38,35 @@
 typedef struct xtc_app xtc_app_t;
 
 typedef struct xtc_app_opts {
-	const char     *name;          /* optional, for logs */
-	xtc_loop_t     *loop;          /* optional; NULL = create one */
-	int             n_loops;       /* >1 = own an N-loop executor and run
+	size_t                size;    /* sizeof(xtc_app_opts_t) */
+	const char           *name;    /* optional, for logs */
+	xtc_loop_t           *loop;    /* optional; NULL = create one */
+	int                   n_loops; /* >1 = own an N-loop executor and run
 	                                * the root supervisor on loop 0 (the
 	                                * other loops host children placed via
 	                                * xtc_child_spec.loop, and any work the
 	                                * children spawn via xtc_app_exec); 0/1
 	                                * = single loop.  Ignored when `loop`
 	                                * is supplied. */
-	xtc_sup_opts_t  sup;           /* root-supervisor settings */
-	int             no_tuning_check; /* 1 = skip the __os_tuning_check()
-	                                * power/kernel-tuning advisor probe
-	                                * xtc_app_start runs by default
-	                                * (PLAN.md 19.21); additive field,
-	                                * appended last -- see
-	                                * docs/abi-stability.md. */
+	int                   no_tuning_check; /* 1 = skip the
+	                                * __os_tuning_check() power/kernel-
+	                                * tuning advisor probe xtc_app_start
+	                                * runs by default */
+	/* Root-supervisor settings, or NULL for XTC_SUP_OPTS_DEFAULT.  A
+	 * pointer, not an embedded struct: a sized struct embedded by value
+	 * would move every field after it whenever it grew.  Read (copied)
+	 * by xtc_app_create; need not outlive the call.  Its .exec is
+	 * ignored -- the app owns its executor. */
+	const xtc_sup_opts_t *sup;
 } xtc_app_opts_t;
 
 #define XTC_APP_OPTS_DEFAULT { \
+	.size = sizeof(xtc_app_opts_t), \
 	.name = NULL, \
 	.loop = NULL, \
 	.n_loops = 1, \
-	.sup  = XTC_SUP_OPTS_DEFAULT, \
-	.no_tuning_check = 0 \
+	.no_tuning_check = 0, \
+	.sup  = NULL \
 }
 
 /*

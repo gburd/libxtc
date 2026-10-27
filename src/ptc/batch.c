@@ -1447,7 +1447,7 @@ static int
 batch_finish_create(xtc_batch_t *b, xtc_loop_t *loop, int lane,
     xtc_batch_t **out)
 {
-	xtc_proc_opts_t po = { 0 };
+	xtc_proc_opts_t po = XTC_PROC_OPTS_INIT;
 	uint32_t i;
 	int rc;
 	if ((rc = batch_alloc(b->opts.capacity, sizeof(*b->slots),

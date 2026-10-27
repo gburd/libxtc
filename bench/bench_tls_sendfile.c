@@ -90,6 +90,7 @@ receiver(void *arg)
 	(void)arg;
 	(void)pthread_setname_np(pthread_self(), "tls-recv");  /* for perf */
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.verify_peer_mode = XTC_TLS_VERIFY_NONE;
 	if (buf == NULL || xtc_tls_ctx_create(XTC_TLS_CLIENT, &o, &ctx) != 0 ||
 	    xtc_tls_create(ctx, g_sv[1], &t) != 0 ||
@@ -188,6 +189,7 @@ main(int argc, char **argv)
 				return 1;
 	}
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.cert_file = argv[4];
 	o.key_file = argv[5];
 	if (tcp_pair(g_sv) != 0 ||

@@ -56,6 +56,7 @@ test_ctx_create_destroy(const MunitParameter params[], void *data)
 
 	/* Zero out opts so all fields are NULL / 0. */
 	__builtin_memset(&opts, 0, sizeof(opts));
+	opts.size = sizeof opts;
 	opts.verify_peer  = 0;
 	opts.min_version  = XTC_TLS_VER_12;
 	opts.max_version  = XTC_TLS_VER_13;
@@ -148,6 +149,7 @@ test_tls_create_destroy(const MunitParameter params[], void *data)
 	(void)data;
 
 	__builtin_memset(&opts, 0, sizeof(opts));
+	opts.size = sizeof opts;
 	ctx_rc = xtc_tls_ctx_create(XTC_TLS_SERVER, &opts, &ctx);
 	munit_assert_true(TLS_ACCEPTABLE(ctx_rc));
 

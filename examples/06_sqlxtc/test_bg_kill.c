@@ -52,7 +52,7 @@ ms(void)
 static int
 gone(xtc_pid_t p)
 {
-	xtc_proc_info_t pi;
+	xtc_proc_info_t pi = XTC_PROC_INFO_INIT;
 	return xtc_proc_info(p, &pi) != XTC_OK || !pi.alive;
 }
 
@@ -100,7 +100,7 @@ main(void)
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	char path[256];
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t po = { .name = "drv" };
+	xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "drv" };
 	_Atomic int conns = 0;
 	xtc_pid_t pid;
 	int fd;

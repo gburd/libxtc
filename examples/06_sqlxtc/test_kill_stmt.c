@@ -133,7 +133,7 @@ watchdog(void *arg)
 static int
 spawn_slot(int i)
 {
-	xtc_proc_opts_t o = { .name = "conn" };
+	xtc_proc_opts_t o = { .size = sizeof(xtc_proc_opts_t), .name = "conn" };
 	uint64_t ref;
 	if (xtc_proc_spawn_monitor(xtc_exec_loop(g_exec, i % NL), conn, NULL,
 	    &o, &g_pid[i], &ref) != XTC_OK)
@@ -201,7 +201,7 @@ main(int argc, char **argv)
 {
 	const char *sfx[] = { "", "-wal", ".dwb", "-wal.ocompact", "-wal.compact" };
 	char side[320], sql[160];
-	xtc_proc_opts_t bo = { .name = "boss" };
+	xtc_proc_opts_t bo = { .size = sizeof(xtc_proc_opts_t), .name = "boss" };
 	xtc_pid_t bp;
 	pthread_t wd;
 	sx_db *h = NULL;

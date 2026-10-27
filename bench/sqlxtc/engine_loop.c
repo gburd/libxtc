@@ -121,7 +121,7 @@ int
 main(int argc, char **argv)
 {
 	xtc_exec_t *exec = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	sx_db *h = NULL;
 	sx_stmt *ins = NULL;

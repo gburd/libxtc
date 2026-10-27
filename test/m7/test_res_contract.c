@@ -91,7 +91,7 @@ test_redzone_via_log(const MunitParameter p[], void *d)
 	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
 	xtc_log_opts_t lo = XTC_LOG_OPTS_DEFAULT;
 	xtc_log_t *log;
-	xtc_slab_stats_t st;
+	xtc_slab_stats_t st = XTC_SLAB_STATS_INIT;
 	uint8_t *o;
 	int errpipe[2], saved, n;
 	char buf[256];

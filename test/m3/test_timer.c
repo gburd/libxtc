@@ -515,7 +515,7 @@ static void tm14_cb(void *u) { (void)u; g_tm14_fired++; }
 static long
 tm14_inuse(xtc_loop_t *loop)
 {
-	xtc_slab_stats_t st;
+	xtc_slab_stats_t st = XTC_SLAB_STATS_INIT;
 	if (loop->timer_slab == NULL) return 0;
 	munit_assert_int(xtc_slab_stat((const xtc_slab_t *)loop->timer_slab,
 	    &st), ==, XTC_OK);
@@ -690,6 +690,79 @@ test_heap_slots_consistent(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- Tm16: a fired park timer clears only its own park slot.
+ *
+ * A migratable fiber F parks with timer A on loop L1.  A falls due and
+ * L1's drain claims it (FIRED).  Before the drain reaches F's park_timer
+ * slot, F -- woken and stolen by L2 -- cancels A (too late, it fired),
+ * drops A's slot reference and re-arms B on L2.  The drain used to
+ * exchange the slot to NULL unconditionally, so it took B's slot
+ * reference: B was left in L2's heap with no slot owner (never cancelled,
+ * a spurious wake later), and L1 read B's refcount with nothing ordering
+ * it after B's calloc on L2's thread (TSan, timer.c refs load, m5 Blk4
+ * 14/40 under load).
+ *
+ * The interleaving is made deterministic on one loop: A's callback runs
+ * inside the drain after the claim and before the slot is touched (a park
+ * timer has no callback in the library; the test adds one), and does
+ * what F does on L2.  After the drain, B must still be F's, with both its
+ * references.  Fails on the unconditional exchange (slot NULL, refs 1). */
+static xtc_timer_t *g_tm16_b;
+static xtc_timer_t *g_tm16_slot;
+static int g_tm16_refs;
+
+static void
+tm16_rearm(void *u)
+{
+	xtc_task_t *self = u;
+	__xtc_task_cancel_park_timer(self);
+	munit_assert_int(xtc_task_park_on_timer(self, XTC_NS_PER_MS), ==,
+	    XTC_OK);
+	g_tm16_b = atomic_load(&self->park_timer);
+}
+
+static int
+tm16_task(xtc_task_t *self, void *u)
+{
+	int *phase = u;
+	xtc_timer_t *a;
+	if ((*phase)++ == 0) {
+		munit_assert_int(xtc_task_park_on_timer(self, 1000), ==,
+		    XTC_OK);
+		a = atomic_load(&self->park_timer);
+		a->cb = tm16_rearm;
+		a->user = self;
+		return XTC_TASK_PENDING;
+	}
+	/* Woken by A's fire. */
+	g_tm16_slot = atomic_load(&self->park_timer);
+	if (g_tm16_slot != NULL)
+		g_tm16_refs = atomic_load(&g_tm16_slot->refs);
+	__xtc_task_cancel_park_timer(self);
+	return XTC_TASK_DONE;
+}
+
+static MunitResult
+test_fire_clears_own_slot(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	int phase = 0;
+	(void)p; (void)d;
+	g_tm16_b = g_tm16_slot = NULL;
+	g_tm16_refs = 0;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_task_spawn(loop, tm16_task, &phase, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(phase, ==, 2);
+	munit_assert_ptr_not_null(g_tm16_b);
+	munit_assert_ptr_equal(g_tm16_slot, g_tm16_b);
+	munit_assert_int(g_tm16_refs, ==, 2);   /* heap + slot */
+	munit_assert_int(loop->n_timers, ==, 0);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/Tm5_basic",            test_timer_basic,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Tm6_order",            test_order,              NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -705,6 +778,7 @@ static MunitTest tests[] = {
 	{ "/Tm14_timer_set_reclaimed",   test_timer_set_reclaimed,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Tm14_future_timeout_reclaimed", test_future_timeout_reclaimed, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Tm15_heap_slots_consistent", test_heap_slots_consistent, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Tm16_fire_clears_own_slot", test_fire_clears_own_slot, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m3/timer", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

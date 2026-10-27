@@ -228,6 +228,24 @@ is unavailable).
 returns the OS pid or -1.
 .Fn xtc_xproc_child_main
 returns the child's exit code.
+A child whose own runtime cannot start retries
+.Fn xtc_loop_init
+for about 2 seconds (1 ms back-off, doubling) when it fails with
+.Dv XTC_E_INTERNAL ,
+.Dv XTC_E_NOMEM
+or
+.Dv XTC_E_RESOURCE
+-- creating an io_uring ring fails transiently while other rings are
+being torn down -- and then exits with 240 minus the
+.Dv XTC_E_*
+code (246 for
+.Dv XTC_E_INTERNAL ,
+242 for
+.Dv XTC_E_NOMEM ) ,
+which its monitor sees as an
+.Dv XTC_DOWN_KIND_EXIT .
+The I/O backend is chosen at configure time, so a child cannot fall back
+to another one.
 .Pp
 .Fn xtc_xproc_destroy
 returns no value.

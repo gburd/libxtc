@@ -203,8 +203,12 @@ test_svr_no_handler_empty_reply(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
 	xtc_svr_t *svr = NULL;
-	xtc_svr_callbacks_t cb = {0};   /* handle_call == NULL */
-	xtc_svr_opts_t opts = { .name = "noh", .mailbox_cap = 0 };
+	xtc_svr_callbacks_t cb = XTC_SVR_CALLBACKS_INIT;   /* handle_call == NULL */
+	xtc_svr_opts_t opts = {
+		.size = sizeof(xtc_svr_opts_t),
+		.name = "noh",
+		.mailbox_cap = 0
+	};
 	xtc_pid_t dpid;
 	(void)p; (void)d;
 
@@ -306,8 +310,12 @@ test_svr_reply_oom(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
 	xtc_svr_t *svr = NULL;
-	xtc_svr_callbacks_t cb = {0};
-	xtc_svr_opts_t opts = { .name = "oom", .mailbox_cap = 0 };
+	xtc_svr_callbacks_t cb = XTC_SVR_CALLBACKS_INIT;
+	xtc_svr_opts_t opts = {
+		.size = sizeof(xtc_svr_opts_t),
+		.name = "oom",
+		.mailbox_cap = 0
+	};
 	xtc_pid_t dpid;
 	(void)p; (void)d;
 

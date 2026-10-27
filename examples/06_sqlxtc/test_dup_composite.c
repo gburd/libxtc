@@ -96,7 +96,7 @@ main(void)
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	bm_t *bm = NULL;
 	xtc_exec_t *ex = NULL;
-	xtc_proc_opts_t po = { .name = "dupcomp" };
+	xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "dupcomp" };
 	xtc_pid_t pid;
 	sx_stmt *st;
 	long multi, lost, zero, rows;

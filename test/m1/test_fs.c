@@ -72,7 +72,7 @@ test_namespace(const MunitParameter p[], void *d)
 	char dir[512], a[600], b[620];
 	int fd = -1;
 	size_t done = 0;
-	xtc_fs_stat_t st;
+	xtc_fs_stat_t st = XTC_FS_STAT_INIT;
 	(void)p; (void)d;
 
 	munit_assert_int(xtc_fs_tmpdir(dir, sizeof dir), ==, XTC_OK);
@@ -83,7 +83,7 @@ test_namespace(const MunitParameter p[], void *d)
 
 	munit_assert_int(xtc_fs_exists(a), ==, 1);
 	munit_assert_int(xtc_fs_stat(a, &st), ==, XTC_OK);
-	munit_assert_int64(st.size, ==, 4);
+	munit_assert_int64(st.bytes, ==, 4);
 	munit_assert_int(st.is_dir, ==, 0);
 
 	/* rename to a sibling, old name gone, new name present */

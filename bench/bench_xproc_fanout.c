@@ -74,7 +74,7 @@ driver(void *a)
 		if (xtc_recv(&m, &n, 10LL * 1000 * 1000 * 1000) != XTC_OK)
 			break;
 		{
-			xtc_down_info_t di;
+			xtc_down_info_t di = XTC_DOWN_INFO_INIT;
 			if (xtc_down_decode_ex(m, n, &di) == XTC_OK)
 				d->downs++;
 		}

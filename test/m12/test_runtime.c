@@ -16,7 +16,7 @@
 static MunitResult
 test_runtime_basic(const MunitParameter p[], void *d)
 {
-	xtc_runtime_info_t ri;
+	xtc_runtime_info_t ri = XTC_RUNTIME_INFO_INIT;
 	(void)p; (void)d;
 
 	/* Off any loop (the test thread is not on an executor loop):

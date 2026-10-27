@@ -50,7 +50,11 @@ xtc_res_init(xtc_res_t *r, const xtc_res_caps_t *caps)
 			d.mem_bytes = mem_max;
 		r->caps = d;
 	} else {
-		r->caps = *caps;
+		/* A cap past the caller's .size takes its default. */
+		xtc_res_caps_t d = XTC_RES_CAPS_DEFAULT;
+		int rc = __xtc_sized_in(&r->caps, &d, sizeof d, caps, 0);
+		if (rc != XTC_OK)
+			return rc;
 	}
 	for (i = 0; i < XTC_RES__COUNT; i++) {
 		atomic_store_explicit(&r->used[i],    0, memory_order_relaxed);

@@ -143,11 +143,17 @@ __bounds_dbl_ok(struct cfg_var *v, double n)
 }
 
 int
-xtc_cfg_register(const xtc_cfg_spec_t *spec)
+xtc_cfg_register(const xtc_cfg_spec_t *uspec)
 {
+	xtc_cfg_spec_t full;
+	const xtc_cfg_spec_t *spec = &full;
 	struct cfg_var *v;
 	int rc;
-	if (spec == NULL || spec->name == NULL) return XTC_E_INVAL;
+	if (uspec == NULL) return XTC_E_INVAL;
+	if ((rc = __xtc_sized_in(&full, NULL, sizeof full, uspec,
+	    offsetof(xtc_cfg_spec_t, kind) + sizeof full.kind)) != XTC_OK)
+		return rc;
+	if (spec->name == NULL) return XTC_E_INVAL;
 	if ((rc = __os_calloc(1, sizeof *v, (void **)&v)) != XTC_OK) return rc;
 	if ((rc = __os_strdup(spec->name, &v->name)) != XTC_OK) {
 		__os_free(v); return rc;

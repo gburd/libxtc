@@ -89,6 +89,26 @@ Restart on abnormal exit only.
 Never restart; one-shot.
 .El
 .Pp
+.Sy Sized structs:
+.Vt xtc_sup_opts_t
+.Pq Dv XTC_SUP_OPTS_DEFAULT
+and every
+.Vt xtc_child_spec_t
+.Pq Dv XTC_CHILD_SPEC_INIT
+start with a
+.Va size
+member set to the caller's
+.Fn sizeof .
+The library reads only that many bytes (later fields default), strides the
+.Fa children
+array by
+.Va children[0].size ,
+and returns
+.Dv XTC_E_INVAL
+for a
+.Va size
+of 0 or elements of different sizes.
+.Pp
 .Sy Restart intensity:
 .Va opts.max_restarts
 restarts within

@@ -124,4 +124,25 @@ xtc_tls_clear_wants(struct xtc_tls *tls)
 	          *o = 0;                                                \
 	  return XTC_E_NOSYS; }
 
+/*
+ * Read a caller's xtc_tls_opts_t only up to its .size (2.0 sized-struct
+ * contract): copy it into the backend's full-size `*full` and repoint
+ * `*opts` at the copy, so every later opts->field read is in bounds and a
+ * field the caller's header lacks reads as 0 (its default).  NULL stays
+ * NULL.  Used at the top of every backend's xtc_tls_ctx_create.
+ */
+static inline int
+__xtc_tls_opts_in(const xtc_tls_opts_t **opts, xtc_tls_opts_t *full)
+{
+	int rc;
+
+	if (*opts == NULL)
+		return XTC_OK;
+	if ((rc = __xtc_sized_in(full, NULL, sizeof *full, *opts, 0)) !=
+	    XTC_OK)
+		return rc;
+	*opts = full;
+	return XTC_OK;
+}
+
 #endif /* XTC_TLS_COMMON_H */

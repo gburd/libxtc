@@ -107,7 +107,7 @@ metrics_spawn(xtc_loop_t *loop, db_t *db, xtc_res_t *res,
               xtc_pid_t *out_pid)
 {
 	metrics_state_t *st;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	int rc;
 
 	metrics_register();

@@ -418,7 +418,7 @@ pgmock_backend_spawn(xtc_loop_t *loop, const pgmock_backend_opts_t *opts,
                      xtc_pid_t *out_pid)
 {
 	backend_state_t *st;
-	xtc_proc_opts_t po = { 0 };
+	xtc_proc_opts_t po = XTC_PROC_OPTS_INIT;
 	int rc;
 
 	st = calloc(1, sizeof *st);

@@ -279,6 +279,7 @@ accept_fiber(void *arg)
 		{
 			xtc_proc_opts_t o;
 			memset(&o, 0, sizeof o);
+			o.size = sizeof o;
 			o.name = "conn";
 			o.migratable = 1;
 			if (xtc_proc_spawn(self, conn_fiber,
@@ -335,6 +336,7 @@ run_server(int port, int n_loops, unsigned compute)
 		xtc_loop_t *lp = xtc_exec_loop(e, i);
 		xtc_proc_opts_t o;
 		memset(&o, 0, sizeof o);
+		o.size = sizeof o;
 		o.name = "accept";
 		if (xtc_proc_spawn(lp, accept_fiber, lp, &o, NULL) != XTC_OK) {
 			fprintf(stderr, "spawn accept failed\n");

@@ -82,7 +82,7 @@ watcher_proc(void *arg)
 	for (i = 0; i < N_TARGETS; i++) {
 		void *m = NULL; size_t n = 0;
 		if (xtc_recv(&m, &n, 2000LL * 1000 * 1000) == XTC_OK) {
-			xtc_down_info_t di;
+			xtc_down_info_t di = XTC_DOWN_INFO_INIT;
 			if (xtc_down_decode_ex(m, n, &di) == XTC_OK)
 				atomic_fetch_add_explicit(&g_downs, 1,
 				    memory_order_relaxed);

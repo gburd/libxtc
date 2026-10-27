@@ -153,7 +153,7 @@ main(int argc, char **argv)
 
 	for (w = 0; w < workers; w++) {
 		xtc_loop_t *lp = xtc_exec_loop(exec, (int)(w % n_loops));
-		xtc_proc_opts_t opts = { .name = "mbw" };
+		xtc_proc_opts_t opts = { .size = sizeof(xtc_proc_opts_t), .name = "mbw" };
 		if (xtc_proc_spawn(lp, worker_proc, (void *)w, &opts, NULL) !=
 		    XTC_OK) {
 			fprintf(stderr, "proc_spawn %ld\n", w);

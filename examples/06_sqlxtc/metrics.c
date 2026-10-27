@@ -160,7 +160,7 @@ metrics_spawn(xtc_loop_t *loop, xtc_res_t *res, _Atomic int *conn_count,
               _Atomic int64_t *queries_total, xtc_pid_t *out_pid)
 {
 	metrics_state_t *st;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	int rc;
 
 	(void)queries_total;   /* superseded by sqlxtc_stat_query_total */
