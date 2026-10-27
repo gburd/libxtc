@@ -63,6 +63,8 @@ from here can silently rot against the API.
   runtime introspection.
 - [ABI stability]({{ '/reference/abi-stability/' | relative_url }}) -- what stays fixed across releases.
 - [Known issues]({{ '/reference/known-issues/' | relative_url }}) -- honest caveats and workarounds.
+- [Security policy](https://codeberg.org/gregburd/libxtc/src/branch/main/SECURITY.md) -- supported
+  versions and how to report a vulnerability privately.
 
 ### Part III -- The example programs
 

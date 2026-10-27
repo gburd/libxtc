@@ -121,6 +121,55 @@ policy for adding `XTC_2.N` nodes in later minors.  At release time,
 `scripts/abi-check.sh PREV_TAG` runs `abidiff` between the previous
 release and the candidate.
 
+## Release branches and tags
+
+`main` carries the next minor.  A major's LTS line has its own branch,
+`lts/MAJOR.MINOR` (the first is `lts/2.0`), cut from the `vMAJOR.MINOR.0`
+tag on the day it is released:
+
+    git branch lts/2.0 v2.0.0
+    git push origin lts/2.0
+
+Nothing is committed to an LTS branch directly except a backport that
+could not be cherry-picked.  What a patch release may change is the LTS
+contract in `docs/abi-stability.md` ("Long-term support and the 2.0
+LTS"): fixes only, no ABI, format, default or dependency change.
+
+## Patch releases on an LTS branch
+
+1. Land the fix on `main` with its test (fail-before / pass-after), as
+   for any change.
+2. Backport, naming the source commit:
+
+       git switch lts/2.0
+       git cherry-pick -x <main-commit>
+
+   If it does not apply, rewrite it on the branch with the same test and
+   say why in the message.  Never backport a commit that changes
+   test/abi/layout.txt, dist/libxtc.map's symbol set, a format version,
+   or a documented default: that is a minor-release change.
+3. Bump the patch number (`dist/version.in`, `dist/configure` regenerated
+   and committed, the man-page dates if they changed), and add the
+   release notes: the fixes, with the `main` commit of each, any
+   security advisory (SECURITY.md), and any accepted perf-gate cell.
+4. Qualify on the branch exactly as a minor is qualified (AGENTS.md
+   "Cutting a release"): `make check` on a readiness and a completion
+   backend, `make check-dst` in a sim build, the 100k swarm by hand,
+   `scripts/perf-gate.sh vPREV HEAD` against the previous 2.0.x, and the
+   io_uring gate.  The compat CI job must pass: the N-1 consumer built
+   against v2.0.0's headers runs against the patch release's library.
+5. Tag from the branch, signed, and push the tag:
+
+       git tag -s v2.0.N -m "libxtc 2.0.N"
+       git push origin lts/2.0 v2.0.N
+
+6. Check CI on the tag and on the branch (a tag does not run the nightly
+   tiers; see AGENTS.md).
+
+A security fix follows SECURITY.md's embargo: it is prepared on private
+branches, and `main` and every supported `lts/*` branch are tagged
+together on the disclosure day.
+
 ## Debian / Ubuntu
 
 `debian/` builds two binary packages:

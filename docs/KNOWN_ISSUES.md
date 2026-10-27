@@ -182,6 +182,22 @@ report and file an issue: the page id in the report is where to look.
 New DST coverage of scans racing merges and page-id reuse:
 test_sim_btree_scan.
 
+## FIXED (2.0): the clean-close version GC could bring back a deleted sqlxtc row
+
+Never in a release: introduced by the 1.60 candidate's clean-close
+version GC (31d1ef8) and fixed before 2.0.  The version GC (xs_gc)
+collects dead version keys in batches of 512 and restarted its per-row
+state at every batch, so a batch that ended right after a deleted row's
+tombstone treated that row's older versions as a new row and kept one:
+the deleted row came back, without its secondary-index entries.  The
+GC had always had the flaw; a GC pass rarely held 512 dead keys until
+the clean close ran it over a whole store.  `test_crash_oracle` caught
+it under CPU contention ("rows missing from an index" after an open);
+unloaded it passed.  Fixed by keeping the row state across batches;
+`test_close_prune` and `test_sim_sqlxtc_gcidx` (now with small GC
+batches) fail without the fix, planted bug 23 (GCBATCH) is caught by
+DST, and `test_sim_sqlxtc_gcidx 2 1` is pinned in the seed corpus.
+
 ## FIXED (2.0): a fired park timer could release a newer timer of a migrated fiber
 
 **What was wrong.**  When a park timer fired, the loop cleared the
@@ -2869,38 +2885,19 @@ support SIGEV_KEVENT completion on regular files anyway.  The macOS CI
 job (macos-latest, Apple Silicon) builds and runs the full C suite
 green on every commit.
 
-## pbt-hegel CI job fails on ubuntu-24.04 with no output (OPEN, advisory)
+## RESOLVED: pbt-hegel CI job failed on ubuntu-24.04 with no output
 
-**Status:** OPEN. The job is `continue-on-error: true` so it does not block
-merges; the property tier itself is verified and passing.
+**Status:** RESOLVED (2.0); the job is a merge gate again (no longer
+`continue-on-error`).
 
-The property tier works. All 36 properties across 17 suites build and pass
-under `--with-hegel`, verified locally in several configurations:
+The job once exited 2 printing nothing, which could not be reproduced
+locally.  The cause was the job itself: `out=$(make ...)` under `set -e`
+aborted the step before the captured output was printed.  Once the step
+captured the status explicitly and always printed, the last failing runs
+(2026-09-15) showed a real property failure (`[PBT] alloc/hook_balanced
+FAIL`), fixed that day by a1c57151 (the allocator hook vtable is copied
+and all six callbacks are required).  From then to 2026-10-26 the job
+passed 54 of 54 GitHub runs (one more was cancelled together with its
+whole run), all 36 properties across 17 suites, so `continue-on-error`
+was removed: a property failure blocks a merge again.
 
-- `--with-hegel` via pkg-config (the `nix develop` path);
-- `--with-hegel=PREFIX` with a hand-assembled prefix (header + `.so` copied
-  in), which is exactly what the CI job constructs;
-- with `LD_LIBRARY_PATH` unset, confirming `configure`'s `-Wl,-rpath` for the
-  explicit-prefix case is sufficient;
-- under CI's `-Werror -Wall -Wextra -Wpedantic`, in both the hegel-enabled
-  and default (SKIP-stub) builds.
-
-On the `ubuntu-24.04` runner, `make -C build_pbt tests-pbt` exits **2 with no
-output whatsoever** -- not a compile error, not a property failure, not a SKIP.
-The job now always prints the captured output before deciding (an earlier
-version lost it to `set -e` around `out=$(make ...)`), and there is still
-nothing to print, which suggests make itself fails before running a recipe.
-
-Unverified hypotheses, in the order worth testing:
-
-1. The `Build the library` step and this step disagree about the build
-   directory or a generated file, so make has nothing to do and errors.
-2. Something in the runner image's `make`/`sh` differs enough that the
-   `tests-pbt` recipe's `$$((...))` arithmetic or `case` fails immediately.
-3. The libhegel `.so` fetched by `curl` is fine to link against but the
-   runner's loader rejects it at first use in a way that kills make's
-   subshell without output.
-
-Anyone picking this up: reproduce on an actual ubuntu-24.04 container rather
-than a nix shell, which is where every local attempt succeeded and therefore
-where the difference is invisible.

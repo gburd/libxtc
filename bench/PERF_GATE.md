@@ -39,6 +39,20 @@ Results go to the output directory, never into the repository:
 the two revisions).  Quote `summary.txt` and `host.txt` in the release
 notes' qualification section.
 
+## Why there is no scheduled CI timing job
+
+A weekly "perf-gate-lite" on a CI runner (the micro and hop cells, which
+need no idle-state control) was considered and not added.  A runner is
+a fresh shared virtual machine each run, so a weekly number compares
+two different machines; the same cells moved by up to 5x between hosts
+during 1.59's qualification, and a +70% measured on 16 vCPUs was -45%
+on 64.  An A/B inside one run (both refs built and interleaved, as
+perf-gate.sh does) cancels the host, but on a shared runner its spread
+is wider than the 5-10% thresholds, so the job could only ever report,
+never decide -- and a number nobody can act on is noise.  The timing
+gate stays a release-time manual tier on one measurement-grade host;
+CI keeps the work-count tier (exact counts, host-independent).
+
 ## The rule
 
 A cell regresses when both of these hold:

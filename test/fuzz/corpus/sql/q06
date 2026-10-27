@@ -1,0 +1,2 @@
+DELETE FROM "q t" WHERE [x] LIKE '%a' ESCAPE '\' -- c
+/* b */

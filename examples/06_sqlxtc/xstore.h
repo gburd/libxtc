@@ -379,6 +379,8 @@ int xstore_gc_run(struct xsql *db);          /* xstore_gc() -> reclaimed */
  * store keeps one version per live row and none of a deleted one.
  * Returns the number reclaimed. */
 uint64_t xstore_gc_close(bt_t *bt);
+/* Tests: cap a version-GC batch at n keys (0 = the default, 512). */
+void xstore_gc_set_batch(int n);
 int xstore_autovacuum_set(struct xsql *db, int on); /* xstore_autovacuum(on) */
 /* The autovacuum setting new connections start with (default 0 for a
  * bare tree; sx_storage_open turns it on).  On, a write prunes its row's
