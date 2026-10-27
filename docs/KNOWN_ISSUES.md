@@ -182,6 +182,22 @@ report and file an issue: the page id in the report is where to look.
 New DST coverage of scans racing merges and page-id reuse:
 test_sim_btree_scan.
 
+## FIXED (2.0): the clean-close version GC could bring back a deleted sqlxtc row
+
+Never in a release: introduced by the 1.60 candidate's clean-close
+version GC (31d1ef8) and fixed before 2.0.  The version GC (xs_gc)
+collects dead version keys in batches of 512 and restarted its per-row
+state at every batch, so a batch that ended right after a deleted row's
+tombstone treated that row's older versions as a new row and kept one:
+the deleted row came back, without its secondary-index entries.  The
+GC had always had the flaw; a GC pass rarely held 512 dead keys until
+the clean close ran it over a whole store.  `test_crash_oracle` caught
+it under CPU contention ("rows missing from an index" after an open);
+unloaded it passed.  Fixed by keeping the row state across batches;
+`test_close_prune` and `test_sim_sqlxtc_gcidx` (now with small GC
+batches) fail without the fix, planted bug 23 (GCBATCH) is caught by
+DST, and `test_sim_sqlxtc_gcidx 2 1` is pinned in the seed corpus.
+
 ## FIXED (2.0): a fired park timer could release a newer timer of a migrated fiber
 
 **What was wrong.**  When a park timer fired, the loop cleared the
