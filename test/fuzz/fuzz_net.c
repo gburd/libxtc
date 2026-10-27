@@ -122,8 +122,10 @@ fz_recv(const uint8_t *d, size_t n, size_t max_len, int nonblock)
 		off += flen;
 		/* A frame forwarded to a mailbox may be decoded as a
 		 * DOWN/EXIT signal: it must not read past flen. */
-		if (f != NULL)
+		if (f != NULL) {
+			di = (xtc_down_info_t)XTC_DOWN_INFO_INIT;
 			(void)xtc_down_decode_ex(f, flen, &di);
+		}
 		xtc_free(f);
 	}
 	(void)close(sv[0]);

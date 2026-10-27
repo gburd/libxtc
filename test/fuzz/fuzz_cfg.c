@@ -43,6 +43,7 @@ fz_reg(const char *name, xtc_cfg_kind_t k, int64_t lo, int64_t hi, double dlo,
 {
 	xtc_cfg_spec_t s;
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = name;
 	s.kind = k;
 	s.min_int = lo;

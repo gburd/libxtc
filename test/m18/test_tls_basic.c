@@ -299,6 +299,7 @@ test_ctx_bad_alpn(const MunitParameter params[], void *data)
 			munit_assert_not_null(w);
 			memcpy(w, src, n + 1);
 			__builtin_memset(&opts, 0, sizeof(opts));
+			opts.size = sizeof opts;
 			opts.alpn_protos = w;
 			opts.verify_peer_mode = XTC_TLS_VERIFY_NONE;
 			ctx = NULL;

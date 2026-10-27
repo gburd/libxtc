@@ -68,6 +68,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 	s[len] = '\0';
 	for (role = 0; role < 2; role++) {
 		memset(&o, 0, sizeof o);
+		o.size = sizeof o;
 		o.alpn_protos = s;
 		o.verify_peer_mode = XTC_TLS_VERIFY_NONE;
 		ctx = NULL;
