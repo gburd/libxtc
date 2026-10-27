@@ -82,12 +82,35 @@ test_affinity_hint(const MunitParameter p[], void *d)
 
 	munit_assert_int(__os_thread_set_affinity(-1), ==, XTC_E_INVAL);
 
+#if defined(__linux__)
+	{
+		/* Only CPUs this thread may use: a cpuset can leave out CPU 0
+		 * and the last CPU (a pin outside it is refused, by design). */
+		cpu_set_t allowed;
+		int i, lo = -1, hi = -1;
+		CPU_ZERO(&allowed);
+		munit_assert_int(pthread_getaffinity_np(pthread_self(),
+		    sizeof allowed, &allowed), ==, 0);
+		for (i = 0; i < CPU_SETSIZE; i++)
+			if (CPU_ISSET(i, &allowed)) {
+				if (lo < 0) lo = i;
+				hi = i;
+			}
+		munit_assert_int(lo, >=, 0);
+		munit_assert_int(__os_thread_set_affinity(lo), ==, XTC_OK);
+		munit_assert_int(__os_thread_set_affinity(hi), ==, XTC_OK);
+		(void)pthread_setaffinity_np(pthread_self(), sizeof allowed,
+		    &allowed);
+		(void)rc;
+	}
+#else
 	rc = __os_thread_set_affinity(0);
 	munit_assert_true(rc == XTC_OK || rc == XTC_E_NOSYS);
 
 	/* A CPU index within the machine's count behaves the same. */
 	rc = __os_thread_set_affinity(__os_ncpus() - 1);
 	munit_assert_true(rc == XTC_OK || rc == XTC_E_NOSYS);
+#endif
 	return MUNIT_OK;
 }
 
@@ -112,9 +135,20 @@ test_affinity_enforced(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 #if defined(__linux__)
 	{
-		cpu_set_t mask;
-		int cpu = 0;            /* CPU 0 always exists */
+		cpu_set_t mask, allowed;
+		int cpu = -1;
 		int i, set_count;
+
+		/* The first CPU this thread may run on: CPU 0 is not in every
+		 * cpuset (a container or CI runner given CPUs 2-3, say). */
+		CPU_ZERO(&allowed);
+		munit_assert_int(
+		    pthread_getaffinity_np(pthread_self(), sizeof allowed, &allowed),
+		    ==, 0);
+		for (i = 0; i < CPU_SETSIZE && cpu < 0; i++)
+			if (CPU_ISSET(i, &allowed))
+				cpu = i;
+		munit_assert_int(cpu, >=, 0);
 
 		munit_assert_int(__os_thread_set_affinity(cpu), ==, XTC_OK);
 
@@ -132,6 +166,8 @@ test_affinity_enforced(const MunitParameter p[], void *d)
 		for (i = 0; i < 1000 && sched_getcpu() != cpu; i++)
 			sched_yield();
 		munit_assert_int(sched_getcpu(), ==, cpu);
+		(void)pthread_setaffinity_np(pthread_self(), sizeof allowed,
+		    &allowed);           /* leave the thread as it was */
 		return MUNIT_OK;
 	}
 #elif defined(__APPLE__)
