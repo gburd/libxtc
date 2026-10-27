@@ -55,6 +55,48 @@ parse_nested(int depth, const char *tail, int *kind)
 	return rc;
 }
 
+/* 1 if the first column of CREATE TABLE sql has the declared type want. */
+static int
+coltype_is(const char *sql, const char *want)
+{
+	struct sql_arena *a = NULL;
+	struct sql_stmt *root = NULL;
+	const char *err = NULL;
+	const sql_coldef_t *c;
+	int ok;
+
+	if (sql_parse_ast(sql, strlen(sql), &a, &root, &err) != 0 ||
+	    root == NULL)
+		return 0;
+	c = root->kind == SQL_KIND_CREATE ? root->u.create->cols : NULL;
+	ok = c != NULL && c->type.len == strlen(want) &&
+	    memcmp(c->type.p, want, c->type.len) == 0 &&
+	    c->type.p >= sql && c->type.p + c->type.len <= sql + strlen(sql);
+	sql_arena_destroy(a);
+	return ok;
+}
+
+/* 1 if the first select item of sql has a source span, and it is
+ * exactly `want` (a slice of sql, not of a dequoted copy). */
+static int
+span_is(const char *sql, const char *want)
+{
+	struct sql_arena *a = NULL;
+	struct sql_stmt *root = NULL;
+	const char *err = NULL, *p = NULL;
+	size_t n = strlen(sql);
+	int len = 0, ok;
+
+	if (sql_parse_ast(sql, n, &a, &root, &err) != 0 || root == NULL)
+		return 0;
+	ok = root->kind == SQL_KIND_SELECT &&
+	    sql_expr_span(root->u.select->cols->head->expr, &p, &len) &&
+	    p >= sql && p + len <= sql + n && (size_t)len == strlen(want) &&
+	    memcmp(p, want, (size_t)len) == 0;
+	sql_arena_destroy(a);
+	return ok;
+}
+
 int
 main(void)
 {
@@ -170,6 +212,19 @@ main(void)
 	CHECK(bad == 0, "stack_overflow_is_error");
 	CHECK(parse_nested(40, "1" "))))))))))))))))))))))))))))))))))))))))",
 	    &k) == 0 && k == SQL_KIND_SELECT, "nested_40_ok");
+
+	/* A span is a slice of the SQL text even when a quoted identifier
+	 * has a doubled quote (its value is then an arena copy): the span
+	 * of "a""b" + 1 used to start in the arena and end in the text. */
+	CHECK(span_is("SELECT \"a\"\"b\" + 1", "\"a\"\"b\" + 1"),
+	      "span_doubled_quote");
+	CHECK(span_is("SELECT 1 + \"a\"\"b\"(2)", "1 + \"a\"\"b\"(2)"),
+	      "span_doubled_quote_func");
+	CHECK(span_is("SELECT \"a\" + 1", "\"a\" + 1"), "span_quoted_id");
+	CHECK(coltype_is("CREATE TABLE t(a \"x\"\"y\" INT)",
+	      "\"x\"\"y\" INT"), "type_name_doubled_quote");
+	CHECK(coltype_is("CREATE TABLE t(a UNSIGNED BIG INT)",
+	      "UNSIGNED BIG INT"), "type_name_words");
 
 	/* Trailing semicolon tolerated */
 	CHECK(parse("SELECT 1;", &i) == 0 && i.kind == SQL_KIND_SELECT,
