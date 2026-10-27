@@ -254,9 +254,11 @@ xtc_await(xtc_task_t *t, intptr_t *result)
 		return XTC_OK;
 	}
 
-	/* Re-park until the target is done; see coro_uctx.c. */
+	/* Re-park until the target is done; a kill wake delivers the kill
+	 * (see coro_uctx.c). */
 	while (!target->done) {
 		void *pctx;
+		AWAIT_KILL_POLL(me, target);
 		target->waiter = me->self;
 		me->_parked_on = target;
 		pctx = __xtc_fiber_ctx_save ? __xtc_fiber_ctx_save() : NULL;

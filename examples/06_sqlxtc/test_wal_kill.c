@@ -38,6 +38,7 @@
 
 #include "xtc_exec.h"
 #include "xtc_preempt.h"
+#include "xtc_preempt_involuntary.h"
 #include "t_tmp.h"
 
 #define NL        4
@@ -101,7 +102,7 @@ rec_byte(int slot, uint32_t seq, uint32_t i)
 }
 
 /* payload: u32 slot, u32 seq, then pattern bytes */
-static void
+XTC_PREEMPTIBLE static void
 rec_fill(uint8_t *p, int slot, uint32_t seq, uint32_t len)
 {
 	uint32_t i, s = (uint32_t)slot;
@@ -112,7 +113,7 @@ rec_fill(uint8_t *p, int slot, uint32_t seq, uint32_t len)
 }
 
 /* One commit for `slot`; returns wal_commit's rc. */
-static int
+XTC_PREEMPTIBLE static int
 commit_one(int slot, uint8_t *buf)
 {
 	struct slot *s = &g_slot[slot];
@@ -146,7 +147,7 @@ linked_child(void *arg)
 	(void)xtc_exit_self(9);              /* abnormal: kills the linked peer */
 }
 
-static void
+XTC_PREEMPTIBLE static void
 committer(void *arg)
 {
 	int slot = (int)(intptr_t)arg;
@@ -457,7 +458,11 @@ run_mode(const char *mode)
 	g_exec = exec;
 	if (g_cfg.preempt) {
 		(void)xtc_exec_set_preempt(exec, 50LL * 1000);
-		xtc_preempt_set_involuntary(1);
+		/* Only the XTC_PREEMPTIBLE committer path is preemptible:
+		 * this binary links libxtc statically. */
+		if (xtc_preempt_involuntary_supported() &&
+		    xtc_preempt_set_involuntary(1) != XTC_OK)
+			return 1;
 	}
 	(void)wal_writer_spawn(g_wal, xtc_exec_loop(exec, 0), NULL);
 	if (xtc_proc_spawn(xtc_exec_loop(exec, 0), boss, exec, &bo, &bp) != XTC_OK)
@@ -473,7 +478,7 @@ run_mode(const char *mode)
 	(void)pthread_join(wd, NULL);
 	(void)xtc_exec_fini(exec);
 	if (g_cfg.preempt)
-		xtc_preempt_set_involuntary(0);
+		(void)xtc_preempt_set_involuntary(0);
 
 	if (wal_scan(path, scan_cb, found) != XTC_OK)
 		fail = 1;

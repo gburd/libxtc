@@ -48,6 +48,8 @@
 #if defined(XTC_CORO_REDIRECT_X86_64) || defined(XTC_CORO_REDIRECT_AARCH64)
 #include <signal.h>
 #include <ucontext.h>    /* the signal-delivered ucontext_t (mcontext) */
+/* 1 if an involuntary yield may land at pc (preempt.c, SAFE POINTS). */
+extern int __xtc_preempt_pc_ok(uintptr_t pc);
 #endif
 
 /*
@@ -100,9 +102,13 @@ __in_preempt_slot(void)
  * halves, ZMM16-31 and opmask registers (test/m14/test_preempt_p2
  * /vector_state: 100 of 69k checks corrupted per 0.4 s run before).
  *
- * The mask is XCR0 limited to x87, SSE, AVX, opmask and the two ZMM
- * components: the state a fiber's own code can hold live across an
- * arbitrary instruction.  AMX tile data (8 KiB) is left out on purpose
+ * The mask is XCR0 limited to x87, SSE, AVX, opmask, the two ZMM
+ * components and PKRU: the state a fiber's own code can hold live across
+ * an arbitrary instruction.  PKRU (the protection-key rights, xtc_pkey)
+ * is per thread, so a fiber that ran in the slice could leave the
+ * preempted code a different set of rights between its own wrpkru and
+ * the access it guarded (test_preempt_p2 /tick_pkru: 64 of 64 ticks
+ * resumed with the peer's PKRU before).  AMX tile data (8 KiB) is left out on purpose
  * -- it would put ~11 KiB on a 64 KiB fiber stack, and Linux gates AMX
  * behind an explicit per-process permission request.  Probed once (CPUID
  * and XGETBV are plain instructions, safe in the signal handler that
@@ -127,7 +133,7 @@ static _Atomic int g_xsave_probed;
 extern XTC_THREAD_LOCAL uintptr_t __xtc_preempt_pc
     __attribute__((visibility("hidden")));
 
-#define XTC_XSAVE_WANT 0xE7ull   /* x87 SSE AVX opmask ZMM_Hi256 Hi16_ZMM */
+#define XTC_XSAVE_WANT 0x2E7ull  /* x87 SSE AVX opmask ZMM_Hi256 Hi16_ZMM PKRU */
 
 static void
 __preempt_xsave_probe(void)
@@ -142,7 +148,7 @@ __preempt_xsave_probe(void)
 	    __get_cpuid_max(0, NULL) >= 0xD) {
 		__asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
 		mask = (((uint64_t)hi << 32) | lo) & XTC_XSAVE_WANT;
-		for (i = 2; i < 8; i++) {
+		for (i = 2; i < 10; i++) {
 			if ((mask & (1ull << i)) == 0)
 				continue;
 			__cpuid_count(0xD, i, a, b, c, d);   /* a size, b offset */
@@ -214,6 +220,9 @@ __coro_preempt_redirect_x86_64(void *uctx)
 	if (orig_pc >= (greg_t)(uintptr_t)&__xtc_preempt_trampoline &&
 	    orig_pc <  (greg_t)(uintptr_t)&__xtc_preempt_trampoline_end)
 		return 0;
+	/* Not a safe point: libc, another library, libxtc (preempt.c). */
+	if (!__xtc_preempt_pc_ok((uintptr_t)orig_pc))
+		return 0;
 
 	/*
 	 * Enter the trampoline BELOW the interrupted code's 128-byte red
@@ -279,6 +288,8 @@ __coro_preempt_redirect_aarch64(void *uctx)
 	if (pc >= (unsigned long long)(uintptr_t)&__xtc_preempt_trampoline &&
 	    pc < (unsigned long long)(uintptr_t)&__xtc_preempt_trampoline_end)
 		return 0;
+	if (!__xtc_preempt_pc_ok((uintptr_t)pc))
+		return 0;   /* not a safe point (preempt.c) */
 	/* The frame starts with the siginfo; the ucontext follows it.  It
 	 * must be the kernel's frame on THIS fiber's stack, below the
 	 * interrupted sp (anything else, say a handler on an alternate

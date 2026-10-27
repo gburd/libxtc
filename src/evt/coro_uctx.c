@@ -659,10 +659,15 @@ xtc_await(xtc_task_t *t, intptr_t *result)
 	 *
 	 * Re-park until the target is done: a wake that is not the
 	 * target's completion (a reclaimed task's late waker landing on
-	 * this reused task struct, or a kill wake) is spurious here.
+	 * this reused task struct) is spurious here.  A kill wake
+	 * (xtc_exit_pid) is not: AWAIT_KILL_POLL delivers it now, once this
+	 * fiber is no longer the target's waiter, instead of when the
+	 * target finishes.  The target is left alone (another task may
+	 * await it).  Masked, the kill is latched and the await goes on.
 	 */
 	while (!target->done) {
 		void *pctx;
+		AWAIT_KILL_POLL(me, target);
 		target->waiter = me->self;
 		me->self->q_next = NULL; /* belt-and-braces; see q-pop semantics */
 		me->_parked_on = target;

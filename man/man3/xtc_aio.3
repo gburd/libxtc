@@ -182,6 +182,18 @@ and
 so they are not declared there; the scalar
 .Fn xtc_aio_pread Ns / Ns Fn xtc_aio_pwrite
 remain available on every platform.
+.Pp
+A proc killed
+.Pq Xr xtc_exit_pid 3
+while an operation is in flight dies when the operation completes: the
+kernel owns the buffer and the request until then, and an operation it
+has started cannot be cancelled.
+The result is lost
+.Po
+.Sx KILL DELIVERY
+in
+.Xr xtc_proc 3
+.Pc .
 .Sh RETURN VALUES
 .Fn xtc_aio_pread
 and
