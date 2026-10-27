@@ -471,6 +471,97 @@ before the rename and fails deterministically without the fix.  The
 fix does not repair a schema an affected build already persisted (the
 row data itself was never touched); such a table must be recreated.
 
+## CHANGED (2.0): the sqlxtc page format (XBT3) -- short separators, internal prefixes
+
+**What changed.**  A B-tree split's separator is now the shortest key
+between the two halves (suffix truncation) instead of the left half's
+whole largest key, internal nodes carry real fences and store their
+separators prefix-compressed as leaves do, and a child page id takes 4
+bytes (the width the right-sibling link already had; a store holds at
+most 2^32 - 1 pages, 16 TiB at 4 KiB, and an allocation past that fails
+instead of wrapping).  An internal node of a 4 KiB page holds about
+150 children (1.60: about 66), and a tree of 400k version keys is 3
+levels (1.60: 4).  The superblock says `XBT3`.  The leaf slot (10
+bytes) and the page size (4 KiB) are unchanged.
+
+**Measured** on a 64-vCPU x86-64 host, in-process, three interleaved
+runs, medians (ops/s; TPROC-C New-Order per minute), against 1.60's
+format:
+
+| cell | 1.60 | 2.0 | SQLite 3.53.4 |
+| --- | ---: | ---: | ---: |
+| ledger history, 1 / 2 / 4 conns | 24.0k / 47.5k / 92.4k | 26.4k / 51.7k / 100.9k | 29.1k / 50.6k / 92.8k |
+| ledger statement, 1 / 2 / 4 | 48.7k / 94.7k / 184.8k | 53.3k / 104.3k / 201.6k | 53.5k / 95.0k / 173.1k |
+| TPROC-C W=10, 1 / 8 | 90.5k / 374.8k | 96.9k / 393.4k | 100.5k / 91.2k |
+| ledger transfer, 1 / 16 / 64 | 15.8k / 102.1k / 95.1k | 16.2k / 103.2k / 94.9k | 5.7k / 8.7k / 9.0k |
+| ledger insert, 1 / 16 / 64 | 28.3k / 155.0k / 166.1k | 28.6k / 154.5k / 163.8k | 19.7k / 19.4k / 19.0k |
+
+The range reads are 9-10% faster, TPROC-C 5-7%, the write shapes
+within their run-to-run spread.  Store size: the ledger page file
+459.6 -> 454.5 MB (allocated), TPROC-C W=10 1,221.7 -> 1,215.7 MB.
+
+**Measured and not adopted:**
+* **Redistribution before a split** (`-DBT_SHIFT_PCT=80`, off by
+  default).  A full leaf moves entries into a sibling below 80% full
+  instead of splitting: leaf fill on random inserts about 70% -> 81-83%,
+  the ledger page file 9.6% smaller.  It holds the parent for two page
+  rebuilds where a split holds it for one separator insert, and cost
+  transfer 7.4% at 16 connections and 9.9% at 64, insert 6.7% at 16.
+  The option, its test (`test_btree_shift`) and its DST coverage stay
+  (the simulator builds turn it on; planted bug 22 removes the lower-
+  fence check a parked cursor needs after a shift into the left
+  sibling, and `test_sim_btree_scan` catches it).
+* **8 KiB pages**: TPROC-C at 8 connections 3.3% faster, but ledger
+  insert at 64 connections 3.5% slower, so the default stays 4 KiB.
+* **An 8-byte slot** (a 2-byte key head): ledger page file 5% smaller
+  (454.5 -> 431.9 MB), but the range reads 2.3-2.8% slower.
+
+**Upgrade:** the first start of 2.0 on a 1.60 store (`XBT2`) rebuilds
+the page file from the log, as 1.60 did with 1.59 stores; the log format
+is unchanged.  `sx_size` refuses `XBT1` and `XBT2` page files.  The 2.0
+format is described in the
+[sqlxtc notes]({{ '/examples/sqlxtc/' | relative_url }}), "On-disk
+format (2.0)".
+
+## FIXED (2.0): sqlxtc wrote uninitialised memory into the page file and the log
+
+Every B-tree node rebuild -- compaction, a split, a merge -- built the
+new page in a stack buffer, and only its 48-byte header was zeroed.  The
+gap between the page's slot array and its cell heap was therefore
+whatever that stack held, and it was written to the page file and the
+log with the page: bytes of other rows' keys and values, and pointers.
+A deleted entry's bytes also stayed in its page until the page was
+rebuilt.  Present since the slotted node format; on a 1.60 store,
+37 of 37 node pages carried 28,292 such bytes after a 6,000-row
+workload with an index, updates and deletes.  Nothing read them, so no
+result was wrong, but a store file or log could leak data of rows other
+than the ones it holds, and two builds of one page could differ.
+Fixed: a node page is zeroed whole before it is built and a removed
+cell is cleared.  `test_page_bytes` scans a closed store's every node
+page (0 stray bytes now) and `test_btnode` builds the same pages from
+two differently filled stacks and compares them; memcheck over the
+B-tree and sqlxtc simulator tests is clean (it reported
+"pwrite64(buf) points to uninitialised byte(s)" before).
+
+## FIXED (2.0): sqlxtc commit stamps under the simulator carried real time
+
+The commit clock's physical half (hlc_phys_ms) is the monotonic clock
+plus a wall-clock offset sampled once.  Under the simulator the
+monotonic clock is virtual, but the offset had been sampled from the
+real clock before the run, so every stamp of a simulated run carried
+real time, and two runs of one seed minted different stamps.  Nothing
+in the guard could see it (the real clock was read outside the run).
+It became visible with the 2.0 B-tree format, whose separators depend
+on where two version keys first differ (the stamp is part of the key):
+about 5% of `test_sim_sqlxtc_ckpt`'s replays failed, more when several
+ran at once.  Under the virtual clock the physical half is now the
+virtual milliseconds alone, for commit stamps and for SQL 'now'
+(`xtc_sim_clock_active`, new), and the tests' commits all run under the
+virtual clock.  The sqlxtc DST tiers now hash every commit stamp into
+their replay check, and `test_sim_sqlxtc_ckpt 1 6 sleep` lets real time
+pass between runs, which made every replay fail before the fix.
+Production stamps are unchanged.
+
 ## FIXED (2.0): the clean-close version GC could bring back a deleted sqlxtc row
 
 Never in a release: introduced by the 1.60 candidate's clean-close
@@ -821,12 +912,13 @@ in 28,000.
 
   | store | SQLite | sqlxtc page file | sqlxtc page file + log |
   | --- | --- | --- | --- |
-  | ledger, 100k accounts, 2M transfers | 267 MB | 459 MB (1.72x) | 732 MB (2.74x) |
-  | TPROC-C, 10 warehouses | 899 MB | 1,219 MB (1.36x) | 2,306 MB (2.56x) |
+  | ledger, 100k accounts, 2M transfers | 267 MB | 455 MB (1.70x) | 728 MB (2.73x) |
+  | TPROC-C, 10 warehouses | 899 MB | 1,216 MB (1.35x) | 2,303 MB (2.56x) |
   | TPROC-C, 50 warehouses | 4,498 MB | 6,040 MB (1.34x) | 11,413 MB (2.54x) |
 
-  (1.58: 2.56x and 3.61x for the page file; 1.59: 488 MB, 1.83x, for the
-  ledger.  The TPROC-C rows are 1.59's, not re-measured.)  Where the
+  (2.0 for the ledger and 10 warehouses; 1.60: 460 MB and 1,222 MB.
+  1.58: 2.56x and 3.61x for the page file; 1.59: 488 MB, 1.83x, for the
+  ledger.  The 50-warehouse row is 1.59's, not re-measured.)  Where the
   rest goes:
   * **The log.**  SQLite in WAL mode checkpoints its log back into the
     database and truncates it; sqlxtc keeps a compacted log of the live
@@ -837,19 +929,14 @@ in 28,000.
   * **Per-entry overhead.**  Every table row carries a 20-byte version
     key (table id, rowid, inverted commit timestamp; about 9 bytes
     stored after prefix compression) and every entry a 10-byte slot,
-    against about 4-6 bytes of cell overhead in SQLite.  A narrower
-    slot (6-8 bytes for leaves whose values are empty, as index leaves'
-    are) would save 16-32 MB on the ledger, but its 4-byte head is the
-    search accelerator of every node lookup, and it is a page-format
-    change; it is left for a later format bump.
-  * **Index fill.**  Index leaves split at 70% full (SQLite's
-    redistribute-before-split keeps about 90%).  Moving entries into a
-    sibling before splitting raises it (modelled on random inserts: 70%
-    -> 74-76% shifting into the right sibling only, 81-86% into either
-    sibling, for 2-8x the structure changes), about 10 MB and 60 MB on
-    the ledger.  Not done: a move into the LEFT sibling moves keys left,
-    and readers and parked cursors only chase right, so every hop and
-    resume would need a lower-fence check; that is a later release.
+    against about 4-6 bytes of cell overhead in SQLite.  An 8-byte slot
+    was measured for 2.0 (23 MB less on the ledger) and not adopted: its
+    shorter key head made the range reads 2.3-2.8% slower.
+  * **Index fill.**  Index leaves split at about 70% full (SQLite's
+    redistribute-before-split keeps about 90%).  2.0 has redistribution
+    as a build option (`-DBT_SHIFT_PCT=80`: 81-83% fill, the ledger page
+    file 9.6% smaller), off by default because it cost the 16- and
+    64-connection write shapes 7-10%.
   * **Old versions.**  Versions no snapshot can see are reclaimed by
     autovacuum while the server runs, and the rest at a clean close (it
     leaves one version per live row): a load used to leave about 5 per

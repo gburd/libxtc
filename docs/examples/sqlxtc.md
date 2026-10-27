@@ -120,6 +120,34 @@ serialize on a per-tree structure-modification lock and post separators
 bottom-up. Nodes are slotted pages with prefix compression derived from
 the fences and a 4-byte cached key head per slot.
 
+**Internal nodes route on short keys (2.0).**  A split's separator is
+the shortest key between the last key it keeps and the first key it
+moves (suffix truncation, Bayer and Unterauer's simple prefix B-tree),
+usually a few bytes of the right half's first key, not the left half's
+whole 20-byte key.  Internal nodes carry real fences -- the range their
+parent routes to them -- and store their separators as suffixes of the
+fences' common prefix, as leaves do, and a child id takes 4 bytes.
+Until 1.60 an internal node held about 66 children at 4 KiB and every
+separator of one table's region began with the same table id, so every
+binary-search step fell through to a 20-byte `memcmp`; now about 150
+children, separators averaging 12 bytes (2.5 stored), and a head that
+tells keys apart (`test_btree_inner`).  The B-link invariants are
+unchanged: a key that reaches a node is inside its fences once the
+descent has passed the checks it already makes (move right while
+beyond the upper fence, restart when at or below the lower one).
+
+**Redistribution is a build option.**  `-DBT_SHIFT_PCT=80` makes a full
+leaf first move entries into a sibling below 80% full instead of
+splitting (leaf fill about 70% -> 81-83% on random inserts; the ledger's
+page file 10% smaller).  It is off by default: it holds the parent for
+two page rebuilds where a split holds it for one separator insert, and
+cost the 16- and 64-connection write shapes 5-14% on a 64-vCPU host.
+A shift into the left sibling moves keys out of a leaf's bottom, which
+readers that only chase right cannot follow; every descent, optimistic
+read, cursor hop and parked-cursor resume re-checks the leaf's lower
+fence and re-descends (DST planted bug 22 removes the resume's check;
+`test_sim_btree_scan` catches it).
+
 1.57 compared this design against RethinkDB's B-tree
 (`src/btree/`, `src/buffer_cache/`) and borrowed six things.
 
@@ -128,7 +156,7 @@ the fences and a 4-byte cached key head per slot.
 follows from that bound. sqlxtc had no bound: a 2 KB row could make a
 4 KiB leaf unsplittable, and an indexed TEXT value over 1 KB overflowed
 the split's separator buffer. Now `bt_max_key()` and `bt_max_inline()`
-derive the limits from the page size (4 KiB pages: 498-byte keys, 506
+derive the limits from the page size (4 KiB pages: 497-byte keys, 1008
 bytes of key plus value inline), every call checks them before touching
 anything, and leaves split **by bytes**, choosing the cut nearest half
 that leaves room for the row being inserted (`btnode_split_ex`).
@@ -281,6 +309,127 @@ so restart time is proportional to the live data plus the writes since
 the last checkpoint. (The in-place recovery path that would trust the
 page file and its double-write buffer exists and is tested, but the
 server does not use it yet.)
+
+## On-disk format (2.0)
+
+A store is two files: the page file (`NAME.xstore`, or the path given)
+and the log (`NAME-wal`).  This is the format 2.0 writes and reads.
+It is frozen: a change to anything below bumps the version field named
+with it, and an older store is rebuilt from its log rather than read in
+a format it was not written in.  All integers are little-endian unless
+marked BE; keys compare as unsigned bytes (`memcmp`).
+
+**Page file.**  Fixed-size pages, 4096 bytes by default (`page_size`
+in the superblock; 512 to 65535).  Page *n* is at offset *n* x
+page size.  A store holds at most 2^32 - 1 pages: child and sibling
+page ids are 32 bits.
+
+*Page 0, the superblock* (`btree.c` `struct bt_super`):
+
+| offset | bytes | field |
+| ---: | ---: | --- |
+| 0 | 4 | magic `XBT3` (0x58425433) -- **the page-format version** |
+| 4 | 4 | page size |
+| 8 | 8 | root page id |
+| 16 | 8 | height (levels; 1 = the root is a leaf) |
+| 24 | 8 | clean: 1 if the page file was flushed and closed cleanly |
+| 32 | 8 | commit clock at the clean close |
+| 40 | 64 | 8 engine words: index trust tag (`XS_IDX_FORMAT`, **the index-entry version**), log tail (end, last frame, max LSN, valid), stale index entries |
+| size - 40 | 8 | page checksum: CRC32C of the page with these 4 bytes as zero, then the page id (0) |
+| size - 32 | 32 | freelist trailer (a clean close only): magic `XFL1` (4), page size (4), first chain page (8), free page ids (8), chain pages (8) |
+
+A start trusts the page file only if the magic is `XBT3`, the checksum
+holds and *clean* is 1; anything else (a crash, a 1.59 `XBT1` or 1.60
+`XBT2` store, a damaged page 0) discards the page file and rebuilds it
+from the log.
+
+*B-tree node* (every other page that is not out-of-line value data):
+a 48-byte header, a slot array growing up, and cells growing down from
+the end of the page.
+
+| offset | bytes | header field |
+| ---: | ---: | --- |
+| 0 | 8 | page LSN (the log record that last changed it) |
+| 8 | 4 | page size |
+| 12 | 4 | right sibling page id (0 = none) |
+| 16 | 2 | slot count |
+| 18 | 1 | 1 = leaf, 0 = internal |
+| 19 | 1 | 1 = unlinked by a merge (dead) |
+| 20 | 2 | heap bytes in use |
+| 22 | 2 | lowest cell offset |
+| 24 | 2 | prefix length *P* |
+| 26 | 8 | lower fence offset and length, upper fence offset and length (length 0 = infinite) |
+| 34 | 4 | insert history (slot after the last insert, run length) |
+| 40 | 4 | CRC32C of the page with these 4 bytes as zero |
+| 44 | 4 | low 32 bits of the page's own id |
+
+A node owns the keys in (lower fence, upper fence].  *P* is the length
+of the fences' common prefix; every key in the node starts with those
+*P* bytes (taken from the lower fence) and stores only the rest.  A
+10-byte slot per entry, sorted by key:
+
+| bytes | slot field |
+| ---: | --- |
+| 2 | offset of the cell (the key suffix, then the value) |
+| 2 | key suffix length |
+| 2 | value length; bit 15 set = the value is an out-of-line reference |
+| 4 | first 4 bytes of the key suffix, BE, zero-padded (the search head) |
+
+Every byte of a node page outside the header, the slots, the fences and
+the live cells is zero (2.0; `test_page_bytes`).
+
+A leaf maps a key to its value.  An internal node maps separators to
+4-byte child page ids: slot 0 is the child for keys at or below the
+first separator and is stored with an empty suffix; slot *i* holds
+separator *k_i* and the child for keys in (*k_i*, *k_i+1*].  A
+separator is the shortest key between the last key of the left child
+and the first key of the right one (suffix truncation) and is the
+left child's upper fence and the right child's lower fence.
+
+*Out-of-line value page* (`btovf.h`): page LSN (8), magic `OVF1` (4),
+payload length (4), the checksum and page id at offset 40 as above,
+payload from offset 48.  The leaf holds a reference: tag 0x5F, page
+count, 2 reserved bytes, total length (4), checksum (4), then the page
+ids (8 bytes each).
+
+*Freelist chain page* (free pages that hold the saved freelist; read
+only at a trusted start, after the trailer named them): LSN slot (all
+ones, 8), magic `XFL1` (4), count (4), next chain page (8), page ids (8
+bytes each).  A malformed chain loads nothing (the pages stay unused).
+
+**Log.**  A sequence of frames `[LSN:8][length:4][body][checksum:8]`;
+the checksum is `0x43524332` ("2CRC") in the high 32 bits and the
+CRC32C of the LSN, length and body in the low 32 (a frame whose
+checksum is the 64-bit FNV-1a of the same bytes is a 1.58 frame, still
+read).  The first frame that does not check ends the log.  A body is a
+run of records, each `[type:1][txn id:8][previous LSN:8]` and then:
+
+| type | record | after the header |
+| ---: | --- | --- |
+| 1, 3, 4, 7 | begin, commit, abort, end | nothing |
+| 2 | update | page id (4), table id (4), rowid (8), commit stamp (8), flags (1), redo length (2), redo, undo length (2), undo |
+| 5 | compensation | undo-next LSN (8), then as update without the undo |
+| 6 | checkpoint | commit clock (8), start LSN (8); the live rows follow as updates |
+| 8 | page image | page id (4), image length (2), the page (in the page-file format) |
+
+The log carries rows, not pages (page images are written only by the
+in-place recovery path, which the server does not use), so it is
+independent of the page format: an `XBT2` store's log rebuilds an
+`XBT3` page file.  The record types and their layouts are the log
+format; a new type or field is a log-format change and has no version
+field today -- add one (a first frame naming the version) with it.
+
+**Keys.**  A row version is `[table id:4 BE][rowid:8 BE, sign bit
+flipped][~commit stamp:8 BE]`, value `[flags:1][record]` (the record in
+SQLite's record format).  An index entry is `[0xFE][index id:4
+BE][column elements][rowid:8]` with an empty value; its encoding is
+versioned by `XS_IDX_FORMAT` (2), stored in the superblock's trust tag:
+a different value rebuilds every index from the rows at the next start.
+
+What to bump: the superblock magic for anything in the page file
+(header, slot, cells, fences, separators, child ids, the out-of-line
+and freelist pages); `XS_IDX_FORMAT` for the index-entry encoding; the
+log has none yet (see above).
 
 ## Buffer replacement: HOT/COOL and CLOCK
 
@@ -787,9 +936,40 @@ What the 64-vCPU matrix shows:
   every table and index in one B-tree, four levels for this store
   against SQLite's three, and an index walk spends a quarter of its time
   comparing keys (node searches and fence checks).  Closing it needs a change to the
-  tree's layout, which 1.60 does not make.  A write no longer computes
-  the version-GC horizon when it is not going to prune, which was 4.5%
-  of a TPROC-C connection's CPU.
+  tree's layout, which 1.60 does not make (2.0 does: below).  A write no
+  longer computes the version-GC horizon when it is not going to prune,
+  which was 4.5% of a TPROC-C connection's CPU.
+
+### The 2.0 page format, measured
+
+2.0's B-tree routes on truncated separators and prefix-compresses its
+internal nodes (above, "Internal nodes route on short keys").  The same
+host, the same drivers, three interleaved runs, each build on its own
+freshly loaded store; medians:
+
+| Cell | 1.60 | 2.0 | SQLite 3.53.4 |
+| --- | ---: | ---: | ---: |
+| history, 1 / 2 / 4 conns | 24.0k / 47.5k / 92.4k | 26.4k / 51.7k / 100.9k | 29.1k / 50.6k / 92.8k |
+| statement, 1 / 2 / 4 | 48.7k / 94.7k / 184.8k | 53.3k / 104.3k / 201.6k | 53.5k / 95.0k / 173.1k |
+| TPROC-C 10 warehouses, 1 / 8 | 90.5k / 374.8k | 96.9k / 393.4k | 100.5k / 91.2k |
+| transfer, 1 / 16 / 64 | 15.8k / 102.1k / 95.1k | 16.2k / 103.2k / 94.9k | 5.7k / 8.7k / 9.0k |
+| insert, 1 / 16 / 64 | 28.3k / 155.0k / 166.1k | 28.6k / 154.5k / 163.8k | 19.7k / 19.4k / 19.0k |
+
+At one connection the range reads went from 0.82x to 0.91x of SQLite
+(history) and from 0.91x to 1.00x (statement), TPROC-C from 0.90x to
+0.96x; the write shapes moved within their run-to-run spread.  The
+ledger is 4 levels deep either way (100k leaves need more than the
+~150 children an internal node of a 4 KiB page now holds, squared);
+what changed is the cost of each level: internal binary searches settle
+on the 4-byte slot head instead of comparing 20-byte keys.
+
+Three more changes were measured for 2.0 and left out of the default:
+redistribution before a split (ledger page file 9.6% smaller, but the
+16- and 64-connection writes 7-10% slower: it is a build option), 8 KiB
+pages (TPROC-C at 8 connections 3.3% faster, ledger inserts at 64
+connections 3.5% slower), and an 8-byte slot (the page file 5% smaller,
+the range reads 2.3-2.8% slower).  One B-tree per table, which would
+cut the ledger's height to 3, was assessed and not done.
 
 ### Latency at a fixed offered load
 
