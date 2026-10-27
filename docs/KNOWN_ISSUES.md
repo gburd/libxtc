@@ -18,9 +18,9 @@ sizeof(T)`).  A zeroed struct (`= { 0 }`, `memset`) is now REJECTED with
 | struct | initializer | bytes | also |
 |---|---|---|---|
 | `xtc_proc_opts_t` | `XTC_PROC_OPTS_INIT` | 56 -> 56 | `link_to` removed (never read); regrouped |
-| `xtc_proc_info_t` | `XTC_PROC_INFO_INIT` | 80 -> 88 | |
+| `xtc_proc_info_t` | `XTC_PROC_INFO_INIT` | 80 -> 96 | 16-byte pid (below) |
 | `xtc_mailbox_stats_t` | `XTC_MAILBOX_STATS_INIT` | 48 -> 56 | |
-| `xtc_down_info_t` | `XTC_DOWN_INFO_INIT` | 32 -> 40 | now has a struct tag |
+| `xtc_down_info_t` | `XTC_DOWN_INFO_INIT` | 32 -> 48 | now has a struct tag; 16-byte pid (below) |
 | `xtc_runtime_info_t` | `XTC_RUNTIME_INFO_INIT` | 40 -> 48 | |
 | `xtc_loop_info_t` | (library-sized) | 32 -> 40 | read newer fields under `XTC_FIELD_OK` |
 | `xtc_loop_stats_t` | `XTC_LOOP_STATS_INIT` | 16 -> 24 | |
@@ -47,7 +47,7 @@ sizeof(T)`).  A zeroed struct (`= { 0 }`, `memset`) is now REJECTED with
 Unchanged on purpose: the frozen lock-layer structs, array element types
 the library strides at its own `sizeof` (`xtc_io_event_t`,
 `xtc_accel_dev_t`, `xtc_msg_t`, batch items/results, scheduler lanes),
-value types (`xtc_pid_t` -- which a separate 2.0 change widens --
+value types (`xtc_pid_t` -- widened to 16 bytes, see the next entry --
 `xtc_pt_t`, `xtc_waker_t`, the trace/tail records), and the experimental
 batch / scheduler-policy structs, which already carry `size, version`.
 
@@ -68,31 +68,94 @@ ones; `opts.sup.X = ...` becomes a separate `xtc_sup_opts_t` and
 `opts.sup = &it;`; `st.size` of an `xtc_fs_stat_t` becomes `st.bytes`.
 
 ---
-## OPEN (libxtc): at most 65,536 live processes per loop
+## CHANGED (2.0): the pid is 16 bytes; trace and probe formats versioned
 
-**The limit.**  `xtc_pid_t` names a process by its loop and a 16-bit
-slot on that loop (`local_id`), so one loop can hold at most 65,536 live
-processes.  `xtc_proc_spawn` on a full loop returns `XTC_E_RESOURCE` and
-spawns nothing.  Every process counts, supervisors included.  A server
-that runs one process per connection therefore stops accepting at about
-65,500 clients per loop.  rexis 1.59 stopped at exactly 65,532 clients
-(65,536 minus its supervisor, listener, expiry and metrics procs) and
-closed each connection after that without a reply.  On the same host,
-with the same client harness, Valkey held 70,002, so neither the client's
-ports nor the file-descriptor limits were the cause.
+**What changed.**  `xtc_pid_t` is `{ uint32_t loop_id; uint32_t
+local_id; uint64_t gen; }`, 16 bytes (1.x: `{ uint16_t, uint16_t,
+uint32_t }`, 8 bytes).  Source compatible for code that treats a pid as
+an opaque value and compares it with `xtc_pid_eq`; positional
+initializers `{ loop, local, gen }` keep their order.  Binary
+incompatible, and so is everything that embeds a pid: `xtc_proc_info_t`
+88 -> 96 bytes, `xtc_down_info_t` 40 -> 48, `xtc_tail_rec_t` 32 -> 40,
+`xtc_trace_rec_t`, `xtc_xpid_t` (sizes x86-64; `test/abi/layout.txt`).
 
-**Workaround.**  Spread the processes over the loops of an `xtc_exec`
-executor: each loop has its own 65,536 slots.  rexis does this with
-`--loops=N`.  It puts each connection on the least-loaded loop with room
-and refuses startup when `--max-clients` is more than its loops can hold.
-A client over the limit gets `-ERR max number of clients reached` and a
-close, as Redis sends.  Measured: `--loops=2` held 100,000 idle
-connections on one 32-vCPU x86-64 host.
+- **A pid no longer fits one 64-bit word.**  Code that published a pid
+  through an `_Atomic uint64_t` (packing `loop << 48 | local << 32 |
+  gen`) or declared `_Atomic xtc_pid_t` must use the new
+  `xtc_atomic_pid_t` with `xtc_atomic_pid_load` / `xtc_atomic_pid_store`
+  (a seqlock; a load never sees a torn pid; sequentially consistent; see
+  xtc_proc(3)).  `_Atomic xtc_pid_t` is a 16-byte C11 atomic: a call
+  into libatomic, so it fails to link without `-latomic`, and MSVC C
+  has none.  The library's own publication sites (`xtc_app` children,
+  the supervisor, gen_server) and rexis's per-fd wake table use it.
+- **USDT probes: every pid is two arguments,** `id = loop_id << 32 |
+  local_id`, then the 64-bit `gen`.  `proc-spawn(pid, gen, parent,
+  parent_gen)`, `proc-start(pid, gen, task)`, `proc-exit(pid, gen,
+  reason)`, `proc-kill(target, gen, reason)`, `msg-send(from, from_gen,
+  to, to_gen, bytes)`, `msg-recv(pid, gen, from, from_gen, bytes)`,
+  `sup-restart(sup, child, child_gen, reason)`.  A D or bpftrace script
+  that read `arg1` of `msg-send` as the destination now reads the
+  sender's generation; see xtc_usdt(3).
+- **xtc_tail binary dump: version 3** (`XTC_TAIL_VERSION`).  The stream
+  layout is the same LEB128 sequence; the values are wider, and
+  `XTC_TAIL_LOOP_NONE` is `0xFFFFFFFF` (was `0xFFFF`).
+  `tools/xtc-tail.py` reads versions 2 and 3 and refuses others; the gdb
+  `xtc-tail-dump` labels the dump by the inferior's pid width.  The
+  dial9 export keeps dial9's container version 1 and adds
+  `xtc_format = 3` to its `SegmentMetadataEvent`; its 64-bit `task_id`
+  is a grouping key, `(gen & 0xFFFF) << 48 | (loop_id & 0xFFFF) << 32 |
+  local_id`, not a pid (xtc_tail(3)).
+- `xtc_dump` and the sqlxtc admin view print the generation with
+  `%llu`.
 
-**Why it stays open.**  `xtc_pid_t` is a public struct passed by value
-(see [ABI stability]({{ '/reference/abi-stability/' | relative_url }})),
-so widening `local_id` has to wait for 2.0.  See
-[xtc_proc(3)](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_proc.3).
+**Why.**  The two limits below.  The cost was measured before deciding:
+the same tree with the 8-byte and the 16-byte pid, 5 interleaved
+repetitions on one 32-vCPU x86-64 host, changed bench_micro
+`proc_send_recv` by +1.0% (843 -> 852 ns per round trip) and the
+bench_hop cells by -1.9% to +5.2% with overlapping ranges, the same
+size as `fiber_switch`, which carries no pid.
+
+## FIXED (2.0): at most 65,536 live processes per loop
+
+**Was.**  `xtc_pid_t` named a process by its loop and a 16-bit slot on
+that loop (`local_id`), so one loop held at most 65,536 live processes
+and `xtc_proc_spawn` on a full loop returned `XTC_E_RESOURCE`.  Every
+process counted, supervisors included, so a server that ran one process
+per connection stopped accepting at about 65,500 clients per loop.
+rexis 1.59 stopped at exactly 65,532 clients (65,536 minus its
+supervisor, listener, expiry and metrics procs) and closed each
+connection after that without a reply, where Valkey held 70,002 with
+the same client harness on the same host.  The 1.x workaround was to
+spread the processes over the loops of an `xtc_exec` executor (rexis
+`--loops=N`).
+
+**Now.**  `local_id` is 32 bits.  A loop holds as many live processes as
+memory and its `xtc_res` caps allow (`XTC_RES_TASKS`, 100,000 by
+default); each costs a fiber stack.  `test_proc /pid_local_id_ceiling`
+holds 100,000 parked processes on one loop and sends each its own index
+(v1.59: `XTC_E_RESOURCE` at 65,536; 2.0: all 100,000 delivered; with
+16 KiB stacks 0.95 s and 651 MB peak RSS on a 32-vCPU x86-64 host).
+One million parked processes on one loop took 6.5 GB (6,651 bytes each,
+16 KiB stacks) and every one received its own message.  rexis on ONE
+loop held 100,000 idle connections (7.3 KB of RSS each, PING answered),
+where the 1.x build refused every client past 65,520.  A fiber stack is
+two memory mappings, so a process with more than about 32,000 live
+fibers needs `vm.max_map_count` raised above the Linux default of
+65,530.
+
+## FIXED (2.0): a pid held across 2^32 reuses of its slot named the new occupant
+
+**Was.**  A slot's generation was 32 bits.  The free list is LIFO, so
+under churn one slot takes every spawn: at a million spawns a second it
+wrapped in 72 minutes, and a pid kept that long (a cached worker pid, a
+registry entry, a message's sender) then compared equal to the process
+in that slot, so a send, link, monitor or kill reached the wrong process.
+
+**Now.**  The generation is 64 bits per slot and does not wrap.
+`test_proc /pid_gen_no_wrap` advances a free slot by 2^32 - 1
+generations through a test seam and spawns into it: on 1.x the new pid
+equals the stale one; on 2.0 they differ and a send to the stale pid
+fails with `XTC_E_INVAL`.
 
 ## CHANGED (2.0): `xtc_pg_send_owned`, process-group fan-out with one copy fewer
 
@@ -1358,7 +1421,7 @@ test_lockmgr) is 0 errors with no stack-switch warnings.
 
 **Still not memcheck targets.**  `test_proc`'s fault-containment cases
 write to address 0x10 on purpose; its `pid_local_id_ceiling` case holds
-65,536 fiber stacks, more mappings than valgrind tracks (`VG_N_SEGMENTS
+100,000 fiber stacks, more mappings than valgrind tracks (`VG_N_SEGMENTS
 is too low`).  `test_exec`'s `Blk2_concurrent_commit` spins on a shared
 lock across a blocking offload and does not finish in 15 minutes under
 valgrind.  The timing tests in `test_sync` still skip under

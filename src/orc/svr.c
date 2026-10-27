@@ -55,30 +55,16 @@ static const uint8_t SVR_REPLY_MAGIC[8] = {
 	0xfe, 'x', 't', 'c', 's', 'v', 'r', 0xa5
 };
 
-/* xtc_pid_t packed into one word so it can be published atomically. */
-static uint64_t
-__svr_pid_pack(xtc_pid_t p)
-{
-	uint64_t v;
-	memcpy(&v, &p, sizeof v);
-	return v;
-}
-
-static xtc_pid_t
-__svr_pid_unpack(uint64_t v)
-{
-	xtc_pid_t p;
-	memcpy(&p, &v, sizeof p);
-	return p;
-}
+/* A pid-routed call frame: 'C' 'p' <xtc_pid_t> <tag:8> <payload>. */
+#define SVR_PCALL_HDR (2 + sizeof(xtc_pid_t) + 8)
 
 struct xtc_svr {
 	xtc_loop_t           *loop;
 	xtc_svr_callbacks_t   cb;
 	void                 *state;
-	/* Packed xtc_pid_t. Stored by xtc_svr_start and again (same value)
-	 * by the server proc itself, read from any thread. */
-	_Atomic uint64_t      pid;
+	/* Stored by xtc_svr_start and again (same value) by the server
+	 * proc itself, read from any thread. */
+	xtc_atomic_pid_t      pid;
 	xtc_notify_t         *stopped;
 	_Atomic int           stop_requested;
 	_Atomic int           alive;
@@ -226,8 +212,7 @@ __svr_entry(void *arg)
 {
 	struct xtc_svr *s = arg;
 	int hooked;
-	atomic_store_explicit(&s->pid, __svr_pid_pack(xtc_self()),
-	    memory_order_release);
+	xtc_atomic_pid_store(&s->pid, xtc_self());
 	hooked = (xtc_proc_at_exit(__svr_exited, s) == XTC_OK);
 
 	if (s->cb.init != NULL) {
@@ -277,8 +262,8 @@ __svr_entry(void *arg)
 		if (kind == 'C') {
 			/* Call: byte 1 is the routing tag.
 			 *   's' = slot routing  (bytes 2..9 = slot id,     payload at +10)
-			 *   'p' = pid  routing  (bytes 2..9 = xtc_pid_t,
-			 *                       bytes 10..17 = tag,        payload at +18)
+			 *   'p' = pid  routing  (bytes 2.. = xtc_pid_t, then the
+			 *                       8-byte tag, payload at SVR_PCALL_HDR)
 			 */
 			struct xtc_svr_call call = {0};
 			size_t hdr;
@@ -287,10 +272,13 @@ __svr_entry(void *arg)
 			if (size >= 10 && ((uint8_t *)msg)[1] == 's') {
 				memcpy(&call.slot_id, (uint8_t *)msg + 2, 8);
 				hdr = 10;
-			} else if (size >= 18 && ((uint8_t *)msg)[1] == 'p') {
-				memcpy(&call.reply_pid, (uint8_t *)msg + 2, 8);
-				memcpy(&call.reply_tag, (uint8_t *)msg + 10, 8);
-				hdr = 18;
+			} else if (size >= SVR_PCALL_HDR &&
+			    ((uint8_t *)msg)[1] == 'p') {
+				memcpy(&call.reply_pid, (uint8_t *)msg + 2,
+				    sizeof call.reply_pid);
+				memcpy(&call.reply_tag, (uint8_t *)msg + 2 +
+				    sizeof call.reply_pid, 8);
+				hdr = SVR_PCALL_HDR;
 			} else {
 				/* Malformed call.  Skip. */
 				s->inflight = NULL;
@@ -370,8 +358,7 @@ xtc_svr_start(xtc_loop_t *loop, const xtc_svr_callbacks_t *cb, void *state,
 		__os_free(s);
 		return rc;
 	}
-	atomic_store_explicit(&s->pid, __svr_pid_pack(pid),
-	    memory_order_release);
+	xtc_atomic_pid_store(&s->pid, pid);
 	*out = s;
 	return XTC_OK;
 }
@@ -383,8 +370,7 @@ xtc_svr_stop(xtc_svr_t *s)
 	atomic_store_explicit(&s->stop_requested, 1, memory_order_release);
 	{
 		uint8_t kick = 'S';
-		(void)xtc_send(__svr_pid_unpack(atomic_load_explicit(&s->pid,
-		    memory_order_acquire)), &kick, 1);
+		(void)xtc_send(xtc_atomic_pid_load(&s->pid), &kick, 1);
 	}
 	return XTC_OK;
 }
@@ -416,8 +402,7 @@ xtc_pid_t
 xtc_svr_pid(const xtc_svr_t *s)
 {
 	xtc_pid_t none = {0,0,0};
-	return s ? __svr_pid_unpack(atomic_load_explicit(&s->pid,
-	               memory_order_acquire)) : none;
+	return s ? xtc_atomic_pid_load(&s->pid) : none;
 }
 
 /* ----- client side ----------------------------------------------- */
@@ -493,7 +478,7 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 	 * Every path below computes msg_size = header + req_size; a
 	 * req_size near SIZE_MAX would wrap to a small allocation and
 	 * the subsequent memcpy would overflow the heap.  The largest
-	 * header used below is 18 bytes; reject with margin. */
+	 * header used below is SVR_PCALL_HDR bytes; reject with margin. */
 	if (req_size > SIZE_MAX - 64) return XTC_E_INVAL;
 	if (out_reply == NULL || out_size == NULL) return XTC_E_INVAL;
 
@@ -507,14 +492,14 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 		    memory_order_relaxed) + 1;
 		xtc_pid_t self_pid = xtc_self();
 
-		msg_size = 18 + req_size;
+		msg_size = SVR_PCALL_HDR + req_size;
 		if (__os_malloc(msg_size, (void **)&buf) != XTC_OK)
 			return XTC_E_NOMEM;
 		buf[0] = 'C';
 		buf[1] = 'p';
-		memcpy(buf + 2, &self_pid, 8);
-		memcpy(buf + 10, &tag, 8);
-		if (req_size > 0) memcpy(buf + 18, req, req_size);
+		memcpy(buf + 2, &self_pid, sizeof self_pid);
+		memcpy(buf + 2 + sizeof self_pid, &tag, 8);
+		if (req_size > 0) memcpy(buf + SVR_PCALL_HDR, req, req_size);
 
 		/* Move the frame (no second copy); ours again on error. */
 		rc = xtc_send_owned(target, buf, msg_size);

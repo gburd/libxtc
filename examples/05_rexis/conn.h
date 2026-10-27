@@ -69,16 +69,16 @@ int conn_spawn(xtc_loop_t *loop, const conn_opts_t *opts, xtc_pid_t *out_pid);
 int64_t conn_client_bytes(void);
 
 /*
- * Per-loop connection census.  A loop holds at most 65,536 procs: a pid's
- * per-loop slot (xtc_pid_t.local_id) is 16 bits, so xtc_proc_spawn
- * refuses the 65,537th live proc on one loop with XTC_E_RESOURCE.  rexis
- * keeps CONN_LOOP_RESERVE of them for its own procs (supervisor,
- * listener, expiry, metrics) and headroom, so one loop serves at most
- * CONN_LOOP_MAX clients, and more clients need more loops (--loops).
+ * Per-loop connection census.  libxtc 2.0 has no per-loop proc ceiling
+ * (1.x stopped at 65,536: a 16-bit pid slot), so the per-loop client cap
+ * is a configured number (--loop-clients), checked here so a full loop
+ * refuses with Redis's error instead of a failed spawn.  CONN_LOOP_MAX
+ * bounds the option; each loop's XTC_RES_TASKS cap is raised to fit it
+ * plus CONN_LOOP_RESERVE for rexis's own procs (supervisor, listener,
+ * expiry, metrics).
  */
-#define CONN_LOOP_PROCS    65536
 #define CONN_LOOP_RESERVE  16
-#define CONN_LOOP_MAX      (CONN_LOOP_PROCS - CONN_LOOP_RESERVE)
+#define CONN_LOOP_MAX      (1 << 22)   /* x CONN_MAX_LOOPS fits an int */
 #define CONN_MAX_LOOPS     256
 
 /* Set the loop count and the per-loop client cap (<= CONN_LOOP_MAX). */
