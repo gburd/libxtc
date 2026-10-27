@@ -87,7 +87,7 @@ int
 main(void)
 {
 	char path[256], side[300], sql[128];
-	static const char *sfx[] = { "", ".xstore", ".xstore-wal", ".xstore.lock" };
+	static const char *sfx[] = { "", "-wal", ".xstore", ".xstore-wal", ".xstore.lock" };
 	sx_db *db = NULL;
 	long nv;
 	int fd, i, j;
@@ -196,7 +196,7 @@ main(void)
 	for (j = 0; j < 4; j++) {
 		long live;
 		uint64_t miss = 0, stale = 0;
-		for (i = 0; i < 4; i++) {
+		for (i = 0; i < 5; i++) {   /* a fresh store: no log to recover */
 			snprintf(side, sizeof side, "%s%s", path, sfx[i]);
 			unlink(side);
 		}
@@ -237,7 +237,7 @@ main(void)
 		CK(sx_storage_close() == SX_OK);
 	}
 	(void)sx_shutdown();
-	for (i = 0; i < 4; i++) {
+	for (i = 0; i < 5; i++) {
 		snprintf(side, sizeof side, "%s%s", path, sfx[i]);
 		unlink(side);
 	}
