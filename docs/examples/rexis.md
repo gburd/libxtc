@@ -84,7 +84,10 @@ idle connections then took half a core and a third of the throughput
 left for the active clients. Now an idle process parks on its socket with
 no deadline, and shutdown wakes each one explicitly. That costs one
 `xtc_proc_wake` per connection at exit instead of 100,000 timer wakes per
-second.
+second. Nor does it hold buffers it has not used: the 16 KiB query and
+output buffers are allocated by the first read and the first reply, so a
+connection that has sent nothing costs about 7.3 KB of RSS (15.7 KB when
+both were allocated at accept; 20,000 idle connections, `--loops=2`).
 
 ## How it works
 
