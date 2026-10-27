@@ -840,8 +840,8 @@ conn_teardown(void *arg)
 		return;
 	if (st->pubsub != NULL && st->sub_count > 0)
 		(void)xtc_reg_drop_pid(st->pubsub, st->self);
-	if (st->fd >= 0 && st->fd < g_fd_cap)
-		xtc_atomic_pid_store(&g_fd_pid[st->fd], XTC_PID_NONE);  /* before the close */
+	if (st->fd >= 0 && st->fd < g_fd_cap)          /* before the close */
+		xtc_atomic_pid_store(&g_fd_pid[st->fd], XTC_PID_NONE);
 	if (st->fd >= 0)
 		xtc_net_close(st->fd);
 	if (st->conn_count != NULL)

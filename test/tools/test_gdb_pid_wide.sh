@@ -12,6 +12,9 @@
 #	    table and _pid_str prints the wide slot);
 #	  - the dump is an XTCL version 3 trace (the 16-byte pid), and
 #	    xtc-tail.py shows SPAWN for 0.69999.1.
+#	lldb's xtc-procs must list the same pid and count (it listed NO proc
+#	at all before 2.0: lldb cannot Dereference an _Atomic(T *), and the
+#	loop registry's fields are _Atomic).
 #	Plus a reader-only check that needs no gdb: a synthesized v3 trace
 #	with a 64-bit gen and the v3 loop sentinel, and a v2 trace with the
 #	1.x sentinel (0xFFFF), both decode, and an unknown version is refused.
@@ -212,3 +215,27 @@ if [ "$fail" -ne 0 ]; then
 	exit 1
 fi
 echo "  [pid-wide] OK: gdb xtc-procs and xtc-tail-dump decode slot 69999 (v3)"
+
+# ---- 3. the same stopped process under lldb (xtc-procs) ----------------
+# --no-lldbinit: a user's ~/.lldbinit must not change what this checks.
+if ! command -v lldb >/dev/null 2>&1; then
+	echo "  [pid-wide] SKIP (lldb part): lldb not on PATH"
+	exit 0
+fi
+LLDBPY="$XTC_SRC_DIR/tools/lldb/xtc_lldb.py"
+timeout -k 10 600 lldb --no-lldbinit -b -p "$PROG_PID" \
+    -o "command script import $LLDBPY" -o "xtc-procs" \
+    > "$TMPD/lldb.out" 2>&1 || true
+if grep -q "attach failed\|error: attach" "$TMPD/lldb.out"; then
+	echo "  [pid-wide] SKIP (lldb part): lldb could not attach"
+	exit 0
+fi
+grep -q " 0\.69999\.1 " "$TMPD/lldb.out" ||
+    { echo "  [pid-wide] FAIL: lldb xtc-procs did not list 0.69999.1"; fail=1; }
+grep -q "^(70000 procs)" "$TMPD/lldb.out" ||
+    { echo "  [pid-wide] FAIL: lldb xtc-procs did not count 70000 procs"; fail=1; }
+if [ "$fail" -ne 0 ]; then
+	grep -v "^0x" "$TMPD/lldb.out" | tail -10 | sed 's/^/    /'
+	exit 1
+fi
+echo "  [pid-wide] OK: lldb xtc-procs decodes slot 69999"

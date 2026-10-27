@@ -408,7 +408,7 @@ usage(FILE *fp, const char *prog)
 	    "                        over it: \"-ERR max number of clients reached\"\n"
 	    "      --loops=N         Event loops (threads) to spread clients over\n"
 	    "                        (default 1)\n"
-	    "      --loop-clients=N  Per-loop client cap (default and max 4194304)\n"
+	    "      --loop-clients=N  Per-loop client cap (default, max 4194304)\n"
 	    "      --max-fds=N       Socket cap, listener included (default: fit\n"
 	    "                        --max-clients); raises RLIMIT_NOFILE to fit\n"
 	    "  -i, --max-iops=N      Rate limit commands/sec (0 = unlimited)\n"
