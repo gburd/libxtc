@@ -604,7 +604,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang make autoconf pkg-config libssl-dev \
-            liburing-dev gawk libmbedtls-dev libgnutls28-dev
+            liburing-dev gawk libgnutls28-dev cmake
+          # tls_mbedtls.c needs mbedTLS 3.x; Ubuntu's libmbedtls-dev is
+          # 2.x (as in the tls-backends job, build 3.6 from source).
+          git clone --depth 1 --branch v3.6.2 --recurse-submodules \
+            https://github.com/Mbed-TLS/mbedtls /tmp/mbed
+          cmake -S /tmp/mbed -B /tmp/mbed/build -DCMAKE_BUILD_TYPE=Release \
+                -DENABLE_TESTING=Off -DENABLE_PROGRAMS=Off \
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON >/dev/null
+          cmake --build /tmp/mbed/build -j"$(nproc)" >/dev/null
       - name: Autoreconf
         working-directory: dist
         run: autoreconf -i
@@ -613,10 +621,12 @@ jobs:
       - name: fuzz_tls on mbedTLS and GnuTLS (10 min each)
         run: |
           rc=0
-          for b in mbedtls gnutls; do
-            FUZZ_BUILD=build_fuzz_$b FUZZ_CONFIGURE=--with-tls=$b \
-              CC=clang sh scripts/fuzz.sh tls 600 || rc=1
-          done
+          LIB=$(dirname "$(find /tmp/mbed/build -name libmbedtls.a | head -1)")
+          CPPFLAGS="-I/tmp/mbed/include" LDFLAGS="-L$LIB" \
+            FUZZ_BUILD=build_fuzz_mbedtls FUZZ_CONFIGURE=--with-tls=mbedtls \
+            CC=clang sh scripts/fuzz.sh tls 600 || rc=1
+          FUZZ_BUILD=build_fuzz_gnutls FUZZ_CONFIGURE=--with-tls=gnutls \
+            CC=clang sh scripts/fuzz.sh tls 600 || rc=1
           exit $rc
       - name: Keep crash reproducers
         if: failure()

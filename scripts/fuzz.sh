@@ -24,6 +24,7 @@
 #      FUZZ_CONFIGURE (extra configure args, default --with-tls=auto; e.g.
 #      --with-tls=mbedtls to fuzz that backend's ALPN decoder),
 #      FUZZ_ARGS (extra libFuzzer flags, e.g. -fork=4), CC (default clang),
+#      CPPFLAGS / LDFLAGS (passed to configure, e.g. a TLS library's -I/-L),
 #      FUZZ_KEEP=1 to keep the scratch corpus (the inputs the run found).
 set -eu
 
@@ -32,6 +33,10 @@ secs=${2:?usage: fuzz.sh NAME SECS}
 # shellcheck disable=SC1007
 src=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 B=${FUZZ_BUILD:-$src/build_fuzz}
+# Absolute: the run cds into $B, and a relative FUZZ_BUILD / FUZZ_OUT
+# would then name a directory inside itself.
+mkdir -p "$B"
+B=$(CDPATH= cd -- "$B" && pwd)
 CC=${CC:-clang}
 J=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
 
@@ -59,7 +64,7 @@ if [ ! -f "$B/Makefile" ]; then
 	# shellcheck disable=SC2086  # FUZZ_CONFIGURE is a word list
 	( cd "$B" && CC="$CC" \
 	    CFLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=fuzzer-no-link,address,undefined" \
-	    LDFLAGS="-fsanitize=address,undefined" \
+	    LDFLAGS="-fsanitize=address,undefined ${LDFLAGS:-}" \
 	    "$src/dist/configure" ${FUZZ_CONFIGURE:---with-tls=auto} ) \
 	    > "$B/fuzz-configure.log" 2>&1 || {
 		echo "fuzz.sh: configure failed; see $B/fuzz-configure.log" >&2
@@ -75,6 +80,8 @@ make -s -C "$B" -j"$J" "fuzz_$name" > "$B/fuzz-build.log" 2>&1 || {
 }
 
 out=${FUZZ_OUT:-$B/fuzz-out}/$name
+mkdir -p "$out"
+out=$(CDPATH= cd -- "$out" && pwd)
 seeds=$src/test/fuzz/corpus/$name
 mkdir -p "$out/artifacts" "$out/corpus"
 dict=
