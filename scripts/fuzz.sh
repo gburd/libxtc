@@ -66,8 +66,9 @@ if [ ! -f "$B/Makefile" ]; then
 		exit 2
 	}
 fi
-make -s -C "$B" -j"$J" libxtc.a > "$B/fuzz-build.log" 2>&1 &&
-    make -s -C "$B" "fuzz_$name" >> "$B/fuzz-build.log" 2>&1 || {
+# fuzz_net/cfg/tls depend on libxtc.a, the example parsers do not: make
+# builds only what the harness needs.
+make -s -C "$B" -j"$J" "fuzz_$name" > "$B/fuzz-build.log" 2>&1 || {
 	echo "fuzz.sh: build failed; see $B/fuzz-build.log" >&2
 	tail -20 "$B/fuzz-build.log" >&2
 	exit 2

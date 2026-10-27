@@ -539,6 +539,124 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  style:
+    # clang-format on the lines a change TOUCHES, against .clang-format
+    # (scripts/style-check.sh: git clang-format --diff against the merge
+    # base).  The tree itself is not formatted to .clang-format and is not
+    # to be reformatted wholesale, so only changed lines are checked.
+    # Informational for now (continue-on-error): the diff it prints is the
+    # fix.  clang-format 18 is ubuntu-24.04's; 18 and 21 differ on a few files,
+    # so the check pins 18 (scripts/style-check.sh prefers it locally too).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install clang-format 18
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+      - name: clang-format the changed lines
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            base=$(git merge-base HEAD "origin/${{ github.base_ref }}")
+          else
+            base=${{ github.event.before }}
+            git cat-file -e "$base^{commit}" 2>/dev/null || base=HEAD~1
+          fi
+          CLANG_FORMAT=clang-format-18 GIT_CLANG_FORMAT=git-clang-format-18 \
+            sh scripts/style-check.sh "$base"
+
+  fuzz:
+    # libFuzzer harnesses (test/fuzz/): every committed corpus input once
+    # (the regression run: each crash-* input is a fixed bug), then 60 s
+    # of fuzzing per harness.  The nightly fuzz-nightly job runs 10 min.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang make autoconf pkg-config libssl-dev \
+            liburing-dev gawk
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: Corpus regression (every input once)
+        run: CC=clang sh scripts/fuzz.sh all 0
+      - name: Fuzz each harness for 60 s
+        run: CC=clang sh scripts/fuzz.sh all 60
+      - name: Keep crash reproducers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: build_fuzz/fuzz-out/*/artifacts/
+          if-no-files-found: ignore
+
+  fuzz-nightly:
+    # 10 minutes per harness (nightly / on demand), the OpenSSL build, and
+    # fuzz_tls on the mbedTLS and GnuTLS backends whose ALPN decoders are
+    # libxtc code.  A crash uploads its reproducer: fix it, then commit the
+    # input as test/fuzz/corpus/NAME/crash-<what> (test/fuzz/README.md).
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang make autoconf pkg-config libssl-dev \
+            liburing-dev gawk libmbedtls-dev libgnutls28-dev
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: Fuzz each harness for 10 min
+        run: CC=clang sh scripts/fuzz.sh all 600
+      - name: fuzz_tls on mbedTLS and GnuTLS (10 min each)
+        run: |
+          rc=0
+          for b in mbedtls gnutls; do
+            FUZZ_BUILD=build_fuzz_$b FUZZ_CONFIGURE=--with-tls=$b \
+              CC=clang sh scripts/fuzz.sh tls 600 || rc=1
+          done
+          exit $rc
+      - name: Keep crash reproducers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-nightly-artifacts
+          path: build_fuzz*/fuzz-out/*/artifacts/
+          if-no-files-found: ignore
+
+  compat:
+    # The N-1 consumer gate (scripts/compat-check.sh): test/abi's consumer
+    # from the PREVIOUS 2.x release tag, compiled against that release's
+    # installed headers, must run against this tree's libxtc.a and
+    # libxtc.so.  With the layout gate (test/abi/layout.txt in make check)
+    # it is the mechanical half of the 2.x ABI promise.  SKIPS, saying
+    # why, until a 2.x tag exists: 1.x -> 2.0 is the major break.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc make autoconf pkg-config libssl-dev \
+            liburing-dev gawk
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: N-1 consumer against this library
+        run: sh scripts/compat-check.sh
+
   sanitizers:
     # SCOPE, stated so nobody assumes coverage this job does not have:
     # this is the ordinary (epoll/uring) `make check` under ASan or UBSan.
@@ -1210,10 +1328,10 @@ jobs:
             *)
               ../dist/configure --with-tls=${{ matrix.backend }} ;;
           esac
-      - name: Build + run the m18 TLS suite
+      - name: Build + run the m18 TLS suite (incl. per-backend ALPN validation)
         run: |
-          make -C build_tls -j"$(nproc)" test_tls_server test_tls_client
-          ( cd build_tls && ./test_tls_server && ./test_tls_client )
+          make -C build_tls -j"$(nproc)" test_tls_basic test_tls_server test_tls_client
+          ( cd build_tls && ./test_tls_basic && ./test_tls_server && ./test_tls_client )
 
   macos:
     # macOS runtime coverage: kqueue I/O backend + the fcontext coroutine

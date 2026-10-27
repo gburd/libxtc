@@ -304,7 +304,7 @@ test_ctx_bad_alpn(const MunitParameter params[], void *data)
 			    : XTC_TLS_SERVER, &opts, &ctx);
 			free(w);
 			if (rc == XTC_E_NOSYS)
-				return MUNIT_SKIP;      /* built without TLS */
+				return MUNIT_SKIP;      /* no TLS, or no ALPN */
 			if (i < 4) {
 				munit_assert_int(rc, ==, XTC_E_INVAL);
 				munit_assert_null(ctx);
