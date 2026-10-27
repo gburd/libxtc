@@ -13,7 +13,9 @@
  *                data both ways over loopback TCP; when the kernel took
  *                TX the server's xtc_tls_write and xtc_tls_sendfile reach
  *                the client intact, and the client's data reaches the
- *                server (kernel RX).  SKIP (77 semantics via
+ *                server (kernel RX); a 256 KiB xtc_tls_write is at most
+ *                4 write(2)s (the kernel frames records, not OpenSSL's
+ *                16 KiB-per-syscall path).  SKIP (77 semantics via
  *                MUNIT_SKIP) when the kernel/OpenSSL declines kTLS.
  *                When the kernel itself has the TLS ULP (probed with
  *                setsockopt(TCP_ULP) directly), kernel TX is REQUIRED,
@@ -131,21 +133,28 @@ kernel_has_ktls(void)
 #endif
 }
 
-/* This thread's read-syscall count (Linux /proc/thread-self/io syscr);
- * -1 when unavailable. */
+/* This thread's read- or write-syscall count (Linux /proc/thread-self/io
+ * syscr / syscw); -1 when unavailable. */
 static long long
-thread_syscr(void)
+thread_io_count(const char *key)
 {
-	char line[128];
+	char line[128], fmt[32];
 	long long v = -1;
 	FILE *fp = fopen("/proc/thread-self/io", "r");
 	if (fp == NULL)
 		return -1;
+	(void)snprintf(fmt, sizeof fmt, "%s: %%lld", key);
 	while (fgets(line, sizeof line, fp) != NULL)
-		if (sscanf(line, "syscr: %lld", &v) == 1)
+		if (sscanf(line, fmt, &v) == 1)
 			break;
 	fclose(fp);
 	return v;
+}
+
+static long long
+thread_syscr(void)
+{
+	return thread_io_count("syscr");
 }
 
 static int
@@ -380,9 +389,23 @@ test_roundtrip(const MunitParameter p[], void *d)
 	if (kernel_has_ktls())
 		munit_assert_int(active & XTC_TLS_KTLS_TX, !=, 0);
 	if ((active & XTC_TLS_KTLS_TX) != 0) {
-		long long r0, r1, probe, calls = 0;
+		long long r0, r1, probe, calls = 0, w0, w1;
+		int sndbuf = 4 << 20;
+		/* The kernel frames the records: a 256 KiB write is one
+		 * write(2), not one per 16 KiB record (OpenSSL's kTLS write
+		 * path: 16 here, and 0.71x the user-space TLS rate in
+		 * bench_tls_sendfile).  The send buffer holds the whole write,
+		 * so only a slow reader could split it. */
+		(void)setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &sndbuf,
+		    sizeof sndbuf);
+		w0 = thread_io_count("syscw");
 		munit_assert_int(write_all(tls, sv[0], g_msg, RT_MSG), ==,
 		    XTC_OK);
+		w1 = thread_io_count("syscw");
+		fprintf(stderr, "write: %u bytes in %lld write(2)s\n", RT_MSG,
+		    w1 - w0);
+		if (w0 >= 0 && w1 >= 0)
+			munit_assert_llong(w1 - w0, <=, 4);
 		probe = thread_syscr();
 		r0 = thread_syscr();
 		probe = r0 - probe;          /* the probe's own read(2)s */

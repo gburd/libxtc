@@ -1,13 +1,14 @@
 .\" Copyright (c) 2026, The XTC Project
 .\" Use of this source code is governed by the ISC License.
-.Dd July 10, 2026
+.Dd October 27, 2026
 .Dt XTC_PG 3
 .Os
 .Sh NAME
 .Nm xtc_pg_join ,
 .Nm xtc_pg_leave ,
 .Nm xtc_pg_members ,
-.Nm xtc_pg_send
+.Nm xtc_pg_send ,
+.Nm xtc_pg_send_owned
 .Nd process groups (pub/sub and fan-out)
 .Sh LIBRARY
 .Lb libxtc
@@ -21,6 +22,8 @@
 .Fn xtc_pg_members "xtc_reg_t *reg" "const char *group" "int (*fn)(xtc_pid_t, void *)" "void *user"
 .Ft int
 .Fn xtc_pg_send "xtc_reg_t *reg" "const char *group" "const void *msg" "size_t size"
+.Ft int
+.Fn xtc_pg_send_owned "xtc_reg_t *reg" "const char *group" "void *buf" "size_t size"
 .Sh DESCRIPTION
 A process group is a named membership set of pids -- the Erlang
 .Ql pg ,
@@ -62,6 +65,19 @@ broadcasts
 registry lock and then sends OUTSIDE the lock, so a bounded-mailbox park
 never happens with the registry lock held.  A send to an
 already-dead member fails harmlessly and is skipped.
+.Pp
+.Fn xtc_pg_send_owned
+broadcasts a buffer the caller gives away: it must come from
+.Fn xtc_malloc .
+Every member but the last receives a copy; the last receives
+.Fa buf
+itself, as
+.Fn xtc_send_owned
+would hand it over, so a group of one member costs no copy and a group
+of N costs N - 1.
+.Fa buf
+belongs to the library on return, whatever happened: it was moved, or
+it was freed because no member took it.
 .Sh RETURN VALUES
 .Fn xtc_pg_join
 and
@@ -74,7 +90,9 @@ code.
 .Fn xtc_pg_members
 returns the number of members visited.
 .Fn xtc_pg_send
-returns the number of members the message was successfully sent to.
+and
+.Fn xtc_pg_send_owned
+return the number of members the message was successfully sent to.
 .Sh NOTES
 Single node only.  Cross-node process groups need the distributed
 module, which is not built.  Until the registry gains a monitor that

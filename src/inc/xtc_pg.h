@@ -34,6 +34,7 @@
  * PUBLIC: int xtc_pg_leave __P((xtc_reg_t *, const char *, xtc_pid_t));
  * PUBLIC: int xtc_pg_members __P((xtc_reg_t *, const char *, int (*)(xtc_pid_t, void *), void *));
  * PUBLIC: int xtc_pg_send __P((xtc_reg_t *, const char *, const void *, size_t));
+ * PUBLIC: int xtc_pg_send_owned __P((xtc_reg_t *, const char *, void *, size_t));
  */
 
 /* Add `pid` to group `group` (idempotent).  Typically the caller joins
@@ -55,5 +56,14 @@ XTC_API int xtc_pg_members(xtc_reg_t *reg, const char *group,
  * embedder's responsibility until the registry monitor lands). */
 XTC_API int xtc_pg_send(xtc_reg_t *reg, const char *group,
                         const void *msg, size_t size);
+
+/* xtc_pg_send of an xtc_malloc'd buffer the caller gives away: every
+ * member but the last gets a copy, the last gets `buf` itself
+ * (xtc_send_owned), so a group of one member costs no copy and a group
+ * of N costs N - 1.  `buf` is the library's on return whatever happens
+ * (moved, or freed when no member took it); do not touch it after the
+ * call.  Returns the number of members the message was sent to. */
+XTC_API int xtc_pg_send_owned(xtc_reg_t *reg, const char *group,
+                              void *buf, size_t size);
 
 #endif /* XTC_PG_H */

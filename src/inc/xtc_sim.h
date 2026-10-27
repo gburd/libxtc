@@ -37,6 +37,7 @@ enum xtc_sim_stream {
 	XTC_SIM_RNG_FAULT   = 5,   /* fault-injection toggles */
 	XTC_SIM_RNG_APP     = 6,   /* application/test draws */
 	XTC_SIM_RNG_BUGGIFY = 7,   /* buggify per-call activation coins */
+	XTC_SIM_RNG_RAND    = 8,   /* xtc_rand_u64 on an un-seeded thread */
 	XTC_SIM_RNG_NSTREAMS
 };
 
@@ -62,7 +63,7 @@ enum xtc_sim_stream {
 XTC_API int      __xtc_sim_active(void);
 
 /* Determinism guard.  A sim-reachable primitive that would break seed
- * replay (real clock, unseeded RNG, env read, raw thread id) calls
+ * replay (real clock, env read, raw thread id) calls
  * __xtc_sim_nondeterminism(what); during a sim run it records the
  * violation and, in strict mode (default), aborts naming the source.
  * xtc_sim_strict toggles abort-vs-count; xtc_sim_nondeterminism_count

@@ -246,6 +246,9 @@ int         xtc_env_set(const char *name, const char *value, int overwrite);
  *	xtc_rand_seed makes the calling thread's stream reproducible: the
  *	same seed yields the same sequence.  An un-seeded thread auto-seeds
  *	from the clock, so distinct threads get distinct default streams.
+ *	Under the deterministic simulator an un-seeded thread draws from
+ *	the run's own stream instead, so its values replay from the run's
+ *	seed (a seeded thread keeps its own sequence).
  *	This is NOT a cryptographic generator; do not use it for keys or
  *	security tokens.
  */

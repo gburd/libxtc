@@ -24,6 +24,20 @@ extern xtc_counter_t *rexis_stat_unknown_cmd;
 extern xtc_hist_t    *rexis_stat_cmd_latency;
 
 /* Local helper wrapping xtc_clock_mono(). */
+/* The keyspace shards a command's keys live in (db_lock): argv[1], or
+ * every argument for a multi-key command (DEL, EXISTS). */
+static db_keyset_t
+cmd_keyset(cmd_ctx_t *ctx, int multi)
+{
+	db_keyset_t set = 0;
+	int i;
+
+	for (i = 1; i < (multi ? ctx->argc : 2); i++)
+		set |= db_key_shard(ctx->db, ctx->argv[i].u.str.data,
+		    ctx->argv[i].u.str.len);
+	return set;
+}
+
 static inline int64_t xtc_now_ns(void) {
 	int64_t t; t = xtc_clock_mono(); return t;
 }
@@ -97,8 +111,9 @@ cmd_get(cmd_ctx_t *ctx)
 {
 	const char *data;
 	size_t len;
+	db_keyset_t ks = cmd_keyset(ctx, 0);
 
-	db_read_begin(ctx->db);
+	db_lock(ctx->db, ks, 0);
 	if (db_get(ctx->db, ctx->argv[1].u.str.data, ctx->argv[1].u.str.len,
 	           &data, &len) == 0) {
 		/* A large value is sent from the keyspace's own memory: the
@@ -119,7 +134,7 @@ cmd_get(cmd_ctx_t *ctx)
 	} else {
 		resp_write_bulk_null(ctx->out);
 	}
-	db_read_end(ctx->db);
+	db_unlock(ctx->db, ks, 0);
 	return 0;
 }
 
@@ -128,6 +143,7 @@ cmd_set(cmd_ctx_t *ctx)
 {
 	int64_t expire_ns = 0;
 	int i;
+	db_keyset_t ks = cmd_keyset(ctx, 0);
 
 	/* Parse options: EX seconds, PX milliseconds, NX, XX */
 	for (i = 3; i < ctx->argc; i++) {
@@ -146,15 +162,15 @@ cmd_set(cmd_ctx_t *ctx)
 		/* NX/XX ignored for simplicity */
 	}
 
-	db_write_begin(ctx->db);
+	db_lock(ctx->db, ks, 1);
 	if (db_set_ex(ctx->db, ctx->argv[1].u.str.data, ctx->argv[1].u.str.len,
 	              ctx->argv[2].u.str.data, ctx->argv[2].u.str.len,
 	              expire_ns) < 0) {
-		db_write_end(ctx->db);
+		db_unlock(ctx->db, ks, 1);
 		resp_write_error_n(ctx->out, "OOM", "out of memory or key limit reached");
 		return 0;
 	}
-	db_write_end(ctx->db);
+	db_unlock(ctx->db, ks, 1);
 	resp_write_ok(ctx->out);
 	return 0;
 }
@@ -163,13 +179,14 @@ static int
 cmd_del(cmd_ctx_t *ctx)
 {
 	int i, count = 0;
+	db_keyset_t ks = cmd_keyset(ctx, 1);
 
-	db_write_begin(ctx->db);
+	db_lock(ctx->db, ks, 1);
 	for (i = 1; i < ctx->argc; i++) {
 		count += db_del(ctx->db, ctx->argv[i].u.str.data,
 		                ctx->argv[i].u.str.len);
 	}
-	db_write_end(ctx->db);
+	db_unlock(ctx->db, ks, 1);
 	resp_write_int(ctx->out, count);
 	return 0;
 }
@@ -178,13 +195,14 @@ static int
 cmd_exists(cmd_ctx_t *ctx)
 {
 	int i, count = 0;
+	db_keyset_t ks = cmd_keyset(ctx, 1);
 
-	db_read_begin(ctx->db);
+	db_lock(ctx->db, ks, 0);
 	for (i = 1; i < ctx->argc; i++) {
 		count += db_exists(ctx->db, ctx->argv[i].u.str.data,
 		                   ctx->argv[i].u.str.len);
 	}
-	db_read_end(ctx->db);
+	db_unlock(ctx->db, ks, 0);
 	resp_write_int(ctx->out, count);
 	return 0;
 }
@@ -193,11 +211,12 @@ static int
 cmd_incr(cmd_ctx_t *ctx)
 {
 	int64_t val;
+	db_keyset_t ks = cmd_keyset(ctx, 0);
 
-	db_write_begin(ctx->db);
+	db_lock(ctx->db, ks, 1);
 	val = db_incr(ctx->db, ctx->argv[1].u.str.data,
 	              ctx->argv[1].u.str.len, 1);
-	db_write_end(ctx->db);
+	db_unlock(ctx->db, ks, 1);
 
 	if (val == -1) {
 		resp_write_error(ctx->out, "value is not an integer");
@@ -211,11 +230,12 @@ static int
 cmd_decr(cmd_ctx_t *ctx)
 {
 	int64_t val;
+	db_keyset_t ks = cmd_keyset(ctx, 0);
 
-	db_write_begin(ctx->db);
+	db_lock(ctx->db, ks, 1);
 	val = db_incr(ctx->db, ctx->argv[1].u.str.data,
 	              ctx->argv[1].u.str.len, -1);
-	db_write_end(ctx->db);
+	db_unlock(ctx->db, ks, 1);
 
 	if (val == -1) {
 		resp_write_error(ctx->out, "value is not an integer");
@@ -229,13 +249,14 @@ static int
 cmd_incrby(cmd_ctx_t *ctx)
 {
 	int64_t delta, val;
+	db_keyset_t ks = cmd_keyset(ctx, 0);
 
 	delta = atoll(ctx->argv[2].u.str.data);
 
-	db_write_begin(ctx->db);
+	db_lock(ctx->db, ks, 1);
 	val = db_incr(ctx->db, ctx->argv[1].u.str.data,
 	              ctx->argv[1].u.str.len, delta);
-	db_write_end(ctx->db);
+	db_unlock(ctx->db, ks, 1);
 
 	if (val == -1) {
 		resp_write_error(ctx->out, "value is not an integer");
@@ -249,13 +270,14 @@ static int
 cmd_decrby(cmd_ctx_t *ctx)
 {
 	int64_t delta, val;
+	db_keyset_t ks = cmd_keyset(ctx, 0);
 
 	delta = atoll(ctx->argv[2].u.str.data);
 
-	db_write_begin(ctx->db);
+	db_lock(ctx->db, ks, 1);
 	val = db_incr(ctx->db, ctx->argv[1].u.str.data,
 	              ctx->argv[1].u.str.len, -delta);
-	db_write_end(ctx->db);
+	db_unlock(ctx->db, ks, 1);
 
 	if (val == -1) {
 		resp_write_error(ctx->out, "value is not an integer");
@@ -269,18 +291,19 @@ static int
 cmd_expire(cmd_ctx_t *ctx)
 {
 	int64_t secs, expire_ns;
+	db_keyset_t ks = cmd_keyset(ctx, 0);
 
 	secs = atoll(ctx->argv[2].u.str.data);
 	expire_ns = xtc_now_ns() + secs * 1000000000LL;
 
-	db_write_begin(ctx->db);
+	db_lock(ctx->db, ks, 1);
 	if (db_expire(ctx->db, ctx->argv[1].u.str.data,
 	              ctx->argv[1].u.str.len, expire_ns) < 0) {
-		db_write_end(ctx->db);
+		db_unlock(ctx->db, ks, 1);
 		resp_write_int(ctx->out, 0);
 		return 0;
 	}
-	db_write_end(ctx->db);
+	db_unlock(ctx->db, ks, 1);
 	resp_write_int(ctx->out, 1);
 	return 0;
 }
@@ -289,10 +312,11 @@ static int
 cmd_ttl(cmd_ctx_t *ctx)
 {
 	int ttl;
+	db_keyset_t ks = cmd_keyset(ctx, 0);
 
-	db_read_begin(ctx->db);
+	db_lock(ctx->db, ks, 0);
 	ttl = db_ttl(ctx->db, ctx->argv[1].u.str.data, ctx->argv[1].u.str.len);
-	db_read_end(ctx->db);
+	db_unlock(ctx->db, ks, 0);
 	resp_write_int(ctx->out, ttl);
 	return 0;
 }
@@ -369,20 +393,21 @@ cmd_lpush(cmd_ctx_t *ctx)
 {
 	int64_t len = 0;
 	int i;
+	db_keyset_t ks = cmd_keyset(ctx, 0);
 
-	db_write_begin(ctx->db);
+	db_lock(ctx->db, ks, 1);
 	for (i = 2; i < ctx->argc; i++) {
 		len = db_lpush(ctx->db, ctx->argv[1].u.str.data,
 		               ctx->argv[1].u.str.len,
 		               ctx->argv[i].u.str.data,
 		               ctx->argv[i].u.str.len);
 		if (len < 0) {
-			db_write_end(ctx->db);
+			db_unlock(ctx->db, ks, 1);
 			resp_write_error_n(ctx->out, "OOM", "out of memory");
 			return 0;
 		}
 	}
-	db_write_end(ctx->db);
+	db_unlock(ctx->db, ks, 1);
 	resp_write_int(ctx->out, len);
 	return 0;
 }
@@ -392,20 +417,21 @@ cmd_rpush(cmd_ctx_t *ctx)
 {
 	int64_t len = 0;
 	int i;
+	db_keyset_t ks = cmd_keyset(ctx, 0);
 
-	db_write_begin(ctx->db);
+	db_lock(ctx->db, ks, 1);
 	for (i = 2; i < ctx->argc; i++) {
 		len = db_rpush(ctx->db, ctx->argv[1].u.str.data,
 		               ctx->argv[1].u.str.len,
 		               ctx->argv[i].u.str.data,
 		               ctx->argv[i].u.str.len);
 		if (len < 0) {
-			db_write_end(ctx->db);
+			db_unlock(ctx->db, ks, 1);
 			resp_write_error_n(ctx->out, "OOM", "out of memory");
 			return 0;
 		}
 	}
-	db_write_end(ctx->db);
+	db_unlock(ctx->db, ks, 1);
 	resp_write_int(ctx->out, len);
 	return 0;
 }
@@ -428,11 +454,12 @@ static int
 cmd_lpop(cmd_ctx_t *ctx)
 {
 	struct pop_state st = { .out = ctx->out, .found = 0 };
+	db_keyset_t ks = cmd_keyset(ctx, 0);
 
-	db_write_begin(ctx->db);
+	db_lock(ctx->db, ks, 1);
 	db_lpop(ctx->db, ctx->argv[1].u.str.data, ctx->argv[1].u.str.len,
 	        pop_cb, &st);
-	db_write_end(ctx->db);
+	db_unlock(ctx->db, ks, 1);
 
 	if (!st.found)
 		resp_write_bulk_null(ctx->out);
@@ -443,11 +470,12 @@ static int
 cmd_rpop(cmd_ctx_t *ctx)
 {
 	struct pop_state st = { .out = ctx->out, .found = 0 };
+	db_keyset_t ks = cmd_keyset(ctx, 0);
 
-	db_write_begin(ctx->db);
+	db_lock(ctx->db, ks, 1);
 	db_rpop(ctx->db, ctx->argv[1].u.str.data, ctx->argv[1].u.str.len,
 	        pop_cb, &st);
-	db_write_end(ctx->db);
+	db_unlock(ctx->db, ks, 1);
 
 	if (!st.found)
 		resp_write_bulk_null(ctx->out);
@@ -458,10 +486,11 @@ static int
 cmd_llen(cmd_ctx_t *ctx)
 {
 	size_t len;
+	db_keyset_t ks = cmd_keyset(ctx, 0);
 
-	db_read_begin(ctx->db);
+	db_lock(ctx->db, ks, 0);
 	len = db_llen(ctx->db, ctx->argv[1].u.str.data, ctx->argv[1].u.str.len);
-	db_read_end(ctx->db);
+	db_unlock(ctx->db, ks, 0);
 	resp_write_int(ctx->out, (int64_t)len);
 	return 0;
 }
@@ -470,14 +499,15 @@ static int
 cmd_lrange(cmd_ctx_t *ctx)
 {
 	int64_t start, stop;
+	db_keyset_t ks = cmd_keyset(ctx, 0);
 
 	start = atoll(ctx->argv[2].u.str.data);
 	stop = atoll(ctx->argv[3].u.str.data);
 
-	db_read_begin(ctx->db);
+	db_lock(ctx->db, ks, 0);
 	(void)db_lrange(ctx->db, ctx->argv[1].u.str.data,
 	    ctx->argv[1].u.str.len, start, stop, visit_bulk, ctx->out);
-	db_read_end(ctx->db);
+	db_unlock(ctx->db, ks, 0);
 	return 0;
 }
 
@@ -487,21 +517,22 @@ static int
 cmd_hset(cmd_ctx_t *ctx)
 {
 	int i, added = 0;
+	db_keyset_t ks = cmd_keyset(ctx, 0);
 
-	db_write_begin(ctx->db);
+	db_lock(ctx->db, ks, 1);
 	for (i = 2; i + 1 < ctx->argc; i += 2) {
 		int r = db_hset(ctx->db,
 		                ctx->argv[1].u.str.data, ctx->argv[1].u.str.len,
 		                ctx->argv[i].u.str.data, ctx->argv[i].u.str.len,
 		                ctx->argv[i+1].u.str.data, ctx->argv[i+1].u.str.len);
 		if (r < 0) {
-			db_write_end(ctx->db);
+			db_unlock(ctx->db, ks, 1);
 			resp_write_error_n(ctx->out, "OOM", "out of memory");
 			return 0;
 		}
 		added += r;
 	}
-	db_write_end(ctx->db);
+	db_unlock(ctx->db, ks, 1);
 	resp_write_int(ctx->out, added);
 	return 0;
 }
@@ -511,8 +542,9 @@ cmd_hget(cmd_ctx_t *ctx)
 {
 	const char *data;
 	size_t len;
+	db_keyset_t ks = cmd_keyset(ctx, 0);
 
-	db_read_begin(ctx->db);
+	db_lock(ctx->db, ks, 0);
 	if (db_hget(ctx->db, ctx->argv[1].u.str.data, ctx->argv[1].u.str.len,
 	            ctx->argv[2].u.str.data, ctx->argv[2].u.str.len,
 	            &data, &len) == 0) {
@@ -520,7 +552,7 @@ cmd_hget(cmd_ctx_t *ctx)
 	} else {
 		resp_write_bulk_null(ctx->out);
 	}
-	db_read_end(ctx->db);
+	db_unlock(ctx->db, ks, 0);
 	return 0;
 }
 
@@ -528,14 +560,15 @@ static int
 cmd_hdel(cmd_ctx_t *ctx)
 {
 	int i, count = 0;
+	db_keyset_t ks = cmd_keyset(ctx, 0);
 
-	db_write_begin(ctx->db);
+	db_lock(ctx->db, ks, 1);
 	for (i = 2; i < ctx->argc; i++) {
 		count += db_hdel(ctx->db,
 		                 ctx->argv[1].u.str.data, ctx->argv[1].u.str.len,
 		                 ctx->argv[i].u.str.data, ctx->argv[i].u.str.len);
 	}
-	db_write_end(ctx->db);
+	db_unlock(ctx->db, ks, 1);
 	resp_write_int(ctx->out, count);
 	return 0;
 }
@@ -543,30 +576,36 @@ cmd_hdel(cmd_ctx_t *ctx)
 static int
 cmd_hkeys(cmd_ctx_t *ctx)
 {
-	db_read_begin(ctx->db);
+	db_keyset_t ks = cmd_keyset(ctx, 0);
+
+	db_lock(ctx->db, ks, 0);
 	(void)db_hscan(ctx->db, ctx->argv[1].u.str.data,
 	    ctx->argv[1].u.str.len, visit_bulk, ctx->out);
-	db_read_end(ctx->db);
+	db_unlock(ctx->db, ks, 0);
 	return 0;
 }
 
 static int
 cmd_hvals(cmd_ctx_t *ctx)
 {
-	db_read_begin(ctx->db);
+	db_keyset_t ks = cmd_keyset(ctx, 0);
+
+	db_lock(ctx->db, ks, 0);
 	(void)db_hscan(ctx->db, ctx->argv[1].u.str.data,
 	    ctx->argv[1].u.str.len, visit_val, ctx->out);
-	db_read_end(ctx->db);
+	db_unlock(ctx->db, ks, 0);
 	return 0;
 }
 
 static int
 cmd_hgetall(cmd_ctx_t *ctx)
 {
-	db_read_begin(ctx->db);
+	db_keyset_t ks = cmd_keyset(ctx, 0);
+
+	db_lock(ctx->db, ks, 0);
 	(void)db_hscan(ctx->db, ctx->argv[1].u.str.data,
 	    ctx->argv[1].u.str.len, visit_pair, ctx->out);
-	db_read_end(ctx->db);
+	db_unlock(ctx->db, ks, 0);
 	return 0;
 }
 
@@ -574,10 +613,11 @@ static int
 cmd_hlen(cmd_ctx_t *ctx)
 {
 	size_t len;
+	db_keyset_t ks = cmd_keyset(ctx, 0);
 
-	db_read_begin(ctx->db);
+	db_lock(ctx->db, ks, 0);
 	len = db_hlen(ctx->db, ctx->argv[1].u.str.data, ctx->argv[1].u.str.len);
-	db_read_end(ctx->db);
+	db_unlock(ctx->db, ks, 0);
 	resp_write_int(ctx->out, (int64_t)len);
 	return 0;
 }
@@ -783,8 +823,10 @@ cmd_publish(cmd_ctx_t *ctx)
 		return 0;
 	}
 
-	/* Build the RESP push frame in a heap buffer; xtc_pg_send copies it
-	 * into each subscriber's mailbox, so we free our copy afterward.
+	/* Build the RESP push frame in a heap buffer and give it away:
+	 * xtc_pg_send_owned moves it to the last subscriber and copies it
+	 * for the others (a channel with one subscriber costs no copy), and
+	 * frees it if nobody took it.
 	 * Sizing: array header + "message" + channel + payload, each bulk
 	 * costs len + a small envelope ("$<len>\r\n...\r\n"). */
 	cap = 64 + clen + plen;
@@ -798,8 +840,7 @@ cmd_publish(cmd_ctx_t *ctx)
 	resp_write_bulk(&fb, ch, clen);
 	resp_write_bulk(&fb, payload, plen);
 
-	n = xtc_pg_send(ctx->pubsub, key, frame, fb.len);
-	xtc_free(frame);
+	n = xtc_pg_send_owned(ctx->pubsub, key, frame, fb.len);
 
 	resp_write_int(ctx->out, n);
 	return 0;

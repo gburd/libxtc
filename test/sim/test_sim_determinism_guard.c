@@ -18,10 +18,11 @@
  *	in the native-engine composition tests.  A synthetic injection
  *	test cannot catch that; this one does.
  *
- *	For EACH of the four classes, call the actual primitive while a
- *	sim is active and assert the violation counter advanced.  Also
- *	assert a SEEDED RNG draw does NOT trip it, so the guard is not
- *	simply crying wolf on every draw.
+ *	For EACH guarded class, call the actual primitive while a sim is
+ *	active and assert the violation counter advanced.  The RNG is no
+ *	longer a guarded class (2.0): under the simulator an un-seeded
+ *	draw takes the run's own stream, so assert it does NOT trip and
+ *	replays, and that a SEEDED draw does not trip either.
  *
  *	Count mode (xtc_sim_strict(0)) is used deliberately: the guard's
  *	behavior under a real sim run is to abort, which a test cannot
@@ -92,17 +93,29 @@ main(void)
 	}
 
 	/*
-	 * --- 2. unseeded RNG -- the auto-seed path is unreplayable ---
-	 * Only the FIRST draw on a thread auto-seeds (it mixes the clock
-	 * with an ASLR-dependent address), so this must be this thread's
-	 * first draw; nothing above draws.
+	 * --- 2. un-seeded RNG -- replays from the run's stream ---
+	 * Off the simulator an un-seeded thread seeds from the clock and an
+	 * ASLR-dependent address, which no seed reproduces.  Under it the
+	 * draw takes the run's XTC_SIM_RNG_RAND stream instead, so it must
+	 * NOT trip the guard, and re-activating with the same seed must
+	 * draw the same value (xtc_sim_activate also zeroes the count).
 	 */
 	{
-		before = xtc_sim_nondeterminism_count();
-		(void)__os_rand_u64();
+		uint64_t r1, r2;
+		xtc_sim_activate(0xD371E511u);
+		r1 = __os_rand_u64();
+		xtc_sim_activate(0xD371E511u);
+		r2 = __os_rand_u64();
 		after = xtc_sim_nondeterminism_count();
-		expect_trapped("unseeded RNG (__os_rand_u64 auto-seed)",
-		    before, after);
+		if (after != 0 || r1 != r2) {
+			printf("  [guard] FAIL: an un-seeded __os_rand_u64 draw "
+			    "under sim %s\n", after != 0 ? "tripped the guard" :
+			    "did not replay from the run's seed");
+			g_failures++;
+		} else {
+			printf("  [guard] OK: un-seeded RNG draw replays from the "
+			    "run's seed (not trapped)\n");
+		}
 	}
 
 	/* A SEEDED stream is deterministic and must NOT trip the guard,
@@ -147,12 +160,12 @@ main(void)
 
 	if (g_failures != 0) {
 		printf("FAIL: %d determinism-guard hole(s) -- AGENTS.md "
-		    "yardstick #1 claims all four classes are trapped\n",
+		    "yardstick #1 claims these classes are trapped\n",
 		    g_failures);
 		return 1;
 	}
-	printf("OK: determinism guard traps all four nondeterminism classes "
-	    "(real clock, unseeded RNG, env read, raw thread id) and does not "
-	    "false-positive on a seeded RNG stream\n");
+	printf("OK: determinism guard traps the real clock, env reads and raw "
+	    "thread ids; an un-seeded RNG draw replays from the run's seed and "
+	    "a seeded one is not trapped\n");
 	return 0;
 }
