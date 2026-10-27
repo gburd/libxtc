@@ -1103,6 +1103,24 @@ jobs:
               ./$t || echo "helgrind $t reported issues (informational)"
           done
 
+      - name: memcheck over the DST suite (determinism holes)
+        run: |
+          # An uninitialised byte that reaches a replayed decision, a page
+          # image or a run hash is a determinism hole the replay check sees
+          # only by chance (a 2% replay mismatch in p162 came from one).
+          # Every sim test runs under memcheck; any error fails the job.
+          # test_sim_scope is excluded: it faults on purpose (a write to
+          # 0x10 the per-proc guard contains), which memcheck reports.
+          set -e
+          mkdir -p "$RUNNER_TEMP/simvg"
+          all=$(sed -n 's/^for t in \(test_sim_[^;]*\); do$/\1/p' test/sim/run_sim_tests.sh)
+          only=$(printf '%s\n' $all | grep -vx test_sim_scope | tr '\n' ' ')
+          XTC_SRC_DIR="$PWD" XTC_SIM_KEEP_BUILD="$RUNNER_TEMP/simvg" \
+            XTC_SIM_ONLY="$only" \
+            XTC_SIM_RUNNER="valgrind --tool=memcheck -q --error-exitcode=99 \
+              --track-origins=yes --suppressions=$PWD/.github/valgrind.supp" \
+            sh test/sim/run_sim_tests.sh
+
       - name: DRD (data-race detector, informational)
         working-directory: build_vg
         run: |
