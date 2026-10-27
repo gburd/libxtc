@@ -64,8 +64,11 @@ state and buffers -- there is no shared connection table to lock. By
 default all of them run on ONE `xtc_loop` (one OS thread), like Redis.
 `--loops=N` spreads the connection processes over the N loops of an
 `xtc_exec` executor: each connection goes to the least-loaded loop, and
-the keyspace, now shared by N threads, takes one parking reader/writer
-latch (`xtc_arwlock`) per command, so writes are still serialized.
+the keyspace, now shared by N threads, is cut into 64 shards by key hash,
+each with its own parking reader/writer latch (`xtc_arwlock`). A command
+latches only its keys' shards, so writes to different keys run in
+parallel: SET at `--loops=4` measured 1.60M/s, against 0.14M/s with one
+latch for the whole keyspace (one loop: 0.89M/s).
 
 Spreading is also how rexis gets past a hard per-loop limit. A pid
 names its process by loop and a 16-bit slot (`xtc_pid_t.local_id`), so

@@ -271,14 +271,20 @@ shaped the library:
   the note in `bitcask.h` about why, and `examples/06_sqlxtc/wal.c` for
   the `xtc_aio_*` alternative.
 * `KEYS pattern` is O(n) like real Redis -- documented, not a bug.
-* `--loops=N` spreads CONNECTIONS, not the keyspace.  The lrlock guards
-  only the table header; both copies share the buckets and entries, and
-  writers free entries in place, so with N > 1 every command also takes
-  one `xtc_arwlock` (readers share it, writers serialize).  That buys
-  connection capacity (65,520 clients per loop) and parallel parsing and
-  I/O, not parallel writes.  The scalable shape is DragonFly's: one
-  keyspace shard per loop, each command run on (or sent to) the loop that
-  owns its key -- see `docs/examples/rexis-vs-dragonfly.md`.
+* `--loops=N` spreads connections, and with N > 1 the keyspace is cut
+  into 64 shards by key hash.  The lrlock guards only a table header;
+  both copies share the buckets and entries, and writers free entries
+  in place, so each shard also has an `xtc_arwlock` (readers share it,
+  writers to that shard serialize).  A command takes only the shards of
+  its keys, in ascending order (`db_lock`; DEL and EXISTS may name
+  several); KEYS, FLUSHDB, expiry and the persistence replay take all
+  of them.  Measured, 32-vCPU x86-64 host, valkey-benchmark -c 200
+  --threads 8 -P 16, 32 B, 1M keys, median of 3: SET at `--loops=2`
+  1.14M/s and at `--loops=4` 1.60M/s, where one latch for the whole
+  keyspace gave 0.23M and 0.14M (one loop: 0.89M).  The shards are not
+  a DragonFly design: any loop runs any command on any shard, so a hot
+  key still serializes its writers and its cache lines move between
+  cores -- see `docs/examples/rexis-vs-dragonfly.md`.
 * An idle connection that has sent nothing costs ~7.3 KB of RSS (its
   fiber stack and per-connection state; Valkey: 0.9 KB): the query and
   output buffers are allocated by the first read and the first reply
