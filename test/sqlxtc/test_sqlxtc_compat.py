@@ -588,6 +588,36 @@ CORPUS = [
       "UPDATE zb SET v = zeroblob(10) WHERE id = 3"],
      "SELECT id, typeof(v), length(v), hex(v) FROM zb ORDER BY id",
      {"ordered": True}),
+    # random() / randomblob(N): the values differ between engines, so
+    # compare what SQLite defines -- the type, the range (never
+    # INT64_MIN), randomblob's length (N < 1 and NULL are 1, a REAL
+    # truncates, a text prefix converts), and that two calls in one row
+    # and one call per row of a scan are distinct draws (64 random bits:
+    # a collision is a ~2^-58 event over these rows).  Blobs compare
+    # through hex(): the native engine declines a BLOB comparison
+    # (zeroblob(2) <> zeroblob(2) too).
+    ("fn_random", [],
+     "SELECT typeof(random()), random() BETWEEN -9223372036854775807 AND "
+     "9223372036854775807, random() <> random(), typeof(random() + 1)"),
+    ("fn_randomblob", [],
+     "SELECT typeof(randomblob(4)), length(randomblob(4)), "
+     "length(randomblob(0)), length(randomblob(-3)), length(randomblob(NULL)), "
+     "length(randomblob(2.9)), length(randomblob('5')), length(randomblob('x')), "
+     "length(hex(randomblob(16))), hex(randomblob(16)) <> hex(randomblob(16))"),
+    ("fn_randomblob_bind", [],
+     "SELECT length(randomblob(?)), typeof(randomblob(?))", {"params": [7, 3]}),
+    ("fn_randomblob_too_big", [], "SELECT randomblob(2000000000)"),
+    ("fn_randomblob_args", [], "SELECT randomblob()"),
+    ("fn_random_args", [], "SELECT random(1)"),
+    ("fn_random_per_row",
+     ["CREATE TABLE rr(id INTEGER PRIMARY KEY)",
+      "INSERT INTO rr VALUES(1),(2),(3),(4),(5),(6),(7),(8)"],
+     "SELECT count(*), count(DISTINCT r), count(DISTINCT length(b)), min(length(b)) "
+     "FROM (SELECT random() AS r, randomblob(8) AS b FROM rr)"),
+    ("fn_random_where",
+     ["CREATE TABLE rw(id INTEGER PRIMARY KEY, v INT)",
+      "INSERT INTO rw VALUES(1,1),(2,2),(3,3)"],
+     "SELECT count(*) FROM rw WHERE id = random()"),
     ("fn_concat", [],
      "SELECT concat('a', NULL, 1, 2.5), concat_ws('-', 'a', NULL, 'b', 3), "
      "concat(NULL), concat_ws(NULL, 1, 2), concat_ws(',', NULL)"),

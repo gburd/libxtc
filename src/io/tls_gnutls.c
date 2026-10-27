@@ -199,6 +199,8 @@ alpn_decode(const char *wire, gnutls_datum_t **out, unsigned int *out_count)
 
 	*out = NULL;
 	*out_count = 0;
+	if (!xtc_tls_alpn_wire_ok(wire))
+		return XTC_E_INVAL;
 
 	while (wire[off] != '\0') {
 		size_t l = (unsigned char)wire[off];

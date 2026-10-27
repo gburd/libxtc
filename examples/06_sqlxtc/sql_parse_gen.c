@@ -122,7 +122,7 @@ static int param_ordinal(sql_parse_state_t *ps, sql_token_t t) {
  * slice covering this leaf in the original SQL).  The whole-expression
  * span is unioned over the tree by sql_expr_span(). */
 static void span_tok(sql_expr_t *e, sql_token_t t) {
-    if (e && t.p && t.len > 0) { e->src = t.p; e->srclen = (uint32_t)t.len; }
+    if (e && t.src && t.srclen > 0) { e->src = t.src; e->srclen = (uint32_t)t.srclen; }
 }
 
 static sql_expr_t *mk_expr(sql_parse_state_t *ps, sql_expr_op_t op) {
@@ -2042,6 +2042,11 @@ static void yyStackOverflow(yyParser *yypParser){
    /* Here code is inserted which will execute if the parser
    ** stack every overflows */
 /******** Begin %stack_overflow code ******************************************/
+#line 214 "sql_grammar.lime"
+
+    pstate->error = 1;
+    pstate->err_msg = "statement nested too deeply";
+#line 2050 "sql_grammar.c"
 /******** End %stack_overflow code ********************************************/
    SqlParseARG_STORE /* Suppress warning about unused %extra_argument var */
    SqlParseCTX_STORE
@@ -2714,7 +2719,7 @@ static void yy_rule_0(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 342 "sql_grammar.lime"
+#line 351 "sql_grammar.lime"
 {
     pstate->stmts = yymsp[-1].minor.yy285;
     /* Route on the FIRST statement.  Set here (not in the per-statement
@@ -2723,7 +2728,7 @@ static void yy_rule_0(yy_reduce_ctx *yy_ctx){
      * before the outer statement reduces. */
     if (yymsp[-1].minor.yy285) { pstate->kind = yymsp[-1].minor.yy285->kind; pstate->readonly = yymsp[-1].minor.yy285->readonly; }
 }
-#line 2718 "sql_grammar.c"
+#line 2723 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -2757,9 +2762,9 @@ static void yy_rule_1(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 354 "sql_grammar.lime"
+#line 363 "sql_grammar.lime"
 { yylhsminor.yy285 = yymsp[0].minor.yy285; }
-#line 2745 "sql_grammar.c"
+#line 2750 "sql_grammar.c"
   yymsp[0].minor.yy285 = yylhsminor.yy285;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -2794,13 +2799,13 @@ static void yy_rule_2(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 355 "sql_grammar.lime"
+#line 364 "sql_grammar.lime"
 {
     /* append S to the tail of L */
     if (yymsp[-2].minor.yy285 == NULL) { yylhsminor.yy285 = yymsp[0].minor.yy285; }
     else { sql_stmt_t *t = yymsp[-2].minor.yy285; while (t->next) t = t->next; t->next = yymsp[0].minor.yy285; yylhsminor.yy285 = yymsp[-2].minor.yy285; }
 }
-#line 2777 "sql_grammar.c"
+#line 2782 "sql_grammar.c"
   yymsp[-2].minor.yy285 = yylhsminor.yy285;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -2835,9 +2840,9 @@ static void yy_rule_3(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 361 "sql_grammar.lime"
+#line 370 "sql_grammar.lime"
 { yylhsminor.yy285 = AST(pstate, sql_stmt_t); if (yylhsminor.yy285) { yylhsminor.yy285->kind = SQL_KIND_SELECT; yylhsminor.yy285->readonly = 1; yylhsminor.yy285->u.select = yymsp[0].minor.yy81; } }
-#line 2805 "sql_grammar.c"
+#line 2810 "sql_grammar.c"
   yymsp[0].minor.yy285 = yylhsminor.yy285;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -2872,9 +2877,9 @@ static void yy_rule_4(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 362 "sql_grammar.lime"
+#line 371 "sql_grammar.lime"
 { yylhsminor.yy285 = yymsp[0].minor.yy285; }
-#line 2833 "sql_grammar.c"
+#line 2838 "sql_grammar.c"
   yymsp[0].minor.yy285 = yylhsminor.yy285;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -2909,9 +2914,9 @@ static void yy_rule_5(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 363 "sql_grammar.lime"
+#line 372 "sql_grammar.lime"
 { yylhsminor.yy285 = yymsp[0].minor.yy285; }
-#line 2861 "sql_grammar.c"
+#line 2866 "sql_grammar.c"
   yymsp[0].minor.yy285 = yylhsminor.yy285;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -2946,9 +2951,9 @@ static void yy_rule_6(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 364 "sql_grammar.lime"
+#line 373 "sql_grammar.lime"
 { yylhsminor.yy285 = yymsp[0].minor.yy285; }
-#line 2889 "sql_grammar.c"
+#line 2894 "sql_grammar.c"
   yymsp[0].minor.yy285 = yylhsminor.yy285;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -2983,9 +2988,9 @@ static void yy_rule_7(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 365 "sql_grammar.lime"
+#line 374 "sql_grammar.lime"
 { yylhsminor.yy285 = yymsp[0].minor.yy285; }
-#line 2917 "sql_grammar.c"
+#line 2922 "sql_grammar.c"
   yymsp[0].minor.yy285 = yylhsminor.yy285;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3020,9 +3025,9 @@ static void yy_rule_8(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 366 "sql_grammar.lime"
+#line 375 "sql_grammar.lime"
 { yylhsminor.yy285 = yymsp[0].minor.yy285; }
-#line 2945 "sql_grammar.c"
+#line 2950 "sql_grammar.c"
   yymsp[0].minor.yy285 = yylhsminor.yy285;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3057,9 +3062,9 @@ static void yy_rule_9(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 367 "sql_grammar.lime"
+#line 376 "sql_grammar.lime"
 { yylhsminor.yy285 = yymsp[0].minor.yy285; }
-#line 2973 "sql_grammar.c"
+#line 2978 "sql_grammar.c"
   yymsp[0].minor.yy285 = yylhsminor.yy285;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3094,9 +3099,9 @@ static void yy_rule_10(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 368 "sql_grammar.lime"
+#line 377 "sql_grammar.lime"
 { yylhsminor.yy285 = yymsp[0].minor.yy285; }
-#line 3001 "sql_grammar.c"
+#line 3006 "sql_grammar.c"
   yymsp[0].minor.yy285 = yylhsminor.yy285;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3131,9 +3136,9 @@ static void yy_rule_11(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 369 "sql_grammar.lime"
+#line 378 "sql_grammar.lime"
 { yylhsminor.yy285 = yymsp[0].minor.yy285; }
-#line 3029 "sql_grammar.c"
+#line 3034 "sql_grammar.c"
   yymsp[0].minor.yy285 = yylhsminor.yy285;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3168,9 +3173,9 @@ static void yy_rule_12(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 370 "sql_grammar.lime"
+#line 379 "sql_grammar.lime"
 { yylhsminor.yy285 = yymsp[0].minor.yy285; }
-#line 3057 "sql_grammar.c"
+#line 3062 "sql_grammar.c"
   yymsp[0].minor.yy285 = yylhsminor.yy285;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3205,9 +3210,9 @@ static void yy_rule_13(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 371 "sql_grammar.lime"
+#line 380 "sql_grammar.lime"
 { yylhsminor.yy285 = yymsp[0].minor.yy285; }
-#line 3085 "sql_grammar.c"
+#line 3090 "sql_grammar.c"
   yymsp[0].minor.yy285 = yylhsminor.yy285;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3242,9 +3247,9 @@ static void yy_rule_14(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 372 "sql_grammar.lime"
+#line 381 "sql_grammar.lime"
 { yylhsminor.yy285 = yymsp[0].minor.yy285; }
-#line 3113 "sql_grammar.c"
+#line 3118 "sql_grammar.c"
   yymsp[0].minor.yy285 = yylhsminor.yy285;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3279,9 +3284,9 @@ static void yy_rule_15(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 373 "sql_grammar.lime"
+#line 382 "sql_grammar.lime"
 { yylhsminor.yy285 = yymsp[0].minor.yy285; }
-#line 3141 "sql_grammar.c"
+#line 3146 "sql_grammar.c"
   yymsp[0].minor.yy285 = yylhsminor.yy285;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3316,9 +3321,9 @@ static void yy_rule_16(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 374 "sql_grammar.lime"
+#line 383 "sql_grammar.lime"
 { yylhsminor.yy285 = yymsp[0].minor.yy285; }
-#line 3169 "sql_grammar.c"
+#line 3174 "sql_grammar.c"
   yymsp[0].minor.yy285 = yylhsminor.yy285;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3353,9 +3358,9 @@ static void yy_rule_17(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 375 "sql_grammar.lime"
+#line 384 "sql_grammar.lime"
 { yylhsminor.yy285 = yymsp[0].minor.yy285; }
-#line 3197 "sql_grammar.c"
+#line 3202 "sql_grammar.c"
   yymsp[0].minor.yy285 = yylhsminor.yy285;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3390,9 +3395,9 @@ static void yy_rule_18(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 376 "sql_grammar.lime"
+#line 385 "sql_grammar.lime"
 { yylhsminor.yy285 = yymsp[0].minor.yy285; }
-#line 3225 "sql_grammar.c"
+#line 3230 "sql_grammar.c"
   yymsp[0].minor.yy285 = yylhsminor.yy285;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3427,12 +3432,12 @@ static void yy_rule_19(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 384 "sql_grammar.lime"
+#line 393 "sql_grammar.lime"
 {
     if (yymsp[0].minor.yy81) { yymsp[0].minor.yy81->with = yymsp[-1].minor.yy143.list; yymsp[0].minor.yy81->with_recursive = yymsp[-1].minor.yy143.rec; }
     yylhsminor.yy81 = yymsp[0].minor.yy81;
 }
-#line 3256 "sql_grammar.c"
+#line 3261 "sql_grammar.c"
   yymsp[-1].minor.yy81 = yylhsminor.yy81;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3467,9 +3472,9 @@ static void yy_rule_20(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 388 "sql_grammar.lime"
+#line 397 "sql_grammar.lime"
 { yylhsminor.yy81 = yymsp[0].minor.yy81; }
-#line 3284 "sql_grammar.c"
+#line 3289 "sql_grammar.c"
   yymsp[0].minor.yy81 = yylhsminor.yy81;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3504,11 +3509,11 @@ static void yy_rule_21(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 389 "sql_grammar.lime"
+#line 398 "sql_grammar.lime"
 {
     if (yymsp[-2].minor.yy81) { yymsp[-2].minor.yy81->setop = SX_SET_UNION; yymsp[-2].minor.yy81->rhs = yymsp[0].minor.yy81; } yylhsminor.yy81 = yymsp[-2].minor.yy81;
 }
-#line 3314 "sql_grammar.c"
+#line 3319 "sql_grammar.c"
   yymsp[-2].minor.yy81 = yylhsminor.yy81;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3543,11 +3548,11 @@ static void yy_rule_22(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 392 "sql_grammar.lime"
+#line 401 "sql_grammar.lime"
 {
     if (yymsp[-3].minor.yy81) { yymsp[-3].minor.yy81->setop = SX_SET_UNION_ALL; yymsp[-3].minor.yy81->rhs = yymsp[0].minor.yy81; } yylhsminor.yy81 = yymsp[-3].minor.yy81;
 }
-#line 3344 "sql_grammar.c"
+#line 3349 "sql_grammar.c"
   yymsp[-3].minor.yy81 = yylhsminor.yy81;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3582,11 +3587,11 @@ static void yy_rule_23(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 395 "sql_grammar.lime"
+#line 404 "sql_grammar.lime"
 {
     if (yymsp[-2].minor.yy81) { yymsp[-2].minor.yy81->setop = SX_SET_INTERSECT; yymsp[-2].minor.yy81->rhs = yymsp[0].minor.yy81; } yylhsminor.yy81 = yymsp[-2].minor.yy81;
 }
-#line 3374 "sql_grammar.c"
+#line 3379 "sql_grammar.c"
   yymsp[-2].minor.yy81 = yylhsminor.yy81;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3621,11 +3626,11 @@ static void yy_rule_24(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 398 "sql_grammar.lime"
+#line 407 "sql_grammar.lime"
 {
     if (yymsp[-2].minor.yy81) { yymsp[-2].minor.yy81->setop = SX_SET_EXCEPT; yymsp[-2].minor.yy81->rhs = yymsp[0].minor.yy81; } yylhsminor.yy81 = yymsp[-2].minor.yy81;
 }
-#line 3404 "sql_grammar.c"
+#line 3409 "sql_grammar.c"
   yymsp[-2].minor.yy81 = yylhsminor.yy81;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3660,17 +3665,17 @@ static void yy_rule_25(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 404 "sql_grammar.lime"
+#line 413 "sql_grammar.lime"
 {
     yylhsminor.yy81 = AST(pstate, sql_select_t);
     if (yylhsminor.yy81) {
         yylhsminor.yy81->distinct = yymsp[-7].minor.yy82; yylhsminor.yy81->cols = yymsp[-6].minor.yy54; yylhsminor.yy81->from = yymsp[-5].minor.yy331; yylhsminor.yy81->where = yymsp[-4].minor.yy328;
         yylhsminor.yy81->group = yymsp[-3].minor.yy54; yylhsminor.yy81->having = yymsp[-2].minor.yy328; yylhsminor.yy81->order = yymsp[-1].minor.yy54; yylhsminor.yy81->limit = yymsp[0].minor.yy58.limit;
         yylhsminor.yy81->offset = yymsp[0].minor.yy58.offset;
-        yylhsminor.yy81->src = yymsp[-8].minor.yy0.p;   /* SELECT keyword; length resolved by the consumer */
+        yylhsminor.yy81->src = yymsp[-8].minor.yy0.src;   /* SELECT keyword; length resolved by the consumer */
     }
 }
-#line 3440 "sql_grammar.c"
+#line 3445 "sql_grammar.c"
   yymsp[-8].minor.yy81 = yylhsminor.yy81;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3705,9 +3710,9 @@ static void yy_rule_26(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 414 "sql_grammar.lime"
+#line 423 "sql_grammar.lime"
 { yymsp[1].minor.yy82 = 0; }
-#line 3468 "sql_grammar.c"
+#line 3473 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -3741,9 +3746,9 @@ static void yy_rule_27(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 415 "sql_grammar.lime"
+#line 424 "sql_grammar.lime"
 { yymsp[0].minor.yy82 = 1; }
-#line 3495 "sql_grammar.c"
+#line 3500 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -3777,9 +3782,9 @@ static void yy_rule_28(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 416 "sql_grammar.lime"
+#line 425 "sql_grammar.lime"
 { yymsp[0].minor.yy82 = 0; }
-#line 3522 "sql_grammar.c"
+#line 3527 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -3813,9 +3818,9 @@ static void yy_rule_29(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 418 "sql_grammar.lime"
+#line 427 "sql_grammar.lime"
 { yylhsminor.yy54 = mk_list(pstate); if (yylhsminor.yy54 && yymsp[0].minor.yy304) { yylhsminor.yy54->head = yylhsminor.yy54->tail = yymsp[0].minor.yy304; yylhsminor.yy54->n = 1; } }
-#line 3549 "sql_grammar.c"
+#line 3554 "sql_grammar.c"
   yymsp[0].minor.yy54 = yylhsminor.yy54;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3850,11 +3855,11 @@ static void yy_rule_30(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 419 "sql_grammar.lime"
+#line 428 "sql_grammar.lime"
 {
     yylhsminor.yy54 = yymsp[-2].minor.yy54; if (yylhsminor.yy54 && yymsp[0].minor.yy304) { if (yylhsminor.yy54->tail) yylhsminor.yy54->tail->next = yymsp[0].minor.yy304; else yylhsminor.yy54->head = yymsp[0].minor.yy304; yylhsminor.yy54->tail = yymsp[0].minor.yy304; yylhsminor.yy54->n++; }
 }
-#line 3579 "sql_grammar.c"
+#line 3584 "sql_grammar.c"
   yymsp[-2].minor.yy54 = yylhsminor.yy54;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3889,12 +3894,12 @@ static void yy_rule_31(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 423 "sql_grammar.lime"
+#line 432 "sql_grammar.lime"
 {
     yymsp[0].minor.yy304 = AST(pstate, sql_exprlist_item_t);
     if (yymsp[0].minor.yy304) { yymsp[0].minor.yy304->expr = mk_expr(pstate, SX_E_STAR); }
 }
-#line 3610 "sql_grammar.c"
+#line 3615 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -3928,13 +3933,13 @@ static void yy_rule_32(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 427 "sql_grammar.lime"
+#line 436 "sql_grammar.lime"
 {
     yylhsminor.yy304 = AST(pstate, sql_exprlist_item_t);
     if (yylhsminor.yy304) { yylhsminor.yy304->expr = mk_expr(pstate, SX_E_STAR);
              if (yylhsminor.yy304->expr) { yylhsminor.yy304->expr->name[0] = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy304->expr->nname = 1; } }
 }
-#line 3641 "sql_grammar.c"
+#line 3646 "sql_grammar.c"
   yymsp[-2].minor.yy304 = yylhsminor.yy304;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -3969,9 +3974,9 @@ static void yy_rule_33(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 432 "sql_grammar.lime"
+#line 441 "sql_grammar.lime"
 { yylhsminor.yy304 = AST(pstate, sql_exprlist_item_t); if (yylhsminor.yy304) yylhsminor.yy304->expr = yymsp[0].minor.yy328; }
-#line 3669 "sql_grammar.c"
+#line 3674 "sql_grammar.c"
   yymsp[0].minor.yy304 = yylhsminor.yy304;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -4006,11 +4011,11 @@ static void yy_rule_34(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 433 "sql_grammar.lime"
+#line 442 "sql_grammar.lime"
 {
     yylhsminor.yy304 = AST(pstate, sql_exprlist_item_t); if (yylhsminor.yy304) { yylhsminor.yy304->expr = yymsp[-2].minor.yy328; yylhsminor.yy304->alias = tok_str(yymsp[0].minor.yy0); }
 }
-#line 3699 "sql_grammar.c"
+#line 3704 "sql_grammar.c"
   yymsp[-2].minor.yy304 = yylhsminor.yy304;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -4045,11 +4050,11 @@ static void yy_rule_35(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 436 "sql_grammar.lime"
+#line 445 "sql_grammar.lime"
 {
     yylhsminor.yy304 = AST(pstate, sql_exprlist_item_t); if (yylhsminor.yy304) { yylhsminor.yy304->expr = yymsp[-1].minor.yy328; yylhsminor.yy304->alias = tok_str(yymsp[0].minor.yy0); }
 }
-#line 3729 "sql_grammar.c"
+#line 3734 "sql_grammar.c"
   yymsp[-1].minor.yy304 = yylhsminor.yy304;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -4084,9 +4089,9 @@ static void yy_rule_36(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 440 "sql_grammar.lime"
+#line 449 "sql_grammar.lime"
 { yymsp[1].minor.yy331 = NULL; }
-#line 3757 "sql_grammar.c"
+#line 3762 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4120,9 +4125,9 @@ static void yy_rule_37(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 441 "sql_grammar.lime"
+#line 450 "sql_grammar.lime"
 { yymsp[-1].minor.yy331 = yymsp[0].minor.yy331; }
-#line 3784 "sql_grammar.c"
+#line 3789 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4156,9 +4161,9 @@ static void yy_rule_38(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 443 "sql_grammar.lime"
+#line 452 "sql_grammar.lime"
 { yylhsminor.yy331 = yymsp[0].minor.yy331; }
-#line 3811 "sql_grammar.c"
+#line 3816 "sql_grammar.c"
   yymsp[0].minor.yy331 = yylhsminor.yy331;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -4193,13 +4198,13 @@ static void yy_rule_39(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 444 "sql_grammar.lime"
+#line 453 "sql_grammar.lime"
 {
     if (yymsp[0].minor.yy331) yymsp[0].minor.yy331->join = SX_J_NONE;
     if (yymsp[-2].minor.yy331 == NULL) { yylhsminor.yy331 = yymsp[0].minor.yy331; }
     else { sql_src_t *s = yymsp[-2].minor.yy331; while (s->next) s = s->next; s->next = yymsp[0].minor.yy331; yylhsminor.yy331 = yymsp[-2].minor.yy331; }
 }
-#line 3843 "sql_grammar.c"
+#line 3848 "sql_grammar.c"
   yymsp[-2].minor.yy331 = yylhsminor.yy331;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -4234,7 +4239,7 @@ static void yy_rule_40(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 449 "sql_grammar.lime"
+#line 458 "sql_grammar.lime"
 {
     if (yymsp[-1].minor.yy331) { yymsp[-1].minor.yy331->join = (sql_join_type_t)yymsp[-2].minor.yy82; yymsp[-1].minor.yy331->on = yymsp[0].minor.yy220.on; yymsp[-1].minor.yy331->using_cols = yymsp[0].minor.yy220.using_cols; }
     if (yymsp[-1].minor.yy331 && yymsp[0].minor.yy220.using_cols != NULL)
@@ -4242,7 +4247,7 @@ static void yy_rule_40(yy_reduce_ctx *yy_ctx){
     if (yymsp[-3].minor.yy331 == NULL) { yylhsminor.yy331 = yymsp[-1].minor.yy331; }
     else { sql_src_t *s = yymsp[-3].minor.yy331; while (s->next) s = s->next; s->next = yymsp[-1].minor.yy331; yylhsminor.yy331 = yymsp[-3].minor.yy331; }
 }
-#line 3877 "sql_grammar.c"
+#line 3882 "sql_grammar.c"
   yymsp[-3].minor.yy331 = yylhsminor.yy331;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -4277,9 +4282,9 @@ static void yy_rule_41(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 457 "sql_grammar.lime"
+#line 466 "sql_grammar.lime"
 { yymsp[0].minor.yy82 = SX_J_INNER; }
-#line 3905 "sql_grammar.c"
+#line 3910 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4313,9 +4318,9 @@ static void yy_rule_42(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 458 "sql_grammar.lime"
+#line 467 "sql_grammar.lime"
 { yymsp[-1].minor.yy82 = SX_J_INNER; }
-#line 3932 "sql_grammar.c"
+#line 3937 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4349,9 +4354,9 @@ static void yy_rule_43(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 459 "sql_grammar.lime"
+#line 468 "sql_grammar.lime"
 { yymsp[-1].minor.yy82 = SX_J_LEFT; }
-#line 3959 "sql_grammar.c"
+#line 3964 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4385,9 +4390,9 @@ static void yy_rule_44(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 460 "sql_grammar.lime"
+#line 469 "sql_grammar.lime"
 { yymsp[-2].minor.yy82 = SX_J_LEFT; }
-#line 3986 "sql_grammar.c"
+#line 3991 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4421,9 +4426,9 @@ static void yy_rule_45(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 461 "sql_grammar.lime"
+#line 470 "sql_grammar.lime"
 { yymsp[-1].minor.yy82 = SX_J_RIGHT; }
-#line 4013 "sql_grammar.c"
+#line 4018 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4457,9 +4462,9 @@ static void yy_rule_46(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 462 "sql_grammar.lime"
+#line 471 "sql_grammar.lime"
 { yymsp[-2].minor.yy82 = SX_J_RIGHT; }
-#line 4040 "sql_grammar.c"
+#line 4045 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4493,9 +4498,9 @@ static void yy_rule_47(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 463 "sql_grammar.lime"
+#line 472 "sql_grammar.lime"
 { yymsp[-1].minor.yy82 = SX_J_FULL; }
-#line 4067 "sql_grammar.c"
+#line 4072 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4529,9 +4534,9 @@ static void yy_rule_48(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 464 "sql_grammar.lime"
+#line 473 "sql_grammar.lime"
 { yymsp[-2].minor.yy82 = SX_J_FULL; }
-#line 4094 "sql_grammar.c"
+#line 4099 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4565,9 +4570,9 @@ static void yy_rule_49(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 465 "sql_grammar.lime"
+#line 474 "sql_grammar.lime"
 { yymsp[-1].minor.yy82 = SX_J_CROSS; }
-#line 4121 "sql_grammar.c"
+#line 4126 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4601,9 +4606,9 @@ static void yy_rule_50(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 466 "sql_grammar.lime"
+#line 475 "sql_grammar.lime"
 { yymsp[-1].minor.yy82 = SX_J_NATURAL; }
-#line 4148 "sql_grammar.c"
+#line 4153 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4637,9 +4642,9 @@ static void yy_rule_51(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 467 "sql_grammar.lime"
+#line 476 "sql_grammar.lime"
 { yymsp[-2].minor.yy82 = SX_J_NATURAL; }
-#line 4175 "sql_grammar.c"
+#line 4180 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4673,9 +4678,9 @@ static void yy_rule_52(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 470 "sql_grammar.lime"
+#line 479 "sql_grammar.lime"
 { yymsp[1].minor.yy220.on = NULL; yymsp[1].minor.yy220.using_cols = NULL; }
-#line 4202 "sql_grammar.c"
+#line 4207 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4709,9 +4714,9 @@ static void yy_rule_53(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 471 "sql_grammar.lime"
+#line 480 "sql_grammar.lime"
 { yymsp[-1].minor.yy220.on = yymsp[0].minor.yy328; yymsp[-1].minor.yy220.using_cols = NULL; }
-#line 4229 "sql_grammar.c"
+#line 4234 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4745,9 +4750,9 @@ static void yy_rule_54(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 472 "sql_grammar.lime"
+#line 481 "sql_grammar.lime"
 { yymsp[-3].minor.yy220.on = NULL; yymsp[-3].minor.yy220.using_cols = yymsp[-1].minor.yy54; }
-#line 4256 "sql_grammar.c"
+#line 4261 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -4781,11 +4786,11 @@ static void yy_rule_55(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 474 "sql_grammar.lime"
+#line 483 "sql_grammar.lime"
 {
     yylhsminor.yy331 = AST(pstate, sql_src_t); if (yylhsminor.yy331) yylhsminor.yy331->table = tok_str(yymsp[0].minor.yy0);
 }
-#line 4285 "sql_grammar.c"
+#line 4290 "sql_grammar.c"
   yymsp[0].minor.yy331 = yylhsminor.yy331;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -4820,11 +4825,11 @@ static void yy_rule_56(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 477 "sql_grammar.lime"
+#line 486 "sql_grammar.lime"
 {
     yylhsminor.yy331 = AST(pstate, sql_src_t); if (yylhsminor.yy331) { yylhsminor.yy331->schema = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy331->table = tok_str(yymsp[0].minor.yy0); }
 }
-#line 4315 "sql_grammar.c"
+#line 4320 "sql_grammar.c"
   yymsp[-2].minor.yy331 = yylhsminor.yy331;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -4859,11 +4864,11 @@ static void yy_rule_57(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 480 "sql_grammar.lime"
+#line 489 "sql_grammar.lime"
 {
     yylhsminor.yy331 = AST(pstate, sql_src_t); if (yylhsminor.yy331) { yylhsminor.yy331->table = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy331->alias = tok_str(yymsp[0].minor.yy0); }
 }
-#line 4345 "sql_grammar.c"
+#line 4350 "sql_grammar.c"
   yymsp[-2].minor.yy331 = yylhsminor.yy331;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -4898,11 +4903,11 @@ static void yy_rule_58(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 483 "sql_grammar.lime"
+#line 492 "sql_grammar.lime"
 {
     yylhsminor.yy331 = AST(pstate, sql_src_t); if (yylhsminor.yy331) { yylhsminor.yy331->table = tok_str(yymsp[-1].minor.yy0); yylhsminor.yy331->alias = tok_str(yymsp[0].minor.yy0); }
 }
-#line 4375 "sql_grammar.c"
+#line 4380 "sql_grammar.c"
   yymsp[-1].minor.yy331 = yylhsminor.yy331;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -4937,12 +4942,12 @@ static void yy_rule_59(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 486 "sql_grammar.lime"
+#line 495 "sql_grammar.lime"
 {
     yylhsminor.yy331 = AST(pstate, sql_src_t);
-    if (yylhsminor.yy331) { yylhsminor.yy331->subquery = yymsp[-1].minor.yy81; yylhsminor.yy331->subsrc = yymsp[-2].minor.yy0.p; yylhsminor.yy331->subsrclen = (uint32_t)((yymsp[0].minor.yy0.p + yymsp[0].minor.yy0.len) - yymsp[-2].minor.yy0.p); }
+    if (yylhsminor.yy331) { yylhsminor.yy331->subquery = yymsp[-1].minor.yy81; yylhsminor.yy331->subsrc = yymsp[-2].minor.yy0.src; yylhsminor.yy331->subsrclen = (uint32_t)((yymsp[0].minor.yy0.src + yymsp[0].minor.yy0.srclen) - yymsp[-2].minor.yy0.src); }
 }
-#line 4406 "sql_grammar.c"
+#line 4411 "sql_grammar.c"
   yymsp[-2].minor.yy331 = yylhsminor.yy331;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -4977,13 +4982,13 @@ static void yy_rule_60(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 490 "sql_grammar.lime"
+#line 499 "sql_grammar.lime"
 {
     yylhsminor.yy331 = AST(pstate, sql_src_t);
     if (yylhsminor.yy331) { yylhsminor.yy331->subquery = yymsp[-3].minor.yy81; yylhsminor.yy331->alias = tok_str(yymsp[0].minor.yy0);
-             yylhsminor.yy331->subsrc = yymsp[-4].minor.yy0.p; yylhsminor.yy331->subsrclen = (uint32_t)((yymsp[-2].minor.yy0.p + yymsp[-2].minor.yy0.len) - yymsp[-4].minor.yy0.p); }
+             yylhsminor.yy331->subsrc = yymsp[-4].minor.yy0.src; yylhsminor.yy331->subsrclen = (uint32_t)((yymsp[-2].minor.yy0.src + yymsp[-2].minor.yy0.srclen) - yymsp[-4].minor.yy0.src); }
 }
-#line 4438 "sql_grammar.c"
+#line 4443 "sql_grammar.c"
   yymsp[-4].minor.yy331 = yylhsminor.yy331;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -5018,9 +5023,9 @@ static void yy_rule_61(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 496 "sql_grammar.lime"
+#line 505 "sql_grammar.lime"
 { yymsp[1].minor.yy328 = NULL; }
-#line 4466 "sql_grammar.c"
+#line 4471 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5054,9 +5059,9 @@ static void yy_rule_62(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 497 "sql_grammar.lime"
+#line 506 "sql_grammar.lime"
 { yymsp[-1].minor.yy328 = yymsp[0].minor.yy328; }
-#line 4493 "sql_grammar.c"
+#line 4498 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5090,9 +5095,9 @@ static void yy_rule_63(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 499 "sql_grammar.lime"
+#line 508 "sql_grammar.lime"
 { yymsp[1].minor.yy54 = NULL; }
-#line 4520 "sql_grammar.c"
+#line 4525 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5126,9 +5131,9 @@ static void yy_rule_64(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 500 "sql_grammar.lime"
+#line 509 "sql_grammar.lime"
 { yymsp[-2].minor.yy54 = yymsp[0].minor.yy54; }
-#line 4547 "sql_grammar.c"
+#line 4552 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5162,9 +5167,9 @@ static void yy_rule_65(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 502 "sql_grammar.lime"
+#line 511 "sql_grammar.lime"
 { yymsp[1].minor.yy328 = NULL; }
-#line 4574 "sql_grammar.c"
+#line 4579 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5198,9 +5203,9 @@ static void yy_rule_66(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 503 "sql_grammar.lime"
+#line 512 "sql_grammar.lime"
 { yymsp[-1].minor.yy328 = yymsp[0].minor.yy328; }
-#line 4601 "sql_grammar.c"
+#line 4606 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5234,9 +5239,9 @@ static void yy_rule_67(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 505 "sql_grammar.lime"
+#line 514 "sql_grammar.lime"
 { yymsp[1].minor.yy54 = NULL; }
-#line 4628 "sql_grammar.c"
+#line 4633 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5270,9 +5275,9 @@ static void yy_rule_68(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 506 "sql_grammar.lime"
+#line 515 "sql_grammar.lime"
 { yymsp[-2].minor.yy54 = yymsp[0].minor.yy54; }
-#line 4655 "sql_grammar.c"
+#line 4660 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5306,9 +5311,9 @@ static void yy_rule_69(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 508 "sql_grammar.lime"
+#line 517 "sql_grammar.lime"
 { yylhsminor.yy54 = mk_list(pstate); if (yylhsminor.yy54 && yymsp[0].minor.yy304) { yylhsminor.yy54->head = yylhsminor.yy54->tail = yymsp[0].minor.yy304; yylhsminor.yy54->n = 1; } }
-#line 4682 "sql_grammar.c"
+#line 4687 "sql_grammar.c"
   yymsp[0].minor.yy54 = yylhsminor.yy54;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -5343,11 +5348,11 @@ static void yy_rule_70(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 509 "sql_grammar.lime"
+#line 518 "sql_grammar.lime"
 {
     yylhsminor.yy54 = yymsp[-2].minor.yy54; if (yylhsminor.yy54 && yymsp[0].minor.yy304) { if (yylhsminor.yy54->tail) yylhsminor.yy54->tail->next = yymsp[0].minor.yy304; else yylhsminor.yy54->head = yymsp[0].minor.yy304; yylhsminor.yy54->tail = yymsp[0].minor.yy304; yylhsminor.yy54->n++; }
 }
-#line 4712 "sql_grammar.c"
+#line 4717 "sql_grammar.c"
   yymsp[-2].minor.yy54 = yylhsminor.yy54;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -5382,12 +5387,12 @@ static void yy_rule_71(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 515 "sql_grammar.lime"
+#line 524 "sql_grammar.lime"
 {
     yylhsminor.yy304 = AST(pstate, sql_exprlist_item_t);
     if (yylhsminor.yy304) { yylhsminor.yy304->expr = yymsp[-2].minor.yy328; yylhsminor.yy304->sort = yymsp[-1].minor.yy82; yylhsminor.yy304->nulls = yymsp[0].minor.yy82; }
 }
-#line 4743 "sql_grammar.c"
+#line 4748 "sql_grammar.c"
   yymsp[-2].minor.yy304 = yylhsminor.yy304;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -5422,9 +5427,9 @@ static void yy_rule_72(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 519 "sql_grammar.lime"
+#line 528 "sql_grammar.lime"
 { yymsp[1].minor.yy82 = 1; }
-#line 4771 "sql_grammar.c"
+#line 4776 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5458,9 +5463,9 @@ static void yy_rule_73(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 520 "sql_grammar.lime"
+#line 529 "sql_grammar.lime"
 { yymsp[0].minor.yy82 = 1; }
-#line 4798 "sql_grammar.c"
+#line 4803 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5494,9 +5499,9 @@ static void yy_rule_74(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 521 "sql_grammar.lime"
+#line 530 "sql_grammar.lime"
 { yymsp[0].minor.yy82 = 2; }
-#line 4825 "sql_grammar.c"
+#line 4830 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5530,9 +5535,9 @@ static void yy_rule_75(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 522 "sql_grammar.lime"
+#line 531 "sql_grammar.lime"
 { yymsp[1].minor.yy82 = 0; }
-#line 4852 "sql_grammar.c"
+#line 4857 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5566,9 +5571,9 @@ static void yy_rule_76(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 523 "sql_grammar.lime"
+#line 532 "sql_grammar.lime"
 { yymsp[-1].minor.yy82 = 1; }
-#line 4879 "sql_grammar.c"
+#line 4884 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5602,9 +5607,9 @@ static void yy_rule_77(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 524 "sql_grammar.lime"
+#line 533 "sql_grammar.lime"
 { yymsp[-1].minor.yy82 = 2; }
-#line 4906 "sql_grammar.c"
+#line 4911 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5638,9 +5643,9 @@ static void yy_rule_78(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 527 "sql_grammar.lime"
+#line 536 "sql_grammar.lime"
 { yymsp[1].minor.yy58.limit = NULL; yymsp[1].minor.yy58.offset = NULL; }
-#line 4933 "sql_grammar.c"
+#line 4938 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5674,9 +5679,9 @@ static void yy_rule_79(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 528 "sql_grammar.lime"
+#line 537 "sql_grammar.lime"
 { yymsp[-1].minor.yy58.limit = yymsp[0].minor.yy328; yymsp[-1].minor.yy58.offset = NULL; }
-#line 4960 "sql_grammar.c"
+#line 4965 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5710,9 +5715,9 @@ static void yy_rule_80(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 529 "sql_grammar.lime"
+#line 538 "sql_grammar.lime"
 { yymsp[-3].minor.yy58.limit = yymsp[-2].minor.yy328; yymsp[-3].minor.yy58.offset = yymsp[0].minor.yy328; }
-#line 4987 "sql_grammar.c"
+#line 4992 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5746,9 +5751,9 @@ static void yy_rule_81(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 530 "sql_grammar.lime"
+#line 539 "sql_grammar.lime"
 { yymsp[-3].minor.yy58.limit = yymsp[0].minor.yy328; yymsp[-3].minor.yy58.offset = yymsp[-2].minor.yy328; }
-#line 5014 "sql_grammar.c"
+#line 5019 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5782,9 +5787,9 @@ static void yy_rule_82(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 538 "sql_grammar.lime"
+#line 547 "sql_grammar.lime"
 { yymsp[-1].minor.yy143.list = yymsp[0].minor.yy237; yymsp[-1].minor.yy143.rec = 0; }
-#line 5041 "sql_grammar.c"
+#line 5046 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5818,9 +5823,9 @@ static void yy_rule_83(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 539 "sql_grammar.lime"
+#line 548 "sql_grammar.lime"
 { yymsp[-2].minor.yy143.list = yymsp[0].minor.yy237; yymsp[-2].minor.yy143.rec = 1; }
-#line 5068 "sql_grammar.c"
+#line 5073 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -5854,9 +5859,9 @@ static void yy_rule_84(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 541 "sql_grammar.lime"
+#line 550 "sql_grammar.lime"
 { yylhsminor.yy237 = yymsp[0].minor.yy237; }
-#line 5095 "sql_grammar.c"
+#line 5100 "sql_grammar.c"
   yymsp[0].minor.yy237 = yylhsminor.yy237;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -5891,12 +5896,12 @@ static void yy_rule_85(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 542 "sql_grammar.lime"
+#line 551 "sql_grammar.lime"
 {
     if (yymsp[-2].minor.yy237 == NULL) { yylhsminor.yy237 = yymsp[0].minor.yy237; }
     else { sql_cte_t *s = yymsp[-2].minor.yy237; while (s->next) s = s->next; s->next = yymsp[0].minor.yy237; yylhsminor.yy237 = yymsp[-2].minor.yy237; }
 }
-#line 5126 "sql_grammar.c"
+#line 5131 "sql_grammar.c"
   yymsp[-2].minor.yy237 = yylhsminor.yy237;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -5931,13 +5936,13 @@ static void yy_rule_86(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 547 "sql_grammar.lime"
+#line 556 "sql_grammar.lime"
 {
     yylhsminor.yy237 = AST(pstate, sql_cte_t);
     if (yylhsminor.yy237) { yylhsminor.yy237->name = tok_str(yymsp[-4].minor.yy0); yylhsminor.yy237->select = yymsp[-1].minor.yy81;
-             yylhsminor.yy237->src = yymsp[-2].minor.yy0.p; yylhsminor.yy237->srclen = (uint32_t)((yymsp[0].minor.yy0.p + yymsp[0].minor.yy0.len) - yymsp[-2].minor.yy0.p); }
+             yylhsminor.yy237->src = yymsp[-2].minor.yy0.src; yylhsminor.yy237->srclen = (uint32_t)((yymsp[0].minor.yy0.src + yymsp[0].minor.yy0.srclen) - yymsp[-2].minor.yy0.src); }
 }
-#line 5158 "sql_grammar.c"
+#line 5163 "sql_grammar.c"
   yymsp[-4].minor.yy237 = yylhsminor.yy237;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -5972,13 +5977,13 @@ static void yy_rule_87(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 552 "sql_grammar.lime"
+#line 561 "sql_grammar.lime"
 {
     yylhsminor.yy237 = AST(pstate, sql_cte_t);
     if (yylhsminor.yy237) { yylhsminor.yy237->name = tok_str(yymsp[-7].minor.yy0); yylhsminor.yy237->cols = yymsp[-5].minor.yy54; yylhsminor.yy237->select = yymsp[-1].minor.yy81;
-             yylhsminor.yy237->src = yymsp[-2].minor.yy0.p; yylhsminor.yy237->srclen = (uint32_t)((yymsp[0].minor.yy0.p + yymsp[0].minor.yy0.len) - yymsp[-2].minor.yy0.p); }
+             yylhsminor.yy237->src = yymsp[-2].minor.yy0.src; yylhsminor.yy237->srclen = (uint32_t)((yymsp[0].minor.yy0.src + yymsp[0].minor.yy0.srclen) - yymsp[-2].minor.yy0.src); }
 }
-#line 5190 "sql_grammar.c"
+#line 5195 "sql_grammar.c"
   yymsp[-7].minor.yy237 = yylhsminor.yy237;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -6013,7 +6018,7 @@ static void yy_rule_88(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 560 "sql_grammar.lime"
+#line 569 "sql_grammar.lime"
 {
     sql_insert_t *ins = yymsp[0].minor.yy268 ? yymsp[0].minor.yy268 : AST(pstate, sql_insert_t);
     yymsp[-4].minor.yy285 = AST(pstate, sql_stmt_t);
@@ -6022,7 +6027,7 @@ static void yy_rule_88(yy_reduce_ctx *yy_ctx){
         yymsp[-4].minor.yy285->kind = SQL_KIND_INSERT; yymsp[-4].minor.yy285->u.insert = ins;
     }
 }
-#line 5225 "sql_grammar.c"
+#line 5230 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6056,7 +6061,7 @@ static void yy_rule_89(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 568 "sql_grammar.lime"
+#line 577 "sql_grammar.lime"
 {
     sql_insert_t *ins = AST(pstate, sql_insert_t);
     yymsp[-5].minor.yy285 = AST(pstate, sql_stmt_t);
@@ -6065,7 +6070,7 @@ static void yy_rule_89(yy_reduce_ctx *yy_ctx){
         yymsp[-5].minor.yy285->kind = SQL_KIND_INSERT; yymsp[-5].minor.yy285->u.insert = ins;
     }
 }
-#line 5259 "sql_grammar.c"
+#line 5264 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6099,7 +6104,7 @@ static void yy_rule_90(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 576 "sql_grammar.lime"
+#line 585 "sql_grammar.lime"
 {
     sql_insert_t *ins = AST(pstate, sql_insert_t);
     yymsp[-4].minor.yy285 = AST(pstate, sql_stmt_t);
@@ -6108,7 +6113,7 @@ static void yy_rule_90(yy_reduce_ctx *yy_ctx){
         yymsp[-4].minor.yy285->kind = SQL_KIND_INSERT; yymsp[-4].minor.yy285->u.insert = ins;
     }
 }
-#line 5293 "sql_grammar.c"
+#line 5298 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6142,7 +6147,7 @@ static void yy_rule_91(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 584 "sql_grammar.lime"
+#line 593 "sql_grammar.lime"
 {
     sql_insert_t *ins = yymsp[0].minor.yy268 ? yymsp[0].minor.yy268 : AST(pstate, sql_insert_t);
     yymsp[-4].minor.yy285 = AST(pstate, sql_stmt_t);
@@ -6151,7 +6156,7 @@ static void yy_rule_91(yy_reduce_ctx *yy_ctx){
         yymsp[-4].minor.yy285->kind = SQL_KIND_INSERT; yymsp[-4].minor.yy285->u.insert = ins;
     }
 }
-#line 5327 "sql_grammar.c"
+#line 5332 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6185,9 +6190,9 @@ static void yy_rule_92(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 594 "sql_grammar.lime"
+#line 603 "sql_grammar.lime"
 { yylhsminor.yy153.schema.p = NULL; yylhsminor.yy153.schema.len = 0; yylhsminor.yy153.table = tok_str(yymsp[0].minor.yy0); }
-#line 5354 "sql_grammar.c"
+#line 5359 "sql_grammar.c"
   yymsp[0].minor.yy153 = yylhsminor.yy153;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -6222,9 +6227,9 @@ static void yy_rule_93(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 595 "sql_grammar.lime"
+#line 604 "sql_grammar.lime"
 { yylhsminor.yy153.schema = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy153.table = tok_str(yymsp[0].minor.yy0); }
-#line 5382 "sql_grammar.c"
+#line 5387 "sql_grammar.c"
   yymsp[-2].minor.yy153 = yylhsminor.yy153;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -6259,9 +6264,9 @@ static void yy_rule_94(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 597 "sql_grammar.lime"
+#line 606 "sql_grammar.lime"
 { yymsp[1].minor.yy54 = NULL; }
-#line 5410 "sql_grammar.c"
+#line 5415 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6295,9 +6300,9 @@ static void yy_rule_95(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 598 "sql_grammar.lime"
+#line 607 "sql_grammar.lime"
 { yymsp[-2].minor.yy54 = yymsp[-1].minor.yy54; }
-#line 5437 "sql_grammar.c"
+#line 5442 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6331,7 +6336,7 @@ static void yy_rule_96(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 600 "sql_grammar.lime"
+#line 609 "sql_grammar.lime"
 {
     yymsp[-3].minor.yy268 = AST(pstate, sql_insert_t);
     if (yymsp[-3].minor.yy268) {
@@ -6339,7 +6344,7 @@ static void yy_rule_96(yy_reduce_ctx *yy_ctx){
         if (yymsp[-3].minor.yy268->rows) { yymsp[-3].minor.yy268->rows[0] = yymsp[-1].minor.yy54; yymsp[-3].minor.yy268->n_rows = 1; }
     }
 }
-#line 5470 "sql_grammar.c"
+#line 5475 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6373,7 +6378,7 @@ static void yy_rule_97(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 607 "sql_grammar.lime"
+#line 616 "sql_grammar.lime"
 {
     yylhsminor.yy268 = yymsp[-4].minor.yy268;
     if (yylhsminor.yy268) {
@@ -6385,7 +6390,7 @@ static void yy_rule_97(yy_reduce_ctx *yy_ctx){
         }
     }
 }
-#line 5507 "sql_grammar.c"
+#line 5512 "sql_grammar.c"
   yymsp[-4].minor.yy268 = yylhsminor.yy268;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -6420,7 +6425,7 @@ static void yy_rule_98(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 621 "sql_grammar.lime"
+#line 630 "sql_grammar.lime"
 {
     sql_update_t *up = AST(pstate, sql_update_t);
     yymsp[-4].minor.yy285 = AST(pstate, sql_stmt_t);
@@ -6429,7 +6434,7 @@ static void yy_rule_98(yy_reduce_ctx *yy_ctx){
         yymsp[-4].minor.yy285->kind = SQL_KIND_UPDATE; yymsp[-4].minor.yy285->u.update = up;
     }
 }
-#line 5542 "sql_grammar.c"
+#line 5547 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6463,9 +6468,9 @@ static void yy_rule_99(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 630 "sql_grammar.lime"
+#line 639 "sql_grammar.lime"
 { yylhsminor.yy370 = yymsp[0].minor.yy370; }
-#line 5569 "sql_grammar.c"
+#line 5574 "sql_grammar.c"
   yymsp[0].minor.yy370 = yylhsminor.yy370;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -6500,12 +6505,12 @@ static void yy_rule_100(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 631 "sql_grammar.lime"
+#line 640 "sql_grammar.lime"
 {
     if (yymsp[-2].minor.yy370 == NULL) { yylhsminor.yy370 = yymsp[0].minor.yy370; }
     else { sql_assign_t *s = yymsp[-2].minor.yy370; while (s->next) s = s->next; s->next = yymsp[0].minor.yy370; yylhsminor.yy370 = yymsp[-2].minor.yy370; }
 }
-#line 5600 "sql_grammar.c"
+#line 5605 "sql_grammar.c"
   yymsp[-2].minor.yy370 = yylhsminor.yy370;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -6540,11 +6545,11 @@ static void yy_rule_101(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 636 "sql_grammar.lime"
+#line 645 "sql_grammar.lime"
 {
     yylhsminor.yy370 = AST(pstate, sql_assign_t); if (yylhsminor.yy370) { yylhsminor.yy370->col = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy370->val = yymsp[0].minor.yy328; }
 }
-#line 5630 "sql_grammar.c"
+#line 5635 "sql_grammar.c"
   yymsp[-2].minor.yy370 = yylhsminor.yy370;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -6579,7 +6584,7 @@ static void yy_rule_102(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 642 "sql_grammar.lime"
+#line 651 "sql_grammar.lime"
 {
     sql_delete_t *d = AST(pstate, sql_delete_t);
     yymsp[-3].minor.yy285 = AST(pstate, sql_stmt_t);
@@ -6588,7 +6593,7 @@ static void yy_rule_102(yy_reduce_ctx *yy_ctx){
         yymsp[-3].minor.yy285->kind = SQL_KIND_DELETE; yymsp[-3].minor.yy285->u.del = d;
     }
 }
-#line 5665 "sql_grammar.c"
+#line 5670 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6622,7 +6627,7 @@ static void yy_rule_103(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 654 "sql_grammar.lime"
+#line 663 "sql_grammar.lime"
 {
     sql_create_t *cr = AST(pstate, sql_create_t);
     yymsp[-7].minor.yy285 = AST(pstate, sql_stmt_t);
@@ -6632,7 +6637,7 @@ static void yy_rule_103(yy_reduce_ctx *yy_ctx){
         yymsp[-7].minor.yy285->kind = SQL_KIND_CREATE; yymsp[-7].minor.yy285->u.create = cr;
     }
 }
-#line 5700 "sql_grammar.c"
+#line 5705 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6666,7 +6671,7 @@ static void yy_rule_104(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 664 "sql_grammar.lime"
+#line 673 "sql_grammar.lime"
 {
     sql_create_t *cr = AST(pstate, sql_create_t);
     yymsp[-6].minor.yy285 = AST(pstate, sql_stmt_t);
@@ -6676,7 +6681,7 @@ static void yy_rule_104(yy_reduce_ctx *yy_ctx){
         yymsp[-6].minor.yy285->kind = SQL_KIND_CREATE; yymsp[-6].minor.yy285->u.create = cr;
     }
 }
-#line 5735 "sql_grammar.c"
+#line 5740 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6710,7 +6715,7 @@ static void yy_rule_105(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 674 "sql_grammar.lime"
+#line 683 "sql_grammar.lime"
 {
     sql_create_t *cr = AST(pstate, sql_create_t);
     yymsp[-9].minor.yy285 = AST(pstate, sql_stmt_t);
@@ -6721,7 +6726,7 @@ static void yy_rule_105(yy_reduce_ctx *yy_ctx){
         yymsp[-9].minor.yy285->kind = SQL_KIND_CREATE; yymsp[-9].minor.yy285->u.create = cr;
     }
 }
-#line 5771 "sql_grammar.c"
+#line 5776 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6755,7 +6760,7 @@ static void yy_rule_106(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 685 "sql_grammar.lime"
+#line 694 "sql_grammar.lime"
 {
     sql_create_t *cr = AST(pstate, sql_create_t);
     yymsp[-6].minor.yy285 = AST(pstate, sql_stmt_t);
@@ -6765,7 +6770,7 @@ static void yy_rule_106(yy_reduce_ctx *yy_ctx){
         yymsp[-6].minor.yy285->kind = SQL_KIND_CREATE; yymsp[-6].minor.yy285->u.create = cr;
     }
 }
-#line 5806 "sql_grammar.c"
+#line 5811 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6799,12 +6804,12 @@ static void yy_rule_107(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 698 "sql_grammar.lime"
+#line 707 "sql_grammar.lime"
 {
     yylhsminor.yy54 = mk_list(pstate);
     if (yylhsminor.yy54 && yymsp[0].minor.yy304) { yylhsminor.yy54->head = yylhsminor.yy54->tail = yymsp[0].minor.yy304; yylhsminor.yy54->n = 1; }
 }
-#line 5836 "sql_grammar.c"
+#line 5841 "sql_grammar.c"
   yymsp[0].minor.yy54 = yylhsminor.yy54;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -6839,12 +6844,12 @@ static void yy_rule_108(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 702 "sql_grammar.lime"
+#line 711 "sql_grammar.lime"
 {
     yylhsminor.yy54 = yymsp[-2].minor.yy54;
     if (yylhsminor.yy54 && yymsp[0].minor.yy304) { if (yylhsminor.yy54->tail) yylhsminor.yy54->tail->next = yymsp[0].minor.yy304; else yylhsminor.yy54->head = yymsp[0].minor.yy304; yylhsminor.yy54->tail = yymsp[0].minor.yy304; yylhsminor.yy54->n++; }
 }
-#line 5867 "sql_grammar.c"
+#line 5872 "sql_grammar.c"
   yymsp[-2].minor.yy54 = yylhsminor.yy54;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -6879,14 +6884,14 @@ static void yy_rule_109(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 706 "sql_grammar.lime"
+#line 715 "sql_grammar.lime"
 {
     sql_expr_t *c = mk_expr(pstate, SX_E_COLUMN);
     yylhsminor.yy304 = AST(pstate, sql_exprlist_item_t);
     if (c) { c->name[0] = tok_str(yymsp[-1].minor.yy0); c->nname = 1; }
     if (yylhsminor.yy304) { yylhsminor.yy304->expr = c; yylhsminor.yy304->sort = yymsp[0].minor.yy82; }
 }
-#line 5900 "sql_grammar.c"
+#line 5905 "sql_grammar.c"
   yymsp[-1].minor.yy304 = yylhsminor.yy304;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -6921,9 +6926,9 @@ static void yy_rule_110(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 713 "sql_grammar.lime"
+#line 722 "sql_grammar.lime"
 { yymsp[1].minor.yy82 = 1; }
-#line 5928 "sql_grammar.c"
+#line 5933 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6957,9 +6962,9 @@ static void yy_rule_111(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 714 "sql_grammar.lime"
+#line 723 "sql_grammar.lime"
 { yymsp[0].minor.yy82 = 1; }
-#line 5955 "sql_grammar.c"
+#line 5960 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -6993,9 +6998,9 @@ static void yy_rule_112(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 715 "sql_grammar.lime"
+#line 724 "sql_grammar.lime"
 { yymsp[0].minor.yy82 = 2; }
-#line 5982 "sql_grammar.c"
+#line 5987 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7029,9 +7034,9 @@ static void yy_rule_113(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 720 "sql_grammar.lime"
+#line 729 "sql_grammar.lime"
 { yymsp[1].minor.yy82 = 0; }
-#line 6009 "sql_grammar.c"
+#line 6014 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7065,9 +7070,9 @@ static void yy_rule_114(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 721 "sql_grammar.lime"
+#line 730 "sql_grammar.lime"
 { yymsp[0].minor.yy82 = 1; }
-#line 6036 "sql_grammar.c"
+#line 6041 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7101,9 +7106,9 @@ static void yy_rule_115(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 722 "sql_grammar.lime"
+#line 731 "sql_grammar.lime"
 { yymsp[0].minor.yy82 = 1; }
-#line 6063 "sql_grammar.c"
+#line 6068 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7137,9 +7142,9 @@ static void yy_rule_116(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 724 "sql_grammar.lime"
+#line 733 "sql_grammar.lime"
 { yymsp[1].minor.yy82 = 0; }
-#line 6090 "sql_grammar.c"
+#line 6095 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7173,9 +7178,9 @@ static void yy_rule_117(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 725 "sql_grammar.lime"
+#line 734 "sql_grammar.lime"
 { yymsp[0].minor.yy82 = 1; }
-#line 6117 "sql_grammar.c"
+#line 6122 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7209,9 +7214,9 @@ static void yy_rule_118(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 727 "sql_grammar.lime"
+#line 736 "sql_grammar.lime"
 { yymsp[1].minor.yy82 = 0; }
-#line 6144 "sql_grammar.c"
+#line 6149 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7245,9 +7250,9 @@ static void yy_rule_119(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 728 "sql_grammar.lime"
+#line 737 "sql_grammar.lime"
 { yymsp[-2].minor.yy82 = 1; }
-#line 6171 "sql_grammar.c"
+#line 6176 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7281,9 +7286,9 @@ static void yy_rule_120(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 740 "sql_grammar.lime"
+#line 749 "sql_grammar.lime"
 { yylhsminor.yy174 = yymsp[0].minor.yy174; }
-#line 6198 "sql_grammar.c"
+#line 6203 "sql_grammar.c"
   yymsp[0].minor.yy174 = yylhsminor.yy174;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7318,13 +7323,13 @@ static void yy_rule_121(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 741 "sql_grammar.lime"
+#line 750 "sql_grammar.lime"
 {
     if (yymsp[0].minor.yy174 == NULL) { yylhsminor.yy174 = yymsp[-2].minor.yy174; }                    /* a constraint: no column */
     else if (yymsp[-2].minor.yy174 == NULL) { yylhsminor.yy174 = yymsp[0].minor.yy174; }
     else { sql_coldef_t *s = yymsp[-2].minor.yy174; while (s->next) s = s->next; s->next = yymsp[0].minor.yy174; yylhsminor.yy174 = yymsp[-2].minor.yy174; }
 }
-#line 6230 "sql_grammar.c"
+#line 6235 "sql_grammar.c"
   yymsp[-2].minor.yy174 = yylhsminor.yy174;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7359,9 +7364,9 @@ static void yy_rule_122(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 747 "sql_grammar.lime"
+#line 756 "sql_grammar.lime"
 { yylhsminor.yy174 = yymsp[0].minor.yy174; }
-#line 6258 "sql_grammar.c"
+#line 6263 "sql_grammar.c"
   yymsp[0].minor.yy174 = yylhsminor.yy174;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7396,9 +7401,9 @@ static void yy_rule_123(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 748 "sql_grammar.lime"
+#line 757 "sql_grammar.lime"
 { yylhsminor.yy174 = yymsp[0].minor.yy174; }
-#line 6286 "sql_grammar.c"
+#line 6291 "sql_grammar.c"
   yymsp[0].minor.yy174 = yylhsminor.yy174;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7433,14 +7438,14 @@ static void yy_rule_124(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 750 "sql_grammar.lime"
+#line 759 "sql_grammar.lime"
 {
     yylhsminor.yy174 = AST(pstate, sql_coldef_t);
     if (yylhsminor.yy174) { yylhsminor.yy174->name = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy174->type = yymsp[-1].minor.yy84;
              yylhsminor.yy174->primary = (yymsp[0].minor.yy82 & 1) != 0; yylhsminor.yy174->notnull = (yymsp[0].minor.yy82 & 2) != 0;
              yylhsminor.yy174->unique = (yymsp[0].minor.yy82 & 4) != 0; }
 }
-#line 6319 "sql_grammar.c"
+#line 6324 "sql_grammar.c"
   yymsp[-2].minor.yy174 = yylhsminor.yy174;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7475,9 +7480,9 @@ static void yy_rule_125(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 759 "sql_grammar.lime"
+#line 768 "sql_grammar.lime"
 { yymsp[1].minor.yy84.p = NULL; yymsp[1].minor.yy84.len = 0; }
-#line 6347 "sql_grammar.c"
+#line 6352 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7511,9 +7516,9 @@ static void yy_rule_126(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 760 "sql_grammar.lime"
-{ yylhsminor.yy84 = yymsp[0].minor.yy84; }
-#line 6374 "sql_grammar.c"
+#line 769 "sql_grammar.lime"
+{ yylhsminor.yy84 = tok_str(yymsp[0].minor.yy0); }
+#line 6379 "sql_grammar.c"
   yymsp[0].minor.yy84 = yylhsminor.yy84;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7548,9 +7553,9 @@ static void yy_rule_127(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 761 "sql_grammar.lime"
-{ yylhsminor.yy84 = yymsp[-3].minor.yy84; }
-#line 6402 "sql_grammar.c"
+#line 770 "sql_grammar.lime"
+{ yylhsminor.yy84 = tok_str(yymsp[-3].minor.yy0); }
+#line 6407 "sql_grammar.c"
   yymsp[-3].minor.yy84 = yylhsminor.yy84;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7585,9 +7590,9 @@ static void yy_rule_128(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 762 "sql_grammar.lime"
-{ yylhsminor.yy84 = yymsp[-5].minor.yy84; }
-#line 6430 "sql_grammar.c"
+#line 771 "sql_grammar.lime"
+{ yylhsminor.yy84 = tok_str(yymsp[-5].minor.yy0); }
+#line 6435 "sql_grammar.c"
   yymsp[-5].minor.yy84 = yylhsminor.yy84;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7622,10 +7627,10 @@ static void yy_rule_129(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 766 "sql_grammar.lime"
-{ yylhsminor.yy84 = tok_str(yymsp[0].minor.yy0); }
-#line 6458 "sql_grammar.c"
-  yymsp[0].minor.yy84 = yylhsminor.yy84;
+#line 775 "sql_grammar.lime"
+{ yylhsminor.yy0 = yymsp[0].minor.yy0; }
+#line 6463 "sql_grammar.c"
+  yymsp[0].minor.yy0 = yylhsminor.yy0;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7659,10 +7664,15 @@ static void yy_rule_130(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 767 "sql_grammar.lime"
-{ yylhsminor.yy84 = yymsp[-1].minor.yy84; yylhsminor.yy84.len = (uint32_t)((yymsp[0].minor.yy0.p + yymsp[0].minor.yy0.len) - yymsp[-1].minor.yy84.p); }
-#line 6486 "sql_grammar.c"
-  yymsp[-1].minor.yy84 = yylhsminor.yy84;
+#line 776 "sql_grammar.lime"
+{
+    /* Several words: the verbatim source slice over all of them (a
+     * dequoted word's value may live in the arena, not in the text). */
+    yylhsminor.yy0.src = yymsp[-1].minor.yy0.src; yylhsminor.yy0.srclen = (int)((yymsp[0].minor.yy0.src + yymsp[0].minor.yy0.srclen) - yymsp[-1].minor.yy0.src);
+    yylhsminor.yy0.p = yylhsminor.yy0.src; yylhsminor.yy0.len = yylhsminor.yy0.srclen;
+}
+#line 6496 "sql_grammar.c"
+  yymsp[-1].minor.yy0 = yylhsminor.yy0;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7696,9 +7706,9 @@ static void yy_rule_131(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 771 "sql_grammar.lime"
+#line 785 "sql_grammar.lime"
 { yymsp[1].minor.yy82 = 0; }
-#line 6514 "sql_grammar.c"
+#line 6524 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7732,9 +7742,9 @@ static void yy_rule_132(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 772 "sql_grammar.lime"
+#line 786 "sql_grammar.lime"
 { yylhsminor.yy82 = yymsp[-1].minor.yy82 | yymsp[0].minor.yy82; }
-#line 6541 "sql_grammar.c"
+#line 6551 "sql_grammar.c"
   yymsp[-1].minor.yy82 = yylhsminor.yy82;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -7769,9 +7779,9 @@ static void yy_rule_133(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 774 "sql_grammar.lime"
+#line 788 "sql_grammar.lime"
 { yymsp[-1].minor.yy82 = 1; }
-#line 6569 "sql_grammar.c"
+#line 6579 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7805,9 +7815,9 @@ static void yy_rule_134(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 775 "sql_grammar.lime"
+#line 789 "sql_grammar.lime"
 { yymsp[-2].minor.yy82 = 1; }
-#line 6596 "sql_grammar.c"
+#line 6606 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7841,9 +7851,9 @@ static void yy_rule_135(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 776 "sql_grammar.lime"
+#line 790 "sql_grammar.lime"
 { yymsp[-2].minor.yy82 = 1; }
-#line 6623 "sql_grammar.c"
+#line 6633 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7877,9 +7887,9 @@ static void yy_rule_136(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 777 "sql_grammar.lime"
+#line 791 "sql_grammar.lime"
 { yymsp[-2].minor.yy82 = 1; }
-#line 6650 "sql_grammar.c"
+#line 6660 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7913,9 +7923,9 @@ static void yy_rule_137(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 778 "sql_grammar.lime"
+#line 792 "sql_grammar.lime"
 { yymsp[-1].minor.yy82 = 2; }
-#line 6677 "sql_grammar.c"
+#line 6687 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7949,9 +7959,9 @@ static void yy_rule_138(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 779 "sql_grammar.lime"
+#line 793 "sql_grammar.lime"
 { yymsp[0].minor.yy82 = 4; }
-#line 6704 "sql_grammar.c"
+#line 6714 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -7985,9 +7995,9 @@ static void yy_rule_139(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 780 "sql_grammar.lime"
+#line 794 "sql_grammar.lime"
 { yymsp[-1].minor.yy82 = 0; }
-#line 6731 "sql_grammar.c"
+#line 6741 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8021,9 +8031,9 @@ static void yy_rule_140(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 781 "sql_grammar.lime"
+#line 795 "sql_grammar.lime"
 { yymsp[-3].minor.yy82 = 0; }
-#line 6758 "sql_grammar.c"
+#line 6768 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8057,9 +8067,9 @@ static void yy_rule_141(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 782 "sql_grammar.lime"
+#line 796 "sql_grammar.lime"
 { yymsp[-1].minor.yy82 = 0; }
-#line 6785 "sql_grammar.c"
+#line 6795 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8093,9 +8103,9 @@ static void yy_rule_142(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 783 "sql_grammar.lime"
+#line 797 "sql_grammar.lime"
 { yymsp[-4].minor.yy82 = 0; }
-#line 6812 "sql_grammar.c"
+#line 6822 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8129,12 +8139,12 @@ static void yy_rule_143(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 789 "sql_grammar.lime"
+#line 803 "sql_grammar.lime"
 {
     yymsp[-4].minor.yy174 = AST(pstate, sql_coldef_t);
     if (yymsp[-4].minor.yy174) { yymsp[-4].minor.yy174->cons = SX_CONS_PRIMARY; yymsp[-4].minor.yy174->cons_cols = yymsp[-1].minor.yy54; }
 }
-#line 6842 "sql_grammar.c"
+#line 6852 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8168,12 +8178,12 @@ static void yy_rule_144(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 793 "sql_grammar.lime"
+#line 807 "sql_grammar.lime"
 {
     yymsp[-3].minor.yy174 = AST(pstate, sql_coldef_t);
     if (yymsp[-3].minor.yy174) { yymsp[-3].minor.yy174->cons = SX_CONS_UNIQUE; yymsp[-3].minor.yy174->cons_cols = yymsp[-1].minor.yy54; }
 }
-#line 6872 "sql_grammar.c"
+#line 6882 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8207,9 +8217,9 @@ static void yy_rule_145(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 797 "sql_grammar.lime"
+#line 811 "sql_grammar.lime"
 { yymsp[-6].minor.yy174 = NULL; }
-#line 6899 "sql_grammar.c"
+#line 6909 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8243,9 +8253,9 @@ static void yy_rule_146(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 798 "sql_grammar.lime"
+#line 812 "sql_grammar.lime"
 { yymsp[-9].minor.yy174 = NULL; }
-#line 6926 "sql_grammar.c"
+#line 6936 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8279,9 +8289,9 @@ static void yy_rule_147(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 799 "sql_grammar.lime"
+#line 813 "sql_grammar.lime"
 { yymsp[-3].minor.yy174 = NULL; }
-#line 6953 "sql_grammar.c"
+#line 6963 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8315,14 +8325,14 @@ static void yy_rule_148(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 803 "sql_grammar.lime"
+#line 817 "sql_grammar.lime"
 {
     sql_drop_t *d = AST(pstate, sql_drop_t);
     yymsp[-3].minor.yy285 = AST(pstate, sql_stmt_t);
     if (yymsp[-3].minor.yy285 && d) { d->kind = SX_DR_TABLE; d->if_exists = yymsp[-1].minor.yy82; d->schema = yymsp[0].minor.yy153.schema; d->name = yymsp[0].minor.yy153.table;
                   yymsp[-3].minor.yy285->kind = SQL_KIND_DROP; yymsp[-3].minor.yy285->u.drop = d; }
 }
-#line 6985 "sql_grammar.c"
+#line 6995 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8356,14 +8366,14 @@ static void yy_rule_149(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 809 "sql_grammar.lime"
+#line 823 "sql_grammar.lime"
 {
     sql_drop_t *d = AST(pstate, sql_drop_t);
     yymsp[-3].minor.yy285 = AST(pstate, sql_stmt_t);
     if (yymsp[-3].minor.yy285 && d) { d->kind = SX_DR_INDEX; d->if_exists = yymsp[-1].minor.yy82; d->schema = yymsp[0].minor.yy153.schema; d->name = yymsp[0].minor.yy153.table;
                   yymsp[-3].minor.yy285->kind = SQL_KIND_DROP; yymsp[-3].minor.yy285->u.drop = d; }
 }
-#line 7017 "sql_grammar.c"
+#line 7027 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8397,14 +8407,14 @@ static void yy_rule_150(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 815 "sql_grammar.lime"
+#line 829 "sql_grammar.lime"
 {
     sql_drop_t *d = AST(pstate, sql_drop_t);
     yymsp[-3].minor.yy285 = AST(pstate, sql_stmt_t);
     if (yymsp[-3].minor.yy285 && d) { d->kind = SX_DR_VIEW; d->if_exists = yymsp[-1].minor.yy82; d->schema = yymsp[0].minor.yy153.schema; d->name = yymsp[0].minor.yy153.table;
                   yymsp[-3].minor.yy285->kind = SQL_KIND_DROP; yymsp[-3].minor.yy285->u.drop = d; }
 }
-#line 7049 "sql_grammar.c"
+#line 7059 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8438,14 +8448,14 @@ static void yy_rule_151(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 821 "sql_grammar.lime"
+#line 835 "sql_grammar.lime"
 {
     sql_drop_t *d = AST(pstate, sql_drop_t);
     yymsp[-3].minor.yy285 = AST(pstate, sql_stmt_t);
     if (yymsp[-3].minor.yy285 && d) { d->kind = SX_DR_TRIGGER; d->if_exists = yymsp[-1].minor.yy82; d->schema = yymsp[0].minor.yy153.schema; d->name = yymsp[0].minor.yy153.table;
                   yymsp[-3].minor.yy285->kind = SQL_KIND_DROP; yymsp[-3].minor.yy285->u.drop = d; }
 }
-#line 7081 "sql_grammar.c"
+#line 7091 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8479,14 +8489,14 @@ static void yy_rule_152(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 830 "sql_grammar.lime"
+#line 844 "sql_grammar.lime"
 {
     sql_create_t *cr = AST(pstate, sql_create_t);
     yymsp[-5].minor.yy285 = AST(pstate, sql_stmt_t);
     if (yymsp[-5].minor.yy285 && cr) { cr->name = yymsp[-3].minor.yy153.table; cr->on_table = yymsp[0].minor.yy153.table;
                    yymsp[-5].minor.yy285->kind = SQL_KIND_ALTER; yymsp[-5].minor.yy285->u.create = cr; }
 }
-#line 7113 "sql_grammar.c"
+#line 7123 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8520,9 +8530,9 @@ static void yy_rule_153(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 838 "sql_grammar.lime"
+#line 852 "sql_grammar.lime"
 { yymsp[1].minor.yy82 = 0; }
-#line 7140 "sql_grammar.c"
+#line 7150 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8556,9 +8566,9 @@ static void yy_rule_154(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 839 "sql_grammar.lime"
+#line 853 "sql_grammar.lime"
 { yymsp[-1].minor.yy82 = 1; }
-#line 7167 "sql_grammar.c"
+#line 7177 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8592,13 +8602,13 @@ static void yy_rule_155(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 843 "sql_grammar.lime"
+#line 857 "sql_grammar.lime"
 {
     sql_pragma_t *p = AST(pstate, sql_pragma_t);
     yymsp[-1].minor.yy285 = AST(pstate, sql_stmt_t);
     if (yymsp[-1].minor.yy285 && p) { p->schema = yymsp[0].minor.yy153.schema; p->name = yymsp[0].minor.yy153.table; yymsp[-1].minor.yy285->kind = SQL_KIND_PRAGMA; yymsp[-1].minor.yy285->readonly = 1; yymsp[-1].minor.yy285->u.pragma = p; }
 }
-#line 7198 "sql_grammar.c"
+#line 7208 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8632,13 +8642,13 @@ static void yy_rule_156(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 848 "sql_grammar.lime"
+#line 862 "sql_grammar.lime"
 {
     sql_pragma_t *p = AST(pstate, sql_pragma_t);
     yymsp[-3].minor.yy285 = AST(pstate, sql_stmt_t);
     if (yymsp[-3].minor.yy285 && p) { p->schema = yymsp[-2].minor.yy153.schema; p->name = yymsp[-2].minor.yy153.table; p->value = yymsp[0].minor.yy328; yymsp[-3].minor.yy285->kind = SQL_KIND_PRAGMA; yymsp[-3].minor.yy285->u.pragma = p; }
 }
-#line 7229 "sql_grammar.c"
+#line 7239 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8672,13 +8682,13 @@ static void yy_rule_157(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 853 "sql_grammar.lime"
+#line 867 "sql_grammar.lime"
 {
     sql_pragma_t *p = AST(pstate, sql_pragma_t);
     yymsp[-4].minor.yy285 = AST(pstate, sql_stmt_t);
     if (yymsp[-4].minor.yy285 && p) { p->schema = yymsp[-3].minor.yy153.schema; p->name = yymsp[-3].minor.yy153.table; p->value = yymsp[-1].minor.yy328; yymsp[-4].minor.yy285->kind = SQL_KIND_PRAGMA; yymsp[-4].minor.yy285->u.pragma = p; }
 }
-#line 7260 "sql_grammar.c"
+#line 7270 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8712,9 +8722,9 @@ static void yy_rule_158(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 861 "sql_grammar.lime"
+#line 875 "sql_grammar.lime"
 { yymsp[0].minor.yy285 = AST(pstate, sql_stmt_t); if (yymsp[0].minor.yy285) yymsp[0].minor.yy285->kind = SQL_KIND_BEGIN; }
-#line 7287 "sql_grammar.c"
+#line 7297 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8748,9 +8758,9 @@ static void yy_rule_159(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 862 "sql_grammar.lime"
+#line 876 "sql_grammar.lime"
 { yymsp[-1].minor.yy285 = AST(pstate, sql_stmt_t); if (yymsp[-1].minor.yy285) yymsp[-1].minor.yy285->kind = SQL_KIND_BEGIN; }
-#line 7314 "sql_grammar.c"
+#line 7324 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8784,9 +8794,9 @@ static void yy_rule_160(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 863 "sql_grammar.lime"
+#line 877 "sql_grammar.lime"
 { yymsp[-1].minor.yy285 = AST(pstate, sql_stmt_t); if (yymsp[-1].minor.yy285) yymsp[-1].minor.yy285->kind = SQL_KIND_BEGIN; }
-#line 7341 "sql_grammar.c"
+#line 7351 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8820,9 +8830,9 @@ static void yy_rule_161(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 864 "sql_grammar.lime"
+#line 878 "sql_grammar.lime"
 { yymsp[-2].minor.yy285 = AST(pstate, sql_stmt_t); if (yymsp[-2].minor.yy285) yymsp[-2].minor.yy285->kind = SQL_KIND_BEGIN; }
-#line 7368 "sql_grammar.c"
+#line 7378 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8856,9 +8866,9 @@ static void yy_rule_162(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 866 "sql_grammar.lime"
+#line 880 "sql_grammar.lime"
 { yymsp[0].minor.yy285 = AST(pstate, sql_stmt_t); if (yymsp[0].minor.yy285) yymsp[0].minor.yy285->kind = SQL_KIND_COMMIT; }
-#line 7395 "sql_grammar.c"
+#line 7405 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8892,9 +8902,9 @@ static void yy_rule_163(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 867 "sql_grammar.lime"
+#line 881 "sql_grammar.lime"
 { yymsp[-1].minor.yy285 = AST(pstate, sql_stmt_t); if (yymsp[-1].minor.yy285) yymsp[-1].minor.yy285->kind = SQL_KIND_COMMIT; }
-#line 7422 "sql_grammar.c"
+#line 7432 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8928,9 +8938,9 @@ static void yy_rule_164(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 868 "sql_grammar.lime"
+#line 882 "sql_grammar.lime"
 { yymsp[0].minor.yy285 = AST(pstate, sql_stmt_t); if (yymsp[0].minor.yy285) yymsp[0].minor.yy285->kind = SQL_KIND_COMMIT; }
-#line 7449 "sql_grammar.c"
+#line 7459 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -8964,9 +8974,9 @@ static void yy_rule_165(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 869 "sql_grammar.lime"
+#line 883 "sql_grammar.lime"
 { yymsp[-1].minor.yy285 = AST(pstate, sql_stmt_t); if (yymsp[-1].minor.yy285) yymsp[-1].minor.yy285->kind = SQL_KIND_COMMIT; }
-#line 7476 "sql_grammar.c"
+#line 7486 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -9000,9 +9010,9 @@ static void yy_rule_166(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 871 "sql_grammar.lime"
+#line 885 "sql_grammar.lime"
 { yymsp[0].minor.yy285 = AST(pstate, sql_stmt_t); if (yymsp[0].minor.yy285) yymsp[0].minor.yy285->kind = SQL_KIND_ROLLBACK; }
-#line 7503 "sql_grammar.c"
+#line 7513 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -9036,9 +9046,9 @@ static void yy_rule_167(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 872 "sql_grammar.lime"
+#line 886 "sql_grammar.lime"
 { yymsp[-1].minor.yy285 = AST(pstate, sql_stmt_t); if (yymsp[-1].minor.yy285) yymsp[-1].minor.yy285->kind = SQL_KIND_ROLLBACK; }
-#line 7530 "sql_grammar.c"
+#line 7540 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -9072,12 +9082,12 @@ static void yy_rule_168(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 873 "sql_grammar.lime"
+#line 887 "sql_grammar.lime"
 {
     sql_txn_t *x = AST(pstate, sql_txn_t);
     yymsp[-2].minor.yy285 = AST(pstate, sql_stmt_t);
     if (yymsp[-2].minor.yy285) { yymsp[-2].minor.yy285->kind = SQL_KIND_ROLLBACK; yymsp[-2].minor.yy285->u.txn = x; if (x) x->name = tok_str(yymsp[0].minor.yy0); } }
-#line 7560 "sql_grammar.c"
+#line 7570 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -9111,12 +9121,12 @@ static void yy_rule_169(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 877 "sql_grammar.lime"
+#line 891 "sql_grammar.lime"
 {
     sql_txn_t *x = AST(pstate, sql_txn_t);
     yymsp[-3].minor.yy285 = AST(pstate, sql_stmt_t);
     if (yymsp[-3].minor.yy285) { yymsp[-3].minor.yy285->kind = SQL_KIND_ROLLBACK; yymsp[-3].minor.yy285->u.txn = x; if (x) x->name = tok_str(yymsp[0].minor.yy0); } }
-#line 7590 "sql_grammar.c"
+#line 7600 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -9150,12 +9160,12 @@ static void yy_rule_170(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 881 "sql_grammar.lime"
+#line 895 "sql_grammar.lime"
 {
     sql_txn_t *x = AST(pstate, sql_txn_t);
     yymsp[-3].minor.yy285 = AST(pstate, sql_stmt_t);
     if (yymsp[-3].minor.yy285) { yymsp[-3].minor.yy285->kind = SQL_KIND_ROLLBACK; yymsp[-3].minor.yy285->u.txn = x; if (x) x->name = tok_str(yymsp[0].minor.yy0); } }
-#line 7620 "sql_grammar.c"
+#line 7630 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -9189,12 +9199,12 @@ static void yy_rule_171(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 886 "sql_grammar.lime"
+#line 900 "sql_grammar.lime"
 {
     sql_txn_t *x = AST(pstate, sql_txn_t);
     yymsp[-1].minor.yy285 = AST(pstate, sql_stmt_t);
     if (yymsp[-1].minor.yy285) { yymsp[-1].minor.yy285->kind = SQL_KIND_SAVEPOINT; yymsp[-1].minor.yy285->u.txn = x; if (x) x->name = tok_str(yymsp[0].minor.yy0); } }
-#line 7650 "sql_grammar.c"
+#line 7660 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -9228,12 +9238,12 @@ static void yy_rule_172(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 891 "sql_grammar.lime"
+#line 905 "sql_grammar.lime"
 {
     sql_txn_t *x = AST(pstate, sql_txn_t);
     yymsp[-1].minor.yy285 = AST(pstate, sql_stmt_t);
     if (yymsp[-1].minor.yy285) { yymsp[-1].minor.yy285->kind = SQL_KIND_RELEASE; yymsp[-1].minor.yy285->u.txn = x; if (x) x->name = tok_str(yymsp[0].minor.yy0); } }
-#line 7680 "sql_grammar.c"
+#line 7690 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -9267,12 +9277,12 @@ static void yy_rule_173(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 895 "sql_grammar.lime"
+#line 909 "sql_grammar.lime"
 {
     sql_txn_t *x = AST(pstate, sql_txn_t);
     yymsp[-2].minor.yy285 = AST(pstate, sql_stmt_t);
     if (yymsp[-2].minor.yy285) { yymsp[-2].minor.yy285->kind = SQL_KIND_RELEASE; yymsp[-2].minor.yy285->u.txn = x; if (x) x->name = tok_str(yymsp[0].minor.yy0); } }
-#line 7710 "sql_grammar.c"
+#line 7720 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -9306,13 +9316,13 @@ static void yy_rule_174(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 900 "sql_grammar.lime"
+#line 914 "sql_grammar.lime"
 {
     sql_attach_t *at = AST(pstate, sql_attach_t);
     yymsp[-3].minor.yy285 = AST(pstate, sql_stmt_t);
     if (yymsp[-3].minor.yy285 && at) { at->target = yymsp[-2].minor.yy328; at->alias = tok_str(yymsp[0].minor.yy0); yymsp[-3].minor.yy285->kind = SQL_KIND_ATTACH; yymsp[-3].minor.yy285->u.attach = at; }
 }
-#line 7741 "sql_grammar.c"
+#line 7751 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -9346,13 +9356,13 @@ static void yy_rule_175(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 905 "sql_grammar.lime"
+#line 919 "sql_grammar.lime"
 {
     sql_attach_t *at = AST(pstate, sql_attach_t);
     yymsp[-4].minor.yy285 = AST(pstate, sql_stmt_t);
     if (yymsp[-4].minor.yy285 && at) { at->target = yymsp[-2].minor.yy328; at->alias = tok_str(yymsp[0].minor.yy0); yymsp[-4].minor.yy285->kind = SQL_KIND_ATTACH; yymsp[-4].minor.yy285->u.attach = at; }
 }
-#line 7772 "sql_grammar.c"
+#line 7782 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -9386,11 +9396,11 @@ static void yy_rule_176(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 911 "sql_grammar.lime"
+#line 925 "sql_grammar.lime"
 {
     yymsp[-1].minor.yy285 = AST(pstate, sql_stmt_t); if (yymsp[-1].minor.yy285) { yymsp[-1].minor.yy285->kind = SQL_KIND_DETACH; yymsp[-1].minor.yy285->u.detach = tok_str(yymsp[0].minor.yy0); }
 }
-#line 7801 "sql_grammar.c"
+#line 7811 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -9424,11 +9434,11 @@ static void yy_rule_177(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 914 "sql_grammar.lime"
+#line 928 "sql_grammar.lime"
 {
     yymsp[-2].minor.yy285 = AST(pstate, sql_stmt_t); if (yymsp[-2].minor.yy285) { yymsp[-2].minor.yy285->kind = SQL_KIND_DETACH; yymsp[-2].minor.yy285->u.detach = tok_str(yymsp[0].minor.yy0); }
 }
-#line 7830 "sql_grammar.c"
+#line 7840 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -9462,11 +9472,11 @@ static void yy_rule_178(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 918 "sql_grammar.lime"
+#line 932 "sql_grammar.lime"
 {
     yymsp[-1].minor.yy285 = yymsp[0].minor.yy285; if (yymsp[-1].minor.yy285) { yymsp[-1].minor.yy285->explain = 1; yymsp[-1].minor.yy285->kind = SQL_KIND_EXPLAIN; yymsp[-1].minor.yy285->readonly = 1; }
 }
-#line 7859 "sql_grammar.c"
+#line 7869 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -9500,11 +9510,11 @@ static void yy_rule_179(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 921 "sql_grammar.lime"
+#line 935 "sql_grammar.lime"
 {
     yymsp[-3].minor.yy285 = yymsp[0].minor.yy285; if (yymsp[-3].minor.yy285) { yymsp[-3].minor.yy285->explain = 2; yymsp[-3].minor.yy285->kind = SQL_KIND_EXPLAIN; yymsp[-3].minor.yy285->readonly = 1; }
 }
-#line 7888 "sql_grammar.c"
+#line 7898 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -9538,13 +9548,13 @@ static void yy_rule_180(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 927 "sql_grammar.lime"
+#line 941 "sql_grammar.lime"
 {
     sql_expr_t *c = mk_expr(pstate, SX_E_COLUMN);
     if (c) { c->name[0] = tok_str(yymsp[0].minor.yy0); c->nname = 1; }
     yylhsminor.yy54 = list_add(pstate, NULL, c);
 }
-#line 7919 "sql_grammar.c"
+#line 7929 "sql_grammar.c"
   yymsp[0].minor.yy54 = yylhsminor.yy54;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -9579,13 +9589,13 @@ static void yy_rule_181(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 932 "sql_grammar.lime"
+#line 946 "sql_grammar.lime"
 {
     sql_expr_t *c = mk_expr(pstate, SX_E_COLUMN);
     if (c) { c->name[0] = tok_str(yymsp[0].minor.yy0); c->nname = 1; }
     yylhsminor.yy54 = list_add(pstate, yymsp[-2].minor.yy54, c);
 }
-#line 7951 "sql_grammar.c"
+#line 7961 "sql_grammar.c"
   yymsp[-2].minor.yy54 = yylhsminor.yy54;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -9620,9 +9630,9 @@ static void yy_rule_182(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 938 "sql_grammar.lime"
+#line 952 "sql_grammar.lime"
 { yylhsminor.yy54 = list_add(pstate, NULL, yymsp[0].minor.yy328); }
-#line 7979 "sql_grammar.c"
+#line 7989 "sql_grammar.c"
   yymsp[0].minor.yy54 = yylhsminor.yy54;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -9657,9 +9667,9 @@ static void yy_rule_183(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 939 "sql_grammar.lime"
+#line 953 "sql_grammar.lime"
 { yylhsminor.yy54 = list_add(pstate, yymsp[-2].minor.yy54, yymsp[0].minor.yy328); }
-#line 8007 "sql_grammar.c"
+#line 8017 "sql_grammar.c"
   yymsp[-2].minor.yy54 = yylhsminor.yy54;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -9694,9 +9704,9 @@ static void yy_rule_184(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 941 "sql_grammar.lime"
+#line 955 "sql_grammar.lime"
 { yylhsminor.yy328 = yymsp[0].minor.yy328; }
-#line 8035 "sql_grammar.c"
+#line 8045 "sql_grammar.c"
   yymsp[0].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -9731,14 +9741,14 @@ static void yy_rule_185(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 942 "sql_grammar.lime"
+#line 956 "sql_grammar.lime"
 {
     yylhsminor.yy328 = yymsp[-1].minor.yy328;
     /* Grow the span to include the parentheses so a parenthesized
      * select item is named with them, as SQLite does ((a+1)*2). */
-    if (yylhsminor.yy328) { yylhsminor.yy328->src = yymsp[-2].minor.yy0.p; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.p + yymsp[0].minor.yy0.len) - yymsp[-2].minor.yy0.p); }
+    if (yylhsminor.yy328) { yylhsminor.yy328->src = yymsp[-2].minor.yy0.src; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.src + yymsp[0].minor.yy0.srclen) - yymsp[-2].minor.yy0.src); }
 }
-#line 8068 "sql_grammar.c"
+#line 8078 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -9773,12 +9783,12 @@ static void yy_rule_186(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 948 "sql_grammar.lime"
+#line 962 "sql_grammar.lime"
 {
     yylhsminor.yy328 = mk_expr(pstate, SX_E_SUBQUERY);
-    if (yylhsminor.yy328) { yylhsminor.yy328->sel = yymsp[-1].minor.yy81; yylhsminor.yy328->src = yymsp[-2].minor.yy0.p; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.p + yymsp[0].minor.yy0.len) - yymsp[-2].minor.yy0.p); }
+    if (yylhsminor.yy328) { yylhsminor.yy328->sel = yymsp[-1].minor.yy81; yylhsminor.yy328->src = yymsp[-2].minor.yy0.src; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.src + yymsp[0].minor.yy0.srclen) - yymsp[-2].minor.yy0.src); }
 }
-#line 8099 "sql_grammar.c"
+#line 8109 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -9813,9 +9823,9 @@ static void yy_rule_187(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 952 "sql_grammar.lime"
+#line 966 "sql_grammar.lime"
 { yymsp[-1].minor.yy328 = mk_unary(pstate, TK_NOT, yymsp[0].minor.yy328); }
-#line 8127 "sql_grammar.c"
+#line 8137 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -9849,9 +9859,9 @@ static void yy_rule_188(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 953 "sql_grammar.lime"
+#line 967 "sql_grammar.lime"
 { yymsp[-1].minor.yy328 = mk_unary(pstate, TK_MINUS, yymsp[0].minor.yy328); }
-#line 8154 "sql_grammar.c"
+#line 8164 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -9885,9 +9895,9 @@ static void yy_rule_189(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 954 "sql_grammar.lime"
+#line 968 "sql_grammar.lime"
 { yymsp[-1].minor.yy328 = mk_unary(pstate, TK_PLUS, yymsp[0].minor.yy328); }
-#line 8181 "sql_grammar.c"
+#line 8191 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -9921,9 +9931,9 @@ static void yy_rule_190(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 955 "sql_grammar.lime"
+#line 969 "sql_grammar.lime"
 { yymsp[-1].minor.yy328 = mk_unary(pstate, TK_TILDE, yymsp[0].minor.yy328); }
-#line 8208 "sql_grammar.c"
+#line 8218 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -9957,9 +9967,9 @@ static void yy_rule_191(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 956 "sql_grammar.lime"
+#line 970 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_binary(pstate, TK_OR, yymsp[-2].minor.yy328, yymsp[0].minor.yy328); }
-#line 8235 "sql_grammar.c"
+#line 8245 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -9994,9 +10004,9 @@ static void yy_rule_192(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 957 "sql_grammar.lime"
+#line 971 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_binary(pstate, TK_AND, yymsp[-2].minor.yy328, yymsp[0].minor.yy328); }
-#line 8263 "sql_grammar.c"
+#line 8273 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10031,9 +10041,9 @@ static void yy_rule_193(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 958 "sql_grammar.lime"
+#line 972 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_binary(pstate, TK_EQ, yymsp[-2].minor.yy328, yymsp[0].minor.yy328); }
-#line 8291 "sql_grammar.c"
+#line 8301 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10068,9 +10078,9 @@ static void yy_rule_194(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 959 "sql_grammar.lime"
+#line 973 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_binary(pstate, TK_NE, yymsp[-2].minor.yy328, yymsp[0].minor.yy328); }
-#line 8319 "sql_grammar.c"
+#line 8329 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10105,9 +10115,9 @@ static void yy_rule_195(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 960 "sql_grammar.lime"
+#line 974 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_binary(pstate, TK_LT, yymsp[-2].minor.yy328, yymsp[0].minor.yy328); }
-#line 8347 "sql_grammar.c"
+#line 8357 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10142,9 +10152,9 @@ static void yy_rule_196(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 961 "sql_grammar.lime"
+#line 975 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_binary(pstate, TK_LE, yymsp[-2].minor.yy328, yymsp[0].minor.yy328); }
-#line 8375 "sql_grammar.c"
+#line 8385 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10179,9 +10189,9 @@ static void yy_rule_197(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 962 "sql_grammar.lime"
+#line 976 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_binary(pstate, TK_GT, yymsp[-2].minor.yy328, yymsp[0].minor.yy328); }
-#line 8403 "sql_grammar.c"
+#line 8413 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10216,9 +10226,9 @@ static void yy_rule_198(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 963 "sql_grammar.lime"
+#line 977 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_binary(pstate, TK_GE, yymsp[-2].minor.yy328, yymsp[0].minor.yy328); }
-#line 8431 "sql_grammar.c"
+#line 8441 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10253,9 +10263,9 @@ static void yy_rule_199(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 964 "sql_grammar.lime"
+#line 978 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_binary(pstate, TK_PLUS, yymsp[-2].minor.yy328, yymsp[0].minor.yy328); }
-#line 8459 "sql_grammar.c"
+#line 8469 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10290,9 +10300,9 @@ static void yy_rule_200(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 965 "sql_grammar.lime"
+#line 979 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_binary(pstate, TK_MINUS, yymsp[-2].minor.yy328, yymsp[0].minor.yy328); }
-#line 8487 "sql_grammar.c"
+#line 8497 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10327,9 +10337,9 @@ static void yy_rule_201(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 966 "sql_grammar.lime"
+#line 980 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_binary(pstate, TK_STAR, yymsp[-2].minor.yy328, yymsp[0].minor.yy328); }
-#line 8515 "sql_grammar.c"
+#line 8525 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10364,9 +10374,9 @@ static void yy_rule_202(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 967 "sql_grammar.lime"
+#line 981 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_binary(pstate, TK_SLASH, yymsp[-2].minor.yy328, yymsp[0].minor.yy328); }
-#line 8543 "sql_grammar.c"
+#line 8553 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10401,9 +10411,9 @@ static void yy_rule_203(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 968 "sql_grammar.lime"
+#line 982 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_binary(pstate, TK_PERCENT, yymsp[-2].minor.yy328, yymsp[0].minor.yy328); }
-#line 8571 "sql_grammar.c"
+#line 8581 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10438,9 +10448,9 @@ static void yy_rule_204(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 969 "sql_grammar.lime"
+#line 983 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_binary(pstate, TK_CONCAT, yymsp[-2].minor.yy328, yymsp[0].minor.yy328); }
-#line 8599 "sql_grammar.c"
+#line 8609 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10475,9 +10485,9 @@ static void yy_rule_205(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 970 "sql_grammar.lime"
+#line 984 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_binary(pstate, TK_AMP, yymsp[-2].minor.yy328, yymsp[0].minor.yy328); }
-#line 8627 "sql_grammar.c"
+#line 8637 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10512,9 +10522,9 @@ static void yy_rule_206(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 971 "sql_grammar.lime"
+#line 985 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_binary(pstate, TK_PIPE, yymsp[-2].minor.yy328, yymsp[0].minor.yy328); }
-#line 8655 "sql_grammar.c"
+#line 8665 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10549,9 +10559,9 @@ static void yy_rule_207(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 972 "sql_grammar.lime"
+#line 986 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_binary(pstate, TK_LIKE, yymsp[-2].minor.yy328, yymsp[0].minor.yy328); }
-#line 8683 "sql_grammar.c"
+#line 8693 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10586,11 +10596,11 @@ static void yy_rule_208(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 976 "sql_grammar.lime"
+#line 990 "sql_grammar.lime"
 {
     yylhsminor.yy328 = mk_binary(pstate, TK_LIKE, yymsp[-4].minor.yy328, yymsp[-2].minor.yy328); if (yylhsminor.yy328) yylhsminor.yy328->c = yymsp[0].minor.yy328;
 }
-#line 8713 "sql_grammar.c"
+#line 8723 "sql_grammar.c"
   yymsp[-4].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10625,11 +10635,11 @@ static void yy_rule_209(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 979 "sql_grammar.lime"
+#line 993 "sql_grammar.lime"
 {
     yylhsminor.yy328 = mk_unary(pstate, TK_NOT, mk_binary(pstate, TK_LIKE, yymsp[-3].minor.yy328, yymsp[0].minor.yy328));
 }
-#line 8743 "sql_grammar.c"
+#line 8753 "sql_grammar.c"
   yymsp[-3].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10664,13 +10674,13 @@ static void yy_rule_210(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 982 "sql_grammar.lime"
+#line 996 "sql_grammar.lime"
 {
     sql_expr_t *l = mk_binary(pstate, TK_LIKE, yymsp[-5].minor.yy328, yymsp[-2].minor.yy328);
     if (l) l->c = yymsp[0].minor.yy328;
     yylhsminor.yy328 = mk_unary(pstate, TK_NOT, l);
 }
-#line 8775 "sql_grammar.c"
+#line 8785 "sql_grammar.c"
   yymsp[-5].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10705,9 +10715,9 @@ static void yy_rule_211(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 987 "sql_grammar.lime"
+#line 1001 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_expr(pstate, SX_E_IS_NULL); if (yylhsminor.yy328) { yylhsminor.yy328->a = yymsp[-2].minor.yy328; yylhsminor.yy328->ival = 1; } }
-#line 8803 "sql_grammar.c"
+#line 8813 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10742,13 +10752,13 @@ static void yy_rule_212(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 991 "sql_grammar.lime"
+#line 1005 "sql_grammar.lime"
 {
     if (yymsp[0].minor.yy328 && yymsp[0].minor.yy328->op == SX_E_NULL) {
         yylhsminor.yy328 = mk_expr(pstate, SX_E_IS_NULL); if (yylhsminor.yy328) { yylhsminor.yy328->a = yymsp[-2].minor.yy328; yylhsminor.yy328->ival = 0; }
     } else yylhsminor.yy328 = mk_binary(pstate, TK_IS, yymsp[-2].minor.yy328, yymsp[0].minor.yy328);
 }
-#line 8835 "sql_grammar.c"
+#line 8845 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10783,13 +10793,13 @@ static void yy_rule_213(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 996 "sql_grammar.lime"
+#line 1010 "sql_grammar.lime"
 {
     if (yymsp[0].minor.yy328 && yymsp[0].minor.yy328->op == SX_E_NULL) {
         yylhsminor.yy328 = mk_expr(pstate, SX_E_IS_NULL); if (yylhsminor.yy328) { yylhsminor.yy328->a = yymsp[-3].minor.yy328; yylhsminor.yy328->ival = 1; }
     } else yylhsminor.yy328 = mk_unary(pstate, TK_NOT, mk_binary(pstate, TK_IS, yymsp[-3].minor.yy328, yymsp[0].minor.yy328));
 }
-#line 8867 "sql_grammar.c"
+#line 8877 "sql_grammar.c"
   yymsp[-3].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10824,11 +10834,11 @@ static void yy_rule_214(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1001 "sql_grammar.lime"
+#line 1015 "sql_grammar.lime"
 {
     yylhsminor.yy328 = mk_binary(pstate, TK_IS, yymsp[-5].minor.yy328, yymsp[0].minor.yy328);
 }
-#line 8897 "sql_grammar.c"
+#line 8907 "sql_grammar.c"
   yymsp[-5].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10863,11 +10873,11 @@ static void yy_rule_215(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1004 "sql_grammar.lime"
+#line 1018 "sql_grammar.lime"
 {
     yylhsminor.yy328 = mk_unary(pstate, TK_NOT, mk_binary(pstate, TK_IS, yymsp[-4].minor.yy328, yymsp[0].minor.yy328));
 }
-#line 8927 "sql_grammar.c"
+#line 8937 "sql_grammar.c"
   yymsp[-4].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10902,11 +10912,11 @@ static void yy_rule_216(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1007 "sql_grammar.lime"
+#line 1021 "sql_grammar.lime"
 {
     yylhsminor.yy328 = mk_expr(pstate, SX_E_IN_LIST); if (yylhsminor.yy328) { yylhsminor.yy328->a = yymsp[-4].minor.yy328; yylhsminor.yy328->list = yymsp[-1].minor.yy54; }
 }
-#line 8957 "sql_grammar.c"
+#line 8967 "sql_grammar.c"
   yymsp[-4].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10941,11 +10951,11 @@ static void yy_rule_217(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1010 "sql_grammar.lime"
+#line 1024 "sql_grammar.lime"
 {
     yylhsminor.yy328 = mk_expr(pstate, SX_E_IN_LIST); if (yylhsminor.yy328) { yylhsminor.yy328->a = yymsp[-5].minor.yy328; yylhsminor.yy328->list = yymsp[-1].minor.yy54; yylhsminor.yy328->ival = 1; }
 }
-#line 8987 "sql_grammar.c"
+#line 8997 "sql_grammar.c"
   yymsp[-5].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -10980,13 +10990,13 @@ static void yy_rule_218(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1013 "sql_grammar.lime"
+#line 1027 "sql_grammar.lime"
 {
     yylhsminor.yy328 = mk_expr(pstate, SX_E_IN_SELECT);
     if (yylhsminor.yy328) { yylhsminor.yy328->a = yymsp[-5].minor.yy328; yylhsminor.yy328->sel = yymsp[-1].minor.yy81; yylhsminor.yy328->ival = 1;
-             yylhsminor.yy328->src = yymsp[-2].minor.yy0.p; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.p + yymsp[0].minor.yy0.len) - yymsp[-2].minor.yy0.p); }
+             yylhsminor.yy328->src = yymsp[-2].minor.yy0.src; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.src + yymsp[0].minor.yy0.srclen) - yymsp[-2].minor.yy0.src); }
 }
-#line 9019 "sql_grammar.c"
+#line 9029 "sql_grammar.c"
   yymsp[-5].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -11021,12 +11031,12 @@ static void yy_rule_219(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1018 "sql_grammar.lime"
+#line 1032 "sql_grammar.lime"
 {
     yylhsminor.yy328 = mk_expr(pstate, SX_E_IN_SELECT);
-    if (yylhsminor.yy328) { yylhsminor.yy328->a = yymsp[-4].minor.yy328; yylhsminor.yy328->sel = yymsp[-1].minor.yy81; yylhsminor.yy328->src = yymsp[-2].minor.yy0.p; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.p + yymsp[0].minor.yy0.len) - yymsp[-2].minor.yy0.p); }
+    if (yylhsminor.yy328) { yylhsminor.yy328->a = yymsp[-4].minor.yy328; yylhsminor.yy328->sel = yymsp[-1].minor.yy81; yylhsminor.yy328->src = yymsp[-2].minor.yy0.src; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.src + yymsp[0].minor.yy0.srclen) - yymsp[-2].minor.yy0.src); }
 }
-#line 9050 "sql_grammar.c"
+#line 9060 "sql_grammar.c"
   yymsp[-4].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -11061,11 +11071,11 @@ static void yy_rule_220(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1022 "sql_grammar.lime"
+#line 1036 "sql_grammar.lime"
 {
     yylhsminor.yy328 = mk_expr(pstate, SX_E_BETWEEN); if (yylhsminor.yy328) { yylhsminor.yy328->a = yymsp[-4].minor.yy328; yylhsminor.yy328->b = yymsp[-2].minor.yy328; yylhsminor.yy328->c = yymsp[0].minor.yy328; }
 }
-#line 9080 "sql_grammar.c"
+#line 9090 "sql_grammar.c"
   yymsp[-4].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -11100,13 +11110,13 @@ static void yy_rule_221(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1025 "sql_grammar.lime"
+#line 1039 "sql_grammar.lime"
 {
     sql_expr_t *bt = mk_expr(pstate, SX_E_BETWEEN);
     if (bt) { bt->a = yymsp[-5].minor.yy328; bt->b = yymsp[-2].minor.yy328; bt->c = yymsp[0].minor.yy328; }
     yylhsminor.yy328 = mk_unary(pstate, TK_NOT, bt);
 }
-#line 9112 "sql_grammar.c"
+#line 9122 "sql_grammar.c"
   yymsp[-5].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -11141,13 +11151,13 @@ static void yy_rule_222(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1030 "sql_grammar.lime"
+#line 1044 "sql_grammar.lime"
 {
     yylhsminor.yy328 = mk_expr(pstate, SX_E_CASE);
     if (yylhsminor.yy328) { yylhsminor.yy328->a = yymsp[-3].minor.yy328; yylhsminor.yy328->arms = yymsp[-2].minor.yy308; yylhsminor.yy328->els = yymsp[-1].minor.yy328;
-             yylhsminor.yy328->src = yymsp[-4].minor.yy0.p; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.p + yymsp[0].minor.yy0.len) - yymsp[-4].minor.yy0.p); }
+             yylhsminor.yy328->src = yymsp[-4].minor.yy0.src; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.src + yymsp[0].minor.yy0.srclen) - yymsp[-4].minor.yy0.src); }
 }
-#line 9144 "sql_grammar.c"
+#line 9154 "sql_grammar.c"
   yymsp[-4].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -11182,13 +11192,13 @@ static void yy_rule_223(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1035 "sql_grammar.lime"
+#line 1049 "sql_grammar.lime"
 {
     yylhsminor.yy328 = mk_expr(pstate, SX_E_CASE);
     if (yylhsminor.yy328) { yylhsminor.yy328->arms = yymsp[-2].minor.yy308; yylhsminor.yy328->els = yymsp[-1].minor.yy328;
-             yylhsminor.yy328->src = yymsp[-3].minor.yy0.p; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.p + yymsp[0].minor.yy0.len) - yymsp[-3].minor.yy0.p); }
+             yylhsminor.yy328->src = yymsp[-3].minor.yy0.src; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.src + yymsp[0].minor.yy0.srclen) - yymsp[-3].minor.yy0.src); }
 }
-#line 9176 "sql_grammar.c"
+#line 9186 "sql_grammar.c"
   yymsp[-3].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -11223,12 +11233,12 @@ static void yy_rule_224(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1040 "sql_grammar.lime"
+#line 1054 "sql_grammar.lime"
 {
     yylhsminor.yy328 = mk_expr(pstate, SX_E_FUNC); if (yylhsminor.yy328) { yylhsminor.yy328->name[0] = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy328->nname = 1; }
-    if (yylhsminor.yy328) { yylhsminor.yy328->src = yymsp[-2].minor.yy0.p; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.p + yymsp[0].minor.yy0.len) - yymsp[-2].minor.yy0.p); }
+    if (yylhsminor.yy328) { yylhsminor.yy328->src = yymsp[-2].minor.yy0.src; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.src + yymsp[0].minor.yy0.srclen) - yymsp[-2].minor.yy0.src); }
 }
-#line 9207 "sql_grammar.c"
+#line 9217 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -11263,12 +11273,12 @@ static void yy_rule_225(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1044 "sql_grammar.lime"
+#line 1058 "sql_grammar.lime"
 {
     yylhsminor.yy328 = mk_expr(pstate, SX_E_FUNC); if (yylhsminor.yy328) { yylhsminor.yy328->name[0] = tok_str(yymsp[-3].minor.yy0); yylhsminor.yy328->nname = 1; yylhsminor.yy328->ival = 2; }
-    if (yylhsminor.yy328) { yylhsminor.yy328->src = yymsp[-3].minor.yy0.p; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.p + yymsp[0].minor.yy0.len) - yymsp[-3].minor.yy0.p); }
+    if (yylhsminor.yy328) { yylhsminor.yy328->src = yymsp[-3].minor.yy0.src; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.src + yymsp[0].minor.yy0.srclen) - yymsp[-3].minor.yy0.src); }
 }
-#line 9238 "sql_grammar.c"
+#line 9248 "sql_grammar.c"
   yymsp[-3].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -11303,12 +11313,12 @@ static void yy_rule_226(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1048 "sql_grammar.lime"
+#line 1062 "sql_grammar.lime"
 {
     yylhsminor.yy328 = mk_expr(pstate, SX_E_FUNC); if (yylhsminor.yy328) { yylhsminor.yy328->name[0] = tok_str(yymsp[-3].minor.yy0); yylhsminor.yy328->nname = 1; yylhsminor.yy328->list = yymsp[-1].minor.yy54; }
-    if (yylhsminor.yy328) { yylhsminor.yy328->src = yymsp[-3].minor.yy0.p; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.p + yymsp[0].minor.yy0.len) - yymsp[-3].minor.yy0.p); }
+    if (yylhsminor.yy328) { yylhsminor.yy328->src = yymsp[-3].minor.yy0.src; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.src + yymsp[0].minor.yy0.srclen) - yymsp[-3].minor.yy0.src); }
 }
-#line 9269 "sql_grammar.c"
+#line 9279 "sql_grammar.c"
   yymsp[-3].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -11343,12 +11353,12 @@ static void yy_rule_227(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1052 "sql_grammar.lime"
+#line 1066 "sql_grammar.lime"
 {
     yylhsminor.yy328 = mk_expr(pstate, SX_E_FUNC); if (yylhsminor.yy328) { yylhsminor.yy328->name[0] = tok_str(yymsp[-4].minor.yy0); yylhsminor.yy328->nname = 1; yylhsminor.yy328->list = yymsp[-1].minor.yy54; yylhsminor.yy328->ival = 1; }
-    if (yylhsminor.yy328) { yylhsminor.yy328->src = yymsp[-4].minor.yy0.p; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.p + yymsp[0].minor.yy0.len) - yymsp[-4].minor.yy0.p); }
+    if (yylhsminor.yy328) { yylhsminor.yy328->src = yymsp[-4].minor.yy0.src; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.src + yymsp[0].minor.yy0.srclen) - yymsp[-4].minor.yy0.src); }
 }
-#line 9300 "sql_grammar.c"
+#line 9310 "sql_grammar.c"
   yymsp[-4].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -11383,7 +11393,7 @@ static void yy_rule_228(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1056 "sql_grammar.lime"
+#line 1070 "sql_grammar.lime"
 {
     /* CAST(expr AS type) -- modelled as a FUNC named "cast" with the
      * target type in name[1] and the operand as the single list arg. */
@@ -11394,10 +11404,10 @@ static void yy_rule_228(yy_reduce_ctx *yy_ctx){
         item->expr = yymsp[-3].minor.yy328; l->head = item; l->n = 1;
         yylhsminor.yy328->name[0].p = "cast"; yylhsminor.yy328->name[0].len = 4;
         yylhsminor.yy328->name[1] = yymsp[-1].minor.yy84; yylhsminor.yy328->nname = 2; yylhsminor.yy328->list = l;
-        yylhsminor.yy328->src = yymsp[-5].minor.yy0.p; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.p + yymsp[0].minor.yy0.len) - yymsp[-5].minor.yy0.p);
+        yylhsminor.yy328->src = yymsp[-5].minor.yy0.src; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.src + yymsp[0].minor.yy0.srclen) - yymsp[-5].minor.yy0.src);
     }
 }
-#line 9340 "sql_grammar.c"
+#line 9350 "sql_grammar.c"
   yymsp[-5].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -11432,15 +11442,15 @@ static void yy_rule_229(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1069 "sql_grammar.lime"
+#line 1083 "sql_grammar.lime"
 {
     /* EXISTS (select) -- an IN_SELECT-style node with no operand; the
      * executor tests whether the subquery returns any row. */
     yymsp[-3].minor.yy328 = mk_expr(pstate, SX_E_IN_SELECT);
     if (yymsp[-3].minor.yy328) { yymsp[-3].minor.yy328->a = NULL; yymsp[-3].minor.yy328->sel = yymsp[-1].minor.yy81; yymsp[-3].minor.yy328->ival = 2;   /* ival bit1 = EXISTS */
-             yymsp[-3].minor.yy328->src = yymsp[-2].minor.yy0.p; yymsp[-3].minor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.p + yymsp[0].minor.yy0.len) - yymsp[-2].minor.yy0.p); }
+             yymsp[-3].minor.yy328->src = yymsp[-2].minor.yy0.src; yymsp[-3].minor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.src + yymsp[0].minor.yy0.srclen) - yymsp[-2].minor.yy0.src); }
 }
-#line 9374 "sql_grammar.c"
+#line 9384 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -11474,11 +11484,11 @@ static void yy_rule_230(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1077 "sql_grammar.lime"
+#line 1091 "sql_grammar.lime"
 {
     yymsp[-3].minor.yy308 = AST(pstate, sql_case_arm_t); if (yymsp[-3].minor.yy308) { yymsp[-3].minor.yy308->when = yymsp[-2].minor.yy328; yymsp[-3].minor.yy308->then = yymsp[0].minor.yy328; }
 }
-#line 9403 "sql_grammar.c"
+#line 9413 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -11512,14 +11522,14 @@ static void yy_rule_231(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1080 "sql_grammar.lime"
+#line 1094 "sql_grammar.lime"
 {
     sql_case_arm_t *arm = AST(pstate, sql_case_arm_t);
     if (arm) { arm->when = yymsp[-2].minor.yy328; arm->then = yymsp[0].minor.yy328; }
     if (yymsp[-4].minor.yy308 == NULL) { yylhsminor.yy308 = arm; }
     else { sql_case_arm_t *s = yymsp[-4].minor.yy308; while (s->next) s = s->next; s->next = arm; yylhsminor.yy308 = yymsp[-4].minor.yy308; }
 }
-#line 9435 "sql_grammar.c"
+#line 9445 "sql_grammar.c"
   yymsp[-4].minor.yy308 = yylhsminor.yy308;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -11554,9 +11564,9 @@ static void yy_rule_232(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1087 "sql_grammar.lime"
+#line 1101 "sql_grammar.lime"
 { yymsp[1].minor.yy328 = NULL; }
-#line 9463 "sql_grammar.c"
+#line 9473 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -11590,9 +11600,9 @@ static void yy_rule_233(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1088 "sql_grammar.lime"
+#line 1102 "sql_grammar.lime"
 { yymsp[-1].minor.yy328 = yymsp[0].minor.yy328; }
-#line 9490 "sql_grammar.c"
+#line 9500 "sql_grammar.c"
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
   ** so the post-action stack-shift sees them. */
@@ -11626,9 +11636,9 @@ static void yy_rule_234(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1090 "sql_grammar.lime"
+#line 1104 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_expr(pstate, SX_E_NUMBER); if (yylhsminor.yy328) { yylhsminor.yy328->lit = num_lit(pstate, yymsp[0].minor.yy0); span_tok(yylhsminor.yy328, yymsp[0].minor.yy0); } }
-#line 9517 "sql_grammar.c"
+#line 9527 "sql_grammar.c"
   yymsp[0].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -11663,9 +11673,9 @@ static void yy_rule_235(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1091 "sql_grammar.lime"
+#line 1105 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_expr(pstate, SX_E_STRING); if (yylhsminor.yy328) { yylhsminor.yy328->lit = tok_str_unquote(pstate, yymsp[0].minor.yy0); span_tok(yylhsminor.yy328, yymsp[0].minor.yy0); } }
-#line 9545 "sql_grammar.c"
+#line 9555 "sql_grammar.c"
   yymsp[0].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -11700,9 +11710,9 @@ static void yy_rule_236(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1092 "sql_grammar.lime"
+#line 1106 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_expr(pstate, SX_E_BLOB);   if (yylhsminor.yy328) { yylhsminor.yy328->lit = tok_str(yymsp[0].minor.yy0); span_tok(yylhsminor.yy328, yymsp[0].minor.yy0); } }
-#line 9573 "sql_grammar.c"
+#line 9583 "sql_grammar.c"
   yymsp[0].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -11737,9 +11747,9 @@ static void yy_rule_237(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1093 "sql_grammar.lime"
+#line 1107 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_expr(pstate, SX_E_NULL); span_tok(yylhsminor.yy328, yymsp[0].minor.yy0); }
-#line 9601 "sql_grammar.c"
+#line 9611 "sql_grammar.c"
   yymsp[0].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -11774,13 +11784,13 @@ static void yy_rule_238(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1096 "sql_grammar.lime"
+#line 1110 "sql_grammar.lime"
 {
     yylhsminor.yy328 = mk_expr(pstate, SX_E_FUNC);
     if (yylhsminor.yy328) { yylhsminor.yy328->name[0] = tok_str(yymsp[0].minor.yy0); yylhsminor.yy328->nname = 1; }
     span_tok(yylhsminor.yy328, yymsp[0].minor.yy0);
 }
-#line 9633 "sql_grammar.c"
+#line 9643 "sql_grammar.c"
   yymsp[0].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -11815,9 +11825,9 @@ static void yy_rule_239(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1101 "sql_grammar.lime"
+#line 1115 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_expr(pstate, SX_E_BOOL); if (yylhsminor.yy328) { yylhsminor.yy328->ival = 1; span_tok(yylhsminor.yy328, yymsp[0].minor.yy0); } }
-#line 9661 "sql_grammar.c"
+#line 9671 "sql_grammar.c"
   yymsp[0].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -11852,9 +11862,9 @@ static void yy_rule_240(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1102 "sql_grammar.lime"
+#line 1116 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_expr(pstate, SX_E_BOOL); if (yylhsminor.yy328) { yylhsminor.yy328->ival = 0; span_tok(yylhsminor.yy328, yymsp[0].minor.yy0); } }
-#line 9689 "sql_grammar.c"
+#line 9699 "sql_grammar.c"
   yymsp[0].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -11889,13 +11899,13 @@ static void yy_rule_241(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1103 "sql_grammar.lime"
+#line 1117 "sql_grammar.lime"
 {
     yylhsminor.yy328 = mk_expr(pstate, SX_E_PARAM);
     if (yylhsminor.yy328) yylhsminor.yy328->ival = param_ordinal(pstate, yymsp[0].minor.yy0);
     span_tok(yylhsminor.yy328, yymsp[0].minor.yy0);
 }
-#line 9721 "sql_grammar.c"
+#line 9731 "sql_grammar.c"
   yymsp[0].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -11930,9 +11940,9 @@ static void yy_rule_242(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1108 "sql_grammar.lime"
+#line 1122 "sql_grammar.lime"
 { yylhsminor.yy328 = mk_expr(pstate, SX_E_COLUMN); if (yylhsminor.yy328) { yylhsminor.yy328->name[0] = tok_str(yymsp[0].minor.yy0); yylhsminor.yy328->nname = 1; span_tok(yylhsminor.yy328, yymsp[0].minor.yy0); } }
-#line 9749 "sql_grammar.c"
+#line 9759 "sql_grammar.c"
   yymsp[0].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -11967,12 +11977,12 @@ static void yy_rule_243(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1109 "sql_grammar.lime"
+#line 1123 "sql_grammar.lime"
 {
     yylhsminor.yy328 = mk_expr(pstate, SX_E_COLUMN); if (yylhsminor.yy328) { yylhsminor.yy328->name[0] = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy328->name[1] = tok_str(yymsp[0].minor.yy0); yylhsminor.yy328->nname = 2;
-                                              yylhsminor.yy328->src = yymsp[-2].minor.yy0.p; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.p + yymsp[0].minor.yy0.len) - yymsp[-2].minor.yy0.p); }
+                                              yylhsminor.yy328->src = yymsp[-2].minor.yy0.src; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.src + yymsp[0].minor.yy0.srclen) - yymsp[-2].minor.yy0.src); }
 }
-#line 9780 "sql_grammar.c"
+#line 9790 "sql_grammar.c"
   yymsp[-2].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -12007,12 +12017,12 @@ static void yy_rule_244(yy_reduce_ctx *yy_ctx){
 #ifdef YYLOCATIONTYPE
   (void)yyloc_lhs;
 #endif
-#line 1113 "sql_grammar.lime"
+#line 1127 "sql_grammar.lime"
 {
     yylhsminor.yy328 = mk_expr(pstate, SX_E_COLUMN); if (yylhsminor.yy328) { yylhsminor.yy328->name[0] = tok_str(yymsp[-4].minor.yy0); yylhsminor.yy328->name[1] = tok_str(yymsp[-2].minor.yy0); yylhsminor.yy328->name[2] = tok_str(yymsp[0].minor.yy0); yylhsminor.yy328->nname = 3;
-                                              yylhsminor.yy328->src = yymsp[-4].minor.yy0.p; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.p + yymsp[0].minor.yy0.len) - yymsp[-4].minor.yy0.p); }
+                                              yylhsminor.yy328->src = yymsp[-4].minor.yy0.src; yylhsminor.yy328->srclen = (uint32_t)((yymsp[0].minor.yy0.src + yymsp[0].minor.yy0.srclen) - yymsp[-4].minor.yy0.src); }
 }
-#line 9811 "sql_grammar.c"
+#line 9821 "sql_grammar.c"
   yymsp[-4].minor.yy328 = yylhsminor.yy328;
 #ifdef YYLOCATIONTYPE
   /* Commit any @$ writes back to yy_reduce's local
@@ -12419,7 +12429,7 @@ static void yy_parse_failed(
 
     pstate->error = 1;
     if (!pstate->err_msg) pstate->err_msg = "parse failure";
-#line 10218 "sql_grammar.c"
+#line 10228 "sql_grammar.c"
 /************ End %parse_failure code *****************************************/
   SqlParseARG_STORE /* Suppress warning about unused %extra_argument variable */
   SqlParseCTX_STORE
@@ -12473,7 +12483,7 @@ static void yy_syntax_error(
     (void)yyminor;
     pstate->error = 1;
     if (!pstate->err_msg) pstate->err_msg = "syntax error";
-#line 10272 "sql_grammar.c"
+#line 10282 "sql_grammar.c"
 /************ End %syntax_error code ******************************************/
   SqlParseARG_STORE /* Suppress warning about unused %extra_argument variable */
   SqlParseCTX_STORE

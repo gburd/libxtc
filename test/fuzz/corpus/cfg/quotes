@@ -1,0 +1,4 @@
+s = 'unterminated
+s = ""
+s = ''
+e = 'mid'

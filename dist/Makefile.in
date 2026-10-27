@@ -530,6 +530,7 @@ TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt
 # Default goal.
 # -------------------------------------------------------------------------
 .PHONY: soak-mem
+.PHONY: fuzz fuzz-net fuzz-cfg fuzz-tls fuzz-sql fuzz-quack fuzz-resp fuzz-kaka
 .PHONY: all check check-sim check-dst cbmc check-cbmc check-examples check-rexis coverage tests-c tests-sh tests-pbt clean distclean install uninstall compile-commands amalgamation print-includedir print-libdir bench-micro
 
 all: $(STATIC_LIB) $(SHARED_LIB_TARGETS) compile_commands.json
@@ -1255,6 +1256,61 @@ test_resp_parser: $(M99_DIR)/test_resp_parser.c $(M99_DIR)/munit.c \
 $(M99_NET): %: $(M99_DIR)/%.c $(M99_DIR)/munit.c $(M99_DIR)/rexis_harness.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -D_GNU_SOURCE -I$(M99_DIR) -o $@ \
 		$(M99_DIR)/$@.c $(M99_DIR)/munit.c $(LDFLAGS)
+
+# -------------------------------------------------------------------------
+# Fuzzing (test/fuzz/).  libFuzzer harnesses, one per parser a peer or a
+# config file reaches: fuzz-net (xtc_net_recv_frame / send_framev and
+# xtc_down_decode_ex), fuzz-cfg (xtc_cfg_load_file / reload), fuzz-tls
+# (xtc_tls_opts_t.alpn_protos), fuzz-sql (sqlxtc sql_parse /
+# sql_parse_ast), fuzz-quack (sqlxtc's wire decoder), fuzz-resp (rexis),
+# fuzz-kaka (kaka's frames and request bodies).
+#
+# Needs clang, and a build dir configured with the library instrumented
+# for coverage, which scripts/fuzz.sh does:
+#   CC=clang CFLAGS="-g -O1 -fsanitize=fuzzer-no-link,address,undefined" \
+#       ../dist/configure
+# `make fuzz-NAME` builds ./fuzz_NAME; scripts/fuzz.sh NAME SECS builds
+# and runs it on test/fuzz/corpus/NAME.  Not part of `make check`.
+FUZZ_DIR   = $(srcdir)/../test/fuzz
+FUZZ_FLAGS = -g -O1 -fsanitize=fuzzer,address,undefined \
+	     -fno-sanitize-recover=undefined
+FUZZ_SX    = $(srcdir)/../examples/06_sqlxtc
+FUZZ_SQL   = $(FUZZ_SX)/sql_parse.c $(FUZZ_SX)/sql_parse_drv.c \
+	     $(FUZZ_SX)/sql_parse_gen.c $(FUZZ_SX)/sql_ast.c
+FUZZ_NAMES = net cfg tls sql quack resp kaka
+FUZZ_BINS  = fuzz_net fuzz_cfg fuzz_tls fuzz_sql fuzz_quack fuzz_resp fuzz_kaka
+
+fuzz: $(FUZZ_BINS)
+fuzz-net: fuzz_net
+fuzz-cfg: fuzz_cfg
+fuzz-tls: fuzz_tls
+fuzz-sql: fuzz_sql
+fuzz-quack: fuzz_quack
+fuzz-resp: fuzz_resp
+fuzz-kaka: fuzz_kaka
+
+fuzz_net fuzz_cfg fuzz_tls: %: $(FUZZ_DIR)/%.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(FUZZ_FLAGS) -o $@ $(FUZZ_DIR)/$@.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS) -lm
+
+fuzz_sql: $(FUZZ_DIR)/fuzz_sql.c $(FUZZ_SQL)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(FUZZ_FLAGS) -D_GNU_SOURCE \
+		-DSQLXTC_HAVE_LIME=1 -I$(FUZZ_SX) -o $@ \
+		$(FUZZ_DIR)/fuzz_sql.c $(FUZZ_SQL)
+
+fuzz_quack: $(FUZZ_DIR)/fuzz_quack.c $(FUZZ_SX)/quack.c $(FUZZ_SQL)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(FUZZ_FLAGS) -D_GNU_SOURCE \
+		-DSQLXTC_HAVE_LIME=1 -I$(FUZZ_SX) -o $@ \
+		$(FUZZ_DIR)/fuzz_quack.c $(FUZZ_SX)/quack.c $(FUZZ_SQL)
+
+fuzz_resp: $(FUZZ_DIR)/fuzz_resp.c $(REXIS_DIR)/proto.c
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(FUZZ_FLAGS) -D_GNU_SOURCE \
+		-I$(REXIS_DIR) -o $@ $(FUZZ_DIR)/fuzz_resp.c $(REXIS_DIR)/proto.c
+
+fuzz_kaka: $(FUZZ_DIR)/fuzz_kaka.c $(srcdir)/../examples/07_kaka/frame.c
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(FUZZ_FLAGS) -D_GNU_SOURCE \
+		-I$(srcdir)/../examples/07_kaka -o $@ $(FUZZ_DIR)/fuzz_kaka.c \
+		$(srcdir)/../examples/07_kaka/frame.c
 
 # The canonical tnt example: a TCP echo server.  Links the in-library
 # tnt L4 layer; driven by test/tnt/test_tnt_echo.sh.
@@ -2335,6 +2391,7 @@ clean:
 	$(RM) $(LIB_OBJS) $(STATIC_LIB) $(TESTS_C) $(TESTS_PBT) compile_commands.json
 	$(RM) check-skips-c.txt check-skips-sh.txt check-skips-pbt.txt .tests-c.out .tests-sh.out .tests-c.rc .tests-sh.rc
 	$(RM) soak_mem_bound continuous_batching bench_continuous_batching mandel hetero usdt_convoy
+	$(RM) $(FUZZ_BINS)
 	$(RM) $(SHARED_LIB_REAL) $(SHARED_LIB_SONAME) $(SHARED_LIB_LINKNAME)
 	$(RM) libxtc.exp xtc_probes.o xtc_probes_dtrace.h
 	rm -rf *.dSYM

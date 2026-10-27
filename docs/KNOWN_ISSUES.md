@@ -153,6 +153,115 @@ generations through a test seam and spawns into it: on 1.x the new pid
 equals the stale one; on 2.0 they differ and a send to the stale pid
 fails with `XTC_E_INVAL`.
 
+## CHANGED (2.0): `xtc_pg_send_owned`, process-group fan-out with one copy fewer
+
+`xtc_pg_send` copies a `const` buffer once per member, so rexis
+PUBLISH, which built the frame in a heap buffer, copied it again even
+for a channel with one subscriber.  `xtc_pg_send_owned(reg, group, buf,
+size)` takes an `xtc_malloc`'d buffer and moves it to the last member
+(`xtc_send_owned`): N - 1 copies for N members, none for one.  The
+buffer is the library's on return (moved, or freed if nobody took it).
+Measured on a 32-vCPU x86-64 host, one loop, 100,000 messages, 5 runs:
+one subscriber at 64 KiB 338k -> 685k messages/s, at 4 KiB 1.74M ->
+1.94M; four subscribers at 64 KiB 121k -> 147k (with glibc's trim
+threshold pinned; with the defaults the copying publisher's
+allocate-free cycle page-faults on every message and runs at 15k).
+rexis PUBLISH uses it.
+
+## CHANGED (2.0): a kernel-TLS `xtc_tls_write` is one system call, not one per record
+
+**Before.**  With kernel TLS TX active, `xtc_tls_write` went through
+OpenSSL, whose kernel-TLS record layer issues one `write(2)` per 16 KiB
+record: 16 system calls for a 256 KiB write, and 0.71x the user-space
+TLS rate for plain writes (1329 vs 1837 MiB/s, `bench_tls_sendfile`,
+32-vCPU x86-64 host, Linux 6.12, OpenSSL 3.5.7).  The kernel's AES-GCM
+was not the cost (it uses the same vector instructions OpenSSL does),
+nor the SIGPIPE bracket (0.1% of the sender's samples).
+
+**Now.**  When OpenSSL has nothing of its own to send (handshake done,
+no close_notify sent, no KeyUpdate pending, no `SSL_write` waiting to
+be retried), `xtc_tls_write` writes the plaintext to the socket itself
+and the kernel frames the records: one `write(2)` for 256 KiB
+(`test_tls_ktls` /roundtrip asserts at most 4; before: 16).  Measured,
+5 runs interleaved: 1593 MiB/s (1523..1681), sender CPU 0.639 s/GiB
+(0.769 before), 0.87x user-space TLS.  A `write(2)` of the same
+plaintext to the kernel-TLS socket with neither libxtc nor OpenSSL in
+the path measures the same (1525 MiB/s, 1503..1796), so the remaining
+gap is the kernel's.  A dead peer is reported as before (`XTC_E_IO`).
+`xtc_tls_sendfile` is unchanged (2106 MiB/s) and remains the reason to
+enable kernel TLS.
+
+## CHANGED (2.0): `xtc_rand_u64` replays under the simulator; sqlxtc `random()`, `randomblob()`
+
+**Before.**  A thread that never called `xtc_rand_seed` seeded its
+stream from the clock and the address of its state cell, which no seed
+reproduces, so under the deterministic simulator the determinism guard
+trapped every such draw and a sim-reachable path could not use the
+RNG.  sqlxtc declined `randomblob()` and `random()` for that reason.
+
+**Now.**  Under the simulator an un-seeded thread draws from the run's
+own stream (`XTC_SIM_RNG_RAND`, reset by every `xtc_sim_activate`), so
+its values are a function of the run's seed and replay, the way
+`xtc_clock_mono` is virtualized.  A thread that called
+`xtc_rand_seed` keeps the sequence it asked for.  Off the simulator
+nothing changed.  The RNG is no longer a guarded class:
+`test_sim_determinism_guard` now asserts that an un-seeded draw does
+not trip the guard and replays, and `test_sim_rand` checks replay over
+8 seeds x 4 fibers on 2 loops.
+
+sqlxtc implements `random()` (a 64-bit value, never -2^63, as SQLite)
+and `randomblob(N)` (N random bytes, at least 1; N must be a constant
+of at most 1 MiB, as for `zeroblob`).  A `random()` in a WHERE clause is
+evaluated per row, never used as an index seek bound.  Both replay
+under the simulator (`test_sim_sql_now`).  They are not cryptographic.
+
+## FIXED (2.0): one hot `xtc_amutex` shared by many plain threads
+
+**The problem (1.59).**  With 16-128 OS threads (not fibers) contending
+for one `xtc_amutex`, throughput was up to 52% below 1.58 (perf gate
+cell `lock_amutex_w64`, accepted for 1.59).  1.59 woke a sleeper on
+every release, so the lock never sat free while a woken thread left a
+deep CPU idle state (that had cost the sqlxtc ledger 35-50%), but on a
+hot mutex the woken thread lost it to a spinning thread and slept again:
+3.2 context switches per acquire.
+
+**The fix.**  A release that frees the mutex while another thread is
+spinning on it no longer wakes a sleeper: the spinner takes the mutex
+within its spin, so the mutex is not left free.  At most 8 releases in
+a row skip the wake, so a sleeper still gets a turn on a mutex that
+always has a spinner.  `xtc_arwlock` is unchanged.  Measured on a
+64-vCPU x86-64 host, 3 reps x 3 s interleaved, median acquires/s
+(`bench_sync_offloop amutex w N`, the perf gate's arguments):
+
+| threads | 1.58 | 1.59 | 2.0 | 2.0, C1E+C6 on |
+| --- | --- | --- | --- | --- |
+| 4 | 794k | 947k | 989k | 1,018k |
+| 16 | 484k | 252k | 519k | 512k |
+| 64 | 486k | 247k | 523k | 411k |
+| 128 | 485k | 243k | 538k | 427k |
+
+The first three columns ran with the deep idle states C1E and C6
+disabled, as the perf gate requires; the last with them enabled (1.58
+there: 491k / 383k / 326k at 16 / 64 / 128, 1.59: 252k / 213k / 204k).
+Context switches per 1,000 acquires at 64 threads: 1.58 1,814, 1.59
+3,249, 2.0 678.  The arwlock cells did not move.
+
+**What it costs.**  The sqlxtc ledger (transfer and blend, 8 and 64
+clients) is unchanged with the deep idle states off (every cell within
+1%, ranges overlapping).  With C1E and C6 on, transfer at 64 clients is
+4.5% lower (45.0k vs 47.1k txn/s, median of 10 runs each, ranges
+overlapping) and blend at 64 2% lower: a sleeper whose wake was skipped
+later needs ~100 us to come out of C6.  Acquire p99 at 64 threads is
+1.2 ms (1.59: 1.4 ms, 1.58: 0.75 ms).
+
+**If many plain threads must share one mutex, fibers are still faster.**
+Fibers on one loop never block an OS thread: a contended fiber parks and
+the release hands the mutex to it in the same thread (1.59, same host:
+2.45-2.49M acquires/s at 4-64 fibers, `bench_amutex_fibers`).  Fibers
+spread over many loops bring the cross-thread hand-off back, so
+co-locate the fibers that share one hot lock on one loop, or shard the
+lock.
+
 ## FIXED (1.60): sqlxtc SELECT prepares serialized on one lock; write-tail stalls
 
 **Prepares.**  Every SELECT prepare ran under one process-wide lock, because a prepare's
@@ -240,6 +349,36 @@ the stderr report ("sqlxtc btree: ... gave up"), keep the store and the
 report and file an issue: the page id in the report is where to look.
 New DST coverage of scans racing merges and page-id reuse:
 test_sim_btree_scan.
+
+## FIXED (2.0): sqlxtc ALTER TABLE RENAME could corrupt the table's schema
+
+Since ALTER TABLE RENAME was added (1.x, 2026-06), the rename read the
+old catalog value into a stack buffer that was not NUL-terminated and
+took the column list with strlen, so stale stack bytes could be
+appended to the renamed table's schema.  When that happened, every
+INSERT into the renamed table failed with "unsupported SQL (native
+engine)", and the damaged schema was persisted.  Whether it happened
+depended on the stack's contents (`test_cat_reopen` failed about 1 run
+in 200 under CPU contention).  Fixed; the test now poisons the stack
+before the rename and fails deterministically without the fix.  The
+fix does not repair a schema an affected build already persisted (the
+row data itself was never touched); such a table must be recreated.
+
+## FIXED (2.0): the clean-close version GC could bring back a deleted sqlxtc row
+
+Never in a release: introduced by the 1.60 candidate's clean-close
+version GC (31d1ef8) and fixed before 2.0.  The version GC (xs_gc)
+collects dead version keys in batches of 512 and restarted its per-row
+state at every batch, so a batch that ended right after a deleted row's
+tombstone treated that row's older versions as a new row and kept one:
+the deleted row came back, without its secondary-index entries.  The
+GC had always had the flaw; a GC pass rarely held 512 dead keys until
+the clean close ran it over a whole store.  `test_crash_oracle` caught
+it under CPU contention ("rows missing from an index" after an open);
+unloaded it passed.  Fixed by keeping the row state across batches;
+`test_close_prune` and `test_sim_sqlxtc_gcidx` (now with small GC
+batches) fail without the fix, planted bug 23 (GCBATCH) is caught by
+DST, and `test_sim_sqlxtc_gcidx 2 1` is pinned in the seed corpus.
 
 ## FIXED (2.0): a fired park timer could release a newer timer of a migrated fiber
 
@@ -550,35 +689,6 @@ be its cause, so it stays open.
 
 ## OPEN (1.59): known costs of the 1.59 performance work
 
-* **One hot `xtc_amutex` shared by many plain threads is slower.**  With
-  16-128 OS threads (not fibers) contending for one mutex, throughput is
-  up to 52% below 1.58 (`bench_sync_offloop amutex w`).  1.59 wakes a
-  sleeper on every release instead of keeping one wake in flight,
-  because the in-flight rule left the lock free while the woken thread
-  was still leaving a deep CPU idle state; that made the sqlxtc ledger
-  workloads 35-50% slower on hosts with deep idle states enabled.  The
-  woken thread now often loses the mutex to a spinning one and sleeps
-  again.  `xtc_arwlock` and workloads over several locks are 1.6-12x
-  faster than 1.58.
-
-  **Workaround: fewer threads on one mutex, or fibers.**  Measured on a
-  64-vCPU x86-64 host (deep idle states off, 5 reps, median ops/s, one
-  short critical section per acquire):
-
-  | contenders | plain OS threads | fibers, all on 1 loop | fibers over 8 loops |
-  | --- | --- | --- | --- |
-  | 4 | 1.04M | 2.45M | 0.20M |
-  | 16 | 0.26M | 2.48M | 0.25M |
-  | 64 | 0.25M | 2.49M | 0.31M |
-
-  Fibers on one loop never block an OS thread: a contended fiber parks
-  and the release hands the mutex to it in the same thread, 10x the
-  plain-thread rate at 16-64 contenders.  Fibers spread over many loops
-  bring the cross-thread hand-off back, so co-locate the fibers that
-  share one hot lock on one loop (`xtc_proc_spawn` on that loop), or
-  shard the lock.  If they must be plain threads, keep the number that
-  contend for one mutex small (4 above: 1.04M).  `bench_amutex_fibers`
-  measures the fiber cases.
 * **The store is larger than SQLite's on disk.**  Measured on stores
   each engine built from the same load (allocated blocks, XFS):
 
@@ -2928,38 +3038,19 @@ support SIGEV_KEVENT completion on regular files anyway.  The macOS CI
 job (macos-latest, Apple Silicon) builds and runs the full C suite
 green on every commit.
 
-## pbt-hegel CI job fails on ubuntu-24.04 with no output (OPEN, advisory)
+## RESOLVED: pbt-hegel CI job failed on ubuntu-24.04 with no output
 
-**Status:** OPEN. The job is `continue-on-error: true` so it does not block
-merges; the property tier itself is verified and passing.
+**Status:** RESOLVED (2.0); the job is a merge gate again (no longer
+`continue-on-error`).
 
-The property tier works. All 36 properties across 17 suites build and pass
-under `--with-hegel`, verified locally in several configurations:
+The job once exited 2 printing nothing, which could not be reproduced
+locally.  The cause was the job itself: `out=$(make ...)` under `set -e`
+aborted the step before the captured output was printed.  Once the step
+captured the status explicitly and always printed, the last failing runs
+(2026-09-15) showed a real property failure (`[PBT] alloc/hook_balanced
+FAIL`), fixed that day by a1c57151 (the allocator hook vtable is copied
+and all six callbacks are required).  From then to 2026-10-26 the job
+passed 54 of 54 GitHub runs (one more was cancelled together with its
+whole run), all 36 properties across 17 suites, so `continue-on-error`
+was removed: a property failure blocks a merge again.
 
-- `--with-hegel` via pkg-config (the `nix develop` path);
-- `--with-hegel=PREFIX` with a hand-assembled prefix (header + `.so` copied
-  in), which is exactly what the CI job constructs;
-- with `LD_LIBRARY_PATH` unset, confirming `configure`'s `-Wl,-rpath` for the
-  explicit-prefix case is sufficient;
-- under CI's `-Werror -Wall -Wextra -Wpedantic`, in both the hegel-enabled
-  and default (SKIP-stub) builds.
-
-On the `ubuntu-24.04` runner, `make -C build_pbt tests-pbt` exits **2 with no
-output whatsoever** -- not a compile error, not a property failure, not a SKIP.
-The job now always prints the captured output before deciding (an earlier
-version lost it to `set -e` around `out=$(make ...)`), and there is still
-nothing to print, which suggests make itself fails before running a recipe.
-
-Unverified hypotheses, in the order worth testing:
-
-1. The `Build the library` step and this step disagree about the build
-   directory or a generated file, so make has nothing to do and errors.
-2. Something in the runner image's `make`/`sh` differs enough that the
-   `tests-pbt` recipe's `$$((...))` arithmetic or `case` fails immediately.
-3. The libhegel `.so` fetched by `curl` is fine to link against but the
-   runner's loader rejects it at first use in a way that kills make's
-   subshell without output.
-
-Anyone picking this up: reproduce on an actual ubuntu-24.04 container rather
-than a nix shell, which is where every local attempt succeeded and therefore
-where the difference is invisible.

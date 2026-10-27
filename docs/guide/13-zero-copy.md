@@ -66,14 +66,23 @@ copy each direction once: the request (or reply) and its routing
 header must become one message, and the payload you pass is `const`.
 The frame is then moved, and the caller is handed the very block the
 server built.  (Before the zero-copy work a call round trip copied the
-payload seven times.)
+payload seven times.)  What the remaining copy costs, measured on one
+loop of a 32-vCPU x86-64 host with equal request and reply sizes: about
+1% of an 890 ns round trip at 64 bytes, 7% of 1.0 us at 4 KiB, 77% of
+3.75 us at 64 KiB.  For large payloads, send an `xtc_send_owned` block
+to the server process and reply the same way instead of calling.
 
 **Process groups** (`xtc_pg_send`) send one copy per member: a
-fan-out of a `const` buffer.  Zero-copy fan-out would need shared,
-reference-counted, immutable messages with their own release call --
-deliberately not added; if you fan out large payloads, send each member
-an `xtc_send_owned` block, or share one immutable buffer by pointer over
-a channel and count references yourself.
+fan-out of a `const` buffer.  `xtc_pg_send_owned` takes an
+`xtc_malloc`'d buffer instead and moves it to the last member, so a
+group of N costs N - 1 copies and a group of one costs none (rexis
+PUBLISH uses it).  Measured, one loop, 100,000 messages: one subscriber
+at 64 KiB 338k -> 685k messages/s, 4 KiB 1.74M -> 1.94M; four
+subscribers at 64 KiB 121k -> 147k.  Zero-copy fan-out to every member
+would need shared, reference-counted, immutable messages with their own
+release call -- deliberately not added; if you fan out large payloads,
+share one immutable buffer by pointer over a channel and count
+references yourself.
 
 ## Sockets and framing
 
@@ -109,19 +118,24 @@ space.  Without it the call returns `XTC_E_NOSYS`, which is your cue to
 {% include snippet.html file="18_tls_sendfile.c" region="full" %}
 
 Measured on a 32-vCPU x86-64 host (Linux 6.12, OpenSSL 3.5.7, AES-GCM,
-loopback, sender and receiver on two pinned cores), serving a file:
+loopback, sender and receiver on two pinned cores, 256 KiB writes, 5
+runs interleaved, median), serving a file:
 
-| mode | MiB/s | sender CPU s/GiB | copy share of sender CPU |
-|---|---|---|---|
-| user-space TLS, `pread` + `xtc_tls_write` | 1887 | 0.543 | 37.8% |
-| kernel TLS, `pread` + `xtc_tls_write` | 1345 | 0.760 | 20.2% |
-| kernel TLS, `xtc_tls_sendfile` | 2105 | 0.485 | 3.4% |
+| mode | MiB/s | sender CPU s/GiB |
+|---|---|---|
+| user-space TLS, `pread` + `xtc_tls_write` | 1837 | 0.556 |
+| kernel TLS, `pread` + `xtc_tls_write` | 1593 | 0.639 |
+| kernel TLS, `xtc_tls_sendfile` | 2106 | 0.486 |
 
-Note the middle row: kernel TLS **alone** was slower here.  The
-kernel's AES-GCM cost more than OpenSSL's, and the copy from your
-buffer into the kernel remains.  Enable kernel TLS for connections that
-mostly serve files with `xtc_tls_sendfile`, not as a blanket default,
-and measure on your hardware.
+With kernel TX active, `xtc_tls_write` hands your whole buffer to the
+socket in one `write(2)` and the kernel cuts it into records (before
+2.0 it went through OpenSSL, which writes one 16 KiB record per system
+call: 1329 MiB/s here).  Kernel TLS for plain writes is still below
+user-space TLS on this host: a `write(2)` of the same plaintext to the
+kernel-TLS socket without libxtc or OpenSSL measures the same, so the
+rest is the kernel's copy-and-encrypt path.  Enable kernel TLS for
+connections that mostly serve files with `xtc_tls_sendfile`, not as a
+blanket default, and measure on your hardware.
 
 Two rules for a kernel-TLS connection.  Close its socket with
 `xtc_net_close`, not `close(2)`: on Linux the kernel flushes a queued
@@ -162,7 +176,7 @@ examples show both styles: one reads results back with a copy
 | `xtc_send` <= 256 B | 2 (in, out) | inline pooled envelope; at this size the copy costs about the same as moving (measured) |
 | `xtc_send` > 256 B | 1 | the buffer is `const` and stays yours; use `xtc_send_owned` |
 | `xtc_svr_call` / `xtc_fsm_call` | 1 per direction | header + `const` payload become one message |
-| `xtc_pg_send` | 1 per member | fan-out of a `const` buffer |
+| `xtc_pg_send` | 1 per member | fan-out of a `const` buffer; `xtc_pg_send_owned`: 1 per member but the last |
 | `xtc_log_write` | 1 | formatting is the copy |
 | user-space TLS | record copy + crypto | use kernel TLS + `xtc_tls_sendfile` where it pays |
 
@@ -185,4 +199,4 @@ commit (many committers' records leave in one write).
   a large message already *is* the receiver's buffer; a receive-into
   would add the copy back.
 - **Kernel TLS on by default.**  Measured slower for plain writes on a
-  host whose CPU has fast user-space AES; it pays for `sendfile`.
+  host whose CPU has fast user-space AES (0.87x); it pays for `sendfile`.

@@ -1,0 +1,1 @@
+{"q":"INSERT INTO t VALUES(?1,?2,?3,?4,?5)","params":[7,"a\u00e9\n",null,1.5e3,{"hex":"00ff"}]}

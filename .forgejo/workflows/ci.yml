@@ -133,6 +133,66 @@ jobs:
       - name: Test (tests-c + tests-pbt slice ${{ matrix.part }})
         run: sh scripts/ci-check-part.sh build_musl ${{ matrix.part }}
 
+  fuzz:
+    # libFuzzer harnesses (test/fuzz/): every committed corpus input once
+    # -- each crash-* input is a fixed bug -- then 20 s of fuzzing per
+    # harness (GitHub's fuzz job runs 60 s each, and fuzz-nightly 10 min).
+    # Split in two for the 5:00 cap: the library-linked harnesses build an
+    # ASan libxtc first, the example parsers do not.
+    name: fuzz (${{ matrix.set }})
+    runs-on: codeberg-small
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        set: [lib, examples]
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang make autoconf automake pkg-config \
+            libssl-dev gawk
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+      - name: Autoreconf
+        working-directory: dist
+        run: autoreconf -i
+      - name: Corpus regression, then 20 s per harness
+        run: |
+          case "${{ matrix.set }}" in
+            lib) set -- net cfg tls ;;
+            examples) set -- sql quack resp kaka ;;
+          esac
+          rc=0
+          for n in "$@"; do
+            CC=clang FUZZ_CONFIGURE="--with-tls=auto --with-io-backend=epoll" \
+              sh scripts/fuzz.sh "$n" 0 || rc=1
+            CC=clang FUZZ_CONFIGURE="--with-tls=auto --with-io-backend=epoll" \
+              sh scripts/fuzz.sh "$n" 20 || rc=1
+          done
+          exit $rc
+
+  style:
+    # clang-format on the lines a change touches (scripts/style-check.sh);
+    # informational, like GitHub's style job.  Needs the history for the
+    # merge base.
+    runs-on: codeberg-small
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format git
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: clang-format the changed lines
+        run: |
+          base=$(git merge-base HEAD origin/main 2>/dev/null || git rev-parse HEAD~1)
+          sh scripts/style-check.sh "$base"
+
   sim-dst:
     # Deterministic Simulation Testing: sim I/O backend + the multi-loop
     # deterministic scheduler + cross-loop park/wake replay tests.
@@ -436,7 +496,7 @@ jobs:
         run: |
           mkdir -p build_tls && cd build_tls
           ../dist/configure --with-tls=${{ matrix.backend }} --with-io-backend=epoll
-      - name: Build + run the m18 TLS suite
+      - name: Build + run the m18 TLS suite (incl. per-backend ALPN validation)
         run: |
-          make -C build_tls -j"$(nproc)" test_tls_server test_tls_client
-          ( cd build_tls && ./test_tls_server && ./test_tls_client )
+          make -C build_tls -j"$(nproc)" test_tls_basic test_tls_server test_tls_client
+          ( cd build_tls && ./test_tls_basic && ./test_tls_server && ./test_tls_client )

@@ -28,6 +28,10 @@
  *	xstore_index_check must report 0 missing entries.  The same seed
  *	run twice must give the same result text (and the run must return
  *	XTC_OK: no determinism guard tripped).
+ *	The GC runs in seed-chosen batches of 2-17 keys, so a batch often
+ *	ends right after a deleted row's tombstone with its older versions
+ *	in the next one (a GC that forgot the row there resurrected it, its
+ *	index entries gone: the clean-close GC lost index rows that way).
  *	usage: test_sim_sqlxtc_gcidx [base [count]]   (default 1 8)
  */
 
@@ -178,7 +182,10 @@ worker(void *arg)
 			    __xtc_sim_rng_range(XTC_SIM_RNG_APP, 500)) * 1000);
 		}
 		(void)xtc_proc_sleep(2LL * 1000 * 1000);   /* the horizon moves */
-		if (xstore_gc_run((struct xsql *)h) < 0) {
+		xstore_gc_set_batch(2 + (int)__xtc_sim_rng_range(XTC_SIM_RNG_APP, 16));
+		rc = xstore_gc_run((struct xsql *)h);
+		xstore_gc_set_batch(0);
+		if (rc < 0) {
 			snprintf(g_why, sizeof g_why, "xstore_gc_run failed");
 			goto out;
 		}

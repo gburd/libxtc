@@ -144,5 +144,6 @@
 #define XTC_DST_BUG_EVICTNOWB  19  /* bufmgr.c: evict a dirty page unwritten */
 #define XTC_DST_BUG_OCKDROP    20  /* wal.c: an online-checkpoint copy round drops its last frame */
 #define XTC_DST_BUG_PRUNEHZN   21  /* xstore.c: prune-on-write deletes the version at the horizon */
+#define XTC_DST_BUG_GCBATCH    23  /* xstore.c: version GC forgets its row at a batch boundary */
 
 #endif /* XTC_DST_INJECT_H */

@@ -4788,20 +4788,37 @@ xs_newest_ts(bt_t *bt, uint32_t tableid, int64_t rowid)
  * GC never touches.
  */
 #define XS_GC_BATCH 512
+static int g_gc_batch = XS_GC_BATCH;      /* xstore_gc_set_batch (tests) */
+
+/* Tests: cap a GC batch at n keys (1..XS_GC_BATCH) so a small table
+ * crosses batch boundaries; 0 restores the default. */
+void
+xstore_gc_set_batch(int n)
+{
+	g_gc_batch = (n >= 1 && n <= XS_GC_BATCH) ? n : XS_GC_BATCH;
+}
+
 static int
 xs_gc(bt_t *bt, uint64_t horizon, int *out_reclaimed)
 {
 	uint8_t resume[XS_VKLEN];
 	int have_resume = 0, reclaimed = 0, rc = XTC_OK;
+	/* Per-row state outlives a batch: a batch that ends right after a
+	 * row's tombstone must not restart that row's older versions as a
+	 * new row (its survivor would come back, without its index entries). */
+	int64_t prev_rowid = 0;
+	uint32_t prev_tableid = 0;
+	int in_group = 0, survivor_found = 0;
 
 	for (;;) {
 		bt_cursor_t *cur = NULL;
 		uint8_t dead[XS_GC_BATCH][XS_VKLEN];
 		int ndead = 0, i;
-		int64_t prev_rowid = 0;
-		uint32_t prev_tableid = 0;
-		int in_group = 0, survivor_found = 0;
 		const uint8_t *start = have_resume ? resume : NULL;
+
+#if XTC_DST_BUG(XTC_DST_BUG_GCBATCH)
+		in_group = 0;     /* planted: the row state restarts per batch */
+#endif
 
 		if (bt_cursor_open(bt, start, have_resume ? XS_VKLEN : 0, &cur) != XTC_OK)
 			break;
@@ -4845,7 +4862,7 @@ xs_gc(bt_t *bt, uint64_t horizon, int *out_reclaimed)
 			} else {
 				memcpy(dead[ndead++], k, XS_VKLEN);   /* older than survivor */
 			}
-			if (ndead == XS_GC_BATCH) {
+			if (ndead == g_gc_batch) {
 				memcpy(resume, k, XS_VKLEN);
 				have_resume = 1;
 				break;
@@ -4855,7 +4872,7 @@ xs_gc(bt_t *bt, uint64_t horizon, int *out_reclaimed)
 		for (i = 0; i < ndead; i++) {
 			if (bt_delete(bt, dead[i], XS_VKLEN) == XTC_OK) reclaimed++;
 		}
-		if (ndead < XS_GC_BATCH)
+		if (ndead < g_gc_batch)
 			break;     /* scanned to the end */
 	}
 	if (out_reclaimed != NULL) *out_reclaimed = reclaimed;
@@ -8383,8 +8400,9 @@ xstore_rename_table(struct xsql *db, const char *oldname, const char *newname)
 
 	/* Recover the column schema from the persisted catalog value
 	 * (name\0coldefs); fall back to the cached coldefs. */
-	vlen = xs_cat_value(bt, oldname, val, (int)sizeof val);
+	vlen = xs_cat_value(bt, oldname, val, (int)sizeof val - 1);
 	if (vlen > 0) {
+		val[vlen] = '\0';      /* the value is not NUL-terminated */
 		for (i = 0; i < vlen; i++) if (val[i] == 0) break;
 		if (i < vlen - 1) coldefs = (const char *)val + i + 1;
 	}

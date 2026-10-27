@@ -73,7 +73,7 @@ hold under stress:
 |---|---|---|
 | `--cores=N` | Which CPUs the process may run on | `sched_setaffinity(2)` restricts it to CPUs 0..N-1.  It pins; it does not add threads (that is `--loops`) |
 | `--loops=N` | Event loops (OS threads) | Connections go to the least-loaded of N `xtc_exec` loops.  One loop holds at most 65,520 clients: a pid has a 16-bit per-loop slot, so a loop runs at most 65,536 procs, and rexis keeps 16 for itself.  100k clients need `--loops=2`.  With N > 1 the keyspace is shared by N threads and every command takes a parking reader/writer latch (`xtc_arwlock`); with 1 it takes none |
-| `--max-memory=N` | Keyspace + client buffers | One `xtc_res` `XTC_RES_MEM_BYTES` budget charged by every keyspace allocation (including the bucket array) AND by every client query/output buffer's growth above a fixed 16 KiB each.  A write that would pass it gets `-OOM`; a client whose buffer would pass it gets `-OOM` and is closed.  `INFO` `used_memory` is the budget's total (`used_memory_dataset` + `used_memory_clients`).  Not covered: the fixed 32 KiB of buffers per connection (bounded by `--max-clients`), proc stacks, allocator overhead.  0 = no cap |
+| `--max-memory=N` | Keyspace + client buffers | One `xtc_res` `XTC_RES_MEM_BYTES` budget charged by every keyspace allocation (including the bucket array) AND by every client query/output buffer's growth above a fixed 16 KiB each.  A write that would pass it gets `-OOM`; a client whose buffer would pass it gets `-OOM` and is closed.  `INFO` `used_memory` is the budget's total (`used_memory_dataset` + `used_memory_clients`).  Not covered: the first 16 KiB of each of a connection's two buffers (bounded by `--max-clients`; allocated on first use), proc stacks, allocator overhead.  0 = no cap |
 | `--max-keys=N` | DB key count | Per-DB counter; SET/HSET/LPUSH refused above cap |
 | `--max-clients=N` | Concurrent connections (default 10000; 0 = all the loops hold) | Listener checks the live count before spawning a per-conn proc.  An over-limit client gets `-ERR max number of clients reached` (Redis's reply) and a close, as does one that finds every loop full (`--loop-clients=N` lowers the per-loop cap; INFO shows `connected_clients`, `rejected_connections`, `loopN_clients`).  A cap above `--loops` x 65,520 is refused at startup with the `--loops` value that fits |
 | `--max-fds=N` | Sockets, listener included (default: `--max-clients` + 64) | The `xtc_res` `XTC_RES_FDS` budget, attached with `xtc_res_attach_net`, so `xtc_net_accept` refuses BEFORE accepting: a client past it waits in the kernel backlog and is served when a socket closes.  The soft `RLIMIT_NOFILE` is raised to fit |
@@ -271,16 +271,25 @@ shaped the library:
   the note in `bitcask.h` about why, and `examples/06_sqlxtc/wal.c` for
   the `xtc_aio_*` alternative.
 * `KEYS pattern` is O(n) like real Redis -- documented, not a bug.
-* `--loops=N` spreads CONNECTIONS, not the keyspace.  The lrlock guards
-  only the table header; both copies share the buckets and entries, and
-  writers free entries in place, so with N > 1 every command also takes
-  one `xtc_arwlock` (readers share it, writers serialize).  That buys
-  connection capacity (65,520 clients per loop) and parallel parsing and
-  I/O, not parallel writes.  The scalable shape is DragonFly's: one
-  keyspace shard per loop, each command run on (or sent to) the loop that
-  owns its key -- see `docs/examples/rexis-vs-dragonfly.md`.
-* An idle connection costs ~15.6 KB of RSS (its fiber stack and two
-  16 KiB base buffers; Valkey: 0.9 KB).  It does not wake: with no
+* `--loops=N` spreads connections, and with N > 1 the keyspace is cut
+  into 64 shards by key hash.  The lrlock guards only a table header;
+  both copies share the buckets and entries, and writers free entries
+  in place, so each shard also has an `xtc_arwlock` (readers share it,
+  writers to that shard serialize).  A command takes only the shards of
+  its keys, in ascending order (`db_lock`; DEL and EXISTS may name
+  several); KEYS, FLUSHDB, expiry and the persistence replay take all
+  of them.  Measured, 32-vCPU x86-64 host, valkey-benchmark -c 200
+  --threads 8 -P 16, 32 B, 1M keys, median of 3: SET at `--loops=2`
+  1.14M/s and at `--loops=4` 1.60M/s, where one latch for the whole
+  keyspace gave 0.23M and 0.14M (one loop: 0.89M).  The shards are not
+  a DragonFly design: any loop runs any command on any shard, so a hot
+  key still serializes its writers and its cache lines move between
+  cores -- see `docs/examples/rexis-vs-dragonfly.md`.
+* An idle connection that has sent nothing costs ~7.3 KB of RSS (its
+  fiber stack and per-connection state; Valkey: 0.9 KB): the query and
+  output buffers are allocated by the first read and the first reply
+  (20,000 idle connections on `--loops=2`: 15.7 KB each when both
+  16 KiB buffers were allocated at accept).  It does not wake: with no
   `--timeout` and nothing buffered its proc parks on the socket with no
   deadline, and shutdown wakes it explicitly (an fd -> pid table in
   `conn.c`).  Each idle proc used to wake once a second to look at the

@@ -864,13 +864,15 @@ xtc_abort_token_reason(const xtc_abort_token_t *t)
  * the same `held` flag via the condvar: they spin briefly, then sleep
  * (see "Off-loop spin-then-park").  When both kinds wait, unlock
  * prefers a fiber waiter; a release with no fiber waiters wakes ONE
- * sleeping thread (cond_signal, as before).  An earlier version held
- * that wake back while a previously woken thread had not run yet (at
- * most one wake in flight per mutex); on a host with deep CPU idle
- * states the woken thread takes ~100 us to run, and the mutex sat free
- * with sleepers for that long (measured, 64-vCPU x86-64 host: 22 us
- * mean free-with-sleepers interval, sqlxtc ledger transfer at 64
- * clients), so every release now signals.
+ * sleeping thread (cond_signal), unless a thread is spinning on the
+ * mutex (see amutex_wake_thread_locked).  An earlier version held the
+ * wake back while a previously woken thread had not run yet (at most
+ * one wake in flight per mutex); on a host with deep CPU idle states
+ * the woken thread takes ~100 us to run, and the mutex sat free with
+ * sleepers for that long (measured, 64-vCPU x86-64 host: 22 us mean
+ * free-with-sleepers interval, sqlxtc ledger transfer at 64 clients).
+ * A spinner cannot leave it free that way: it polls `held` and takes
+ * the mutex within its ~5 us spin.
  */
 
 /* Field order: lock .. wq.head (everything an uncontended lock/unlock
@@ -884,6 +886,7 @@ struct xtc_amutex {
 	struct fw_queue       wq;        /* fiber waiters */
 	_Atomic int           spinners;  /* threads in the off-loop spin */
 	int                   count;     /* recursion depth */
+	int                   wake_skips; /* releases gated since a wake */
 	struct amutex_owner {
 		int       kind;          /* 0 none, 1 fiber, 2 thread */
 		void     *task;          /* fiber identity (kind 1) */
@@ -901,12 +904,39 @@ struct xtc_amutex {
 /* Wake ONE sleeping thread waiter (under lock).  The woken thread
  * re-tests: a running thread may have taken the lock first (barging,
  * which keeps the lock busy while the sleeper is being scheduled); then
- * it sleeps again and that thread's release wakes the next one. */
+ * it sleeps again and that thread's release wakes the next one.
+ *
+ * The spinner gate: a release that frees the mutex while a thread is
+ * spinning on it does not wake a sleeper.  The spinner takes the free
+ * mutex within its spin, so a sleeper woken now would only find it
+ * re-taken and sleep again: on a hot mutex 1.59 woke one on EVERY
+ * release, 3.2 context switches per acquire and half the 1.58 rate
+ * (bench_sync_offloop amutex w 64, 64-vCPU x86-64 host: 247k vs 486k
+ * acquires/s; with the gate 523k).  At most SYNC_AM_SKIP_MAX releases
+ * in a row skip, so a sleeper still gets a turn on a mutex that always
+ * has a spinner (2..32 measured: 8 keeps 64-thread acquire p99 at the
+ * ungated 1.2 ms, unbounded let it grow to 1.6 ms).  Nothing is
+ * stranded: `spinners` is raised under m->lock, so a counted spinner
+ * either is still polling or has stopped and not yet re-taken m->lock;
+ * either way it re-tests `held` after this release, takes the free
+ * mutex or sleeps, and the next release decides again.  The gate reads
+ * no clock: deterministic, and spinners is 0 under the simulator. */
+#ifndef SYNC_AM_SKIP_MAX
+#define SYNC_AM_SKIP_MAX 8
+#endif
 static void
 amutex_wake_thread_locked(xtc_amutex_t *m)
 {
-	if (m->cv_waiters > 0)
-		(void)pthread_cond_signal(&m->cv);
+	if (m->cv_waiters == 0)
+		return;
+	if (SYNC_AM_SKIP_MAX > 0 &&
+	    atomic_load_explicit(&m->spinners, memory_order_relaxed) > 0 &&
+	    m->wake_skips < SYNC_AM_SKIP_MAX) {
+		m->wake_skips++;
+		return;
+	}
+	m->wake_skips = 0;
+	(void)pthread_cond_signal(&m->cv);
 }
 
 /*

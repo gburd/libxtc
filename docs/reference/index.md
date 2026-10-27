@@ -14,3 +14,5 @@ Reference material to use after the [Guide]({{ '/guide/' | relative_url }}):
 - [Manual pages]({{ '/reference/man-pages/' | relative_url }})
 - [ABI stability]({{ '/reference/abi-stability/' | relative_url }})
 - [Known issues]({{ '/reference/known-issues/' | relative_url }})
+- [Security policy](https://codeberg.org/gregburd/libxtc/src/branch/main/SECURITY.md)
+  -- supported versions, private reporting, the disclosure timeline.

@@ -853,6 +853,54 @@ test_idle_conns_do_not_wake(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* An idle connection that never sent a byte holds no query or output
+ * buffer: they are allocated by the first read and the first reply.
+ * Both used to be allocated at accept (16 KiB each); with 100,000 idle
+ * connections the server held 15.6 KB per connection, about 8 KB of it
+ * those buffers' touched pages.  Measured as the server's RSS growth
+ * over IDLE_RSS_N connections; then each must still be served. */
+#define IDLE_RSS_N     800
+#define IDLE_RSS_BOUND (11 * 1024)   /* bytes per connection */
+
+static MunitResult
+test_idle_conns_hold_no_buffers(const MunitParameter p[], void *d)
+{
+#ifdef __linux__
+	int fds[IDLE_RSS_N], i, n = 0;
+	long long r0, r1, per;
+	(void)p; (void)d;
+
+	START("--max-clients=1000");
+	munit_assert_int((fds[0] = rexis_connect(&g_srv, 2000)), >=, 0);
+	munit_assert_true(served(fds[0]));   /* warm: one connection served */
+	n = 1;
+	usleep(200 * 1000);
+	r0 = rss_bytes(g_srv.pid);
+	for (i = 1; i < IDLE_RSS_N; i++) {
+		if ((fds[i] = rexis_connect(&g_srv, 2000)) < 0)
+			break;
+		n++;
+	}
+	usleep(500 * 1000);                  /* every conn proc parked */
+	r1 = rss_bytes(g_srv.pid);
+	per = n > 1 ? (r1 - r0) / (n - 1) : -1;
+	printf("\n  idle rss: %d conns, RSS %lld -> %lld, %lld B per idle "
+	    "connection\n", n, r0, r1, per);
+	munit_assert_int(n, ==, IDLE_RSS_N);
+	if (RSS_CHECKS)
+		munit_assert_llong(per, <, IDLE_RSS_BOUND);
+	for (i = 0; i < n; i += 97)          /* still served */
+		munit_assert_true(served(fds[i]));
+	for (i = 0; i < n; i++)
+		close(fds[i]);
+	STOP_CLEAN();
+	return MUNIT_OK;
+#else
+	(void)p; (void)d;
+	return MUNIT_SKIP;
+#endif
+}
+
 /* fd exhaustion: with RLIMIT_NOFILE low, a flood of connections used to
  * spin the listener at 100% CPU (raw accept() -> EMFILE -> park on the
  * still-readable listen fd -> repeat).  With xtc_net_accept + back-off
@@ -911,6 +959,7 @@ static MunitTest tests[] = {
 	{ "/output_limit",     test_output_limit,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/idle_timeout",     test_idle_timeout,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/idle_conns_do_not_wake", test_idle_conns_do_not_wake, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/idle_conns_hold_no_buffers", test_idle_conns_hold_no_buffers, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/emfile_no_spin",   test_emfile_no_spin,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
