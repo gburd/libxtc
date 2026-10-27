@@ -182,6 +182,20 @@ report and file an issue: the page id in the report is where to look.
 New DST coverage of scans racing merges and page-id reuse:
 test_sim_btree_scan.
 
+## FIXED (2.0): sqlxtc ALTER TABLE RENAME could corrupt the table's schema
+
+Since ALTER TABLE RENAME was added (1.x, 2026-06), the rename read the
+old catalog value into a stack buffer that was not NUL-terminated and
+took the column list with strlen, so stale stack bytes could be
+appended to the renamed table's schema.  When that happened, every
+INSERT into the renamed table failed with "unsupported SQL (native
+engine)", and the damaged schema was persisted.  Whether it happened
+depended on the stack's contents (`test_cat_reopen` failed about 1 run
+in 200 under CPU contention).  Fixed; the test now poisons the stack
+before the rename and fails deterministically without the fix.  The
+fix does not repair a schema an affected build already persisted (the
+row data itself was never touched); such a table must be recreated.
+
 ## FIXED (2.0): the clean-close version GC could bring back a deleted sqlxtc row
 
 Never in a release: introduced by the 1.60 candidate's clean-close
