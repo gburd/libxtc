@@ -221,17 +221,18 @@ xtc is **1.0**.  The public API surface is stable in the sense that no
 documented `xtc_*` function has been removed, renamed, or had its
 signature changed during 1.x.
 
-**One caveat a packager must read before mixing versions:** several
-caller-allocated option and info structs have GROWN during 1.x, and two
-had fields inserted mid-struct rather than appended.  Source
-compatibility is intact; **binary** compatibility across minors is not.
-Recompile consumers against the headers of the exact minor whose library
-they link, and do not mix.  The measured sizes and the affected structs
-are in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md); the compatibility
-policy, and an explicit split between what is mechanically enforced and
-what is only intention, is in `docs/abi-stability.md`.  There is **no
-automated ABI or signature diff** between release tags -- run `abidiff`
-yourself if you need that guarantee.
+**Binary compatibility, from 2.0.**  Every caller-allocated option,
+info and stats struct starts with a `size_t size` the caller sets
+(`XTC_*_INIT`), and the library reads and writes only that much, so a
+consumer built against one 2.x minor runs against another.  Exported
+symbols carry the `XTC_2.0` version, every installed header declares a
+`stable` or `experimental` tier, and `make check` diffs every public
+struct's layout against a committed table.  The 1.x structs did NOT
+have this (they grew, two mid-struct): for 1.x, recompile against the
+exact minor you link.  The enforced/policy split is in
+`docs/abi-stability.md`; the struct-by-struct 2.0 changes are in
+[docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).  `scripts/abi-check.sh
+TAG` runs `abidiff` against a previous release.
 
 What's working today:
 

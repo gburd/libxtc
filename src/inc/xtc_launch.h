@@ -1,5 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project -- All rights reserved.
+ * @stability stable
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_launch.h

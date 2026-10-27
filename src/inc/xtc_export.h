@@ -1,5 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project
+ * @stability stable
  * Use of this source code is governed by the ISC License,
  * a copy of which is in the file LICENSE in the top-level directory
  * of this distribution.
@@ -40,6 +41,29 @@
 #  define XTC_API __declspec(dllimport)
 #else
 #  define XTC_API
+#endif
+
+/*
+ * XTC_DEPRECATED(msg) -- mark a public declaration deprecated.  A use
+ * compiles, with a warning carrying `msg` (say what to use instead):
+ *
+ *	XTC_DEPRECATED("use xtc_foo_ex") XTC_API int xtc_foo(int);
+ *
+ * Policy (docs/abi-stability.md "Deprecation"): a symbol is deprecated in
+ * some minor N, keeps working for the rest of that major, and is removed
+ * no earlier than the next MAJOR.  Define XTC_NO_DEPRECATION_WARNINGS to
+ * silence the warnings (for example while migrating a large codebase).
+ */
+#if defined(XTC_NO_DEPRECATION_WARNINGS)
+#  define XTC_DEPRECATED(msg)
+#elif defined(__cplusplus) && __cplusplus >= 201402L
+#  define XTC_DEPRECATED(msg) [[deprecated(msg)]]
+#elif defined(__GNUC__) || defined(__clang__)
+#  define XTC_DEPRECATED(msg) __attribute__((deprecated(msg)))
+#elif defined(_MSC_VER)
+#  define XTC_DEPRECATED(msg) __declspec(deprecated(msg))
+#else
+#  define XTC_DEPRECATED(msg)
 #endif
 
 #endif /* XTC_EXPORT_H */
