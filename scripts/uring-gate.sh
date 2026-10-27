@@ -118,6 +118,14 @@ dd if=/dev/zero of="$dat" bs=1M count=256 status=none
 #   controls that recreate 8 rings 6 times (with NOP, armed-poll and
 #   submit_and_get_events reaps) did not reproduce it, 0 of 52.  One mode
 #   per process: 0 of 92 (72 at 1.5 s per mode, 20 at the default 600 ms).
+#   wal_kill_big: its 3 MiB records go to the log directly, past the
+#   preallocated end, so they extend the file and XFS allocates on io-wq
+#   (WRITE punts ~60%; 6.4% of the mode's few requests).  The same punts
+#   were always in the combined run (v1.59.0: WRITE 864 of 1312 punted),
+#   diluted below the threshold by the other modes.  Control, plain
+#   liburing, O_DSYNC on XFS, 1 in 61 writes a 3 MiB extending record and
+#   the rest 512 B into preallocated zeros: 73-75 of 4066 punted, i.e.
+#   the extending writes, and no in-place write.  Hence PUNT.
 # ERRORS is judged per opcode: a cancelled POLL_ADD completes -ECANCELED
 # and uringscope counts it as an error; libxtc cancels polls routinely
 # (one-shot re-arm, unregister).  Errors on any other opcode fail.
@@ -131,7 +139,7 @@ exec_scale||$build/bench_exec_scale 8 2000000 spawn
 wal_kill_exit||$sx/test_wal_kill exit
 wal_kill_any||$sx/test_wal_kill any
 wal_kill_link||$sx/test_wal_kill link
-wal_kill_big||$sx/test_wal_kill big
+wal_kill_big|PUNT|$sx/test_wal_kill big
 wal_kill_mid||$sx/test_wal_kill mid
 wal_kill_writer||$sx/test_wal_kill writer
 crash_oracle|PUNT|$sx/test_crash_oracle 4 1
