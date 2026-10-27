@@ -447,6 +447,18 @@ test_p2_red_zone_flags(const MunitParameter p[], void *d)
  *   /tick_errno  errno is per thread: a peer on the same thread set it,
  *                and the interrupted code (say between a failed call and
  *                its errno test) read the peer's value.
+ *   /tick_fpenv  MXCSR and the x87 control word set to round-toward-zero
+ *                at the tick: the peer runs with its own (the substrate
+ *                keeps both per fiber) and the target gets its own back.
+ *   /tick_avx_upper  YMM upper halves dirty at the tick: the peer must
+ *                start clean (XINUSE bit 2 = 0).  Not an ABI rule, but
+ *                dirty upper state taxes the SSE code the scheduler and
+ *                its fibers run with transition penalties.
+ *   /tick_pkru   PKRU (protection-key rights, xtc_pkey) changed at the
+ *                tick, and a peer sets its own: the interrupted code must
+ *                resume with its own rights, as if never preempted.
+ *                (PKRU stays per THREAD across a COOPERATIVE yield; see
+ *                xtc_pkey(3).)  Skips without OSPKE.
  */
 uint64_t p2_cb_flags_tick(long pid, long tid, long sig, uint64_t fl);
 void p2_cb_bwd_copy_tick(unsigned char *dlast, const unsigned char *slast,
@@ -514,7 +526,87 @@ __asm__(".text\n"
     "movl $234, %eax\n\t"   /* SYS_tgkill */
     "syscall\n\t"
     "ret\n\t"
-    ".size p2_cb_tick, .-p2_cb_tick\n");
+    ".size p2_cb_tick, .-p2_cb_tick\n"
+    /* MXCSR and the x87 CW := round toward zero, tick, return both as
+     * resumed with (MXCSR low 32 bits, CW high), then put them back. */
+    ".type p2_cb_fpenv_tick,@function\np2_cb_fpenv_tick:\n\t"
+    "subq $24, %rsp\n\t"
+    "stmxcsr 0(%rsp)\n\t"
+    "fnstcw 4(%rsp)\n\t"
+    "movl 0(%rsp), %eax\n\t"
+    "orl $0x6000, %eax\n\t"
+    "movl %eax, 8(%rsp)\n\t"
+    "movzwl 4(%rsp), %eax\n\t"
+    "orl $0xc00, %eax\n\t"
+    "movw %ax, 12(%rsp)\n\t"
+    "ldmxcsr 8(%rsp)\n\t"
+    "fldcw 12(%rsp)\n\t"
+    "movl $234, %eax\n\t"   /* SYS_tgkill */
+    "syscall\n\t"
+    "stmxcsr 16(%rsp)\n\t"
+    "fnstcw 20(%rsp)\n\t"
+    "ldmxcsr 0(%rsp)\n\t"
+    "fldcw 4(%rsp)\n\t"
+    "movzwl 20(%rsp), %eax\n\t"
+    "shlq $32, %rax\n\t"
+    "movl 16(%rsp), %ecx\n\t"
+    "orq %rcx, %rax\n\t"
+    "addq $24, %rsp\n\t"
+    "ret\n\t"
+    ".size p2_cb_fpenv_tick, .-p2_cb_fpenv_tick\n"
+    /* Dirty the YMM upper halves, tick, clean them. */
+    ".type p2_cb_ymm_tick,@function\np2_cb_ymm_tick:\n\t"
+    "vpcmpeqd %ymm1, %ymm1, %ymm1\n\t"
+    "movl $234, %eax\n\t"   /* SYS_tgkill */
+    "syscall\n\t"
+    "vzeroupper\n\t"
+    "ret\n\t"
+    ".size p2_cb_ymm_tick, .-p2_cb_ymm_tick\n");
+uint64_t p2_cb_fpenv_tick(long pid, long tid, long sig);
+/* PKRU := v, tick, return the PKRU resumed with (rdpkru/wrpkru need
+ * ecx = edx = 0; the caller restores the original). */
+uint32_t p2_cb_pkru_tick(long pid, long tid, long sig, uint32_t v);
+uint32_t p2_cb_rdpkru(void);
+void p2_cb_wrpkru(uint32_t v);
+__asm__(".text\n"
+    ".type p2_cb_pkru_tick,@function\np2_cb_pkru_tick:\n\t"
+    "movq %rdx, %r8\n\t"
+    "movl %ecx, %eax\n\t"
+    "xorl %ecx, %ecx\n\t"
+    "xorl %edx, %edx\n\t"
+    ".byte 0x0f, 0x01, 0xef\n\t"   /* wrpkru */
+    "movq %r8, %rdx\n\t"
+    "movl $234, %eax\n\t"   /* SYS_tgkill */
+    "syscall\n\t"
+    "xorl %ecx, %ecx\n\t"
+    ".byte 0x0f, 0x01, 0xee\n\t"   /* rdpkru */
+    "ret\n\t"
+    ".size p2_cb_pkru_tick, .-p2_cb_pkru_tick\n"
+    ".type p2_cb_rdpkru,@function\np2_cb_rdpkru:\n\t"
+    "xorl %ecx, %ecx\n\t"
+    ".byte 0x0f, 0x01, 0xee\n\t"
+    "ret\n\t"
+    ".size p2_cb_rdpkru, .-p2_cb_rdpkru\n"
+    ".type p2_cb_wrpkru,@function\np2_cb_wrpkru:\n\t"
+    "movl %edi, %eax\n\t"
+    "xorl %ecx, %ecx\n\t"
+    "xorl %edx, %edx\n\t"
+    ".byte 0x0f, 0x01, 0xef\n\t"
+    "ret\n\t"
+    ".size p2_cb_wrpkru, .-p2_cb_wrpkru\n");
+#define P2_CB_PKEY15 (3u << 30)   /* key 15: access + write disable */
+void p2_cb_ymm_tick(long pid, long tid, long sig);
+
+/* XINUSE (XGETBV with ECX = 1) bit 2: the YMM upper halves are not in
+ * their initial (zero) state. */
+static int
+p2_cb_ymm_dirty(void)
+{
+	unsigned lo, hi;
+	__asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(1));
+	(void)hi;
+	return (lo & 4) != 0;
+}
 
 #define P2_CB_DF     0x400ull
 #define P2_CB_AC     0x40000ull
@@ -523,7 +615,8 @@ __asm__(".text\n"
 #define P2_CB_PEERNO 8765
 static atomic_long g_cb_peer_runs, g_cb_peer_bad, g_cb_tgt_bad, g_cb_preempted;
 static atomic_int  g_cb_stop;
-static int         g_cb_mode;   /* 0 df, 1 ac, 2 x87, 3 errno */
+static int         g_cb_mode;   /* 0 df, 1 ac, 2 x87, 3 errno, 4 fpenv, 5 ymm, 6 pkru */
+static uint32_t    g_cb_pkru0;  /* the thread's PKRU before the run */
 static unsigned char g_cb_pat[192];
 
 static double
@@ -539,6 +632,8 @@ static void
 p2_cb_peer(void *arg)
 {
 	unsigned char b[192];
+	uint32_t mx;
+	uint16_t cw;
 	int bad, k;
 	(void)arg;
 	while (!atomic_load(&g_cb_stop)) {
@@ -559,8 +654,19 @@ p2_cb_peer(void *arg)
 			bad = !(p2_cb_x87_pi3() > 9.42477 &&
 			    p2_cb_x87_pi3() < 9.42478);
 			break;
-		default:
+		case 3:
 			errno = P2_CB_PEERNO;
+			break;
+		case 4:
+			__asm__ volatile("stmxcsr %0\n\tfnstcw %1"
+			    : "=m"(mx), "=m"(cw));
+			bad = (mx & 0x6000) != 0 || (cw & 0xc00) != 0;
+			break;
+		case 5:
+			bad = p2_cb_ymm_dirty();
+			break;
+		default:    /* another fiber sets its own rights */
+			p2_cb_wrpkru(g_cb_pkru0);
 			break;
 		}
 		if (bad)
@@ -601,10 +707,24 @@ p2_cb_target(void *arg)
 			bad = o[0] != M_LOG2E || o[1] != 1.0 || o[2] != M_PI ||
 			    o[3] != 1.0 || o[4] != 0.0 || o[5] != 1.0;
 			break;
-		default:
+		case 3:
 			errno = P2_CB_ERRNO;
 			p2_cb_tick(pid, tid, SIGVTALRM);
 			bad = errno != P2_CB_ERRNO;
+			break;
+		case 4:
+			got = p2_cb_fpenv_tick(pid, tid, SIGVTALRM);
+			bad = (got & 0x6000) != 0x6000 ||
+			    ((got >> 32) & 0xc00) != 0xc00;
+			break;
+		case 5:
+			p2_cb_ymm_tick(pid, tid, SIGVTALRM);
+			break;
+		default:
+			bad = p2_cb_pkru_tick(pid, tid, SIGVTALRM,
+			    g_cb_pkru0 | P2_CB_PKEY15) !=
+			    (g_cb_pkru0 | P2_CB_PKEY15);
+			p2_cb_wrpkru(g_cb_pkru0);
 			break;
 		}
 		if (bad)
@@ -620,6 +740,7 @@ p2_cb_run(int mode)
 {
 	extern int __xtc_coro_preempt_effective(void);
 	xtc_exec_t *e = NULL;
+	unsigned a, b, c, dx, lo, hi;
 	int k;
 
 	if (!xtc_preempt_supported() || !__xtc_coro_preempt_effective())
@@ -628,6 +749,25 @@ p2_cb_run(int mode)
     __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
 	return MUNIT_SKIP;   /* see test_p2_preempt_tight_loop */
 #endif
+	if (mode == 5) {
+		/* AVX enabled by the OS, and XGETBV ECX = 1 (XINUSE). */
+		if (!__get_cpuid(1, &a, &b, &c, &dx) ||
+		    (c & bit_OSXSAVE) == 0 || __get_cpuid_max(0, NULL) < 0xD)
+			return MUNIT_SKIP;
+		__asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+		__cpuid_count(0xD, 1, a, b, c, dx);
+		if ((lo & 6) != 6 || (a & 4) == 0)
+			return MUNIT_SKIP;
+	}
+	if (mode == 6) {
+		/* OSPKE (CR4.PKE): rdpkru/wrpkru are usable. */
+		if (__get_cpuid_max(0, NULL) < 7)
+			return MUNIT_SKIP;
+		__cpuid_count(7, 0, a, b, c, dx);
+		if ((c & (1u << 4)) == 0)
+			return MUNIT_SKIP;
+		g_cb_pkru0 = p2_cb_rdpkru();
+	}
 	g_cb_mode = mode;
 	for (k = 0; k < 192; k++)
 		g_cb_pat[k] = (unsigned char)(k * 7 + 1);
@@ -684,11 +824,33 @@ test_p2_tick_errno(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	return p2_cb_run(3);
 }
+
+static MunitResult
+test_p2_tick_fpenv(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return p2_cb_run(4);
+}
+
+static MunitResult
+test_p2_tick_avx_upper(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return p2_cb_run(5);
+}
+
+static MunitResult
+test_p2_tick_pkru(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return p2_cb_run(6);
+}
 #endif /* x86-64 Linux */
 
 #if defined(__aarch64__) && defined(__linux__) && \
     (defined(__GNUC__) || defined(__clang__))
 #include <sys/auxv.h>
+#include <sys/syscall.h>
 #define P2_A64 1
 #ifndef HWCAP_SVE
 #define HWCAP_SVE (1UL << 22)
@@ -884,6 +1046,217 @@ test_p2_a64_x16_preserved(const MunitParameter p[], void *d)
 	munit_assert_long(atomic_load(&g_x17_bad), ==, 0);
 	munit_assert_long(atomic_load(&g_nzcv_bad), ==, 0);
 	return MUNIT_OK;
+}
+
+/*
+ * The aarch64 twins of the x86-64 /tick_* cases: the tick is a raw
+ * tgkill svc from this file's own text, a 10 s timer keeps natural ticks
+ * out, and a peer fiber on the same loop checks what the scheduler
+ * handed it.
+ *   /a64_tick_errno  errno is per thread (the peer sets its own).
+ *   /a64_tick_fpcr   FPCR.RMode = round-toward-zero at the tick: the
+ *                    peer must run with its own FPCR (the substrate keeps
+ *                    FPCR per fiber) and the target gets its own back.
+ *   /a64_tick_sme    the tick lands in SME streaming mode with ZA on
+ *                    (skips without HWCAP2_SME).  The scheduler and the
+ *                    peer ran in streaming mode with ZA live; the peer's
+ *                    Advanced SIMD add faults there without
+ *                    FEAT_SME_FA64 (SIGILL), and its result is checked.
+ */
+#ifndef HWCAP2_SME
+#define HWCAP2_SME (1UL << 23)
+#endif
+void p2_a64_cb_tick(long pid, long tid, long sig);
+uint64_t p2_a64_cb_fpcr_tick(long pid, long tid, long sig, uint64_t fpcr);
+uint64_t p2_a64_cb_sme_tick(long pid, long tid, long sig);
+uint64_t p2_a64_cb_svcr(void);
+__asm__(".text\n"
+    ".type p2_a64_cb_tick,%function\np2_a64_cb_tick:\n\t"
+    "mov x8, #131\n\t"            /* __NR_tgkill */
+    "svc #0\n\t"
+    "ret\n\t"
+    ".size p2_a64_cb_tick, .-p2_a64_cb_tick\n"
+    /* FPCR := x3, tick, return the FPCR resumed with; restore 0. */
+    ".type p2_a64_cb_fpcr_tick,%function\np2_a64_cb_fpcr_tick:\n\t"
+    "mrs x9, fpcr\n\t"
+    "msr fpcr, x3\n\t"
+    "mov x8, #131\n\t"
+    "svc #0\n\t"
+    "mrs x0, fpcr\n\t"
+    "msr fpcr, x9\n\t"
+    "ret\n\t"
+    ".size p2_a64_cb_fpcr_tick, .-p2_a64_cb_fpcr_tick\n"
+    /* smstart (SM and ZA), tick, read SVCR, smstop: returns the SVCR
+     * the code resumed with (3 = SM and ZA, as it was at the tick). */
+    ".type p2_a64_cb_sme_tick,%function\np2_a64_cb_sme_tick:\n\t"
+    ".inst 0xd503477f\n\t"        /* smstart */
+    "mov x8, #131\n\t"
+    "svc #0\n\t"
+    ".inst 0xd53b4249\n\t"        /* mrs x9, svcr */
+    ".inst 0xd503467f\n\t"        /* smstop */
+    "mov x0, x9\n\t"
+    "ret\n\t"
+    ".size p2_a64_cb_sme_tick, .-p2_a64_cb_sme_tick\n"
+    ".type p2_a64_cb_svcr,%function\np2_a64_cb_svcr:\n\t"
+    ".inst 0xd53b4240\n\t"        /* mrs x0, svcr */
+    "ret\n\t"
+    ".size p2_a64_cb_svcr, .-p2_a64_cb_svcr\n");
+
+#define P2_A64_RZ    (3ull << 22)   /* FPCR.RMode = round toward zero */
+#define P2_A64_N     64
+static atomic_long g_a64cb_peer_runs, g_a64cb_peer_bad, g_a64cb_tgt_bad;
+static atomic_long g_a64cb_preempted;
+static atomic_int  g_a64cb_stop;
+static int         g_a64cb_mode;   /* 0 errno, 1 fpcr, 2 sme */
+
+static void
+p2_a64cb_nop(int sig)
+{
+	(void)sig;
+}
+
+static void
+p2_a64cb_peer(void *arg)
+{
+	uint64_t fpcr, v;
+	int bad;
+	(void)arg;
+	while (!atomic_load(&g_a64cb_stop)) {
+		bad = 0;
+		switch (g_a64cb_mode) {
+		case 0:
+			errno = 8765;
+			break;
+		case 1:
+			__asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+			bad = (fpcr & P2_A64_RZ) != 0;
+			break;
+		default:
+			bad = p2_a64_cb_svcr() != 0;
+			v = 21;
+			__asm__ volatile("dup v0.2d, %1\n\t"
+			    "add v0.2d, v0.2d, v0.2d\n\t"
+			    "umov %0, v0.d[1]" : "=r"(v) : "r"(v) : "v0");
+			bad |= v != 42;
+			break;
+		}
+		if (bad)
+			atomic_fetch_add(&g_a64cb_peer_bad, 1);
+		atomic_fetch_add(&g_a64cb_peer_runs, 1);
+		xtc_yield();
+	}
+}
+
+static void
+p2_a64cb_target(void *arg)
+{
+	long pid = getpid(), tid = syscall(SYS_gettid), before;
+	int i, bad;
+	(void)arg;
+	xtc_yield();                        /* let the peer start */
+	for (i = 0; i < P2_A64_N; i++) {
+		bad = 0;
+		before = atomic_load(&g_a64cb_peer_runs);
+		switch (g_a64cb_mode) {
+		case 0:
+			errno = 4321;
+			p2_a64_cb_tick(pid, tid, SIGVTALRM);
+			bad = errno != 4321;
+			break;
+		case 1:
+			bad = (p2_a64_cb_fpcr_tick(pid, tid, SIGVTALRM,
+			    P2_A64_RZ) & P2_A64_RZ) != P2_A64_RZ;
+			break;
+		default:
+			bad = p2_a64_cb_sme_tick(pid, tid, SIGVTALRM) != 3;
+			break;
+		}
+		if (bad)
+			atomic_fetch_add(&g_a64cb_tgt_bad, 1);
+		if (atomic_load(&g_a64cb_peer_runs) != before)
+			atomic_fetch_add(&g_a64cb_preempted, 1);
+	}
+	atomic_store(&g_a64cb_stop, 1);
+}
+
+static MunitResult
+p2_a64cb_run(int mode)
+{
+	xtc_exec_t *e = NULL;
+	struct sigaction sa, old;
+	int tgt_ok = 1;
+
+	if (!xtc_preempt_supported())
+		return MUNIT_SKIP;
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
+    __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	return MUNIT_SKIP;   /* see test_p2_preempt_tight_loop */
+#endif
+	if (mode == 2 && (getauxval(AT_HWCAP2) & HWCAP2_SME) == 0)
+		return MUNIT_SKIP;
+	if (mode == 2) {
+		/* Control: does a PLAIN signal round trip restore streaming
+		 * mode here?  (qemu-user 10.2 restores ZA but not PSTATE.SM.)
+		 * If not, the target half measures the platform, not libxtc. */
+		memset(&sa, 0, sizeof sa);
+		sa.sa_handler = p2_a64cb_nop;
+		(void)sigemptyset(&sa.sa_mask);
+		(void)sigaction(SIGUSR1, &sa, &old);
+		tgt_ok = p2_a64_cb_sme_tick(getpid(), syscall(SYS_gettid),
+		    SIGUSR1) == 3;
+		(void)sigaction(SIGUSR1, &old, NULL);
+		if (!tgt_ok)
+			munit_log(MUNIT_LOG_INFO, "a plain signal does not restore "
+			    "PSTATE.SM on this platform: target half not checked");
+	}
+	g_a64cb_mode = mode;
+	atomic_store(&g_a64cb_peer_runs, 0);
+	atomic_store(&g_a64cb_peer_bad, 0);
+	atomic_store(&g_a64cb_tgt_bad, 0);
+	atomic_store(&g_a64cb_preempted, 0);
+	atomic_store(&g_a64cb_stop, 0);
+	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
+	    ==, XTC_OK);
+	xtc_preempt_set_involuntary(1);
+	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0), p2_a64cb_target,
+	    NULL, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0), p2_a64cb_peer,
+	    NULL, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	xtc_preempt_set_involuntary(0);
+	(void)xtc_exec_fini(e);
+	munit_logf(MUNIT_LOG_INFO, "mode %d: %ld/%d ticks preempted, target "
+	    "bad %ld, peer bad %ld of %ld", mode,
+	    atomic_load(&g_a64cb_preempted), P2_A64_N,
+	    atomic_load(&g_a64cb_tgt_bad), atomic_load(&g_a64cb_peer_bad),
+	    atomic_load(&g_a64cb_peer_runs));
+	munit_assert_long(atomic_load(&g_a64cb_preempted), >, 0);
+	if (tgt_ok)
+		munit_assert_long(atomic_load(&g_a64cb_tgt_bad), ==, 0);
+	munit_assert_long(atomic_load(&g_a64cb_peer_bad), ==, 0);
+	return MUNIT_OK;
+}
+
+static MunitResult
+test_p2_a64_tick_errno(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return p2_a64cb_run(0);
+}
+
+static MunitResult
+test_p2_a64_tick_fpcr(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return p2_a64cb_run(1);
+}
+
+static MunitResult
+test_p2_a64_tick_sme(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return p2_a64cb_run(2);
 }
 #endif /* aarch64 Linux */
 
@@ -1538,11 +1911,23 @@ static MunitTest tests[] = {
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/tick_errno", test_p2_tick_errno, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/tick_fpenv", test_p2_tick_fpenv, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/tick_avx_upper", test_p2_tick_avx_upper, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/tick_pkru", test_p2_tick_pkru, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
 #endif
 #if defined(P2_A64)
 	{ "/a64_sve_state", test_p2_a64_sve_state, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/a64_x16_preserved", test_p2_a64_x16_preserved, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/a64_tick_errno", test_p2_a64_tick_errno, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/a64_tick_fpcr", test_p2_a64_tick_fpcr, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/a64_tick_sme", test_p2_a64_tick_sme, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 #endif
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }

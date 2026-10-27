@@ -77,6 +77,9 @@
 #include <sys/syscall.h>   /* SYS_gettid for SIGEV_THREAD_ID targeting */
 #include <unistd.h>
 #endif
+#if defined(__aarch64__) && defined(__linux__)
+#include <sys/auxv.h>      /* getauxval(AT_HWCAP2): the SME probe */
+#endif
 
 #if defined(__linux__) || defined(__FreeBSD__) || defined(__NetBSD__) || \
     defined(__OpenBSD__) || defined(__DragonFly__) || defined(__sun) || \
@@ -215,6 +218,13 @@ __xtc_preempt_errno_set(int e)
 {
 	errno = e;
 }
+
+#if defined(__aarch64__) && defined(__linux__)
+/* 1 when the CPU has SME: the aarch64 trampoline then leaves streaming
+ * mode, turns ZA off and clears TPIDR2_EL0 before its xtc_yield.  Set by
+ * xtc_preempt_set_involuntary before the first redirect can happen. */
+XTC_PREEMPT_HIDDEN int __xtc_preempt_a64_sme;
+#endif
 #endif
 
 #if defined(XTC_HAVE_POSIX_TIMERS) || defined(XTC_HAVE_KQUEUE_TIMER)
@@ -660,6 +670,11 @@ xtc_preempt_supported(void)
 void
 xtc_preempt_set_involuntary(int on)
 {
+#if defined(__aarch64__) && defined(__linux__)
+	if (on)
+		__xtc_preempt_a64_sme =
+		    (getauxval(AT_HWCAP2) & (1UL << 23)) != 0;   /* HWCAP2_SME */
+#endif
 	atomic_store_explicit(&g_involuntary_on, on ? 1 : 0,
 	    memory_order_relaxed);
 }
