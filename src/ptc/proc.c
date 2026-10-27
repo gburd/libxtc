@@ -643,7 +643,7 @@ _Static_assert(
  */
 struct xtc_proc_slot {
 	struct xtc_proc *proc;       /* NULL if free */
-	uint32_t         gen;
+	uint64_t         gen;        /* bumped per hand-out; never wraps */
 	uint32_t         next_free;  /* free-list link (XTC_PT_FREE_NONE = end) */
 };
 #define XTC_PT_FREE_NONE UINT32_MAX
@@ -707,7 +707,7 @@ struct xtc_proc_table {
 };
 
 static inline unsigned
-__pt_stripe(uint16_t local_id)
+__pt_stripe(uint32_t local_id)
 {
 	return (unsigned)local_id & (XTC_PT_NSTRIPES - 1u);
 }
@@ -808,10 +808,10 @@ __lt_hash(const xtc_loop_t *loop)
 	return (unsigned)(v >> 40) & (LT_HCAP - 1u);
 }
 
-static inline uint16_t
+static inline uint32_t
 __lt_loop_id(const xtc_loop_t *l)
 {
-	return (uint16_t)(l->exec_id < 0 ? 0 : l->exec_id + 1);
+	return (uint32_t)(l->exec_id < 0 ? 0 : l->exec_id + 1);
 }
 
 /* Writer side of the seqlock (caller holds __lt_lock). */
@@ -874,7 +874,7 @@ __lt_find(xtc_loop_t *loop)
 
 /* Lock-free: a live registered loop whose id is `id` (NULL if none). */
 static xtc_loop_t *
-__lt_find_id(uint16_t id)
+__lt_find_id(uint32_t id)
 {
 	unsigned seq;
 	int i, n;
@@ -910,7 +910,7 @@ static struct xtc_proc_table *
 __lt_remove_locked(xtc_loop_t *loop)
 {
 	struct xtc_proc_table *tbl = NULL;
-	uint16_t id;
+	uint32_t id;
 	int i, j;
 	for (i = 0; i < __lt_n; i++)
 		if (atomic_load_explicit(&__lt[i].loop,
@@ -1073,7 +1073,7 @@ static int
 __table_get(xtc_loop_t *loop, struct xtc_proc_table **out)
 {
 	struct xtc_proc_table *t;
-	uint16_t id;
+	uint32_t id;
 	unsigned s;
 	int rc = XTC_OK;
 
@@ -1120,29 +1120,20 @@ out:
 }
 
 /*
- * Hard ceiling on live procs per loop, dictated by the pid ABI:
- * xtc_pid_t.local_id is uint16_t (see <xtc_proc.h>), so slot index
- * 65536 would truncate to 0 and hand out a pid IDENTICAL to the live
- * proc in slot 0 -- same loop_id, same local_id, and (because gen is
- * per-SLOT) the same gen, so the generation check cannot disambiguate
- * them either.  Two live procs sharing a pid means xtc_send / wake /
- * DOWN can be delivered to the wrong proc, and __table_release can
- * clear a slot belonging to a different proc (dropping the real
- * owner's reference).
- *
- * Historically this was masked only INCIDENTALLY: the default fds
- * resource cap (XTC_RES_CAPS_DEFAULT.fds == 65536) stopped spawning at
- * exactly 65536 first.  That is not a guard -- the tasks cap defaults
- * to 100000, deliberately ABOVE this limit -- so an embedder that
- * legitimately raised fds could reach the collision.  Refuse
- * explicitly here, so the bound is a property of the proc table rather
- * than a side effect of an unrelated cap.
+ * Ceiling on slot indices per loop.  local_id is 32 bits and
+ * XTC_PT_FREE_NONE (UINT32_MAX) ends the free list, so indices stop one
+ * short of it.  In practice memory and the xtc_res caps (tasks, fds)
+ * stop a loop long before: a live proc costs a fiber stack.  Through
+ * 1.x local_id was 16 bits and this was 65,536 -- a server running one
+ * proc per connection stopped accepting at ~65,500 clients per loop.
+ * Refused with XTC_E_RESOURCE (never wrapped: a wrapped index would hand
+ * out a pid identical to a live one).
  */
-#define XTC_PROC_MAX_LOCAL_ID 65536u   /* UINT16_MAX + 1 */
+#define XTC_PROC_MAX_LOCAL_ID ((size_t)UINT32_MAX)
 
 static int
 __table_alloc_slot(struct xtc_proc_table *t, struct xtc_proc *p,
-                   uint16_t *out_local, uint32_t *out_gen)
+                   uint32_t *out_local, uint64_t *out_gen)
 {
 	size_t i;
 	int rc = XTC_OK;
@@ -1165,12 +1156,15 @@ __table_alloc_slot(struct xtc_proc_table *t, struct xtc_proc *p,
 		goto take;
 	}
 	/* Grow -- but never past what local_id can represent. */
-	if (t->cap >= (size_t)XTC_PROC_MAX_LOCAL_ID) {
+	if (t->cap >= XTC_PROC_MAX_LOCAL_ID) {
 		rc = XTC_E_RESOURCE; goto out;
 	}
 	new_cap = t->cap == 0 ? 16 : t->cap * 2;
-	if (new_cap > (size_t)XTC_PROC_MAX_LOCAL_ID)
-		new_cap = (size_t)XTC_PROC_MAX_LOCAL_ID;
+	if (new_cap > XTC_PROC_MAX_LOCAL_ID)
+		new_cap = XTC_PROC_MAX_LOCAL_ID;
+	if (new_cap > SIZE_MAX / sizeof *ns) {   /* 32-bit size_t */
+		rc = XTC_E_NOMEM; goto out;
+	}
 	if (__os_realloc(t->slots, new_cap * sizeof *ns,
 	    (void **)&ns) != XTC_OK) {
 		rc = XTC_E_NOMEM; goto out;
@@ -1185,7 +1179,7 @@ __table_alloc_slot(struct xtc_proc_table *t, struct xtc_proc *p,
 	idx = t->hw++;
 take:
 	t->slots[idx].proc = p;
-	*out_local = (uint16_t)idx;
+	*out_local = (uint32_t)idx;
 	*out_gen   = ++t->slots[idx].gen;
 	atomic_fetch_add_explicit(&t->n_used, 1, memory_order_relaxed);
 out:
@@ -1196,7 +1190,7 @@ out:
 /* Vacate slot `local_id` (caller holds its stripe and saw proc != NULL)
  * and return it to the free list. */
 static void
-__table_vacate_locked(struct xtc_proc_table *t, uint16_t local_id)
+__table_vacate_locked(struct xtc_proc_table *t, uint32_t local_id)
 {
 	t->slots[local_id].proc = NULL;
 	atomic_fetch_sub_explicit(&t->n_used, 1, memory_order_relaxed);
@@ -1220,7 +1214,7 @@ __proc_release(struct xtc_proc *p)
 }
 
 static struct xtc_proc *
-__table_lookup(struct xtc_proc_table *t, uint16_t local_id, uint32_t gen)
+__table_lookup(struct xtc_proc_table *t, uint32_t local_id, uint64_t gen)
 {
 	struct xtc_proc *p = NULL;
 	unsigned st = __pt_stripe(local_id);
@@ -1261,7 +1255,7 @@ __xtc_proc_loop_contains(xtc_loop_t *loop, xtc_pid_t pid)
 }
 
 static void
-__table_release(struct xtc_proc_table *t, uint16_t local_id)
+__table_release(struct xtc_proc_table *t, uint32_t local_id)
 {
 	unsigned st = __pt_stripe(local_id);
 	(void) __proc_mtx_lock(&t->stripes[st]);
@@ -1543,7 +1537,8 @@ __proc_entry(void *arg)
 	 */
 	if (p->coro != NULL)
 		p->coro->proc = p;
-	XTC_PROBE_PROC_START(XTC_PROBE_PID(p->pid), (uintptr_t)p->task);
+	XTC_PROBE_PROC_START(XTC_PROBE_PID_ID(p->pid), XTC_PROBE_PID_GEN(p->pid),
+	    (uintptr_t)p->task);
 
 	/* L1: apply the spawn-time scheduling class on THIS loop's thread
 	 * (the class array is per-loop; the handle was created on this same
@@ -1638,7 +1633,8 @@ proc_exit:
 	reason = p->exit_reason;
 	__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_EXIT, p->pid,
 	    (uint64_t)(unsigned)reason);
-	XTC_PROBE_PROC_EXIT(XTC_PROBE_PID(p->pid), reason);
+	XTC_PROBE_PROC_EXIT(XTC_PROBE_PID_ID(p->pid), XTC_PROBE_PID_GEN(p->pid),
+	    reason);
 	__notify_links_and_monitors(p);
 
 	__current_proc = NULL;
@@ -1723,8 +1719,8 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	xtc_task_t *t;
 	xtc_pid_t spawned_pid;
 	struct xtc_proc *self = (rel != 0) ? __current_proc : NULL;
-	uint16_t local;
-	uint32_t gen;
+	uint32_t local;
+	uint64_t gen;
 	int rc;
 	int pinned;
 	xtc_proc_opts_t o;
@@ -1775,7 +1771,7 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 		__os_free(p);
 		return rc;
 	}
-	p->pid.loop_id  = (uint16_t)(loop->exec_id < 0 ? 0 : loop->exec_id + 1);
+	p->pid.loop_id  = __lt_loop_id(loop);
 	p->pid.local_id = local;
 	p->pid.gen      = gen;
 	/* Capture the pid before the spawn: once xtc_async enqueues the
@@ -1897,8 +1893,10 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	(void)t;   /* p->task / p->coro are set by __proc_entry, not here */
 
 	__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_SPAWN, spawned_pid, 0);
-	XTC_PROBE_PROC_SPAWN(XTC_PROBE_PID(spawned_pid),
-	    __current_proc != NULL ? XTC_PROBE_PID(__current_proc->pid) : 0);
+	XTC_PROBE_PROC_SPAWN(XTC_PROBE_PID_ID(spawned_pid),
+	    XTC_PROBE_PID_GEN(spawned_pid),
+	    __current_proc != NULL ? XTC_PROBE_PID_ID(__current_proc->pid) : 0,
+	    __current_proc != NULL ? XTC_PROBE_PID_GEN(__current_proc->pid) : 0);
 	if (out_pid) *out_pid = spawned_pid;
 	return XTC_OK;
 
@@ -1932,6 +1930,70 @@ xtc_pid_t
 xtc_self(void)
 {
 	return __current_proc != NULL ? __current_proc->pid : XTC_PID_NONE;
+}
+
+/*
+ * xtc_atomic_pid_t: a seqlock over the two 64-bit words of a pid.  A
+ * writer claims the sequence (even -> odd) with a CAS, so concurrent
+ * stores serialize instead of interleaving words; readers retry while it
+ * is odd or changed under them.  The writer runs inside the preemption
+ * bracket: a fiber preempted between claim and release would leave a
+ * reader (or the next writer) on the same thread spinning forever.
+ * The publishing store and the first load are seq_cst, so a store
+ * followed by a load of another seq_cst flag pairs Dekker-style with the
+ * mirror image on another thread (xtc_app's draining handshake).
+ */
+/* PUBLIC: xtc_pid_t xtc_atomic_pid_load __P((const xtc_atomic_pid_t *)); */
+xtc_pid_t
+xtc_atomic_pid_load(const xtc_atomic_pid_t *a)
+{
+	_Atomic uint64_t *seq = (_Atomic uint64_t *)(uintptr_t)&a->seq_;
+	_Atomic uint64_t *w = (_Atomic uint64_t *)(uintptr_t)a->w_;
+	uint64_t s1, s2, w0, w1;
+	xtc_pid_t p;
+
+	for (;;) {
+		s1 = atomic_load_explicit(seq, memory_order_seq_cst);
+		if (s1 & 1u) {
+			__os_pause();
+			continue;
+		}
+		w0 = atomic_load_explicit(&w[0], memory_order_relaxed);
+		w1 = atomic_load_explicit(&w[1], memory_order_relaxed);
+		atomic_thread_fence(memory_order_acquire);
+		s2 = atomic_load_explicit(seq, memory_order_relaxed);
+		if (s1 == s2)
+			break;
+	}
+	p.loop_id = (uint32_t)w0;
+	p.local_id = (uint32_t)(w0 >> 32);
+	p.gen = w1;
+	return p;
+}
+
+/* PUBLIC: void xtc_atomic_pid_store __P((xtc_atomic_pid_t *, xtc_pid_t)); */
+void
+xtc_atomic_pid_store(xtc_atomic_pid_t *a, xtc_pid_t p)
+{
+	_Atomic uint64_t *seq = (_Atomic uint64_t *)&a->seq_;
+	_Atomic uint64_t *w = (_Atomic uint64_t *)a->w_;
+	uint64_t s;
+
+	__xtc_unsafe_enter();
+	s = atomic_load_explicit(seq, memory_order_relaxed);
+	for (;;) {
+		if ((s & 1u) == 0 && atomic_compare_exchange_weak_explicit(seq,
+		    &s, s + 1, memory_order_acquire, memory_order_relaxed))
+			break;
+		__os_pause();
+		s = atomic_load_explicit(seq, memory_order_relaxed);
+	}
+	atomic_thread_fence(memory_order_release);
+	atomic_store_explicit(&w[0], (uint64_t)p.loop_id |
+	    (uint64_t)p.local_id << 32, memory_order_relaxed);
+	atomic_store_explicit(&w[1], p.gen, memory_order_relaxed);
+	atomic_store_explicit(seq, s + 2, memory_order_seq_cst);
+	__xtc_unsafe_leave();
 }
 
 /* PUBLIC: int   xtc_proc_set_userdata __P((void *)); */
@@ -2389,8 +2451,7 @@ __resolve(xtc_pid_t pid, xtc_loop_t **out_loop_for_send)
 	/* Strategy 1: if we are running on a loop, prefer same-loop and
 	 * exec-sibling lookups (cheapest). */
 	if (__xtc_current_loop != NULL) {
-		uint16_t my_id = (uint16_t)(__xtc_current_loop->exec_id < 0
-		    ? 0 : __xtc_current_loop->exec_id + 1);
+		uint32_t my_id = __lt_loop_id(__xtc_current_loop);
 		if (pid.loop_id == my_id)
 			target_loop = __xtc_current_loop;
 		else if (__xtc_current_loop->exec != NULL) {
@@ -2552,7 +2613,8 @@ __send_ex(xtc_loop_t *owner, xtc_pid_t to, const void *data, size_t size,
 	/* xtc_tail MSG source: record the send (target pid, payload bytes).
 	 * One relaxed mask load when the source is off. */
 	__xtc_tail_emit(XTC_TAIL_MSG, XTC_TAIL_SEND, to, (uint64_t)size);
-	XTC_PROBE_MSG_SEND(XTC_PROBE_PID(e->from), XTC_PROBE_PID(to), size);
+	XTC_PROBE_MSG_SEND(XTC_PROBE_PID_ID(e->from), XTC_PROBE_PID_GEN(e->from),
+	    XTC_PROBE_PID_ID(to), XTC_PROBE_PID_GEN(to), size);
 
 	rc = __mbox_deliver(p, e, sys, &queued);
 	__proc_release(p);
@@ -2598,7 +2660,8 @@ __exit_pid_on(xtc_loop_t *owner, xtc_pid_t target, int reason)
 	if (XTC_UNLIKELY(!atomic_load_explicit(&p->alive,
 	    memory_order_relaxed))) { __proc_release(p); return XTC_E_INVAL; }
 
-	XTC_PROBE_PROC_KILL(XTC_PROBE_PID(target), reason);
+	XTC_PROBE_PROC_KILL(XTC_PROBE_PID_ID(target), XTC_PROBE_PID_GEN(target),
+	    reason);
 	/* Encode reason so 0 means "no kill pending".  Negative reasons
 	 * are clamped to -1 so the encoded value stays nonzero. */
 	desired = (reason == 0) ? 1 : reason + 1;
@@ -2718,8 +2781,7 @@ __exit_pid_deadline_on(xtc_loop_t *owner, xtc_pid_t target, int reason,
 		 * is bumped each time it is handed out, so this loop issued
 		 * the pid iff 1 <= pid.gen <= slot.gen.  A pid whose loop has
 		 * been finalized cannot be told apart and counts as unknown.
-		 * A slot reused 2^32 times wraps gen; same ceiling
-		 * the pid generation check itself has.
+		 * gen is 64 bits per slot, so it does not wrap.
 		 */
 		xtc_loop_t *tl = NULL;
 		struct xtc_proc_table *tbl;
@@ -3106,8 +3168,9 @@ deliver:
 		/* xtc_tail MSG source: record the receive (receiver pid, bytes). */
 		__xtc_tail_emit(XTC_TAIL_MSG, XTC_TAIL_RECV, self->pid,
 		    (uint64_t)e->size);
-		XTC_PROBE_MSG_RECV(XTC_PROBE_PID(self->pid),
-		    XTC_PROBE_PID(e->from), e->size);
+		XTC_PROBE_MSG_RECV(XTC_PROBE_PID_ID(self->pid),
+		    XTC_PROBE_PID_GEN(self->pid), XTC_PROBE_PID_ID(e->from),
+		    XTC_PROBE_PID_GEN(e->from), e->size);
 		__env_free(e);
 	}
 	return XTC_OK;

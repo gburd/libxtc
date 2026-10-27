@@ -38,10 +38,11 @@
 
 #include "xtc_int.h"	/* xtc_config.h: XTC_HAVE_DTRACE / XTC_PROBES_SDT */
 
-/* A libxtc pid packed into one 64-bit probe argument. */
-#define XTC_PROBE_PID(p)						\
-	(((uint64_t)(p).loop_id << 48) | ((uint64_t)(p).local_id << 32) | \
-	 (uint64_t)(p).gen)
+/* A libxtc pid is TWO probe arguments (2.0: the pid is 16 bytes):
+ * id = loop_id << 32 | local_id, then gen.  0, 0 is XTC_PID_NONE. */
+#define XTC_PROBE_PID_ID(p)						\
+	(((uint64_t)(p).loop_id << 32) | (uint64_t)(p).local_id)
+#define XTC_PROBE_PID_GEN(p)	((uint64_t)(p).gen)
 
 /* fiber-park / fiber-resume `reason` (arg1).  Stable: documented in
  * xtc_usdt(3) and decoded by tools/dtrace and tools/bpftrace. */
@@ -86,12 +87,12 @@ static const char *const __xtc_probes_ref __attribute__((used)) =
 
 #define XTC_PROBE_ENABLED(name)		(XTC_DT_##name##_ENABLED())
 
-#define XTC_PROBE_PROC_SPAWN(a, b)	XTC_DT_PROC_SPAWN(a, b)
-#define XTC_PROBE_PROC_START(a, b)	XTC_DT_PROC_START(a, b)
-#define XTC_PROBE_PROC_EXIT(a, b)	XTC_DT_PROC_EXIT(a, b)
-#define XTC_PROBE_PROC_KILL(a, b)	XTC_DT_PROC_KILL(a, b)
-#define XTC_PROBE_MSG_SEND(a, b, c)	XTC_DT_MSG_SEND(a, b, c)
-#define XTC_PROBE_MSG_RECV(a, b, c)	XTC_DT_MSG_RECV(a, b, c)
+#define XTC_PROBE_PROC_SPAWN(a, b, c, d)	XTC_DT_PROC_SPAWN(a, b, c, d)
+#define XTC_PROBE_PROC_START(a, b, c)	XTC_DT_PROC_START(a, b, c)
+#define XTC_PROBE_PROC_EXIT(a, b, c)	XTC_DT_PROC_EXIT(a, b, c)
+#define XTC_PROBE_PROC_KILL(a, b, c)	XTC_DT_PROC_KILL(a, b, c)
+#define XTC_PROBE_MSG_SEND(a, b, c, d, e)	XTC_DT_MSG_SEND(a, b, c, d, e)
+#define XTC_PROBE_MSG_RECV(a, b, c, d, e)	XTC_DT_MSG_RECV(a, b, c, d, e)
 #define XTC_PROBE_FIBER_PARK(a, b, c)	XTC_DT_FIBER_PARK(a, b, c)
 #define XTC_PROBE_FIBER_RESUME(a, b, c)	XTC_DT_FIBER_RESUME(a, b, c)
 #define XTC_PROBE_FIBER_WAKE(a, b, c)	XTC_DT_FIBER_WAKE(a, b, c)
@@ -110,7 +111,7 @@ static const char *const __xtc_probes_ref __attribute__((used)) =
 #define XTC_PROBE_BLOCKING_DONE(a, b)	XTC_DT_BLOCKING_DONE(a, b)
 #define XTC_PROBE_LOCK_WAIT_START(a, b, c, d) XTC_DT_LOCK_WAIT_START(a, b, c, d)
 #define XTC_PROBE_LOCK_WAIT_DONE(a, b, c, d) XTC_DT_LOCK_WAIT_DONE(a, b, c, d)
-#define XTC_PROBE_SUP_RESTART(a, b, c)	XTC_DT_SUP_RESTART(a, b, c)
+#define XTC_PROBE_SUP_RESTART(a, b, c, d)	XTC_DT_SUP_RESTART(a, b, c, d)
 #define XTC_PROBE_PREEMPT_TICK(a)	XTC_DT_PREEMPT_TICK(a)
 #define XTC_PROBE_ALLOC_FAIL(a)		XTC_DT_ALLOC_FAIL(a)
 #define XTC_PROBE_SLAB_GROW(a, b)	XTC_DT_SLAB_GROW(a, b)
@@ -126,12 +127,12 @@ static const char *const __xtc_probes_ref __attribute__((used)) =
 
 #define XTC_PROBE_ENABLED(name)		(1)
 
-#define XTC_PROBE_PROC_SPAWN(a, b)	DTRACE_PROBE2(xtc, proc__spawn, a, b)
-#define XTC_PROBE_PROC_START(a, b)	DTRACE_PROBE2(xtc, proc__start, a, b)
-#define XTC_PROBE_PROC_EXIT(a, b)	DTRACE_PROBE2(xtc, proc__exit, a, b)
-#define XTC_PROBE_PROC_KILL(a, b)	DTRACE_PROBE2(xtc, proc__kill, a, b)
-#define XTC_PROBE_MSG_SEND(a, b, c)	DTRACE_PROBE3(xtc, msg__send, a, b, c)
-#define XTC_PROBE_MSG_RECV(a, b, c)	DTRACE_PROBE3(xtc, msg__recv, a, b, c)
+#define XTC_PROBE_PROC_SPAWN(a, b, c, d)	DTRACE_PROBE4(xtc, proc__spawn, a, b, c, d)
+#define XTC_PROBE_PROC_START(a, b, c)	DTRACE_PROBE3(xtc, proc__start, a, b, c)
+#define XTC_PROBE_PROC_EXIT(a, b, c)	DTRACE_PROBE3(xtc, proc__exit, a, b, c)
+#define XTC_PROBE_PROC_KILL(a, b, c)	DTRACE_PROBE3(xtc, proc__kill, a, b, c)
+#define XTC_PROBE_MSG_SEND(a, b, c, d, e)	DTRACE_PROBE5(xtc, msg__send, a, b, c, d, e)
+#define XTC_PROBE_MSG_RECV(a, b, c, d, e)	DTRACE_PROBE5(xtc, msg__recv, a, b, c, d, e)
 #define XTC_PROBE_FIBER_PARK(a, b, c)	DTRACE_PROBE3(xtc, fiber__park, a, b, c)
 #define XTC_PROBE_FIBER_RESUME(a, b, c)	DTRACE_PROBE3(xtc, fiber__resume, a, b, c)
 #define XTC_PROBE_FIBER_WAKE(a, b, c)	DTRACE_PROBE3(xtc, fiber__wake, a, b, c)
@@ -157,7 +158,7 @@ static const char *const __xtc_probes_ref __attribute__((used)) =
 	DTRACE_PROBE4(xtc, lock__wait__start, a, b, c, d)
 #define XTC_PROBE_LOCK_WAIT_DONE(a, b, c, d) \
 	DTRACE_PROBE4(xtc, lock__wait__done, a, b, c, d)
-#define XTC_PROBE_SUP_RESTART(a, b, c)	DTRACE_PROBE3(xtc, sup__restart, a, b, c)
+#define XTC_PROBE_SUP_RESTART(a, b, c, d)	DTRACE_PROBE4(xtc, sup__restart, a, b, c, d)
 #define XTC_PROBE_PREEMPT_TICK(a)	DTRACE_PROBE1(xtc, preempt__tick, a)
 #define XTC_PROBE_ALLOC_FAIL(a)		DTRACE_PROBE1(xtc, alloc__fail, a)
 #define XTC_PROBE_SLAB_GROW(a, b)	DTRACE_PROBE2(xtc, slab__grow, a, b)
@@ -169,12 +170,12 @@ static const char *const __xtc_probes_ref __attribute__((used)) =
 
 #define XTC_PROBE_ENABLED(name)		(0)
 
-#define XTC_PROBE_PROC_SPAWN(a, b)	do { } while (0)
-#define XTC_PROBE_PROC_START(a, b)	do { } while (0)
-#define XTC_PROBE_PROC_EXIT(a, b)	do { } while (0)
-#define XTC_PROBE_PROC_KILL(a, b)	do { } while (0)
-#define XTC_PROBE_MSG_SEND(a, b, c)	do { } while (0)
-#define XTC_PROBE_MSG_RECV(a, b, c)	do { } while (0)
+#define XTC_PROBE_PROC_SPAWN(a, b, c, d)	do { } while (0)
+#define XTC_PROBE_PROC_START(a, b, c)	do { } while (0)
+#define XTC_PROBE_PROC_EXIT(a, b, c)	do { } while (0)
+#define XTC_PROBE_PROC_KILL(a, b, c)	do { } while (0)
+#define XTC_PROBE_MSG_SEND(a, b, c, d, e)	do { } while (0)
+#define XTC_PROBE_MSG_RECV(a, b, c, d, e)	do { } while (0)
 #define XTC_PROBE_FIBER_PARK(a, b, c)	do { } while (0)
 #define XTC_PROBE_FIBER_RESUME(a, b, c)	do { } while (0)
 #define XTC_PROBE_FIBER_WAKE(a, b, c)	do { } while (0)
@@ -193,7 +194,7 @@ static const char *const __xtc_probes_ref __attribute__((used)) =
 #define XTC_PROBE_BLOCKING_DONE(a, b)	do { } while (0)
 #define XTC_PROBE_LOCK_WAIT_START(a, b, c, d) do { } while (0)
 #define XTC_PROBE_LOCK_WAIT_DONE(a, b, c, d) do { } while (0)
-#define XTC_PROBE_SUP_RESTART(a, b, c)	do { } while (0)
+#define XTC_PROBE_SUP_RESTART(a, b, c, d)	do { } while (0)
 #define XTC_PROBE_PREEMPT_TICK(a)	do { } while (0)
 #define XTC_PROBE_ALLOC_FAIL(a)		do { } while (0)
 #define XTC_PROBE_SLAB_GROW(a, b)	do { } while (0)

@@ -813,7 +813,7 @@ __xtc_loop_dispatch_event(xtc_loop_t *loop, xtc_io_event_t *ev)
 	if (__xtc_tail_on(XTC_TAIL_SCHED)) {
 		xtc_pid_t lp;
 		memset(&lp, 0, sizeof lp);
-		lp.loop_id = (uint16_t)(loop->exec_id >= 0 ? loop->exec_id : 0);
+		lp.loop_id = (uint32_t)(loop->exec_id >= 0 ? loop->exec_id : 0);
 		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_WAKE, lp,
 		    (uint64_t)(uintptr_t)t);
 	}

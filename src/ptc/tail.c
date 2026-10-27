@@ -272,7 +272,9 @@ out:
  * task_id wire as Varint(u64), local_queue as u8, spawn_loc/runtime_name as
  * a PooledString (u32 pool id resolved by a String Pool frame).  libxtc's
  * proc identity {loop_id, local_id, gen} is packed into one u64 task_id so
- * the GUI groups a proc's events; worker_id is the loop's exec id.
+ * the GUI groups a proc's events (see __xtc_d9_task_id); worker_id is the
+ * loop's exec id.  SegmentMetadataEvent.xtc_format versions libxtc's
+ * layout inside the container (XTC_TAIL_VERSION).
  *
  * Streams over the SAME per-event snapshot the XTCL dump takes (no extra
  * allocator on the write path); all values little-endian, LEB128 varints.
@@ -356,8 +358,12 @@ static const struct xtc_d9_field XTC_D9_F_CLOCK[] = {
 	{ "realtime_ns", XTC_D9_FT_VARINT },
 };
 static const struct xtc_d9_field XTC_D9_F_SEGMETA[] = {
-	{ "service",   XTC_D9_FT_POOLED_STR },
-	{ "backend",   XTC_D9_FT_POOLED_STR },
+	{ "service",    XTC_D9_FT_POOLED_STR },
+	{ "backend",    XTC_D9_FT_POOLED_STR },
+	/* libxtc's own layout version inside dial9's v1 container (which
+	 * the viewer pins): XTC_TAIL_VERSION, so 3 = the 2.0 pid (u32
+	 * worker_id with 0xFFFFFFFF = no exec loop, 32-bit task slot). */
+	{ "xtc_format", XTC_D9_FT_VARINT },
 };
 
 #define XTC_D9_NF(a) ((unsigned)(sizeof (a) / sizeof (a)[0]))
@@ -416,14 +422,19 @@ __xtc_d9_kind_schema(unsigned kind)
 	}
 }
 
-/* Pack a proc pid into a single u64 task_id so the GUI groups a proc's
- * events: gen<<48 | loop<<32 | local.  Stable and collision-free within a
- * run (gen distinguishes reused local_ids). */
+/* Pack a proc pid into dial9's single u64 task_id so the GUI groups a
+ * proc's events: (gen & 0xFFFF) << 48 | (loop & 0xFFFF) << 32 | local.
+ * The 16-byte pid (2.0) does not fit, so this keeps the full 32-bit slot,
+ * the low 16 bits of the loop (worker_id carries it whole) and the low 16
+ * bits of the generation: two incarnations of one slot collide only if
+ * 65,536 spawns of that slot fall between them, more events than one
+ * ring snapshot holds.  A grouping key, not a pid: the XTCL dump is the
+ * lossless form. */
 static uint64_t
 __xtc_d9_task_id(xtc_pid_t p)
 {
-	return ((uint64_t)p.gen << 48) |
-	       ((uint64_t)p.loop_id << 32) |
+	return ((p.gen & 0xFFFFu) << 48) |
+	       ((uint64_t)(p.loop_id & 0xFFFFu) << 32) |
 	       (uint64_t)p.local_id;
 }
 
@@ -553,10 +564,11 @@ xtc_tail_dump_dial9(int fd)
 		off = __xtc_d9_evhdr(buf, XTC_D9_TID_CLOCK_SYNC, 0);
 		__leb128(buf, &off, rt);
 		if ((rc = __tail_write_all(fd, buf, off)) != XTC_OK) goto out;
-		/* SegmentMetadataEvent { service=POOL_LOC, backend=POOL_BACKEND } */
+		/* SegmentMetadataEvent { service, backend, xtc_format } */
 		off = __xtc_d9_evhdr(buf, XTC_D9_TID_SEG_META, 0);
 		__tail_le32(buf + off, POOL_LOC); off += 4;
 		__tail_le32(buf + off, POOL_BACKEND); off += 4;
+		__leb128(buf, &off, (uint64_t)XTC_TAIL_VERSION);
 		if ((rc = __tail_write_all(fd, buf, off)) != XTC_OK) goto out;
 	}
 

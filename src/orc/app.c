@@ -40,7 +40,7 @@ struct app_kid {
 	xtc_proc_fn          fn;
 	void                *arg;
 	xtc_restart_policy_t policy;
-	_Atomic uint64_t     pid;       /* packed xtc_pid_t, 0 = not yet run */
+	xtc_atomic_pid_t     pid;       /* XTC_PID_NONE = not yet run */
 	/* pid's OWNER loop, stored before pid (constant per child index):
 	 * PIDs are executor-relative, so pid alone can name another
 	 * standalone loop's proc -- shutdown killed one that way. */
@@ -135,23 +135,6 @@ fail:
 
 /* ---- graceful drain (PLAN.md 19.20 / 19.27.10) ---- */
 
-static uint64_t
-__pid_pack(xtc_pid_t p)
-{
-	return ((uint64_t)p.loop_id << 48) | ((uint64_t)p.local_id << 32) |
-	    (uint64_t)p.gen;
-}
-
-static xtc_pid_t
-__pid_unpack(uint64_t v)
-{
-	xtc_pid_t p;
-	p.loop_id  = (uint16_t)(v >> 48);
-	p.local_id = (uint16_t)(v >> 32);
-	p.gen      = (uint32_t)v;
-	return p;
-}
-
 /* Cleanup-complete: the pid has LEFT the proc table.  Not `!alive` and
  * not XTC_KILL_DELIVERED -- both are reported before the at-exit hooks
  * and scope finalizers have run (see xtc_exit_pid_deadline).  A child
@@ -159,9 +142,9 @@ __pid_unpack(uint64_t v)
 static int
 __kid_gone(struct app_kid *k)
 {
-	uint64_t v = atomic_load(&k->pid);
-	return v != 0 && !__xtc_proc_loop_contains(atomic_load(&k->owner),
-	    __pid_unpack(v));
+	xtc_pid_t v = xtc_atomic_pid_load(&k->pid);
+	return !xtc_pid_is_none(v) &&
+	    !__xtc_proc_loop_contains(atomic_load(&k->owner), v);
 }
 
 /*
@@ -185,7 +168,7 @@ __kid_trampoline(void *arg)
 	 * draining-store / pid-load: either we see draining, or it sees
 	 * our pid and messages us. */
 	atomic_store(&k->owner, __xtc_proc_self_loop(NULL));
-	atomic_store(&k->pid, __pid_pack(xtc_self()));
+	xtc_atomic_pid_store(&k->pid, xtc_self());
 	if (!atomic_load(&k->kids->draining))
 		k->fn(k->arg);
 	if (!atomic_load(&k->kids->draining))
@@ -308,7 +291,7 @@ __wait_kids(xtc_app_t *a, int64_t deadline, int force)
 	struct app_kids *ks = a->kids;
 	int i, pending;
 	int64_t now;
-	uint64_t v;
+	xtc_pid_t v;
 	for (;;) {
 		pending = (force && xtc_sup_alive(a->root)) ? 1 : 0;
 		for (i = 0; i < ks->n; i++) {
@@ -321,9 +304,10 @@ __wait_kids(xtc_app_t *a, int64_t deadline, int force)
 			/* Re-kill the CURRENT incarnation each pass: a restart
 			 * racing the supervisor stop may have replaced it
 			 * (xtc_exit_pid is idempotent per incarnation). */
-			if (force && (v = atomic_load(&k->pid)) != 0)
+			if (force && !xtc_pid_is_none(v =
+			    xtc_atomic_pid_load(&k->pid)))
 				(void)__xtc_exit_pid_on(atomic_load(&k->owner),
-				    __pid_unpack(v), XTC_APP_SHUTDOWN_REASON);
+				    v, XTC_APP_SHUTDOWN_REASON);
 		}
 		(void)__os_clock_mono(&now);
 		if (pending == 0 || now >= deadline)
@@ -366,7 +350,7 @@ xtc_app_shutdown(xtc_app_t *a, int64_t drain_ns, int64_t force_ns,
 	self_loop = __xtc_proc_self_loop(&self);
 	for (i = 0; i < ks->n; i++)
 		if (!xtc_pid_is_none(self) &&
-		    __pid_pack(self) == atomic_load(&ks->k[i].pid) &&
+		    xtc_pid_eq(self, xtc_atomic_pid_load(&ks->k[i].pid)) &&
 		    self_loop == atomic_load(&ks->k[i].owner))
 			return XTC_E_INVAL;
 	if (!atomic_compare_exchange_strong_explicit(&a->shutting_down,
@@ -381,10 +365,10 @@ xtc_app_shutdown(xtc_app_t *a, int64_t drain_ns, int64_t force_ns,
 	/* 1-2. Cooperative phase: ask, then wait for return or exit. */
 	atomic_store(&ks->draining, 1);
 	for (i = 0; i < ks->n; i++) {
-		uint64_t v = atomic_load(&ks->k[i].pid);
-		if (v != 0)
+		xtc_pid_t v = xtc_atomic_pid_load(&ks->k[i].pid);
+		if (!xtc_pid_is_none(v))
 			(void)__xtc_send_on(atomic_load(&ks->k[i].owner),
-			    __pid_unpack(v), XTC_APP_SHUTDOWN_MSG,
+			    v, XTC_APP_SHUTDOWN_MSG,
 			    sizeof XTC_APP_SHUTDOWN_MSG);
 	}
 	__wait_kids(a, t0 + drain_ns, 0);

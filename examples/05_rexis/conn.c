@@ -193,25 +193,8 @@ conn_ref_bytes(void)
  * above g_fd_cap (or a failed allocation) is not recorded, and its proc
  * keeps a 1 s park deadline instead.
  */
-static _Atomic uint64_t *g_fd_pid;
+static xtc_atomic_pid_t *g_fd_pid;
 static int               g_fd_cap;
-
-static uint64_t
-pid_pack(xtc_pid_t p)
-{
-	return (uint64_t)p.loop_id << 48 | (uint64_t)p.local_id << 32 | p.gen;
-}
-
-static xtc_pid_t
-pid_unpack(uint64_t v)
-{
-	xtc_pid_t p;
-
-	p.loop_id = (uint16_t)(v >> 48);
-	p.local_id = (uint16_t)(v >> 32);
-	p.gen = (uint32_t)v;
-	return p;
-}
 
 void
 conn_wake_init(int max_fd)
@@ -224,12 +207,12 @@ conn_wake_init(int max_fd)
 void
 conn_wake_all(void)
 {
-	uint64_t v;
+	xtc_pid_t v;
 	int i;
 
 	for (i = 0; i < g_fd_cap; i++)
-		if ((v = atomic_load(&g_fd_pid[i])) != 0)
-			(void)xtc_proc_wake(pid_unpack(v));
+		if (!xtc_pid_is_none(v = xtc_atomic_pid_load(&g_fd_pid[i])))
+			(void)xtc_proc_wake(v);
 }
 
 int64_t
@@ -828,7 +811,7 @@ conn_teardown(void *arg)
 	if (st->pubsub != NULL && st->sub_count > 0)
 		(void)xtc_reg_drop_pid(st->pubsub, st->self);
 	if (st->fd >= 0 && st->fd < g_fd_cap)
-		atomic_store(&g_fd_pid[st->fd], 0);    /* before the close */
+		xtc_atomic_pid_store(&g_fd_pid[st->fd], XTC_PID_NONE);  /* before the close */
 	if (st->fd >= 0)
 		xtc_net_close(st->fd);
 	if (st->conn_count != NULL)
@@ -857,7 +840,7 @@ conn_proc(void *arg)
 	st->self = xtc_self();   /* for pub/sub group membership */
 	st->last_io_ns = st->trim_ns = xtc_clock_mono();
 	if (st->fd < g_fd_cap)
-		atomic_store(&g_fd_pid[st->fd], pid_pack(st->self));
+		xtc_atomic_pid_store(&g_fd_pid[st->fd], st->self);
 
 	/*
 	 * Resource scope (mechanism, not manner): register the connection

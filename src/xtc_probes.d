@@ -18,8 +18,9 @@
  *	documented in xtc_usdt(3) and change only with a SemVer note.
  *	Conventions shared by every probe:
  *
- *	  pid     a libxtc pid packed into 64 bits:
- *	          loop_id << 48 | local_id << 32 | gen
+ *	  pid     a libxtc pid as TWO arguments (2.0: the pid is 16 bytes):
+ *	          pid = loop_id << 32 | local_id, then its 64-bit gen.
+ *	          A pid's identity is the pair; 0, 0 is XTC_PID_NONE.
  *	  task    the xtc_task_t * of a fiber, as an integer: the join key
  *	          between park, wake, resume and the run probes (it is
  *	          stable for the fiber's life, and a fiber can migrate
@@ -35,14 +36,17 @@
 
 provider xtc {
 	/* Process lifecycle. */
-	probe proc__spawn(uint64_t pid, uint64_t parent);
-	probe proc__start(uint64_t pid, uintptr_t task);
-	probe proc__exit(uint64_t pid, int reason);
-	probe proc__kill(uint64_t target, int reason);
+	probe proc__spawn(uint64_t pid, uint64_t gen, uint64_t parent,
+	    uint64_t parent_gen);
+	probe proc__start(uint64_t pid, uint64_t gen, uintptr_t task);
+	probe proc__exit(uint64_t pid, uint64_t gen, int reason);
+	probe proc__kill(uint64_t target, uint64_t gen, int reason);
 
 	/* Mailbox. */
-	probe msg__send(uint64_t from, uint64_t to, size_t bytes);
-	probe msg__recv(uint64_t pid, uint64_t from, size_t bytes);
+	probe msg__send(uint64_t from, uint64_t from_gen, uint64_t to,
+	    uint64_t to_gen, size_t bytes);
+	probe msg__recv(uint64_t pid, uint64_t gen, uint64_t from,
+	    uint64_t from_gen, size_t bytes);
 
 	/* Fiber park / wake / resume. */
 	probe fiber__park(uintptr_t task, int reason, uintptr_t object);
@@ -76,7 +80,8 @@ provider xtc {
 	probe lock__wait__done(uintptr_t lock, int kind, int mode, uintptr_t waiter);
 
 	/* Supervision and preemption. */
-	probe sup__restart(uintptr_t sup, uint64_t child, int reason);
+	probe sup__restart(uintptr_t sup, uint64_t child, uint64_t child_gen,
+	    int reason);
 	probe preempt__tick(int involuntary);
 
 	/* Allocation slow paths. */

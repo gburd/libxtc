@@ -1,6 +1,6 @@
 .\" Copyright (c) 2026, The XTC Project
 .\" Use of this source code is governed by the ISC License.
-.Dd September 12, 2026
+.Dd October 27, 2026
 .Dt XTC_TAIL 3
 .Os
 .Sh NAME
@@ -86,6 +86,16 @@ header
 .Pq magic, version, endianness flag, count, base timestamp
 written little-endian, followed by one varint/delta-encoded frame per
 event (kind, source, LEB128 timestamp delta, pid, and detail).
+The format version is
+.Dv XTC_TAIL_VERSION ,
+3 since libxtc 2.0
+.Po
+the 16-byte pid: a 32-bit loop id and slot, a 64-bit generation, and
+.Dv XTC_TAIL_LOOP_NONE
+widened to 0xFFFFFFFF
+.Pc ;
+.Nm xtc-tail.py
+reads versions 2 and 3.
 The
 delta-encoded timestamps and varint fields keep it to a handful of
 bytes per event -- and being explicit little-endian with no struct
@@ -99,6 +109,17 @@ writes the same buffered records to
 in the dial9 trace wire format
 .Pq Dq Li TRC\e0 , No version 1 ,
 so a libxtc trace opens in the dial9 GUI viewer with no viewer change.
+Its
+.Dv SegmentMetadataEvent
+carries
+.Li xtc_format ,
+the same
+.Dv XTC_TAIL_VERSION ,
+and the dial9
+.Li task_id
+packs a pid into 64 bits as
+.Li (gen & 0xFFFF) << 48 | (loop_id & 0xFFFF) << 32 | local_id :
+a grouping key for the viewer, not a pid.
 The dial9 viewer keys on a schema NAME string, so each libxtc event kind is
 registered as a self-describing schema under a name the viewer recognizes
 where a runtime analogue exists
@@ -394,7 +415,7 @@ bare
 .Fn xtc_loop_init
 rather than as part of an executor -- reports
 .Dv XTC_TAIL_LOOP_NONE
-.Pq 0xFFFF ,
+.Pq 0xFFFFFFFF ; 0xFFFF in version 2 traces ,
 which
 .Nm xtc-tail.py
 renders as

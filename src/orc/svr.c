@@ -55,30 +55,13 @@ static const uint8_t SVR_REPLY_MAGIC[8] = {
 	0xfe, 'x', 't', 'c', 's', 'v', 'r', 0xa5
 };
 
-/* xtc_pid_t packed into one word so it can be published atomically. */
-static uint64_t
-__svr_pid_pack(xtc_pid_t p)
-{
-	uint64_t v;
-	memcpy(&v, &p, sizeof v);
-	return v;
-}
-
-static xtc_pid_t
-__svr_pid_unpack(uint64_t v)
-{
-	xtc_pid_t p;
-	memcpy(&p, &v, sizeof p);
-	return p;
-}
-
 struct xtc_svr {
 	xtc_loop_t           *loop;
 	xtc_svr_callbacks_t   cb;
 	void                 *state;
-	/* Packed xtc_pid_t. Stored by xtc_svr_start and again (same value)
-	 * by the server proc itself, read from any thread. */
-	_Atomic uint64_t      pid;
+	/* Stored by xtc_svr_start and again (same value) by the server
+	 * proc itself, read from any thread. */
+	xtc_atomic_pid_t      pid;
 	xtc_notify_t         *stopped;
 	_Atomic int           stop_requested;
 	_Atomic int           alive;
@@ -226,8 +209,7 @@ __svr_entry(void *arg)
 {
 	struct xtc_svr *s = arg;
 	int hooked;
-	atomic_store_explicit(&s->pid, __svr_pid_pack(xtc_self()),
-	    memory_order_release);
+	xtc_atomic_pid_store(&s->pid, xtc_self());
 	hooked = (xtc_proc_at_exit(__svr_exited, s) == XTC_OK);
 
 	if (s->cb.init != NULL) {
@@ -370,8 +352,7 @@ xtc_svr_start(xtc_loop_t *loop, const xtc_svr_callbacks_t *cb, void *state,
 		__os_free(s);
 		return rc;
 	}
-	atomic_store_explicit(&s->pid, __svr_pid_pack(pid),
-	    memory_order_release);
+	xtc_atomic_pid_store(&s->pid, pid);
 	*out = s;
 	return XTC_OK;
 }
@@ -383,8 +364,7 @@ xtc_svr_stop(xtc_svr_t *s)
 	atomic_store_explicit(&s->stop_requested, 1, memory_order_release);
 	{
 		uint8_t kick = 'S';
-		(void)xtc_send(__svr_pid_unpack(atomic_load_explicit(&s->pid,
-		    memory_order_acquire)), &kick, 1);
+		(void)xtc_send(xtc_atomic_pid_load(&s->pid), &kick, 1);
 	}
 	return XTC_OK;
 }
@@ -416,8 +396,7 @@ xtc_pid_t
 xtc_svr_pid(const xtc_svr_t *s)
 {
 	xtc_pid_t none = {0,0,0};
-	return s ? __svr_pid_unpack(atomic_load_explicit(&s->pid,
-	               memory_order_acquire)) : none;
+	return s ? xtc_atomic_pid_load(&s->pid) : none;
 }
 
 /* ----- client side ----------------------------------------------- */
