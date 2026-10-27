@@ -19,6 +19,8 @@
  *	there).
  */
 
+#include <errno.h>
+#include <math.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -223,6 +225,7 @@ test_p2_peers_progress_on_ucontext(const MunitParameter p[], void *d)
 #if defined(__x86_64__) && defined(__linux__) && \
     (defined(__GNUC__) || defined(__clang__))
 #include <cpuid.h>
+#include <sys/syscall.h>
 #define P2_VEC 1
 /*
  * /vector_state: involuntary preemption must preserve the WHOLE vector
@@ -416,6 +419,270 @@ test_p2_red_zone_flags(const MunitParameter p[], void *d)
 	munit_assert_long(atomic_load(&g_rz_bad), ==, 0);
 	munit_assert_long(atomic_load(&g_fl_bad), ==, 0);
 	return MUNIT_OK;
+}
+
+/*
+ * Call-boundary state across an involuntary yield.  The trampoline calls
+ * xtc_yield from an ARBITRARY instruction, so the scheduler and every
+ * fiber it runs in the slice must get the state the ABI promises at a
+ * call, whatever the interrupted code had live; and the interrupted code
+ * must get its own state back.  Each case forces the tick at a chosen
+ * instruction: a raw tgkill(SIGVTALRM) from this file's own text (no
+ * libc frame; the signal is delivered on the syscall's return, i.e.
+ * before the next instruction), with a 10 s timer so no natural tick
+ * lands elsewhere.  A peer fiber on the same loop runs in the slice and
+ * checks what it inherited.
+ *   /tick_df     DF = 1 at the tick (inside a backward copy: `std; ...;
+ *                rep movsb; cld`).  The scheduler and the peer ran with
+ *                DF = 1 (neither swapcontext nor jump_fcontext touches
+ *                RFLAGS), so the peer's forward `rep movsb` wrote
+ *                BACKWARDS below its destination; the preempted
+ *                backward copy itself must still be correct.
+ *   /tick_ac     AC = 1 at the tick: with CR0.AM set (Linux), every
+ *                misaligned access the scheduler made would raise SIGBUS.
+ *   /tick_x87    six values on the x87 stack at the tick.  fcontext
+ *                reloads only the x87 control word, so the peer inherited
+ *                a nearly full x87 stack and its pi + pi + pi overflowed
+ *                to NaN; the target must get its six values back.
+ *   /tick_errno  errno is per thread: a peer on the same thread set it,
+ *                and the interrupted code (say between a failed call and
+ *                its errno test) read the peer's value.
+ */
+uint64_t p2_cb_flags_tick(long pid, long tid, long sig, uint64_t fl);
+void p2_cb_bwd_copy_tick(unsigned char *dlast, const unsigned char *slast,
+    size_t n, long pid, long tid, long sig);
+void p2_cb_fwd_movsb(unsigned char *d, const unsigned char *s, size_t n);
+uint64_t p2_cb_rflags(void);
+void p2_cb_x87_tick(double *out6, long pid, long tid, long sig);
+void p2_cb_tick(long pid, long tid, long sig);
+__asm__(".text\n"
+    /* RFLAGS := fl, tick, return the RFLAGS the code resumed with. */
+    ".type p2_cb_flags_tick,@function\np2_cb_flags_tick:\n\t"
+    "movl $234, %eax\n\t"   /* SYS_tgkill */
+    "pushq %rcx\n\t"
+    "popfq\n\t"
+    "syscall\n\t"
+    "pushfq\n\t"
+    "popq %rax\n\t"
+    "pushq $0x202\n\t"
+    "popfq\n\t"
+    "ret\n\t"
+    ".size p2_cb_flags_tick, .-p2_cb_flags_tick\n"
+    /* std, tick, then the backward copy of n bytes ending at slast. */
+    ".type p2_cb_bwd_copy_tick,@function\np2_cb_bwd_copy_tick:\n\t"
+    "pushq %rdi\n\t"
+    "pushq %rsi\n\t"
+    "pushq %rdx\n\t"
+    "movq %rcx, %rdi\n\t"
+    "movq %r8, %rsi\n\t"
+    "movq %r9, %rdx\n\t"
+    "movl $234, %eax\n\t"   /* SYS_tgkill */
+    "std\n\t"
+    "syscall\n\t"
+    "popq %rcx\n\t"
+    "popq %rsi\n\t"
+    "popq %rdi\n\t"
+    "rep movsb\n\t"
+    "cld\n\t"
+    "ret\n\t"
+    ".size p2_cb_bwd_copy_tick, .-p2_cb_bwd_copy_tick\n"
+    /* A forward copy that trusts the ABI's DF = 0 at a call. */
+    ".type p2_cb_fwd_movsb,@function\np2_cb_fwd_movsb:\n\t"
+    "movq %rdx, %rcx\n\t"
+    "rep movsb\n\t"
+    "ret\n\t"
+    ".size p2_cb_fwd_movsb, .-p2_cb_fwd_movsb\n"
+    ".type p2_cb_rflags,@function\np2_cb_rflags:\n\t"
+    "pushfq\n\t"
+    "popq %rax\n\t"
+    "ret\n\t"
+    ".size p2_cb_rflags, .-p2_cb_rflags\n"
+    /* Six x87 loads, tick, six stores (pops) into out6[0..5]. */
+    ".type p2_cb_x87_tick,@function\np2_cb_x87_tick:\n\t"
+    "movq %rdi, %r8\n\t"
+    "movq %rsi, %rdi\n\t"
+    "movq %rdx, %rsi\n\t"
+    "movq %rcx, %rdx\n\t"
+    "fld1\n\tfldz\n\tfld1\n\tfldpi\n\tfld1\n\tfldl2e\n\t"
+    "movl $234, %eax\n\t"   /* SYS_tgkill */
+    "syscall\n\t"
+    "fstpl 0(%r8)\n\tfstpl 8(%r8)\n\tfstpl 16(%r8)\n\t"
+    "fstpl 24(%r8)\n\tfstpl 32(%r8)\n\tfstpl 40(%r8)\n\t"
+    "ret\n\t"
+    ".size p2_cb_x87_tick, .-p2_cb_x87_tick\n"
+    ".type p2_cb_tick,@function\np2_cb_tick:\n\t"
+    "movl $234, %eax\n\t"   /* SYS_tgkill */
+    "syscall\n\t"
+    "ret\n\t"
+    ".size p2_cb_tick, .-p2_cb_tick\n");
+
+#define P2_CB_DF     0x400ull
+#define P2_CB_AC     0x40000ull
+#define P2_CB_N      64
+#define P2_CB_ERRNO  4321
+#define P2_CB_PEERNO 8765
+static atomic_long g_cb_peer_runs, g_cb_peer_bad, g_cb_tgt_bad, g_cb_preempted;
+static atomic_int  g_cb_stop;
+static int         g_cb_mode;   /* 0 df, 1 ac, 2 x87, 3 errno */
+static unsigned char g_cb_pat[192];
+
+static double
+p2_cb_x87_pi3(void)
+{
+	double r;
+	__asm__ volatile("fldpi\n\tfldpi\n\tfldpi\n\tfaddp\n\tfaddp\n\t"
+	    "fstpl %0" : "=m"(r) : : "memory");
+	return r;
+}
+
+static void
+p2_cb_peer(void *arg)
+{
+	unsigned char b[192];
+	int bad, k;
+	(void)arg;
+	while (!atomic_load(&g_cb_stop)) {
+		bad = 0;
+		switch (g_cb_mode) {
+		case 0:     /* DF: a forward copy must stay inside b[64..128) */
+			memset(b, 0, sizeof b);
+			bad = (p2_cb_rflags() & P2_CB_DF) != 0;
+			p2_cb_fwd_movsb(b + 64, g_cb_pat + 64, 64);
+			for (k = 0; k < 192; k++)
+				bad |= b[k] != (k >= 64 && k < 128 ?
+				    g_cb_pat[k] : 0);
+			break;
+		case 1:
+			bad = (p2_cb_rflags() & P2_CB_AC) != 0;
+			break;
+		case 2:
+			bad = !(p2_cb_x87_pi3() > 9.42477 &&
+			    p2_cb_x87_pi3() < 9.42478);
+			break;
+		default:
+			errno = P2_CB_PEERNO;
+			break;
+		}
+		if (bad)
+			atomic_fetch_add(&g_cb_peer_bad, 1);
+		atomic_fetch_add(&g_cb_peer_runs, 1);
+		xtc_yield();
+	}
+}
+
+static void
+p2_cb_target(void *arg)
+{
+	unsigned char d[192];
+	double o[6];
+	long pid = getpid(), tid = syscall(SYS_gettid), before;
+	uint64_t got;
+	int i, k, bad;
+	(void)arg;
+	xtc_yield();                        /* let the peer start */
+	for (i = 0; i < P2_CB_N; i++) {
+		bad = 0;
+		before = atomic_load(&g_cb_peer_runs);
+		switch (g_cb_mode) {
+		case 0:     /* d[0..128) := pat[32..160), copied backwards */
+			memset(d, 0, sizeof d);
+			p2_cb_bwd_copy_tick(d + 127, g_cb_pat + 159, 128, pid,
+			    tid, SIGVTALRM);
+			for (k = 0; k < 192; k++)
+				bad |= d[k] != (k < 128 ? g_cb_pat[k + 32] : 0);
+			break;
+		case 1:
+			got = p2_cb_flags_tick(pid, tid, SIGVTALRM,
+			    0x202 | P2_CB_AC | 0x1);
+			bad = (got & (P2_CB_AC | 0x1)) != (P2_CB_AC | 0x1);
+			break;
+		case 2:
+			p2_cb_x87_tick(o, pid, tid, SIGVTALRM);
+			bad = o[0] != M_LOG2E || o[1] != 1.0 || o[2] != M_PI ||
+			    o[3] != 1.0 || o[4] != 0.0 || o[5] != 1.0;
+			break;
+		default:
+			errno = P2_CB_ERRNO;
+			p2_cb_tick(pid, tid, SIGVTALRM);
+			bad = errno != P2_CB_ERRNO;
+			break;
+		}
+		if (bad)
+			atomic_fetch_add(&g_cb_tgt_bad, 1);
+		if (atomic_load(&g_cb_peer_runs) != before)
+			atomic_fetch_add(&g_cb_preempted, 1);
+	}
+	atomic_store(&g_cb_stop, 1);
+}
+
+static MunitResult
+p2_cb_run(int mode)
+{
+	extern int __xtc_coro_preempt_effective(void);
+	xtc_exec_t *e = NULL;
+	int k;
+
+	if (!xtc_preempt_supported() || !__xtc_coro_preempt_effective())
+		return MUNIT_SKIP;
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
+    __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	return MUNIT_SKIP;   /* see test_p2_preempt_tight_loop */
+#endif
+	g_cb_mode = mode;
+	for (k = 0; k < 192; k++)
+		g_cb_pat[k] = (unsigned char)(k * 7 + 1);
+	atomic_store(&g_cb_peer_runs, 0);
+	atomic_store(&g_cb_peer_bad, 0);
+	atomic_store(&g_cb_tgt_bad, 0);
+	atomic_store(&g_cb_preempted, 0);
+	atomic_store(&g_cb_stop, 0);
+	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
+	    ==, XTC_OK);
+	xtc_preempt_set_involuntary(1);
+	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0), p2_cb_target,
+	    NULL, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0), p2_cb_peer,
+	    NULL, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	xtc_preempt_set_involuntary(0);
+	(void)xtc_exec_fini(e);
+	munit_logf(MUNIT_LOG_INFO, "mode %d: %ld/%d ticks preempted, target "
+	    "bad %ld, peer bad %ld of %ld", mode, atomic_load(&g_cb_preempted),
+	    P2_CB_N, atomic_load(&g_cb_tgt_bad), atomic_load(&g_cb_peer_bad),
+	    atomic_load(&g_cb_peer_runs));
+	munit_assert_long(atomic_load(&g_cb_preempted), >, 0);
+	munit_assert_long(atomic_load(&g_cb_tgt_bad), ==, 0);
+	munit_assert_long(atomic_load(&g_cb_peer_bad), ==, 0);
+	return MUNIT_OK;
+}
+
+static MunitResult
+test_p2_tick_df(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return p2_cb_run(0);
+}
+
+static MunitResult
+test_p2_tick_ac(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return p2_cb_run(1);
+}
+
+static MunitResult
+test_p2_tick_x87(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return p2_cb_run(2);
+}
+
+static MunitResult
+test_p2_tick_errno(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return p2_cb_run(3);
 }
 #endif /* x86-64 Linux */
 
@@ -1262,6 +1529,14 @@ static MunitTest tests[] = {
 	{ "/vector_state", test_p2_vector_state, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/red_zone_flags", test_p2_red_zone_flags, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/tick_df", test_p2_tick_df, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/tick_ac", test_p2_tick_ac, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/tick_x87", test_p2_tick_x87, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/tick_errno", test_p2_tick_errno, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 #endif
 #if defined(P2_A64)

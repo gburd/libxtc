@@ -67,6 +67,7 @@
 #include "preempt_int.h"
 #include "xtc_probes.h"
 
+#include <errno.h>
 #include <signal.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -190,6 +191,29 @@ uintptr_t
 __xtc_preempt_take_pc(void)
 {
 	return __xtc_preempt_pc;
+}
+
+/*
+ * errno across an involuntary yield (the x86-64 trampoline calls these
+ * around its xtc_yield).  errno is per THREAD: the fibers the scheduler
+ * runs in the slice may set it, and a migratable fiber may resume on
+ * another thread, so the interrupted code would see a foreign errno
+ * between, say, a failed read() and its errno test.  Functions, not an
+ * inline TLS access, because errno's TLS layout is the libc's.
+ */
+XTC_PREEMPT_HIDDEN int __xtc_preempt_errno_get(void);
+XTC_PREEMPT_HIDDEN void __xtc_preempt_errno_set(int e);
+
+int
+__xtc_preempt_errno_get(void)
+{
+	return errno;
+}
+
+void
+__xtc_preempt_errno_set(int e)
+{
+	errno = e;
 }
 #endif
 
