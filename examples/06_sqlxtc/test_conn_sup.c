@@ -222,7 +222,6 @@ scenario(int kill, const char *name)
 		sx_close(h);
 		return;
 	}
-	fd0 = nfds();
 	CK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
 	c->fd = sv[1];
 	memset(&o, 0, sizeof o);
@@ -236,6 +235,11 @@ scenario(int kill, const char *name)
 
 	CK(cli_line(c, line, sizeof line, 2000) == 1 &&
 	    strncmp(line, "{\"hello\"", 8) == 0);
+	/* The baseline, less the socketpair's two ends (both are closed by
+	 * the end), once loop 1 is serving: its first run may rebuild its
+	 * ring (a DEFER ring is made on the thread that runs the loop), and
+	 * a count taken before could miss that fd. */
+	fd0 = nfds() - 2;
 	CK(cli_q(c, "BEGIN") == 0);
 	CK(cli_q(c, "UPDATE t SET v = 100 WHERE k = 1") == 0);
 	memset(big, ' ', sizeof big - 1);
