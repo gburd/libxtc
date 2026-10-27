@@ -33,6 +33,29 @@
 #include "xtc_int.h"
 #include "xtc_tls.h"
 
+/*
+ * xtc_tls_opts_t.alpn_protos is the ALPN list in wire form: a length
+ * byte (1..255), then that many bytes, repeated, ending at the string's
+ * NUL.  1 if `wire` is exactly that, 0 otherwise.  Every backend checks
+ * this before it decodes or hands the list on: the decoders in the
+ * mbedTLS, GnuTLS and wolfSSL backends trusted the length bytes and
+ * stepped past the NUL when one overstated what was left (a heap read
+ * overrun found by test/fuzz/fuzz_tls.c), and OpenSSL's server side took
+ * any bytes at all.  Never reads past the NUL.
+ */
+static inline int
+xtc_tls_alpn_wire_ok(const char *wire)
+{
+	size_t n = strlen(wire), off = 0;
+	while (off < n) {
+		size_t l = (unsigned char)wire[off];
+		if (l == 0 || l > n - off - 1)
+			return 0;
+		off += 1 + l;
+	}
+	return 1;
+}
+
 /* Clear the would-block direction on a connection.  Called at the top
  * of every read / write / handshake so a fresh attempt does not report
  * a stale direction; the backend then sets wants_read / wants_write

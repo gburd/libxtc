@@ -772,6 +772,12 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 		size_t        len  = strlen(opts->alpn_protos);
 		unsigned char *copy;
 
+		if (!xtc_tls_alpn_wire_ok(opts->alpn_protos)) {
+			SSL_CTX_free(c->ssl_ctx);
+			__os_free(c);
+			return XTC_E_INVAL;
+		}
+
 		if ((rc = __os_malloc(len, (void **)&copy)) != XTC_OK) {
 			SSL_CTX_free(c->ssl_ctx);
 			__os_free(c);

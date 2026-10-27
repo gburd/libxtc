@@ -196,7 +196,15 @@ opts accepted any server certificate, and the GnuTLS, wolfSSL and
 mbedTLS backends ignored
 .Va verify_peer_mode .
 .It Va alpn_protos
-ALPN wire-form list.
+ALPN wire-form list: a length byte (1 to 255), then that many bytes,
+repeated, up to the terminating NUL, as in
+.Qq \ex02h2\ex08http/1.1 .
+A list that is not exactly that (a zero length byte, or one that runs
+past the end of the string) is
+.Er XTC_E_INVAL
+from
+.Fn xtc_tls_ctx_create ,
+on every backend and both roles.
 .It Va min_version , max_version
 .Dv XTC_TLS_VER_12
 or
