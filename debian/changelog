@@ -1,3 +1,88 @@
+libxtc (2.0.0-1) unstable; urgency=medium
+
+  * MAJOR release, the first LTS candidate.  The ABI is broken on purpose,
+    once, to make the changes that are hard to make later; from 2.0 the
+    stable tier is held to the LTS contract in docs/abi-stability.md
+    (18 months on lts/2.0).  SONAME libxtc.so.2; the Debian package is
+    renamed libxtc2.  There are no compatibility shims: rebuild against
+    the 2.0 headers (migration recipes in docs/KNOWN_ISSUES.md).
+  * ABI and stability:
+    - Every caller-allocated public struct (26 opts/info/stats/spec
+      structs) starts with `size_t size`; the library reads and writes
+      only up to it, refuses 0 (XTC_E_INVAL) and unknown nonzero fields
+      (XTC_E_VERSION).  Use the XTC_*_INIT macros; `= { 0 }` is refused.
+      Layout decisions made once: xtc_app_opts_t.sup is a pointer, the
+      1.x mid-struct insertion in the server callbacks is undone,
+      xtc_fs_stat_t's size is `bytes`, two unused fields are gone.
+    - A struct-layout gate (test/abi/layout.txt, 64 structs) runs in make
+      check; scripts/abi-check.sh runs abidiff at release time.
+    - Symbol versions: every export is in the XTC_2.0 version node.
+    - Stability tiers: every installed header carries an @stability tag
+      (stable or experimental), checked by a test.  XTC_DEPRECATED(msg).
+    - xtc_pid_t is 16 bytes {u32 loop_id, u32 local_id, u64 gen}: a loop
+      holds as many live procs as memory allows (1,000,000 measured; 1.x
+      stopped at 65,536), and a slot's generation never wraps (on 1.x a
+      pid held across 2^32 reuses of its slot named the new occupant).
+      New xtc_atomic_pid_t (a seqlock) for publishing a pid across
+      threads.  USDT probes take a pid as two arguments; the xtc_tail
+      format is version 3; the gdb/lldb helpers and xtc-tail.py decode it.
+  * Preemption:
+    - Involuntary preemption is EXPERIMENTAL and lives in
+      xtc_preempt_involuntary.h (xtc_preempt.h, cooperative ticks, stays
+      stable).  It yields only at safe points: code marked
+      XTC_PREEMPTIBLE, ranges added with xtc_preempt_region_add, and the
+      main program's own text when libxtc and libc are shared.  A static
+      libxtc or libc with nothing marked refuses (XTC_E_NOSYS).  Before,
+      a tick inside libc corrupted glibc's malloc (SIGSEGV / tcache
+      abort) and tore stdio output (936 of 600,000 lines); now 0.
+    - The preemption trampoline hands the scheduler a clean call
+      boundary: DF and AC cleared (a backward string copy made the next
+      fiber's memcpy run backwards), an empty x87 stack (NaN on
+      fcontext), errno, PKRU, AVX upper state, and on aarch64 errno and
+      SME streaming mode / ZA.
+    - Late kills: a kill reaches a proc in xtc_await at once (it waited
+      for the awaited task: 1,980 ms measured; now 0.1 ms) and a proc in
+      xtc_aio_* once the operation in flight completes (it was never
+      delivered to a proc issuing back-to-back operations).
+  * Fixes in libxtc:
+    - A fired park timer could release a newer timer of a fiber stolen by
+      another loop (TSan, 40 of 100 runs; now 0).
+    - One hot xtc_amutex shared by many threads: a release no longer
+      wakes a sleeper while another thread spins (64 waiters: 245k ->
+      536k acquires/s, above 1.58's 486k).
+    - A malformed TLS ALPN list: a heap over-read on mbedTLS and GnuTLS,
+      accepted by the OpenSSL server; refused on every backend and role.
+    - valgrind memcheck now understands fiber stacks (1,629 errors on one
+      test before, 0); CI runs memcheck over the whole DST suite.
+  * New: xtc_pg_send_owned (process-group fan-out that moves the buffer
+    to the last member); xtc_rand_u64 replays under the simulator;
+    xtc_sim_clock_active(); a kernel-TLS xtc_tls_write is one write(2)
+    (0.72x -> 0.87x of user-space TLS).
+  * Security and LTS: SECURITY.md (reporting and timelines), the LTS
+    contract and patch procedure, libFuzzer harnesses for every parser a
+    peer or a config reaches (make fuzz-NAME), CI fuzz, style and N-1
+    compat jobs.
+  * sqlxtc (example):
+    - Page format XBT3: truncated separators, prefix-compressed internal
+      nodes, 4-byte child ids (150 children per internal node, was 66).
+      Reads +9-10% against 1.60, TPC-C W=10 +5-7%, writes within noise;
+      against SQLite at one connection: history 0.91x (was 0.82x),
+      statement 1.00x (0.91x), TPC-C 0.96x (0.90x).  The first start of
+      2.0 on a 1.60 store rebuilds the page file from the log (the log
+      format is unchanged); sx_size refuses XBT1 and XBT2 page files.
+    - Fixed: a syntax error that overflowed the parser stack ran as a
+      different statement (SELECT + 98 '(' + DELETE parsed as a DELETE);
+      ALTER TABLE RENAME could append stale stack bytes to the table's
+      schema; the page file and the log carried uninitialised stack
+      memory (28,292 bytes in 37 of 37 pages); the clean-close version
+      GC could bring back a deleted row without its index entries.
+    - rexis (example): 64 keyspace shards (SET on 4 loops 0.14M ->
+      1.6-1.77M/s), lazy connection buffers (15.8 -> 7.3 KB per idle
+      connection), 100,000 idle clients on one loop.
+  * Qualification and known issues: docs/KNOWN_ISSUES.md.
+
+ -- Greg Burd <greg@burd.me>  Tue, 27 Oct 2026 10:22:59 -0400
+
 libxtc (1.59.0-1) unstable; urgency=medium
 
   * MINOR release -- preemption and aarch64 correctness, faster fibers and

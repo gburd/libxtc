@@ -14,10 +14,12 @@ Vcs-Git: https://codeberg.org/gregburd/libxtc.git
 Vcs-Browser: https://codeberg.org/gregburd/libxtc
 Rules-Requires-Root: no
 
-Package: libxtc0
+Package: libxtc2
 Architecture: any
 Multi-Arch: same
 Depends: ${shlibs:Depends}, ${misc:Depends}
+Conflicts: libxtc0
+Replaces: libxtc0
 Description: high-performance async/concurrency runtime for C (shared library)
  xtc is a C11 async/concurrency runtime: an event loop with pluggable
  I/O backends (epoll, io_uring, kqueue, IOCP, event ports), stackful
@@ -30,7 +32,7 @@ Package: libxtc-dev
 Architecture: any
 Multi-Arch: same
 Section: libdevel
-Depends: libxtc0 (= ${binary:Version}), ${misc:Depends}
+Depends: libxtc2 (= ${binary:Version}), ${misc:Depends}
 Description: high-performance async/concurrency runtime for C (development files)
  xtc is a C11 async/concurrency runtime: an event loop with pluggable
  I/O backends (epoll, io_uring, kqueue, IOCP, event ports), stackful
