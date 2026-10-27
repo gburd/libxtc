@@ -207,6 +207,15 @@ struct limit_v { sql_expr_t *limit; sql_expr_t *offset; };
     if (!pstate->err_msg) pstate->err_msg = "parse failure";
 }
 
+/* The parser stack is YYSTACKDEPTH (100) deep and does not grow.  On
+ * overflow Lime empties the stack and, without this action, the parse
+ * CONTINUED from the empty stack: "SELECT" + 98 '(' + "DELETE FROM t"
+ * parsed as one DELETE.  An overflow is an error. */
+%stack_overflow {
+    pstate->error = 1;
+    pstate->err_msg = "statement nested too deeply";
+}
+
 %start_symbol input
 
 /*
