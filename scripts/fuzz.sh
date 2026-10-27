@@ -101,8 +101,12 @@ fi
 echo "fuzz.sh: $name: fuzzing for $secs s (seeds $seeds)"
 rc=0
 # shellcheck disable=SC2086  # FUZZ_ARGS and dict are word lists
+# -print_funcs=0: libFuzzer symbolizes each newly covered function, and
+# without llvm-symbolizer on PATH (the Codeberg runner image) it shells out
+# to addr2line per function: fuzz_sql ran 16 inputs in 20 s that way, 321k
+# with the flag.  Crash reports are still symbolized.
 ./"fuzz_$name" -max_total_time="$secs" -timeout=10 -rss_limit_mb=2048 \
-    -print_final_stats=1 -artifact_prefix="$out/artifacts/" $dict \
+    -print_funcs=0 -print_final_stats=1 -artifact_prefix="$out/artifacts/" $dict \
     ${FUZZ_ARGS:-} "$out/corpus" "$seeds" > "$out/run.log" 2>&1 || rc=$?
 grep -E '^stat::(number_of_executed_units|new_units_added|peak_rss_mb)' \
     "$out/run.log" | tr '\n' ' '
