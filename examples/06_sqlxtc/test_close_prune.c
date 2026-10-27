@@ -43,6 +43,7 @@
 
 #define NROW 2000
 #define NUPD 6
+#define NDEL 700      /* (4): > one 512-key GC batch of dead versions */
 
 static int64_t
 q1(sx_db *db, const char *sql)
@@ -188,6 +189,53 @@ main(void)
 		sx_close(db);
 	}
 	CK(sx_storage_close() == SX_OK);
+
+	/* (4) GC batch boundary: P rows with one dead version each, then
+	 * NDEL deleted rows (tombstone + insert, two dead each), so for
+	 * some P a 512-key batch ends right after a tombstone. */
+	for (j = 0; j < 4; j++) {
+		long live;
+		uint64_t miss = 0, stale = 0;
+		for (i = 0; i < 4; i++) {
+			snprintf(side, sizeof side, "%s%s", path, sfx[i]);
+			unlink(side);
+		}
+		CK(sx_storage_open(path, 4096) == SX_OK);
+		CK(sx_open(":memory:", &db) == SX_OK);
+		if (db == NULL)
+			return 1;
+		CK(sx_exec(db, "CREATE TABLE t(k INTEGER PRIMARY KEY, v INT)",
+		    NULL) == SX_OK);
+		CK(sx_exec(db, "CREATE INDEX tv ON t(v)", NULL) == SX_OK);
+		CK(sx_exec(db, "BEGIN", NULL) == SX_OK);
+		for (i = 0; i < j + NDEL; i++) {
+			snprintf(sql, sizeof sql, "INSERT INTO t VALUES(%d, %d)",
+			    i, i);
+			CK(sx_exec(db, sql, NULL) == SX_OK);
+		}
+		CK(sx_exec(db, "COMMIT", NULL) == SX_OK);
+		snprintf(sql, sizeof sql, "UPDATE t SET v = v + 1 WHERE k < %d", j);
+		CK(sx_exec(db, sql, NULL) == SX_OK);
+		snprintf(sql, sizeof sql, "DELETE FROM t WHERE k >= %d", j);
+		CK(sx_exec(db, sql, NULL) == SX_OK);
+		sx_close(db);
+		CK(sx_storage_close() == SX_OK);
+		CK(sx_storage_open(path, 4096) == SX_OK);
+		CK(sx_open(":memory:", &db) == SX_OK);
+		if (db == NULL)
+			return 1;
+		(void)sx_exec(db, "CREATE TABLE t(k INTEGER PRIMARY KEY, v INT)",
+		    NULL);
+		live = (long)q1(db, "SELECT count(*) FROM t");
+		(void)xstore_index_check(sx_storage_bt(), &miss, &stale);
+		printf("  batch boundary P=%d: %ld rows after the close (want %d), "
+		    "%llu index entries missing\n", j, live, j,
+		    (unsigned long long)miss);
+		CK(live == j);
+		CK(miss == 0);
+		sx_close(db);
+		CK(sx_storage_close() == SX_OK);
+	}
 	(void)sx_shutdown();
 	for (i = 0; i < 4; i++) {
 		snprintf(side, sizeof side, "%s%s", path, sfx[i]);
