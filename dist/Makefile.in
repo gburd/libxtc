@@ -393,6 +393,7 @@ TESTS_SH	= \
 	$(abs_top_srcdir)/../test/dist/test_s_include_inline_comment.sh \
 	$(abs_top_srcdir)/../test/dist/test_shellcheck.sh \
 	$(abs_top_srcdir)/../test/dist/test_api_discipline.sh \
+	$(abs_top_srcdir)/../test/dist/test_abi_layout.sh \
 	$(abs_top_srcdir)/../test/dist/test_api_reach.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_perm.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_async.sh \
