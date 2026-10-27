@@ -32,6 +32,29 @@ connections on one 32-vCPU x86-64 host.
 so widening `local_id` has to wait for 2.0.  See
 [xtc_proc(3)](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_proc.3).
 
+## CHANGED (2.0): a kernel-TLS `xtc_tls_write` is one system call, not one per record
+
+**Before.**  With kernel TLS TX active, `xtc_tls_write` went through
+OpenSSL, whose kernel-TLS record layer issues one `write(2)` per 16 KiB
+record: 16 system calls for a 256 KiB write, and 0.71x the user-space
+TLS rate for plain writes (1329 vs 1837 MiB/s, `bench_tls_sendfile`,
+32-vCPU x86-64 host, Linux 6.12, OpenSSL 3.5.7).  The kernel's AES-GCM
+was not the cost (it uses the same vector instructions OpenSSL does),
+nor the SIGPIPE bracket (0.1% of the sender's samples).
+
+**Now.**  When OpenSSL has nothing of its own to send (handshake done,
+no close_notify sent, no KeyUpdate pending, no `SSL_write` waiting to
+be retried), `xtc_tls_write` writes the plaintext to the socket itself
+and the kernel frames the records: one `write(2)` for 256 KiB
+(`test_tls_ktls` /roundtrip asserts at most 4; before: 16).  Measured,
+5 runs interleaved: 1593 MiB/s (1523..1681), sender CPU 0.639 s/GiB
+(0.769 before), 0.87x user-space TLS.  A `write(2)` of the same
+plaintext to the kernel-TLS socket with neither libxtc nor OpenSSL in
+the path measures the same (1525 MiB/s, 1503..1796), so the remaining
+gap is the kernel's.  A dead peer is reported as before (`XTC_E_IO`).
+`xtc_tls_sendfile` is unchanged (2106 MiB/s) and remains the reason to
+enable kernel TLS.
+
 ## CHANGED (2.0): `xtc_rand_u64` replays under the simulator; sqlxtc `random()`, `randomblob()`
 
 **Before.**  A thread that never called `xtc_rand_seed` seeded its

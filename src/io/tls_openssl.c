@@ -62,6 +62,7 @@
 #define XTC_OSSL_KTLS 1
 #include <signal.h>       /* kTLS mode: SIGPIPE bracket */
 #include <time.h>
+#include <unistd.h>       /* kTLS mode: write(2) of plaintext */
 #else
 #define XTC_OSSL_KTLS 0
 #endif
@@ -130,6 +131,7 @@ struct xtc_tls {
 	int              ktls;             /* xtc_tls_enable_ktls: socket BIO */
 	int              ktls_sigpipe;     /* ktls on a socket without
 	                                    * SO_NOSIGPIPE: bracket the calls */
+	int              ssl_wpend;        /* an SSL_write wants a retry */
 };
 
 #include "tls_common.h"   /* after struct xtc_tls: shared want-flag accessors */
@@ -1301,6 +1303,68 @@ xtc_tls_read(xtc_tls_t *tls, void *buf, size_t buflen, size_t *out_n)
 	return tls_fail(tls, err);
 }
 
+/*
+ * kTLS TX: write the plaintext to the socket ourselves; the kernel cuts
+ * it into records.  OpenSSL's kTLS record layer issues one write(2) per
+ * 16 KiB record, and that framing, not the kernel's AES-GCM, was why a
+ * kTLS xtc_tls_write ran at 0.71x of user-space TLS (measured, 32-vCPU
+ * x86-64 host, bench_tls_sendfile, 256 KiB writes: 1329 MiB/s through
+ * SSL_write vs 1945 MiB/s for one write of the same plaintext to the
+ * kTLS socket; 1383 MiB/s when that write too was cut at 16 KiB).
+ * Only when OpenSSL has nothing of its own to send first: the handshake
+ * is done, no close_notify went out, no KeyUpdate is pending, and no
+ * SSL_write is waiting to be retried.  The write is OpenSSL's socket
+ * BIO's (write(2), inside the same SIGPIPE bracket), so a dead peer is
+ * reported exactly as on the SSL_write path.
+ */
+static int
+ktls_direct_ok(xtc_tls_t *tls)
+{
+#if XTC_OSSL_KTLS
+	return tls->ktls && !tls->ssl_wpend &&
+	    SSL_is_init_finished(tls->ssl) &&
+	    (SSL_get_shutdown(tls->ssl) & SSL_SENT_SHUTDOWN) == 0 &&
+	    SSL_get_key_update_type(tls->ssl) == SSL_KEY_UPDATE_NONE &&
+	    BIO_get_ktls_send(SSL_get_wbio(tls->ssl));
+#else
+	(void)tls;
+	return 0;
+#endif
+}
+
+static int
+ktls_direct_write(xtc_tls_t *tls, const void *buf, size_t buflen,
+    size_t *out_n)
+{
+#if XTC_OSSL_KTLS
+	struct ktls_sig ks;
+	ssize_t n;
+	int e;
+
+	if (buflen > (size_t)INT_MAX)
+		buflen = (size_t)INT_MAX;        /* a short count */
+	ktls_sig_enter(tls, &ks);
+	do {
+		n = write(tls->fd, buf, buflen);
+	} while (n < 0 && errno == EINTR);
+	e = errno;
+	if (ktls_sig_leave(&ks))
+		return tls_peer_gone();
+	if (n >= 0) {
+		*out_n = (size_t)n;
+		return XTC_OK;
+	}
+	if (e == EAGAIN || e == EWOULDBLOCK) {
+		tls->wants_write = 1;
+		return XTC_E_AGAIN;
+	}
+	return XTC_E_IO;
+#else
+	(void)tls; (void)buf; (void)buflen; (void)out_n;
+	return XTC_E_NOSYS;              /* ktls_direct_ok is 0 here */
+#endif
+}
+
 int
 xtc_tls_write(xtc_tls_t *tls, const void *buf, size_t buflen, size_t *out_n)
 {
@@ -1313,18 +1377,23 @@ xtc_tls_write(xtc_tls_t *tls, const void *buf, size_t buflen, size_t *out_n)
 
 	*out_n           = 0;
 	tls_op_begin(tls);
+	if (buflen > 0 && ktls_direct_ok(tls))
+		return ktls_direct_write(tls, buf, buflen, out_n);
 
 	ktls_sig_enter(tls, &ks);
 	rc = xtc_ssl_write_ex(tls->ssl, buf, buflen, &nwritten);
 	if (ktls_sig_leave(&ks))
 		return tls_peer_gone();
 	if (rc == 1) {
+		tls->ssl_wpend = 0;
 		*out_n = nwritten;
 		return XTC_OK;
 	}
 
 	err = SSL_get_error(tls->ssl, rc);
-	return tls_fail(tls, err);
+	rc = tls_fail(tls, err);
+	tls->ssl_wpend = rc == XTC_E_AGAIN;
+	return rc;
 }
 
 /* -------------------------------------------------------------------------

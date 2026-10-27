@@ -109,19 +109,24 @@ space.  Without it the call returns `XTC_E_NOSYS`, which is your cue to
 {% include snippet.html file="18_tls_sendfile.c" region="full" %}
 
 Measured on a 32-vCPU x86-64 host (Linux 6.12, OpenSSL 3.5.7, AES-GCM,
-loopback, sender and receiver on two pinned cores), serving a file:
+loopback, sender and receiver on two pinned cores, 256 KiB writes, 5
+runs interleaved, median), serving a file:
 
-| mode | MiB/s | sender CPU s/GiB | copy share of sender CPU |
-|---|---|---|---|
-| user-space TLS, `pread` + `xtc_tls_write` | 1887 | 0.543 | 37.8% |
-| kernel TLS, `pread` + `xtc_tls_write` | 1345 | 0.760 | 20.2% |
-| kernel TLS, `xtc_tls_sendfile` | 2105 | 0.485 | 3.4% |
+| mode | MiB/s | sender CPU s/GiB |
+|---|---|---|
+| user-space TLS, `pread` + `xtc_tls_write` | 1837 | 0.556 |
+| kernel TLS, `pread` + `xtc_tls_write` | 1593 | 0.639 |
+| kernel TLS, `xtc_tls_sendfile` | 2106 | 0.486 |
 
-Note the middle row: kernel TLS **alone** was slower here.  The
-kernel's AES-GCM cost more than OpenSSL's, and the copy from your
-buffer into the kernel remains.  Enable kernel TLS for connections that
-mostly serve files with `xtc_tls_sendfile`, not as a blanket default,
-and measure on your hardware.
+With kernel TX active, `xtc_tls_write` hands your whole buffer to the
+socket in one `write(2)` and the kernel cuts it into records (before
+2.0 it went through OpenSSL, which writes one 16 KiB record per system
+call: 1329 MiB/s here).  Kernel TLS for plain writes is still below
+user-space TLS on this host: a `write(2)` of the same plaintext to the
+kernel-TLS socket without libxtc or OpenSSL measures the same, so the
+rest is the kernel's copy-and-encrypt path.  Enable kernel TLS for
+connections that mostly serve files with `xtc_tls_sendfile`, not as a
+blanket default, and measure on your hardware.
 
 Two rules for a kernel-TLS connection.  Close its socket with
 `xtc_net_close`, not `close(2)`: on Linux the kernel flushes a queued
@@ -185,4 +190,4 @@ commit (many committers' records leave in one write).
   a large message already *is* the receiver's buffer; a receive-into
   would add the copy back.
 - **Kernel TLS on by default.**  Measured slower for plain writes on a
-  host whose CPU has fast user-space AES; it pays for `sendfile`.
+  host whose CPU has fast user-space AES (0.87x); it pays for `sendfile`.
