@@ -263,7 +263,7 @@ group_coordinator_spawn(xtc_loop_t *loop, xtc_pid_t *out)
 int
 group_coordinator_spawn_ex(xtc_loop_t *loop, const char *dir, xtc_pid_t *out)
 {
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	struct coord_arg *ca;
 
 	ca = calloc(1, sizeof *ca);
@@ -366,7 +366,7 @@ group_selftest(void)
 {
 	xtc_loop_t *loop = NULL;
 	struct grp_test_state st;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t client;
 
 	memset(&st, 0, sizeof st);
@@ -450,7 +450,7 @@ grp_persist_phase(const char *dir, int mode)
 {
 	xtc_loop_t *loop = NULL;
 	struct grp_persist_state st;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t client;
 
 	memset(&st, 0, sizeof st);

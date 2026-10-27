@@ -72,18 +72,22 @@ reg_kinds(void)
 {
 	xtc_cfg_spec_t s;
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "ar.b"; s.kind = XTC_CFG_BOOL; s.dflt.d_bool = 0;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "ar.i64"; s.kind = XTC_CFG_INT64;
 	s.dflt.d_int64 = 5000000000LL;
 	s.min_int = 1; s.max_int = 10000000000LL;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "ar.d"; s.kind = XTC_CFG_DOUBLE; s.dflt.d_double = 0.5;
 	s.min_double = 0.0; s.max_double = 1.0;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "ar.e"; s.kind = XTC_CFG_ENUM; s.dflt.d_enum = 0;
 	s.enum_labels = g_labels; s.n_enum_labels = 3;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
@@ -266,6 +270,7 @@ test_io_aio_submit(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_fs_mkstemp(path, &fd), ==, XTC_OK);
 
 	memset(&a, 0, sizeof a);
+	a.size = sizeof a;
 	a.fd = fd; a.op = XTC_AIO_PWRITE; a.buf = buf;
 	a.len = (uint32_t)sizeof buf; a.off = 0; a.tag = &a;
 	rc = xtc_io_aio_submit(io, &a);
@@ -678,7 +683,7 @@ static void
 reap_watch(void *arg)
 {
 	struct reap_st *s = arg;
-	xtc_slab_stats_t st;
+	xtc_slab_stats_t st = XTC_SLAB_STATS_INIT;
 	munit_assert_int(xtc_slab_stat(s->slab, &st), ==, XTC_OK);
 	s->before = st.reaps;
 	(void)xtc_proc_sleep(30 * MS);

@@ -107,7 +107,7 @@ int
 main(void)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t po = { .name = "rec-worker" };
+	xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "rec-worker" };
 	xtc_pid_t w;
 	wal_opts_t wo = { 0 };
 	bm_opts_t bo = BM_OPTS_DEFAULT, b2 = BM_OPTS_DEFAULT;

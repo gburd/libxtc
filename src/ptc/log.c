@@ -87,14 +87,16 @@ int
 xtc_log_create(const xtc_log_opts_t *opts, xtc_log_t **out)
 {
 	xtc_log_t *log;
-	xtc_log_opts_t defaults = XTC_LOG_OPTS_DEFAULT;
+	xtc_log_opts_t defaults = XTC_LOG_OPTS_DEFAULT, o = defaults;
 	int rc;
 
 	if (out == NULL) return XTC_E_INVAL;
-	if (opts == NULL) opts = &defaults;
+	if (opts != NULL &&
+	    (rc = __xtc_sized_in(&o, &defaults, sizeof o, opts, 0)) != XTC_OK)
+		return rc;
 	if ((rc = __os_calloc(1, sizeof *log, (void **)&log)) != XTC_OK)
 		return rc;
-	log->opts = *opts;
+	log->opts = o;
 	if (log->opts.ring_size  <= 0) log->opts.ring_size  = 4096;
 	if (log->opts.record_max <= 0) log->opts.record_max = 256;
 	log->record_stride = sizeof(struct log_record_hdr) +

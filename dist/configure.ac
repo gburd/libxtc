@@ -235,6 +235,14 @@ AC_CHECK_HEADER([execinfo.h],
      xtc_have_execinfo=yes])],
   [xtc_have_execinfo=no])
 
+# Valgrind client requests: register each fiber stack with memcheck so a
+# stack switch is not reported as thousands of invalid accesses.
+# valgrind.h is header-only; outside valgrind a request is a few
+# instructions that do nothing, once per fiber spawn and exit.
+AC_CHECK_HEADER([valgrind/valgrind.h],
+  [AC_DEFINE([XTC_HAVE_VALGRIND_H], 1,
+     [Define to 1 if <valgrind/valgrind.h> is available])])
+
 # Builtin unwinder (_Unwind_Backtrace from <unwind.h>).  This is the
 # C++ EH-personality ABI walker provided by libgcc_s / LLVM's unwinder
 # and AUTO-LINKED -- no extra -l flag.  It is the same unwinder glibc's

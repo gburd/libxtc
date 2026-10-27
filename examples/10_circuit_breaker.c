@@ -137,7 +137,9 @@ cb_event(void *st, int cur, const void *msg, size_t len, xtc_fsm_call_t *call)
 }
 
 static const xtc_fsm_callbacks_t CB_CALLBACKS = {
-	cb_enter, cb_event, NULL
+	.size = sizeof(xtc_fsm_callbacks_t),
+	.enter = cb_enter,
+	.event = cb_event
 };
 
 /* Driver: drive the breaker through trip -> cooldown -> recover, and

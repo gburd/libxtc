@@ -62,6 +62,7 @@ xtc_launch(xtc_loop_t *loop, xtc_launch_fn fn, void *arg,
 {
 	struct launch_box *box = NULL;
 	xtc_proc_opts_t popts;
+	xtc_launch_opts_t o = XTC_LAUNCH_OPTS_INIT;
 	xtc_pid_t child;
 	uint64_t mref = 0;
 	int rc;
@@ -70,6 +71,9 @@ xtc_launch(xtc_loop_t *loop, xtc_launch_fn fn, void *arg,
 
 	if (fn == NULL)
 		return XTC_E_INVAL;
+	if (opts != NULL &&
+	    (rc = __xtc_sized_in(&o, NULL, sizeof o, opts, 0)) != XTC_OK)
+		return rc;
 	/* A NULL loop means "the loop the caller is running on" -- the
 	 * natural default for launching from inside a fiber. */
 	if (loop == NULL)
@@ -86,10 +90,9 @@ xtc_launch(xtc_loop_t *loop, xtc_launch_fn fn, void *arg,
 	atomic_init(&box->finished, 0);
 
 	memset(&popts, 0, sizeof popts);
-	popts.name = (opts != NULL && opts->name != NULL) ? opts->name
-	    : "xtc-launch";
-	if (opts != NULL && opts->mailbox_cap > 0)
-		popts.mailbox_cap = opts->mailbox_cap;
+	popts.size = sizeof popts;
+	popts.name = o.name != NULL ? o.name : "xtc-launch";
+	popts.mailbox_cap = o.mailbox_cap;
 
 	rc = xtc_proc_spawn(loop, launch_child, box, &popts, &child);
 	if (rc != XTC_OK) {

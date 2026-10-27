@@ -59,6 +59,7 @@ edge_handle_call(void *st, const void *req, size_t sz, xtc_svr_call_t *call)
 }
 
 static const xtc_svr_callbacks_t edge_cb = {
+	.size = sizeof(xtc_svr_callbacks_t),
 	.init = NULL, .handle_call = edge_handle_call,
 	.handle_cast = NULL, .handle_info = NULL, .terminate = NULL
 };
@@ -132,6 +133,7 @@ save_and_stop_handle_call(void *st, const void *req, size_t sz,
 }
 
 static const xtc_svr_callbacks_t save_cb = {
+	.size = sizeof(xtc_svr_callbacks_t),
 	.init = NULL, .handle_call = save_and_stop_handle_call,
 	.handle_cast = NULL, .handle_info = NULL, .terminate = NULL
 };
@@ -239,6 +241,7 @@ oom_handle_call(void *st, const void *req, size_t sz, xtc_svr_call_t *call)
 }
 
 static const xtc_svr_callbacks_t oom_cb = {
+	.size = sizeof(xtc_svr_callbacks_t),
 	.init = NULL, .handle_call = oom_handle_call,
 	.handle_cast = NULL, .handle_info = NULL, .terminate = NULL
 };

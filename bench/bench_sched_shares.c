@@ -116,7 +116,9 @@ run_window(int use_shares, int a_shares, int b_shares,
 	}
 
 	memset(&oa, 0, sizeof oa);
+	oa.size = sizeof oa;
 	memset(&ob, 0, sizeof ob);
+	ob.size = sizeof ob;
 
 	if (use_shares) {
 		if (xtc_exec_class_create(loop, a_shares, 0, &ca) != XTC_OK ||

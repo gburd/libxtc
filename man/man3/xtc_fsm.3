@@ -42,6 +42,15 @@ that dispatches each event to the caller's
 .Fn event
 callback for the current state and acts on the returned
 .Vt xtc_fsm_result_t .
+The
+.Vt xtc_fsm_callbacks_t
+is copied at start; it and
+.Vt xtc_fsm_opts_t
+begin with a
+.Va size
+member
+.Pq Dv XTC_FSM_CALLBACKS_INIT , XTC_FSM_OPTS_INIT
+and the library reads no further than it.
 It standardizes the three features hand-rolled C switch machines almost
 always get wrong:
 .Bl -bullet -compact

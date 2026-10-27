@@ -33,10 +33,12 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
                    const xtc_tls_opts_t *opts,
                    xtc_tls_ctx_t **out)
 {
-	(void)role; (void)opts;
+	(void)role;
 	if (out == NULL)
 		return XTC_E_INVAL;
 	*out = NULL;
+	if (opts != NULL && opts->size < sizeof(size_t))
+		return XTC_E_INVAL;
 	return XTC_E_NOSYS;
 }
 

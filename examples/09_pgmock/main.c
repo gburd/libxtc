@@ -123,6 +123,7 @@ main(int argc, char **argv)
 	g_listener.shutdown = &g_shutdown;
 
 	memset(kids, 0, sizeof kids);
+	kids[0].size = sizeof kids[0];
 	kids[0].name = "postmaster";
 	kids[0].fn = pgmock_listener_proc;
 	kids[0].arg = &g_listener;

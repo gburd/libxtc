@@ -1,5 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project
+ * @stability stable
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_inspect.h
@@ -51,6 +52,7 @@ enum xtc_proc_park {
  * large or growing value is the most common pathology.
  */
 typedef struct xtc_proc_info {
+	size_t    size;             /* sizeof(xtc_proc_info_t): XTC_PROC_INFO_INIT */
 	xtc_pid_t pid;
 	int       run_state;        /* enum xtc_proc_run_state */
 	int       park_reason;      /* enum xtc_proc_park (valid if PARKED) */
@@ -89,6 +91,12 @@ typedef struct xtc_proc_info {
 	uint64_t  mbox_drop_total;  /* messages ever rejected (full/dead) */
 } xtc_proc_info_t;
 
+/* Set before xtc_proc_info(); the library writes at most .size bytes.  An
+ * info handed to an xtc_inspect_proc_fn carries the LIBRARY's size: check
+ * XTC_FIELD_OK(info, field) before reading a field newer than your oldest
+ * supported library. */
+#define XTC_PROC_INFO_INIT { .size = sizeof(xtc_proc_info_t) }
+
 /*
  * Link/monitor topology is intentionally NOT in the live snapshot: a
  * proc mutates its own link/monitor lists without a lock, so walking
@@ -101,6 +109,7 @@ typedef struct xtc_proc_info {
 
 /* One loop's scheduler snapshot. */
 typedef struct xtc_loop_info {
+	size_t   size;              /* the LIBRARY's sizeof: see XTC_FIELD_OK */
 	int      loop_id;           /* 0 standalone, exec slot + 1 otherwise */
 	int      n_procs;           /* live procs homed on this loop */
 	int      n_alive;           /* live tasks (procs + plain tasks) */
@@ -126,9 +135,9 @@ XTC_API int xtc_inspect_procs(xtc_inspect_proc_fn cb, void *user);
  * negative XTC_E_*. */
 XTC_API int xtc_inspect_loops(xtc_inspect_loop_fn cb, void *user);
 
-/* Snapshot one proc by pid into *out.  XTC_OK on success,
- * XTC_E_NOTFOUND if no live proc has that pid, XTC_E_INVAL on a NULL
- * out-pointer. */
+/* Snapshot one proc by pid into *out, writing at most out->size bytes.
+ * XTC_OK on success, XTC_E_NOTFOUND if no live proc has that pid,
+ * XTC_E_INVAL on a NULL out-pointer or an out->size of 0. */
 XTC_API int xtc_proc_info(xtc_pid_t pid, xtc_proc_info_t *out);
 
 #endif /* XTC_INSPECT_H */

@@ -125,7 +125,24 @@ allocates a cache.
 is required and must set
 .Fa opts->name
 and
-.Fa opts->obj_size .
+.Fa opts->obj_size ;
+start from
+.Dv XTC_SLAB_OPTS_DEFAULT ,
+which also sets
+.Fa opts->size
+to the caller's
+.Fn sizeof .
+The library reads no further than
+.Fa opts->size
+(later fields take their defaults) and returns
+.Dv XTC_E_INVAL
+when it does not cover
+.Fa obj_size .
+.Fn xtc_slab_stat
+writes at most
+.Fa out->size
+bytes; initialize the stats with
+.Dv XTC_SLAB_STATS_INIT .
 .Pp
 .Fn xtc_slab_alloc
 returns a fresh object pointer or NULL on OOM.

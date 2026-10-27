@@ -145,7 +145,7 @@ one_case(int c, int nloops)
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	bm_t *bm = NULL;
 	xtc_exec_t *ex = NULL;
-	xtc_proc_opts_t po = { .name = "ilk" };
+	xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "ilk" };
 	xtc_pid_t pid;
 	int fd;
 	long i;

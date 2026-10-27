@@ -1058,7 +1058,7 @@ jobs:
         run: |
           make -C build_vg -j"$(nproc)" \
             test_chan test_mctx test_timer test_loop test_svr \
-            test_sync test_lockmgr test_exec test_cross_wake
+            test_sync test_lockmgr test_exec test_cross_wake test_proc
 
       - name: memcheck (leak + error gate)
         working-directory: build_vg
@@ -1077,6 +1077,25 @@ jobs:
               --track-origins=yes \
               --error-exitcode=1 \
               ./$t
+          done
+          # Fiber-heavy suites, one memcheck per test (fiber stacks are
+          # registered with valgrind, so cross-loop resumes are clean).
+          # Excluded: test_proc's deliberate faults (a write to 0x10 that
+          # R1 contains) and its 65,536-proc ceiling (more mappings than
+          # valgrind tracks), and test_exec's Blk2, which spins across a
+          # blocking offload and does not finish under valgrind.
+          for t in test_exec test_proc; do
+            for c in $(./$t --list | grep '^/' | grep -Ev \
+                'Blk2_concurrent_commit|fault_|recovery_registry|pid_local_id_ceiling'); do
+              echo "===== memcheck $t $c ====="
+              XTC_UNDER_VALGRIND=1 valgrind --tool=memcheck -q \
+                --suppressions=../.github/valgrind.supp \
+                --leak-check=full \
+                --show-leak-kinds=definite,indirect \
+                --errors-for-leak-kinds=definite \
+                --error-exitcode=1 \
+                ./$t "$c"
+            done
           done
 
       - name: Helgrind (data-race detector, informational)

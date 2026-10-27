@@ -97,6 +97,7 @@ analog for one identity.
 A proc snapshot is reported in:
 .Bd -literal -offset indent
 typedef struct xtc_proc_info {
+        size_t    size;             /* sizeof(xtc_proc_info_t) */
         xtc_pid_t pid;
         int       run_state;        /* enum xtc_proc_run_state */
         int       park_reason;      /* enum xtc_proc_park */
@@ -115,6 +116,25 @@ typedef struct xtc_proc_info {
 .Pp
 The fields are:
 .Bl -tag -width "mbox_recv_total" -offset indent
+.It Va size
+The size of the caller's view of the struct.  Before
+.Fn xtc_proc_info ,
+initialize the struct with
+.Dv XTC_PROC_INFO_INIT ,
+which sets it to
+.Fn sizeof xtc_proc_info_t ;
+the library writes at most
+.Va size
+bytes, and a
+.Va size
+of 0 is
+.Er XTC_E_INVAL .
+An info passed to an
+.Vt xtc_inspect_proc_fn
+carries the library's size: check
+.Fn XTC_FIELD_OK info field
+before reading a field added after the oldest library the program
+supports.
 .It Va pid
 The proc identity.
 .It Va run_state
@@ -225,6 +245,7 @@ Waiting for a message
 A loop snapshot is reported in:
 .Bd -literal -offset indent
 typedef struct xtc_loop_info {
+        size_t   size;        /* the library's sizeof; see XTC_FIELD_OK */
         int      loop_id;     /* 0 standalone, exec slot + 1 otherwise */
         int      n_procs;     /* live procs homed on this loop */
         int      n_alive;     /* live tasks (procs + plain tasks) */
@@ -300,7 +321,7 @@ printf("%d live procs\\n", n);
 .Pp
 Snapshot one proc by pid:
 .Bd -literal -offset indent
-xtc_proc_info_t info;
+xtc_proc_info_t info = XTC_PROC_INFO_INIT;
 if (xtc_proc_info(pid, &info) == XTC_OK && info.mbox_len > info.mbox_cap / 2)
         log_warn("proc %llu mailbox half full", (unsigned long long)pid);
 .Ed

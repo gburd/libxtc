@@ -67,7 +67,7 @@ int
 main(void)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 
 	xtc_trace_causal_enable(1);         /* opt in (off by default) */
 

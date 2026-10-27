@@ -391,7 +391,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	ssize_t n = 0;
 	int res;
 
-	if (io == NULL || a == NULL)
+	if (io == NULL || !__XTC_AIO_OK(a))
 		return XTC_E_INVAL;
 
 	/*

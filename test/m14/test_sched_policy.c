@@ -238,6 +238,7 @@ deterministic_policy(void)
 			assert(xtc_sched_policy_set(loop, &p) == XTC_OK);
 			for (i = 0; i < 4; i++) {
 				memset(&opts, 0, sizeof opts);
+				opts.size = sizeof opts;
 				if (i != 0) {
 					assert(xtc_exec_class_create(loop, 100, 0, &lane) == XTC_OK);
 					opts.sched_class = lane;

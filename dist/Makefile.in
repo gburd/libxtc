@@ -393,6 +393,9 @@ TESTS_SH	= \
 	$(abs_top_srcdir)/../test/dist/test_s_include_inline_comment.sh \
 	$(abs_top_srcdir)/../test/dist/test_shellcheck.sh \
 	$(abs_top_srcdir)/../test/dist/test_api_discipline.sh \
+	$(abs_top_srcdir)/../test/dist/test_abi_layout.sh \
+	$(abs_top_srcdir)/../test/dist/test_deprecated.sh \
+	$(abs_top_srcdir)/../test/dist/test_stability_tiers.sh \
 	$(abs_top_srcdir)/../test/dist/test_api_reach.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_perm.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_async.sh \
@@ -417,6 +420,7 @@ TESTS_SH	= \
 # echo-test) and test/tnt/test_tnt_echo.sh by hand.
 
 TESTS_C		= test_sched_policy test_sched_continuous test_batch test_version test_header test_errors \
+		  test_abi_sized \
 		  test_atomic test_alloc test_time \
 		  test_errno \
 		  test_sharp_edges \
@@ -1441,6 +1445,11 @@ test_version: $(srcdir)/../test/m0/test_version.c \
 		-I$(srcdir)/../test/m0 \
 		-o $@ $(srcdir)/../test/m0/test_version.c \
 		$(srcdir)/../test/m0/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_abi_sized: $(srcdir)/../test/abi/test_abi_sized.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../test/abi/test_abi_sized.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_header: $(srcdir)/../test/m0/test_header.c \
 		$(srcdir)/../test/m0/munit.c $(STATIC_LIB)

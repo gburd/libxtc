@@ -110,7 +110,7 @@ supervisor(void *arg)
 			if (n >= 1 && *k == 'D') {
 				int reason = 0;
 				xtc_pid_t dpid;
-				xtc_down_info_t di;
+				xtc_down_info_t di = XTC_DOWN_INFO_INIT;
 				if (xtc_down_decode(m, n, &dpid, &reason)
 				    == XTC_OK) {
 					seen++;
@@ -136,7 +136,7 @@ supervisor(void *arg)
 				}
 			} else if (n >= sizeof(struct exit_sig) && *k == 'E') {
 				const struct exit_sig *ex = m;
-				xtc_down_info_t di;
+				xtc_down_info_t di = XTC_DOWN_INFO_INIT;
 				seen++;
 				/* The link EXIT (reason 7) must decode as KIND_EXIT
 				 * with exit_code 7 via the self-describing path. */

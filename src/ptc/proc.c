@@ -1727,10 +1727,16 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	uint32_t gen;
 	int rc;
 	int pinned;
+	xtc_proc_opts_t o;
 
 	if (XTC_UNLIKELY(loop == NULL || fn == NULL)) return XTC_E_INVAL;
 	/* link/monitor require a calling process to be the other end. */
 	if (rel != 0 && self == NULL) return XTC_E_INVAL;
+	/* Read the caller's opts only up to its .size: unset fields default. */
+	memset(&o, 0, sizeof o);
+	if (opts != NULL &&
+	    (rc = __xtc_sized_in(&o, NULL, sizeof o, opts, 0)) != XTC_OK)
+		return rc;
 
 	/* Install the fiber-context preservation hooks (so a yield/await
 	 * inside a proc keeps __current_proc pointing at this proc on
@@ -1751,19 +1757,17 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	 * would silently turn every xtc_exit_self(code) into a clean exit. */
 	p->exit_kind_override = -1;
 	atomic_store_explicit(&p->alive, 1, memory_order_relaxed);
-	p->spawn_class = (opts != NULL) ? opts->sched_class : NULL;
+	p->spawn_class = o.sched_class;
 	atomic_store_explicit(&p->refs, 1, memory_order_relaxed);   /* owner ref */
-	p->mbox_cap = (opts != NULL && opts->mailbox_cap > 0)
-	    ? opts->mailbox_cap : 4096;
+	p->mbox_cap = o.mailbox_cap > 0 ? o.mailbox_cap : 4096;
 	/* Watermark level: a percent of cap (rounded down), clamped so a
 	 * positive percent yields at least 1.  0 percent disables it. */
-	if (opts != NULL && opts->mailbox_watermark_pct > 0 &&
-	    opts->mailbox_watermark_pct <= 100) {
+	if (o.mailbox_watermark_pct > 0 && o.mailbox_watermark_pct <= 100) {
 		p->mbox_wm_lvl = (p->mbox_cap * (size_t)
-		    opts->mailbox_watermark_pct) / 100;
+		    o.mailbox_watermark_pct) / 100;
 		if (p->mbox_wm_lvl == 0) p->mbox_wm_lvl = 1;
-		p->mbox_wm_fn = opts->mailbox_watermark_fn;
-		p->mbox_wm_user = opts->mailbox_watermark_user;
+		p->mbox_wm_fn = o.mailbox_watermark_fn;
+		p->mbox_wm_user = o.mailbox_watermark_user;
 	}
 
 	if ((rc = __table_alloc_slot(tbl, p, &local, &gen)) != XTC_OK) {
@@ -1850,7 +1854,7 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	 * cross-loop-steal DST test).  Default (opts == NULL or
 	 * migratable == 0) stays pinned -- byte-identical to prior
 	 * behavior. */
-	pinned = (opts != NULL && opts->migratable) ? 0 : 1;
+	pinned = o.migratable ? 0 : 1;
 	if ((rc = __xtc_async_ex(loop, __proc_entry, p, pinned, &t)) != XTC_OK) {
 		/* Undo the parent-side link/monitor we added above (removed
 		 * by the child pid, which never got to run), then the
@@ -2351,10 +2355,11 @@ xtc_proc_sleep(int64_t ns)
 /* PUBLIC: int xtc_proc_mailbox_stats __P((xtc_pid_t, xtc_mailbox_stats_t *)); */
 static struct xtc_proc *__resolve(xtc_pid_t pid, xtc_loop_t **out);
 int
-xtc_proc_mailbox_stats(xtc_pid_t pid, xtc_mailbox_stats_t *out)
+xtc_proc_mailbox_stats(xtc_pid_t pid, xtc_mailbox_stats_t *uout)
 {
+	xtc_mailbox_stats_t full, *out = &full;
 	struct xtc_proc *p;
-	if (out == NULL || xtc_pid_is_none(pid))
+	if (!__XTC_SIZED_OUT_OK(uout) || xtc_pid_is_none(pid))
 		return XTC_E_INVAL;
 	p = __resolve(pid, NULL);
 	if (p == NULL)
@@ -2369,7 +2374,7 @@ xtc_proc_mailbox_stats(xtc_pid_t pid, xtc_mailbox_stats_t *out)
 	out->drop_total = p->mbox_drop_total;
 	(void) __proc_mtx_unlock(&p->mbox_lock);
 	__proc_release(p);
-	return XTC_OK;
+	return __xtc_sized_out(uout, &full, sizeof full);
 }
 
 /* ---------- send ---------- */
@@ -4680,9 +4685,10 @@ xtc_down_decode_ex(const void *msg, size_t len, xtc_down_info_t *out)
 	xtc_down_info_t info;
 	int ek;
 
-	if (msg == NULL || len < 1 || out == NULL)
+	if (msg == NULL || len < 1 || !__XTC_SIZED_OUT_OK(out))
 		return XTC_E_INVAL;
 	memset(&info, 0, sizeof info);
+	info.size = sizeof info;
 
 	if (*k == 'D') {
 		struct dmsg d;
@@ -4736,8 +4742,7 @@ xtc_down_decode_ex(const void *msg, size_t len, xtc_down_info_t *out)
 			info.exit_code = info.reason;
 		}
 	}
-	*out = info;
-	return XTC_OK;
+	return __xtc_sized_out(out, &info, sizeof info);
 }
 
 /*
@@ -5125,6 +5130,7 @@ static void
 __fill_proc_info(struct xtc_proc *p, xtc_proc_info_t *info)
 {
 	memset(info, 0, sizeof *info);
+	info->size = sizeof *info;
 	info->pid = p->pid;
 	info->alive = atomic_load_explicit(&p->alive,
 	    memory_order_relaxed);
@@ -5270,6 +5276,7 @@ xtc_inspect_loops(xtc_inspect_loop_fn cb, void *user)
 			if (tbl->slots[s].proc != NULL)
 				procs++;
 		(void) __pt_unlock_all(tbl);
+		infos[n].size = sizeof infos[n];
 		infos[n].loop_id = loop->exec_id < 0 ? 0 : loop->exec_id + 1;
 		infos[n].n_procs = (int)procs;
 		infos[n].n_alive =
@@ -5292,9 +5299,12 @@ xtc_inspect_loops(xtc_inspect_loop_fn cb, void *user)
 int
 xtc_proc_info(xtc_pid_t pid, xtc_proc_info_t *out)
 {
+	xtc_proc_info_t full;
 	int i, found = 0;
 
-	if (out == NULL)
+	/* Fill a library-sized copy, then hand back only out->size bytes:
+	 * an older caller's smaller struct is never written past its end. */
+	if (!__XTC_SIZED_OUT_OK(out))
 		return XTC_E_INVAL;
 
 	(void) __proc_mtx_lock(&__lt_lock);
@@ -5309,7 +5319,7 @@ xtc_proc_info(xtc_pid_t pid, xtc_proc_info_t *out)
 		for (s = 0; s < tbl->cap; s++) {
 			struct xtc_proc *p = tbl->slots[s].proc;
 			if (p != NULL && xtc_pid_eq(p->pid, pid)) {
-				__fill_proc_info(p, out);
+				__fill_proc_info(p, &full);
 				found = 1;
 				break;
 			}
@@ -5317,18 +5327,23 @@ xtc_proc_info(xtc_pid_t pid, xtc_proc_info_t *out)
 		(void) __pt_unlock_all(tbl);
 	}
 	(void) __proc_mtx_unlock(&__lt_lock);
-	return found ? XTC_OK : XTC_E_NOTFOUND;
+	if (!found)
+		return XTC_E_NOTFOUND;
+	return __xtc_sized_out(out, &full, sizeof full);
 }
 
 /* ---------- process runtime introspection (xtc_runtime.h) ---------- */
 
 int
-xtc_runtime_info(xtc_runtime_info_t *out)
+xtc_runtime_info(xtc_runtime_info_t *uout)
 {
+	xtc_runtime_info_t full, *out = &full;
 	int n;
 
-	if (out == NULL)
+	if (!__XTC_SIZED_OUT_OK(uout))
 		return XTC_E_INVAL;
+	memset(&full, 0, sizeof full);
+	full.size = sizeof full;
 
 	/* n_loops: the executor the caller runs on.  xtc_shard_count()
 	 * returns that executor's loop count on a multi-loop loop, 1 on
@@ -5348,7 +5363,7 @@ xtc_runtime_info(xtc_runtime_info_t *out)
 	out->mem_cap_bytes  = 0;
 	out->mem_used_bytes = 0;
 
-	return XTC_OK;
+	return __xtc_sized_out(uout, &full, sizeof full);
 }
 
 /* ---------- causal tracing public API (xtc_trace.h) ---------- */

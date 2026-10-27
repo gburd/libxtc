@@ -100,7 +100,7 @@ main(void)
 	char path[256];
 	wal_opts_t wo;
 	xtc_exec_t *ex = NULL;
-	xtc_proc_opts_t po = { .name = "committer" };
+	xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "committer" };
 	pthread_t th[NT];
 	struct sc s;
 	xtc_pid_t p;

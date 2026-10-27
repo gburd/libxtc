@@ -96,6 +96,7 @@ run_once(uint64_t seed, int migratable, long *out_commits, uint64_t *out_state)
 	xtc_sim_io_faults_enable(50 * 1000LL, 500 * 1000LL, 0);
 
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.migratable = migratable;
 	for (i = 0; i < N_WORKERS; i++)
 		(void)xtc_proc_spawn(xtc_exec_loop(e, 0), commit_worker,

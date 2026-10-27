@@ -243,6 +243,7 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
                    const xtc_tls_opts_t *opts,
                    xtc_tls_ctx_t **out)
 {
+	xtc_tls_opts_t        opts_full;
 	struct xtc_tls_ctx    *c;
 	WOLFSSL_METHOD        *method;
 	xtc_tls_verify_mode_t  vm;
@@ -251,6 +252,8 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 	if (out == NULL)
 		return XTC_E_INVAL;
 	*out = NULL;
+	if ((rc = __xtc_tls_opts_in(&opts, &opts_full)) != XTC_OK)
+		return rc;
 
 	pthread_once(&s_init_once, wolfssl_global_init); /* XTC_BLOCKING_OK */
 

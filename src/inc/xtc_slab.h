@@ -1,5 +1,6 @@
 /*-
  * Copyright (c) 2026, The XTC Project
+ * @stability stable
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_slab.h
@@ -127,6 +128,7 @@ typedef enum xtc_slab_oom_policy {
 #define XTC_SLAB_NO_MAGAZINE (1u << 3)   /* always go through cache lock */
 
 typedef struct xtc_slab_opts {
+	size_t                 size;          /* sizeof(xtc_slab_opts_t) */
 	const char            *name;          /* required, for stats/diag */
 	size_t                 obj_size;      /* required */
 	size_t                 align;          /* default cache-line, 64 */
@@ -149,6 +151,7 @@ typedef struct xtc_slab_opts {
 } xtc_slab_opts_t;
 
 #define XTC_SLAB_OPTS_DEFAULT { \
+	.size = sizeof(xtc_slab_opts_t), \
 	.name = "anon", \
 	.obj_size = 0, \
 	.align = 64, \
@@ -164,6 +167,7 @@ typedef struct xtc_slab_opts {
 }
 
 typedef struct xtc_slab_stats {
+	size_t   size;              /* sizeof(xtc_slab_stats_t): XTC_SLAB_STATS_INIT */
 	uint64_t alloc_fast;        /* magazine hit */
 	uint64_t alloc_slow;        /* magazine miss -> cache lock */
 	uint64_t free_fast;
@@ -177,6 +181,8 @@ typedef struct xtc_slab_stats {
 	uint64_t oom_fails;
 	uint64_t redzone_violations;
 } xtc_slab_stats_t;
+
+#define XTC_SLAB_STATS_INIT { .size = sizeof(xtc_slab_stats_t) }
 
 /*
  * PUBLIC: int  xtc_slab_create __P((const xtc_slab_opts_t *, xtc_slab_t **));

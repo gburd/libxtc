@@ -43,7 +43,7 @@ run(uint64_t seed, int classes, int faults)
 {
 	struct trace t = {0};
 	struct worker w[WORKERS];
-	xtc_proc_opts_t opts = {0};
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_exec_class_t lanes[2] = {0};
 	xtc_exec_t *exec;
 	xtc_loop_t *loop;

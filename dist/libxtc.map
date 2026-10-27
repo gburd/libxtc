@@ -38,14 +38,30 @@
  * the [C7] gate allows -- test/m0/test_symbols.sh [C8] asserts the two
  * agree.
  *
- * The single unnamed version node keeps the SONAME's symbols
- * unversioned (plain global symbols), which is what a C library that
- * has not yet committed to per-symbol versioning wants: consumers link
- * against the SONAME (libxtc.so.MAJOR) and the SemVer policy in
- * docs/abi-stability.md governs compatibility.  When per-symbol
- * versioning is later desired, add named nodes (XTC_1.0 { ... };) here.
+ * Symbol versioning (2.0).  Every exported symbol carries the version
+ * node XTC_2.0 (`nm -D` shows xtc_foo@@XTC_2.0), so a consumer linked
+ * against 2.0 records the node it needs and the dynamic loader refuses
+ * an older library that lacks it ("version `XTC_2.1' not found") instead
+ * of failing at the first missing symbol.  The node is matched by glob
+ * (xtc_*), so a new function is versioned automatically -- which is
+ * exactly why the policy below needs a human:
+ *
+ * POLICY for later releases (docs/abi-stability.md "Symbol versions"):
+ *   - A MINOR release N that ADDS functions lists them by name in a new
+ *     node `XTC_2.N { global: xtc_new_a; xtc_new_b; } XTC_2.(N-1);`
+ *     placed ABOVE the XTC_2.0 node (an explicit name binds before a
+ *     glob), so they carry @@XTC_2.N and a consumer that uses them
+ *     cannot load against a 2.(N-1) library.
+ *   - Symbols are never moved out of the node they shipped in, and a
+ *     node is never edited after its release.  A changed signature is a
+ *     NEW function name (or a MAJOR).
+ *   - A MAJOR release starts over with a single XTC_<MAJOR>.0 node and a
+ *     new SONAME (libxtc.so.MAJOR); test/m0/test_symbols.sh [C9] checks
+ *     that the base node matches the MAJOR in dist/version.in.
+ * The Mach-O (libxtc.exp) and Windows builds have no symbol versions;
+ * they get the same export SET (see [C8]).
  */
-{
+XTC_2.0 {
 	global:
 		xtc_*;
 		__xtc_proc_recovery_slot;

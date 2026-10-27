@@ -120,7 +120,7 @@ run_one(int n_loops, const char *tag)
 		assert(xtc_loop_init(&loop) == XTC_OK);
 		assert(wal_writer_spawn(g_wal, loop, NULL) == XTC_OK);
 		for (c = 0; c < N_COMMITTERS; c++) {
-			xtc_proc_opts_t po = { .name = "cmt" };
+			xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "cmt" };
 			xtc_pid_t pid;
 			assert(xtc_proc_spawn(loop, committer_proc, (void *)c, &po, &pid) == XTC_OK);
 		}
@@ -133,7 +133,7 @@ run_one(int n_loops, const char *tag)
 		assert(wal_writer_spawn(g_wal, xtc_exec_loop(exec, 0), NULL) == XTC_OK);
 		for (c = 0; c < N_COMMITTERS; c++) {
 			xtc_loop_t *lp = xtc_exec_loop(exec, (int)(c % n_loops));
-			xtc_proc_opts_t po = { .name = "cmt" };
+			xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "cmt" };
 			xtc_pid_t pid;
 			assert(xtc_proc_spawn(lp, committer_proc, (void *)c, &po, &pid) == XTC_OK);
 		}

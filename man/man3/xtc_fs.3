@@ -133,8 +133,23 @@ makes the data durable (the page- and log-flush hot path).
 .Fn xtc_fs_stat
 fills
 .Fa out
-with the size, last-modified time (nanoseconds since the epoch), and a
-directory flag.
+with the file size
+.Pq Va bytes ,
+last-modified time
+.Pq Va mtime_ns ,
+nanoseconds since the epoch, and a directory flag
+.Pq Va is_dir .
+Initialize
+.Fa out
+with
+.Dv XTC_FS_STAT_INIT :
+its
+.Va size
+member is the size of the caller's struct, the library writes no more
+than that, and a
+.Va size
+of 0 is
+.Dv XTC_E_INVAL .
 .Fn xtc_fs_exists
 returns 1 if
 .Fa path

@@ -103,7 +103,7 @@ main(void)
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	bm_t *bm = NULL;
 	xtc_exec_t *ex = NULL;
-	xtc_proc_opts_t po = { .name = "skew" };
+	xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "skew" };
 	xtc_pid_t pid;
 	int fd, nloops;
 	long i;

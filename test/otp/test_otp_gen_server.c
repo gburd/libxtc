@@ -108,6 +108,7 @@ counter_terminate(void *st, int reason)
 }
 
 static const xtc_svr_callbacks_t counter_cb = {
+	.size = sizeof(xtc_svr_callbacks_t),
 	.init        = counter_init,
 	.handle_call = counter_handle_call,
 	.handle_cast = counter_handle_cast,
@@ -259,6 +260,7 @@ stop_terminate(void *st, int reason)
 }
 
 static const xtc_svr_callbacks_t stop_cb = {
+	.size = sizeof(xtc_svr_callbacks_t),
 	.init = stop_init,
 	.handle_call = stop_handle_call,
 	.terminate = stop_terminate
@@ -311,6 +313,7 @@ slow_handle_call(void *st, const void *req, size_t sz, xtc_svr_call_t *call)
 }
 
 static const xtc_svr_callbacks_t slow_cb = {
+	.size = sizeof(xtc_svr_callbacks_t),
 	.handle_call = slow_handle_call
 };
 

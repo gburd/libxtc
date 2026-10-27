@@ -113,8 +113,20 @@ The process runs on
 .Fa loop
 co-operatively with all other procs and tasks on that loop.
 .Fa opts
-is optional and may set the mailbox capacity, initial stack size,
-or per-proc resource accountant.
+is optional
+.Pq Dv NULL No means all defaults
+and may set the name, mailbox capacity and watermark, migratability and
+scheduling class.  Initialize it with
+.Dv XTC_PROC_OPTS_INIT ,
+or a designated initializer that sets
+.Va .size = sizeof(xtc_proc_opts_t) :
+the library reads only the first
+.Va size
+bytes, so a field the caller's header does not have takes its default,
+and a
+.Va size
+of 0 is
+.Er XTC_E_INVAL .
 .Pp
 A process is pinned to
 .Fa loop
@@ -764,8 +776,7 @@ proc to rebalance runnable work across cores.
 A proc is stolen only at a yield/park point, never mid-instruction, so
 no statement ever runs half on one loop and half on another.
 .Pp
-A zeroed
-.Vt xtc_proc_opts_t
+.Dv XTC_PROC_OPTS_INIT
 leaves
 .Fa migratable
 at 0 (pinned) -- byte-identical to the historical behavior.
