@@ -1170,6 +1170,13 @@ __xtc_sim_vclock(int64_t *out_ns)
 	return 1;
 }
 
+/* PUBLIC: int xtc_sim_clock_active __P((void)); */
+int
+xtc_sim_clock_active(void)
+{
+	return __xtc_sim_vclock(NULL);
+}
+
 /*
  * Clock skew (FoundationDB "the clock is not perfect").  The SCHEDULER
  * schedules timers against the true virtual clock (via __xtc_sim_vclock

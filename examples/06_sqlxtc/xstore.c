@@ -163,8 +163,15 @@ static void xs_vis_wake(void);
  *
  * The epoch offset is sampled ONCE, so stamps remain meaningful as
  * absolute wall-clock milliseconds while still advancing monotonically.
- * Under the simulator the offset is sampled from the virtual clock too,
- * so it is part of the replayable state.
+ *
+ * Inside a deterministic run (the simulator's virtual clock active) the
+ * physical component is the virtual milliseconds alone -- a pure
+ * function of the run.  The offset is NOT added there: it was sampled
+ * from the real clock before the run, so adding it carried real time
+ * into every stamp of the run, and two runs of one seed minted
+ * different stamps (2.0; the version keys hold the stamp, so a replay
+ * then built a different tree).  The determinism guard cannot see that
+ * class: the real clock was read outside the run.
  */
 static uint64_t
 hlc_phys_ms(void)
@@ -177,6 +184,8 @@ hlc_phys_ms(void)
 	int64_t mono_ns = xtc_clock_mono();
 	int64_t mono_ms = (mono_ns < 0 ? 0 : mono_ns) / 1000000LL;
 
+	if (xtc_sim_clock_active())
+		return (uint64_t)mono_ms;    /* virtual: no real-time offset */
 	if (!atomic_load_explicit(&epoch_set, memory_order_acquire)) {
 		/* One wall-clock read, outside any hot/simulated path, to
 		 * anchor the monotonic timeline to a human-meaningful epoch. */
@@ -409,6 +418,15 @@ xstore_set_clock(uint64_t v)
  * A thin alias over xstore_set_clock, named for the distributed call
  * site that will use it. */
 void xstore_clock_observe(uint64_t peer_ts) { xstore_set_clock(peer_ts); }
+
+void
+xstore_clock_reset(void)
+{
+	xs_commit_lock();
+	atomic_store_explicit(&g_xclock, 1, memory_order_relaxed);
+	atomic_store_explicit(&g_xvisible, 1, memory_order_seq_cst);
+	xs_commit_unlock();
+}
 
 #define XS_F_DELETED 0x01u     /* value[0] flag: this version is a tombstone */
 

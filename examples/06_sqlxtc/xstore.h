@@ -130,6 +130,12 @@ void xstore_set_clock(uint64_t v);
  * clock so the next minted stamp is causally after it (for the future
  * distributed engine; an alias over xstore_set_clock). */
 void xstore_clock_observe(uint64_t peer_ts);
+/* Test seam for deterministic simulation: put the commit clock and the
+ * read horizon back to their process-start value (1), so a run's stamps
+ * do not continue from an earlier run's in the same process.  Only with
+ * no store open and no commit in flight; never on a live store (the
+ * clock must not run backwards under data it has stamped). */
+void xstore_clock_reset(void);
 
 /* Number of CLRs written during recovery undo passes (test/metric). */
 uint64_t xstore_undo_clrs(void);

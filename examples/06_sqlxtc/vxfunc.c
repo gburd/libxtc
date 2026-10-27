@@ -33,6 +33,7 @@
 
 #include "vxfunc.h"
 #include "xtc.h"         /* xtc_clock_mono / xtc_clock_real */
+#include "xtc_sim.h"     /* xtc_sim_clock_active */
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -146,11 +147,15 @@ vxf_now_ms(void)
 {
 	/* Same scheme as xstore.c hlc_phys_ms: the monotonic clock (which
 	 * the simulator virtualizes) plus a wall-clock offset sampled once,
-	 * so 'now' replays under DST and never runs backward. */
+	 * so 'now' never runs backward -- and inside a deterministic run the
+	 * virtual milliseconds alone, so 'now' replays (the offset was
+	 * sampled from real time before the run). */
 	static _Atomic int64_t epoch_off_ms;
 	static _Atomic int     epoch_set;
 	int64_t mono_ns = xtc_clock_mono();
 	int64_t mono_ms = (mono_ns < 0 ? 0 : mono_ns) / 1000000LL;
+	if (xtc_sim_clock_active())
+		return mono_ms;               /* virtual: no real-time offset */
 	if (!atomic_load_explicit(&epoch_set, memory_order_acquire)) {
 		int64_t wall_ns = xtc_clock_real();
 		int64_t wall_ms = (wall_ns < 0 ? 0 : wall_ns) / 1000000LL;

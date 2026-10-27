@@ -185,11 +185,25 @@ in priority order:
 
    CONSUMER-VISIBLE COROLLARY: xtc_clock_mono is virtualized by the
    simulator and is the clock to use on any sim-reachable path;
-   xtc_clock_real is NOT virtualized.  Code that needs a wall-clock-
-   like physical component under DST must derive it from
-   xtc_clock_mono plus a single epoch offset (see hlc_phys_ms in
-   examples/06_sqlxtc/xstore.c, which does exactly this and is
-   replay-clean).
+   xtc_clock_real is NOT virtualized.  A value DERIVED from real time
+   before a sim run must not reach the run either -- and the guard
+   cannot see that class, because the real read happened outside the
+   run.  The 1.60 version of hlc_phys_ms (examples/06_sqlxtc/xstore.c)
+   was exactly that: xtc_clock_mono plus a wall-clock offset sampled
+   once, off the simulator, so every commit stamp of a run carried the
+   real time of the warm-up, and two runs of one seed minted different
+   stamps (about 5% of test_sim_sqlxtc_ckpt replays failed once the
+   B-tree's separators depended on the stamp bytes).  The rule: under
+   the virtual clock (xtc_sim_clock_active()) a wall-clock-like value
+   is the virtual time plus a FIXED constant, never an offset sampled
+   from real time; off the simulator it may anchor to the wall clock.
+   hlc_phys_ms and vxf_now_ms ('now') now do that, and the state a run
+   starts from must be a function of the seed too (a commit clock left
+   by an earlier run or an off-sim commit carries its time forward:
+   reset it, xstore_clock_reset, or make every commit of the seed run
+   under the virtual clock).  The sqlxtc DST tiers hash every commit
+   stamp into their replay check, and `test_sim_sqlxtc_ckpt 1 6 sleep`
+   lets real time pass between the runs, so a leak fails every time.
 
 2. VOLUME SURVIVED: seeds x fault-classes run with ZERO invariant
    violation.  This is the trust-building number and it grows over

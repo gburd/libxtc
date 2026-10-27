@@ -44,9 +44,14 @@
  *	  EXACTNESS   no row the oracle does not hold, every column right;
  *	  INDEX       0 rows missing from an index, index counts = oracle;
  *	  LIVENESS    every run quiesces (no deadlock / step budget);
- *	  REPLAY      the same seed yields the identical fingerprint.
+ *	  REPLAY      the same seed yields the identical fingerprint: the
+ *	              final rows and statuses, the counters, and every commit
+ *	              stamp the run minted (a stamp that took real time
+ *	              differs even when the tree it built does not).
  *
- *	usage: test_sim_sqlxtc_reopen [base [count]]   (default 1 6)
+ *	usage: test_sim_sqlxtc_reopen [base [count [sleep]]]   (default 1 6)
+ *	"sleep" lets 50 ms of real time pass before each run of a seed, so a
+ *	real-time input to a run fails the replay every time.
  */
 
 #ifndef _GNU_SOURCE
@@ -798,30 +803,16 @@ segment(uint64_t rs, int crash)
 }
 
 /*
- * The commit clock samples its one-shot wall-clock epoch offset on the
- * first commit of a process (xstore.c hlc_phys_ms); inside a sim run
- * that real-clock read trips the determinism guard.  So every child
- * commits once OFF the sim, right after its open, to a side table the
- * oracle ignores (test_sim_sql_now warms the same offset).
+ * Every commit of a seed runs under the virtual clock -- the sim runs,
+ * and the table's CREATE, which runs between them on a clock fixed at 0.
+ * Under the virtual clock the commit stamp's physical half is the virtual
+ * milliseconds alone (xstore.c hlc_phys_ms), so the store's clock, which
+ * each open restores, is a function of the seed too.  (Until 2.0 each
+ * child made a warm-up commit off the simulator, to sample the stamp's
+ * wall-clock offset outside any run; that commit, and the offset added
+ * to every stamp in the runs, carried real time into the run: two runs
+ * of a seed minted different stamps.)
  */
-static int
-warm_clock(void)
-{
-	sx_db *h = NULL;
-	int rc;
-	if (sx_open(":memory:", &h) != SX_OK)
-		return -1;
-	rc = sx_exec(h, "CREATE TABLE IF NOT EXISTS warm(k INTEGER PRIMARY KEY, "
-	    "v INTEGER)", NULL);
-	if (rc == SX_OK)
-		rc = sx_exec(h, "DELETE FROM warm WHERE k = 1", NULL);
-	if (rc == SX_OK)
-		rc = sx_exec(h, "INSERT INTO warm(k, v) VALUES(1, 0)", NULL);
-	sx_close(h);
-	if (rc != SX_OK)
-		FAILF("warm-up commit failed (rc %d)", rc);
-	return rc == SX_OK ? 0 : -1;
-}
 
 /* Open the store, recording which kind of open this is. */
 static int
@@ -843,17 +834,22 @@ open_store(const char **kind)
 		g_sh->recover_opens++;
 	if (!g_sh->created) {
 		sx_db *h = NULL;
-		if (sx_open(":memory:", &h) != SX_OK ||
+		int bad;
+		xtc_sim_clock_enable(0);
+		bad = sx_open(":memory:", &h) != SX_OK ||
 		    sx_exec(h, "CREATE TABLE t(k INTEGER PRIMARY KEY, u TEXT UNIQUE, "
 		    "g INTEGER, w INTEGER, p TEXT)", NULL) != SX_OK ||
-		    sx_exec(h, "CREATE INDEX t_g ON t(g)", NULL) != SX_OK) {
+		    sx_exec(h, "CREATE INDEX t_g ON t(g)", NULL) != SX_OK;
+		if (h != NULL)
+			sx_close(h);
+		xtc_sim_clock_disable();
+		if (bad) {
 			FAILF("create failed");
 			return -1;
 		}
-		sx_close(h);
 		g_sh->created = 1;
 	}
-	return warm_clock();
+	return 0;
 }
 
 /* Child: one round of 1-2 segments; exit 0 / 3 (failed). */
@@ -936,6 +932,11 @@ run_seed(uint64_t seed, uint64_t *fp)
 		h = (h ^ (uint64_t)(uint32_t)g_sh->row[id].w) * 0x100000001B3ull;
 		h = (h ^ g_sh->st[id]) * 0x100000001B3ull;
 	}
+	/* The commit stamps themselves (every op's clock after it): a stamp
+	 * that took real time, or any other input not of the seed, differs
+	 * here even when the tree it built happens to come out the same. */
+	for (i = 0; i < (size_t)g_tr->n; i++)
+		h = (h ^ g_tr->r[i].clock) * 0x100000001B3ull;
 	h = (h ^ g_sh->acked) * 0x100000001B3ull;
 	h = (h ^ g_sh->crashes) * 0x100000001B3ull;
 	h = (h ^ g_sh->ckpts) * 0x100000001B3ull;
@@ -1006,6 +1007,11 @@ main(int argc, char **argv)
 {
 	uint64_t base = argc > 1 ? strtoull(argv[1], NULL, 0) : 1;
 	int count = argc > 2 ? atoi(argv[2]) : 6, k;
+	/* argv[3] "sleep": real time passes before the first run and between
+	 * the two runs of every seed (50 ms each), so any real-time input to
+	 * a run -- a stamp offset sampled from the wall clock -- makes the
+	 * replay differ every time, not one run in twenty. */
+	int sleep_ms = argc > 3 && strcmp(argv[3], "sleep") == 0 ? 50 : 0;
 	uint64_t acked = 0, crashes = 0, cleans = 0, tr = 0, rec = 0, it = 0;
 	uint64_t ev = 0, ld = 0, ck = 0, cka = 0, ckf = 0, cac = 0;
 	uint64_t sn = 0, sns = 0, gcr = 0, gcv = 0, pr = 0;
@@ -1023,6 +1029,8 @@ main(int argc, char **argv)
 		return 1;
 	for (k = 0; k < count; k++) {
 		uint64_t seed = base + (uint64_t)k, f1 = 0, f2 = 0;
+		if (sleep_ms > 0)
+			(void)usleep((useconds_t)sleep_ms * 1000u);
 		if (run_seed(seed, &f1) != 0) {
 			printf("corpus row: %s %llu 1 <fixing commit>: <what failed>\n",
 			    SIM_TEST, (unsigned long long)seed);
@@ -1046,6 +1054,8 @@ main(int argc, char **argv)
 		gcv += g_sh->gc_reclaimed;
 		pr += g_sh->prunes;
 		memcpy(g_tr1, g_tr, sizeof *g_tr1);
+		if (sleep_ms > 0)
+			(void)usleep((useconds_t)sleep_ms * 1000u);
 		if (run_seed(seed, &f2) != 0)
 			return 1;
 		if (f1 != f2) {
