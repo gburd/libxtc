@@ -46,8 +46,7 @@ fnv1a(const char *data, size_t len)
  */
 typedef struct db_table {
 	lh_t         lh;
-	size_t       n_keys;
-	size_t       mem_used;
+	size_t       n_keys;         /* this shard's keys (load factor) */
 	size_t       expire_cursor;  /* next bucket db_expire_stale scans */
 } db_table_t;
 
@@ -62,57 +61,122 @@ typedef struct db_table {
  * walk a chain while a writer on another frees it, so a shared db also
  * holds a parking reader/writer latch (xtc_arwlock: a waiter parks its
  * fiber, FIFO, a writer is not starved) for every section.
+ *
+ * A shared db is DB_SHARDS shards, each its own table, lrlock and latch;
+ * a key lives in the shard its hash's high bits pick (the table's bucket
+ * uses the low bits).  A command latches only its keys' shards, in
+ * ascending order (db_lock), so writes to different shards run in
+ * parallel on different loops.  With one latch for the whole keyspace a
+ * SET at --loops=2 ran at a quarter of the one-loop rate.  One loop: one
+ * shard, no latch, as before.  The key count and the dataset bytes are
+ * keyspace-wide (the budgets are): atomics, reserved before an insert.
  */
-struct db {
-	xtc_lrlock_t *lr;
+#ifndef DB_SHARDS
+#define DB_SHARDS 64            /* a power of two, <= 64 (db_keyset_t) */
+#endif
+#if DB_SHARDS > 64 || (DB_SHARDS & (DB_SHARDS - 1)) != 0
+#error "DB_SHARDS must be a power of two of at most 64"
+#endif
+
+struct db_shard {
+	xtc_lrlock_t  *lr;
 	xtc_arwlock_t *mt;         /* NULL unless opts.shared */
+};
+
+struct db {
+	struct db_shard *sh;
+	int           nshard;
+	int           expire_shard;  /* db_expire_stale's current shard */
+	_Atomic size_t keys;         /* live keys + in-flight reservations */
+	_Atomic int64_t mem;         /* dataset bytes charged */
 	db_opts_t     opts;
 	bitcask_t    *bc;          /* persistence; NULL if disabled */
-	int           refused;     /* last db_malloc failed on the budget */
+	_Atomic int   refused;     /* last db_malloc failed on the budget */
 };
+
+static struct db_shard *
+shard_of(db_t *db, uint64_t h)
+{
+	return &db->sh[(size_t)(h >> 32) & (size_t)(db->nshard - 1)];
+}
+
+static const db_table_t *
+rtable(db_t *db, uint64_t h)
+{
+	return xtc_lrlock_read_data(shard_of(db, h)->lr);
+}
+
+static db_table_t *
+wtable(db_t *db, uint64_t h)
+{
+	return (db_table_t *)xtc_lrlock_write_data(shard_of(db, h)->lr);
+}
+
+/* One more key under --max-keys: reserved here, kept by the insert or
+ * handed back (key_unreserve) when it fails. */
+static int
+key_reserve(db_t *db)
+{
+	size_t n = atomic_fetch_add(&db->keys, 1);
+	if (db->opts.max_keys > 0 && n >= db->opts.max_keys) {
+		atomic_fetch_sub(&db->keys, 1);
+		return -1;
+	}
+	return 0;
+}
+
+static void
+key_unreserve(db_t *db)
+{
+	atomic_fetch_sub(&db->keys, 1);
+}
 
 /* ----- Memory tracking ----- */
 
 static void *
-db_malloc(db_t *db, db_table_t *tbl, size_t sz)
+db_malloc(db_t *db, size_t sz)
 {
 	void *p;
+	int64_t was = atomic_fetch_add(&db->mem, (int64_t)sz);
 	if (db->opts.max_mem_bytes > 0 &&
-	    tbl->mem_used + sz > (size_t)db->opts.max_mem_bytes) {
+	    was + (int64_t)sz > db->opts.max_mem_bytes) {
+		atomic_fetch_sub(&db->mem, (int64_t)sz);
 		db->refused = 1;
 		return NULL;
 	}
 	if (db->opts.res) {
 		if (xtc_res_acquire(db->opts.res, XTC_RES_MEM_BYTES,
 		                    (int64_t)sz) != XTC_OK) {
+			atomic_fetch_sub(&db->mem, (int64_t)sz);
 			db->refused = 1;
 			return NULL;
 		}
 	}
 	p = xtc_malloc(sz);
-	if (p)
-		tbl->mem_used += sz;
-	else if (db->opts.res)
-		xtc_res_release(db->opts.res, XTC_RES_MEM_BYTES, (int64_t)sz);
+	if (p == NULL) {
+		atomic_fetch_sub(&db->mem, (int64_t)sz);
+		if (db->opts.res)
+			xtc_res_release(db->opts.res, XTC_RES_MEM_BYTES,
+			    (int64_t)sz);
+	}
 	return p;
 }
 
 static void
-db_uncharge(db_t *db, db_table_t *tbl, size_t sz)
+db_uncharge(db_t *db, size_t sz)
 {
-	if (tbl->mem_used >= sz)
-		tbl->mem_used -= sz;
+	atomic_fetch_sub(&db->mem, (int64_t)sz);
 	if (db->opts.res)
 		xtc_res_release(db->opts.res, XTC_RES_MEM_BYTES, (int64_t)sz);
 }
 
 static void
-db_free(db_t *db, db_table_t *tbl, void *p, size_t sz)
+db_free(db_t *db, void *p, size_t sz)
 {
 	if (!p)
 		return;
 	xtc_free(p);
-	db_uncharge(db, tbl, sz);
+	db_uncharge(db, sz);
 }
 
 /* ----- String values (DB_REF_MIN, db.h) -----
@@ -142,13 +206,13 @@ val_size(size_t len)
 
 /* Room for a len-byte value (plus its NUL), charged; NULL if refused. */
 static char *
-val_alloc(db_t *db, db_table_t *tbl, size_t len)
+val_alloc(db_t *db, size_t len)
 {
 	db_blob_t *b;
 
 	if (len < DB_REF_MIN)
-		return db_malloc(db, tbl, len + 1);
-	if ((b = db_malloc(db, tbl, val_size(len))) == NULL)
+		return db_malloc(db, len + 1);
+	if ((b = db_malloc(db, val_size(len))) == NULL)
 		return NULL;
 	atomic_init(&b->refs, 1);
 	return b->data;
@@ -166,15 +230,15 @@ blob_release(const char *data)
 /* The keyspace lets go of a value: its charge now, its memory once the
  * last holder has released it. */
 static void
-val_free(db_t *db, db_table_t *tbl, char *data, size_t len)
+val_free(db_t *db, char *data, size_t len)
 {
 	if (data == NULL)
 		return;
 	if (len < DB_REF_MIN) {
-		db_free(db, tbl, data, len + 1);
+		db_free(db, data, len + 1);
 		return;
 	}
-	db_uncharge(db, tbl, val_size(len));
+	db_uncharge(db, val_size(len));
 	blob_release(data);
 }
 
@@ -210,7 +274,7 @@ static void *
 db_lh_alloc(void *ctx, size_t sz)
 {
 	db_t *db = ctx;
-	void *p = db_malloc(db, xtc_lrlock_write_data(db->lr), sz);
+	void *p = db_malloc(db, sz);
 	if (p != NULL)
 		memset(p, 0, sz);
 	return p;
@@ -220,7 +284,7 @@ static void
 db_lh_free(void *ctx, void *p, size_t sz)
 {
 	db_t *db = ctx;
-	db_free(db, xtc_lrlock_write_data(db->lr), p, sz);
+	db_free(db, p, sz);
 }
 
 /* ----- Entry helpers ----- */
@@ -245,7 +309,8 @@ entry_find(db_table_t *tbl, const char *key, size_t key_len, uint64_t h)
 	return NULL;
 }
 
-/* Link a new entry (key set, hash h) and grow the table past load 1. */
+/* Link a new entry (key set, hash h; its key reserved, key_reserve) and
+ * grow the shard's table past load 1. */
 static void
 entry_link(db_t *db, db_table_t *tbl, db_entry_t *e, uint64_t h)
 {
@@ -259,25 +324,25 @@ entry_link(db_t *db, db_table_t *tbl, db_entry_t *e, uint64_t h)
 }
 
 static void
-entry_free_value(db_t *db, db_table_t *tbl, db_entry_t *e)
+entry_free_value(db_t *db, db_entry_t *e)
 {
 	db_list_node_t *ln, *ln_next;
 	db_hash_field_t *hf, *hf_next;
 
 	switch (e->type) {
 	case DB_VAL_STRING:
-		val_free(db, tbl, e->val.str.data, e->val.str.len);
+		val_free(db, e->val.str.data, e->val.str.len);
 		break;
 	case DB_VAL_LIST:
 		for (ln = e->val.list.head; ln; ln = ln_next) {
 			ln_next = ln->next;
-			db_free(db, tbl, ln, sizeof(*ln) + ln->len + 1);
+			db_free(db, ln, sizeof(*ln) + ln->len + 1);
 		}
 		break;
 	case DB_VAL_HASH:
 		for (hf = e->val.hash.head; hf; hf = hf_next) {
 			hf_next = hf->next;
-			db_free(db, tbl, hf,
+			db_free(db, hf,
 			        sizeof(*hf) + hf->key_len + hf->val_len + 2);
 		}
 		break;
@@ -298,10 +363,11 @@ entry_remove(db_t *db, db_table_t *tbl, db_entry_t *e)
 			break;
 		}
 	}
-	entry_free_value(db, tbl, e);
-	db_free(db, tbl, e, entry_size(e->key_len));
+	entry_free_value(db, e);
+	db_free(db, e, entry_size(e->key_len));
 	if (tbl->n_keys > 0)
 		tbl->n_keys--;
+	key_unreserve(db);
 }
 
 /* ----- lrlock callbacks ----- */
@@ -370,13 +436,89 @@ db_persist_replay(db_t *db)
 
 /* ----- Public API ----- */
 
+/* Free shards [0, n): their entries, tables, lrlocks and latches. */
+static void
+shards_destroy(db_t *db, int n)
+{
+	db_table_t *tbl;
+	size_t i;
+	lh_node_t *ln, *ln_next;
+	db_entry_t *e;
+	int k;
+
+	for (k = 0; k < n; k++) {
+		/* Free all entries in the write copy, then the table (both
+		 * release their budget charge). */
+		tbl = xtc_lrlock_write_begin(db->sh[k].lr);
+		for (i = 0; tbl->lh.dir != NULL && i < lh_buckets(&tbl->lh);
+		    i++) {
+			for (ln = *lh_bucket(&tbl->lh, i); ln; ln = ln_next) {
+				ln_next = ln->next;
+				e = (db_entry_t *)ln;
+				entry_free_value(db, e);
+				db_free(db, e, entry_size(e->key_len));
+			}
+		}
+		if (tbl->lh.dir != NULL)
+			lh_destroy(&tbl->lh, db_lh_free, db);
+		xtc_lrlock_write_end(db->sh[k].lr);
+		xtc_lrlock_destroy(db->sh[k].lr);
+		xtc_arwlock_destroy(db->sh[k].mt);
+	}
+	xtc_free(db->sh);
+	db->sh = NULL;
+}
+
+/* Create shard k: its lrlock, latch (shared db) and empty table.  The
+ * bucket table is charged to the shared budget (db_lh_alloc), so the
+ * budget's total is exactly what INFO reports as used_memory (keyspace
+ * + client buffers).  A cap below it cannot hold an empty keyspace:
+ * XTC_E_RESOURCE. */
+static int
+shard_init(db_t *db, int k)
+{
+	xtc_lrlock_opts_t lr_opts = { 0 };
+	struct db_shard *sh = &db->sh[k];
+	db_table_t *tbl;
+	size_t nb = db->opts.n_buckets / (size_t)db->nshard;
+
+	lr_opts.name = "rexis_db";
+	lr_opts.data_size = sizeof(db_table_t);
+	lr_opts.apply_fn = db_apply_op;
+	lr_opts.sync_fn = db_sync;
+	lr_opts.oplog_capacity = 64;     /* no ops are logged (db_apply_op) */
+	if (xtc_lrlock_create_ex(&lr_opts, &sh->lr) != XTC_OK)
+		return XTC_E_NOMEM;
+	if (db->opts.shared && xtc_arwlock_create(&sh->mt) != XTC_OK) {
+		xtc_lrlock_destroy(sh->lr);
+		return XTC_E_NOMEM;
+	}
+	tbl = xtc_lrlock_write_begin(sh->lr);
+	memset(tbl, 0, sizeof(*tbl));
+	if (lh_init(&tbl->lh, nb, db_lh_alloc, db_lh_free, db) != 0) {
+		xtc_lrlock_write_end(sh->lr);
+		xtc_lrlock_destroy(sh->lr);
+		xtc_arwlock_destroy(sh->mt);
+		return db->refused ? XTC_E_RESOURCE : XTC_E_NOMEM;
+	}
+	xtc_lrlock_publish_full_sync(sh->lr);
+	xtc_lrlock_write_end(sh->lr);
+
+	/* publish_full_sync copied the table struct into the other copy, so
+	 * both copies now share this one bucket table (every write_end does
+	 * the same full sync).  A second table used to be allocated here and
+	 * the next full sync overwrote one copy's pointer with the other's,
+	 * leaking 512 KiB per db_create (ASan, test_db_persist). */
+
+	xtc_lrlock_mark_ready(sh->lr);
+	return XTC_OK;
+}
+
 int
 db_create(const db_opts_t *opts, db_t **out)
 {
 	db_t *db;
-	xtc_lrlock_opts_t lr_opts = { 0 };
-	db_table_t *tbl;
-	int rc;
+	int rc, k;
 
 	if (!out)
 		return XTC_E_INVAL;
@@ -387,54 +529,23 @@ db_create(const db_opts_t *opts, db_t **out)
 	db->opts = opts ? *opts : (db_opts_t)DB_OPTS_DEFAULT;
 	if (db->opts.n_buckets == 0)
 		db->opts.n_buckets = 65536;
-
-	lr_opts.name = "rexis_db";
-	lr_opts.data_size = sizeof(db_table_t);
-	lr_opts.apply_fn = db_apply_op;
-	lr_opts.sync_fn = db_sync;
-
-	if (xtc_lrlock_create_ex(&lr_opts, &db->lr) != XTC_OK) {
+	db->nshard = db->opts.shared ? DB_SHARDS : 1;
+	if ((db->sh = xtc_calloc((size_t)db->nshard, sizeof *db->sh)) == NULL) {
 		xtc_free(db);
 		return XTC_E_NOMEM;
 	}
-	if (db->opts.shared && xtc_arwlock_create(&db->mt) != XTC_OK) {
-		xtc_lrlock_destroy(db->lr);
-		xtc_free(db);
-		return XTC_E_NOMEM;
+	for (k = 0; k < db->nshard; k++) {
+		if ((rc = shard_init(db, k)) != XTC_OK) {
+			shards_destroy(db, k);
+			xtc_free(db);
+			return rc;
+		}
 	}
-
-	/* Initialize the table in the write copy, then mark ready.  The
-	 * bucket table is charged to the shared budget (db_lh_alloc), so the
-	 * budget's total is exactly what INFO reports as used_memory
-	 * (keyspace + client buffers).  A cap below it cannot hold an empty
-	 * keyspace: XTC_E_RESOURCE. */
-	tbl = xtc_lrlock_write_begin(db->lr);
-	memset(tbl, 0, sizeof(*tbl));
-	if (lh_init(&tbl->lh, db->opts.n_buckets, db_lh_alloc, db_lh_free,
-	    db) != 0) {
-		rc = db->refused ? XTC_E_RESOURCE : XTC_E_NOMEM;
-		xtc_lrlock_write_end(db->lr);
-		xtc_lrlock_destroy(db->lr);
-		xtc_arwlock_destroy(db->mt);
-		xtc_free(db);
-		return rc;
-	}
-	xtc_lrlock_publish_full_sync(db->lr);
-	xtc_lrlock_write_end(db->lr);
-
-	/* publish_full_sync copied the table struct into the other copy, so
-	 * both copies now share this one bucket table (every write_end does
-	 * the same full sync).  A second table used to be allocated here and
-	 * the next full sync overwrote one copy's pointer with the other's,
-	 * leaking 512 KiB per db_create (ASan, test_db_persist). */
-
-	xtc_lrlock_mark_ready(db->lr);
 
 	/* Open Bitcask for persistence if configured. */
 	if (db->opts.persist_dir != NULL) {
 		if (bitcask_open(db->opts.persist_dir, &db->bc) != 0) {
-			xtc_lrlock_destroy(db->lr);
-			xtc_arwlock_destroy(db->mt);
+			shards_destroy(db, db->nshard);
 			xtc_free(db);
 			return XTC_E_INTERNAL;
 		}
@@ -458,65 +569,102 @@ db_create(const db_opts_t *opts, db_t **out)
 void
 db_destroy(db_t *db)
 {
-	db_table_t *tbl;
-	size_t i;
-	lh_node_t *n, *n_next;
-	db_entry_t *e;
-
 	if (!db)
 		return;
-
-	/* Free all entries in the write copy, then the table (both release
-	 * their budget charge). */
-	tbl = xtc_lrlock_write_begin(db->lr);
-	for (i = 0; i < lh_buckets(&tbl->lh); i++) {
-		for (n = *lh_bucket(&tbl->lh, i); n; n = n_next) {
-			n_next = n->next;
-			e = (db_entry_t *)n;
-			entry_free_value(db, tbl, e);
-			db_free(db, tbl, e, entry_size(e->key_len));
-		}
-	}
-	lh_destroy(&tbl->lh, db_lh_free, db);
-	xtc_lrlock_write_end(db->lr);
-
-	xtc_lrlock_destroy(db->lr);
-	xtc_arwlock_destroy(db->mt);
+	shards_destroy(db, db->nshard);
 	if (db->bc != NULL) bitcask_close(db->bc);
 	xtc_free(db);
+}
+
+db_keyset_t
+db_key_shard(db_t *db, const char *key, size_t key_len)
+{
+	if (db->nshard == 1)
+		return 1;
+	return (db_keyset_t)1 << ((fnv1a(key, key_len) >> 32) &
+	    (uint64_t)(db->nshard - 1));
+}
+
+/* Index of the lowest set bit of a non-zero set. */
+static int
+set_low(db_keyset_t set)
+{
+#if defined(__GNUC__) || defined(__clang__)
+	return __builtin_ctzll(set);
+#else
+	int k = 0;
+	while ((set & 1) == 0) {
+		set >>= 1;
+		k++;
+	}
+	return k;
+#endif
+}
+
+/* Latch the shards of `set` (shared db), then enter their lrlock
+ * sections, in ascending shard order: two commands that need
+ * overlapping sets cannot deadlock. */
+void
+db_lock(db_t *db, db_keyset_t set, int write)
+{
+	int k;
+
+	if (db->nshard < 64)
+		set &= ((db_keyset_t)1 << db->nshard) - 1;
+	for (; set != 0; set &= set - 1) {
+		k = set_low(set);
+		if (db->sh[k].mt != NULL)
+			(void)(write ? xtc_arwlock_wrlock(db->sh[k].mt, -1) :
+			    xtc_arwlock_rdlock(db->sh[k].mt, -1));
+		if (write)
+			(void)xtc_lrlock_write_begin(db->sh[k].lr);
+		else
+			(void)xtc_lrlock_read_begin(db->sh[k].lr);
+	}
+}
+
+void
+db_unlock(db_t *db, db_keyset_t set, int write)
+{
+	int k;
+
+	if (db->nshard < 64)
+		set &= ((db_keyset_t)1 << db->nshard) - 1;
+	for (; set != 0; set &= set - 1) {      /* any order releases */
+		k = set_low(set);
+		if (write) {
+			xtc_lrlock_publish_full_sync(db->sh[k].lr);
+			xtc_lrlock_write_end(db->sh[k].lr);
+		} else {
+			xtc_lrlock_read_end(db->sh[k].lr);
+		}
+		if (db->sh[k].mt != NULL)
+			(void)xtc_arwlock_unlock(db->sh[k].mt);
+	}
 }
 
 void
 db_read_begin(db_t *db)
 {
-	if (db->mt != NULL)
-		(void)xtc_arwlock_rdlock(db->mt, -1);
-	(void)xtc_lrlock_read_begin(db->lr);
+	db_lock(db, DB_ALL_SHARDS, 0);
 }
 
 void
 db_read_end(db_t *db)
 {
-	xtc_lrlock_read_end(db->lr);
-	if (db->mt != NULL)
-		(void)xtc_arwlock_unlock(db->mt);
+	db_unlock(db, DB_ALL_SHARDS, 0);
 }
 
 void
 db_write_begin(db_t *db)
 {
-	if (db->mt != NULL)
-		(void)xtc_arwlock_wrlock(db->mt, -1);
-	(void)xtc_lrlock_write_begin(db->lr);
+	db_lock(db, DB_ALL_SHARDS, 1);
 }
 
 void
 db_write_end(db_t *db)
 {
-	xtc_lrlock_publish_full_sync(db->lr);
-	xtc_lrlock_write_end(db->lr);
-	if (db->mt != NULL)
-		(void)xtc_arwlock_unlock(db->mt);
+	db_unlock(db, DB_ALL_SHARDS, 1);
 }
 
 /* ----- Read operations ----- */
@@ -524,8 +672,8 @@ db_write_end(db_t *db)
 static const db_entry_t *
 db_lookup(db_t *db, const char *key, size_t key_len)
 {
-	const db_table_t *tbl = xtc_lrlock_read_data(db->lr);
 	uint64_t h = fnv1a(key, key_len);
+	const db_table_t *tbl = rtable(db, h);
 	const lh_node_t *n;
 	const db_entry_t *e;
 
@@ -706,19 +854,22 @@ size_t
 db_keys(db_t *db, const char *pattern, size_t pattern_len,
         db_visit_fn fn, void *user)
 {
-	const db_table_t *tbl = xtc_lrlock_read_data(db->lr);
+	const db_table_t *tbl;
 	int64_t now = xtc_now_ns();
 	const lh_node_t *n;
 	const db_entry_t *e;
 	size_t i, count = 0;
-	int pass;
+	int pass, k;
 
-	/* Pass 0 counts, pass 1 visits: same snapshot, same `now`, so the
-	 * announced count is exactly the number visited. */
+	/* Pass 0 counts, pass 1 visits: same snapshot (every shard is held,
+	 * db_read_begin), same `now`, so the announced count is exactly the
+	 * number visited. */
 	for (pass = 0; pass < 2; pass++) {
 		if (pass == 1)
 			fn(NULL, count, NULL, 0, user);
-		for (i = 0; i < lh_buckets(&tbl->lh); i++) {
+		for (k = 0; k < db->nshard; k++)
+		for (tbl = xtc_lrlock_read_data(db->sh[k].lr), i = 0;
+		    i < lh_buckets(&tbl->lh); i++) {
 			for (n = *lh_bucket(&tbl->lh, i); n; n = n->next) {
 				e = (const db_entry_t *)n;
 				if (e->expire_at_ns > 0 && now >= e->expire_at_ns)
@@ -736,33 +887,21 @@ db_keys(db_t *db, const char *pattern, size_t pattern_len,
 	return count;
 }
 
+/* Keyspace-wide counters: no section needed (atomics). */
 size_t
 db_key_count(db_t *db)
 {
-	const db_table_t *tbl;
-	db_read_begin(db);
-	tbl = xtc_lrlock_read_data(db->lr);
-	db_read_end(db);
-	return tbl->n_keys;
+	return atomic_load(&db->keys);
 }
 
 size_t
 db_mem_used(db_t *db)
 {
-	const db_table_t *tbl;
-	db_read_begin(db);
-	tbl = xtc_lrlock_read_data(db->lr);
-	db_read_end(db);
-	return tbl->mem_used;
+	int64_t m = atomic_load(&db->mem);
+	return m > 0 ? (size_t)m : 0;
 }
 
 /* ----- Write operations ----- */
-
-static db_table_t *
-db_write_table(db_t *db)
-{
-	return (db_table_t *)xtc_lrlock_write_data(db->lr);
-}
 
 int
 db_set(db_t *db, const char *key, size_t key_len,
@@ -775,8 +914,8 @@ static int
 db_set_inmem(db_t *db, const char *key, size_t key_len,
              const char *val, size_t val_len)
 {
-	db_table_t *tbl = db_write_table(db);
 	uint64_t h = fnv1a(key, key_len);
+	db_table_t *tbl = wtable(db, h);
 	db_entry_t *e;
 	char *val_copy;
 
@@ -786,8 +925,8 @@ db_set_inmem(db_t *db, const char *key, size_t key_len,
 	e = entry_find(tbl, key, key_len, h);
 	if (e) {
 		/* Replace existing */
-		entry_free_value(db, tbl, e);
-		val_copy = val_alloc(db, tbl, val_len);
+		entry_free_value(db, e);
+		val_copy = val_alloc(db, val_len);
 		if (!val_copy)
 			return -1;
 		memcpy(val_copy, val, val_len);
@@ -800,17 +939,20 @@ db_set_inmem(db_t *db, const char *key, size_t key_len,
 	}
 
 	/* Check key limit */
-	if (db->opts.max_keys > 0 && tbl->n_keys >= db->opts.max_keys)
+	if (key_reserve(db) != 0)
 		return -1;
 
 	/* New entry */
-	e = db_malloc(db, tbl, entry_size(key_len));
-	if (!e)
+	e = db_malloc(db, entry_size(key_len));
+	if (!e) {
+		key_unreserve(db);
 		return -1;
+	}
 
-	val_copy = val_alloc(db, tbl, val_len);
+	val_copy = val_alloc(db, val_len);
 	if (!val_copy) {
-		db_free(db, tbl, e, entry_size(key_len));
+		db_free(db, e, entry_size(key_len));
+		key_unreserve(db);
 		return -1;
 	}
 
@@ -833,8 +975,8 @@ int
 db_set_ex(db_t *db, const char *key, size_t key_len,
           const char *val, size_t val_len, int64_t expire_ns)
 {
-	db_table_t *tbl = db_write_table(db);
 	uint64_t h = fnv1a(key, key_len);
+	db_table_t *tbl = wtable(db, h);
 	db_entry_t *e;
 	char *val_copy;
 
@@ -844,8 +986,8 @@ db_set_ex(db_t *db, const char *key, size_t key_len,
 	e = entry_find(tbl, key, key_len, h);
 	if (e) {
 		/* Replace existing */
-		entry_free_value(db, tbl, e);
-		val_copy = val_alloc(db, tbl, val_len);
+		entry_free_value(db, e);
+		val_copy = val_alloc(db, val_len);
 		if (!val_copy)
 			return -1;
 		memcpy(val_copy, val, val_len);
@@ -858,17 +1000,20 @@ db_set_ex(db_t *db, const char *key, size_t key_len,
 	}
 
 	/* Check key limit */
-	if (db->opts.max_keys > 0 && tbl->n_keys >= db->opts.max_keys)
+	if (key_reserve(db) != 0)
 		return -1;
 
 	/* New entry */
-	e = db_malloc(db, tbl, entry_size(key_len));
-	if (!e)
+	e = db_malloc(db, entry_size(key_len));
+	if (!e) {
+		key_unreserve(db);
 		return -1;
+	}
 
-	val_copy = val_alloc(db, tbl, val_len);
+	val_copy = val_alloc(db, val_len);
 	if (!val_copy) {
-		db_free(db, tbl, e, entry_size(key_len));
+		db_free(db, e, entry_size(key_len));
+		key_unreserve(db);
 		return -1;
 	}
 
@@ -897,8 +1042,8 @@ persist:
 int
 db_del(db_t *db, const char *key, size_t key_len)
 {
-	db_table_t *tbl = db_write_table(db);
 	uint64_t h = fnv1a(key, key_len);
+	db_table_t *tbl = wtable(db, h);
 	db_entry_t *e = entry_find(tbl, key, key_len, h);
 
 	if (!e)
@@ -914,8 +1059,8 @@ db_del(db_t *db, const char *key, size_t key_len)
 int
 db_expire(db_t *db, const char *key, size_t key_len, int64_t expire_ns)
 {
-	db_table_t *tbl = db_write_table(db);
 	uint64_t h = fnv1a(key, key_len);
+	db_table_t *tbl = wtable(db, h);
 	db_entry_t *e = entry_find(tbl, key, key_len, h);
 
 	if (!e)
@@ -927,8 +1072,8 @@ db_expire(db_t *db, const char *key, size_t key_len, int64_t expire_ns)
 int64_t
 db_incr(db_t *db, const char *key, size_t key_len, int64_t delta)
 {
-	db_table_t *tbl = db_write_table(db);
 	uint64_t h = fnv1a(key, key_len);
+	db_table_t *tbl = wtable(db, h);
 	db_entry_t *e = entry_find(tbl, key, key_len, h);
 	int64_t val;
 	char buf[32];
@@ -969,8 +1114,8 @@ db_incr(db_t *db, const char *key, size_t key_len, int64_t delta)
 
 	/* Update */
 	n = snprintf(buf, sizeof buf, "%lld", (long long)val);
-	val_free(db, tbl, e->val.str.data, e->val.str.len);
-	e->val.str.data = db_malloc(db, tbl, (size_t)n + 1);   /* < DB_REF_MIN */
+	val_free(db, e->val.str.data, e->val.str.len);
+	e->val.str.data = db_malloc(db, (size_t)n + 1);   /* < DB_REF_MIN */
 	if (!e->val.str.data) {
 		/* Entry is now corrupted; remove it */
 		entry_remove(db, tbl, e);
@@ -987,8 +1132,8 @@ db_incr(db_t *db, const char *key, size_t key_len, int64_t delta)
 static db_entry_t *
 db_get_or_create_list(db_t *db, const char *key, size_t key_len)
 {
-	db_table_t *tbl = db_write_table(db);
 	uint64_t h = fnv1a(key, key_len);
+	db_table_t *tbl = wtable(db, h);
 	db_entry_t *e = entry_find(tbl, key, key_len, h);
 
 	if (e) {
@@ -998,12 +1143,14 @@ db_get_or_create_list(db_t *db, const char *key, size_t key_len)
 	}
 
 	/* Check key limit */
-	if (db->opts.max_keys > 0 && tbl->n_keys >= db->opts.max_keys)
+	if (key_reserve(db) != 0)
 		return NULL;
 
-	e = db_malloc(db, tbl, entry_size(key_len));
-	if (!e)
+	e = db_malloc(db, entry_size(key_len));
+	if (!e) {
+		key_unreserve(db);
 		return NULL;
+	}
 
 	memcpy(e->key, key, key_len);
 	e->key[key_len] = '\0';
@@ -1023,14 +1170,13 @@ int64_t
 db_lpush(db_t *db, const char *key, size_t key_len,
          const char *val, size_t val_len)
 {
-	db_table_t *tbl = db_write_table(db);
 	db_entry_t *e = db_get_or_create_list(db, key, key_len);
 	db_list_node_t *n;
 
 	if (!e)
 		return -1;
 
-	n = db_malloc(db, tbl, sizeof(*n) + val_len + 1);
+	n = db_malloc(db, sizeof(*n) + val_len + 1);
 	if (!n)
 		return -1;
 
@@ -1053,14 +1199,13 @@ int64_t
 db_rpush(db_t *db, const char *key, size_t key_len,
          const char *val, size_t val_len)
 {
-	db_table_t *tbl = db_write_table(db);
 	db_entry_t *e = db_get_or_create_list(db, key, key_len);
 	db_list_node_t *n;
 
 	if (!e)
 		return -1;
 
-	n = db_malloc(db, tbl, sizeof(*n) + val_len + 1);
+	n = db_malloc(db, sizeof(*n) + val_len + 1);
 	if (!n)
 		return -1;
 
@@ -1083,8 +1228,8 @@ int
 db_lpop(db_t *db, const char *key, size_t key_len,
         db_pop_cb cb, void *user)
 {
-	db_table_t *tbl = db_write_table(db);
 	uint64_t h = fnv1a(key, key_len);
+	db_table_t *tbl = wtable(db, h);
 	db_entry_t *e = entry_find(tbl, key, key_len, h);
 	db_list_node_t *n;
 
@@ -1101,7 +1246,7 @@ db_lpop(db_t *db, const char *key, size_t key_len,
 
 	if (cb)
 		cb(n->data, n->len, user);
-	db_free(db, tbl, n, sizeof(*n) + n->len + 1);
+	db_free(db, n, sizeof(*n) + n->len + 1);
 
 	/* Remove empty list */
 	if (e->val.list.count == 0)
@@ -1114,8 +1259,8 @@ int
 db_rpop(db_t *db, const char *key, size_t key_len,
         db_pop_cb cb, void *user)
 {
-	db_table_t *tbl = db_write_table(db);
 	uint64_t h = fnv1a(key, key_len);
+	db_table_t *tbl = wtable(db, h);
 	db_entry_t *e = entry_find(tbl, key, key_len, h);
 	db_list_node_t *n;
 
@@ -1132,7 +1277,7 @@ db_rpop(db_t *db, const char *key, size_t key_len,
 
 	if (cb)
 		cb(n->data, n->len, user);
-	db_free(db, tbl, n, sizeof(*n) + n->len + 1);
+	db_free(db, n, sizeof(*n) + n->len + 1);
 
 	/* Remove empty list */
 	if (e->val.list.count == 0)
@@ -1146,8 +1291,8 @@ db_rpop(db_t *db, const char *key, size_t key_len,
 static db_entry_t *
 db_get_or_create_hash(db_t *db, const char *key, size_t key_len)
 {
-	db_table_t *tbl = db_write_table(db);
 	uint64_t h = fnv1a(key, key_len);
+	db_table_t *tbl = wtable(db, h);
 	db_entry_t *e = entry_find(tbl, key, key_len, h);
 
 	if (e) {
@@ -1157,12 +1302,14 @@ db_get_or_create_hash(db_t *db, const char *key, size_t key_len)
 	}
 
 	/* Check key limit */
-	if (db->opts.max_keys > 0 && tbl->n_keys >= db->opts.max_keys)
+	if (key_reserve(db) != 0)
 		return NULL;
 
-	e = db_malloc(db, tbl, entry_size(key_len));
-	if (!e)
+	e = db_malloc(db, entry_size(key_len));
+	if (!e) {
+		key_unreserve(db);
 		return NULL;
+	}
 
 	memcpy(e->key, key, key_len);
 	e->key[key_len] = '\0';
@@ -1182,7 +1329,6 @@ db_hset(db_t *db, const char *key, size_t key_len,
         const char *field, size_t field_len,
         const char *val, size_t val_len)
 {
-	db_table_t *tbl = db_write_table(db);
 	db_entry_t *e = db_get_or_create_hash(db, key, key_len);
 	db_hash_field_t *f, *prev = NULL;
 	int added = 0;
@@ -1195,7 +1341,7 @@ db_hset(db_t *db, const char *key, size_t key_len,
 		if (f->key_len == field_len &&
 		    memcmp(f->data, field, field_len) == 0) {
 			/* Replace value */
-			db_hash_field_t *nf = db_malloc(db, tbl,
+			db_hash_field_t *nf = db_malloc(db,
 			    sizeof(*nf) + field_len + val_len + 2);
 			if (!nf)
 				return -1;
@@ -1210,14 +1356,14 @@ db_hset(db_t *db, const char *key, size_t key_len,
 				prev->next = nf;
 			else
 				e->val.hash.head = nf;
-			db_free(db, tbl, f,
+			db_free(db, f,
 			        sizeof(*f) + f->key_len + f->val_len + 2);
 			return 0;
 		}
 	}
 
 	/* New field */
-	f = db_malloc(db, tbl, sizeof(*f) + field_len + val_len + 2);
+	f = db_malloc(db, sizeof(*f) + field_len + val_len + 2);
 	if (!f)
 		return -1;
 	f->key_len = field_len;
@@ -1238,8 +1384,8 @@ int
 db_hdel(db_t *db, const char *key, size_t key_len,
         const char *field, size_t field_len)
 {
-	db_table_t *tbl = db_write_table(db);
 	uint64_t h = fnv1a(key, key_len);
+	db_table_t *tbl = wtable(db, h);
 	db_entry_t *e = entry_find(tbl, key, key_len, h);
 	db_hash_field_t **pp, *f;
 
@@ -1251,7 +1397,7 @@ db_hdel(db_t *db, const char *key, size_t key_len,
 		if (f->key_len == field_len &&
 		    memcmp(f->data, field, field_len) == 0) {
 			*pp = f->next;
-			db_free(db, tbl, f,
+			db_free(db, f,
 			        sizeof(*f) + f->key_len + f->val_len + 2);
 			e->val.hash.count--;
 			/* Remove empty hash */
@@ -1266,28 +1412,33 @@ db_hdel(db_t *db, const char *key, size_t key_len,
 void
 db_flushdb(db_t *db)
 {
-	db_table_t *tbl = db_write_table(db);
+	db_table_t *tbl;
 	size_t i;
 	lh_node_t *n, *n_next;
 	db_entry_t *e;
+	int k;
 
-	for (i = 0; i < lh_buckets(&tbl->lh); i++) {
-		for (n = *lh_bucket(&tbl->lh, i); n; n = n_next) {
-			n_next = n->next;
-			e = (db_entry_t *)n;
-			entry_free_value(db, tbl, e);
-			db_free(db, tbl, e, entry_size(e->key_len));
+	for (k = 0; k < db->nshard; k++) {
+		tbl = xtc_lrlock_write_data(db->sh[k].lr);
+		for (i = 0; i < lh_buckets(&tbl->lh); i++) {
+			for (n = *lh_bucket(&tbl->lh, i); n; n = n_next) {
+				n_next = n->next;
+				e = (db_entry_t *)n;
+				entry_free_value(db, e);
+				db_free(db, e, entry_size(e->key_len));
+			}
+			*lh_bucket(&tbl->lh, i) = NULL;
 		}
-		*lh_bucket(&tbl->lh, i) = NULL;
+		atomic_fetch_sub(&db->keys, tbl->n_keys);
+		tbl->n_keys = 0;
 	}
-	tbl->n_keys = 0;
 }
 
 int
 db_expire_stale(db_t *db, int64_t now_ns, int max_scan)
 {
-	db_table_t *tbl = db_write_table(db);
-	int removed = 0, scanned = 0;
+	db_table_t *tbl;
+	int removed = 0, scanned = 0, k, sh;
 	size_t i, visited, nb;
 
 	/* Resume where the last pass stopped and wrap, so successive passes
@@ -1295,27 +1446,37 @@ db_expire_stale(db_t *db, int64_t now_ns, int max_scan)
 	 * DbTable::expire_cursor).  Restarting at bucket 0 every time kept
 	 * rescanning the same first max_scan entries: expired keys behind
 	 * them were never reclaimed.  A bucket is always finished, so a pass
-	 * may look at up to one chain more than max_scan. */
-	nb = lh_buckets(&tbl->lh);
-	i = tbl->expire_cursor % nb;
-	for (visited = 0; visited < nb && scanned < max_scan;
-	    visited++, i = (i + 1) % nb) {
-		lh_node_t **pp = lh_bucket(&tbl->lh, i);
-		while (*pp) {
-			db_entry_t *e = (db_entry_t *)*pp;
-			scanned++;
-			if (e->expire_at_ns > 0 && now_ns >= e->expire_at_ns) {
-				*pp = e->node.next;
-				entry_free_value(db, tbl, e);
-				db_free(db, tbl, e, entry_size(e->key_len));
-				if (tbl->n_keys > 0)
-					tbl->n_keys--;
-				removed++;
-			} else {
-				pp = &e->node.next;
+	 * may look at up to one chain more than max_scan.  The cursor walks
+	 * one shard, then the next. */
+	for (k = 0; k < db->nshard && scanned < max_scan; k++) {
+		sh = (db->expire_shard + k) % db->nshard;
+		tbl = xtc_lrlock_write_data(db->sh[sh].lr);
+		nb = lh_buckets(&tbl->lh);
+		i = tbl->expire_cursor % nb;
+		for (visited = 0; visited < nb && scanned < max_scan;
+		    visited++, i = (i + 1) % nb) {
+			lh_node_t **pp = lh_bucket(&tbl->lh, i);
+			while (*pp) {
+				db_entry_t *e = (db_entry_t *)*pp;
+				scanned++;
+				if (e->expire_at_ns > 0 &&
+				    now_ns >= e->expire_at_ns) {
+					*pp = e->node.next;
+					entry_free_value(db, e);
+					db_free(db, e, entry_size(e->key_len));
+					if (tbl->n_keys > 0)
+						tbl->n_keys--;
+					key_unreserve(db);
+					removed++;
+				} else {
+					pp = &e->node.next;
+				}
 			}
 		}
+		tbl->expire_cursor = i;
+		db->expire_shard = sh;
+		if (visited == nb)           /* swept it: the next shard */
+			db->expire_shard = (sh + 1) % db->nshard;
 	}
-	tbl->expire_cursor = i;
 	return removed;
 }

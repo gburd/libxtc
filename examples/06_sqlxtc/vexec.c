@@ -4017,6 +4017,9 @@ ap_const(const vx_expr_t *e, const struct ap_scope *sc)
 		    ((sc->placed >> sc->side_of[e->col]) & 1u) != 0;
 	case VXO_CORRSUBQ: case VXO_CORRIN: case VXO_EXISTS:
 		return 0;
+	case VXO_FUNC:
+		if (e->func == VXF_EXT && vxf_volatile(e->col)) return 0;
+		break;
 	default: break;
 	}
 	if (!ap_const(e->a, sc) || !ap_const(e->b, sc)) return 0;

@@ -71,7 +71,7 @@ worth investigating every time; rerun the cell (`CELLS=...`) before
 calling it.
 
 A regression that is understood and decided on (a trade-off the release
-makes on purpose) is passed by name: `PERF_GATE_ACCEPT="lock_amutex_w64"`.
+makes on purpose) is passed by name: `PERF_GATE_ACCEPT="CELL ..."`.
 The verdict still prints it as `ACCEPTED regression`, and the release
 notes must name it with its cause.  There is no way to accept a cell
 silently.
@@ -110,7 +110,7 @@ Use that only to debug the gate itself.
 | `micro_fiber_switch`, `micro_proc_send_recv` | fiber switch, same-loop message | the scheduler's cost floor; glibc ucontext versus fcontext changed it 3.7x |
 | `micro_timer_set_fire`, `micro_slab_alloc_free`, `micro_amutex_lock`, `micro_chan_mpsc`, `micro_deque_steal`, `micro_chash_get` | the bench_micro hot paths | each a primitive every program uses |
 | `hop_same_2x64`, `hop_cross_2x64`, `hop_cross_16x64` | `bench_hop`: request/reply between loops | cross-loop messaging; per-slab statistics on one cache line capped it at 3.3M hops/s, and a fix moved the cost onto a kernel lock instead |
-| `lock_amutex_w4`, `lock_amutex_w64`, `lock_arwlock_mix16`, `lock_arwlock_r64` | `bench_sync_offloop`: plain threads on one lock | off-loop locks at low and high thread counts; one 1.59 change won at 64 threads and lost 4-9% at 4 |
+| `lock_amutex_w4`, `lock_amutex_w64`, `lock_arwlock_mix16`, `lock_arwlock_r64` | `bench_sync_offloop`: plain threads on one lock | off-loop locks at low and high thread counts; one 1.59 change won at 64 threads and lost 4-9% at 4, another halved `lock_amutex_w64` (fixed in 2.0) |
 | `timer_scale_8` | `bench_timer_scale`: 8 loops arming and cancelling | the timer heap under load |
 | `exec_spawn_8` | `bench_exec_scale`: spawn throughput, 8 loops | task creation and work stealing |
 | `wal_fiber_c8`, `wal_thread_c1` | sqlxtc `bench_wal`: group commit | the durable-commit path |

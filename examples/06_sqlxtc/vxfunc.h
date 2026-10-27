@@ -37,6 +37,10 @@ enum vxf_class vxf_class_of(int id);
  * other than 'now' / 'subsec' (args[i] == NULL = not a literal). */
 int vxf_wants_now(int id, const vx_cell_t *const *args, int nargs);
 
+/* 1 if every call of `id` may return a different value (random,
+ * randomblob): never evaluate it once for a whole scan. */
+int vxf_volatile(int id);
+
 /* 1 if argument argi of function id can be evaluated exactly: `lit` is
  * its value when it is a constant (else NULL), `maybe_real` is 1 when a
  * non-constant argument could be a REAL.  (quote() of a REAL is exact

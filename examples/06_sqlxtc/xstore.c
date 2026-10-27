@@ -8400,8 +8400,9 @@ xstore_rename_table(struct xsql *db, const char *oldname, const char *newname)
 
 	/* Recover the column schema from the persisted catalog value
 	 * (name\0coldefs); fall back to the cached coldefs. */
-	vlen = xs_cat_value(bt, oldname, val, (int)sizeof val);
+	vlen = xs_cat_value(bt, oldname, val, (int)sizeof val - 1);
 	if (vlen > 0) {
+		val[vlen] = '\0';      /* the value is not NUL-terminated */
 		for (i = 0; i < vlen; i++) if (val[i] == 0) break;
 		if (i < vlen - 1) coldefs = (const char *)val + i + 1;
 	}

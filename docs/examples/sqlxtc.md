@@ -93,7 +93,7 @@ textbook ones SQLite also uses.
   index order instead of a sort, MIN/MAX from the first or last key,
   index nested-loop joins) shared by SELECT, aggregates, ORDER BY,
   UPDATE and DELETE, and a per-statement plan cache. `vxfunc.c` holds
-  the date/time, printf and math functions.
+  the date/time, printf, math and random()/randomblob() functions.
 - **`bufmgr.c`** -- the buffer pool: pinning, eviction (CLOCK with a
   double-write buffer), and the pin-accounting that DST and ASan hardened
   (see [Known issues]({{ '/reference/known-issues/' | relative_url }}) for
@@ -959,9 +959,50 @@ read only):
   reaches full speed (each connection fills its own page cache), hence
   the 20 s warm-up for this shape.
 
-The open-loop mode, the stall check and the sweep are part of the
-benchmark kit that produced the ledger table; they are not shipped in
-this tree.
+**TPROC-C** (all five transaction types in the standard mix, 10
+warehouses, 8 connections).  The same method on the TPROC-C driver: each
+connection gets an even share of the offered rate, waits for its next
+scheduled start (the keying time), and each of the five transaction
+drivers measures latency from that scheduled start, retries included.
+Measured on a 32-vCPU x86-64 host, local NVMe, XFS, Debian 13, the 2.0
+tree: SQLite with WAL, `synchronous=FULL`, a 16 GB page cache and
+`BEGIN IMMEDIATE`; sqlxtc in process with a pool of 1.25x its page
+file.  A fresh copy of each engine's store per run; 30 s windows after a
+60 s warm-up at the same rate, and the window opens only once every
+connection has run a transaction (sqlxtc's first connections replay the
+store's log, which took up to 70 s).  Three runs per cell, interleaved;
+medians, all transactions together, microseconds unless marked:
+
+| Engine | Load | Offered/s | New-Order/min | p50 | p99 | p99.9 | max, ms: median (range) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| SQLite | closed loop | 3,518 | 91,781 | 201 | 34 ms | 532 ms | 2,931 (2,531-3,431) |
+| SQLite | 25% | 879 | 22,930 | 323 | 2,879 | 4,351 | 5.0 (4.9-5.2) |
+| SQLite | 50% | 1,759 | 45,888 | 615 | 19 ms | 79 ms | 231 (79-429) |
+| SQLite | 75% | 2,638 | 68,522 | 34 ms | 860 ms | 1,114 ms | 1,230 (1,130-1,956) |
+| sqlxtc | closed loop | 17,992 | 468,915 | 371 | 2,399 | 3,551 | 11 (11-14) |
+| sqlxtc | 25% | 4,497 | 117,283 | 347 | 1,615 | 2,143 | 7.2 (6.4-7.7) |
+| sqlxtc | 50% | 8,995 | 234,583 | 391 | 1,727 | 2,911 | 14 (14-17) |
+| sqlxtc | 75% | 13,493 | 351,747 | 479 | 7,423 | 29 ms | 57 (31-81) |
+
+* **At a quarter of its own maximum sqlxtc carries 5.1x SQLite's rate
+  with a lower tail** (p99 1.6 ms against 2.9 ms).  At half load
+  sqlxtc's p99 barely moves (1.7 ms) while SQLite's is 19 ms; at three
+  quarters SQLite's queue grows faster than it drains (p50 34 ms, p99
+  860 ms, 150-660 starts still owed at the end of the window) and
+  sqlxtc's p99.9 reaches 29 ms.
+* **Retries are in the latency.**  sqlxtc validates at commit (first
+  committer wins), and a New-Order that lost is retried by the driver:
+  at 75% load 0.12 retries per New-Order (20,709-21,862 retries for
+  176,569-176,574 New-Orders).  SQLite takes
+  the write lock at `BEGIN IMMEDIATE`, so it waits instead, in its busy
+  handler, which is where its tail comes from (see transfer above).
+* These cells ran a 30 s window on a different host than the TPROC-C
+  table above (60 s after a 120 s ramp, 64 vCPUs); compare within this
+  table only.
+
+The open-loop modes, the stall check and the sweeps are part of the
+benchmark kit that produced these tables; they are not shipped in this
+tree.
 
 ### Feature by feature
 
