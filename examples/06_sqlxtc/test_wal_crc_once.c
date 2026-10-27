@@ -32,15 +32,21 @@ static volatile unsigned long g_spin;
 static atomic_int g_in_init;
 static uint64_t   g_ticks_in_init;
 
-/* 20 ms of CPU inside the init, long enough for many 50 us ticks. */
-#define WAL_C32C_INIT_HOOK() do {                                      \
-	int64_t end_ = xtc_clock_mono() + 20000000;                    \
-	uint64_t t0_ = xtc_preempt_ticks();                            \
-	atomic_store(&g_in_init, 1);                                   \
-	while (xtc_clock_mono() < end_)                                \
-		g_spin++;                                              \
-	g_ticks_in_init = xtc_preempt_ticks() - t0_;                   \
-} while (0)
+/* 20 ms of CPU inside the init, long enough for many 50 us ticks.  The
+ * spin is XTC_PREEMPTIBLE: this binary links libxtc statically, so only
+ * marked code is preemptible, and the ticks must land where a redirect
+ * would be accepted if the init did not defer them. */
+XTC_PREEMPTIBLE static void
+crc_init_spin(void)
+{
+	int64_t end = xtc_clock_mono() + 20000000;
+	uint64_t t0 = xtc_preempt_ticks();
+	atomic_store(&g_in_init, 1);
+	while (xtc_clock_mono() < end)
+		g_spin++;
+	g_ticks_in_init = xtc_preempt_ticks() - t0;
+}
+#define WAL_C32C_INIT_HOOK() crc_init_spin()
 
 #include "wal.c"
 
@@ -89,7 +95,11 @@ main(void)
 		fprintf(stderr, "FAIL: executor setup\n");
 		return 1;
 	}
-	xtc_preempt_set_involuntary(1);
+	if (xtc_preempt_involuntary_supported() &&
+	    xtc_preempt_set_involuntary(1) != XTC_OK) {
+		fprintf(stderr, "FAIL: involuntary preemption refused\n");
+		return 1;
+	}
 	if (xtc_proc_spawn(xtc_exec_loop(e, 0), crc_fiber, (void *)0, NULL,
 	    NULL) != XTC_OK ||
 	    xtc_proc_spawn(xtc_exec_loop(e, 0), crc_fiber, (void *)1, NULL,
@@ -100,7 +110,7 @@ main(void)
 	}
 	(void)xtc_exec_run(e);
 	(void)pthread_join(wd, NULL);
-	xtc_preempt_set_involuntary(0);
+	(void)xtc_preempt_set_involuntary(0);
 	(void)xtc_exec_fini(e);
 
 	if (!atomic_load(&g_in_init) || g_sum[0] != g_sum[1]) {

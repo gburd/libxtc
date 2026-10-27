@@ -86,6 +86,10 @@ instruction, is EXPERIMENTAL, off by default, and documented in
 .Xr xtc_preempt_involuntary 3
 (its own header,
 .In xtc_preempt_involuntary.h ) .
+A program that links libxtc or libc statically must mark the code it
+wants preemptible
+.Pq Dv XTC_PREEMPTIBLE
+or enabling it fails.
 .Pp
 Signal masks: the ucontext substrate restores each fiber's saved signal
 mask on every switch; the fcontext substrate does not touch the mask,

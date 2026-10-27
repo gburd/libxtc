@@ -51,12 +51,6 @@ XTC_VERSION_FULL  = @XTC_VERSION_FULL@
 XTC_VERSION_MAJOR = @XTC_VERSION_MAJOR@
 AR		= ar
 RANLIB		= @RANLIB@
-# objcopy (empty where configure found none, or off Linux): renames the
-# archive's text to the xtc_text section, bounded by __start_xtc_text /
-# __stop_xtc_text, so involuntary preemption can tell libxtc's own code
-# from the application's in a static link (src/ptc/preempt.c, SAFE
-# POINTS).  The shared library needs no rename: it is a separate object.
-XTC_OBJCOPY	= @XTC_OBJCOPY@
 INSTALL		= @INSTALL@
 INSTALL_DATA	= @INSTALL_DATA@
 INSTALL_PROGRAM	= @INSTALL_PROGRAM@
@@ -573,13 +567,6 @@ compile_commands.json: Makefile
 
 $(STATIC_LIB): $(LIB_OBJS) $(XTC_PROBES_OBJ)
 	$(AR) rcs $@ $(LIB_OBJS) $(XTC_PROBES_OBJ)
-	if test -n "$(XTC_OBJCOPY)"; then \
-		$(XTC_OBJCOPY) --rename-section .text=xtc_text \
-		    --rename-section .text.unlikely=xtc_text \
-		    --rename-section .text.hot=xtc_text \
-		    --rename-section .text.startup=xtc_text \
-		    --rename-section .text.exit=xtc_text $@ || exit 1; \
-	fi
 	$(RANLIB) $@
 
 # The probe header, from src/xtc_probes.d.  Only named as a prerequisite

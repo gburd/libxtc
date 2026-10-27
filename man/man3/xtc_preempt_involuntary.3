@@ -49,7 +49,8 @@ outside libxtc's own internal regions, and at a program counter inside a
 The preemptible ranges are:
 .Bl -bullet
 .It
-the main executable's own code, when libc is a shared object;
+the main executable's own code, but only when libxtc and libc are both
+shared objects (neither lies inside it);
 .It
 every function marked
 .Dv XTC_PREEMPTIBLE
@@ -80,18 +81,19 @@ of its time outside preemptible code is sliced only by the ticks that
 land in its own code: its slices are about
 .Va interval No / (1 \- Va f )
 long.
-.Pp
-In a static executable libc lies in the main text, which is then not
-trusted; with no
+.Ss Static builds must mark their preemptible code
+When libxtc
+.Pq Pa libxtc.a
+or libc is linked statically, its code lies inside the main executable's
+text and cannot be told apart from the program's by segment, so the main
+executable is not preemptible by default: only
 .Dv XTC_PREEMPTIBLE
-function and no added range, enabling fails.
-A static libxtc is excluded by its own section: the build renames
-.Pa libxtc.a Ns 's
-text to
-.Li xtc_text
-.Pq objcopy ,
-and a libxtc that is linked into the executable without that rename
-refuses to enable.
+functions and added ranges are.
+With neither, enabling fails with
+.Dv XTC_E_NOSYS
+and says why.
+The rule is the same on every platform; the only question asked is which
+object holds libxtc and which holds libc.
 .Pp
 .Fn xtc_preempt_region_add
 adds

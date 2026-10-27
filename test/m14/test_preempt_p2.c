@@ -27,16 +27,20 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
+#include "xtc.h"
+#include "xtc_preempt_involuntary.h"   /* XTC_PREEMPTIBLE */
 /* No preemption signal on Windows (the preemption tests skip there).
- * The tick must land in THIS file's code: the safe-point check declines a
- * tick whose PC is in libc (raise) or libxtc.  So on Linux x86-64 and
- * aarch64 it is a raw tgkill from inline asm; the signal is delivered on
- * the syscall's return, at the next instruction of the caller. */
+ * The tick must land in preemptible code: the safe-point check declines a
+ * tick whose PC is in libc (raise) or libxtc, and this binary links
+ * libxtc.a, so only XTC_PREEMPTIBLE code is preemptible.  So on Linux
+ * x86-64 and aarch64 it is a raw tgkill from inline asm in a marked
+ * function; the signal is delivered on the syscall's return, at its next
+ * instruction. */
 #if defined(__linux__) && defined(__x86_64__) && \
     (defined(__GNUC__) || defined(__clang__))
 #include <sys/syscall.h>
 #include <unistd.h>
-static void
+XTC_PREEMPTIBLE static void
 preempt_tick_raw(void)
 {
 	long pid = getpid(), tid = syscall(SYS_gettid), rc;
@@ -50,7 +54,7 @@ preempt_tick_raw(void)
     (defined(__GNUC__) || defined(__clang__))
 #include <sys/syscall.h>
 #include <unistd.h>
-static void
+XTC_PREEMPTIBLE static void
 preempt_tick_raw(void)
 {
 	long pid = getpid(), tid = syscall(SYS_gettid);
@@ -80,7 +84,6 @@ preempt_tick_raw(void)
 #include "xtc_proc.h"
 #include "xtc_async.h"
 #include "xtc_preempt.h"
-#include "xtc_preempt_involuntary.h"
 #include "xtc_aio.h"
 #include "xtc_fs.h"
 #include "xtc_inject.h"
@@ -98,7 +101,7 @@ static volatile uint64_t g_sink;
  * anywhere.  Under cooperative scheduling this monopolizes the loop
  * until it finishes.  Only true (signal-context) preemption can slice
  * it. */
-static void
+XTC_PREEMPTIBLE static void
 runaway(void *arg)
 {
 	uint64_t iters = (uint64_t)(intptr_t)arg;
@@ -111,7 +114,7 @@ runaway(void *arg)
 
 /* A peer: increments a counter and yields, until the runaway is done.
  * It makes progress ONLY if the runaway is preempted to let it run. */
-static void
+XTC_PREEMPTIBLE static void
 peer(void *arg)
 {
 	(void)arg;
@@ -277,7 +280,7 @@ test_p2_peers_progress_on_ucontext(const MunitParameter p[], void *d)
 static atomic_long g_vec_bad, g_vec_checks;
 static int g_vec_avx2, g_vec_avx512;
 
-__attribute__((target("avx2"))) static int
+XTC_PREEMPTIBLE __attribute__((target("avx2"))) static int
 p2_ymm_hold(uint64_t want)
 {
 	uint64_t got[4];
@@ -293,7 +296,7 @@ p2_ymm_hold(uint64_t want)
 	    got[3] != want;
 }
 
-__attribute__((target("avx512f"))) static int
+XTC_PREEMPTIBLE __attribute__((target("avx512f"))) static int
 p2_zmm_hold(uint64_t want)
 {
 	uint64_t got[8];
@@ -311,7 +314,7 @@ p2_zmm_hold(uint64_t want)
 	return bad;
 }
 
-static void
+XTC_PREEMPTIBLE static void
 p2_vec_spinner(void *arg)
 {
 	uint64_t want = 0x0101010101010101ull * (uint64_t)((intptr_t)arg + 1);
@@ -382,7 +385,7 @@ test_p2_vector_state(const MunitParameter p[], void *d)
  * `subq` before saving RFLAGS (the carry came back wrong).
  */
 int p2_rz_probe(uint64_t v);
-__asm__(".text\n\t.type p2_rz_probe,@function\np2_rz_probe:\n\t"
+__asm__(".section xtc_preemptible,\"ax\",@progbits\n\t.type p2_rz_probe,@function\np2_rz_probe:\n\t"
     "movq %rdi, -8(%rsp)\n\t"
     "movq %rdi, -120(%rsp)\n\t"
     "movq $1, %rax\n\t"
@@ -401,11 +404,11 @@ __asm__(".text\n\t.type p2_rz_probe,@function\np2_rz_probe:\n\t"
     "je 5f\n\t"
     "orl $2, %eax\n"
     "5:\tret\n\t"
-    ".size p2_rz_probe, .-p2_rz_probe\n");
+    ".size p2_rz_probe, .-p2_rz_probe\n\t.text\n");
 
 static atomic_long g_rz_bad, g_fl_bad, g_rz_n;
 
-static void
+XTC_PREEMPTIBLE static void
 p2_rz_spinner(void *arg)
 {
 	uint64_t v = 0x5a5a5a5a00000000ull | (uint64_t)(intptr_t)arg;
@@ -504,7 +507,7 @@ void p2_cb_fwd_movsb(unsigned char *d, const unsigned char *s, size_t n);
 uint64_t p2_cb_rflags(void);
 void p2_cb_x87_tick(double *out6, long pid, long tid, long sig);
 void p2_cb_tick(long pid, long tid, long sig);
-__asm__(".text\n"
+__asm__(".section xtc_preemptible,\"ax\",@progbits\n"
     /* RFLAGS := fl, tick, return the RFLAGS the code resumed with. */
     ".type p2_cb_flags_tick,@function\np2_cb_flags_tick:\n\t"
     "movl $234, %eax\n\t"   /* SYS_tgkill */
@@ -598,14 +601,14 @@ __asm__(".text\n"
     "syscall\n\t"
     "vzeroupper\n\t"
     "ret\n\t"
-    ".size p2_cb_ymm_tick, .-p2_cb_ymm_tick\n");
+    ".size p2_cb_ymm_tick, .-p2_cb_ymm_tick\n\t.text\n");
 uint64_t p2_cb_fpenv_tick(long pid, long tid, long sig);
 /* PKRU := v, tick, return the PKRU resumed with (rdpkru/wrpkru need
  * ecx = edx = 0; the caller restores the original). */
 uint32_t p2_cb_pkru_tick(long pid, long tid, long sig, uint32_t v);
 uint32_t p2_cb_rdpkru(void);
 void p2_cb_wrpkru(uint32_t v);
-__asm__(".text\n"
+__asm__(".section xtc_preemptible,\"ax\",@progbits\n"
     ".type p2_cb_pkru_tick,@function\np2_cb_pkru_tick:\n\t"
     "movq %rdx, %r8\n\t"
     "movl %ecx, %eax\n\t"
@@ -630,13 +633,13 @@ __asm__(".text\n"
     "xorl %edx, %edx\n\t"
     ".byte 0x0f, 0x01, 0xef\n\t"
     "ret\n\t"
-    ".size p2_cb_wrpkru, .-p2_cb_wrpkru\n");
+    ".size p2_cb_wrpkru, .-p2_cb_wrpkru\n\t.text\n");
 #define P2_CB_PKEY15 (3u << 30)   /* key 15: access + write disable */
 void p2_cb_ymm_tick(long pid, long tid, long sig);
 
 /* XINUSE (XGETBV with ECX = 1) bit 2: the YMM upper halves are not in
  * their initial (zero) state. */
-static int
+XTC_PREEMPTIBLE static int
 p2_cb_ymm_dirty(void)
 {
 	unsigned lo, hi;
@@ -656,7 +659,7 @@ static int         g_cb_mode;   /* 0 df, 1 ac, 2 x87, 3 errno, 4 fpenv, 5 ymm, 6
 static uint32_t    g_cb_pkru0;  /* the thread's PKRU before the run */
 static unsigned char g_cb_pat[192];
 
-static double
+XTC_PREEMPTIBLE static double
 p2_cb_x87_pi3(void)
 {
 	double r;
@@ -665,7 +668,7 @@ p2_cb_x87_pi3(void)
 	return r;
 }
 
-static void
+XTC_PREEMPTIBLE static void
 p2_cb_peer(void *arg)
 {
 	unsigned char b[192];
@@ -713,7 +716,7 @@ p2_cb_peer(void *arg)
 	}
 }
 
-static void
+XTC_PREEMPTIBLE static void
 p2_cb_target(void *arg)
 {
 	unsigned char d[192];
@@ -912,7 +915,7 @@ p2_a64_note(int i)
 		atomic_fetch_add(&g_a64_slices, 1);
 }
 
-__attribute__((target("+sve"))) static int
+XTC_PREEMPTIBLE __attribute__((target("+sve"))) static int
 p2_sve_hold(uint64_t want, int i)
 {
 	uint64_t got[32];   /* up to 2048-bit vectors */
@@ -943,7 +946,7 @@ p2_sve_hold(uint64_t want, int i)
 	return bad;
 }
 
-static void
+XTC_PREEMPTIBLE static void
 p2_sve_spinner(void *arg)
 {
 	int i = (int)(intptr_t)arg;
@@ -970,7 +973,7 @@ p2_sve_spinner(void *arg)
  */
 static atomic_long g_x16_bad, g_x17_bad, g_nzcv_bad, g_x16_n;
 
-static int
+XTC_PREEMPTIBLE static int
 p2_x16_hold(uint64_t want)
 {
 	uint64_t a, b, lt;
@@ -991,7 +994,7 @@ p2_x16_hold(uint64_t want)
 	return (a != want) | ((b != want) << 1) | ((lt != 1) << 2);
 }
 
-static void
+XTC_PREEMPTIBLE static void
 p2_x16_spinner(void *arg)
 {
 	uint64_t want = 0x5a5a5a5a00000000ull | (uint64_t)(intptr_t)arg;
@@ -1107,7 +1110,7 @@ void p2_a64_cb_tick(long pid, long tid, long sig);
 uint64_t p2_a64_cb_fpcr_tick(long pid, long tid, long sig, uint64_t fpcr);
 uint64_t p2_a64_cb_sme_tick(long pid, long tid, long sig);
 uint64_t p2_a64_cb_svcr(void);
-__asm__(".text\n"
+__asm__(".section xtc_preemptible,\"ax\",%progbits\n"
     ".type p2_a64_cb_tick,%function\np2_a64_cb_tick:\n\t"
     "mov x8, #131\n\t"            /* __NR_tgkill */
     "svc #0\n\t"
@@ -1137,7 +1140,7 @@ __asm__(".text\n"
     ".type p2_a64_cb_svcr,%function\np2_a64_cb_svcr:\n\t"
     ".inst 0xd53b4240\n\t"        /* mrs x0, svcr */
     "ret\n\t"
-    ".size p2_a64_cb_svcr, .-p2_a64_cb_svcr\n");
+    ".size p2_a64_cb_svcr, .-p2_a64_cb_svcr\n\t.text\n");
 
 #define P2_A64_RZ    (3ull << 22)   /* FPCR.RMode = round toward zero */
 #define P2_A64_N     64
@@ -1152,7 +1155,7 @@ p2_a64cb_nop(int sig)
 	(void)sig;
 }
 
-static void
+XTC_PREEMPTIBLE static void
 p2_a64cb_peer(void *arg)
 {
 	uint64_t fpcr, v;
@@ -1184,7 +1187,7 @@ p2_a64cb_peer(void *arg)
 	}
 }
 
-static void
+XTC_PREEMPTIBLE static void
 p2_a64cb_target(void *arg)
 {
 	long pid = getpid(), tid = syscall(SYS_gettid), before;

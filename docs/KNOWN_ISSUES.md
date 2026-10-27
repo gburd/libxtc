@@ -93,12 +93,16 @@ before 980,535 [980,229-982,727] iterations, after 980,668
 [980,361-981,071]; the CPU-time timer fired about 250 times a second, the
 host's scheduler tick).
 
-**Static executables.**  libc then lies in the main text, which is not
-trusted: with no `XTC_PREEMPTIBLE` function and no added region, enabling
-returns `XTC_E_NOSYS` and says why on stderr (`test_preempt_static.sh`).
-libxtc's own code inside a static link is excluded by section: the build
-renames `libxtc.a`'s text to `xtc_text` with objcopy (configure finds it;
-a build without it refuses to enable).
+**Static builds must mark their preemptible code.**  When libxtc
+(`libxtc.a`) or libc is linked statically, its code lies inside the main
+executable's text and cannot be told apart from the program's by segment,
+so the main executable is not preemptible by default; only
+`XTC_PREEMPTIBLE` functions and `xtc_preempt_region_add` ranges are.  With
+neither, enabling returns `XTC_E_NOSYS` and says why on stderr
+(`test_preempt_static.sh`).  The main executable's own code is
+preemptible by default only when libxtc and libc are both shared objects.
+libxtc's own test programs link `libxtc.a`, so their spin loops carry
+`XTC_PREEMPTIBLE`.
 
 **What to do.**  Check the return of `xtc_preempt_set_involuntary(1)`.
 Include `xtc_preempt_involuntary.h`.  A fiber whose hot loop lives in a

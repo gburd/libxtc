@@ -658,16 +658,20 @@ test_concurrent(const MunitParameter p[], void *d)
  */
 #include <signal.h>
 #include "xtc_exec.h"
+#include "xtc.h"
+#include "xtc_preempt_involuntary.h"   /* XTC_PREEMPTIBLE */
 /* No preemption signal on Windows (the preemption tests skip there).
- * The tick must land in THIS file's code: the safe-point check declines a
- * tick whose PC is in libc (raise) or libxtc.  So on Linux x86-64 and
- * aarch64 it is a raw tgkill from inline asm; the signal is delivered on
- * the syscall's return, at the next instruction of the caller. */
+ * The tick must land in preemptible code: the safe-point check declines a
+ * tick whose PC is in libc (raise) or libxtc, and this binary links
+ * libxtc.a, so only XTC_PREEMPTIBLE code is preemptible.  So on Linux
+ * x86-64 and aarch64 it is a raw tgkill from inline asm in a marked
+ * function; the signal is delivered on the syscall's return, at its next
+ * instruction. */
 #if defined(__linux__) && defined(__x86_64__) && \
     (defined(__GNUC__) || defined(__clang__))
 #include <sys/syscall.h>
 #include <unistd.h>
-static void
+XTC_PREEMPTIBLE static void
 preempt_tick_raw(void)
 {
 	long pid = getpid(), tid = syscall(SYS_gettid), rc;
@@ -681,7 +685,7 @@ preempt_tick_raw(void)
     (defined(__GNUC__) || defined(__clang__))
 #include <sys/syscall.h>
 #include <unistd.h>
-static void
+XTC_PREEMPTIBLE static void
 preempt_tick_raw(void)
 {
 	long pid = getpid(), tid = syscall(SYS_gettid);
@@ -702,7 +706,6 @@ preempt_tick_raw(void)
 #endif
 #include "xtc_inject.h"
 #include "xtc_preempt.h"
-#include "xtc_preempt_involuntary.h"
 #include "xtc_proc.h"
 
 static atomic_long g_mp_peer_runs;

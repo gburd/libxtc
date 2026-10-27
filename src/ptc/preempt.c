@@ -239,35 +239,29 @@ XTC_PREEMPT_HIDDEN int __xtc_preempt_a64_sme;
  * third-party per-thread state.  libxtc brackets its own such regions,
  * but cannot bracket libc's.  So the redirect accepts only a PC inside a
  * PREEMPTIBLE range:
- *   - the main executable's executable segments (dl_iterate_phdr's first
- *     object), when libc is a separate shared object;
- *   - the xtc_preemptible section (functions marked XTC_PREEMPTIBLE);
+ *   - the main executable's executable segments, but only when neither
+ *     libxtc nor libc lies inside them (both are shared objects);
+ *   - the xtc_preemptible section of the object that links libxtc
+ *     (functions marked XTC_PREEMPTIBLE);
  *   - ranges added with xtc_preempt_region_add.
- * and never one inside libxtc's own text (the build renames libxtc.a's
- * text to the xtc_text section, bounded by __start_/__stop_xtc_text, so a
- * static libxtc inside the main executable is still excluded; libxtc.so
- * lies outside the main executable anyway).  Elsewhere the tick stays
- * pending and the fiber yields cooperatively at its next yield point.
+ * A static libxtc or a static libc cannot be told apart from the
+ * program's own code by segment, so then the main executable is not
+ * trusted and only marked code and added ranges are: a static build must
+ * mark its preemptible code, and enabling with none fails.  Elsewhere the
+ * tick stays pending and the fiber yields cooperatively at its next yield
+ * point.
  *
  * The table only grows (an entry, once published, never changes), so the
  * handler reads it lock-free: acquire the count, then scan.
  */
 #if defined(__ELF__) && defined(__linux__)
-/* The xtc_text bounds exist only when libxtc's archive was renamed and
- * linked into this object; the xtc_preemptible bounds only when some
- * function in this object carries XTC_PREEMPTIBLE.  Weak: absent is
- * NULL.  Hidden: they are this object's own sections. */
-extern char __start_xtc_text[] __attribute__((weak, visibility("hidden")));
-extern char __stop_xtc_text[] __attribute__((weak, visibility("hidden")));
+/* The bounds of the xtc_preemptible section in the object that links
+ * this file (the executable, for a static libxtc).  Weak: NULL when no
+ * function there carries XTC_PREEMPTIBLE. */
 extern char __start_xtc_preemptible[]
     __attribute__((weak, visibility("hidden")));
 extern char __stop_xtc_preemptible[]
     __attribute__((weak, visibility("hidden")));
-#define XTC_SELF_LO ((uintptr_t)__start_xtc_text)
-#define XTC_SELF_HI ((uintptr_t)__stop_xtc_text)
-#else
-#define XTC_SELF_LO ((uintptr_t)0)
-#define XTC_SELF_HI ((uintptr_t)0)
 #endif
 
 #define XTC_PREEMPT_REGIONS 32
@@ -280,6 +274,36 @@ static pthread_mutex_t g_regions_mu = PTHREAD_MUTEX_INITIALIZER;
 static int          g_regions_init;   /* under g_regions_mu */
 static int          g_regions_rc;     /* the init's verdict */
 static int          g_regions_norange;   /* refused only for want of a range */
+/* A libc PC a region must never cover (preempt_libc_pc). */
+static uintptr_t    g_guard_libc;
+
+/* A PC inside libc, wherever libc is linked: the return address of a
+ * qsort comparator.  (Not &qsort: in a non-PIE executable a function's
+ * address can be a canonical PLT stub inside the executable.) */
+#if defined(__GNUC__) || defined(__clang__)
+static uintptr_t g_libc_pc_probe;
+
+__attribute__((noinline)) static int
+preempt_libc_cmp(const void *a, const void *b)
+{
+	g_libc_pc_probe = (uintptr_t)__builtin_return_address(0);
+	return *(const int *)a - *(const int *)b;
+}
+
+static uintptr_t
+preempt_libc_pc(void)
+{
+	int v[2] = { 2, 1 };
+	qsort(v, 2, sizeof v[0], preempt_libc_cmp);
+	return g_libc_pc_probe;
+}
+#else
+static uintptr_t
+preempt_libc_pc(void)
+{
+	return 0;   /* no redirect on these compilers' targets anyway */
+}
+#endif
 
 static int
 region_push(uintptr_t lo, uintptr_t hi)
@@ -297,39 +321,43 @@ region_push(uintptr_t lo, uintptr_t hi)
 #include <link.h>
 
 struct preempt_scan {
-	int       seen;       /* objects visited */
-	int       others;     /* loaded objects other than main and the vDSO */
-	int       main_has_self;  /* this function lies in the main object */
-	uintptr_t vdso;
-	uintptr_t lo[4], hi[4];
+	int       seen;          /* objects visited */
+	uintptr_t libc_pc;       /* a PC inside libc (preempt_libc_pc) */
+	uintptr_t lo[4], hi[4];  /* the main executable's PF_X segments */
 	int       nx;
 };
 
-static int
+/*
+ * The first object dl_iterate_phdr reports is the main executable.  (The
+ * question is dladdr's -- which object holds libxtc, which holds libc --
+ * asked without dladdr, which needs -ldl before glibc 2.34.)
+ */
+__attribute__((noinline)) static int
 preempt_scan_cb(struct dl_phdr_info *i, size_t sz, void *arg)
 {
 	struct preempt_scan *s = arg;
-	uintptr_t me = (uintptr_t)&preempt_scan_cb, lo, hi;
 	int k;
 	(void)sz;
-	if (s->seen++ == 0) {
-		for (k = 0; k < i->dlpi_phnum; k++) {
-			if (i->dlpi_phdr[k].p_type != PT_LOAD ||
-			    (i->dlpi_phdr[k].p_flags & PF_X) == 0)
-				continue;
-			lo = i->dlpi_addr + i->dlpi_phdr[k].p_vaddr;
-			hi = lo + i->dlpi_phdr[k].p_memsz;
-			if (me >= lo && me < hi)
-				s->main_has_self = 1;
-			if (s->nx < 4) {
-				s->lo[s->nx] = lo;
-				s->hi[s->nx++] = hi;
-			}
-		}
-		return 0;
+	if (s->seen++ != 0)
+		return 1;   /* only the main executable is needed */
+	for (k = 0; k < i->dlpi_phnum && s->nx < 4; k++) {
+		if (i->dlpi_phdr[k].p_type != PT_LOAD ||
+		    (i->dlpi_phdr[k].p_flags & PF_X) == 0)
+			continue;
+		s->lo[s->nx] = i->dlpi_addr + i->dlpi_phdr[k].p_vaddr;
+		s->hi[s->nx] = s->lo[s->nx] + i->dlpi_phdr[k].p_memsz;
+		s->nx++;
 	}
-	if (i->dlpi_addr != s->vdso)
-		s->others++;
+	return 1;
+}
+
+static int
+preempt_in_main(const struct preempt_scan *s, uintptr_t pc)
+{
+	int k;
+	for (k = 0; k < s->nx; k++)
+		if (pc >= s->lo[k] && pc < s->hi[k])
+			return 1;
 	return 0;
 }
 
@@ -339,43 +367,35 @@ static int
 preempt_regions_init(const char **why)
 {
 	struct preempt_scan s;
-	int k, have = 0;
+	int k, self_in_main, libc_in_main;
 
 	memset(&s, 0, sizeof s);
-	s.vdso = (uintptr_t)getauxval(AT_SYSINFO_EHDR);
 	(void)dl_iterate_phdr(preempt_scan_cb, &s);
-	/* libxtc in the main executable: its text must be bounded, and the
-	 * bounds must cover this very function (a libxtc.a whose text kept a
-	 * name the rename missed, say -ffunction-sections, is refused). */
-	if (s.main_has_self && ((uintptr_t)&preempt_scan_cb < XTC_SELF_LO ||
-	    (uintptr_t)&preempt_scan_cb >= XTC_SELF_HI)) {
-		*why = "libxtc is linked into the executable but its text is "
-		    "not bounded (a build without the xtc_text rename)";
-		return XTC_E_NOSYS;
-	}
-	if (__start_xtc_preemptible != NULL &&
-	    (uintptr_t)__stop_xtc_preemptible >
-	    (uintptr_t)__start_xtc_preemptible) {
-		(void)region_push((uintptr_t)__start_xtc_preemptible,
-		    (uintptr_t)__stop_xtc_preemptible);
-		have = 1;
-	}
-	/* libc is a shared object exactly when some loaded object other
-	 * than the main program and the vDSO exists; with none, libc (and
-	 * every other library) lies in the main text, which is then not
-	 * trusted. */
-	if (s.others > 0) {
+	s.libc_pc = g_guard_libc = preempt_libc_pc();
+	/* A static (non-inlinable) function of this file stands for libxtc
+	 * (dladdr's question: is libxtc in the main executable?); its
+	 * address is never a PLT stub. */
+	self_in_main = preempt_in_main(&s, (uintptr_t)&preempt_scan_cb);
+	libc_in_main = s.libc_pc == 0 || preempt_in_main(&s, s.libc_pc);
+	if (!self_in_main && !libc_in_main)
 		for (k = 0; k < s.nx; k++)
 			(void)region_push(s.lo[k], s.hi[k]);
-		have |= s.nx > 0;
-	}
-	if (atomic_load_explicit(&g_nregions, memory_order_relaxed) > 0)
-		have = 1;
-	if (!have) {
+	if (__start_xtc_preemptible != NULL &&
+	    (uintptr_t)__stop_xtc_preemptible >
+	    (uintptr_t)__start_xtc_preemptible)
+		(void)region_push((uintptr_t)__start_xtc_preemptible,
+		    (uintptr_t)__stop_xtc_preemptible);
+	if (atomic_load_explicit(&g_nregions, memory_order_relaxed) == 0) {
 		g_regions_norange = 1;
-		*why = "static executable: libc lies in the main text, and no "
-		    "XTC_PREEMPTIBLE function or xtc_preempt_region_add range "
-		    "exists";
+		*why = self_in_main ?
+		    "libxtc is linked statically into the executable, which "
+		    "is then not preemptible by default: mark preemptible "
+		    "code XTC_PREEMPTIBLE or add it with "
+		    "xtc_preempt_region_add" :
+		    "libc is linked statically into the executable, which "
+		    "is then not preemptible by default: mark preemptible "
+		    "code XTC_PREEMPTIBLE or add it with "
+		    "xtc_preempt_region_add";
 		return XTC_E_NOSYS;
 	}
 	return XTC_OK;
@@ -399,8 +419,6 @@ int
 __xtc_preempt_pc_ok(uintptr_t pc)
 {
 	int n = atomic_load_explicit(&g_nregions, memory_order_acquire), k;
-	if (pc >= XTC_SELF_LO && pc < XTC_SELF_HI)
-		return 0;
 	for (k = 0; k < n; k++)
 		if (pc >= g_regions[k].lo && pc < g_regions[k].hi)
 			return 1;
@@ -423,10 +441,18 @@ xtc_preempt_region_add(const void *start, const void *end)
 	int rc;
 	if (start == NULL || hi <= lo)
 		return XTC_E_INVAL;
-	if (lo < XTC_SELF_HI && hi > XTC_SELF_LO)
-		return XTC_E_INVAL;   /* libxtc's own text is never preemptible */
+	/* A cheap guard, not a proof: refuse a range that covers this file
+	 * (a static function: its address is never a PLT stub) or a libc
+	 * PC (the return address into qsort's caller-of-comparator). */
+	if ((uintptr_t)&region_push >= lo && (uintptr_t)&region_push < hi)
+		return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&g_regions_mu);
-	rc = region_push(lo, hi);
+	if (g_guard_libc == 0)
+		g_guard_libc = preempt_libc_pc();
+	if (g_guard_libc != 0 && g_guard_libc >= lo && g_guard_libc < hi)
+		rc = XTC_E_INVAL;
+	else
+		rc = region_push(lo, hi);
 	(void)__xtc_mtx_unlock(&g_regions_mu);
 	return rc;
 }

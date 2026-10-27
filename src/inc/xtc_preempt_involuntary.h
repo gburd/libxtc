@@ -14,10 +14,12 @@
  *	THE CONTRACT (xtc_preempt_involuntary(3)):
  *	  - A tick yields the fiber only at a SAFE POINT: outside a
  *	    critical section and libxtc's own internal regions, and at a PC
- *	    inside a PREEMPTIBLE range.  By default that is the main
- *	    executable's own code (when libc is a shared object), plus every
- *	    function marked XTC_PREEMPTIBLE, plus ranges added with
- *	    xtc_preempt_region_add.  Never libc, other shared libraries, or
+ *	    inside a PREEMPTIBLE range: every function marked
+ *	    XTC_PREEMPTIBLE, ranges added with xtc_preempt_region_add, and
+ *	    the main executable's own code when libxtc and libc are both
+ *	    shared objects.  A static libxtc or libc lies inside the main
+ *	    text and cannot be told apart from it, so a STATIC BUILD MUST
+ *	    MARK ITS PREEMPTIBLE CODE (enabling with none fails).  Never libc, other shared libraries, or
  *	    libxtc itself: code compiled for a thread (malloc's per-thread
  *	    cache, a FILE's per-thread lock) is not safe to interleave with a
  *	    loop-mate on the same thread.  Elsewhere the tick stays pending
@@ -45,10 +47,9 @@
 #include "xtc.h"
 
 /*
- * Mark a function preemptible: the build places it in the
- * xtc_preemptible section, which the safe-point check trusts even in a
- * static executable (where the main text holds libc and is not
- * trusted).  A marked function must follow the contract above; it may
+ * Mark a function preemptible: it is placed in the xtc_preemptible
+ * section, which the safe-point check trusts even in a static build
+ * (where the main text holds libxtc or libc and is not trusted).  A marked function must follow the contract above; it may
  * call anything, but a tick that lands in a callee outside a preemptible
  * range is deferred.  ELF with GCC or Clang; empty elsewhere.
  */

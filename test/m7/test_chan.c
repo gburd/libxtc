@@ -412,7 +412,7 @@ struct pr_ctx {
 	_Atomic int stop, done, bad;
 };
 
-static void
+XTC_PREEMPTIBLE static void
 pr_producer(void *arg)
 {
 	struct pr_ctx *x = arg;
@@ -440,7 +440,7 @@ pr_producer(void *arg)
 	atomic_store(&x->stop, 1);
 }
 
-static void
+XTC_PREEMPTIBLE static void
 pr_consumer(void *arg)
 {
 	struct pr_ctx *x = arg;

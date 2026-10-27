@@ -137,7 +137,7 @@ ps_skip(void)
 	return MUNIT_OK;
 }
 
-static void
+XTC_PREEMPTIBLE static void
 ps_note_loop(intptr_t id)
 {
 	if (id == 0) {
@@ -147,7 +147,7 @@ ps_note_loop(intptr_t id)
 }
 
 /* ---- /libc_malloc ---- */
-static void
+XTC_PREEMPTIBLE static void
 ps_malloc_worker(void *arg)
 {
 	intptr_t id = (intptr_t)arg;
@@ -200,7 +200,7 @@ static char  *g_buf;
 #define PS_BUFSZ (64u << 20)
 static const char ps_tail[] = "abcdefghijklmnopqrstuvwxyz";
 
-static void
+XTC_PREEMPTIBLE static void
 ps_stdio_worker(void *arg)
 {
 	intptr_t id = (intptr_t)arg;
@@ -260,7 +260,7 @@ static _Atomic int  g_runaway_done;
 static _Atomic long g_peer_runs;
 static volatile unsigned char g_scratch[1 << 16];
 
-static void
+XTC_PREEMPTIBLE static void
 ps_runaway(void *arg)
 {
 	uint64_t acc = 0, k;
@@ -277,7 +277,7 @@ ps_runaway(void *arg)
 	atomic_store(&g_ready, 0);
 }
 
-static void
+XTC_PREEMPTIBLE static void
 ps_peer(void *arg)
 {
 	(void)arg;
@@ -287,7 +287,7 @@ ps_peer(void *arg)
 	}
 }
 
-static void
+XTC_PREEMPTIBLE static void
 ps_fair_spawn(void *arg)
 {
 	intptr_t i = (intptr_t)arg;
@@ -315,7 +315,9 @@ test_ps_fairness(const MunitParameter p[], void *d)
 
 #if !defined(PS_BEFORE)
 /* ---- /classify ---- */
-static void ps_classify_dummy(void) { }
+static volatile int g_cls_sink;
+XTC_PREEMPTIBLE static void ps_classify_dummy(void) { g_cls_sink = 1; }
+static void ps_unmarked(void) { g_cls_sink = 2; }   /* distinct body: no ICF */
 static unsigned char g_jit[64];
 static uintptr_t g_libc_pc;   /* a return address inside libc's qsort */
 
@@ -338,7 +340,10 @@ test_ps_classify(const MunitParameter p[], void *d)
 		return MUNIT_SKIP;
 	munit_assert_int(xtc_preempt_set_involuntary(1), ==, XTC_OK);
 	munit_assert_int(__xtc_preempt_pc_ok(
-	    (uintptr_t)&ps_classify_dummy), ==, 1);           /* this file */
+	    (uintptr_t)&ps_classify_dummy), ==, 1);   /* XTC_PREEMPTIBLE */
+	/* This binary links libxtc.a, so the rest of the executable is not
+	 * preemptible by default (static libxtc: mark or add). */
+	munit_assert_int(__xtc_preempt_pc_ok((uintptr_t)&ps_unmarked), ==, 0);
 	qsort(v, 4, sizeof v[0], ps_cmp);
 	munit_assert_int(__xtc_preempt_pc_ok(g_libc_pc), ==, 0);   /* libc */
 	munit_assert_int(__xtc_preempt_pc_ok((uintptr_t)&xtc_yield), ==, 0);
@@ -355,9 +360,10 @@ test_ps_classify(const MunitParameter p[], void *d)
 	    XTC_E_INVAL);
 	munit_assert_int(xtc_preempt_region_add(NULL, g_jit), ==,
 	    XTC_E_INVAL);
-	munit_assert_int(xtc_preempt_region_add(
-	    (const void *)(uintptr_t)&xtc_yield,
-	    (const void *)((uintptr_t)&xtc_yield + 1)), ==, XTC_E_INVAL);
+	/* A range over libc (around the PC qsort returned to) is refused. */
+	munit_assert_int(xtc_preempt_region_add((const void *)(g_libc_pc - 64),
+	    (const void *)(g_libc_pc + 64)), ==, XTC_E_INVAL);
+
 	(void)xtc_preempt_set_involuntary(0);
 	return MUNIT_OK;
 }
