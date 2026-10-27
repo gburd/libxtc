@@ -15,6 +15,7 @@
  */
 
 #include "btnode.h"
+#include "t_pagebytes.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -475,7 +476,6 @@ test_check(void)
 	struct btnode_hdr hh;
 	struct btnode_slot s1, s2;
 	int i;
-	uint64_t pid;
 	uint8_t ref[12 + 8];
 	uint8_t empty = 0;
 
@@ -553,30 +553,38 @@ test_check(void)
 	corrupt_expect(L, ps, X, (size_t)s1.offset + 3 + 12, "\0", 1,
 	    "ovf ref with page id 0");
 
-	/* Internal node in the btree's shape. */
+	/* Internal node in the btree's shape (XBT3): real fences and their
+	 * prefix, slot 0 the -infinity child with an empty stored suffix,
+	 * 4-byte child ids. */
 	btnode_init(L, ps, 0);
-	btnode_set_fences(L, NULL, 0, NULL, 0);
-	pid = 11;
-	memcpy(b8, &pid, 8);
-	CHECK(btnode_insert(L, &empty, 0, b8, 8) == 0, "slot 0");
-	pid = 12;
-	memcpy(b8, &pid, 8);
-	CHECK(btnode_insert(L, "m", 1, b8, 8) == 0, "sep");
+	btnode_set_fences(L, "ka", 2, "kz", 2);
+	CHECK(btnode_prefix_len(L) == 1, "internal prefix %u",
+	    btnode_prefix_len(L));
+	u32 = 11;
+	memcpy(b8, &u32, 4);
+	CHECK(btnode_insert(L, &empty, 0, b8, 4) == 0, "slot 0");
+	u32 = 12;
+	memcpy(b8, &u32, 4);
+	CHECK(btnode_insert(L, "km", 2, b8, 4) == 0, "sep");
+	CHECK(btnode_insert(L, "m", 1, b8, 4) == -2, "a key outside the "
+	    "prefix is refused");
 	CHECK(btnode_check(L, why, sizeof why) == 0, "internal: %s", why);
 	memcpy(&s1, L + s0, sl);
 	memcpy(&s2, L + s0 + sl, sl);
-	u16 = 4;
+	u16 = 8;
 	corrupt_expect(L, ps, X, s0 + sl + offsetof(struct btnode_slot,
-	    val_len), &u16, 2, "internal value not 8 bytes");
-	pid = 0;
-	corrupt_expect(L, ps, X, (size_t)s2.offset + 1, &pid, 8,
+	    val_len), &u16, 2, "internal value not 4 bytes");
+	u32 = 0;
+	corrupt_expect(L, ps, X, (size_t)s2.offset + s2.key_len, &u32, 4,
 	    "internal child pid 0");
+	corrupt_expect(L, ps, X, (size_t)s2.offset, "a", 1,
+	    "internal separator <= lo fence");
 	/* An internal node whose slot 0 is a real key. */
 	btnode_init(X, ps, 0);
 	btnode_set_fences(X, NULL, 0, NULL, 0);
-	pid = 11;
-	memcpy(b8, &pid, 8);
-	CHECK(btnode_insert(X, "a", 1, b8, 8) == 0, "slot 0 keyed");
+	u32 = 11;
+	memcpy(b8, &u32, 4);
+	CHECK(btnode_insert(X, "a", 1, b8, 4) == 0, "slot 0 keyed");
 	CHECK(btnode_check(X, why, sizeof why) != 0, "missed: slot 0 key");
 	printf("    caught %-34s -> %s\n", "internal slot 0 not empty", why);
 
@@ -689,10 +697,81 @@ test_split_bound(void)
 	    "pending entry up to M = (cap - 2K)/3; %d failures above it)\n", bad_over);
 }
 
+/*
+ * No page image carries memory it was not meant to.  Every node rebuild
+ * (compaction, split, merge) builds into a stack buffer, and btnode_init
+ * zeroed only the header, so the gap between the slot array and the cell
+ * heap was whatever the stack held -- written to the page file and the
+ * log with the page.  Build the same split, merge and compaction twice,
+ * with the stack below pre-filled with two different patterns: the pages
+ * must be byte-identical, and every byte that belongs to nothing must be
+ * zero, also after removes (a removed cell's bytes are cleared).
+ */
+static void __attribute__((noinline))
+fill_stack(uint8_t v)
+{
+	volatile uint8_t junk[96 * 1024];
+	size_t i;
+
+	for (i = 0; i < sizeof junk; i++)
+		junk[i] = v;
+}
+
+static void __attribute__((noinline))
+build_pages(uint8_t *L, uint8_t *R, uint32_t ps)
+{
+	uint8_t sep[64];
+	uint16_t sl = 0;
+	int i;
+
+	btnode_init(L, ps, 1);
+	btnode_set_fences(L, "k0000", 5, "k9999", 5);
+	for (i = 1; i < 300; i++) {
+		char key[16], val[24];
+		snprintf(key, sizeof key, "k%04d", i * 7 % 9000 + 1);
+		memset(val, 'a' + i % 26, sizeof val);
+		if (btnode_insert(L, key, 5, val, (uint16_t)(i % 20)) < 0)
+			break;
+	}
+	for (i = 0; i < 40; i++)
+		(void)btnode_remove(L, (i * 3) % (int)btnode_count(L));
+	btnode_init(R, ps, 1);
+	(void)btnode_split(L, R, sep, &sl);
+	(void)btnode_merge(L, R);
+	(void)btnode_split(L, R, sep, &sl);
+}
+
+static void
+test_page_bytes(void)
+{
+	const uint32_t ps = 4096;
+	uint8_t *L1 = malloc(ps), *R1 = malloc(ps), *L2 = malloc(ps),
+	    *R2 = malloc(ps);
+	long d;
+
+	CHECK(L1 != NULL && R1 != NULL && L2 != NULL && R2 != NULL, "malloc");
+	memset(L1, 0x5A, ps); memset(R1, 0x5A, ps);
+	memset(L2, 0xC3, ps); memset(R2, 0xC3, ps);
+	fill_stack(0x11);
+	build_pages(L1, R1, ps);
+	fill_stack(0xEE);
+	build_pages(L2, R2, ps);
+	CHECK(memcmp(L1, L2, ps) == 0 && memcmp(R1, R2, ps) == 0,
+	    "the same split/merge/compaction built from differently filled "
+	    "memory gives different pages");
+	d = t_dead_bytes(L1) + t_dead_bytes(R1);
+	CHECK(d == 0, "%ld bytes outside the live header/slots/cells are not "
+	    "zero", d);
+	printf("  test_page_bytes: ok (rebuilt pages identical from different "
+	    "stack contents; 0 unowned non-zero bytes)\n");
+	free(L1); free(R1); free(L2); free(R2);
+}
+
 int
 main(void)
 {
 	printf("btnode unit tests\n");
+	test_page_bytes();
 	test_prefix_leaf();
 	test_fill_and_split();
 	test_binary_keys();

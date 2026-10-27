@@ -19,8 +19,10 @@
  *	  - random() / randomblob() replay too (xtc_rand_u64 takes the run's
  *	    stream under the simulator), and differ between seeds.
  *
- *	The epoch offset is sampled once per process (outside the runs, by
- *	a warm-up query), as xstore's HLC does.
+ *	Inside a run 'now' is the virtual clock alone (no wall-clock offset,
+ *	which would carry real time into the run), as xstore's HLC is; off
+ *	the simulator it is the wall clock.  (A first query outside the runs
+ *	checks the latter.)
  */
 
 #ifndef _GNU_SOURCE
@@ -145,11 +147,15 @@ main(void)
 		unlink(btf);
 		return 1;
 	}
-	/* Warm-up outside any sim run: samples the one-shot epoch offset. */
+	/* Outside the runs 'now' reads the wall clock (plus its one-shot
+	 * offset); inside a run it is the virtual milliseconds alone, so the
+	 * runs need no warm-up and nothing sampled before them reaches them. */
 	if (sx_open_bt(g_bt, &warm) != SX_OK) return 1;
 	g_out[0] = '\0';
-	if (run_q(warm, "SELECT datetime('now')") != 0) {
-		printf("  FAIL: warm-up query did not run\n");
+	if (run_q(warm, "SELECT datetime('now')") != 0 ||
+	    strncmp(g_out, "19", 2) == 0) {
+		printf("  FAIL: off the simulator 'now' is not the wall clock "
+		    "(%s)\n", g_out);
 		return 1;
 	}
 	sx_close(warm);

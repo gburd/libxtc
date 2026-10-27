@@ -218,12 +218,30 @@ run_one(uint64_t seed, char *out)
 	return (rc == XTC_OK && g_ok) ? 0 : -1;
 }
 
+/* A fresh, empty tree in the same page file, and the commit clock back
+ * at its start (xstore_clock_reset: no store open, nothing in flight). */
+static int
+fresh(bm_t **bm, bm_opts_t *bo)
+{
+	if (g_bt != NULL)
+		bt_close(g_bt);
+	if (*bm != NULL)
+		bm_destroy(*bm);
+	g_bt = NULL;
+	*bm = NULL;
+	xstore_clock_reset();
+	bo->reopen = 0;
+	if (truncate(bo->path, 0) != 0 || bm_create(bo, bm) != XTC_OK ||
+	    bt_open(*bm, &g_bt) != XTC_OK)
+		return -1;
+	return 0;
+}
+
 int
 main(int argc, char **argv)
 {
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	bm_t *bm = NULL;
-	sx_db *warm = NULL;
 	char btf[] = "/tmp/xtc-gcidx-bt-XXXXXX";
 	static char a[OUTCAP], b[OUTCAP];
 	uint64_t base = argc > 1 ? strtoull(argv[1], NULL, 0) : 1;
@@ -237,18 +255,17 @@ main(int argc, char **argv)
 	bo.path = btf;
 	bo.page_size = 4096;
 	bo.n_frames = 512;
-	if (bm_create(&bo, &bm) != XTC_OK || bt_open(bm, &g_bt) != XTC_OK) {
-		unlink(btf);
-		return 1;
-	}
-	/* Outside any sim run: samples the HLC's one-shot epoch offset. */
-	if (sx_open_bt(g_bt, &warm) != SX_OK ||
-	    sx_exec(warm, "CREATE TABLE warm(k INTEGER PRIMARY KEY)", NULL) != SX_OK)
-		return 1;
-	sx_close(warm);
 	for (s = base; s < base + count; s++) {
 		uint64_t seed = 0x9E3779B97F4A7C15ull * (s + 1);
-		if (run_one(seed, a) != 0 || run_one(seed, b) != 0) {
+		int ra, rb;
+		/* Each run on a fresh tree from the same commit clock: stamps
+		 * are the run's virtual milliseconds (xstore.c hlc_phys_ms),
+		 * and the clock never runs backwards, so a second run in this
+		 * process would otherwise continue from the first one's last
+		 * stamp (and its versions would sit under the older ones). */
+		ra = fresh(&bm, &bo) != 0 ? -1 : run_one(seed, a);
+		rb = ra != 0 || fresh(&bm, &bo) != 0 ? -1 : run_one(seed, b);
+		if (ra != 0 || rb != 0) {
 			printf("  FAIL: seed=%llu (0x%016llx): %s\n",
 			    (unsigned long long)s, (unsigned long long)seed,
 			    g_why[0] ? g_why : "run error or guard trip");
@@ -263,8 +280,10 @@ main(int argc, char **argv)
 			fails++;
 		}
 	}
-	bt_close(g_bt);
-	bm_destroy(bm);
+	if (g_bt != NULL)
+		bt_close(g_bt);
+	if (bm != NULL)
+		bm_destroy(bm);
 	unlink(btf);
 	if (fails) {
 		printf("FAIL: %d of %llu seeds\n", fails, (unsigned long long)count);

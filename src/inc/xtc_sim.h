@@ -59,6 +59,7 @@ enum xtc_sim_stream {
  * PUBLIC: void     xtc_sim_clock_advance __P((int64_t));
  * PUBLIC: void     xtc_sim_clock_set __P((int64_t));
  * PUBLIC: int      __xtc_sim_vclock __P((int64_t *));
+ * PUBLIC: int      xtc_sim_clock_active __P((void));
  */
 XTC_API int      __xtc_sim_active(void);
 
@@ -317,6 +318,13 @@ XTC_API void     xtc_sim_clock_set(int64_t ns);
 /* Query the virtual clock: returns 1 and writes *out_ns when active,
  * 0 otherwise.  The single seam __os_clock_mono consults. */
 XTC_API int      __xtc_sim_vclock(int64_t *out_ns);
+
+/* 1 while the virtual clock is active (inside a deterministic run), so
+ * xtc_clock_mono returns virtual time; 0 otherwise.  For code that
+ * derives a wall-clock-like value from xtc_clock_mono: under the virtual
+ * clock it must not add an offset sampled from real time (that offset
+ * would carry real time into the run and break replay). */
+XTC_API int      xtc_sim_clock_active(void);
 
 /*
  * Run an executor's loops deterministically (DST scheduler).  Activates

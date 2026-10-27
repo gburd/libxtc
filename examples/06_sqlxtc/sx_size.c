@@ -253,6 +253,7 @@ struct pstat {
 	uint64_t n, used, slots, fences, prefix;
 };
 static struct pstat g_leaf, g_inner;
+static int g_height;        /* levels, root to leaf */
 static uint64_t g_ovf_pages, g_ovf_used;
 
 static void
@@ -364,6 +365,8 @@ walk(uint64_t pid, int depth)
 	}
 	mark(pid);
 	h = (const void *)pg;
+	if (depth + 1 > g_height)
+		g_height = depth + 1;
 	if (h->is_leaf) {
 		walk_leaf(pg);
 		free(pg);
@@ -373,14 +376,16 @@ walk(uint64_t pid, int depth)
 	g_inner.used += sizeof *h + (uint64_t)h->count * 10u + h->space_used;
 	g_inner.slots += h->count;
 	g_inner.fences += (uint64_t)h->lo_fence_len + h->hi_fence_len;
+	g_inner.prefix += h->prefix_len;
 	for (s = 0; s < h->count; s++) {
 		const void *vv;
 		uint16_t vl;
-		uint64_t child = 0;
+		uint32_t child = 0;
 
-		if (btnode_get(pg, s, NULL, NULL, &vv, &vl) != 0 || vl < 8)
+		if (btnode_get(pg, s, NULL, NULL, &vv, &vl) != 0 ||
+		    vl != BTNODE_CHILD_LEN)
 			continue;
-		memcpy(&child, vv, 8);
+		memcpy(&child, vv, sizeof child);
 		(void)walk(child, depth + 1);
 	}
 	free(pg);
@@ -452,12 +457,14 @@ main(int argc, char **argv)
 		perror(argv[1]);
 		return 1;
 	}
-	if (*(uint32_t *)sb == 0x58425431u) {   /* XBT1: 40-byte node headers */
-		fprintf(stderr, "%s: a sqlxtc 1.59 page file; open it with the "
-		    "server once (it is rebuilt from the log)\n", argv[1]);
+	if (*(uint32_t *)sb == 0x58425431u || *(uint32_t *)sb == 0x58425432u) {
+		/* XBT1 (1.59) / XBT2 (1.60): older node layouts */
+		fprintf(stderr, "%s: a sqlxtc %s page file; open it with the "
+		    "server once (it is rebuilt from the log)\n", argv[1],
+		    *(uint32_t *)sb == 0x58425431u ? "1.59" : "1.60");
 		return 1;
 	}
-	if (be32(sb) != 0 && *(uint32_t *)sb != 0x58425432u) {   /* XBT2 */
+	if (be32(sb) != 0 && *(uint32_t *)sb != 0x58425433u) {   /* XBT3 */
 		fprintf(stderr, "%s: not a sqlxtc page file\n", argv[1]);
 		return 1;
 	}
@@ -477,10 +484,13 @@ main(int argc, char **argv)
 
 	printf("page file %s: %.1f MB, %" PRIu64 " pages of %u B\n", argv[1],
 	    mb((uint64_t)st.st_size), g_npages, g_ps);
-	printf("  inner  %10" PRIu64 " pages %8.1f MB  fill %5.1f%%  slots/page %.1f\n",
+	printf("  height %d\n", g_height);
+	printf("  inner  %10" PRIu64 " pages %8.1f MB  fill %5.1f%%  slots/page %.1f  "
+	    "prefix %.1f B\n",
 	    g_inner.n, mb(g_inner.n * g_ps),
 	    g_inner.n ? 100.0 * (double)g_inner.used / ((double)g_inner.n * g_ps) : 0,
-	    g_inner.n ? (double)g_inner.slots / (double)g_inner.n : 0);
+	    g_inner.n ? (double)g_inner.slots / (double)g_inner.n : 0,
+	    g_inner.n ? (double)g_inner.prefix / (double)g_inner.n : 0);
 	printf("  leaf   %10" PRIu64 " pages %8.1f MB  fill %5.1f%%  slots/page %.1f  "
 	    "prefix %.1f B  fences %.1f B/page\n",
 	    g_leaf.n, mb(g_leaf.n * g_ps),

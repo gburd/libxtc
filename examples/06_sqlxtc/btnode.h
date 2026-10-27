@@ -148,9 +148,12 @@ int btnode_search(const void *page, const void *key, uint16_t key_len,
 
 /*
  * Insert key/value, keeping slots sorted.  `key` is the FULL key; only
- * its suffix (key_len - prefix_len bytes) is stored.  Returns 0 on
- * success, -1 if the node lacks room even after compaction (the caller
- * must split).
+ * its suffix (key_len - prefix_len bytes) is stored.  The empty key
+ * (key_len 0) is an internal node's -infinity slot 0: it goes to slot 0
+ * with an empty suffix under any prefix.  Returns 0 on success, -1 if
+ * the node lacks room even after compaction (the caller must split), -2
+ * if a non-empty key does not start with the node prefix (it is outside
+ * the node's fences: a caller bug).
  */
 int btnode_insert(void *page, const void *key, uint16_t key_len,
     const void *val, uint16_t val_len);
@@ -224,6 +227,11 @@ int btnode_split_ex(void *page, void *right_page, void *sep_key_out,
     uint16_t sep_cap, uint16_t *sep_len_out, const void *pend_key,
     uint16_t pend_klen, uint16_t pend_vlen);
 
+/* An internal node's child page id: the value of every internal slot,
+ * a little-endian uint32_t (the same width as right_sibling; a store
+ * holds at most 2^32 - 1 pages, 16 TiB of 4 KiB pages). */
+#define BTNODE_CHILD_LEN 4u
+
 /* Bytes an entry of the given full key and value length needs in a node
  * (slot + key + value, counting the whole key, i.e. no prefix savings). */
 static inline uint32_t
@@ -254,6 +262,37 @@ int btnode_merge(void *page, const void *right_page);
  * lock.  Returns 1 if they fit, 0 otherwise.
  */
 int btnode_merge_fits(const void *page, const void *right_page);
+
+/*
+ * Redistribute two adjacent LEAVES (left's upper fence == right's lower
+ * fence) before a split: move entries across their boundary so both end
+ * up about evenly full, with room for the pending entry (pend_key, whose
+ * full key and value length are given) on the side it will go to (left
+ * iff its key <= the new separator).  The new separator -- the shortest
+ * key between the two halves' boundary keys -- is written to sep_out
+ * (sep_cap bytes) and becomes left's upper and right's lower fence; the
+ * outer fences and both right links are kept.  The two rebuilt pages go
+ * to `out` (two pages: left, then right); `left` and `right` are only
+ * read, so the caller commits (copies) them once the parent's separator
+ * is known to fit.  Returns 0, or -1 if the pair cannot be evened with
+ * room for the entry, the best cut is the current one, or the separator
+ * would exceed sep_cap.  The caller owns the readers' safety: entries
+ * can move LEFT (btree.c bt_shift).
+ */
+int btnode_shift(const void *left, const void *right, const void *pend_key,
+    uint16_t pend_klen, uint16_t pend_vlen, void *sep_out, uint16_t sep_cap,
+    uint16_t *sep_len_out, void *out);
+
+/* How full a node is, percent of the page past the header (slots, cells
+ * and fences). */
+uint32_t btnode_fill(const void *page);
+
+/* Free bytes after compaction (what an insert may use). */
+uint32_t btnode_room(const void *page);
+
+/* How many inserts in a row landed just after the previous one (the
+ * insert history the split uses; 0 after a remove). */
+unsigned btnode_ins_run(const void *page);
 
 /* Heap bytes currently in use (key suffixes, values, and fence keys).
  * A node "underflows" when this drops well below the page capacity;
@@ -303,9 +342,10 @@ int btnode_hi_fence(const void *page, void *out, uint16_t cap, uint16_t *len);
  * that every cell and fence lies in [data_offset, page_size) with no two
  * overlapping, space_used == live cell bytes + fence bytes, the cached
  * slot heads, prefix_len == the fences' common prefix, keys strictly
- * ascending, leaf keys inside (lo_fence, hi_fence], the internal-node
- * shape (prefix 0, slot 0 the empty -infinity key, 8-byte unflagged
- * child values, separators <= hi_fence), and that a flagged leaf value
+ * ascending, leaf keys and internal separators inside (lo_fence,
+ * hi_fence], the internal-node shape (slot 0 the -infinity child with an
+ * empty stored suffix, 4-byte unflagged nonzero child values), and that
+ * a flagged leaf value
  * is a well-formed out-of-line ref (btovf.h).  Returns 0 if the node is
  * well formed, else -1 with a reason in `why` (may be NULL).  Reads the
  * page only; the caller must hold it stable (latched or private).

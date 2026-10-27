@@ -1,0 +1,66 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd October 27, 2026
+.Dt XTC_SIM 3
+.Os
+.Sh NAME
+.Nm xtc_sim_clock_enable ,
+.Nm xtc_sim_clock_disable ,
+.Nm xtc_sim_clock_advance ,
+.Nm xtc_sim_clock_set ,
+.Nm xtc_sim_clock_active
+.Nd the deterministic simulator's virtual clock
+.Sh LIBRARY
+.Lb libxtc
+.Sh SYNOPSIS
+.In xtc_sim.h
+.Ft void
+.Fn xtc_sim_clock_enable "int64_t start_ns"
+.Ft void
+.Fn xtc_sim_clock_disable "void"
+.Ft void
+.Fn xtc_sim_clock_advance "int64_t delta_ns"
+.Ft void
+.Fn xtc_sim_clock_set "int64_t ns"
+.Ft int
+.Fn xtc_sim_clock_active "void"
+.Sh DESCRIPTION
+These are test seams of the deterministic simulator
+.Pq Pa xtc_sim.h
+is not an installed header.
+While the virtual clock is enabled,
+.Fn xtc_clock_mono
+.Pq Xr xtc_free 3
+returns virtual time, a pure function of the run's schedule, instead of
+the host's monotonic clock.
+.Fn xtc_sim_exec_run
+enables it at time 0 for every run and disables it at the end.
+.Pp
+.Fn xtc_sim_clock_enable
+turns the virtual clock on at
+.Fa start_ns ;
+.Fn xtc_sim_clock_disable
+turns it off.
+.Fn xtc_sim_clock_advance
+moves it forward by
+.Fa delta_ns ,
+and
+.Fn xtc_sim_clock_set
+sets it to
+.Fa ns .
+.Pp
+.Fn xtc_sim_clock_active
+tells code that derives a wall-clock-like value from
+.Fn xtc_clock_mono
+whether it is inside a run.
+Such code must not add an offset sampled from real time while the
+virtual clock is active: the offset carries real time into the run, and
+two runs of one seed then differ.
+The determinism guard cannot see this case, because the real clock was
+read before the run started.
+.Sh RETURN VALUES
+.Fn xtc_sim_clock_active
+returns 1 while the virtual clock is enabled, else 0.
+The other functions return no value.
+.Sh SEE ALSO
+.Xr xtc_free 3

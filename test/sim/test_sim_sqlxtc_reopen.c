@@ -44,9 +44,14 @@
  *	  EXACTNESS   no row the oracle does not hold, every column right;
  *	  INDEX       0 rows missing from an index, index counts = oracle;
  *	  LIVENESS    every run quiesces (no deadlock / step budget);
- *	  REPLAY      the same seed yields the identical fingerprint.
+ *	  REPLAY      the same seed yields the identical fingerprint: the
+ *	              final rows and statuses, the counters, and every commit
+ *	              stamp the run minted (a stamp that took real time
+ *	              differs even when the tree it built does not).
  *
- *	usage: test_sim_sqlxtc_reopen [base [count]]   (default 1 6)
+ *	usage: test_sim_sqlxtc_reopen [base [count [sleep]]]   (default 1 6)
+ *	"sleep" lets 50 ms of real time pass before each run of a seed, so a
+ *	real-time input to a run fails the replay every time.
  */
 
 #ifndef _GNU_SOURCE
@@ -149,6 +154,46 @@ static int        g_round, g_seg;
 static _Atomic long g_step, g_crash_at;
 static _Atomic int  g_crashed, g_left, g_lanes;
 static int        g_ops;
+
+/* Replay trace: one record per engine-visible event of a seed (each op
+ * the lanes run, with its result and the commit clock after it, and each
+ * segment's end with the buffer pool's counters), in the order the
+ * simulator ran them.  Two runs of one seed must produce the same trace;
+ * when their fingerprints differ, both traces are written to files and
+ * the first differing record is printed: it names the first input that
+ * was not replayed (an op scheduled differently, a different commit
+ * stamp, a different eviction count). */
+#define TR_MAX 16384
+struct trec {
+	int16_t  round, seg, lane, kind;
+	int32_t  id, rc;
+	uint64_t clock, a, b;
+};
+struct trace {
+	int         n;
+	struct trec r[TR_MAX];
+};
+static struct trace *g_tr, *g_tr1;
+
+static void
+tr_add(int lane, int kind, int64_t id, int rc, uint64_t a, uint64_t b)
+{
+	struct trec *t;
+
+	if (g_tr == NULL || g_tr->n >= TR_MAX)
+		return;
+	t = &g_tr->r[g_tr->n++];
+	t->round = (int16_t)g_round;
+	t->seg = (int16_t)g_seg;
+	t->lane = (int16_t)lane;
+	t->kind = (int16_t)kind;
+	t->id = (int32_t)id;
+	t->rc = rc;
+	t->clock = xstore_clock();
+	t->a = a;
+	t->b = b;
+}
+
 
 static uint64_t
 mix(uint64_t x)
@@ -279,6 +324,7 @@ lane_proc(void *arg)
 		g_sh->st[id] = S_UNKNOWN;
 		g_sh->next_s[l] = s + 1;
 		rc = run_op(h, kind, id, tgt);
+		tr_add(l, kind, id, rc, (uint64_t)tgt, (uint64_t)step);
 		if (rc == SX_OK) {
 			g_sh->st[id] = S_ACKED;
 			g_sh->acked++;
@@ -741,6 +787,7 @@ segment(uint64_t rs, int crash)
 	sx_storage_bm_stats(&bs);
 	g_sh->evicted += bs.evicted;
 	g_sh->loads += bs.loads;
+	tr_add(-1, 100, 0, 0, bs.evicted, bs.loads);
 	n = xstore_index_check(sx_storage_bt(), &miss, &stale);
 	if (n != N_IDX || miss != 0)
 		FAILF("in run, before a clean close: INDEX: %llu rows missing "
@@ -756,30 +803,16 @@ segment(uint64_t rs, int crash)
 }
 
 /*
- * The commit clock samples its one-shot wall-clock epoch offset on the
- * first commit of a process (xstore.c hlc_phys_ms); inside a sim run
- * that real-clock read trips the determinism guard.  So every child
- * commits once OFF the sim, right after its open, to a side table the
- * oracle ignores (test_sim_sql_now warms the same offset).
+ * Every commit of a seed runs under the virtual clock -- the sim runs,
+ * and the table's CREATE, which runs between them on a clock fixed at 0.
+ * Under the virtual clock the commit stamp's physical half is the virtual
+ * milliseconds alone (xstore.c hlc_phys_ms), so the store's clock, which
+ * each open restores, is a function of the seed too.  (Until 2.0 each
+ * child made a warm-up commit off the simulator, to sample the stamp's
+ * wall-clock offset outside any run; that commit, and the offset added
+ * to every stamp in the runs, carried real time into the run: two runs
+ * of a seed minted different stamps.)
  */
-static int
-warm_clock(void)
-{
-	sx_db *h = NULL;
-	int rc;
-	if (sx_open(":memory:", &h) != SX_OK)
-		return -1;
-	rc = sx_exec(h, "CREATE TABLE IF NOT EXISTS warm(k INTEGER PRIMARY KEY, "
-	    "v INTEGER)", NULL);
-	if (rc == SX_OK)
-		rc = sx_exec(h, "DELETE FROM warm WHERE k = 1", NULL);
-	if (rc == SX_OK)
-		rc = sx_exec(h, "INSERT INTO warm(k, v) VALUES(1, 0)", NULL);
-	sx_close(h);
-	if (rc != SX_OK)
-		FAILF("warm-up commit failed (rc %d)", rc);
-	return rc == SX_OK ? 0 : -1;
-}
 
 /* Open the store, recording which kind of open this is. */
 static int
@@ -801,17 +834,22 @@ open_store(const char **kind)
 		g_sh->recover_opens++;
 	if (!g_sh->created) {
 		sx_db *h = NULL;
-		if (sx_open(":memory:", &h) != SX_OK ||
+		int bad;
+		xtc_sim_clock_enable(0);
+		bad = sx_open(":memory:", &h) != SX_OK ||
 		    sx_exec(h, "CREATE TABLE t(k INTEGER PRIMARY KEY, u TEXT UNIQUE, "
 		    "g INTEGER, w INTEGER, p TEXT)", NULL) != SX_OK ||
-		    sx_exec(h, "CREATE INDEX t_g ON t(g)", NULL) != SX_OK) {
+		    sx_exec(h, "CREATE INDEX t_g ON t(g)", NULL) != SX_OK;
+		if (h != NULL)
+			sx_close(h);
+		xtc_sim_clock_disable();
+		if (bad) {
 			FAILF("create failed");
 			return -1;
 		}
-		sx_close(h);
 		g_sh->created = 1;
 	}
-	return warm_clock();
+	return 0;
 }
 
 /* Child: one round of 1-2 segments; exit 0 / 3 (failed). */
@@ -862,6 +900,7 @@ run_seed(uint64_t seed, uint64_t *fp)
 
 	g_seed = seed;
 	memset(g_sh, 0, sizeof *g_sh);
+	g_tr->n = 0;
 	snprintf(g_path, sizeof g_path, "%s/sim_reopen_XXXXXX",
 	    td != NULL && td[0] != '\0' ? td : "/tmp");
 	if ((fd = mkstemp(g_path)) < 0)
@@ -893,6 +932,11 @@ run_seed(uint64_t seed, uint64_t *fp)
 		h = (h ^ (uint64_t)(uint32_t)g_sh->row[id].w) * 0x100000001B3ull;
 		h = (h ^ g_sh->st[id]) * 0x100000001B3ull;
 	}
+	/* The commit stamps themselves (every op's clock after it): a stamp
+	 * that took real time, or any other input not of the seed, differs
+	 * here even when the tree it built happens to come out the same. */
+	for (i = 0; i < (size_t)g_tr->n; i++)
+		h = (h ^ g_tr->r[i].clock) * 0x100000001B3ull;
 	h = (h ^ g_sh->acked) * 0x100000001B3ull;
 	h = (h ^ g_sh->crashes) * 0x100000001B3ull;
 	h = (h ^ g_sh->ckpts) * 0x100000001B3ull;
@@ -901,11 +945,73 @@ run_seed(uint64_t seed, uint64_t *fp)
 	return ok ? 0 : 1;
 }
 
+static void
+tr_write(const char *path, const struct trace *t)
+{
+	FILE *f = fopen(path, "w");
+	int i;
+
+	if (f == NULL)
+		return;
+	for (i = 0; i < t->n; i++) {
+		const struct trec *r = &t->r[i];
+		fprintf(f, "%d r%d s%d lane %d kind %d id %d rc %d clock %llu "
+		    "a %llu b %llu\n", i, r->round, r->seg, r->lane, r->kind, r->id,
+		    r->rc, (unsigned long long)r->clock, (unsigned long long)r->a,
+		    (unsigned long long)r->b);
+	}
+	fclose(f);
+}
+
+/* Write both runs' traces next to the store and print the first record
+ * where they differ. */
+static void
+tr_diverge(uint64_t seed, const struct trace *a, const struct trace *b)
+{
+	const char *td = getenv("TMPDIR");
+	char p1[600], p2[600];
+	int i, n = a->n < b->n ? a->n : b->n;
+
+	snprintf(p1, sizeof p1, "%s/%s-seed%llu-run1.trace", td != NULL &&
+	    td[0] != '\0' ? td : "/tmp", SIM_TEST, (unsigned long long)seed);
+	snprintf(p2, sizeof p2, "%s/%s-seed%llu-run2.trace", td != NULL &&
+	    td[0] != '\0' ? td : "/tmp", SIM_TEST, (unsigned long long)seed);
+	tr_write(p1, a);
+	tr_write(p2, b);
+	for (i = 0; i < n; i++)
+		if (memcmp(&a->r[i], &b->r[i], sizeof a->r[i]) != 0)
+			break;
+	if (i == n && a->n == b->n) {
+		printf("  traces identical (%d records): the divergence is in "
+		    "state the trace does not record (%s, %s)\n", a->n, p1, p2);
+		return;
+	}
+	printf("  first divergence at trace record %d of %d / %d (%s, %s)\n",
+	    i, a->n, b->n, p1, p2);
+	if (i < a->n)
+		printf("    run1: r%d s%d lane %d kind %d id %d rc %d clock %llu "
+		    "a %llu b %llu\n", a->r[i].round, a->r[i].seg, a->r[i].lane,
+		    a->r[i].kind, a->r[i].id, a->r[i].rc,
+		    (unsigned long long)a->r[i].clock,
+		    (unsigned long long)a->r[i].a, (unsigned long long)a->r[i].b);
+	if (i < b->n)
+		printf("    run2: r%d s%d lane %d kind %d id %d rc %d clock %llu "
+		    "a %llu b %llu\n", b->r[i].round, b->r[i].seg, b->r[i].lane,
+		    b->r[i].kind, b->r[i].id, b->r[i].rc,
+		    (unsigned long long)b->r[i].clock,
+		    (unsigned long long)b->r[i].a, (unsigned long long)b->r[i].b);
+}
+
 int
 main(int argc, char **argv)
 {
 	uint64_t base = argc > 1 ? strtoull(argv[1], NULL, 0) : 1;
 	int count = argc > 2 ? atoi(argv[2]) : 6, k;
+	/* argv[3] "sleep": real time passes before the first run and between
+	 * the two runs of every seed (50 ms each), so any real-time input to
+	 * a run -- a stamp offset sampled from the wall clock -- makes the
+	 * replay differ every time, not one run in twenty. */
+	int sleep_ms = argc > 3 && strcmp(argv[3], "sleep") == 0 ? 50 : 0;
 	uint64_t acked = 0, crashes = 0, cleans = 0, tr = 0, rec = 0, it = 0;
 	uint64_t ev = 0, ld = 0, ck = 0, cka = 0, ckf = 0, cac = 0;
 	uint64_t sn = 0, sns = 0, gcr = 0, gcv = 0, pr = 0;
@@ -915,10 +1021,16 @@ main(int argc, char **argv)
 	    MAP_SHARED | MAP_ANON, -1, 0);
 	g_cov = mmap(NULL, sizeof *g_cov, PROT_READ | PROT_WRITE,
 	    MAP_SHARED | MAP_ANON, -1, 0);
-	if (g_sh == MAP_FAILED || g_cov == MAP_FAILED)
+	g_tr = mmap(NULL, sizeof *g_tr, PROT_READ | PROT_WRITE,
+	    MAP_SHARED | MAP_ANON, -1, 0);
+	g_tr1 = malloc(sizeof *g_tr1);
+	if (g_sh == MAP_FAILED || g_cov == MAP_FAILED || g_tr == MAP_FAILED ||
+	    g_tr1 == NULL)
 		return 1;
 	for (k = 0; k < count; k++) {
 		uint64_t seed = base + (uint64_t)k, f1 = 0, f2 = 0;
+		if (sleep_ms > 0)
+			(void)usleep((useconds_t)sleep_ms * 1000u);
 		if (run_seed(seed, &f1) != 0) {
 			printf("corpus row: %s %llu 1 <fixing commit>: <what failed>\n",
 			    SIM_TEST, (unsigned long long)seed);
@@ -941,12 +1053,16 @@ main(int argc, char **argv)
 		gcr += g_sh->gc_runs;
 		gcv += g_sh->gc_reclaimed;
 		pr += g_sh->prunes;
+		memcpy(g_tr1, g_tr, sizeof *g_tr1);
+		if (sleep_ms > 0)
+			(void)usleep((useconds_t)sleep_ms * 1000u);
 		if (run_seed(seed, &f2) != 0)
 			return 1;
 		if (f1 != f2) {
 			printf("FAIL: seed=%llu REPLAY: fingerprint %016llx vs "
 			    "%016llx\n", (unsigned long long)seed,
 			    (unsigned long long)f1, (unsigned long long)f2);
+			tr_diverge(seed, g_tr1, g_tr);
 			return 1;
 		}
 	}
