@@ -111,6 +111,7 @@ typedef struct xtc_proc_opts {
 
 /* Mailbox statistics snapshot (see xtc_proc_mailbox_stats). */
 typedef struct xtc_mailbox_stats {
+	size_t   size;         /* sizeof(xtc_mailbox_stats_t): XTC_MAILBOX_STATS_INIT */
 	size_t   depth;        /* messages currently in the mailbox */
 	size_t   saved;        /* messages held in the selective-receive
 	                        * save queue (inspected, not yet matched) */
@@ -119,6 +120,8 @@ typedef struct xtc_mailbox_stats {
 	uint64_t recv_total;   /* messages accepted over the proc's life */
 	uint64_t drop_total;   /* messages rejected (full / dead) */
 } xtc_mailbox_stats_t;
+
+#define XTC_MAILBOX_STATS_INIT { .size = sizeof(xtc_mailbox_stats_t) }
 
 /*
  * PUBLIC: int       xtc_proc_spawn __P((xtc_loop_t *, xtc_proc_fn, void *, const xtc_proc_opts_t *, xtc_pid_t *));
@@ -953,7 +956,8 @@ typedef enum {
 	                                 * control socket closed) */
 } xtc_down_kind_t;
 
-typedef struct {
+typedef struct xtc_down_info {
+	size_t          size;       /* sizeof(xtc_down_info_t): XTC_DOWN_INFO_INIT */
 	xtc_pid_t       pid;        /* the target that went DOWN */
 	xtc_down_kind_t kind;       /* how it ended (never ambiguous) */
 	int             signal;     /* signal number iff kind == SIGNAL, else 0 */
@@ -961,6 +965,8 @@ typedef struct {
 	int             reason;     /* the legacy xtc_down_decode reason value */
 	uint64_t        ref;        /* the monitor reference (0 for a link EXIT) */
 } xtc_down_info_t;
+
+#define XTC_DOWN_INFO_INIT { .size = sizeof(xtc_down_info_t) }
 
 /*
  * Decode a DOWN or EXIT signal into a fully-classified xtc_down_info_t.

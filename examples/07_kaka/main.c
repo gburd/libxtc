@@ -206,7 +206,8 @@ main(int argc, char **argv)
 	broker_cfg_t       cfg;
 	xtc_log_t         *log = NULL;
 	xtc_log_opts_t     log_opts = XTC_LOG_OPTS_DEFAULT;
-	xtc_app_opts_t     app_opts = { 0 };
+	xtc_app_opts_t     app_opts = XTC_APP_OPTS_DEFAULT;
+	xtc_sup_opts_t     app_opts_sup = XTC_SUP_OPTS_DEFAULT;
 	xtc_child_spec_t   kids[1];
 	xtc_tcp_opts_t     tcp_opts = XTC_TCP_OPTS_DEFAULT;
 	int                rc;
@@ -247,9 +248,10 @@ main(int argc, char **argv)
 	xtc_io_set_iowq_max_workers(MAX_SYNC_WORKERS, 0);
 
 	app_opts.name = "kaka";
-	app_opts.sup.strategy = XTC_SUP_ONE_FOR_ONE;
-	app_opts.sup.max_restarts = 10;
-	app_opts.sup.period_ns = 60LL * 1000 * 1000 * 1000;
+	app_opts_sup.strategy = XTC_SUP_ONE_FOR_ONE;
+	app_opts_sup.max_restarts = 10;
+	app_opts_sup.period_ns = 60LL * 1000 * 1000 * 1000;
+	app_opts.sup = &app_opts_sup;
 	if (xtc_app_create(&app_opts, &b->app) != XTC_OK) {
 		fprintf(stderr, "app create failed\n");
 		return 1;
@@ -275,6 +277,7 @@ main(int argc, char **argv)
 	kaka_metrics_set_mem_cap(cfg.max_memory);
 
 	memset(kids, 0, sizeof kids);
+	kids[0].size = sizeof kids[0];
 	kids[0].name = "listener";
 	kids[0].fn = listener_proc;
 	kids[0].arg = b;

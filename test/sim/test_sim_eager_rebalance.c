@@ -118,7 +118,7 @@ run_once(uint64_t seed, int eager, uint64_t *out_state, int *out_done)
 	}
 
 	for (i = 0; i < LOOPS; i++) {
-		xtc_loop_stats_t st;
+		xtc_loop_stats_t st = XTC_LOOP_STATS_INIT;
 		if (xtc_exec_loop_stats(e, i, &st) == XTC_OK)
 			total_steals += (long)st.steals;
 	}

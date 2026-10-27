@@ -63,7 +63,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 {
 	struct sol_aio *s;
 	int rc;
-	if (io == NULL || a == NULL || a->fd < 0)
+	if (io == NULL || !__XTC_AIO_OK(a) || a->fd < 0)
 		return XTC_E_INVAL;
 	/* Vectored ops have no lio_listio-with-port form here; decline them
 	 * so xtc_aio offloads (preadv/pwritev via the pool). */

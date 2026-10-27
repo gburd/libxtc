@@ -96,6 +96,8 @@ typedef struct xtc_fsm_call xtc_fsm_call_t;
 #define XTC_FSM_REASON_NORMAL 0
 
 typedef struct xtc_fsm_callbacks {
+	size_t size;  /* sizeof(xtc_fsm_callbacks_t): XTC_FSM_CALLBACKS_INIT */
+
 	/* Called on every state change (old_state -> new_state), including
 	 * the initial entry (old_state == new_state == initial_state).
 	 * Returns XTC_OK to proceed; any XTC_E_* stops the machine.
@@ -115,10 +117,15 @@ typedef struct xtc_fsm_callbacks {
 	void (*terminate)(void *state, int reason);
 } xtc_fsm_callbacks_t;
 
+#define XTC_FSM_CALLBACKS_INIT { .size = sizeof(xtc_fsm_callbacks_t) }
+
 typedef struct xtc_fsm_opts {
+	size_t      size;         /* sizeof(xtc_fsm_opts_t): XTC_FSM_OPTS_INIT */
 	const char *name;         /* optional, for logs */
 	size_t      mailbox_cap;  /* 0 = default */
 } xtc_fsm_opts_t;
+
+#define XTC_FSM_OPTS_INIT { .size = sizeof(xtc_fsm_opts_t) }
 
 /*
  * PUBLIC: int       xtc_fsm_start __P((xtc_loop_t *, const xtc_fsm_callbacks_t *, void *, int, const xtc_fsm_opts_t *, xtc_fsm_t **));

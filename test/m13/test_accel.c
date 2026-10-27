@@ -270,6 +270,7 @@ mb_waiter(void *a)
 	    g_mb_mode == 1 ? -1 : 300LL * 1000 * 1000);
 	g_mb_elapsed = mb_now() - t0;
 	memset(&st, 0, sizeof st);
+	st.size = sizeof st;
 	(void)xtc_proc_mailbox_stats(xtc_self(), &st);
 	g_mb_depth = st.depth;
 	atomic_store(&g_mb_done, 1);

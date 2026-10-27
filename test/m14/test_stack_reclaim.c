@@ -501,7 +501,7 @@ test_reclaim_migratable(const MunitParameter p[], void *d)
 	    XTC_OK);
 	munit_assert_int(xtc_exec_run(life_exec), ==, XTC_OK);
 	for (i = 0; i < LIFE_LOOPS; i++) {
-		xtc_loop_stats_t st;
+		xtc_loop_stats_t st = XTC_LOOP_STATS_INIT;
 		if (xtc_exec_loop_stats(life_exec, i, &st) == XTC_OK)
 			steals += (int64_t)st.steals;
 	}

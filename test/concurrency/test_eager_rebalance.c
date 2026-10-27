@@ -142,7 +142,7 @@ run_once(int eager)
 	if (xtc_exec_run(e) != XTC_OK) { (void)xtc_exec_fini(e); return (uint64_t)-1; }
 
 	for (i = 0; i < LOOPS; i++) {
-		xtc_loop_stats_t st;
+		xtc_loop_stats_t st = XTC_LOOP_STATS_INIT;
 		if (xtc_exec_loop_stats(e, i, &st) == XTC_OK)
 			total_steals += st.steals;
 	}

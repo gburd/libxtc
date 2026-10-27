@@ -294,10 +294,15 @@ xtc_net_close(int fd)
 /* ----- TCP knobs ----------------------------------------- */
 
 int
-xtc_net_apply_tcp_opts(int fd, const xtc_tcp_opts_t *opts)
+xtc_net_apply_tcp_opts(int fd, const xtc_tcp_opts_t *uopts)
 {
-	int v;
-	if (opts == NULL) return XTC_OK;
+	xtc_tcp_opts_t full;
+	const xtc_tcp_opts_t *opts = &full;
+	int v, rc;
+	if (uopts == NULL) return XTC_OK;
+	/* Fields past the caller's .size are 0: that knob is left alone. */
+	if ((rc = __xtc_sized_in(&full, NULL, sizeof full, uopts, 0)) != XTC_OK)
+		return rc;
 
 #if !defined(_WIN32)
 	if (opts->nodelay) {
@@ -440,7 +445,8 @@ __net_listen_raw(xtc_net_family_t fam, const char *host, int port,
 	int af;
 
 	WSA_INIT_ONCE();
-	if (out_fd == NULL || port <= 0 || port > 65535 || backlog < 0)
+	if (out_fd == NULL || port <= 0 || port > 65535 || backlog < 0 ||
+	    (opts != NULL && opts->size < sizeof(size_t)))
 		return XTC_E_INVAL;
 	if (backlog == 0)
 		backlog = XTC_NET_BACKLOG_DEFAULT;
@@ -489,7 +495,8 @@ __net_dial_raw(xtc_net_family_t fam, const char *host, int port,
 	int af;
 
 	WSA_INIT_ONCE();
-	if (out_fd == NULL || host == NULL || port <= 0 || port > 65535)
+	if (out_fd == NULL || host == NULL || port <= 0 || port > 65535 ||
+	    (opts != NULL && opts->size < sizeof(size_t)))
 		return XTC_E_INVAL;
 	if (fam != XTC_NET_INET && fam != XTC_NET_INET6)
 		return XTC_E_INVAL;

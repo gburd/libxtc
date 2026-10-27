@@ -80,6 +80,7 @@ cs_terminate(void *st, int reason)
 }
 
 static const xtc_svr_callbacks_t cs_cb = {
+	.size = sizeof(xtc_svr_callbacks_t),
 	.init = cs_init,
 	.handle_call = cs_handle_call,
 	.handle_cast = cs_handle_cast,

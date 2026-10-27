@@ -182,16 +182,18 @@ xtc_fs_fsize(int fd, int64_t *out_size)
 }
 
 int
-xtc_fs_stat(const char *path, xtc_fs_stat_t *out)
+xtc_fs_stat(const char *path, xtc_fs_stat_t *uout)
 {
+	xtc_fs_stat_t full, *out = &full;
 	struct __stat64 st;
-	if (path == NULL || out == NULL) return XTC_E_INVAL;
+	if (path == NULL || !__XTC_SIZED_OUT_OK(uout)) return XTC_E_INVAL;
+	full.size = sizeof full;
 	if (_stat64(path, &st) != 0)
 		return errno == ENOENT ? XTC_E_NOTFOUND : XTC_E_IO;
-	out->size = (int64_t)st.st_size;
+	out->bytes = (int64_t)st.st_size;
 	out->mtime_ns = (int64_t)st.st_mtime * 1000000000LL;
 	out->is_dir = (st.st_mode & _S_IFDIR) ? 1 : 0;
-	return XTC_OK;
+	return __xtc_sized_out(uout, &full, sizeof full);
 }
 
 int xtc_fs_exists(const char *path) { return path && _access(path, 0) == 0; }
@@ -470,12 +472,14 @@ xtc_fs_fsize(int fd, int64_t *out_size)
 }
 
 int
-xtc_fs_stat(const char *path, xtc_fs_stat_t *out)
+xtc_fs_stat(const char *path, xtc_fs_stat_t *uout)
 {
+	xtc_fs_stat_t full, *out = &full;
 	struct stat st;
-	if (path == NULL || out == NULL) return XTC_E_INVAL;
+	if (path == NULL || !__XTC_SIZED_OUT_OK(uout)) return XTC_E_INVAL;
+	full.size = sizeof full;
 	if (stat(path, &st) != 0) return err_map(errno);
-	out->size = (int64_t)st.st_size;
+	out->bytes = (int64_t)st.st_size;
 #if defined(__APPLE__)
 	out->mtime_ns = (int64_t)st.st_mtimespec.tv_sec * 1000000000LL +
 	    st.st_mtimespec.tv_nsec;
@@ -486,7 +490,7 @@ xtc_fs_stat(const char *path, xtc_fs_stat_t *out)
 	out->mtime_ns = (int64_t)st.st_mtime * 1000000000LL;
 #endif
 	out->is_dir = S_ISDIR(st.st_mode) ? 1 : 0;
-	return XTC_OK;
+	return __xtc_sized_out(uout, &full, sizeof full);
 }
 
 int

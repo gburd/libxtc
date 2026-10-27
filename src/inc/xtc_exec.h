@@ -167,9 +167,12 @@ XTC_API xtc_loop_t *xtc_exec_loop(xtc_exec_t *exec, int idx);
  * a concurrently running executor is not guaranteed.
  */
 typedef struct xtc_loop_stats {
+	size_t   size;     /* sizeof(xtc_loop_stats_t): XTC_LOOP_STATS_INIT */
 	uint64_t tasks_run;
 	uint64_t steals;
 } xtc_loop_stats_t;
+
+#define XTC_LOOP_STATS_INIT { .size = sizeof(xtc_loop_stats_t) }
 
 /*
  * PUBLIC: int  xtc_exec_loop_stats __P((xtc_exec_t *, int, xtc_loop_stats_t *));

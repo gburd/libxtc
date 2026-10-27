@@ -2355,10 +2355,11 @@ xtc_proc_sleep(int64_t ns)
 /* PUBLIC: int xtc_proc_mailbox_stats __P((xtc_pid_t, xtc_mailbox_stats_t *)); */
 static struct xtc_proc *__resolve(xtc_pid_t pid, xtc_loop_t **out);
 int
-xtc_proc_mailbox_stats(xtc_pid_t pid, xtc_mailbox_stats_t *out)
+xtc_proc_mailbox_stats(xtc_pid_t pid, xtc_mailbox_stats_t *uout)
 {
+	xtc_mailbox_stats_t full, *out = &full;
 	struct xtc_proc *p;
-	if (out == NULL || xtc_pid_is_none(pid))
+	if (!__XTC_SIZED_OUT_OK(uout) || xtc_pid_is_none(pid))
 		return XTC_E_INVAL;
 	p = __resolve(pid, NULL);
 	if (p == NULL)
@@ -2373,7 +2374,7 @@ xtc_proc_mailbox_stats(xtc_pid_t pid, xtc_mailbox_stats_t *out)
 	out->drop_total = p->mbox_drop_total;
 	(void) __proc_mtx_unlock(&p->mbox_lock);
 	__proc_release(p);
-	return XTC_OK;
+	return __xtc_sized_out(uout, &full, sizeof full);
 }
 
 /* ---------- send ---------- */
@@ -4684,9 +4685,10 @@ xtc_down_decode_ex(const void *msg, size_t len, xtc_down_info_t *out)
 	xtc_down_info_t info;
 	int ek;
 
-	if (msg == NULL || len < 1 || out == NULL)
+	if (msg == NULL || len < 1 || !__XTC_SIZED_OUT_OK(out))
 		return XTC_E_INVAL;
 	memset(&info, 0, sizeof info);
+	info.size = sizeof info;
 
 	if (*k == 'D') {
 		struct dmsg d;
@@ -4740,8 +4742,7 @@ xtc_down_decode_ex(const void *msg, size_t len, xtc_down_info_t *out)
 			info.exit_code = info.reason;
 		}
 	}
-	*out = info;
-	return XTC_OK;
+	return __xtc_sized_out(out, &info, sizeof info);
 }
 
 /*
@@ -5275,6 +5276,7 @@ xtc_inspect_loops(xtc_inspect_loop_fn cb, void *user)
 			if (tbl->slots[s].proc != NULL)
 				procs++;
 		(void) __pt_unlock_all(tbl);
+		infos[n].size = sizeof infos[n];
 		infos[n].loop_id = loop->exec_id < 0 ? 0 : loop->exec_id + 1;
 		infos[n].n_procs = (int)procs;
 		infos[n].n_alive =
@@ -5333,12 +5335,15 @@ xtc_proc_info(xtc_pid_t pid, xtc_proc_info_t *out)
 /* ---------- process runtime introspection (xtc_runtime.h) ---------- */
 
 int
-xtc_runtime_info(xtc_runtime_info_t *out)
+xtc_runtime_info(xtc_runtime_info_t *uout)
 {
+	xtc_runtime_info_t full, *out = &full;
 	int n;
 
-	if (out == NULL)
+	if (!__XTC_SIZED_OUT_OK(uout))
 		return XTC_E_INVAL;
+	memset(&full, 0, sizeof full);
+	full.size = sizeof full;
 
 	/* n_loops: the executor the caller runs on.  xtc_shard_count()
 	 * returns that executor's loop count on a multi-loop loop, 1 on
@@ -5358,7 +5363,7 @@ xtc_runtime_info(xtc_runtime_info_t *out)
 	out->mem_cap_bytes  = 0;
 	out->mem_used_bytes = 0;
 
-	return XTC_OK;
+	return __xtc_sized_out(uout, &full, sizeof full);
 }
 
 /* ---------- causal tracing public API (xtc_trace.h) ---------- */

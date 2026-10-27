@@ -51,6 +51,7 @@ typedef enum xtc_restart_policy {
 struct xtc_exec;
 
 typedef struct xtc_child_spec {
+	size_t                size;       /* sizeof(xtc_child_spec_t): XTC_CHILD_SPEC_INIT */
 	const char           *name;       /* optional, for logs */
 	xtc_proc_fn           fn;
 	void                 *arg;
@@ -61,7 +62,13 @@ typedef struct xtc_child_spec {
 	                                    * has an exec); 0 = loop 0 */
 } xtc_child_spec_t;
 
+/* Every spec, including each element of an xtc_sup_start / xtc_app_start
+ * array, carries .size; the library strides an array by children[0].size
+ * and requires every element to carry that same size. */
+#define XTC_CHILD_SPEC_INIT { .size = sizeof(xtc_child_spec_t) }
+
 typedef struct xtc_sup_opts {
+	size_t                 size;             /* sizeof(xtc_sup_opts_t) */
 	xtc_restart_strategy_t strategy;
 	int                    max_restarts;     /* default 3 */
 	int64_t                period_ns;        /* default 5 s */
@@ -78,6 +85,7 @@ typedef struct xtc_sup_opts {
 } xtc_sup_opts_t;
 
 #define XTC_SUP_OPTS_DEFAULT { \
+	.size         = sizeof(xtc_sup_opts_t), \
 	.strategy     = XTC_SUP_ONE_FOR_ONE, \
 	.max_restarts = 3, \
 	.period_ns    = 5LL * 1000 * 1000 * 1000, \

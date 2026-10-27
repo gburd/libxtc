@@ -217,7 +217,7 @@ listener_proc(void *arg)
 	server_t *srv = arg;
 	int rc, backing_off = 0, waited, n_bg;
 	uint64_t ref;
-	xtc_down_info_t down;
+	xtc_down_info_t down = XTC_DOWN_INFO_INIT;
 	uint32_t revents;
 	void *msg;
 	size_t msg_len;
@@ -633,6 +633,7 @@ main(int argc, char **argv)
 	server_t *srv = &g_server;
 	server_cfg_t cfg;
 	xtc_app_opts_t app_opts = XTC_APP_OPTS_DEFAULT;
+	xtc_sup_opts_t app_opts_sup = XTC_SUP_OPTS_DEFAULT;
 	xtc_child_spec_t kids[3];
 	xtc_log_opts_t log_opts = XTC_LOG_OPTS_DEFAULT;
 	xtc_log_t *log;
@@ -733,7 +734,8 @@ main(int argc, char **argv)
 		return 1;
 	}
 	xtc_net_setnonblock(srv->listen_fd);
-	srv->conn_tcp_opts = (xtc_tcp_opts_t){ .nodelay = 1 };
+	srv->conn_tcp_opts = (xtc_tcp_opts_t){ .size = sizeof(xtc_tcp_opts_t),
+	    .nodelay = 1 };
 	printf("rexis: listening on %s:%d\n", cfg.host, cfg.port);
 	fflush(stdout);
 
@@ -745,9 +747,10 @@ main(int argc, char **argv)
 
 	/* Create app */
 	app_opts.name = "xtc-rexis";
-	app_opts.sup.strategy = XTC_SUP_ONE_FOR_ONE;
-	app_opts.sup.max_restarts = 10;
-	app_opts.sup.period_ns = 60LL * 1000 * 1000 * 1000;
+	app_opts_sup.strategy = XTC_SUP_ONE_FOR_ONE;
+	app_opts_sup.max_restarts = 10;
+	app_opts_sup.period_ns = 60LL * 1000 * 1000 * 1000;
+	app_opts.sup = &app_opts_sup;
 	app_opts.n_loops = cfg.loops;
 
 	if (xtc_app_create(&app_opts, &srv->app) != XTC_OK) {
@@ -760,6 +763,7 @@ main(int argc, char **argv)
 	/* Setup supervised children.  xtc_sup_start requires at least
 	 * one initial child; the listener is the natural choice. */
 	memset(kids, 0, sizeof kids);
+	kids[0].size = sizeof kids[0];
 	kids[0].name = "listener";
 	kids[0].fn = listener_proc;
 	kids[0].arg = srv;

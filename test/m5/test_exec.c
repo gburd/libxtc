@@ -242,7 +242,7 @@ static MunitResult
 test_accessors_errors(const MunitParameter p[], void *d)
 {
 	xtc_exec_t *e = NULL;
-	xtc_loop_stats_t st;
+	xtc_loop_stats_t st = XTC_LOOP_STATS_INIT;
 	(void)p; (void)d;
 
 	/* NULL exec on every accessor. */

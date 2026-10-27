@@ -55,7 +55,7 @@ struct xtc_fsm_call {
 
 /* The running machine's private state, owned by its proc fiber. */
 struct fsm_run {
-	const xtc_fsm_callbacks_t *cb;
+	xtc_fsm_callbacks_t cb;  /* the caller's callbacks, copied at start */
 	void                      *state;
 	int                        cur_state;
 	struct xtc_fsm            *handle;   /* shared stop flag */
@@ -113,7 +113,7 @@ fsm_dispatch(struct fsm_run *r, const void *msg, size_t len,
 {
 	xtc_fsm_result_t res;
 
-	res = r->cb->event(r->state, r->cur_state, msg, len, call);
+	res = r->cb.event(r->state, r->cur_state, msg, len, call);
 
 	/* A sync call that is postponed cannot block the caller forever:
 	 * reply XTC_E_AGAIN and drop it (do not stash). */
@@ -146,8 +146,8 @@ fsm_apply(struct fsm_run *r, xtc_fsm_result_t res, int *out_stop_reason)
 		int old = r->cur_state;
 		struct fsm_postponed *replay, *p, *n;
 		r->cur_state = res.next_state;
-		if (r->cb->enter != NULL &&
-		    r->cb->enter(r->state, old, r->cur_state) != XTC_OK) {
+		if (r->cb.enter != NULL &&
+		    r->cb.enter(r->state, old, r->cur_state) != XTC_OK) {
 			*out_stop_reason = XTC_FSM_REASON_NORMAL;
 			return 0;
 		}
@@ -197,8 +197,8 @@ fsm_entry(void *arg)
 	r->handle->pid = xtc_self();
 
 	/* Initial state entry: enter(initial, initial). */
-	if (r->cb->enter != NULL &&
-	    r->cb->enter(r->state, r->cur_state, r->cur_state) != XTC_OK)
+	if (r->cb.enter != NULL &&
+	    r->cb.enter(r->state, r->cur_state, r->cur_state) != XTC_OK)
 		running = 0;
 
 	while (running &&
@@ -256,8 +256,8 @@ fsm_entry(void *arg)
 		}
 	}
 
-	if (r->cb->terminate != NULL)
-		r->cb->terminate(r->state, stop_reason);
+	if (r->cb.terminate != NULL)
+		r->cb.terminate(r->state, stop_reason);
 	fsm_pq_free(r);
 	__os_free(r);
 }
@@ -272,11 +272,20 @@ xtc_fsm_start(xtc_loop_t *loop, const xtc_fsm_callbacks_t *cb, void *state,
 	struct xtc_fsm *h;
 	struct fsm_run *r;
 	xtc_proc_opts_t pop;
+	xtc_fsm_callbacks_t c;
+	xtc_fsm_opts_t o = XTC_FSM_OPTS_INIT;
 	xtc_pid_t pid;
 	int rc;
 
-	if (loop == NULL || cb == NULL || cb->event == NULL || out == NULL)
+	if (loop == NULL || cb == NULL || out == NULL)
 		return XTC_E_INVAL;
+	if ((rc = __xtc_sized_in(&c, NULL, sizeof c, cb, 0)) != XTC_OK)
+		return rc;
+	if (c.event == NULL)
+		return XTC_E_INVAL;
+	if (opts != NULL &&
+	    (rc = __xtc_sized_in(&o, NULL, sizeof o, opts, 0)) != XTC_OK)
+		return rc;
 
 	if ((rc = __os_calloc(1, sizeof(*h), (void **)&h)) != XTC_OK)
 		return rc;
@@ -286,7 +295,7 @@ xtc_fsm_start(xtc_loop_t *loop, const xtc_fsm_callbacks_t *cb, void *state,
 	}
 	atomic_store_explicit(&h->stop_requested, 0, memory_order_relaxed);
 	h->joined = 0;
-	r->cb = cb;
+	r->cb = c;
 	r->state = state;
 	r->cur_state = initial_state;
 	r->handle = h;
@@ -295,10 +304,8 @@ xtc_fsm_start(xtc_loop_t *loop, const xtc_fsm_callbacks_t *cb, void *state,
 
 	memset(&pop, 0, sizeof pop);
 	pop.size = sizeof pop;
-	if (opts != NULL) {
-		pop.name = opts->name;
-		pop.mailbox_cap = opts->mailbox_cap;
-	}
+	pop.name = o.name;
+	pop.mailbox_cap = o.mailbox_cap;
 	rc = xtc_proc_spawn(loop, fsm_entry, r, &pop, &pid);
 	if (rc != XTC_OK) {
 		__os_free(r);

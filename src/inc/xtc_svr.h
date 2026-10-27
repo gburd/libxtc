@@ -47,6 +47,7 @@ typedef struct xtc_svr     xtc_svr_t;
 typedef struct xtc_svr_call xtc_svr_call_t;
 
 typedef struct xtc_svr_callbacks {
+	size_t size;        /* sizeof(xtc_svr_callbacks_t): XTC_SVR_CALLBACKS_INIT */
 	int  (*init)        (void *state);                              /* OK to be NULL */
 	int  (*handle_call) (void *state, const void *req, size_t req_size,
 	                     xtc_svr_call_t *call);                     /* required if calls used */
@@ -59,14 +60,21 @@ typedef struct xtc_svr_callbacks {
 	 * self-send that could race an incoming message).  A handle_continue
 	 * may itself arm another continuation.  OK to be NULL (an armed
 	 * continuation with no handler is dropped). */
-	int  (*handle_continue)(void *state, void *cont);               /* OK to be NULL */
 	void (*terminate)   (void *state, int reason);                  /* OK to be NULL */
+	int  (*handle_continue)(void *state, void *cont);               /* OK to be NULL */
 } xtc_svr_callbacks_t;
 
+/* Set the callbacks with designated initializers after it:
+ * { .size = sizeof(xtc_svr_callbacks_t), .handle_call = f }. */
+#define XTC_SVR_CALLBACKS_INIT { .size = sizeof(xtc_svr_callbacks_t) }
+
 typedef struct xtc_svr_opts {
+	size_t      size;          /* sizeof(xtc_svr_opts_t): XTC_SVR_OPTS_INIT */
 	const char *name;          /* optional, for logs */
 	size_t      mailbox_cap;   /* 0 = default */
 } xtc_svr_opts_t;
+
+#define XTC_SVR_OPTS_INIT { .size = sizeof(xtc_svr_opts_t) }
 
 /*
  * PUBLIC: int       xtc_svr_start __P((xtc_loop_t *, const xtc_svr_callbacks_t *, void *, const xtc_svr_opts_t *, xtc_svr_t **));

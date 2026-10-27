@@ -20,7 +20,8 @@
  *	Usage pattern:
  *
  *	  // 1.  Create a shared context (once per server/client role):
- *	  xtc_tls_opts_t opts = { .cert_file = "srv.crt", .key_file = "srv.key",
+ *	  xtc_tls_opts_t opts = { .size = sizeof(xtc_tls_opts_t),
+ *	                           .cert_file = "srv.crt", .key_file = "srv.key",
  *	                           .min_version = XTC_TLS_VER_12 };
  *	  xtc_tls_ctx_t *ctx;
  *	  xtc_tls_ctx_create(XTC_TLS_SERVER, &opts, &ctx);
@@ -252,18 +253,15 @@ typedef int (*xtc_tls_passphrase_cb_t)(char *buf, int size, void *userdata);
  * mode required for correct non-blocking sends is enabled.
  */
 typedef struct xtc_tls_opts {
-	const char *cert_file;
-	const char *key_file;
-	const char *ca_file;
-	int         verify_peer;   /* legacy on/off; see verify_peer_mode */
-	const char *alpn_protos;
-	int         min_version;
-	int         max_version;
-
-	/* additions (v1.24.0) -- a zeroed struct is byte-for-byte the old
-	 * behavior, so this grows the struct without breaking callers that
-	 * only set the original fields. */
+	size_t                  size;      /* sizeof(xtc_tls_opts_t): XTC_TLS_OPTS_INIT */
+	const char             *cert_file;
+	const char             *key_file;
+	const char             *ca_file;
+	const char             *alpn_protos;
+	int                     verify_peer; /* legacy on/off; see verify_peer_mode */
 	xtc_tls_verify_mode_t   verify_peer_mode;
+	int                     min_version;
+	int                     max_version;
 	const char             *cipher_list;
 	const char             *ciphersuites_13;
 	const char             *groups;
@@ -273,6 +271,9 @@ typedef struct xtc_tls_opts {
 	xtc_tls_passphrase_cb_t passphrase_cb;
 	void                   *passphrase_userdata;
 } xtc_tls_opts_t;
+
+/* All defaults (role-default verification, library-default ciphers). */
+#define XTC_TLS_OPTS_INIT { .size = sizeof(xtc_tls_opts_t) }
 
 /* -------------------------------------------------------------------------
  * Context lifecycle.
@@ -427,10 +428,13 @@ XTC_API int  xtc_tls_ctx_set_sni_cb(xtc_tls_ctx_t *ctx,
  * ----------------------------------------------------------------------- */
 
 typedef struct xtc_tls_transport {
+	size_t size;  /* sizeof(xtc_tls_transport_t): XTC_TLS_TRANSPORT_INIT */
 	int  (*read_cb)(void *userdata, void *buf, size_t len);
 	int  (*write_cb)(void *userdata, const void *buf, size_t len);
 	void  *userdata;
 } xtc_tls_transport_t;
+
+#define XTC_TLS_TRANSPORT_INIT { .size = sizeof(xtc_tls_transport_t) }
 
 /*
  * PUBLIC: int  xtc_tls_create_transport __P((xtc_tls_ctx_t *,

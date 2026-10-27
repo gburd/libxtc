@@ -166,7 +166,7 @@ my_changed(const char *name, const void *o, const void *n, void *u)
 static MunitResult
 test_cfg_int(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t spec = {0};
+	xtc_cfg_spec_t spec = XTC_CFG_SPEC_INIT;
 	int v;
 	(void)p; (void)d;
 	g_changed_count = 0;
@@ -206,7 +206,7 @@ test_cfg_int(const MunitParameter p[], void *d)
 static MunitResult
 test_cfg_string(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t spec = {0};
+	xtc_cfg_spec_t spec = XTC_CFG_SPEC_INIT;
 	const char *s;
 	(void)p; (void)d;
 	spec.name = "test.label";
@@ -227,7 +227,7 @@ test_cfg_string(const MunitParameter p[], void *d)
 static MunitResult
 test_cfg_load_file(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t spec = {0};
+	xtc_cfg_spec_t spec = XTC_CFG_SPEC_INIT;
 	static const char *levels[] = { "quiet", "normal", "loud" };
 	char tmpdir[512];
 	char path[640];
@@ -244,12 +244,15 @@ test_cfg_load_file(const MunitParameter p[], void *d)
 	spec.dflt.d_int = 4; spec.min_int = 1; spec.max_int = 64;
 	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
 	memset(&spec, 0, sizeof spec);
+	spec.size = sizeof spec;
 	spec.name = "t.tls"; spec.kind = XTC_CFG_BOOL; spec.dflt.d_bool = 0;
 	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
 	memset(&spec, 0, sizeof spec);
+	spec.size = sizeof spec;
 	spec.name = "t.banner"; spec.kind = XTC_CFG_STRING; spec.dflt.d_string = "x";
 	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
 	memset(&spec, 0, sizeof spec);
+	spec.size = sizeof spec;
 	spec.name = "t.level"; spec.kind = XTC_CFG_ENUM; spec.dflt.d_enum = 0;
 	spec.enum_labels = levels; spec.n_enum_labels = 3;
 	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);

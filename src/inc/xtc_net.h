@@ -36,6 +36,7 @@ typedef enum xtc_net_family {
 /* TCP-level knobs.  Defaults pick reasonable server-side values:
  * TCP_NODELAY=1, SO_REUSEADDR=1, KEEPALIVE off (caller opts in). */
 typedef struct xtc_tcp_opts {
+	size_t size;           /* sizeof(xtc_tcp_opts_t): XTC_TCP_OPTS_DEFAULT */
 	int  nodelay;          /* TCP_NODELAY: 1 = disable Nagle */
 	int  reuseaddr;        /* SO_REUSEADDR */
 	int  reuseport;        /* SO_REUSEPORT (Linux/BSD; falls back to no-op) */
@@ -47,6 +48,7 @@ typedef struct xtc_tcp_opts {
 } xtc_tcp_opts_t;
 
 #define XTC_TCP_OPTS_DEFAULT { \
+	.size = sizeof(xtc_tcp_opts_t), \
 	.nodelay = 1, .reuseaddr = 1, .reuseport = 0, .keepalive = 0, \
 	.keepidle_s = 0, .keepintvl_s = 0, .keepcnt = 0, .user_timeout_ms = 0 \
 }

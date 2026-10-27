@@ -195,7 +195,7 @@ run_once(uint64_t seed, int *out_calls, long *out_sum, long *out_hash,
     long *out_total, long *out_max, uint64_t *out_state)
 {
 	xtc_exec_t *e = NULL;
-	xtc_svr_callbacks_t cb = {0};
+	xtc_svr_callbacks_t cb = XTC_SVR_CALLBACKS_INIT;
 	static struct acc_state st;      /* reset per run below */
 	int i, rc;
 

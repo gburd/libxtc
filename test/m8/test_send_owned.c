@@ -276,7 +276,7 @@ big_recv(void *arg)
 	/* Wait until the message is queued, then count the payload-sized
 	 * allocations the receive itself makes. */
 	for (;;) {
-		xtc_mailbox_stats_t st;
+		xtc_mailbox_stats_t st = XTC_MAILBOX_STATS_INIT;
 		if (xtc_proc_mailbox_stats(xtc_self(), &st) != XTC_OK)
 			return;
 		if (st.depth > 0)

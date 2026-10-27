@@ -529,7 +529,7 @@ dinfo_parent(void *arg)
 	void *msg = NULL; size_t sz = 0;
 	xtc_pid_t child;
 	uint64_t ref = 0;
-	xtc_down_info_t info;
+	xtc_down_info_t info = XTC_DOWN_INFO_INIT;
 	if (xtc_proc_spawn_monitor(s->loop, exit1_child, NULL, NULL,
 	    &child, &ref) != XTC_OK)
 		return;
@@ -664,7 +664,7 @@ test_mailbox_stats(const MunitParameter p[], void *d)
 	xtc_loop_t *loop = NULL;
 	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
-	xtc_mailbox_stats_t st;
+	xtc_mailbox_stats_t st = XTC_MAILBOX_STATS_INIT;
 	int i, v = 7;
 	(void)p; (void)d;
 
@@ -737,7 +737,7 @@ static void
 sqc_flooder(void *arg)
 {
 	struct sqc_state *s = arg;
-	xtc_mailbox_stats_t st;
+	xtc_mailbox_stats_t st = XTC_MAILBOX_STATS_INIT;
 	int v = 1, i, spins;
 
 	/* Fill to cap (8): all accepted, then drained into the save
@@ -2702,7 +2702,7 @@ m2_parent(void *a)
 	munit_assert_int(xtc_proc_spawn_link(s->loop, m2_child, s, NULL, &c),
 	    ==, XTC_OK);
 	if (xtc_recv(&m, &n, 100 * F155_MS) == XTC_OK) {
-		xtc_down_info_t di;
+		xtc_down_info_t di = XTC_DOWN_INFO_INIT;
 		if (n > 0 && *(char *)m == 'E' &&
 		    xtc_down_decode_ex(m, n, &di) == XTC_OK) {
 			s->got_e = 1;

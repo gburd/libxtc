@@ -300,6 +300,7 @@ server_thread(void *arg)
     a->rc = 1;   /* assume unexpected failure */
 
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.cert_file   = a->cert != NULL ? a->cert : TEST_CERT_PATH;
     opts.key_file    = a->key  != NULL ? a->key  : TEST_KEY_PATH;
     opts.min_version = XTC_TLS_VER_12;
@@ -354,6 +355,7 @@ test_client_handshake_roundtrip(const MunitParameter params[], void *data)
     (void)data;
 
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.verify_peer_mode = XTC_TLS_VERIFY_NONE;
     opts.min_version = XTC_TLS_VER_12;
 
@@ -432,6 +434,7 @@ test_client_verify_peer(const MunitParameter params[], void *data)
      * ================================================================== */
 
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.ca_file     = TEST_CERT_PATH;
     opts.verify_peer = 1;
     opts.min_version = XTC_TLS_VER_12;
@@ -477,6 +480,7 @@ test_client_verify_peer(const MunitParameter params[], void *data)
      * ================================================================== */
 
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.ca_file     = WRONG_CA_PATH;
     opts.verify_peer = 1;
     opts.min_version = XTC_TLS_VER_12;
@@ -585,6 +589,7 @@ connect_expecting(const char *prior, const char *expect,
     xtc_tls_opts_t opts;
 
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.ca_file     = NAME_CERT_PATH;
     opts.verify_peer = 1;
     opts.min_version = XTC_TLS_VER_12;
@@ -675,6 +680,7 @@ test_client_default_verifies(const MunitParameter params[], void *data)
 
     /* Zeroed opts, ca_file NULL: the untrusted server is REJECTED. */
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
 #if defined(XTC_TLS_BACKEND_MBEDTLS)
     munit_assert_int(xtc_tls_ctx_create(XTC_TLS_CLIENT, &opts, &ctx),
                      ==, XTC_E_INVAL);
@@ -691,6 +697,7 @@ test_client_default_verifies(const MunitParameter params[], void *data)
     /* Zeroed verify fields, a ca_file that did not issue the server
      * cert: REJECTED (on every backend, mbedTLS included). */
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.ca_file = WRONG_CA_PATH;
     rc = connect_opts(&opts, NULL, NULL, NULL, NULL, &host_rc, &srv_rc);
     munit_assert_int(rc, ==, XTC_E_INTERNAL);
@@ -698,6 +705,7 @@ test_client_default_verifies(const MunitParameter params[], void *data)
 
     /* Positive control: zeroed verify fields, trusted ca_file -> OK. */
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.ca_file = TEST_CERT_PATH;
     rc = connect_opts(&opts, NULL, NULL, NULL, NULL, &host_rc, &srv_rc);
     munit_assert_int(rc, ==, XTC_OK);
@@ -706,6 +714,7 @@ test_client_default_verifies(const MunitParameter params[], void *data)
     /* The opt-out: explicit NONE accepts the untrusted server, and wins
      * over the legacy verify_peer int. */
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.verify_peer_mode = XTC_TLS_VERIFY_NONE;
     rc = connect_opts(&opts, NULL, NULL, NULL, NULL, &host_rc, &srv_rc);
     munit_assert_int(rc, ==, XTC_OK);
@@ -719,6 +728,7 @@ test_client_default_verifies(const MunitParameter params[], void *data)
     /* Explicit REQUIRE is honored too (before 1.50 GnuTLS, wolfSSL and
      * mbedTLS ignored verify_peer_mode and read only verify_peer). */
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.verify_peer_mode = XTC_TLS_VERIFY_REQUIRE;
     opts.ca_file          = WRONG_CA_PATH;
     rc = connect_opts(&opts, NULL, NULL, NULL, NULL, &host_rc, &srv_rc);

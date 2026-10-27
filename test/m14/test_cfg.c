@@ -38,7 +38,7 @@
 static MunitResult
 test_register_basic(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t spec = { 0 };
+	xtc_cfg_spec_t spec = XTC_CFG_SPEC_INIT;
 	xtc_cfg_kind_t k;
 	xtc_cfg_session_t *ss = NULL;
 	xtc_cfg_source_t src;
@@ -99,7 +99,7 @@ test_register_basic(const MunitParameter p[], void *d)
 static MunitResult
 test_int_bounds(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t s = { 0 };
+	xtc_cfg_spec_t s = XTC_CFG_SPEC_INIT;
 	int iv;
 	int64_t i64;
 	(void)p; (void)d;
@@ -132,6 +132,7 @@ test_int_bounds(const MunitParameter p[], void *d)
 
 	/* int64, unbounded (min==max==0). */
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "t.i64";
 	s.kind = XTC_CFG_INT64;
 	s.dflt.d_int64 = 100;
@@ -144,6 +145,7 @@ test_int_bounds(const MunitParameter p[], void *d)
 	/* int64 bounded RANGE. */
 	munit_assert_int(xtc_cfg_unregister("t.i64"), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "t.i64b";
 	s.kind = XTC_CFG_INT64;
 	s.dflt.d_int64 = 5;
@@ -161,7 +163,7 @@ test_int_bounds(const MunitParameter p[], void *d)
 static MunitResult
 test_double(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t s = { 0 };
+	xtc_cfg_spec_t s = XTC_CFG_SPEC_INIT;
 	double dv;
 	(void)p; (void)d;
 
@@ -190,7 +192,7 @@ test_double(const MunitParameter p[], void *d)
 static MunitResult
 test_bool(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t s = { 0 };
+	xtc_cfg_spec_t s = XTC_CFG_SPEC_INIT;
 	int b;
 	(void)p; (void)d;
 
@@ -214,7 +216,7 @@ test_bool(const MunitParameter p[], void *d)
 static MunitResult
 test_string(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t s = { 0 };
+	xtc_cfg_spec_t s = XTC_CFG_SPEC_INIT;
 	const char *sv;
 	(void)p; (void)d;
 
@@ -247,7 +249,7 @@ static const char *const g_levels[] = { "low", "mid", "high", NULL };
 static MunitResult
 test_enum(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t s = { 0 };
+	xtc_cfg_spec_t s = XTC_CFG_SPEC_INIT;
 	int ev;
 	(void)p; (void)d;
 
@@ -295,7 +297,7 @@ on_change_cb(const char *name, const void *old_val, const void *new_val,
 static MunitResult
 test_validator_and_change(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t s = { 0 };
+	xtc_cfg_spec_t s = XTC_CFG_SPEC_INIT;
 	(void)p; (void)d;
 
 	s.name = "t.cb";
@@ -322,7 +324,7 @@ test_validator_and_change(const MunitParameter p[], void *d)
 static MunitResult
 test_load_file(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t s = { 0 };
+	xtc_cfg_spec_t s = XTC_CFG_SPEC_INIT;
 	char tmpdir[512], path[600];
 	int fd, iv, b, ev;
 	int64_t i64;
@@ -337,18 +339,23 @@ test_load_file(const MunitParameter p[], void *d)
 	s.name = "f.int";    s.kind = XTC_CFG_INT;    s.dflt.d_int = 0;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "f.i64";    s.kind = XTC_CFG_INT64;  s.dflt.d_int64 = 0;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "f.dbl";    s.kind = XTC_CFG_DOUBLE; s.dflt.d_double = 0.0;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "f.bool";   s.kind = XTC_CFG_BOOL;   s.dflt.d_bool = 0;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "f.str";    s.kind = XTC_CFG_STRING; s.dflt.d_string = "";
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "f.enum";   s.kind = XTC_CFG_ENUM;
 	s.enum_labels = g_levels; s.n_enum_labels = 3;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
@@ -418,7 +425,7 @@ test_load_file(const MunitParameter p[], void *d)
 static MunitResult
 test_load_enum_numeric(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t s = { 0 };
+	xtc_cfg_spec_t s = XTC_CFG_SPEC_INIT;
 	char tmpdir[512], path[600];
 	int fd, ev;
 	FILE *f;
@@ -453,7 +460,7 @@ test_load_enum_numeric(const MunitParameter p[], void *d)
 static MunitResult
 test_load_parse_variants(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t s = { 0 };
+	xtc_cfg_spec_t s = XTC_CFG_SPEC_INIT;
 	char tmpdir[512], path[600];
 	int fd, b, iv;
 	const char *sv;
@@ -465,9 +472,11 @@ test_load_parse_variants(const MunitParameter p[], void *d)
 	s.name = "v.bool"; s.kind = XTC_CFG_BOOL; s.dflt.d_bool = 1;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "v.int"; s.kind = XTC_CFG_INT; s.dflt.d_int = 1;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "v.str"; s.kind = XTC_CFG_STRING; s.dflt.d_string = "x";
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 
@@ -518,7 +527,7 @@ test_load_parse_variants(const MunitParameter p[], void *d)
 static MunitResult
 test_kind_mismatch(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t s = { 0 };
+	xtc_cfg_spec_t s = XTC_CFG_SPEC_INIT;
 	const char *sv;
 	int64_t i64;
 	double dv;
@@ -528,6 +537,7 @@ test_kind_mismatch(const MunitParameter p[], void *d)
 	s.name = "k.str"; s.kind = XTC_CFG_STRING; s.dflt.d_string = "hello";
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "k.int"; s.kind = XTC_CFG_INT; s.dflt.d_int = 7;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 
@@ -640,7 +650,7 @@ test_unknown_and_null(const MunitParameter p[], void *d)
 static MunitResult
 test_unbounded(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t s = { 0 };
+	xtc_cfg_spec_t s = XTC_CFG_SPEC_INIT;
 	int64_t i64;
 	double dv;
 	int iv;
@@ -650,9 +660,11 @@ test_unbounded(const MunitParameter p[], void *d)
 	s.name = "u.int"; s.kind = XTC_CFG_INT;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "u.i64"; s.kind = XTC_CFG_INT64;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "u.dbl"; s.kind = XTC_CFG_DOUBLE;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 
@@ -678,6 +690,7 @@ test_unbounded(const MunitParameter p[], void *d)
 
 	/* Bool's check is a literal 0-or-1 test, not a bounds range: 2 is out. */
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "u.bool"; s.kind = XTC_CFG_BOOL;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	munit_assert_int(xtc_cfg_set_bool("u.bool", 2),  ==, XTC_E_RANGE);
@@ -686,6 +699,7 @@ test_unbounded(const MunitParameter p[], void *d)
 
 	/* Enum bounds come from n_enum_labels, not min/max. */
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "u.enum"; s.kind = XTC_CFG_ENUM;
 	s.enum_labels = g_levels; s.n_enum_labels = 3;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
@@ -705,7 +719,7 @@ test_unbounded(const MunitParameter p[], void *d)
 static MunitResult
 test_ref(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t s = { 0 };
+	xtc_cfg_spec_t s = XTC_CFG_SPEC_INIT;
 	static const char *const lv[] = { "a", "b", "c", NULL };
 	xtc_cfg_ref_t ri, rs, re, rb;
 	int iv, ev, bv;
@@ -721,13 +735,16 @@ test_ref(const MunitParameter p[], void *d)
 	s.name = "r.int"; s.kind = XTC_CFG_INT; s.dflt.d_int = 42;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "r.str"; s.kind = XTC_CFG_STRING; s.dflt.d_string = "hi";
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "r.enum"; s.kind = XTC_CFG_ENUM;
 	s.enum_labels = lv; s.n_enum_labels = 3; s.dflt.d_enum = 1;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "r.bool"; s.kind = XTC_CFG_BOOL; s.dflt.d_bool = 1;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 
@@ -770,7 +787,7 @@ test_ref(const MunitParameter p[], void *d)
 static MunitResult
 test_session_scoping(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t spec = { 0 };
+	xtc_cfg_spec_t spec = XTC_CFG_SPEC_INIT;
 	xtc_cfg_session_t *a = NULL, *b = NULL;
 	xtc_cfg_source_t src;
 	int v;
@@ -782,6 +799,7 @@ test_session_scoping(const MunitParameter p[], void *d)
 	spec.dflt.d_int = 4096; spec.min_int = 64; spec.max_int = 1000000;
 	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
 	memset(&spec, 0, sizeof spec);
+	spec.size = sizeof spec;
 	spec.name = "s.tz"; spec.kind = XTC_CFG_STRING;
 	spec.dflt.d_string = "UTC";
 	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
@@ -921,7 +939,7 @@ fiber_ssn_body(void *a)
 static MunitResult
 test_session_per_fiber(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t spec = { 0 };
+	xtc_cfg_spec_t spec = XTC_CFG_SPEC_INIT;
 	xtc_cfg_session_t *a = NULL, *b = NULL;
 	struct fiber_ssn_arg aa = { 0 }, ba = { 0 };
 	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
@@ -1021,7 +1039,7 @@ ssn_exit_driver(void *a)
 static MunitResult
 test_session_unbound_at_exit(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t spec = { 0 };
+	xtc_cfg_spec_t spec = XTC_CFG_SPEC_INIT;
 	struct ssn_exit_arg arg = { 0 };
 	int v = -1;
 	(void)p; (void)d;
@@ -1063,7 +1081,7 @@ test_session_unbound_at_exit(const MunitParameter p[], void *d)
 static MunitResult
 test_unregister_ordering(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t spec = { 0 };
+	xtc_cfg_spec_t spec = XTC_CFG_SPEC_INIT;
 	xtc_cfg_session_t *s = NULL;
 	const char *sv;
 	int v;
@@ -1096,6 +1114,7 @@ test_unregister_ordering(const MunitParameter p[], void *d)
 	/* (2) the reverse order still works: destroy THEN unregister. */
 	s = NULL;
 	memset(&spec, 0, sizeof spec);
+	spec.size = sizeof spec;
 	spec.name = "u.mem"; spec.kind = XTC_CFG_INT; spec.dflt.d_int = 64;
 	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
 	munit_assert_int(xtc_cfg_session_create(&s), ==, XTC_OK);
@@ -1110,6 +1129,7 @@ test_unregister_ordering(const MunitParameter p[], void *d)
 	 * dead name, then destroy: reset must not resurrect or double-free. */
 	s = NULL;
 	memset(&spec, 0, sizeof spec);
+	spec.size = sizeof spec;
 	spec.name = "u.str2"; spec.kind = XTC_CFG_STRING;
 	spec.dflt.d_string = "g";
 	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
@@ -1135,7 +1155,7 @@ test_unregister_ordering(const MunitParameter p[], void *d)
 static MunitResult
 test_load_int_range(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t s = { 0 };
+	xtc_cfg_spec_t s = XTC_CFG_SPEC_INIT;
 	char tmpdir[512], path[600];
 	int fd, iv, ev;
 	FILE *f;
@@ -1147,9 +1167,11 @@ test_load_int_range(const MunitParameter p[], void *d)
 	s.dflt.d_int = 3; s.min_int = 1; s.max_int = 100;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "g.free"; s.kind = XTC_CFG_INT; s.dflt.d_int = 5;  /* unbounded */
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "g.lvl"; s.kind = XTC_CFG_ENUM;
 	s.enum_labels = g_levels; s.n_enum_labels = 3;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
@@ -1209,7 +1231,7 @@ test_load_int_range(const MunitParameter p[], void *d)
 static MunitResult
 test_range_code_consistent(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t s = { 0 };
+	xtc_cfg_spec_t s = XTC_CFG_SPEC_INIT;
 	xtc_cfg_session_t *ss = NULL;
 	int v;
 	(void)p; (void)d;
@@ -1218,21 +1240,26 @@ test_range_code_consistent(const MunitParameter p[], void *d)
 	s.min_int = 0; s.max_int = 10;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "rc.i64"; s.kind = XTC_CFG_INT64; s.dflt.d_int64 = 5;
 	s.min_int = 0; s.max_int = 10;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "rc.dbl"; s.kind = XTC_CFG_DOUBLE; s.dflt.d_double = 1.0;
 	s.min_double = 0.0; s.max_double = 2.0;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "rc.bool"; s.kind = XTC_CFG_BOOL;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "rc.enum"; s.kind = XTC_CFG_ENUM;
 	s.enum_labels = g_levels; s.n_enum_labels = 3;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "rc.even"; s.kind = XTC_CFG_INT; s.dflt.d_int = 2;
 	s.min_int = 0; s.max_int = 100; s.validator = even_only;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
@@ -1318,7 +1345,7 @@ gsc_setter(void *arg)
 static MunitResult
 test_get_string_copy(const MunitParameter p[], void *d)
 {
-	xtc_cfg_spec_t s = { 0 };
+	xtc_cfg_spec_t s = XTC_CFG_SPEC_INIT;
 	xtc_cfg_session_t *ss = NULL;
 	char *cp = NULL;
 #if !defined(_WIN32)
@@ -1332,9 +1359,11 @@ test_get_string_copy(const MunitParameter p[], void *d)
 	s.name = "gsc.str"; s.kind = XTC_CFG_STRING; s.dflt.d_string = g_gsc_a;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "gsc.null"; s.kind = XTC_CFG_STRING;   /* NULL default */
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "gsc.int"; s.kind = XTC_CFG_INT;
 	munit_assert_int(xtc_cfg_register(&s), ==, XTC_OK);
 

@@ -515,7 +515,7 @@ static void tm14_cb(void *u) { (void)u; g_tm14_fired++; }
 static long
 tm14_inuse(xtc_loop_t *loop)
 {
-	xtc_slab_stats_t st;
+	xtc_slab_stats_t st = XTC_SLAB_STATS_INIT;
 	if (loop->timer_slab == NULL) return 0;
 	munit_assert_int(xtc_slab_stat((const xtc_slab_t *)loop->timer_slab,
 	    &st), ==, XTC_OK);

@@ -36,6 +36,7 @@ test_bad_opts(const MunitParameter p[], void *d)
 
 	munit_assert_int(xtc_osproc_spawn(NULL, &h), ==, XTC_E_INVAL);
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	/* neither argv nor fn */
 	munit_assert_int(xtc_osproc_spawn(&o, &h), ==, XTC_E_INVAL);
 	/* both argv and fn */
@@ -54,6 +55,7 @@ run_exec(char *const argv[], int *exitcode)
 	int spins, st = 0, rc;
 
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.argv = argv;
 	if (xtc_osproc_spawn(&o, &h) != XTC_OK)
 		return -1;
@@ -175,6 +177,7 @@ parent_proc(void *arg)
 	(void)arg;
 
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.fn = child_ping;
 	o.ctrl_socket = 1;
 	if (xtc_osproc_spawn(&o, &h) != XTC_OK) return;
@@ -238,6 +241,7 @@ signal_proc(void *arg)
 	(void)arg;
 
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.fn = child_sleep;
 	if (xtc_osproc_spawn(&o, &h) != XTC_OK) return;
 
@@ -284,6 +288,7 @@ test_nosys(const MunitParameter p[], void *d)
 	char *const argv[] = { "cmd", NULL };
 	(void)p; (void)d;
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.argv = argv;
 	munit_assert_int(xtc_osproc_spawn(&o, &h), ==, XTC_E_NOSYS);
 	return MUNIT_OK;

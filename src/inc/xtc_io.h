@@ -19,6 +19,7 @@
 
 #include "xtc_export.h"
 
+#include <stddef.h>
 #include <stdint.h>
 
 typedef struct xtc_io xtc_io_t;
@@ -83,12 +84,24 @@ enum {
 	XTC_AIO_PWRITEV   = 5     /* vectored write (iov/iovcnt) */
 };
 typedef struct xtc_aio {
+	size_t    size;       /* sizeof(xtc_aio_t): XTC_AIO_INIT.  The library
+	                       * keeps this pointer until completion and reads
+	                       * and writes the struct IN PLACE, so it refuses
+	                       * (XTC_E_INVAL) a size that does not cover every
+	                       * field below; a field appended in a later minor
+	                       * is read only when .size covers it. */
 	int       fd;
 	int       op;         /* XTC_AIO_* */
 	void     *buf;        /* read/write buffer (scalar ops; NULL for FSYNC/V) */
-	uint32_t  len;        /* byte count (scalar ops) */
+	/* Vectored ops (PREADV / PWRITEV): iov points at the caller's
+	 * iovec array (struct iovec *, kept opaque here to avoid a
+	 * <sys/uio.h> dependency in this header) and iovcnt is its count.
+	 * Zero/NULL for the scalar and sync ops. */
+	void     *iov;        /* const struct iovec * */
 	int64_t   off;        /* file offset (ignored for FSYNC) */
 	void     *tag;        /* woken on completion (an xtc_task_t *) */
+	uint32_t  len;        /* byte count (scalar ops) */
+	int       iovcnt;
 	/*
 	 * 0 until the completion is reaped.  CONCURRENCY CONTRACT: on a
 	 * native completion backend (io_uring / IOCP / kqueue-AIO / Solaris
@@ -103,29 +116,20 @@ typedef struct xtc_aio {
 	 * ordinary load/store usable on the single-threaded pre-publication
 	 * init path, where xtc_io_aio_submit clears it).
 	 *
-	 * Why not `_Atomic int` (measured, 2026-09):
-	 *   - sizeof/_Alignof/every field offset of xtc_aio_t are IDENTICAL
-	 *     either way (64/8, done@40, res@44, iov@48, iovcnt@56; gcc and
-	 *     clang, x86-64), so layout was NOT the objection.
-	 *   - but `_Atomic` is not valid C++, and this header has no
-	 *     extern "C" guard of its own (xtc.h has one; xtc_io.h is also
-	 *     includable directly).  g++ -std=c++17 compiles this header today
-	 *     and would fail outright with `'_Atomic' does not name a type`.
-	 *     Consumers allocate xtc_aio_t on the stack, so that is a source
-	 *     break for every C++ embedder, in exchange for nothing the
-	 *     helper accesses do not already provide.
-	 * The accessor route gets the well-defined cross-thread access with
-	 * no ABI change and no C++ break.  Do not "upgrade" it.
+	 * Why not `_Atomic int`: layout is identical either way (gcc and
+	 * clang, x86-64), but `_Atomic` is not valid C++, and this header has
+	 * no extern "C" guard of its own (xtc.h has one; xtc_io.h is also
+	 * includable directly).  g++ -std=c++17 compiles this header today
+	 * and would fail outright with `'_Atomic' does not name a type`.
+	 * Consumers allocate xtc_aio_t on the stack, so that is a source
+	 * break for every C++ embedder, in exchange for nothing the helper
+	 * accesses do not already provide.  Do not "upgrade" it.
 	 */
 	int       done;
 	int32_t   res;        /* bytes transferred, or -errno */
-	/* Vectored ops (PREADV / PWRITEV): iov points at the caller's
-	 * iovec array (struct iovec *, kept opaque here to avoid a
-	 * <sys/uio.h> dependency in this header) and iovcnt is its count.
-	 * Zero/NULL for the scalar and sync ops. */
-	void     *iov;        /* const struct iovec * */
-	int       iovcnt;
 } xtc_aio_t;
+
+#define XTC_AIO_INIT { .size = sizeof(xtc_aio_t) }
 
 /*
  * PUBLIC: int          xtc_io_init __P((xtc_io_t **));

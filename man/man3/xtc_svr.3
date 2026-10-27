@@ -45,8 +45,25 @@ synchronous calls and asynchronous casts via user-supplied
 callbacks.  Models the OTP gen_server pattern.
 .Pp
 .Sy Callbacks
-.Pq Vt xtc_svr_callbacks_t :
+.Pq Vt xtc_svr_callbacks_t ,
+copied at start; initialize with
+.Dv XTC_SVR_CALLBACKS_INIT
+or a designated initializer that sets
+.Va .size = sizeof(xtc_svr_callbacks_t) ;
+a callback past the caller's
+.Va size
+is treated as
+.Dv NULL ,
+and a
+.Va size
+of 0 is
+.Dv XTC_E_INVAL ;
+.Vt xtc_svr_opts_t
+follows the same rule with
+.Dv XTC_SVR_OPTS_INIT ) :
 .Bl -tag -width "handle_call" -offset indent
+.It Va size
+The size of the caller's struct.
 .It Va init
 Called once at server start.  Returns
 .Dv XTC_OK
@@ -184,6 +201,7 @@ my_call(void *st, const void *req, size_t sz, xtc_svr_call_t *call)
 }
 
 xtc_svr_callbacks_t cb = {
+    .size = sizeof(xtc_svr_callbacks_t),
     .init = my_init, .handle_call = my_call, /* ... */
 };
 xtc_svr_t *s;

@@ -395,6 +395,7 @@ step_cfg(int *ok)
 	const char *v = NULL;
 	int rc = XTC_OK, reg_rc;
 	memset(&s, 0, sizeof s);
+	s.size = sizeof s;
 	s.name = "oom.str"; s.short_desc = "an oom-sweep knob";
 	s.kind = XTC_CFG_STRING; s.dflt.d_string = "dflt";
 	*ok = 1;
@@ -596,7 +597,7 @@ mon_parent(void *a)
 	uint64_t ref = 0;
 	void *m = NULL;
 	size_t n = 0;
-	xtc_down_info_t di;
+	xtc_down_info_t di = XTC_DOWN_INFO_INIT;
 	arm();
 	s->spawn_rc = xtc_proc_spawn_monitor(s->loop, mon_child, NULL,
 	    NULL, &c, &ref);
@@ -650,7 +651,7 @@ lnk_parent(void *a)
 	xtc_pid_t c = XTC_PID_NONE;
 	void *m = NULL;
 	size_t n = 0;
-	xtc_down_info_t di;
+	xtc_down_info_t di = XTC_DOWN_INFO_INIT;
 	(void)xtc_proc_trap_exit(1);   /* receive the EXIT, do not die of it */
 	arm();
 	s->spawn_rc = xtc_proc_spawn_link(s->loop, lnk_child, NULL, NULL, &c);

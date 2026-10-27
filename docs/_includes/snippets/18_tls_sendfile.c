@@ -54,7 +54,7 @@ wait_io(xtc_tls_t *t, int fd)
 static void *
 client(void *arg)
 {
-	xtc_tls_opts_t o = { 0 };
+	xtc_tls_opts_t o = XTC_TLS_OPTS_INIT;
 	xtc_tls_ctx_t *ctx = NULL;
 	xtc_tls_t *t = NULL;
 	char buf[65536];
@@ -111,7 +111,7 @@ int
 main(void)
 {
 	char cert[] = "/tmp/xtc-snip18-cert-XXXXXX", key[64], path[64];
-	xtc_tls_opts_t o = { 0 };
+	xtc_tls_opts_t o = XTC_TLS_OPTS_INIT;
 	xtc_tls_ctx_t *ctx = NULL;
 	xtc_tls_t *tls = NULL;
 	struct sockaddr_in sa;

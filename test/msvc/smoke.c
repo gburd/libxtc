@@ -403,7 +403,7 @@ smoke_xdriver(void *arg)
 	}
 	(void)xtc_xsend(child, &code, sizeof code);
 	if (xtc_recv(&m, &n, 5000LL * 1000 * 1000) == XTC_OK) {
-		xtc_down_info_t di;
+		xtc_down_info_t di = XTC_DOWN_INFO_INIT;
 		if (xtc_down_decode_ex(m, n, &di) == XTC_OK)
 			s_xproc_reason = di.reason;
 		else
@@ -538,7 +538,7 @@ main(int argc, char **argv)
 		int64_t sz = -1;
 		size_t done = 0;
 		char buf[32];
-		xtc_fs_stat_t st;
+		xtc_fs_stat_t st = XTC_FS_STAT_INIT;
 		static const char msg[] = "xtc_fs-win";
 
 		CHECK(xtc_fs_tmpdir(dir, sizeof dir) == XTC_OK);
@@ -554,7 +554,7 @@ main(int argc, char **argv)
 		CHECK(xtc_fs_pread(fd, buf, sizeof msg, 0, &done) == XTC_OK);
 		CHECK(done == sizeof msg && strcmp(buf, msg) == 0);
 		CHECK(xtc_fs_close(fd) == XTC_OK);
-		CHECK(xtc_fs_stat(tmpl, &st) == XTC_OK && st.size == (int64_t)sizeof msg);
+		CHECK(xtc_fs_stat(tmpl, &st) == XTC_OK && st.bytes == (int64_t)sizeof msg);
 		CHECK(xtc_fs_exists(tmpl) == 1);
 		CHECK(xtc_fs_unlink(tmpl) == XTC_OK);
 		CHECK(xtc_fs_exists(tmpl) == 0);

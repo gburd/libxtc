@@ -71,6 +71,7 @@ extern "C" {
 typedef struct xtc_osproc xtc_osproc_t;
 
 typedef struct xtc_osproc_opts {
+	size_t       size;            /* sizeof(xtc_osproc_opts_t): XTC_OSPROC_OPTS_INIT */
 	const char  *name;            /* label for logs/debug; may be NULL */
 
 	/* Exactly one of argv / fn must be set.
@@ -85,6 +86,8 @@ typedef struct xtc_osproc_opts {
 
 	int          ctrl_socket;     /* 1: create the control socketpair */
 } xtc_osproc_opts_t;
+
+#define XTC_OSPROC_OPTS_INIT { .size = sizeof(xtc_osproc_opts_t) }
 
 /*
  * Spawn an OS process.  Callable from a loop fiber; never blocks the

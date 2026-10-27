@@ -162,7 +162,7 @@ struct xtc_svr_call {
 static int
 __svr_gone(xtc_pid_t target)
 {
-	xtc_mailbox_stats_t st;
+	xtc_mailbox_stats_t st = XTC_MAILBOX_STATS_INIT;
 	return xtc_proc_mailbox_stats(target, &st) != XTC_OK;
 }
 
@@ -342,10 +342,18 @@ xtc_svr_start(xtc_loop_t *loop, const xtc_svr_callbacks_t *cb, void *state,
 	int rc;
 	xtc_pid_t pid;
 
+	xtc_svr_opts_t o = XTC_SVR_OPTS_INIT;
+	xtc_svr_callbacks_t c;
+
 	if (loop == NULL || cb == NULL || out == NULL) return XTC_E_INVAL;
+	if ((rc = __xtc_sized_in(&c, NULL, sizeof c, cb, 0)) != XTC_OK)
+		return rc;
+	if (opts != NULL &&
+	    (rc = __xtc_sized_in(&o, NULL, sizeof o, opts, 0)) != XTC_OK)
+		return rc;
 	if ((rc = __os_calloc(1, sizeof *s, (void **)&s)) != XTC_OK) return rc;
 	s->loop = loop;
-	s->cb = *cb;
+	s->cb = c;
 	s->state = state;
 	atomic_store_explicit(&s->alive, 1, memory_order_relaxed);
 
@@ -354,10 +362,8 @@ xtc_svr_start(xtc_loop_t *loop, const xtc_svr_callbacks_t *cb, void *state,
 		return rc;
 	}
 
-	if (opts != NULL) {
-		pop.name = opts->name;
-		pop.mailbox_cap = opts->mailbox_cap;
-	}
+	pop.name = o.name;
+	pop.mailbox_cap = o.mailbox_cap;
 	rc = xtc_proc_spawn(loop, __svr_entry, s, &pop, &pid);
 	if (rc != XTC_OK) {
 		xtc_notify_destroy(s->stopped);

@@ -151,7 +151,7 @@ listener_proc(void *arg)
 				break;
 			}
 			{
-				xtc_tcp_opts_t t = { .nodelay = 1 };
+				xtc_tcp_opts_t t = { .size = sizeof(xtc_tcp_opts_t), .nodelay = 1 };
 				(void)xtc_net_apply_tcp_opts(fd, &t);
 				xtc_net_setnonblock(fd);
 			}

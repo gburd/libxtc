@@ -627,25 +627,47 @@ __sup_entry(void *arg)
 		(void)xtc_exec_stop(sup->opts.exec);
 }
 
+/* A caller's child spec, read up to its .size (unset fields default to 0). */
+static int
+__sup_spec_in(xtc_child_spec_t *dst, const void *src)
+{
+	return __xtc_sized_in(dst, NULL, sizeof *dst, src, 0);
+}
+
 int
 xtc_sup_start(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
               const xtc_child_spec_t *children, int n_children,
               xtc_supervisor_t **out_sup)
 {
 	xtc_supervisor_t *sup;
-	xtc_sup_opts_t   defaults = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t   defaults = XTC_SUP_OPTS_DEFAULT, o = defaults;
 	int rc;
 	xtc_pid_t pid;
 	int i;
+	size_t stride = 0;
 
 	if (loop == NULL || out_sup == NULL || n_children < 0 ||
 	    (n_children > 0 && children == NULL))
 		return XTC_E_INVAL;
+	if (opts != NULL &&
+	    (rc = __xtc_sized_in(&o, &defaults, sizeof o, opts, 0)) != XTC_OK)
+		return rc;
+	/* The array strides at its elements' own size, which all agree. */
+	if (n_children > 0) {
+		stride = children[0].size;
+		if (stride < sizeof(size_t))
+			return XTC_E_INVAL;
+		for (i = 1; i < n_children; i++)
+			if (((const xtc_child_spec_t *)(const void *)
+			    ((const char *)children + (size_t)i * stride))->size
+			    != stride)
+				return XTC_E_INVAL;
+	}
 
 	if ((rc = __os_calloc(1, sizeof *sup, (void **)&sup)) != XTC_OK)
 		return rc;
 	sup->loop = loop;
-	sup->opts = opts != NULL ? *opts : defaults;
+	sup->opts = o;
 	if (sup->opts.strategy != XTC_SUP_ONE_FOR_ONE &&
 	    sup->opts.strategy != XTC_SUP_ONE_FOR_ALL &&
 	    sup->opts.strategy != XTC_SUP_REST_FOR_ONE &&
@@ -665,7 +687,10 @@ xtc_sup_start(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
 		    (void **)&sup->children)) != XTC_OK) goto fail1;
 	}
 	sup->n_children = n_children;
-	for (i = 0; i < n_children; i++) sup->children[i].spec = children[i];
+	for (i = 0; i < n_children; i++)
+		if ((rc = __sup_spec_in(&sup->children[i].spec,
+		    (const char *)children + (size_t)i * stride)) != XTC_OK)
+			goto fail2;
 
 	if ((rc = xtc_notify_create(&sup->stopped)) != XTC_OK) goto fail2;
 
@@ -717,20 +742,22 @@ xtc_sup_add_child(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
 	struct add_child_msg a;
 	struct add_child_reply rep;
 	void *msg; size_t sz;
+	int rc;
 
 	if (sup == NULL || spec == NULL) return XTC_E_INVAL;
 	if (!atomic_load_explicit(&sup->alive, memory_order_acquire))
 		return XTC_E_INVAL;
+	memset(&a, 0, sizeof a);
+	if ((rc = __sup_spec_in(&a.spec, spec)) != XTC_OK)
+		return rc;
 	if (xtc_pid_is_none(xtc_self()))
 		return XTC_E_INVAL;     /* must run inside a proc (awaits reply) */
 
-	memset(&a, 0, sizeof a);
 	a.kind = 'A';
 	/* Record (pid, owner): a pid-only reply from the supervisor's loop
 	 * would resolve loop_id 0 to ITS loop, not ours. */
 	a.reply_loop = __xtc_proc_self_loop(&a.reply);
 	a.tag = atomic_fetch_add_explicit(&tagctr, 1, memory_order_relaxed) + 1;
-	a.spec = *spec;
 	if (__xtc_send_on(sup->loop, __sup_pid_load(sup), &a, sizeof a)
 	    != XTC_OK)
 		return XTC_E_INTERNAL;

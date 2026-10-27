@@ -49,7 +49,16 @@ a loop thread, and for one-process-per-connection isolation.
 .Pp
 .Fn xtc_osproc_spawn
 forks a child described by
-.Fa opts .
+.Fa opts
+.Po initialize with
+.Dv XTC_OSPROC_OPTS_INIT ,
+which sets
+.Va opts->size ;
+the library reads no further than it, and a
+.Va size
+of 0 is
+.Dv XTC_E_INVAL
+.Pc .
 Exactly one of
 .Va opts->argv
 (the child

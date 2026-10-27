@@ -307,6 +307,7 @@ client_thread(void *arg)
     a->rc = 1;   /* assume failure */
 
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     /* Self-signed server cert: opt out of server verification.  Since
      * 1.50 a zeroed opts would verify it (and fail). */
     opts.verify_peer_mode = XTC_TLS_VERIFY_NONE;
@@ -352,6 +353,7 @@ client_thread_with_cert(void *arg)
     a->rc = 1;
 
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.verify_peer_mode = XTC_TLS_VERIFY_NONE;   /* self-signed server */
     opts.min_version = XTC_TLS_VER_12;
     opts.cert_file   = TEST_CLI_CERT;     /* present our client cert */
@@ -396,6 +398,7 @@ test_server_ctx_create_destroy(const MunitParameter params[], void *data)
     (void)data;
 
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.cert_file   = TEST_CERT_PATH;
     opts.key_file    = TEST_KEY_PATH;
     opts.min_version = XTC_TLS_VER_12;
@@ -433,6 +436,7 @@ test_server_handshake_roundtrip(const MunitParameter params[], void *data)
     (void)data;
 
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.cert_file   = TEST_CERT_PATH;
     opts.key_file    = TEST_KEY_PATH;
     opts.min_version = XTC_TLS_VER_12;
@@ -495,6 +499,7 @@ test_server_alpn(const MunitParameter params[], void *data)
     (void)data;
 
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.cert_file   = TEST_CERT_PATH;
     opts.key_file    = TEST_KEY_PATH;
     opts.min_version = XTC_TLS_VER_12;
@@ -526,6 +531,7 @@ test_server_tls_create_bad_args(const MunitParameter params[], void *data)
     (void)data;
 
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.cert_file = TEST_CERT_PATH;
     opts.key_file  = TEST_KEY_PATH;
 
@@ -575,6 +581,7 @@ test_server_extended_opts(const MunitParameter params[], void *data)
     (void)data;
 
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.cert_file        = TEST_CERT_PATH;
     opts.key_file         = TEST_KEY_PATH;
     opts.min_version      = XTC_TLS_VER_12;
@@ -704,6 +711,7 @@ test_server_pss_channel_binding(const MunitParameter params[], void *data)
         return MUNIT_SKIP;   /* toolchain cannot build an RSA-PSS cert */
 
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.cert_file   = TEST_PSS_CERT;
     opts.key_file    = TEST_PSS_KEY;
     opts.min_version = XTC_TLS_VER_12;
@@ -801,6 +809,7 @@ test_server_bad_cert_path(const MunitParameter params[], void *data)
     (void)data;
 
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.cert_file = "/tmp/xtc-nonexistent-cert-89ab.pem";
     opts.key_file  = "/tmp/xtc-nonexistent-key-89ab.pem";
 
@@ -831,6 +840,7 @@ test_server_peer_cert(const MunitParameter params[], void *data)
     (void)params; (void)data;
 
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.cert_file        = TEST_CERT_PATH;
     opts.key_file         = TEST_KEY_PATH;
     opts.min_version      = XTC_TLS_VER_12;
@@ -931,6 +941,7 @@ client_thread_sni(void *arg)
 
     a->rc = 1;
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.verify_peer_mode = XTC_TLS_VERIFY_NONE;   /* self-signed server */
     opts.min_version = XTC_TLS_VER_12;
 
@@ -1004,6 +1015,7 @@ test_server_sni_select(const MunitParameter params[], void *data)
 
     /* Alternate (tenant) context. */
     memset(&alt_opts, 0, sizeof(alt_opts));
+    alt_opts.size = sizeof alt_opts;
     alt_opts.cert_file   = TEST_SNI_CERT;
     alt_opts.key_file    = TEST_SNI_KEY;
     alt_opts.min_version = XTC_TLS_VER_12;
@@ -1012,6 +1024,7 @@ test_server_sni_select(const MunitParameter params[], void *data)
 
     /* Default context, with the SNI selector installed. */
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.cert_file   = TEST_CERT_PATH;
     opts.key_file    = TEST_KEY_PATH;
     opts.min_version = XTC_TLS_VER_12;
@@ -1030,7 +1043,7 @@ test_server_sni_select(const MunitParameter params[], void *data)
     /* Registering on a CLIENT context is refused. */
     {
         xtc_tls_ctx_t *cli = NULL;
-        xtc_tls_opts_t co; memset(&co, 0, sizeof(co));
+        xtc_tls_opts_t co = XTC_TLS_OPTS_INIT;
         co.verify_peer_mode = XTC_TLS_VERIFY_NONE;   /* no ca_file */
         munit_assert_int(xtc_tls_ctx_create(XTC_TLS_CLIENT, &co, &cli), ==, XTC_OK);
         munit_assert_int(xtc_tls_ctx_set_sni_cb(cli, sni_selector, NULL),
@@ -1137,7 +1150,7 @@ test_server_transport_roundtrip(const MunitParameter params[], void *data)
     xtc_tls_t      *tls = NULL;
     struct client_args ca;
     struct xport    x;
-    xtc_tls_transport_t xt;
+    xtc_tls_transport_t xt = XTC_TLS_TRANSPORT_INIT;
     pthread_t       tid;
     int             sv[2], rc;
     char            rbuf[CLIENT_MSG_LEN + 1];
@@ -1146,6 +1159,7 @@ test_server_transport_roundtrip(const MunitParameter params[], void *data)
     (void)data;
 
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.cert_file   = TEST_CERT_PATH;
     opts.key_file    = TEST_KEY_PATH;
     opts.min_version = XTC_TLS_VER_12;
@@ -1160,6 +1174,7 @@ test_server_transport_roundtrip(const MunitParameter params[], void *data)
      * implement custom transport returns XTC_E_NOSYS for every call;
      * detect that and skip. */
     memset(&xt, 0, sizeof(xt));
+    xt.size = sizeof xt;
     rc = xtc_tls_create_transport(NULL, &xt, &tls);
     if (rc == XTC_E_NOSYS) {
         xtc_tls_ctx_destroy(ctx);
@@ -1277,6 +1292,7 @@ test_server_verify_modes(const MunitParameter params[], void *data)
     (void)data;
 
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.cert_file   = TEST_CERT_PATH;
     opts.key_file    = TEST_KEY_PATH;
     opts.min_version = XTC_TLS_VER_12;
@@ -1387,6 +1403,7 @@ dead_peer_client(void *arg)
     xtc_tls_t     *tls = NULL;
 
     memset(&o, 0, sizeof o);
+    o.size = sizeof o;
     o.verify_peer_mode = XTC_TLS_VERIFY_NONE;   /* self-signed test cert */
     if (xtc_tls_ctx_create(XTC_TLS_CLIENT, &o, &ctx) == XTC_OK &&
         xtc_tls_create(ctx, a->fd, &tls) == XTC_OK)
@@ -1414,6 +1431,7 @@ dead_peer_child(void)
 
     (void)signal(SIGPIPE, SIG_DFL);   /* an embedder that did nothing */
     memset(&o, 0, sizeof o);
+    o.size = sizeof o;
     o.cert_file = TEST_CERT_PATH;
     o.key_file  = TEST_KEY_PATH;
     if (xtc_tls_ctx_create(XTC_TLS_SERVER, &o, &ctx) != XTC_OK)
@@ -1518,6 +1536,7 @@ test_server_error_isolation(const MunitParameter params[], void *data)
     (void)data;
 
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.cert_file   = TEST_CERT_PATH;
     opts.key_file    = TEST_KEY_PATH;
     opts.min_version = XTC_TLS_VER_12;
@@ -1650,7 +1669,7 @@ ywrite(void *ud, const void *buf, size_t len)
 static int
 yattacker_open(xtc_tls_ctx_t *ctx, struct ysess *a, int sv[2])
 {
-    xtc_tls_transport_t xt;
+    xtc_tls_transport_t xt = XTC_TLS_TRANSPORT_INIT;
 
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0 ||
         set_nonblock(sv[0]) != 0 ||
@@ -1727,7 +1746,7 @@ test_server_transport_yield_isolation(const MunitParameter params[],
 {
     xtc_tls_opts_t  opts;
     xtc_tls_ctx_t  *ctx = NULL;
-    xtc_tls_transport_t xt;
+    xtc_tls_transport_t xt = XTC_TLS_TRANSPORT_INIT;
     xtc_loop_t     *loop = NULL;
     struct client_args ca;
     struct ysess    v, a;
@@ -1739,6 +1758,7 @@ test_server_transport_yield_isolation(const MunitParameter params[],
     (void)data;
 
     memset(&opts, 0, sizeof(opts));
+    opts.size = sizeof opts;
     opts.cert_file   = TEST_CERT_PATH;
     opts.key_file    = TEST_KEY_PATH;
     opts.min_version = XTC_TLS_VER_12;
@@ -1856,6 +1876,7 @@ eof_client(void *arg)
 
     a->rc = 1;
     memset(&o, 0, sizeof o);
+    o.size = sizeof o;
     o.verify_peer_mode = XTC_TLS_VERIFY_NONE;
     o.min_version = XTC_TLS_VER_12;
     if (xtc_tls_ctx_create(XTC_TLS_CLIENT, &o, &ctx) == XTC_OK &&
@@ -1884,6 +1905,7 @@ eof_case(int mode, size_t *out_n)
     int sv[2], ctl[2], rc;
 
     memset(&o, 0, sizeof o);
+    o.size = sizeof o;
     o.cert_file = TEST_CERT_PATH;
     o.key_file  = TEST_KEY_PATH;
     o.min_version = XTC_TLS_VER_12;

@@ -105,13 +105,18 @@ test_svr_basic(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	xtc_svr_t  *svr;
 	xtc_svr_callbacks_t cb = {
+		.size = sizeof(xtc_svr_callbacks_t),
 		.init        = NULL,
 		.handle_call = counter_handle_call,
 		.handle_cast = counter_handle_cast,
 		.handle_info = counter_handle_info,
 		.terminate   = NULL
 	};
-	xtc_svr_opts_t opts = { .name = "counter", .mailbox_cap = 0 };
+	xtc_svr_opts_t opts = {
+		.size = sizeof(xtc_svr_opts_t),
+		.name = "counter",
+		.mailbox_cap = 0
+	};
 	struct counter_state state = {0};
 	struct driver_args da;
 	xtc_pid_t dpid;
@@ -189,10 +194,15 @@ test_svr_call_abortable(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	xtc_svr_t  *svr;
 	xtc_svr_callbacks_t cb = {
+		.size = sizeof(xtc_svr_callbacks_t),
 		.init = NULL, .handle_call = blackhole_handle_call,
 		.handle_cast = NULL, .handle_info = NULL, .terminate = NULL
 	};
-	xtc_svr_opts_t opts = { .name = "blackhole", .mailbox_cap = 0 };
+	xtc_svr_opts_t opts = {
+		.size = sizeof(xtc_svr_opts_t),
+		.name = "blackhole",
+		.mailbox_cap = 0
+	};
 	struct abrt_args a;
 	xtc_pid_t cpid, kpid;
 	(void)p; (void)d;
@@ -287,11 +297,16 @@ test_svr_deferred_reply(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	xtc_svr_t  *svr;
 	xtc_svr_callbacks_t cb = {
+		.size = sizeof(xtc_svr_callbacks_t),
 		.init = NULL, .handle_call = defer_handle_call,
 		.handle_cast = defer_handle_cast, .handle_info = NULL,
 		.terminate = NULL
 	};
-	xtc_svr_opts_t opts = { .name = "defer", .mailbox_cap = 0 };
+	xtc_svr_opts_t opts = {
+		.size = sizeof(xtc_svr_opts_t),
+		.name = "defer",
+		.mailbox_cap = 0
+	};
 	struct defer_state state = {0};
 	struct defer_args a1, a2, fa;
 	xtc_pid_t p1, p2, pf;
@@ -353,7 +368,10 @@ cont_call(void *st, const void *req, size_t n, xtc_svr_call_t *call)
 	return XTC_SVR_CONTINUE;
 }
 static const xtc_svr_callbacks_t CONT_CB = {
-	cont_init, cont_call, NULL, NULL, cont_continue, NULL
+	.size = sizeof(xtc_svr_callbacks_t),
+	.init = cont_init,
+	.handle_call = cont_call,
+	.handle_continue = cont_continue
 };
 struct cont_drv { xtc_svr_t *svr; int reply_ready; };
 static void
@@ -441,13 +459,18 @@ test_svr_call_name(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	xtc_svr_callbacks_t cb = {
+		.size = sizeof(xtc_svr_callbacks_t),
 		.init        = NULL,
 		.handle_call = counter_handle_call,
 		.handle_cast = counter_handle_cast,
 		.handle_info = counter_handle_info,
 		.terminate   = NULL
 	};
-	xtc_svr_opts_t opts = { .name = "counter.named", .mailbox_cap = 0 };
+	xtc_svr_opts_t opts = {
+		.size = sizeof(xtc_svr_opts_t),
+		.name = "counter.named",
+		.mailbox_cap = 0
+	};
 	struct counter_state state = { 0 };
 	struct call_name_args a;
 	xtc_pid_t dpid;
@@ -561,10 +584,15 @@ test_svr_call_off_loop(const MunitParameter p[], void *d)
 	xtc_loop_t *loop = NULL;
 	xtc_svr_t  *svr = NULL;
 	xtc_svr_callbacks_t cb = {
+		.size = sizeof(xtc_svr_callbacks_t),
 		.init = NULL, .handle_call = ol_handle_call,
 		.handle_cast = NULL, .handle_info = NULL, .terminate = NULL
 	};
-	xtc_svr_opts_t opts = { .name = "offloop", .mailbox_cap = 0 };
+	xtc_svr_opts_t opts = {
+		.size = sizeof(xtc_svr_opts_t),
+		.name = "offloop",
+		.mailbox_cap = 0
+	};
 	struct offloop_args a;
 	pthread_t th;
 	(void)p; (void)d;
@@ -677,7 +705,10 @@ test_svr_off_loop_late_reply(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
 	xtc_svr_t  *svr = NULL;
-	xtc_svr_callbacks_t cb = { .handle_call = late_handle_call };
+	xtc_svr_callbacks_t cb = {
+		.size = sizeof(xtc_svr_callbacks_t),
+		.handle_call = late_handle_call
+	};
 	struct late_args a;
 	pthread_t th;
 	(void)p; (void)d;
@@ -761,7 +792,10 @@ test_svr_server_dies_mid_call(const MunitParameter p[], void *d)
 	const char *mode = munit_parameters_get(p, "caller");
 	xtc_loop_t *loop = NULL;
 	xtc_svr_t  *svr = NULL;
-	xtc_svr_callbacks_t cb = { .handle_call = dying_handle_call };
+	xtc_svr_callbacks_t cb = {
+		.size = sizeof(xtc_svr_callbacks_t),
+		.handle_call = dying_handle_call
+	};
 	struct dying_args a;
 	pthread_t th;
 	(void)d;
@@ -822,7 +856,7 @@ static void
 inproc_late_caller(void *arg)
 {
 	struct inproc_args *a = arg;
-	xtc_mailbox_stats_t ms;
+	xtc_mailbox_stats_t ms = XTC_MAILBOX_STATS_INIT;
 	uint32_t req[2], *r;
 	size_t rs;
 	int i, rc;
@@ -854,7 +888,10 @@ test_svr_inproc_late_replies(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
 	xtc_svr_t  *svr = NULL;
-	xtc_svr_callbacks_t cb = { .handle_call = echo_handle_call };
+	xtc_svr_callbacks_t cb = {
+		.size = sizeof(xtc_svr_callbacks_t),
+		.handle_call = echo_handle_call
+	};
 	struct inproc_args a;
 	(void)p; (void)d;
 	memset(&a, 0, sizeof a);
@@ -922,7 +959,10 @@ test_svr_inproc_reply_not_spoofed(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
 	xtc_svr_t  *svr = NULL;
-	xtc_svr_callbacks_t cb = { .handle_call = echo_handle_call };
+	xtc_svr_callbacks_t cb = {
+		.size = sizeof(xtc_svr_callbacks_t),
+		.handle_call = echo_handle_call
+	};
 	struct spoof_args a;
 	(void)p; (void)d;
 	memset(&a, 0, sizeof a);
@@ -986,7 +1026,10 @@ test_svr_huge_timeout(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
 	xtc_svr_t  *svr = NULL;
-	xtc_svr_callbacks_t cb = { .handle_call = echo_handle_call };
+	xtc_svr_callbacks_t cb = {
+		.size = sizeof(xtc_svr_callbacks_t),
+		.handle_call = echo_handle_call
+	};
 	struct bigto_args a;
 	pthread_t th;
 	(void)p; (void)d;

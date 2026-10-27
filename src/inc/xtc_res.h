@@ -54,6 +54,7 @@ typedef enum xtc_res_kind {
  * pick reasonable values for a 4-loop M5 executor on a workstation.
  */
 typedef struct xtc_res_caps {
+	size_t  size;             /* sizeof(xtc_res_caps_t): XTC_RES_CAPS_DEFAULT */
 	int64_t tasks;            /* default 100000 */
 	int64_t channels;         /* default 4096 */
 	int64_t chan_slots;       /* default 1000000 */
@@ -63,6 +64,7 @@ typedef struct xtc_res_caps {
 } xtc_res_caps_t;
 
 #define XTC_RES_CAPS_DEFAULT { \
+	.size        = sizeof(xtc_res_caps_t), \
 	.tasks       = 100000,            \
 	.channels    = 4096,              \
 	.chan_slots  = 1000000,           \
