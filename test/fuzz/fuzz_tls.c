@@ -74,7 +74,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		rc = xtc_tls_ctx_create(role ? XTC_TLS_CLIENT : XTC_TLS_SERVER,
 		    &o, &ctx);
 		if (rc == XTC_E_NOSYS)
-			break;                  /* built without TLS */
+			break; /* built without TLS */
 		fz_check(rc == XTC_OK || rc == XTC_E_INVAL);
 		fz_check((rc == XTC_OK) == (ctx != NULL));
 		if (len > 0 && !fz_wire_ok((const unsigned char *)s, len))

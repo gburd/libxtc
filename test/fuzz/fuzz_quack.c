@@ -42,8 +42,8 @@ fz_line(const uint8_t *d, size_t n)
 	memcpy(line, d, n);
 	memset(&m, 0, sizeof m);
 	if (quack_parse(line, n, &m) == 0) {
-		fz_check(m.kind >= QUACK_MSG_NONE &&
-		    m.kind <= QUACK_MSG_UNKNOWN);
+		fz_check(
+		    m.kind >= QUACK_MSG_NONE && m.kind <= QUACK_MSG_UNKNOWN);
 		fz_check(m.n_params >= 0 && m.n_params <= QUACK_MAX_PARAMS);
 		for (i = 0; i < m.n_params; i++) {
 			if (m.params[i].type != QUACK_P_TEXT &&
@@ -74,7 +74,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 	while (n > 0) {
 		nl = memchr(d, '\n', n);
 		if (nl == NULL) {
-			fz_line(d, n);          /* a final unterminated line */
+			fz_line(d, n); /* a final unterminated line */
 			break;
 		}
 		fz_line(d, (size_t)(nl - d));

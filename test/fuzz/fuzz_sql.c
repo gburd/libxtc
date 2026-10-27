@@ -99,33 +99,40 @@ fz_lead_kind(const char *s, size_t n)
 {
 	static const struct {
 		const char *kw;
-		int         kind;
+		int kind;
 	} k[] = {
-		{ "SELECT", SQL_KIND_SELECT }, { "INSERT", SQL_KIND_INSERT },
-		{ "REPLACE", SQL_KIND_INSERT }, { "UPDATE", SQL_KIND_UPDATE },
-		{ "DELETE", SQL_KIND_DELETE }, { "CREATE", SQL_KIND_CREATE },
-		{ "DROP", SQL_KIND_DROP }, { "PRAGMA", SQL_KIND_PRAGMA },
+		{ "SELECT", SQL_KIND_SELECT },
+		{ "INSERT", SQL_KIND_INSERT },
+		{ "REPLACE", SQL_KIND_INSERT },
+		{ "UPDATE", SQL_KIND_UPDATE },
+		{ "DELETE", SQL_KIND_DELETE },
+		{ "CREATE", SQL_KIND_CREATE },
+		{ "DROP", SQL_KIND_DROP },
+		{ "PRAGMA", SQL_KIND_PRAGMA },
 	};
 	size_t i = 0, j, w;
 
-	for (;;) {                       /* the lexer's whitespace + comments */
-		while (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' ||
-		    s[i] == '\n'))
+	for (;;) { /* the lexer's whitespace + comments */
+		while (i < n &&
+		    (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' ||
+		        s[i] == '\n'))
 			i++;
 		if (i + 1 < n && s[i] == '-' && s[i + 1] == '-') {
 			while (i < n && s[i] != '\n')
 				i++;
 		} else if (i + 1 < n && s[i] == '/' && s[i + 1] == '*') {
-			for (i += 2; i + 1 < n && !(s[i] == '*' && s[i + 1] == '/');)
+			for (i += 2;
+			     i + 1 < n && !(s[i] == '*' && s[i + 1] == '/');)
 				i++;
 			i = i + 1 < n ? i + 2 : n;
 		} else {
 			break;
 		}
 	}
-	for (w = i; w < n && ((s[w] >= 'A' && s[w] <= 'Z') ||
-	    (s[w] >= 'a' && s[w] <= 'z') || (s[w] >= '0' && s[w] <= '9') ||
-	    s[w] == '_'); w++)
+	for (w = i; w < n &&
+	     ((s[w] >= 'A' && s[w] <= 'Z') || (s[w] >= 'a' && s[w] <= 'z') ||
+	         (s[w] >= '0' && s[w] <= '9') || s[w] == '_');
+	     w++)
 		;
 	for (j = 0; j < sizeof k / sizeof k[0]; j++) {
 		size_t m, len = strlen(k[j].kw);

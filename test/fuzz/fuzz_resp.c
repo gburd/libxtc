@@ -22,7 +22,7 @@
 
 #include "proto.h"
 
-#define FZ_MAX_ARGS 128           /* conn.c's MAX_ARGS */
+#define FZ_MAX_ARGS 128 /* conn.c's MAX_ARGS */
 
 static void
 fz_check(int ok)
@@ -74,8 +74,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 			fz_check(argv[i].type == RESP_TYPE_BULK ||
 			    argv[i].type == RESP_TYPE_SIMPLE);
 			fz_check(argv[i].u.str.data >= buf &&
-			    argv[i].u.str.data + argv[i].u.str.len <=
-			    buf + n);
+			    argv[i].u.str.data + argv[i].u.str.len <= buf + n);
 		}
 	}
 	fz_check(guard <= n);
@@ -86,8 +85,8 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		start = p.pos;
 		if (resp_parse(&p, &v, &consumed) != RESP_OK)
 			break;
-		fz_check(consumed > 0 && p.pos == start + consumed &&
-		    p.pos <= n);
+		fz_check(
+		    consumed > 0 && p.pos == start + consumed && p.pos <= n);
 		if (v.type == RESP_TYPE_SIMPLE || v.type == RESP_TYPE_ERROR ||
 		    v.type == RESP_TYPE_BULK)
 			fz_check(v.u.str.data >= buf &&

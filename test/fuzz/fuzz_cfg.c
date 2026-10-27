@@ -38,8 +38,8 @@ fz_check(int ok)
 }
 
 static void
-fz_reg(const char *name, xtc_cfg_kind_t k, int64_t lo, int64_t hi,
-    double dlo, double dhi)
+fz_reg(const char *name, xtc_cfg_kind_t k, int64_t lo, int64_t hi, double dlo,
+    double dhi)
 {
 	xtc_cfg_spec_t s;
 	memset(&s, 0, sizeof s);
@@ -92,7 +92,7 @@ fz_invariants(void)
 	fz_check(xtc_cfg_get_int("ib", &i) == XTC_OK && i >= -5 && i <= 100);
 	fz_check(xtc_cfg_get_int64("l", &l) == XTC_OK);
 	fz_check(xtc_cfg_get_int64("lb", &l) == XTC_OK);
-	fz_check(l == 0 || (l >= 1 && l <= (1LL << 40)));  /* 0: the default */
+	fz_check(l == 0 || (l >= 1 && l <= (1LL << 40))); /* 0: the default */
 	fz_check(xtc_cfg_get_double("d", &d) == XTC_OK);
 	fz_check(!isnan(d) && d >= -1.5 && d <= 10.0);
 	fz_check(xtc_cfg_get_enum("e", &e) == XTC_OK && e >= 0 && e < 3);

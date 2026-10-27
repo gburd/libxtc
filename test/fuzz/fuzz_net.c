@@ -21,7 +21,8 @@
  *
  *	(mode >> 1) & 3 picks recv_frame's max_len: 1 MiB, 16, 4096 or
  *	65536.  Never 0: "no cap" allocates whatever a peer claims, up to
- *	4 GiB, by contract, which only measures the allocator.  mode & 8 makes the reading end non-blocking (the poll(2)
+ *	4 GiB, by contract, which only measures the allocator.
+ *	mode & 8 makes the reading end non-blocking (the poll(2)
  *	off-loop wait path).  No loop is created: the off-loop path is the
  *	one a peer reaches before any fiber is involved, and it needs no
  *	scheduler, so a run is deterministic.

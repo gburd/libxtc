@@ -24,11 +24,13 @@ TabWidth: 8
 UseTab: ForIndentation
 ColumnLimit: 80
 ContinuationIndentWidth: 4
-AlignAfterOpenBracket: Align
+# style(9): second-level indents are four spaces, not aligned to the
+# open bracket; a wrapped line ends with its operator.
+AlignAfterOpenBracket: DontAlign
 AlignConsecutiveAssignments: false
 AlignConsecutiveDeclarations: false
 AlignEscapedNewlines: Right
-AlignOperands: true
+AlignOperands: false
 AlignTrailingComments: true
 AllowAllArgumentsOnNextLine: false
 AllowAllParametersOfDeclarationOnNextLine: false
@@ -52,7 +54,7 @@ BraceWrapping:
   BeforeElse: false
   IndentBraces: false
   SplitEmptyFunction: true
-BreakBeforeBinaryOperators: NonAssignment
+BreakBeforeBinaryOperators: None
 BreakBeforeBraces: Custom
 BreakBeforeTernaryOperators: false
 BreakStringLiterals: false

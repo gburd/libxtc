@@ -68,8 +68,9 @@ fz_frame(uint8_t type, const uint8_t *body, size_t blen)
 		break;
 	case KAKA_COMMIT:
 	case KAKA_OFFSETS:
-		if ((type == KAKA_COMMIT ? kaka_decode_commit(body, blen, &c) :
-		    kaka_decode_offsets(body, blen, &c)) == 0) {
+		if ((type == KAKA_COMMIT ?
+		            kaka_decode_commit(body, blen, &c) :
+		            kaka_decode_offsets(body, blen, &c)) == 0) {
 			fz_in(c.group, c.group_len);
 			fz_in(c.topic, c.topic_len);
 		}
