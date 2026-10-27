@@ -524,9 +524,9 @@ test_check(void)
 	u16 = (uint16_t)(hh.prefix_len + 1);
 	corrupt_expect(L, ps, X, offsetof(struct btnode_hdr, prefix_len),
 	    &u16, 2, "prefix_len != fence prefix");
-	u32 = s1.head ^ 1u;
+	u16 = (uint16_t)(s1.head ^ 1u);
 	corrupt_expect(L, ps, X, s0 + offsetof(struct btnode_slot, head),
-	    &u32, 4, "stale slot head");
+	    &u16, 2, "stale slot head");
 	u16 = (uint16_t)(s1.val_len | BTNODE_VFLAG);
 	corrupt_expect(L, ps, X, s0 + offsetof(struct btnode_slot, val_len),
 	    &u16, 2, "VFLAG on a non-ref value");
@@ -696,10 +696,60 @@ test_split_bound(void)
 	    "pending entry up to M = (cap - 2K)/3; %d failures above it)\n", bad_over);
 }
 
+/*
+ * Format XBT3's slot is 8 bytes (10 up to 1.60): an index-shaped leaf of
+ * 18-byte stored suffixes and empty values (the ledger's history indexes
+ * store 17 B after prefix compression) holds 154 entries per 4 KiB page,
+ * 143 with the 10-byte slot (+7.7%), and every entry still reads back in
+ * order (the 2-byte head orders them, the cell bytes break its ties).
+ */
+static void
+test_slot_width(void)
+{
+	const uint32_t ps = 4096;
+	uint8_t *L = malloc(ps);
+	char why[200];
+	int n, i;
+
+	CHECK(L != NULL, "malloc");
+	CHECK(sizeof(struct btnode_slot) == 8, "slot is %zu bytes (want 8)",
+	    sizeof(struct btnode_slot));
+	btnode_init(L, ps, 1);
+	btnode_set_fences(L, "\xfe\0\0\0\x07" "AAAAAA", 11,
+	    "\xfe\0\0\0\x07" "AAAAAZ", 11);
+	for (n = 0;; n++) {
+		uint8_t k[11 + 17];
+
+		memcpy(k, "\xfe\0\0\0\x07" "AAAAA", 10);
+		k[10] = (uint8_t)('A' + n % 7);
+		for (i = 0; i < 17; i++)
+			k[11 + i] = (uint8_t)((n * 2654435761u) >> (i % 4 * 8));
+		k[11] = (uint8_t)(n >> 8);
+		k[12] = (uint8_t)n;
+		if (btnode_insert(L, k, sizeof k, NULL, 0) != 0)
+			break;
+	}
+	CHECK(btnode_check(L, why, sizeof why) == 0, "slot fill: %s", why);
+	CHECK(n >= 154, "4 KiB index leaf holds %d entries (want >= 154; a "
+	    "10-byte slot holds 143)", n);
+	for (i = 1; i < (int)btnode_count(L); i++) {
+		uint8_t a[64], b[64];
+		uint16_t al = 0, bl = 0;
+
+		(void)btnode_full_key(L, i - 1, a, sizeof a, &al);
+		(void)btnode_full_key(L, i, b, sizeof b, &bl);
+		CHECK(memcmp(a, b, al < bl ? al : bl) < 0, "order at %d", i);
+	}
+	printf("  test_slot_width: ok (8-byte slot: %d index entries per 4 KiB "
+	    "leaf)\n", n);
+	free(L);
+}
+
 int
 main(void)
 {
 	printf("btnode unit tests\n");
+	test_slot_width();
 	test_prefix_leaf();
 	test_fill_and_split();
 	test_binary_keys();

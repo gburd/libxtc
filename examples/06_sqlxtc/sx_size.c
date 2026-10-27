@@ -265,7 +265,7 @@ walk_leaf(const uint8_t *pg)
 	int s;
 
 	g_leaf.n++;
-	g_leaf.used += sizeof *h + (uint64_t)h->count * 10u + h->space_used;
+	g_leaf.used += sizeof *h + (uint64_t)h->count * sizeof(struct btnode_slot) + h->space_used;
 	g_leaf.slots += h->count;
 	g_leaf.fences += (uint64_t)h->lo_fence_len + h->hi_fence_len;
 	g_leaf.prefix += h->prefix_len;
@@ -291,11 +291,11 @@ walk_leaf(const uint8_t *pg)
 		if (first == NULL) {
 			first = c;
 			c->pages++;
-			c->page_used_b += sizeof *h + (uint64_t)h->count * 10u +
+			c->page_used_b += sizeof *h + (uint64_t)h->count * sizeof(struct btnode_slot) +
 			    h->space_used;
 		}
 		c->entries++;
-		c->slot_b += 10;
+		c->slot_b += sizeof(struct btnode_slot);
 		c->key_full_b += kl;
 		c->key_sfx_b += ksl;
 		c->val_b += vlv;
@@ -373,7 +373,7 @@ walk(uint64_t pid, int depth)
 		return 0;
 	}
 	g_inner.n++;
-	g_inner.used += sizeof *h + (uint64_t)h->count * 10u + h->space_used;
+	g_inner.used += sizeof *h + (uint64_t)h->count * sizeof(struct btnode_slot) + h->space_used;
 	g_inner.slots += h->count;
 	g_inner.fences += (uint64_t)h->lo_fence_len + h->hi_fence_len;
 	g_inner.prefix += h->prefix_len;

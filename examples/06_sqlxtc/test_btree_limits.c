@@ -471,8 +471,9 @@ t_seek_lt(uint32_t ps)
 }
 
 /* The inline bound on 4 KiB pages: an entry of up to (cap - 2K) / 3 =
- * 1018 bytes (1008 of key + value; 1010 before the 1.60 page checksum
- * took 8 bytes of the node header) stays in its leaf.  It was cap/4 - K
+ * 1018 bytes (1010 of key + value with 2.0's 8-byte slot; 1008 in 1.60
+ * with a 10-byte slot, 1010 before the 1.60 page checksum took 8 bytes
+ * of the node header) stays in its leaf.  It was cap/4 - K
  * = 516 (506 of key + value), and every TPC-C customer row (about 660 B)
  * took a 4 KiB out-of-line page of its own.  2,000 rows of 700 B with
  * 20 B keys: none out of line, about 5 rows a leaf, all intact. */
@@ -488,7 +489,7 @@ t_inline_bound(void)
 	int i, bad = 0;
 
 	CHECK(bt_open(bm, &bt) == XTC_OK, "open");
-	CHECK(bt_max_inline(bt) == 1008, "4 KiB inline bound %u (want 1008)",
+	CHECK(bt_max_inline(bt) == 1010, "4 KiB inline bound %u (want 1010)",
 	    bt_max_inline(bt));
 	for (i = 0; i < 2000; i++) {
 		snprintf(k, sizeof k, "row%017d", (i * 7919) % 2000);

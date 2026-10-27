@@ -40,8 +40,8 @@
  *	are common, and the prefix bytes themselves are taken from the
  *	stored lower fence key.  Each slot then stores only the key
  *	SUFFIX (the bytes after the common prefix).  The slot also caches
- *	the first four bytes of that suffix, big-endian, in `head`, so a
- *	binary search can usually order two keys with a single 32-bit
+ *	the first two bytes of that suffix, big-endian, in `head`, so a
+ *	binary search can usually order two keys with a single 16-bit
  *	compare before touching the cell bytes.
  *
  *	USAGE ORDER
@@ -115,15 +115,18 @@ struct btnode_hdr {
 #define BTNODE_CKSUM_OFF 40
 
 /*
- * One slot.  Packed so the on-page layout is exactly 10 bytes
- * regardless of the host's alignment rules.  `offset` points at the
- * key suffix; the value immediately follows the suffix in the cell.
+ * One slot, 8 bytes (2.0; 10 up to 1.60, with a 4-byte head).  `offset`
+ * points at the key suffix; the value immediately follows the suffix in
+ * the cell.  The head caches the suffix's first two bytes: on the
+ * ledger store two adjacent leaf suffixes agree on their first 2 bytes
+ * in 48.6% of the pairs and on their first 4 in 47.1%, so the two extra
+ * bytes settled almost no comparison and cost 2 bytes per entry.
  */
 struct __attribute__((packed)) btnode_slot {
 	uint16_t offset;  /* page offset of the key suffix */
 	uint16_t key_len; /* length of the key SUFFIX (full key - prefix) */
-	uint16_t val_len; /* length of the value */
-	uint32_t head;    /* first 4 bytes of the suffix, big-endian */
+	uint16_t val_len; /* length of the value (top bit: BTNODE_VFLAG) */
+	uint16_t head;    /* first 2 bytes of the suffix, big-endian */
 };
 
 /* Initialize an empty node in `page`.  page_size must be <= 65535. */
@@ -237,7 +240,8 @@ int btnode_split_ex(void *page, void *right_page, void *sep_key_out,
 static inline uint32_t
 btnode_entry_cost(uint16_t klen, uint16_t vlen)
 {
-	return 10u + (uint32_t)klen + (uint32_t)vlen;
+	return (uint32_t)sizeof(struct btnode_slot) + (uint32_t)klen +
+	    (uint32_t)vlen;
 }
 
 /*

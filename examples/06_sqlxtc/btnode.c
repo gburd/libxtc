@@ -9,7 +9,7 @@
  *	for the layout and the public contract.
  *
  *	The design follows leanstore's BTreeNode (prefix derived from
- *	the fence keys, per-slot 4-byte "head" for fast ordering, key
+ *	the fence keys, per-slot 2-byte "head" for fast ordering, key
  *	suffixes + values packed from the back of the page) and the
  *	classic slotted page (slot array grows
  *	from the front, cells from the back).
@@ -22,8 +22,8 @@
 #include <stdio.h>
 #include <string.h>
 
-_Static_assert(sizeof(struct btnode_slot) == 10,
-    "btnode_slot must pack to 10 bytes");
+_Static_assert(sizeof(struct btnode_slot) == 8,
+    "btnode_slot is on disk: 8 bytes (format XBT3)");
 _Static_assert(sizeof(struct btnode_hdr) == 48,
     "btnode_hdr is on disk: the insert history must stay in the padding");
 _Static_assert(offsetof(struct btnode_hdr, page_cksum) == BTNODE_CKSUM_OFF,
@@ -52,20 +52,17 @@ cslots_of(const void *page)
 	    sizeof(struct btnode_hdr));
 }
 
-/* First four bytes of `k` packed big-endian, zero padded for short keys. */
-static uint32_t
+/* First two bytes of `k` packed big-endian, zero padded for short keys. */
+#define HEAD_LEN 2
+static uint16_t
 suffix_head(const uint8_t *k, uint16_t len)
 {
-	uint32_t h = 0;
+	uint16_t h = 0;
 
 	if (len > 0)
-		h |= (uint32_t)k[0] << 24;
+		h = (uint16_t)(k[0] << 8);
 	if (len > 1)
-		h |= (uint32_t)k[1] << 16;
-	if (len > 2)
-		h |= (uint32_t)k[2] << 8;
-	if (len > 3)
-		h |= (uint32_t)k[3];
+		h |= k[1];
 	return h;
 }
 
@@ -178,7 +175,7 @@ node_compact(void *page)
  * *found (if non-NULL) to 1 on an exact match.  Compares the key prefix
  * against the node prefix first, then orders suffixes by `head`,
  * falling back to a full byte compare only when heads tie on a key
- * longer than four bytes.
+ * longer than HEAD_LEN bytes.
  */
 static int
 node_lower_bound(const void *page, const uint8_t *key, uint16_t key_len,
@@ -190,7 +187,7 @@ node_lower_bound(const void *page, const uint8_t *key, uint16_t key_len,
 	uint16_t pl = h->prefix_len;
 	const uint8_t *skey;
 	uint16_t sklen;
-	uint32_t khead;
+	uint16_t khead;
 	uint16_t lo = 0;
 	uint16_t hi = h->count;
 
@@ -233,13 +230,13 @@ node_lower_bound(const void *page, const uint8_t *key, uint16_t key_len,
 
 	while (lo < hi) {
 		uint16_t mid = (uint16_t)(lo + (hi - lo) / 2);
-		uint32_t mhead = s[mid].head;
+		uint16_t mhead = s[mid].head;
 
 		if (khead < mhead) {
 			hi = mid;
 		} else if (khead > mhead) {
 			lo = (uint16_t)(mid + 1);
-		} else if (s[mid].key_len <= 4) {
+		} else if (s[mid].key_len <= HEAD_LEN) {
 			/* head holds the whole stored suffix */
 			if (sklen < s[mid].key_len) {
 				hi = mid;
