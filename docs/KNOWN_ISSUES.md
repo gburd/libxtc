@@ -120,6 +120,26 @@ report and file an issue: the page id in the report is where to look.
 New DST coverage of scans racing merges and page-id reuse:
 test_sim_btree_scan.
 
+## FIXED (2.0): a fired park timer could release a newer timer of a migrated fiber
+
+**What was wrong.**  When a park timer fired, the loop cleared the
+waiting fiber's timer slot unconditionally and dropped the reference it
+found there.  A migratable fiber woken and stolen by another loop in the
+window between the fire and that clear had already cancelled the fired
+timer and armed a new one on the thief loop, so the firing loop dropped
+the NEW timer's reference: that timer lost its owner (it was never
+cancelled and woke the fiber spuriously later), and the firing loop read
+its reference count with nothing ordering the read after its allocation
+on the other thread.  ThreadSanitizer reported it in
+`/m5/exec/Blk4_cross_loop_state_timer` under load: 14 of 40 and 40 of
+100 runs on a 32-vCPU host.
+
+**The fix.**  The fire clears the slot only if it still holds the fired
+timer (a compare-and-swap) and otherwise leaves it to the fiber, which
+already released it.  0 of 100 TSan runs.  `/m3/timer/Tm16_fire_clears_own_slot`
+reproduces the interleaving deterministically on one loop.  It is not
+reachable under DST: the simulator runs no fiber inside a timer drain.
+
 ## CHANGED (1.60): involuntary preemption on musl/aarch64; platform checks
 
 * **musl on aarch64 now has involuntary preemption.**  1.59 compiled
@@ -879,43 +899,60 @@ sole cause of the specific Linux failure.  The fix is safe regardless:
 rounding a sub-microsecond wait up to 1 us cannot strand a fiber or
 over-sleep a deadline meaningfully.
 
-## OPEN: FreeBSD CI -- intermittent test_exec hang in the kqueue VM job
+## RESOLVED (1.51): FreeBSD -- intermittent test_exec hang in Blk4
 
-**Status:** OPEN as of 1.50.0.  Seen on the GitHub FreeBSD 15.1 VM job
-(`vmactions/freebsd-vm`), in `test/m5/test_exec.c` around
-`/m5/exec/Blk4_cross_loop_state_timer` -- migratable fibers parked in
-`xtc_recv` with a 1 ms timeout while a foreign thread wakes them, work
-stealing across loops.  It hit 7fa2340 and 47443de (1.48, before this
-release) and 4 of the 8 CI runs of the 1.50 candidate; it passed on the
-others including the 0283ac1 commit the v1.50.0 tag points at.  Not
-reproduced on Linux: Blk4 is 0/30 bad on poll (the closest kqueue proxy),
-epoll and io_uring, on both 1.49.5 and 1.50.  None of 1.50's source
-changes touch the timer, recv, wake or kqueue paths this test drives.
+**What it was.**  The GitHub FreeBSD 15.1 VM job (`vmactions/freebsd-vm`)
+timed out inside `test/m5/test_exec.c` in 1.48 and in two of the eight
+CI runs of the 1.50 candidate; the one log that named a test showed
+`/m5/exec/Blk4_cross_loop_state_timer` passing and the run stopping
+after it.  Blk4 runs migratable fibers in a 1 ms timed `xtc_recv` while
+a foreign thread wakes them and peers steal them.
 
-**Workaround:** none needed on Linux.  On FreeBSD, fibers that do not
-set `migratable = 1` are not affected by the stealing path this stresses.
+**Cause.**  `xtc_recv` took the calling proc from `__current_proc`, a
+thread-local that fiber context save/restore carries across a park, and
+that a migration can leave naming a different proc than the fiber
+running.  The receive then popped from, armed the waker of, and parked
+on another proc's mailbox, and could block forever on that proc's
+mailbox lock, taken on the other fiber's behalf by a thread that went
+idle.  Linux never hit it in testing.  1.51 (`d4df0bd3`) re-anchors the
+proc from the running fiber at receive entry and after every resume, as
+`xtc_proc_sleep` and `xtc_proc_wait_fd` already did.
 
-**Not the same cause as the select strand above.**  The select
-truncation-to-zero bug does not apply here: the kqueue backend converts
-`timeout_ns` to a `struct timespec` at full nanosecond resolution
-(`tv_nsec = timeout_ns % 1e9`), so a positive sub-microsecond deadline
-is preserved exactly and cannot collapse to a non-blocking `kevent`.
-This remains OPEN and un-root-caused: it has not reproduced on any
-available host (Linux poll/epoll/io_uring, macOS kqueue), only
-intermittently on the FreeBSD VM job, so a fix cannot be developed
-against a reproducer or validated without regressing the one backend it
-would touch.  Deliberately left un-patched rather than changing the
-EVFILT_USER wake path on a guess.
+**Evidence.**  On a native FreeBSD 15.1 host (8 CPUs, kqueue, clang),
+full `/m5/exec` runs, each bounded at 3 minutes: v1.50.0 hung in Blk4 in
+1 of 100 runs on 2 CPUs (`cpuset -l 4-5`) and 1 of 123 on all 8.  The
+captured stack: seven executor threads idle in `kevent`, the eighth
+blocked for good in `blk4_proc -> xtc_recv -> __do_recv ->
+__xtc_mtx_lock`.  v1.51.0: 0 of 100 on 2 CPUs.  Blk4 alone on v1.50.0
+did not hang in 1,000 runs (`cpuset -l 0-1`), nor Blk5 in 300; the full
+suite's earlier tests are part of the shape.  CI's FreeBSD job has passed
+every run since (57 of 57, September 24 to October 26).
 
-## OPEN: xspawn_entry children may fail to start on small hosts under ring churn
+The Blk4 timer race fixed in 2.0 ("a fired park timer could release a
+newer timer of a migrated fiber", above) is a different defect: it
+cannot block a thread on a lock, and this hang did not recur while it
+was still present (1.51 to 1.59).
 
-**Status:** OPEN as of 1.50.0; behavior, not a correctness defect.  A
-re-exec'd `xtc_xspawn_entry` child that cannot create its own io_uring
-ring exits at once with 246 (240 minus `XTC_E_INTERNAL`, see
-`xtc_xproc_child_main`), so its monitor gets a prompt `XTC_DOWN_KIND_EXIT`
-rather than a hang.  On 4-vCPU CI runners with 8 threads continuously
-creating and destroying rings, up to 73 of 400 children did; 0 on a
-32-vCPU host.  Retry the spawn, or reserve ring capacity on small hosts.
+## RESOLVED (1.51, 1.55): xspawn_entry children failed to start on small hosts under ring churn
+
+**What it was.**  A re-exec'd `xtc_xspawn_entry` child that could not
+create its own io_uring ring exited at once with 246 (240 minus
+`XTC_E_INTERNAL`, see `xtc_xproc_child_main`).  On 4-vCPU CI runners with
+8 threads continuously creating and destroying rings, up to 73 of 400
+children did.  The cause is the kernel tearing a ring down
+asynchronously: the next setup can fail until the earlier ring's memory
+is released.  It needs a kernel that charges ring memory to the locked-
+memory budget: on a 4-CPU Linux 7.2 host, v1.50.0 loses 300 to 345 of the
+400 children of `/m10.10/xproc/entry_mt_parent`; Linux 6.12 never
+reproduced it.
+
+**Now.**  The child retries `xtc_loop_init` for about 2 s with a doubling
+back-off (1.51), and ring setup itself retries a transient `ENOMEM`
+(1.55); only a failure that persists exits 240 minus `XTC_E_*`.  Same
+host and test: 0 of 400 in each of 15 runs (pinned to 4 CPUs, and with
+only 4 CPUs online).  The test fails if more than 4 of 400 cannot start.
+A child cannot fall back to the epoll backend instead: the I/O backend is
+chosen at configure time.  See xtc_xproc(3).
 
 ## RESOLVED (1.51): timed waits reclaim their timer when it fires or cancels
 
@@ -1180,18 +1217,36 @@ GitHub CI's sched-policy job hit it in `/m7/chan/mpsc_involuntary_preempt`.
 The test is opt-in (`XTC_TEST_INVOLUNTARY=1`) until the signal-context
 redirect path is fixed.
 
-## OPEN: valgrind memcheck reports libxtc fiber stacks as invalid
+## RESOLVED (2.0): valgrind memcheck reported libxtc fiber stacks as invalid
 
-**Status:** OPEN, tooling limitation; not a memory error in libxtc.
+**What it was.**  libxtc allocates fiber stacks with `mmap` and did not
+register them with valgrind, so once a fiber resumed on another loop's
+thread after a cross-loop `xtc_amutex` hand-off, memcheck reported its
+stack accesses as errors: 1,629 (ucontext) and 1,678 (fcontext) in
+`/m9/sync/kill_after_park_while_running`, with "client switching
+stacks?" warnings.  It was not a memory error in libxtc (ASan, which
+libxtc annotates for fiber switches, reported nothing), but CI's memcheck
+job had to skip that case.
 
-libxtc allocates fiber stacks with `mmap` and does not register them with
-`VALGRIND_STACK_REGISTER`, so once a fiber resumes on another loop's
-thread after a cross-loop `xtc_amutex` hand-off, memcheck flags its stack
-accesses (thousands of "invalid read/write" reports for a two-loop
-amutex test on 1.55.0 and 1.56).  ASan, which libxtc annotates for fiber
-switches, reports nothing for the same tests.  CI's memcheck job sets
-`XTC_UNDER_VALGRIND=1`, which skips the amutex case of
-`/m9/sync/kill_after_park_while_running`; use ASan for fiber code.
+**Now.**  When configure finds `<valgrind/valgrind.h>` (header-only; the
+`valgrind-devel` / `valgrind` package), every fiber stack is registered
+with `VALGRIND_STACK_REGISTER` when its coroutine is created and
+deregistered before the stack is pooled or unmapped.  Outside valgrind
+the requests are skipped after one `RUNNING_ON_VALGRIND` check per process:
+spawn+exit throughput is within 0.4% of a build without the header
+(medians of 15 interleaved runs, ranges overlapping).  The same test runs
+with 0 errors on both substrates, and the skip is gone; CI's memcheck
+list (test_sync, test_chan, test_mctx, test_timer, test_loop, test_svr,
+test_lockmgr) is 0 errors with no stack-switch warnings.
+
+**Still not memcheck targets.**  `test_proc`'s fault-containment cases
+write to address 0x10 on purpose; its `pid_local_id_ceiling` case holds
+65,536 fiber stacks, more mappings than valgrind tracks (`VG_N_SEGMENTS
+is too low`).  `test_exec`'s `Blk2_concurrent_commit` spins on a shared
+lock across a blocking offload and does not finish in 15 minutes under
+valgrind.  The timing tests in `test_sync` still skip under
+`XTC_UNDER_VALGRIND` (valgrind serializes threads; those tests measure
+scheduling, not memory).
 
 ## RESOLVED (1.56): a finished proc fiber is reclaimed at once
 
