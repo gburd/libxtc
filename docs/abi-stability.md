@@ -211,8 +211,9 @@ announced with the major, never retroactively.
 **What a 2.0.x patch may change.**  Fixes only.  A patch release:
 
 - adds, removes or renames no exported symbol and changes no function
-  signature, enum value, macro value, or struct layout (layout gate,
-  test/abi/layout.txt, must be unchanged);
+  signature, enum value, macro value, or struct layout (the layout
+  gate's table is unchanged, and the release abidiff, abi-check.sh,
+  against the previous 2.0.x reports status 0);
 - keeps every on-disk, wire, trace and probe format byte for byte
   (below);
 - changes no documented default, no configuration name, and no error
@@ -260,12 +261,14 @@ USDT probe set (its provider and argument lists).  The rule:
 - a reader in any 2.x release accepts every version a 2.x release
   wrote.
 
-**The compat job.**  CI's `compat` job builds the N-1 consumer under
-test/abi against the PREVIOUS release's installed headers and runs it
-against the current library -- a consumer compiled for 2.0.0 must keep
-working against every later 2.x.  It skips, saying why, until a 2.x
-tag exists (a 1.x consumer is not expected to work against 2.0:
-1.x -> 2.0 is the major break).
+**The compat job.**  CI's `compat` job (`scripts/compat-check.sh`)
+takes the N-1 consumer from the PREVIOUS 2.x release tag, compiles it
+against that release's installed headers, and runs it against the
+current `libxtc.a` and `libxtc.so` -- a consumer compiled for 2.0.0 must
+keep working against every later 2.x.  It skips, saying why, until a
+2.x tag exists (a 1.x consumer is not expected to work against 2.0:
+1.x -> 2.0 is the major break).  With the layout gate it is the
+mechanical half of this contract; the rest is review.
 
 **Security fixes** follow the process in SECURITY.md: private report,
 fix on every supported line, coordinated release.

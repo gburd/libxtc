@@ -38,7 +38,7 @@ J=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
 if [ "$name" = all ]; then
 	rc=0
 	for n in net cfg tls sql quack resp kaka; do
-		"$0" "$n" "$secs" || rc=1
+		sh "$0" "$n" "$secs" || rc=1
 	done
 	exit $rc
 fi
