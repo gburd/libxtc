@@ -66,7 +66,11 @@ copy each direction once: the request (or reply) and its routing
 header must become one message, and the payload you pass is `const`.
 The frame is then moved, and the caller is handed the very block the
 server built.  (Before the zero-copy work a call round trip copied the
-payload seven times.)
+payload seven times.)  What the remaining copy costs, measured on one
+loop of a 32-vCPU x86-64 host with equal request and reply sizes: about
+1% of an 890 ns round trip at 64 bytes, 7% of 1.0 us at 4 KiB, 77% of
+3.75 us at 64 KiB.  For large payloads, send an `xtc_send_owned` block
+to the server process and reply the same way instead of calling.
 
 **Process groups** (`xtc_pg_send`) send one copy per member: a
 fan-out of a `const` buffer.  `xtc_pg_send_owned` takes an
