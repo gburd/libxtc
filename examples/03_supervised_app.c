@@ -157,6 +157,7 @@ main(int argc, char **argv)
 {
 	xtc_app_t *app;
 	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+	xtc_sup_opts_t sup_opts = XTC_SUP_OPTS_DEFAULT;
 	xtc_child_spec_t kids[2];
 	xtc_pid_t watcher_pid;
 	int rc, status = 1;
@@ -188,11 +189,14 @@ main(int argc, char **argv)
 	(void)xtc_trace_causal_enable(1);
 
 	opts.name = "demo_app";
-	opts.sup.strategy     = XTC_SUP_ONE_FOR_ALL;
-	opts.sup.max_restarts = 5;
-	opts.sup.period_ns    = 1000LL * 1000 * 1000;
+	sup_opts.strategy     = XTC_SUP_ONE_FOR_ALL;
+	sup_opts.max_restarts = 5;
+	sup_opts.period_ns    = 1000LL * 1000 * 1000;
+	opts.sup = &sup_opts;
 
 	memset(kids, 0, sizeof kids);
+	kids[0].size = sizeof kids[0];
+	kids[1].size = sizeof kids[1];
 	kids[0].name   = "counter";
 	kids[0].fn     = counter_proc;
 	kids[0].policy = XTC_RESTART_TRANSIENT;

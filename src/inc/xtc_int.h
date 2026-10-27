@@ -149,4 +149,69 @@
 #  define XTC_PACKED  __attribute__((packed))
 #endif
 
+/*
+ * Size-first public structs (2.0 ABI; docs/abi-stability.md).  Every
+ * caller-allocated option/info struct starts with `size_t size`, set by
+ * the caller to sizeof ITS view of the struct.  These two helpers are the
+ * only place the library interprets that size.
+ *
+ * __xtc_sized_in: copy a caller's INPUT struct into `dst` (the library's
+ * full view, `full` bytes): `dflt` (or zeroes) first, then the caller's
+ * first `size` bytes over it, so a field the caller did not allocate reads
+ * as its default -- never as whatever follows the caller's object.
+ *   size == 0 or size < min          XTC_E_INVAL
+ *   size > full, unknown tail != 0   XTC_E_VERSION (a newer caller set a
+ *                                    field this library does not know)
+ * `min` is the end of the struct's last required field (sizeof(size_t)
+ * when every field is optional).
+ *
+ * __xtc_sized_out: write the library's full `src` into a caller's OUTPUT
+ * struct, at most dst->size bytes; bytes of a larger (newer) caller view
+ * past `full` are zeroed.  dst->size is left as the caller set it.
+ */
+static inline int
+__xtc_sized_in(void *dst, const void *dflt, size_t full, const void *src,
+    size_t min)
+{
+	const unsigned char *tail;
+	size_t sz, i;
+
+	memcpy(&sz, src, sizeof sz);
+	if (sz < sizeof(size_t) || sz < min)
+		return XTC_E_INVAL;
+	if (sz > full) {
+		tail = (const unsigned char *)src + full;
+		for (i = 0; i < sz - full; i++)
+			if (tail[i] != 0)
+				return XTC_E_VERSION;
+		sz = full;
+	}
+	if (dflt != NULL)
+		memcpy(dst, dflt, full);
+	else
+		memset(dst, 0, full);
+	memcpy(dst, src, sz);
+	memcpy(dst, &full, sizeof full);
+	return XTC_OK;
+}
+
+static inline int
+__xtc_sized_out(void *dst, const void *src, size_t full)
+{
+	size_t sz;
+
+	memcpy(&sz, dst, sizeof sz);
+	if (sz < sizeof(size_t))
+		return XTC_E_INVAL;
+	memcpy((unsigned char *)dst + sizeof sz,
+	    (const unsigned char *)src + sizeof sz,
+	    (sz < full ? sz : full) - sizeof sz);
+	if (sz > full)
+		memset((unsigned char *)dst + full, 0, sz - full);
+	return XTC_OK;
+}
+
+/* Validate an OUTPUT struct's size before doing the work that fills it. */
+#define __XTC_SIZED_OUT_OK(p) ((p) != NULL && (p)->size >= sizeof(size_t))
+
 #endif /* XTC_INT_H */

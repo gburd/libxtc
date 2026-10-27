@@ -63,7 +63,9 @@ spawner(void *arg)
 	int i;
 
 	memset(&oa, 0, sizeof oa);
+	oa.size = sizeof oa;
 	memset(&ob, 0, sizeof ob);
+	ob.size = sizeof ob;
 	oa.sched_class = c->a;   /* place these tasks in class A */
 	ob.sched_class = c->b;   /* and these in class B */
 	for (i = 0; i < 3; i++) {

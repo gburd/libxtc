@@ -530,7 +530,7 @@ partition_for(const char *topic, uint16_t topic_len, uint32_t partition,
 	int i, free_slot = -1, rc = -1;
 	char tkey[64];
 	struct part_arg *pa;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 
 	if (topic_len == 0 || topic_len >= sizeof tkey)
@@ -901,7 +901,7 @@ int
 broker_spawn_conn(xtc_loop_t *loop, int fd)
 {
 	struct conn_arg *ca;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	int i, slot = -1;
 
@@ -1115,7 +1115,7 @@ st_run(void (*client)(void *), struct st *st)
 {
 	xtc_loop_t *loop = NULL;
 	struct part_arg *pa;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 
 	if (xtc_loop_init(&loop) != XTC_OK) return -1;
@@ -1523,7 +1523,7 @@ static void
 timeout_main(void *arg)
 {
 	struct st *st = arg;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	opts.name = "timeout-client";
 	if (xtc_proc_spawn(g_loop, timeout_client, st, &opts, &pid) != XTC_OK) {
@@ -1539,7 +1539,7 @@ broker_timeout_selftest(const char *dir)
 {
 	struct st st;
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	int i;
 

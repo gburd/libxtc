@@ -452,6 +452,7 @@ __coro_destroy(struct xtc_coro *c)
 	if (c->stack != NULL) {
 		long pg = sysconf(_SC_PAGESIZE);
 		size_t total = c->stack_sz + (pg > 0 ? (size_t)pg : 4096);
+		__xtc_vg_stack_deregister(c->vg_stack_id);
 #if defined(XTC_FIBER_SWITCH_ANNOTATE)
 		/* A finished fiber leaves its last frames' redzones poisoned
 		 * (it never returned; a kill longjmp skipped more).  Clear them
@@ -527,6 +528,7 @@ __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
 		}
 	}
 	c->stack = base;
+	c->vg_stack_id = __xtc_vg_stack_register(base + guard, c->stack_sz);
 	c->fn = fn;
 	c->arg = arg;
 	c->done = 0;

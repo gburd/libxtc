@@ -125,7 +125,7 @@ conflict_starter(void *a)
 	atomic_store(&g_clients_left, g_conflict_nclients);
 	for (c = 0; c < g_conflict_nclients; c++) {
 		xtc_loop_t *lp = g_conflict_loops[c % g_conflict_nloops];
-		xtc_proc_opts_t po = { .name = "cli" };
+		xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "cli" };
 		xtc_pid_t pid;
 		if (xtc_proc_spawn(lp, conflict_client, (void *)c, &po, &pid)
 		    != XTC_OK)
@@ -138,7 +138,7 @@ run_correctness(void)
 {
 	xtc_loop_t *loop = NULL;
 	xtc_loop_t *sl[N_SHARDS];
-	xtc_proc_opts_t o = { .name = "drv" };
+	xtc_proc_opts_t o = { .size = sizeof(xtc_proc_opts_t), .name = "drv" };
 	xtc_pid_t pid;
 	int i;
 
@@ -170,7 +170,7 @@ run_conflict(int n_loops, int n_clients, const char *tag)
 	if (n_loops <= 1) {
 		xtc_loop_t *loop = NULL;
 		xtc_loop_t *cloops[1];
-		xtc_proc_opts_t o = { .name = "start" };
+		xtc_proc_opts_t o = { .size = sizeof(xtc_proc_opts_t), .name = "start" };
 		xtc_pid_t pid;
 		assert(xtc_loop_init(&loop) == XTC_OK);
 		for (i = 0; i < N_SHARDS; i++) sl[i] = loop;
@@ -183,7 +183,7 @@ run_conflict(int n_loops, int n_clients, const char *tag)
 	} else {
 		xtc_exec_t *exec = NULL;
 		xtc_loop_t *cloops[N_SHARDS];
-		xtc_proc_opts_t o = { .name = "start" };
+		xtc_proc_opts_t o = { .size = sizeof(xtc_proc_opts_t), .name = "start" };
 		xtc_pid_t pid;
 		assert(xtc_exec_init(&exec, n_loops) == XTC_OK);
 		for (i = 0; i < N_SHARDS; i++) sl[i] = xtc_exec_loop(exec, i % n_loops);
@@ -269,7 +269,7 @@ run_gc(void)
 {
 	xtc_loop_t *loop = NULL;
 	xtc_loop_t *sl[N_SHARDS];
-	xtc_proc_opts_t o = { .name = "gc" };
+	xtc_proc_opts_t o = { .size = sizeof(xtc_proc_opts_t), .name = "gc" };
 	xtc_pid_t pid;
 	int i;
 

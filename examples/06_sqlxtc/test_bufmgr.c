@@ -93,7 +93,7 @@ int
 main(void)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	xtc_pid_t w, pp;
 	bm_stats_t st;

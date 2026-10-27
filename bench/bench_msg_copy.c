@@ -130,7 +130,7 @@ tx_proc(void *arg)
 int
 main(int argc, char **argv)
 {
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	int loops;
 	double secs;
 

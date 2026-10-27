@@ -77,7 +77,7 @@ static MunitResult
 test_frame_roundtrip(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	struct fr_state s;
 	int sv[2];
 	xtc_pid_t a, b;
@@ -130,7 +130,7 @@ static MunitResult
 test_frame_cap(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	struct fr_state s;
 	int sv[2];
 	xtc_pid_t a, b;
@@ -212,7 +212,7 @@ static MunitResult
 test_frame_truncated(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	struct fr_state s;
 	int sv[2];
 	xtc_pid_t a, b;

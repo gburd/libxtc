@@ -169,7 +169,7 @@ child_pump_proc(void *a)
 			 * any DOWN sitting in our mailbox. */
 			void *m = NULL; size_t mn = 0;
 			if (xtc_recv(&m, &mn, 0) == XTC_OK) {
-				xtc_down_info_t di;
+				xtc_down_info_t di = XTC_DOWN_INFO_INIT;
 				if (xtc_down_decode_ex(m, mn, &di) == XTC_OK &&
 				    pp->exit_code != NULL)
 					*pp->exit_code = di.reason;
@@ -478,6 +478,7 @@ xtc_xspawn(xtc_loop_t *loop, const char *name, xtc_xproc_root_fn root_fn,
 	cctx->arg = arg_copy;
 
 	memset(&oo, 0, sizeof oo);
+	oo.size = sizeof oo;
 	oo.name = name;
 	oo.fn = child_fn;
 	oo.arg = cctx;
@@ -603,6 +604,7 @@ xtc_xspawn_entry(xtc_loop_t *loop, const char *name, const char *entry,
 	argv[3] = NULL;
 
 	memset(&oo, 0, sizeof oo);
+	oo.size = sizeof oo;
 	oo.name = name;
 	oo.argv = argv;
 	oo.ctrl_socket = 1;
@@ -1187,7 +1189,7 @@ win_rootmon_proc(void *a)
 	uint64_t ref = 0;
 	(void)xtc_monitor(m->root, &ref);
 	if (xtc_recv(&msg, &n, -1) == XTC_OK) {
-		xtc_down_info_t di;
+		xtc_down_info_t di = XTC_DOWN_INFO_INIT;
 		if (xtc_down_decode_ex(msg, n, &di) == XTC_OK && m->exit_code)
 			*m->exit_code = di.reason;
 	}

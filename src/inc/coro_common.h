@@ -35,6 +35,61 @@
 
 #include "preempt_int.h"   /* __xtc_unsafe_enter/leave around the spare lock */
 
+/* ---- Valgrind stack registration ----------------------------------
+ *
+ * memcheck tracks one stack per thread and treats a stack-pointer jump
+ * into memory it does not know as a stack switch only on a heuristic
+ * ("client switching stacks?"); after a fiber resumes on another thread
+ * it reports the fiber's own frames as invalid reads and writes.  Each
+ * coroutine registers its usable stack range when it is created and
+ * deregisters it before the stack is pooled or unmapped, so memcheck
+ * knows every fiber stack.  Outside valgrind the requests are skipped: a
+ * client request is an asm with a memory clobber that cost 1.9% of
+ * spawn+exit throughput, so RUNNING_ON_VALGRIND is asked once per process
+ * and the result cached. */
+#if defined(XTC_HAVE_VALGRIND_H)
+#  include <valgrind/valgrind.h>
+/* -1 not asked yet, 0 native, 1 under valgrind.  Racy first use is
+ * benign: every thread computes the same answer.  The requests live in
+ * cold out-of-line functions so their asm (a memory clobber) stays out
+ * of the spawn path; a native run pays one load and branch per spawn and
+ * per exit. */
+static _Atomic int __xtc_vg_on = -1;
+
+__attribute__((noinline, cold)) static unsigned
+__xtc_vg_register_slow(char *lo, size_t sz)
+{
+	int on = atomic_load_explicit(&__xtc_vg_on, memory_order_relaxed);
+	if (on < 0) {
+		on = RUNNING_ON_VALGRIND != 0;
+		atomic_store_explicit(&__xtc_vg_on, on, memory_order_relaxed);
+	}
+	return on ? (unsigned)VALGRIND_STACK_REGISTER(lo, lo + sz) : 0u;
+}
+
+/* Only reached after a register, so the probe has run.  Valgrind's ids
+ * start at 0: whether one was taken is a property of the process. */
+__attribute__((noinline, cold)) static void
+__xtc_vg_deregister_slow(unsigned id)
+{
+	VALGRIND_STACK_DEREGISTER(id);
+}
+
+#  define __xtc_vg_stack_register(lo, sz) \
+	(XTC_UNLIKELY(atomic_load_explicit(&__xtc_vg_on, \
+	    memory_order_relaxed) != 0) ? \
+	    __xtc_vg_register_slow((char *)(lo), (sz)) : 0u)
+#  define __xtc_vg_stack_deregister(id) \
+	do { \
+		if (XTC_UNLIKELY(atomic_load_explicit(&__xtc_vg_on, \
+		    memory_order_relaxed) > 0)) \
+			__xtc_vg_deregister_slow(id); \
+	} while (0)
+#else
+#  define __xtc_vg_stack_register(lo, sz)  ((void)(lo), (void)(sz), 0u)
+#  define __xtc_vg_stack_deregister(id)    ((void)(id))
+#endif
+
 /* ---- Fiber-stack pool (per-thread) --------------------------------
  *
  * Every fresh fiber stack costs an mmap + an mprotect(PROT_NONE) for its

@@ -236,9 +236,11 @@ main(void)
 	/* Server presents the cert; client trusts only it and (by default,
 	 * since 1.50) REQUIRES a valid certificate from the server. */
 	memset(&sopts, 0, sizeof sopts);
+	sopts.size = sizeof sopts;
 	sopts.cert_file = cert;
 	sopts.key_file = key;
 	memset(&copts, 0, sizeof copts);
+	copts.size = sizeof copts;
 	copts.ca_file = cert;
 	copts.min_version = XTC_TLS_VER_12;
 	rc = xtc_tls_ctx_create(XTC_TLS_SERVER, &sopts, &sh.srv_ctx);

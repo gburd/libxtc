@@ -162,7 +162,7 @@ committer(void *arg)
 	(void)xtc_proc_at_exit(xtc_free, buf);   /* a kill unwinds past it */
 	while (!atomic_load(&g_stop)) {
 		if (g_cfg.link && (n++ & 7) == 0) {
-			xtc_proc_opts_t o = { .name = "lnk" };
+			xtc_proc_opts_t o = { .size = sizeof(xtc_proc_opts_t), .name = "lnk" };
 			xtc_pid_t c;
 			(void)xtc_proc_spawn_link(xtc_exec_loop(g_exec,
 			    (int)(rng(&r) % NL)), linked_child,
@@ -260,7 +260,7 @@ thread_committer(void *arg)
 static int
 spawn_slot(int i)
 {
-	xtc_proc_opts_t o = { .name = "cmt" };
+	xtc_proc_opts_t o = { .size = sizeof(xtc_proc_opts_t), .name = "cmt" };
 	uint64_t ref;
 	if (xtc_proc_spawn_monitor(xtc_exec_loop(g_exec, i % NL), committer,
 	    (void *)(intptr_t)i, &o, &g_slot[i].pid, &ref) != XTC_OK)
@@ -415,7 +415,7 @@ run_mode(const char *mode)
 	char path[256];
 	wal_opts_t wo;
 	xtc_exec_t *exec = NULL;
-	xtc_proc_opts_t bo = { .name = "boss" };
+	xtc_proc_opts_t bo = { .size = sizeof(xtc_proc_opts_t), .name = "boss" };
 	xtc_pid_t bp;
 	pthread_t wd, th[NT];
 	uint64_t *found[NS];

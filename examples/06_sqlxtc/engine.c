@@ -268,7 +268,7 @@ sx_storage_on_failure(void (*fn)(const char *what, void *arg), void *arg)
 int
 sx_storage_proc_pid(int which, xtc_pid_t *out)
 {
-	xtc_proc_info_t pi;
+	xtc_proc_info_t pi = XTC_PROC_INFO_INIT;
 	xtc_pid_t p;
 
 	if (!g_xrunning)
@@ -812,14 +812,14 @@ sx_sw_stop(void)
 int
 sx_storage_run(xtc_loop_t *loop)
 {
-	xtc_proc_opts_t so = { 0 };
+	xtc_proc_opts_t so = XTC_PROC_OPTS_INIT;
 
 	if (g_xbt == NULL || g_xrunning || loop == NULL)
 		return SX_OK;
 	if (g_xwal != NULL)
 		(void)wal_writer_spawn(g_xwal, loop, NULL);
 	if (g_xwal != NULL) {
-		xtc_proc_opts_t co = { 0 };
+		xtc_proc_opts_t co = XTC_PROC_OPTS_INIT;
 		xtc_pid_t cp;
 		co.name = "checkpoint";
 		atomic_store(&g_ckpt_stop, 0);

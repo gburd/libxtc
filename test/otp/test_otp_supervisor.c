@@ -124,6 +124,8 @@ test_one_for_one_basic(const MunitParameter p[], void *d)
 	opts.period_ns = 1000LL * 1000 * 1000;
 
 	memset(kids, 0, sizeof kids);
+	kids[0].size = sizeof kids[0];
+	kids[1].size = sizeof kids[1];
 	kids[0].name = "a"; kids[0].fn = proc_a;
 	kids[0].arg = (void *)(intptr_t)2;   /* crash twice */
 	kids[0].policy = XTC_RESTART_TRANSIENT;
@@ -167,6 +169,8 @@ test_one_for_all(const MunitParameter p[], void *d)
 	opts.period_ns = 1000LL * 1000 * 1000;
 
 	memset(kids, 0, sizeof kids);
+	kids[0].size = sizeof kids[0];
+	kids[1].size = sizeof kids[1];
 	kids[0].name = "a"; kids[0].fn = proc_a;
 	kids[0].arg = (void *)(intptr_t)1;   /* crash once */
 	kids[0].policy = XTC_RESTART_TRANSIENT;
@@ -224,6 +228,9 @@ test_rest_for_one(const MunitParameter p[], void *d)
 	opts.period_ns = 1000LL * 1000 * 1000;
 
 	memset(kids, 0, sizeof kids);
+	kids[0].size = sizeof kids[0];
+	kids[1].size = sizeof kids[1];
+	kids[2].size = sizeof kids[2];
 	kids[0].name = "a"; kids[0].fn = proc_a;
 	kids[0].arg = (void *)(intptr_t)0;
 	kids[0].policy = XTC_RESTART_TRANSIENT;
@@ -287,6 +294,7 @@ test_permanent_restarts_on_normal_exit(const MunitParameter p[], void *d)
 	opts.period_ns = 1000LL * 1000 * 1000;
 
 	memset(kids, 0, sizeof kids);
+	kids[0].size = sizeof kids[0];
 	kids[0].name = "perm"; kids[0].fn = perm_proc;
 	kids[0].policy = XTC_RESTART_PERMANENT;
 
@@ -335,6 +343,7 @@ test_temporary_no_restart(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	atomic_store(&g_temp_spawns, 0);
 	memset(kids, 0, sizeof kids);
+	kids[0].size = sizeof kids[0];
 	kids[0].name = "temp"; kids[0].fn = temp_proc;
 	kids[0].policy = XTC_RESTART_TEMPORARY;
 
@@ -369,6 +378,7 @@ test_intensity_exceeded(const MunitParameter p[], void *d)
 	opts.period_ns = 5LL * 1000 * 1000 * 1000;
 
 	memset(kids, 0, sizeof kids);
+	kids[0].size = sizeof kids[0];
 	kids[0].name = "flap"; kids[0].fn = fast_flap;
 	kids[0].policy = XTC_RESTART_PERMANENT;
 
@@ -412,6 +422,7 @@ test_count_children(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	memset(kids, 0, sizeof kids);
 	for (i = 0; i < 5; i++) {
+		kids[i].size = sizeof kids[i];
 		kids[i].name = "k";
 		kids[i].fn = noop_endless;
 		kids[i].policy = XTC_RESTART_TEMPORARY;
@@ -468,6 +479,7 @@ test_scale_start_stop_many(const MunitParameter p[], void *d)
 	atomic_store(&g_endless_alive, 0);
 	memset(kids, 0, sizeof kids);
 	for (i = 0; i < 50; i++) {
+		kids[i].size = sizeof kids[i];
 		kids[i].name = "k";
 		kids[i].fn = endless_with_counter;
 		kids[i].policy = XTC_RESTART_TEMPORARY;
@@ -513,6 +525,7 @@ test_hanging_restart_loop(const MunitParameter p[], void *d)
 	opts.max_restarts = 5;
 	opts.period_ns = 5LL * 1000 * 1000 * 1000;
 	memset(kids, 0, sizeof kids);
+	kids[0].size = sizeof kids[0];
 	kids[0].name = "qe"; kids[0].fn = quick_exit_worker;
 	kids[0].policy = XTC_RESTART_PERMANENT;
 
@@ -573,6 +586,7 @@ test_count_restarting_children(const MunitParameter p[], void *d)
 	opts.period_ns = 5LL * 1000 * 1000 * 1000;
 	memset(kids, 0, sizeof kids);
 	for (i = 0; i < 3; i++) {
+		kids[i].size = sizeof kids[i];
 		kids[i].name = "kr";
 		kids[i].fn = slow_oneshot;
 		kids[i].policy = XTC_RESTART_PERMANENT;

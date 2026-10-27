@@ -90,7 +90,7 @@ main(void)
 		return 1;
 	}
 	for (i = 0; i < NPROCS; i++) {
-		xtc_proc_opts_t po = { .name = "w" };
+		xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "w" };
 		if (xtc_proc_spawn(xtc_exec_loop(exec, i % NLOOPS), worker, NULL,
 		    &po, &pid) != XTC_OK) {
 			fprintf(stderr, "spawn %d\n", i);

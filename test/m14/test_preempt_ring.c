@@ -211,6 +211,7 @@ test_ring_crossloop(const MunitParameter p[], void *d)
 	 * them, which is what puts a fiber on a non-home loop. */
 	for (i = 0; i < XL_FIBERS; i++) {
 		memset(&opts, 0, sizeof opts);
+		opts.size = sizeof opts;
 		opts.name = "xl";
 		opts.migratable = 1;
 		munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0), xl_compute,

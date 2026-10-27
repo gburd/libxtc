@@ -86,7 +86,7 @@ main(void)
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	char path[256];
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t po = { .name = "drv" };
+	xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "drv" };
 	xtc_pid_t pid;
 	int fd, bad = 0;
 	/* Fixed cadence would be IDLE_MS / interval passes; allow a quarter. */

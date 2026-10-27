@@ -80,7 +80,7 @@ child_fn(void *arg)
 static void
 classify(void *m, size_t n)
 {
-	xtc_down_info_t di;
+	xtc_down_info_t di = XTC_DOWN_INFO_INIT;
 	if (xtc_down_decode_ex(m, n, &di) != XTC_OK)
 		return;
 	if (di.ref != 0)

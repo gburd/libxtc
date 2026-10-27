@@ -203,21 +203,21 @@ main(void)
 		long w, r, c;
 		for (w = 0; w < N_WRITERS; w++) {
 			xtc_loop_t *lp = xtc_exec_loop(exec, (int)(w % N_LOOPS));
-			xtc_proc_opts_t po = { .name = "wr" };
+			xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "wr" };
 			xtc_pid_t pid;
 			if (xtc_proc_spawn(lp, writer_proc, (void *)w, &po, &pid) != XTC_OK)
 				return 1;
 		}
 		for (c = 0; c < N_CHURNERS; c++) {
 			xtc_loop_t *lp = xtc_exec_loop(exec, (int)(c % N_LOOPS));
-			xtc_proc_opts_t po = { .name = "chn" };
+			xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "chn" };
 			xtc_pid_t pid;
 			if (xtc_proc_spawn(lp, churner_proc, (void *)c, &po, &pid) != XTC_OK)
 				return 1;
 		}
 		for (r = 0; r < N_READERS; r++) {
 			xtc_loop_t *lp = xtc_exec_loop(exec, (int)((r + 1) % N_LOOPS));
-			xtc_proc_opts_t po = { .name = "rd" };
+			xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "rd" };
 			xtc_pid_t pid;
 			if (xtc_proc_spawn(lp, reader_proc, (void *)(r + 1), &po, &pid) != XTC_OK)
 				return 1;

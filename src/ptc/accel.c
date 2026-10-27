@@ -158,7 +158,7 @@ xtc_accel_probe(xtc_accel_dev_t *out, int max, int *out_n)
 static int
 fence_mail_pending(void)
 {
-	xtc_mailbox_stats_t st;
+	xtc_mailbox_stats_t st = XTC_MAILBOX_STATS_INIT;
 	if (xtc_proc_mailbox_stats(xtc_self(), &st) != XTC_OK)
 		return 0;
 	return st.depth > 0 || st.saved > 0;

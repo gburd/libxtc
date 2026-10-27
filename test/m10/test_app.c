@@ -48,16 +48,19 @@ test_app_basic(const MunitParameter p[], void *d)
 {
 	xtc_app_t *a;
 	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+	xtc_sup_opts_t sup_opts = XTC_SUP_OPTS_DEFAULT;
 	xtc_child_spec_t kids[1];
 	xtc_pid_t dpid;
 	(void)p; (void)d;
 
 	atomic_store(&g_kid_ran, 0);
 	opts.name = "test_app";
-	opts.sup.max_restarts = 5;
-	opts.sup.period_ns    = 1000LL * 1000 * 1000;
+	sup_opts.max_restarts = 5;
+	sup_opts.period_ns    = 1000LL * 1000 * 1000;
+	opts.sup = &sup_opts;
 
 	memset(kids, 0, sizeof kids);
+	kids[0].size = sizeof kids[0];
 	kids[0].name   = "kid";
 	kids[0].fn     = kid_proc;
 	kids[0].policy = XTC_RESTART_TRANSIENT;
@@ -129,6 +132,7 @@ test_app_multiloop(const MunitParameter p[], void *d)
 {
 	xtc_app_t *a;
 	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+	xtc_sup_opts_t sup_opts = XTC_SUP_OPTS_DEFAULT;
 	xtc_child_spec_t kids[5];
 	xtc_pid_t dpid;
 	int i;
@@ -139,17 +143,20 @@ test_app_multiloop(const MunitParameter p[], void *d)
 
 	opts.name = "test_ml";
 	opts.n_loops = 4;
-	opts.sup.max_restarts = 5;
-	opts.sup.period_ns    = 2000LL * 1000 * 1000;
+	sup_opts.max_restarts = 5;
+	sup_opts.period_ns    = 2000LL * 1000 * 1000;
+	opts.sup = &sup_opts;
 
 	memset(kids, 0, sizeof kids);
 	for (i = 0; i < 4; i++) {
+		kids[i].size = sizeof kids[i];
 		kids[i].name   = "ml_worker";
 		kids[i].fn     = ml_worker;
 		kids[i].arg    = (void *)(intptr_t)i;
 		kids[i].loop   = i;                   /* place on loop i */
 		kids[i].policy = XTC_RESTART_TEMPORARY;
 	}
+	kids[4].size   = sizeof kids[4];
 	kids[4].name   = "ml_crasher";
 	kids[4].fn     = ml_crasher;
 	kids[4].loop   = 2;                       /* crash + restart on loop 2 */
@@ -247,6 +254,7 @@ static void
 dr_spec(xtc_child_spec_t *k, xtc_proc_fn fn, xtc_restart_policy_t pol)
 {
 	memset(k, 0, sizeof *k);
+	k->size = sizeof *k;
 	k->name = "dr";
 	k->fn = fn;
 	k->policy = pol;
@@ -585,6 +593,7 @@ test_app_stop_waits_cleanup_multiloop(const MunitParameter p[], void *d)
 	opts.n_loops = 4;
 	memset(kids, 0, sizeof kids);
 	for (i = 0; i < 3; i++) {
+		kids[i].size = sizeof kids[i];
 		kids[i].name   = "ex_child";
 		kids[i].fn     = ex_child;
 		kids[i].loop   = i + 1;

@@ -278,7 +278,8 @@ int
 xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 {
 	(void)io;
-	(void)a;
+	if (!__XTC_AIO_OK(a))
+		return XTC_E_INVAL;
 	return XTC_E_NOSYS;
 }
 #endif

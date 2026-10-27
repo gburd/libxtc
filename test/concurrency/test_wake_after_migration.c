@@ -160,6 +160,7 @@ main(void)
 	xtc_exec_set_eager_rebalance(e, 1);
 
 	memset(&mopts, 0, sizeof mopts);
+	mopts.size = sizeof mopts;
 	mopts.migratable = 1;
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), migratee, NULL, &mopts, NULL);
 	for (i = 0; i < 8; i++)

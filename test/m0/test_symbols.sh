@@ -199,6 +199,7 @@ else
 	# and normalize a Mach-O triple-underscore back to the source __.
 	exported=$(nm -D --defined-only "$SO" 2>/dev/null \
 		| awk '$2 ~ /^[TWDBR]$/ {print $3}' \
+		| sed -E 's/@.*$//' \
 		| grep -E '^(__|___)[a-z]' \
 		| sed -E 's/^___/__/' \
 		| sort -u || true)
@@ -215,4 +216,56 @@ else
 	fi
 	exp_n=$(echo "$exported" | grep -c '.' || true)
 	echo "  [C8] OK: shared library exports xtc_* + $exp_n macro-backed __ symbol(s), no internal leak"
+fi
+
+# [C9]: symbol versions.  Every symbol the shared library exports carries
+# the base version node, XTC_<MAJOR>.0, or a later XTC_<MAJOR>.N node a
+# minor release added (dist/libxtc.map "POLICY"); none is unversioned and
+# none carries a different major's node.  The base node in the map must
+# be XTC_<MAJOR>.0 for the MAJOR in dist/version.in.  ELF only: Mach-O and
+# PE have no symbol versions.
+if [ -z "$SO" ] || [ -z "${XTC_SRC_DIR:-}" ]; then
+	echo "  [C9] SKIP: no shared library (or XTC_SRC_DIR) to check"
+elif ! readelf -V "$SO" >/dev/null 2>&1 || \
+     ! readelf -V "$SO" 2>/dev/null | grep -q 'Version definition'; then
+	if readelf -h "$SO" >/dev/null 2>&1; then
+		echo "  [C9] FAIL: $SO has no version definitions" >&2
+		echo "        (dist/libxtc.map must name a version node)" >&2
+		exit 1
+	fi
+	echo "  [C9] SKIP: not an ELF shared library (no symbol versions)"
+else
+	major=$(sed -e 's/^\([0-9]*\).*/\1/' "$XTC_SRC_DIR/dist/version.in")
+	node=$(sed -n 's/^\(XTC_[0-9][0-9.]*\)[[:space:]]*{.*/\1/p' \
+		"$XTC_SRC_DIR/dist/libxtc.map" | tail -1)
+	defs=$(readelf -V "$SO" | sed -n 's/.*Name: \(XTC_[0-9.]*\).*/\1/p' |
+		sort -u)
+	# every exported, defined dynamic symbol must have a version suffix
+	unver=$(nm -D --defined-only --with-symbol-versions "$SO" 2>/dev/null |
+		awk '$2 ~ /^[TWDBR]$/ && $3 !~ /@/ {print $3}' | head -5 || true)
+	if [ -n "$unver" ]; then
+		echo "  [C9] FAIL: unversioned exported symbols (e.g. $(echo $unver))" >&2
+		exit 1
+	fi
+	foreign=$(nm -D --defined-only --with-symbol-versions "$SO" 2>/dev/null |
+		awk '$2 ~ /^[TWDBR]$/ {print $3}' | sed -n 's/.*@@*//p' |
+		sort -u | grep -v '^XTC_[0-9]' || true)
+	if [ -n "$foreign" ]; then
+		echo "  [C9] FAIL: symbols in non-XTC version nodes: $foreign" >&2
+		exit 1
+	fi
+	if [ "$major" = 1 ]; then
+		echo "  [C9] OK: every export is versioned ($(echo $defs));" \
+			"SKIP the node==XTC_<MAJOR>.0 check while dist/version.in" \
+			"is 1.x (the map is 2.0's; it turns green at the 2.0.0 bump)"
+	elif [ "$node" != "XTC_$major.0" ]; then
+		echo "  [C9] FAIL: base version node is '$node' but dist/version.in" \
+			"major is $major (expected XTC_$major.0)" >&2
+		exit 1
+	elif echo "$defs" | grep -v "^XTC_$major\." | grep -q .; then
+		echo "  [C9] FAIL: version nodes from another major: $defs" >&2
+		exit 1
+	else
+		echo "  [C9] OK: every export carries an XTC_$major.N version ($(echo $defs))"
+	fi
 fi

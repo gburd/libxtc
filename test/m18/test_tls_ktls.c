@@ -259,6 +259,7 @@ test_api(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_tls_ktls_active(NULL), ==, 0);
 	munit_assert_int(xtc_tls_sendfile(NULL, 0, 0, 1, &n), !=, XTC_OK);
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.verify_peer_mode = XTC_TLS_VERIFY_NONE;
 	rc = xtc_tls_ctx_create(XTC_TLS_CLIENT, &o, &ctx);
 	if (rc == XTC_E_NOSYS)
@@ -310,6 +311,7 @@ rt_client(void *arg)
 	xtc_tls_t *tls = NULL;
 	a->rc = -1;
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.verify_peer_mode = XTC_TLS_VERIFY_NONE;   /* self-signed test cert */
 	if (xtc_tls_ctx_create(XTC_TLS_CLIENT, &o, &ctx) != XTC_OK ||
 	    xtc_tls_create(ctx, a->fd, &tls) != XTC_OK)
@@ -343,6 +345,7 @@ test_roundtrip(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.cert_file = g_cert;
 	o.key_file = g_key;
 	rc = xtc_tls_ctx_create(XTC_TLS_SERVER, &o, &ctx);
@@ -464,6 +467,7 @@ dc_client(void *arg)
 	xtc_tls_t *tls = NULL;
 	a->rc = -1;
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.verify_peer_mode = XTC_TLS_VERIFY_NONE;
 	o.max_version = XTC_TLS_VER_12;
 	o.cipher_list = "ECDHE-RSA-AES128-SHA256:AES128-SHA256";
@@ -503,6 +507,7 @@ test_declined(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.cert_file = g_cert;
 	o.key_file = g_key;
 	o.max_version = XTC_TLS_VER_12;
@@ -559,6 +564,7 @@ vanish_client(void *arg)
 	xtc_tls_ctx_t *ctx = NULL;
 	xtc_tls_t *tls = NULL;
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.verify_peer_mode = XTC_TLS_VERIFY_NONE;
 	if (xtc_tls_ctx_create(XTC_TLS_CLIENT, &o, &ctx) == XTC_OK &&
 	    xtc_tls_create(ctx, a->fd, &tls) == XTC_OK)
@@ -587,6 +593,7 @@ vanish_child(void)
 
 	(void)signal(SIGPIPE, SIG_DFL);           /* an embedder that did nothing */
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	o.cert_file = g_cert;
 	o.key_file = g_key;
 	if (xtc_tls_ctx_create(XTC_TLS_SERVER, &o, &ctx) != XTC_OK ||
@@ -633,6 +640,7 @@ test_no_sigpipe(const MunitParameter p[], void *d)
 	xtc_tls_opts_t o;
 	(void)p; (void)d;
 	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
 	if (xtc_tls_ctx_create(XTC_TLS_CLIENT, &o, &ctx) != XTC_OK)
 		return MUNIT_SKIP;
 	xtc_tls_ctx_destroy(ctx);

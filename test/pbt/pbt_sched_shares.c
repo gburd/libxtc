@@ -88,7 +88,9 @@ prop_higher_shares_get_more_cpu(hegel_test_case *tc, void *u)
 	hegel_assume(xtc_exec_class_create(loop, lo, 0, &clo) == XTC_OK);
 
 	memset(&ohi, 0, sizeof ohi);
+	ohi.size = sizeof ohi;
 	memset(&olo, 0, sizeof olo);
+	olo.size = sizeof olo;
 	ohi.sched_class = chi;
 	olo.sched_class = clo;
 	for (i = 0; i < WORKERS_PER_CLASS; i++) {

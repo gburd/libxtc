@@ -103,7 +103,7 @@ static MunitResult
 test_records_order(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_pid_t dpid;
 	int i;
 	(void)p; (void)d;
@@ -154,7 +154,7 @@ static MunitResult
 test_disabled_zero(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_pid_t dpid;
 	(void)p; (void)d;
 
@@ -201,7 +201,7 @@ static MunitResult
 test_ring_evict(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_pid_t dpid;
 	(void)p; (void)d;
 
@@ -244,7 +244,7 @@ static MunitResult
 test_dump_splice(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t o = { 0 };
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_pid_t dpid;
 	char tmpl[] = "/tmp/xtc_ct_XXXXXX";
 	int fd, n;

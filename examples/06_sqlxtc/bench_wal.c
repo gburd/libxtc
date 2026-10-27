@@ -189,7 +189,7 @@ main(int argc, char **argv)
 			return 1;
 		atomic_store(&g_live, c);
 		for (i = 0; i < c; i++) {
-			xtc_proc_opts_t po = { .name = "committer" };
+			xtc_proc_opts_t po = { .size = sizeof(xtc_proc_opts_t), .name = "committer" };
 			xtc_pid_t p;
 			if (xtc_proc_spawn(xtc_exec_loop(ex, i % loops), proc_main,
 			    (void *)(intptr_t)i, &po, &p) != XTC_OK)

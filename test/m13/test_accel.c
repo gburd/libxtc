@@ -128,7 +128,7 @@ test_wait_fence_signalled(const MunitParameter p[], void *d)
 #if HAVE_EVENTFD
 	{
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t w, s;
 	int fd;
 
@@ -181,7 +181,7 @@ test_wait_fence_timeout(const MunitParameter p[], void *d)
 #if HAVE_EVENTFD
 	{
 	xtc_loop_t *loop = NULL;
-	xtc_proc_opts_t opts = { 0 };
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t t;
 	int fd;
 
@@ -270,6 +270,7 @@ mb_waiter(void *a)
 	    g_mb_mode == 1 ? -1 : 300LL * 1000 * 1000);
 	g_mb_elapsed = mb_now() - t0;
 	memset(&st, 0, sizeof st);
+	st.size = sizeof st;
 	(void)xtc_proc_mailbox_stats(xtc_self(), &st);
 	g_mb_depth = st.depth;
 	atomic_store(&g_mb_done, 1);

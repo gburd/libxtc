@@ -77,6 +77,7 @@ test_supervisor_restarts(const MunitParameter p[], void *d)
 	opts.period_ns    = 1000LL * 1000 * 1000;
 
 	memset(&kids[0], 0, sizeof kids[0]);
+	kids[0].size = sizeof kids[0];
 	kids[0].name   = "flapper";
 	kids[0].fn     = flapper_proc;
 	kids[0].arg    = NULL;
@@ -153,6 +154,8 @@ test_one_for_all(const MunitParameter p[], void *d)
 	opts.period_ns    = 1000LL * 1000 * 1000;
 
 	memset(kids, 0, sizeof kids);
+	kids[0].size = sizeof kids[0];
+	kids[1].size = sizeof kids[1];
 	kids[0].name = "a"; kids[0].fn = ofa_a; kids[0].policy = XTC_RESTART_TRANSIENT;
 	kids[1].name = "b"; kids[1].fn = ofa_b; kids[1].policy = XTC_RESTART_TRANSIENT;
 
@@ -229,6 +232,9 @@ test_rest_for_one(const MunitParameter p[], void *d)
 	opts.period_ns    = 1000LL * 1000 * 1000;
 
 	memset(kids, 0, sizeof kids);
+	kids[0].size = sizeof kids[0];
+	kids[1].size = sizeof kids[1];
+	kids[2].size = sizeof kids[2];
 	kids[0].name = "a"; kids[0].fn = rfo_a; kids[0].policy = XTC_RESTART_TRANSIENT;
 	kids[1].name = "b"; kids[1].fn = rfo_b; kids[1].policy = XTC_RESTART_TRANSIENT;
 	kids[2].name = "c"; kids[2].fn = rfo_c; kids[2].policy = XTC_RESTART_TRANSIENT;
@@ -276,6 +282,7 @@ test_intensity_exceeded(const MunitParameter p[], void *d)
 	opts.period_ns    = 5LL * 1000 * 1000 * 1000;
 
 	memset(&kids[0], 0, sizeof kids[0]);
+	kids[0].size = sizeof kids[0];
 	kids[0].name   = "fast";
 	kids[0].fn     = fast_flapper;
 	kids[0].policy = XTC_RESTART_PERMANENT;
@@ -315,6 +322,7 @@ sofo_manager(void *arg)
 	int i;
 	for (i = 0; i < 3; i++) {
 		memset(&spec, 0, sizeof spec);
+		spec.size = sizeof spec;
 		spec.name = "session";
 		spec.fn = sofo_session;
 		spec.policy = XTC_RESTART_TEMPORARY;
@@ -334,7 +342,7 @@ test_simple_one_for_one(const MunitParameter p[], void *d)
 	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
 	xtc_supervisor_t *sup = NULL;
 	struct sofo_state st = { NULL, 0 };
-	xtc_proc_opts_t popts = { 0 };
+	xtc_proc_opts_t popts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t mgr;
 	(void)p; (void)d;
 
@@ -378,6 +386,7 @@ pool_manager(void *arg)
 	xtc_pid_t pid;
 	int i, rc;
 	memset(&spec, 0, sizeof spec);
+	spec.size = sizeof spec;
 	spec.name = "pw";
 	spec.fn = pool_worker;
 	spec.policy = XTC_RESTART_PERMANENT;
@@ -396,7 +405,7 @@ test_pool_max_children(const MunitParameter p[], void *d)
 	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
 	xtc_supervisor_t *sup = NULL;
 	struct pool_state st = { NULL, XTC_OK, 0 };
-	xtc_proc_opts_t popts = { 0 };
+	xtc_proc_opts_t popts = XTC_PROC_OPTS_INIT;
 	(void)p; (void)d;
 	atomic_store(&g_pool_alive, 0);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
@@ -471,6 +480,7 @@ test_atomic_spawn_monitor(const MunitParameter p[], void *d)
 
 	atomic_store(&g_atomic_mon_starts, 0);
 	memset(&so, 0, sizeof so);
+	so.size = sizeof so;
 	so.strategy = XTC_SUP_ONE_FOR_ONE;
 	/*
 	 * TRANSIENT plus a restart budget is the shape that shows the bug: if
@@ -480,6 +490,7 @@ test_atomic_spawn_monitor(const MunitParameter p[], void *d)
 	so.max_restarts = 5;
 	so.period_ns = 2000000000LL;
 	memset(&cs, 0, sizeof cs);
+	cs.size = sizeof cs;
 	cs.name = "atomic_mon";
 	cs.fn = atomic_mon_child;
 	cs.policy = XTC_RESTART_TRANSIENT;
@@ -577,8 +588,9 @@ run_overlap_case(xtc_restart_strategy_t strategy)
 	o.strategy = strategy;
 	o.max_restarts = 5;
 	memset(cs, 0, sizeof cs);
+	cs[0].size = sizeof cs[0];
 	cs[0].fn = ov_crasher; cs[0].name = "crasher";
-	for (i = 1; i < 3; i++) { cs[i].fn = ov_holder; cs[i].name = "holder"; }
+	for (i = 1; i < 3; i++) { cs[i].size = sizeof cs[i]; cs[i].fn = ov_holder; cs[i].name = "holder"; }
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_start(loop, &o, cs, 3, &sup), ==, XTC_OK);
@@ -679,6 +691,7 @@ test_join_timeout_keeps_sup(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	memset(kids, 0, sizeof kids);
+	kids[0].size = sizeof kids[0];
 	kids[0].name = "w";
 	kids[0].fn = join_worker;
 	kids[0].policy = XTC_RESTART_PERMANENT;
@@ -816,6 +829,8 @@ test_one_for_all_equal_pid_other_loop(const MunitParameter p[], void *d)
 	opts.max_restarts = 5;
 	opts.period_ns = 1000LL * 1000 * 1000;
 	memset(kids, 0, sizeof kids);
+	kids[0].size = sizeof kids[0];
+	kids[1].size = sizeof kids[1];
 	kids[0].name = "a"; kids[0].fn = seq_a; kids[0].policy = XTC_RESTART_TRANSIENT;
 	kids[1].name = "b"; kids[1].fn = seq_b; kids[1].policy = XTC_RESTART_TRANSIENT;
 	munit_assert_int(xtc_loop_init(&la), ==, XTC_OK);
@@ -848,6 +863,7 @@ xadd_caller(void *arg)
 	xtc_child_spec_t spec;
 	xtc_pid_t pid = XTC_PID_NONE;
 	memset(&spec, 0, sizeof spec);
+	spec.size = sizeof spec;
 	spec.name = "xsession";
 	spec.fn = sofo_session;
 	spec.policy = XTC_RESTART_TEMPORARY;
@@ -917,6 +933,7 @@ reclaim_driver(void *arg)
 	xtc_child_spec_t cs;
 	int i, spins;
 	memset(&cs, 0, sizeof cs);
+	cs.size = sizeof cs;
 	cs.name = "tmp";
 	cs.fn = sofo_quick;
 	for (i = 0; i < 2200; i++) {

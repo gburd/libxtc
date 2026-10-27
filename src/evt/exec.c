@@ -1270,15 +1270,18 @@ __xtc_exec_loop_node(xtc_exec_t *e, int idx)
 int
 xtc_exec_loop_stats(xtc_exec_t *e, int idx, xtc_loop_stats_t *out)
 {
+	xtc_loop_stats_t full = XTC_LOOP_STATS_INIT;
 	xtc_loop_t *l;
-	if (e == NULL || out == NULL || idx < 0 || idx >= e->n_loops)
+	if (e == NULL || !__XTC_SIZED_OUT_OK(out) || idx < 0 ||
+	    idx >= e->n_loops)
 		return XTC_E_INVAL;
 	l = e->loops[idx];
-	out->tasks_run = atomic_load_explicit(&l->n_tasks_run,
+	full.size = sizeof full;
+	full.tasks_run = atomic_load_explicit(&l->n_tasks_run,
 	    memory_order_relaxed);
-	out->steals = atomic_load_explicit(&l->n_steals,
+	full.steals = atomic_load_explicit(&l->n_steals,
 	    memory_order_relaxed);
-	return XTC_OK;
+	return __xtc_sized_out(out, &full, sizeof full);
 }
 
 /* --- spawn/async helpers ------------------------------------------- */

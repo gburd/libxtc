@@ -309,6 +309,7 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
                    const xtc_tls_opts_t *opts,
                    xtc_tls_ctx_t **out)
 {
+	xtc_tls_opts_t        opts_full;
 	struct xtc_tls_ctx *c;
 	int                 rc;
 	int                 endpoint;
@@ -316,6 +317,8 @@ xtc_tls_ctx_create(xtc_tls_role_t role,
 	if (out == NULL)
 		return XTC_E_INVAL;
 	*out = NULL;
+	if ((rc = __xtc_tls_opts_in(&opts, &opts_full)) != XTC_OK)
+		return rc;
 
 	if ((rc = __os_calloc(1, sizeof(*c), (void **)&c)) != XTC_OK)
 		return rc;
