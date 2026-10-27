@@ -12,7 +12,9 @@
  *	xs_cat_lookup (and xs_cat_value + a schema parse) -- ~19% of a TPC-C
  *	connection's CPU.  Asserts: after reopen, 1000 point SELECTs and
  *	1000 UPDATEs do 0 catalog-tree scans (xstore_cat_scan_count), and
- *	DROP TABLE / ALTER TABLE RENAME still resolve correctly afterwards.
+ *	DROP TABLE / ALTER TABLE RENAME still resolve correctly afterwards,
+ *	and the renamed table keeps exactly its columns (the rename once
+ *	appended stale stack bytes to its schema: INSERT then declined).
  *	Off a loop.
  */
 
@@ -46,6 +48,18 @@ one(sx_db *h, const char *sql)
 	if (sx_step(st) == SX_ROW) v = sx_column_int64(st, 0);
 	sx_finalize(st);
 	return v;
+}
+
+/* Leave non-zero bytes in the stack the next call's frames reuse: the
+ * rename read its catalog value with strlen past the copied bytes, so
+ * stale stack contents became part of the renamed table's schema. */
+static void __attribute__((noinline))
+poison_stack(void)
+{
+	volatile unsigned char junk[64 * 1024];
+	size_t i;
+	for (i = 0; i < sizeof junk; i++)
+		junk[i] = 0xA5;
 }
 
 int
@@ -103,6 +117,7 @@ main(void)
 	sx_finalize(q); sx_finalize(u);
 
 	/* DDL after the cache was primed from the persisted catalog. */
+	poison_stack();
 	CK(sx_exec(h, "ALTER TABLE c RENAME TO c2", NULL) == SX_OK);
 	CK(sx_exec(h, "INSERT INTO c2 VALUES(1, 'x')", NULL) == SX_OK);
 	CK(one(h, "SELECT count(*) FROM c2") == 1);
