@@ -307,7 +307,7 @@ static void smo_log_page(bt_t *bt, bm_pid_t pid, void *image);
  * values belong out of line.
  *
  * The guarantee (cap = page - header, K = max key, M = max leaf entry
- * cost incl. its 8-byte slot; btnode's split costs each half exactly as
+ * cost incl. its 10-byte slot; btnode's split costs each half exactly as
  * it will be stored, so a half never costs more than its entries do in
  * the full node).  A full leaf holds E + Llo + Lhi <= cap (entries, both
  * fences); the pending entry P <= M.  Over the sequence of the entries
@@ -319,14 +319,14 @@ static void smo_log_page(bt_t *bt, bm_pid_t pid, void *image);
  * 2M + 2K <= cap.  If that boundary is the one after P, step back over
  * P: the right part grows by P, and fits when 3M + 2K <= cap.  (P first
  * cannot be that case: then P + e0 + Llo + K > cap, impossible.)
- * Internal entries are a separator plus a 4-byte pid (<= K + 12; the
+ * Internal entries are a separator plus a 4-byte pid (<= K + 14; the
  * bound below was derived for the 1.60 entry, K + 18, and is kept: it
  * only errs safe); with M = K + 18 the same rule bounds K, and the
  * internal split (a midpoint by count) needs 4K + 36 <= cap/2, i.e.
  * K <= cap/8 - 9.  So K = min(BT_MAX_KEY, cap/8 - 9) and
- * M = (cap - 2K) / 3.  For 4 KiB pages (cap 4048) that is K = 497 and
- * M = 1018 (an inline key + value of up to 1010 bytes with the 8-byte
- * slot, so a 700-byte row stays in its leaf); 16 KiB: K = 1024 and
+ * M = (cap - 2K) / 3.  For 4 KiB pages (cap 4048, the 48-byte header)
+ * that is K = 497 and M = 1018 (an inline key + value of up to 1008
+ * bytes, so a 700-byte row stays in its leaf); 16 KiB: K = 1024 and
  * M = 4762; 64 KiB: M = 21146, below the 32 KiB the slot's 15-bit length
  * holds.  The rule used to be M + K <= cap/4 (M = 516 on 4 KiB), derived
  * when the split costed every key in full; every TPC-C customer row
@@ -361,7 +361,7 @@ bt_max_key(const bt_t *bt)
 uint16_t
 bt_max_inline(const bt_t *bt)
 {
-	return (uint16_t)(bt_entry_max(bt) - (uint32_t)sizeof(struct btnode_slot));
+	return (uint16_t)(bt_entry_max(bt) - 10u);
 }
 
 /* ---- out-of-line values (RethinkDB blob, one level; btovf.h) ---------- */
@@ -386,7 +386,7 @@ bt_value_max(const bt_t *bt, uint16_t klen)
 	cap = pages * ovf_payload(bt);
 	if (cap > 0xFFFFu)
 		cap = 0xFFFFu;          /* the bt_* API's 16-bit value length */
-	inl = bt_entry_max(bt) - (uint32_t)sizeof(struct btnode_slot) - klen;
+	inl = bt_entry_max(bt) - 10u - klen;
 	return cap > inl ? cap : inl;
 }
 
@@ -2525,7 +2525,7 @@ bt_seek_ge(bt_t *bt, const void *key, uint16_t klen, void *kout,
  * per probe; it is that read with the shared levels read once.
  */
 /* Prefetch the lines a node search reads first: the header and the
- * slot directory after it (8-byte slots: 512 bytes hold ~58, about a
+ * slot directory after it (10-byte slots: 512 bytes hold ~47, about a
  * full leaf's directory). */
 static void
 bt_prefetch_node(const void *pg)
