@@ -1254,6 +1254,27 @@ __xtc_proc_loop_contains(xtc_loop_t *loop, xtc_pid_t pid)
 	return found;
 }
 
+/* Test seam: set the generation of FREE slot `local_id` on `loop`, so a
+ * test can reach a generation a real run would need 2^32 spawns of one
+ * slot to reach.  XTC_E_INVAL if the slot is out of range or occupied. */
+int
+__xtc_proc_slot_gen_set(xtc_loop_t *loop, uint32_t local_id, uint64_t gen)
+{
+	struct xtc_proc_table *t = __table_for(loop, 0);
+	unsigned st = __pt_stripe(local_id);
+	int rc = XTC_E_INVAL;
+
+	if (t == NULL)
+		return XTC_E_INVAL;
+	(void) __proc_mtx_lock(&t->stripes[st]);
+	if (local_id < t->hw && t->slots[local_id].proc == NULL) {
+		t->slots[local_id].gen = gen;
+		rc = XTC_OK;
+	}
+	(void) __proc_mtx_unlock(&t->stripes[st]);
+	return rc;
+}
+
 static void
 __table_release(struct xtc_proc_table *t, uint32_t local_id)
 {

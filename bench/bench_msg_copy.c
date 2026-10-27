@@ -46,7 +46,7 @@
 static int        g_owned;
 static size_t     g_size;
 static long       g_nmsg;
-static _Atomic xtc_pid_t g_rx;
+static xtc_atomic_pid_t g_rx;
 static _Atomic int g_ready;
 static int64_t    g_t0, g_t1;
 static uint64_t   g_sum;
@@ -60,7 +60,7 @@ rx_proc(void *arg)
 	long i;
 	uint64_t sum = 0;
 	(void)arg;
-	atomic_store(&g_rx, xtc_self());
+	xtc_atomic_pid_store(&g_rx, xtc_self());
 	atomic_store(&g_ready, 1);
 	for (i = 0; i < g_nmsg; i++) {
 		void *m = NULL;
@@ -95,7 +95,7 @@ tx_proc(void *arg)
 	(void)arg;
 	while (!atomic_load(&g_ready))
 		(void)xtc_yield();
-	to = atomic_load(&g_rx);
+	to = xtc_atomic_pid_load(&g_rx);
 	if (!g_owned) {
 		if ((src = xtc_malloc(g_size)) == NULL)
 			exit(1);

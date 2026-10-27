@@ -28,6 +28,9 @@
 #include <stdint.h>
 #include <string.h>
 
+/* A call frame: 'C' <xtc_pid_t> <tag:4> <payload>. */
+#define FSM_CALL_HDR (1 + sizeof(xtc_pid_t) + 4)
+
 /* A stashed (postponed) event: the raw decoded payload, replayed after
  * the next state transition.  Sync calls are NOT postponable (a caller
  * is blocked waiting) -- POSTPONE of a call replies XTC_E_AGAIN and is
@@ -238,14 +241,18 @@ fsm_entry(void *arg)
 			const void *pl = size > 1 ? (uint8_t *)msg + 1 : NULL;
 			running = fsm_dispatch(r, pl, size - 1, NULL, &stop_reason);
 			__os_free(msg);
-		} else if (kind == 'C' && size >= 13) {
+		} else if (kind == 'C' && size >= FSM_CALL_HDR) {
 			struct xtc_fsm_call call;
 			const void *pl;
 			call.replied = 0;
-			memcpy(&call.reply_pid, (uint8_t *)msg + 1, 8);
-			memcpy(&call.reply_tag, (uint8_t *)msg + 9, 4);
-			pl = size > 13 ? (uint8_t *)msg + 13 : NULL;
-			running = fsm_dispatch(r, pl, size - 13, &call, &stop_reason);
+			memcpy(&call.reply_pid, (uint8_t *)msg + 1,
+			    sizeof call.reply_pid);
+			memcpy(&call.reply_tag, (uint8_t *)msg + 1 +
+			    sizeof call.reply_pid, 4);
+			pl = size > FSM_CALL_HDR ? (uint8_t *)msg + FSM_CALL_HDR
+			    : NULL;
+			running = fsm_dispatch(r, pl, size - FSM_CALL_HDR, &call,
+			    &stop_reason);
 			/* A call that the callback neither replied nor postponed
 			 * gets an empty reply so the caller does not hang. */
 			if (!call.replied)
@@ -393,17 +400,17 @@ xtc_fsm_call(xtc_pid_t target, const void *req, size_t req_size,
 	int rc;
 
 	if (req_size > 0 && req == NULL) return XTC_E_INVAL;
-	if (req_size > SIZE_MAX - 13) return XTC_E_INVAL;
+	if (req_size > SIZE_MAX - FSM_CALL_HDR) return XTC_E_INVAL;
 	self = xtc_self();
 	if (xtc_pid_is_none(self)) return XTC_E_INVAL;   /* must call from a proc */
 
 	tag = atomic_fetch_add_explicit(&g_tag, 1, memory_order_relaxed);
-	msg_size = 13 + req_size;
+	msg_size = FSM_CALL_HDR + req_size;
 	if (__os_malloc(msg_size, (void **)&buf) != XTC_OK) return XTC_E_NOMEM;
 	buf[0] = 'C';
-	memcpy(buf + 1, &self, 8);
-	memcpy(buf + 9, &tag, 4);
-	if (req_size > 0) memcpy(buf + 13, req, req_size);
+	memcpy(buf + 1, &self, sizeof self);
+	memcpy(buf + 1 + sizeof self, &tag, 4);
+	if (req_size > 0) memcpy(buf + FSM_CALL_HDR, req, req_size);
 	rc = xtc_send_owned(target, buf, msg_size);
 	if (rc != XTC_OK) { __os_free(buf); return rc; }
 

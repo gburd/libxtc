@@ -963,7 +963,7 @@ jobs:
           # Fiber-heavy suites, one memcheck per test (fiber stacks are
           # registered with valgrind, so cross-loop resumes are clean).
           # Excluded: test_proc's deliberate faults (a write to 0x10 that
-          # R1 contains) and its 65,536-proc ceiling (more mappings than
+          # R1 contains) and its 100,000-live-proc case (more mappings than
           # valgrind tracks), and test_exec's Blk2, which spins across a
           # blocking offload and does not finish under valgrind.
           for t in test_exec test_proc; do

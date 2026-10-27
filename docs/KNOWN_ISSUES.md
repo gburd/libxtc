@@ -1248,7 +1248,7 @@ test_lockmgr) is 0 errors with no stack-switch warnings.
 
 **Still not memcheck targets.**  `test_proc`'s fault-containment cases
 write to address 0x10 on purpose; its `pid_local_id_ceiling` case holds
-65,536 fiber stacks, more mappings than valgrind tracks (`VG_N_SEGMENTS
+100,000 fiber stacks, more mappings than valgrind tracks (`VG_N_SEGMENTS
 is too low`).  `test_exec`'s `Blk2_concurrent_commit` spins on a shared
 lock across a blocking offload and does not finish in 15 minutes under
 valgrind.  The timing tests in `test_sync` still skip under

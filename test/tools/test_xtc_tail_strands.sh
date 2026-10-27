@@ -132,7 +132,7 @@ for (k, s, t, lp, lo, g, d) in evs:
     prev = t
     body += leb(lp) + leb(lo) + leb(g) + leb(d)
 
-hdr = struct.pack("<IIII", MAGIC, 1, FLAG_LE, len(evs))
+hdr = struct.pack("<IIII", MAGIC, 3, FLAG_LE, len(evs))   # XTC_TAIL_VERSION
 hdr += struct.pack("<Q", 1000)
 open(sys.argv[1], "wb").write(hdr + bytes(body))
 PYEOF

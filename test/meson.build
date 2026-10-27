@@ -130,6 +130,7 @@ plain_tests = [
   ['m1/thread_sigmask',                     'm1/test_thread_sigmask.c'],
   ['concurrency/proc_wake_crossthread',     'concurrency/test_proc_wake_crossthread.c'],
   ['concurrency/proc_table_stress',         'concurrency/test_proc_table_stress.c'],
+  ['concurrency/atomic_pid',                'concurrency/test_atomic_pid.c'],
   ['concurrency/eager_rebalance',           'concurrency/test_eager_rebalance.c'],
   ['concurrency/wake_after_migration',      'concurrency/test_wake_after_migration.c'],
   ['concurrency/aio_migrate_wake',          'concurrency/test_aio_migrate_wake.c'],
