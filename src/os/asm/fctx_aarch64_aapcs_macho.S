@@ -159,6 +159,8 @@ ___xtc_jump_fcontext:
 	/* Hand the transfer arg to the resumed code. */
 	mov     x0, x2
 
-	ret
+	/* `br x30`, not `ret`: see fctx_aarch64_aapcs.S (a ret here
+	 * mispredicts on every switch). */
+	br      x30
 
 #endif  /* __aarch64__ && __APPLE__ */
