@@ -342,11 +342,14 @@ __xtc_coro_preempt(void *uctx)
 #endif
 }
 
+static void __coro_release_stack(struct xtc_coro *c);   /* below */
+
 /*
  * The task fn that the L2 scheduler calls.  Swaps into the fiber.
  * On return, decides what to tell the loop based on the fiber's
  * state.
  */
+
 int
 __xtc_coro_step(xtc_task_t *self, void *user)
 {
@@ -401,11 +404,18 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 		}
 		/* lifetime: a finished PROC fiber is reclaimed by the loop's
 		 * DONE handler (task.c __xtc_task_reclaim).  Its task handle
-		 * was never handed out; an xtc_async task's was, so that one
-		 * stays until xtc_loop_fini.  c->proc is set by __proc_entry
+		 * was never handed out; an xtc_async task's was, so that task
+		 * and its coro stay until xtc_loop_fini (the stack does not).  c->proc is set by __proc_entry
 		 * before the body runs and never cleared. */
 		if (c->proc != NULL)
 			self->reclaim = 1;
+		else
+			/* A bare xtc_async coroutine keeps its task + coro for
+			 * xtc_await until xtc_loop_fini, but not its stack:
+			 * 20,000 async/await pairs held 20,000 stacks (two
+			 * mappings each) until fini.  We are on the scheduler
+			 * stack, so the finished fiber's is idle. */
+			__coro_release_stack(c);
 		return XTC_TASK_DONE;
 	}
 	/* Awaiting another coroutine?  Stay parked; the awaitee will
@@ -442,13 +452,13 @@ __xtc_coro_step(xtc_task_t *self, void *user)
  * destructor on the task user pointer; M4 just frees in xtc_loop_fini
  * via the all_tasks walk.
  */
+/* Give a coro's fiber stack back (the thread's pool, the loop's spare,
+ * or munmap) and forget it.  Idempotent: a finished xtc_async coroutine
+ * releases its stack at once (__xtc_coro_step), and the coro struct --
+ * which xtc_await reads the result from -- is freed at xtc_loop_fini. */
 static void
-__coro_destroy(struct xtc_coro *c)
+__coro_release_stack(struct xtc_coro *c)
 {
-	if (c == NULL) return;
-#if defined(XTC_TSAN_FIBERS)
-	if (c->tsan_fiber != NULL) __tsan_destroy_fiber(c->tsan_fiber);
-#endif
 	if (c->stack != NULL) {
 		long pg = sysconf(_SC_PAGESIZE);
 		size_t total = c->stack_sz + (pg > 0 ? (size_t)pg : 4096);
@@ -466,6 +476,17 @@ __coro_destroy(struct xtc_coro *c)
 		     c->stack_sz)))
 			(void)munmap(c->stack, total);
 	}
+	c->stack = NULL;
+}
+
+static void
+__coro_destroy(struct xtc_coro *c)
+{
+	if (c == NULL) return;
+#if defined(XTC_TSAN_FIBERS)
+	if (c->tsan_fiber != NULL) __tsan_destroy_fiber(c->tsan_fiber);
+#endif
+	__coro_release_stack(c);
 	__os_free(c);
 }
 

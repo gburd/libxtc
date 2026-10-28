@@ -88,6 +88,13 @@ in
 .Xr xtc_proc 3
 .Pc .
 .Pp
+The task handle stays valid, and
+.Fn xtc_await
+can read the result again, until
+.Fn xtc_loop_fini .
+The coroutine's stack does not: it is returned to the thread's stack
+pool as soon as the coroutine returns.
+.Pp
 .Fn xtc_yield
 returns control to the loop.  The next loop step resumes the coroutine
 at the line after the call.

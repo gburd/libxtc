@@ -6,6 +6,7 @@
  */
 
 #include <stdint.h>
+#include <stdio.h>
 
 #include "munit.h"
 #include "xtc.h"
@@ -386,7 +387,79 @@ test_fp_env_per_fiber(const MunitParameter p[], void *d)
 }
 #endif
 
+#if defined(__linux__)
+/*
+ * C11: a finished xtc_async coroutine gives its fiber stack back at once.
+ * Its task and coro stay until xtc_loop_fini (xtc_await reads the result
+ * through them), but the stack did too: 20,000 async/await pairs held
+ * 20,000 stacks -- two mappings each, 48 -> 40,048 lines of
+ * /proc/self/maps -- so a long-lived loop using xtc_async ran into the
+ * kernel's mapping limit after ~32 K of them.  Asserted: 4,000 pairs grow
+ * the mapping count by less than 100 (the stacks are pooled and reused),
+ * and every result still reads back after the coroutines finished.
+ */
+static long
+c11_maps(void)
+{
+	FILE *f = fopen("/proc/self/maps", "r");
+	char buf[512];
+	long n = 0;
+	if (f == NULL) return -1;
+	while (fgets(buf, sizeof buf, f) != NULL)
+		n++;
+	fclose(f);
+	return n;
+}
+
+static intptr_t
+c11_child(void *arg)
+{
+	return (intptr_t)arg * 3;
+}
+
+static long g_c11_before, g_c11_after, g_c11_bad;
+
+static intptr_t
+c11_parent(void *arg)
+{
+	xtc_loop_t *loop = arg;
+	long i;
+	g_c11_before = c11_maps();
+	for (i = 0; i < 4000; i++) {
+		xtc_task_t *t = NULL;
+		intptr_t r = -1;
+		if (xtc_async(loop, c11_child, (void *)(intptr_t)i, &t) != XTC_OK ||
+		    xtc_await(t, &r) != XTC_OK || r != i * 3)
+			g_c11_bad++;
+		if (xtc_await(t, &r) != XTC_OK || r != i * 3)
+			g_c11_bad++;   /* a second await reads the kept result */
+	}
+	g_c11_after = c11_maps();
+	return 0;
+}
+
+static MunitResult
+test_async_releases_stack(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	(void)p; (void)d;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_async(loop, c11_parent, loop, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_logf(MUNIT_LOG_INFO, "/proc/self/maps lines: %ld -> %ld over "
+	    "4000 async/await", g_c11_before, g_c11_after);
+	munit_assert_long(g_c11_bad, ==, 0);
+	munit_assert_long(g_c11_before, >, 0);
+	munit_assert_long(g_c11_after - g_c11_before, <, 100);
+	return MUNIT_OK;
+}
+#endif
+
 static MunitTest tests[] = {
+#if defined(__linux__)
+	{ "/C11_async_releases_stack", test_async_releases_stack, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+#endif
 #if defined(FPE_TEST)
 	{ "/C10_fp_env_per_fiber", test_fp_env_per_fiber, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #endif

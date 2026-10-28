@@ -1645,7 +1645,12 @@ after the fix: +1.4 MB RSS, +131 mappings.  A 4-loop migratable run with
 
 * A task created with `xtc_task_spawn` or `xtc_async`.  Its handle is
   documented as valid for the loop's lifetime and `xtc_await` reads the
-  finished coroutine's result through it.  A long-lived service should run
+  finished coroutine's result through it.  Since 2.1 a finished
+  `xtc_async` coroutine gives its fiber STACK back at once (to the
+  per-thread pool), so what stays is the task and coro structs, a few
+  hundred bytes: 4,000 async/await pairs grew `/proc/self/maps` from 44 to
+  8,045 lines before and leave it flat now (`test_async`
+  `/C11_async_releases_stack`).  A long-lived service should still run
   short-lived work as procs, not as bare `xtc_async` coroutines.
 * Task STRUCTS (a few hundred bytes each, no stacks).  Recycled ones are
   kept on the loop's free list up to the high-water count of
