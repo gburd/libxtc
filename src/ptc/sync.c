@@ -315,6 +315,12 @@ struct fiber_waiter {
 	int                  mode;     /* arwlock: ARW_SHARED / ARW_EXCL */
 	int                  granted;  /* notify/amutex/arwlock hand-off */
 	int                  queued;
+	/* notify: granted by a signaler on this pinned waiter's own loop
+	 * thread, which therefore finished signalling (and unlocked) before
+	 * the waiter could resume; the waiter may return without the lock.
+	 * Only that same-thread signaler sets it (a remote one never writes
+	 * it), so it is never accessed by two threads. */
+	int                  handed;
 };
 
 struct fw_queue {
@@ -377,13 +383,14 @@ fw_expired(int64_t deadline, int64_t *now)
 }
 
 /*
- * Park the calling fiber once.  Called and returns with *lk held.  The
- * waker is re-armed each time so it names the loop the fiber is on now
- * (a migratable fiber may have been stolen since the last park), and a
- * stale park timer is replaced, never left to fire into a later park.
+ * Park the calling fiber once.  Called with *lk held, returns WITHOUT it
+ * (fw_park re-takes it).  The waker is re-armed each time so it names
+ * the loop the fiber is on now (a migratable fiber may have been stolen
+ * since the last park), and a stale park timer is replaced, never left
+ * to fire into a later park.
  */
 static void
-fw_park(pthread_mutex_t *lk, xtc_task_t *cur, xtc_waker_t *wk,
+fw_park_unlocked(pthread_mutex_t *lk, xtc_task_t *cur, xtc_waker_t *wk,
     int64_t deadline, int64_t now)
 {
 	void *proc_ctx;
@@ -401,6 +408,14 @@ fw_park(pthread_mutex_t *lk, xtc_task_t *cur, xtc_waker_t *wk,
 	XTC_PROBE_FIBER_RESUME((uintptr_t)cur, XTC_PROBE_PARK_SYNC,
 	    (uintptr_t)lk);
 	__xtc_proc_ctx_restore(proc_ctx);
+}
+
+/* Park once; called and returns with *lk held. */
+static void
+fw_park(pthread_mutex_t *lk, xtc_task_t *cur, xtc_waker_t *wk,
+    int64_t deadline, int64_t now)
+{
+	fw_park_unlocked(lk, cur, wk, deadline, now);
 	(void)__xtc_mtx_lock(lk);
 }
 
@@ -496,6 +511,12 @@ notify_give_locked(xtc_notify_t *n)
 	}
 	fw_remove(&n->wq, w);
 	w->granted = 1;
+	/* Same-thread hand-off to a pinned waiter: it cannot run until this
+	 * step yields, and a pinned task is never stolen meanwhile.  A
+	 * remote or migratable waiter re-takes the lock to return, so a
+	 * notify freed right after the wait never sees our unlock. */
+	if (__xtc_current_loop == w->waker.loop && w->waker.task->pinned)
+		w->handed = 1;
 	(void)xtc_waker_wake(&w->waker);
 }
 
@@ -576,7 +597,16 @@ xtc_notify_wait(xtc_notify_t *n, int64_t timeout_ns)
 			if (NT_STORED(n)) { NT_SET(n, 0); rc = XTC_OK; break; }
 			if (fw_expired(deadline, &now)) { rc = XTC_E_AGAIN; break; }
 			fw_enqueue(&n->wq, &w);
-			fw_park(&n->lock, cur, &w.waker, deadline, now);
+			fw_park_unlocked(&n->lock, cur, &w.waker, deadline, now);
+			if (w.handed && !fw_kill_pending(masked)) {
+				/* Dequeued and granted by a same-thread signal
+				 * that has already unlocked: done, lock-free. */
+				__xtc_task_cancel_park_timer(cur);
+				fw_mask_leave(masked);
+				return XTC_OK;
+			}
+			w.handed = 0;   /* a kill: the locked path passes it on */
+			(void)__xtc_mtx_lock(&n->lock);
 		}
 		fw_remove(&n->wq, &w);
 		__xtc_task_cancel_park_timer(cur);
