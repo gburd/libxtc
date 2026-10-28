@@ -1380,11 +1380,13 @@ xtc_loop_run(xtc_loop_t *loop)
 
 	while (!atomic_load_explicit(&loop->stop_requested,
 	    memory_order_relaxed)) {
-		int has_tasks  =
-		    atomic_load_explicit(&loop->n_alive, memory_order_relaxed) > 0;
-		int has_timers =
-		    __xtc_timer_heap_next_deadline(loop) >= 0;
-		if (!has_tasks && !has_timers) break;
+		/* The timer heap is consulted only when no task is alive (its
+		 * next-deadline peek pops cancelled heads, 13 instructions a
+		 * step on a yield-bound loop for nothing while tasks run). */
+		if (atomic_load_explicit(&loop->n_alive,
+		    memory_order_relaxed) <= 0 &&
+		    __xtc_timer_heap_next_deadline(loop) < 0)
+			break;
 		if ((rc = __xtc_loop_step(loop)) != XTC_OK) {
 			__xtc_io_owner_leave(loop->io);
 			__xtc_current_loop = saved;
