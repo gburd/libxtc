@@ -459,6 +459,15 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 static void
 __coro_release_stack(struct xtc_coro *c)
 {
+#if defined(XTC_TSAN_FIBERS)
+	/* TSan's per-fiber state is mapped too (161 -> 8,153 maps lines over
+	 * 4,000 async/await under -fsanitize=thread); the fiber is never
+	 * switched to again. */
+	if (c->tsan_fiber != NULL) {
+		__tsan_destroy_fiber(c->tsan_fiber);
+		c->tsan_fiber = NULL;
+	}
+#endif
 	if (c->stack != NULL) {
 		long pg = sysconf(_SC_PAGESIZE);
 		size_t total = c->stack_sz + (pg > 0 ? (size_t)pg : 4096);
@@ -483,9 +492,6 @@ static void
 __coro_destroy(struct xtc_coro *c)
 {
 	if (c == NULL) return;
-#if defined(XTC_TSAN_FIBERS)
-	if (c->tsan_fiber != NULL) __tsan_destroy_fiber(c->tsan_fiber);
-#endif
 	__coro_release_stack(c);
 	__os_free(c);
 }
