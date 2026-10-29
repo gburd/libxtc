@@ -42,6 +42,36 @@
 #include <string.h>
 #include <unistd.h>    /* sysconf(_SC_PAGESIZE) for stack-overflow detection */
 
+/*
+ * The exit unwind (xtc_exit_self -> __proc_entry).  glibc 2.44 changed
+ * setjmp's pointer mangling and TSan's longjmp interceptor no longer
+ * finds the buffer ("can't find longjmp buf", llvm-project#228263), so
+ * every kill or exit aborts a TSan run.  Under TSan on x86-64 the unwind
+ * uses the compiler's builtin pair instead, which TSan does not
+ * intercept; it carries only 1, so the code travels in exit_jv.  aarch64
+ * clang has no __builtin_longjmp and keeps the libc pair.
+ */
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer) && defined(__x86_64__)
+#define XTC_EXIT_BUILTIN_JMP 1
+#endif
+#endif
+#if !defined(XTC_EXIT_BUILTIN_JMP) && defined(__SANITIZE_THREAD__) &&          \
+    defined(__x86_64__)
+#define XTC_EXIT_BUILTIN_JMP 1
+#endif
+#if defined(XTC_EXIT_BUILTIN_JMP)
+#define EXIT_SETJMP(p) (__builtin_setjmp((p)->exit_jb) ? (p)->exit_jv : 0)
+#define EXIT_LONGJMP(p, v)                                                     \
+	do {                                                                   \
+		(p)->exit_jv = (v) != 0 ? (v) : 1;                             \
+		__builtin_longjmp((p)->exit_jb, 1);                            \
+	} while (0)
+#else
+#define EXIT_SETJMP(p) setjmp((p)->exit_jb)
+#define EXIT_LONGJMP(p, v) longjmp((p)->exit_jb, (v))
+#endif
+
 /* ---------- envelope ---------- */
 
 /*
@@ -450,7 +480,12 @@ struct xtc_proc {
 	void       *arg;
 
 	/* Exit handling. */
+#if defined(XTC_EXIT_BUILTIN_JMP)
+	void *exit_jb[5]; /* __builtin_setjmp's buffer */
+	int exit_jv;      /* the longjmp value it cannot carry */
+#else
 	jmp_buf     exit_jb;
+#endif
 	int         exit_jb_set;
 	int         exit_reason;
 	int         exit_kind;   /* xtc_down_kind_t: 0 clean, 1 exit, 2 signal */
@@ -1598,7 +1633,7 @@ __proc_entry(void *arg)
 		}
 	}
 
-	if ((reason = setjmp(p->exit_jb)) == 0) {
+	if ((reason = EXIT_SETJMP(p)) == 0) {
 		p->exit_jb_set = 1;
 		p->fn(p->arg);
 		p->exit_reason = 0;        /* normal */
@@ -3797,7 +3832,7 @@ xtc_exit_self(int reason)
 	 * __proc_reanchor). */
 	struct xtc_proc *self = __proc_reanchor(__current_proc);
 	if (self == NULL || !self->exit_jb_set) return XTC_E_INVAL;
-	longjmp(self->exit_jb, reason + 1);
+	EXIT_LONGJMP(self, reason + 1);
 	/* NOTREACHED */
 	return XTC_OK;
 }
@@ -3825,7 +3860,7 @@ __xtc_exit_self_kind(int reason, int kind)
 	if (kind < XTC_DOWN_KIND_CLEAN || kind > XTC_DOWN_KIND_NOCONNECTION)
 		return XTC_E_INVAL;
 	self->exit_kind_override = kind;
-	longjmp(self->exit_jb, reason + 1);
+	EXIT_LONGJMP(self, reason + 1);
 	/* NOTREACHED */
 	return XTC_OK;
 }
