@@ -357,6 +357,13 @@ test_wake_running_loop_no_write(const MunitParameter p[], void *d)
 	xtc_exec_t *e;
 	static struct shared s;
 	(void)p; (void)d;
+	/* It busy-waits on the other loop's thread and counts write(2)s: a
+	 * scheduling measurement.  Valgrind serializes threads, so the spin
+	 * waits on its scheduler instead -- under the CI job's DRD step it took
+	 * 2 minutes on one run and 10+ on the next (the job hit its 45-minute
+	 * cap).  Same call as test_sync.c's offloop_valgrind_note. */
+	if (getenv("XTC_UNDER_VALGRIND") != NULL)
+		return MUNIT_SKIP;
 	if (cw6_syscw() < 0)
 		return MUNIT_SKIP;
 	s.parker_runs = 0; s.init_done = 0; s.max_runs = CW6_WAKES + 1;
