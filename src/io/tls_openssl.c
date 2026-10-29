@@ -1055,6 +1055,19 @@ tls_set1_peername(SSL *ssl, const char *name)
 		return 0;
 	return SSL_set1_dnsname(ssl, name);
 #else
+#if !defined(OPENSSL_IS_BORINGSSL)
+	/* Before 4.0 (and in LibreSSL) SSL_set1_host sets ONE list -- an
+	 * address literal the IP, anything else the names -- and leaves the
+	 * other, so a name set after an address (or the reverse, or a clear
+	 * after an address) still had to match the old one too: the right
+	 * address after a wrong name failed the handshake.  Clear both. */
+	X509_VERIFY_PARAM *vp = SSL_get0_param(ssl);
+	if (X509_VERIFY_PARAM_set1_host(vp, NULL, 0) != 1 ||
+	    X509_VERIFY_PARAM_set1_ip(vp, NULL, 0) != 1)
+		return 0;
+	if (name == NULL)
+		return 1;
+#endif
 	return SSL_set1_host(ssl, name);
 #endif
 }
