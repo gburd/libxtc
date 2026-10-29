@@ -1449,10 +1449,10 @@ hd_spin(void *arg)
 	return NULL;
 }
 
-/* CPUs that HERD_K spinning threads of this process get right now
- * (CPU-seconds per second; no library code involved). */
+/* CPUs that n (<= HERD_K) spinning threads of this process get right
+ * now (CPU-seconds per second; no library code involved). */
 static double
-hd_capacity(void)
+hd_capacity(int n)
 {
 	pthread_t th[HERD_K];
 	struct timespec w0, w1, c0, c1;
@@ -1460,12 +1460,12 @@ hd_capacity(void)
 	atomic_store(&g_hd_stop, 0);
 	clock_gettime(CLOCK_MONOTONIC, &w0);  /* XTC_RAW_OK: test measurement */
 	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &c0);  /* XTC_RAW_OK: test measurement */
-	for (i = 0; i < HERD_K; i++)
+	for (i = 0; i < n; i++)
 		munit_assert_int(pthread_create(&th[i], NULL, hd_spin, NULL),
 		    ==, 0);
 	(void)__os_sleep_ns(200LL * 1000 * 1000);
 	atomic_store(&g_hd_stop, 1);
-	for (i = 0; i < HERD_K; i++)
+	for (i = 0; i < n; i++)
 		(void)pthread_join(th[i], NULL);
 	clock_gettime(CLOCK_MONOTONIC, &w1);  /* XTC_RAW_OK: test measurement */
 	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &c1);  /* XTC_RAW_OK: test measurement */
@@ -1494,7 +1494,7 @@ test_offloop_no_herd(const MunitParameter p[], void *d)
 	 * herd bound measures the lock only when the waiters can all run.
 	 * 4 CPUs + 4 busy loops: 1.59.0 and 2.0 both fail it (1,360 and
 	 * 3,155 switches) with 2.0 CPUs left to the process. */
-	cap = hd_capacity();
+	cap = hd_capacity(HERD_K);
 	if (cap < HERD_K / 2 - 0.5) {   /* a quiet 4-CPU host measures ~4.0 */
 		fprintf(stderr, "  skipped: %d spinning threads get %.2f CPUs "
 		    "here (a shared host)\n", HERD_K, cap);
@@ -1696,12 +1696,24 @@ static MunitResult
 test_offloop_notify_spin(const MunitParameter p[], void *d)
 {
 	pthread_t th;
+	double cap;
 	int i;
 	(void)p; (void)d;
 	if (getenv("XTC_UNDER_VALGRIND") != NULL)
 		return MUNIT_SKIP;   /* timing: see offloop_valgrind_note */
 	if (xtc_ncpus() < 2)
 		return MUNIT_SKIP;
+	/* The waiter spins only while it has a CPU of its own: on a shared
+	 * host it is descheduled mid-spin and counted as a switch (32 vCPUs
+	 * + 40 busy loops: 2.0.0 failed 1/20 runs, 4,398 switches once).
+	 * So the two threads here must each get a CPU; a quiet 2-CPU host
+	 * measures ~2.0. */
+	cap = hd_capacity(2);
+	if (cap < 1.8) {
+		fprintf(stderr, "  skipped: 2 spinning threads get %.2f CPUs "
+		    "here (a shared host)\n", cap);
+		return MUNIT_SKIP;
+	}
 	munit_assert_int(xtc_notify_create(&g_ns), ==, XTC_OK);
 	g_sp_csw = 0; g_ns_ack = 0;
 	munit_assert_int(pthread_create(&th, NULL, ns_waiter, NULL), ==, 0);
