@@ -166,7 +166,11 @@ if ! (cd "$XTC_BUILD_DIR" && ar p libxtc.a proc.o 2>/dev/null | \
 	exit 0
 fi
 
-if ! ${CC:-cc} -O0 -g -w -I "$XTC_SRC_DIR/src/inc" -I "$XTC_BUILD_DIR" \
+# -fno-lto: a libxtc built with -ffat-lto-objects -flto (distribution
+# hardened flags) would otherwise be re-optimized at this link, which
+# keeps no debug location for its statics (__lt, __tail_seq: "optimized
+# out"), and the helpers under test read them by name.
+if ! ${CC:-cc} -O0 -g -w -fno-lto -I "$XTC_SRC_DIR/src/inc" -I "$XTC_BUILD_DIR" \
     -o "$TMPD/prog" "$TMPD/prog.c" "$LIB" \
     -pthread -luring -lssl -lcrypto -ldl -lm > "$TMPD/cc.log" 2>&1; then
 	# No io_uring (or no liburing) -- this gate is uring-specific.

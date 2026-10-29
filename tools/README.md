@@ -27,6 +27,15 @@ Recommended flags to build libxtc so the tools can see:
 For the nix flake, set `dontStrip = true` (or use a debug/`debuginfo`
 variant).  On a distro package, install the matching `-dbg` / `debuginfo`.
 
+**Link-time optimization hides libxtc's statics.**  A libxtc built with
+`-flto -ffat-lto-objects` (Fedora's and openSUSE's default package
+flags) and then linked with LTO is re-optimized at that link, and the
+result keeps no debug location for the file-static tables the commands
+read (`__lt`, `__tail_ring`, `__tail_seq`): gdb prints `value has been
+optimized out`.  Link the program you want to inspect with `-fno-lto`
+(the fat objects' regular code is then used), or build libxtc without
+`-flto`.
+
 ## GDB
 
     (gdb) source tools/gdb/xtc-gdb.py

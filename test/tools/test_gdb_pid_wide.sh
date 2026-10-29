@@ -166,7 +166,11 @@ main(void)
 }
 PROGEOF
 
-if ! ${CC:-cc} -O0 -g -w -I "$XTC_SRC_DIR/src/inc" -I "$XTC_BUILD_DIR" \
+# -fno-lto: a libxtc built with -ffat-lto-objects -flto (distribution
+# hardened flags) would otherwise be re-optimized at this link, which
+# keeps no debug location for its statics (__lt, __tail_seq: "optimized
+# out"), and the helpers under test read them by name.
+if ! ${CC:-cc} -O0 -g -w -fno-lto -I "$XTC_SRC_DIR/src/inc" -I "$XTC_BUILD_DIR" \
     -o "$TMPD/prog" "$TMPD/prog.c" "$LIB" \
     -pthread $(sed -n 's/^LIBS[ \t]*=[ \t]*//p' "$XTC_BUILD_DIR/Makefile") \
     > "$TMPD/cc.log" 2>&1; then
