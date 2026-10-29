@@ -28,7 +28,6 @@
 /* Activation state is process-global and read on hot paths, so it is a
  * relaxed atomic flag rather than a lock. */
 static _Atomic int      g_sim_active;
-static uint64_t         g_sim_seed;
 static uint64_t         g_sim_stream[XTC_SIM_RNG_NSTREAMS];
 /* Adversarial-mode knobs (see xtc_sim.h); defined early because
  * xtc_sim_deactivate resets them.  Both OFF (0) by default. */
@@ -135,7 +134,6 @@ xtc_sim_activate(uint64_t seed)
 {
 	int i;
 	uint64_t s = seed ? seed : 0x9E3779B97F4A7C15ull;
-	g_sim_seed = s;
 	/* Derive each stream's initial state from the root seed so the
 	 * streams are independent yet fully determined by the seed. */
 	for (i = 0; i < XTC_SIM_RNG_NSTREAMS; i++) {

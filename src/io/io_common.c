@@ -25,9 +25,11 @@
 #endif
 
 /* Set FD_CLOEXEC and O_NONBLOCK on a file descriptor.  Used only by
- * the self-pipe path (POSIX backends other than kqueue); the Windows
- * path uses ioctlsocket(FIONBIO) and kqueue uses EVFILT_USER. */
-#if !defined(_WIN32) && !defined(XTC_IO_BACKEND_KQUEUE)
+ * the self-pipe path (POSIX backends other than kqueue and sim); the
+ * Windows path uses ioctlsocket(FIONBIO), kqueue EVFILT_USER, sim a
+ * flag.  Same condition as the self-pipe block in xtc_io_init. */
+#if !defined(_WIN32) && !defined(XTC_IO_BACKEND_KQUEUE) && \
+    !defined(XTC_IO_BACKEND_SIM)
 static int
 __set_cloexec_nonblock(int fd)
 {
