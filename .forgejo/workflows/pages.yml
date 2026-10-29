@@ -62,7 +62,7 @@ jobs:
           # resolve locally, then check every link and anchor.
           bundle exec jekyll build --baseurl "" --destination _site_check
           LYCHEE_VER=v0.15.1
-          curl -sSL "https://github.com/lycheeverse/lychee/releases/download/${LYCHEE_VER}/lychee-x86_64-unknown-linux-gnu.tar.gz" \
+          curl -fsSL "https://github.com/lycheeverse/lychee/releases/download/${LYCHEE_VER}/lychee-${LYCHEE_VER}-x86_64-unknown-linux-gnu.tar.gz" \
             | tar xz lychee
           ./lychee --config lychee.toml --no-progress \
             --root-dir "$PWD/_site_check" '_site_check/**/*.html' ../README.md
