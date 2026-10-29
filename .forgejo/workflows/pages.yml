@@ -61,9 +61,11 @@ jobs:
           # Build a copy with an empty baseurl so root-relative links
           # resolve locally, then check every link and anchor.
           bundle exec jekyll build --baseurl "" --destination _site_check
-          LYCHEE_VER=v0.15.1
-          curl -fsSL "https://github.com/lycheeverse/lychee/releases/download/${LYCHEE_VER}/lychee-${LYCHEE_VER}-x86_64-unknown-linux-gnu.tar.gz" \
-            | tar xz lychee
+          # The version lycheeverse/lychee-action@v2 runs on GitHub (it has
+          # --root-dir; v0.15.1 did not).
+          LYCHEE_VER=lychee-v0.24.2
+          curl -fsSL "https://github.com/lycheeverse/lychee/releases/download/${LYCHEE_VER}/lychee-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar xz --strip-components=1 lychee-x86_64-unknown-linux-gnu/lychee
           ./lychee --config lychee.toml --no-progress \
             --root-dir "$PWD/_site_check" '_site_check/**/*.html' ../README.md
 
