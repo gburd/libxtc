@@ -35,7 +35,7 @@ fi
 	cd "$build"
 	"$XTC_SRC_DIR/dist/configure" --prefix="$prefix" >/dev/null 2>&1
 	make -j"$(nproc 2>/dev/null || echo 2)" >/dev/null 2>&1
-	make install >/dev/null 2>&1
+	"${MAKE:-make}" install >/dev/null 2>&1
 ) || { echo "  [install-headers] FAIL: build/install errored"; exit 1; }
 
 # The umbrella header must exist.

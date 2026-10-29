@@ -41,7 +41,7 @@ echo "  [coverage] 1/3 building + running make check (instrumented)"
 	CFLAGS="--coverage -O0 -g" LDFLAGS="--coverage" \
 	    "$SRC_DIR/dist/configure" --with-tls=auto >configure.log 2>&1
 	make -j"$(nproc 2>/dev/null || echo 2)" >build.log 2>&1
-	make check >check.log 2>&1
+	"${MAKE:-make}" check >check.log 2>&1
 ) || {
 	echo "  [coverage] FAIL: instrumented make check failed"
 	echo "             see $BUILD/check.log"

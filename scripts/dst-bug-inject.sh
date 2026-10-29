@@ -206,7 +206,7 @@ clean="$work/clean"
 mkdir -p "$clean"
 ( cd "$clean" && CFLAGS="-g -O1 -D_GNU_SOURCE" \
 	"$ROOT/dist/configure" --with-io-backend=sim --with-tls=none --enable-sched-policy \
-	--without-liburing >/dev/null 2>&1 && make -j4 libxtc.a \
+	--without-liburing >/dev/null 2>&1 && "${MAKE:-make}" -j4 libxtc.a \
 	>/dev/null 2>&1 ) || {
 	echo "  [bug] FAIL: the CLEAN control library did not build"
 	find "$work" -mindepth 1 -delete 2>/dev/null
@@ -255,7 +255,7 @@ while IFS=';' read -r bug test_c need_eng seeded expect; do
 	mkdir -p "$bdir"
 	( cd "$bdir" && CFLAGS="-DXTC_DST_INJECT_BUG=$bug -g -O1 -D_GNU_SOURCE" \
 		"$ROOT/dist/configure" --with-io-backend=sim --with-tls=none --enable-sched-policy \
-		--without-liburing >/dev/null 2>&1 && make -j4 libxtc.a \
+		--without-liburing >/dev/null 2>&1 && "${MAKE:-make}" -j4 libxtc.a \
 		>/dev/null 2>&1 ) || {
 		echo "  [bug $bug] FAIL: sim lib did not build"
 		fails=$((fails + 1)); continue; }

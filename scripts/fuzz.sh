@@ -73,7 +73,7 @@ if [ ! -f "$B/Makefile" ]; then
 fi
 # fuzz_net/cfg/tls depend on libxtc.a, the example parsers do not: make
 # builds only what the harness needs.
-make -s -C "$B" -j"$J" "fuzz_$name" > "$B/fuzz-build.log" 2>&1 || {
+"${MAKE:-make}" -s -C "$B" -j"$J" "fuzz_$name" > "$B/fuzz-build.log" 2>&1 || {
 	echo "fuzz.sh: build failed; see $B/fuzz-build.log" >&2
 	tail -20 "$B/fuzz-build.log" >&2
 	exit 2

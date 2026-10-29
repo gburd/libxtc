@@ -1406,7 +1406,7 @@ tests-pbt: $(TESTS_PBT)
 # a normal `make check` alone does not exercise it.
 check-sim: check-dst
 check-dst:
-	XTC_SRC_DIR=$(abs_top_srcdir)/.. sh $(abs_top_srcdir)/../test/sim/run_sim_tests.sh
+	MAKE='$(MAKE)' XTC_SRC_DIR=$(abs_top_srcdir)/.. sh $(abs_top_srcdir)/../test/sim/run_sim_tests.sh
 
 # coverage: MERGED coverage across both build configurations.
 #
@@ -2420,7 +2420,7 @@ distclean: clean
 # Nested off/on builds: explicit qualification target, not recursive make check.
 .PHONY: check-sched-policy
 check-sched-policy:
-	sh $(srcdir)/../test/dist/test_sched_policy_build.sh
+	MAKE='$(MAKE)' sh $(srcdir)/../test/dist/test_sched_policy_build.sh
 
 # Loop layout depends on the optional inline policy state. Rebuild all objects
 # on these internal-header edits rather than combine incompatible layouts.

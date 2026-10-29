@@ -113,7 +113,8 @@ strip "$TMPD/prog_str" 2>/dev/null || {
 wait_stopped() {
 	_p=$1 _i=0
 	while [ "$_i" -lt 100 ]; do
-		_st=$(awk '{print $3}' "/proc/$_p/stat" 2>/dev/null || echo "")
+		# ps, not /proc/PID/stat: FreeBSD and macOS have no procfs stat.
+		_st=$(ps -o stat= -p "$_p" 2>/dev/null | cut -c1)
 		[ "$_st" = "T" ] && return 0
 		_i=$((_i + 1))
 		sleep 0.1

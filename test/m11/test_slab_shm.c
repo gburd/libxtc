@@ -20,7 +20,7 @@
 
 #ifndef _WIN32
 
-/* Feature-test macros for usleep, shm_open. */
+/* Feature-test macros for shm_open. */
 #ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 700
 #endif
@@ -48,6 +48,7 @@
 #include "xtc.h"
 #include "xtc_slab.h"
 #include "xtc_int.h"
+#include "os_time.h" /* __os_sleep_ns: usleep is not POSIX.1-2008 */
 
 /* Test payload written to shared memory. */
 struct test_payload {
@@ -336,7 +337,7 @@ test_shm_alloc_in_child(const MunitParameter p[], void *d)
 		*child_ready = 1;
 
 		/* Wait a bit for parent to read, then exit. */
-		usleep(50000);
+		(void)__os_sleep_ns(50000LL * 1000);
 
 		xtc_slab_destroy(child_slab);
 		(void)munmap(child_shm_addr, SHM_SIZE);
@@ -347,7 +348,7 @@ test_shm_alloc_in_child(const MunitParameter p[], void *d)
 	/* Parent: wait for child's allocation. */
 	while (atomic_load_explicit((volatile _Atomic int *)ready_flag,
 	    memory_order_acquire) == 0) {
-		usleep(1000);
+		(void)__os_sleep_ns(1000LL * 1000);
 	}
 
 	xtc_slab_off_t off = *offset_slot;
@@ -450,7 +451,7 @@ test_shm_concurrent_alloc(const MunitParameter p[], void *d)
 		*c_count = CONC_ALLOCS;
 
 		/* Wait for parent to finish checking. */
-		usleep(100000);
+		(void)__os_sleep_ns(100000LL * 1000);
 
 		xtc_slab_destroy(child_slab);
 		(void)munmap(child_shm_addr, SHM_SIZE);
@@ -470,7 +471,7 @@ test_shm_concurrent_alloc(const MunitParameter p[], void *d)
 	/* Wait for child to finish allocating. */
 	while (atomic_load_explicit((volatile _Atomic int *)child_count_slot,
 	    memory_order_acquire) < CONC_ALLOCS) {
-		usleep(1000);
+		(void)__os_sleep_ns(1000LL * 1000);
 	}
 
 	/* Verify no overlap between parent and child offsets. */

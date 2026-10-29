@@ -188,7 +188,8 @@ PROG_PID=$!
 i=0
 st=
 while [ "$i" -lt 300 ]; do
-	st=$(awk '{print $3}' "/proc/$PROG_PID/stat" 2>/dev/null || echo "")
+	# ps, not /proc/PID/stat: FreeBSD and macOS have no procfs stat.
+	st=$(ps -o stat= -p "$PROG_PID" 2>/dev/null | cut -c1)
 	[ "$st" = "T" ] && break
 	[ -z "$st" ] && break
 	i=$((i + 1))

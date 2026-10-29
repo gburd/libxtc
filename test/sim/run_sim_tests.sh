@@ -64,7 +64,7 @@ mkdir -p "$build"
 	"$XTC_SRC_DIR/dist/configure" --with-io-backend=sim \
 		--with-tls=none --without-liburing --enable-diagnostic \
 		--enable-sched-policy ${XTC_SIM_CONFIGURE_EXTRA:-} >/dev/null 2>&1
-	make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)" >/dev/null 2>&1
+	"${MAKE:-make}" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)" >/dev/null 2>&1
 ) || { echo "  [sim] FAIL: sim-backend build errored"; exit 1; }
 
 inc="-I$build -I$XTC_SRC_DIR/src/inc"

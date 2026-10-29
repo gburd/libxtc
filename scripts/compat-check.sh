@@ -77,13 +77,13 @@ git archive "$base" | tar x -C "$out/base-src"
 ( cd "$out/base-build" &&
     CC="$CC" "$out/base-src/dist/configure" --prefix="$out/base-prefix" \
         --with-tls=auto > configure.log 2>&1 &&
-    make -j"$JOBS" > make.log 2>&1 && make install > install.log 2>&1 ) || {
+    "${MAKE:-make}" -j"$JOBS" > make.log 2>&1 && "${MAKE:-make}" install > install.log 2>&1 ) || {
 	echo "compat-check: building/installing $base failed; see $out/base-build" >&2
 	exit 2
 }
 ( cd "$out/head-build" &&
     CC="$CC" "$src/dist/configure" --enable-shared --with-tls=auto \
-        > configure.log 2>&1 && make -j"$JOBS" > make.log 2>&1 ) || {
+        > configure.log 2>&1 && "${MAKE:-make}" -j"$JOBS" > make.log 2>&1 ) || {
 	echo "compat-check: building HEAD failed; see $out/head-build" >&2
 	exit 2
 }

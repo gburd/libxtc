@@ -146,7 +146,7 @@ build() {
 		exit 2
 	fi
 	( cd "$t/build" && "$t/src/dist/configure" --with-tls=auto \
-	    > configure.log 2>&1 && make -j"$JOBS" > make.log 2>&1 ) || {
+	    > configure.log 2>&1 && "${MAKE:-make}" -j"$JOBS" > make.log 2>&1 ) || {
 		echo "perf-gate: $tag ($ref) failed to build; see $t/build" >&2
 		exit 2
 	}

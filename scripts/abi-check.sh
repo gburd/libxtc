@@ -48,7 +48,7 @@ build() {	# build REF DIR -> DIR/build/libxtc.so.* and DIR/src/src/inc
 	fi
 	( cd "$t/build" && CFLAGS='-g -Og' "$t/src/dist/configure" \
 	    --enable-shared --with-tls=auto > configure.log 2>&1 &&
-	  make -j"$JOBS" > make.log 2>&1 ) || {
+	  "${MAKE:-make}" -j"$JOBS" > make.log 2>&1 ) || {
 		echo "abi-check: build of $ref failed (see $t/build)" >&2
 		return 1
 	}

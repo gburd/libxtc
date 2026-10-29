@@ -185,7 +185,7 @@ PROG_PID=$!
 # Wait for the self-STOP rather than guessing at a sleep.
 i=0
 while [ "$i" -lt 100 ]; do
-	st=$(awk '{print $3}' "/proc/$PROG_PID/stat" 2>/dev/null || echo "")
+	st=$(ps -o stat= -p "$PROG_PID" 2>/dev/null | cut -c1)
 	[ "$st" = "T" ] && break
 	i=$((i + 1))
 	sleep 0.1

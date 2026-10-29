@@ -24,14 +24,14 @@ for mode in no yes; do
     (cd "$work/$mode"
      "$root/dist/configure" --enable-sched-policy="$mode" \
          --with-tls=none --without-liburing --prefix="$work/install-$mode" >configure.log
-     make -j"$jobs" libxtc.a >build.log 2>&1
+     "${MAKE:-make}" -j"$jobs" libxtc.a >build.log 2>&1
      # Build the small feature binaries (compiles the new APIs in both
      # modes); run only the quick policy/continuous checks, not the heavy
      # test_batch (that runs in the dedicated make check job).
-     make -j"$jobs" test_sched_policy test_sched_continuous >test-build.log 2>&1
+     "${MAKE:-make}" -j"$jobs" test_sched_policy test_sched_continuous >test-build.log 2>&1
      ./test_sched_policy
      ./test_sched_continuous
-     make install >install.log 2>&1)
+     "${MAKE:-make}" install >install.log 2>&1)
 
     cat > "$work/consumer.c" <<'SRC'
 #include <xtc.h>
@@ -65,7 +65,7 @@ SRC
     (cd "$work/sim-$mode"
      "$root/dist/configure" --enable-sched-policy="$mode" \
          --with-io-backend=sim --with-tls=none --without-liburing >configure.log
-     make -j"$jobs" libxtc.a >build.log 2>&1)
+     "${MAKE:-make}" -j"$jobs" libxtc.a >build.log 2>&1)
     simlibs=$(sed -n 's/^LIBS[[:space:]]*=[[:space:]]*//p' "$work/sim-$mode/Makefile")
     if [ "$mode" = yes ]; then
         # One deterministic async+mt replay (the feature's own DST check);

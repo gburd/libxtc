@@ -445,7 +445,10 @@ __now_ns_slab(void)
 }
 
 static size_t
-__align_up(size_t n, size_t a) { return (n + a - 1) & ~(a - 1); }
+__slab_align_up(size_t n, size_t a)
+{
+	return (n + a - 1) & ~(a - 1);
+}
 
 static void
 __audit_record(xtc_slab_t *s, void *obj, uint8_t op)
@@ -739,7 +742,7 @@ xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 	/*
 	 * Overflow guard: slot_size is obj_size + redzones, then rounded up
 	 * to align.  Reject an obj_size so large that adding the redzones or
-	 * the align-1 rounding term in __align_up() would wrap size_t.  A
+	 * the align-1 rounding term in __slab_align_up() would wrap size_t.  A
 	 * 1 GiB ceiling is far above any legitimate slab object and leaves
 	 * ample headroom for the additive terms.  Without this a hostile or
 	 * buggy obj_size could wrap slot_size to a tiny value and hand out
@@ -773,14 +776,14 @@ xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 		 * requested alignment.  Enabling a diagnostic must not weaken
 		 * the alignment guarantee.  The back guard is then placed on
 		 * its own word boundary (see __rz_back_at). */
-		s->rz_front = __align_up(XTC_RZ_FRONT, s->opts.align);
-		s->rz_back = __align_up(s->rz_front + s->opts.obj_size,
+		s->rz_front = __slab_align_up(XTC_RZ_FRONT, s->opts.align);
+		s->rz_back = __slab_align_up(s->rz_front + s->opts.obj_size,
 		    sizeof(uint64_t));
 		if (s->rz_back < s->rz_front + 2 * sizeof(void *))
 			s->rz_back = s->rz_front + 2 * sizeof(void *);
 		slot = s->rz_back + XTC_RZ_BACK;
 	}
-	slot = __align_up(slot, s->opts.align);
+	slot = __slab_align_up(slot, s->opts.align);
 	s->slot_size = slot;
 	s->objs_per_chunk = (int)(s->opts.chunk_size / slot);
 	if (s->objs_per_chunk < 1) {
