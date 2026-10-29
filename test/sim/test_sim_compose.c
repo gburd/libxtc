@@ -354,6 +354,10 @@ main(int argc, char **argv)
 	int n = 12, i, fails = 0, mode;
 	int bug_seen_benign = 0, bug_seen_adv = 0;
 
+	/* SQL on a fiber needs sqlxtc's 512 KiB stack (main.c): the 64 KiB
+	 * default overflows in bt_insert_leaf on FreeBSD/clang. */
+	if (xtc_set_stack_size(512u * 1024u) != XTC_OK)
+		return 1;
 	if (argc > 1) base = strtoull(argv[1], NULL, 0);
 	if (argc > 2) n = atoi(argv[2]);
 

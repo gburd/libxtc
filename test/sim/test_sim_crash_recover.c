@@ -646,6 +646,10 @@ main(void)
 	long total_txns = (long)N_WORKERS * TXNS_PER;
 
 	/* --- same seed twice: replay (identical crash + acked + tree) --- */
+	/* SQL on a fiber needs sqlxtc's 512 KiB stack (main.c): the 64 KiB
+	 * default overflows in bt_insert_leaf on FreeBSD/clang. */
+	if (xtc_set_stack_size(512u * 1024u) != XTC_OK)
+		return 1;
 	rc = run_once(seed0, &ca1, &ak1, &rv1, &h1);
 	if (rc != 0) {
 		report_bug(seed0, ca1, rc, ak1, rv1);

@@ -248,6 +248,10 @@ main(int argc, char **argv)
 	uint64_t count = argc > 2 ? strtoull(argv[2], NULL, 0) : 8, s;
 	int fd, fails = 0;
 
+	/* SQL on a fiber needs sqlxtc's 512 KiB stack (main.c): the 64 KiB
+	 * default overflows in bt_insert_leaf on FreeBSD/clang. */
+	if (xtc_set_stack_size(512u * 1024u) != XTC_OK)
+		return 1;
 	fd = mkstemp(btf);
 	if (fd < 0)
 		return 1;
