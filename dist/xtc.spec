@@ -6,10 +6,10 @@
 # Build:
 #   rpmbuild -ba dist/xtc.spec \
 #       --define "_sourcedir $PWD" \
-#       --define "version 1.28.1"
+#       --define "version 2.1.0"
 # (or set Version: below and point Source0 at a release tarball).
 
-%global sover 0
+%global sover 2
 
 Name:           libxtc
 Version:        2.0.0
@@ -74,7 +74,7 @@ make check
 %{_libdir}/libxtc.so.%{version}
 
 %files devel
-%{_includedir}/xtc.h
+%{_includedir}/xtc*.h
 %{_libdir}/libxtc.a
 %{_libdir}/libxtc.so
 %{_libdir}/pkgconfig/xtc.pc
