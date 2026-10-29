@@ -98,7 +98,8 @@ PROGEOF
 # what matters -- $LIB carries the build's debug info (or not).
 if ! ${CC:-cc} -O1 -g -w -I "$XTC_SRC_DIR/src/inc" -I "$XTC_BUILD_DIR" \
     -o "$TMPD/prog_dbg" "$TMPD/prog.c" "$LIB" \
-    -pthread -luring -lssl -lcrypto -ldl -lm > "$TMPD/cc.log" 2>&1; then
+    -pthread $(sed -n 's/^LDFLAGS[ \t]*=//p' "$XTC_BUILD_DIR/Makefile" | tr ' \t' '\n\n' | grep '^-fsanitize') \
+    -luring -lssl -lcrypto -ldl -lm > "$TMPD/cc.log" 2>&1; then
 	echo "  [gdb-debuginfo] SKIP: test program will not link"
 	exit 0
 fi
