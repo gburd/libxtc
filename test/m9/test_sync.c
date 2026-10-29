@@ -1642,9 +1642,16 @@ test_offloop_release_wakes(const MunitParameter p[], void *d)
 		(void)__os_sleep_ns(50LL * 1000 * 1000);   /* all asleep */
 		for (i = 0; i < HERD_K; i++)
 			v0[i] = task_vcsw(atomic_load(&g_rw_tid[i]));
+		/* Paced: since 2.0 an amutex release skips the wake while a
+		 * thread spins on the mutex (the spinner gate, up to 8 in a
+		 * row), and a sleeper woken by the previous release is still
+		 * spinning a few us later.  Back-to-back releases then woke 2-3
+		 * of 8 (1-2 of 40 runs on 4 CPUs, on 2.0.0 too).  2 ms lets the
+		 * spin end, so each release meets no spinner and must wake. */
 		for (i = 0; i < HERD_K; i++) {
 			hd_unlock(kind);
 			hd_lock(kind, -1);
+			(void)__os_sleep_ns(2LL * 1000 * 1000);
 		}
 		(void)__os_sleep_ns(50LL * 1000 * 1000);   /* woken ones ran */
 		for (woke = 0, i = 0; i < HERD_K; i++) {
