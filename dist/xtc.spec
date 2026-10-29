@@ -12,7 +12,7 @@
 %global sover 2
 
 Name:           libxtc
-Version:        2.0.0
+Version:        2.1.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,15 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Thu Oct 29 2026 Greg Burd <greg@burd.me> - 2.1.0-1
+- MINOR on 2.x, ABI-compatible with 2.0.0.  Faster fiber switch (an
+  indirect jump instead of ret: fiber_switch +21.5%), same-thread
+  notify hand-off without the lock, timed parks with one clock read
+  less (proc_send_recv +11.2%).  An xtc_amutex release frees the mutex
+  and wakes the head waiter (4 loops: 157k -> 2.12M acquires/s); a
+  finished xtc_async coroutine releases its stack at once.  Builds
+  -Werror against OpenSSL 4.0, gcc 16, clang 23.  This spec now
+  packages libxtc.so.2 and every header (2.0.0's spec did not build).
 * Thu Sep 24 2026 Greg Burd <greg@burd.me> - 1.50.0-1
 - Production-readiness release (PLAN.md 19.27).  MINOR: contract changes
   and new APIs.  Behavior changes: a TLS CLIENT verifies by default (opt

@@ -16,8 +16,7 @@ and what happens after you do.
 | 2.x minors older than the current one | Superseded | No: upgrade to the current minor (a minor is ABI-compatible within 2.x) |
 | 1.x (1.0.0 to 1.59.x) | End of life | No |
 
-Until 2.0.0 is tagged, only the newest release receives fixes.  The
-support window, what a patch release may change, and the backport
+The support window, what a patch release may change, and the backport
 branch (`lts/2.0`) are defined in the [LTS contract](docs/abi-stability.md#long-term-support-and-the-20-lts-policy).
 
 ## Reporting a vulnerability

@@ -1,3 +1,53 @@
+libxtc (2.1.0-1) unstable; urgency=medium
+
+  * MINOR release on 2.x: ABI-compatible with 2.0.0 (no exported symbol,
+    signature, enum or struct layout changed; a 2.0.0 consumer runs
+    against it, scripts/compat-check.sh).  Fiber hot paths, from a
+    comparison with another stackful runtime; each change kept only if
+    it measured better and regressed no perf-gate cell:
+    - The fcontext switch ends in an indirect jump instead of `ret`
+      (x86-64 SysV, aarch64 ELF and Mach-O): the return predictor never
+      held the resume address.  Raw switch round trip 22.2 -> 6.9 ns
+      (x86-64), 23.8 -> 14.6 ns (aarch64).
+    - A same-thread xtc_notify hand-off to a pinned fiber returns
+      without re-taking the notify's lock: one-loop ping-pong round
+      312 -> 257 ns.
+    - Timed parks arm on the absolute deadline the wait already holds
+      (one clock read less): a timed ping-pong round 489 -> 453 ns,
+      proc_send_recv 777 -> 733 ns.
+    - xtc_loop_run peeks the timer heap only when no task is alive.
+    - Perf gate against v2.0.0 (32-vCPU x86-64 host): fiber_switch
+      +21.5%, proc_send_recv +11.2%, 0 regressions.
+  * Behaviour changes:
+    - An xtc_amutex release FREES the mutex and wakes the head parked
+      fiber, which re-competes, instead of handing it the mutex; a head
+      that loses 4 races in a row is granted the next release, so it
+      cannot be starved.  One hot amutex shared by fibers on 4 loops:
+      157k -> 2.12M acquires/s (16 loops x 256 fibers 167k -> 1.63M);
+      one loop and the plain-thread cells unchanged.
+    - A finished xtc_async coroutine gives its fiber stack (and, under
+      TSan, its TSan fiber) back at once; the task handle and result
+      stay until xtc_loop_fini.  4,000 async/await pairs grew
+      /proc/self/maps from 44 to 8,045 lines; now flat.  Spawn + await
+      4,417 -> 328 ns.
+  * Fixes:
+    - Builds -Werror against OpenSSL 4.0 (SSL_set1_host deprecated;
+      const X509_NAME getters); xtc_tls_set_hostname uses
+      SSL_set1_dnsname / SSL_set1_ipaddr there.  Builds -Werror with
+      gcc 16 and clang 23.
+    - The RPM spec packaged libxtc.so.0 (2.0's SONAME is libxtc.so.2)
+      and only xtc.h of the headers: rpmbuild of 2.0.0 failed.
+    - make check under distribution package flags (-flto) and under the
+      sanitizers: the gdb tool tests' probe programs link with -fno-lto
+      and the build's -fsanitize.
+    - Four timing tests (offloop_release_wakes, offloop_notify_spin,
+      offloop_no_herd, and the CPU-capacity check they share) no longer
+      fail on a loaded or larger host; each failed on 2.0.0 the same
+      way.
+  * Qualification and known issues: docs/KNOWN_ISSUES.md.
+
+ -- Greg Burd <greg@burd.me>  Thu, 29 Oct 2026 01:37:32 -0400
+
 libxtc (2.0.0-1) unstable; urgency=medium
 
   * MAJOR release, the first LTS candidate.  The ABI is broken on purpose,
