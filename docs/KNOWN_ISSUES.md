@@ -6,6 +6,39 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## FIXED (2.2): ThreadSanitizer aborted every proc exit on glibc 2.44
+
+**What it was.**  glibc 2.44 changed how `setjmp` mangles the saved
+stack pointer, and TSan's `longjmp` interceptor (clang 22 and 23) can
+no longer match the buffer: any `longjmp` aborts with "can't find
+longjmp buf" (llvm-project issue 228263, reproduced with a plain
+`setjmp`/`longjmp` in `main`).  A proc's exit and kill unwind is a
+`longjmp`, so under TSan every `xtc_exit_self`, kill or link exit
+aborted the run: on Fedora 45, `test_proc` had 15 failing cases,
+`test_sync` 22, `test_svr` 2.
+
+**Fix.**  Under TSan on x86-64 the exit unwind uses
+`__builtin_setjmp`/`__builtin_longjmp`, which TSan does not intercept;
+other builds keep the libc pair.  `test_proc`, `test_svr`, `test_sync`
+and the CI TSan set pass on Fedora 45 (clang 23.1.2, glibc 2.44) and on
+Ubuntu 24.04 (clang 18.1.3, glibc 2.39).  Not covered: aarch64 clang
+has no `__builtin_longjmp`, so aarch64 keeps the libc pair (TSan on
+aarch64 with glibc 2.44 was not tested), and an application's own
+`longjmp` under TSan on glibc 2.44 still hits the upstream bug.
+
+## Linux/XFS: io_uring WAL writes go to io-wq unless the filesystem has `lazytime`
+
+On XFS mounted without `lazytime`, a write that must update the file's
+mtime cannot do it without blocking, so io_uring hands it to an io-wq
+worker thread.  sqlxtc's log writes in place into preallocated zeros
+with `O_DIRECT|O_DSYNC`; once per timestamp tick (1 ms at HZ=1000) the
+write punts.  Plain liburing on Linux 7.2 shows the same: 599 of 600
+in-place direct writes at a 2 ms cadence punt, 0 of 600 with
+`mount -o lazytime`.  The writes are correct either way; a punt costs
+a thread hand-off.  Mount the log's filesystem with `lazytime` to keep
+them inline.  `scripts/uring-gate.sh` allows PUNT for `wal_kill_mid`
+on this basis.
+
 ## CHANGED (2.1): an `xtc_amutex` release no longer hands the mutex to a parked fiber
 
 **What changed.**  Through 2.0 `xtc_amutex_unlock` with a fiber parked on

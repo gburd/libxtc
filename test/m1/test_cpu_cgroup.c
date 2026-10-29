@@ -141,7 +141,8 @@ static int64_t
 uncapped_mem_max(void)
 {
 	int64_t m;
-	__xtc_os_cgroup_mem_path_override("/tmp/xtc_cgroup_fixture_does_not_exist");
+	__xtc_os_cgroup_mem_path_override(
+	    "/tmp/xtc_cgroup_fixture_does_not_exist");
 	m = __os_mem_max();
 	__xtc_os_cgroup_mem_path_override(NULL);
 	return m;
