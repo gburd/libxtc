@@ -515,8 +515,10 @@ notify_give_locked(xtc_notify_t *n)
 	/* Same-thread hand-off to a pinned waiter: it cannot run until this
 	 * step yields, and a pinned task is never stolen meanwhile.  A
 	 * remote or migratable waiter re-takes the lock to return, so a
-	 * notify freed right after the wait never sees our unlock. */
-	if (__xtc_current_loop == w->waker.loop && w->waker.task->pinned)
+	 * notify freed right after the wait never sees our unlock.  The
+	 * out-of-line read: a migratable signaler's cached TLS address may
+	 * name the thread it ran on before its last yield. */
+	if (w->waker.task->pinned && __xtc_current_loop_get() == w->waker.loop)
 		w->handed = 1;
 	(void)xtc_waker_wake(&w->waker);
 }
