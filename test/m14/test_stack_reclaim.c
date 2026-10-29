@@ -427,10 +427,14 @@ life_run(long n, int mode)
  * Migratable procs on a 4-loop executor: children are stolen and many
  * finish on a thief loop, so their task structs go back to the home loop
  * through its dead stack.  Each carrier thread keeps up to
- * XTC_STACK_POOL_MAX (64) stacks pooled, two mappings each, and the
- * pools are unmapped when the carriers exit.
+ * XTC_STACK_POOL_MAX (64) stacks pooled, and since 1.57 each loop up to
+ * XTC_LOOP_STACK_SPARE (64) more in its cross-loop spare, two mappings
+ * per stack; the pools go when the carriers exit, the spares at
+ * loop_fini.  The bound once left the spares out: a Codeberg musl run
+ * peaked at +1093 against 1088 (other runs: +572 to +838).
  */
 #define LIFE_LOOPS  4
+#define LIFE_RETAIN (LIFE_LOOPS * 2 * (64 + 64)) /* pools + spares */
 /* Loose mapping bound under qemu-user: well above its own churn (<5000)
  * and far below the per-spawn regression (+200000). */
 #define LIFE_QEMU_MAPS 51200L
@@ -527,7 +531,7 @@ test_reclaim_migratable(const MunitParameter p[], void *d)
 		munit_assert_long(maps_grow, <, LIFE_QEMU_MAPS);
 	else
 		munit_assert_long(maps_grow, <,
-		    2 * LIFE_LIVE + LIFE_LOOPS * 2 * 64 + LIFE_MAPS_SLACK);
+		    2 * LIFE_LIVE + LIFE_RETAIN + LIFE_MAPS_SLACK);
 	if (LIFE_CHECK_RSS)
 		munit_assert_long(rss_grow, <, 32 * 1024);
 	/* Carrier threads have exited: their stack pools are unmapped.  (Not
