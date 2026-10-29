@@ -1085,16 +1085,16 @@ xtc_tls_set_hostname(xtc_tls_t *tls, const char *name)
 		return XTC_OK;   /* no-op on the server side */
 	if (name == NULL || name[0] == '\0') {
 		(void)SSL_set_tlsext_host_name(tls->ssl, NULL);
-		/* Clear the name check.  OpenSSL accepts SSL_set1_host(ssl,
-		 * NULL) as "no name" (tls_set1_peername).  BoringSSL does strlen(NULL) there and
-		 * CRASHES, rejects an empty name, and has no call that removes
-		 * a host once set (SSL_set1_param merges and keeps it) -- found
-		 * by the CI boringssl job (/m18/tls_client/hostname_check,
-		 * SIGSEGV in SSL_set1_host -> strlen).  So on BoringSSL a clear
-		 * is a no-op when no name was ever set, and XTC_E_NOSYS when one
-		 * was: reporting "cannot clear" is honest; pretending to clear
-		 * and still checking the old name is not.  Use a fresh
-		 * connection instead. */
+		/* Clear the name check (tls_set1_peername with NULL).
+		 * BoringSSL does strlen(NULL) in SSL_set1_host and CRASHES,
+		 * rejects an empty name, and has no call that removes a host
+		 * once set (SSL_set1_param merges and keeps it) -- found by the
+		 * CI boringssl job (/m18/tls_client/hostname_check, SIGSEGV in
+		 * SSL_set1_host -> strlen).  So on BoringSSL a clear is a no-op
+		 * when no name was ever set, and XTC_E_NOSYS when one was:
+		 * reporting "cannot clear" is honest; pretending to clear and
+		 * still checking the old name is not.  Use a fresh connection
+		 * instead. */
 #if defined(OPENSSL_IS_BORINGSSL)
 		if (tls->host_set)
 			return XTC_E_NOSYS;

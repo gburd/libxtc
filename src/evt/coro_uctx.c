@@ -342,7 +342,7 @@ __xtc_coro_preempt(void *uctx)
 #endif
 }
 
-static void __coro_release_stack(struct xtc_coro *c);   /* below */
+static void __coro_release_stack(struct xtc_coro *c); /* below */
 
 /*
  * The task fn that the L2 scheduler calls.  Swaps into the fiber.
@@ -405,8 +405,9 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 		/* lifetime: a finished PROC fiber is reclaimed by the loop's
 		 * DONE handler (task.c __xtc_task_reclaim).  Its task handle
 		 * was never handed out; an xtc_async task's was, so that task
-		 * and its coro stay until xtc_loop_fini (the stack does not).  c->proc is set by __proc_entry
-		 * before the body runs and never cleared. */
+		 * and its coro stay until xtc_loop_fini (the stack does not).
+		 * c->proc is set by __proc_entry before the body runs and never
+		 * cleared. */
 		if (c->proc != NULL)
 			self->reclaim = 1;
 		else
