@@ -29,7 +29,7 @@ message, with links, monitors, and supervisors for failure handling.
 This manual is written to be read front to back the first time -- like
 an O'Reilly guide -- and used as a reference afterward, like the
 BerkeleyDB manual. Every code block on these pages is a real file under
-[`docs/_includes/snippets/`](https://codeberg.org/gregburd/libxtc/src/branch/main/docs/snippets)
+[`docs/_includes/snippets/`](https://codeberg.org/gregburd/libxtc/src/branch/main/docs/_includes/snippets)
 that is compiled and run as part of the test suite, so nothing you copy
 from here can silently rot against the API.
 

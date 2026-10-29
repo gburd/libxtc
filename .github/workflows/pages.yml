@@ -101,7 +101,7 @@ jobs:
             --config docs/lychee.toml
             --no-progress
             --root-dir ${{ github.workspace }}/docs/_site
-            docs/_site/**/*.html
+            'docs/_site/**/*.html'
             README.md
           fail: true
 

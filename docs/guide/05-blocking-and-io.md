@@ -157,7 +157,7 @@ The future always resolves **exactly once**: with `fn`'s value on a
 normal return, or `XTC_E_ABORTED` if you `xtc_dispatch_cancel` the
 handle or the fiber crashes -- never lost, never doubled, never a hang.
 Cancellation is cooperative and composes with
-[`xtc_uncancelable(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_uncancelable.3)
+[`xtc_uncancelable(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_scope.3)
 and
 [`xtc_scope(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_scope.3),
 so a resource acquired under a scope is still released on the
