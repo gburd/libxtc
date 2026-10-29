@@ -2411,7 +2411,7 @@ xtc_proc_sleep(int64_t ns)
 		 * us on the loop we are actually on.
 		 */
 		__xtc_task_cancel_park_timer(self->task);
-		(void)xtc_task_park_on_timer(self->task, deadline - now);
+		(void)__xtc_task_park_on_timer_at(self->task, deadline);
 		ctx = __xtc_proc_ctx_save();
 		__xtc_trace_causal(XTC_CAUSAL_PARK_TIMER, __func__);
 		XTC_PROBE_FIBER_PARK((uintptr_t)self->task,
@@ -3073,7 +3073,7 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 			 * strand fixed in xtc_proc_sleep and the sync.c timed waits.
 			 * Cancel is a race-free flag; the owning loop reaps it. */
 			__xtc_task_cancel_park_timer(self->task);
-			(void)xtc_task_park_on_timer(self->task, deadline - now);
+			(void)__xtc_task_park_on_timer_at(self->task, deadline);
 		} else {
 			/* Infinite wait: park until a sender's waker
 			 * re-enqueues us, rather than busy-rescheduling and

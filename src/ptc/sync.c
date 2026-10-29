@@ -392,13 +392,13 @@ fw_expired(int64_t deadline, int64_t *now)
  */
 static void
 fw_park_unlocked(pthread_mutex_t *lk, xtc_task_t *cur, xtc_waker_t *wk,
-    int64_t deadline, int64_t now)
+    int64_t deadline)
 {
 	void *proc_ctx;
 	(void)xtc_task_waker(cur, wk);
 	if (deadline >= 0) {
 		__xtc_task_cancel_park_timer(cur);
-		(void)xtc_task_park_on_timer(cur, deadline - now);
+		(void)__xtc_task_park_on_timer_at(cur, deadline);
 	} else {
 		cur->park_requested = 1;
 	}
@@ -414,9 +414,9 @@ fw_park_unlocked(pthread_mutex_t *lk, xtc_task_t *cur, xtc_waker_t *wk,
 /* Park once; called and returns with *lk held. */
 static void
 fw_park(pthread_mutex_t *lk, xtc_task_t *cur, xtc_waker_t *wk,
-    int64_t deadline, int64_t now)
+    int64_t deadline)
 {
-	fw_park_unlocked(lk, cur, wk, deadline, now);
+	fw_park_unlocked(lk, cur, wk, deadline);
 	(void)__xtc_mtx_lock(lk);
 }
 
@@ -598,7 +598,7 @@ xtc_notify_wait(xtc_notify_t *n, int64_t timeout_ns)
 			if (NT_STORED(n)) { NT_SET(n, 0); rc = XTC_OK; break; }
 			if (fw_expired(deadline, &now)) { rc = XTC_E_AGAIN; break; }
 			fw_enqueue(&n->wq, &w);
-			fw_park_unlocked(&n->lock, cur, &w.waker, deadline, now);
+			fw_park_unlocked(&n->lock, cur, &w.waker, deadline);
 			if (w.handed && !fw_kill_pending(masked)) {
 				/* Dequeued and granted by a same-thread signal
 				 * that has already unlocked: done, lock-free. */
@@ -780,7 +780,7 @@ xtc_sem_acquire(xtc_sem_t *s, unsigned n, int64_t timeout_ns)
 			 * it does satisfy before parking again. */
 			sem_wake_locked(s);
 			fw_enqueue(&s->wq, &w);
-			fw_park(&s->lock, cur, &w.waker, deadline, now);
+			fw_park(&s->lock, cur, &w.waker, deadline);
 		}
 		fw_remove(&s->wq, &w);
 		sem_wake_locked(s);
@@ -1286,7 +1286,7 @@ xtc_amutex_lock(xtc_amutex_t *m, int64_t timeout_ns)
 		}
 		XTC_PROBE_LOCK_WAIT_START((uintptr_t)m, XTC_PROBE_LOCK_AMUTEX, 0,
 		    (uintptr_t)cur);
-		fw_park(&m->lock, cur, &w.waker, deadline, now);
+		fw_park(&m->lock, cur, &w.waker, deadline);
 		XTC_PROBE_LOCK_WAIT_DONE((uintptr_t)m, XTC_PROBE_LOCK_AMUTEX, 0,
 		    (uintptr_t)cur);
 	}
@@ -1615,7 +1615,7 @@ __arwlock_lock(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
 		}
 		XTC_PROBE_LOCK_WAIT_START((uintptr_t)r, XTC_PROBE_LOCK_ARWLOCK,
 		    mode, (uintptr_t)cur);
-		fw_park(&r->lock, cur, &w.waker, deadline, now);
+		fw_park(&r->lock, cur, &w.waker, deadline);
 		XTC_PROBE_LOCK_WAIT_DONE((uintptr_t)r, XTC_PROBE_LOCK_ARWLOCK,
 		    mode, (uintptr_t)cur);
 	}
@@ -1820,7 +1820,7 @@ xtc_barrier_wait(xtc_barrier_t *b)
 				continue;
 			}
 			fw_enqueue(&b->wq, &w);
-			fw_park(&b->lock, cur, &w.waker, -1, 0);
+			fw_park(&b->lock, cur, &w.waker, -1);
 		}
 		fw_remove(&b->wq, &w);
 		(void)__xtc_mtx_unlock(&b->lock);
@@ -1944,7 +1944,7 @@ xtc_gate_drain(xtc_gate_t *g, int64_t timeout_ns)
 			if (g->count == 0) { rc = XTC_OK; break; }
 			if (fw_expired(deadline, &now)) { rc = XTC_E_AGAIN; break; }
 			fw_enqueue(&g->wq, &w);
-			fw_park(&g->lock, cur, &w.waker, deadline, now);
+			fw_park(&g->lock, cur, &w.waker, deadline);
 		}
 		fw_remove(&g->wq, &w);
 		__xtc_task_cancel_park_timer(cur);

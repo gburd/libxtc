@@ -617,6 +617,8 @@ void __xtc_timer_park_release(xtc_timer_t *t);
 int  __xtc_timer_try_cancel(xtc_timer_t *t);
 int64_t      __xtc_timer_heap_next_deadline(xtc_loop_t *loop);
 void __xtc_task_cancel_park_timer(xtc_task_t *self);
+/* xtc_task_park_on_timer on an absolute mono deadline (task.c). */
+int  __xtc_task_park_on_timer_at(xtc_task_t *self, int64_t deadline_ns);
 int  __xtc_loop_dispatch_event(xtc_loop_t *loop, xtc_io_event_t *ev);
 
 /*

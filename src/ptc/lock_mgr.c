@@ -688,8 +688,8 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 				 * keeps advancing the sim clock (mirrors the
 				 * xtc_recv park-timer discipline in proc.c). */
 				__xtc_task_cancel_park_timer(cur);
-				(void)xtc_task_park_on_timer(cur,
-				    deadline - now);
+				(void)__xtc_task_park_on_timer_at(cur,
+				    deadline);
 			} else {
 				cur->park_requested = 1;
 			}

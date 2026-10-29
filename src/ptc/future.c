@@ -402,7 +402,7 @@ future_get(xtc_future_t *fut, intptr_t *out, int64_t timeout_ns)
 				(void)__os_clock_mono(&now);
 				if (now >= deadline) { timed_out = 1; break; }
 				__xtc_task_cancel_park_timer(cur);
-				(void)xtc_task_park_on_timer(cur, deadline - now);
+				(void)__xtc_task_park_on_timer_at(cur, deadline);
 			} else {
 				cur->park_requested = 1;
 			}

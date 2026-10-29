@@ -628,11 +628,28 @@ xtc_waker_wake(const xtc_waker_t *w)
 int
 xtc_task_park_on_timer(xtc_task_t *self, int64_t delay_ns)
 {
-	xtc_timer_t *t;
 	int64_t now_ns;
 	int rc;
 
 	if (self == NULL || delay_ns < 0)
+		return XTC_E_INVAL;
+	if ((rc = __os_clock_mono(&now_ns)) != XTC_OK)
+		return rc;
+	return __xtc_task_park_on_timer_at(self, now_ns + delay_ns);
+}
+
+/*
+ * Park on an ABSOLUTE mono deadline.  The internal timed waits already
+ * hold a fresh `now` (they just checked the deadline), and re-reading
+ * the clock here was one of three clock reads per timed park.
+ */
+int
+__xtc_task_park_on_timer_at(xtc_task_t *self, int64_t deadline_ns)
+{
+	xtc_timer_t *t;
+	int rc;
+
+	if (self == NULL)
 		return XTC_E_INVAL;
 	if (atomic_load_explicit(&self->park_timer,
 	    memory_order_relaxed) != NULL || self->park_fd >= 0)
@@ -640,11 +657,7 @@ xtc_task_park_on_timer(xtc_task_t *self, int64_t delay_ns)
 
 	if ((rc = __os_calloc(1, sizeof(*t), (void **)&t)) != XTC_OK)
 		return rc;
-	if ((rc = __os_clock_mono(&now_ns)) != XTC_OK) {
-		__os_free(t);
-		return rc;
-	}
-	t->deadline_ns = now_ns + delay_ns;
+	t->deadline_ns = deadline_ns;
 	t->cb = NULL;
 	t->user = NULL;
 	t->waiter = self;
