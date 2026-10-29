@@ -132,6 +132,21 @@ test_ncpus_cgroup_ceil(const MunitParameter p[], void *d)
 
 /* --- __os_mem_max() cgroup cases ------------------------------------ */
 
+/* The host total __os_mem_max() falls back to.  Read with the cgroup file
+ * pointed at a missing path: in a memory-limited container (a CI runner)
+ * the real /sys/fs/cgroup/memory.max is the container's limit, not the
+ * host total the "max" and missing-file fixtures fall back to (Codeberg:
+ * 6 GiB against 1.5 TiB). */
+static int64_t
+uncapped_mem_max(void)
+{
+	int64_t m;
+	__xtc_os_cgroup_mem_path_override("/tmp/xtc_cgroup_fixture_does_not_exist");
+	m = __os_mem_max();
+	__xtc_os_cgroup_mem_path_override(NULL);
+	return m;
+}
+
 /* A numeric memory.max is returned verbatim. */
 static MunitResult
 test_mem_max_cgroup_numeric(const MunitParameter p[], void *d)
@@ -155,8 +170,7 @@ test_mem_max_cgroup_max(const MunitParameter p[], void *d)
 	int64_t host;
 	(void)p; (void)d;
 
-	__xtc_os_cgroup_mem_path_override(NULL);
-	host = __os_mem_max();
+	host = uncapped_mem_max();
 	munit_assert_int64(host, >, 0);
 
 	write_fixture(path, sizeof path, "max\n");
@@ -174,8 +188,7 @@ test_mem_max_cgroup_missing(const MunitParameter p[], void *d)
 	int64_t host;
 	(void)p; (void)d;
 
-	__xtc_os_cgroup_mem_path_override(NULL);
-	host = __os_mem_max();
+	host = uncapped_mem_max();
 
 	__xtc_os_cgroup_mem_path_override(
 	    "/tmp/xtc_cgroup_fixture_does_not_exist");
