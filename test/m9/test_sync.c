@@ -29,6 +29,7 @@
 #include "xtc_sync.h"
 #include "xtc_future.h"
 #include "xtc_loop.h"
+#include "xtc_async.h"
 #include "xtc_proc.h"
 #include "xtc_blocking.h"
 #include "xtc_exec.h"
@@ -1934,6 +1935,62 @@ test_offloop_timed_handoff(const MunitParameter p[], void *d)
 }
 
 /*
+ * amutex_no_starve: an amutex release frees the mutex and wakes the head
+ * waiter, which re-competes (no hand-off: hand-off left the mutex idle
+ * for the head's wake latency on every release, 185k vs 2.13M acquires/s
+ * across 4 loops).  A barger that re-locks right after its unlock, and
+ * yields only while HOLDING, wins every race, so the head is granted the
+ * mutex outright after AM_HANDOFF_LOSSES (4) lost races.  Asserted: the
+ * parked waiter gets the mutex within 16 of the barger's rounds, on one
+ * loop (deterministic).  A pure no-hand-off mutex never lets it in.
+ */
+static xtc_amutex_t *g_ns_m;
+static int g_ns_rounds, g_ns_got_at = -1, g_ns_stop;
+
+static intptr_t
+nst_barger(void *a)
+{
+	(void)a;
+	for (g_ns_rounds = 0; g_ns_rounds < 1000 && !g_ns_stop; g_ns_rounds++) {
+		munit_assert_int(xtc_amutex_lock(g_ns_m, -1), ==, XTC_OK);
+		xtc_yield();                   /* the waiter runs, finds it held */
+		(void)xtc_amutex_unlock(g_ns_m);
+	}
+	return 0;
+}
+
+static intptr_t
+nst_waiter(void *a)
+{
+	(void)a;
+	munit_assert_int(xtc_amutex_lock(g_ns_m, -1), ==, XTC_OK);
+	g_ns_got_at = g_ns_rounds;
+	g_ns_stop = 1;
+	(void)xtc_amutex_unlock(g_ns_m);
+	return 0;
+}
+
+static MunitResult
+test_amutex_no_starve(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	(void)p; (void)d;
+	g_ns_rounds = 0; g_ns_got_at = -1; g_ns_stop = 0;
+	munit_assert_int(xtc_amutex_create(&g_ns_m), ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_async(loop, nst_barger, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_async(loop, nst_waiter, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_amutex_destroy(g_ns_m);
+	munit_logf(MUNIT_LOG_INFO, "waiter got the mutex at barger round %d",
+	    g_ns_got_at);
+	munit_assert_int(g_ns_got_at, >=, 0);
+	munit_assert_int(g_ns_got_at, <, 16);
+	return MUNIT_OK;
+}
+
+/*
  * Readers of DIFFERENT locks must not contend.  sqlxtc keeps one arwlock
  * per buffer frame; when these objects were packed by malloc, the hot
  * words of neighbouring locks shared cache lines, and 8 threads each
@@ -1967,6 +2024,7 @@ test_sync_objects_line_aligned(const MunitParameter p[], void *d)
 }
 
 static MunitTest tests[] = {
+	{ "/amutex_no_starve",    test_amutex_no_starve,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/amutex_recursive_exit", test_amutex_recursive_exit, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/amutex_recursive_thread", test_amutex_recursive_thread, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/notify_stored",       test_notify_stored,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

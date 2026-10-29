@@ -321,6 +321,7 @@ struct fiber_waiter {
 	 * Only that same-thread signaler sets it (a remote one never writes
 	 * it), so it is never accessed by two threads. */
 	int                  handed;
+	int                  lost;     /* amutex: woken, found it re-taken */
 };
 
 struct fw_queue {
@@ -917,6 +918,7 @@ struct xtc_amutex {
 	_Atomic int           spinners;  /* threads in the off-loop spin */
 	int                   count;     /* recursion depth */
 	int                   wake_skips; /* releases gated since a wake */
+	int                   handoff;   /* next release grants the head */
 	struct amutex_owner {
 		int       kind;          /* 0 none, 1 fiber, 2 thread */
 		void     *task;          /* fiber identity (kind 1) */
@@ -969,12 +971,38 @@ amutex_wake_thread_locked(xtc_amutex_t *m)
 	(void)pthread_cond_signal(&m->cv);
 }
 
+/* The mutex is free (under lock): wake the head fiber waiter, which
+ * stays queued and re-competes, else a thread waiter. */
+static void
+amutex_wake_next_locked(xtc_amutex_t *m)
+{
+	if (m->wq.head != NULL)
+		(void)xtc_waker_wake(&m->wq.head->waker);
+	else
+		amutex_wake_thread_locked(m);
+}
+
 /*
- * Release a held (non-recursive-nested) mutex: hand it to the head fiber
- * waiter, which keeps held == 1, or free it and wake a thread waiter.
- * Under m->lock.  The waker fires before m->lock is dropped: the waiter
- * cannot return (and release its stack frame) without re-taking m->lock.
+ * Release a held (non-recursive-nested) mutex.  Under m->lock.
+ *
+ * Normally the mutex is FREED and the head fiber waiter woken; it stays
+ * queued and re-competes when it runs, so a running fiber or thread may
+ * take the mutex first (barging).  Handing it to the parked head instead
+ * (held stays 1 until the head runs) kept the mutex idle for the whole
+ * wake latency of the head's loop, every release: one hot amutex shared
+ * by fibers on 4 loops did 185k acquires/s with hand-off and 2.13M
+ * without (bench_amutex_fibers 4 64, 32-vCPU x86-64 host); on one loop
+ * the two are equal.  A head that loses AM_HANDOFF_LOSSES races in a row
+ * sets `handoff`, and the next release grants it the mutex directly, so
+ * a parked waiter is not starved by a fiber that re-locks in a loop.
+ * Counted, not timed: deterministic under the simulator.
+ *
+ * The waker fires before m->lock is dropped: the waiter cannot return
+ * (and release its stack frame) without re-taking m->lock.
  */
+#ifndef AM_HANDOFF_LOSSES
+#define AM_HANDOFF_LOSSES 4
+#endif
 static void
 amutex_release_locked(xtc_amutex_t *m)
 {
@@ -983,14 +1011,15 @@ amutex_release_locked(xtc_amutex_t *m)
 		m->count = 0;
 		m->owner.kind = 0;         /* next owner claims it */
 	}
-	if (w != NULL) {
+	if (w != NULL && m->handoff) {
+		m->handoff = 0;
 		fw_remove(&m->wq, w);
 		w->granted = 1;
 		(void)xtc_waker_wake(&w->waker);
-	} else {
-		AM_SET(m, 0);
-		amutex_wake_thread_locked(m);
+		return;
 	}
+	AM_SET(m, 0);
+	amutex_wake_next_locked(m);
 }
 
 /* Identity of the current execution context: the running fiber's task
@@ -1215,10 +1244,16 @@ xtc_amutex_lock(xtc_amutex_t *m, int64_t timeout_ns)
 	masked = fw_mask_enter();
 	for (;;) {
 		if (fw_kill_pending(masked)) {
+			int was_head = m->wq.head == &w;
 			fw_remove(&m->wq, &w);
 			if (w.granted) {               /* hand it on */
 				w.granted = 0;
 				amutex_release_locked(m);
+			} else if (was_head) {
+				m->handoff = 0;
+				/* A release woke us, not the next waiter. */
+				if (!AM_HELD(m))
+					amutex_wake_next_locked(m);
 			}
 			__xtc_task_cancel_park_timer(cur);
 			(void)__xtc_mtx_unlock(&m->lock);
@@ -1226,13 +1261,25 @@ xtc_amutex_lock(xtc_amutex_t *m, int64_t timeout_ns)
 			(void)__xtc_mtx_lock(&m->lock);
 			continue;
 		}
-		if (!w.granted && !w.queued) {
-			/* First pass, or back from a deferred kill. */
-			if (!AM_HELD(m)) { AM_SET(m, 1); w.granted = 1; }
-			else fw_enqueue(&m->wq, &w);
+		if (!w.granted && !AM_HELD(m)) {
+			/* Free: take it (first pass, a release woke us as the
+			 * head, or back from a deferred kill). */
+			if (m->wq.head == &w)
+				m->handoff = 0;   /* our hand-off is moot */
+			fw_remove(&m->wq, &w);
+			AM_SET(m, 1);
+			w.granted = 1;
+		} else if (!w.granted) {
+			if (!w.queued)
+				fw_enqueue(&m->wq, &w);
+			else if (m->wq.head == &w &&
+			    ++w.lost >= AM_HANDOFF_LOSSES)
+				m->handoff = 1;   /* the next release is ours */
 		}
 		if (w.granted) { rc = XTC_OK; break; }
 		if (fw_expired(deadline, &now)) {
+			if (m->wq.head == &w)
+				m->handoff = 0;
 			fw_remove(&m->wq, &w);
 			rc = XTC_E_AGAIN;
 			break;

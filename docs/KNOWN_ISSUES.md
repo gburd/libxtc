@@ -362,12 +362,17 @@ later needs ~100 us to come out of C6.  Acquire p99 at 64 threads is
 1.2 ms (1.59: 1.4 ms, 1.58: 0.75 ms).
 
 **If many plain threads must share one mutex, fibers are still faster.**
-Fibers on one loop never block an OS thread: a contended fiber parks and
-the release hands the mutex to it in the same thread (1.59, same host:
-2.45-2.49M acquires/s at 4-64 fibers, `bench_amutex_fibers`).  Fibers
-spread over many loops bring the cross-thread hand-off back, so
-co-locate the fibers that share one hot lock on one loop, or shard the
-lock.
+Fibers never block an OS thread: a contended fiber parks on its loop
+(1.59, same host: 2.45-2.49M acquires/s at 4-64 fibers on one loop,
+`bench_amutex_fibers`).  Until 2.1 a release handed the mutex to the
+parked head waiter, so with the fibers spread over several loops the
+mutex sat held-but-idle for the head loop's whole wake latency on every
+release.  Since 2.1 a release frees the mutex and wakes the head, which
+re-competes; a head that loses 4 races in a row is handed the next
+release, so it cannot be starved.  `bench_amutex_fibers L 64` on a
+32-vCPU x86-64 host, 5 interleaved runs, median acquires/s: 4 loops
+157k -> 2.12M, 8 loops (longer critical section) 185k -> 944k, 16 loops
+x 256 fibers 167k -> 1.63M; one loop 2.31M -> 2.29M.
 
 ## FIXED (1.60): sqlxtc SELECT prepares serialized on one lock; write-tail stalls
 
