@@ -62,16 +62,16 @@ grep -q '^#define XTC_IO_BACKEND_URING 1' "$build/xtc_config.h" 2>/dev/null || {
 sx="$src/examples/06_sqlxtc"
 (
 	cd "$build"
-	make bench_aio_fibers bench_exec_scale > "$out/build.log" 2>&1 || true
+	"${MAKE:-make}" bench_aio_fibers bench_exec_scale > "$out/build.log" 2>&1 || true
 	# The example Makefiles do not depend on libxtc.a: drop the
 	# binaries so they relink against THIS build, never a stale one.
 	cd "$sx"
 	rm -f test_wal_kill test_crash_oracle test_wal_group_sync \
 	    sqlxtc-server ../07_kaka/kaka-broker ../07_kaka/kaka_soak
-	make XTC_BUILD="$build" test_wal_kill test_crash_oracle \
+	"${MAKE:-make}" XTC_BUILD="$build" test_wal_kill test_crash_oracle \
 	    test_wal_group_sync sqlxtc-server >> "$out/build.log" 2>&1 || true
 	cd "$src/examples/07_kaka"
-	make XTC_BUILD="$build" kaka-broker kaka_soak \
+	"${MAKE:-make}" XTC_BUILD="$build" kaka-broker kaka_soak \
 	    >> "$out/build.log" 2>&1 || true
 )
 dat="$scratch/aio.dat"
@@ -87,8 +87,23 @@ dd if=/dev/zero of="$dat" bs=1M count=256 status=none
 #     punts 0.4%; 4 threads with a ring each 36%; 16 threads 97% -- and
 #     bench_aio_fibers runs 16 loops on one file.  Hence PUNT and WORKERS.
 #   crash_oracle: buffered page writes punt when they extend or fill a
-#     hole in the page file (XFS allocates on io-wq).  sqlxtc's WAL
-#     commits do not (O_DSYNC + preallocated log): wal_kill shows <1%.
+#     hole in the page file (XFS allocates on io-wq).  WORKERS: uringscope
+#     counts DISTINCT io-wq threads over the run, and each round's rings
+#     exit before the next round's are made, so their workers do too.
+#     bpftrace on create_io_thread: 35 created, at most 1 alive at once
+#     (the same probe shows 38 alive for 40 concurrent rings).  Control,
+#     plain liburing, Linux 7.2: 40 rings made one after another, one
+#     IOSQE_ASYNC write each, also report WORKERS (40, 1 alive).
+#   wal_kill_mid: on XFS mounted without lazytime, an in-place O_DIRECT
+#     write cannot update the file's c/mtime under IOCB_NOWAIT
+#     (xfs_vn_update_time returns -EAGAIN), so every write after the
+#     timestamp ticks (1 ms at HZ=1000) punts; the log's 1 MiB
+#     preallocation writes extend the file and punt for the allocation.
+#     Control, plain liburing, Linux 7.2, XFS: O_DIRECT|O_DSYNC writes
+#     into a zero-filled file punt 599 of 600 at a 2 ms cadence (22 of
+#     600 back to back), 0 of 600 with lazytime; extending direct writes
+#     punt 2000 of 2000.  Under lazytime the WAL's WRITEV punts 5 of 536.
+#     Linux 6.12 had shown <1% for the same commits.
 #   kaka_soak, sqlxtc_iosoak: the concurrent network + storage soaks.  A
 #     command starting with "@wrap " is a test script that runs its
 #     SERVER under $SOAK_WRAP, so uringscope traces the server only (the
@@ -140,9 +155,9 @@ wal_kill_exit||$sx/test_wal_kill exit
 wal_kill_any||$sx/test_wal_kill any
 wal_kill_link||$sx/test_wal_kill link
 wal_kill_big|PUNT|$sx/test_wal_kill big
-wal_kill_mid||$sx/test_wal_kill mid
+wal_kill_mid|PUNT|$sx/test_wal_kill mid
 wal_kill_writer||$sx/test_wal_kill writer
-crash_oracle|PUNT|$sx/test_crash_oracle 4 1
+crash_oracle|PUNT,WORKERS|$sx/test_crash_oracle 4 1
 rexis||make -C $build check-rexis
 kaka_soak|PUNT,WORKERS|@wrap env KAKA_BROKER=$src/examples/07_kaka/kaka-broker KAKA_SOAK=$src/examples/07_kaka/kaka_soak SECS=15 bash $src/examples/07_kaka/test_kaka_soak.sh
 sqlxtc_iosoak|PUNT,WORKERS|@wrap env SQLXTC_SERVER=$sx/sqlxtc-server SECS=20 CLIENTS=32 bash $src/test/sqlxtc/test_sqlxtc_iosoak.sh
