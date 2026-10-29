@@ -40,10 +40,16 @@ libxtc (2.1.0-1) unstable; urgency=medium
     - make check under distribution package flags (-flto) and under the
       sanitizers: the gdb tool tests' probe programs link with -fno-lto
       and the build's -fsanitize.
-    - Four timing tests (offloop_release_wakes, offloop_notify_spin,
-      offloop_no_herd, and the CPU-capacity check they share) no longer
-      fail on a loaded or larger host; each failed on 2.0.0 the same
-      way.
+    - xtc_tls_set_hostname with an IP address after a DNS name (or the
+      reverse) on OpenSSL < 4.0 kept demanding the old name too.
+    - sqlxtc (example): a page provider or trickler killed inside a page
+      write left the frame claimed, so the clean-shutdown checkpoint
+      failed (test_storage_sup under load: 10-14 of 15 runs on 2.0.0);
+      the write-back now runs under the cancellation mask.
+    - Five timing tests (offloop_release_wakes, offloop_notify_spin,
+      offloop_no_herd, slab stats_scale, and the CPU-capacity check
+      they share) no longer fail on a loaded or larger host; each
+      failed on 2.0.0 the same way.
   * Qualification and known issues: docs/KNOWN_ISSUES.md.
 
  -- Greg Burd <greg@burd.me>  Thu, 29 Oct 2026 01:37:32 -0400
