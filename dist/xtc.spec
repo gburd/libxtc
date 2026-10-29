@@ -12,7 +12,7 @@
 %global sover 2
 
 Name:           libxtc
-Version:        2.1.0
+Version:        2.1.1
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,12 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Thu Oct 29 2026 Greg Burd <greg@burd.me> - 2.1.1-1
+- PATCH on 2.1: fixes only, ABI-compatible with 2.0.0 and 2.1.0.  Under
+  ThreadSanitizer on glibc 2.44 (x86-64) a proc exit or kill no longer
+  aborts ("can't find longjmp buf").  FreeBSD: builds with gcc -Werror,
+  the gdb and simulator test tiers run.  Tests that failed in
+  memory-limited containers or on tmpfs no longer do.
 * Thu Oct 29 2026 Greg Burd <greg@burd.me> - 2.1.0-1
 - MINOR on 2.x, ABI-compatible with 2.0.0.  Faster fiber switch (an
   indirect jump instead of ret: fiber_switch +21.5%), same-thread

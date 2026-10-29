@@ -1,3 +1,31 @@
+libxtc (2.1.1-1) unstable; urgency=medium
+
+  * PATCH release on 2.1: fixes only.  ABI-compatible with 2.0.0 and
+    2.1.0 (no exported symbol, signature, enum or struct layout
+    changed).
+  * Fixes:
+    - Under ThreadSanitizer on glibc 2.44, every proc exit, kill or
+      link exit aborted with "can't find longjmp buf" (glibc changed
+      setjmp's pointer mangling; llvm-project issue 228263).  On
+      x86-64 TSan builds the exit unwind now uses __builtin_setjmp /
+      __builtin_longjmp, which TSan does not intercept.
+    - FreeBSD: builds with gcc 14 -Werror (slab.c's __align_up clashed
+      with sys/cdefs.h; a test used usleep); the gdb tool tests no
+      longer read /proc/PID/stat; check-dst runs under gmake (nested
+      builds use $(MAKE)).
+    - Simulator tests that run SQL on a fiber set sqlxtc's 512 KiB
+      stack: test_sim_sqlxtc_gcidx overflowed the 64 KiB default on
+      FreeBSD.
+    - test_cpu_cgroup's no-cgroup cases failed inside a memory-limited
+      container; test_wal_group_sync's group-factor bound failed when
+      TMPDIR is tmpfs (a flush that never blocks cannot group).
+  * scripts/uring-gate.sh allows PUNT for wal_kill_mid (XFS without
+    lazytime punts in-place direct writes to update mtime) and WORKERS
+    for crash_oracle (workers created one after another, at most one
+    alive), each measured against plain liburing.
+
+ -- Greg Burd <greg@burd.me>  Thu, 29 Oct 2026 12:40:00 -0400
+
 libxtc (2.1.0-1) unstable; urgency=medium
 
   * MINOR release on 2.x: ABI-compatible with 2.0.0 (no exported symbol,
