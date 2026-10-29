@@ -19,8 +19,10 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #if defined(_WIN32)
 /* No mmap on Windows: back MAP_ANONYMOUS with calloc so the region is
  * ZERO-FILLED, matching mmap(MAP_ANONYMOUS)'s contract.  The slab
@@ -941,21 +943,45 @@ sc_worker(void *arg)
 	return NULL;
 }
 
+#if !defined(_WIN32)
+/* Process CPU nanoseconds (all threads). */
+static int64_t
+sc_cpu_ns(void)
+{
+	struct timespec ts;
+	if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) != 0)  /* XTC_RAW_OK: test measurement */
+		return 0;
+	return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+}
+#endif
+
+/* Aggregate alloc+free ops per ns over n threads; *cpus gets the CPUs
+ * the run actually had (process CPU time / wall time), or n where that
+ * cannot be measured. */
 static double
-sc_run(int n)
+sc_run(int n, double *cpus)
 {
 	pthread_t th[SC_THREADS];
-	int64_t t0, t1;
+	int64_t t0, t1, c0 = 0, c1 = 0;
 	int i;
 	atomic_store(&g_sc_go, 0);
 	for (i = 0; i < n; i++)
 		munit_assert_int(pthread_create(&th[i], NULL, sc_worker, NULL),
 		    ==, 0);
 	t0 = xtc_clock_mono();
+#if !defined(_WIN32)
+	c0 = sc_cpu_ns();
+#endif
 	atomic_store(&g_sc_go, 1);
 	for (i = 0; i < n; i++)
 		(void)pthread_join(th[i], NULL);
 	t1 = xtc_clock_mono();
+#if !defined(_WIN32)
+	c1 = sc_cpu_ns();
+#endif
+	if (cpus != NULL)
+		*cpus = c1 > c0 && t1 > t0 ?
+		    (double)(c1 - c0) / (double)(t1 - t0) : (double)n;
 	return (double)n * SC_ROUNDS * 16 / (double)(t1 - t0 > 0 ? t1 - t0 : 1);
 }
 
@@ -963,7 +989,7 @@ static MunitResult
 test_stats_scale(const MunitParameter p[], void *d)
 {
 	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
-	double one, all;
+	double one, all, cpus = SC_THREADS;
 	(void)p; (void)d;
 #if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
     __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
@@ -973,12 +999,22 @@ test_stats_scale(const MunitParameter p[], void *d)
 		return MUNIT_SKIP;
 	opts.name = "scale"; opts.obj_size = 64;
 	munit_assert_int(xtc_slab_create(&opts, &g_slab), ==, XTC_OK);
-	(void)sc_run(1);                  /* warm: magazines, chunks */
-	one = sc_run(1);
-	all = sc_run(SC_THREADS);
+	(void)sc_run(1, NULL);            /* warm: magazines, chunks */
+	one = sc_run(1, NULL);
+	all = sc_run(SC_THREADS, &cpus);
 	xtc_slab_destroy(g_slab);
 	munit_logf(MUNIT_LOG_INFO, "1 thread %.1f M/s, %d threads %.1f M/s "
-	    "(%.2fx)", one * 1e3, SC_THREADS, all * 1e3, all / one);
+	    "(%.2fx) on %.2f CPUs", one * 1e3, SC_THREADS, all * 1e3,
+	    all / one, cpus);
+	/* The bound needs the 4 threads to run at once.  A CI runner with 4
+	 * vCPUs and the rest of make -j2 check beside it gave them less:
+	 * 0.88x once, a scheduling number, not a slab one.  Under 3 CPUs
+	 * the scaling is not measurable here. */
+	if (cpus < 3.0) {
+		fprintf(stderr, "  skipped: %d threads got %.2f CPUs (a shared "
+		    "host)\n", SC_THREADS, cpus);
+		return MUNIT_SKIP;
+	}
 	munit_assert_double(all, >=, 1.5 * one);
 	return MUNIT_OK;
 }
