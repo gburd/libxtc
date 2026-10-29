@@ -1034,6 +1034,31 @@ xtc_tls_create_transport(xtc_tls_ctx_t *ctx,
 	return XTC_OK;
 }
 
+/*
+ * Set (or with NULL, clear) the expected peer name: a DNS name or an IP
+ * address literal, as SSL_set1_host took.  OpenSSL 4.0 deprecated
+ * SSL_set1_host for SSL_set1_dnsname / SSL_set1_ipaddr, one list each;
+ * each set1 clears its own list, so clearing or setting one kind clears
+ * the other.  An IP literal goes to the address list, anything else to
+ * the DNS list.
+ */
+static int
+tls_set1_peername(SSL *ssl, const char *name)
+{
+#if OPENSSL_VERSION_NUMBER >= 0x40000000L && \
+    !defined(LIBRESSL_VERSION_NUMBER) && !defined(OPENSSL_IS_BORINGSSL)
+	/* SSL_set1_ipaddr fails (0) on anything not an address literal, so
+	 * it doubles as the parser. */
+	if (name != NULL && SSL_set1_ipaddr(ssl, name) == 1)
+		return SSL_set1_dnsname(ssl, NULL);
+	if (SSL_set1_ipaddr(ssl, NULL) != 1)
+		return 0;
+	return SSL_set1_dnsname(ssl, name);
+#else
+	return SSL_set1_host(ssl, name);
+#endif
+}
+
 /* -------------------------------------------------------------------------
  * PUBLIC: int  xtc_tls_set_hostname __P((xtc_tls_t *, const char *));
  * ----------------------------------------------------------------------- */
@@ -1048,7 +1073,7 @@ xtc_tls_set_hostname(xtc_tls_t *tls, const char *name)
 	if (name == NULL || name[0] == '\0') {
 		(void)SSL_set_tlsext_host_name(tls->ssl, NULL);
 		/* Clear the name check.  OpenSSL accepts SSL_set1_host(ssl,
-		 * NULL) as "no name".  BoringSSL does strlen(NULL) there and
+		 * NULL) as "no name" (tls_set1_peername).  BoringSSL does strlen(NULL) there and
 		 * CRASHES, rejects an empty name, and has no call that removes
 		 * a host once set (SSL_set1_param merges and keeps it) -- found
 		 * by the CI boringssl job (/m18/tls_client/hostname_check,
@@ -1061,7 +1086,7 @@ xtc_tls_set_hostname(xtc_tls_t *tls, const char *name)
 		if (tls->host_set)
 			return XTC_E_NOSYS;
 #else
-		(void)SSL_set1_host(tls->ssl, NULL);
+		(void)tls_set1_peername(tls->ssl, NULL);
 		tls->host_set = 0;
 #endif
 		return XTC_OK;
@@ -1073,7 +1098,7 @@ xtc_tls_set_hostname(xtc_tls_t *tls, const char *name)
 	 * Enforced by the chain verify, so it only bites when the context
 	 * verifies peers (SSL_VERIFY_PEER).  A failure here (OOM) must not
 	 * be swallowed: it would silently drop the name check. */
-	if (SSL_set1_host(tls->ssl, name) != 1)
+	if (tls_set1_peername(tls->ssl, name) != 1)
 		return XTC_E_NOMEM;
 	tls->host_set = 1;
 	return XTC_OK;
@@ -1655,7 +1680,7 @@ xtc_tls_get_verify_error(const xtc_tls_t *tls, long *x509_err,
  * or XTC_E_INTERNAL.
  */
 static int
-name_to_rfc2253(X509_NAME *nm, char *buf, size_t len)
+name_to_rfc2253(const X509_NAME *nm, char *buf, size_t len)
 {
 	BIO *bio;
 	long n;
@@ -1667,7 +1692,10 @@ name_to_rfc2253(X509_NAME *nm, char *buf, size_t len)
 	bio = BIO_new(BIO_s_mem());
 	if (bio == NULL)
 		return XTC_E_NOMEM;
-	if (X509_NAME_print_ex(bio, nm, 0, XN_FLAG_RFC2253) < 0) {
+	/* OpenSSL 1.1 / LibreSSL take a non-const name here; it is not
+	 * written (3.0+ declare it const). */
+	if (X509_NAME_print_ex(bio, (X509_NAME *)(uintptr_t)nm, 0,
+	    XN_FLAG_RFC2253) < 0) {
 		BIO_free(bio);
 		return XTC_E_INTERNAL;
 	}
@@ -1692,7 +1720,7 @@ static int
 peer_name_dn(const xtc_tls_t *tls, int issuer, char *buf, size_t len)
 {
 	X509 *cert;
-	X509_NAME *nm;
+	const X509_NAME *nm;   /* const since OpenSSL 4.0 */
 	int rc;
 	if (tls == NULL || tls->ssl == NULL || buf == NULL || len == 0)
 		return XTC_E_INVAL;
@@ -1722,10 +1750,10 @@ int
 xtc_tls_get_peer_common_name(const xtc_tls_t *tls, char *buf, size_t len)
 {
 	X509 *cert;
-	X509_NAME *nm;
+	const X509_NAME *nm;          /* the three are const since 4.0 */
 	int idx, dlen, rc = XTC_OK;
-	X509_NAME_ENTRY *e;
-	ASN1_STRING *as;
+	const X509_NAME_ENTRY *e;
+	const ASN1_STRING *as;
 	unsigned char *utf8 = NULL;
 
 	if (tls == NULL || tls->ssl == NULL || buf == NULL || len == 0)

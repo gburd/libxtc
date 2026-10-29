@@ -34,6 +34,9 @@
 #include "munit.h"
 #include "xtc_int.h"
 #include "xtc_tls.h"
+#if defined(XTC_TLS_BACKEND_OPENSSL)
+#include <openssl/ssl.h>   /* OPENSSL_IS_BORINGSSL, LIBRESSL_VERSION_NUMBER */
+#endif
 
 /* =========================================================================
  * TLS-enabled branch -- full implementation (any backend).
@@ -97,6 +100,9 @@ __m18_paths_init(void)
 /* Server cert issued for NAME_CERT (CN and SAN), for the name check. */
 #define NAME_CERT        "a.example"
 #define NAME_OTHER       "b.example"
+/* ... and the SAN also carries this address, for the IP-literal check. */
+#define NAME_CERT_IP     "127.0.0.1"
+#define NAME_OTHER_IP    "127.0.0.2"
 
 /* Generate a self-signed RSA-2048 cert+key via the openssl CLI.
  * Returns 0 on success. */
@@ -145,7 +151,7 @@ generate_name_cert(const char *cert_path, const char *key_path,
         "[dn]\nCN = %s\n"
         "[v3]\nbasicConstraints = critical,CA:TRUE\n"
         "subjectKeyIdentifier = hash\n"
-        "subjectAltName = DNS:%s\n", name, name);
+        "subjectAltName = DNS:%s, IP:%s\n", name, name, NAME_CERT_IP);
     fclose(cnf_fp);
     snprintf(cmd, sizeof(cmd),
              "openssl req -x509 -newkey rsa:2048 -nodes -days 1 "
@@ -627,6 +633,27 @@ test_client_hostname_check(const MunitParameter params[], void *data)
     munit_assert_int(rc, ==, XTC_E_INTERNAL);   /* handshake REJECTED */
     munit_assert_int(host_rc, ==, XTC_OK);      /* NOSYS is a failure */
     munit_assert_int(srv_rc, !=, 0);
+
+#if defined(XTC_TLS_BACKEND_OPENSSL) && !defined(OPENSSL_IS_BORINGSSL) && \
+    !defined(LIBRESSL_VERSION_NUMBER)
+    /* An IP-address literal is matched against the SAN's IP entries
+     * (OpenSSL >= 4.0 routes it through SSL_set1_ipaddr, older ones
+     * through SSL_set1_host): the cert's address passes, another fails.
+     * Switching kinds replaces the old name: an address after a wrong DNS
+     * name, a DNS name after a wrong address. */
+    rc = connect_expecting(NULL, NAME_CERT_IP, &host_rc, &srv_rc);
+    munit_assert_int(host_rc, ==, XTC_OK);
+    munit_assert_int(rc, ==, XTC_OK);
+    rc = connect_expecting(NULL, NAME_OTHER_IP, &host_rc, &srv_rc);
+    munit_assert_int(host_rc, ==, XTC_OK);
+    munit_assert_int(rc, ==, XTC_E_INTERNAL);
+    rc = connect_expecting(NAME_OTHER, NAME_CERT_IP, &host_rc, &srv_rc);
+    munit_assert_int(host_rc, ==, XTC_OK);
+    munit_assert_int(rc, ==, XTC_OK);
+    rc = connect_expecting(NAME_OTHER_IP, NAME_CERT, &host_rc, &srv_rc);
+    munit_assert_int(host_rc, ==, XTC_OK);
+    munit_assert_int(rc, ==, XTC_OK);
+#endif
 
     /* Clearing the name falls back to chain-only verification. */
     rc = connect_expecting(NULL, "", &host_rc, &srv_rc);
