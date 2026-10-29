@@ -1493,9 +1493,13 @@ test_offloop_no_herd(const MunitParameter p[], void *d)
 	/* The same holds when other jobs share the CPUs (a CI runner): the
 	 * herd bound measures the lock only when the waiters can all run.
 	 * 4 CPUs + 4 busy loops: 1.59.0 and 2.0 both fail it (1,360 and
-	 * 3,155 switches) with 2.0 CPUs left to the process. */
+	 * 3,155 switches) with 2.0 CPUs left to the process.  So compare
+	 * against what an idle host of this size gives HERD_K spinners: a
+	 * quiet 4-CPU host measures ~4.0 of 4; a 16-vCPU host under 16 busy
+	 * loops ~4 of 8, and fails the bound there (2.0.0: 4/15 runs,
+	 * 845-982 switches) though 4 quiet CPUs pass it. */
 	cap = hd_capacity(HERD_K);
-	if (cap < HERD_K / 2 - 0.5) {   /* a quiet 4-CPU host measures ~4.0 */
+	if (cap < 0.85 * (xtc_ncpus() < HERD_K ? xtc_ncpus() : HERD_K)) {
 		fprintf(stderr, "  skipped: %d spinning threads get %.2f CPUs "
 		    "here (a shared host)\n", HERD_K, cap);
 		return MUNIT_SKIP;
