@@ -526,8 +526,6 @@ struct offloop_args {
 	_Atomic int started;
 };
 
-static struct offloop_args *g_ol;
-static xtc_svr_t *g_ol_svr;
 static xtc_loop_t *g_ol_loop;
 
 /* Server callback: serve the value, then ask the loop to stop so the
@@ -605,10 +603,8 @@ test_svr_call_off_loop(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_svr_start(loop, &cb, NULL, &opts, &svr),
 	    ==, XTC_OK);
-	g_ol_svr = svr;
 	g_ol_loop = loop;
 	a.target = xtc_svr_pid(svr);
-	g_ol = &a;
 
 	munit_assert_int(pthread_create(&th, NULL, ol_thread, &a), ==, 0);
 	atomic_store(&a.started, 1);

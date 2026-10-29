@@ -112,7 +112,9 @@ counter_proc(void *arg)
 		 * restart-kill can never split the two-step update. */
 		(void)xtc_uncancelable(critical_commit, &count);
 	}
-	printf("counter: completed %d iterations\n", count);
+	/* Both steps landed together every time: the shared side agrees. */
+	printf("counter: completed %d iterations (committed %d)\n", count,
+	    g_committed);
 
 	/* Closing the scope runs counter_release LIFO; an async kill while
 	 * parked in xtc_recv above would run the same finalizer on the

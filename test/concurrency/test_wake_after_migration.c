@@ -76,6 +76,7 @@ filler(void *arg)
 		for (j = 0; j < 200000UL; j++) spin += j;
 		xtc_yield();
 	}
+	(void)spin;   /* read once: gcc 16 -Wunused-but-set-variable */
 }
 
 /*

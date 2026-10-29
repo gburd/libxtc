@@ -41,8 +41,9 @@ static int xtc_posix_memalign(void **out, size_t a, size_t s) {
 #else
 # define MAYBE_UNUSED
 #endif
-static int alloc_inflight;
-static int alloc_total;
+/* Read only by the hegel property (absent without XTC_HAVE_HEGEL). */
+MAYBE_UNUSED static int alloc_inflight;
+MAYBE_UNUSED static int alloc_total;
 MAYBE_UNUSED static void *p_malloc (size_t s)             { alloc_inflight++; alloc_total++; return malloc(s); }
 MAYBE_UNUSED static void *p_calloc (size_t n, size_t s)   { alloc_inflight++; alloc_total++; return calloc(n, s); }
 MAYBE_UNUSED static void *p_realloc(void *p, size_t s)    { if (!p) { alloc_inflight++; alloc_total++; } return realloc(p, s); }

@@ -89,7 +89,6 @@ test_probe(const MunitParameter p[], void *d)
 /* ---- wait_fence: park a fiber on an eventfd "fence", signal it ---- */
 #if HAVE_EVENTFD
 static _Atomic int g_wait_rc;
-static int         g_fence_fd;
 
 /* Waiter proc: park on the fence fd until it signals. */
 static void
@@ -134,7 +133,6 @@ test_wait_fence_signalled(const MunitParameter p[], void *d)
 
 	fd = eventfd(0, EFD_NONBLOCK);
 	munit_assert_int(fd, >=, 0);
-	g_fence_fd = fd;
 	atomic_store(&g_wait_rc, 12345);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);

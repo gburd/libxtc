@@ -1445,6 +1445,7 @@ hd_spin(void *arg)
 	(void)arg;
 	while (!atomic_load_explicit(&g_hd_stop, memory_order_relaxed))
 		n++;
+	(void)n;   /* read once: gcc 16 -Wunused-but-set-variable */
 	return NULL;
 }
 
@@ -1523,6 +1524,7 @@ sp_burn(int n)
 	volatile int k = 0;
 	int i;
 	for (i = 0; i < n; i++) k += i;
+	(void)k;
 }
 
 static void *
