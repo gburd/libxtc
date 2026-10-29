@@ -807,8 +807,29 @@ dw_recover(bm_t *bm)
 #define BM_FLUSH_TEST_HOOK(bm, frame) ((void)0)
 #endif
 
+static int flush_frame_claimed(bm_t *bm, bm_frame_t *f);
+
+/*
+ * The claim (pin + io_busy) through the release runs under the
+ * cancellation mask.  Its writes (dw_protect, do_io) are xtc_aio waits,
+ * where a kill is delivered; a page provider, trickler or checkpoint
+ * proc killed there unwound with the frame still claimed, so no later
+ * flush could write it and sx_storage_close failed its checkpoint
+ * (test_storage_sup under load: 10-12 of 15 runs, on 2.0.0 too).  A
+ * kill now lands at the mask's end, after the release.
+ */
 static int
 flush_frame(bm_t *bm, bm_frame_t *f)
+{
+	int masked = xtc_mask_enter() == XTC_OK, rc;
+	rc = flush_frame_claimed(bm, f);
+	if (masked)
+		(void)xtc_mask_leave();   /* may deliver a latched kill */
+	return rc;
+}
+
+static int
+flush_frame_claimed(bm_t *bm, bm_frame_t *f)
 {
 	int expect = 0, clean = 0;
 	void *snap;
@@ -3214,6 +3235,10 @@ tr_flush_batch(bm_t *bm, struct tr_cand *sel, int nsel, uint8_t *wbuf,
 	uint32_t psz = bm->page_size;
 	int slot = 0, run_len = 0, written = 0, j;
 	bm_pid_t run_pid0 = 0, prev_pid = 0;
+	/* Claimed frames are released by tr_emit_run after the pwrite, a
+	 * kill point: mask so a killed trickler cannot leave them claimed
+	 * (see flush_frame). */
+	int masked = xtc_mask_enter() == XTC_OK;
 
 	qsort(sel, (size_t)nsel, sizeof *sel, tr_cmp_pid);   /* elevator */
 
@@ -3239,6 +3264,8 @@ tr_flush_batch(bm_t *bm, struct tr_cand *sel, int nsel, uint8_t *wbuf,
 		written += tr_emit_run(bm,
 		    wbuf + (size_t)(slot - run_len) * psz, run_len, run_pid0,
 		    run_f);
+	if (masked)
+		(void)xtc_mask_leave();   /* may deliver a latched kill */
 	return written;
 }
 static void
