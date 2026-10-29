@@ -6,6 +6,27 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## CHANGED (2.1): an `xtc_amutex` release no longer hands the mutex to a parked fiber
+
+**What changed.**  Through 2.0 `xtc_amutex_unlock` with a fiber parked on
+the mutex handed it to the oldest waiter: the mutex stayed held until
+that fiber ran.  Since 2.1 a release frees the mutex and wakes the
+oldest waiter, which re-competes when it runs; a fiber or thread that
+gets there first takes it (barging).  A waiter that loses 4 such races
+in a row is handed the next release, so it is not starved.  Mutual
+exclusion, timeouts, kill delivery and the plain-thread path are
+unchanged.
+
+**Why.**  With the waiters on another loop the hand-off left the mutex
+held but idle for that loop's whole wake latency on every release:
+`bench_amutex_fibers` on a 32-vCPU x86-64 host went from 157k to 2.12M
+acquires/s with fibers on 4 loops (16 loops x 256 fibers: 167k ->
+1.63M); on one loop the two are equal (2.31M vs 2.29M).
+
+**What to check.**  Code that relied on strict FIFO order between
+parked fibers of one amutex now gets at most a bounded (4) number of
+overtakes per waiter.  `/m9/sync/amutex_no_starve` pins the bound.
+
 ## CHANGED (2.0): every caller-allocated public struct is size-first
 
 **What changed.**  Source and binary incompatible with 1.x, by design

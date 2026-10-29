@@ -178,6 +178,11 @@ never parks;
 releases; and
 .Fn xtc_amutex_destroy
 frees it.
+A release frees the mutex and wakes the oldest parked fiber, which
+competes for it again when it runs, so a running fiber or thread may
+take it first; a fiber that loses four such races in a row is handed
+the next release directly (since 2.1; before, every release was a
+hand-off).
 A proc that exits while holding an amutex leaves it held forever
 (there is no robust-mutex recovery, and a later proc never inherits a
 recursive amutex's ownership), so release it in an
