@@ -76,6 +76,31 @@ AC_MSG_CHECKING([whether to build a shared library])
 AC_MSG_RESULT([$xtc_enable_shared])
 AC_SUBST([XTC_ENABLE_SHARED], [$xtc_enable_shared])
 
+# -------------------------------------------------------------------------
+# The examples live in their own repository (libxtc-examples), carried as
+# the git submodule `examples/`.  A checkout without it (a shallow clone,
+# `git clone` without --recurse-submodules, a tarball without it) still
+# builds and checks the library; `make check` then SKIPs the tests that
+# compile example sources, and says so.  `git submodule update --init
+# --recursive` brings them back.
+# -------------------------------------------------------------------------
+AC_MSG_CHECKING([for the examples submodule])
+AS_IF([test -f "$srcdir/../examples/README.md"],
+  [xtc_have_examples=yes], [xtc_have_examples=no])
+AC_MSG_RESULT([$xtc_have_examples])
+AS_IF([test "x$xtc_have_examples" = xyes],
+  [XTC_EXAMPLE_TESTS_C='test_pgmock_smoke'
+   XTC_EXAMPLE_TESTS_PBT='pbt_qsel'
+   XTC_CHECK_EXAMPLES='check-examples'],
+  [XTC_EXAMPLE_TESTS_C=''
+   XTC_EXAMPLE_TESTS_PBT=''
+   XTC_CHECK_EXAMPLES='check-examples-skip'
+   AC_MSG_WARN([examples/ is empty: run `git submodule update --init --recursive` to test the examples])])
+AC_SUBST([XTC_HAVE_EXAMPLES], [$xtc_have_examples])
+AC_SUBST([XTC_EXAMPLE_TESTS_C])
+AC_SUBST([XTC_EXAMPLE_TESTS_PBT])
+AC_SUBST([XTC_CHECK_EXAMPLES])
+
 AC_ARG_ENABLE([sched-policy],
   [AS_HELP_STRING([--enable-sched-policy],
     [Enable optional runtime lane policies (default: no).])],

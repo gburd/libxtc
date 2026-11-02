@@ -71,7 +71,7 @@ apples-to-apples.
   under realistic load: the [rexis](  {{ '/examples/rexis/' | relative_url }})
   Redis work-alike against `redis-benchmark`, and the
   [sqlxtc](  {{ '/examples/sqlxtc/' | relative_url }}) engine under
-  concurrent query load (`bench/sqlxtc/`). These matter more than the
+  concurrent query load (`examples/06_sqlxtc/bench/`). These matter more than the
   micro-numbers: they show libxtc under the messy, mixed workload a real
   system produces, not a synthetic best case.
 - **At scale** means many cores and long runs, on real hardware, with the
@@ -103,7 +103,7 @@ BENCH_WORKERS=$(nproc) ./run.sh # full parallelism
 The harness and its output format are in
 [`bench/conformance/`](https://codeberg.org/gregburd/libxtc/src/branch/main/bench/conformance);
 the sqlxtc application benchmarks and their recorded runs are in
-[`bench/sqlxtc/`](https://codeberg.org/gregburd/libxtc/src/branch/main/bench/sqlxtc).
+[`06_sqlxtc/bench/`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/06_sqlxtc/bench).
 Run them on your hardware, against your baseline. That is the only
 benchmark result that should ever persuade you -- including ours.
 

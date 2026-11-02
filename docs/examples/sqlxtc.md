@@ -13,7 +13,7 @@ lede: >-
 ---
 
 Source:
-[`examples/06_sqlxtc/`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/06_sqlxtc)
+[`examples/06_sqlxtc/`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/06_sqlxtc)
 (~45,000 lines of C, including a large test suite). This is the most
 demanding use of the library and the one that drove much of its
 hardening.
@@ -597,7 +597,7 @@ flowchart TD
   be unwound safely -- and recovery is a restart that replays the log.
   (Contrast [let it crash]({{ '/philosophy/let-it-crash/' | relative_url }}),
   which fits stateless connection handlers, not a shared page cache.)
-  `test_conn_sup`, `test_storage_sup` and `test/sqlxtc/test_sqlxtc_kill.sh`
+  `test_conn_sup`, `test_storage_sup` and `examples/06_sqlxtc/test/test_sqlxtc_kill.sh`
   check each of these.
 - **The executor and the B-tree run on fibers, not threads.** Each
   connection is a fiber (`xtc_proc_spawn`) on the multi-loop `xtc_exec`

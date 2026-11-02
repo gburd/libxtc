@@ -61,43 +61,12 @@ bench/bench_tls_sendfile
 bench/bench_win_scale.exe
 bench/conformance/w*/tokio/target/
 
-# rexis (Redis-protocol-compatible) example binary
-examples/05_rexis/rexis-server-xtc
-examples/05_rexis/*.o
 
-
-# rexis example build outputs
-examples/05_rexis/*.o
-examples/05_rexis/rexis-server-xtc
-
-# rexis bitcask test binary
-examples/05_rexis/test_bitcask
-examples/05_rexis/test_db_persist
-examples/05_rexis/test_db_table
-examples/05_rexis/test_metrics
-
-# m99 example test binaries and objects
-test/m99/test_resp_parser
-test/m99/test_rexis_loopback
-test/m99/test_rexis_budgets
-test/m99/test_rexis_pbt
-test/m99/*.o
 
 # Doxygen-generated documentation site
 docs/api/
 doxygen-warnings.txt
 
-# kaka example
-examples/07_kaka/kaka-broker
-examples/07_kaka/*.o
-examples/07_kaka/test_frame
-examples/07_kaka/test_partition
-examples/07_kaka/test_broker
-examples/07_kaka/test_group
-examples/07_kaka/kaka_load
-examples/07_kaka/kaka_soak
-examples/07_kaka/kaka-broker-plant
-examples/07_kaka/soak-plant.out
 build_unix/test_inject_races
 test/m2/test_bdev
 
@@ -108,18 +77,6 @@ compile_commands.json
 /amalgamation/
 build_unix/amalgamation/
 
-# sqlxtc amalgamation build artifacts
-examples/06_sqlxtc/amalg/
-examples/06_sqlxtc/*.amalg.o
-examples/06_sqlxtc/sqlxtc-server-amalg
-examples/06_sqlxtc/test_xtc_vfs
-examples/06_sqlxtc/test_xtc_vfs_amalg
-examples/06_sqlxtc/xtc_vfs.o
-examples/06_sqlxtc/test_xtc_vfs.o
-examples/06_sqlxtc/test_pcache_xtc
-examples/06_sqlxtc/test_pcache_xtc_amalg
-examples/06_sqlxtc/pcache_xtc.o
-examples/06_sqlxtc/test_pcache_xtc.o
 
 # Jekyll docs build output + local bundle
 docs/_site/

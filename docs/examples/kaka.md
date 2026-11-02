@@ -13,7 +13,7 @@ lede: >-
 ---
 
 Source:
-[`examples/07_kaka/`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/07_kaka)
+[`examples/07_kaka/`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/07_kaka)
 (~2,800 lines of C, including tests).
 
 ## The software that inspired it

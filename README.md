@@ -174,8 +174,12 @@ cd examples/05_rexis && make
 
 Then talk to it with `redis-cli` like any Redis server.
 
-Other examples in `examples/` (the full list, with per-example design
-notes, is [`examples/README.md`](examples/README.md)):
+The examples are their own repository,
+[libxtc-examples](https://codeberg.org/gregburd/libxtc-examples), carried
+here as the git submodule `examples/`: clone with `--recurse-submodules`
+(or run `git submodule update --init --recursive`).  Other examples in
+`examples/` (the full list, with per-example design notes, is
+[`examples/README.md`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/README.md)):
 
 | Example | What it shows | Gated by |
 |---|---|---|
@@ -298,7 +302,9 @@ current status -- the live status is this table plus KNOWN_ISSUES.
 ## Building
 
 xtc is BSD-style C11.  No external deps beyond libc, pthreads, and
-optionally `liburing`/`OpenSSL`.
+optionally `liburing`/`OpenSSL`.  Clone with `--recurse-submodules` to
+get the examples (`examples/`, a submodule); the library builds and
+tests without them, and `make check` names what it skipped.
 
 ```sh
 <!-- M0_CLAIMS:B1_BEGIN -->

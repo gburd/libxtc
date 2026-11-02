@@ -47,6 +47,12 @@ XTC_HEGEL_PBT	 = @XTC_HEGEL_PBT@
 XTC_TLS_BACKEND	 = @XTC_TLS_BACKEND@
 XTC_TLS_LIBS	 = @XTC_TLS_LIBS@
 XTC_ENABLE_SHARED = @XTC_ENABLE_SHARED@
+# The examples are the submodule examples/ (dist/configure.ac checks for
+# it); without it these are empty and `check` runs check-examples-skip.
+XTC_HAVE_EXAMPLES     = @XTC_HAVE_EXAMPLES@
+XTC_EXAMPLE_TESTS_C   = @XTC_EXAMPLE_TESTS_C@
+XTC_EXAMPLE_TESTS_PBT = @XTC_EXAMPLE_TESTS_PBT@
+XTC_CHECK_EXAMPLES    = @XTC_CHECK_EXAMPLES@
 XTC_VERSION_FULL  = @XTC_VERSION_FULL@
 XTC_VERSION_MAJOR = @XTC_VERSION_MAJOR@
 AR		= ar
@@ -525,10 +531,10 @@ TESTS_C		= test_sched_policy test_sched_continuous test_batch test_version test_
 		  test_tls_server \
 		  test_tls_ktls \
 		  test_tls_client \
-		  test_pgmock_smoke \
-		  test_inject_races
+		  test_inject_races \
+		  $(XTC_EXAMPLE_TESTS_C)
 
-TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_scope pbt_slab pbt_chash pbt_cskip pbt_lrlock pbt_lwlock pbt_chan pbt_sim pbt_sched_shares pbt_saga pbt_qsel
+TESTS_PBT	= pbt_atomic pbt_alloc pbt_timer pbt_run_queue pbt_async pbt_deque pbt_proc pbt_scope pbt_slab pbt_chash pbt_cskip pbt_lrlock pbt_lwlock pbt_chan pbt_sim pbt_sched_shares pbt_saga $(XTC_EXAMPLE_TESTS_PBT)
 
 # -------------------------------------------------------------------------
 # Default goal.
@@ -1083,7 +1089,8 @@ examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_brea
 # test/docs/test_doc_snippets.sh like every other snippet; that gate links
 # the build's XTC_TLS_LIBS.)
 check-examples: check-continuous-batching check-gpu-batching check-hetero-batching 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker tnt_echo usdt_convoy
-	@for t in 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo \
+	@rm -f check-skips-examples.txt; \
+	for t in 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo \
 	          10_circuit_breaker 'usdt_convoy convoy' 'usdt_convoy fixed' \
 	          'usdt_convoy lostwake'; do \
 		printf 'running example: %s\n' "$$t"; \
@@ -1093,6 +1100,14 @@ check-examples: check-continuous-batching check-gpu-batching check-hetero-batchi
 	    ./03_supervised_app ./04_lockmgr_demo ./10_circuit_breaker \
 	    ./tnt_echo ./usdt_convoy || exit 1; \
 	echo "  [examples] OK: teaching examples build and run clean"
+
+# Without the examples submodule (configure says so): skip, and say what.
+.PHONY: check-examples-skip
+check-examples-skip:
+	@echo "  [examples] SKIP: examples/ submodule not checked out" \
+	    "(git submodule update --init --recursive); skipped:" \
+	    "check-examples, test_pgmock_smoke, pbt_qsel"; \
+	echo "SKIP: examples submodule absent" >check-skips-examples.txt
 
 .PHONY: check-continuous-batching
 check-continuous-batching: $(STATIC_LIB)
@@ -1178,13 +1193,14 @@ usdt_convoy: $(srcdir)/../examples/15_usdt/convoy.c $(STATIC_LIB)
 		-o $@ $(srcdir)/../examples/10_circuit_breaker.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
-# check-rexis: examples/05_rexis (the README flagship) and its test/m99
+# check-rexis: examples/05_rexis (the README flagship) and its test suite
+# (examples/05_rexis/test)
 # suite -- RESP parser, loopback round-trips, property tests, and the
 # budget tests that MEASURE each --max-* cap on a real forked server
 # (RSS, affinity mask, reply rate).  Before this target nothing built or
 # ran any of it.  Everything is built HERE, in the build dir, from the
 # sources; nothing is written into the source tree.  The servers bind
-# kernel-chosen free loopback ports (test/m99/rexis_harness.h), so
+# kernel-chosen free loopback ports (05_rexis/test/rexis_harness.h), so
 # parallel runs on a shared host cannot collide.
 #
 # The network suites run twice: on the default one-loop server and with
@@ -1195,7 +1211,7 @@ usdt_convoy: $(srcdir)/../examples/15_usdt/convoy.c $(STATIC_LIB)
 # two of its budget checks read /proc (Linux).  CI runs it in the
 # examples job.
 REXIS_DIR  = $(srcdir)/../examples/05_rexis
-M99_DIR    = $(srcdir)/../test/m99
+M99_DIR    = $(REXIS_DIR)/test
 REXIS_SRCS = $(REXIS_DIR)/main.c $(REXIS_DIR)/proto.c $(REXIS_DIR)/db.c \
 	     $(REXIS_DIR)/cmd.c $(REXIS_DIR)/conn.c $(REXIS_DIR)/expire.c \
 	     $(REXIS_DIR)/metrics.c $(REXIS_DIR)/bitcask.c
@@ -1224,7 +1240,7 @@ check-rexis: $(REXIS_BINS)
 			cat $$t.l2.log; exit 1; }; \
 	done; \
 	sh $(srcdir)/../examples/check_help.sh ./rexis-server-xtc; \
-	echo "  [rexis] OK: 05_rexis server + test/m99 suite"
+	echo "  [rexis] OK: 05_rexis server + its test suite"
 
 rexis-server-xtc: $(REXIS_SRCS) $(REXIS_HDRS) $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -D_GNU_SOURCE -I$(REXIS_DIR) \
@@ -1335,12 +1351,12 @@ tnt_echo: $(srcdir)/../examples/08_tnt/echo.c $(STATIC_LIB)
 # that still holds it.  The collection never changes a test's exit status.
 SKIP_AWK	= $(abs_top_srcdir)/../test/dist/skip_collect.awk
 
-check: tests-c tests-pbt tests-sh check-examples
+check: tests-c tests-pbt tests-sh $(XTC_CHECK_EXAMPLES)
 	@echo "== M0 test summary =="
 	@n=$$(cat check-skips-c.txt check-skips-pbt.txt check-skips-sh.txt \
-	    2>/dev/null | grep -c . || true); \
+	    check-skips-examples.txt 2>/dev/null | grep -c . || true); \
 	echo "== SKIP SUMMARY: $$n skip(s) -- NOT tested by this run =="; \
-	for f in c pbt sh; do \
+	for f in c pbt sh examples; do \
 		[ -s check-skips-$$f.txt ] && sed "s/^/  [$$f] /" check-skips-$$f.txt; \
 	done; \
 	echo "== end SKIP SUMMARY =="; true
@@ -1358,7 +1374,7 @@ tests-c: $(TESTS_C)
 		elif [ $$rc -ne 0 ]; then exit 1; fi; \
 	done
 
-tests-sh: $(STATIC_LIB) tnt_echo
+tests-sh: $(STATIC_LIB)
 	@: >check-skips-sh.txt; \
 	for t in $(TESTS_SH); do \
 		echo "running shell test: $$(basename $$t)"; \
@@ -2405,7 +2421,7 @@ uninstall:
 # -------------------------------------------------------------------------
 clean:
 	$(RM) $(LIB_OBJS) $(STATIC_LIB) $(TESTS_C) $(TESTS_PBT) compile_commands.json
-	$(RM) check-skips-c.txt check-skips-sh.txt check-skips-pbt.txt .tests-c.out .tests-sh.out .tests-c.rc .tests-sh.rc
+	$(RM) check-skips-c.txt check-skips-sh.txt check-skips-pbt.txt check-skips-examples.txt .tests-c.out .tests-sh.out .tests-c.rc .tests-sh.rc
 	$(RM) soak_mem_bound continuous_batching bench_continuous_batching mandel hetero usdt_convoy
 	$(RM) $(FUZZ_BINS)
 	$(RM) $(SHARED_LIB_REAL) $(SHARED_LIB_SONAME) $(SHARED_LIB_LINKNAME)

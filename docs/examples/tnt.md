@@ -13,7 +13,7 @@ lede: >-
 ---
 
 Source:
-[`examples/08_tnt/echo.c`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/08_tnt/echo.c)
+[`examples/08_tnt/echo.c`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/08_tnt/echo.c)
 (~290 lines). The layer itself is a supported part of the library
 (`src/orc/tnt.c`,
 [`xtc_tnt(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_tnt.3));

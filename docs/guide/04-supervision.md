@@ -104,7 +104,7 @@ A restart budget (max restarts within a window) prevents a
 crash-restart-crash storm: exceed it and the supervisor itself gives up
 and escalates to *its* supervisor. This is the tree that makes BEAM
 systems self-heal, and
-[`examples/03_supervised_app.c`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/03_supervised_app.c)
+[`examples/03_supervised_app.c`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/03_supervised_app.c)
 shows a whole application built as one -- walked through in the
 [Examples]({{ '/examples/' | relative_url }}) section. That example also
 demonstrates the three tools a *supervised* worker needs so a restart

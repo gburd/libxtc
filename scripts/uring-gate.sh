@@ -60,6 +60,12 @@ grep -q '^#define XTC_IO_BACKEND_URING 1' "$build/xtc_config.h" 2>/dev/null || {
 }
 
 sx="$src/examples/06_sqlxtc"
+[ -f "$sx/wal.c" ] || {
+	echo "uring-gate: examples/ submodule not checked out (its sqlxtc and" \
+	    "kaka workloads are gated here); run git submodule update --init" \
+	    "--recursive" >&2
+	exit 2
+}
 (
 	cd "$build"
 	"${MAKE:-make}" bench_aio_fibers bench_exec_scale > "$out/build.log" 2>&1 || true
@@ -160,7 +166,7 @@ wal_kill_writer||$sx/test_wal_kill writer
 crash_oracle|PUNT,WORKERS|$sx/test_crash_oracle 4 1
 rexis||make -C $build check-rexis
 kaka_soak|PUNT,WORKERS|@wrap env KAKA_BROKER=$src/examples/07_kaka/kaka-broker KAKA_SOAK=$src/examples/07_kaka/kaka_soak SECS=15 bash $src/examples/07_kaka/test_kaka_soak.sh
-sqlxtc_iosoak|PUNT,WORKERS|@wrap env SQLXTC_SERVER=$sx/sqlxtc-server SECS=20 CLIENTS=32 bash $src/test/sqlxtc/test_sqlxtc_iosoak.sh
+sqlxtc_iosoak|PUNT,WORKERS|@wrap env SQLXTC_SERVER=$sx/sqlxtc-server SECS=20 CLIENTS=32 bash $sx/test/test_sqlxtc_iosoak.sh
 EOF
 }
 

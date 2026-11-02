@@ -169,6 +169,10 @@ test('m12/backtrace',
 # test_pgmock_smoke: m16 test + the examples/09_pgmock mock sources,
 # -I examples/09_pgmock.  Plain main (no munit).
 # --------------------------------------------------------------------------
+fs = import('fs')
+# The examples are the git submodule examples/ (libxtc-examples); a
+# checkout without it skips this test.
+if fs.exists('../examples/09_pgmock/listener.c')
 test('m16/pgmock_smoke',
   executable('test_pgmock_smoke',
     files('m16/test_pgmock_smoke.c',
@@ -181,3 +185,6 @@ test('m16/pgmock_smoke',
     link_with : xtc_static,
     dependencies : lib_deps),
   timeout : 120)
+else
+  message('examples/ submodule not checked out: m16/pgmock_smoke skipped')
+endif

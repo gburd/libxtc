@@ -85,8 +85,20 @@ libs="$libs $(sed -n 's/^LIBS[[:space:]]*=[[:space:]]*//p' "$build/Makefile")"
 # needed.  Compile it against the sim lib into a per-test object.
 bmdir="$XTC_SRC_DIR/examples/06_sqlxtc"
 bmobj="$work/bufmgr.o"
+# The sqlxtc engine lives in the examples submodule (libxtc-examples).
+# Without it, the tests that drive the engine are SKIPPED, by name, and
+# the rest of the tier still runs: a checkout made without
+# --recurse-submodules must not fail obscurely.
+SQLXTC_TESTS="test_sim_bufmgr test_sim_crash_recover test_sim_compose test_sim_compose_crash test_sim_btree_merge test_sim_btree_scan test_sim_sql_now test_sim_wal_kill test_sim_sqlxtc_reopen test_sim_sqlxtc_evict test_sim_sqlxtc_ckpt test_sim_sqlxtc_gc test_sim_sqlxtc_gcidx"
+have_sqlxtc=1
+[ -f "$bmdir/bufmgr.c" ] || have_sqlxtc=0
+if [ "$have_sqlxtc" -eq 0 ]; then
+	echo "  [sim] SKIP: examples/ submodule not checked out" \
+	    "(git submodule update --init --recursive); skipping the" \
+	    "sqlxtc-engine tests: $SQLXTC_TESTS"
+fi
 # shellcheck disable=SC2086
-if ! $CC -std=c11 -D_GNU_SOURCE $inc -I"$bmdir" \
+if [ "$have_sqlxtc" -eq 1 ] && ! $CC -std=c11 -D_GNU_SOURCE $inc -I"$bmdir" \
 	-c "$bmdir/bufmgr.c" -o "$bmobj" 2> "$work/cc.err"; then
 	echo "  [sim] FAIL: bufmgr.c (for test_sim_bufmgr) did not compile"
 	head -20 "$work/cc.err" >&2
@@ -100,8 +112,10 @@ fi
 # (which the sim lib provides) + the SQLXTC_HAVE_LIME parser, so compile
 # each against the sim lib into per-test objects (bufmgr.o is reused).
 engobjs="$bmobj"
+[ "$have_sqlxtc" -eq 1 ] || engobjs=""
 for s in engine db quack metrics vexec vxfunc sql_parse sql_parse_drv sql_ast \
 	sql_parse_gen xstore xlog wal btree btnode; do
+	[ "$have_sqlxtc" -eq 1 ] || break
 	o="$work/$s.o"
 	# shellcheck disable=SC2086
 	if ! $CC -std=c11 -D_GNU_SOURCE -DSQLXTC_HAVE_LIME=1 $inc -I"$bmdir" \
@@ -120,6 +134,9 @@ for t in test_sim_sched test_sim_sched_policy test_sim_batch test_sim_cross_loop
 	# test_sim_crash_recover needs the whole native engine object set.
 	if [ -n "${XTC_SIM_ONLY:-}" ]; then   # XTC_SIM_ONLY="t1 t2"
 		case " $XTC_SIM_ONLY " in *" $t "*) ;; *) continue ;; esac
+	fi
+	if [ "$have_sqlxtc" -eq 0 ]; then
+		case " $SQLXTC_TESTS " in *" $t "*) continue ;; esac
 	fi
 	extra_obj=""
 	extra_inc=""

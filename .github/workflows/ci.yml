@@ -36,6 +36,8 @@ jobs:
         compiler: [gcc, clang]
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Install dependencies
         run: |
@@ -77,6 +79,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -113,6 +117,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -150,6 +156,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -182,6 +190,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -231,6 +241,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Build + test (musl, aarch64, Alpine)
         run: |
           docker run --rm -v "$PWD":/src -w /src alpine:latest sh -euc '
@@ -266,6 +278,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -366,6 +380,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -396,6 +412,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Install Nix (for a pinned CBMC 5.x)
         uses: cachix/install-nix-action@v27
         with:
@@ -424,6 +442,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -547,6 +567,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          submodules: true
       - name: Install clang-format 18
         run: |
           sudo apt-get update
@@ -570,6 +591,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -600,6 +623,8 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -649,6 +674,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          submodules: true
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -678,6 +704,8 @@ jobs:
         compiler: [gcc, clang]
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Install dependencies
         run: |
@@ -748,6 +776,8 @@ jobs:
         sanitizer: [address, undefined]
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -822,6 +852,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -850,6 +882,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -932,6 +966,8 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -1039,6 +1075,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Install dependencies
         run: |
@@ -1151,6 +1189,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Fetch the Lime submodule (best-effort)
         # The Lime submodule lives on Codeberg and is used only by the
         # sqlxtc parser-staleness check, which already no-ops when it is
@@ -1187,7 +1227,7 @@ jobs:
           make XTC_BUILD=../../build_ci
           ./test_lob
           ./test_lob_diff
-      - name: rexis server + test/m99 (RESP, loopback, PBT, measured budgets)
+      - name: rexis server + its test suite (RESP, loopback, PBT, measured budgets)
         # The README flagship.  Forks real servers on kernel-chosen free
         # loopback ports (no fixed port, so no collision on a shared
         # runner); every wait inside is bounded, and the target wraps
@@ -1233,7 +1273,7 @@ jobs:
         working-directory: examples/06_sqlxtc
         run: |
           make XTC_BUILD=../../build_ci sqlxtc-server
-          bash ../../test/sqlxtc/test_sqlxtc_mt.sh
+          bash test/test_sqlxtc_mt.sh
       - name: kaka network + storage soak (8 producers + 8 consumers, durable, cold reads)
         # A real broker on a durable dir (fdatasync before each ack, 256 KiB
         # segments, a 1 MiB memory cap so FETCHes read segment files back)
@@ -1285,7 +1325,7 @@ jobs:
           # the differential that proves the native engine is
           # functionally equivalent to SQLite, and it must keep passing
           # as sqlite3.c is excised.
-          bash ../../test/sqlxtc/test_sqlxtc_oracle.sh
+          bash test/test_sqlxtc_oracle.sh
       - name: sqlxtc SQL-dialect compatibility (self-contained corpus vs python sqlite3)
         working-directory: examples/06_sqlxtc
         run: |
@@ -1295,7 +1335,7 @@ jobs:
           # are reported, not failed.  This is NOT a run of SQLite's
           # testfixture TCL suite -- sqlxtc is a from-scratch wire-
           # protocol engine, so that suite does not apply.
-          bash ../../test/sqlxtc/test_sqlxtc_compat.sh
+          bash test/test_sqlxtc_compat.sh
 
   tls-backends:
     # Build the library against each TLS backend and run the m18 TLS
@@ -1308,6 +1348,8 @@ jobs:
         backend: [openssl, mbedtls, gnutls, wolfssl, boringssl]
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Install base toolchain
         run: |
           sudo apt-get update
@@ -1387,6 +1429,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Install dependencies
         run: brew install autoconf automake pkg-config gawk openssl@3
       - name: Autoreconf
@@ -1471,7 +1515,7 @@ jobs:
         working-directory: examples/06_sqlxtc
         run: |
           make XTC_BUILD=../../build_ci sqlxtc-server
-          bash ../../test/sqlxtc/test_sqlxtc_mt.sh
+          bash test/test_sqlxtc_mt.sh
 
   freebsd:
     # FreeBSD runtime coverage in a VM on the Linux runner
@@ -1491,6 +1535,8 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Build + test in a FreeBSD VM
         uses: vmactions/freebsd-vm@v1
         with:
@@ -1534,6 +1580,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Register qemu-user binfmt (riscv64)
         uses: docker/setup-qemu-action@v3
         with:
@@ -1561,6 +1609,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Set up MSVC (cl, ml64, lib on PATH)
         uses: ilammy/msvc-dev-cmd@v1
       - name: Build xtc.lib + smoke, run smoke

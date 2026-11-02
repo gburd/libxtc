@@ -145,6 +145,22 @@ build() {
 		echo "perf-gate: cannot archive $ref" >&2
 		exit 2
 	fi
+	# `git archive` leaves submodules empty.  Since 2.2 the examples
+	# (and the bench_wal cell's engine) are the submodule examples/:
+	# extract it at the commit this ref records, from the checked-out
+	# submodule's object store.  A ref from before the split carries
+	# examples/ as plain files and needs nothing.
+	exc=$(git -C "$src" ls-tree "$ref" examples 2>/dev/null | awk '$2 == "commit" {print $3}')
+	if [ -n "$exc" ]; then
+		if git -C "$src/examples" cat-file -e "$exc^{commit}" 2>/dev/null; then
+			mkdir -p "$t/src/examples"
+			git -C "$src/examples" archive "$exc" | tar x -C "$t/src/examples"
+		else
+			echo "perf-gate: $tag: examples submodule commit $exc not" \
+			    "available (git submodule update --init); the bench_wal" \
+			    "cell is skipped for this side" >&2
+		fi
+	fi
 	( cd "$t/build" && "$t/src/dist/configure" --with-tls=auto \
 	    > configure.log 2>&1 && "${MAKE:-make}" -j"$JOBS" > make.log 2>&1 ) || {
 		echo "perf-gate: $tag ($ref) failed to build; see $t/build" >&2
@@ -218,8 +234,16 @@ for f in micro/bench_micro bench_hop bench_sync_offloop bench_timer_scale \
 	git -C "$src" show "$cand_ref:bench/$f.c" > "$out/cand-bench/$f.c" 2>/dev/null || \
 	    rm -f "$out/cand-bench/$f.c"
 done
-git -C "$src" show "$cand_ref:examples/06_sqlxtc/bench_wal.c" \
-    > "$out/cand-bench/bench_wal.c" 2>/dev/null || rm -f "$out/cand-bench/bench_wal.c"
+# bench_wal.c: a plain file before the examples split, inside the
+# examples submodule's commit after it.
+excand=$(git -C "$src" ls-tree "$cand_ref" examples 2>/dev/null | awk '$2 == "commit" {print $3}')
+if [ -n "$excand" ]; then
+	git -C "$src/examples" show "$excand:06_sqlxtc/bench_wal.c" \
+	    > "$out/cand-bench/bench_wal.c" 2>/dev/null || rm -f "$out/cand-bench/bench_wal.c"
+else
+	git -C "$src" show "$cand_ref:examples/06_sqlxtc/bench_wal.c" \
+	    > "$out/cand-bench/bench_wal.c" 2>/dev/null || rm -f "$out/cand-bench/bench_wal.c"
+fi
 build base "$base_ref"
 build cand "$cand_ref"
 echo "base $(cat "$out/base/rev") $base_ref" >> "$out/host.txt"

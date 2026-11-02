@@ -1,3 +1,4 @@
-[submodule "examples/sqlxtc/lime"]
-	path = examples/06_sqlxtc/lime
-	url = https://codeberg.org/gregburd/lime.git
+[submodule "examples"]
+	path = examples
+	url = https://codeberg.org/gregburd/libxtc-examples.git
+	branch = main

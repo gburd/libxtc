@@ -1,3 +1,0 @@
-# tnt echo example build artifacts -- compiled output is never committed.
-*.o
-tnt_echo

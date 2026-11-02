@@ -60,17 +60,13 @@ if [ -z "$base" ] || ! git rev-parse --verify -q "$base^{commit}" >/dev/null; th
 	exit 2
 fi
 
-# The vendored Lime submodule and the generated parser are not ours to
-# format.
+# examples/ is the libxtc-examples submodule: its style is checked there.
 # git-clang-format exits 1 when it has a diff to show and also on its own
 # errors, so tell them apart by the output: a real diff starts "diff --git".
 err=$(mktemp "${TMPDIR:-/tmp}/style-check.XXXXXX")
 trap 'rm -f "$err"' EXIT
 out=$("$GCF" --binary "$CF" --style file --extensions c,h --diff \
-    "$base" -- src test bench examples tools \
-    ':(exclude)examples/06_sqlxtc/lime' \
-    ':(exclude)examples/06_sqlxtc/sql_parse_gen.c' \
-    ':(exclude)examples/06_sqlxtc/sql_parse_gen.h' 2>"$err") || true
+    "$base" -- src test bench tools 2>"$err") || true
 if [ -s "$err" ]; then
 	echo "style-check: $GCF failed (pair it with a clang-format of the same version):" >&2
 	head -5 "$err" >&2

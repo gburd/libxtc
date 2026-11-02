@@ -326,21 +326,21 @@ the summary:
 Two examples drive real accelerators through this API with a FAKE
 backend fallback that needs no device and runs in `make check`:
 
-- [`examples/13_gpu_batching`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/13_gpu_batching/README.md)
+- [`examples/13_gpu_batching`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/13_gpu_batching/README.md)
   -- continuous-batching Mandelbrot over OpenCL, demonstrated on two AMD
   GPUs at once (one group per device, each on its own carrier loop).
-- [`examples/14_hetero_batching`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/14_hetero_batching/README.md)
+- [`examples/14_hetero_batching`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/14_hetero_batching/README.md)
   -- a heterogeneous capstone driving an Intel Arc GPU (OpenCL) and an
   Intel AI Boost NPU (Level Zero) concurrently, with GPU and NPU
   operations in overlapping in-flight windows.
 
 ## Demonstrated in
 
-- [`examples/03_supervised_app.c`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/03_supervised_app.c)
+- [`examples/03_supervised_app.c`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/03_supervised_app.c)
   -- the minimal case: two supervised children share one loop as two
   classes (a latency-bounded foreground counter with 3x shares vs a
   best-effort background stats printer), plus the stall watchdog.
-- [`examples/06_sqlxtc`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/06_sqlxtc)
+- [`examples/06_sqlxtc`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/06_sqlxtc)
   -- the real case: the SQL server enables the over-budget stall
   watchdog so a runaway query or structure-modification that hogs a
   worker loop is logged with a backtrace instead of silently stalling

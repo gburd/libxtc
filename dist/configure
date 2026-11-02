@@ -673,6 +673,10 @@ XTC_ACCEL_CFLAGS
 XTC_DPDK_LIBS
 XTC_DPDK_CFLAGS
 PKG_CONFIG
+XTC_CHECK_EXAMPLES
+XTC_EXAMPLE_TESTS_PBT
+XTC_EXAMPLE_TESTS_C
+XTC_HAVE_EXAMPLES
 XTC_ENABLE_SHARED
 AWK
 RANLIB
@@ -3937,6 +3941,44 @@ printf %s "checking whether to build a shared library... " >&6; }
 { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $xtc_enable_shared" >&5
 printf "%s\n" "$xtc_enable_shared" >&6; }
 XTC_ENABLE_SHARED=$xtc_enable_shared
+
+
+# -------------------------------------------------------------------------
+# The examples live in their own repository (libxtc-examples), carried as
+# the git submodule `examples/`.  A checkout without it (a shallow clone,
+# `git clone` without --recurse-submodules, a tarball without it) still
+# builds and checks the library; `make check` then SKIPs the tests that
+# compile example sources, and says so.  `git submodule update --init
+# --recursive` brings them back.
+# -------------------------------------------------------------------------
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for the examples submodule" >&5
+printf %s "checking for the examples submodule... " >&6; }
+if test -f "$srcdir/../examples/README.md"
+then :
+  xtc_have_examples=yes
+else case e in #(
+  e) xtc_have_examples=no ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $xtc_have_examples" >&5
+printf "%s\n" "$xtc_have_examples" >&6; }
+if test "x$xtc_have_examples" = xyes
+then :
+  XTC_EXAMPLE_TESTS_C='test_pgmock_smoke'
+   XTC_EXAMPLE_TESTS_PBT='pbt_qsel'
+   XTC_CHECK_EXAMPLES='check-examples'
+else case e in #(
+  e) XTC_EXAMPLE_TESTS_C=''
+   XTC_EXAMPLE_TESTS_PBT=''
+   XTC_CHECK_EXAMPLES='check-examples-skip'
+   { printf "%s\n" "$as_me:${as_lineno-$LINENO}: WARNING: examples/ is empty: run \`git submodule update --init --recursive\` to test the examples" >&5
+printf "%s\n" "$as_me: WARNING: examples/ is empty: run \`git submodule update --init --recursive\` to test the examples" >&2;} ;;
+esac
+fi
+XTC_HAVE_EXAMPLES=$xtc_have_examples
+
+
+
 
 
 # Check whether --enable-sched-policy was given.

@@ -179,7 +179,7 @@ reclaimed).
 
 ## The example
 
-[`examples/08_tnt/echo.c`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/08_tnt/echo.c)
+[`examples/08_tnt/echo.c`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/08_tnt/echo.c)
 is a TCP echo server where each connection is its own Isolate -- no
 shared socket table, no lock. The
 [tnt example page]({{ '/examples/tnt/' | relative_url }}) walks through

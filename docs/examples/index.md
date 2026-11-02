@@ -12,7 +12,7 @@ lede: >-
 
 ---
 
-The [`examples/`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples)
+The [`examples/`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main)
 directory ships complete, buildable programs. The small ones isolate a
 single idea; the large ones are real servers modelled on well-known
 systems -- Redis, SQLite, Kafka, Seastar/Tina, PostgreSQL -- rebuilt on
@@ -60,7 +60,7 @@ the result. It exists to prove the async/await contract end to end and
 to be the first thing a newcomer reads. It is the basis of
 [Getting started]({{ '/guide/01-getting-started/' | relative_url }}).
 Source:
-[`examples/01_hello_async.c`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/01_hello_async.c).
+[`examples/01_hello_async.c`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/01_hello_async.c).
 
 ### 02_proc_pingpong -- message passing
 
@@ -69,7 +69,7 @@ Two processes bounce a counter back and forth. It shows that the
 and it establishes the idiom of encoding the reply-to pid in the payload
 (libxtc deliberately does not attach an implicit sender --
 [why]({{ '/guide/03-processes-and-messages/' | relative_url }})). Source:
-[`examples/02_proc_pingpong.c`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/02_proc_pingpong.c).
+[`examples/02_proc_pingpong.c`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/02_proc_pingpong.c).
 
 ### 03_supervised_app -- an OTP application
 
@@ -78,7 +78,7 @@ external watcher that can request an orderly shutdown. It demonstrates
 that the supervisor stack composes: the app owns the loop, registry, and
 root supervisor; the supervisor owns children with a restart policy.
 This is the skeleton of a real service. Source:
-[`examples/03_supervised_app.c`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/03_supervised_app.c).
+[`examples/03_supervised_app.c`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/03_supervised_app.c).
 
 ### 04_lockmgr_demo -- deadlock detection
 
@@ -88,7 +88,7 @@ counterpoint to the process model: when you *do* want shared,
 lock-ordered state, [the lock manager]({{ '/reference/locks/' | relative_url }})
 provides it -- with deadlock detection, which hand-rolled
 `pthread_mutex` ordering does not. Source:
-[`examples/04_lockmgr_demo.c`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/04_lockmgr_demo.c).
+[`examples/04_lockmgr_demo.c`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/04_lockmgr_demo.c).
 
 ## Continuous batching
 
@@ -110,7 +110,7 @@ tracer finds and a debugger does not. The
 [tracing guide]({{ '/guide/12-tracing/' | relative_url }}) runs
 `tools/dtrace/xtc_lock_contention.d` and `xtc_park_latency.d` against it.
 Source:
-[`examples/15_usdt/convoy.c`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/15_usdt/convoy.c).
+[`examples/15_usdt/convoy.c`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/15_usdt/convoy.c).
 
 ## Reading suggestion
 

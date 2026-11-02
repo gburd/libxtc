@@ -13,7 +13,7 @@ lede: >-
 ---
 
 Source:
-[`examples/05_rexis/`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/05_rexis)
+[`examples/05_rexis/`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/05_rexis)
 (~4,500 lines of C, including tests).
 
 ## The software that inspired it
@@ -209,7 +209,7 @@ both were allocated at accept; 20,000 idle connections, `--loops=2`).
   request-size cap enforced at the header, EOF tracked separately from
   errors, and client buffers charged to the same budget -- are each a
   few lines; finding that they were missing took an adversarial client.
-  `test/m99/test_rexis_budgets.c` now measures each one.
+  `examples/05_rexis/test/test_rexis_budgets.c` now measures each one.
 
 ## Run it
 

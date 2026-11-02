@@ -13,7 +13,7 @@ lede: >-
 ---
 
 Source:
-[`examples/09_pgmock/`](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/09_pgmock)
+[`examples/09_pgmock/`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/09_pgmock)
 (~680 lines of C).
 
 ## The software that inspired it

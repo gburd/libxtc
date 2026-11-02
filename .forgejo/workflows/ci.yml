@@ -58,6 +58,8 @@ jobs:
 
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Autoreconf
         working-directory: dist
@@ -91,6 +93,8 @@ jobs:
             pkg-config libssl-dev liburing-dev gawk openssl
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          submodules: true
       - name: Autoreconf
         working-directory: dist
         run: autoreconf -i
@@ -120,6 +124,8 @@ jobs:
           sudo apt-get install -y musl-tools musl-dev make autoconf automake pkg-config gawk
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          submodules: true
       - name: Autoreconf
         working-directory: dist
         run: autoreconf -i
@@ -154,6 +160,8 @@ jobs:
             libssl-dev gawk
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          submodules: true
       - name: Autoreconf
         working-directory: dist
         run: autoreconf -i
@@ -188,6 +196,7 @@ jobs:
         uses: https://code.forgejo.org/actions/checkout@v4
         with:
           fetch-depth: 0
+          submodules: true
       - name: clang-format the changed lines
         run: |
           base=$(git merge-base HEAD origin/main 2>/dev/null || git rev-parse HEAD~1)
@@ -212,6 +221,8 @@ jobs:
           sudo apt-get install -y gcc make autoconf automake pkg-config libssl-dev gawk openssl
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          submodules: true
       - name: Autoreconf
         working-directory: dist
         run: autoreconf -i
@@ -230,6 +241,8 @@ jobs:
           sudo apt-get install -y gcc make autoconf automake pkg-config libssl-dev gawk openssl
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          submodules: true
       - name: Autoreconf
         working-directory: dist
         run: autoreconf -i
@@ -250,6 +263,8 @@ jobs:
           sudo apt-get install -y gcc make autoconf automake pkg-config libssl-dev gawk openssl
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          submodules: true
       - name: Autoreconf
         working-directory: dist
         run: autoreconf -i
@@ -292,6 +307,8 @@ jobs:
           sudo apt-get install -y gcc make autoconf automake pkg-config gawk
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          submodules: true
       - name: Scheduler feature matrix and replay equivalence
         timeout-minutes: 25
         run: sh test/dist/test_sched_policy_build.sh
@@ -329,6 +346,8 @@ jobs:
 
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Autoreconf
         working-directory: dist
@@ -370,6 +389,8 @@ jobs:
             gcc make autoconf automake pkg-config libssl-dev liburing-dev gawk openssl python3
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          submodules: true
       - name: Autoreconf
         working-directory: dist
         run: autoreconf -i
@@ -391,7 +412,7 @@ jobs:
         working-directory: examples/06_sqlxtc
         run: |
           make XTC_BUILD=../../build_ci sqlxtc-server
-          bash ../../test/sqlxtc/test_sqlxtc_mt.sh
+          bash test/test_sqlxtc_mt.sh
       - name: kaka network + storage soak, and its planted-bug control
         # See the GitHub examples job.  SECS=5 keeps the data written
         # under ~1 GB on a small runner; the soak's segment checks still
@@ -449,6 +470,8 @@ jobs:
             gcc make autoconf automake pkg-config libssl-dev liburing-dev gawk openssl python3
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          submodules: true
       - name: Autoreconf
         working-directory: dist
         run: autoreconf -i
@@ -489,6 +512,8 @@ jobs:
           esac
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          submodules: true
       - name: Autoreconf
         working-directory: dist
         run: autoreconf -i

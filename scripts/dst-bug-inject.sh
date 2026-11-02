@@ -47,6 +47,12 @@ INC="-I$ROOT/src/inc"
 # The libraries configure found a build's libxtc.a needs (FreeBSD: -lrt).
 cfg_libs() { sed -n 's/^LIBS[[:space:]]*=[[:space:]]*//p' "$1/Makefile"; }
 BMDIR="$ROOT/examples/06_sqlxtc"
+# Several planted bugs live in the sqlxtc engine (the examples submodule).
+if [ ! -f "$BMDIR/bufmgr.c" ]; then
+	echo "dst-bug-inject: examples/ submodule not checked out; run" \
+	    "git submodule update --init --recursive" >&2
+	exit 2
+fi
 
 # bug-id ; catching-test ; sqlxtc-engine-needed(0/1) ; seeded(0/1) ; EXPECT
 #

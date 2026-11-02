@@ -7,7 +7,7 @@ lede: >-
   Refill a numerical batch between iterations without holding short requests behind the longest member.
 ---
 
-The [complete example source](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/12_continuous_batching/main.c)
+The [complete example source](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/12_continuous_batching/main.c)
 runs two numerical batch groups and an unrelated heartbeat process on one
 loop. It uses only public APIs from `xtc_batch.h`, `xtc_sched.h`, and the
 process/loop interfaces. Each group has a distinct scheduling class.
@@ -72,8 +72,8 @@ would not provide that drain guarantee.
 Configure libxtc with `--enable-sched-policy` and build `libxtc.a`. In
 `examples/12_continuous_batching`, run
 `make XTC_BUILD=/absolute/path/to/configured-build test`.
-See the [README](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/12_continuous_batching/README.md)
-and [Makefile](https://codeberg.org/gregburd/libxtc/src/branch/main/examples/12_continuous_batching/Makefile)
+See the [README](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/12_continuous_batching/README.md)
+and [Makefile](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/12_continuous_batching/Makefile)
 for the build contract and command-line options.
 
 `--self-test` checks exact scalar results, one terminal callback per accepted

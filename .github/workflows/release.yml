@@ -156,10 +156,11 @@ jobs:
           ../dist/configure --with-tls=auto
           make -j"$(nproc)"
           test -f libxtc.a
-          # Smoke: the tarball's own example must build and run against the
-          # library just built from the tarball.
-          make 01_hello
-          ./01_hello
+          # The tarball is the library only: `git archive` leaves the
+          # examples submodule (libxtc-examples) empty, and configure says
+          # so.  Its consumer check is the installed-header program below.
+          test -z "$(ls -A "$src/examples" 2>/dev/null)" \
+            || { echo "FAIL: expected an empty examples/ in the tarball"; exit 1; }
           # And the library must be usable through the documented install
           # surface: install into a throwaway prefix, then compile+link+run
           # a consumer against ONLY the installed headers.

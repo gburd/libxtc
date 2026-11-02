@@ -44,7 +44,7 @@ libc + pthreads.
 Clone, configure, build:
 
 ```sh
-git clone https://codeberg.org/gregburd/libxtc.git
+git clone --recurse-submodules https://codeberg.org/gregburd/libxtc.git
 cd libxtc/dist && autoreconf -i && cd ..
 mkdir -p build_unix && cd build_unix
 ../dist/configure
