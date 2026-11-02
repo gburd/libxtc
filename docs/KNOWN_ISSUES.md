@@ -2241,7 +2241,7 @@ every size).
 work sessions (three in the IOCP round below, plus four more --
 poll-timeout, pthread retval, thread affinity, slab mmap zero-fill --
 in the full test-surface sweep; see the sweep update further down and
-docs/M_WINDOWS_MATRIX.md); the one then-remaining item (tnt/test_tnt)
+docs/windows-matrix.md); the one then-remaining item (tnt/test_tnt)
 turned out not to be a bug at all -- see the tnt entry above -- and a
 EIGHTH real bug (the raw EXCEPTION_* DOWN reason) was found in 2026-09
 by getting m8/test_proc to run on the host:
@@ -2329,7 +2329,7 @@ by getting m8/test_proc to run on the host:
 2022):** every `TESTS_C` test was built + run individually under
 cl.exe 2022 and the Windows gate grew from 16 to a 100-test HARD GATE
 (`build_msvc.bat` step 5, all-pass, 0 warnings under `/WX`; per-test
-matrix in docs/M_WINDOWS_MATRIX.md).  Four more real bugs were found
+matrix in docs/windows-matrix.md).  Four more real bugs were found
 and fixed on the host, plus the poll-timeout bug below:
 
 5. FIXED -- `xtc_io_poll` ignored its caller timeout across AFD repoll
@@ -2344,7 +2344,7 @@ and fixed on the host, plus the poll-timeout bug below:
    until an event/wakeup is emitted or the caller's real deadline
    elapses (src/io/io_iocp.c).
 6. FIXED -- the pthread compat shim discarded the thread return value
-   (`m1/test_thread` T1/T2); see docs/M_WINDOWS_MATRIX.md.
+   (`m1/test_thread` T1/T2); see docs/windows-matrix.md.
 7. FIXED -- `__os_thread_set_affinity` was XTC_E_NOSYS on Windows
    (`m1/test_cpu`); now SetThreadAffinityMask.
 8. FIXED -- test_slab's Windows mmap shim used malloc, not calloc, so
@@ -2389,7 +2389,7 @@ re-running the smoke binary passes.
 
 `src/io/io_iocp.c` was rewritten from the round-1 readiness emulation
 to a native completion-port design (details in
-`docs/M_WINDOWS_MATRIX.md`):
+`docs/windows-matrix.md`):
 
   - `CreateIoCompletionPort` + `GetQueuedCompletionStatusEx` is the
     only wait primitive; the round-1 64-handle

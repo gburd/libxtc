@@ -79,8 +79,8 @@ start with libxtc, it's exqusite!"** -everyone who uses it.
   has an OS-layer port.  (An AIX/ppc64 OS-layer port exists in-tree and
   compiles, but AIX is NOT a supported or maintained target -- it is
   unverified and off the roadmap; see docs/KNOWN_ISSUES.md.)  See
-  `docs/M_WINDOWS_MATRIX.md`,
-  `docs/M_LIBC_MATRIX.md`, and PLAN.md for the per-platform status.
+  `docs/windows-matrix.md`,
+  `docs/libc-matrix.md`, and PLAN.md for the per-platform status.
 
 * **You want to stay close to the metal.**  No GC, no STW pauses.
   Memory comes from cache-line-padded slab caches with optional
@@ -244,7 +244,7 @@ What's working today:
 | L3 primitives | Done.  Channels, processes, sync, RCU, lwlock, lrlock, lockmgr, slab, resource caps, observability. |
 | L4 orchestration | Done.  Supervisors (4 strategies), gen_server, registry, app bringup, hierarchical mctx. |
 | Process groups | Done.  `xtc_pg` (Erlang `:pg`): named, single-node pid groups with join/leave/broadcast; tested in `test/m10/test_pg.c` and under DST.  Cross-node groups await the unbuilt distributed module. |
-| TLS | OpenSSL, GnuTLS, wolfSSL, Mbed TLS, and BoringSSL backends build and pass the m18 suite in CI (`docs/M_TLS_MATRIX.md`); SChannel (Windows) is compile-only.  Since 1.50 a CLIENT verifies the server certificate AND host name by default on the four non-Windows backends, a write to a dead peer is an error rather than a process-killing `SIGPIPE`, and a zeroed `xtc_tls_opts_t` is secure.  SChannel applies the same verify default since 1.51 but does not yet check the host name. |
+| TLS | OpenSSL, GnuTLS, wolfSSL, Mbed TLS, and BoringSSL backends build and pass the m18 suite in CI (`docs/tls-matrix.md`); SChannel (Windows) is compile-only.  Since 1.50 a CLIENT verifies the server certificate AND host name by default on the four non-Windows backends, a write to a dead peer is an error rather than a process-killing `SIGPIPE`, and a zeroed `xtc_tls_opts_t` is secure.  SChannel applies the same verify default since 1.51 but does not yet check the host name. |
 
 Test coverage today, measured against this tree (v1.49.1 plus the
 allocator / cancellation / accounting regression tests that landed after

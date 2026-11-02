@@ -7,7 +7,7 @@
 #	bash shell.  Reports a per-toolchain summary.
 #
 #	The source tree is expected at /c/scratch/xtc (see
-#	docs/M_WINDOWS_MATRIX.md for how to land it there).
+#	docs/windows-matrix.md for how to land it there).
 #
 #	Usage, from a workstation:
 #	  scp dist/santorini-matrix.sh santorini:matrix.sh
@@ -82,7 +82,7 @@ run_toolchain "MinGW64 gcc" "/mingw64/bin"        gcc   build_mingw
 run_toolchain "Clang64"     "/c/msys64/clang64/bin" clang build_clang64
 
 # MSVC requires the asm port + meson expansion (see
-# docs/M_WINDOWS_MATRIX.md); not driven by this script yet.
+# docs/windows-matrix.md); not driven by this script yet.
 echo "================================================================"
 echo "MSVC: not driven by this script (asm port pending)."
 echo "================================================================"

@@ -23,7 +23,7 @@
  *	correctness was reviewed against Microsoft's SSPI / SChannel
  *	documentation (AcquireCredentialsHandle, InitializeSecurityContext,
  *	AcceptSecurityContext, EncryptMessage, DecryptMessage).  See
- *	docs/M_TLS_MATRIX.md for the verification status.
+ *	docs/tls-matrix.md for the verification status.
  *
  *	Non-blocking discipline:
  *

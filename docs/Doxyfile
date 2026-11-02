@@ -30,9 +30,9 @@ INPUT                  = ../README.md \
                          ./locks.md \
                          ./abi-stability.md \
                          ./KNOWN_ISSUES.md \
-                         ./M_WINDOWS_MATRIX.md \
-                         ./M_TLS_MATRIX.md \
-                         ./M_LIBC_MATRIX.md \
+                         ./windows-matrix.md \
+                         ./tls-matrix.md \
+                         ./libc-matrix.md \
                          ../src/inc/
 
 FILE_PATTERNS          = *.h *.md

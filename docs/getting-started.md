@@ -397,7 +397,7 @@ By layer of complexity:
 
 For specific topics:
 
-* `docs/M_TLS.md` -- TLS support strategy.
+* `docs/tls.md` -- TLS support strategy.
 
 For API reference:
 

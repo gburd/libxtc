@@ -81,7 +81,7 @@
  *	ws2_32.  It has NOT run on a Windows host: the AFD poll path, the
  *	cancel/re-arm lifetime, and the wakeup ordering must be validated
  *	on santorini (or the windows CI job) before this is called
- *	production quality.  See docs/M_WINDOWS_MATRIX.md and
+ *	production quality.  See docs/windows-matrix.md and
  *	docs/KNOWN_ISSUES.md for the exact test plan.  This mirrors the
  *	reviewed-but-untested status of src/io/io_aix.c.
  */

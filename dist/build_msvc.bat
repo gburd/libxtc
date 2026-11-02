@@ -6,7 +6,7 @@ rem   Build libxtc as a static library with the Microsoft toolchain
 rem   (cl.exe + ml64.exe + lib.exe), build one smoke test, and
 rem   best-effort build+run one real munit-suite test (test/m1/test_atomic.c)
 rem   now that the harness's VLA-param macro (MUNIT_ARRAY_PARAM) has been
-rem   fixed to standard C11 -- see step 5 below and docs/M_WINDOWS_MATRIX.md.
+rem   fixed to standard C11 -- see step 5 below and docs/windows-matrix.md.
 rem
 rem   Run from a directory you want the objects in, inside a Visual
 rem   Studio "x64 Native Tools" environment (or after calling
@@ -29,7 +29,7 @@ rem /DXTC_BUILDING_DLL marks these objects as "I am the library" for
 rem the XTC_API export macro (src/inc/xtc_export.h): it selects
 rem __declspec(dllexport) on every PUBLIC prototype.  This build still
 rem archives into a STATIC xtc.lib (lib.exe below, no link.exe /DLL
-rem step) -- see docs/M_WINDOWS_MATRIX.md -- so the dllexport directive
+rem step) -- see docs/windows-matrix.md -- so the dllexport directive
 rem is inert here (no DLL is produced to export from) but its presence
 rem is what a follow-up DLL-producing build needs unchanged.  Wiring an
 rem actual link.exe /DLL step, a generated import .lib, and pointing
@@ -101,7 +101,7 @@ rem
 rem        This is now a HARD GATE: confirmed all-pass on a real cloud
 rem        Windows Server 2022 / MSVC 2022 host (100/100), so any
 rem        build/run failure in the set fails the job.
-rem        See docs/M_WINDOWS_MATRIX.md. ---
+rem        See docs/windows-matrix.md. ---
 echo.
 echo [5/5] cl real munit suite (Windows-runnable set)
 set MUNIT_PASS=0
@@ -127,7 +127,7 @@ rem    * tnt:test_tnt -- exits 77/SKIP.  xtc_tnt is genuinely POSIX-only
 rem      (src/orc/tnt.c is #if !defined(_WIN32) with NOSYS stubs), so the
 rem      old "all-zero counters = a cross-shard-wake bug" reading was
 rem      wrong: there is no tnt code on Windows to have a bug in.
-rem  See docs/M_WINDOWS_MATRIX.md for the honest per-test status.
+rem  See docs/windows-matrix.md for the honest per-test status.
 rem  (test_proc_wake_crossthread exits 77/SKIP on Windows; the gate now
 rem  honors exit 77 as SKIP, so a legitimately-skipping test -- including
 rem  the timing path of concurrency/test_wake_after_migration -- is not a
@@ -147,7 +147,7 @@ rem async-completion path is environment-timing-sensitive (the
 rem documented \Device\Afd driver defect + 8ms re-poll workaround), so
 rem these can flap on a shared/slower CI runner.  Build+run them and
 rem REPORT, but do NOT fail the gate on them -- they are covered as
-rem verified by the on-host sweep (see docs/M_WINDOWS_MATRIX.md).
+rem verified by the on-host sweep (see docs/windows-matrix.md).
 set MUNIT_ADVISORY=m2:test_io_events
 for %%P in (%MUNIT_ADVISORY%) do (
   for /f "tokens=1,2 delims=:" %%a in ("%%P") do call :run_munit_advisory %%a %%b

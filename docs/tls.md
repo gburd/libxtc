@@ -14,7 +14,7 @@ OpenSSL, LibreSSL, mbedTLS, GnuTLS, and wolfSSL.  An SChannel (Windows
 SSPI) backend is written to the same seam but is compile-only -- not
 yet runtime-verified, awaiting a Windows host.  Select with
 `configure --with-tls=openssl|libressl|mbedtls|gnutls|wolfssl|schannel|auto|none`.
-See docs/M_TLS_MATRIX.md for the per-backend / per-version matrix.
+See docs/tls-matrix.md for the per-backend / per-version matrix.
 
 ## Goal
 
