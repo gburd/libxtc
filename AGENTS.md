@@ -37,7 +37,9 @@ Project-specific rules for AI agents (Claude Code, Kiro CLI, Pi, Maki).
      - `examples/06_sqlxtc/sql_parse_gen.c` -- the Lemon/Lime-generated
        SQL parser, committed like SQLite commits its lemon output
        (regenerating needs the Lime submodule built; the sqlxtc
-       Makefile documents it as "the committed generated file").
+       Makefile documents it as "the committed generated file").  Since
+       2026-11 it is committed in the libxtc-examples repository (the
+       `examples/` submodule), not in libxtc.
    These are generated SOURCE, not compiled OUTPUT -- the line the rule
    above draws.  Anything else generated (a `.o`, a lib, a second
    generated `.c`) is an artifact and must be gitignored, not committed.
@@ -51,35 +53,92 @@ Project-specific rules for AI agents (Claude Code, Kiro CLI, Pi, Maki).
    reads (API.md, ARCHITECTURE.md, KNOWN_ISSUES.md, abi-stability.md,
    getting-started.md, guide/, locks.md, index.md, PUBLISHING.md, the
    ADRs, Doxyfile) plus reference matrices a shipped man page / README
-   legitimately cites.  A file named `M_*.md` is the tell of an agent
-   memo: it belongs in `.agent/`.  When moving one out of `docs/`,
+   legitimately cites (libc-matrix.md, tls.md, tls-matrix.md,
+   windows-matrix.md; renamed from `M_*.md` in 2026-11).  A NEW file
+   named `M_*.md` is the tell of an agent memo: it belongs in `.agent/`.
+   PLAN.md at the root is the historical design rationale that the
+   README, man pages and source comments cite; it ships, and is not an
+   agent memo.  When moving one out of `docs/`,
    fix or drop every shipped reference to it (README, man pages, source
    header comments, index.md) rather than leaving a dead link.
 
-   `.agent/` is gitignored (`.gitignore` line 39).  NEVER `git add -f`
+   `.agent/` is gitignored (`.gitignore`).  NEVER `git add -f`
    a file under `.agent/` -- the `-f` overrides the ignore and is
    exactly how six memos leaked into Git in 2026-07 (removed in
    `4969eda`).  Agent tracking notes stay local-only, full stop; if a
    note's content deserves to ship, it becomes consumer-facing docs
    under `docs/` on its own merits, not a force-added `.agent/` file.
 
-## Worktrees and agent scratch space
+## The examples submodule
+
+`examples/` is the libxtc-examples repository
+(codeberg.org/gregburd/libxtc-examples), carried as a git submodule.
+Clone with `--recurse-submodules`, or run `git submodule update --init
+--recursive`.  Without it libxtc still builds and `make check` /
+`make check-dst` / `scripts/dst-corpus.sh` pass, SKIPPING by name the
+tests that compile example sources; the release gates that need the
+sqlxtc engine (`dst-bug-inject.sh`, `uring-gate.sh`) refuse instead.
+
+- A change to an example is a commit in libxtc-examples, then a libxtc
+  commit that moves the submodule pointer.  Push libxtc-examples FIRST:
+  a libxtc commit must never point at an examples commit the remote
+  does not have.
+- The libxtc DST tier links `06_sqlxtc` as its durability client, so
+  the pointer is the exact examples commit the tier was tested with.
+- Release tarballs are `git archive` of libxtc and contain an empty
+  `examples/`; that is intended (the library is what ships).
+
+## Where agent files go: `.agent/` vs `/scratch/libxtc/`
+
+Two places, never confused:
+
+- **`.agent/` (in the repo, gitignored): anything that informs or directs
+  an agent working on this code.**  Design notes, plans, briefs,
+  reviews and review findings, qualification records, investigation
+  write-ups, the scripts and probe sources an investigation used, small
+  result tables (csv/md/txt), and the per-campaign kits (`.agent/pNNN/`).
+  These STAY in `.agent/`.  Never move them to `/scratch`, `/tmp` or
+  `/home`: the next agent must find them next to the code.  A review
+  round writes its briefs, FINDINGS.md and plan straight into
+  `.agent/<round>/` (e.g. `.agent/review-2026-11/`).
+- **`/scratch/libxtc/` (outside the repo): artifacts and cruft.**  Git
+  worktrees, build trees (`build_*`, configure output, `autom4te.cache`),
+  binaries and objects, release-tarball and repo copies, vendored source
+  copies, git bundles, cores, raw per-run logs (`*.log`, `*.err`,
+  `*.out`, `*.thr`), archives of host results (`*.tgz`), flame-graph
+  SVGs, anything over ~1 MiB.  `/scratch/libxtc/cruft/` holds what was
+  swept out of the tree.  Nothing here directs an agent; if a number in
+  a raw log matters, copy it into the `.agent/` report that cites it.
+- **Never `/tmp` for agent work.**  `/tmp` is on the small root
+  filesystem; it filled to 100% during a 2026-11 review run and
+  silently truncated reviewer files.  Use `/scratch/libxtc/` for
+  throwaway probes and builds, `.agent/` for the notes.
+- **The repository root stays clean.**  No stray logs, build trees,
+  clones of other projects, or editor/tool leftovers (`*~`) in the
+  working tree; `git status --ignored` at the top should show only
+  `.agent/`, the editor/agent config dot-files, and the examples' own
+  ignored build outputs.
+- **This tree is synced to other hosts (unison).**  A file deleted or
+  moved here may be copied back from a peer with a newer copy.  After
+  moving anything out of the tree, re-check it a few minutes later and
+  remove what came back; do not move `.agent/` notes at all.
+
+## Worktrees
 
 - **Git worktrees live in `/scratch/libxtc/<worktree>`**, never inside the
   repository or elsewhere under the home directory.  Remove a worktree as
   soon as its branch is merged or abandoned (`git worktree list` should not
-  grow without bound).  This repo has a submodule
-  (`examples/06_sqlxtc/lime`), so `git worktree remove` refuses an
+  grow without bound).  This repo has a submodule (`examples/`, the
+  libxtc-examples repository, which nests `06_sqlxtc/lime`), so
+  `git worktree remove` refuses an
   initialized worktree: confirm `git status` is clean, then
   `git worktree remove --force --force`.  `git worktree move` cannot move
   such a worktree at all: remove it and `git worktree add` it at the new
   path.
-- **`.agent/` holds notes, not build output.**  Keep reports, scripts and
-  small result files; do not leave build trees, binaries, object files,
-  git bundles, cores or raw multi-hundred-MB driver logs there (compact a
-  raw log to its counts, or delete it once its numbers are in a report).
-  A git bundle of history taken before a rewrite still contains what the
-  rewrite removed: delete it once the rewrite is confirmed on the remote.
+- **`.agent/` holds notes, not build output** (see above).  A git bundle
+  of history taken before a rewrite still contains what the rewrite
+  removed: keep it in `/scratch/libxtc/`, and delete it once the rewrite
+  is confirmed on the remote.
 
 ## Recovering from a bad commit (history rewrite)
 
@@ -267,6 +326,18 @@ a different compiler, a backend the local build did not select).  A
 red pipeline that nobody looks at silently rots: this project once
 accumulated dozens of consecutive failing runs from one latent UBSan
 misalignment because pushes were not being checked.
+
+**GitHub Actions is the only CI.**  Codeberg disabled hosted Forgejo
+Actions for this repository on 2026-10-30 (its issue #1: too many
+pipelines).  Do not re-enable it, dispatch `.forgejo/` workflows, or
+move CI to another hosted runner without the maintainer's decision.
+Each push to `main` runs the whole matrix, so batch fixes into few
+pushes: one push per patch release, not one per fix.
+
+**Branches.**  `main` takes everything first.  The LTS line is
+`lts/2.1` (2.1.x): bug fixes only, cherry-picked from `main` after
+they land there.  New features, API changes and new error codes stay
+on `main` and ship in development releases.
 
 ```sh
 # wait for the mirror to sync (~30-60s), then:
