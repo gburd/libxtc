@@ -2141,7 +2141,8 @@ __xtc_proc_ctx_save(void)
 		rp->yield_park = t->park_requested ||
 		    atomic_load_explicit(&t->park_timer,
 		    memory_order_relaxed) != NULL ||
-		    atomic_load_explicit(&t->park_fd, memory_order_relaxed) >= 0 ||
+		    atomic_load_explicit(&t->park_fd, memory_order_relaxed) !=
+		    __PARK_TOK_NONE ||
 		    c->_parked_on != NULL;
 		l = __xtc_current_loop_get();
 		if (l != NULL && atomic_load_explicit(&rp->run_loop,
@@ -3552,9 +3553,10 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		}
 	}
 	/* park_io first; the release-store publishes it. */
-	self->task->park_io = wl->io;
-	atomic_store_explicit(&self->task->park_fd, fd,
-	    memory_order_release);
+	atomic_store_explicit(&self->task->park_io, wl->io,
+	    memory_order_relaxed);
+	atomic_store_explicit(&self->task->park_fd,
+	    __park_tok(self->task, fd), memory_order_release);
 	had_fd = 1;
 
 	if (timeout_ns >= 0) {
@@ -3567,9 +3569,10 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		    __os_clock_mono(&now_ns) != XTC_OK) {
 			if (t) __os_free(t);
 			(void)xtc_io_del_fd(wl->io, fd);
-			atomic_store_explicit(&self->task->park_fd, -1,
+			atomic_store_explicit(&self->task->park_fd,
+			    __PARK_TOK_NONE, memory_order_relaxed);
+			atomic_store_explicit(&self->task->park_io, NULL,
 			    memory_order_relaxed);
-			self->task->park_io = NULL;
 			__wait_fd_disarm_waker(self);
 			return XTC_E_INTERNAL;
 		}
@@ -3586,9 +3589,10 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		if (__xtc_timer_heap_push(wl, t) != XTC_OK) {
 			__os_free(t);
 			(void)xtc_io_del_fd(wl->io, fd);
-			atomic_store_explicit(&self->task->park_fd, -1,
+			atomic_store_explicit(&self->task->park_fd,
+			    __PARK_TOK_NONE, memory_order_relaxed);
+			atomic_store_explicit(&self->task->park_io, NULL,
 			    memory_order_relaxed);
-			self->task->park_io = NULL;
 			__wait_fd_disarm_waker(self);
 			return XTC_E_INTERNAL;
 		}
@@ -3712,11 +3716,12 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	 * and a test-then-use read leaked it when dispatch cleared the field
 	 * in between (see park_fd in loop_int.h). */
 	{
-	int claimed_fd = atomic_exchange_explicit(&self->task->park_fd, -1,
-	    memory_order_acq_rel);
-	xtc_io_t *claimed_io = self->task->park_io;
-	self->task->park_io = NULL;
-	if (claimed_fd >= 0) {
+	int64_t claimed_tok = atomic_exchange_explicit(&self->task->park_fd,
+	    __PARK_TOK_NONE, memory_order_acq_rel);
+	xtc_io_t *claimed_io =
+	    atomic_load_explicit(&self->task->park_io, memory_order_relaxed);
+	atomic_store_explicit(&self->task->park_io, NULL, memory_order_relaxed);
+	if (claimed_tok != __PARK_TOK_NONE) {
 		extern int __xtc_io_defer_del_fd(xtc_io_t *, int);
 		(void)had_fd;   /* documents intent: an fd was registered */
 		/*
@@ -3745,7 +3750,8 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		 * For a backend whose registry is kernel-synchronized (epoll)
 		 * the defer is a safe passthrough. */
 		(void)__xtc_io_defer_del_fd(
-		    claimed_io != NULL ? claimed_io : wl->io, claimed_fd);
+		    claimed_io != NULL ? claimed_io : wl->io,
+		    __park_tok_fd(claimed_tok));
 	}
 	}
 	if (had_timer) {
@@ -5262,7 +5268,7 @@ __fill_proc_info(struct xtc_proc *p, xtc_proc_info_t *info)
 		info->run_state = st;
 		if (st == XTC_TS_PARKED) {
 			if (atomic_load_explicit(&p->task->park_fd,
-			    memory_order_relaxed) >= 0)
+			    memory_order_relaxed) != __PARK_TOK_NONE)
 				info->park_reason = XTC_PARK_FD;
 			else if (atomic_load_explicit(&p->task->park_timer,
 			    memory_order_relaxed) != NULL)

@@ -119,6 +119,17 @@ def _waker_armed(p):
     return bool(wa.IsValid() and _u(wa) != 0)
 
 
+def _park_fd(task):
+    """The fd a task is parked on, or -1.  task->park_fd is a park token
+    (2.1.2+: fd in the low 32 bits, a generation in the high 32, -1 for
+    none); older builds store the bare fd, which decodes the same."""
+    tok = task.GetChildMemberWithName("park_fd").GetValueAsSigned()
+    if tok == -1:
+        return -1
+    fd = tok & 0xFFFFFFFF
+    return fd - (1 << 32) if fd & 0x80000000 else fd
+
+
 def _proc_state(p):
     task = p.GetChildMemberWithName("task")
     if _u(task) == 0:
@@ -127,7 +138,7 @@ def _proc_state(p):
     st = _u(task.GetChildMemberWithName("state"))
     s = TASK_STATE.get(st, "?%d" % st)
     if st == 2:
-        if task.GetChildMemberWithName("park_fd").GetValueAsSigned() >= 0:
+        if _park_fd(task) >= 0:
             s += "(fd)"
         elif _u(task.GetChildMemberWithName("park_timer")) != 0:
             s += "(timer)"
@@ -152,7 +163,7 @@ def _park_kind(task, proc=None):
     if _u(task) == 0:
         return "no-task"
     task = task.Dereference()
-    if task.GetChildMemberWithName("park_fd").GetValueAsSigned() >= 0:
+    if _park_fd(task) >= 0:
         return "fd"
     if _u(task.GetChildMemberWithName("park_timer")) != 0:
         return "timer"

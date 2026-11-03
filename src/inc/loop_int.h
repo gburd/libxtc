@@ -121,17 +121,38 @@ struct xtc_task {
 	 * Claiming it with atomic_exchange makes the unregister exactly-once:
 	 * whichever side takes the non-negative value owns the del, and the
 	 * loser sees -1 and does nothing.
+	 *
+	 * The word is a PARK TOKEN, not a bare fd: the fd in the low 32 bits
+	 * and a per-park generation in the high 32 (__park_tok).  A peer
+	 * loop's dispatch claims with a CAS against the token it LOADED; a
+	 * bare fd let that CAS succeed against a NEWER park of the same fd
+	 * number (the fiber cleaned up, migrated and re-parked between the
+	 * dispatch's load and its CAS), which cleared the new park's claim
+	 * and orphaned its registration -- found by CBMC
+	 * (test/cbmc/fdclaim_harness.c).  The generation makes every park a
+	 * distinct value, so that CAS fails.  -1 (no park) is all ones;
+	 * __park_tok_fd() reads the fd, __PARK_TOK_NONE tests for none.
 	 */
-	_Atomic int  park_fd;
+	_Atomic int64_t park_fd;
 	/*
 	 * The io that holds park_fd's registration.  Needed because the two
 	 * park entry points register on DIFFERENT ios -- xtc_task_park_on_fd
 	 * on self->loop->io (the home loop), xtc_proc_wait_fd on the loop the
 	 * fiber is RUNNING on -- so the unregister cannot infer the registry.
 	 * Written before park_fd is published and read after it is claimed,
-	 * so the claim orders it.
+	 * so the claim orders it (every access is relaxed; park_fd's
+	 * release/acquire carries the ordering).
+	 *
+	 * Atomic because a PEER loop's dispatch reads it too, before
+	 * claiming: a migratable fiber can be woken another way, move to
+	 * loop B and park on the same fd NUMBER there before loop A
+	 * dispatches the readiness it already reaped.  Same fd is not the
+	 * same registration, so the dispatch claims only a park recorded on
+	 * the io that delivered the event (__xtc_loop_dispatch_event).
 	 */
-	struct xtc_io *park_io;
+	_Atomic(struct xtc_io *) park_io;
+	/* The generation of the next park token (owner fiber only). */
+	uint32_t     park_gen;
 	/* Voluntary park: when set by a primitive (e.g. xtc_amutex) just
 	 * before yielding, the coro step returns PENDING instead of
 	 * RESCHED, so the task sleeps until a waker re-enqueues it rather
@@ -707,5 +728,30 @@ extern void  (*__xtc_loop_fini_hook)(xtc_loop_t *loop);
 
 /* Forward declaration for back-pointer in xtc_loop. */
 struct xtc_exec;
+
+/*
+ * Park tokens (struct xtc_task, park_fd).  A token is the fd in the low
+ * 32 bits and a generation in the high 32; no park is -1.  Every park
+ * takes a fresh generation, so two parks on the same fd are different
+ * values and a claim CAS against an older one fails.
+ */
+#define __PARK_TOK_NONE ((int64_t)-1)
+
+static inline int64_t
+__park_tok(xtc_task_t *t, int fd)
+{
+	uint32_t g = ++t->park_gen;
+
+	/* The high word must never make the token -1 (all ones). */
+	if (g == UINT32_MAX)
+		g = t->park_gen = 0;
+	return (int64_t)(((uint64_t)g << 32) | (uint32_t)fd);
+}
+
+static inline int
+__park_tok_fd(int64_t tok)
+{
+	return tok == __PARK_TOK_NONE ? -1 : (int)(uint32_t)tok;
+}
 
 #endif /* XTC_LOOP_INT_H */
