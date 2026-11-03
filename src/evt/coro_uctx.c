@@ -434,7 +434,8 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 	if (c->self != NULL &&
 	    (atomic_load_explicit(&c->self->park_timer,
 		memory_order_relaxed) != NULL ||
-	     atomic_load_explicit(&c->self->park_fd, memory_order_relaxed) >= 0)) {
+	     atomic_load_explicit(&c->self->park_fd, memory_order_relaxed) !=
+	     __PARK_TOK_NONE)) {
 		return XTC_TASK_PENDING;
 	}
 	/* Voluntary park requested (xtc_amutex and friends): sleep until

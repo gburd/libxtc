@@ -287,17 +287,19 @@ __task_release_parts(xtc_task_t *t)
 {
 	extern int __xtc_io_defer_del_fd(xtc_io_t *, int);
 	xtc_io_t *io;
-	int fd;
+	int64_t tok;
 
 	/* A proc parks only through sites that disarm on resume, so these
 	 * are normally clear; release them anyway so a recycled struct never
 	 * inherits a timer or an fd tag naming it. */
 	__xtc_task_cancel_park_timer(t);
-	fd = atomic_exchange_explicit(&t->park_fd, -1, memory_order_acq_rel);
-	io = t->park_io;
-	t->park_io = NULL;
-	if (fd >= 0)
-		(void)__xtc_io_defer_del_fd(io != NULL ? io : t->loop->io, fd);
+	tok = atomic_exchange_explicit(&t->park_fd, __PARK_TOK_NONE,
+	    memory_order_acq_rel);
+	io = atomic_load_explicit(&t->park_io, memory_order_relaxed);
+	atomic_store_explicit(&t->park_io, NULL, memory_order_relaxed);
+	if (tok != __PARK_TOK_NONE)
+		(void)__xtc_io_defer_del_fd(io != NULL ? io : t->loop->io,
+		    __park_tok_fd(tok));
 	if (t->cleanup != NULL) {
 		t->cleanup(t->cleanup_arg);   /* fiber stack + coro */
 		t->cleanup = NULL;
@@ -414,7 +416,8 @@ __xtc_task_spawn_cleanup(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 	t->q_next = NULL;
 	atomic_store_explicit(&t->park_timer, NULL,
 	    memory_order_relaxed);
-	t->park_fd = -1;
+	atomic_store_explicit(&t->park_fd, __PARK_TOK_NONE,
+	    memory_order_relaxed);
 	atomic_store_explicit(&t->wake_revents, 0, memory_order_relaxed);
 	t->cleanup = cleanup;
 	t->cleanup_arg = cleanup_arg;
@@ -652,7 +655,9 @@ __xtc_task_park_on_timer_at(xtc_task_t *self, int64_t deadline_ns)
 	if (self == NULL)
 		return XTC_E_INVAL;
 	if (atomic_load_explicit(&self->park_timer,
-	    memory_order_relaxed) != NULL || self->park_fd >= 0)
+	    memory_order_relaxed) != NULL ||
+	    atomic_load_explicit(&self->park_fd, memory_order_relaxed) !=
+	    __PARK_TOK_NONE)
 		return XTC_E_INVAL;     /* already parked */
 
 	if ((rc = __os_calloc(1, sizeof(*t), (void **)&t)) != XTC_OK)
@@ -747,11 +752,18 @@ xtc_task_park_on_fd(xtc_task_t *self, int fd, uint32_t interest)
 	if (self == NULL || fd < 0 || interest == 0)
 		return XTC_E_INVAL;
 	if (atomic_load_explicit(&self->park_timer,
-	    memory_order_relaxed) != NULL || self->park_fd >= 0)
+	    memory_order_relaxed) != NULL ||
+	    atomic_load_explicit(&self->park_fd, memory_order_relaxed) !=
+	    __PARK_TOK_NONE)
 		return XTC_E_INVAL;
 	if ((rc = xtc_io_reg_fd(self->loop->io, fd, interest, self)) != XTC_OK)
 		return rc;
-	self->park_fd = fd;
+	/* park_io first; the release-store of park_fd publishes it, so a
+	 * dispatch's io check sees this registry (see park_io). */
+	atomic_store_explicit(&self->park_io, self->loop->io,
+	    memory_order_relaxed);
+	atomic_store_explicit(&self->park_fd, __park_tok(self, fd),
+	    memory_order_release);
 	return XTC_OK;
 }
 
@@ -794,20 +806,38 @@ __xtc_loop_dispatch_event(xtc_loop_t *loop, xtc_io_event_t *ev)
 	 * back to the claimed park_fd on its recorded io.
 	 */
 	if (ev->fd >= 0) {
-		int claimed = atomic_load_explicit(&t->park_fd,
+		/* park_fd's acquire orders the park_io read after it. */
+		int64_t claimed = atomic_load_explicit(&t->park_fd,
 		    memory_order_acquire);
-		if (claimed == ev->fd)
+		xtc_io_t *pio =
+		    atomic_load_explicit(&t->park_io, memory_order_relaxed);
+		/*
+		 * Same fd is not the same registration.  A migratable task can
+		 * be woken another way, move to loop B and park on this fd
+		 * there before we dispatch the event loop A already reaped.
+		 * Clearing park_fd then would orphan B's registration: the
+		 * task's cleanup on B finds -1 and skips its del, and its next
+		 * wait on the fd fails as a duplicate (XTC_E_INVAL).  Claim
+		 * only a park recorded on the io that delivered the event; our
+		 * own (stale) registration is still dropped just below.  The
+		 * CAS is against the TOKEN loaded above (fd + generation), so
+		 * a newer park of the same fd on this same io, made between
+		 * the loads and the CAS, is a different value and survives.
+		 */
+		if (__park_tok_fd(claimed) == ev->fd && pio == loop->io)
 			(void)atomic_compare_exchange_strong_explicit(
-			    &t->park_fd, &claimed, -1,
+			    &t->park_fd, &claimed, __PARK_TOK_NONE,
 			    memory_order_acq_rel, memory_order_relaxed);
 		(void)xtc_io_del_fd(loop->io, ev->fd);
 	} else {
-		int claimed = atomic_exchange_explicit(&t->park_fd, -1,
-		    memory_order_acq_rel);
-		if (claimed >= 0)
-			(void)xtc_io_del_fd(
-			    t->park_io != NULL ? t->park_io : loop->io,
-			    claimed);
+		int64_t claimed = atomic_exchange_explicit(&t->park_fd,
+		    __PARK_TOK_NONE, memory_order_acq_rel);
+		if (claimed != __PARK_TOK_NONE) {
+			xtc_io_t *pio = atomic_load_explicit(&t->park_io,
+			    memory_order_relaxed);
+			(void)xtc_io_del_fd(pio != NULL ? pio : loop->io,
+			    __park_tok_fd(claimed));
+		}
 	}
 	/*
 	 * xtc_tail SCHED: record the DISPATCH itself, keyed by the task

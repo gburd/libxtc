@@ -247,6 +247,17 @@ def _waker_armed(p):
         return False
 
 
+def _park_fd(task):
+    """The fd a task is parked on, or -1.  task->park_fd is a park token
+    (2.1.2+: fd in the low 32 bits, a generation in the high 32, -1 for
+    none); older builds store the bare fd, which decodes the same."""
+    tok = int(task["park_fd"])
+    if tok == -1:
+        return -1
+    fd = tok & 0xFFFFFFFF
+    return fd - (1 << 32) if fd & 0x80000000 else fd
+
+
 def _proc_state(p):
     task = p["task"]
     if int(task) == 0:
@@ -254,8 +265,8 @@ def _proc_state(p):
     st = int(task["state"])
     s = TASK_STATE.get(st, "?%d" % st)
     if st == 2:  # PARKED -- why?
-        if int(task["park_fd"]) >= 0:
-            s += "(fd %d)" % int(task["park_fd"])
+        if _park_fd(task) >= 0:
+            s += "(fd %d)" % _park_fd(task)
         elif int(task["park_timer"]) != 0:
             s += "(timer)"
         elif _waker_armed(p):
@@ -319,7 +330,7 @@ def _park_kind(task, proc=None):
     """
     if int(task) == 0:
         return "no-task"
-    if int(task["park_fd"]) >= 0:
+    if _park_fd(task) >= 0:
         return "fd"
     if int(task["park_timer"]) != 0:
         return "timer"
