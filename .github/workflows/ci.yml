@@ -399,7 +399,7 @@ jobs:
         run: CC=gcc TMPDIR="${RUNNER_TEMP:-/tmp}" sh scripts/dst-corpus.sh
 
   cbmc-nightly:
-    # Bounded model checking (test/cbmc/): 20 modelled concurrent-algorithm
+    # Bounded model checking (test/cbmc/): 21 modelled concurrent-algorithm
     # harnesses (their copied statements drift-checked against the source)
     # and 4 in test/cbmc/real/ that compile the library source unchanged,
     # each verified over every interleaving / input up to a tuned bound.  Nightly / on demand,

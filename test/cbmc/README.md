@@ -61,6 +61,7 @@ are exposed at 2-3 concurrent actors, which is well within reach.
 | `inbox_harness.c`       | `src/evt/loop.c` lock-free inbox + sleep/nudge | never asleep with work queued and no wakeup; every pushed task drained once; one wakeup per sleep | u4 | drift-checked push/sleep_begin; stack index-encoded |
 | `parktimer_harness.c`   | `src/evt/loop.c` timer fire vs `task.c` cancel | a fired park timer never releases a migrated fiber's newer timer; no double release, no orphan (the 2.0 bug) | u3 | drift-checked slot claim |
 | `timeout_harness.c`     | `src/ptc/future.c` with_timeout | source vs timer fire: promise set once, context freed once, each owner retires once (the 1.55.1 leak) | u3 | drift-checked callbacks |
+| `ltreg_harness.c`       | `src/ptc/proc.c` loop registry | the lock-free seqlock lookup on every send/wake finds a still-registered loop while another is removed and the hash rebuilt in place | u5 | drift-checked find/put/remove |
 | `combinator_harness.c`  | `src/ptc/future.c` when_all / when_any | registration (which may fail) racing an input's fire: set once, freed once, the right status (2.1.2: a failed registration was ignored) | u3 | drift-checked callbacks + registration |
 
 Real-code harnesses (`real/`, library source compiled unchanged):
