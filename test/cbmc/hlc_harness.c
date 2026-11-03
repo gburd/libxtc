@@ -33,7 +33,7 @@
  *	proc.c drifts, this must be updated in lockstep.
  *
  *	NEGATIVE CHECK (reproduce the classic HLC bug); verified to FAIL:
- *	  - `cbmc hlc_harness.c -DHLC_BUG_NONMONO --unwind 4`
+ *	  - `cbmc hlc_harness.c -DPLANT_HLC_BUG_NONMONO --unwind 4`
  *	    __hlc_tick, when physical time has not advanced and the logical
  *	    field has room, forgets the `+ 1` (emits `pphys << 16 | plog`
  *	    instead of `| (plog + 1)`) -> two ticks return the SAME stamp
@@ -59,7 +59,7 @@
 #include <stdatomic.h>
 
 /* The global HLC, exactly as proc.c declares it. */
-static _Atomic uint64_t g_hlc;
+static _Atomic uint64_t __g_hlc;
 
 /* Non-deterministic physical microseconds, bounded so CBMC's state
  * space is finite.  This REPLACES __phys_us() (which reads the real
@@ -68,7 +68,7 @@ static _Atomic uint64_t g_hlc;
  * stored physical component, so every branch of the ladder is
  * explored, including a physical clock that appears to go backward. */
 static uint64_t
-phys_us(void)
+__phys_us(void)
 {
 	uint64_t pt;
 	pt = __CPROVER_nondet_ulong();
@@ -80,17 +80,18 @@ phys_us(void)
 static uint64_t
 hlc_tick(void)
 {
-	uint64_t prev, next, pt = phys_us();
+	/* BEGIN SOURCE src/ptc/proc.c __hlc_tick */
+	uint64_t prev, next, pt = __phys_us();
 	do {
 		uint64_t pphys, plog;
-		prev = atomic_load_explicit(&g_hlc, memory_order_relaxed);
+		prev = atomic_load_explicit(&__g_hlc, memory_order_relaxed);
 		pphys = prev >> 16; plog = prev & 0xFFFF;
 		if (pt > pphys) {
 			next = pt << 16;
 		} else if (plog + 1 > 0xFFFF) {
 			next = (pphys + 1) << 16;
 		} else {
-#ifdef HLC_BUG_NONMONO
+#ifdef PLANT_HLC_BUG_NONMONO
 			/* planted bug: forget the +1 on the logical bump ->
 			 * two ticks with the same physical time collide. */
 			next = (pphys << 16) | (plog);
@@ -98,8 +99,9 @@ hlc_tick(void)
 			next = (pphys << 16) | (plog + 1);
 #endif
 		}
-	} while (!atomic_compare_exchange_weak_explicit(&g_hlc, &prev, next,
+	} while (!atomic_compare_exchange_weak_explicit(&__g_hlc, &prev, next,
 	    memory_order_relaxed, memory_order_relaxed));
+	/* END SOURCE */
 	/* MONOTONICITY: every committed advance is strictly greater than
 	 * what it read.  Non-vacuity: change `> prev` to `>= prev + 2` and
 	 * CBMC reports a counterexample (a single logical tick,
@@ -113,11 +115,12 @@ hlc_tick(void)
 static uint64_t
 hlc_update(uint64_t m)
 {
-	uint64_t prev, next, pt = phys_us();
+	/* BEGIN SOURCE src/ptc/proc.c __hlc_update */
+	uint64_t prev, next, pt = __phys_us();
 	do {
 		uint64_t pphys = 0, plog = 0, mphys = m >> 16, mlog = m & 0xFFFF;
 		uint64_t nphys, nlog;
-		prev = atomic_load_explicit(&g_hlc, memory_order_relaxed);
+		prev = atomic_load_explicit(&__g_hlc, memory_order_relaxed);
 		pphys = prev >> 16; plog = prev & 0xFFFF;
 		nphys = pphys;
 		if (mphys > nphys) nphys = mphys;
@@ -132,8 +135,9 @@ hlc_update(uint64_t m)
 			nlog = 0;
 		if (nlog > 0xFFFF) { nphys++; nlog = 0; }
 		next = (nphys << 16) | (nlog & 0xFFFF);
-	} while (!atomic_compare_exchange_weak_explicit(&g_hlc, &prev, next,
+	} while (!atomic_compare_exchange_weak_explicit(&__g_hlc, &prev, next,
 	    memory_order_relaxed, memory_order_relaxed));
+	/* END SOURCE */
 	/* MONOTONICITY: the update never lowers the clock. */
 	__CPROVER_assert(next > prev,
 	    "hlc_update never returns a non-increasing stamp (monotonic)");
@@ -170,7 +174,7 @@ updater(void)
 int
 main(void)
 {
-	atomic_store_explicit(&g_hlc, 0, memory_order_relaxed);
+	atomic_store_explicit(&__g_hlc, 0, memory_order_relaxed);
 
 	/* A tick and an update race on the single global clock; CBMC
 	 * explores every interleaving of the two CAS loops. */

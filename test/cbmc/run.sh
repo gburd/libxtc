@@ -1,10 +1,16 @@
 #!/bin/sh
 # test/cbmc/run.sh -- run the libxtc bounded-model-checking tier.
 #
-# Each harness verifies one hard-to-keep-correct concurrent algorithm
-# against its REAL source (see README.md).  CBMC explores every
-# interleaving up to the harness's bound and proves the asserted safety
-# invariant, or prints a counterexample trace.
+# Two kinds of harness (see README.md):
+#   - test/cbmc/*_harness.c: a concurrent algorithm, modelled.  Where the
+#     model copies statements from the source they sit between
+#     BEGIN/END SOURCE markers, and check_drift.sh (run first, below, and
+#     in make check) fails if the source no longer contains them.
+#   - test/cbmc/real/*_harness.c: links or #includes the REAL library
+#     source unchanged, with only the allocator/OS calls stubbed, so it
+#     cannot drift.  These also run memory-safety checks.
+# CBMC explores every interleaving / input up to the harness's bound and
+# proves the asserted invariants, or prints a counterexample trace.
 #
 # Requires cbmc on PATH (nix-shell -p cbmc).  Not in the default
 # `make check`; this is a separate verification tier + release gate,
@@ -33,7 +39,7 @@ fi
 # CBMC MAJOR VERSION GATE.  6.x aborts with "pointer handling for
 # concurrency is unsound" BEFORE producing a verdict on every concurrent
 # harness here (verified on 6.4.0 and 6.9.0), so running it would report
-# all 14 harnesses as FAILED for a tool reason -- indistinguishable, to a
+# every harness as FAILED for a tool reason -- indistinguishable, to a
 # reader or a CI log, from a real invariant violation.  Skip loudly
 # instead, naming the version needed.  5.x emits the same note as a
 # warning and completes to VERIFICATION SUCCESSFUL, which is what the
@@ -95,11 +101,37 @@ chash_resize_harness --unwind 6
 res_harness        --unwind 3
 hlc_harness        --unwind 4
 fdclaim_harness    --unwind 3
+wakeclaim_harness  --unwind 3
+inbox_harness      --unwind 4
+parktimer_harness  --unwind 3
+'
+
+# Checks every concurrent harness also runs.  --pointer-check cannot be
+# combined with threads in CBMC 5.x ("pointer handling for concurrency
+# is unsound"), so it is on the sequential real-code harnesses only.
+SAFE="--bounds-check --div-by-zero-check --signed-overflow-check --pointer-overflow-check"
+
+# Real-code harnesses: <name> <sources...> -- <cbmc flags...>.  Sources
+# are relative to the repository root and linked into the harness with
+# goto-cc; the harness's own stubs replace the allocator and OS calls.
+# @RECV marks a harness whose recv/poll are replaced after linking
+# (CBMC's built-in models of those win over a definition in the harness).
+REAL='
+down_decode_harness  src/ptc/proc.c -- --unwind 48 --bounds-check --pointer-check --signed-overflow-check
+net_frame_harness    src/io/io_net.c src/os/os_alloc.c src/os/os_time.c @RECV -- --unwind 2 --unwindset xtc_net_recv_frame.0:8,xtc_net_recv_frame.1:7,main.0:8,main.1:5,peer_recv.0:5,__net_wait_fd.0:2 --unwinding-assertions --bounds-check --pointer-check
+res_harness          src/ptc/res.c -- --unwind 3 --unwindset xtc_res_init.0:7 --unwinding-assertions --bounds-check --signed-overflow-check
+lockmgr_harness      -- --unwind 3 --unwindset __do_acquire_locked.0:1,__do_acquire_locked.1:1,__do_acquire_locked.2:1,__do_acquire_locked.3:1,__do_acquire_locked.4:1,__do_acquire_locked.5:1,__do_acquire_locked.6:1,__do_acquire_locked.7:1,__dominates.0:10,spec_dominates.0:10,main.0:4,xtc_lockmgr_create.0:2,__hash.0:2,memcmp.0:2,holds_at_least.0:5,newest_mode.0:5,exclusive.0:5,exclusive.1:5,__find_granted.0:3,__has_conflict_granted.0:3 --bounds-check --slice-formula
 '
 
 want="${*:-}"
 rcfile=$(mktemp)
 echo 0 > "$rcfile"
+
+# The drift gate first: a transcribed harness that no longer matches its
+# source proves nothing about the code that ships.
+if ! sh "$DIR/check_drift.sh"; then
+	echo 1 > "$rcfile"
+fi
 printf '%s\n' "$HARNESSES" | while read -r name flags; do
 	[ -n "$name" ] || continue
 	[ -f "$DIR/$name.c" ] || continue
@@ -108,7 +140,7 @@ printf '%s\n' "$HARNESSES" | while read -r name flags; do
 	fi
 	printf '  [cbmc] %-22s ' "$name"
 	# shellcheck disable=SC2086
-	if out=$(timeout "$TIMEOUT" cbmc "$DIR/$name.c" -I "$INC" $flags 2>&1); then
+	if out=$(timeout "$TIMEOUT" cbmc "$DIR/$name.c" -I "$INC" $flags $SAFE 2>&1); then
 		if printf '%s' "$out" | grep -q 'VERIFICATION SUCCESSFUL'; then
 			echo "OK (verified)"
 		else
@@ -127,6 +159,71 @@ printf '%s\n' "$HARNESSES" | while read -r name flags; do
 		echo 1 > "$rcfile"
 	fi
 done
+
+TOP=$(cd "$DIR/../.." && pwd)
+GB=$(mktemp -d "${TMPDIR:-/var/tmp}/cbmc-real.XXXXXX")
+printf '%s\n' "$REAL" | while read -r line; do
+	[ -n "$line" ] || continue
+	name=${line%% *}
+	rest=${line#"$name"}
+	srcs=${rest%% -- *}
+	flags=${rest#* -- }
+	[ -f "$DIR/real/$name.c" ] || continue
+	if [ -n "$want" ]; then
+		case " $want " in *" real/$name "*|*" $name "*) : ;; *) continue ;; esac
+	fi
+	printf '  [cbmc] %-22s ' "real/$name"
+	recv=0
+	files=""
+	for f in $srcs; do
+		case "$f" in
+		@RECV) recv=1 ;;
+		*) files="$files $TOP/$f" ;;
+		esac
+	done
+	# shellcheck disable=SC2086
+	if ! out=$(goto-cc -std=c11 -D_DEFAULT_SOURCE -pthread \
+	    -I "$DIR/real/inc" -I "$INC" -I "$TOP/src/ptc" \
+	    "$DIR/real/$name.c" $files -o "$GB/$name.0.gb" 2>&1); then
+		echo "FAILED (goto-cc)"
+		printf '%s\n' "$out" | grep -iE 'error' | head -5
+		echo 1 > "$rcfile"
+		continue
+	fi
+	if [ "$recv" = 1 ]; then
+		goto-instrument --replace-calls recv:peer_recv \
+		    --replace-calls poll:peer_poll \
+		    "$GB/$name.0.gb" "$GB/$name.gb" >/dev/null 2>&1
+	else
+		mv "$GB/$name.0.gb" "$GB/$name.gb"
+	fi
+	# The log of a long unwind is large: keep it in a file, not a shell
+	# variable (a variable that size overflows the argument limit).
+	st=0
+	# shellcheck disable=SC2086
+	timeout "$TIMEOUT" cbmc "$GB/$name.gb" $flags > "$GB/$name.log" 2>&1 ||
+	    st=$?
+	if [ "$st" = 0 ]; then
+		if grep -q 'VERIFICATION SUCCESSFUL' "$GB/$name.log"; then
+			echo "OK (verified)"
+		else
+			echo "UNKNOWN (no verdict -- see below)"
+			tail -5 "$GB/$name.log"
+			echo 1 > "$rcfile"
+		fi
+	else
+		if [ "$st" = 124 ]; then
+			echo "TIMEOUT (${TIMEOUT}s) -- raise CBMC_TIMEOUT or lower the bound"
+		else
+			echo "FAILED (verification counterexample or error)"
+			grep -iE ': FAILURE|VERIFICATION|out of memory' \
+			    "$GB/$name.log" | head -8
+		fi
+		echo 1 > "$rcfile"
+	fi
+done
+find "$GB" -type f \( -name '*.gb' -o -name '*.log' \) -exec rm -f {} +
+rmdir "$GB" 2>/dev/null || :
 
 rc=$(cat "$rcfile")
 rm -f "$rcfile"

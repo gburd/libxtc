@@ -1,8 +1,26 @@
 # libxtc bounded model checking (CBMC)
 
-This directory holds **bounded model-checking harnesses** that verify
-the hardest-to-keep-correct concurrent algorithms in libxtc against
-their *actual C source* using [CBMC](https://www.cprover.org/cbmc/).
+This directory holds **bounded model-checking harnesses** for the
+hardest-to-keep-correct code in libxtc, checked with
+[CBMC](https://www.cprover.org/cbmc/) (the University of Oxford / Diffblue
+bounded model checker; libxtc writes only the harnesses and `run.sh`).
+
+There are two kinds, and the difference matters:
+
+- **Real-code harnesses** (`real/`) compile the library source unchanged
+  -- `goto-cc` links the `.c` file, or the harness `#include`s it -- and
+  stub only the allocator and OS calls.  They cannot drift from the code
+  that ships.  They also run CBMC's memory-safety checks
+  (`--bounds-check`, `--pointer-check`, signed overflow).
+- **Modelled harnesses** (this directory) are for concurrent algorithms
+  whose source drags in the executor, slab, RCU or fiber waits and does
+  not compile standalone.  They model the algorithm.  Where a model
+  copies statements from the source, the copy sits between
+  `/* BEGIN SOURCE <path> <label> */` and `/* END SOURCE */`, and
+  `check_drift.sh` (in `make check`, no CBMC needed) fails the build if
+  `<path>` no longer contains those statements.  Harnesses without
+  markers are faithful-in-intent models whose agreement with the source
+  is NOT mechanically checked; see the "source?" column.
 
 ## Why
 
@@ -37,12 +55,68 @@ are exposed at 2-3 concurrent actors, which is well within reach.
 | `wakepark_harness.c`   | `src/evt/loop.c` park latch  | the RUNNING->PARKED wake race never loses a wake (v1.8.0) | u6 | faithful model |
 | `chash_resize_harness.c`| `src/ptc/chash.c` resize     | no key lost; table stays single-valued across a resize | u6 | essential model |
 | `res_harness.c`         | `src/ptc/res.c` accountant   | `used` never exceeds `cap` under concurrent acquire (no over-admission) | u3 | verbatim CAS core |
-| `hlc_harness.c`         | `src/ptc/proc.c` HLC         | hybrid logical clock is monotonic + causal (update > remote stamp) under concurrent tick/update | u4 | verbatim __hlc_tick/_update |
+| `hlc_harness.c`         | `src/ptc/proc.c` HLC         | hybrid logical clock is monotonic + causal (update > remote stamp) under concurrent tick/update | u4 | drift-checked __hlc_tick/_update |
 | `fdclaim_harness.c`     | `src/evt/task.c` fd-readiness claim | a stale readiness event never orphans a newer park of the same fd (2.1.2) | u3 | claim statement drift-checked |
+| `wakeclaim_harness.c`   | `src/evt/task.c` __task_wake_claim + `loop.c` PENDING verdict | two wakers racing a park: no lost wake, enqueued at most once (the 7th/9th surfaces) | u3 | drift-checked |
+| `inbox_harness.c`       | `src/evt/loop.c` lock-free inbox + sleep/nudge | never asleep with work queued and no wakeup; every pushed task drained once; one wakeup per sleep | u4 | drift-checked push/sleep_begin; stack index-encoded |
+| `parktimer_harness.c`   | `src/evt/loop.c` timer fire vs `task.c` cancel | a fired park timer never releases a migrated fiber's newer timer; no double release, no orphan (the 2.0 bug) | u3 | drift-checked slot claim |
+
+Real-code harnesses (`real/`, library source compiled unchanged):
+
+| harness | source | property | planted bugs (must FAIL) |
+|---------|--------|----------|--------------------------|
+| `down_decode_harness.c` | `src/ptc/proc.c` xtc_down_decode{,_ex} | memory-safe on every length 0..40 and byte content, for any caller struct size; kind is one of the five documented | a decoder that copies `sizeof d` past a short message |
+| `net_frame_harness.c` | `src/io/io_net.c` xtc_net_recv_frame | adversarial peer (any chunking, EAGAIN/EINTR/close): memory-safe, oversize frame -> XTC_E_RANGE never allocated, OK returns exactly the declared bytes, error leaves *out NULL | no max_len guard; an off-by-one chunk |
+| `res_harness.c` | `src/ptc/res.c` acquire/release | no over-admission, no signed overflow (cap INT64_MAX), used never negative, conservation | DST bug 6 RESOVER, DST bug 5 RESLEAK, the 1.59 headroom wrap |
+| `lockmgr_harness.c` | `src/ptc/lock_mgr.c` get/upgrade/downgrade | two lockers, 3 steps, S/X/IX/IS: no two lockers' granted entries conflict; get/upgrade hold at least the asked mode; downgrade only to a dominated mode | DST bug 2 LOCKEXCL; the 1.50 own-mode-only re-request; the 1.50 enum-order "stronger" |
+
+`real/res_harness.c` supersedes `res_harness.c`, which transcribes the
+pre-1.59 release (fetch_sub then clamp); res.c has floored the
+subtraction in one CAS since 8f85d0d2.  The old harness is kept until it
+is retired deliberately, but it no longer describes the shipped code.
 
 Every harness above VERIFIES SUCCESSFUL at the listed bound; each also has
 a negative check (injecting the classic bug makes CBMC report the
 counterexample) and a non-vacuity check (the asserted path is reachable).
+
+## What this tier does NOT check
+
+- **Memory ordering.**  CBMC interleaves threads under sequential
+  consistency.  A store-buffering litmus test with `memory_order_relaxed`
+  atomics verifies under `--mm sc`, `tso` and `pso` alike (measured on
+  5.91.0), so a relaxed load or store that should have been acquire or
+  release is invisible here.  The `memory_order_*` arguments the harnesses
+  carry are there for the drift check, not because they are verified.
+  The memory-order class is covered by TSan (`make check` under
+  `-fsanitize=thread`, the CI TSan job), not by this tier.
+- **Pointers shared between threads.**  CBMC 5.x refuses
+  `--pointer-check` together with threads and refuses `_Atomic` pointers
+  between threads ("pointer handling for concurrency is unsound").  The
+  concurrent harnesses therefore index-encode pointer-valued words (a task
+  or timer is an array index) and run `--bounds-check`,
+  `--div-by-zero-check`, `--signed-overflow-check` and
+  `--pointer-overflow-check` only.  The sequential real-code harnesses run
+  `--pointer-check` too.
+
+## Writing a harness that proves something
+
+Three ways a harness here verified while proving nothing, each caught by
+planting the bug it guards against:
+
+- A file-scope variable is zero-initialised, not nondeterministic.
+  `static int64_t CAP;` made every cap 0 (unlimited) and the cap assertion
+  vacuous; use `nondet_*()` for inputs.
+- CBMC ships models of some libc calls (`recv`, `poll`) that win over a
+  definition in the harness.  Name the stub differently and swap the calls
+  after linking (`goto-instrument --replace-calls recv:peer_recv`;
+  `run.sh`'s `@RECV`).
+- An unstubbed allocator returns success without setting the pointer.
+  Stub every allocator the code under test calls.
+
+So every harness carries planted bugs (`-DPLANT_*`, or the DST tier's
+`-DXTC_DST_INJECT_BUG=<id>` for the real-code ones, so one switch breaks
+both tiers) that must make CBMC FAIL, and `--cover location` is the
+quick check that the asserted code is reached at all.
 Where a harness models the algorithm rather than including the real source,
 the top-of-file comment says so precisely and explains why the real source
 does not compile standalone under CBMC (it drags in the executor, RCU,
@@ -50,9 +124,9 @@ slab, pthread/fiber waits, etc. that do not bear on the property) -- the
 model is a faithful transcription of the same steps/atomics/ordering, so
 drift from the intended algorithm is still caught.
 
-Full-suite wall time is about 3.5 minutes on an idle 16-core box; `mpsc`
-(~2 min) and `credit`/`lwlock` (tens of seconds) dominate, the rest are
-sub-second.
+Full-suite wall time is about 7 minutes on an idle 48-core box (cbmc
+5.91.0): `credit`, `mpsc`, `lwlock`, `real/net_frame` and `real/lockmgr`
+take 1-2.5 minutes each, the rest seconds.
 
 ## Deliberately NOT modelled
 
@@ -83,8 +157,9 @@ make -C build_unix check-cbmc      # or: make -C build_unix cbmc
 
 Not part of the default `make check` (CBMC runs are minutes, not
 seconds); it is a separate verification tier, like `make check-dst`.
-CI runs it in the `cbmc-nightly` job (nightly + `workflow_dispatch`),
-where all 14 harnesses must verify.
+The drift gate (`check_drift.sh`) is in `make check`.  CI runs the
+tier in the `cbmc-nightly` job (nightly + `workflow_dispatch`), where
+every harness must verify.
 
 **CBMC 5.x is required** (validated: 5.91.0 and 5.95.1).  CBMC **6.x
 cannot verify these harnesses at all**: it aborts with `pointer handling
@@ -130,5 +205,5 @@ SUCCESSFUL (acted == 1 exactly), but that ordering also loses the
 interleaving coverage that discriminates "defer while masked" from a
 bug that acts while masked, so it is not a satisfactory fix.  A faithful
 async model (bounding the killer to fire within an observed window)
-is TODO; until then treat this one harness as advisory.  The other 13
-harnesses gate.  (CBMC is a local release-tier check, not a CI gate.)
+is TODO; until then treat this one harness as advisory (it still
+verifies at the bound in run.sh, which is why it stays in the list).

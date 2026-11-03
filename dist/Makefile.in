@@ -400,6 +400,7 @@ TESTS_SH	= \
 	$(abs_top_srcdir)/../test/dist/test_s_include_inline_comment.sh \
 	$(abs_top_srcdir)/../test/dist/test_shellcheck.sh \
 	$(abs_top_srcdir)/../test/dist/test_api_discipline.sh \
+	$(abs_top_srcdir)/../test/cbmc/check_drift.sh \
 	$(abs_top_srcdir)/../test/dist/test_abi_layout.sh \
 	$(abs_top_srcdir)/../test/dist/test_deprecated.sh \
 	$(abs_top_srcdir)/../test/dist/test_stability_tiers.sh \
@@ -1447,11 +1448,13 @@ coverage:
 	@XTC_SRC_DIR=$(abs_top_srcdir)/.. CC='$(CC)' \
 		sh $(abs_top_srcdir)/../scripts/coverage.sh $(COVERAGE_OUT)
 
-# check-cbmc / cbmc: the bounded-model-checking tier (test/cbmc/, 14
-# harnesses).  Each harness proves one concurrent algorithm's safety
-# invariant against its REAL source over every interleaving up to a
-# tuned bound.  NOT part of plain `make check` (runs are minutes, not
-# seconds) -- it is a separate verification tier, like check-dst.
+# check-cbmc / cbmc: the bounded-model-checking tier (test/cbmc/, 18
+# concurrent-algorithm harnesses + 4 in test/cbmc/real/ that compile the
+# library source unchanged).  Each proves its invariants over every
+# interleaving / input up to a tuned bound.  NOT part of plain
+# `make check` (runs are minutes, not seconds) -- it is a separate
+# verification tier, like check-dst.  The DRIFT gate for the modelled
+# harnesses (test/cbmc/check_drift.sh, no CBMC needed) IS in make check.
 #
 # Needs cbmc 5.x on PATH (`nix develop` provides it; CBMC 6.x aborts on
 # the concurrent-pointer harnesses -- see test/cbmc/README.md).  Without
