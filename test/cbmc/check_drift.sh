@@ -19,9 +19,10 @@
 #
 # Needs only POSIX sh + awk; runs in make check (no CBMC needed).
 # Comments are ignored on both sides.  Preprocessor lines in the block are
-# skipped; the lines under `#ifdef PLANT_...` (a planted-bug variant) are
-# skipped, the lines under `#ifndef PLANT_...` (real code a plant removes)
-# are compared.
+# skipped.  In a conditional on a PLANT_ macro (a planted-bug variant) the
+# branches a PLANT_ macro selects -- `#ifdef PLANT_X`, `#if defined(PLANT_X)`,
+# `#elif defined(PLANT_X)`, the `#else` of an `#ifndef PLANT_X` -- are
+# skipped and the other branch, the real code, is compared.
 #
 # Exit 0 = every block found; 1 = a block drifted (the harness proves an
 # algorithm the code no longer runs) or names a missing file.
@@ -65,21 +66,29 @@ for h in "$DIR"/*_harness.c; do
 	/^[ \t]*\/\* END SOURCE \*\// { inb = 0; close(out "/" n ".body"); next }
 	inb {
 		if ($0 ~ /\/\* harness \*\//) next
+		# A PLANT_ conditional: branches selected by a PLANT_ macro are
+		# skipped, the remaining branch (the real code) is compared.
 		if ($0 ~ /^[ \t]*#[ \t]*ifdef[ \t]+PLANT_/ ||
 		    $0 ~ /^[ \t]*#[ \t]*if[ \t]+defined\(PLANT_/) {
-			st[++sp] = skip; skip = 1; next
+			st[++sp] = skip; plant[sp] = 1; skip = 1; next
 		}
-		if ($0 ~ /^[ \t]*#[ \t]*ifndef[ \t]+PLANT_/) {
-			st[++sp] = skip; plantneg[sp] = 1; next
+		if ($0 ~ /^[ \t]*#[ \t]*ifndef[ \t]+PLANT_/ ||
+		    $0 ~ /^[ \t]*#[ \t]*if[ \t]+!defined\(PLANT_/) {
+			st[++sp] = skip; plant[sp] = 2; next
 		}
-		if ($0 ~ /^[ \t]*#[ \t]*if/) { st[++sp] = skip; next }
+		if ($0 ~ /^[ \t]*#[ \t]*if/) {
+			st[++sp] = skip; plant[sp] = 0; next
+		}
+		if ($0 ~ /^[ \t]*#[ \t]*elif[ \t]+defined\(PLANT_/) {
+			skip = 1; next
+		}
 		if ($0 ~ /^[ \t]*#[ \t]*else/) {
-			if (sp > 0 && plantneg[sp]) skip = 1
-			else if (sp > 0) skip = st[sp]
+			if (sp > 0 && plant[sp] == 1) skip = st[sp]
+			else if (sp > 0 && plant[sp] == 2) skip = 1
 			next
 		}
 		if ($0 ~ /^[ \t]*#[ \t]*endif/) {
-			if (sp > 0) { skip = st[sp]; plantneg[sp] = 0; sp-- }
+			if (sp > 0) { skip = st[sp]; plant[sp] = 0; sp-- }
 			next
 		}
 		if ($0 ~ /^[ \t]*#/) next

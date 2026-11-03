@@ -716,7 +716,14 @@ xtc_future_when_all(xtc_future_t **futs, int n, xtc_future_t **out_fut)
 	atomic_init(&a->err_set, 0);
 
 	for (i = 0; i < n; i++) {
-		(void)cell_on_complete(futs[i]->cell, all_on_complete, a);
+		/* A registration that fails (its node allocation) means that
+		 * input's callback never runs; report it as that input
+		 * completing with XTC_E_NOMEM, or `remaining` never reaches 0
+		 * and the combined future never resolves (CBMC,
+		 * test/cbmc/combinator_harness.c -DREGISTER_CAN_FAIL). */
+		if (cell_on_complete(futs[i]->cell, all_on_complete, a) !=
+		    XTC_OK)
+			all_on_complete(0, XTC_E_NOMEM, a);
 		cell_unref(futs[i]->cell);   /* handle ref */
 		__os_free(futs[i]);
 	}
@@ -745,6 +752,22 @@ any_on_complete(intptr_t value, int status, void *u)
 		__os_free(a);
 }
 
+/* An input whose callback could not be registered: retire for it.  The
+ * last retire resolves the future with XTC_E_NOMEM if no input did (all
+ * of them failed to register), so the caller never waits forever. */
+static void
+any_retire_failed(struct any_ctx *a)
+{
+	if (atomic_fetch_sub_explicit(&a->remaining, 1,
+	    memory_order_acq_rel) == 1) {
+		int expected = 0;
+		if (atomic_compare_exchange_strong_explicit(&a->done,
+		    &expected, 1, memory_order_acq_rel, memory_order_relaxed))
+			(void)xtc_promise_set(a->prom, 0, XTC_E_NOMEM);
+		__os_free(a);
+	}
+}
+
 int
 xtc_future_when_any(xtc_future_t **futs, int n, xtc_future_t **out_fut)
 {
@@ -769,7 +792,11 @@ xtc_future_when_any(xtc_future_t **futs, int n, xtc_future_t **out_fut)
 	atomic_init(&a->remaining, n);
 
 	for (i = 0; i < n; i++) {
-		(void)cell_on_complete(futs[i]->cell, any_on_complete, a);
+		/* As in when_all: a callback that cannot be registered still
+		 * owes its retire, or the context leaks. */
+		if (cell_on_complete(futs[i]->cell, any_on_complete, a) !=
+		    XTC_OK)
+			any_retire_failed(a);
 		cell_unref(futs[i]->cell);
 		__os_free(futs[i]);
 	}
@@ -859,7 +886,11 @@ xtc_future_with_timeout(xtc_future_t *src, int64_t timeout_ns,
 		atomic_store_explicit(&t->remaining, 1, memory_order_relaxed);
 	}
 
-	cell_on_complete(src->cell, timeout_src_complete, t);
+	/* A failed registration means the source's callback never runs:
+	 * report it as the source completing with XTC_E_NOMEM (which also
+	 * cancels the timer and retires for it), not as a timeout later. */
+	if (cell_on_complete(src->cell, timeout_src_complete, t) != XTC_OK)
+		timeout_src_complete(0, XTC_E_NOMEM, t);
 	cell_unref(src->cell);
 	__os_free(src);
 	*out_fut = fut;

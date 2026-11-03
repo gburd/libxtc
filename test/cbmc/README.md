@@ -60,6 +60,8 @@ are exposed at 2-3 concurrent actors, which is well within reach.
 | `wakeclaim_harness.c`   | `src/evt/task.c` __task_wake_claim + `loop.c` PENDING verdict | two wakers racing a park: no lost wake, enqueued at most once (the 7th/9th surfaces) | u3 | drift-checked |
 | `inbox_harness.c`       | `src/evt/loop.c` lock-free inbox + sleep/nudge | never asleep with work queued and no wakeup; every pushed task drained once; one wakeup per sleep | u4 | drift-checked push/sleep_begin; stack index-encoded |
 | `parktimer_harness.c`   | `src/evt/loop.c` timer fire vs `task.c` cancel | a fired park timer never releases a migrated fiber's newer timer; no double release, no orphan (the 2.0 bug) | u3 | drift-checked slot claim |
+| `timeout_harness.c`     | `src/ptc/future.c` with_timeout | source vs timer fire: promise set once, context freed once, each owner retires once (the 1.55.1 leak) | u3 | drift-checked callbacks |
+| `combinator_harness.c`  | `src/ptc/future.c` when_all / when_any | registration (which may fail) racing an input's fire: set once, freed once, the right status (2.1.2: a failed registration was ignored) | u3 | drift-checked callbacks + registration |
 
 Real-code harnesses (`real/`, library source compiled unchanged):
 
@@ -69,6 +71,12 @@ Real-code harnesses (`real/`, library source compiled unchanged):
 | `net_frame_harness.c` | `src/io/io_net.c` xtc_net_recv_frame | adversarial peer (any chunking, EAGAIN/EINTR/close): memory-safe, oversize frame -> XTC_E_RANGE never allocated, OK returns exactly the declared bytes, error leaves *out NULL | no max_len guard; an off-by-one chunk |
 | `res_harness.c` | `src/ptc/res.c` acquire/release | no over-admission, no signed overflow (cap INT64_MAX), used never negative, conservation | DST bug 6 RESOVER, DST bug 5 RESLEAK, the 1.59 headroom wrap |
 | `lockmgr_harness.c` | `src/ptc/lock_mgr.c` get/upgrade/downgrade | two lockers, 3 steps, S/X/IX/IS: no two lockers' granted entries conflict; get/upgrade hold at least the asked mode; downgrade only to a dominated mode | DST bug 2 LOCKEXCL; the 1.50 own-mode-only re-request; the 1.50 enum-order "stronger" |
+
+Found by this tier and fixed: the fd-readiness claim ABA
+(`fdclaim_harness.c`, 2.1.2) and the combinators' ignored registration
+failure (`combinator_harness.c`, 2.1.2: when_all never resolved,
+when_any leaked its context, with_timeout reported a completed source
+as a timeout).
 
 `real/res_harness.c` supersedes `res_harness.c`, which transcribes the
 pre-1.59 release (fetch_sub then clamp); res.c has floored the

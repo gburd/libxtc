@@ -104,6 +104,8 @@ fdclaim_harness    --unwind 3
 wakeclaim_harness  --unwind 3
 inbox_harness      --unwind 4
 parktimer_harness  --unwind 3
+timeout_harness    --unwind 3
+combinator_harness --unwind 3
 '
 
 # Checks every concurrent harness also runs.  --pointer-check cannot be
