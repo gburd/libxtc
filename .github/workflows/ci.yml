@@ -7,7 +7,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # lts/2.1: the 2.1.x LTS line (fixes cherry-picked from main) gets
+    # the same matrix on every push.
+    branches: [main, lts/2.1]
   pull_request:
   # Callable as a reusable workflow so release.yml can require THIS
   # workflow, at the tagged commit, before it publishes anything.  A tag
