@@ -92,6 +92,7 @@ write_cases() {
 		"21;test_sim_sqlxtc_gc;1;1;SNAPSHOT: " \
 		"22;test_sim_btree_scan;0;1;FAIL: seed 0x[0-9a-f]+ \\((benign|adversarial)\\): .* skipped=[1-9]" \
 		"23;test_sim_sqlxtc_gcidx;1;1;(index [0-9]+, scan [0-9]+|entries missing)" \
+		"30;test_sim_pid_xexec;0;0;MISDELIVERED" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -120,6 +121,8 @@ write_cases() {
 # 22 SHIFTLO    btree.c resume skips lo-fence chk -> a scan skips no live key across a left shift
 #               (test_sim_btree_scan #includes btree.c, so no engine objects are needed)
 # 23 GCBATCH    xstore.c GC restarts a row per batch -> no deleted row comes back
+# 24..29        reserved (assigned on other 2.2 branches)
+# 30 PIDEXEC    proc.c mints exec-relative pids -> a pid reaches only its own proc
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

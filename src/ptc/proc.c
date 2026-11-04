@@ -854,7 +854,11 @@ __lt_hash(const xtc_loop_t *loop)
 static inline uint32_t
 __lt_loop_id(const xtc_loop_t *l)
 {
+#if XTC_DST_BUG(XTC_DST_BUG_PIDEXEC)
+	return (uint32_t)(l->exec_id < 0 ? 0 : l->exec_id + 1); /* 2.1 */
+#else
 	return l->id;
+#endif
 }
 
 static inline unsigned
@@ -2540,6 +2544,16 @@ __resolve(xtc_pid_t pid, xtc_loop_t **out_loop_for_send)
 	 * pid to the proc in the same slot of the sender's own.
 	 */
 	target_loop = __lt_find_id(pid.loop_id, &tbl);
+#if XTC_DST_BUG(XTC_DST_BUG_PIDEXEC)
+	/* The 2.1 fast path: loop_id read as a slot of the SENDER's exec. */
+	if (__xtc_current_loop != NULL && __xtc_current_loop->exec != NULL &&
+	    pid.loop_id >= 1 &&
+	    (int)pid.loop_id <= xtc_exec_n_loops(__xtc_current_loop->exec)) {
+		target_loop = xtc_exec_loop(__xtc_current_loop->exec,
+		    (int)pid.loop_id - 1);
+		tbl = __table_for(target_loop, 0);
+	}
+#endif
 	if (target_loop == NULL || tbl == NULL)
 		return NULL;
 	if (out_loop_for_send)

@@ -95,6 +95,12 @@
  *	                   the LEFT sibling it resumes at the page's first key
  *	                   and skips the keys that moved
  *	                   (test_sim_btree_scan: skipped anchor).
+ *	 24..29        reserved (assigned on other 2.2 branches).
+ *	 30  PIDEXEC   -- proc.c mints pids with the 2.1 executor-relative
+ *	                   loop id (exec slot + 1, 0 standalone), so a send
+ *	                   to a pid of another executor reaches the proc in
+ *	                   the same slot of the sender's own
+ *	                   (test_sim_pid_xexec: MISDELIVERED).
  *
  *	NOT plantable under DST (an honest gap, recorded so it is not
  *	mistaken for missing coverage): the xtc_amutex mutual-exclusion and
@@ -152,5 +158,6 @@
 #define XTC_DST_BUG_PRUNEHZN   21  /* xstore.c: prune-on-write deletes the version at the horizon */
 #define XTC_DST_BUG_SHIFTLO    22  /* btree.c: a resumed cursor skips the lo-fence re-check */
 #define XTC_DST_BUG_GCBATCH    23  /* xstore.c: version GC forgets its row at a batch boundary */
+#define XTC_DST_BUG_PIDEXEC 30     /* proc.c: 2.1 exec-relative pids */
 
 #endif /* XTC_DST_INJECT_H */
