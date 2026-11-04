@@ -219,10 +219,11 @@ int  bm_alloc_pid(bm_t *bm, bm_frame_t **out_frame, bm_pid_t *out_pid);
  * links rather than retrying the same dead id indefinitely. */
 int  bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame);
 
-/* Page checksums (bm_opts.cksum_off).  A load that fails its checksum
- * makes bm_fix_pid return XTC_E_IO, counts it, and calls hook(ctx, pid)
- * on the loading thread (the engine fail-stops its log there: the page
- * file is then never trusted again and the next open rebuilds it).
+/* Page checksums (bm_opts.cksum_off).  A load that fails its checksum,
+ * or whose read fails, makes bm_fix_pid return XTC_E_IO, counts it, and
+ * calls hook(ctx, pid) on the loading thread (the engine fail-stops its
+ * log there: the page file is then never trusted again and the next
+ * open rebuilds it).
  * bm_cksum_failures is the count since bm_create; *bad_pid (optional)
  * gets the last page that failed. */
 void bm_set_cksum_hook(bm_t *bm, void (*hook)(void *ctx, bm_pid_t pid),
@@ -387,7 +388,7 @@ typedef struct bm_stats {
 	uint64_t advances;      /* frames visited by those calls (sum) */
 	uint64_t adv_max;       /* most frames visited by any ONE call */
 	uint64_t forced_claims; /* successful reclaims after protection budget */
-	uint64_t cksum_failures; /* loads refused by the page checksum */
+	uint64_t cksum_failures; /* loads refused: bad sum or failed read */
 } bm_stats_t;
 void bm_get_stats(bm_t *bm, bm_stats_t *out);
 

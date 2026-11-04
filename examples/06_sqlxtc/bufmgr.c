@@ -565,7 +565,8 @@ ck_ok(const bm_t *bm, const uint8_t *pg, bm_pid_t pid, uint32_t off)
 	    ck_get32(pg + off) == ck_sum(bm, pg, off);
 }
 
-/* A load was refused: count it, remember the page, tell the owner. */
+/* A load was refused (bad checksum, or the read failed): count it,
+ * remember the page, tell the owner. */
 static void
 ck_fail(bm_t *bm, bm_pid_t pid)
 {
@@ -2595,7 +2596,13 @@ bm_fix_pid(bm_t *bm, bm_pid_t pid, bm_frame_t **out_frame)
 		atomic_store_explicit(&f->dirty, 0, memory_order_relaxed);
 		atomic_store_explicit(&f->doomed, 0, memory_order_relaxed);
 		atomic_store_explicit(&f->io_busy, 0, memory_order_relaxed);
-		if (do_io(bm, f->page, pid, 0) != 0) { free_push(bm, f); return XTC_E_INTERNAL; }
+		/* A page that cannot be read is damage, as a bad checksum is:
+		 * the owner must stop trusting the base (ck_fail). */
+		if (do_io(bm, f->page, pid, 0) != 0) {
+			free_push(bm, f);
+			ck_fail(bm, pid);
+			return XTC_E_IO;
+		}
 		/* Checked now, acted on only after the race checks below: a
 		 * read that overlapped a concurrent write-back of this pid can
 		 * be torn, and the generation check retries it. */

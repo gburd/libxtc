@@ -14,6 +14,12 @@
  *	          byte-identical (or keep every row); 1.60-2.1.1 skipped the
  *	          failed insert, compacted the log over the short tree and
  *	          returned SX_OK.
+ *	  read    a trusted reopen, then a SELECT that reads the bad page:
+ *	          the read fail-stops the log as a checksum failure does
+ *	          (xstore_wal_failed() == 1), the SELECT returns an error, not
+ *	          a short count, and the close does not mark the base clean,
+ *	          so the restart rebuilds it from the log.  2.1.1 returned a
+ *	          bare XTC_E_INTERNAL and kept the base trusted.
  *	The run is bounded by alarm(120).
  */
 
@@ -30,6 +36,7 @@
 #include <unistd.h>
 
 #include "engine.h"
+#include "xstore.h"
 #include "t_tmp.h"
 
 #define ROWS 2000
@@ -208,12 +215,72 @@ t_replay(void)
 	teardown();
 }
 
+/* The clean flag in the page file's superblock (struct bt_super:
+ * magic:4 page_size:4 root_pid:8 height:8 clean:8). */
+static long
+super_clean(void)
+{
+	uint64_t c = 99;
+	int fd;
+
+	if ((fd = open(g_path, O_RDONLY)) < 0)
+		return -1;
+	if (pread(fd, &c, sizeof c, 24) != (ssize_t)sizeof c)
+		c = 99;
+	close(fd);
+	return (long)c;
+}
+
+/* A trusted reopen, then a read of a page that cannot be read. */
+static void
+t_read(void)
+{
+	sx_db *h = NULL;
+	sx_stmt *st = NULL;
+	long n = -1;
+	int rc;
+
+	setup("eioread");
+	CK(sx_storage_close() == SX_OK);
+	CK(super_clean() == 1);
+	CK(sx_storage_open(g_path, 64) == SX_OK); /* trusted: no replay */
+	CK(sx_open(":memory:", &h) == SX_OK);
+	if (h == NULL) {
+		teardown();
+		return;
+	}
+	arm(-1, EIO);
+	CK(sx_prepare(h, "SELECT count(*) FROM t", -1, &st, NULL) == SX_OK);
+	rc = st != NULL ? sx_step(st) : SX_ERROR;
+	if (rc == SX_ROW)
+		n = (long)sx_column_int64(st, 0);
+	sx_finalize(st);
+	g_armed = 0;
+	CK(g_hits > 0);
+	CK(rc != SX_ROW || n == ROWS); /* never a short answer */
+	CK(xstore_wal_failed() == 1);
+	printf("  read: SELECT rc=%d count=%ld (%ld failed reads), "
+	       "wal_failed=%d\n",
+	    rc, n, g_hits, xstore_wal_failed());
+	sx_close(h);
+	rc = sx_storage_close();
+	CK(rc != SX_OK);
+	CK(super_clean() == 0);
+	printf("  read: close rc=%d, superblock clean=%ld\n", rc,
+	    super_clean());
+	CK(sx_storage_open(g_path, 64) == SX_OK);
+	CK((n = count_rows()) == ROWS);
+	printf("  read: restart: %ld of %d rows\n", n, ROWS);
+	teardown();
+}
+
 int
 main(void)
 {
 	alarm(120);
 	CK(sx_init() == SX_OK);
 	t_replay();
+	t_read();
 	if (!g_fail)
 		printf("ok test_page_eio\n");
 	return g_fail;
