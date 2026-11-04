@@ -177,4 +177,13 @@
  */
 #define XTC_DST_BUG_SCOPE_UNMASKED_FIN 25
 
+/*
+ * 26 SUP_LOCKPARK: sup.c's group-restart wait sleeps holding a pthread
+ * mutex taken with __xtc_mtx_lock, as 2.1.1 held sup->lock there.  Any
+ * fiber that parks inside an internal-lock bracket trips the sim's
+ * step-boundary check (exec.c: "a fiber yielded holding an internal
+ * lock"), which is what test_sim_sup_strategy's one_for_all case reports.
+ */
+#define XTC_DST_BUG_SUP_LOCKPARK 26
+
 #endif /* XTC_DST_INJECT_H */

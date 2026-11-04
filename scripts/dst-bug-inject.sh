@@ -94,6 +94,7 @@ write_cases() {
 		"23;test_sim_sqlxtc_gcidx;1;1;(index [0-9]+, scan [0-9]+|entries missing)" \
 		"24;test_sim_scope;0;1;a recovery record ran twice or not at all" \
 		"25;test_sim_scope;0;1;a scope finalizer was skipped after a kill inside xtc_scope_close" \
+		"26;test_sim_sup_strategy;0;1;a fiber yielded holding an internal lock" \
 		"30;test_sim_pid_xexec;0;0;MISDELIVERED" \
 		> "$1"
 }
@@ -128,6 +129,8 @@ write_cases() {
 # 30 PIDEXEC    proc.c mints exec-relative pids -> a pid reaches only its own proc
 # 25 SCOPE_UNMASKED_FIN xtc_scope_close detaches + runs unmasked -> no finalizer skipped
 #               (test_sim_scope's close+kill workers: a kill lands in a parked finalizer)
+# 26 SUP_LOCKPARK sup.c sleeps holding an __xtc_mtx lock -> no park inside an internal lock
+#               (exec.c's sim step-boundary check of __xtc_unsafe_depth)
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.
