@@ -70,6 +70,22 @@ descriptors, locks, and memory contexts on an unwind
 .Pq see Xr xtc_proc 3 ,
 so the finalizers ride the same LIFO cleanup.  Scopes nest: an outer
 unwind closes the inner scopes first.
+.Pp
+The finalizers run with cancellation masked
+.Pq see Fn xtc_uncancelable ,
+on
+.Fn xtc_scope_close
+and on an unwind.  A kill delivered while a finalizer parks is
+deferred until the last finalizer has run and then unwinds the
+process; it cannot skip the older finalizers.  A finalizer that needs
+to be cancellable can wrap its parking work in
+.Fn xtc_cancel_poll .
+Each finalizer runs at most once: if one exits or faults, the older
+ones still run on the process's unwind.  Before 2.1.2 the finalizers
+of
+.Fn xtc_scope_close
+ran unmasked, and a kill in a parking finalizer dropped the older
+ones.
 .Ss Bracket
 .Fn xtc_bracket
 is the load-bearing acquire/use/release sugar.

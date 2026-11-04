@@ -87,6 +87,7 @@ write_cases() {
 		"22;test_sim_btree_scan;0;1;FAIL: seed 0x[0-9a-f]+ \\((benign|adversarial)\\): .* skipped=[1-9]" \
 		"23;test_sim_sqlxtc_gcidx;1;1;(index [0-9]+, scan [0-9]+|entries missing)" \
 		"24;test_sim_scope;0;1;a recovery record ran twice or not at all" \
+		"25;test_sim_scope;0;1;a scope finalizer was skipped after a kill inside xtc_scope_close" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -117,6 +118,8 @@ write_cases() {
 # 23 GCBATCH    xstore.c GC restarts a row per batch -> no deleted row comes back
 # 24 RECOV_REWALK proc.c recovery walk unmasked, popped late -> each record runs once
 #               (test_sim_scope's fault+kill workers: a kill lands inside the walk)
+# 25 SCOPE_UNMASKED_FIN xtc_scope_close detaches + runs unmasked -> no finalizer skipped
+#               (test_sim_scope's close+kill workers: a kill lands in a parked finalizer)
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.
