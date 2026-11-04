@@ -200,11 +200,23 @@ __xtc_jump_fcontext:
 	 * predictor, whose top entry is the call made on the OTHER context's
 	 * stack, so it mispredicted on every switch: 23.8 ns per round trip
 	 * against 14.6 ns with br on a 16-vCPU aarch64 host (Neoverse-V1).
-	 * The object carries no BTI property note, so a BTI-enforcing link
-	 * keeps this file's code unguarded and br needs no landing pad. */
+	 * br needs no landing pad only because libxtc.so is not BTI-marked:
+	 * ld ANDs the GNU property over every object it links, and these
+	 * objects carry none, so the loader maps none of libxtc PROT_BTI.
+	 * Marking any libxtc object means a `bti j` at every resume site. */
 	br      x30
 	.size __xtc_jump_fcontext, .-__xtc_jump_fcontext
 
-	.section .note.GNU-stack,"",%progbits
-
 #endif  /* __aarch64__ && !_WIN32 */
+
+/*
+ * Outside the arch #if on purpose.  On every other arch this object is
+ * empty, and an ELF object with no .note.GNU-stack makes ld mark the
+ * whole output (libxtc.so) as needing an executable stack
+ * (test/dist/test_gnu_stack.sh).  Deliberately no GNU property note
+ * (IBT/SHSTK/BTI): the context switch is not shadow-stack aware, and a
+ * marked libxtc.so would turn SHSTK on and fault the first resume.
+ */
+#if defined(__ELF__)
+	.section .note.GNU-stack,"",%progbits
+#endif
