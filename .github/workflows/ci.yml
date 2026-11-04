@@ -1392,11 +1392,16 @@ jobs:
               # dir; locate them rather than assume a layout.
               sudo apt-get install -y cmake golang-go
               git clone --depth 1 https://boringssl.googlesource.com/boringssl /tmp/bssl
-              # The runner's gcc 15 trips BoringSSL's own -Werror
+              # The runner's gcc 15.2 trips BoringSSL's own -Werror
               # (stringop-overflow in keccak); its warnings are not ours.
+              # BoringSSL adds -Werror with add_compile_options, which
+              # lands AFTER CMAKE_C_FLAGS, so a -Wno-error there loses:
+              # drop the -Werror from its warning list instead.
+              sed -i 's/set(C_CXX_WARNINGS -Werror /set(C_CXX_WARNINGS /' \
+                /tmp/bssl/CMakeLists.txt
+              grep -q 'set(C_CXX_WARNINGS -Werror' /tmp/bssl/CMakeLists.txt &&
+                { echo "BoringSSL CMakeLists changed: -Werror not removed"; exit 1; }
               cmake -S /tmp/bssl -B /tmp/bssl/build -DCMAKE_BUILD_TYPE=Release \
-                    -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF \
-                    -DCMAKE_C_FLAGS=-Wno-error -DCMAKE_CXX_FLAGS=-Wno-error \
                     -DCMAKE_POSITION_INDEPENDENT_CODE=ON >/dev/null
               cmake --build /tmp/bssl/build -j"$(nproc)" --target ssl crypto >/dev/null
               ;;
