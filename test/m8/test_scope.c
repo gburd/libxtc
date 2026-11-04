@@ -532,6 +532,121 @@ test_recovery_record_exits_once(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---------- 8. A6: xtc_scope_close runs its finalizers masked ---------- */
+
+/*
+ * effects case 1: a scope with an older finalizer and a parking one is
+ * closed, and a sibling kills the proc while the parking one sleeps.
+ * 2.1.1 detached the scope's recovery marker first and ran the
+ * finalizers unmasked: the kill unwound out of the close, the older
+ * finalizer never ran (old_fin=0) and the scope leaked.
+ */
+static _Atomic int g_old_fin, g_park_fin_done, g_after_close;
+static xtc_pid_t g_close_target;
+
+static void
+cl_fin_old(void *a)
+{
+	(void)a;
+	atomic_fetch_add(&g_old_fin, 1);
+}
+
+static void
+cl_fin_park(void *a)
+{
+	(void)a;
+	(void)xtc_proc_sleep(50 * MS);
+	atomic_store(&g_park_fin_done, 1);
+}
+
+static void
+cl_fin_exit(void *a)
+{
+	(void)a;
+	(void)xtc_exit_self(0);
+}
+
+static void
+cl_kill_target(void *a)
+{
+	xtc_scope_t *s = xtc_scope_open();
+	(void)a;
+	if (s == NULL)
+		return;
+	(void)xtc_scope_defer(s, cl_fin_old, NULL);
+	(void)xtc_scope_defer(s, cl_fin_park, NULL);
+	xtc_scope_close(s);
+	atomic_store(&g_after_close, 1); /* the latched kill fires first */
+}
+
+static void
+cl_exit_target(void *a)
+{
+	xtc_scope_t *s = xtc_scope_open();
+	(void)a;
+	if (s == NULL)
+		return;
+	(void)xtc_scope_defer(s, cl_fin_old, NULL);
+	(void)xtc_scope_defer(s, cl_fin_exit, NULL);
+	xtc_scope_close(s);
+	atomic_store(&g_after_close, 1); /* NOTREACHED: cl_fin_exit exits */
+}
+
+static void
+cl_killer(void *a)
+{
+	(void)a;
+	(void)xtc_proc_sleep(10 * MS);
+	(void)xtc_exit_pid(g_close_target, 7);
+}
+
+/* Run `target`, and a killer when `kill`, to quiescence. */
+static void
+cl_run(xtc_proc_fn target, int kill)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_pid_t k;
+	int rc;
+	atomic_store(&g_old_fin, 0);
+	atomic_store(&g_park_fin_done, 0);
+	atomic_store(&g_after_close, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	rc = xtc_proc_spawn(loop, target, NULL, NULL, &g_close_target);
+	munit_assert_int(rc, ==, XTC_OK);
+	if (kill) {
+		rc = xtc_proc_spawn(loop, cl_killer, NULL, NULL, &k);
+		munit_assert_int(rc, ==, XTC_OK);
+	}
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+}
+
+static MunitResult
+test_scope_close_kill_masked(const MunitParameter p[], void *d)
+{
+	(void)p;
+	(void)d;
+	cl_run(cl_kill_target, 1);
+	munit_assert_int(atomic_load(&g_park_fin_done), ==, 1);
+	munit_assert_int(atomic_load(&g_old_fin), ==, 1);
+	/* The kill was latched, not lost: it fired at the end of the close. */
+	munit_assert_int(atomic_load(&g_after_close), ==, 0);
+	return MUNIT_OK;
+}
+
+static MunitResult
+test_scope_close_fin_exits(const MunitParameter p[], void *d)
+{
+	(void)p;
+	(void)d;
+	cl_run(cl_exit_target, 0);
+	/* The finalizer that exited left the older one to the recovery
+	 * walk, which ran it once (and freed the scope: ASan/LSan). */
+	munit_assert_int(atomic_load(&g_old_fin), ==, 1);
+	munit_assert_int(atomic_load(&g_after_close), ==, 0);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/scope_normal_lifo",     test_scope_normal_lifo,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/scope_exit_self",       test_scope_exit_self,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -546,6 +661,10 @@ static MunitTest tests[] = {
 	    NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/recovery_record_exits_once", test_recovery_record_exits_once, NULL,
 	    NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/scope_close_kill_masked", test_scope_close_kill_masked, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/scope_close_fin_exits", test_scope_close_fin_exits, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m8/scope", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

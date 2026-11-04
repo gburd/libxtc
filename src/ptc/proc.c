@@ -4647,25 +4647,33 @@ xtc_cancel_requested(void)
 
 struct xtc_scope {
 	struct xtc_proc *owner;      /* proc this scope belongs to */
-	int              closed;     /* guards double-run */
+	int              closed;     /* no more defers */
+	int              closing;    /* xtc_scope_close raised the mask */
 #define XTC_SCOPE_MAX_DEFER 32
 	struct { xtc_finalizer_fn fn; void *arg; } fin[XTC_SCOPE_MAX_DEFER];
 	int              n_fin;
 };
 
-/* Run a scope's deferred finalizers LIFO, once.  Shared by the happy-
- * path close and the recovery-marker unwind. */
+/*
+ * Run a scope's deferred finalizers LIFO, each once.  Shared by the
+ * happy-path close and the recovery-marker unwind.  Each finalizer is
+ * popped before it runs, so a run that is cut short (the finalizer
+ * exits or faults) leaves exactly the older ones for the next run --
+ * the recovery walk, through the scope's marker.  `closed` only stops
+ * new defers; it does not stop the remaining finalizers from running.
+ */
 static void
 __scope_run(struct xtc_scope *s)
 {
 	int i;
-	if (s == NULL || s->closed)
+	if (s == NULL)
 		return;
 	s->closed = 1;
-	for (i = s->n_fin - 1; i >= 0; i--)
+	while (s->n_fin > 0) {
+		i = --s->n_fin;
 		if (s->fin[i].fn != NULL)
 			s->fin[i].fn(s->fin[i].arg);
-	s->n_fin = 0;
+	}
 }
 
 /* Recovery-marker trampoline: the registry invokes fn(arg) on an
@@ -4678,6 +4686,11 @@ __scope_recover_cb(void *arg)
 	struct xtc_scope *s = arg;
 	if (s == NULL)
 		return;
+	/* A finalizer faulted or exited inside xtc_scope_close: give back
+	 * the mask the close raised, so a recovery block that carries on
+	 * is not left uncancelable.  The walk running this is masked. */
+	if (s->closing)
+		__mask_depth_dec(s->owner);
 	__scope_run(s);
 	__os_free(s);
 }
@@ -4746,7 +4759,18 @@ xtc_scope_defer(xtc_scope_t *s, xtc_finalizer_fn fn, void *arg)
 	return XTC_OK;
 }
 
-/* PUBLIC: void xtc_scope_close __P((xtc_scope_t *)); */
+/*
+ * PUBLIC: void xtc_scope_close __P((xtc_scope_t *));
+ *
+ * The finalizers run MASKED (Cats Effect runs Resource finalizers
+ * uncancelable for the same reason): a kill delivered at a park inside
+ * one is latched and fires after the close, once every finalizer has
+ * run.  The recovery marker stays attached until they have run, so a
+ * finalizer that exits or faults leaves the older ones to the proc's
+ * recovery walk, which runs them and frees the scope.  2.1.1 detached
+ * the marker first and ran unmasked: a kill in a parking finalizer
+ * dropped every older finalizer and leaked the scope.
+ */
 void
 xtc_scope_close(xtc_scope_t *s)
 {
@@ -4754,11 +4778,28 @@ xtc_scope_close(xtc_scope_t *s)
 	if (s == NULL)
 		return;
 	p = s->owner;
-	/* Detach the recovery marker FIRST so that if a finalizer itself
-	 * faults or exits, the unwind does not re-enter this same scope. */
+#if XTC_DST_BUG(XTC_DST_BUG_SCOPE_UNMASKED_FIN)
 	__scope_drop_marker(p, s);
 	__scope_run(s);
 	__os_free(s);
+#else
+	/* Mask only the proc running the close: draining a latched kill
+	 * exits the running fiber, which must be the scope's owner. */
+	if (p != __proc_reanchor(__current_proc))
+		p = NULL;
+	if (p != NULL) {
+		__mask_depth_inc(p);
+		s->closing = 1;
+	}
+	__scope_run(s);
+	__scope_drop_marker(s->owner, s);
+	__os_free(s);
+	if (p != NULL) {
+		__mask_depth_dec(p);
+		/* A kill latched in a finalizer fires now: may not return. */
+		__mask_drain(p);
+	}
+#endif
 }
 
 /* PUBLIC: int xtc_bracket __P((int (*)(void **, void *), int (*)(void *, void *), void (*)(void *, void *), void *)); */

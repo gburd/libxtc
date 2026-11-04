@@ -169,5 +169,12 @@
 #define XTC_DST_BUG_RECOV_REWALK 24
 
 #define XTC_DST_BUG_PIDEXEC 30     /* proc.c: 2.1 exec-relative pids */
+/*
+ * 25 SCOPE_UNMASKED_FIN: xtc_scope_close detaches the recovery marker
+ * first and runs the finalizers unmasked (2.1.1), so a kill delivered
+ * while a finalizer parks drops every older finalizer of that scope
+ * (test_sim_scope: a scope finalizer was skipped).
+ */
+#define XTC_DST_BUG_SCOPE_UNMASKED_FIN 25
 
 #endif /* XTC_DST_INJECT_H */
