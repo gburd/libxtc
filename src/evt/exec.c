@@ -20,6 +20,7 @@
 #include "xtc_sim.h"
 
 #include <stdatomic.h>
+#include <stdio.h>
 
 extern int __xtc_loop_step_once(xtc_loop_t *loop);
 
@@ -989,6 +990,7 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 {
 	long steps = 0;
 	xtc_loop_t *saved;
+	int base_unsafe = __xtc_unsafe_depth();
 	/* Per-run last-run-step per loop, for the pessimal (starve) pick.
 	 * A fixed cap keeps it a stack local (no alloc); loops beyond the
 	 * cap simply are not starve-tracked and fall back to uniform. */
@@ -1158,6 +1160,28 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 			xtc_sim_deactivate();
 			__xtc_current_loop = saved;
 			return rc;
+		}
+		/*
+		 * No fiber may park, or yield at all, inside an internal-lock
+		 * bracket (__xtc_mtx_lock, __os_mutex_lock, the allocator).  A
+		 * step returns here only once its fiber has yielded, and the
+		 * sim runs every loop on this one thread, so a depth above the
+		 * one the run started at is held by a yielded fiber: a
+		 * same-loop taker of that lock blocks the loop thread for good
+		 * (2.1.1's supervisor slept in a group restart holding
+		 * sup->lock, and a same-loop xtc_sup_n_alive hung the loop).
+		 */
+		if (__xtc_unsafe_depth() > base_unsafe) {
+			fprintf(stderr,
+			    "xtc DST: a fiber yielded holding an internal lock "
+			    "(unsafe depth %d after a step of loop %d, step "
+			    "%ld)\n",
+			    __xtc_unsafe_depth(), chosen, steps);
+			e->started = 0;
+			xtc_sim_clock_disable();
+			xtc_sim_deactivate();
+			__xtc_current_loop = saved;
+			return XTC_E_INTERNAL;
 		}
 		/* Structural invariants must hold after every step; a
 		 * violation pinpoints the exact seeded interleaving that

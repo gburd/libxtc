@@ -6,11 +6,13 @@
  */
 
 #include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdatomic.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "munit.h"
 #include "xtc.h"
@@ -977,6 +979,93 @@ test_simple_ofo_reclaims_dead(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * A2 (otp probe F): xtc_sup_n_alive from a proc on the supervisor's loop
+ * while a one_for_all restart waits for a masked child's cleanup.  2.1.1
+ * held sup->lock (a pthread mutex) across that wait, which sleeps; the
+ * same-loop caller blocked the loop thread in pthread_mutex_lock and the
+ * supervisor that would release it never ran again (probe: killed by
+ * timeout(1) after 12 s).  The run is bounded by an alarm so the
+ * regression fails rather than hanging make check.
+ */
+#define NA_MS (1000LL * 1000)
+static _Atomic int g_na_n0, g_na_rc = -999;
+static _Atomic int64_t g_na_ns = -1;
+static xtc_supervisor_t *g_na_sup;
+
+static void
+na_k0(void *a)
+{
+	(void)a;
+	if (atomic_fetch_add(&g_na_n0, 1) == 0) {
+		(void)xtc_proc_sleep(20 * NA_MS);
+		(void)xtc_exit_self(4); /* crash once: one_for_all restart */
+	}
+	(void)xtc_proc_sleep(500 * NA_MS);
+}
+
+static void
+na_k1(void *a)
+{
+	(void)a;
+	/* Masked: the restart's kill is deferred, so the supervisor sits in
+	 * its cleanup wait for the whole 600 ms. */
+	(void)xtc_mask_enter();
+	(void)xtc_proc_sleep(600 * NA_MS);
+	(void)xtc_mask_leave();
+}
+
+static void
+na_observer(void *a)
+{
+	int64_t t0;
+	(void)a;
+	(void)xtc_proc_sleep(100 * NA_MS); /* inside the restart wait */
+	t0 = xtc_clock_mono();
+	atomic_store(&g_na_rc, xtc_sup_n_alive(g_na_sup));
+	atomic_store(&g_na_ns, xtc_clock_mono() - t0);
+	(void)xtc_sup_stop(g_na_sup);
+}
+
+static void
+na_alarm(int sig)
+{
+	(void)sig;
+	_exit(9); /* the loop thread is wedged in pthread_mutex_lock */
+}
+
+static MunitResult
+test_n_alive_during_group_restart(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_child_spec_t ch[2] = { XTC_CHILD_SPEC_INIT, XTC_CHILD_SPEC_INIT };
+	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_pid_t pid;
+	(void)p;
+	(void)d;
+	atomic_store(&g_na_n0, 0);
+	ch[0].fn = na_k0;
+	ch[0].policy = XTC_RESTART_PERMANENT;
+	ch[1].fn = na_k1;
+	ch[1].policy = XTC_RESTART_TEMPORARY;
+	so.strategy = XTC_SUP_ONE_FOR_ALL;
+	(void)signal(SIGALRM, na_alarm);
+	(void)alarm(10);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_sup_start(loop, &so, ch, 2, &g_na_sup), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, na_observer, NULL, NULL, &pid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)alarm(0);
+	/* It returned, at once: no park, no lock. */
+	munit_assert_int(atomic_load(&g_na_rc), >=, 0);
+	munit_assert_int64(atomic_load(&g_na_ns), <, 100 * NA_MS);
+	munit_assert_int(xtc_sup_join(g_na_sup, 0), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/add_child_other_loop", test_add_child_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/supervisor_restarts",   test_supervisor_restarts, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -991,6 +1080,8 @@ static MunitTest tests[] = {
 	{ "/pool_max_children",     test_pool_max_children,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/atomic_spawn_monitor",  test_atomic_spawn_monitor, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/one_for_all_equal_pid_other_loop", test_one_for_all_equal_pid_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/n_alive_during_group_restart", test_n_alive_during_group_restart,
+	    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10/sup", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

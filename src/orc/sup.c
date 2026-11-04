@@ -11,16 +11,19 @@
  */
 
 #include "xtc_int.h"
-#include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
 #include "xtc_orc.h"
 #include "xtc_exec.h"
 #include "xtc_proc.h"
 #include "xtc_sync.h"
 #include "proc_int.h"      /* __xtc_proc_loop_contains: owner-qualified presence */
 #include "xtc_probes.h"
+#include "xtc_dst_inject.h"
+#if XTC_DST_BUG(XTC_DST_BUG_SUP_LOCKPARK)
+#include "preempt_int.h"
+#include <pthread.h>
+#endif
 
 #include <stdio.h>
-#include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,10 +36,19 @@ struct child {
 	int              dynamic;   /* added by xtc_sup_add_child */
 };
 
+/*
+ * The child table (children, n_children, recent_restarts) is read and
+ * written ONLY by the supervisor proc's own fiber: ADD_CHILD and DOWN
+ * both arrive in its mailbox.  So it needs no lock.  Until 2.1.2 a
+ * pthread mutex guarded it for xtc_sup_n_alive, and the supervisor held
+ * it across the yielding wait of a group restart (__wait_children_gone,
+ * up to 5 s): a same-loop xtc_sup_n_alive then blocked the loop thread
+ * in pthread_mutex_lock, and the supervisor that would release it never
+ * ran again.  The counters other threads read are atomics.
+ */
 struct xtc_supervisor {
 	xtc_loop_t            *loop;
 	xtc_sup_opts_t         opts;
-	pthread_mutex_t        lock;
 
 	struct child          *children;
 	int                    n_children;
@@ -49,6 +61,7 @@ struct xtc_supervisor {
 	int                    rr_n;
 
 	_Atomic int            n_restarts_total;
+	_Atomic int            n_alive;        /* children alive (atomic) */
 	_Atomic int            alive;
 	_Atomic int            stop_requested;
 	_Atomic int            abandon_wait;   /* __xtc_sup_abandon_wait */
@@ -56,6 +69,9 @@ struct xtc_supervisor {
 	 * by the supervisor proc itself, read from any thread. */
 	xtc_atomic_pid_t       sup_pid;
 	xtc_notify_t          *stopped;
+#if XTC_DST_BUG(XTC_DST_BUG_SUP_LOCKPARK)
+	pthread_mutex_t        plant_lock;     /* 2.1.1's sup->lock shape */
+#endif
 };
 
 static xtc_pid_t
@@ -165,6 +181,17 @@ __child_loop(struct xtc_supervisor *sup, const struct child *c)
 	return sup->loop;
 }
 
+/* Set a child's alive flag, keeping n_alive in step.  Supervisor fiber. */
+static void
+__child_alive(struct xtc_supervisor *sup, struct child *c, int v)
+{
+	if (c->alive == v)
+		return;
+	c->alive = v;
+	(void)atomic_fetch_add_explicit(&sup->n_alive, v ? 1 : -1,
+	    memory_order_relaxed);
+}
+
 static int
 __spawn_child(struct xtc_supervisor *sup, struct child *c)
 {
@@ -210,7 +237,7 @@ __spawn_child(struct xtc_supervisor *sup, struct child *c)
 	rc = xtc_proc_spawn_monitor(target, c->spec.fn, c->spec.arg, &pop,
 	    &c->pid, &c->monitor_ref);
 	if (rc != XTC_OK) return rc;
-	c->alive = 1;
+	__child_alive(sup, c, 1);
 	return XTC_OK;
 }
 
@@ -226,7 +253,6 @@ __handle_add_child(struct xtc_supervisor *sup, const struct add_child_msg *a)
 
 	memset(&rep, 0, sizeof rep);
 	rep.tag = a->tag;
-	(void)__xtc_mtx_lock(&sup->lock);
 	/* Bounded dynamic pool: enforce max_children (0 = unbounded).  Count
 	 * only live children so a slot freed by a DOWN can be reused. */
 	if (sup->opts.max_children > 0) {
@@ -234,7 +260,6 @@ __handle_add_child(struct xtc_supervisor *sup, const struct add_child_msg *a)
 		for (i = 0; i < sup->n_children; i++)
 			if (sup->children[i].alive) live++;
 		if (live >= sup->opts.max_children) {
-			(void)__xtc_mtx_unlock(&sup->lock);
 			rep.ok = 2;   /* at cap -> XTC_E_RESOURCE */
 			(void)__xtc_send_on(a->reply_loop, a->reply, &rep, sizeof rep);
 			return;
@@ -243,7 +268,6 @@ __handle_add_child(struct xtc_supervisor *sup, const struct add_child_msg *a)
 	if (__os_realloc(sup->children,
 	    (size_t)(sup->n_children + 1) * sizeof(struct child), &nc)
 	    != XTC_OK) {
-		(void)__xtc_mtx_unlock(&sup->lock);
 		rep.ok = 0;
 		(void)__xtc_send_on(a->reply_loop, a->reply, &rep, sizeof rep);
 		return;
@@ -255,7 +279,6 @@ __handle_add_child(struct xtc_supervisor *sup, const struct add_child_msg *a)
 	sup->children[idx].dynamic = 1;
 	rc = __spawn_child(sup, &sup->children[idx]);
 	if (rc != XTC_OK) {
-		(void)__xtc_mtx_unlock(&sup->lock);
 		rep.ok = 0;
 		(void)__xtc_send_on(a->reply_loop, a->reply, &rep, sizeof rep);
 		return;
@@ -263,7 +286,6 @@ __handle_add_child(struct xtc_supervisor *sup, const struct add_child_msg *a)
 	sup->n_children++;
 	rep.ok = 1;
 	rep.pid = sup->children[idx].pid;
-	(void)__xtc_mtx_unlock(&sup->lock);
 	(void)__xtc_send_on(a->reply_loop, a->reply, &rep, sizeof rep);
 }
 
@@ -303,11 +325,9 @@ __child_gone(xtc_loop_t *owner, xtc_pid_t pid)
  * its predecessor was still inside an exit hook holding the resource --
  * measured as a hold count of 4 where the steady state is 2.
  *
- * Called from the supervisor's own fiber with sup->lock held; the only
- * other takers of that lock are this same proc (ADD_CHILD is handled in
- * this loop), so yielding while holding it cannot deadlock a foreign
- * thread.  It must yield rather than block: the dying siblings need
- * scheduler time, possibly on this very loop, to run their exit hooks.
+ * Called from the supervisor's own fiber, holding no lock.  It must
+ * yield rather than block: the dying siblings need scheduler time,
+ * possibly on this very loop, to run their exit hooks.
  */
 static int
 __wait_children_gone(struct xtc_supervisor *sup, int lo, int hi,
@@ -333,7 +353,13 @@ __wait_children_gone(struct xtc_supervisor *sup, int lo, int hi,
 		(void)__os_clock_mono(&now);
 		if (now - start >= XTC_SUP_CLEANUP_WAIT_NS)
 			return 0;
+#if XTC_DST_BUG(XTC_DST_BUG_SUP_LOCKPARK)
+		(void)__xtc_mtx_lock(&sup->plant_lock);
+		(void)xtc_proc_sleep(1LL * 1000 * 1000);
+		(void)__xtc_mtx_unlock(&sup->plant_lock);
+#else
 		(void)xtc_proc_sleep(1LL * 1000 * 1000);   /* 1 ms */
+#endif
 	}
 }
 
@@ -371,7 +397,8 @@ __do_one_for_all(struct xtc_supervisor *sup, int dead_idx)
 		old[i] = sup->children[i].pid;
 	for (i = 0; i < sup->n_children; i++)
 		if (sup->children[i].alive) __kill_sibling(sup, &sup->children[i]);
-	for (i = 0; i < sup->n_children; i++) sup->children[i].alive = 0;
+	for (i = 0; i < sup->n_children; i++)
+		__child_alive(sup, &sup->children[i], 0);
 
 	/* Do not respawn into an overlap: wait for every old child's cleanup
 	 * to COMPLETE.  If one will not finish, give up on the restart rather
@@ -414,7 +441,8 @@ __do_rest_for_one(struct xtc_supervisor *sup, int dead_idx)
 		old[i] = sup->children[i].pid;
 	for (i = sup->n_children - 1; i > dead_idx; i--)
 		if (sup->children[i].alive) __kill_sibling(sup, &sup->children[i]);
-	for (i = dead_idx; i < sup->n_children; i++) sup->children[i].alive = 0;
+	for (i = dead_idx; i < sup->n_children; i++)
+		__child_alive(sup, &sup->children[i], 0);
 
 	/* As in one_for_all: no replacement until the old generation's
 	 * cleanup has completed; escalate (stop) if it does not. */
@@ -498,19 +526,14 @@ __sup_entry(void *arg)
 		memcpy(&d, msg, sizeof d);
 		__os_free(msg);
 
-		(void)__xtc_mtx_lock(&sup->lock);
 		idx = __find_child_by_pid(sup, d.pid);
-		if (idx < 0) {
-			(void)__xtc_mtx_unlock(&sup->lock);
+		if (idx < 0)
 			continue;
-		}
-		sup->children[idx].alive = 0;
+		__child_alive(sup, &sup->children[idx], 0);
 
 		if (atomic_load_explicit(&sup->stop_requested,
-		    memory_order_acquire)) {
-			(void)__xtc_mtx_unlock(&sup->lock);
+		    memory_order_acquire))
 			break;
-		}
 
 		if (!__should_restart(sup, &sup->children[idx], d.reason)) {
 			/* A dynamic child that is not coming back (TEMPORARY, or
@@ -526,7 +549,6 @@ __sup_entry(void *arg)
 				    sizeof(struct child));
 				sup->n_children--;
 			}
-			(void)__xtc_mtx_unlock(&sup->lock);
 			continue;
 		}
 
@@ -534,10 +556,8 @@ __sup_entry(void *arg)
 		    XTC_PROBE_PID_GEN(d.pid), d.reason);
 		(void)__os_clock_mono(&now);
 		__record_restart(sup, now);
-		if (__intensity_exceeded(sup, now)) {
-			(void)__xtc_mtx_unlock(&sup->lock);
+		if (__intensity_exceeded(sup, now))
 			break;
-		}
 
 		switch (sup->opts.strategy) {
 		case XTC_SUP_ONE_FOR_ONE:
@@ -556,7 +576,6 @@ __sup_entry(void *arg)
 			(void)__spawn_child(sup, &sup->children[idx]);
 			break;
 		}
-		(void)__xtc_mtx_unlock(&sup->lock);
 	}
 
 	/*
@@ -578,7 +597,6 @@ __sup_entry(void *arg)
 		    __os_calloc((size_t)sup->n_children, sizeof *old,
 		    (void **)&old) != XTC_OK)
 			old = NULL;             /* no memory: kill, do not wait */
-		(void)__xtc_mtx_lock(&sup->lock);
 		for (k = 0; k < sup->n_children; k++) {
 			if (old != NULL)
 				old[k] = sup->children[k].alive
@@ -586,10 +604,9 @@ __sup_entry(void *arg)
 			if (sup->children[k].alive) {
 				(void)__xtc_exit_pid_on(__child_loop(sup,
 				    &sup->children[k]), sup->children[k].pid, 1);
-				sup->children[k].alive = 0;
+				__child_alive(sup, &sup->children[k], 0);
 			}
 		}
-		(void)__xtc_mtx_unlock(&sup->lock);
 		if (old != NULL) {
 			(void)__wait_children_gone(sup, 0, sup->n_children, old);
 			__os_free(old);
@@ -663,8 +680,10 @@ xtc_sup_start(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
 		__os_free(sup);
 		return XTC_E_NOSYS;
 	}
-	(void)pthread_mutex_init(&sup->lock, NULL);
 	atomic_store_explicit(&sup->alive, 1, memory_order_relaxed);
+#if XTC_DST_BUG(XTC_DST_BUG_SUP_LOCKPARK)
+	(void)pthread_mutex_init(&sup->plant_lock, NULL);
+#endif
 
 	sup->rr_cap = sup->opts.max_restarts + 4;
 	if ((rc = __os_calloc((size_t)sup->rr_cap, sizeof *sup->recent_restarts,
@@ -700,8 +719,7 @@ xtc_sup_start(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
 fail3:	xtc_notify_destroy(sup->stopped);
 fail2:	__os_free(sup->children);
 fail1:	__os_free(sup->recent_restarts);
-fail0:	(void)pthread_mutex_destroy(&sup->lock);
-	__os_free(sup);
+fail0:	__os_free(sup);
 	return rc;
 }
 
@@ -831,25 +849,19 @@ xtc_sup_join(xtc_supervisor_t *sup, int64_t timeout_ns)
 	xtc_notify_destroy(sup->stopped);
 	__os_free(sup->children);
 	__os_free(sup->recent_restarts);
-	(void)pthread_mutex_destroy(&sup->lock);
 	__os_free(sup);
 	return XTC_OK;
 }
 
 int xtc_sup_n_children(const xtc_supervisor_t *sup) {
-	/* Unlocked on purpose: the supervisor holds sup->lock across
-	 * yields during a group restart, so a same-loop caller blocking on
-	 * it would deadlock the loop thread.  A snapshot. */
+	/* A snapshot of a field only the supervisor fiber writes. */
 	return sup ? sup->n_children : 0;
 }
 int xtc_sup_n_alive(const xtc_supervisor_t *sup) {
-	int live = 0, i;
-	if (sup == NULL) return 0;
-	(void)__xtc_mtx_lock(&((xtc_supervisor_t *)sup)->lock);
-	for (i = 0; i < sup->n_children; i++)
-		if (sup->children[i].alive) live++;
-	(void)__xtc_mtx_unlock(&((xtc_supervisor_t *)sup)->lock);
-	return live;
+	if (sup == NULL)
+		return 0;
+	return atomic_load_explicit(&((xtc_supervisor_t *)sup)->n_alive,
+	    memory_order_relaxed);
 }
 int xtc_sup_n_restarts(const xtc_supervisor_t *sup) {
 	return sup ? atomic_load_explicit(&((xtc_supervisor_t *)sup)->n_restarts_total,
