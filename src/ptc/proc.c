@@ -1557,6 +1557,7 @@ static void __recov_release_all(struct xtc_proc *p);
  * a cancellable park must release its SCHEDULER resources (fd
  * registration, timeout timer) before the kill unwinds it. */
 static void __mask_drain(struct xtc_proc *p);
+static inline void __mask_depth_inc(struct xtc_proc *p);
 
 static intptr_t
 __proc_entry(void *arg)
@@ -1624,8 +1625,16 @@ __proc_entry(void *arg)
 	{
 		int fsig = xtc_proc_recovery_arm();   /* POSIX sigsetjmp / Win CONTEXT */
 		if (fsig != 0) {
-			/* A contained fault fired the default frame. */
+			/* A contained fault fired the default frame.  Mask
+			 * for good before the walk, as __run_proc_at_exit
+			 * does: a record that parks is a kill point, and a
+			 * kill delivered there unwound into the exit path,
+			 * which walked the same records again (2.1.1: a
+			 * scope freed twice, "double free detected"). */
 			p->recovery_armed = 0;
+#if !XTC_DST_BUG(XTC_DST_BUG_RECOV_REWALK)
+			__mask_depth_inc(p);
+#endif
 			__recov_release_all(p);
 			p->exit_reason = fsig;   /* positive signal / exception code */
 			p->exit_kind = 2;        /* XTC_DOWN_KIND_SIGNAL */
@@ -4374,43 +4383,83 @@ xtc_proc_recovery_track(void (*fn)(void *), void *arg)
 	return __recov_push(__current_proc, r);
 }
 
-/* Release every tracked resource (LIFO) and forget them.  Shared by
- * the public cleanup call and the proc exit path. */
+/* Release one tracked resource. */
+static void
+__recov_run(const struct xtc_recov_rec *r)
+{
+	switch (r->kind) {
+	case XTC_RECOV_FD:
+		if (r->fd >= 0)
+			(void)xtc_fs_close(r->fd);
+		break;
+	case XTC_RECOV_MCTX:
+		if (r->ptr != NULL)
+			xtc_mctx_reset((struct xtc_mctx *)r->ptr);
+		break;
+	case XTC_RECOV_LOCKS:
+		if (r->lock_release != NULL && r->ptr != NULL)
+			r->lock_release(r->ptr, r->u64);
+		break;
+	case XTC_RECOV_CB:
+		if (r->fn != NULL)
+			r->fn(r->ptr);
+		break;
+	default:
+		break;
+	}
+}
+
+/*
+ * Release every tracked resource (LIFO) and forget them.  Shared by
+ * the public cleanup call and the proc exit path.  Each record is
+ * POPPED before it runs: a record that does not return (it exits, it
+ * faults, or a kill unwinds it) is then not run again by the next walk,
+ * which starts at the record below it.  Until 2.1.2 the walk indexed
+ * the array and zeroed n_recov after the loop, so an unwind out of one
+ * record re-ran every record above it.
+ */
 static void
 __recov_release_all(struct xtc_proc *p)
 {
+#if XTC_DST_BUG(XTC_DST_BUG_RECOV_REWALK)
 	int i;
+#endif
 	if (p == NULL)
 		return;
-	for (i = p->n_recov - 1; i >= 0; i--) {
-		struct xtc_recov_rec *r = &p->recov[i];
-		switch (r->kind) {
-		case XTC_RECOV_FD:
-			if (r->fd >= 0) (void)xtc_fs_close(r->fd);
-			break;
-		case XTC_RECOV_MCTX:
-			if (r->ptr != NULL)
-				xtc_mctx_reset((struct xtc_mctx *)r->ptr);
-			break;
-		case XTC_RECOV_LOCKS:
-			if (r->lock_release != NULL && r->ptr != NULL)
-				r->lock_release(r->ptr, r->u64);
-			break;
-		case XTC_RECOV_CB:
-			if (r->fn != NULL) r->fn(r->ptr);
-			break;
-		default:
-			break;
-		}
-	}
+#if XTC_DST_BUG(XTC_DST_BUG_RECOV_REWALK)
+	for (i = p->n_recov - 1; i >= 0; i--)
+		__recov_run(&p->recov[i]);
 	p->n_recov = 0;
+#else
+	while (p->n_recov > 0) {
+		struct xtc_recov_rec r = p->recov[--p->n_recov];
+		__recov_run(&r); /* a copy: the record may push another */
+	}
+#endif
 }
 
-/* PUBLIC: void xtc_proc_recovery_cleanup __P((void)); */
+/*
+ * PUBLIC: void xtc_proc_recovery_cleanup __P((void));
+ *
+ * Masked for the walk: a kill delivered at a park inside a record is
+ * latched, not acted on, so the rest of the records still run.  The
+ * latched kill stays pending in kill_pending and fires at the next
+ * delivery point; it is not drained here, so xtc_proc_recovery_arm_clean
+ * still exits with the fault's code, not the kill's.
+ */
 void
 xtc_proc_recovery_cleanup(void)
 {
-	__recov_release_all(__current_proc);
+	struct xtc_proc *p = __current_proc;
+	if (p == NULL)
+		return;
+#if !XTC_DST_BUG(XTC_DST_BUG_RECOV_REWALK)
+	__mask_depth_inc(p);
+#endif
+	__recov_release_all(p);
+#if !XTC_DST_BUG(XTC_DST_BUG_RECOV_REWALK)
+	__mask_depth_dec(p);
+#endif
 }
 
 /* PUBLIC: int xtc_proc_recovery_untrack_fd __P((int)); */
