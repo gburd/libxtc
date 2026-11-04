@@ -612,7 +612,7 @@ jobs:
           git clone --depth 1 --branch v3.6.2 --recurse-submodules \
             https://github.com/Mbed-TLS/mbedtls /tmp/mbed
           cmake -S /tmp/mbed -B /tmp/mbed/build -DCMAKE_BUILD_TYPE=Release \
-                -DENABLE_TESTING=Off -DENABLE_PROGRAMS=Off \
+                -DENABLE_TESTING=Off -DENABLE_PROGRAMS=Off -DMBEDTLS_FATAL_WARNINGS=Off \
                 -DCMAKE_POSITION_INDEPENDENT_CODE=ON >/dev/null
           cmake --build /tmp/mbed/build -j"$(nproc)" >/dev/null
       - name: Autoreconf
@@ -1330,7 +1330,7 @@ jobs:
               git clone --depth 1 --branch v3.6.2 --recurse-submodules \
                 https://github.com/Mbed-TLS/mbedtls /tmp/mbed
               cmake -S /tmp/mbed -B /tmp/mbed/build -DCMAKE_BUILD_TYPE=Release \
-                    -DENABLE_TESTING=Off -DENABLE_PROGRAMS=Off \
+                    -DENABLE_TESTING=Off -DENABLE_PROGRAMS=Off -DMBEDTLS_FATAL_WARNINGS=Off \
                     -DCMAKE_POSITION_INDEPENDENT_CODE=ON >/dev/null
               cmake --build /tmp/mbed/build -j"$(nproc)" >/dev/null
               ;;
@@ -1341,7 +1341,11 @@ jobs:
               # dir; locate them rather than assume a layout.
               sudo apt-get install -y cmake golang-go
               git clone --depth 1 https://boringssl.googlesource.com/boringssl /tmp/bssl
+              # The runner's gcc 15 trips BoringSSL's own -Werror
+              # (stringop-overflow in keccak); its warnings are not ours.
               cmake -S /tmp/bssl -B /tmp/bssl/build -DCMAKE_BUILD_TYPE=Release \
+                    -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF \
+                    -DCMAKE_C_FLAGS=-Wno-error -DCMAKE_CXX_FLAGS=-Wno-error \
                     -DCMAKE_POSITION_INDEPENDENT_CODE=ON >/dev/null
               cmake --build /tmp/bssl/build -j"$(nproc)" --target ssl crypto >/dev/null
               ;;
