@@ -269,11 +269,12 @@ kill_round(const char *path, int round, uint8_t *acked)
 	return 1;
 }
 
-static void
+static int
 dump1(wal_emit_fn emit, void *ctx, void *user)
 {
 	(void)user;
 	emit(ctx, "ckpt", 4);
+	return XTC_OK;
 }
 
 int

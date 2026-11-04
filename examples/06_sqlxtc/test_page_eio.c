@@ -20,6 +20,15 @@
  *	          a short count, and the close does not mark the base clean,
  *	          so the restart rebuilds it from the log.  2.1.1 returned a
  *	          bare XTC_E_INTERNAL and kept the base trusted.
+ *	  close   a trusted reopen, one more commit, a clean close whose log
+ *	          compaction reads the bad page: the close fails, the log is
+ *	          byte-identical, and the documented repair (drop the page
+ *	          file, rebuild from the log) brings back every row.  2.1.1
+ *	          marked the base clean over a log that held 288 of 2001.
+ *	  dump    the quiesced compaction (xstore_checkpoint_wal) on a store
+ *	          whose read error does NOT fail-stop the log (no checksum
+ *	          hook): the cut-short dump must not replace the log.  2.1.1
+ *	          renamed it over the log whatever the dump returned.
  *	The run is bounded by alarm(120).
  */
 
@@ -35,8 +44,12 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "btree.h"
+#include "bufmgr.h"
 #include "engine.h"
+#include "wal.h"
 #include "xstore.h"
+#include "xtc.h"
 #include "t_tmp.h"
 
 #define ROWS 2000
@@ -110,19 +123,28 @@ slurp(const char *p, size_t *len)
 }
 
 static long
-count_rows(void)
+count_db(sx_db *h)
 {
-	sx_db *h = NULL;
 	sx_stmt *st = NULL;
 	long n = -1;
 
-	if (sx_open(":memory:", &h) != SX_OK)
-		return -1;
 	if (sx_prepare(h, "SELECT count(*) FROM t", -1, &st, NULL) == SX_OK) {
 		if (sx_step(st) == SX_ROW)
 			n = (long)sx_column_int64(st, 0);
 		sx_finalize(st);
 	}
+	return n;
+}
+
+static long
+count_rows(void)
+{
+	sx_db *h = NULL;
+	long n;
+
+	if (sx_open(":memory:", &h) != SX_OK)
+		return -1;
+	n = count_db(h);
 	sx_close(h);
 	return n;
 }
@@ -130,15 +152,11 @@ count_rows(void)
 /* Rows [from, to) in a shuffled key order (so a replay of them revisits
  * leaves the small pool evicted), ~200 bytes each. */
 static void
-fill(int from, int to)
+fill_db(sx_db *h, int from, int to)
 {
-	sx_db *h = NULL;
 	char sql[400];
 	int i, k;
 
-	CK(sx_open(":memory:", &h) == SX_OK);
-	if (h == NULL)
-		return;
 	if (from == 0)
 		CK(sx_exec(h, "CREATE TABLE t(k INTEGER PRIMARY KEY, v TEXT)",
 		       NULL) == SX_OK);
@@ -150,7 +168,31 @@ fill(int from, int to)
 		    k, k, 0);
 		CK(sx_exec(h, sql, NULL) == SX_OK);
 	}
+}
+
+static void
+fill(int from, int to)
+{
+	sx_db *h = NULL;
+
+	CK(sx_open(":memory:", &h) == SX_OK);
+	if (h == NULL)
+		return;
+	fill_db(h, from, to);
 	sx_close(h);
+}
+
+/* 1 if the log at g_wal holds exactly the l0 bytes w0. */
+static int
+log_same(const char *w0, size_t l0)
+{
+	size_t l1 = 0;
+	char *w1 = slurp(g_wal, &l1);
+	int same =
+	    w0 != NULL && w1 != NULL && l1 == l0 && memcmp(w0, w1, l0) == 0;
+
+	free(w1);
+	return same;
 }
 
 static void
@@ -274,6 +316,107 @@ t_read(void)
 	teardown();
 }
 
+/* The clean close's compaction cannot read a page of the cold base. */
+static void
+t_close(void)
+{
+	char *w0;
+	size_t l0 = 0;
+	long n;
+	int rc;
+
+	setup("eioclose");
+	CK(sx_storage_close() == SX_OK);
+	CK(sx_storage_open(g_path, 64) == SX_OK); /* trusted: no replay */
+	fill(ROWS, ROWS + 1);                     /* the close must compact */
+	w0 = slurp(g_wal, &l0);
+	CK(w0 != NULL);
+	arm(-1, EIO);
+	rc = sx_storage_close();
+	g_armed = 0;
+	CK(g_hits > 0);
+	CK(rc != SX_OK);
+	CK(super_clean() == 0);
+	CK(log_same(w0, l0));
+	printf("  close: rc=%d (%ld failed reads), clean=%ld, log "
+	       "byte-identical: %d\n",
+	    rc, g_hits, super_clean(), log_same(w0, l0));
+	free(w0);
+	unlink(g_path); /* the repair: rebuild from the log */
+	CK(sx_storage_open(g_path, 64) == SX_OK);
+	CK((n = count_rows()) == ROWS + 1);
+	printf("  close: rebuilt from the log: %ld of %d rows\n", n, ROWS + 1);
+	teardown();
+}
+
+/* xstore_checkpoint_wal over a dump that a read error cut short, on a
+ * store with no checksum hook (the log is not fail-stopped). */
+static void
+t_dump(void)
+{
+	bm_opts_t bo = BM_OPTS_DEFAULT;
+	wal_opts_t wo;
+	bm_t *bm = NULL;
+	bt_t *bt = NULL;
+	wal_t *w = NULL;
+	sx_db *h = NULL;
+	char *w0;
+	size_t l0 = 0;
+	long n;
+	int fd, rc;
+
+	t_tmpl(g_path, sizeof g_path, "eiodump");
+	if ((fd = mkstemp(g_path)) >= 0)
+		close(fd);
+	snprintf(g_wal, sizeof g_wal, "%s-wal", g_path);
+	memset(&wo, 0, sizeof wo);
+	wo.path = g_wal;
+	wo.max_batch = 1;
+	CK(wal_open(&wo, &w) == XTC_OK);
+	bo.path = g_path;
+	bo.n_frames = 64;
+	CK(bm_create(&bo, &bm) == XTC_OK);
+	CK(bt_open(bm, &bt) == XTC_OK);
+	xstore_set_wal((struct wal *)w);
+	CK(sx_open_bt(bt, &h) == SX_OK);
+	if (h == NULL)
+		return;
+	fill_db(h, 0, ROWS);
+	w0 = slurp(g_wal, &l0);
+	CK(w0 != NULL);
+	arm(-1, EIO);
+	rc = xstore_checkpoint_wal(bt, (struct wal *)w, g_wal);
+	g_armed = 0;
+	CK(g_hits > 0);
+	CK(rc != XTC_OK);
+	CK(wal_failed(w) == 0); /* cut short, not fail-stopped */
+	CK(log_same(w0, l0));
+	printf("  dump: xstore_checkpoint_wal rc=%d (%ld failed reads), log "
+	       "byte-identical: %d\n",
+	    rc, g_hits, log_same(w0, l0));
+	free(w0);
+	sx_close(h);
+	xstore_set_wal(NULL);
+	bt_close(bt);
+	bm_destroy(bm); /* crash: rebuild from the log */
+	wal_close(w);
+	bo.reopen = 0;
+	CK(bm_create(&bo, &bm) == XTC_OK);
+	CK(bt_open(bm, &bt) == XTC_OK);
+	CK(xstore_recover(bt, g_wal) == XTC_OK);
+	CK(sx_open_bt(bt, &h) == SX_OK);
+	if (h != NULL) {
+		CK((n = count_db(h)) == ROWS);
+		printf("  dump: recovered from the log: %ld of %d rows\n", n,
+		    ROWS);
+		sx_close(h);
+	}
+	bt_close(bt);
+	bm_destroy(bm);
+	unlink(g_path);
+	unlink(g_wal);
+}
+
 int
 main(void)
 {
@@ -281,6 +424,8 @@ main(void)
 	CK(sx_init() == SX_OK);
 	t_replay();
 	t_read();
+	t_close();
+	t_dump();
 	if (!g_fail)
 		printf("ok test_page_eio\n");
 	return g_fail;

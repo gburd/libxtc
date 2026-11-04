@@ -39,20 +39,22 @@
 #define N_POST  20
 
 /* The compaction dump: one placeholder record, the checkpoint marker. */
-static void
+static int
 dump_one(wal_emit_fn emit, void *emit_ctx, void *user)
 {
 	static const char ck[] = "checkpoint";
 	(void)user;
 	emit(emit_ctx, ck, (uint32_t)sizeof ck);
+	return XTC_OK;
 }
 
-static void
+static int
 dump_empty(wal_emit_fn emit, void *emit_ctx, void *user)
 {
 	(void)emit;
 	(void)emit_ctx;
 	(void)user;
+	return XTC_OK;
 }
 
 struct scan_st { uint64_t prev, min, n; int ordered; };

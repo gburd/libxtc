@@ -87,11 +87,12 @@ scan_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
 	return 0;
 }
 
-static void
+static int
 dump1(wal_emit_fn emit, void *ctx, void *user)
 {
 	(void)user;
 	emit(ctx, "ckpt", 4);
+	return XTC_OK;
 }
 
 int

@@ -192,15 +192,17 @@ int  wal_flush_through(wal_t *w, uint64_t lsn);
  *
  * `dump(emit, emit_ctx, user)` calls emit(emit_ctx, payload, len) once
  * per record of the compacted log, in the WAL payload format wal_scan
- * delivers.  The dump emits the leading checkpoint record itself; this
- * layer does not interpret the bytes. A NULL callback or a dump emitting
- * zero records is rejected with XTC_E_INVAL without replacing the log:
- * an empty file cannot preserve its LSN high-water mark across reopen.
+ * delivers, and returns XTC_OK once it has emitted ALL of them.  The
+ * dump emits the leading checkpoint record itself; this layer does not
+ * interpret the bytes.  A dump that returns an error (it was cut short)
+ * is never swapped in: the temp file is removed, the log is unchanged
+ * and that error is returned.  A NULL callback or a dump emitting zero
+ * records is rejected with XTC_E_INVAL without replacing the log: an
+ * empty file cannot preserve its LSN high-water mark across reopen.
  */
 typedef void (*wal_emit_fn)(void *emit_ctx, const void *payload, uint32_t len);
-int  wal_checkpoint(wal_t *w, const char *path,
-         void (*dump)(wal_emit_fn emit, void *emit_ctx, void *user),
-         void *user);
+int wal_checkpoint(wal_t *w, const char *path,
+    int (*dump)(wal_emit_fn emit, void *emit_ctx, void *user), void *user);
 
 /*
  * Online checkpoint: compact the log WITHOUT holding commits for the

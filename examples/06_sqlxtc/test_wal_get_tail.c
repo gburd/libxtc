@@ -52,13 +52,14 @@ same_as_scan(wal_t *w, const char *path, const char *what)
 	return ok;
 }
 
-static void
+static int
 dump2(wal_emit_fn emit, void *ctx, void *user)
 {
 	(void)user;
 	emit(ctx, "checkpoint", 10);
 	emit(ctx, "row-1", 5);
 	emit(ctx, "row-two", 7);
+	return XTC_OK;
 }
 
 /* Reopen with hint `t`; 1 if the open trusted it (end matches and the

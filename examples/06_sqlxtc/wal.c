@@ -1677,11 +1677,11 @@ wal_cmp_emit(void *vctx, const void *payload, uint32_t len)
 
 int
 wal_checkpoint(wal_t *w, const char *path,
-    void (*dump)(wal_emit_fn emit, void *emit_ctx, void *user), void *user)
+    int (*dump)(wal_emit_fn emit, void *emit_ctx, void *user), void *user)
 {
 	char tmp[1100];
 	struct wal_cmp_ctx c;
-	int fd;
+	int fd, rc;
 
 	if (w == NULL || path == NULL || dump == NULL)
 		return XTC_E_INVAL;
@@ -1719,9 +1719,16 @@ wal_checkpoint(wal_t *w, const char *path,
 	/* The dump emits every record of the compacted log, starting with
 	 * its own checkpoint record -- this layer does not interpret the
 	 * record bytes. */
-	dump(wal_cmp_emit, &c, user);
+	rc = dump(wal_cmp_emit, &c, user);
 	wal_cmp_flush(&c);
 	free(c.buf);
+	/* A dump cut short (a page it could not read, no memory): the image
+	 * misses live rows, so it must never replace the complete log. */
+	if (rc != XTC_OK) {
+		(void)close(fd);
+		(void)unlink(tmp);
+		return rc;
+	}
 	/* An empty replacement cannot persist the LSN high-water mark.
 	 * Reject before rename so reopen cannot restart the sequence. */
 	if (!c.err && c.off == 0) {

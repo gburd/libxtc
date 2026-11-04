@@ -9298,7 +9298,7 @@ xstore_recover_inplace(bt_t *bt, bm_t *bm, const char *wal_path,
 struct xs_dump_ctx { bt_t *bt; uint64_t clock; uint64_t snap; uint64_t n;
     int cancelled; };
 
-static void
+static int
 xs_dump_tree(wal_emit_fn emit, void *ectx, void *user)
 {
 	struct xs_dump_ctx *dc = user;
@@ -9313,8 +9313,10 @@ xs_dump_tree(wal_emit_fn emit, void *ectx, void *user)
 		emit(ectx, ck, (uint32_t)cn);
 
 	enc_vkey(0, INT64_MIN, ~(uint64_t)0, startk);   /* before every key */
-	if (bt_cursor_open(bt, startk, XS_VKLEN, &cur) != XTC_OK)
-		return;
+	if (bt_cursor_open(bt, startk, XS_VKLEN, &cur) != XTC_OK) {
+		dc->cancelled = 1; /* nothing dumped: not swapped in */
+		return XTC_E_IO;
+	}
 	for (;;) {
 		const void *k = NULL, *vv = NULL;
 		uint16_t klen = 0, vl = 0;
@@ -9344,9 +9346,8 @@ xs_dump_tree(wal_emit_fn emit, void *ectx, void *user)
 		}
 		if ((n = bt_cursor_next(cur, &k, &klen, &vv, &vl)) != XTC_OK) {
 			/* NOTFOUND is the end of the tree; anything else would
-			 * leave a truncated image, so the online checkpoint must
-			 * not swap it in.  (shortcut: the quiesced dump has no
-			 * abort path and still stops here; it runs at open/close.) */
+			 * leave a truncated image, which neither checkpoint
+			 * swaps in (the quiesced one gets XTC_E_IO below). */
 			if (n != XTC_E_NOTFOUND)
 				dc->cancelled = 1;
 			break;
@@ -9365,7 +9366,7 @@ xs_dump_tree(wal_emit_fn emit, void *ectx, void *user)
 			cur = NULL;
 			if (bt_cursor_open(bt, &past, 1, &cur) != XTC_OK) {
 				dc->cancelled = 1;    /* a truncated image: not swapped in */
-				return;
+				return XTC_E_IO;
 			}
 			continue;
 		}
@@ -9402,6 +9403,7 @@ xs_dump_tree(wal_emit_fn emit, void *ectx, void *user)
 		emit(ectx, rec, (uint32_t)(p - rec));
 	}
 	bt_cursor_close(cur);
+	return dc->cancelled ? XTC_E_IO : XTC_OK;
 }
 
 int
@@ -9466,8 +9468,7 @@ xs_ock_body(void *arg)
 	uint64_t left = 0;
 	int round;
 	wal_ockpt_emitter(j->k, &fn, &ctx);
-	xs_dump_tree(fn, ctx, &j->dc);
-	if (j->dc.cancelled) {
+	if (xs_dump_tree(fn, ctx, &j->dc) != XTC_OK) {
 		j->rc = XTC_E_AGAIN;
 		return 0;
 	}
@@ -9566,7 +9567,7 @@ xs_fuzzy_tail_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
 	return 0;
 }
 
-static void
+static int
 xs_dump_fuzzy(wal_emit_fn emit, void *ectx, void *user)
 {
 	struct xs_fuzzy_ctx *fc = user;
@@ -9578,7 +9579,7 @@ xs_dump_fuzzy(wal_emit_fn emit, void *ectx, void *user)
 	/* start_lsn == horizon (nonzero): fuzzy checkpoint, base trusted. */
 	if ((cn = xl_enc_checkpoint(ck, sizeof ck, fc->clock, fc->horizon)) > 0)
 		emit(ectx, ck, (uint32_t)cn);
-	(void)wal_scan(fc->path, xs_fuzzy_tail_cb, fc);
+	return wal_scan(fc->path, xs_fuzzy_tail_cb, fc); /* NOMEM: cut short */
 }
 
 int
