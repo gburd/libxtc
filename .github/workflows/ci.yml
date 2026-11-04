@@ -1228,6 +1228,14 @@ jobs:
           make XTC_BUILD=../../build_ci
           ./test_lob
           ./test_lob_diff
+      - name: l2book (Isolates + fibers order book) tests, wasm build, bench smoke
+        working-directory: examples/16_l2book
+        run: |
+          sudo apt-get install -y clang lld
+          make XTC_BUILD=../../build_ci check
+          make wasm WASM_CC=clang
+          ./l2book --bench 2000
+          make clean
       - name: rexis server + its test suite (RESP, loopback, PBT, measured budgets)
         # The README flagship.  Forks real servers on kernel-chosen free
         # loopback ports (no fixed port, so no collision on a shared
