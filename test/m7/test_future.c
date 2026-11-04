@@ -24,6 +24,7 @@
 #include "xtc_future.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
+#include "os_alloc.h"   /* __os_alloc_set_hook: allocation-failure sweep */
 
 /* ---- thread-context: set on a helper thread, wait on main ---- */
 struct setter_arg { xtc_promise_t *prom; intptr_t value; };
@@ -360,6 +361,154 @@ test_with_timeout(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- combinators under a failed allocation --------------------------
+ *
+ * Fail the k-th allocation inside the combinator call, for every k.  The
+ * combinator must either report the failure (a non-OK return) or return
+ * a future that still resolves once its inputs do.  Through 2.1.1 a
+ * failed cell_on_complete (the node that queues an input's callback) was
+ * ignored: when_all's future never resolved, when_any leaked its
+ * context, and with_timeout reported a source that completed as a
+ * timeout (XTC_E_AGAIN).  Found by CBMC (test/cbmc/combinator_harness.c).
+ */
+static int g_fail_at = -1, g_n_malloc;
+static struct __os_alloc_hook g_saved_hook;
+
+static void *
+oom_malloc(size_t sz)
+{
+	if (g_n_malloc++ == g_fail_at)
+		return NULL;
+	return g_saved_hook.malloc(sz);
+}
+
+static void
+oom_arm(void)
+{
+	struct __os_alloc_hook h;
+
+	munit_assert_int(__os_alloc_get_hook(&g_saved_hook), ==, XTC_OK);
+	h = g_saved_hook;
+	h.malloc = oom_malloc;
+	munit_assert_int(__os_alloc_set_hook(&h), ==, XTC_OK);
+}
+
+static void
+oom_disarm(void)
+{
+	munit_assert_int(__os_alloc_set_hook(&g_saved_hook), ==, XTC_OK);
+}
+
+static MunitResult
+test_combinator_oom(const MunitParameter p[], void *d)
+{
+	int which, k, rc, ready;
+	(void)p; (void)d;
+
+	oom_arm();
+	for (which = 0; which < 2; which++)
+		for (k = 0; k < 12; k++) {
+			xtc_promise_t *p1 = NULL, *p2 = NULL;
+			xtc_future_t *f[2] = { NULL, NULL }, *c = NULL;
+			intptr_t out = 0;
+
+			g_fail_at = -1;
+			munit_assert_int(xtc_future_new_pair(&p1, &f[0]), ==,
+			    XTC_OK);
+			munit_assert_int(xtc_future_new_pair(&p2, &f[1]), ==,
+			    XTC_OK);
+			g_n_malloc = 0;
+			g_fail_at = k;
+			rc = which ? xtc_future_when_any(f, 2, &c) :
+			    xtc_future_when_all(f, 2, &c);
+			g_fail_at = -1;
+			if (rc != XTC_OK) {
+				/* Failed before taking the inputs: they are still
+				 * ours.  A dropped promise completes its future
+				 * (ABORTED), and the wait consumes it. */
+				munit_assert_int(rc, ==, XTC_E_NOMEM);
+				xtc_promise_drop(p1);
+				xtc_promise_drop(p2);
+				(void)xtc_future_wait(f[0], &out, 0);
+				(void)xtc_future_wait(f[1], &out, 0);
+				continue;
+			}
+			(void)xtc_promise_set(p1, 1, XTC_OK);
+			(void)xtc_promise_set(p2, 2, XTC_OK);
+			ready = 0;
+			munit_assert_int(xtc_future_ready(c, &ready), ==, XTC_OK);
+			if (!ready)
+				munit_errorf("%s: malloc #%d failed: returned "
+				    "XTC_OK but never resolves",
+				    which ? "when_any" : "when_all", k);
+			rc = xtc_future_wait(c, &out, 0);
+			munit_assert_true(rc == XTC_OK || rc == XTC_E_NOMEM);
+		}
+	oom_disarm();
+	return MUNIT_OK;
+}
+
+static _Atomic int g_to_oom_bad, g_to_oom_ran;
+
+static void
+timeout_oom_body(void *arg)
+{
+	int k, rc;
+	(void)arg;
+
+	for (k = 0; k < 8; k++) {
+		xtc_promise_t *prom = NULL;
+		xtc_future_t *fut = NULL, *tf = NULL;
+		intptr_t out = 0;
+
+		g_fail_at = -1;
+		if (xtc_future_new_pair(&prom, &fut) != XTC_OK)
+			continue;
+		g_n_malloc = 0;
+		g_fail_at = k;
+		rc = xtc_future_with_timeout(fut, 2LL * 1000 * 1000 * 1000,
+		    &tf);
+		g_fail_at = -1;
+		if (rc != XTC_OK) {
+			if (rc != XTC_E_NOMEM)
+				atomic_store(&g_to_oom_bad, 1000 + k);
+			xtc_promise_drop(prom);
+			(void)xtc_future_wait(fut, &out, 0);   /* still ours */
+			continue;
+		}
+		(void)xtc_promise_set(prom, 7, XTC_OK);
+		/* The source completed: never a timeout.  (The 2 s timeout
+		 * is far beyond this bounded wait.) */
+		rc = xtc_future_wait(tf, &out, 500LL * 1000 * 1000);
+		if (rc == XTC_E_AGAIN)
+			atomic_store(&g_to_oom_bad, 1 + k);
+	}
+	atomic_store(&g_to_oom_ran, 1);
+}
+
+static MunitResult
+test_with_timeout_oom(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_pid_t c;
+	(void)p; (void)d;
+
+	atomic_store(&g_to_oom_bad, 0);
+	atomic_store(&g_to_oom_ran, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, timeout_oom_body, NULL, NULL,
+	    &c), ==, XTC_OK);
+	oom_arm();
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	oom_disarm();
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_to_oom_ran), ==, 1);
+	/* 1 + k: the k-th allocation failed and a completed source was
+	 * reported as a timeout; 1000 + k: an error other than NOMEM. */
+	munit_assert_int(atomic_load(&g_to_oom_bad), ==, 0);
+	return MUNIT_OK;
+}
+
 /* ---- argument validation ---- */
 static MunitResult
 test_inval(const MunitParameter p[], void *d)
@@ -467,6 +616,8 @@ static MunitTest tests[] = {
 	{ "/when_all_error",     test_when_all_error,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/when_any",           test_when_any,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/with_timeout",       test_with_timeout,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/combinator_oom",     test_combinator_oom,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/with_timeout_oom",   test_with_timeout_oom,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/inval",              test_inval,              NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/kill_then_fulfil",   test_kill_then_fulfil,   NULL, NULL, MUNIT_TEST_OPTION_NONE, kf_params },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
