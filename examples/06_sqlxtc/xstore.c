@@ -8925,6 +8925,7 @@ struct xs_recover {
 	                          * on the trusted base); 0 == replay from front */
 	struct rec_txn *txn;     /* ACTIVE (uncommitted) transactions only */
 	int      n_txn, cap_txn;
+	int rc; /* why the replay stopped (XTC_OK: it did not) */
 };
 
 static struct rec_txn *
@@ -8948,15 +8949,15 @@ rec_txn_get(struct xs_recover *r, uint64_t txn_id)
 	return t;
 }
 
-static void
-rec_txn_addupd(struct rec_txn *t, uint64_t lsn, uint32_t tableid,
-    int64_t rowid, uint64_t commit_ts)
+static int
+rec_txn_addupd(struct rec_txn *t, uint64_t lsn, uint32_t tableid, int64_t rowid,
+    uint64_t commit_ts)
 {
 	if (t->n_upd == t->cap_upd) {
 		int nc = t->cap_upd ? t->cap_upd * 2 : 8;
 		struct rec_upd *nu = realloc(t->upd, (size_t)nc * sizeof *nu);
 		if (nu == NULL)
-			return;               /* best-effort: a dropped undo entry */
+			return XTC_E_NOMEM; /* a loser could not be undone */
 		t->upd = nu; t->cap_upd = nc;
 	}
 	t->upd[t->n_upd].lsn = lsn;
@@ -8964,6 +8965,7 @@ rec_txn_addupd(struct rec_txn *t, uint64_t lsn, uint32_t tableid,
 	t->upd[t->n_upd].rowid = rowid;
 	t->upd[t->n_upd].commit_ts = commit_ts;
 	t->n_upd++;
+	return XTC_OK;
 }
 
 /* Retire a committed (winner) transaction: its redo stays, drop it from
@@ -8978,11 +8980,15 @@ rec_txn_retire(struct xs_recover *r, struct rec_txn *t)
 
 /* Undo one loser newest-first: delete each version it inserted and write
  * an XL_CLR naming the next LSN still to undo (0 when done), then an
- * XL_END.  A CLR is redo-only and never itself undone. */
-static void
+ * XL_END.  A CLR is redo-only and never itself undone.  Returns XTC_OK,
+ * or the first failure (the loser is then not fully undone). */
+static int
 xs_undo_loser(bt_t *bt, wal_t *w, struct rec_txn *t)
 {
-	int i;
+	uint8_t end[XL_HDR_LEN];
+	xl_hdr_t eh;
+	uint64_t elsn;
+	int i, n, rc;
 
 	for (i = t->n_upd - 1; i >= 0; i--) {
 		struct rec_upd *u = &t->upd[i];
@@ -8991,28 +8997,28 @@ xs_undo_loser(bt_t *bt, wal_t *w, struct rec_txn *t)
 		xl_hdr_t h;
 		xl_body_t b;
 		uint64_t lsn;
-		int n;
 
 		enc_vkey(u->tableid, u->rowid, u->commit_ts, key);
-		(void)bt_delete(bt, key, XS_VKLEN);     /* reverse the insert */
+		rc = bt_delete(bt, key, XS_VKLEN); /* reverse the insert */
+		if (rc != XTC_OK && rc != XTC_E_NOTFOUND)
+			return rc;
 
 		h.type = XL_CLR; h.txn_id = t->txn_id; h.prev_lsn = u->lsn;
 		memset(&b, 0, sizeof b);
 		b.undo_next_lsn = (i > 0) ? t->upd[i - 1].lsn : 0;
 		b.tableid = u->tableid; b.rowid = u->rowid; b.commit_ts = u->commit_ts;
-		if ((n = xl_enc_clr(clr, sizeof clr, &h, &b)) > 0)
-			(void)wal_commit_sync(w, clr, (uint32_t)n, &lsn);
+		if ((n = xl_enc_clr(clr, sizeof clr, &h, &b)) <= 0)
+			return XTC_E_INTERNAL;
+		if ((rc = wal_commit_sync(w, clr, (uint32_t)n, &lsn)) != XTC_OK)
+			return rc;
 		atomic_fetch_add_explicit(&g_undo_clrs, 1, memory_order_relaxed);
 	}
-	{
-		uint8_t end[XL_HDR_LEN];
-		xl_hdr_t h;
-		uint64_t lsn;
-		int n;
-		h.type = XL_END; h.txn_id = t->txn_id; h.prev_lsn = 0;
-		if ((n = xl_enc_simple(end, sizeof end, &h)) > 0)
-			(void)wal_commit_sync(w, end, (uint32_t)n, &lsn);
-	}
+	eh.type = XL_END;
+	eh.txn_id = t->txn_id;
+	eh.prev_lsn = 0;
+	if ((n = xl_enc_simple(end, sizeof end, &eh)) <= 0)
+		return XTC_E_INTERNAL;
+	return wal_commit_sync(w, end, (uint32_t)n, &elsn);
 }
 
 static int
@@ -9021,6 +9027,7 @@ xs_recover_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
 	struct xs_recover *r = user;
 	const uint8_t *base = rec;
 	uint32_t off = 0;
+	int rc;
 
 	/*
 	 * A WAL frame carries one transaction: a run of XL_UPDATE records
@@ -9111,9 +9118,23 @@ xs_recover_cb(uint64_t lsn, const void *rec, uint32_t len, void *user)
 				enc_vkey(b.tableid, b.rowid, b.commit_ts, key);
 				buf[0] = b.flags;
 				if (vl) memcpy(buf + 1, b.redo, vl);
-				(void)bt_insert(r->bt, key, XS_VKLEN, buf, (uint16_t)(1 + vl));
-				if ((t = rec_txn_get(r, uh.txn_id)) != NULL)
-					rec_txn_addupd(t, lsn, b.tableid, b.rowid, b.commit_ts);
+				/* An update that cannot be applied (a page read
+				 * failed, no frame, no memory) stops the
+				 * replay: a tree missing a committed row must
+				 * be neither served nor compacted over the log
+				 * that still holds it. */
+				rc = bt_insert(r->bt, key, XS_VKLEN, buf,
+				    (uint16_t)(1 + vl));
+				if (rc != XTC_OK) {
+					r->rc = rc;
+					return 1;
+				}
+				if ((t = rec_txn_get(r, uh.txn_id)) == NULL ||
+				    rec_txn_addupd(t, lsn, b.tableid, b.rowid,
+				        b.commit_ts) != XTC_OK) {
+					r->rc = XTC_E_NOMEM;
+					return 1;
+				}
 				if (b.commit_ts > r->max_ts) r->max_ts = b.commit_ts;
 			}
 		} else if (h.type == XL_COMMIT) {
@@ -9150,27 +9171,30 @@ xstore_recover_ex(bt_t *bt, const char *wal_path, struct wal_tail *tail)
 	memset(&r, 0, sizeof r);
 	r.bt = bt;
 	rc = wal_scan_ex(wal_path, xs_recover_cb, &r, &t);
+	if (rc == XTC_OK)
+		rc = r.rc;
 
 	/* Whatever transactions are still active are losers: undo them,
 	 * writing CLRs through an append handle on the same log (opened at
 	 * the tail the scan found, no second scan).  Skipped entirely in the
-	 * NO-STEAL path (no losers). */
-	if (r.n_txn > 0) {
+	 * NO-STEAL path (no losers), and after a replay that stopped short:
+	 * it has not seen every commit, and it writes nothing to the log. */
+	if (rc == XTC_OK && r.n_txn > 0) {
 		wal_t *w = NULL;
 		wal_opts_t wo;
 		memset(&wo, 0, sizeof wo);
 		wo.path = wal_path; wo.append = 1;
 		wo.tail = &t;
-		if (wal_open(&wo, &w) == XTC_OK) {
-			for (i = 0; i < r.n_txn; i++)
-				xs_undo_loser(bt, w, &r.txn[i]);
+		if ((rc = wal_open(&wo, &w)) == XTC_OK) {
+			for (i = 0; i < r.n_txn && rc == XTC_OK; i++)
+				rc = xs_undo_loser(bt, w, &r.txn[i]);
 			if (wal_get_tail(w, &t) != XTC_OK)
 				t.valid = 0;           /* the CLRs moved the end */
 			wal_close(w);
-		} else {
-			t.valid = 0;
 		}
 	}
+	if (rc != XTC_OK)
+		t.valid = 0;
 	if (tail != NULL)
 		*tail = t;
 	for (i = 0; i < r.n_txn; i++)
@@ -9226,6 +9250,8 @@ xstore_recover_inplace(bt_t *bt, bm_t *bm, const char *wal_path,
 	 * pages are repaired before pass 2's logical redo descends them. */
 	r.page_pass = 1;
 	rc = wal_scan(wal_path, xs_recover_cb, &r);
+	if (rc == XTC_OK)
+		rc = r.rc;
 	if (out_pages != NULL)
 		*out_pages = r.pages_redone;
 	if (rc != XTC_OK)
@@ -9234,15 +9260,17 @@ xstore_recover_inplace(bt_t *bt, bm_t *bm, const char *wal_path,
 	/* Pass 2: logical redo + winner retire over the repaired base. */
 	r.page_pass = 0;
 	rc = wal_scan(wal_path, xs_recover_cb, &r);
+	if (rc == XTC_OK)
+		rc = r.rc;
 
-	if (r.n_txn > 0) {
+	if (rc == XTC_OK && r.n_txn > 0) {
 		wal_t *w = NULL;
 		wal_opts_t wo;
 		memset(&wo, 0, sizeof wo);
 		wo.path = wal_path; wo.append = 1;
-		if (wal_open(&wo, &w) == XTC_OK) {
-			for (i = 0; i < r.n_txn; i++)
-				xs_undo_loser(bt, w, &r.txn[i]);
+		if ((rc = wal_open(&wo, &w)) == XTC_OK) {
+			for (i = 0; i < r.n_txn && rc == XTC_OK; i++)
+				rc = xs_undo_loser(bt, w, &r.txn[i]);
 			wal_close(w);
 		}
 	}

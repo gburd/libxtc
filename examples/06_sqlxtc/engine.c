@@ -632,7 +632,18 @@ sx_storage_open(const char *path, unsigned int n_frames)
 		 * The checkpoint below makes the log compact and durable before
 		 * any new commit.
 		 */
-		(void)xstore_recover_ex(g_xbt, g_xwal_path, &tail);  /* replay */
+		/* A replay that did not apply every record (a page read or
+		 * write failed, no frame, no memory) refuses the open: the tree
+		 * misses committed rows, and the compaction below would replace
+		 * the only complete copy of them with its dump.  Nothing wrote
+		 * the log, so a retry replays it all again. */
+		if (xstore_recover_ex(g_xbt, g_xwal_path, &tail) != XTC_OK) {
+			bt_close(g_xbt);
+			g_xbt = NULL;
+			bm_destroy(g_xbm);
+			g_xbm = NULL;
+			return SX_ERROR;
+		}
 	}
 
 	/* Open the log (append past whatever is there). */
