@@ -233,6 +233,14 @@ typedef struct xtc_tnt_spec {
 	 * a negative value (default after memset) to disable; the canonical
 	 * use is a "driver" or "root supervisor" isolate.  -1 = none. */
 	int               boot_type;
+	/* Busy-poll before parking: an idle shard keeps checking its rings
+	 * for up to spin_ns before it parks on its wake pipe.  It trades a
+	 * core for latency (no wake syscall, no context switch on the next
+	 * message) -- what a matching engine wants and a server sharing its
+	 * cores does not.  0 (the default after memset) parks at once, as
+	 * before.  Ignored under deterministic simulation.  Added in 2.2:
+	 * an older caller's spec, zero-initialised, gets 0. */
+	int64_t           spin_ns;
 } xtc_tnt_spec_t;
 
 /* ---- Send results -------------------------------------------------

@@ -1374,6 +1374,26 @@ xtc_tnt_shard_main(void *arg)
 			continue;
 		}
 
+		/* Busy-poll (spec->spin_ns): look for ring input without
+		 * parking, yielding so couriers and timers on this loop run.
+		 * A message that arrives in the window costs no wake. */
+		if (sh->spec->spin_ns > 0 && !__xtc_sim_active()) {
+			int64_t now = 0, until;
+			int got = 0;
+			(void)__os_clock_mono(&now);
+			until = now + sh->spec->spin_ns;
+			while (now < until && !atomic_load(&sh->rt->stop)) {
+				if (shard_has_ready(sh)) {
+					got = 1;
+					break;
+				}
+				xtc_yield();
+				(void)__os_clock_mono(&now);
+			}
+			if (got)
+				continue;
+		}
+
 		/* Under deterministic simulation the shard parks on its own
 		 * proc mailbox (a sim-modeled cross-loop park/wake) instead of
 		 * the real wake pipe: shard_wake sends a one-byte message here,
