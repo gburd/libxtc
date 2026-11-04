@@ -366,6 +366,172 @@ test_offproc_safe(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---------- 7. A4: the recovery walk runs each record once ---------- */
+
+/*
+ * effects/probe5: scope A's finalizer parks, scope B's counts, the proc
+ * faults, and a sibling kills it while A's finalizer is parked in the
+ * fault branch's recovery walk.  2.1.1 walked unmasked and zeroed
+ * n_recov only after the loop, so the kill unwound into the exit path,
+ * whose walk ran B's marker again on the freed scope: "free(): double
+ * free detected in tcache 2", abort.
+ */
+#define MS (1000LL * 1000)
+static _Atomic int g_b_runs, g_a_done, g_after;
+static xtc_pid_t g_rw_target;
+
+static void
+rw_fin_a_park(void *x)
+{
+	(void)x;
+	(void)xtc_proc_sleep(50 * MS);
+	atomic_store(&g_a_done, 1);
+}
+
+static void
+rw_fin_b(void *x)
+{
+	(void)x;
+	atomic_fetch_add(&g_b_runs, 1);
+}
+
+static void
+rw_killer(void *x)
+{
+	(void)x;
+	(void)xtc_proc_sleep(15 * MS); /* lands while fin_a parks */
+	(void)xtc_exit_pid(g_rw_target, 7);
+}
+
+static void
+rw_fault_target(void *x)
+{
+	xtc_scope_t *a = xtc_scope_open(), *b = xtc_scope_open();
+	volatile uintptr_t bad = 0x10;
+	(void)x;
+	if (a == NULL || b == NULL)
+		return;
+	(void)xtc_scope_defer(a, rw_fin_a_park, NULL); /* record 0: parks */
+	(void)xtc_scope_defer(b, rw_fin_b, NULL);      /* record 1: first */
+	(void)xtc_proc_sleep(5 * MS);
+	*(volatile int *)bad = 1; /* contained fault -> default frame */
+}
+
+/* The same walk reached through xtc_proc_recovery_cleanup, no fault, so
+ * it also runs under ASan (which owns SIGSEGV). */
+static void
+rw_cleanup_target(void *x)
+{
+	xtc_scope_t *a = xtc_scope_open(), *b = xtc_scope_open();
+	(void)x;
+	if (a == NULL || b == NULL)
+		return;
+	(void)xtc_scope_defer(a, rw_fin_a_park, NULL);
+	(void)xtc_scope_defer(b, rw_fin_b, NULL);
+	(void)xtc_proc_sleep(5 * MS);
+	xtc_proc_recovery_cleanup();
+	atomic_store(&g_after, 1); /* the walk returned */
+}
+
+static void
+rw_run(xtc_proc_fn target)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_pid_t k;
+	atomic_store(&g_b_runs, 0);
+	atomic_store(&g_a_done, 0);
+	atomic_store(&g_after, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, target, NULL, NULL, &g_rw_target),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, rw_killer, NULL, NULL, &k), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+}
+
+static MunitResult
+test_recovery_fault_kill_once(const MunitParameter p[], void *d)
+{
+	(void)p;
+	(void)d;
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+	return MUNIT_SKIP; /* sanitizer owns SIGSEGV */
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	return MUNIT_SKIP;
+#endif
+#endif
+	munit_assert_int(xtc_fault_guard_install(), ==, XTC_OK);
+	rw_run(rw_fault_target);
+	munit_assert_int(atomic_load(&g_b_runs), ==, 1);
+	/* The walk is masked: the kill did not cut A's finalizer short. */
+	munit_assert_int(atomic_load(&g_a_done), ==, 1);
+	return MUNIT_OK;
+}
+
+static MunitResult
+test_recovery_cleanup_kill_once(const MunitParameter p[], void *d)
+{
+	(void)p;
+	(void)d;
+	rw_run(rw_cleanup_target);
+	munit_assert_int(atomic_load(&g_b_runs), ==, 1);
+	munit_assert_int(atomic_load(&g_a_done), ==, 1);
+	/* The kill was latched and fires at the next delivery point, after
+	 * cleanup returned. */
+	munit_assert_int(atomic_load(&g_after), ==, 1);
+	return MUNIT_OK;
+}
+
+/* A record that exits: the exit path's walk must start BELOW it (the
+ * record was popped before it ran), not run it, and the ones above it,
+ * again.  The masking above cannot cover this: an exit is explicit. */
+static _Atomic int g_exit_cb_runs, g_low_cb_runs;
+
+static void
+rw_exit_cb(void *x)
+{
+	(void)x;
+	if (atomic_fetch_add(&g_exit_cb_runs, 1) == 0)
+		(void)xtc_exit_self(3);
+}
+
+static void
+rw_low_cb(void *x)
+{
+	(void)x;
+	atomic_fetch_add(&g_low_cb_runs, 1);
+}
+
+static void
+rw_exit_target(void *x)
+{
+	(void)x;
+	(void)xtc_proc_recovery_track(rw_low_cb, NULL);  /* record 0 */
+	(void)xtc_proc_recovery_track(rw_exit_cb, NULL); /* record 1 */
+	xtc_proc_recovery_cleanup();
+}
+
+static MunitResult
+test_recovery_record_exits_once(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_pid_t pid;
+	(void)p;
+	(void)d;
+	atomic_store(&g_exit_cb_runs, 0);
+	atomic_store(&g_low_cb_runs, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, rw_exit_target, NULL, NULL, &pid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_exit_cb_runs), ==, 1);
+	munit_assert_int(atomic_load(&g_low_cb_runs), ==, 1);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/scope_normal_lifo",     test_scope_normal_lifo,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/scope_exit_self",       test_scope_exit_self,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -374,6 +540,12 @@ static MunitTest tests[] = {
 	{ "/bracket_release_on_error", test_bracket_release_on_error, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/mask_defers_kill",      test_mask_defers_kill,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/offproc_safe",          test_offproc_safe,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/recovery_fault_kill_once", test_recovery_fault_kill_once, NULL,
+	    NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/recovery_cleanup_kill_once", test_recovery_cleanup_kill_once, NULL,
+	    NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/recovery_record_exits_once", test_recovery_record_exits_once, NULL,
+	    NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m8/scope", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

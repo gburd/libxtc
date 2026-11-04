@@ -25,12 +25,22 @@
  *	          park -- but DEFERRED while it is inside the masked
  *	          acquire, the A2 guarantee), or
  *	      (b) FAULT: the worker dereferences a bad pointer mid-scope,
- *	          contained by the per-proc fault guard.
+ *	          contained by the per-proc fault guard, or
+ *	      (c) FAULT+KILL: the worker faults with a recovery record that
+ *	          PARKS, and the killer kills it while that record is parked
+ *	          inside the recovery walk (the effects-lane probe5 shape).
+ *	          The walk is masked, so the kill is latched and every record
+ *	          still runs once; 2.1.1 walked unmasked, the kill unwound into
+ *	          the exit path, and that walk ran the records above the
+ *	          parked one a second time (planted as RECOV_REWALK).  Half of
+ *	          these workers use the default frame, half
+ *	          xtc_proc_recovery_arm_clean, so both walks are covered.
  *	  - INVARIANT: for EVERY worker -- whether it closed normally, was
  *	    aborted, or crashed -- ALL of its deferred finalizers ran
  *	    exactly once (fin_count[w] == DEFER_PER), and the count of
  *	    workers whose masked-acquire release registered equals the count
- *	    that started (no finalizer eaten by a mid-mask abort).
+ *	    that started (no finalizer eaten by a mid-mask abort), and every
+ *	    recovery record ran exactly once.
  *	  - REPLAY: the same seed reproduces the identical disruption set,
  *	    the identical finalizer tallies, and the identical scheduler
  *	    state hash; a sweep of seeds disrupts different workers in
@@ -69,13 +79,17 @@
 #define DEFER_PER   4          /* finalizers each worker defers */
 
 /* Disruption kinds a worker may be assigned (seeded). */
-enum { DIS_NONE = 0, DIS_ABORT = 1, DIS_FAULT = 2 };
+enum { DIS_NONE = 0, DIS_ABORT = 1, DIS_FAULT = 2, DIS_FAULT_KILL = 3 };
 
 /* Per-worker observations (disjoint slots -> no cross-fiber races). */
 static _Atomic int g_fin_count[N_WORKERS];   /* finalizers that ran */
 static _Atomic int g_release_ran[N_WORKERS]; /* masked-acquire release ran */
 static _Atomic int g_started[N_WORKERS];     /* worker began its scope */
 static int         g_disrupt[N_WORKERS];     /* DIS_* assigned this run */
+static _Atomic int
+    g_top_runs[N_WORKERS]; /* FAULT_KILL: record above the park */
+static _Atomic int
+    g_park_done[N_WORKERS]; /* FAULT_KILL: parked record finished */
 
 static xtc_exec_t *g_exec;
 static xtc_pid_t   g_worker_pid[N_WORKERS];
@@ -121,6 +135,24 @@ masked_acquire(void *ud)
 	return XTC_OK;
 }
 
+/* FAULT_KILL records.  The parking one advertises that it is parked
+ * (g_pid_ready 3) so the killer fires inside the recovery walk. */
+static void
+rec_top(void *arg)
+{
+	atomic_fetch_add(&g_top_runs[(int)(intptr_t)arg], 1);
+}
+
+static void
+rec_park(void *arg)
+{
+	int w = (int)(intptr_t)arg;
+	if (atomic_load(&g_pid_ready[w]) == 1)
+		atomic_store(&g_pid_ready[w], 3);
+	(void)xtc_proc_sleep(5 * 1000 * 1000LL);
+	atomic_store(&g_park_done[w], 1);
+}
+
 static void
 worker(void *arg)
 {
@@ -131,8 +163,11 @@ worker(void *arg)
 	int i, dis;
 
 	/* Arm the default fault-recovery so a contained fault unwinds this
-	 * one proc (and runs the recovery registry -> open scopes). */
-	xtc_proc_recovery_arm_clean();
+	 * one proc (and runs the recovery registry -> open scopes).  Odd
+	 * FAULT_KILL workers keep the default frame from __proc_entry, so
+	 * its walk is covered too. */
+	if (g_disrupt[w] != DIS_FAULT_KILL || (w & 1) == 0)
+		xtc_proc_recovery_arm_clean();
 
 	atomic_store(&g_started[w], 1);
 
@@ -156,6 +191,13 @@ worker(void *arg)
 	atomic_store(&g_pid_ready[w], 1);
 
 	dis = g_disrupt[w];
+	if (dis == DIS_FAULT_KILL) {
+		/* Registry, bottom to top: scope marker, park, top.  The walk
+		 * runs top, then parks; the kill lands there. */
+		(void)xtc_proc_recovery_track(rec_park, (void *)(intptr_t)w);
+		(void)xtc_proc_recovery_track(rec_top, (void *)(intptr_t)w);
+		dis = DIS_FAULT;
+	}
 	if (dis == DIS_FAULT) {
 		/* Contained fault mid-scope: the recovery unwind must still
 		 * run this worker's open-scope finalizers. */
@@ -187,9 +229,11 @@ killer(void *arg)
 	for (tries = 0; tries < 40000 && done < N_WORKERS; tries++) {
 		int w, remaining = 0;
 		for (w = 0; w < N_WORKERS; w++) {
-			if (g_disrupt[w] != DIS_ABORT)
+			int fire = g_disrupt[w] == DIS_FAULT_KILL ? 3 : 1;
+			if (g_disrupt[w] != DIS_ABORT &&
+			    g_disrupt[w] != DIS_FAULT_KILL)
 				continue;
-			if (atomic_load(&g_pid_ready[w]) == 1) {
+			if (atomic_load(&g_pid_ready[w]) == fire) {
 				/* Fire once, then mark handled by clearing ready. */
 				atomic_store(&g_pid_ready[w], 2);
 				(void)xtc_exit_pid(g_worker_pid[w], 7);
@@ -205,9 +249,11 @@ killer(void *arg)
 
 static int
 run_one_inproc(uint64_t seed, int *out_started, int *out_all_fin, int *out_rel,
-    int *out_abort, int *out_fault, uint64_t *out_state)
+    int *out_abort, int *out_fault, int *out_fkill, int *out_rewalk,
+    uint64_t *out_state)
 {
 	int i, rc, started, all_fin = 1, rel = 0, n_abort = 0, n_fault = 0;
+	int n_fkill = 0, rewalk = 0;
 
 	(void)xtc_fault_guard_install();
 
@@ -216,6 +262,8 @@ run_one_inproc(uint64_t seed, int *out_started, int *out_all_fin, int *out_rel,
 		atomic_store(&g_release_ran[i], 0);
 		atomic_store(&g_started[i], 0);
 		atomic_store(&g_pid_ready[i], 0);
+		atomic_store(&g_top_runs[i], 0);
+		atomic_store(&g_park_done[i], 0);
 		g_disrupt[i] = DIS_NONE;
 	}
 
@@ -224,14 +272,19 @@ run_one_inproc(uint64_t seed, int *out_started, int *out_all_fin, int *out_rel,
 	xtc_exec_set_service_mode(g_exec, 1);
 
 	/* Seeded disruption assignment, drawn from the FAULT stream so it
-	 * does NOT perturb the scheduler streams: ~1/3 abort, ~1/3 fault,
-	 * ~1/3 undisturbed. */
+	 * does NOT perturb the scheduler streams: ~1/4 each of abort, fault,
+	 * fault+kill-in-recovery, undisturbed. */
 	for (i = 0; i < N_WORKERS; i++) {
-		unsigned draw = (unsigned)__xtc_sim_rng_range(XTC_SIM_RNG_FAULT, 3);
+		unsigned draw =
+		    (unsigned)__xtc_sim_rng_range(XTC_SIM_RNG_FAULT, 4);
 		g_disrupt[i] = (draw == 0) ? DIS_ABORT :
-		               (draw == 1) ? DIS_FAULT : DIS_NONE;
+		    (draw == 1)            ? DIS_FAULT :
+		    (draw == 2)            ? DIS_FAULT_KILL :
+		                             DIS_NONE;
 		if (g_disrupt[i] == DIS_ABORT) n_abort++;
 		else if (g_disrupt[i] == DIS_FAULT) n_fault++;
+		else if (g_disrupt[i] == DIS_FAULT_KILL)
+			n_fkill++;
 	}
 
 	/* Spawn workers spread across the loops; capture pids for the
@@ -266,6 +319,12 @@ run_one_inproc(uint64_t seed, int *out_started, int *out_all_fin, int *out_rel,
 		if (atomic_load(&g_started[i]) &&
 		    atomic_load(&g_release_ran[i]) == 1)
 			rel++;
+		/* A FAULT_KILL worker's records each ran once: the one above
+		 * the park was not re-run, and the parked one finished. */
+		if (g_disrupt[i] == DIS_FAULT_KILL &&
+		    (atomic_load(&g_top_runs[i]) != 1 ||
+		        atomic_load(&g_park_done[i]) != 1))
+			rewalk++;
 	}
 
 	if (out_started) *out_started = started;
@@ -273,6 +332,10 @@ run_one_inproc(uint64_t seed, int *out_started, int *out_all_fin, int *out_rel,
 	if (out_rel)     *out_rel = rel;
 	if (out_abort)   *out_abort = n_abort;
 	if (out_fault)   *out_fault = n_fault;
+	if (out_fkill)
+		*out_fkill = n_fkill;
+	if (out_rewalk)
+		*out_rewalk = rewalk;
 	if (out_state)   *out_state = xtc_sim_state_hash(g_exec);
 
 	(void)xtc_exec_fini(g_exec);
@@ -298,12 +361,15 @@ struct run_result {
 	int      rel;
 	int      n_abort;
 	int      n_fault;
+	int n_fkill;
+	int rewalk;
 	uint64_t state;
 };
 
 static int
 run_one(uint64_t seed, int *out_started, int *out_all_fin, int *out_rel,
-    int *out_abort, int *out_fault, uint64_t *out_state)
+    int *out_abort, int *out_fault, int *out_fkill, int *out_rewalk,
+    uint64_t *out_state)
 {
 	int pfd[2];
 	pid_t pid;
@@ -321,7 +387,8 @@ run_one(uint64_t seed, int *out_started, int *out_all_fin, int *out_rel,
 		close(pfd[0]);
 		memset(&rr, 0, sizeof rr);
 		rr.rc = run_one_inproc(seed, &rr.started, &rr.all_fin, &rr.rel,
-		    &rr.n_abort, &rr.n_fault, &rr.state);
+		    &rr.n_abort, &rr.n_fault, &rr.n_fkill, &rr.rewalk,
+		    &rr.state);
 		wn = write(pfd[1], &rr, sizeof rr);
 		close(pfd[1]);
 		_exit(wn == (ssize_t)sizeof rr ? 0 : 2);
@@ -347,6 +414,10 @@ run_one(uint64_t seed, int *out_started, int *out_all_fin, int *out_rel,
 	if (out_rel)     *out_rel = rr.rel;
 	if (out_abort)   *out_abort = rr.n_abort;
 	if (out_fault)   *out_fault = rr.n_fault;
+	if (out_fkill)
+		*out_fkill = rr.n_fkill;
+	if (out_rewalk)
+		*out_rewalk = rr.rewalk;
 	if (out_state)   *out_state = rr.state;
 	return rr.rc;
 }
@@ -356,7 +427,7 @@ main(int argc, char **argv)
 {
 	uint64_t base = 0x53434f5045ull;   /* "SCOPE" */
 	int n = 40, i, fails = 0;
-	int tot_abort = 0, tot_fault = 0, tot_none_runs = 0;
+	int tot_abort = 0, tot_fault = 0, tot_fkill = 0, tot_none_runs = 0;
 
 	if (argc > 1) base = strtoull(argv[1], NULL, 0);
 	if (argc > 2) n = atoi(argv[2]);
@@ -377,48 +448,67 @@ main(int argc, char **argv)
 
 	for (i = 0; i < n; i++) {
 		uint64_t seed = base + (uint64_t)i * 0x9E3779B97F4A7C15ull;
-		int st = 0, af = 0, rl = 0, ab = 0, fl = 0;
-		int st2 = 0, af2 = 0, rl2 = 0, ab2 = 0, fl2 = 0;
+		int st = 0, af = 0, rl = 0, ab = 0, fl = 0, fk = 0, rw = 0;
+		int st2 = 0, af2 = 0, rl2 = 0, ab2 = 0, fl2 = 0, fk2 = 0,
+		    rw2 = 0;
 		uint64_t sh = 0, sh2 = 0;
 		int rc, rc2, pass = 1;
 
-		rc = run_one(seed, &st, &af, &rl, &ab, &fl, &sh);
+		rc = run_one(seed, &st, &af, &rl, &ab, &fl, &fk, &rw, &sh);
 		if (rc != XTC_OK) pass = 0;
 		else if (st != N_WORKERS) pass = 0;   /* all workers started */
 		else if (af != 1) pass = 0;           /* ALL finalizers ran */
 		else if (rl != st) pass = 0;          /* every release registered */
+		else if (rw != 0)
+			pass = 0; /* every record ran once */
 
 		if (pass) {
-			rc2 = run_one(seed, &st2, &af2, &rl2, &ab2, &fl2, &sh2);
+			rc2 = run_one(seed, &st2, &af2, &rl2, &ab2, &fl2, &fk2,
+			    &rw2, &sh2);
 			if (rc2 != rc || st2 != st || af2 != af || rl2 != rl ||
-			    ab2 != ab || fl2 != fl || sh2 != sh)
+			    ab2 != ab || fl2 != fl || fk2 != fk || rw2 != rw ||
+			    sh2 != sh)
 				pass = 0;
 		}
 
 		if (!pass) {
-			printf("  seed 0x%016llx: FAIL (started=%d all_fin=%d "
-			    "rel=%d abort=%d fault=%d rc=%d; replay sh=%016llx/"
-			    "%016llx)\n",
-			    (unsigned long long)seed, st, af, rl, ab, fl, rc,
-			    (unsigned long long)sh, (unsigned long long)sh2);
+			if (rw != 0)
+				printf(
+				    "  seed 0x%016llx: a recovery record ran "
+				    "twice or not at all after a kill inside "
+				    "the recovery walk (%d of %d fault+kill "
+				    "workers)\n",
+				    (unsigned long long)seed, rw, fk);
+			printf(
+			    "  seed 0x%016llx: FAIL (started=%d all_fin=%d "
+			    "rel=%d abort=%d fault=%d fkill=%d rewalk=%d rc=%d; "
+			    "replay sh=%016llx/%016llx)\n",
+			    (unsigned long long)seed, st, af, rl, ab, fl, fk,
+			    rw, rc, (unsigned long long)sh,
+			    (unsigned long long)sh2);
 			fails++;
 		} else {
 			tot_abort += ab;
 			tot_fault += fl;
-			if (ab == 0 && fl == 0)
+			tot_fkill += fk;
+			if (ab == 0 && fl == 0 && fk == 0)
 				tot_none_runs++;
 		}
 	}
 
 	if (fails == 0) {
-		printf("OK: scope/bracket + masking DST -- %d seeds, every "
+		printf(
+		    "OK: scope/bracket + masking DST -- %d seeds, every "
 		    "started worker ran all %d deferred finalizers AND its "
 		    "masked-acquire release on every exit path (normal close, "
-		    "seeded abort mid-scope, seeded contained fault mid-scope); "
-		    "no finalizer eaten by a mid-mask abort; replay-identical "
-		    "(disruptions across the sweep: %d aborts, %d faults, %d "
-		    "seeds left all workers undisturbed)\n",
-		    n, DEFER_PER, tot_abort, tot_fault, tot_none_runs);
+		    "seeded abort mid-scope, seeded contained fault mid-scope, "
+		    "seeded kill inside the fault's recovery walk); no finalizer "
+		    "eaten by a mid-mask abort, every recovery record ran once; "
+		    "replay-identical (disruptions across the sweep: %d aborts, "
+		    "%d faults, %d fault+kills, %d seeds left all workers "
+		    "undisturbed)\n",
+		    n, DEFER_PER, tot_abort, tot_fault, tot_fkill,
+		    tot_none_runs);
 		return 0;
 	}
 	printf("FAIL: %d/%d scope DST seeds failed\n", fails, n);

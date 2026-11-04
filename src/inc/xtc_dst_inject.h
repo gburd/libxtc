@@ -158,6 +158,16 @@
 #define XTC_DST_BUG_PRUNEHZN   21  /* xstore.c: prune-on-write deletes the version at the horizon */
 #define XTC_DST_BUG_SHIFTLO    22  /* btree.c: a resumed cursor skips the lo-fence re-check */
 #define XTC_DST_BUG_GCBATCH    23  /* xstore.c: version GC forgets its row at a batch boundary */
+
+/*
+ * 24 RECOV_REWALK: proc.c walks the recovery registry the 2.1.1 way
+ * (indexed, n_recov zeroed after the loop, unmasked on the fault branch
+ * and in xtc_proc_recovery_cleanup), so a kill that lands while a record
+ * parks unwinds into the exit path, which runs the records above it a
+ * second time (test_sim_scope: a recovery record ran twice).
+ */
+#define XTC_DST_BUG_RECOV_REWALK 24
+
 #define XTC_DST_BUG_PIDEXEC 30     /* proc.c: 2.1 exec-relative pids */
 
 #endif /* XTC_DST_INJECT_H */
