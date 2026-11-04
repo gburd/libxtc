@@ -33,7 +33,9 @@
  *	never a value saved from a different thread.
  *
  *	No ELF-only assembler directives (.type/.size/.section
- *	.note.GNU-stack); those are not valid for COFF/PE.
+ *	.note.GNU-stack) inside the arch #if; those are not valid for
+ *	COFF/PE.  The note at the end is under __ELF__ for the off-arch
+ *	builds that assemble this file to an empty ELF object.
  *
  *	Stack alignment: the Windows ARM64 ABI, like AAPCS64, requires sp
  *	to be 16-byte aligned at any public interface.  The saved context
@@ -152,3 +154,15 @@ __xtc_jump_fcontext:
 	ret
 
 #endif  /* __aarch64__ && _WIN32 */
+
+/*
+ * Outside the arch #if on purpose.  On every other arch this object is
+ * empty, and an ELF object with no .note.GNU-stack makes ld mark the
+ * whole output (libxtc.so) as needing an executable stack
+ * (test/dist/test_gnu_stack.sh).  Deliberately no GNU property note
+ * (IBT/SHSTK/BTI): the context switch is not shadow-stack aware, and a
+ * marked libxtc.so would turn SHSTK on and fault the first resume.
+ */
+#if defined(__ELF__)
+	.section .note.GNU-stack,"",%progbits
+#endif

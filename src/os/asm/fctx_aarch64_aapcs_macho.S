@@ -10,7 +10,8 @@
  *	  - Mach-O prepends an underscore to C symbols, so the C names
  *	    __xtc_make_fcontext / __xtc_jump_fcontext are the assembler
  *	    symbols ___xtc_make_fcontext / ___xtc_jump_fcontext.
- *	  - no .type / .size / .note.GNU-stack (ELF-only directives).
+ *	  - no .type / .size (ELF-only directives); the .note.GNU-stack
+ *	    at the end is under __ELF__, so a Mach-O build never emits it.
  *	  - .p2align (log2) instead of ELF .align.
  *	  - adrp/@PAGE + add/@PAGEOFF for the start trampoline's address.
  *
@@ -164,3 +165,15 @@ ___xtc_jump_fcontext:
 	br      x30
 
 #endif  /* __aarch64__ && __APPLE__ */
+
+/*
+ * Outside the arch #if on purpose.  On every other arch this object is
+ * empty, and an ELF object with no .note.GNU-stack makes ld mark the
+ * whole output (libxtc.so) as needing an executable stack
+ * (test/dist/test_gnu_stack.sh).  Deliberately no GNU property note
+ * (IBT/SHSTK/BTI): the context switch is not shadow-stack aware, and a
+ * marked libxtc.so would turn SHSTK on and fault the first resume.
+ */
+#if defined(__ELF__)
+	.section .note.GNU-stack,"",%progbits
+#endif

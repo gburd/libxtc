@@ -126,3 +126,15 @@ __xtc_jump_fcontext:
 	ret
 
 #endif  /* _WIN32 && __x86_64__ */
+
+/*
+ * Outside the arch #if on purpose.  On every other arch this object is
+ * empty, and an ELF object with no .note.GNU-stack makes ld mark the
+ * whole output (libxtc.so) as needing an executable stack
+ * (test/dist/test_gnu_stack.sh).  Deliberately no GNU property note
+ * (IBT/SHSTK/BTI): the context switch is not shadow-stack aware, and a
+ * marked libxtc.so would turn SHSTK on and fault the first resume.
+ */
+#if defined(__ELF__)
+	.section .note.GNU-stack,"",%progbits
+#endif
