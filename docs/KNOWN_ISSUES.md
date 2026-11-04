@@ -6,6 +6,23 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## OPEN: a pid does not cross from one xtc_exec to another
+
+A pid names its loop by the executor slot (`loop_id` = slot + 1), not by
+a process-wide id.  A proc on one `xtc_exec` that sends to a pid minted
+on a SECOND `xtc_exec` reaches the proc in the same slot of its OWN exec:
+`xtc_send` returns `XTC_OK` and the message goes to the wrong process.
+`xtc_tnt_start` runs its shards on an exec of its own, so a program with
+tnt and its own exec of procs has two.  Reproduced with two execs of two
+loops each: the send to exec A's proc 1.0.1 was delivered to exec B's
+proc in slot 0.
+
+**Workaround.**  Keep the procs that talk to another exec's procs on a
+standalone loop (`xtc_loop_init`): its pids (`loop_id` 0) resolve from
+any exec, provided there is only one standalone loop.
+`examples/16_l2book` does this.  The fix, process-wide loop ids in the
+pid, is planned for a 2.x development release.
+
 ## FIXED (2.2): a cross-shard xtc_tnt_send could lose messages
 
 **What it was.**  An `xtc_tnt_send` to an Isolate on another shard
