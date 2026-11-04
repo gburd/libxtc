@@ -234,6 +234,10 @@ typedef struct xtc_tnt_shard {
 	struct xtc_tnt_spawn_req *spawn_head;
 	struct xtc_tnt_spawn_req *spawn_tail;
 	pthread_mutex_t    spawn_lock;
+	/* Armed timers' args (xtc_tnt_register_timer), so shard_destroy frees
+	 * one whose fiber never ran to completion: a loop stopped with a timer
+	 * pending frees the fiber, not its arg.  Guarded by comp_lock. */
+	struct xtc_tnt_timer_arg *timers;
 
 	atomic_int         stop;
 	uint64_t           ticks;
@@ -994,11 +998,39 @@ xtc_tnt_submit_close(int fd)
 /* Timer: arm a one-shot timer that delivers `tag` back to this Isolate.
  * Implemented with a courier-like fiber that sleeps then posts. */
 typedef struct xtc_tnt_timer_arg {
+	struct xtc_tnt_timer_arg *prev, *next; /* on shard->timers */
 	xtc_tnt_shard_t  *shard;
 	xtc_tnt_handle_t  target;
 	uint64_t      duration_ns;
 	uint16_t      tag;
 } xtc_tnt_timer_arg_t;
+
+static void
+timer_link(xtc_tnt_timer_arg_t *ta)
+{
+	xtc_tnt_shard_t *sh = ta->shard;
+	pthread_mutex_lock(&sh->comp_lock);
+	ta->prev = NULL;
+	ta->next = sh->timers;
+	if (sh->timers != NULL)
+		sh->timers->prev = ta;
+	sh->timers = ta;
+	pthread_mutex_unlock(&sh->comp_lock);
+}
+
+static void
+timer_unlink(xtc_tnt_timer_arg_t *ta)
+{
+	xtc_tnt_shard_t *sh = ta->shard;
+	pthread_mutex_lock(&sh->comp_lock);
+	if (ta->prev != NULL)
+		ta->prev->next = ta->next;
+	else
+		sh->timers = ta->next;
+	if (ta->next != NULL)
+		ta->next->prev = ta->prev;
+	pthread_mutex_unlock(&sh->comp_lock);
+}
 
 static void
 xtc_tnt_timer_main(void *arg)
@@ -1014,6 +1046,7 @@ xtc_tnt_timer_main(void *arg)
 	c.result = 0;
 	(void)comp_push(ta->shard, &c);
 	shard_wake(ta->shard);
+	timer_unlink(ta);
 	__os_free(ta);
 }
 
@@ -1034,9 +1067,12 @@ xtc_tnt_register_timer(uint64_t duration_ns, uint16_t tag)
 	ta->duration_ns = duration_ns;
 	ta->tag = tag;
 	popts.name = "tnt-timer";
-	if (xtc_proc_spawn(sh->loop, xtc_tnt_timer_main, ta, &popts, &pid)
-	    != XTC_OK)
+	timer_link(ta);
+	if (xtc_proc_spawn(sh->loop, xtc_tnt_timer_main, ta, &popts, &pid) !=
+	    XTC_OK) {
+		timer_unlink(ta);
 		__os_free(ta);
+	}
 }
 
 /* External / cross-thread spawn: enqueue a request onto the target
@@ -1668,6 +1704,14 @@ shard_destroy(xtc_tnt_shard_t *sh)
 		xtc_tnt_envelope_t *e = sh->env_free;
 		sh->env_free = e->next;
 		__os_free(e);
+	}
+
+	/* Timers still armed when the runtime stopped: their fibers were
+	 * freed with the loop, before they could free their args. */
+	while (sh->timers != NULL) {
+		xtc_tnt_timer_arg_t *ta = sh->timers;
+		sh->timers = ta->next;
+		__os_free(ta);
 	}
 
 	/* Drain pending external spawn requests. */
