@@ -240,7 +240,8 @@ XTC_API uint64_t xtc_sim_io_durable_end(int fd);
  * seeded latency so delivery ORDER is part of the replayable schedule.
  * All OFF by default (no behaviour change in production or normal sim).
  *
- * Loops are identified by pid.loop_id (== exec_id + 1; 0 == standalone).
+ * Loops are identified by executor slot + 1 (xtc_exec_loop index + 1; 0 ==
+ * standalone).  Not pid.loop_id, which since 2.2 is a process-wide id.
  * A blocked edge makes __mbox_deliver DROP the message via the sender's
  * existing soft-full path (XTC_E_AGAIN), so a partitioned peer never
  * deadlocks the sim.  Scope: the in-process cross-loop path only -- the

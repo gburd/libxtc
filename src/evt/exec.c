@@ -158,7 +158,8 @@ __xtc_exec_try_steal(xtc_loop_t *me)
 		XTC_SIM_FAULT_POINT("sched.steal.pre_cas");
 		t = xtc_deque_steal(&victim->deque);
 		if (t != NULL) {
-			XTC_PROBE_SCHED_STEAL(me->exec_id, idx, (uintptr_t)t);
+			XTC_PROBE_SCHED_STEAL((int)me->id, (int)victim->id,
+			    (uintptr_t)t);
 			return t;
 		}
 	}
@@ -172,7 +173,8 @@ __xtc_exec_try_steal(xtc_loop_t *me)
 		if (xtc_deque_len(&victim->deque) == 0) continue;
 		t = xtc_deque_steal(&victim->deque);
 		if (t != NULL) {
-			XTC_PROBE_SCHED_STEAL(me->exec_id, idx, (uintptr_t)t);
+			XTC_PROBE_SCHED_STEAL((int)me->id, (int)victim->id,
+			    (uintptr_t)t);
 			return t;
 		}
 	}
@@ -323,7 +325,7 @@ __xtc_exec_worker(void *arg)
 			}
 			atomic_fetch_sub_explicit(&exec->n_idle, 1,
 			    memory_order_relaxed);
-			XTC_PROBE_LOOP_POLL(loop->exec_id, idle_poll_ns, n_out);
+			XTC_PROBE_LOOP_POLL((int)loop->id, idle_poll_ns, n_out);
 			/*
 			 * Dispatch the events this poll reaped.  This poll is
 			 * NOT just a sleep interrupted by the wakeup fd: a real
@@ -358,8 +360,7 @@ __xtc_exec_worker(void *arg)
 			if (n_out == 0 && __xtc_tail_on(XTC_TAIL_SCHED)) {
 				xtc_pid_t lp;
 				memset(&lp, 0, sizeof lp);
-				lp.loop_id = (uint32_t)(loop->exec_id >= 0
-				    ? (unsigned)loop->exec_id : XTC_TAIL_LOOP_NONE);
+				lp.loop_id = loop->id;
 				__xtc_tail_emit(XTC_TAIL_SCHED,
 				    XTC_TAIL_LOOP_POLL, lp, 0);
 			}
@@ -439,13 +440,6 @@ xtc_exec_init(xtc_exec_t **out, int n_loops)
 			return rc;
 		}
 		e->loops[i]->exec_id = i;
-		/* Label this loop's io so XTC_TAIL_REAP, emitted inside
-		 * xtc_io_poll where the loop is not visible, can name the
-		 * reaping loop.  A label only -- never used for control. */
-		if (e->loops[i]->io != NULL) {
-			extern void __xtc_io_set_tail_loop_id(xtc_io_t *, int);
-			__xtc_io_set_tail_loop_id(e->loops[i]->io, i);
-		}
 		e->loops[i]->exec = e;
 	}
 

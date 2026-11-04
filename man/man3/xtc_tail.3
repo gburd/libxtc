@@ -410,19 +410,20 @@ is the only kind here whose mere presence is a fault -- every other needs a
 join to mean anything -- because a fiber parked on a refused request can never
 be woken.
 .Pp
-A ring with no exec-relative loop id -- one belonging to a loop created by a
-bare
-.Fn xtc_loop_init
-rather than as part of an executor -- reports
+Every loop event carries the loop's process-wide id, the
+.Fa loop_id
+of the pids that loop mints, for a standalone loop and an executor loop alike
+(2.2; through 2.1 an executor loop reported its 0-based slot and a standalone
+loop the value below).
+A ring no loop owns reports
 .Dv XTC_TAIL_LOOP_NONE
 .Pq 0xFFFFFFFF ; 0xFFFF in version 2 traces ,
 which
 .Nm xtc-tail.py
 renders as
 .Li none .
-This is distinct from a fallback of 0, which would be indistinguishable from
-the executor's real loop 0 and would misattribute an unlabelled ring's events
-to it.
+It is never a loop id, so an unlabelled ring's events are not misattributed
+to a real loop.
 .Pp
 .Dv XTC_TAIL_POLL_FULL
 records a poll that drained its FULL per-call budget and so may have left

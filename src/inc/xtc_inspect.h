@@ -110,7 +110,7 @@ typedef struct xtc_proc_info {
 /* One loop's scheduler snapshot. */
 typedef struct xtc_loop_info {
 	size_t   size;              /* the LIBRARY's sizeof: see XTC_FIELD_OK */
-	int      loop_id;           /* 0 standalone, exec slot + 1 otherwise */
+	int loop_id;                /* the loop's id, as in its pids (2.2) */
 	int      n_procs;           /* live procs homed on this loop */
 	int      n_alive;           /* live tasks (procs + plain tasks) */
 	uint64_t tasks_run;

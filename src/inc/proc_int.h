@@ -20,7 +20,8 @@
 #include "xtc_proc.h"
 
 /* Owner/quiescent lookup on a live loop, including procs still in exit hooks.
- * PIDs are executor-relative; a global info scan cannot establish this join. */
+ * One table probe, no registry walk (through 2.1 PIDs were executor-relative
+ * and a global info scan could not establish this join). */
 int __xtc_proc_loop_contains(xtc_loop_t *, xtc_pid_t);
 
 /* The calling proc's OWNER loop: the one it was spawned on, whose table

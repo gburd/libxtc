@@ -245,16 +245,19 @@ enum xtc_tail_kind {
 #define XTC_TAIL_SHORT_SUBMIT_BASE 4096
 
 /*
- * loop_id reported for a ring that has NO exec-relative loop id -- a loop
- * created by a bare xtc_loop_init rather than as part of an executor.
+ * loop_id reported for a ring that NO loop owns.  Since 2.2 every loop,
+ * standalone or on an executor, labels its ring with its process-wide id
+ * (the loop_id of its pids), so a loop event joins the pids it minted.
+ * Through 2.1 the label was the executor slot (0-based, unlike the pid's
+ * slot + 1) and a ring of a bare xtc_loop_init loop reported this value.
  *
  * This exists because the obvious fallback is a lie: reporting 0 makes an
  * unlabelled ring indistinguishable from the executor's REAL loop 0, and a
  * consumer read a stack of "loop 0" SUBMIT/REAP events as evidence that
  * loop 0 owned a stranded completion.  That inference may well be right, but
  * the number they read could not distinguish the two cases, so it could not
- * support it.  0xFFFFFFFF cannot be a real exec loop id and is visibly
- * not an index.  (1.x, with a 16-bit loop_id, used 0xFFFF.)
+ * support it.  0xFFFFFFFF is never a loop id (xtc_loop_init stops one
+ * short of it).  (1.x, with a 16-bit loop_id, used 0xFFFF.)
  */
 #define XTC_TAIL_LOOP_NONE 0xFFFFFFFFu
 
@@ -362,7 +365,7 @@ XTC_API uint64_t xtc_tail_dropped(void);
  *     ts_delta: LEB128 varint, ns since the previous event (base for the
  *               first) -- monotonic timestamps make this 1-2 bytes
  *     loop_id : LEB128 varint (pid.loop_id, u32; XTC_TAIL_LOOP_NONE
- *               0xFFFFFFFF = a ring with no exec loop id)
+ *               0xFFFFFFFF = a ring no loop owns)
  *     local_id: LEB128 varint (pid.local_id, u32)
  *     gen     : LEB128 varint (pid.gen, u64)
  *     detail  : LEB128 varint (EXIT reason / RUN latency ns)

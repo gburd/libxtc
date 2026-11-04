@@ -43,7 +43,7 @@ struct fsm_postponed {
 
 struct xtc_fsm {
 	xtc_pid_t             pid;
-	xtc_loop_t           *loop;  /* owner: PIDs are executor-relative */
+	xtc_loop_t *loop; /* owner (exact resolve; see __resolve_on) */
 	_Atomic int           stop_requested;
 	int                   joined;
 };

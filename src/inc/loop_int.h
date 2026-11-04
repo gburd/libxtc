@@ -494,6 +494,13 @@ struct xtc_loop {
 	 * this loop is standalone (M3 single-thread mode). */
 	int exec_id;
 
+	/* Process-wide loop id, 1.., set by xtc_loop_init and never reused
+	 * in the process: pid.loop_id, xtc_loop_info.loop_id, the xtc_tail
+	 * and USDT loop label.  Through 2.1 a pid carried exec_id + 1, which
+	 * two executors (or two standalone loops) shared.  See
+	 * __xtc_loop_id_take. */
+	uint32_t id;
+
 	/* Back-pointer to the executor (NULL if standalone). */
 	struct xtc_exec *exec;
 

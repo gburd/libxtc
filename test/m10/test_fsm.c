@@ -302,8 +302,10 @@ test_fsm_state_timeout(const MunitParameter p[], void *data)
 
 #include <pthread.h>
 
-/* PIDs are executor-relative: every standalone loop encodes loop_id 0, so
- * a proc on an UNRELATED standalone loop can carry a pid equal to ours.
+/* Through 2.1 PIDs were executor-relative: every standalone loop encoded
+ * loop_id 0, so a proc on an UNRELATED standalone loop could carry a pid
+ * equal to ours.  Since 2.2 the loop ids differ, but the bystander still
+ * holds our (local_id, gen) -- the part a 2.1 pid could not tell apart.
  * feq_by is that bystander: it counts messages it receives and records
  * whether it exited normally (a kill aimed at the wrong proc stops it). */
 static _Atomic int g_feq_stop, g_feq_by_msgs, g_feq_by_normal;
@@ -343,12 +345,15 @@ feq_by_start(xtc_loop_t **b, xtc_pid_t *by, int n, pthread_t *th)
 		    ==, XTC_OK);
 	munit_assert_int(pthread_create(th, NULL, feq_loop_thread, *b), ==, 0);
 }
+/* A bystander in p's slot (local_id, gen) on another loop. */
 static int
 feq_has_equal(const xtc_pid_t *by, int n, xtc_pid_t p)
 {
 	int i;
 	for (i = 0; i < n; i++)
-		if (xtc_pid_eq(by[i], p)) return 1;
+		if (by[i].local_id == p.local_id && by[i].gen == p.gen &&
+		    by[i].loop_id != p.loop_id)
+			return 1;
 	return 0;
 }
 

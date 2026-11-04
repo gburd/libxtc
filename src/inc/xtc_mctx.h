@@ -136,14 +136,14 @@ XTC_API size_t      xtc_mctx_total_chunks(const xtc_mctx_t *m);
  *
  * Members are the fibers registered with xtc_arena_group_add.  A fiber
  * adds ITSELF, and the group records its pid TOGETHER WITH its owner loop
- * (the loop it was spawned on): PIDs are executor-relative, so a pid alone
- * can name an unrelated proc on another standalone loop.  OWNER-LOOP
- * LIFETIME: a member's owner loop must not be finalized (xtc_loop_fini /
- * xtc_exec_fini) while the group still lists that member -- i.e. until a
- * discard has reported all_gone == 1, or the group is destroyed.  A member that exits on
- * its own is reaped from the group lazily (a dead pid is skipped at
- * discard time).  The group's arena is a normal xtc_mctx_t and may have
- * children; reset discards them too.
+ * (the loop it was spawned on); through 2.1 PIDs were executor-relative
+ * and a pid alone could name an unrelated proc on another standalone
+ * loop.  OWNER-LOOP LIFETIME: a member's owner loop must not be finalized
+ * (xtc_loop_fini / xtc_exec_fini) while the group still lists that member
+ * -- i.e. until a discard has reported all_gone == 1, or the group is
+ * destroyed.  A member that exits on its own is reaped from the group
+ * lazily (a dead pid is skipped at discard time).  The group's arena is
+ * a normal xtc_mctx_t and may have children; reset discards them too.
  *
  * JOIN/DISCARD RACE -- THE GROUP IS SEALED WHILE A DISCARD RUNS.
  * discard() must kill a FIXED cohort, and killing yields, so the window

@@ -972,12 +972,14 @@ __xtc_sim_io_flip_byte(int len)
  * sockets/TLS is a separate, larger effort and is NOT modelled here.
  *
  * Partition matrix: a directed adjacency of "loop i cannot reach loop
- * j".  Loops are identified by pid.loop_id (== exec_id + 1, or 0 for a
- * standalone loop), so the matrix is indexed by loop_id in
- * [0, XTC_SIM_PART_MAX).  A blocked edge causes __mbox_deliver to DROP
- * the message the same way a soft-full mailbox does (return XTC_E_AGAIN;
- * the sender already handles that path), so a partitioned peer never
- * deadlocks the sim.  Off by default (no edge blocked).
+ * j".  Loops are identified by their executor slot + 1 (0 for a
+ * standalone loop), so the matrix is indexed by that in
+ * [0, XTC_SIM_PART_MAX).  (Through 2.1 this was also pid.loop_id; since
+ * 2.2 pid.loop_id is a process-wide id, and the matrix kept the slot.)
+ * A blocked edge causes __mbox_deliver to DROP the message the same way
+ * a soft-full mailbox does (return XTC_E_AGAIN; the sender already
+ * handles that path), so a partitioned peer never deadlocks the sim.
+ * Off by default (no edge blocked).
  *
  * Latency: when a [min,max] window is set, each cross-loop delivery is
  * deferred to now + a seeded draw from the IO stream (reusing the IO
@@ -996,7 +998,7 @@ static pthread_mutex_t  g_part_lock = PTHREAD_MUTEX_INITIALIZER;
  * Set (or clear) the directed edge src_loop_id -> dst_loop_id in the
  * partition matrix: when `blocked` is nonzero a cross-loop message from
  * a proc on src_loop_id to a proc on dst_loop_id is dropped under sim.
- * loop_id is pid.loop_id (exec_id + 1; 0 == standalone).  The edge is
+ * loop_id is the executor slot + 1 (0 == standalone).  The edge is
  * DIRECTED: block only src->dst for a one-way (asymmetric) partition --
  * where src cannot reach dst but dst's replies to src still flow, the
  * harder failure mode that exposes asymmetric-timeout bugs.  For a

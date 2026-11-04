@@ -33,14 +33,20 @@
  * Process identifier (16 bytes; 2.0).  Encodes the loop ID, a per-loop
  * slot index, and the slot's generation, so a stale pid (after a
  * process exits and its slot is reused) is recognisably stale on
- * lookup.  The slot index is 32 bits (a loop holds as many live procs as
- * memory and the xtc_res caps allow), and the generation is 64 bits per
- * slot, so it never wraps: a pid held across any number of reuses of
- * its slot never names the new occupant.  Compare with xtc_pid_eq, not
- * memcmp (padding-free today, but that is not part of the contract).
+ * lookup.  The loop ID is process-wide (2.2): every xtc_loop_init, on an
+ * executor or standalone, takes the next id from 1, and an id is never
+ * reused in the process, so a pid names one proc from any loop of any
+ * executor, and a pid of a finalized loop names none.  (Through 2.1 it
+ * was the executor slot + 1, 0 for a standalone loop, which two
+ * executors or two standalone loops shared.)  The slot index is 32 bits
+ * (a loop holds as many live procs as memory and the xtc_res caps
+ * allow), and the generation is 64 bits per slot, so it never wraps: a
+ * pid held across any number of reuses of its slot never names the new
+ * occupant.  Compare with xtc_pid_eq, not memcmp (padding-free today,
+ * but that is not part of the contract).
  */
 typedef struct xtc_pid {
-	uint32_t loop_id;   /* 0 standalone loop, else xtc_exec slot + 1 */
+	uint32_t loop_id;   /* the loop's process-wide id, 1.. (0: NONE) */
 	uint32_t local_id;  /* slot in the loop's proc table */
 	uint64_t gen;       /* slot generation, 1.. (0 only in XTC_PID_NONE) */
 } xtc_pid_t;

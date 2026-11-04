@@ -273,7 +273,7 @@ out:
  * a PooledString (u32 pool id resolved by a String Pool frame).  libxtc's
  * proc identity {loop_id, local_id, gen} is packed into one u64 task_id so
  * the GUI groups a proc's events (see __xtc_d9_task_id); worker_id is the
- * loop's exec id.  SegmentMetadataEvent.xtc_format versions libxtc's
+ * loop's id (pid.loop_id, process-wide since 2.2).  SegmentMetadataEvent.xtc_format versions libxtc's
  * layout inside the container (XTC_TAIL_VERSION).
  *
  * Streams over the SAME per-event snapshot the XTCL dump takes (no extra
@@ -362,7 +362,7 @@ static const struct xtc_d9_field XTC_D9_F_SEGMETA[] = {
 	{ "backend",    XTC_D9_FT_POOLED_STR },
 	/* libxtc's own layout version inside dial9's v1 container (which
 	 * the viewer pins): XTC_TAIL_VERSION, so 3 = the 2.0 pid (u32
-	 * worker_id with 0xFFFFFFFF = no exec loop, 32-bit task slot). */
+	 * worker_id with 0xFFFFFFFF = no loop, 32-bit task slot). */
 	{ "xtc_format", XTC_D9_FT_VARINT },
 };
 

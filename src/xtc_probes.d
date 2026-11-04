@@ -25,8 +25,9 @@
  *	          between park, wake, resume and the run probes (it is
  *	          stable for the fiber's life, and a fiber can migrate
  *	          between OS threads, so key D arrays on it, not on tid).
- *	  loop    the executor loop id (xtc_exec loop index), -1 for a
- *	          loop that is not part of an executor.
+ *	  loop    the loop's process-wide id, the loop_id of the pids it
+ *	          mints (2.2; through 2.1 the xtc_exec loop index, -1 for
+ *	          a standalone loop).
  *
  *	No probe argument reads a clock: use D's `timestamp` (or bpftrace
  *	`nsecs`).  That keeps every probe outside the DST determinism

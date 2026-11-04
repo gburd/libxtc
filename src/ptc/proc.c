@@ -809,8 +809,12 @@ static struct xtc_proc *__proc_reanchor(struct xtc_proc *self);
  *            the by-id fallback scan, and the hash rebuild source)
  *   __lt_h   open-addressed hash of the same entries (load <= 1/2), so
  *            a send finds its loop's table in O(1)
- *   __lt_id  loop id (exec slot + 1; 0 = standalone) -> a live loop with
- *            that id, for __resolve's off-exec lookup
+ *   __lt_ih  open-addressed hash keyed by the loop's process-wide id
+ *            (pid.loop_id) -> the loop and its table, for __resolve.
+ *            An id names one loop for the life of the process (see
+ *            __xtc_loop_id_take), so a pid resolves to the loop that
+ *            minted it or to nothing -- never to another executor's loop
+ *            in the same slot, which the exec-relative ids of 2.1 did.
  *
  * Writers serialize on __lt_lock and bracket every change with the
  * __lt_seq seqlock; readers are lock-free and retry if a writer ran
@@ -818,17 +822,23 @@ static struct xtc_proc *__proc_reanchor(struct xtc_proc *self);
  * full registry fails the spawn with XTC_E_RESOURCE.
  */
 #define LOOP_TABLE_MAX 1024
-#define LT_HCAP        (2 * LOOP_TABLE_MAX)
-#define LT_ID_MAX      LOOP_TABLE_MAX
+#define LT_HCAP (2 * LOOP_TABLE_MAX)
 struct lt_entry {
 	_Atomic(xtc_loop_t *)            loop;
+	_Atomic(struct xtc_proc_table *) tbl;
+};
+/* __lt_ih entry: the id is copied in so a reader never dereferences a
+ * loop it has not validated (the loop may be mid-finalize). */
+struct lt_id_entry {
+	_Atomic uint32_t id;
+	_Atomic(xtc_loop_t *) loop;
 	_Atomic(struct xtc_proc_table *) tbl;
 };
 static pthread_mutex_t __lt_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct lt_entry __lt[LOOP_TABLE_MAX];
 static int __lt_n;                                  /* under __lt_lock */
 static struct lt_entry __lt_h[LT_HCAP];
-static _Atomic(xtc_loop_t *) __lt_id[LT_ID_MAX];
+static struct lt_id_entry __lt_ih[LT_HCAP];
 static _Atomic unsigned __lt_seq;
 
 static inline unsigned
@@ -840,10 +850,17 @@ __lt_hash(const xtc_loop_t *loop)
 	return (unsigned)(v >> 40) & (LT_HCAP - 1u);
 }
 
+/* The id a pid minted on l carries, and the registry's key for l. */
 static inline uint32_t
 __lt_loop_id(const xtc_loop_t *l)
 {
-	return (uint32_t)(l->exec_id < 0 ? 0 : l->exec_id + 1);
+	return l->id;
+}
+
+static inline unsigned
+__lt_id_hash(uint32_t id)
+{
+	return (unsigned)((id * 2654435761u) >> 21) & (LT_HCAP - 1u);
 }
 
 /* Writer side of the seqlock (caller holds __lt_lock). */
@@ -872,6 +889,19 @@ __lt_hash_put(xtc_loop_t *loop, struct xtc_proc_table *t)
 		h = (h + 1u) & (LT_HCAP - 1u);
 	atomic_store_explicit(&__lt_h[h].tbl, t, memory_order_release);
 	atomic_store_explicit(&__lt_h[h].loop, loop, memory_order_release);
+}
+
+static void
+__lt_id_put(xtc_loop_t *loop, struct xtc_proc_table *t)
+{
+	uint32_t id = __lt_loop_id(loop);
+	unsigned h = __lt_id_hash(id);
+	while (atomic_load_explicit(&__lt_ih[h].loop, memory_order_relaxed) !=
+	    NULL)
+		h = (h + 1u) & (LT_HCAP - 1u);
+	atomic_store_explicit(&__lt_ih[h].id, id, memory_order_release);
+	atomic_store_explicit(&__lt_ih[h].tbl, t, memory_order_release);
+	atomic_store_explicit(&__lt_ih[h].loop, loop, memory_order_release);
 }
 
 /* Lock-free lookup of loop's table (NULL if none). */
@@ -904,35 +934,45 @@ __lt_find(xtc_loop_t *loop)
 	}
 }
 
-/* Lock-free: a live registered loop whose id is `id` (NULL if none). */
+/*
+ * Lock-free: the live registered loop whose id is `id` and its table
+ * (NULL, NULL if none).  This is the cross-thread send/wake path and must
+ * not take __lt_lock.  The probe is bounded: load <= 1/2, but a reader
+ * racing a rebuild sees a mix of two states, so do not rely on reaching
+ * an empty slot.
+ */
 static xtc_loop_t *
-__lt_find_id(uint32_t id)
+__lt_find_id(uint32_t id, struct xtc_proc_table **out_tbl)
 {
-	unsigned seq;
-	int i, n;
+	unsigned seq, h, k;
 	xtc_loop_t *l, *found;
-	if (id < LT_ID_MAX)
-		return atomic_load_explicit(&__lt_id[id], memory_order_acquire);
+	struct xtc_proc_table *t;
 	for (;;) {
 		seq = atomic_load_explicit(&__lt_seq, memory_order_acquire);
 		if (seq & 1u)
 			continue;
 		found = NULL;
-		n = LOOP_TABLE_MAX;
-		for (i = 0; i < n; i++) {
-			l = atomic_load_explicit(&__lt[i].loop,
+		t = NULL;
+		for (h = __lt_id_hash(id), k = 0; k < LT_HCAP;
+		     h = (h + 1u) & (LT_HCAP - 1u), k++) {
+			l = atomic_load_explicit(&__lt_ih[h].loop,
 			    memory_order_acquire);
 			if (l == NULL)
-				break;             /* dense: end of live entries */
-			if (__lt_loop_id(l) == id) {
+				break;
+			if (atomic_load_explicit(&__lt_ih[h].id,
+			        memory_order_acquire) == id) {
 				found = l;
+				t = atomic_load_explicit(&__lt_ih[h].tbl,
+				    memory_order_acquire);
 				break;
 			}
 		}
 		atomic_thread_fence(memory_order_acquire);
-		if (atomic_load_explicit(&__lt_seq,
-		    memory_order_relaxed) == seq)
+		if (atomic_load_explicit(&__lt_seq, memory_order_relaxed) ==
+		    seq) {
+			*out_tbl = t;
 			return found;
+		}
 	}
 }
 
@@ -942,7 +982,6 @@ static struct xtc_proc_table *
 __lt_remove_locked(xtc_loop_t *loop)
 {
 	struct xtc_proc_table *tbl = NULL;
-	uint32_t id;
 	int i, j;
 	for (i = 0; i < __lt_n; i++)
 		if (atomic_load_explicit(&__lt[i].loop,
@@ -951,7 +990,6 @@ __lt_remove_locked(xtc_loop_t *loop)
 	if (i == __lt_n)
 		return NULL;
 	tbl = atomic_load_explicit(&__lt[i].tbl, memory_order_relaxed);
-	id = __lt_loop_id(loop);
 	__lt_write_begin();
 	/* Dense array: move the last entry into the hole. */
 	__lt_n--;
@@ -961,28 +999,25 @@ __lt_remove_locked(xtc_loop_t *loop)
 	    &__lt[__lt_n].tbl, memory_order_relaxed), memory_order_release);
 	atomic_store_explicit(&__lt[__lt_n].loop, NULL, memory_order_release);
 	atomic_store_explicit(&__lt[__lt_n].tbl, NULL, memory_order_release);
-	/* Hash: rebuild from the dense array (no tombstones). */
+	/* Both hashes: rebuild from the dense array (no tombstones). */
 	for (j = 0; j < (int)LT_HCAP; j++) {
 		atomic_store_explicit(&__lt_h[j].loop, NULL,
 		    memory_order_relaxed);
 		atomic_store_explicit(&__lt_h[j].tbl, NULL,
 		    memory_order_relaxed);
+		atomic_store_explicit(&__lt_ih[j].loop, NULL,
+		    memory_order_relaxed);
+		atomic_store_explicit(&__lt_ih[j].tbl, NULL,
+		    memory_order_relaxed);
+		atomic_store_explicit(&__lt_ih[j].id, 0, memory_order_relaxed);
 	}
-	for (j = 0; j < __lt_n; j++)
+	for (j = 0; j < __lt_n; j++) {
 		__lt_hash_put(atomic_load_explicit(&__lt[j].loop,
 		    memory_order_relaxed), atomic_load_explicit(&__lt[j].tbl,
 		    memory_order_relaxed));
-	/* By-id index: hand the id to another live loop that has it. */
-	if (id < LT_ID_MAX && atomic_load_explicit(&__lt_id[id],
-	    memory_order_relaxed) == loop) {
-		xtc_loop_t *other = NULL;
-		for (j = 0; j < __lt_n; j++) {
-			xtc_loop_t *l = atomic_load_explicit(&__lt[j].loop,
-			    memory_order_relaxed);
-			if (__lt_loop_id(l) == id) { other = l; break; }
-		}
-		atomic_store_explicit(&__lt_id[id], other,
-		    memory_order_release);
+		__lt_id_put(atomic_load_explicit(&__lt[j].loop,
+		                memory_order_relaxed),
+		    atomic_load_explicit(&__lt[j].tbl, memory_order_relaxed));
 	}
 	__lt_write_end();
 	return tbl;
@@ -1105,7 +1140,6 @@ static int
 __table_get(xtc_loop_t *loop, struct xtc_proc_table **out)
 {
 	struct xtc_proc_table *t;
-	uint32_t id;
 	unsigned s;
 	int rc = XTC_OK;
 
@@ -1135,15 +1169,12 @@ __table_get(xtc_loop_t *loop, struct xtc_proc_table **out)
 		t->free_head = XTC_PT_FREE_NONE;
 		t->inited = 1;
 	}
-	id = __lt_loop_id(loop);
 	__lt_write_begin();
 	atomic_store_explicit(&__lt[__lt_n].tbl, t, memory_order_release);
 	atomic_store_explicit(&__lt[__lt_n].loop, loop, memory_order_release);
 	__lt_n++;
 	__lt_hash_put(loop, t);
-	if (id < LT_ID_MAX && atomic_load_explicit(&__lt_id[id],
-	    memory_order_relaxed) == NULL)
-		atomic_store_explicit(&__lt_id[id], loop, memory_order_release);
+	__lt_id_put(loop, t);
 	__lt_write_end();
 out:
 	(void) __proc_mtx_unlock(&__lt_lock);
@@ -1163,9 +1194,9 @@ out:
  */
 #define XTC_PROC_MAX_LOCAL_ID ((size_t)UINT32_MAX)
 
+/* Give p a slot and its pid (p->loop set by the caller). */
 static int
-__table_alloc_slot(struct xtc_proc_table *t, struct xtc_proc *p,
-                   uint32_t *out_local, uint64_t *out_gen)
+__table_alloc_slot(struct xtc_proc_table *t, struct xtc_proc *p)
 {
 	size_t i;
 	int rc = XTC_OK;
@@ -1211,8 +1242,11 @@ __table_alloc_slot(struct xtc_proc_table *t, struct xtc_proc *p,
 	idx = t->hw++;
 take:
 	t->slots[idx].proc = p;
-	*out_local = (uint32_t)idx;
-	*out_gen   = ++t->slots[idx].gen;
+	/* p->pid before the stripes drop: a resolver that finds p here
+	 * compares it (see __resolve). */
+	p->pid.loop_id = __lt_loop_id(p->loop);
+	p->pid.local_id = (uint32_t)idx;
+	p->pid.gen = ++t->slots[idx].gen;
 	atomic_fetch_add_explicit(&t->n_used, 1, memory_order_relaxed);
 out:
 	__pt_unlock_all(t);
@@ -1495,8 +1529,8 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e, int sys, int *queued)
 {
 	/*
 	 * DST cross-loop network model (sim only; a single relaxed load
-	 * gates it out of production).  Loops are identified by pid.loop_id
-	 * (== exec_id + 1; 0 == standalone).  A partition cut DROPS the
+	 * gates it out of production).  Loops are identified by executor
+	 * slot + 1 (0 == standalone; see xtc_sim.h).  A partition cut DROPS the
 	 * message via the sender's existing soft-full path (XTC_E_AGAIN); a
 	 * net-latency window DEFERS the delivery to now + a seeded latency so
 	 * delivery ORDER is part of the replayable schedule.  Off by default.
@@ -1773,8 +1807,6 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	xtc_task_t *t;
 	xtc_pid_t spawned_pid;
 	struct xtc_proc *self = (rel != 0) ? __current_proc : NULL;
-	uint32_t local;
-	uint64_t gen;
 	int rc;
 	int pinned;
 	xtc_proc_opts_t o;
@@ -1820,14 +1852,11 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 		p->mbox_wm_user = o.mailbox_watermark_user;
 	}
 
-	if ((rc = __table_alloc_slot(tbl, p, &local, &gen)) != XTC_OK) {
+	if ((rc = __table_alloc_slot(tbl, p)) != XTC_OK) {
 		(void)pthread_mutex_destroy(&p->mbox_lock);
 		__os_free(p);
 		return rc;
 	}
-	p->pid.loop_id  = __lt_loop_id(loop);
-	p->pid.local_id = local;
-	p->pid.gen      = gen;
 	/* Capture the pid before the spawn: once xtc_async enqueues the
 	 * task, p may be reaped on another thread, so reading p->pid for
 	 * out_pid afterward would be a use-after-free. */
@@ -1956,7 +1985,7 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 
 undo_slot:
 	/* p was never made runnable: release its slot and free it. */
-	__table_release(tbl, local);
+	__table_release(tbl, spawned_pid.local_id);
 	(void)pthread_mutex_destroy(&p->mbox_lock);
 	__os_free(p);
 	return rc;
@@ -2497,49 +2526,41 @@ xtc_proc_mailbox_stats(xtc_pid_t pid, xtc_mailbox_stats_t *uout)
 static struct xtc_proc *
 __resolve(xtc_pid_t pid, xtc_loop_t **out_loop_for_send)
 {
-	xtc_loop_t *target_loop = NULL;
-	struct xtc_proc_table *tbl;
+	xtc_loop_t *target_loop;
+	struct xtc_proc_table *tbl = NULL;
 	struct xtc_proc *p;
 
-	/* Strategy 1: if we are running on a loop, prefer same-loop and
-	 * exec-sibling lookups (cheapest). */
-	if (__xtc_current_loop != NULL) {
-		uint32_t my_id = __lt_loop_id(__xtc_current_loop);
-		if (pid.loop_id == my_id)
-			target_loop = __xtc_current_loop;
-		else if (__xtc_current_loop->exec != NULL) {
-			struct xtc_exec *e = __xtc_current_loop->exec;
-			int idx = (int)pid.loop_id - 1;
-			if (idx >= 0 && idx < xtc_exec_n_loops(e))
-				target_loop = xtc_exec_loop(e, idx);
-		}
-	}
-
 	/*
-	 * Strategy 2 (fallback for senders called from the main thread
-	 * before xtc_loop_run, or a cross-thread wake to a loop outside
-	 * the caller's exec): scan the global loop table for the loop
-	 * whose encoded ID matches this pid.  LOCK-FREE: the slots are
-	 * the by-id index (see __lt_find_id) -- this is the hot
-	 * cross-thread-wake path and must not serialize on __lt_lock.
+	 * pid.loop_id is the minting loop's process-wide id, so one probe of
+	 * the by-id hash finds the loop and its table, from any thread and
+	 * any executor.  LOCK-FREE (see __lt_find_id): this is the hot
+	 * cross-thread send/wake path and must not serialize on __lt_lock.
+	 * Through 2.1 a fast path mapped loop_id onto the SENDER's executor
+	 * (slot loop_id - 1), which delivered a send to another executor's
+	 * pid to the proc in the same slot of the sender's own.
 	 */
-	if (target_loop == NULL)
-		target_loop = __lt_find_id(pid.loop_id);
-
-	if (target_loop == NULL) return NULL;
-	if (out_loop_for_send) *out_loop_for_send = target_loop;
-	if ((tbl = __table_for(target_loop, 0)) == NULL) return NULL;
+	target_loop = __lt_find_id(pid.loop_id, &tbl);
+	if (target_loop == NULL || tbl == NULL)
+		return NULL;
+	if (out_loop_for_send)
+		*out_loop_for_send = target_loop;
 	p = __table_lookup(tbl, pid.local_id, pid.gen);
+	/* tbl may have been finalized and reused by a NEW loop after the
+	 * probe; the proc's own pid names its loop, so compare it. */
+	if (p != NULL && !xtc_pid_eq(p->pid, pid)) {
+		__proc_release(p);
+		p = NULL;
+	}
 	return p;
 }
 
 /*
- * __resolve, but in a KNOWN owner loop's table only.  A pid is executor-
- * relative (every standalone loop encodes loop_id 0, and two execs reuse
- * 1..n), so __resolve's loop_id search can land on an unrelated proc with
- * an equal pid.  A caller that recorded the owner (the loop the proc was
- * spawned on -- p->loop, unchanged by migration) resolves exactly.  The
- * caller keeps `owner` alive (not finalized).  owner == NULL is __resolve.
+ * __resolve, but in a KNOWN owner loop's table only (the loop the proc was
+ * spawned on -- p->loop, unchanged by migration).  A pid names its owner
+ * since 2.2, so this is __resolve without the by-id probe; through 2.1 it
+ * was the only exact resolve (every standalone loop encoded loop_id 0, and
+ * two execs reused 1..n).  The caller keeps `owner` alive (not finalized).
+ * owner == NULL is __resolve.
  */
 static struct xtc_proc *
 __resolve_on(xtc_loop_t *owner, xtc_pid_t pid, xtc_loop_t **out_loop)
@@ -5397,7 +5418,7 @@ xtc_inspect_loops(xtc_inspect_loop_fn cb, void *user)
 				procs++;
 		(void) __pt_unlock_all(tbl);
 		infos[n].size = sizeof infos[n];
-		infos[n].loop_id = loop->exec_id < 0 ? 0 : loop->exec_id + 1;
+		infos[n].loop_id = (int)loop->id;
 		infos[n].n_procs = (int)procs;
 		infos[n].n_alive =
 		    atomic_load_explicit(&loop->n_alive, memory_order_relaxed);

@@ -41,9 +41,9 @@ struct app_kid {
 	void                *arg;
 	xtc_restart_policy_t policy;
 	xtc_atomic_pid_t     pid;       /* XTC_PID_NONE = not yet run */
-	/* pid's OWNER loop, stored before pid (constant per child index):
-	 * PIDs are executor-relative, so pid alone can name another
-	 * standalone loop's proc -- shutdown killed one that way. */
+	/* pid's OWNER loop, stored before pid (constant per child index).
+	 * Through 2.1 PIDs were executor-relative, so pid alone could name
+	 * another standalone loop's proc -- shutdown killed one that way. */
 	_Atomic(xtc_loop_t *) owner;
 	_Atomic int          returned;  /* body returned during the drain */
 	struct app_kids     *kids;

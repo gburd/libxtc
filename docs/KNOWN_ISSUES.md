@@ -6,22 +6,49 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
-## OPEN: a pid does not cross from one xtc_exec to another
+## FIXED (2.2): a pid did not cross from one xtc_exec to another
 
-A pid names its loop by the executor slot (`loop_id` = slot + 1), not by
-a process-wide id.  A proc on one `xtc_exec` that sends to a pid minted
-on a SECOND `xtc_exec` reaches the proc in the same slot of its OWN exec:
-`xtc_send` returns `XTC_OK` and the message goes to the wrong process.
-`xtc_tnt_start` runs its shards on an exec of its own, so a program with
-tnt and its own exec of procs has two.  Reproduced with two execs of two
-loops each: the send to exec A's proc 1.0.1 was delivered to exec B's
-proc in slot 0.
+**What it was.**  A pid named its loop by the executor slot (`loop_id` =
+slot + 1, 0 for every standalone loop), not by a process-wide id.  A
+proc on one `xtc_exec` that sent to a pid minted on a second `xtc_exec`
+reached the proc in the same slot of its OWN exec: `xtc_send` returned
+`XTC_OK` and the message went to the wrong process.  Two standalone
+loops collided the same way on `loop_id` 0.  `xtc_tnt_start` runs its
+shards on an exec of its own, so a program with tnt and its own exec of
+procs had two.  `test/concurrency/test_pid_xexec` (two execs of two
+loops and two standalone loops, every proc sending to every other) on
+2.2 before the fix: 18 of 30 messages reached the wrong proc, and after
+one exec and one standalone loop were finalized, 2 of 6 sends to their
+dead pids were accepted and delivered to the new loops' procs.
 
-**Workaround.**  Keep the procs that talk to another exec's procs on a
-standalone loop (`xtc_loop_init`): its pids (`loop_id` 0) resolve from
-any exec, provided there is only one standalone loop.
-`examples/16_l2book` does this.  The fix, process-wide loop ids in the
-pid, is planned for a 2.x development release.
+**Fix.**  `loop_id` is the loop's process-wide id: every
+`xtc_loop_init`, on an executor or standalone, takes the next id from a
+counter that starts at 1 and never reuses one, and a send resolves the
+pid through a lock-free hash of the registered loops keyed by that id.
+A pid names one proc from any loop of any exec, and a pid of a
+finalized loop names none: a send to it fails as for any dead pid,
+never reaches a later loop.  (The deterministic-simulation build
+restarts the ids at 1 whenever no loop is alive, so the pids of a sim
+run depend only on its seed.)  The pid layout is unchanged (16 bytes, the
+same three fields), so there is no ABI change.  The same test passes
+(30 of 30 delivered, 0 of 6 dead sends accepted);
+`test/sim/test_sim_pid_xexec` checks it under DST and catches planted
+bug 30, which restores the old minting.  Commit "proc: a pid names its
+loop by a process-wide id, not the exec slot".
+
+**What changed for consumers.**  `loop_id` values are no longer small
+executor indices: the first loop a process creates is 1, the next 2,
+and so on, whatever executor they belong to.  The same id is
+`xtc_loop_info.loop_id` (`xtc_inspect_loops`), the `loop_id` of loop
+events in `xtc_tail` traces (an executor loop reported its 0-based slot,
+and a standalone loop `XTC_TAIL_LOOP_NONE`, through 2.1), and the `loop`
+argument of the USDT probes (the executor index, or -1, through 2.1).
+A pid no longer says which executor slot its proc lives on; code that
+read the slot out of `loop_id` must record it (a proc can read its own
+with `xtc_exec_loop_id()`).  `xtc_sim_partition_set` is still keyed by
+executor slot + 1.  4,294,967,294 loop inits exhaust the
+ids; `xtc_loop_init` then fails with `XTC_E_RESOURCE`.  The
+standalone-loop workaround (`examples/16_l2book`) is no longer needed.
 
 ## FIXED (2.2): a cross-shard xtc_tnt_send could lose messages
 

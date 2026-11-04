@@ -29,7 +29,7 @@ knob.
 
 | Limit | Value | Why |
 |---|---|---|
-| Loops per process (`pid.loop_id`) | 1,024 with processes at once (`LOOP_TABLE_MAX`); the id is `uint32_t` | A process id is `{loop_id, local_id, gen}`, 16 bytes since 2.0. The id itself has 32 bits; the loop registry admits 1,024 live loops hosting processes. |
+| Loops per process (`pid.loop_id`) | 1,024 with processes at once (`LOOP_TABLE_MAX`); 4,294,967,294 loop inits per process | A process id is `{loop_id, local_id, gen}`, 16 bytes since 2.0. Since 2.2 `loop_id` is a process-wide id that every `xtc_loop_init` takes from a counter and that is never reused, so a pid names one process across executors; once the counter is spent `xtc_loop_init` fails with `XTC_E_RESOURCE`. The loop registry admits 1,024 live loops hosting processes. |
 | Live processes per loop (`pid.local_id`) | 4,294,967,294 (`uint32_t`); in practice `XTC_RES_TASKS` and memory | Per-loop slot index; the table grows on demand. Through 1.x it was 16 bits, 65,536 per loop. Each live process costs a fiber stack, and a stack is two memory mappings, so more than about 32,000 per process needs `vm.max_map_count` raised on Linux. |
 | Process-generation counter (`pid.gen`) | 2^64 (`uint64_t`) | Bumped each time a slot is reused, so a stale pid to an exited process is recognized as stale rather than aliasing a new one. Does not wrap (1.x's 32 bits wrapped after 4 billion reuses of one slot: 72 minutes at a million spawns a second). |
 | Per-loop run-queue depth (`XTC_DEQUE_CAP`) | 256 (power of two) | The work-stealing deque of *immediately runnable* fibers. Not a cap on total fibers -- parked fibers are not in it. 256 is generous; a backend-shaped workload typically has under 128 in flight. |

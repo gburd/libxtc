@@ -321,6 +321,52 @@ __xtc_inbox_drain(xtc_loop_t *loop)
 
 /* --- lifecycle ------------------------------------------------------ */
 
+/*
+ * Process-wide loop ids (2.2).  One word: live loops in the high half,
+ * the last id handed out in the low half.  An id is never handed out
+ * twice, so a pid of a finalized loop resolves to nothing rather than to
+ * a later loop.  Ids run 1..0xFFFFFFFE (0 is XTC_PID_NONE's, 0xFFFFFFFF
+ * XTC_TAIL_LOOP_NONE); after 4,294,967,294 loop inits xtc_loop_init
+ * fails with XTC_E_RESOURCE instead of wrapping.
+ *
+ * DST: the sim backend restarts the ids at 1 when a loop is created and
+ * none is alive, so the pids of a sim run are a function of its seed
+ * whatever ran before it in the process (the replay checks fold pids).
+ * No loop is alive, so no pid of an earlier loop can still reach a
+ * loop; a test that kept one across runs could alias, sim only.
+ */
+static _Atomic uint64_t __loop_ids;
+
+void __xtc_io_set_tail_loop_id(xtc_io_t *io, uint32_t id); /* io_int.h */
+
+static int
+__xtc_loop_id_take(uint32_t *out)
+{
+	uint64_t o, n;
+	uint32_t last;
+	o = atomic_load_explicit(&__loop_ids, memory_order_relaxed);
+	do {
+		last = (uint32_t)o;
+#if defined(XTC_IO_BACKEND_SIM)
+		if ((o >> 32) == 0)
+			last = 0;
+#endif
+		if (last >= UINT32_MAX - 1u)
+			return XTC_E_RESOURCE;
+		n = (((o >> 32) + 1) << 32) | (uint64_t)(last + 1u);
+	} while (!atomic_compare_exchange_weak_explicit(&__loop_ids, &o, n,
+	    memory_order_relaxed, memory_order_relaxed));
+	*out = last + 1u;
+	return XTC_OK;
+}
+
+static void
+__xtc_loop_id_put(void)
+{
+	(void)atomic_fetch_sub_explicit(&__loop_ids, (uint64_t)1 << 32,
+	    memory_order_relaxed);
+}
+
 /* PUBLIC: int xtc_loop_init __P((xtc_loop_t **)); */
 int
 xtc_loop_init(xtc_loop_t **out)
@@ -331,6 +377,10 @@ xtc_loop_init(xtc_loop_t **out)
 	if (out == NULL) return XTC_E_INVAL;
 	if ((rc = __os_calloc(1, sizeof(*loop), (void **)&loop)) != XTC_OK)
 		return rc;
+	if ((rc = __xtc_loop_id_take(&loop->id)) != XTC_OK) {
+		__os_free(loop);
+		return rc;
+	}
 
 	if ((rc = xtc_io_init(&loop->io)) != XTC_OK)        goto fail0;
 	xtc_deque_init(&loop->deque);
@@ -354,13 +404,16 @@ xtc_loop_init(xtc_loop_t **out)
 	atomic_store_explicit(&loop->stop_requested, 0, memory_order_relaxed);
 	loop->exec_id = -1;
 	loop->exec = NULL;
+	__xtc_io_set_tail_loop_id(loop->io, loop->id);
 
 	*out = loop;
 	return XTC_OK;
 
 fail2:	__xtc_inbox_fini(&loop->inbox);
 fail1:	(void)xtc_io_fini(loop->io);
-fail0:	__os_free(loop);
+fail0:
+	__xtc_loop_id_put();
+	__os_free(loop);
 	return rc;
 }
 
@@ -449,6 +502,7 @@ xtc_loop_fini(xtc_loop_t *loop)
 	(void)xtc_io_fini(loop->io);
 	if (loop->owns_res) __os_free(loop->res);
 	__os_free(loop);
+	__xtc_loop_id_put();
 	return XTC_OK;
 }
 
@@ -967,10 +1021,10 @@ __xtc_loop_step(xtc_loop_t *loop)
 		}
 		atomic_store_explicit(&t->state, XTC_TS_RUNNING,
 		    memory_order_release);
-		XTC_PROBE_TASK_RUN_START((uintptr_t)t, loop->exec_id,
+		XTC_PROBE_TASK_RUN_START((uintptr_t)t, (int)loop->id,
 		    t->sched_class);
 		verdict = t->fn(t, t->user);
-		XTC_PROBE_TASK_RUN_DONE((uintptr_t)t, loop->exec_id, verdict);
+		XTC_PROBE_TASK_RUN_DONE((uintptr_t)t, (int)loop->id, verdict);
 		/*
 		 * L1 + L3 run-end time accounting.  Read the clock ONCE at the
 		 * verdict boundary and use it for both the proportional-share
@@ -1307,7 +1361,7 @@ __xtc_loop_step(xtc_loop_t *loop)
 	if (timeout_ns != 0)
 		__xtc_inbox_sleep_end(loop);
 	if (rc != XTC_OK) return rc;
-	XTC_PROBE_LOOP_POLL(loop->exec_id, timeout_ns, n_out);
+	XTC_PROBE_LOOP_POLL((int)loop->id, timeout_ns, n_out);
 
 	/*
 	 * xtc_tail SCHED: this loop completed an IDLE poll on its OWN ring
@@ -1339,8 +1393,7 @@ __xtc_loop_step(xtc_loop_t *loop)
 	if (n_out == 0 && __xtc_tail_on(XTC_TAIL_SCHED)) {
 		xtc_pid_t lp;
 		memset(&lp, 0, sizeof lp);
-		lp.loop_id = (uint32_t)(loop->exec_id >= 0 ? (unsigned)loop->exec_id :
-		    XTC_TAIL_LOOP_NONE);
+		lp.loop_id = loop->id;
 		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_LOOP_POLL, lp, 0);
 	}
 

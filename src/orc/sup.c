@@ -282,9 +282,9 @@ __handle_add_child(struct xtc_supervisor *sup, const struct add_child_msg *a)
  * cleanup finished -- the proc clears `alive` BEFORE running its exit
  * hooks -- so neither may gate a respawn.  Same test
  * xtc_arena_group_discard uses for the same reason.  Looked up in the
- * child's OWNER loop only: PIDs are executor-relative, and a global
- * (xtc_proc_info) scan matched an unrelated standalone loop's equal pid,
- * so a group restart waited out XTC_SUP_CLEANUP_WAIT_NS and stopped.
+ * child's OWNER loop only: through 2.1 PIDs were executor-relative, and a
+ * global (xtc_proc_info) scan matched an unrelated standalone loop's equal
+ * pid, so a group restart waited out XTC_SUP_CLEANUP_WAIT_NS and stopped.
  */
 static int
 __child_gone(xtc_loop_t *owner, xtc_pid_t pid)
@@ -741,8 +741,8 @@ xtc_sup_add_child(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
 		return XTC_E_INVAL;     /* must run inside a proc (awaits reply) */
 
 	a.kind = 'A';
-	/* Record (pid, owner): a pid-only reply from the supervisor's loop
-	 * would resolve loop_id 0 to ITS loop, not ours. */
+	/* Record (pid, owner): through 2.1 a pid-only reply from the
+	 * supervisor's loop resolved loop_id 0 to ITS loop, not ours. */
 	a.reply_loop = __xtc_proc_self_loop(&a.reply);
 	a.tag = atomic_fetch_add_explicit(&tagctr, 1, memory_order_relaxed) + 1;
 	if (__xtc_send_on(sup->loop, __sup_pid_load(sup), &a, sizeof a)

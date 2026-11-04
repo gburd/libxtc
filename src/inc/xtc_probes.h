@@ -39,7 +39,8 @@
 #include "xtc_int.h"	/* xtc_config.h: XTC_HAVE_DTRACE / XTC_PROBES_SDT */
 
 /* A libxtc pid is TWO probe arguments (2.0: the pid is 16 bytes):
- * id = loop_id << 32 | local_id, then gen.  0, 0 is XTC_PID_NONE. */
+ * id = loop_id << 32 | local_id, then gen.  0, 0 is XTC_PID_NONE.  A
+ * `loop` argument is the same process-wide loop id (2.2). */
 #define XTC_PROBE_PID_ID(p)						\
 	(((uint64_t)(p).loop_id << 32) | (uint64_t)(p).local_id)
 #define XTC_PROBE_PID_GEN(p)	((uint64_t)(p).gen)

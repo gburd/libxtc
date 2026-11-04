@@ -588,11 +588,11 @@ xtc_waker_wake(const xtc_waker_t *w)
 		 * exchange the next time it parks. */
 		if (__task_wake_claim(w->task)) {
 			XTC_PROBE_FIBER_WAKE((uintptr_t)w->task,
-			    w->loop->exec_id, XTC_PROBE_WAKE_LOCAL);
+			    (int)w->loop->id, XTC_PROBE_WAKE_LOCAL);
 			rc = __xtc_loop_enqueue(w->loop, w->task);
 		} else {
 			XTC_PROBE_FIBER_WAKE((uintptr_t)w->task,
-			    w->loop->exec_id, XTC_PROBE_WAKE_UNPARKED);
+			    (int)w->loop->id, XTC_PROBE_WAKE_UNPARKED);
 		}
 		__xtc_unsafe_leave();
 		return rc;
@@ -615,11 +615,11 @@ xtc_waker_wake(const xtc_waker_t *w)
 		xtc_loop_t *loop = w->loop;
 		xtc_task_t *task = w->task;
 		if (__task_wake_claim(task)) {
-			XTC_PROBE_FIBER_WAKE((uintptr_t)task, loop->exec_id,
+			XTC_PROBE_FIBER_WAKE((uintptr_t)task, (int)loop->id,
 			    XTC_PROBE_WAKE_REMOTE);
 			return __xtc_inbox_push(loop, XTC_INB_WAKE, task);
 		}
-		XTC_PROBE_FIBER_WAKE((uintptr_t)task, loop->exec_id,
+		XTC_PROBE_FIBER_WAKE((uintptr_t)task, (int)loop->id,
 		    XTC_PROBE_WAKE_UNPARKED);
 		return XTC_OK;
 	}
@@ -784,7 +784,7 @@ __xtc_loop_dispatch_event(xtc_loop_t *loop, xtc_io_event_t *ev)
 		return XTC_OK;
 
 	t = (xtc_task_t *)ev->tag;
-	XTC_PROBE_IO_DISPATCH(loop->exec_id, ev->fd, ev->flags, (uintptr_t)t);
+	XTC_PROBE_IO_DISPATCH((int)loop->id, ev->fd, ev->flags, (uintptr_t)t);
 	/* Record the io flags so the parker knows what fired. */
 	atomic_fetch_or_explicit(&t->wake_revents, ev->flags,
 	    memory_order_relaxed);
@@ -856,7 +856,7 @@ __xtc_loop_dispatch_event(xtc_loop_t *loop, xtc_io_event_t *ev)
 	if (__xtc_tail_on(XTC_TAIL_SCHED)) {
 		xtc_pid_t lp;
 		memset(&lp, 0, sizeof lp);
-		lp.loop_id = (uint32_t)(loop->exec_id >= 0 ? loop->exec_id : 0);
+		lp.loop_id = loop->id;
 		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_WAKE, lp,
 		    (uint64_t)(uintptr_t)t);
 	}

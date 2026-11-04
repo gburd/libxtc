@@ -403,13 +403,15 @@ xtc_mctx_total_chunks(const xtc_mctx_t *m)
  */
 
 /*
- * A member is (pid, owner loop), never a bare pid.  A pid is executor-
- * relative: every standalone loop encodes loop_id 0 (and two execs reuse
- * 1..n), so equal pids on different loops are routine.  A bare pid made
- * the group dedup two real members into one, call a reaped member alive
- * because an unrelated equal-pid proc was in another table, and -- worst
- * -- deliver discard's kill to an unrelated proc on the discarder's own
- * loop while the real member lived on.  The owner is the loop whose table
+ * A member is (pid, owner loop), never a bare pid.  Through 2.1 a pid was
+ * executor-relative: every standalone loop encoded loop_id 0 (and two
+ * execs reused 1..n), so equal pids on different loops were routine, and
+ * a bare pid made the group dedup two real members into one, call a reaped
+ * member alive because an unrelated equal-pid proc was in another table,
+ * and -- worst -- deliver discard's kill to an unrelated proc on the
+ * discarder's own loop while the real member lived on.  Since 2.2 a pid is
+ * exact; the owner still makes each check one table probe, with no walk
+ * of the registry.  The owner is the loop whose table
  * holds the member's slot (its spawn loop; migration does not change it),
  * read on the member's own fiber at add.  LIFETIME: an owner loop must
  * not be finalized while the group still lists its members (until the

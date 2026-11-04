@@ -358,14 +358,21 @@ test_arena_group_join_during_discard(const MunitParameter p[], void *d)
 }
 
 /*
- * Arena-group member identity must be OWNER-QUALIFIED.  A pid is only
- * executor-relative: every standalone loop encodes loop_id 0, so procs
- * on two standalone loops routinely carry EQUAL pids.  The group used to
+ * Arena-group member identity must be OWNER-QUALIFIED.  Through 2.1 a pid
+ * was executor-relative: every standalone loop encoded loop_id 0, so procs
+ * on two standalone loops routinely carried EQUAL pids.  The group used to
  * keep bare pids and ask the global, pid-only questions (xtc_proc_info,
- * xtc_exit_pid_deadline, pid equality), which mix the two procs up.
+ * xtc_exit_pid_deadline, pid equality), which mixed the two procs up.
  * These three cases each failed before the group recorded the member's
- * owner loop at xtc_arena_group_add.
+ * owner loop at xtc_arena_group_add.  Since 2.2 the two pids differ in
+ * loop_id only (same_slot); the cases still hold that slot collision.
  */
+static int
+same_slot(xtc_pid_t a, xtc_pid_t b)
+{
+	return a.local_id == b.local_id && a.gen == b.gen &&
+	    a.loop_id != b.loop_id;
+}
 static void ag_join_proc(void *arg)
 {
 	munit_assert_int(xtc_arena_group_add(arg), ==, XTC_OK);
@@ -373,7 +380,7 @@ static void ag_join_proc(void *arg)
 static void ag_noop_proc(void *arg) { (void)arg; }
 
 /* A reaped member is gone even though an UNRELATED proc on another
- * standalone loop, with an equal pid, is still in its table.  Before the
+ * standalone loop, in the same slot, is still in its table.  Before the
  * fix the global xtc_proc_info scan found the unrelated proc and
  * discard reported all_gone=0. */
 static MunitResult
@@ -392,7 +399,7 @@ test_arena_group_reaped_vs_equal_pid(const MunitParameter p[], void *d)
 	    XTC_OK);
 	munit_assert_int(xtc_proc_spawn(b, ag_noop_proc, NULL, NULL, &pb), ==,
 	    XTC_OK);
-	munit_assert_true(xtc_pid_eq(pa, pb));       /* the precondition */
+	munit_assert_true(same_slot(pa, pb));           /* the precondition */
 	munit_assert_int(xtc_loop_run(a), ==, XTC_OK);  /* member reaped */
 	munit_assert_int(xtc_arena_group_size(g), ==, 1);
 	munit_assert_int(xtc_arena_group_discard(g, 1, 0, &gone), ==, XTC_OK);
@@ -424,7 +431,7 @@ test_arena_group_add_equal_pid_other_loop(const MunitParameter p[], void *d)
 	    XTC_OK);
 	munit_assert_int(xtc_proc_spawn(b, ag_join_proc, g, NULL, &pb), ==,
 	    XTC_OK);
-	munit_assert_true(xtc_pid_eq(pa, pb));
+	munit_assert_true(same_slot(pa, pb));
 	munit_assert_int(xtc_loop_run(a), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(b), ==, XTC_OK);
 	munit_assert_int(xtc_arena_group_size(g), ==, 2);
@@ -505,7 +512,7 @@ test_arena_group_kill_targets_owner(const MunitParameter p[], void *d)
 	    ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(b, kg_bystander_proc, NULL, NULL,
 	    &pu), ==, XTC_OK);
-	munit_assert_true(xtc_pid_eq(pm, pu));
+	munit_assert_true(same_slot(pm, pu));
 	munit_assert_int(xtc_proc_spawn(b, kg_discarder_proc, NULL, NULL,
 	    &pd), ==, XTC_OK);
 	munit_assert_int(pthread_create(&th, NULL, kg_loop_thread, a), ==, 0);

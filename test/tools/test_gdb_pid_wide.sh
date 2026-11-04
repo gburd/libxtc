@@ -8,10 +8,11 @@
 #	the old 16-bit ceiling of 65,536) with the tail ring on, then stops
 #	itself.  gdb attaches and runs xtc-procs and xtc-tail-dump; then
 #	tools/xtc-tail.py reads the dump.  Required:
-#	  - xtc-procs lists the pid 0.69999.1 (the walk covers the grown
-#	    table and _pid_str prints the wide slot);
+#	  - xtc-procs lists the last proc's pid, L.69999.1 (the walk covers
+#	    the grown table and _pid_str prints the wide slot; L is the
+#	    loop's id, 1 for the program's only loop, printed by the program);
 #	  - the dump is an XTCL version 3 trace (the 16-byte pid), and
-#	    xtc-tail.py shows SPAWN for 0.69999.1.
+#	    xtc-tail.py shows SPAWN for L.69999.1.
 #	lldb's xtc-procs must list the same pid and count (it listed NO proc
 #	at all before 2.0: lldb cannot Dereference an _Atomic(T *), and the
 #	loop registry's fields are _Atomic).
@@ -161,6 +162,9 @@ main(void)
 			fprintf(stderr, "spawn %d failed\n", i);
 			return 3;
 		}
+	printf("pid %u.%u.%llu\n", (unsigned)pid.loop_id,
+	    (unsigned)pid.local_id, (unsigned long long)pid.gen);
+	fflush(stdout);
 	(void)raise(SIGSTOP);
 	return 0;
 }
@@ -199,23 +203,31 @@ if [ "$st" != "T" ]; then
 	echo "  [pid-wide] FAIL: probe never stopped: $(cat "$TMPD/prog.out")"
 	exit 1
 fi
+# The last pid, as the program minted it; its slot must be 69999.
+LAST=$(sed -n 's/^pid //p' "$TMPD/prog.out")
+case "$LAST" in
+*.69999.1) ;;
+*)	echo "  [pid-wide] FAIL: probe's last pid is '$LAST', not L.69999.1"
+	exit 1 ;;
+esac
+LAST_RE=$(printf '%s' "$LAST" | sed 's/\./\\./g')
 
 gdb -q -p "$PROG_PID" -batch \
     -ex "source $GDBPY" \
     -ex "xtc-procs" \
     -ex "xtc-tail-dump $TMPD/live.xtcl" > "$TMPD/gdb.out" 2>&1 || true
 
-grep -q " 0\.69999\.1 " "$TMPD/gdb.out" ||
-    { echo "  [pid-wide] FAIL: xtc-procs did not list 0.69999.1"; fail=1; }
+grep -q " $LAST_RE " "$TMPD/gdb.out" ||
+    { echo "  [pid-wide] FAIL: xtc-procs did not list $LAST"; fail=1; }
 grep -q "^(70000 procs)" "$TMPD/gdb.out" ||
     { echo "  [pid-wide] FAIL: xtc-procs did not count 70000 procs"; fail=1; }
 if [ -f "$TMPD/live.xtcl" ]; then
 	ver=$(od -An -tu4 -j4 -N4 "$TMPD/live.xtcl" | tr -d ' ')
 	[ "$ver" = "3" ] ||
 	    { echo "  [pid-wide] FAIL: xtc-tail-dump wrote version $ver"; fail=1; }
-	"$PY" "$VIEWER" "$TMPD/live.xtcl" --pid 0.69999.1 > "$TMPD/view.out" 2>&1
-	grep -q "SPAWN.*pid=0.69999.1" "$TMPD/view.out" ||
-	    { echo "  [pid-wide] FAIL: no SPAWN for 0.69999.1 in the dump"; fail=1; }
+	"$PY" "$VIEWER" "$TMPD/live.xtcl" --pid "$LAST" > "$TMPD/view.out" 2>&1
+	grep -q "SPAWN.*pid=$LAST_RE" "$TMPD/view.out" ||
+	    { echo "  [pid-wide] FAIL: no SPAWN for $LAST in the dump"; fail=1; }
 else
 	echo "  [pid-wide] FAIL: xtc-tail-dump wrote nothing"; fail=1
 fi
@@ -239,8 +251,8 @@ if grep -q "attach failed\|error: attach" "$TMPD/lldb.out"; then
 	echo "  [pid-wide] SKIP (lldb part): lldb could not attach"
 	exit 0
 fi
-grep -q " 0\.69999\.1 " "$TMPD/lldb.out" ||
-    { echo "  [pid-wide] FAIL: lldb xtc-procs did not list 0.69999.1"; fail=1; }
+grep -q " $LAST_RE " "$TMPD/lldb.out" ||
+    { echo "  [pid-wide] FAIL: lldb xtc-procs did not list $LAST"; fail=1; }
 grep -q "^(70000 procs)" "$TMPD/lldb.out" ||
     { echo "  [pid-wide] FAIL: lldb xtc-procs did not count 70000 procs"; fail=1; }
 if [ "$fail" -ne 0 ]; then

@@ -2097,9 +2097,10 @@ ku_checker_proc(void *arg)
 	bogus = g_ku_victim;
 	bogus.local_id = 60000;
 	atomic_store(&g_ku_cap_rc, xtc_exit_pid_deadline(bogus, 9, 0, NULL));
-	/* Never issued: a loop that does not exist. */
+	/* Never issued: a loop id no loop has (ids count up from 1 per
+	 * process, so a small constant can name a live loop). */
 	bogus = g_ku_victim;
-	bogus.loop_id = 77;
+	bogus.loop_id = UINT32_MAX;
 	atomic_store(&g_ku_loop_rc, xtc_exit_pid_deadline(bogus, 9, 0, NULL));
 
 	/* Dying: body returned, at-exit hook parked, pid still in table. */

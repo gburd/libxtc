@@ -106,7 +106,7 @@ inbox_harness      --unwind 4
 parktimer_harness  --unwind 3
 timeout_harness    --unwind 3
 combinator_harness --unwind 3
-ltreg_harness      --unwind 5
+ltreg_harness      --unwind 5 --object-bits 10
 tntring_harness    --unwind 4
 '
 

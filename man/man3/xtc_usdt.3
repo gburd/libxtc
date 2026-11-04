@@ -176,9 +176,13 @@ and the run probes.
 Key D variables on it rather than on the thread: a migratable fiber can
 park on one OS thread and resume on another.
 .It Fa loop
-The executor loop index, or \-1 for a loop that is not part of an
+The loop's process-wide id: the
+.Fa loop_id
+of the pids it mints, for a standalone loop and an
 .Xr xtc_exec 3
-executor.
+loop alike.
+Through libxtc 2.1 it was the executor loop index, or \-1 for a
+standalone loop.
 .El
 .Pp
 No probe argument reads a clock.

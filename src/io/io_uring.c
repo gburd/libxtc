@@ -343,8 +343,7 @@ __submit_note(xtc_io_t *io, int rc, unsigned queued)
 	    (rc < 0 || (unsigned)rc < queued)) {
 		xtc_pid_t lp;
 		memset(&lp, 0, sizeof lp);
-		lp.loop_id = (uint32_t)(io->tail_loop_id >= 0 ?
-		    (unsigned)io->tail_loop_id : XTC_TAIL_LOOP_NONE);
+		lp.loop_id = io->tail_loop_id;
 		/*
 		 * detail: the negated errno for an error, or -- for a short
 		 * submit, which has no errno -- the count left behind, offset
@@ -525,8 +524,7 @@ __submit_poll_add(xtc_io_t *io, struct __xtc_uring_fd *uf)
 	if (__xtc_tail_on(XTC_TAIL_SCHED)) {
 		xtc_pid_t lp;
 		memset(&lp, 0, sizeof lp);
-		lp.loop_id = (uint32_t)(io->tail_loop_id >= 0 ?
-		    (unsigned)io->tail_loop_id : XTC_TAIL_LOOP_NONE);
+		lp.loop_id = io->tail_loop_id;
 		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_SUBMIT, lp,
 		    uf->is_wakeup ? 0 : (uint64_t)(uintptr_t)uf->tag);
 	}
@@ -1005,7 +1003,7 @@ __xtc_io_backend_init(xtc_io_t *io)
 	io->cap_pending_del = 0;
 	atomic_store_explicit(&io->has_pending_del, 0, memory_order_relaxed);
 	atomic_store_explicit(&io->owner_set, 0, memory_order_relaxed);
-	io->tail_loop_id = -1;   /* label only; the owning loop publishes it */
+	io->tail_loop_id = XTC_TAIL_LOOP_NONE; /* label; the loop sets it */
 	if (pthread_mutex_init(&io->del_lock, NULL) != 0) {
 		io_uring_queue_exit(&io->ring);
 		return XTC_E_INTERNAL;
@@ -1418,8 +1416,7 @@ __aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	if (__xtc_tail_on(XTC_TAIL_SCHED)) {
 		xtc_pid_t lp;
 		memset(&lp, 0, sizeof lp);
-		lp.loop_id = (uint32_t)(io->tail_loop_id >= 0 ?
-		    (unsigned)io->tail_loop_id : XTC_TAIL_LOOP_NONE);
+		lp.loop_id = io->tail_loop_id;
 		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_SUBMIT, lp,
 		    (uint64_t)(uintptr_t)a->tag);
 	}
@@ -1726,8 +1723,7 @@ __tail_reap(xtc_io_t *io, void *tag)
 	if (!__xtc_tail_on(XTC_TAIL_SCHED))
 		return;
 	memset(&lp, 0, sizeof lp);
-	lp.loop_id = (uint32_t)(io->tail_loop_id >= 0 ?
-	    (unsigned)io->tail_loop_id : XTC_TAIL_LOOP_NONE);
+	lp.loop_id = io->tail_loop_id;
 	__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_REAP, lp,
 	    (uint64_t)(uintptr_t)tag);
 }
@@ -1972,8 +1968,7 @@ __poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 	if (got >= max && __xtc_tail_on(XTC_TAIL_SCHED)) {
 		xtc_pid_t lp;
 		memset(&lp, 0, sizeof lp);
-		lp.loop_id = (uint32_t)(io->tail_loop_id >= 0 ?
-		    (unsigned)io->tail_loop_id : XTC_TAIL_LOOP_NONE);
+		lp.loop_id = io->tail_loop_id;
 		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_POLL_FULL, lp,
 		    (uint64_t)max);
 	}

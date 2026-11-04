@@ -146,7 +146,7 @@ PostgreSQL backend per loop) can rely on it.
 .Vt xtc_pid_t
 is 16 bytes: a 32-bit
 .Fa loop_id
-(0 for a standalone loop, else the executor slot + 1),
+(the loop's process-wide id),
 a 32-bit
 .Fa local_id
 (the process's slot on that loop) and a 64-bit
@@ -155,6 +155,15 @@ a 32-bit
 A slot is reused after its process exits, with the next generation, so
 a pid kept after its process exits never names the new occupant (the
 generation does not wrap).
+Every loop, standalone or in an executor, takes the next loop id from 1
+when it is created, and an id is never reused in the process, so a pid
+names one process from any loop of any executor, and once its loop is
+finalized it names none: a send to it fails as for any dead pid.
+Through libxtc 2.1
+.Fa loop_id
+was the executor slot + 1 (0 for a standalone loop), which two executors,
+or two standalone loops, shared; a send between them could reach the
+process in the same slot of the sender's executor.
 Compare pids with
 .Fn xtc_pid_eq .
 A loop holds as many live processes as memory and its

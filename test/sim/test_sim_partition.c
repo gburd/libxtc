@@ -141,7 +141,7 @@ run_once(uint64_t seed, int partition, int *out_arrived, long *out_hash,
 	/*
 	 * Per-loop expected arrival count.  A receiver on loop j expects a
 	 * message from every OTHER loop i whose edge (i -> j) is not cut.
-	 * loop_id in the partition matrix is exec_id + 1.
+	 * loop_id in the partition matrix is exec slot + 1 (not pid.loop_id).
 	 */
 	for (j = 0; j < N_LOOPS; j++) {
 		int expect = 0;

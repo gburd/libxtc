@@ -100,7 +100,7 @@
  * message ever crosses, so every "partition" seed silently ran an
  * UNPARTITIONED workload.  Cut a neighbour edge instead.
  *
- * partition_set is keyed by pid.loop_id == loop index + 1, hence the +1.
+ * partition_set is keyed by loop index + 1, hence the +1.
  * PAIR_IS_CUT(i) names the pairs the cut severs -- pong on CUT_LOOP_A,
  * ping on CUT_LOOP_B.  With N_LOOPS == 4 that is i in {0, 4, 8}: THREE
  * pairs, and the reaper can kill at most ONE pong, so at least two cut
@@ -475,7 +475,7 @@ run_once(uint64_t seed, const struct scenario *sc, uint64_t *out_state,
 	/* Seeded scenario knobs, installed before the run advances. */
 	if (sc->partition) {
 		/* Cut a NEIGHBOUR edge -- the only kind this workload's pinned
-		 * ping/pong pairs actually send across.  loop_id == index + 1. */
+		 * ping/pong pairs actually send across.  Keyed by index + 1. */
 		xtc_sim_partition_set(CUT_LOOP_A + 1, CUT_LOOP_B + 1, 1);
 		xtc_sim_partition_set(CUT_LOOP_B + 1, CUT_LOOP_A + 1, 1);
 	}
