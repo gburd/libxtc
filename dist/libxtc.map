@@ -49,9 +49,10 @@
  * POLICY for later releases (docs/abi-stability.md "Symbol versions"):
  *   - A MINOR release N that ADDS functions lists them by name in a new
  *     node `XTC_2.N { global: xtc_new_a; xtc_new_b; } XTC_2.(N-1);`
- *     placed ABOVE the XTC_2.0 node (an explicit name binds before a
- *     glob), so they carry @@XTC_2.N and a consumer that uses them
- *     cannot load against a 2.(N-1) library.
+ *     placed AFTER the node it inherits from (GNU ld needs the
+ *     dependency defined first; an explicit name still binds before
+ *     the xtc_* glob), so they carry @@XTC_2.N and a consumer that uses
+ *     them cannot load against a 2.(N-1) library.
  *   - Symbols are never moved out of the node they shipped in, and a
  *     node is never edited after its release.  A changed signature is a
  *     NEW function name (or a MAJOR).
@@ -69,3 +70,8 @@ XTC_2.0 {
 	local:
 		*;
 };
+
+XTC_2.2 {
+	global:
+		xtc_tnt_send_from;
+} XTC_2.0;

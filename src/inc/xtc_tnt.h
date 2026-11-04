@@ -265,8 +265,22 @@ typedef enum xtc_tnt_io_result {
 /* ---- Ambient ctx_* API (valid only during a handler) -------------- */
 
 /* Messaging.  tag must be >= XTC_TNT_USER_TAG_BASE.  Payload max 96 bytes.
- * Drop-on-full with sender feedback, matching Tina's .mailbox_full. */
+ * Drop-on-full with sender feedback, matching Tina's .mailbox_full.  A
+ * send to an Isolate on ANOTHER shard goes through a per-(source,
+ * destination) SPSC ring and reaches the mailbox on the destination's
+ * next tick; a full ring is reported as XTC_TNT_SEND_MAILBOX_FULL.  FIFO
+ * holds per (sender shard, receiver). */
 xtc_tnt_send_result_t xtc_tnt_send(xtc_tnt_handle_t to, uint16_t tag,
+                           const void *payload, size_t payload_size);
+
+/* Send from OUTSIDE any handler (a proc, a plain thread): thread-safe.
+ * `source` is what the receiver sees as msg->body.user.source.  The
+ * message goes into the target shard's external ring and reaches the
+ * mailbox on the target's next tick; a full ring drops it with
+ * XTC_TNT_SEND_MAILBOX_FULL.  Valid only while the system is running
+ * (between xtc_tnt_start and its return). */
+xtc_tnt_send_result_t xtc_tnt_send_from(xtc_tnt_handle_t source,
+                           xtc_tnt_handle_t to, uint16_t tag,
                            const void *payload, size_t payload_size);
 
 /* Spawn a new Isolate of type_id on the CURRENT shard.  The child's

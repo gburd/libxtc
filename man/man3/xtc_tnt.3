@@ -9,6 +9,7 @@
 .Nm xtc_tnt_spawn_on ,
 .Nm xtc_tnt_spawn ,
 .Nm xtc_tnt_send ,
+.Nm xtc_tnt_send_from ,
 .Nm xtc_tnt_submit_recv ,
 .Nm xtc_tnt_io_send ,
 .Nm xtc_tnt_io_send_owned ,
@@ -32,6 +33,8 @@
 .Fn xtc_tnt_spawn "uint8_t type_id" "const void *args" "size_t args_size" "xtc_tnt_handle_t *out_handle"
 .Ft xtc_tnt_send_result_t
 .Fn xtc_tnt_send "xtc_tnt_handle_t to" "uint16_t tag" "const void *payload" "size_t payload_size"
+.Ft xtc_tnt_send_result_t
+.Fn xtc_tnt_send_from "xtc_tnt_handle_t source" "xtc_tnt_handle_t to" "uint16_t tag" "const void *payload" "size_t payload_size"
 .Ft xtc_tnt_io_result_t
 .Fn xtc_tnt_submit_recv "int fd"
 .Ft xtc_tnt_io_result_t
@@ -130,6 +133,26 @@ bytes
 .Pc
 into the target's bounded mailbox; it never grows the mailbox or
 retries.
+A send to an Isolate on another shard is not written into that mailbox
+from the sender's thread: it goes through a single-producer,
+single-consumer ring per (source shard, destination shard), and the
+destination moves it into the mailbox at the top of its next tick.
+Order is kept per (sender shard, receiver), and a full ring is reported
+as
+.Dv XTC_TNT_SEND_MAILBOX_FULL .
+.Pp
+.Fn xtc_tnt_send_from
+is the same send from outside any handler
+.Po a proc, a listener, a plain thread
+.Pc ,
+with
+.Fa source
+the handle the receiver sees as the sender
+.Pq Dv XTC_TNT_HANDLE_NONE No for none .
+It is thread-safe, goes through the destination shard's external ring,
+and is valid only while the system runs.
+It was added in 2.2
+.Pq symbol version XTC_2.2 .
 .Fn xtc_tnt_submit_recv ,
 .Fn xtc_tnt_io_send ,
 and

@@ -236,8 +236,12 @@ elif ! readelf -V "$SO" >/dev/null 2>&1 || \
 	echo "  [C9] SKIP: not an ELF shared library (no symbol versions)"
 else
 	major=$(sed -e 's/^\([0-9]*\).*/\1/' "$XTC_SRC_DIR/dist/version.in")
-	node=$(sed -n 's/^\(XTC_[0-9][0-9.]*\)[[:space:]]*{.*/\1/p' \
-		"$XTC_SRC_DIR/dist/libxtc.map" | tail -1)
+	# The base node is the one that inherits from none (`XTC_x.y {` with
+	# no `} XTC_...;` parent); a later minor node names its parent.
+	node=$(awk '/^XTC_[0-9][0-9.]*[[:space:]]*{/ { n = $1; sub(/[[:space:]]*{.*/, "", n) }
+	    /^}[[:space:]]*;/ && n != "" { print n; n = "" }
+	    /^}[[:space:]]*XTC_/ { n = "" }' "$XTC_SRC_DIR/dist/libxtc.map" |
+	    head -1)
 	defs=$(readelf -V "$SO" | sed -n 's/.*Name: \(XTC_[0-9.]*\).*/\1/p' |
 		sort -u)
 	# every exported, defined dynamic symbol must have a version suffix

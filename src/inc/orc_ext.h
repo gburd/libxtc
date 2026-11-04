@@ -25,6 +25,7 @@ xtc_tnt_io_result_t xtc_tnt_io_send_owned __P((int, void *, size_t));
 xtc_tnt_io_result_t xtc_tnt_submit_close __P((int));
 xtc_tnt_io_result_t xtc_tnt_submit_recv __P((int));
 xtc_tnt_send_result_t xtc_tnt_send __P((xtc_tnt_handle_t, uint16_t, const void *, size_t));
+xtc_tnt_send_result_t xtc_tnt_send_from __P((xtc_tnt_handle_t, xtc_tnt_handle_t, uint16_t, const void *, size_t));
 xtc_tnt_spawn_error_t xtc_tnt_spawn __P((uint8_t, const void *, size_t, xtc_tnt_handle_t *));
 xtc_tnt_spawn_error_t xtc_tnt_spawn_on __P((uint8_t, uint8_t, const void *, size_t));
 

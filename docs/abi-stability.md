@@ -113,17 +113,19 @@ release commit.
 
 ## Symbol versions and the export set (ENFORCED)
 
-`dist/libxtc.map` is an ELF version script with one named node,
-`XTC_2.0`, covering every exported `xtc_*` symbol (`nm -D` shows
-`xtc_foo@@XTC_2.0`).  A consumer linked against 2.x records the node it
+`dist/libxtc.map` is an ELF version script whose base node, `XTC_2.0`,
+covers every exported `xtc_*` symbol (`nm -D` shows `xtc_foo@@XTC_2.0`),
+and whose later nodes name the functions each minor release added
+(`XTC_2.2`: `xtc_tnt_send_from`).  A consumer linked against 2.x records the node it
 needs, so the dynamic loader refuses a library that lacks it instead of
 failing at the first missing function.
 
 POLICY for later releases, written into the map's header:
 
 - A minor release 2.N that adds functions lists them BY NAME in a new
-  node `XTC_2.N { global: xtc_new_a; } XTC_2.(N-1);` placed above
-  `XTC_2.0` (an explicit name binds before the `xtc_*` glob).
+  node `XTC_2.N { global: xtc_new_a; } XTC_2.(N-1);` placed after the
+  node it inherits from (GNU ld needs the parent defined first; an
+  explicit name still binds before the `xtc_*` glob).
 - A symbol never moves out of the node it shipped in, and a released
   node is never edited.  A changed signature is a new name (or a major).
 - A major release starts over with one `XTC_<MAJOR>.0` node and a new

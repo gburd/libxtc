@@ -107,6 +107,7 @@ parktimer_harness  --unwind 3
 timeout_harness    --unwind 3
 combinator_harness --unwind 3
 ltreg_harness      --unwind 5
+tntring_harness    --unwind 4
 '
 
 # Checks every concurrent harness also runs.  --pointer-check cannot be

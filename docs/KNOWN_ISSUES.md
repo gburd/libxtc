@@ -6,6 +6,32 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## FIXED (2.2): a cross-shard xtc_tnt_send could lose messages
+
+**What it was.**  An `xtc_tnt_send` to an Isolate on another shard
+appended to that Isolate's mailbox from the sender's thread.  The
+mailbox is plain state owned by the target shard, so the append raced
+the target's own dispatch.  With two shards each flooding a sink on the
+other, 1552 of 400,000 messages vanished and the run never reached its
+end; ThreadSanitizer reported 11 races in `xtc_tnt_deliver` against
+`shard_tick`.  Every send also allocated its envelope.
+
+**Fix.**  A cross-shard message goes into a single-producer,
+single-consumer ring for its (source shard, destination shard) pair, and
+the destination moves it into the mailbox at the top of its own tick.
+Order is kept per (sender shard, receiver), a full ring is reported as
+`XTC_TNT_SEND_MAILBOX_FULL` like a full mailbox, and a busy destination
+costs its senders no system call (a sender writes the wake byte only to a
+shard that announced it is parking).  Envelopes are reused from a
+per-shard free list.  The new `xtc_tnt_send_from` (symbol version
+`XTC_2.2`) is the thread-safe send for code outside a handler.
+`test/tnt/test_tnt_xshard` accounts for every message (delivered plus
+reported dropped equals sent, per-pair FIFO): 2.1.1 times out with
+199,513 of 400,000 delivered and none reported dropped; fixed, it passes,
+and passes clean under TSan.  `test/cbmc/tntring_harness.c` proves the
+ring and its park handshake (no lost wake, FIFO, nothing lost or
+doubled) and fails on each of three planted bugs.
+
 ## FIXED (2.2): ThreadSanitizer aborted every proc exit on glibc 2.44
 
 **What it was.**  glibc 2.44 changed how `setjmp` mangles the saved
