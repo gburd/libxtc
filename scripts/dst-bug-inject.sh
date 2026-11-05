@@ -89,6 +89,7 @@ write_cases() {
 		"24;test_sim_scope;0;1;a recovery record ran twice or not at all" \
 		"25;test_sim_scope;0;1;a scope finalizer was skipped after a kill inside xtc_scope_close" \
 		"26;test_sim_sup_strategy;0;1;a fiber yielded holding an internal lock" \
+		"27;test_sim_sup_strategy;0;1;children outlived a killed supervisor" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -123,6 +124,7 @@ write_cases() {
 #               (test_sim_scope's close+kill workers: a kill lands in a parked finalizer)
 # 26 SUP_LOCKPARK sup.c sleeps holding an __xtc_mtx lock -> no park inside an internal lock
 #               (exec.c's sim step-boundary check of __xtc_unsafe_depth)
+# 27 SUP_NOHOOK   sup.c shutdown inline, not an at-exit hook -> a killed sup takes its children
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

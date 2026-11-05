@@ -186,6 +186,22 @@ Releases before 1.50 ignored the wait's result and freed the supervisor
 anyway, so a join that timed out returned
 .Dv XTC_OK
 and freed memory the still-running supervisor was using.
+.Pp
+The shutdown \(em kill every child, wait for its cleanup, then report
+the exit to
+.Fn xtc_sup_join
+and
+.Fn xtc_sup_alive
+\(em runs on every exit of the supervisor process: a stop, a
+restart-intensity give-up, an
+.Xr xtc_exit_pid 3
+of the supervisor itself, or a contained fault in it.
+Releases before 2.1.2 ran it only on the first two, so a killed
+supervisor left its children running unsupervised and
+.Fn xtc_sup_join
+returned
+.Er XTC_E_AGAIN
+forever.
 .Sh SEE ALSO
 .Xr xtc_app 3 ,
 .Xr xtc_proc 3 ,
