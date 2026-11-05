@@ -31,6 +31,7 @@
 #include <unistd.h>
 #include <sys/time.h>
 #include <aio.h>
+#include <pthread.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -51,6 +52,19 @@ extern int __xtc_io_drain_wakeup(xtc_io_t *io);
  * xtc_io_aio_submit returns XTC_E_NOSYS and xtc_aio falls back to the
  * blocking pool -- the offload path stays the proven default.
  */
+/*
+ * illumos libc's POSIX AIO is not safe for concurrent submission from
+ * several threads: with eight threads posting aio_write/aio_fsync on one
+ * file, aio_fsync fails at random with errno 0 and libc aborts with
+ * "_aio_do_request(): AIOFSYNC: request already in hash table" (OmniOS
+ * r151058; a plain-libc reproducer without libxtc fails 10 of 10 runs,
+ * and passes 10 of 10 with the submissions serialized).  A multi-loop
+ * xtc_exec submits from every loop thread, so test_aio_migrate_wake
+ * aborted.  Submissions take one process-wide lock; completions are
+ * reaped without it (the reproducer's single reaper needs none).
+ */
+static pthread_mutex_t sol_aio_submit_lock = PTHREAD_MUTEX_INITIALIZER;
+
 struct sol_aio {
 	struct aiocb   cb;
 	port_notify_t  pn;
@@ -79,6 +93,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	s->cb.aio_reqprio = 0;
 	s->cb.aio_sigevent.sigev_notify = SIGEV_PORT;
 	s->cb.aio_sigevent.sigev_value.sival_ptr = &s->pn;
+	(void)pthread_mutex_lock(&sol_aio_submit_lock);
 	switch (a->op) {
 	case XTC_AIO_PREAD:
 		s->cb.aio_buf = a->buf;
@@ -102,6 +117,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 		rc = -1;
 		break;
 	}
+	(void)pthread_mutex_unlock(&sol_aio_submit_lock);
 	if (rc != 0) {
 		__os_free(s);
 		return XTC_E_NOSYS;   /* AIO unavailable: offload instead */
