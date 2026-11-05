@@ -12,7 +12,7 @@
 %global sover 2
 
 Name:           libxtc
-Version:        2.1.1
+Version:        2.1.2
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,17 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Thu Nov 05 2026 Greg Burd <greg@burd.me> - 2.1.2-1
+  Memory safety and data loss: a stale readiness event no longer
+  steals a newer park of the fd; a combinator whose callback cannot be
+  registered still resolves; fault recovery, scope finalizers,
+  supervisor shutdown and xtc_launch no longer double-run, deadlock,
+  leak children or eat mail; the AIO reapers no longer touch a released
+  request and xtc_loop_fini no longer frees memory an in-flight AIO
+  still targets; libxtc.so no longer asks for an executable stack.
+  sqlxtc: recovery and checkpoint errors refuse or fail-stop instead of
+  losing rows.
+
 * Thu Oct 29 2026 Greg Burd <greg@burd.me> - 2.1.1-1
 - PATCH on 2.1: fixes only, ABI-compatible with 2.0.0 and 2.1.0.  Under
   ThreadSanitizer on glibc 2.44 (x86-64) a proc exit or kill no longer

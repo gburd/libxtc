@@ -1,3 +1,43 @@
+libxtc (2.1.2-1) unstable; urgency=medium
+
+  * PATCH release on the 2.1 LTS line: fixes only.  ABI-compatible with
+    2.0.0, 2.1.0 and 2.1.1 (abidiff against 2.1.1: no change; the same
+    762 exported symbols; SONAME libxtc.so.2).
+  * Memory safety:
+    - A stale readiness event (an fd closed and its number reused, or a
+      fiber that re-parked the same fd on another loop) no longer claims
+      a newer park: a park is a token, fd plus generation, and the
+      dispatch claims it by compare-and-swap only if both still match.
+    - A kill that lands while a fault-recovery record runs no longer
+      re-runs the records (a double free); scope finalizers run masked
+      and once each.
+    - The AIO reapers copy the request's tag before publishing it done
+      and never touch the request again (a migrated fiber could reuse
+      it); xtc_loop_fini waits for in-flight file AIO, on every
+      io_uring ring type, before it frees any task or stack, and
+      cancels what is still pending after 5 s.
+    - libxtc.so no longer asks for an executable stack: every assembly
+      file emits .note.GNU-stack.
+  * Supervision:
+    - A killed supervisor takes its children with it (cleanup runs as an
+      at-exit hook); a supervisor never holds its lock across the group
+      restart wait (xtc_sup_n_alive could hang).
+    - xtc_sup_add_child, xtc_launch and xtc_fsm_call take only their own
+      reply from the caller's mailbox; xtc_launch has an absolute
+      deadline and never frees its result while the child can write it.
+    - xtc_future_when_all/_when_any/_with_timeout resolve (with
+      XTC_E_NOMEM) when a callback cannot be registered.
+  * sqlxtc (example): recovery that cannot apply a record refuses the
+    open and leaves the log alone; a page that cannot be read
+    fail-stops the log like a bad checksum; a checkpoint whose dump was
+    cut short deletes its temp instead of replacing the log.
+  * Each fix has a test that fails on 2.1.1, and the concurrency and
+    supervision fixes a planted bug the simulator catches (24-29).
+  * CI: lts/2.1 runs the full matrix; mbedTLS and BoringSSL build with
+    the runners' gcc 15.
+
+ -- Greg Burd <greg@burd.me>  Thu, 05 Nov 2026 09:00:00 -0500
+
 libxtc (2.1.1-1) unstable; urgency=medium
 
   * PATCH release on 2.1: fixes only.  ABI-compatible with 2.0.0 and
