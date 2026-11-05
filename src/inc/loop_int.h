@@ -661,6 +661,8 @@ int  __xtc_io_uring_preempt_due(xtc_io_t *io);
 void __xtc_io_uring_preempt_disarm(xtc_io_t *io);
 /* The calling thread stops running loop->io's loop (io_int.h). */
 void __xtc_io_owner_leave(xtc_io_t *io);
+/* Reap the io's in-flight file AIO before its memory goes (io_int.h). */
+void __xtc_io_aio_drain(xtc_io_t *io);
 /* io_uring only (submission is deferred to the poll): submit the io's
  * queued SQEs now.  Owner thread only; a no-op otherwise.  The loop calls
  * it after a yield and every few runs (io_uring.c __submit_wait). */

@@ -392,12 +392,22 @@ int __xtc_io_uring_info(xtc_io_t *io, unsigned *flags, unsigned *sq_consumed,
 
 /*
  * The calling thread stops running this io's loop (an executor worker
- * exiting, xtc_loop_run returning).  On a SINGLE_ISSUER io_uring ring it
- * reaps every file-AIO completion still in the kernel, because only this
- * thread can, and keeps them for the next owner's first poll.  No-op on
- * other backends and when the caller is not the owner.
+ * exiting, xtc_loop_run returning).  On io_uring it reaps every file-AIO
+ * completion still in the kernel (a SINGLE_ISSUER ring: only this thread
+ * can; any ring: the loop may be finied next) and keeps them for the
+ * next owner's first poll.  No-op on other backends and when the caller
+ * is not the owner.
  */
 void __xtc_io_owner_leave(xtc_io_t *io);
+
+/*
+ * Reap every file-AIO op still in the kernel (io_uring: bounded, then
+ * cancelled; see io_uring.c __aio_drain), so the memory the kernel would
+ * write -- the caller's xtc_aio_t and buffer -- can be freed.  Called by
+ * xtc_loop_fini before any fiber stack goes, and by xtc_io_fini.  No-op
+ * on other backends and when nothing is in flight.
+ */
+void __xtc_io_aio_drain(xtc_io_t *io);
 
 /*
  * io_uring (XTC_E_NOSYS elsewhere): POLL_REMOVEs submitted, and

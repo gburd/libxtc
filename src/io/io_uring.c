@@ -249,10 +249,8 @@ __pollres_to_flags(uint32_t res)
 	return f;
 }
 
-#if defined(XTC_DIAGNOSTIC)
-#include <stdio.h>     /* the single-issuer violation report below */
+#include <stdio.h>     /* the single-issuer / io_fini reports below */
 #include <stdlib.h>    /* abort */
-#endif
 
 /*
  * Every SQ submit goes through here so the DIAGNOSTIC single-issuer
@@ -1016,6 +1014,18 @@ __xtc_io_backend_fini(xtc_io_t *io)
 {
 	struct __xtc_uring_fd *p, *n;
 	int i;
+	/* Freeing with file AIO in flight would hand the kernel freed memory
+	 * (the caller's xtc_aio_t and buffer): reap it, and refuse to go on
+	 * if that failed. */
+	__xtc_io_aio_drain(io);
+	if (io->n_aio != 0) {
+		fprintf(stderr,
+		    "xtc: xtc_io_fini: %d file AIO op(s) still in "
+		    "the kernel (io=%p); aborting rather than free memory the "
+		    "kernel will write\n",
+		    io->n_aio, (void *)io);
+		abort();
+	}
 	/* A queued node is also live (in tab) or a zombie, except a retired
 	 * one with nothing in flight: only those are freed from here. */
 	for (p = io->pending; p != NULL; p = n) {
@@ -1559,35 +1569,56 @@ __xtc_io_set_owner(xtc_io_t *io)
 }
 
 /*
- * The calling thread stops running this io's loop.  See io_int.h.
+ * Reap until none of this io's file AIO is in the kernel, keeping what
+ * the reap returns -- the AIO completions and any readiness reaped
+ * alongside -- in io->carry for the next poll.  This waits for the I/O
+ * itself (a read or fsync in flight when the loop was stopped).  Owner
+ * only.
  *
- * Only a SINGLE_ISSUER ring needs work here.  Its completions are posted
- * only when its issuer waits for them, and the next owner gets a NEW ring
- * (__ring_rebind) -- so a file-AIO op still in the kernel would never
- * complete for the fiber parked on it.  Reap until none is left (this
- * waits for the I/O itself: a read or fsync in flight when the loop was
- * stopped), keeping everything the reap returns -- the AIO completions
- * and any readiness reaped alongside -- for the next owner's first poll.
- * A loop that ran to idle has nothing in flight: the common case is one
- * comparison.  The io stays owned by this thread, so a peer's cleanup
- * still queues to it, and a later run on this same thread keeps the ring.
+ * bounded (teardown only): an op still in flight after
+ * XTC_URING_AIO_DRAIN_NS (at once under the "io.uring.aio_drain_cancel"
+ * test injection) is cancelled, since a read on an empty pipe would
+ * never end (xtc_aio_* is for files).  IORING_ASYNC_CANCEL_ANY | _ALL cancels
+ * every request of the ring, polls included.  That is safe only because the
+ * bounded drain runs at teardown, where io_uring_queue_exit is about to cancel
+ * those polls anyway, and the reap path already eats a poll's -ECANCELED.  A
+ * cancelled op completes with -ECANCELED.  An op the kernel has already
+ * started (-EALREADY: a file read, an fsync) cannot be cancelled and is
+ * waited for.
  *
- * shortcut: the wait is unbounded, so an AIO op that never completes (a
- * read on an empty pipe: xtc_aio_* is for files) holds the loop's exit;
- * add an IORING_OP_ASYNC_CANCEL after a deadline if a consumer needs it.
+ * shortcut: before Linux 5.19 (no CANCEL_ANY) the cancel fails with
+ * -EINVAL and an op that never completes still holds the exit; cancel
+ * by user_data needs a list of the in-flight xtc_aio_t if that matters.
  */
-void
-__xtc_io_owner_leave(xtc_io_t *io)
+#define XTC_URING_AIO_DRAIN_NS (5000LL * 1000 * 1000)
+
+static void
+__aio_drain(xtc_io_t *io, int bounded)
 {
 	xtc_io_event_t ev[64];
 	xtc_io_event_t *nc;
-	int n;
+	struct io_uring_sqe *sqe;
+	int64_t t0 = 0, now = 0;
+	int n, cancelled = !bounded;
 
-	if (io == NULL || atomic_load_explicit(&io->owner_tok,
-	    memory_order_relaxed) != __self_tok())
-		return;
-	__xtc_unsafe_enter();
-	while (io->ring_single && io->n_aio > 0 && !io->ring_dead) {
+	(void)__os_clock_mono(&t0);
+	while (io->n_aio > 0 && !io->ring_dead) {
+		if (!cancelled && __os_clock_mono(&now) == XTC_OK &&
+		    (now - t0 >= XTC_URING_AIO_DRAIN_NS ||
+		        xtc_inject_check("io.uring.aio_drain_cancel"))) {
+			cancelled = 1;
+#if defined(IORING_ASYNC_CANCEL_ANY)
+			if ((sqe = __get_sqe(io)) != NULL) {
+				io_uring_prep_rw(IORING_OP_ASYNC_CANCEL, sqe,
+				    -1, NULL, 0, 0);
+				sqe->cancel_flags = IORING_ASYNC_CANCEL_ANY |
+				    IORING_ASYNC_CANCEL_ALL;
+				io_uring_sqe_set_data(sqe, NULL);
+			}
+#else
+			(void)sqe;
+#endif
+		}
 		n = 0;
 		if (__poll(io, ev, (int)(sizeof ev / sizeof ev[0]),
 		    100LL * 1000 * 1000, &n) != XTC_OK)
@@ -1605,14 +1636,55 @@ __xtc_io_owner_leave(xtc_io_t *io)
 		memcpy(io->carry + io->n_carry, ev, (size_t)n * sizeof *ev);
 		io->n_carry += n;
 	}
+}
+
+/*
+ * The calling thread stops running this io's loop.  See io_int.h.
+ *
+ * File AIO still in the kernel is reaped here (__aio_drain), on every
+ * ring type.  A SINGLE_ISSUER ring posts completions only when its
+ * issuer waits for them, and the next owner gets a NEW ring
+ * (__ring_rebind), so an op left in flight would never complete for the
+ * fiber parked on it.  A COOP or plain ring (every kernel before 6.1, or
+ * DEFER refused) used to skip the drain, and a loop stopped and finied
+ * with an op in flight freed the fiber's stack and buffer while the
+ * kernel still owned them.  The wait is unbounded, as it always was on
+ * a DEFER ring: the op is a file op the fiber will resume from, so it
+ * is not cancelled here.  A loop that ran to idle has nothing in
+ * flight: the common case is one comparison.  The io stays owned by this
+ * thread, so a peer's cleanup still queues to it, and a later run on
+ * this same thread keeps the ring.
+ */
+void
+__xtc_io_owner_leave(xtc_io_t *io)
+{
+	if (io == NULL ||
+	    atomic_load_explicit(&io->owner_tok, memory_order_relaxed) !=
+	        __self_tok())
+		return;
+	__xtc_unsafe_enter();
+	if (io->n_aio > 0)
+		__aio_drain(io, 0);
 	/* SQEs still queued (submission is deferred, see __submit_wait) stay
-	 * for the next owner's poll.  On a SINGLE_ISSUER ring queued AIO is
-	 * in n_aio, so the reap above submitted it; a rebuild re-arms every
-	 * live poll and frees the retired nodes.  On a COOP ring the next
-	 * owner submits them: from here they would belong to a thread that
-	 * may be about to exit, and the kernel cancels an exiting task's
-	 * requests. */
+	 * for the next owner's poll.  Queued AIO is in n_aio, so the drain
+	 * above submitted it; a rebuild re-arms every live poll and frees
+	 * the retired nodes.  On a COOP ring the next owner submits them:
+	 * from here they would belong to a thread that may be about to
+	 * exit, and the kernel cancels an exiting task's requests. */
 	atomic_store_explicit(&io->owner_active, 0, memory_order_release);
+	__xtc_unsafe_leave();
+}
+
+/* Reap every file AIO still in the kernel before the io's memory goes
+ * (xtc_loop_fini, before any fiber stack is freed).  See io_int.h. */
+void
+__xtc_io_aio_drain(xtc_io_t *io)
+{
+	if (io == NULL || io->n_aio == 0)
+		return;
+	__xtc_unsafe_enter();
+	if (__own(io, 0) == XTC_OK)
+		__aio_drain(io, 1);
 	__xtc_unsafe_leave();
 }
 
@@ -2237,6 +2309,12 @@ __xtc_io_uring_info(xtc_io_t *io, unsigned *flags, unsigned *sq_consumed,
 
 void
 __xtc_io_owner_leave(xtc_io_t *io)
+{
+	(void)io;
+}
+
+void
+__xtc_io_aio_drain(xtc_io_t *io)
 {
 	(void)io;
 }

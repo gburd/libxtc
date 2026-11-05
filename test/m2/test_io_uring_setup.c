@@ -28,6 +28,13 @@
  *                     on a different thread
  *   /ready_across_move readiness that arrives while no thread runs the
  *                     loop is reported by the next owner's (rebuilt) ring
+ *   /aio_fini_no_defer a COOP ring (DEFER refused): a loop stopped with
+ *                     a fiber parked in a 1 MiB aio_pwrite reaps it before
+ *                     the run returns, so fini frees nothing the kernel owns
+ *   /aio_fini_direct  an op submitted on loop->io and never polled is
+ *                     reaped by xtc_loop_fini before it frees anything
+ *   /aio_fini_cancel  one that would never complete (a read on an empty
+ *                     pipe) is cancelled by fini after the bound
  *
  * Other backends: the uring-only checks are skips; the ownership cases
  * run everywhere (they are plain API contracts).
@@ -35,6 +42,7 @@
 
 #define _GNU_SOURCE
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -55,6 +63,7 @@
 #include "xtc_proc.h"
 #include "os_thread.h"
 #include "loop_int.h"     /* loop->io: the ring a loop polls */
+#include "aio_int.h"      /* __xtc_aio_done_get: xtc_aio_t.done */
 
 int __xtc_io_uring_info(xtc_io_t *, unsigned *, unsigned *, unsigned *);
 
@@ -518,8 +527,199 @@ test_ready_across_move(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
-static MunitTest tests[] = {
-	{ "/tiers", test_tiers, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+/* ---- file AIO in flight at xtc_loop_fini ---------------------------- */
+
+#define FINI_BIG (1u << 20)
+
+struct fini_ctx {
+	xtc_loop_t *loop;
+	int rp, wp;         /* pipe: wp full, so the write waits */
+	unsigned char *buf; /* the write's heap buffer */
+	atomic_int fini_done;
+	atomic_long got; /* bytes the drain thread read */
+	atomic_int res;
+};
+
+/* Fill the pipe, then make wp blocking again (io_uring answers -EAGAIN
+ * on an O_NONBLOCK fd instead of waiting for room). */
+static long
+fini_pipe(struct fini_ctx *c)
+{
+	char junk[4096];
+	long n = 0;
+	ssize_t w;
+	int pp[2];
+
+	munit_assert_int(pipe(pp), ==, 0);
+	c->rp = pp[0];
+	c->wp = pp[1];
+	munit_assert_int(fcntl(c->rp, F_SETFL, O_NONBLOCK), ==, 0);
+	munit_assert_int(fcntl(c->wp, F_SETFL, O_NONBLOCK), ==, 0);
+	memset(junk, 'j', sizeof junk);
+	while ((w = write(c->wp, junk, sizeof junk)) > 0)
+		n += w;
+	munit_assert_int(fcntl(c->wp, F_SETFL, 0), ==, 0);
+	return n;
+}
+
+/* Starts reading 200 ms in (so the run is over before the write can
+ * move) and keeps reading until fini has returned and the pipe is
+ * empty. */
+static void *
+fini_drain(void *arg)
+{
+	struct fini_ctx *c = arg;
+	unsigned char b[65536];
+	ssize_t r;
+	int i;
+
+	usleep(200 * 1000);
+	for (i = 0; i < 2000; i++) {
+		while ((r = read(c->rp, b, sizeof b)) > 0)
+			atomic_fetch_add(&c->got, (long)r);
+		if (atomic_load(&c->fini_done))
+			break;
+		usleep(1000);
+	}
+	return NULL;
+}
+
+static void
+fini_fiber(void *arg)
+{
+	struct fini_ctx *c = arg;
+
+	(void)xtc_loop_stop(c->loop);
+	atomic_store(&c->res, xtc_aio_pwrite(c->wp, c->buf, FINI_BIG, 0));
+}
+
+static MunitResult
+test_aio_fini_no_defer(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	struct fini_ctx c;
+	__os_thread_t th;
+	long prefill;
+	(void)p;
+	(void)d;
+
+	if (!is_uring())
+		return MUNIT_SKIP;
+	memset(&c, 0, sizeof c);
+	prefill = fini_pipe(&c);
+	c.buf = malloc(FINI_BIG);
+	munit_assert_not_null(c.buf);
+	memset(c.buf, 'w', FINI_BIG);
+	atomic_store(&c.res, -12345);
+	munit_assert_int(xtc_inject_attach("io.uring.no_defer", inj_nop, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	c.loop = loop;
+	munit_assert_int(xtc_proc_spawn(loop, fini_fiber, &c, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(__os_thread_create(&th, fini_drain, &c), ==, XTC_OK);
+	/* Stops with the fiber parked on the write.  The run's end reaps it:
+	 * before, only a DEFER ring was drained, and this one is COOP. */
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)xtc_inject_detach("io.uring.no_defer");
+	munit_assert_uint(ring_flags(loop->io) & SETUP_SINGLE_ISSUER, ==, 0);
+	munit_assert_int(atomic_load(&c.res), ==, -12345); /* still parked */
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	atomic_store(&c.fini_done, 1);
+	munit_assert_int(__os_thread_join(&th, NULL), ==, XTC_OK);
+	/* The write moved bytes: it completed rather than being dropped with
+	 * the ring. */
+	munit_assert_long(atomic_load(&c.got), >, prefill);
+	free(c.buf);
+	close(c.rp);
+	close(c.wp);
+	return MUNIT_OK;
+}
+
+/* Answers the parked read 200 ms in. */
+static void *
+fini_feed(void *arg)
+{
+	struct fini_ctx *c = arg;
+
+	usleep(200 * 1000);
+	if (write(c->wp, "x", 1) != 1)
+		atomic_store(&c->res, -1);
+	return NULL;
+}
+
+static MunitResult
+fini_direct(int cancel)
+{
+	xtc_loop_t *loop = NULL;
+	struct fini_ctx c;
+	__os_thread_t th;
+	xtc_aio_t *a;
+	unsigned char *b;
+	int pp[2];
+
+	if (!is_uring())
+		return MUNIT_SKIP;
+	if (cancel && !kernel_at_least(5, 19))
+		return MUNIT_SKIP; /* IORING_ASYNC_CANCEL_ANY */
+	memset(&c, 0, sizeof c);
+	munit_assert_int(pipe(pp), ==, 0);
+	c.rp = pp[0];
+	c.wp = pp[1];
+	a = calloc(1, sizeof *a);
+	b = malloc(64);
+	munit_assert_not_null(a);
+	munit_assert_not_null(b);
+	a->size = sizeof *a;
+	a->fd = c.rp;
+	a->op = XTC_AIO_PREAD;
+	a->buf = b;
+	a->len = 64;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_io_aio_submit(loop->io, a), ==, XTC_OK);
+	if (cancel)
+		munit_assert_int(xtc_inject_attach("io.uring.aio_drain_cancel",
+		                     inj_nop, NULL),
+		    ==, XTC_OK);
+	else
+		munit_assert_int(__os_thread_create(&th, fini_feed, &c), ==,
+		    XTC_OK);
+	/* Never polled: fini must reap it before freeing the ring. */
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_assert_int(__xtc_aio_done_get(a), ==, 1);
+	if (cancel) {
+		(void)xtc_inject_detach("io.uring.aio_drain_cancel");
+		munit_assert_int(a->res, ==, -ECANCELED);
+	} else {
+		munit_assert_int(__os_thread_join(&th, NULL), ==, XTC_OK);
+		munit_assert_int(atomic_load(&c.res), ==, 0);
+		munit_assert_int(a->res, ==, 1);
+	}
+	free(a);
+	free(b);
+	close(c.rp);
+	close(c.wp);
+	return MUNIT_OK;
+}
+
+static MunitResult
+test_aio_fini_direct(const MunitParameter p[], void *d)
+{
+	(void)p;
+	(void)d;
+	return fini_direct(0);
+}
+
+static MunitResult
+test_aio_fini_cancel(const MunitParameter p[], void *d)
+{
+	(void)p;
+	(void)d;
+	return fini_direct(1);
+}
+
+static MunitTest tests[] = { { "/tiers", test_tiers, NULL, NULL,
+	                         MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fallback_coop", test_fallback_coop, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fallback_plain", test_fallback_plain, NULL, NULL,
@@ -534,8 +734,13 @@ static MunitTest tests[] = {
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/ready_across_move", test_ready_across_move, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
-	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
-};
+	{ "/aio_fini_no_defer", test_aio_fini_no_defer, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/aio_fini_direct", test_aio_fini_direct, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/aio_fini_cancel", test_aio_fini_cancel, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL } };
 static const MunitSuite suite = { "/m2/io_uring_setup", tests, NULL, 1,
     MUNIT_SUITE_OPTION_NONE };
 
