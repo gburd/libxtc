@@ -14,6 +14,7 @@
 #include "loop_int.h"
 #include "preempt_int.h"  /* __xtc_unsafe_enter/leave around the spare lock */
 
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
@@ -183,6 +184,56 @@ __xtc_task_spare_fini(xtc_loop_t *loop)
 /* exec.c: count a live unpinned task (its loop's 0 -> 1 wakes sleepers). */
 extern void __xtc_exec_mig_alive(xtc_loop_t *l, int delta);
 
+/*
+ * Zero a recycled task struct for reuse.  A recycled struct is type-
+ * stable precisely because a waker armed by its previous incarnation may
+ * still reach it from another thread: an AIO completion reaped on the
+ * submitting loop while the fiber was stolen, a cross-thread
+ * xtc_waker_wake, an fd dispatch.  Those touch only the atomic fields
+ * (state's PARKED->SCHEDULED CAS, which fails on a DONE or reused struct;
+ * wake_pending; wake_revents; park_fd), so clear those with atomic stores
+ * and memset only the plain bytes between them.  A memset of the whole
+ * struct was a data race with that CAS (TSan, test_aio_kill_stress on
+ * uring: __task_alloc's memset vs __task_wake_claim).  Every atomic field
+ * gets its zero value, as the memset gave it.
+ */
+static void
+__task_zero_recycled(xtc_task_t *t)
+{
+	static const size_t at[] = {
+		offsetof(xtc_task_t, state),
+		offsetof(xtc_task_t, park_timer),
+		offsetof(xtc_task_t, park_fd),
+		offsetof(xtc_task_t, park_io),
+		offsetof(xtc_task_t, wake_revents),
+		offsetof(xtc_task_t, wake_pending),
+	};
+	static const size_t sz[] = {
+		sizeof(((xtc_task_t *)0)->state),
+		sizeof(((xtc_task_t *)0)->park_timer),
+		sizeof(((xtc_task_t *)0)->park_fd),
+		sizeof(((xtc_task_t *)0)->park_io),
+		sizeof(((xtc_task_t *)0)->wake_revents),
+		sizeof(((xtc_task_t *)0)->wake_pending),
+	};
+	size_t off = 0;
+	unsigned i;
+
+	/* The offsets are in declaration order (loop_int.h). */
+	for (i = 0; i < sizeof at / sizeof at[0]; i++) {
+		memset((char *)t + off, 0, at[i] - off);
+		off = at[i] + sz[i];
+	}
+	memset((char *)t + off, 0, sizeof *t - off);
+	atomic_store_explicit(&t->state, XTC_TS_SCHEDULED,
+	    memory_order_relaxed);
+	atomic_store_explicit(&t->park_timer, NULL, memory_order_relaxed);
+	atomic_store_explicit(&t->park_fd, 0, memory_order_relaxed);
+	atomic_store_explicit(&t->park_io, NULL, memory_order_relaxed);
+	atomic_store_explicit(&t->wake_revents, 0, memory_order_relaxed);
+	atomic_store_explicit(&t->wake_pending, 0, memory_order_relaxed);
+}
+
 /* Allocate a zeroed task struct: reuse a recycled one from the loop's
  * free list or spare if available, else malloc.  recyclable marks a free-
  * list-eligible struct (recycle on completion). */
@@ -194,7 +245,7 @@ __task_alloc(xtc_loop_t *loop, int pinned, xtc_task_t **out)
 	t = __task_freelist_pop(loop, pinned);
 	if (t != NULL) {
 		int typestable = t->typestable;
-		memset(t, 0, sizeof *t);
+		__task_zero_recycled(t);
 		t->recyclable = 1;
 		t->typestable = typestable;
 		*out = t;
