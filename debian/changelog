@@ -18,6 +18,17 @@ libxtc (2.1.2-1) unstable; urgency=medium
       cancels what is still pending after 5 s.
     - libxtc.so no longer asks for an executable stack: every assembly
       file emits .note.GNU-stack.
+    - A cross-shard xtc_tnt_send no longer writes the target shard's
+      mailbox from the sender's thread (it lost 1552 of 400000 messages
+      under load): cross-shard messages go through a per-pair ring the
+      destination drains on its own thread.  A sender that is not an
+      Isolate still needs 2.2's xtc_tnt_send_from.
+    - A recycled task struct is re-zeroed without a plain write over
+      the state a stale waker on another thread may still CAS (a data
+      race TSan reported); a failed pre-steal poll is the loop step's
+      error instead of a silent idle (it hung a run that should fail).
+    - illumos: POSIX AIO submissions are serialized; illumos libc
+      aborted under concurrent submitters.
   * Supervision:
     - A killed supervisor takes its children with it (cleanup runs as an
       at-exit hook); a supervisor never holds its lock across the group
@@ -33,6 +44,9 @@ libxtc (2.1.2-1) unstable; urgency=medium
     cut short deletes its temp instead of replacing the log.
   * Each fix has a test that fails on 2.1.1, and the concurrency and
     supervision fixes a planted bug the simulator catches (24-29).
+  * Build and tests: OmniOS (event ports) passes make check -- the tests,
+    doc snippets and amalgamation set __EXTENSIONS__, the network
+    snippets link -lsocket -lnsl.
   * CI: lts/2.1 runs the full matrix; mbedTLS and BoringSSL build with
     the runners' gcc 15.
 

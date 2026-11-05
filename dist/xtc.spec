@@ -89,7 +89,9 @@ make check
   supervisor shutdown and xtc_launch no longer double-run, deadlock,
   leak children or eat mail; the AIO reapers no longer touch a released
   request and xtc_loop_fini no longer frees memory an in-flight AIO
-  still targets; libxtc.so no longer asks for an executable stack.
+  still targets; libxtc.so no longer asks for an executable stack; a
+  cross-shard xtc_tnt_send no longer loses messages; illumos AIO
+  submissions are serialized.
   sqlxtc: recovery and checkpoint errors refuse or fail-stop instead of
   losing rows.
 
