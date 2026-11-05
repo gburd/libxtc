@@ -130,6 +130,20 @@ bytes
 .Pc
 into the target's bounded mailbox; it never grows the mailbox or
 retries.
+A send to an Isolate on another shard is not written into that mailbox
+from the sender's thread: it goes through a single-producer,
+single-consumer ring per (source shard, destination shard), and the
+destination moves it into the mailbox at the top of its next tick.
+Order is kept per (sender shard, receiver), and a full ring is reported
+as
+.Dv XTC_TNT_SEND_MAILBOX_FULL .
+Called from a thread that runs no shard,
+.Fn xtc_tnt_send
+returns
+.Dv XTC_TNT_SEND_STALE_HANDLE ;
+the thread-safe send for code that is not an Isolate,
+.Fn xtc_tnt_send_from ,
+is new in 2.2 and not in 2.1.
 .Fn xtc_tnt_submit_recv ,
 .Fn xtc_tnt_io_send ,
 and

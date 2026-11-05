@@ -167,12 +167,13 @@ Carried straight from `the design notes`:
    slab pools is straightforward follow-on work; the structural claim
    ("after boot, malloc is never called") is not yet enforced.
 
-3. **Cross-shard messaging uses the in-process libxtc transport.** All
-   shards share the process address space, so `xtc_tnt_send` to another
-   shard delivers directly into that shard's arena mailbox (waking it
-   via its pipe).  Tina's faithful per-shard-pair lock-free SPSC rings
-   are not built here; this is the "approximate" transport from the
-   doc.
+3. **Cross-shard messaging uses per-shard-pair SPSC rings.**  An
+   `xtc_tnt_send` to another shard goes into the ring for (source
+   shard, destination shard); the destination moves it into the arena
+   mailbox on its own thread at the top of its next tick, and is woken
+   through its pipe only when it was about to park.  (Through 2.1.1 the
+   sender wrote the other shard's mailbox directly, which raced that
+   shard's dispatch and lost messages; fixed in 2.1.2.)
 
 4. **Supervision is Level-1 only.** A handler returning `XTC_TNT_CRASH`
    or `XTC_TNT_DONE` tears down its own arena slot (bumping the

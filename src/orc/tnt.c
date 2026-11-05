@@ -82,6 +82,7 @@
 #define XTC_TNT_MAX_TYPES        16
 #define XTC_TNT_MAX_STAGED_IO    8     /* staged I/O ops per turn frame */
 #define XTC_TNT_COMPLETION_CAP   4096  /* per-shard completion ring depth */
+#define XTC_TNT_XSHARD_CAP 1024 /* per-(src,dst) cross-shard ring; pow2 */
 #define XTC_TNT_DEFAULT_RECVBUF  65536
 
 /* ---- Slot states -------------------------------------------------- */
@@ -147,6 +148,22 @@ typedef struct xtc_tnt_staged_io {
 	void         *owned;         /* io_send_owned: freed by the runtime */
 } xtc_tnt_staged_io_t;
 
+/*
+ * Cross-shard message ring: single producer (the source shard's thread),
+ * single consumer (the destination shard's thread).  A slot mailbox is
+ * plain fields owned by its shard, so a message for another shard is
+ * never written into the mailbox from the sender's thread (that raced
+ * the target's dispatch and lost messages); it goes into the ring for
+ * (src, dst) and the destination moves it into the mailbox at the top of
+ * its tick.  head/tail are free-running; capacity is a power of two.
+ */
+typedef struct xtc_tnt_xring {
+	_Alignas(64) _Atomic uint32_t head; /* consumer */
+	_Alignas(64) _Atomic uint32_t tail; /* producer */
+	_Alignas(64) xtc_tnt_handle_t to[XTC_TNT_XSHARD_CAP];
+	xtc_tnt_message_t msg[XTC_TNT_XSHARD_CAP];
+} xtc_tnt_xring_t;
+
 /* Shard: one per loop, owns everything it touches. */
 typedef struct xtc_tnt_shard {
 	uint8_t            id;
@@ -195,6 +212,20 @@ typedef struct xtc_tnt_shard {
 	 * the self-wake pipe, which is level-triggered and does not have
 	 * this window). */
 	atomic_int         pending_wake;
+
+	/* Incoming cross-shard messages, one SPSC ring per source shard
+	 * (xin[src]).  Drained at the top of every tick (drain_xshard), on
+	 * this shard's thread only.  (2.2 adds an external ring for
+	 * xtc_tnt_send_from; 2.1 has no sender that is not a shard.) */
+	xtc_tnt_xring_t *xin[XTC_TNT_MAX_SHARDS];
+	/* 1 while the shard is about to park or parked on its wake pipe.  A
+	 * ring producer writes the wake byte only then (Dekker with the
+	 * shard's last ring check, both seq_cst), so a busy shard costs its
+	 * cross-shard senders no system call. */
+	atomic_int sleeping;
+	/* Envelopes freed by dispatch, reused by deliver.  Owner-thread
+	 * only: every deliver runs on this shard's thread. */
+	struct xtc_tnt_envelope *env_free;
 
 	/* Cross-shard / external spawn inbox (handle-less spawn requests).
 	 * Guarded by spawn_lock. */
@@ -342,6 +373,61 @@ shard_wake(xtc_tnt_shard_t *sh)
 
 	r = write(sh->wake_wr, &b, 1);  /* XTC_BLOCKING_OK: 1 byte to a nonblocking self-wake pipe */
 	(void)r;
+}
+
+/* ---- Cross-shard rings -------------------------------------------- */
+
+/* Producer side.  The release store of tail publishes the slot. */
+static xtc_tnt_send_result_t
+xring_push(xtc_tnt_xring_t *r, xtc_tnt_shard_t *dst, xtc_tnt_handle_t to,
+    const xtc_tnt_message_t *m)
+{
+	uint32_t t = atomic_load_explicit(&r->tail, memory_order_relaxed);
+	uint32_t h = atomic_load_explicit(&r->head, memory_order_acquire);
+	uint32_t i;
+
+	if (t - h >= XTC_TNT_XSHARD_CAP)
+		return XTC_TNT_SEND_MAILBOX_FULL; /* drop, with feedback */
+	i = t & (XTC_TNT_XSHARD_CAP - 1u);
+	r->to[i] = to;
+	r->msg[i] = *m;
+	/* seq_cst store, then seq_cst load of `sleeping`: paired with the
+	 * shard's store of `sleeping` and its seq_cst ring check before it
+	 * parks, at least one side sees the other (the push is drained, or
+	 * the wake is written).  Under sim, always wake (its own path). */
+	atomic_store(&r->tail, t + 1u);
+	if (__xtc_sim_active() || atomic_load(&dst->sleeping))
+		shard_wake(dst);
+	return XTC_TNT_SEND_OK;
+}
+
+/* Consumer side (dst's own thread): move every pending message into its
+ * target's mailbox.  A message for a stale handle or a full mailbox is
+ * dropped here (the sender already saw OK: the ring, not the mailbox,
+ * was its admission point). */
+static uint32_t
+xring_drain(xtc_tnt_xring_t *r, xtc_tnt_shard_t *sh)
+{
+	uint32_t h = atomic_load_explicit(&r->head, memory_order_relaxed);
+	uint32_t t = atomic_load_explicit(&r->tail, memory_order_acquire);
+	uint32_t n = t - h;
+
+	for (; h != t; h++) {
+		uint32_t i = h & (XTC_TNT_XSHARD_CAP - 1u);
+		(void)xtc_tnt_deliver(sh, r->to[i], &r->msg[i]);
+	}
+	atomic_store_explicit(&r->head, h, memory_order_release);
+	return n;
+}
+
+static void
+drain_xshard(xtc_tnt_shard_t *sh)
+{
+	int i;
+
+	for (i = 0; i < sh->rt->shard_count; i++)
+		if (sh->xin[i] != NULL)
+			(void)xring_drain(sh->xin[i], sh);
 }
 
 /* ---- Slot lifecycle ----------------------------------------------- */
@@ -702,26 +788,21 @@ xtc_tnt_send(xtc_tnt_handle_t to, uint16_t tag, const void *payload,
 	if (payload && payload_size)
 		memcpy(m.body.user.payload, payload, payload_size);
 
-	/* Intra-shard fast path: deliver straight into the arena mailbox.
-	 * Cross-shard would route via the runtime; this slice delivers
-	 * intra-shard directly and cross-shard through the same path since
-	 * all shards share the process address space. */
+	/* Intra-shard: straight into the arena mailbox (we own it). */
 	if (xtc_tnt_handle_shard(to) == sh->id)
 		return xtc_tnt_deliver(sh, to, &m);
 
-	/* Cross-shard: hand to the target shard's deliver under its lock
-	 * via the completion ring is overkill for messages; instead route
-	 * through that shard directly (same process).  For this slice we
-	 * deliver into the target arena guarded by its comp_lock-free
-	 * mailbox -- safe because deliver only touches the slot mailbox and
-	 * is called on the owning thread in the common case.  Cross-shard
-	 * faithful transport (per-pair rings) is layer-future work. */
+	/* Cross-shard: never touch the target's mailbox from this thread.
+	 * Push into the (this shard -> target shard) ring; the target moves
+	 * it into the mailbox on its own thread.  A full ring drops, with
+	 * feedback, exactly like a full mailbox. */
 	{
 		xtc_tnt_runtime_t *rt = sh->rt;
 		uint8_t dst = xtc_tnt_handle_shard(to);
 		if (dst >= rt->shard_count || rt->shards[dst] == NULL)
 			return XTC_TNT_SEND_STALE_HANDLE;
-		return xtc_tnt_deliver(rt->shards[dst], to, &m);
+		return xring_push(rt->shards[dst]->xin[sh->id], rt->shards[dst],
+		    to, &m);
 	}
 }
 
@@ -748,7 +829,9 @@ xtc_tnt_deliver(xtc_tnt_shard_t *sh, xtc_tnt_handle_t to, const xtc_tnt_message_
 	if (meta->mbox_depth >= ar->type->mailbox_capacity)
 		return XTC_TNT_SEND_MAILBOX_FULL;   /* drop-on-full */
 
-	if (__os_malloc(sizeof(*e), (void **)&e) != XTC_OK)
+	if ((e = sh->env_free) != NULL)
+		sh->env_free = e->next;
+	else if (__os_malloc(sizeof(*e), (void **)&e) != XTC_OK)
 		return XTC_TNT_SEND_POOL_EXHAUSTED;
 	e->next = NULL;
 	e->msg = *m;
@@ -1139,6 +1222,7 @@ shard_tick(xtc_tnt_shard_t *sh)
 	int ai;
 
 	drain_spawns(sh);
+	drain_xshard(sh);
 	drain_completions(sh);
 
 	for (ai = 0; ai < sh->n_arenas; ai++) {
@@ -1166,7 +1250,8 @@ shard_tick(xtc_tnt_shard_t *sh)
 				if (meta->mbox_head == NULL)
 					meta->mbox_tail = NULL;
 				meta->mbox_depth--;
-				__os_free(e);
+				e->next = sh->env_free;
+				sh->env_free = e;
 				(void)dispatch_slot(sh, ar, slot, &msg);
 			} else {
 				/* READY with no message: a YIELD re-run with a
@@ -1184,9 +1269,24 @@ shard_tick(xtc_tnt_shard_t *sh)
 
 /* Is there any work left (live slots that are READY, or pending I/O)? */
 static int
+xring_pending(const xtc_tnt_xring_t *r)
+{
+	/* seq_cst tail load: the shard's half of the Dekker pair (see
+	 * xring_push). */
+	return r != NULL &&
+	    atomic_load(&((xtc_tnt_xring_t *)r)->tail) !=
+	    atomic_load_explicit(&((xtc_tnt_xring_t *)r)->head,
+	        memory_order_relaxed);
+}
+
+static int
 shard_has_ready(xtc_tnt_shard_t *sh)
 {
 	int ai;
+
+	for (ai = 0; ai < sh->rt->shard_count; ai++)
+		if (xring_pending(sh->xin[ai]))
+			return 1;
 	for (ai = 0; ai < sh->n_arenas; ai++) {
 		xtc_tnt_arena_t *ar = &sh->arenas[ai];
 		uint32_t i;
@@ -1263,7 +1363,15 @@ xtc_tnt_shard_main(void *arg)
 
 		/* Park on the wake pipe (couriers, timers, cross-shard sends,
 		 * and external spawns all write a byte).  Bounded timeout so
-		 * we re-check the stop flag. */
+		 * we re-check the stop flag.  Announce the park first and look
+		 * at the rings once more: a ring producer that pushed before
+		 * the store is seen here, one that pushes after it sees
+		 * sleeping == 1 and writes the wake byte. */
+		atomic_store(&sh->sleeping, 1);
+		if (shard_has_ready(sh)) {
+			atomic_store(&sh->sleeping, 0);
+			continue;
+		}
 		{
 			uint32_t revents = 0;
 			(void)xtc_proc_wait_fd(sh->wake_rd,
@@ -1273,6 +1381,7 @@ xtc_tnt_shard_main(void *arg)
 			while (read(sh->wake_rd, drain, sizeof(drain)) > 0)  /* XTC_BLOCKING_OK: nonblocking pipe drain after a ready wait */
 				;
 		}
+		atomic_store(&sh->sleeping, 0);
 	}
 
 	tl_shard = NULL;
@@ -1375,8 +1484,21 @@ shard_init(xtc_tnt_runtime_t *rt, uint8_t id, xtc_tnt_shard_t **out)
 	sh->rt = rt;
 	atomic_init(&sh->stop, 0);
 	atomic_init(&sh->pending_wake, 0);
+	atomic_init(&sh->sleeping, 0);
 	pthread_mutex_init(&sh->comp_lock, NULL);
 	pthread_mutex_init(&sh->spawn_lock, NULL);
+	/* One ring per possible source shard (a shard never sends to itself
+	 * through a ring).  Boot-time allocations; the hot path never
+	 * allocates for a cross-shard message. */
+	for (i = 0; i < rt->shard_count; i++) {
+		if (i == id)
+			continue;
+		if (__os_aligned_alloc(64, sizeof(xtc_tnt_xring_t),
+		        (void **)&sh->xin[i]) != XTC_OK)
+			goto fail;
+		atomic_init(&sh->xin[i]->head, 0);
+		atomic_init(&sh->xin[i]->tail, 0);
+	}
 
 	if (__os_calloc(XTC_TNT_COMPLETION_CAP, sizeof(xtc_tnt_completion_t),
 	    (void **)&sh->comp_ring) != XTC_OK || sh->comp_ring == NULL)
@@ -1406,6 +1528,9 @@ shard_init(xtc_tnt_runtime_t *rt, uint8_t id, xtc_tnt_shard_t **out)
 
 fail:
 	if (sh) {
+		for (i = 0; i < XTC_TNT_MAX_SHARDS; i++)
+			if (sh->xin[i] != NULL)
+				__os_aligned_free(sh->xin[i]);
 		if (sh->comp_ring)
 			__os_free(sh->comp_ring);
 		if (sh->scratch)
@@ -1469,12 +1594,21 @@ shard_destroy(xtc_tnt_shard_t *sh)
 			xtc_slab_destroy(sh->store_cache[i]);
 	}
 
+	while (sh->env_free != NULL) {
+		xtc_tnt_envelope_t *e = sh->env_free;
+		sh->env_free = e->next;
+		__os_free(e);
+	}
+
 	/* Drain pending external spawn requests. */
 	for (req = sh->spawn_head; req != NULL; req = n) {
 		n = req->next;
 		__os_free(req);
 	}
 
+	for (i = 0; i < XTC_TNT_MAX_SHARDS; i++)
+		if (sh->xin[i] != NULL)
+			__os_aligned_free(sh->xin[i]);
 	if (sh->comp_ring)
 		__os_free(sh->comp_ring);
 	if (sh->scratch)

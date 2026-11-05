@@ -486,6 +486,7 @@ TESTS_C		= test_sched_policy test_sched_continuous test_batch test_version test_
 		  test_app \
 		  test_tnt \
 		  test_tnt_zcopy \
+		  test_tnt_xshard \
 		  test_osproc \
 		  test_isolated \
 		  test_mctx \
@@ -2013,6 +2014,11 @@ test_app: $(srcdir)/../test/m10/test_app.c \
 test_tnt: $(srcdir)/../test/tnt/test_tnt.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../test/tnt/test_tnt.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_tnt_xshard: $(srcdir)/../test/tnt/test_tnt_xshard.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../test/tnt/test_tnt_xshard.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_tnt_zcopy: $(srcdir)/../test/tnt/test_tnt_zcopy.c $(STATIC_LIB)

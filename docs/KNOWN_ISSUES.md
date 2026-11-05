@@ -6,6 +6,37 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## FIXED (2.1.2): a cross-shard xtc_tnt_send could lose messages
+
+**What it was.**  Through 2.1.1 an `xtc_tnt_send` to an Isolate on
+another shard appended to that Isolate's mailbox from the sender's
+thread.  The mailbox is plain state owned by the target shard, so the
+append raced the target's own dispatch.  With two shards each flooding a
+sink on the other (`test/tnt/test_tnt_xshard`, 200,000 sends), 2.1.1
+delivered 198,073 to 199,055 and reported none dropped, and the run
+never reached its end; ThreadSanitizer reported 14 races, in
+`xtc_tnt_deliver` against `shard_tick`.
+
+**Fix.**  A cross-shard message goes into a single-producer,
+single-consumer ring for its (source shard, destination shard) pair, and
+the destination moves it into the mailbox at the top of its own tick.
+Order is kept per (sender shard, receiver), a full ring is reported as
+`XTC_TNT_SEND_MAILBOX_FULL` like a full mailbox, and a busy destination
+costs its senders no system call (a sender writes the wake byte only to a
+shard that announced it is parking).  Envelopes are reused from a
+per-shard free list instead of allocated per send.  No public symbol,
+type or error code changed.  `test_tnt_xshard` now accounts for every
+message (delivered plus reported dropped equals sent, per-pair FIFO) in
+20 of 20 runs, and passes clean under TSan.  `test/cbmc/tntring_harness.c`
+proves the ring and its park handshake (no lost wake, FIFO, nothing lost
+or doubled) and fails on each of three planted bugs.
+
+**Not in 2.1.x.**  `xtc_tnt_send` is an ambient call: from a thread
+that runs no shard it returns `XTC_TNT_SEND_STALE_HANDLE`, as before.
+The thread-safe send for senders that are not Isolates,
+`xtc_tnt_send_from`, is new API and ships in 2.2 (symbol version
+`XTC_2.2`), not in a 2.1.x patch.
+
 ## FIXED (2.2): ThreadSanitizer aborted every proc exit on glibc 2.44
 
 **What it was.**  glibc 2.44 changed how `setjmp` mangles the saved

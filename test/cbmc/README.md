@@ -39,6 +39,7 @@ are exposed at 2-3 concurrent actors, which is well within reach.
 | `res_harness.c`         | `src/ptc/res.c` accountant   | `used` never exceeds `cap` under concurrent acquire (no over-admission) | u3 | verbatim CAS core |
 | `hlc_harness.c`         | `src/ptc/proc.c` HLC         | hybrid logical clock is monotonic + causal (update > remote stamp) under concurrent tick/update | u4 | verbatim __hlc_tick/_update |
 | `fdclaim_harness.c`     | `src/evt/task.c` fd-readiness claim | a stale readiness event never orphans a newer park of the same fd (2.1.2) | u3 | claim statement drift-checked |
+| `tntring_harness.c`     | `src/orc/tnt.c` cross-shard ring | per-(source, destination) SPSC ring vs the shard's drain-then-park: no lost wake, FIFO, none lost or doubled, a full ring refuses (2.1.2) | u4 | push/drain/pending drift-checked |
 
 Every harness above VERIFIES SUCCESSFUL at the listed bound; each also has
 a negative check (injecting the classic bug makes CBMC report the
