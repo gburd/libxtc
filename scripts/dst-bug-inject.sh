@@ -128,13 +128,14 @@ write_cases() {
 # 23 GCBATCH    xstore.c GC restarts a row per batch -> no deleted row comes back
 # 24 RECOV_REWALK proc.c recovery walk unmasked, popped late -> each record runs once
 #               (test_sim_scope's fault+kill workers: a kill lands inside the walk)
-# 30 PIDEXEC    proc.c mints exec-relative pids -> a pid reaches only its own proc
 # 25 SCOPE_UNMASKED_FIN xtc_scope_close detaches + runs unmasked -> no finalizer skipped
 #               (test_sim_scope's close+kill workers: a kill lands in a parked finalizer)
 # 26 SUP_LOCKPARK sup.c sleeps holding an __xtc_mtx lock -> no park inside an internal lock
 #               (exec.c's sim step-boundary check of __xtc_unsafe_depth)
 # 27 SUP_NOHOOK   sup.c shutdown inline, not an at-exit hook -> a killed sup takes its children
 # 28 LAUNCH_EATMAIL launch.c receives (and frees) any message -> a DOWN queued before the call survives it
+# 29 AIO_TAG_AFTER_DONE (reserved: the aio branch)
+# 30 PIDEXEC    proc.c mints exec-relative pids -> a pid reaches only its own proc
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.
