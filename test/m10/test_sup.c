@@ -1033,12 +1033,14 @@ na_observer(void *a)
 	(void)xtc_sup_stop(g_na_sup);
 }
 
+#if !defined(_WIN32)
 static void
 na_alarm(int sig)
 {
 	(void)sig;
 	_exit(9); /* the loop thread is wedged in pthread_mutex_lock */
 }
+#endif
 
 static MunitResult
 test_n_alive_during_group_restart(const MunitParameter p[], void *d)
@@ -1055,15 +1057,21 @@ test_n_alive_during_group_restart(const MunitParameter p[], void *d)
 	ch[1].fn = na_k1;
 	ch[1].policy = XTC_RESTART_TEMPORARY;
 	so.strategy = XTC_SUP_ONE_FOR_ALL;
+#if !defined(_WIN32)
+	/* A wedged loop thread hangs here: fail in 10 s, not at the CI
+	 * job timeout.  (No SIGALRM on Windows: the job's timeout bounds it.) */
 	(void)signal(SIGALRM, na_alarm);
 	(void)alarm(10);
+#endif
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_start(loop, &so, ch, 2, &g_na_sup), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, na_observer, NULL, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+#if !defined(_WIN32)
 	(void)alarm(0);
+#endif
 	/* It returned, at once: no park, no lock. */
 	munit_assert_int(atomic_load(&g_na_rc), >=, 0);
 	munit_assert_int64(atomic_load(&g_na_ns), <, 100 * NA_MS);
