@@ -106,19 +106,16 @@ race:xtc_timer_cancel
 # above; noted in the v1.40.2 CI audit as the reason test_exec cannot
 # join the curated gate.
 race:xtc_yield
-# aio_do's on-stack xtc_aio_t (src/ptc/aio.c): the submitting fiber
-# memsets the struct at the TOP of the next iteration while the REAPING
-# thread's xtc_io_poll still has the PREVIOUS op's pointer in hand --
-# same stack address, consecutive ops, two threads.  Not a live overlap:
-# the fiber cannot leave aio_do until `while (!__xtc_aio_done_get(&a))`
-# observes done, and done is published release-after-res by the reaper
-# (see the acquire/release pair in src/inc/aio_int.h), so the slot cannot
-# be reused while a completion is in flight.  TSan reports the address
-# reuse because it cannot carry that happens-before across the fiber
-# switch.  Named on aio_do rather than xtc_io_poll: the poll function
-# reaps every completion in the runtime and a stanza there would blanket
-# the entire I/O path.
-race:aio_do
+# (2.1.2) There was a `race:aio_do` stanza here, for the reaper reading
+# a dead aio_do frame: every native reaper read a->tag AFTER its done
+# store, and a kill-woken, stolen fiber that saw done left aio_do and
+# memset the same stack slot for its next op.  It was called "not a
+# live overlap"; it was a use-after-return (io_uring.c's events[].tag =
+# a->tag, measured by test_aio_kill_stress: 4 reports per 1e5 ops).
+# The reapers now copy the tag first and the stanza is gone.  The
+# loop-step stanzas above also match that stack, so the guard is
+# test_aio_kill_stress under TSan with NO suppression file (ci.yml,
+# tsan-uring-migration): any report there is a regression.
 
 # NOT SUPPRESSIBLE, documented instead: "use of an invalid mutex" on a
 # proc's mbox_lock, reported the first time a MIGRATED fiber locks it from

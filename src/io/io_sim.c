@@ -27,7 +27,10 @@
 #include "xtc_aio.h"
 #include <sys/uio.h>
 #include "xtc_sim.h"
+#include "xtc_inject.h"     /* sim.aio.wake_after_done: opt-in buggify */
+#include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
 
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
@@ -48,6 +51,8 @@ struct __xtc_sim_ev {
 	void     *tag;        /* event tag */
 	xtc_aio_t *aio;       /* non-NULL for an AIO completion */
 	int       aio_res;    /* the result to publish on the aio at due time */
+	int aio_done; /* done already published; only the WAKE is left */
+	int aio_gone; /* the submitter left its wait: aio is a dead frame */
 	/* Generic deferred callback (non-NULL for a deferred cross-loop
 	 * message delivery driven by xtc_sim_net_latency): invoked when the
 	 * event becomes due instead of publishing readiness / an AIO. */
@@ -303,6 +308,46 @@ __xtc_io_register_wakeup(xtc_io_t *io, int fd)
 	return XTC_OK;       /* no fd-based wakeup in sim */
 }
 
+/*
+ * Read a deferred AIO completion's tag into e->tag: the reaper's one
+ * read of the caller's xtc_aio_t besides the result and done stores.
+ * A read of a frame whose submitter already left its wait (aio_gone,
+ * see __xtc_io_sim_aio_release) is the use-after-return the native
+ * reapers had (the tag read after the done store): report it and fail
+ * the poll, which fails the sim run.  Returns 0, or -1 on that read.
+ */
+static int
+sim_aio_tag(struct __xtc_sim_ev *e)
+{
+	if (e->aio_gone) {
+		fprintf(stderr,
+		    "xtc DST: aio reaper read a released "
+		    "xtc_aio_t (its fiber had already left the wait)\n");
+		return -1;
+	}
+	e->tag = e->aio->tag;
+	return 0;
+}
+
+/* PUBLIC: void __xtc_io_sim_aio_release __P((xtc_io_t *, const xtc_aio_t *));
+ */
+/*
+ * aio.c, when a native wait ends (done seen): the xtc_aio_t on that
+ * fiber's stack dies with the return.  Mark every completion still
+ * queued for it so a later read of it is caught (sim_aio_tag).  Only
+ * the buggified "wake after done" leaves one queued.
+ */
+void
+__xtc_io_sim_aio_release(xtc_io_t *io, const xtc_aio_t *a)
+{
+	struct __xtc_sim_ev *e;
+	if (io == NULL || io->sim == NULL)
+		return;
+	for (e = io->sim->events; e != NULL; e = e->next)
+		if (e->aio == a)
+			e->aio_gone = 1;
+}
+
 /* ---- poll ---- */
 
 /* Pop every event due at or before the current virtual time into the
@@ -346,12 +391,51 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		if (e->aio != NULL) {
 			/* A deferred AIO completion: publish the (possibly
 			 * fault-injected) result computed at submit time and
-			 * wake the parked op. */
-			e->aio->res = e->aio_res;
-			/* Release: publish res before the flag (uniform with the
-			 * native reapers, even though sim drains in-thread). */
-			__xtc_aio_done_set(e->aio);
-			events[idx].tag = e->aio->tag;
+			 * wake the parked op.  Same order as the native
+			 * reapers: copy the tag, then the done store is the
+			 * LAST touch of e->aio (its frame dies once its fiber
+			 * sees done). */
+			if (!e->aio_done) {
+#if XTC_DST_BUG(XTC_DST_BUG_AIO_TAG_AFTER_DONE)
+				e->aio->res = e->aio_res;
+				__xtc_aio_done_set(e->aio);
+				e->aio_done = 1;
+#else
+				if (sim_aio_tag(e) < 0)
+					return XTC_E_INTERNAL;
+				e->aio->res = e->aio_res;
+				/* Release: res before the flag, as the
+				 * native reapers do. */
+				__xtc_aio_done_set(e->aio);
+				e->aio_done = 1;
+#endif
+				/*
+				 * Buggify: the reaper stalls between the done
+				 * store and the wake (a native reaper preempted
+				 * there while the fiber, woken another way,
+				 * runs on another thread).  Re-queue the event
+				 * 1-50 us out: the WAKE goes out then, and the
+				 * fiber may have seen done and left its wait
+				 * meanwhile.  Opt-in by inject point so no
+				 * other test's BUGGIFY stream moves.
+				 */
+				if (xtc_inject_check(
+				        "sim.aio.wake_after_done") &&
+				    XTC_SIM_BUGGIFY("io.aio.wake_after_done") &&
+				    xtc_sim_buggify_fault(500)) {
+					*pp = e->next;
+					e->due_ns = now + 1000 +
+					    (int64_t)__xtc_sim_rng_range(
+					        XTC_SIM_RNG_BUGGIFY, 49000);
+					sim_events_insert(s, e);
+					continue;
+				}
+			}
+#if XTC_DST_BUG(XTC_DST_BUG_AIO_TAG_AFTER_DONE)
+			if (sim_aio_tag(e) < 0)
+				return XTC_E_INTERNAL;
+#endif
+			events[idx].tag = e->tag;
 			events[idx].flags = XTC_IO_AIO;
 			events[idx].fd = -1;
 			idx++;

@@ -1798,6 +1798,11 @@ __poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		 * __xtc_uring_fd pointers are calloc-aligned, so bit 0 is 0. */
 		if (((uintptr_t)data & 1u) != 0) {
 			xtc_aio_t *a = (xtc_aio_t *)((uintptr_t)data & ~(uintptr_t)1);
+			/* Copy the tag first: a lives on the parked fiber's
+			 * stack, and once done is set that fiber may run on
+			 * another thread, return and reuse the frame.  The done
+			 * store is the last access to a. */
+			void *tag = a->tag;
 			io->n_aio--;
 			a->res = cqe->res;
 			/* Release: publish res BEFORE the done flag the parked
@@ -1806,11 +1811,11 @@ __poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 			__xtc_aio_done_set(a);
 			if (got < max) {
 				events[got].fd = -1;
-				events[got].tag = a->tag;
+				events[got].tag = tag;
 				events[got].flags = XTC_IO_AIO;
 				got++;
 			}
-			__tail_reap(io, a->tag);
+			__tail_reap(io, tag);
 			io_uring_cqe_seen(&io->ring, cqe);
 			cqe = NULL;
 			continue;

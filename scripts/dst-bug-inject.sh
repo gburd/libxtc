@@ -97,6 +97,7 @@ write_cases() {
 		"26;test_sim_sup_strategy;0;1;a fiber yielded holding an internal lock" \
 		"27;test_sim_sup_strategy;0;1;children outlived a killed supervisor" \
 		"28;test_sim_launch;0;1;a message queued for the launcher did not survive xtc_launch" \
+		"29;test_sim_aio_migrate;0;1;aio reaper read a released xtc_aio_t" \
 		"30;test_sim_pid_xexec;0;0;MISDELIVERED" \
 		> "$1"
 }
@@ -134,7 +135,9 @@ write_cases() {
 #               (exec.c's sim step-boundary check of __xtc_unsafe_depth)
 # 27 SUP_NOHOOK   sup.c shutdown inline, not an at-exit hook -> a killed sup takes its children
 # 28 LAUNCH_EATMAIL launch.c receives (and frees) any message -> a DOWN queued before the call survives it
-# 29 AIO_TAG_AFTER_DONE (reserved: the aio branch)
+# 29 AIO_TAG_AFTER_DONE io_sim.c reads a->tag after done -> the reaper never
+#               touches an xtc_aio_t after the done store (the frame is dead once a
+#               kill-woken fiber sees done); the kill arm reports the late read
 # 30 PIDEXEC    proc.c mints exec-relative pids -> a pid reaches only its own proc
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds

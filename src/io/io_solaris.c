@@ -317,12 +317,14 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 				int aerr = aio_error(&s->cb);
 				ssize_t ares = aio_return(&s->cb);
 				if (a != NULL) {
+					/* Before done: a may die after it. */
+					void *atag = a->tag;
 					a->res = (aerr == 0)
 					    ? (int32_t)ares : -(int32_t)aerr;
 					__xtc_aio_done_set(a);   /* release */
 					if (out_idx < max) {
 						events[out_idx].fd = -1;
-						events[out_idx].tag = a->tag;
+						events[out_idx].tag = atag;
 						events[out_idx].flags = XTC_IO_AIO;
 						out_idx++;
 					}

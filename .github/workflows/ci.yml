@@ -1019,6 +1019,23 @@ jobs:
           if [ "$total" -gt 0 ]; then
             echo "::warning::$total TSan report(s) on the uring migration path -- expected to include ONE non-suppressible mbox_lock invalid-mutex report; anything naming TWO DIFFERENT fibers is a NEW race, investigate it (see .github/tsan.supp)"
           fi
+      - name: aio reaper use-after-return guard (TSan, no suppressions)
+        run: |
+          # The reaper read a->tag after its done store (a dead aio_do
+          # frame once a kill-woken fiber saw done), and tsan.supp hid it.
+          # No suppression file here, on purpose: any report is a bug.
+          cd build_tsan_uring
+          make test_aio_kill_stress > build_test_aio_kill_stress.log 2>&1 ||
+            { tail -40 build_test_aio_kill_stress.log; exit 1; }
+          ./test_aio_kill_stress --no-fork --show-stderr \
+            > tsan_test_aio_kill_stress.log 2>&1 || true
+          n=$(grep -c "WARNING: ThreadSanitizer" tsan_test_aio_kill_stress.log || true)
+          echo "aio reaper guard TSan reports: $n" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$n" -gt 0 ]; then
+            grep -A12 "WARNING: ThreadSanitizer" tsan_test_aio_kill_stress.log | head -60
+            echo "::error::$n TSan report(s) in test_aio_kill_stress"
+            exit 1
+          fi
       - name: Upload TSan logs
         if: always()
         uses: actions/upload-artifact@v4

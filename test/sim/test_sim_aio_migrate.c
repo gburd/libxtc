@@ -27,6 +27,22 @@
  *	must also pass, so a migratable-only failure localizes the defect to
  *	the migration path rather than to aio.
  *
+ *	KILL ARM (the reaper's use of a dead frame, 2.1.2).  A killer
+ *	xtc_exit_pid()s random workers while their fdatasync is in flight,
+ *	with the io.aio.wake_after_done buggify on: the sim reaper then
+ *	publishes done and sends the wake a few microseconds LATER, which is
+ *	a native reaper preempted between its two stores.  The kill's wake
+ *	lets the fiber see done, leave aio_do and die, so a reaper that
+ *	reads a->tag after the done store reads a dead frame.  The sim io
+ *	backend is told when each wait ends (__xtc_io_sim_aio_release) and
+ *	reports such a read ("aio reaper read a released xtc_aio_t"), which
+ *	fails the run.  Planted bug 29 (AIO_TAG_AFTER_DONE) restores the old
+ *	order and must be caught here.  Every worker must end: done, or a
+ *	DOWN with the kill reason.
+ *
+ *	Usage: test_sim_aio_migrate [base count]   (kill arm seeds only; no
+ *	args runs every arm with the built-in seeds).
+ *
  *	Sim tests are plain main()/return-0-or-1, not munit (they link the
  *	sim library, which does not pull in the munit runner).
  */
@@ -42,6 +58,7 @@
 #include "xtc_exec.h"
 #include "xtc_proc.h"
 #include "xtc_aio.h"
+#include "xtc_inject.h"
 #include "xtc_sim.h"
 
 #define N_LOOPS    8
@@ -51,6 +68,10 @@
 static _Atomic int  g_done;
 static _Atomic long g_commits;
 static int          g_fd;
+
+#define KILL_REASON 77
+static xtc_pid_t g_wpid[N_WORKERS];
+static int g_kills, g_downs, g_bad_downs;
 
 static void
 commit_worker(void *arg)
@@ -73,6 +94,101 @@ commit_worker(void *arg)
 		(void)xtc_proc_sleep(1000);
 	}
 	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+}
+
+static void
+inj_nop(const char *name, void *user)
+{
+	(void)name;
+	(void)user;
+}
+
+/* Monitors every worker, kills a seeded subset while their commits are
+ * in flight, then collects one DOWN per worker. */
+static void
+killer(void *arg)
+{
+	uint64_t ref;
+	int i, k, n_mon = 0;
+	(void)arg;
+	for (i = 0; i < N_WORKERS; i++)
+		if (xtc_monitor(g_wpid[i], &ref) == XTC_OK)
+			n_mon++;
+	for (k = 0; k < N_WORKERS / 2; k++) {
+		i = (int)__xtc_sim_rng_range(XTC_SIM_RNG_APP, N_WORKERS);
+		(void)xtc_proc_sleep(10 * 1000 +
+		    (int64_t)__xtc_sim_rng_range(XTC_SIM_RNG_APP, 400 * 1000));
+		if (xtc_exit_pid(g_wpid[i], KILL_REASON) == XTC_OK)
+			g_kills++;
+	}
+	while (g_downs < n_mon) {
+		void *m = NULL;
+		size_t n = 0;
+		int reason = 0;
+		if (xtc_recv(&m, &n, -1) != XTC_OK)
+			break;
+		if (xtc_down_decode(m, n, NULL, &reason) == XTC_OK) {
+			g_downs++;
+			if (reason != 0 && reason != KILL_REASON)
+				g_bad_downs++;
+		}
+		xtc_free(m);
+	}
+}
+
+/* Kill arm: returns 0 if every worker ended (done or killed), the run
+ * quiesced and no reaper touched a dead frame. */
+static int
+run_kill(uint64_t seed)
+{
+	xtc_exec_t *e = NULL;
+	xtc_proc_opts_t o;
+	char path[512];
+	const char *td = getenv("TMPDIR");
+	int i, rc, done;
+
+	atomic_store(&g_done, 0);
+	atomic_store(&g_commits, 0);
+	g_kills = g_downs = g_bad_downs = 0;
+	(void)snprintf(path, sizeof path, "%s/sim_aio_kill_XXXXXX",
+	    td != NULL && *td != '\0' ? td : "/tmp");
+	g_fd = mkstemp(path);
+	if (g_fd < 0)
+		return -1;
+	(void)unlink(path);
+	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) {
+		close(g_fd);
+		return -1;
+	}
+	xtc_exec_set_eager_rebalance(e, 1);
+	xtc_sim_io_faults_enable(50 * 1000LL, 500 * 1000LL, 0);
+	xtc_sim_buggify_enable(1000);
+	(void)xtc_inject_attach("sim.aio.wake_after_done", inj_nop, NULL);
+
+	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
+	o.migratable = 1;
+	for (i = 0; i < N_WORKERS; i++)
+		(void)xtc_proc_spawn(xtc_exec_loop(e, 0), commit_worker,
+		    (void *)(intptr_t)i, &o, &g_wpid[i]);
+	(void)xtc_proc_spawn(xtc_exec_loop(e, 1), killer, NULL, NULL, NULL);
+
+	rc = xtc_sim_exec_run(e, seed, 200000000);
+	done = atomic_load(&g_done);
+
+	(void)xtc_inject_detach("sim.aio.wake_after_done");
+	xtc_sim_buggify_disable();
+	xtc_sim_io_faults_disable();
+	(void)xtc_exec_fini(e);
+	close(g_fd);
+	if (rc != XTC_OK || g_downs != N_WORKERS || g_bad_downs != 0) {
+		printf("  seed 0x%016llx: FAIL kill arm (rc=%d done=%d "
+		       "downs=%d/%d bad=%d kills=%d)\n",
+		    (unsigned long long)seed, rc, done, g_downs, N_WORKERS,
+		    g_bad_downs, g_kills);
+		return 1;
+	}
+	return 0;
 }
 
 static int
@@ -115,10 +231,25 @@ run_once(uint64_t seed, int migratable, long *out_commits, uint64_t *out_state)
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
 	uint64_t seed, h1 = 0, h2 = 0;
 	int fails = 0;
+
+	/* Kill arm, first: also the planted-bug-29 catcher, so a seed walk
+	 * ("base count") runs only this arm. */
+	if (argc >= 3) {
+		uint64_t base = strtoull(argv[1], NULL, 0);
+		uint64_t cnt = strtoull(argv[2], NULL, 0);
+		for (seed = base; seed < base + cnt; seed++)
+			fails += run_kill(seed) != 0;
+		printf("%s: kill arm, %llu seed(s) from %llu\n",
+		    fails ? "FAIL" : "OK", (unsigned long long)cnt,
+		    (unsigned long long)base);
+		return fails ? 1 : 0;
+	}
+	for (seed = 1; seed <= 16; seed++)
+		fails += run_kill(seed) != 0;
 
 	/* Migratable arm: every worker must finish, every commit reaped. */
 	for (seed = 1; seed <= 24; seed++) {
@@ -153,10 +284,12 @@ main(void)
 	}
 
 	if (fails == 0) {
-		printf("OK: migratable-fiber AIO completion DST -- 24 seeds, "
+		printf(
+		    "OK: migratable-fiber AIO completion DST -- 24 seeds, "
 		    "%d workers x %d commits each, all reaped and resumed even "
 		    "when work-stolen across loops mid-flight; pinned control "
-		    "and replay clean\n", N_WORKERS, N_COMMITS);
+		    "and replay clean; kill arm (16 seeds, late wakes) clean\n",
+		    N_WORKERS, N_COMMITS);
 		return 0;
 	}
 	printf("FAIL: %d migratable-AIO case(s) failed\n", fails);
