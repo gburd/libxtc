@@ -1515,10 +1515,18 @@ __loop_step_once(xtc_loop_t *loop)
 			extern void *__xtc_exec_try_steal(xtc_loop_t *me);
 			xtc_task_t *stolen;
 			xtc_io_event_t oevs[16];
-			int on_out = 0, oi;
-			if (xtc_io_poll(loop->io, oevs,
-			    (int)(sizeof oevs / sizeof oevs[0]), 0,
-			    &on_out) == XTC_OK && on_out > 0) {
+			int on_out = 0, oi, prc;
+			prc = xtc_io_poll(loop->io, oevs,
+			    (int)(sizeof oevs / sizeof oevs[0]), 0, &on_out);
+			/* A failed poll is the step's error, as it is on the
+			 * main path (__xtc_loop_step): read as "no events" it
+			 * left the loop reporting idle while the failing event
+			 * stayed queued, and the next step polled it again --
+			 * the sim's AIO invariant (io_sim.c sim_aio_tag) then
+			 * hung the run instead of failing it. */
+			if (prc != XTC_OK)
+				return prc < 0 ? prc : XTC_E_INTERNAL;
+			if (on_out > 0) {
 				for (oi = 0; oi < on_out; oi++)
 					(void)__xtc_loop_dispatch_event(loop,
 					    &oevs[oi]);
