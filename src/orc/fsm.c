@@ -14,8 +14,9 @@
  *	  'E' <payload>                       async event  (xtc_fsm_send)
  *	  'C' <reply_pid:8><tag:4><payload>   sync call     (xtc_fsm_call)
  *	  'S'                                 stop kick     (xtc_fsm_stop)
- *	A call reply is a plain message to reply_pid: <tag:4><payload>,
- *	which xtc_fsm_call correlates.
+ *	A call reply is a plain message to reply_pid:
+ *	<payload><tag:4><FSM_REPLY_MAGIC:8>, which xtc_fsm_call receives
+ *	selectively (by the magic) and correlates (by the tag).
  */
 
 #include "xtc_int.h"
@@ -30,6 +31,12 @@
 
 /* A call frame: 'C' <xtc_pid_t> <tag:4> <payload>. */
 #define FSM_CALL_HDR (1 + sizeof(xtc_pid_t) + 4)
+
+/* A reply's trailer: <tag:4><FSM_REPLY_MAGIC:8>. */
+#define FSM_REPLY_HDR 12
+static const uint8_t FSM_REPLY_MAGIC[8] = {
+	0xfe, 'x', 't', 'c', 'f', 's', 'm', 0xa5
+};
 
 /* A stashed (postponed) event: the raw decoded payload, replayed after
  * the next state transition.  Sync calls are NOT postponable (a caller
@@ -388,6 +395,18 @@ xtc_fsm_send(xtc_pid_t target, const void *ev, size_t len)
 	return rc;
 }
 
+/* Any fsm reply (by its trailing magic); the tag is checked by the caller. */
+static int
+__match_fsm_reply(const void *data, size_t size, void *u)
+{
+	const uint8_t *p = data;
+	(void)u;
+	if (size < FSM_REPLY_HDR)
+		return 0;
+	p += size - sizeof FSM_REPLY_MAGIC;
+	return memcmp(p, FSM_REPLY_MAGIC, sizeof FSM_REPLY_MAGIC) == 0;
+}
+
 int
 xtc_fsm_call(xtc_pid_t target, const void *req, size_t req_size,
              void **out_reply, size_t *out_size, int64_t timeout_ns)
@@ -397,6 +416,7 @@ xtc_fsm_call(xtc_pid_t target, const void *req, size_t req_size,
 	uint32_t tag;
 	xtc_pid_t self;
 	size_t msg_size;
+	int64_t deadline = 0;
 	int rc;
 
 	if (req_size > 0 && req == NULL) return XTC_E_INVAL;
@@ -414,46 +434,47 @@ xtc_fsm_call(xtc_pid_t target, const void *req, size_t req_size,
 	rc = xtc_send_owned(target, buf, msg_size);
 	if (rc != XTC_OK) { __os_free(buf); return rc; }
 
-	/* Wait for a reply tagged with our tag: <tag:4><payload>. */
-	{
-		int64_t waited = 0;
-		const int64_t step = 5LL * 1000 * 1000;
-		for (;;) {
-			void  *rmsg = NULL;
-			size_t rsize = 0;
-			int64_t to = timeout_ns < 0 ? step :
-			    (timeout_ns - waited < step ? timeout_ns - waited : step);
-			if (to <= 0 && timeout_ns >= 0) return XTC_E_AGAIN;
-			rc = xtc_recv(&rmsg, &rsize, to);
-			if (rc == XTC_E_AGAIN) {
-				waited += step;
-				if (timeout_ns >= 0 && waited >= timeout_ns)
-					return XTC_E_AGAIN;
-				continue;
-			}
-			if (rc != XTC_OK) return rc;
-			if (rsize >= 4) {
-				uint32_t rtag;
-				/* Reply = payload + tag[4]: hand the received
-				 * block over as is (no strip copy). */
-				memcpy(&rtag, (uint8_t *)rmsg + rsize - 4, 4);
-				if (rtag == tag) {
-					size_t plen = rsize - 4;
-					if (out_reply != NULL && plen > 0) {
-						*out_reply = rmsg;
-						rmsg = NULL;
-					} else if (out_reply != NULL) {
-						*out_reply = NULL;
-					}
-					if (out_size != NULL) *out_size = plen;
-					__os_free(rmsg);
-					return XTC_OK;
-				}
-			}
-			/* Not our reply -- drop it (fsm callers do not multiplex
-			 * unrelated traffic on the calling proc). */
-			__os_free(rmsg);
+	/*
+	 * Wait for the reply with a selective receive, under ONE deadline.
+	 * Until 2.1.2 this was a plain xtc_recv that freed every message
+	 * that was not its reply (the caller's other mail, a monitor DOWN
+	 * included).  A reply whose tag is not ours answers an earlier
+	 * call that timed out, and is dropped.
+	 */
+	if (timeout_ns >= 0) {
+		(void)__os_clock_mono(&deadline);
+		deadline += timeout_ns;
+	}
+	for (;;) {
+		void *rmsg = NULL;
+		size_t rsize = 0;
+		uint32_t rtag;
+		int64_t to = -1, now = 0;
+		if (timeout_ns >= 0) {
+			(void)__os_clock_mono(&now);
+			if (now >= deadline)
+				return XTC_E_AGAIN;
+			to = deadline - now;
 		}
+		rc = xtc_recv_match(__match_fsm_reply, NULL, &rmsg, &rsize, to);
+		if (rc != XTC_OK)
+			return rc; /* XTC_E_AGAIN on timeout */
+		memcpy(&rtag, (uint8_t *)rmsg + rsize - FSM_REPLY_HDR, 4);
+		if (rtag != tag) {
+			__os_free(rmsg); /* a late reply: drop */
+			continue;
+		}
+		/* Hand the received block over as is (no strip copy). */
+		if (out_size != NULL)
+			*out_size = rsize - FSM_REPLY_HDR;
+		if (out_reply != NULL && rsize > FSM_REPLY_HDR) {
+			*out_reply = rmsg;
+			rmsg = NULL;
+		} else if (out_reply != NULL) {
+			*out_reply = NULL;
+		}
+		__os_free(rmsg);
+		return XTC_OK;
 	}
 }
 
@@ -467,12 +488,14 @@ xtc_fsm_reply(xtc_fsm_call_t *call, const void *reply, size_t size)
 	if (call == NULL) return XTC_E_INVAL;
 	if (call->replied) return XTC_E_INVAL;
 	if (xtc_pid_is_none(call->reply_pid)) { call->replied = 1; return XTC_OK; }
-	if (size > SIZE_MAX - 4) return XTC_E_INVAL;
+	if (size > SIZE_MAX - FSM_REPLY_HDR)
+		return XTC_E_INVAL;
 
-	msg_size = 4 + size;
+	msg_size = FSM_REPLY_HDR + size;
 	if (__os_malloc(msg_size, (void **)&buf) != XTC_OK) return XTC_E_NOMEM;
 	if (size > 0) memcpy(buf, reply, size);
 	memcpy(buf + size, &call->reply_tag, 4);   /* trailer: see fsm_call */
+	memcpy(buf + size + 4, FSM_REPLY_MAGIC, sizeof FSM_REPLY_MAGIC);
 	rc = xtc_send_owned(call->reply_pid, buf, msg_size);
 	if (rc != XTC_OK)
 		__os_free(buf);

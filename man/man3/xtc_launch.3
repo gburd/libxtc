@@ -65,6 +65,18 @@ A negative
 .Fa timeout_ns
 means no deadline (a plain awaited spawn).
 .Pp
+The deadline is absolute.
+.Nm
+takes only its child's DOWN from the caller's mailbox; other messages
+the caller receives while it waits stay queued for it and do not extend
+the deadline.
+If the caller exits while it waits \(em it is killed, or it faults \(em
+the child is cancelled as well, so it never outlives its launcher.
+Before 2.1.2
+.Nm
+read and freed every message that arrived while it waited, each one
+restarted the timeout, and a killed caller left the child running.
+.Pp
 .Fa opts ,
 if non-NULL, may set the child proc
 .Fa name
@@ -82,7 +94,7 @@ The child runs on
 .Nm
 is composable: a launched function may itself call
 .Nm .
-It must be called from a fiber (it parks the caller).
+It must be called from a process (it parks the caller).
 .Sh CANCELLATION AND UNCOOPERATIVE WORK
 .Nm
 bounds a
@@ -116,7 +128,10 @@ on deadline (cancelled);
 .Dv XTC_E_ABORTED
 on a contained fault;
 .Dv XTC_E_INVAL
-for bad arguments;
+for bad arguments or when not called from a process;
+.Dv XTC_E_RESOURCE
+when the caller's per-process recovery registry is full
+.Pq see Xr xtc_scope 3 ;
 .Dv XTC_E_NOMEM
 or a spawn error otherwise.
 .Sh SEE ALSO

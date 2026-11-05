@@ -114,6 +114,10 @@ elapses; on success
 .Fa out_reply
 receives a heap buffer the caller releases with
 .Xr xtc_free 3 .
+It takes only its reply from the caller's mailbox; other messages,
+monitor DOWNs included, stay queued.
+Before 2.1.2 it read and freed every message that arrived while it
+waited.
 Inside
 .Fn event ,
 when

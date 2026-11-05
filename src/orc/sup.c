@@ -101,12 +101,19 @@ struct add_child_msg {
 	uint32_t         tag;
 	xtc_child_spec_t spec;
 };
+/* The reply ends in a magic, so the caller can receive it selectively
+ * (xtc_recv_match) and leave its other mail alone, as svr.c does. */
 struct add_child_reply {
 	uint32_t  tag;
 	int       ok;
 	xtc_pid_t pid;
+	uint8_t magic[8];
 };
 XTC_PACK_POP
+
+static const uint8_t SUP_REPLY_MAGIC[8] = {
+	0xfe, 'x', 't', 'c', 's', 'u', 'p', 0xa5
+};
 
 static int
 __should_restart(struct xtc_supervisor *sup, const struct child *c, int reason)
@@ -254,6 +261,7 @@ __handle_add_child(struct xtc_supervisor *sup, const struct add_child_msg *a)
 
 	memset(&rep, 0, sizeof rep);
 	rep.tag = a->tag;
+	memcpy(rep.magic, SUP_REPLY_MAGIC, sizeof rep.magic);
 	/* Bounded dynamic pool: enforce max_children (0 = unbounded).  Count
 	 * only live children so a slot freed by a DOWN can be reused. */
 	if (sup->opts.max_children > 0) {
@@ -788,7 +796,26 @@ fail0:	__os_free(sup);
  * thread, preventing the supervisor from reaching its exit cleanup
  * to fire the notify.  Splitting stop and join is the correct shape.
  */
-/* PUBLIC: int xtc_sup_add_child __P((xtc_supervisor_t *, const xtc_child_spec_t *, xtc_pid_t *)); */
+/* Any add_child reply (by its magic); the tag is checked by the caller. */
+static int
+__match_add_reply(const void *data, size_t size, void *u)
+{
+	const struct add_child_reply *r = data;
+	(void)u;
+	if (size != sizeof *r)
+		return 0;
+	return memcmp(r->magic, SUP_REPLY_MAGIC, sizeof r->magic) == 0;
+}
+
+/*
+ * PUBLIC: int xtc_sup_add_child __P((xtc_supervisor_t *, const xtc_child_spec_t *, xtc_pid_t *));
+ *
+ * Waits for the reply with a selective receive: the caller's other mail
+ * stays queued.  Until 2.1.2 this was a plain xtc_recv that freed every
+ * message that was not its reply, a monitor DOWN included.  A reply
+ * whose tag is not this call's answers an earlier call that timed out,
+ * and is dropped.  The 5 s bound is one deadline for the whole call.
+ */
 int
 xtc_sup_add_child(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
                   xtc_pid_t *out_pid)
@@ -797,6 +824,7 @@ xtc_sup_add_child(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
 	struct add_child_msg a;
 	struct add_child_reply rep;
 	void *msg; size_t sz;
+	int64_t deadline = 0, now = 0;
 	int rc;
 
 	if (sup == NULL || spec == NULL) return XTC_E_INVAL;
@@ -817,19 +845,27 @@ xtc_sup_add_child(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
 	    != XTC_OK)
 		return XTC_E_INTERNAL;
 
+	(void)__os_clock_mono(&deadline);
+	deadline += 5LL * 1000 * 1000 * 1000;
 	for (;;) {
-		if (xtc_recv(&msg, &sz, 5LL * 1000 * 1000 * 1000) != XTC_OK)
+		(void)__os_clock_mono(&now);
+		if (now >= deadline)
 			return XTC_E_AGAIN;
-		if (sz >= sizeof rep) {
-			memcpy(&rep, msg, sizeof rep);
-			__os_free(msg);
-			if (rep.tag != a.tag) continue;   /* not our reply */
-			if (rep.ok == 2) return XTC_E_RESOURCE;   /* pool at max_children */
-			if (!rep.ok) return XTC_E_NOMEM;
-			if (out_pid != NULL) *out_pid = rep.pid;
-			return XTC_OK;
-		}
+		rc = xtc_recv_match(__match_add_reply, NULL, &msg, &sz,
+		    deadline - now);
+		if (rc != XTC_OK)
+			return XTC_E_AGAIN;
+		memcpy(&rep, msg, sizeof rep);
 		__os_free(msg);
+		if (rep.tag != a.tag)
+			continue; /* a late reply: drop */
+		if (rep.ok == 2)
+			return XTC_E_RESOURCE; /* pool at max_children */
+		if (!rep.ok)
+			return XTC_E_NOMEM;
+		if (out_pid != NULL)
+			*out_pid = rep.pid;
+		return XTC_OK;
 	}
 }
 
