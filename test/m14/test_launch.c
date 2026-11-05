@@ -211,9 +211,147 @@ test_launch_runaway(const MunitParameter p[], void *d)
 	return MUNIT_OK;   /* documented skip -- see comment */
 }
 
+/*
+ * ---- (e) effects case 4: unrelated mail during a launch ----
+ * A mailer sends the launcher a message every 40 ms while it waits on a
+ * 300 ms child with a 60 ms deadline.  2.1.1 re-armed the relative
+ * timeout on every message (launch_rc=0 after ~300 ms) and freed every
+ * message (mail_seen=0).  Now: XTC_E_AGAIN at ~60 ms, and the mail is
+ * still in the launcher's mailbox afterwards.
+ */
+#define LMS (1000LL * 1000)
+static _Atomic int g_mail_rc = 999, g_mail_seen, g_mail_sent;
+static _Atomic int64_t g_mail_ms = -1;
+static xtc_pid_t g_mail_launcher;
+
+static intptr_t
+slow300_fn(void *arg)
+{
+	(void)arg;
+	(void)xtc_proc_sleep(300 * LMS);
+	return 42;
+}
+
+static void
+mail_launcher(void *arg)
+{
+	int64_t t0;
+	void *m;
+	size_t n;
+	(void)arg;
+	t0 = xtc_clock_mono();
+	atomic_store(&g_mail_rc,
+	    xtc_launch(NULL, slow300_fn, NULL, 60 * LMS, NULL, NULL));
+	atomic_store(&g_mail_ms, (xtc_clock_mono() - t0) / LMS);
+	(void)xtc_proc_sleep(150 * LMS);   /* let the mailer finish */
+	while (xtc_recv(&m, &n, 0) == XTC_OK && m != NULL) {
+		atomic_fetch_add(&g_mail_seen, 1);
+		xtc_free(m);
+	}
+}
+
+static void
+mailer(void *arg)
+{
+	int i;
+	(void)arg;
+	for (i = 0; i < 4; i++) {
+		(void)xtc_proc_sleep(20 * LMS);
+		if (xtc_send(g_mail_launcher, "x", 1) == XTC_OK)
+			atomic_fetch_add(&g_mail_sent, 1);
+	}
+}
+
+static MunitResult
+test_launch_keeps_mail(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_pid_t m;
+	(void)p;
+	(void)d;
+	atomic_store(&g_mail_seen, 0);
+	atomic_store(&g_mail_sent, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, mail_launcher, NULL, NULL,
+	                     &g_mail_launcher),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, mailer, NULL, NULL, &m), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_mail_rc), ==, XTC_E_AGAIN);
+	munit_assert_int64(atomic_load(&g_mail_ms), <, 250);
+	munit_assert_int(atomic_load(&g_mail_sent), ==, 4);
+	munit_assert_int(atomic_load(&g_mail_seen), ==, 4);
+	return MUNIT_OK;
+}
+
+/*
+ * ---- (f) effects case 3: the launcher is killed while it waits ----
+ * 2.1.1 only monitored the child, so it ran all 20 ticks after its
+ * launcher died.  Now the launcher's exit kills it.
+ */
+static _Atomic int g_orphan_ticks, g_orphan_done;
+static xtc_pid_t g_orphan_launcher;
+
+static intptr_t
+ticker_fn(void *arg)
+{
+	int i;
+	(void)arg;
+	for (i = 0; i < 20; i++) {
+		(void)xtc_proc_sleep(10 * LMS);
+		atomic_fetch_add(&g_orphan_ticks, 1);
+	}
+	return 0;
+}
+
+static void
+orphan_launcher(void *arg)
+{
+	(void)arg;
+	(void)xtc_launch(NULL, ticker_fn, NULL, -1, NULL, NULL);
+	atomic_store(&g_orphan_done, 1);   /* not reached: killed */
+}
+
+static void
+orphan_killer(void *arg)
+{
+	(void)arg;
+	(void)xtc_proc_sleep(25 * LMS);
+	(void)xtc_exit_pid(g_orphan_launcher, 7);
+}
+
+static MunitResult
+test_launch_no_orphan(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_pid_t k;
+	(void)p;
+	(void)d;
+	atomic_store(&g_orphan_ticks, 0);
+	atomic_store(&g_orphan_done, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, orphan_launcher, NULL, NULL,
+	                     &g_orphan_launcher),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, orphan_killer, NULL, NULL, &k),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_orphan_done), ==, 0);
+	/* Killed at ~25 ms: 2 ticks, at most 3; never the 2.1.1 20. */
+	munit_assert_int(atomic_load(&g_orphan_ticks), <=, 3);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/launch", test_launch, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/launch_runaway", test_launch_runaway, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/launch_keeps_mail", test_launch_keeps_mail, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/launch_no_orphan", test_launch_no_orphan, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

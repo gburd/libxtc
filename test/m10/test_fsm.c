@@ -398,10 +398,79 @@ test_fsm_join_equal_pid_other_loop(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * A3: a proc with a monitor DOWN already queued makes an xtc_fsm_call.
+ * 2.1.1 waited for the reply with a plain xtc_recv and freed every
+ * message that was not it: the call returned XTC_OK and the DOWN was
+ * gone.
+ */
+struct call_keep {
+	xtc_loop_t *loop;
+	xtc_fsm_t *fsm;
+	int call_rc;
+	int down_kept;
+};
+
+static void
+ck_quick(void *a)
+{
+	(void)a;
+	(void)xtc_exit_self(3);
+}
+
+static void
+ck_caller(void *arg)
+{
+	struct call_keep *ck = arg;
+	xtc_down_info_t di = XTC_DOWN_INFO_INIT;
+	xtc_pid_t x;
+	uint64_t ref;
+	void *rep = NULL, *m = NULL;
+	size_t rn = 0, sz;
+	(void)xtc_proc_spawn_monitor(ck->loop, ck_quick, NULL, NULL, &x, &ref);
+	(void)xtc_proc_sleep(20LL * 1000 * 1000); /* the DOWN is queued */
+	ck->call_rc = xtc_fsm_call(xtc_fsm_pid(ck->fsm), "?", 1, &rep, &rn,
+	    1000LL * 1000 * 1000);
+	if (rep != NULL)
+		xtc_free(rep);
+	if (xtc_recv(&m, &sz, 50LL * 1000 * 1000) == XTC_OK &&
+	    xtc_down_decode_ex(m, sz, &di) == XTC_OK && di.ref == ref)
+		ck->down_kept = 1;
+	if (m != NULL)
+		xtc_free(m);
+	(void)xtc_fsm_stop(ck->fsm);
+}
+
+static MunitResult
+test_fsm_call_keeps_mail(const MunitParameter p[], void *data)
+{
+	struct door d;
+	struct call_keep ck;
+	(void)p;
+	(void)data;
+	memset(&d, 0, sizeof d);
+	memset(&ck, 0, sizeof ck);
+	ck.call_rc = -999;
+	munit_assert_int(xtc_loop_init(&ck.loop), ==, XTC_OK);
+	munit_assert_int(xtc_fsm_start(ck.loop, &DOOR_CB, &d, S_CLOSED, NULL,
+	                     &ck.fsm),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(ck.loop, ck_caller, &ck, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(ck.loop), ==, XTC_OK);
+	munit_assert_int(ck.call_rc, ==, XTC_OK);
+	munit_assert_int(ck.down_kept, ==, 1);
+	(void)xtc_fsm_join(ck.fsm, 0);
+	(void)xtc_loop_fini(ck.loop);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/fsm_basic", test_fsm_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fsm_state_timeout", test_fsm_state_timeout, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fsm_join_equal_pid_other_loop", test_fsm_join_equal_pid_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/fsm_call_keeps_mail", test_fsm_call_keeps_mail, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 

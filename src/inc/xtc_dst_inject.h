@@ -195,4 +195,12 @@
  */
 #define XTC_DST_BUG_SUP_NOHOOK 27
 
+/*
+ * 28 LAUNCH_EATMAIL: xtc_launch receives ANY message while it waits for
+ * its child's DOWN and frees what is not that DOWN, as 2.1.1 did, so a
+ * DOWN or other mail queued for the caller is lost (test_sim_launch: "a
+ * message queued for the launcher did not survive xtc_launch").
+ */
+#define XTC_DST_BUG_LAUNCH_EATMAIL 28
+
 #endif /* XTC_DST_INJECT_H */

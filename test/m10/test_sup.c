@@ -1164,6 +1164,77 @@ test_killed_sup_stops_children(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * A3 (otp probe E): a proc with a monitor DOWN already queued calls
+ * xtc_sup_add_child.  2.1.1 waited for the reply with a plain xtc_recv
+ * and freed everything that was not it: add_child returned XTC_OK and
+ * the DOWN was gone.
+ */
+static _Atomic int g_ac_rc = -999, g_ac_down = -1;
+static xtc_supervisor_t *g_ac_sup;
+
+static void
+ac_quick(void *a)
+{
+	(void)a;
+	(void)xtc_exit_self(3);
+}
+
+static void
+ac_worker(void *a)
+{
+	(void)a;
+	(void)xtc_proc_sleep(20 * NA_MS);
+}
+
+static void
+ac_caller(void *a)
+{
+	xtc_child_spec_t spec = XTC_CHILD_SPEC_INIT;
+	xtc_down_info_t di = XTC_DOWN_INFO_INIT;
+	xtc_pid_t x, w;
+	uint64_t ref;
+	void *m = NULL;
+	size_t sz;
+	(void)xtc_proc_spawn_monitor((xtc_loop_t *)a, ac_quick, NULL, NULL, &x,
+	    &ref);
+	(void)xtc_proc_sleep(20 * NA_MS); /* the DOWN is now queued */
+	spec.fn = ac_worker;
+	spec.policy = XTC_RESTART_TEMPORARY;
+	atomic_store(&g_ac_rc, xtc_sup_add_child(g_ac_sup, &spec, &w));
+	if (xtc_recv(&m, &sz, 50 * NA_MS) == XTC_OK &&
+	    xtc_down_decode_ex(m, sz, &di) == XTC_OK && di.ref == ref &&
+	    di.exit_code == 3)
+		atomic_store(&g_ac_down, 1);
+	else
+		atomic_store(&g_ac_down, 0);
+	if (m != NULL)
+		xtc_free(m);
+	(void)xtc_sup_stop(g_ac_sup);
+}
+
+static MunitResult
+test_add_child_keeps_mail(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_pid_t pid;
+	(void)p;
+	(void)d;
+	so.strategy = XTC_SUP_SIMPLE_OFO;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_sup_start(loop, &so, NULL, 0, &g_ac_sup), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, ac_caller, loop, NULL, &pid), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_ac_rc), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_ac_down), ==, 1);
+	munit_assert_int(xtc_sup_join(g_ac_sup, 0), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/add_child_other_loop", test_add_child_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/supervisor_restarts",   test_supervisor_restarts, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1182,6 +1253,8 @@ static MunitTest tests[] = {
 	    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/killed_sup_stops_children", test_killed_sup_stops_children, NULL,
 	    NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/add_child_keeps_mail", test_add_child_keeps_mail, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10/sup", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

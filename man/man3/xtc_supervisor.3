@@ -162,6 +162,13 @@ This is the dynamic path used with a
 .Sy simple_one_for_one
 supervisor, whose children are spawned on demand rather than all
 listed up front.
+It must be called from a process; it waits up to 5 seconds for the
+supervisor's reply
+.Pq Er XTC_E_AGAIN No if none comes ,
+and takes only that reply from the caller's mailbox: other messages,
+monitor DOWNs included, stay queued.
+Before 2.1.2 it read and freed every message that arrived while it
+waited.
 .Pp
 .Fn xtc_sup_stop
 asynchronously requests shutdown.  Children get

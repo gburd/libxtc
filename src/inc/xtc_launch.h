@@ -12,7 +12,7 @@
  *	exceeds the deadline it is CANCELLED at the deadline (its recovery
  *	/ at-exit cleanup runs, so locks, fds, and memory contexts it
  *	registered are released -- no leak) and xtc_launch returns
- *	XTC_E_TIMEDOUT.  This is the statement-timeout / bounded-untrusted-
+ *	XTC_E_AGAIN.  This is the statement-timeout / bounded-untrusted-
  *	work primitive.
  *
  *	Precise-timeout on a RUNAWAY (a fn that never reaches a cooperative
@@ -24,8 +24,8 @@
  *	its next such point regardless.
  *
  *	Composable: a launched fn may itself xtc_launch.  Must be called
- *	from a fiber (it parks the caller waiting on the child); off a
- *	fiber it drives the loop.
+ *	from a process (it parks the caller waiting on the child); off a
+ *	process it returns XTC_E_INVAL.
  */
 
 #ifndef XTC_LAUNCH_H
@@ -76,7 +76,16 @@ typedef struct xtc_launch_opts {
  * On a fault inside fn (contained by the per-fiber recovery): returns
  * XTC_E_ABORTED.
  *
- * Other returns: XTC_E_INVAL (bad args), XTC_E_NOMEM / spawn failure.
+ * The deadline is absolute: mail the caller receives meanwhile does not
+ * extend it, and stays in the caller's mailbox (xtc_launch takes only
+ * its child's DOWN).  If the caller exits while it waits (it is killed,
+ * or faults), the child is cancelled too.  Before 2.1.2 unrelated mail
+ * was read and freed, each message restarted the timeout, and a killed
+ * caller left the child running.
+ *
+ * Other returns: XTC_E_INVAL (bad args, or not called from a process),
+ * XTC_E_RESOURCE (the caller's recovery registry is full),
+ * XTC_E_NOMEM / spawn failure.
  *
  * PUBLIC: int xtc_launch __P((xtc_loop_t *, xtc_launch_fn, void *, int64_t, const xtc_launch_opts_t *, intptr_t *));
  */

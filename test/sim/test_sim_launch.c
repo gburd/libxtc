@@ -22,7 +22,13 @@
  *	      (no resource leak) -- deterministically for the seed;
  *	  (c) clean quiescence;
  *	  (d) REPLAY: the same seed reproduces the exact per-launcher
- *	      outcomes (finish-vs-timeout) and the result fingerprint.
+ *	      outcomes (finish-vs-timeout) and the result fingerprint;
+ *	  (e) MAIL SURVIVES: every launcher first has a monitor DOWN queued
+ *	      (a helper it monitors exits before the launch), and a seeded
+ *	      sender mails it during the launch.  After xtc_launch returns,
+ *	      the DOWN and the mail are still in the launcher's mailbox.
+ *	      2.1.1's launch read and freed every message it was not
+ *	      waiting for (planted as LAUNCH_EATMAIL).
  */
 
 #ifndef _GNU_SOURCE
@@ -49,6 +55,9 @@ static atomic_int g_timed_out;   /* launches that returned XTC_E_AGAIN */
 static atomic_int g_cleanups;    /* at-exit cleanups the cancel path ran */
 static atomic_int g_bad;         /* an unexpected outcome (BUG) */
 static atomic_int g_done;        /* launchers finished */
+static atomic_int g_lost;        /* launchers whose queued mail was eaten */
+static xtc_pid_t  g_lpid[16];    /* each launcher's pid, for its mailer */
+static atomic_int g_mailed[16];  /* mail each mailer delivered */
 
 /* A launched fn.  arg low bit selects the behavior: even -> finish fast
  * and return a value; odd -> sleep well past the deadline (must be
@@ -73,15 +82,66 @@ launched(void *arg)
 	return (intptr_t)(id * 10 + 7);
 }
 
-struct launcher_arg { int id; };
+struct launcher_arg { int id; xtc_loop_t *loop; };
+
+static void
+helper(void *arg)
+{
+	(void)arg;   /* exits at once: its DOWN is queued for the launcher */
+}
+
+/* Mails launcher `id` 1..3 times at seeded points inside its launch. */
+static void
+mailer(void *arg)
+{
+	int id = (int)(intptr_t)arg, i, k;
+	k = 1 + (int)__xtc_sim_rng_range(XTC_SIM_RNG_APP, 3);
+	for (i = 0; i < k; i++) {
+		(void)xtc_proc_sleep(1000 * 1000LL *
+		    (int64_t)(1 + __xtc_sim_rng_range(XTC_SIM_RNG_APP, 8)));
+		if (xtc_send(g_lpid[id], "m", 1) == XTC_OK)
+			atomic_fetch_add(&g_mailed[id], 1);
+	}
+}
+
+/* After the launch: the queued DOWN, and every message mailed so far,
+ * are still in the mailbox. */
+static void
+check_mail(int id, uint64_t ref)
+{
+	void *m = NULL;
+	size_t n = 0;
+	xtc_down_info_t di = XTC_DOWN_INFO_INIT;
+	int down = 0, mail = 0, sent = atomic_load(&g_mailed[id]);
+	while (xtc_recv(&m, &n, 0) == XTC_OK && m != NULL) {
+		if (xtc_down_decode_ex(m, n, &di) == XTC_OK && di.ref == ref)
+			down++;
+		else if (n == 1)
+			mail++;
+		xtc_free(m);
+		m = NULL;
+	}
+	if (down != 1 || mail < sent)
+		atomic_fetch_add(&g_lost, 1);
+}
 
 static void
 launcher(void *arg)
 {
 	struct launcher_arg *la = arg;
 	intptr_t v = 0;
-	int rc = xtc_launch(NULL, launched,
-	    (void *)(intptr_t)la->id, DEADLINE_NS, NULL, &v);
+	xtc_pid_t h;
+	uint64_t ref = 0;
+	int rc;
+
+	g_lpid[la->id] = xtc_self();
+	(void)xtc_proc_spawn_monitor(la->loop, helper, NULL, NULL, &h, &ref);
+	(void)xtc_proc_spawn(la->loop, mailer, (void *)(intptr_t)la->id, NULL,
+	    NULL);
+	(void)xtc_proc_sleep(500 * 1000LL);   /* the helper's DOWN arrives */
+	rc = xtc_launch(NULL, launched, (void *)(intptr_t)la->id, DEADLINE_NS,
+	    NULL, &v);
+	check_mail(la->id, ref);
 
 	if (la->id & 1) {
 		/* Slow -> must have timed out (cancelled). */
@@ -115,7 +175,7 @@ coordinator(void *arg)
 
 static int
 run_one(uint64_t seed, int *out_fin, int *out_to, int *out_clean,
-    int *out_bad, uint64_t *out_state)
+    int *out_bad, int *out_lost, uint64_t *out_state)
 {
 	xtc_exec_t *e = NULL;
 	struct launcher_arg la[N_LAUNCH];
@@ -126,6 +186,9 @@ run_one(uint64_t seed, int *out_fin, int *out_to, int *out_clean,
 	atomic_store(&g_cleanups, 0);
 	atomic_store(&g_bad, 0);
 	atomic_store(&g_done, 0);
+	atomic_store(&g_lost, 0);
+	for (i = 0; i < N_LAUNCH; i++)
+		atomic_store(&g_mailed[i], 0);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
 		return -1;
@@ -133,8 +196,8 @@ run_one(uint64_t seed, int *out_fin, int *out_to, int *out_clean,
 
 	for (i = 0; i < N_LAUNCH; i++) {
 		la[i].id = i;
-		(void)xtc_proc_spawn(xtc_exec_loop(e, i % N_LOOPS), launcher,
-		    &la[i], NULL, NULL);
+		la[i].loop = xtc_exec_loop(e, i % N_LOOPS);
+		(void)xtc_proc_spawn(la[i].loop, launcher, &la[i], NULL, NULL);
 	}
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), coordinator, e, NULL, NULL);
 
@@ -144,6 +207,7 @@ run_one(uint64_t seed, int *out_fin, int *out_to, int *out_clean,
 	if (out_to)    *out_to = atomic_load(&g_timed_out);
 	if (out_clean) *out_clean = atomic_load(&g_cleanups);
 	if (out_bad)   *out_bad = atomic_load(&g_bad);
+	if (out_lost)  *out_lost = atomic_load(&g_lost);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	(void)xtc_exec_fini(e);
 	return rc;
@@ -168,21 +232,28 @@ main(int argc, char **argv)
 
 	for (i = 0; i < n; i++) {
 		uint64_t seed = base + (uint64_t)i * 0x9E3779B97F4A7C15ull;
-		int fin = 0, to = 0, cl = 0, bad = 0, rc, pass = 1;
-		int fin2 = 0, to2 = 0, cl2 = 0, bad2 = 0, rc2;
+		int fin = 0, to = 0, cl = 0, bad = 0, lost = 0, rc, pass = 1;
+		int fin2 = 0, to2 = 0, cl2 = 0, bad2 = 0, lost2 = 0, rc2;
 		uint64_t st = 0, st2 = 0;
 
-		rc = run_one(seed, &fin, &to, &cl, &bad, &st);
+		rc = run_one(seed, &fin, &to, &cl, &bad, &lost, &st);
 		if (rc != XTC_OK) pass = 0;
 		else if (bad) pass = 0;
 		else if (fin != expect_fin) pass = 0;   /* all fast finished */
 		else if (to != expect_to) pass = 0;      /* all slow cancelled */
 		else if (cl != expect_to) pass = 0;      /* each cancel cleaned up */
+		else if (lost != 0) {
+			printf("  seed 0x%016llx: a message queued for the "
+			       "launcher did not survive xtc_launch (%d of %d "
+			       "launchers)\n",
+			    (unsigned long long)seed, lost, N_LAUNCH);
+			pass = 0;
+		}
 
 		if (pass) {
-			rc2 = run_one(seed, &fin2, &to2, &cl2, &bad2, &st2);
+			rc2 = run_one(seed, &fin2, &to2, &cl2, &bad2, &lost2, &st2);
 			if (rc2 != rc || fin2 != fin || to2 != to || cl2 != cl ||
-			    st2 != st)
+			    lost2 != lost || st2 != st)
 				pass = 0;
 		}
 
@@ -197,7 +268,9 @@ main(int argc, char **argv)
 
 	if (fails == 0) {
 		printf("OK: xtc_launch DST -- %d seeds, finish/timeout/cancel "
-		    "outcomes + at-exit cleanup deterministic, all replay\n", n);
+		    "outcomes + at-exit cleanup deterministic, a DOWN and mail "
+		    "queued for the launcher survive the launch, all "
+		    "replay\n", n);
 		return 0;
 	}
 	printf("FAIL: %d/%d xtc_launch seeds failed\n", fails, n);
