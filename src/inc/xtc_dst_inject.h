@@ -152,6 +152,16 @@
 #define XTC_DST_BUG_PRUNEHZN   21  /* xstore.c: prune-on-write deletes the version at the horizon */
 #define XTC_DST_BUG_SHIFTLO    22  /* btree.c: a resumed cursor skips the lo-fence re-check */
 #define XTC_DST_BUG_GCBATCH    23  /* xstore.c: version GC forgets its row at a batch boundary */
+/*
+ * 29 AIO_TAG_AFTER_DONE: src/io/io_sim.c's AIO reaper publishes done and
+ * only then reads a->tag, the order every native reaper had until 2.1.2.
+ * The xtc_aio_t is on the parked fiber's stack, and a kill-woken fiber
+ * that sees done leaves the wait and dies, so the late read is of a dead
+ * frame.  With the io.aio.wake_after_done buggify (the reaper stalls
+ * between the two stores) test_sim_aio_migrate's kill arm reports "aio
+ * reaper read a released xtc_aio_t".
+ */
+#define XTC_DST_BUG_AIO_TAG_AFTER_DONE 29
 
 /*
  * 24 RECOV_REWALK: proc.c walks the recovery registry the 2.1.1 way

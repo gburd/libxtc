@@ -55,6 +55,7 @@ uint32_t xtc_bdev_logical_sector __P((const xtc_bdev_t *));
 uint32_t xtc_bdev_physical_sector __P((const xtc_bdev_t *));
 uint64_t xtc_bdev_capacity __P((const xtc_bdev_t *));
 void __xtc_io_backend_fini __P((xtc_io_t *));
+void __xtc_io_sim_aio_release __P((xtc_io_t *, const xtc_aio_t *));
 void __xtc_net_ktls_seen __P((void));
 void xtc_bdev_close __P((xtc_bdev_t *));
 void xtc_io_set_iowq_max_workers __P((unsigned, unsigned));

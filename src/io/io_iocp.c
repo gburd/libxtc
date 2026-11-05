@@ -1242,6 +1242,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		ar = __take_aio(io, ov, &aslot);
 		if (ar != NULL) {
 			xtc_aio_t *a = (xtc_aio_t *)ar->aio;
+			void *tag = a->tag; /* a may die after done */
 			DWORD nbytes = 0;
 			if (GetOverlappedResult((HANDLE)ar->fh, ov, &nbytes, FALSE))
 				a->res = (int)nbytes;
@@ -1251,7 +1252,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 				a->res = -5;                 /* I/O error (~ -EIO) */
 			__xtc_aio_done_set(a);   /* release: res, then flag */
 			if (out_idx < max) {
-				events[out_idx].tag = a->tag;
+				events[out_idx].tag = tag;
 				events[out_idx].flags = XTC_IO_AIO;
 				events[out_idx].fd = -1;
 				out_idx++;

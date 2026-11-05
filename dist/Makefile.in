@@ -508,6 +508,7 @@ TESTS_C		= test_sched_policy test_sched_continuous test_batch test_version test_
 		  test_cfg \
 		  test_stall \
 		  test_stack_reclaim \
+		  test_aio_kill_stress \
 		  test_unsafe_depth \
 		  test_coverage_pump \
 		  test_fault_inject \
@@ -2151,6 +2152,12 @@ test_stack_reclaim: $(srcdir)/../test/m14/test_stack_reclaim.c \
 		$(srcdir)/../test/m14/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m14 \
 		-o $@ $(srcdir)/../test/m14/test_stack_reclaim.c \
+		$(srcdir)/../test/m14/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_aio_kill_stress: $(srcdir)/../test/m14/test_aio_kill_stress.c \
+		$(srcdir)/../test/m14/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m14 \
+		-o $@ $(srcdir)/../test/m14/test_aio_kill_stress.c \
 		$(srcdir)/../test/m14/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_launch: $(srcdir)/../test/m14/test_launch.c \

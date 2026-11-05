@@ -202,6 +202,18 @@ aio_offload_v(int op, int fd, const struct iovec *iov, int iovcnt,
  */
 #define AIO_KILL_POINT() __xtc_proc_kill_poll()
 
+/*
+ * The wait is over and `a` dies with this frame.  Under DST, tell the
+ * sim backend, so a reaper that still reads `a` (it may: the wake can
+ * trail the done store) is caught as the use-after-return it is.
+ */
+#if defined(XTC_IO_BACKEND_SIM)
+extern void __xtc_io_sim_aio_release(xtc_io_t *io, const xtc_aio_t *a);
+#define AIO_SIM_RELEASE(l, ap) __xtc_io_sim_aio_release((l)->io, (ap))
+#else
+#define AIO_SIM_RELEASE(l, ap) ((void)0)
+#endif
+
 static int
 aio_do(int op, int fd, void *buf, uint32_t len, int64_t off)
 {
@@ -337,6 +349,7 @@ aio_do(int op, int fd, void *buf, uint32_t len, int64_t off)
 				(void)xtc_loop_wake(loop);
 		}
 		XTC_PROBE_AIO_DONE((uintptr_t)&a, op, a.res);
+		AIO_SIM_RELEASE(loop, &a);
 		if (tail_on && park_ns != 0) {
 			int64_t run_ns = 0;
 			(void)__os_clock_mono(&run_ns);
@@ -455,6 +468,7 @@ aio_do_v(int op, int fd, const struct iovec *iov, int iovcnt, int64_t off)
 			(void)xtc_loop_wake(loop);
 	}
 	XTC_PROBE_AIO_DONE((uintptr_t)&a, op, a.res);
+	AIO_SIM_RELEASE(loop, &a);
 	AIO_KILL_POINT();
 	return a.res;
 }

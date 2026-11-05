@@ -402,6 +402,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 			 * negative aio_error becomes a -errno result. */
 			struct kq_aio *w = (struct kq_aio *)evs[i].udata;
 			xtc_aio_t *a = w->a;
+			void *atag = a->tag; /* a may die after done */
 			int err = aio_error(&w->cb);
 			ssize_t n = aio_return(&w->cb);
 			if (err != 0)
@@ -409,7 +410,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 			else
 				a->res = (int32_t)n;   /* bytes (0 for fsync) */
 			__xtc_aio_done_set(a);   /* release: res, then flag */
-			events[out_idx].tag = a->tag;
+			events[out_idx].tag = atag;
 			events[out_idx].flags = XTC_IO_AIO;
 			__os_free(w);
 #endif
