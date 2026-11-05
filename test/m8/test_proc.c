@@ -1276,9 +1276,14 @@ test_pid_local_id_ceiling(const MunitParameter p[], void *d)
 	if (rc == XTC_E_NOMEM && n < A1_PROBE_TARGET) {
 		munit_logf(MUNIT_LOG_INFO, "host mapping limit hit at %u procs "
 		    "(raise vm.max_map_count to run this test)", n);
-		/* Release the spawned procs before skipping. */
+		/* Release the spawned procs before skipping.  Not with a
+		 * message: at the memory limit that hit the spawn, a send can
+		 * fail too (XTC_E_NOMEM for the envelope), and a proc whose
+		 * wake was refused stays parked in xtc_recv -- the loop then
+		 * never drains and the test hung (OmniOS, where the limit is
+		 * address space at ~65,500 procs).  A kill needs no envelope. */
 		for (i = 0; i < n; i++)
-			(void)xtc_send(pids[i], &i, sizeof i);
+			(void)xtc_exit_pid(pids[i], 1);
 		(void)xtc_loop_run(lp);
 		(void)xtc_loop_fini(lp);
 		(void)xtc_set_stack_size(old_stack);
