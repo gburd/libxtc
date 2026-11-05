@@ -186,4 +186,13 @@
  */
 #define XTC_DST_BUG_SUP_LOCKPARK 26
 
+/*
+ * 27 SUP_NOHOOK: sup.c runs its shutdown (kill the children, wait for
+ * them, signal `stopped`) inline after its receive loop, as 2.1.1 did,
+ * instead of from an xtc_proc_at_exit hook, so a supervisor that is
+ * killed leaves its children running and never reports stopped
+ * (test_sim_sup_strategy: "children outlived a killed supervisor").
+ */
+#define XTC_DST_BUG_SUP_NOHOOK 27
+
 #endif /* XTC_DST_INJECT_H */

@@ -18,7 +18,13 @@
  *	    restarts;
  *	  - restart INTENSITY: more than max_restarts crashes within
  *	    period_ns makes the supervisor give up and exit (it does not
- *	    restart forever).
+ *	    restart forever);
+ *	  - SUPERVISOR KILLED at a seeded step (0..9 ms, which lands in its
+ *	    receive loop, inside a group restart's cleanup wait, or right
+ *	    after one): no child outlives it, it reports !alive, and
+ *	    xtc_sup_join frees it.  2.1.1 ran the shutdown inline after the
+ *	    receive loop, so a kill left the children running and alive=1
+ *	    (planted as SUP_NOHOOK).
  *
  *	Each scenario is a pure function of the seed (the crash timing is
  *	drawn from the sim RNG), so a repeated seed reproduces the exact
@@ -39,6 +45,7 @@
 #include "xtc_exec.h"
 #include "xtc_proc.h"
 #include "xtc_orc.h"
+#include "xtc_inspect.h"
 #include "xtc_sim.h"
 
 #define N_LOOPS 2
@@ -47,8 +54,17 @@
 /* Per-kid spawn counts (index = child slot).  A child bumps its slot on
  * every (re)spawn, so we can tell which children were restarted. */
 static atomic_int g_spawns[N_KIDS];
+static atomic_int g_running; /* kids alive (their exit hook decrements) */
+static int g_join_rc;        /* the scenario's final xtc_sup_join */
 static xtc_pid_t  g_pids[N_KIDS];
 static xtc_supervisor_t *g_sup;
+
+static void
+kid_gone(void *arg)
+{
+	(void)arg;
+	atomic_fetch_sub(&g_running, 1);
+}
 
 /* A supervised child: record pid, bump my spawn counter, park forever
  * (the supervisor kills me on stop / strategy takedown). */
@@ -58,6 +74,8 @@ kid(void *arg)
 	int idx = (int)(intptr_t)arg;
 	g_pids[idx] = xtc_self();
 	atomic_fetch_add(&g_spawns[idx], 1);
+	if (xtc_proc_at_exit(kid_gone, NULL) == XTC_OK)
+		atomic_fetch_add(&g_running, 1);
 	for (;;) {
 		void *m = NULL;
 		size_t sz = 0;
@@ -130,14 +148,62 @@ hammer(void *arg)
 		(void)xtc_sup_stop(g_sup);
 }
 
+/* sup_kill: the supervisor proc, found as the one live proc that is
+ * neither a kid nor the killer (the test spawns nothing else). */
+static xtc_pid_t g_sup_pid;
+
+static int
+find_sup(const xtc_proc_info_t *info, void *u)
+{
+	int i;
+	(void)u;
+	if (xtc_pid_eq(info->pid, xtc_self()))
+		return 0;
+	for (i = 0; i < N_KIDS; i++)
+		if (xtc_pid_eq(info->pid, g_pids[i]))
+			return 0;
+	g_sup_pid = info->pid;
+	return 1;
+}
+
+/*
+ * Kill the supervisor proc itself at a seeded step: crash child 1 first
+ * (a one_for_all restart, whose cleanup wait sleeps), then kill the
+ * supervisor 0..9 ms later.  The run must still quiesce: the killed
+ * supervisor kills and waits for its children, and stops the executor.
+ * A child that outlived it would keep the run alive until the step
+ * budget, so `alive`, g_running and the run's rc all witness it.
+ */
+static void
+sup_killer(void *arg)
+{
+	int64_t delay =
+	    (int64_t)__xtc_sim_rng_range(XTC_SIM_RNG_APP, 10) * 1000 * 1000LL;
+	xtc_pid_t v;
+	int tries;
+	(void)arg;
+	for (tries = 0; tries < 50; tries++) {
+		v = g_pids[1];
+		if (!xtc_pid_is_none(v))
+			break;
+		(void)xtc_proc_sleep(1000 * 1000LL);
+	}
+	g_sup_pid = XTC_PID_NONE;
+	(void)xtc_inspect_procs(find_sup, NULL);
+	if (!xtc_pid_is_none(g_pids[1]))
+		(void)xtc_exit_pid(g_pids[1], 99);
+	(void)xtc_proc_sleep(delay);
+	(void)xtc_exit_pid(g_sup_pid, 9);
+}
+
 /* Run one scenario.  strategy/policy/victim/reason configure the crash;
  * hammer_times>0 selects the intensity scenario.  Returns the sup-alive
  * flag in *out_alive and the total restart count in *out_restarts. */
 static int
 run_scenario(uint64_t seed, xtc_restart_strategy_t strat,
-    xtc_restart_policy_t policy, int victim, int reason,
-    int max_restarts, int hammer_times,
-    int *out_alive, int *out_restarts, uint64_t *out_state)
+    xtc_restart_policy_t policy, int victim, int reason, int max_restarts,
+    int hammer_times, int kill_sup, int *out_alive, int *out_restarts,
+    uint64_t *out_state)
 {
 	xtc_exec_t *e = NULL;
 	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
@@ -150,6 +216,7 @@ run_scenario(uint64_t seed, xtc_restart_strategy_t strat,
 		atomic_store(&g_spawns[i], 0);
 		g_pids[i] = (xtc_pid_t){0};
 	}
+	atomic_store(&g_running, 0);
 	g_sup = NULL;
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
@@ -176,7 +243,10 @@ run_scenario(uint64_t seed, xtc_restart_strategy_t strat,
 		return -1;
 	}
 
-	if (hammer_times > 0) {
+	if (kill_sup) {
+		(void)xtc_proc_spawn(xtc_exec_loop(e, 1), sup_killer, NULL,
+		    NULL, NULL);
+	} else if (hammer_times > 0) {
 		ha.victim = victim;
 		ha.times = hammer_times;
 		(void)xtc_proc_spawn(xtc_exec_loop(e, 1), hammer, &ha,
@@ -202,8 +272,11 @@ run_scenario(uint64_t seed, xtc_restart_strategy_t strat,
 	 * supervisor fiber is no longer running; a poll-once join (called
 	 * from outside the supervisor loop) frees it -- otherwise the
 	 * struct + its children/recent_restarts arrays leak (ASan). */
+	g_join_rc = XTC_E_INVAL;
 	if (g_sup != NULL) {
-		(void)xtc_sup_join(g_sup, 0);
+		g_join_rc = xtc_sup_join(g_sup, 0);
+		/* AGAIN: still running, so not freed; leak it rather than
+		 * free it under its proc (the 2.1.1 killed-sup case). */
 		g_sup = NULL;
 	}
 
@@ -245,8 +318,8 @@ main(int argc, char **argv)
 
 		/* --- ONE_FOR_ALL: crash child 1 -> ALL restart. --- */
 		rc = run_scenario(seed, XTC_SUP_ONE_FOR_ALL,
-		    XTC_RESTART_PERMANENT, 1, 99, 10, 0,
-		    &alive, &restarts, &st);
+		    XTC_RESTART_PERMANENT, 1, 99, 10, 0, 0, &alive, &restarts,
+		    &st);
 		fp = fingerprint(alive, restarts, st, rc);
 		s0 = atomic_load(&g_spawns[0]);
 		s1 = atomic_load(&g_spawns[1]);
@@ -260,8 +333,8 @@ main(int argc, char **argv)
 		/* --- REST_FOR_ONE: crash child 2 -> 2 and 3 restart, 0/1 do
 		 * NOT (they started before the victim). --- */
 		rc = run_scenario(seed, XTC_SUP_REST_FOR_ONE,
-		    XTC_RESTART_PERMANENT, 2, 99, 10, 0,
-		    &alive, &restarts, &st);
+		    XTC_RESTART_PERMANENT, 2, 99, 10, 0, 0, &alive, &restarts,
+		    &st);
 		s0 = atomic_load(&g_spawns[0]);
 		s1 = atomic_load(&g_spawns[1]);
 		s2 = atomic_load(&g_spawns[2]);
@@ -272,24 +345,24 @@ main(int argc, char **argv)
 
 		/* --- TEMPORARY policy: crashed child is NEVER restarted. --- */
 		rc = run_scenario(seed, XTC_SUP_ONE_FOR_ONE,
-		    XTC_RESTART_TEMPORARY, 0, 99, 10, 0,
-		    &alive, &restarts, &st);
+		    XTC_RESTART_TEMPORARY, 0, 99, 10, 0, 0, &alive, &restarts,
+		    &st);
 		s0 = atomic_load(&g_spawns[0]);
 		if (rc != XTC_OK) pass = 0;
 		else if (s0 != 1) pass = 0;     /* spawned once, never again */
 
 		/* --- TRANSIENT policy + NORMAL exit (reason 0): NO restart. */
 		rc = run_scenario(seed, XTC_SUP_ONE_FOR_ONE,
-		    XTC_RESTART_TRANSIENT, 0, 0, 10, 0,
-		    &alive, &restarts, &st);
+		    XTC_RESTART_TRANSIENT, 0, 0, 10, 0, 0, &alive, &restarts,
+		    &st);
 		s0 = atomic_load(&g_spawns[0]);
 		if (rc != XTC_OK) pass = 0;
 		else if (s0 != 1) pass = 0;     /* normal exit -> no restart */
 
 		/* --- TRANSIENT policy + ABNORMAL exit (reason != 0): restart. */
 		rc = run_scenario(seed, XTC_SUP_ONE_FOR_ONE,
-		    XTC_RESTART_TRANSIENT, 0, 99, 10, 0,
-		    &alive, &restarts, &st);
+		    XTC_RESTART_TRANSIENT, 0, 99, 10, 0, 0, &alive, &restarts,
+		    &st);
 		s0 = atomic_load(&g_spawns[0]);
 		if (rc != XTC_OK) pass = 0;
 		else if (s0 < 2) pass = 0;      /* abnormal exit -> restart */
@@ -297,15 +370,30 @@ main(int argc, char **argv)
 		/* --- INTENSITY: hammer child 0 more than max_restarts=2 in
 		 * the window -> supervisor gives up and is NOT alive. --- */
 		rc = run_scenario(seed, XTC_SUP_ONE_FOR_ONE,
-		    XTC_RESTART_PERMANENT, 0, 99, 2, 5,
-		    &alive, &restarts, &st);
+		    XTC_RESTART_PERMANENT, 0, 99, 2, 5, 0, &alive, &restarts,
+		    &st);
 		if (rc != XTC_OK) pass = 0;
 		else if (alive != 0) pass = 0;  /* must have exited */
 
+		/* --- SUPERVISOR KILLED at a seeded step: it takes its
+		 * children with it, reports !alive, and the run quiesces. */
+		rc = run_scenario(seed, XTC_SUP_ONE_FOR_ALL,
+		    XTC_RESTART_PERMANENT, 1, 99, 10, 0, 1, &alive, &restarts,
+		    &st);
+		if (rc != XTC_OK || alive != 0 ||
+		    atomic_load(&g_running) != 0 || g_join_rc != XTC_OK) {
+			printf("  seed 0x%016llx: children outlived a killed "
+			       "supervisor (alive=%d running=%d join=%d "
+			       "rc=%d)\n",
+			    (unsigned long long)seed, alive,
+			    atomic_load(&g_running), g_join_rc, rc);
+			pass = 0;
+		}
+
 		/* --- REPLAY: the ONE_FOR_ALL scenario reproduces. --- */
 		rc = run_scenario(seed, XTC_SUP_ONE_FOR_ALL,
-		    XTC_RESTART_PERMANENT, 1, 99, 10, 0,
-		    &alive, &restarts, &st);
+		    XTC_RESTART_PERMANENT, 1, 99, 10, 0, 0, &alive, &restarts,
+		    &st);
 		fp2 = fingerprint(alive, restarts, st, rc);
 		if (fp2 != fp) pass = 0;
 
@@ -322,8 +410,11 @@ main(int argc, char **argv)
 	}
 
 	if (fails == 0) {
-		printf("OK: supervisor-strategy DST -- %d seeds, all strategy/"
-		    "policy/intensity invariants hold and replay\n", n);
+		printf(
+		    "OK: supervisor-strategy DST -- %d seeds, all strategy/"
+		    "policy/intensity invariants hold, a supervisor killed at "
+		    "a seeded step takes its children with it, and replay\n",
+		    n);
 		return 0;
 	}
 	printf("FAIL: %d/%d supervisor-strategy seeds failed\n", fails, n);

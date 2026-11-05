@@ -69,6 +69,7 @@ struct xtc_supervisor {
 	 * by the supervisor proc itself, read from any thread. */
 	xtc_atomic_pid_t       sup_pid;
 	xtc_notify_t          *stopped;
+	xtc_pid_t             *restart_old;    /* a group restart's snapshot */
 #if XTC_DST_BUG(XTC_DST_BUG_SUP_LOCKPARK)
 	pthread_mutex_t        plant_lock;     /* 2.1.1's sup->lock shape */
 #endif
@@ -363,6 +364,25 @@ __wait_children_gone(struct xtc_supervisor *sup, int lo, int hi,
 	}
 }
 
+/*
+ * __wait_children_gone for a group restart, which owns `old` (freed
+ * here; calloc'd, so the slots outside [lo, hi) are XTC_PID_NONE).  The
+ * wait sleeps, and a kill of the supervisor unwinds out of it: `old` is
+ * published in sup->restart_old meanwhile, so the exit hook waits for
+ * those children too and frees it.
+ */
+static int
+__wait_children_gone_owned(struct xtc_supervisor *sup, int lo, int hi,
+    xtc_pid_t *old)
+{
+	int gone;
+	sup->restart_old = old;
+	gone = __wait_children_gone(sup, lo, hi, old);
+	sup->restart_old = NULL;
+	__os_free(old);
+	return gone;
+}
+
 /* Kill a still-alive sibling; we only mark it as not-alive once we
  * see its DOWN come back through the mailbox. */
 static void
@@ -404,13 +424,11 @@ __do_one_for_all(struct xtc_supervisor *sup, int dead_idx)
 	 * to COMPLETE.  If one will not finish, give up on the restart rather
 	 * than run a replacement beside it -- stopping the supervisor is the
 	 * documented escalation, and its caller sees it exit. */
-	if (!__wait_children_gone(sup, 0, sup->n_children, old)) {
-		__os_free(old);
+	if (!__wait_children_gone_owned(sup, 0, sup->n_children, old)) {
 		atomic_store_explicit(&sup->stop_requested, 1,
 		    memory_order_release);
 		return;
 	}
-	__os_free(old);
 
 	for (i = 0; i < sup->n_children; i++) {
 		if (__spawn_child(sup, &sup->children[i]) != XTC_OK) {
@@ -446,13 +464,11 @@ __do_rest_for_one(struct xtc_supervisor *sup, int dead_idx)
 
 	/* As in one_for_all: no replacement until the old generation's
 	 * cleanup has completed; escalate (stop) if it does not. */
-	if (!__wait_children_gone(sup, dead_idx, sup->n_children, old)) {
-		__os_free(old);
+	if (!__wait_children_gone_owned(sup, dead_idx, sup->n_children, old)) {
 		atomic_store_explicit(&sup->stop_requested, 1,
 		    memory_order_release);
 		return;
 	}
-	__os_free(old);
 
 	for (i = dead_idx; i < sup->n_children; i++) {
 		if (__spawn_child(sup, &sup->children[i]) != XTC_OK) {
@@ -475,23 +491,104 @@ __find_child_by_pid(struct xtc_supervisor *sup, xtc_pid_t p)
 	return -1;
 }
 
+/*
+ * Shut the supervisor down: kill every still-alive child, wait (bounded)
+ * for their cleanup, then announce the stop.  An xtc_proc_at_exit hook,
+ * so it runs on EVERY exit of the supervisor proc -- the recv loop
+ * ending (xtc_sup_stop, intensity give-up), an xtc_exit_pid kill, a
+ * contained fault -- the same fix svr.c got in 1.55.1.  Until 2.1.2 this
+ * was inline after the recv loop, so a killed supervisor longjmp'd past
+ * it: its children ran on unsupervised, xtc_sup_alive stayed 1, and
+ * xtc_sup_join returned XTC_E_AGAIN forever, so the handle could never
+ * be freed.
+ *
+ * Hooks run masked with any kill already consumed (proc.c,
+ * __run_proc_at_exit), so the sleeping wait below is not unwound.
+ */
+static void
+__sup_exited(void *arg)
+{
+	struct xtc_supervisor *sup = arg;
+	xtc_exec_t *exec;
+	xtc_pid_t *old = NULL, *rold = sup->restart_old;
+	int k;
+
+	/* Killed inside a group restart's wait (rold != NULL): the children
+	 * that restart killed are marked dead but may still be cleaning up,
+	 * so they are waited for too. */
+	sup->restart_old = NULL;
+
+	/*
+	 * Kill, then WAIT (bounded) for the children's cleanup to finish
+	 * before announcing the stop.  Before 1.50 the supervisor signalled
+	 * `stopped` and, as the root of a multi-loop app, called
+	 * xtc_exec_stop immediately after sending the kills -- freezing the
+	 * executor while the children were still in their exit hooks, so a
+	 * graceful shutdown left them half-cleaned (reported by the shutdown
+	 * work, 19.27.10).  The same proc-table absence wait the group
+	 * restarts use (__wait_children_gone, XTC_SUP_CLEANUP_WAIT_NS); a
+	 * child that will not finish in time is abandoned, not waited on
+	 * forever.
+	 */
+	if (sup->n_children > 0 &&
+	    __os_calloc((size_t)sup->n_children, sizeof *old,
+	    (void **)&old) != XTC_OK)
+		old = NULL;             /* no memory: kill, do not wait */
+	for (k = 0; k < sup->n_children; k++) {
+		if (old != NULL)
+			old[k] = sup->children[k].alive ? sup->children[k].pid :
+			    rold != NULL                ? rold[k] :
+			                                  XTC_PID_NONE;
+		if (sup->children[k].alive) {
+			(void)__xtc_exit_pid_on(__child_loop(sup,
+			    &sup->children[k]), sup->children[k].pid, 1);
+			__child_alive(sup, &sup->children[k], 0);
+		}
+	}
+	if (rold != NULL)
+		__os_free(rold);
+	if (old != NULL) {
+		(void)__wait_children_gone(sup, 0, sup->n_children, old);
+		__os_free(old);
+	}
+
+	/*
+	 * `alive` drops only NOW, with the exit complete and `stopped` about
+	 * to be signalled -- not before the child wait above.  Callers read
+	 * !xtc_sup_alive as "the supervisor has exited, a join will succeed"
+	 * (xtc_app_shutdown's force phase does); clearing it earlier let one
+	 * stop the loop while this proc still slept in __wait_children_gone,
+	 * so the join timed out and -- correctly, since f6637ef -- freed
+	 * nothing: the supervisor leaked (LSan, 12_graceful_drain under ASan).
+	 */
+	atomic_store_explicit(&sup->alive, 0, memory_order_release);
+	/* Read before the signal: a joiner may free sup once it is sent. */
+	exec = sup->opts.exec;
+	(void)xtc_notify_signal(sup->stopped);
+	/* Root of a multi-loop app: stopping the supervisor stops the whole
+	 * application -- release the executor so xtc_exec_run (driving all
+	 * loops) returns.  This fires on an intentional xtc_sup_stop, on a
+	 * restart-intensity giveup, and on a kill of the supervisor. */
+	if (exec != NULL)
+		(void)xtc_exec_stop(exec);
+}
+
 static void
 __sup_entry(void *arg)
 {
 	struct xtc_supervisor *sup = arg;
-	int i;
+	int i, hooked;
 
 	xtc_atomic_pid_store(&sup->sup_pid, xtc_self());
+#if XTC_DST_BUG(XTC_DST_BUG_SUP_NOHOOK)
+	hooked = 0; /* the 2.1.1 shape: shutdown runs inline, if reached */
+#else
+	hooked = (xtc_proc_at_exit(__sup_exited, sup) == XTC_OK);
+#endif
 
-	for (i = 0; i < sup->n_children; i++) {
-		if (__spawn_child(sup, &sup->children[i]) != XTC_OK) {
-			atomic_store_explicit(&sup->alive, 0, memory_order_release);
-			(void)xtc_notify_signal(sup->stopped);
-			if (sup->opts.exec != NULL)
-				(void)xtc_exec_stop(sup->opts.exec);
-			return;
-		}
-	}
+	for (i = 0; i < sup->n_children; i++)
+		if (__spawn_child(sup, &sup->children[i]) != XTC_OK)
+			goto out; /* the children already spawned are killed */
 
 	while (!atomic_load_explicit(&sup->stop_requested, memory_order_acquire)) {
 		void *msg; size_t sz;
@@ -578,58 +675,11 @@ __sup_entry(void *arg)
 		}
 	}
 
-	/*
-	 * On exit, kill any still-alive children, then WAIT (bounded) for
-	 * their cleanup to finish before announcing the stop.  Before 1.50
-	 * the supervisor signalled `stopped` and, as the root of a
-	 * multi-loop app, called xtc_exec_stop immediately after sending the
-	 * kills -- freezing the executor while the children were still in
-	 * their exit hooks, so a graceful shutdown left them half-cleaned
-	 * (reported by the shutdown work, 19.27.10).  The same proc-table
-	 * absence wait the group restarts use (__wait_children_gone,
-	 * XTC_SUP_CLEANUP_WAIT_NS); a child that will not finish in time is
-	 * abandoned, not waited on forever.
-	 */
-	{
-		int k;
-		xtc_pid_t *old = NULL;
-		if (sup->n_children > 0 &&
-		    __os_calloc((size_t)sup->n_children, sizeof *old,
-		    (void **)&old) != XTC_OK)
-			old = NULL;             /* no memory: kill, do not wait */
-		for (k = 0; k < sup->n_children; k++) {
-			if (old != NULL)
-				old[k] = sup->children[k].alive
-				    ? sup->children[k].pid : XTC_PID_NONE;
-			if (sup->children[k].alive) {
-				(void)__xtc_exit_pid_on(__child_loop(sup,
-				    &sup->children[k]), sup->children[k].pid, 1);
-				__child_alive(sup, &sup->children[k], 0);
-			}
-		}
-		if (old != NULL) {
-			(void)__wait_children_gone(sup, 0, sup->n_children, old);
-			__os_free(old);
-		}
-	}
-
-	/*
-	 * `alive` drops only NOW, with the exit complete and `stopped` about
-	 * to be signalled -- not before the child wait above.  Callers read
-	 * !xtc_sup_alive as "the supervisor has exited, a join will succeed"
-	 * (xtc_app_shutdown's force phase does); clearing it earlier let one
-	 * stop the loop while this proc still slept in __wait_children_gone,
-	 * so the join timed out and -- correctly, since f6637ef -- freed
-	 * nothing: the supervisor leaked (LSan, 12_graceful_drain under ASan).
-	 */
-	atomic_store_explicit(&sup->alive, 0, memory_order_release);
-	(void)xtc_notify_signal(sup->stopped);
-	/* Root of a multi-loop app: stopping the supervisor stops the whole
-	 * application -- release the executor so xtc_exec_run (driving all
-	 * loops) returns.  This fires both on an intentional xtc_sup_stop
-	 * and on a restart-intensity giveup. */
-	if (sup->opts.exec != NULL)
-		(void)xtc_exec_stop(sup->opts.exec);
+out:
+	/* No hook (the at-exit table was full): shut down inline; only a
+	 * clean return gets here. */
+	if (!hooked)
+		__sup_exited(sup);
 }
 
 /* A caller's child spec, read up to its .size (unset fields default to 0). */

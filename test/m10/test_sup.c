@@ -19,6 +19,7 @@
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "xtc_orc.h"
+#include "xtc_inspect.h"
 #include "xtc_int.h"
 
 /* Shared counter that flapping children bump on each spawn. */
@@ -1071,6 +1072,98 @@ test_n_alive_during_group_restart(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * A1 (otp probe D): kill the supervisor proc itself.  2.1.1 ran the
+ * shutdown inline after the receive loop, so the kill longjmp'd past
+ * it: the PERMANENT child kept running unsupervised, xtc_sup_alive
+ * stayed 1, and xtc_sup_join returned XTC_E_AGAIN forever.  Now the
+ * shutdown is an at-exit hook: the child is killed and waited for, and
+ * join frees the handle.
+ */
+static _Atomic int g_kd_started, g_kd_running, g_kd_stop;
+static xtc_supervisor_t *g_kd_sup;
+static _Atomic int g_kd_alive_after = -1, g_kd_child_after = -1;
+
+static void
+kd_dec(void *a)
+{
+	(void)a;
+	atomic_fetch_sub(&g_kd_running, 1);
+}
+
+/* The child counts itself running until its exit hook runs. */
+static void
+kd_worker(void *a)
+{
+	(void)a;
+	(void)xtc_proc_at_exit(kd_dec, NULL);
+	atomic_fetch_add(&g_kd_started, 1);
+	atomic_fetch_add(&g_kd_running, 1);
+	while (!atomic_load(&g_kd_stop))
+		(void)xtc_proc_sleep(10 * NA_MS);
+}
+
+struct kd_info {
+	xtc_pid_t self;
+	xtc_pid_t sup;
+};
+
+static int
+kd_find_sup(const xtc_proc_info_t *i, void *u)
+{
+	struct kd_info *k = u;
+	/* The supervisor is the first proc of this loop: lowest local_id. */
+	if (!xtc_pid_eq(i->pid, k->self) &&
+	    (xtc_pid_is_none(k->sup) || i->pid.local_id < k->sup.local_id))
+		k->sup = i->pid;
+	return 0;
+}
+
+static void
+kd_killer(void *a)
+{
+	struct kd_info k;
+	(void)a;
+	(void)xtc_proc_sleep(50 * NA_MS);
+	k.self = xtc_self();
+	k.sup = XTC_PID_NONE;
+	(void)xtc_inspect_procs(kd_find_sup, &k);
+	munit_assert_false(xtc_pid_is_none(k.sup));
+	munit_assert_int(xtc_exit_pid(k.sup, 9), ==, XTC_OK);
+	(void)xtc_proc_sleep(300 * NA_MS);
+	atomic_store(&g_kd_alive_after, xtc_sup_alive(g_kd_sup));
+	atomic_store(&g_kd_child_after, atomic_load(&g_kd_running));
+	atomic_store(&g_kd_stop, 1); /* release a 2.1.1 orphan */
+}
+
+static MunitResult
+test_killed_sup_stops_children(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_child_spec_t ch = XTC_CHILD_SPEC_INIT;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_pid_t pid;
+	(void)p;
+	(void)d;
+	atomic_store(&g_kd_started, 0);
+	atomic_store(&g_kd_running, 0);
+	atomic_store(&g_kd_stop, 0);
+	ch.fn = kd_worker;
+	ch.policy = XTC_RESTART_PERMANENT;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_sup_start(loop, &so, &ch, 1, &g_kd_sup), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, kd_killer, NULL, NULL, &pid), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_kd_started), ==, 1);
+	munit_assert_int(atomic_load(&g_kd_alive_after), ==, 0);
+	munit_assert_int(atomic_load(&g_kd_child_after), ==, 0);
+	munit_assert_int(xtc_sup_join(g_kd_sup, 0), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/add_child_other_loop", test_add_child_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/supervisor_restarts",   test_supervisor_restarts, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1087,6 +1180,8 @@ static MunitTest tests[] = {
 	{ "/one_for_all_equal_pid_other_loop", test_one_for_all_equal_pid_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/n_alive_during_group_restart", test_n_alive_during_group_restart,
 	    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/killed_sup_stops_children", test_killed_sup_stops_children, NULL,
+	    NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10/sup", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
