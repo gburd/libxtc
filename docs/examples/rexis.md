@@ -67,8 +67,22 @@ default all of them run on ONE `xtc_loop` (one OS thread), like Redis.
 the keyspace, now shared by N threads, is cut into 64 shards by key hash,
 each with its own parking reader/writer latch (`xtc_arwlock`). A command
 latches only its keys' shards, so writes to different keys run in
-parallel: SET at `--loops=4` measured 1.60M/s, against 0.14M/s with one
-latch for the whole keyspace (one loop: 0.89M/s).
+parallel. SET/s with valkey-benchmark (`-c 200 --threads 8 -P 16`, 32 B,
+1M keys) on a two-socket 64-core x86-64 bare-metal host, libxtc
+2.1.1-37, median of 3 runs:
+
+| `--loops` | 1 | 2 | 4 | 8 | 16 | 32 |
+|---|---:|---:|---:|---:|---:|---:|
+| SET/s | 0.78M | 1.14M | 1.75M | 2.53M | 3.20M | 3.50M |
+
+With one latch for the whole keyspace (an earlier build, on a 32-vCPU
+host), `--loops=4` gave 0.14M/s against one loop's 0.89M/s. Past 16
+loops every SET still takes its shard's write latch, and 16 more loops
+buy 9%. The same client against DragonFly gives 0.38M, 0.72M, 1.36M,
+2.57M, 4.33M and 4.30M, and against Valkey at most 0.87M: rexis leads up
+to 4 threads, they are level at 8, and DragonFly leads by 35% at 16 and
+23% at 32 (see
+[rexis vs DragonFly and Valkey]({{ '/examples/rexis-vs-dragonfly/' | relative_url }})).
 
 Through libxtc 1.x, spreading was also the only way past a hard
 per-loop limit: a pid named its process by loop and a 16-bit slot, so
