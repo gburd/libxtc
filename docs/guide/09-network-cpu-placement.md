@@ -33,7 +33,14 @@ Measured on a 32-vCPU box across 75 benchmark runs: `peak_iowq_threads = 0`
 for every network run, and `io_wq_submit_work` never appears in a `perf`
 profile while `tcp_sendmsg` accounts for ~46% of server CPU under
 `__x64_sys_write`. Per-request kernel time was **flat at 7.8-8.6 us across
-every loop count and compute level**.
+every loop count and compute level**.  Re-measured with libxtc 2.1.1-37 on
+a two-socket 64-core x86-64 bare-metal host over loopback
+(`bench_net_compute`, server on 8 cores of one socket, 64 connections from
+the other, 1, 2, 4 and 8 loops x 0, 2 and 8 us of compute, 3 runs each):
+no io-wq worker thread in any run, and per-request kernel time
+(the server's system time over the requests it served) of 8.2-8.5 us at
+1 and 2 loops, 8.6-9.2 us at 4 and 9.4-10.2 us at 8, at every compute
+level.
 
 So there is no concentration of libxtc-submitted kernel work to redistribute,
 and an `io_uring_register_iowq_aff`-style knob would have nothing to bind.

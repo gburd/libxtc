@@ -45,7 +45,8 @@ cases:
 
 `fiber_switch` is deliberately the full `xtc_yield` cost (stack-tail
 reclaim + per-fiber TLS save/restore + the run-queue turn), not the
-bare `~7.6 ns/swap` `fcontext` register swap.  It is the number a fiber
+bare `~4.4 ns/swap` `fcontext` register swap (Ice Lake; on the same
+host `fiber_switch` is 93 ns).  It is the number a fiber
 that yields actually pays, so a regression in **any** part of the yield
 path -- not only the asm swap -- is caught.
 

@@ -36,8 +36,8 @@ interleave hundreds of thousands of fibers.
 {: .rationale }
 > **Why hand-written `fcontext` assembly?** The switch is the hottest
 > path in the whole library. The x86-64 System V switch measures about
-> 7.6 ns. `ucontext` (the portable fallback) also saves the signal mask
-> with a syscall on every switch -- roughly an order of magnitude
+> 4.4 ns (on an Ice Lake host). `ucontext` (the portable fallback) also
+> saves the signal mask with a syscall on every switch -- roughly an order of magnitude
 > slower. libxtc ships assembly for x86-64, AArch64, ppc64le, riscv64,
 > arm, s390x, and sparc64, and falls back to `ucontext` (and Win32
 > fibers on Windows) only where it must. See

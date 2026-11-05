@@ -53,10 +53,12 @@ with `xtc_send_owned`.  A received network frame
 reads frames and hands them to a process moves them without a copy --
 libxtc's own cross-process child pump does exactly that.
 
-Measured (one loop, producer writing every byte, 16-vCPU x86-64 host):
-moving instead of copying is 4.2x the message rate at 4 KiB, 10x at
-64 KiB and 7.9x at 1 MiB; at 64 bytes the two are the same, so keep
-`xtc_send` for small messages.
+Measured (`bench/bench_msg_copy.c`, one loop, producer writing every
+byte; libxtc 2.1.1-37 on a two-socket 64-core x86-64 bare-metal host,
+pinned to one core, median of 5 runs): moving instead of copying is
+3.1x the message rate at 4 KiB, 9.9x at 64 KiB and 9.6x at 1 MiB; at
+64 bytes the two are the same (0.99x), so keep `xtc_send` for small
+messages.
 
 **Channels** (`xtc_chan_*`) carry `void *`: they never copy.  The
 lifetime of what the pointer points at is yours.
@@ -67,10 +69,11 @@ header must become one message, and the payload you pass is `const`.
 The frame is then moved, and the caller is handed the very block the
 server built.  (Before the zero-copy work a call round trip copied the
 payload seven times.)  What the remaining copy costs, measured on one
-loop of a 32-vCPU x86-64 host with equal request and reply sizes: about
-1% of an 890 ns round trip at 64 bytes, 7% of 1.0 us at 4 KiB, 77% of
-3.75 us at 64 KiB.  For large payloads, send an `xtc_send_owned` block
-to the server process and reply the same way instead of calling.
+loop of the same host with equal request and reply sizes (median of 3
+runs): under 1% of a 1.09 us round trip at 64 bytes, 8% of 1.22 us
+at 4 KiB, 73% of 3.96 us at 64 KiB.  For large payloads, send an
+`xtc_send_owned` block to the server process and reply the same way
+instead of calling.
 
 **Process groups** (`xtc_pg_send`) send one copy per member: a
 fan-out of a `const` buffer.  `xtc_pg_send_owned` takes an

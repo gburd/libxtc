@@ -67,7 +67,7 @@ Rust's `unsafe`. Not forbidden; marked.
 saves the signal mask with a syscall on every switch -- an order of
 magnitude slower than a register swap. Since the switch is the hottest
 path in the library, libxtc ships hand-written `fcontext` assembly for
-the common architectures (x86-64 ~7.6 ns/switch) and falls back to
+the common architectures (x86-64 ~4.4 ns/switch) and falls back to
 `ucontext` (and Win32 fibers) only where it must.
 
 ## Deterministic simulation, not just stress tests

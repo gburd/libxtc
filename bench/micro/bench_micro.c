@@ -513,7 +513,7 @@ bench_fiber_switch(void)
 	 * scheduler actually executes (fiber -> loop -> fiber), which
 	 * includes stack-tail reclaim, per-fiber TLS save/restore, and
 	 * the run-queue turn, NOT just the raw fcontext register swap.
-	 * The ~7.6 ns/swap claim is the bare __xtc_jump_fcontext cost;
+	 * The ~4.4 ns/swap claim is the bare __xtc_jump_fcontext cost;
 	 * this number is deliberately the higher, consumer-visible one
 	 * (what a fiber that yields really pays), so a regression in any
 	 * part of the yield path -- not only the asm swap -- is caught.
