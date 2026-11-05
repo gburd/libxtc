@@ -879,6 +879,13 @@ AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[]], [[
 # _DEFAULT_SOURCE globally: it is the right base feature level for a
 # POSIX program and is a no-op where the libc already exposes POSIX.
 CFLAGS="$CFLAGS -D_DEFAULT_SOURCE"
+# illumos/Solaris libc ignores _DEFAULT_SOURCE: under -std=c11 it hides
+# nanosleep, usleep, setenv, mkdtemp and the rest unless __EXTENSIONS__ is
+# set (the library TUs get it from xtc_int.h; the tests did not, and 28
+# test programs failed to compile on OmniOS r151058).
+case "$host_os" in
+  *solaris*|*illumos*) CFLAGS="$CFLAGS -D__EXTENSIONS__" ;;
+esac
 
 AC_SUBST([CFLAGS])
 

@@ -67,6 +67,13 @@ if [ -f "$BUILD/Makefile" ] && ! nm "$LIB" 2>/dev/null | grep -q '^tls_none\.o:'
 	tls_ldf=$(sed -n 's/^LDFLAGS[[:space:]]*=[[:space:]]*//p' "$BUILD/Makefile" | head -1)
 	[ -n "$tls_libs" ] && LIBS="$LIBS $tls_ldf $tls_libs"
 fi
+# The platform's socket libraries (illumos/Solaris: -lsocket -lnsl), as
+# configure found them for the library; without them every network snippet
+# failed to link on OmniOS (send/recv/accept undefined).
+if [ -f "$BUILD/Makefile" ]; then
+	plat_libs=$(sed -n 's/^XTC_PLATFORM_LIBS[[:space:]]*=[[:space:]]*//p' "$BUILD/Makefile" | head -1)
+	[ -n "$plat_libs" ] && LIBS="$LIBS $plat_libs"
+fi
 # libdl is folded into libc on modern glibc; add it only if present.
 printf 'int main(void){return 0;}\n' > "$tmp/dltest.c"
 if $CC "$tmp/dltest.c" -ldl -o "$tmp/dltest" >/dev/null 2>&1; then

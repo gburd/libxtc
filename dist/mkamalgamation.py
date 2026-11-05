@@ -154,6 +154,14 @@ def version_defines(root, qualifier):
 
 
 REMAP_PROLOGUE = """\
+/* Feature macros before ANY system header: the amalgamation hoists every
+ * system #include to the top, ahead of xtc_int.h's own feature block, so
+ * on illumos/Solaris (whose libc ignores _GNU_SOURCE/_DEFAULT_SOURCE)
+ * clock_gettime, nanosleep and friends were undeclared under -std=c11. */
+#if (defined(__sun) || defined(__illumos__)) && !defined(__EXTENSIONS__)
+# define __EXTENSIONS__ 1
+#endif
+
 /* Debug #line remapping (see dist/mkamalgamation.py header comment).
  * Build with -DDEBUG -DXTC_RELATIVE_LOC=<rel-path-to-libxtc-root> to
  * point debug info at the original sources instead of this file. */
