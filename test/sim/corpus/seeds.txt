@@ -84,3 +84,10 @@ test_sim_btree_scan     0          16  p161/bthang: cursor hop + keyless open vs
 # INT64_MAX): index lookups lost rows.  FAILED 8/8 seeds before 071053b.
 test_sim_sqlxtc_gcidx   1          8   p161/sxstore: GC must not delete 20-byte index entries; FAILS before 071053b (fixed 071053b)
 test_sim_sqlxtc_gcidx   2          1   p162: GC batch boundary resurrected a deleted row without its index entries; FAILS before 32935ea (fixed 32935ea)
+# p165/sup (2.1.2, PLAN 4.1 items 1-5).  Each row FAILS on its planted
+# build (-DXTC_DST_INJECT_BUG=N restores the pre-fix code) and passes clean.
+test_sim_scope          1          1   bug24 RECOV_REWALK: kill inside the fault's recovery walk re-ran records; fixed "proc: a kill during fault recovery no longer re-runs the recovery records"
+test_sim_scope          2          1   bug25 SCOPE_UNMASKED_FIN: kill in a parking xtc_scope_close finalizer skipped older ones; fixed "scope: xtc_scope_close runs its finalizers masked, each once"
+test_sim_sup_strategy   1          1   bug26 SUP_LOCKPARK: supervisor slept in a group restart holding sup->lock; fixed "sup: never hold a lock across the group-restart wait"
+test_sim_sup_strategy   2          1   bug27 SUP_NOHOOK: a killed supervisor left its children running; fixed "sup: a killed supervisor takes its children with it"
+test_sim_launch         1          1   bug28 LAUNCH_EATMAIL: xtc_launch freed the caller's queued DOWN and mail; fixed "orc: library calls take only their own reply from the caller's mailbox"
