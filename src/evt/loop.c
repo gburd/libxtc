@@ -372,6 +372,9 @@ xtc_loop_fini(xtc_loop_t *loop)
 
 	if (loop == NULL) return XTC_E_INVAL;
 
+	/* File AIO the kernel still owns writes the parked fiber's stack and
+	 * buffer: reap it before any task (and its stack) is freed below. */
+	__xtc_io_aio_drain(loop->io);
 	if (__xtc_loop_fini_hook != NULL)
 		__xtc_loop_fini_hook(loop);
 	/* lifetime: tasks handed back by other loops are still on all_tasks;
