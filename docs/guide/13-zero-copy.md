@@ -79,9 +79,15 @@ instead of calling.
 fan-out of a `const` buffer.  `xtc_pg_send_owned` takes an
 `xtc_malloc`'d buffer instead and moves it to the last member, so a
 group of N costs N - 1 copies and a group of one costs none (rexis
-PUBLISH uses it).  Measured, one loop, 100,000 messages: one subscriber
-at 64 KiB 338k -> 685k messages/s, 4 KiB 1.74M -> 1.94M; four
-subscribers at 64 KiB 121k -> 147k.  Zero-copy fan-out to every member
+PUBLISH uses it).  Measured on the same host, one loop, 100,000
+messages, median of 3: one subscriber at 64 KiB 324k -> 646k
+messages/s, 4 KiB 1.43M -> 1.63M; four subscribers at 64 KiB 17.0k ->
+140k.  The four-subscriber copy rate is the copies plus glibc: the
+freed 64 KiB copies go back to the kernel (two `brk` calls per message
+under `strace -c`), so the next copies fault fresh pages in (a profile
+shows memcpy, page faults and TLB flushes on top); the owned send makes
+neither the copies nor the `brk` calls.  An earlier run on another host
+measured 121k -> 147k for this row.  Zero-copy fan-out to every member
 would need shared, reference-counted, immutable messages with their own
 release call -- deliberately not added; if you fan out large payloads,
 share one immutable buffer by pointer over a channel and count
