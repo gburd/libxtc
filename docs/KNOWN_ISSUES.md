@@ -6,6 +6,21 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## OPEN: `/m5/exec/Blk3_cross_loop_del_fd` hangs about 1 run in 1,700 under riscv64 qemu-user
+
+The test parks 32 migratable fibers on pipe fds with a 2 ms timeout
+while a foreign thread wakes them, so a fiber resumes on a peer loop
+and removes its fd registration from there.  Under riscv64 qemu-user
+(epoll, 4 CPUs) a run occasionally never quiesces: the 2.1.2 CI
+riscv64-qemu job hung there for four hours (the job re-run passed in
+20 minutes).  Measured on 2026-11-05, interleaved: 30 of 41,589 runs
+on 2.1.1 and 24 of 41,585 on 2.1.2, so 2.1.2 did not introduce it.
+Native x86-64, 20,000 runs on epoll and io_uring, never hung.  Not yet
+root-caused: emulated riscv64 atomics are weaker than x86's TSO and
+expose an ordering the native runs do not, or qemu-user's futex/epoll
+emulation drops a wakeup.  Until it is fixed, a hung riscv64-qemu job
+in CI that passes on re-run is this issue.
+
 ## FIXED (2.2): a pid did not cross from one xtc_exec to another
 
 **What it was.**  A pid named its loop by the executor slot (`loop_id` =
