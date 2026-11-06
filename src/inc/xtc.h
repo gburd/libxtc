@@ -15,12 +15,18 @@
 #ifndef XTC_H
 #define XTC_H
 
+#include <stddef.h>
+#include <stdint.h> /* int64_t for the public clock / atomic helpers */
+
+/* Portable compiler directives and atomics on plain storage
+ * (xtc_atomic(3)).  Outside the extern "C" block: they are all
+ * static inline or macros, valid C and C++. */
+#include "xtc_compiler.h"
+#include "xtc_atomic.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#include <stddef.h>
-#include <stdint.h>   /* int64_t for the public clock / atomic helpers */
 
 /*
  * Compile-time version macros.
@@ -205,10 +211,11 @@ int xtc_sleep_ns(int64_t ns);
 
 /*
  * xtc_atomic_i64_load / xtc_atomic_i64_add --
- *	Relaxed atomic load, and atomic fetch-add (returns the PRIOR
- *	value), on a shared int64_t.  The minimal public atomic surface a
- *	consumer needs for a shared counter / token bucket without reaching
- *	for the internal __os_atomic_* macros or a compiler builtin.
+ *	SUPERSEDED by the inline xtc_atomic_load_i64 / xtc_atomic_fetch_add_i64
+ *	(xtc_atomic.h), which take an explicit order and cost no call; kept
+ *	exported for ABI.  Both are sequentially consistent: the load is
+ *	xtc_atomic_load_i64(p, xtc_mo_seq_cst), the add (which returns the
+ *	PRIOR value) xtc_atomic_fetch_add_i64(p, delta, xtc_mo_seq_cst).
  */
 int64_t xtc_atomic_i64_load(const int64_t *p);
 int64_t xtc_atomic_i64_add(int64_t *p, int64_t delta);

@@ -26,7 +26,7 @@ munit_tests = [
   # M0
   ['version', 'm0'], ['header', 'm0'], ['errors', 'm0'],
   # M1
-  ['atomic', 'm1'], ['alloc', 'm1'], ['sharp_edges', 'm1'], ['time', 'm1'],
+  ['atomic', 'm1'], ['xtc_atomic', 'm1'], ['alloc', 'm1'], ['sharp_edges', 'm1'], ['time', 'm1'],
   ['errno', 'm1'], ['cpu', 'm1'], ['cpu_cgroup', 'm1'], ['tuning', 'm1'],
   ['crypto', 'm1'], ['fs', 'm1'], ['dio', 'm1'], ['pkey', 'm1'],
   ['thread', 'm1'], ['tls', 'm1'], ['mutex', 'm1'],

@@ -1,0 +1,265 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd November 5, 2026
+.Dt XTC_ATOMIC 3
+.Os
+.Sh NAME
+.Nm xtc_atomic_load_i32 ,
+.Nm xtc_atomic_store_i32 ,
+.Nm xtc_atomic_exchange_i32 ,
+.Nm xtc_atomic_cas_i32 ,
+.Nm xtc_atomic_cas_weak_i32 ,
+.Nm xtc_atomic_fetch_add_i32 ,
+.Nm xtc_atomic_fetch_sub_i32 ,
+.Nm xtc_atomic_fetch_and_i32 ,
+.Nm xtc_atomic_fetch_or_i32 ,
+.Nm xtc_atomic_fetch_xor_i32 ,
+.Nm xtc_atomic_load_ptr ,
+.Nm xtc_atomic_store_ptr ,
+.Nm xtc_atomic_exchange_ptr ,
+.Nm xtc_atomic_cas_ptr ,
+.Nm xtc_atomic_cas_weak_ptr ,
+.Nm xtc_atomic_thread_fence ,
+.Nm xtc_atomic_signal_fence ,
+.Nm xtc_ctz64 ,
+.Nm xtc_clz64 ,
+.Nm xtc_popcount64 ,
+.Nm XTC_LIKELY ,
+.Nm XTC_UNLIKELY ,
+.Nm XTC_CACHE_LINE ,
+.Nm XTC_ALIGNED ,
+.Nm XTC_THREAD_LOCAL ,
+.Nm XTC_CPU_RELAX
+.Nd portable atomics on plain storage, and compiler directives
+.Sh SYNOPSIS
+.In xtc.h
+.Pp
+.Vt typedef enum { xtc_mo_relaxed, xtc_mo_acquire, xtc_mo_release, xtc_mo_acq_rel, xtc_mo_seq_cst } xtc_mo_t;
+.Pp
+For each suffix
+.Em S
+and type
+.Em T :
+.Sy u8 Pq uint8_t ,
+.Sy i32 Pq int32_t ,
+.Sy u32 Pq uint32_t ,
+.Sy i64 Pq int64_t ,
+.Sy u64 Pq uint64_t ,
+.Sy long ,
+.Sy ulong Pq unsigned long ,
+.Sy llong Pq long long ,
+.Sy ullong Pq unsigned long long ,
+.Sy size Pq size_t ,
+.Sy iptr Pq intptr_t ,
+.Sy uptr Pq uintptr_t :
+.Pp
+.Ft T
+.Fn xtc_atomic_load_S "const T *p" "xtc_mo_t mo"
+.Ft void
+.Fn xtc_atomic_store_S "T *p" "T v" "xtc_mo_t mo"
+.Ft T
+.Fn xtc_atomic_exchange_S "T *p" "T v" "xtc_mo_t mo"
+.Ft int
+.Fn xtc_atomic_cas_S "T *p" "T *expect" "T desired" "xtc_mo_t success" "xtc_mo_t failure"
+.Ft int
+.Fn xtc_atomic_cas_weak_S "T *p" "T *expect" "T desired" "xtc_mo_t success" "xtc_mo_t failure"
+.Ft T
+.Fn xtc_atomic_fetch_add_S "T *p" "T v" "xtc_mo_t mo"
+.Pq likewise Fn xtc_atomic_fetch_sub_S , Fn xtc_atomic_fetch_and_S , Fn xtc_atomic_fetch_or_S , Fn xtc_atomic_fetch_xor_S
+.Pp
+For any pointer type
+.Em P
+.Pq object or function pointer :
+.Pp
+.Ft P
+.Fn xtc_atomic_load_ptr "P *pp" "xtc_mo_t mo"
+.Ft void
+.Fn xtc_atomic_store_ptr "P *pp" "P v" "xtc_mo_t mo"
+.Ft P
+.Fn xtc_atomic_exchange_ptr "P *pp" "P v" "xtc_mo_t mo"
+.Ft int
+.Fn xtc_atomic_cas_ptr "P *pp" "P *expect" "P desired" "xtc_mo_t success" "xtc_mo_t failure"
+.Ft int
+.Fn xtc_atomic_cas_weak_ptr "P *pp" "P *expect" "P desired" "xtc_mo_t success" "xtc_mo_t failure"
+.Pp
+.Ft void
+.Fn xtc_atomic_thread_fence "xtc_mo_t mo"
+.Ft void
+.Fn xtc_atomic_signal_fence "xtc_mo_t mo"
+.Pp
+.Ft int
+.Fn xtc_ctz64 "uint64_t v"
+.Ft int
+.Fn xtc_clz64 "uint64_t v"
+.Ft int
+.Fn xtc_popcount64 "uint64_t v"
+.Pq and the 32-bit Fn xtc_ctz32 , Fn xtc_clz32 , Fn xtc_popcount32
+.Pp
+.Fn XTC_LIKELY expr
+.Fn XTC_UNLIKELY expr
+.Dv XTC_CACHE_LINE
+.Fn XTC_ALIGNED n
+.Dv XTC_THREAD_LOCAL
+.Fn XTC_CPU_RELAX
+.Sh DESCRIPTION
+These are the library's one set of atomics and compiler directives,
+public so that a consumer needs neither
+.In stdatomic.h
+nor a compiler builtin.
+All are
+.Sy static inline
+functions or macros: there is no call and no exported symbol.
+They are declared by
+.In xtc_atomic.h
+and
+.In xtc_compiler.h ,
+which
+.In xtc.h
+includes.
+.Ss Plain storage
+An atomic object is an ordinary
+.Vt int ,
+.Vt uint64_t ,
+pointer, and so on, never an
+.Sy _Atomic
+one.
+A struct holding it is valid C and C++ and has the same layout under
+every compiler, which is why public structs such as
+.Vt xtc_aio_t
+use these functions.
+Every access to such an object that can race with another thread must
+go through these functions; a plain read or write of it is a data race.
+Initializing it with a plain store before it is published to other
+threads is fine.
+.Ss Memory order
+Every operation takes its memory order explicitly, as a
+.Vt xtc_mo_t ,
+with the meanings C11 gives the matching
+.Dv memory_order_*
+value.
+A load accepts
+.Dv xtc_mo_relaxed ,
+.Dv xtc_mo_acquire
+or
+.Dv xtc_mo_seq_cst ;
+a store
+.Dv xtc_mo_relaxed ,
+.Dv xtc_mo_release
+or
+.Dv xtc_mo_seq_cst ;
+a read-modify-write any of them.
+Pass a constant: the order then costs nothing.
+.Pp
+.Fn xtc_atomic_cas_S
+compares
+.Fa *p
+with
+.Fa *expect ;
+if they are equal it stores
+.Fa desired
+and returns 1, ordered by
+.Fa success ;
+otherwise it writes the current value to
+.Fa *expect
+and returns 0, ordered by
+.Fa failure ,
+which must not be
+.Dv xtc_mo_release ,
+.Dv xtc_mo_acq_rel ,
+or stronger than
+.Fa success .
+.Fn xtc_atomic_cas_weak_S
+is the same but may fail spuriously; use it in a retry loop.
+The
+.Fn xtc_atomic_fetch_*_S
+functions return the value before the operation; arithmetic wraps
+modulo the type's width.
+.Pp
+The pointer operations are type-generic macros over a
+.Vt P *
+for any pointer type
+.Vt P .
+With gcc and clang the result has type
+.Vt P
+and a non-pointer operand is a compile-time error; with MSVC in C and
+with the plain C11 backend the result is
+.Vt void * ,
+so assign a function pointer through a cast.
+.Pp
+.Fn xtc_atomic_thread_fence
+orders memory against other threads,
+.Fn xtc_atomic_signal_fence
+against a signal handler on the same thread (a compiler barrier).
+.Ss Directives
+.Fn XTC_LIKELY
+and
+.Fn XTC_UNLIKELY
+are branch hints.
+.Dv XTC_CACHE_LINE
+is the cache-line size the library pads to (64; build with
+.Fl D Ns Dv XTC_CACHE_LINE Ns =128
+where the line is 128 bytes).
+.Fn XTC_ALIGNED
+aligns a declaration
+.Pq written first, like Sy _Alignas ;
+an over-aligned object on the heap needs
+.Xr xtc_aligned_alloc 3 .
+.Dv XTC_THREAD_LOCAL
+is the thread-local storage class.
+.Fn XTC_CPU_RELAX
+is the spin-wait hint (x86 PAUSE, arm64 YIELD); it is not a yield.
+.Pp
+.Fn xtc_ctz64
+is the index of the lowest set bit and
+.Fn xtc_clz64
+the number of leading zero bits; both are undefined for 0.
+.Fn xtc_popcount64
+counts the set bits.
+.Ss Backends
+gcc and clang (also clang-cl), in C and C++, use the
+.Sy __atomic
+builtins, the ones
+.In stdatomic.h
+itself expands to, so the code is what C11 atomics give.
+MSVC (C and C++, x64 and ARM64) uses the Interlocked intrinsics and
+ISO-volatile loads and stores with explicit barriers, and needs no
+.Fl experimental:c11atomics ;
+a read-modify-write there is always a full barrier, never weaker than
+asked.
+Any other C11 compiler uses
+.In stdatomic.h .
+There are no 16-byte operations; a pid is published with
+.Vt xtc_atomic_pid_t
+.Pq Xr xtc_proc 3 .
+.Pp
+.Fn xtc_atomic_i64_load
+and
+.Fn xtc_atomic_i64_add
+.Pq Xr xtc_free 3
+are the older out-of-line pair, kept exported; they are
+.Fn xtc_atomic_load_i64
+and
+.Fn xtc_atomic_fetch_add_i64
+with
+.Dv xtc_mo_seq_cst .
+.Sh RETURN VALUES
+The load, exchange and fetch functions return the value read.
+The CAS functions return 1 when they stored
+.Fa desired ,
+0 otherwise.
+.Sh EXAMPLES
+A counter bumped by one thread and read by another, and a pointer
+published with release and read with acquire:
+.Bd -literal -offset indent
+static uint64_t n_cmds;
+static struct book *top;
+
+xtc_atomic_fetch_add_u64(&n_cmds, 1, xtc_mo_relaxed);
+xtc_atomic_store_ptr(&top, b, xtc_mo_release);
+
+struct book *t = xtc_atomic_load_ptr(&top, xtc_mo_acquire);
+.Ed
+.Sh SEE ALSO
+.Xr __os_atomic 3 ,
+.Xr xtc_free 3 ,
+.Xr xtc_proc 3

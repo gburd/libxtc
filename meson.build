@@ -531,6 +531,8 @@ endif
 install_headers(
   'src/inc/xtc.h',
   'src/inc/xtc_export.h',
+  'src/inc/xtc_atomic.h',
+  'src/inc/xtc_compiler.h',
   'src/inc/xtc_runtime.h',
   'src/inc/xtc_aio.h',
   'src/inc/xtc_alloc_audit.h',

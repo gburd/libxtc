@@ -59,53 +59,12 @@
 #include "os_cpu.h"
 
 /*
- * Cache-line size.  Default 64 bytes; some ARM cores (Apple M1/M2,
- * Cortex-X1) use 128-byte lines.  Override via -DXTC_CACHE_LINE=128
- * on those platforms.
+ * XTC_CACHE_LINE, XTC_LIKELY / XTC_UNLIKELY, XTC_THREAD_LOCAL and the bit
+ * scans are public now (xtc_compiler.h, through xtc.h).  The older
+ * internal bit-scan names stay as aliases.
  */
-#ifndef XTC_CACHE_LINE
-#  define XTC_CACHE_LINE  64
-#endif
-
-/*
- * Branch prediction hints.  Use XTC_LIKELY for conditions that are
- * almost always true on the hot path, XTC_UNLIKELY for error checks
- * and slow-path fallbacks.
- */
-#if defined(__GNUC__) || defined(__clang__)
-#  define XTC_LIKELY(x)   __builtin_expect(!!(x), 1)
-#  define XTC_UNLIKELY(x) __builtin_expect(!!(x), 0)
-#else
-#  define XTC_LIKELY(x)   (x)
-#  define XTC_UNLIKELY(x) (x)
-#endif
-
-/*
- * Bit-scan helpers.  GCC and clang provide __builtin_ctzll /
- * __builtin_clzll directly; MSVC provides _BitScanForward64 /
- * _BitScanReverse64 with different signatures.  Wrap both so call
- * sites in the rest of the source need not branch on toolchain.
- */
-#if defined(__GNUC__) || defined(__clang__)
-#  define XTC_CTZLL(v) __builtin_ctzll(v)
-#  define XTC_CLZLL(v) __builtin_clzll(v)
-#elif defined(_MSC_VER)
-#  include <intrin.h>
-   static inline int xtc__ctzll(unsigned long long v) {
-       unsigned long idx;
-       _BitScanForward64(&idx, v);
-       return (int)idx;
-   }
-   static inline int xtc__clzll(unsigned long long v) {
-       unsigned long idx;
-       _BitScanReverse64(&idx, v);
-       return 63 - (int)idx;
-   }
-#  define XTC_CTZLL(v) xtc__ctzll(v)
-#  define XTC_CLZLL(v) xtc__clzll(v)
-#else
-#  error "need bit-scan intrinsics for this toolchain"
-#endif
+#define XTC_CTZLL(v) xtc_ctz64(v)
+#define XTC_CLZLL(v) xtc_clz64(v)
 
 /*
  * Cache-line padding helper.  Embeds explicit padding bytes to push

@@ -212,6 +212,52 @@ if [ -n "$spawn_viol" ]; then
 	fail=1
 fi
 
+# ---------------------------------------------------------------------------
+# RULE 6: one atomics layer.  Atomics go through the public xtc_atomic.h
+# (xtc_atomic(3)): plain storage, an explicit order on every operation.
+# Outside that header nothing writes `_Atomic`, includes <stdatomic.h>,
+# calls a C11 atomic_* function / names an atomic_* type or a
+# memory_order_* constant, or uses a raw __atomic_* / __sync_* builtin.
+# Covers src/ test/ bench/ docs/_includes/snippets/ and examples/, minus
+# vendored code (examples/06_sqlxtc/sqlite, examples/06_sqlxtc/lime,
+# every munit.[ch]).  A justified line carries /* XTC_RAW_OK: reason */.
+#
+# rule6_fatal=0 while the tree is being migrated (the hits are counted,
+# not failed); it flips to 1 with the last conversion commit.
+rule6_fatal=0
+atomic_files=$(find "$ROOT/src" "$ROOT/test" "$ROOT/bench" \
+    "$ROOT/docs/_includes/snippets" "$ROOT/examples" \
+    \( -name '*.c' -o -name '*.h' -o -name '*.cc' -o -name '*.cpp' \) \
+    2>/dev/null | grep -vE '/src/inc/xtc_atomic\.h$|/examples/06_sqlxtc/(sqlite|lime)/|/munit\.[ch]$' | sort)
+atomic_re='(^|[^A-Za-z0-9_])(_Atomic|atomic_[a-z_]+[[:space:]]*\(|atomic_(bool|char|schar|uchar|short|ushort|int|uint|long|ulong|llong|ullong|flag|size_t|intptr_t|uintptr_t|u?int(_least|_fast)?[0-9]+_t)\b|memory_order_[a-z_]+|ATOMIC_(VAR|FLAG)_INIT|__atomic_[a-z_]+[[:space:]]*\(|__sync_[a-z_]+[[:space:]]*\()|#[[:space:]]*include[[:space:]]*<stdatomic\.h>'
+atomic_hits=$(printf '%s\n' "$atomic_files" | while IFS= read -r f; do
+	[ -n "$f" ] || continue
+	# one pass per file: marker lines are dropped here (a per-hit sed,
+	# as filter_markers does, costs ~25 s over the unmigrated tree)
+	grep -qE "$atomic_re" "$f" 2>/dev/null || continue
+	ok=$(grep -nE 'XTC_RAW_OK' "$f" | cut -d: -f1 | tr '\n' ' ')
+	strip_comments "$f" | grep -nE "$atomic_re" 2>/dev/null |
+	    awk -F: -v ok=" $ok" -v f="$f" 'index(ok, " " $1 " ") == 0 { print f ":" $0 }'
+done)
+if [ -n "$atomic_hits" ]; then
+	n=$(printf '%s\n' "$atomic_hits" | grep -c .)
+	nf=$(printf '%s\n' "$atomic_hits" | cut -d: -f1 | sort -u | grep -c .)
+	if [ "$rule6_fatal" -eq 1 ]; then
+		echo "  [api] FAIL RULE 6: $n line(s) in $nf file(s) use C11 atomics /"
+		echo "        compiler atomic builtins directly; use xtc_atomic.h"
+		echo "        (xtc_atomic(3)), or mark XTC_RAW_OK with a reason."
+		printf '%s\n' "$atomic_hits" | sed "s#^$ROOT/##; s/^/        /"
+		fail=1
+	else
+		echo "  [api] NOTE RULE 6 (not yet enforced): $n line(s) in $nf"
+		echo "        file(s) still use C11 atomics directly (migration to"
+		echo "        xtc_atomic.h in progress; the list: XTC_API_VERBOSE=1)"
+		if [ "${XTC_API_VERBOSE:-0}" = 1 ]; then
+			printf '%s\n' "$atomic_hits" | sed "s#^$ROOT/##; s/^/        /"
+		fi
+	fi
+fi
+
 if [ "$fail" -eq 0 ]; then
 	echo "  [api] OK: API discipline -- library uses __os_* wrappers (checked, "
 	echo "        never voided), no dead NULL checks, consumers use only xtc_*,"

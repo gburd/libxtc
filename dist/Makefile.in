@@ -307,6 +307,8 @@ LIB_HDR_PUBLIC	= $(srcdir)/../src/inc/xtc.h
 LIB_HDRS_PUBLIC	= \
 	$(srcdir)/../src/inc/xtc.h \
 	$(srcdir)/../src/inc/xtc_export.h \
+	$(srcdir)/../src/inc/xtc_atomic.h \
+	$(srcdir)/../src/inc/xtc_compiler.h \
 	$(srcdir)/../src/inc/xtc_runtime.h \
 	$(srcdir)/../src/inc/xtc_aio.h \
 	$(srcdir)/../src/inc/xtc_alloc_audit.h \
@@ -404,6 +406,7 @@ TESTS_SH	= \
 	$(abs_top_srcdir)/../test/cbmc/check_drift.sh \
 	$(abs_top_srcdir)/../test/dist/test_abi_layout.sh \
 	$(abs_top_srcdir)/../test/dist/test_deprecated.sh \
+	$(abs_top_srcdir)/../test/dist/test_atomic_cxx.sh \
 	$(abs_top_srcdir)/../test/dist/test_stability_tiers.sh \
 	$(abs_top_srcdir)/../test/dist/test_api_reach.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_perm.sh \
@@ -433,7 +436,7 @@ TESTS_SH	= \
 
 TESTS_C		= test_sched_policy test_sched_continuous test_batch test_version test_header test_errors \
 		  test_abi_sized \
-		  test_atomic test_alloc test_time \
+		  test_atomic test_xtc_atomic test_xtc_atomic_c11 test_alloc test_time \
 		  test_errno \
 		  test_sharp_edges \
 		  test_cpu \
@@ -1518,6 +1521,20 @@ test_atomic: $(srcdir)/../test/m1/test_atomic.c \
 		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
 		-o $@ $(srcdir)/../test/m1/test_atomic.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+test_xtc_atomic: $(srcdir)/../test/m1/test_xtc_atomic.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(srcdir)/../test/m1 \
+		-o $@ $(srcdir)/../test/m1/test_xtc_atomic.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# The same test against the <stdatomic.h> fallback backend.
+test_xtc_atomic_c11: $(srcdir)/../test/m1/test_xtc_atomic.c \
+		$(srcdir)/../test/m1/munit.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -DXTC_ATOMIC_FORCE_C11 \
+		-I$(srcdir)/../test/m1 \
+		-o $@ $(srcdir)/../test/m1/test_xtc_atomic.c \
 		$(srcdir)/../test/m1/munit.c $(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 test_alloc: $(srcdir)/../test/m1/test_alloc.c \

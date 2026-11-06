@@ -47,9 +47,11 @@ The
 .Nm __os_atomic_*
 family provides sequentially-consistent atomic primitives over the
 five core integer widths and over pointers.
-The library deliberately does not expose relaxed orderings in M1; if
-weaker orderings are required they are added in a later milestone
-under a distinct namespace.
+They are aliases over the public
+.Xr xtc_atomic 3
+functions with
+.Dv xtc_mo_seq_cst ;
+new code calls those directly, with the order it needs.
 .Pp
 .Fn __os_atomic_load_ Ns Em SUF
 returns the current value of
@@ -108,6 +110,7 @@ if (__os_atomic_cas_i32(&v, &expect, 200)) {
 .Ed
 .Sh SEE ALSO
 .Xr __os_mutex 3 ,
+.Xr xtc_atomic 3 ,
 .Xr xtc 7
 .Sh HISTORY
 First appeared in xtc 0.0.1 (M1).
