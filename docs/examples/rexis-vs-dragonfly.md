@@ -272,6 +272,11 @@ smaller:
   DragonFly keeps one multishot poll per socket for the socket's whole
   life.
 
+Together with the switch, that took one rexis loop from about 7 system
+calls per request to 2.1 (`strace -c` over 5 s at one thread: one
+`recvfrom` and one `sendto` per request, and one `io_uring_enter` per 8
+requests). Valkey and DragonFly make 2.0.
+
 ## The shard-per-loop shape on libxtc
 
 `xtc_exec` gives you N loops on N threads, `xtc_shard_id()` tells a
