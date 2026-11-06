@@ -2686,6 +2686,24 @@ actually cares about -- an `XTC_CACHE_LINE` alignment stricter than
 
 ## Windows multi-core scalability: datapoint RE-MEASURED, curve reproduces
 
+**Re-measurement (2026-11-06, libxtc 2.2 development tree 6bc97793):**
+Windows 11 Pro on an 8-core ARM64 laptop-class host, MSVC 18 (VS
+2026), IOCP backend, `bench_win_scale 30000`, three runs each; the
+median run, spawns/s:
+
+| loops | native ARM64 | x64 under emulation |
+|------:|-------------:|--------------------:|
+|     1 |         62 K |                48 K |
+|     2 |        111 K |                64 K |
+|     4 |    **135 K** |            **95 K** |
+|     8 |        118 K |                78 K |
+
+Every run: `spawn_ok == done`, `fail = 0`; run-to-run spread under 9%.
+The shape is the one below on a different CPU, OS and compiler: the
+peak is at 4 loops and 8 loops (every core) is 13-18% lower.  The x64
+column runs through Windows' x64 emulation, so it shows the shape, not
+an x64 speed.
+
 **Re-measurement (2026-09-09):** re-run on the same instance shape as
 the original datapoint (cloud x86_64 Windows Server 2022, 16
 vCPU, MSVC 2022, IOCP backend) with the same `per_loop=30000`, so it is
