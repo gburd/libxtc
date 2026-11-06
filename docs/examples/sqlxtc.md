@@ -667,10 +667,147 @@ flowchart TD
 
 ## Benchmark: TPROC-C against SQLite and Turso
 
-Measured for 1.58 on a bare-metal host: two Xeon 8375C sockets (128
-threads), 1 TiB, and eight local NVMe drives in mdadm RAID-0 under XFS
-(`su=64k,sw=8`, `noatime,largeio`).  The OS was tuned for measurement:
-the performance governor, C-states held shallow through
+### The numbers (2.1, all engines in process)
+
+Measured 2026-11 on libxtc 2.1.1-37 (`a2134a08`, examples `7748ab9`),
+on a bare-metal host: two Ice Lake Xeon sockets (64 cores, 128 threads),
+1 TiB, and eight local NVMe drives in mdadm RAID-0 under XFS
+(`su=64k,sw=8`, `noatime,largeio`), Debian 13, kernel 6.12.  The OS was
+tuned for measurement: the performance governor, the C1E and C6 idle
+states disabled, transparent hugepages and NUMA balancing off, swap
+off, irqbalance and timers stopped.  On that array a 4 KiB write plus
+`fdatasync` takes 24 us (97 us the first time a block is written).
+
+Every engine ran the same driver, in the same process as the engine:
+Turso's own `perf/tpc-c` (a tpcc-mysql derivative, 35 prepared
+statements, the standard 45/43/4/4/4 mix with no think time) through
+the sqlite3 C API.  For sqlxtc that API is a binding over its `sx_*`
+calls, linked into the driver the way SQLite and Turso are.  The
+driver was patched so that retries are real transactions: COMMIT runs
+inside the retry loop, the transaction is re-opened before a retry,
+every statement is reset before a retry, and Payment no longer calls
+`exit()` on a conflict.  With more than one connection the SQLite and
+Turso WAL runs begin with `BEGIN IMMEDIATE` (a deferred transaction's
+upgrade to a writer fails at once with `SQLITE_BUSY`, without waiting).
+
+The setup: 10 warehouses, each engine's store loaded once by its own
+loader and copied fresh for every run, the page cache dropped before
+the run, 120 s of ramp, 60 s measured.  SQLite has a 16 GB page cache
+per connection; sqlxtc's pool is 1.25x its page file.  The driver
+process is pinned to 56 of the 64 vCPUs of NUMA node 0, memory on
+node 0.  3 passes, the engines interleaved inside each pass; the table
+shows New-Order transactions per minute (tpmC), the median of 3.
+
+| Engine, mode | 1 conn | 8 conns | 32 conns | 64 conns |
+| --- | ---: | ---: | ---: | ---: |
+| SQLite 3.53.4, WAL, `synchronous=NORMAL` (no fsync per commit) | 111,800 | 108,500 | 109,100 | 104,100 |
+| SQLite 3.53.4, WAL, `synchronous=FULL` (fsync per commit) | 94,300 | 90,300 | 92,600 | 93,100 |
+| **sqlxtc 2.1** (fdatasync before every commit returns) | 76,700 | **331,400** | **437,300** | **436,700** |
+| Turso 0.8.3, WAL, `synchronous=NORMAL` | 5,060 | 5,160 | fails in 2 of 3 runs: no commit after "not an error" (the run that completed: 5,040) | fails in 3 of 3 runs: no commit after "not an error" |
+| Turso 0.8.3, MVCC, `BEGIN CONCURRENT` | 1,360 | 5,580 | 10,100 | 9,220 |
+
+Every run of a cell is within 2% of its median, except SQLite NORMAL at
+8 connections (104,965-108,909, 3.2%).
+
+What the numbers say:
+
+- **sqlxtc carries 4.7x SQLite's durable rate from 32 connections up**
+  (3.7x at 8).
+  SQLite takes one database-wide write lock, so it does about 93k tpmC
+  at every connection count, on about one core (0.9-1.1 cores busy).
+  sqlxtc goes from 76.7k at one connection to 331k at 8 and
+  437k at 32, on 18 cores.  Its rows lock per row and its
+  commits group into shared log flushes.  Past 32 the hot rows of
+  TPC-C bound it: Payment and New-Order update one district row per
+  transaction, and under snapshot isolation first-committer-wins rolls
+  the loser back.  The driver retried about 0.4 New-Orders per committed
+  New-Order at 32 and 64 connections, and no run had a failed
+  transaction.  Compared with SQLite NORMAL, which does not sync at
+  commit, sqlxtc is 3.0x at 8 connections and 4.0-4.2x at 32 and 64.
+- **At one connection SQLite is still faster**, 1.23x over sqlxtc
+  with both syncing every commit (1.46x for SQLite NORMAL).
+- **Turso 0.8.3 is the slowest, and its WAL mode does not survive 32
+  connections.**  WAL mode does about 5k tpmC at 1 and at 8
+  connections (with 8 connections it keeps 8 cores busy for the same
+  rate).  At 32 connections it failed in 2 of 3 runs and at 64 in all
+  3, the same way: during the 120 s ramp, 5-28 of the connections ended
+  with an error whose text is "not an error", and the rest kept
+  running (each on a full core) without committing a single
+  transaction in any 10 s interval of the window or after it, until
+  the run's time limit stopped it.  Stack samples of a wedged run show
+  every live connection inside `BEGIN IMMEDIATE`, spinning in Turso's
+  wait for the write lock, which nothing released.  The run at 32 that
+  survived did 5,039 tpmC.  MVCC mode
+  scales to 10.2k at 32 connections, but conflict retries dominate
+  (4.3-4.5 million retried Payments in the minute at 32), and 418-494
+  Payments a minute fail after their retries run out.
+- **SQLite NORMAL against FULL** is 1.12-1.20x: the price of an
+  `fdatasync` per commit on this array.
+
+Tail latency, New-Order p99, the median of the 10 s intervals (the
+driver's percentiles have a 1 ms floor): sqlxtc 1.0-1.8 ms at every
+connection count, SQLite FULL 3.7-4.8 ms, Turso MVCC 116 ms at 32
+connections.  These are closed-loop service times; the open-loop
+numbers further down are the tail under a fixed offered load.
+
+**The ledger.**  The same binaries also run a double-entry ledger
+(TigerBeetle-style accounts and transfers, ported from a PostgreSQL
+ledger benchmark to the sqlite3 API): 100k accounts, 2M seeded
+transfers, ten transaction shapes.  Each cell runs 10 s after a 5 s
+warm-up on a fresh copy of the engine's own store, and an audit after
+every run checks that posted debits equal posted credits and the sum
+of posted transfers, and that pending balances match the open pending
+transfers.  SQLite runs with WAL, `synchronous=FULL` and `BEGIN
+IMMEDIATE` above one connection; both engines `fdatasync` every
+commit.  Transactions per second, median of 3 interleaved runs; every
+audit passed (240 runs):
+
+| Shape | What a transaction does | 1 conn SQLite / sqlxtc | 8 conns | 32 conns | 64 conns |
+| --- | --- | ---: | ---: | ---: | ---: |
+| transfer | debit + credit 2 accounts, insert a transfer | 5,302 / **14,934** | 8,499 / **75,702** | 8,771 / **115,267** | 8,730 / **100,190** |
+| lifecycle | a pending transfer, then post (80%) or void | 3,454 / **9,668** | 5,961 / **53,295** | 6,334 / **62,586** | 6,441 / **58,448** |
+| batch | 10 transfers in one transaction | 894 / **2,292** | 1,384 / **14,062** | 1,506 / **14,297** | 1,473 / **14,139** |
+| insert | append one event row, autocommit | 21,638 / **32,960** | 21,425 / **133,394** | 21,130 / **185,586** | 20,864 / **209,020** |
+| mixed | 60% transfer, 20% lifecycle, 20% reads | 5,343 / **15,322** | 9,816 / **87,968** | 9,937 / **119,506** | 9,962 / **107,133** |
+| blend | 40% transfer, 25% balance, the rest spread over five shapes | 5,171 / **9,446** | 11,014 / **67,186** | 11,417 / **199,862** | 11,559 / **130,928** |
+| balance | read one account | 279,029 / **519,779** | 353,683 / **3,405,182** | 347,793 / **8,681,504** | 346,849 / **6,579,018** |
+| history | an account's last 20 transfers (two index ranges) | **25,273** / 18,996 | **152,546** / 145,776 | 140,797 / **522,192** | 36,046 / **741,334** |
+| statement | count and sum an account's debits | **47,782** / 37,446 | 274,934 / **289,720** | 244,944 / **1,046,729** | 70,838 / **1,505,928** |
+| analytic | group the last 5,000 transfers | 822 / **877** | 6,782 / **6,945** | 23,887 / **24,862** | 29,804 / **31,921** |
+
+What the ledger shows:
+
+- **Writes scale with connections; SQLite's do not.**  SQLite's write
+  shapes stay on about one core at every connection count (one writer).
+  sqlxtc's are 1.5-2.9x SQLite at one connection and 6-10x at 8;
+  `transfer` reaches 115k a second at 32 connections (13x), and
+  `insert` 209k at 64 (10x).  Every write shape but `insert` peaks at
+  32 connections and gives back 1-34% at 64 (`blend` 200k -> 131k);
+  why was not measured in this run.
+- **Reads scale with connections in sqlxtc, and in SQLite only to 8.**
+  `balance` is 1.9x SQLite at one connection; SQLite's stays near 350k
+  from 8 connections up while sqlxtc's reaches 8.7M at 32 (25x).
+  `history` and `statement` are SQLite's best shapes at one connection
+  (sqlxtc 0.75x and 0.78x) and level at 8; at 32 and 64 SQLite falls
+  back (history 36k at 64, on 3.4 busy cores out of 56, its connection
+  threads mostly off CPU) while sqlxtc keeps every connection on a
+  core (741k and 1.5M at 64, 21x).
+- **`analytic` is even** (1.02-1.07x at every connection count): both
+  engines spend the run on CPU, aggregating the same 5,001 rows.
+
+The sections that follow are the history of how sqlxtc got here, with
+the numbers each release measured at the time.  They are kept because
+the prose explains what each change bought; the table above is the
+current measurement.  Compare across them with care: they ran on three
+different hosts, through two different bindings (Quack over TCP, then
+in process), at 1.58, 1.59, 1.60 and 2.0.
+
+### History: 1.58, over the network
+
+Measured 2026-10 for 1.58 on the same bare-metal host shape (two Xeon
+Ice Lake sockets, 128 threads, 1 TiB, eight local NVMe drives in mdadm
+RAID-0 under XFS, `su=64k,sw=8`, `noatime,largeio`).  The OS was
+tuned for measurement: the performance governor, C-states held shallow through
 `/dev/cpu_dma_latency`, transparent hugepages and NUMA balancing off,
 swap off, irqbalance and timers stopped.  On that array a 4 KiB write
 plus `fdatasync` takes 95 us.
@@ -691,13 +828,13 @@ New-Order transactions per minute (tpmC), median of 3:
 
 | Engine, mode | 1 conn | 8 conns | 32 conns | 64 conns |
 | --- | ---: | ---: | ---: | ---: |
-| SQLite 3.53.4, WAL, `synchronous=NORMAL` (no fsync per commit) | 95,400 | 99,400 | 95,300 | -- |
-| SQLite 3.53.4, WAL, `synchronous=FULL` (fsync per commit) | 81,000 | 84,500 | 84,400 | -- |
+| SQLite 3.53.4, WAL, `synchronous=NORMAL` (no fsync per commit) | 95,400 | 99,400 | 95,300 | not run in 1.58 (2.1: 104,100, above) |
+| SQLite 3.53.4, WAL, `synchronous=FULL` (fsync per commit) | 81,000 | 84,500 | 84,400 | not run in 1.58 (2.1: 93,100, above) |
 | **sqlxtc 1.58** (fdatasync before every ack, 32 loops) | 13,900 | **54,600** | 47,200 | 39,700 |
-| Turso 0.8.3, WAL, `synchronous=NORMAL` | 4,830 | 4,970 | -- | -- |
+| Turso 0.8.3, WAL, `synchronous=NORMAL` | 4,830 | 4,970 | not run in 1.58 (2.1: fails in 2 of 3, above) | not run in 1.58 (2.1: fails in 3 of 3, above) |
 | Turso 0.8.3, MVCC, `BEGIN CONCURRENT` | 1,320 | 5,790 | 10,500 | 9,200 |
 
-What the numbers say:
+What those 1.58 numbers said:
 
 - **SQLite wins, by a wide margin, at every connection count.**  It does
   about 95k tpmC on one core: an in-process B-tree with no network hop,
@@ -732,7 +869,7 @@ without it the 8-connection run spent 78% of the server in `evict_one`
 and did 8.4k), and the page provider walks a bounded slice per tick
 (the full-pool walk halved one-connection throughput at a 1 GiB pool).
 
-### In-process, after the 1.59 fixes
+### History: in-process, after the 1.59 fixes
 
 The numbers above measure the network binding as much as the engine:
 at one connection about 70% of a transaction was Quack round trips.
@@ -785,7 +922,7 @@ the district row after reading it under snapshot isolation, where
 first-committer-wins rolls one of them back.  SQLite has no such
 conflict because it serializes writers.
 
-### The rest of the 1.59 work: the log, the B-tree, the version GC
+### History: the rest of the 1.59 work: the log, the B-tree, the version GC
 
 A second round compared sqlxtc's write path with Berkeley DB, BDB JE,
 WiredTiger, LMDB, LeanStore, InnoDB and PostgreSQL's async WAL series,
@@ -870,9 +1007,9 @@ measured, two passes alternating the engines:
 
 With a 30 s ramp the pool is still filling from the cold page file, and
 sqlxtc reads 54,000 at one connection.  Count the warm-up when comparing
-with the metal table above, which used a 60 s ramp.
+with the 1.59 in-process table above, which used a 60 s ramp.
 
-### In-process at 1.60, on a 64-vCPU host
+### History: in-process at 1.60, on a 64-vCPU host
 
 The ledger and TPROC-C numbers above were taken on a 32-vCPU host.  For
 1.60 the whole matrix ran again on a 64-vCPU x86-64 host (one socket),
@@ -940,7 +1077,7 @@ What the 64-vCPU matrix shows:
   longer computes the version-GC horizon when it is not going to prune,
   which was 4.5% of a TPROC-C connection's CPU.
 
-### The 2.0 page format, measured
+### History: the 2.0 page format, measured
 
 2.0's B-tree routes on truncated separators and prefix-compresses its
 internal nodes (above, "Internal nodes route on short keys").  The same
@@ -971,7 +1108,7 @@ connections 3.5% slower), and an 8-byte slot (the page file 5% smaller,
 the range reads 2.3-2.8% slower).  One B-tree per table, which would
 cut the ledger's height to 3, was assessed and not done.
 
-### Latency at a fixed offered load
+### History: latency at a fixed offered load (1.60 and 2.0)
 
 The ledger numbers above are closed loop: each connection starts its
 next transaction when the previous one returns.  A closed loop stops
@@ -1184,10 +1321,12 @@ The open-loop modes, the stall check and the sweeps are part of the
 benchmark kit that produced these tables; they are not shipped in this
 tree.
 
-### Feature by feature
+### History: feature by feature (1.58, over the network)
 
-The same data set (10 warehouses), the same sqlite3-API binary per
-engine, one prepared statement per row with random keys, 10 s each.
+Measured for 1.58 on the bare-metal host of the 1.58 table, with sqlxtc
+reached over Quack/TCP as there.  The same data set (10 warehouses),
+the same sqlite3-API binary per engine, one prepared statement per row
+with random keys, 10 s each.
 Operations per second, 1 thread / 16 threads:
 
 | Statement shape | SQLite (WAL, NORMAL) | sqlxtc | Turso WAL | Turso MVCC |
