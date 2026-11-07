@@ -6,20 +6,32 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
-## OPEN: `/m5/exec/Blk3_cross_loop_del_fd` hangs about 1 run in 1,700 under riscv64 qemu-user
+## FIXED (2.2): xtc_exec_run could fail to return after the last task finished
 
-The test parks 32 migratable fibers on pipe fds with a 2 ms timeout
-while a foreign thread wakes them, so a fiber resumes on a peer loop
-and removes its fd registration from there.  Under riscv64 qemu-user
-(epoll, 4 CPUs) a run occasionally never quiesces: the 2.1.2 CI
-riscv64-qemu job hung there for four hours (the job re-run passed in
-20 minutes).  Measured on 2026-11-05, interleaved: 30 of 41,589 runs
-on 2.1.1 and 24 of 41,585 on 2.1.2, so 2.1.2 did not introduce it.
-Native x86-64, 20,000 runs on epoll and io_uring, never hung.  Not yet
-root-caused: emulated riscv64 atomics are weaker than x86's TSO and
-expose an ordering the native runs do not, or qemu-user's futex/epoll
-emulation drops a wakeup.  Until it is fixed, a hung riscv64-qemu job
-in CI that passes on re-run is this issue.
+The executor's supervisor stops the run when every loop is idle, and
+for a loop's timers it reads a count the loop publishes (it may not
+read the owner-only heap).  The loop published that count only when a
+step returned.  A step that dropped the heap's last timer -- here a
+cancelled park timer popped by the next-deadline peek -- and then
+blocked in its poll with no timeout, because one of its tasks was still
+alive, left the old count published while it slept.  When that task
+then finished on a peer loop without waking this one, every loop read
+idle except for the stale count, and `xtc_exec_run` never returned.
+The loop now publishes the count before it blocks.
+
+Seen as `/m5/exec/Blk3_cross_loop_del_fd` hanging about 1 run in 1,000
+under riscv64 qemu-user (the 2.1.2 CI riscv64-qemu job hung there for
+four hours), where the last fiber of the spawning loop finishes on a
+peer.  2.1.1 hangs at the same rate, so it predates 2.1.2.  An
+instrumented copy of the test showed the state at the hang: all 32
+fibers done, every loop `n_alive=0` with empty queues and inboxes, and
+the spawning loop's published timer count 1-7 against an empty heap.
+`/m5/exec/Ex5_quiesce_after_timer_drop` builds that state
+deterministically and checks the published count while the loop is
+blocked: 1 before the fix (3 of 3 runs), 0 after.  The riscv64 hammer:
+81 hangs in 75,689 runs before, 0 in 76,359 after.  On real riscv64
+hardware (an 8-core riscv64 board) the hang did not occur in 104,000
+runs before the fix: the window is a few instructions wide.
 
 ## FIXED (2.2): a pid did not cross from one xtc_exec to another
 

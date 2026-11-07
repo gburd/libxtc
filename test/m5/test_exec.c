@@ -21,6 +21,7 @@
 #include "os_time.h"     /* __os_sleep_ns */
 #include "os_cpu.h"      /* __os_ncpus: size the exec to the host */
 #include "io_pipe_compat.h"
+#include "loop_int.h"     /* Ex5 reads n_timers_pub, the supervisor's input */
 #if !defined(_WIN32)
 #include <fcntl.h>       /* O_NONBLOCK for Blk6 pipe read end */
 #endif
@@ -1122,10 +1123,123 @@ test_migratable_self_identity(const MunitParameter p[], void *d)
 #endif
 }
 
+/*
+ * [Ex5] xtc_exec_run returns once the last task is done, even when the
+ * loop's timer heap emptied in the step that then blocked.
+ *
+ * The supervisor's idle check reads each loop's published timer count
+ * (n_timers_pub), and the owner published it only after a step
+ * RETURNED.  A step that dropped the last timer (here a cancelled one,
+ * popped by the next-deadline peek) and then blocked in its poll --
+ * with no timeout, because a task was still alive -- left the count
+ * stale while it slept.  When that task finished without waking this
+ * loop (on a peer, or by an exit the poll does not see), every loop
+ * read idle except for the stale count: xtc_exec_run never returned.
+ * Found as a 1-in-1,000 hang of /Blk3_cross_loop_del_fd under riscv64
+ * emulation, where the last fiber finishes on a peer loop.
+ *
+ * The hang itself needs the last fiber to finish on a peer in the few
+ * instructions between this loop's n_alive read and its steal re-check,
+ * so this test checks the precondition deterministically instead: one
+ * loop, a proc that arms a 10 s timer and parks on a pipe; a foreign
+ * thread cancels the timer (a mark only, off the owner) and wakes the
+ * proc, so the owner's next step pops the cancelled node and blocks.
+ * While it is blocked, the published count must be 0 -- it was 1.
+ */
+static int          g_ex5_rfd = -1, g_ex5_wfd = -1;
+static xtc_timer_t *g_ex5_timer;
+static xtc_pid_t    g_ex5_pid;
+static _Atomic int  g_ex5_parked;
+static _Atomic int  g_ex5_returned;
+static _Atomic int  g_ex5_pub = -1;
+
+static void
+ex5_never(void *u)
+{
+	(void)u;
+}
+
+static void
+ex5_proc(void *arg)
+{
+	uint32_t revents;
+	(void)arg;
+	g_ex5_pid = xtc_self();
+	(void)xtc_timer_set(xtc_exec_loop((xtc_exec_t *)arg, 0),
+	    10LL * 1000 * 1000 * 1000, ex5_never, NULL, &g_ex5_timer);
+	for (;;) {
+		revents = 0;
+		atomic_fetch_add(&g_ex5_parked, 1);
+		(void)xtc_proc_wait_fd(g_ex5_rfd, XTC_IO_READABLE, -1, &revents);
+	}
+}
+
+static void *
+ex5_driver(void *arg)
+{
+	int i;
+	(void)arg;
+	for (i = 0; i < 2000 && atomic_load(&g_ex5_parked) < 1; i++)
+		(void)__os_sleep_ns(1000 * 1000LL);
+	(void)__os_sleep_ns(20 * 1000 * 1000LL);
+	(void)xtc_timer_cancel(g_ex5_timer);    /* foreign: marks only */
+	/* Wake the loop, not the proc: an idle step pops the cancelled node
+	 * in its next-deadline peek and blocks again, running nothing. */
+	(void)xtc_io_wakeup(xtc_exec_loop((xtc_exec_t *)arg, 0)->io);
+	(void)__os_sleep_ns(20 * 1000 * 1000LL);
+	atomic_store(&g_ex5_pub, atomic_load_explicit(
+	    &xtc_exec_loop((xtc_exec_t *)arg, 0)->n_timers_pub,
+	    memory_order_relaxed));
+	(void)xtc_exit_pid(g_ex5_pid, 0);
+	/* Bound the test: if the run has not returned in 5 s, it is the
+	 * hang; stop the executor so the assertion reports it. */
+	for (i = 0; i < 5000 && !atomic_load(&g_ex5_returned); i++)
+		(void)__os_sleep_ns(1000 * 1000LL);
+	if (!atomic_load(&g_ex5_returned))
+		xtc_exec_stop((xtc_exec_t *)arg);
+	return NULL;
+}
+
+static MunitResult
+test_quiesce_after_timer_drop(const MunitParameter p[], void *d)
+{
+	xtc_exec_t *e;
+	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
+	__os_thread_t drv = {0};
+	xtc_pid_t pid;
+	int64_t t0 = 0, t1 = 0;
+	(void)p; (void)d;
+
+	atomic_store(&g_ex5_parked, 0);
+	atomic_store(&g_ex5_returned, 0);
+	if (xtc_test_make_pipe(&g_ex5_rfd, &g_ex5_wfd) != 0)
+		return MUNIT_SKIP;
+	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0), ex5_proc, e,
+	    &opts, &pid), ==, XTC_OK);
+	munit_assert_int(__os_thread_create(&drv, ex5_driver, e), ==, XTC_OK);
+	(void)__os_clock_mono(&t0);
+	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
+	(void)__os_clock_mono(&t1);
+	atomic_store(&g_ex5_returned, 1);
+	munit_assert_int(__os_thread_join(&drv, NULL), ==, XTC_OK);
+	munit_assert_int(atomic_load(&g_ex5_parked), >=, 1);
+	/* Blocked with an empty heap: the supervisor must read 0 timers. */
+	munit_assert_int(atomic_load(&g_ex5_pub), ==, 0);
+	if (t1 - t0 >= 4LL * 1000 * 1000 * 1000)
+		munit_errorf("xtc_exec_run did not return after the last proc "
+		    "exited (%lld ms; stopped by the 5 s bound)",
+		    (long long)((t1 - t0) / 1000000));
+	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_test_close_pipe(g_ex5_rfd, g_ex5_wfd);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/Ex1_Ex2_init_fini",       test_init_fini,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Ex3_run_until_done",      test_run_until_done,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Ex4_n_loops",             test_n_loops,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/Ex5_quiesce_after_timer_drop", test_quiesce_after_timer_drop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Sp1_spawn",               test_spawn,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Sp2_spawn_on",            test_spawn_on,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Sp3_n_spawned_sum",       test_n_spawned_sum,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

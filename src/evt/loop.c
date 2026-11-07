@@ -1356,6 +1356,18 @@ __xtc_loop_step(xtc_loop_t *loop)
 	if (timeout_ns != 0 && __xtc_inbox_sleep_begin(loop))
 		return XTC_OK;   /* a wake/spawn arrived: drain it first */
 
+	/* Publish the timer count before blocking, not only when the step
+	 * returns: the next-deadline peek above may just have emptied the
+	 * heap, and a step that blocks with no timeout (a task is alive)
+	 * would leave the executor supervisor reading the old count.  When
+	 * that task then finished on a peer, every loop looked idle except
+	 * this stale count, and xtc_exec_run never returned (test_exec
+	 * /Ex5_quiesce_after_timer_drop; a 1-in-1,000 /Blk3 hang under
+	 * riscv64 emulation). */
+	if (loop->exec != NULL)
+		atomic_store_explicit(&loop->n_timers_pub, loop->n_timers,
+		    memory_order_relaxed);
+
 	for (i = 0; i < (int)(sizeof evs / sizeof evs[0]); i++)
 		evs[i].fd = -1;
 	loop->runs_since_poll = 0;
