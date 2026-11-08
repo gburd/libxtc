@@ -452,7 +452,7 @@ test_pool_max_children(const MunitParameter p[], void *d)
 static int g_atomic_mon_starts;
 
 static void
-atomic_mon_child(void *arg)
+spawnmon_child(void *arg)
 {
 	(void)arg;
 	(void)xtc_atomic_fetch_add_i32(&g_atomic_mon_starts, 1, xtc_mo_seq_cst);
@@ -466,7 +466,7 @@ static xtc_supervisor_t *g_atomic_mon_sup;
  * FREE happens via xtc_sup_join below, which must be called from OUTSIDE the
  * loop thread. */
 static void
-atomic_mon_watch(void *arg)
+spawnmon_watch(void *arg)
 {
 	(void)arg;
 	(void)xtc_proc_sleep(300000000LL);
@@ -496,14 +496,14 @@ test_atomic_spawn_monitor(const MunitParameter p[], void *d)
 	memset(&cs, 0, sizeof cs);
 	cs.size = sizeof cs;
 	cs.name = "atomic_mon";
-	cs.fn = atomic_mon_child;
+	cs.fn = spawnmon_child;
 	cs.policy = XTC_RESTART_TRANSIENT;
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_start(loop, &so, &cs, 1, &sup), ==, XTC_OK);
 	g_atomic_mon_sup = sup;
-	munit_assert_int(xtc_proc_spawn(loop, atomic_mon_watch, NULL, NULL,
-	    NULL), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, spawnmon_watch, NULL, NULL, NULL),
+	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
 	/*

@@ -95,12 +95,14 @@ a clean native compile against the Win32 / SSPI SDK headers.
 All compiled with zero warnings (clang/gcc `-Wall -Wextra`; MSVC
 `/W4`).  No portability bugs were found in `io_iocp.c` or
 `tls_schannel.c` on the native ARM64 compile -- nothing needed fixing.
-The library build uses `/std:c11 /experimental:c11atomics` because
-library sources still write C11 `_Atomic` (being migrated onto
-`xtc_atomic.h`).  The public atomics in `xtc_atomic.h` do not need it:
-under MSVC they use the Interlocked intrinsics on plain fields, in C and
-C++ (compile-checked for x64 and ARM64 by `test/dist/test_atomic_cxx.sh`
-through clang's MSVC targets).  clang and gcc accept `-std=c11`
+The library sources no longer write C11 `_Atomic`: every atomic goes
+through `xtc_atomic.h`, which under MSVC uses the Interlocked
+intrinsics and ISO-volatile loads and stores on plain fields, in C and
+C++.  That MSVC backend is compile-checked for x64 and ARM64 by
+`test/dist/test_atomic_cxx.sh` through clang's MSVC targets; it has
+not yet been built with cl and run on a Windows host since the library
+moved onto it, so the build still passes `/std:c11
+/experimental:c11atomics` (harmless without `_Atomic`) until that run.  clang and gcc accept `-std=c11`
 directly.  This CONFIRMS the headers are MSVC-clean on ARM64 (Task C).
 
 What is still NOT verified: `io_iocp.c` and `tls_schannel.c` have only

@@ -14,7 +14,7 @@
  *   hot path.
  *
  * Gauge design:
- *   single _Atomic int64.  Trivial.  For higher write rates we'd
+ *   single atomic int64.  Trivial.  For higher write rates we'd
  *   shard like the counter; today this is fine.
  *
  * Histogram design:

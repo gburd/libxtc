@@ -117,8 +117,8 @@ hits one cache-line-isolated atomic on the calling CPU.  No
 cross-CPU coherence traffic on the hot path.  Reads sum all
 shards.
 .It
-Gauges are a single
-.Vt _Atomic int64_t .
+Gauges are a single atomic
+.Vt int64_t .
 For low-frequency-update gauges this is fine; high-frequency
 gauges should be modeled as a counter pair instead.
 .It

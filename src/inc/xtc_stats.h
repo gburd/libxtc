@@ -8,7 +8,7 @@
  * src/inc/xtc_stats.h
  *	Runtime statistics primitives: counters, gauges, histograms.
  *	Designed to be cheap to update on the hot path (single atomic
- *	per-CPU shard for counters; one _Atomic for gauges) and
+ *	per-CPU shard for counters; one atomic word for gauges) and
  *	non-obscuring under perf inspection.
  *
  *	A counter accumulates events.  Per-CPU sharded so that
@@ -16,7 +16,7 @@
  *	Cross-CPU summing happens only on read, which is the slow path.
  *
  *	A gauge holds a current value (depth, queue length, etc.).
- *	Single _Atomic int64; reads are wait-free, writes are atomic
+ *	Single atomic int64; reads are wait-free, writes are atomic
  *	store.  For low-frequency-update gauges this is fine.
  *
  *	A histogram tracks a value distribution and answers quantile

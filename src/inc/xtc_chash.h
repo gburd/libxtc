@@ -154,7 +154,7 @@ XTC_API int    xtc_chash_insert(xtc_chash_t *h, void *key, void *value,
  */
 XTC_API int    xtc_chash_remove(xtc_chash_t *h, const void *key, void **out_value);
 
-/* Approximate live entry count (an _Atomic counter; exact at any
+/* Approximate live entry count (an atomic counter; exact at any
  * instant with no concurrent writers, a fresh-enough estimate
  * otherwise). */
 XTC_API size_t xtc_chash_size(const xtc_chash_t *h);

@@ -222,9 +222,9 @@ fi
 # vendored code (examples/06_sqlxtc/sqlite, examples/06_sqlxtc/lime,
 # every munit.[ch]).  A justified line carries /* XTC_RAW_OK: reason */.
 #
-# rule6_fatal=0 while the tree is being migrated (the hits are counted,
-# not failed); it flips to 1 with the last conversion commit.
-rule6_fatal=0
+# Fatal since the tree was converted (Stage 2 of the portable-atomics
+# work); rule6_fatal=0 would count the hits instead of failing.
+rule6_fatal=1
 atomic_files=$(find "$ROOT/src" "$ROOT/test" "$ROOT/bench" \
     "$ROOT/docs/_includes/snippets" "$ROOT/examples" \
     \( -name '*.c' -o -name '*.h' -o -name '*.cc' -o -name '*.cpp' \) \

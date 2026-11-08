@@ -174,7 +174,7 @@ something reads it:
   minutes) at 16 buckets per power of two; a quantile is its bucket's upper
   bound, so it is never below the true value and at most 1/16 above it, and
   `xtc_hist_max` is exact.
-- **Gauges** are a single `_Atomic int64_t`: wait-free reads, atomic-store
+- **Gauges** are a single atomic `int64_t`: wait-free reads, atomic-store
   writes, for a value that moves up and down (queue depth, live connections).
 - **`xtc_dist`** adds mergeable online mean/variance: each shard keeps a
   Welford running moment on its hot path, and the read merges shards with the

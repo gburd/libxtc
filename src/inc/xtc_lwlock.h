@@ -41,12 +41,6 @@
 
 #include <pthread.h>
 #include <stdint.h>
-/* shortcut: transitional -- C consumers that used C11 atomics after
- * including only this header got <stdatomic.h> from it; kept (C only)
- * until the tree's own users are converted to xtc_atomic.h. */
-#if !defined(__cplusplus)
-#include <stdatomic.h>
-#endif
 
 #include "xtc.h"
 

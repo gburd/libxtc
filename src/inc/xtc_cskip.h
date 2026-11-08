@@ -135,7 +135,7 @@ XTC_API int    xtc_cskip_min(xtc_cskip_t *s, void **out_key,
 XTC_API int    xtc_cskip_floor(xtc_cskip_t *s, const void *key,
                                void **out_key, void **out_value);
 
-/* Approximate live entry count (an _Atomic counter; exact with no
+/* Approximate live entry count (an atomic counter; exact with no
  * concurrent writers). */
 XTC_API size_t xtc_cskip_size(const xtc_cskip_t *s);
 
