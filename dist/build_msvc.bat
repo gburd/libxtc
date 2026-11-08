@@ -24,7 +24,8 @@ if "%XTC_SRC%"=="" set XTC_SRC=%~dp0..
 echo XTC_SRC=%XTC_SRC%
 
 set INC=/I"%XTC_SRC%\src\inc" /I"%XTC_SRC%\src\inc\compat" /I"%XTC_SRC%\test\include" /I.
-rem /experimental:c11atomics enables _Atomic on VS2022 17.5+ / VS2026.
+rem No: the sources use xtc_atomic.h (plain
+rem storage + Interlocked / __iso_volatile intrinsics), never _Atomic.
 rem /DXTC_BUILDING_DLL marks these objects as "I am the library" for
 rem the XTC_API export macro (src/inc/xtc_export.h): it selects
 rem __declspec(dllexport) on every PUBLIC prototype.  This build still
@@ -36,7 +37,7 @@ rem actual link.exe /DLL step, a generated import .lib, and pointing
 rem smoke.c at it is NOT done in this pass (needs a Windows host to
 rem build+run+verify); this only makes the export-macro plumbing that
 rem such a follow-up would require already correct and in place.
-set CFLAGS=/nologo /std:c11 /experimental:c11atomics /W3 /WX /O2 /MT /D_WIN32 /DWIN32_LEAN_AND_MEAN /D_CRT_SECURE_NO_WARNINGS /DXTC_BUILDING_DLL %INC%
+set CFLAGS=/nologo /std:c11 /W3 /WX /O2 /MT /D_WIN32 /DWIN32_LEAN_AND_MEAN /D_CRT_SECURE_NO_WARNINGS /DXTC_BUILDING_DLL %INC%
 
 rem --- 1. Assemble the fcontext primitives with the right assembler
 rem        for the target arch.  ml64 assembles the x86-64 MASM file;

@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 if "%XTC_SRC%"=="" set XTC_SRC=C:\libxtc
 set INC=/I"%XTC_SRC%\src\inc" /I"%XTC_SRC%\src\inc\compat" /I.
-set CFLAGS=/nologo /std:c11 /experimental:c11atomics /W3 /WX /O2 /MT /D_WIN32 /DWIN32_LEAN_AND_MEAN /D_CRT_SECURE_NO_WARNINGS /DXTC_BUILDING_DLL %INC%
+set CFLAGS=/nologo /std:c11 /W3 /WX /O2 /MT /D_WIN32 /DWIN32_LEAN_AND_MEAN /D_CRT_SECURE_NO_WARNINGS /DXTC_BUILDING_DLL %INC%
 ml64 /nologo /c /Fo fctx_x86_64_ms_pe.obj "%XTC_SRC%\src\os\asm\fctx_x86_64_ms_pe.asm"
 if errorlevel 1 exit /b 1
 set SRCS=
