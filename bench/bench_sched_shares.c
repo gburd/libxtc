@@ -32,7 +32,6 @@
  *	Usage: bench_sched_shares [window_ms]   (default 300)
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,9 +46,9 @@
 #define N_PER_CLASS 4            /* fibers in each class */
 #define CHUNK_ITERS 2000         /* compute per chunk (equal for A and B) */
 
-static atomic_long g_a_chunks;
-static atomic_long g_b_chunks;
-static atomic_int  g_stop;
+static long g_a_chunks;
+static long g_b_chunks;
+static int g_stop;
 static volatile long g_sink;     /* defeat dead-code elimination */
 
 /* A well-behaved worker: compute one equal-size chunk, then yield,
@@ -58,17 +57,17 @@ static void
 worker(void *arg)
 {
 	int which = (int)(intptr_t)arg;
-	while (!atomic_load_explicit(&g_stop, memory_order_relaxed)) {
+	while (!xtc_atomic_load_i32(&g_stop, xtc_mo_relaxed)) {
 		long acc = 0, i;
 		for (i = 0; i < CHUNK_ITERS; i++)
 			acc += (i ^ (i << 1)) + (acc >> 3);
 		g_sink += acc;
 		if (which == 0)
-			atomic_fetch_add_explicit(&g_a_chunks, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_long(&g_a_chunks, 1,
+			    xtc_mo_relaxed);
 		else
-			atomic_fetch_add_explicit(&g_b_chunks, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_long(&g_b_chunks, 1,
+			    xtc_mo_relaxed);
 		xtc_yield();
 	}
 }
@@ -88,7 +87,7 @@ timekeeper(void *arg)
 			break;
 		xtc_yield();
 	}
-	atomic_store_explicit(&g_stop, 1, memory_order_relaxed);
+	xtc_atomic_store_i32(&g_stop, 1, xtc_mo_relaxed);
 }
 
 /*
@@ -106,9 +105,9 @@ run_window(int use_shares, int a_shares, int b_shares,
 	xtc_proc_opts_t oa, ob;
 	int i;
 
-	atomic_store(&g_a_chunks, 0);
-	atomic_store(&g_b_chunks, 0);
-	atomic_store(&g_stop, 0);
+	xtc_atomic_store_long(&g_a_chunks, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_b_chunks, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_stop, 0, xtc_mo_seq_cst);
 
 	if (xtc_loop_init(&loop) != XTC_OK) {
 		fprintf(stderr, "loop_init failed\n");
@@ -142,8 +141,8 @@ run_window(int use_shares, int a_shares, int b_shares,
 	(void)xtc_loop_run(loop);
 	(void)xtc_loop_fini(loop);
 
-	*out_a = atomic_load(&g_a_chunks);
-	*out_b = atomic_load(&g_b_chunks);
+	*out_a = xtc_atomic_load_long(&g_a_chunks, xtc_mo_seq_cst);
+	*out_b = xtc_atomic_load_long(&g_b_chunks, xtc_mo_seq_cst);
 	return 0;
 }
 

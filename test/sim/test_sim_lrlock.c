@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -75,18 +74,18 @@ pl_sync(void *dst, const void *src, size_t data_size)
 }
 
 static xtc_lrlock_t *g_lr;
-static atomic_int     g_torn;      /* reader saw an inconsistent snapshot */
-static atomic_int     g_no_slot;   /* read_begin returned NULL (slot cap) */
-static atomic_int     g_done;
-static atomic_long    g_hash;      /* order-sensitive fold of reads */
+static int g_torn;    /* reader saw an inconsistent snapshot */
+static int g_no_slot; /* read_begin returned NULL (slot cap) */
+static int g_done;
+static long g_hash; /* order-sensitive fold of reads */
 
 static void
 fold(long v)
 {
-	long h = atomic_load_explicit(&g_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(v + 1));
-	atomic_store_explicit(&g_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_hash, h, xtc_mo_relaxed);
 }
 
 static void
@@ -100,19 +99,18 @@ lr_reader(void *arg)
 		/* Full read-side, NO yield inside it (see the slot note). */
 		p = xtc_lrlock_read_begin(g_lr);
 		if (p == NULL) {
-			atomic_fetch_add_explicit(&g_no_slot, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_no_slot, 1, xtc_mo_relaxed);
 		} else {
 			long hi = p->hi, lo = p->lo, sum = p->sum;
 			if (hi != lo || sum != hi + lo)
-				atomic_fetch_add_explicit(&g_torn, 1,
-				    memory_order_relaxed);
+				xtc_atomic_fetch_add_i32(&g_torn, 1,
+				    xtc_mo_relaxed);
 			fold(hi + (long)id);
 			xtc_lrlock_read_end(g_lr);
 		}
 		xtc_yield();                /* interleave BETWEEN read-sides */
 	}
-	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 }
 
 static void
@@ -132,7 +130,7 @@ lr_writer(void *arg)
 		xtc_lrlock_write_end(g_lr);
 		xtc_yield();
 	}
-	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -143,10 +141,10 @@ run_lr(uint64_t seed, int *out_done, int *out_torn, int *out_no_slot,
 	struct payload *w;
 	int i, rc, next = 0;
 
-	atomic_store(&g_torn, 0);
-	atomic_store(&g_no_slot, 0);
-	atomic_store(&g_done, 0);
-	atomic_store(&g_hash, 0);
+	xtc_atomic_store_i32(&g_torn, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_no_slot, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	if (xtc_lrlock_create(sizeof(struct payload), pl_apply, pl_sync,
@@ -171,10 +169,10 @@ run_lr(uint64_t seed, int *out_done, int *out_torn, int *out_no_slot,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_done = atomic_load(&g_done);
-	*out_torn = atomic_load(&g_torn);
-	*out_no_slot = atomic_load(&g_no_slot);
-	*out_hash = atomic_load(&g_hash);
+	*out_done = xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
+	*out_torn = xtc_atomic_load_i32(&g_torn, xtc_mo_seq_cst);
+	*out_no_slot = xtc_atomic_load_i32(&g_no_slot, xtc_mo_seq_cst);
+	*out_hash = xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_lrlock_destroy(g_lr);
 	g_lr = NULL;

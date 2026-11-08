@@ -24,7 +24,6 @@
  *	test_preempt_p1 -- is the trigger there).
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,10 +37,11 @@
 #include "xtc_preempt.h"
 #include "xtc_io.h"
 
-static atomic_int  g_peer_progress;
-static atomic_int  g_compute_done;
-static atomic_long g_yields;
-static atomic_ullong g_signal_ticks;   /* xtc_preempt_ticks() on the worker */
+static int g_peer_progress;
+static int g_compute_done;
+static long g_yields;
+static unsigned long long
+    g_signal_ticks; /* xtc_preempt_ticks() on the worker */
 static volatile uint64_t g_sink;
 
 /* A long compute fiber: burns CPU, calling xtc_yield_if_due() each
@@ -60,24 +60,22 @@ compute(void *arg)
 			acc += (k ^ (k << 1)) + (acc >> 3);
 		g_sink += acc;
 		if (xtc_yield_if_due())
-			atomic_fetch_add_explicit(&g_yields, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_long(&g_yields, 1, xtc_mo_relaxed);
 	}
 	/* Record the signal handler's tick count observed ON the worker
 	 * thread (thread-local): the ring path must not have delivered any
 	 * SIGVTALRM, so this must be 0. */
-	atomic_store_explicit(&g_signal_ticks, xtc_preempt_ticks(),
-	    memory_order_relaxed);
-	atomic_fetch_add_explicit(&g_compute_done, 1, memory_order_relaxed);
+	xtc_atomic_store_ullong(&g_signal_ticks, xtc_preempt_ticks(),
+	    xtc_mo_relaxed);
+	xtc_atomic_fetch_add_i32(&g_compute_done, 1, xtc_mo_relaxed);
 }
 
 static void
 peer(void *arg)
 {
 	(void)arg;
-	while (!atomic_load_explicit(&g_compute_done, memory_order_relaxed)) {
-		atomic_fetch_add_explicit(&g_peer_progress, 1,
-		    memory_order_relaxed);
+	while (!xtc_atomic_load_i32(&g_compute_done, xtc_mo_relaxed)) {
+		xtc_atomic_fetch_add_i32(&g_peer_progress, 1, xtc_mo_relaxed);
 		xtc_yield();
 	}
 }
@@ -95,10 +93,10 @@ test_ring_timeslice(const MunitParameter p[], void *d)
 	if (strcmp(xtc_io_backend_name(), "uring") != 0)
 		return MUNIT_OK;
 
-	atomic_store(&g_peer_progress, 0);
-	atomic_store(&g_compute_done, 0);
-	atomic_store(&g_yields, 0);
-	atomic_store(&g_signal_ticks, 0);
+	xtc_atomic_store_i32(&g_peer_progress, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_compute_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_yields, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_ullong(&g_signal_ticks, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);   /* single loop */
 	l = xtc_exec_loop(e, 0);
@@ -116,12 +114,17 @@ test_ring_timeslice(const MunitParameter p[], void *d)
 
 	/* The ring sliced the compute fiber: it yielded, and the peers
 	 * made progress meanwhile. */
-	munit_assert_int(atomic_load(&g_compute_done), ==, 1);
-	munit_assert_long(atomic_load(&g_yields), >, 0);
-	munit_assert_int(atomic_load(&g_peer_progress), >, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_compute_done, xtc_mo_seq_cst),
+	    ==, 1);
+	munit_assert_long(xtc_atomic_load_long(&g_yields, xtc_mo_seq_cst), >,
+	    0);
+	munit_assert_int(xtc_atomic_load_i32(&g_peer_progress, xtc_mo_seq_cst),
+	    >, 0);
 	/* And it did so with NO signal delivered: the SIGVTALRM handler's
 	 * tick counter on the worker thread never advanced. */
-	munit_assert_ullong(atomic_load(&g_signal_ticks), ==, 0);
+	munit_assert_ullong(xtc_atomic_load_ullong(&g_signal_ticks,
+	                        xtc_mo_seq_cst),
+	    ==, 0);
 	/* The loop's yield-due telemetry climbed (the ring source fed it). */
 	munit_assert_uint64(xtc_yield_due_count(l), >, 0);
 
@@ -159,8 +162,8 @@ test_ring_timeslice(const MunitParameter p[], void *d)
  * under the sanitizers it is the real guard.
  */
 #define XL_FIBERS 16
-static _Atomic int  g_xl_done;
-static _Atomic long g_xl_yields;
+static int g_xl_done;
+static long g_xl_yields;
 
 static void
 xl_compute(void *arg)
@@ -180,10 +183,10 @@ xl_compute(void *arg)
 		/* THE path under test: reached while this fiber may be running
 		 * stolen on a loop other than the one it was spawned on. */
 		if (xtc_yield_if_due())
-			atomic_fetch_add_explicit(&g_xl_yields, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_long(&g_xl_yields, 1,
+			    xtc_mo_relaxed);
 	}
-	atomic_fetch_add_explicit(&g_xl_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_xl_done, 1, xtc_mo_relaxed);
 }
 
 static MunitResult
@@ -197,8 +200,8 @@ test_ring_crossloop(const MunitParameter p[], void *d)
 	if (strcmp(xtc_io_backend_name(), "uring") != 0)
 		return MUNIT_OK;   /* ring preempt is io_uring-only */
 
-	atomic_store(&g_xl_done, 0);
-	atomic_store(&g_xl_yields, 0);
+	xtc_atomic_store_i32(&g_xl_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_xl_yields, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_exec_init(&e, 8), ==, XTC_OK);
 	/* Eager rebalance so idle peers actively steal, maximizing the number
@@ -221,9 +224,11 @@ test_ring_crossloop(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 
 	/* No hang, no lost work: every fiber ran to completion... */
-	munit_assert_int(atomic_load(&g_xl_done), ==, XL_FIBERS);
+	munit_assert_int(xtc_atomic_load_i32(&g_xl_done, xtc_mo_seq_cst), ==,
+	    XL_FIBERS);
 	/* ...and the ring still sliced them while they migrated. */
-	munit_assert_long(atomic_load(&g_xl_yields), >, 0);
+	munit_assert_long(xtc_atomic_load_long(&g_xl_yields, xtc_mo_seq_cst), >,
+	    0);
 
 	(void)xtc_exec_fini(e);
 	return MUNIT_OK;

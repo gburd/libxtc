@@ -11,7 +11,6 @@
  *	  Mp3: K-message FIFO order is preserved.
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,12 +25,12 @@
 
 /* ----- Mp1: spawn N processes, all complete ----------------- */
 
-static _Atomic int mp1_done;
+static int mp1_done;
 
 static void mp1_proc(void *arg)
 {
 	(void)arg;
-	atomic_fetch_add(&mp1_done, 1);
+	xtc_atomic_fetch_add_i32(&mp1_done, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -41,7 +40,7 @@ prop_spawn_n_all_complete(hegel_test_case *tc, void *u)
 	int n, i;
 	(void)u;
 	n = (int)hegel_draw_int(tc, hegel_integers(1, 32));
-	atomic_store(&mp1_done, 0);
+	xtc_atomic_store_i32(&mp1_done, 0, xtc_mo_seq_cst);
 	hegel_assume(xtc_loop_init(&loop) == XTC_OK);
 	for (i = 0; i < n; i++) {
 		xtc_pid_t p;
@@ -49,7 +48,7 @@ prop_spawn_n_all_complete(hegel_test_case *tc, void *u)
 		    == XTC_OK);
 	}
 	hegel_assume(xtc_loop_run(loop) == XTC_OK);
-	hegel_assume(atomic_load(&mp1_done) == n);
+	hegel_assume(xtc_atomic_load_i32(&mp1_done, xtc_mo_seq_cst) == n);
 	hegel_assume(xtc_loop_fini(loop) == XTC_OK);
 }
 

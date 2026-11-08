@@ -31,7 +31,6 @@
 
 #include <fcntl.h>
 #include <signal.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,8 +53,8 @@
 static xtc_exec_t *g_exec;
 static int g_fd = -1;
 static long g_target;
-static atomic_long g_ops;
-static atomic_int g_bad;
+static long g_ops;
+static int g_bad;
 static xtc_pid_t g_pid[WORKERS];
 static int g_kills_sent, g_killed, g_exited, g_bad_reason;
 
@@ -67,10 +66,10 @@ worker(void *arg)
 	char buf[SLOT], rd[SLOT];
 
 	memset(buf, 'a' + slot % 26, sizeof buf);
-	while (atomic_load_explicit(&g_ops, memory_order_relaxed) < g_target) {
+	while (xtc_atomic_load_long(&g_ops, xtc_mo_relaxed) < g_target) {
 		int j, ok = 1;
 		if (xtc_mask_enter() != XTC_OK) {
-			atomic_fetch_add(&g_bad, 1);
+			xtc_atomic_fetch_add_i32(&g_bad, 1, xtc_mo_seq_cst);
 			return;
 		}
 		for (j = 0; ok && j < BURST / 2; j++) {
@@ -81,8 +80,8 @@ worker(void *arg)
 			    memcmp(rd, buf, sizeof rd) == 0;
 		}
 		if (!ok)
-			atomic_fetch_add(&g_bad, 1);
-		atomic_fetch_add_explicit(&g_ops, 2 * j, memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_bad, 1, xtc_mo_seq_cst);
+		xtc_atomic_fetch_add_long(&g_ops, 2 * j, xtc_mo_relaxed);
 		(void)xtc_mask_leave(); /* a latched kill lands here */
 		if (!ok)
 			return;
@@ -123,7 +122,9 @@ boss(void *arg)
 
 		if (xtc_recv(&m, &n, wait) != XTC_OK) {
 			int k;
-			for (k = 0; k < 4 && atomic_load(&g_ops) < g_target;
+			for (k = 0; k < 4 &&
+			     xtc_atomic_load_long(&g_ops, xtc_mo_seq_cst) <
+			         g_target;
 			     k++) {
 				i = (int)(xtc_rand_u64() % WORKERS);
 				if (xtc_exit_pid(g_pid[i], KILL_REASON) ==
@@ -147,7 +148,8 @@ boss(void *arg)
 		for (i = 0; i < WORKERS; i++)
 			if (xtc_pid_eq(g_pid[i], who))
 				break;
-		if (i < WORKERS && atomic_load(&g_ops) < g_target &&
+		if (i < WORKERS &&
+		    xtc_atomic_load_long(&g_ops, xtc_mo_seq_cst) < g_target &&
 		    spawn_worker(i) == XTC_OK)
 			live++;
 	}
@@ -162,7 +164,7 @@ on_alarm(int s)
 	n = snprintf(m, sizeof m,
 	    "FAIL: hang -- %ld/%ld ops, %d kills "
 	    "landed\n",
-	    atomic_load(&g_ops), g_target, g_killed);
+	    xtc_atomic_load_long(&g_ops, xtc_mo_seq_cst), g_target, g_killed);
 	(void)!write(2, m, (size_t)n);
 	_exit(1);
 }
@@ -176,8 +178,8 @@ test_kill_stress(const MunitParameter p[], void *d)
 	(void)d;
 
 	g_target = env != NULL ? atol(env) : 100000;
-	atomic_store(&g_ops, 0);
-	atomic_store(&g_bad, 0);
+	xtc_atomic_store_long(&g_ops, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_bad, 0, xtc_mo_seq_cst);
 	g_kills_sent = g_killed = g_exited = g_bad_reason = 0;
 	munit_assert_int(xtc_fs_tmpdir(dir, sizeof dir), ==, XTC_OK);
 	snprintf(path, sizeof path, "%s/xtc_aio_kill_XXXXXX", dir);
@@ -201,10 +203,12 @@ test_kill_stress(const MunitParameter p[], void *d)
 	fprintf(stderr,
 	    "aio_kill: %ld ops, %d kills sent, %d landed, %d "
 	    "workers exited normally\n",
-	    atomic_load(&g_ops), g_kills_sent, g_killed, g_exited);
-	munit_assert_int(atomic_load(&g_bad), ==, 0);
+	    xtc_atomic_load_long(&g_ops, xtc_mo_seq_cst), g_kills_sent,
+	    g_killed, g_exited);
+	munit_assert_int(xtc_atomic_load_i32(&g_bad, xtc_mo_seq_cst), ==, 0);
 	munit_assert_int(g_bad_reason, ==, 0);
-	munit_assert_long(atomic_load(&g_ops), >=, g_target);
+	munit_assert_long(xtc_atomic_load_long(&g_ops, xtc_mo_seq_cst), >=,
+	    g_target);
 	munit_assert_int(g_killed, >, 0);
 	return MUNIT_OK;
 }

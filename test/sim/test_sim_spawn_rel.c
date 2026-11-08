@@ -26,7 +26,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,13 +39,13 @@
 #define N_LOOPS   4
 #define N_PER_SUP 6           /* children each supervisor spawns */
 
-static atomic_int g_spawned;
-static atomic_int g_mon_ok;       /* monitor DOWN, reason == expected */
-static atomic_int g_mon_noproc;   /* monitor DOWN == XTC_DOWN_NOPROC (MUST be 0) */
-static atomic_int g_mon_bad;      /* monitor DOWN, unexpected reason */
-static atomic_int g_link_ok;      /* link EXIT, reason == expected */
-static atomic_int g_link_bad;     /* link EXIT, unexpected reason */
-static atomic_int g_sups_done;
+static int g_spawned;
+static int g_mon_ok;     /* monitor DOWN, reason == expected */
+static int g_mon_noproc; /* monitor DOWN == XTC_DOWN_NOPROC (MUST be 0) */
+static int g_mon_bad;    /* monitor DOWN, unexpected reason */
+static int g_link_ok;    /* link EXIT, reason == expected */
+static int g_link_bad;   /* link EXIT, unexpected reason */
+static int g_sups_done;
 
 /* Child: yield a seeded number of times, then exit with a known reason.
  * reason 0 for the monitored children (clean), a nonzero code for the
@@ -59,7 +58,7 @@ child_fn(void *arg)
 	struct child_arg *c = arg;
 	int k = (int)__xtc_sim_rng_range(XTC_SIM_RNG_APP, 4);   /* 0..3 yields */
 	int i;
-	atomic_fetch_add(&g_spawned, 1);
+	xtc_atomic_fetch_add_i32(&g_spawned, 1, xtc_mo_seq_cst);
 	for (i = 0; i < k; i++)
 		xtc_yield();
 	xtc_exit_self(c->reason);
@@ -120,19 +119,31 @@ supervisor(void *arg)
 					 * with the legacy reason.  Exercises
 					 * xtc_down_decode_ex under DST. */
 					if (xtc_down_decode_ex(m, n, &di) != XTC_OK)
-						atomic_fetch_add(&g_mon_bad, 1);
+						xtc_atomic_fetch_add_i32(
+						    &g_mon_bad, 1,
+						    xtc_mo_seq_cst);
 					else if (xtc_down_is_noproc(reason)) {
 						if (di.kind != XTC_DOWN_KIND_NOPROC)
-							atomic_fetch_add(&g_mon_bad, 1);
+							xtc_atomic_fetch_add_i32(
+							    &g_mon_bad, 1,
+							    xtc_mo_seq_cst);
 						else
-							atomic_fetch_add(&g_mon_noproc, 1);
+							xtc_atomic_fetch_add_i32(
+							    &g_mon_noproc, 1,
+							    xtc_mo_seq_cst);
 					} else if (reason == 0) {
 						if (di.kind != XTC_DOWN_KIND_CLEAN)
-							atomic_fetch_add(&g_mon_bad, 1);
+							xtc_atomic_fetch_add_i32(
+							    &g_mon_bad, 1,
+							    xtc_mo_seq_cst);
 						else
-							atomic_fetch_add(&g_mon_ok, 1);
+							xtc_atomic_fetch_add_i32(
+							    &g_mon_ok, 1,
+							    xtc_mo_seq_cst);
 					} else
-						atomic_fetch_add(&g_mon_bad, 1);
+						xtc_atomic_fetch_add_i32(
+						    &g_mon_bad, 1,
+						    xtc_mo_seq_cst);
 				}
 			} else if (n >= sizeof(struct exit_sig) && *k == 'E') {
 				const struct exit_sig *ex = m;
@@ -143,15 +154,18 @@ supervisor(void *arg)
 				if (xtc_down_decode_ex(m, n, &di) == XTC_OK &&
 				    di.kind == XTC_DOWN_KIND_EXIT &&
 				    di.exit_code == 7 && ex->reason == 7)
-					atomic_fetch_add(&g_link_ok, 1);
+					xtc_atomic_fetch_add_i32(&g_link_ok, 1,
+					    xtc_mo_seq_cst);
 				else
-					atomic_fetch_add(&g_link_bad, 1);
+					xtc_atomic_fetch_add_i32(&g_link_bad, 1,
+					    xtc_mo_seq_cst);
 			}
 			xtc_free(m);
 		}
 	}
 
-	if (atomic_fetch_add(&g_sups_done, 1) + 1 >= N_LOOPS)
+	if (xtc_atomic_fetch_add_i32(&g_sups_done, 1, xtc_mo_seq_cst) + 1 >=
+	    N_LOOPS)
 		(void)xtc_exec_stop(sa->e);
 }
 
@@ -163,13 +177,13 @@ run_one(uint64_t seed, int pessimal, int *out_mok, int *out_np,
 	struct sup_arg sa[N_LOOPS];
 	int i, rc;
 
-	atomic_store(&g_spawned, 0);
-	atomic_store(&g_mon_ok, 0);
-	atomic_store(&g_mon_noproc, 0);
-	atomic_store(&g_mon_bad, 0);
-	atomic_store(&g_link_ok, 0);
-	atomic_store(&g_link_bad, 0);
-	atomic_store(&g_sups_done, 0);
+	xtc_atomic_store_i32(&g_spawned, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_mon_ok, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_mon_noproc, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_mon_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_link_ok, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_link_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_sups_done, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
 		return -1;
@@ -191,12 +205,17 @@ run_one(uint64_t seed, int pessimal, int *out_mok, int *out_np,
 
 	rc = xtc_sim_exec_run(e, seed, 20000000);
 
-	if (out_mok)   *out_mok = atomic_load(&g_mon_ok);
-	if (out_np)    *out_np  = atomic_load(&g_mon_noproc);
-	if (out_lok)   *out_lok = atomic_load(&g_link_ok);
-	if (out_bad)   *out_bad = atomic_load(&g_mon_bad) +
-	                          atomic_load(&g_link_bad);
-	if (out_sp)    *out_sp  = atomic_load(&g_spawned);
+	if (out_mok)
+		*out_mok = xtc_atomic_load_i32(&g_mon_ok, xtc_mo_seq_cst);
+	if (out_np)
+		*out_np = xtc_atomic_load_i32(&g_mon_noproc, xtc_mo_seq_cst);
+	if (out_lok)
+		*out_lok = xtc_atomic_load_i32(&g_link_ok, xtc_mo_seq_cst);
+	if (out_bad)
+		*out_bad = xtc_atomic_load_i32(&g_mon_bad, xtc_mo_seq_cst) +
+		    xtc_atomic_load_i32(&g_link_bad, xtc_mo_seq_cst);
+	if (out_sp)
+		*out_sp = xtc_atomic_load_i32(&g_spawned, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	(void)xtc_exec_fini(e);
 	return rc;

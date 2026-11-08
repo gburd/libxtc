@@ -8,7 +8,6 @@
  */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -175,15 +174,16 @@ fe_producer(void *arg)
 }
 /* Polls a done flag rather than being pthread_cancel'd: the MSVC
  * pthread shim (src/inc/compat/pthread.h) has no pthread_cancel. */
-static _Atomic int fe_done;
+static int fe_done;
 static void *
 fe_watchdog(void *arg)
 {
 	int i;
 	(void)arg;
-	for (i = 0; i < 500 && !atomic_load(&fe_done); i++)
+	for (i = 0; i < 500 && !xtc_atomic_load_i32(&fe_done, xtc_mo_seq_cst);
+	     i++)
 		(void)xtc_sleep_ns(10LL * 1000 * 1000);
-	if (!atomic_load(&fe_done))
+	if (!xtc_atomic_load_i32(&fe_done, xtc_mo_seq_cst))
 		munit_error("xtc_stream_for_each livelocked the loop");
 	return NULL;
 }
@@ -206,10 +206,10 @@ test_stream_for_each_same_loop_producer(const MunitParameter p[], void *d)
 	    ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, fe_producer, &c, NULL, NULL),
 	    ==, XTC_OK);
-	atomic_store(&fe_done, 0);
+	xtc_atomic_store_i32(&fe_done, 0, xtc_mo_seq_cst);
 	munit_assert_int(pthread_create(&wd, NULL, fe_watchdog, NULL), ==, 0);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	atomic_store(&fe_done, 1);
+	xtc_atomic_store_i32(&fe_done, 1, xtc_mo_seq_cst);
 	(void)pthread_join(wd, NULL);
 	munit_assert_int(c.rc, ==, XTC_OK);
 	munit_assert_int(c.sum, ==, 10);

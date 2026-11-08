@@ -6,7 +6,6 @@
  */
 
 #include <stdint.h>
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -641,15 +640,15 @@ test_recv_inf_parks(const MunitParameter p[], void *d)
  * capped mailbox before the proc runs; the watermark callback fires
  * on the rising edge, over-cap sends are rejected and counted, and
  * xtc_proc_mailbox_stats reports depth / peak / totals. */
-static _Atomic int    g_wm_fires;
-static _Atomic size_t g_wm_depth;
+static int g_wm_fires;
+static size_t g_wm_depth;
 
 static void
 wm_cb(xtc_pid_t self, size_t depth, size_t cap, void *user)
 {
 	(void)self; (void)cap; (void)user;
-	atomic_fetch_add(&g_wm_fires, 1);
-	atomic_store(&g_wm_depth, depth);
+	xtc_atomic_fetch_add_i32(&g_wm_fires, 1, xtc_mo_seq_cst);
+	xtc_atomic_store_size(&g_wm_depth, depth, xtc_mo_seq_cst);
 }
 
 static void
@@ -673,8 +672,8 @@ test_mailbox_stats(const MunitParameter p[], void *d)
 	int i, v = 7;
 	(void)p; (void)d;
 
-	atomic_store(&g_wm_fires, 0);
-	atomic_store(&g_wm_depth, 0);
+	xtc_atomic_store_i32(&g_wm_fires, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_size(&g_wm_depth, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	opts.name = "mbx";
@@ -699,8 +698,10 @@ test_mailbox_stats(const MunitParameter p[], void *d)
 	munit_assert_uint64(st.drop_total, ==, 2);
 
 	/* Watermark fired once on the rising edge, at depth >= 4. */
-	munit_assert_int(atomic_load(&g_wm_fires), ==, 1);
-	munit_assert_size(atomic_load(&g_wm_depth), >=, 4);
+	munit_assert_int(xtc_atomic_load_i32(&g_wm_fires, xtc_mo_seq_cst), ==,
+	    1);
+	munit_assert_size(xtc_atomic_load_size(&g_wm_depth, xtc_mo_seq_cst), >=,
+	    4);
 
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
@@ -1165,10 +1166,24 @@ test_fault_escalate(const MunitParameter p[], void *d)
 }
 
 /* at-exit hooks run LIFO on a normal proc exit. */
-static _Atomic int g_atx_order;
-static _Atomic int g_atx_a, g_atx_b;
-static void atx_a(void *u) { (void)u; atomic_store(&g_atx_a, atomic_fetch_add(&g_atx_order, 1) + 1); }
-static void atx_b(void *u) { (void)u; atomic_store(&g_atx_b, atomic_fetch_add(&g_atx_order, 1) + 1); }
+static int g_atx_order;
+static int g_atx_a, g_atx_b;
+static void
+atx_a(void *u)
+{
+	(void)u;
+	xtc_atomic_store_i32(&g_atx_a,
+	    xtc_atomic_fetch_add_i32(&g_atx_order, 1, xtc_mo_seq_cst) + 1,
+	    xtc_mo_seq_cst);
+}
+static void
+atx_b(void *u)
+{
+	(void)u;
+	xtc_atomic_store_i32(&g_atx_b,
+	    xtc_atomic_fetch_add_i32(&g_atx_order, 1, xtc_mo_seq_cst) + 1,
+	    xtc_mo_seq_cst);
+}
 static void atx_proc(void *arg)
 {
 	(void)arg;
@@ -1184,9 +1199,9 @@ test_proc_at_exit(const MunitParameter p[], void *d)
 	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	(void)p; (void)d;
-	atomic_store(&g_atx_order, 0);
-	atomic_store(&g_atx_a, 0);
-	atomic_store(&g_atx_b, 0);
+	xtc_atomic_store_i32(&g_atx_order, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_atx_a, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_atx_b, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	opts.name = "atx";
 	munit_assert_int(xtc_proc_spawn(loop, atx_proc, NULL, &opts, &pid),
@@ -1194,8 +1209,8 @@ test_proc_at_exit(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	/* Both ran; LIFO -> b (registered second) ran first. */
-	munit_assert_int(atomic_load(&g_atx_b), ==, 1);
-	munit_assert_int(atomic_load(&g_atx_a), ==, 2);
+	munit_assert_int(xtc_atomic_load_i32(&g_atx_b, xtc_mo_seq_cst), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_atx_a, xtc_mo_seq_cst), ==, 2);
 	return MUNIT_OK;
 }
 
@@ -1217,7 +1232,7 @@ test_proc_at_exit(const MunitParameter p[], void *d)
  * 16 KiB stacks keep the run near 2 GB of address space and ~1 GB RSS.
  */
 #define A1_PROBE_TARGET 100000
-static _Atomic int g_a1_ok, g_a1_bad;
+static int g_a1_ok, g_a1_bad;
 static void
 a1_parker(void *arg)
 {
@@ -1226,13 +1241,14 @@ a1_parker(void *arg)
 	uint32_t want = (uint32_t)(uintptr_t)arg, got;
 
 	if (xtc_recv(&m, &sz, -1) != XTC_OK || sz != sizeof got) {
-		atomic_fetch_add(&g_a1_bad, 1);
+		xtc_atomic_fetch_add_i32(&g_a1_bad, 1, xtc_mo_seq_cst);
 		xtc_free(m);
 		return;
 	}
 	memcpy(&got, m, sizeof got);
 	xtc_free(m);
-	atomic_fetch_add(got == want ? &g_a1_ok : &g_a1_bad, 1);
+	xtc_atomic_fetch_add_i32(got == want ? &g_a1_ok : &g_a1_bad, 1,
+	    xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -1250,8 +1266,8 @@ test_pid_local_id_ceiling(const MunitParameter p[], void *d)
 	/* 100,000 fiber stacks: more mappings than valgrind tracks. */
 	if (getenv("XTC_UNDER_VALGRIND") != NULL)
 		return MUNIT_SKIP;
-	atomic_store(&g_a1_ok, 0);
-	atomic_store(&g_a1_bad, 0);
+	xtc_atomic_store_i32(&g_a1_ok, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_a1_bad, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_set_stack_size(16 * 1024), ==, XTC_OK);
 	munit_assert_int(xtc_loop_init(&lp), ==, XTC_OK);
 	res = xtc_loop_res(lp);
@@ -1298,8 +1314,9 @@ test_pid_local_id_ceiling(const MunitParameter p[], void *d)
 	for (i = 0; i < n; i++)
 		munit_assert_int(xtc_send(pids[i], &i, sizeof i), ==, XTC_OK);
 	(void)xtc_loop_run(lp);
-	munit_assert_int(atomic_load(&g_a1_bad), ==, 0);
-	munit_assert_int(atomic_load(&g_a1_ok), ==, (int)n);
+	munit_assert_int(xtc_atomic_load_i32(&g_a1_bad, xtc_mo_seq_cst), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_a1_ok, xtc_mo_seq_cst), ==,
+	    (int)n);
 	(void)xtc_loop_fini(lp);
 	(void)xtc_set_stack_size(old_stack);
 	free(pids);
@@ -1324,7 +1341,7 @@ test_pid_local_id_ceiling(const MunitParameter p[], void *d)
  * in B's mailbox; with 64 bits the pids differ, the send is refused
  * (XTC_E_INVAL) and B's mailbox stays empty.
  */
-static _Atomic int g_a2_got;
+static int g_a2_got;
 static void a2_exits(void *arg) { (void)arg; }
 static void
 a2_occupant(void *arg)
@@ -1333,7 +1350,7 @@ a2_occupant(void *arg)
 	size_t sz = 0;
 	(void)arg;
 	if (xtc_recv(&m, &sz, 0) == XTC_OK) {
-		atomic_store(&g_a2_got, 1);
+		xtc_atomic_store_i32(&g_a2_got, 1, xtc_mo_seq_cst);
 		xtc_free(m);
 	}
 }
@@ -1346,7 +1363,7 @@ test_pid_gen_no_wrap(const MunitParameter p[], void *d)
 	xtc_proc_info_t info = XTC_PROC_INFO_INIT;
 	(void)p; (void)d;
 
-	atomic_store(&g_a2_got, 0);
+	xtc_atomic_store_i32(&g_a2_got, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&lp), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(lp, a2_exits, NULL, NULL, &a), ==,
 	    XTC_OK);
@@ -1361,7 +1378,7 @@ test_pid_gen_no_wrap(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_send(a, "x", 1), ==, XTC_E_INVAL);
 	munit_assert_int(xtc_proc_info(a, &info), !=, XTC_OK);
 	(void)xtc_loop_run(lp);
-	munit_assert_int(atomic_load(&g_a2_got), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_a2_got, xtc_mo_seq_cst), ==, 0);
 	(void)xtc_loop_fini(lp);
 	return MUNIT_OK;
 }
@@ -1382,16 +1399,16 @@ test_pid_gen_no_wrap(const MunitParameter p[], void *d)
  * and restore the mask), and polling with a kill already deferred (must
  * honor it, so the code after the poll never runs).
  */
-static _Atomic int g_cp_body_ran;
-static _Atomic int g_cp_after_poll_ran;
-static _Atomic int g_cp_finalizer_ran;
-static _Atomic int g_cp_nopending_ok;
+static int g_cp_body_ran;
+static int g_cp_after_poll_ran;
+static int g_cp_finalizer_ran;
+static int g_cp_nopending_ok;
 
 static int
 cp_poll_body(void *ud)
 {
 	(void)ud;
-	atomic_fetch_add(&g_cp_body_ran, 1);
+	xtc_atomic_fetch_add_i32(&g_cp_body_ran, 1, xtc_mo_seq_cst);
 	return 7;
 }
 
@@ -1402,10 +1419,10 @@ cp_nothing_pending(void *ud)
 {
 	(void)ud;
 	if (xtc_cancel_poll(cp_poll_body, NULL) == 7)
-		atomic_fetch_add(&g_cp_nopending_ok, 1);
+		xtc_atomic_fetch_add_i32(&g_cp_nopending_ok, 1, xtc_mo_seq_cst);
 	/* Still masked here: a kill arriving now must not tear us down
 	 * before we record that we got this far. */
-	atomic_fetch_add(&g_cp_after_poll_ran, 1);
+	xtc_atomic_fetch_add_i32(&g_cp_after_poll_ran, 1, xtc_mo_seq_cst);
 	return 0;
 }
 
@@ -1437,7 +1454,7 @@ cp_kill_pending(void *ud)
 	xtc_free(m);
 	(void)xtc_cancel_poll(cp_poll_body, NULL);
 	/* Unreachable: the poll unmasked and drained the deferred kill. */
-	atomic_fetch_add(&g_cp_after_poll_ran, 100);
+	xtc_atomic_fetch_add_i32(&g_cp_after_poll_ran, 100, xtc_mo_seq_cst);
 	return 0;
 }
 
@@ -1445,7 +1462,7 @@ static void
 cp_finalizer(void *ud)
 {
 	(void)ud;
-	atomic_fetch_add(&g_cp_finalizer_ran, 1);
+	xtc_atomic_fetch_add_i32(&g_cp_finalizer_ran, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -1464,10 +1481,10 @@ test_cancel_poll(const MunitParameter p[], void *d)
 	xtc_pid_t pid;
 	(void)p; (void)d;
 
-	atomic_store(&g_cp_body_ran, 0);
-	atomic_store(&g_cp_after_poll_ran, 0);
-	atomic_store(&g_cp_finalizer_ran, 0);
-	atomic_store(&g_cp_nopending_ok, 0);
+	xtc_atomic_store_i32(&g_cp_body_ran, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_cp_after_poll_ran, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_cp_finalizer_ran, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_cp_nopending_ok, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	opts.name = "cp-none";
@@ -1481,14 +1498,21 @@ test_cancel_poll(const MunitParameter p[], void *d)
 	/* Only the nothing-pending proc reaches the poll body: the killed
 	 * proc is torn down by the drain INSIDE xtc_cancel_poll, before it
 	 * ever calls the body. */
-	munit_assert_int(atomic_load(&g_cp_body_ran), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_cp_body_ran, xtc_mo_seq_cst),
+	    ==, 1);
 	/* Nothing-pending: the body's value passed through and the code
 	 * after the poll still ran (mask restored, not abandoned). */
-	munit_assert_int(atomic_load(&g_cp_nopending_ok), ==, 1);
-	munit_assert_int(atomic_load(&g_cp_after_poll_ran), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_cp_nopending_ok,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_cp_after_poll_ran,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
 	/* Kill-pending: the poll honored the deferred kill, so the +100
 	 * after it never ran -- and the finalizer still did. */
-	munit_assert_int(atomic_load(&g_cp_finalizer_ran), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_cp_finalizer_ran,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
 
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	return MUNIT_OK;
@@ -1507,8 +1531,8 @@ test_cancel_poll(const MunitParameter p[], void *d)
  * point and a test that only proved DELIVERED would be the vacuous
  * half: a bug that reported DELIVERED unconditionally would pass it.
  */
-static _Atomic int g_kd_masked_entered;
-static _Atomic int g_kd_release_mask;
+static int g_kd_masked_entered;
+static int g_kd_release_mask;
 
 /* A fiber that parks forever WITHOUT a mask: killable, so a kill must
  * be reported DELIVERED. */
@@ -1534,11 +1558,11 @@ kd_masked_body(void *ud)
 	void  *m = NULL;
 	size_t sz = 0;
 	(void)ud;
-	atomic_store(&g_kd_masked_entered, 1);
+	xtc_atomic_store_i32(&g_kd_masked_entered, 1, xtc_mo_seq_cst);
 	/* Park at delivery points while masked: each one OBSERVES a pending
 	 * kill and latches it into mask_deferred (which is exactly what
 	 * xtc_exit_pid_deadline reports as DEFERRED), without unwinding. */
-	while (!atomic_load(&g_kd_release_mask)) {
+	while (!xtc_atomic_load_i32(&g_kd_release_mask, xtc_mo_seq_cst)) {
 		(void)xtc_recv(&m, &sz, 1000000);   /* 1ms */
 		xtc_free(m);
 		m = NULL;
@@ -1557,11 +1581,11 @@ kd_proc_wedged(void *arg)
 struct kd_targets {
 	xtc_pid_t killable;
 	xtc_pid_t wedged;
-	_Atomic int delivered_ok;
-	_Atomic int deferred_ok;
-	_Atomic int selfkill_rejected;
-	_Atomic int dead_ok;
-	_Atomic int mask_seen;
+	int delivered_ok;
+	int deferred_ok;
+	int selfkill_rejected;
+	int dead_ok;
+	int mask_seen;
 };
 
 static void
@@ -1573,18 +1597,18 @@ kd_proc_supervisor(void *arg)
 
 	/* Killing yourself is xtc_exit_self, not this. */
 	if (xtc_exit_pid_deadline(xtc_self(), 1, 0, &status) == XTC_E_INVAL)
-		atomic_store(&t->selfkill_rejected, 1);
+		xtc_atomic_store_i32(&t->selfkill_rejected, 1, xtc_mo_seq_cst);
 
 	/* Wait for the wedged fiber to actually be inside its mask, so the
 	 * DEFERRED assertion tests the mask and not a startup race. */
-	while (!atomic_load(&g_kd_masked_entered))
+	while (!xtc_atomic_load_i32(&g_kd_masked_entered, xtc_mo_seq_cst))
 		(void)xtc_proc_sleep(200000);
 
 	/* (1) An unmasked fiber parked at a delivery point: DELIVERED. */
 	status = -1;
 	if (xtc_exit_pid_deadline(t->killable, 9, 2000000000LL, &status) ==
 	    XTC_OK && status == XTC_KILL_DELIVERED)
-		atomic_store(&t->delivered_ok, 1);
+		xtc_atomic_store_i32(&t->delivered_ok, 1, xtc_mo_seq_cst);
 
 	/* (2) The wedged fiber: masked with the kill latched => DEFERRED.
 	 * A short deadline is enough BECAUSE the report does not wait it
@@ -1593,24 +1617,24 @@ kd_proc_supervisor(void *arg)
 	status = -1;
 	if (xtc_exit_pid_deadline(t->wedged, 9, 500000000LL, &status) ==
 	    XTC_OK && status == XTC_KILL_DEFERRED)
-		atomic_store(&t->deferred_ok, 1);
+		xtc_atomic_store_i32(&t->deferred_ok, 1, xtc_mo_seq_cst);
 
 	/* (3) The same state is visible to a supervisor through inspection
 	 * (item 2 of the request): "is it stuck in a critical section?" */
 	if (xtc_proc_info(t->wedged, &info) == XTC_OK &&
 	    info.mask_depth > 0 && info.mask_deferred != 0)
-		atomic_store(&t->mask_seen, 1);
+		xtc_atomic_store_i32(&t->mask_seen, 1, xtc_mo_seq_cst);
 
 	/* (4) Already-dead target reports DELIVERED, not an error: that IS
 	 * the outcome the caller asked for. */
 	status = -1;
 	if (xtc_exit_pid_deadline(t->killable, 9, 0, &status) == XTC_OK &&
 	    status == XTC_KILL_DELIVERED)
-		atomic_store(&t->dead_ok, 1);
+		xtc_atomic_store_i32(&t->dead_ok, 1, xtc_mo_seq_cst);
 
 	/* Let the wedged fiber leave its mask; the latched kill fires as the
 	 * mask drops, so the loop drains rather than hanging. */
-	atomic_store(&g_kd_release_mask, 1);
+	xtc_atomic_store_i32(&g_kd_release_mask, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -1623,8 +1647,8 @@ test_exit_pid_deadline(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	memset(&t, 0, sizeof t);
-	atomic_store(&g_kd_masked_entered, 0);
-	atomic_store(&g_kd_release_mask, 0);
+	xtc_atomic_store_i32(&g_kd_masked_entered, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_kd_release_mask, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	opts.name = "kd-killable";
@@ -1638,13 +1662,19 @@ test_exit_pid_deadline(const MunitParameter p[], void *d)
 	    &sup), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
-	munit_assert_int(atomic_load(&t.selfkill_rejected), ==, 1);
-	munit_assert_int(atomic_load(&t.delivered_ok), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&t.selfkill_rejected,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&t.delivered_ok, xtc_mo_seq_cst),
+	    ==, 1);
 	/* The one that matters: a wedged critical section is REPORTED as
 	 * such instead of silently swallowing the kill. */
-	munit_assert_int(atomic_load(&t.deferred_ok), ==, 1);
-	munit_assert_int(atomic_load(&t.mask_seen), ==, 1);
-	munit_assert_int(atomic_load(&t.dead_ok), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&t.deferred_ok, xtc_mo_seq_cst),
+	    ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&t.mask_seen, xtc_mo_seq_cst), ==,
+	    1);
+	munit_assert_int(xtc_atomic_load_i32(&t.dead_ok, xtc_mo_seq_cst), ==,
+	    1);
 
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	return MUNIT_OK;
@@ -1661,16 +1691,16 @@ test_exit_pid_deadline(const MunitParameter p[], void *d)
  * into a mechanically-checkable invariant.
  */
 static xtc_pid_t   g_mk_worker;
-static _Atomic int g_mk_in_mask;     /* worker is between enter and leave */
-static _Atomic int g_mk_release;     /* supervisor tells worker to leave */
-static _Atomic int g_mk_reached_after; /* code after the deferred kill ran? */
-static _Atomic int g_mk_finalizer_ran;
+static int g_mk_in_mask;       /* worker is between enter and leave */
+static int g_mk_release;       /* supervisor tells worker to leave */
+static int g_mk_reached_after; /* code after the deferred kill ran? */
+static int g_mk_finalizer_ran;
 
 static void
 mk_finalizer(void *ud)
 {
 	(void)ud;
-	atomic_fetch_add(&g_mk_finalizer_ran, 1);
+	xtc_atomic_fetch_add_i32(&g_mk_finalizer_ran, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -1685,26 +1715,27 @@ mk_worker_proc(void *arg)
 	 * START_CRIT_SECTION() macro bridge produces: enter, then arbitrary
 	 * code with its own control flow, then leave.  No callback body. */
 	munit_assert_int(xtc_mask_enter(), ==, XTC_OK);
-	atomic_store(&g_mk_in_mask, 1);
+	xtc_atomic_store_i32(&g_mk_in_mask, 1, xtc_mo_seq_cst);
 
 	/* Park at delivery points while masked so the supervisor's kill is
 	 * OBSERVED and latched (mask_deferred) rather than unwinding here. */
-	while (!atomic_load(&g_mk_release)) {
+	while (!xtc_atomic_load_i32(&g_mk_release, xtc_mo_seq_cst)) {
 		(void)xtc_recv(&m, &sz, 1000000);   /* 1ms */
 		xtc_free(m);
 		m = NULL;
 	}
 
-	atomic_store(&g_mk_in_mask, 0);
+	xtc_atomic_store_i32(&g_mk_in_mask, 0, xtc_mo_seq_cst);
 	/* Leaving drops the mask to 0 and honors the latched kill: this call
 	 * does NOT return, so the line below must never run. */
 	(void)xtc_mask_leave();
-	atomic_fetch_add(&g_mk_reached_after, 1);   /* must stay 0 */
+	xtc_atomic_fetch_add_i32(&g_mk_reached_after, 1,
+	    xtc_mo_seq_cst); /* must stay 0 */
 }
 
 struct mk_sup {
-	_Atomic int deferred_ok;   /* kill inside the mask -> DEFERRED */
-	_Atomic int mask_seen;     /* xtc_proc_info shows mask_depth > 0 */
+	int deferred_ok; /* kill inside the mask -> DEFERRED */
+	int mask_seen;   /* xtc_proc_info shows mask_depth > 0 */
 };
 
 static void
@@ -1714,22 +1745,22 @@ mk_sup_proc(void *arg)
 	xtc_proc_info_t info = XTC_PROC_INFO_INIT;
 	int status = -1;
 
-	while (!atomic_load(&g_mk_in_mask))
+	while (!xtc_atomic_load_i32(&g_mk_in_mask, xtc_mo_seq_cst))
 		(void)xtc_proc_sleep(200000);
 
 	/* A supervisor can SEE the fiber is inside a critical section... */
 	if (xtc_proc_info(g_mk_worker, &info) == XTC_OK &&
 	    info.mask_depth > 0)
-		atomic_store(&s->mask_seen, 1);
+		xtc_atomic_store_i32(&s->mask_seen, 1, xtc_mo_seq_cst);
 
 	/* ...and a kill aimed at it is DEFERRED, not delivered, because the
 	 * paired mask defers exactly like xtc_uncancelable() would. */
 	if (xtc_exit_pid_deadline(g_mk_worker, 42, 500000000LL, &status) ==
 	    XTC_OK && status == XTC_KILL_DEFERRED)
-		atomic_store(&s->deferred_ok, 1);
+		xtc_atomic_store_i32(&s->deferred_ok, 1, xtc_mo_seq_cst);
 
 	/* Release: the latched kill fires as the mask drops in leave(). */
-	atomic_store(&g_mk_release, 1);
+	xtc_atomic_store_i32(&g_mk_release, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -1742,10 +1773,10 @@ test_mask_enter_leave(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	memset(&s, 0, sizeof s);
-	atomic_store(&g_mk_in_mask, 0);
-	atomic_store(&g_mk_release, 0);
-	atomic_store(&g_mk_reached_after, 0);
-	atomic_store(&g_mk_finalizer_ran, 0);
+	xtc_atomic_store_i32(&g_mk_in_mask, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_mk_release, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_mk_reached_after, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_mk_finalizer_ran, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	opts.name = "mk-worker";
@@ -1757,12 +1788,18 @@ test_mask_enter_leave(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
 	/* Inside the pair: visible as masked, and the kill was deferred. */
-	munit_assert_int(atomic_load(&s.mask_seen), ==, 1);
-	munit_assert_int(atomic_load(&s.deferred_ok), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&s.mask_seen, xtc_mo_seq_cst), ==,
+	    1);
+	munit_assert_int(xtc_atomic_load_i32(&s.deferred_ok, xtc_mo_seq_cst),
+	    ==, 1);
 	/* leave() honored the deferred kill, so the line after it never ran,
 	 * while the at-exit finalizer still did (the A1+A2 guarantee). */
-	munit_assert_int(atomic_load(&g_mk_reached_after), ==, 0);
-	munit_assert_int(atomic_load(&g_mk_finalizer_ran), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_mk_reached_after,
+	                     xtc_mo_seq_cst),
+	    ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_mk_finalizer_ran,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
 
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	return MUNIT_OK;
@@ -1771,7 +1808,7 @@ test_mask_enter_leave(const MunitParameter p[], void *d)
 /* enter/leave NEST: N enters need N leaves, only the outermost unwinds;
  * and off a proc both return XTC_E_INVAL (so a bridge macro can ignore
  * the return).  A pure-logic check, no kill involved. */
-static _Atomic int g_mkn_after_inner, g_mkn_after_outer;
+static int g_mkn_after_inner, g_mkn_after_outer;
 
 static void
 mkn_proc(void *arg)
@@ -1787,9 +1824,11 @@ mkn_proc(void *arg)
 		xtc_free(m);
 	}
 	(void)xtc_mask_leave();                 /* depth 2->1: must NOT unwind */
-	atomic_fetch_add(&g_mkn_after_inner, 1);/* must reach here (== 1) */
+	xtc_atomic_fetch_add_i32(&g_mkn_after_inner, 1,
+	    xtc_mo_seq_cst);                    /* must reach here (== 1) */
 	(void)xtc_mask_leave();                 /* depth 1->0: honors the kill */
-	atomic_fetch_add(&g_mkn_after_outer, 1);/* must NOT reach here (== 0) */
+	xtc_atomic_fetch_add_i32(&g_mkn_after_outer, 1,
+	    xtc_mo_seq_cst); /* must NOT reach here (== 0) */
 }
 
 static MunitResult
@@ -1804,8 +1843,8 @@ test_mask_nesting(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_mask_enter(), ==, XTC_E_INVAL);
 	munit_assert_int(xtc_mask_leave(), ==, XTC_E_INVAL);
 
-	atomic_store(&g_mkn_after_inner, 0);
-	atomic_store(&g_mkn_after_outer, 0);
+	xtc_atomic_store_i32(&g_mkn_after_inner, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_mkn_after_outer, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	opts.name = "mkn";
 	munit_assert_int(xtc_proc_spawn(loop, mkn_proc, NULL, &opts, &pid),
@@ -1813,8 +1852,12 @@ test_mask_nesting(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
 	/* The inner leave only decremented; the outer leave unwound. */
-	munit_assert_int(atomic_load(&g_mkn_after_inner), ==, 1);
-	munit_assert_int(atomic_load(&g_mkn_after_outer), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_mkn_after_inner,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_mkn_after_outer,
+	                     xtc_mo_seq_cst),
+	    ==, 0);
 
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	return MUNIT_OK;
@@ -1842,16 +1885,16 @@ test_mask_nesting(const MunitParameter p[], void *d)
 #define XT_PER_PROC   16
 
 static xtc_pid_t   g_xt_pid[XT_N];
-static _Atomic int g_xt_ready;
-static _Atomic int g_xt_recv;
-static _Atomic int g_xt_sent;
+static int g_xt_ready;
+static int g_xt_recv;
+static int g_xt_sent;
 
 static void
 xt_worker(void *arg)
 {
 	int want = XT_PER_PROC;
 	(void)arg;
-	atomic_fetch_add(&g_xt_ready, 1);
+	xtc_atomic_fetch_add_i32(&g_xt_ready, 1, xtc_mo_seq_cst);
 	while (want > 0) {
 		void  *m = NULL;
 		size_t sz = 0;
@@ -1860,7 +1903,7 @@ xt_worker(void *arg)
 		if (xtc_recv(&m, &sz, -1) != XTC_OK)
 			continue;
 		xtc_free(m);
-		atomic_fetch_add(&g_xt_recv, 1);
+		xtc_atomic_fetch_add_i32(&g_xt_recv, 1, xtc_mo_seq_cst);
 		want--;
 	}
 }
@@ -1871,7 +1914,7 @@ xt_sender(void *u)
 {
 	int i, k;
 	(void)u;
-	while (atomic_load(&g_xt_ready) < XT_N)
+	while (xtc_atomic_load_i32(&g_xt_ready, xtc_mo_seq_cst) < XT_N)
 		(void)usleep(1000);
 	/* Burst every target, retrying only the backpressure code so a full
 	 * mailbox is not miscounted as a lost wake. */
@@ -1882,7 +1925,8 @@ xt_sender(void *u)
 			for (;;) {
 				int rc = xtc_send(g_xt_pid[k], msg, sizeof msg);
 				if (rc == XTC_OK) {
-					atomic_fetch_add(&g_xt_sent, 1);
+					xtc_atomic_fetch_add_i32(&g_xt_sent, 1,
+					    xtc_mo_seq_cst);
 					break;
 				}
 				if (rc != XTC_E_AGAIN && rc != XTC_E_RESOURCE)
@@ -1903,9 +1947,9 @@ test_cross_thread_send_wakes(const MunitParameter p[], void *d)
 	int i;
 	(void)p; (void)d;
 
-	atomic_store(&g_xt_ready, 0);
-	atomic_store(&g_xt_recv, 0);
-	atomic_store(&g_xt_sent, 0);
+	xtc_atomic_store_i32(&g_xt_ready, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_xt_recv, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_xt_sent, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	o.name = "xt-worker";
@@ -1919,8 +1963,10 @@ test_cross_thread_send_wakes(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(pthread_join(th, NULL), ==, 0);
 
-	munit_assert_int(atomic_load(&g_xt_sent), ==, XT_N * XT_PER_PROC);
-	munit_assert_int(atomic_load(&g_xt_recv), ==, XT_N * XT_PER_PROC);
+	munit_assert_int(xtc_atomic_load_i32(&g_xt_sent, xtc_mo_seq_cst), ==,
+	    XT_N * XT_PER_PROC);
+	munit_assert_int(xtc_atomic_load_i32(&g_xt_recv, xtc_mo_seq_cst), ==,
+	    XT_N * XT_PER_PROC);
 
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	return MUNIT_OK;
@@ -1936,8 +1982,8 @@ test_cross_thread_send_wakes(const MunitParameter p[], void *d)
  * arena is NOT reset (all_gone=0) and the caller must escalate.
  */
 static xtc_arena_group_t *g_ag;
-static _Atomic int g_ag_ready;      /* members that have added + parked */
-static _Atomic int g_ag_release;
+static int g_ag_ready; /* members that have added + parked */
+static int g_ag_release;
 
 static void
 ag_member_proc(void *arg)
@@ -1948,13 +1994,13 @@ ag_member_proc(void *arg)
 	/* Join the group and allocate SHARED state in its arena. */
 	(void)xtc_arena_group_add(g_ag);
 	(void)xtc_mctx_alloc(xtc_arena_group_mctx(g_ag), 128);
-	atomic_fetch_add(&g_ag_ready, 1);
+	xtc_atomic_fetch_add_i32(&g_ag_ready, 1, xtc_mo_seq_cst);
 	if (wedge) {
 		/* Wedged inside the mask: observe the kill (park at a
 		 * delivery point) but defer it, so discard's deadline
 		 * expires with this fiber still alive. */
 		(void)xtc_mask_enter();
-		while (!atomic_load(&g_ag_release)) {
+		while (!xtc_atomic_load_i32(&g_ag_release, xtc_mo_seq_cst)) {
 			(void)xtc_recv(&m, &sz, 1000000);
 			xtc_free(m); m = NULL;
 		}
@@ -1967,10 +2013,10 @@ ag_member_proc(void *arg)
 }
 
 struct ag_sup {
-	_Atomic int all_gone;
-	_Atomic int rc;
-	_Atomic int chunks_after;
-	_Atomic int done;
+	int all_gone;
+	int rc;
+	int chunks_after;
+	int done;
 };
 
 static void
@@ -1979,21 +2025,22 @@ ag_sup_proc(void *arg)
 	struct ag_sup *s = arg;
 	int all_gone = -1, r;
 
-	while (atomic_load(&g_ag_ready) < 2)
+	while (xtc_atomic_load_i32(&g_ag_ready, xtc_mo_seq_cst) < 2)
 		(void)xtc_proc_sleep(200000);
 	/* Let the wedged member reach its mask before we kill. */
 	(void)xtc_proc_sleep(20LL * 1000 * 1000);
 
 	r = xtc_arena_group_discard(g_ag, 9, 300000000LL, &all_gone);
-	atomic_store(&s->rc, r);
-	atomic_store(&s->all_gone, all_gone);
+	xtc_atomic_store_i32(&s->rc, r, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&s->all_gone, all_gone, xtc_mo_seq_cst);
 	/* Arena reset iff all_gone: chunks drop to 0 only then. */
-	atomic_store(&s->chunks_after,
-	    (int)xtc_mctx_total_chunks(xtc_arena_group_mctx(g_ag)));
-	atomic_store(&s->done, 1);
+	xtc_atomic_store_i32(&s->chunks_after,
+	    (int)xtc_mctx_total_chunks(xtc_arena_group_mctx(g_ag)),
+	    xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&s->done, 1, xtc_mo_seq_cst);
 
 	/* Release any wedged member so the loop can drain and finish. */
-	atomic_store(&g_ag_release, 1);
+	xtc_atomic_store_i32(&g_ag_release, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -2005,8 +2052,8 @@ ag_run(int wedge, int expect_all_gone, int expect_chunks_zero)
 	xtc_pid_t p;
 
 	memset(&s, 0, sizeof s);
-	atomic_store(&g_ag_ready, 0);
-	atomic_store(&g_ag_release, 0);
+	xtc_atomic_store_i32(&g_ag_ready, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ag_release, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_arena_group_create("ag", &g_ag), ==, XTC_OK);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
@@ -2021,13 +2068,19 @@ ag_run(int wedge, int expect_all_gone, int expect_chunks_zero)
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
-	munit_assert_int(atomic_load(&s.done), ==, 1);
-	munit_assert_int(atomic_load(&s.rc), ==, XTC_OK);
-	munit_assert_int(atomic_load(&s.all_gone), ==, expect_all_gone);
+	munit_assert_int(xtc_atomic_load_i32(&s.done, xtc_mo_seq_cst), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&s.rc, xtc_mo_seq_cst), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_atomic_load_i32(&s.all_gone, xtc_mo_seq_cst), ==,
+	    expect_all_gone);
 	if (expect_chunks_zero)
-		munit_assert_int(atomic_load(&s.chunks_after), ==, 0);
+		munit_assert_int(xtc_atomic_load_i32(&s.chunks_after,
+		                     xtc_mo_seq_cst),
+		    ==, 0);
 	else
-		munit_assert_int(atomic_load(&s.chunks_after), >, 0);
+		munit_assert_int(xtc_atomic_load_i32(&s.chunks_after,
+		                     xtc_mo_seq_cst),
+		    >, 0);
 
 	xtc_arena_group_destroy(g_ag);
 	g_ag = NULL;
@@ -2063,17 +2116,17 @@ test_arena_group_wedged(const MunitParameter p[], void *d)
  * backwards: a never-issued pid got XTC_OK + DELIVERED, and a target
  * inside its at-exit hook got XTC_E_INVAL.
  */
-static _Atomic int g_ku_in_hook, g_ku_release_hook;
-static _Atomic int g_ku_gen_rc, g_ku_gen_st, g_ku_cap_rc, g_ku_loop_rc;
-static _Atomic int g_ku_dying_rc, g_ku_dying_st, g_ku_dead_rc, g_ku_dead_st;
+static int g_ku_in_hook, g_ku_release_hook;
+static int g_ku_gen_rc, g_ku_gen_st, g_ku_cap_rc, g_ku_loop_rc;
+static int g_ku_dying_rc, g_ku_dying_st, g_ku_dead_rc, g_ku_dead_st;
 static xtc_pid_t g_ku_victim;
 
 static void
 ku_hook(void *arg)
 {
 	(void)arg;
-	atomic_store(&g_ku_in_hook, 1);
-	while (!atomic_load(&g_ku_release_hook))
+	xtc_atomic_store_i32(&g_ku_in_hook, 1, xtc_mo_seq_cst);
+	while (!xtc_atomic_load_i32(&g_ku_release_hook, xtc_mo_seq_cst))
 		(void)xtc_proc_sleep(1000000);
 }
 
@@ -2096,35 +2149,39 @@ ku_checker_proc(void *arg)
 	bogus = g_ku_victim;
 	bogus.gen += 1000;
 	st = -1;
-	atomic_store(&g_ku_gen_rc, xtc_exit_pid_deadline(bogus, 9, 0, &st));
-	atomic_store(&g_ku_gen_st, st);
+	xtc_atomic_store_i32(&g_ku_gen_rc,
+	    xtc_exit_pid_deadline(bogus, 9, 0, &st), xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ku_gen_st, st, xtc_mo_seq_cst);
 	/* Never issued: a slot index past the table. */
 	bogus = g_ku_victim;
 	bogus.local_id = 60000;
-	atomic_store(&g_ku_cap_rc, xtc_exit_pid_deadline(bogus, 9, 0, NULL));
+	xtc_atomic_store_i32(&g_ku_cap_rc,
+	    xtc_exit_pid_deadline(bogus, 9, 0, NULL), xtc_mo_seq_cst);
 	/* Never issued: a loop id no loop has (ids count up from 1 per
 	 * process, so a small constant can name a live loop). */
 	bogus = g_ku_victim;
 	bogus.loop_id = UINT32_MAX;
-	atomic_store(&g_ku_loop_rc, xtc_exit_pid_deadline(bogus, 9, 0, NULL));
+	xtc_atomic_store_i32(&g_ku_loop_rc,
+	    xtc_exit_pid_deadline(bogus, 9, 0, NULL), xtc_mo_seq_cst);
 
 	/* Dying: body returned, at-exit hook parked, pid still in table. */
-	while (!atomic_load(&g_ku_in_hook) && spins++ < 5000)
+	while (!xtc_atomic_load_i32(&g_ku_in_hook, xtc_mo_seq_cst) &&
+	    spins++ < 5000)
 		(void)xtc_proc_sleep(1000000);
 	st = -1;
-	atomic_store(&g_ku_dying_rc,
-	    xtc_exit_pid_deadline(g_ku_victim, 9, 0, &st));
-	atomic_store(&g_ku_dying_st, st);
+	xtc_atomic_store_i32(&g_ku_dying_rc,
+	    xtc_exit_pid_deadline(g_ku_victim, 9, 0, &st), xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ku_dying_st, st, xtc_mo_seq_cst);
 
 	/* Dead and reaped: still DELIVERED (the control). */
-	atomic_store(&g_ku_release_hook, 1);
+	xtc_atomic_store_i32(&g_ku_release_hook, 1, xtc_mo_seq_cst);
 	spins = 0;
 	while (xtc_proc_info(g_ku_victim, &info) == XTC_OK && spins++ < 5000)
 		(void)xtc_proc_sleep(1000000);
 	st = -1;
-	atomic_store(&g_ku_dead_rc,
-	    xtc_exit_pid_deadline(g_ku_victim, 9, 0, &st));
-	atomic_store(&g_ku_dead_st, st);
+	xtc_atomic_store_i32(&g_ku_dead_rc,
+	    xtc_exit_pid_deadline(g_ku_victim, 9, 0, &st), xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ku_dead_st, st, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -2135,11 +2192,11 @@ test_exit_pid_deadline_unknown(const MunitParameter p[], void *d)
 	xtc_pid_t checker;
 	(void)p; (void)d;
 
-	atomic_store(&g_ku_in_hook, 0);
-	atomic_store(&g_ku_release_hook, 0);
-	atomic_store(&g_ku_gen_rc, 12345);
-	atomic_store(&g_ku_dying_rc, 12345);
-	atomic_store(&g_ku_dead_rc, 12345);
+	xtc_atomic_store_i32(&g_ku_in_hook, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ku_release_hook, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ku_gen_rc, 12345, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ku_dying_rc, 12345, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ku_dead_rc, 12345, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	opts.name = "ku-victim";
@@ -2152,16 +2209,25 @@ test_exit_pid_deadline_unknown(const MunitParameter p[], void *d)
 
 	/* The header contract, matching xtc_exit_pid: unknown -> INVAL, and
 	 * the out-status is not written. */
-	munit_assert_int(atomic_load(&g_ku_gen_rc), ==, XTC_E_INVAL);
-	munit_assert_int(atomic_load(&g_ku_gen_st), ==, -1);
-	munit_assert_int(atomic_load(&g_ku_cap_rc), ==, XTC_E_INVAL);
-	munit_assert_int(atomic_load(&g_ku_loop_rc), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_atomic_load_i32(&g_ku_gen_rc, xtc_mo_seq_cst), ==,
+	    XTC_E_INVAL);
+	munit_assert_int(xtc_atomic_load_i32(&g_ku_gen_st, xtc_mo_seq_cst), ==,
+	    -1);
+	munit_assert_int(xtc_atomic_load_i32(&g_ku_cap_rc, xtc_mo_seq_cst), ==,
+	    XTC_E_INVAL);
+	munit_assert_int(xtc_atomic_load_i32(&g_ku_loop_rc, xtc_mo_seq_cst), ==,
+	    XTC_E_INVAL);
 	/* Already dead -> DELIVERED, whether unwinding or reaped. */
-	munit_assert_int(atomic_load(&g_ku_in_hook), ==, 1);
-	munit_assert_int(atomic_load(&g_ku_dying_rc), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_ku_dying_st), ==, XTC_KILL_DELIVERED);
-	munit_assert_int(atomic_load(&g_ku_dead_rc), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_ku_dead_st), ==, XTC_KILL_DELIVERED);
+	munit_assert_int(xtc_atomic_load_i32(&g_ku_in_hook, xtc_mo_seq_cst), ==,
+	    1);
+	munit_assert_int(xtc_atomic_load_i32(&g_ku_dying_rc, xtc_mo_seq_cst),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_atomic_load_i32(&g_ku_dying_st, xtc_mo_seq_cst),
+	    ==, XTC_KILL_DELIVERED);
+	munit_assert_int(xtc_atomic_load_i32(&g_ku_dead_rc, xtc_mo_seq_cst), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_atomic_load_i32(&g_ku_dead_st, xtc_mo_seq_cst), ==,
+	    XTC_KILL_DELIVERED);
 
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	return MUNIT_OK;
@@ -2180,7 +2246,7 @@ test_exit_pid_deadline_unknown(const MunitParameter p[], void *d)
  * whenever no non-timeout bit was seen and a timeout had been SUPPLIED,
  * so a 1s wait woken at ~10ms reported "deadline expired" with revents
  * == 0 and consumers ended waits ~990ms early. */
-static _Atomic int g_wnt_rc, g_wnt_revents, g_wnt_early;
+static int g_wnt_rc, g_wnt_revents, g_wnt_early;
 static xtc_pid_t g_wnt_victim;
 
 static void
@@ -2195,11 +2261,12 @@ wnt_victim_proc(void *arg)
 	rc = xtc_proc_wait_fd(rfd, XTC_IO_READABLE,
 	    2000LL * 1000 * 1000, &revents);
 	t1 = xtc_clock_mono();
-	atomic_store(&g_wnt_rc, rc);
-	atomic_store(&g_wnt_revents, (int)revents);
+	xtc_atomic_store_i32(&g_wnt_rc, rc, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_wnt_revents, (int)revents, xtc_mo_seq_cst);
 	/* Woken well before the 2s deadline: proves the wake -- not an
 	 * expiry -- is what returned, independently of the return code. */
-	atomic_store(&g_wnt_early, (t1 - t0) < 1000LL * 1000 * 1000);
+	xtc_atomic_store_i32(&g_wnt_early, (t1 - t0) < 1000LL * 1000 * 1000,
+	    xtc_mo_seq_cst);
 }
 
 static void
@@ -2219,9 +2286,9 @@ test_wait_fd_wake_is_not_timeout(const MunitParameter p[], void *d)
 	int pipefd[2];
 	(void)p; (void)d;
 
-	atomic_store(&g_wnt_rc, 12345);
-	atomic_store(&g_wnt_revents, -1);
-	atomic_store(&g_wnt_early, 0);
+	xtc_atomic_store_i32(&g_wnt_rc, 12345, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_wnt_revents, -1, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_wnt_early, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_test_make_pipe(&pipefd[0], &pipefd[1]), ==, 0);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
@@ -2234,12 +2301,15 @@ test_wait_fd_wake_is_not_timeout(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
 	/* It really was the wake, not the deadline. */
-	munit_assert_int(atomic_load(&g_wnt_early), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_wnt_early, xtc_mo_seq_cst), ==,
+	    1);
 	/* The timeout bit must NOT be set -- the timer never fired. */
-	munit_assert_int(atomic_load(&g_wnt_revents) & XTC_WAIT_TIMEOUT,
+	munit_assert_int(xtc_atomic_load_i32(&g_wnt_revents, xtc_mo_seq_cst) &
+	        XTC_WAIT_TIMEOUT,
 	    ==, 0);
 	/* THE REGRESSION: a non-timeout wake returns XTC_OK (xtc_proc.h). */
-	munit_assert_int(atomic_load(&g_wnt_rc), ==, XTC_OK);
+	munit_assert_int(xtc_atomic_load_i32(&g_wnt_rc, xtc_mo_seq_cst), ==,
+	    XTC_OK);
 
 	xtc_test_close_pipe(pipefd[0], pipefd[1]);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
@@ -2253,7 +2323,7 @@ test_wait_fd_wake_is_not_timeout(const MunitParameter p[], void *d)
  * the duplicate-registration reject instead of its own timeout.  Proc
  * exit does not cover this: the recovery registry and at-exit hooks know
  * nothing about scheduler park state. */
-static _Atomic int g_krr_second_rc, g_krr_second_revents;
+static int g_krr_second_rc, g_krr_second_revents;
 static xtc_pid_t g_krr_victim;
 
 static void
@@ -2283,8 +2353,9 @@ krr_reuser_proc(void *arg)
 	 * is still in the loop's registry. */
 	rc = xtc_proc_wait_fd(rfd, XTC_IO_READABLE, 30LL * 1000 * 1000,
 	    &revents);
-	atomic_store(&g_krr_second_rc, rc);
-	atomic_store(&g_krr_second_revents, (int)revents);
+	xtc_atomic_store_i32(&g_krr_second_rc, rc, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_krr_second_revents, (int)revents,
+	    xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -2296,8 +2367,8 @@ test_wait_fd_kill_releases_registration(const MunitParameter p[], void *d)
 	int pipefd[2];
 	(void)p; (void)d;
 
-	atomic_store(&g_krr_second_rc, 12345);
-	atomic_store(&g_krr_second_revents, -1);
+	xtc_atomic_store_i32(&g_krr_second_rc, 12345, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_krr_second_revents, -1, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_test_make_pipe(&pipefd[0], &pipefd[1]), ==, 0);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
@@ -2311,9 +2382,12 @@ test_wait_fd_kill_releases_registration(const MunitParameter p[], void *d)
 
 	/* THE REGRESSION: pre-fix this was XTC_E_INTERNAL (a leaked
 	 * registration); it must be the clean timeout the wait asked for. */
-	munit_assert_int(atomic_load(&g_krr_second_rc), ==, XTC_E_AGAIN);
-	munit_assert_int(atomic_load(&g_krr_second_revents) &
-	    XTC_WAIT_TIMEOUT, ==, XTC_WAIT_TIMEOUT);
+	munit_assert_int(xtc_atomic_load_i32(&g_krr_second_rc, xtc_mo_seq_cst),
+	    ==, XTC_E_AGAIN);
+	munit_assert_int(xtc_atomic_load_i32(&g_krr_second_revents,
+	                     xtc_mo_seq_cst) &
+	        XTC_WAIT_TIMEOUT,
+	    ==, XTC_WAIT_TIMEOUT);
 
 	xtc_test_close_pipe(pipefd[0], pipefd[1]);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
@@ -2340,8 +2414,8 @@ test_wait_fd_kill_releases_registration(const MunitParameter p[], void *d)
  * which is how it was verified to have teeth.
  */
 #if !defined(_WIN32)
-static _Atomic int g_wnl_in_window, g_wnl_release, g_wnl_returned;
-static _Atomic int g_wnl_rc, g_wnl_revents;
+static int g_wnl_in_window, g_wnl_release, g_wnl_returned;
+static int g_wnl_rc, g_wnl_revents;
 static xtc_pid_t g_wnl_victim;
 static int g_wnl_mode;               /* 0 = send, 1 = kill */
 
@@ -2351,9 +2425,10 @@ wnl_window_cb(const char *name, void *user)
 {
 	int spins = 0;
 	(void)name; (void)user;
-	if (atomic_exchange(&g_wnl_in_window, 1))
+	if (xtc_atomic_exchange_i32(&g_wnl_in_window, 1, xtc_mo_seq_cst))
 		return;                      /* hold only the first pass */
-	while (!atomic_load(&g_wnl_release) && spins++ < 200000)
+	while (!xtc_atomic_load_i32(&g_wnl_release, xtc_mo_seq_cst) &&
+	    spins++ < 200000)
 		__os_sleep_ns(100LL * 1000);
 }
 
@@ -2365,9 +2440,9 @@ wnl_victim_proc(void *arg)
 	int rc;
 
 	rc = xtc_proc_wait_fd(rfd, XTC_IO_READABLE, -1, &revents);
-	atomic_store(&g_wnl_rc, rc);
-	atomic_store(&g_wnl_revents, (int)revents);
-	atomic_store(&g_wnl_returned, 1);
+	xtc_atomic_store_i32(&g_wnl_rc, rc, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_wnl_revents, (int)revents, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_wnl_returned, 1, xtc_mo_seq_cst);
 }
 
 static void *
@@ -2376,9 +2451,10 @@ wnl_racer_thread(void *arg)
 	int spins = 0;
 	(void)arg;
 	/* Wait until the victim is provably stopped inside the window. */
-	while (!atomic_load(&g_wnl_in_window) && spins++ < 200000)
+	while (!xtc_atomic_load_i32(&g_wnl_in_window, xtc_mo_seq_cst) &&
+	    spins++ < 200000)
 		__os_sleep_ns(100LL * 1000);
-	if (atomic_load(&g_wnl_in_window)) {
+	if (xtc_atomic_load_i32(&g_wnl_in_window, xtc_mo_seq_cst)) {
 		if (g_wnl_mode == 0) {
 			int v = 7;
 			(void)xtc_send(g_wnl_victim, &v, sizeof v);
@@ -2386,7 +2462,7 @@ wnl_racer_thread(void *arg)
 			(void)xtc_exit_pid(g_wnl_victim, 42);
 		}
 	}
-	atomic_store(&g_wnl_release, 1);
+	xtc_atomic_store_i32(&g_wnl_release, 1, xtc_mo_seq_cst);
 	return NULL;
 }
 
@@ -2399,11 +2475,11 @@ wnl_run(int mode)
 	int pipefd[2];
 
 	g_wnl_mode = mode;
-	atomic_store(&g_wnl_in_window, 0);
-	atomic_store(&g_wnl_release, 0);
-	atomic_store(&g_wnl_returned, 0);
-	atomic_store(&g_wnl_rc, 12345);
-	atomic_store(&g_wnl_revents, -1);
+	xtc_atomic_store_i32(&g_wnl_in_window, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_wnl_release, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_wnl_returned, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_wnl_rc, 12345, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_wnl_revents, -1, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_test_make_pipe(&pipefd[0], &pipefd[1]), ==, 0);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
@@ -2421,17 +2497,25 @@ wnl_run(int mode)
 	munit_assert_int(xtc_inject_detach("proc.wait_fd.armed"), ==, XTC_OK);
 
 	/* The window really was held; otherwise the test proved nothing. */
-	munit_assert_int(atomic_load(&g_wnl_in_window), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_wnl_in_window, xtc_mo_seq_cst),
+	    ==, 1);
 	if (mode == 0) {
 		/* Sent: wait_fd returned and reported the mailbox. */
-		munit_assert_int(atomic_load(&g_wnl_returned), ==, 1);
-		munit_assert_int(atomic_load(&g_wnl_rc), ==, XTC_OK);
-		munit_assert_int(atomic_load(&g_wnl_revents) &
-		    XTC_WAIT_MAILBOX, ==, XTC_WAIT_MAILBOX);
+		munit_assert_int(xtc_atomic_load_i32(&g_wnl_returned,
+		                     xtc_mo_seq_cst),
+		    ==, 1);
+		munit_assert_int(xtc_atomic_load_i32(&g_wnl_rc, xtc_mo_seq_cst),
+		    ==, XTC_OK);
+		munit_assert_int(xtc_atomic_load_i32(&g_wnl_revents,
+		                     xtc_mo_seq_cst) &
+		        XTC_WAIT_MAILBOX,
+		    ==, XTC_WAIT_MAILBOX);
 	} else {
 		/* Killed: the proc unwound instead of parking, so wait_fd
 		 * never returned normally. */
-		munit_assert_int(atomic_load(&g_wnl_returned), ==, 0);
+		munit_assert_int(xtc_atomic_load_i32(&g_wnl_returned,
+		                     xtc_mo_seq_cst),
+		    ==, 0);
 	}
 
 	xtc_test_close_pipe(pipefd[0], pipefd[1]);
@@ -2462,7 +2546,7 @@ test_wait_fd_kill_wake_not_lost(const MunitParameter p[], void *d)
  * XTC_OK + XTC_IO_ERR for a finite or infinite one; epoll returned
  * XTC_E_INTERNAL.  The infinite wait is included on purpose: it must not
  * park.  Control: the surviving read end of the same pipe (EOF) works. */
-static _Atomic int g_cf_rc[3], g_cf_rev[3], g_cf_ctl_rc, g_cf_ran;
+static int g_cf_rc[3], g_cf_rev[3], g_cf_ctl_rc, g_cf_ran;
 
 static void
 cf_proc(void *arg)
@@ -2482,15 +2566,20 @@ cf_proc(void *arg)
 	munit_assert_int(close(pipefd[1]), ==, 0);
 	for (i = 0; i < 3; i++) {
 		revents = 0;
-		atomic_store(&g_cf_rc[i], xtc_proc_wait_fd(pipefd[1],
-		    XTC_IO_READABLE, to[i], &revents));
-		atomic_store(&g_cf_rev[i], (int)revents);
+		xtc_atomic_store_i32(&g_cf_rc[i],
+		    xtc_proc_wait_fd(pipefd[1], XTC_IO_READABLE, to[i],
+		        &revents),
+		    xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&g_cf_rev[i], (int)revents,
+		    xtc_mo_seq_cst);
 	}
 	revents = 0;
-	atomic_store(&g_cf_ctl_rc, xtc_proc_wait_fd(pipefd[0],
-	    XTC_IO_READABLE, 1000LL * 1000 * 1000, &revents));
+	xtc_atomic_store_i32(&g_cf_ctl_rc,
+	    xtc_proc_wait_fd(pipefd[0], XTC_IO_READABLE, 1000LL * 1000 * 1000,
+	        &revents),
+	    xtc_mo_seq_cst);
 	(void)close(pipefd[0]);
-	atomic_store(&g_cf_ran, 1);
+	xtc_atomic_store_i32(&g_cf_ran, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -2501,20 +2590,25 @@ test_wait_fd_closed_fd_is_inval(const MunitParameter p[], void *d)
 	int i;
 	(void)p; (void)d;
 	for (i = 0; i < 3; i++) {
-		atomic_store(&g_cf_rc[i], 12345);
-		atomic_store(&g_cf_rev[i], -1);
+		xtc_atomic_store_i32(&g_cf_rc[i], 12345, xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&g_cf_rev[i], -1, xtc_mo_seq_cst);
 	}
-	atomic_store(&g_cf_ran, 0);
+	xtc_atomic_store_i32(&g_cf_ran, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, cf_proc, NULL, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_cf_ran), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_cf_ran, xtc_mo_seq_cst), ==, 1);
 	for (i = 0; i < 3; i++) {
-		munit_assert_int(atomic_load(&g_cf_rc[i]), ==, XTC_E_INVAL);
-		munit_assert_int(atomic_load(&g_cf_rev[i]), ==, 0);
+		munit_assert_int(xtc_atomic_load_i32(&g_cf_rc[i],
+		                     xtc_mo_seq_cst),
+		    ==, XTC_E_INVAL);
+		munit_assert_int(xtc_atomic_load_i32(&g_cf_rev[i],
+		                     xtc_mo_seq_cst),
+		    ==, 0);
 	}
-	munit_assert_int(atomic_load(&g_cf_ctl_rc), ==, XTC_OK);
+	munit_assert_int(xtc_atomic_load_i32(&g_cf_ctl_rc, xtc_mo_seq_cst), ==,
+	    XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	return MUNIT_OK;
 }
@@ -2529,18 +2623,19 @@ test_wait_fd_closed_fd_is_inval(const MunitParameter p[], void *d)
  *
  * `kill` parameterises the control: on a CLEAN exit the identical hook
  * always worked, which is what isolated the defect to the kill path. */
-static _Atomic int g_pak_entered, g_pak_sleep_rc, g_pak_completed;
-static _Atomic int g_pak_kill_status;
+static int g_pak_entered, g_pak_sleep_rc, g_pak_completed;
+static int g_pak_kill_status;
 static xtc_pid_t g_pak_victim;
 
 static void
 pak_hook(void *arg)
 {
 	(void)arg;
-	atomic_fetch_add(&g_pak_entered, 1);
+	xtc_atomic_fetch_add_i32(&g_pak_entered, 1, xtc_mo_seq_cst);
 	/* The park that used to re-trigger the latched kill. */
-	atomic_store(&g_pak_sleep_rc, xtc_proc_sleep(20LL * 1000 * 1000));
-	atomic_fetch_add(&g_pak_completed, 1);
+	xtc_atomic_store_i32(&g_pak_sleep_rc,
+	    xtc_proc_sleep(20LL * 1000 * 1000), xtc_mo_seq_cst);
+	xtc_atomic_fetch_add_i32(&g_pak_completed, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -2570,7 +2665,7 @@ pak_killer_proc(void *arg)
 	rc = xtc_exit_pid_deadline(g_pak_victim, 9, 2000LL * 1000 * 1000,
 	    &st);
 	munit_assert_int(rc, ==, XTC_OK);
-	atomic_store(&g_pak_kill_status, st);
+	xtc_atomic_store_i32(&g_pak_kill_status, st, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -2580,10 +2675,10 @@ pak_run(int killed)
 	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t killer;
 
-	atomic_store(&g_pak_entered, 0);
-	atomic_store(&g_pak_sleep_rc, 12345);
-	atomic_store(&g_pak_completed, 0);
-	atomic_store(&g_pak_kill_status, -1);
+	xtc_atomic_store_i32(&g_pak_entered, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_pak_sleep_rc, 12345, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_pak_completed, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_pak_kill_status, -1, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	opts.name = "pak-victim";
@@ -2598,14 +2693,18 @@ pak_run(int killed)
 
 	/* THE REGRESSION: exactly one entry (pre-fix: hundreds), and the
 	 * hook's own park completed (pre-fix: it never returned). */
-	munit_assert_int(atomic_load(&g_pak_entered), ==, 1);
-	munit_assert_int(atomic_load(&g_pak_sleep_rc), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_pak_completed), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_pak_entered, xtc_mo_seq_cst),
+	    ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_pak_sleep_rc, xtc_mo_seq_cst),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_atomic_load_i32(&g_pak_completed, xtc_mo_seq_cst),
+	    ==, 1);
 	if (killed) {
 		/* The kill still lands: masking the hook run must not turn a
 		 * delivered kill into a DEFERRED/TIMEOUT report. */
-		munit_assert_int(atomic_load(&g_pak_kill_status), ==,
-		    XTC_KILL_DELIVERED);
+		munit_assert_int(xtc_atomic_load_i32(&g_pak_kill_status,
+		                     xtc_mo_seq_cst),
+		    ==, XTC_KILL_DELIVERED);
 	}
 
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
@@ -2912,22 +3011,27 @@ test_kill_interrupts_park(const MunitParameter p[], void *d)
 /* ---- M10: procs on more than 64 loops.  Pre-fix the 65th loop's spawn
  * failed with XTC_E_NOMEM. ---- */
 #define M10_NL 80
-static _Atomic int m10_ran;
+static int m10_ran;
 static void
-m10_proc(void *a) { (void)a; atomic_fetch_add(&m10_ran, 1); }
+m10_proc(void *a)
+{
+	(void)a;
+	xtc_atomic_fetch_add_i32(&m10_ran, 1, xtc_mo_seq_cst);
+}
 static MunitResult
 test_many_loops(const MunitParameter p[], void *d)
 {
 	xtc_exec_t *e;
 	int i;
 	(void)p; (void)d;
-	atomic_store(&m10_ran, 0);
+	xtc_atomic_store_i32(&m10_ran, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_exec_init(&e, M10_NL), ==, XTC_OK);
 	for (i = 0; i < M10_NL; i++)
 		munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, i), m10_proc,
 		    NULL, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	munit_assert_int(atomic_load(&m10_ran), ==, M10_NL);
+	munit_assert_int(xtc_atomic_load_i32(&m10_ran, xtc_mo_seq_cst), ==,
+	    M10_NL);
 	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
 	return MUNIT_OK;
 }

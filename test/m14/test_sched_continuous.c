@@ -141,9 +141,9 @@ contracts(void)
 	loop->classes[0].q_head = loop->classes[1].q_head = NULL;
 	assert(xtc_sched_policy_set(loop, NULL) == XTC_OK);
 	assert(loop->sched.policy.select == NULL);
-	atomic_store(&loop->sched.phase, 1);
+	xtc_atomic_store_i32(&loop->sched.phase, 1, xtc_mo_seq_cst);
 	assert(xtc_sched_continuous_set(loop, 3) == XTC_E_AGAIN);
-	atomic_store(&loop->sched.phase, 0);
+	xtc_atomic_store_i32(&loop->sched.phase, 0, xtc_mo_seq_cst);
 	assert(xtc_sched_continuous_set(loop, UINT32_MAX) == XTC_OK);
 	(void)__xtc_loop_step_once(loop);
 	assert(xtc_sched_continuous_set(loop, 3) == XTC_E_AGAIN);

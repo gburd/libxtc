@@ -35,9 +35,9 @@
  * consumer example), so using it here is acceptable. */
 int __os_ncpus(void);
 
-static _Atomic long g_done;
-static _Atomic long g_spawn_fail;
-static _Atomic long g_spawn_ok;
+static long g_done;
+static long g_spawn_fail;
+static long g_spawn_ok;
 
 /* Child proc: bump the global counter and exit immediately. */
 static void
@@ -88,9 +88,9 @@ run_spawn(int n_loops, long per_loop)
 		printf("  exec_init(%d) failed\n", n_loops);
 		return;
 	}
-	g_done = 0;
-	g_spawn_fail = 0;
-	g_spawn_ok = 0;
+	xtc_atomic_store_long(&g_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_spawn_fail, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_spawn_ok, 0, xtc_mo_seq_cst);
 	t0 = now_ms();
 	for (i = 0; i < n_loops; i++) {
 		drivers[i].loop = xtc_exec_loop(ex, i);
@@ -103,11 +103,15 @@ run_spawn(int n_loops, long per_loop)
 	(void)xtc_exec_fini(ex);
 
 	sec = (t1 - t0) / 1000.0;
-	rate = sec > 0 ? (double)g_done / sec : 0;
+	rate = sec > 0 ?
+	    (double)xtc_atomic_load_long(&g_done, xtc_mo_seq_cst) / sec :
+	    0;
 	printf("  loops=%2d  total=%-9ld  %8.1f ms  %12.0f spawns/s"
-	    "  (spawn_ok=%ld done=%ld fail=%ld)\n", n_loops, total,
-	    t1 - t0, rate, (long)g_spawn_ok, (long)g_done,
-	    (long)g_spawn_fail);
+	       "  (spawn_ok=%ld done=%ld fail=%ld)\n",
+	    n_loops, total, t1 - t0, rate,
+	    (long)xtc_atomic_load_long(&g_spawn_ok, xtc_mo_seq_cst),
+	    (long)xtc_atomic_load_long(&g_done, xtc_mo_seq_cst),
+	    (long)xtc_atomic_load_long(&g_spawn_fail, xtc_mo_seq_cst));
 }
 
 int

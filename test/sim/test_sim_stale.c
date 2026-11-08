@@ -27,7 +27,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,18 +47,18 @@
 #define VOFF      0            /* the version lives in the first 8 bytes */
 
 static int         g_fd = -1;
-static atomic_int  g_stale_seen;    /* reads that returned an old version */
-static atomic_int  g_regressions;   /* stale ACCEPTED (MUST be 0) */
-static atomic_int  g_done;
-static atomic_long g_hash;
+static int g_stale_seen;  /* reads that returned an old version */
+static int g_regressions; /* stale ACCEPTED (MUST be 0) */
+static int g_done;
+static long g_hash;
 
 static void
 fold(long v)
 {
-	long h = atomic_load_explicit(&g_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(v + 3));
-	atomic_store_explicit(&g_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_hash, h, xtc_mo_relaxed);
 }
 
 /*
@@ -104,17 +103,19 @@ slot_worker(void *arg)
 			 * than what we durably wrote.  The version check
 			 * CATCHES it -- we detect and do NOT adopt it as
 			 * current (a bug that skipped this check would). */
-			atomic_fetch_add(&g_stale_seen, 1);
+			xtc_atomic_fetch_add_i32(&g_stale_seen, 1,
+			    xtc_mo_seq_cst);
 		} else if (got > highest) {
 			/* Impossible: a version from the FUTURE means real
 			 * corruption / a model bug -- count it as a regression
 			 * (must be 0). */
-			atomic_fetch_add(&g_regressions, 1);
+			xtc_atomic_fetch_add_i32(&g_regressions, 1,
+			    xtc_mo_seq_cst);
 		}
 		if ((v & 1) == 0)
 			xtc_yield();
 	}
-	atomic_fetch_add(&g_done, 1);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_seq_cst);
 }
 
 static int
@@ -130,10 +131,10 @@ run_once(uint64_t seed, int *out_stale, int *out_reg, long *out_hash,
 	(void)snprintf(path, sizeof path, "%s/sim_stale_XXXXXX",
 	    td_ != NULL && *td_ != '\0' ? td_ : "/tmp");
 
-	atomic_store(&g_stale_seen, 0);
-	atomic_store(&g_regressions, 0);
-	atomic_store(&g_done, 0);
-	atomic_store(&g_hash, 0);
+	xtc_atomic_store_i32(&g_stale_seen, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_regressions, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
 
 	g_fd = mkstemp(path);
 	if (g_fd < 0) {
@@ -166,9 +167,12 @@ run_once(uint64_t seed, int *out_stale, int *out_reg, long *out_hash,
 
 	rc = xtc_sim_exec_run(e, seed, 20000000);
 
-	if (out_stale)  *out_stale = atomic_load(&g_stale_seen);
-	if (out_reg)    *out_reg = atomic_load(&g_regressions);
-	if (out_hash)   *out_hash = atomic_load(&g_hash);
+	if (out_stale)
+		*out_stale = xtc_atomic_load_i32(&g_stale_seen, xtc_mo_seq_cst);
+	if (out_reg)
+		*out_reg = xtc_atomic_load_i32(&g_regressions, xtc_mo_seq_cst);
+	if (out_hash)
+		*out_hash = xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
 	if (out_state)  *out_state = xtc_sim_state_hash(e);
 
 	xtc_sim_io_stale_enable(0);

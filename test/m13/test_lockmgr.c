@@ -6,7 +6,6 @@
  */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 #include <time.h>
@@ -59,14 +58,15 @@ test_modes(const MunitParameter p[], void *d)
 /* Two threads contending: one acquires X, the other waits, the
  * first releases, the second proceeds. */
 static xtc_lockmgr_t *g_mgr;
-static _Atomic int    g_thread_got_lock;
+static int g_thread_got_lock;
 
 static void *
 contender(void *arg)
 {
 	xtc_locker_t l = *(xtc_locker_t *)arg;
 	int rc = xtc_lock_get(g_mgr, l, "k", 1, XTC_LOCK_X, 5LL * 1000 * 1000 * 1000);
-	if (rc == XTC_OK) atomic_store(&g_thread_got_lock, 1);
+	if (rc == XTC_OK)
+		xtc_atomic_store_i32(&g_thread_got_lock, 1, xtc_mo_seq_cst);
 	return NULL;
 }
 
@@ -85,15 +85,19 @@ test_wait_grant(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_lockmgr_id(g_mgr, &l2), ==, XTC_OK);
 
 	munit_assert_int(xtc_lock_get(g_mgr, l1, "k", 1, XTC_LOCK_X, 0), ==, XTC_OK);
-	atomic_store(&g_thread_got_lock, 0);
+	xtc_atomic_store_i32(&g_thread_got_lock, 0, xtc_mo_seq_cst);
 
 	pthread_create(&th, NULL, contender, &l2);
 	(void)nanosleep(&ts, NULL);
-	munit_assert_int(atomic_load(&g_thread_got_lock), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_thread_got_lock,
+	                     xtc_mo_seq_cst),
+	    ==, 0);
 
 	(void)xtc_lock_release_all(g_mgr, l1);
 	pthread_join(th, NULL);
-	munit_assert_int(atomic_load(&g_thread_got_lock), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_thread_got_lock,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
 
 	(void)xtc_lockmgr_id_free(g_mgr, l1);
 	(void)xtc_lockmgr_id_free(g_mgr, l2);
@@ -104,8 +108,8 @@ test_wait_grant(const MunitParameter p[], void *d)
 /* Deadlock: l1 holds A, l2 holds B; l1 waits for B, l2 waits for A.
  * Detector should kill one of them. */
 static xtc_lockmgr_t *g_dl_mgr;
-static _Atomic int    g_t1_rc;
-static _Atomic int    g_t2_rc;
+static int g_t1_rc;
+static int g_t2_rc;
 
 static void *
 dl_t1(void *arg)
@@ -113,8 +117,10 @@ dl_t1(void *arg)
 	xtc_locker_t l = *(xtc_locker_t *)arg;
 	(void)xtc_lock_get(g_dl_mgr, l, "A", 1, XTC_LOCK_X, 0);
 	{ struct timespec ts = { 0, 100 * 1000 * 1000 }; nanosleep(&ts, NULL); }
-	atomic_store(&g_t1_rc, xtc_lock_get(g_dl_mgr, l, "B", 1, XTC_LOCK_X,
-	    5LL * 1000 * 1000 * 1000));
+	xtc_atomic_store_i32(&g_t1_rc,
+	    xtc_lock_get(g_dl_mgr, l, "B", 1, XTC_LOCK_X,
+	        5LL * 1000 * 1000 * 1000),
+	    xtc_mo_seq_cst);
 	return NULL;
 }
 static void *
@@ -123,8 +129,10 @@ dl_t2(void *arg)
 	xtc_locker_t l = *(xtc_locker_t *)arg;
 	(void)xtc_lock_get(g_dl_mgr, l, "B", 1, XTC_LOCK_X, 0);
 	{ struct timespec ts = { 0, 100 * 1000 * 1000 }; nanosleep(&ts, NULL); }
-	atomic_store(&g_t2_rc, xtc_lock_get(g_dl_mgr, l, "A", 1, XTC_LOCK_X,
-	    5LL * 1000 * 1000 * 1000));
+	xtc_atomic_store_i32(&g_t2_rc,
+	    xtc_lock_get(g_dl_mgr, l, "A", 1, XTC_LOCK_X,
+	        5LL * 1000 * 1000 * 1000),
+	    xtc_mo_seq_cst);
 	return NULL;
 }
 
@@ -143,16 +151,16 @@ test_deadlock(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_lockmgr_id(g_dl_mgr, &l1), ==, XTC_OK);
 	munit_assert_int(xtc_lockmgr_id(g_dl_mgr, &l2), ==, XTC_OK);
 
-	atomic_store(&g_t1_rc, XTC_OK);
-	atomic_store(&g_t2_rc, XTC_OK);
+	xtc_atomic_store_i32(&g_t1_rc, XTC_OK, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_t2_rc, XTC_OK, xtc_mo_seq_cst);
 
 	pthread_create(&th1, NULL, dl_t1, &l1);
 	pthread_create(&th2, NULL, dl_t2, &l2);
 	pthread_join(th1, NULL);
 	pthread_join(th2, NULL);
 
-	t1 = atomic_load(&g_t1_rc);
-	t2 = atomic_load(&g_t2_rc);
+	t1 = xtc_atomic_load_i32(&g_t1_rc, xtc_mo_seq_cst);
+	t2 = xtc_atomic_load_i32(&g_t2_rc, xtc_mo_seq_cst);
 
 	/* Exactly one of them should be killed by the detector. */
 	munit_assert_true(t1 == XTC_E_DEADLK || t2 == XTC_E_DEADLK);
@@ -425,23 +433,25 @@ test_stats_failchk(const MunitParameter p[], void *d)
 }
 
 static xtc_lockmgr_t *g_onblk_mgr;
-static _Atomic int    g_onblk_t1_rc;
-static _Atomic int    g_onblk_t2_rc;
+static int g_onblk_t1_rc;
+static int g_onblk_t2_rc;
 
 static void *onblk_t1(void *arg) {
 	xtc_locker_t l = *(xtc_locker_t *)arg;
 	(void)xtc_lock_get(g_onblk_mgr, l, "A", 1, XTC_LOCK_X, 0);
 	{ struct timespec ts = { 0, 50 * 1000 * 1000 }; nanosleep(&ts, NULL); }
-	atomic_store(&g_onblk_t1_rc,
-	    xtc_lock_get(g_onblk_mgr, l, "B", 1, XTC_LOCK_X, -1));
+	xtc_atomic_store_i32(&g_onblk_t1_rc,
+	    xtc_lock_get(g_onblk_mgr, l, "B", 1, XTC_LOCK_X, -1),
+	    xtc_mo_seq_cst);
 	return NULL;
 }
 static void *onblk_t2(void *arg) {
 	xtc_locker_t l = *(xtc_locker_t *)arg;
 	(void)xtc_lock_get(g_onblk_mgr, l, "B", 1, XTC_LOCK_X, 0);
 	{ struct timespec ts = { 0, 50 * 1000 * 1000 }; nanosleep(&ts, NULL); }
-	atomic_store(&g_onblk_t2_rc,
-	    xtc_lock_get(g_onblk_mgr, l, "A", 1, XTC_LOCK_X, -1));
+	xtc_atomic_store_i32(&g_onblk_t2_rc,
+	    xtc_lock_get(g_onblk_mgr, l, "A", 1, XTC_LOCK_X, -1),
+	    xtc_mo_seq_cst);
 	return NULL;
 }
 
@@ -460,14 +470,14 @@ test_detect_on_block(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_lockmgr_id(g_onblk_mgr, &l1), ==, XTC_OK);
 	munit_assert_int(xtc_lockmgr_id(g_onblk_mgr, &l2), ==, XTC_OK);
 
-	atomic_store(&g_onblk_t1_rc, XTC_OK);
-	atomic_store(&g_onblk_t2_rc, XTC_OK);
+	xtc_atomic_store_i32(&g_onblk_t1_rc, XTC_OK, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_onblk_t2_rc, XTC_OK, xtc_mo_seq_cst);
 	pthread_create(&th1, NULL, onblk_t1, &l1);
 	pthread_create(&th2, NULL, onblk_t2, &l2);
 	pthread_join(th1, NULL);
 	pthread_join(th2, NULL);
-	t1 = atomic_load(&g_onblk_t1_rc);
-	t2 = atomic_load(&g_onblk_t2_rc);
+	t1 = xtc_atomic_load_i32(&g_onblk_t1_rc, xtc_mo_seq_cst);
+	t2 = xtc_atomic_load_i32(&g_onblk_t2_rc, xtc_mo_seq_cst);
 	munit_assert_true(t1 == XTC_E_DEADLK || t2 == XTC_E_DEADLK);
 
 	(void)xtc_lockmgr_id_free(g_onblk_mgr, l1);
@@ -586,14 +596,15 @@ test_conversion_not_behind_waiter(const MunitParameter p[], void *d)
  * (xtc_lockmgr_id_set_timeout): with B never releasing its S, A's S -> X
  * upgrade returns XTC_E_AGAIN instead of waiting forever.  1.49.5: blocked
  * forever (it passed -1).  B releases after 3 s so the test cannot hang. */
-static _Atomic int g_up_rc = 12345;   /* read while up_thread writes it */
+static int g_up_rc = 12345; /* read while up_thread writes it */
 static xtc_locker_t g_up_a;
 static void *
 up_thread(void *x)
 {
 	(void)x;
-	atomic_store(&g_up_rc,
-	    xtc_lock_upgrade(g_rr_m, g_up_a, "k", 1, XTC_LOCK_X));
+	xtc_atomic_store_i32(&g_up_rc,
+	    xtc_lock_upgrade(g_rr_m, g_up_a, "k", 1, XTC_LOCK_X),
+	    xtc_mo_seq_cst);
 	return NULL;
 }
 
@@ -606,7 +617,7 @@ test_upgrade_honors_deadline(const MunitParameter p[], void *d)
 	struct timespec ts = { 0, 10 * 1000 * 1000 };
 	(void)p; (void)d;
 	g_rr_m = rr_mgr(&g_up_a, &b);
-	g_up_rc = 12345;
+	xtc_atomic_store_i32(&g_up_rc, 12345, xtc_mo_seq_cst);
 	munit_assert_int(xtc_lock_get(g_rr_m, g_up_a, "k", 1, XTC_LOCK_S, 0),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_lock_get(g_rr_m, b, "k", 1, XTC_LOCK_S, 0), ==,
@@ -614,13 +625,17 @@ test_upgrade_honors_deadline(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_lockmgr_id_set_timeout(g_rr_m, g_up_a,
 	    100LL * 1000 * 1000), ==, XTC_OK);
 	munit_assert_int(pthread_create(&t, NULL, up_thread, NULL), ==, 0);
-	for (i = 0; i < 300 && g_up_rc == 12345; i++)
+	for (i = 0;
+	     i < 300 && xtc_atomic_load_i32(&g_up_rc, xtc_mo_seq_cst) == 12345;
+	     i++)
 		nanosleep(&ts, NULL);
-	if (g_up_rc == 12345)                        /* never let it hang */
+	if (xtc_atomic_load_i32(&g_up_rc, xtc_mo_seq_cst) ==
+	    12345) /* never let it hang */
 		(void)xtc_lock_put(g_rr_m, b, "k", 1);
 	(void)pthread_join(t, NULL);
 	munit_assert_int(i, <, 300);                 /* returned in time */
-	munit_assert_int(g_up_rc, ==, XTC_E_AGAIN);
+	munit_assert_int(xtc_atomic_load_i32(&g_up_rc, xtc_mo_seq_cst), ==,
+	    XTC_E_AGAIN);
 	/* A still holds its S, unchanged: B's S is still compatible. */
 	munit_assert_int(xtc_lockmgr_n_held(g_rr_m), ==, 2);
 	xtc_lockmgr_destroy(g_rr_m);
@@ -639,7 +654,7 @@ test_upgrade_folds_entry(const MunitParameter p[], void *d)
 	struct timespec ts = { 0, 100 * 1000 * 1000 };
 	(void)p; (void)d;
 	g_rr_m = rr_mgr(&g_up_a, &b);
-	g_up_rc = 12345;
+	xtc_atomic_store_i32(&g_up_rc, 12345, xtc_mo_seq_cst);
 	munit_assert_int(xtc_lock_get(g_rr_m, g_up_a, "k", 1, XTC_LOCK_S, 0),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_lock_get(g_rr_m, b, "k", 1, XTC_LOCK_S, 0), ==,
@@ -648,7 +663,8 @@ test_upgrade_folds_entry(const MunitParameter p[], void *d)
 	nanosleep(&ts, NULL);                        /* A waits for B */
 	munit_assert_int(xtc_lock_put(g_rr_m, b, "k", 1), ==, XTC_OK);
 	(void)pthread_join(t, NULL);
-	munit_assert_int(g_up_rc, ==, XTC_OK);
+	munit_assert_int(xtc_atomic_load_i32(&g_up_rc, xtc_mo_seq_cst), ==,
+	    XTC_OK);
 	munit_assert_int(xtc_lockmgr_n_held(g_rr_m), ==, 1);
 	munit_assert_int(xtc_lock_put(g_rr_m, g_up_a, "k", 1), ==, XTC_OK);
 	munit_assert_int(xtc_lock_get(g_rr_m, b, "k", 1, XTC_LOCK_X, 0), ==,
@@ -671,7 +687,7 @@ static xtc_lockmgr_t *g_km;
 static xtc_locker_t   g_km_l1, g_km_l2, g_km_l3;
 static xtc_loop_t    *g_km_loop;
 static int64_t        g_km_tmo;
-static atomic_int     g_km_returned;
+static int g_km_returned;
 static int            g_km_down;
 static int            g_km_after;
 
@@ -680,7 +696,8 @@ km_victim(void *arg)
 {
 	(void)arg;
 	(void)xtc_lock_get(g_km, g_km_l2, "k", 1, XTC_LOCK_X, g_km_tmo);
-	atomic_store(&g_km_returned, 1);          /* must not be reached */
+	xtc_atomic_store_i32(&g_km_returned, 1,
+	    xtc_mo_seq_cst); /* must not be reached */
 }
 
 static void
@@ -716,7 +733,7 @@ test_kill_then_release(const MunitParameter p[], void *d)
 	o.detect_mode = XTC_LOCK_DETECT_NONE;
 	g_km_tmo = (wt != NULL && strcmp(wt, "timed") == 0) ?
 	    50LL * 1000 * 1000 : -1;
-	atomic_store(&g_km_returned, 0);
+	xtc_atomic_store_i32(&g_km_returned, 0, xtc_mo_seq_cst);
 	g_km_down = 0;
 	g_km_after = -999;
 	munit_assert_int(xtc_lockmgr_create(&o, &g_km), ==, XTC_OK);
@@ -731,7 +748,8 @@ test_kill_then_release(const MunitParameter p[], void *d)
 	munit_logf(MUNIT_LOG_INFO, "down=%d after=%d held=%d waiting=%d",
 	    g_km_down, g_km_after, xtc_lockmgr_n_held(g_km),
 	    xtc_lockmgr_n_waiting(g_km));
-	munit_assert_int(atomic_load(&g_km_returned), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_km_returned, xtc_mo_seq_cst),
+	    ==, 0);
 	munit_assert_int(g_km_down, ==, 1);
 	munit_assert_int(g_km_after, ==, XTC_OK);
 	munit_assert_int(xtc_lockmgr_n_held(g_km), ==, 0);

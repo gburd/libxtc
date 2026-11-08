@@ -46,7 +46,6 @@ main(void)
 
 #include <pthread.h>
 #include <signal.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -59,8 +58,8 @@ main(void)
 
 static int          g_pr = -1, g_pw = -1;
 static xtc_exec_t  *g_e;
-static atomic_int   g_woke;
-static atomic_int   g_ready;
+static int g_woke;
+static int g_ready;
 static xtc_pid_t    g_waiter;
 
 static void
@@ -71,11 +70,11 @@ waiter(void *arg)
 
 	(void)arg;
 	g_waiter = xtc_self();
-	atomic_store(&g_ready, 1);
+	xtc_atomic_store_i32(&g_ready, 1, xtc_mo_seq_cst);
 	/* Park on the pipe read-end through whatever I/O backend this
 	 * platform built with (epoll / io_uring / kqueue / poll / select). */
 	if (xtc_proc_wait_fd(g_pr, XTC_IO_READABLE, -1, &rev) == XTC_OK)
-		atomic_fetch_add(&g_woke, 1);
+		xtc_atomic_fetch_add_i32(&g_woke, 1, xtc_mo_seq_cst);
 	{ ssize_t rd = read(g_pr, buf, sizeof buf); (void)rd; }   /* drain */
 	(void)xtc_exec_stop(g_e);
 }
@@ -86,7 +85,7 @@ foreign(void *arg)
 	struct timespec ts = { 0, 40 * 1000 * 1000 };   /* 40ms */
 
 	(void)arg;
-	while (atomic_load(&g_ready) == 0)
+	while (xtc_atomic_load_i32(&g_ready, xtc_mo_seq_cst) == 0)
 		;
 	nanosleep(&ts, NULL);
 	/* Make the watched fd readable (as an embedder latch would) AND
@@ -117,8 +116,8 @@ one_round(void)
 	g_pr = pfd[0];
 	g_pw = pfd[1];
 
-	atomic_store(&g_woke, 0);
-	atomic_store(&g_ready, 0);
+	xtc_atomic_store_i32(&g_woke, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ready, 0, xtc_mo_seq_cst);
 	if (xtc_exec_init(&g_e, 3) != XTC_OK)
 		return 77;
 	xtc_exec_set_service_mode(g_e, 1);
@@ -133,7 +132,7 @@ one_round(void)
 	(void)xtc_exec_fini(g_e);
 	close(g_pr);
 	close(g_pw);
-	return atomic_load(&g_woke) ? 0 : 1;
+	return xtc_atomic_load_i32(&g_woke, xtc_mo_seq_cst) ? 0 : 1;
 }
 
 int

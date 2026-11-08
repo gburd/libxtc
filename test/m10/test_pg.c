@@ -9,7 +9,6 @@
  *	asserts every subscriber received exactly the broadcast.
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -63,7 +62,10 @@ test_pg_membership(const MunitParameter p[], void *d)
 
 /* ---------- broadcast to live subscribers ---------- */
 
-struct sub_state { _Atomic int got; int value; };
+struct sub_state {
+	int got;
+	int value;
+};
 
 static void
 sub_proc(void *arg)
@@ -72,7 +74,7 @@ sub_proc(void *arg)
 	void *msg = NULL; size_t sz = 0;
 	if (xtc_recv(&msg, &sz, 2LL * 1000 * 1000 * 1000) == XTC_OK) {
 		if (sz == sizeof(int)) s->value = *(int *)msg;
-		atomic_store(&s->got, 1);
+		xtc_atomic_store_i32(&s->got, 1, xtc_mo_seq_cst);
 		if (msg) __os_free(msg);
 	}
 }
@@ -108,7 +110,9 @@ test_pg_broadcast(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
 	for (i = 0; i < 4; i++) {
-		munit_assert_int(atomic_load(&st[i].got), ==, 1);
+		munit_assert_int(xtc_atomic_load_i32(&st[i].got,
+		                     xtc_mo_seq_cst),
+		    ==, 1);
 		munit_assert_int(st[i].value, ==, 7);
 	}
 
@@ -128,7 +132,7 @@ test_pg_broadcast(const MunitParameter p[], void *d)
  * one of them does. */
 #define OWN_SZ 4096
 static void *g_own_buf;
-static _Atomic int g_own_same, g_own_got;
+static int g_own_same, g_own_got;
 
 static void
 own_sub(void *arg)
@@ -138,9 +142,10 @@ own_sub(void *arg)
 	(void)arg;
 	if (xtc_recv(&msg, &sz, 2LL * 1000 * 1000 * 1000) == XTC_OK) {
 		if (sz == OWN_SZ && ((unsigned char *)msg)[OWN_SZ - 1] == 0x5a)
-			atomic_fetch_add(&g_own_got, 1);
+			xtc_atomic_fetch_add_i32(&g_own_got, 1, xtc_mo_seq_cst);
 		if (msg == g_own_buf)
-			atomic_fetch_add(&g_own_same, 1);
+			xtc_atomic_fetch_add_i32(&g_own_same, 1,
+			    xtc_mo_seq_cst);
 		xtc_free(msg);
 	}
 }
@@ -162,15 +167,19 @@ test_pg_send_owned(const MunitParameter p[], void *d)
 			    NULL, &pid), ==, XTC_OK);
 			munit_assert_int(xtc_pg_join(r, "t", pid), ==, XTC_OK);
 		}
-		atomic_store(&g_own_same, 0);
-		atomic_store(&g_own_got, 0);
+		xtc_atomic_store_i32(&g_own_same, 0, xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&g_own_got, 0, xtc_mo_seq_cst);
 		munit_assert_not_null(g_own_buf = xtc_malloc(OWN_SZ));
 		memset(g_own_buf, 0x5a, OWN_SZ);
 		sent = xtc_pg_send_owned(r, "t", g_own_buf, OWN_SZ);
 		munit_assert_int(sent, ==, n);
 		munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-		munit_assert_int(atomic_load(&g_own_got), ==, n);
-		munit_assert_int(atomic_load(&g_own_same), ==, 1);
+		munit_assert_int(xtc_atomic_load_i32(&g_own_got,
+		                     xtc_mo_seq_cst),
+		    ==, n);
+		munit_assert_int(xtc_atomic_load_i32(&g_own_same,
+		                     xtc_mo_seq_cst),
+		    ==, 1);
 		xtc_reg_destroy(r);
 		munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	}

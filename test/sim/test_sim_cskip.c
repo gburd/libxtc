@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <sys/resource.h>
 #include "xtc.h"
@@ -63,7 +62,7 @@
 struct ikey { int64_t v; };
 
 struct val {
-	_Atomic uint64_t sentinel;
+	uint64_t sentinel;
 	int64_t          key;
 };
 
@@ -78,20 +77,20 @@ ikey_cmp(const void *a, const void *b)
 static xtc_cskip_t   *g_s;
 static struct ikey   *g_keyptrs[CK_KEYSPACE];
 static struct val    *g_valptrs[CK_KEYSPACE];
-static _Atomic int     g_valfreed[CK_KEYSPACE];
-static atomic_int      g_uaf;
-static atomic_int      g_ord;      /* out-of-order min/floor observed */
-static atomic_int      g_rd_done;
-static atomic_int      g_wr_done;
-static atomic_long     g_hash;
+static int g_valfreed[CK_KEYSPACE];
+static int g_uaf;
+static int g_ord; /* out-of-order min/floor observed */
+static int g_rd_done;
+static int g_wr_done;
+static long g_hash;
 
 static void
 ch_fold(long v)
 {
-	long h = atomic_load_explicit(&g_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(v + 1));
-	atomic_store_explicit(&g_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_hash, h, xtc_mo_relaxed);
 }
 
 static void
@@ -100,10 +99,8 @@ val_free(void *p)
 	struct val *vp = p;
 	int64_t key = vp->key;
 	if (key >= 0 && key < CK_KEYSPACE)
-		atomic_store_explicit(&g_valfreed[key], 1,
-		    memory_order_release);
-	atomic_store_explicit(&vp->sentinel, VAL_FREED_MAGIC,
-	    memory_order_release);
+		xtc_atomic_store_i32(&g_valfreed[key], 1, xtc_mo_release);
+	xtc_atomic_store_u64(&vp->sentinel, VAL_FREED_MAGIC, xtc_mo_release);
 	free(vp);
 }
 
@@ -118,8 +115,8 @@ ck_writer(void *arg)
 		struct ikey *k = g_keyptrs[key];
 		struct val *vp = g_valptrs[key];
 		void *old = NULL;
-		atomic_store_explicit(&vp->sentinel, VAL_LIVE_MAGIC,
-		    memory_order_relaxed);
+		xtc_atomic_store_u64(&vp->sentinel, VAL_LIVE_MAGIC,
+		    xtc_mo_relaxed);
 		vp->key = key;
 		(void)xtc_cskip_insert(g_s, k, vp, &old);
 		ch_fold((long)(key * 3));
@@ -136,15 +133,15 @@ ck_writer(void *arg)
 		ch_fold((long)(key * 5 + 1));
 		xtc_yield();
 	}
-	atomic_fetch_add_explicit(&g_wr_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_wr_done, 1, xtc_mo_relaxed);
 }
 
 static void
 check_live(struct val *vp, int64_t expect_key)
 {
-	uint64_t s = atomic_load_explicit(&vp->sentinel, memory_order_acquire);
+	uint64_t s = xtc_atomic_load_u64(&vp->sentinel, xtc_mo_acquire);
 	if (s != VAL_LIVE_MAGIC || vp->key != expect_key)
-		atomic_fetch_add_explicit(&g_uaf, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_uaf, 1, xtc_mo_relaxed);
 }
 
 static void
@@ -185,8 +182,8 @@ ck_reader(void *arg)
 				    XTC_OK) {
 					int64_t fkey = ((struct ikey *)fk)->v;
 					if (!(mk <= fkey && fkey <= probe))
-						atomic_fetch_add_explicit(&g_ord,
-						    1, memory_order_relaxed);
+						xtc_atomic_fetch_add_i32(&g_ord,
+						    1, xtc_mo_relaxed);
 					check_live((struct val *)fv, fkey);
 				}
 			}
@@ -194,7 +191,7 @@ ck_reader(void *arg)
 		}
 		xtc_yield();
 	}
-	atomic_fetch_add_explicit(&g_rd_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_rd_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -204,11 +201,11 @@ run_cskip(uint64_t seed, int *out_rd, int *out_wr, int *out_uaf, int *out_ord,
 	xtc_exec_t *e = NULL;
 	int i, rc, next = 0;
 
-	atomic_store(&g_uaf, 0);
-	atomic_store(&g_ord, 0);
-	atomic_store(&g_rd_done, 0);
-	atomic_store(&g_wr_done, 0);
-	atomic_store(&g_hash, 0);
+	xtc_atomic_store_i32(&g_uaf, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ord, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rd_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_wr_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
 
 	if (xtc_rcu_init() != XTC_OK) return -1;
 	if (xtc_cskip_create(ikey_cmp, &g_s) != XTC_OK) {
@@ -220,9 +217,10 @@ run_cskip(uint64_t seed, int *out_rd, int *out_wr, int *out_uaf, int *out_ord,
 		g_valptrs[i] = malloc(sizeof(struct val));
 		if (g_keyptrs[i] == NULL || g_valptrs[i] == NULL) return -1;
 		g_keyptrs[i]->v = i;
-		atomic_store(&g_valptrs[i]->sentinel, VAL_LIVE_MAGIC);
+		xtc_atomic_store_u64(&g_valptrs[i]->sentinel, VAL_LIVE_MAGIC,
+		    xtc_mo_seq_cst);
 		g_valptrs[i]->key = i;
-		atomic_store(&g_valfreed[i], 0);
+		xtc_atomic_store_i32(&g_valfreed[i], 0, xtc_mo_seq_cst);
 	}
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) {
@@ -237,12 +235,12 @@ run_cskip(uint64_t seed, int *out_rd, int *out_wr, int *out_uaf, int *out_ord,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_rd = atomic_load(&g_rd_done);
-	*out_wr = atomic_load(&g_wr_done);
-	*out_uaf = atomic_load(&g_uaf);
-	*out_ord = atomic_load(&g_ord);
+	*out_rd = xtc_atomic_load_i32(&g_rd_done, xtc_mo_seq_cst);
+	*out_wr = xtc_atomic_load_i32(&g_wr_done, xtc_mo_seq_cst);
+	*out_uaf = xtc_atomic_load_i32(&g_uaf, xtc_mo_seq_cst);
+	*out_ord = xtc_atomic_load_i32(&g_ord, xtc_mo_seq_cst);
 	*out_size = (int)xtc_cskip_size(g_s);
-	*out_hash = atomic_load(&g_hash);
+	*out_hash = xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 
 	/* Off a fiber now: min on the quiesced map. */
@@ -260,7 +258,7 @@ run_cskip(uint64_t seed, int *out_rd, int *out_wr, int *out_uaf, int *out_ord,
 	xtc_rcu_synchronize();
 
 	for (i = 0; i < CK_KEYSPACE; i++) {
-		if (!atomic_load_explicit(&g_valfreed[i], memory_order_acquire))
+		if (!xtc_atomic_load_i32(&g_valfreed[i], xtc_mo_acquire))
 			free(g_valptrs[i]);
 		free(g_keyptrs[i]);
 	}

@@ -25,7 +25,6 @@
  *	library primitive (no buffer manager involved).
  */
 
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
@@ -41,8 +40,8 @@
 #define NPROCS 16
 #define ITERS  4000
 
-static _Atomic int  g_done;
-static _Atomic long g_calls;
+static int g_done;
+static long g_calls;
 
 static int noop_fn(void *a) { (void)a; return 42; }
 
@@ -53,7 +52,8 @@ watchdog(void *a)
 	(void)a;
 	nanosleep(&ts, 0);
 	fprintf(stderr, "=== WATCHDOG: HANG (%d/%d done, %ld calls) ===\n",
-	    atomic_load(&g_done), NPROCS, atomic_load(&g_calls));
+	    xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst), NPROCS,
+	    xtc_atomic_load_long(&g_calls, xtc_mo_seq_cst));
 	_exit(7);
 }
 
@@ -65,13 +65,13 @@ worker(void *a)
 	for (i = 0; i < ITERS; i++) {
 		r = 0;
 		(void)xtc_blocking_run(noop_fn, NULL, &r);
-		atomic_fetch_add(&g_calls, 1);
+		xtc_atomic_fetch_add_long(&g_calls, 1, xtc_mo_seq_cst);
 		if (r != 42)
 			fprintf(stderr, "bad result %d\n", r);
 		if ((i & 31) == 0)
 			xtc_yield();
 	}
-	atomic_fetch_add(&g_done, 1);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_seq_cst);
 }
 
 int
@@ -103,12 +103,13 @@ main(void)
 	}
 	(void)xtc_exec_fini(exec);
 
-	if (atomic_load(&g_done) != NPROCS) {
+	if (xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst) != NPROCS) {
 		fprintf(stderr, "FAIL: only %d/%d procs done (%ld calls)\n",
-		    atomic_load(&g_done), NPROCS, atomic_load(&g_calls));
+		    xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst), NPROCS,
+		    xtc_atomic_load_long(&g_calls, xtc_mo_seq_cst));
 		return 1;
 	}
-	printf("ok: %d procs x %d blocking_run = %ld calls\n",
-	    NPROCS, ITERS, atomic_load(&g_calls));
+	printf("ok: %d procs x %d blocking_run = %ld calls\n", NPROCS, ITERS,
+	    xtc_atomic_load_long(&g_calls, xtc_mo_seq_cst));
 	return 0;
 }

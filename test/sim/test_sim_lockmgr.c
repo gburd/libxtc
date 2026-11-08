@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -49,9 +48,9 @@
 
 /* ---- contention workload ---- */
 static xtc_lockmgr_t *g_mgr;
-static atomic_int      g_done;
-static atomic_int      g_pairs;      /* completed acquire+release pairs */
-static atomic_uint_fast64_t g_order_hash;  /* order-sensitive app hash */
+static int g_done;
+static int g_pairs;           /* completed acquire+release pairs */
+static uint64_t g_order_hash; /* order-sensitive app hash */
 
 struct work_arg {
 	int      id;
@@ -67,11 +66,11 @@ mix_hash(uint64_t v)
 	 * deterministic regardless of the (deterministic) interleaving. */
 	uint_fast64_t cur, nxt;
 	do {
-		cur = atomic_load_explicit(&g_order_hash, memory_order_relaxed);
+		cur = xtc_atomic_load_u64(&g_order_hash, xtc_mo_relaxed);
 		nxt = (cur ^ v) * 1099511628211ULL;
 		nxt ^= nxt >> 29;
-	} while (!atomic_compare_exchange_weak_explicit(&g_order_hash,
-	    &cur, nxt, memory_order_relaxed, memory_order_relaxed));
+	} while (!xtc_atomic_cas_weak_u64(&g_order_hash, &cur, nxt,
+	    xtc_mo_relaxed, xtc_mo_relaxed));
 }
 
 static void
@@ -82,7 +81,7 @@ contend_worker(void *arg)
 	int rc;
 
 	if (xtc_lockmgr_id(g_mgr, &id) != XTC_OK) {
-		atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 		return;
 	}
 
@@ -98,10 +97,10 @@ contend_worker(void *arg)
 		/* Hold across a yield so waiters queue behind us. */
 		xtc_yield();
 		(void)xtc_lock_put(g_mgr, id, &w->obj, sizeof w->obj);
-		atomic_fetch_add_explicit(&g_pairs, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_pairs, 1, xtc_mo_relaxed);
 	}
 	(void)xtc_lockmgr_id_free(g_mgr, id);
-	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -117,9 +116,10 @@ run_contend(uint64_t seed, int *out_done, int *out_pairs,
 	opts.detect_mode = XTC_LOCK_DETECT_ON_BLOCK;
 	opts.n_partitions = 8;
 
-	atomic_store(&g_done, 0);
-	atomic_store(&g_pairs, 0);
-	atomic_store(&g_order_hash, 1469598103934665603ULL);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_pairs, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_u64(&g_order_hash, 1469598103934665603ULL,
+	    xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	if (xtc_lockmgr_create(&opts, &g_mgr) != XTC_OK) {
@@ -135,9 +135,10 @@ run_contend(uint64_t seed, int *out_done, int *out_pairs,
 		(void)xtc_proc_spawn(l, contend_worker, &g_args[i], NULL, NULL);
 	}
 	rc = xtc_sim_exec_run(e, seed, 5000000);
-	*out_done = atomic_load(&g_done);
-	*out_pairs = atomic_load(&g_pairs);
-	*out_order = (uint64_t)atomic_load(&g_order_hash);
+	*out_done = xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
+	*out_pairs = xtc_atomic_load_i32(&g_pairs, xtc_mo_seq_cst);
+	*out_order =
+	    (uint64_t)xtc_atomic_load_u64(&g_order_hash, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_lockmgr_destroy(g_mgr);
 	g_mgr = NULL;
@@ -147,10 +148,10 @@ run_contend(uint64_t seed, int *out_done, int *out_pairs,
 
 /* ---- deadlock workload ---- */
 static xtc_lockmgr_t *g_dl_mgr;
-static atomic_int      g_dl_ready;      /* both hold their first lock */
-static atomic_int      g_dl_ok;         /* acquired both -> would-be no-deadlock */
-static atomic_int      g_dl_deadlk;     /* got XTC_E_DEADLK */
-static atomic_int      g_dl_done;
+static int g_dl_ready;  /* both hold their first lock */
+static int g_dl_ok;     /* acquired both -> would-be no-deadlock */
+static int g_dl_deadlk; /* got XTC_E_DEADLK */
+static int g_dl_done;
 
 static const uint64_t  g_obj1 = 0x1111;
 static const uint64_t  g_obj2 = 0x2222;
@@ -169,7 +170,7 @@ dl_worker(void *arg)
 	int rc, spins;
 
 	if (xtc_lockmgr_id(g_dl_mgr, &id) != XTC_OK) {
-		atomic_fetch_add_explicit(&g_dl_done, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_dl_done, 1, xtc_mo_relaxed);
 		return;
 	}
 	/* Take the first lock (uncontended -> immediate). */
@@ -179,10 +180,10 @@ dl_worker(void *arg)
 	/* Wait until BOTH procs hold their first lock, so the second
 	 * acquire is guaranteed to conflict and form the cycle.  Bounded
 	 * spin-with-yield so a lost peer cannot hang the sim. */
-	atomic_fetch_add_explicit(&g_dl_ready, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_dl_ready, 1, xtc_mo_relaxed);
 	for (spins = 0; spins < 100000 &&
-	    atomic_load_explicit(&g_dl_ready, memory_order_relaxed) < 2;
-	    spins++)
+	     xtc_atomic_load_i32(&g_dl_ready, xtc_mo_relaxed) < 2;
+	     spins++)
 		xtc_yield();
 
 	/* Cross-acquire: A wants obj2 (held by B), B wants obj1 (held by A).
@@ -190,13 +191,13 @@ dl_worker(void *arg)
 	 * victim.  Forever (-1) would also work under ON_BLOCK detection. */
 	rc = xtc_lock_get(g_dl_mgr, id, second, sizeof *second, XTC_LOCK_X, -1);
 	if (rc == XTC_E_DEADLK)
-		atomic_fetch_add_explicit(&g_dl_deadlk, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_dl_deadlk, 1, xtc_mo_relaxed);
 	else if (rc == XTC_OK)
-		atomic_fetch_add_explicit(&g_dl_ok, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_dl_ok, 1, xtc_mo_relaxed);
 out:
 	(void)xtc_lock_release_all(g_dl_mgr, id);
 	(void)xtc_lockmgr_id_free(g_dl_mgr, id);
-	atomic_fetch_add_explicit(&g_dl_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_dl_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -211,10 +212,10 @@ run_deadlock(uint64_t seed, int *out_done, int *out_deadlk, int *out_ok,
 	opts.victim = XTC_LOCK_VICTIM_DEFAULT;   /* seeded under sim -> replays */
 	opts.n_partitions = 8;
 
-	atomic_store(&g_dl_ready, 0);
-	atomic_store(&g_dl_ok, 0);
-	atomic_store(&g_dl_deadlk, 0);
-	atomic_store(&g_dl_done, 0);
+	xtc_atomic_store_i32(&g_dl_ready, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_dl_ok, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_dl_deadlk, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_dl_done, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, 2) != XTC_OK) return -1;
 	if (xtc_lockmgr_create(&opts, &g_dl_mgr) != XTC_OK) {
@@ -224,9 +225,9 @@ run_deadlock(uint64_t seed, int *out_done, int *out_deadlk, int *out_ok,
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 1), dl_worker, &g_dl_b, NULL, NULL);
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
-	*out_done = atomic_load(&g_dl_done);
-	*out_deadlk = atomic_load(&g_dl_deadlk);
-	*out_ok = atomic_load(&g_dl_ok);
+	*out_done = xtc_atomic_load_i32(&g_dl_done, xtc_mo_seq_cst);
+	*out_deadlk = xtc_atomic_load_i32(&g_dl_deadlk, xtc_mo_seq_cst);
+	*out_ok = xtc_atomic_load_i32(&g_dl_ok, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_lockmgr_destroy(g_dl_mgr);
 	g_dl_mgr = NULL;
@@ -255,10 +256,10 @@ run_deadlock(uint64_t seed, int *out_done, int *out_deadlk, int *out_ok,
  */
 #define RR_WORK 16
 static xtc_lockmgr_t *g_rr_mgr;
-static atomic_int     g_rr_done, g_rr_viol, g_rr_grants;
+static int g_rr_done, g_rr_viol, g_rr_grants;
 static const uint64_t g_rr_obj = 0x5151;
 /* held[i] is a bitmask of modes proc i was granted and still holds. */
-static atomic_uint    g_rr_held[RR_WORK];
+static unsigned g_rr_held[RR_WORK];
 static const uint8_t RR_CONF[9 * 9] = {
 	/*         NL  S   X   WT  IX  IS  IWR RU  WW  */
 	/* NL  */   0,  0,  0,  0,  0,  0,  0,  0,  0,
@@ -286,17 +287,18 @@ static const int RR_PAIRS[][2] = {
 static void
 rr_check(int self)
 {
-	unsigned mine = atomic_load(&g_rr_held[self]);
+	unsigned mine = xtc_atomic_load_u32(&g_rr_held[self], xtc_mo_seq_cst);
 	int j, a, b;
 	for (j = 0; j < RR_WORK; j++) {
 		unsigned theirs;
 		if (j == self) continue;
-		theirs = atomic_load(&g_rr_held[j]);
+		theirs = xtc_atomic_load_u32(&g_rr_held[j], xtc_mo_seq_cst);
 		for (a = 1; a < 9; a++) {
 			if (!(mine & (1u << a))) continue;
 			for (b = 1; b < 9; b++)
 				if ((theirs & (1u << b)) && RR_CONF[a * 9 + b])
-					atomic_store(&g_rr_viol, 1);
+					xtc_atomic_store_i32(&g_rr_viol, 1,
+					    xtc_mo_seq_cst);
 		}
 	}
 }
@@ -312,25 +314,29 @@ rr_worker(void *arg)
 		goto out;
 	if (xtc_lock_get(g_rr_mgr, id, &g_rr_obj, sizeof g_rr_obj,
 	    (xtc_lock_mode_t)m1, 1000000LL) == XTC_OK) {
-		atomic_fetch_or(&g_rr_held[i], 1u << m1);
-		atomic_fetch_add(&g_rr_grants, 1);
+		xtc_atomic_fetch_or_u32(&g_rr_held[i], 1u << m1,
+		    xtc_mo_seq_cst);
+		xtc_atomic_fetch_add_i32(&g_rr_grants, 1, xtc_mo_seq_cst);
 		rr_check(i);
 		xtc_yield();
 		/* Short timeout: a refused re-request is legal. */
 		if (xtc_lock_get(g_rr_mgr, id, &g_rr_obj, sizeof g_rr_obj,
 		    (xtc_lock_mode_t)m2, 1000000LL) == XTC_OK) {
-			atomic_fetch_or(&g_rr_held[i], 1u << m2);
-			atomic_fetch_add(&g_rr_grants, 1);
+			xtc_atomic_fetch_or_u32(&g_rr_held[i], 1u << m2,
+			    xtc_mo_seq_cst);
+			xtc_atomic_fetch_add_i32(&g_rr_grants, 1,
+			    xtc_mo_seq_cst);
 			rr_check(i);
 		}
 		xtc_yield();
 		rr_check(i);
-		atomic_store(&g_rr_held[i], 0);        /* before release */
+		xtc_atomic_store_u32(&g_rr_held[i], 0,
+		    xtc_mo_seq_cst); /* before release */
 		(void)xtc_lock_release_all(g_rr_mgr, id);
 	}
 	(void)xtc_lockmgr_id_free(g_rr_mgr, id);
 out:
-	atomic_fetch_add(&g_rr_done, 1);
+	xtc_atomic_fetch_add_i32(&g_rr_done, 1, xtc_mo_seq_cst);
 }
 
 static int
@@ -349,11 +355,11 @@ run_reget(uint64_t seed, int *out_done, int *out_viol, int *out_grants,
 	 * oracle is exact. */
 	opts.detect_mode = XTC_LOCK_DETECT_NONE;
 	opts.n_partitions = 4;
-	atomic_store(&g_rr_done, 0);
-	atomic_store(&g_rr_viol, 0);
-	atomic_store(&g_rr_grants, 0);
+	xtc_atomic_store_i32(&g_rr_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rr_viol, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rr_grants, 0, xtc_mo_seq_cst);
 	for (i = 0; i < RR_WORK; i++)
-		atomic_store(&g_rr_held[i], 0);
+		xtc_atomic_store_u32(&g_rr_held[i], 0, xtc_mo_seq_cst);
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	if (xtc_lockmgr_create(&opts, &g_rr_mgr) != XTC_OK) {
 		xtc_exec_fini(e); return -1;
@@ -362,9 +368,9 @@ run_reget(uint64_t seed, int *out_done, int *out_viol, int *out_grants,
 		(void)xtc_proc_spawn(xtc_exec_loop(e, (unsigned)(i % N_LOOPS)),
 		    rr_worker, (void *)(intptr_t)i, NULL, NULL);
 	rc = xtc_sim_exec_run(e, seed, 5000000);
-	*out_done = atomic_load(&g_rr_done);
-	*out_viol = atomic_load(&g_rr_viol);
-	*out_grants = atomic_load(&g_rr_grants);
+	*out_done = xtc_atomic_load_i32(&g_rr_done, xtc_mo_seq_cst);
+	*out_viol = xtc_atomic_load_i32(&g_rr_viol, xtc_mo_seq_cst);
+	*out_grants = xtc_atomic_load_i32(&g_rr_grants, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_lockmgr_destroy(g_rr_mgr);
 	g_rr_mgr = NULL;

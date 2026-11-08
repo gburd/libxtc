@@ -18,7 +18,6 @@
  */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,10 +33,10 @@
 /* ----- Common counter+log gen_server -------------------------- */
 
 struct cs_state {
-	_Atomic int n_call;
-	_Atomic int n_cast;
-	_Atomic int n_info;
-	_Atomic int terminated;
+	int n_call;
+	int n_cast;
+	int n_info;
+	int terminated;
 	int last_cast_id;
 };
 
@@ -48,7 +47,7 @@ static int
 cs_handle_call(void *st, const void *req, size_t sz, xtc_svr_call_t *call)
 {
 	struct cs_state *s = st;
-	atomic_fetch_add(&s->n_call, 1);
+	xtc_atomic_fetch_add_i32(&s->n_call, 1, xtc_mo_seq_cst);
 	(void)xtc_svr_reply(call, req, sz);   /* echo the request */
 	return XTC_SVR_CONTINUE;
 }
@@ -58,7 +57,7 @@ cs_handle_cast(void *st, const void *msg, size_t sz)
 {
 	struct cs_state *s = st;
 	if (sz >= sizeof(int)) memcpy(&s->last_cast_id, msg, sizeof(int));
-	atomic_fetch_add(&s->n_cast, 1);
+	xtc_atomic_fetch_add_i32(&s->n_cast, 1, xtc_mo_seq_cst);
 	return XTC_SVR_CONTINUE;
 }
 
@@ -67,7 +66,7 @@ cs_handle_info(void *st, const void *msg, size_t sz)
 {
 	struct cs_state *s = st;
 	(void)msg; (void)sz;
-	atomic_fetch_add(&s->n_info, 1);
+	xtc_atomic_fetch_add_i32(&s->n_info, 1, xtc_mo_seq_cst);
 	return XTC_SVR_CONTINUE;
 }
 
@@ -76,7 +75,7 @@ cs_terminate(void *st, int reason)
 {
 	struct cs_state *s = st;
 	(void)reason;
-	atomic_store(&s->terminated, 1);
+	xtc_atomic_store_i32(&s->terminated, 1, xtc_mo_seq_cst);
 }
 
 static const xtc_svr_callbacks_t cs_cb = {
@@ -124,7 +123,8 @@ test_cast_fast(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, cf_driver, &args, NULL, &dpid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&state.n_cast), ==, 100);
+	munit_assert_int(xtc_atomic_load_i32(&state.n_cast, xtc_mo_seq_cst), ==,
+	    100);
 	munit_assert_int(state.last_cast_id, ==, 99);
 	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
@@ -179,8 +179,10 @@ test_call_huge_mq(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, hmq_driver, &args, NULL, &dpid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&state.n_cast), ==, 200);
-	munit_assert_int(atomic_load(&state.n_call), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&state.n_cast, xtc_mo_seq_cst), ==,
+	    200);
+	munit_assert_int(xtc_atomic_load_i32(&state.n_call, xtc_mo_seq_cst), ==,
+	    1);
 	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
@@ -221,7 +223,8 @@ test_info_dispatch(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, inf_driver, &args, NULL, &dpid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&state.n_info), ==, 50);
+	munit_assert_int(xtc_atomic_load_i32(&state.n_info, xtc_mo_seq_cst), ==,
+	    50);
 	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
@@ -229,7 +232,11 @@ test_info_dispatch(const MunitParameter p[], void *d)
 
 /* ----- reply_with_data: payload preserved -------------------- */
 
-struct rwd_args { xtc_pid_t target; xtc_svr_t *svr; _Atomic int got_match; };
+struct rwd_args {
+	xtc_pid_t target;
+	xtc_svr_t *svr;
+	int got_match;
+};
 
 static void
 rwd_driver(void *arg)
@@ -244,7 +251,7 @@ rwd_driver(void *arg)
 	    1000LL * 1000 * 1000) == XTC_OK) {
 		if (reply_sz == sizeof req &&
 		    memcmp(reply, req, sizeof req) == 0)
-			atomic_store(&a->got_match, 1);
+			xtc_atomic_store_i32(&a->got_match, 1, xtc_mo_seq_cst);
 		free(reply);
 	}
 	(void)xtc_svr_stop(a->svr);
@@ -267,7 +274,8 @@ test_reply_with_data(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, rwd_driver, &args, NULL, &dpid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&args.got_match), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&args.got_match, xtc_mo_seq_cst),
+	    ==, 1);
 	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
@@ -293,7 +301,8 @@ test_terminate_runs(const MunitParameter p[], void *d)
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
-	munit_assert_int(atomic_load(&state.terminated), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&state.terminated, xtc_mo_seq_cst),
+	    ==, 1);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
 }
@@ -330,7 +339,8 @@ test_zero_byte_cast(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, zero_driver, &args, NULL, &dpid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&state.n_cast), ==, 3);
+	munit_assert_int(xtc_atomic_load_i32(&state.n_cast, xtc_mo_seq_cst), ==,
+	    3);
 	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
@@ -479,7 +489,8 @@ test_cast_after_stop(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, cast_after_stop_driver, &args,
 	    NULL, &dpid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&state.n_cast), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&state.n_cast, xtc_mo_seq_cst), ==,
+	    0);
 	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;

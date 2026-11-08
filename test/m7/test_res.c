@@ -11,7 +11,6 @@
  */
 
 #include <stdint.h>
-#include <stdatomic.h>
 #if !defined(_WIN32)
 #include <pthread.h>
 #endif
@@ -257,12 +256,12 @@ test_alert(const MunitParameter p[], void *d)
  * the test thread samples it.
  */
 #if !defined(_WIN32)
-static _Atomic int neg_stop;
+static int neg_stop;
 static void *
 neg_releaser(void *arg)
 {
 	xtc_res_t *r = arg;
-	while (!atomic_load(&neg_stop))
+	while (!xtc_atomic_load_i32(&neg_stop, xtc_mo_seq_cst))
 		xtc_res_release(r, XTC_RES_CHANNELS, 3);
 	return NULL;
 }
@@ -281,7 +280,7 @@ test_release_never_negative(const MunitParameter p[], void *d)
 	long i;
 	(void)p; (void)d;
 	munit_assert_int(xtc_res_init(&r, NULL), ==, XTC_OK);
-	atomic_store(&neg_stop, 0);
+	xtc_atomic_store_i32(&neg_stop, 0, xtc_mo_seq_cst);
 	munit_assert_int(pthread_create(&th, NULL, neg_releaser, &r), ==, 0);
 	for (i = 0; i < 20000000L && min >= 0; i++) {
 		if ((i & 1023) == 0 &&
@@ -291,7 +290,7 @@ test_release_never_negative(const MunitParameter p[], void *d)
 		if (v < min)
 			min = v;
 	}
-	atomic_store(&neg_stop, 1);
+	xtc_atomic_store_i32(&neg_stop, 1, xtc_mo_seq_cst);
 	munit_assert_int(pthread_join(th, NULL), ==, 0);
 	munit_assert_int64(min, >=, 0);
 	return MUNIT_OK;

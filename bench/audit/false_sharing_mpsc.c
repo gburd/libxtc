@@ -36,7 +36,7 @@
 #define CHAN_CAP      4096
 
 static xtc_chan_mpsc_t *g_chan;
-static _Atomic int g_producers_done;
+static int g_producers_done;
 
 static int64_t
 now_ns(void)
@@ -59,7 +59,7 @@ producer(void *arg)
 			; /* spin on full */
 	}
 
-	atomic_fetch_add(&g_producers_done, 1);
+	xtc_atomic_fetch_add_i32(&g_producers_done, 1, xtc_mo_seq_cst);
 	return NULL;
 }
 
@@ -106,7 +106,7 @@ main(void)
 	printf("Channel capacity: %d\n", CHAN_CAP);
 	printf("\n");
 
-	atomic_store(&g_producers_done, 0);
+	xtc_atomic_store_i32(&g_producers_done, 0, xtc_mo_seq_cst);
 	start = now_ns();
 
 	if (pthread_create(&cons, NULL, consumer, NULL) != 0) {

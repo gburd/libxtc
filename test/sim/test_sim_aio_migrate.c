@@ -48,7 +48,6 @@
  */
 
 #include <stdlib.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -65,8 +64,8 @@
 #define N_WORKERS  24     /* > N_LOOPS, all spawned on loop 0 => heavy steal */
 #define N_COMMITS  16     /* write+fdatasync pairs per worker */
 
-static _Atomic int  g_done;
-static _Atomic long g_commits;
+static int g_done;
+static long g_commits;
 static int          g_fd;
 
 #define KILL_REASON 77
@@ -87,13 +86,13 @@ commit_worker(void *arg)
 			return;
 		if (xtc_aio_fdatasync(g_fd) != XTC_OK)
 			return;
-		atomic_fetch_add_explicit(&g_commits, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_long(&g_commits, 1, xtc_mo_relaxed);
 		/* A park point between commits so the stealer can migrate the
 		 * fiber -- successive commits then tend to run, and complete,
 		 * on different loops. */
 		(void)xtc_proc_sleep(1000);
 	}
-	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 }
 
 static void
@@ -147,8 +146,8 @@ run_kill(uint64_t seed)
 	const char *td = getenv("TMPDIR");
 	int i, rc, done;
 
-	atomic_store(&g_done, 0);
-	atomic_store(&g_commits, 0);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_commits, 0, xtc_mo_seq_cst);
 	g_kills = g_downs = g_bad_downs = 0;
 	(void)snprintf(path, sizeof path, "%s/sim_aio_kill_XXXXXX",
 	    td != NULL && *td != '\0' ? td : "/tmp");
@@ -174,7 +173,7 @@ run_kill(uint64_t seed)
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 1), killer, NULL, NULL, NULL);
 
 	rc = xtc_sim_exec_run(e, seed, 200000000);
-	done = atomic_load(&g_done);
+	done = xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
 
 	(void)xtc_inject_detach("sim.aio.wake_after_done");
 	xtc_sim_buggify_disable();
@@ -199,8 +198,8 @@ run_once(uint64_t seed, int migratable, long *out_commits, uint64_t *out_state)
 	char path[] = "/tmp/sim_aio_migrate_XXXXXX";
 	int i, done;
 
-	atomic_store(&g_done, 0);
-	atomic_store(&g_commits, 0);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_commits, 0, xtc_mo_seq_cst);
 
 	g_fd = mkstemp(path);
 	if (g_fd < 0)
@@ -220,8 +219,9 @@ run_once(uint64_t seed, int migratable, long *out_commits, uint64_t *out_state)
 
 	(void)xtc_sim_exec_run(e, seed, 200000000);
 
-	done = atomic_load(&g_done);
-	if (out_commits) *out_commits = atomic_load(&g_commits);
+	done = xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
+	if (out_commits)
+		*out_commits = xtc_atomic_load_long(&g_commits, xtc_mo_seq_cst);
 	if (out_state)   *out_state = xtc_sim_state_hash(e);
 
 	xtc_sim_io_faults_disable();

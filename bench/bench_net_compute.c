@@ -65,7 +65,6 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <signal.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -175,8 +174,8 @@ struct srv_cfg {
 };
 
 static struct srv_cfg g_srv;
-static _Atomic uint64_t g_requests;
-static _Atomic uint64_t g_bytes;
+static uint64_t g_requests;
+static uint64_t g_bytes;
 
 /*
  * One fiber per connection.  Reads a request, burns <compute> us, echoes
@@ -233,10 +232,8 @@ conn_fiber(void *arg)
 				goto done;
 			}
 		}
-		atomic_fetch_add_explicit(&g_requests, 1,
-		    memory_order_relaxed);
-		atomic_fetch_add_explicit(&g_bytes, (uint64_t)n,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_add_u64(&g_requests, 1, xtc_mo_relaxed);
+		xtc_atomic_fetch_add_u64(&g_bytes, (uint64_t)n, xtc_mo_relaxed);
 	}
 done:
 	free(buf);
@@ -366,8 +363,9 @@ run_server(int port, int n_loops, unsigned compute)
 	 * this process.
 	 */
 	{
-		uint64_t reqs = atomic_load(&g_requests);
-		uint64_t bytes = atomic_load(&g_bytes);
+		uint64_t reqs =
+		    xtc_atomic_load_u64(&g_requests, xtc_mo_seq_cst);
+		uint64_t bytes = xtc_atomic_load_u64(&g_bytes, xtc_mo_seq_cst);
 		struct timespec cpu;
 		double cpu_s = 0.0;
 

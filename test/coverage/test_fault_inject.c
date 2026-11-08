@@ -359,14 +359,14 @@ test_svr_reply_oom(const MunitParameter p[], void *d)
  * the sweep walked past that object's allocations); what must NOT happen
  * is a crash, a double free, or a leak.
  */
-static _Atomic long g_alloc_seq;
-static _Atomic long g_alloc_fail_at;   /* -1 = never fail */
+static long g_alloc_seq;
+static long g_alloc_fail_at; /* -1 = never fail */
 
 static int
 oom_should_fail(void)
 {
-	long at = atomic_load(&g_alloc_fail_at);
-	long n  = atomic_fetch_add(&g_alloc_seq, 1) + 1;
+	long at = xtc_atomic_load_long(&g_alloc_fail_at, xtc_mo_seq_cst);
+	long n = xtc_atomic_fetch_add_long(&g_alloc_seq, 1, xtc_mo_seq_cst) + 1;
 	return (at > 0 && n == at);
 }
 static void *oom_malloc(size_t sz)
@@ -479,12 +479,12 @@ test_oom_sweep(const MunitParameter p[], void *d)
 
 	/* First pass with no failures, to learn how many allocations the
 	 * workload makes -- so the sweep covers all of them and no more. */
-	atomic_store(&g_alloc_fail_at, -1);
-	atomic_store(&g_alloc_seq, 0);
+	xtc_atomic_store_long(&g_alloc_fail_at, -1, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_alloc_seq, 0, xtc_mo_seq_cst);
 	munit_assert_int(__os_alloc_set_hook(&OOM_HOOK), ==, XTC_OK);
 	oom_workload();
 	{
-		long total = atomic_load(&g_alloc_seq);
+		long total = xtc_atomic_load_long(&g_alloc_seq, xtc_mo_seq_cst);
 		/* The hook MUST have been consulted, or this test is vacuous. */
 		munit_assert_true(total > 0);
 		munit_logf(MUNIT_LOG_INFO, "oom sweep: %ld allocation(s)", total);
@@ -492,14 +492,15 @@ test_oom_sweep(const MunitParameter p[], void *d)
 			total = 200;   /* keep the test fast */
 
 		for (n = 1; n <= total; n++) {
-			atomic_store(&g_alloc_seq, 0);
-			atomic_store(&g_alloc_fail_at, n);
+			xtc_atomic_store_long(&g_alloc_seq, 0, xtc_mo_seq_cst);
+			xtc_atomic_store_long(&g_alloc_fail_at, n,
+			    xtc_mo_seq_cst);
 			/* Must not crash, double-free, or leak (ASan/valgrind
 			 * runs of this test are the real assertion). */
 			oom_workload();
 		}
 	}
-	atomic_store(&g_alloc_fail_at, -1);
+	xtc_atomic_store_long(&g_alloc_fail_at, -1, xtc_mo_seq_cst);
 	if (have_saved)
 		(void)__os_alloc_set_hook(&saved);
 	else

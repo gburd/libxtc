@@ -49,7 +49,6 @@
 #include <string.h>
 #include <time.h>
 #include <pthread.h>
-#include <stdatomic.h>
 #include <sched.h>
 #include <sys/resource.h>
 
@@ -85,7 +84,7 @@ struct w6_msg {
 
 struct w6_shared {
 	xtc_chan_mpsc_t  *chan;
-	atomic_int        gens_done;   /* counts completed generators */
+	int gens_done;                 /* counts completed generators */
 	int               n_gens;      /* total generator threads     */
 };
 
@@ -114,13 +113,13 @@ struct consumer_arg {
  * Alert state (fires once per upward 80%-capacity crossing)
  * ------------------------------------------------------------------------- */
 
-static atomic_int g_alert_fires;
+static int g_alert_fires;
 
 static void
 hwm_alert(xtc_res_kind_t k, int64_t used, int64_t cap, void *user)
 {
 	(void)k; (void)used; (void)cap; (void)user;
-	atomic_fetch_add_explicit(&g_alert_fires, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_alert_fires, 1, xtc_mo_relaxed);
 }
 
 /* -------------------------------------------------------------------------
@@ -196,8 +195,8 @@ gen_fn(void *arg_)
 	 * Signal completion.  The last generator to finish closes the
 	 * channel so the consumer sees XTC_E_INVAL after draining.
 	 */
-	if (atomic_fetch_add_explicit(&sh->gens_done, 1,
-	                              memory_order_acq_rel) + 1 == sh->n_gens)
+	if (xtc_atomic_fetch_add_i32(&sh->gens_done, 1, xtc_mo_acq_rel) + 1 ==
+	    sh->n_gens)
 		xtc_chan_mpsc_close(sh->chan);
 
 	return NULL;
@@ -333,7 +332,7 @@ main(int argc, char **argv)
 	}
 
 	/* ---- high-water alert at 80% ---- */
-	atomic_init(&g_alert_fires, 0);
+	xtc_atomic_store_i32(&g_alert_fires, 0, xtc_mo_relaxed);
 	(void)xtc_res_set_alert(&res, XTC_RES_CHAN_SLOTS, 0.80);
 	(void)xtc_res_set_alert_fn(&res, hwm_alert, NULL);
 
@@ -353,7 +352,7 @@ main(int argc, char **argv)
 
 	/* ---- shared state ---- */
 	shared.chan    = chan;
-	atomic_init(&shared.gens_done, 0);
+	xtc_atomic_store_i32(&shared.gens_done, 0, xtc_mo_relaxed);
 	shared.n_gens  = gens;
 
 	/* ---- per-generator args ---- */
@@ -414,9 +413,8 @@ main(int argc, char **argv)
 	/* ---- diagnostics to stderr (not part of M17 format) ---- */
 	fprintf(stderr,
 	    "# w6/xtc: admitted=%ld rejected=%ld alerts=%d hwm=%lld\n",
-	    con_arg.admitted,
-	    total_rejected,
-	    atomic_load(&g_alert_fires),
+	    con_arg.admitted, total_rejected,
+	    xtc_atomic_load_i32(&g_alert_fires, xtc_mo_seq_cst),
 	    (long long)xtc_res_high(&res, XTC_RES_CHAN_SLOTS));
 
 	/* ---- M17 results line ---- */

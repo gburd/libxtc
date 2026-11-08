@@ -6,7 +6,6 @@
  */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -408,8 +407,8 @@ test_demand_waker_wake_now(const MunitParameter p[], void *d)
 
 struct pr_ctx {
 	xtc_chan_mpsc_t *c;
-	_Atomic uint64_t sent, recvd;
-	_Atomic int stop, done, bad;
+	uint64_t sent, recvd;
+	int stop, done, bad;
 };
 
 XTC_PREEMPTIBLE static void
@@ -425,19 +424,19 @@ pr_producer(void *arg)
 		 * (same loop, but the send can be preempted after its slot
 		 * store) may receive it before try_send returns, and its exit
 		 * test compares recvd with sent. */
-		atomic_store(&x->sent, seq + 1);
+		xtc_atomic_store_u64(&x->sent, seq + 1, xtc_mo_seq_cst);
 		if (xtc_chan_mpsc_try_send(x->c, (void *)(uintptr_t)(seq + 1))
 		    == XTC_OK)
 			seq++;
 		else
-			atomic_store(&x->sent, seq);
+			xtc_atomic_store_u64(&x->sent, seq, xtc_mo_seq_cst);
 		if ((++k & 63) == 0) {
 			xtc_yield();
 			now = xtc_clock_mono();
 		}
 	}
 	(void)xtc_preempt_disarm();
-	atomic_store(&x->stop, 1);
+	xtc_atomic_store_i32(&x->stop, 1, xtc_mo_seq_cst);
 }
 
 XTC_PREEMPTIBLE static void
@@ -450,13 +449,16 @@ pr_consumer(void *arg)
 		xtc_proc_critical_enter();
 		while (xtc_chan_mpsc_try_recv(x->c, &v) == XTC_OK) {
 			if ((uintptr_t)v != want)
-				atomic_store(&x->bad, 1);   /* FIFO broken */
+				xtc_atomic_store_i32(&x->bad, 1,
+				    xtc_mo_seq_cst); /* FIFO broken */
 			want++;
-			atomic_store(&x->recvd, want - 1);
+			xtc_atomic_store_u64(&x->recvd, want - 1,
+			    xtc_mo_seq_cst);
 		}
 		xtc_proc_critical_leave();
-		if (atomic_load(&x->stop)
-		    && atomic_load(&x->recvd) == atomic_load(&x->sent))
+		if (xtc_atomic_load_i32(&x->stop, xtc_mo_seq_cst) &&
+		    xtc_atomic_load_u64(&x->recvd, xtc_mo_seq_cst) ==
+		        xtc_atomic_load_u64(&x->sent, xtc_mo_seq_cst))
 			break;
 		xtc_yield();
 	}
@@ -468,13 +470,15 @@ pr_watchdog(void *arg)
 	struct pr_ctx *x = arg;
 	uint64_t last = 0, cur;
 	int stall = 0;
-	while (!atomic_load(&x->done)) {
+	while (!xtc_atomic_load_i32(&x->done, xtc_mo_seq_cst)) {
 		usleep(100000);
-		cur = atomic_load(&x->recvd);
+		cur = xtc_atomic_load_u64(&x->recvd, xtc_mo_seq_cst);
 		if (cur == last && ++stall >= 30) {
-			fprintf(stderr, "mpsc_involuntary_preempt: HANG, no "
+			fprintf(stderr,
+			    "mpsc_involuntary_preempt: HANG, no "
 			    "message received for 3 s (sent=%llu recvd=%llu)\n",
-			    (unsigned long long)atomic_load(&x->sent),
+			    (unsigned long long)xtc_atomic_load_u64(&x->sent,
+			        xtc_mo_seq_cst),
 			    (unsigned long long)cur);
 			abort();
 		}
@@ -522,14 +526,15 @@ test_mpsc_involuntary_preempt(const MunitParameter p[], void *d)
 	    NULL, NULL), ==, XTC_OK);
 	munit_assert_int(pthread_create(&w, NULL, pr_watchdog, &x), ==, 0);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	atomic_store(&x.done, 1);
+	xtc_atomic_store_i32(&x.done, 1, xtc_mo_seq_cst);
 	(void)pthread_join(w, NULL);
 	(void)xtc_preempt_set_involuntary(0);
-	munit_assert_int(atomic_load(&x.bad), ==, 0);
-	munit_assert_uint64(atomic_load(&x.recvd), ==, atomic_load(&x.sent));
-	munit_assert_uint64(atomic_load(&x.sent), >, 0);
+	munit_assert_int(xtc_atomic_load_i32(&x.bad, xtc_mo_seq_cst), ==, 0);
+	munit_assert_uint64(xtc_atomic_load_u64(&x.recvd, xtc_mo_seq_cst), ==,
+	    xtc_atomic_load_u64(&x.sent, xtc_mo_seq_cst));
+	munit_assert_uint64(xtc_atomic_load_u64(&x.sent, xtc_mo_seq_cst), >, 0);
 	munit_logf(MUNIT_LOG_INFO, "sent=recvd=%llu",
-	    (unsigned long long)atomic_load(&x.sent));
+	    (unsigned long long)xtc_atomic_load_u64(&x.sent, xtc_mo_seq_cst));
 	(void)xtc_exec_fini(e);
 	xtc_chan_mpsc_destroy(x.c);
 	return MUNIT_OK;

@@ -12,7 +12,6 @@
  *	true no-cooperation preemption is Phase 2.
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -24,9 +23,9 @@
 #include "xtc_async.h"
 #include "xtc_preempt.h"
 
-static atomic_int  g_peer_progress;   /* co-located fibers' work */
-static atomic_int  g_compute_done;
-static atomic_long g_yields;          /* times the compute fiber yielded */
+static int g_peer_progress; /* co-located fibers' work */
+static int g_compute_done;
+static long g_yields; /* times the compute fiber yielded */
 static volatile uint64_t g_sink;
 
 /* A long compute fiber: burns CPU, calling xtc_yield_if_due() each
@@ -43,10 +42,9 @@ compute(void *arg)
 			acc += (k ^ (k << 1)) + (acc >> 3);
 		g_sink += acc;
 		if (xtc_yield_if_due())
-			atomic_fetch_add_explicit(&g_yields, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_long(&g_yields, 1, xtc_mo_relaxed);
 	}
-	atomic_fetch_add_explicit(&g_compute_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_compute_done, 1, xtc_mo_relaxed);
 }
 
 /* A peer fiber: does a little work + yields cooperatively, repeatedly,
@@ -56,9 +54,8 @@ static void
 peer(void *arg)
 {
 	(void)arg;
-	while (!atomic_load_explicit(&g_compute_done, memory_order_relaxed)) {
-		atomic_fetch_add_explicit(&g_peer_progress, 1,
-		    memory_order_relaxed);
+	while (!xtc_atomic_load_i32(&g_compute_done, xtc_mo_relaxed)) {
+		xtc_atomic_fetch_add_i32(&g_peer_progress, 1, xtc_mo_relaxed);
 		xtc_yield();
 	}
 }
@@ -76,9 +73,9 @@ test_p1_timeslice(const MunitParameter p[], void *d)
 		return MUNIT_OK;
 	}
 
-	atomic_store(&g_peer_progress, 0);
-	atomic_store(&g_compute_done, 0);
-	atomic_store(&g_yields, 0);
+	xtc_atomic_store_i32(&g_peer_progress, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_compute_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_yields, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);   /* single loop */
 	l = xtc_exec_loop(e, 0);
@@ -102,9 +99,12 @@ test_p1_timeslice(const MunitParameter p[], void *d)
 	 * Without timer preemption + no manual budget, compute would run
 	 * each 3M-iter chunk to completion between yields, but it DOES
 	 * yield_if_due every chunk -- with the timer, those yields fire. */
-	munit_assert_int(atomic_load(&g_compute_done), ==, 1);
-	munit_assert_long(atomic_load(&g_yields), >, 0);        /* timer sliced it */
-	munit_assert_int(atomic_load(&g_peer_progress), >, 0);  /* peers ran */
+	munit_assert_int(xtc_atomic_load_i32(&g_compute_done, xtc_mo_seq_cst),
+	    ==, 1);
+	munit_assert_long(xtc_atomic_load_long(&g_yields, xtc_mo_seq_cst), >,
+	    0); /* timer sliced it */
+	munit_assert_int(xtc_atomic_load_i32(&g_peer_progress, xtc_mo_seq_cst),
+	    >, 0); /* peers ran */
 
 	(void)xtc_exec_fini(e);
 	return MUNIT_OK;

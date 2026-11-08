@@ -29,7 +29,6 @@
  */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
@@ -65,9 +64,9 @@ static void sync_dict(void *dst, const void *src, size_t sz)
  * ===================================================================== */
 
 static xtc_lrlock_t   *g_lr;
-static _Atomic int     g_reader_saw_inconsistent;
-static _Atomic int     g_writer_released;
-static _Atomic int     g_reader_done;
+static int g_reader_saw_inconsistent;
+static int g_writer_released;
+static int g_reader_done;
 
 static void *
 publish_writer_thread(void *arg)
@@ -84,7 +83,7 @@ publish_writer_thread(void *arg)
 		xtc_lrlock_publish(g_lr);     /* trips post_swap injection */
 		xtc_lrlock_write_end(g_lr);
 	}
-	atomic_store(&g_writer_released, 1);
+	xtc_atomic_store_i32(&g_writer_released, 1, xtc_mo_seq_cst);
 	return NULL;
 }
 
@@ -100,9 +99,10 @@ publish_reader_thread(void *arg)
 	 * post-publish (200) value -- never torn/garbage.  Because the
 	 * swap already happened, we expect the new value. */
 	if (r->n < 1 || (r->items[0] != 100 && r->items[0] != 200))
-		atomic_fetch_add(&g_reader_saw_inconsistent, 1);
+		xtc_atomic_fetch_add_i32(&g_reader_saw_inconsistent, 1,
+		    xtc_mo_seq_cst);
 	xtc_lrlock_read_end(g_lr);
-	atomic_store(&g_reader_done, 1);
+	xtc_atomic_store_i32(&g_reader_done, 1, xtc_mo_seq_cst);
 	return NULL;
 }
 
@@ -114,9 +114,9 @@ test_lrlock_publish_drain_window(const MunitParameter p[], void *d)
 	int spins;
 	(void)p; (void)d;
 
-	atomic_store(&g_reader_saw_inconsistent, 0);
-	atomic_store(&g_writer_released, 0);
-	atomic_store(&g_reader_done, 0);
+	xtc_atomic_store_i32(&g_reader_saw_inconsistent, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_writer_released, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_reader_done, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_lrlock_create(sizeof(struct dict), apply_set,
 	    sync_dict, "inj", &g_lr), ==, XTC_OK);
@@ -143,11 +143,14 @@ test_lrlock_publish_drain_window(const MunitParameter p[], void *d)
 
 	/* Let the reader complete its read while the writer is paused. */
 	for (spins = 0; spins < 100000 &&
-	    atomic_load(&g_reader_done) == 0; spins++)
+	     xtc_atomic_load_i32(&g_reader_done, xtc_mo_seq_cst) == 0;
+	     spins++)
 		sched_yield();
 
 	/* The writer must still be parked (drain not yet run). */
-	munit_assert_int(atomic_load(&g_writer_released), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_writer_released,
+	                     xtc_mo_seq_cst),
+	    ==, 0);
 
 	/* Release the writer; it drains and finishes. */
 	munit_assert_int(xtc_inject_wakeup("lrlock.publish.post_swap"),
@@ -157,8 +160,12 @@ test_lrlock_publish_drain_window(const MunitParameter p[], void *d)
 	pthread_join(wr, NULL);
 	(void)xtc_inject_detach("lrlock.publish.post_swap");
 
-	munit_assert_int(atomic_load(&g_reader_saw_inconsistent), ==, 0);
-	munit_assert_int(atomic_load(&g_writer_released), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_reader_saw_inconsistent,
+	                     xtc_mo_seq_cst),
+	    ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_writer_released,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
 
 	/* Final state is the published value. */
 	{
@@ -186,23 +193,28 @@ test_lrlock_publish_drain_window(const MunitParameter p[], void *d)
  * ===================================================================== */
 
 static xtc_lwlock_t    g_lw;
-static _Atomic int     g_lw_holders;       /* must never exceed 1 (excl) */
-static _Atomic int     g_lw_max_holders;
-static _Atomic int     g_lwA_acquired;
-static _Atomic int     g_lwA_reached;      /* A hit the injection point */
-static _Atomic int     g_lwA_release;      /* main lets A past the point */
+static int g_lw_holders; /* must never exceed 1 (excl) */
+static int g_lw_max_holders;
+static int g_lwA_acquired;
+static int g_lwA_reached; /* A hit the injection point */
+static int g_lwA_release; /* main lets A past the point */
 static _Thread_local int g_is_thread_A;
 
 static void
 note_acquire(void)
 {
-	int h = atomic_fetch_add(&g_lw_holders, 1) + 1;
-	int prev = atomic_load(&g_lw_max_holders);
+	int h = xtc_atomic_fetch_add_i32(&g_lw_holders, 1, xtc_mo_seq_cst) + 1;
+	int prev = xtc_atomic_load_i32(&g_lw_max_holders, xtc_mo_seq_cst);
 	while (h > prev &&
-	    !atomic_compare_exchange_weak(&g_lw_max_holders, &prev, h))
+	    !xtc_atomic_cas_weak_i32(&g_lw_max_holders, &prev, h,
+	        xtc_mo_seq_cst, xtc_mo_seq_cst))
 		;
 }
-static void note_release(void) { atomic_fetch_sub(&g_lw_holders, 1); }
+static void
+note_release(void)
+{
+	xtc_atomic_fetch_sub_i32(&g_lw_holders, 1, xtc_mo_seq_cst);
+}
 
 /* Callback on lwlock.acquire.pre_cas.  Blocks only thread A, and only
  * its first arrival, so B (main) passes through freely. */
@@ -211,8 +223,9 @@ lw_pre_cas_cb(const char *name, void *user)
 {
 	(void)name; (void)user;
 	if (!g_is_thread_A) return;
-	if (atomic_exchange(&g_lwA_reached, 1) != 0) return;  /* once */
-	while (atomic_load(&g_lwA_release) == 0)
+	if (xtc_atomic_exchange_i32(&g_lwA_reached, 1, xtc_mo_seq_cst) != 0)
+		return; /* once */
+	while (xtc_atomic_load_i32(&g_lwA_release, xtc_mo_seq_cst) == 0)
 		sched_yield();
 }
 
@@ -225,7 +238,7 @@ lw_acquirer_A(void *arg)
 	munit_assert_int(xtc_lwlock_acquire(&g_lw, XTC_LW_EXCLUSIVE),
 	    ==, XTC_OK);
 	note_acquire();
-	atomic_store(&g_lwA_acquired, 1);
+	xtc_atomic_store_i32(&g_lwA_acquired, 1, xtc_mo_seq_cst);
 	note_release();
 	xtc_lwlock_release(&g_lw);
 	return NULL;
@@ -239,11 +252,11 @@ test_lwlock_contended_cas_retry(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	munit_assert_int(xtc_lwlock_init(&g_lw, 0), ==, XTC_OK);
-	atomic_store(&g_lw_holders, 0);
-	atomic_store(&g_lw_max_holders, 0);
-	atomic_store(&g_lwA_acquired, 0);
-	atomic_store(&g_lwA_reached, 0);
-	atomic_store(&g_lwA_release, 0);
+	xtc_atomic_store_i32(&g_lw_holders, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_lw_max_holders, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_lwA_acquired, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_lwA_reached, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_lwA_release, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_inject_attach("lwlock.acquire.pre_cas",
 	    lw_pre_cas_cb, NULL), ==, XTC_OK);
@@ -252,24 +265,28 @@ test_lwlock_contended_cas_retry(const MunitParameter p[], void *d)
 
 	/* Wait until A is parked at the pre-CAS window. */
 	for (spins = 0; spins < 2000000 &&
-	    atomic_load(&g_lwA_reached) == 0; spins++)
+	     xtc_atomic_load_i32(&g_lwA_reached, xtc_mo_seq_cst) == 0;
+	     spins++)
 		sched_yield();
-	munit_assert_int(atomic_load(&g_lwA_reached), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_lwA_reached, xtc_mo_seq_cst),
+	    ==, 1);
 
 	/* B (main) takes the lock exclusively, changing state under A.
 	 * B also passes through pre_cas, but the callback lets it by. */
 	munit_assert_int(xtc_lwlock_acquire(&g_lw, XTC_LW_EXCLUSIVE),
 	    ==, XTC_OK);
 	note_acquire();
-	munit_assert_int(atomic_load(&g_lwA_acquired), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_lwA_acquired, xtc_mo_seq_cst),
+	    ==, 0);
 
 	/* Release A past the injection point: its stale-`expected` CAS
 	 * fails and it falls through to block because B holds exclusive. */
-	atomic_store(&g_lwA_release, 1);
+	xtc_atomic_store_i32(&g_lwA_release, 1, xtc_mo_seq_cst);
 
 	/* A must remain blocked while B still holds the lock. */
 	for (spins = 0; spins < 200000; spins++) sched_yield();
-	munit_assert_int(atomic_load(&g_lwA_acquired), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_lwA_acquired, xtc_mo_seq_cst),
+	    ==, 0);
 
 	/* B releases; A now acquires. */
 	note_release();
@@ -277,9 +294,11 @@ test_lwlock_contended_cas_retry(const MunitParameter p[], void *d)
 	pthread_join(a, NULL);
 	(void)xtc_inject_detach("lwlock.acquire.pre_cas");
 
-	munit_assert_int(atomic_load(&g_lwA_acquired), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_lwA_acquired, xtc_mo_seq_cst),
+	    ==, 1);
 	/* The core invariant: exclusive mode never had two holders. */
-	munit_assert_int(atomic_load(&g_lw_max_holders), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_lw_max_holders, xtc_mo_seq_cst),
+	    ==, 1);
 
 	xtc_lwlock_destroy(&g_lw);
 	return MUNIT_OK;

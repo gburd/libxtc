@@ -13,7 +13,6 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <stdatomic.h>
 
 #include "pbt_common.h"
 #include "deque.h"
@@ -27,9 +26,9 @@
 
 struct th_ctx {
 	xtc_deque_t   *q;
-	_Atomic int   *got;       /* per-item received count */
+	int *got; /* per-item received count */
 	int            n_items;
-	_Atomic int   *done;       /* signals end of producer */
+	int *done;                 /* signals end of producer */
 	int            taken;      /* per-thread accounting */
 };
 
@@ -40,8 +39,7 @@ __thief(void *p)
 	for (;;) {
 		void *v = xtc_deque_steal(c->q);
 		if (v == NULL) {
-			if (atomic_load_explicit(c->done,
-			    memory_order_acquire)) {
+			if (xtc_atomic_load_i32(c->done, xtc_mo_acquire)) {
 				/* Producer done; one final attempt. */
 				int i;
 				for (i = 0; i < 100; i++) {
@@ -53,8 +51,8 @@ __thief(void *p)
 				continue;        /* retry */
 			}
 		}
-		atomic_fetch_add_explicit(&c->got[(int)(intptr_t)v - 1], 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&c->got[(int)(intptr_t)v - 1], 1,
+		    xtc_mo_relaxed);
 		c->taken++;
 	}
 	return NULL;
@@ -69,13 +67,13 @@ prop_pop_steal_partition(hegel_test_case *tc, void *u)
 	int n_items, n_thieves, i;
 	pthread_t *th;
 	struct th_ctx *ctxs;
-	_Atomic int *got;
-	_Atomic int done;
+	int *got;
+	int done;
 	int owner_took = 0;
 	(void)u;
 
 	xtc_deque_init(&q);
-	atomic_store_explicit(&done, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&done, 0, xtc_mo_relaxed);
 
 	/* Hegel-drawn parameters.  Keep within deque capacity. */
 	n_items   = (int)hegel_draw_int(tc, hegel_integers(1, XTC_DEQUE_CAP));
@@ -100,16 +98,16 @@ prop_pop_steal_partition(hegel_test_case *tc, void *u)
 	for (;;) {
 		void *v = xtc_deque_pop(&q);
 		if (v == NULL) break;
-		atomic_fetch_add_explicit(&got[(int)(intptr_t)v - 1], 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&got[(int)(intptr_t)v - 1], 1,
+		    xtc_mo_relaxed);
 		owner_took++;
 	}
-	atomic_store_explicit(&done, 1, memory_order_release);
+	xtc_atomic_store_i32(&done, 1, xtc_mo_release);
 	for (i = 0; i < n_thieves; i++) hegel_assume(pthread_join(th[i], NULL) == 0);
 
 	/* Linearizability: every item delivered exactly once. */
 	for (i = 0; i < n_items; i++) {
-		int s = atomic_load_explicit(&got[i], memory_order_relaxed);
+		int s = xtc_atomic_load_i32(&got[i], xtc_mo_relaxed);
 		hegel_assume(s == 1);
 	}
 

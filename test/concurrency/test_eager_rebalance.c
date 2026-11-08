@@ -40,7 +40,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <unistd.h>
 #include "xtc.h"
 #include "xtc_exec.h"
@@ -52,9 +51,9 @@
 #define WORKERS   64
 #define WORK_YIELDS 20
 
-static atomic_int g_workers_done;
+static int g_workers_done;
 static xtc_exec_t *g_exec;
-static atomic_int g_backoff;   /* set steal_backoff on the run's exec */
+static int g_backoff; /* set steal_backoff on the run's exec */
 
 /* A migratable worker: a short yielding compute loop.  The yields are
  * the park points at which its coro can be stolen onto another loop. */
@@ -70,7 +69,7 @@ worker(void *arg)
 		xtc_yield();
 	}
 	(void)spin;	/* read it: gcc 16 -Wunused-but-set-variable */
-	atomic_fetch_add_explicit(&g_workers_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_workers_done, 1, xtc_mo_relaxed);
 }
 
 /* A parker: parks on a long sleep so its loop has n_alive > 0 (not
@@ -112,8 +111,8 @@ watcher(void *arg)
 {
 	(void)arg;
 	for (;;) {
-		if (atomic_load_explicit(&g_workers_done,
-		    memory_order_relaxed) >= WORKERS)
+		if (xtc_atomic_load_i32(&g_workers_done, xtc_mo_relaxed) >=
+		    WORKERS)
 			break;
 		(void)xtc_proc_sleep(2 * 1000 * 1000);   /* 2ms poll */
 	}
@@ -128,13 +127,14 @@ run_once(int eager)
 	uint64_t total_steals = 0;
 	int i;
 
-	atomic_store(&g_workers_done, 0);
+	xtc_atomic_store_i32(&g_workers_done, 0, xtc_mo_seq_cst);
 	if (xtc_exec_init(&e, LOOPS) != XTC_OK)
 		return (uint64_t)-1;
 	g_exec = e;
 	xtc_exec_set_service_mode(e, 1);         /* stop only via _stop */
 	xtc_exec_set_eager_rebalance(e, eager);
-	xtc_exec_set_steal_backoff(e, atomic_load(&g_backoff));
+	xtc_exec_set_steal_backoff(e,
+	    xtc_atomic_load_i32(&g_backoff, xtc_mo_seq_cst));
 
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), spawner, e, NULL, NULL);
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), watcher, NULL, NULL, NULL);
@@ -259,10 +259,10 @@ main(void)
 	 * backoff must never starve pending work.  run_once returns
 	 * (uint64_t)-1 on a run error / non-completion.
 	 */
-	atomic_store(&g_backoff, 1);
+	xtc_atomic_store_i32(&g_backoff, 1, xtc_mo_seq_cst);
 	{
 		uint64_t bk = run_once(1);
-		atomic_store(&g_backoff, 0);
+		xtc_atomic_store_i32(&g_backoff, 0, xtc_mo_seq_cst);
 		if (bk == (uint64_t)-1) {
 			printf("FAIL: run with steal_backoff did not complete "
 			    "(work starved?)\n");

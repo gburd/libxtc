@@ -17,7 +17,6 @@
  *	One of the cells guarded by scripts/perf-gate.sh.
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,8 +36,8 @@ typedef struct req {
 static int g_loops, g_cpl, g_iters, g_same;
 static xtc_pid_t g_owner[MAX_LOOPS];
 static uint64_t g_counter[MAX_LOOPS];
-static _Atomic int g_ready, g_done;
-static _Atomic uint64_t g_total;
+static int g_ready, g_done;
+static uint64_t g_total;
 
 static void
 owner_proc(void *arg)
@@ -72,7 +71,7 @@ client_proc(void *arg)
 	req_t r;
 
 	r.from = xtc_self();
-	while (atomic_load(&g_ready) == 0)
+	while (xtc_atomic_load_i32(&g_ready, xtc_mo_seq_cst) == 0)
 		(void)xtc_proc_sleep(1000000);
 	tgt = g_same ? me % g_loops : (me + 1) % g_loops;
 	for (i = 0; i < g_iters; i++) {
@@ -82,8 +81,9 @@ client_proc(void *arg)
 			;
 		xtc_free(m);
 	}
-	atomic_fetch_add(&g_total, (uint64_t)g_iters);
-	if (atomic_fetch_add(&g_done, 1) + 1 == g_loops * g_cpl)
+	xtc_atomic_fetch_add_u64(&g_total, (uint64_t)g_iters, xtc_mo_seq_cst);
+	if (xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_seq_cst) + 1 ==
+	    g_loops * g_cpl)
 		for (i = 0; i < g_loops; i++)
 			(void)xtc_send(g_owner[i], "x", 1);
 }
@@ -120,15 +120,18 @@ main(int argc, char **argv)
 			    NULL) != XTC_OK)
 				return 1;
 	t0 = xtc_clock_mono();
-	atomic_store(&g_ready, 1);
+	xtc_atomic_store_i32(&g_ready, 1, xtc_mo_seq_cst);
 	(void)xtc_exec_run(e);
 	t1 = xtc_clock_mono();
-	per = (double)atomic_load(&g_total) / (double)(g_loops * g_cpl);
+	per = (double)xtc_atomic_load_u64(&g_total, xtc_mo_seq_cst) /
+	    (double)(g_loops * g_cpl);
 	printf("loops=%d clients=%d same=%d hops=%llu ns_per_hop_wall=%.0f "
-	    "hops_per_s=%.0f\n", g_loops, g_loops * g_cpl, g_same,
-	    (unsigned long long)atomic_load(&g_total),
+	       "hops_per_s=%.0f\n",
+	    g_loops, g_loops * g_cpl, g_same,
+	    (unsigned long long)xtc_atomic_load_u64(&g_total, xtc_mo_seq_cst),
 	    (double)(t1 - t0) / per,
-	    (double)atomic_load(&g_total) * 1e9 / (double)(t1 - t0));
+	    (double)xtc_atomic_load_u64(&g_total, xtc_mo_seq_cst) * 1e9 /
+	        (double)(t1 - t0));
 	(void)xtc_exec_fini(e);
 	return 0;
 }

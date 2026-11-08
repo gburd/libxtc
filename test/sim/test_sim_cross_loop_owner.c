@@ -31,7 +31,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_exec.h"
@@ -43,7 +42,7 @@
 #define N_WORKERS  16
 #define N_ITERS    24
 
-static atomic_int g_done;
+static int g_done;
 
 static void
 worker(void *arg)
@@ -60,7 +59,7 @@ worker(void *arg)
 		 * DIAGNOSTIC sim-mode owner check. */
 		xtc_yield();
 	}
-	atomic_fetch_add(&g_done, 1);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -86,7 +85,7 @@ run_seed(uint64_t seed)
 {
 	xtc_exec_t *e = NULL;
 	int rc;
-	atomic_store(&g_done, 0);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	xtc_sim_sched_pessimal(500);   /* 50% pessimal (starve/monopolize) */
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), spawner, e, NULL, NULL);
@@ -100,9 +99,10 @@ run_seed(uint64_t seed)
 		    (unsigned long long)seed, rc);
 		return -1;
 	}
-	if (atomic_load(&g_done) != N_WORKERS) {
+	if (xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst) != N_WORKERS) {
 		printf("FAIL: seed %llu -- %d/%d workers done\n",
-		    (unsigned long long)seed, atomic_load(&g_done), N_WORKERS);
+		    (unsigned long long)seed,
+		    xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst), N_WORKERS);
 		return -1;
 	}
 	return 0;

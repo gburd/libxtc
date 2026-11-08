@@ -18,7 +18,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -33,10 +32,10 @@
 #define PAYLOAD 0xC0DE
 
 static xtc_reg_t  *g_reg;
-static atomic_int   g_received;    /* subscribers that got the broadcast */
-static atomic_int   g_bad;         /* wrong payload (bug) */
-static atomic_int   g_ready;       /* subscribers that have joined */
-static atomic_int   g_sent_count;  /* what xtc_pg_send reported */
+static int g_received;   /* subscribers that got the broadcast */
+static int g_bad;        /* wrong payload (bug) */
+static int g_ready;      /* subscribers that have joined */
+static int g_sent_count; /* what xtc_pg_send reported */
 
 /* Subscriber: join the group, then wait for the broadcast. */
 static void
@@ -45,14 +44,13 @@ subscriber(void *arg)
 	(void)arg;
 	void *m = NULL; size_t n = 0;
 	(void)xtc_pg_join(g_reg, "topic", xtc_self());
-	atomic_fetch_add_explicit(&g_ready, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_ready, 1, xtc_mo_relaxed);
 	if (xtc_recv(&m, &n, 2000LL * 1000 * 1000) == XTC_OK) {
 		if (n == sizeof(int) && *(int *)m == PAYLOAD)
-			atomic_fetch_add_explicit(&g_received, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_received, 1,
+			    xtc_mo_relaxed);
 		else
-			atomic_fetch_add_explicit(&g_bad, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_bad, 1, xtc_mo_relaxed);
 	}
 	if (m) xtc_free(m);
 }
@@ -64,10 +62,10 @@ publisher(void *arg)
 	(void)arg;
 	int payload = PAYLOAD;
 	int n;
-	while (atomic_load_explicit(&g_ready, memory_order_relaxed) < N_SUBS)
+	while (xtc_atomic_load_i32(&g_ready, xtc_mo_relaxed) < N_SUBS)
 		xtc_yield();
 	n = xtc_pg_send(g_reg, "topic", &payload, sizeof payload);
-	atomic_store_explicit(&g_sent_count, n, memory_order_relaxed);
+	xtc_atomic_store_i32(&g_sent_count, n, xtc_mo_relaxed);
 }
 
 static int
@@ -77,10 +75,10 @@ run_pg(uint64_t seed, int *out_recv, int *out_bad, int *out_sent,
 	xtc_exec_t *e = NULL;
 	int i, rc;
 
-	atomic_store(&g_received, 0);
-	atomic_store(&g_bad, 0);
-	atomic_store(&g_ready, 0);
-	atomic_store(&g_sent_count, 0);
+	xtc_atomic_store_i32(&g_received, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ready, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_sent_count, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	if (xtc_reg_create(&g_reg) != XTC_OK) {
@@ -93,9 +91,9 @@ run_pg(uint64_t seed, int *out_recv, int *out_bad, int *out_sent,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_recv = atomic_load(&g_received);
-	*out_bad = atomic_load(&g_bad);
-	*out_sent = atomic_load(&g_sent_count);
+	*out_recv = xtc_atomic_load_i32(&g_received, xtc_mo_seq_cst);
+	*out_bad = xtc_atomic_load_i32(&g_bad, xtc_mo_seq_cst);
+	*out_sent = xtc_atomic_load_i32(&g_sent_count, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_reg_destroy(g_reg);
 	g_reg = NULL;

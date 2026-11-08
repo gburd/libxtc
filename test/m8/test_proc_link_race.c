@@ -20,7 +20,6 @@
 
 #define _GNU_SOURCE
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -34,7 +33,7 @@
 #define N_LINKERS 64        /* linker procs spread across the loops */
 #define N_ROUNDS  40        /* children each linker races per run */
 
-static atomic_int g_done;   /* linkers that finished */
+static int g_done; /* linkers that finished */
 static xtc_exec_t *g_exec;
 
 /* A child that exits the instant it runs -- so a cross-loop link/monitor
@@ -76,7 +75,7 @@ linker_proc(void *arg)
 			free(m);
 		}
 	}
-	atomic_fetch_add(&g_done, 1);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -85,7 +84,7 @@ test_link_race(const MunitParameter p[], void *d)
 	int i;
 	(void)p; (void)d;
 
-	atomic_store(&g_done, 0);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_exec_init(&g_exec, N_LOOPS), ==, XTC_OK);
 	for (i = 0; i < N_LINKERS; i++) {
 		xtc_loop_t *l = xtc_exec_loop(g_exec, i % N_LOOPS);
@@ -99,7 +98,8 @@ test_link_race(const MunitParameter p[], void *d)
 
 	/* Every linker ran to completion (the run drained without a crash
 	 * or a sanitizer abort on the freed peer struct). */
-	munit_assert_int(atomic_load(&g_done), ==, N_LINKERS);
+	munit_assert_int(xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst), ==,
+	    N_LINKERS);
 	return MUNIT_OK;
 }
 

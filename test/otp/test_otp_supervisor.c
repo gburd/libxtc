@@ -26,7 +26,6 @@
  */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,16 +41,16 @@
 
 /* ----- Helpers ------------------------------------------------- */
 
-static _Atomic int g_a_spawns;
-static _Atomic int g_b_spawns;
-static _Atomic int g_c_spawns;
+static int g_a_spawns;
+static int g_b_spawns;
+static int g_c_spawns;
 
 static void
 proc_a(void *arg)
 {
 	void *m; size_t sz;
 	int crashes = (int)(intptr_t)arg;
-	int n = atomic_fetch_add(&g_a_spawns, 1) + 1;
+	int n = xtc_atomic_fetch_add_i32(&g_a_spawns, 1, xtc_mo_seq_cst) + 1;
 	if (n <= crashes) {
 		(void)xtc_recv(&m, &sz, 20 * 1000 * 1000);
 		if (m) __os_free(m);
@@ -68,7 +67,7 @@ proc_b_endless(void *arg)
 {
 	void *m; size_t sz;
 	(void)arg;
-	atomic_fetch_add(&g_b_spawns, 1);
+	xtc_atomic_fetch_add_i32(&g_b_spawns, 1, xtc_mo_seq_cst);
 	for (;;) {
 		(void)xtc_recv(&m, &sz, 200 * 1000 * 1000);
 		if (m) __os_free(m);
@@ -80,7 +79,7 @@ proc_c_endless(void *arg)
 {
 	void *m; size_t sz;
 	(void)arg;
-	atomic_fetch_add(&g_c_spawns, 1);
+	xtc_atomic_fetch_add_i32(&g_c_spawns, 1, xtc_mo_seq_cst);
 	for (;;) {
 		(void)xtc_recv(&m, &sz, 200 * 1000 * 1000);
 		if (m) __os_free(m);
@@ -95,7 +94,8 @@ watcher(void *arg)
 {
 	void *m; size_t sz;
 	(void)arg;
-	while (atomic_load(&g_a_spawns) < g_target_a_spawns) {
+	while (xtc_atomic_load_i32(&g_a_spawns, xtc_mo_seq_cst) <
+	    g_target_a_spawns) {
 		(void)xtc_recv(&m, &sz, 5 * 1000 * 1000);
 		if (m) __os_free(m);
 	}
@@ -116,8 +116,8 @@ test_one_for_one_basic(const MunitParameter p[], void *d)
 	xtc_child_spec_t kids[2];
 	xtc_pid_t wpid;
 	(void)p; (void)d;
-	atomic_store(&g_a_spawns, 0);
-	atomic_store(&g_b_spawns, 0);
+	xtc_atomic_store_i32(&g_a_spawns, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_b_spawns, 0, xtc_mo_seq_cst);
 	g_target_a_spawns = 3;
 	opts.strategy = XTC_SUP_ONE_FOR_ONE;
 	opts.max_restarts = 5;
@@ -141,8 +141,10 @@ test_one_for_one_basic(const MunitParameter p[], void *d)
 
 	/* A was restarted twice (3 spawns total).
 	 * B was started once and never restarted (one_for_one isolates). */
-	munit_assert_int(atomic_load(&g_a_spawns), ==, 3);
-	munit_assert_int(atomic_load(&g_b_spawns), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_a_spawns, xtc_mo_seq_cst), ==,
+	    3);
+	munit_assert_int(xtc_atomic_load_i32(&g_b_spawns, xtc_mo_seq_cst), ==,
+	    1);
 	munit_assert_int(xtc_sup_join(sup, 1000LL * 1000 * 1000), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
@@ -161,8 +163,8 @@ test_one_for_all(const MunitParameter p[], void *d)
 	xtc_child_spec_t kids[2];
 	xtc_pid_t wpid;
 	(void)p; (void)d;
-	atomic_store(&g_a_spawns, 0);
-	atomic_store(&g_b_spawns, 0);
+	xtc_atomic_store_i32(&g_a_spawns, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_b_spawns, 0, xtc_mo_seq_cst);
 	g_target_a_spawns = 2;
 	opts.strategy = XTC_SUP_ONE_FOR_ALL;
 	opts.max_restarts = 5;
@@ -187,8 +189,10 @@ test_one_for_all(const MunitParameter p[], void *d)
 	/* A: 2 spawns (initial + 1 restart).
 	 * B: at least 2 spawns (one_for_all killed and restarted it
 	 *    when A died). */
-	munit_assert_int(atomic_load(&g_a_spawns), ==, 2);
-	munit_assert_int(atomic_load(&g_b_spawns), >=, 2);
+	munit_assert_int(xtc_atomic_load_i32(&g_a_spawns, xtc_mo_seq_cst), ==,
+	    2);
+	munit_assert_int(xtc_atomic_load_i32(&g_b_spawns, xtc_mo_seq_cst), >=,
+	    2);
 	munit_assert_int(xtc_sup_join(sup, 1000LL * 1000 * 1000), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
@@ -220,8 +224,8 @@ test_rest_for_one(const MunitParameter p[], void *d)
 	xtc_child_spec_t kids[3];
 	xtc_pid_t wpid;
 	(void)p; (void)d;
-	atomic_store(&g_a_spawns, 0);
-	atomic_store(&g_c_spawns, 0);
+	xtc_atomic_store_i32(&g_a_spawns, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_c_spawns, 0, xtc_mo_seq_cst);
 
 	opts.strategy = XTC_SUP_REST_FOR_ONE;
 	opts.max_restarts = 5;
@@ -248,8 +252,10 @@ test_rest_for_one(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
 	/* All children spawned exactly once (no crashes triggered). */
-	munit_assert_int(atomic_load(&g_a_spawns), ==, 2);   /* A + B both call proc_a */
-	munit_assert_int(atomic_load(&g_c_spawns), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_a_spawns, xtc_mo_seq_cst), ==,
+	    2); /* A + B both call proc_a */
+	munit_assert_int(xtc_atomic_load_i32(&g_c_spawns, xtc_mo_seq_cst), ==,
+	    1);
 	munit_assert_int(xtc_sup_join(sup, 1000LL * 1000 * 1000), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
@@ -258,13 +264,13 @@ test_rest_for_one(const MunitParameter p[], void *d)
 /* ----- supervisor_SUITE: abnormal_termination + restart -------- */
 
 /* Permanent child: even normal exit triggers restart. */
-static _Atomic int g_perm_spawns;
+static int g_perm_spawns;
 
 static void
 perm_proc(void *arg)
 {
 	(void)arg;
-	atomic_fetch_add(&g_perm_spawns, 1);
+	xtc_atomic_fetch_add_i32(&g_perm_spawns, 1, xtc_mo_seq_cst);
 	/* Return normally. */
 }
 
@@ -273,7 +279,7 @@ perm_watcher(void *arg)
 {
 	xtc_supervisor_t *sup = arg;
 	void *m; size_t sz;
-	while (atomic_load(&g_perm_spawns) < 3) {
+	while (xtc_atomic_load_i32(&g_perm_spawns, xtc_mo_seq_cst) < 3) {
 		(void)xtc_recv(&m, &sz, 5 * 1000 * 1000);
 		if (m) __os_free(m);
 	}
@@ -289,7 +295,7 @@ test_permanent_restarts_on_normal_exit(const MunitParameter p[], void *d)
 	xtc_child_spec_t kids[1];
 	xtc_pid_t wpid;
 	(void)p; (void)d;
-	atomic_store(&g_perm_spawns, 0);
+	xtc_atomic_store_i32(&g_perm_spawns, 0, xtc_mo_seq_cst);
 	opts.max_restarts = 10;
 	opts.period_ns = 1000LL * 1000 * 1000;
 
@@ -303,7 +309,8 @@ test_permanent_restarts_on_normal_exit(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, perm_watcher, sup, NULL, &wpid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_perm_spawns), >=, 3);
+	munit_assert_int(xtc_atomic_load_i32(&g_perm_spawns, xtc_mo_seq_cst),
+	    >=, 3);
 	munit_assert_int(xtc_sup_join(sup, 1000LL * 1000 * 1000), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
@@ -312,13 +319,13 @@ test_permanent_restarts_on_normal_exit(const MunitParameter p[], void *d)
 /* ----- supervisor_SUITE: temporary_bystander -------------------- */
 
 /* TEMPORARY child never restarts even on abnormal exit. */
-static _Atomic int g_temp_spawns;
+static int g_temp_spawns;
 
 static void
 temp_proc(void *arg)
 {
 	(void)arg;
-	atomic_fetch_add(&g_temp_spawns, 1);
+	xtc_atomic_fetch_add_i32(&g_temp_spawns, 1, xtc_mo_seq_cst);
 	xtc_exit_self(99);
 }
 
@@ -341,7 +348,7 @@ test_temporary_no_restart(const MunitParameter p[], void *d)
 	xtc_child_spec_t kids[1];
 	xtc_pid_t wpid;
 	(void)p; (void)d;
-	atomic_store(&g_temp_spawns, 0);
+	xtc_atomic_store_i32(&g_temp_spawns, 0, xtc_mo_seq_cst);
 	memset(kids, 0, sizeof kids);
 	kids[0].size = sizeof kids[0];
 	kids[0].name = "temp"; kids[0].fn = temp_proc;
@@ -352,7 +359,8 @@ test_temporary_no_restart(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, temp_watcher, sup, NULL, &wpid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_temp_spawns), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_temp_spawns, xtc_mo_seq_cst),
+	    ==, 1);
 	munit_assert_int(xtc_sup_join(sup, 1000LL * 1000 * 1000), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
@@ -360,10 +368,15 @@ test_temporary_no_restart(const MunitParameter p[], void *d)
 
 /* ----- supervisor_SUITE: multiple_restarts hits intensity ------- */
 
-static _Atomic int g_flap_count;
+static int g_flap_count;
 
 static void
-fast_flap(void *arg) { (void)arg; atomic_fetch_add(&g_flap_count, 1); xtc_exit_self(1); }
+fast_flap(void *arg)
+{
+	(void)arg;
+	xtc_atomic_fetch_add_i32(&g_flap_count, 1, xtc_mo_seq_cst);
+	xtc_exit_self(1);
+}
 
 static MunitResult
 test_intensity_exceeded(const MunitParameter p[], void *d)
@@ -373,7 +386,7 @@ test_intensity_exceeded(const MunitParameter p[], void *d)
 	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
 	xtc_child_spec_t kids[1];
 	(void)p; (void)d;
-	atomic_store(&g_flap_count, 0);
+	xtc_atomic_store_i32(&g_flap_count, 0, xtc_mo_seq_cst);
 	opts.max_restarts = 3;
 	opts.period_ns = 5LL * 1000 * 1000 * 1000;
 
@@ -387,7 +400,8 @@ test_intensity_exceeded(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
 	munit_assert_int(xtc_sup_alive(sup), ==, 0);
-	munit_assert_int(atomic_load(&g_flap_count), <=, opts.max_restarts + 2);
+	munit_assert_int(xtc_atomic_load_i32(&g_flap_count, xtc_mo_seq_cst), <=,
+	    opts.max_restarts + 2);
 	munit_assert_int(xtc_sup_join(sup, 1000LL * 1000 * 1000), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
@@ -440,14 +454,14 @@ test_count_children(const MunitParameter p[], void *d)
 
 /* ----- supervisor_SUITE phase-2: scale + hanging restart ------- */
 
-static _Atomic int g_endless_alive;
+static int g_endless_alive;
 
 static void
 endless_with_counter(void *arg)
 {
 	void *m; size_t sz;
 	(void)arg;
-	atomic_fetch_add(&g_endless_alive, 1);
+	xtc_atomic_fetch_add_i32(&g_endless_alive, 1, xtc_mo_seq_cst);
 	for (;;) {
 		int rc = xtc_recv(&m, &sz, 200LL * 1000 * 1000);
 		if (rc == XTC_OK && m) __os_free(m);
@@ -476,7 +490,7 @@ test_scale_start_stop_many(const MunitParameter p[], void *d)
 	xtc_pid_t wpid;
 	int i;
 	(void)p; (void)d;
-	atomic_store(&g_endless_alive, 0);
+	xtc_atomic_store_i32(&g_endless_alive, 0, xtc_mo_seq_cst);
 	memset(kids, 0, sizeof kids);
 	for (i = 0; i < 50; i++) {
 		kids[i].size = sizeof kids[i];
@@ -492,7 +506,8 @@ test_scale_start_stop_many(const MunitParameter p[], void *d)
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_join(sup, 2000LL * 1000 * 1000), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_endless_alive), ==, 50);
+	munit_assert_int(xtc_atomic_load_i32(&g_endless_alive, xtc_mo_seq_cst),
+	    ==, 50);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
 }
@@ -501,13 +516,13 @@ test_scale_start_stop_many(const MunitParameter p[], void *d)
  * causing the supervisor to keep restarting until intensity is hit
  * and the supervisor itself dies.  Verify n_restarts is bounded. */
 
-static _Atomic int g_quick_exit_count;
+static int g_quick_exit_count;
 
 static void
 quick_exit_worker(void *arg)
 {
 	(void)arg;
-	atomic_fetch_add(&g_quick_exit_count, 1);
+	xtc_atomic_fetch_add_i32(&g_quick_exit_count, 1, xtc_mo_seq_cst);
 	/* Return immediately (which the supervisor sees as a normal
 	 * exit and -- because policy is permanent -- restarts). */
 }
@@ -521,7 +536,7 @@ test_hanging_restart_loop(const MunitParameter p[], void *d)
 	xtc_child_spec_t kids[1];
 	int n_restarts;
 	(void)p; (void)d;
-	atomic_store(&g_quick_exit_count, 0);
+	xtc_atomic_store_i32(&g_quick_exit_count, 0, xtc_mo_seq_cst);
 	opts.max_restarts = 5;
 	opts.period_ns = 5LL * 1000 * 1000 * 1000;
 	memset(kids, 0, sizeof kids);
@@ -537,9 +552,12 @@ test_hanging_restart_loop(const MunitParameter p[], void *d)
 	n_restarts = xtc_sup_n_restarts(sup);
 	/* Bounded: at most max_restarts + a small slack for race. */
 	munit_assert_int(n_restarts, <=, opts.max_restarts + 2);
-	munit_assert_int(atomic_load(&g_quick_exit_count), >=, 1);
-	munit_assert_int(atomic_load(&g_quick_exit_count), <=,
-	    opts.max_restarts + 3);
+	munit_assert_int(xtc_atomic_load_i32(&g_quick_exit_count,
+	                     xtc_mo_seq_cst),
+	    >=, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_quick_exit_count,
+	                     xtc_mo_seq_cst),
+	    <=, opts.max_restarts + 3);
 	munit_assert_int(xtc_sup_join(sup, 1000LL * 1000 * 1000), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
@@ -548,14 +566,14 @@ test_hanging_restart_loop(const MunitParameter p[], void *d)
 /* count_restarting_children: while children are restarting, the
  * n_children API should still report the configured count. */
 
-static _Atomic int g_oneshot_starts;
+static int g_oneshot_starts;
 
 static void
 slow_oneshot(void *arg)
 {
 	void *m; size_t sz;
 	(void)arg;
-	atomic_fetch_add(&g_oneshot_starts, 1);
+	xtc_atomic_fetch_add_i32(&g_oneshot_starts, 1, xtc_mo_seq_cst);
 	(void)xtc_recv(&m, &sz, 30LL * 1000 * 1000);
 	if (m) __os_free(m);
 	/* exit normally -- supervisor will restart if permanent */
@@ -581,7 +599,7 @@ test_count_restarting_children(const MunitParameter p[], void *d)
 	xtc_pid_t wpid;
 	int i;
 	(void)p; (void)d;
-	atomic_store(&g_oneshot_starts, 0);
+	xtc_atomic_store_i32(&g_oneshot_starts, 0, xtc_mo_seq_cst);
 	opts.max_restarts = 100;
 	opts.period_ns = 5LL * 1000 * 1000 * 1000;
 	memset(kids, 0, sizeof kids);
@@ -603,7 +621,8 @@ test_count_restarting_children(const MunitParameter p[], void *d)
 	 * count is stable. */
 	munit_assert_int(xtc_sup_n_children(sup), ==, 3);
 	/* Each child started at least once. */
-	munit_assert_int(atomic_load(&g_oneshot_starts), >=, 3);
+	munit_assert_int(xtc_atomic_load_i32(&g_oneshot_starts, xtc_mo_seq_cst),
+	    >=, 3);
 	munit_assert_int(xtc_sup_join(sup, 2000LL * 1000 * 1000), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;

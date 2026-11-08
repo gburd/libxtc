@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -52,19 +51,19 @@
 
 /* ---- PART A: linked / monitored workers + a seeded reaper ---- */
 
-static atomic_int  g_exit_seen;    /* 'E' link-exit signals observed */
-static atomic_int  g_down_seen;    /* 'D' monitor-DOWN signals observed */
-static atomic_long g_evt_hash;     /* order-sensitive fold of observations */
-static atomic_int  g_victim_idx;   /* which worker the reaper picked */
-static atomic_long g_victim_time;  /* virtual time (ns) the kill fired */
+static int g_exit_seen;    /* 'E' link-exit signals observed */
+static int g_down_seen;    /* 'D' monitor-DOWN signals observed */
+static long g_evt_hash;    /* order-sensitive fold of observations */
+static int g_victim_idx;   /* which worker the reaper picked */
+static long g_victim_time; /* virtual time (ns) the kill fired */
 
 static void
 fold(long v)
 {
-	long h = atomic_load_explicit(&g_evt_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_evt_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(v + 11));
-	atomic_store_explicit(&g_evt_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_evt_hash, h, xtc_mo_relaxed);
 }
 
 static int
@@ -123,7 +122,7 @@ observer(void *arg)
 	/* Await the 'E' link-exit signal (bounded). */
 	if (xtc_recv_match(match_exit, NULL, &m, &n,
 	    100 * 1000 * 1000LL) == XTC_OK && m != NULL) {
-		atomic_fetch_add_explicit(&g_exit_seen, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_exit_seen, 1, xtc_mo_relaxed);
 		fold(1);
 		free(m);
 		m = NULL;
@@ -131,7 +130,7 @@ observer(void *arg)
 	/* Await the 'D' monitor DOWN (bounded). */
 	if (xtc_recv_match(match_down, NULL, &m, &n,
 	    100 * 1000 * 1000LL) == XTC_OK && m != NULL) {
-		atomic_fetch_add_explicit(&g_down_seen, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_down_seen, 1, xtc_mo_relaxed);
 		fold(2);
 		free(m);
 	}
@@ -157,8 +156,8 @@ reaper(void *arg)
 
 	(void)xtc_proc_sleep(delay);
 	(void)__xtc_sim_vclock(&now);
-	atomic_store_explicit(&g_victim_idx, victim, memory_order_relaxed);
-	atomic_store_explicit(&g_victim_time, now, memory_order_relaxed);
+	xtc_atomic_store_i32(&g_victim_idx, victim, xtc_mo_relaxed);
+	xtc_atomic_store_long(&g_victim_time, now, xtc_mo_relaxed);
 	(void)xtc_exit_pid(ra->workers[victim], 99 /* killed */);
 }
 
@@ -183,11 +182,11 @@ run_part_a(uint64_t seed, int *out_exit, int *out_down, long *out_hash,
 	xtc_exec_t *e = NULL;
 	int i, rc;
 
-	atomic_store(&g_exit_seen, 0);
-	atomic_store(&g_down_seen, 0);
-	atomic_store(&g_evt_hash, 0);
-	atomic_store(&g_victim_idx, -1);
-	atomic_store(&g_victim_time, -1);
+	xtc_atomic_store_i32(&g_exit_seen, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_down_seen, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_evt_hash, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_victim_idx, -1, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_victim_time, -1, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
 		return -1;
@@ -216,20 +215,20 @@ run_part_a(uint64_t seed, int *out_exit, int *out_down, long *out_hash,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_exit = atomic_load(&g_exit_seen);
-	*out_down = atomic_load(&g_down_seen);
-	*out_hash = atomic_load(&g_evt_hash);
+	*out_exit = xtc_atomic_load_i32(&g_exit_seen, xtc_mo_seq_cst);
+	*out_down = xtc_atomic_load_i32(&g_down_seen, xtc_mo_seq_cst);
+	*out_hash = xtc_atomic_load_long(&g_evt_hash, xtc_mo_seq_cst);
 	if (out_state != NULL)
 		*out_state = xtc_sim_state_hash(e);
-	*out_victim = atomic_load(&g_victim_idx);
-	*out_time = atomic_load(&g_victim_time);
+	*out_victim = xtc_atomic_load_i32(&g_victim_idx, xtc_mo_seq_cst);
+	*out_time = xtc_atomic_load_long(&g_victim_time, xtc_mo_seq_cst);
 	(void)xtc_exec_fini(e);
 	return rc;
 }
 
 /* ---- PART B: a supervisor whose seeded child is killed mid-run ---- */
 
-static atomic_int  g_kid_spawns;   /* total child (re)spawns */
+static int g_kid_spawns; /* total child (re)spawns */
 static xtc_supervisor_t *g_sup;
 static int g_kill_kid;             /* seeded child index to kill */
 static xtc_pid_t g_kid_pids[N_KIDS];
@@ -245,8 +244,7 @@ kid(void *arg)
 	int idx = (int)(intptr_t)arg;
 	int n;
 	g_kid_pids[idx] = xtc_self();
-	n = atomic_fetch_add_explicit(&g_kid_spawns, 1,
-	    memory_order_relaxed) + 1;
+	n = xtc_atomic_fetch_add_i32(&g_kid_spawns, 1, xtc_mo_relaxed) + 1;
 	(void)n;
 	for (;;) {
 		void *m = NULL;
@@ -291,7 +289,7 @@ run_part_b(uint64_t seed, int *out_restarts, int *out_spawns,
 	xtc_child_spec_t kids[N_KIDS];
 	int i, rc;
 
-	atomic_store(&g_kid_spawns, 0);
+	xtc_atomic_store_i32(&g_kid_spawns, 0, xtc_mo_seq_cst);
 	g_sup = NULL;
 	for (i = 0; i < N_KIDS; i++)
 		g_kid_pids[i] = (xtc_pid_t){0};
@@ -332,7 +330,7 @@ run_part_b(uint64_t seed, int *out_restarts, int *out_spawns,
 
 	if (out_restarts != NULL)
 		*out_restarts = g_sup != NULL ? xtc_sup_n_restarts(g_sup) : -1;
-	*out_spawns = atomic_load(&g_kid_spawns);
+	*out_spawns = xtc_atomic_load_i32(&g_kid_spawns, xtc_mo_seq_cst);
 	if (out_state != NULL)
 		*out_state = xtc_sim_state_hash(e);
 
@@ -351,8 +349,8 @@ run_part_b(uint64_t seed, int *out_restarts, int *out_spawns,
  * FoundationDB's node-incarnation (creation) guarantee, integrated with
  * the machine-death model rather than a separate subsystem. ---- */
 
-static atomic_int  g_reboot_ok;      /* 1 if the incarnation guarantee held */
-static atomic_int  g_reboot_rx;      /* messages the replacement received */
+static int g_reboot_ok; /* 1 if the incarnation guarantee held */
+static int g_reboot_rx; /* messages the replacement received */
 
 static void
 reboot_child(void *arg)
@@ -362,7 +360,7 @@ reboot_child(void *arg)
 	 * while the OLD (stale) pid does not. */
 	void *m = NULL; size_t n = 0;
 	if (xtc_recv(&m, &n, 50 * 1000 * 1000LL) == XTC_OK && m != NULL) {
-		atomic_fetch_add(&g_reboot_rx, 1);
+		xtc_atomic_fetch_add_i32(&g_reboot_rx, 1, xtc_mo_seq_cst);
 		xtc_free(m);
 	}
 }
@@ -378,7 +376,9 @@ reboot_driver(void *arg)
 	/* Spawn a child, capture its pid, kill it, and wait for it to be
 	 * reaped (monitor DOWN). */
 	if (xtc_proc_spawn(l, reboot_child, NULL, NULL, &old_pid) != XTC_OK) {
-		atomic_store(&g_reboot_ok, 0); (void)xtc_exec_stop(e); return;
+		xtc_atomic_store_i32(&g_reboot_ok, 0, xtc_mo_seq_cst);
+		(void)xtc_exec_stop(e);
+		return;
 	}
 	(void)xtc_monitor(old_pid, NULL);
 	(void)xtc_exit_pid(old_pid, 9);   /* kill it */
@@ -410,7 +410,7 @@ reboot_driver(void *arg)
 	if (xtc_send(old_pid, &msg, sizeof msg) == XTC_OK)
 		ok = 0;
 
-	atomic_store(&g_reboot_ok, ok);
+	xtc_atomic_store_i32(&g_reboot_ok, ok, xtc_mo_seq_cst);
 	(void)xtc_exec_stop(e);
 }
 
@@ -419,15 +419,17 @@ run_part_c(uint64_t seed, int *out_ok, int *out_rx, uint64_t *out_state)
 {
 	xtc_exec_t *e = NULL;
 	int rc;
-	atomic_store(&g_reboot_ok, -1);
-	atomic_store(&g_reboot_rx, 0);
+	xtc_atomic_store_i32(&g_reboot_ok, -1, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_reboot_rx, 0, xtc_mo_seq_cst);
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
 		return -1;
 	xtc_exec_set_service_mode(e, 1);
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), reboot_driver, e, NULL, NULL);
 	rc = xtc_sim_exec_run(e, seed, 5000000);
-	if (out_ok)    *out_ok = atomic_load(&g_reboot_ok);
-	if (out_rx)    *out_rx = atomic_load(&g_reboot_rx);
+	if (out_ok)
+		*out_ok = xtc_atomic_load_i32(&g_reboot_ok, xtc_mo_seq_cst);
+	if (out_rx)
+		*out_rx = xtc_atomic_load_i32(&g_reboot_rx, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	(void)xtc_exec_fini(e);
 	return rc;

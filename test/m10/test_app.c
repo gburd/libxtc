@@ -6,7 +6,6 @@
  */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 
@@ -16,14 +15,14 @@
 #include "xtc_proc.h"
 #include "xtc_int.h"
 
-static _Atomic int g_kid_ran;
+static int g_kid_ran;
 
 static void
 kid_proc(void *arg)
 {
 	void *m; size_t s;
 	(void)arg;
-	atomic_fetch_add_explicit(&g_kid_ran, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_kid_ran, 1, xtc_mo_relaxed);
 	(void)xtc_recv(&m, &s, 50 * 1000 * 1000);
 	if (m) __os_free(m);
 }
@@ -36,7 +35,7 @@ driver_proc(void *arg)
 {
 	void *m; size_t s;
 	(void)arg;
-	while (atomic_load_explicit(&g_kid_ran, memory_order_relaxed) < 1) {
+	while (xtc_atomic_load_i32(&g_kid_ran, xtc_mo_relaxed) < 1) {
 		(void)xtc_recv(&m, &s, 5 * 1000 * 1000);
 		if (m) __os_free(m);
 	}
@@ -53,7 +52,7 @@ test_app_basic(const MunitParameter p[], void *d)
 	xtc_pid_t dpid;
 	(void)p; (void)d;
 
-	atomic_store(&g_kid_ran, 0);
+	xtc_atomic_store_i32(&g_kid_ran, 0, xtc_mo_seq_cst);
 	opts.name = "test_app";
 	sup_opts.max_restarts = 5;
 	sup_opts.period_ns    = 1000LL * 1000 * 1000;
@@ -74,7 +73,8 @@ test_app_basic(const MunitParameter p[], void *d)
 	    NULL, &dpid), ==, XTC_OK);
 	munit_assert_int(xtc_app_run(a), ==, XTC_OK);
 
-	munit_assert_int(atomic_load(&g_kid_ran), >=, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_kid_ran, xtc_mo_seq_cst), >=,
+	    1);
 	munit_assert_null(xtc_app_exec(a));   /* single-loop: no executor */
 	xtc_app_destroy(a);
 	return MUNIT_OK;
@@ -84,10 +84,10 @@ test_app_basic(const MunitParameter p[], void *d)
 #include "xtc_exec.h"
 
 struct mlctx {
-	_Atomic int seen[4];      /* loop id each placed worker observed */
-	_Atomic int reported;     /* workers that recorded their loop */
-	_Atomic int crash;        /* crasher entries */
-	_Atomic int restarted;    /* crasher's post-restart run reached */
+	int seen[4];   /* loop id each placed worker observed */
+	int reported;  /* workers that recorded their loop */
+	int crash;     /* crasher entries */
+	int restarted; /* crasher's post-restart run reached */
 };
 static struct mlctx g_ml;
 static xtc_app_t   *g_ml_app;
@@ -97,8 +97,9 @@ ml_worker(void *arg)
 {
 	int i = (int)(intptr_t)arg;
 	if (i >= 0 && i < 4)
-		atomic_store(&g_ml.seen[i], xtc_exec_loop_id());
-	atomic_fetch_add(&g_ml.reported, 1);
+		xtc_atomic_store_i32(&g_ml.seen[i], xtc_exec_loop_id(),
+		    xtc_mo_seq_cst);
+	xtc_atomic_fetch_add_i32(&g_ml.reported, 1, xtc_mo_seq_cst);
 	/* TEMPORARY child: just exit (no restart). */
 }
 
@@ -107,9 +108,9 @@ ml_crasher(void *arg)
 {
 	void *m; size_t s;
 	(void)arg;
-	if (atomic_fetch_add(&g_ml.crash, 1) == 0)
+	if (xtc_atomic_fetch_add_i32(&g_ml.crash, 1, xtc_mo_seq_cst) == 0)
 		xtc_exit_self(1);          /* abnormal -> PERMANENT restart */
-	atomic_store(&g_ml.restarted, 1);
+	xtc_atomic_store_i32(&g_ml.restarted, 1, xtc_mo_seq_cst);
 	(void)xtc_recv(&m, &s, 60LL * 1000 * 1000);
 	if (m) __os_free(m);
 }
@@ -119,8 +120,8 @@ ml_driver(void *arg)
 {
 	void *m; size_t s;
 	(void)arg;
-	while (atomic_load(&g_ml.reported) < 4 ||
-	       atomic_load(&g_ml.restarted) < 1) {
+	while (xtc_atomic_load_i32(&g_ml.reported, xtc_mo_seq_cst) < 4 ||
+	    xtc_atomic_load_i32(&g_ml.restarted, xtc_mo_seq_cst) < 1) {
 		(void)xtc_recv(&m, &s, 5LL * 1000 * 1000);
 		if (m) __os_free(m);
 	}
@@ -139,7 +140,8 @@ test_app_multiloop(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	memset(&g_ml, 0, sizeof g_ml);
-	for (i = 0; i < 4; i++) atomic_store(&g_ml.seen[i], -1);
+	for (i = 0; i < 4; i++)
+		xtc_atomic_store_i32(&g_ml.seen[i], -1, xtc_mo_seq_cst);
 
 	opts.name = "test_ml";
 	opts.n_loops = 4;
@@ -179,13 +181,15 @@ test_app_multiloop(const MunitParameter p[], void *d)
 	 * (__xtc_current_loop cleared), i.e. the app stopped early; the
 	 * [0,3] bound still catches that. */
 	for (i = 0; i < 4; i++) {
-		int lid = atomic_load(&g_ml.seen[i]);
+		int lid = xtc_atomic_load_i32(&g_ml.seen[i], xtc_mo_seq_cst);
 		munit_assert_int(lid, >=, 0);
 		munit_assert_int(lid, <=, 3);
 	}
 	/* The crasher crashed once and was restarted (cross-loop). */
-	munit_assert_int(atomic_load(&g_ml.crash), >=, 2);
-	munit_assert_int(atomic_load(&g_ml.restarted), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_ml.crash, xtc_mo_seq_cst), >=,
+	    2);
+	munit_assert_int(xtc_atomic_load_i32(&g_ml.restarted, xtc_mo_seq_cst),
+	    ==, 1);
 	xtc_app_destroy(a);
 	return MUNIT_OK;
 }
@@ -199,8 +203,8 @@ test_app_multiloop(const MunitParameter p[], void *d)
 
 #define MS (1000LL * 1000)
 
-static _Atomic int g_dr_hook_done;   /* at-exit hooks that COMPLETED */
-static _Atomic int g_dr_started;     /* children that reached their body */
+static int g_dr_hook_done; /* at-exit hooks that COMPLETED */
+static int g_dr_started;   /* children that reached their body */
 
 /* Wait for the drain request; return (the cooperative exit). */
 static void
@@ -208,7 +212,7 @@ dr_polite(void *arg)
 {
 	void *m; size_t s;
 	(void)arg;
-	atomic_fetch_add(&g_dr_started, 1);
+	xtc_atomic_fetch_add_i32(&g_dr_started, 1, xtc_mo_seq_cst);
 	for (;;) {
 		if (xtc_recv(&m, &s, -1) != XTC_OK) continue;
 		if (xtc_app_is_shutdown_msg(m, s)) { __os_free(m); return; }
@@ -224,7 +228,7 @@ dr_slow_hook(void *arg)
 {
 	(void)arg;
 	(void)xtc_proc_sleep(30 * MS);
-	atomic_fetch_add(&g_dr_hook_done, 1);
+	xtc_atomic_fetch_add_i32(&g_dr_hook_done, 1, xtc_mo_seq_cst);
 }
 
 /* Ignores the drain request (throws the message away). */
@@ -234,7 +238,7 @@ dr_deaf(void *arg)
 	void *m; size_t s;
 	(void)arg;
 	(void)xtc_proc_at_exit(dr_slow_hook, NULL);
-	atomic_fetch_add(&g_dr_started, 1);
+	xtc_atomic_fetch_add_i32(&g_dr_started, 1, xtc_mo_seq_cst);
 	for (;;)
 		if (xtc_recv(&m, &s, -1) == XTC_OK) __os_free(m);
 }
@@ -245,7 +249,7 @@ dr_masked(void *arg)
 {
 	(void)arg;
 	(void)xtc_mask_enter();
-	atomic_fetch_add(&g_dr_started, 1);
+	xtc_atomic_fetch_add_i32(&g_dr_started, 1, xtc_mo_seq_cst);
 	for (;;)
 		(void)xtc_proc_sleep(5 * MS);
 }
@@ -273,7 +277,7 @@ static void *
 dr_thread(void *arg)
 {
 	struct dr_run *r = arg;
-	while (atomic_load(&g_dr_started) < r->n_kids)
+	while (xtc_atomic_load_i32(&g_dr_started, xtc_mo_seq_cst) < r->n_kids)
 		(void)xtc_sleep_ns(1 * MS);
 	r->rc = xtc_app_shutdown(r->app, r->drain_ns, r->force_ns, &r->rep);
 	return NULL;
@@ -286,8 +290,8 @@ dr_go(struct dr_run *r, xtc_child_spec_t *kids, int n, int n_loops)
 	xtc_app_drain_report_t init = XTC_APP_DRAIN_REPORT_INIT;
 	pthread_t th;
 
-	atomic_store(&g_dr_hook_done, 0);
-	atomic_store(&g_dr_started, 0);
+	xtc_atomic_store_i32(&g_dr_hook_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_dr_started, 0, xtc_mo_seq_cst);
 	opts.no_tuning_check = 1;
 	opts.n_loops = n_loops;
 	r->n_kids = n;
@@ -345,7 +349,8 @@ test_app_shutdown_forces(const MunitParameter p[], void *d)
 	munit_assert_int(r.rep.n_forced, ==, 1);
 	munit_assert_int(r.rep.n_survivors, ==, 0);
 	munit_assert_uint64(r.rep.forced_mask, ==, 1u << 1);
-	munit_assert_int(atomic_load(&g_dr_hook_done), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_dr_hook_done, xtc_mo_seq_cst),
+	    ==, 1);
 	munit_assert_int64(r.rep.elapsed_ns, >=, 100 * MS);
 	xtc_app_destroy(r.app);
 	return MUNIT_OK;
@@ -408,7 +413,9 @@ test_app_shutdown_multiloop(const MunitParameter p[], void *d)
 	munit_assert_uint64(r.rep.survivor_mask & (1u << 2), ==, 0);
 	/* Deaf child: forced means its (parking) hook finished. */
 	if (r.rep.forced_mask & (1u << 1))
-		munit_assert_int(atomic_load(&g_dr_hook_done), ==, 1);
+		munit_assert_int(xtc_atomic_load_i32(&g_dr_hook_done,
+		                     xtc_mo_seq_cst),
+		    ==, 1);
 	else
 		munit_assert_uint64(r.rep.survivor_mask & (1u << 1), !=, 0);
 	munit_assert_int64(r.rep.elapsed_ns, <, 400 * MS + 250 * MS);
@@ -473,7 +480,7 @@ static void
 sig_sender(void *arg)
 {
 	(void)arg;
-	while (atomic_load(&g_dr_started) < 2)
+	while (xtc_atomic_load_i32(&g_dr_started, xtc_mo_seq_cst) < 2)
 		(void)xtc_proc_sleep(1 * MS);
 	(void)kill(getpid(), SIGTERM);
 }
@@ -489,8 +496,8 @@ test_app_drain_on_sigterm(const MunitParameter p[], void *d)
 	xtc_pid_t spid;
 	(void)p; (void)d;
 
-	atomic_store(&g_dr_hook_done, 0);
-	atomic_store(&g_dr_started, 0);
+	xtc_atomic_store_i32(&g_dr_hook_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_dr_started, 0, xtc_mo_seq_cst);
 	g_sig_rep = init;
 	opts.no_tuning_check = 1;
 	dr_spec(&kids[0], dr_polite, XTC_RESTART_PERMANENT);
@@ -509,7 +516,8 @@ test_app_drain_on_sigterm(const MunitParameter p[], void *d)
 	munit_assert_int(g_sig_rep.n_drained, ==, 1);
 	munit_assert_int(g_sig_rep.n_forced, ==, 1);
 	munit_assert_int(g_sig_rep.n_survivors, ==, 0);
-	munit_assert_int(atomic_load(&g_dr_hook_done), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_dr_hook_done, xtc_mo_seq_cst),
+	    ==, 1);
 	xtc_app_destroy(a);
 	munit_assert_int(sigaction(SIGTERM, NULL, &after), ==, 0);
 	/* Compare as function pointers: munit_assert_ptr converts to void *,
@@ -544,7 +552,7 @@ test_app_drain_on_sigterm(const MunitParameter p[], void *d)
  * the time xtc_app_run returns.  Before the fix the supervisor called
  * xtc_exec_stop right after sending the kills, so the executor stopped
  * while the hooks were still sleeping: hooks_done < 3 when run returned. */
-static _Atomic int g_ex_started, g_ex_hooks_done;
+static int g_ex_started, g_ex_hooks_done;
 static xtc_app_t *g_ex_app;
 
 static void
@@ -552,7 +560,7 @@ ex_slow_hook(void *a)
 {
 	(void)a;
 	(void)xtc_proc_sleep(50LL * 1000 * 1000);
-	atomic_fetch_add(&g_ex_hooks_done, 1);
+	xtc_atomic_fetch_add_i32(&g_ex_hooks_done, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -562,7 +570,7 @@ ex_child(void *a)
 	size_t n;
 	(void)a;
 	(void)xtc_proc_at_exit(ex_slow_hook, NULL);
-	atomic_fetch_add(&g_ex_started, 1);
+	xtc_atomic_fetch_add_i32(&g_ex_started, 1, xtc_mo_seq_cst);
 	for (;;) {
 		(void)xtc_recv(&m, &n, 100LL * 1000 * 1000);
 		if (m != NULL) { xtc_free(m); m = NULL; }
@@ -573,7 +581,7 @@ static void
 ex_driver(void *a)
 {
 	(void)a;
-	while (atomic_load(&g_ex_started) < 3)
+	while (xtc_atomic_load_i32(&g_ex_started, xtc_mo_seq_cst) < 3)
 		(void)xtc_proc_sleep(5LL * 1000 * 1000);
 	(void)xtc_app_stop(g_ex_app);
 }
@@ -587,8 +595,8 @@ test_app_stop_waits_cleanup_multiloop(const MunitParameter p[], void *d)
 	int i;
 	(void)p; (void)d;
 
-	atomic_store(&g_ex_started, 0);
-	atomic_store(&g_ex_hooks_done, 0);
+	xtc_atomic_store_i32(&g_ex_started, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ex_hooks_done, 0, xtc_mo_seq_cst);
 	opts.name = "test_ex";
 	opts.n_loops = 4;
 	memset(kids, 0, sizeof kids);
@@ -605,7 +613,8 @@ test_app_stop_waits_cleanup_multiloop(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(xtc_app_loop(a), ex_driver, NULL, NULL,
 	    NULL), ==, XTC_OK);
 	munit_assert_int(xtc_app_run(a), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_ex_hooks_done), ==, 3);
+	munit_assert_int(xtc_atomic_load_i32(&g_ex_hooks_done, xtc_mo_seq_cst),
+	    ==, 3);
 	xtc_app_destroy(a);
 	return MUNIT_OK;
 }
@@ -617,21 +626,22 @@ test_app_stop_waits_cleanup_multiloop(const MunitParameter p[], void *d)
  * holds our (local_id, gen) -- the part a 2.1 pid could not tell apart.
  * aeq_by is that bystander: it counts messages it receives and records
  * whether it exited normally (a kill aimed at the wrong proc stops it). */
-static _Atomic int g_aeq_stop, g_aeq_by_msgs, g_aeq_by_normal;
+static int g_aeq_stop, g_aeq_by_msgs, g_aeq_by_normal;
 static void
 aeq_by(void *arg)
 {
 	void *m;
 	size_t s;
 	(void)arg;
-	while (!atomic_load(&g_aeq_stop)) {
+	while (!xtc_atomic_load_i32(&g_aeq_stop, xtc_mo_seq_cst)) {
 		m = NULL;
 		if (xtc_recv(&m, &s, 1000000) == XTC_OK) {
-			atomic_fetch_add(&g_aeq_by_msgs, 1);
+			xtc_atomic_fetch_add_i32(&g_aeq_by_msgs, 1,
+			    xtc_mo_seq_cst);
 			xtc_free(m);
 		}
 	}
-	atomic_fetch_add(&g_aeq_by_normal, 1);
+	xtc_atomic_fetch_add_i32(&g_aeq_by_normal, 1, xtc_mo_seq_cst);
 }
 static void *
 aeq_loop_thread(void *arg)
@@ -645,9 +655,9 @@ static void
 aeq_by_start(xtc_loop_t **b, xtc_pid_t *by, int n, pthread_t *th)
 {
 	int i;
-	atomic_store(&g_aeq_stop, 0);
-	atomic_store(&g_aeq_by_msgs, 0);
-	atomic_store(&g_aeq_by_normal, 0);
+	xtc_atomic_store_i32(&g_aeq_stop, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_aeq_by_msgs, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_aeq_by_normal, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(b), ==, XTC_OK);
 	for (i = 0; i < n; i++)
 		munit_assert_int(xtc_proc_spawn(*b, aeq_by, NULL, NULL, &by[i]),
@@ -693,16 +703,19 @@ test_app_shutdown_equal_pid_other_loop(const MunitParameter p[], void *d)
 	r.drain_ns = 50 * MS;
 	r.force_ns = 1000 * MS;
 	dr_go(&r, kids, 1, 1);
-	atomic_store(&g_aeq_stop, 1);
+	xtc_atomic_store_i32(&g_aeq_stop, 1, xtc_mo_seq_cst);
 	munit_assert_int(pthread_join(th, NULL), ==, 0);
 
 	munit_assert_true(aeq_has_equal(by, 8, g_aeq_kid_pid));   /* premise */
-	munit_assert_int(atomic_load(&g_aeq_by_normal), ==, 8);   /* none killed */
-	munit_assert_int(atomic_load(&g_aeq_by_msgs), ==, 0);     /* no stray msg */
+	munit_assert_int(xtc_atomic_load_i32(&g_aeq_by_normal, xtc_mo_seq_cst),
+	    ==, 8); /* none killed */
+	munit_assert_int(xtc_atomic_load_i32(&g_aeq_by_msgs, xtc_mo_seq_cst),
+	    ==, 0); /* no stray msg */
 	munit_assert_int(r.rc, ==, XTC_OK);
 	munit_assert_int(r.rep.n_forced, ==, 1);
 	munit_assert_int(r.rep.n_survivors, ==, 0);
-	munit_assert_int(atomic_load(&g_dr_hook_done), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_dr_hook_done, xtc_mo_seq_cst),
+	    ==, 1);
 	xtc_app_destroy(r.app);
 	munit_assert_int(xtc_loop_fini(lb), ==, XTC_OK);
 	return MUNIT_OK;

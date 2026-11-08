@@ -44,7 +44,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -76,8 +75,8 @@
 
 static bm_t        *g_bm;
 static bt_t        *g_bt;
-static _Atomic int  g_left;
-static _Atomic long g_bad_order, g_skipped, g_errors, g_scans, g_hops;
+static int g_left;
+static long g_bad_order, g_skipped, g_errors, g_scans, g_hops;
 
 static void
 anchor_k(int i, char *k)
@@ -115,7 +114,7 @@ churner(void *arg)
 				xtc_yield();
 		}
 	}
-	(void)atomic_fetch_sub(&g_left, 1);
+	(void)xtc_atomic_fetch_sub_i32(&g_left, 1, xtc_mo_seq_cst);
 }
 
 /* One scan from anchor index `a` (or from the first key if a < 0): at
@@ -137,7 +136,7 @@ one_scan(int a)
 	}
 	next_anchor = a >= 0 ? a : 0;
 	if (bt_cursor_open(g_bt, a >= 0 ? start : NULL, sl, &c) != XTC_OK) {
-		atomic_fetch_add(&g_errors, 1);
+		xtc_atomic_fetch_add_long(&g_errors, 1, xtc_mo_seq_cst);
 		return;
 	}
 	while (rows < SCAN_ROWS) {
@@ -145,14 +144,15 @@ one_scan(int a)
 		if (rc == XTC_E_NOTFOUND)
 			break;
 		if (rc != XTC_OK || kl == 0 || kl >= sizeof prev) {
-			atomic_fetch_add(&g_errors, 1);
+			xtc_atomic_fetch_add_long(&g_errors, 1, xtc_mo_seq_cst);
 			break;
 		}
 		if (pl != 0) {
 			uint16_t ml = kl < pl ? kl : pl;
 			int cmpv = memcmp(prev, k, ml);
 			if (cmpv > 0 || (cmpv == 0 && pl >= kl))
-				atomic_fetch_add(&g_bad_order, 1);
+				xtc_atomic_fetch_add_long(&g_bad_order, 1,
+				    xtc_mo_seq_cst);
 		}
 		memcpy(prev, k, kl);
 		pl = kl;
@@ -160,12 +160,14 @@ one_scan(int a)
 		if (kl == 7 && ((const char *)k)[6] == '0') {
 			int idx = atoi((const char *)k + 1) / 10;
 			if (idx != next_anchor)
-				atomic_fetch_add(&g_skipped, 1);
+				xtc_atomic_fetch_add_long(&g_skipped, 1,
+				    xtc_mo_seq_cst);
 			next_anchor = idx + 1;
 		}
 		if (++rows % 3 == 0) {
 			if (bt_cursor_park(c) != XTC_OK) {
-				atomic_fetch_add(&g_errors, 1);
+				xtc_atomic_fetch_add_long(&g_errors, 1,
+				    xtc_mo_seq_cst);
 				break;
 			}
 			/* Every other park stays parked across a yield, so the
@@ -173,14 +175,15 @@ one_scan(int a)
 			if (rows % 6 == 0)
 				xtc_yield();
 			if (bt_cursor_resume(c) != XTC_OK) {
-				atomic_fetch_add(&g_errors, 1);
+				xtc_atomic_fetch_add_long(&g_errors, 1,
+				    xtc_mo_seq_cst);
 				break;
 			}
 			xtc_yield();
 		}
 	}
 	bt_cursor_close(c);
-	atomic_fetch_add(&g_scans, 1);
+	xtc_atomic_fetch_add_long(&g_scans, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -189,7 +192,9 @@ scanner(void *arg)
 	unsigned s = (unsigned)(uintptr_t)arg;
 	int i;
 
-	for (i = 0; i < SCANS_PER && atomic_load(&g_left) > 0; i++) {
+	for (i = 0;
+	     i < SCANS_PER && xtc_atomic_load_i32(&g_left, xtc_mo_seq_cst) > 0;
+	     i++) {
 		s = s * 1103515245u + 12345u;
 		one_scan((s >> 8) % 8 == 0 ? -1 : (int)((s >> 8) % N_ANCHORS));
 		xtc_yield();
@@ -227,11 +232,11 @@ run_once(uint64_t seed, int adversarial, struct run_out *out)
 	intptr_t w;
 
 	memset(out, 0, sizeof *out);
-	atomic_store(&g_left, N_CHURNERS);
-	atomic_store(&g_bad_order, 0);
-	atomic_store(&g_skipped, 0);
-	atomic_store(&g_errors, 0);
-	atomic_store(&g_scans, 0);
+	xtc_atomic_store_i32(&g_left, N_CHURNERS, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_bad_order, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_skipped, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_errors, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_scans, 0, xtc_mo_seq_cst);
 	if ((fd = mkstemp(path)) < 0)
 		return -1;
 	close(fd);
@@ -310,10 +315,10 @@ run_once(uint64_t seed, int adversarial, struct run_out *out)
 	out->merges = bs.merges;
 	out->shifts_left = bs.shifts_left;
 	out->reissued = ms.reissued;
-	out->bad_order = atomic_load(&g_bad_order);
-	out->skipped = atomic_load(&g_skipped);
-	out->errors = atomic_load(&g_errors);
-	out->scans = atomic_load(&g_scans);
+	out->bad_order = xtc_atomic_load_long(&g_bad_order, xtc_mo_seq_cst);
+	out->skipped = xtc_atomic_load_long(&g_skipped, xtc_mo_seq_cst);
+	out->errors = xtc_atomic_load_long(&g_errors, xtc_mo_seq_cst);
+	out->scans = xtc_atomic_load_long(&g_scans, xtc_mo_seq_cst);
 	out->result = 0xCBF29CE484222325ull;
 	out->result = mix(out->result, (uint64_t)out->missing);
 	out->result = mix(out->result, (uint64_t)out->churn_surv);

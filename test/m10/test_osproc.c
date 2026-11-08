@@ -15,7 +15,6 @@
 #include "xtc_io.h"
 
 #include <signal.h>
-#include <stdatomic.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
@@ -152,7 +151,7 @@ test_no_fd_leak(const MunitParameter p[], void *d)
 }
 
 /* ---- fork callback + control socket + cooperative wait (on a loop) ---- */
-static _Atomic int g_ok;
+static int g_ok;
 
 /* Child: send a known byte string on the control fd, then exit 7. */
 static int
@@ -199,7 +198,7 @@ parent_proc(void *arg)
 	rc = xtc_osproc_wait(h, &st, 2000LL * 1000 * 1000);
 	if (rc == XTC_OK && got == 4 && memcmp(buf, "PING", 4) == 0 &&
 	    WIFEXITED(st) && WEXITSTATUS(st) == 7)
-		atomic_store(&g_ok, 1);
+		xtc_atomic_store_i32(&g_ok, 1, xtc_mo_seq_cst);
 
 	xtc_osproc_destroy(h);
 }
@@ -210,19 +209,19 @@ test_fn_ctrl_wait(const MunitParameter p[], void *d)
 	xtc_loop_t *loop = NULL;
 	xtc_pid_t pid;
 	(void)p; (void)d;
-	atomic_store(&g_ok, 0);
+	xtc_atomic_store_i32(&g_ok, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, parent_proc, NULL, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_ok), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_ok, xtc_mo_seq_cst), ==, 1);
 	return MUNIT_OK;
 }
 
 /* ---- signal a long-lived child ---- */
-static _Atomic int g_sig_ok;
+static int g_sig_ok;
 
 static int
 child_sleep(int ctrl_fd, void *arg)
@@ -248,7 +247,7 @@ signal_proc(void *arg)
 	munit_assert_int(xtc_osproc_signal(h, SIGTERM), ==, XTC_OK);
 	if (xtc_osproc_wait(h, &st, 2000LL * 1000 * 1000) == XTC_OK &&
 	    WIFSIGNALED(st) && WTERMSIG(st) == SIGTERM)
-		atomic_store(&g_sig_ok, 1);
+		xtc_atomic_store_i32(&g_sig_ok, 1, xtc_mo_seq_cst);
 	xtc_osproc_destroy(h);
 }
 
@@ -258,14 +257,14 @@ test_signal(const MunitParameter p[], void *d)
 	xtc_loop_t *loop = NULL;
 	xtc_pid_t pid;
 	(void)p; (void)d;
-	atomic_store(&g_sig_ok, 0);
+	xtc_atomic_store_i32(&g_sig_ok, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, signal_proc, NULL, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_sig_ok), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_sig_ok, xtc_mo_seq_cst), ==, 1);
 	return MUNIT_OK;
 }
 

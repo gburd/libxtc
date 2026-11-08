@@ -9,7 +9,6 @@
 #include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <stdatomic.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -307,12 +306,13 @@ test_intensity_exceeded(const MunitParameter p[], void *d)
 /* SIMPLE_ONE_FOR_ONE: a 0-child pool grows on demand via
  * xtc_sup_add_child; TEMPORARY children are reclaimed (not restarted)
  * when they exit -- the session-pool policy. */
-static _Atomic int g_sofo_ran;
+static int g_sofo_ran;
 static void
 sofo_session(void *arg)
 {
 	(void)arg;
-	atomic_fetch_add(&g_sofo_ran, 1);   /* run once, then exit */
+	xtc_atomic_fetch_add_i32(&g_sofo_ran, 1,
+	    xtc_mo_seq_cst); /* run once, then exit */
 }
 struct sofo_state { xtc_supervisor_t *sup; int added; };
 static void
@@ -349,7 +349,7 @@ test_simple_one_for_one(const MunitParameter p[], void *d)
 	xtc_pid_t mgr;
 	(void)p; (void)d;
 
-	atomic_store(&g_sofo_ran, 0);
+	xtc_atomic_store_i32(&g_sofo_ran, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	opts.strategy = XTC_SUP_SIMPLE_OFO;
 	/* Start with zero children -- the pool is filled dynamically. */
@@ -363,22 +363,23 @@ test_simple_one_for_one(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 
 	munit_assert_int(st.added, ==, 3);            /* 3 spawned on demand */
-	munit_assert_int(atomic_load(&g_sofo_ran), ==, 3);  /* all ran */
+	munit_assert_int(xtc_atomic_load_i32(&g_sofo_ran, xtc_mo_seq_cst), ==,
+	    3); /* all ran */
 	return MUNIT_OK;
 }
 
 /* Bounded pool: max_children caps live dynamic children.  A manager
  * spawns long-lived (permanent, blocking) children up to the cap, then
  * one more, which must be rejected with XTC_E_RESOURCE. */
-static _Atomic int g_pool_alive;
+static int g_pool_alive;
 static void
 pool_worker(void *arg)
 {
 	void *m; size_t n;
 	(void)arg;
-	atomic_fetch_add(&g_pool_alive, 1);
+	xtc_atomic_fetch_add_i32(&g_pool_alive, 1, xtc_mo_seq_cst);
 	(void)xtc_recv(&m, &n, 10LL * 1000 * 1000 * 1000);  /* block, stay alive */
-	atomic_fetch_sub(&g_pool_alive, 1);
+	xtc_atomic_fetch_sub_i32(&g_pool_alive, 1, xtc_mo_seq_cst);
 }
 struct pool_state { xtc_supervisor_t *sup; int over_cap_rc; int live_at_cap; };
 static void
@@ -410,7 +411,7 @@ test_pool_max_children(const MunitParameter p[], void *d)
 	struct pool_state st = { NULL, XTC_OK, 0 };
 	xtc_proc_opts_t popts = XTC_PROC_OPTS_INIT;
 	(void)p; (void)d;
-	atomic_store(&g_pool_alive, 0);
+	xtc_atomic_store_i32(&g_pool_alive, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	opts.strategy = XTC_SUP_SIMPLE_OFO;
 	opts.max_children = 2;
@@ -448,13 +449,13 @@ test_pool_max_children(const MunitParameter p[], void *d)
  * reason=-100000 in 40 of 40 runs on a SINGLE loop, so no OS-thread race is
  * needed to hit it.
  */
-static _Atomic int g_atomic_mon_starts;
+static int g_atomic_mon_starts;
 
 static void
 atomic_mon_child(void *arg)
 {
 	(void)arg;
-	(void)atomic_fetch_add(&g_atomic_mon_starts, 1);
+	(void)xtc_atomic_fetch_add_i32(&g_atomic_mon_starts, 1, xtc_mo_seq_cst);
 	(void)xtc_exit_self(0);      /* clean, and as fast as possible */
 }
 
@@ -481,7 +482,7 @@ test_atomic_spawn_monitor(const MunitParameter p[], void *d)
 	xtc_child_spec_t cs;
 	(void)p; (void)d;
 
-	atomic_store(&g_atomic_mon_starts, 0);
+	xtc_atomic_store_i32(&g_atomic_mon_starts, 0, xtc_mo_seq_cst);
 	memset(&so, 0, sizeof so);
 	so.size = sizeof so;
 	so.strategy = XTC_SUP_ONE_FOR_ONE;
@@ -510,7 +511,9 @@ test_atomic_spawn_monitor(const MunitParameter p[], void *d)
 	 * abnormal and the child was restarted -- the OTP transient violation
 	 * this guards.
 	 */
-	munit_assert_int(atomic_load(&g_atomic_mon_starts), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_atomic_mon_starts,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
 	munit_assert_int(xtc_sup_join(sup, 1LL * 1000 * 1000 * 1000), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
@@ -530,7 +533,7 @@ test_atomic_spawn_monitor(const MunitParameter p[], void *d)
  *
  * Fails on the unfixed library (held_max == 4) and passes with the fix.
  */
-static _Atomic int g_ov_held, g_ov_max, g_ov_starts, g_ov_crashes;
+static int g_ov_held, g_ov_max, g_ov_starts, g_ov_crashes;
 
 static void
 ov_release(void *a)
@@ -539,7 +542,7 @@ ov_release(void *a)
 	/* Slow cleanup: the predecessor is still inside its exit hook, still
 	 * holding the resource, for 30ms after it was told to exit. */
 	(void)xtc_proc_sleep(30LL * 1000 * 1000);
-	atomic_fetch_sub(&g_ov_held, 1);
+	xtc_atomic_fetch_sub_i32(&g_ov_held, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -547,11 +550,13 @@ ov_holder(void *a)
 {
 	int cur, m;
 	(void)a;
-	atomic_fetch_add(&g_ov_starts, 1);
-	cur = atomic_fetch_add(&g_ov_held, 1) + 1;
+	xtc_atomic_fetch_add_i32(&g_ov_starts, 1, xtc_mo_seq_cst);
+	cur = xtc_atomic_fetch_add_i32(&g_ov_held, 1, xtc_mo_seq_cst) + 1;
 	do {
-		m = atomic_load(&g_ov_max);
-	} while (cur > m && !atomic_compare_exchange_weak(&g_ov_max, &m, cur));
+		m = xtc_atomic_load_i32(&g_ov_max, xtc_mo_seq_cst);
+	} while (cur > m &&
+	    !xtc_atomic_cas_weak_i32(&g_ov_max, &m, cur, xtc_mo_seq_cst,
+	        xtc_mo_seq_cst));
 	(void)xtc_proc_at_exit(ov_release, NULL);
 	for (;;)
 		(void)xtc_proc_sleep(1LL * 1000 * 1000);
@@ -562,7 +567,7 @@ ov_crasher(void *a)
 {
 	(void)a;
 	(void)xtc_proc_sleep(20LL * 1000 * 1000);
-	if (atomic_fetch_add(&g_ov_crashes, 1) == 0)
+	if (xtc_atomic_fetch_add_i32(&g_ov_crashes, 1, xtc_mo_seq_cst) == 0)
 		(void)xtc_exit_self(5);            /* crash exactly once */
 	for (;;)
 		(void)xtc_proc_sleep(1LL * 1000 * 1000);
@@ -583,10 +588,10 @@ run_overlap_case(xtc_restart_strategy_t strategy)
 	xtc_child_spec_t cs[3];
 	int i;
 
-	atomic_store(&g_ov_held, 0);
-	atomic_store(&g_ov_max, 0);
-	atomic_store(&g_ov_starts, 0);
-	atomic_store(&g_ov_crashes, 0);
+	xtc_atomic_store_i32(&g_ov_held, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ov_max, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ov_starts, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ov_crashes, 0, xtc_mo_seq_cst);
 
 	o.strategy = strategy;
 	o.max_restarts = 5;
@@ -603,10 +608,12 @@ run_overlap_case(xtc_restart_strategy_t strategy)
 
 	/* The restart must actually have HAPPENED -- otherwise "no overlap"
 	 * would be vacuous.  Two holders started, then both were replaced. */
-	munit_assert_int(atomic_load(&g_ov_crashes), >=, 1);
-	munit_assert_int(atomic_load(&g_ov_starts), >=, 4);
+	munit_assert_int(xtc_atomic_load_i32(&g_ov_crashes, xtc_mo_seq_cst), >=,
+	    1);
+	munit_assert_int(xtc_atomic_load_i32(&g_ov_starts, xtc_mo_seq_cst), >=,
+	    4);
 	/* The property: never more holders alive than the steady state. */
-	munit_assert_int(atomic_load(&g_ov_max), <=, 2);
+	munit_assert_int(xtc_atomic_load_i32(&g_ov_max, xtc_mo_seq_cst), <=, 2);
 
 	(void)xtc_sup_stop(sup);
 	(void)xtc_timer_set(loop, 300LL * 1000 * 1000, ov_stopper, loop, NULL);
@@ -644,7 +651,7 @@ test_rest_for_one_no_overlap(const MunitParameter p[], void *d)
 static xtc_supervisor_t *g_join_sup;
 static int g_join_rc1 = 12345;
 static int g_join_alive_after = -1;
-static _Atomic int g_join_done;
+static int g_join_done;
 
 /* Watchdog: on the unfixed library the first join returns XTC_OK (having
  * freed the sup), so nothing ever stops the PERMANENT worker and the loop
@@ -655,9 +662,10 @@ static void
 join_watchdog(void *a)
 {
 	int i;
-	for (i = 0; i < 300 && !atomic_load(&g_join_done); i++)
+	for (i = 0;
+	     i < 300 && !xtc_atomic_load_i32(&g_join_done, xtc_mo_seq_cst); i++)
 		(void)xtc_proc_sleep(10LL * 1000 * 1000);
-	if (!atomic_load(&g_join_done))
+	if (!xtc_atomic_load_i32(&g_join_done, xtc_mo_seq_cst))
 		(void)xtc_loop_stop((xtc_loop_t *)a);
 }
 
@@ -680,7 +688,7 @@ join_thread(void *a)
 		g_join_alive_after = xtc_sup_alive(g_join_sup);
 		(void)xtc_sup_stop(g_join_sup);          /* then the loop drains */
 	}
-	atomic_store(&g_join_done, 1);
+	xtc_atomic_store_i32(&g_join_done, 1, xtc_mo_seq_cst);
 	return NULL;
 }
 
@@ -716,7 +724,6 @@ test_join_timeout_keeps_sup(const MunitParameter p[], void *d)
 }
 
 #include <pthread.h>
-#include <stdatomic.h>
 
 /* Through 2.1 PIDs were executor-relative: every standalone loop encoded
  * loop_id 0, so a proc on an UNRELATED standalone loop could carry a pid
@@ -724,21 +731,22 @@ test_join_timeout_keeps_sup(const MunitParameter p[], void *d)
  * holds our (local_id, gen) -- the part a 2.1 pid could not tell apart.
  * seq_by is that bystander: it counts messages it receives and records
  * whether it exited normally (a kill aimed at the wrong proc stops it). */
-static _Atomic int g_seq_stop, g_seq_by_msgs, g_seq_by_normal;
+static int g_seq_stop, g_seq_by_msgs, g_seq_by_normal;
 static void
 seq_by(void *arg)
 {
 	void *m;
 	size_t s;
 	(void)arg;
-	while (!atomic_load(&g_seq_stop)) {
+	while (!xtc_atomic_load_i32(&g_seq_stop, xtc_mo_seq_cst)) {
 		m = NULL;
 		if (xtc_recv(&m, &s, 1000000) == XTC_OK) {
-			atomic_fetch_add(&g_seq_by_msgs, 1);
+			xtc_atomic_fetch_add_i32(&g_seq_by_msgs, 1,
+			    xtc_mo_seq_cst);
 			xtc_free(m);
 		}
 	}
-	atomic_fetch_add(&g_seq_by_normal, 1);
+	xtc_atomic_fetch_add_i32(&g_seq_by_normal, 1, xtc_mo_seq_cst);
 }
 static void *
 seq_loop_thread(void *arg)
@@ -752,9 +760,9 @@ static void
 seq_by_start(xtc_loop_t **b, xtc_pid_t *by, int n, pthread_t *th)
 {
 	int i;
-	atomic_store(&g_seq_stop, 0);
-	atomic_store(&g_seq_by_msgs, 0);
-	atomic_store(&g_seq_by_normal, 0);
+	xtc_atomic_store_i32(&g_seq_stop, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_seq_by_msgs, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_seq_by_normal, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(b), ==, XTC_OK);
 	for (i = 0; i < n; i++)
 		munit_assert_int(xtc_proc_spawn(*b, seq_by, NULL, NULL, &by[i]),
@@ -773,7 +781,7 @@ seq_has_equal(const xtc_pid_t *by, int n, xtc_pid_t p)
 	return 0;
 }
 
-static _Atomic int g_seq_a_spawns, g_seq_b_spawns;
+static int g_seq_a_spawns, g_seq_b_spawns;
 static xtc_pid_t g_seq_a_pid0;
 static void
 seq_a(void *arg)
@@ -781,7 +789,7 @@ seq_a(void *arg)
 	void *m;
 	size_t s;
 	(void)arg;
-	if (atomic_fetch_add(&g_seq_a_spawns, 1) == 0) {
+	if (xtc_atomic_fetch_add_i32(&g_seq_a_spawns, 1, xtc_mo_seq_cst) == 0) {
 		g_seq_a_pid0 = xtc_self();
 		(void)xtc_proc_sleep(20LL * 1000 * 1000);
 		xtc_exit_self(7);
@@ -798,7 +806,7 @@ seq_b(void *arg)
 	void *m;
 	size_t s;
 	(void)arg;
-	atomic_fetch_add(&g_seq_b_spawns, 1);
+	xtc_atomic_fetch_add_i32(&g_seq_b_spawns, 1, xtc_mo_seq_cst);
 	for (;;) {
 		m = NULL;
 		(void)xtc_recv(&m, &s, 200LL * 1000 * 1000);
@@ -810,7 +818,8 @@ seq_watch(void *arg)
 {
 	xtc_supervisor_t *sup = arg;
 	int64_t t0 = xtc_clock_mono();
-	while (atomic_load(&g_seq_b_spawns) < 2 && xtc_sup_alive(sup) &&
+	while (xtc_atomic_load_i32(&g_seq_b_spawns, xtc_mo_seq_cst) < 2 &&
+	    xtc_sup_alive(sup) &&
 	    xtc_clock_mono() - t0 < 3LL * 1000 * 1000 * 1000)
 		(void)xtc_proc_sleep(5LL * 1000 * 1000);
 	(void)xtc_sup_stop(sup);
@@ -830,8 +839,8 @@ test_one_for_all_equal_pid_other_loop(const MunitParameter p[], void *d)
 	pthread_t th;
 	(void)p; (void)d;
 
-	atomic_store(&g_seq_a_spawns, 0);
-	atomic_store(&g_seq_b_spawns, 0);
+	xtc_atomic_store_i32(&g_seq_a_spawns, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_seq_b_spawns, 0, xtc_mo_seq_cst);
 	seq_by_start(&lb, by, 8, &th);
 	opts.strategy = XTC_SUP_ONE_FOR_ALL;
 	opts.max_restarts = 5;
@@ -846,12 +855,14 @@ test_one_for_all_equal_pid_other_loop(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(la, seq_watch, sup, NULL, &wpid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(la), ==, XTC_OK);
-	atomic_store(&g_seq_stop, 1);
+	xtc_atomic_store_i32(&g_seq_stop, 1, xtc_mo_seq_cst);
 	munit_assert_int(pthread_join(th, NULL), ==, 0);
 
 	munit_assert_true(seq_has_equal(by, 8, g_seq_a_pid0));   /* premise */
-	munit_assert_int(atomic_load(&g_seq_b_spawns), >=, 2);   /* restarted */
-	munit_assert_int(atomic_load(&g_seq_by_normal), ==, 8);  /* none killed */
+	munit_assert_int(xtc_atomic_load_i32(&g_seq_b_spawns, xtc_mo_seq_cst),
+	    >=, 2); /* restarted */
+	munit_assert_int(xtc_atomic_load_i32(&g_seq_by_normal, xtc_mo_seq_cst),
+	    ==, 8); /* none killed */
 	munit_assert_int(xtc_sup_join(sup, 1LL * 1000 * 1000 * 1000), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(la), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(lb), ==, XTC_OK);
@@ -896,7 +907,7 @@ test_add_child_other_loop(const MunitParameter p[], void *d)
 	pthread_t thb, ths;
 	(void)p; (void)d;
 
-	atomic_store(&g_sofo_ran, 0);
+	xtc_atomic_store_i32(&g_sofo_ran, 0, xtc_mo_seq_cst);
 	seq_by_start(&lb, by, 8, &thb);      /* bystanders, registered first */
 	munit_assert_int(xtc_loop_init(&ls), ==, XTC_OK);
 	opts.strategy = XTC_SUP_SIMPLE_OFO;
@@ -908,14 +919,16 @@ test_add_child_other_loop(const MunitParameter p[], void *d)
 	munit_assert_int(pthread_create(&ths, NULL, xadd_sup_thread, ls), ==, 0);
 	munit_assert_int(xtc_loop_run(lc), ==, XTC_OK);
 	munit_assert_int(pthread_join(ths, NULL), ==, 0);
-	atomic_store(&g_seq_stop, 1);
+	xtc_atomic_store_i32(&g_seq_stop, 1, xtc_mo_seq_cst);
 	munit_assert_int(pthread_join(thb, NULL), ==, 0);
 
 	munit_assert_true(seq_has_equal(by, 8, cpid));            /* premise */
 	munit_assert_int(x.rc, ==, XTC_OK);
 	munit_assert_int(x.added, ==, 1);
-	munit_assert_int(atomic_load(&g_sofo_ran), ==, 1);
-	munit_assert_int(atomic_load(&g_seq_by_msgs), ==, 0);     /* no stray */
+	munit_assert_int(xtc_atomic_load_i32(&g_sofo_ran, xtc_mo_seq_cst), ==,
+	    1);
+	munit_assert_int(xtc_atomic_load_i32(&g_seq_by_msgs, xtc_mo_seq_cst),
+	    ==, 0); /* no stray */
 	munit_assert_int(xtc_sup_join(sup, 1LL * 1000 * 1000 * 1000), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(lc), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(ls), ==, XTC_OK);
@@ -995,15 +1008,15 @@ test_simple_ofo_reclaims_dead(const MunitParameter p[], void *d)
  * regression fails rather than hanging make check.
  */
 #define NA_MS (1000LL * 1000)
-static _Atomic int g_na_n0, g_na_rc = -999;
-static _Atomic int64_t g_na_ns = -1;
+static int g_na_n0, g_na_rc = -999;
+static int64_t g_na_ns = -1;
 static xtc_supervisor_t *g_na_sup;
 
 static void
 na_k0(void *a)
 {
 	(void)a;
-	if (atomic_fetch_add(&g_na_n0, 1) == 0) {
+	if (xtc_atomic_fetch_add_i32(&g_na_n0, 1, xtc_mo_seq_cst) == 0) {
 		(void)xtc_proc_sleep(20 * NA_MS);
 		(void)xtc_exit_self(4); /* crash once: one_for_all restart */
 	}
@@ -1028,8 +1041,9 @@ na_observer(void *a)
 	(void)a;
 	(void)xtc_proc_sleep(100 * NA_MS); /* inside the restart wait */
 	t0 = xtc_clock_mono();
-	atomic_store(&g_na_rc, xtc_sup_n_alive(g_na_sup));
-	atomic_store(&g_na_ns, xtc_clock_mono() - t0);
+	xtc_atomic_store_i32(&g_na_rc, xtc_sup_n_alive(g_na_sup),
+	    xtc_mo_seq_cst);
+	xtc_atomic_store_i64(&g_na_ns, xtc_clock_mono() - t0, xtc_mo_seq_cst);
 	(void)xtc_sup_stop(g_na_sup);
 }
 
@@ -1051,7 +1065,7 @@ test_n_alive_during_group_restart(const MunitParameter p[], void *d)
 	xtc_pid_t pid;
 	(void)p;
 	(void)d;
-	atomic_store(&g_na_n0, 0);
+	xtc_atomic_store_i32(&g_na_n0, 0, xtc_mo_seq_cst);
 	ch[0].fn = na_k0;
 	ch[0].policy = XTC_RESTART_PERMANENT;
 	ch[1].fn = na_k1;
@@ -1073,8 +1087,9 @@ test_n_alive_during_group_restart(const MunitParameter p[], void *d)
 	(void)alarm(0);
 #endif
 	/* It returned, at once: no park, no lock. */
-	munit_assert_int(atomic_load(&g_na_rc), >=, 0);
-	munit_assert_int64(atomic_load(&g_na_ns), <, 100 * NA_MS);
+	munit_assert_int(xtc_atomic_load_i32(&g_na_rc, xtc_mo_seq_cst), >=, 0);
+	munit_assert_int64(xtc_atomic_load_i64(&g_na_ns, xtc_mo_seq_cst), <,
+	    100 * NA_MS);
 	munit_assert_int(xtc_sup_join(g_na_sup, 0), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
@@ -1088,15 +1103,15 @@ test_n_alive_during_group_restart(const MunitParameter p[], void *d)
  * shutdown is an at-exit hook: the child is killed and waited for, and
  * join frees the handle.
  */
-static _Atomic int g_kd_started, g_kd_running, g_kd_stop;
+static int g_kd_started, g_kd_running, g_kd_stop;
 static xtc_supervisor_t *g_kd_sup;
-static _Atomic int g_kd_alive_after = -1, g_kd_child_after = -1;
+static int g_kd_alive_after = -1, g_kd_child_after = -1;
 
 static void
 kd_dec(void *a)
 {
 	(void)a;
-	atomic_fetch_sub(&g_kd_running, 1);
+	xtc_atomic_fetch_sub_i32(&g_kd_running, 1, xtc_mo_seq_cst);
 }
 
 /* The child counts itself running until its exit hook runs. */
@@ -1105,9 +1120,9 @@ kd_worker(void *a)
 {
 	(void)a;
 	(void)xtc_proc_at_exit(kd_dec, NULL);
-	atomic_fetch_add(&g_kd_started, 1);
-	atomic_fetch_add(&g_kd_running, 1);
-	while (!atomic_load(&g_kd_stop))
+	xtc_atomic_fetch_add_i32(&g_kd_started, 1, xtc_mo_seq_cst);
+	xtc_atomic_fetch_add_i32(&g_kd_running, 1, xtc_mo_seq_cst);
+	while (!xtc_atomic_load_i32(&g_kd_stop, xtc_mo_seq_cst))
 		(void)xtc_proc_sleep(10 * NA_MS);
 }
 
@@ -1139,9 +1154,12 @@ kd_killer(void *a)
 	munit_assert_false(xtc_pid_is_none(k.sup));
 	munit_assert_int(xtc_exit_pid(k.sup, 9), ==, XTC_OK);
 	(void)xtc_proc_sleep(300 * NA_MS);
-	atomic_store(&g_kd_alive_after, xtc_sup_alive(g_kd_sup));
-	atomic_store(&g_kd_child_after, atomic_load(&g_kd_running));
-	atomic_store(&g_kd_stop, 1); /* release a 2.1.1 orphan */
+	xtc_atomic_store_i32(&g_kd_alive_after, xtc_sup_alive(g_kd_sup),
+	    xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_kd_child_after,
+	    xtc_atomic_load_i32(&g_kd_running, xtc_mo_seq_cst), xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_kd_stop, 1,
+	    xtc_mo_seq_cst); /* release a 2.1.1 orphan */
 }
 
 static MunitResult
@@ -1153,9 +1171,9 @@ test_killed_sup_stops_children(const MunitParameter p[], void *d)
 	xtc_pid_t pid;
 	(void)p;
 	(void)d;
-	atomic_store(&g_kd_started, 0);
-	atomic_store(&g_kd_running, 0);
-	atomic_store(&g_kd_stop, 0);
+	xtc_atomic_store_i32(&g_kd_started, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_kd_running, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_kd_stop, 0, xtc_mo_seq_cst);
 	ch.fn = kd_worker;
 	ch.policy = XTC_RESTART_PERMANENT;
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
@@ -1164,9 +1182,12 @@ test_killed_sup_stops_children(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, kd_killer, NULL, NULL, &pid), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_kd_started), ==, 1);
-	munit_assert_int(atomic_load(&g_kd_alive_after), ==, 0);
-	munit_assert_int(atomic_load(&g_kd_child_after), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_kd_started, xtc_mo_seq_cst), ==,
+	    1);
+	munit_assert_int(xtc_atomic_load_i32(&g_kd_alive_after, xtc_mo_seq_cst),
+	    ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_kd_child_after, xtc_mo_seq_cst),
+	    ==, 0);
 	munit_assert_int(xtc_sup_join(g_kd_sup, 0), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
@@ -1178,7 +1199,7 @@ test_killed_sup_stops_children(const MunitParameter p[], void *d)
  * and freed everything that was not it: add_child returned XTC_OK and
  * the DOWN was gone.
  */
-static _Atomic int g_ac_rc = -999, g_ac_down = -1;
+static int g_ac_rc = -999, g_ac_down = -1;
 static xtc_supervisor_t *g_ac_sup;
 
 static void
@@ -1209,13 +1230,14 @@ ac_caller(void *a)
 	(void)xtc_proc_sleep(20 * NA_MS); /* the DOWN is now queued */
 	spec.fn = ac_worker;
 	spec.policy = XTC_RESTART_TEMPORARY;
-	atomic_store(&g_ac_rc, xtc_sup_add_child(g_ac_sup, &spec, &w));
+	xtc_atomic_store_i32(&g_ac_rc, xtc_sup_add_child(g_ac_sup, &spec, &w),
+	    xtc_mo_seq_cst);
 	if (xtc_recv(&m, &sz, 50 * NA_MS) == XTC_OK &&
 	    xtc_down_decode_ex(m, sz, &di) == XTC_OK && di.ref == ref &&
 	    di.exit_code == 3)
-		atomic_store(&g_ac_down, 1);
+		xtc_atomic_store_i32(&g_ac_down, 1, xtc_mo_seq_cst);
 	else
-		atomic_store(&g_ac_down, 0);
+		xtc_atomic_store_i32(&g_ac_down, 0, xtc_mo_seq_cst);
 	if (m != NULL)
 		xtc_free(m);
 	(void)xtc_sup_stop(g_ac_sup);
@@ -1236,8 +1258,10 @@ test_add_child_keeps_mail(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, ac_caller, loop, NULL, &pid), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_ac_rc), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_ac_down), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_ac_rc, xtc_mo_seq_cst), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_atomic_load_i32(&g_ac_down, xtc_mo_seq_cst), ==,
+	    1);
 	munit_assert_int(xtc_sup_join(g_ac_sup, 0), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;

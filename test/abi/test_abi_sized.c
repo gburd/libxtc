@@ -17,7 +17,6 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -217,13 +216,13 @@ g2_out_proc(void *arg)
 
 /* ---- G2: sup opts + child spec array at an older stride ---------------- */
 
-static _Atomic int g_kid_runs;
+static int g_kid_runs;
 
 static void
 kid(void *arg)
 {
 	(void)arg;
-	atomic_fetch_add(&g_kid_runs, 1);
+	xtc_atomic_fetch_add_i32(&g_kid_runs, 1, xtc_mo_seq_cst);
 }
 
 /* ---- G2: svr callbacks without the fields after handle_info ------------ */
@@ -280,7 +279,7 @@ g2_inputs(void)
 	CHECK(xtc_loop_run(loop) == XTC_OK);
 	if (sup != NULL)
 		CHECK(xtc_sup_join(sup, -1) == XTC_OK);
-	CHECK(atomic_load(&g_kid_runs) >= 3);
+	CHECK(xtc_atomic_load_i32(&g_kid_runs, xtc_mo_seq_cst) >= 3);
 
 	/* Mixed element sizes and size 0 are refused. */
 	memset(zk, 0, sizeof zk);

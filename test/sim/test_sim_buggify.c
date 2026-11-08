@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -40,8 +39,8 @@
 #define N_PAIRS 12
 #define N_MSGS  8        /* messages each ping sends to its pong */
 
-static atomic_int  g_delivered;
-static atomic_long g_hash;
+static int g_delivered;
+static long g_hash;
 
 static void
 pong(void *arg)
@@ -58,12 +57,12 @@ pong(void *arg)
 			memcpy(&v, m, sizeof v);
 			free(m);
 			got++;
-			atomic_fetch_add_explicit(&g_delivered, 1,
-			    memory_order_relaxed);
-			long h = atomic_load_explicit(&g_hash, memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_delivered, 1,
+			    xtc_mo_relaxed);
+			long h = xtc_atomic_load_long(&g_hash, xtc_mo_relaxed);
 			h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(v + 1));
-			atomic_store_explicit(&g_hash, h, memory_order_relaxed);
+			xtc_atomic_store_long(&g_hash, h, xtc_mo_relaxed);
 		}
 	}
 }
@@ -101,8 +100,8 @@ run_once(uint64_t seed, unsigned bug_pct, int *out_delivered,
 {
 	xtc_exec_t *e = NULL;
 	int i;
-	atomic_store(&g_delivered, 0);
-	atomic_store(&g_hash, 0);
+	xtc_atomic_store_i32(&g_delivered, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) { *out_delivered = -1; return; }
 
 	if (bug_pct > 0)
@@ -123,8 +122,8 @@ run_once(uint64_t seed, unsigned bug_pct, int *out_delivered,
 
 	(void)xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_delivered = atomic_load(&g_delivered);
-	*out_hash = atomic_load(&g_hash);
+	*out_delivered = xtc_atomic_load_i32(&g_delivered, xtc_mo_seq_cst);
+	*out_hash = xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
 	*out_bug_active = xtc_sim_buggify_active_count();
 
 	xtc_sim_buggify_disable();

@@ -13,7 +13,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
-#include <stdatomic.h>
 #include <time.h>
 
 #include "munit.h"
@@ -463,7 +462,10 @@ struct reap_ctx { int rc; };
  * still readable.  (Learned the hard way: raising a deadline once converted a
  * bounded failure into a 45-minute hang.)
  */
-struct reap_wd { xtc_loop_t *loop; _Atomic int done; };
+struct reap_wd {
+	xtc_loop_t *loop;
+	int done;
+};
 
 static void *
 reap_watchdog(void *arg)
@@ -471,7 +473,7 @@ reap_watchdog(void *arg)
 	struct reap_wd *w = arg;
 	int i;
 	for (i = 0; i < 100; i++) {          /* <= 10s */
-		if (atomic_load(&w->done))
+		if (xtc_atomic_load_i32(&w->done, xtc_mo_seq_cst))
 			return NULL;
 		usleep(100000);
 	}
@@ -570,10 +572,10 @@ test_tail_reap(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, reap_worker, &c, NULL, NULL),
 	    ==, XTC_OK);
 	wd.loop = loop;
-	atomic_store(&wd.done, 0);
+	xtc_atomic_store_i32(&wd.done, 0, xtc_mo_seq_cst);
 	munit_assert_int(pthread_create(&wdt, NULL, reap_watchdog, &wd), ==, 0);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	atomic_store(&wd.done, 1);
+	xtc_atomic_store_i32(&wd.done, 1, xtc_mo_seq_cst);
 	munit_assert_int(pthread_join(wdt, NULL), ==, 0);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	/* If the watchdog had to stop the loop, the fiber never finished --

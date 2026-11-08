@@ -32,7 +32,6 @@
  */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,8 +59,8 @@ static xtc_amutex_t *g_am;
 static xtc_arwlock_t *g_arw;
 static pthread_mutex_t g_pm = PTHREAD_MUTEX_INITIALIZER;
 static pthread_rwlock_t g_prw = PTHREAD_RWLOCK_INITIALIZER;
-static _Atomic int g_go, g_stop;
-static _Atomic int g_inw, g_inr, g_viol;
+static int g_go, g_stop;
+static int g_inw, g_inr, g_viol;
 static volatile uint64_t g_data[8];       /* the protected state */
 static struct tstate *g_ts;
 
@@ -128,9 +127,9 @@ worker(void *arg)
 	uint64_t r, lat;
 	int64_t t0;
 
-	while (!atomic_load_explicit(&g_go, memory_order_acquire))
+	while (!xtc_atomic_load_i32(&g_go, xtc_mo_acquire))
 		;
-	while (!atomic_load_explicit(&g_stop, memory_order_relaxed)) {
+	while (!xtc_atomic_load_i32(&g_stop, xtc_mo_relaxed)) {
 		t->rng ^= t->rng << 13; t->rng ^= t->rng >> 7; t->rng ^= t->rng << 17;
 		r = t->rng;
 		excl = g_lock == L_AMUTEX || g_lock == L_PMUTEX ||
@@ -139,20 +138,25 @@ worker(void *arg)
 		lock_acquire(excl);
 		lat = (uint64_t)(xtc_clock_mono() - t0);
 		if (excl) {
-			if (atomic_fetch_add_explicit(&g_inw, 1, memory_order_relaxed) != 0 ||
-			    atomic_load_explicit(&g_inr, memory_order_relaxed) != 0)
-				atomic_store(&g_viol, 1);
+			if (xtc_atomic_fetch_add_i32(&g_inw, 1,
+			        xtc_mo_relaxed) != 0 ||
+			    xtc_atomic_load_i32(&g_inr, xtc_mo_relaxed) != 0)
+				xtc_atomic_store_i32(&g_viol, 1,
+				    xtc_mo_seq_cst);
 			for (i = 0; i < 8; i++) g_data[i]++;
 			spin_work(g_cs);
-			atomic_fetch_sub_explicit(&g_inw, 1, memory_order_relaxed);
+			xtc_atomic_fetch_sub_i32(&g_inw, 1, xtc_mo_relaxed);
 		} else {
-			atomic_fetch_add_explicit(&g_inr, 1, memory_order_relaxed);
-			if (atomic_load_explicit(&g_inw, memory_order_relaxed) != 0)
-				atomic_store(&g_viol, 1);
+			xtc_atomic_fetch_add_i32(&g_inr, 1, xtc_mo_relaxed);
+			if (xtc_atomic_load_i32(&g_inw, xtc_mo_relaxed) != 0)
+				xtc_atomic_store_i32(&g_viol, 1,
+				    xtc_mo_seq_cst);
 			for (i = 1; i < 8; i++)
-				if (g_data[i] != g_data[0]) atomic_store(&g_viol, 1);
+				if (g_data[i] != g_data[0])
+					xtc_atomic_store_i32(&g_viol, 1,
+					    xtc_mo_seq_cst);
 			spin_work(g_cs);
-			atomic_fetch_sub_explicit(&g_inr, 1, memory_order_relaxed);
+			xtc_atomic_fetch_sub_i32(&g_inr, 1, xtc_mo_relaxed);
 		}
 		lock_release();
 		t->ops++;
@@ -215,9 +219,9 @@ main(int argc, char **argv)
 	}
 	(void)getrusage(RUSAGE_SELF, &u0);
 	t0 = xtc_clock_mono();
-	atomic_store_explicit(&g_go, 1, memory_order_release);
+	xtc_atomic_store_i32(&g_go, 1, xtc_mo_release);
 	(void)xtc_sleep_ns((int64_t)secs * 1000000000LL);
-	atomic_store(&g_stop, 1);
+	xtc_atomic_store_i32(&g_stop, 1, xtc_mo_seq_cst);
 	t1 = xtc_clock_mono();
 	(void)getrusage(RUSAGE_SELF, &u1);
 	for (i = 0; i < n; i++) {
@@ -239,10 +243,10 @@ main(int argc, char **argv)
 	    ops ? (double)csw * 1000.0 / (double)ops : 0.0, cpu,
 	    ops ? cpu * 1e6 / (double)ops : 0.0, (unsigned long long)p50,
 	    (unsigned long long)p99, (unsigned long long)max,
-	    atomic_load(&g_viol));
+	    xtc_atomic_load_i32(&g_viol, xtc_mo_seq_cst));
 	xtc_amutex_destroy(g_am);
 	xtc_arwlock_destroy(g_arw);
 	xtc_free(hist);
 	xtc_aligned_free(g_ts);
-	return atomic_load(&g_viol) ? 1 : 0;
+	return xtc_atomic_load_i32(&g_viol, xtc_mo_seq_cst) ? 1 : 0;
 }

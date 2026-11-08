@@ -33,7 +33,6 @@
  */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,13 +47,13 @@
 
 /* ----- proc_lib:spawn -- basic ---------------------------------- */
 
-static _Atomic int g_spawned_ran;
+static int g_spawned_ran;
 
 static void
 trivial_proc(void *arg)
 {
 	(void)arg;
-	atomic_fetch_add(&g_spawned_ran, 1);
+	xtc_atomic_fetch_add_i32(&g_spawned_ran, 1, xtc_mo_seq_cst);
 }
 
 /* Maps to: spawn(Mod, Fun, Args) returns a valid Pid; the spawned
@@ -65,21 +64,22 @@ test_t_spawn(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	xtc_pid_t   pid;
 	(void)p; (void)d;
-	atomic_store(&g_spawned_ran, 0);
+	xtc_atomic_store_i32(&g_spawned_ran, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, trivial_proc, NULL, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_false(xtc_pid_is_none(pid));
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_spawned_ran), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_spawned_ran, xtc_mo_seq_cst),
+	    ==, 1);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
 }
 
 /* ----- proc_lib:spawn_link -- abnormal exit propagates ----------- */
 
-static _Atomic int g_link_signal_seen;
-static _Atomic int g_link_signal_reason;
+static int g_link_signal_seen;
+static int g_link_signal_reason;
 
 struct link_state { xtc_pid_t target; };
 
@@ -103,8 +103,10 @@ link_observer(void *arg)
 	if (xtc_recv_match(__match_exit, NULL, &m, &sz,
 	    1000LL * 1000 * 1000) == XTC_OK) {
 		const uint8_t *e = m;
-		atomic_store(&g_link_signal_seen, 1);
-		if (sz >= 2) atomic_store(&g_link_signal_reason, (int)e[1]);
+		xtc_atomic_store_i32(&g_link_signal_seen, 1, xtc_mo_seq_cst);
+		if (sz >= 2)
+			xtc_atomic_store_i32(&g_link_signal_reason, (int)e[1],
+			    xtc_mo_seq_cst);
 		__os_free(m);
 	}
 }
@@ -129,8 +131,8 @@ test_spawn_link_abnormal(const MunitParameter p[], void *d)
 	xtc_pid_t crasher_pid, observer_pid;
 	struct link_state st;
 	(void)p; (void)d;
-	atomic_store(&g_link_signal_seen, 0);
-	atomic_store(&g_link_signal_reason, 0);
+	xtc_atomic_store_i32(&g_link_signal_seen, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_link_signal_reason, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, crashing_proc, NULL, NULL,
 	    &crasher_pid), ==, XTC_OK);
@@ -138,14 +140,16 @@ test_spawn_link_abnormal(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, link_observer, &st, NULL,
 	    &observer_pid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_link_signal_seen), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_link_signal_seen,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
 }
 
 /* ----- proc_lib:spawn_monitor -- DOWN message ------------------- */
 
-static _Atomic int g_monitor_down_seen;
+static int g_monitor_down_seen;
 
 static int
 __match_down(const void *data, size_t size, void *u)
@@ -162,12 +166,14 @@ monitor_observer(void *arg)
 	uint64_t  ref;
 	void *m; size_t sz;
 	if (xtc_monitor(target, &ref) != XTC_OK) {
-		atomic_fetch_add(&g_monitor_down_seen, 1);
+		xtc_atomic_fetch_add_i32(&g_monitor_down_seen, 1,
+		    xtc_mo_seq_cst);
 		return;
 	}
 	if (xtc_recv_match(__match_down, NULL, &m, &sz,
 	    1000LL * 1000 * 1000) == XTC_OK) {
-		atomic_fetch_add(&g_monitor_down_seen, 1);
+		xtc_atomic_fetch_add_i32(&g_monitor_down_seen, 1,
+		    xtc_mo_seq_cst);
 		if (m) __os_free(m);
 	}
 }
@@ -180,21 +186,23 @@ test_spawn_monitor_down(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	xtc_pid_t target_pid, observer_pid;
 	(void)p; (void)d;
-	atomic_store(&g_monitor_down_seen, 0);
+	xtc_atomic_store_i32(&g_monitor_down_seen, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, crashing_proc, NULL, NULL,
 	    &target_pid), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, monitor_observer, &target_pid,
 	    NULL, &observer_pid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_monitor_down_seen), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_monitor_down_seen,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
 }
 
 /* ----- proc_lib: exit-with-self-pid is_alive --------------------- */
 
-static _Atomic int g_self_observed;
+static int g_self_observed;
 
 static void
 self_observer(void *arg)
@@ -202,7 +210,8 @@ self_observer(void *arg)
 	xtc_pid_t self;
 	(void)arg;
 	self = xtc_self();
-	if (!xtc_pid_is_none(self)) atomic_store(&g_self_observed, 1);
+	if (!xtc_pid_is_none(self))
+		xtc_atomic_store_i32(&g_self_observed, 1, xtc_mo_seq_cst);
 }
 
 /* Maps to: self() returns a non-bottom Pid in a spawned process. */
@@ -212,19 +221,20 @@ test_self_returns_pid(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	xtc_pid_t pid;
 	(void)p; (void)d;
-	atomic_store(&g_self_observed, 0);
+	xtc_atomic_store_i32(&g_self_observed, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, self_observer, NULL, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_self_observed), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_self_observed, xtc_mo_seq_cst),
+	    ==, 1);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
 }
 
 /* ----- proc_lib: send/recv between two procs (counter pingpong) - */
 
-static _Atomic int g_pingpong_count;
+static int g_pingpong_count;
 
 struct ppmsg { xtc_pid_t from; int n; };
 
@@ -263,7 +273,7 @@ pingpong_ping(void *arg)
 		__os_free(m);
 		n = rep.n;
 	}
-	atomic_store(&g_pingpong_count, n);
+	xtc_atomic_store_i32(&g_pingpong_count, n, xtc_mo_seq_cst);
 }
 
 /* Maps to: classic Erlang ping-pong.  See proc_lib examples. */
@@ -273,21 +283,22 @@ test_pingpong_50(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	xtc_pid_t pong_pid, ping_pid;
 	(void)p; (void)d;
-	atomic_store(&g_pingpong_count, 0);
+	xtc_atomic_store_i32(&g_pingpong_count, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, pingpong_pong, NULL, NULL,
 	    &pong_pid), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, pingpong_ping, &pong_pid, NULL,
 	    &ping_pid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_pingpong_count), >=, 50);
+	munit_assert_int(xtc_atomic_load_i32(&g_pingpong_count, xtc_mo_seq_cst),
+	    >=, 50);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
 }
 
 /* ----- proc_lib: recv with timeout returns AGAIN ---------------- */
 
-static _Atomic int g_timeout_seen;
+static int g_timeout_seen;
 
 static void
 timeout_proc(void *arg)
@@ -295,7 +306,7 @@ timeout_proc(void *arg)
 	void *m; size_t sz;
 	(void)arg;
 	if (xtc_recv(&m, &sz, 50 * 1000 * 1000) == XTC_E_AGAIN)
-		atomic_store(&g_timeout_seen, 1);
+		xtc_atomic_store_i32(&g_timeout_seen, 1, xtc_mo_seq_cst);
 }
 
 /* Maps to: receive ... after Timeout -> timeout_value.  Erlang's
@@ -306,12 +317,13 @@ test_recv_timeout(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	xtc_pid_t pid;
 	(void)p; (void)d;
-	atomic_store(&g_timeout_seen, 0);
+	xtc_atomic_store_i32(&g_timeout_seen, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, timeout_proc, NULL, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_timeout_seen), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_timeout_seen, xtc_mo_seq_cst),
+	    ==, 1);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
 }
@@ -382,7 +394,7 @@ test_selective_receive(const MunitParameter p[], void *d)
 /* ----- proc_lib: many spawns + send_msg fanout ------------------ */
 
 #define FANOUT_N 100
-static _Atomic int g_fanout_count;
+static int g_fanout_count;
 
 static void
 fanout_worker(void *arg)
@@ -390,7 +402,7 @@ fanout_worker(void *arg)
 	void *m; size_t sz;
 	(void)arg;
 	if (xtc_recv(&m, &sz, 1000LL * 1000 * 1000) == XTC_OK) {
-		atomic_fetch_add(&g_fanout_count, 1);
+		xtc_atomic_fetch_add_i32(&g_fanout_count, 1, xtc_mo_seq_cst);
 		if (m) __os_free(m);
 	}
 }
@@ -403,7 +415,7 @@ test_fanout_100_workers(const MunitParameter p[], void *d)
 	int marker = 1;
 	int i;
 	(void)p; (void)d;
-	atomic_store(&g_fanout_count, 0);
+	xtc_atomic_store_i32(&g_fanout_count, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	for (i = 0; i < FANOUT_N; i++)
 		munit_assert_int(xtc_proc_spawn(loop, fanout_worker, NULL,
@@ -411,7 +423,8 @@ test_fanout_100_workers(const MunitParameter p[], void *d)
 	for (i = 0; i < FANOUT_N; i++)
 		(void)xtc_send(pids[i], &marker, sizeof marker);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_fanout_count), ==, FANOUT_N);
+	munit_assert_int(xtc_atomic_load_i32(&g_fanout_count, xtc_mo_seq_cst),
+	    ==, FANOUT_N);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
 }

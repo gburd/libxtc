@@ -2,7 +2,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -23,8 +22,8 @@
 #define N_LOOPS   4
 #define N_WORKERS 32
 
-static atomic_int  g_done;
-static atomic_long g_fault_mask_lo;   /* bit i set if worker i "faulted" */
+static int g_done;
+static long g_fault_mask_lo; /* bit i set if worker i "faulted" */
 
 static void
 worker(void *arg)
@@ -32,12 +31,12 @@ worker(void *arg)
 	long id = (long)(intptr_t)arg;
 	/* Deterministic per-worker fault decision (~25%). */
 	if (id < 32 && xtc_sim_fault(250)) {
-		long m = atomic_load_explicit(&g_fault_mask_lo, memory_order_relaxed);
+		long m = xtc_atomic_load_long(&g_fault_mask_lo, xtc_mo_relaxed);
 		m |= (1L << id);
-		atomic_store_explicit(&g_fault_mask_lo, m, memory_order_relaxed);
+		xtc_atomic_store_long(&g_fault_mask_lo, m, xtc_mo_relaxed);
 	}
 	xtc_yield();
-	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 }
 
 static void
@@ -45,16 +44,16 @@ run_once(uint64_t seed, int *out_done, long *out_faults, uint64_t *out_state)
 {
 	xtc_exec_t *e = NULL;
 	long w;
-	atomic_store(&g_done, 0);
-	atomic_store(&g_fault_mask_lo, 0);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_fault_mask_lo, 0, xtc_mo_seq_cst);
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) { *out_done = -1; return; }
 	for (w = 0; w < N_WORKERS; w++) {
 		xtc_loop_t *l = xtc_exec_loop(e, (unsigned)(w % N_LOOPS));
 		(void)xtc_proc_spawn(l, worker, (void *)(intptr_t)w, NULL, NULL);
 	}
 	(void)xtc_sim_exec_run(e, seed, 1000000);
-	*out_done = atomic_load(&g_done);
-	*out_faults = atomic_load(&g_fault_mask_lo);
+	*out_done = xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
+	*out_faults = xtc_atomic_load_long(&g_fault_mask_lo, xtc_mo_seq_cst);
 	*out_state = xtc_sim_state_hash(e);
 	(void)xtc_exec_fini(e);
 }

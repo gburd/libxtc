@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -71,19 +70,19 @@
 #define MPMC_TOTAL  (MPMC_PROD * MPMC_PER)
 
 static xtc_chan_mpmc_t *g_mpmc;
-static atomic_int  g_mpmc_produced;
-static atomic_int  g_mpmc_consumed;
-static atomic_int  g_mpmc_seen[MPMC_TOTAL];   /* per-item consume count */
-static atomic_int  g_mpmc_prod_done;
-static atomic_long g_mpmc_hash;               /* ORDER-sensitive fold */
+static int g_mpmc_produced;
+static int g_mpmc_consumed;
+static int g_mpmc_seen[MPMC_TOTAL]; /* per-item consume count */
+static int g_mpmc_prod_done;
+static long g_mpmc_hash; /* ORDER-sensitive fold */
 
 static void
 mpmc_fold(int v)
 {
-	long h = atomic_load_explicit(&g_mpmc_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_mpmc_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(v + 1));
-	atomic_store_explicit(&g_mpmc_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_mpmc_hash, h, xtc_mo_relaxed);
 }
 
 static void
@@ -93,15 +92,16 @@ mpmc_producer(void *arg)
 	int i = 0, guard = 0;
 	while (i < MPMC_PER && guard++ < 200000) {
 		if (xtc_chan_mpmc_try_send(g_mpmc, IPTR(base + i)) == XTC_OK) {
-			atomic_fetch_add_explicit(&g_mpmc_produced, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_mpmc_produced, 1,
+			    xtc_mo_relaxed);
 			i++;
 		} else {
 			xtc_yield();       /* full -- let a consumer drain */
 		}
 	}
-	if (atomic_fetch_add_explicit(&g_mpmc_prod_done, 1,
-	    memory_order_relaxed) + 1 == MPMC_PROD)
+	if (xtc_atomic_fetch_add_i32(&g_mpmc_prod_done, 1, xtc_mo_relaxed) +
+	        1 ==
+	    MPMC_PROD)
 		(void)xtc_chan_mpmc_close(g_mpmc);   /* last producer closes */
 }
 
@@ -116,10 +116,10 @@ mpmc_consumer(void *arg)
 		if (rc == XTC_OK) {
 			int id = IVAL(v);
 			if (id >= 0 && id < MPMC_TOTAL)
-				atomic_fetch_add_explicit(&g_mpmc_seen[id], 1,
-				    memory_order_relaxed);
-			atomic_fetch_add_explicit(&g_mpmc_consumed, 1,
-			    memory_order_relaxed);
+				xtc_atomic_fetch_add_i32(&g_mpmc_seen[id], 1,
+				    xtc_mo_relaxed);
+			xtc_atomic_fetch_add_i32(&g_mpmc_consumed, 1,
+			    xtc_mo_relaxed);
 			mpmc_fold(id);
 		} else if (rc == XTC_E_INVAL) {
 			break;             /* closed and drained */
@@ -136,12 +136,12 @@ run_mpmc(uint64_t seed, int *out_prod, int *out_cons, int *out_dupdrop,
 	xtc_exec_t *e = NULL;
 	int i, rc, dupdrop = 0;
 
-	atomic_store(&g_mpmc_produced, 0);
-	atomic_store(&g_mpmc_consumed, 0);
-	atomic_store(&g_mpmc_prod_done, 0);
-	atomic_store(&g_mpmc_hash, 0);
+	xtc_atomic_store_i32(&g_mpmc_produced, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_mpmc_consumed, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_mpmc_prod_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_mpmc_hash, 0, xtc_mo_seq_cst);
 	for (i = 0; i < MPMC_TOTAL; i++)
-		atomic_store(&g_mpmc_seen[i], 0);
+		xtc_atomic_store_i32(&g_mpmc_seen[i], 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	/* Small cap so producers actually block on a full channel and the
@@ -160,12 +160,13 @@ run_mpmc(uint64_t seed, int *out_prod, int *out_cons, int *out_dupdrop,
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
 	for (i = 0; i < MPMC_TOTAL; i++)
-		if (atomic_load(&g_mpmc_seen[i]) != 1) dupdrop++;
+		if (xtc_atomic_load_i32(&g_mpmc_seen[i], xtc_mo_seq_cst) != 1)
+			dupdrop++;
 
-	*out_prod = atomic_load(&g_mpmc_produced);
-	*out_cons = atomic_load(&g_mpmc_consumed);
+	*out_prod = xtc_atomic_load_i32(&g_mpmc_produced, xtc_mo_seq_cst);
+	*out_cons = xtc_atomic_load_i32(&g_mpmc_consumed, xtc_mo_seq_cst);
 	*out_dupdrop = dupdrop;
-	*out_hash = atomic_load(&g_mpmc_hash);
+	*out_hash = xtc_atomic_load_long(&g_mpmc_hash, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_chan_mpmc_destroy(g_mpmc);
 	g_mpmc = NULL;
@@ -178,10 +179,10 @@ run_mpmc(uint64_t seed, int *out_prod, int *out_cons, int *out_dupdrop,
 #define WATCH_N 12
 
 static xtc_chan_watch_t *g_watch;
-static atomic_int  g_watch_writes;
-static atomic_int  g_watch_reads;
-static atomic_int  g_watch_regress;      /* set if a reader saw a value < last */
-static atomic_int  g_watch_bogus;        /* set if a reader saw an unpublished value */
+static int g_watch_writes;
+static int g_watch_reads;
+static int g_watch_regress; /* set if a reader saw a value < last */
+static int g_watch_bogus;   /* set if a reader saw an unpublished value */
 
 static void
 watch_writer(void *arg)
@@ -190,8 +191,7 @@ watch_writer(void *arg)
 	(void)arg;
 	for (i = 1; i <= WATCH_N; i++) {
 		(void)xtc_chan_watch_send(g_watch, IPTR(i)); /* value i */
-		atomic_fetch_add_explicit(&g_watch_writes, 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_watch_writes, 1, xtc_mo_relaxed);
 		xtc_yield();
 	}
 }
@@ -206,14 +206,14 @@ watch_reader(void *arg)
 		if (xtc_chan_watch_recv(g_watch, &v) == XTC_OK) {
 			int val = IVAL(v);
 			if (val < 1 || val > WATCH_N)
-				atomic_store_explicit(&g_watch_bogus, 1,
-				    memory_order_relaxed);
+				xtc_atomic_store_i32(&g_watch_bogus, 1,
+				    xtc_mo_relaxed);
 			if (val < last)
-				atomic_store_explicit(&g_watch_regress, 1,
-				    memory_order_relaxed);
+				xtc_atomic_store_i32(&g_watch_regress, 1,
+				    xtc_mo_relaxed);
 			last = val;
-			atomic_fetch_add_explicit(&g_watch_reads, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_watch_reads, 1,
+			    xtc_mo_relaxed);
 			if (val == WATCH_N) break;   /* saw the final value */
 		}
 		xtc_yield();
@@ -226,10 +226,10 @@ run_watch(uint64_t seed, int *out_reads, int *out_bad, uint64_t *out_state)
 	xtc_exec_t *e = NULL;
 	int rc;
 
-	atomic_store(&g_watch_writes, 0);
-	atomic_store(&g_watch_reads, 0);
-	atomic_store(&g_watch_regress, 0);
-	atomic_store(&g_watch_bogus, 0);
+	xtc_atomic_store_i32(&g_watch_writes, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_watch_reads, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_watch_regress, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_watch_bogus, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	if (xtc_chan_watch_create(NULL, &g_watch) != XTC_OK) {
@@ -241,8 +241,9 @@ run_watch(uint64_t seed, int *out_reads, int *out_bad, uint64_t *out_state)
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_reads = atomic_load(&g_watch_reads);
-	*out_bad = atomic_load(&g_watch_regress) | atomic_load(&g_watch_bogus);
+	*out_reads = xtc_atomic_load_i32(&g_watch_reads, xtc_mo_seq_cst);
+	*out_bad = xtc_atomic_load_i32(&g_watch_regress, xtc_mo_seq_cst) |
+	    xtc_atomic_load_i32(&g_watch_bogus, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_chan_watch_destroy(g_watch);
 	g_watch = NULL;
@@ -256,17 +257,17 @@ run_watch(uint64_t seed, int *out_reads, int *out_bad, uint64_t *out_state)
 #define BC_SUBS  3
 
 static xtc_chan_broadcast_t *g_bc;
-static atomic_int  g_bc_recv;            /* total messages received */
-static atomic_int  g_bc_bad;             /* out-of-order / unpublished */
-static atomic_long g_bc_hash;
+static int g_bc_recv; /* total messages received */
+static int g_bc_bad;  /* out-of-order / unpublished */
+static long g_bc_hash;
 
 static void
 bc_fold(int v)
 {
-	long h = atomic_load_explicit(&g_bc_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_bc_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(v + 1));
-	atomic_store_explicit(&g_bc_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_bc_hash, h, xtc_mo_relaxed);
 }
 
 /*
@@ -294,11 +295,10 @@ bc_subscriber(void *arg)
 			int val = IVAL(v);
 			if (val < 1 || val > BC_N ||
 			    val <= last /* strictly increasing */)
-				atomic_store_explicit(&g_bc_bad, 1,
-				    memory_order_relaxed);
+				xtc_atomic_store_i32(&g_bc_bad, 1,
+				    xtc_mo_relaxed);
 			last = val;
-			atomic_fetch_add_explicit(&g_bc_recv, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_bc_recv, 1, xtc_mo_relaxed);
 			bc_fold(val * 8 + a->id);
 			if (val == BC_N) break;
 		} else {
@@ -333,9 +333,9 @@ run_broadcast(uint64_t seed, int *out_recv, int *out_bad, long *out_hash,
 	int i, rc;
 	static struct bc_arg args[BC_SUBS];
 
-	atomic_store(&g_bc_recv, 0);
-	atomic_store(&g_bc_bad, 0);
-	atomic_store(&g_bc_hash, 0);
+	xtc_atomic_store_i32(&g_bc_recv, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_bc_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_bc_hash, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	/* Ring bigger than BC_N so a keeping-up subscriber never lags,
@@ -354,9 +354,9 @@ run_broadcast(uint64_t seed, int *out_recv, int *out_bad, long *out_hash,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_recv = atomic_load(&g_bc_recv);
-	*out_bad = atomic_load(&g_bc_bad);
-	*out_hash = atomic_load(&g_bc_hash);
+	*out_recv = xtc_atomic_load_i32(&g_bc_recv, xtc_mo_seq_cst);
+	*out_bad = xtc_atomic_load_i32(&g_bc_bad, xtc_mo_seq_cst);
+	*out_hash = xtc_atomic_load_long(&g_bc_hash, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_chan_broadcast_destroy(g_bc);
 	g_bc = NULL;

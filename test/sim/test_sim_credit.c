@@ -20,7 +20,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -36,10 +35,10 @@
 #define PER       5           /* acquire/release cycles per issuer */
 
 static xtc_credit_t *g_cw;
-static atomic_int     g_inflight;    /* observed live count */
-static atomic_int     g_observed_peak;
-static atomic_int     g_violation;   /* in-flight ever exceeded WINDOW */
-static atomic_int     g_done;
+static int g_inflight; /* observed live count */
+static int g_observed_peak;
+static int g_violation; /* in-flight ever exceeded WINDOW */
+static int g_done;
 
 static void
 issuer(void *arg)
@@ -57,23 +56,22 @@ issuer(void *arg)
 			i--;                 /* retry this cycle */
 			continue;
 		}
-		now = atomic_fetch_add_explicit(&g_inflight, 1,
-		    memory_order_relaxed) + 1;
+		now = xtc_atomic_fetch_add_i32(&g_inflight, 1, xtc_mo_relaxed) +
+		    1;
 		if (now > WINDOW)
-			atomic_store_explicit(&g_violation, 1,
-			    memory_order_relaxed);
+			xtc_atomic_store_i32(&g_violation, 1, xtc_mo_relaxed);
 		/* track observed peak */
-		pk = atomic_load_explicit(&g_observed_peak, memory_order_relaxed);
+		pk = xtc_atomic_load_i32(&g_observed_peak, xtc_mo_relaxed);
 		while (now > pk &&
-		    !atomic_compare_exchange_weak_explicit(&g_observed_peak,
-		        &pk, now, memory_order_relaxed, memory_order_relaxed))
+		    !xtc_atomic_cas_weak_i32(&g_observed_peak, &pk, now,
+		        xtc_mo_relaxed, xtc_mo_relaxed))
 			;
 		/* Hold the credit across a yield so windows genuinely overlap. */
 		xtc_yield();
-		atomic_fetch_sub_explicit(&g_inflight, 1, memory_order_relaxed);
+		xtc_atomic_fetch_sub_i32(&g_inflight, 1, xtc_mo_relaxed);
 		(void)xtc_credit_release(g_cw);
 	}
-	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -83,10 +81,10 @@ run_credit(uint64_t seed, int *out_done, int *out_peak, int *out_reg_peak,
 	xtc_exec_t *e = NULL;
 	int i, rc;
 
-	atomic_store(&g_inflight, 0);
-	atomic_store(&g_observed_peak, 0);
-	atomic_store(&g_violation, 0);
-	atomic_store(&g_done, 0);
+	xtc_atomic_store_i32(&g_inflight, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_observed_peak, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_violation, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	if (xtc_credit_create(WINDOW, &g_cw) != XTC_OK) {
@@ -98,10 +96,10 @@ run_credit(uint64_t seed, int *out_done, int *out_peak, int *out_reg_peak,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_done = atomic_load(&g_done);
-	*out_peak = atomic_load(&g_observed_peak);
+	*out_done = xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
+	*out_peak = xtc_atomic_load_i32(&g_observed_peak, xtc_mo_seq_cst);
 	*out_reg_peak = (int)xtc_credit_peak(g_cw);
-	*out_violation = atomic_load(&g_violation);
+	*out_violation = xtc_atomic_load_i32(&g_violation, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_credit_destroy(g_cw);
 	g_cw = NULL;

@@ -19,7 +19,6 @@
  *   ./bench --params=N=50000
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,14 +33,14 @@
  * Task payload
  * ------------------------------------------------------------------------- */
 
-static atomic_int g_done;
+static int g_done;
 
 static int
 task_bump(xtc_task_t *self, void *user)
 {
 	(void)self;
 	(void)user;
-	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 	return XTC_TASK_DONE;
 }
 
@@ -99,7 +98,7 @@ main(int argc, char *argv[])
 	N = parse_n(argc, argv);
 	if (N <= 0) N = 10000;
 
-	atomic_store_explicit(&g_done, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_relaxed);
 
 	if (xtc_loop_init(&loop) != XTC_OK) {
 		fprintf(stderr, "xtc_loop_init failed\n");

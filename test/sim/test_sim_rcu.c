@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <sys/resource.h>
 #include "xtc.h"
@@ -72,25 +71,25 @@
 #define NODE_FREED_MAGIC 0xDEADBEEFDEADBEEFULL
 
 struct node {
-	_Atomic uint64_t sentinel;   /* LIVE while published; FREED after */
+	uint64_t sentinel;           /* LIVE while published; FREED after */
 	uint64_t         gen;        /* monotonically increasing */
 };
 
-static _Atomic(struct node *) g_ptr;
-static atomic_int   g_alloc;         /* nodes allocated (incl. the seed) */
-static atomic_int   g_freed;         /* free callback fired count */
-static atomic_int   g_uaf;           /* reader saw a freed/torn node (bug) */
-static atomic_int   g_rd_done;
-static atomic_int   g_wr_done;
-static atomic_long  g_hash;          /* order-sensitive fold of observed gens */
+static struct node *g_ptr;
+static int g_alloc; /* nodes allocated (incl. the seed) */
+static int g_freed; /* free callback fired count */
+static int g_uaf;   /* reader saw a freed/torn node (bug) */
+static int g_rd_done;
+static int g_wr_done;
+static long g_hash; /* order-sensitive fold of observed gens */
 
 static void
 rcu_fold(long v)
 {
-	long h = atomic_load_explicit(&g_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(v + 1));
-	atomic_store_explicit(&g_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_hash, h, xtc_mo_relaxed);
 }
 
 static void
@@ -99,9 +98,8 @@ node_free(void *p)
 	struct node *n = p;
 	/* Poison BEFORE free so a racing reader that still holds this
 	 * node (a bug) sees FREED even under a non-ASan build. */
-	atomic_store_explicit(&n->sentinel, NODE_FREED_MAGIC,
-	    memory_order_release);
-	atomic_fetch_add_explicit(&g_freed, 1, memory_order_relaxed);
+	xtc_atomic_store_u64(&n->sentinel, NODE_FREED_MAGIC, xtc_mo_release);
+	xtc_atomic_fetch_add_i32(&g_freed, 1, xtc_mo_relaxed);
 	free(n);
 }
 
@@ -110,10 +108,9 @@ node_new(uint64_t gen)
 {
 	struct node *n = malloc(sizeof *n);
 	if (n == NULL) return NULL;
-	atomic_store_explicit(&n->sentinel, NODE_LIVE_MAGIC,
-	    memory_order_relaxed);
+	xtc_atomic_store_u64(&n->sentinel, NODE_LIVE_MAGIC, xtc_mo_relaxed);
 	n->gen = gen;
-	atomic_fetch_add_explicit(&g_alloc, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_alloc, 1, xtc_mo_relaxed);
 	return n;
 }
 
@@ -130,26 +127,24 @@ rcu_reader(void *arg)
 		xtc_rcu_read_lock();
 		/* Load the protected pointer INSIDE the read-side.  RCU
 		 * guarantees this node stays live until we read_unlock. */
-		n = atomic_load_explicit(&g_ptr, memory_order_acquire);
+		n = xtc_atomic_load_ptr(&g_ptr, xtc_mo_acquire);
 		if (n == NULL) { xtc_rcu_read_unlock(); xtc_yield(); continue; }
-		s0 = atomic_load_explicit(&n->sentinel, memory_order_acquire);
+		s0 = xtc_atomic_load_u64(&n->sentinel, xtc_mo_acquire);
 		gen0 = n->gen;
 		if (s0 != NODE_LIVE_MAGIC)
-			atomic_fetch_add_explicit(&g_uaf, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_uaf, 1, xtc_mo_relaxed);
 		/* Hold the read-side across a yield: a broken synchronize
 		 * (freeing a node a reader still holds) surfaces here. */
 		xtc_yield();
-		s1 = atomic_load_explicit(&n->sentinel, memory_order_acquire);
+		s1 = xtc_atomic_load_u64(&n->sentinel, xtc_mo_acquire);
 		gen1 = n->gen;
 		if (s1 != NODE_LIVE_MAGIC || gen1 != gen0)
-			atomic_fetch_add_explicit(&g_uaf, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_uaf, 1, xtc_mo_relaxed);
 		rcu_fold((long)(gen0 + id));
 		xtc_rcu_read_unlock();
 		xtc_yield();
 	}
-	atomic_fetch_add_explicit(&g_rd_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_rd_done, 1, xtc_mo_relaxed);
 }
 
 static void
@@ -162,7 +157,7 @@ rcu_writer(void *arg)
 		struct node *old, *nu;
 		uint64_t g;
 
-		old = atomic_load_explicit(&g_ptr, memory_order_acquire);
+		old = xtc_atomic_load_ptr(&g_ptr, xtc_mo_acquire);
 		g = (old ? old->gen : 0) + 1;
 		nu = node_new(g);
 		if (nu == NULL) break;
@@ -170,15 +165,14 @@ rcu_writer(void *arg)
 		 * grace period.  synchronize() must not reclaim `old` while
 		 * a reader that already loaded it is still inside its
 		 * read-side. */
-		old = atomic_exchange_explicit(&g_ptr, nu,
-		    memory_order_acq_rel);
+		old = xtc_atomic_exchange_ptr(&g_ptr, nu, xtc_mo_acq_rel);
 		if (old != NULL)
 			xtc_rcu_retire(old, node_free);
 		xtc_rcu_synchronize();
 		rcu_fold((long)(g * 7 + id));
 		xtc_yield();
 	}
-	atomic_fetch_add_explicit(&g_wr_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_wr_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -189,18 +183,18 @@ run_rcu(uint64_t seed, int *out_rd, int *out_wr, int *out_uaf,
 	struct node *seed_node, *last;
 	int i, rc, next = 0;
 
-	atomic_store(&g_ptr, NULL);
-	atomic_store(&g_alloc, 0);
-	atomic_store(&g_freed, 0);
-	atomic_store(&g_uaf, 0);
-	atomic_store(&g_rd_done, 0);
-	atomic_store(&g_wr_done, 0);
-	atomic_store(&g_hash, 0);
+	xtc_atomic_store_ptr(&g_ptr, NULL, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_alloc, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_freed, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_uaf, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rd_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_wr_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
 
 	if (xtc_rcu_init() != XTC_OK) return -1;
 	seed_node = node_new(1);
 	if (seed_node == NULL) { xtc_rcu_fini(); return -1; }
-	atomic_store_explicit(&g_ptr, seed_node, memory_order_release);
+	xtc_atomic_store_ptr(&g_ptr, seed_node, xtc_mo_release);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) {
 		free(seed_node); xtc_rcu_fini(); return -1;
@@ -217,9 +211,9 @@ run_rcu(uint64_t seed, int *out_rd, int *out_wr, int *out_uaf,
 	/* Drain: retire the last published node and flush all buckets so
 	 * every retired node is reclaimed.  Off a fiber here (the sim run
 	 * has returned), so synchronize takes the plain thread path. */
-	last = atomic_load_explicit(&g_ptr, memory_order_acquire);
+	last = xtc_atomic_load_ptr(&g_ptr, xtc_mo_acquire);
 	if (last != NULL) {
-		atomic_store_explicit(&g_ptr, NULL, memory_order_release);
+		xtc_atomic_store_ptr(&g_ptr, NULL, xtc_mo_release);
 		xtc_rcu_retire(last, node_free);
 	}
 	xtc_rcu_synchronize();
@@ -227,12 +221,12 @@ run_rcu(uint64_t seed, int *out_rd, int *out_wr, int *out_uaf,
 	xtc_rcu_synchronize();
 	xtc_rcu_synchronize();
 
-	*out_rd = atomic_load(&g_rd_done);
-	*out_wr = atomic_load(&g_wr_done);
-	*out_uaf = atomic_load(&g_uaf);
-	*out_alloc = atomic_load(&g_alloc);
-	*out_freed = atomic_load(&g_freed);
-	*out_hash = atomic_load(&g_hash);
+	*out_rd = xtc_atomic_load_i32(&g_rd_done, xtc_mo_seq_cst);
+	*out_wr = xtc_atomic_load_i32(&g_wr_done, xtc_mo_seq_cst);
+	*out_uaf = xtc_atomic_load_i32(&g_uaf, xtc_mo_seq_cst);
+	*out_alloc = xtc_atomic_load_i32(&g_alloc, xtc_mo_seq_cst);
+	*out_freed = xtc_atomic_load_i32(&g_freed, xtc_mo_seq_cst);
+	*out_hash = xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	(void)xtc_exec_fini(e);
 	xtc_rcu_fini();

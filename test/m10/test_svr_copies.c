@@ -21,7 +21,6 @@
  *	so unrelated small allocations do not count.
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -37,15 +36,15 @@
 #define REPLY_SZ 50000u
 
 static struct __os_alloc_hook g_down;
-static _Atomic int g_req_allocs, g_reply_allocs;
+static int g_req_allocs, g_reply_allocs;
 
 static void
 count(size_t n)
 {
 	if (n >= REQ_SZ && n < REQ_SZ + 64)
-		atomic_fetch_add(&g_req_allocs, 1);
+		xtc_atomic_fetch_add_i32(&g_req_allocs, 1, xtc_mo_seq_cst);
 	if (n >= REPLY_SZ && n < REPLY_SZ + 64)
-		atomic_fetch_add(&g_reply_allocs, 1);
+		xtc_atomic_fetch_add_i32(&g_reply_allocs, 1, xtc_mo_seq_cst);
 }
 static void *c_malloc(size_t n) { count(n); return g_down.malloc(n); }
 static void *c_calloc(size_t k, size_t n) { count(k * n); return g_down.calloc(k, n); }
@@ -85,7 +84,8 @@ svr_call_cb(void *st, const void *req, size_t sz, xtc_svr_call_t *call)
 {
 	(void)st;
 	g_req_ok = (sz == REQ_SZ && memcmp(req, g_req, sz) == 0);
-	g_req_allocs_at_call = atomic_load(&g_req_allocs);
+	g_req_allocs_at_call =
+	    xtc_atomic_load_i32(&g_req_allocs, xtc_mo_seq_cst);
 	(void)xtc_svr_reply(call, g_rep, sizeof g_rep);
 	return XTC_SVR_STOP;
 }
@@ -105,7 +105,8 @@ svr_caller(void *arg)
 	if (xtc_svr_call(xtc_svr_pid(s), g_req, sizeof g_req, &r, &n,
 	    5LL * 1000 * 1000 * 1000) != XTC_OK)
 		return;
-	g_rep_allocs_at_reply = atomic_load(&g_reply_allocs);
+	g_rep_allocs_at_reply =
+	    xtc_atomic_load_i32(&g_reply_allocs, xtc_mo_seq_cst);
 	g_rep_ok = (n == REPLY_SZ && memcmp(r, g_rep, n) == 0);
 	xtc_free(r);
 }
@@ -119,8 +120,8 @@ test_svr_call_copies(const MunitParameter p[], void *d)
 	memset(g_req, 0x11, sizeof g_req);
 	memset(g_rep, 0x22, sizeof g_rep);
 	g_req_ok = g_rep_ok = 0;
-	atomic_store(&g_req_allocs, 0);
-	atomic_store(&g_reply_allocs, 0);
+	xtc_atomic_store_i32(&g_req_allocs, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_reply_allocs, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_svr_start(loop, &svr_cb, NULL, NULL, &s), ==,
 	    XTC_OK);
@@ -149,7 +150,8 @@ fsm_event(void *st, int cur, const void *msg, size_t len,
 	if (call == NULL)
 		return r;
 	g_req_ok = (len == REQ_SZ && memcmp(msg, g_req, len) == 0);
-	g_req_allocs_at_call = atomic_load(&g_req_allocs);
+	g_req_allocs_at_call =
+	    xtc_atomic_load_i32(&g_req_allocs, xtc_mo_seq_cst);
 	(void)xtc_fsm_reply(call, g_rep, sizeof g_rep);
 	return r;
 }
@@ -168,7 +170,8 @@ fsm_caller(void *arg)
 	if (xtc_fsm_call(xtc_fsm_pid(f), g_req, sizeof g_req, &r, &n,
 	    5LL * 1000 * 1000 * 1000) != XTC_OK)
 		return;
-	g_rep_allocs_at_reply = atomic_load(&g_reply_allocs);
+	g_rep_allocs_at_reply =
+	    xtc_atomic_load_i32(&g_reply_allocs, xtc_mo_seq_cst);
 	g_rep_ok = (n == REPLY_SZ && memcmp(r, g_rep, n) == 0);
 	xtc_free(r);
 }
@@ -182,8 +185,8 @@ test_fsm_call_copies(const MunitParameter p[], void *d)
 	memset(g_req, 0x33, sizeof g_req);
 	memset(g_rep, 0x44, sizeof g_rep);
 	g_req_ok = g_rep_ok = 0;
-	atomic_store(&g_req_allocs, 0);
-	atomic_store(&g_reply_allocs, 0);
+	xtc_atomic_store_i32(&g_req_allocs, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_reply_allocs, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_fsm_start(loop, &fsm_cb, NULL, 0, NULL, &f), ==,
 	    XTC_OK);

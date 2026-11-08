@@ -35,7 +35,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -66,9 +65,9 @@ struct worker_result {
 };
 
 static struct worker_result g_results[N_WORKERS];
-static atomic_int           g_done;
+static int g_done;
 /* ORDER-sensitive fold of every worker's outcome, for replay comparison. */
-static atomic_long          g_outcome_hash;
+static long g_outcome_hash;
 
 struct step_ctx {
 	struct worker_result *r;
@@ -98,12 +97,12 @@ saga_compensate(void *arg)
 }
 
 static void
-fold(atomic_long *h, long v)
+fold(long *h, long v)
 {
-	long x = atomic_load_explicit(h, memory_order_relaxed);
+	long x = xtc_atomic_load_long(h, xtc_mo_relaxed);
 	x = (long)((unsigned long)x * 1000003UL +
 		    (unsigned long)(v + 1));
-	atomic_store_explicit(h, x, memory_order_relaxed);
+	xtc_atomic_store_long(h, x, xtc_mo_relaxed);
 }
 
 /*
@@ -146,7 +145,7 @@ done:
 	 * worker, whether it failed, at which step, how many completed. */
 	fold(&g_outcome_hash, id * 100003L + r->rc);
 	fold(&g_outcome_hash, r->n_completed * 7 + r->failed_step + 1000);
-	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 }
 
 /*
@@ -223,8 +222,8 @@ run_once(uint64_t seed, int *out_done, int *out_n_failed,
 	long w;
 	int n_failed = 0;
 
-	atomic_store(&g_done, 0);
-	atomic_store(&g_outcome_hash, 0);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_outcome_hash, 0, xtc_mo_seq_cst);
 	memset(g_results, 0, sizeof g_results);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) { *out_done = -1; return -1; }
@@ -234,8 +233,9 @@ run_once(uint64_t seed, int *out_done, int *out_n_failed,
 	}
 	(void)xtc_sim_exec_run(e, seed, 2000000);
 
-	*out_done = atomic_load(&g_done);
-	*out_outcome_hash = atomic_load(&g_outcome_hash);
+	*out_done = xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
+	*out_outcome_hash =
+	    xtc_atomic_load_long(&g_outcome_hash, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	(void)xtc_exec_fini(e);
 

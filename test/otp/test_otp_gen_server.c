@@ -24,7 +24,6 @@
  */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,8 +42,8 @@ struct counter_state {
 	int count;
 	int  init_called;
 	int  terminated_with;
-	_Atomic int n_casts;
-	_Atomic int n_infos;
+	int n_casts;
+	int n_infos;
 };
 
 static int
@@ -86,7 +85,7 @@ counter_handle_cast(void *st, const void *msg, size_t sz)
 {
 	struct counter_state *s = st;
 	(void)msg; (void)sz;
-	atomic_fetch_add(&s->n_casts, 1);
+	xtc_atomic_fetch_add_i32(&s->n_casts, 1, xtc_mo_seq_cst);
 	s->count++;
 	return XTC_SVR_CONTINUE;
 }
@@ -96,7 +95,7 @@ counter_handle_info(void *st, const void *msg, size_t sz)
 {
 	struct counter_state *s = st;
 	(void)msg; (void)sz;
-	atomic_fetch_add(&s->n_infos, 1);
+	xtc_atomic_fetch_add_i32(&s->n_infos, 1, xtc_mo_seq_cst);
 	return XTC_SVR_CONTINUE;
 }
 
@@ -150,7 +149,7 @@ test_start_stop(const MunitParameter p[], void *d)
 
 struct call_driver_args {
 	xtc_pid_t target;
-	_Atomic int got_value;
+	int got_value;
 	xtc_svr_t  *svr;
 };
 
@@ -202,7 +201,7 @@ call_cast_info_driver(void *arg)
 		memcpy(&val, reply, sizeof val);
 		__os_free(reply);
 	}
-	atomic_store(&da->got_value, val);
+	xtc_atomic_store_i32(&da->got_value, val, xtc_mo_seq_cst);
 
 	(void)xtc_svr_stop(da->svr);
 }
@@ -226,10 +225,13 @@ test_call_cast_info(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
 	/* 3 casts (+3) + 1 inc call (+1) + 1 add 5 (+5) = 9. */
-	munit_assert_int(atomic_load(&da.got_value), ==, 9);
+	munit_assert_int(xtc_atomic_load_i32(&da.got_value, xtc_mo_seq_cst), ==,
+	    9);
 	munit_assert_int(state.count, ==, 9);
-	munit_assert_int(atomic_load(&state.n_casts), ==, 3);
-	munit_assert_int(atomic_load(&state.n_infos), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&state.n_casts, xtc_mo_seq_cst),
+	    ==, 3);
+	munit_assert_int(xtc_atomic_load_i32(&state.n_infos, xtc_mo_seq_cst),
+	    ==, 1);
 
 	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
@@ -317,7 +319,7 @@ static const xtc_svr_callbacks_t slow_cb = {
 	.handle_call = slow_handle_call
 };
 
-static _Atomic int g_call_timeout_seen;
+static int g_call_timeout_seen;
 
 static void
 timeout_call_driver(void *arg)
@@ -327,7 +329,8 @@ timeout_call_driver(void *arg)
 	int rc;
 	uint8_t req = 0;
 	rc = xtc_svr_call(target, &req, 1, &r, &rs, 30 * 1000 * 1000);
-	if (rc == XTC_E_AGAIN) atomic_store(&g_call_timeout_seen, 1);
+	if (rc == XTC_E_AGAIN)
+		xtc_atomic_store_i32(&g_call_timeout_seen, 1, xtc_mo_seq_cst);
 	if (r) __os_free(r);
 }
 
@@ -349,7 +352,7 @@ test_call_timeout(const MunitParameter p[], void *d)
 	xtc_pid_t target, dpid, spid;
 	int dummy = 0;
 	(void)p; (void)d;
-	atomic_store(&g_call_timeout_seen, 0);
+	xtc_atomic_store_i32(&g_call_timeout_seen, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_svr_start(loop, &slow_cb, &dummy, NULL, &svr),
 	    ==, XTC_OK);
@@ -359,7 +362,9 @@ test_call_timeout(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, timeout_stopper, svr, NULL,
 	    &spid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_call_timeout_seen), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_call_timeout_seen,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
 	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;

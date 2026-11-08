@@ -23,7 +23,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdatomic.h>
 
 #include "pbt_common.h"
 #include "xtc.h"

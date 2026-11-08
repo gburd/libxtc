@@ -25,7 +25,6 @@
  *	xtc_tnt_send_from into both sinks.
  */
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -66,15 +65,17 @@ typedef struct {
 	int x;
 } boot_t;
 
-static _Atomic xtc_tnt_handle_t g_sink[NSHARD];
-static _Atomic uint64_t g_delivered, g_dropped, g_disorder;
-static _Atomic int g_sinks_up, g_ext_done, g_done, g_timed_out;
+static xtc_tnt_handle_t g_sink[NSHARD];
+static uint64_t g_delivered, g_dropped, g_disorder;
+static int g_sinks_up, g_ext_done, g_done, g_timed_out;
 
 static void
 maybe_stop(void)
 {
-	if (atomic_load(&g_delivered) + atomic_load(&g_dropped) ==
-	    (uint64_t)NSRC * N && atomic_load(&g_ext_done) == 2)
+	if (xtc_atomic_load_u64(&g_delivered, xtc_mo_seq_cst) +
+	            xtc_atomic_load_u64(&g_dropped, xtc_mo_seq_cst) ==
+	        (uint64_t)NSRC * N &&
+	    xtc_atomic_load_i32(&g_ext_done, xtc_mo_seq_cst) == 2)
 		xtc_tnt_stop();
 }
 
@@ -84,8 +85,9 @@ sink_init(void *self, const void *a, size_t n)
 	(void)a;
 	(void)n;
 	memset(self, 0, sizeof(sink_t));
-	atomic_store(&g_sink[xtc_tnt_shard_id()], xtc_tnt_self());
-	atomic_fetch_add(&g_sinks_up, 1);
+	xtc_atomic_store_u64(&g_sink[xtc_tnt_shard_id()], xtc_tnt_self(),
+	    xtc_mo_seq_cst);
+	xtc_atomic_fetch_add_i32(&g_sinks_up, 1, xtc_mo_seq_cst);
 	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 }
 
@@ -99,10 +101,10 @@ sink_handler(void *self, xtc_tnt_message_t *msg)
 		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 	memcpy(&h, msg->body.user.payload, sizeof h);
 	if (h.src >= NSRC || h.seq + 1u <= s->last[h.src])
-		atomic_fetch_add(&g_disorder, 1);
+		xtc_atomic_fetch_add_u64(&g_disorder, 1, xtc_mo_seq_cst);
 	else
 		s->last[h.src] = h.seq + 1u;
-	atomic_fetch_add(&g_delivered, 1);
+	xtc_atomic_fetch_add_u64(&g_delivered, 1, xtc_mo_seq_cst);
 	maybe_stop();
 	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 }
@@ -132,11 +134,12 @@ src_handler(void *self, xtc_tnt_message_t *msg)
 
 	if (msg->tag != TAG_GO)
 		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
-	if (atomic_load(&g_sinks_up) < NSHARD) {
+	if (xtc_atomic_load_i32(&g_sinks_up, xtc_mo_seq_cst) < NSHARD) {
 		xtc_tnt_register_timer(1000000, TAG_GO);
 		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 	}
-	peer = atomic_load(&g_sink[(s->id + 1) % NSHARD]);
+	peer =
+	    xtc_atomic_load_u64(&g_sink[(s->id + 1) % NSHARD], xtc_mo_seq_cst);
 	for (i = 0; i < 256 && s->sent < N; i++) {
 		h.src = s->id;
 		h.seq = s->sent;
@@ -144,7 +147,7 @@ src_handler(void *self, xtc_tnt_message_t *msg)
 		    XTC_TNT_SEND_OK) {
 			if (s->id == 1)
 				break;          /* retry next turn */
-			atomic_fetch_add(&g_dropped, 1);
+			xtc_atomic_fetch_add_u64(&g_dropped, 1, xtc_mo_seq_cst);
 		}
 		s->sent++;
 	}
@@ -162,10 +165,11 @@ watchdog(void *arg)
 	int i;
 
 	(void)arg;
-	for (i = 0; i < 600 && !atomic_load(&g_done); i++)
+	for (i = 0; i < 600 && !xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
+	     i++)
 		xtc_sleep_ns(100LL * 1000 * 1000);
-	if (!atomic_load(&g_done)) {
-		atomic_store(&g_timed_out, 1);
+	if (!xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst)) {
+		xtc_atomic_store_i32(&g_timed_out, 1, xtc_mo_seq_cst);
 		xtc_tnt_stop();
 	}
 	return NULL;
@@ -177,22 +181,23 @@ ext_thread(void *arg)
 	uint32_t id = (uint32_t)(uintptr_t)arg, seq;
 	struct hit h;
 
-	while (atomic_load(&g_sinks_up) < NSHARD &&
-	    !atomic_load(&g_timed_out))
+	while (xtc_atomic_load_i32(&g_sinks_up, xtc_mo_seq_cst) < NSHARD &&
+	    !xtc_atomic_load_i32(&g_timed_out, xtc_mo_seq_cst))
 		xtc_sleep_ns(1000000);
-	for (seq = 0; seq < N && !atomic_load(&g_timed_out); ) {
+	for (seq = 0;
+	     seq < N && !xtc_atomic_load_i32(&g_timed_out, xtc_mo_seq_cst);) {
 		h.src = id;
 		h.seq = seq;
 		/* Alternate sinks so both shards' external rings carry load;
 		 * retry on a full ring (no loss). */
 		if (xtc_tnt_send_from(XTC_TNT_HANDLE_NONE,
-		    atomic_load(&g_sink[seq & 1]), TAG_HIT, &h, sizeof h) ==
-		    XTC_TNT_SEND_OK)
+		        xtc_atomic_load_u64(&g_sink[seq & 1], xtc_mo_seq_cst),
+		        TAG_HIT, &h, sizeof h) == XTC_TNT_SEND_OK)
 			seq++;
 		else
 			xtc_sleep_ns(10000);
 	}
-	atomic_fetch_add(&g_ext_done, 1);
+	xtc_atomic_fetch_add_i32(&g_ext_done, 1, xtc_mo_seq_cst);
 	return NULL;
 }
 
@@ -251,20 +256,20 @@ main(void)
 		return 1;
 	}
 	rc = xtc_tnt_start(&spec);
-	atomic_store(&g_done, 1);
+	xtc_atomic_store_i32(&g_done, 1, xtc_mo_seq_cst);
 	for (i = 0; i < 2; i++)
 		(void)pthread_join(th[i], NULL);
 	(void)pthread_join(wd, NULL);
-	d = atomic_load(&g_delivered);
-	x = atomic_load(&g_dropped);
-	o = atomic_load(&g_disorder);
+	d = xtc_atomic_load_u64(&g_delivered, xtc_mo_seq_cst);
+	x = xtc_atomic_load_u64(&g_dropped, xtc_mo_seq_cst);
+	o = xtc_atomic_load_u64(&g_disorder, xtc_mo_seq_cst);
 	printf("delivered=%llu dropped=%llu disorder=%llu sent=%d rc=%d\n",
 	    (unsigned long long)d, (unsigned long long)x,
 	    (unsigned long long)o, NSRC * N, rc);
-	if (atomic_load(&g_timed_out))
+	if (xtc_atomic_load_i32(&g_timed_out, xtc_mo_seq_cst))
 		printf("FAIL: timed out after 60 s: messages were lost\n");
 	if (rc != 0 || d + x != (uint64_t)NSRC * N || o != 0 ||
-	    atomic_load(&g_timed_out)) {
+	    xtc_atomic_load_i32(&g_timed_out, xtc_mo_seq_cst)) {
 		printf("FAIL: a cross-shard message was lost, duplicated or "
 		    "reordered\n");
 		return 1;

@@ -8,7 +8,6 @@
  *	on checkout until another fiber checks a resource back in.
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -139,7 +138,7 @@ test_pool_block_until_checkin(const MunitParameter p[], void *d)
 struct two_wait_ctx {
 	xtc_pool_t *pool;
 	void       *held[2];
-	_Atomic int got;
+	int got;
 };
 
 static void
@@ -148,7 +147,7 @@ two_wait_waiter(void *arg)
 	struct two_wait_ctx *c = arg;
 	void *r = NULL;
 	if (xtc_pool_checkout(c->pool, 2LL * 1000 * 1000 * 1000, &r) == XTC_OK)
-		atomic_fetch_add(&c->got, 1);
+		xtc_atomic_fetch_add_i32(&c->got, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -186,7 +185,7 @@ test_pool_two_waiters(const MunitParameter p[], void *d)
 	    ==, XTC_OK);
 	t0 = xtc_clock_mono();
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&c.got), ==, 2);
+	munit_assert_int(xtc_atomic_load_i32(&c.got, xtc_mo_seq_cst), ==, 2);
 	/* Both woke on the checkins, not on their 2 s timeouts. */
 	munit_assert_int64(xtc_clock_mono() - t0, <, 1LL * 1000 * 1000 * 1000);
 	xtc_pool_destroy(c.pool);

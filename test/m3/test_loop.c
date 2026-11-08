@@ -5,7 +5,6 @@
  * test/m3/test_loop.c -- verifies M3_CLAIMS.md Ev1-Ev5.
  */
 
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -102,34 +101,40 @@ test_stop(const MunitParameter p[], void *d)
 #define FINI_BYTES  4096
 
 static struct __os_alloc_hook fini_real;
-static _Atomic long long      fini_live;    /* outstanding allocations */
+static long long fini_live; /* outstanding allocations */
 
 static void *fini_malloc(size_t n) {
 	void *p = fini_real.malloc(n);
-	if (p) atomic_fetch_add(&fini_live, 1);
+	if (p)
+		xtc_atomic_fetch_add_llong(&fini_live, 1, xtc_mo_seq_cst);
 	return p;
 }
 static void *fini_calloc(size_t n, size_t sz) {
 	void *p = fini_real.calloc(n, sz);
-	if (p) atomic_fetch_add(&fini_live, 1);
+	if (p)
+		xtc_atomic_fetch_add_llong(&fini_live, 1, xtc_mo_seq_cst);
 	return p;
 }
 static void *fini_realloc(void *o, size_t n) {
 	void *p = fini_real.realloc(o, n);
-	if (p && o == NULL) atomic_fetch_add(&fini_live, 1);
+	if (p && o == NULL)
+		xtc_atomic_fetch_add_llong(&fini_live, 1, xtc_mo_seq_cst);
 	return p;
 }
 static void fini_free(void *p) {
-	if (p) atomic_fetch_sub(&fini_live, 1);
+	if (p)
+		xtc_atomic_fetch_sub_llong(&fini_live, 1, xtc_mo_seq_cst);
 	fini_real.free(p);
 }
 static void *fini_aligned(size_t a, size_t n) {
 	void *p = fini_real.aligned(a, n);
-	if (p) atomic_fetch_add(&fini_live, 1);
+	if (p)
+		xtc_atomic_fetch_add_llong(&fini_live, 1, xtc_mo_seq_cst);
 	return p;
 }
 static void fini_aligned_free(void *p) {
-	if (p) atomic_fetch_sub(&fini_live, 1);
+	if (p)
+		xtc_atomic_fetch_sub_llong(&fini_live, 1, xtc_mo_seq_cst);
 	fini_real.aligned_free(p);
 }
 
@@ -170,13 +175,13 @@ static long long
 fini_round(void)
 {
 	long long before;
-	before = atomic_load(&fini_live);
+	before = xtc_atomic_load_llong(&fini_live, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&fini_loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(fini_loop, fini_parent, NULL, NULL,
 	    NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(fini_loop), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(fini_loop), ==, XTC_OK);
-	return atomic_load(&fini_live) - before;
+	return xtc_atomic_load_llong(&fini_live, xtc_mo_seq_cst) - before;
 }
 
 static MunitResult

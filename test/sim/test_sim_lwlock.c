@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -60,19 +59,19 @@
 #define EXCL_ITERS 3
 
 static xtc_lwlock_t g_ex_lk;
-static atomic_int    g_ex_live;      /* current exclusive holders */
-static atomic_int    g_ex_peak;      /* max holders seen (must stay 1) */
+static int g_ex_live;                /* current exclusive holders */
+static int g_ex_peak;                /* max holders seen (must stay 1) */
 static long          g_ex_counter;   /* protected, non-atomic on purpose */
-static atomic_int    g_ex_done;
-static atomic_long   g_ex_hash;
+static int g_ex_done;
+static long g_ex_hash;
 
 static void
 ex_fold(long v)
 {
-	long h = atomic_load_explicit(&g_ex_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_ex_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(v + 1));
-	atomic_store_explicit(&g_ex_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_ex_hash, h, xtc_mo_relaxed);
 }
 
 static void
@@ -84,14 +83,13 @@ ex_worker(void *arg)
 	for (it = 0; it < EXCL_ITERS; it++) {
 		int pk, live;
 		(void)xtc_lwlock_acquire(&g_ex_lk, XTC_LW_EXCLUSIVE);
-		live = atomic_fetch_add_explicit(&g_ex_live, 1,
-		    memory_order_relaxed) + 1;
+		live =
+		    xtc_atomic_fetch_add_i32(&g_ex_live, 1, xtc_mo_relaxed) + 1;
 		do {
-			pk = atomic_load_explicit(&g_ex_peak,
-			    memory_order_relaxed);
+			pk = xtc_atomic_load_i32(&g_ex_peak, xtc_mo_relaxed);
 			if (live <= pk) break;
-		} while (!atomic_compare_exchange_weak_explicit(&g_ex_peak,
-		    &pk, live, memory_order_relaxed, memory_order_relaxed));
+		} while (!xtc_atomic_cas_weak_i32(&g_ex_peak, &pk, live,
+		    xtc_mo_relaxed, xtc_mo_relaxed));
 		/* Protected critical section: read-modify-write a plain long
 		 * across a yield.  Under mutual exclusion this is exact; a
 		 * broken lock would lose updates. */
@@ -101,11 +99,11 @@ ex_worker(void *arg)
 			g_ex_counter = v + 1;
 			ex_fold(id);
 		}
-		atomic_fetch_sub_explicit(&g_ex_live, 1, memory_order_relaxed);
+		xtc_atomic_fetch_sub_i32(&g_ex_live, 1, xtc_mo_relaxed);
 		xtc_lwlock_release(&g_ex_lk);
 		xtc_yield();
 	}
-	atomic_fetch_add_explicit(&g_ex_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_ex_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -115,11 +113,11 @@ run_excl(uint64_t seed, int *out_done, int *out_peak, long *out_counter,
 	xtc_exec_t *e = NULL;
 	int i, rc;
 
-	atomic_store(&g_ex_live, 0);
-	atomic_store(&g_ex_peak, 0);
+	xtc_atomic_store_i32(&g_ex_live, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ex_peak, 0, xtc_mo_seq_cst);
 	g_ex_counter = 0;
-	atomic_store(&g_ex_done, 0);
-	atomic_store(&g_ex_hash, 0);
+	xtc_atomic_store_i32(&g_ex_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_ex_hash, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	if (xtc_lwlock_init(&g_ex_lk, 1) != XTC_OK) {
@@ -131,10 +129,10 @@ run_excl(uint64_t seed, int *out_done, int *out_peak, long *out_counter,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_done = atomic_load(&g_ex_done);
-	*out_peak = atomic_load(&g_ex_peak);
+	*out_done = xtc_atomic_load_i32(&g_ex_done, xtc_mo_seq_cst);
+	*out_peak = xtc_atomic_load_i32(&g_ex_peak, xtc_mo_seq_cst);
 	*out_counter = g_ex_counter;
-	*out_hash = atomic_load(&g_ex_hash);
+	*out_hash = xtc_atomic_load_long(&g_ex_hash, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_lwlock_destroy(&g_ex_lk);
 	(void)xtc_exec_fini(e);
@@ -148,15 +146,15 @@ run_excl(uint64_t seed, int *out_done, int *out_peak, long *out_counter,
 #define RW_ITERS   3
 
 static xtc_lwlock_t g_rw_lk;
-static atomic_long   g_rw_hi;        /* two halves that must always agree */
-static atomic_long   g_rw_lo;
-static atomic_int     g_rw_torn;     /* reader saw hi != lo (bug) */
-static atomic_int     g_rw_rd_live;  /* concurrent shared holders */
-static atomic_int     g_rw_rd_peak;  /* max concurrent readers */
-static atomic_int     g_rw_wr_conflict; /* writer saw a peer writer (bug) */
-static atomic_int     g_rw_wr_live;  /* concurrent exclusive holders */
-static atomic_int     g_rw_done;
-static atomic_long    g_rw_hash;
+static long g_rw_hi; /* two halves that must always agree */
+static long g_rw_lo;
+static int g_rw_torn;        /* reader saw hi != lo (bug) */
+static int g_rw_rd_live;     /* concurrent shared holders */
+static int g_rw_rd_peak;     /* max concurrent readers */
+static int g_rw_wr_conflict; /* writer saw a peer writer (bug) */
+static int g_rw_wr_live;     /* concurrent exclusive holders */
+static int g_rw_done;
+static long g_rw_hash;
 
 static void
 rw_writer(void *arg)
@@ -168,23 +166,23 @@ rw_writer(void *arg)
 		long nv = (long)((id + 1) * 100 + it);
 		int live;
 		(void)xtc_lwlock_acquire(&g_rw_lk, XTC_LW_EXCLUSIVE);
-		live = atomic_fetch_add_explicit(&g_rw_wr_live, 1,
-		    memory_order_relaxed) + 1;
+		live =
+		    xtc_atomic_fetch_add_i32(&g_rw_wr_live, 1, xtc_mo_relaxed) +
+		    1;
 		if (live > 1)
-			atomic_fetch_add_explicit(&g_rw_wr_conflict, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_rw_wr_conflict, 1,
+			    xtc_mo_relaxed);
 		/* Write the two halves with a yield BETWEEN them, so a reader
 		 * that saw the update without exclusion would catch a torn
 		 * (hi != lo) state. */
-		atomic_store_explicit(&g_rw_hi, nv, memory_order_relaxed);
+		xtc_atomic_store_long(&g_rw_hi, nv, xtc_mo_relaxed);
 		xtc_yield();
-		atomic_store_explicit(&g_rw_lo, nv, memory_order_relaxed);
-		atomic_fetch_sub_explicit(&g_rw_wr_live, 1,
-		    memory_order_relaxed);
+		xtc_atomic_store_long(&g_rw_lo, nv, xtc_mo_relaxed);
+		xtc_atomic_fetch_sub_i32(&g_rw_wr_live, 1, xtc_mo_relaxed);
 		xtc_lwlock_release(&g_rw_lk);
 		xtc_yield();
 	}
-	atomic_fetch_add_explicit(&g_rw_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_rw_done, 1, xtc_mo_relaxed);
 }
 
 static void
@@ -197,34 +195,31 @@ rw_reader(void *arg)
 		long hi, lo;
 		int live, pk;
 		(void)xtc_lwlock_acquire(&g_rw_lk, XTC_LW_SHARED);
-		live = atomic_fetch_add_explicit(&g_rw_rd_live, 1,
-		    memory_order_relaxed) + 1;
+		live =
+		    xtc_atomic_fetch_add_i32(&g_rw_rd_live, 1, xtc_mo_relaxed) +
+		    1;
 		do {
-			pk = atomic_load_explicit(&g_rw_rd_peak,
-			    memory_order_relaxed);
+			pk = xtc_atomic_load_i32(&g_rw_rd_peak, xtc_mo_relaxed);
 			if (live <= pk) break;
-		} while (!atomic_compare_exchange_weak_explicit(&g_rw_rd_peak,
-		    &pk, live, memory_order_relaxed, memory_order_relaxed));
-		hi = atomic_load_explicit(&g_rw_hi, memory_order_relaxed);
+		} while (!xtc_atomic_cas_weak_i32(&g_rw_rd_peak, &pk, live,
+		    xtc_mo_relaxed, xtc_mo_relaxed));
+		hi = xtc_atomic_load_long(&g_rw_hi, xtc_mo_relaxed);
 		xtc_yield();                /* hold shared across a yield */
-		lo = atomic_load_explicit(&g_rw_lo, memory_order_relaxed);
+		lo = xtc_atomic_load_long(&g_rw_lo, xtc_mo_relaxed);
 		if (hi != lo)
-			atomic_fetch_add_explicit(&g_rw_torn, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_rw_torn, 1, xtc_mo_relaxed);
 		{
-			long h = atomic_load_explicit(&g_rw_hash,
-			    memory_order_relaxed);
+			long h =
+			    xtc_atomic_load_long(&g_rw_hash, xtc_mo_relaxed);
 			h = (long)((unsigned long)h * 1000003UL +
 			    (unsigned long)((hi + 1) + (long)id));
-			atomic_store_explicit(&g_rw_hash, h,
-			    memory_order_relaxed);
+			xtc_atomic_store_long(&g_rw_hash, h, xtc_mo_relaxed);
 		}
-		atomic_fetch_sub_explicit(&g_rw_rd_live, 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_sub_i32(&g_rw_rd_live, 1, xtc_mo_relaxed);
 		xtc_lwlock_release(&g_rw_lk);
 		xtc_yield();
 	}
-	atomic_fetch_add_explicit(&g_rw_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_rw_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -234,15 +229,15 @@ run_rw(uint64_t seed, int *out_done, int *out_torn, int *out_wr_conflict,
 	xtc_exec_t *e = NULL;
 	int i, rc, next = 0;
 
-	atomic_store(&g_rw_hi, 0);
-	atomic_store(&g_rw_lo, 0);
-	atomic_store(&g_rw_torn, 0);
-	atomic_store(&g_rw_rd_live, 0);
-	atomic_store(&g_rw_rd_peak, 0);
-	atomic_store(&g_rw_wr_conflict, 0);
-	atomic_store(&g_rw_wr_live, 0);
-	atomic_store(&g_rw_done, 0);
-	atomic_store(&g_rw_hash, 0);
+	xtc_atomic_store_long(&g_rw_hi, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_rw_lo, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rw_torn, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rw_rd_live, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rw_rd_peak, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rw_wr_conflict, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rw_wr_live, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rw_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_rw_hash, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	if (xtc_lwlock_init(&g_rw_lk, 2) != XTC_OK) {
@@ -257,11 +252,12 @@ run_rw(uint64_t seed, int *out_done, int *out_torn, int *out_wr_conflict,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_done = atomic_load(&g_rw_done);
-	*out_torn = atomic_load(&g_rw_torn);
-	*out_wr_conflict = atomic_load(&g_rw_wr_conflict);
-	*out_rd_peak = atomic_load(&g_rw_rd_peak);
-	*out_hash = atomic_load(&g_rw_hash);
+	*out_done = xtc_atomic_load_i32(&g_rw_done, xtc_mo_seq_cst);
+	*out_torn = xtc_atomic_load_i32(&g_rw_torn, xtc_mo_seq_cst);
+	*out_wr_conflict =
+	    xtc_atomic_load_i32(&g_rw_wr_conflict, xtc_mo_seq_cst);
+	*out_rd_peak = xtc_atomic_load_i32(&g_rw_rd_peak, xtc_mo_seq_cst);
+	*out_hash = xtc_atomic_load_long(&g_rw_hash, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_lwlock_destroy(&g_rw_lk);
 	(void)xtc_exec_fini(e);

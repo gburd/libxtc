@@ -12,7 +12,6 @@
 #include "xtc_reg.h"
 #include "xtc_int.h"
 
-#include <stdatomic.h>
 #include <string.h>
 
 #include <stdint.h>
@@ -254,7 +253,7 @@ test_reg_dup_keys(const MunitParameter p[], void *d)
 struct ca_ctx {
 	xtc_reg_t  *reg;
 	xtc_loop_t *loop;               /* checker stops it when done */
-	_Atomic int worker_gone_seen;   /* checker: entry absent after crash */
+	int worker_gone_seen;           /* checker: entry absent after crash */
 };
 
 /* A worker that registers itself for monitored cleanup, then exits
@@ -279,7 +278,8 @@ ca_checker(void *arg)
 	 * DOWN, (c) drop_pid.  Give it several scheduler turns. */
 	for (i = 0; i < 200; i++) {
 		if (xtc_reg_whereis(c->reg, "worker", &pid) != XTC_OK) {
-			atomic_store(&c->worker_gone_seen, 1);
+			xtc_atomic_store_i32(&c->worker_gone_seen, 1,
+			    xtc_mo_seq_cst);
 			break;
 		}
 		xtc_proc_sleep(5LL * 1000 * 1000);   /* 5ms */
@@ -316,7 +316,9 @@ test_reg_crash_aware(const MunitParameter p[], void *d)
 	 * once it has its answer, so xtc_loop_run returns. */
 	(void)xtc_loop_run(loop);
 
-	munit_assert_int(atomic_load(&c.worker_gone_seen), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&c.worker_gone_seen,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
 
 	xtc_reg_destroy(r);
 	(void)xtc_loop_fini(loop);

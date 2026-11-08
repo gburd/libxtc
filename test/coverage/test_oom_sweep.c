@@ -33,7 +33,6 @@
 
 #define _GNU_SOURCE
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -80,23 +79,32 @@ static void trace_site(void) { }
  * point.  Live allocations are counted always. */
 
 static struct __os_alloc_hook g_real;
-static _Atomic int  g_armed;
-static _Atomic long g_seq;        /* armed allocations this step */
+static int g_armed;
+static long g_seq;                /* armed allocations this step */
 static long         g_fail_n;     /* fail the Nth armed one; 0 = never */
-static _Atomic long g_failed;     /* injected failures this step */
-static _Atomic long g_live;       /* successful allocs minus frees */
+static long g_failed;             /* injected failures this step */
+static long g_live;               /* successful allocs minus frees */
 
-static void arm(void)    { atomic_store(&g_armed, 1); }
-static void disarm(void) { atomic_store(&g_armed, 0); }
+static void
+arm(void)
+{
+	xtc_atomic_store_i32(&g_armed, 1, xtc_mo_seq_cst);
+}
+static void
+disarm(void)
+{
+	xtc_atomic_store_i32(&g_armed, 0, xtc_mo_seq_cst);
+}
 
 static int
 should_fail(void)
 {
 	long n;
-	if (!atomic_load(&g_armed)) return 0;
-	n = atomic_fetch_add(&g_seq, 1) + 1;
+	if (!xtc_atomic_load_i32(&g_armed, xtc_mo_seq_cst))
+		return 0;
+	n = xtc_atomic_fetch_add_long(&g_seq, 1, xtc_mo_seq_cst) + 1;
 	if (g_fail_n > 0 && n == g_fail_n) {
-		atomic_fetch_add(&g_failed, 1);
+		xtc_atomic_fetch_add_long(&g_failed, 1, xtc_mo_seq_cst);
 		trace_site();
 		return 1;
 	}
@@ -109,7 +117,8 @@ h_malloc(size_t n)
 	void *p;
 	if (should_fail()) return NULL;
 	p = g_real.malloc(n);
-	if (p != NULL) atomic_fetch_add(&g_live, 1);
+	if (p != NULL)
+		xtc_atomic_fetch_add_long(&g_live, 1, xtc_mo_seq_cst);
 	return p;
 }
 static void *
@@ -118,7 +127,8 @@ h_calloc(size_t n, size_t sz)
 	void *p;
 	if (should_fail()) return NULL;
 	p = g_real.calloc(n, sz);
-	if (p != NULL) atomic_fetch_add(&g_live, 1);
+	if (p != NULL)
+		xtc_atomic_fetch_add_long(&g_live, 1, xtc_mo_seq_cst);
 	return p;
 }
 static void *
@@ -127,13 +137,15 @@ h_realloc(void *o, size_t sz)
 	void *p;
 	if (should_fail()) return NULL;
 	p = g_real.realloc(o, sz);
-	if (o == NULL && p != NULL) atomic_fetch_add(&g_live, 1);
+	if (o == NULL && p != NULL)
+		xtc_atomic_fetch_add_long(&g_live, 1, xtc_mo_seq_cst);
 	return p;
 }
 static void
 h_free(void *p)
 {
-	if (p != NULL) atomic_fetch_sub(&g_live, 1);
+	if (p != NULL)
+		xtc_atomic_fetch_sub_long(&g_live, 1, xtc_mo_seq_cst);
 	g_real.free(p);
 }
 static void *
@@ -142,13 +154,15 @@ h_aligned(size_t a, size_t sz)
 	void *p;
 	if (should_fail()) return NULL;
 	p = g_real.aligned(a, sz);
-	if (p != NULL) atomic_fetch_add(&g_live, 1);
+	if (p != NULL)
+		xtc_atomic_fetch_add_long(&g_live, 1, xtc_mo_seq_cst);
 	return p;
 }
 static void
 h_aligned_free(void *p)
 {
-	if (p != NULL) atomic_fetch_sub(&g_live, 1);
+	if (p != NULL)
+		xtc_atomic_fetch_sub_long(&g_live, 1, xtc_mo_seq_cst);
 	g_real.aligned_free(p);
 }
 
@@ -185,23 +199,23 @@ sweep(const char *what, step_fn step)
 
 	for (n = 1; n <= SWEEP_MAX; n++) {
 		(void)xtc_slab_reap_all();
-		live0 = atomic_load(&g_live);
-		atomic_store(&g_seq, 0);
-		atomic_store(&g_failed, 0);
+		live0 = xtc_atomic_load_long(&g_live, xtc_mo_seq_cst);
+		xtc_atomic_store_long(&g_seq, 0, xtc_mo_seq_cst);
+		xtc_atomic_store_long(&g_failed, 0, xtc_mo_seq_cst);
 		g_fail_n = n;
 		ok = 0;
 		rc = step(&ok);
 		disarm();
 		g_fail_n = 0;
 		(void)xtc_slab_reap_all();
-		leaked = atomic_load(&g_live) - live0;
+		leaked = xtc_atomic_load_long(&g_live, xtc_mo_seq_cst) - live0;
 		if (leaked != 0 || ok != 1)
 			munit_logf(MUNIT_LOG_ERROR,
 			    "%s: failing armed allocation #%ld: rc=%d ok=%d "
 			    "leaked=%ld", what, n, rc, ok, leaked);
 		munit_assert_long(leaked, ==, 0);
 		munit_assert_int(ok, ==, 1);
-		if (atomic_load(&g_failed) == 0) {
+		if (xtc_atomic_load_long(&g_failed, xtc_mo_seq_cst) == 0) {
 			/* Allocation #n was never requested: the target ran to
 			 * completion with no injected failure. */
 			munit_assert_int(rc, ==, XTC_OK);
@@ -247,8 +261,13 @@ test_loop_init(const MunitParameter p[], void *d)
 
 /* ---- proc spawn ------------------------------------------------------ */
 
-static _Atomic int g_ran;
-static void p_mark(void *a) { (void)a; atomic_fetch_add(&g_ran, 1); }
+static int g_ran;
+static void
+p_mark(void *a)
+{
+	(void)a;
+	xtc_atomic_fetch_add_i32(&g_ran, 1, xtc_mo_seq_cst);
+}
 
 static int
 step_spawn(int *ok)
@@ -257,7 +276,7 @@ step_spawn(int *ok)
 	xtc_pid_t pid = XTC_PID_NONE;
 	int rc;
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
-	atomic_store(&g_ran, 0);
+	xtc_atomic_store_i32(&g_ran, 0, xtc_mo_seq_cst);
 	arm();
 	rc = xtc_proc_spawn(loop, p_mark, NULL, NULL, &pid);
 	disarm();
@@ -266,9 +285,10 @@ step_spawn(int *ok)
 	/* A spawn that reported success must have produced a pid AND a
 	 * proc that ran; a failed one must not have run anything. */
 	if (rc == XTC_OK)
-		*ok = !xtc_pid_is_none(pid) && atomic_load(&g_ran) == 1;
+		*ok = !xtc_pid_is_none(pid) &&
+		    xtc_atomic_load_i32(&g_ran, xtc_mo_seq_cst) == 1;
 	else
-		*ok = atomic_load(&g_ran) == 0;
+		*ok = xtc_atomic_load_i32(&g_ran, xtc_mo_seq_cst) == 0;
 	return rc;
 }
 
@@ -352,8 +372,13 @@ test_mbox_large(const MunitParameter p[], void *d)
 
 /* ---- timer set ------------------------------------------------------ */
 
-static _Atomic int g_fired;
-static void t_mark(void *u) { (void)u; atomic_fetch_add(&g_fired, 1); }
+static int g_fired;
+static void
+t_mark(void *u)
+{
+	(void)u;
+	xtc_atomic_fetch_add_i32(&g_fired, 1, xtc_mo_seq_cst);
+}
 
 static int
 step_timer(int *ok)
@@ -362,16 +387,17 @@ step_timer(int *ok)
 	xtc_timer_t *tm = NULL;
 	int rc;
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
-	atomic_store(&g_fired, 0);
+	xtc_atomic_store_i32(&g_fired, 0, xtc_mo_seq_cst);
 	arm();
 	rc = xtc_timer_set(loop, 1000, t_mark, NULL, &tm);
 	disarm();
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	if (rc == XTC_OK)
-		*ok = (tm != NULL && atomic_load(&g_fired) == 1);
+		*ok = (tm != NULL &&
+		    xtc_atomic_load_i32(&g_fired, xtc_mo_seq_cst) == 1);
 	else
-		*ok = (atomic_load(&g_fired) == 0);
+		*ok = (xtc_atomic_load_i32(&g_fired, xtc_mo_seq_cst) == 0);
 	return rc;
 }
 

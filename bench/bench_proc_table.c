@@ -37,7 +37,6 @@
  *	Usage: bench_proc_table [targets] [msgs_per_sender]
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,8 +58,8 @@ static long      g_msgs_per_sender;
 static int       g_nsenders;
 static int       g_nloops;
 
-static atomic_long g_sends_done;      /* sends issued (all senders) */
-static atomic_int  g_senders_done;
+static long g_sends_done; /* sends issued (all senders) */
+static int g_senders_done;
 static xtc_exec_t *g_exec;
 
 /* Sink: drain the mailbox forever; stopped by exec_stop at the end. */
@@ -92,12 +91,12 @@ sender_body(void *arg)
 		(void)xtc_send(g_targets[t], &payload, sizeof payload);
 		if (++t >= g_ntargets)
 			t = 0;
-		atomic_fetch_add_explicit(&g_sends_done, 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_add_long(&g_sends_done, 1, xtc_mo_relaxed);
 		if ((i & 255) == 0)
 			xtc_yield();
 	}
-	if (atomic_fetch_add(&g_senders_done, 1) + 1 == g_nsenders)
+	if (xtc_atomic_fetch_add_i32(&g_senders_done, 1, xtc_mo_seq_cst) + 1 ==
+	    g_nsenders)
 		(void)xtc_exec_stop(g_exec);
 }
 
@@ -140,8 +139,8 @@ run_once(int senders)
 
 	g_nsenders = senders;
 	g_nloops = senders;   /* one loop (OS thread) per sender: max cross-thread contention on loop 0's table */
-	atomic_store(&g_sends_done, 0);
-	atomic_store(&g_senders_done, 0);
+	xtc_atomic_store_long(&g_sends_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_senders_done, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, (unsigned)senders) != XTC_OK)
 		return -1.0;
@@ -154,7 +153,7 @@ run_once(int senders)
 	if (xtc_exec_run(e) != XTC_OK) { (void)xtc_exec_fini(e); return -1.0; }
 	t1 = now_sec();
 
-	total = atomic_load(&g_sends_done);
+	total = xtc_atomic_load_long(&g_sends_done, xtc_mo_seq_cst);
 	(void)xtc_exec_fini(e);
 	return (t1 > t0) ? (double)total / (t1 - t0) : 0.0;
 }

@@ -21,7 +21,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,8 +47,8 @@
 #define DEEP_BYTES 16384    /* a frame well above one page, so parking it
                              * leaves a clearly-reclaimable tail */
 
-static atomic_int g_ok;      /* fibers that round-tripped their sentinel */
-static atomic_int g_done;
+static int g_ok; /* fibers that round-tripped their sentinel */
+static int g_done;
 
 /* Force the compiler not to optimize the deep buffer away. */
 static void
@@ -107,8 +106,8 @@ worker(void *arg)
 			good = 0;
 	}
 	if (good)
-		atomic_fetch_add(&g_ok, 1);
-	atomic_fetch_add(&g_done, 1);
+		xtc_atomic_fetch_add_i32(&g_ok, 1, xtc_mo_seq_cst);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_seq_cst);
 }
 
 /* A driver that keeps the loop busy so the workers actually park+resume
@@ -117,7 +116,7 @@ static void
 driver(void *arg)
 {
 	int n = (int)(intptr_t)arg;
-	while (atomic_load(&g_done) < n)
+	while (xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst) < n)
 		xtc_yield();
 }
 
@@ -128,8 +127,8 @@ run_workers(int n, int rounds)
 	xtc_loop_t *l;
 	int i;
 
-	atomic_store(&g_ok, 0);
-	atomic_store(&g_done, 0);
+	xtc_atomic_store_i32(&g_ok, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
 	l = xtc_exec_loop(e, 0);
@@ -139,8 +138,9 @@ run_workers(int n, int rounds)
 	(void)xtc_proc_spawn(l, driver, (void *)(intptr_t)n, NULL, NULL);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 
-	munit_assert_int(atomic_load(&g_done), ==, n);
-	munit_assert_int(atomic_load(&g_ok), ==, n);   /* all sentinels survived */
+	munit_assert_int(xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst), ==, n);
+	munit_assert_int(xtc_atomic_load_i32(&g_ok, xtc_mo_seq_cst), ==,
+	    n); /* all sentinels survived */
 	(void)xtc_exec_fini(e);
 	return MUNIT_OK;
 }
@@ -282,9 +282,9 @@ life_maps(void)
 }
 
 static long          life_n;          /* procs to spawn in total */
-static atomic_long   life_live;       /* spawned and not yet exited */
-static atomic_long   life_started;
-static atomic_long   life_exited;
+static long life_live;                /* spawned and not yet exited */
+static long life_started;
+static long life_exited;
 static long          life_spawn_fail; /* first failing index, or -1 */
 static int           life_mode;       /* 0 return, 1 exit_self,
                                        * 2 killed parked, 3 killed running */
@@ -295,8 +295,8 @@ static void
 life_on_exit(void *arg)
 {
 	(void)arg;
-	atomic_fetch_sub(&life_live, 1);
-	atomic_fetch_add(&life_exited, 1);
+	xtc_atomic_fetch_sub_long(&life_live, 1, xtc_mo_seq_cst);
+	xtc_atomic_fetch_add_long(&life_exited, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -305,7 +305,7 @@ life_child(void *arg)
 	int i;
 	(void)arg;
 	(void)xtc_proc_at_exit(life_on_exit, NULL);
-	atomic_fetch_add(&life_started, 1);
+	xtc_atomic_fetch_add_long(&life_started, 1, xtc_mo_seq_cst);
 	switch (life_mode) {
 	case 1:
 		xtc_yield();
@@ -343,12 +343,15 @@ life_spawner(void *arg)
 	while (i < life_n) {
 		if (life_mode < 2) {
 			/* Steady state: keep up to LIFE_LIVE alive. */
-			while (atomic_load(&life_live) >= LIFE_LIVE)
+			while (xtc_atomic_load_long(&life_live,
+			           xtc_mo_seq_cst) >= LIFE_LIVE)
 				xtc_yield();
-			atomic_fetch_add(&life_live, 1);
+			xtc_atomic_fetch_add_long(&life_live, 1,
+			    xtc_mo_seq_cst);
 			if (xtc_proc_spawn(l, life_child, NULL, NULL,
 			    NULL) != XTC_OK) {
-				atomic_fetch_sub(&life_live, 1);
+				xtc_atomic_fetch_sub_long(&life_live, 1,
+				    xtc_mo_seq_cst);
 				life_spawn_fail = i;
 				return;
 			}
@@ -360,20 +363,22 @@ life_spawner(void *arg)
 		/* Kill modes: a batch of LIFE_LIVE parked (2) or runnable (3)
 		 * procs, all started, then all killed. */
 		for (k = 0; k < LIFE_LIVE && i < life_n; k++, i++) {
-			atomic_fetch_add(&life_live, 1);
+			xtc_atomic_fetch_add_long(&life_live, 1,
+			    xtc_mo_seq_cst);
 			if (xtc_proc_spawn(l, life_child, NULL, NULL,
 			    &pids[k]) != XTC_OK) {
-				atomic_fetch_sub(&life_live, 1);
+				xtc_atomic_fetch_sub_long(&life_live, 1,
+				    xtc_mo_seq_cst);
 				life_spawn_fail = i;
 				return;
 			}
 		}
-		while (atomic_load(&life_started) < i)
+		while (xtc_atomic_load_long(&life_started, xtc_mo_seq_cst) < i)
 			xtc_yield();
 		life_sample();
 		for (j = 0; j < k; j++)
 			(void)xtc_exit_pid(pids[j], 9);
-		while (atomic_load(&life_exited) < i)
+		while (xtc_atomic_load_long(&life_exited, xtc_mo_seq_cst) < i)
 			xtc_yield();
 	}
 }
@@ -388,9 +393,9 @@ life_run(long n, int mode)
 	life_n = n;
 	life_mode = mode;
 	life_spawn_fail = -1;
-	atomic_store(&life_live, 0);
-	atomic_store(&life_started, 0);
-	atomic_store(&life_exited, 0);
+	xtc_atomic_store_long(&life_live, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&life_started, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&life_exited, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_loop_init(&l), ==, XTC_OK);
 	m0 = life_maps();
@@ -407,14 +412,15 @@ life_run(long n, int mode)
 	rss_grow = life_rss_peak - r0;
 	/* stdout, so the numbers show on a passing run too. */
 	printf("  mode %d: %ld spawned, %ld exited, maps +%ld (peak), "
-	    "rss +%ld kB (peak); at end maps +%ld rss +%ld kB\n",
-	    mode, n, (long)atomic_load(&life_exited), maps_grow, rss_grow,
-	    m1 - m0, r1 - r0);
+	       "rss +%ld kB (peak); at end maps +%ld rss +%ld kB\n",
+	    mode, n, (long)xtc_atomic_load_long(&life_exited, xtc_mo_seq_cst),
+	    maps_grow, rss_grow, m1 - m0, r1 - r0);
 	fflush(stdout);
 	(void)xtc_loop_fini(l);
 
 	munit_assert_long(life_spawn_fail, ==, -1);
-	munit_assert_long(atomic_load(&life_exited), ==, n);
+	munit_assert_long(xtc_atomic_load_long(&life_exited, xtc_mo_seq_cst),
+	    ==, n);
 	/* Two VMAs per live fiber stack, plus the bounded stack pool and
 	 * allocator slack -- not two per historical spawn. */
 	munit_assert_long(maps_grow, <, 2 * LIFE_LIVE + LIFE_MAPS_SLACK);
@@ -440,7 +446,7 @@ life_run(long n, int mode)
 #define LIFE_QEMU_MAPS 51200L
 
 static xtc_exec_t   *life_exec;
-static atomic_long   life_mig_done;
+static long life_mig_done;
 
 static void
 life_mig_child(void *arg)
@@ -449,8 +455,8 @@ life_mig_child(void *arg)
 	(void)arg;
 	for (i = 0; i < 4; i++)
 		xtc_yield();
-	atomic_fetch_sub(&life_live, 1);
-	atomic_fetch_add(&life_mig_done, 1);
+	xtc_atomic_fetch_sub_long(&life_live, 1, xtc_mo_seq_cst);
+	xtc_atomic_fetch_add_long(&life_mig_done, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -464,19 +470,21 @@ life_mig_spawner(void *arg)
 	o.size = sizeof o;
 	o.migratable = 1;
 	for (i = 0; i < life_n; i++) {
-		while (atomic_load(&life_live) >= LIFE_LIVE)
+		while (xtc_atomic_load_long(&life_live, xtc_mo_seq_cst) >=
+		    LIFE_LIVE)
 			xtc_yield();
-		atomic_fetch_add(&life_live, 1);
+		xtc_atomic_fetch_add_long(&life_live, 1, xtc_mo_seq_cst);
 		if (xtc_proc_spawn(l, life_mig_child, NULL, &o, NULL) !=
 		    XTC_OK) {
-			atomic_fetch_sub(&life_live, 1);
+			xtc_atomic_fetch_sub_long(&life_live, 1,
+			    xtc_mo_seq_cst);
 			life_spawn_fail = i;
 			break;
 		}
 		if ((i & 1023) == 0)
 			life_sample();
 	}
-	while (atomic_load(&life_live) > 0)
+	while (xtc_atomic_load_long(&life_live, xtc_mo_seq_cst) > 0)
 		xtc_yield();
 	life_sample();
 	(void)xtc_exec_stop(life_exec);
@@ -492,8 +500,8 @@ test_reclaim_migratable(const MunitParameter p[], void *d)
 
 	life_n = 100000;
 	life_spawn_fail = -1;
-	atomic_store(&life_live, 0);
-	atomic_store(&life_mig_done, 0);
+	xtc_atomic_store_long(&life_live, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&life_mig_done, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_exec_init(&life_exec, LIFE_LOOPS), ==, XTC_OK);
 	xtc_exec_set_service_mode(life_exec, 1);
 	m0 = life_maps();
@@ -514,13 +522,14 @@ test_reclaim_migratable(const MunitParameter p[], void *d)
 	maps_grow = life_maps_peak - m0;
 	rss_grow = life_rss_peak - r0;
 	printf("  migratable: %ld done, %lld steals, maps +%ld (peak), "
-	    "rss +%ld kB (peak); after exec_fini maps %+ld\n",
-	    (long)atomic_load(&life_mig_done), (long long)steals, maps_grow,
-	    rss_grow, m1 - m0);
+	       "rss +%ld kB (peak); after exec_fini maps %+ld\n",
+	    (long)xtc_atomic_load_long(&life_mig_done, xtc_mo_seq_cst),
+	    (long long)steals, maps_grow, rss_grow, m1 - m0);
 	fflush(stdout);
 
 	munit_assert_long(life_spawn_fail, ==, -1);
-	munit_assert_long(atomic_load(&life_mig_done), ==, life_n);
+	munit_assert_long(xtc_atomic_load_long(&life_mig_done, xtc_mo_seq_cst),
+	    ==, life_n);
 	/* qemu-user (CI's riscv64 job) maps translation buffers and per-thread
 	 * state of its own into the guest's /proc/self/maps and grows them with
 	 * the 4-thread steal churn: +2000-4900 there, flat ~+900 on native

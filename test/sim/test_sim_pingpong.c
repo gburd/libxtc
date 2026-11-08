@@ -2,7 +2,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -22,8 +21,8 @@
 #define N_LOOPS 4
 #define N_PAIRS 8
 
-static atomic_int g_replies;
-static atomic_long g_hash;
+static int g_replies;
+static long g_hash;
 
 static void
 pong(void *arg)
@@ -53,13 +52,13 @@ ping(void *arg)
 	(void)xtc_send(pa->peer, &self, sizeof self);
 	if (xtc_recv(&m, &n, -1) == XTC_OK && m != NULL) {
 		free(m);
-		atomic_fetch_add_explicit(&g_replies, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_replies, 1, xtc_mo_relaxed);
 		/* Order-sensitive fold: the order replies are observed is a
 		 * function of the seed. */
-		h = atomic_load_explicit(&g_hash, memory_order_relaxed);
+		h = xtc_atomic_load_long(&g_hash, xtc_mo_relaxed);
 		h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(pa->id + 1));
-		atomic_store_explicit(&g_hash, h, memory_order_relaxed);
+		xtc_atomic_store_long(&g_hash, h, xtc_mo_relaxed);
 	}
 }
 
@@ -70,8 +69,8 @@ run_once(uint64_t seed, int *out_replies)
 {
 	xtc_exec_t *e = NULL;
 	int i;
-	atomic_store(&g_replies, 0);
-	atomic_store(&g_hash, 0);
+	xtc_atomic_store_i32(&g_replies, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) { *out_replies = -1; return -1; }
 
 	for (i = 0; i < N_PAIRS; i++) {
@@ -86,9 +85,9 @@ run_once(uint64_t seed, int *out_replies)
 		(void)xtc_proc_spawn(li, ping, &g_args[i], NULL, NULL);
 	}
 	(void)xtc_sim_exec_run(e, seed, 2000000);
-	*out_replies = atomic_load(&g_replies);
+	*out_replies = xtc_atomic_load_i32(&g_replies, xtc_mo_seq_cst);
 	(void)xtc_exec_fini(e);
-	return atomic_load(&g_hash);
+	return xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
 }
 
 int

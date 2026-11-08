@@ -41,7 +41,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,15 +56,15 @@ extern int __xtc_tnt_run_sim(const xtc_tnt_spec_t *spec, uint64_t seed,
 
 /* ---- Per-run observed results (reset each run) --------------------- */
 typedef struct results {
-	atomic_int counter_msgs;   /* ADDs handled by the counter */
-	atomic_int counter_value;  /* accumulated total */
-	atomic_int sink_handled;   /* PINGs the overflow sink actually ran */
-	atomic_int drop_full;      /* sends that hit MAILBOX_FULL */
-	atomic_int drop_stale;     /* sends that hit STALE_HANDLE */
-	atomic_int done_seen;      /* isolates torn down (DONE) */
-	atomic_int peer_got;       /* CROSS-SHARD delivery to shard 1 */
-	atomic_int timer_fired;    /* one-shot timer delivered */
-	atomic_int all_pass;       /* driver verdict for this run */
+	int counter_msgs;  /* ADDs handled by the counter */
+	int counter_value; /* accumulated total */
+	int sink_handled;  /* PINGs the overflow sink actually ran */
+	int drop_full;     /* sends that hit MAILBOX_FULL */
+	int drop_stale;    /* sends that hit STALE_HANDLE */
+	int done_seen;     /* isolates torn down (DONE) */
+	int peer_got;      /* CROSS-SHARD delivery to shard 1 */
+	int timer_fired;   /* one-shot timer delivered */
+	int all_pass;      /* driver verdict for this run */
 } results_t;
 
 static results_t g_res;
@@ -101,8 +100,10 @@ counter_handler(void *s, xtc_tnt_message_t *m)
 	counter_iso_t *c = xtc_tnt_self_as(counter_iso_t, s);
 	if (m->tag == TAG_ADD) {
 		c->total += *xtc_tnt_payload_as(int, m);
-		atomic_fetch_add(&g_res.counter_msgs, 1);
-		atomic_store(&g_res.counter_value, c->total);
+		xtc_atomic_fetch_add_i32(&g_res.counter_msgs, 1,
+		    xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&g_res.counter_value, c->total,
+		    xtc_mo_seq_cst);
 	}
 	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 }
@@ -120,12 +121,13 @@ sink_handler(void *s, xtc_tnt_message_t *m)
 {
 	sink_iso_t *k = xtc_tnt_self_as(sink_iso_t, s);
 	if (m->tag == TAG_DONE) {
-		atomic_fetch_add(&g_res.done_seen, 1);
+		xtc_atomic_fetch_add_i32(&g_res.done_seen, 1, xtc_mo_seq_cst);
 		return XTC_TNT_TRANSITION_DONE;
 	}
 	if (m->tag == TAG_PING) {
 		k->seen++;
-		atomic_fetch_add(&g_res.sink_handled, 1);
+		xtc_atomic_fetch_add_i32(&g_res.sink_handled, 1,
+		    xtc_mo_seq_cst);
 	}
 	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 }
@@ -142,7 +144,10 @@ static xtc_tnt_transition_t
 peer_handler(void *s, xtc_tnt_message_t *m)
 {
 	peer_iso_t *p = xtc_tnt_self_as(peer_iso_t, s);
-	if (m->tag == TAG_PEER) { p->hits++; atomic_store(&g_res.peer_got, 1); }
+	if (m->tag == TAG_PEER) {
+		p->hits++;
+		xtc_atomic_store_i32(&g_res.peer_got, 1, xtc_mo_seq_cst);
+	}
 	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 }
 
@@ -206,7 +211,8 @@ driver_handler(void *s, xtc_tnt_message_t *m)
 		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 	}
 	if (d->phase == 2) {
-		if (atomic_load(&g_res.counter_msgs) < N_ADD) {
+		if (xtc_atomic_load_i32(&g_res.counter_msgs, xtc_mo_seq_cst) <
+		    N_ADD) {
 			/* counter has not drained yet -- keep polling. */
 			(void)xtc_tnt_send(xtc_tnt_self(), TAG_KICK, NULL, 0);
 			return XTC_TNT_TRANSITION_WAIT_MESSAGE;
@@ -223,7 +229,8 @@ driver_handler(void *s, xtc_tnt_message_t *m)
 		for (i = 0; i < N_FLOOD; i++)
 			if (xtc_tnt_send(d->fullsink, TAG_PING, NULL, 0) ==
 			    XTC_TNT_SEND_MAILBOX_FULL)
-				atomic_fetch_add(&g_res.drop_full, 1);
+				xtc_atomic_fetch_add_i32(&g_res.drop_full, 1,
+				    xtc_mo_seq_cst);
 		d->phase = 4;
 		(void)xtc_tnt_send(xtc_tnt_self(), TAG_KICK, NULL, 0);
 		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
@@ -237,7 +244,7 @@ driver_handler(void *s, xtc_tnt_message_t *m)
 		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 	}
 	if (d->phase == 5) {
-		if (atomic_load(&g_res.done_seen) < 1) {
+		if (xtc_atomic_load_i32(&g_res.done_seen, xtc_mo_seq_cst) < 1) {
 			(void)xtc_tnt_send(xtc_tnt_self(), TAG_KICK, NULL, 0);
 			return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 		}
@@ -245,7 +252,8 @@ driver_handler(void *s, xtc_tnt_message_t *m)
 		 * OLD handle must be STALE (never mis-delivered). */
 		if (xtc_tnt_send(d->sink, TAG_PING, NULL, 0) ==
 		    XTC_TNT_SEND_STALE_HANDLE)
-			atomic_fetch_add(&g_res.drop_stale, 1);
+			xtc_atomic_fetch_add_i32(&g_res.drop_stale, 1,
+			    xtc_mo_seq_cst);
 		/* Arm a one-shot TIMER.  The cross-SHARD send to the peer on
 		 * shard 1 (and its retry until the async spawn_on materialises
 		 * the peer) happens in the timer handler -- so this run
@@ -263,14 +271,14 @@ driver_handler(void *s, xtc_tnt_message_t *m)
 static xtc_tnt_transition_t
 driver_timer(driver_iso_t *d)
 {
-	atomic_store(&g_res.timer_fired, 1);
+	xtc_atomic_store_i32(&g_res.timer_fired, 1, xtc_mo_seq_cst);
 	/* CROSS-SHARD send to the peer on shard 1.  spawn_on is async, so
 	 * the peer may not exist on the first attempt (STALE); retry on the
 	 * next timer tick.  The seam guarantees a successful cross-shard
 	 * send wakes shard 1 deterministically -- and this timer being
 	 * redelivered after a cross-shard send is the exact case the seam
 	 * fixed. */
-	if (atomic_load(&g_res.peer_got) < 1) {
+	if (xtc_atomic_load_i32(&g_res.peer_got, xtc_mo_seq_cst) < 1) {
 		(void)xtc_tnt_send(d->peer, TAG_PEER, NULL, 0);
 		xtc_tnt_register_timer(2LL * 1000 * 1000, XTC_TNT_TAG_TIMER);
 		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
@@ -278,21 +286,30 @@ driver_timer(driver_iso_t *d)
 	{
 		int total = 0, i, pass = 1;
 		for (i = 1; i <= N_ADD; i++) total += i;
-		pass &= (atomic_load(&g_res.counter_value) == total);
-		pass &= (atomic_load(&g_res.counter_msgs) == N_ADD);
+		pass &= (xtc_atomic_load_i32(&g_res.counter_value,
+		             xtc_mo_seq_cst) == total);
+		pass &= (xtc_atomic_load_i32(&g_res.counter_msgs,
+		             xtc_mo_seq_cst) == N_ADD);
 		/* Flooding N_FLOOD into a cap-SINK_CAP mailbox in ONE turn
 		 * accepts exactly SINK_CAP and drops the rest with
 		 * MAILBOX_FULL (nothing silently lost).  The accepted ones are
 		 * then handled, but the last may still be pending when we stop,
 		 * so assert the drop count exactly and handled as a bound. */
-		pass &= (atomic_load(&g_res.drop_full) == N_FLOOD - SINK_CAP);
-		pass &= (atomic_load(&g_res.sink_handled) >= 1);
-		pass &= (atomic_load(&g_res.sink_handled) <= SINK_CAP);
-		pass &= (atomic_load(&g_res.drop_stale) == 1);
-		pass &= (atomic_load(&g_res.done_seen) == 1);
-		pass &= (atomic_load(&g_res.peer_got) == 1);
-		pass &= (atomic_load(&g_res.timer_fired) == 1);
-		atomic_store(&g_res.all_pass, pass);
+		pass &= (xtc_atomic_load_i32(&g_res.drop_full,
+		             xtc_mo_seq_cst) == N_FLOOD - SINK_CAP);
+		pass &= (xtc_atomic_load_i32(&g_res.sink_handled,
+		             xtc_mo_seq_cst) >= 1);
+		pass &= (xtc_atomic_load_i32(&g_res.sink_handled,
+		             xtc_mo_seq_cst) <= SINK_CAP);
+		pass &= (xtc_atomic_load_i32(&g_res.drop_stale,
+		             xtc_mo_seq_cst) == 1);
+		pass &= (xtc_atomic_load_i32(&g_res.done_seen,
+		             xtc_mo_seq_cst) == 1);
+		pass &=
+		    (xtc_atomic_load_i32(&g_res.peer_got, xtc_mo_seq_cst) == 1);
+		pass &= (xtc_atomic_load_i32(&g_res.timer_fired,
+		             xtc_mo_seq_cst) == 1);
+		xtc_atomic_store_i32(&g_res.all_pass, pass, xtc_mo_seq_cst);
 		xtc_tnt_stop();
 		return XTC_TNT_TRANSITION_DONE;
 	}
@@ -340,19 +357,21 @@ run_one(uint64_t seed, int *pass_out, int *rc_out)
 
 	rc = __xtc_tnt_run_sim(&spec, seed, 5000000);
 	if (rc_out) *rc_out = rc;
-	if (pass_out) *pass_out = atomic_load(&g_res.all_pass);
+	if (pass_out)
+		*pass_out =
+		    xtc_atomic_load_i32(&g_res.all_pass, xtc_mo_seq_cst);
 
 	fp = 1469598103934665603ull;
 #define MIX(v) do { fp ^= (uint64_t)(uint32_t)(v); \
 	                    fp *= 1099511628211ull; } while (0)
-	MIX(atomic_load(&g_res.counter_msgs));
-	MIX(atomic_load(&g_res.counter_value));
-	MIX(atomic_load(&g_res.sink_handled));
-	MIX(atomic_load(&g_res.drop_full));
-	MIX(atomic_load(&g_res.drop_stale));
-	MIX(atomic_load(&g_res.done_seen));
-	MIX(atomic_load(&g_res.peer_got));
-	MIX(atomic_load(&g_res.timer_fired));
+	MIX(xtc_atomic_load_i32(&g_res.counter_msgs, xtc_mo_seq_cst));
+	MIX(xtc_atomic_load_i32(&g_res.counter_value, xtc_mo_seq_cst));
+	MIX(xtc_atomic_load_i32(&g_res.sink_handled, xtc_mo_seq_cst));
+	MIX(xtc_atomic_load_i32(&g_res.drop_full, xtc_mo_seq_cst));
+	MIX(xtc_atomic_load_i32(&g_res.drop_stale, xtc_mo_seq_cst));
+	MIX(xtc_atomic_load_i32(&g_res.done_seen, xtc_mo_seq_cst));
+	MIX(xtc_atomic_load_i32(&g_res.peer_got, xtc_mo_seq_cst));
+	MIX(xtc_atomic_load_i32(&g_res.timer_fired, xtc_mo_seq_cst));
 	MIX(rc);
 #undef MIX
 	return fp;
@@ -384,17 +403,26 @@ main(int argc, char **argv)
 			continue;
 		}
 		if (!pass) {
-			printf("  seed 0x%016llx: invariants FAIL "
+			printf(
+			    "  seed 0x%016llx: invariants FAIL "
 			    "(cv=%d cm=%d sh=%d df=%d ds=%d dn=%d pg=%d tf=%d)\n",
 			    (unsigned long long)seed,
-			    atomic_load(&g_res.counter_value),
-			    atomic_load(&g_res.counter_msgs),
-			    atomic_load(&g_res.sink_handled),
-			    atomic_load(&g_res.drop_full),
-			    atomic_load(&g_res.drop_stale),
-			    atomic_load(&g_res.done_seen),
-			    atomic_load(&g_res.peer_got),
-			    atomic_load(&g_res.timer_fired));
+			    xtc_atomic_load_i32(&g_res.counter_value,
+			        xtc_mo_seq_cst),
+			    xtc_atomic_load_i32(&g_res.counter_msgs,
+			        xtc_mo_seq_cst),
+			    xtc_atomic_load_i32(&g_res.sink_handled,
+			        xtc_mo_seq_cst),
+			    xtc_atomic_load_i32(&g_res.drop_full,
+			        xtc_mo_seq_cst),
+			    xtc_atomic_load_i32(&g_res.drop_stale,
+			        xtc_mo_seq_cst),
+			    xtc_atomic_load_i32(&g_res.done_seen,
+			        xtc_mo_seq_cst),
+			    xtc_atomic_load_i32(&g_res.peer_got,
+			        xtc_mo_seq_cst),
+			    xtc_atomic_load_i32(&g_res.timer_fired,
+			        xtc_mo_seq_cst));
 			fails++;
 			continue;
 		}

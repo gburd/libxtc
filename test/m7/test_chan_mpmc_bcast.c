@@ -19,7 +19,11 @@
 #define MPMC_PER   500
 
 struct mpmc_p { xtc_chan_mpmc_t *c; int id; };
-struct mpmc_c { xtc_chan_mpmc_t *c; int taken; _Atomic int *seen; };
+struct mpmc_c {
+	xtc_chan_mpmc_t *c;
+	int taken;
+	int *seen;
+};
 
 static void *
 mpmc_prod(void *a)
@@ -43,14 +47,15 @@ mpmc_cons(void *a)
 		void *v;
 		int rc = xtc_chan_mpmc_try_recv(c->c, &v);
 		if (rc == XTC_E_AGAIN) {
-			if (atomic_load_explicit(c->seen, memory_order_relaxed) == total)
+			if (xtc_atomic_load_i32(c->seen, xtc_mo_relaxed) ==
+			    total)
 				break;
 			sched_yield();
 			continue;
 		}
 		if (rc != XTC_OK) break;
 		c->taken++;
-		atomic_fetch_add_explicit(c->seen, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(c->seen, 1, xtc_mo_relaxed);
 	}
 	return NULL;
 }
@@ -62,7 +67,7 @@ test_mpmc(const MunitParameter p[], void *d)
 	pthread_t prods[MPMC_PRODS], cons[MPMC_CONS];
 	struct mpmc_p ps[MPMC_PRODS];
 	struct mpmc_c cs[MPMC_CONS];
-	_Atomic int seen = 0;
+	int seen = 0;
 	int total_taken = 0, i;
 	(void)p; (void)d;
 
@@ -79,7 +84,8 @@ test_mpmc(const MunitParameter p[], void *d)
 	for (i = 0; i < MPMC_CONS; i++) pthread_join(cons[i], NULL);
 	for (i = 0; i < MPMC_CONS; i++) total_taken += cs[i].taken;
 	munit_assert_int(total_taken, ==, MPMC_PRODS * MPMC_PER);
-	munit_assert_int((int)atomic_load(&seen), ==, MPMC_PRODS * MPMC_PER);
+	munit_assert_int((int)xtc_atomic_load_i32(&seen, xtc_mo_seq_cst), ==,
+	    MPMC_PRODS * MPMC_PER);
 	xtc_chan_mpmc_destroy(c);
 	return MUNIT_OK;
 }

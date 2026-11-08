@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -37,8 +36,8 @@
 #define N_PAIRS 16
 #define N_HOPS  3
 
-static atomic_int  g_replies;
-static atomic_long g_app_hash;
+static int g_replies;
+static long g_app_hash;
 
 static void
 pong(void *arg)
@@ -75,11 +74,11 @@ ping(void *arg)
 		if (xtc_recv(&m, &n, -1) != XTC_OK || m == NULL)
 			return;
 		free(m);
-		atomic_fetch_add_explicit(&g_replies, 1, memory_order_relaxed);
-		h = atomic_load_explicit(&g_app_hash, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_replies, 1, xtc_mo_relaxed);
+		h = xtc_atomic_load_long(&g_app_hash, xtc_mo_relaxed);
 		h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(pa->id + 1));
-		atomic_store_explicit(&g_app_hash, h, memory_order_relaxed);
+		xtc_atomic_store_long(&g_app_hash, h, xtc_mo_relaxed);
 	}
 }
 
@@ -100,8 +99,8 @@ run_once(uint64_t seed, unsigned pct, struct run_result *r)
 {
 	xtc_exec_t *e = NULL;
 	int i;
-	atomic_store(&g_replies, 0);
-	atomic_store(&g_app_hash, 0);
+	xtc_atomic_store_i32(&g_replies, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_app_hash, 0, xtc_mo_seq_cst);
 	memset(r, 0, sizeof *r);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) { r->rc = -1; return; }
@@ -121,8 +120,8 @@ run_once(uint64_t seed, unsigned pct, struct run_result *r)
 	}
 
 	r->rc = xtc_sim_exec_run(e, seed, 5000000);
-	r->replies = atomic_load(&g_replies);
-	r->app_hash = atomic_load(&g_app_hash);
+	r->replies = xtc_atomic_load_i32(&g_replies, xtc_mo_seq_cst);
+	r->app_hash = xtc_atomic_load_long(&g_app_hash, xtc_mo_seq_cst);
 	r->steal_fires = xtc_sim_fault_point_fires("sched.steal.pre_cas");
 	r->inbox_fires = xtc_sim_fault_point_fires("sched.inbox.pre_push");
 	r->enqueue_fires =
@@ -140,13 +139,13 @@ run_once(uint64_t seed, unsigned pct, struct run_result *r)
  * sched.enqueue.post_deque_push point (deque push) and the
  * sched.steal.pre_cas point (a thief stealing from the loaded loop). */
 #define N_STEAL_WORKERS 64
-static atomic_int g_steal_done;
+static int g_steal_done;
 
 static int
 steal_task(xtc_task_t *self, void *u)
 {
 	(void)self; (void)u;
-	atomic_fetch_add_explicit(&g_steal_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_steal_done, 1, xtc_mo_relaxed);
 	return XTC_TASK_DONE;
 }
 
@@ -156,7 +155,7 @@ run_steal(uint64_t seed, unsigned pct, struct run_result *r)
 	xtc_exec_t *e = NULL;
 	xtc_loop_t *l0;
 	int i;
-	atomic_store(&g_steal_done, 0);
+	xtc_atomic_store_i32(&g_steal_done, 0, xtc_mo_seq_cst);
 	memset(r, 0, sizeof *r);
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) { r->rc = -1; return; }
 	xtc_sim_fault_points_enable(pct);
@@ -164,7 +163,7 @@ run_steal(uint64_t seed, unsigned pct, struct run_result *r)
 	for (i = 0; i < N_STEAL_WORKERS; i++)
 		(void)xtc_task_spawn(l0, steal_task, NULL, NULL);
 	r->rc = xtc_sim_exec_run(e, seed, 5000000);
-	r->replies = atomic_load(&g_steal_done);
+	r->replies = xtc_atomic_load_i32(&g_steal_done, xtc_mo_seq_cst);
 	r->steal_fires = xtc_sim_fault_point_fires("sched.steal.pre_cas");
 	r->enqueue_fires =
 	    xtc_sim_fault_point_fires("sched.enqueue.post_deque_push");

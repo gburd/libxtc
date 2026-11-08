@@ -33,7 +33,6 @@
 #define _GNU_SOURCE
 
 #include <fcntl.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -109,9 +108,9 @@ tmpfile_open(char *path, size_t n)
 struct burst {
 	int        fd;
 	int        verify;   /* read back and compare too */
-	atomic_int next;     /* the fiber's index */
-	atomic_int ok;
-	atomic_int bad;
+	int next;            /* the fiber's index */
+	int ok;
+	int bad;
 };
 
 static void
@@ -119,7 +118,7 @@ burst_fiber(void *arg)
 {
 	struct burst *b = arg;
 	unsigned char out[PAGE], in[PAGE];
-	int i = atomic_fetch_add(&b->next, 1), r;
+	int i = xtc_atomic_fetch_add_i32(&b->next, 1, xtc_mo_seq_cst), r;
 
 	memset(out, 0x30 + (i % 64), sizeof out);
 	out[0] = (unsigned char)i;
@@ -127,7 +126,7 @@ burst_fiber(void *arg)
 	if ((r = xtc_aio_pwrite(b->fd, out, PAGE, (int64_t)i * PAGE)) !=
 	    PAGE) {
 		munit_logf(MUNIT_LOG_WARNING, "write %d: %d", i, r);
-		atomic_fetch_add(&b->bad, 1);
+		xtc_atomic_fetch_add_i32(&b->bad, 1, xtc_mo_seq_cst);
 		return;
 	}
 	if (b->verify) {
@@ -135,11 +134,11 @@ burst_fiber(void *arg)
 		if ((r = xtc_aio_pread(b->fd, in, PAGE, (int64_t)i * PAGE)) !=
 		    PAGE || memcmp(in, out, PAGE) != 0) {
 			munit_logf(MUNIT_LOG_WARNING, "read %d: %d", i, r);
-			atomic_fetch_add(&b->bad, 1);
+			xtc_atomic_fetch_add_i32(&b->bad, 1, xtc_mo_seq_cst);
 			return;
 		}
 	}
-	atomic_fetch_add(&b->ok, 1);
+	xtc_atomic_fetch_add_i32(&b->ok, 1, xtc_mo_seq_cst);
 }
 
 /* N fibers on one loop, one write (+ read) each; returns submitting
@@ -164,8 +163,8 @@ run_burst(int n, int verify)
 	s0 = submits(loop->io);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	s1 = submits(loop->io);
-	munit_assert_int(atomic_load(&b.bad), ==, 0);
-	munit_assert_int(atomic_load(&b.ok), ==, n);
+	munit_assert_int(xtc_atomic_load_i32(&b.bad, xtc_mo_seq_cst), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&b.ok, xtc_mo_seq_cst), ==, n);
 	if (s1 >= 0) {
 		assert_defer_if_kernel(loop->io);
 		/* Nothing is left behind unsubmitted. */
@@ -201,20 +200,20 @@ test_aio_burst(const MunitParameter p[], void *d)
 #define FD_MAX 300
 struct fdb {
 	int        rp[FD_MAX], wp[FD_MAX];
-	atomic_int next;
-	atomic_int ok;
+	int next;
+	int ok;
 };
 
 static void
 fd_fiber(void *arg)
 {
 	struct fdb *f = arg;
-	int i = atomic_fetch_add(&f->next, 1);
+	int i = xtc_atomic_fetch_add_i32(&f->next, 1, xtc_mo_seq_cst);
 	uint32_t rev = 0;
 
 	if (xtc_proc_wait_fd(f->rp[i], XTC_IO_READABLE, 5000LL * 1000000,
 	    &rev) == XTC_OK && (rev & XTC_IO_READABLE))
-		atomic_fetch_add(&f->ok, 1);
+		xtc_atomic_fetch_add_i32(&f->ok, 1, xtc_mo_seq_cst);
 }
 
 /* n fibers each park on their own ready pipe; returns submitting enters
@@ -239,7 +238,7 @@ run_fd_burst(struct fdb *f, int n)
 	s0 = submits(loop->io);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	s1 = submits(loop->io);
-	munit_assert_int(atomic_load(&f->ok), ==, n);
+	munit_assert_int(xtc_atomic_load_i32(&f->ok, xtc_mo_seq_cst), ==, n);
 	if (s1 >= 0)
 		assert_defer_if_kernel(loop->io);
 	(void)xtc_loop_fini(loop);
@@ -384,8 +383,8 @@ test_zero_poll(const MunitParameter p[], void *d)
  * deadline fails the test.
  */
 #define SPIN_BOUND_NS (10LL * 1000 * 1000 * 1000)
-static atomic_int g_spin_done, g_spin_wrote, g_spin_timed_out;
-static atomic_long g_spin_yields;
+static int g_spin_done, g_spin_wrote, g_spin_timed_out;
+static long g_spin_yields;
 static int64_t g_spin_t0;
 static int g_spin_fd;
 
@@ -396,20 +395,21 @@ spin_writer(void *arg)
 	(void)arg;
 	memset(b, 0x5a, sizeof b);
 	if (xtc_aio_pwrite(g_spin_fd, b, PAGE, 0) == PAGE)
-		atomic_store(&g_spin_wrote, 1);
-	atomic_store(&g_spin_done, 1);
+		xtc_atomic_store_i32(&g_spin_wrote, 1, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_spin_done, 1, xtc_mo_seq_cst);
 }
 
 static void
 spinner(void *arg)
 {
 	(void)arg;
-	while (!atomic_load(&g_spin_done)) {
+	while (!xtc_atomic_load_i32(&g_spin_done, xtc_mo_seq_cst)) {
 		if (xtc_clock_mono() - g_spin_t0 >= SPIN_BOUND_NS) {
-			atomic_store(&g_spin_timed_out, 1);
+			xtc_atomic_store_i32(&g_spin_timed_out, 1,
+			    xtc_mo_seq_cst);
 			return;
 		}
-		atomic_fetch_add(&g_spin_yields, 1);
+		xtc_atomic_fetch_add_long(&g_spin_yields, 1, xtc_mo_seq_cst);
 		xtc_yield();
 	}
 }
@@ -423,10 +423,10 @@ test_spin_on_peer(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	g_spin_fd = tmpfile_open(path, sizeof path);
-	atomic_store(&g_spin_done, 0);
-	atomic_store(&g_spin_wrote, 0);
-	atomic_store(&g_spin_yields, 0);
-	atomic_store(&g_spin_timed_out, 0);
+	xtc_atomic_store_i32(&g_spin_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_spin_wrote, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_spin_yields, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_spin_timed_out, 0, xtc_mo_seq_cst);
 	g_spin_t0 = xtc_clock_mono();
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	for (i = 0; i < 4; i++)
@@ -438,12 +438,16 @@ test_spin_on_peer(const MunitParameter p[], void *d)
 	(void)xtc_loop_fini(loop);
 	(void)xtc_fs_close(g_spin_fd);
 	(void)unlink(path);
-	munit_logf(MUNIT_LOG_INFO, "%ld spinner yields before the write "
-	    "completed in %lld us", atomic_load(&g_spin_yields),
+	munit_logf(MUNIT_LOG_INFO,
+	    "%ld spinner yields before the write "
+	    "completed in %lld us",
+	    xtc_atomic_load_long(&g_spin_yields, xtc_mo_seq_cst),
 	    (long long)((xtc_clock_mono() - g_spin_t0) / 1000));
-	munit_assert_int(atomic_load(&g_spin_wrote), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_spin_wrote, xtc_mo_seq_cst), ==,
+	    1);
 	/* The write finished while they spun, not after they gave up. */
-	munit_assert_int(atomic_load(&g_spin_timed_out), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_spin_timed_out, xtc_mo_seq_cst),
+	    ==, 0);
 	return MUNIT_OK;
 }
 

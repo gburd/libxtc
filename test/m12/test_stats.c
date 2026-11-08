@@ -13,7 +13,6 @@
 #include "xtc_int.h"
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>

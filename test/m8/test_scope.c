@@ -14,7 +14,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdatomic.h>
 
 #include "munit.h"
 #include "xtc.h"
@@ -276,15 +275,15 @@ test_bracket_release_on_error(const MunitParameter p[], void *d)
  * killer) sets kill_pending mid-way; the body must NOT be unwound until
  * xtc_uncancelable returns.  We record whether the body ran to
  * completion and whether the scope's finalizer ran. */
-static _Atomic int g_masked_completed;
-static _Atomic int g_masked_fin_ran;
+static int g_masked_completed;
+static int g_masked_fin_ran;
 static xtc_pid_t   g_mask_target;
 
 static void
 mask_fin(void *arg)
 {
 	(void)arg;
-	atomic_store(&g_masked_fin_ran, 1);
+	xtc_atomic_store_i32(&g_masked_fin_ran, 1, xtc_mo_seq_cst);
 }
 
 static int
@@ -298,7 +297,7 @@ masked_body(void *ud)
 	(void)xtc_scope_defer(s, mask_fin, NULL);
 	for (i = 0; i < 8; i++)
 		xtc_yield();
-	atomic_store(&g_masked_completed, 1);
+	xtc_atomic_store_i32(&g_masked_completed, 1, xtc_mo_seq_cst);
 	return XTC_OK;
 }
 
@@ -333,8 +332,8 @@ test_mask_defers_kill(const MunitParameter p[], void *d)
 	xtc_loop_t *loop = NULL;
 	xtc_pid_t killer;
 	(void)p; (void)d;
-	atomic_store(&g_masked_completed, 0);
-	atomic_store(&g_masked_fin_ran, 0);
+	xtc_atomic_store_i32(&g_masked_completed, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_masked_fin_ran, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, mask_target_proc, NULL, NULL,
 	    &g_mask_target), ==, XTC_OK);
@@ -343,9 +342,12 @@ test_mask_defers_kill(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	/* The masked body completed despite the mid-region kill... */
-	munit_assert_int(atomic_load(&g_masked_completed), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_masked_completed,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
 	/* ...and the resource's finalizer still ran (on close or unwind). */
-	munit_assert_int(atomic_load(&g_masked_fin_ran), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_masked_fin_ran, xtc_mo_seq_cst),
+	    ==, 1);
 	return MUNIT_OK;
 }
 
@@ -377,7 +379,7 @@ test_offproc_safe(const MunitParameter p[], void *d)
  * free detected in tcache 2", abort.
  */
 #define MS (1000LL * 1000)
-static _Atomic int g_b_runs, g_a_done, g_after;
+static int g_b_runs, g_a_done, g_after;
 static xtc_pid_t g_rw_target;
 
 static void
@@ -385,14 +387,14 @@ rw_fin_a_park(void *x)
 {
 	(void)x;
 	(void)xtc_proc_sleep(50 * MS);
-	atomic_store(&g_a_done, 1);
+	xtc_atomic_store_i32(&g_a_done, 1, xtc_mo_seq_cst);
 }
 
 static void
 rw_fin_b(void *x)
 {
 	(void)x;
-	atomic_fetch_add(&g_b_runs, 1);
+	xtc_atomic_fetch_add_i32(&g_b_runs, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -430,7 +432,8 @@ rw_cleanup_target(void *x)
 	(void)xtc_scope_defer(b, rw_fin_b, NULL);
 	(void)xtc_proc_sleep(5 * MS);
 	xtc_proc_recovery_cleanup();
-	atomic_store(&g_after, 1); /* the walk returned */
+	xtc_atomic_store_i32(&g_after, 1,
+	    xtc_mo_seq_cst); /* the walk returned */
 }
 
 static void
@@ -438,9 +441,9 @@ rw_run(xtc_proc_fn target)
 {
 	xtc_loop_t *loop = NULL;
 	xtc_pid_t k;
-	atomic_store(&g_b_runs, 0);
-	atomic_store(&g_a_done, 0);
-	atomic_store(&g_after, 0);
+	xtc_atomic_store_i32(&g_b_runs, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_a_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_after, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, target, NULL, NULL, &g_rw_target),
 	    ==, XTC_OK);
@@ -464,9 +467,9 @@ test_recovery_fault_kill_once(const MunitParameter p[], void *d)
 #endif
 	munit_assert_int(xtc_fault_guard_install(), ==, XTC_OK);
 	rw_run(rw_fault_target);
-	munit_assert_int(atomic_load(&g_b_runs), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_b_runs, xtc_mo_seq_cst), ==, 1);
 	/* The walk is masked: the kill did not cut A's finalizer short. */
-	munit_assert_int(atomic_load(&g_a_done), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_a_done, xtc_mo_seq_cst), ==, 1);
 	return MUNIT_OK;
 }
 
@@ -476,24 +479,24 @@ test_recovery_cleanup_kill_once(const MunitParameter p[], void *d)
 	(void)p;
 	(void)d;
 	rw_run(rw_cleanup_target);
-	munit_assert_int(atomic_load(&g_b_runs), ==, 1);
-	munit_assert_int(atomic_load(&g_a_done), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_b_runs, xtc_mo_seq_cst), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_a_done, xtc_mo_seq_cst), ==, 1);
 	/* The kill was latched and fires at the next delivery point, after
 	 * cleanup returned. */
-	munit_assert_int(atomic_load(&g_after), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_after, xtc_mo_seq_cst), ==, 1);
 	return MUNIT_OK;
 }
 
 /* A record that exits: the exit path's walk must start BELOW it (the
  * record was popped before it ran), not run it, and the ones above it,
  * again.  The masking above cannot cover this: an exit is explicit. */
-static _Atomic int g_exit_cb_runs, g_low_cb_runs;
+static int g_exit_cb_runs, g_low_cb_runs;
 
 static void
 rw_exit_cb(void *x)
 {
 	(void)x;
-	if (atomic_fetch_add(&g_exit_cb_runs, 1) == 0)
+	if (xtc_atomic_fetch_add_i32(&g_exit_cb_runs, 1, xtc_mo_seq_cst) == 0)
 		(void)xtc_exit_self(3);
 }
 
@@ -501,7 +504,7 @@ static void
 rw_low_cb(void *x)
 {
 	(void)x;
-	atomic_fetch_add(&g_low_cb_runs, 1);
+	xtc_atomic_fetch_add_i32(&g_low_cb_runs, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -520,15 +523,17 @@ test_recovery_record_exits_once(const MunitParameter p[], void *d)
 	xtc_pid_t pid;
 	(void)p;
 	(void)d;
-	atomic_store(&g_exit_cb_runs, 0);
-	atomic_store(&g_low_cb_runs, 0);
+	xtc_atomic_store_i32(&g_exit_cb_runs, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_low_cb_runs, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, rw_exit_target, NULL, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_exit_cb_runs), ==, 1);
-	munit_assert_int(atomic_load(&g_low_cb_runs), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_exit_cb_runs, xtc_mo_seq_cst),
+	    ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_low_cb_runs, xtc_mo_seq_cst),
+	    ==, 1);
 	return MUNIT_OK;
 }
 
@@ -541,14 +546,14 @@ test_recovery_record_exits_once(const MunitParameter p[], void *d)
  * finalizers unmasked: the kill unwound out of the close, the older
  * finalizer never ran (old_fin=0) and the scope leaked.
  */
-static _Atomic int g_old_fin, g_park_fin_done, g_after_close;
+static int g_old_fin, g_park_fin_done, g_after_close;
 static xtc_pid_t g_close_target;
 
 static void
 cl_fin_old(void *a)
 {
 	(void)a;
-	atomic_fetch_add(&g_old_fin, 1);
+	xtc_atomic_fetch_add_i32(&g_old_fin, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -556,7 +561,7 @@ cl_fin_park(void *a)
 {
 	(void)a;
 	(void)xtc_proc_sleep(50 * MS);
-	atomic_store(&g_park_fin_done, 1);
+	xtc_atomic_store_i32(&g_park_fin_done, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -576,7 +581,8 @@ cl_kill_target(void *a)
 	(void)xtc_scope_defer(s, cl_fin_old, NULL);
 	(void)xtc_scope_defer(s, cl_fin_park, NULL);
 	xtc_scope_close(s);
-	atomic_store(&g_after_close, 1); /* the latched kill fires first */
+	xtc_atomic_store_i32(&g_after_close, 1,
+	    xtc_mo_seq_cst); /* the latched kill fires first */
 }
 
 static void
@@ -589,7 +595,8 @@ cl_exit_target(void *a)
 	(void)xtc_scope_defer(s, cl_fin_old, NULL);
 	(void)xtc_scope_defer(s, cl_fin_exit, NULL);
 	xtc_scope_close(s);
-	atomic_store(&g_after_close, 1); /* NOTREACHED: cl_fin_exit exits */
+	xtc_atomic_store_i32(&g_after_close, 1,
+	    xtc_mo_seq_cst); /* NOTREACHED: cl_fin_exit exits */
 }
 
 static void
@@ -607,9 +614,9 @@ cl_run(xtc_proc_fn target, int kill)
 	xtc_loop_t *loop = NULL;
 	xtc_pid_t k;
 	int rc;
-	atomic_store(&g_old_fin, 0);
-	atomic_store(&g_park_fin_done, 0);
-	atomic_store(&g_after_close, 0);
+	xtc_atomic_store_i32(&g_old_fin, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_park_fin_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_after_close, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	rc = xtc_proc_spawn(loop, target, NULL, NULL, &g_close_target);
 	munit_assert_int(rc, ==, XTC_OK);
@@ -627,10 +634,13 @@ test_scope_close_kill_masked(const MunitParameter p[], void *d)
 	(void)p;
 	(void)d;
 	cl_run(cl_kill_target, 1);
-	munit_assert_int(atomic_load(&g_park_fin_done), ==, 1);
-	munit_assert_int(atomic_load(&g_old_fin), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_park_fin_done, xtc_mo_seq_cst),
+	    ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_old_fin, xtc_mo_seq_cst), ==,
+	    1);
 	/* The kill was latched, not lost: it fired at the end of the close. */
-	munit_assert_int(atomic_load(&g_after_close), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_after_close, xtc_mo_seq_cst),
+	    ==, 0);
 	return MUNIT_OK;
 }
 
@@ -642,8 +652,10 @@ test_scope_close_fin_exits(const MunitParameter p[], void *d)
 	cl_run(cl_exit_target, 0);
 	/* The finalizer that exited left the older one to the recovery
 	 * walk, which ran it once (and freed the scope: ASan/LSan). */
-	munit_assert_int(atomic_load(&g_old_fin), ==, 1);
-	munit_assert_int(atomic_load(&g_after_close), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_old_fin, xtc_mo_seq_cst), ==,
+	    1);
+	munit_assert_int(xtc_atomic_load_i32(&g_after_close, xtc_mo_seq_cst),
+	    ==, 0);
 	return MUNIT_OK;
 }
 

@@ -6,7 +6,6 @@
  */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -87,7 +86,12 @@ test_overflow(const MunitParameter p[], void *d)
 /* [Dq4] no double-take under owner-pop vs thief-steal. */
 #define DQ4_ITEMS 200
 #define DQ4_THIEVES 4
-struct dq4 { xtc_deque_t *q; _Atomic int *seen; int *counts; int idx; };
+struct dq4 {
+	xtc_deque_t *q;
+	int *seen;
+	int *counts;
+	int idx;
+};
 
 static void *
 dq4_thief(void *arg)
@@ -107,8 +111,8 @@ dq4_thief(void *arg)
 		}
 		{
 			int idx = (int)(intptr_t)p - 1;
-			int prev = atomic_fetch_add_explicit(&c->seen[idx], 1,
-			    memory_order_relaxed);
+			int prev = xtc_atomic_fetch_add_i32(&c->seen[idx], 1,
+			    xtc_mo_relaxed);
 			(void)prev;
 		}
 		c->counts[c->idx]++;
@@ -123,7 +127,7 @@ test_no_double_take(const MunitParameter p[], void *d)
 	pthread_t thieves[DQ4_THIEVES];
 	struct dq4 ctxs[DQ4_THIEVES];
 	int counts[DQ4_THIEVES] = {0};
-	_Atomic int *seen;
+	int *seen;
 	int i, total_taken = 0, owner_took = 0;
 	(void)p; (void)d;
 
@@ -153,8 +157,8 @@ test_no_double_take(const MunitParameter p[], void *d)
 		if (p == NULL) break;
 		{
 			int idx = (int)(intptr_t)p - 1;
-			(void)atomic_fetch_add_explicit(&seen[idx], 1,
-			    memory_order_relaxed);
+			(void)xtc_atomic_fetch_add_i32(&seen[idx], 1,
+			    xtc_mo_relaxed);
 			owner_took++;
 		}
 	}
@@ -167,8 +171,9 @@ test_no_double_take(const MunitParameter p[], void *d)
 	/* Every item taken exactly once. */
 	munit_assert_int(total_taken, ==, DQ4_ITEMS);
 	for (i = 0; i < DQ4_ITEMS; i++)
-		munit_assert_int((int)atomic_load_explicit(&seen[i],
-		    memory_order_relaxed), ==, 1);
+		munit_assert_int((int)xtc_atomic_load_i32(&seen[i],
+		                     xtc_mo_relaxed),
+		    ==, 1);
 	free((void *)seen);
 	return MUNIT_OK;
 }

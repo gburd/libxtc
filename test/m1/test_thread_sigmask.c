@@ -35,7 +35,6 @@
 
 #include <pthread.h>
 #include <signal.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -44,8 +43,8 @@
 #define N_SIG     200
 
 static pthread_t   g_main_tid;
-static atomic_int  g_on_main;    /* SIGUSR1s handled on the main thread */
-static atomic_int  g_on_other;   /* SIGUSR1s handled on ANY other thread (bug!) */
+static int g_on_main;  /* SIGUSR1s handled on the main thread */
+static int g_on_other; /* SIGUSR1s handled on ANY other thread (bug!) */
 
 static void
 usr1_handler(int sig)
@@ -55,9 +54,9 @@ usr1_handler(int sig)
 	 * strict letter of POSIX, but pthread_equal is a pure comparison in
 	 * practice and this is a test; record which thread took the signal. */
 	if (pthread_equal(pthread_self(), g_main_tid))
-		atomic_fetch_add(&g_on_main, 1);
+		xtc_atomic_fetch_add_i32(&g_on_main, 1, xtc_mo_seq_cst);
 	else
-		atomic_fetch_add(&g_on_other, 1);
+		xtc_atomic_fetch_add_i32(&g_on_other, 1, xtc_mo_seq_cst);
 }
 
 /* A blocking-pool job (forces the pool threads to exist + be busy). */
@@ -161,7 +160,8 @@ main(void)
 	(void)xtc_exec_fini(g_e);
 
 	{
-		int m = atomic_load(&g_on_main), o = atomic_load(&g_on_other);
+		int m = xtc_atomic_load_i32(&g_on_main, xtc_mo_seq_cst),
+		    o = xtc_atomic_load_i32(&g_on_other, xtc_mo_seq_cst);
 		printf("SIGUSR1: %d on main, %d on other threads\n", m, o);
 		if (o != 0) {
 			printf("FAIL: %d process-directed signal(s) landed on a "

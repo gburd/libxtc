@@ -25,7 +25,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -39,12 +38,12 @@
 #include "xtc_preempt.h"
 
 /* ---- results shared with the driver fiber ---- */
-static atomic_int  g_finish_rc;
-static atomic_long g_finish_val;
-static atomic_int  g_timeout_rc;
-static atomic_int  g_cleanup_ran;    /* the timed-out fn's at-exit fired */
-static atomic_int  g_compose_ok;
-static atomic_int  g_driver_done;
+static int g_finish_rc;
+static long g_finish_val;
+static int g_timeout_rc;
+static int g_cleanup_ran; /* the timed-out fn's at-exit fired */
+static int g_compose_ok;
+static int g_driver_done;
 
 /* (a) a fn that finishes fast and returns a value. */
 static intptr_t
@@ -59,7 +58,7 @@ static void
 slow_cleanup(void *arg)
 {
 	(void)arg;
-	atomic_store(&g_cleanup_ran, 1);
+	xtc_atomic_store_i32(&g_cleanup_ran, 1, xtc_mo_seq_cst);
 }
 
 /* (b) a cooperating fn that runs "forever" (yields in a loop) -- it is
@@ -109,20 +108,21 @@ driver(void *arg)
 	/* (a) finish within deadline. */
 	rc = xtc_launch(loop, quick_fn, (void *)(intptr_t)1,
 	    1000 * 1000 * 1000LL, NULL, &v);
-	atomic_store(&g_finish_rc, rc);
-	atomic_store(&g_finish_val, (long)v);
+	xtc_atomic_store_i32(&g_finish_rc, rc, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_finish_val, (long)v, xtc_mo_seq_cst);
 
 	/* (b) timeout: 20 ms deadline on a fn that never finishes. */
 	rc = xtc_launch(loop, slow_coop_fn, NULL,
 	    20 * 1000 * 1000LL, NULL, NULL);
-	atomic_store(&g_timeout_rc, rc);
+	xtc_atomic_store_i32(&g_timeout_rc, rc, xtc_mo_seq_cst);
 
 	/* (c) composable: outer launches inner. */
 	v = 0;
 	rc = xtc_launch(loop, outer_fn, loop, 1000 * 1000 * 1000LL, NULL, &v);
-	atomic_store(&g_compose_ok, (rc == XTC_OK && v == 777) ? 1 : 0);
+	xtc_atomic_store_i32(&g_compose_ok, (rc == XTC_OK && v == 777) ? 1 : 0,
+	    xtc_mo_seq_cst);
 
-	atomic_store(&g_driver_done, 1);
+	xtc_atomic_store_i32(&g_driver_done, 1, xtc_mo_seq_cst);
 }
 
 /* A watcher: once the driver has done all three launches, stop the
@@ -132,7 +132,8 @@ watcher(void *arg)
 {
 	xtc_exec_t *e = arg;
 	int spins = 0;
-	while (!atomic_load(&g_driver_done) && spins < 100000) {
+	while (!xtc_atomic_load_i32(&g_driver_done, xtc_mo_seq_cst) &&
+	    spins < 100000) {
 		(void)xtc_proc_sleep(1 * 1000 * 1000);
 		spins++;
 	}
@@ -146,12 +147,12 @@ test_launch(const MunitParameter p[], void *d)
 	xtc_loop_t *l;
 	(void)p; (void)d;
 
-	atomic_store(&g_finish_rc, 999);
-	atomic_store(&g_finish_val, 0);
-	atomic_store(&g_timeout_rc, 999);
-	atomic_store(&g_cleanup_ran, 0);
-	atomic_store(&g_compose_ok, 0);
-	atomic_store(&g_driver_done, 0);
+	xtc_atomic_store_i32(&g_finish_rc, 999, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_finish_val, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_timeout_rc, 999, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_cleanup_ran, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_compose_ok, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_driver_done, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
 	l = xtc_exec_loop(e, 0);
@@ -163,15 +164,20 @@ test_launch(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 
 	/* (a) finish. */
-	munit_assert_int(atomic_load(&g_finish_rc), ==, XTC_OK);
-	munit_assert_long(atomic_load(&g_finish_val), ==, 42);
+	munit_assert_int(xtc_atomic_load_i32(&g_finish_rc, xtc_mo_seq_cst), ==,
+	    XTC_OK);
+	munit_assert_long(xtc_atomic_load_long(&g_finish_val, xtc_mo_seq_cst),
+	    ==, 42);
 
 	/* (b) timeout -> XTC_E_AGAIN, and the fn's at-exit cleanup ran. */
-	munit_assert_int(atomic_load(&g_timeout_rc), ==, XTC_E_AGAIN);
-	munit_assert_int(atomic_load(&g_cleanup_ran), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_timeout_rc, xtc_mo_seq_cst), ==,
+	    XTC_E_AGAIN);
+	munit_assert_int(xtc_atomic_load_i32(&g_cleanup_ran, xtc_mo_seq_cst),
+	    ==, 1);
 
 	/* (c) composable. */
-	munit_assert_int(atomic_load(&g_compose_ok), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_compose_ok, xtc_mo_seq_cst), ==,
+	    1);
 
 	(void)xtc_exec_fini(e);
 	return MUNIT_OK;
@@ -220,8 +226,8 @@ test_launch_runaway(const MunitParameter p[], void *d)
  * still in the launcher's mailbox afterwards.
  */
 #define LMS (1000LL * 1000)
-static _Atomic int g_mail_rc = 999, g_mail_seen, g_mail_sent;
-static _Atomic int64_t g_mail_ms = -1;
+static int g_mail_rc = 999, g_mail_seen, g_mail_sent;
+static int64_t g_mail_ms = -1;
 static xtc_pid_t g_mail_launcher;
 
 static intptr_t
@@ -240,12 +246,14 @@ mail_launcher(void *arg)
 	size_t n;
 	(void)arg;
 	t0 = xtc_clock_mono();
-	atomic_store(&g_mail_rc,
-	    xtc_launch(NULL, slow300_fn, NULL, 60 * LMS, NULL, NULL));
-	atomic_store(&g_mail_ms, (xtc_clock_mono() - t0) / LMS);
+	xtc_atomic_store_i32(&g_mail_rc,
+	    xtc_launch(NULL, slow300_fn, NULL, 60 * LMS, NULL, NULL),
+	    xtc_mo_seq_cst);
+	xtc_atomic_store_i64(&g_mail_ms, (xtc_clock_mono() - t0) / LMS,
+	    xtc_mo_seq_cst);
 	(void)xtc_proc_sleep(150 * LMS);   /* let the mailer finish */
 	while (xtc_recv(&m, &n, 0) == XTC_OK && m != NULL) {
-		atomic_fetch_add(&g_mail_seen, 1);
+		xtc_atomic_fetch_add_i32(&g_mail_seen, 1, xtc_mo_seq_cst);
 		xtc_free(m);
 	}
 }
@@ -258,7 +266,8 @@ mailer(void *arg)
 	for (i = 0; i < 4; i++) {
 		(void)xtc_proc_sleep(20 * LMS);
 		if (xtc_send(g_mail_launcher, "x", 1) == XTC_OK)
-			atomic_fetch_add(&g_mail_sent, 1);
+			xtc_atomic_fetch_add_i32(&g_mail_sent, 1,
+			    xtc_mo_seq_cst);
 	}
 }
 
@@ -269,8 +278,8 @@ test_launch_keeps_mail(const MunitParameter p[], void *d)
 	xtc_pid_t m;
 	(void)p;
 	(void)d;
-	atomic_store(&g_mail_seen, 0);
-	atomic_store(&g_mail_sent, 0);
+	xtc_atomic_store_i32(&g_mail_seen, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_mail_sent, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, mail_launcher, NULL, NULL,
 	                     &g_mail_launcher),
@@ -279,10 +288,14 @@ test_launch_keeps_mail(const MunitParameter p[], void *d)
 	    XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_mail_rc), ==, XTC_E_AGAIN);
-	munit_assert_int64(atomic_load(&g_mail_ms), <, 250);
-	munit_assert_int(atomic_load(&g_mail_sent), ==, 4);
-	munit_assert_int(atomic_load(&g_mail_seen), ==, 4);
+	munit_assert_int(xtc_atomic_load_i32(&g_mail_rc, xtc_mo_seq_cst), ==,
+	    XTC_E_AGAIN);
+	munit_assert_int64(xtc_atomic_load_i64(&g_mail_ms, xtc_mo_seq_cst), <,
+	    250);
+	munit_assert_int(xtc_atomic_load_i32(&g_mail_sent, xtc_mo_seq_cst), ==,
+	    4);
+	munit_assert_int(xtc_atomic_load_i32(&g_mail_seen, xtc_mo_seq_cst), ==,
+	    4);
 	return MUNIT_OK;
 }
 
@@ -291,7 +304,7 @@ test_launch_keeps_mail(const MunitParameter p[], void *d)
  * 2.1.1 only monitored the child, so it ran all 20 ticks after its
  * launcher died.  Now the launcher's exit kills it.
  */
-static _Atomic int g_orphan_ticks, g_orphan_done;
+static int g_orphan_ticks, g_orphan_done;
 static xtc_pid_t g_orphan_launcher;
 
 static intptr_t
@@ -301,7 +314,7 @@ ticker_fn(void *arg)
 	(void)arg;
 	for (i = 0; i < 20; i++) {
 		(void)xtc_proc_sleep(10 * LMS);
-		atomic_fetch_add(&g_orphan_ticks, 1);
+		xtc_atomic_fetch_add_i32(&g_orphan_ticks, 1, xtc_mo_seq_cst);
 	}
 	return 0;
 }
@@ -311,7 +324,8 @@ orphan_launcher(void *arg)
 {
 	(void)arg;
 	(void)xtc_launch(NULL, ticker_fn, NULL, -1, NULL, NULL);
-	atomic_store(&g_orphan_done, 1);   /* not reached: killed */
+	xtc_atomic_store_i32(&g_orphan_done, 1,
+	    xtc_mo_seq_cst); /* not reached: killed */
 }
 
 static void
@@ -329,8 +343,8 @@ test_launch_no_orphan(const MunitParameter p[], void *d)
 	xtc_pid_t k;
 	(void)p;
 	(void)d;
-	atomic_store(&g_orphan_ticks, 0);
-	atomic_store(&g_orphan_done, 0);
+	xtc_atomic_store_i32(&g_orphan_ticks, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_orphan_done, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, orphan_launcher, NULL, NULL,
 	                     &g_orphan_launcher),
@@ -339,9 +353,11 @@ test_launch_no_orphan(const MunitParameter p[], void *d)
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_orphan_done), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_orphan_done, xtc_mo_seq_cst),
+	    ==, 0);
 	/* Killed at ~25 ms: 2 ticks, at most 3; never the 2.1.1 20. */
-	munit_assert_int(atomic_load(&g_orphan_ticks), <=, 3);
+	munit_assert_int(xtc_atomic_load_i32(&g_orphan_ticks, xtc_mo_seq_cst),
+	    <=, 3);
 	return MUNIT_OK;
 }
 

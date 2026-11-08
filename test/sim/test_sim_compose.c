@@ -36,7 +36,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -66,10 +65,10 @@ static xtc_lockmgr_t   *g_mgr;
 static bt_t            *g_bt;
 static wal_t           *g_wal;
 static xtc_chan_mpsc_t *g_chan;
-static atomic_int       g_committed;   /* rows a worker COMMITted */
-static atomic_int       g_received;    /* rows the collector drained */
-static atomic_int       g_done;        /* workers that hit their quota */
-static atomic_int       g_lock_held;   /* must never exceed 1 (mutual excl) */
+static int g_committed; /* rows a worker COMMITted */
+static int g_received;  /* rows the collector drained */
+static int g_done;      /* workers that hit their quota */
+static int g_lock_held; /* must never exceed 1 (mutual excl) */
 
 /* Global row count observed by the last consistency check (for the
  * per-run assertion in main). -1 = the check did not run / failed. */
@@ -119,11 +118,11 @@ compose_consistency_check(void *arg)
 	g_consistency_rows = rows;
 	/* Every committed row must be present exactly once; the tree must
 	 * not hold more rows than were committed. */
-	if (rows != atomic_load(&g_committed))
+	if (rows != xtc_atomic_load_i32(&g_committed, xtc_mo_seq_cst))
 		return XTC_E_INTERNAL;
 	return XTC_OK;
 }
-static atomic_int       g_lock_viol;   /* set if two holders overlap */
+static int g_lock_viol; /* set if two holders overlap */
 
 /* A shared logical key that all workers contend on. */
 static const char g_key[] = "shared-row";
@@ -157,8 +156,9 @@ worker(void *arg)
 			continue;
 
 		/* Mutual-exclusion witness: while held, the count must be 1. */
-		if (atomic_fetch_add(&g_lock_held, 1) != 0)
-			atomic_store(&g_lock_viol, 1);
+		if (xtc_atomic_fetch_add_i32(&g_lock_held, 1, xtc_mo_seq_cst) !=
+		    0)
+			xtc_atomic_store_i32(&g_lock_viol, 1, xtc_mo_seq_cst);
 
 		/* 2. Commit a uniquely-keyed row under the lock. */
 		rowid = (long long)(w->id * 1000 + i);
@@ -168,12 +168,13 @@ worker(void *arg)
 			    rowid, w->id, i);
 			if (sx_exec(db, sql, NULL) == SX_OK &&
 			    sx_exec(db, "COMMIT", NULL) == SX_OK)
-				atomic_fetch_add(&g_committed, 1);
+				xtc_atomic_fetch_add_i32(&g_committed, 1,
+				    xtc_mo_seq_cst);
 			else
 				(void)sx_exec(db, "ROLLBACK", NULL);
 		}
 
-		atomic_fetch_sub(&g_lock_held, 1);
+		xtc_atomic_fetch_sub_i32(&g_lock_held, 1, xtc_mo_seq_cst);
 
 		/* 3. Release the lock, THEN report on the channel. */
 		(void)xtc_lock_put(g_mgr, id, g_key, sizeof g_key);
@@ -198,7 +199,7 @@ worker(void *arg)
 done:
 	if (db != NULL)
 		sx_close(db);
-	atomic_fetch_add(&g_done, 1);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_seq_cst);
 }
 
 /* Collector: drain the mpsc channel until every reported row is in.
@@ -214,11 +215,14 @@ collector(void *arg)
 	 * adversarial schedule (pessimal picks + swizzle + tiny-batch WAL +
 	 * eager splits) -- which legitimately needs more turns per commit --
 	 * still drains before giving up. */
-	while (atomic_load(&g_received) < N_WORKERS * QUOTA && idle < 200000) {
+	while (xtc_atomic_load_i32(&g_received, xtc_mo_seq_cst) <
+	        N_WORKERS * QUOTA &&
+	    idle < 200000) {
 		void *m = NULL;
 		if (xtc_chan_mpsc_try_recv(g_chan, &m) == XTC_OK && m != NULL) {
 			free(m);
-			atomic_fetch_add(&g_received, 1);
+			xtc_atomic_fetch_add_i32(&g_received, 1,
+			    xtc_mo_seq_cst);
 			idle = 0;
 		} else {
 			idle++;
@@ -235,8 +239,9 @@ coordinator(void *arg)
 	xtc_exec_t *e = arg;
 	int tries;
 	for (tries = 0; tries < 200000; tries++) {
-		if (atomic_load(&g_done) >= N_WORKERS &&
-		    atomic_load(&g_received) >= N_WORKERS * QUOTA)
+		if (xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst) >= N_WORKERS &&
+		    xtc_atomic_load_i32(&g_received, xtc_mo_seq_cst) >=
+		        N_WORKERS * QUOTA)
 			break;
 		(void)xtc_proc_sleep(1000 * 1000LL);
 	}
@@ -261,11 +266,11 @@ run_one(uint64_t seed, int adversarial, int *out_committed, int *out_received,
 	xtc_pid_t wp;
 	int i, rc = -1, fd;
 
-	atomic_store(&g_committed, 0);
-	atomic_store(&g_received, 0);
-	atomic_store(&g_done, 0);
-	atomic_store(&g_lock_held, 0);
-	atomic_store(&g_lock_viol, 0);
+	xtc_atomic_store_i32(&g_committed, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_received, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_lock_held, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_lock_viol, 0, xtc_mo_seq_cst);
 	g_mgr = NULL; g_bt = NULL; g_wal = NULL; g_chan = NULL;
 
 	fd = mkstemp(logp); if (fd < 0) return -1; close(fd);
@@ -325,9 +330,14 @@ run_one(uint64_t seed, int adversarial, int *out_committed, int *out_received,
 	}
 	rc = xtc_sim_exec_run(e, seed, 20000000);
 
-	if (out_committed) *out_committed = atomic_load(&g_committed);
-	if (out_received)  *out_received = atomic_load(&g_received);
-	if (out_viol)      *out_viol = atomic_load(&g_lock_viol);
+	if (out_committed)
+		*out_committed =
+		    xtc_atomic_load_i32(&g_committed, xtc_mo_seq_cst);
+	if (out_received)
+		*out_received =
+		    xtc_atomic_load_i32(&g_received, xtc_mo_seq_cst);
+	if (out_viol)
+		*out_viol = xtc_atomic_load_i32(&g_lock_viol, xtc_mo_seq_cst);
 	if (out_state)     *out_state = xtc_sim_state_hash(e);
 
 	xtc_sim_io_faults_disable();

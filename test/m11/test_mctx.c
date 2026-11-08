@@ -7,7 +7,6 @@
 
 #include <pthread.h>
 #include <stdint.h>
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -248,14 +247,14 @@ test_cleanup_introspects_self(const MunitParameter p[], void *d)
  * fix the join returns XTC_OK and this test fails.
  */
 static xtc_arena_group_t *g_ag;
-static _Atomic int g_ag_member_ready;   /* victim has joined and parked */
-static _Atomic int g_ag_verdict;        /* discard has returned */
-static _Atomic int g_ag_late_rc = 999;  /* the late join's return code */
-static _Atomic int g_ag_rejoin_rc = 999;
-static _Atomic int g_ag_all_gone = -1;
-static _Atomic int g_ag_discard_rc = 999;
-static _Atomic int g_ag_chunks_after = -1;
-static _Atomic int g_ag_size_after = -1;
+static int g_ag_member_ready;  /* victim has joined and parked */
+static int g_ag_verdict;       /* discard has returned */
+static int g_ag_late_rc = 999; /* the late join's return code */
+static int g_ag_rejoin_rc = 999;
+static int g_ag_all_gone = -1;
+static int g_ag_discard_rc = 999;
+static int g_ag_chunks_after = -1;
+static int g_ag_size_after = -1;
 
 /* The cohort member the discard will kill: joins, allocates, parks. */
 static void
@@ -266,7 +265,7 @@ ag_victim_proc(void *arg)
 	(void)arg;
 	munit_assert_int(xtc_arena_group_add(g_ag), ==, XTC_OK);
 	munit_assert_not_null(xtc_mctx_alloc(xtc_arena_group_mctx(g_ag), 32));
-	atomic_store(&g_ag_member_ready, 1);
+	xtc_atomic_store_i32(&g_ag_member_ready, 1, xtc_mo_seq_cst);
 	(void)xtc_recv(&msg, &sz, -1);   /* killable park */
 	xtc_free(msg);
 }
@@ -276,18 +275,21 @@ static void
 ag_late_joiner_proc(void *arg)
 {
 	(void)arg;
-	while (!atomic_load(&g_ag_member_ready))
+	while (!xtc_atomic_load_i32(&g_ag_member_ready, xtc_mo_seq_cst))
 		(void)xtc_proc_sleep(200000);
 	/* The victim is parked, so the supervisor is inside discard's wait
 	 * by the time we get here (same loop, cooperative). */
-	atomic_store(&g_ag_late_rc, xtc_arena_group_add(g_ag));
+	xtc_atomic_store_i32(&g_ag_late_rc, xtc_arena_group_add(g_ag),
+	    xtc_mo_seq_cst);
 	/* Deliberately do NOT touch the arena: a refused join must not. */
-	while (!atomic_load(&g_ag_verdict))
+	while (!xtc_atomic_load_i32(&g_ag_verdict, xtc_mo_seq_cst))
 		(void)xtc_proc_sleep(200000);
 	/* Once the verdict is in, the seal is lifted and the group is
 	 * reusable by a fresh cohort. */
-	atomic_store(&g_ag_rejoin_rc, xtc_arena_group_add(g_ag));
-	atomic_store(&g_ag_size_after, xtc_arena_group_size(g_ag));
+	xtc_atomic_store_i32(&g_ag_rejoin_rc, xtc_arena_group_add(g_ag),
+	    xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ag_size_after, xtc_arena_group_size(g_ag),
+	    xtc_mo_seq_cst);
 }
 
 static void
@@ -295,14 +297,16 @@ ag_discarder_proc(void *arg)
 {
 	int all_gone = -1;
 	(void)arg;
-	while (!atomic_load(&g_ag_member_ready))
+	while (!xtc_atomic_load_i32(&g_ag_member_ready, xtc_mo_seq_cst))
 		(void)xtc_proc_sleep(200000);
-	atomic_store(&g_ag_discard_rc,
-	    xtc_arena_group_discard(g_ag, 9, 500000000LL, &all_gone));
-	atomic_store(&g_ag_all_gone, all_gone);
-	atomic_store(&g_ag_chunks_after,
-	    (int)xtc_mctx_total_chunks(xtc_arena_group_mctx(g_ag)));
-	atomic_store(&g_ag_verdict, 1);
+	xtc_atomic_store_i32(&g_ag_discard_rc,
+	    xtc_arena_group_discard(g_ag, 9, 500000000LL, &all_gone),
+	    xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ag_all_gone, all_gone, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ag_chunks_after,
+	    (int)xtc_mctx_total_chunks(xtc_arena_group_mctx(g_ag)),
+	    xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ag_verdict, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -315,14 +319,14 @@ test_arena_group_join_during_discard(const MunitParameter p[], void *d)
 
 	memset(&opts, 0, sizeof opts);
 	opts.size = sizeof opts;
-	atomic_store(&g_ag_member_ready, 0);
-	atomic_store(&g_ag_verdict, 0);
-	atomic_store(&g_ag_late_rc, 999);
-	atomic_store(&g_ag_rejoin_rc, 999);
-	atomic_store(&g_ag_all_gone, -1);
-	atomic_store(&g_ag_discard_rc, 999);
-	atomic_store(&g_ag_chunks_after, -1);
-	atomic_store(&g_ag_size_after, -1);
+	xtc_atomic_store_i32(&g_ag_member_ready, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ag_verdict, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ag_late_rc, 999, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ag_rejoin_rc, 999, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ag_all_gone, -1, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ag_discard_rc, 999, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ag_chunks_after, -1, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ag_size_after, -1, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_arena_group_create("ag-seal", &g_ag), ==, XTC_OK);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
@@ -337,19 +341,27 @@ test_arena_group_join_during_discard(const MunitParameter p[], void *d)
 	    &pid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
-	munit_assert_int(atomic_load(&g_ag_verdict), ==, 1);
-	munit_assert_int(atomic_load(&g_ag_discard_rc), ==, XTC_OK);
+	munit_assert_int(xtc_atomic_load_i32(&g_ag_verdict, xtc_mo_seq_cst), ==,
+	    1);
+	munit_assert_int(xtc_atomic_load_i32(&g_ag_discard_rc, xtc_mo_seq_cst),
+	    ==, XTC_OK);
 	/* THE REGRESSION: a join attempted during the discard is REFUSED.
 	 * Before the fix this was XTC_OK and the joiner became a live member
 	 * of a reset arena. */
-	munit_assert_int(atomic_load(&g_ag_late_rc), ==, XTC_E_AGAIN);
+	munit_assert_int(xtc_atomic_load_i32(&g_ag_late_rc, xtc_mo_seq_cst), ==,
+	    XTC_E_AGAIN);
 	/* The cohort was killable, so the arena WAS reset -- which is only
 	 * safe because the seal kept the late joiner out of it. */
-	munit_assert_int(atomic_load(&g_ag_all_gone), ==, 1);
-	munit_assert_int(atomic_load(&g_ag_chunks_after), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_ag_all_gone, xtc_mo_seq_cst),
+	    ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_ag_chunks_after,
+	                     xtc_mo_seq_cst),
+	    ==, 0);
 	/* The seal lifts at the verdict: the group is reusable. */
-	munit_assert_int(atomic_load(&g_ag_rejoin_rc), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_ag_size_after), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_ag_rejoin_rc, xtc_mo_seq_cst),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_atomic_load_i32(&g_ag_size_after, xtc_mo_seq_cst),
+	    ==, 1);
 
 	xtc_arena_group_destroy(g_ag);
 	g_ag = NULL;
@@ -449,27 +461,27 @@ test_arena_group_add_equal_pid_other_loop(const MunitParameter p[], void *d)
  * xtc_exit_pid_deadline resolved loop_id 0 to D's loop and killed U,
  * M survived, and discard timed out with all_gone=0. */
 static xtc_arena_group_t *g_kg;
-static _Atomic int g_kg_m_ready, g_kg_stop, g_kg_m_normal, g_kg_u_normal;
-static _Atomic int g_kg_all_gone = -1;
+static int g_kg_m_ready, g_kg_stop, g_kg_m_normal, g_kg_u_normal;
+static int g_kg_all_gone = -1;
 
 static void
 kg_member_proc(void *arg)
 {
 	(void)arg;
 	munit_assert_int(xtc_arena_group_add(g_kg), ==, XTC_OK);
-	atomic_store(&g_kg_m_ready, 1);
-	while (!atomic_load(&g_kg_stop))
+	xtc_atomic_store_i32(&g_kg_m_ready, 1, xtc_mo_seq_cst);
+	while (!xtc_atomic_load_i32(&g_kg_stop, xtc_mo_seq_cst))
 		(void)xtc_proc_sleep(1000000);   /* killable */
-	atomic_store(&g_kg_m_normal, 1);
+	xtc_atomic_store_i32(&g_kg_m_normal, 1, xtc_mo_seq_cst);
 }
 
 static void
 kg_bystander_proc(void *arg)
 {
 	(void)arg;
-	while (!atomic_load(&g_kg_stop))
+	while (!xtc_atomic_load_i32(&g_kg_stop, xtc_mo_seq_cst))
 		(void)xtc_proc_sleep(1000000);   /* killable */
-	atomic_store(&g_kg_u_normal, 1);
+	xtc_atomic_store_i32(&g_kg_u_normal, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -477,12 +489,12 @@ kg_discarder_proc(void *arg)
 {
 	int gone = -1;
 	(void)arg;
-	while (!atomic_load(&g_kg_m_ready))
+	while (!xtc_atomic_load_i32(&g_kg_m_ready, xtc_mo_seq_cst))
 		(void)xtc_proc_sleep(1000000);
 	munit_assert_int(xtc_arena_group_discard(g_kg, 7, 2000000000LL,
 	    &gone), ==, XTC_OK);
-	atomic_store(&g_kg_all_gone, gone);
-	atomic_store(&g_kg_stop, 1);
+	xtc_atomic_store_i32(&g_kg_all_gone, gone, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_kg_stop, 1, xtc_mo_seq_cst);
 }
 
 static void *
@@ -500,11 +512,11 @@ test_arena_group_kill_targets_owner(const MunitParameter p[], void *d)
 	pthread_t th;
 	(void)p; (void)d;
 
-	atomic_store(&g_kg_m_ready, 0);
-	atomic_store(&g_kg_stop, 0);
-	atomic_store(&g_kg_m_normal, 0);
-	atomic_store(&g_kg_u_normal, 0);
-	atomic_store(&g_kg_all_gone, -1);
+	xtc_atomic_store_i32(&g_kg_m_ready, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_kg_stop, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_kg_m_normal, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_kg_u_normal, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_kg_all_gone, -1, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&a), ==, XTC_OK);
 	munit_assert_int(xtc_loop_init(&b), ==, XTC_OK);
 	munit_assert_int(xtc_arena_group_create("ag-kill", &g_kg), ==, XTC_OK);
@@ -517,12 +529,15 @@ test_arena_group_kill_targets_owner(const MunitParameter p[], void *d)
 	    &pd), ==, XTC_OK);
 	munit_assert_int(pthread_create(&th, NULL, kg_loop_thread, a), ==, 0);
 	munit_assert_int(xtc_loop_run(b), ==, XTC_OK);
-	atomic_store(&g_kg_stop, 1);
+	xtc_atomic_store_i32(&g_kg_stop, 1, xtc_mo_seq_cst);
 	munit_assert_int(pthread_join(th, NULL), ==, 0);
 
-	munit_assert_int(atomic_load(&g_kg_u_normal), ==, 1);  /* spared */
-	munit_assert_int(atomic_load(&g_kg_m_normal), ==, 0);  /* killed */
-	munit_assert_int(atomic_load(&g_kg_all_gone), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_kg_u_normal, xtc_mo_seq_cst),
+	    ==, 1); /* spared */
+	munit_assert_int(xtc_atomic_load_i32(&g_kg_m_normal, xtc_mo_seq_cst),
+	    ==, 0); /* killed */
+	munit_assert_int(xtc_atomic_load_i32(&g_kg_all_gone, xtc_mo_seq_cst),
+	    ==, 1);
 
 	xtc_arena_group_destroy(g_kg);
 	g_kg = NULL;

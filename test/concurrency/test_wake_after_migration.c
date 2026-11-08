@@ -44,7 +44,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <unistd.h>
 #include "xtc.h"
 #include "xtc_exec.h"
@@ -56,11 +55,11 @@
 
 #define LOOPS 4
 
-static atomic_int g_migrated;
-static atomic_int g_waker_ok;      /* 1: post-migration waker named the
-                                     * CURRENT loop (the fix holds) */
-static atomic_int g_waker_bad;     /* 1: waker named a STALE loop (the bug) */
-static atomic_int g_done;
+static int g_migrated;
+static int g_waker_ok;  /* 1: post-migration waker named the
+                         * CURRENT loop (the fix holds) */
+static int g_waker_bad; /* 1: waker named a STALE loop (the bug) */
+static int g_done;
 
 /* Keeps loop 0 busy so a migratable proc spawned there is likely to
  * be pushed to the stealable deque and picked up by an idle peer
@@ -101,8 +100,7 @@ migratee(void *arg)
 		loop_after = xtc_exec_loop_id();
 		if (loop_before != loop_after) {
 			migrated = 1;
-			atomic_store_explicit(&g_migrated, 1,
-			    memory_order_relaxed);
+			xtc_atomic_store_i32(&g_migrated, 1, xtc_mo_relaxed);
 		}
 	}
 
@@ -113,14 +111,14 @@ migratee(void *arg)
 		if (self_task != NULL &&
 		    xtc_task_waker(self_task, &w) == XTC_OK) {
 			if (w.loop == now)
-				atomic_store_explicit(&g_waker_ok, 1,
-				    memory_order_relaxed);
+				xtc_atomic_store_i32(&g_waker_ok, 1,
+				    xtc_mo_relaxed);
 			else
-				atomic_store_explicit(&g_waker_bad, 1,
-				    memory_order_relaxed);
+				xtc_atomic_store_i32(&g_waker_bad, 1,
+				    xtc_mo_relaxed);
 		}
 	}
-	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 }
 
 static xtc_exec_t *g_exec;
@@ -131,7 +129,7 @@ stopper(void *arg)
 	int i;
 	(void)arg;
 	for (i = 0; i < 1500; i++) {   /* ~3s bound at 2ms/poll */
-		if (atomic_load_explicit(&g_done, memory_order_relaxed) > 0)
+		if (xtc_atomic_load_i32(&g_done, xtc_mo_relaxed) > 0)
 			break;
 		(void)xtc_proc_sleep(2 * 1000 * 1000);
 	}
@@ -178,10 +176,12 @@ main(void)
 	}
 
 	printf("migrated=%d waker_ok=%d waker_bad=%d done=%d\n",
-	    atomic_load(&g_migrated), atomic_load(&g_waker_ok),
-	    atomic_load(&g_waker_bad), atomic_load(&g_done));
+	    xtc_atomic_load_i32(&g_migrated, xtc_mo_seq_cst),
+	    xtc_atomic_load_i32(&g_waker_ok, xtc_mo_seq_cst),
+	    xtc_atomic_load_i32(&g_waker_bad, xtc_mo_seq_cst),
+	    xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst));
 
-	if (atomic_load_explicit(&g_done, memory_order_relaxed) == 0) {
+	if (xtc_atomic_load_i32(&g_done, xtc_mo_relaxed) == 0) {
 		/* The migratee did not finish within the stopper's bound.  This
 		 * is ambiguous: on a fast host it would suggest a strand (the
 		 * very bug this guards), but on a slow/coarse-timer host (the
@@ -197,14 +197,14 @@ main(void)
 		    "re-run\n");
 		return 77;
 	}
-	if (!atomic_load_explicit(&g_migrated, memory_order_relaxed)) {
+	if (!xtc_atomic_load_i32(&g_migrated, xtc_mo_relaxed)) {
 		/* Not a failure of the invariant under test, but the run
 		 * proves nothing about migration if it never happened. */
 		printf("SKIP: no migration observed this run (timing); "
 		    "re-run\n");
 		return 77;
 	}
-	if (atomic_load_explicit(&g_waker_bad, memory_order_relaxed)) {
+	if (xtc_atomic_load_i32(&g_waker_bad, xtc_mo_relaxed)) {
 		printf("FAIL: xtc_task_waker named a STALE loop after "
 		    "migration -- this is the reported wake-after-migration "
 		    "bug (a wake would be delivered to the wrong loop's "
@@ -213,7 +213,7 @@ main(void)
 		    "report)\n");
 		return 1;
 	}
-	if (!atomic_load_explicit(&g_waker_ok, memory_order_relaxed)) {
+	if (!xtc_atomic_load_i32(&g_waker_ok, xtc_mo_relaxed)) {
 		printf("FAIL: xtc_task_waker check did not run\n");
 		return 1;
 	}

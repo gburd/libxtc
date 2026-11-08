@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -49,7 +48,7 @@ static xtc_amutex_t *g_mu;
 static long          g_mu_count;   /* deliberately non-atomic: the lock
 				    * is what protects it.  A double-grant
 				    * corrupts it. */
-static atomic_int    g_mu_done;
+static int g_mu_done;
 
 static void
 mu_worker(void *arg)
@@ -66,7 +65,7 @@ mu_worker(void *arg)
 		g_mu_count = v + 1;
 		(void)xtc_amutex_unlock(g_mu);
 	}
-	atomic_fetch_add_explicit(&g_mu_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_mu_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -75,7 +74,7 @@ run_amutex(uint64_t seed, long *out_count, int *out_done, uint64_t *out_state)
 	xtc_exec_t *e = NULL;
 	int i, rc;
 	g_mu_count = 0;
-	atomic_store(&g_mu_done, 0);
+	xtc_atomic_store_i32(&g_mu_done, 0, xtc_mo_seq_cst);
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	if (xtc_amutex_create(&g_mu) != XTC_OK) { xtc_exec_fini(e); return -1; }
 	for (i = 0; i < N_MUWORK; i++) {
@@ -84,7 +83,7 @@ run_amutex(uint64_t seed, long *out_count, int *out_done, uint64_t *out_state)
 	}
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 	*out_count = g_mu_count;
-	*out_done = atomic_load(&g_mu_done);
+	*out_done = xtc_atomic_load_i32(&g_mu_done, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_amutex_destroy(g_mu);
 	g_mu = NULL;
@@ -95,8 +94,8 @@ run_amutex(uint64_t seed, long *out_count, int *out_done, uint64_t *out_state)
 /* ---- arwlock exclusivity workload ---- */
 static xtc_arwlock_t *g_rw;
 static long           g_rw_version;     /* protected by the write lock */
-static atomic_int     g_rw_done;
-static atomic_int     g_rw_torn;        /* set if a reader saw an unstable value */
+static int g_rw_done;
+static int g_rw_torn; /* set if a reader saw an unstable value */
 
 static void
 rw_reader(void *arg)
@@ -111,11 +110,10 @@ rw_reader(void *arg)
 		 * set, never a half-written state. */
 		long b = g_rw_version;
 		if (a != b)
-			atomic_store_explicit(&g_rw_torn, 1,
-			    memory_order_relaxed);
+			xtc_atomic_store_i32(&g_rw_torn, 1, xtc_mo_relaxed);
 		(void)xtc_arwlock_unlock(g_rw);
 	}
-	atomic_fetch_add_explicit(&g_rw_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_rw_done, 1, xtc_mo_relaxed);
 }
 
 static void
@@ -126,7 +124,7 @@ rw_writer(void *arg)
 		g_rw_version += 1;
 		(void)xtc_arwlock_unlock(g_rw);
 	}
-	atomic_fetch_add_explicit(&g_rw_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_rw_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -136,8 +134,8 @@ run_arwlock(uint64_t seed, long *out_ver, int *out_done, int *out_torn,
 	xtc_exec_t *e = NULL;
 	int i, rc;
 	g_rw_version = 0;
-	atomic_store(&g_rw_done, 0);
-	atomic_store(&g_rw_torn, 0);
+	xtc_atomic_store_i32(&g_rw_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rw_torn, 0, xtc_mo_seq_cst);
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	if (xtc_arwlock_create(&g_rw) != XTC_OK) { xtc_exec_fini(e); return -1; }
 	for (i = 0; i < N_RDWORK; i++) {
@@ -150,8 +148,8 @@ run_arwlock(uint64_t seed, long *out_ver, int *out_done, int *out_torn,
 	}
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 	*out_ver = g_rw_version;
-	*out_done = atomic_load(&g_rw_done);
-	*out_torn = atomic_load(&g_rw_torn);
+	*out_done = xtc_atomic_load_i32(&g_rw_done, xtc_mo_seq_cst);
+	*out_torn = xtc_atomic_load_i32(&g_rw_torn, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_arwlock_destroy(g_rw);
 	g_rw = NULL;

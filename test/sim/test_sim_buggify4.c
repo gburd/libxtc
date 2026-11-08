@@ -6,7 +6,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -60,17 +59,17 @@ struct pair { xtc_pid_t peer; int id; };
 static struct pair g_pairs[N_PAIRS];
 static xtc_pid_t   g_pongs[N_PAIRS];
 
-static atomic_int  g_replies;
-static atomic_int  g_sleeps;
-static atomic_long g_hash;
+static int g_replies;
+static int g_sleeps;
+static long g_hash;
 
 static void
 fold(long v)
 {
-	long h = atomic_load_explicit(&g_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(v + 1));
-	atomic_store_explicit(&g_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_hash, h, xtc_mo_relaxed);
 }
 
 /* Echo server: reply to every message with the sender's pid. */
@@ -112,7 +111,7 @@ ping(void *arg)
 		if (xtc_recv(&m, &n, 10 * 1000 * 1000LL) != XTC_OK || m == NULL)
 			continue;
 		free(m);
-		atomic_fetch_add_explicit(&g_replies, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_replies, 1, xtc_mo_relaxed);
 		fold(pa->id + 1);
 		hops--;
 	}
@@ -127,7 +126,7 @@ sleeper(void *arg)
 	int i;
 	for (i = 0; i < 3; i++)
 		(void)xtc_proc_sleep((int64_t)(id % 3 + 1) * 1000000LL);
-	atomic_fetch_add_explicit(&g_sleeps, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_sleeps, 1, xtc_mo_relaxed);
 	fold(1000 + id);
 }
 
@@ -138,9 +137,9 @@ run_once(uint64_t seed, unsigned bug_pct, int *out_replies, int *out_sleeps,
 	xtc_exec_t *e = NULL;
 	int i, rc;
 
-	atomic_store(&g_replies, 0);
-	atomic_store(&g_sleeps, 0);
-	atomic_store(&g_hash, 0);
+	xtc_atomic_store_i32(&g_replies, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_sleeps, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	if (bug_pct > 0) xtc_sim_buggify_enable(bug_pct);
@@ -160,9 +159,9 @@ run_once(uint64_t seed, unsigned bug_pct, int *out_replies, int *out_sleeps,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_replies = atomic_load(&g_replies);
-	*out_sleeps  = atomic_load(&g_sleeps);
-	*out_hash    = atomic_load(&g_hash);
+	*out_replies = xtc_atomic_load_i32(&g_replies, xtc_mo_seq_cst);
+	*out_sleeps = xtc_atomic_load_i32(&g_sleeps, xtc_mo_seq_cst);
+	*out_hash = xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
 	*out_bug     = xtc_sim_buggify_active_count();
 
 	xtc_sim_buggify_disable();
@@ -175,8 +174,8 @@ run_once(uint64_t seed, unsigned bug_pct, int *out_replies, int *out_sleeps,
 #define B_WORKERS 8
 #define B_REGION  1024
 
-static atomic_int  g_b_done;
-static atomic_long g_b_hash;
+static int g_b_done;
+static long g_b_hash;
 static int         g_b_fd = -1;
 
 static void
@@ -193,13 +192,13 @@ b_worker(void *arg)
 	(void)xtc_aio_fsync(g_b_fd);
 	memset(buf, 0, sizeof buf);
 	r = xtc_aio_pread(g_b_fd, buf, B_REGION, off);
-	h = atomic_load_explicit(&g_b_hash, memory_order_relaxed);
+	h = xtc_atomic_load_long(&g_b_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(w + 1));
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(r + 1));
-	atomic_store_explicit(&g_b_hash, h, memory_order_relaxed);
-	atomic_fetch_add_explicit(&g_b_done, 1, memory_order_relaxed);
+	xtc_atomic_store_long(&g_b_hash, h, xtc_mo_relaxed);
+	xtc_atomic_fetch_add_i32(&g_b_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -211,8 +210,8 @@ run_b(uint64_t seed, unsigned bug_pct, int *out_done, long *out_hash,
 	const char *td = getenv("TMPDIR");
 	int i, rc;
 
-	atomic_store(&g_b_done, 0);
-	atomic_store(&g_b_hash, 0);
+	xtc_atomic_store_i32(&g_b_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_b_hash, 0, xtc_mo_seq_cst);
 
 	/* Honor TMPDIR (the swarm/run_sim_tests.sh convention); never a
 	 * hardcoded host path. */
@@ -243,8 +242,8 @@ run_b(uint64_t seed, unsigned bug_pct, int *out_done, long *out_hash,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_done = atomic_load(&g_b_done);
-	*out_hash = atomic_load(&g_b_hash);
+	*out_done = xtc_atomic_load_i32(&g_b_done, xtc_mo_seq_cst);
+	*out_hash = xtc_atomic_load_long(&g_b_hash, xtc_mo_seq_cst);
 	*out_bug  = xtc_sim_buggify_active_count();
 
 	xtc_sim_io_faults_disable();

@@ -14,7 +14,6 @@
 
 #define _GNU_SOURCE
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <time.h>
 #include <stdio.h>
@@ -58,8 +57,8 @@ test_fallback(const MunitParameter p[], void *d)
 }
 
 /* ---- in-proc offload + loop liveness ---- */
-static _Atomic int64_t g_t_start, g_t_end, g_t_b;
-static _Atomic int  g_a_ok, g_b_ran;
+static int64_t g_t_start, g_t_end, g_t_b;
+static int g_a_ok, g_b_ran;
 
 static void
 proc_a(void *arg)
@@ -68,11 +67,11 @@ proc_a(void *arg)
 	int64_t t0 = 0, t1 = 0;
 	(void)arg;
 	(void)__os_clock_mono(&t0);
-	atomic_store(&g_t_start, t0);
+	xtc_atomic_store_i64(&g_t_start, t0, xtc_mo_seq_cst);
 	(void)xtc_blocking_run(sleep_fn, (void *)(intptr_t)60, &out);
 	(void)__os_clock_mono(&t1);
-	atomic_store(&g_t_end, t1);
-	atomic_store(&g_a_ok, out == 120 ? 1 : 0);
+	xtc_atomic_store_i64(&g_t_end, t1, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_a_ok, out == 120 ? 1 : 0, xtc_mo_seq_cst);
 }
 
 static void
@@ -81,8 +80,8 @@ proc_b(void *arg)
 	int64_t t = 0;
 	(void)arg;
 	(void)__os_clock_mono(&t);
-	atomic_store(&g_t_b, t);
-	atomic_store(&g_b_ran, 1);
+	xtc_atomic_store_i64(&g_t_b, t, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_b_ran, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -93,9 +92,11 @@ test_in_proc_liveness(const MunitParameter p[], void *d)
 	xtc_pid_t a, b;
 	(void)p; (void)d;
 
-	atomic_store(&g_t_start, 0); atomic_store(&g_t_end, 0);
-	atomic_store(&g_t_b, 0); atomic_store(&g_a_ok, 0);
-	atomic_store(&g_b_ran, 0);
+	xtc_atomic_store_i64(&g_t_start, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i64(&g_t_end, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i64(&g_t_b, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_a_ok, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_b_ran, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	opts.name = "A";
@@ -108,12 +109,12 @@ test_in_proc_liveness(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 
 	/* A's offload returned the right value. */
-	munit_assert_int(atomic_load(&g_a_ok), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_a_ok, xtc_mo_seq_cst), ==, 1);
 	/* B ran, and it ran before A's blocking call finished -- proof
 	 * the loop was not blocked by the offload (A is spawned first,
 	 * so it parks first; if the offload blocked the loop thread, B
 	 * could not run until after t_end). */
-	munit_assert_int(atomic_load(&g_b_ran), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_b_ran, xtc_mo_seq_cst), ==, 1);
 	/* The exact timestamp ordering (B stamped before A's offload
 	 * returned) is a real proof of non-blocking offload on a fine-grained
 	 * clock, but on Windows the ~15.6 ms default timer granularity
@@ -123,15 +124,17 @@ test_in_proc_liveness(const MunitParameter p[], void *d)
 	 * g_b_ran assertion above is the load-bearing liveness proof; the
 	 * sub-microsecond ordering check is POSIX-only. */
 #if !defined(_WIN32)
-	munit_assert_int64(atomic_load(&g_t_b), <=, atomic_load(&g_t_end));
-	munit_assert_int64(atomic_load(&g_t_b), >=, atomic_load(&g_t_start));
+	munit_assert_int64(xtc_atomic_load_i64(&g_t_b, xtc_mo_seq_cst), <=,
+	    xtc_atomic_load_i64(&g_t_end, xtc_mo_seq_cst));
+	munit_assert_int64(xtc_atomic_load_i64(&g_t_b, xtc_mo_seq_cst), >=,
+	    xtc_atomic_load_i64(&g_t_start, xtc_mo_seq_cst));
 #endif
 	return MUNIT_OK;
 }
 
 /* ---- many concurrent offloads through a small pool ---- */
 #define NCONC 16
-static _Atomic int g_conc_ok;
+static int g_conc_ok;
 
 static void
 conc_proc(void *arg)
@@ -141,7 +144,7 @@ conc_proc(void *arg)
 	int out = -1;
 	(void)xtc_blocking_run(sleep_fn, (void *)(intptr_t)local, &out);
 	if (out == local * 2)
-		atomic_fetch_add(&g_conc_ok, 1);
+		xtc_atomic_fetch_add_i32(&g_conc_ok, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -153,7 +156,7 @@ test_concurrent(const MunitParameter p[], void *d)
 	int i;
 	(void)p; (void)d;
 
-	atomic_store(&g_conc_ok, 0);
+	xtc_atomic_store_i32(&g_conc_ok, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	for (i = 0; i < NCONC; i++) {
 		/* values 1..NCONC ms; all offloaded through a 4-thread pool */
@@ -163,7 +166,8 @@ test_concurrent(const MunitParameter p[], void *d)
 	}
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_conc_ok), ==, NCONC);
+	munit_assert_int(xtc_atomic_load_i32(&g_conc_ok, xtc_mo_seq_cst), ==,
+	    NCONC);
 	return MUNIT_OK;
 }
 
@@ -183,7 +187,7 @@ pread_fn(void *arg)
 	return (int)r;
 }
 
-static _Atomic int g_file_ok;
+static int g_file_ok;
 
 static void
 file_proc(void *arg)
@@ -198,7 +202,7 @@ file_proc(void *arg)
 	/* Offload the read to the pool; the loop runs others meanwhile. */
 	(void)xtc_blocking_run(pread_fn, &ctx, &out);
 	if (out == 512 && ctx.buf[0] == 'Z' && ctx.buf[511] == 'Z')
-		atomic_store(&g_file_ok, 1);
+		xtc_atomic_store_i32(&g_file_ok, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -212,7 +216,7 @@ test_file_offload(const MunitParameter p[], void *d)
 	int fd;
 	(void)p; (void)d;
 
-	atomic_store(&g_file_ok, 0);
+	xtc_atomic_store_i32(&g_file_ok, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_fs_tmpdir(tmpdir, sizeof tmpdir), ==, XTC_OK);
 	snprintf(path, sizeof path, "%s/xtc-blk-file-XXXXXX", tmpdir);
 	fd = mkstemp(path);
@@ -229,7 +233,8 @@ test_file_offload(const MunitParameter p[], void *d)
 
 	(void)close(fd);
 	(void)unlink(path);
-	munit_assert_int(atomic_load(&g_file_ok), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_file_ok, xtc_mo_seq_cst), ==,
+	    1);
 	return MUNIT_OK;
 }
 
@@ -249,7 +254,7 @@ test_shutdown(const MunitParameter p[], void *d)
 }
 
 /* ---- fire-and-forget submit ---- */
-static _Atomic int g_submit_ran;
+static int g_submit_ran;
 
 static int
 submit_marker_fn(void *arg)
@@ -257,7 +262,7 @@ submit_marker_fn(void *arg)
 	/* arg is a heap int the fn owns and frees -- exercises the
 	 * "fn owns arg" lifetime contract. */
 	int *p = arg;
-	atomic_fetch_add(&g_submit_ran, *p);
+	xtc_atomic_fetch_add_i32(&g_submit_ran, *p, xtc_mo_seq_cst);
 	free(p);
 	return 0;
 }
@@ -270,7 +275,7 @@ test_submit_fire_forget(const MunitParameter p[], void *d)
 
 	munit_assert_int(xtc_blocking_submit(NULL, NULL), ==, XTC_E_INVAL);
 
-	atomic_store(&g_submit_ran, 0);
+	xtc_atomic_store_i32(&g_submit_ran, 0, xtc_mo_seq_cst);
 	for (i = 0; i < 10; i++) {
 		int *v = malloc(sizeof *v);
 		munit_assert_not_null(v);
@@ -278,11 +283,14 @@ test_submit_fire_forget(const MunitParameter p[], void *d)
 		munit_assert_int(xtc_blocking_submit(submit_marker_fn, v), ==, XTC_OK);
 	}
 	/* No completion signal: poll the counter until all 10 ran. */
-	for (spins = 0; spins < 5000 && atomic_load(&g_submit_ran) < 10; spins++) {
+	for (spins = 0; spins < 5000 &&
+	     xtc_atomic_load_i32(&g_submit_ran, xtc_mo_seq_cst) < 10;
+	     spins++) {
 		struct timespec ts = { 0, 1000000 };  /* 1ms */
 		(void)nanosleep(&ts, NULL);
 	}
-	munit_assert_int(atomic_load(&g_submit_ran), ==, 10);
+	munit_assert_int(xtc_atomic_load_i32(&g_submit_ran, xtc_mo_seq_cst), ==,
+	    10);
 	return MUNIT_OK;
 }
 
@@ -291,25 +299,26 @@ test_submit_fire_forget(const MunitParameter p[], void *d)
  * (a) the result is correct, (b) fn ran on a POOL worker thread, not
  * inline on the caller (the two pthread_self ids differ), and (c) the
  * guards: NULL fn and a from-a-fiber call both return XTC_E_INVAL. ---- */
-static _Atomic uintptr_t g_off_caller_tid, g_off_worker_tid;
+static uintptr_t g_off_caller_tid, g_off_worker_tid;
 
 static int
 off_tid_fn(void *arg)
 {
 	(void)arg;
-	atomic_store(&g_off_worker_tid, (uintptr_t)pthread_self());
+	xtc_atomic_store_uptr(&g_off_worker_tid, (uintptr_t)pthread_self(),
+	    xtc_mo_seq_cst);
 	return 4242;
 }
 
-static _Atomic int g_off_from_fiber_rc;
+static int g_off_from_fiber_rc;
 
 static void
 off_from_fiber_proc(void *arg)
 {
 	(void)arg;
 	/* Called on a loop process: must be rejected (use xtc_blocking_run). */
-	atomic_store(&g_off_from_fiber_rc,
-	    xtc_blocking_run_off_loop(off_tid_fn, NULL, NULL));
+	xtc_atomic_store_i32(&g_off_from_fiber_rc,
+	    xtc_blocking_run_off_loop(off_tid_fn, NULL, NULL), xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -327,25 +336,34 @@ test_off_loop(const MunitParameter p[], void *d)
 
 	/* From a bare OS thread (the test runner is off any loop): offload
 	 * runs on a pool worker and returns the result. */
-	atomic_store(&g_off_caller_tid, (uintptr_t)pthread_self());
-	atomic_store(&g_off_worker_tid, 0);
+	xtc_atomic_store_uptr(&g_off_caller_tid, (uintptr_t)pthread_self(),
+	    xtc_mo_seq_cst);
+	xtc_atomic_store_uptr(&g_off_worker_tid, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_blocking_run_off_loop(off_tid_fn, NULL, &out),
 	    ==, XTC_OK);
 	munit_assert_int(out, ==, 4242);
 	/* fn ran on the pool, NOT inline on the caller. */
-	munit_assert_uint((unsigned)atomic_load(&g_off_worker_tid), !=, 0);
-	munit_assert_ullong((unsigned long long)atomic_load(&g_off_worker_tid),
-	    !=, (unsigned long long)atomic_load(&g_off_caller_tid));
+	munit_assert_uint((unsigned)xtc_atomic_load_uptr(&g_off_worker_tid,
+	                      xtc_mo_seq_cst),
+	    !=, 0);
+	munit_assert_ullong((unsigned long long)
+	                        xtc_atomic_load_uptr(&g_off_worker_tid,
+	                            xtc_mo_seq_cst),
+	    !=,
+	    (unsigned long long)xtc_atomic_load_uptr(&g_off_caller_tid,
+	        xtc_mo_seq_cst));
 
 	/* From a fiber it must be rejected (use xtc_blocking_run there). */
-	atomic_store(&g_off_from_fiber_rc, XTC_OK);
+	xtc_atomic_store_i32(&g_off_from_fiber_rc, XTC_OK, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	opts.name = "offfib";
 	munit_assert_int(xtc_proc_spawn(loop, off_from_fiber_proc, NULL,
 	    &opts, &pid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_off_from_fiber_rc), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_atomic_load_i32(&g_off_from_fiber_rc,
+	                     xtc_mo_seq_cst),
+	    ==, XTC_E_INVAL);
 	return MUNIT_OK;
 }
 
@@ -354,8 +372,8 @@ test_off_loop(const MunitParameter p[], void *d)
  * time is ~one sleep, not (N / initial_threads) sleeps ---- */
 #define NGROW 32
 #define GROW_MS 80
-static _Atomic int   g_grow_ok;
-static _Atomic int64_t  g_grow_wall_start, g_grow_wall_end;
+static int g_grow_ok;
+static int64_t g_grow_wall_start, g_grow_wall_end;
 
 static void
 grow_proc(void *arg)
@@ -364,7 +382,7 @@ grow_proc(void *arg)
 	(void)arg;
 	(void)xtc_blocking_run(sleep_fn, (void *)(intptr_t)GROW_MS, &out);
 	if (out == GROW_MS * 2)
-		atomic_fetch_add(&g_grow_ok, 1);
+		xtc_atomic_fetch_add_i32(&g_grow_ok, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -373,7 +391,7 @@ grow_timer_proc(void *arg)
 	int64_t t = 0;
 	(void)arg;
 	(void)__os_clock_mono(&t);
-	atomic_store(&g_grow_wall_start, t);
+	xtc_atomic_store_i64(&g_grow_wall_start, t, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -391,8 +409,8 @@ test_pool_grows(const MunitParameter p[], void *d)
 	 * so this runs against the auto-sizing + growth default. */
 	xtc_blocking_shutdown();
 
-	atomic_store(&g_grow_ok, 0);
-	atomic_store(&g_grow_wall_start, 0);
+	xtc_atomic_store_i32(&g_grow_ok, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i64(&g_grow_wall_start, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	opts.name = "t";
 	munit_assert_int(xtc_proc_spawn(loop, grow_timer_proc, NULL, &opts, &pid),
@@ -404,11 +422,12 @@ test_pool_grows(const MunitParameter p[], void *d)
 	}
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	(void)__os_clock_mono(&t1);
-	atomic_store(&g_grow_wall_end, t1);
+	xtc_atomic_store_i64(&g_grow_wall_end, t1, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 
 	/* All offloads returned correctly. */
-	munit_assert_int(atomic_load(&g_grow_ok), ==, NGROW);
+	munit_assert_int(xtc_atomic_load_i32(&g_grow_ok, xtc_mo_seq_cst), ==,
+	    NGROW);
 
 	/* With the pool growing toward NGROW workers, the offloads run
 	 * largely in parallel: total wall time is a small multiple of one
@@ -416,8 +435,10 @@ test_pool_grows(const MunitParameter p[], void *d)
 	 * (NGROW / 4) * GROW_MS (the old fixed-4 pool, ~640ms here).  Allow
 	 * generous slack for scheduling and thread spin-up: assert it
 	 * finished well under the old fixed-4 floor. */
-	elapsed_ms = (atomic_load(&g_grow_wall_end) -
-	              atomic_load(&g_grow_wall_start)) / 1000000L;
+	elapsed_ms =
+	    (xtc_atomic_load_i64(&g_grow_wall_end, xtc_mo_seq_cst) -
+	        xtc_atomic_load_i64(&g_grow_wall_start, xtc_mo_seq_cst)) /
+	    1000000L;
 	/* The absolute wall-time budget assumes GROW_MS sleeps land close to
 	 * their nominal duration.  On Windows the ~15.6 ms default timer
 	 * granularity coarsens each sleep, inflating total wall time past
@@ -484,16 +505,16 @@ test_pool_size(const MunitParameter p[], void *d)
  * off the loop thread while the fd count stays flat.  Fails on 1.55.0. */
 #define NFD 200
 static pthread_t g_fd_loop_thr;
-static _Atomic int g_fd_on_loop, g_fd_off_loop, g_fd_ok;
+static int g_fd_on_loop, g_fd_off_loop, g_fd_ok;
 
 static int
 fd_probe_fn(void *arg)
 {
 	struct timespec ts = { 0, 20 * 1000000L };
 	if (pthread_equal(pthread_self(), g_fd_loop_thr))
-		atomic_fetch_add(&g_fd_on_loop, 1);
+		xtc_atomic_fetch_add_i32(&g_fd_on_loop, 1, xtc_mo_seq_cst);
 	else
-		atomic_fetch_add(&g_fd_off_loop, 1);
+		xtc_atomic_fetch_add_i32(&g_fd_off_loop, 1, xtc_mo_seq_cst);
 	(void)nanosleep(&ts, NULL);
 	return (int)(intptr_t)arg + 1;
 }
@@ -504,7 +525,7 @@ fd_proc(void *arg)
 	int out = -1;
 	if (xtc_blocking_run(fd_probe_fn, arg, &out) == XTC_OK &&
 	    out == (int)(intptr_t)arg + 1)
-		atomic_fetch_add(&g_fd_ok, 1);
+		xtc_atomic_fetch_add_i32(&g_fd_ok, 1, xtc_mo_seq_cst);
 }
 
 #if !defined(_WIN32)
@@ -533,9 +554,9 @@ test_no_fd_per_call(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	xtc_blocking_shutdown();
-	atomic_store(&g_fd_on_loop, 0);
-	atomic_store(&g_fd_off_loop, 0);
-	atomic_store(&g_fd_ok, 0);
+	xtc_atomic_store_i32(&g_fd_on_loop, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_fd_off_loop, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_fd_ok, 0, xtc_mo_seq_cst);
 	g_fd_loop_thr = pthread_self();
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	for (i = 0; i < NFD; i++) {
@@ -561,9 +582,12 @@ test_no_fd_per_call(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 #endif
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_fd_on_loop), ==, 0);
-	munit_assert_int(atomic_load(&g_fd_off_loop), ==, NFD);
-	munit_assert_int(atomic_load(&g_fd_ok), ==, NFD);
+	munit_assert_int(xtc_atomic_load_i32(&g_fd_on_loop, xtc_mo_seq_cst), ==,
+	    0);
+	munit_assert_int(xtc_atomic_load_i32(&g_fd_off_loop, xtc_mo_seq_cst),
+	    ==, NFD);
+	munit_assert_int(xtc_atomic_load_i32(&g_fd_ok, xtc_mo_seq_cst), ==,
+	    NFD);
 	xtc_blocking_shutdown();
 	return MUNIT_OK;
 }

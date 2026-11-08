@@ -10,7 +10,6 @@
 
 #define _GNU_SOURCE
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,7 +36,7 @@ struct aio_ctx {
 	int   loop_ran;  /* a peer fiber ran while the I/O was outstanding */
 };
 
-static atomic_int g_peer_ran;
+static int g_peer_ran;
 
 /* A peer fiber that simply records it got to run -- proof the loop kept
  * scheduling while the aio fiber's I/O was in flight. */
@@ -45,7 +44,7 @@ static void
 peer_proc(void *arg)
 {
 	(void)arg;
-	atomic_store(&g_peer_ran, 1);
+	xtc_atomic_store_i32(&g_peer_ran, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -67,7 +66,7 @@ aio_proc(void *arg)
 	memset(in, 0, AIO_LEN);
 	c->read    = xtc_aio_pread(c->fd, in, AIO_LEN, 0);
 	c->match   = (c->read == AIO_LEN && memcmp(in, out, AIO_LEN) == 0);
-	c->loop_ran = atomic_load(&g_peer_ran);
+	c->loop_ran = xtc_atomic_load_i32(&g_peer_ran, xtc_mo_seq_cst);
 	free(out);
 	free(in);
 }
@@ -84,7 +83,7 @@ run_roundtrip(int force_offload)
 	__xtc_aio_force_offload(force_offload);
 
 	memset(&c, 0, sizeof c);
-	atomic_store(&g_peer_ran, 0);
+	xtc_atomic_store_i32(&g_peer_ran, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_fs_tmpdir(tmpdir, sizeof tmpdir), ==, XTC_OK);
 	snprintf(tmpl, sizeof tmpl, "%s/xtc_aio_XXXXXX", tmpdir);
 	c.fd = mkstemp(tmpl);
@@ -191,7 +190,7 @@ vec_proc(void *arg)
 	memcpy(flat_r + 3072, r2, sizeof r2);
 	c->match = (c->wrote == 4096 && c->rd == 4096 &&
 	    memcmp(flat_w, flat_r, 4096) == 0);
-	c->loop_ran = atomic_load(&g_peer_ran);
+	c->loop_ran = xtc_atomic_load_i32(&g_peer_ran, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -205,7 +204,7 @@ run_vec_roundtrip(int force_offload)
 
 	__xtc_aio_force_offload(force_offload);
 	memset(&c, 0, sizeof c);
-	atomic_store(&g_peer_ran, 0);
+	xtc_atomic_store_i32(&g_peer_ran, 0, xtc_mo_seq_cst);
 	c.fd = mkstemp(tmpl);
 	munit_assert_int(c.fd, >=, 0);
 
@@ -330,7 +329,7 @@ test_aio_short_read(const MunitParameter p[], void *d)
 #define CHURN_SPIN_NS  (50LL * 1000)
 #define CHURN_SLEEP_NS (20LL * 1000)
 #define CHURN_BOUND_NS (3LL * 1000 * 1000 * 1000)
-static atomic_int g_churn_done, g_churn_wrote;
+static int g_churn_done, g_churn_wrote;
 static int64_t    g_churn_start;
 
 static void
@@ -338,7 +337,7 @@ churn_spinner(void *arg)
 {
 	int64_t t0;
 	(void)arg;
-	while (!atomic_load(&g_churn_done) &&
+	while (!xtc_atomic_load_i32(&g_churn_done, xtc_mo_seq_cst) &&
 	    xtc_clock_mono() - g_churn_start < CHURN_BOUND_NS) {
 		t0 = xtc_clock_mono();
 		while (xtc_clock_mono() - t0 < CHURN_SPIN_NS)
@@ -357,8 +356,9 @@ churn_writer(void *arg)
 	    xtc_clock_mono() - g_churn_start < CHURN_BOUND_NS; i++)
 		if (xtc_aio_pwrite(fd, buf, (uint32_t)sizeof buf,
 		    (int64_t)i * (int64_t)sizeof buf) == (int)sizeof buf)
-			atomic_fetch_add(&g_churn_wrote, 1);
-	atomic_store(&g_churn_done, 1);
+			xtc_atomic_fetch_add_i32(&g_churn_wrote, 1,
+			    xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_churn_done, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -376,8 +376,8 @@ test_aio_timer_churn(const MunitParameter p[], void *d)
 	snprintf(tmpl, sizeof tmpl, "%s/xtc_aio3_XXXXXX", tmpdir);
 	fd = mkstemp(tmpl);
 	munit_assert_int(fd, >=, 0);
-	atomic_store(&g_churn_done, 0);
-	atomic_store(&g_churn_wrote, 0);
+	xtc_atomic_store_i32(&g_churn_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_churn_wrote, 0, xtc_mo_seq_cst);
 	g_churn_start = xtc_clock_mono();
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
@@ -391,9 +391,10 @@ test_aio_timer_churn(const MunitParameter p[], void *d)
 	unlink(tmpl);
 
 	munit_logf(MUNIT_LOG_INFO, "%d of %d writes in %lld ms",
-	    atomic_load(&g_churn_wrote), CHURN_WRITES,
+	    xtc_atomic_load_i32(&g_churn_wrote, xtc_mo_seq_cst), CHURN_WRITES,
 	    (long long)(took / 1000000));
-	munit_assert_int(atomic_load(&g_churn_wrote), ==, CHURN_WRITES);
+	munit_assert_int(xtc_atomic_load_i32(&g_churn_wrote, xtc_mo_seq_cst),
+	    ==, CHURN_WRITES);
 	return MUNIT_OK;
 }
 

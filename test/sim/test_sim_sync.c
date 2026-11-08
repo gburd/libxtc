@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -61,19 +60,19 @@
 #define SEM_WORK    12
 
 static xtc_sem_t  *g_sem;
-static atomic_int  g_sem_holders;    /* live holders -- must stay <= CAP */
-static atomic_int  g_sem_peak;       /* max holders seen */
-static atomic_int  g_sem_over;       /* count of over-admissions (bug) */
-static atomic_int  g_sem_done;       /* workers that completed a pair */
-static atomic_long g_sem_hash;       /* order-sensitive fold of grants */
+static int g_sem_holders; /* live holders -- must stay <= CAP */
+static int g_sem_peak;    /* max holders seen */
+static int g_sem_over;    /* count of over-admissions (bug) */
+static int g_sem_done;    /* workers that completed a pair */
+static long g_sem_hash;   /* order-sensitive fold of grants */
 
 static void
 sem_fold(long v)
 {
-	long h = atomic_load_explicit(&g_sem_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_sem_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(v + 1));
-	atomic_store_explicit(&g_sem_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_sem_hash, h, xtc_mo_relaxed);
 }
 
 static void
@@ -94,24 +93,24 @@ sem_worker(void *arg)
 	if (rc != XTC_OK) return;
 
 	{
-		int h = atomic_fetch_add_explicit(&g_sem_holders, 1,
-		    memory_order_relaxed) + 1;
+		int h = xtc_atomic_fetch_add_i32(&g_sem_holders, 1,
+		            xtc_mo_relaxed) +
+		    1;
 		int pk;
 		if (h > SEM_CAP)
-			atomic_fetch_add_explicit(&g_sem_over, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_sem_over, 1,
+			    xtc_mo_relaxed);
 		do {
-			pk = atomic_load_explicit(&g_sem_peak,
-			    memory_order_relaxed);
+			pk = xtc_atomic_load_i32(&g_sem_peak, xtc_mo_relaxed);
 			if (h <= pk) break;
-		} while (!atomic_compare_exchange_weak_explicit(&g_sem_peak,
-		    &pk, h, memory_order_relaxed, memory_order_relaxed));
+		} while (!xtc_atomic_cas_weak_i32(&g_sem_peak, &pk, h,
+		    xtc_mo_relaxed, xtc_mo_relaxed));
 		sem_fold(id);
 	}
 	xtc_yield();                        /* hold across a yield */
-	atomic_fetch_sub_explicit(&g_sem_holders, 1, memory_order_relaxed);
+	xtc_atomic_fetch_sub_i32(&g_sem_holders, 1, xtc_mo_relaxed);
 	(void)xtc_sem_post(g_sem, 1);
-	atomic_fetch_add_explicit(&g_sem_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_sem_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -121,11 +120,11 @@ run_sem(uint64_t seed, int use_buggify, int *out_done, int *out_peak,
 	xtc_exec_t *e = NULL;
 	int i, rc;
 
-	atomic_store(&g_sem_holders, 0);
-	atomic_store(&g_sem_peak, 0);
-	atomic_store(&g_sem_over, 0);
-	atomic_store(&g_sem_done, 0);
-	atomic_store(&g_sem_hash, 0);
+	xtc_atomic_store_i32(&g_sem_holders, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_sem_peak, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_sem_over, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_sem_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_sem_hash, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	if (xtc_sem_create(SEM_CAP, &g_sem) != XTC_OK) {
@@ -139,10 +138,10 @@ run_sem(uint64_t seed, int use_buggify, int *out_done, int *out_peak,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_done = atomic_load(&g_sem_done);
-	*out_peak = atomic_load(&g_sem_peak);
-	*out_over = atomic_load(&g_sem_over);
-	*out_hash = atomic_load(&g_sem_hash);
+	*out_done = xtc_atomic_load_i32(&g_sem_done, xtc_mo_seq_cst);
+	*out_peak = xtc_atomic_load_i32(&g_sem_peak, xtc_mo_seq_cst);
+	*out_over = xtc_atomic_load_i32(&g_sem_over, xtc_mo_seq_cst);
+	*out_hash = xtc_atomic_load_long(&g_sem_hash, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	if (use_buggify) xtc_sim_buggify_disable();
 	xtc_sem_destroy(g_sem);
@@ -157,9 +156,9 @@ run_sem(uint64_t seed, int use_buggify, int *out_done, int *out_peak,
 #define BAR_ROUNDS  3
 
 static xtc_barrier_t *g_bar;
-static atomic_int      g_bar_entered[BAR_ROUNDS]; /* parties that reached wait */
-static atomic_int      g_bar_bad;       /* a party passed before all entered */
-static atomic_int      g_bar_done;      /* parties that finished all rounds */
+static int g_bar_entered[BAR_ROUNDS]; /* parties that reached wait */
+static int g_bar_bad;                 /* a party passed before all entered */
+static int g_bar_done;                /* parties that finished all rounds */
 
 static void
 bar_party(void *arg)
@@ -173,15 +172,13 @@ bar_party(void *arg)
 		 * sampling it after wait returns is race-free: if a party
 		 * returns while entered < PARTIES the barrier released early
 		 * -- a bug (parties must be released TOGETHER). */
-		atomic_fetch_add_explicit(&g_bar_entered[r], 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_bar_entered[r], 1, xtc_mo_relaxed);
 		(void)xtc_barrier_wait(g_bar);
-		if (atomic_load_explicit(&g_bar_entered[r],
-		    memory_order_relaxed) < BAR_PARTIES)
-			atomic_fetch_add_explicit(&g_bar_bad, 1,
-			    memory_order_relaxed);
+		if (xtc_atomic_load_i32(&g_bar_entered[r], xtc_mo_relaxed) <
+		    BAR_PARTIES)
+			xtc_atomic_fetch_add_i32(&g_bar_bad, 1, xtc_mo_relaxed);
 	}
-	atomic_fetch_add_explicit(&g_bar_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_bar_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -191,9 +188,9 @@ run_barrier(uint64_t seed, int *out_done, int *out_bad, uint64_t *out_state)
 	int i, rc;
 
 	for (i = 0; i < BAR_ROUNDS; i++)
-		atomic_store(&g_bar_entered[i], 0);
-	atomic_store(&g_bar_bad, 0);
-	atomic_store(&g_bar_done, 0);
+		xtc_atomic_store_i32(&g_bar_entered[i], 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_bar_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_bar_done, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	if (xtc_barrier_create(BAR_PARTIES, &g_bar) != XTC_OK) {
@@ -205,8 +202,8 @@ run_barrier(uint64_t seed, int *out_done, int *out_bad, uint64_t *out_state)
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_done = atomic_load(&g_bar_done);
-	*out_bad = atomic_load(&g_bar_bad);
+	*out_done = xtc_atomic_load_i32(&g_bar_done, xtc_mo_seq_cst);
+	*out_bad = xtc_atomic_load_i32(&g_bar_bad, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_barrier_destroy(g_bar);
 	g_bar = NULL;
@@ -219,10 +216,10 @@ run_barrier(uint64_t seed, int *out_done, int *out_bad, uint64_t *out_state)
 #define GATE_WORK  8
 
 static xtc_gate_t *g_gate;
-static atomic_int  g_gate_left;      /* workers that entered+left */
-static atomic_int  g_gate_closed;    /* set once the gate is closed */
-static atomic_int  g_gate_after;     /* entries admitted AFTER close (bug) */
-static atomic_int  g_gate_drained;   /* 1 once drain returned with count 0 */
+static int g_gate_left;    /* workers that entered+left */
+static int g_gate_closed;  /* set once the gate is closed */
+static int g_gate_after;   /* entries admitted AFTER close (bug) */
+static int g_gate_drained; /* 1 once drain returned with count 0 */
 
 static void
 gate_worker(void *arg)
@@ -230,12 +227,11 @@ gate_worker(void *arg)
 	(void)arg;
 	if (xtc_gate_enter(g_gate) != XTC_OK)
 		return;                     /* refused (gate already closed) */
-	if (atomic_load_explicit(&g_gate_closed, memory_order_relaxed))
-		atomic_fetch_add_explicit(&g_gate_after, 1,
-		    memory_order_relaxed);
+	if (xtc_atomic_load_i32(&g_gate_closed, xtc_mo_relaxed))
+		xtc_atomic_fetch_add_i32(&g_gate_after, 1, xtc_mo_relaxed);
 	xtc_yield();                        /* "work" inside the gate */
 	(void)xtc_gate_leave(g_gate);
-	atomic_fetch_add_explicit(&g_gate_left, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_gate_left, 1, xtc_mo_relaxed);
 }
 
 static void
@@ -245,13 +241,13 @@ gate_closer(void *arg)
 	(void)arg;
 	/* Let some workers enter first. */
 	xtc_yield(); xtc_yield();
-	atomic_store_explicit(&g_gate_closed, 1, memory_order_relaxed);
+	xtc_atomic_store_i32(&g_gate_closed, 1, xtc_mo_relaxed);
 	(void)xtc_gate_close(g_gate);
 	/* Drain: parks the fiber until every entered worker has left.
 	 * Positive timeout so a stuck worker surfaces, not a hang. */
 	rc = xtc_gate_drain(g_gate, 1000000000LL);
 	if (rc == XTC_OK && xtc_gate_count(g_gate) == 0)
-		atomic_store_explicit(&g_gate_drained, 1, memory_order_relaxed);
+		xtc_atomic_store_i32(&g_gate_drained, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -261,10 +257,10 @@ run_gate(uint64_t seed, int *out_left, int *out_after, int *out_drained,
 	xtc_exec_t *e = NULL;
 	int i, rc;
 
-	atomic_store(&g_gate_left, 0);
-	atomic_store(&g_gate_closed, 0);
-	atomic_store(&g_gate_after, 0);
-	atomic_store(&g_gate_drained, 0);
+	xtc_atomic_store_i32(&g_gate_left, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_gate_closed, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_gate_after, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_gate_drained, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	if (xtc_gate_create(&g_gate) != XTC_OK) {
@@ -278,9 +274,9 @@ run_gate(uint64_t seed, int *out_left, int *out_after, int *out_drained,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_left = atomic_load(&g_gate_left);
-	*out_after = atomic_load(&g_gate_after);
-	*out_drained = atomic_load(&g_gate_drained);
+	*out_left = xtc_atomic_load_i32(&g_gate_left, xtc_mo_seq_cst);
+	*out_after = xtc_atomic_load_i32(&g_gate_after, xtc_mo_seq_cst);
+	*out_drained = xtc_atomic_load_i32(&g_gate_drained, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_gate_destroy(g_gate);
 	g_gate = NULL;

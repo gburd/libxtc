@@ -53,7 +53,7 @@ test_nesting(const MunitParameter p[], void *d)
 /* The allocator brackets the unsafe region: a hook that samples the
  * depth WHILE malloc is running observes depth > 0, and the depth is
  * back to 0 after the call returns. */
-static _Atomic int g_depth_in_malloc = -1;
+static int g_depth_in_malloc = -1;
 
 /* We cannot easily observe the depth from inside the real malloc, so
  * instead assert the contract indirectly: __os_malloc/__os_free run to
@@ -72,7 +72,7 @@ test_alloc_balanced(const MunitParameter p[], void *d)
 		__os_free(m);
 		munit_assert_int(__xtc_unsafe_depth(), ==, 0);  /* balanced after */
 	}
-	(void)g_depth_in_malloc;
+	(void)xtc_atomic_load_i32(&g_depth_in_malloc, xtc_mo_seq_cst);
 	return MUNIT_OK;
 }
 

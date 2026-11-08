@@ -9,7 +9,6 @@
  */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -185,7 +184,7 @@ test_chan_oneshot_waker(const MunitParameter p[], void *d)
 
 /* ----- xtc_link / xtc_unlink (in-proc) ------------------------ */
 
-static _Atomic int g_link_died_seen;
+static int g_link_died_seen;
 
 static int
 __match_exit_signal(const void *data, size_t size, void *u)
@@ -207,19 +206,19 @@ linker_proc(void *arg)
 	if (rc != XTC_OK) {
 		/* Target was already gone (race with its xtc_exit_self).
 		 * That counts as observing the death, so set the flag. */
-		atomic_fetch_add(&g_link_died_seen, 1);
+		xtc_atomic_fetch_add_i32(&g_link_died_seen, 1, xtc_mo_seq_cst);
 		return;
 	}
 	(void)xtc_unlink(target);   /* exercise unlink */
 	/* Re-link before the target dies (or after -- either is fine). */
 	rc = xtc_link(target);
 	if (rc != XTC_OK) {
-		atomic_fetch_add(&g_link_died_seen, 1);
+		xtc_atomic_fetch_add_i32(&g_link_died_seen, 1, xtc_mo_seq_cst);
 		return;
 	}
 	if (xtc_recv_match(__match_exit_signal, NULL, &m, &s,
 	    1000LL * 1000 * 1000) == XTC_OK) {
-		atomic_fetch_add(&g_link_died_seen, 1);
+		xtc_atomic_fetch_add_i32(&g_link_died_seen, 1, xtc_mo_seq_cst);
 		if (m) free(m);
 	}
 }
@@ -242,28 +241,29 @@ test_link_unlink(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	xtc_pid_t crasher_pid, linker_pid;
 	(void)p; (void)d;
-	atomic_store(&g_link_died_seen, 0);
+	xtc_atomic_store_i32(&g_link_died_seen, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, crasher, NULL, NULL,
 	    &crasher_pid), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, linker_proc, &crasher_pid, NULL,
 	    &linker_pid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_link_died_seen), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_link_died_seen, xtc_mo_seq_cst),
+	    ==, 1);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
 }
 
 /* ----- xtc_exit_pid: cross-process kill ----------------------- */
 
-static _Atomic int g_killed_proc_ran;
+static int g_killed_proc_ran;
 
 static void
 victim_proc(void *arg)
 {
 	void *m; size_t s;
 	(void)arg;
-	atomic_fetch_add(&g_killed_proc_ran, 1);
+	xtc_atomic_fetch_add_i32(&g_killed_proc_ran, 1, xtc_mo_seq_cst);
 	/* Block forever; xtc_exit_pid kills us. */
 	for (;;) {
 		(void)xtc_recv(&m, &s, 100 * 1000 * 1000);
@@ -287,14 +287,16 @@ test_exit_pid(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	xtc_pid_t victim, killer;
 	(void)p; (void)d;
-	atomic_store(&g_killed_proc_ran, 0);
+	xtc_atomic_store_i32(&g_killed_proc_ran, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, victim_proc, NULL, NULL, &victim),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, killer_proc, &victim, NULL, &killer),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_killed_proc_ran), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_killed_proc_ran,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
 }
@@ -405,16 +407,16 @@ static int
 exec_simple_task(xtc_task_t *self, void *u)
 {
 	(void)self;
-	_Atomic int *c = u;
-	atomic_fetch_add_explicit(c, 1, memory_order_relaxed);
+	int *c = u;
+	xtc_atomic_fetch_add_i32(c, 1, xtc_mo_relaxed);
 	return XTC_TASK_DONE;
 }
 
 static intptr_t
 exec_simple_coro(void *arg)
 {
-	_Atomic int *c = arg;
-	atomic_fetch_add_explicit(c, 1, memory_order_relaxed);
+	int *c = arg;
+	xtc_atomic_fetch_add_i32(c, 1, xtc_mo_relaxed);
 	return 0;
 }
 
@@ -424,10 +426,10 @@ test_exec_full_api(const MunitParameter p[], void *d)
 	xtc_exec_t *e;
 	xtc_loop_t *l;
 	xtc_task_t *t;
-	_Atomic int counter;
+	int counter;
 	int n_loops;
 	(void)p; (void)d;
-	atomic_store(&counter, 0);
+	xtc_atomic_store_i32(&counter, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_exec_init(&e, 2), ==, XTC_OK);
 	n_loops = xtc_exec_n_loops(e);
 	munit_assert_int(n_loops, ==, 2);
@@ -446,7 +448,7 @@ test_exec_full_api(const MunitParameter p[], void *d)
 	    ==, XTC_E_INVAL);
 
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	munit_assert_int(atomic_load(&counter), >=, 2);
+	munit_assert_int(xtc_atomic_load_i32(&counter, xtc_mo_seq_cst), >=, 2);
 
 	/* xtc_exec_stop is a no-op after run completes; should still
 	 * return OK. */

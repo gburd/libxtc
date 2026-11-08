@@ -32,7 +32,6 @@
  *	Usage: bench_fairness [burn_iters]   (default 50000000)
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,9 +43,9 @@
 
 #define N_WORKERS 8
 
-static atomic_long g_coop_iters;   /* cooperative work done while runaway runs */
-static atomic_int  g_runaway_done;
-static atomic_int  g_use_budget;   /* scenario toggle */
+static long g_coop_iters; /* cooperative work done while runaway runs */
+static int g_runaway_done;
+static int g_use_budget; /* scenario toggle */
 static long        g_burn;
 static volatile long g_sink;        /* defeat dead-code elimination */
 
@@ -56,12 +55,12 @@ static void
 worker(void *arg)
 {
 	(void)arg;
-	while (!atomic_load_explicit(&g_runaway_done, memory_order_relaxed)) {
+	while (!xtc_atomic_load_i32(&g_runaway_done, xtc_mo_relaxed)) {
 		long acc = 0, i;
 		for (i = 0; i < 1000; i++)
 			acc += i;
 		g_sink += acc;
-		atomic_fetch_add_explicit(&g_coop_iters, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_long(&g_coop_iters, 1, xtc_mo_relaxed);
 		xtc_yield();   /* the cooperative contract */
 	}
 }
@@ -73,7 +72,7 @@ static void
 runaway(void *arg)
 {
 	long acc = 0, i;
-	int use_budget = atomic_load(&g_use_budget);
+	int use_budget = xtc_atomic_load_i32(&g_use_budget, xtc_mo_seq_cst);
 	(void)arg;
 	for (i = 0; i < g_burn; i++) {
 		acc += (i ^ (i << 1)) + (acc >> 3);
@@ -81,7 +80,7 @@ runaway(void *arg)
 			(void)xtc_yield_if_due();   /* cooperative preemption */
 	}
 	g_sink += acc;
-	atomic_store_explicit(&g_runaway_done, 1, memory_order_relaxed);
+	xtc_atomic_store_i32(&g_runaway_done, 1, xtc_mo_relaxed);
 }
 
 static long
@@ -90,9 +89,9 @@ run_scenario(int use_budget)
 	xtc_loop_t *loop;
 	int i;
 
-	atomic_store(&g_coop_iters, 0);
-	atomic_store(&g_runaway_done, 0);
-	atomic_store(&g_use_budget, use_budget);
+	xtc_atomic_store_long(&g_coop_iters, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_runaway_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_use_budget, use_budget, xtc_mo_seq_cst);
 
 	if (xtc_loop_init(&loop) != XTC_OK) {
 		fprintf(stderr, "loop_init failed\n");
@@ -107,7 +106,7 @@ run_scenario(int use_budget)
 
 	(void)xtc_loop_run(loop);
 	(void)xtc_loop_fini(loop);
-	return atomic_load(&g_coop_iters);
+	return xtc_atomic_load_long(&g_coop_iters, xtc_mo_seq_cst);
 }
 
 int

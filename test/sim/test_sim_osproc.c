@@ -37,7 +37,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,9 +52,9 @@
 #define N_LOOPS   2
 #define N_WORKERS 5
 
-static atomic_int g_exit_ok;     /* workers whose exit code matched */
-static atomic_int g_killed_ok;   /* the killed worker reaped as signalled */
-static atomic_int g_done;
+static int g_exit_ok;   /* workers whose exit code matched */
+static int g_killed_ok; /* the killed worker reaped as signalled */
+static int g_done;
 
 /* Worker callback: exit with a status derived from its arg.  Runs as a
  * fiber under sim (ctrl_fd is -1 -- no control socket in this test). */
@@ -107,7 +106,8 @@ manager(void *arg)
 		}
 		if (xtc_osproc_wait(p, &st, 1000 * 1000 * 1000LL) == XTC_OK) {
 			if (WIFEXITED(st) && WEXITSTATUS(st) == (want & 0xff))
-				atomic_fetch_add(&g_exit_ok, 1);
+				xtc_atomic_fetch_add_i32(&g_exit_ok, 1,
+				    xtc_mo_seq_cst);
 		}
 		xtc_osproc_destroy(p);
 	}
@@ -129,13 +129,14 @@ manager(void *arg)
 			if (xtc_osproc_wait(p, &st, 1000 * 1000 * 1000LL) ==
 			    XTC_OK) {
 				if (WIFSIGNALED(st))
-					atomic_store(&g_killed_ok, 1);
+					xtc_atomic_store_i32(&g_killed_ok, 1,
+					    xtc_mo_seq_cst);
 			}
 			xtc_osproc_destroy(p);
 		}
 	}
 
-	atomic_fetch_add(&g_done, 1);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_seq_cst);
 	(void)xtc_exec_stop(e);
 }
 
@@ -145,9 +146,9 @@ run_one(uint64_t seed, int *out_exit_ok, int *out_killed, uint64_t *out_state)
 	xtc_exec_t *e = NULL;
 	int rc;
 
-	atomic_store(&g_exit_ok, 0);
-	atomic_store(&g_killed_ok, 0);
-	atomic_store(&g_done, 0);
+	xtc_atomic_store_i32(&g_exit_ok, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_killed_ok, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
 		return -1;
@@ -157,8 +158,10 @@ run_one(uint64_t seed, int *out_exit_ok, int *out_killed, uint64_t *out_state)
 
 	rc = xtc_sim_exec_run(e, seed, 20000000);
 
-	if (out_exit_ok != NULL) *out_exit_ok = atomic_load(&g_exit_ok);
-	if (out_killed != NULL) *out_killed = atomic_load(&g_killed_ok);
+	if (out_exit_ok != NULL)
+		*out_exit_ok = xtc_atomic_load_i32(&g_exit_ok, xtc_mo_seq_cst);
+	if (out_killed != NULL)
+		*out_killed = xtc_atomic_load_i32(&g_killed_ok, xtc_mo_seq_cst);
 	if (out_state != NULL) *out_state = xtc_sim_state_hash(e);
 	(void)xtc_exec_fini(e);
 	return rc;

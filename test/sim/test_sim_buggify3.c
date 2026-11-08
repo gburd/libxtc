@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -64,19 +63,19 @@
 #define A_TOTAL  (A_PROD * A_PER)
 
 static xtc_chan_mpmc_t *g_ch;
-static atomic_int  g_a_prod;
-static atomic_int  g_a_cons;
-static atomic_int  g_a_seen[A_TOTAL];
-static atomic_int  g_a_prod_done;
-static atomic_long g_a_hash;
+static int g_a_prod;
+static int g_a_cons;
+static int g_a_seen[A_TOTAL];
+static int g_a_prod_done;
+static long g_a_hash;
 
 static void
 a_fold(int v)
 {
-	long h = atomic_load_explicit(&g_a_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_a_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(v + 1));
-	atomic_store_explicit(&g_a_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_a_hash, h, xtc_mo_relaxed);
 }
 
 static void
@@ -86,15 +85,14 @@ a_producer(void *arg)
 	int i = 0, guard = 0;
 	while (i < A_PER && guard++ < 500000) {
 		if (xtc_chan_mpmc_try_send(g_ch, IPTR(base + i)) == XTC_OK) {
-			atomic_fetch_add_explicit(&g_a_prod, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_a_prod, 1, xtc_mo_relaxed);
 			i++;
 		} else {
 			xtc_yield();
 		}
 	}
-	if (atomic_fetch_add_explicit(&g_a_prod_done, 1,
-	    memory_order_relaxed) + 1 == A_PROD)
+	if (xtc_atomic_fetch_add_i32(&g_a_prod_done, 1, xtc_mo_relaxed) + 1 ==
+	    A_PROD)
 		(void)xtc_chan_mpmc_close(g_ch);
 }
 
@@ -109,10 +107,9 @@ a_consumer(void *arg)
 		if (rc == XTC_OK) {
 			int id = IVAL(v);
 			if (id >= 0 && id < A_TOTAL)
-				atomic_fetch_add_explicit(&g_a_seen[id], 1,
-				    memory_order_relaxed);
-			atomic_fetch_add_explicit(&g_a_cons, 1,
-			    memory_order_relaxed);
+				xtc_atomic_fetch_add_i32(&g_a_seen[id], 1,
+				    xtc_mo_relaxed);
+			xtc_atomic_fetch_add_i32(&g_a_cons, 1, xtc_mo_relaxed);
 			a_fold(id);
 		} else if (rc == XTC_E_INVAL) {
 			break;
@@ -129,11 +126,12 @@ run_a(uint64_t seed, unsigned bug_pct, int *out_cons, int *out_dupdrop,
 	xtc_exec_t *e = NULL;
 	int i, rc, dupdrop = 0;
 
-	atomic_store(&g_a_prod, 0);
-	atomic_store(&g_a_cons, 0);
-	atomic_store(&g_a_prod_done, 0);
-	atomic_store(&g_a_hash, 0);
-	for (i = 0; i < A_TOTAL; i++) atomic_store(&g_a_seen[i], 0);
+	xtc_atomic_store_i32(&g_a_prod, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_a_cons, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_a_prod_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_a_hash, 0, xtc_mo_seq_cst);
+	for (i = 0; i < A_TOTAL; i++)
+		xtc_atomic_store_i32(&g_a_seen[i], 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	if (bug_pct > 0) xtc_sim_buggify_enable(bug_pct);
@@ -152,11 +150,12 @@ run_a(uint64_t seed, unsigned bug_pct, int *out_cons, int *out_dupdrop,
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
 	for (i = 0; i < A_TOTAL; i++)
-		if (atomic_load(&g_a_seen[i]) != 1) dupdrop++;
+		if (xtc_atomic_load_i32(&g_a_seen[i], xtc_mo_seq_cst) != 1)
+			dupdrop++;
 
-	*out_cons = atomic_load(&g_a_cons);
+	*out_cons = xtc_atomic_load_i32(&g_a_cons, xtc_mo_seq_cst);
 	*out_dupdrop = dupdrop;
-	*out_hash = atomic_load(&g_a_hash);
+	*out_hash = xtc_atomic_load_long(&g_a_hash, xtc_mo_seq_cst);
 	*out_bug = xtc_sim_buggify_active_count();
 	xtc_chan_mpmc_destroy(g_ch);
 	g_ch = NULL;
@@ -185,19 +184,19 @@ b_call(void *st, const void *req, size_t n, xtc_svr_call_t *call)
 
 static xtc_pid_t   g_bsvr_pid;
 static xtc_svr_t  *g_bsvr;
-static atomic_int  g_b_calls;
-static atomic_int  g_b_timeouts;
-static atomic_int  g_b_errs;
-static atomic_int  g_b_clients_done;
-static atomic_long g_b_hash;
+static int g_b_calls;
+static int g_b_timeouts;
+static int g_b_errs;
+static int g_b_clients_done;
+static long g_b_hash;
 
 static void
 b_fold(long v)
 {
-	long h = atomic_load_explicit(&g_b_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_b_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(v + 1));
-	atomic_store_explicit(&g_b_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_b_hash, h, xtc_mo_relaxed);
 }
 
 static void
@@ -214,8 +213,7 @@ b_client(void *arg)
 		if (rc == XTC_OK && rep != NULL && rn >= sizeof(long)) {
 			long val = 0;
 			memcpy(&val, rep, sizeof val);
-			atomic_fetch_add_explicit(&g_b_calls, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_b_calls, 1, xtc_mo_relaxed);
 			b_fold(val);
 		} else if (rc == XTC_E_AGAIN) {
 			/* Timed out: the delay-dispatch buggify can push a call
@@ -223,15 +221,14 @@ b_client(void *arg)
 			 * documents XTC_E_AGAIN on timeout); count it so the
 			 * completion invariant is replies + timeouts == total
 			 * (no lost/duplicated reply, no error). */
-			atomic_fetch_add_explicit(&g_b_timeouts, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_b_timeouts, 1,
+			    xtc_mo_relaxed);
 		} else {
-			atomic_fetch_add_explicit(&g_b_errs, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_b_errs, 1, xtc_mo_relaxed);
 		}
 		if (rep != NULL) free(rep);
 	}
-	atomic_fetch_add_explicit(&g_b_clients_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_b_clients_done, 1, xtc_mo_relaxed);
 }
 
 static void
@@ -240,8 +237,8 @@ b_winder(void *arg)
 	(void)arg;
 	int i;
 	for (i = 0; i < 4000; i++) {
-		if (atomic_load_explicit(&g_b_clients_done,
-		    memory_order_relaxed) >= B_CLIENTS)
+		if (xtc_atomic_load_i32(&g_b_clients_done, xtc_mo_relaxed) >=
+		    B_CLIENTS)
 			break;
 		(void)xtc_proc_sleep(1 * 1000 * 1000LL);
 	}
@@ -260,11 +257,11 @@ run_b(uint64_t seed, unsigned bug_pct, int *out_calls, int *out_timeouts,
 	static struct acc_state st;
 	int i, rc;
 
-	atomic_store(&g_b_calls, 0);
-	atomic_store(&g_b_timeouts, 0);
-	atomic_store(&g_b_errs, 0);
-	atomic_store(&g_b_clients_done, 0);
-	atomic_store(&g_b_hash, 0);
+	xtc_atomic_store_i32(&g_b_calls, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_b_timeouts, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_b_errs, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_b_clients_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_b_hash, 0, xtc_mo_seq_cst);
 	memset(&st, 0, sizeof st);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
@@ -284,10 +281,10 @@ run_b(uint64_t seed, unsigned bug_pct, int *out_calls, int *out_timeouts,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_calls = atomic_load(&g_b_calls);
-	*out_timeouts = atomic_load(&g_b_timeouts);
-	*out_errs = atomic_load(&g_b_errs);
-	*out_hash = atomic_load(&g_b_hash);
+	*out_calls = xtc_atomic_load_i32(&g_b_calls, xtc_mo_seq_cst);
+	*out_timeouts = xtc_atomic_load_i32(&g_b_timeouts, xtc_mo_seq_cst);
+	*out_errs = xtc_atomic_load_i32(&g_b_errs, xtc_mo_seq_cst);
+	*out_hash = xtc_atomic_load_long(&g_b_hash, xtc_mo_seq_cst);
 	*out_bug = xtc_sim_buggify_active_count();
 	xtc_sim_buggify_disable();
 	/* Reclaim the server handle after the run has quiesced (non-blocking

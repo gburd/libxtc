@@ -14,7 +14,6 @@
  *	       returns OK or an error code (drawn).
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>

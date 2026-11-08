@@ -39,7 +39,6 @@
  */
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include "xtc.h"
 #include "xtc_exec.h"
 #include "xtc_loop.h"
@@ -50,7 +49,7 @@
 #define WORKERS     32
 #define WORK_YIELDS 10
 
-static atomic_int g_workers_done;
+static int g_workers_done;
 
 static void
 worker(void *arg)
@@ -59,7 +58,7 @@ worker(void *arg)
 	(void)arg;
 	for (i = 0; i < WORK_YIELDS; i++)
 		xtc_yield();
-	atomic_fetch_add_explicit(&g_workers_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_workers_done, 1, xtc_mo_relaxed);
 }
 
 /* Parks on a timer well past the workers' run -- gives its loop a
@@ -100,7 +99,7 @@ run_once(uint64_t seed, int eager, uint64_t *out_state, int *out_done)
 	long total_steals = 0;
 	int i, rc;
 
-	atomic_store(&g_workers_done, 0);
+	xtc_atomic_store_i32(&g_workers_done, 0, xtc_mo_seq_cst);
 	if (xtc_exec_init(&e, LOOPS) != XTC_OK)
 		return -1;
 	xtc_exec_set_eager_rebalance(e, eager);
@@ -123,7 +122,9 @@ run_once(uint64_t seed, int eager, uint64_t *out_state, int *out_done)
 			total_steals += (long)st.steals;
 	}
 	if (out_state) *out_state = xtc_sim_state_hash(e);
-	if (out_done) *out_done = atomic_load(&g_workers_done);
+	if (out_done)
+		*out_done =
+		    xtc_atomic_load_i32(&g_workers_done, xtc_mo_seq_cst);
 	(void)xtc_exec_fini(e);
 	return total_steals;
 }

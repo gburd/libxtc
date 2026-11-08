@@ -23,8 +23,7 @@
 #include <string.h>
 #include <unistd.h>
 #if !defined(_WIN32)
-#include <pthread.h>          /* the concurrent setter in get_string_copy */
-#include <stdatomic.h>
+#include <pthread.h> /* the concurrent setter in get_string_copy */
 #endif
 
 #include "munit.h"
@@ -1329,14 +1328,14 @@ gsc_shape_ok(const char *s)
 }
 
 #if !defined(_WIN32)
-static _Atomic int g_gsc_stop;
+static int g_gsc_stop;
 
 static void *
 gsc_setter(void *arg)
 {
 	unsigned i = 0;
 	(void)arg;
-	while (!atomic_load(&g_gsc_stop))
+	while (!xtc_atomic_load_i32(&g_gsc_stop, xtc_mo_seq_cst))
 		(void)xtc_cfg_set_string("gsc.str", (i++ & 1) ? g_gsc_a : g_gsc_b);
 	return NULL;
 }
@@ -1401,7 +1400,7 @@ test_get_string_copy(const MunitParameter p[], void *d)
 #if !defined(_WIN32)
 	/* Concurrent set: every copy is one whole value. */
 	munit_assert_int(xtc_cfg_set_string("gsc.str", g_gsc_a), ==, XTC_OK);
-	atomic_store(&g_gsc_stop, 0);
+	xtc_atomic_store_i32(&g_gsc_stop, 0, xtc_mo_seq_cst);
 	munit_assert_int(pthread_create(&th, NULL, gsc_setter, NULL), ==, 0);
 	for (i = 0; i < 200000; i++) {
 		cp = NULL;
@@ -1410,7 +1409,7 @@ test_get_string_copy(const MunitParameter p[], void *d)
 			bad++;
 		xtc_free(cp);
 	}
-	atomic_store(&g_gsc_stop, 1);
+	xtc_atomic_store_i32(&g_gsc_stop, 1, xtc_mo_seq_cst);
 	munit_assert_int(pthread_join(th, NULL), ==, 0);
 	munit_assert_int(bad, ==, 0);
 #endif

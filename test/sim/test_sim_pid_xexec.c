@@ -32,7 +32,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,15 +51,15 @@ struct msg {
 
 static xtc_pid_t g_rx[3][NL];           /* receivers, by side */
 static xtc_pid_t g_dead[NL];
-static atomic_int g_got[3][NL], g_wrong, g_dead_ok;
-static atomic_long g_fold;
+static int g_got[3][NL], g_wrong, g_dead_ok;
+static long g_fold;
 
 static void
 fold(long v)
 {
-	long h = atomic_load_explicit(&g_fold, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_fold, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL + (unsigned long)v);
-	atomic_store_explicit(&g_fold, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_fold, h, xtc_mo_relaxed);
 }
 
 static void
@@ -82,9 +81,10 @@ receiver(void *arg)
 		xtc_free(buf);
 		fold(side * 1000 + me * 100 + m.side * 10 + m.from);
 		if (m.side == side && m.idx == me)
-			atomic_fetch_add(&g_got[side][me], 1);
+			xtc_atomic_fetch_add_i32(&g_got[side][me], 1,
+			    xtc_mo_seq_cst);
 		else {
-			atomic_fetch_add(&g_wrong, 1);
+			xtc_atomic_fetch_add_i32(&g_wrong, 1, xtc_mo_seq_cst);
 			printf("  MISDELIVERED: receiver %c%d got a message "
 			    "for %c%d\n", 'A' + side, me, 'A' + m.side, m.idx);
 		}
@@ -103,7 +103,8 @@ sender(void *arg)
 			m.idx = j;
 			m.from = me;
 			if (xtc_send(g_rx[side][j], &m, sizeof m) != XTC_OK)
-				atomic_fetch_add(&g_wrong, 1);
+				xtc_atomic_fetch_add_i32(&g_wrong, 1,
+				    xtc_mo_seq_cst);
 		}
 }
 
@@ -118,7 +119,7 @@ dead_sender(void *arg)
 		m.idx = j;
 		m.from = (int)(intptr_t)arg;
 		if (xtc_send(g_dead[j], &m, sizeof m) == XTC_OK)
-			atomic_fetch_add(&g_dead_ok, 1);
+			xtc_atomic_fetch_add_i32(&g_dead_ok, 1, xtc_mo_seq_cst);
 	}
 }
 
@@ -155,9 +156,9 @@ run(uint64_t seed, struct out *o)
 	memset(o, 0, sizeof *o);
 	memset(g_rx, 0, sizeof g_rx);
 	memset(g_got, 0, sizeof g_got);
-	atomic_store(&g_wrong, 0);
-	atomic_store(&g_dead_ok, 0);
-	atomic_store(&g_fold, 0);
+	xtc_atomic_store_i32(&g_wrong, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_dead_ok, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_fold, 0, xtc_mo_seq_cst);
 	if (xtc_exec_init(&a, NL) != XTC_OK || xtc_exec_init(&b, NL) !=
 	    XTC_OK || spawn_side(a, 0, 0, NULL) != 0 ||
 	    spawn_side(b, 1, 1, sender) != 0) {
@@ -184,11 +185,12 @@ run(uint64_t seed, struct out *o)
 		for (i = 0; i < NL; i++) {
 			fold_pid(g_rx[s][i]);
 			o->ids[s][i] = g_rx[s][i].loop_id;
-			o->got[s][i] = atomic_load(&g_got[s][i]);
+			o->got[s][i] =
+			    xtc_atomic_load_i32(&g_got[s][i], xtc_mo_seq_cst);
 		}
-	o->wrong = atomic_load(&g_wrong);
-	o->dead_ok = atomic_load(&g_dead_ok);
-	o->fold = atomic_load(&g_fold);
+	o->wrong = xtc_atomic_load_i32(&g_wrong, xtc_mo_seq_cst);
+	o->dead_ok = xtc_atomic_load_i32(&g_dead_ok, xtc_mo_seq_cst);
+	o->fold = xtc_atomic_load_long(&g_fold, xtc_mo_seq_cst);
 }
 
 static int

@@ -31,7 +31,6 @@
 #define HIST_IMPLEMENTATION
 #include "hist.h"
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -49,7 +48,7 @@
 static xtc_loop_t  *g_loop;
 static int64_t     *g_deadline;   /* [N] absolute fire deadline, ns        */
 static hist_t       g_fire_hist;  /* fire-accuracy histogram               */
-static atomic_int   g_remaining;  /* non-cancelled timers not yet fired    */
+static int g_remaining;           /* non-cancelled timers not yet fired    */
 
 /* ---------------------------------------------------------------------- */
 /* Timing helpers                                                           */
@@ -129,8 +128,7 @@ timer_cb(void *u)
 	 * atomic_fetch_sub returns the value *before* decrement, so
 	 * a return value of 1 means we just decremented to 0.
 	 */
-	if (atomic_fetch_sub_explicit(&g_remaining, 1,
-	                              memory_order_acq_rel) == 1)
+	if (xtc_atomic_fetch_sub_i32(&g_remaining, 1, xtc_mo_acq_rel) == 1)
 		xtc_loop_stop(g_loop);
 }
 
@@ -284,7 +282,7 @@ main(int argc, char *argv[])
 	 *
 	 * Maximum wall time: ~10 s (largest possible delay).
 	 */
-	atomic_store_explicit(&g_remaining, (int)n_fire, memory_order_release);
+	xtc_atomic_store_i32(&g_remaining, (int)n_fire, xtc_mo_release);
 
 	t0 = mono_ns();
 

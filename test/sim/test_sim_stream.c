@@ -45,7 +45,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,9 +71,9 @@ struct conn {
 	xtc_chan_mpsc_t *s2c;   /* server -> client bytes */
 };
 
-static atomic_int g_ok;         /* replies that matched */
-static atomic_int g_server_done;
-static atomic_int g_client_done;
+static int g_ok; /* replies that matched */
+static int g_server_done;
+static int g_client_done;
 
 /* Write `len` bytes to `ch` as one or more seeded-size chunks, each
  * delivery deferred by a seeded latency -- the stream fragments and
@@ -193,7 +192,7 @@ server(void *arg)
 			rev[j] = body[len - 1 - j];
 		frame_write(cn->s2c, rev, len);
 	}
-	atomic_fetch_add(&g_server_done, 1);
+	xtc_atomic_fetch_add_i32(&g_server_done, 1, xtc_mo_seq_cst);
 }
 
 /* CLIENT: send N seeded requests, verify each reply is the reverse. */
@@ -219,9 +218,9 @@ client(void *arg)
 		for (j = 0; j < len; j++)
 			expect[j] = body[len - 1 - j];
 		if (memcmp(reply, expect, len) == 0)
-			atomic_fetch_add(&g_ok, 1);
+			xtc_atomic_fetch_add_i32(&g_ok, 1, xtc_mo_seq_cst);
 	}
-	atomic_fetch_add(&g_client_done, 1);
+	xtc_atomic_fetch_add_i32(&g_client_done, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -230,7 +229,8 @@ coordinator(void *arg)
 	xtc_exec_t *e = arg;
 	int tries;
 	for (tries = 0; tries < 8000; tries++) {
-		if (atomic_load(&g_client_done) && atomic_load(&g_server_done))
+		if (xtc_atomic_load_i32(&g_client_done, xtc_mo_seq_cst) &&
+		    xtc_atomic_load_i32(&g_server_done, xtc_mo_seq_cst))
 			break;
 		(void)xtc_proc_sleep(1000 * 1000LL);
 	}
@@ -245,9 +245,9 @@ run_one(uint64_t seed, int *out_ok, uint64_t *out_state)
 	struct conn cn;
 	int rc;
 
-	atomic_store(&g_ok, 0);
-	atomic_store(&g_server_done, 0);
-	atomic_store(&g_client_done, 0);
+	xtc_atomic_store_i32(&g_ok, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_server_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_client_done, 0, xtc_mo_seq_cst);
 	memset(&cn, 0, sizeof cn);
 
 	if (xtc_chan_mpsc_create(NULL, 256, &cn.c2s) != XTC_OK)
@@ -272,7 +272,8 @@ run_one(uint64_t seed, int *out_ok, uint64_t *out_state)
 
 	rc = xtc_sim_exec_run(e, seed, 20000000);
 
-	if (out_ok != NULL) *out_ok = atomic_load(&g_ok);
+	if (out_ok != NULL)
+		*out_ok = xtc_atomic_load_i32(&g_ok, xtc_mo_seq_cst);
 	if (out_state != NULL) *out_state = xtc_sim_state_hash(e);
 
 	(void)xtc_exec_fini(e);

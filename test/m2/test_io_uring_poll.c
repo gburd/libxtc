@@ -39,7 +39,6 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -377,8 +376,8 @@ test_reg_past_table(const MunitParameter p[], void *d)
 #define ROUNDS  10
 
 static int        g_sp[NIDLE][2];
-static atomic_int g_timeouts;
-static atomic_int g_bad;
+static int g_timeouts;
+static int g_bad;
 
 static void
 idle_fiber(void *arg)
@@ -392,9 +391,10 @@ idle_fiber(void *arg)
 		    20LL * 1000000, &rev);
 		if (r == XTC_E_AGAIN && (rev & XTC_WAIT_TIMEOUT) &&
 		    !(rev & XTC_IO_READABLE))
-			atomic_fetch_add(&g_timeouts, 1);
+			xtc_atomic_fetch_add_i32(&g_timeouts, 1,
+			    xtc_mo_seq_cst);
 		else
-			atomic_fetch_add(&g_bad, 1);
+			xtc_atomic_fetch_add_i32(&g_bad, 1, xtc_mo_seq_cst);
 	}
 }
 
@@ -419,15 +419,16 @@ test_idle_many(const MunitParameter p[], void *d)
 	}
 	for (i = 0; i < NIDLE; i++)
 		sockpair(g_sp[i]);
-	atomic_store(&g_timeouts, 0);
-	atomic_store(&g_bad, 0);
+	xtc_atomic_store_i32(&g_timeouts, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_bad, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	for (i = 0; i < NIDLE; i++)
 		munit_assert_int(xtc_proc_spawn(loop, idle_fiber,
 		    (void *)(intptr_t)i, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_bad), ==, 0);
-	munit_assert_int(atomic_load(&g_timeouts), ==, NIDLE * ROUNDS);
+	munit_assert_int(xtc_atomic_load_i32(&g_bad, xtc_mo_seq_cst), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_timeouts, xtc_mo_seq_cst), ==,
+	    NIDLE * ROUNDS);
 	/* Per fiber: the first timeout cancels (a fresh fd records no
 	 * identity), the second re-park lingers, every later one is adopted,
 	 * and the last park's linger is cancelled after the fiber exits: 2

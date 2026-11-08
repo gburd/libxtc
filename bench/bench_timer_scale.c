@@ -28,7 +28,6 @@
  *	    batch   timers armed per round      (default: 512)
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,8 +45,8 @@
 
 /* Per-loop fired-timer counter, each on its own cache line. */
 typedef struct {
-	_Alignas(64) atomic_long v;
-	char pad[64 - sizeof(atomic_long)];
+	_Alignas(64) long v;
+	char pad[64 - sizeof(long)];
 } counter_t;
 static counter_t g_ctr[MAX_LOOPS];
 
@@ -66,7 +65,7 @@ static void
 fire_cb(void *u)
 {
 	int idx = (int)(intptr_t)u;
-	atomic_fetch_add_explicit(&g_ctr[idx].v, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_long(&g_ctr[idx].v, 1, xtc_mo_relaxed);
 }
 
 /*
@@ -159,7 +158,7 @@ main(int argc, char **argv)
 	clock_gettime(CLOCK_MONOTONIC, &t1);
 
 	for (i = 0; i < loops; i++)
-		fired += atomic_load(&g_ctr[i].v);
+		fired += xtc_atomic_load_long(&g_ctr[i].v, xtc_mo_seq_cst);
 	s = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
 
 	/* Timers ARMED = loops * rounds * batch; half fire, half cancel. */

@@ -35,7 +35,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,8 +52,8 @@
 
 /* Per-kid spawn counts (index = child slot).  A child bumps its slot on
  * every (re)spawn, so we can tell which children were restarted. */
-static atomic_int g_spawns[N_KIDS];
-static atomic_int g_running; /* kids alive (their exit hook decrements) */
+static int g_spawns[N_KIDS];
+static int g_running;        /* kids alive (their exit hook decrements) */
 static int g_join_rc;        /* the scenario's final xtc_sup_join */
 static xtc_pid_t  g_pids[N_KIDS];
 static xtc_supervisor_t *g_sup;
@@ -63,7 +62,7 @@ static void
 kid_gone(void *arg)
 {
 	(void)arg;
-	atomic_fetch_sub(&g_running, 1);
+	xtc_atomic_fetch_sub_i32(&g_running, 1, xtc_mo_seq_cst);
 }
 
 /* A supervised child: record pid, bump my spawn counter, park forever
@@ -73,9 +72,9 @@ kid(void *arg)
 {
 	int idx = (int)(intptr_t)arg;
 	g_pids[idx] = xtc_self();
-	atomic_fetch_add(&g_spawns[idx], 1);
+	xtc_atomic_fetch_add_i32(&g_spawns[idx], 1, xtc_mo_seq_cst);
 	if (xtc_proc_at_exit(kid_gone, NULL) == XTC_OK)
-		atomic_fetch_add(&g_running, 1);
+		xtc_atomic_fetch_add_i32(&g_running, 1, xtc_mo_seq_cst);
 	for (;;) {
 		void *m = NULL;
 		size_t sz = 0;
@@ -213,10 +212,10 @@ run_scenario(uint64_t seed, xtc_restart_strategy_t strat,
 	int i, rc;
 
 	for (i = 0; i < N_KIDS; i++) {
-		atomic_store(&g_spawns[i], 0);
+		xtc_atomic_store_i32(&g_spawns[i], 0, xtc_mo_seq_cst);
 		g_pids[i] = (xtc_pid_t){0};
 	}
-	atomic_store(&g_running, 0);
+	xtc_atomic_store_i32(&g_running, 0, xtc_mo_seq_cst);
 	g_sup = NULL;
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
@@ -292,7 +291,7 @@ fingerprint(int alive, int restarts, uint64_t state, int rc)
 	int i;
 #define MIX(v) do { fp ^= (uint64_t)(v); fp *= 1099511628211ull; } while (0)
 	for (i = 0; i < N_KIDS; i++)
-		MIX(atomic_load(&g_spawns[i]));
+		MIX(xtc_atomic_load_i32(&g_spawns[i], xtc_mo_seq_cst));
 	MIX(alive); MIX(restarts); MIX(state); MIX(rc);
 #undef MIX
 	return fp;
@@ -321,10 +320,10 @@ main(int argc, char **argv)
 		    XTC_RESTART_PERMANENT, 1, 99, 10, 0, 0, &alive, &restarts,
 		    &st);
 		fp = fingerprint(alive, restarts, st, rc);
-		s0 = atomic_load(&g_spawns[0]);
-		s1 = atomic_load(&g_spawns[1]);
-		s2 = atomic_load(&g_spawns[2]);
-		s3 = atomic_load(&g_spawns[3]);
+		s0 = xtc_atomic_load_i32(&g_spawns[0], xtc_mo_seq_cst);
+		s1 = xtc_atomic_load_i32(&g_spawns[1], xtc_mo_seq_cst);
+		s2 = xtc_atomic_load_i32(&g_spawns[2], xtc_mo_seq_cst);
+		s3 = xtc_atomic_load_i32(&g_spawns[3], xtc_mo_seq_cst);
 		if (rc != XTC_OK) { pass = 0; }
 		/* every child spawned at least twice (initial + restart). */
 		else if (!(s0 >= 2 && s1 >= 2 && s2 >= 2 && s3 >= 2))
@@ -335,10 +334,10 @@ main(int argc, char **argv)
 		rc = run_scenario(seed, XTC_SUP_REST_FOR_ONE,
 		    XTC_RESTART_PERMANENT, 2, 99, 10, 0, 0, &alive, &restarts,
 		    &st);
-		s0 = atomic_load(&g_spawns[0]);
-		s1 = atomic_load(&g_spawns[1]);
-		s2 = atomic_load(&g_spawns[2]);
-		s3 = atomic_load(&g_spawns[3]);
+		s0 = xtc_atomic_load_i32(&g_spawns[0], xtc_mo_seq_cst);
+		s1 = xtc_atomic_load_i32(&g_spawns[1], xtc_mo_seq_cst);
+		s2 = xtc_atomic_load_i32(&g_spawns[2], xtc_mo_seq_cst);
+		s3 = xtc_atomic_load_i32(&g_spawns[3], xtc_mo_seq_cst);
 		if (rc != XTC_OK) pass = 0;
 		else if (!(s0 == 1 && s1 == 1 && s2 >= 2 && s3 >= 2))
 			pass = 0;
@@ -347,7 +346,7 @@ main(int argc, char **argv)
 		rc = run_scenario(seed, XTC_SUP_ONE_FOR_ONE,
 		    XTC_RESTART_TEMPORARY, 0, 99, 10, 0, 0, &alive, &restarts,
 		    &st);
-		s0 = atomic_load(&g_spawns[0]);
+		s0 = xtc_atomic_load_i32(&g_spawns[0], xtc_mo_seq_cst);
 		if (rc != XTC_OK) pass = 0;
 		else if (s0 != 1) pass = 0;     /* spawned once, never again */
 
@@ -355,7 +354,7 @@ main(int argc, char **argv)
 		rc = run_scenario(seed, XTC_SUP_ONE_FOR_ONE,
 		    XTC_RESTART_TRANSIENT, 0, 0, 10, 0, 0, &alive, &restarts,
 		    &st);
-		s0 = atomic_load(&g_spawns[0]);
+		s0 = xtc_atomic_load_i32(&g_spawns[0], xtc_mo_seq_cst);
 		if (rc != XTC_OK) pass = 0;
 		else if (s0 != 1) pass = 0;     /* normal exit -> no restart */
 
@@ -363,7 +362,7 @@ main(int argc, char **argv)
 		rc = run_scenario(seed, XTC_SUP_ONE_FOR_ONE,
 		    XTC_RESTART_TRANSIENT, 0, 99, 10, 0, 0, &alive, &restarts,
 		    &st);
-		s0 = atomic_load(&g_spawns[0]);
+		s0 = xtc_atomic_load_i32(&g_spawns[0], xtc_mo_seq_cst);
 		if (rc != XTC_OK) pass = 0;
 		else if (s0 < 2) pass = 0;      /* abnormal exit -> restart */
 
@@ -381,12 +380,14 @@ main(int argc, char **argv)
 		    XTC_RESTART_PERMANENT, 1, 99, 10, 0, 1, &alive, &restarts,
 		    &st);
 		if (rc != XTC_OK || alive != 0 ||
-		    atomic_load(&g_running) != 0 || g_join_rc != XTC_OK) {
+		    xtc_atomic_load_i32(&g_running, xtc_mo_seq_cst) != 0 ||
+		    g_join_rc != XTC_OK) {
 			printf("  seed 0x%016llx: children outlived a killed "
 			       "supervisor (alive=%d running=%d join=%d "
 			       "rc=%d)\n",
 			    (unsigned long long)seed, alive,
-			    atomic_load(&g_running), g_join_rc, rc);
+			    xtc_atomic_load_i32(&g_running, xtc_mo_seq_cst),
+			    g_join_rc, rc);
 			pass = 0;
 		}
 
@@ -399,11 +400,13 @@ main(int argc, char **argv)
 
 		if (!pass) {
 			printf("  seed 0x%016llx: FAIL "
-			    "(last spawns %d/%d/%d/%d alive=%d restarts=%d "
-			    "rc=%d)\n",
+			       "(last spawns %d/%d/%d/%d alive=%d restarts=%d "
+			       "rc=%d)\n",
 			    (unsigned long long)seed,
-			    atomic_load(&g_spawns[0]), atomic_load(&g_spawns[1]),
-			    atomic_load(&g_spawns[2]), atomic_load(&g_spawns[3]),
+			    xtc_atomic_load_i32(&g_spawns[0], xtc_mo_seq_cst),
+			    xtc_atomic_load_i32(&g_spawns[1], xtc_mo_seq_cst),
+			    xtc_atomic_load_i32(&g_spawns[2], xtc_mo_seq_cst),
+			    xtc_atomic_load_i32(&g_spawns[3], xtc_mo_seq_cst),
 			    alive, restarts, rc);
 			fails++;
 		}

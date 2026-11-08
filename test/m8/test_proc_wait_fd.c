@@ -15,7 +15,6 @@
 
 #include <fcntl.h>
 #include <pthread.h>
-#include <stdatomic.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
@@ -102,8 +101,8 @@ test_wait_fd_readable(const MunitParameter p[], void *d)
 
 /* ---- test 2: timeout fires ---- */
 
-static _Atomic int t_revents;
-static _Atomic int t_rc;
+static int t_revents;
+static int t_rc;
 
 static void
 to_proc(void *arg)
@@ -112,8 +111,8 @@ to_proc(void *arg)
 	uint32_t revents = 0;
 	int rc = xtc_proc_wait_fd(rfd, XTC_IO_READABLE,
 	    50LL * 1000 * 1000, &revents);
-	atomic_store(&t_rc, rc);
-	atomic_store(&t_revents, (int)revents);
+	xtc_atomic_store_i32(&t_rc, rc, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&t_revents, (int)revents, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -123,8 +122,8 @@ test_wait_fd_timeout(const MunitParameter p[], void *d)
 	int pipefd[2];
 	xtc_pid_t pid;
 	(void)p; (void)d;
-	atomic_store(&t_rc, 0);
-	atomic_store(&t_revents, 0);
+	xtc_atomic_store_i32(&t_rc, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&t_revents, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(pipe(pipefd), ==, 0);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
@@ -132,10 +131,13 @@ test_wait_fd_timeout(const MunitParameter p[], void *d)
 	    (void *)(intptr_t)pipefd[0], NULL, &pid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
-	munit_assert_int(atomic_load(&t_rc), ==, XTC_E_AGAIN);
-	munit_assert_int(atomic_load(&t_revents) & XTC_WAIT_TIMEOUT,
+	munit_assert_int(xtc_atomic_load_i32(&t_rc, xtc_mo_seq_cst), ==,
+	    XTC_E_AGAIN);
+	munit_assert_int(xtc_atomic_load_i32(&t_revents, xtc_mo_seq_cst) &
+	        XTC_WAIT_TIMEOUT,
 	    ==, XTC_WAIT_TIMEOUT);
-	munit_assert_int(atomic_load(&t_revents) & XTC_IO_READABLE,
+	munit_assert_int(xtc_atomic_load_i32(&t_revents, xtc_mo_seq_cst) &
+	        XTC_IO_READABLE,
 	    ==, 0);
 
 	close(pipefd[0]); close(pipefd[1]);
@@ -145,14 +147,14 @@ test_wait_fd_timeout(const MunitParameter p[], void *d)
 
 /* ---- test 3: idle uses no CPU ---- */
 
-static _Atomic int idle_proc_ran;
+static int idle_proc_ran;
 
 static void
 idle_proc(void *arg)
 {
 	int rfd = (int)(intptr_t)arg;
 	uint32_t revents = 0;
-	atomic_store(&idle_proc_ran, 1);
+	xtc_atomic_store_i32(&idle_proc_ran, 1, xtc_mo_seq_cst);
 	(void)xtc_proc_wait_fd(rfd, XTC_IO_READABLE,
 	    200LL * 1000 * 1000, &revents);
 }
@@ -175,7 +177,7 @@ test_wait_fd_idle_low_cpu(const MunitParameter p[], void *d)
 	int64_t cpu_t0_us, cpu_t1_us;
 	struct timespec ts;
 	(void)p; (void)d;
-	atomic_store(&idle_proc_ran, 0);
+	xtc_atomic_store_i32(&idle_proc_ran, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(pipe(pipefd), ==, 0);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
@@ -196,7 +198,8 @@ test_wait_fd_idle_low_cpu(const MunitParameter p[], void *d)
 	int64_t cpu_us  = cpu_t1_us - cpu_t0_us;
 	/* During the 200ms idle wait we expect CPU to be a small fraction
 	 * of wall.  Tolerance 10% (we'd typically see <1%). */
-	munit_assert_int(atomic_load(&idle_proc_ran), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&idle_proc_ran, xtc_mo_seq_cst),
+	    ==, 1);
 	munit_assert_int64(wall_us, >, 150000);    /* >= 150ms wall */
 	munit_assert_int64(cpu_us, <, wall_us / 10);  /* < 10% busy */
 
@@ -238,7 +241,7 @@ test_wait_fd_bad_args(const MunitParameter p[], void *d)
  */
 #define WF_ROUNDS 200
 #if defined(__linux__)
-static _Atomic long g_wf_fcntl_calls;
+static long g_wf_fcntl_calls;
 static int g_wf_count_on;
 
 #include <stdarg.h>
@@ -252,7 +255,7 @@ fcntl(int fd, int cmd, ...)
 	arg = va_arg(ap, long);
 	va_end(ap);
 	if (g_wf_count_on)
-		atomic_fetch_add(&g_wf_fcntl_calls, 1);
+		xtc_atomic_fetch_add_long(&g_wf_fcntl_calls, 1, xtc_mo_seq_cst);
 	return (int)syscall(SYS_fcntl, fd, cmd, arg);
 }
 
@@ -289,16 +292,18 @@ test_wait_fd_no_probe_per_park(const MunitParameter p[], void *d)
 	    NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, wf_side, (void *)(intptr_t)1,
 	    NULL, NULL), ==, XTC_OK);
-	atomic_store(&g_wf_fcntl_calls, 0);
+	xtc_atomic_store_long(&g_wf_fcntl_calls, 0, xtc_mo_seq_cst);
 	g_wf_count_on = 1;
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	g_wf_count_on = 0;
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	(void)close(g_wf_sv[0]);
 	(void)close(g_wf_sv[1]);
-	munit_logf(MUNIT_LOG_INFO, "%d round trips: %ld fcntl calls",
-	    WF_ROUNDS, atomic_load(&g_wf_fcntl_calls));
-	munit_assert_long(atomic_load(&g_wf_fcntl_calls), <, WF_ROUNDS / 4);
+	munit_logf(MUNIT_LOG_INFO, "%d round trips: %ld fcntl calls", WF_ROUNDS,
+	    xtc_atomic_load_long(&g_wf_fcntl_calls, xtc_mo_seq_cst));
+	munit_assert_long(xtc_atomic_load_long(&g_wf_fcntl_calls,
+	                      xtc_mo_seq_cst),
+	    <, WF_ROUNDS / 4);
 	return MUNIT_OK;
 }
 #else

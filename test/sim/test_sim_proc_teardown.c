@@ -24,7 +24,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -35,9 +34,9 @@
 #define N_LOOPS   4
 #define N_TARGETS 12
 
-static atomic_int g_downs;        /* DOWNs the watcher received */
-static atomic_int g_spawned;
-static atomic_int g_bad;          /* any observed inconsistency */
+static int g_downs; /* DOWNs the watcher received */
+static int g_spawned;
+static int g_bad; /* any observed inconsistency */
 
 /* Target: receive one message (or time out), then exit with a fixed
  * reason -- its exit races the watcher's monitor DOWN and the sender. */
@@ -66,10 +65,10 @@ watcher_proc(void *arg)
 		uint64_t ref = 0;
 		if (xtc_proc_spawn(tl, target_proc,
 		    (void *)(intptr_t)(i + 1), NULL, &targets[i]) != XTC_OK) {
-			atomic_fetch_add_explicit(&g_bad, 1, memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_bad, 1, xtc_mo_relaxed);
 			continue;
 		}
-		atomic_fetch_add_explicit(&g_spawned, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_spawned, 1, xtc_mo_relaxed);
 		/* Monitor it (may race an immediate exit -> NOPROC DOWN, which
 		 * is fine), then send it a message (races its teardown). */
 		(void)xtc_monitor(targets[i], &ref);
@@ -84,8 +83,8 @@ watcher_proc(void *arg)
 		if (xtc_recv(&m, &n, 2000LL * 1000 * 1000) == XTC_OK) {
 			xtc_down_info_t di = XTC_DOWN_INFO_INIT;
 			if (xtc_down_decode_ex(m, n, &di) == XTC_OK)
-				atomic_fetch_add_explicit(&g_downs, 1,
-				    memory_order_relaxed);
+				xtc_atomic_fetch_add_i32(&g_downs, 1,
+				    xtc_mo_relaxed);
 		}
 		if (m) xtc_free(m);
 	}
@@ -99,9 +98,9 @@ run_teardown(uint64_t seed, int *out_spawned, int *out_downs, int *out_bad,
 	xtc_loop_t *loops[N_LOOPS];
 	int i, rc;
 
-	atomic_store(&g_downs, 0);
-	atomic_store(&g_spawned, 0);
-	atomic_store(&g_bad, 0);
+	xtc_atomic_store_i32(&g_downs, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_spawned, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_bad, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	for (i = 0; i < N_LOOPS; i++) loops[i] = xtc_exec_loop(e, (unsigned)i);
@@ -109,9 +108,9 @@ run_teardown(uint64_t seed, int *out_spawned, int *out_downs, int *out_bad,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_spawned = atomic_load(&g_spawned);
-	*out_downs = atomic_load(&g_downs);
-	*out_bad = atomic_load(&g_bad);
+	*out_spawned = xtc_atomic_load_i32(&g_spawned, xtc_mo_seq_cst);
+	*out_downs = xtc_atomic_load_i32(&g_downs, xtc_mo_seq_cst);
+	*out_bad = xtc_atomic_load_i32(&g_bad, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	(void)xtc_exec_fini(e);
 	return rc;

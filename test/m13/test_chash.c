@@ -6,7 +6,6 @@
  */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -361,7 +360,7 @@ test_shrink(const MunitParameter p[], void *d)
 #define STRESS_KEYSPACE  (STRESS_WRITERS * STRESS_PER_W)
 
 static xtc_chash_t   *g_h;
-static _Atomic int    g_present[STRESS_KEYSPACE];  /* 1 while inserted */
+static int g_present[STRESS_KEYSPACE];             /* 1 while inserted */
 static struct ikey   *g_keyptrs[STRESS_KEYSPACE];  /* every key we malloc'd,
 						     * so the test can free them
 						     * all at the end without a
@@ -369,8 +368,8 @@ static struct ikey   *g_keyptrs[STRESS_KEYSPACE];  /* every key we malloc'd,
 						     * a caller-owned key, whether
 						     * the entry is still live or
 						     * was removed. */
-static _Atomic int    g_reader_stop;
-static _Atomic int64_t g_reader_iters;
+static int g_reader_stop;
+static int64_t g_reader_iters;
 
 static void *
 stress_writer(void *arg)
@@ -386,8 +385,7 @@ stress_writer(void *arg)
 		munit_assert_int(xtc_chash_insert(g_h, k,
 		    (void *)(intptr_t)(key + 1), &old), ==, XTC_OK);
 		munit_assert_null(old);
-		atomic_store_explicit(&g_present[key], 1,
-		    memory_order_release);
+		xtc_atomic_store_i32(&g_present[key], 1, xtc_mo_release);
 	}
 	/* Remove 3 of every 4 keys we inserted (keep i%4==0), to exercise
 	 * concurrent remove -- and, with auto-shrink enabled below, a
@@ -403,8 +401,7 @@ stress_writer(void *arg)
 		if (i % 4 == 0)
 			continue;   /* survivor */
 		lookup.v = key;
-		atomic_store_explicit(&g_present[key], 0,
-		    memory_order_release);
+		xtc_atomic_store_i32(&g_present[key], 0, xtc_mo_release);
 		munit_assert_int(xtc_chash_remove(g_h, &lookup, &v), ==,
 		    XTC_OK);
 		munit_assert_int((int)(intptr_t)v, ==, (int)(key + 1));
@@ -416,7 +413,7 @@ static void *
 stress_reader(void *arg)
 {
 	(void)arg;
-	while (!atomic_load_explicit(&g_reader_stop, memory_order_acquire)) {
+	while (!xtc_atomic_load_i32(&g_reader_stop, xtc_mo_acquire)) {
 		int64_t key;
 		for (key = 0; key < STRESS_KEYSPACE; key += 7) {
 			struct ikey lookup;
@@ -431,8 +428,7 @@ stress_reader(void *arg)
 			xtc_rcu_read_unlock();
 			(void)present;
 		}
-		atomic_fetch_add_explicit(&g_reader_iters, 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_add_i64(&g_reader_iters, 1, xtc_mo_relaxed);
 	}
 	return NULL;
 }
@@ -452,9 +448,9 @@ test_concurrent_stress(const MunitParameter p[], void *d)
 	 * concurrent RCU shrink (array swap) against live readers. */
 	xtc_chash_set_auto_shrink(g_h, 1);
 	for (i = 0; i < STRESS_KEYSPACE; i++)
-		atomic_store(&g_present[i], 0);
-	atomic_store(&g_reader_stop, 0);
-	atomic_store(&g_reader_iters, 0);
+		xtc_atomic_store_i32(&g_present[i], 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_reader_stop, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i64(&g_reader_iters, 0, xtc_mo_seq_cst);
 
 	for (i = 0; i < STRESS_READERS; i++)
 		munit_assert_int(pthread_create(&readers[i], NULL,
@@ -464,10 +460,11 @@ test_concurrent_stress(const MunitParameter p[], void *d)
 		    stress_writer, (void *)(intptr_t)i), ==, 0);
 
 	for (i = 0; i < STRESS_WRITERS; i++) pthread_join(writers[i], NULL);
-	atomic_store(&g_reader_stop, 1);
+	xtc_atomic_store_i32(&g_reader_stop, 1, xtc_mo_seq_cst);
 	for (i = 0; i < STRESS_READERS; i++) pthread_join(readers[i], NULL);
 
-	munit_assert_int64(atomic_load(&g_reader_iters), >, 0);
+	munit_assert_int64(xtc_atomic_load_i64(&g_reader_iters, xtc_mo_seq_cst),
+	    >, 0);
 
 	/* Final consistency: every key with i%4==0 (the survivors) is
 	 * present with the right value; every other key is gone.

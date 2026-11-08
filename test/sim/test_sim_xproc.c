@@ -24,7 +24,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -44,8 +43,8 @@ static void e3(void *a){(void)a;}
 static const char *g_names[4] = { "e0", "e1", "e2", "e3" };
 static void (*g_fns[4])(void *) = { e0, e1, e2, e3 };
 
-static atomic_int g_bad;      /* a spawn_entry gave the wrong error (bug) */
-static atomic_int g_done;
+static int g_bad; /* a spawn_entry gave the wrong error (bug) */
+static int g_done;
 
 /* Worker: try xtc_xspawn_entry with a NULL loop/out (so no real process
  * is created -- we are only exercising the portable name-resolution +
@@ -63,14 +62,14 @@ worker(void *arg)
 		int rc = xtc_xspawn_entry(NULL, "x", g_names[(id + i) & 3],
 		    NULL, 0, NULL);
 		if (rc != XTC_E_INVAL)      /* resolved -> NULL-arg path */
-			atomic_fetch_add_explicit(&g_bad, 1, memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_bad, 1, xtc_mo_relaxed);
 		/* Unknown name: NOTFOUND regardless of args. */
 		rc = xtc_xspawn_entry(NULL, "x", "no_such_entry", NULL, 0, NULL);
 		if (rc != XTC_E_NOTFOUND && rc != XTC_E_INVAL)
-			atomic_fetch_add_explicit(&g_bad, 1, memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_bad, 1, xtc_mo_relaxed);
 		xtc_yield();
 	}
-	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -79,8 +78,8 @@ run_xproc(uint64_t seed, int *out_done, int *out_bad, uint64_t *out_state)
 	xtc_exec_t *e = NULL;
 	int i, rc;
 
-	atomic_store(&g_bad, 0);
-	atomic_store(&g_done, 0);
+	xtc_atomic_store_i32(&g_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
 
 	/* Register the entries before the run (both platforms do this early,
 	 * in code shared by parent and child). */
@@ -94,8 +93,8 @@ run_xproc(uint64_t seed, int *out_done, int *out_bad, uint64_t *out_state)
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_done = atomic_load(&g_done);
-	*out_bad = atomic_load(&g_bad);
+	*out_done = xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
+	*out_bad = xtc_atomic_load_i32(&g_bad, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	(void)xtc_exec_fini(e);
 	return rc;

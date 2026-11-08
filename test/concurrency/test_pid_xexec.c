@@ -45,7 +45,6 @@ main(void)
 #else
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -65,10 +64,10 @@ struct msg {
 
 static const char *g_name[NP] = { "A0", "A1", "B0", "B1", "S0", "S1" };
 static xtc_atomic_pid_t g_pid[NP];
-static atomic_int g_up;
-static atomic_int g_got[NP];            /* messages addressed to me */
-static atomic_int g_wrong[NP];          /* messages addressed to another */
-static atomic_int g_send_fail;
+static int g_up;
+static int g_got[NP];   /* messages addressed to me */
+static int g_wrong[NP]; /* messages addressed to another */
+static int g_send_fail;
 
 static void
 peer(void *arg)
@@ -80,8 +79,8 @@ peer(void *arg)
 	int64_t t0, now;
 
 	xtc_atomic_pid_store(&g_pid[me], xtc_self());
-	atomic_fetch_add(&g_up, 1);
-	while (atomic_load(&g_up) < NP)
+	xtc_atomic_fetch_add_i32(&g_up, 1, xtc_mo_seq_cst);
+	while (xtc_atomic_load_i32(&g_up, xtc_mo_seq_cst) < NP)
 		(void)xtc_proc_sleep(1000000);
 	for (i = 0; i < NP; i++) {
 		if (i == me)
@@ -90,7 +89,8 @@ peer(void *arg)
 		m.to = i;
 		if (xtc_send(xtc_atomic_pid_load(&g_pid[i]), &m, sizeof m) !=
 		    XTC_OK)
-			atomic_fetch_add(&g_send_fail, 1);
+			xtc_atomic_fetch_add_i32(&g_send_fail, 1,
+			    xtc_mo_seq_cst);
 	}
 	t0 = xtc_clock_mono();
 	while (got < NP - 1) {
@@ -102,10 +102,11 @@ peer(void *arg)
 		memcpy(&m, buf, sizeof m);
 		xtc_free(buf);
 		if (m.to == me) {
-			atomic_fetch_add(&g_got[me], 1);
+			xtc_atomic_fetch_add_i32(&g_got[me], 1, xtc_mo_seq_cst);
 			got++;
 		} else {
-			atomic_fetch_add(&g_wrong[me], 1);
+			xtc_atomic_fetch_add_i32(&g_wrong[me], 1,
+			    xtc_mo_seq_cst);
 			printf("  %s received a message %s sent to %s\n",
 			    g_name[me], g_name[m.from], g_name[m.to]);
 		}
@@ -128,7 +129,7 @@ run_loop(void *l)
 
 /* Phase 2 state. */
 static xtc_pid_t g_dead[2];             /* A0's and S1's pids */
-static atomic_int g_decoy_got, g_dead_ok;
+static int g_decoy_got, g_dead_ok;
 
 static void
 decoy(void *arg)
@@ -139,7 +140,7 @@ decoy(void *arg)
 	(void)arg;
 	while (xtc_recv(&buf, &sz, 300LL * 1000 * 1000) == XTC_OK) {
 		xtc_free(buf);
-		atomic_fetch_add(&g_decoy_got, 1);
+		xtc_atomic_fetch_add_i32(&g_decoy_got, 1, xtc_mo_seq_cst);
 	}
 }
 
@@ -151,7 +152,7 @@ dead_sender(void *arg)
 	(void)arg;
 	for (i = 0; i < 2; i++)
 		if (xtc_send(g_dead[i], "x", 1) == XTC_OK)
-			atomic_fetch_add(&g_dead_ok, 1);
+			xtc_atomic_fetch_add_i32(&g_dead_ok, 1, xtc_mo_seq_cst);
 }
 
 struct ids {
@@ -209,14 +210,15 @@ main(void)
 		(void)pthread_join(th[i], NULL);
 
 	for (i = 0; i < NP; i++) {
-		total += atomic_load(&g_got[i]);
-		wrong += atomic_load(&g_wrong[i]);
+		total += xtc_atomic_load_i32(&g_got[i], xtc_mo_seq_cst);
+		wrong += xtc_atomic_load_i32(&g_wrong[i], xtc_mo_seq_cst);
 	}
 	printf("phase 1: delivered to the addressee %d/%d, to another proc "
-	    "%d, send failures %d\n", total, NP * (NP - 1), wrong,
-	    atomic_load(&g_send_fail));
+	       "%d, send failures %d\n",
+	    total, NP * (NP - 1), wrong,
+	    xtc_atomic_load_i32(&g_send_fail, xtc_mo_seq_cst));
 	if (wrong != 0 || total != NP * (NP - 1) ||
-	    atomic_load(&g_send_fail) != 0) {
+	    xtc_atomic_load_i32(&g_send_fail, xtc_mo_seq_cst) != 0) {
 		printf("FAIL: a pid reached a proc other than its own\n");
 		fail = 1;
 	}
@@ -263,14 +265,16 @@ main(void)
 	}
 	for (i = 0; i < 2; i++)
 		if (xtc_send(g_dead[i], "x", 1) == XTC_OK)
-			atomic_fetch_add(&g_dead_ok, 1);
+			xtc_atomic_fetch_add_i32(&g_dead_ok, 1, xtc_mo_seq_cst);
 	(void)pthread_create(&th[0], NULL, run_exec, C);
 	(void)pthread_create(&th[1], NULL, run_loop, S2);
 	(void)pthread_join(th[0], NULL);
 	(void)pthread_join(th[1], NULL);
 	printf("phase 2: sends to dead pids accepted %d/6, decoys reached %d\n",
-	    atomic_load(&g_dead_ok), atomic_load(&g_decoy_got));
-	if (atomic_load(&g_dead_ok) != 0 || atomic_load(&g_decoy_got) != 0) {
+	    xtc_atomic_load_i32(&g_dead_ok, xtc_mo_seq_cst),
+	    xtc_atomic_load_i32(&g_decoy_got, xtc_mo_seq_cst));
+	if (xtc_atomic_load_i32(&g_dead_ok, xtc_mo_seq_cst) != 0 ||
+	    xtc_atomic_load_i32(&g_decoy_got, xtc_mo_seq_cst) != 0) {
 		printf("FAIL: a pid of a finalized loop reached a new loop\n");
 		fail = 1;
 	}

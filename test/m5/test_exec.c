@@ -6,7 +6,6 @@
  */
 
 #include <stdint.h>
-#include <stdatomic.h>
 #include <time.h>
 
 #include "munit.h"
@@ -356,7 +355,7 @@ test_exec_class_accessors(const MunitParameter p[], void *d)
  * the run must quiesce and every offload must have returned its result.
  */
 #define BLK1_N 8
-static _Atomic int g_blk1_done;
+static int g_blk1_done;
 
 static int
 blk1_sleep_fn(void *arg)
@@ -379,7 +378,7 @@ blk1_proc(void *arg)
 	 * RUNNING on (which, when stolen, is NOT its home loop). */
 	(void)xtc_blocking_run(blk1_sleep_fn, (void *)(intptr_t)ms, &out);
 	if (out == ms * 2)
-		atomic_fetch_add(&g_blk1_done, 1);
+		xtc_atomic_fetch_add_i32(&g_blk1_done, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -391,7 +390,7 @@ test_blocking_resume_on_exec(const MunitParameter p[], void *d)
 	int i;
 	(void)p; (void)d;
 
-	atomic_store(&g_blk1_done, 0);
+	xtc_atomic_store_i32(&g_blk1_done, 0, xtc_mo_seq_cst);
 	/* More procs than loops, ALL spawned on loop 0, so the idle peer
 	 * loops steal them and run them stolen.  A stolen fiber parks its
 	 * blocking-offload completion pipe on the STEAL loop (its current
@@ -414,7 +413,8 @@ test_blocking_resume_on_exec(const MunitParameter p[], void *d)
 	 * on its completion pipe on an n_alive==0 steal loop is never
 	 * resumed. */
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_blk1_done), ==, BLK1_N);
+	munit_assert_int(xtc_atomic_load_i32(&g_blk1_done, xtc_mo_seq_cst), ==,
+	    BLK1_N);
 	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
 	return MUNIT_OK;
 }
@@ -431,8 +431,8 @@ test_blocking_resume_on_exec(const MunitParameter p[], void *d)
  */
 #define BLK2_FIBERS 64
 #define BLK2_ITERS  200
-static _Atomic int g_blk2_done;
-static _Atomic int g_blk2_lock;   /* 0/1 spin "flush lock" */
+static int g_blk2_done;
+static int g_blk2_lock; /* 0/1 spin "flush lock" */
 
 static int
 blk2_flush_fn(void *arg)
@@ -466,8 +466,8 @@ blk2_proc(void *arg)
 		 * churn -- every fiber spinning for the lock wedges. */
 		if ((k & 3) == 0) {
 			int spins = 0;
-			while (atomic_exchange_explicit(&g_blk2_lock, 1,
-			    memory_order_acquire) != 0) {
+			while (xtc_atomic_exchange_i32(&g_blk2_lock, 1,
+			           xtc_mo_acquire) != 0) {
 				xtc_yield();
 				if (++spins > 100000000) { held = -1; break; }
 			}
@@ -480,10 +480,9 @@ blk2_proc(void *arg)
 		(void)xtc_blocking_run(blk2_flush_fn,
 		    (void *)(intptr_t)(1 + (k & 3)), &out);
 		if (held == 1)
-			atomic_store_explicit(&g_blk2_lock, 0,
-			    memory_order_release);
+			xtc_atomic_store_i32(&g_blk2_lock, 0, xtc_mo_release);
 	}
-	atomic_fetch_add(&g_blk2_done, 1);
+	xtc_atomic_fetch_add_i32(&g_blk2_done, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -495,8 +494,8 @@ test_concurrent_commit_resume(const MunitParameter p[], void *d)
 	int i;
 	(void)p; (void)d;
 
-	atomic_store(&g_blk2_done, 0);
-	atomic_store(&g_blk2_lock, 0);
+	xtc_atomic_store_i32(&g_blk2_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_blk2_lock, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_exec_init(&e, 12), ==, XTC_OK);
 	xtc_exec_set_eager_rebalance(e, 1);
 	for (i = 0; i < BLK2_FIBERS; i++) {
@@ -509,7 +508,8 @@ test_concurrent_commit_resume(const MunitParameter p[], void *d)
 		    ==, XTC_OK);
 	}
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_blk2_done), ==, BLK2_FIBERS);
+	munit_assert_int(xtc_atomic_load_i32(&g_blk2_done, xtc_mo_seq_cst), ==,
+	    BLK2_FIBERS);
 	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
 	return MUNIT_OK;
 }
@@ -530,21 +530,22 @@ test_concurrent_commit_resume(const MunitParameter p[], void *d)
  */
 #define BLK3_FIBERS 32
 #define BLK3_ITERS  40
-static _Atomic int g_blk3_done;
+static int g_blk3_done;
 static xtc_pid_t   g_blk3_pids[BLK3_FIBERS];
 static int         g_blk3_rfd[BLK3_FIBERS];
 static int         g_blk3_wfd[BLK3_FIBERS];
-static _Atomic int g_blk3_ready;
-static _Atomic int g_blk3_stop;
+static int g_blk3_ready;
+static int g_blk3_stop;
 
 static void *
 blk3_poker(void *arg)
 {
 	(void)arg;
-	while (atomic_load(&g_blk3_ready) < BLK3_FIBERS &&
-	    !atomic_load(&g_blk3_stop))
+	while (
+	    xtc_atomic_load_i32(&g_blk3_ready, xtc_mo_seq_cst) < BLK3_FIBERS &&
+	    !xtc_atomic_load_i32(&g_blk3_stop, xtc_mo_seq_cst))
 		(void)__os_sleep_ns(100 * 1000LL);
-	while (!atomic_load(&g_blk3_stop)) {
+	while (!xtc_atomic_load_i32(&g_blk3_stop, xtc_mo_seq_cst)) {
 		int i;
 		for (i = 0; i < BLK3_FIBERS; i++)
 			(void)xtc_proc_wake(g_blk3_pids[i]);
@@ -559,7 +560,7 @@ blk3_proc(void *arg)
 	int idx = (int)(intptr_t)arg;
 	int k;
 	g_blk3_pids[idx] = xtc_self();
-	atomic_fetch_add(&g_blk3_ready, 1);
+	xtc_atomic_fetch_add_i32(&g_blk3_ready, 1, xtc_mo_seq_cst);
 	for (k = 0; k < BLK3_ITERS; k++) {
 		uint32_t revents = 0;
 		/* Short-timeout fd park.  A poker xtc_proc_wake resumes us
@@ -579,7 +580,7 @@ blk3_proc(void *arg)
 			    sizeof sink);
 		}
 	}
-	atomic_fetch_add(&g_blk3_done, 1);
+	xtc_atomic_fetch_add_i32(&g_blk3_done, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -592,9 +593,9 @@ test_cross_loop_del_fd(const MunitParameter p[], void *d)
 	int i;
 	(void)p; (void)d;
 
-	atomic_store(&g_blk3_done, 0);
-	atomic_store(&g_blk3_ready, 0);
-	atomic_store(&g_blk3_stop, 0);
+	xtc_atomic_store_i32(&g_blk3_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_blk3_ready, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_blk3_stop, 0, xtc_mo_seq_cst);
 	for (i = 0; i < BLK3_FIBERS; i++) {
 		g_blk3_rfd[i] = g_blk3_wfd[i] = -1;
 		if (xtc_test_make_pipe(&g_blk3_rfd[i], &g_blk3_wfd[i]) != 0)
@@ -613,9 +614,10 @@ test_cross_loop_del_fd(const MunitParameter p[], void *d)
 	/* Must QUIESCE: without the fix a woken-then-stolen fiber corrupts
 	 * the peer io's fd registry and a fiber is stranded. */
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	atomic_store(&g_blk3_stop, 1);
+	xtc_atomic_store_i32(&g_blk3_stop, 1, xtc_mo_seq_cst);
 	munit_assert_int(__os_thread_join(&poker, NULL), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_blk3_done), ==, BLK3_FIBERS);
+	munit_assert_int(xtc_atomic_load_i32(&g_blk3_done, xtc_mo_seq_cst), ==,
+	    BLK3_FIBERS);
 	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
 	for (i = 0; i < BLK3_FIBERS; i++)
 		xtc_test_close_pipe(g_blk3_rfd[i], g_blk3_wfd[i]);
@@ -637,19 +639,20 @@ test_cross_loop_del_fd(const MunitParameter p[], void *d)
  */
 #define BLK4_FIBERS 24
 #define BLK4_ITERS  60
-static _Atomic int g_blk4_done;
+static int g_blk4_done;
 static xtc_pid_t   g_blk4_pids[BLK4_FIBERS];
-static _Atomic int g_blk4_ready;
-static _Atomic int g_blk4_stop;
+static int g_blk4_ready;
+static int g_blk4_stop;
 
 static void *
 blk4_poker(void *arg)
 {
 	(void)arg;
-	while (atomic_load(&g_blk4_ready) < BLK4_FIBERS &&
-	    !atomic_load(&g_blk4_stop))
+	while (
+	    xtc_atomic_load_i32(&g_blk4_ready, xtc_mo_seq_cst) < BLK4_FIBERS &&
+	    !xtc_atomic_load_i32(&g_blk4_stop, xtc_mo_seq_cst))
 		(void)__os_sleep_ns(100 * 1000LL);
-	while (!atomic_load(&g_blk4_stop)) {
+	while (!xtc_atomic_load_i32(&g_blk4_stop, xtc_mo_seq_cst)) {
 		int i;
 		for (i = 0; i < BLK4_FIBERS; i++)
 			(void)xtc_proc_wake(g_blk4_pids[i]);
@@ -669,7 +672,7 @@ blk4_proc(void *arg)
 	int idx = (int)(intptr_t)arg;
 	int k;
 	g_blk4_pids[idx] = xtc_self();
-	atomic_fetch_add(&g_blk4_ready, 1);
+	xtc_atomic_fetch_add_i32(&g_blk4_ready, 1, xtc_mo_seq_cst);
 	for (k = 0; k < BLK4_ITERS; k++) {
 		void *msg = NULL;
 		size_t len = 0;
@@ -679,7 +682,7 @@ blk4_proc(void *arg)
 		if (xtc_recv(&msg, &len, 1 * 1000 * 1000 /* 1ms */) == XTC_OK)
 			xtc_free(msg);
 	}
-	atomic_fetch_add(&g_blk4_done, 1);
+	xtc_atomic_fetch_add_i32(&g_blk4_done, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -692,9 +695,9 @@ test_cross_loop_state_timer(const MunitParameter p[], void *d)
 	int i;
 	(void)p; (void)d;
 
-	atomic_store(&g_blk4_done, 0);
-	atomic_store(&g_blk4_ready, 0);
-	atomic_store(&g_blk4_stop, 0);
+	xtc_atomic_store_i32(&g_blk4_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_blk4_ready, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_blk4_stop, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_exec_init(&e, 8), ==, XTC_OK);
 	xtc_exec_set_eager_rebalance(e, 1);
 	munit_assert_int(__os_thread_create(&poker, blk4_poker, NULL),
@@ -706,9 +709,10 @@ test_cross_loop_state_timer(const MunitParameter p[], void *d)
 		    blk4_proc, (void *)(intptr_t)i, &opts, &pid), ==, XTC_OK);
 	}
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	atomic_store(&g_blk4_stop, 1);
+	xtc_atomic_store_i32(&g_blk4_stop, 1, xtc_mo_seq_cst);
 	munit_assert_int(__os_thread_join(&poker, NULL), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_blk4_done), ==, BLK4_FIBERS);
+	munit_assert_int(xtc_atomic_load_i32(&g_blk4_done, xtc_mo_seq_cst), ==,
+	    BLK4_FIBERS);
 	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
 	return MUNIT_OK;
 }
@@ -735,8 +739,8 @@ test_cross_loop_state_timer(const MunitParameter p[], void *d)
 #define BLK5_FIBERS 16
 #define BLK5_ITERS  20
 #if !defined(_WIN32)
-static _Atomic int g_blk5_done;
-static _Atomic int g_blk5_lock;   /* 0/1 shared "WALWriteLock" */
+static int g_blk5_done;
+static int g_blk5_lock; /* 0/1 shared "WALWriteLock" */
 
 static void
 blk5_proc(void *arg)
@@ -749,18 +753,18 @@ blk5_proc(void *arg)
 		/* Acquire the shared lock, parking (not busy-yield) so waiters
 		 * are NOT runnable -- this lets loops go genuinely idle, the
 		 * state the stranded-wake needs. */
-		while (atomic_exchange_explicit(&g_blk5_lock, 1,
-		    memory_order_acquire) != 0) {
+		while (xtc_atomic_exchange_i32(&g_blk5_lock, 1,
+		           xtc_mo_acquire) != 0) {
 			(void)xtc_proc_sleep(50 * 1000LL);
 			if (++spins > 4000000) goto out;   /* defensive */
 		}
 		/* Hold the lock across a short sleep -- the holder's OWN park
 		 * timer is the one that must resume it after migration. */
 		(void)xtc_proc_sleep(20 * 1000LL);
-		atomic_store_explicit(&g_blk5_lock, 0, memory_order_release);
+		xtc_atomic_store_i32(&g_blk5_lock, 0, xtc_mo_release);
 	}
 out:
-	atomic_fetch_add(&g_blk5_done, 1);
+	xtc_atomic_fetch_add_i32(&g_blk5_done, 1, xtc_mo_seq_cst);
 }
 #endif /* !_WIN32 */
 
@@ -782,8 +786,8 @@ test_migratable_timer_resume(const MunitParameter p[], void *d)
 	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	int i, nloops;
-	atomic_store(&g_blk5_done, 0);
-	atomic_store(&g_blk5_lock, 0);
+	xtc_atomic_store_i32(&g_blk5_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_blk5_lock, 0, xtc_mo_seq_cst);
 	/*
 	 * Size the executor to the CPUs actually available, capped at 8.
 	 *
@@ -814,7 +818,8 @@ test_migratable_timer_resume(const MunitParameter p[], void *d)
 		    blk5_proc, (void *)(intptr_t)i, &opts, &pid), ==, XTC_OK);
 	}
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_blk5_done), ==, BLK5_FIBERS);
+	munit_assert_int(xtc_atomic_load_i32(&g_blk5_done, xtc_mo_seq_cst), ==,
+	    BLK5_FIBERS);
 	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
 	return MUNIT_OK;
 #endif
@@ -844,8 +849,8 @@ test_migratable_timer_resume(const MunitParameter p[], void *d)
 #define BLK6_FIBERS 16
 #define BLK6_ITERS  20
 #if !defined(_WIN32)
-static _Atomic int g_blk6_done;
-static _Atomic int g_blk6_lock;
+static int g_blk6_done;
+static int g_blk6_lock;
 
 static int
 blk6_wait_timeout(int fd)
@@ -870,7 +875,7 @@ blk6_proc(void *arg)
 	int k;
 	(void)idx;
 	if (xtc_test_make_pipe(&r, &w) != 0) {
-		atomic_fetch_add(&g_blk6_done, 1);
+		xtc_atomic_fetch_add_i32(&g_blk6_done, 1, xtc_mo_seq_cst);
 		return;
 	}
 	(void)fcntl(r, F_SETFL, O_NONBLOCK);
@@ -878,8 +883,8 @@ blk6_proc(void *arg)
 		int held = 0;
 		if ((k & 1) == 0) {
 			int spins = 0;
-			while (atomic_exchange_explicit(&g_blk6_lock, 1,
-			    memory_order_acquire) != 0) {
+			while (xtc_atomic_exchange_i32(&g_blk6_lock, 1,
+			           xtc_mo_acquire) != 0) {
 				(void)blk6_wait_timeout(r);
 				if (++spins > 4000000) goto out;
 			}
@@ -889,12 +894,11 @@ blk6_proc(void *arg)
 		 * on whatever loop currently runs it. */
 		(void)blk6_wait_timeout(r);
 		if (held)
-			atomic_store_explicit(&g_blk6_lock, 0,
-			    memory_order_release);
+			xtc_atomic_store_i32(&g_blk6_lock, 0, xtc_mo_release);
 	}
 out:
 	xtc_test_close_pipe(r, w);
-	atomic_fetch_add(&g_blk6_done, 1);
+	xtc_atomic_fetch_add_i32(&g_blk6_done, 1, xtc_mo_seq_cst);
 }
 #endif /* !_WIN32 */
 
@@ -912,8 +916,8 @@ test_migratable_waitfd_resume(const MunitParameter p[], void *d)
 	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	int i;
-	atomic_store(&g_blk6_done, 0);
-	atomic_store(&g_blk6_lock, 0);
+	xtc_atomic_store_i32(&g_blk6_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_blk6_lock, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_exec_init(&e, 8), ==, XTC_OK);
 	xtc_exec_set_eager_rebalance(e, 1);
 	for (i = 0; i < BLK6_FIBERS; i++) {
@@ -923,7 +927,8 @@ test_migratable_waitfd_resume(const MunitParameter p[], void *d)
 		    blk6_proc, (void *)(intptr_t)i, &opts, &pid), ==, XTC_OK);
 	}
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_blk6_done), ==, BLK6_FIBERS);
+	munit_assert_int(xtc_atomic_load_i32(&g_blk6_done, xtc_mo_seq_cst), ==,
+	    BLK6_FIBERS);
 	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
 	return MUNIT_OK;
 #endif
@@ -954,19 +959,19 @@ test_migratable_waitfd_resume(const MunitParameter p[], void *d)
  * deadline reports XTC_KILL_DEFERRED rather than silently swallowing the
  * kill, which is the documented contract for a masked region.
  */
-static _Atomic int g_blk7_work_started, g_blk7_work_finished;
-static _Atomic int g_blk7_finished_at_hook, g_blk7_hook_ran;
-static _Atomic int g_blk7_kill_status, g_blk7_run_returned;
+static int g_blk7_work_started, g_blk7_work_finished;
+static int g_blk7_finished_at_hook, g_blk7_hook_ran;
+static int g_blk7_kill_status, g_blk7_run_returned;
 static xtc_pid_t g_blk7_victim;
 
 static int
 blk7_slow_fn(void *arg)
 {
 	(void)arg;
-	atomic_store(&g_blk7_work_started, 1);
+	xtc_atomic_store_i32(&g_blk7_work_started, 1, xtc_mo_seq_cst);
 	/* Long enough that the kill provably lands mid-flight. */
 	__os_sleep_ns(300LL * 1000 * 1000);
-	atomic_store(&g_blk7_work_finished, 1);
+	xtc_atomic_store_i32(&g_blk7_work_finished, 1, xtc_mo_seq_cst);
 	return 99;
 }
 
@@ -976,9 +981,10 @@ blk7_at_exit(void *arg)
 	(void)arg;
 	/* The frame is being torn down NOW: the worker must already be done
 	 * with it.  Pre-fix this sampled 0. */
-	atomic_store(&g_blk7_finished_at_hook,
-	    atomic_load(&g_blk7_work_finished));
-	atomic_store(&g_blk7_hook_ran, 1);
+	xtc_atomic_store_i32(&g_blk7_finished_at_hook,
+	    xtc_atomic_load_i32(&g_blk7_work_finished, xtc_mo_seq_cst),
+	    xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_blk7_hook_ran, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -988,7 +994,7 @@ blk7_victim_proc(void *arg)
 	(void)arg;
 	munit_assert_int(xtc_proc_at_exit(blk7_at_exit, NULL), ==, XTC_OK);
 	(void)xtc_blocking_run(blk7_slow_fn, NULL, &out);
-	atomic_store(&g_blk7_run_returned, 1);
+	xtc_atomic_store_i32(&g_blk7_run_returned, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -996,14 +1002,17 @@ blk7_killer_proc(void *arg)
 {
 	int st = -1, spins = 0;
 	(void)arg;
-	while (!atomic_load(&g_blk7_work_started) && spins++ < 20000)
+	while (!xtc_atomic_load_i32(&g_blk7_work_started, xtc_mo_seq_cst) &&
+	    spins++ < 20000)
 		(void)xtc_proc_sleep(1000LL * 1000);
 	/* Kill with the worker provably mid-flight. */
 	(void)xtc_proc_sleep(40LL * 1000 * 1000);
-	munit_assert_int(atomic_load(&g_blk7_work_finished), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_blk7_work_finished,
+	                     xtc_mo_seq_cst),
+	    ==, 0);
 	munit_assert_int(xtc_exit_pid_deadline(g_blk7_victim, 9,
 	    3000LL * 1000 * 1000, &st), ==, XTC_OK);
-	atomic_store(&g_blk7_kill_status, st);
+	xtc_atomic_store_i32(&g_blk7_kill_status, st, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -1014,12 +1023,12 @@ test_blocking_kill_no_frame_escape(const MunitParameter p[], void *d)
 	xtc_pid_t killer;
 	(void)p; (void)d;
 
-	atomic_store(&g_blk7_work_started, 0);
-	atomic_store(&g_blk7_work_finished, 0);
-	atomic_store(&g_blk7_finished_at_hook, -1);
-	atomic_store(&g_blk7_hook_ran, 0);
-	atomic_store(&g_blk7_kill_status, -1);
-	atomic_store(&g_blk7_run_returned, 0);
+	xtc_atomic_store_i32(&g_blk7_work_started, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_blk7_work_finished, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_blk7_finished_at_hook, -1, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_blk7_hook_ran, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_blk7_kill_status, -1, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_blk7_run_returned, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	opts.name = "blk7-victim";
@@ -1030,18 +1039,26 @@ test_blocking_kill_no_frame_escape(const MunitParameter p[], void *d)
 	    &killer), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
-	munit_assert_int(atomic_load(&g_blk7_hook_ran), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_blk7_hook_ran, xtc_mo_seq_cst),
+	    ==, 1);
 	/* THE REGRESSION: the offload completed BEFORE the caller's frame
 	 * started being torn down.  Pre-fix: 0 (worker still running). */
-	munit_assert_int(atomic_load(&g_blk7_finished_at_hook), ==, 1);
-	munit_assert_int(atomic_load(&g_blk7_work_finished), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_blk7_finished_at_hook,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_blk7_work_finished,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
 	/* The kill was still honored -- the fiber died rather than
 	 * completing xtc_blocking_run normally. */
-	munit_assert_int(atomic_load(&g_blk7_run_returned), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_blk7_run_returned,
+	                     xtc_mo_seq_cst),
+	    ==, 0);
 	/* And a supervisor is TOLD the kill was deferred by the mask, so a
 	 * wedged offload stays diagnosable (man xtc_proc.3). */
-	munit_assert_int(atomic_load(&g_blk7_kill_status), ==,
-	    XTC_KILL_DEFERRED);
+	munit_assert_int(xtc_atomic_load_i32(&g_blk7_kill_status,
+	                     xtc_mo_seq_cst),
+	    ==, XTC_KILL_DEFERRED);
 
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	return MUNIT_OK;
@@ -1068,7 +1085,7 @@ test_blocking_kill_no_frame_escape(const MunitParameter p[], void *d)
 #define BLK8_ITERS  200
 #define BLK8_CHECKS 2000
 #if !defined(_WIN32)
-static _Atomic int g_blk8_done, g_blk8_wrong;
+static int g_blk8_done, g_blk8_wrong;
 
 static void
 blk8_proc(void *arg)
@@ -1080,12 +1097,13 @@ blk8_proc(void *arg)
 		(void)xtc_proc_sleep(((k & 3) + 1) * 1000LL);
 		for (j = 0; j < BLK8_CHECKS; j++) {
 			if (!xtc_pid_eq(xtc_self(), me)) {
-				atomic_fetch_add(&g_blk8_wrong, 1);
+				xtc_atomic_fetch_add_i32(&g_blk8_wrong, 1,
+				    xtc_mo_seq_cst);
 				break;
 			}
 		}
 	}
-	atomic_fetch_add(&g_blk8_done, 1);
+	xtc_atomic_fetch_add_i32(&g_blk8_done, 1, xtc_mo_seq_cst);
 }
 #endif /* !_WIN32 */
 
@@ -1102,8 +1120,8 @@ test_migratable_self_identity(const MunitParameter p[], void *d)
 	xtc_proc_opts_t opts = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 	int i, nloops;
-	atomic_store(&g_blk8_done, 0);
-	atomic_store(&g_blk8_wrong, 0);
+	xtc_atomic_store_i32(&g_blk8_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_blk8_wrong, 0, xtc_mo_seq_cst);
 	nloops = __os_ncpus();
 	if (nloops > 8) nloops = 8;
 	if (nloops < 2) nloops = 2;
@@ -1116,8 +1134,10 @@ test_migratable_self_identity(const MunitParameter p[], void *d)
 		    blk8_proc, NULL, &opts, &pid), ==, XTC_OK);
 	}
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_blk8_done), ==, BLK8_FIBERS);
-	munit_assert_int(atomic_load(&g_blk8_wrong), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_blk8_done, xtc_mo_seq_cst), ==,
+	    BLK8_FIBERS);
+	munit_assert_int(xtc_atomic_load_i32(&g_blk8_wrong, xtc_mo_seq_cst), ==,
+	    0);
 	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
 	return MUNIT_OK;
 #endif

@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -43,18 +42,18 @@
 #define N_WORKERS 12
 #define REGION 4096
 
-static atomic_int  g_done;
-static atomic_long g_result_hash;   /* order-sensitive fold of AIO results */
-static atomic_int  g_faults_seen;   /* short/failed ops observed */
+static int g_done;
+static long g_result_hash; /* order-sensitive fold of AIO results */
+static int g_faults_seen;  /* short/failed ops observed */
 static int         g_fd = -1;
 
 static void
 fold(long v)
 {
-	long h = atomic_load_explicit(&g_result_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_result_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(v + 7));
-	atomic_store_explicit(&g_result_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_result_hash, h, xtc_mo_relaxed);
 }
 
 static void
@@ -71,15 +70,15 @@ io_worker(void *arg)
 	w = xtc_aio_pwrite(g_fd, buf, REGION, off);
 	fold(w);
 	if (w < 0 || (w >= 0 && w < REGION))
-		atomic_fetch_add_explicit(&g_faults_seen, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_faults_seen, 1, xtc_mo_relaxed);
 
 	/* Durability barrier (may be reported as EIO under fault). */
 	{
 		int fr = xtc_aio_fsync(g_fd);
 		fold(fr);
 		if (fr < 0)
-			atomic_fetch_add_explicit(&g_faults_seen, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_faults_seen, 1,
+			    xtc_mo_relaxed);
 	}
 
 	/* Read it back (may be reported short). */
@@ -87,9 +86,9 @@ io_worker(void *arg)
 	r = xtc_aio_pread(g_fd, buf, REGION, off);
 	fold(r);
 	if (r >= 0 && r < REGION)
-		atomic_fetch_add_explicit(&g_faults_seen, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_faults_seen, 1, xtc_mo_relaxed);
 
-	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -105,9 +104,9 @@ run_once(uint64_t seed, int *out_done, long *out_rhash, int *out_faults,
 	(void)snprintf(path, sizeof path, "%s/sim_iofault_XXXXXX",
 	    td_ != NULL && *td_ != '\0' ? td_ : "/tmp");
 
-	atomic_store(&g_done, 0);
-	atomic_store(&g_result_hash, 0);
-	atomic_store(&g_faults_seen, 0);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_result_hash, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_faults_seen, 0, xtc_mo_seq_cst);
 
 	g_fd = mkstemp(path);
 	if (g_fd < 0) {
@@ -138,9 +137,9 @@ run_once(uint64_t seed, int *out_done, long *out_rhash, int *out_faults,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_done = atomic_load(&g_done);
-	*out_rhash = atomic_load(&g_result_hash);
-	*out_faults = atomic_load(&g_faults_seen);
+	*out_done = xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
+	*out_rhash = xtc_atomic_load_long(&g_result_hash, xtc_mo_seq_cst);
+	*out_faults = xtc_atomic_load_i32(&g_faults_seen, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 
 	xtc_sim_io_faults_disable();

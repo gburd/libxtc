@@ -2,7 +2,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_exec.h"
@@ -23,8 +22,8 @@
 #define N_LOOPS   4
 #define N_WORKERS 16
 
-static atomic_int g_done;
-static atomic_long g_trace_hash;   /* order-sensitive fold of completion ids */
+static int g_done;
+static long g_trace_hash; /* order-sensitive fold of completion ids */
 
 static void
 worker(void *arg)
@@ -34,15 +33,15 @@ worker(void *arg)
 	 * completes.  Because the schedule is deterministic, the ORDER in
 	 * which workers reach here is a function of the seed -> the hash
 	 * replays. */
-	long h = atomic_load_explicit(&g_trace_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_trace_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(id + 1));
-	atomic_store_explicit(&g_trace_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_trace_hash, h, xtc_mo_relaxed);
 	/* A few cooperative yields so the scheduler interleaves us with
 	 * peers (exercising the seeded interleaving + work stealing). */
 	xtc_yield();
 	xtc_yield();
-	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 }
 
 /* Run once with `seed`; return the order-hash and set *out_done. */
@@ -51,8 +50,8 @@ run_once(uint64_t seed, int *out_done, uint64_t *out_state_hash)
 {
 	xtc_exec_t *e = NULL;
 	long w;
-	atomic_store(&g_done, 0);
-	atomic_store(&g_trace_hash, 0);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_trace_hash, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) { *out_done = -1; return -1; }
 	for (w = 0; w < N_WORKERS; w++) {
@@ -63,11 +62,11 @@ run_once(uint64_t seed, int *out_done, uint64_t *out_state_hash)
 		(void)xtc_proc_spawn(l, worker, (void *)(intptr_t)w, NULL, NULL);
 	}
 	(void)xtc_sim_exec_run(e, seed, 1000000);
-	*out_done = atomic_load(&g_done);
+	*out_done = xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
 	if (out_state_hash != NULL)
 		*out_state_hash = xtc_sim_state_hash(e);
 	(void)xtc_exec_fini(e);
-	return atomic_load(&g_trace_hash);
+	return xtc_atomic_load_long(&g_trace_hash, xtc_mo_seq_cst);
 }
 
 int

@@ -20,7 +20,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -50,7 +49,7 @@ struct turnstile {
 static xtc_fsm_t *g_fsm;
 static xtc_pid_t  g_fsm_pid;
 static struct turnstile g_ts;
-static atomic_int g_senders_done;
+static int g_senders_done;
 
 static xtc_fsm_result_t
 ts_event(void *st, int cur, const void *msg, size_t len, xtc_fsm_call_t *call)
@@ -97,7 +96,7 @@ sender(void *arg)
 		int ev = ((id + i) & 1) ? EV_PUSH : EV_COIN;
 		(void)xtc_fsm_send(g_fsm_pid, &ev, sizeof ev);
 	}
-	atomic_fetch_add_explicit(&g_senders_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_senders_done, 1, xtc_mo_relaxed);
 }
 
 /* Winder: once all senders are done, drain by sending a final marker and
@@ -107,8 +106,7 @@ winder(void *arg)
 {
 	(void)arg;
 	/* Spin-yield until every sender has enqueued its events. */
-	while (atomic_load_explicit(&g_senders_done, memory_order_relaxed)
-	    < N_SENDERS)
+	while (xtc_atomic_load_i32(&g_senders_done, xtc_mo_relaxed) < N_SENDERS)
 		xtc_yield();
 	/* A few yields so the machine drains its mailbox. */
 	{ int k; for (k = 0; k < TOTAL + 8; k++) xtc_yield(); }
@@ -123,7 +121,7 @@ run_turnstile(uint64_t seed, int *out_proc, int *out_acc, int *out_rej,
 	int i, rc;
 
 	memset(&g_ts, 0, sizeof g_ts);
-	atomic_store(&g_senders_done, 0);
+	xtc_atomic_store_i32(&g_senders_done, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	if (xtc_fsm_start(xtc_exec_loop(e, 0), &TS_CB, &g_ts, ST_LOCKED, NULL,

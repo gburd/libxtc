@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <sys/resource.h>
 #include "xtc.h"
@@ -73,7 +72,7 @@
 struct ikey { int64_t v; };
 
 struct val {
-	_Atomic uint64_t sentinel;   /* LIVE while in the table; FREED after */
+	uint64_t sentinel;           /* LIVE while in the table; FREED after */
 	int64_t          key;        /* the key this value belongs to */
 };
 
@@ -98,24 +97,24 @@ ikey_hash(const void *key)
 static xtc_chash_t   *g_h;
 static struct ikey   *g_keyptrs[CH_KEYSPACE];  /* every key we malloc'd */
 static struct val    *g_valptrs[CH_KEYSPACE];  /* every value we malloc'd */
-static _Atomic int     g_valfreed[CH_KEYSPACE]; /* set by val_free BEFORE the
-                                                 * free, so end-of-run cleanup
-                                                 * knows which values it must
-                                                 * NOT double-free -- read from
-                                                 * this side table, never from
-                                                 * the freed value's own memory */
-static atomic_int      g_uaf;                  /* reader saw freed/torn val */
-static atomic_int      g_rd_done;
-static atomic_int      g_wr_done;
-static atomic_long     g_hash;                 /* order-sensitive fold */
+static int g_valfreed[CH_KEYSPACE];            /* set by val_free BEFORE the
+                                                * free, so end-of-run cleanup
+                                                * knows which values it must
+                                                * NOT double-free -- read from
+                                                * this side table, never from
+                                                * the freed value's own memory */
+static int g_uaf;                              /* reader saw freed/torn val */
+static int g_rd_done;
+static int g_wr_done;
+static long g_hash; /* order-sensitive fold */
 
 static void
 ch_fold(long v)
 {
-	long h = atomic_load_explicit(&g_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(v + 1));
-	atomic_store_explicit(&g_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_hash, h, xtc_mo_relaxed);
 }
 
 static void
@@ -127,12 +126,10 @@ val_free(void *p)
 	 * while the value is still valid), so end-of-run cleanup never has
 	 * to touch this freed memory to decide whether to free it. */
 	if (key >= 0 && key < CH_KEYSPACE)
-		atomic_store_explicit(&g_valfreed[key], 1,
-		    memory_order_release);
+		xtc_atomic_store_i32(&g_valfreed[key], 1, xtc_mo_release);
 	/* Poison BEFORE free so a racing reader still holding this value
 	 * (a bug) sees FREED even under a non-ASan build. */
-	atomic_store_explicit(&vp->sentinel, VAL_FREED_MAGIC,
-	    memory_order_release);
+	xtc_atomic_store_u64(&vp->sentinel, VAL_FREED_MAGIC, xtc_mo_release);
 	free(vp);
 }
 
@@ -147,8 +144,8 @@ ch_writer(void *arg)
 		struct ikey *k = g_keyptrs[key];
 		struct val *vp = g_valptrs[key];
 		void *old = NULL;
-		atomic_store_explicit(&vp->sentinel, VAL_LIVE_MAGIC,
-		    memory_order_relaxed);
+		xtc_atomic_store_u64(&vp->sentinel, VAL_LIVE_MAGIC,
+		    xtc_mo_relaxed);
 		vp->key = key;
 		(void)xtc_chash_insert(g_h, k, vp, &old);
 		ch_fold((long)(key * 3));
@@ -172,7 +169,7 @@ ch_writer(void *arg)
 		ch_fold((long)(key * 5 + 1));
 		xtc_yield();
 	}
-	atomic_fetch_add_explicit(&g_wr_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_wr_done, 1, xtc_mo_relaxed);
 }
 
 static void
@@ -192,28 +189,28 @@ ch_reader(void *arg)
 				struct val *vp = v;
 				uint64_t s0, s1;
 				int64_t k0, k1;
-				s0 = atomic_load_explicit(&vp->sentinel,
-				    memory_order_acquire);
+				s0 = xtc_atomic_load_u64(&vp->sentinel,
+				    xtc_mo_acquire);
 				k0 = vp->key;
 				if (s0 != VAL_LIVE_MAGIC || k0 != key)
-					atomic_fetch_add_explicit(&g_uaf, 1,
-					    memory_order_relaxed);
+					xtc_atomic_fetch_add_i32(&g_uaf, 1,
+					    xtc_mo_relaxed);
 				/* Hold the read-side across a yield: a
 				 * broken reclamation surfaces here. */
 				xtc_yield();
-				s1 = atomic_load_explicit(&vp->sentinel,
-				    memory_order_acquire);
+				s1 = xtc_atomic_load_u64(&vp->sentinel,
+				    xtc_mo_acquire);
 				k1 = vp->key;
 				if (s1 != VAL_LIVE_MAGIC || k1 != key)
-					atomic_fetch_add_explicit(&g_uaf, 1,
-					    memory_order_relaxed);
+					xtc_atomic_fetch_add_i32(&g_uaf, 1,
+					    xtc_mo_relaxed);
 				ch_fold((long)(key + id));
 			}
 			xtc_rcu_read_unlock();
 		}
 		xtc_yield();
 	}
-	atomic_fetch_add_explicit(&g_rd_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_rd_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -223,10 +220,10 @@ run_chash(uint64_t seed, int *out_rd, int *out_wr, int *out_uaf,
 	xtc_exec_t *e = NULL;
 	int i, rc, next = 0;
 
-	atomic_store(&g_uaf, 0);
-	atomic_store(&g_rd_done, 0);
-	atomic_store(&g_wr_done, 0);
-	atomic_store(&g_hash, 0);
+	xtc_atomic_store_i32(&g_uaf, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rd_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_wr_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
 
 	if (xtc_rcu_init() != XTC_OK) return -1;
 	if (xtc_chash_create(ikey_cmp, ikey_hash, 8, &g_h) != XTC_OK) {
@@ -244,9 +241,10 @@ run_chash(uint64_t seed, int *out_rd, int *out_wr, int *out_uaf,
 			return -1;
 		}
 		g_keyptrs[i]->v = i;
-		atomic_store(&g_valptrs[i]->sentinel, VAL_LIVE_MAGIC);
+		xtc_atomic_store_u64(&g_valptrs[i]->sentinel, VAL_LIVE_MAGIC,
+		    xtc_mo_seq_cst);
 		g_valptrs[i]->key = i;
-		atomic_store(&g_valfreed[i], 0);
+		xtc_atomic_store_i32(&g_valfreed[i], 0, xtc_mo_seq_cst);
 	}
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) {
@@ -261,11 +259,11 @@ run_chash(uint64_t seed, int *out_rd, int *out_wr, int *out_uaf,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_rd = atomic_load(&g_rd_done);
-	*out_wr = atomic_load(&g_wr_done);
-	*out_uaf = atomic_load(&g_uaf);
+	*out_rd = xtc_atomic_load_i32(&g_rd_done, xtc_mo_seq_cst);
+	*out_wr = xtc_atomic_load_i32(&g_wr_done, xtc_mo_seq_cst);
+	*out_uaf = xtc_atomic_load_i32(&g_uaf, xtc_mo_seq_cst);
 	*out_size = (int)xtc_chash_size(g_h);
-	*out_hash = atomic_load(&g_hash);
+	*out_hash = xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 
 	/* Drain retirements so every removed value is reclaimed before we
@@ -281,7 +279,7 @@ run_chash(uint64_t seed, int *out_rd, int *out_wr, int *out_uaf,
 	 * BEFORE it freed) tells us which -- never read the freed value's
 	 * own memory here (that would be a use-after-free). */
 	for (i = 0; i < CH_KEYSPACE; i++) {
-		if (!atomic_load_explicit(&g_valfreed[i], memory_order_acquire))
+		if (!xtc_atomic_load_i32(&g_valfreed[i], xtc_mo_acquire))
 			free(g_valptrs[i]);   /* survivor (or never-removed) */
 		free(g_keyptrs[i]);           /* keys are always ours */
 	}

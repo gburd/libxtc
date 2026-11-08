@@ -25,7 +25,6 @@
  */
 
 #define _GNU_SOURCE
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -88,7 +87,7 @@ test_probe(const MunitParameter p[], void *d)
 
 /* ---- wait_fence: park a fiber on an eventfd "fence", signal it ---- */
 #if HAVE_EVENTFD
-static _Atomic int g_wait_rc;
+static int g_wait_rc;
 
 /* Waiter proc: park on the fence fd until it signals. */
 static void
@@ -96,7 +95,7 @@ waiter_proc(void *arg)
 {
 	int fd = (int)(intptr_t)arg;
 	int rc = xtc_accel_wait_fence(fd, 5LL * 1000 * 1000 * 1000); /* 5s */
-	atomic_store(&g_wait_rc, rc);
+	xtc_atomic_store_i32(&g_wait_rc, rc, xtc_mo_seq_cst);
 }
 
 /* Signaller proc: after a short yield-loop (so the waiter parks first),
@@ -110,7 +109,8 @@ signaller_proc(void *arg)
 	for (i = 0; i < 50; i++)
 		xtc_yield();          /* let the waiter reach its park */
 	if (write(fd, &one, sizeof one) != (ssize_t)sizeof one)
-		atomic_store(&g_wait_rc, -99);   /* signal write failed */
+		xtc_atomic_store_i32(&g_wait_rc, -99,
+		    xtc_mo_seq_cst); /* signal write failed */
 }
 #endif /* HAVE_EVENTFD */
 
@@ -133,7 +133,7 @@ test_wait_fence_signalled(const MunitParameter p[], void *d)
 
 	fd = eventfd(0, EFD_NONBLOCK);
 	munit_assert_int(fd, >=, 0);
-	atomic_store(&g_wait_rc, 12345);
+	xtc_atomic_store_i32(&g_wait_rc, 12345, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	opts.name = "waiter";
@@ -146,7 +146,8 @@ test_wait_fence_signalled(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 
 	/* The waiter woke because the "fence" signalled -> XTC_OK. */
-	munit_assert_int(atomic_load(&g_wait_rc), ==, XTC_OK);
+	munit_assert_int(xtc_atomic_load_i32(&g_wait_rc, xtc_mo_seq_cst), ==,
+	    XTC_OK);
 	(void)close(fd);
 	return MUNIT_OK;
 	}
@@ -157,7 +158,7 @@ test_wait_fence_signalled(const MunitParameter p[], void *d)
 
 /* ---- wait_fence: never-signalled fd times out ---- */
 #if HAVE_EVENTFD
-static _Atomic int g_to_rc;
+static int g_to_rc;
 
 static void
 timeout_proc(void *arg)
@@ -165,7 +166,7 @@ timeout_proc(void *arg)
 	int fd = (int)(intptr_t)arg;
 	/* Short timeout on a fence that never fires. */
 	int rc = xtc_accel_wait_fence(fd, 50 * 1000 * 1000); /* 50ms */
-	atomic_store(&g_to_rc, rc);
+	xtc_atomic_store_i32(&g_to_rc, rc, xtc_mo_seq_cst);
 }
 #endif
 
@@ -185,7 +186,7 @@ test_wait_fence_timeout(const MunitParameter p[], void *d)
 
 	fd = eventfd(0, EFD_NONBLOCK);
 	munit_assert_int(fd, >=, 0);
-	atomic_store(&g_to_rc, 12345);
+	xtc_atomic_store_i32(&g_to_rc, 12345, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	opts.name = "timeout";
@@ -194,7 +195,8 @@ test_wait_fence_timeout(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 
-	munit_assert_int(atomic_load(&g_to_rc), ==, XTC_E_AGAIN);
+	munit_assert_int(xtc_atomic_load_i32(&g_to_rc, xtc_mo_seq_cst), ==,
+	    XTC_E_AGAIN);
 	(void)close(fd);
 	return MUNIT_OK;
 	}
@@ -228,7 +230,7 @@ test_wait_fence_badfd(const MunitParameter p[], void *d)
 #include <stdlib.h>
 #include <time.h>
 
-static _Atomic int g_beats, g_mb_done;
+static int g_beats, g_mb_done;
 static int g_mb_rc, g_mb_fd, g_mb_mode;
 static double g_mb_elapsed;
 static size_t g_mb_depth;
@@ -246,8 +248,8 @@ static void
 mb_heartbeat(void *a)
 {
 	(void)a;
-	while (!atomic_load(&g_mb_done)) {
-		atomic_fetch_add(&g_beats, 1);
+	while (!xtc_atomic_load_i32(&g_mb_done, xtc_mo_seq_cst)) {
+		xtc_atomic_fetch_add_i32(&g_beats, 1, xtc_mo_seq_cst);
 		(void)xtc_proc_sleep(10 * 1000 * 1000);
 	}
 }
@@ -271,7 +273,7 @@ mb_waiter(void *a)
 	st.size = sizeof st;
 	(void)xtc_proc_mailbox_stats(xtc_self(), &st);
 	g_mb_depth = st.depth;
-	atomic_store(&g_mb_done, 1);
+	xtc_atomic_store_i32(&g_mb_done, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -294,11 +296,14 @@ mb_watchdog(void *a)
 {
 	int i;
 	(void)a;
-	for (i = 0; i < 300 && !atomic_load(&g_mb_done); i++)
+	for (i = 0; i < 300 && !xtc_atomic_load_i32(&g_mb_done, xtc_mo_seq_cst);
+	     i++)
 		usleep(10000);
-	if (!atomic_load(&g_mb_done)) {
-		fprintf(stderr, "wait_fence never returned (mode %d), "
-		    "heartbeats=%d in 3 s\n", g_mb_mode, atomic_load(&g_beats));
+	if (!xtc_atomic_load_i32(&g_mb_done, xtc_mo_seq_cst)) {
+		fprintf(stderr,
+		    "wait_fence never returned (mode %d), "
+		    "heartbeats=%d in 3 s\n",
+		    g_mb_mode, xtc_atomic_load_i32(&g_beats, xtc_mo_seq_cst));
 		_exit(3);
 	}
 	return NULL;
@@ -311,8 +316,8 @@ mb_run(int mode)
 	xtc_pid_t pid;
 	pthread_t wd;
 	g_mb_mode = mode;
-	atomic_store(&g_beats, 0);
-	atomic_store(&g_mb_done, 0);
+	xtc_atomic_store_i32(&g_beats, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_mb_done, 0, xtc_mo_seq_cst);
 	g_mb_rc = 12345;
 	g_mb_fd = eventfd(0, EFD_NONBLOCK);
 	munit_assert_int(g_mb_fd, >=, 0);
@@ -329,7 +334,8 @@ mb_run(int mode)
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	(void)close(g_mb_fd);
 	printf("# mode %d: rc=%d after %.3f s, heartbeats=%d, mail left=%zu\n",
-	    mode, g_mb_rc, g_mb_elapsed, atomic_load(&g_beats), g_mb_depth);
+	    mode, g_mb_rc, g_mb_elapsed,
+	    xtc_atomic_load_i32(&g_beats, xtc_mo_seq_cst), g_mb_depth);
 }
 #endif
 
@@ -345,14 +351,14 @@ test_wait_fence_mailbox(const MunitParameter p[], void *d)
 	munit_assert_int(g_mb_rc, ==, XTC_E_AGAIN);
 	munit_assert_double(g_mb_elapsed, >=, 0.299);
 	munit_assert_double(g_mb_elapsed, <, 1.0);
-	munit_assert_int(atomic_load(&g_beats), >=, 10);
+	munit_assert_int(xtc_atomic_load_i32(&g_beats, xtc_mo_seq_cst), >=, 10);
 	munit_assert_size(g_mb_depth, ==, 1);
 	/* No timeout: a fence signalled by a fiber on the same loop is seen
 	 * (that fiber could not run at all while the waiter spun). */
 	mb_run(1);
 	munit_assert_int(g_mb_rc, ==, XTC_OK);
 	munit_assert_double(g_mb_elapsed, <, 1.0);
-	munit_assert_int(atomic_load(&g_beats), >=, 5);
+	munit_assert_int(xtc_atomic_load_i32(&g_beats, xtc_mo_seq_cst), >=, 5);
 	munit_assert_size(g_mb_depth, ==, 1);
 	return MUNIT_OK;
 #else

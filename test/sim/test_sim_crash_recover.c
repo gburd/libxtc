@@ -85,7 +85,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -125,9 +124,9 @@ static xtc_exec_t *g_exec;
 
 /* Seeded crash control (drawn once, inside the sim run, from the FAULT
  * stream so enabling the crash never perturbs the schedule). */
-static _Atomic long g_step;         /* commit attempts so far (all workers) */
-static _Atomic long g_crash_at;     /* threshold; <0 until the first worker draws it */
-static _Atomic int  g_crashed;      /* set once when we trip xtc_exec_stop */
+static long g_step;     /* commit attempts so far (all workers) */
+static long g_crash_at; /* threshold; <0 until the first worker draws it */
+static int g_crashed;   /* set once when we trip xtc_exec_stop */
 
 /*
  * Per-attempt records, indexed [worker][txn].  attempted: the fiber
@@ -173,16 +172,15 @@ worker_proc(void *arg)
 	 * seeded schedule -- keeping replay stable. */
 	{
 		long expect = -1;
-		if (atomic_load_explicit(&g_crash_at, memory_order_relaxed) < 0) {
+		if (xtc_atomic_load_long(&g_crash_at, xtc_mo_relaxed) < 0) {
 			long total = (long)N_WORKERS * TXNS_PER;
 			/* [0 .. total]: 0 crashes before any commit, total+ never
 			 * crashes (a clean drain).  Bias toward mid-workload by
 			 * drawing in [0, total] inclusive. */
 			long draw = (long)__xtc_sim_rng_range(XTC_SIM_RNG_FAULT,
 			    (uint64_t)(total + 1));
-			(void)atomic_compare_exchange_strong_explicit(&g_crash_at,
-			    &expect, draw, memory_order_relaxed,
-			    memory_order_relaxed);
+			(void)xtc_atomic_cas_long(&g_crash_at, &expect, draw,
+			    xtc_mo_relaxed, xtc_mo_relaxed);
 		}
 	}
 
@@ -190,11 +188,11 @@ worker_proc(void *arg)
 		long s;
 
 		/* Crash point check: one step per commit attempt. */
-		s = atomic_fetch_add_explicit(&g_step, 1, memory_order_relaxed) + 1;
-		if (s >= atomic_load_explicit(&g_crash_at, memory_order_relaxed)) {
+		s = xtc_atomic_fetch_add_long(&g_step, 1, xtc_mo_relaxed) + 1;
+		if (s >= xtc_atomic_load_long(&g_crash_at, xtc_mo_relaxed)) {
 			int z = 0;
-			if (atomic_compare_exchange_strong_explicit(&g_crashed,
-			    &z, 1, memory_order_relaxed, memory_order_relaxed))
+			if (xtc_atomic_cas_i32(&g_crashed, &z, 1,
+			        xtc_mo_relaxed, xtc_mo_relaxed))
 				(void)xtc_exec_stop(g_exec);
 			goto done;   /* crashed: this commit never happens */
 		}
@@ -335,9 +333,9 @@ run_once_inproc(uint64_t seed, long *out_crash_at, int *out_acked,
 	int fd, i, w, rc, acked = 0, recovered = 0, ret = 0;
 	uint64_t h = 0xCBF29CE484222325ull;   /* FNV-1a basis */
 
-	atomic_store(&g_step, 0);
-	atomic_store(&g_crash_at, -1);
-	atomic_store(&g_crashed, 0);
+	xtc_atomic_store_long(&g_step, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_crash_at, -1, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_crashed, 0, xtc_mo_seq_cst);
 	memset(g_attempted, 0, sizeof g_attempted);
 	memset(g_acked, 0, sizeof g_acked);
 	g_bug_rowid = 0; g_bug_w = -1; g_bug_i = -1;
@@ -403,7 +401,7 @@ run_once_inproc(uint64_t seed, long *out_crash_at, int *out_acked,
 	 * the last commit).  A run stopped by xtc_exec_stop also returns
 	 * XTC_OK (the stop_flag path).  Only AGAIN/DEADLK/negative is a
 	 * hang / scheduler bug we must not paper over. */
-	*out_crash_at = atomic_load(&g_crash_at);
+	*out_crash_at = xtc_atomic_load_long(&g_crash_at, xtc_mo_seq_cst);
 	xtc_sim_io_faults_disable();
 	(void)xtc_exec_fini(g_exec); g_exec = NULL;
 	if (rc != XTC_OK) { ret = -2; goto cleanup_engine1; }

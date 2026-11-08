@@ -32,7 +32,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,9 +51,9 @@
 
 static xtc_reg_t *g_reg;             /* the app registry */
 static xtc_app_t *g_app;
-static atomic_int g_replies_ok;      /* clients that got the right reply */
-static atomic_int g_clients_done;    /* clients that finished */
-static atomic_int g_reg_count_seen;  /* registry count observed by server */
+static int g_replies_ok;     /* clients that got the right reply */
+static int g_clients_done;   /* clients that finished */
+static int g_reg_count_seen; /* registry count observed by server */
 
 /* Request/reply envelope: sender pid + a value. */
 struct req { xtc_pid_t from; int value; };
@@ -65,7 +64,8 @@ server(void *arg)
 {
 	(void)arg;
 	(void)xtc_reg_register(g_reg, SVC_NAME, xtc_self());
-	atomic_store(&g_reg_count_seen, xtc_reg_count(g_reg));
+	xtc_atomic_store_i32(&g_reg_count_seen, xtc_reg_count(g_reg),
+	    xtc_mo_seq_cst);
 	for (;;) {
 		void *m = NULL;
 		size_t sz = 0;
@@ -100,7 +100,7 @@ client(void *arg)
 		(void)xtc_proc_sleep(1000 * 1000LL);
 	}
 	if (xtc_pid_is_none(svc)) {
-		atomic_fetch_add(&g_clients_done, 1);
+		xtc_atomic_fetch_add_i32(&g_clients_done, 1, xtc_mo_seq_cst);
 		return;
 	}
 
@@ -115,13 +115,14 @@ client(void *arg)
 		    m != NULL && sz == sizeof(int)) {
 			int reply = *(int *)m;
 			if (reply == val + 1)
-				atomic_fetch_add(&g_replies_ok, 1);
+				xtc_atomic_fetch_add_i32(&g_replies_ok, 1,
+				    xtc_mo_seq_cst);
 			free(m);
 		} else if (m != NULL) {
 			free(m);
 		}
 	}
-	atomic_fetch_add(&g_clients_done, 1);
+	xtc_atomic_fetch_add_i32(&g_clients_done, 1, xtc_mo_seq_cst);
 }
 
 /* COORDINATOR: wait until all clients are done, then stop the app. */
@@ -131,7 +132,8 @@ coordinator(void *arg)
 	(void)arg;
 	int tries;
 	for (tries = 0; tries < 500; tries++) {
-		if (atomic_load(&g_clients_done) >= N_CLIENTS)
+		if (xtc_atomic_load_i32(&g_clients_done, xtc_mo_seq_cst) >=
+		    N_CLIENTS)
 			break;
 		(void)xtc_proc_sleep(1000 * 1000LL);
 	}
@@ -149,9 +151,9 @@ run_one(uint64_t seed, int *out_replies, uint64_t *out_state)
 	xtc_exec_t *exec;
 	int i, rc;
 
-	atomic_store(&g_replies_ok, 0);
-	atomic_store(&g_clients_done, 0);
-	atomic_store(&g_reg_count_seen, 0);
+	xtc_atomic_store_i32(&g_replies_ok, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_clients_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_reg_count_seen, 0, xtc_mo_seq_cst);
 	g_app = NULL;
 	g_reg = NULL;
 
@@ -198,7 +200,8 @@ run_one(uint64_t seed, int *out_replies, uint64_t *out_state)
 	rc = xtc_sim_exec_run(exec, seed, 5000000);
 
 	if (out_replies != NULL)
-		*out_replies = atomic_load(&g_replies_ok);
+		*out_replies =
+		    xtc_atomic_load_i32(&g_replies_ok, xtc_mo_seq_cst);
 	if (out_state != NULL)
 		*out_state = xtc_sim_state_hash(exec);
 
@@ -227,7 +230,9 @@ main(int argc, char **argv)
 		rc = run_one(seed, &replies, &st);
 		if (rc != XTC_OK) pass = 0;
 		else if (replies != N_CLIENTS) pass = 0;  /* all got value+1 */
-		else if (atomic_load(&g_reg_count_seen) != 1) pass = 0;
+		else if (xtc_atomic_load_i32(&g_reg_count_seen,
+		             xtc_mo_seq_cst) != 1)
+			pass = 0;
 
 		if (pass) {
 			rc2 = run_one(seed, &replies2, &st2);
@@ -237,9 +242,10 @@ main(int argc, char **argv)
 
 		if (!pass) {
 			printf("  seed 0x%016llx: FAIL (replies=%d/%d rc=%d "
-			    "reg_count=%d)\n",
+			       "reg_count=%d)\n",
 			    (unsigned long long)seed, replies, N_CLIENTS, rc,
-			    atomic_load(&g_reg_count_seen));
+			    xtc_atomic_load_i32(&g_reg_count_seen,
+			        xtc_mo_seq_cst));
 			fails++;
 		}
 	}

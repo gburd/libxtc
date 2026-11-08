@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -40,17 +39,17 @@
 #define ITERS   4
 #define KEYS    4
 
-static atomic_int  g_bad;        /* a get/erase/count assertion failed */
-static atomic_int  g_done;
-static atomic_long g_hash;
+static int g_bad; /* a get/erase/count assertion failed */
+static int g_done;
+static long g_hash;
 
 static void
 fold(long v)
 {
-	long h = atomic_load_explicit(&g_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(v + 1));
-	atomic_store_explicit(&g_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_hash, h, xtc_mo_relaxed);
 }
 
 static void
@@ -69,12 +68,11 @@ pdict_worker(void *arg)
 			    ((intptr_t)it << 8) | k;
 			snprintf(key, sizeof key, "k%d", k);
 			if (xtc_pdict_put(key, (void *)val) != XTC_OK)
-				atomic_fetch_add_explicit(&g_bad, 1,
-				    memory_order_relaxed);
+				xtc_atomic_fetch_add_i32(&g_bad, 1,
+				    xtc_mo_relaxed);
 		}
 		if (xtc_pdict_count() != KEYS)
-			atomic_fetch_add_explicit(&g_bad, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_bad, 1, xtc_mo_relaxed);
 
 		xtc_yield();            /* interleave other procs' slices */
 
@@ -86,8 +84,8 @@ pdict_worker(void *arg)
 			snprintf(key, sizeof key, "k%d", k);
 			if (xtc_pdict_get(key, &got) != XTC_OK ||
 			    (intptr_t)got != want)
-				atomic_fetch_add_explicit(&g_bad, 1,
-				    memory_order_relaxed);
+				xtc_atomic_fetch_add_i32(&g_bad, 1,
+				    xtc_mo_relaxed);
 			fold((long)(intptr_t)got);
 		}
 
@@ -95,8 +93,8 @@ pdict_worker(void *arg)
 		for (k = 0; k < KEYS; k += 2) {
 			snprintf(key, sizeof key, "k%d", k);
 			if (xtc_pdict_erase(key) != XTC_OK)
-				atomic_fetch_add_explicit(&g_bad, 1,
-				    memory_order_relaxed);
+				xtc_atomic_fetch_add_i32(&g_bad, 1,
+				    xtc_mo_relaxed);
 		}
 
 		xtc_yield();
@@ -108,21 +106,20 @@ pdict_worker(void *arg)
 			rc = xtc_pdict_get(key, &got);
 			if ((k % 2) == 0) {
 				if (rc == XTC_OK)     /* erased -> must miss */
-					atomic_fetch_add_explicit(&g_bad, 1,
-					    memory_order_relaxed);
+					xtc_atomic_fetch_add_i32(&g_bad, 1,
+					    xtc_mo_relaxed);
 			} else {
 				if (rc != XTC_OK)     /* kept -> must hit */
-					atomic_fetch_add_explicit(&g_bad, 1,
-					    memory_order_relaxed);
+					xtc_atomic_fetch_add_i32(&g_bad, 1,
+					    xtc_mo_relaxed);
 			}
 		}
 		/* Clear our whole slice for the next round. */
 		(void)xtc_pdict_clear();
 		if (xtc_pdict_count() != 0)
-			atomic_fetch_add_explicit(&g_bad, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_bad, 1, xtc_mo_relaxed);
 	}
-	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -132,9 +129,9 @@ run_pdict(uint64_t seed, int *out_done, int *out_bad, long *out_hash,
 	xtc_exec_t *e = NULL;
 	int i, rc;
 
-	atomic_store(&g_bad, 0);
-	atomic_store(&g_done, 0);
-	atomic_store(&g_hash, 0);
+	xtc_atomic_store_i32(&g_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	for (i = 0; i < WORKERS; i++)
@@ -143,9 +140,9 @@ run_pdict(uint64_t seed, int *out_done, int *out_bad, long *out_hash,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_done = atomic_load(&g_done);
-	*out_bad = atomic_load(&g_bad);
-	*out_hash = atomic_load(&g_hash);
+	*out_done = xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
+	*out_bad = xtc_atomic_load_i32(&g_bad, xtc_mo_seq_cst);
+	*out_hash = xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	(void)xtc_exec_fini(e);
 	return rc;

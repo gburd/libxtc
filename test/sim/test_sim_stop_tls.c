@@ -24,7 +24,6 @@
  *	any tool.
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,7 +38,7 @@
 #define N_PROCS 6
 
 static xtc_exec_t *g_exec;
-static _Atomic int g_steps;
+static int g_steps;
 
 static void
 worker(void *arg)
@@ -47,7 +46,7 @@ worker(void *arg)
 	int i;
 	(void)arg;
 	for (i = 0; i < 50; i++) {
-		if (atomic_fetch_add(&g_steps, 1) == 40)
+		if (xtc_atomic_fetch_add_i32(&g_steps, 1, xtc_mo_seq_cst) == 40)
 			(void)xtc_exec_stop(g_exec);   /* stop the run from a fiber */
 		xtc_yield();
 	}
@@ -80,7 +79,7 @@ static int
 run_one(uint64_t seed)
 {
 	int i, bad = 0, rc;
-	atomic_store(&g_steps, 0);
+	xtc_atomic_store_i32(&g_steps, 0, xtc_mo_seq_cst);
 	if (xtc_exec_init(&g_exec, N_LOOPS) != XTC_OK)
 		return 1;
 	for (i = 0; i < N_PROCS; i++)

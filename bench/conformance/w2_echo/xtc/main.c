@@ -31,7 +31,6 @@
 #include <errno.h>
 #include <pthread.h>
 #include <semaphore.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -82,7 +81,7 @@ mono_ns(void)
 static int              g_listen_fd  = -1;
 static int              g_port       = 0;
 static sem_t            g_server_ready;   /* server posts when listening     */
-static atomic_int       g_clients_done;   /* incremented by each client done */
+static int g_clients_done;                /* incremented by each client done */
 static int              g_n_clients  = 0; /* total clients (set by main)     */
 
 /* Global latency histogram (protected by g_hist_mu) */
@@ -128,8 +127,8 @@ server_thread(void *arg)
 	 * final reads/writes processed).
 	 */
 	for (;;) {
-		int all_done = (atomic_load_explicit(&g_clients_done,
-		                    memory_order_acquire) >= g_n_clients);
+		int all_done = (xtc_atomic_load_i32(&g_clients_done,
+		                    xtc_mo_acquire) >= g_n_clients);
 
 		/* Use a short timeout so we notice when clients are done. */
 		int64_t timeout_ns = all_done ? 0 : (int64_t)5000000LL; /* 5 ms */
@@ -243,8 +242,7 @@ client_thread(void *arg)
 
 	if (hist_init(&local_hist, HIST_SUB_BITS_DEFAULT) != 0) {
 		fprintf(stderr, "w2/xtc: client hist_init failed\n");
-		atomic_fetch_add_explicit(&g_clients_done, 1,
-		    memory_order_release);
+		xtc_atomic_fetch_add_i32(&g_clients_done, 1, xtc_mo_release);
 		return NULL;
 	}
 
@@ -252,8 +250,7 @@ client_thread(void *arg)
 	fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (fd < 0) {
 		hist_fini(&local_hist);
-		atomic_fetch_add_explicit(&g_clients_done, 1,
-		    memory_order_release);
+		xtc_atomic_fetch_add_i32(&g_clients_done, 1, xtc_mo_release);
 		return NULL;
 	}
 
@@ -273,8 +270,7 @@ client_thread(void *arg)
 	if (connect(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
 		close(fd);
 		hist_fini(&local_hist);
-		atomic_fetch_add_explicit(&g_clients_done, 1,
-		    memory_order_release);
+		xtc_atomic_fetch_add_i32(&g_clients_done, 1, xtc_mo_release);
 		return NULL;
 	}
 
@@ -326,7 +322,7 @@ done:
 	pthread_mutex_unlock(&g_hist_mu);
 
 	hist_fini(&local_hist);
-	atomic_fetch_add_explicit(&g_clients_done, 1, memory_order_release);
+	xtc_atomic_fetch_add_i32(&g_clients_done, 1, xtc_mo_release);
 	return NULL;
 }
 
@@ -454,7 +450,7 @@ main(int argc, char *argv[])
 
 	/* Initialise coordination primitives. */
 	sem_init(&g_server_ready, 0, 0);
-	atomic_store_explicit(&g_clients_done, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&g_clients_done, 0, xtc_mo_relaxed);
 	g_n_clients = (int)n_clients;
 
 	/* Find a free port and open the listen socket. */

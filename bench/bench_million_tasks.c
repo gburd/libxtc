@@ -19,7 +19,6 @@
  *	  bench_million_tasks [n_tasks] [iters_per_task]
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,7 +33,7 @@
 #include "xtc_res.h"
 #include "xtc_int.h"
 
-static _Atomic int64_t g_completions;
+static int64_t g_completions;
 static int g_iters_per_task;
 
 static intptr_t
@@ -44,7 +43,7 @@ task_fn(void *arg)
 	(void)arg;
 	for (i = 0; i < g_iters_per_task; i++)
 		xtc_yield();
-	atomic_fetch_add_explicit(&g_completions, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i64(&g_completions, 1, xtc_mo_relaxed);
 	return 0;
 }
 
@@ -98,7 +97,7 @@ main(int argc, char **argv)
 	double   tps;
 
 	g_iters_per_task = iters;
-	atomic_store(&g_completions, 0);
+	xtc_atomic_store_i64(&g_completions, 0, xtc_mo_seq_cst);
 
 	rss_before = __rss_kib();
 
@@ -163,7 +162,8 @@ main(int argc, char **argv)
 	printf("yields total    = %lld\n",
 	    (long long)((int64_t)n_tasks * iters));
 	printf("completions     = %lld / %d\n",
-	    (long long)atomic_load(&g_completions), n_tasks);
+	    (long long)xtc_atomic_load_i64(&g_completions, xtc_mo_seq_cst),
+	    n_tasks);
 	printf("wall time       = %.3f s\n", (double)(t1 - t0) / 1e9);
 	printf("tasks/sec       = %.0f\n", tps);
 	printf("ns/task         = %lld\n", (long long)per_task_ns);
@@ -173,8 +173,9 @@ main(int argc, char **argv)
 	    (double)(rss_peak - rss_before) * 1024.0 / n_tasks);
 
 	printf("first failure at = %s\n",
-	    atomic_load(&g_completions) == n_tasks
-	    ? "none" : "VMA/memory cap (graceful)");
+	    xtc_atomic_load_i64(&g_completions, xtc_mo_seq_cst) == n_tasks ?
+	        "none" :
+	        "VMA/memory cap (graceful)");
 
 	(void)xtc_loop_fini(loop);
 	return 0;

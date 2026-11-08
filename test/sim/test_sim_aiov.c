@@ -26,7 +26,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,20 +47,19 @@
 #define REGION (SEG0 + SEG1 + SEG2)   /* 4096 per worker */
 
 static int         g_fd;
-static atomic_int  g_ok;         /* workers that round-tripped their region */
-static atomic_int  g_done;
-static atomic_long g_hash;       /* fold of transfer counts (replay check) */
+static int g_ok; /* workers that round-tripped their region */
+static int g_done;
+static long g_hash; /* fold of transfer counts (replay check) */
 
 static void
 fold(long v)
 {
 	long h;
 	do {
-		h = atomic_load_explicit(&g_hash, memory_order_relaxed);
-	} while (!atomic_compare_exchange_weak_explicit(&g_hash, &h,
-	    (long)((unsigned long)h * 1000003UL +
-	    (unsigned long)(v + 11)), memory_order_relaxed,
-	    memory_order_relaxed));
+		h = xtc_atomic_load_long(&g_hash, xtc_mo_relaxed);
+	} while (!xtc_atomic_cas_weak_long(&g_hash, &h,
+	    (long)((unsigned long)h * 1000003UL + (unsigned long)(v + 11)),
+	    xtc_mo_relaxed, xtc_mo_relaxed));
 }
 
 static void
@@ -93,8 +91,8 @@ vec_worker(void *arg)
 	fold(rn);
 
 	if (wn == REGION && rn == REGION && memcmp(w, r, REGION) == 0)
-		atomic_fetch_add(&g_ok, 1);
-	atomic_fetch_add(&g_done, 1);
+		xtc_atomic_fetch_add_i32(&g_ok, 1, xtc_mo_seq_cst);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -103,7 +101,7 @@ coordinator(void *arg)
 	xtc_exec_t *e = arg;
 	int tries;
 	for (tries = 0; tries < 8000; tries++) {
-		if (atomic_load(&g_done) >= N_WORKERS)
+		if (xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst) >= N_WORKERS)
 			break;
 		(void)xtc_proc_sleep(1000 * 1000LL);
 	}
@@ -119,9 +117,9 @@ run_one(uint64_t seed, int *out_ok, long *out_hash, uint64_t *out_state)
 	const char *td = getenv("TMPDIR");
 	int i, rc;
 
-	atomic_store(&g_ok, 0);
-	atomic_store(&g_done, 0);
-	atomic_store(&g_hash, 0);
+	xtc_atomic_store_i32(&g_ok, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
 
 	/* Honor TMPDIR (the swarm/run_sim_tests.sh convention); never a
 	 * hardcoded host path. */
@@ -153,8 +151,10 @@ run_one(uint64_t seed, int *out_ok, long *out_hash, uint64_t *out_state)
 
 	rc = xtc_sim_exec_run(e, seed, 20000000);
 
-	if (out_ok)    *out_ok = atomic_load(&g_ok);
-	if (out_hash)  *out_hash = atomic_load(&g_hash);
+	if (out_ok)
+		*out_ok = xtc_atomic_load_i32(&g_ok, xtc_mo_seq_cst);
+	if (out_hash)
+		*out_hash = xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 
 	xtc_sim_io_faults_disable();

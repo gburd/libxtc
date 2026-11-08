@@ -64,7 +64,6 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -92,10 +91,10 @@ static int      g_bytes;
 static off_t    g_file_size;
 static int      g_nfibers;
 
-static _Atomic uint64_t g_done;
-static _Atomic uint64_t g_errs;
+static uint64_t g_done;
+static uint64_t g_errs;
 static int64_t         *g_lat;          /* nfibers * ops_each */
-static _Atomic int      g_lat_idx;
+static int g_lat_idx;
 
 static int64_t
 now_ns(void)
@@ -141,7 +140,7 @@ count_iowq_threads(void)
 	return n;
 }
 
-static _Atomic int g_peak_iowq;
+static int g_peak_iowq;
 
 static void
 aio_fiber(void *arg)
@@ -153,7 +152,7 @@ aio_fiber(void *arg)
 	if (g_op == OP_READ || g_op == OP_WRITE) {
 		/* Aligned for a possible O_DIRECT fd; harmless otherwise. */
 		if (posix_memalign(&buf, 4096, (size_t)g_bytes) != 0) {
-			atomic_fetch_add(&g_errs, 1);
+			xtc_atomic_fetch_add_u64(&g_errs, 1, xtc_mo_seq_cst);
 			return;
 		}
 		memset(buf, 'a' + (id % 26), (size_t)g_bytes);
@@ -192,26 +191,24 @@ aio_fiber(void *arg)
 		}
 		e = now_ns();
 		if (rc < 0)
-			atomic_fetch_add_explicit(&g_errs, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_u64(&g_errs, 1, xtc_mo_relaxed);
 		{
-			int idx = atomic_fetch_add_explicit(&g_lat_idx, 1,
-			    memory_order_relaxed);
+			int idx = xtc_atomic_fetch_add_i32(&g_lat_idx, 1,
+			    xtc_mo_relaxed);
 			if (idx < g_nfibers * g_ops_each)
 				g_lat[idx] = e - s;
 		}
-		atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_u64(&g_done, 1, xtc_mo_relaxed);
 
 		/* Sample the io-wq pool periodically: it grows on demand, so
 		 * the peak during the run is the informative figure. */
 		if ((i & 63) == 0) {
 			int n = count_iowq_threads();
-			int prev = atomic_load_explicit(&g_peak_iowq,
-			    memory_order_relaxed);
+			int prev =
+			    xtc_atomic_load_i32(&g_peak_iowq, xtc_mo_relaxed);
 			while (n > prev &&
-			    !atomic_compare_exchange_weak_explicit(
-			        &g_peak_iowq, &prev, n,
-			        memory_order_relaxed, memory_order_relaxed))
+			    !xtc_atomic_cas_weak_i32(&g_peak_iowq, &prev, n,
+			        xtc_mo_relaxed, xtc_mo_relaxed))
 				;
 		}
 	}
@@ -340,9 +337,9 @@ main(int argc, char **argv)
 	t1 = now_ns();
 
 	{
-		uint64_t done = atomic_load(&g_done);
-		uint64_t errs = atomic_load(&g_errs);
-		int nlat = atomic_load(&g_lat_idx);
+		uint64_t done = xtc_atomic_load_u64(&g_done, xtc_mo_seq_cst);
+		uint64_t errs = xtc_atomic_load_u64(&g_errs, xtc_mo_seq_cst);
+		int nlat = xtc_atomic_load_i32(&g_lat_idx, xtc_mo_seq_cst);
 		double secs = (double)(t1 - t0) / 1e9;
 		struct timespec cpu;
 		double cpu_s = 0.0;
@@ -374,7 +371,7 @@ main(int argc, char **argv)
 		 * be a knob for a problem this workload does not have.
 		 */
 		printf("peak_iowq_threads=%d\n",
-		    atomic_load(&g_peak_iowq));
+		    xtc_atomic_load_i32(&g_peak_iowq, xtc_mo_seq_cst));
 	}
 
 	(void)xtc_exec_fini(e);

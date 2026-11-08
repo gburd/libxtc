@@ -13,7 +13,6 @@
 
 #include <stdint.h>
 #include <string.h>
-#include <stdatomic.h>
 
 #include "munit.h"
 #include "xtc.h"
@@ -422,7 +421,7 @@ test_xproc_destroy_live_child(const MunitParameter p[], void *d)
  * killed by xtc_xproc_destroy, so the test itself cannot hang). */
 #define FH_SPAWNS  400
 #define FH_THREADS 8
-static _Atomic int g_fh_stop;
+static int g_fh_stop;
 static void fh_noop(void *a) { (void)a; }
 static void fh_root(void *a) { (void)a; (void)xtc_exit_self(0); }
 
@@ -430,7 +429,7 @@ static void *
 fh_churn(void *a)
 {
 	(void)a;
-	while (!atomic_load(&g_fh_stop)) {
+	while (!xtc_atomic_load_i32(&g_fh_stop, xtc_mo_seq_cst)) {
 		xtc_loop_t *l = NULL;
 		if (xtc_loop_init(&l) == XTC_OK) {
 			(void)xtc_proc_spawn(l, fh_noop, NULL, NULL, NULL);
@@ -490,7 +489,7 @@ fh_fiber(void *a)
 			xtc_free(m);
 		xtc_xproc_destroy(ch);
 	}
-	atomic_store(&g_fh_stop, 1);
+	xtc_atomic_store_i32(&g_fh_stop, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -503,7 +502,7 @@ test_xproc_entry_mt_parent(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	memset(&c, 0, sizeof c);
-	atomic_store(&g_fh_stop, 0);
+	xtc_atomic_store_i32(&g_fh_stop, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_xproc_register_entry("fh_root", fh_root), ==,
 	    XTC_OK);
 	for (i = 0; i < FH_THREADS; i++)
@@ -515,7 +514,7 @@ test_xproc_entry_mt_parent(const MunitParameter p[], void *d)
 	    XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
-	atomic_store(&g_fh_stop, 1);
+	xtc_atomic_store_i32(&g_fh_stop, 1, xtc_mo_seq_cst);
 	for (i = 0; i < FH_THREADS; i++)
 		(void)pthread_join(t[i], NULL);
 	munit_logf(MUNIT_LOG_INFO, "entry spawns: clean=%d wedged=%d "

@@ -18,7 +18,6 @@
  *	clean; without one it checks only that a stop with timers pending
  *	returns.  The leak itself is LSan's to see.
  */
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -37,7 +36,7 @@ main(void)
 
 #define NARM 8
 
-static _Atomic int g_armed;
+static int g_armed;
 
 typedef struct {
 	int unused;
@@ -54,7 +53,7 @@ arm_init(void *self, const void *a, size_t n)
 	/* Far in the future: these never fire before the stop. */
 	for (i = 0; i < NARM; i++)
 		xtc_tnt_register_timer(60LL * 1000 * 1000 * 1000, 1);
-	atomic_fetch_add(&g_armed, NARM);
+	xtc_atomic_fetch_add_i32(&g_armed, NARM, xtc_mo_seq_cst);
 	xtc_tnt_stop();
 	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 }
@@ -84,8 +83,9 @@ main(void)
 	spec.shard_count = 1;
 	spec.boot_type = 0;
 	rc = xtc_tnt_start(&spec);
-	if (rc != 0 || atomic_load(&g_armed) != NARM) {
-		printf("FAIL: rc=%d armed=%d\n", rc, atomic_load(&g_armed));
+	if (rc != 0 || xtc_atomic_load_i32(&g_armed, xtc_mo_seq_cst) != NARM) {
+		printf("FAIL: rc=%d armed=%d\n", rc,
+		    xtc_atomic_load_i32(&g_armed, xtc_mo_seq_cst));
 		return 1;
 	}
 	printf("PASS: %d timers armed at the stop, all freed\n", NARM);

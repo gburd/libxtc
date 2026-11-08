@@ -34,7 +34,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -192,7 +191,7 @@ test_shm_basic_fork(const MunitParameter p[], void *d)
 	*offset_slot = off;
 
 	/* Memory barrier to ensure writes visible to child. */
-	atomic_thread_fence(memory_order_release);
+	xtc_atomic_thread_fence(xtc_mo_release);
 
 	pid = fork();
 	munit_assert_int(pid, >=, 0);
@@ -213,7 +212,7 @@ test_shm_basic_fork(const MunitParameter p[], void *d)
 		/* Read offset from the top-of-region coordination scratch. */
 		volatile xtc_slab_off_t *child_offset_slot =
 		    (volatile xtc_slab_off_t *)((uint8_t *)child_shm_addr + SHM_COORD_OFF);
-		atomic_thread_fence(memory_order_acquire);
+		xtc_atomic_thread_fence(xtc_mo_acquire);
 		child_off = *child_offset_slot;
 
 		/* Create slab over same region. */
@@ -235,7 +234,7 @@ test_shm_basic_fork(const MunitParameter p[], void *d)
 
 		/* Modify value. */
 		child_obj->value = 99;
-		atomic_thread_fence(memory_order_release);
+		xtc_atomic_thread_fence(xtc_mo_release);
 
 		xtc_slab_destroy(child_slab);
 		(void)munmap(child_shm_addr, SHM_SIZE);
@@ -249,7 +248,7 @@ test_shm_basic_fork(const MunitParameter p[], void *d)
 	munit_assert_int(WEXITSTATUS(status), ==, 0);
 
 	/* Verify child's modification. */
-	atomic_thread_fence(memory_order_acquire);
+	xtc_atomic_thread_fence(xtc_mo_acquire);
 	munit_assert_uint32(obj->magic, ==, TEST_MAGIC);
 	munit_assert_int32(obj->value, ==, 99);
 
@@ -333,7 +332,7 @@ test_shm_alloc_in_child(const MunitParameter p[], void *d)
 		child_obj->value = 777;
 
 		*child_offset_slot = xtc_slab_offset(child_slab, child_obj);
-		atomic_thread_fence(memory_order_release);
+		xtc_atomic_thread_fence(xtc_mo_release);
 		*child_ready = 1;
 
 		/* Wait a bit for parent to read, then exit. */
@@ -346,8 +345,7 @@ test_shm_alloc_in_child(const MunitParameter p[], void *d)
 	}
 
 	/* Parent: wait for child's allocation. */
-	while (atomic_load_explicit((volatile _Atomic int *)ready_flag,
-	    memory_order_acquire) == 0) {
+	while (xtc_atomic_load_i32((int *)ready_flag, xtc_mo_acquire) == 0) {
 		(void)__os_sleep_ns(1000LL * 1000);
 	}
 
@@ -447,7 +445,7 @@ test_shm_concurrent_alloc(const MunitParameter p[], void *d)
 			child_objs[ci]->value = 1000 + ci;
 			c_offs[ci] = xtc_slab_offset(child_slab, child_objs[ci]);
 		}
-		atomic_thread_fence(memory_order_release);
+		xtc_atomic_thread_fence(xtc_mo_release);
 		*c_count = CONC_ALLOCS;
 
 		/* Wait for parent to finish checking. */
@@ -469,8 +467,8 @@ test_shm_concurrent_alloc(const MunitParameter p[], void *d)
 	}
 
 	/* Wait for child to finish allocating. */
-	while (atomic_load_explicit((volatile _Atomic int *)child_count_slot,
-	    memory_order_acquire) < CONC_ALLOCS) {
+	while (xtc_atomic_load_i32((int *)child_count_slot, xtc_mo_acquire) <
+	    CONC_ALLOCS) {
 		(void)__os_sleep_ns(1000LL * 1000);
 	}
 
@@ -630,7 +628,7 @@ test_shm_reclaim_cross_process(const MunitParameter p[], void *d)
 	}
 	for (i = 0; i < XP_N; i++)
 		xtc_slab_free(slab, objs[i]);
-	atomic_thread_fence(memory_order_release);
+	xtc_atomic_thread_fence(xtc_mo_release);
 	*ready_flag = 1;
 
 	pid = fork();
@@ -653,7 +651,7 @@ test_shm_reclaim_cross_process(const MunitParameter p[], void *d)
 		cfreed = (volatile xtc_slab_off_t *)((uint8_t *)caddr + SHM_COORD_OFF + 16);
 		while (*cready == 0)
 			;
-		atomic_thread_fence(memory_order_acquire);
+		xtc_atomic_thread_fence(xtc_mo_acquire);
 
 		copts.name = "shm_reclaim_child";
 		copts.obj_size = sizeof(struct test_payload);

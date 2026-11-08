@@ -21,7 +21,6 @@
 
 #include <errno.h>
 #include <math.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <fcntl.h>
@@ -93,8 +92,8 @@ preempt_tick_raw(void)
 #  define __has_feature(x) 0
 #endif
 
-static atomic_int  g_peer;          /* peer progress while the runaway runs */
-static atomic_int  g_runaway_done;
+static int g_peer; /* peer progress while the runaway runs */
+static int g_runaway_done;
 static volatile uint64_t g_sink;
 
 /* A PURE runaway: a long CPU loop with NO xtc_yield / xtc_yield_if_due
@@ -109,7 +108,7 @@ runaway(void *arg)
 	for (k = 0; k < iters; k++)
 		acc += (k ^ (k << 1)) + (acc >> 3);
 	g_sink += acc;
-	atomic_store_explicit(&g_runaway_done, 1, memory_order_relaxed);
+	xtc_atomic_store_i32(&g_runaway_done, 1, xtc_mo_relaxed);
 }
 
 /* A peer: increments a counter and yields, until the runaway is done.
@@ -118,8 +117,8 @@ XTC_PREEMPTIBLE static void
 peer(void *arg)
 {
 	(void)arg;
-	while (!atomic_load_explicit(&g_runaway_done, memory_order_relaxed)) {
-		atomic_fetch_add_explicit(&g_peer, 1, memory_order_relaxed);
+	while (!xtc_atomic_load_i32(&g_runaway_done, xtc_mo_relaxed)) {
+		xtc_atomic_fetch_add_i32(&g_peer, 1, xtc_mo_relaxed);
 		xtc_yield();
 	}
 }
@@ -149,8 +148,8 @@ test_p2_preempt_tight_loop(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 #endif
 
-	atomic_store(&g_peer, 0);
-	atomic_store(&g_runaway_done, 0);
+	xtc_atomic_store_i32(&g_peer, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_runaway_done, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
 	l = xtc_exec_loop(e, 0);
@@ -170,7 +169,8 @@ test_p2_preempt_tight_loop(const MunitParameter p[], void *d)
 
 	/* The runaway completed (resumable preemption: it was sliced, not
 	 * killed). */
-	munit_assert_int(atomic_load(&g_runaway_done), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_runaway_done, xtc_mo_seq_cst),
+	    ==, 1);
 
 	/*
 	 * If the involuntary yield is active (ucontext substrate), the
@@ -210,8 +210,8 @@ test_p2_peers_progress_on_ucontext(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 #endif
 
-	atomic_store(&g_peer, 0);
-	atomic_store(&g_runaway_done, 0);
+	xtc_atomic_store_i32(&g_peer, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_runaway_done, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
 	l = xtc_exec_loop(e, 0);
@@ -224,8 +224,9 @@ test_p2_peers_progress_on_ucontext(const MunitParameter p[], void *d)
 		(void)xtc_proc_spawn(l, peer, NULL, NULL, NULL);
 
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	peers = atomic_load(&g_peer);
-	munit_assert_int(atomic_load(&g_runaway_done), ==, 1);
+	peers = xtc_atomic_load_i32(&g_peer, xtc_mo_seq_cst);
+	munit_assert_int(xtc_atomic_load_i32(&g_runaway_done, xtc_mo_seq_cst),
+	    ==, 1);
 
 	/*
 	 * peers > 0 proves true preemption occurred (a pure tight loop was
@@ -277,7 +278,7 @@ test_p2_peers_progress_on_ucontext(const MunitParameter p[], void *d)
  * ZMM16-31: ~100 of ~69k checks per run were corrupted (glibc's AVX
  * memcpy corrupted sqlxtc log records the same way).  XSAVE fixes it.
  */
-static atomic_long g_vec_bad, g_vec_checks;
+static long g_vec_bad, g_vec_checks;
 static int g_vec_avx2, g_vec_avx512;
 
 XTC_PREEMPTIBLE __attribute__((target("avx2"))) static int
@@ -322,12 +323,14 @@ p2_vec_spinner(void *arg)
 	long n = 0;
 	while (xtc_clock_mono() < end) {
 		if (g_vec_avx2 && p2_ymm_hold(want))
-			atomic_fetch_add(&g_vec_bad, 1);
+			xtc_atomic_fetch_add_long(&g_vec_bad, 1,
+			    xtc_mo_seq_cst);
 		if (g_vec_avx512 && p2_zmm_hold(~want))
-			atomic_fetch_add(&g_vec_bad, 1);
+			xtc_atomic_fetch_add_long(&g_vec_bad, 1,
+			    xtc_mo_seq_cst);
 		n++;
 	}
-	atomic_fetch_add(&g_vec_checks, n);
+	xtc_atomic_fetch_add_long(&g_vec_checks, n, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -355,8 +358,8 @@ test_p2_vector_state(const MunitParameter p[], void *d)
 	g_vec_avx512 = (xcr0 & 0xE6) == 0xE6 && (b & bit_AVX512F) != 0;
 	if (!g_vec_avx2)
 		return MUNIT_SKIP;
-	atomic_store(&g_vec_bad, 0);
-	atomic_store(&g_vec_checks, 0);
+	xtc_atomic_store_long(&g_vec_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_vec_checks, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
 	munit_assert_int(xtc_exec_set_preempt(e, 50LL * 1000), ==, XTC_OK);
 	xtc_preempt_set_involuntary(1);
@@ -366,11 +369,14 @@ test_p2_vector_state(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	xtc_preempt_set_involuntary(0);
 	(void)xtc_exec_fini(e);
-	munit_logf(MUNIT_LOG_INFO, "%ld checks (avx2 %d avx512 %d), %ld corrupted",
-	    atomic_load(&g_vec_checks), g_vec_avx2, g_vec_avx512,
-	    atomic_load(&g_vec_bad));
-	munit_assert_long(atomic_load(&g_vec_checks), >, 0);
-	munit_assert_long(atomic_load(&g_vec_bad), ==, 0);
+	munit_logf(MUNIT_LOG_INFO,
+	    "%ld checks (avx2 %d avx512 %d), %ld corrupted",
+	    xtc_atomic_load_long(&g_vec_checks, xtc_mo_seq_cst), g_vec_avx2,
+	    g_vec_avx512, xtc_atomic_load_long(&g_vec_bad, xtc_mo_seq_cst));
+	munit_assert_long(xtc_atomic_load_long(&g_vec_checks, xtc_mo_seq_cst),
+	    >, 0);
+	munit_assert_long(xtc_atomic_load_long(&g_vec_bad, xtc_mo_seq_cst), ==,
+	    0);
 	return MUNIT_OK;
 }
 
@@ -406,7 +412,7 @@ __asm__(".section xtc_preemptible,\"ax\",@progbits\n\t.type p2_rz_probe,@functio
     "5:\tret\n\t"
     ".size p2_rz_probe, .-p2_rz_probe\n\t.text\n");
 
-static atomic_long g_rz_bad, g_fl_bad, g_rz_n;
+static long g_rz_bad, g_fl_bad, g_rz_n;
 
 XTC_PREEMPTIBLE static void
 p2_rz_spinner(void *arg)
@@ -418,12 +424,12 @@ p2_rz_spinner(void *arg)
 	while (xtc_clock_mono() < end) {
 		r = p2_rz_probe(v);
 		if (r & 3)
-			atomic_fetch_add(&g_rz_bad, 1);
+			xtc_atomic_fetch_add_long(&g_rz_bad, 1, xtc_mo_seq_cst);
 		if (r & 4)
-			atomic_fetch_add(&g_fl_bad, 1);
+			xtc_atomic_fetch_add_long(&g_fl_bad, 1, xtc_mo_seq_cst);
 		n++;
 	}
-	atomic_fetch_add(&g_rz_n, n);
+	xtc_atomic_fetch_add_long(&g_rz_n, n, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -440,9 +446,9 @@ test_p2_red_zone_flags(const MunitParameter p[], void *d)
     __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
 	return MUNIT_SKIP;   /* see test_p2_preempt_tight_loop */
 #endif
-	atomic_store(&g_rz_bad, 0);
-	atomic_store(&g_fl_bad, 0);
-	atomic_store(&g_rz_n, 0);
+	xtc_atomic_store_long(&g_rz_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_fl_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_rz_n, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
 	munit_assert_int(xtc_exec_set_preempt(e, 50LL * 1000), ==, XTC_OK);
 	xtc_preempt_set_involuntary(1);
@@ -452,12 +458,17 @@ test_p2_red_zone_flags(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	xtc_preempt_set_involuntary(0);
 	(void)xtc_exec_fini(e);
-	munit_logf(MUNIT_LOG_INFO, "%ld probes, red zone clobbered %ld, flags "
-	    "lost %ld", atomic_load(&g_rz_n), atomic_load(&g_rz_bad),
-	    atomic_load(&g_fl_bad));
-	munit_assert_long(atomic_load(&g_rz_n), >, 0);
-	munit_assert_long(atomic_load(&g_rz_bad), ==, 0);
-	munit_assert_long(atomic_load(&g_fl_bad), ==, 0);
+	munit_logf(MUNIT_LOG_INFO,
+	    "%ld probes, red zone clobbered %ld, flags "
+	    "lost %ld",
+	    xtc_atomic_load_long(&g_rz_n, xtc_mo_seq_cst),
+	    xtc_atomic_load_long(&g_rz_bad, xtc_mo_seq_cst),
+	    xtc_atomic_load_long(&g_fl_bad, xtc_mo_seq_cst));
+	munit_assert_long(xtc_atomic_load_long(&g_rz_n, xtc_mo_seq_cst), >, 0);
+	munit_assert_long(xtc_atomic_load_long(&g_rz_bad, xtc_mo_seq_cst), ==,
+	    0);
+	munit_assert_long(xtc_atomic_load_long(&g_fl_bad, xtc_mo_seq_cst), ==,
+	    0);
 	return MUNIT_OK;
 }
 
@@ -653,8 +664,8 @@ p2_cb_ymm_dirty(void)
 #define P2_CB_N      64
 #define P2_CB_ERRNO  4321
 #define P2_CB_PEERNO 8765
-static atomic_long g_cb_peer_runs, g_cb_peer_bad, g_cb_tgt_bad, g_cb_preempted;
-static atomic_int  g_cb_stop;
+static long g_cb_peer_runs, g_cb_peer_bad, g_cb_tgt_bad, g_cb_preempted;
+static int g_cb_stop;
 static int         g_cb_mode;   /* 0 df, 1 ac, 2 x87, 3 errno, 4 fpenv, 5 ymm, 6 pkru */
 static uint32_t    g_cb_pkru0;  /* the thread's PKRU before the run */
 static unsigned char g_cb_pat[192];
@@ -676,7 +687,7 @@ p2_cb_peer(void *arg)
 	uint16_t cw;
 	int bad, k;
 	(void)arg;
-	while (!atomic_load(&g_cb_stop)) {
+	while (!xtc_atomic_load_i32(&g_cb_stop, xtc_mo_seq_cst)) {
 		bad = 0;
 		switch (g_cb_mode) {
 		case 0:     /* DF: a forward copy must stay inside b[64..128) */
@@ -710,8 +721,9 @@ p2_cb_peer(void *arg)
 			break;
 		}
 		if (bad)
-			atomic_fetch_add(&g_cb_peer_bad, 1);
-		atomic_fetch_add(&g_cb_peer_runs, 1);
+			xtc_atomic_fetch_add_long(&g_cb_peer_bad, 1,
+			    xtc_mo_seq_cst);
+		xtc_atomic_fetch_add_long(&g_cb_peer_runs, 1, xtc_mo_seq_cst);
 		xtc_yield();
 	}
 }
@@ -728,7 +740,7 @@ p2_cb_target(void *arg)
 	xtc_yield();                        /* let the peer start */
 	for (i = 0; i < P2_CB_N; i++) {
 		bad = 0;
-		before = atomic_load(&g_cb_peer_runs);
+		before = xtc_atomic_load_long(&g_cb_peer_runs, xtc_mo_seq_cst);
 		switch (g_cb_mode) {
 		case 0:     /* d[0..128) := pat[32..160), copied backwards */
 			memset(d, 0, sizeof d);
@@ -768,11 +780,14 @@ p2_cb_target(void *arg)
 			break;
 		}
 		if (bad)
-			atomic_fetch_add(&g_cb_tgt_bad, 1);
-		if (atomic_load(&g_cb_peer_runs) != before)
-			atomic_fetch_add(&g_cb_preempted, 1);
+			xtc_atomic_fetch_add_long(&g_cb_tgt_bad, 1,
+			    xtc_mo_seq_cst);
+		if (xtc_atomic_load_long(&g_cb_peer_runs, xtc_mo_seq_cst) !=
+		    before)
+			xtc_atomic_fetch_add_long(&g_cb_preempted, 1,
+			    xtc_mo_seq_cst);
 	}
-	atomic_store(&g_cb_stop, 1);
+	xtc_atomic_store_i32(&g_cb_stop, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -811,11 +826,11 @@ p2_cb_run(int mode)
 	g_cb_mode = mode;
 	for (k = 0; k < 192; k++)
 		g_cb_pat[k] = (unsigned char)(k * 7 + 1);
-	atomic_store(&g_cb_peer_runs, 0);
-	atomic_store(&g_cb_peer_bad, 0);
-	atomic_store(&g_cb_tgt_bad, 0);
-	atomic_store(&g_cb_preempted, 0);
-	atomic_store(&g_cb_stop, 0);
+	xtc_atomic_store_long(&g_cb_peer_runs, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_cb_peer_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_cb_tgt_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_cb_preempted, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_cb_stop, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
 	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
 	    ==, XTC_OK);
@@ -827,13 +842,19 @@ p2_cb_run(int mode)
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	xtc_preempt_set_involuntary(0);
 	(void)xtc_exec_fini(e);
-	munit_logf(MUNIT_LOG_INFO, "mode %d: %ld/%d ticks preempted, target "
-	    "bad %ld, peer bad %ld of %ld", mode, atomic_load(&g_cb_preempted),
-	    P2_CB_N, atomic_load(&g_cb_tgt_bad), atomic_load(&g_cb_peer_bad),
-	    atomic_load(&g_cb_peer_runs));
-	munit_assert_long(atomic_load(&g_cb_preempted), >, 0);
-	munit_assert_long(atomic_load(&g_cb_tgt_bad), ==, 0);
-	munit_assert_long(atomic_load(&g_cb_peer_bad), ==, 0);
+	munit_logf(MUNIT_LOG_INFO,
+	    "mode %d: %ld/%d ticks preempted, target "
+	    "bad %ld, peer bad %ld of %ld",
+	    mode, xtc_atomic_load_long(&g_cb_preempted, xtc_mo_seq_cst),
+	    P2_CB_N, xtc_atomic_load_long(&g_cb_tgt_bad, xtc_mo_seq_cst),
+	    xtc_atomic_load_long(&g_cb_peer_bad, xtc_mo_seq_cst),
+	    xtc_atomic_load_long(&g_cb_peer_runs, xtc_mo_seq_cst));
+	munit_assert_long(xtc_atomic_load_long(&g_cb_preempted, xtc_mo_seq_cst),
+	    >, 0);
+	munit_assert_long(xtc_atomic_load_long(&g_cb_tgt_bad, xtc_mo_seq_cst),
+	    ==, 0);
+	munit_assert_long(xtc_atomic_load_long(&g_cb_peer_bad, xtc_mo_seq_cst),
+	    ==, 0);
 	return MUNIT_OK;
 }
 
@@ -902,17 +923,17 @@ test_p2_tick_pkru(const MunitParameter p[], void *d)
  * back.  glibc's memcpy/memset are SVE on an SVE core, so a fiber can be
  * preempted with live SVE state.  Skips without SVE.
  */
-static atomic_long g_sve_bad, g_sve_checks;
+static long g_sve_bad, g_sve_checks;
 /* Fiber changes between consecutive probes on the loop: > 0 proves the
  * yield-free spinners were sliced, so a pass is not vacuous. */
-static atomic_int  g_a64_last;
-static atomic_long g_a64_slices;
+static int g_a64_last;
+static long g_a64_slices;
 
 static void
 p2_a64_note(int i)
 {
-	if (atomic_exchange(&g_a64_last, i) != i)
-		atomic_fetch_add(&g_a64_slices, 1);
+	if (xtc_atomic_exchange_i32(&g_a64_last, i, xtc_mo_seq_cst) != i)
+		xtc_atomic_fetch_add_long(&g_a64_slices, 1, xtc_mo_seq_cst);
 }
 
 XTC_PREEMPTIBLE __attribute__((target("+sve"))) static int
@@ -955,11 +976,12 @@ p2_sve_spinner(void *arg)
 	long n = 0;
 	while (xtc_clock_mono() < end) {
 		if (p2_sve_hold(want, i))
-			atomic_fetch_add(&g_sve_bad, 1);
+			xtc_atomic_fetch_add_long(&g_sve_bad, 1,
+			    xtc_mo_seq_cst);
 		p2_a64_note(i);
 		n++;
 	}
-	atomic_fetch_add(&g_sve_checks, n);
+	xtc_atomic_fetch_add_long(&g_sve_checks, n, xtc_mo_seq_cst);
 }
 
 /*
@@ -971,7 +993,7 @@ p2_sve_spinner(void *arg)
  * condition-flag result across a yield-free, flag-neutral spin and
  * checks all three.
  */
-static atomic_long g_x16_bad, g_x17_bad, g_nzcv_bad, g_x16_n;
+static long g_x16_bad, g_x17_bad, g_nzcv_bad, g_x16_n;
 
 XTC_PREEMPTIBLE static int
 p2_x16_hold(uint64_t want)
@@ -1004,15 +1026,18 @@ p2_x16_spinner(void *arg)
 	while (xtc_clock_mono() < end) {
 		r = p2_x16_hold(want);
 		if (r & 1)
-			atomic_fetch_add(&g_x16_bad, 1);
+			xtc_atomic_fetch_add_long(&g_x16_bad, 1,
+			    xtc_mo_seq_cst);
 		if (r & 2)
-			atomic_fetch_add(&g_x17_bad, 1);
+			xtc_atomic_fetch_add_long(&g_x17_bad, 1,
+			    xtc_mo_seq_cst);
 		if (r & 4)
-			atomic_fetch_add(&g_nzcv_bad, 1);
+			xtc_atomic_fetch_add_long(&g_nzcv_bad, 1,
+			    xtc_mo_seq_cst);
 		p2_a64_note((int)(intptr_t)arg);
 		n++;
 	}
-	atomic_fetch_add(&g_x16_n, n);
+	xtc_atomic_fetch_add_long(&g_x16_n, n, xtc_mo_seq_cst);
 }
 
 /* Run four `fn` spinners on one loop with 50 us involuntary slices. */
@@ -1032,8 +1057,8 @@ p2_a64_run(void (*fn)(void *))
 	/* Every aarch64 Linux build has the redirect, whatever the libc and
 	 * substrate: musl/fcontext used to compile it out and skip here. */
 	munit_assert_int(__xtc_coro_preempt_effective(), ==, 1);
-	atomic_store(&g_a64_last, -1);
-	atomic_store(&g_a64_slices, 0);
+	xtc_atomic_store_i32(&g_a64_last, -1, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_a64_slices, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
 	munit_assert_int(xtc_exec_set_preempt(e, 50LL * 1000), ==, XTC_OK);
 	xtc_preempt_set_involuntary(1);
@@ -1044,8 +1069,9 @@ p2_a64_run(void (*fn)(void *))
 	xtc_preempt_set_involuntary(0);
 	(void)xtc_exec_fini(e);
 	munit_logf(MUNIT_LOG_INFO, "%ld involuntary slices",
-	    atomic_load(&g_a64_slices));
-	munit_assert_long(atomic_load(&g_a64_slices), >, 4);
+	    xtc_atomic_load_long(&g_a64_slices, xtc_mo_seq_cst));
+	munit_assert_long(xtc_atomic_load_long(&g_a64_slices, xtc_mo_seq_cst),
+	    >, 4);
 	return MUNIT_OK;
 }
 
@@ -1056,14 +1082,17 @@ test_p2_a64_sve_state(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	if ((getauxval(AT_HWCAP) & HWCAP_SVE) == 0)
 		return MUNIT_SKIP;
-	atomic_store(&g_sve_bad, 0);
-	atomic_store(&g_sve_checks, 0);
+	xtc_atomic_store_long(&g_sve_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_sve_checks, 0, xtc_mo_seq_cst);
 	if ((r = p2_a64_run(p2_sve_spinner)) != MUNIT_OK)
 		return r;
 	munit_logf(MUNIT_LOG_INFO, "%ld checks, %ld corrupted",
-	    atomic_load(&g_sve_checks), atomic_load(&g_sve_bad));
-	munit_assert_long(atomic_load(&g_sve_checks), >, 0);
-	munit_assert_long(atomic_load(&g_sve_bad), ==, 0);
+	    xtc_atomic_load_long(&g_sve_checks, xtc_mo_seq_cst),
+	    xtc_atomic_load_long(&g_sve_bad, xtc_mo_seq_cst));
+	munit_assert_long(xtc_atomic_load_long(&g_sve_checks, xtc_mo_seq_cst),
+	    >, 0);
+	munit_assert_long(xtc_atomic_load_long(&g_sve_bad, xtc_mo_seq_cst), ==,
+	    0);
 	return MUNIT_OK;
 }
 
@@ -1072,19 +1101,26 @@ test_p2_a64_x16_preserved(const MunitParameter p[], void *d)
 {
 	MunitResult r;
 	(void)p; (void)d;
-	atomic_store(&g_x16_bad, 0);
-	atomic_store(&g_x17_bad, 0);
-	atomic_store(&g_nzcv_bad, 0);
-	atomic_store(&g_x16_n, 0);
+	xtc_atomic_store_long(&g_x16_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_x17_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_nzcv_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_x16_n, 0, xtc_mo_seq_cst);
 	if ((r = p2_a64_run(p2_x16_spinner)) != MUNIT_OK)
 		return r;
-	munit_logf(MUNIT_LOG_INFO, "%ld probes, x16 lost %ld, x17 lost %ld, "
-	    "flags lost %ld", atomic_load(&g_x16_n), atomic_load(&g_x16_bad),
-	    atomic_load(&g_x17_bad), atomic_load(&g_nzcv_bad));
-	munit_assert_long(atomic_load(&g_x16_n), >, 0);
-	munit_assert_long(atomic_load(&g_x16_bad), ==, 0);
-	munit_assert_long(atomic_load(&g_x17_bad), ==, 0);
-	munit_assert_long(atomic_load(&g_nzcv_bad), ==, 0);
+	munit_logf(MUNIT_LOG_INFO,
+	    "%ld probes, x16 lost %ld, x17 lost %ld, "
+	    "flags lost %ld",
+	    xtc_atomic_load_long(&g_x16_n, xtc_mo_seq_cst),
+	    xtc_atomic_load_long(&g_x16_bad, xtc_mo_seq_cst),
+	    xtc_atomic_load_long(&g_x17_bad, xtc_mo_seq_cst),
+	    xtc_atomic_load_long(&g_nzcv_bad, xtc_mo_seq_cst));
+	munit_assert_long(xtc_atomic_load_long(&g_x16_n, xtc_mo_seq_cst), >, 0);
+	munit_assert_long(xtc_atomic_load_long(&g_x16_bad, xtc_mo_seq_cst), ==,
+	    0);
+	munit_assert_long(xtc_atomic_load_long(&g_x17_bad, xtc_mo_seq_cst), ==,
+	    0);
+	munit_assert_long(xtc_atomic_load_long(&g_nzcv_bad, xtc_mo_seq_cst), ==,
+	    0);
 	return MUNIT_OK;
 }
 
@@ -1144,9 +1180,9 @@ __asm__(".section xtc_preemptible,\"ax\",%progbits\n"
 
 #define P2_A64_RZ    (3ull << 22)   /* FPCR.RMode = round toward zero */
 #define P2_A64_N     64
-static atomic_long g_a64cb_peer_runs, g_a64cb_peer_bad, g_a64cb_tgt_bad;
-static atomic_long g_a64cb_preempted;
-static atomic_int  g_a64cb_stop;
+static long g_a64cb_peer_runs, g_a64cb_peer_bad, g_a64cb_tgt_bad;
+static long g_a64cb_preempted;
+static int g_a64cb_stop;
 static int         g_a64cb_mode;   /* 0 errno, 1 fpcr, 2 sme */
 
 static void
@@ -1161,7 +1197,7 @@ p2_a64cb_peer(void *arg)
 	uint64_t fpcr, v;
 	int bad;
 	(void)arg;
-	while (!atomic_load(&g_a64cb_stop)) {
+	while (!xtc_atomic_load_i32(&g_a64cb_stop, xtc_mo_seq_cst)) {
 		bad = 0;
 		switch (g_a64cb_mode) {
 		case 0:
@@ -1181,8 +1217,10 @@ p2_a64cb_peer(void *arg)
 			break;
 		}
 		if (bad)
-			atomic_fetch_add(&g_a64cb_peer_bad, 1);
-		atomic_fetch_add(&g_a64cb_peer_runs, 1);
+			xtc_atomic_fetch_add_long(&g_a64cb_peer_bad, 1,
+			    xtc_mo_seq_cst);
+		xtc_atomic_fetch_add_long(&g_a64cb_peer_runs, 1,
+		    xtc_mo_seq_cst);
 		xtc_yield();
 	}
 }
@@ -1196,7 +1234,8 @@ p2_a64cb_target(void *arg)
 	xtc_yield();                        /* let the peer start */
 	for (i = 0; i < P2_A64_N; i++) {
 		bad = 0;
-		before = atomic_load(&g_a64cb_peer_runs);
+		before =
+		    xtc_atomic_load_long(&g_a64cb_peer_runs, xtc_mo_seq_cst);
 		switch (g_a64cb_mode) {
 		case 0:
 			errno = 4321;
@@ -1212,11 +1251,14 @@ p2_a64cb_target(void *arg)
 			break;
 		}
 		if (bad)
-			atomic_fetch_add(&g_a64cb_tgt_bad, 1);
-		if (atomic_load(&g_a64cb_peer_runs) != before)
-			atomic_fetch_add(&g_a64cb_preempted, 1);
+			xtc_atomic_fetch_add_long(&g_a64cb_tgt_bad, 1,
+			    xtc_mo_seq_cst);
+		if (xtc_atomic_load_long(&g_a64cb_peer_runs, xtc_mo_seq_cst) !=
+		    before)
+			xtc_atomic_fetch_add_long(&g_a64cb_preempted, 1,
+			    xtc_mo_seq_cst);
 	}
-	atomic_store(&g_a64cb_stop, 1);
+	xtc_atomic_store_i32(&g_a64cb_stop, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -1250,11 +1292,11 @@ p2_a64cb_run(int mode)
 			    "PSTATE.SM on this platform: target half not checked");
 	}
 	g_a64cb_mode = mode;
-	atomic_store(&g_a64cb_peer_runs, 0);
-	atomic_store(&g_a64cb_peer_bad, 0);
-	atomic_store(&g_a64cb_tgt_bad, 0);
-	atomic_store(&g_a64cb_preempted, 0);
-	atomic_store(&g_a64cb_stop, 0);
+	xtc_atomic_store_long(&g_a64cb_peer_runs, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_a64cb_peer_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_a64cb_tgt_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_a64cb_preempted, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_a64cb_stop, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
 	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
 	    ==, XTC_OK);
@@ -1266,15 +1308,23 @@ p2_a64cb_run(int mode)
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	xtc_preempt_set_involuntary(0);
 	(void)xtc_exec_fini(e);
-	munit_logf(MUNIT_LOG_INFO, "mode %d: %ld/%d ticks preempted, target "
-	    "bad %ld, peer bad %ld of %ld", mode,
-	    atomic_load(&g_a64cb_preempted), P2_A64_N,
-	    atomic_load(&g_a64cb_tgt_bad), atomic_load(&g_a64cb_peer_bad),
-	    atomic_load(&g_a64cb_peer_runs));
-	munit_assert_long(atomic_load(&g_a64cb_preempted), >, 0);
+	munit_logf(MUNIT_LOG_INFO,
+	    "mode %d: %ld/%d ticks preempted, target "
+	    "bad %ld, peer bad %ld of %ld",
+	    mode, xtc_atomic_load_long(&g_a64cb_preempted, xtc_mo_seq_cst),
+	    P2_A64_N, xtc_atomic_load_long(&g_a64cb_tgt_bad, xtc_mo_seq_cst),
+	    xtc_atomic_load_long(&g_a64cb_peer_bad, xtc_mo_seq_cst),
+	    xtc_atomic_load_long(&g_a64cb_peer_runs, xtc_mo_seq_cst));
+	munit_assert_long(xtc_atomic_load_long(&g_a64cb_preempted,
+	                      xtc_mo_seq_cst),
+	    >, 0);
 	if (tgt_ok)
-		munit_assert_long(atomic_load(&g_a64cb_tgt_bad), ==, 0);
-	munit_assert_long(atomic_load(&g_a64cb_peer_bad), ==, 0);
+		munit_assert_long(xtc_atomic_load_long(&g_a64cb_tgt_bad,
+		                      xtc_mo_seq_cst),
+		    ==, 0);
+	munit_assert_long(xtc_atomic_load_long(&g_a64cb_peer_bad,
+	                      xtc_mo_seq_cst),
+	    ==, 0);
 	return MUNIT_OK;
 }
 
@@ -1322,9 +1372,9 @@ test_p2_a64_tick_sme(const MunitParameter p[], void *d)
  *                  aborts after 10 s)
  */
 #define SW_LEN 4096
-static atomic_long g_sw_peer_runs;
-static atomic_int  g_sw_arm, g_sw_window, g_sw_hits, g_sw_stop, g_sw_done;
-static atomic_int  g_sw_ctrl_preempted, g_sw_win_preempted, g_sw_peer_wrote;
+static long g_sw_peer_runs;
+static int g_sw_arm, g_sw_window, g_sw_hits, g_sw_stop, g_sw_done;
+static int g_sw_ctrl_preempted, g_sw_win_preempted, g_sw_peer_wrote;
 static int         g_sw_fd, g_sw_peer_submits, g_sw_a_ok, g_sw_b_rc, g_sw_fd_ok;
 
 static void
@@ -1332,15 +1382,15 @@ sw_raise_in_window(const char *name, void *user)
 {
 	long before;
 	(void)name; (void)user;
-	if (!atomic_exchange(&g_sw_arm, 0))
+	if (!xtc_atomic_exchange_i32(&g_sw_arm, 0, xtc_mo_seq_cst))
 		return;                          /* one shot: the first SQE */
-	atomic_fetch_add(&g_sw_hits, 1);
-	before = atomic_load(&g_sw_peer_runs);
-	atomic_store(&g_sw_window, 1);
+	xtc_atomic_fetch_add_i32(&g_sw_hits, 1, xtc_mo_seq_cst);
+	before = xtc_atomic_load_long(&g_sw_peer_runs, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_sw_window, 1, xtc_mo_seq_cst);
 	PREEMPT_TICK();              /* a preemption tick, here */
-	atomic_store(&g_sw_window, 0);
-	if (atomic_load(&g_sw_peer_runs) != before)
-		atomic_store(&g_sw_win_preempted, 1);
+	xtc_atomic_store_i32(&g_sw_window, 0, xtc_mo_seq_cst);
+	if (xtc_atomic_load_long(&g_sw_peer_runs, xtc_mo_seq_cst) != before)
+		xtc_atomic_store_i32(&g_sw_win_preempted, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -1349,11 +1399,13 @@ sw_peer(void *arg)
 	static unsigned char b[SW_LEN];
 	(void)arg;
 	memset(b, 0xbb, sizeof b);
-	while (!atomic_load(&g_sw_stop)) {
-		atomic_fetch_add(&g_sw_peer_runs, 1);
-		if (g_sw_peer_submits && atomic_load(&g_sw_window) &&
-		    !atomic_load(&g_sw_peer_wrote)) {
-			atomic_store(&g_sw_peer_wrote, 1);
+	while (!xtc_atomic_load_i32(&g_sw_stop, xtc_mo_seq_cst)) {
+		xtc_atomic_fetch_add_long(&g_sw_peer_runs, 1, xtc_mo_seq_cst);
+		if (g_sw_peer_submits &&
+		    xtc_atomic_load_i32(&g_sw_window, xtc_mo_seq_cst) &&
+		    !xtc_atomic_load_i32(&g_sw_peer_wrote, xtc_mo_seq_cst)) {
+			xtc_atomic_store_i32(&g_sw_peer_wrote, 1,
+			    xtc_mo_seq_cst);
 			g_sw_b_rc = xtc_aio_pwrite(g_sw_fd, b, SW_LEN, SW_LEN);
 		}
 		xtc_yield();
@@ -1370,11 +1422,11 @@ sw_writer(void *arg)
 	(void)arg;
 	memset(out, 0xaa, sizeof out);
 	xtc_yield();                          /* let the peer start */
-	before = atomic_load(&g_sw_peer_runs);
+	before = xtc_atomic_load_long(&g_sw_peer_runs, xtc_mo_seq_cst);
 	PREEMPT_TICK();               /* control: plain fiber code */
-	if (atomic_load(&g_sw_peer_runs) != before)
-		atomic_store(&g_sw_ctrl_preempted, 1);
-	atomic_store(&g_sw_arm, 1);
+	if (xtc_atomic_load_long(&g_sw_peer_runs, xtc_mo_seq_cst) != before)
+		xtc_atomic_store_i32(&g_sw_ctrl_preempted, 1, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_sw_arm, 1, xtc_mo_seq_cst);
 	if (xtc_aio_pwrite(g_sw_fd, out, SW_LEN, 0) == SW_LEN &&
 	    xtc_aio_pread(g_sw_fd, in, SW_LEN, 0) == SW_LEN)
 		g_sw_a_ok = memcmp(in, out, SW_LEN) == 0;
@@ -1382,7 +1434,7 @@ sw_writer(void *arg)
 	 * readable pipe, so the wait returns at once. */
 	if (pipe(pfd) == 0) {
 		if (write(pfd[1], "x", 1) == 1) {
-			atomic_store(&g_sw_arm, 1);
+			xtc_atomic_store_i32(&g_sw_arm, 1, xtc_mo_seq_cst);
 			if (xtc_proc_wait_fd(pfd[0], XTC_IO_READABLE, -1,
 			    &rev) == XTC_OK && (rev & XTC_IO_READABLE))
 				g_sw_fd_ok = 1;
@@ -1390,7 +1442,7 @@ sw_writer(void *arg)
 		(void)close(pfd[0]);
 		(void)close(pfd[1]);
 	}
-	atomic_store(&g_sw_stop, 1);
+	xtc_atomic_store_i32(&g_sw_stop, 1, xtc_mo_seq_cst);
 }
 
 static void *
@@ -1398,12 +1450,14 @@ sw_watchdog(void *arg)
 {
 	int i;
 	(void)arg;
-	for (i = 0; i < 1000 && !atomic_load(&g_sw_done); i++)
+	for (i = 0;
+	     i < 1000 && !xtc_atomic_load_i32(&g_sw_done, xtc_mo_seq_cst); i++)
 		usleep(10000);
-	if (!atomic_load(&g_sw_done)) {
-		fprintf(stderr, "sqe_window: the fiber's io completion never "
+	if (!xtc_atomic_load_i32(&g_sw_done, xtc_mo_seq_cst)) {
+		fprintf(stderr,
+		    "sqe_window: the fiber's io completion never "
 		    "came (preempted inside the SQE window: %d)\n",
-		    atomic_load(&g_sw_win_preempted));
+		    xtc_atomic_load_i32(&g_sw_win_preempted, xtc_mo_seq_cst));
 		abort();
 	}
 	return NULL;
@@ -1430,15 +1484,15 @@ sw_run(int peer_submits)
 	g_sw_fd = mkstemp(path);
 	munit_assert_int(g_sw_fd, >=, 0);
 	(void)unlink(path);
-	atomic_store(&g_sw_peer_runs, 0);
-	atomic_store(&g_sw_arm, 0);
-	atomic_store(&g_sw_window, 0);
-	atomic_store(&g_sw_hits, 0);
-	atomic_store(&g_sw_stop, 0);
-	atomic_store(&g_sw_done, 0);
-	atomic_store(&g_sw_ctrl_preempted, 0);
-	atomic_store(&g_sw_win_preempted, 0);
-	atomic_store(&g_sw_peer_wrote, 0);
+	xtc_atomic_store_long(&g_sw_peer_runs, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_sw_arm, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_sw_window, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_sw_hits, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_sw_stop, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_sw_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_sw_ctrl_preempted, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_sw_win_preempted, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_sw_peer_wrote, 0, xtc_mo_seq_cst);
 	g_sw_peer_submits = peer_submits;
 	g_sw_a_ok = 0;
 	g_sw_b_rc = 0;
@@ -1459,21 +1513,27 @@ sw_run(int peer_submits)
 	    XTC_OK);
 	munit_assert_int(pthread_create(&wd, NULL, sw_watchdog, NULL), ==, 0);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	atomic_store(&g_sw_done, 1);
+	xtc_atomic_store_i32(&g_sw_done, 1, xtc_mo_seq_cst);
 	(void)pthread_join(wd, NULL);
 	xtc_preempt_set_involuntary(0);
 	(void)xtc_exec_fini(e);
 	(void)xtc_inject_detach("io.uring.sqe_reserved");
 	(void)close(g_sw_fd);
 
-	if (atomic_load(&g_sw_hits) == 0)
+	if (xtc_atomic_load_i32(&g_sw_hits, xtc_mo_seq_cst) == 0)
 		return MUNIT_SKIP;   /* injection points compiled out */
-	munit_assert_int(atomic_load(&g_sw_ctrl_preempted), ==, 1);
-	munit_assert_int(atomic_load(&g_sw_win_preempted), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_sw_ctrl_preempted,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_sw_win_preempted,
+	                     xtc_mo_seq_cst),
+	    ==, 0);
 	munit_assert_int(g_sw_a_ok, ==, 1);
 	munit_assert_int(g_sw_fd_ok, ==, 1);
-	munit_assert_int(atomic_load(&g_sw_hits), ==, 2);   /* aio + POLL_ADD */
-	if (peer_submits && atomic_load(&g_sw_peer_wrote))
+	munit_assert_int(xtc_atomic_load_i32(&g_sw_hits, xtc_mo_seq_cst), ==,
+	    2); /* aio + POLL_ADD */
+	if (peer_submits &&
+	    xtc_atomic_load_i32(&g_sw_peer_wrote, xtc_mo_seq_cst))
 		munit_assert_int(g_sw_b_rc, ==, SW_LEN);
 	return MUNIT_OK;
 }
@@ -1509,30 +1569,30 @@ test_p2_sqe_window_lost_completion(const MunitParameter p[], void *d)
  * swapcontexts the same way, with no hook) and where the redirect is
  * not implemented.
  */
-static atomic_long g_swd_peer_runs;
-static atomic_int  g_swd_arm, g_swd_hits, g_swd_stop, g_swd_redirected;
-static atomic_int  g_swd_ctrl_preempted, g_swd_ctrl_pending;
+static long g_swd_peer_runs;
+static int g_swd_arm, g_swd_hits, g_swd_stop, g_swd_redirected;
+static int g_swd_ctrl_preempted, g_swd_ctrl_pending;
 
 static void
 swd_raise_in_window(const char *name, void *user)
 {
 	(void)name; (void)user;
-	if (atomic_load(&g_swd_arm) <= 0)
+	if (xtc_atomic_load_i32(&g_swd_arm, xtc_mo_seq_cst) <= 0)
 		return;
-	atomic_fetch_sub(&g_swd_arm, 1);
-	atomic_fetch_add(&g_swd_hits, 1);
+	xtc_atomic_fetch_sub_i32(&g_swd_arm, 1, xtc_mo_seq_cst);
+	xtc_atomic_fetch_add_i32(&g_swd_hits, 1, xtc_mo_seq_cst);
 	(void)xtc_preempt_tick_pending();    /* clear any stale tick */
 	PREEMPT_TICK();              /* a preemption tick, here */
 	if (!xtc_preempt_tick_pending())     /* not declined: redirected */
-		atomic_fetch_add(&g_swd_redirected, 1);
+		xtc_atomic_fetch_add_i32(&g_swd_redirected, 1, xtc_mo_seq_cst);
 }
 
 static void
 swd_peer(void *arg)
 {
 	(void)arg;
-	while (!atomic_load(&g_swd_stop)) {
-		atomic_fetch_add(&g_swd_peer_runs, 1);
+	while (!xtc_atomic_load_i32(&g_swd_stop, xtc_mo_seq_cst)) {
+		xtc_atomic_fetch_add_long(&g_swd_peer_runs, 1, xtc_mo_seq_cst);
 		xtc_yield();
 	}
 }
@@ -1545,20 +1605,20 @@ swd_target(void *arg)
 	(void)arg;
 	xtc_yield();                          /* let the peer start */
 	(void)xtc_preempt_tick_pending();
-	before = atomic_load(&g_swd_peer_runs);
+	before = xtc_atomic_load_long(&g_swd_peer_runs, xtc_mo_seq_cst);
 	PREEMPT_TICK();               /* control: plain fiber code */
-	if (atomic_load(&g_swd_peer_runs) != before)
-		atomic_store(&g_swd_ctrl_preempted, 1);
+	if (xtc_atomic_load_long(&g_swd_peer_runs, xtc_mo_seq_cst) != before)
+		xtc_atomic_store_i32(&g_swd_ctrl_preempted, 1, xtc_mo_seq_cst);
 	if (xtc_preempt_tick_pending())
-		atomic_store(&g_swd_ctrl_pending, 1);
+		xtc_atomic_store_i32(&g_swd_ctrl_pending, 1, xtc_mo_seq_cst);
 	/* Each armed hit is one switch window: this fiber's yield, then the
 	 * scheduler's steps of the peer and of this fiber. */
 	for (i = 0; i < 8; i++) {
-		atomic_store(&g_swd_arm, 1);
+		xtc_atomic_store_i32(&g_swd_arm, 1, xtc_mo_seq_cst);
 		xtc_yield();
 	}
-	atomic_store(&g_swd_arm, 0);
-	atomic_store(&g_swd_stop, 1);
+	xtc_atomic_store_i32(&g_swd_arm, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_swd_stop, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -1575,13 +1635,13 @@ test_p2_switch_window_declines(const MunitParameter p[], void *d)
     __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
 	return MUNIT_SKIP;   /* see test_p2_preempt_tight_loop */
 #endif
-	atomic_store(&g_swd_peer_runs, 0);
-	atomic_store(&g_swd_arm, 0);
-	atomic_store(&g_swd_hits, 0);
-	atomic_store(&g_swd_stop, 0);
-	atomic_store(&g_swd_redirected, 0);
-	atomic_store(&g_swd_ctrl_preempted, 0);
-	atomic_store(&g_swd_ctrl_pending, 0);
+	xtc_atomic_store_long(&g_swd_peer_runs, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_swd_arm, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_swd_hits, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_swd_stop, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_swd_redirected, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_swd_ctrl_preempted, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_swd_ctrl_pending, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_inject_attach("coro.switch_window",
 	    swd_raise_in_window, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
@@ -1598,14 +1658,21 @@ test_p2_switch_window_declines(const MunitParameter p[], void *d)
 	(void)xtc_exec_fini(e);
 	(void)xtc_inject_detach("coro.switch_window");
 
-	if (atomic_load(&g_swd_hits) == 0)
+	if (xtc_atomic_load_i32(&g_swd_hits, xtc_mo_seq_cst) == 0)
 		return MUNIT_SKIP;   /* no hook: ucontext, or points compiled out */
 	munit_logf(MUNIT_LOG_INFO, "%d in-switch ticks, %d redirected",
-	    atomic_load(&g_swd_hits), atomic_load(&g_swd_redirected));
-	munit_assert_int(atomic_load(&g_swd_ctrl_preempted), ==, 1);
-	munit_assert_int(atomic_load(&g_swd_ctrl_pending), ==, 0);
-	munit_assert_int(atomic_load(&g_swd_hits), >=, 8);
-	munit_assert_int(atomic_load(&g_swd_redirected), ==, 0);
+	    xtc_atomic_load_i32(&g_swd_hits, xtc_mo_seq_cst),
+	    xtc_atomic_load_i32(&g_swd_redirected, xtc_mo_seq_cst));
+	munit_assert_int(xtc_atomic_load_i32(&g_swd_ctrl_preempted,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_swd_ctrl_pending,
+	                     xtc_mo_seq_cst),
+	    ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_swd_hits, xtc_mo_seq_cst), >=,
+	    8);
+	munit_assert_int(xtc_atomic_load_i32(&g_swd_redirected, xtc_mo_seq_cst),
+	    ==, 0);
 	return MUNIT_OK;
 }
 
@@ -1627,10 +1694,10 @@ test_p2_switch_window_declines(const MunitParameter p[], void *d)
  *   lost_wake   the woken task must run (phase 1), and a child spawned
  *               onto the waker's own loop must run (phase 2)
  */
-static atomic_long g_rq_peer_runs;
-static atomic_int  g_rq_arm, g_rq_hits, g_rq_stop, g_rq_done;
-static atomic_int  g_rq_ctrl_preempted, g_rq_win_preempted;
-static atomic_int  g_rq_target_runs, g_rq_child_ran;
+static long g_rq_peer_runs;
+static int g_rq_arm, g_rq_hits, g_rq_stop, g_rq_done;
+static int g_rq_ctrl_preempted, g_rq_win_preempted;
+static int g_rq_target_runs, g_rq_child_ran;
 static xtc_task_t *g_rq_target;
 static xtc_loop_t *g_rq_loop;
 
@@ -1639,20 +1706,20 @@ rq_raise_in_window(const char *name, void *user)
 {
 	long before;
 	(void)name; (void)user;
-	if (!atomic_exchange(&g_rq_arm, 0))
+	if (!xtc_atomic_exchange_i32(&g_rq_arm, 0, xtc_mo_seq_cst))
 		return;                          /* one shot per arm */
-	atomic_fetch_add(&g_rq_hits, 1);
-	before = atomic_load(&g_rq_peer_runs);
+	xtc_atomic_fetch_add_i32(&g_rq_hits, 1, xtc_mo_seq_cst);
+	before = xtc_atomic_load_long(&g_rq_peer_runs, xtc_mo_seq_cst);
 	PREEMPT_TICK();              /* a preemption tick, here */
-	if (atomic_load(&g_rq_peer_runs) != before)
-		atomic_store(&g_rq_win_preempted, 1);
+	if (xtc_atomic_load_long(&g_rq_peer_runs, xtc_mo_seq_cst) != before)
+		xtc_atomic_store_i32(&g_rq_win_preempted, 1, xtc_mo_seq_cst);
 }
 
 static int
 rq_target(xtc_task_t *self, void *user)
 {
 	(void)self; (void)user;
-	if (atomic_fetch_add(&g_rq_target_runs, 1) == 0)
+	if (xtc_atomic_fetch_add_i32(&g_rq_target_runs, 1, xtc_mo_seq_cst) == 0)
 		return XTC_TASK_PENDING;          /* park; the waker wakes it */
 	return XTC_TASK_DONE;
 }
@@ -1661,8 +1728,9 @@ static void
 rq_peer(void *arg)
 {
 	(void)arg;
-	while (!atomic_load(&g_rq_stop)) {   /* keeps the FIFO non-empty */
-		atomic_fetch_add(&g_rq_peer_runs, 1);
+	while (!xtc_atomic_load_i32(&g_rq_stop,
+	    xtc_mo_seq_cst)) { /* keeps the FIFO non-empty */
+		xtc_atomic_fetch_add_long(&g_rq_peer_runs, 1, xtc_mo_seq_cst);
 		xtc_yield();
 	}
 }
@@ -1671,7 +1739,7 @@ static void
 rq_child(void *arg)
 {
 	(void)arg;
-	atomic_store(&g_rq_child_ran, 1);
+	xtc_atomic_store_i32(&g_rq_child_ran, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -1680,27 +1748,27 @@ rq_waker(void *arg)
 	xtc_waker_t w;
 	long before;
 	(void)arg;
-	while (atomic_load(&g_rq_target_runs) == 0)
+	while (xtc_atomic_load_i32(&g_rq_target_runs, xtc_mo_seq_cst) == 0)
 		xtc_yield();                      /* target parked, peer queued */
-	before = atomic_load(&g_rq_peer_runs);
+	before = xtc_atomic_load_long(&g_rq_peer_runs, xtc_mo_seq_cst);
 	PREEMPT_TICK();               /* control: plain fiber code */
-	if (atomic_load(&g_rq_peer_runs) != before)
-		atomic_store(&g_rq_ctrl_preempted, 1);
+	if (xtc_atomic_load_long(&g_rq_peer_runs, xtc_mo_seq_cst) != before)
+		xtc_atomic_store_i32(&g_rq_ctrl_preempted, 1, xtc_mo_seq_cst);
 	xtc_yield();                          /* re-queue the peer first */
 	/* Phase 1: a same-loop wake. */
 	munit_assert_int(xtc_task_waker(g_rq_target, &w), ==, XTC_OK);
-	atomic_store(&g_rq_arm, 1);
+	xtc_atomic_store_i32(&g_rq_arm, 1, xtc_mo_seq_cst);
 	(void)xtc_waker_wake(&w);
-	while (atomic_load(&g_rq_target_runs) < 2)
+	while (xtc_atomic_load_i32(&g_rq_target_runs, xtc_mo_seq_cst) < 2)
 		xtc_yield();
 	/* Phase 2: a spawn onto this fiber's own loop. */
 	xtc_yield();
-	atomic_store(&g_rq_arm, 1);
+	xtc_atomic_store_i32(&g_rq_arm, 1, xtc_mo_seq_cst);
 	munit_assert_int(xtc_proc_spawn(g_rq_loop, rq_child, NULL, NULL,
 	    NULL), ==, XTC_OK);
-	while (!atomic_load(&g_rq_child_ran))
+	while (!xtc_atomic_load_i32(&g_rq_child_ran, xtc_mo_seq_cst))
 		xtc_yield();
-	atomic_store(&g_rq_stop, 1);
+	xtc_atomic_store_i32(&g_rq_stop, 1, xtc_mo_seq_cst);
 }
 
 static void *
@@ -1708,14 +1776,16 @@ rq_watchdog(void *arg)
 {
 	int i;
 	(void)arg;
-	for (i = 0; i < 1000 && !atomic_load(&g_rq_done); i++)
+	for (i = 0;
+	     i < 1000 && !xtc_atomic_load_i32(&g_rq_done, xtc_mo_seq_cst); i++)
 		usleep(10000);
-	if (!atomic_load(&g_rq_done)) {
-		fprintf(stderr, "runq: a woken/spawned task never ran (target "
+	if (!xtc_atomic_load_i32(&g_rq_done, xtc_mo_seq_cst)) {
+		fprintf(stderr,
+		    "runq: a woken/spawned task never ran (target "
 		    "runs %d, child %d, preempted inside the enqueue: %d)\n",
-		    atomic_load(&g_rq_target_runs),
-		    atomic_load(&g_rq_child_ran),
-		    atomic_load(&g_rq_win_preempted));
+		    xtc_atomic_load_i32(&g_rq_target_runs, xtc_mo_seq_cst),
+		    xtc_atomic_load_i32(&g_rq_child_ran, xtc_mo_seq_cst),
+		    xtc_atomic_load_i32(&g_rq_win_preempted, xtc_mo_seq_cst));
 		abort();
 	}
 	return NULL;
@@ -1735,15 +1805,15 @@ test_p2_runq_lost_wake(const MunitParameter p[], void *d)
     __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
 	return MUNIT_SKIP;   /* see test_p2_preempt_tight_loop */
 #endif
-	atomic_store(&g_rq_peer_runs, 0);
-	atomic_store(&g_rq_arm, 0);
-	atomic_store(&g_rq_hits, 0);
-	atomic_store(&g_rq_stop, 0);
-	atomic_store(&g_rq_done, 0);
-	atomic_store(&g_rq_ctrl_preempted, 0);
-	atomic_store(&g_rq_win_preempted, 0);
-	atomic_store(&g_rq_target_runs, 0);
-	atomic_store(&g_rq_child_ran, 0);
+	xtc_atomic_store_long(&g_rq_peer_runs, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rq_arm, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rq_hits, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rq_stop, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rq_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rq_ctrl_preempted, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rq_win_preempted, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rq_target_runs, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rq_child_ran, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_inject_attach("loop.enqueue.fifo_link",
 	    rq_raise_in_window, NULL), ==, XTC_OK);
 
@@ -1760,19 +1830,26 @@ test_p2_runq_lost_wake(const MunitParameter p[], void *d)
 	    NULL), ==, XTC_OK);
 	munit_assert_int(pthread_create(&wd, NULL, rq_watchdog, NULL), ==, 0);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	atomic_store(&g_rq_done, 1);
+	xtc_atomic_store_i32(&g_rq_done, 1, xtc_mo_seq_cst);
 	(void)pthread_join(wd, NULL);
 	xtc_preempt_set_involuntary(0);
 	(void)xtc_exec_fini(e);
 	(void)xtc_inject_detach("loop.enqueue.fifo_link");
 
-	if (atomic_load(&g_rq_hits) == 0)
+	if (xtc_atomic_load_i32(&g_rq_hits, xtc_mo_seq_cst) == 0)
 		return MUNIT_SKIP;   /* injection points compiled out */
-	munit_assert_int(atomic_load(&g_rq_ctrl_preempted), ==, 1);
-	munit_assert_int(atomic_load(&g_rq_win_preempted), ==, 0);
-	munit_assert_int(atomic_load(&g_rq_hits), ==, 2);   /* wake + spawn */
-	munit_assert_int(atomic_load(&g_rq_target_runs), ==, 2);
-	munit_assert_int(atomic_load(&g_rq_child_ran), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_rq_ctrl_preempted,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_rq_win_preempted,
+	                     xtc_mo_seq_cst),
+	    ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_rq_hits, xtc_mo_seq_cst), ==,
+	    2); /* wake + spawn */
+	munit_assert_int(xtc_atomic_load_i32(&g_rq_target_runs, xtc_mo_seq_cst),
+	    ==, 2);
+	munit_assert_int(xtc_atomic_load_i32(&g_rq_child_ran, xtc_mo_seq_cst),
+	    ==, 1);
 	return MUNIT_OK;
 }
 
@@ -1792,17 +1869,25 @@ test_p2_runq_lost_wake(const MunitParameter p[], void *d)
  *   lost_timer   the peer's timer, armed while the arming fiber is
  *                inside the sift, must fire
  */
-static atomic_int  g_th_arm, g_th_hits, g_th_in, g_th_ctrl_preempted;
-static atomic_int  g_th_win_preempted, g_th_peer_armed, g_th_stop;
-static atomic_int  g_th_x_fired, g_th_y_fired;
-static atomic_long g_th_peer_runs;
+static int g_th_arm, g_th_hits, g_th_in, g_th_ctrl_preempted;
+static int g_th_win_preempted, g_th_peer_armed, g_th_stop;
+static int g_th_x_fired, g_th_y_fired;
+static long g_th_peer_runs;
 static xtc_loop_t *g_th_loop;
 
 static void
-th_fire_x(void *u) { (void)u; atomic_store(&g_th_x_fired, 1); }
+th_fire_x(void *u)
+{
+	(void)u;
+	xtc_atomic_store_i32(&g_th_x_fired, 1, xtc_mo_seq_cst);
+}
 
 static void
-th_fire_y(void *u) { (void)u; atomic_store(&g_th_y_fired, 1); }
+th_fire_y(void *u)
+{
+	(void)u;
+	xtc_atomic_store_i32(&g_th_y_fired, 1, xtc_mo_seq_cst);
+}
 
 static void
 th_fire_never(void *u) { (void)u; }
@@ -1812,25 +1897,27 @@ th_raise_in_window(const char *name, void *user)
 {
 	long before;
 	(void)name; (void)user;
-	if (!atomic_exchange(&g_th_arm, 0))
+	if (!xtc_atomic_exchange_i32(&g_th_arm, 0, xtc_mo_seq_cst))
 		return;                          /* one shot */
-	atomic_fetch_add(&g_th_hits, 1);
-	before = atomic_load(&g_th_peer_runs);
-	atomic_store(&g_th_in, 1);
+	xtc_atomic_fetch_add_i32(&g_th_hits, 1, xtc_mo_seq_cst);
+	before = xtc_atomic_load_long(&g_th_peer_runs, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_th_in, 1, xtc_mo_seq_cst);
 	PREEMPT_TICK();              /* a preemption tick, here */
-	atomic_store(&g_th_in, 0);
-	if (atomic_load(&g_th_peer_runs) != before)
-		atomic_store(&g_th_win_preempted, 1);
+	xtc_atomic_store_i32(&g_th_in, 0, xtc_mo_seq_cst);
+	if (xtc_atomic_load_long(&g_th_peer_runs, xtc_mo_seq_cst) != before)
+		xtc_atomic_store_i32(&g_th_win_preempted, 1, xtc_mo_seq_cst);
 }
 
 static void
 th_peer(void *arg)
 {
 	(void)arg;
-	while (!atomic_load(&g_th_stop)) {
-		atomic_fetch_add(&g_th_peer_runs, 1);
-		if (atomic_load(&g_th_in) && !atomic_load(&g_th_peer_armed)) {
-			atomic_store(&g_th_peer_armed, 1);
+	while (!xtc_atomic_load_i32(&g_th_stop, xtc_mo_seq_cst)) {
+		xtc_atomic_fetch_add_long(&g_th_peer_runs, 1, xtc_mo_seq_cst);
+		if (xtc_atomic_load_i32(&g_th_in, xtc_mo_seq_cst) &&
+		    !xtc_atomic_load_i32(&g_th_peer_armed, xtc_mo_seq_cst)) {
+			xtc_atomic_store_i32(&g_th_peer_armed, 1,
+			    xtc_mo_seq_cst);
 			munit_assert_int(xtc_timer_set(g_th_loop, 0, th_fire_y,
 			    NULL, NULL), ==, XTC_OK);
 		}
@@ -1846,31 +1933,35 @@ th_armer(void *arg)
 	int i;
 	(void)arg;
 	xtc_yield();                          /* let the peer start */
-	before = atomic_load(&g_th_peer_runs);
+	before = xtc_atomic_load_long(&g_th_peer_runs, xtc_mo_seq_cst);
 	PREEMPT_TICK();               /* control: plain fiber code */
-	if (atomic_load(&g_th_peer_runs) != before)
-		atomic_store(&g_th_ctrl_preempted, 1);
+	if (xtc_atomic_load_long(&g_th_peer_runs, xtc_mo_seq_cst) != before)
+		xtc_atomic_store_i32(&g_th_ctrl_preempted, 1, xtc_mo_seq_cst);
 	/* A far_tm root, then a due timer that sifts above it. */
 	munit_assert_int(xtc_timer_set(g_th_loop, 10LL * 1000 * 1000 * 1000,
 	    th_fire_never, NULL, &far_tm), ==, XTC_OK);
-	atomic_store(&g_th_arm, 1);
+	xtc_atomic_store_i32(&g_th_arm, 1, xtc_mo_seq_cst);
 	munit_assert_int(xtc_timer_set(g_th_loop, 0, th_fire_x, NULL, NULL),
 	    ==, XTC_OK);
-	for (i = 0; i < 100000 && !(atomic_load(&g_th_x_fired) &&
-	    (atomic_load(&g_th_y_fired) || !atomic_load(&g_th_peer_armed)));
-	    i++)
+	for (i = 0; i < 100000 &&
+	     !(xtc_atomic_load_i32(&g_th_x_fired, xtc_mo_seq_cst) &&
+	         (xtc_atomic_load_i32(&g_th_y_fired, xtc_mo_seq_cst) ||
+	             !xtc_atomic_load_i32(&g_th_peer_armed, xtc_mo_seq_cst)));
+	     i++)
 		xtc_yield();
-	if (atomic_load(&g_th_peer_armed) && !atomic_load(&g_th_y_fired)) {
+	if (xtc_atomic_load_i32(&g_th_peer_armed, xtc_mo_seq_cst) &&
+	    !xtc_atomic_load_i32(&g_th_y_fired, xtc_mo_seq_cst)) {
 		/* The heap now holds a duplicated node; tearing it down would
 		 * double-release it, so stop here. */
-		fprintf(stderr, "timer_heap: the peer's timer never fired "
+		fprintf(stderr,
+		    "timer_heap: the peer's timer never fired "
 		    "(preempted inside the sift: %d)\n",
-		    atomic_load(&g_th_win_preempted));
+		    xtc_atomic_load_i32(&g_th_win_preempted, xtc_mo_seq_cst));
 		abort();
 	}
 	(void)xtc_timer_cancel(far_tm);
 	(void)xtc_timer_release(far_tm);
-	atomic_store(&g_th_stop, 1);
+	xtc_atomic_store_i32(&g_th_stop, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -1886,16 +1977,16 @@ test_p2_timer_heap_lost_timer(const MunitParameter p[], void *d)
     __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
 	return MUNIT_SKIP;   /* see test_p2_preempt_tight_loop */
 #endif
-	atomic_store(&g_th_arm, 0);
-	atomic_store(&g_th_hits, 0);
-	atomic_store(&g_th_in, 0);
-	atomic_store(&g_th_ctrl_preempted, 0);
-	atomic_store(&g_th_win_preempted, 0);
-	atomic_store(&g_th_peer_armed, 0);
-	atomic_store(&g_th_stop, 0);
-	atomic_store(&g_th_x_fired, 0);
-	atomic_store(&g_th_y_fired, 0);
-	atomic_store(&g_th_peer_runs, 0);
+	xtc_atomic_store_i32(&g_th_arm, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_th_hits, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_th_in, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_th_ctrl_preempted, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_th_win_preempted, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_th_peer_armed, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_th_stop, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_th_x_fired, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_th_y_fired, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_th_peer_runs, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_inject_attach("timer.heap.sift_up",
 	    th_raise_in_window, NULL), ==, XTC_OK);
 
@@ -1913,13 +2004,20 @@ test_p2_timer_heap_lost_timer(const MunitParameter p[], void *d)
 	(void)xtc_exec_fini(e);
 	(void)xtc_inject_detach("timer.heap.sift_up");
 
-	if (atomic_load(&g_th_hits) == 0)
+	if (xtc_atomic_load_i32(&g_th_hits, xtc_mo_seq_cst) == 0)
 		return MUNIT_SKIP;   /* injection points compiled out */
-	munit_assert_int(atomic_load(&g_th_ctrl_preempted), ==, 1);
-	munit_assert_int(atomic_load(&g_th_win_preempted), ==, 0);
-	munit_assert_int(atomic_load(&g_th_x_fired), ==, 1);
-	if (atomic_load(&g_th_peer_armed))
-		munit_assert_int(atomic_load(&g_th_y_fired), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_th_ctrl_preempted,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_th_win_preempted,
+	                     xtc_mo_seq_cst),
+	    ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_th_x_fired, xtc_mo_seq_cst), ==,
+	    1);
+	if (xtc_atomic_load_i32(&g_th_peer_armed, xtc_mo_seq_cst))
+		munit_assert_int(xtc_atomic_load_i32(&g_th_y_fired,
+		                     xtc_mo_seq_cst),
+		    ==, 1);
 	return MUNIT_OK;
 }
 

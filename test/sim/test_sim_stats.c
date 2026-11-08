@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -51,7 +50,7 @@
 static xtc_counter_t *g_ctr;
 static xtc_gauge_t   *g_gauge;
 static xtc_hist_t    *g_hist;
-static atomic_int     g_done;
+static int g_done;
 
 static void
 stats_worker(void *arg)
@@ -68,7 +67,7 @@ stats_worker(void *arg)
 		xtc_yield();
 		xtc_gauge_add(g_gauge, -(id + 1));      /* net 0 */
 	}
-	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -78,7 +77,7 @@ run_stats(uint64_t seed, int *out_done, uint64_t *out_ctr, int64_t *out_gauge,
 	xtc_exec_t *e = NULL;
 	int i, rc;
 
-	atomic_store(&g_done, 0);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	if (xtc_counter_create("dst.ctr", &g_ctr) != XTC_OK ||
 	    xtc_gauge_create("dst.gauge", &g_gauge) != XTC_OK ||
@@ -91,7 +90,7 @@ run_stats(uint64_t seed, int *out_done, uint64_t *out_ctr, int64_t *out_gauge,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_done = atomic_load(&g_done);
+	*out_done = xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
 	*out_ctr = xtc_counter_read(g_ctr);
 	*out_gauge = xtc_gauge_read(g_gauge);
 	*out_hcount = xtc_hist_count(g_hist);

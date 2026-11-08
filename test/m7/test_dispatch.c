@@ -16,7 +16,6 @@
  */
 
 #define _GNU_SOURCE
-#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 #include <pthread.h>
@@ -40,14 +39,14 @@
 struct fixture {
 	xtc_exec_t   *exec;
 	pthread_t     th;
-	_Atomic int   running;
+	int running;
 };
 
 static void *
 exec_runner(void *a)
 {
 	struct fixture *f = a;
-	atomic_store(&f->running, 1);
+	xtc_atomic_store_i32(&f->running, 1, xtc_mo_seq_cst);
 	(void)xtc_exec_run(f->exec);   /* service mode: until xtc_exec_stop */
 	return NULL;
 }
@@ -57,9 +56,9 @@ fixture_start(struct fixture *f)
 {
 	munit_assert_int(xtc_exec_init(&f->exec, 2), ==, XTC_OK);
 	xtc_exec_set_service_mode(f->exec, 1);
-	atomic_store(&f->running, 0);
+	xtc_atomic_store_i32(&f->running, 0, xtc_mo_seq_cst);
 	munit_assert_int(pthread_create(&f->th, NULL, exec_runner, f), ==, 0);
-	while (atomic_load(&f->running) == 0)
+	while (xtc_atomic_load_i32(&f->running, xtc_mo_seq_cst) == 0)
 		usleep(200);
 	/* Give the worker threads a beat to spin up their pollers. */
 	usleep(5 * 1000);
@@ -81,20 +80,20 @@ fixture_stop(struct fixture *f)
 
 /* ---- effect fns ---- */
 
-static _Atomic int g_ran;   /* counts how many times an effect body ran */
+static int g_ran; /* counts how many times an effect body ran */
 
 static int
 effect_return_7(void *arg)
 {
 	(void)arg;
-	atomic_fetch_add(&g_ran, 1);
+	xtc_atomic_fetch_add_i32(&g_ran, 1, xtc_mo_seq_cst);
 	return 7;
 }
 
 static int
 effect_return_arg(void *arg)
 {
-	atomic_fetch_add(&g_ran, 1);
+	xtc_atomic_fetch_add_i32(&g_ran, 1, xtc_mo_seq_cst);
 	return (int)(intptr_t)arg;
 }
 
@@ -105,7 +104,7 @@ effect_wait_for_cancel(void *arg)
 {
 	int i;
 	(void)arg;
-	atomic_fetch_add(&g_ran, 1);
+	xtc_atomic_fetch_add_i32(&g_ran, 1, xtc_mo_seq_cst);
 	for (i = 0; i < 100000; i++) {
 		if (xtc_cancel_requested())
 			return 0;         /* observed; fiber will unwind/exit */
@@ -123,7 +122,7 @@ test_foreign_submit(const MunitParameter p[], void *d)
 	intptr_t out = 0;
 	(void)p; (void)d;
 
-	atomic_store(&g_ran, 0);
+	xtc_atomic_store_i32(&g_ran, 0, xtc_mo_seq_cst);
 	fixture_start(&f);
 
 	/* main is foreign to the executor's worker threads: this exercises
@@ -133,7 +132,8 @@ test_foreign_submit(const MunitParameter p[], void *d)
 	    ==, XTC_OK);
 	munit_assert_int(xtc_future_wait(fut, &out, -1), ==, XTC_OK);
 	munit_assert_llong((long long)out, ==, 7);
-	munit_assert_int(atomic_load(&g_ran), ==, 1);   /* exactly once */
+	munit_assert_int(xtc_atomic_load_i32(&g_ran, xtc_mo_seq_cst), ==,
+	    1); /* exactly once */
 
 	fixture_stop(&f);
 	return MUNIT_OK;
@@ -148,7 +148,7 @@ test_value_carried(const MunitParameter p[], void *d)
 	intptr_t out = 0;
 	(void)p; (void)d;
 
-	atomic_store(&g_ran, 0);
+	xtc_atomic_store_i32(&g_ran, 0, xtc_mo_seq_cst);
 	fixture_start(&f);
 	munit_assert_int(
 	    xtc_dispatch(fixture_loop(&f), effect_return_arg,
@@ -171,7 +171,7 @@ test_cancel(const MunitParameter p[], void *d)
 	int rc;
 	(void)p; (void)d;
 
-	atomic_store(&g_ran, 0);
+	xtc_atomic_store_i32(&g_ran, 0, xtc_mo_seq_cst);
 	fixture_start(&f);
 	munit_assert_int(
 	    xtc_dispatch(fixture_loop(&f), effect_wait_for_cancel, NULL,
@@ -208,7 +208,7 @@ test_handle_free(const MunitParameter p[], void *d)
 	intptr_t out = 0;
 	(void)p; (void)d;
 
-	atomic_store(&g_ran, 0);
+	xtc_atomic_store_i32(&g_ran, 0, xtc_mo_seq_cst);
 	fixture_start(&f);
 	munit_assert_int(
 	    xtc_dispatch(fixture_loop(&f), effect_return_7, NULL, &fut, &h),

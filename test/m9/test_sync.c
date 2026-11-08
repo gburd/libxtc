@@ -10,7 +10,6 @@
 #endif
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -191,14 +190,14 @@ test_rwlock_basic(const MunitParameter p[], void *d)
 /* barrier: 4 threads rendezvous */
 #define BR_N 4
 static xtc_barrier_t *br_b;
-static _Atomic int    br_phase;
+static int br_phase;
 static int            br_after_phase[BR_N];
 static void *
 br_worker(void *arg) {
 	int id = (int)(intptr_t)arg;
-	atomic_fetch_add_explicit(&br_phase, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&br_phase, 1, xtc_mo_relaxed);
 	(void)xtc_barrier_wait(br_b);
-	br_after_phase[id] = atomic_load_explicit(&br_phase, memory_order_relaxed);
+	br_after_phase[id] = xtc_atomic_load_i32(&br_phase, xtc_mo_relaxed);
 	return NULL;
 }
 static MunitResult
@@ -208,7 +207,7 @@ test_barrier(const MunitParameter p[], void *d)
 	int i;
 	(void)p; (void)d;
 	munit_assert_int(xtc_barrier_create(BR_N, &br_b), ==, XTC_OK);
-	atomic_store(&br_phase, 0);
+	xtc_atomic_store_i32(&br_phase, 0, xtc_mo_seq_cst);
 	for (i = 0; i < BR_N; i++) pthread_create(&th[i], NULL, br_worker, (void *)(intptr_t)i);
 	for (i = 0; i < BR_N; i++) pthread_join(th[i], NULL);
 	/* All threads see the full N count after the barrier. */
@@ -244,9 +243,9 @@ test_gate(const MunitParameter p[], void *d)
  * waiters park and the holder is still woken, so all complete and
  * mutual exclusion holds. */
 static xtc_amutex_t *g_am;
-static _Atomic int   g_in_cs;
-static _Atomic int   g_overlap;
-static _Atomic int   g_cs_count;
+static int g_in_cs;
+static int g_overlap;
+static int g_cs_count;
 
 static int
 cs_sleep(void *a)
@@ -264,12 +263,13 @@ cs_proc(void *arg)
 	int i, r;
 	for (i = 0; i < iters; i++) {
 		(void)xtc_amutex_lock(g_am, -1);
-		if (atomic_fetch_add(&g_in_cs, 1) + 1 > 1)
-			atomic_store(&g_overlap, 1);
+		if (xtc_atomic_fetch_add_i32(&g_in_cs, 1, xtc_mo_seq_cst) + 1 >
+		    1)
+			xtc_atomic_store_i32(&g_overlap, 1, xtc_mo_seq_cst);
 		/* Hold the lock across a park: the deadlock scenario. */
 		(void)xtc_blocking_run(cs_sleep, NULL, &r);
-		atomic_fetch_sub(&g_in_cs, 1);
-		atomic_fetch_add(&g_cs_count, 1);
+		xtc_atomic_fetch_sub_i32(&g_in_cs, 1, xtc_mo_seq_cst);
+		xtc_atomic_fetch_add_i32(&g_cs_count, 1, xtc_mo_seq_cst);
 		(void)xtc_amutex_unlock(g_am);
 	}
 }
@@ -283,9 +283,9 @@ test_amutex_fiber(const MunitParameter p[], void *d)
 	int i;
 	(void)p; (void)d;
 
-	atomic_store(&g_in_cs, 0);
-	atomic_store(&g_overlap, 0);
-	atomic_store(&g_cs_count, 0);
+	xtc_atomic_store_i32(&g_in_cs, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_overlap, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_cs_count, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_amutex_create(&g_am), ==, XTC_OK);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
@@ -301,8 +301,10 @@ test_amutex_fiber(const MunitParameter p[], void *d)
 	xtc_blocking_shutdown();
 
 	/* 3 procs * 3 iterations, all serialized, none overlapping. */
-	munit_assert_int(atomic_load(&g_cs_count), ==, 9);
-	munit_assert_int(atomic_load(&g_overlap), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_cs_count, xtc_mo_seq_cst), ==,
+	    9);
+	munit_assert_int(xtc_atomic_load_i32(&g_overlap, xtc_mo_seq_cst), ==,
+	    0);
 	return MUNIT_OK;
 }
 
@@ -310,12 +312,12 @@ test_amutex_fiber(const MunitParameter p[], void *d)
  * and the cooperative-safety property -- a writer parks while holding
  * the exclusive latch and contenders park (not thread-block). */
 static xtc_arwlock_t *g_arw;
-static _Atomic int g_arw_value;        /* protected counter */
-static _Atomic int g_arw_inwrite;      /* writers currently inside crit */
-static _Atomic int g_arw_inread;       /* readers currently inside crit */
-static _Atomic int g_arw_excl_viol;    /* writer overlapped any peer */
-static _Atomic int g_arw_read_viol;    /* reader saw a torn/odd value */
-static _Atomic int g_arw_writes;
+static int g_arw_value;     /* protected counter */
+static int g_arw_inwrite;   /* writers currently inside crit */
+static int g_arw_inread;    /* readers currently inside crit */
+static int g_arw_excl_viol; /* writer overlapped any peer */
+static int g_arw_read_viol; /* reader saw a torn/odd value */
+static int g_arw_writes;
 
 static void
 arw_writer(void *arg)
@@ -324,17 +326,21 @@ arw_writer(void *arg)
 	(void)arg;
 	for (i = 0; i < 50; i++) {
 		(void)xtc_arwlock_wrlock(g_arw, -1);
-		if (atomic_fetch_add(&g_arw_inwrite, 1) != 0 ||
-		    atomic_load(&g_arw_inread) != 0)
-			atomic_store(&g_arw_excl_viol, 1);
+		if (xtc_atomic_fetch_add_i32(&g_arw_inwrite, 1,
+		        xtc_mo_seq_cst) != 0 ||
+		    xtc_atomic_load_i32(&g_arw_inread, xtc_mo_seq_cst) != 0)
+			xtc_atomic_store_i32(&g_arw_excl_viol, 1,
+			    xtc_mo_seq_cst);
 		/* Make the value briefly odd, then even -- a reader that sees
 		 * odd under a shared latch would prove exclusion broke.  Park
 		 * mid-critical-section to exercise holder-parks-while-latched. */
-		atomic_fetch_add(&g_arw_value, 1);          /* odd */
+		xtc_atomic_fetch_add_i32(&g_arw_value, 1,
+		    xtc_mo_seq_cst);                         /* odd */
 		(void)xtc_proc_sleep(200LL * 1000);          /* 0.2ms park */
-		atomic_fetch_add(&g_arw_value, 1);          /* even */
-		atomic_fetch_sub(&g_arw_inwrite, 1);
-		atomic_fetch_add(&g_arw_writes, 1);
+		xtc_atomic_fetch_add_i32(&g_arw_value, 1,
+		    xtc_mo_seq_cst); /* even */
+		xtc_atomic_fetch_sub_i32(&g_arw_inwrite, 1, xtc_mo_seq_cst);
+		xtc_atomic_fetch_add_i32(&g_arw_writes, 1, xtc_mo_seq_cst);
 		(void)xtc_arwlock_unlock(g_arw);
 		{ void *m=NULL; size_t n=0; (void)xtc_recv(&m,&n, 100LL*1000); if(m) m=NULL; }
 	}
@@ -347,14 +353,17 @@ arw_reader(void *arg)
 	for (i = 0; i < 80; i++) {
 		int v;
 		(void)xtc_arwlock_rdlock(g_arw, -1);
-		atomic_fetch_add(&g_arw_inread, 1);
-		if (atomic_load(&g_arw_inwrite) != 0)
-			atomic_store(&g_arw_read_viol, 1);   /* writer overlapped */
-		v = atomic_load(&g_arw_value);
+		xtc_atomic_fetch_add_i32(&g_arw_inread, 1, xtc_mo_seq_cst);
+		if (xtc_atomic_load_i32(&g_arw_inwrite, xtc_mo_seq_cst) != 0)
+			xtc_atomic_store_i32(&g_arw_read_viol, 1,
+			    xtc_mo_seq_cst); /* writer overlapped */
+		v = xtc_atomic_load_i32(&g_arw_value, xtc_mo_seq_cst);
 		(void)xtc_proc_sleep(100LL * 1000);
-		if ((v & 1) != 0 || atomic_load(&g_arw_value) != v)
-			atomic_store(&g_arw_read_viol, 1);   /* torn / odd value */
-		atomic_fetch_sub(&g_arw_inread, 1);
+		if ((v & 1) != 0 ||
+		    xtc_atomic_load_i32(&g_arw_value, xtc_mo_seq_cst) != v)
+			xtc_atomic_store_i32(&g_arw_read_viol, 1,
+			    xtc_mo_seq_cst); /* torn / odd value */
+		xtc_atomic_fetch_sub_i32(&g_arw_inread, 1, xtc_mo_seq_cst);
 		(void)xtc_arwlock_unlock(g_arw);
 		{ void *m=NULL; size_t n=0; (void)xtc_recv(&m,&n, 100LL*1000); if(m) m=NULL; }
 	}
@@ -370,10 +379,12 @@ test_arwlock_fiber(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	munit_assert_int(xtc_arwlock_create(&g_arw), ==, XTC_OK);
-	atomic_store(&g_arw_value, 0);
-	atomic_store(&g_arw_inwrite, 0); atomic_store(&g_arw_inread, 0);
-	atomic_store(&g_arw_excl_viol, 0); atomic_store(&g_arw_read_viol, 0);
-	atomic_store(&g_arw_writes, 0);
+	xtc_atomic_store_i32(&g_arw_value, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_arw_inwrite, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_arw_inread, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_arw_excl_viol, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_arw_read_viol, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_arw_writes, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	for (i = 0; i < 3; i++) {
@@ -390,10 +401,14 @@ test_arwlock_fiber(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 
-	munit_assert_int(atomic_load(&g_arw_excl_viol), ==, 0);  /* exclusion held */
-	munit_assert_int(atomic_load(&g_arw_read_viol), ==, 0);  /* no torn reads */
-	munit_assert_int(atomic_load(&g_arw_writes), ==, 3 * 50);
-	munit_assert_int(atomic_load(&g_arw_value), ==, 2 * 3 * 50);
+	munit_assert_int(xtc_atomic_load_i32(&g_arw_excl_viol, xtc_mo_seq_cst),
+	    ==, 0); /* exclusion held */
+	munit_assert_int(xtc_atomic_load_i32(&g_arw_read_viol, xtc_mo_seq_cst),
+	    ==, 0); /* no torn reads */
+	munit_assert_int(xtc_atomic_load_i32(&g_arw_writes, xtc_mo_seq_cst), ==,
+	    3 * 50);
+	munit_assert_int(xtc_atomic_load_i32(&g_arw_value, xtc_mo_seq_cst), ==,
+	    2 * 3 * 50);
 	xtc_arwlock_destroy(g_arw);
 	return MUNIT_OK;
 }
@@ -417,10 +432,10 @@ test_arwlock_fiber(const MunitParameter p[], void *d)
 #if !defined(_WIN32)   /* helpers used only by the POSIX-only body below */
 static xtc_amutex_t  *g_to_m;
 static xtc_arwlock_t *g_to_rw;
-static atomic_int g_to_mutex_timedout;
-static atomic_int g_to_rd_timedout;
-static atomic_int g_to_wr_timedout;
-static atomic_int g_to_holder_done;
+static int g_to_mutex_timedout;
+static int g_to_rd_timedout;
+static int g_to_wr_timedout;
+static int g_to_holder_done;
 
 static int
 to_hold_sleep(void *arg)
@@ -446,7 +461,7 @@ to_mutex_holder(void *arg)
 		return;
 	(void)xtc_blocking_run(to_hold_sleep, NULL, &r);
 	(void)xtc_amutex_unlock(g_to_m);
-	atomic_fetch_add(&g_to_holder_done, 1);
+	xtc_atomic_fetch_add_i32(&g_to_holder_done, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -456,7 +471,8 @@ to_mutex_waiter(void *arg)
 	/* Contended + finite deadline => must return XTC_E_AGAIN after the
 	 * timer fires, and must unlink itself from the wait queue. */
 	if (xtc_amutex_lock(g_to_m, 20 * 1000 * 1000LL) == XTC_E_AGAIN)
-		atomic_fetch_add(&g_to_mutex_timedout, 1);
+		xtc_atomic_fetch_add_i32(&g_to_mutex_timedout, 1,
+		    xtc_mo_seq_cst);
 	else
 		(void)xtc_amutex_unlock(g_to_m);
 }
@@ -470,7 +486,7 @@ to_rw_holder(void *arg)
 		return;
 	(void)xtc_blocking_run(to_hold_sleep, NULL, &r);
 	(void)xtc_arwlock_unlock(g_to_rw);
-	atomic_fetch_add(&g_to_holder_done, 1);
+	xtc_atomic_fetch_add_i32(&g_to_holder_done, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -479,11 +495,11 @@ to_rw_waiters(void *arg)
 	(void)arg;
 	/* A writer holds it, so BOTH a reader and a writer must time out. */
 	if (xtc_arwlock_rdlock(g_to_rw, 20 * 1000 * 1000LL) == XTC_E_AGAIN)
-		atomic_fetch_add(&g_to_rd_timedout, 1);
+		xtc_atomic_fetch_add_i32(&g_to_rd_timedout, 1, xtc_mo_seq_cst);
 	else
 		(void)xtc_arwlock_unlock(g_to_rw);
 	if (xtc_arwlock_wrlock(g_to_rw, 20 * 1000 * 1000LL) == XTC_E_AGAIN)
-		atomic_fetch_add(&g_to_wr_timedout, 1);
+		xtc_atomic_fetch_add_i32(&g_to_wr_timedout, 1, xtc_mo_seq_cst);
 	else
 		(void)xtc_arwlock_unlock(g_to_rw);
 }
@@ -516,10 +532,10 @@ test_fiber_timeout_expiry(const MunitParameter p[], void *d)
 	xtc_pid_t pid;
 	(void)p; (void)d;
 
-	atomic_store(&g_to_mutex_timedout, 0);
-	atomic_store(&g_to_rd_timedout, 0);
-	atomic_store(&g_to_wr_timedout, 0);
-	atomic_store(&g_to_holder_done, 0);
+	xtc_atomic_store_i32(&g_to_mutex_timedout, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_to_rd_timedout, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_to_wr_timedout, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_to_holder_done, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_amutex_create(&g_to_m), ==, XTC_OK);
 	munit_assert_int(xtc_arwlock_create(&g_to_rw), ==, XTC_OK);
@@ -541,12 +557,17 @@ test_fiber_timeout_expiry(const MunitParameter p[], void *d)
 
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
-	munit_assert_int(atomic_load(&g_to_mutex_timedout), ==, 1);
-	munit_assert_int(atomic_load(&g_to_rd_timedout), ==, 1);
-	munit_assert_int(atomic_load(&g_to_wr_timedout), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_to_mutex_timedout,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_to_rd_timedout, xtc_mo_seq_cst),
+	    ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_to_wr_timedout, xtc_mo_seq_cst),
+	    ==, 1);
 	/* Both holders must have released cleanly -- a timed-out waiter
 	 * must not corrupt the queue or strand the holder. */
-	munit_assert_int(atomic_load(&g_to_holder_done), ==, 2);
+	munit_assert_int(xtc_atomic_load_i32(&g_to_holder_done, xtc_mo_seq_cst),
+	    ==, 2);
 
 	(void)xtc_loop_fini(loop);
 	xtc_amutex_destroy(g_to_m);
@@ -568,8 +589,8 @@ test_fiber_timeout_expiry(const MunitParameter p[], void *d)
 static xtc_sem_t    *g_tw_sem;
 static xtc_notify_t *g_tw_n;
 static int           g_tw_mode;             /* 0 sem, 1 notify */
-static atomic_int    g_tw_ok;
-static atomic_int    g_tw_late;
+static int g_tw_ok;
+static int g_tw_late;
 
 static void
 tw_waiter(void *a)
@@ -581,8 +602,10 @@ tw_waiter(void *a)
 	rc = g_tw_mode == 0 ? xtc_sem_acquire(g_tw_sem, 1, TW_TIMEOUT)
 	                    : xtc_notify_wait(g_tw_n, TW_TIMEOUT);
 	(void)__os_clock_mono(&t1);
-	if (rc == XTC_OK) atomic_fetch_add(&g_tw_ok, 1);
-	if (t1 - t0 > TW_PROMPT) atomic_fetch_add(&g_tw_late, 1);
+	if (rc == XTC_OK)
+		xtc_atomic_fetch_add_i32(&g_tw_ok, 1, xtc_mo_seq_cst);
+	if (t1 - t0 > TW_PROMPT)
+		xtc_atomic_fetch_add_i32(&g_tw_late, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -609,8 +632,8 @@ tw_run(int mode)
 	xtc_loop_t *loop = NULL;
 	xtc_pid_t pid;
 	g_tw_mode = mode;
-	atomic_store(&g_tw_ok, 0);
-	atomic_store(&g_tw_late, 0);
+	xtc_atomic_store_i32(&g_tw_ok, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_tw_late, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_sem_create(0, &g_tw_sem), ==, XTC_OK);
 	munit_assert_int(xtc_notify_create(&g_tw_n), ==, XTC_OK);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
@@ -621,8 +644,9 @@ tw_run(int mode)
 	(void)xtc_loop_fini(loop);
 	xtc_sem_destroy(g_tw_sem);
 	xtc_notify_destroy(g_tw_n);
-	munit_assert_int(atomic_load(&g_tw_ok), ==, 2);
-	munit_assert_int(atomic_load(&g_tw_late), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_tw_ok, xtc_mo_seq_cst), ==, 2);
+	munit_assert_int(xtc_atomic_load_i32(&g_tw_late, xtc_mo_seq_cst), ==,
+	    0);
 	return MUNIT_OK;
 }
 
@@ -652,10 +676,10 @@ test_notify_two_waiters(const MunitParameter p[], void *d)
 #define CW_WAITERS 12
 #define CW_ROUNDS  20
 static xtc_sem_t  *g_cw_sem;
-static atomic_int  g_cw_taken;     /* units acquired */
-static atomic_int  g_cw_fail;      /* acquire returned != OK */
-static atomic_int  g_cw_late;      /* acquire took > TW_PROMPT */
-static atomic_int  g_cw_done;      /* waiters that finished */
+static int g_cw_taken; /* units acquired */
+static int g_cw_fail;  /* acquire returned != OK */
+static int g_cw_late;  /* acquire took > TW_PROMPT */
+static int g_cw_done;  /* waiters that finished */
 static int         g_cw_need[CW_WAITERS][CW_ROUNDS];
 static int         g_cw_chunks[CW_WAITERS * CW_ROUNDS * 2];
 static int         g_cw_yields[CW_WAITERS * CW_ROUNDS * 2];
@@ -672,12 +696,17 @@ cw_waiter(void *a)
 		rc = xtc_sem_acquire(g_cw_sem, (unsigned)g_cw_need[id][r],
 		    TW_TIMEOUT);
 		(void)__os_clock_mono(&t1);
-		if (rc != XTC_OK) { atomic_fetch_add(&g_cw_fail, 1); continue; }
-		atomic_fetch_add(&g_cw_taken, g_cw_need[id][r]);
-		if (t1 - t0 > TW_PROMPT) atomic_fetch_add(&g_cw_late, 1);
+		if (rc != XTC_OK) {
+			xtc_atomic_fetch_add_i32(&g_cw_fail, 1, xtc_mo_seq_cst);
+			continue;
+		}
+		xtc_atomic_fetch_add_i32(&g_cw_taken, g_cw_need[id][r],
+		    xtc_mo_seq_cst);
+		if (t1 - t0 > TW_PROMPT)
+			xtc_atomic_fetch_add_i32(&g_cw_late, 1, xtc_mo_seq_cst);
 		if (r & 1) xtc_yield();
 	}
-	atomic_fetch_add(&g_cw_done, 1);
+	xtc_atomic_fetch_add_i32(&g_cw_done, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -710,10 +739,10 @@ test_sem_conservation(const MunitParameter p[], void *d)
 			g_cw_chunks[g_cw_nchunks] = c < left ? c : left;
 			g_cw_yields[g_cw_nchunks] = (int)(munit_rand_uint32() % 4);
 		}
-		atomic_store(&g_cw_taken, 0);
-		atomic_store(&g_cw_fail, 0);
-		atomic_store(&g_cw_late, 0);
-		atomic_store(&g_cw_done, 0);
+		xtc_atomic_store_i32(&g_cw_taken, 0, xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&g_cw_fail, 0, xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&g_cw_late, 0, xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&g_cw_done, 0, xtc_mo_seq_cst);
 		munit_assert_int(xtc_sem_create(0, &g_cw_sem), ==, XTC_OK);
 		munit_assert_int(xtc_exec_init(&e, CW_LOOPS), ==, XTC_OK);
 		for (i = 0; i < CW_WAITERS; i++)
@@ -724,10 +753,18 @@ test_sem_conservation(const MunitParameter p[], void *d)
 		    cw_poster, NULL, NULL, NULL), ==, XTC_OK);
 		munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 		(void)xtc_exec_fini(e);
-		munit_assert_int(atomic_load(&g_cw_done), ==, CW_WAITERS);
-		munit_assert_int(atomic_load(&g_cw_fail), ==, 0);
-		munit_assert_int(atomic_load(&g_cw_late), ==, 0);
-		munit_assert_int(atomic_load(&g_cw_taken), ==, total);
+		munit_assert_int(xtc_atomic_load_i32(&g_cw_done,
+		                     xtc_mo_seq_cst),
+		    ==, CW_WAITERS);
+		munit_assert_int(xtc_atomic_load_i32(&g_cw_fail,
+		                     xtc_mo_seq_cst),
+		    ==, 0);
+		munit_assert_int(xtc_atomic_load_i32(&g_cw_late,
+		                     xtc_mo_seq_cst),
+		    ==, 0);
+		munit_assert_int(xtc_atomic_load_i32(&g_cw_taken,
+		                     xtc_mo_seq_cst),
+		    ==, total);
 		munit_assert_int(xtc_sem_count(g_cw_sem), ==, 0);
 		xtc_sem_destroy(g_cw_sem);
 	}
@@ -861,7 +898,7 @@ static xtc_gate_t    *g_kw_g;
 static int            g_kw_kind;   /* index into kw_kinds */
 static xtc_loop_t    *g_kw_loop;
 static xtc_pid_t      g_kw_victim;
-static atomic_int     g_kw_victim_ret;    /* victim's wait returned */
+static int g_kw_victim_ret; /* victim's wait returned */
 static int            g_kw_third_rc;
 static int            g_kw_down;
 
@@ -879,7 +916,8 @@ kw_victim(void *a)
 	case 4: (void)xtc_barrier_wait(g_kw_b); break;
 	default: (void)xtc_gate_drain(g_kw_g, g_kw_tmo); break;
 	}
-	atomic_store(&g_kw_victim_ret, 1);       /* must not be reached */
+	xtc_atomic_store_i32(&g_kw_victim_ret, 1,
+	    xtc_mo_seq_cst); /* must not be reached */
 }
 
 static void
@@ -967,7 +1005,7 @@ static void
 kw_run(xtc_proc_fn driver)
 {
 	xtc_loop_t *loop = NULL;
-	atomic_store(&g_kw_victim_ret, 0);
+	xtc_atomic_store_i32(&g_kw_victim_ret, 0, xtc_mo_seq_cst);
 	g_kw_third_rc = -999;
 	g_kw_down = 0;
 	munit_assert_int(xtc_amutex_create(&g_kw_m), ==, XTC_OK);
@@ -989,7 +1027,8 @@ kw_run(xtc_proc_fn driver)
 	xtc_gate_destroy(g_kw_g);
 	munit_logf(MUNIT_LOG_INFO, "%s: down=%d third_rc=%d",
 	    kw_kinds[g_kw_kind], g_kw_down, g_kw_third_rc);
-	munit_assert_int(atomic_load(&g_kw_victim_ret), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_kw_victim_ret, xtc_mo_seq_cst),
+	    ==, 0);
 	munit_assert_int(g_kw_down, ==, 1);
 }
 
@@ -1271,7 +1310,7 @@ test_amutex_recursive_exit(const MunitParameter p[], void *d)
  * instead of hanging the suite).
  */
 static xtc_amutex_t *g_rt_m;
-static _Atomic int g_rt_ok, g_rt_bad;
+static int g_rt_ok, g_rt_bad;
 
 static void *
 rt_thread(void *a)
@@ -1279,14 +1318,17 @@ rt_thread(void *a)
 	int i;
 	(void)a;
 	for (i = 0; i < 2000; i++) {
-		if (xtc_amutex_lock(g_rt_m, -1) != XTC_OK) { g_rt_bad++; continue; }
+		if (xtc_amutex_lock(g_rt_m, -1) != XTC_OK) {
+			xtc_atomic_fetch_add_i32(&g_rt_bad, 1, xtc_mo_seq_cst);
+			continue;
+		}
 		/* nested re-entry by the owner: must succeed at once */
 		if (xtc_amutex_lock(g_rt_m, 2LL * 1000 * 1000 * 1000) != XTC_OK) {
-			g_rt_bad++;
+			xtc_atomic_fetch_add_i32(&g_rt_bad, 1, xtc_mo_seq_cst);
 			(void)xtc_amutex_unlock(g_rt_m);
 			return NULL;
 		}
-		g_rt_ok++;
+		xtc_atomic_fetch_add_i32(&g_rt_ok, 1, xtc_mo_seq_cst);
 		(void)xtc_amutex_unlock(g_rt_m);
 		(void)xtc_amutex_unlock(g_rt_m);
 	}
@@ -1299,15 +1341,17 @@ test_amutex_recursive_thread(const MunitParameter p[], void *d)
 	pthread_t th[4];
 	int i;
 	(void)p; (void)d;
-	g_rt_ok = 0; g_rt_bad = 0;
+	xtc_atomic_store_i32(&g_rt_ok, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rt_bad, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_amutex_create_ex(&g_rt_m, XTC_AMUTEX_RECURSIVE),
 	    ==, XTC_OK);
 	for (i = 0; i < 4; i++)
 		munit_assert_int(pthread_create(&th[i], NULL, rt_thread, NULL), ==, 0);
 	for (i = 0; i < 4; i++)
 		(void)pthread_join(th[i], NULL);
-	munit_assert_int(g_rt_bad, ==, 0);
-	munit_assert_int(g_rt_ok, ==, 4 * 2000);
+	munit_assert_int(xtc_atomic_load_i32(&g_rt_bad, xtc_mo_seq_cst), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_rt_ok, xtc_mo_seq_cst), ==,
+	    4 * 2000);
 	/* Released for good: an off-loop try_lock now succeeds. */
 	munit_assert_int(xtc_amutex_try_lock(g_rt_m), ==, XTC_OK);
 	(void)xtc_amutex_unlock(g_rt_m);
@@ -1375,8 +1419,8 @@ test_amutex_recursive_thread(const MunitParameter p[], void *d)
 enum { HD_WR, HD_RD, HD_AM };
 static xtc_arwlock_t *g_hd_rw;
 static xtc_amutex_t  *g_hd_m;
-static _Atomic int    g_hd_ready, g_hd_stop, g_hd_got;
-static _Atomic long   g_hd_csw;
+static int g_hd_ready, g_hd_stop, g_hd_got;
+static long g_hd_csw;
 
 static void
 hd_lock(int kind, int64_t to)
@@ -1401,14 +1445,15 @@ hd_waiter(void *arg)
 	struct rusage u0, u1;
 	int kind = (int)(intptr_t)arg;
 	(void)getrusage(RUSAGE_THREAD, &u0);
-	atomic_fetch_add(&g_hd_ready, 1);
-	while (!atomic_load(&g_hd_stop)) {
+	xtc_atomic_fetch_add_i32(&g_hd_ready, 1, xtc_mo_seq_cst);
+	while (!xtc_atomic_load_i32(&g_hd_stop, xtc_mo_seq_cst)) {
 		hd_lock(kind, 30LL * 1000 * 1000 * 1000);
-		atomic_fetch_add(&g_hd_got, 1);
+		xtc_atomic_fetch_add_i32(&g_hd_got, 1, xtc_mo_seq_cst);
 		hd_unlock(kind);
 	}
 	(void)getrusage(RUSAGE_THREAD, &u1);
-	atomic_fetch_add(&g_hd_csw, u1.ru_nvcsw - u0.ru_nvcsw);
+	xtc_atomic_fetch_add_long(&g_hd_csw, u1.ru_nvcsw - u0.ru_nvcsw,
+	    xtc_mo_seq_cst);
 	return NULL;
 }
 
@@ -1417,12 +1462,15 @@ herd_run(int kind)
 {
 	pthread_t th[HERD_K];
 	int i;
-	g_hd_ready = 0; g_hd_stop = 0; g_hd_got = 0; g_hd_csw = 0;
+	xtc_atomic_store_i32(&g_hd_ready, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_hd_stop, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_hd_got, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_hd_csw, 0, xtc_mo_seq_cst);
 	hd_lock(kind, -1);
 	for (i = 0; i < HERD_K; i++)
 		munit_assert_int(pthread_create(&th[i], NULL, hd_waiter,
 		    (void *)(intptr_t)kind), ==, 0);
-	while (atomic_load(&g_hd_ready) < HERD_K)
+	while (xtc_atomic_load_i32(&g_hd_ready, xtc_mo_seq_cst) < HERD_K)
 		(void)__os_sleep_ns(1000 * 1000);
 	(void)__os_sleep_ns(50LL * 1000 * 1000);   /* all asleep in the lock */
 	for (i = 0; i < HERD_R; i++) {
@@ -1430,12 +1478,13 @@ herd_run(int kind)
 		hd_unlock(kind);
 		hd_lock(kind, -1);
 	}
-	atomic_store(&g_hd_stop, 1);
+	xtc_atomic_store_i32(&g_hd_stop, 1, xtc_mo_seq_cst);
 	hd_unlock(kind);
 	for (i = 0; i < HERD_K; i++)
 		(void)pthread_join(th[i], NULL);
-	munit_assert_int(atomic_load(&g_hd_got), >=, HERD_K);
-	return atomic_load(&g_hd_csw);
+	munit_assert_int(xtc_atomic_load_i32(&g_hd_got, xtc_mo_seq_cst), >=,
+	    HERD_K);
+	return xtc_atomic_load_long(&g_hd_csw, xtc_mo_seq_cst);
 }
 
 static void *
@@ -1443,7 +1492,7 @@ hd_spin(void *arg)
 {
 	volatile unsigned long n = 0;
 	(void)arg;
-	while (!atomic_load_explicit(&g_hd_stop, memory_order_relaxed))
+	while (!xtc_atomic_load_i32(&g_hd_stop, xtc_mo_relaxed))
 		n++;
 	(void)n;   /* read once: gcc 16 -Wunused-but-set-variable */
 	return NULL;
@@ -1457,14 +1506,14 @@ hd_capacity(int n)
 	pthread_t th[HERD_K];
 	struct timespec w0, w1, c0, c1;
 	int i;
-	atomic_store(&g_hd_stop, 0);
+	xtc_atomic_store_i32(&g_hd_stop, 0, xtc_mo_seq_cst);
 	clock_gettime(CLOCK_MONOTONIC, &w0);  /* XTC_RAW_OK: test measurement */
 	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &c0);  /* XTC_RAW_OK: test measurement */
 	for (i = 0; i < n; i++)
 		munit_assert_int(pthread_create(&th[i], NULL, hd_spin, NULL),
 		    ==, 0);
 	(void)__os_sleep_ns(200LL * 1000 * 1000);
-	atomic_store(&g_hd_stop, 1);
+	xtc_atomic_store_i32(&g_hd_stop, 1, xtc_mo_seq_cst);
 	for (i = 0; i < n; i++)
 		(void)pthread_join(th[i], NULL);
 	clock_gettime(CLOCK_MONOTONIC, &w1);  /* XTC_RAW_OK: test measurement */
@@ -1518,8 +1567,8 @@ test_offloop_no_herd(const MunitParameter p[], void *d)
 }
 
 #define SP_N 20000
-static _Atomic int  g_sp_go;
-static _Atomic long g_sp_csw;
+static int g_sp_go;
+static long g_sp_csw;
 static volatile long g_sp_val;
 
 static void
@@ -1536,7 +1585,7 @@ sp_thread(void *arg)
 {
 	struct rusage u0, u1;
 	int kind = (int)(intptr_t)arg, i;
-	while (!atomic_load(&g_sp_go))
+	while (!xtc_atomic_load_i32(&g_sp_go, xtc_mo_seq_cst))
 		;
 	(void)getrusage(RUSAGE_THREAD, &u0);
 	for (i = 0; i < SP_N; i++) {
@@ -1547,7 +1596,8 @@ sp_thread(void *arg)
 		sp_burn(1000);
 	}
 	(void)getrusage(RUSAGE_THREAD, &u1);
-	atomic_fetch_add(&g_sp_csw, u1.ru_nvcsw - u0.ru_nvcsw);
+	xtc_atomic_fetch_add_long(&g_sp_csw, u1.ru_nvcsw - u0.ru_nvcsw,
+	    xtc_mo_seq_cst);
 	return NULL;
 }
 
@@ -1565,15 +1615,17 @@ test_offloop_spin(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_arwlock_create(&g_hd_rw), ==, XTC_OK);
 	munit_assert_int(xtc_amutex_create(&g_hd_m), ==, XTC_OK);
 	for (kind = HD_WR; kind <= HD_AM; kind += 2) {
-		g_sp_go = 0; g_sp_csw = 0; g_sp_val = 0;
+		xtc_atomic_store_i32(&g_sp_go, 0, xtc_mo_seq_cst);
+		xtc_atomic_store_long(&g_sp_csw, 0, xtc_mo_seq_cst);
+		g_sp_val = 0;
 		for (i = 0; i < 2; i++)
 			munit_assert_int(pthread_create(&th[i], NULL, sp_thread,
 			    (void *)(intptr_t)kind), ==, 0);
-		atomic_store(&g_sp_go, 1);
+		xtc_atomic_store_i32(&g_sp_go, 1, xtc_mo_seq_cst);
 		for (i = 0; i < 2; i++)
 			(void)pthread_join(th[i], NULL);
 		fprintf(stderr, "  %s: %ld csw over %d acquires\n", name[kind],
-		    atomic_load(&g_sp_csw), 2 * SP_N);
+		    xtc_atomic_load_long(&g_sp_csw, xtc_mo_seq_cst), 2 * SP_N);
 		munit_assert_long(g_sp_val, ==, 2L * SP_N);
 		/* The switch bound is a property of real cores: under CPU
 		 * emulation (CI's riscv64 qemu-user job sets
@@ -1581,15 +1633,16 @@ test_offloop_spin(const MunitParameter p[], void *d)
 		 * time-bounded spin and 50-100% of acquires park.  Mutual
 		 * exclusion (above) is still checked there. */
 		if (getenv("XTC_TEST_EMULATED") == NULL)
-			munit_assert_long(atomic_load(&g_sp_csw), <,
-			    2L * SP_N / 10);
+			munit_assert_long(xtc_atomic_load_long(&g_sp_csw,
+			                      xtc_mo_seq_cst),
+			    <, 2L * SP_N / 10);
 	}
 	xtc_arwlock_destroy(g_hd_rw);
 	xtc_amutex_destroy(g_hd_m);
 	return MUNIT_OK;
 }
 
-static _Atomic int g_rw_tid[HERD_K];
+static int g_rw_tid[HERD_K];
 
 /* Voluntary context switches of thread `tid` of this process, or -1. */
 static long
@@ -1612,9 +1665,10 @@ static void *
 rw_waiter(void *arg)
 {
 	int kind = (int)((intptr_t)arg & 0xff), idx = (int)((intptr_t)arg >> 8);
-	atomic_store(&g_rw_tid[idx], (int)syscall(SYS_gettid));
-	atomic_fetch_add(&g_hd_ready, 1);
-	while (!atomic_load(&g_hd_stop)) {
+	xtc_atomic_store_i32(&g_rw_tid[idx], (int)syscall(SYS_gettid),
+	    xtc_mo_seq_cst);
+	xtc_atomic_fetch_add_i32(&g_hd_ready, 1, xtc_mo_seq_cst);
+	while (!xtc_atomic_load_i32(&g_hd_stop, xtc_mo_seq_cst)) {
 		hd_lock(kind, 30LL * 1000 * 1000 * 1000);
 		hd_unlock(kind);
 	}
@@ -1636,16 +1690,19 @@ test_offloop_release_wakes(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_arwlock_create(&g_hd_rw), ==, XTC_OK);
 	munit_assert_int(xtc_amutex_create(&g_hd_m), ==, XTC_OK);
 	for (kind = HD_WR; kind <= HD_AM; kind += 2) {
-		g_hd_ready = 0; g_hd_stop = 0;
+		xtc_atomic_store_i32(&g_hd_ready, 0, xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&g_hd_stop, 0, xtc_mo_seq_cst);
 		hd_lock(kind, -1);
 		for (i = 0; i < HERD_K; i++)
 			munit_assert_int(pthread_create(&th[i], NULL, rw_waiter,
 			    (void *)(intptr_t)(kind | (i << 8))), ==, 0);
-		while (atomic_load(&g_hd_ready) < HERD_K)
+		while (
+		    xtc_atomic_load_i32(&g_hd_ready, xtc_mo_seq_cst) < HERD_K)
 			(void)__os_sleep_ns(1000 * 1000);
 		(void)__os_sleep_ns(50LL * 1000 * 1000);   /* all asleep */
 		for (i = 0; i < HERD_K; i++)
-			v0[i] = task_vcsw(atomic_load(&g_rw_tid[i]));
+			v0[i] = task_vcsw(
+			    xtc_atomic_load_i32(&g_rw_tid[i], xtc_mo_seq_cst));
 		/* Paced: since 2.0 an amutex release skips the wake while a
 		 * thread spins on the mutex (the spinner gate, up to 8 in a
 		 * row), and a sleeper woken by the previous release is still
@@ -1659,11 +1716,12 @@ test_offloop_release_wakes(const MunitParameter p[], void *d)
 		}
 		(void)__os_sleep_ns(50LL * 1000 * 1000);   /* woken ones ran */
 		for (woke = 0, i = 0; i < HERD_K; i++) {
-			v1 = task_vcsw(atomic_load(&g_rw_tid[i]));
+			v1 = task_vcsw(
+			    xtc_atomic_load_i32(&g_rw_tid[i], xtc_mo_seq_cst));
 			munit_assert_long(v1, >=, 0);
 			woke += v1 > v0[i];
 		}
-		atomic_store(&g_hd_stop, 1);
+		xtc_atomic_store_i32(&g_hd_stop, 1, xtc_mo_seq_cst);
 		hd_unlock(kind);
 		for (i = 0; i < HERD_K; i++)
 			(void)pthread_join(th[i], NULL);
@@ -1678,7 +1736,7 @@ test_offloop_release_wakes(const MunitParameter p[], void *d)
 
 #define NS_N 20000
 static xtc_notify_t *g_ns;
-static _Atomic int   g_ns_ack;
+static int g_ns_ack;
 
 static void *
 ns_waiter(void *arg)
@@ -1689,10 +1747,11 @@ ns_waiter(void *arg)
 	(void)getrusage(RUSAGE_THREAD, &u0);
 	for (i = 0; i < NS_N; i++) {
 		munit_assert_int(xtc_notify_wait(g_ns, -1), ==, XTC_OK);
-		atomic_store(&g_ns_ack, i + 1);
+		xtc_atomic_store_i32(&g_ns_ack, i + 1, xtc_mo_seq_cst);
 	}
 	(void)getrusage(RUSAGE_THREAD, &u1);
-	atomic_store(&g_sp_csw, u1.ru_nvcsw - u0.ru_nvcsw);
+	xtc_atomic_store_long(&g_sp_csw, u1.ru_nvcsw - u0.ru_nvcsw,
+	    xtc_mo_seq_cst);
 	return NULL;
 }
 
@@ -1719,18 +1778,20 @@ test_offloop_notify_spin(const MunitParameter p[], void *d)
 		return MUNIT_SKIP;
 	}
 	munit_assert_int(xtc_notify_create(&g_ns), ==, XTC_OK);
-	g_sp_csw = 0; g_ns_ack = 0;
+	xtc_atomic_store_long(&g_sp_csw, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ns_ack, 0, xtc_mo_seq_cst);
 	munit_assert_int(pthread_create(&th, NULL, ns_waiter, NULL), ==, 0);
 	for (i = 0; i < NS_N; i++) {
 		sp_burn(2000);                     /* ~2 us into the wait */
 		munit_assert_int(xtc_notify_signal(g_ns), ==, XTC_OK);
-		while (atomic_load(&g_ns_ack) <= i)
+		while (xtc_atomic_load_i32(&g_ns_ack, xtc_mo_seq_cst) <= i)
 			;                          /* the waiter took it */
 	}
 	(void)pthread_join(th, NULL);
 	fprintf(stderr, "  notify: %ld waiter csw over %d waits\n",
-	    atomic_load(&g_sp_csw), NS_N);
-	munit_assert_long(atomic_load(&g_sp_csw), <, (long)NS_N / 10);
+	    xtc_atomic_load_long(&g_sp_csw, xtc_mo_seq_cst), NS_N);
+	munit_assert_long(xtc_atomic_load_long(&g_sp_csw, xtc_mo_seq_cst), <,
+	    (long)NS_N / 10);
 	xtc_notify_destroy(g_ns);
 	return MUNIT_OK;
 }
@@ -1754,8 +1815,8 @@ test_offloop_notify_spin(const MunitParameter p[], void *d)
 #define HM_N     20000
 #define HM_BOUND 200
 static xtc_amutex_t *g_hm;
-static _Atomic int   g_hm_go;
-static _Atomic long  g_hm_csw;
+static int g_hm_go;
+static long g_hm_csw;
 static volatile long g_hm_val;
 
 static void *
@@ -1764,7 +1825,7 @@ hm_thread(void *arg)
 	struct rusage u0, u1;
 	int i;
 	(void)arg;
-	while (!atomic_load(&g_hm_go))
+	while (!xtc_atomic_load_i32(&g_hm_go, xtc_mo_seq_cst))
 		;
 	(void)getrusage(RUSAGE_THREAD, &u0);
 	for (i = 0; i < HM_N; i++) {
@@ -1776,7 +1837,8 @@ hm_thread(void *arg)
 		sp_burn(200);
 	}
 	(void)getrusage(RUSAGE_THREAD, &u1);
-	atomic_fetch_add(&g_hm_csw, u1.ru_nvcsw - u0.ru_nvcsw);
+	xtc_atomic_fetch_add_long(&g_hm_csw, u1.ru_nvcsw - u0.ru_nvcsw,
+	    xtc_mo_seq_cst);
 	return NULL;
 }
 
@@ -1792,15 +1854,18 @@ test_offloop_hot_mutex(const MunitParameter p[], void *d)
 	if (xtc_ncpus() < 8)
 		return MUNIT_SKIP;
 	munit_assert_int(xtc_amutex_create(&g_hm), ==, XTC_OK);
-	g_hm_go = 0; g_hm_csw = 0; g_hm_val = 0;
+	xtc_atomic_store_i32(&g_hm_go, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_hm_csw, 0, xtc_mo_seq_cst);
+	g_hm_val = 0;
 	for (i = 0; i < HM_T; i++)
 		munit_assert_int(pthread_create(&th[i], NULL, hm_thread, NULL),
 		    ==, 0);
-	atomic_store(&g_hm_go, 1);
+	xtc_atomic_store_i32(&g_hm_go, 1, xtc_mo_seq_cst);
 	for (i = 0; i < HM_T; i++)
 		(void)pthread_join(th[i], NULL);
 	munit_assert_long(g_hm_val, ==, (long)HM_T * HM_N);
-	per100 = atomic_load(&g_hm_csw) * 100 / ((long)HM_T * HM_N);
+	per100 = xtc_atomic_load_long(&g_hm_csw, xtc_mo_seq_cst) * 100 /
+	    ((long)HM_T * HM_N);
 	fprintf(stderr, "  amutex: %ld voluntary csw per 100 acquires\n", per100);
 	if (getenv("XTC_TEST_EMULATED") == NULL)
 		munit_assert_long(per100, <, HM_BOUND);
@@ -1814,8 +1879,8 @@ test_offloop_hot_mutex(const MunitParameter p[], void *d)
 #define ART_WR   8
 #define ART_RD   8
 static xtc_arwlock_t *g_art;
-static _Atomic int g_art_inw, g_art_inr, g_art_viol, g_art_lost;
-static _Atomic long g_art_wcnt, g_art_rcnt;
+static int g_art_inw, g_art_inr, g_art_viol, g_art_lost;
+static long g_art_wcnt, g_art_rcnt;
 static volatile long g_art_val;
 
 static void *
@@ -1825,17 +1890,19 @@ art_writer(void *arg)
 	(void)arg;
 	for (i = 0; i < ART_N; i++) {
 		if (xtc_arwlock_wrlock(g_art, 10LL * 1000 * 1000 * 1000) != XTC_OK) {
-			atomic_fetch_add(&g_art_lost, 1);
+			xtc_atomic_fetch_add_i32(&g_art_lost, 1,
+			    xtc_mo_seq_cst);
 			break;
 		}
-		if (atomic_fetch_add(&g_art_inw, 1) != 0 ||
-		    atomic_load(&g_art_inr) != 0)
-			atomic_store(&g_art_viol, 1);
+		if (xtc_atomic_fetch_add_i32(&g_art_inw, 1, xtc_mo_seq_cst) !=
+		        0 ||
+		    xtc_atomic_load_i32(&g_art_inr, xtc_mo_seq_cst) != 0)
+			xtc_atomic_store_i32(&g_art_viol, 1, xtc_mo_seq_cst);
 		g_art_val++;
 		g_art_val++;
-		atomic_fetch_sub(&g_art_inw, 1);
+		xtc_atomic_fetch_sub_i32(&g_art_inw, 1, xtc_mo_seq_cst);
 		(void)xtc_arwlock_unlock(g_art);
-		atomic_fetch_add(&g_art_wcnt, 1);
+		xtc_atomic_fetch_add_long(&g_art_wcnt, 1, xtc_mo_seq_cst);
 	}
 	return NULL;
 }
@@ -1848,18 +1915,19 @@ art_reader(void *arg)
 	(void)arg;
 	for (i = 0; i < ART_N; i++) {
 		if (xtc_arwlock_rdlock(g_art, 10LL * 1000 * 1000 * 1000) != XTC_OK) {
-			atomic_fetch_add(&g_art_lost, 1);
+			xtc_atomic_fetch_add_i32(&g_art_lost, 1,
+			    xtc_mo_seq_cst);
 			break;
 		}
-		atomic_fetch_add(&g_art_inr, 1);
-		if (atomic_load(&g_art_inw) != 0)
-			atomic_store(&g_art_viol, 1);
+		xtc_atomic_fetch_add_i32(&g_art_inr, 1, xtc_mo_seq_cst);
+		if (xtc_atomic_load_i32(&g_art_inw, xtc_mo_seq_cst) != 0)
+			xtc_atomic_store_i32(&g_art_viol, 1, xtc_mo_seq_cst);
 		v = g_art_val;
 		if ((v & 1) != 0)
-			atomic_store(&g_art_viol, 1);
-		atomic_fetch_sub(&g_art_inr, 1);
+			xtc_atomic_store_i32(&g_art_viol, 1, xtc_mo_seq_cst);
+		xtc_atomic_fetch_sub_i32(&g_art_inr, 1, xtc_mo_seq_cst);
 		(void)xtc_arwlock_unlock(g_art);
-		atomic_fetch_add(&g_art_rcnt, 1);
+		xtc_atomic_fetch_add_long(&g_art_rcnt, 1, xtc_mo_seq_cst);
 	}
 	return NULL;
 }
@@ -1870,7 +1938,10 @@ test_arwlock_threads(const MunitParameter p[], void *d)
 	pthread_t th[ART_WR + ART_RD];
 	int i;
 	(void)p; (void)d;
-	g_art_viol = 0; g_art_lost = 0; g_art_wcnt = 0; g_art_rcnt = 0;
+	xtc_atomic_store_i32(&g_art_viol, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_art_lost, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_art_wcnt, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_art_rcnt, 0, xtc_mo_seq_cst);
 	g_art_val = 0;
 	munit_assert_int(xtc_arwlock_create(&g_art), ==, XTC_OK);
 	for (i = 0; i < ART_WR; i++)
@@ -1881,10 +1952,14 @@ test_arwlock_threads(const MunitParameter p[], void *d)
 		    art_reader, NULL), ==, 0);
 	for (i = 0; i < ART_WR + ART_RD; i++)
 		(void)pthread_join(th[i], NULL);
-	munit_assert_int(atomic_load(&g_art_viol), ==, 0);
-	munit_assert_int(atomic_load(&g_art_lost), ==, 0);
-	munit_assert_long(atomic_load(&g_art_wcnt), ==, (long)ART_WR * ART_N);
-	munit_assert_long(atomic_load(&g_art_rcnt), ==, (long)ART_RD * ART_N);
+	munit_assert_int(xtc_atomic_load_i32(&g_art_viol, xtc_mo_seq_cst), ==,
+	    0);
+	munit_assert_int(xtc_atomic_load_i32(&g_art_lost, xtc_mo_seq_cst), ==,
+	    0);
+	munit_assert_long(xtc_atomic_load_long(&g_art_wcnt, xtc_mo_seq_cst), ==,
+	    (long)ART_WR * ART_N);
+	munit_assert_long(xtc_atomic_load_long(&g_art_rcnt, xtc_mo_seq_cst), ==,
+	    (long)ART_RD * ART_N);
 	munit_assert_long(g_art_val, ==, 2L * ART_WR * ART_N);
 	xtc_arwlock_destroy(g_art);
 	return MUNIT_OK;
@@ -1901,7 +1976,7 @@ test_arwlock_threads(const MunitParameter p[], void *d)
 #define TT_N 6
 static xtc_amutex_t  *g_tt_m;
 static xtc_arwlock_t *g_tt_rw;
-static _Atomic int    g_tt_ok, g_tt_bad;
+static int g_tt_ok, g_tt_bad;
 
 static void *
 tt_thread(void *arg)
@@ -1913,7 +1988,10 @@ tt_thread(void *arg)
 		        : xtc_arwlock_wrlock(g_tt_rw, 1000 * 1000);
 		if (rc == XTC_E_AGAIN)
 			continue;
-		if (rc != XTC_OK) { atomic_fetch_add(&g_tt_bad, 1); break; }
+		if (rc != XTC_OK) {
+			xtc_atomic_fetch_add_i32(&g_tt_bad, 1, xtc_mo_seq_cst);
+			break;
+		}
 		(void)__os_sleep_ns((int64_t)(i % 4) * 1000 * 1000 / 4);
 		if (am) (void)xtc_amutex_unlock(g_tt_m);
 		else (void)xtc_arwlock_unlock(g_tt_rw);
@@ -1923,9 +2001,9 @@ tt_thread(void *arg)
 	        : xtc_arwlock_wrlock(g_tt_rw, 10LL * 1000 * 1000 * 1000);
 	(void)__os_clock_mono(&t1);
 	if (rc != XTC_OK || t1 - t0 > 2LL * 1000 * 1000 * 1000) {
-		atomic_fetch_add(&g_tt_bad, 1);
+		xtc_atomic_fetch_add_i32(&g_tt_bad, 1, xtc_mo_seq_cst);
 	} else {
-		atomic_fetch_add(&g_tt_ok, 1);
+		xtc_atomic_fetch_add_i32(&g_tt_ok, 1, xtc_mo_seq_cst);
 		if (am) (void)xtc_amutex_unlock(g_tt_m);
 		else (void)xtc_arwlock_unlock(g_tt_rw);
 	}
@@ -1941,14 +2019,17 @@ test_offloop_timed_handoff(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_amutex_create(&g_tt_m), ==, XTC_OK);
 	munit_assert_int(xtc_arwlock_create(&g_tt_rw), ==, XTC_OK);
 	for (am = 0; am < 2; am++) {
-		g_tt_ok = 0; g_tt_bad = 0;
+		xtc_atomic_store_i32(&g_tt_ok, 0, xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&g_tt_bad, 0, xtc_mo_seq_cst);
 		for (i = 0; i < TT_N; i++)
 			munit_assert_int(pthread_create(&th[i], NULL, tt_thread,
 			    (void *)(intptr_t)am), ==, 0);
 		for (i = 0; i < TT_N; i++)
 			(void)pthread_join(th[i], NULL);
-		munit_assert_int(atomic_load(&g_tt_bad), ==, 0);
-		munit_assert_int(atomic_load(&g_tt_ok), ==, TT_N);
+		munit_assert_int(xtc_atomic_load_i32(&g_tt_bad, xtc_mo_seq_cst),
+		    ==, 0);
+		munit_assert_int(xtc_atomic_load_i32(&g_tt_ok, xtc_mo_seq_cst),
+		    ==, TT_N);
 	}
 	munit_assert_int(xtc_amutex_try_lock(g_tt_m), ==, XTC_OK);
 	(void)xtc_amutex_unlock(g_tt_m);

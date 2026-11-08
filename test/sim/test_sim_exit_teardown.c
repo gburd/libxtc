@@ -33,7 +33,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,11 +46,11 @@
 #define N_LOOPS   4
 #define N_PROCS   24          /* many short-lived monitored procs */
 
-static atomic_int g_spawned;
-static atomic_int g_down_ok;      /* DOWN reason 0 (clean) */
-static atomic_int g_down_noproc;  /* DOWN XTC_DOWN_NOPROC (monitor raced exit) */
-static atomic_int g_down_bad;     /* any OTHER reason (a real classification bug) */
-static atomic_int g_sups_done;    /* supervisors that finished draining */
+static int g_spawned;
+static int g_down_ok;     /* DOWN reason 0 (clean) */
+static int g_down_noproc; /* DOWN XTC_DOWN_NOPROC (monitor raced exit) */
+static int g_down_bad;    /* any OTHER reason (a real classification bug) */
+static int g_sups_done;   /* supervisors that finished draining */
 
 /* A worker: yield a seeded number of times, then exit cleanly. */
 static void
@@ -60,7 +59,7 @@ worker(void *arg)
 	int k = 1 + (int)__xtc_sim_rng_range(XTC_SIM_RNG_APP, 6);
 	int i;
 	void *scratch = malloc(4096);
-	atomic_fetch_add(&g_spawned, 1);
+	xtc_atomic_fetch_add_i32(&g_spawned, 1, xtc_mo_seq_cst);
 	for (i = 0; i < k; i++) {
 		if (scratch)
 			memset(scratch, i & 0xff, 4096);
@@ -98,18 +97,22 @@ supervisor(void *arg)
 			if (xtc_down_decode(m, n, &dpid, &reason) == XTC_OK) {
 				seen++;
 				if (reason == 0)
-					atomic_fetch_add(&g_down_ok, 1);
+					xtc_atomic_fetch_add_i32(&g_down_ok, 1,
+					    xtc_mo_seq_cst);
 				else if (xtc_down_is_noproc(reason))
-					atomic_fetch_add(&g_down_noproc, 1);
+					xtc_atomic_fetch_add_i32(&g_down_noproc,
+					    1, xtc_mo_seq_cst);
 				else
-					atomic_fetch_add(&g_down_bad, 1);
+					xtc_atomic_fetch_add_i32(&g_down_bad, 1,
+					    xtc_mo_seq_cst);
 			}
 			xtc_free(m);
 		}
 	}
 	/* Stop only when EVERY supervisor has finished draining, so one
 	 * supervisor finishing does not cut off another's pending DOWN. */
-	if (atomic_fetch_add(&g_sups_done, 1) + 1 >= N_LOOPS)
+	if (xtc_atomic_fetch_add_i32(&g_sups_done, 1, xtc_mo_seq_cst) + 1 >=
+	    N_LOOPS)
 		(void)xtc_exec_stop(sa->e);
 }
 
@@ -121,11 +124,11 @@ run_one(uint64_t seed, int *out_ok, int *out_noproc, int *out_bad,
 	struct sup_arg sa[N_LOOPS];
 	int i, rc, base, rem;
 
-	atomic_store(&g_spawned, 0);
-	atomic_store(&g_down_ok, 0);
-	atomic_store(&g_down_noproc, 0);
-	atomic_store(&g_down_bad, 0);
-	atomic_store(&g_sups_done, 0);
+	xtc_atomic_store_i32(&g_spawned, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_down_ok, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_down_noproc, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_down_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_sups_done, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
 		return -1;
@@ -145,10 +148,15 @@ run_one(uint64_t seed, int *out_ok, int *out_noproc, int *out_bad,
 
 	rc = xtc_sim_exec_run(e, seed, 20000000);
 
-	if (out_ok)      *out_ok = atomic_load(&g_down_ok);
-	if (out_noproc)  *out_noproc = atomic_load(&g_down_noproc);
-	if (out_bad)     *out_bad = atomic_load(&g_down_bad);
-	if (out_spawned) *out_spawned = atomic_load(&g_spawned);
+	if (out_ok)
+		*out_ok = xtc_atomic_load_i32(&g_down_ok, xtc_mo_seq_cst);
+	if (out_noproc)
+		*out_noproc =
+		    xtc_atomic_load_i32(&g_down_noproc, xtc_mo_seq_cst);
+	if (out_bad)
+		*out_bad = xtc_atomic_load_i32(&g_down_bad, xtc_mo_seq_cst);
+	if (out_spawned)
+		*out_spawned = xtc_atomic_load_i32(&g_spawned, xtc_mo_seq_cst);
 	if (out_state)   *out_state = xtc_sim_state_hash(e);
 	(void)xtc_exec_fini(e);
 	return rc;

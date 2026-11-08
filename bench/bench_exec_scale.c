@@ -33,7 +33,6 @@
  *	                task free-list recycling, the realistic pattern)
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,8 +50,8 @@
 
 /* Per-loop counter, each on its own cache line (no false sharing). */
 typedef struct {
-	_Alignas(64) atomic_long v;
-	char pad[64 - sizeof(atomic_long)];
+	_Alignas(64) long v;
+	char pad[64 - sizeof(long)];
 } counter_t;
 static counter_t g_ctr[MAX_LOOPS];
 
@@ -75,8 +74,8 @@ leaf(xtc_task_t *self, void *u)
 {
 	(void)self;
 	work_chunk();
-	atomic_fetch_add_explicit(&g_ctr[(int)(intptr_t)u].v, 1,
-	    memory_order_relaxed);
+	xtc_atomic_fetch_add_long(&g_ctr[(int)(intptr_t)u].v, 1,
+	    xtc_mo_relaxed);
 	return XTC_TASK_DONE;
 }
 
@@ -104,7 +103,7 @@ generator(xtc_task_t *self, void *u)
  * makes room for the next), where the per-loop free-list recycles the
  * just-freed struct into the next spawn -- the case the free-list
  * optimizes.  g_units here is the TOTAL units the loop must retire. */
-static _Alignas(64) atomic_long g_owed[MAX_LOOPS];
+static _Alignas(64) long g_owed[MAX_LOOPS];
 #define CHURN_WIDTH 256   /* concurrent live tasks per loop */
 static struct genarg g_churn[MAX_LOOPS];
 static int
@@ -113,10 +112,10 @@ churn_leaf(xtc_task_t *self, void *u)
 	struct genarg *g = u;
 	(void)self;
 	work_chunk();
-	atomic_fetch_add_explicit(&g_ctr[g->idx].v, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_long(&g_ctr[g->idx].v, 1, xtc_mo_relaxed);
 	/* Spawn a replacement if the loop still owes retirements. */
-	if (atomic_fetch_sub_explicit(&g_owed[g->idx], 1,
-	    memory_order_relaxed) > CHURN_WIDTH)
+	if (xtc_atomic_fetch_sub_long(&g_owed[g->idx], 1, xtc_mo_relaxed) >
+	    CHURN_WIDTH)
 		(void)xtc_task_spawn(g->loop, churn_leaf, g, NULL);
 	return XTC_TASK_DONE;
 }
@@ -132,7 +131,7 @@ worker(xtc_task_t *self, void *u)
 	struct wk *w = u;
 	(void)self;
 	work_chunk();
-	atomic_fetch_add_explicit(&g_ctr[w->idx].v, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_long(&g_ctr[w->idx].v, 1, xtc_mo_relaxed);
 	if (--w->remaining > 0)
 		return XTC_TASK_RESCHED;
 	return XTC_TASK_DONE;
@@ -182,7 +181,7 @@ main(int argc, char **argv)
 		for (i = 0; i < loops; i++) {
 			g_churn[i].loop = xtc_exec_loop(e, i);
 			g_churn[i].idx = i;
-			atomic_store(&g_owed[i], per);
+			xtc_atomic_store_long(&g_owed[i], per, xtc_mo_seq_cst);
 			for (j = 0; j < CHURN_WIDTH; j++)
 				(void)xtc_task_spawn(g_churn[i].loop,
 				    churn_leaf, &g_churn[i], NULL);
@@ -213,7 +212,7 @@ main(int argc, char **argv)
 	clock_gettime(CLOCK_MONOTONIC, &t1);
 
 	for (i = 0; i < loops; i++)
-		done += atomic_load(&g_ctr[i].v);
+		done += xtc_atomic_load_long(&g_ctr[i].v, xtc_mo_seq_cst);
 	s = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
 
 	printf("mode=%-5s loops=%-3d done=%-10ld %7.3fs  %8.0f tasks/sec "

@@ -11,7 +11,6 @@
  * delivery added in M5.
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -303,7 +302,7 @@ test_inbox_res_wake_symmetric(const MunitParameter p[], void *d)
  * only (the counter is /proc/self/io); a work count, not a timing.
  */
 #define CW6_WAKES 200
-static _Atomic int  g_cw6_done;
+static int g_cw6_done;
 static long         g_cw6_writes = -1;
 
 static long
@@ -327,7 +326,9 @@ cw6_syscw(void)
 
 static int cw6_spinner_fn(xtc_task_t *self, void *u) {
 	(void)self; (void)u;
-	return atomic_load(&g_cw6_done) ? XTC_TASK_DONE : XTC_TASK_RESCHED;
+	return xtc_atomic_load_i32(&g_cw6_done, xtc_mo_seq_cst) ?
+	    XTC_TASK_DONE :
+	    XTC_TASK_RESCHED;
 }
 
 static int cw6_waker_fn(xtc_task_t *self, void *u) {
@@ -347,7 +348,7 @@ static int cw6_waker_fn(xtc_task_t *self, void *u) {
 	}
 	if (w0 >= 0)
 		g_cw6_writes = cw6_syscw() - w0;
-	atomic_store(&g_cw6_done, 1);
+	xtc_atomic_store_i32(&g_cw6_done, 1, xtc_mo_seq_cst);
 	return XTC_TASK_DONE;
 }
 
@@ -368,7 +369,7 @@ test_wake_running_loop_no_write(const MunitParameter p[], void *d)
 		return MUNIT_SKIP;
 	s.parker_runs = 0; s.init_done = 0; s.max_runs = CW6_WAKES + 1;
 	s.wake_calls = 0;
-	atomic_store(&g_cw6_done, 0);
+	xtc_atomic_store_i32(&g_cw6_done, 0, xtc_mo_seq_cst);
 	g_cw6_writes = -1;
 	munit_assert_int(xtc_exec_init(&e, 2), ==, XTC_OK);
 	munit_assert_int(xtc_exec_spawn_on(e, 0, cw6_spinner_fn, NULL, NULL),

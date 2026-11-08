@@ -33,7 +33,6 @@
  */
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include "xtc.h"
 #include "xtc_exec.h"
 #include "xtc_loop.h"
@@ -47,8 +46,8 @@
                                   * bounded finite job would just drain
                                   * both equally regardless of shares). */
 
-static atomic_int g_done;
-static atomic_int g_total_runs;   /* rounds executed across all workers */
+static int g_done;
+static int g_total_runs; /* rounds executed across all workers */
 
 /* A well-behaved worker: equal cooperative rounds, looping until the
  * shared run budget is spent.  Because the higher-shares class is
@@ -59,10 +58,10 @@ static void
 worker(void *arg)
 {
 	(void)arg;
-	while (atomic_fetch_add_explicit(&g_total_runs, 1,
-	    memory_order_relaxed) < TOTAL_BUDGET)
+	while (xtc_atomic_fetch_add_i32(&g_total_runs, 1, xtc_mo_relaxed) <
+	    TOTAL_BUDGET)
 		xtc_yield();
-	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 }
 
 struct spawn_ctx {
@@ -111,8 +110,8 @@ run_once(uint64_t seed, int use_classes, uint64_t *out_runs_a,
 	struct spawn_ctx ctx;
 	int rc;
 
-	atomic_store(&g_done, 0);
-	atomic_store(&g_total_runs, 0);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_total_runs, 0, xtc_mo_seq_cst);
 	if (xtc_exec_init(&e, 1) != XTC_OK)
 		return -1;
 	loop = xtc_exec_loop(e, 0);
@@ -144,15 +143,16 @@ run_once(uint64_t seed, int use_classes, uint64_t *out_runs_a,
 	if (out_runs_a) *out_runs_a = xtc_exec_class_runs(ca);
 	if (out_runs_b) *out_runs_b = xtc_exec_class_runs(cb);
 	if (out_state)  *out_state = xtc_sim_state_hash(e);
-	if (out_done)   *out_done = atomic_load(&g_done);
+	if (out_done)
+		*out_done = xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
 	(void)xtc_exec_fini(e);
 	return 0;
 }
 
 /* --- INV4: latency class scheduled promptly --- */
 
-static atomic_int g_lat_first_step;   /* scheduler step the lat proc first ran */
-static atomic_int g_step_counter;
+static int g_lat_first_step; /* scheduler step the lat proc first ran */
+static int g_step_counter;
 
 static void
 hog(void *arg)
@@ -160,8 +160,7 @@ hog(void *arg)
 	int i;
 	(void)arg;
 	for (i = 0; i < 200; i++) {
-		atomic_fetch_add_explicit(&g_step_counter, 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_step_counter, 1, xtc_mo_relaxed);
 		xtc_yield();
 	}
 }
@@ -171,10 +170,10 @@ latency_proc(void *arg)
 {
 	(void)arg;
 	/* Record the global step at which we first got to run. */
-	if (atomic_load_explicit(&g_lat_first_step, memory_order_relaxed) < 0)
-		atomic_store_explicit(&g_lat_first_step,
-		    atomic_load_explicit(&g_step_counter, memory_order_relaxed),
-		    memory_order_relaxed);
+	if (xtc_atomic_load_i32(&g_lat_first_step, xtc_mo_relaxed) < 0)
+		xtc_atomic_store_i32(&g_lat_first_step,
+		    xtc_atomic_load_i32(&g_step_counter, xtc_mo_relaxed),
+		    xtc_mo_relaxed);
 }
 
 struct lat_ctx {
@@ -212,8 +211,8 @@ run_latency(uint64_t seed, int *out_first_step)
 	xtc_exec_class_t hogc = NULL, latc = NULL;
 	struct lat_ctx ctx;
 
-	atomic_store(&g_lat_first_step, -1);
-	atomic_store(&g_step_counter, 0);
+	xtc_atomic_store_i32(&g_lat_first_step, -1, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_step_counter, 0, xtc_mo_seq_cst);
 	if (xtc_exec_init(&e, 1) != XTC_OK)
 		return -1;
 	loop = xtc_exec_loop(e, 0);
@@ -237,7 +236,8 @@ run_latency(uint64_t seed, int *out_first_step)
 		return -1;
 	}
 	if (out_first_step)
-		*out_first_step = atomic_load(&g_lat_first_step);
+		*out_first_step =
+		    xtc_atomic_load_i32(&g_lat_first_step, xtc_mo_seq_cst);
 	(void)xtc_exec_fini(e);
 	return 0;
 }

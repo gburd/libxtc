@@ -25,7 +25,6 @@
  *	Plain main(), exit 0 = pass, 77 = tnt unsupported (Windows).
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -45,36 +44,36 @@ int main(void) { return 77; }
 #define T_ECHO   0
 
 static struct __os_alloc_hook g_down;
-static _Atomic long g_alloc, g_free;          /* RECVBUF-sized blocks */
+static long g_alloc, g_free; /* RECVBUF-sized blocks */
 static void *g_taken, *g_sent;
-static _Atomic int g_done, g_ok, g_dropped_ok, g_take_bad;
+static int g_done, g_ok, g_dropped_ok, g_take_bad;
 
 /* Counting hook: blocks of exactly RECVBUF bytes are reactor buffers
  * (and the one test buffer below); track them by address. */
 #define TRACK 64
 static void *g_live[TRACK];
-static _Atomic int g_live_lock;
+static int g_live_lock;
 
 static void
 live_add(void *p)
 {
 	int i;
-	while (atomic_exchange(&g_live_lock, 1))
+	while (xtc_atomic_exchange_i32(&g_live_lock, 1, xtc_mo_seq_cst))
 		;
 	for (i = 0; i < TRACK; i++)
 		if (g_live[i] == NULL) { g_live[i] = p; break; }
-	atomic_store(&g_live_lock, 0);
+	xtc_atomic_store_i32(&g_live_lock, 0, xtc_mo_seq_cst);
 }
 
 static int
 live_del(void *p)
 {
 	int i, hit = 0;
-	while (atomic_exchange(&g_live_lock, 1))
+	while (xtc_atomic_exchange_i32(&g_live_lock, 1, xtc_mo_seq_cst))
 		;
 	for (i = 0; i < TRACK; i++)
 		if (g_live[i] == p) { g_live[i] = NULL; hit = 1; break; }
-	atomic_store(&g_live_lock, 0);
+	xtc_atomic_store_i32(&g_live_lock, 0, xtc_mo_seq_cst);
 	return hit;
 }
 
@@ -83,7 +82,7 @@ c_malloc(size_t n)
 {
 	void *p = g_down.malloc(n);
 	if (p != NULL && n == RECVBUF) {
-		atomic_fetch_add(&g_alloc, 1);
+		xtc_atomic_fetch_add_long(&g_alloc, 1, xtc_mo_seq_cst);
 		live_add(p);
 	}
 	return p;
@@ -94,7 +93,7 @@ static void
 c_free(void *q)
 {
 	if (q != NULL && live_del(q))
-		atomic_fetch_add(&g_free, 1);
+		xtc_atomic_fetch_add_long(&g_free, 1, xtc_mo_seq_cst);
 	g_down.free(q);
 }
 static void *c_aligned(size_t a, size_t n) { return g_down.aligned(a, n); }
@@ -131,7 +130,7 @@ echo_handler(void *self_raw, xtc_tnt_message_t *msg)
 		 * return WAIT_IO is never committed: the runtime frees it. */
 		if ((b = xtc_malloc(RECVBUF)) != NULL &&
 		    xtc_tnt_io_send_owned(self->fd, b, 8) == XTC_TNT_IO_OK)
-			atomic_store(&g_dropped_ok, 1);
+			xtc_atomic_store_i32(&g_dropped_ok, 1, xtc_mo_seq_cst);
 		(void)xtc_tnt_send(xtc_tnt_self(), TAG_READ, NULL, 0);
 		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 	case TAG_READ:
@@ -146,7 +145,8 @@ echo_handler(void *self_raw, xtc_tnt_message_t *msg)
 		b = xtc_tnt_recv_take(msg);
 		if (b == NULL || msg->body.io.buffer != NULL ||
 		    xtc_tnt_recv_take(msg) != NULL) {
-			atomic_store(&g_take_bad, 1);        /* -> FAIL */
+			xtc_atomic_store_i32(&g_take_bad, 1,
+			    xtc_mo_seq_cst); /* -> FAIL */
 			(void)xtc_tnt_submit_close(self->fd);
 			return XTC_TNT_TRANSITION_WAIT_IO;
 		}
@@ -161,11 +161,11 @@ echo_handler(void *self_raw, xtc_tnt_message_t *msg)
 		return XTC_TNT_TRANSITION_WAIT_IO;
 	case XTC_TNT_IO_TAG_SEND_COMPLETE:
 		if (msg->body.io.result == 8)
-			atomic_store(&g_ok, 1);
+			xtc_atomic_store_i32(&g_ok, 1, xtc_mo_seq_cst);
 		(void)xtc_tnt_submit_recv(self->fd);   /* next: EOF */
 		return XTC_TNT_TRANSITION_WAIT_IO;
 	case XTC_TNT_IO_TAG_CLOSE_COMPLETE:
-		atomic_store(&g_done, 1);
+		xtc_atomic_store_i32(&g_done, 1, xtc_mo_seq_cst);
 		xtc_tnt_stop();
 		return XTC_TNT_TRANSITION_DONE;
 	default:
@@ -246,24 +246,32 @@ main(void)
 	n = read(sv[0], back, sizeof back);
 
 	printf("start rc=%d done=%d send_ok=%d echo=%zd [%.*s]\n", rc,
-	    atomic_load(&g_done), atomic_load(&g_ok), n,
-	    (int)(n > 0 ? n : 0), back);
+	    xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst),
+	    xtc_atomic_load_i32(&g_ok, xtc_mo_seq_cst), n, (int)(n > 0 ? n : 0),
+	    back);
 	printf("reactor/owned %u-byte blocks: alloc=%ld free=%ld; "
-	    "dropped-owned staged=%d\n", RECVBUF, atomic_load(&g_alloc),
-	    atomic_load(&g_free), atomic_load(&g_dropped_ok));
+	       "dropped-owned staged=%d\n",
+	    RECVBUF, xtc_atomic_load_long(&g_alloc, xtc_mo_seq_cst),
+	    xtc_atomic_load_long(&g_free, xtc_mo_seq_cst),
+	    xtc_atomic_load_i32(&g_dropped_ok, xtc_mo_seq_cst));
 	printf("taken=%p sent=%p\n", g_taken, g_sent);
 
-	if (atomic_load(&g_take_bad)) {
+	if (xtc_atomic_load_i32(&g_take_bad, xtc_mo_seq_cst)) {
 		printf("recv_take did not hand the reactor buffer over\n");
 		fail = 1;
 	}
-	if (!atomic_load(&g_done) || !atomic_load(&g_ok)) fail = 1;
+	if (!xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst) ||
+	    !xtc_atomic_load_i32(&g_ok, xtc_mo_seq_cst))
+		fail = 1;
 	if (n < 8 || memcmp(back, "zerocopy", 8) != 0) fail = 1;
 	if (g_taken == NULL || g_sent != g_taken) fail = 1;
-	if (!atomic_load(&g_dropped_ok)) fail = 1;
+	if (!xtc_atomic_load_i32(&g_dropped_ok, xtc_mo_seq_cst))
+		fail = 1;
 	/* the dropped buffer + 2 reactor buffers, every one freed once. */
-	if (atomic_load(&g_alloc) != 3 ||
-	    atomic_load(&g_alloc) != atomic_load(&g_free)) fail = 1;
+	if (xtc_atomic_load_long(&g_alloc, xtc_mo_seq_cst) != 3 ||
+	    xtc_atomic_load_long(&g_alloc, xtc_mo_seq_cst) !=
+	        xtc_atomic_load_long(&g_free, xtc_mo_seq_cst))
+		fail = 1;
 	close(sv[0]);
 	printf("%s\n", fail ? "FAIL" : "PASS");
 	return fail;

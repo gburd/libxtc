@@ -50,7 +50,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <unistd.h>
 #include "xtc.h"
@@ -74,10 +73,10 @@
 static bm_t       *g_bm;
 static bm_pid_t    g_pid[N_ROOTS];
 
-static _Atomic uint64_t g_verified;     /* pinned reads that matched */
-static _Atomic uint64_t g_mismatch;     /* content/pid mismatches (bugs) */
-static _Atomic uint64_t g_fix_fail;     /* bm_fix returned != XTC_OK */
-static _Atomic int      g_workers_done; /* count; last one stops provider */
+static uint64_t g_verified; /* pinned reads that matched */
+static uint64_t g_mismatch; /* content/pid mismatches (bugs) */
+static uint64_t g_fix_fail; /* bm_fix returned != XTC_OK */
+static int g_workers_done;  /* count; last one stops provider */
 
 struct warg { int id; unsigned seed; };
 static struct warg g_warg[N_WORKERS];
@@ -123,7 +122,7 @@ worker_proc(void *arg)
 
 	local = malloc(PAGE_SZ);                  /* off the fiber stack */
 	if (local == NULL) {
-		atomic_fetch_add(&g_fix_fail, 1);
+		xtc_atomic_fetch_add_u64(&g_fix_fail, 1, xtc_mo_seq_cst);
 		goto done;
 	}
 
@@ -138,7 +137,8 @@ worker_proc(void *arg)
 			k = lo + (int)((unsigned)rand_r(&seed) % (unsigned)(hi - lo));
 
 		if (bm_fix_pid(g_bm, g_pid[k], &f) != XTC_OK) {
-			atomic_fetch_add(&g_fix_fail, 1);
+			xtc_atomic_fetch_add_u64(&g_fix_fail, 1,
+			    xtc_mo_seq_cst);
 			continue;
 		}
 
@@ -152,9 +152,11 @@ worker_proc(void *arg)
 
 		if (fpid != g_pid[k] ||
 		    !check_page(local, g_pid[k], (uint64_t)k))
-			atomic_fetch_add(&g_mismatch, 1);
+			xtc_atomic_fetch_add_u64(&g_mismatch, 1,
+			    xtc_mo_seq_cst);
 		else
-			atomic_fetch_add(&g_verified, 1);
+			xtc_atomic_fetch_add_u64(&g_verified, 1,
+			    xtc_mo_seq_cst);
 
 		/* Yield periodically so peers on the same loop and the
 		 * page-provider interleave with us. */
@@ -168,7 +170,8 @@ done:
 	/* The last worker to finish stops the provider so the executor,
 	 * once every proc has returned and the provider's timer is gone,
 	 * observes a globally idle state and lets xtc_sim_exec_run return. */
-	if (atomic_fetch_add(&g_workers_done, 1) + 1 == N_WORKERS)
+	if (xtc_atomic_fetch_add_i32(&g_workers_done, 1, xtc_mo_seq_cst) + 1 ==
+	    N_WORKERS)
 		bm_provider_stop(g_bm);
 }
 
@@ -241,10 +244,10 @@ run_once(uint64_t seed, uint64_t *out_verified, uint64_t *out_mismatch,
 	char path[] = "/tmp/sim_bufmgr_XXXXXX";
 	int fd, i, rc;
 
-	atomic_store(&g_verified, 0);
-	atomic_store(&g_mismatch, 0);
-	atomic_store(&g_fix_fail, 0);
-	atomic_store(&g_workers_done, 0);
+	xtc_atomic_store_u64(&g_verified, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_u64(&g_mismatch, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_u64(&g_fix_fail, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_workers_done, 0, xtc_mo_seq_cst);
 
 	fd = mkstemp(path);
 	if (fd < 0)
@@ -309,9 +312,9 @@ run_once(uint64_t seed, uint64_t *out_verified, uint64_t *out_mismatch,
 
 	rc = xtc_sim_exec_run(exec, seed, 20000000);
 
-	*out_verified = atomic_load(&g_verified);
-	*out_mismatch = atomic_load(&g_mismatch);
-	*out_fix_fail = atomic_load(&g_fix_fail);
+	*out_verified = xtc_atomic_load_u64(&g_verified, xtc_mo_seq_cst);
+	*out_mismatch = xtc_atomic_load_u64(&g_mismatch, xtc_mo_seq_cst);
+	*out_fix_fail = xtc_atomic_load_u64(&g_fix_fail, xtc_mo_seq_cst);
 	if (out_state)
 		*out_state = xtc_sim_state_hash(exec);
 

@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -60,22 +59,22 @@
 #define CON_NAMES  4
 
 static xtc_reg_t  *g_reg;
-static atomic_int   g_wins;        /* successful registrations */
-static atomic_int   g_bad_resolve; /* whereis returned the wrong pid (bug) */
-static atomic_int   g_bad_dup;     /* two winners held a name at once (bug) */
-static atomic_int   g_held[CON_NAMES];  /* live registrations per name */
-static atomic_int   g_done;
-static atomic_long  g_hash;        /* order-sensitive resolution fold */
+static int g_wins;            /* successful registrations */
+static int g_bad_resolve;     /* whereis returned the wrong pid (bug) */
+static int g_bad_dup;         /* two winners held a name at once (bug) */
+static int g_held[CON_NAMES]; /* live registrations per name */
+static int g_done;
+static long g_hash; /* order-sensitive resolution fold */
 
 static const char *g_names[CON_NAMES] = { "svc.a", "svc.b", "svc.c", "svc.d" };
 
 static void
 fold(long v)
 {
-	long h = atomic_load_explicit(&g_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(v + 1));
-	atomic_store_explicit(&g_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_hash, h, xtc_mo_relaxed);
 }
 
 static void
@@ -95,18 +94,17 @@ con_worker(void *arg)
 		/* Name already taken by another fiber -- a legal, expected
 		 * loser; do not touch it.  Yield so a winner can proceed. */
 		xtc_yield();
-		atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 		return;
 	}
 	if (rc != XTC_OK) {
-		atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 		return;
 	}
 	/* Won the name.  While held, exactly one holder must exist. */
-	atomic_fetch_add_explicit(&g_wins, 1, memory_order_relaxed);
-	if (atomic_fetch_add_explicit(&g_held[slot], 1, memory_order_relaxed)
-	    != 0)
-		atomic_fetch_add_explicit(&g_bad_dup, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_wins, 1, xtc_mo_relaxed);
+	if (xtc_atomic_fetch_add_i32(&g_held[slot], 1, xtc_mo_relaxed) != 0)
+		xtc_atomic_fetch_add_i32(&g_bad_dup, 1, xtc_mo_relaxed);
 
 	xtc_yield();     /* hold across a yield so others contend the name */
 
@@ -114,13 +112,12 @@ con_worker(void *arg)
 	if (xtc_reg_whereis(g_reg, name, &got) != XTC_OK ||
 	    got.loop_id != self.loop_id || got.local_id != self.local_id ||
 	    got.gen != self.gen)
-		atomic_fetch_add_explicit(&g_bad_resolve, 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_bad_resolve, 1, xtc_mo_relaxed);
 	fold((long)((uint64_t)slot << 16 ^ got.local_id));
 
-	atomic_fetch_sub_explicit(&g_held[slot], 1, memory_order_relaxed);
+	xtc_atomic_fetch_sub_i32(&g_held[slot], 1, xtc_mo_relaxed);
 	(void)xtc_reg_unregister(g_reg, name);
-	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -130,12 +127,13 @@ run_contend(uint64_t seed, int *out_done, int *out_wins, int *out_badr,
 	xtc_exec_t *e = NULL;
 	int i, rc;
 
-	atomic_store(&g_wins, 0);
-	atomic_store(&g_bad_resolve, 0);
-	atomic_store(&g_bad_dup, 0);
-	atomic_store(&g_done, 0);
-	atomic_store(&g_hash, 0);
-	for (i = 0; i < CON_NAMES; i++) atomic_store(&g_held[i], 0);
+	xtc_atomic_store_i32(&g_wins, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_bad_resolve, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_bad_dup, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
+	for (i = 0; i < CON_NAMES; i++)
+		xtc_atomic_store_i32(&g_held[i], 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	if (xtc_reg_create(&g_reg) != XTC_OK) {
@@ -147,12 +145,12 @@ run_contend(uint64_t seed, int *out_done, int *out_wins, int *out_badr,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_done = atomic_load(&g_done);
-	*out_wins = atomic_load(&g_wins);
-	*out_badr = atomic_load(&g_bad_resolve);
-	*out_badd = atomic_load(&g_bad_dup);
+	*out_done = xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
+	*out_wins = xtc_atomic_load_i32(&g_wins, xtc_mo_seq_cst);
+	*out_badr = xtc_atomic_load_i32(&g_bad_resolve, xtc_mo_seq_cst);
+	*out_badd = xtc_atomic_load_i32(&g_bad_dup, xtc_mo_seq_cst);
 	*out_count = xtc_reg_count(g_reg);
-	*out_hash = atomic_load(&g_hash);
+	*out_hash = xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_reg_destroy(g_reg);
 	g_reg = NULL;
@@ -166,9 +164,9 @@ run_contend(uint64_t seed, int *out_done, int *out_wins, int *out_badr,
 #define CHURN_ITERS 5
 
 static xtc_reg_t  *g_creg;
-static atomic_int   g_creg_ok;       /* register/whereis/unregister triples */
-static atomic_int   g_creg_bad;      /* a lookup missed its own registration */
-static atomic_int   g_creg_done;
+static int g_creg_ok;  /* register/whereis/unregister triples */
+static int g_creg_bad; /* a lookup missed its own registration */
+static int g_creg_done;
 
 static void
 churn_worker(void *arg)
@@ -185,8 +183,8 @@ churn_worker(void *arg)
 	for (it = 0; it < CHURN_ITERS; it++) {
 		int tries;
 		if (xtc_reg_register(g_creg, name, self) != XTC_OK) {
-			atomic_fetch_add_explicit(&g_creg_bad, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_creg_bad, 1,
+			    xtc_mo_relaxed);
 			break;
 		}
 		xtc_yield();
@@ -198,12 +196,12 @@ churn_worker(void *arg)
 			xtc_yield();
 		}
 		if (got.local_id != self.local_id)
-			atomic_fetch_add_explicit(&g_creg_bad, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_creg_bad, 1,
+			    xtc_mo_relaxed);
 		(void)xtc_reg_unregister(g_creg, name);
-		atomic_fetch_add_explicit(&g_creg_ok, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_creg_ok, 1, xtc_mo_relaxed);
 	}
-	atomic_fetch_add_explicit(&g_creg_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_creg_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -213,9 +211,9 @@ run_churn(uint64_t seed, int use_buggify, int *out_done, int *out_ok,
 	xtc_exec_t *e = NULL;
 	int i, rc;
 
-	atomic_store(&g_creg_ok, 0);
-	atomic_store(&g_creg_bad, 0);
-	atomic_store(&g_creg_done, 0);
+	xtc_atomic_store_i32(&g_creg_ok, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_creg_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_creg_done, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	if (xtc_reg_create(&g_creg) != XTC_OK) {
@@ -228,9 +226,9 @@ run_churn(uint64_t seed, int use_buggify, int *out_done, int *out_ok,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_done = atomic_load(&g_creg_done);
-	*out_ok = atomic_load(&g_creg_ok);
-	*out_bad = atomic_load(&g_creg_bad);
+	*out_done = xtc_atomic_load_i32(&g_creg_done, xtc_mo_seq_cst);
+	*out_ok = xtc_atomic_load_i32(&g_creg_ok, xtc_mo_seq_cst);
+	*out_bad = xtc_atomic_load_i32(&g_creg_bad, xtc_mo_seq_cst);
 	*out_count = xtc_reg_count(g_creg);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	if (use_buggify) xtc_sim_buggify_disable();
@@ -245,19 +243,19 @@ run_churn(uint64_t seed, int use_buggify, int *out_done, int *out_ok,
 #define PG_WORK   8
 
 static xtc_reg_t  *g_preg;
-static atomic_int   g_pg_bad;      /* a lost/duplicate membership (bug) */
-static atomic_int   g_pg_done;
-static atomic_long  g_pg_hash;     /* order-sensitive membership fold */
+static int g_pg_bad; /* a lost/duplicate membership (bug) */
+static int g_pg_done;
+static long g_pg_hash; /* order-sensitive membership fold */
 
 static int
 pg_count_cb(xtc_pid_t pid, void *user)
 {
 	(void)user;
 	/* fold the member pids so the final membership is replay-checkable */
-	long h = atomic_load_explicit(&g_pg_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_pg_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 	    (unsigned long)((long)pid.local_id + 1));
-	atomic_store_explicit(&g_pg_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_pg_hash, h, xtc_mo_relaxed);
 	return 0;
 }
 
@@ -284,12 +282,10 @@ pg_worker(void *arg)
 		int rc = xtc_reg_unregister_pid(g_preg, "grp", self);
 		/* Leaving a member must succeed exactly once. */
 		if (rc != XTC_OK)
-			atomic_fetch_add_explicit(&g_pg_bad, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_pg_bad, 1, xtc_mo_relaxed);
 		/* A second leave must fail (no phantom membership). */
 		if (xtc_reg_unregister_pid(g_preg, "grp", self) == XTC_OK)
-			atomic_fetch_add_explicit(&g_pg_bad, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_pg_bad, 1, xtc_mo_relaxed);
 	} else if (id == 1) {
 		/* One worker drops itself from EVERY key (simulates the
 		 * reaper's crash cleanup).  After this, id 1 must be in no
@@ -298,7 +294,7 @@ pg_worker(void *arg)
 		(void)xtc_reg_drop_pid(g_preg, self);
 	}
 	for (i = 0; i < 3; i++) xtc_yield();
-	atomic_fetch_add_explicit(&g_pg_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_pg_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -308,9 +304,9 @@ run_pg(uint64_t seed, int *out_done, int *out_bad, long *out_hash,
 	xtc_exec_t *e = NULL;
 	int i, rc;
 
-	atomic_store(&g_pg_bad, 0);
-	atomic_store(&g_pg_done, 0);
-	atomic_store(&g_pg_hash, 0);
+	xtc_atomic_store_i32(&g_pg_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_pg_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_pg_hash, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return XTC_E_NOMEM;
 	if (xtc_reg_create(&g_preg) != XTC_OK) {
@@ -325,9 +321,9 @@ run_pg(uint64_t seed, int *out_done, int *out_bad, long *out_hash,
 	/* Fold the final membership of both groups deterministically. */
 	*out_grp = xtc_reg_members(g_preg, "grp", pg_count_cb, NULL);
 	*out_grp2 = xtc_reg_members(g_preg, "grp2", pg_count_cb, NULL);
-	*out_done = atomic_load(&g_pg_done);
-	*out_bad = atomic_load(&g_pg_bad);
-	*out_hash = atomic_load(&g_pg_hash);
+	*out_done = xtc_atomic_load_i32(&g_pg_done, xtc_mo_seq_cst);
+	*out_bad = xtc_atomic_load_i32(&g_pg_bad, xtc_mo_seq_cst);
+	*out_hash = xtc_atomic_load_long(&g_pg_hash, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_reg_destroy(g_preg);
 	g_preg = NULL;

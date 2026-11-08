@@ -21,7 +21,6 @@
  */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,12 +39,12 @@
 #define ST_N_LOOPS   4
 #define ST_N_TASKS   200
 
-static _Atomic int  st_run_count[ST_N_TASKS];
-static _Atomic int  st_done_count;
+static int st_run_count[ST_N_TASKS];
+static int st_done_count;
 
 /* For the fairness test: each worker records the loop it ran on so
  * the test can count how many distinct loops participated. */
-static _Atomic(void *) st_ran_on[ST_N_TASKS];
+static void *st_ran_on[ST_N_TASKS];
 
 static int
 worker(xtc_task_t *self, void *arg)
@@ -54,9 +53,8 @@ worker(xtc_task_t *self, void *arg)
 	struct timespec ts = { 0, 50 * 1000 };  /* 0.05 ms each */
 	(void)self;
 	(void)nanosleep(&ts, NULL);
-	atomic_fetch_add_explicit(&st_run_count[task_id], 1,
-	    memory_order_relaxed);
-	atomic_fetch_add_explicit(&st_done_count, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&st_run_count[task_id], 1, xtc_mo_relaxed);
+	xtc_atomic_fetch_add_i32(&st_done_count, 1, xtc_mo_relaxed);
 	return XTC_TASK_DONE;
 }
 
@@ -67,8 +65,9 @@ test_no_loss_no_double_run(const MunitParameter p[], void *d)
 	int i, total_runs = 0;
 	(void)p; (void)d;
 
-	for (i = 0; i < ST_N_TASKS; i++) atomic_store(&st_run_count[i], 0);
-	atomic_store(&st_done_count, 0);
+	for (i = 0; i < ST_N_TASKS; i++)
+		xtc_atomic_store_i32(&st_run_count[i], 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&st_done_count, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_exec_init(&e, ST_N_LOOPS), ==, XTC_OK);
 
@@ -86,16 +85,19 @@ test_no_loss_no_double_run(const MunitParameter p[], void *d)
 
 	/* St2: every task ran at least once. */
 	for (i = 0; i < ST_N_TASKS; i++) {
-		int rc = atomic_load(&st_run_count[i]);
+		int rc = xtc_atomic_load_i32(&st_run_count[i], xtc_mo_seq_cst);
 		munit_assert_int(rc, >=, 1);
 		total_runs += rc;
 	}
 	/* St3: every task ran AT MOST once. */
 	for (i = 0; i < ST_N_TASKS; i++)
-		munit_assert_int(atomic_load(&st_run_count[i]), <=, 1);
+		munit_assert_int(xtc_atomic_load_i32(&st_run_count[i],
+		                     xtc_mo_seq_cst),
+		    <=, 1);
 
 	munit_assert_int(total_runs, ==, ST_N_TASKS);
-	munit_assert_int(atomic_load(&st_done_count), ==, ST_N_TASKS);
+	munit_assert_int(xtc_atomic_load_i32(&st_done_count, xtc_mo_seq_cst),
+	    ==, ST_N_TASKS);
 
 	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
 	return MUNIT_OK;
@@ -116,9 +118,9 @@ fair_worker(xtc_task_t *self, void *arg)
 	struct timespec ts = { 0, 200 * 1000 };  /* 0.2 ms each */
 	(void)self;
 	(void)nanosleep(&ts, NULL);
-	atomic_store_explicit(&st_ran_on[task_id],
-	    (void *)__xtc_current_loop, memory_order_relaxed);
-	atomic_fetch_add_explicit(&st_done_count, 1, memory_order_relaxed);
+	xtc_atomic_store_ptr(&st_ran_on[task_id], (void *)__xtc_current_loop,
+	    xtc_mo_relaxed);
+	xtc_atomic_fetch_add_i32(&st_done_count, 1, xtc_mo_relaxed);
 	return XTC_TASK_DONE;
 }
 
@@ -131,8 +133,8 @@ test_steals_happen(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	for (i = 0; i < ST_N_TASKS; i++)
-		atomic_store(&st_ran_on[i], NULL);
-	atomic_store(&st_done_count, 0);
+		xtc_atomic_store_ptr(&st_ran_on[i], NULL, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&st_done_count, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_exec_init(&e, ST_N_LOOPS), ==, XTC_OK);
 	for (i = 0; i < ST_N_TASKS; i++) {
@@ -143,11 +145,12 @@ test_steals_happen(const MunitParameter p[], void *d)
 		    fair_worker, (void *)(intptr_t)i, &t), ==, XTC_OK);
 	}
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	munit_assert_int(atomic_load(&st_done_count), ==, ST_N_TASKS);
+	munit_assert_int(xtc_atomic_load_i32(&st_done_count, xtc_mo_seq_cst),
+	    ==, ST_N_TASKS);
 
 	/* Count distinct loops that ran a task. */
 	for (i = 0; i < ST_N_TASKS; i++) {
-		void *l = atomic_load(&st_ran_on[i]);
+		void *l = xtc_atomic_load_ptr(&st_ran_on[i], xtc_mo_seq_cst);
 		int j, found = 0;
 		if (l == NULL) continue;
 		for (j = 0; j < n_distinct; j++)
@@ -190,7 +193,7 @@ test_steals_happen(const MunitParameter p[], void *d)
  * way.
  */
 #define M8_ITERS 2000
-static _Atomic int m8_count[2];
+static int m8_count[2];
 static int m8_seen_at_finish[2];
 
 static void
@@ -198,10 +201,11 @@ m8_yielder(void *arg)
 {
 	int me = (int)(intptr_t)arg, k;
 	for (k = 0; k < M8_ITERS; k++) {
-		atomic_fetch_add(&m8_count[me], 1);
+		xtc_atomic_fetch_add_i32(&m8_count[me], 1, xtc_mo_seq_cst);
 		xtc_yield();
 	}
-	m8_seen_at_finish[me] = atomic_load(&m8_count[!me]);
+	m8_seen_at_finish[me] =
+	    xtc_atomic_load_i32(&m8_count[!me], xtc_mo_seq_cst);
 }
 
 static int
@@ -212,8 +216,8 @@ m8_run_pair(int migratable0, int migratable1)
 	xtc_pid_t pid;
 	o0.migratable = migratable0;
 	o1.migratable = migratable1;
-	atomic_store(&m8_count[0], 0);
-	atomic_store(&m8_count[1], 0);
+	xtc_atomic_store_i32(&m8_count[0], 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&m8_count[1], 0, xtc_mo_seq_cst);
 	m8_seen_at_finish[0] = m8_seen_at_finish[1] = -1;
 	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0), m8_yielder,
@@ -246,14 +250,14 @@ test_yield_fairness(const MunitParameter p[], void *d)
  * (or eager rebalance), so loop 1 sat out the whole sleep: steals [0, 0].
  */
 #define M9_BUSY 32
-static _Atomic int m9_stop;
+static int m9_stop;
 
 static void
 m9_busy(void *arg)
 {
 	volatile int k;
 	(void)arg;
-	while (!atomic_load(&m9_stop)) {
+	while (!xtc_atomic_load_i32(&m9_stop, xtc_mo_seq_cst)) {
 		for (k = 0; k < 2000; k++)
 			;
 		xtc_yield();
@@ -265,7 +269,7 @@ m9_sleeper(void *arg)
 {
 	(void)arg;
 	(void)xtc_proc_sleep(300 * 1000 * 1000LL);
-	atomic_store(&m9_stop, 1);
+	xtc_atomic_store_i32(&m9_stop, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -277,7 +281,7 @@ test_steal_with_pending_timer(const MunitParameter p[], void *d)
 	xtc_pid_t pid;
 	int i;
 	(void)p; (void)d;
-	atomic_store(&m9_stop, 0);
+	xtc_atomic_store_i32(&m9_stop, 0, xtc_mo_seq_cst);
 	mo.migratable = 1;
 	munit_assert_int(xtc_exec_init(&e, 2), ==, XTC_OK);
 	for (i = 0; i < M9_BUSY; i++)

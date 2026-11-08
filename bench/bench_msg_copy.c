@@ -37,7 +37,6 @@
 #include "xtc_exec.h"
 #include "xtc_proc.h"
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,7 +46,7 @@ static int        g_owned;
 static size_t     g_size;
 static long       g_nmsg;
 static xtc_atomic_pid_t g_rx;
-static _Atomic int g_ready;
+static int g_ready;
 static int64_t    g_t0, g_t1;
 static uint64_t   g_sum;
 static size_t     g_stride = 4096;
@@ -61,7 +60,7 @@ rx_proc(void *arg)
 	uint64_t sum = 0;
 	(void)arg;
 	xtc_atomic_pid_store(&g_rx, xtc_self());
-	atomic_store(&g_ready, 1);
+	xtc_atomic_store_i32(&g_ready, 1, xtc_mo_seq_cst);
 	for (i = 0; i < g_nmsg; i++) {
 		void *m = NULL;
 		size_t n = 0, k;
@@ -93,7 +92,7 @@ tx_proc(void *arg)
 	uint8_t *src = NULL;
 	xtc_pid_t to;
 	(void)arg;
-	while (!atomic_load(&g_ready))
+	while (!xtc_atomic_load_i32(&g_ready, xtc_mo_seq_cst))
 		(void)xtc_yield();
 	to = xtc_atomic_pid_load(&g_rx);
 	if (!g_owned) {

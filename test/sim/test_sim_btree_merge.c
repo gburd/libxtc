@@ -47,7 +47,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,8 +74,8 @@
 
 static bm_t       *g_bm;
 static bt_t       *g_bt;
-static _Atomic int g_left;         /* churners still running */
-static _Atomic long g_read_mismatch;
+static int g_left; /* churners still running */
+static long g_read_mismatch;
 
 static void
 anchor_kv(int i, char *k, char *v)
@@ -116,7 +115,7 @@ churner_proc(void *arg)
 				xtc_yield();
 		}
 	}
-	if (atomic_fetch_sub(&g_left, 1) == 1)
+	if (xtc_atomic_fetch_sub_i32(&g_left, 1, xtc_mo_seq_cst) == 1)
 		bm_provider_stop(g_bm);
 }
 
@@ -139,7 +138,8 @@ reader_proc(void *arg)
 		if (bt_lookup(g_bt, k, (uint16_t)strlen(k), buf, sizeof buf,
 		    &vl) == XTC_OK) {
 			if (vl != strlen(v) || memcmp(buf, v, vl) != 0)
-				atomic_fetch_add(&g_read_mismatch, 1);
+				xtc_atomic_fetch_add_long(&g_read_mismatch, 1,
+				    xtc_mo_seq_cst);
 		}
 		if ((i & 7) == 0)
 			xtc_yield();
@@ -186,8 +186,8 @@ run_once(uint64_t seed, int adversarial, struct run_out *out)
 	uint16_t ckl, cvl;
 
 	memset(out, 0, sizeof *out);
-	atomic_store(&g_left, N_CHURNERS);
-	atomic_store(&g_read_mismatch, 0);
+	xtc_atomic_store_i32(&g_left, N_CHURNERS, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_read_mismatch, 0, xtc_mo_seq_cst);
 
 	fd = mkstemp(path);
 	if (fd < 0)
@@ -326,7 +326,7 @@ run_once(uint64_t seed, int adversarial, struct run_out *out)
 	} else
 		out->scan_bad = 1;
 
-	out->mismatch = atomic_load(&g_read_mismatch);
+	out->mismatch = xtc_atomic_load_long(&g_read_mismatch, xtc_mo_seq_cst);
 	out->result = result_hash(out->missing, out->churn_surv,
 	    out->scan_count, out->mismatch);
 

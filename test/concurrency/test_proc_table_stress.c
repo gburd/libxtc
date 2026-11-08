@@ -34,7 +34,6 @@
 
 #include <pthread.h>
 #include <signal.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,10 +52,10 @@
 
 static xtc_exec_t   *g_exec;
 static xtc_pid_t     g_rcv[RECEIVERS];
-static atomic_int    g_ready;         /* receivers that have registered */
-static atomic_int    g_recv_total;    /* messages delivered, all receivers */
-static atomic_int    g_bad;           /* torn/misrouted payloads */
-static atomic_int    g_go;
+static int g_ready;      /* receivers that have registered */
+static int g_recv_total; /* messages delivered, all receivers */
+static int g_bad;        /* torn/misrouted payloads */
+static int g_go;
 
 struct msg { int sender; int seq; int target_idx; };
 
@@ -77,7 +76,7 @@ receiver(void *arg)
 {
 	int idx = (int)(intptr_t)arg;
 	g_rcv[idx] = xtc_self();
-	atomic_fetch_add_explicit(&g_ready, 1, memory_order_release);
+	xtc_atomic_fetch_add_i32(&g_ready, 1, xtc_mo_release);
 
 	for (;;) {
 		void *data = NULL;
@@ -91,13 +90,12 @@ receiver(void *arg)
 		if (sz == sizeof(struct msg)) {
 			struct msg *m = data;
 			if (m->target_idx != idx)   /* misrouted! */
-				atomic_fetch_add_explicit(&g_bad, 1,
-				    memory_order_relaxed);
-			atomic_fetch_add_explicit(&g_recv_total, 1,
-			    memory_order_relaxed);
+				xtc_atomic_fetch_add_i32(&g_bad, 1,
+				    xtc_mo_relaxed);
+			xtc_atomic_fetch_add_i32(&g_recv_total, 1,
+			    xtc_mo_relaxed);
 		} else {
-			atomic_fetch_add_explicit(&g_bad, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_bad, 1, xtc_mo_relaxed);
 		}
 		if (data) xtc_free(data);
 	}
@@ -112,7 +110,7 @@ sender_thread(void *arg)
 	int id = (int)(intptr_t)arg;
 	uint64_t rng = 0x9E3779B97F4A7C15ULL * (uint64_t)(id + 1);
 	int i;
-	while (!atomic_load_explicit(&g_go, memory_order_acquire))
+	while (!xtc_atomic_load_i32(&g_go, xtc_mo_acquire))
 		sched_yield();
 	for (i = 0; i < ITERS; i++) {
 		struct msg m;
@@ -143,10 +141,10 @@ main(void)
 	}
 	g_exec = e;
 	xtc_exec_set_service_mode(e, 1);   /* do not idle-auto-stop */
-	atomic_store(&g_ready, 0);
-	atomic_store(&g_recv_total, 0);
-	atomic_store(&g_bad, 0);
-	atomic_store(&g_go, 0);
+	xtc_atomic_store_i32(&g_ready, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_recv_total, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_go, 0, xtc_mo_seq_cst);
 
 	for (i = 0; i < RECEIVERS; i++)
 		(void)xtc_proc_spawn(xtc_exec_loop(e, (unsigned)(i % LOOPS)),
@@ -158,20 +156,21 @@ main(void)
 		return 77;
 	}
 	/* Wait for every receiver to register its pid. */
-	while (atomic_load_explicit(&g_ready, memory_order_acquire) < RECEIVERS)
+	while (xtc_atomic_load_i32(&g_ready, xtc_mo_acquire) < RECEIVERS)
 		usleep(1000);
 
 	for (i = 0; i < SENDERS; i++)
 		pthread_create(&st[i], NULL, sender_thread, (void *)(intptr_t)i);
-	atomic_store_explicit(&g_go, 1, memory_order_release);
+	xtc_atomic_store_i32(&g_go, 1, xtc_mo_release);
 	for (i = 0; i < SENDERS; i++)
 		pthread_join(st[i], NULL);
 
 	/* Drain: wait until every message is accounted for. */
 	{
 		int spins = 0;
-		while (atomic_load_explicit(&g_recv_total,
-		    memory_order_acquire) < SENDERS * ITERS && spins++ < 10000)
+		while (xtc_atomic_load_i32(&g_recv_total, xtc_mo_acquire) <
+		        SENDERS * ITERS &&
+		    spins++ < 10000)
 			usleep(1000);
 	}
 
@@ -184,8 +183,8 @@ main(void)
 	(void)xtc_exec_fini(e);
 
 	{
-		int total = atomic_load(&g_recv_total);
-		int bad = atomic_load(&g_bad);
+		int total = xtc_atomic_load_i32(&g_recv_total, xtc_mo_seq_cst);
+		int bad = xtc_atomic_load_i32(&g_bad, xtc_mo_seq_cst);
 		printf("proc-table stress: %d receivers x %d loops, %d senders "
 		    "x %d iters => %d delivered (expect %d), %d bad\n",
 		    RECEIVERS, LOOPS, SENDERS, ITERS, total, SENDERS * ITERS,

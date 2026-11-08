@@ -23,7 +23,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,8 +32,8 @@
 #include "xtc_proc.h"
 #include "xtc_sim.h"
 
-static atomic_int g_inject;   /* worker injects a violation when set */
-static atomic_int g_ran;
+static int g_inject; /* worker injects a violation when set */
+static int g_ran;
 
 /* A trivial worker: yield a couple of times, then exit.  If g_inject is
  * set, it calls the determinism guard directly to SIMULATE a
@@ -43,9 +42,9 @@ static void
 worker(void *arg)
 {
 	(void)arg;
-	atomic_fetch_add(&g_ran, 1);
+	xtc_atomic_fetch_add_i32(&g_ran, 1, xtc_mo_seq_cst);
 	xtc_yield();
-	if (atomic_load(&g_inject))
+	if (xtc_atomic_load_i32(&g_inject, xtc_mo_seq_cst))
 		__xtc_sim_nondeterminism("test-injected real clock");
 	xtc_yield();
 	xtc_exit_self(0);
@@ -56,8 +55,8 @@ run_one(uint64_t seed, int inject, int *out_violations)
 {
 	xtc_exec_t *e = NULL;
 	int rc;
-	atomic_store(&g_ran, 0);
-	atomic_store(&g_inject, inject);
+	xtc_atomic_store_i32(&g_ran, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_inject, inject, xtc_mo_seq_cst);
 	if (xtc_exec_init(&e, 2) != XTC_OK)
 		return -999;
 	/* Count-only mode so an injected violation does not abort the test

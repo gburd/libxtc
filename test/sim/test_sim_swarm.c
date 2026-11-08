@@ -6,7 +6,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -112,18 +111,18 @@
 #define PAIR_IS_CUT(i)  (((i) % N_LOOPS) == CUT_LOOP_A && \
 	((((i) + 1) % N_LOOPS) == CUT_LOOP_B))
 
-static atomic_int  g_replies;
-static atomic_int  g_pair_replies[N_PAIRS];   /* round-trips, PER PAIR */
-static atomic_int  g_pair_drops[N_PAIRS];     /* sends DROPPED, per pair */
-static atomic_int  g_sleeps;
-static atomic_int  g_killed;      /* 1 if the reaper fired this run */
-static atomic_int  g_kill_victim; /* pair index the reaper killed, else -1 */
-static atomic_int  g_torn_bad;    /* torn/corrupt pages ACCEPTED silently (MUST be 0) */
-static atomic_int  g_torn_detected;   /* tears the checksum CAUGHT */
-static atomic_int  g_torn_verified;   /* verifiers that converged */
-static atomic_int  g_torn_stuck;      /* verifiers that EXHAUSTED retries */
-static atomic_int  g_torn_skipped;    /* torn workload NOT run (no temp file) */
-static atomic_long g_app_hash;
+static int g_replies;
+static int g_pair_replies[N_PAIRS]; /* round-trips, PER PAIR */
+static int g_pair_drops[N_PAIRS];   /* sends DROPPED, per pair */
+static int g_sleeps;
+static int g_killed;      /* 1 if the reaper fired this run */
+static int g_kill_victim; /* pair index the reaper killed, else -1 */
+static int g_torn_bad;    /* torn/corrupt pages ACCEPTED silently (MUST be 0) */
+static int g_torn_detected; /* tears the checksum CAUGHT */
+static int g_torn_verified; /* verifiers that converged */
+static int g_torn_stuck;    /* verifiers that EXHAUSTED retries */
+static int g_torn_skipped;  /* torn workload NOT run (no temp file) */
+static long g_app_hash;
 
 /* Seeded per-run scenario, derived from the seed before the run. */
 struct scenario {
@@ -201,8 +200,7 @@ torn_verifier(void *arg)
 	int attempt;
 	if (g_torn_fd < 0) {
 		/* Not reachable: run_once counts the skip before spawning. */
-		atomic_fetch_add_explicit(&g_torn_skipped, 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_torn_skipped, 1, xtc_mo_relaxed);
 		return;
 	}
 	for (attempt = 0; attempt < TORN_TRIES; attempt++) {
@@ -220,8 +218,8 @@ torn_verifier(void *arg)
 		if (got != want) {
 			/* Checksum REJECTED the page: a torn write (or a
 			 * corrupt read) was DETECTED.  Rewrite and retry. */
-			atomic_fetch_add_explicit(&g_torn_detected, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_torn_detected, 1,
+			    xtc_mo_relaxed);
 			continue;
 		}
 		/*
@@ -238,26 +236,24 @@ torn_verifier(void *arg)
 		 * incremented, so the advertised check was vacuous).
 		 */
 		if (!torn_page_legal(rd, id)) {
-			atomic_fetch_add_explicit(&g_torn_bad, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_torn_bad, 1,
+			    xtc_mo_relaxed);
 			return;
 		}
 		if (memcmp(rd, page, TORN_PAGE) != 0) {
 			/* Legal, but an earlier image: this attempt's write was
 			 * torn back to a prior consistent page -- detected as
 			 * "not what I just wrote", and safe. */
-			atomic_fetch_add_explicit(&g_torn_detected, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_torn_detected, 1,
+			    xtc_mo_relaxed);
 		}
-		atomic_fetch_add_explicit(&g_torn_verified, 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_torn_verified, 1, xtc_mo_relaxed);
 		{
-			long h = atomic_load_explicit(&g_app_hash,
-			    memory_order_relaxed);
+			long h =
+			    xtc_atomic_load_long(&g_app_hash, xtc_mo_relaxed);
 			h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(id + 100));
-			atomic_store_explicit(&g_app_hash, h,
-			    memory_order_relaxed);
+			xtc_atomic_store_long(&g_app_hash, h, xtc_mo_relaxed);
 		}
 		return;                        /* verified */
 	}
@@ -267,7 +263,7 @@ torn_verifier(void *arg)
 	 * page that never converges is a page whose durability was never
 	 * established, so record it and let the sweep FAIL on it.
 	 */
-	atomic_fetch_add_explicit(&g_torn_stuck, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_torn_stuck, 1, xtc_mo_relaxed);
 }
 
 /* ---- ping/pong: a pong replies to N_HOPS pings; a ping does N_HOPS
@@ -317,8 +313,8 @@ ping(void *arg)
 			/* dropped (partition) or soft-full: back off + retry.
 			 * Counted PER PAIR: this is the observable that proves a
 			 * partition actually cut this pair's traffic. */
-			atomic_fetch_add_explicit(&g_pair_drops[pa->id], 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_pair_drops[pa->id], 1,
+			    xtc_mo_relaxed);
 			(void)xtc_proc_sleep(1 * 1000 * 1000LL);
 			continue;
 		}
@@ -328,13 +324,13 @@ ping(void *arg)
 		    m == NULL)
 			continue;              /* no reply (killed peer): retry */
 		free(m);
-		atomic_fetch_add_explicit(&g_replies, 1, memory_order_relaxed);
-		atomic_fetch_add_explicit(&g_pair_replies[pa->id], 1,
-		    memory_order_relaxed);
-		h = atomic_load_explicit(&g_app_hash, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_replies, 1, xtc_mo_relaxed);
+		xtc_atomic_fetch_add_i32(&g_pair_replies[pa->id], 1,
+		    xtc_mo_relaxed);
+		h = xtc_atomic_load_long(&g_app_hash, xtc_mo_relaxed);
 		h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(pa->id + 1));
-		atomic_store_explicit(&g_app_hash, h, memory_order_relaxed);
+		xtc_atomic_store_long(&g_app_hash, h, xtc_mo_relaxed);
 		hops--;
 	}
 }
@@ -346,7 +342,7 @@ sleeper(void *arg)
 	int i;
 	for (i = 0; i < 3; i++)
 		(void)xtc_proc_sleep((int64_t)(id % 5 + 1) * 1000000LL);
-	atomic_fetch_add_explicit(&g_sleeps, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_sleeps, 1, xtc_mo_relaxed);
 }
 
 /* The reaper: kills a seeded pong proc mid-run.  The victim pid is
@@ -364,11 +360,10 @@ reaper(void *arg)
 	(void)xtc_proc_sleep(delay);
 	if (!xtc_pid_is_none(ra->pongs[victim])) {
 		(void)xtc_exit_pid(ra->pongs[victim], 99);
-		atomic_store_explicit(&g_killed, 1, memory_order_relaxed);
+		xtc_atomic_store_i32(&g_killed, 1, xtc_mo_relaxed);
 		/* Which pair lost its pong: the partition oracle must not
 		 * demand drops from a pair whose peer is simply gone. */
-		atomic_store_explicit(&g_kill_victim, victim,
-		    memory_order_relaxed);
+		xtc_atomic_store_i32(&g_kill_victim, victim, xtc_mo_relaxed);
 	}
 }
 
@@ -435,19 +430,19 @@ run_once(uint64_t seed, const struct scenario *sc, uint64_t *out_state,
 	xtc_exec_t *e = NULL;
 	int i, rc;
 
-	atomic_store(&g_replies, 0);
-	atomic_store(&g_sleeps, 0);
-	atomic_store(&g_killed, 0);
-	atomic_store(&g_kill_victim, -1);
-	atomic_store(&g_torn_bad, 0);
-	atomic_store(&g_torn_detected, 0);
-	atomic_store(&g_torn_verified, 0);
-	atomic_store(&g_torn_stuck, 0);
-	atomic_store(&g_torn_skipped, 0);
-	atomic_store(&g_app_hash, 0);
+	xtc_atomic_store_i32(&g_replies, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_sleeps, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_killed, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_kill_victim, -1, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_torn_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_torn_detected, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_torn_verified, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_torn_stuck, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_torn_skipped, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_app_hash, 0, xtc_mo_seq_cst);
 	for (i = 0; i < N_PAIRS; i++) {
-		atomic_store(&g_pair_replies[i], 0);
-		atomic_store(&g_pair_drops[i], 0);
+		xtc_atomic_store_i32(&g_pair_replies[i], 0, xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&g_pair_drops[i], 0, xtc_mo_seq_cst);
 	}
 
 	xtc_sim_partition_clear();
@@ -533,14 +528,14 @@ run_once(uint64_t seed, const struct scenario *sc, uint64_t *out_state,
 			 * smaller workload while still printing "torn-write
 			 * scenarios" is exactly how a check rots into a claim.
 			 */
-			atomic_store_explicit(&g_torn_skipped, 1,
-			    memory_order_relaxed);
+			xtc_atomic_store_i32(&g_torn_skipped, 1,
+			    xtc_mo_relaxed);
 		}
 	}
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 	*out_state = xtc_sim_state_hash(e);
-	*out_app = atomic_load(&g_app_hash);
+	*out_app = xtc_atomic_load_long(&g_app_hash, xtc_mo_seq_cst);
 
 	/*
 	 * Collect the fault-activation report BEFORE any cleanup:
@@ -664,35 +659,40 @@ main(int argc, char **argv)
 		tot_activations += act1;
 		if (act1 > 0)
 			seeds_with_activation++;
-		torn_detected += atomic_load(&g_torn_detected);
-		torn_verified += atomic_load(&g_torn_verified);
-		torn_skipped  += atomic_load(&g_torn_skipped);
+		torn_detected +=
+		    xtc_atomic_load_i32(&g_torn_detected, xtc_mo_seq_cst);
+		torn_verified +=
+		    xtc_atomic_load_i32(&g_torn_verified, xtc_mo_seq_cst);
+		torn_skipped +=
+		    xtc_atomic_load_i32(&g_torn_skipped, xtc_mo_seq_cst);
 
 		/* ---- silent-corruption oracle.  Previously vacuous:
 		 * g_torn_bad was never incremented anywhere, so this branch
 		 * could not be taken by any input. ---- */
-		if (atomic_load(&g_torn_bad) != 0) {
-			printf("FAIL seed=%llu: %d torn/corrupt page(s) accepted "
+		if (xtc_atomic_load_i32(&g_torn_bad, xtc_mo_seq_cst) != 0) {
+			printf(
+			    "FAIL seed=%llu: %d torn/corrupt page(s) accepted "
 			    "SILENTLY (a checksum-VALID page held bytes no "
 			    "writer ever wrote) -- durability broken\n",
 			    (unsigned long long)seed,
-			    atomic_load(&g_torn_bad));
+			    xtc_atomic_load_i32(&g_torn_bad, xtc_mo_seq_cst));
 			failures++; NOTE_FAIL_OFFSET();
 			continue;
 		}
 		/* A verifier that burned every retry never established its
 		 * page's durability; the old loop just fell out and passed. */
-		if (atomic_load(&g_torn_stuck) != 0) {
+		if (xtc_atomic_load_i32(&g_torn_stuck, xtc_mo_seq_cst) != 0) {
 			printf("FAIL seed=%llu: %d torn-page verifier(s) "
-			    "EXHAUSTED %d retries without a checksum-valid "
-			    "read-back -- durability never established\n",
+			       "EXHAUSTED %d retries without a checksum-valid "
+			       "read-back -- durability never established\n",
 			    (unsigned long long)seed,
-			    atomic_load(&g_torn_stuck), TORN_TRIES);
+			    xtc_atomic_load_i32(&g_torn_stuck, xtc_mo_seq_cst),
+			    TORN_TRIES);
 			failures++; NOTE_FAIL_OFFSET();
 			continue;
 		}
 		/* A workload that did not run must be VISIBLE, not absent. */
-		if (atomic_load(&g_torn_skipped) != 0) {
+		if (xtc_atomic_load_i32(&g_torn_skipped, xtc_mo_seq_cst) != 0) {
 			printf("FAIL seed=%llu: the torn-write workload was "
 			    "SKIPPED (no usable temp file) -- this seed "
 			    "advertises a scenario it did not execute\n",
@@ -705,17 +705,21 @@ main(int argc, char **argv)
 		 * workload traffic.  A cut pair (pong on CUT_LOOP_A, ping on
 		 * CUT_LOOP_B) has BOTH directions blocked, so it completes ZERO
 		 * round-trips and its ping sees XTC_E_AGAIN on every send. ---- */
-		victim = atomic_load(&g_kill_victim);
+		victim = xtc_atomic_load_i32(&g_kill_victim, xtc_mo_seq_cst);
 		victim_is_cut = (victim >= 0 && victim < N_PAIRS &&
 		    PAIR_IS_CUT(victim));
 		for (i = 0; i < N_PAIRS; i++) {
 			if (!PAIR_IS_CUT(i))
 				continue;
-			if (atomic_load(&g_pair_drops[i]) > 0) {
+			if (xtc_atomic_load_i32(&g_pair_drops[i],
+			        xtc_mo_seq_cst) > 0) {
 				cut_drop_pairs++;
-				cut_drops += atomic_load(&g_pair_drops[i]);
+				cut_drops +=
+				    xtc_atomic_load_i32(&g_pair_drops[i],
+				        xtc_mo_seq_cst);
 			}
-			if (atomic_load(&g_pair_replies[i]) > 0)
+			if (xtc_atomic_load_i32(&g_pair_replies[i],
+			        xtc_mo_seq_cst) > 0)
 				cut_reply_pairs++;
 		}
 		if (sc.partition) {
@@ -753,8 +757,8 @@ main(int argc, char **argv)
 		}
 
 		rc2 = run_once(seed, &sc, &st2, &app2, NULL, &act2);
-		if (atomic_load(&g_torn_bad) != 0 ||
-		    atomic_load(&g_torn_stuck) != 0) {
+		if (xtc_atomic_load_i32(&g_torn_bad, xtc_mo_seq_cst) != 0 ||
+		    xtc_atomic_load_i32(&g_torn_stuck, xtc_mo_seq_cst) != 0) {
 			printf("FAIL seed=%llu: torn page accepted silently / "
 			    "left unresolved on the replay run\n",
 			    (unsigned long long)seed);

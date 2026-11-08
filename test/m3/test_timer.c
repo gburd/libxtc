@@ -17,7 +17,6 @@
 #include "xtc_proc.h"
 #include "xtc_future.h"
 
-#include <stdatomic.h>
 
 /* [Tm5] basic */
 static int basic_fired;
@@ -264,47 +263,53 @@ test_timer_under_busy_runqueue(const MunitParameter p[], void *d)
  * sanitizer needed): every calloc/malloc the loop makes must be matched
  * by a free by the time xtc_loop_fini returns.  Fails on the unfixed code
  * (one live allocation per park); passes with it. */
-static _Atomic long g_tm12_live;
+static long g_tm12_live;
 static struct __os_alloc_hook g_tm12_saved;
 
 static void *
 tm12_malloc(size_t n)
 {
 	void *p = g_tm12_saved.malloc(n);
-	if (p != NULL) atomic_fetch_add(&g_tm12_live, 1);
+	if (p != NULL)
+		xtc_atomic_fetch_add_long(&g_tm12_live, 1, xtc_mo_seq_cst);
 	return p;
 }
 static void *
 tm12_calloc(size_t n, size_t sz)
 {
 	void *p = g_tm12_saved.calloc(n, sz);
-	if (p != NULL) atomic_fetch_add(&g_tm12_live, 1);
+	if (p != NULL)
+		xtc_atomic_fetch_add_long(&g_tm12_live, 1, xtc_mo_seq_cst);
 	return p;
 }
 static void *
 tm12_realloc(void *o, size_t sz)
 {
 	void *p = g_tm12_saved.realloc(o, sz);
-	if (o == NULL && p != NULL) atomic_fetch_add(&g_tm12_live, 1);
+	if (o == NULL && p != NULL)
+		xtc_atomic_fetch_add_long(&g_tm12_live, 1, xtc_mo_seq_cst);
 	return p;
 }
 static void
 tm12_free(void *p)
 {
-	if (p != NULL) atomic_fetch_sub(&g_tm12_live, 1);
+	if (p != NULL)
+		xtc_atomic_fetch_sub_long(&g_tm12_live, 1, xtc_mo_seq_cst);
 	g_tm12_saved.free(p);
 }
 static void *
 tm12_aligned(size_t a, size_t sz)
 {
 	void *p = g_tm12_saved.aligned(a, sz);
-	if (p != NULL) atomic_fetch_add(&g_tm12_live, 1);
+	if (p != NULL)
+		xtc_atomic_fetch_add_long(&g_tm12_live, 1, xtc_mo_seq_cst);
 	return p;
 }
 static void
 tm12_aligned_free(void *p)
 {
-	if (p != NULL) atomic_fetch_sub(&g_tm12_live, 1);
+	if (p != NULL)
+		xtc_atomic_fetch_sub_long(&g_tm12_live, 1, xtc_mo_seq_cst);
 	g_tm12_saved.aligned_free(p);
 }
 
@@ -338,7 +343,7 @@ test_park_timers_freed_with_slab(const MunitParameter p[], void *d)
 	h.malloc = tm12_malloc;   h.calloc = tm12_calloc;
 	h.realloc = tm12_realloc; h.free = tm12_free;
 	h.aligned = tm12_aligned; h.aligned_free = tm12_aligned_free;
-	atomic_store(&g_tm12_live, 0);
+	xtc_atomic_store_long(&g_tm12_live, 0, xtc_mo_seq_cst);
 	munit_assert_int(__os_alloc_set_hook(&h), ==, XTC_OK);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
@@ -354,7 +359,7 @@ test_park_timers_freed_with_slab(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 
 	munit_assert_int(__os_alloc_set_hook(&g_tm12_saved), ==, XTC_OK);
-	leaked = atomic_load(&g_tm12_live);
+	leaked = xtc_atomic_load_long(&g_tm12_live, xtc_mo_seq_cst);
 	munit_logf(MUNIT_LOG_INFO, "live allocations after loop_fini: %ld",
 	    leaked);
 	munit_assert_long(leaked, ==, 0);
@@ -718,7 +723,7 @@ tm16_rearm(void *u)
 	__xtc_task_cancel_park_timer(self);
 	munit_assert_int(xtc_task_park_on_timer(self, XTC_NS_PER_MS), ==,
 	    XTC_OK);
-	g_tm16_b = atomic_load(&self->park_timer);
+	g_tm16_b = xtc_atomic_load_ptr(&self->park_timer, xtc_mo_seq_cst);
 }
 
 static int
@@ -729,15 +734,16 @@ tm16_task(xtc_task_t *self, void *u)
 	if ((*phase)++ == 0) {
 		munit_assert_int(xtc_task_park_on_timer(self, 1000), ==,
 		    XTC_OK);
-		a = atomic_load(&self->park_timer);
+		a = xtc_atomic_load_ptr(&self->park_timer, xtc_mo_seq_cst);
 		a->cb = tm16_rearm;
 		a->user = self;
 		return XTC_TASK_PENDING;
 	}
 	/* Woken by A's fire. */
-	g_tm16_slot = atomic_load(&self->park_timer);
+	g_tm16_slot = xtc_atomic_load_ptr(&self->park_timer, xtc_mo_seq_cst);
 	if (g_tm16_slot != NULL)
-		g_tm16_refs = atomic_load(&g_tm16_slot->refs);
+		g_tm16_refs =
+		    xtc_atomic_load_i32(&g_tm16_slot->refs, xtc_mo_seq_cst);
 	__xtc_task_cancel_park_timer(self);
 	return XTC_TASK_DONE;
 }

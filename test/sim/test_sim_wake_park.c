@@ -26,7 +26,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,9 +38,9 @@
 #define N_LOOPS   4
 #define N_PEERS   (N_LOOPS - 1)   /* one parked peer per non-leader loop */
 
-static atomic_int g_recv;      /* parked peers that received the wake message */
-static atomic_int g_spawned;   /* fresh procs (spawned onto idle loops) that ran */
-static atomic_int g_parked;    /* peers that reached their recv park */
+static int g_recv;    /* parked peers that received the wake message */
+static int g_spawned; /* fresh procs (spawned onto idle loops) that ran */
+static int g_parked;  /* peers that reached their recv park */
 static xtc_pid_t  g_peer[N_PEERS];
 
 /* A peer: park in an INFINITE recv (its loop goes idle with n_alive > 0,
@@ -53,10 +52,10 @@ peer(void *arg)
 	long id = (long)(intptr_t)arg;
 	void *m = NULL;
 	size_t n = 0;
-	atomic_fetch_add(&g_parked, 1);
+	xtc_atomic_fetch_add_i32(&g_parked, 1, xtc_mo_seq_cst);
 	(void)id;
 	if (xtc_recv(&m, &n, -1) == XTC_OK) {   /* infinite park */
-		atomic_fetch_add(&g_recv, 1);
+		xtc_atomic_fetch_add_i32(&g_recv, 1, xtc_mo_seq_cst);
 		if (m != NULL) xtc_free(m);
 	}
 }
@@ -67,7 +66,7 @@ static void
 fresh(void *arg)
 {
 	(void)arg;
-	atomic_fetch_add(&g_spawned, 1);
+	xtc_atomic_fetch_add_i32(&g_spawned, 1, xtc_mo_seq_cst);
 	xtc_exit_self(0);
 }
 
@@ -82,7 +81,8 @@ leader(void *arg)
 	int tries, i;
 	/* Wait for all peers to reach their park. */
 	for (tries = 0; tries < 100000 &&
-	    atomic_load(&g_parked) < N_PEERS; tries++)
+	     xtc_atomic_load_i32(&g_parked, xtc_mo_seq_cst) < N_PEERS;
+	     tries++)
 		xtc_proc_sleep(1000 * 1000LL);   /* 1ms virtual */
 
 	for (i = 0; i < N_PEERS; i++) {
@@ -101,9 +101,9 @@ run_one(uint64_t seed, int *out_recv, int *out_spawned, uint64_t *out_state)
 	xtc_exec_t *e = NULL;
 	int i, rc;
 
-	atomic_store(&g_recv, 0);
-	atomic_store(&g_spawned, 0);
-	atomic_store(&g_parked, 0);
+	xtc_atomic_store_i32(&g_recv, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_spawned, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_parked, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
 		return -1;
@@ -121,8 +121,10 @@ run_one(uint64_t seed, int *out_recv, int *out_spawned, uint64_t *out_state)
 
 	rc = xtc_sim_exec_run(e, seed, 20000000);
 
-	if (out_recv)    *out_recv = atomic_load(&g_recv);
-	if (out_spawned) *out_spawned = atomic_load(&g_spawned);
+	if (out_recv)
+		*out_recv = xtc_atomic_load_i32(&g_recv, xtc_mo_seq_cst);
+	if (out_spawned)
+		*out_spawned = xtc_atomic_load_i32(&g_spawned, xtc_mo_seq_cst);
 	if (out_state)   *out_state = xtc_sim_state_hash(e);
 	(void)xtc_exec_fini(e);
 	return rc;

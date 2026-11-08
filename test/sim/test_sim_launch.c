@@ -34,7 +34,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,21 +49,25 @@
 #define N_LAUNCH   6
 #define DEADLINE_NS (20 * 1000 * 1000LL)   /* 20 ms */
 
-static atomic_int g_finished;    /* launches that returned XTC_OK */
-static atomic_int g_timed_out;   /* launches that returned XTC_E_AGAIN */
-static atomic_int g_cleanups;    /* at-exit cleanups the cancel path ran */
-static atomic_int g_bad;         /* an unexpected outcome (BUG) */
-static atomic_int g_done;        /* launchers finished */
-static atomic_int g_lost;        /* launchers whose queued mail was eaten */
+static int g_finished;           /* launches that returned XTC_OK */
+static int g_timed_out;          /* launches that returned XTC_E_AGAIN */
+static int g_cleanups;           /* at-exit cleanups the cancel path ran */
+static int g_bad;                /* an unexpected outcome (BUG) */
+static int g_done;               /* launchers finished */
+static int g_lost;               /* launchers whose queued mail was eaten */
 static xtc_pid_t  g_lpid[16];    /* each launcher's pid, for its mailer */
-static atomic_int g_mailed[16];  /* mail each mailer delivered */
+static int g_mailed[16];         /* mail each mailer delivered */
 
 /* A launched fn.  arg low bit selects the behavior: even -> finish fast
  * and return a value; odd -> sleep well past the deadline (must be
  * cancelled).  The slow path registers an at-exit so the cancel path's
  * cleanup is observable. */
 static void
-slow_cleanup(void *arg) { (void)arg; atomic_fetch_add(&g_cleanups, 1); }
+slow_cleanup(void *arg)
+{
+	(void)arg;
+	xtc_atomic_fetch_add_i32(&g_cleanups, 1, xtc_mo_seq_cst);
+}
 
 static intptr_t
 launched(void *arg)
@@ -100,7 +103,8 @@ mailer(void *arg)
 		(void)xtc_proc_sleep(1000 * 1000LL *
 		    (int64_t)(1 + __xtc_sim_rng_range(XTC_SIM_RNG_APP, 8)));
 		if (xtc_send(g_lpid[id], "m", 1) == XTC_OK)
-			atomic_fetch_add(&g_mailed[id], 1);
+			xtc_atomic_fetch_add_i32(&g_mailed[id], 1,
+			    xtc_mo_seq_cst);
 	}
 }
 
@@ -112,7 +116,8 @@ check_mail(int id, uint64_t ref)
 	void *m = NULL;
 	size_t n = 0;
 	xtc_down_info_t di = XTC_DOWN_INFO_INIT;
-	int down = 0, mail = 0, sent = atomic_load(&g_mailed[id]);
+	int down = 0, mail = 0,
+	    sent = xtc_atomic_load_i32(&g_mailed[id], xtc_mo_seq_cst);
 	while (xtc_recv(&m, &n, 0) == XTC_OK && m != NULL) {
 		if (xtc_down_decode_ex(m, n, &di) == XTC_OK && di.ref == ref)
 			down++;
@@ -122,7 +127,7 @@ check_mail(int id, uint64_t ref)
 		m = NULL;
 	}
 	if (down != 1 || mail < sent)
-		atomic_fetch_add(&g_lost, 1);
+		xtc_atomic_fetch_add_i32(&g_lost, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -146,17 +151,19 @@ launcher(void *arg)
 	if (la->id & 1) {
 		/* Slow -> must have timed out (cancelled). */
 		if (rc == XTC_E_AGAIN)
-			atomic_fetch_add(&g_timed_out, 1);
+			xtc_atomic_fetch_add_i32(&g_timed_out, 1,
+			    xtc_mo_seq_cst);
 		else
-			atomic_store(&g_bad, 1);
+			xtc_atomic_store_i32(&g_bad, 1, xtc_mo_seq_cst);
 	} else {
 		/* Fast -> must have finished with the right value. */
 		if (rc == XTC_OK && v == (intptr_t)(la->id * 10 + 7))
-			atomic_fetch_add(&g_finished, 1);
+			xtc_atomic_fetch_add_i32(&g_finished, 1,
+			    xtc_mo_seq_cst);
 		else
-			atomic_store(&g_bad, 1);
+			xtc_atomic_store_i32(&g_bad, 1, xtc_mo_seq_cst);
 	}
-	atomic_fetch_add(&g_done, 1);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -165,7 +172,7 @@ coordinator(void *arg)
 	xtc_exec_t *e = arg;
 	int tries;
 	for (tries = 0; tries < 8000; tries++) {
-		if (atomic_load(&g_done) >= N_LAUNCH)
+		if (xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst) >= N_LAUNCH)
 			break;
 		(void)xtc_proc_sleep(1000 * 1000LL);
 	}
@@ -181,14 +188,14 @@ run_one(uint64_t seed, int *out_fin, int *out_to, int *out_clean,
 	struct launcher_arg la[N_LAUNCH];
 	int i, rc;
 
-	atomic_store(&g_finished, 0);
-	atomic_store(&g_timed_out, 0);
-	atomic_store(&g_cleanups, 0);
-	atomic_store(&g_bad, 0);
-	atomic_store(&g_done, 0);
-	atomic_store(&g_lost, 0);
+	xtc_atomic_store_i32(&g_finished, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_timed_out, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_cleanups, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_lost, 0, xtc_mo_seq_cst);
 	for (i = 0; i < N_LAUNCH; i++)
-		atomic_store(&g_mailed[i], 0);
+		xtc_atomic_store_i32(&g_mailed[i], 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
 		return -1;
@@ -203,11 +210,16 @@ run_one(uint64_t seed, int *out_fin, int *out_to, int *out_clean,
 
 	rc = xtc_sim_exec_run(e, seed, 20000000);
 
-	if (out_fin)   *out_fin = atomic_load(&g_finished);
-	if (out_to)    *out_to = atomic_load(&g_timed_out);
-	if (out_clean) *out_clean = atomic_load(&g_cleanups);
-	if (out_bad)   *out_bad = atomic_load(&g_bad);
-	if (out_lost)  *out_lost = atomic_load(&g_lost);
+	if (out_fin)
+		*out_fin = xtc_atomic_load_i32(&g_finished, xtc_mo_seq_cst);
+	if (out_to)
+		*out_to = xtc_atomic_load_i32(&g_timed_out, xtc_mo_seq_cst);
+	if (out_clean)
+		*out_clean = xtc_atomic_load_i32(&g_cleanups, xtc_mo_seq_cst);
+	if (out_bad)
+		*out_bad = xtc_atomic_load_i32(&g_bad, xtc_mo_seq_cst);
+	if (out_lost)
+		*out_lost = xtc_atomic_load_i32(&g_lost, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	(void)xtc_exec_fini(e);
 	return rc;

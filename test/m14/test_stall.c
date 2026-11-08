@@ -21,7 +21,6 @@
  *	      for a hogging fiber; and the stall count stays 0.
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -32,9 +31,9 @@
 #include "xtc_proc.h"
 #include "xtc_async.h"
 
-static atomic_int  g_stall_reports;
-static atomic_long g_last_ran_ns;
-static atomic_long g_last_budget_ns;
+static int g_stall_reports;
+static long g_last_ran_ns;
+static long g_last_budget_ns;
 static xtc_loop_t *g_last_loop;
 static xtc_task_t *g_last_task;
 static volatile uint64_t g_sink;
@@ -46,10 +45,9 @@ stall_cb(xtc_loop_t *loop, xtc_task_t *task, int64_t ran_ns,
 	(void)user;
 	g_last_loop = loop;
 	g_last_task = task;
-	atomic_store_explicit(&g_last_ran_ns, ran_ns, memory_order_relaxed);
-	atomic_store_explicit(&g_last_budget_ns, budget_ns,
-	    memory_order_relaxed);
-	atomic_fetch_add_explicit(&g_stall_reports, 1, memory_order_relaxed);
+	xtc_atomic_store_long(&g_last_ran_ns, ran_ns, xtc_mo_relaxed);
+	xtc_atomic_store_long(&g_last_budget_ns, budget_ns, xtc_mo_relaxed);
+	xtc_atomic_fetch_add_i32(&g_stall_reports, 1, xtc_mo_relaxed);
 }
 
 /* A hogging fiber: one long CPU burn with NO yield inside the run, so a
@@ -83,9 +81,9 @@ polite(void *arg)
 static void
 reset(void)
 {
-	atomic_store(&g_stall_reports, 0);
-	atomic_store(&g_last_ran_ns, 0);
-	atomic_store(&g_last_budget_ns, 0);
+	xtc_atomic_store_i32(&g_stall_reports, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_last_ran_ns, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_last_budget_ns, 0, xtc_mo_seq_cst);
 	g_last_loop = NULL;
 	g_last_task = NULL;
 }
@@ -106,13 +104,16 @@ test_hog_trips(const MunitParameter p[], void *d)
 	(void)xtc_proc_spawn(loop, hog, NULL, NULL, NULL);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
-	munit_assert_int(atomic_load(&g_stall_reports), >, 0);   /* tripped */
+	munit_assert_int(xtc_atomic_load_i32(&g_stall_reports, xtc_mo_seq_cst),
+	    >, 0);                                               /* tripped */
 	munit_assert_ptr(g_last_loop, ==, loop);                 /* names loop */
 	munit_assert_ptr_not_null(g_last_task);                  /* names task */
 	/* ran >= budget (the definition of an overrun). */
-	munit_assert_long(atomic_load(&g_last_ran_ns), >=,
-	    atomic_load(&g_last_budget_ns));
-	munit_assert_long(atomic_load(&g_last_budget_ns), ==, 5 * 1000 * 1000LL);
+	munit_assert_long(xtc_atomic_load_long(&g_last_ran_ns, xtc_mo_seq_cst),
+	    >=, xtc_atomic_load_long(&g_last_budget_ns, xtc_mo_seq_cst));
+	munit_assert_long(xtc_atomic_load_long(&g_last_budget_ns,
+	                      xtc_mo_seq_cst),
+	    ==, 5 * 1000 * 1000LL);
 	munit_assert_uint64(xtc_loop_stall_count(loop), >, 0);
 
 	(void)xtc_loop_fini(loop);
@@ -134,7 +135,8 @@ test_polite_ok(const MunitParameter p[], void *d)
 	(void)xtc_proc_spawn(loop, polite, NULL, NULL, NULL);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
-	munit_assert_int(atomic_load(&g_stall_reports), ==, 0);  /* never */
+	munit_assert_int(xtc_atomic_load_i32(&g_stall_reports, xtc_mo_seq_cst),
+	    ==, 0); /* never */
 	munit_assert_uint64(xtc_loop_stall_count(loop), ==, 0);
 
 	(void)xtc_loop_fini(loop);
@@ -156,7 +158,8 @@ test_off_by_default(const MunitParameter p[], void *d)
 	(void)xtc_proc_spawn(loop, hog, NULL, NULL, NULL);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
-	munit_assert_int(atomic_load(&g_stall_reports), ==, 0);  /* off */
+	munit_assert_int(xtc_atomic_load_i32(&g_stall_reports, xtc_mo_seq_cst),
+	    ==, 0); /* off */
 	munit_assert_uint64(xtc_loop_stall_count(loop), ==, 0);
 
 	(void)xtc_loop_fini(loop);
@@ -181,7 +184,8 @@ test_exec_wide_budget(const MunitParameter p[], void *d)
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), hog, NULL, NULL, NULL);
 
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_stall_reports), >, 0);   /* tripped */
+	munit_assert_int(xtc_atomic_load_i32(&g_stall_reports, xtc_mo_seq_cst),
+	    >, 0); /* tripped */
 
 	(void)xtc_exec_fini(e);
 	return MUNIT_OK;

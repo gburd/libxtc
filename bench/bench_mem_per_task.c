@@ -28,7 +28,6 @@
  *	~order-of-100-bytes-per-task to size the gap for your workload.
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,7 +44,7 @@
 #include "xtc_proc.h"
 #include "xtc_res.h"
 
-static atomic_int g_parked;
+static int g_parked;
 static xtc_loop_t *g_loop;
 
 /* A fiber that signals it is live, touches its stack near the top (so
@@ -60,7 +59,7 @@ parker(void *arg)
 
 	(void)arg;
 	memset((void *)touch, 0x5a, sizeof touch);
-	atomic_fetch_add_explicit(&g_parked, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_parked, 1, xtc_mo_relaxed);
 	/* Park indefinitely: recv with no sender ever -- the loop will be
 	 * torn down to release us.  This keeps the stack live + minimal. */
 	{
@@ -105,7 +104,7 @@ measure(int n_tasks, size_t stack_bytes)
 	int i;
 
 	(void)xtc_set_stack_size(stack_bytes);
-	atomic_store(&g_parked, 0);
+	xtc_atomic_store_i32(&g_parked, 0, xtc_mo_seq_cst);
 
 	if (xtc_loop_init(&g_loop) != XTC_OK) {
 		fprintf(stderr, "loop_init failed\n");
@@ -129,7 +128,8 @@ measure(int n_tasks, size_t stack_bytes)
 	{
 		extern int __xtc_loop_step_once(xtc_loop_t *loop);
 		int spun = 0;
-		while (atomic_load(&g_parked) < i && spun < n_tasks * 4) {
+		while (xtc_atomic_load_i32(&g_parked, xtc_mo_seq_cst) < i &&
+		    spun < n_tasks * 4) {
 			(void)__xtc_loop_step_once(g_loop);
 			spun++;
 		}
@@ -138,7 +138,7 @@ measure(int n_tasks, size_t stack_bytes)
 	rss_after = rss_kib();
 
 	{
-		int live = atomic_load(&g_parked);
+		int live = xtc_atomic_load_i32(&g_parked, xtc_mo_seq_cst);
 		double per_task = (live > 0 && rss_after > rss_before)
 		    ? ((double)(rss_after - rss_before) * 1024.0) / live
 		    : 0.0;

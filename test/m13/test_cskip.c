@@ -6,7 +6,6 @@
  */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -196,8 +195,8 @@ test_ordered(const MunitParameter p[], void *d)
 
 static xtc_cskip_t *g_s;
 static struct ikey  *g_keyptrs[STRESS_KEYSPACE];
-static atomic_int    g_reader_bad;   /* torn/UAF/ordering read seen */
-static atomic_int    g_go;
+static int g_reader_bad; /* torn/UAF/ordering read seen */
+static int g_go;
 
 static void *
 stress_writer(void *arg)
@@ -206,7 +205,7 @@ stress_writer(void *arg)
 	int64_t base = id * (STRESS_KEYSPACE / STRESS_WRITERS);
 	int64_t span = STRESS_KEYSPACE / STRESS_WRITERS;
 	int r;
-	while (!atomic_load(&g_go)) { }
+	while (!xtc_atomic_load_i32(&g_go, xtc_mo_seq_cst)) { }
 	for (r = 0; r < STRESS_ROUNDS; r++) {
 		int64_t i;
 		for (i = 0; i < span; i++) {
@@ -230,7 +229,7 @@ stress_reader(void *arg)
 {
 	(void)arg;
 	int r;
-	while (!atomic_load(&g_go)) { }
+	while (!xtc_atomic_load_i32(&g_go, xtc_mo_seq_cst)) { }
 	for (r = 0; r < STRESS_ROUNDS; r++) {
 		int64_t k;
 		for (k = 0; k < STRESS_KEYSPACE; k++) {
@@ -241,7 +240,8 @@ stress_reader(void *arg)
 				/* value encodes the key -- a torn or freed
 				 * read would not satisfy this. */
 				if ((intptr_t)v != (intptr_t)(k * 3 + 1))
-					atomic_fetch_add(&g_reader_bad, 1);
+					xtc_atomic_fetch_add_i32(&g_reader_bad,
+					    1, xtc_mo_seq_cst);
 			}
 			xtc_rcu_read_unlock();
 		}
@@ -251,7 +251,8 @@ stress_reader(void *arg)
 			xtc_rcu_read_lock();
 			rc = xtc_cskip_min(g_s, &mk, NULL);
 			if (rc == XTC_OK && ((struct ikey *)mk)->v < 0)
-				atomic_fetch_add(&g_reader_bad, 1);
+				xtc_atomic_fetch_add_i32(&g_reader_bad, 1,
+				    xtc_mo_seq_cst);
 			xtc_rcu_read_unlock();
 		}
 	}
@@ -267,8 +268,8 @@ test_concurrent_stress(const MunitParameter p[], void *d)
 
 	munit_assert_int(xtc_rcu_init(), ==, XTC_OK);
 	munit_assert_int(xtc_cskip_create(ikey_cmp, &g_s), ==, XTC_OK);
-	atomic_store(&g_reader_bad, 0);
-	atomic_store(&g_go, 0);
+	xtc_atomic_store_i32(&g_reader_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_go, 0, xtc_mo_seq_cst);
 	for (i = 0; i < STRESS_KEYSPACE; i++)
 		g_keyptrs[i] = mkkey(i);
 
@@ -278,11 +279,12 @@ test_concurrent_stress(const MunitParameter p[], void *d)
 	for (i = 0; i < STRESS_READERS; i++)
 		munit_assert_int(pthread_create(&rt[i], NULL, stress_reader,
 		    NULL), ==, 0);
-	atomic_store(&g_go, 1);
+	xtc_atomic_store_i32(&g_go, 1, xtc_mo_seq_cst);
 	for (i = 0; i < STRESS_WRITERS; i++) pthread_join(wt[i], NULL);
 	for (i = 0; i < STRESS_READERS; i++) pthread_join(rt[i], NULL);
 
-	munit_assert_int(atomic_load(&g_reader_bad), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_reader_bad, xtc_mo_seq_cst), ==,
+	    0);
 
 	/* Final contents: for each writer's stride, odd offsets survive. */
 	{

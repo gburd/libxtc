@@ -19,7 +19,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -37,11 +36,11 @@
 /* Each resource is an int slot with an "owner" flag; a double-checkout
  * would set owned twice. */
 static xtc_pool_t *g_pool;
-static atomic_int   g_res_owned[CAP];   /* per-resource live-owner count */
-static atomic_int   g_double_hand;      /* a resource held by two at once */
-static atomic_int   g_over_cap;         /* checked-out exceeded CAP */
-static atomic_int   g_live;             /* currently checked out */
-static atomic_int   g_done;
+static int g_res_owned[CAP]; /* per-resource live-owner count */
+static int g_double_hand;    /* a resource held by two at once */
+static int g_over_cap;       /* checked-out exceeded CAP */
+static int g_live;           /* currently checked out */
+static int g_done;
 static int          g_slots[CAP];
 
 static void
@@ -57,26 +56,24 @@ worker(void *arg)
 		}
 		idx = (int)((int *)r - g_slots);   /* which slot */
 		if (idx < 0 || idx >= CAP) {
-			atomic_store_explicit(&g_double_hand, 1,
-			    memory_order_relaxed);   /* bogus pointer */
-		} else if (atomic_fetch_add_explicit(&g_res_owned[idx], 1,
-		    memory_order_relaxed) != 0) {
-			atomic_store_explicit(&g_double_hand, 1,
-			    memory_order_relaxed);   /* already owned! */
+			xtc_atomic_store_i32(&g_double_hand, 1,
+			    xtc_mo_relaxed); /* bogus pointer */
+		} else if (xtc_atomic_fetch_add_i32(&g_res_owned[idx], 1,
+		               xtc_mo_relaxed) != 0) {
+			xtc_atomic_store_i32(&g_double_hand, 1,
+			    xtc_mo_relaxed); /* already owned! */
 		}
-		live = atomic_fetch_add_explicit(&g_live, 1,
-		    memory_order_relaxed) + 1;
+		live = xtc_atomic_fetch_add_i32(&g_live, 1, xtc_mo_relaxed) + 1;
 		if (live > CAP)
-			atomic_store_explicit(&g_over_cap, 1,
-			    memory_order_relaxed);
+			xtc_atomic_store_i32(&g_over_cap, 1, xtc_mo_relaxed);
 		xtc_yield();                       /* hold across a reschedule */
-		atomic_fetch_sub_explicit(&g_live, 1, memory_order_relaxed);
+		xtc_atomic_fetch_sub_i32(&g_live, 1, xtc_mo_relaxed);
 		if (idx >= 0 && idx < CAP)
-			atomic_fetch_sub_explicit(&g_res_owned[idx], 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_sub_i32(&g_res_owned[idx], 1,
+			    xtc_mo_relaxed);
 		(void)xtc_pool_checkin(g_pool, r);
 	}
-	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -86,11 +83,12 @@ run_pool(uint64_t seed, int *out_done, int *out_dbl, int *out_over,
 	xtc_exec_t *e = NULL;
 	int i, rc;
 
-	for (i = 0; i < CAP; i++) atomic_store(&g_res_owned[i], 0);
-	atomic_store(&g_double_hand, 0);
-	atomic_store(&g_over_cap, 0);
-	atomic_store(&g_live, 0);
-	atomic_store(&g_done, 0);
+	for (i = 0; i < CAP; i++)
+		xtc_atomic_store_i32(&g_res_owned[i], 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_double_hand, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_over_cap, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_live, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	if (xtc_pool_create(CAP, &g_pool) != XTC_OK) {
@@ -106,9 +104,9 @@ run_pool(uint64_t seed, int *out_done, int *out_dbl, int *out_over,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_done = atomic_load(&g_done);
-	*out_dbl  = atomic_load(&g_double_hand);
-	*out_over = atomic_load(&g_over_cap);
+	*out_done = xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
+	*out_dbl = xtc_atomic_load_i32(&g_double_hand, xtc_mo_seq_cst);
+	*out_over = xtc_atomic_load_i32(&g_over_cap, xtc_mo_seq_cst);
 	*out_avail = (int)xtc_pool_available(g_pool);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_pool_destroy(g_pool);

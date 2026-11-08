@@ -6,7 +6,6 @@
  */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -93,20 +92,21 @@ test_lrlock_basic(const MunitParameter p[], void *d)
 
 /* Concurrent reads while writers commit. */
 static xtc_lrlock_t *g_lr;
-static _Atomic int   g_stop_readers;
-static _Atomic int   g_inconsistent;
+static int g_stop_readers;
+static int g_inconsistent;
 
 static void *
 reader_thread(void *arg)
 {
 	(void)arg;
-	while (!atomic_load(&g_stop_readers)) {
+	while (!xtc_atomic_load_i32(&g_stop_readers, xtc_mo_seq_cst)) {
 		const struct dict *r = xtc_lrlock_read_begin(g_lr);
 		int i;
 		/* Invariant: every item's value should be > 0. */
 		for (i = 0; i < r->n; i++)
 			if (r->items[i].value <= 0)
-				atomic_fetch_add(&g_inconsistent, 1);
+				xtc_atomic_fetch_add_i32(&g_inconsistent, 1,
+				    xtc_mo_seq_cst);
 		xtc_lrlock_read_end(g_lr);
 	}
 	return NULL;
@@ -120,8 +120,8 @@ test_lrlock_concurrent(const MunitParameter p[], void *d)
 	struct op_set s;
 	(void)p; (void)d;
 
-	atomic_store(&g_stop_readers, 0);
-	atomic_store(&g_inconsistent, 0);
+	xtc_atomic_store_i32(&g_stop_readers, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_inconsistent, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_lrlock_create(sizeof(struct dict), apply_set,
 	    sync_dict, "kv", &g_lr), ==, XTC_OK);
 
@@ -147,10 +147,11 @@ test_lrlock_concurrent(const MunitParameter p[], void *d)
 		xtc_lrlock_write_end(g_lr);
 	}
 
-	atomic_store(&g_stop_readers, 1);
+	xtc_atomic_store_i32(&g_stop_readers, 1, xtc_mo_seq_cst);
 	for (i = 0; i < 3; i++) pthread_join(readers[i], NULL);
 
-	munit_assert_int(atomic_load(&g_inconsistent), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_inconsistent, xtc_mo_seq_cst),
+	    ==, 0);
 	xtc_lrlock_destroy(g_lr);
 	return MUNIT_OK;
 }
@@ -278,19 +279,20 @@ test_lrlock_cow_basic(const MunitParameter p[], void *d)
 }
 
 static xtc_lrlock_t *g_cow_lr;
-static _Atomic int   g_cow_stop;
-static _Atomic int   g_cow_inconsistent;
+static int g_cow_stop;
+static int g_cow_inconsistent;
 
 static void *
 cow_reader_thread(void *arg)
 {
 	(void)arg;
-	while (!atomic_load(&g_cow_stop)) {
+	while (!xtc_atomic_load_i32(&g_cow_stop, xtc_mo_seq_cst)) {
 		const struct dict *r = xtc_lrlock_read_begin(g_cow_lr);
 		int i;
 		for (i = 0; i < r->n; i++)
 			if (r->items[i].value <= 0)
-				atomic_fetch_add(&g_cow_inconsistent, 1);
+				xtc_atomic_fetch_add_i32(&g_cow_inconsistent, 1,
+				    xtc_mo_seq_cst);
 		xtc_lrlock_read_end(g_cow_lr);
 	}
 	return NULL;
@@ -304,8 +306,8 @@ test_lrlock_cow_concurrent(const MunitParameter p[], void *d)
 	int i;
 	struct op_set s;
 	(void)p; (void)d;
-	atomic_store(&g_cow_stop, 0);
-	atomic_store(&g_cow_inconsistent, 0);
+	xtc_atomic_store_i32(&g_cow_stop, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_cow_inconsistent, 0, xtc_mo_seq_cst);
 	o.name = "cowc"; o.data_size = sizeof(struct dict);
 	o.apply_fn = apply_set; o.sync_fn = sync_dict;
 	o.flags = XTC_LRLOCK_COW;
@@ -328,10 +330,12 @@ test_lrlock_cow_concurrent(const MunitParameter p[], void *d)
 		xtc_lrlock_write_end(g_cow_lr);
 	}
 
-	atomic_store(&g_cow_stop, 1);
+	xtc_atomic_store_i32(&g_cow_stop, 1, xtc_mo_seq_cst);
 	for (i = 0; i < 3; i++) pthread_join(readers[i], NULL);
 
-	munit_assert_int(atomic_load(&g_cow_inconsistent), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_cow_inconsistent,
+	                     xtc_mo_seq_cst),
+	    ==, 0);
 	xtc_lrlock_destroy(g_cow_lr);
 	return MUNIT_OK;
 }
@@ -385,8 +389,8 @@ test_lrlock_oplog_grow(const MunitParameter p[], void *d)
  */
 
 static xtc_lrlock_t  *g_churn_lr;
-static _Atomic int    g_churn_null_begin;
-static _Atomic int    g_churn_inconsistent;
+static int g_churn_null_begin;
+static int g_churn_inconsistent;
 
 static void *
 churn_reader(void *arg)
@@ -395,12 +399,15 @@ churn_reader(void *arg)
 	{
 		const struct dict *r = xtc_lrlock_read_begin(g_churn_lr);
 		if (r == NULL) {
-			atomic_fetch_add(&g_churn_null_begin, 1);
+			xtc_atomic_fetch_add_i32(&g_churn_null_begin, 1,
+			    xtc_mo_seq_cst);
 		} else {
 			int i;
 			for (i = 0; i < r->n; i++)
 				if (r->items[i].value <= 0)
-					atomic_fetch_add(&g_churn_inconsistent, 1);
+					xtc_atomic_fetch_add_i32(
+					    &g_churn_inconsistent, 1,
+					    xtc_mo_seq_cst);
 			xtc_lrlock_read_end(g_churn_lr);
 		}
 	}
@@ -414,8 +421,8 @@ test_lrlock_thread_churn(const MunitParameter p[], void *d)
 	int round;
 	(void)p; (void)d;
 
-	atomic_store(&g_churn_null_begin, 0);
-	atomic_store(&g_churn_inconsistent, 0);
+	xtc_atomic_store_i32(&g_churn_null_begin, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_churn_inconsistent, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_lrlock_create(sizeof(struct dict), apply_set,
 	    sync_dict, "churn", &g_churn_lr), ==, XTC_OK);
 
@@ -443,8 +450,12 @@ test_lrlock_thread_churn(const MunitParameter p[], void *d)
 			pthread_join(t[i], NULL);
 	}
 
-	munit_assert_int(atomic_load(&g_churn_null_begin), ==, 0);
-	munit_assert_int(atomic_load(&g_churn_inconsistent), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_churn_null_begin,
+	                     xtc_mo_seq_cst),
+	    ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_churn_inconsistent,
+	                     xtc_mo_seq_cst),
+	    ==, 0);
 
 	xtc_lrlock_destroy(g_churn_lr);
 	return MUNIT_OK;

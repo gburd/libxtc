@@ -36,8 +36,8 @@
 
 static xtc_loop_t *g_loop;
 static xtc_pid_t   g_receiver;
-static _Atomic int g_senders_done;
-static _Atomic int g_received;
+static int g_senders_done;
+static int g_received;
 
 static int64_t
 now_ns(void)
@@ -65,7 +65,7 @@ sender_thread(void *arg)
 		}
 	}
 
-	atomic_fetch_add(&g_senders_done, 1);
+	xtc_atomic_fetch_add_i32(&g_senders_done, 1, xtc_mo_seq_cst);
 	return NULL;
 }
 
@@ -85,7 +85,7 @@ receiver_proc(void *arg)
 			free(msg);
 		}
 	}
-	atomic_store(&g_received, count);
+	xtc_atomic_store_i32(&g_received, count, xtc_mo_seq_cst);
 }
 
 int
@@ -116,8 +116,8 @@ main(void)
 	printf("Mailbox capacity: 8192\n");
 	printf("\n");
 
-	atomic_store(&g_senders_done, 0);
-	atomic_store(&g_received, 0);
+	xtc_atomic_store_i32(&g_senders_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_received, 0, xtc_mo_seq_cst);
 
 	start = now_ns();
 
@@ -131,10 +131,12 @@ main(void)
 	}
 
 	/* Run the loop until all messages are received. */
-	while (atomic_load(&g_received) < N_SENDERS * MSGS_PER_SEND) {
+	while (xtc_atomic_load_i32(&g_received, xtc_mo_seq_cst) <
+	    N_SENDERS * MSGS_PER_SEND) {
 		xtc_loop_run(g_loop);
 		/* Small sleep to avoid busy-wait if senders are slow. */
-		if (atomic_load(&g_received) < N_SENDERS * MSGS_PER_SEND) {
+		if (xtc_atomic_load_i32(&g_received, xtc_mo_seq_cst) <
+		    N_SENDERS * MSGS_PER_SEND) {
 			struct timespec ts = { .tv_nsec = 100000 }; /* 0.1ms */
 			nanosleep(&ts, NULL);
 		}
@@ -147,7 +149,8 @@ main(void)
 
 	elapsed_ms = (double)(end - start) / 1000000.0;
 
-	printf("Received: %d msgs\n", atomic_load(&g_received));
+	printf("Received: %d msgs\n",
+	    xtc_atomic_load_i32(&g_received, xtc_mo_seq_cst));
 	printf("Elapsed: %.2f ms\n", elapsed_ms);
 	printf("Throughput: %.0f msgs/sec\n",
 	    (double)(N_SENDERS * MSGS_PER_SEND) / (elapsed_ms / 1000.0));

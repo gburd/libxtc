@@ -12,7 +12,6 @@
  */
 
 #define _GNU_SOURCE
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -123,7 +122,7 @@ test_double_set(const MunitParameter p[], void *d)
 }
 
 /* ---- fiber-context: await inside a proc ---- */
-static _Atomic int      g_fiber_ok;
+static int g_fiber_ok;
 static xtc_promise_t   *g_prom;
 static xtc_future_t    *g_fut;
 
@@ -147,7 +146,7 @@ consumer_proc(void *arg)
 	(void)arg;
 	rc = xtc_future_await(g_fut, &out);
 	if (rc == XTC_OK && out == 0xABCD)
-		atomic_store(&g_fiber_ok, 1);
+		xtc_atomic_store_i32(&g_fiber_ok, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -158,7 +157,7 @@ test_await_in_fiber(const MunitParameter p[], void *d)
 	xtc_pid_t a, b;
 	(void)p; (void)d;
 
-	atomic_store(&g_fiber_ok, 0);
+	xtc_atomic_store_i32(&g_fiber_ok, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_future_new_pair(&g_prom, &g_fut), ==, XTC_OK);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
@@ -171,7 +170,8 @@ test_await_in_fiber(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 
-	munit_assert_int(atomic_load(&g_fiber_ok), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_fiber_ok, xtc_mo_seq_cst), ==,
+	    1);
 	return MUNIT_OK;
 }
 
@@ -320,7 +320,7 @@ test_when_any(const MunitParameter p[], void *d)
 }
 
 /* ---- combinator: with_timeout (fiber, times out) ---- */
-static _Atomic int g_to_status;
+static int g_to_status;
 
 static void
 timeout_consumer(void *arg)
@@ -337,7 +337,7 @@ timeout_consumer(void *arg)
 		return;
 	}
 	rc = xtc_future_await(tf, &out);
-	atomic_store(&g_to_status, rc);
+	xtc_atomic_store_i32(&g_to_status, rc, xtc_mo_seq_cst);
 	xtc_promise_drop(prom);   /* release the never-set source */
 }
 
@@ -349,7 +349,7 @@ test_with_timeout(const MunitParameter p[], void *d)
 	xtc_pid_t c;
 	(void)p; (void)d;
 
-	atomic_store(&g_to_status, 0);
+	xtc_atomic_store_i32(&g_to_status, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	opts.name = "to";
 	munit_assert_int(xtc_proc_spawn(loop, timeout_consumer, NULL, &opts, &c),
@@ -357,7 +357,8 @@ test_with_timeout(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 
-	munit_assert_int(atomic_load(&g_to_status), ==, XTC_E_AGAIN);
+	munit_assert_int(xtc_atomic_load_i32(&g_to_status, xtc_mo_seq_cst), ==,
+	    XTC_E_AGAIN);
 	return MUNIT_OK;
 }
 
@@ -448,7 +449,7 @@ test_combinator_oom(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
-static _Atomic int g_to_oom_bad, g_to_oom_ran;
+static int g_to_oom_bad, g_to_oom_ran;
 
 static void
 timeout_oom_body(void *arg)
@@ -471,7 +472,8 @@ timeout_oom_body(void *arg)
 		g_fail_at = -1;
 		if (rc != XTC_OK) {
 			if (rc != XTC_E_NOMEM)
-				atomic_store(&g_to_oom_bad, 1000 + k);
+				xtc_atomic_store_i32(&g_to_oom_bad, 1000 + k,
+				    xtc_mo_seq_cst);
 			xtc_promise_drop(prom);
 			(void)xtc_future_wait(fut, &out, 0);   /* still ours */
 			continue;
@@ -481,9 +483,10 @@ timeout_oom_body(void *arg)
 		 * is far beyond this bounded wait.) */
 		rc = xtc_future_wait(tf, &out, 500LL * 1000 * 1000);
 		if (rc == XTC_E_AGAIN)
-			atomic_store(&g_to_oom_bad, 1 + k);
+			xtc_atomic_store_i32(&g_to_oom_bad, 1 + k,
+			    xtc_mo_seq_cst);
 	}
-	atomic_store(&g_to_oom_ran, 1);
+	xtc_atomic_store_i32(&g_to_oom_ran, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -493,8 +496,8 @@ test_with_timeout_oom(const MunitParameter p[], void *d)
 	xtc_pid_t c;
 	(void)p; (void)d;
 
-	atomic_store(&g_to_oom_bad, 0);
-	atomic_store(&g_to_oom_ran, 0);
+	xtc_atomic_store_i32(&g_to_oom_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_to_oom_ran, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, timeout_oom_body, NULL, NULL,
 	    &c), ==, XTC_OK);
@@ -502,10 +505,12 @@ test_with_timeout_oom(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	oom_disarm();
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_to_oom_ran), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_to_oom_ran, xtc_mo_seq_cst), ==,
+	    1);
 	/* 1 + k: the k-th allocation failed and a completed source was
 	 * reported as a timeout; 1000 + k: an error other than NOMEM. */
-	munit_assert_int(atomic_load(&g_to_oom_bad), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_to_oom_bad, xtc_mo_seq_cst), ==,
+	    0);
 	return MUNIT_OK;
 }
 
@@ -540,7 +545,7 @@ static xtc_future_t  *g_kf_fut;
 static xtc_promise_t *g_kf_prom;
 static int64_t        g_kf_tmo;
 static xtc_loop_t    *g_kf_loop;
-static atomic_int     g_kf_returned;
+static int g_kf_returned;
 static int            g_kf_down;
 
 static void
@@ -549,7 +554,8 @@ kf_victim(void *arg)
 	intptr_t v = 0;
 	(void)arg;
 	(void)xtc_future_wait(g_kf_fut, &v, g_kf_tmo);
-	atomic_store(&g_kf_returned, 1);          /* must not be reached */
+	xtc_atomic_store_i32(&g_kf_returned, 1,
+	    xtc_mo_seq_cst); /* must not be reached */
 }
 
 static void
@@ -580,7 +586,7 @@ test_kill_then_fulfil(const MunitParameter params[], void *data)
 	(void)data;
 	g_kf_tmo = (wt != NULL && strcmp(wt, "timed") == 0) ?
 	    50LL * 1000 * 1000 : -1;
-	atomic_store(&g_kf_returned, 0);
+	xtc_atomic_store_i32(&g_kf_returned, 0, xtc_mo_seq_cst);
 	g_kf_down = 0;
 	munit_assert_int(xtc_future_new_pair(&g_kf_prom, &g_kf_fut), ==, XTC_OK);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
@@ -588,7 +594,8 @@ test_kill_then_fulfil(const MunitParameter params[], void *data)
 	munit_assert_int(xtc_proc_spawn(loop, kf_driver, NULL, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
-	munit_assert_int(atomic_load(&g_kf_returned), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_kf_returned, xtc_mo_seq_cst),
+	    ==, 0);
 	munit_assert_int(g_kf_down, ==, 1);
 	/* The killed waiter left the future unconsumed: the value is still
 	 * there for anyone holding the handle. */

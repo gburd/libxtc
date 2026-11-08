@@ -17,7 +17,6 @@
 #endif
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -154,21 +153,21 @@ test_magazine_fastpath(const MunitParameter p[], void *d)
 
 /* ----- Constructor/destructor --------------------------------- */
 
-static _Atomic int g_ctor_count;
-static _Atomic int g_dtor_count;
+static int g_ctor_count;
+static int g_dtor_count;
 
 static int
 my_ctor(void *obj, void *user) {
 	(void)user;
 	*(int *)obj = 0xdeadbeef;
-	atomic_fetch_add(&g_ctor_count, 1);
+	xtc_atomic_fetch_add_i32(&g_ctor_count, 1, xtc_mo_seq_cst);
 	return XTC_OK;
 }
 static void
 my_dtor(void *obj, void *user) {
 	(void)user;
 	*(int *)obj = 0;
-	atomic_fetch_add(&g_dtor_count, 1);
+	xtc_atomic_fetch_add_i32(&g_dtor_count, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -178,8 +177,8 @@ test_ctor_dtor(const MunitParameter p[], void *d)
 	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
 	void *o1, *o2;
 	(void)p; (void)d;
-	atomic_store(&g_ctor_count, 0);
-	atomic_store(&g_dtor_count, 0);
+	xtc_atomic_store_i32(&g_ctor_count, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_dtor_count, 0, xtc_mo_seq_cst);
 	opts.name = "ctor_dtor"; opts.obj_size = sizeof(int);
 	opts.ctor = my_ctor; opts.dtor = my_dtor;
 	munit_assert_int(xtc_slab_create(&opts, &s), ==, XTC_OK);
@@ -188,11 +187,13 @@ test_ctor_dtor(const MunitParameter p[], void *d)
 	o2 = xtc_slab_alloc(s); munit_assert_not_null(o2);
 	munit_assert_int(*(int *)o1, ==, (int)0xdeadbeef);
 	munit_assert_int(*(int *)o2, ==, (int)0xdeadbeef);
-	munit_assert_int(atomic_load(&g_ctor_count), ==, 2);
+	munit_assert_int(xtc_atomic_load_i32(&g_ctor_count, xtc_mo_seq_cst), ==,
+	    2);
 
 	xtc_slab_free(s, o1);
 	xtc_slab_free(s, o2);
-	munit_assert_int(atomic_load(&g_dtor_count), ==, 2);
+	munit_assert_int(xtc_atomic_load_i32(&g_dtor_count, xtc_mo_seq_cst), ==,
+	    2);
 	/*
 	 * Destroy must NOT re-run the destructor on objects the caller
 	 * already freed.  xtc_slab_free runs the dtor before caching the
@@ -204,7 +205,8 @@ test_ctor_dtor(const MunitParameter p[], void *d)
 	 * without the magazine drain in xtc_slab_destroy.
 	 */
 	xtc_slab_destroy(s);
-	munit_assert_int(atomic_load(&g_dtor_count), ==, 2);
+	munit_assert_int(xtc_atomic_load_i32(&g_dtor_count, xtc_mo_seq_cst), ==,
+	    2);
 	return MUNIT_OK;
 }
 
@@ -229,7 +231,7 @@ test_word_slot_destroy(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	for (si = 0; si < sizeof sizes / sizeof sizes[0]; si++) {
-		atomic_store(&g_dtor_count, 0);
+		xtc_atomic_store_i32(&g_dtor_count, 0, xtc_mo_seq_cst);
 		opts = (xtc_slab_opts_t)XTC_SLAB_OPTS_DEFAULT;
 		opts.name = "word_slot";
 		opts.obj_size = sizes[si];
@@ -241,10 +243,14 @@ test_word_slot_destroy(const MunitParameter p[], void *d)
 			munit_assert_not_null((o[i] = xtc_slab_alloc(s)));
 		for (i = 0; i < 4; i++)
 			xtc_slab_free(s, o[i]);
-		munit_assert_int(atomic_load(&g_dtor_count), ==, 4);
+		munit_assert_int(xtc_atomic_load_i32(&g_dtor_count,
+		                     xtc_mo_seq_cst),
+		    ==, 4);
 		/* Destroy must add nothing: everything was already freed. */
 		xtc_slab_destroy(s);
-		munit_assert_int(atomic_load(&g_dtor_count), ==, 4);
+		munit_assert_int(xtc_atomic_load_i32(&g_dtor_count,
+		                     xtc_mo_seq_cst),
+		    ==, 4);
 	}
 	return MUNIT_OK;
 }
@@ -264,7 +270,7 @@ test_destroy_dtor_once(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	/* Magazine path: free everything, destroy, dtor count stays == n. */
-	atomic_store(&g_dtor_count, 0);
+	xtc_atomic_store_i32(&g_dtor_count, 0, xtc_mo_seq_cst);
 	opts.name = "dtor_once_mag"; opts.obj_size = sizeof(int);
 	opts.dtor = my_dtor;
 	munit_assert_int(xtc_slab_create(&opts, &s), ==, XTC_OK);
@@ -274,13 +280,15 @@ test_destroy_dtor_once(const MunitParameter p[], void *d)
 	}
 	for (i = 0; i < 4; i++)
 		xtc_slab_free(s, o[i]);
-	munit_assert_int(atomic_load(&g_dtor_count), ==, 4);
+	munit_assert_int(xtc_atomic_load_i32(&g_dtor_count, xtc_mo_seq_cst), ==,
+	    4);
 	xtc_slab_destroy(s);
-	munit_assert_int(atomic_load(&g_dtor_count), ==, 4);
+	munit_assert_int(xtc_atomic_load_i32(&g_dtor_count, xtc_mo_seq_cst), ==,
+	    4);
 
 	/* Same with the magazine disabled (slot goes straight back to the
 	 * chunk free list): still exactly once each. */
-	atomic_store(&g_dtor_count, 0);
+	xtc_atomic_store_i32(&g_dtor_count, 0, xtc_mo_seq_cst);
 	opts.name = "dtor_once_nomag";
 	opts.flags = XTC_SLAB_NO_MAGAZINE;
 	munit_assert_int(xtc_slab_create(&opts, &s), ==, XTC_OK);
@@ -288,21 +296,25 @@ test_destroy_dtor_once(const MunitParameter p[], void *d)
 		munit_assert_not_null((o[i] = xtc_slab_alloc(s)));
 	for (i = 0; i < 4; i++)
 		xtc_slab_free(s, o[i]);
-	munit_assert_int(atomic_load(&g_dtor_count), ==, 4);
+	munit_assert_int(xtc_atomic_load_i32(&g_dtor_count, xtc_mo_seq_cst), ==,
+	    4);
 	xtc_slab_destroy(s);
-	munit_assert_int(atomic_load(&g_dtor_count), ==, 4);
+	munit_assert_int(xtc_atomic_load_i32(&g_dtor_count, xtc_mo_seq_cst), ==,
+	    4);
 
 	/* A genuinely LIVE object at destroy time still gets its one dtor
 	 * call -- the drain must not suppress that. */
-	atomic_store(&g_dtor_count, 0);
+	xtc_atomic_store_i32(&g_dtor_count, 0, xtc_mo_seq_cst);
 	opts.name = "dtor_live"; opts.flags = 0;
 	munit_assert_int(xtc_slab_create(&opts, &s), ==, XTC_OK);
 	munit_assert_not_null((o[0] = xtc_slab_alloc(s)));
 	munit_assert_not_null((o[1] = xtc_slab_alloc(s)));
 	xtc_slab_free(s, o[0]);            /* one dtor here */
-	munit_assert_int(atomic_load(&g_dtor_count), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_dtor_count, xtc_mo_seq_cst), ==,
+	    1);
 	xtc_slab_destroy(s);               /* one dtor for the live o[1] */
-	munit_assert_int(atomic_load(&g_dtor_count), ==, 2);
+	munit_assert_int(xtc_atomic_load_i32(&g_dtor_count, xtc_mo_seq_cst), ==,
+	    2);
 	return MUNIT_OK;
 }
 
@@ -710,9 +722,9 @@ preempt_tick_raw(void)
 #include "xtc_preempt.h"
 #include "xtc_proc.h"
 
-static atomic_long g_mp_peer_runs;
-static atomic_int  g_mp_arm, g_mp_hits, g_mp_stop;
-static atomic_int  g_mp_ctrl_preempted, g_mp_win_preempted;
+static long g_mp_peer_runs;
+static int g_mp_arm, g_mp_hits, g_mp_stop;
+static int g_mp_ctrl_preempted, g_mp_win_preempted;
 static void       *g_mp_obj;
 
 static void
@@ -720,21 +732,21 @@ mp_raise_in_window(const char *name, void *user)
 {
 	long before;
 	(void)name; (void)user;
-	if (!atomic_exchange(&g_mp_arm, 0))
+	if (!xtc_atomic_exchange_i32(&g_mp_arm, 0, xtc_mo_seq_cst))
 		return;
-	atomic_fetch_add(&g_mp_hits, 1);
-	before = atomic_load(&g_mp_peer_runs);
+	xtc_atomic_fetch_add_i32(&g_mp_hits, 1, xtc_mo_seq_cst);
+	before = xtc_atomic_load_long(&g_mp_peer_runs, xtc_mo_seq_cst);
 	PREEMPT_TICK();              /* a preemption tick, here */
-	if (atomic_load(&g_mp_peer_runs) != before)
-		atomic_store(&g_mp_win_preempted, 1);
+	if (xtc_atomic_load_long(&g_mp_peer_runs, xtc_mo_seq_cst) != before)
+		xtc_atomic_store_i32(&g_mp_win_preempted, 1, xtc_mo_seq_cst);
 }
 
 static void
 mp_peer(void *arg)
 {
 	(void)arg;
-	while (!atomic_load(&g_mp_stop)) {
-		atomic_fetch_add(&g_mp_peer_runs, 1);
+	while (!xtc_atomic_load_i32(&g_mp_stop, xtc_mo_seq_cst)) {
+		xtc_atomic_fetch_add_long(&g_mp_peer_runs, 1, xtc_mo_seq_cst);
 		xtc_yield();
 	}
 }
@@ -746,16 +758,16 @@ mp_owner(void *arg)
 	void *o;
 	(void)arg;
 	xtc_yield();                          /* let the peer start */
-	before = atomic_load(&g_mp_peer_runs);
+	before = xtc_atomic_load_long(&g_mp_peer_runs, xtc_mo_seq_cst);
 	PREEMPT_TICK();               /* control: plain fiber code */
-	if (atomic_load(&g_mp_peer_runs) != before)
-		atomic_store(&g_mp_ctrl_preempted, 1);
+	if (xtc_atomic_load_long(&g_mp_peer_runs, xtc_mo_seq_cst) != before)
+		xtc_atomic_store_i32(&g_mp_ctrl_preempted, 1, xtc_mo_seq_cst);
 	o = xtc_slab_alloc(g_slab);           /* fill this thread's magazine */
 	xtc_slab_free(g_slab, o);
-	atomic_store(&g_mp_arm, 1);
+	xtc_atomic_store_i32(&g_mp_arm, 1, xtc_mo_seq_cst);
 	g_mp_obj = xtc_slab_alloc(g_slab);    /* magazine hit: the window */
 	xtc_slab_free(g_slab, g_mp_obj);
-	atomic_store(&g_mp_stop, 1);
+	xtc_atomic_store_i32(&g_mp_stop, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -774,12 +786,12 @@ test_magazine_preempt(const MunitParameter p[], void *d)
 #endif
 	opts.name = "mag-preempt"; opts.obj_size = 64;
 	munit_assert_int(xtc_slab_create(&opts, &g_slab), ==, XTC_OK);
-	atomic_store(&g_mp_peer_runs, 0);
-	atomic_store(&g_mp_arm, 0);
-	atomic_store(&g_mp_hits, 0);
-	atomic_store(&g_mp_stop, 0);
-	atomic_store(&g_mp_ctrl_preempted, 0);
-	atomic_store(&g_mp_win_preempted, 0);
+	xtc_atomic_store_long(&g_mp_peer_runs, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_mp_arm, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_mp_hits, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_mp_stop, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_mp_ctrl_preempted, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_mp_win_preempted, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_inject_attach("slab.magazine_window",
 	    mp_raise_in_window, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
@@ -798,10 +810,14 @@ test_magazine_preempt(const MunitParameter p[], void *d)
 	(void)xtc_exec_fini(e);
 	(void)xtc_inject_detach("slab.magazine_window");
 	xtc_slab_destroy(g_slab);
-	if (atomic_load(&g_mp_hits) == 0)
+	if (xtc_atomic_load_i32(&g_mp_hits, xtc_mo_seq_cst) == 0)
 		return MUNIT_SKIP;   /* injection points compiled out */
-	munit_assert_int(atomic_load(&g_mp_ctrl_preempted), ==, 1);
-	munit_assert_int(atomic_load(&g_mp_win_preempted), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_mp_ctrl_preempted,
+	                     xtc_mo_seq_cst),
+	    ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_mp_win_preempted,
+	                     xtc_mo_seq_cst),
+	    ==, 0);
 	return MUNIT_OK;
 }
 
@@ -923,7 +939,7 @@ test_stats_ctor_refused(const MunitParameter p[], void *d)
  */
 #define SC_THREADS 4
 #define SC_ROUNDS  200000
-static _Atomic int g_sc_go;
+static int g_sc_go;
 
 static void *
 sc_worker(void *arg)
@@ -932,7 +948,7 @@ sc_worker(void *arg)
 	long r;
 	int j;
 	(void)arg;
-	while (!atomic_load(&g_sc_go))
+	while (!xtc_atomic_load_i32(&g_sc_go, xtc_mo_seq_cst))
 		;
 	for (r = 0; r < SC_ROUNDS; r++) {
 		for (j = 0; j < 8; j++)
@@ -964,7 +980,7 @@ sc_run(int n, double *cpus)
 	pthread_t th[SC_THREADS];
 	int64_t t0, t1, c0 = 0, c1 = 0;
 	int i;
-	atomic_store(&g_sc_go, 0);
+	xtc_atomic_store_i32(&g_sc_go, 0, xtc_mo_seq_cst);
 	for (i = 0; i < n; i++)
 		munit_assert_int(pthread_create(&th[i], NULL, sc_worker, NULL),
 		    ==, 0);
@@ -972,7 +988,7 @@ sc_run(int n, double *cpus)
 #if !defined(_WIN32)
 	c0 = sc_cpu_ns();
 #endif
-	atomic_store(&g_sc_go, 1);
+	xtc_atomic_store_i32(&g_sc_go, 1, xtc_mo_seq_cst);
 	for (i = 0; i < n; i++)
 		(void)pthread_join(th[i], NULL);
 	t1 = xtc_clock_mono();

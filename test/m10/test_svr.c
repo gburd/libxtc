@@ -6,7 +6,6 @@
  */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,7 +57,7 @@ static xtc_svr_t *g_svr_for_driver;
 
 struct driver_args {
 	xtc_pid_t target;
-	_Atomic int call_result;
+	int call_result;
 };
 
 static void
@@ -94,7 +93,7 @@ driver_proc(void *arg)
 	} else {
 		val = -1;
 	}
-	atomic_store_explicit(&da->call_result, val, memory_order_release);
+	xtc_atomic_store_i32(&da->call_result, val, xtc_mo_release);
 
 	(void)xtc_svr_stop(g_svr_for_driver);
 }
@@ -130,7 +129,7 @@ test_svr_basic(const MunitParameter p[], void *d)
 	g_svr_for_driver = svr;
 
 	da.target = xtc_svr_pid(svr);
-	atomic_store_explicit(&da.call_result, -2, memory_order_relaxed);
+	xtc_atomic_store_i32(&da.call_result, -2, xtc_mo_relaxed);
 	munit_assert_int(xtc_proc_spawn(loop, driver_proc, &da, NULL,
 	    &dpid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
@@ -138,8 +137,8 @@ test_svr_basic(const MunitParameter p[], void *d)
 	/* Three casts incremented the counter to 3.  The synchronous
 	 * call read 3 back. */
 	munit_assert_int(state.count, ==, 3);
-	munit_assert_int(atomic_load_explicit(&da.call_result,
-	    memory_order_acquire), ==, 3);
+	munit_assert_int(xtc_atomic_load_i32(&da.call_result, xtc_mo_acquire),
+	    ==, 3);
 	/* The raw-send hit handle_info exactly once. */
 	munit_assert_int(__os_atomic_load_i32(&g_info_seen), ==, 1);
 
@@ -163,7 +162,7 @@ struct abrt_args {
 	xtc_pid_t           target;
 	xtc_abort_source_t *src;
 	xtc_abort_token_t   tok;
-	_Atomic int         rc;
+	int rc;
 };
 static xtc_svr_t *g_blackhole_svr;
 
@@ -174,7 +173,7 @@ abrt_caller(void *arg)
 	void *reply = NULL; size_t rsz = 0;
 	int rc = xtc_svr_call_abortable(a->target, NULL, 0, &reply, &rsz,
 	    5LL * 1000 * 1000 * 1000, &a->tok);
-	atomic_store_explicit(&a->rc, rc, memory_order_release);
+	xtc_atomic_store_i32(&a->rc, rc, xtc_mo_release);
 	if (reply) __os_free(reply);
 	(void)xtc_svr_stop(g_blackhole_svr);
 }
@@ -216,7 +215,7 @@ test_svr_call_abortable(const MunitParameter p[], void *d)
 	a.target = xtc_svr_pid(svr);
 	munit_assert_int(xtc_abort_source_create(&a.src), ==, XTC_OK);
 	munit_assert_int(xtc_abort_source_token(a.src, &a.tok), ==, XTC_OK);
-	atomic_store_explicit(&a.rc, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&a.rc, 0, xtc_mo_relaxed);
 
 	munit_assert_int(xtc_proc_spawn(loop, abrt_caller, &a, NULL, &cpid),
 	    ==, XTC_OK);
@@ -224,8 +223,8 @@ test_svr_call_abortable(const MunitParameter p[], void *d)
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
-	munit_assert_int(atomic_load_explicit(&a.rc, memory_order_acquire),
-	    ==, XTC_E_ABORTED);
+	munit_assert_int(xtc_atomic_load_i32(&a.rc, xtc_mo_acquire), ==,
+	    XTC_E_ABORTED);
 
 	xtc_abort_source_destroy(a.src);
 	munit_assert_int(xtc_svr_join(svr, 1LL * 1000 * 1000 * 1000), ==, XTC_OK);
@@ -264,9 +263,13 @@ defer_handle_cast(void *st, const void *msg, size_t size)
 	return XTC_SVR_CONTINUE;
 }
 
-struct defer_args { xtc_pid_t target; _Atomic int rc; _Atomic int val; };
+struct defer_args {
+	xtc_pid_t target;
+	int rc;
+	int val;
+};
 static xtc_svr_t *g_defer_svr;
-static _Atomic int g_defer_left;
+static int g_defer_left;
 
 static void
 defer_caller(void *arg)
@@ -275,12 +278,12 @@ defer_caller(void *arg)
 	void *reply = NULL; size_t rsz = 0;
 	int rc = xtc_svr_call(a->target, NULL, 0, &reply, &rsz,
 	    5LL * 1000 * 1000 * 1000);
-	atomic_store_explicit(&a->rc, rc, memory_order_release);
+	xtc_atomic_store_i32(&a->rc, rc, xtc_mo_release);
 	if (rc == XTC_OK && rsz == sizeof(int))
-		atomic_store_explicit(&a->val, *(int *)reply, memory_order_release);
+		xtc_atomic_store_i32(&a->val, *(int *)reply, xtc_mo_release);
 	if (reply) __os_free(reply);
 	/* The last caller to get its deferred reply stops the server. */
-	if (atomic_fetch_sub(&g_defer_left, 1) == 1)
+	if (xtc_atomic_fetch_sub_i32(&g_defer_left, 1, xtc_mo_seq_cst) == 1)
 		(void)xtc_svr_stop(g_defer_svr);
 }
 static void
@@ -315,7 +318,7 @@ test_svr_deferred_reply(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_svr_start(loop, &cb, &state, &opts, &svr), ==, XTC_OK);
 	g_defer_svr = svr;
-	atomic_store(&g_defer_left, 2);
+	xtc_atomic_store_i32(&g_defer_left, 2, xtc_mo_seq_cst);
 
 	memset(&a1, 0, sizeof a1); memset(&a2, 0, sizeof a2); memset(&fa, 0, sizeof fa);
 	a1.target = a2.target = fa.target = xtc_svr_pid(svr);
@@ -327,10 +330,14 @@ test_svr_deferred_reply(const MunitParameter p[], void *d)
 
 	/* Both calls deferred past handle_call, then answered from the
 	 * cast: each caller got the magic reply. */
-	munit_assert_int(atomic_load(&a1.rc), ==, XTC_OK);
-	munit_assert_int(atomic_load(&a2.rc), ==, XTC_OK);
-	munit_assert_int(atomic_load(&a1.val), ==, DEFER_MAGIC);
-	munit_assert_int(atomic_load(&a2.val), ==, DEFER_MAGIC);
+	munit_assert_int(xtc_atomic_load_i32(&a1.rc, xtc_mo_seq_cst), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_atomic_load_i32(&a2.rc, xtc_mo_seq_cst), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_atomic_load_i32(&a1.val, xtc_mo_seq_cst), ==,
+	    DEFER_MAGIC);
+	munit_assert_int(xtc_atomic_load_i32(&a2.val, xtc_mo_seq_cst), ==,
+	    DEFER_MAGIC);
 
 	munit_assert_int(xtc_svr_join(svr, 1LL * 1000 * 1000 * 1000), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
@@ -339,14 +346,19 @@ test_svr_deferred_reply(const MunitParameter p[], void *d)
 
 /* handle_continue: init returns fast after arming a continuation; the
  * continuation runs before the first message and marks state ready. */
-struct cont_state { _Atomic int inited; _Atomic int continued; _Atomic int order_bad; };
+struct cont_state {
+	int inited;
+	int continued;
+	int order_bad;
+};
 static int
 cont_init(void *st)
 {
 	struct cont_state *s = st;
-	atomic_store(&s->inited, 1);
+	xtc_atomic_store_i32(&s->inited, 1, xtc_mo_seq_cst);
 	/* the continuation must not have run yet */
-	if (atomic_load(&s->continued)) atomic_store(&s->order_bad, 1);
+	if (xtc_atomic_load_i32(&s->continued, xtc_mo_seq_cst))
+		xtc_atomic_store_i32(&s->order_bad, 1, xtc_mo_seq_cst);
 	return xtc_svr_continue(s);   /* arm; returns XTC_OK */
 }
 static int
@@ -354,15 +366,17 @@ cont_continue(void *st, void *cont)
 {
 	struct cont_state *s = st;
 	(void)cont;   /* == s */
-	if (!atomic_load(&s->inited)) atomic_store(&s->order_bad, 1);
-	atomic_store(&s->continued, 1);
+	if (!xtc_atomic_load_i32(&s->inited, xtc_mo_seq_cst))
+		xtc_atomic_store_i32(&s->order_bad, 1, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&s->continued, 1, xtc_mo_seq_cst);
 	return XTC_OK;
 }
 static int
 cont_call(void *st, const void *req, size_t n, xtc_svr_call_t *call)
 {
 	struct cont_state *s = st;
-	int ready = atomic_load(&s->continued);   /* must be 1 by first call */
+	int ready = xtc_atomic_load_i32(&s->continued,
+	    xtc_mo_seq_cst); /* must be 1 by first call */
 	(void)req; (void)n;
 	(void)xtc_svr_reply(call, &ready, sizeof ready);
 	return XTC_SVR_CONTINUE;
@@ -399,8 +413,10 @@ test_svr_handle_continue(const MunitParameter p[], void *dp)
 	munit_assert_int(xtc_proc_spawn(loop, cont_driver, &d, NULL, NULL), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&st.continued), ==, 1);
-	munit_assert_int(atomic_load(&st.order_bad), ==, 0);  /* init before continue before call */
+	munit_assert_int(xtc_atomic_load_i32(&st.continued, xtc_mo_seq_cst), ==,
+	    1);
+	munit_assert_int(xtc_atomic_load_i32(&st.order_bad, xtc_mo_seq_cst), ==,
+	    0); /* init before continue before call */
 	munit_assert_int(d.reply_ready, ==, 1);               /* continuation ran before first call */
 	(void)xtc_svr_join(d.svr, 0);
 	(void)xtc_loop_fini(loop);
@@ -413,8 +429,8 @@ static xtc_reg_t  *g_cn_reg;
 static xtc_svr_t  *g_cn_svr;
 
 struct call_name_args {
-	_Atomic int result;
-	_Atomic int miss_rc;
+	int result;
+	int miss_rc;
 };
 
 static void
@@ -444,12 +460,13 @@ call_name_driver(void *arg)
 		memcpy(&val, reply, sizeof val);
 		__os_free(reply);
 	}
-	atomic_store(&a->result, val);
+	xtc_atomic_store_i32(&a->result, val, xtc_mo_seq_cst);
 
 	/* Unknown name -> XTC_E_NOTFOUND (registry miss). */
-	atomic_store(&a->miss_rc,
-	    xtc_svr_call_name(g_cn_reg, "no.such.server", NULL, 0,
-	        &reply, &reply_size, 1000LL * 1000 * 1000));
+	xtc_atomic_store_i32(&a->miss_rc,
+	    xtc_svr_call_name(g_cn_reg, "no.such.server", NULL, 0, &reply,
+	        &reply_size, 1000LL * 1000 * 1000),
+	    xtc_mo_seq_cst);
 
 	(void)xtc_svr_stop(g_cn_svr);
 }
@@ -483,15 +500,16 @@ test_svr_call_name(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_reg_register(g_cn_reg, "counter.named",
 	    xtc_svr_pid(g_cn_svr)), ==, XTC_OK);
 
-	atomic_store(&a.result, -2);
-	atomic_store(&a.miss_rc, 12345);
+	xtc_atomic_store_i32(&a.result, -2, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&a.miss_rc, 12345, xtc_mo_seq_cst);
 	munit_assert_int(xtc_proc_spawn(loop, call_name_driver, &a, NULL,
 	    &dpid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
 	/* Two casts -> counter == 2, read back by name. */
-	munit_assert_int(atomic_load(&a.result), ==, 2);
-	munit_assert_int(atomic_load(&a.miss_rc), ==, XTC_E_NOTFOUND);
+	munit_assert_int(xtc_atomic_load_i32(&a.result, xtc_mo_seq_cst), ==, 2);
+	munit_assert_int(xtc_atomic_load_i32(&a.miss_rc, xtc_mo_seq_cst), ==,
+	    XTC_E_NOTFOUND);
 
 	munit_assert_int(xtc_svr_join(g_cn_svr, 1LL * 1000 * 1000 * 1000),
 	    ==, XTC_OK);
@@ -521,9 +539,9 @@ test_svr_call_name(const MunitParameter p[], void *d)
  */
 struct offloop_args {
 	xtc_pid_t target;
-	_Atomic int rc;
-	_Atomic int value;
-	_Atomic int started;
+	int rc;
+	int value;
+	int started;
 };
 
 static xtc_loop_t *g_ol_loop;
@@ -548,7 +566,7 @@ ol_thread(void *arg)
 	int rc;
 
 	/* Wait until the server pid is published and the loop is running. */
-	while (!atomic_load(&a->started))
+	while (!xtc_atomic_load_i32(&a->started, xtc_mo_seq_cst))
 		(void)xtc_sleep_ns(1000 * 1000LL);
 
 	/* xtc_self() is NONE here (not a proc), so this takes the off-loop
@@ -559,11 +577,11 @@ ol_thread(void *arg)
 	 * enough for a slow shared runner, but BOUNDED. */
 	rc = xtc_svr_call(a->target, "q", 1, &reply, &rsz,
 	    10LL * 1000 * 1000 * 1000);
-	atomic_store(&a->rc, rc);
+	xtc_atomic_store_i32(&a->rc, rc, xtc_mo_seq_cst);
 	if (rc == XTC_OK && reply != NULL && rsz == sizeof(int)) {
 		int v;
 		memcpy(&v, reply, sizeof v);
-		atomic_store(&a->value, v);
+		xtc_atomic_store_i32(&a->value, v, xtc_mo_seq_cst);
 	}
 	xtc_free(reply);
 	/* The loop is stopped by ol_handle_call returning XTC_SVR_STOP -- but
@@ -596,9 +614,9 @@ test_svr_call_off_loop(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	memset(&a, 0, sizeof a);
-	atomic_store(&a.rc, -12345);
-	atomic_store(&a.value, 0);
-	atomic_store(&a.started, 0);
+	xtc_atomic_store_i32(&a.rc, -12345, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&a.value, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&a.started, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_svr_start(loop, &cb, NULL, &opts, &svr),
@@ -607,14 +625,16 @@ test_svr_call_off_loop(const MunitParameter p[], void *d)
 	a.target = xtc_svr_pid(svr);
 
 	munit_assert_int(pthread_create(&th, NULL, ol_thread, &a), ==, 0);
-	atomic_store(&a.started, 1);
+	xtc_atomic_store_i32(&a.started, 1, xtc_mo_seq_cst);
 
 	/* Runs until ol_handle_call returns XTC_SVR_STOP. */
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(pthread_join(th, NULL), ==, 0);
 
-	munit_assert_int(atomic_load(&a.rc), ==, XTC_OK);
-	munit_assert_int(atomic_load(&a.value), ==, 4242);
+	munit_assert_int(xtc_atomic_load_i32(&a.rc, xtc_mo_seq_cst), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_atomic_load_i32(&a.value, xtc_mo_seq_cst), ==,
+	    4242);
 
 	/* Reap the server before tearing down the loop: xtc_svr_join is what
 	 * releases the svr object (the handler returned XTC_SVR_STOP, so it
@@ -641,14 +661,15 @@ test_svr_call_off_loop(const MunitParameter p[], void *d)
  * ================================================================ */
 
 static xtc_loop_t *g_late_loop;
-static _Atomic int g_late_reply_rc = 12345;
+static int g_late_reply_rc = 12345;
 
 static int
 late_handle_call(void *st, const void *req, size_t size, xtc_svr_call_t *call)
 {
 	(void)st; (void)req; (void)size;
 	(void)xtc_proc_sleep(300LL * 1000 * 1000);
-	atomic_store(&g_late_reply_rc, xtc_svr_reply(call, "late", 4));
+	xtc_atomic_store_i32(&g_late_reply_rc, xtc_svr_reply(call, "late", 4),
+	    xtc_mo_seq_cst);
 	return XTC_SVR_STOP;
 }
 
@@ -674,8 +695,8 @@ late_scrub_and_hold(void)
 
 struct late_args {
 	xtc_pid_t   target;
-	_Atomic int rc;
-	_Atomic int corrupted;
+	int rc;
+	int corrupted;
 };
 
 static void *
@@ -689,9 +710,10 @@ late_thread(void *arg)
 	(void)xtc_sleep_ns(50LL * 1000 * 1000);   /* let the loop start */
 	rc = xtc_svr_call(a->target, "q", 1, &reply, &rsz,
 	    50LL * 1000 * 1000);
-	atomic_store(&a->rc, rc);
+	xtc_atomic_store_i32(&a->rc, rc, xtc_mo_seq_cst);
 	xtc_free(reply);
-	atomic_store(&a->corrupted, late_scrub_and_hold());
+	xtc_atomic_store_i32(&a->corrupted, late_scrub_and_hold(),
+	    xtc_mo_seq_cst);
 	(void)xtc_loop_stop(g_late_loop);
 	return NULL;
 }
@@ -710,9 +732,9 @@ test_svr_off_loop_late_reply(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	memset(&a, 0, sizeof a);
-	atomic_store(&a.rc, -12345);
-	atomic_store(&a.corrupted, -1);
-	atomic_store(&g_late_reply_rc, 12345);
+	xtc_atomic_store_i32(&a.rc, -12345, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&a.corrupted, -1, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_late_reply_rc, 12345, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	g_late_loop = loop;
 	munit_assert_int(xtc_svr_start(loop, &cb, NULL, NULL, &svr), ==, XTC_OK);
@@ -721,10 +743,13 @@ test_svr_off_loop_late_reply(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(pthread_join(th, NULL), ==, 0);
 
-	munit_assert_int(atomic_load(&a.rc), ==, XTC_E_AGAIN);
-	munit_assert_int(atomic_load(&a.corrupted), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&a.rc, xtc_mo_seq_cst), ==,
+	    XTC_E_AGAIN);
+	munit_assert_int(xtc_atomic_load_i32(&a.corrupted, xtc_mo_seq_cst), ==,
+	    0);
 	/* The late reply found no caller and was discarded. */
-	munit_assert_int(atomic_load(&g_late_reply_rc), ==, XTC_E_NOTFOUND);
+	munit_assert_int(xtc_atomic_load_i32(&g_late_reply_rc, xtc_mo_seq_cst),
+	    ==, XTC_E_NOTFOUND);
 	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	return MUNIT_OK;
@@ -750,8 +775,8 @@ dying_handle_call(void *st, const void *req, size_t size, xtc_svr_call_t *call)
 struct dying_args {
 	xtc_pid_t   target;
 	xtc_loop_t *loop;
-	_Atomic int rc;
-	_Atomic int64_t elapsed_ns;
+	int rc;
+	int64_t elapsed_ns;
 };
 
 static void
@@ -760,9 +785,12 @@ dying_do_call(struct dying_args *a)
 	void  *reply = NULL;
 	size_t rsz = 0;
 	int64_t t0 = xtc_clock_mono();
-	atomic_store(&a->rc, xtc_svr_call(a->target, "q", 1, &reply, &rsz,
-	    5LL * 1000 * 1000 * 1000));
-	atomic_store(&a->elapsed_ns, xtc_clock_mono() - t0);
+	xtc_atomic_store_i32(&a->rc,
+	    xtc_svr_call(a->target, "q", 1, &reply, &rsz,
+	        5LL * 1000 * 1000 * 1000),
+	    xtc_mo_seq_cst);
+	xtc_atomic_store_i64(&a->elapsed_ns, xtc_clock_mono() - t0,
+	    xtc_mo_seq_cst);
 	xtc_free(reply);
 }
 
@@ -797,7 +825,7 @@ test_svr_server_dies_mid_call(const MunitParameter p[], void *d)
 	(void)d;
 
 	memset(&a, 0, sizeof a);
-	atomic_store(&a.rc, -12345);
+	xtc_atomic_store_i32(&a.rc, -12345, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_svr_start(loop, &cb, NULL, NULL, &svr), ==, XTC_OK);
 	a.target = xtc_svr_pid(svr);
@@ -812,9 +840,10 @@ test_svr_server_dies_mid_call(const MunitParameter p[], void *d)
 		munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 		munit_assert_int(pthread_join(th, NULL), ==, 0);
 	}
-	munit_assert_int(atomic_load(&a.rc), ==, XTC_E_NOTFOUND);
-	munit_assert_int64(atomic_load(&a.elapsed_ns), <,
-	    2LL * 1000 * 1000 * 1000);
+	munit_assert_int(xtc_atomic_load_i32(&a.rc, xtc_mo_seq_cst), ==,
+	    XTC_E_NOTFOUND);
+	munit_assert_int64(xtc_atomic_load_i64(&a.elapsed_ns, xtc_mo_seq_cst),
+	    <, 2LL * 1000 * 1000 * 1000);
 	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	return MUNIT_OK;
@@ -983,7 +1012,7 @@ test_svr_inproc_reply_not_spoofed(const MunitParameter p[], void *d)
 struct bigto_args {
 	xtc_svr_t *svr;
 	xtc_loop_t *loop;
-	_Atomic int proc_rc;
+	int proc_rc;
 	int thread_rc;
 	xtc_pid_t seen;
 };
@@ -995,8 +1024,10 @@ bigto_caller(void *arg)
 	uint32_t req[2] = { 0, 1 };
 	void *r = NULL;
 	size_t rs = 0;
-	atomic_store(&a->proc_rc, xtc_svr_call(xtc_svr_pid(a->svr), req,
-	    sizeof req, &r, &rs, INT64_MAX));
+	xtc_atomic_store_i32(&a->proc_rc,
+	    xtc_svr_call(xtc_svr_pid(a->svr), req, sizeof req, &r, &rs,
+	        INT64_MAX),
+	    xtc_mo_seq_cst);
 	xtc_free(r);
 }
 
@@ -1011,7 +1042,7 @@ bigto_thread(void *arg)
 	a->thread_rc = xtc_svr_call(a->seen, req, sizeof req, &r, &rs,
 	    INT64_MAX);
 	xtc_free(r);
-	while (atomic_load(&a->proc_rc) == -12345)
+	while (xtc_atomic_load_i32(&a->proc_rc, xtc_mo_seq_cst) == -12345)
 		(void)xtc_sleep_ns(1000000);
 	(void)xtc_svr_stop(a->svr);
 	return NULL;
@@ -1030,7 +1061,7 @@ test_svr_huge_timeout(const MunitParameter p[], void *d)
 	pthread_t th;
 	(void)p; (void)d;
 	memset(&a, 0, sizeof a);
-	atomic_store(&a.proc_rc, -12345);
+	xtc_atomic_store_i32(&a.proc_rc, -12345, xtc_mo_seq_cst);
 	a.thread_rc = -12345;
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_svr_start(loop, &cb, NULL, NULL, &svr), ==, XTC_OK);
@@ -1041,7 +1072,8 @@ test_svr_huge_timeout(const MunitParameter p[], void *d)
 	munit_assert_int(pthread_create(&th, NULL, bigto_thread, &a), ==, 0);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(pthread_join(th, NULL), ==, 0);
-	munit_assert_int(atomic_load(&a.proc_rc), ==, XTC_OK);
+	munit_assert_int(xtc_atomic_load_i32(&a.proc_rc, xtc_mo_seq_cst), ==,
+	    XTC_OK);
 	munit_assert_int(a.thread_rc, ==, XTC_OK);
 	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);

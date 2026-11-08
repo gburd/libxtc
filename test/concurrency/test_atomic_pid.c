@@ -42,7 +42,6 @@ main(void)
 
 #include <pthread.h>
 #include <signal.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,10 +56,10 @@ main(void)
 
 static xtc_atomic_pid_t g_pid = XTC_ATOMIC_PID_INIT;
 /* the --torn control: the same two words, written with no seqlock */
-static _Atomic uint64_t g_raw[2];
+static uint64_t g_raw[2];
 static int g_control;
-static _Atomic int g_stop;
-static _Atomic uint64_t g_loads, g_torn, g_stores;
+static int g_stop;
+static uint64_t g_loads, g_torn, g_stores;
 
 /* Writer w's i-th pid.  Family w is recognisable from every field. */
 static xtc_pid_t
@@ -103,17 +102,17 @@ writer(void *arg)
 	uint64_t i = 1;
 	xtc_pid_t p;
 
-	while (!atomic_load_explicit(&g_stop, memory_order_relaxed)) {
+	while (!xtc_atomic_load_i32(&g_stop, xtc_mo_relaxed)) {
 		p = mk(w, i++);
 		if (g_control) {
-			atomic_store_explicit(&g_raw[0], (uint64_t)p.loop_id |
-			    (uint64_t)p.local_id << 32, memory_order_relaxed);
-			atomic_store_explicit(&g_raw[1], p.gen,
-			    memory_order_relaxed);
+			xtc_atomic_store_u64(&g_raw[0],
+			    (uint64_t)p.loop_id | (uint64_t)p.local_id << 32,
+			    xtc_mo_relaxed);
+			xtc_atomic_store_u64(&g_raw[1], p.gen, xtc_mo_relaxed);
 		} else {
 			xtc_atomic_pid_store(&g_pid, p);
 		}
-		atomic_fetch_add_explicit(&g_stores, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_u64(&g_stores, 1, xtc_mo_relaxed);
 	}
 	return NULL;
 }
@@ -125,14 +124,12 @@ reader(void *arg)
 	xtc_pid_t p;
 	(void)arg;
 
-	while (!atomic_load_explicit(&g_stop, memory_order_relaxed)) {
+	while (!xtc_atomic_load_i32(&g_stop, xtc_mo_relaxed)) {
 		if (g_control) {
-			w0 = atomic_load_explicit(&g_raw[0],
-			    memory_order_relaxed);
+			w0 = xtc_atomic_load_u64(&g_raw[0], xtc_mo_relaxed);
 			p.loop_id = (uint32_t)w0;
 			p.local_id = (uint32_t)(w0 >> 32);
-			p.gen = atomic_load_explicit(&g_raw[1],
-			    memory_order_relaxed);
+			p.gen = xtc_atomic_load_u64(&g_raw[1], xtc_mo_relaxed);
 		} else {
 			p = xtc_atomic_pid_load(&g_pid);
 		}
@@ -140,8 +137,8 @@ reader(void *arg)
 			torn++;
 		n++;
 	}
-	atomic_fetch_add(&g_loads, n);
-	atomic_fetch_add(&g_torn, torn);
+	xtc_atomic_fetch_add_u64(&g_loads, n, xtc_mo_seq_cst);
+	xtc_atomic_fetch_add_u64(&g_torn, torn, xtc_mo_seq_cst);
 	return NULL;
 }
 
@@ -188,24 +185,27 @@ main(int argc, char **argv)
 		    (void *)(uintptr_t)i) != 0)
 			return 77;
 	(void)xtc_sleep_ns(run_ns);
-	atomic_store(&g_stop, 1);
+	xtc_atomic_store_i32(&g_stop, 1, xtc_mo_seq_cst);
 	for (i = 0; i < N_WRITERS; i++)
 		(void)pthread_join(wt[i], NULL);
 	for (i = 0; i < N_READERS; i++)
 		(void)pthread_join(rt[i], NULL);
 
 	printf("%s: %d writers, %d readers: %llu stores, %llu loads, "
-	    "%llu torn\n", g_control ? "control (no seqlock)" : "seqlock",
-	    N_WRITERS, N_READERS, (unsigned long long)atomic_load(&g_stores),
-	    (unsigned long long)atomic_load(&g_loads),
-	    (unsigned long long)atomic_load(&g_torn));
-	if (atomic_load(&g_stores) == 0 || atomic_load(&g_loads) == 0) {
+	       "%llu torn\n",
+	    g_control ? "control (no seqlock)" : "seqlock", N_WRITERS,
+	    N_READERS,
+	    (unsigned long long)xtc_atomic_load_u64(&g_stores, xtc_mo_seq_cst),
+	    (unsigned long long)xtc_atomic_load_u64(&g_loads, xtc_mo_seq_cst),
+	    (unsigned long long)xtc_atomic_load_u64(&g_torn, xtc_mo_seq_cst));
+	if (xtc_atomic_load_u64(&g_stores, xtc_mo_seq_cst) == 0 ||
+	    xtc_atomic_load_u64(&g_loads, xtc_mo_seq_cst) == 0) {
 		printf("FAIL: no progress\n");
 		return 1;
 	}
 	if (g_control)
 		return 0;                    /* the count is the evidence */
-	if (atomic_load(&g_torn) != 0) {
+	if (xtc_atomic_load_u64(&g_torn, xtc_mo_seq_cst) != 0) {
 		printf("FAIL: a reader saw a torn pid\n");
 		return 1;
 	}

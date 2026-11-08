@@ -27,7 +27,6 @@
  */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -64,7 +63,11 @@ static const xtc_svr_callbacks_t edge_cb = {
 	.handle_cast = NULL, .handle_info = NULL, .terminate = NULL
 };
 
-struct edge_args { xtc_pid_t target; xtc_svr_t *svr; _Atomic int rc; };
+struct edge_args {
+	xtc_pid_t target;
+	xtc_svr_t *svr;
+	int rc;
+};
 
 static void
 cas_driver(void *arg)
@@ -81,7 +84,7 @@ cas_driver(void *arg)
 	reply = NULL;
 	rc = xtc_svr_call(a->target, &want, sizeof want, &reply, &rsz,
 	    60LL * 1000 * 1000);
-	atomic_store_explicit(&a->rc, rc, memory_order_release);
+	xtc_atomic_store_i32(&a->rc, rc, xtc_mo_release);
 	munit_assert_int(rc == XTC_E_INVAL || rc == XTC_E_AGAIN, ==, 1);
 	if (rc == XTC_OK && reply) __os_free(reply);
 }
@@ -138,7 +141,10 @@ static const xtc_svr_callbacks_t save_cb = {
 	.handle_cast = NULL, .handle_info = NULL, .terminate = NULL
 };
 
-struct save_args { xtc_pid_t target; _Atomic int call_rc; };
+struct save_args {
+	xtc_pid_t target;
+	int call_rc;
+};
 
 static void
 save_caller(void *arg)
@@ -148,7 +154,7 @@ save_caller(void *arg)
 	size_t rsz = 0;
 	int rc = xtc_svr_call(a->target, "x", 1, &reply, &rsz,
 	    80LL * 1000 * 1000);
-	atomic_store_explicit(&a->call_rc, rc, memory_order_release);
+	xtc_atomic_store_i32(&a->call_rc, rc, xtc_mo_release);
 	if (reply) __os_free(reply);
 }
 
@@ -176,8 +182,8 @@ test_reply_when_stopped(const MunitParameter p[], void *d)
 	/* The handler saved a handle and stopped without replying.  The
 	 * caller notices the server exit and fails fast (since 1.55.1;
 	 * before, it waited out its whole timeout and got XTC_E_AGAIN). */
-	munit_assert_int(atomic_load_explicit(&a.call_rc, memory_order_acquire),
-	    ==, XTC_E_NOTFOUND);
+	munit_assert_int(xtc_atomic_load_i32(&a.call_rc, xtc_mo_acquire), ==,
+	    XTC_E_NOTFOUND);
 	munit_assert_not_null(st.saved);
 
 	/* Reply now, when the server proc and caller proc are gone.  The
@@ -209,21 +215,21 @@ test_reply_when_stopped(const MunitParameter p[], void *d)
 #define OOM_MSG_SIZE     (16 + OOM_REPLY_SIZE)
 
 static struct __os_alloc_hook g_saved_hook;
-static _Atomic int g_oom_armed;
+static int g_oom_armed;
 
 static void *
 oom_malloc(size_t s)
 {
-	if (atomic_load_explicit(&g_oom_armed, memory_order_acquire) &&
+	if (xtc_atomic_load_i32(&g_oom_armed, xtc_mo_acquire) &&
 	    s == (size_t)OOM_MSG_SIZE) {
 		/* Fail exactly the reply-path allocation, once. */
-		atomic_store_explicit(&g_oom_armed, 0, memory_order_release);
+		xtc_atomic_store_i32(&g_oom_armed, 0, xtc_mo_release);
 		return NULL;
 	}
 	return g_saved_hook.malloc(s);
 }
 
-static _Atomic int g_reply_rc;
+static int g_reply_rc;
 
 static int
 oom_handle_call(void *st, const void *req, size_t sz, xtc_svr_call_t *call)
@@ -232,11 +238,11 @@ oom_handle_call(void *st, const void *req, size_t sz, xtc_svr_call_t *call)
 	uint8_t buf[OOM_REPLY_SIZE];
 	(void)st; (void)req; (void)sz;
 	memset(buf, 0x5A, sizeof buf);
-	atomic_store_explicit(&g_oom_armed, 1, memory_order_release);
+	xtc_atomic_store_i32(&g_oom_armed, 1, xtc_mo_release);
 	rc = xtc_svr_reply(call, buf, sizeof buf);
-	atomic_store_explicit(&g_reply_rc, rc, memory_order_release);
+	xtc_atomic_store_i32(&g_reply_rc, rc, xtc_mo_release);
 	/* Disarm in case reply took a path that did not consume it. */
-	atomic_store_explicit(&g_oom_armed, 0, memory_order_release);
+	xtc_atomic_store_i32(&g_oom_armed, 0, xtc_mo_release);
 	return XTC_SVR_STOP;
 }
 
@@ -246,7 +252,10 @@ static const xtc_svr_callbacks_t oom_cb = {
 	.handle_cast = NULL, .handle_info = NULL, .terminate = NULL
 };
 
-struct oom_args { xtc_pid_t target; _Atomic int call_rc; };
+struct oom_args {
+	xtc_pid_t target;
+	int call_rc;
+};
 
 static void
 oom_caller(void *arg)
@@ -256,7 +265,7 @@ oom_caller(void *arg)
 	size_t rsz = 0;
 	int rc = xtc_svr_call(a->target, "x", 1, &reply, &rsz,
 	    120LL * 1000 * 1000);
-	atomic_store_explicit(&a->call_rc, rc, memory_order_release);
+	xtc_atomic_store_i32(&a->call_rc, rc, xtc_mo_release);
 	if (reply) __os_free(reply);
 }
 
@@ -274,8 +283,8 @@ test_oom_reply(const MunitParameter p[], void *d)
 	munit_assert_int(__os_alloc_get_hook(&g_saved_hook), ==, XTC_OK);
 	my = g_saved_hook;
 	my.malloc = oom_malloc;
-	atomic_store(&g_oom_armed, 0);
-	atomic_store(&g_reply_rc, 0xDEAD);
+	xtc_atomic_store_i32(&g_oom_armed, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_reply_rc, 0xDEAD, xtc_mo_seq_cst);
 	munit_assert_int(__os_alloc_set_hook(&my), ==, XTC_OK);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
@@ -291,13 +300,13 @@ test_oom_reply(const MunitParameter p[], void *d)
 	munit_assert_int(__os_alloc_set_hook(&g_saved_hook), ==, XTC_OK);
 
 	/* The reply path hit OOM and returned XTC_E_NOMEM. */
-	munit_assert_int(atomic_load_explicit(&g_reply_rc, memory_order_acquire),
-	    ==, XTC_E_NOMEM);
+	munit_assert_int(xtc_atomic_load_i32(&g_reply_rc, xtc_mo_acquire), ==,
+	    XTC_E_NOMEM);
 	/* The caller never got a reply, and the server then stopped: the
 	 * call fails with XTC_E_NOTFOUND (server gone) rather than waiting
 	 * out its timeout. */
-	munit_assert_int(atomic_load_explicit(&a.call_rc, memory_order_acquire),
-	    ==, XTC_E_NOTFOUND);
+	munit_assert_int(xtc_atomic_load_i32(&a.call_rc, xtc_mo_acquire), ==,
+	    XTC_E_NOTFOUND);
 
 	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);

@@ -20,7 +20,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -59,20 +58,20 @@ main(void)
  * main after the runtime stops.  Single shard in this test, so the
  * shard fiber is the only writer of most fields. */
 typedef struct results {
-	atomic_int counter_msgs;      /* COUNTER isolate: messages handled */
-	atomic_int counter_value;     /* COUNTER isolate: accumulated value */
-	atomic_int timer_fired;       /* TIMER isolate: timer delivered */
-	atomic_int sink_handled;      /* SINK isolate: messages handled */
-	atomic_int drop_full;         /* sends that hit MAILBOX_FULL */
-	atomic_int drop_stale;        /* sends that hit STALE_HANDLE */
-	atomic_int echo_recv;         /* ECHO: RECV_COMPLETE seen */
-	atomic_int echo_sent;         /* ECHO: SEND_COMPLETE seen */
-	atomic_int echo_closed;       /* ECHO: CLOSE_COMPLETE seen */
-	atomic_int echo_bytes;        /* ECHO: bytes echoed back */
-	atomic_int echo_scratch_ok;   /* ECHO: scratch arena served a request */
-	atomic_int send_ok;           /* sends that succeeded */
-	atomic_int done_seen;         /* SINK isolates torn down (DONE) */
-	atomic_int all_pass;          /* set by driver: 1 = scenario passed */
+	int counter_msgs;    /* COUNTER isolate: messages handled */
+	int counter_value;   /* COUNTER isolate: accumulated value */
+	int timer_fired;     /* TIMER isolate: timer delivered */
+	int sink_handled;    /* SINK isolate: messages handled */
+	int drop_full;       /* sends that hit MAILBOX_FULL */
+	int drop_stale;      /* sends that hit STALE_HANDLE */
+	int echo_recv;       /* ECHO: RECV_COMPLETE seen */
+	int echo_sent;       /* ECHO: SEND_COMPLETE seen */
+	int echo_closed;     /* ECHO: CLOSE_COMPLETE seen */
+	int echo_bytes;      /* ECHO: bytes echoed back */
+	int echo_scratch_ok; /* ECHO: scratch arena served a request */
+	int send_ok;         /* sends that succeeded */
+	int done_seen;       /* SINK isolates torn down (DONE) */
+	int all_pass;        /* set by driver: 1 = scenario passed */
 } results_t;
 
 static results_t g_res;
@@ -121,8 +120,10 @@ counter_handler(void *self_raw, xtc_tnt_message_t *msg)
 	if (msg->tag == TAG_ADD) {
 		int v = *xtc_tnt_payload_as(int, msg);
 		self->total += v;
-		atomic_fetch_add(&g_res.counter_msgs, 1);
-		atomic_store(&g_res.counter_value, self->total);
+		xtc_atomic_fetch_add_i32(&g_res.counter_msgs, 1,
+		    xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&g_res.counter_value, self->total,
+		    xtc_mo_seq_cst);
 	}
 	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 }
@@ -150,12 +151,13 @@ sink_handler(void *self_raw, xtc_tnt_message_t *msg)
 	sink_iso_t *self = xtc_tnt_self_as(sink_iso_t, self_raw);
 
 	if (msg->tag == TAG_DONE) {
-		atomic_fetch_add(&g_res.done_seen, 1);
+		xtc_atomic_fetch_add_i32(&g_res.done_seen, 1, xtc_mo_seq_cst);
 		return XTC_TNT_TRANSITION_DONE;
 	}
 	if (msg->tag == TAG_PING) {
 		self->seen++;
-		atomic_fetch_add(&g_res.sink_handled, 1);
+		xtc_atomic_fetch_add_i32(&g_res.sink_handled, 1,
+		    xtc_mo_seq_cst);
 	}
 	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 }
@@ -187,7 +189,7 @@ timer_handler(void *self_raw, xtc_tnt_message_t *msg)
 		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 	}
 	if (msg->tag == XTC_TNT_TAG_TIMER) {
-		atomic_store(&g_res.timer_fired, 1);
+		xtc_atomic_store_i32(&g_res.timer_fired, 1, xtc_mo_seq_cst);
 		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 	}
 	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
@@ -233,7 +235,8 @@ driver_handler(void *self_raw, xtc_tnt_message_t *msg)
 			xtc_tnt_send_result_t r =
 			    xtc_tnt_send(self->sink, TAG_PING, NULL, 0);
 			if (r == XTC_TNT_SEND_STALE_HANDLE)
-				atomic_fetch_add(&g_res.drop_stale, 1);
+				xtc_atomic_fetch_add_i32(&g_res.drop_stale, 1,
+				    xtc_mo_seq_cst);
 			/* Now arm the real timer on the timer isolate. */
 			(void)xtc_tnt_send(self->timer, TAG_ARMTIMER, NULL, 0);
 			self->phase = 5;
@@ -242,15 +245,22 @@ driver_handler(void *self_raw, xtc_tnt_message_t *msg)
 			return XTC_TNT_TRANSITION_WAIT_MESSAGE;
 		}
 		/* phase 5: poll until the timer isolate's timer fired. */
-		if (atomic_load(&g_res.timer_fired)) {
+		if (xtc_atomic_load_i32(&g_res.timer_fired, xtc_mo_seq_cst)) {
 			int pass = 1;
-			pass &= (atomic_load(&g_res.counter_value) == 6);
-			pass &= (atomic_load(&g_res.counter_msgs) == 3);
-			pass &= (atomic_load(&g_res.drop_full) >= 1);
-			pass &= (atomic_load(&g_res.drop_stale) >= 1);
-			pass &= (atomic_load(&g_res.done_seen) == 1);
-			pass &= (atomic_load(&g_res.timer_fired) == 1);
-			atomic_store(&g_res.all_pass, pass);
+			pass &= (xtc_atomic_load_i32(&g_res.counter_value,
+			             xtc_mo_seq_cst) == 6);
+			pass &= (xtc_atomic_load_i32(&g_res.counter_msgs,
+			             xtc_mo_seq_cst) == 3);
+			pass &= (xtc_atomic_load_i32(&g_res.drop_full,
+			             xtc_mo_seq_cst) >= 1);
+			pass &= (xtc_atomic_load_i32(&g_res.drop_stale,
+			             xtc_mo_seq_cst) >= 1);
+			pass &= (xtc_atomic_load_i32(&g_res.done_seen,
+			             xtc_mo_seq_cst) == 1);
+			pass &= (xtc_atomic_load_i32(&g_res.timer_fired,
+			             xtc_mo_seq_cst) == 1);
+			xtc_atomic_store_i32(&g_res.all_pass, pass,
+			    xtc_mo_seq_cst);
 			xtc_tnt_stop();
 			return XTC_TNT_TRANSITION_DONE;
 		}
@@ -285,13 +295,16 @@ driver_handler(void *self_raw, xtc_tnt_message_t *msg)
 		int a = 1, b = 2, c = 3;
 		if (xtc_tnt_send(self->counter, TAG_ADD, &a, sizeof a) ==
 		    XTC_TNT_SEND_OK)
-			atomic_fetch_add(&g_res.send_ok, 1);
+			xtc_atomic_fetch_add_i32(&g_res.send_ok, 1,
+			    xtc_mo_seq_cst);
 		if (xtc_tnt_send(self->counter, TAG_ADD, &b, sizeof b) ==
 		    XTC_TNT_SEND_OK)
-			atomic_fetch_add(&g_res.send_ok, 1);
+			xtc_atomic_fetch_add_i32(&g_res.send_ok, 1,
+			    xtc_mo_seq_cst);
 		if (xtc_tnt_send(self->counter, TAG_ADD, &c, sizeof c) ==
 		    XTC_TNT_SEND_OK)
-			atomic_fetch_add(&g_res.send_ok, 1);
+			xtc_atomic_fetch_add_i32(&g_res.send_ok, 1,
+			    xtc_mo_seq_cst);
 		self->phase = 2;
 		(void)xtc_tnt_send(xtc_tnt_self(), TAG_KICK, NULL, 0);
 		return XTC_TNT_TRANSITION_WAIT_MESSAGE;
@@ -307,9 +320,11 @@ driver_handler(void *self_raw, xtc_tnt_message_t *msg)
 			xtc_tnt_send_result_t r =
 			    xtc_tnt_send(self->fullsink, TAG_PING, NULL, 0);
 			if (r == XTC_TNT_SEND_OK)
-				atomic_fetch_add(&g_res.send_ok, 1);
+				xtc_atomic_fetch_add_i32(&g_res.send_ok, 1,
+				    xtc_mo_seq_cst);
 			else if (r == XTC_TNT_SEND_MAILBOX_FULL)
-				atomic_fetch_add(&g_res.drop_full, 1);
+				xtc_atomic_fetch_add_i32(&g_res.drop_full, 1,
+				    xtc_mo_seq_cst);
 		}
 		self->phase = 3;
 		(void)xtc_tnt_send(xtc_tnt_self(), TAG_KICK, NULL, 0);
@@ -374,7 +389,8 @@ echo_init(void *self_raw, const void *args, size_t n)
 	 * it needs no matching release.  Exercised here because nothing
 	 * else in the suite touches it. */
 	if (xtc_tnt_scratch_arena(64) != NULL)
-		atomic_fetch_add(&g_res.echo_scratch_ok, 1);
+		xtc_atomic_fetch_add_i32(&g_res.echo_scratch_ok, 1,
+		    xtc_mo_seq_cst);
 
 	if (xtc_tnt_submit_recv(self->fd) != XTC_TNT_IO_OK)
 		return XTC_TNT_TRANSITION_DONE;
@@ -388,7 +404,7 @@ echo_handler(void *self_raw, xtc_tnt_message_t *msg)
 
 	switch (msg->tag) {
 	case XTC_TNT_IO_TAG_RECV_COMPLETE:
-		atomic_fetch_add(&g_res.echo_recv, 1);
+		xtc_atomic_fetch_add_i32(&g_res.echo_recv, 1, xtc_mo_seq_cst);
 		if (msg->body.io.result <= 0) {
 			/* peer closed or error -- stage the close and finish */
 			(void)xtc_tnt_submit_close(self->fd);
@@ -405,18 +421,19 @@ echo_handler(void *self_raw, xtc_tnt_message_t *msg)
 			(void)xtc_tnt_submit_close(self->fd);
 			return XTC_TNT_TRANSITION_WAIT_IO;
 		}
-		atomic_fetch_add(&g_res.echo_bytes, (int)self->bytes);
+		xtc_atomic_fetch_add_i32(&g_res.echo_bytes, (int)self->bytes,
+		    xtc_mo_seq_cst);
 		self->echoed = 1;
 		return XTC_TNT_TRANSITION_WAIT_IO;
 
 	case XTC_TNT_IO_TAG_SEND_COMPLETE:
-		atomic_fetch_add(&g_res.echo_sent, 1);
+		xtc_atomic_fetch_add_i32(&g_res.echo_sent, 1, xtc_mo_seq_cst);
 		/* One echo is all this scenario needs; close down. */
 		(void)xtc_tnt_submit_close(self->fd);
 		return XTC_TNT_TRANSITION_WAIT_IO;
 
 	case XTC_TNT_IO_TAG_CLOSE_COMPLETE:
-		atomic_fetch_add(&g_res.echo_closed, 1);
+		xtc_atomic_fetch_add_i32(&g_res.echo_closed, 1, xtc_mo_seq_cst);
 		return XTC_TNT_TRANSITION_DONE;
 
 	default:
@@ -505,18 +522,19 @@ main(void)
 
 	/* Report. */
 	printf("counter_msgs  = %d (want 3)\n",
-	    atomic_load(&g_res.counter_msgs));
+	    xtc_atomic_load_i32(&g_res.counter_msgs, xtc_mo_seq_cst));
 	printf("counter_value = %d (want 6)\n",
-	    atomic_load(&g_res.counter_value));
-	printf("send_ok       = %d\n", atomic_load(&g_res.send_ok));
+	    xtc_atomic_load_i32(&g_res.counter_value, xtc_mo_seq_cst));
+	printf("send_ok       = %d\n",
+	    xtc_atomic_load_i32(&g_res.send_ok, xtc_mo_seq_cst));
 	printf("drop_full     = %d (want >=1)\n",
-	    atomic_load(&g_res.drop_full));
+	    xtc_atomic_load_i32(&g_res.drop_full, xtc_mo_seq_cst));
 	printf("drop_stale    = %d (want >=1)\n",
-	    atomic_load(&g_res.drop_stale));
+	    xtc_atomic_load_i32(&g_res.drop_stale, xtc_mo_seq_cst));
 	printf("done_seen     = %d (want 1)\n",
-	    atomic_load(&g_res.done_seen));
+	    xtc_atomic_load_i32(&g_res.done_seen, xtc_mo_seq_cst));
 	printf("timer_fired   = %d (want 1)\n",
-	    atomic_load(&g_res.timer_fired));
+	    xtc_atomic_load_i32(&g_res.timer_fired, xtc_mo_seq_cst));
 
 	/*
 	 * Staged-io (courier) scenario.  Only asserted when the socketpair
@@ -526,24 +544,26 @@ main(void)
 	if (echo_staged) {
 		echo_n = read(sv[0], echo_back, sizeof echo_back);
 		printf("echo_recv     = %d (want 1)\n",
-		    atomic_load(&g_res.echo_recv));
+		    xtc_atomic_load_i32(&g_res.echo_recv, xtc_mo_seq_cst));
 		printf("echo_sent     = %d (want 1)\n",
-		    atomic_load(&g_res.echo_sent));
+		    xtc_atomic_load_i32(&g_res.echo_sent, xtc_mo_seq_cst));
 		printf("echo_closed   = %d (want 1)\n",
-		    atomic_load(&g_res.echo_closed));
+		    xtc_atomic_load_i32(&g_res.echo_closed, xtc_mo_seq_cst));
 		printf("echo_bytes    = %d (want 8)\n",
-		    atomic_load(&g_res.echo_bytes));
+		    xtc_atomic_load_i32(&g_res.echo_bytes, xtc_mo_seq_cst));
 		printf("echo_scratch  = %d (want 1)\n",
-		    atomic_load(&g_res.echo_scratch_ok));
+		    xtc_atomic_load_i32(&g_res.echo_scratch_ok,
+		        xtc_mo_seq_cst));
 		printf("echo_readback = %zd (want 8) [%.*s]\n", echo_n,
 		    (int)(echo_n > 0 ? echo_n : 0), echo_back);
 
-		if (atomic_load(&g_res.echo_recv) < 1 ||
-		    atomic_load(&g_res.echo_sent) < 1 ||
-		    atomic_load(&g_res.echo_closed) < 1 ||
-		    atomic_load(&g_res.echo_scratch_ok) < 1 ||
-		    echo_n != 8 ||
-		    memcmp(echo_back, "tnt-echo", 8) != 0) {
+		if (xtc_atomic_load_i32(&g_res.echo_recv, xtc_mo_seq_cst) < 1 ||
+		    xtc_atomic_load_i32(&g_res.echo_sent, xtc_mo_seq_cst) < 1 ||
+		    xtc_atomic_load_i32(&g_res.echo_closed, xtc_mo_seq_cst) <
+		        1 ||
+		    xtc_atomic_load_i32(&g_res.echo_scratch_ok,
+		        xtc_mo_seq_cst) < 1 ||
+		    echo_n != 8 || memcmp(echo_back, "tnt-echo", 8) != 0) {
 			printf("\nFAIL: staged-io echo (submit_recv -> io_send -> "
 			    "submit_close) did not round-trip\n");
 			(void)close(sv[0]);
@@ -555,7 +575,7 @@ main(void)
 	}
 	if (sv[0] >= 0) (void)close(sv[0]);
 
-	if (atomic_load(&g_res.all_pass)) {
+	if (xtc_atomic_load_i32(&g_res.all_pass, xtc_mo_seq_cst)) {
 		printf("\nPASS: all tnt dispatch invariants hold\n");
 		return 0;
 	}

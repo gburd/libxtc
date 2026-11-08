@@ -14,7 +14,6 @@
 
 #include <errno.h>
 #include <inttypes.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -593,7 +592,7 @@ struct mfix {
 	uint64_t seed;
 	unsigned accepted, terminals, completed, cancelled;
 	struct mreq req[MNREQ];
-	_Atomic int producer_done;
+	int producer_done;
 	struct trace *trace;
 };
 
@@ -710,8 +709,7 @@ mproducer(void *arg)
 			f->req[i].expect_abort = 1;
 		}
 	}
-	(void)atomic_store_explicit(&f->producer_done, 1,
-	    memory_order_relaxed);
+	(void)xtc_atomic_store_i32(&f->producer_done, 1, xtc_mo_relaxed);
 }
 
 /* Canceller on the model loop: a different producer than the submitter. */
@@ -738,8 +736,8 @@ mcontroller(void *arg)
 {
 	struct mfix *f = arg;
 	unsigned ticks = 0;
-	while (f->terminals < MNREQ
-	    || !atomic_load_explicit(&f->producer_done, memory_order_relaxed)) {
+	while (f->terminals < MNREQ ||
+	    !xtc_atomic_load_i32(&f->producer_done, xtc_mo_relaxed)) {
 		/* A clean run needs a few dozen ticks; an accepted hand-in that
 		 * never completes keeps this loop going forever. */
 		mrequire(f, ++ticks <= 1000,

@@ -82,7 +82,7 @@ owner_proc(void *arg)
 
 /* A client: inline when it already runs on the owner's loop (DragonFly's
  * CanRunInlined), otherwise one request/reply round trip to the owner. */
-static _Atomic int g_inline, g_hops, g_done;
+static int g_inline, g_hops, g_done;
 
 static void
 client_proc(void *arg)
@@ -97,7 +97,7 @@ client_proc(void *arg)
 		key = (seed * 31 + i * 7) % NKEYS;
 		if (owner_of(key) == xtc_shard_id()) {
 			(void)incr(key);
-			g_inline++;
+			xtc_atomic_fetch_add_i32(&g_inline, 1, xtc_mo_seq_cst);
 			continue;
 		}
 		r.key = key;
@@ -105,9 +105,10 @@ client_proc(void *arg)
 		while (xtc_recv(&m, &sz, -1) != XTC_OK)
 			;
 		xtc_free(m);
-		g_hops++;
+		xtc_atomic_fetch_add_i32(&g_hops, 1, xtc_mo_seq_cst);
 	}
-	if (++g_done == NCLIENTS)
+	if (xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_seq_cst) + 1 ==
+	    NCLIENTS)
 		for (i = 0; i < NLOOPS; i++)
 			(void)xtc_send(g_owner[i], NULL, 0);
 }
@@ -137,9 +138,14 @@ main(void)
 		for (k = 0; k < NKEYS; k++)
 			total += g_shard[i].counter[k];
 	printf("%d commands: %d inline on the owner's loop, %d hopped\n",
-	    NCLIENTS * NOPS, g_inline, g_hops);
+	    NCLIENTS * NOPS, xtc_atomic_load_i32(&g_inline, xtc_mo_seq_cst),
+	    xtc_atomic_load_i32(&g_hops, xtc_mo_seq_cst));
 	printf("sum of all counters = %lld (expect %d)\n", (long long)total,
 	    NCLIENTS * NOPS);
-	return total == NCLIENTS * NOPS && g_inline > 0 && g_hops > 0 ? 0 : 1;
+	return total == NCLIENTS * NOPS &&
+	        xtc_atomic_load_i32(&g_inline, xtc_mo_seq_cst) > 0 &&
+	        xtc_atomic_load_i32(&g_hops, xtc_mo_seq_cst) > 0 ?
+	    0 :
+	    1;
 }
 /* !endregion full */

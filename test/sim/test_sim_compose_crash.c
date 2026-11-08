@@ -48,7 +48,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -89,10 +88,10 @@ static xtc_exec_t      *g_exec;
 static int      g_acked[N_WORKERS][QUOTA];   /* commit returned SX_OK */
 static int      g_attempted[N_WORKERS][QUOTA];/* the INSERT+COMMIT was tried */
 static int      g_lock_viol;
-static atomic_long g_step;                   /* shared workload step counter */
-static _Atomic long g_crash_at = -1;         /* seeded crash threshold */
-static atomic_int  g_crashed;
-static atomic_int  g_lock_held;
+static long g_step;          /* shared workload step counter */
+static long g_crash_at = -1; /* seeded crash threshold */
+static int g_crashed;
+static int g_lock_held;
 
 static long ROWID(int w, int i) { return (long)(w * 1000 + i); }
 
@@ -148,11 +147,11 @@ worker(void *arg)
 	 * schedule). */
 	{
 		long expect = -1;
-		if (atomic_load(&g_crash_at) < 0) {
+		if (xtc_atomic_load_long(&g_crash_at, xtc_mo_seq_cst) < 0) {
 			long thr = (long)__xtc_sim_rng_range(XTC_SIM_RNG_FAULT,
 			    (uint64_t)(N_WORKERS * QUOTA)) + 1;
-			atomic_compare_exchange_strong(&g_crash_at, &expect,
-			    thr);
+			xtc_atomic_cas_long(&g_crash_at, &expect, thr,
+			    xtc_mo_seq_cst, xtc_mo_seq_cst);
 		}
 	}
 
@@ -164,7 +163,8 @@ worker(void *arg)
 		if (xtc_lock_get(g_mgr, id, "row", 4, XTC_LOCK_X,
 		    1000000000LL) != XTC_OK)
 			continue;
-		if (atomic_fetch_add(&g_lock_held, 1) != 0)
+		if (xtc_atomic_fetch_add_i32(&g_lock_held, 1, xtc_mo_seq_cst) !=
+		    0)
 			g_lock_viol = 1;
 
 		if (sx_exec(db, "BEGIN", NULL) == SX_OK) {
@@ -184,7 +184,7 @@ worker(void *arg)
 			}
 		}
 
-		atomic_fetch_sub(&g_lock_held, 1);
+		xtc_atomic_fetch_sub_i32(&g_lock_held, 1, xtc_mo_seq_cst);
 		(void)xtc_lock_put(g_mgr, id, "row", 4);
 
 		{
@@ -198,11 +198,12 @@ worker(void *arg)
 		}
 
 		/* Advance the shared step; trip the seeded crash. */
-		step = atomic_fetch_add(&g_step, 1) + 1;
-		if (!atomic_load(&g_crashed) &&
-		    atomic_load(&g_crash_at) > 0 &&
-		    step >= atomic_load(&g_crash_at)) {
-			atomic_store(&g_crashed, 1);
+		step =
+		    xtc_atomic_fetch_add_long(&g_step, 1, xtc_mo_seq_cst) + 1;
+		if (!xtc_atomic_load_i32(&g_crashed, xtc_mo_seq_cst) &&
+		    xtc_atomic_load_long(&g_crash_at, xtc_mo_seq_cst) > 0 &&
+		    step >= xtc_atomic_load_long(&g_crash_at, xtc_mo_seq_cst)) {
+			xtc_atomic_store_i32(&g_crashed, 1, xtc_mo_seq_cst);
 			(void)xtc_exec_stop(g_exec);   /* CRASH */
 		}
 		if ((i & 1) == 0)
@@ -349,10 +350,10 @@ run_one(uint64_t seed, uint64_t *out_hash, int *out_viol, int *out_recovered,
 	memset(g_acked, 0, sizeof g_acked);
 	memset(g_attempted, 0, sizeof g_attempted);
 	g_lock_viol = 0;
-	atomic_store(&g_step, 0);
-	atomic_store(&g_crash_at, -1);
-	atomic_store(&g_crashed, 0);
-	atomic_store(&g_lock_held, 0);
+	xtc_atomic_store_long(&g_step, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_crash_at, -1, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_crashed, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_lock_held, 0, xtc_mo_seq_cst);
 	g_mgr = NULL; g_bt = NULL; g_wal = NULL; g_chan = NULL; g_exec = NULL;
 
 	fd = mkstemp(logp); if (fd < 0) return -1; close(fd);
@@ -545,7 +546,7 @@ run_forked(uint64_t seed, struct rr *out)
 		r.bad = -1;
 		r.rc = run_one(seed, &r.hash, &r.viol, &r.recovered, &r.acked,
 		    &r.rows, &r.bad);
-		r.crash_at = atomic_load(&g_crash_at);
+		r.crash_at = xtc_atomic_load_long(&g_crash_at, xtc_mo_seq_cst);
 		(void)!write(pfd[1], &r, sizeof r);
 		close(pfd[1]);
 		_exit(r.rc == XTC_OK && r.viol == 0 ? 0 : 1);

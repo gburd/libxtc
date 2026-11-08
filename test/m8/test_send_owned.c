@@ -35,7 +35,6 @@
 #include "xtc_alloc_audit.h"
 #include "os_alloc.h"    /* test-only: a counting allocator hook */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -240,27 +239,27 @@ test_owned_error_keeps(const MunitParameter p[], void *d)
 static size_t g_recv_big = (size_t)-1;
 static int    g_big_ok;
 static struct __os_alloc_hook g_down;
-static _Atomic size_t g_big_allocs;   /* mallocs of >= BIG bytes */
+static size_t g_big_allocs; /* mallocs of >= BIG bytes */
 
 static void *
 cnt_malloc(size_t n)
 {
 	if (n >= BIG)
-		atomic_fetch_add(&g_big_allocs, 1);
+		xtc_atomic_fetch_add_size(&g_big_allocs, 1, xtc_mo_seq_cst);
 	return g_down.malloc(n);
 }
 static void *
 cnt_calloc(size_t k, size_t n)
 {
 	if (k * n >= BIG)
-		atomic_fetch_add(&g_big_allocs, 1);
+		xtc_atomic_fetch_add_size(&g_big_allocs, 1, xtc_mo_seq_cst);
 	return g_down.calloc(k, n);
 }
 static void *
 cnt_realloc(void *q, size_t n)
 {
 	if (n >= BIG)
-		atomic_fetch_add(&g_big_allocs, 1);
+		xtc_atomic_fetch_add_size(&g_big_allocs, 1, xtc_mo_seq_cst);
 	return g_down.realloc(q, n);
 }
 static void cnt_free(void *q) { g_down.free(q); }
@@ -283,10 +282,10 @@ big_recv(void *arg)
 			break;
 		(void)xtc_yield();
 	}
-	b0 = atomic_load(&g_big_allocs);
+	b0 = xtc_atomic_load_size(&g_big_allocs, xtc_mo_seq_cst);
 	if (xtc_recv(&m, &n, 0) != XTC_OK)
 		return;
-	g_recv_big = atomic_load(&g_big_allocs) - b0;
+	g_recv_big = xtc_atomic_load_size(&g_big_allocs, xtc_mo_seq_cst) - b0;
 	g_big_ok = (n == BIG && check(m, n, 3));
 	xtc_free(m);
 }
@@ -314,13 +313,14 @@ test_large_send_one_copy(const MunitParameter p[], void *d)
 	h.aligned = cnt_aligned;
 	h.aligned_free = cnt_aligned_free;
 	munit_assert_int(__os_alloc_set_hook(&h), ==, XTC_OK);
-	atomic_store(&g_big_allocs, 0);
+	xtc_atomic_store_size(&g_big_allocs, 0, xtc_mo_seq_cst);
 	run2(big_recv, NULL, big_send, &r, &r);
 	(void)__os_alloc_set_hook(&g_down);
 	munit_assert_int(g_big_ok, ==, 1);
 	munit_assert_size(g_recv_big, ==, 0);   /* recv: no copy */
 	/* send: exactly one payload-sized buffer (its one copy). */
-	munit_assert_size(atomic_load(&g_big_allocs), ==, 1);
+	munit_assert_size(xtc_atomic_load_size(&g_big_allocs, xtc_mo_seq_cst),
+	    ==, 1);
 	return MUNIT_OK;
 }
 
@@ -328,7 +328,7 @@ test_large_send_one_copy(const MunitParameter p[], void *d)
 
 #define XT_N 2000
 static xtc_atomic_pid_t g_xt_rx;
-static _Atomic int g_xt_ready, g_xt_ok, g_xt_got;
+static int g_xt_ready, g_xt_ok, g_xt_got;
 
 static void
 xt_rx(void *arg)
@@ -336,17 +336,17 @@ xt_rx(void *arg)
 	int i;
 	(void)arg;
 	xtc_atomic_pid_store(&g_xt_rx, xtc_self());
-	atomic_store(&g_xt_ready, 1);
+	xtc_atomic_store_i32(&g_xt_ready, 1, xtc_mo_seq_cst);
 	for (i = 0; i < XT_N; i++) {
 		void *m = NULL;
 		size_t n = 0;
 		uint32_t seq;
 		if (xtc_recv(&m, &n, 5000000000LL) != XTC_OK)
 			return;
-		atomic_fetch_add(&g_xt_got, 1);
+		xtc_atomic_fetch_add_i32(&g_xt_got, 1, xtc_mo_seq_cst);
 		memcpy(&seq, m, sizeof seq);
 		if (n == 3000 && check((uint8_t *)m + 4, n - 4, (uint8_t)seq))
-			atomic_fetch_add(&g_xt_ok, 1);
+			xtc_atomic_fetch_add_i32(&g_xt_ok, 1, xtc_mo_seq_cst);
 		xtc_free(m);
 	}
 }
@@ -356,7 +356,7 @@ xt_tx(void *arg)
 {
 	uint32_t i;
 	(void)arg;
-	while (!atomic_load(&g_xt_ready))
+	while (!xtc_atomic_load_i32(&g_xt_ready, xtc_mo_seq_cst))
 		(void)xtc_yield();
 	for (i = 0; i < XT_N; i++) {
 		uint8_t *b = xtc_malloc(3000);
@@ -388,8 +388,10 @@ test_owned_crossthread(const MunitParameter p[], void *d)
 	    NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	(void)xtc_exec_fini(e);
-	munit_assert_int(atomic_load(&g_xt_got), ==, XT_N);
-	munit_assert_int(atomic_load(&g_xt_ok), ==, XT_N);
+	munit_assert_int(xtc_atomic_load_i32(&g_xt_got, xtc_mo_seq_cst), ==,
+	    XT_N);
+	munit_assert_int(xtc_atomic_load_i32(&g_xt_ok, xtc_mo_seq_cst), ==,
+	    XT_N);
 	return MUNIT_OK;
 }
 

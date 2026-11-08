@@ -13,7 +13,6 @@
 #include "xtc_proc.h"
 #include "xtc_int.h"
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -43,8 +42,8 @@ kid_proc(void *arg)
 	(void)xtc_send(a->parent, &r, sizeof r);
 }
 
-static _Atomic int g_collected;
-static _Atomic int g_total_result;
+static int g_collected;
+static int g_total_result;
 
 static void
 parent_proc(void *arg)
@@ -68,13 +67,13 @@ parent_proc(void *arg)
 	rc = xtc_recv_correlate(&corr, sizeof corr, N_KIDS, replies,
 	    &n_recv, 5LL * 1000 * 1000 * 1000);
 
-	atomic_store(&g_collected, n_recv);
+	xtc_atomic_store_i32(&g_collected, n_recv, xtc_mo_seq_cst);
 	for (i = 0; i < n_recv; i++) {
 		struct reply *r = replies[i].data;
 		total += r->result;
 		__os_free(replies[i].data);
 	}
-	atomic_store(&g_total_result, total);
+	xtc_atomic_store_i32(&g_total_result, total, xtc_mo_seq_cst);
 	(void)rc;
 
 	xtc_loop_stop(loop);
@@ -86,17 +85,19 @@ test_correlate_fork_join(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	xtc_pid_t pid;
 	(void)p; (void)d;
-	atomic_store(&g_collected, 0);
-	atomic_store(&g_total_result, 0);
+	xtc_atomic_store_i32(&g_collected, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_total_result, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, parent_proc, loop, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
-	munit_assert_int(atomic_load(&g_collected), ==, N_KIDS);
+	munit_assert_int(xtc_atomic_load_i32(&g_collected, xtc_mo_seq_cst), ==,
+	    N_KIDS);
 	/* sum of 0..4 * 10 = 100 */
-	munit_assert_int(atomic_load(&g_total_result), ==, 100);
+	munit_assert_int(xtc_atomic_load_i32(&g_total_result, xtc_mo_seq_cst),
+	    ==, 100);
 
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;

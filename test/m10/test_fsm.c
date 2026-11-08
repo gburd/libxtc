@@ -5,7 +5,6 @@
  * test/m10/test_fsm.c -- xtc_fsm (gen_statem) behaviour.
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -308,21 +307,22 @@ test_fsm_state_timeout(const MunitParameter p[], void *data)
  * holds our (local_id, gen) -- the part a 2.1 pid could not tell apart.
  * feq_by is that bystander: it counts messages it receives and records
  * whether it exited normally (a kill aimed at the wrong proc stops it). */
-static _Atomic int g_feq_stop, g_feq_by_msgs, g_feq_by_normal;
+static int g_feq_stop, g_feq_by_msgs, g_feq_by_normal;
 static void
 feq_by(void *arg)
 {
 	void *m;
 	size_t s;
 	(void)arg;
-	while (!atomic_load(&g_feq_stop)) {
+	while (!xtc_atomic_load_i32(&g_feq_stop, xtc_mo_seq_cst)) {
 		m = NULL;
 		if (xtc_recv(&m, &s, 1000000) == XTC_OK) {
-			atomic_fetch_add(&g_feq_by_msgs, 1);
+			xtc_atomic_fetch_add_i32(&g_feq_by_msgs, 1,
+			    xtc_mo_seq_cst);
 			xtc_free(m);
 		}
 	}
-	atomic_fetch_add(&g_feq_by_normal, 1);
+	xtc_atomic_fetch_add_i32(&g_feq_by_normal, 1, xtc_mo_seq_cst);
 }
 static void *
 feq_loop_thread(void *arg)
@@ -336,9 +336,9 @@ static void
 feq_by_start(xtc_loop_t **b, xtc_pid_t *by, int n, pthread_t *th)
 {
 	int i;
-	atomic_store(&g_feq_stop, 0);
-	atomic_store(&g_feq_by_msgs, 0);
-	atomic_store(&g_feq_by_normal, 0);
+	xtc_atomic_store_i32(&g_feq_stop, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_feq_by_msgs, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_feq_by_normal, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(b), ==, XTC_OK);
 	for (i = 0; i < n; i++)
 		munit_assert_int(xtc_proc_spawn(*b, feq_by, NULL, NULL, &by[i]),
@@ -389,10 +389,11 @@ test_fsm_join_equal_pid_other_loop(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_fsm_stop(fsm), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(la), ==, XTC_OK);   /* machine exits */
 	rc = xtc_fsm_join(fsm, 0);
-	atomic_store(&g_feq_stop, 1);
+	xtc_atomic_store_i32(&g_feq_stop, 1, xtc_mo_seq_cst);
 	munit_assert_int(pthread_join(th, NULL), ==, 0);
 	munit_assert_int(rc, ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_feq_by_msgs), ==, 0);   /* no stray kick */
+	munit_assert_int(xtc_atomic_load_i32(&g_feq_by_msgs, xtc_mo_seq_cst),
+	    ==, 0); /* no stray kick */
 	munit_assert_int(xtc_loop_fini(la), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(lb), ==, XTC_OK);
 	return MUNIT_OK;

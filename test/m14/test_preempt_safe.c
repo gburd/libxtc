@@ -32,7 +32,6 @@
  *	elsewhere and under sanitizers (see test_preempt_p2).
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -76,9 +75,9 @@ extern int __xtc_preempt_pc_ok(uintptr_t pc);
 	munit_assert_int(xtc_preempt_set_involuntary(1), ==, XTC_OK)
 #endif
 
-static _Atomic int g_ready, g_done;
+static int g_ready, g_done;
 static pthread_t   g_loop_thread;
-static _Atomic long g_ops, g_bad;
+static long g_ops, g_bad;
 static long        g_kick_us = 5;
 
 /* The kicker: SIGVTALRM into the loop thread every g_kick_us while the
@@ -91,8 +90,8 @@ ps_kicker(void *arg)
 	(void)arg;
 	ts.tv_sec = 0;
 	ts.tv_nsec = g_kick_us * 1000L;
-	while (!atomic_load(&g_done)) {
-		if (atomic_load(&g_ready))
+	while (!xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst)) {
+		if (xtc_atomic_load_i32(&g_ready, xtc_mo_seq_cst))
 			(void)pthread_kill(g_loop_thread, SIGVTALRM);
 		(void)nanosleep(&ts, NULL);
 	}
@@ -106,10 +105,10 @@ ps_run(void (*fn)(void *), int n)
 	xtc_exec_t *e = NULL;
 	pthread_t kt;
 	intptr_t i;
-	atomic_store(&g_ready, 0);
-	atomic_store(&g_done, 0);
-	atomic_store(&g_ops, 0);
-	atomic_store(&g_bad, 0);
+	xtc_atomic_store_i32(&g_ready, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_ops, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_bad, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
 	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
 	    ==, XTC_OK);
@@ -119,7 +118,7 @@ ps_run(void (*fn)(void *), int n)
 		    (void *)i, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(pthread_create(&kt, NULL, ps_kicker, NULL), ==, 0);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	atomic_store(&g_done, 1);
+	xtc_atomic_store_i32(&g_done, 1, xtc_mo_seq_cst);
 	(void)pthread_join(kt, NULL);
 	(void)xtc_preempt_set_involuntary(0);
 	(void)xtc_exec_fini(e);
@@ -142,7 +141,7 @@ ps_note_loop(intptr_t id)
 {
 	if (id == 0) {
 		g_loop_thread = pthread_self();
-		atomic_store(&g_ready, 1);
+		xtc_atomic_store_i32(&g_ready, 1, xtc_mo_seq_cst);
 	}
 }
 
@@ -163,21 +162,22 @@ ps_malloc_worker(void *arg)
 			s = s * 1103515245u + 12345u;
 			if (p[i] != NULL) {
 				if (p[i][0] != (unsigned char)i)
-					atomic_fetch_add(&g_bad, 1);
+					xtc_atomic_fetch_add_long(&g_bad, 1,
+					    xtc_mo_seq_cst);
 				free(p[i]);   /* XTC_RAW_OK: the libc allocator under test */
 			}
 			p[i] = malloc(16 + (s >> 24) % 200);   /* XTC_RAW_OK: as above */
 			munit_assert_not_null(p[i]);
 			p[i][0] = (unsigned char)i;
 		}
-		atomic_fetch_add(&g_ops, 16);
+		xtc_atomic_fetch_add_long(&g_ops, 16, xtc_mo_seq_cst);
 		if ((s & 255) == 0)
 			xtc_yield();
 	}
 	for (i = 0; i < 16; i++)
 		free(p[i]);   /* XTC_RAW_OK: as above */
 	if (id == 0)
-		atomic_store(&g_ready, 0);
+		xtc_atomic_store_i32(&g_ready, 0, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -188,9 +188,10 @@ test_ps_libc_malloc(const MunitParameter p[], void *d)
 		return MUNIT_SKIP;
 	ps_run(ps_malloc_worker, 4);
 	munit_logf(MUNIT_LOG_INFO, "%ld malloc/free pairs, %ld bad",
-	    atomic_load(&g_ops), atomic_load(&g_bad));
-	munit_assert_long(atomic_load(&g_ops), >, 0);
-	munit_assert_long(atomic_load(&g_bad), ==, 0);
+	    xtc_atomic_load_long(&g_ops, xtc_mo_seq_cst),
+	    xtc_atomic_load_long(&g_bad, xtc_mo_seq_cst));
+	munit_assert_long(xtc_atomic_load_long(&g_ops, xtc_mo_seq_cst), >, 0);
+	munit_assert_long(xtc_atomic_load_long(&g_bad, xtc_mo_seq_cst), ==, 0);
 	return MUNIT_OK;
 }
 
@@ -214,9 +215,9 @@ ps_stdio_worker(void *arg)
 		if ((seq & 1023) == 0)
 			xtc_yield();
 	}
-	atomic_fetch_add(&g_ops, seq);
+	xtc_atomic_fetch_add_long(&g_ops, seq, xtc_mo_seq_cst);
 	if (id == 0)
-		atomic_store(&g_ready, 0);
+		xtc_atomic_store_i32(&g_ready, 0, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -249,15 +250,16 @@ test_ps_libc_stdio(const MunitParameter p[], void *d)
 	(void)fclose(g_f);
 	free(g_buf);   /* XTC_RAW_OK: as above */
 	munit_logf(MUNIT_LOG_INFO, "%ld lines written, %ld parsed, %ld torn",
-	    atomic_load(&g_ops), lines, bad);
-	munit_assert_long(lines, ==, atomic_load(&g_ops));
+	    xtc_atomic_load_long(&g_ops, xtc_mo_seq_cst), lines, bad);
+	munit_assert_long(lines, ==,
+	    xtc_atomic_load_long(&g_ops, xtc_mo_seq_cst));
 	munit_assert_long(bad, ==, 0);
 	return MUNIT_OK;
 }
 
 /* ---- /fairness ---- */
-static _Atomic int  g_runaway_done;
-static _Atomic long g_peer_runs;
+static int g_runaway_done;
+static long g_peer_runs;
 static volatile unsigned char g_scratch[1 << 16];
 
 XTC_PREEMPTIBLE static void
@@ -273,16 +275,16 @@ ps_runaway(void *arg)
 			acc += (k ^ (acc << 1)) + (acc >> 3);
 	}
 	g_scratch[0] = (unsigned char)acc;
-	atomic_store(&g_runaway_done, 1);
-	atomic_store(&g_ready, 0);
+	xtc_atomic_store_i32(&g_runaway_done, 1, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ready, 0, xtc_mo_seq_cst);
 }
 
 XTC_PREEMPTIBLE static void
 ps_peer(void *arg)
 {
 	(void)arg;
-	while (!atomic_load(&g_runaway_done)) {
-		atomic_fetch_add(&g_peer_runs, 1);
+	while (!xtc_atomic_load_i32(&g_runaway_done, xtc_mo_seq_cst)) {
+		xtc_atomic_fetch_add_long(&g_peer_runs, 1, xtc_mo_seq_cst);
 		xtc_yield();
 	}
 }
@@ -303,13 +305,16 @@ test_ps_fairness(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	if (ps_skip() != MUNIT_OK)
 		return MUNIT_SKIP;
-	atomic_store(&g_runaway_done, 0);
-	atomic_store(&g_peer_runs, 0);
+	xtc_atomic_store_i32(&g_runaway_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_peer_runs, 0, xtc_mo_seq_cst);
 	ps_run(ps_fair_spawn, 3);
-	munit_logf(MUNIT_LOG_INFO, "peers ran %ld times while the runaway "
-	    "(memset + own loop) held the loop", atomic_load(&g_peer_runs));
+	munit_logf(MUNIT_LOG_INFO,
+	    "peers ran %ld times while the runaway "
+	    "(memset + own loop) held the loop",
+	    xtc_atomic_load_long(&g_peer_runs, xtc_mo_seq_cst));
 	/* Each slice of the runaway lets both peers run once. */
-	munit_assert_long(atomic_load(&g_peer_runs), >, 100);
+	munit_assert_long(xtc_atomic_load_long(&g_peer_runs, xtc_mo_seq_cst), >,
+	    100);
 	return MUNIT_OK;
 }
 

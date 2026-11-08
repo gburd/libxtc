@@ -15,7 +15,7 @@
 #include <getopt.h>
 #include <pthread.h>
 #include <signal.h>
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,10 +54,10 @@ static struct {
 };
 
 /* Stats */
-static atomic_int g_completed;
-static atomic_int g_errors;
+static int g_completed;
+static int g_errors;
 static int64_t   *g_latencies;
-static atomic_int g_lat_idx;
+static int g_lat_idx;
 static int64_t    g_start_ns;
 static int64_t    g_end_ns;
 
@@ -129,7 +129,8 @@ client_thread(void *arg)
 
 	fd = connect_server(g_cfg.host, g_cfg.port);
 	if (fd < 0) {
-		atomic_fetch_add(&g_errors, requests_per_client);
+		xtc_atomic_fetch_add_i32(&g_errors, requests_per_client,
+		    xtc_mo_seq_cst);
 		return NULL;
 	}
 
@@ -151,13 +152,13 @@ client_thread(void *arg)
 		t0 = now_ns();
 
 		if (send(fd, cmd, (size_t)n, 0) != n) {
-			atomic_fetch_add(&g_errors, 1);
+			xtc_atomic_fetch_add_i32(&g_errors, 1, xtc_mo_seq_cst);
 			continue;
 		}
 
 		n = (int)recv(fd, resp, sizeof resp - 1, 0);
 		if (n <= 0) {
-			atomic_fetch_add(&g_errors, 1);
+			xtc_atomic_fetch_add_i32(&g_errors, 1, xtc_mo_seq_cst);
 			continue;
 		}
 
@@ -165,12 +166,13 @@ client_thread(void *arg)
 
 		/* Record latency */
 		{
-			int idx = atomic_fetch_add(&g_lat_idx, 1);
+			int idx = xtc_atomic_fetch_add_i32(&g_lat_idx, 1,
+			    xtc_mo_seq_cst);
 			if (idx < MAX_SAMPLES)
 				g_latencies[idx] = t1 - t0;
 		}
 
-		atomic_fetch_add(&g_completed, 1);
+		xtc_atomic_fetch_add_i32(&g_completed, 1, xtc_mo_seq_cst);
 	}
 
 	close(fd);
@@ -190,9 +192,9 @@ cmp_i64(const void *a, const void *b)
 static void
 print_stats(const char *label, int port)
 {
-	int completed = atomic_load(&g_completed);
-	int errors = atomic_load(&g_errors);
-	int n_lat = atomic_load(&g_lat_idx);
+	int completed = xtc_atomic_load_i32(&g_completed, xtc_mo_seq_cst);
+	int errors = xtc_atomic_load_i32(&g_errors, xtc_mo_seq_cst);
+	int n_lat = xtc_atomic_load_i32(&g_lat_idx, xtc_mo_seq_cst);
 	double elapsed_s = (g_end_ns - g_start_ns) / 1000000000.0;
 	double ops_per_sec = completed / elapsed_s;
 	int64_t p50, p99, p999;
@@ -233,9 +235,9 @@ run_bench(const char *label, const char *host, int port)
 	pthread_t threads[MAX_CLIENTS];
 	int i;
 
-	atomic_store(&g_completed, 0);
-	atomic_store(&g_errors, 0);
-	atomic_store(&g_lat_idx, 0);
+	xtc_atomic_store_i32(&g_completed, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_errors, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_lat_idx, 0, xtc_mo_seq_cst);
 	memset(g_latencies, 0, MAX_SAMPLES * sizeof(int64_t));
 
 	if (!g_cfg.quiet)

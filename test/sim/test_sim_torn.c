@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -56,10 +55,10 @@
 #define PAGE      512
 #define CKOFF     (PAGE - 8)   /* checksum occupies the last 8 bytes */
 
-static atomic_int  g_verified;      /* pages that finally verified OK */
-static atomic_int  g_detected;      /* corruptions the checksum caught */
-static atomic_int  g_silent_bad;    /* MUST stay 0: undetected bad data */
-static atomic_long g_hash;          /* order-sensitive event fold */
+static int g_verified;   /* pages that finally verified OK */
+static int g_detected;   /* corruptions the checksum caught */
+static int g_silent_bad; /* MUST stay 0: undetected bad data */
+static long g_hash;      /* order-sensitive event fold */
 static int         g_fd = -1;
 
 static uint64_t
@@ -96,10 +95,10 @@ verify_page(const uint8_t *page)
 static void
 fold(long v)
 {
-	long h = atomic_load_explicit(&g_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(v + 3));
-	atomic_store_explicit(&g_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_hash, h, xtc_mo_relaxed);
 }
 
 static void
@@ -148,12 +147,12 @@ page_worker(void *arg)
 		} else {
 			/* Checksum FAILED -- a detected torn/corrupt page.
 			 * Rewrite it on the next attempt. */
-			atomic_fetch_add_explicit(&g_detected, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_detected, 1,
+			    xtc_mo_relaxed);
 		}
 	}
 	if (ok)
-		atomic_fetch_add_explicit(&g_verified, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_verified, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -169,10 +168,10 @@ run_once(uint64_t seed, int *out_verified, int *out_detected,
 	(void)snprintf(path, sizeof path, "%s/sim_torn_XXXXXX",
 	    td_ != NULL && *td_ != '\0' ? td_ : "/tmp");
 
-	atomic_store(&g_verified, 0);
-	atomic_store(&g_detected, 0);
-	atomic_store(&g_silent_bad, 0);
-	atomic_store(&g_hash, 0);
+	xtc_atomic_store_i32(&g_verified, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_detected, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_silent_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
 
 	g_fd = mkstemp(path);
 	if (g_fd < 0) {
@@ -202,10 +201,10 @@ run_once(uint64_t seed, int *out_verified, int *out_detected,
 
 	rc = xtc_sim_exec_run(e, seed, 20000000);
 
-	*out_verified = atomic_load(&g_verified);
-	*out_detected = atomic_load(&g_detected);
-	*out_silent   = atomic_load(&g_silent_bad);
-	*out_hash     = atomic_load(&g_hash);
+	*out_verified = xtc_atomic_load_i32(&g_verified, xtc_mo_seq_cst);
+	*out_detected = xtc_atomic_load_i32(&g_detected, xtc_mo_seq_cst);
+	*out_silent = xtc_atomic_load_i32(&g_silent_bad, xtc_mo_seq_cst);
+	*out_hash = xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 
 	xtc_sim_io_corrupt_disable();

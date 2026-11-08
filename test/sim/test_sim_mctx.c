@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -47,25 +46,25 @@
 #define PER_CHILD 4              /* allocs per child */
 #define ALLOC_SZ  64
 
-static atomic_int  g_cleanups;   /* total cleanup callbacks fired */
-static atomic_int  g_acct_bad;   /* an accounting assertion failed */
-static atomic_int  g_done;
-static atomic_long g_hash;
+static int g_cleanups; /* total cleanup callbacks fired */
+static int g_acct_bad; /* an accounting assertion failed */
+static int g_done;
+static long g_hash;
 
 static void
 fold(long v)
 {
-	long h = atomic_load_explicit(&g_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(v + 1));
-	atomic_store_explicit(&g_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_hash, h, xtc_mo_relaxed);
 }
 
 static void
 on_cleanup(void *user)
 {
 	(void)user;
-	atomic_fetch_add_explicit(&g_cleanups, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_cleanups, 1, xtc_mo_relaxed);
 }
 
 static void
@@ -76,9 +75,8 @@ mctx_worker(void *arg)
 	int i, j;
 
 	if (xtc_mctx_create(NULL, "root", XTC_MCTX_DEFAULT, &root) != XTC_OK) {
-		atomic_fetch_add_explicit(&g_acct_bad, 1,
-		    memory_order_relaxed);
-		atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_acct_bad, 1, xtc_mo_relaxed);
+		xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 		return;
 	}
 	for (i = 0; i < CHILDREN; i++) {
@@ -86,24 +84,24 @@ mctx_worker(void *arg)
 		kids[i] = NULL;
 		if (xtc_mctx_create(root, "kid", XTC_MCTX_DEFAULT, &kids[i])
 		    != XTC_OK) {
-			atomic_fetch_add_explicit(&g_acct_bad, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_acct_bad, 1,
+			    xtc_mo_relaxed);
 			continue;
 		}
 		(void)xtc_mctx_register_cleanup(kids[i], on_cleanup, NULL);
 		for (j = 0; j < PER_CHILD; j++) {
 			void *p = xtc_mctx_alloc(kids[i], ALLOC_SZ);
 			if (p == NULL)
-				atomic_fetch_add_explicit(&g_acct_bad, 1,
-				    memory_order_relaxed);
+				xtc_atomic_fetch_add_i32(&g_acct_bad, 1,
+				    xtc_mo_relaxed);
 		}
 		/* Accounting: exactly PER_CHILD chunks totalling PER_CHILD *
 		 * ALLOC_SZ bytes must be recorded on this child. */
 		want = (size_t)PER_CHILD * ALLOC_SZ;
 		if (xtc_mctx_total_bytes(kids[i]) != want ||
 		    xtc_mctx_total_chunks(kids[i]) != (size_t)PER_CHILD)
-			atomic_fetch_add_explicit(&g_acct_bad, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_acct_bad, 1,
+			    xtc_mo_relaxed);
 		fold((long)id * 31 + i);
 	}
 
@@ -114,16 +112,15 @@ mctx_worker(void *arg)
 	xtc_mctx_reset(kids[0]);
 	if (xtc_mctx_total_bytes(kids[0]) != 0 ||
 	    xtc_mctx_total_chunks(kids[0]) != 0)
-		atomic_fetch_add_explicit(&g_acct_bad, 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_acct_bad, 1, xtc_mo_relaxed);
 	/* Re-arm a cleanup on the reset child so destroy still fires one
 	 * for it (reset ran the first). */
 	(void)xtc_mctx_register_cleanup(kids[0], on_cleanup, NULL);
 	{
 		void *p = xtc_mctx_alloc(kids[0], ALLOC_SZ);
 		if (p == NULL || xtc_mctx_total_chunks(kids[0]) != 1)
-			atomic_fetch_add_explicit(&g_acct_bad, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_acct_bad, 1,
+			    xtc_mo_relaxed);
 	}
 
 	xtc_yield();
@@ -131,7 +128,7 @@ mctx_worker(void *arg)
 	/* Destroy the root: children destroyed first, remaining cleanups
 	 * fire, all chunks freed (no leak under ASan). */
 	xtc_mctx_destroy(root);
-	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -141,10 +138,10 @@ run_mctx(uint64_t seed, int *out_done, int *out_cleanups, int *out_bad,
 	xtc_exec_t *e = NULL;
 	int i, rc;
 
-	atomic_store(&g_cleanups, 0);
-	atomic_store(&g_acct_bad, 0);
-	atomic_store(&g_done, 0);
-	atomic_store(&g_hash, 0);
+	xtc_atomic_store_i32(&g_cleanups, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_acct_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 	for (i = 0; i < WORKERS; i++)
@@ -153,10 +150,10 @@ run_mctx(uint64_t seed, int *out_done, int *out_cleanups, int *out_bad,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_done = atomic_load(&g_done);
-	*out_cleanups = atomic_load(&g_cleanups);
-	*out_bad = atomic_load(&g_acct_bad);
-	*out_hash = atomic_load(&g_hash);
+	*out_done = xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
+	*out_cleanups = xtc_atomic_load_i32(&g_cleanups, xtc_mo_seq_cst);
+	*out_bad = xtc_atomic_load_i32(&g_acct_bad, xtc_mo_seq_cst);
+	*out_hash = xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	(void)xtc_exec_fini(e);
 	return rc;

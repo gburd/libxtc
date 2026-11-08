@@ -32,7 +32,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,14 +49,14 @@
 #define MAX_CHILDREN 32        /* per-driver child-pid tracking */
 
 /* System-wide tallies (summed across all drivers). */
-static atomic_int g_monitors;    /* monitors established (spawn_monitor + monitor) */
-static atomic_int g_downs;       /* DOWN signals received */
-static atomic_int g_links;       /* links established (spawn_link) */
-static atomic_int g_exits;       /* EXIT signals received */
-static atomic_int g_spawned;     /* children spawned (any flavor) */
-static atomic_int g_child_ran;   /* children that entered their body */
-static atomic_int g_drv_done;
-static atomic_long g_tally;      /* order-insensitive fold for a coarse check */
+static int g_monitors;  /* monitors established (spawn_monitor + monitor) */
+static int g_downs;     /* DOWN signals received */
+static int g_links;     /* links established (spawn_link) */
+static int g_exits;     /* EXIT signals received */
+static int g_spawned;   /* children spawned (any flavor) */
+static int g_child_ran; /* children that entered their body */
+static int g_drv_done;
+static long g_tally; /* order-insensitive fold for a coarse check */
 
 /* A child: run a seeded number of yields, then exit with reason 0.
  * It may be force-exited by its driver before it gets here; either way
@@ -67,7 +66,7 @@ child_fn(void *arg)
 {
 	int k = (int)(intptr_t)arg;
 	int i;
-	atomic_fetch_add_explicit(&g_child_ran, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_child_ran, 1, xtc_mo_relaxed);
 	for (i = 0; i < (k & 3); i++)
 		xtc_yield();
 	xtc_exit_self(0);
@@ -84,9 +83,9 @@ classify(void *m, size_t n)
 	if (xtc_down_decode_ex(m, n, &di) != XTC_OK)
 		return;
 	if (di.ref != 0)
-		atomic_fetch_add_explicit(&g_downs, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_downs, 1, xtc_mo_relaxed);
 	else
-		atomic_fetch_add_explicit(&g_exits, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_exits, 1, xtc_mo_relaxed);
 }
 
 /*
@@ -116,7 +115,8 @@ driver(void *arg)
 		case 0:   /* plain spawn (fire-and-forget child) */
 			if (xtc_proc_spawn(l, child_fn, (void *)(intptr_t)karg,
 			    NULL, &cpid) == XTC_OK) {
-				atomic_fetch_add(&g_spawned, 1);
+				xtc_atomic_fetch_add_i32(&g_spawned, 1,
+				    xtc_mo_seq_cst);
 				if (n_children < MAX_CHILDREN)
 					children[n_children++] = cpid;
 			}
@@ -126,8 +126,10 @@ driver(void *arg)
 			if (xtc_proc_spawn_monitor(l, child_fn,
 			    (void *)(intptr_t)karg, NULL, &cpid, &ref)
 			    == XTC_OK) {
-				atomic_fetch_add(&g_spawned, 1);
-				atomic_fetch_add(&g_monitors, 1);
+				xtc_atomic_fetch_add_i32(&g_spawned, 1,
+				    xtc_mo_seq_cst);
+				xtc_atomic_fetch_add_i32(&g_monitors, 1,
+				    xtc_mo_seq_cst);
 				my_monitors++;
 				if (n_children < MAX_CHILDREN)
 					children[n_children++] = cpid;
@@ -136,8 +138,10 @@ driver(void *arg)
 		case 3:   /* atomic spawn+link */
 			if (xtc_proc_spawn_link(l, child_fn,
 			    (void *)(intptr_t)karg, NULL, &cpid) == XTC_OK) {
-				atomic_fetch_add(&g_spawned, 1);
-				atomic_fetch_add(&g_links, 1);
+				xtc_atomic_fetch_add_i32(&g_spawned, 1,
+				    xtc_mo_seq_cst);
+				xtc_atomic_fetch_add_i32(&g_links, 1,
+				    xtc_mo_seq_cst);
 				my_links++;
 				if (n_children < MAX_CHILDREN)
 					children[n_children++] = cpid;
@@ -148,7 +152,8 @@ driver(void *arg)
 				int idx = (int)__xtc_sim_rng_range(
 				    XTC_SIM_RNG_APP, (uint64_t)n_children);
 				if (xtc_monitor(children[idx], &ref) == XTC_OK) {
-					atomic_fetch_add(&g_monitors, 1);
+					xtc_atomic_fetch_add_i32(&g_monitors, 1,
+					    xtc_mo_seq_cst);
 					my_monitors++;
 				}
 			}
@@ -180,10 +185,9 @@ driver(void *arg)
 		}
 	}
 
-	atomic_fetch_add_explicit(&g_tally,
-	    (long)(my_monitors * 7 + my_links * 13 + 1),
-	    memory_order_relaxed);
-	atomic_fetch_add(&g_drv_done, 1);
+	xtc_atomic_fetch_add_long(&g_tally,
+	    (long)(my_monitors * 7 + my_links * 13 + 1), xtc_mo_relaxed);
+	xtc_atomic_fetch_add_i32(&g_drv_done, 1, xtc_mo_seq_cst);
 }
 
 /* Count live procs at end-of-run (INV3): must be 0 -- no orphan/leak. */
@@ -203,14 +207,14 @@ run_composition(uint64_t seed, int *mon, int *down, int *lnk, int *ex,
 	xtc_exec_t *e = NULL;
 	int i, rc;
 
-	atomic_store(&g_monitors, 0);
-	atomic_store(&g_downs, 0);
-	atomic_store(&g_links, 0);
-	atomic_store(&g_exits, 0);
-	atomic_store(&g_spawned, 0);
-	atomic_store(&g_child_ran, 0);
-	atomic_store(&g_drv_done, 0);
-	atomic_store(&g_tally, 0);
+	xtc_atomic_store_i32(&g_monitors, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_downs, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_links, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_exits, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_spawned, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_child_ran, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_drv_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_tally, 0, xtc_mo_seq_cst);
 	g_live_procs = 0;
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
@@ -221,13 +225,13 @@ run_composition(uint64_t seed, int *mon, int *down, int *lnk, int *ex,
 
 	rc = xtc_sim_exec_run(e, seed, 20000000);
 
-	*mon = atomic_load(&g_monitors);
-	*down = atomic_load(&g_downs);
-	*lnk = atomic_load(&g_links);
-	*ex = atomic_load(&g_exits);
-	*spawned = atomic_load(&g_spawned);
-	*ran = atomic_load(&g_child_ran);
-	*tally = atomic_load(&g_tally);
+	*mon = xtc_atomic_load_i32(&g_monitors, xtc_mo_seq_cst);
+	*down = xtc_atomic_load_i32(&g_downs, xtc_mo_seq_cst);
+	*lnk = xtc_atomic_load_i32(&g_links, xtc_mo_seq_cst);
+	*ex = xtc_atomic_load_i32(&g_exits, xtc_mo_seq_cst);
+	*spawned = xtc_atomic_load_i32(&g_spawned, xtc_mo_seq_cst);
+	*ran = xtc_atomic_load_i32(&g_child_ran, xtc_mo_seq_cst);
+	*tally = xtc_atomic_load_long(&g_tally, xtc_mo_seq_cst);
 	if (state) *state = xtc_sim_state_hash(e);
 
 	/* INV3: after quiescence, no proc may remain alive. */
@@ -282,7 +286,7 @@ main(void)
 	    &ran1, &live1, &t1, &s1);
 	if (rc != XTC_OK) { printf("FAIL: run rc=%d (hang?)\n", rc); return 1; }
 	if (check("compose run1", mon1, down1, lnk1, ex1, sp1, ran1, live1,
-	    atomic_load(&g_drv_done)))
+	        xtc_atomic_load_i32(&g_drv_done, xtc_mo_seq_cst)))
 		return 1;
 
 	/* INV4a: byte-identical replay from the same seed. */
@@ -304,7 +308,7 @@ main(void)
 	    &ran3, &live3, &t3, &s3);
 	if (rc != XTC_OK) { printf("FAIL: diff-seed rc=%d\n", rc); return 1; }
 	if (check("compose run3", mon3, down3, lnk3, ex3, sp3, ran3, live3,
-	    atomic_load(&g_drv_done)))
+	        xtc_atomic_load_i32(&g_drv_done, xtc_mo_seq_cst)))
 		return 1;
 
 	printf("OK: compositional DST -- random spawn/monitor/link/send/exit "

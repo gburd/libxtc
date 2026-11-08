@@ -58,7 +58,6 @@
 #define _GNU_SOURCE
 #endif
 #include <fcntl.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -151,8 +150,8 @@ static char       g_path[512];
 static xtc_exec_t *g_exec;
 static uint64_t   g_seed;
 static int        g_round, g_seg;
-static _Atomic long g_step, g_crash_at;
-static _Atomic int  g_crashed, g_left, g_lanes;
+static long g_step, g_crash_at;
+static int g_crashed, g_left, g_lanes;
 static int        g_ops;
 
 /* Replay trace: one record per engine-visible event of a seed (each op
@@ -308,11 +307,12 @@ lane_proc(void *arg)
 		int kind, rc;
 		if (s >= MAXSEQ)
 			break;
-		step = atomic_fetch_add(&g_step, 1);
-		if (step >= atomic_load(&g_crash_at) &&
-		    atomic_load(&g_crash_at) >= 0) {
+		step = xtc_atomic_fetch_add_long(&g_step, 1, xtc_mo_seq_cst);
+		if (step >= xtc_atomic_load_long(&g_crash_at, xtc_mo_seq_cst) &&
+		    xtc_atomic_load_long(&g_crash_at, xtc_mo_seq_cst) >= 0) {
 			int z = 0;
-			if (atomic_compare_exchange_strong(&g_crashed, &z, 1))
+			if (xtc_atomic_cas_i32(&g_crashed, &z, 1,
+			        xtc_mo_seq_cst, xtc_mo_seq_cst))
 				(void)xtc_exec_stop(g_exec);
 			break;                  /* the crash: this op never starts */
 		}
@@ -339,8 +339,9 @@ lane_proc(void *arg)
 	}
 	sx_close(h);
 out:
-	atomic_fetch_sub(&g_lanes, 1);
-	if (atomic_fetch_sub(&g_left, 1) == 1 && !atomic_load(&g_crashed))
+	xtc_atomic_fetch_sub_i32(&g_lanes, 1, xtc_mo_seq_cst);
+	if (xtc_atomic_fetch_sub_i32(&g_left, 1, xtc_mo_seq_cst) == 1 &&
+	    !xtc_atomic_load_i32(&g_crashed, xtc_mo_seq_cst))
 		sx_storage_quiesce();
 }
 
@@ -353,7 +354,7 @@ static void
 ckpt_proc(void *arg)
 {
 	(void)arg;
-	while (atomic_load(&g_left) > 0) {
+	while (xtc_atomic_load_i32(&g_left, xtc_mo_seq_cst) > 0) {
 		uint64_t tail = 0;
 		int rc = xstore_checkpoint_wal_online(sx_storage_bt(),
 		    sx_storage_wal(), sx_storage_wal_path(), &tail);
@@ -430,7 +431,7 @@ reader_proc(void *arg)
 		FAILF("reader: sx_open failed");
 		goto out;
 	}
-	while (atomic_load(&g_lanes) > 0) {
+	while (xtc_atomic_load_i32(&g_lanes, xtc_mo_seq_cst) > 0) {
 		if (sx_exec(h, "BEGIN", NULL) != SX_OK) {
 			FAILF("reader: BEGIN failed");
 			break;
@@ -466,7 +467,8 @@ reader_proc(void *arg)
 	}
 	sx_close(h);
 out:
-	if (atomic_fetch_sub(&g_left, 1) == 1 && !atomic_load(&g_crashed))
+	if (xtc_atomic_fetch_sub_i32(&g_left, 1, xtc_mo_seq_cst) == 1 &&
+	    !xtc_atomic_load_i32(&g_crashed, xtc_mo_seq_cst))
 		sx_storage_quiesce();
 }
 
@@ -481,7 +483,7 @@ gc_proc(void *arg)
 		FAILF("gc: sx_open failed");
 		goto out;
 	}
-	while (atomic_load(&g_lanes) > 0) {
+	while (xtc_atomic_load_i32(&g_lanes, xtc_mo_seq_cst) > 0) {
 		(void)xtc_proc_sleep((int64_t)(300 +
 		    __xtc_sim_rng_range(XTC_SIM_RNG_APP, 3000)) * 1000);
 		if ((r = xstore_gc_run(h)) < 0) {
@@ -493,7 +495,8 @@ gc_proc(void *arg)
 	}
 	sx_close(h);
 out:
-	if (atomic_fetch_sub(&g_left, 1) == 1 && !atomic_load(&g_crashed))
+	if (xtc_atomic_fetch_sub_i32(&g_left, 1, xtc_mo_seq_cst) == 1 &&
+	    !xtc_atomic_load_i32(&g_crashed, xtc_mo_seq_cst))
 		sx_storage_quiesce();
 }
 #endif
@@ -712,12 +715,14 @@ segment(uint64_t rs, int crash)
 #endif
 
 	g_ops = OPS_MIN + (int)(mix(rs ^ 0x6F7073ull) % OPS_SPAN);
-	atomic_store(&g_step, 0);
-	atomic_store(&g_crashed, 0);
-	atomic_store(&g_left, NW + N_EXTRA);
-	atomic_store(&g_lanes, NW);
-	atomic_store(&g_crash_at, crash ?
-	    (long)(mix(rs ^ 0x637574ull) % (uint64_t)(NW * g_ops + 1)) : -1L);
+	xtc_atomic_store_long(&g_step, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_crashed, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_left, NW + N_EXTRA, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_lanes, NW, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_crash_at,
+	    crash ? (long)(mix(rs ^ 0x637574ull) % (uint64_t)(NW * g_ops + 1)) :
+	            -1L,
+	    xtc_mo_seq_cst);
 	if (xtc_exec_init(&g_exec, N_LOOPS) != XTC_OK) {
 		FAILF("xtc_exec_init failed");
 		return -1;
@@ -766,7 +771,7 @@ segment(uint64_t rs, int crash)
 		    rc == XTC_E_AGAIN ? "step budget exhausted" : "error");
 		return -1;
 	}
-	if (atomic_load(&g_crashed)) {
+	if (xtc_atomic_load_i32(&g_crashed, xtc_mo_seq_cst)) {
 		char wp[1100];
 		uint64_t dlsn = wal_durable_lsn(sx_storage_wal());
 		snprintf(wp, sizeof wp, "%s", sx_storage_wal_path());

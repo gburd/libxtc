@@ -8,7 +8,6 @@
 
 #include <pthread.h>
 #include <stdarg.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -303,48 +302,51 @@ test_cfg_load_file(const MunitParameter p[], void *d)
 
 /* ----- Injection points -------------------------------------- */
 
-static _Atomic int g_inject_fired;
+static int g_inject_fired;
 
 static void
 inject_cb(const char *name, void *user)
 {
 	(void)name; (void)user;
-	atomic_fetch_add(&g_inject_fired, 1);
+	xtc_atomic_fetch_add_i32(&g_inject_fired, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
 test_inject_callback(const MunitParameter p[], void *d)
 {
 	(void)p; (void)d;
-	atomic_store(&g_inject_fired, 0);
+	xtc_atomic_store_i32(&g_inject_fired, 0, xtc_mo_seq_cst);
 
 	/* No attachment yet -- trigger is a no-op. */
 	xtc_inject_trigger("xtc.test.point1");
-	munit_assert_int(atomic_load(&g_inject_fired), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_inject_fired, xtc_mo_seq_cst),
+	    ==, 0);
 
 	/* Attach + trigger fires. */
 	munit_assert_int(xtc_inject_attach("xtc.test.point1", inject_cb, NULL),
 	    ==, XTC_OK);
 	xtc_inject_trigger("xtc.test.point1");
 	xtc_inject_trigger("xtc.test.point1");
-	munit_assert_int(atomic_load(&g_inject_fired), ==, 2);
+	munit_assert_int(xtc_atomic_load_i32(&g_inject_fired, xtc_mo_seq_cst),
+	    ==, 2);
 
 	munit_assert_int(xtc_inject_detach("xtc.test.point1"), ==, XTC_OK);
 	xtc_inject_trigger("xtc.test.point1");
-	munit_assert_int(atomic_load(&g_inject_fired), ==, 2);
+	munit_assert_int(xtc_atomic_load_i32(&g_inject_fired, xtc_mo_seq_cst),
+	    ==, 2);
 	return MUNIT_OK;
 }
 
 /* Wait-style: trigger blocks until wakeup is called from a peer. */
-static _Atomic int g_wait_phase;
+static int g_wait_phase;
 
 static void *
 wait_trigger_thread(void *arg)
 {
 	(void)arg;
-	atomic_store(&g_wait_phase, 1);
+	xtc_atomic_store_i32(&g_wait_phase, 1, xtc_mo_seq_cst);
 	xtc_inject_trigger("xtc.test.wait_point");
-	atomic_store(&g_wait_phase, 2);
+	xtc_atomic_store_i32(&g_wait_phase, 2, xtc_mo_seq_cst);
 	return NULL;
 }
 
@@ -354,7 +356,7 @@ test_inject_wait(const MunitParameter p[], void *d)
 	pthread_t th;
 	struct timespec ts = { 0, 100 * 1000 * 1000 };  /* 100ms */
 	(void)p; (void)d;
-	atomic_store(&g_wait_phase, 0);
+	xtc_atomic_store_i32(&g_wait_phase, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_inject_attach_wait("xtc.test.wait_point"),
 	    ==, XTC_OK);
 
@@ -363,12 +365,14 @@ test_inject_wait(const MunitParameter p[], void *d)
 	/* Phase 1: trigger thread reaches and blocks.  Sleep 100ms;
 	 * phase should still be 1. */
 	(void)nanosleep(&ts, NULL);
-	munit_assert_int(atomic_load(&g_wait_phase), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_wait_phase, xtc_mo_seq_cst), ==,
+	    1);
 
 	/* Wake it up. */
 	munit_assert_int(xtc_inject_wakeup("xtc.test.wait_point"), ==, XTC_OK);
 	pthread_join(th, NULL);
-	munit_assert_int(atomic_load(&g_wait_phase), ==, 2);
+	munit_assert_int(xtc_atomic_load_i32(&g_wait_phase, xtc_mo_seq_cst), ==,
+	    2);
 
 	(void)xtc_inject_detach("xtc.test.wait_point");
 	return MUNIT_OK;
@@ -376,7 +380,7 @@ test_inject_wait(const MunitParameter p[], void *d)
 
 /* ----- Proc dictionary --------------------------------------- */
 
-static _Atomic int g_pdict_test_ok;
+static int g_pdict_test_ok;
 
 static void
 pdict_user(void *arg)
@@ -406,7 +410,7 @@ pdict_user(void *arg)
 	(void)xtc_pdict_clear();
 	if (xtc_pdict_count() != 0) return;
 
-	atomic_store(&g_pdict_test_ok, 1);
+	xtc_atomic_store_i32(&g_pdict_test_ok, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -415,12 +419,13 @@ test_pdict_basic(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	xtc_pid_t pid;
 	(void)p; (void)d;
-	atomic_store(&g_pdict_test_ok, 0);
+	xtc_atomic_store_i32(&g_pdict_test_ok, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, pdict_user, NULL, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_pdict_test_ok), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_pdict_test_ok, xtc_mo_seq_cst),
+	    ==, 1);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
 }
@@ -441,7 +446,7 @@ test_pdict_outside_proc(const MunitParameter p[], void *d)
 
 #include "xtc_res.h"
 
-static _Atomic int g_alert_count;
+static int g_alert_count;
 static xtc_res_kind_t g_last_kind;
 
 static void
@@ -449,7 +454,7 @@ alert_cb(xtc_res_kind_t k, int64_t used, int64_t cap, void *user)
 {
 	(void)used; (void)cap; (void)user;
 	g_last_kind = k;
-	atomic_fetch_add(&g_alert_count, 1);
+	xtc_atomic_fetch_add_i32(&g_alert_count, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -462,21 +467,25 @@ test_res_alert(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_res_init(&r, &caps), ==, XTC_OK);
 	munit_assert_int(xtc_res_set_alert(&r, XTC_RES_TASKS, 0.8), ==, XTC_OK);
 	munit_assert_int(xtc_res_set_alert_fn(&r, alert_cb, NULL), ==, XTC_OK);
-	atomic_store(&g_alert_count, 0);
+	xtc_atomic_store_i32(&g_alert_count, 0, xtc_mo_seq_cst);
 
 	/* Acquire 70 -- under threshold, no fire. */
 	munit_assert_int(xtc_res_acquire(&r, XTC_RES_TASKS, 70), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_alert_count), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_alert_count, xtc_mo_seq_cst),
+	    ==, 0);
 	/* Push to 85 -- fires once. */
 	munit_assert_int(xtc_res_acquire(&r, XTC_RES_TASKS, 15), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_alert_count), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_alert_count, xtc_mo_seq_cst),
+	    ==, 1);
 	/* Stay above; no re-fire. */
 	munit_assert_int(xtc_res_acquire(&r, XTC_RES_TASKS, 5), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_alert_count), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_alert_count, xtc_mo_seq_cst),
+	    ==, 1);
 	/* Drop below threshold and back up -- re-arms and fires again. */
 	xtc_res_release(&r, XTC_RES_TASKS, 30);
 	munit_assert_int(xtc_res_acquire(&r, XTC_RES_TASKS, 30), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_alert_count), ==, 2);
+	munit_assert_int(xtc_atomic_load_i32(&g_alert_count, xtc_mo_seq_cst),
+	    ==, 2);
 	munit_assert_int(g_last_kind, ==, XTC_RES_TASKS);
 	return MUNIT_OK;
 }
@@ -484,18 +493,19 @@ test_res_alert(const MunitParameter p[], void *d)
 /* ----- live introspection (xtc_inspect) ----------------------- */
 #include "xtc_inspect.h"
 
-static _Atomic int g_insp_seen;        /* procs the callback saw */
-static _Atomic int g_insp_sleeper_mbox;/* mailbox depth seen on the sleeper */
-static _Atomic int g_insp_loop_procs;  /* procs counted via xtc_inspect_loops */
+static int g_insp_seen;         /* procs the callback saw */
+static int g_insp_sleeper_mbox; /* mailbox depth seen on the sleeper */
+static int g_insp_loop_procs;   /* procs counted via xtc_inspect_loops */
 static xtc_pid_t   g_insp_sleeper;
 
 static int
 insp_proc_cb(const xtc_proc_info_t *info, void *user)
 {
 	(void)user;
-	atomic_fetch_add(&g_insp_seen, 1);
+	xtc_atomic_fetch_add_i32(&g_insp_seen, 1, xtc_mo_seq_cst);
 	if (xtc_pid_eq(info->pid, g_insp_sleeper))
-		atomic_store(&g_insp_sleeper_mbox, (int)info->mbox_len);
+		xtc_atomic_store_i32(&g_insp_sleeper_mbox, (int)info->mbox_len,
+		    xtc_mo_seq_cst);
 	return 0;
 }
 
@@ -528,14 +538,15 @@ insp_driver(void *a)
 	{
 		int lp = 0;
 		(void)xtc_inspect_loops(insp_loop_cb, &lp);
-		atomic_store(&g_insp_loop_procs, lp);
+		xtc_atomic_store_i32(&g_insp_loop_procs, lp, xtc_mo_seq_cst);
 	}
 	{
 		xtc_proc_info_t info = XTC_PROC_INFO_INIT;
 		int rc = xtc_proc_info(g_insp_sleeper, &info);
 		if (rc == XTC_OK && info.mbox_len == 2 &&
 		    info.run_state == XTC_PROC_PARKED)
-			atomic_fetch_add(&g_insp_seen, 1000);   /* sentinel: per-pid ok */
+			xtc_atomic_fetch_add_i32(&g_insp_seen, 1000,
+			    xtc_mo_seq_cst); /* sentinel: per-pid ok */
 	}
 	/* The sleeper wakes on its own (~300ms); no need to kill it. */
 }
@@ -548,8 +559,8 @@ test_inspect_procs(const MunitParameter p[], void *d)
 	xtc_pid_t dpid;
 	(void)p; (void)d;
 
-	atomic_store(&g_insp_seen, 0);
-	atomic_store(&g_insp_sleeper_mbox, -1);
+	xtc_atomic_store_i32(&g_insp_seen, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_insp_sleeper_mbox, -1, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	o.name = "sleeper";
@@ -562,9 +573,14 @@ test_inspect_procs(const MunitParameter p[], void *d)
 
 	/* The driver enumerated at least the two procs, saw the sleeper's
 	 * mailbox at depth 2, and the per-pid lookup matched (sentinel). */
-	munit_assert_int(atomic_load(&g_insp_seen), >=, 1002);
-	munit_assert_int(atomic_load(&g_insp_sleeper_mbox), ==, 2);
-	munit_assert_int(atomic_load(&g_insp_loop_procs), >=, 2);
+	munit_assert_int(xtc_atomic_load_i32(&g_insp_seen, xtc_mo_seq_cst), >=,
+	    1002);
+	munit_assert_int(xtc_atomic_load_i32(&g_insp_sleeper_mbox,
+	                     xtc_mo_seq_cst),
+	    ==, 2);
+	munit_assert_int(xtc_atomic_load_i32(&g_insp_loop_procs,
+	                     xtc_mo_seq_cst),
+	    >=, 2);
 
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
@@ -590,7 +606,7 @@ test_inspect_procs(const MunitParameter p[], void *d)
  * whole park_reason mapping rather than one branch.
  */
 static xtc_pid_t g_pr_mbox, g_pr_timer;
-static _Atomic int g_pr_mbox_reason, g_pr_timer_reason, g_pr_checked;
+static int g_pr_mbox_reason, g_pr_timer_reason, g_pr_checked;
 
 static void
 pr_mbox_proc(void *a)
@@ -620,11 +636,13 @@ pr_probe(void *a)
 
 	if (xtc_proc_info(g_pr_mbox, &info) == XTC_OK &&
 	    info.run_state == XTC_PROC_PARKED)
-		atomic_store(&g_pr_mbox_reason, info.park_reason);
+		xtc_atomic_store_i32(&g_pr_mbox_reason, info.park_reason,
+		    xtc_mo_seq_cst);
 	if (xtc_proc_info(g_pr_timer, &info) == XTC_OK &&
 	    info.run_state == XTC_PROC_PARKED)
-		atomic_store(&g_pr_timer_reason, info.park_reason);
-	atomic_store(&g_pr_checked, 1);
+		xtc_atomic_store_i32(&g_pr_timer_reason, info.park_reason,
+		    xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_pr_checked, 1, xtc_mo_seq_cst);
 
 	/* Release the mailbox parker so the loop can drain. */
 	(void)xtc_send(g_pr_mbox, "go", 3);
@@ -638,9 +656,9 @@ test_inspect_park_reason(const MunitParameter p[], void *d)
 	xtc_pid_t probe;
 	(void)p; (void)d;
 
-	atomic_store(&g_pr_mbox_reason, -1);
-	atomic_store(&g_pr_timer_reason, -1);
-	atomic_store(&g_pr_checked, 0);
+	xtc_atomic_store_i32(&g_pr_mbox_reason, -1, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_pr_timer_reason, -1, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_pr_checked, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	o.name = "pr-mbox";
@@ -654,10 +672,14 @@ test_inspect_park_reason(const MunitParameter p[], void *d)
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
-	munit_assert_int(atomic_load(&g_pr_checked), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_pr_checked, xtc_mo_seq_cst), ==,
+	    1);
 	/* The regression: this was XTC_PARK_NONE (0) for every recv park. */
-	munit_assert_int(atomic_load(&g_pr_mbox_reason), ==, XTC_PARK_MAILBOX);
-	munit_assert_int(atomic_load(&g_pr_timer_reason), ==, XTC_PARK_TIMER);
+	munit_assert_int(xtc_atomic_load_i32(&g_pr_mbox_reason, xtc_mo_seq_cst),
+	    ==, XTC_PARK_MAILBOX);
+	munit_assert_int(xtc_atomic_load_i32(&g_pr_timer_reason,
+	                     xtc_mo_seq_cst),
+	    ==, XTC_PARK_TIMER);
 
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
@@ -745,15 +767,15 @@ test_trace_causal(const MunitParameter p[], void *d)
 }
 
 /* xtc_pdict_put_with_dtor: the dtor runs on erase/clear/replace. */
-static _Atomic int g_dtor_calls;
+static int g_dtor_calls;
 static void
 pdict_free_dtor(void *v)
 {
 	(void)v;
-	atomic_fetch_add(&g_dtor_calls, 1);
+	xtc_atomic_fetch_add_i32(&g_dtor_calls, 1, xtc_mo_seq_cst);
 }
 
-static _Atomic int g_pdict_dtor_ok;
+static int g_pdict_dtor_ok;
 static void
 pdict_dtor_user(void *arg)
 {
@@ -763,11 +785,13 @@ pdict_dtor_user(void *arg)
 	    pdict_free_dtor) != XTC_OK) return;
 	if (xtc_pdict_put_with_dtor("k", (void *)(uintptr_t)2,
 	    pdict_free_dtor) != XTC_OK) return;
-	if (atomic_load(&g_dtor_calls) != 1) return;   /* old value freed */
+	if (xtc_atomic_load_i32(&g_dtor_calls, xtc_mo_seq_cst) != 1)
+		return; /* old value freed */
 	/* erase fires the dtor for the current value. */
 	if (xtc_pdict_erase("k") != XTC_OK) return;
-	if (atomic_load(&g_dtor_calls) != 2) return;
-	atomic_store(&g_pdict_dtor_ok, 1);
+	if (xtc_atomic_load_i32(&g_dtor_calls, xtc_mo_seq_cst) != 2)
+		return;
+	xtc_atomic_store_i32(&g_pdict_dtor_ok, 1, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -776,13 +800,14 @@ test_pdict_dtor(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	xtc_pid_t pid;
 	(void)p; (void)d;
-	atomic_store(&g_dtor_calls, 0);
-	atomic_store(&g_pdict_dtor_ok, 0);
+	xtc_atomic_store_i32(&g_dtor_calls, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_pdict_dtor_ok, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, pdict_dtor_user, NULL, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_pdict_dtor_ok), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_pdict_dtor_ok, xtc_mo_seq_cst),
+	    ==, 1);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;
 }

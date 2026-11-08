@@ -38,7 +38,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -53,8 +52,8 @@
 #define WORKERS    24     /* > LOOPS, all on loop 0 => heavy migration */
 #define COMMITS    40     /* write+fdatasync pairs per worker */
 
-static atomic_int g_done;
-static atomic_long g_commits;
+static int g_done;
+static long g_commits;
 static char g_dir[512];
 
 static void
@@ -67,7 +66,10 @@ committer(void *arg)
 	memset(buf, 'w', sizeof buf);
 	snprintf(path, sizeof path, "%s/awm_%p.dat", g_dir, (void *)&fd);
 	fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
-	if (fd < 0) { atomic_fetch_add(&g_done, 1); return; }
+	if (fd < 0) {
+		xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_seq_cst);
+		return;
+	}
 	(void)unlink(path);
 	for (i = 0; i < COMMITS; i++) {
 		if (xtc_aio_pwrite(fd, buf, sizeof buf,
@@ -75,14 +77,14 @@ committer(void *arg)
 			break;
 		if (xtc_aio_fdatasync(fd) != XTC_OK)
 			break;
-		atomic_fetch_add(&g_commits, 1);
+		xtc_atomic_fetch_add_long(&g_commits, 1, xtc_mo_seq_cst);
 		/* A park point so the stealer can migrate us between commits;
 		 * the next commit then tends to run, and complete, on a
 		 * different loop than this one. */
 		(void)xtc_proc_sleep(1000);
 	}
 	close(fd);
-	atomic_fetch_add(&g_done, 1);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -96,7 +98,8 @@ on_alarm(int s)
 		int n = snprintf(m, sizeof m,
 		    "FAIL: hang -- %d/%d committers finished, %ld commits "
 		    "(a cross-loop aio completion was stranded)\n",
-		    atomic_load(&g_done), WORKERS, atomic_load(&g_commits));
+		    xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst), WORKERS,
+		    xtc_atomic_load_long(&g_commits, xtc_mo_seq_cst));
 		(void)!write(2, m, (size_t)n);
 	}
 	_exit(1);
@@ -142,14 +145,16 @@ main(void)
 	(void)xtc_exec_fini(e);
 	alarm(0);
 
-	if (atomic_load(&g_done) != WORKERS) {
+	if (xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst) != WORKERS) {
 		printf("FAIL: %d/%d committers finished\n",
-		    atomic_load(&g_done), WORKERS);
+		    xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst), WORKERS);
 		return 1;
 	}
-	if (atomic_load(&g_commits) != (long)WORKERS * COMMITS) {
+	if (xtc_atomic_load_long(&g_commits, xtc_mo_seq_cst) !=
+	    (long)WORKERS * COMMITS) {
 		printf("FAIL: %ld/%d commits completed\n",
-		    atomic_load(&g_commits), WORKERS * COMMITS);
+		    xtc_atomic_load_long(&g_commits, xtc_mo_seq_cst),
+		    WORKERS * COMMITS);
 		return 1;
 	}
 	printf("OK: cross-loop aio wake -- %d migratable committers x %d "

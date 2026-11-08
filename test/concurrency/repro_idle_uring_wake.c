@@ -29,7 +29,6 @@
 #include "os_thread.h"
 #include "os_time.h"
 
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
@@ -37,14 +36,14 @@
 #define N_LOOPS   4
 #define N_SPAWN   2000     /* foreign spawns across the burst */
 
-static atomic_int g_ran;       /* spawned proc bodies that executed */
+static int g_ran; /* spawned proc bodies that executed */
 
 /* The spawned worker: mark that it ran, then exit cleanly. */
 static void
 worker(void *arg)
 {
 	(void)arg;
-	atomic_fetch_add(&g_ran, 1);
+	xtc_atomic_fetch_add_i32(&g_ran, 1, xtc_mo_seq_cst);
 	xtc_exit_self(0);
 }
 
@@ -139,7 +138,7 @@ main(void)
 	 * go to this foreign thread's non-existent mailbox, so we only
 	 * assert the bodies ran -- a missed wake means g_ran falls short.) */
 	for (i = 0; i < 6000; i++) {
-		if (atomic_load(&g_ran) >= N_SPAWN)
+		if (xtc_atomic_load_i32(&g_ran, xtc_mo_seq_cst) >= N_SPAWN)
 			break;
 		(void)xtc_sleep_ns(5 * 1000 * 1000LL);
 	}
@@ -154,7 +153,7 @@ main(void)
 	(void)xtc_exec_fini(g_e);
 
 	{
-		int ran = atomic_load(&g_ran);
+		int ran = xtc_atomic_load_i32(&g_ran, xtc_mo_seq_cst);
 		if (ran != N_SPAWN) {
 			printf("FAIL: %d/%d foreign-spawned procs ran -- "
 			    "cross-thread wake to an idle io_uring loop was "

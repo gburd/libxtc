@@ -28,7 +28,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,17 +49,17 @@
 
 static xtc_atomic_pid_t g_cell[CELLS];
 static xtc_pid_t   g_pub[NPUB];     /* every publisher's pid, set at start */
-static atomic_int  g_pub_up, g_readers_done;
-static atomic_int  g_bad, g_sent, g_recv;
-static atomic_long g_fold;
+static int g_pub_up, g_readers_done;
+static int g_bad, g_sent, g_recv;
+static long g_fold;
 
 static void
 fold(xtc_pid_t p)
 {
-	long h = atomic_load_explicit(&g_fold, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_fold, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL + p.loop_id * 131UL +
 	    p.local_id * 7UL + (unsigned long)p.gen);
-	atomic_store_explicit(&g_fold, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_fold, h, xtc_mo_relaxed);
 }
 
 static void
@@ -72,26 +71,26 @@ publisher(void *arg)
 	size_t sz;
 
 	g_pub[id] = self;
-	atomic_fetch_add(&g_pub_up, 1);
+	xtc_atomic_fetch_add_i32(&g_pub_up, 1, xtc_mo_seq_cst);
 	for (r = 0; r < ROUNDS; r++) {
 		xtc_atomic_pid_store(&g_cell[(id + r) % CELLS], self);
 		xtc_yield();
 		while (xtc_recv(&m, &sz, 0) == XTC_OK) {
 			xtc_free(m);
-			atomic_fetch_add(&g_recv, 1);
+			xtc_atomic_fetch_add_i32(&g_recv, 1, xtc_mo_seq_cst);
 		}
 	}
 	/* Stay reachable until every reader is done, then drain. */
-	while (atomic_load(&g_readers_done) < NREAD) {
+	while (xtc_atomic_load_i32(&g_readers_done, xtc_mo_seq_cst) < NREAD) {
 		while (xtc_recv(&m, &sz, 0) == XTC_OK) {
 			xtc_free(m);
-			atomic_fetch_add(&g_recv, 1);
+			xtc_atomic_fetch_add_i32(&g_recv, 1, xtc_mo_seq_cst);
 		}
 		xtc_yield();
 	}
 	while (xtc_recv(&m, &sz, 0) == XTC_OK) {
 		xtc_free(m);
-		atomic_fetch_add(&g_recv, 1);
+		xtc_atomic_fetch_add_i32(&g_recv, 1, xtc_mo_seq_cst);
 	}
 }
 
@@ -113,22 +112,25 @@ reader(void *arg)
 	xtc_pid_t p;
 	char c = 'x';
 
-	while (atomic_load(&g_pub_up) < NPUB)
+	while (xtc_atomic_load_i32(&g_pub_up, xtc_mo_seq_cst) < NPUB)
 		xtc_yield();
 	for (r = 0; r < ROUNDS; r++) {
 		p = xtc_atomic_pid_load(&g_cell[(id * 3 + r) % CELLS]);
 		if (!xtc_pid_is_none(p)) {
 			if (!known(p))
-				atomic_fetch_add(&g_bad, 1);
+				xtc_atomic_fetch_add_i32(&g_bad, 1,
+				    xtc_mo_seq_cst);
 			else if (xtc_send(p, &c, 1) == XTC_OK)
-				atomic_fetch_add(&g_sent, 1);
+				xtc_atomic_fetch_add_i32(&g_sent, 1,
+				    xtc_mo_seq_cst);
 			else
-				atomic_fetch_add(&g_bad, 1);  /* publishers live */
+				xtc_atomic_fetch_add_i32(&g_bad, 1,
+				    xtc_mo_seq_cst); /* publishers live */
 			fold(p);
 		}
 		xtc_yield();
 	}
-	atomic_fetch_add(&g_readers_done, 1);
+	xtc_atomic_fetch_add_i32(&g_readers_done, 1, xtc_mo_seq_cst);
 }
 
 static int
@@ -139,12 +141,12 @@ run(uint64_t seed, int *bad, int *sent, int *recv, long *fh, uint64_t *st)
 
 	memset(g_cell, 0, sizeof g_cell);
 	memset(g_pub, 0, sizeof g_pub);
-	atomic_store(&g_pub_up, 0);
-	atomic_store(&g_readers_done, 0);
-	atomic_store(&g_bad, 0);
-	atomic_store(&g_sent, 0);
-	atomic_store(&g_recv, 0);
-	atomic_store(&g_fold, 0);
+	xtc_atomic_store_i32(&g_pub_up, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_readers_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_sent, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_recv, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_fold, 0, xtc_mo_seq_cst);
 	if (xtc_exec_init(&e, PUB_LOOPS) != XTC_OK)
 		return XTC_E_NOMEM;
 	for (i = 0; i < NPUB; i++)
@@ -154,10 +156,10 @@ run(uint64_t seed, int *bad, int *sent, int *recv, long *fh, uint64_t *st)
 		(void)xtc_proc_spawn(xtc_exec_loop(e, i % PUB_LOOPS),
 		    reader, (void *)(intptr_t)i, NULL, NULL);
 	rc = xtc_sim_exec_run(e, seed, 5000000);
-	*bad = atomic_load(&g_bad);
-	*sent = atomic_load(&g_sent);
-	*recv = atomic_load(&g_recv);
-	*fh = atomic_load(&g_fold);
+	*bad = xtc_atomic_load_i32(&g_bad, xtc_mo_seq_cst);
+	*sent = xtc_atomic_load_i32(&g_sent, xtc_mo_seq_cst);
+	*recv = xtc_atomic_load_i32(&g_recv, xtc_mo_seq_cst);
+	*fh = xtc_atomic_load_long(&g_fold, xtc_mo_seq_cst);
 	*st = xtc_sim_state_hash(e);
 	(void)xtc_exec_fini(e);
 	return rc;

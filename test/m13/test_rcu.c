@@ -6,7 +6,6 @@
  */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,11 +16,11 @@
 #include "xtc_rcu.h"
 
 /* Counter incremented by the free function. */
-static _Atomic int g_freed_count;
+static int g_freed_count;
 static void
 my_free(void *p)
 {
-	atomic_fetch_add_explicit(&g_freed_count, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_freed_count, 1, xtc_mo_relaxed);
 	free(p);
 }
 
@@ -30,7 +29,7 @@ test_basic(const MunitParameter p[], void *d)
 {
 	void *a, *b;
 	(void)p; (void)d;
-	atomic_store(&g_freed_count, 0);
+	xtc_atomic_store_i32(&g_freed_count, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_rcu_init(), ==, XTC_OK);
 
 	xtc_rcu_read_lock();
@@ -43,30 +42,32 @@ test_basic(const MunitParameter p[], void *d)
 
 	xtc_rcu_retire(a, my_free);
 	xtc_rcu_retire(b, my_free);
-	munit_assert_int(atomic_load(&g_freed_count), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_freed_count, xtc_mo_seq_cst),
+	    ==, 0);
 
 	/* Two grace periods to push past the bucket lag. */
 	xtc_rcu_synchronize();
 	xtc_rcu_synchronize();
 	xtc_rcu_synchronize();
 
-	munit_assert_int(atomic_load(&g_freed_count), ==, 2);
+	munit_assert_int(xtc_atomic_load_i32(&g_freed_count, xtc_mo_seq_cst),
+	    ==, 2);
 
 	xtc_rcu_fini();
 	return MUNIT_OK;
 }
 
 /* Reader holding a read-side blocks reclamation until they leave. */
-static _Atomic int  g_phase;
-static _Atomic int  g_reader_started;
+static int g_phase;
+static int g_reader_started;
 
 static void *
 slow_reader(void *arg)
 {
 	(void)arg;
 	xtc_rcu_read_lock();
-	atomic_store(&g_reader_started, 1);
-	while (atomic_load(&g_phase) < 1) {
+	xtc_atomic_store_i32(&g_reader_started, 1, xtc_mo_seq_cst);
+	while (xtc_atomic_load_i32(&g_phase, xtc_mo_seq_cst) < 1) {
 		struct timespec ts = { 0, 1 * 1000 * 1000 };
 		nanosleep(&ts, NULL);
 	}
@@ -81,13 +82,13 @@ test_blocks_reclaim(const MunitParameter p[], void *d)
 	void *p1;
 	(void)p; (void)d;
 
-	atomic_store(&g_freed_count, 0);
-	atomic_store(&g_phase, 0);
-	atomic_store(&g_reader_started, 0);
+	xtc_atomic_store_i32(&g_freed_count, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_phase, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_reader_started, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_rcu_init(), ==, XTC_OK);
 
 	pthread_create(&th, NULL, slow_reader, NULL);
-	while (!atomic_load(&g_reader_started)) {
+	while (!xtc_atomic_load_i32(&g_reader_started, xtc_mo_seq_cst)) {
 		struct timespec ts = { 0, 100 * 1000 };
 		nanosleep(&ts, NULL);
 	}
@@ -107,7 +108,7 @@ test_blocks_reclaim(const MunitParameter p[], void *d)
 		nanosleep(&ts, NULL);
 		/* Reader still alive; nothing reclaimed yet (the bucket
 		 * is two epochs old once we eventually advance). */
-		atomic_store(&g_phase, 1);
+		xtc_atomic_store_i32(&g_phase, 1, xtc_mo_seq_cst);
 		pthread_join(sync_th, NULL);
 		pthread_join(th, NULL);
 	}
@@ -115,7 +116,8 @@ test_blocks_reclaim(const MunitParameter p[], void *d)
 	/* A couple more synchronizes to flush. */
 	xtc_rcu_synchronize();
 	xtc_rcu_synchronize();
-	munit_assert_int(atomic_load(&g_freed_count), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_freed_count, xtc_mo_seq_cst),
+	    ==, 1);
 	xtc_rcu_fini();
 	return MUNIT_OK;
 }
@@ -126,16 +128,16 @@ test_blocks_reclaim(const MunitParameter p[], void *d)
  * reset it to 0), but 0 is also the "not in a read side" mark, so such a
  * reader published "inactive" and synchronize freed its object under it.
  */
-static _Atomic int g_e0_inside;
-static _Atomic int g_e0_freed_inside;
-static _Atomic int g_e0_syncs;
+static int g_e0_inside;
+static int g_e0_freed_inside;
+static int g_e0_syncs;
 
 static void
 e0_free(void *p)
 {
-	if (atomic_load(&g_e0_inside))
-		atomic_store(&g_e0_freed_inside, 1);
-	atomic_fetch_add_explicit(&g_freed_count, 1, memory_order_relaxed);
+	if (xtc_atomic_load_i32(&g_e0_inside, xtc_mo_seq_cst))
+		xtc_atomic_store_i32(&g_e0_freed_inside, 1, xtc_mo_seq_cst);
+	xtc_atomic_fetch_add_i32(&g_freed_count, 1, xtc_mo_relaxed);
 	free(p);
 }
 
@@ -144,13 +146,13 @@ e0_reader(void *arg)
 {
 	(void)arg;
 	xtc_rcu_read_lock();
-	atomic_store(&g_e0_inside, 1);
-	atomic_store(&g_reader_started, 1);
-	while (atomic_load(&g_phase) < 1) {
+	xtc_atomic_store_i32(&g_e0_inside, 1, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_reader_started, 1, xtc_mo_seq_cst);
+	while (xtc_atomic_load_i32(&g_phase, xtc_mo_seq_cst) < 1) {
 		struct timespec ts = { 0, 1 * 1000 * 1000 };
 		nanosleep(&ts, NULL);
 	}
-	atomic_store(&g_e0_inside, 0);
+	xtc_atomic_store_i32(&g_e0_inside, 0, xtc_mo_seq_cst);
 	xtc_rcu_read_unlock();
 	return NULL;
 }
@@ -162,7 +164,7 @@ e0_writer(void *arg)
 	(void)arg;
 	for (i = 0; i < 3; i++) {
 		xtc_rcu_synchronize();
-		atomic_fetch_add(&g_e0_syncs, 1);
+		xtc_atomic_fetch_add_i32(&g_e0_syncs, 1, xtc_mo_seq_cst);
 	}
 	return NULL;
 }
@@ -176,15 +178,15 @@ test_reader_before_first_sync(const MunitParameter p[], void *d)
 
 	xtc_rcu_fini();                 /* a fresh epoch, as at process start */
 	munit_assert_int(xtc_rcu_init(), ==, XTC_OK);
-	atomic_store(&g_freed_count, 0);
-	atomic_store(&g_phase, 0);
-	atomic_store(&g_reader_started, 0);
-	atomic_store(&g_e0_inside, 0);
-	atomic_store(&g_e0_freed_inside, 0);
-	atomic_store(&g_e0_syncs, 0);
+	xtc_atomic_store_i32(&g_freed_count, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_phase, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_reader_started, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_e0_inside, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_e0_freed_inside, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_e0_syncs, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(pthread_create(&rd, NULL, e0_reader, NULL), ==, 0);
-	while (!atomic_load(&g_reader_started)) {
+	while (!xtc_atomic_load_i32(&g_reader_started, xtc_mo_seq_cst)) {
 		struct timespec w = { 0, 100 * 1000 };
 		nanosleep(&w, NULL);
 	}
@@ -193,14 +195,21 @@ test_reader_before_first_sync(const MunitParameter p[], void *d)
 	nanosleep(&ts, NULL);
 	/* The reader is still inside: nothing may have been freed, and the
 	 * writer's first synchronize must still be waiting for it. */
-	munit_assert_int(atomic_load(&g_e0_freed_inside), ==, 0);
-	munit_assert_int(atomic_load(&g_freed_count), ==, 0);
-	munit_assert_int(atomic_load(&g_e0_syncs), ==, 0);
-	atomic_store(&g_phase, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_e0_freed_inside,
+	                     xtc_mo_seq_cst),
+	    ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_freed_count, xtc_mo_seq_cst),
+	    ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_e0_syncs, xtc_mo_seq_cst), ==,
+	    0);
+	xtc_atomic_store_i32(&g_phase, 1, xtc_mo_seq_cst);
 	pthread_join(rd, NULL);
 	pthread_join(wr, NULL);
-	munit_assert_int(atomic_load(&g_e0_freed_inside), ==, 0);
-	munit_assert_int(atomic_load(&g_freed_count), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_e0_freed_inside,
+	                     xtc_mo_seq_cst),
+	    ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_freed_count, xtc_mo_seq_cst),
+	    ==, 1);
 	munit_assert_uint64(xtc_rcu_current_epoch(), !=, 0);
 	xtc_rcu_fini();
 	munit_assert_uint64(xtc_rcu_current_epoch(), !=, 0);

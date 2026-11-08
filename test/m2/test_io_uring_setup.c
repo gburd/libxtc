@@ -44,7 +44,6 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -256,8 +255,8 @@ struct work {
 	int         fd;       /* temp file */
 	int         rp, wp;   /* pipe: the fiber waits on rp */
 	int         round;
-	atomic_int  ok;       /* fibers that finished correctly */
-	atomic_int  bad;
+	int ok; /* fibers that finished correctly */
+	int bad;
 };
 
 static void
@@ -274,28 +273,28 @@ work_fiber(void *arg)
 	if ((r = xtc_aio_pwrite(w->fd, out, PAGE, (int64_t)w->round * PAGE)) !=
 	    PAGE || (r = xtc_aio_fdatasync(w->fd)) != 0) {
 		munit_logf(MUNIT_LOG_WARNING, "write/sync r=%d", r);
-		atomic_fetch_add(&w->bad, 1);
+		xtc_atomic_fetch_add_i32(&w->bad, 1, xtc_mo_seq_cst);
 		return;
 	}
 	memset(in, 0, sizeof in);
 	if ((r = xtc_aio_pread(w->fd, in, PAGE, (int64_t)w->round * PAGE)) !=
 	    PAGE || memcmp(in, out, PAGE) != 0) {
 		munit_logf(MUNIT_LOG_WARNING, "read r=%d", r);
-		atomic_fetch_add(&w->bad, 1);
+		xtc_atomic_fetch_add_i32(&w->bad, 1, xtc_mo_seq_cst);
 		return;
 	}
 	/* An fd wait that completes: the byte is written before the park. */
 	if (write(w->wp, "x", 1) != 1) {
-		atomic_fetch_add(&w->bad, 1);
+		xtc_atomic_fetch_add_i32(&w->bad, 1, xtc_mo_seq_cst);
 		return;
 	}
 	r = xtc_proc_wait_fd(w->rp, XTC_IO_READABLE, 2000LL * 1000000, &rev);
 	if (r != XTC_OK || read(w->rp, &c, 1) != 1) {
 		munit_logf(MUNIT_LOG_WARNING, "wait r=%d", r);
-		atomic_fetch_add(&w->bad, 1);
+		xtc_atomic_fetch_add_i32(&w->bad, 1, xtc_mo_seq_cst);
 		return;
 	}
-	atomic_fetch_add(&w->ok, 1);
+	xtc_atomic_fetch_add_i32(&w->ok, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -370,16 +369,18 @@ test_loop_other_thread(const MunitParameter p[], void *d)
 		munit_assert_int(xtc_proc_spawn(loop, work_fiber, &w, NULL,
 		    NULL), ==, XTC_OK);
 		run_on_thread(loop);
-		munit_assert_int(atomic_load(&w.bad), ==, 0);
-		munit_assert_int(atomic_load(&w.ok), ==, k + 1);
+		munit_assert_int(xtc_atomic_load_i32(&w.bad, xtc_mo_seq_cst),
+		    ==, 0);
+		munit_assert_int(xtc_atomic_load_i32(&w.ok, xtc_mo_seq_cst), ==,
+		    k + 1);
 	}
 	/* And once on this (creating) thread. */
 	w.round = 3;
 	munit_assert_int(xtc_proc_spawn(loop, work_fiber, &w, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&w.ok), ==, 4);
-	munit_assert_int(atomic_load(&w.bad), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&w.ok, xtc_mo_seq_cst), ==, 4);
+	munit_assert_int(xtc_atomic_load_i32(&w.bad, xtc_mo_seq_cst), ==, 0);
 	if (is_uring() && (ring_flags(loop->io) & SETUP_SINGLE_ISSUER))
 		munit_assert_uint(rebinds(loop->io), ==, 4);   /* 1 per run */
 	(void)xtc_loop_fini(loop);
@@ -411,8 +412,12 @@ test_exec_run_twice(const MunitParameter p[], void *d)
 		}
 		munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 		for (i = 0; i < NLOOPS; i++) {
-			munit_assert_int(atomic_load(&w[i].bad), ==, 0);
-			munit_assert_int(atomic_load(&w[i].ok), ==, run + 1);
+			munit_assert_int(xtc_atomic_load_i32(&w[i].bad,
+			                     xtc_mo_seq_cst),
+			    ==, 0);
+			munit_assert_int(xtc_atomic_load_i32(&w[i].ok,
+			                     xtc_mo_seq_cst),
+			    ==, run + 1);
 		}
 	}
 	(void)xtc_exec_fini(e);
@@ -426,8 +431,8 @@ test_exec_run_twice(const MunitParameter p[], void *d)
 struct stop_ctx {
 	xtc_loop_t *loop;
 	int         fd;
-	atomic_int  started;
-	atomic_int  res;
+	int started;
+	int res;
 };
 
 static void
@@ -436,11 +441,12 @@ stop_fiber(void *arg)
 	struct stop_ctx *c = arg;
 	static unsigned char buf[1 << 20];
 
-	atomic_store(&c->started, 1);
+	xtc_atomic_store_i32(&c->started, 1, xtc_mo_seq_cst);
 	/* Stop the loop while this write is in the kernel: the run returns
 	 * with the fiber parked on it. */
 	(void)xtc_loop_stop(c->loop);
-	atomic_store(&c->res, xtc_aio_pwrite(c->fd, buf, sizeof buf, 0));
+	xtc_atomic_store_i32(&c->res, xtc_aio_pwrite(c->fd, buf, sizeof buf, 0),
+	    xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -456,17 +462,19 @@ test_aio_across_stop(const MunitParameter p[], void *d)
 	memset(&c, 0, sizeof c);
 	c.fd = mkstemp(path);
 	munit_assert_int(c.fd, >=, 0);
-	atomic_store(&c.res, -12345);
+	xtc_atomic_store_i32(&c.res, -12345, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	c.loop = loop;
 	munit_assert_int(xtc_proc_spawn(loop, stop_fiber, &c, NULL, NULL), ==,
 	    XTC_OK);
 	run_on_thread(loop);           /* stops with the write parked */
-	munit_assert_int(atomic_load(&c.started), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&c.started, xtc_mo_seq_cst), ==,
+	    1);
 	/* A different thread finishes the run: the fiber must resume with
 	 * the write's result, not hang (the old ring's issuer is gone). */
 	run_on_thread(loop);
-	munit_assert_int(atomic_load(&c.res), ==, 1 << 20);
+	munit_assert_int(xtc_atomic_load_i32(&c.res, xtc_mo_seq_cst), ==,
+	    1 << 20);
 	(void)xtc_loop_fini(loop);
 	close(c.fd);
 	unlink(path);
@@ -478,8 +486,8 @@ test_aio_across_stop(const MunitParameter p[], void *d)
 struct ready_ctx {
 	xtc_loop_t *loop;
 	int         rp, wp;
-	atomic_int  phase;
-	atomic_int  res;
+	int phase;
+	int res;
 	uint32_t    rev;
 };
 
@@ -488,11 +496,12 @@ ready_fiber(void *arg)
 {
 	struct ready_ctx *c = arg;
 
-	atomic_store(&c->phase, 1);
+	xtc_atomic_store_i32(&c->phase, 1, xtc_mo_seq_cst);
 	(void)xtc_loop_stop(c->loop);
-	atomic_store(&c->res, xtc_proc_wait_fd(c->rp, XTC_IO_READABLE,
-	    5000LL * 1000000, &c->rev));
-	atomic_store(&c->phase, 2);
+	xtc_atomic_store_i32(&c->res,
+	    xtc_proc_wait_fd(c->rp, XTC_IO_READABLE, 5000LL * 1000000, &c->rev),
+	    xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&c->phase, 2, xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -508,18 +517,19 @@ test_ready_across_move(const MunitParameter p[], void *d)
 	munit_assert_int(fcntl(pp[0], F_SETFL, O_NONBLOCK), ==, 0);
 	c.rp = pp[0];
 	c.wp = pp[1];
-	atomic_store(&c.res, -12345);
+	xtc_atomic_store_i32(&c.res, -12345, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	c.loop = loop;
 	munit_assert_int(xtc_proc_spawn(loop, ready_fiber, &c, NULL, NULL), ==,
 	    XTC_OK);
 	run_on_thread(loop);    /* returns with the fiber parked on rp */
-	munit_assert_int(atomic_load(&c.phase), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&c.phase, xtc_mo_seq_cst), ==, 1);
 	/* The fd becomes ready while no thread runs the loop. */
 	munit_assert_int((int)write(c.wp, "x", 1), ==, 1);
 	run_on_thread(loop);
-	munit_assert_int(atomic_load(&c.phase), ==, 2);
-	munit_assert_int(atomic_load(&c.res), ==, XTC_OK);
+	munit_assert_int(xtc_atomic_load_i32(&c.phase, xtc_mo_seq_cst), ==, 2);
+	munit_assert_int(xtc_atomic_load_i32(&c.res, xtc_mo_seq_cst), ==,
+	    XTC_OK);
 	munit_assert_uint(c.rev & XTC_IO_READABLE, ==, XTC_IO_READABLE);
 	(void)xtc_loop_fini(loop);
 	close(pp[0]);
@@ -535,9 +545,9 @@ struct fini_ctx {
 	xtc_loop_t *loop;
 	int rp, wp;         /* pipe: wp full, so the write waits */
 	unsigned char *buf; /* the write's heap buffer */
-	atomic_int fini_done;
-	atomic_long got; /* bytes the drain thread read */
-	atomic_int res;
+	int fini_done;
+	long got; /* bytes the drain thread read */
+	int res;
 };
 
 /* Fill the pipe, then make wp blocking again (io_uring answers -EAGAIN
@@ -576,8 +586,9 @@ fini_drain(void *arg)
 	usleep(200 * 1000);
 	for (i = 0; i < 2000; i++) {
 		while ((r = read(c->rp, b, sizeof b)) > 0)
-			atomic_fetch_add(&c->got, (long)r);
-		if (atomic_load(&c->fini_done))
+			xtc_atomic_fetch_add_long(&c->got, (long)r,
+			    xtc_mo_seq_cst);
+		if (xtc_atomic_load_i32(&c->fini_done, xtc_mo_seq_cst))
 			break;
 		usleep(1000);
 	}
@@ -590,7 +601,8 @@ fini_fiber(void *arg)
 	struct fini_ctx *c = arg;
 
 	(void)xtc_loop_stop(c->loop);
-	atomic_store(&c->res, xtc_aio_pwrite(c->wp, c->buf, FINI_BIG, 0));
+	xtc_atomic_store_i32(&c->res,
+	    xtc_aio_pwrite(c->wp, c->buf, FINI_BIG, 0), xtc_mo_seq_cst);
 }
 
 static MunitResult
@@ -610,7 +622,7 @@ test_aio_fini_no_defer(const MunitParameter p[], void *d)
 	c.buf = malloc(FINI_BIG);
 	munit_assert_not_null(c.buf);
 	memset(c.buf, 'w', FINI_BIG);
-	atomic_store(&c.res, -12345);
+	xtc_atomic_store_i32(&c.res, -12345, xtc_mo_seq_cst);
 	munit_assert_int(xtc_inject_attach("io.uring.no_defer", inj_nop, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
@@ -623,13 +635,15 @@ test_aio_fini_no_defer(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	(void)xtc_inject_detach("io.uring.no_defer");
 	munit_assert_uint(ring_flags(loop->io) & SETUP_SINGLE_ISSUER, ==, 0);
-	munit_assert_int(atomic_load(&c.res), ==, -12345); /* still parked */
+	munit_assert_int(xtc_atomic_load_i32(&c.res, xtc_mo_seq_cst), ==,
+	    -12345); /* still parked */
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
-	atomic_store(&c.fini_done, 1);
+	xtc_atomic_store_i32(&c.fini_done, 1, xtc_mo_seq_cst);
 	munit_assert_int(__os_thread_join(&th, NULL), ==, XTC_OK);
 	/* The write moved bytes: it completed rather than being dropped with
 	 * the ring. */
-	munit_assert_long(atomic_load(&c.got), >, prefill);
+	munit_assert_long(xtc_atomic_load_long(&c.got, xtc_mo_seq_cst), >,
+	    prefill);
 	free(c.buf);
 	close(c.rp);
 	close(c.wp);
@@ -644,7 +658,7 @@ fini_feed(void *arg)
 
 	usleep(200 * 1000);
 	if (write(c->wp, "x", 1) != 1)
-		atomic_store(&c->res, -1);
+		xtc_atomic_store_i32(&c->res, -1, xtc_mo_seq_cst);
 	return NULL;
 }
 
@@ -692,7 +706,8 @@ fini_direct(int cancel)
 		munit_assert_int(a->res, ==, -ECANCELED);
 	} else {
 		munit_assert_int(__os_thread_join(&th, NULL), ==, XTC_OK);
-		munit_assert_int(atomic_load(&c.res), ==, 0);
+		munit_assert_int(xtc_atomic_load_i32(&c.res, xtc_mo_seq_cst),
+		    ==, 0);
 		munit_assert_int(a->res, ==, 1);
 	}
 	free(a);

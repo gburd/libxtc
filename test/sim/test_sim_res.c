@@ -31,7 +31,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -49,11 +48,11 @@
 #define CAP       8            /* small cap so acquires contend + reject */
 
 static xtc_res_t   g_res;
-static atomic_int  g_success;   /* successful acquires (== releases) */
-static atomic_int  g_reject;    /* XTC_E_RESOURCE returns */
-static atomic_int  g_attempts;  /* total acquire attempts */
-static atomic_int  g_over_cap;  /* set if used>cap ever observed (BUG) */
-static atomic_int  g_done;
+static int g_success;  /* successful acquires (== releases) */
+static int g_reject;   /* XTC_E_RESOURCE returns */
+static int g_attempts; /* total acquire attempts */
+static int g_over_cap; /* set if used>cap ever observed (BUG) */
+static int g_done;
 
 /* Worker: repeatedly acquire a seeded 1..3 units, (if granted) hold
  * briefly, verify used<=cap, then release. */
@@ -66,24 +65,26 @@ worker(void *arg)
 		int64_t n = 1 + (int64_t)__xtc_sim_rng_range(XTC_SIM_RNG_APP, 3);
 		int rc;
 
-		atomic_fetch_add(&g_attempts, 1);
+		xtc_atomic_fetch_add_i32(&g_attempts, 1, xtc_mo_seq_cst);
 		rc = xtc_res_acquire(&g_res, XTC_RES_TASKS, n);
 		if (rc == XTC_OK) {
-			atomic_fetch_add(&g_success, 1);
+			xtc_atomic_fetch_add_i32(&g_success, 1, xtc_mo_seq_cst);
 			/* SAFETY check while holding: used must never exceed
 			 * the cap. */
 			if (xtc_res_used(&g_res, XTC_RES_TASKS) > CAP)
-				atomic_store(&g_over_cap, 1);
+				xtc_atomic_store_i32(&g_over_cap, 1,
+				    xtc_mo_seq_cst);
 			/* Hold across a yield so other fibers interleave. */
 			xtc_yield();
 			xtc_res_release(&g_res, XTC_RES_TASKS, n);
 		} else {
-			atomic_fetch_add(&g_reject, 1);
+			xtc_atomic_fetch_add_i32(&g_reject, 1, xtc_mo_seq_cst);
 		}
 		if ((i & 3) == 0)
 			(void)xtc_proc_sleep(500 * 1000LL);
 	}
-	if (atomic_fetch_add(&g_done, 1) + 1 >= N_WORKERS) {
+	if (xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_seq_cst) + 1 >=
+	    N_WORKERS) {
 		/* last worker out: nothing to do -- coordinator stops. */
 	}
 }
@@ -94,7 +95,7 @@ coordinator(void *arg)
 	xtc_exec_t *e = arg;
 	int tries;
 	for (tries = 0; tries < 4000; tries++) {
-		if (atomic_load(&g_done) >= N_WORKERS)
+		if (xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst) >= N_WORKERS)
 			break;
 		(void)xtc_proc_sleep(1000 * 1000LL);
 	}
@@ -110,11 +111,11 @@ run_one(uint64_t seed, int *out_succ, int *out_rej, int *out_over,
 	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
 	int i, rc;
 
-	atomic_store(&g_success, 0);
-	atomic_store(&g_reject, 0);
-	atomic_store(&g_attempts, 0);
-	atomic_store(&g_over_cap, 0);
-	atomic_store(&g_done, 0);
+	xtc_atomic_store_i32(&g_success, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_reject, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_attempts, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_over_cap, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
 
 	caps.tasks = CAP;    /* the resource we contend on */
 	if (xtc_res_init(&g_res, &caps) != XTC_OK)
@@ -131,9 +132,12 @@ run_one(uint64_t seed, int *out_succ, int *out_rej, int *out_over,
 
 	rc = xtc_sim_exec_run(e, seed, 20000000);
 
-	if (out_succ) *out_succ = atomic_load(&g_success);
-	if (out_rej) *out_rej = atomic_load(&g_reject);
-	if (out_over) *out_over = atomic_load(&g_over_cap);
+	if (out_succ)
+		*out_succ = xtc_atomic_load_i32(&g_success, xtc_mo_seq_cst);
+	if (out_rej)
+		*out_rej = xtc_atomic_load_i32(&g_reject, xtc_mo_seq_cst);
+	if (out_over)
+		*out_over = xtc_atomic_load_i32(&g_over_cap, xtc_mo_seq_cst);
 	if (out_final_used) *out_final_used = xtc_res_used(&g_res, XTC_RES_TASKS);
 	if (out_high) *out_high = xtc_res_high(&g_res, XTC_RES_TASKS);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
@@ -161,7 +165,7 @@ main(int argc, char **argv)
 		uint64_t st = 0, st2 = 0;
 
 		rc = run_one(seed, &succ, &rej, &over, &used, &high, &st);
-		attempts = atomic_load(&g_attempts);
+		attempts = xtc_atomic_load_i32(&g_attempts, xtc_mo_seq_cst);
 		if (rc != XTC_OK) pass = 0;
 		else if (over != 0) pass = 0;              /* used never > cap */
 		else if (used != 0) pass = 0;              /* conservation */

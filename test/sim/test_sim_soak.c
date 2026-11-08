@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -40,9 +39,9 @@
 #define N_SLEEPERS 8        /* timer-driven procs */
 #define N_HOPS     4        /* round-trips per pair */
 
-static atomic_int  g_replies;
-static atomic_int  g_sleeps;
-static atomic_long g_app_hash;
+static int g_replies;
+static int g_sleeps;
+static long g_app_hash;
 
 /* ---- ping/pong: a ping does N_HOPS round-trips with a pong on another
  * loop, parking on each reply; both terminate after N_HOPS. ---- */
@@ -81,11 +80,11 @@ ping(void *arg)
 		if (xtc_recv(&m, &n, -1) != XTC_OK || m == NULL)
 			return;
 		free(m);
-		atomic_fetch_add_explicit(&g_replies, 1, memory_order_relaxed);
-		h = atomic_load_explicit(&g_app_hash, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_replies, 1, xtc_mo_relaxed);
+		h = xtc_atomic_load_long(&g_app_hash, xtc_mo_relaxed);
 		h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(pa->id + 1));
-		atomic_store_explicit(&g_app_hash, h, memory_order_relaxed);
+		xtc_atomic_store_long(&g_app_hash, h, xtc_mo_relaxed);
 	}
 }
 
@@ -97,7 +96,7 @@ sleeper(void *arg)
 	int i;
 	for (i = 0; i < 3; i++)
 		(void)xtc_proc_sleep((int64_t)(id % 5 + 1) * 1000000LL); /* 1-5 ms */
-	atomic_fetch_add_explicit(&g_sleeps, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_sleeps, 1, xtc_mo_relaxed);
 }
 
 /* Build + run the workload once with `seed`. */
@@ -107,9 +106,9 @@ run_once(uint64_t seed, int skew, uint64_t *out_state, long *out_app,
 {
 	xtc_exec_t *e = NULL;
 	int i, rc;
-	atomic_store(&g_replies, 0);
-	atomic_store(&g_sleeps, 0);
-	atomic_store(&g_app_hash, 0);
+	xtc_atomic_store_i32(&g_replies, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_sleeps, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_app_hash, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
 		return -1;
@@ -140,8 +139,9 @@ run_once(uint64_t seed, int skew, uint64_t *out_state, long *out_app,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 	*out_state = xtc_sim_state_hash(e);
-	*out_app = atomic_load(&g_app_hash);
-	*out_done = atomic_load(&g_replies) + atomic_load(&g_sleeps);
+	*out_app = xtc_atomic_load_long(&g_app_hash, xtc_mo_seq_cst);
+	*out_done = xtc_atomic_load_i32(&g_replies, xtc_mo_seq_cst) +
+	    xtc_atomic_load_i32(&g_sleeps, xtc_mo_seq_cst);
 	(void)xtc_exec_fini(e);
 	return rc;
 }

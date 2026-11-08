@@ -2,7 +2,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_exec.h"
@@ -48,15 +47,15 @@
 #define N_WORKERS  16
 #define N_YIELDS   24     /* many park points => many steal opportunities */
 
-static atomic_int  g_self_ok;       /* xtc_self()==own pid checks that passed */
-static atomic_int  g_self_bad;      /* ... that FAILED (must stay 0) */
-static atomic_int  g_ud_ok;         /* xtc_proc_userdata()==own value passed */
-static atomic_int  g_ud_bad;        /* ... that FAILED (must stay 0) */
-static atomic_int  g_migrations;    /* observed carrier-loop changes */
-static atomic_int  g_loopid_mismatch; /* xtc_exec_loop_id() disagreed with
-                                       * __xtc_current_loop (must stay 0) */
-static atomic_int  g_downs;         /* DOWN messages the monitor received */
-static atomic_int  g_workers_done;
+static int g_self_ok;         /* xtc_self()==own pid checks that passed */
+static int g_self_bad;        /* ... that FAILED (must stay 0) */
+static int g_ud_ok;           /* xtc_proc_userdata()==own value passed */
+static int g_ud_bad;          /* ... that FAILED (must stay 0) */
+static int g_migrations;      /* observed carrier-loop changes */
+static int g_loopid_mismatch; /* xtc_exec_loop_id() disagreed with
+                               * __xtc_current_loop (must stay 0) */
+static int g_downs;           /* DOWN messages the monitor received */
+static int g_workers_done;
 
 /*
  * Worker: learn our own pid via xtc_self() at entry, then yield
@@ -79,24 +78,21 @@ worker(void *arg)
 
 		/* INV1: identity survived the resume (possibly on a new loop). */
 		if (xtc_pid_eq(xtc_self(), me))
-			atomic_fetch_add_explicit(&g_self_ok, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_self_ok, 1, xtc_mo_relaxed);
 		else
-			atomic_fetch_add_explicit(&g_self_bad, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_self_bad, 1,
+			    xtc_mo_relaxed);
 
 		/* INV5: per-proc userdata survived the resume too. */
 		if (xtc_proc_userdata() == my_ud)
-			atomic_fetch_add_explicit(&g_ud_ok, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_ud_ok, 1, xtc_mo_relaxed);
 		else
-			atomic_fetch_add_explicit(&g_ud_bad, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_ud_bad, 1, xtc_mo_relaxed);
 
 		/* INV2: did the carrier loop change? (a real migration) */
 		if (__xtc_current_loop != last_loop) {
-			atomic_fetch_add_explicit(&g_migrations, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_migrations, 1,
+			    xtc_mo_relaxed);
 			last_loop = __xtc_current_loop;
 		}
 
@@ -107,10 +103,10 @@ worker(void *arg)
 		 * actually use (no internal access needed). */
 		if ((__xtc_current_loop != NULL ? __xtc_current_loop->exec_id : -1)
 		    != xtc_exec_loop_id())
-			atomic_fetch_add_explicit(&g_loopid_mismatch, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_loopid_mismatch, 1,
+			    xtc_mo_relaxed);
 	}
-	atomic_fetch_add_explicit(&g_workers_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_workers_done, 1, xtc_mo_relaxed);
 }
 
 /*
@@ -143,8 +139,7 @@ monitor(void *arg)
 		if (xtc_recv(&m, &n, 10LL * 1000 * 1000 * 1000) != XTC_OK)
 			break;
 		if (xtc_down_decode(m, n, &dpid, &reason) == XTC_OK) {
-			atomic_fetch_add_explicit(&g_downs, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_downs, 1, xtc_mo_relaxed);
 			collected++;
 		}
 		if (m) xtc_free(m);
@@ -159,14 +154,14 @@ run_once(uint64_t seed, int migratable, uint64_t *out_state_hash,
 {
 	xtc_exec_t *e = NULL;
 
-	atomic_store(&g_self_ok, 0);
-	atomic_store(&g_self_bad, 0);
-	atomic_store(&g_ud_ok, 0);
-	atomic_store(&g_ud_bad, 0);
-	atomic_store(&g_migrations, 0);
-	atomic_store(&g_loopid_mismatch, 0);
-	atomic_store(&g_downs, 0);
-	atomic_store(&g_workers_done, 0);
+	xtc_atomic_store_i32(&g_self_ok, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_self_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ud_ok, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ud_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_migrations, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_loopid_mismatch, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_downs, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_workers_done, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
 
@@ -184,14 +179,22 @@ run_once(uint64_t seed, int migratable, uint64_t *out_state_hash,
 	(void)xtc_sim_exec_run(e, seed, 5000000);
 
 	if (out_state_hash) *out_state_hash = xtc_sim_state_hash(e);
-	if (out_migrations) *out_migrations = atomic_load(&g_migrations);
-	if (out_self_ok)    *out_self_ok = atomic_load(&g_self_ok);
-	if (out_self_bad)   *out_self_bad = atomic_load(&g_self_bad);
-	if (out_downs)      *out_downs = atomic_load(&g_downs);
-	if (out_done)       *out_done = atomic_load(&g_workers_done);
+	if (out_migrations)
+		*out_migrations =
+		    xtc_atomic_load_i32(&g_migrations, xtc_mo_seq_cst);
+	if (out_self_ok)
+		*out_self_ok = xtc_atomic_load_i32(&g_self_ok, xtc_mo_seq_cst);
+	if (out_self_bad)
+		*out_self_bad =
+		    xtc_atomic_load_i32(&g_self_bad, xtc_mo_seq_cst);
+	if (out_downs)
+		*out_downs = xtc_atomic_load_i32(&g_downs, xtc_mo_seq_cst);
+	if (out_done)
+		*out_done =
+		    xtc_atomic_load_i32(&g_workers_done, xtc_mo_seq_cst);
 
 	(void)xtc_exec_fini(e);
-	return atomic_load(&g_self_ok);
+	return xtc_atomic_load_i32(&g_self_ok, xtc_mo_seq_cst);
 }
 
 int
@@ -205,11 +208,13 @@ main(void)
 
 	/* Two runs, same seed -> must replay byte-identically. */
 	run_once(0xA11CEULL, 1, &s1, &mig1, &ok1, &bad1, &down1, &done1);
-	ud_ok1 = atomic_load(&g_ud_ok); ud_bad1 = atomic_load(&g_ud_bad);
-	mismatch1 = atomic_load(&g_loopid_mismatch);
+	ud_ok1 = xtc_atomic_load_i32(&g_ud_ok, xtc_mo_seq_cst);
+	ud_bad1 = xtc_atomic_load_i32(&g_ud_bad, xtc_mo_seq_cst);
+	mismatch1 = xtc_atomic_load_i32(&g_loopid_mismatch, xtc_mo_seq_cst);
 	run_once(0xA11CEULL, 1, &s2, &mig2, &ok2, &bad2, &down2, &done2);
-	ud_ok2 = atomic_load(&g_ud_ok); ud_bad2 = atomic_load(&g_ud_bad);
-	mismatch2 = atomic_load(&g_loopid_mismatch);
+	ud_ok2 = xtc_atomic_load_i32(&g_ud_ok, xtc_mo_seq_cst);
+	ud_bad2 = xtc_atomic_load_i32(&g_ud_bad, xtc_mo_seq_cst);
+	mismatch2 = xtc_atomic_load_i32(&g_loopid_mismatch, xtc_mo_seq_cst);
 
 	printf("run1: self_ok=%d self_bad=%d migrations=%d downs=%d done=%d "
 	    "state=%016llx\n", ok1, bad1, mig1, down1, done1,

@@ -15,7 +15,6 @@
  */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,7 +31,7 @@
 struct lw1_state {
 	xtc_lwlock_t lk;
 	int          val;     /* protected; updates must be atomic-feeling */
-	_Atomic int  failures;
+	int failures;
 };
 
 static void *
@@ -58,7 +57,9 @@ lw1_observer(void *arg)
 	int i;
 	for (i = 0; i < 200; i++) {
 		(void)xtc_lwlock_acquire(&s->lk, XTC_LW_SHARED);
-		if (s->val != 0) atomic_fetch_add(&s->failures, 1);
+		if (s->val != 0)
+			xtc_atomic_fetch_add_i32(&s->failures, 1,
+			    xtc_mo_seq_cst);
 		xtc_lwlock_release(&s->lk);
 	}
 	return NULL;
@@ -79,7 +80,7 @@ prop_mutex_invariant(hegel_test_case *tc, void *u)
 		pthread_create(&readers[i], NULL, lw1_observer, &s);
 	for (i = 0; i < n_writers; i++) pthread_join(writers[i], NULL);
 	for (i = 0; i < 2; i++) pthread_join(readers[i], NULL);
-	hegel_assume(atomic_load(&s.failures) == 0);
+	hegel_assume(xtc_atomic_load_i32(&s.failures, xtc_mo_seq_cst) == 0);
 	xtc_lwlock_destroy(&s.lk);
 }
 

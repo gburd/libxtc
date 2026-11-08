@@ -2,7 +2,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -34,9 +33,9 @@
 #define N_LOOPS   4
 #define N_EFFECTS 12
 
-static atomic_int  g_ran;        /* effect bodies that executed */
-static atomic_int  g_resolved;   /* futures observed resolved */
-static atomic_long g_hash;       /* order-sensitive fold of effect ids */
+static int g_ran;      /* effect bodies that executed */
+static int g_resolved; /* futures observed resolved */
+static long g_hash;    /* order-sensitive fold of effect ids */
 
 /* Each dispatched effect: run once, fold id, resolve via return. */
 static int
@@ -44,11 +43,11 @@ effect_body(void *arg)
 {
 	long id = (long)(intptr_t)arg;
 	long h;
-	atomic_fetch_add_explicit(&g_ran, 1, memory_order_relaxed);
-	h = atomic_load_explicit(&g_hash, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_ran, 1, xtc_mo_relaxed);
+	h = xtc_atomic_load_long(&g_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(id + 1));
-	atomic_store_explicit(&g_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_hash, h, xtc_mo_relaxed);
 	return (int)id;
 }
 
@@ -64,7 +63,7 @@ consumer(void *arg)
 	xtc_future_t *fut = arg;
 	intptr_t out = -1;
 	if (xtc_future_await(fut, &out) == XTC_OK)
-		atomic_fetch_add_explicit(&g_resolved, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&g_resolved, 1, xtc_mo_relaxed);
 }
 
 static long
@@ -73,9 +72,9 @@ run_once(uint64_t seed, int *out_ran, int *out_resolved)
 	xtc_exec_t *e = NULL;
 	int i;
 
-	atomic_store(&g_ran, 0);
-	atomic_store(&g_resolved, 0);
-	atomic_store(&g_hash, 0);
+	xtc_atomic_store_i32(&g_ran, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_resolved, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) {
 		*out_ran = -1; *out_resolved = -1; return -1;
@@ -99,10 +98,10 @@ run_once(uint64_t seed, int *out_ran, int *out_resolved)
 	}
 
 	(void)xtc_sim_exec_run(e, seed, 2000000);
-	*out_ran = atomic_load(&g_ran);
-	*out_resolved = atomic_load(&g_resolved);
+	*out_ran = xtc_atomic_load_i32(&g_ran, xtc_mo_seq_cst);
+	*out_resolved = xtc_atomic_load_i32(&g_resolved, xtc_mo_seq_cst);
 	(void)xtc_exec_fini(e);
-	return atomic_load(&g_hash);
+	return xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
 }
 
 int

@@ -60,7 +60,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -88,18 +87,16 @@ enum {
 };
 
 /* Per-worker observations (disjoint slots -> no cross-fiber races). */
-static _Atomic int g_fin_count[N_WORKERS];   /* finalizers that ran */
-static _Atomic int g_release_ran[N_WORKERS]; /* masked-acquire release ran */
-static _Atomic int g_started[N_WORKERS];     /* worker began its scope */
+static int g_fin_count[N_WORKERS];           /* finalizers that ran */
+static int g_release_ran[N_WORKERS];         /* masked-acquire release ran */
+static int g_started[N_WORKERS];             /* worker began its scope */
 static int         g_disrupt[N_WORKERS];     /* DIS_* assigned this run */
-static _Atomic int
-    g_top_runs[N_WORKERS]; /* FAULT_KILL: record above the park */
-static _Atomic int
-    g_park_done[N_WORKERS]; /* FAULT_KILL: parked record finished */
+static int g_top_runs[N_WORKERS];  /* FAULT_KILL: record above the park */
+static int g_park_done[N_WORKERS]; /* FAULT_KILL: parked record finished */
 
 static xtc_exec_t *g_exec;
 static xtc_pid_t   g_worker_pid[N_WORKERS];
-static _Atomic int g_pid_ready[N_WORKERS];
+static int g_pid_ready[N_WORKERS];
 
 struct warg { int id; };
 static struct warg g_warg[N_WORKERS];
@@ -111,7 +108,7 @@ fin_bump(void *arg)
 {
 	int w = (int)(intptr_t)arg;
 	if (w >= 0 && w < N_WORKERS)
-		atomic_fetch_add(&g_fin_count[w], 1);
+		xtc_atomic_fetch_add_i32(&g_fin_count[w], 1, xtc_mo_seq_cst);
 }
 
 /* The masked-acquire release (via xtc_scope_defer inside a masked
@@ -121,7 +118,7 @@ release_bump(void *arg)
 {
 	int w = (int)(intptr_t)arg;
 	if (w >= 0 && w < N_WORKERS)
-		atomic_fetch_add(&g_release_ran[w], 1);
+		xtc_atomic_fetch_add_i32(&g_release_ran[w], 1, xtc_mo_seq_cst);
 }
 
 /* body run under xtc_uncancelable: "acquire" a resource and register its
@@ -146,17 +143,18 @@ masked_acquire(void *ud)
 static void
 rec_top(void *arg)
 {
-	atomic_fetch_add(&g_top_runs[(int)(intptr_t)arg], 1);
+	xtc_atomic_fetch_add_i32(&g_top_runs[(int)(intptr_t)arg], 1,
+	    xtc_mo_seq_cst);
 }
 
 static void
 rec_park(void *arg)
 {
 	int w = (int)(intptr_t)arg;
-	if (atomic_load(&g_pid_ready[w]) == 1)
-		atomic_store(&g_pid_ready[w], 3);
+	if (xtc_atomic_load_i32(&g_pid_ready[w], xtc_mo_seq_cst) == 1)
+		xtc_atomic_store_i32(&g_pid_ready[w], 3, xtc_mo_seq_cst);
 	(void)xtc_proc_sleep(5 * 1000 * 1000LL);
-	atomic_store(&g_park_done[w], 1);
+	xtc_atomic_store_i32(&g_park_done[w], 1, xtc_mo_seq_cst);
 }
 
 /* CLOSE_KILL: the scope's newest finalizer; parks inside the close. */
@@ -164,8 +162,8 @@ static void
 fin_park(void *arg)
 {
 	int w = (int)(intptr_t)arg;
-	if (atomic_load(&g_pid_ready[w]) == 1)
-		atomic_store(&g_pid_ready[w], 4);
+	if (xtc_atomic_load_i32(&g_pid_ready[w], xtc_mo_seq_cst) == 1)
+		xtc_atomic_store_i32(&g_pid_ready[w], 4, xtc_mo_seq_cst);
 	(void)xtc_proc_sleep(5 * 1000 * 1000LL);
 }
 
@@ -185,7 +183,7 @@ worker(void *arg)
 	if (g_disrupt[w] != DIS_FAULT_KILL || (w & 1) == 0)
 		xtc_proc_recovery_arm_clean();
 
-	atomic_store(&g_started[w], 1);
+	xtc_atomic_store_i32(&g_started[w], 1, xtc_mo_seq_cst);
 
 	s = xtc_scope_open();
 	if (s == NULL) {
@@ -204,7 +202,7 @@ worker(void *arg)
 
 	/* Now advertise our pid so the killer can target us, and yield a
 	 * seeded number of times mid-scope so a kill / fault lands here. */
-	atomic_store(&g_pid_ready[w], 1);
+	xtc_atomic_store_i32(&g_pid_ready[w], 1, xtc_mo_seq_cst);
 
 	dis = g_disrupt[w];
 	if (dis == DIS_FAULT_KILL) {
@@ -254,12 +252,15 @@ killer(void *arg)
 			if (g_disrupt[w] == DIS_NONE ||
 			    g_disrupt[w] == DIS_FAULT)
 				continue;
-			if (atomic_load(&g_pid_ready[w]) == fire) {
+			if (xtc_atomic_load_i32(&g_pid_ready[w],
+			        xtc_mo_seq_cst) == fire) {
 				/* Fire once, then mark handled by clearing ready. */
-				atomic_store(&g_pid_ready[w], 2);
+				xtc_atomic_store_i32(&g_pid_ready[w], 2,
+				    xtc_mo_seq_cst);
 				(void)xtc_exit_pid(g_worker_pid[w], 7);
 				done++;
-			} else if (atomic_load(&g_pid_ready[w]) == 1) {
+			} else if (xtc_atomic_load_i32(&g_pid_ready[w],
+			               xtc_mo_seq_cst) == 1) {
 				remaining++;
 			}
 		}
@@ -279,12 +280,12 @@ run_one_inproc(uint64_t seed, int *out_started, int *out_all_fin, int *out_rel,
 	(void)xtc_fault_guard_install();
 
 	for (i = 0; i < N_WORKERS; i++) {
-		atomic_store(&g_fin_count[i], 0);
-		atomic_store(&g_release_ran[i], 0);
-		atomic_store(&g_started[i], 0);
-		atomic_store(&g_pid_ready[i], 0);
-		atomic_store(&g_top_runs[i], 0);
-		atomic_store(&g_park_done[i], 0);
+		xtc_atomic_store_i32(&g_fin_count[i], 0, xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&g_release_ran[i], 0, xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&g_started[i], 0, xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&g_pid_ready[i], 0, xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&g_top_runs[i], 0, xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&g_park_done[i], 0, xtc_mo_seq_cst);
 		g_disrupt[i] = DIS_NONE;
 	}
 
@@ -336,28 +337,32 @@ run_one_inproc(uint64_t seed, int *out_started, int *out_all_fin, int *out_rel,
 
 	started = 0;
 	for (i = 0; i < N_WORKERS; i++) {
-		if (atomic_load(&g_started[i]))
+		if (xtc_atomic_load_i32(&g_started[i], xtc_mo_seq_cst))
 			started++;
 		/* Every started worker MUST have run all DEFER_PER
 		 * finalizers -- on close, abort, or contained fault. */
-		if (atomic_load(&g_started[i]) &&
-		    atomic_load(&g_fin_count[i]) != DEFER_PER)
+		if (xtc_atomic_load_i32(&g_started[i], xtc_mo_seq_cst) &&
+		    xtc_atomic_load_i32(&g_fin_count[i], xtc_mo_seq_cst) !=
+		        DEFER_PER)
 			all_fin = 0;
 		/* Its masked-acquire release must also have run exactly once
 		 * (the A2 defer-across-mask guarantee -- never eaten). */
-		if (atomic_load(&g_started[i]) &&
-		    atomic_load(&g_release_ran[i]) == 1)
+		if (xtc_atomic_load_i32(&g_started[i], xtc_mo_seq_cst) &&
+		    xtc_atomic_load_i32(&g_release_ran[i], xtc_mo_seq_cst) == 1)
 			rel++;
 		/* A FAULT_KILL worker's records each ran once: the one above
 		 * the park was not re-run, and the parked one finished. */
 		if (g_disrupt[i] == DIS_FAULT_KILL &&
-		    (atomic_load(&g_top_runs[i]) != 1 ||
-		        atomic_load(&g_park_done[i]) != 1))
+		    (xtc_atomic_load_i32(&g_top_runs[i], xtc_mo_seq_cst) != 1 ||
+		        xtc_atomic_load_i32(&g_park_done[i], xtc_mo_seq_cst) !=
+		            1))
 			rewalk++;
 		/* A CLOSE_KILL worker's older finalizers all ran. */
 		if (g_disrupt[i] == DIS_CLOSE_KILL &&
-		    (atomic_load(&g_fin_count[i]) != DEFER_PER ||
-		        atomic_load(&g_release_ran[i]) != 1))
+		    (xtc_atomic_load_i32(&g_fin_count[i], xtc_mo_seq_cst) !=
+		            DEFER_PER ||
+		        xtc_atomic_load_i32(&g_release_ran[i],
+		            xtc_mo_seq_cst) != 1))
 			skipped++;
 	}
 

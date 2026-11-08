@@ -18,7 +18,6 @@
  *	prints: loops=L fibers=N ops=X ops_per_s=Y violations=V
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,8 +31,8 @@
 
 static xtc_amutex_t *g_m;
 static int g_cs = 20, g_think = 200;
-static _Atomic int g_stop, g_inside, g_viol;
-static _Atomic uint64_t g_ops;
+static int g_stop, g_inside, g_viol;
+static uint64_t g_ops;
 static uint64_t g_data[8];
 static int64_t g_end_ns;
 
@@ -54,25 +53,25 @@ worker(void *arg)
 	int i;
 
 	(void)arg;
-	while (!atomic_load_explicit(&g_stop, memory_order_relaxed)) {
+	while (!xtc_atomic_load_i32(&g_stop, xtc_mo_relaxed)) {
 		(void)xtc_amutex_lock(g_m, -1);
-		if (atomic_fetch_add_explicit(&g_inside, 1,
-		    memory_order_relaxed) != 0)
-			atomic_store(&g_viol, 1);
+		if (xtc_atomic_fetch_add_i32(&g_inside, 1, xtc_mo_relaxed) != 0)
+			xtc_atomic_store_i32(&g_viol, 1, xtc_mo_seq_cst);
 		for (i = 0; i < 8; i++)
 			g_data[i]++;
 		spin_work(g_cs);
-		atomic_fetch_sub_explicit(&g_inside, 1, memory_order_relaxed);
+		xtc_atomic_fetch_sub_i32(&g_inside, 1, xtc_mo_relaxed);
 		(void)xtc_amutex_unlock(g_m);
 		ops++;
 		spin_work(g_think);
 		if ((ops & 63) == 0) {
 			if (xtc_clock_mono() >= g_end_ns)
-				atomic_store(&g_stop, 1);
+				xtc_atomic_store_i32(&g_stop, 1,
+				    xtc_mo_seq_cst);
 			xtc_yield();    /* let the loop's other fibers in */
 		}
 	}
-	atomic_fetch_add(&g_ops, ops);
+	xtc_atomic_fetch_add_u64(&g_ops, ops, xtc_mo_seq_cst);
 }
 
 int
@@ -108,10 +107,12 @@ main(int argc, char **argv)
 	(void)xtc_exec_run(e);
 	t1 = xtc_clock_mono();
 	printf("loops=%d fibers=%d ops=%llu ops_per_s=%.0f violations=%d\n",
-	    loops, fibers, (unsigned long long)atomic_load(&g_ops),
-	    (double)atomic_load(&g_ops) * 1e9 / (double)(t1 - t0),
-	    atomic_load(&g_viol));
+	    loops, fibers,
+	    (unsigned long long)xtc_atomic_load_u64(&g_ops, xtc_mo_seq_cst),
+	    (double)xtc_atomic_load_u64(&g_ops, xtc_mo_seq_cst) * 1e9 /
+	        (double)(t1 - t0),
+	    xtc_atomic_load_i32(&g_viol, xtc_mo_seq_cst));
 	(void)xtc_exec_fini(e);
 	xtc_amutex_destroy(g_m);
-	return atomic_load(&g_viol) ? 1 : 0;
+	return xtc_atomic_load_i32(&g_viol, xtc_mo_seq_cst) ? 1 : 0;
 }

@@ -31,7 +31,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,9 +50,9 @@
 #define RING_CAP   16          /* must match XTC_PROC_CAUSAL_RING */
 
 /* Per-worker observations (disjoint slots -> no cross-fiber races). */
-static _Atomic int      g_parks[N_WORKERS];     /* PARK records seen */
-static _Atomic int      g_alt_ok[N_WORKERS];    /* 1 if strictly alternating */
-static _Atomic uint64_t g_hash[N_WORKERS];      /* FNV of the kind sequence */
+static int g_parks[N_WORKERS];                   /* PARK records seen */
+static int g_alt_ok[N_WORKERS];                  /* 1 if strictly alternating */
+static uint64_t g_hash[N_WORKERS];               /* FNV of the kind sequence */
 static int              g_nsleep[N_WORKERS];     /* seeded sleep count */
 
 static xtc_exec_t *g_exec;
@@ -101,9 +100,9 @@ worker(void *arg)
 	f.idx = 0; f.parks = 0; f.alt_ok = 1; f.h = 1469598103934665603ull;
 	(void)xtc_trace_causal_dump(xtc_self(), fold_cb, &f);
 
-	atomic_store(&g_parks[w], f.parks);
-	atomic_store(&g_alt_ok[w], f.alt_ok);
-	atomic_store(&g_hash[w], f.h);
+	xtc_atomic_store_i32(&g_parks[w], f.parks, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_alt_ok[w], f.alt_ok, xtc_mo_seq_cst);
+	xtc_atomic_store_u64(&g_hash[w], f.h, xtc_mo_seq_cst);
 	xtc_exit_self(0);
 }
 
@@ -116,9 +115,9 @@ run_one_inproc(uint64_t seed, int *out_started, int *out_ok, uint64_t *out_state
 	(void)xtc_trace_causal_enable(1);   /* A3 ON for this run */
 
 	for (i = 0; i < N_WORKERS; i++) {
-		atomic_store(&g_parks[i], -1);
-		atomic_store(&g_alt_ok[i], 0);
-		atomic_store(&g_hash[i], 0);
+		xtc_atomic_store_i32(&g_parks[i], -1, xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&g_alt_ok[i], 0, xtc_mo_seq_cst);
+		xtc_atomic_store_u64(&g_hash[i], 0, xtc_mo_seq_cst);
 		g_nsleep[i] = 0;
 	}
 
@@ -146,8 +145,8 @@ run_one_inproc(uint64_t seed, int *out_started, int *out_ok, uint64_t *out_state
 	rc = xtc_sim_exec_run(g_exec, seed, 20000000);
 
 	for (i = 0; i < N_WORKERS; i++) {
-		int parks = atomic_load(&g_parks[i]);
-		int alt = atomic_load(&g_alt_ok[i]);
+		int parks = xtc_atomic_load_i32(&g_parks[i], xtc_mo_seq_cst);
+		int alt = xtc_atomic_load_i32(&g_alt_ok[i], xtc_mo_seq_cst);
 		/* Expected recorded park count: min(nsleep, RING_CAP/2) --
 		 * once the ring fills, the oldest are evicted and the visible
 		 * window holds the last RING_CAP events = RING_CAP/2 parks.
@@ -187,7 +186,8 @@ mix_hashes(void)
 	uint64_t m = 0;
 	int i;
 	for (i = 0; i < N_WORKERS; i++)
-		m ^= atomic_load(&g_hash[i]) + (uint64_t)i * 0x9E3779B97F4A7C15ull;
+		m ^= xtc_atomic_load_u64(&g_hash[i], xtc_mo_seq_cst) +
+		    (uint64_t)i * 0x9E3779B97F4A7C15ull;
 	return m;
 }
 

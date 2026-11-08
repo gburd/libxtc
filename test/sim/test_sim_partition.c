@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -50,16 +49,16 @@
 #define N_LOOPS 4
 #define GROUP_OF(loop) ((loop) < 2 ? 0 : 1)   /* A = {0,1}, B = {2,3} */
 
-static atomic_int  g_arrived;      /* messages a receiver actually got */
-static atomic_long g_arr_hash;     /* order-sensitive fold of arrivals */
+static int g_arrived;   /* messages a receiver actually got */
+static long g_arr_hash; /* order-sensitive fold of arrivals */
 
 static void
 fold(long v)
 {
-	long h = atomic_load_explicit(&g_arr_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_arr_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(v + 7));
-	atomic_store_explicit(&g_arr_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_arr_hash, h, xtc_mo_relaxed);
 }
 
 /* Receiver arg: how many messages to expect on this loop this run. */
@@ -85,8 +84,7 @@ receiver(void *arg)
 			long v;
 			memcpy(&v, m, sizeof v < n ? sizeof v : n);
 			free(m);
-			atomic_fetch_add_explicit(&g_arrived, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_arrived, 1, xtc_mo_relaxed);
 			fold(v);
 			got++;
 		}
@@ -131,8 +129,8 @@ run_once(uint64_t seed, int partition, int *out_arrived, long *out_hash,
 	xtc_pid_t rpid[N_LOOPS];
 	int i, j, ns = 0, rc;
 
-	atomic_store(&g_arrived, 0);
-	atomic_store(&g_arr_hash, 0);
+	xtc_atomic_store_i32(&g_arrived, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_arr_hash, 0, xtc_mo_seq_cst);
 
 	xtc_sim_partition_clear();       /* start from a healed network */
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
@@ -216,8 +214,8 @@ run_once(uint64_t seed, int partition, int *out_arrived, long *out_hash,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_arrived = atomic_load(&g_arrived);
-	*out_hash = atomic_load(&g_arr_hash);
+	*out_arrived = xtc_atomic_load_i32(&g_arrived, xtc_mo_seq_cst);
+	*out_hash = xtc_atomic_load_long(&g_arr_hash, xtc_mo_seq_cst);
 	if (out_state != NULL)
 		*out_state = xtc_sim_state_hash(e);
 

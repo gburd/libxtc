@@ -32,7 +32,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,9 +46,9 @@
 #define N_LOOPS   2
 #define N_WORKERS 6
 
-static atomic_int  g_correct;      /* offloads that returned the right value */
-static atomic_int  g_done;         /* workers finished */
-static atomic_llong g_sum;         /* sum of all returned results */
+static int g_correct;   /* offloads that returned the right value */
+static int g_done;      /* workers finished */
+static long long g_sum; /* sum of all returned results */
 
 /* The offloaded computation: pure function of its input. */
 static int
@@ -71,10 +70,11 @@ worker(void *arg)
 	int rc = xtc_blocking_run(compute, (void *)(intptr_t)input, &got);
 
 	if (rc == XTC_OK && got == want) {
-		atomic_fetch_add(&g_correct, 1);
-		atomic_fetch_add(&g_sum, (long long)got);
+		xtc_atomic_fetch_add_i32(&g_correct, 1, xtc_mo_seq_cst);
+		xtc_atomic_fetch_add_llong(&g_sum, (long long)got,
+		    xtc_mo_seq_cst);
 	}
-	atomic_fetch_add(&g_done, 1);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_seq_cst);
 }
 
 /* Coordinator: wait for all workers, then stop the executor. */
@@ -84,7 +84,7 @@ coordinator(void *arg)
 	xtc_exec_t *e = arg;
 	int tries;
 	for (tries = 0; tries < 500; tries++) {
-		if (atomic_load(&g_done) >= N_WORKERS)
+		if (xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst) >= N_WORKERS)
 			break;
 		(void)xtc_proc_sleep(1000 * 1000LL);
 	}
@@ -99,9 +99,9 @@ run_one(uint64_t seed, int *out_correct, long long *out_sum,
 	xtc_exec_t *e = NULL;
 	int i, rc;
 
-	atomic_store(&g_correct, 0);
-	atomic_store(&g_done, 0);
-	atomic_store(&g_sum, 0);
+	xtc_atomic_store_i32(&g_correct, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_llong(&g_sum, 0, xtc_mo_seq_cst);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
 		return -1;
@@ -114,8 +114,10 @@ run_one(uint64_t seed, int *out_correct, long long *out_sum,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	if (out_correct != NULL) *out_correct = atomic_load(&g_correct);
-	if (out_sum != NULL) *out_sum = atomic_load(&g_sum);
+	if (out_correct != NULL)
+		*out_correct = xtc_atomic_load_i32(&g_correct, xtc_mo_seq_cst);
+	if (out_sum != NULL)
+		*out_sum = xtc_atomic_load_llong(&g_sum, xtc_mo_seq_cst);
 	if (out_state != NULL) *out_state = xtc_sim_state_hash(e);
 	(void)xtc_exec_fini(e);
 	return rc;

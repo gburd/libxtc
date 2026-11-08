@@ -19,7 +19,6 @@
 /* !region full */
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -28,7 +27,7 @@
 
 #define BUDGET 900
 
-static atomic_int g_total;   /* shared work budget across both classes */
+static int g_total; /* shared work budget across both classes */
 
 /* Workers of BOTH classes contend for ONE shared budget, each round taken
  * by whichever class the scheduler picks next.  That is what makes this a
@@ -44,8 +43,7 @@ static void
 worker(void *arg)
 {
 	(void)arg;
-	while (atomic_fetch_add_explicit(&g_total, 1, memory_order_relaxed)
-	    < BUDGET)
+	while (xtc_atomic_fetch_add_i32(&g_total, 1, xtc_mo_relaxed) < BUDGET)
 		xtc_yield();
 }
 

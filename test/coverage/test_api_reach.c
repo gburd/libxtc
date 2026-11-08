@@ -21,7 +21,6 @@
 #include <fcntl.h>
 #include <sched.h>
 #include <signal.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -808,13 +807,14 @@ test_tail_spill_dial9(const MunitParameter p[], void *d)
 
 /* ---- tnt: shard_id ------------------------------------------------- */
 
-static atomic_int g_shard_id0 = -1, g_shard_id1 = -1;
+static int g_shard_id0 = -1, g_shard_id1 = -1;
 
 static xtc_tnt_transition_t
 tnt_boot_init(void *self, const void *args, size_t n)
 {
 	(void)self; (void)args; (void)n;
-	atomic_store(&g_shard_id0, (int)xtc_tnt_shard_id());
+	xtc_atomic_store_i32(&g_shard_id0, (int)xtc_tnt_shard_id(),
+	    xtc_mo_seq_cst);
 	(void)xtc_tnt_spawn_on(1, 1, NULL, 0);   /* the probe, on shard 1 */
 	return XTC_TNT_TRANSITION_DONE;
 }
@@ -823,7 +823,8 @@ static xtc_tnt_transition_t
 tnt_probe_init(void *self, const void *args, size_t n)
 {
 	(void)self; (void)args; (void)n;
-	atomic_store(&g_shard_id1, (int)xtc_tnt_shard_id());
+	xtc_atomic_store_i32(&g_shard_id1, (int)xtc_tnt_shard_id(),
+	    xtc_mo_seq_cst);
 	xtc_tnt_stop();
 	return XTC_TNT_TRANSITION_DONE;
 }
@@ -859,8 +860,10 @@ test_tnt_shard_id(const MunitParameter p[], void *d)
 	if (rc == XTC_E_NOSYS)
 		return MUNIT_SKIP;
 	munit_assert_int(rc, ==, 0);
-	munit_assert_int(atomic_load(&g_shard_id0), ==, 0);
-	munit_assert_int(atomic_load(&g_shard_id1), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_shard_id0, xtc_mo_seq_cst), ==,
+	    0);
+	munit_assert_int(xtc_atomic_load_i32(&g_shard_id1, xtc_mo_seq_cst), ==,
+	    1);
 	return MUNIT_OK;
 }
 

@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -98,20 +97,20 @@ acc_cast(void *st, const void *msg, size_t n)
 
 static xtc_pid_t   g_svr_pid;
 static xtc_svr_t  *g_svr;
-static atomic_int  g_calls_done;    /* replies successfully received */
-static atomic_int  g_clients_done;
-static atomic_long g_reply_sum;     /* sum of all reply values (order-free) */
-static atomic_long g_reply_hash;    /* ORDER-sensitive fold of replies */
-static atomic_long g_call_total;    /* sum of every call+cast payload sent */
-static atomic_long g_max_reply;     /* the largest reply seen == final total */
+static int g_calls_done; /* replies successfully received */
+static int g_clients_done;
+static long g_reply_sum;  /* sum of all reply values (order-free) */
+static long g_reply_hash; /* ORDER-sensitive fold of replies */
+static long g_call_total; /* sum of every call+cast payload sent */
+static long g_max_reply;  /* the largest reply seen == final total */
 
 static void
-fold(atomic_long *h, long v)
+fold(long *h, long v)
 {
-	long x = atomic_load_explicit(h, memory_order_relaxed);
+	long x = xtc_atomic_load_long(h, xtc_mo_relaxed);
 	x = (long)((unsigned long)x * 1000003UL +
 		    (unsigned long)(v + 1));
-	atomic_store_explicit(h, x, memory_order_relaxed);
+	xtc_atomic_store_long(h, x, xtc_mo_relaxed);
 }
 
 /*
@@ -130,8 +129,8 @@ client(void *arg)
 		 * SCHED/STEAL streams, so the schedule replays). */
 		long payload = 1 + (long)__xtc_sim_rng_range(XTC_SIM_RNG_APP, 8);
 		int is_call = (__xtc_sim_rng_range(XTC_SIM_RNG_APP, 2) == 0);
-		atomic_fetch_add_explicit(&g_call_total, payload,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_add_long(&g_call_total, payload,
+		    xtc_mo_relaxed);
 		if (is_call) {
 			void  *rep = NULL;
 			size_t rn = 0;
@@ -140,20 +139,20 @@ client(void *arg)
 			if (rc == XTC_OK && rep != NULL && rn >= sizeof(long)) {
 				long val = 0;
 				memcpy(&val, rep, sizeof val);
-				atomic_fetch_add_explicit(&g_calls_done, 1,
-				    memory_order_relaxed);
-				atomic_fetch_add_explicit(&g_reply_sum, val,
-				    memory_order_relaxed);
+				xtc_atomic_fetch_add_i32(&g_calls_done, 1,
+				    xtc_mo_relaxed);
+				xtc_atomic_fetch_add_long(&g_reply_sum, val,
+				    xtc_mo_relaxed);
 				fold(&g_reply_hash, val);
 				/* track the max reply == final running total */
 				for (;;) {
-					long cur = atomic_load_explicit(&g_max_reply,
-					    memory_order_relaxed);
+					long cur =
+					    xtc_atomic_load_long(&g_max_reply,
+					        xtc_mo_relaxed);
 					if (val <= cur) break;
-					if (atomic_compare_exchange_weak_explicit(
-					    &g_max_reply, &cur, val,
-					    memory_order_relaxed,
-					    memory_order_relaxed))
+					if (xtc_atomic_cas_weak_long(
+					        &g_max_reply, &cur, val,
+					        xtc_mo_relaxed, xtc_mo_relaxed))
 						break;
 				}
 			}
@@ -163,7 +162,7 @@ client(void *arg)
 		}
 	}
 	(void)id;
-	atomic_fetch_add_explicit(&g_clients_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_clients_done, 1, xtc_mo_relaxed);
 }
 
 /*
@@ -182,8 +181,8 @@ winder(void *arg)
 	(void)arg;
 	int i;
 	for (i = 0; i < 2000; i++) {
-		if (atomic_load_explicit(&g_clients_done,
-		    memory_order_relaxed) >= N_CLIENTS)
+		if (xtc_atomic_load_i32(&g_clients_done, xtc_mo_relaxed) >=
+		    N_CLIENTS)
 			break;
 		(void)xtc_proc_sleep(1 * 1000 * 1000LL /* 1 ms */);
 	}
@@ -199,12 +198,12 @@ run_once(uint64_t seed, int *out_calls, long *out_sum, long *out_hash,
 	static struct acc_state st;      /* reset per run below */
 	int i, rc;
 
-	atomic_store(&g_calls_done, 0);
-	atomic_store(&g_clients_done, 0);
-	atomic_store(&g_reply_sum, 0);
-	atomic_store(&g_reply_hash, 0);
-	atomic_store(&g_call_total, 0);
-	atomic_store(&g_max_reply, 0);
+	xtc_atomic_store_i32(&g_calls_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_clients_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_reply_sum, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_reply_hash, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_call_total, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_max_reply, 0, xtc_mo_seq_cst);
 	memset(&st, 0, sizeof st);
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
@@ -227,11 +226,11 @@ run_once(uint64_t seed, int *out_calls, long *out_sum, long *out_hash,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_calls = atomic_load(&g_calls_done);
-	*out_sum   = atomic_load(&g_reply_sum);
-	*out_hash  = atomic_load(&g_reply_hash);
-	*out_total = atomic_load(&g_call_total);
-	*out_max   = atomic_load(&g_max_reply);
+	*out_calls = xtc_atomic_load_i32(&g_calls_done, xtc_mo_seq_cst);
+	*out_sum = xtc_atomic_load_long(&g_reply_sum, xtc_mo_seq_cst);
+	*out_hash = xtc_atomic_load_long(&g_reply_hash, xtc_mo_seq_cst);
+	*out_total = xtc_atomic_load_long(&g_call_total, xtc_mo_seq_cst);
+	*out_max = xtc_atomic_load_long(&g_max_reply, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	/* Reclaim the server handle AFTER the run has quiesced (the server
 	 * proc has exited and signaled 'stopped').  A non-blocking join

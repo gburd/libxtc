@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -56,18 +55,18 @@ struct obj {
 };
 
 static xtc_slab_t *g_slab;
-static atomic_int  g_dbl;        /* a live object was corrupted (double-alloc) */
-static atomic_int  g_null;       /* alloc returned NULL (OOM -- bug here) */
-static atomic_int  g_done;
-static atomic_long g_hash;
+static int g_dbl;  /* a live object was corrupted (double-alloc) */
+static int g_null; /* alloc returned NULL (OOM -- bug here) */
+static int g_done;
+static long g_hash;
 
 static void
 fold(long v)
 {
-	long h = atomic_load_explicit(&g_hash, memory_order_relaxed);
+	long h = xtc_atomic_load_long(&g_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(v + 1));
-	atomic_store_explicit(&g_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_hash, h, xtc_mo_relaxed);
 }
 
 static void
@@ -79,8 +78,7 @@ slab_worker(void *arg)
 	for (it = 0; it < ITERS; it++) {
 		struct obj *o = xtc_slab_alloc(g_slab);
 		if (o == NULL) {
-			atomic_fetch_add_explicit(&g_null, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_null, 1, xtc_mo_relaxed);
 			continue;
 		}
 		o->magic = MAGIC;
@@ -91,13 +89,12 @@ slab_worker(void *arg)
 		 * address to another fiber would have overwritten it. */
 		if (o->magic != MAGIC || o->id != (uint16_t)id ||
 		    o->iter != (uint16_t)it)
-			atomic_fetch_add_explicit(&g_dbl, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&g_dbl, 1, xtc_mo_relaxed);
 		fold((long)id * 131 + it);
 		xtc_slab_free(g_slab, o);
 		xtc_yield();
 	}
-	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -109,10 +106,10 @@ run_slab(uint64_t seed, int *out_done, int *out_dbl,
 	xtc_slab_stats_t st;
 	int i, rc;
 
-	atomic_store(&g_dbl, 0);
-	atomic_store(&g_null, 0);
-	atomic_store(&g_done, 0);
-	atomic_store(&g_hash, 0);
+	xtc_atomic_store_i32(&g_dbl, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_null, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
 
 	opts.name = "slab.dst";
 	opts.obj_size = sizeof(struct obj);
@@ -130,14 +127,14 @@ run_slab(uint64_t seed, int *out_done, int *out_dbl,
 
 	rc = xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_done = atomic_load(&g_done);
-	*out_dbl = atomic_load(&g_dbl);
-	*out_null = atomic_load(&g_null);
+	*out_done = xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
+	*out_dbl = xtc_atomic_load_i32(&g_dbl, xtc_mo_seq_cst);
+	*out_null = xtc_atomic_load_i32(&g_null, xtc_mo_seq_cst);
 	memset(&st, 0, sizeof st);
 	st.size = sizeof st;
 	(void)xtc_slab_stat(g_slab, &st);
 	*out_inuse = st.n_inuse;
-	*out_hash = atomic_load(&g_hash);
+	*out_hash = xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_slab_destroy(g_slab);
 	g_slab = NULL;

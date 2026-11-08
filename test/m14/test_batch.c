@@ -1239,7 +1239,6 @@ async_fence_kind(void)
  * complete callback resolves, demonstrating the cross-loop result pattern the
  * engine does NOT provide itself.
  * -------------------------------------------------------------------------- */
-#include <stdatomic.h>
 
 struct mt_req {
 	int id, left, outcome, completions, ran;
@@ -1251,8 +1250,8 @@ struct mt_ctx {
 	xtc_batch_t *batch;
 	struct mt_req req[8];
 	int n_req;
-	_Atomic int completed; /* complete cb fired (driver loop) */
-	_Atomic int producers_done;
+	int completed; /* complete cb fired (driver loop) */
+	int producers_done;
 	int n_producers;
 	int submit_rejections; /* producer-observed XTC_E_AGAIN */
 };
@@ -1300,7 +1299,7 @@ mt_complete(uint64_t handle, void *request, int outcome, void *user)
 	r->completions++;
 	assert(r->completions == 1); /* EXACTLY ONCE */
 	r->outcome = outcome;
-	(void)atomic_fetch_add_explicit(&c->completed, 1, memory_order_relaxed);
+	(void)xtc_atomic_fetch_add_i32(&c->completed, 1, xtc_mo_relaxed);
 	/* Resolve the submitter's reply future (cross-loop result routing). */
 	if (r->reply != NULL) {
 		(void)xtc_promise_set(r->reply, (intptr_t)outcome, XTC_OK);
@@ -1358,8 +1357,7 @@ mt_producer_fn(void *arg)
 		c->req[i].reply_fut = NULL;
 		assert(val == XTC_OK);
 	}
-	(void)atomic_fetch_add_explicit(&c->producers_done, 1,
-	    memory_order_relaxed);
+	(void)xtc_atomic_fetch_add_i32(&c->producers_done, 1, xtc_mo_relaxed);
 }
 
 /* Controller on the model loop: once every member has completed and every
@@ -1369,10 +1367,9 @@ static void
 mt_controller_fn(void *arg)
 {
 	struct mt_ctx *c = arg;
-	while (atomic_load_explicit(&c->completed, memory_order_relaxed)
-	           < c->n_req
-	       || atomic_load_explicit(&c->producers_done, memory_order_relaxed)
-	              < c->n_producers)
+	while (xtc_atomic_load_i32(&c->completed, xtc_mo_relaxed) < c->n_req ||
+	    xtc_atomic_load_i32(&c->producers_done, xtc_mo_relaxed) <
+	        c->n_producers)
 		xtc_yield();
 	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
 }
@@ -1387,9 +1384,8 @@ mt_conservation(struct mt_ctx *c)
 	/* accepted == completed+cancelled+failed, reserved back to 0. */
 	assert(s.reserved_units == 0);
 	assert(s.queued == 0 && s.ready == 0 && s.blocked == 0);
-	assert(s.completed + s.cancelled + s.failed
-	       == (uint64_t)atomic_load_explicit(&c->completed,
-	              memory_order_relaxed));
+	assert(s.completed + s.cancelled + s.failed ==
+	    (uint64_t)xtc_atomic_load_i32(&c->completed, xtc_mo_relaxed));
 	assert(xtc_batch_get_async_stats(c->batch, &as) == XTC_OK);
 	(void)as;
 }
@@ -1474,7 +1470,8 @@ mt_overflow(void)
 	 * (ABORTED by the cancel-close), then the driver exits. */
 	assert(xtc_batch_close(c.batch, XTC_BATCH_CANCEL) == XTC_OK);
 	assert(xtc_exec_run(c.exec) == XTC_OK);
-	assert(atomic_load(&c.completed) == 5 - rejects);
+	assert(
+	    xtc_atomic_load_i32(&c.completed, xtc_mo_seq_cst) == 5 - rejects);
 	for (i = 0; i < 5 - rejects; ++i)
 		assert(c.req[i].completions == 1
 		       && c.req[i].outcome == XTC_E_ABORTED);
@@ -1518,7 +1515,7 @@ extern int __xtc_batch_mt_inject(xtc_batch_t *, int, uint64_t, void *, uint64_t)
 struct stale_ctx {
 	struct mt_ctx *c;
 	uint64_t victim;
-	_Atomic int phase;
+	int phase;
 };
 static struct stale_ctx g_stale;
 
@@ -1544,9 +1541,11 @@ mt_block_collect(const xtc_batch_item_t *items, xtc_batch_result_t *results,
 	size_t i;
 	(void)exec_status;
 	for (i = 0; i < n; ++i)
-		results[i].state = items[i].request == &c->req[0]
-		        && atomic_load(&g_stale.phase) < 2 ?
-		    XTC_BATCH_BLOCKED : XTC_BATCH_DONE;
+		results[i].state = items[i].request == &c->req[0] &&
+		        xtc_atomic_load_i32(&g_stale.phase, xtc_mo_seq_cst) <
+		            2 ?
+		    XTC_BATCH_BLOCKED :
+		    XTC_BATCH_DONE;
 	return XTC_OK;
 }
 
@@ -1555,14 +1554,14 @@ mt_stale_canceller(void *arg)
 {
 	struct mt_ctx *c = arg;
 	int i;
-	while (atomic_load(&g_stale.phase) < 1)
+	while (xtc_atomic_load_i32(&g_stale.phase, xtc_mo_seq_cst) < 1)
 		xtc_yield();
 	/* Different producer than the submitter: cancel the held victim. */
 	while (xtc_batch_cancel_mt(c->batch, g_stale.victim) != XTC_OK)
 		xtc_yield();
 	for (i = 0; i < 8; ++i)
 		xtc_yield();
-	atomic_store(&g_stale.phase, 2);
+	xtc_atomic_store_i32(&g_stale.phase, 2, xtc_mo_seq_cst);
 }
 
 static void
@@ -1594,8 +1593,8 @@ mt_stale_owner(void *arg)
 	while (xtc_batch_submit_mt(c->batch, &c->req[1], 1, &g_stale.victim)
 	       != XTC_OK)
 		xtc_yield();
-	atomic_store(&g_stale.phase, 1);
-	while (atomic_load(&g_stale.phase) < 2)
+	xtc_atomic_store_i32(&g_stale.phase, 1, xtc_mo_seq_cst);
+	while (xtc_atomic_load_i32(&g_stale.phase, xtc_mo_seq_cst) < 2)
 		xtc_yield();
 	assert(xtc_batch_resume_mt(c->batch, h) == XTC_OK);
 	while (c->req[0].completions == 0 || c->req[1].completions == 0)
@@ -1701,8 +1700,7 @@ mt_hammer_fn(void *arg)
 		}
 		assert(handle != 0);
 	}
-	(void)atomic_fetch_add_explicit(&c->producers_done, 1,
-	    memory_order_relaxed);
+	(void)xtc_atomic_fetch_add_i32(&c->producers_done, 1, xtc_mo_relaxed);
 }
 
 /* Count-only complete cb (no per-request reply future). */
@@ -1713,7 +1711,7 @@ mt_count_complete(uint64_t handle, void *request, int outcome, void *user)
 	(void)request;
 	(void)outcome;
 	assert(handle != 0);
-	(void)atomic_fetch_add_explicit(&c->completed, 1, memory_order_relaxed);
+	(void)xtc_atomic_fetch_add_i32(&c->completed, 1, xtc_mo_relaxed);
 }
 
 /* SYNC step that marks every member DONE in one pass (NULL requests). */
@@ -1775,7 +1773,7 @@ mt_contended_pool(void)
 	 * the driver's exactly-once count. A double-claim would corrupt the
 	 * pool and either strand a record (completed < admitted) or complete
 	 * one twice (completed > admitted). */
-	admitted = atomic_load_explicit(&c.completed, memory_order_relaxed);
+	admitted = xtc_atomic_load_i32(&c.completed, xtc_mo_relaxed);
 	assert(admitted == c.n_req);
 	mt_conservation(&c);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
@@ -1792,7 +1790,7 @@ mt_contended_pool(void)
 struct hold_ctx {
 	struct mt_ctx *c;
 	uint64_t order[8];
-	_Atomic int n_order;
+	int n_order;
 };
 static struct hold_ctx *g_hold;
 
@@ -1802,8 +1800,7 @@ mt_hold_complete(uint64_t handle, void *request, int outcome, void *user)
 	int i;
 	(void)request;
 	assert(outcome == XTC_OK);
-	i = atomic_fetch_add_explicit(&g_hold->n_order, 1,
-	    memory_order_relaxed);
+	i = xtc_atomic_fetch_add_i32(&g_hold->n_order, 1, xtc_mo_relaxed);
 	if (i < 8)
 		g_hold->order[i] = handle;
 	mt_count_complete(handle, request, outcome, user);
@@ -1814,8 +1811,8 @@ mt_bounded_controller_fn(void *arg)
 {
 	struct mt_ctx *c = arg;
 	long guard = 0;
-	while (atomic_load_explicit(&c->completed, memory_order_relaxed)
-	    < c->n_req && ++guard < 200000)
+	while (xtc_atomic_load_i32(&c->completed, xtc_mo_relaxed) < c->n_req &&
+	    ++guard < 200000)
 		xtc_yield();
 	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
 }
@@ -1845,7 +1842,7 @@ mt_full_hold(void)
 	assert(xtc_proc_spawn(xtc_exec_loop(c.exec, 0),
 	    mt_bounded_controller_fn, &c, NULL, &pid) == XTC_OK);
 	assert(xtc_exec_run(c.exec) == XTC_OK);
-	assert(atomic_load(&c.completed) == 6);
+	assert(xtc_atomic_load_i32(&c.completed, xtc_mo_seq_cst) == 6);
 	for (i = 0; i < 6; ++i)
 		assert(hc.order[i] == h[i]); /* admission order preserved */
 	assert(xtc_batch_get_stats(c.batch, &s) == XTC_OK);
@@ -1862,8 +1859,8 @@ mt_full_hold(void)
  * every XTC_OK handle completes exactly once. */
 struct close_ctx {
 	struct mt_ctx *c;
-	_Atomic int closed, ok;
-	_Atomic int done[4096];
+	int closed, ok;
+	int done[4096];
 };
 static struct close_ctx g_close;
 
@@ -1874,9 +1871,10 @@ mt_close_complete(uint64_t handle, void *request, int outcome, void *user)
 	(void)user;
 	assert(outcome == XTC_OK);
 	assert(handle < 4096);
-	assert(atomic_fetch_add(&g_close.done[handle], 1) == 0);
-	(void)atomic_fetch_add_explicit(&g_close.c->completed, 1,
-	    memory_order_relaxed);
+	assert(xtc_atomic_fetch_add_i32(&g_close.done[handle], 1,
+	           xtc_mo_seq_cst) == 0);
+	(void)xtc_atomic_fetch_add_i32(&g_close.c->completed, 1,
+	    xtc_mo_relaxed);
 }
 
 static void *
@@ -1890,13 +1888,15 @@ mt_close_producer(void *arg)
 		rc = xtc_batch_submit_mt(c->batch, NULL, 1, &h);
 		if (rc == XTC_OK) {
 			assert(h != 0 && h < 4096);
-			(void)atomic_fetch_add(&g_close.ok, 1);
+			(void)xtc_atomic_fetch_add_i32(&g_close.ok, 1,
+			    xtc_mo_seq_cst);
 		} else {
 			assert(rc == XTC_E_AGAIN && h == 0);
-			if (atomic_load(&g_close.closed))
+			if (xtc_atomic_load_i32(&g_close.closed,
+			        xtc_mo_seq_cst))
 				break;
 		}
-		if (atomic_load(&g_close.ok) >= 3000)
+		if (xtc_atomic_load_i32(&g_close.ok, xtc_mo_seq_cst) >= 3000)
 			break;
 	}
 	return NULL;
@@ -1906,10 +1906,10 @@ static void
 mt_close_owner(void *arg)
 {
 	struct mt_ctx *c = arg;
-	while (atomic_load(&g_close.ok) < 200)
+	while (xtc_atomic_load_i32(&g_close.ok, xtc_mo_seq_cst) < 200)
 		xtc_yield();
 	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
-	atomic_store(&g_close.closed, 1);
+	xtc_atomic_store_i32(&g_close.closed, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -1935,7 +1935,8 @@ mt_closed(void)
 	assert(xtc_exec_run(c.exec) == XTC_OK);
 	for (i = 0; i < 8; ++i)
 		assert(xtc_batch_submit_mt(c.batch, NULL, 1, &h) == XTC_E_AGAIN);
-	assert(h == 77 && atomic_load(&c.completed) == 0);
+	assert(
+	    h == 77 && xtc_atomic_load_i32(&c.completed, xtc_mo_seq_cst) == 0);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
 	assert(xtc_exec_fini(c.exec) == XTC_OK);
 	/* (b) producers racing close(DRAIN). */
@@ -1956,11 +1957,13 @@ mt_closed(void)
 	assert(xtc_exec_run(c.exec) == XTC_OK);
 	for (i = 0; i < 2; ++i)
 		assert(pthread_join(th[i], NULL) == 0);
-	assert(atomic_load(&c.completed) == atomic_load(&g_close.ok));
+	assert(xtc_atomic_load_i32(&c.completed, xtc_mo_seq_cst) ==
+	    xtc_atomic_load_i32(&g_close.ok, xtc_mo_seq_cst));
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
 	assert(xtc_exec_fini(c.exec) == XTC_OK);
 	printf("batch-mt: closed group refuses submit_mt; %d hand-ins racing "
-	       "close all completed once OK\n", atomic_load(&g_close.ok));
+	       "close all completed once OK\n",
+	    xtc_atomic_load_i32(&g_close.ok, xtc_mo_seq_cst));
 }
 
 /* NIT: handle exhaustion under concurrency. With fetch-add + restore, a
@@ -1970,7 +1973,7 @@ mt_closed(void)
  * is XTC_E_RANGE. */
 struct exh_ctx {
 	xtc_batch_t *batch;
-	_Atomic int ok, bad;
+	int ok, bad;
 };
 
 static void *
@@ -1982,11 +1985,12 @@ mt_exhaust_thread(void *arg)
 	for (i = 0; i < 200000; ++i) {
 		rc = xtc_batch_submit_mt(e->batch, NULL, 1, &h);
 		if (rc == XTC_OK) {
-			atomic_fetch_add(&e->ok, 1);
+			xtc_atomic_fetch_add_i32(&e->ok, 1, xtc_mo_seq_cst);
 			if (h <= UINT64_MAX - 8)
-				atomic_fetch_add(&e->bad, 1);
+				xtc_atomic_fetch_add_i32(&e->bad, 1,
+				    xtc_mo_seq_cst);
 		} else if (rc != XTC_E_RANGE && rc != XTC_E_AGAIN)
-			atomic_fetch_add(&e->bad, 1);
+			xtc_atomic_fetch_add_i32(&e->bad, 1, xtc_mo_seq_cst);
 	}
 	return NULL;
 }
@@ -2012,10 +2016,11 @@ mt_handle_exhaustion(void)
 		assert(pthread_create(&th[i], NULL, mt_exhaust_thread, &e) == 0);
 	for (i = 0; i < 4; ++i)
 		assert(pthread_join(th[i], NULL) == 0);
-	assert(atomic_load(&e.bad) == 0 && atomic_load(&e.ok) == 8);
+	assert(xtc_atomic_load_i32(&e.bad, xtc_mo_seq_cst) == 0 &&
+	    xtc_atomic_load_i32(&e.ok, xtc_mo_seq_cst) == 8);
 	assert(xtc_batch_close(c.batch, XTC_BATCH_DRAIN) == XTC_OK);
 	assert(xtc_exec_run(c.exec) == XTC_OK);
-	assert(atomic_load(&c.completed) == 8);
+	assert(xtc_atomic_load_i32(&c.completed, xtc_mo_seq_cst) == 8);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
 	assert(xtc_exec_fini(c.exec) == XTC_OK);
 	puts("batch-mt: concurrent handle exhaustion never wraps OK");
@@ -2041,8 +2046,8 @@ struct starve {
 	struct mt_req req[5];
 	uint64_t h0, h1;
 	xtc_promise_t *prom;
-	_Atomic int phase, completed, unblocked, hints, hint_in_flight;
-	_Atomic int op_done, r0_ran; /* r0_ran: req[0] reached submit */
+	int phase, completed, unblocked, hints, hint_in_flight;
+	int op_done, r0_ran; /* r0_ran: req[0] reached submit */
 	int ctl_rc, ctl_tries, self_drained, owner_rc;
 };
 static struct starve g_sv;
@@ -2059,7 +2064,7 @@ sv_submit(const xtc_batch_item_t *items, size_t n, void *user,
 		((struct mt_req *)items[i].request)->ran++;
 	r = items[0].request;
 	if (r == &g_sv.req[0])
-		atomic_store(&g_sv.r0_ran, 1);
+		xtc_atomic_store_i32(&g_sv.r0_ran, 1, xtc_mo_seq_cst);
 	if (g_sv.mode == 1 && n == 1 && r == &g_sv.req[0] && r->ran == 1) {
 		assert(xtc_future_new_pair(&g_sv.prom, &f) == XTC_OK);
 		exec->kind = XTC_BATCH_EXEC_FUTURE;
@@ -2078,10 +2083,11 @@ sv_collect(const xtc_batch_item_t *items, xtc_batch_result_t *results,
 	(void)exec_status;
 	(void)user;
 	for (i = 0; i < n; ++i)
-		results[i].state = g_sv.mode != 1
-		        && items[i].request == &g_sv.req[0]
-		        && !atomic_load(&g_sv.unblocked) ?
-		    XTC_BATCH_BLOCKED : XTC_BATCH_DONE;
+		results[i].state = g_sv.mode != 1 &&
+		        items[i].request == &g_sv.req[0] &&
+		        !xtc_atomic_load_i32(&g_sv.unblocked, xtc_mo_seq_cst) ?
+		    XTC_BATCH_BLOCKED :
+		    XTC_BATCH_DONE;
 	return XTC_OK;
 }
 
@@ -2094,16 +2100,17 @@ sv_complete(uint64_t handle, void *request, int outcome, void *user)
 	r->completions++;
 	assert(r->completions == 1);
 	r->outcome = outcome;
-	(void)atomic_fetch_add(&g_sv.completed, 1);
+	(void)xtc_atomic_fetch_add_i32(&g_sv.completed, 1, xtc_mo_seq_cst);
 }
 
 static void
 sv_hint(uint64_t handle, void *user)
 {
 	(void)user;
-	(void)atomic_fetch_add(&g_sv.hints, 1);
-	if (handle == g_sv.h0 && !atomic_load(&g_sv.op_done))
-		atomic_store(&g_sv.hint_in_flight, 1);
+	(void)xtc_atomic_fetch_add_i32(&g_sv.hints, 1, xtc_mo_seq_cst);
+	if (handle == g_sv.h0 &&
+	    !xtc_atomic_load_i32(&g_sv.op_done, xtc_mo_seq_cst))
+		xtc_atomic_store_i32(&g_sv.hint_in_flight, 1, xtc_mo_seq_cst);
 }
 
 static void *
@@ -2116,7 +2123,7 @@ sv_producer(void *arg)
 	(void)arg;
 	while (xtc_batch_submit_mt(v->batch, &v->req[0], 1, &v->h0) != XTC_OK)
 		usleep(100);
-	while (!atomic_load(&v->r0_ran))
+	while (!xtc_atomic_load_i32(&v->r0_ran, xtc_mo_seq_cst))
 		usleep(100);
 	usleep(20000);
 	/* mt_queue_cap more: every one is held (the only slot is taken). */
@@ -2132,11 +2139,11 @@ sv_producer(void *arg)
 	}
 	usleep(50000); /* let the driver drain them into the held FIFO */
 	if (v->mode == 2) {
-		atomic_store(&v->phase, 1);
+		xtc_atomic_store_i32(&v->phase, 1, xtc_mo_seq_cst);
 		return NULL;
 	}
 	if (v->mode == 0)
-		atomic_store(&v->unblocked, 1);
+		xtc_atomic_store_i32(&v->unblocked, 1, xtc_mo_seq_cst);
 	t0 = oc_now();
 	for (;;) {
 		rc = v->mode == 0 ? xtc_batch_resume_mt(v->batch, v->h0) :
@@ -2147,7 +2154,7 @@ sv_producer(void *arg)
 		usleep(50);
 	}
 	v->ctl_rc = rc;
-	atomic_store(&v->phase, 1);
+	xtc_atomic_store_i32(&v->phase, 1, xtc_mo_seq_cst);
 	return NULL;
 }
 
@@ -2158,25 +2165,30 @@ sv_owner(void *arg)
 {
 	struct starve *v = arg;
 	int rc, i;
-	while (atomic_load(&v->phase) == 0)
+	while (xtc_atomic_load_i32(&v->phase, xtc_mo_seq_cst) == 0)
 		(void)xtc_proc_sleep(1000000);
 	if (v->mode == 2) {
 		v->owner_rc = xtc_batch_cancel(v->batch, v->h1);
-		atomic_store(&v->unblocked, 1);
+		xtc_atomic_store_i32(&v->unblocked, 1, xtc_mo_seq_cst);
 		while ((rc = xtc_batch_resume(v->batch, v->h0)) == XTC_E_DEADLK)
 			xtc_yield();
 	}
 	if (v->mode == 1) {
-		for (i = 0; i < 200 && !atomic_load(&v->hints); ++i)
+		for (i = 0;
+		     i < 200 && !xtc_atomic_load_i32(&v->hints, xtc_mo_seq_cst);
+		     ++i)
 			(void)xtc_proc_sleep(1000000);
-		atomic_store(&v->op_done, 1);
+		xtc_atomic_store_i32(&v->op_done, 1, xtc_mo_seq_cst);
 		(void)xtc_promise_set(v->prom, 0, XTC_OK);
 	}
-	for (i = 0; i < 2000 && atomic_load(&v->completed) < 5; ++i)
+	for (i = 0;
+	     i < 2000 && xtc_atomic_load_i32(&v->completed, xtc_mo_seq_cst) < 5;
+	     ++i)
 		(void)xtc_proc_sleep(1000000);
-	v->self_drained = atomic_load(&v->completed) == 5;
+	v->self_drained =
+	    xtc_atomic_load_i32(&v->completed, xtc_mo_seq_cst) == 5;
 	if (!v->self_drained && v->mode == 0) {
-		atomic_store(&v->unblocked, 1);
+		xtc_atomic_store_i32(&v->unblocked, 1, xtc_mo_seq_cst);
 		while ((rc = xtc_batch_resume(v->batch, v->h0)) == XTC_E_DEADLK)
 			xtc_yield();
 	}
@@ -2216,11 +2228,12 @@ mt_control_starvation(int mode)
 	assert(pthread_join(t, NULL) == 0);
 	printf("batch-mt: control starvation mode %d: ctl_rc=%d after %d "
 	       "AGAIN retries, self_drained=%d hints=%d in_flight=%d "
-	       "owner_rc=%d completed=%d\n", mode, v->ctl_rc, v->ctl_tries,
-	    v->self_drained, atomic_load(&v->hints),
-	    atomic_load(&v->hint_in_flight), v->owner_rc,
-	    atomic_load(&v->completed));
-	assert(atomic_load(&v->completed) == 5);
+	       "owner_rc=%d completed=%d\n",
+	    mode, v->ctl_rc, v->ctl_tries, v->self_drained,
+	    xtc_atomic_load_i32(&v->hints, xtc_mo_seq_cst),
+	    xtc_atomic_load_i32(&v->hint_in_flight, xtc_mo_seq_cst),
+	    v->owner_rc, xtc_atomic_load_i32(&v->completed, xtc_mo_seq_cst));
+	assert(xtc_atomic_load_i32(&v->completed, xtc_mo_seq_cst) == 5);
 	for (i = 0; i < 5; ++i)
 		assert(v->req[i].completions == 1);
 	if (mode == 0) {
@@ -2230,8 +2243,9 @@ mt_control_starvation(int mode)
 			assert(v->req[i].outcome == XTC_OK);
 	} else if (mode == 1) {
 		assert(v->ctl_rc == XTC_OK);
-		assert(atomic_load(&v->hints) == 1);
-		assert(atomic_load(&v->hint_in_flight) == 1);
+		assert(xtc_atomic_load_i32(&v->hints, xtc_mo_seq_cst) == 1);
+		assert(xtc_atomic_load_i32(&v->hint_in_flight,
+		           xtc_mo_seq_cst) == 1);
 		assert(v->req[0].outcome == XTC_E_ABORTED);
 		for (i = 1; i < 5; ++i)
 			assert(v->req[i].outcome == XTC_OK);
@@ -2366,8 +2380,7 @@ place_closer_fn(void *arg)
 {
 	struct place_ctx *pc = arg;
 	int id = xtc_exec_loop_id();
-	while (atomic_load_explicit(&pc->mc->completed, memory_order_acquire)
-	    < pc->n)
+	while (xtc_atomic_load_i32(&pc->mc->completed, xtc_mo_acquire) < pc->n)
 		xtc_yield();
 	assert(xtc_batch_close(pc->g[id], XTC_BATCH_DRAIN) == XTC_OK);
 }
@@ -2455,9 +2468,9 @@ struct oc {
 	xtc_batch_t *batch;
 	int kind, fence_fd, blocking_rc, cont_on_timeout;
 	int64_t timeout_ns;
-	xtc_promise_t *_Atomic prom; /* handed to the "device" thread */
-	_Atomic int op_running, overlap, submits, collects, hints, completions;
-	_Atomic int hint_while_running, done, stage;
+	xtc_promise_t *prom; /* handed to the "device" thread */
+	int op_running, overlap, submits, collects, hints, completions;
+	int hint_while_running, done, stage;
 	int statuses[8], outcome;
 	double t0, t_collect, t_hint;
 	xtc_pid_t driver;
@@ -2488,9 +2501,10 @@ oc_submit(const xtc_batch_item_t *items, size_t n, void *user,
 	xtc_future_t *f;
 	(void)items;
 	(void)n;
-	if (atomic_load(&c->op_running))
-		atomic_fetch_add(&c->overlap, 1); /* resubmitted over a live op */
-	atomic_fetch_add(&c->submits, 1);
+	if (xtc_atomic_load_i32(&c->op_running, xtc_mo_seq_cst))
+		xtc_atomic_fetch_add_i32(&c->overlap, 1,
+		    xtc_mo_seq_cst); /* resubmitted over a live op */
+	xtc_atomic_fetch_add_i32(&c->submits, 1, xtc_mo_seq_cst);
 	c->driver = xtc_self();
 	exec->kind = c->kind;
 	switch (c->kind) {
@@ -2499,13 +2513,13 @@ oc_submit(const xtc_batch_item_t *items, size_t n, void *user,
 		if (xtc_future_new_pair(&p, &f) != XTC_OK)
 			return XTC_E_NOMEM;
 		exec->future = f;
-		atomic_store(&c->op_running, 1);
-		atomic_store(&c->prom, p);
+		xtc_atomic_store_i32(&c->op_running, 1, xtc_mo_seq_cst);
+		xtc_atomic_store_ptr(&c->prom, p, xtc_mo_seq_cst);
 		break;
 	}
 	case XTC_BATCH_EXEC_FENCE:
 		exec->fence_fd = c->fence_fd;
-		atomic_store(&c->op_running, 1);
+		xtc_atomic_store_i32(&c->op_running, 1, xtc_mo_seq_cst);
 		break;
 	case XTC_BATCH_EXEC_BLOCKING:
 		exec->run = oc_blocking_fn;
@@ -2522,7 +2536,7 @@ oc_collect(const xtc_batch_item_t *items, xtc_batch_result_t *results,
 {
 	struct oc *c = user;
 	size_t i;
-	int k = atomic_fetch_add(&c->collects, 1);
+	int k = xtc_atomic_fetch_add_i32(&c->collects, 1, xtc_mo_seq_cst);
 	(void)items;
 	if (k < 8)
 		c->statuses[k] = exec_status;
@@ -2540,10 +2554,11 @@ oc_hint(uint64_t handle, void *user)
 {
 	struct oc *c = user;
 	(void)handle;
-	if (atomic_fetch_add(&c->hints, 1) == 0)
+	if (xtc_atomic_fetch_add_i32(&c->hints, 1, xtc_mo_seq_cst) == 0)
 		c->t_hint = oc_now() - c->t0;
-	if (atomic_load(&c->op_running))
-		atomic_fetch_add(&c->hint_while_running, 1);
+	if (xtc_atomic_load_i32(&c->op_running, xtc_mo_seq_cst))
+		xtc_atomic_fetch_add_i32(&c->hint_while_running, 1,
+		    xtc_mo_seq_cst);
 }
 
 static void
@@ -2552,7 +2567,8 @@ oc_complete(uint64_t handle, void *request, int outcome, void *user)
 	struct oc *c = user;
 	(void)handle;
 	(void)request;
-	assert(atomic_fetch_add(&c->completions, 1) == 0); /* exactly once */
+	assert(xtc_atomic_fetch_add_i32(&c->completions, 1, xtc_mo_seq_cst) ==
+	    0); /* exactly once */
 	c->outcome = outcome;
 }
 
@@ -2561,13 +2577,17 @@ oc_watchdog(void *arg)
 {
 	struct oc *c = arg;
 	int i;
-	for (i = 0; i < 500 && !atomic_load(&c->done); i++)
+	for (i = 0; i < 500 && !xtc_atomic_load_i32(&c->done, xtc_mo_seq_cst);
+	     i++)
 		usleep(10000);
-	if (!atomic_load(&c->done)) {
-		fprintf(stderr, "%s: hung (submits=%d collects=%d "
-		    "completions=%d hints=%d)\n", c->name, atomic_load(&c->submits),
-		    atomic_load(&c->collects), atomic_load(&c->completions),
-		    atomic_load(&c->hints));
+	if (!xtc_atomic_load_i32(&c->done, xtc_mo_seq_cst)) {
+		fprintf(stderr,
+		    "%s: hung (submits=%d collects=%d "
+		    "completions=%d hints=%d)\n",
+		    c->name, xtc_atomic_load_i32(&c->submits, xtc_mo_seq_cst),
+		    xtc_atomic_load_i32(&c->collects, xtc_mo_seq_cst),
+		    xtc_atomic_load_i32(&c->completions, xtc_mo_seq_cst),
+		    xtc_atomic_load_i32(&c->hints, xtc_mo_seq_cst));
 		_exit(3);
 	}
 	return NULL;
@@ -2582,10 +2602,11 @@ oc_device(void *arg)
 	uint64_t one = 1;
 	xtc_promise_t *p;
 	usleep((useconds_t)g_dev_ms * 1000);
-	atomic_store(&c->op_running, 0);
+	xtc_atomic_store_i32(&c->op_running, 0, xtc_mo_seq_cst);
 	if (c->kind == XTC_BATCH_EXEC_FENCE && c->fence_fd >= 0)
 		assert(write(c->fence_fd, &one, sizeof one) == sizeof one);
-	else if ((p = atomic_exchange(&c->prom, NULL)) != NULL)
+	else if ((p = xtc_atomic_exchange_ptr(&c->prom, NULL,
+	              xtc_mo_seq_cst)) != NULL)
 		(void)xtc_promise_set(p, 0, XTC_OK);
 	return NULL;
 }
@@ -2630,14 +2651,16 @@ oc_run(struct oc *c, void (*peer)(void *), int device_ms)
 	assert(xtc_loop_run(c->loop) == XTC_OK);
 	if (device_ms >= 0)
 		assert(pthread_join(dev, NULL) == 0);
-	atomic_store(&c->done, 1);
+	xtc_atomic_store_i32(&c->done, 1, xtc_mo_seq_cst);
 	assert(pthread_join(wd, NULL) == 0);
 	assert(xtc_batch_destroy(c->batch) == XTC_OK);
 	assert(xtc_loop_fini(c->loop) == XTC_OK);
 	printf("batch-async: %s: collects=%d status0=%d outcome=%d hints=%d "
-	       "t_collect=%.3f t_hint=%.3f\n", c->name, atomic_load(&c->collects),
-	       c->statuses[0], c->outcome, atomic_load(&c->hints), c->t_collect,
-	       c->t_hint);
+	       "t_collect=%.3f t_hint=%.3f\n",
+	    c->name, xtc_atomic_load_i32(&c->collects, xtc_mo_seq_cst),
+	    c->statuses[0], c->outcome,
+	    xtc_atomic_load_i32(&c->hints, xtc_mo_seq_cst), c->t_collect,
+	    c->t_hint);
 }
 
 static void
@@ -2726,7 +2749,8 @@ async_timeout_no_resubmit(void)
 	c->cont_on_timeout = 1;
 	oc_run(c, oc_peer_drain, 300);
 	assert(c->statuses[0] == XTC_BATCH_EXEC_TIMEOUT);
-	assert(atomic_load(&c->overlap) == 0 && atomic_load(&c->submits) == 1);
+	assert(xtc_atomic_load_i32(&c->overlap, xtc_mo_seq_cst) == 0 &&
+	    xtc_atomic_load_i32(&c->submits, xtc_mo_seq_cst) == 1);
 	assert(c->outcome == XTC_E_AGAIN);
 }
 
@@ -2736,7 +2760,7 @@ static void
 oc_peer_stray(void *arg)
 {
 	struct oc *c = arg;
-	while (atomic_load(&c->submits) == 0)
+	while (xtc_atomic_load_i32(&c->submits, xtc_mo_seq_cst) == 0)
 		xtc_yield();
 	(void)xtc_proc_sleep(20000000);
 	(void)xtc_proc_wake(c->driver);
@@ -2762,7 +2786,7 @@ static void
 oc_peer_cancel(void *arg)
 {
 	struct oc *c = arg;
-	while (atomic_load(&c->submits) == 0)
+	while (xtc_atomic_load_i32(&c->submits, xtc_mo_seq_cst) == 0)
 		xtc_yield();
 	(void)xtc_proc_sleep(20000000);
 	assert(xtc_batch_close(c->batch, XTC_BATCH_CANCEL) == XTC_OK);
@@ -2779,7 +2803,7 @@ async_fence_close_cancel(void)
 	(void)close(c->fence_fd);
 	assert(c->statuses[0] == XTC_BATCH_EXEC_ABORTED);
 	assert(c->outcome == XTC_E_ABORTED && c->t_collect < 1.0);
-	assert(atomic_load(&c->hints) == 1);
+	assert(xtc_atomic_load_i32(&c->hints, xtc_mo_seq_cst) == 1);
 #endif
 }
 
@@ -2791,7 +2815,7 @@ static void
 oc_peer_kill(void *arg)
 {
 	struct oc *c = arg;
-	while (atomic_load(&c->submits) == 0)
+	while (xtc_atomic_load_i32(&c->submits, xtc_mo_seq_cst) == 0)
 		xtc_yield();
 	(void)xtc_proc_sleep(20000000);
 	assert(xtc_exit_pid(c->driver, 1) == XTC_OK);
@@ -2807,8 +2831,9 @@ async_future_kill(void)
 	oc_run(c, oc_peer_kill, -1);
 	assert(c->statuses[0] == XTC_BATCH_EXEC_ABORTED);
 	assert(c->outcome == XTC_E_ABORTED && c->t_collect < 1.0);
-	if (atomic_load(&c->prom) != NULL)
-		xtc_promise_drop(atomic_exchange(&c->prom, NULL));
+	if (xtc_atomic_load_ptr(&c->prom, xtc_mo_seq_cst) != NULL)
+		xtc_promise_drop(
+		    xtc_atomic_exchange_ptr(&c->prom, NULL, xtc_mo_seq_cst));
 #else
 	puts("batch-async: future kill test skipped (needs proc kill-wake)");
 #endif
@@ -2821,7 +2846,7 @@ static void
 oc_peer_owner_cancel(void *arg)
 {
 	struct oc *c = arg;
-	while (atomic_load(&c->submits) == 0)
+	while (xtc_atomic_load_i32(&c->submits, xtc_mo_seq_cst) == 0)
 		xtc_yield();
 	(void)xtc_proc_sleep(20000000);
 	assert(xtc_batch_cancel(c->batch, 1) == XTC_OK);
@@ -2832,7 +2857,7 @@ static void *
 oc_mt_canceller(void *arg)
 {
 	struct oc *c = arg;
-	while (atomic_load(&c->submits) == 0)
+	while (xtc_atomic_load_i32(&c->submits, xtc_mo_seq_cst) == 0)
 		usleep(1000);
 	usleep(20000);
 	assert(xtc_batch_cancel_mt(c->batch, 1) == XTC_OK);
@@ -2869,8 +2894,9 @@ async_hint_on_landing(void)
 			assert(pthread_join(t, NULL) == 0);
 			(void)close(c->fence_fd);
 		}
-		assert(atomic_load(&c->hints) == 1);
-		assert(atomic_load(&c->hint_while_running) == 1);
+		assert(xtc_atomic_load_i32(&c->hints, xtc_mo_seq_cst) == 1);
+		assert(xtc_atomic_load_i32(&c->hint_while_running,
+		           xtc_mo_seq_cst) == 1);
 		assert(c->t_hint < 0.2);
 		assert(c->outcome == XTC_E_ABORTED);
 	}

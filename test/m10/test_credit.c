@@ -9,7 +9,6 @@
  *	(the issuer never exceeds the window; every op is acknowledged).
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -170,7 +169,7 @@ test_credit_sliding_window(const MunitParameter p[], void *d)
 }
 
 /* ---------- blocking acquire (xtc_credit_acquire) inside a fiber ----- */
-static _Atomic int g_ba_ok;
+static int g_ba_ok;
 
 static void
 blocking_acquire_proc(void *arg)
@@ -191,7 +190,7 @@ blocking_acquire_proc(void *arg)
 	/* Release one, then a blocking acquire succeeds again. */
 	if (xtc_credit_release(c) != XTC_OK) goto out;
 	if (xtc_credit_acquire(c, 100LL * 1000000) != XTC_OK) goto out;
-	atomic_store(&g_ba_ok, 1);
+	xtc_atomic_store_i32(&g_ba_ok, 1, xtc_mo_seq_cst);
 out:
 	xtc_credit_destroy(c);
 }
@@ -202,12 +201,12 @@ test_credit_blocking_acquire(const MunitParameter p[], void *d)
 	xtc_loop_t *loop = NULL;
 	xtc_pid_t pid;
 	(void)p; (void)d;
-	atomic_store(&g_ba_ok, 0);
+	xtc_atomic_store_i32(&g_ba_ok, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, blocking_acquire_proc, NULL, NULL,
 	    &pid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_ba_ok), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_ba_ok, xtc_mo_seq_cst), ==, 1);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	return MUNIT_OK;
 }
@@ -223,7 +222,7 @@ test_credit_blocking_acquire(const MunitParameter p[], void *d)
  */
 struct cr_two_ctx {
 	xtc_credit_t *c;
-	_Atomic int   got;
+	int got;
 };
 
 static void
@@ -231,7 +230,7 @@ cr_two_waiter(void *arg)
 {
 	struct cr_two_ctx *x = arg;
 	if (xtc_credit_acquire(x->c, 2LL * 1000 * 1000 * 1000) == XTC_OK)
-		atomic_fetch_add(&x->got, 1);
+		xtc_atomic_fetch_add_i32(&x->got, 1, xtc_mo_seq_cst);
 }
 
 static void
@@ -266,7 +265,7 @@ test_credit_two_waiters(const MunitParameter p[], void *d)
 	    ==, XTC_OK);
 	t0 = xtc_clock_mono();
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(atomic_load(&x.got), ==, 2);
+	munit_assert_int(xtc_atomic_load_i32(&x.got, xtc_mo_seq_cst), ==, 2);
 	munit_assert_int64(xtc_clock_mono() - t0, <, 1LL * 1000 * 1000 * 1000);
 	xtc_credit_destroy(x.c);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);

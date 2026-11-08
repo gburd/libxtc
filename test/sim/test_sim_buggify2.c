@@ -3,7 +3,6 @@
 #endif
 #include <stdlib.h>
 #include <stdio.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -54,8 +53,8 @@
 #define N_LOOPS 4
 #define N_TASKS 400
 
-static atomic_int  g_done;
-static atomic_long g_hash;
+static int g_done;
+static long g_hash;
 
 static int
 leaf(xtc_task_t *self, void *u)
@@ -63,11 +62,11 @@ leaf(xtc_task_t *self, void *u)
 	long id = (long)(intptr_t)u;
 	long h;
 	(void)self;
-	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
-	h = atomic_load_explicit(&g_hash, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
+	h = xtc_atomic_load_long(&g_hash, xtc_mo_relaxed);
 	h = (long)((unsigned long)h * 1000003UL +
 		    (unsigned long)(id + 1));       /* ORDER-sensitive fold */
-	atomic_store_explicit(&g_hash, h, memory_order_relaxed);
+	xtc_atomic_store_long(&g_hash, h, xtc_mo_relaxed);
 	return XTC_TASK_DONE;
 }
 
@@ -77,8 +76,8 @@ run_once(uint64_t seed, unsigned bug_pct, int *out_done, long *out_hash,
 {
 	xtc_exec_t *e = NULL;
 	int i;
-	atomic_store(&g_done, 0);
-	atomic_store(&g_hash, 0);
+	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) { *out_done = -1; return; }
 
 	if (bug_pct > 0)
@@ -94,8 +93,8 @@ run_once(uint64_t seed, unsigned bug_pct, int *out_done, long *out_hash,
 
 	(void)xtc_sim_exec_run(e, seed, 5000000);
 
-	*out_done = atomic_load(&g_done);
-	*out_hash = atomic_load(&g_hash);
+	*out_done = xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
+	*out_hash = xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
 	*out_bug_active = xtc_sim_buggify_active_count();
 
 	xtc_sim_buggify_disable();

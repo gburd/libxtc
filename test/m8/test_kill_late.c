@@ -24,7 +24,6 @@
  *	                 again (no DOWN in 10 s).
  */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,7 +41,7 @@
 
 static xtc_loop_t *g_loop;
 static xtc_task_t *g_slow;
-static atomic_int  g_slow_done, g_victim_past, g_victim_parked, g_stop;
+static int g_slow_done, g_victim_past, g_victim_parked, g_stop;
 static int64_t     g_slow_ns, g_kill_ns, g_down_ns;
 static int         g_down_ok, g_down_reason, g_second_ok, g_masked;
 static intptr_t    g_second_r;
@@ -62,7 +61,7 @@ slow_task(void *arg)
 	(void)arg;
 	while (now_ns() < end)
 		xtc_yield();
-	atomic_store(&g_slow_done, 1);
+	xtc_atomic_store_i32(&g_slow_done, 1, xtc_mo_seq_cst);
 	return 42;
 }
 
@@ -73,15 +72,16 @@ await_victim(void *arg)
 	(void)arg;
 	if (g_masked)
 		munit_assert_int(xtc_mask_enter(), ==, XTC_OK);
-	atomic_store(&g_victim_parked, 1);
+	xtc_atomic_store_i32(&g_victim_parked, 1, xtc_mo_seq_cst);
 	(void)xtc_await(g_slow, &r);
 	if (g_masked) {
 		/* The kill was latched, not delivered, while masked. */
 		munit_assert_int((int)r, ==, 42);
-		atomic_store(&g_victim_past, 1);
+		xtc_atomic_store_i32(&g_victim_past, 1, xtc_mo_seq_cst);
 		(void)xtc_mask_leave();   /* delivers it: does not return */
 	}
-	atomic_store(&g_victim_past, 2);   /* never reached */
+	xtc_atomic_store_i32(&g_victim_past, 2,
+	    xtc_mo_seq_cst); /* never reached */
 }
 
 static int
@@ -97,9 +97,10 @@ blocking_victim(void *arg)
 {
 	int rc = 0;
 	(void)arg;
-	atomic_store(&g_victim_parked, 1);
+	xtc_atomic_store_i32(&g_victim_parked, 1, xtc_mo_seq_cst);
 	(void)xtc_blocking_run(blocking_fn, NULL, &rc);
-	atomic_store(&g_victim_past, 2);   /* never reached */
+	xtc_atomic_store_i32(&g_victim_past, 2,
+	    xtc_mo_seq_cst); /* never reached */
 }
 
 static int g_aio_fd = -1;
@@ -110,14 +111,14 @@ aio_victim(void *arg)
 	static char buf[1 << 20];
 	int j;
 	(void)arg;
-	atomic_store(&g_victim_parked, 1);
-	while (!atomic_load(&g_stop)) {
+	xtc_atomic_store_i32(&g_victim_parked, 1, xtc_mo_seq_cst);
+	while (!xtc_atomic_load_i32(&g_stop, xtc_mo_seq_cst)) {
 		for (j = 0; j < g_aio_mib; j++)
 			(void)xtc_aio_pwrite(g_aio_fd, buf, sizeof buf,
 			    (int64_t)j * (int64_t)sizeof buf);
 		(void)xtc_aio_fsync(g_aio_fd);
 	}
-	atomic_store(&g_victim_past, 2);
+	xtc_atomic_store_i32(&g_victim_past, 2, xtc_mo_seq_cst);
 }
 
 /* The driver: spawn the victim monitored, wait until it parks, kill it,
@@ -134,7 +135,9 @@ driver(void *arg)
 	(void)arg;
 	munit_assert_int(xtc_proc_spawn_monitor(g_loop, g_victim_fn, NULL,
 	    NULL, &victim, &ref), ==, XTC_OK);
-	for (i = 0; i < 1000 && !atomic_load(&g_victim_parked); i++)
+	for (i = 0;
+	     i < 1000 && !xtc_atomic_load_i32(&g_victim_parked, xtc_mo_seq_cst);
+	     i++)
 		xtc_yield();
 	(void)xtc_proc_sleep(20LL * 1000 * 1000);   /* well inside the park */
 	g_kill_ns = now_ns();
@@ -142,7 +145,8 @@ driver(void *arg)
 	g_down_ok = xtc_recv(&m, &n, 10LL * 1000 * 1000 * 1000) == XTC_OK &&
 	    xtc_down_decode(m, n, NULL, &g_down_reason) == XTC_OK;
 	g_down_ns = now_ns();
-	atomic_store(&g_stop, 1);   /* a victim that was never killed ends */
+	xtc_atomic_store_i32(&g_stop, 1,
+	    xtc_mo_seq_cst); /* a victim that was never killed ends */
 	if (m != NULL)
 		xtc_free(m);
 	if (g_slow != NULL) {
@@ -154,10 +158,10 @@ driver(void *arg)
 static void
 run(void (*victim)(void *), int with_slow)
 {
-	atomic_store(&g_slow_done, 0);
-	atomic_store(&g_victim_past, 0);
-	atomic_store(&g_victim_parked, 0);
-	atomic_store(&g_stop, 0);
+	xtc_atomic_store_i32(&g_slow_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_victim_past, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_victim_parked, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_stop, 0, xtc_mo_seq_cst);
 	g_down_ok = g_second_ok = 0;
 	g_down_reason = -1;
 	g_second_r = 0;
@@ -184,12 +188,14 @@ test_await(const MunitParameter p[], void *d)
 	    "runs 2000 ms)", (double)(g_down_ns - g_kill_ns) / 1e6);
 	munit_assert_int(g_down_ok, ==, 1);
 	munit_assert_int(g_down_reason, ==, 9);
-	munit_assert_int(atomic_load(&g_victim_past), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_victim_past, xtc_mo_seq_cst),
+	    ==, 0);
 	/* Delivered at once, not when the awaited task finished. */
 	munit_assert_int64(g_down_ns - g_kill_ns, <, 500LL * 1000 * 1000);
 	munit_assert_int(g_second_ok, ==, 1);
 	munit_assert_int((int)g_second_r, ==, 42);
-	munit_assert_int(atomic_load(&g_slow_done), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_slow_done, xtc_mo_seq_cst), ==,
+	    1);
 	return MUNIT_OK;
 }
 
@@ -205,7 +211,8 @@ test_await_masked(const MunitParameter p[], void *d)
 	munit_assert_int(g_down_reason, ==, 9);
 	/* Latched while masked: the await completed, then the leave
 	 * delivered the kill. */
-	munit_assert_int(atomic_load(&g_victim_past), ==, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_victim_past, xtc_mo_seq_cst),
+	    ==, 1);
 	munit_assert_int64(g_down_ns - g_kill_ns, >=, 200LL * 1000 * 1000);
 	return MUNIT_OK;
 }
@@ -219,7 +226,8 @@ test_blocking_run(const MunitParameter p[], void *d)
 	    (double)(g_down_ns - g_kill_ns) / 1e6);
 	munit_assert_int(g_down_ok, ==, 1);
 	munit_assert_int(g_down_reason, ==, 9);
-	munit_assert_int(atomic_load(&g_victim_past), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_victim_past, xtc_mo_seq_cst),
+	    ==, 0);
 	/* Masked by design: the DOWN waits for the offload. */
 	munit_assert_int64(g_down_ns - g_kill_ns, >=, 300LL * 1000 * 1000);
 	return MUNIT_OK;
@@ -249,7 +257,8 @@ test_aio(const MunitParameter p[], void *d)
 	    "fsync loop)", (double)(g_down_ns - g_kill_ns) / 1e6, g_aio_mib);
 	munit_assert_int(g_down_ok, ==, 1);
 	munit_assert_int(g_down_reason, ==, 9);
-	munit_assert_int(atomic_load(&g_victim_past), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_victim_past, xtc_mo_seq_cst),
+	    ==, 0);
 	return MUNIT_OK;
 }
 

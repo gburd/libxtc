@@ -49,7 +49,6 @@
 #define _GNU_SOURCE
 
 #include <malloc.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,20 +63,24 @@
 /* ---- exact heap accounting through the allocator hook --------------- */
 
 static struct __os_alloc_hook g_real;
-static _Atomic long long g_heap;
+static long long g_heap;
 
 static void *
 c_malloc(size_t n)
 {
 	void *p = g_real.malloc(n);
-	if (p) atomic_fetch_add(&g_heap, (long long)malloc_usable_size(p));
+	if (p)
+		xtc_atomic_fetch_add_llong(&g_heap,
+		    (long long)malloc_usable_size(p), xtc_mo_seq_cst);
 	return p;
 }
 static void *
 c_calloc(size_t n, size_t sz)
 {
 	void *p = g_real.calloc(n, sz);
-	if (p) atomic_fetch_add(&g_heap, (long long)malloc_usable_size(p));
+	if (p)
+		xtc_atomic_fetch_add_llong(&g_heap,
+		    (long long)malloc_usable_size(p), xtc_mo_seq_cst);
 	return p;
 }
 static void *
@@ -85,27 +88,34 @@ c_realloc(void *o, size_t sz)
 {
 	long long before = o ? (long long)malloc_usable_size(o) : 0;
 	void *p = g_real.realloc(o, sz);
-	if (p) atomic_fetch_add(&g_heap,
-	    (long long)malloc_usable_size(p) - before);
+	if (p)
+		xtc_atomic_fetch_add_llong(&g_heap,
+		    (long long)malloc_usable_size(p) - before, xtc_mo_seq_cst);
 	return p;
 }
 static void
 c_free(void *p)
 {
-	if (p) atomic_fetch_sub(&g_heap, (long long)malloc_usable_size(p));
+	if (p)
+		xtc_atomic_fetch_sub_llong(&g_heap,
+		    (long long)malloc_usable_size(p), xtc_mo_seq_cst);
 	g_real.free(p);
 }
 static void *
 c_aligned(size_t a, size_t sz)
 {
 	void *p = g_real.aligned(a, sz);
-	if (p) atomic_fetch_add(&g_heap, (long long)malloc_usable_size(p));
+	if (p)
+		xtc_atomic_fetch_add_llong(&g_heap,
+		    (long long)malloc_usable_size(p), xtc_mo_seq_cst);
 	return p;
 }
 static void
 c_aligned_free(void *p)
 {
-	if (p) atomic_fetch_sub(&g_heap, (long long)malloc_usable_size(p));
+	if (p)
+		xtc_atomic_fetch_sub_llong(&g_heap,
+		    (long long)malloc_usable_size(p), xtc_mo_seq_cst);
 	g_real.aligned_free(p);
 }
 
@@ -226,16 +236,19 @@ main(int argc, char **argv)
 		}
 		(void)xtc_slab_reap_all();
 		if (g == warm) {
-			heap0 = atomic_load(&g_heap);
+			heap0 = xtc_atomic_load_llong(&g_heap, xtc_mo_seq_cst);
 			map0 = status_kb("VmSize");
 			rss0 = status_kb("VmRSS");
 		}
 		if (g % (gens / 10) == 0)
 			printf("  gen %4d: heap %10lld B  VmSize %8lld kB  "
-			    "VmRSS %8lld kB\n", g, (long long)atomic_load(&g_heap),
+			       "VmRSS %8lld kB\n",
+			    g,
+			    (long long)xtc_atomic_load_llong(&g_heap,
+			        xtc_mo_seq_cst),
 			    status_kb("VmSize"), status_kb("VmRSS"));
 	}
-	heap1 = atomic_load(&g_heap);
+	heap1 = xtc_atomic_load_llong(&g_heap, xtc_mo_seq_cst);
 	map1 = status_kb("VmSize");
 	rss1 = status_kb("VmRSS");
 	per = (double)(gens - warm);
