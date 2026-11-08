@@ -35,7 +35,12 @@
 #include "xtc_export.h"
 
 #include <stdint.h>
+/* shortcut: transitional -- C consumers that used C11 atomics after
+ * including only this header got <stdatomic.h> from it; kept (C only)
+ * until the tree's own users are converted to xtc_atomic.h. */
+#if !defined(__cplusplus)
 #include <stdatomic.h>
+#endif
 
 #include "xtc.h"
 
@@ -76,16 +81,16 @@ typedef struct xtc_res_caps {
 
 typedef struct xtc_res {
 	xtc_res_caps_t   caps;
-	_Atomic int64_t  used[XTC_RES__COUNT];
-	_Atomic int64_t  high[XTC_RES__COUNT];   /* high-water mark for stats */
-	_Atomic int64_t  rejects[XTC_RES__COUNT];/* count of XTC_E_RESOURCE returns */
+	int64_t used[XTC_RES__COUNT];
+	int64_t high[XTC_RES__COUNT];    /* high-water mark for stats */
+	int64_t rejects[XTC_RES__COUNT]; /* count of XTC_E_RESOURCE returns */
 
 	/* High-water alert callback: fires once when used / cap crosses
 	 * the threshold percent (e.g. 0.8 = 80%).  Re-arms when used
 	 * drops below the threshold so a second crossing fires again.
 	 * Set via xtc_res_set_alert. */
 	double           alert_pct[XTC_RES__COUNT];
-	_Atomic int      alert_armed[XTC_RES__COUNT];   /* 1 = ready to fire */
+	int alert_armed[XTC_RES__COUNT]; /* 1 = ready to fire */
 	void           (*alert_fn)(xtc_res_kind_t k, int64_t used,
 	                          int64_t cap, void *user);
 	void            *alert_user;

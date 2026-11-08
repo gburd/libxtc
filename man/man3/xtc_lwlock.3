@@ -66,7 +66,10 @@ clears the edge set and counter.  The tracker has overhead and is
 intended for test and staging builds, not production hot paths.
 .Pp
 The lock state is encoded in one
-.Vt _Atomic uint32_t :
+.Vt uint32_t
+(plain storage, accessed only through
+.Xr xtc_atomic 3
+operations):
 the high three bits hold the
 .Dv LW_FLAG_HAS_WAITERS ,
 .Dv LW_FLAG_WAKE_IN_PROGRESS ,

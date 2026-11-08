@@ -57,12 +57,11 @@ xtc_res_init(xtc_res_t *r, const xtc_res_caps_t *caps)
 			return rc;
 	}
 	for (i = 0; i < XTC_RES__COUNT; i++) {
-		atomic_store_explicit(&r->used[i],    0, memory_order_relaxed);
-		atomic_store_explicit(&r->high[i],    0, memory_order_relaxed);
-		atomic_store_explicit(&r->rejects[i], 0, memory_order_relaxed);
+		xtc_atomic_store_i64(&r->used[i], 0, xtc_mo_relaxed);
+		xtc_atomic_store_i64(&r->high[i], 0, xtc_mo_relaxed);
+		xtc_atomic_store_i64(&r->rejects[i], 0, xtc_mo_relaxed);
 		r->alert_pct[i] = 0.0;
-		atomic_store_explicit(&r->alert_armed[i], 1,
-		    memory_order_relaxed);
+		xtc_atomic_store_i32(&r->alert_armed[i], 1, xtc_mo_relaxed);
 	}
 	r->alert_fn = NULL;
 	r->alert_user = NULL;
@@ -80,7 +79,7 @@ xtc_res_acquire(xtc_res_t *r, xtc_res_kind_t k, int64_t n)
 	cap = __cap_for(&r->caps, k);
 
 	for (;;) {
-		cur = atomic_load_explicit(&r->used[k], memory_order_relaxed);
+		cur = xtc_atomic_load_i64(&r->used[k], xtc_mo_relaxed);
 		/*
 		 * Test the HEADROOM before adding.  Computing cur + n first
 		 * and then comparing it to the cap is signed overflow (UB)
@@ -94,8 +93,8 @@ xtc_res_acquire(xtc_res_t *r, xtc_res_kind_t k, int64_t n)
 		 * cur > 0 anyway -- for cur <= 0, cur + n cannot overflow.
 		 */
 		if (cur > 0 && n > INT64_MAX - cur) {
-			(void)atomic_fetch_add_explicit(&r->rejects[k], 1,
-			    memory_order_relaxed);
+			(void)xtc_atomic_fetch_add_i64(&r->rejects[k], 1,
+			    xtc_mo_relaxed);
 			return XTC_E_RESOURCE;
 		}
 		next = cur + n;
@@ -106,22 +105,19 @@ xtc_res_acquire(xtc_res_t *r, xtc_res_kind_t k, int64_t n)
 #else
 		if (cap > 0 && next > cap) {
 #endif
-			(void)atomic_fetch_add_explicit(&r->rejects[k], 1,
-			    memory_order_relaxed);
+			(void)xtc_atomic_fetch_add_i64(&r->rejects[k], 1,
+			    xtc_mo_relaxed);
 			return XTC_E_RESOURCE;
 		}
-		if (atomic_compare_exchange_weak_explicit(
-		        &r->used[k], &cur, next,
-		        memory_order_relaxed, memory_order_relaxed))
+		if (xtc_atomic_cas_weak_i64(&r->used[k], &cur, next,
+		        xtc_mo_relaxed, xtc_mo_relaxed))
 			break;
 	}
 	/* Update high-water mark (best-effort; lossy is OK here). */
-	observed_high = atomic_load_explicit(&r->high[k],
-	    memory_order_relaxed);
+	observed_high = xtc_atomic_load_i64(&r->high[k], xtc_mo_relaxed);
 	if (next > observed_high) {
-		(void)atomic_compare_exchange_strong_explicit(
-		    &r->high[k], &observed_high, next,
-		    memory_order_relaxed, memory_order_relaxed);
+		(void)xtc_atomic_cas_i64(&r->high[k], &observed_high, next,
+		    xtc_mo_relaxed, xtc_mo_relaxed);
 	}
 
 	/* Threshold alert: fire if we crossed the configured % of cap. */
@@ -129,9 +125,8 @@ xtc_res_acquire(xtc_res_t *r, xtc_res_kind_t k, int64_t n)
 		int64_t threshold = (int64_t)(r->alert_pct[k] * (double)cap);
 		if (next >= threshold) {
 			int expected = 1;
-			if (atomic_compare_exchange_strong_explicit(
-			    &r->alert_armed[k], &expected, 0,
-			    memory_order_acq_rel, memory_order_acquire))
+			if (xtc_atomic_cas_i32(&r->alert_armed[k], &expected, 0,
+			        xtc_mo_acq_rel, xtc_mo_acquire))
 				r->alert_fn(k, next, cap, r->alert_user);
 		}
 	}
@@ -157,37 +152,35 @@ xtc_res_release(xtc_res_t *r, xtc_res_kind_t k, int64_t n)
 	 * (an acquire reading it computed INT64_MAX - cur, a signed overflow
 	 * UBSan caught) and its store could erase a concurrent acquire.
 	 */
-	prev = atomic_load_explicit(&r->used[k], memory_order_relaxed);
-	while (!atomic_compare_exchange_weak_explicit(&r->used[k], &prev,
-	    prev > n ? prev - n : 0, memory_order_relaxed,
-	    memory_order_relaxed))
+	prev = xtc_atomic_load_i64(&r->used[k], xtc_mo_relaxed);
+	while (!xtc_atomic_cas_weak_i64(&r->used[k], &prev,
+	    prev > n ? prev - n : 0, xtc_mo_relaxed, xtc_mo_relaxed))
 		;
 	/* Re-arm the alert if used dropped below the threshold. */
 	cap = __cap_for(&r->caps, k);
 	if (r->alert_pct[k] > 0.0 && cap > 0) {
-		int64_t cur = atomic_load_explicit(&r->used[k],
-		    memory_order_relaxed);
+		int64_t cur = xtc_atomic_load_i64(&r->used[k], xtc_mo_relaxed);
 		int64_t threshold = (int64_t)(r->alert_pct[k] * (double)cap);
 		if (cur < threshold)
-			atomic_store_explicit(&r->alert_armed[k], 1,
-			    memory_order_release);
+			xtc_atomic_store_i32(&r->alert_armed[k], 1,
+			    xtc_mo_release);
 	}
 }
 
 /* PUBLIC: int64_t xtc_res_used __P((const xtc_res_t *, xtc_res_kind_t)); */
 int64_t xtc_res_used(const xtc_res_t *r, xtc_res_kind_t k) {
 	if (r == NULL || (int)k < 0 || (int)k >= XTC_RES__COUNT) return 0;
-	return atomic_load_explicit(&r->used[k], memory_order_relaxed);
+	return xtc_atomic_load_i64(&r->used[k], xtc_mo_relaxed);
 }
 /* PUBLIC: int64_t xtc_res_high __P((const xtc_res_t *, xtc_res_kind_t)); */
 int64_t xtc_res_high(const xtc_res_t *r, xtc_res_kind_t k) {
 	if (r == NULL || (int)k < 0 || (int)k >= XTC_RES__COUNT) return 0;
-	return atomic_load_explicit(&r->high[k], memory_order_relaxed);
+	return xtc_atomic_load_i64(&r->high[k], xtc_mo_relaxed);
 }
 /* PUBLIC: int64_t xtc_res_rejects __P((const xtc_res_t *, xtc_res_kind_t)); */
 int64_t xtc_res_rejects(const xtc_res_t *r, xtc_res_kind_t k) {
 	if (r == NULL || (int)k < 0 || (int)k >= XTC_RES__COUNT) return 0;
-	return atomic_load_explicit(&r->rejects[k], memory_order_relaxed);
+	return xtc_atomic_load_i64(&r->rejects[k], xtc_mo_relaxed);
 }
 /* PUBLIC: void xtc_res_set_cap __P((xtc_res_t *, xtc_res_kind_t, int64_t)); */
 void xtc_res_set_cap(xtc_res_t *r, xtc_res_kind_t k, int64_t cap) {
@@ -221,7 +214,7 @@ xtc_res_set_alert(xtc_res_t *r, xtc_res_kind_t k, double pct)
 	 * refused.  `!(pct > 0.0 && pct < 1.0)` also rejects NaN. */
 	if (!(pct > 0.0 && pct < 1.0)) return XTC_E_INVAL;
 	r->alert_pct[k] = pct;
-	atomic_store_explicit(&r->alert_armed[k], 1, memory_order_release);
+	xtc_atomic_store_i32(&r->alert_armed[k], 1, xtc_mo_release);
 	return XTC_OK;
 }
 

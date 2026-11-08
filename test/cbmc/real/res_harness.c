@@ -36,8 +36,8 @@ int64_t __os_mem_max(void) { return 0; }	/* not on this path */
 static xtc_res_t R;
 static int64_t CAP;		/* set nondeterministically in main */
 int64_t nondet_int64(void);
-static _Atomic int64_t held;	/* units granted and not yet released */
-static _Atomic int done;
+static int64_t held; /* units granted and not yet released */
+static int done;
 
 static void
 actor(void)
@@ -48,15 +48,15 @@ actor(void)
 	if (xtc_res_acquire(&R, XTC_RES_TASKS, n) == XTC_OK) {
 		/* Units held at once by the start load plus the actors: the
 		 * sum the cap bounds, independent of when `used` is read. */
-		u = atomic_fetch_add(&held, n) + n;
+		u = xtc_atomic_fetch_add_i64(&held, n, xtc_mo_seq_cst) + n;
 		__CPROVER_assert(CAP <= 0 || u <= CAP,
 		    "granted units never exceed the cap (no over-admission)");
-		atomic_fetch_sub(&held, n);
+		xtc_atomic_fetch_sub_i64(&held, n, xtc_mo_seq_cst);
 		xtc_res_release(&R, XTC_RES_TASKS, n);
 	}
 	__CPROVER_assert(xtc_res_used(&R, XTC_RES_TASKS) >= 0,
 	    "used never goes negative");
-	atomic_fetch_add(&done, 1);
+	xtc_atomic_fetch_add_i32(&done, 1, xtc_mo_seq_cst);
 }
 
 int
@@ -74,12 +74,12 @@ main(void)
 	/* Start anywhere at or under the cap (a long-running process). */
 	__CPROVER_assume(start >= 0 && (CAP <= 0 || start <= CAP));
 	__CPROVER_assume(CAP != INT64_MAX || start >= INT64_MAX - 3);
-	atomic_store(&R.used[XTC_RES_TASKS], start);
-	atomic_store(&held, start);
+	xtc_atomic_store_i64(&R.used[XTC_RES_TASKS], start, xtc_mo_seq_cst);
+	xtc_atomic_store_i64(&held, start, xtc_mo_seq_cst);
 
 	__CPROVER_ASYNC_1: actor();
 	actor();
-	__CPROVER_assume(atomic_load(&done) == 2);
+	__CPROVER_assume(xtc_atomic_load_i32(&done, xtc_mo_seq_cst) == 2);
 	__CPROVER_assert(xtc_res_used(&R, XTC_RES_TASKS) == start,
 	    "conservation: balanced acquire/release returns used to start");
 	return 0;

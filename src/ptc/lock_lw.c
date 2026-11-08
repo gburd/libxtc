@@ -41,7 +41,6 @@
 #include "loop_int.h"      /* xtc_task::park_requested / park_timer */
 #include "xtc_probes.h"
 
-#include <stdatomic.h>
 #include <string.h>
 
 /* ----- state encoding ----- */
@@ -82,8 +81,8 @@ static XTC_THREAD_LOCAL int               __n_held = 0;
  * room for per-lock bookkeeping.  Enable in test/staging; it has
  * overhead and is not meant for production hot paths. */
 #define LW_TRACK_EDGES 8192u            /* power of two */
-static _Atomic int        __lw_track_on = 0;
-static _Atomic long       __lw_track_viol = 0;
+static int __lw_track_on = 0;
+static long __lw_track_viol = 0;
 static pthread_mutex_t    __lw_track_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t           __lw_track_edge[LW_TRACK_EDGES];  /* 0 == empty */
 static xtc_lwlock_track_fn __lw_track_fn = NULL;
@@ -123,7 +122,7 @@ __lw_track_acquire(const xtc_lwlock_t *acquired)
 	int i;
 	uint16_t b = acquired->tranche;
 
-	if (!atomic_load_explicit(&__lw_track_on, memory_order_relaxed))
+	if (!xtc_atomic_load_i32(&__lw_track_on, xtc_mo_relaxed))
 		return;
 	(void)__xtc_mtx_lock(&__lw_track_mu);
 	for (i = 0; i < __n_held; i++) {
@@ -133,8 +132,8 @@ __lw_track_acquire(const xtc_lwlock_t *acquired)
 		fwd = ((uint32_t)a << 16) | b;
 		rev = ((uint32_t)b << 16) | a;
 		if (__lw_edge_contains(rev)) {
-			atomic_fetch_add_explicit(&__lw_track_viol, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_long(&__lw_track_viol, 1,
+			    xtc_mo_relaxed);
 			if (__lw_track_fn != NULL)
 				__lw_track_fn(a, b, __lw_track_user);
 		}
@@ -147,15 +146,14 @@ __lw_track_acquire(const xtc_lwlock_t *acquired)
 void
 xtc_lwlock_track_enable(int on)
 {
-	atomic_store_explicit(&__lw_track_on, on ? 1 : 0,
-	    memory_order_relaxed);
+	xtc_atomic_store_i32(&__lw_track_on, on ? 1 : 0, xtc_mo_relaxed);
 }
 
 /* PUBLIC: long xtc_lwlock_track_violations __P((void)); */
 long
 xtc_lwlock_track_violations(void)
 {
-	return atomic_load_explicit(&__lw_track_viol, memory_order_relaxed);
+	return xtc_atomic_load_long(&__lw_track_viol, xtc_mo_relaxed);
 }
 
 /* PUBLIC: void xtc_lwlock_track_reset __P((void)); */
@@ -164,7 +162,7 @@ xtc_lwlock_track_reset(void)
 {
 	(void)__xtc_mtx_lock(&__lw_track_mu);
 	memset(__lw_track_edge, 0, sizeof __lw_track_edge);
-	atomic_store_explicit(&__lw_track_viol, 0, memory_order_relaxed);
+	xtc_atomic_store_long(&__lw_track_viol, 0, xtc_mo_relaxed);
 	(void)__xtc_mtx_unlock(&__lw_track_mu);
 }
 
@@ -234,8 +232,7 @@ __held_find(const xtc_lwlock_t *l, xtc_lwlock_mode_t *out_mode)
 static int
 __try_attempt(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 {
-	uint32_t old_state = atomic_load_explicit(&lock->state,
-	    memory_order_relaxed);
+	uint32_t old_state = xtc_atomic_load_u32(&lock->state, xtc_mo_relaxed);
 
 	for (;;) {
 		uint32_t expected = old_state;
@@ -258,9 +255,8 @@ __try_attempt(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 		 * retry from the new state -- exercising the contended
 		 * retry path deterministically. */
 		XTC_INJECTION_POINT("lwlock.acquire.pre_cas");
-		if (atomic_compare_exchange_weak_explicit(&lock->state,
-		    &expected, desired,
-		    memory_order_acquire, memory_order_relaxed)) {
+		if (xtc_atomic_cas_weak_u32(&lock->state, &expected, desired,
+		        xtc_mo_acquire, xtc_mo_relaxed)) {
 			return 1;
 		}
 		old_state = expected;
@@ -272,15 +268,14 @@ static uint32_t
 __release_state(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 {
 	uint32_t old_state, desired;
-	old_state = atomic_load_explicit(&lock->state, memory_order_relaxed);
+	old_state = xtc_atomic_load_u32(&lock->state, xtc_mo_relaxed);
 	for (;;) {
 		if (mode == XTC_LW_EXCLUSIVE)
 			desired = old_state - LW_VAL_EXCLUSIVE;
 		else
 			desired = old_state - LW_VAL_SHARED;
-		if (atomic_compare_exchange_weak_explicit(&lock->state,
-		    &old_state, desired,
-		    memory_order_release, memory_order_relaxed))
+		if (xtc_atomic_cas_weak_u32(&lock->state, &old_state, desired,
+		        xtc_mo_release, xtc_mo_relaxed))
 			return desired;
 	}
 }
@@ -372,7 +367,7 @@ xtc_lwlock_init(xtc_lwlock_t *lock, uint16_t tranche)
 {
 	if (lock == NULL) return XTC_E_INVAL;
 	memset(lock, 0, sizeof *lock);
-	atomic_store_explicit(&lock->state, 0, memory_order_relaxed);
+	xtc_atomic_store_u32(&lock->state, 0, xtc_mo_relaxed);
 	(void)pthread_mutex_init(&lock->wait_mu, NULL);
 	(void)pthread_cond_init (&lock->wait_cv, NULL);
 	lock->tranche = tranche;
@@ -407,12 +402,13 @@ xtc_lwlock_acquire(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 		/* Set HAS_WAITERS on the state.  Use compare_exchange so we
 		 * don't wipe other flags. */
 		{
-			uint32_t s = atomic_load_explicit(&lock->state,
-			    memory_order_acquire);
+			uint32_t s =
+			    xtc_atomic_load_u32(&lock->state, xtc_mo_acquire);
 			while ((s & LW_FLAG_HAS_WAITERS) == 0) {
-				if (atomic_compare_exchange_weak_explicit(&lock->state,
-				    &s, s | LW_FLAG_HAS_WAITERS,
-				    memory_order_release, memory_order_acquire)) break;
+				if (xtc_atomic_cas_weak_u32(&lock->state, &s,
+				        s | LW_FLAG_HAS_WAITERS, xtc_mo_release,
+				        xtc_mo_acquire))
+					break;
 			}
 		}
 		lock->n_waiters++;
@@ -541,12 +537,13 @@ xtc_lwlock_release(xtc_lwlock_t *lock)
 			(void)pthread_cond_broadcast(&lock->wait_cv);
 		} else {
 			/* Clear the HAS_WAITERS flag -- no one is queued. */
-			uint32_t s = atomic_load_explicit(&lock->state,
-			    memory_order_relaxed);
+			uint32_t s =
+			    xtc_atomic_load_u32(&lock->state, xtc_mo_relaxed);
 			while ((s & LW_FLAG_HAS_WAITERS) != 0) {
-				if (atomic_compare_exchange_weak_explicit(&lock->state,
-				    &s, s & ~LW_FLAG_HAS_WAITERS,
-				    memory_order_release, memory_order_relaxed)) break;
+				if (xtc_atomic_cas_weak_u32(&lock->state, &s,
+				        s & ~LW_FLAG_HAS_WAITERS,
+				        xtc_mo_release, xtc_mo_relaxed))
+					break;
 			}
 		}
 		/* Wake any parked fibers (DST): each re-CASes the state and
