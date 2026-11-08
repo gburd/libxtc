@@ -36,7 +36,6 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,7 +53,7 @@
 /* ---- test harness state shared main thread <-> client thread ---- */
 static xtc_app_t         *g_app;
 static pgmock_listener_t  g_listener;
-static _Atomic int        g_shutdown;
+static int g_shutdown;
 static int                g_client_ok;   /* set by the client thread */
 static int                g_port;        /* ephemeral port bound by main */
 
@@ -283,8 +282,8 @@ client_thread(void *arg)
 	ok &= (do_select_1(fd2) == 0);
 
 	/* Two connections were accepted -> two backend procs spawned. */
-	assert(atomic_load(&g_listener.accepted) >= 2);
-	assert(atomic_load(&g_listener.pids_n) >= 2);
+	assert(xtc_atomic_load_i32(&g_listener.accepted, xtc_mo_seq_cst) >= 2);
+	assert(xtc_atomic_load_i32(&g_listener.pids_n, xtc_mo_seq_cst) >= 2);
 	/* ...and they are DISTINCT pids. */
 	assert(!xtc_pid_eq(g_listener.pids[0], g_listener.pids[1]));
 
@@ -295,7 +294,7 @@ client_thread(void *arg)
 
 	/* Ask the postmaster loop to stop; the main thread's xtc_app_run
 	 * returns. */
-	atomic_store(&g_shutdown, 1);
+	xtc_atomic_store_i32(&g_shutdown, 1, xtc_mo_seq_cst);
 	(void)xtc_app_stop(g_app);
 	return NULL;
 }
@@ -346,9 +345,9 @@ main(void)
 	app_opts.n_loops = 1;
 	assert(xtc_app_create(&app_opts, &g_app) == XTC_OK);
 
-	atomic_init(&g_shutdown, 0);
-	atomic_init(&g_listener.accepted, 0);
-	atomic_init(&g_listener.pids_n, 0);
+	xtc_atomic_store_i32(&g_shutdown, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&g_listener.accepted, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&g_listener.pids_n, 0, xtc_mo_relaxed);
 	memset(pid_slots, 0, sizeof pid_slots);
 	g_listener.listen_fd = listen_fd;
 	g_listener.loop = xtc_app_loop(g_app);
@@ -378,8 +377,8 @@ main(void)
 
 	assert(g_client_ok);
 	printf("test_pgmock_smoke: PASS "
-	    "(handshake + SELECT 1, %d conns, 2 distinct backend pids, "
-	    "clean terminate)\n",
-	    atomic_load(&g_listener.accepted));
+	       "(handshake + SELECT 1, %d conns, 2 distinct backend pids, "
+	       "clean terminate)\n",
+	    xtc_atomic_load_i32(&g_listener.accepted, xtc_mo_seq_cst));
 	return 0;
 }

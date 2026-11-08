@@ -254,7 +254,8 @@ dump_state(void)
 	    "durable_lsn %llu wq %s", g_wal->flushing, g_wal->direct,
 	    (unsigned long long)g_wal->next_lsn,
 	    (unsigned long long)g_wal->copied_lsn,
-	    (unsigned long long)atomic_load(&g_wal->durable_lsn),
+	    (unsigned long long)xtc_atomic_load_u64(&g_wal->durable_lsn,
+	        xtc_mo_seq_cst),
 	    g_wal->wq == NULL ? "empty" : "");
 	for (q = g_wal->wq; q != NULL; q = q->next)
 		n++;

@@ -5,7 +5,7 @@
 # bench/rexis_compat/Makefile
 
 CC      = cc
-CFLAGS  = -O3 -std=c11 -Wall -Wextra -D_GNU_SOURCE
+CFLAGS  = -O3 -std=c11 -Wall -Wextra -D_GNU_SOURCE -I../../src/inc
 LDFLAGS = -lpthread
 
 .PHONY: all clean
