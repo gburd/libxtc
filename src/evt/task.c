@@ -75,17 +75,17 @@ static void
 __task_spare_lock(xtc_loop_t *loop)
 {
 	__xtc_unsafe_enter();
-	while (atomic_exchange_explicit(&loop->task_spare_lock, 1,
-	    memory_order_acquire))
-		while (atomic_load_explicit(&loop->task_spare_lock,
-		    memory_order_relaxed))
+	while (
+	    xtc_atomic_exchange_i32(&loop->task_spare_lock, 1, xtc_mo_acquire))
+		while (
+		    xtc_atomic_load_i32(&loop->task_spare_lock, xtc_mo_relaxed))
 			__os_pause();
 }
 
 static void
 __task_spare_unlock(xtc_loop_t *loop)
 {
-	atomic_store_explicit(&loop->task_spare_lock, 0, memory_order_release);
+	xtc_atomic_store_i32(&loop->task_spare_lock, 0, xtc_mo_release);
 	__xtc_unsafe_leave();
 }
 
@@ -97,9 +97,9 @@ __task_spare_push(xtc_loop_t *loop, xtc_task_t *t)
 	__task_spare_lock(loop);
 	t->q_next = loop->task_spare[k];
 	loop->task_spare[k] = t;
-	atomic_store_explicit(&loop->task_spare_n,
-	    atomic_load_explicit(&loop->task_spare_n, memory_order_relaxed) + 1,
-	    memory_order_relaxed);
+	xtc_atomic_store_i32(&loop->task_spare_n,
+	    xtc_atomic_load_i32(&loop->task_spare_n, xtc_mo_relaxed) + 1,
+	    xtc_mo_relaxed);
 	__task_spare_unlock(loop);
 }
 
@@ -112,9 +112,10 @@ __task_spare_pop(xtc_loop_t *loop, int pinned)
 	__task_spare_lock(loop);
 	if ((t = loop->task_spare[k]) != NULL) {
 		loop->task_spare[k] = t->q_next;
-		atomic_store_explicit(&loop->task_spare_n,
-		    atomic_load_explicit(&loop->task_spare_n,
-		    memory_order_relaxed) - 1, memory_order_relaxed);
+		xtc_atomic_store_i32(&loop->task_spare_n,
+		    xtc_atomic_load_i32(&loop->task_spare_n, xtc_mo_relaxed) -
+		        1,
+		    xtc_mo_relaxed);
 	}
 	__task_spare_unlock(loop);
 	return t;
@@ -125,7 +126,7 @@ static int
 __task_retained(xtc_loop_t *loop)
 {
 	return loop->task_free_n +
-	    atomic_load_explicit(&loop->task_spare_n, memory_order_relaxed);
+	    xtc_atomic_load_i32(&loop->task_spare_n, xtc_mo_relaxed);
 }
 
 /* Push a completed task struct onto its loop's free list, or its spare
@@ -178,7 +179,7 @@ __xtc_task_spare_fini(xtc_loop_t *loop)
 			t->q_next = *__task_freelist(loop, k);
 			*__task_freelist(loop, k) = t;
 		}
-	atomic_store_explicit(&loop->task_spare_n, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&loop->task_spare_n, 0, xtc_mo_relaxed);
 }
 
 /* exec.c: count a live unpinned task (its loop's 0 -> 1 wakes sleepers). */
@@ -225,13 +226,12 @@ __task_zero_recycled(xtc_task_t *t)
 		off = at[i] + sz[i];
 	}
 	memset((char *)t + off, 0, sizeof *t - off);
-	atomic_store_explicit(&t->state, XTC_TS_SCHEDULED,
-	    memory_order_relaxed);
-	atomic_store_explicit(&t->park_timer, NULL, memory_order_relaxed);
-	atomic_store_explicit(&t->park_fd, 0, memory_order_relaxed);
-	atomic_store_explicit(&t->park_io, NULL, memory_order_relaxed);
-	atomic_store_explicit(&t->wake_revents, 0, memory_order_relaxed);
-	atomic_store_explicit(&t->wake_pending, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&t->state, XTC_TS_SCHEDULED, xtc_mo_relaxed);
+	xtc_atomic_store_ptr(&t->park_timer, NULL, xtc_mo_relaxed);
+	xtc_atomic_store_i64(&t->park_fd, 0, xtc_mo_relaxed);
+	xtc_atomic_store_ptr(&t->park_io, NULL, xtc_mo_relaxed);
+	xtc_atomic_store_u32(&t->wake_revents, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&t->wake_pending, 0, xtc_mo_relaxed);
 }
 
 /* Allocate a zeroed task struct: reuse a recycled one from the loop's
@@ -344,10 +344,10 @@ __task_release_parts(xtc_task_t *t)
 	 * are normally clear; release them anyway so a recycled struct never
 	 * inherits a timer or an fd tag naming it. */
 	__xtc_task_cancel_park_timer(t);
-	tok = atomic_exchange_explicit(&t->park_fd, __PARK_TOK_NONE,
-	    memory_order_acq_rel);
-	io = atomic_load_explicit(&t->park_io, memory_order_relaxed);
-	atomic_store_explicit(&t->park_io, NULL, memory_order_relaxed);
+	tok = xtc_atomic_exchange_i64(&t->park_fd, __PARK_TOK_NONE,
+	    xtc_mo_acq_rel);
+	io = xtc_atomic_load_ptr(&t->park_io, xtc_mo_relaxed);
+	xtc_atomic_store_ptr(&t->park_io, NULL, xtc_mo_relaxed);
 	if (tok != __PARK_TOK_NONE)
 		(void)__xtc_io_defer_del_fd(io != NULL ? io : t->loop->io,
 		    __park_tok_fd(tok));
@@ -390,11 +390,11 @@ __xtc_task_reclaim(xtc_loop_t *loop, xtc_task_t *t)
 		return;
 	}
 	/* Finished on a thief: hand the struct back to its home loop. */
-	old = atomic_load_explicit(&home->dead_head, memory_order_relaxed);
+	old = xtc_atomic_load_ptr(&home->dead_head, xtc_mo_relaxed);
 	do {
 		t->dead_next = old;
-	} while (!atomic_compare_exchange_weak_explicit(&home->dead_head,
-	    &old, t, memory_order_release, memory_order_relaxed));
+	} while (!xtc_atomic_cas_weak_ptr(&home->dead_head, &old, t,
+	    xtc_mo_release, xtc_mo_relaxed));
 }
 
 /* Recycle the tasks other loops handed back.  Owner thread only; called
@@ -404,11 +404,9 @@ __xtc_task_reclaim_drain(xtc_loop_t *loop)
 {
 	xtc_task_t *t, *n;
 
-	if (atomic_load_explicit(&loop->dead_head,
-	    memory_order_relaxed) == NULL)
+	if (xtc_atomic_load_ptr(&loop->dead_head, xtc_mo_relaxed) == NULL)
 		return;
-	t = atomic_exchange_explicit(&loop->dead_head, NULL,
-	    memory_order_acquire);
+	t = xtc_atomic_exchange_ptr(&loop->dead_head, NULL, xtc_mo_acquire);
 	for (; t != NULL; t = n) {
 		n = t->dead_next;
 		t->dead_next = NULL;
@@ -462,14 +460,12 @@ __xtc_task_spawn_cleanup(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 	t->loop = loop;
 	t->pinned = pinned;
 	t->sched_class = -1;   /* default (implicit) FIFO class */
-	atomic_store_explicit(&t->state, XTC_TS_SCHEDULED,
-	    memory_order_relaxed);   /* init, before the task is published */
+	xtc_atomic_store_i32(&t->state, XTC_TS_SCHEDULED,
+	    xtc_mo_relaxed); /* init, before the task is published */
 	t->q_next = NULL;
-	atomic_store_explicit(&t->park_timer, NULL,
-	    memory_order_relaxed);
-	atomic_store_explicit(&t->park_fd, __PARK_TOK_NONE,
-	    memory_order_relaxed);
-	atomic_store_explicit(&t->wake_revents, 0, memory_order_relaxed);
+	xtc_atomic_store_ptr(&t->park_timer, NULL, xtc_mo_relaxed);
+	xtc_atomic_store_i64(&t->park_fd, __PARK_TOK_NONE, xtc_mo_relaxed);
+	xtc_atomic_store_u32(&t->wake_revents, 0, xtc_mo_relaxed);
 	t->cleanup = cleanup;
 	t->cleanup_arg = cleanup_arg;
 
@@ -485,8 +481,7 @@ __xtc_task_spawn_cleanup(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 		if (loop->all_tasks != NULL)
 			loop->all_tasks->all_prev = t;
 		loop->all_tasks = t;
-		atomic_fetch_add_explicit(&loop->n_alive, 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&loop->n_alive, 1, xtc_mo_relaxed);
 		if (!pinned && loop->exec != NULL)
 			__xtc_exec_mig_alive(loop, 1);
 		(void)__xtc_loop_enqueue(loop, t);
@@ -513,7 +508,7 @@ __xtc_task_spawn_cleanup(xtc_loop_t *loop, xtc_task_fn fn, void *user,
 		}
 	}
 
-	atomic_fetch_add_explicit(&loop->n_alive, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&loop->n_alive, 1, xtc_mo_relaxed);
 	if (!pinned && loop->exec != NULL)
 		__xtc_exec_mig_alive(loop, 1);
 	return __xtc_inbox_push(loop, XTC_INB_PUBLISH, t);
@@ -583,16 +578,16 @@ static int
 __task_wake_claim(xtc_task_t *t)
 {
 	int expect = XTC_TS_PARKED;
-	if (atomic_compare_exchange_strong(&t->state, &expect,
-	    XTC_TS_SCHEDULED))
+	if (xtc_atomic_cas_i32(&t->state, &expect, XTC_TS_SCHEDULED,
+	        xtc_mo_seq_cst, xtc_mo_seq_cst))
 		return 1;
-	atomic_store(&t->wake_pending, 1);
-	if (atomic_load(&t->state) != XTC_TS_PARKED ||
-	    !atomic_exchange(&t->wake_pending, 0))
+	xtc_atomic_store_i32(&t->wake_pending, 1, xtc_mo_seq_cst);
+	if (xtc_atomic_load_i32(&t->state, xtc_mo_seq_cst) != XTC_TS_PARKED ||
+	    !xtc_atomic_exchange_i32(&t->wake_pending, 0, xtc_mo_seq_cst))
 		return 0;
 	expect = XTC_TS_PARKED;
-	return atomic_compare_exchange_strong(&t->state, &expect,
-	    XTC_TS_SCHEDULED);
+	return xtc_atomic_cas_i32(&t->state, &expect, XTC_TS_SCHEDULED,
+	    xtc_mo_seq_cst, xtc_mo_seq_cst);
 }
 
 /*
@@ -705,10 +700,9 @@ __xtc_task_park_on_timer_at(xtc_task_t *self, int64_t deadline_ns)
 
 	if (self == NULL)
 		return XTC_E_INVAL;
-	if (atomic_load_explicit(&self->park_timer,
-	    memory_order_relaxed) != NULL ||
-	    atomic_load_explicit(&self->park_fd, memory_order_relaxed) !=
-	    __PARK_TOK_NONE)
+	if (xtc_atomic_load_ptr(&self->park_timer, xtc_mo_relaxed) != NULL ||
+	    xtc_atomic_load_i64(&self->park_fd, xtc_mo_relaxed) !=
+	        __PARK_TOK_NONE)
 		return XTC_E_INVAL;     /* already parked */
 
 	if ((rc = __os_calloc(1, sizeof(*t), (void **)&t)) != XTC_OK)
@@ -718,10 +712,11 @@ __xtc_task_park_on_timer_at(xtc_task_t *self, int64_t deadline_ns)
 	t->user = NULL;
 	t->waiter = self;
 	t->heap_idx = -1;
-	t->cancelled = 0;
-	t->fired = 0;
+	xtc_atomic_store_i32(&t->cancelled, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&t->fired, 0, xtc_mo_seq_cst);
 	t->from_slab = 0;
-	atomic_store_explicit(&t->refs, 2, memory_order_relaxed);  /* heap + park_timer slot */
+	xtc_atomic_store_i32(&t->refs, 2,
+	    xtc_mo_relaxed); /* heap + park_timer slot */
 	/*
 	 * Arm the timer on the loop this fiber is RUNNING on, not its home
 	 * loop (self->loop).  Under the multi-loop executor a migratable
@@ -759,8 +754,7 @@ __xtc_task_park_on_timer_at(xtc_task_t *self, int64_t deadline_ns)
 		 * third owner that loop_fini would double-free.
 		 */
 	}
-	atomic_store_explicit(&self->park_timer, t,
-	    memory_order_relaxed);
+	xtc_atomic_store_ptr(&self->park_timer, t, xtc_mo_relaxed);
 	return XTC_OK;
 }
 
@@ -781,8 +775,8 @@ __xtc_task_cancel_park_timer(xtc_task_t *self)
 		 * the node cancelled first so the loop's heap-pop reclaims the
 		 * heap reference; the last of the two frees it.
 		 */
-		xtc_timer_t *pt = atomic_exchange_explicit(&self->park_timer,
-		    NULL, memory_order_relaxed);
+		xtc_timer_t *pt = xtc_atomic_exchange_ptr(&self->park_timer,
+		    NULL, xtc_mo_relaxed);
 		if (pt != NULL) {
 			(void)xtc_timer_cancel(pt);
 			__xtc_timer_park_release(pt);
@@ -802,19 +796,17 @@ xtc_task_park_on_fd(xtc_task_t *self, int fd, uint32_t interest)
 	int rc;
 	if (self == NULL || fd < 0 || interest == 0)
 		return XTC_E_INVAL;
-	if (atomic_load_explicit(&self->park_timer,
-	    memory_order_relaxed) != NULL ||
-	    atomic_load_explicit(&self->park_fd, memory_order_relaxed) !=
-	    __PARK_TOK_NONE)
+	if (xtc_atomic_load_ptr(&self->park_timer, xtc_mo_relaxed) != NULL ||
+	    xtc_atomic_load_i64(&self->park_fd, xtc_mo_relaxed) !=
+	        __PARK_TOK_NONE)
 		return XTC_E_INVAL;
 	if ((rc = xtc_io_reg_fd(self->loop->io, fd, interest, self)) != XTC_OK)
 		return rc;
 	/* park_io first; the release-store of park_fd publishes it, so a
 	 * dispatch's io check sees this registry (see park_io). */
-	atomic_store_explicit(&self->park_io, self->loop->io,
-	    memory_order_relaxed);
-	atomic_store_explicit(&self->park_fd, __park_tok(self, fd),
-	    memory_order_release);
+	xtc_atomic_store_ptr(&self->park_io, self->loop->io, xtc_mo_relaxed);
+	xtc_atomic_store_i64(&self->park_fd, __park_tok(self, fd),
+	    xtc_mo_release);
 	return XTC_OK;
 }
 
@@ -837,8 +829,7 @@ __xtc_loop_dispatch_event(xtc_loop_t *loop, xtc_io_event_t *ev)
 	t = (xtc_task_t *)ev->tag;
 	XTC_PROBE_IO_DISPATCH((int)loop->id, ev->fd, ev->flags, (uintptr_t)t);
 	/* Record the io flags so the parker knows what fired. */
-	atomic_fetch_or_explicit(&t->wake_revents, ev->flags,
-	    memory_order_relaxed);
+	xtc_atomic_fetch_or_u32(&t->wake_revents, ev->flags, xtc_mo_relaxed);
 	/*
 	 * Drop the fd registration before waking; the task may register a
 	 * fresh one when it runs.
@@ -858,10 +849,10 @@ __xtc_loop_dispatch_event(xtc_loop_t *loop, xtc_io_event_t *ev)
 	 */
 	if (ev->fd >= 0) {
 		/* park_fd's acquire orders the park_io read after it. */
-		int64_t claimed = atomic_load_explicit(&t->park_fd,
-		    memory_order_acquire);
+		int64_t claimed =
+		    xtc_atomic_load_i64(&t->park_fd, xtc_mo_acquire);
 		xtc_io_t *pio =
-		    atomic_load_explicit(&t->park_io, memory_order_relaxed);
+		    xtc_atomic_load_ptr(&t->park_io, xtc_mo_relaxed);
 		/*
 		 * Same fd is not the same registration.  A migratable task can
 		 * be woken another way, move to loop B and park on this fd
@@ -876,16 +867,15 @@ __xtc_loop_dispatch_event(xtc_loop_t *loop, xtc_io_event_t *ev)
 		 * the loads and the CAS, is a different value and survives.
 		 */
 		if (__park_tok_fd(claimed) == ev->fd && pio == loop->io)
-			(void)atomic_compare_exchange_strong_explicit(
-			    &t->park_fd, &claimed, __PARK_TOK_NONE,
-			    memory_order_acq_rel, memory_order_relaxed);
+			(void)xtc_atomic_cas_i64(&t->park_fd, &claimed,
+			    __PARK_TOK_NONE, xtc_mo_acq_rel, xtc_mo_relaxed);
 		(void)xtc_io_del_fd(loop->io, ev->fd);
 	} else {
-		int64_t claimed = atomic_exchange_explicit(&t->park_fd,
-		    __PARK_TOK_NONE, memory_order_acq_rel);
+		int64_t claimed = xtc_atomic_exchange_i64(&t->park_fd,
+		    __PARK_TOK_NONE, xtc_mo_acq_rel);
 		if (claimed != __PARK_TOK_NONE) {
-			xtc_io_t *pio = atomic_load_explicit(&t->park_io,
-			    memory_order_relaxed);
+			xtc_io_t *pio =
+			    xtc_atomic_load_ptr(&t->park_io, xtc_mo_relaxed);
 			(void)xtc_io_del_fd(pio != NULL ? pio : loop->io,
 			    __park_tok_fd(claimed));
 		}

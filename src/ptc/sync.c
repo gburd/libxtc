@@ -22,7 +22,6 @@
 #include "xtc_probes.h"
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -135,9 +134,9 @@ cv_wait_until(pthread_cond_t *cv, pthread_mutex_t *lock,
 #define sync_spin_hint() __os_pause()
 #endif
 
-static _Atomic int g_sync_spin_cap = -1;
-static _Atomic int g_sync_spin_scale_pm;   /* polls per tuned poll, x1000 */
-static _Atomic int g_sync_cal_word;
+static int g_sync_spin_cap = -1;
+static int g_sync_spin_scale_pm; /* polls per tuned poll, x1000 */
+static int g_sync_cal_word;
 
 static int
 sync_spin_cap(void)
@@ -145,11 +144,11 @@ sync_spin_cap(void)
 	int v;
 	if (__xtc_sim_active())
 		return 0;
-	v = atomic_load_explicit(&g_sync_spin_cap, memory_order_relaxed);
+	v = xtc_atomic_load_i32(&g_sync_spin_cap, xtc_mo_relaxed);
 	if (v < 0) {
 		v = __os_ncpus();
 		v = v > 1 ? (v / 4 > 0 ? v / 4 : 1) : 0;
-		atomic_store_explicit(&g_sync_spin_cap, v, memory_order_relaxed);
+		xtc_atomic_store_i32(&g_sync_spin_cap, v, xtc_mo_relaxed);
 	}
 	return v;
 }
@@ -172,8 +171,8 @@ sync_spin_calibrate(void)
 			return 1000;
 		for (i = 0; i < SYNC_CAL_POLLS; i++) {
 			sync_spin_hint();
-			sink += atomic_load_explicit(&g_sync_cal_word,
-			    memory_order_relaxed);
+			sink += xtc_atomic_load_i32(&g_sync_cal_word,
+			    xtc_mo_relaxed);
 		}
 		if (__os_clock_mono(&t1) != XTC_OK)
 			return 1000;
@@ -189,7 +188,7 @@ sync_spin_calibrate(void)
 		pm = SYNC_SCALE_MIN_PM;
 	if (pm > 64 * 1000)
 		pm = 64 * 1000;
-	atomic_store_explicit(&g_sync_spin_scale_pm, pm, memory_order_relaxed);
+	xtc_atomic_store_i32(&g_sync_spin_scale_pm, pm, xtc_mo_relaxed);
 	return pm;
 }
 
@@ -197,8 +196,7 @@ sync_spin_calibrate(void)
 static int
 sync_spin_rounds(int tuned)
 {
-	int pm = atomic_load_explicit(&g_sync_spin_scale_pm,
-	    memory_order_relaxed);
+	int pm = xtc_atomic_load_i32(&g_sync_spin_scale_pm, xtc_mo_relaxed);
 	if (pm == 0)
 		pm = sync_spin_calibrate();
 	return (int)((int64_t)tuned * pm / 1000);
@@ -206,22 +204,22 @@ sync_spin_rounds(int tuned)
 
 /* Enter the spin if fewer than the cap are spinning; 1 if admitted. */
 static int
-sync_spin_enter(_Atomic int *spinners)
+sync_spin_enter(int *spinners)
 {
 	int cap = sync_spin_cap();
 	if (cap == 0)
 		return 0;
-	if (atomic_fetch_add_explicit(spinners, 1, memory_order_relaxed) >= cap) {
-		atomic_fetch_sub_explicit(spinners, 1, memory_order_relaxed);
+	if (xtc_atomic_fetch_add_i32(spinners, 1, xtc_mo_relaxed) >= cap) {
+		xtc_atomic_fetch_sub_i32(spinners, 1, xtc_mo_relaxed);
 		return 0;
 	}
 	return 1;
 }
 
 static void
-sync_spin_leave(_Atomic int *spinners)
+sync_spin_leave(int *spinners)
 {
-	atomic_fetch_sub_explicit(spinners, 1, memory_order_relaxed);
+	xtc_atomic_fetch_sub_i32(spinners, 1, xtc_mo_relaxed);
 }
 
 /*
@@ -471,14 +469,13 @@ fw_kill_deliver(int *masked)
 struct xtc_notify {
 	pthread_mutex_t lock;
 	pthread_cond_t  cv;
-	_Atomic int     stored;       /* one-shot stored signal; under lock,
+	int stored;                   /* one-shot stored signal; under lock,
 	                               * peeked by off-loop spinners */
 	struct fw_queue wq;           /* fiber waiters */
 };
 
-#define NT_STORED(n) atomic_load_explicit(&(n)->stored, memory_order_relaxed)
-#define NT_SET(n, v) \
-	atomic_store_explicit(&(n)->stored, (v), memory_order_relaxed)
+#define NT_STORED(n) xtc_atomic_load_i32(&(n)->stored, xtc_mo_relaxed)
+#define NT_SET(n, v) xtc_atomic_store_i32(&(n)->stored, (v), xtc_mo_relaxed)
 
 /*
  * An off-loop thread that waits on a notify without a deadline first polls
@@ -495,7 +492,7 @@ struct xtc_notify {
 #ifndef SYNC_NOTIFY_SPIN_ROUNDS
 #define SYNC_NOTIFY_SPIN_ROUNDS 4096
 #endif
-static _Atomic int g_notify_spinners;
+static int g_notify_spinners;
 
 /* Hand one signal to the oldest fiber waiter, else store it for the next
  * wait (under the lock).  Direct hand-off, so N signals reach N parked
@@ -827,8 +824,8 @@ xtc_sem_count(const xtc_sem_t *s)
 /* ----- abort_source ---------------------------------------------- */
 
 struct xtc_abort_source {
-	_Atomic int  fired;
-	_Atomic int  reason;
+	int fired;
+	int reason;
 };
 
 int
@@ -839,8 +836,8 @@ xtc_abort_source_create(xtc_abort_source_t **out)
 	if (out == NULL) return XTC_E_INVAL;
 	if ((rc = __os_calloc(1, sizeof *s, (void **)&s)) != XTC_OK)
 		return rc;
-	atomic_store_explicit(&s->fired, 0, memory_order_relaxed);
-	atomic_store_explicit(&s->reason, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&s->fired, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&s->reason, 0, xtc_mo_relaxed);
 	*out = s;
 	return XTC_OK;
 }
@@ -855,8 +852,8 @@ int
 xtc_abort_source_fire(xtc_abort_source_t *s, int reason)
 {
 	if (s == NULL) return XTC_E_INVAL;
-	atomic_store_explicit(&s->reason, reason, memory_order_relaxed);
-	atomic_store_explicit(&s->fired, 1, memory_order_release);
+	xtc_atomic_store_i32(&s->reason, reason, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&s->fired, 1, xtc_mo_release);
 	return XTC_OK;
 }
 
@@ -872,14 +869,14 @@ int
 xtc_abort_token_is_aborted(const xtc_abort_token_t *t)
 {
 	if (t == NULL || t->src == NULL) return 0;
-	return atomic_load_explicit(&t->src->fired, memory_order_acquire);
+	return xtc_atomic_load_i32(&t->src->fired, xtc_mo_acquire);
 }
 
 int
 xtc_abort_token_reason(const xtc_abort_token_t *t)
 {
 	if (t == NULL || t->src == NULL) return 0;
-	return atomic_load_explicit(&t->src->reason, memory_order_relaxed);
+	return xtc_atomic_load_i32(&t->src->reason, xtc_mo_relaxed);
 }
 
 /* ----- amutex (parking mutex) -----------------------------------
@@ -913,11 +910,11 @@ xtc_abort_token_reason(const xtc_abort_token_t *t)
  * xtc_arwlock and sync_obj_alloc. */
 struct xtc_amutex {
 	pthread_mutex_t       lock;
-	_Atomic int           held;      /* written under lock; spinners peek */
+	int held;                        /* written under lock; spinners peek */
 	int                   recursive; /* XTC_AMUTEX_RECURSIVE */
 	int                   cv_waiters; /* threads asleep on cv */
 	struct fw_queue       wq;        /* fiber waiters */
-	_Atomic int           spinners;  /* threads in the off-loop spin */
+	int spinners;                    /* threads in the off-loop spin */
 	int                   count;     /* recursion depth */
 	int                   wake_skips; /* releases gated since a wake */
 	int                   handoff;   /* next release grants the head */
@@ -931,9 +928,8 @@ struct xtc_amutex {
 	pthread_cond_t        cv;        /* thread (non-fiber) waiters */
 };
 
-#define AM_HELD(m) atomic_load_explicit(&(m)->held, memory_order_relaxed)
-#define AM_SET(m, v) \
-	atomic_store_explicit(&(m)->held, (v), memory_order_relaxed)
+#define AM_HELD(m) xtc_atomic_load_i32(&(m)->held, xtc_mo_relaxed)
+#define AM_SET(m, v) xtc_atomic_store_i32(&(m)->held, (v), xtc_mo_relaxed)
 
 /* Wake ONE sleeping thread waiter (under lock).  The woken thread
  * re-tests: a running thread may have taken the lock first (barging,
@@ -964,7 +960,7 @@ amutex_wake_thread_locked(xtc_amutex_t *m)
 	if (m->cv_waiters == 0)
 		return;
 	if (SYNC_AM_SKIP_MAX > 0 &&
-	    atomic_load_explicit(&m->spinners, memory_order_relaxed) > 0 &&
+	    xtc_atomic_load_i32(&m->spinners, xtc_mo_relaxed) > 0 &&
 	    m->wake_skips < SYNC_AM_SKIP_MAX) {
 		m->wake_skips++;
 		return;
@@ -1368,30 +1364,29 @@ xtc_amutex_unlock(xtc_amutex_t *m)
  * txns/s); with this order and line-aligned objects it gains 38%. */
 struct xtc_arwlock {
 	pthread_mutex_t        lock;
-	_Atomic int            readers;   /* active shared holders */
-	_Atomic int            writer;    /* 1 if exclusive held */
+	int readers;                       /* active shared holders */
+	int writer;                        /* 1 if exclusive held */
 	int                    rd_waiters; /* threads asleep on cv */
 	int                    wr_waiters; /* threads asleep on wcv */
 	struct fw_queue        wq;        /* fiber waiters */
 	int                    last_excl; /* the last release was exclusive */
-	_Atomic int            spinners;  /* threads in the off-loop spin */
+	int spinners;                     /* threads in the off-loop spin */
 	pthread_cond_t         cv;        /* off-loop shared waiters */
 	pthread_cond_t         wcv;       /* off-loop exclusive waiters */
 };
 
 /* readers / writer are written under lock; spinners peek without it. */
-#define ARW_R(r) atomic_load_explicit(&(r)->readers, memory_order_relaxed)
-#define ARW_W(r) atomic_load_explicit(&(r)->writer, memory_order_relaxed)
+#define ARW_R(r) xtc_atomic_load_i32(&(r)->readers, xtc_mo_relaxed)
+#define ARW_W(r) xtc_atomic_load_i32(&(r)->writer, xtc_mo_relaxed)
 
 /* Take one hold in `mode` (under r->lock). */
 static void
 __arw_take(xtc_arwlock_t *r, int mode)
 {
 	if (mode == ARW_EXCL)
-		atomic_store_explicit(&r->writer, 1, memory_order_relaxed);
+		xtc_atomic_store_i32(&r->writer, 1, xtc_mo_relaxed);
 	else
-		atomic_store_explicit(&r->readers, ARW_R(r) + 1,
-		    memory_order_relaxed);
+		xtc_atomic_store_i32(&r->readers, ARW_R(r) + 1, xtc_mo_relaxed);
 }
 
 int
@@ -1478,10 +1473,9 @@ __arw_release_locked(xtc_arwlock_t *r)
 	if ((r->rd_waiters | r->wr_waiters) != 0)
 		r->last_excl = ARW_W(r);   /* only the wake phase reads it */
 	if (ARW_W(r))
-		atomic_store_explicit(&r->writer, 0, memory_order_relaxed);
+		xtc_atomic_store_i32(&r->writer, 0, xtc_mo_relaxed);
 	else if (ARW_R(r) > 0)
-		atomic_store_explicit(&r->readers, ARW_R(r) - 1,
-		    memory_order_relaxed);
+		xtc_atomic_store_i32(&r->readers, ARW_R(r) - 1, xtc_mo_relaxed);
 }
 
 /* Can an off-loop waiter take `mode` now (under r->lock)? */

@@ -35,7 +35,6 @@
 #include "xtc_probes.h"
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -72,7 +71,7 @@ struct lock_entry {
 	xtc_waker_t        waker;         /* fiber waiter (is_fiber == 1) */
 	int                is_fiber;      /* 0 = thread/cv, 1 = fiber/waker */
 	int                granted;
-	_Atomic int        aborted;
+	int aborted;
 	int                from_pool;     /* 1 = recycle to slab, 0 = free() */
 	struct lock_entry *prev;
 	struct lock_entry *next;
@@ -99,10 +98,10 @@ struct locker_rec {
 	int64_t            ctime_ns;
 	int64_t            timeout_ns;       /* -1 = no expiry */
 	int64_t            deadline_ns;      /* ctime_ns + timeout_ns; -1 if none */
-	_Atomic int        n_held;
-	_Atomic int        n_write_held;     /* X / IX / IWR / WW */
-	_Atomic int        aborted;
-	_Atomic int        failed;
+	int n_held;
+	int n_write_held; /* X / IX / IWR / WW */
+	int aborted;
+	int failed;
 	struct locker_rec *next;
 };
 
@@ -123,22 +122,22 @@ struct xtc_lockmgr {
 
 	pthread_mutex_t        locker_lock;
 	struct locker_rec     *locker_table[256];
-	_Atomic uint64_t       next_locker;
-	_Atomic int            n_lockers;
+	uint64_t next_locker;
+	int n_lockers;
 
 	struct lock_pool       pool;
 
-	_Atomic int            n_held;
-	_Atomic int            n_waiting;
-	_Atomic int            n_objects;
-	_Atomic uint64_t       n_acquires;
-	_Atomic uint64_t       n_releases;
-	_Atomic uint64_t       n_deadlocks_found;
-	_Atomic uint64_t       n_timeouts;
+	int n_held;
+	int n_waiting;
+	int n_objects;
+	uint64_t n_acquires;
+	uint64_t n_releases;
+	uint64_t n_deadlocks_found;
+	uint64_t n_timeouts;
 
 	pthread_t              detector_thread;
 	int                    detector_running;
-	_Atomic int            detector_stop;
+	int detector_stop;
 };
 
 /* ----- helpers ----------------------------------------------- */
@@ -265,8 +264,8 @@ xtc_lockmgr_id(xtc_lockmgr_t *m, xtc_locker_t *out)
 	int rc, b;
 	if (m == NULL || out == NULL) return XTC_E_INVAL;
 	if ((rc = __os_calloc(1, sizeof *r, (void **)&r)) != XTC_OK) return rc;
-	r->id = atomic_fetch_add_explicit(&m->next_locker, 1,
-	    memory_order_relaxed) + 1;
+	r->id =
+	    xtc_atomic_fetch_add_u64(&m->next_locker, 1, xtc_mo_relaxed) + 1;
 	r->ctime_ns = __lockmgr_now_ns();
 	r->timeout_ns = -1;
 	r->deadline_ns = -1;
@@ -275,7 +274,7 @@ xtc_lockmgr_id(xtc_lockmgr_t *m, xtc_locker_t *out)
 	r->next = m->locker_table[b];
 	m->locker_table[b] = r;
 	(void)__xtc_mtx_unlock(&m->locker_lock);
-	atomic_fetch_add_explicit(&m->n_lockers, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&m->n_lockers, 1, xtc_mo_relaxed);
 	*out = r->id;
 	return XTC_OK;
 }
@@ -309,8 +308,8 @@ xtc_lockmgr_id_free(xtc_lockmgr_t *m, xtc_locker_t id)
 			*link = r->next;
 			(void)__xtc_mtx_unlock(&m->locker_lock);
 			__os_free(r);
-			atomic_fetch_sub_explicit(&m->n_lockers, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_sub_i32(&m->n_lockers, 1,
+			    xtc_mo_relaxed);
 			return XTC_OK;
 		}
 	}
@@ -347,7 +346,7 @@ __obj_get(xtc_lockmgr_t *m, struct lock_partition *p, const void *key,
 	o->hash = hash;
 	o->next = p->table;
 	p->table = o;
-	atomic_fetch_add_explicit(&m->n_objects, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&m->n_objects, 1, xtc_mo_relaxed);
 	return o;
 }
 
@@ -361,7 +360,7 @@ __obj_maybe_free(xtc_lockmgr_t *m, struct lock_partition *p, struct lock_obj *o)
 	}
 	__os_free(o->key);
 	__os_free(o);
-	atomic_fetch_sub_explicit(&m->n_objects, 1, memory_order_relaxed);
+	xtc_atomic_fetch_sub_i32(&m->n_objects, 1, xtc_mo_relaxed);
 }
 
 /* ----- conflict checks ------------------------------------- */
@@ -466,8 +465,7 @@ xtc_lockmgr_destroy(xtc_lockmgr_t *m)
 	struct lock_entry *e;
 	if (m == NULL) return;
 	if (m->detector_running) {
-		atomic_store_explicit(&m->detector_stop, 1,
-		    memory_order_release);
+		xtc_atomic_store_i32(&m->detector_stop, 1, xtc_mo_release);
 		(void)pthread_join(m->detector_thread, NULL);
 	}
 	for (i = 0; i < m->n_parts; i++) {
@@ -554,9 +552,9 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 				lr = __locker_find(m, locker);
 				(void)__xtc_mtx_unlock(&m->locker_lock);
 				if (lr)
-					atomic_fetch_add_explicit(
+					xtc_atomic_fetch_add_i32(
 					    &lr->n_write_held, dw,
-					    memory_order_relaxed);
+					    xtc_mo_relaxed);
 			}
 			prior->mode = mode;
 			return XTC_OK;
@@ -585,17 +583,17 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 		e->next = o->granted;
 		if (o->granted) o->granted->prev = e;
 		o->granted = e;
-		atomic_fetch_add_explicit(&m->n_held, 1, memory_order_relaxed);
-		atomic_fetch_add_explicit(&m->n_acquires, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&m->n_held, 1, xtc_mo_relaxed);
+		xtc_atomic_fetch_add_u64(&m->n_acquires, 1, xtc_mo_relaxed);
 		(void)__xtc_mtx_lock(&m->locker_lock);
 		lr = __locker_find(m, locker);
 		(void)__xtc_mtx_unlock(&m->locker_lock);
 		if (lr) {
-			atomic_fetch_add_explicit(&lr->n_held, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&lr->n_held, 1,
+			    xtc_mo_relaxed);
 			if (__is_write_mode(mode))
-				atomic_fetch_add_explicit(&lr->n_write_held, 1,
-				    memory_order_relaxed);
+				xtc_atomic_fetch_add_i32(&lr->n_write_held, 1,
+				    xtc_mo_relaxed);
 		}
 		return XTC_OK;
 	}
@@ -621,7 +619,7 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 		else                 o->waiting        = e;
 		o->waiting_tail = e;
 	}
-	atomic_fetch_add_explicit(&m->n_waiting, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&m->n_waiting, 1, xtc_mo_relaxed);
 
 	/* If detect-on-block, kick the detector synchronously. */
 	if (m->opts.detect_mode == XTC_LOCK_DETECT_ON_BLOCK) {
@@ -663,8 +661,7 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 				rc = XTC_E_ABORTED;
 				break;
 			}
-			if (atomic_load_explicit(&e->aborted,
-			    memory_order_acquire)) {
+			if (xtc_atomic_load_i32(&e->aborted, xtc_mo_acquire)) {
 				rc = XTC_E_DEADLK;
 				break;
 			}
@@ -676,9 +673,8 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 					 * raced it (checked above), so this is
 					 * a genuine timeout. */
 					rc = XTC_E_AGAIN;
-					atomic_fetch_add_explicit(
-					    &m->n_timeouts, 1,
-					    memory_order_relaxed);
+					xtc_atomic_fetch_add_u64(&m->n_timeouts,
+					    1, xtc_mo_relaxed);
 					break;
 				}
 				/* Re-arm a fresh timer each park.  A prior
@@ -724,8 +720,7 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 		XTC_PROBE_LOCK_WAIT_START((uintptr_t)o, XTC_PROBE_LOCK_LOCKMGR,
 		    (int)mode, (uintptr_t)0);
 		for (;;) {
-			if (atomic_load_explicit(&e->aborted,
-			    memory_order_acquire)) {
+			if (xtc_atomic_load_i32(&e->aborted, xtc_mo_acquire)) {
 				rc = XTC_E_DEADLK;
 				break;
 			}
@@ -744,12 +739,11 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 				wait_rc = pthread_cond_timedwait(&e->cv,
 				    &p->lock, &ts);
 				if (wait_rc != 0 && !e->granted &&
-				    !atomic_load_explicit(&e->aborted,
-				        memory_order_acquire)) {
+				    !xtc_atomic_load_i32(&e->aborted,
+				        xtc_mo_acquire)) {
 					rc = XTC_E_AGAIN;
-					atomic_fetch_add_explicit(
-					    &m->n_timeouts, 1,
-					    memory_order_relaxed);
+					xtc_atomic_fetch_add_u64(&m->n_timeouts,
+					    1, xtc_mo_relaxed);
 					break;
 				}
 			}
@@ -768,24 +762,22 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 		else         o->waiting    = e->next;
 		if (e->next) e->next->prev = e->prev;
 		else         o->waiting_tail = e->prev;
-		atomic_fetch_sub_explicit(&m->n_waiting, 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_sub_i32(&m->n_waiting, 1, xtc_mo_relaxed);
 		__entry_release(m, e);
 		__obj_maybe_free(m, p, o);
 	} else {
-		atomic_fetch_sub_explicit(&m->n_waiting, 1,
-		    memory_order_relaxed);
-		atomic_fetch_add_explicit(&m->n_held, 1, memory_order_relaxed);
-		atomic_fetch_add_explicit(&m->n_acquires, 1, memory_order_relaxed);
+		xtc_atomic_fetch_sub_i32(&m->n_waiting, 1, xtc_mo_relaxed);
+		xtc_atomic_fetch_add_i32(&m->n_held, 1, xtc_mo_relaxed);
+		xtc_atomic_fetch_add_u64(&m->n_acquires, 1, xtc_mo_relaxed);
 		(void)__xtc_mtx_lock(&m->locker_lock);
 		lr = __locker_find(m, locker);
 		(void)__xtc_mtx_unlock(&m->locker_lock);
 		if (lr) {
-			atomic_fetch_add_explicit(&lr->n_held, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&lr->n_held, 1,
+			    xtc_mo_relaxed);
 			if (__is_write_mode(mode))
-				atomic_fetch_add_explicit(&lr->n_write_held, 1,
-				    memory_order_relaxed);
+				xtc_atomic_fetch_add_i32(&lr->n_write_held, 1,
+				    xtc_mo_relaxed);
 		}
 	}
 	if (killed_granted) {
@@ -850,24 +842,23 @@ __release_entry_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 	struct locker_rec *lr;
 
 	if (e->granted) {
-		atomic_fetch_sub_explicit(&m->n_held, 1, memory_order_relaxed);
-		atomic_fetch_add_explicit(&m->n_releases, 1, memory_order_relaxed);
+		xtc_atomic_fetch_sub_i32(&m->n_held, 1, xtc_mo_relaxed);
+		xtc_atomic_fetch_add_u64(&m->n_releases, 1, xtc_mo_relaxed);
 		(void)__xtc_mtx_lock(&m->locker_lock);
 		lr = __locker_find(m, e->locker);
 		(void)__xtc_mtx_unlock(&m->locker_lock);
 		if (lr) {
-			atomic_fetch_sub_explicit(&lr->n_held, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_sub_i32(&lr->n_held, 1,
+			    xtc_mo_relaxed);
 			if (__is_write_mode(e->mode))
-				atomic_fetch_sub_explicit(&lr->n_write_held, 1,
-				    memory_order_relaxed);
+				xtc_atomic_fetch_sub_i32(&lr->n_write_held, 1,
+				    xtc_mo_relaxed);
 		}
 		if (e->prev) e->prev->next = e->next;
 		else         o->granted    = e->next;
 		if (e->next) e->next->prev = e->prev;
 	} else {
-		atomic_fetch_sub_explicit(&m->n_waiting, 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_sub_i32(&m->n_waiting, 1, xtc_mo_relaxed);
 		if (e->prev) e->prev->next = e->next;
 		else         o->waiting    = e->next;
 		if (e->next) e->next->prev = e->prev;
@@ -962,8 +953,8 @@ xtc_lock_release_all(xtc_lockmgr_t *m, xtc_locker_t locker)
 			for (e = o->waiting; e != NULL; e = ne) {
 				ne = e->next;
 				if (e->locker == locker) {
-					atomic_store_explicit(&e->aborted, 1,
-					    memory_order_release);
+					xtc_atomic_store_i32(&e->aborted, 1,
+					    xtc_mo_release);
 					__entry_wake(e);
 				}
 			}
@@ -1060,11 +1051,11 @@ xtc_lock_upgrade(xtc_lockmgr_t *m, xtc_locker_t locker,
 		lr = __locker_find(m, locker);
 		(void)__xtc_mtx_unlock(&m->locker_lock);
 		if (lr && !__is_write_mode(cur->mode) && __is_write_mode(new_mode))
-			atomic_fetch_add_explicit(&lr->n_write_held, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&lr->n_write_held, 1,
+			    xtc_mo_relaxed);
 		else if (lr && __is_write_mode(cur->mode) && !__is_write_mode(new_mode))
-			atomic_fetch_sub_explicit(&lr->n_write_held, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_sub_i32(&lr->n_write_held, 1,
+			    xtc_mo_relaxed);
 		cur->mode = new_mode;
 	}
 	(void)__xtc_mtx_unlock(&p->lock);
@@ -1103,8 +1094,7 @@ xtc_lock_downgrade(xtc_lockmgr_t *m, xtc_locker_t locker,
 	lr = __locker_find(m, locker);
 	(void)__xtc_mtx_unlock(&m->locker_lock);
 	if (lr && __is_write_mode(cur->mode) && !__is_write_mode(new_mode))
-		atomic_fetch_sub_explicit(&lr->n_write_held, 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_sub_i32(&lr->n_write_held, 1, xtc_mo_relaxed);
 
 	cur->mode = new_mode;
 	/* Promote head-of-line waiters now that we hold a weaker mode. */
@@ -1264,7 +1254,8 @@ xtc_lockmgr_failchk(xtc_lockmgr_t *m, xtc_locker_t locker)
 	if (m == NULL) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&m->locker_lock);
 	r = __locker_find(m, locker);
-	if (r) atomic_store_explicit(&r->failed, 1, memory_order_release);
+	if (r)
+		xtc_atomic_store_i32(&r->failed, 1, xtc_mo_release);
 	(void)__xtc_mtx_unlock(&m->locker_lock);
 	if (r) {
 		(void)xtc_lock_release_all(m, locker);
@@ -1309,10 +1300,10 @@ __dd_node_idx(struct dd_state *st, xtc_locker_t id, struct locker_rec *lr,
 	st->nodes[st->n_nodes].deadline = lr ? lr->deadline_ns : -1;
 	st->nodes[st->n_nodes].expired = (lr && lr->deadline_ns > 0 &&
 	    now > lr->deadline_ns) ? 1 : 0;
-	st->nodes[st->n_nodes].n_held = lr ?
-	    atomic_load_explicit(&lr->n_held, memory_order_relaxed) : 0;
-	st->nodes[st->n_nodes].n_write_held = lr ?
-	    atomic_load_explicit(&lr->n_write_held, memory_order_relaxed) : 0;
+	st->nodes[st->n_nodes].n_held =
+	    lr ? xtc_atomic_load_i32(&lr->n_held, xtc_mo_relaxed) : 0;
+	st->nodes[st->n_nodes].n_write_held =
+	    lr ? xtc_atomic_load_i32(&lr->n_write_held, xtc_mo_relaxed) : 0;
 	st->nodes[st->n_nodes].out_first = -1;
 	return st->n_nodes++;
 }
@@ -1496,8 +1487,9 @@ xtc_lockmgr_check_deadlocks(xtc_lockmgr_t *m, int *n_aborted)
 					for (e = o->waiting; e != NULL; e = ne) {
 						ne = e->next;
 						if (e->locker != vid) continue;
-						atomic_store_explicit(&e->aborted, 1,
-						    memory_order_release);
+						xtc_atomic_store_i32(
+						    &e->aborted, 1,
+						    xtc_mo_release);
 						__entry_wake(e);
 					}
 					for (e = o->granted; e != NULL; e = ne) {
@@ -1510,8 +1502,8 @@ xtc_lockmgr_check_deadlocks(xtc_lockmgr_t *m, int *n_aborted)
 			}
 			st->nodes[victim].out_first = -1;
 			n_killed++;
-			atomic_fetch_add_explicit(&m->n_deadlocks_found, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_u64(&m->n_deadlocks_found, 1,
+			    xtc_mo_relaxed);
 		}
 	}
 
@@ -1532,7 +1524,7 @@ __detector_thread(void *arg)
 {
 	xtc_lockmgr_t *m = arg;
 	int64_t  iv = m->opts.detect_interval_ns;
-	while (!atomic_load_explicit(&m->detector_stop, memory_order_acquire)) {
+	while (!xtc_atomic_load_i32(&m->detector_stop, xtc_mo_acquire)) {
 		(void)__os_sleep_ns(iv);   /* portable; Windows uses Sleep() */
 		(void)xtc_lockmgr_check_deadlocks(m, NULL);
 	}
@@ -1546,26 +1538,25 @@ xtc_lockmgr_stat(const xtc_lockmgr_t *m, xtc_lockmgr_stat_t *out)
 {
 	xtc_lockmgr_t *mm = (xtc_lockmgr_t *)m;
 	if (m == NULL || out == NULL) return XTC_E_INVAL;
-	out->n_held    = atomic_load_explicit(&mm->n_held,    memory_order_relaxed);
-	out->n_waiting = atomic_load_explicit(&mm->n_waiting, memory_order_relaxed);
-	out->n_objects = atomic_load_explicit(&mm->n_objects, memory_order_relaxed);
-	out->n_lockers = atomic_load_explicit(&mm->n_lockers, memory_order_relaxed);
-	out->n_acquires = atomic_load_explicit(&mm->n_acquires,
-	    memory_order_relaxed);
-	out->n_releases = atomic_load_explicit(&mm->n_releases,
-	    memory_order_relaxed);
-	out->n_deadlocks_found = atomic_load_explicit(&mm->n_deadlocks_found,
-	    memory_order_relaxed);
-	out->n_timeouts = atomic_load_explicit(&mm->n_timeouts,
-	    memory_order_relaxed);
+	out->n_held = xtc_atomic_load_i32(&mm->n_held, xtc_mo_relaxed);
+	out->n_waiting = xtc_atomic_load_i32(&mm->n_waiting, xtc_mo_relaxed);
+	out->n_objects = xtc_atomic_load_i32(&mm->n_objects, xtc_mo_relaxed);
+	out->n_lockers = xtc_atomic_load_i32(&mm->n_lockers, xtc_mo_relaxed);
+	out->n_acquires = xtc_atomic_load_u64(&mm->n_acquires, xtc_mo_relaxed);
+	out->n_releases = xtc_atomic_load_u64(&mm->n_releases, xtc_mo_relaxed);
+	out->n_deadlocks_found =
+	    xtc_atomic_load_u64(&mm->n_deadlocks_found, xtc_mo_relaxed);
+	out->n_timeouts = xtc_atomic_load_u64(&mm->n_timeouts, xtc_mo_relaxed);
 	return XTC_OK;
 }
 
 int xtc_lockmgr_n_held(const xtc_lockmgr_t *m) {
-	return m ? atomic_load_explicit(&((xtc_lockmgr_t *)m)->n_held,
-	    memory_order_relaxed) : 0;
+	return m ?
+	    xtc_atomic_load_i32(&((xtc_lockmgr_t *)m)->n_held, xtc_mo_relaxed) :
+	    0;
 }
 int xtc_lockmgr_n_waiting(const xtc_lockmgr_t *m) {
-	return m ? atomic_load_explicit(&((xtc_lockmgr_t *)m)->n_waiting,
-	    memory_order_relaxed) : 0;
+	return m ? xtc_atomic_load_i32(&((xtc_lockmgr_t *)m)->n_waiting,
+	               xtc_mo_relaxed) :
+	           0;
 }

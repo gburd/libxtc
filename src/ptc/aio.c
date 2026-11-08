@@ -62,14 +62,13 @@ extern int __xtc_dio_is_direct(int fd);
  * 1 = always offload.  Resolved from XTC_AIO_FORCE_OFFLOAD on first use
  * and overridable via __xtc_aio_force_offload().
  */
-static _Atomic int g_force_offload = -1;   /* -1 = unresolved */
+static int g_force_offload = -1; /* -1 = unresolved */
 
 /* PUBLIC (internal): set by tests / tuning to force the offload path. */
 void
 __xtc_aio_force_offload(int on)
 {
-	atomic_store_explicit(&g_force_offload, on ? 1 : 0,
-	    memory_order_relaxed);
+	xtc_atomic_store_i32(&g_force_offload, on ? 1 : 0, xtc_mo_relaxed);
 }
 
 static int
@@ -86,11 +85,11 @@ aio_offload_forced(void)
 	 * store is harmless.  Relaxed suffices -- there is no other state to
 	 * order against, only this flag's own visibility.
 	 */
-	int v = atomic_load_explicit(&g_force_offload, memory_order_relaxed);
+	int v = xtc_atomic_load_i32(&g_force_offload, xtc_mo_relaxed);
 	if (v < 0) {
 		const char *e = getenv("XTC_AIO_FORCE_OFFLOAD");
 		v = (e != NULL && e[0] == '1') ? 1 : 0;
-		atomic_store_explicit(&g_force_offload, v, memory_order_relaxed);
+		xtc_atomic_store_i32(&g_force_offload, v, xtc_mo_relaxed);
 	}
 	return v;
 }
@@ -310,8 +309,8 @@ aio_do(int op, int fd, void *buf, uint32_t len, int64_t off)
 		 * a->res below is guaranteed visible once done is set. */
 		while (!__xtc_aio_done_get(&a)) {
 			t->park_requested = 1;
-			atomic_store_explicit(&t->wake_revents, 0,
-			    memory_order_relaxed);
+			xtc_atomic_store_u32(&t->wake_revents, 0,
+			    xtc_mo_relaxed);
 			XTC_PROBE_FIBER_PARK((uintptr_t)t, XTC_PROBE_PARK_AIO,
 			    (uintptr_t)&a);
 			xtc_yield();
@@ -456,7 +455,7 @@ aio_do_v(int op, int fd, const struct iovec *iov, int iovcnt, int64_t off)
 	 * __xtc_aio_done_get), so a.res below is visible once done is set. */
 	while (!__xtc_aio_done_get(&a)) {
 		t->park_requested = 1;
-		atomic_store_explicit(&t->wake_revents, 0, memory_order_relaxed);
+		xtc_atomic_store_u32(&t->wake_revents, 0, xtc_mo_relaxed);
 		XTC_PROBE_FIBER_PARK((uintptr_t)t, XTC_PROBE_PARK_AIO,
 		    (uintptr_t)&a);
 		xtc_yield();

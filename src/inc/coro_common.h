@@ -54,15 +54,15 @@
  * cold out-of-line functions so their asm (a memory clobber) stays out
  * of the spawn path; a native run pays one load and branch per spawn and
  * per exit. */
-static _Atomic int __xtc_vg_on = -1;
+static int __xtc_vg_on = -1;
 
 __attribute__((noinline, cold)) static unsigned
 __xtc_vg_register_slow(char *lo, size_t sz)
 {
-	int on = atomic_load_explicit(&__xtc_vg_on, memory_order_relaxed);
+	int on = xtc_atomic_load_i32(&__xtc_vg_on, xtc_mo_relaxed);
 	if (on < 0) {
 		on = RUNNING_ON_VALGRIND != 0;
-		atomic_store_explicit(&__xtc_vg_on, on, memory_order_relaxed);
+		xtc_atomic_store_i32(&__xtc_vg_on, on, xtc_mo_relaxed);
 	}
 	return on ? (unsigned)VALGRIND_STACK_REGISTER(lo, lo + sz) : 0u;
 }
@@ -75,15 +75,16 @@ __xtc_vg_deregister_slow(unsigned id)
 	VALGRIND_STACK_DEREGISTER(id);
 }
 
-#  define __xtc_vg_stack_register(lo, sz) \
-	(XTC_UNLIKELY(atomic_load_explicit(&__xtc_vg_on, \
-	    memory_order_relaxed) != 0) ? \
-	    __xtc_vg_register_slow((char *)(lo), (sz)) : 0u)
-#  define __xtc_vg_stack_deregister(id) \
-	do { \
-		if (XTC_UNLIKELY(atomic_load_explicit(&__xtc_vg_on, \
-		    memory_order_relaxed) > 0)) \
-			__xtc_vg_deregister_slow(id); \
+#define __xtc_vg_stack_register(lo, sz)                                        \
+	(XTC_UNLIKELY(                                                         \
+	     xtc_atomic_load_i32(&__xtc_vg_on, xtc_mo_relaxed) != 0) ?         \
+	        __xtc_vg_register_slow((char *)(lo), (sz)) :                   \
+	        0u)
+#define __xtc_vg_stack_deregister(id)                                          \
+	do {                                                                   \
+		if (XTC_UNLIKELY(xtc_atomic_load_i32(&__xtc_vg_on,             \
+		                     xtc_mo_relaxed) > 0))                     \
+			__xtc_vg_deregister_slow(id);                          \
 	} while (0)
 #else
 #  define __xtc_vg_stack_register(lo, sz)  ((void)(lo), (void)(sz), 0u)
@@ -178,17 +179,16 @@ static void
 __stack_spare_lock(xtc_loop_t *l)
 {
 	__xtc_unsafe_enter();
-	while (atomic_exchange_explicit(&l->stack_spare_lock, 1,
-	    memory_order_acquire))
-		while (atomic_load_explicit(&l->stack_spare_lock,
-		    memory_order_relaxed))
+	while (xtc_atomic_exchange_i32(&l->stack_spare_lock, 1, xtc_mo_acquire))
+		while (
+		    xtc_atomic_load_i32(&l->stack_spare_lock, xtc_mo_relaxed))
 			__os_pause();
 }
 
 static void
 __stack_spare_unlock(xtc_loop_t *l)
 {
-	atomic_store_explicit(&l->stack_spare_lock, 0, memory_order_release);
+	xtc_atomic_store_i32(&l->stack_spare_lock, 0, xtc_mo_release);
 	__xtc_unsafe_leave();
 }
 
@@ -199,18 +199,17 @@ __stack_spare_get(xtc_loop_t *l, size_t stack_sz)
 	void *base = NULL;
 	int n;
 	if (__xtc_current_loop != l &&
-	    atomic_load_explicit(&l->stack_spare_want, memory_order_relaxed) <
-	    XTC_LOOP_STACK_SPARE)
-		atomic_fetch_add_explicit(&l->stack_spare_want, 1,
-		    memory_order_relaxed);
-	if (atomic_load_explicit(&l->stack_spare_n, memory_order_relaxed) == 0)
+	    xtc_atomic_load_i32(&l->stack_spare_want, xtc_mo_relaxed) <
+	        XTC_LOOP_STACK_SPARE)
+		xtc_atomic_fetch_add_i32(&l->stack_spare_want, 1,
+		    xtc_mo_relaxed);
+	if (xtc_atomic_load_i32(&l->stack_spare_n, xtc_mo_relaxed) == 0)
 		return NULL;
 	__stack_spare_lock(l);
-	n = atomic_load_explicit(&l->stack_spare_n, memory_order_relaxed);
+	n = xtc_atomic_load_i32(&l->stack_spare_n, xtc_mo_relaxed);
 	if (n > 0 && l->stack_spare_sz == stack_sz) {
 		base = l->stack_spare[--n];
-		atomic_store_explicit(&l->stack_spare_n, n,
-		    memory_order_relaxed);
+		xtc_atomic_store_i32(&l->stack_spare_n, n, xtc_mo_relaxed);
 	}
 	__stack_spare_unlock(l);
 	return base;
@@ -222,19 +221,18 @@ static int
 __stack_spare_put(xtc_loop_t *l, void *base, size_t stack_sz)
 {
 	int n, ok = 0;
-	if (atomic_load_explicit(&l->stack_spare_want, memory_order_relaxed) <
-	    XTC_LOOP_STACK_SPARE ||
-	    atomic_load_explicit(&l->stack_spare_n, memory_order_relaxed) >=
-	    XTC_LOOP_STACK_SPARE)
+	if (xtc_atomic_load_i32(&l->stack_spare_want, xtc_mo_relaxed) <
+	        XTC_LOOP_STACK_SPARE ||
+	    xtc_atomic_load_i32(&l->stack_spare_n, xtc_mo_relaxed) >=
+	        XTC_LOOP_STACK_SPARE)
 		return 0;
 	__stack_spare_lock(l);
-	n = atomic_load_explicit(&l->stack_spare_n, memory_order_relaxed);
+	n = xtc_atomic_load_i32(&l->stack_spare_n, xtc_mo_relaxed);
 	if (n == 0)
 		l->stack_spare_sz = stack_sz;  /* first entry sets the size */
 	if (l->stack_spare_sz == stack_sz && n < XTC_LOOP_STACK_SPARE) {
 		l->stack_spare[n++] = base;
-		atomic_store_explicit(&l->stack_spare_n, n,
-		    memory_order_relaxed);
+		xtc_atomic_store_i32(&l->stack_spare_n, n, xtc_mo_relaxed);
 		ok = 1;
 	}
 	__stack_spare_unlock(l);
@@ -247,10 +245,10 @@ __xtc_coro_stack_spare_fini(xtc_loop_t *l)
 {
 	long pg = sysconf(_SC_PAGESIZE);
 	size_t guard = pg > 0 ? (size_t)pg : 4096u;
-	int n = atomic_load_explicit(&l->stack_spare_n, memory_order_relaxed);
+	int n = xtc_atomic_load_i32(&l->stack_spare_n, xtc_mo_relaxed);
 	while (n > 0)
 		(void)munmap(l->stack_spare[--n], l->stack_spare_sz + guard);
-	atomic_store_explicit(&l->stack_spare_n, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&l->stack_spare_n, 0, xtc_mo_relaxed);
 }
 
 /* ---- Lever S1: stack-memory reclamation on park -------------------
@@ -261,9 +259,9 @@ __xtc_coro_stack_spare_fini(xtc_loop_t *l)
  * madvise(MADV_DONTNEED); it faults back zero-filled on resume.  See
  * xtc_async.h. */
 #if defined(MADV_DONTNEED)
-static _Atomic int      g_reclaim_on = 0;
-static _Atomic size_t   g_reclaim_keep = 0;      /* live margin below SP */
-static _Atomic uint64_t g_reclaim_count = 0;     /* madvise calls made */
+static int g_reclaim_on = 0;
+static size_t g_reclaim_keep = 0;    /* live margin below SP */
+static uint64_t g_reclaim_count = 0; /* madvise calls made */
 
 int
 xtc_stack_reclaim_enable(size_t keep_bytes)
@@ -272,27 +270,27 @@ xtc_stack_reclaim_enable(size_t keep_bytes)
 	size_t page = (pg > 0) ? (size_t)pg : 4096u;
 	if (keep_bytes == 0)
 		keep_bytes = page;      /* default live margin: one page */
-	atomic_store(&g_reclaim_keep, keep_bytes);
-	atomic_store(&g_reclaim_on, 1);
+	xtc_atomic_store_size(&g_reclaim_keep, keep_bytes, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_reclaim_on, 1, xtc_mo_seq_cst);
 	return XTC_OK;
 }
 
 void
 xtc_stack_reclaim_disable(void)
 {
-	atomic_store(&g_reclaim_on, 0);
+	xtc_atomic_store_i32(&g_reclaim_on, 0, xtc_mo_seq_cst);
 }
 
 int
 xtc_stack_reclaim_enabled(void)
 {
-	return atomic_load(&g_reclaim_on);
+	return xtc_atomic_load_i32(&g_reclaim_on, xtc_mo_seq_cst);
 }
 
 uint64_t
 xtc_stack_reclaim_count(void)
 {
-	return atomic_load(&g_reclaim_count);
+	return xtc_atomic_load_u64(&g_reclaim_count, xtc_mo_seq_cst);
 }
 
 /*
@@ -311,12 +309,13 @@ coro_stack_shrink(struct xtc_coro *c, void *sp)
 	size_t page, keep;
 	uintptr_t lo, hi, guard, base;
 
-	if (c == NULL || c->stack == NULL || !atomic_load(&g_reclaim_on))
+	if (c == NULL || c->stack == NULL ||
+	    !xtc_atomic_load_i32(&g_reclaim_on, xtc_mo_seq_cst))
 		return;
 	pgl = sysconf(_SC_PAGESIZE);
 	page = (pgl > 0) ? (size_t)pgl : 4096u;
 	guard = page;                    /* one guard page at the base */
-	keep = atomic_load(&g_reclaim_keep);
+	keep = xtc_atomic_load_size(&g_reclaim_keep, xtc_mo_seq_cst);
 
 	base = (uintptr_t)c->stack + guard;      /* first usable byte */
 	hi = (uintptr_t)sp;
@@ -329,7 +328,8 @@ coro_stack_shrink(struct xtc_coro *c, void *sp)
 	if (hi <= lo || hi - lo < page)
 		return;                  /* nothing worth a syscall */
 	if (madvise((void *)lo, (size_t)(hi - lo), MADV_DONTNEED) == 0)
-		(void)atomic_fetch_add(&g_reclaim_count, 1);
+		(void)xtc_atomic_fetch_add_u64(&g_reclaim_count, 1,
+		    xtc_mo_seq_cst);
 }
 #else  /* no MADV_DONTNEED: reclaim is a no-op */
 int      xtc_stack_reclaim_enable(size_t k) { (void)k; return XTC_E_NOSYS; }

@@ -45,7 +45,7 @@ struct xtc_reg {
 	struct reg_node **buckets;      /* nbuckets heads */
 	uint32_t          nbuckets;     /* power of two */
 	int               n;            /* live entry count */
-	_Atomic int       has_reaper;   /* 1 once a reaper proc has registered */
+	int has_reaper; /* 1 once a reaper proc has registered */
 	xtc_pid_t         reaper;       /* the reaper's pid (valid if has_reaper) */
 };
 
@@ -400,7 +400,7 @@ xtc_reg_reaper(void *arg)
 	/* Publish the reaper's pid so xtc_reg_register_mon can reach it. */
 	(void)__xtc_mtx_lock(&r->lock);
 	r->reaper = xtc_self();
-	atomic_store_explicit(&r->has_reaper, 1, memory_order_release);
+	xtc_atomic_store_i32(&r->has_reaper, 1, xtc_mo_release);
 	(void)__xtc_mtx_unlock(&r->lock);
 
 	for (;;) {
@@ -451,7 +451,7 @@ xtc_reg_reaper(void *arg)
 	 * calls fall back to a plain register rather than sending into a
 	 * dead mailbox. */
 	(void)__xtc_mtx_lock(&r->lock);
-	atomic_store_explicit(&r->has_reaper, 0, memory_order_release);
+	xtc_atomic_store_i32(&r->has_reaper, 0, xtc_mo_release);
 	(void)__xtc_mtx_unlock(&r->lock);
 }
 
@@ -465,7 +465,7 @@ xtc_reg_register_mon(xtc_reg_t *r, const char *name, xtc_pid_t pid)
 	/* If a reaper is running, ask it to monitor pid so the entry is
 	 * auto-dropped on DOWN.  If none, this behaves as a plain register
 	 * (the caller may still xtc_reg_drop_pid manually). */
-	if (atomic_load_explicit(&r->has_reaper, memory_order_acquire)) {
+	if (xtc_atomic_load_i32(&r->has_reaper, xtc_mo_acquire)) {
 		struct reg_reaper_msg m;
 		xtc_pid_t reaper;
 		(void)__xtc_mtx_lock(&r->lock);

@@ -56,10 +56,10 @@
  */
 
 #include <stdint.h>
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 
 /* The global HLC, exactly as proc.c declares it. */
-static _Atomic uint64_t __g_hlc;
+static uint64_t __g_hlc;
 
 /* Non-deterministic physical microseconds, bounded so CBMC's state
  * space is finite.  This REPLACES __phys_us() (which reads the real
@@ -84,7 +84,7 @@ hlc_tick(void)
 	uint64_t prev, next, pt = __phys_us();
 	do {
 		uint64_t pphys, plog;
-		prev = atomic_load_explicit(&__g_hlc, memory_order_relaxed);
+		prev = xtc_atomic_load_u64(&__g_hlc, xtc_mo_relaxed);
 		pphys = prev >> 16; plog = prev & 0xFFFF;
 		if (pt > pphys) {
 			next = pt << 16;
@@ -99,8 +99,8 @@ hlc_tick(void)
 			next = (pphys << 16) | (plog + 1);
 #endif
 		}
-	} while (!atomic_compare_exchange_weak_explicit(&__g_hlc, &prev, next,
-	    memory_order_relaxed, memory_order_relaxed));
+	} while (!xtc_atomic_cas_weak_u64(&__g_hlc, &prev, next, xtc_mo_relaxed,
+	    xtc_mo_relaxed));
 	/* END SOURCE */
 	/* MONOTONICITY: every committed advance is strictly greater than
 	 * what it read.  Non-vacuity: change `> prev` to `>= prev + 2` and
@@ -120,7 +120,7 @@ hlc_update(uint64_t m)
 	do {
 		uint64_t pphys = 0, plog = 0, mphys = m >> 16, mlog = m & 0xFFFF;
 		uint64_t nphys, nlog;
-		prev = atomic_load_explicit(&__g_hlc, memory_order_relaxed);
+		prev = xtc_atomic_load_u64(&__g_hlc, xtc_mo_relaxed);
 		pphys = prev >> 16; plog = prev & 0xFFFF;
 		nphys = pphys;
 		if (mphys > nphys) nphys = mphys;
@@ -135,8 +135,8 @@ hlc_update(uint64_t m)
 			nlog = 0;
 		if (nlog > 0xFFFF) { nphys++; nlog = 0; }
 		next = (nphys << 16) | (nlog & 0xFFFF);
-	} while (!atomic_compare_exchange_weak_explicit(&__g_hlc, &prev, next,
-	    memory_order_relaxed, memory_order_relaxed));
+	} while (!xtc_atomic_cas_weak_u64(&__g_hlc, &prev, next, xtc_mo_relaxed,
+	    xtc_mo_relaxed));
 	/* END SOURCE */
 	/* MONOTONICITY: the update never lowers the clock. */
 	__CPROVER_assert(next > prev,
@@ -174,7 +174,7 @@ updater(void)
 int
 main(void)
 {
-	atomic_store_explicit(&__g_hlc, 0, memory_order_relaxed);
+	xtc_atomic_store_u64(&__g_hlc, 0, xtc_mo_relaxed);
 
 	/* A tick and an update race on the single global clock; CBMC
 	 * explores every interleaving of the two CAS loops. */

@@ -36,13 +36,13 @@
  */
 
 #include <stdint.h>
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 #include <stddef.h>
 
 /* Minimal frame: only the seqlock version + a modelled "page byte". */
 typedef struct bm_frame {
-	_Atomic uint64_t version;   /* EVEN stable, ODD while a writer mutates */
-	_Atomic int      page;      /* the protected payload (one byte) */
+	uint64_t version; /* EVEN stable, ODD while a writer mutates */
+	int page;         /* the protected payload (one byte) */
 } bm_frame_t;
 
 static bm_frame_t frame;
@@ -53,8 +53,7 @@ bm_read_begin(const bm_frame_t *f, uint64_t *out_v)
 {
 	uint64_t v;
 	if (f == NULL) return 0;
-	v = atomic_load_explicit(&((bm_frame_t *)f)->version,
-	    memory_order_acquire);
+	v = xtc_atomic_load_u64(&((bm_frame_t *)f)->version, xtc_mo_acquire);
 	if ((v & 1u) != 0)
 		return 0;               /* a writer holds it: caller latches */
 	*out_v = v;
@@ -67,8 +66,8 @@ bm_read_valid(const bm_frame_t *f, uint64_t v)
 {
 	if (f == NULL) return 0;
 	/* acquire so the version re-read is ordered after the page reads. */
-	return atomic_load_explicit(&((bm_frame_t *)f)->version,
-	    memory_order_acquire) == v;
+	return xtc_atomic_load_u64(&((bm_frame_t *)f)->version,
+	           xtc_mo_acquire) == v;
 }
 
 /* --- writer: version protocol transcribed from bm_frame_wrlatch /
@@ -80,13 +79,13 @@ static void
 writer(void)
 {
 	/* Enter write section: version -> odd. */
-	(void)atomic_fetch_add_explicit(&frame.version, 1, memory_order_release);
+	(void)xtc_atomic_fetch_add_u64(&frame.version, 1, xtc_mo_release);
 	/* Mutate the payload (a reader that accepted this partial state
 	 * would see a torn value; the seqlock must reject it). */
-	atomic_store_explicit(&frame.page, 2, memory_order_relaxed);
-	atomic_store_explicit(&frame.page, 3, memory_order_relaxed);
+	xtc_atomic_store_i32(&frame.page, 2, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&frame.page, 3, xtc_mo_relaxed);
 	/* Leave write section: version -> even. */
-	(void)atomic_fetch_add_explicit(&frame.version, 1, memory_order_release);
+	(void)xtc_atomic_fetch_add_u64(&frame.version, 1, xtc_mo_release);
 }
 
 /* --- optimistic reader: the OLC read discipline from the bufmgr
@@ -100,7 +99,7 @@ reader(void)
 	if (!bm_read_begin(&frame, &v))
 		return;                 /* writer active: fall back to latch */
 	/* Read the page bytes into a LOCAL copy. */
-	seen = atomic_load_explicit(&frame.page, memory_order_relaxed);
+	seen = xtc_atomic_load_i32(&frame.page, xtc_mo_relaxed);
 	if (bm_read_valid(&frame, v)) {
 		/* Accepted: the snapshot MUST be a consistent, untorn
 		 * value -- either the pre-write stable value (1) or the
@@ -113,8 +112,8 @@ reader(void)
 int
 main(void)
 {
-	atomic_store_explicit(&frame.version, 0, memory_order_relaxed); /* even */
-	atomic_store_explicit(&frame.page, 1, memory_order_relaxed);    /* stable */
+	xtc_atomic_store_u64(&frame.version, 0, xtc_mo_relaxed); /* even */
+	xtc_atomic_store_i32(&frame.page, 1, xtc_mo_relaxed);    /* stable */
 
 	__CPROVER_ASYNC_1: writer();
 	reader();

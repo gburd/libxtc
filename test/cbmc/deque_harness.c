@@ -29,7 +29,6 @@
  */
 
 #include <stdint.h>
-#include <stdatomic.h>
 #include <stddef.h>
 
 /* deque.h needs only XTC_OK / XTC_E_AGAIN from xtc.h; suppress the real
@@ -47,7 +46,7 @@ static xtc_deque_t d;
 
 /* Task ids are small integers 1..NITEMS, carried as (void*)(intptr_t)id.
  * id 0 == "nothing" (NULL). */
-static _Atomic int claimed[NITEMS + 1];
+static int claimed[NITEMS + 1];
 
 static void
 claim(void *x)
@@ -57,8 +56,7 @@ claim(void *x)
 		return;
 	__CPROVER_assert(id >= 1 && id <= NITEMS,
 	    "returned value is a pushed task id (nothing fabricated)");
-	int prev = atomic_fetch_add_explicit(&claimed[id], 1,
-	    memory_order_relaxed);
+	int prev = xtc_atomic_fetch_add_i32(&claimed[id], 1, xtc_mo_relaxed);
 	__CPROVER_assert(prev == 0, "no task returned twice (no duplication)");
 }
 
@@ -78,12 +76,12 @@ main(void)
 	 * only ever read slots they wrote).  Setting the two index fields
 	 * is the semantically-relevant part and keeps the model's loop
 	 * count tiny. */
-	atomic_store_explicit(&d.top, 0, memory_order_relaxed);
-	atomic_store_explicit(&d.bottom, 0, memory_order_relaxed);
+	xtc_atomic_store_i64(&d.top, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i64(&d.bottom, 0, xtc_mo_relaxed);
 	for (i = 1; i <= NITEMS; i++)
 		(void)xtc_deque_push(&d, (void *)(intptr_t)i);
 	for (i = 0; i <= NITEMS; i++)
-		atomic_store_explicit(&claimed[i], 0, memory_order_relaxed);
+		xtc_atomic_store_i32(&claimed[i], 0, xtc_mo_relaxed);
 
 	/* One thief steals concurrently with the owner's pops; CBMC
 	 * explores all interleavings. */

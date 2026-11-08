@@ -41,7 +41,7 @@
  */
 
 #include <stdint.h>
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 
 int nondet_int(void);   /* CBMC nondeterministic choice */
 
@@ -61,12 +61,12 @@ int nondet_int(void);   /* CBMC nondeterministic choice */
 
 enum lw_mode { XTC_LW_EXCLUSIVE = 0, XTC_LW_SHARED = 1 };
 
-static _Atomic uint32_t g_state;
+static uint32_t g_state;
 
 /* Owner-observability: how many holders think they are in the
  * EXCLUSIVE critical section right now.  Bumped on grant, dropped on
  * release; must never exceed 1. */
-static _Atomic int in_excl_cs;
+static int in_excl_cs;
 
 /* __try_attempt -- verbatim from lock_lw.c (state word only).
  * The inner for(;;) is the real code's CAS-retry-on-contention loop;
@@ -75,8 +75,7 @@ static _Atomic int in_excl_cs;
 static int
 try_attempt(int mode)
 {
-	uint32_t old_state = atomic_load_explicit(&g_state,
-	    memory_order_relaxed);
+	uint32_t old_state = xtc_atomic_load_u32(&g_state, xtc_mo_relaxed);
 
 	for (;;) {
 		uint32_t expected = old_state;
@@ -91,9 +90,8 @@ try_attempt(int mode)
 				return 0;        /* held exclusive */
 			desired = old_state + LW_VAL_SHARED;
 		}
-		if (atomic_compare_exchange_weak_explicit(&g_state,
-		    &expected, desired,
-		    memory_order_acquire, memory_order_relaxed)) {
+		if (xtc_atomic_cas_weak_u32(&g_state, &expected, desired,
+		        xtc_mo_acquire, xtc_mo_relaxed)) {
 			return 1;
 		}
 		old_state = expected;
@@ -105,15 +103,14 @@ static uint32_t
 release_state(int mode)
 {
 	uint32_t old_state, desired;
-	old_state = atomic_load_explicit(&g_state, memory_order_relaxed);
+	old_state = xtc_atomic_load_u32(&g_state, xtc_mo_relaxed);
 	for (;;) {
 		if (mode == XTC_LW_EXCLUSIVE)
 			desired = old_state - LW_VAL_EXCLUSIVE;
 		else
 			desired = old_state - LW_VAL_SHARED;
-		if (atomic_compare_exchange_weak_explicit(&g_state,
-		    &old_state, desired,
-		    memory_order_release, memory_order_relaxed))
+		if (xtc_atomic_cas_weak_u32(&g_state, &old_state, desired,
+		        xtc_mo_release, xtc_mo_relaxed))
 			return desired;
 	}
 }
@@ -146,9 +143,9 @@ excl_actor(void)
 {
 	int n;
 	acquire(XTC_LW_EXCLUSIVE);
-	n = atomic_fetch_add_explicit(&in_excl_cs, 1, memory_order_relaxed);
+	n = xtc_atomic_fetch_add_i32(&in_excl_cs, 1, xtc_mo_relaxed);
 	__CPROVER_assert(n == 0, "mutual exclusion: never two exclusive holders");
-	(void)atomic_fetch_sub_explicit(&in_excl_cs, 1, memory_order_relaxed);
+	(void)xtc_atomic_fetch_sub_i32(&in_excl_cs, 1, xtc_mo_relaxed);
 	(void)release_state(XTC_LW_EXCLUSIVE);
 }
 
@@ -159,7 +156,7 @@ shared_actor(void)
 {
 	uint32_t s;
 	acquire(XTC_LW_SHARED);
-	s = atomic_load_explicit(&g_state, memory_order_relaxed);
+	s = xtc_atomic_load_u32(&g_state, xtc_mo_relaxed);
 	__CPROVER_assert((s & LW_VAL_EXCLUSIVE) == 0,
 	    "no exclusive holder while a shared holder is in the CS");
 	(void)release_state(XTC_LW_SHARED);
@@ -170,8 +167,8 @@ main(void)
 {
 	int scenario = nondet_int();
 
-	atomic_store_explicit(&g_state, 0, memory_order_relaxed);
-	atomic_store_explicit(&in_excl_cs, 0, memory_order_relaxed);
+	xtc_atomic_store_u32(&g_state, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&in_excl_cs, 0, xtc_mo_relaxed);
 
 	if (scenario) {
 		/* excl vs excl: the classic mutual-exclusion race. */

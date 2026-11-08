@@ -74,7 +74,6 @@
 #include "xtc_sim.h"
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 
 /*
@@ -88,19 +87,19 @@
 
 struct cskip_node {
 	void                          *key;    /* caller-owned */
-	_Atomic(void *)                value;  /* caller-owned */
+	void *value;                           /* caller-owned */
 	int                            level;  /* # of forward slots, >=1 */
 	/* forward[i] = next node at level i.  Flexible array: a node of
 	 * height L allocates L slots.  Atomic: readers load with acquire,
 	 * writers publish with release. */
-	_Atomic(struct cskip_node *)   forward[];
+	struct cskip_node *forward[];
 };
 
 struct xtc_cskip {
 	xtc_cskip_cmp_fn      cmp;
 	struct cskip_node    *head;      /* sentinel, height MAXLEVEL, key=NULL */
-	_Atomic int           level;     /* current highest occupied level+1 */
-	_Atomic size_t        count;
+	int level;                       /* current highest occupied level+1 */
+	size_t count;
 	pthread_mutex_t       wlock;     /* serializes insert/remove */
 	uint64_t              rng;       /* splitmix64 state, under wlock */
 };
@@ -143,15 +142,15 @@ static struct cskip_node *
 __cskip_node_alloc(int level, void *key, void *value)
 {
 	struct cskip_node *n;
-	size_t sz = sizeof *n + (size_t)level * sizeof(_Atomic(struct cskip_node *));
+	size_t sz = sizeof *n + (size_t)level * sizeof(struct cskip_node *);
 	int i;
 	if (__os_malloc(sz, (void **)&n) != XTC_OK)
 		return NULL;
 	n->key = key;
-	atomic_init(&n->value, value);
+	xtc_atomic_store_ptr(&n->value, value, xtc_mo_relaxed);
 	n->level = level;
 	for (i = 0; i < level; i++)
-		atomic_init(&n->forward[i], NULL);
+		xtc_atomic_store_ptr(&n->forward[i], NULL, xtc_mo_relaxed);
 	return n;
 }
 
@@ -172,8 +171,8 @@ xtc_cskip_create(xtc_cskip_cmp_fn cmp, xtc_cskip_t **out)
 	if (__os_malloc(sizeof *s, (void **)&s) != XTC_OK)
 		return XTC_E_NOMEM;
 	s->cmp = cmp;
-	atomic_init(&s->level, 1);
-	atomic_init(&s->count, 0);
+	xtc_atomic_store_i32(&s->level, 1, xtc_mo_relaxed);
+	xtc_atomic_store_size(&s->count, 0, xtc_mo_relaxed);
 	s->rng = 0x243F6A8885A308D3ULL;   /* fixed seed: deterministic levels */
 	(void)pthread_mutex_init(&s->wlock, NULL);
 	/* Head sentinel is full height with all-NULL forward pointers. */
@@ -184,7 +183,8 @@ xtc_cskip_create(xtc_cskip_cmp_fn cmp, xtc_cskip_t **out)
 		return XTC_E_NOMEM;
 	}
 	for (i = 0; i < XTC_CSKIP_MAXLEVEL; i++)
-		atomic_init(&s->head->forward[i], NULL);
+		xtc_atomic_store_ptr(&s->head->forward[i], NULL,
+		    xtc_mo_relaxed);
 	*out = s;
 	return XTC_OK;
 }
@@ -197,9 +197,9 @@ xtc_cskip_destroy(xtc_cskip_t *s)
 		return;
 	/* Not concurrency-safe: caller has quiesced.  Walk level 0 and
 	 * free every node (bookkeeping only; caller owns key/value). */
-	n = atomic_load_explicit(&s->head->forward[0], memory_order_relaxed);
+	n = xtc_atomic_load_ptr(&s->head->forward[0], xtc_mo_relaxed);
 	while (n != NULL) {
-		next = atomic_load_explicit(&n->forward[0], memory_order_relaxed);
+		next = xtc_atomic_load_ptr(&n->forward[0], xtc_mo_relaxed);
 		__os_free(n);
 		n = next;
 	}
@@ -221,15 +221,15 @@ __cskip_find_ge(struct xtc_cskip *s, const void *key,
 {
 	struct cskip_node *x = s->head;
 	struct cskip_node *nxt;
-	int top = atomic_load_explicit(&s->level, memory_order_acquire);
+	int top = xtc_atomic_load_i32(&s->level, xtc_mo_acquire);
 	int i;
 
 	if (top < 1)
 		top = 1;
 	for (i = top - 1; i >= 0; i--) {
 		for (;;) {
-			nxt = atomic_load_explicit(&x->forward[i],
-			    memory_order_acquire);
+			nxt =
+			    xtc_atomic_load_ptr(&x->forward[i], xtc_mo_acquire);
 			if (nxt != NULL && s->cmp(nxt->key, key) < 0)
 				x = nxt;   /* nxt still strictly before key */
 			else
@@ -250,8 +250,7 @@ xtc_cskip_get(xtc_cskip_t *s, const void *key, void **out_value)
 		return XTC_E_INVAL;
 	n = __cskip_find_ge(s, key, NULL, NULL);
 	if (n != NULL && s->cmp(n->key, key) == 0) {
-		*out_value = atomic_load_explicit(&n->value,
-		    memory_order_acquire);
+		*out_value = xtc_atomic_load_ptr(&n->value, xtc_mo_acquire);
 		return XTC_OK;
 	}
 	return XTC_E_NOTFOUND;
@@ -263,13 +262,12 @@ xtc_cskip_min(xtc_cskip_t *s, void **out_key, void **out_value)
 	struct cskip_node *n;
 	if (s == NULL)
 		return XTC_E_INVAL;
-	n = atomic_load_explicit(&s->head->forward[0], memory_order_acquire);
+	n = xtc_atomic_load_ptr(&s->head->forward[0], xtc_mo_acquire);
 	if (n == NULL)
 		return XTC_E_NOTFOUND;
 	if (out_key != NULL) *out_key = n->key;
 	if (out_value != NULL)
-		*out_value = atomic_load_explicit(&n->value,
-		    memory_order_acquire);
+		*out_value = xtc_atomic_load_ptr(&n->value, xtc_mo_acquire);
 	return XTC_OK;
 }
 
@@ -284,12 +282,12 @@ xtc_cskip_floor(xtc_cskip_t *s, const void *key, void **out_key,
 	/* Walk down keeping the last node strictly < or == key.  We want
 	 * the largest key <= `key`: advance while next->key <= key. */
 	x = s->head;
-	top = atomic_load_explicit(&s->level, memory_order_acquire);
+	top = xtc_atomic_load_i32(&s->level, xtc_mo_acquire);
 	if (top < 1) top = 1;
 	for (i = top - 1; i >= 0; i--) {
 		for (;;) {
-			nxt = atomic_load_explicit(&x->forward[i],
-			    memory_order_acquire);
+			nxt =
+			    xtc_atomic_load_ptr(&x->forward[i], xtc_mo_acquire);
 			if (nxt != NULL && s->cmp(nxt->key, key) <= 0)
 				x = nxt;
 			else
@@ -301,8 +299,7 @@ xtc_cskip_floor(xtc_cskip_t *s, const void *key, void **out_key,
 		return XTC_E_NOTFOUND;
 	if (out_key != NULL) *out_key = x->key;
 	if (out_value != NULL)
-		*out_value = atomic_load_explicit(&x->value,
-		    memory_order_acquire);
+		*out_value = xtc_atomic_load_ptr(&x->value, xtc_mo_acquire);
 	return XTC_OK;
 }
 
@@ -323,10 +320,8 @@ xtc_cskip_insert(xtc_cskip_t *s, void *key, void *value, void **out_old_value)
 	cand = __cskip_find_ge(s, key, preds, succs);
 	if (cand != NULL && s->cmp(cand->key, key) == 0) {
 		/* Replace value in place: one atomic store, no linkage. */
-		void *old = atomic_load_explicit(&cand->value,
-		    memory_order_relaxed);
-		atomic_store_explicit(&cand->value, value,
-		    memory_order_release);
+		void *old = xtc_atomic_load_ptr(&cand->value, xtc_mo_relaxed);
+		xtc_atomic_store_ptr(&cand->value, value, xtc_mo_release);
 		(void)__xtc_mtx_unlock(&s->wlock);
 		xtc_rcu_read_unlock();
 		if (out_old_value != NULL) *out_old_value = old;
@@ -334,7 +329,7 @@ xtc_cskip_insert(xtc_cskip_t *s, void *key, void *value, void **out_old_value)
 	}
 
 	lvl = __cskip_random_level(s);
-	cur_level = atomic_load_explicit(&s->level, memory_order_relaxed);
+	cur_level = xtc_atomic_load_i32(&s->level, xtc_mo_relaxed);
 	if (lvl > cur_level) {
 		/* New levels: their predecessor is the head sentinel, whose
 		 * forward[i] is NULL (succs[i] for those levels is NULL). */
@@ -353,18 +348,16 @@ xtc_cskip_insert(xtc_cskip_t *s, void *key, void *value, void **out_old_value)
 	/* Point the new node's forward pointers at its successors FIRST
 	 * (private, not yet visible), then publish bottom-up. */
 	for (i = 0; i < lvl; i++)
-		atomic_store_explicit(&n->forward[i], succs[i],
-		    memory_order_relaxed);
+		xtc_atomic_store_ptr(&n->forward[i], succs[i], xtc_mo_relaxed);
 	/* Publish bottom-up: level 0 first makes the node a member the
 	 * instant its base link is visible; upper levels only accelerate
 	 * future searches. */
 	for (i = 0; i < lvl; i++)
-		atomic_store_explicit(&preds[i]->forward[i], n,
-		    memory_order_release);
+		xtc_atomic_store_ptr(&preds[i]->forward[i], n, xtc_mo_release);
 	if (lvl > cur_level)
-		atomic_store_explicit(&s->level, lvl, memory_order_release);
+		xtc_atomic_store_i32(&s->level, lvl, xtc_mo_release);
 
-	atomic_fetch_add_explicit(&s->count, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_size(&s->count, 1, xtc_mo_relaxed);
 	(void)__xtc_mtx_unlock(&s->wlock);
 	xtc_rcu_read_unlock();
 	if (out_old_value != NULL) *out_old_value = NULL;
@@ -396,27 +389,28 @@ xtc_cskip_remove(xtc_cskip_t *s, const void *key, void **out_value)
 	 * the victim, splice preds[i] past it (release store of the
 	 * victim's own unchanged successor).  Only touch levels that
 	 * actually pointed at the victim. */
-	top = atomic_load_explicit(&s->level, memory_order_relaxed);
+	top = xtc_atomic_load_i32(&s->level, xtc_mo_relaxed);
 	for (i = top - 1; i >= 0; i--) {
 		if (i < victim->level && preds[i] != NULL &&
-		    atomic_load_explicit(&preds[i]->forward[i],
-			memory_order_relaxed) == victim) {
-			struct cskip_node *after = atomic_load_explicit(
-			    &victim->forward[i], memory_order_relaxed);
-			atomic_store_explicit(&preds[i]->forward[i], after,
-			    memory_order_release);
+		    xtc_atomic_load_ptr(&preds[i]->forward[i],
+		        xtc_mo_relaxed) == victim) {
+			struct cskip_node *after =
+			    xtc_atomic_load_ptr(&victim->forward[i],
+			        xtc_mo_relaxed);
+			xtc_atomic_store_ptr(&preds[i]->forward[i], after,
+			    xtc_mo_release);
 		}
 	}
 	/* Lower s->level while the top levels are now empty. */
 	while (top > 1 &&
-	    atomic_load_explicit(&s->head->forward[top - 1],
-		memory_order_relaxed) == NULL) {
+	    xtc_atomic_load_ptr(&s->head->forward[top - 1], xtc_mo_relaxed) ==
+	        NULL) {
 		top--;
 	}
-	atomic_store_explicit(&s->level, top, memory_order_release);
+	xtc_atomic_store_i32(&s->level, top, xtc_mo_release);
 
-	val = atomic_load_explicit(&victim->value, memory_order_relaxed);
-	atomic_fetch_sub_explicit(&s->count, 1, memory_order_relaxed);
+	val = xtc_atomic_load_ptr(&victim->value, xtc_mo_relaxed);
+	xtc_atomic_fetch_sub_size(&s->count, 1, xtc_mo_relaxed);
 	(void)__xtc_mtx_unlock(&s->wlock);
 	xtc_rcu_read_unlock();
 
@@ -432,6 +426,6 @@ xtc_cskip_size(const xtc_cskip_t *s)
 {
 	if (s == NULL)
 		return 0;
-	return atomic_load_explicit(&((struct xtc_cskip *)s)->count,
-	    memory_order_relaxed);
+	return xtc_atomic_load_size(&((struct xtc_cskip *)s)->count,
+	    xtc_mo_relaxed);
 }

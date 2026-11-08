@@ -32,41 +32,42 @@
  *	  -DPLANT_NO_LATCH    a waker that loses the CAS just gives up (the
  *	                      7th surface, before the wake_pending latch).
  */
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 
 enum { XTC_TS_SCHEDULED = 0, XTC_TS_RUNNING = 1, XTC_TS_PARKED = 2 };
 
 typedef struct {
-	_Atomic int state;
-	_Atomic int wake_pending;
+	int state;
+	int wake_pending;
 } xtc_task_t;
 
 static xtc_task_t task;
 static xtc_task_t *t = &task;
-static _Atomic int enqueued;
-static _Atomic int wakers_done;
+static int enqueued;
+static int wakers_done;
 static void *loop;
 /* The verdict's enqueue, so the transcribed block stays verbatim. */
-#define __xtc_loop_enqueue(l, tk) ((void)(l), atomic_fetch_add(&enqueued, 1))
+#define __xtc_loop_enqueue(l, tk)                                              \
+	((void)(l), xtc_atomic_fetch_add_i32(&enqueued, 1, xtc_mo_seq_cst))
 
 /* BEGIN SOURCE src/evt/task.c __task_wake_claim */
 static int
 __task_wake_claim(xtc_task_t *t)
 {
 	int expect = XTC_TS_PARKED;
-	if (atomic_compare_exchange_strong(&t->state, &expect,
-	    XTC_TS_SCHEDULED))
+	if (xtc_atomic_cas_i32(&t->state, &expect, XTC_TS_SCHEDULED,
+	        xtc_mo_seq_cst, xtc_mo_seq_cst))
 		return 1;
 #ifdef PLANT_NO_LATCH
 	return 0;
 #endif
-	atomic_store(&t->wake_pending, 1);
-	if (atomic_load(&t->state) != XTC_TS_PARKED ||
-	    !atomic_exchange(&t->wake_pending, 0))
+	xtc_atomic_store_i32(&t->wake_pending, 1, xtc_mo_seq_cst);
+	if (xtc_atomic_load_i32(&t->state, xtc_mo_seq_cst) != XTC_TS_PARKED ||
+	    !xtc_atomic_exchange_i32(&t->wake_pending, 0, xtc_mo_seq_cst))
 		return 0;
 	expect = XTC_TS_PARKED;
-	return atomic_compare_exchange_strong(&t->state, &expect,
-	    XTC_TS_SCHEDULED);
+	return xtc_atomic_cas_i32(&t->state, &expect, XTC_TS_SCHEDULED,
+	    xtc_mo_seq_cst, xtc_mo_seq_cst);
 }
 /* END SOURCE */
 
@@ -74,30 +75,35 @@ static void
 waker(void)
 {
 	if (__task_wake_claim(t))
-		atomic_fetch_add(&enqueued, 1);
-	atomic_fetch_add(&wakers_done, 1);
+		xtc_atomic_fetch_add_i32(&enqueued, 1, xtc_mo_seq_cst);
+	xtc_atomic_fetch_add_i32(&wakers_done, 1, xtc_mo_seq_cst);
 }
 
 static void
 verdict_pending(void)
 {
 	/* BEGIN SOURCE src/evt/loop.c XTC_TASK_PENDING */
-			if (atomic_exchange_explicit(&t->wake_pending, 0,
-			    memory_order_acquire)) {
-				atomic_store_explicit(&t->state, XTC_TS_SCHEDULED,
-				    memory_order_release);
-				(void)__xtc_loop_enqueue(loop, t);
-			} else {
-				atomic_store(&t->state, XTC_TS_PARKED);
+	if (xtc_atomic_exchange_i32(&t->wake_pending, 0,
+	        xtc_mo_acquire)) {
+		xtc_atomic_store_i32(&t->state,
+		    XTC_TS_SCHEDULED, xtc_mo_release);
+		(void)__xtc_loop_enqueue(loop, t);
+	} else {
+		/* seq_cst store + the seq_cst exchange below pair
+		 * with __task_wake_claim's latch-then-load-state
+		 * (src/evt/task.c): of this re-check and a waker's
+		 * re-check, at least one sees the other's write. */
+		xtc_atomic_store_i32(&t->state, XTC_TS_PARKED,
+		    xtc_mo_seq_cst);
 #ifndef PLANT_NO_RECHECK
-				if (atomic_exchange(&t->wake_pending, 0)) {
-					int exp = XTC_TS_PARKED;
-					if (atomic_compare_exchange_strong_explicit(
-					    &t->state, &exp, XTC_TS_SCHEDULED,
-					    memory_order_acq_rel,
-					    memory_order_acquire))
-						(void)__xtc_loop_enqueue(loop, t);
-				}
+		if (xtc_atomic_exchange_i32(&t->wake_pending, 0,
+		        xtc_mo_seq_cst)) {
+			int exp = XTC_TS_PARKED;
+			if (xtc_atomic_cas_i32(&t->state, &exp,
+			        XTC_TS_SCHEDULED,
+			        xtc_mo_acq_rel, xtc_mo_acquire))
+				(void)__xtc_loop_enqueue(loop, t);
+		}
 #endif
 			}
 	/* END SOURCE */
@@ -106,18 +112,20 @@ verdict_pending(void)
 int
 main(void)
 {
-	atomic_store(&t->state, XTC_TS_RUNNING);
-	atomic_store(&t->wake_pending, 0);
+	xtc_atomic_store_i32(&t->state, XTC_TS_RUNNING, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&t->wake_pending, 0, xtc_mo_seq_cst);
 
 	__CPROVER_ASYNC_1: waker();
 	__CPROVER_ASYNC_2: waker();
 	verdict_pending();
 
-	__CPROVER_assume(atomic_load(&wakers_done) == 2);
-	__CPROVER_assert(atomic_load(&enqueued) <= 1,
+	__CPROVER_assume(
+	    xtc_atomic_load_i32(&wakers_done, xtc_mo_seq_cst) == 2);
+	__CPROVER_assert(xtc_atomic_load_i32(&enqueued, xtc_mo_seq_cst) <= 1,
 	    "exactly-once: the task is enqueued at most once");
-	__CPROVER_assert(atomic_load(&enqueued) == 1 ||
-	    atomic_load(&t->state) == XTC_TS_SCHEDULED,
+	__CPROVER_assert(xtc_atomic_load_i32(&enqueued, xtc_mo_seq_cst) == 1 ||
+	        xtc_atomic_load_i32(&t->state, xtc_mo_seq_cst) ==
+	            XTC_TS_SCHEDULED,
 	    "no lost wake: a woken task is never left PARKED");
 	return 0;
 }

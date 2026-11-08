@@ -19,7 +19,7 @@
 
 #include "xtc_io.h"       /* xtc_aio_t */
 
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 
 void __xtc_aio_force_offload(int on);
 
@@ -54,15 +54,13 @@ void __xtc_aio_force_offload(int on);
 static inline void
 __xtc_aio_done_set(xtc_aio_t *a)
 {
-	atomic_store_explicit((_Atomic int *)&a->done, 1,
-	    memory_order_release);
+	xtc_atomic_store_i32((int *)&a->done, 1, xtc_mo_release);
 }
 
 static inline int
 __xtc_aio_done_get(const xtc_aio_t *a)
 {
-	return atomic_load_explicit(
-	    (_Atomic int *)(uintptr_t)&a->done, memory_order_acquire);
+	return xtc_atomic_load_i32((int *)(uintptr_t)&a->done, xtc_mo_acquire);
 }
 
 #endif /* XTC_AIO_INT_H */

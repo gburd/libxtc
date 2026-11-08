@@ -42,7 +42,6 @@
 #include "xtc_inject.h"   /* svr.reply.oom fault-injection point */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -66,8 +65,8 @@ struct xtc_svr {
 	 * proc itself, read from any thread. */
 	xtc_atomic_pid_t      pid;
 	xtc_notify_t         *stopped;
-	_Atomic int           stop_requested;
-	_Atomic int           alive;
+	int stop_requested;
+	int alive;
 	/* handle_continue: a callback may arm a continuation via
 	 * xtc_svr_continue(); the server runs handle_continue(state, cont)
 	 * before its next recv, so it can finish expensive init/post-work
@@ -114,7 +113,7 @@ struct __svr_slot_bucket {
 };
 static struct __svr_slot_bucket __svr_slot_tab[SVR_SLOT_BUCKETS];
 static __os_once_t              __svr_slot_once = XTC_OS_ONCE_INIT;
-static _Atomic uint64_t         __svr_slot_seq;
+static uint64_t __svr_slot_seq;
 
 static void
 __svr_slot_tab_init(void)
@@ -173,7 +172,7 @@ static void
 __svr_run_continue(struct xtc_svr *s)
 {
 	while (s->cont_pending && s->cb.handle_continue != NULL &&
-	    !atomic_load_explicit(&s->stop_requested, memory_order_acquire)) {
+	    !xtc_atomic_load_i32(&s->stop_requested, xtc_mo_acquire)) {
 		void *cont = s->cont_arg;
 		s->cont_pending = 0;
 		s->cont_arg = NULL;
@@ -203,7 +202,7 @@ __svr_exited(void *arg)
 		__os_free(s->inflight);
 		s->inflight = NULL;
 	}
-	atomic_store_explicit(&s->alive, 0, memory_order_release);
+	xtc_atomic_store_i32(&s->alive, 0, xtc_mo_release);
 	(void)xtc_notify_signal(s->stopped);   /* s may be freed after this */
 }
 
@@ -224,7 +223,7 @@ __svr_entry(void *arg)
 	}
 	__svr_run_continue(s);   /* init may have armed a continuation */
 
-	while (!atomic_load_explicit(&s->stop_requested, memory_order_acquire)) {
+	while (!xtc_atomic_load_i32(&s->stop_requested, xtc_mo_acquire)) {
 		void  *msg = NULL;
 		size_t size = 0;
 		int    rc;
@@ -343,7 +342,7 @@ xtc_svr_start(xtc_loop_t *loop, const xtc_svr_callbacks_t *cb, void *state,
 	s->loop = loop;
 	s->cb = c;
 	s->state = state;
-	atomic_store_explicit(&s->alive, 1, memory_order_relaxed);
+	xtc_atomic_store_i32(&s->alive, 1, xtc_mo_relaxed);
 
 	if ((rc = xtc_notify_create(&s->stopped)) != XTC_OK) {
 		__os_free(s);
@@ -367,7 +366,7 @@ int
 xtc_svr_stop(xtc_svr_t *s)
 {
 	if (s == NULL) return XTC_E_INVAL;
-	atomic_store_explicit(&s->stop_requested, 1, memory_order_release);
+	xtc_atomic_store_i32(&s->stop_requested, 1, xtc_mo_release);
 	{
 		uint8_t kick = 'S';
 		(void)xtc_send(xtc_atomic_pid_load(&s->pid), &kick, 1);
@@ -487,9 +486,10 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 	 * starve the server itself), so route the reply back through
 	 * the caller's mailbox using xtc_recv_match. */
 	if (!xtc_pid_is_none(xtc_self())) {
-		static _Atomic uint64_t g_next_tag;
-		uint64_t tag = atomic_fetch_add_explicit(&g_next_tag, 1,
-		    memory_order_relaxed) + 1;
+		static uint64_t g_next_tag;
+		uint64_t tag =
+		    xtc_atomic_fetch_add_u64(&g_next_tag, 1, xtc_mo_relaxed) +
+		    1;
 		xtc_pid_t self_pid = xtc_self();
 
 		msg_size = SVR_PCALL_HDR + req_size;
@@ -517,8 +517,8 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 		xtc_notify_destroy(slot.done);
 		return XTC_E_NOMEM;
 	}
-	slot.id = atomic_fetch_add_explicit(&__svr_slot_seq, 1,
-	    memory_order_relaxed) + 1;           /* never 0 (the pid path) */
+	slot.id = xtc_atomic_fetch_add_u64(&__svr_slot_seq, 1, xtc_mo_relaxed) +
+	    1; /* never 0 (the pid path) */
 	b = __svr_slot_bucket(slot.id);
 	(void)__xtc_mtx_lock(&b->lock);
 	slot.next = b->head;

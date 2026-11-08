@@ -30,7 +30,6 @@
 
 #include <pthread.h>
 #include <sched.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -73,7 +72,7 @@
 
 #define XTC_LRLOCK_MAX_GLOBAL_SLOTS  4096
 
-static _Atomic int     __global_slot_counter = 0;
+static int __global_slot_counter = 0;
 static XTC_THREAD_LOCAL int    __my_global_slot = -1;
 
 static pthread_mutex_t __slot_free_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -122,17 +121,16 @@ __slot_for(xtc_lrlock_t *lr)
 		(void)__xtc_mtx_unlock(&__slot_free_lock);
 
 		if (s < 0) {
-			s = atomic_fetch_add_explicit(&__global_slot_counter, 1,
-			    memory_order_relaxed);
+			s = xtc_atomic_fetch_add_i32(&__global_slot_counter, 1,
+			    xtc_mo_relaxed);
 			if (s >= XTC_LRLOCK_MAX_GLOBAL_SLOTS) {
 				/* Hard cap: more concurrently-live reader
 				 * threads than the process supports.  Undo
 				 * the bump so the counter does not run away,
 				 * and fail closed -- callers must treat a
 				 * negative slot as "cannot read safely". */
-				(void)atomic_fetch_sub_explicit(
-				    &__global_slot_counter, 1,
-				    memory_order_relaxed);
+				(void)xtc_atomic_fetch_sub_i32(
+				    &__global_slot_counter, 1, xtc_mo_relaxed);
 				return -1;
 			}
 		}
@@ -155,7 +153,7 @@ __slot_for(xtc_lrlock_t *lr)
 
 typedef union epoch_entry {
 	struct {
-		_Atomic uint32_t epoch;     /* even = idle, odd = active */
+		uint32_t epoch;             /* even = idle, odd = active */
 		uint32_t         enters;    /* nesting depth, owner-only */
 	};
 	char pad[XTC_CACHE_LINE];
@@ -188,14 +186,14 @@ struct xtc_lrlock {
 	void                *data[2];
 	size_t               data_alloc[2];   /* mmap rounded sizes */
 
-	_Atomic uint32_t     read_idx;        /* 0 or 1 */
+	uint32_t read_idx; /* 0 or 1 */
 
 	/* Per-slot epoch counters (cache-line padded). */
 	epoch_entry_t       *epochs;
 	int                  max_readers;
 
 	/* Active-reader bitmask: ceil(max_readers/64) words. */
-	_Atomic uint64_t    *active_mask;
+	uint64_t *active_mask;
 	int                  nbitmask_words;
 
 	/* Writer's snapshot of epochs taken at the start of each publish. */
@@ -274,12 +272,13 @@ __snapshot_epochs(xtc_lrlock_t *lr)
 		           : lr->max_readers - base;
 		uint64_t word;
 		memset(&lr->last_seen_epochs[base], 0, (size_t)nbits * sizeof(uint32_t));
-		word = atomic_load_explicit(&lr->active_mask[w], memory_order_acquire);
+		word = xtc_atomic_load_u64(&lr->active_mask[w], xtc_mo_acquire);
 		while (word != 0) {
 			int bit = XTC_CTZLL(word);
 			int i   = base + bit;
-			lr->last_seen_epochs[i] = atomic_load_explicit(
-			    &lr->epochs[i].epoch, memory_order_acquire);
+			lr->last_seen_epochs[i] =
+			    xtc_atomic_load_u32(&lr->epochs[i].epoch,
+			        xtc_mo_acquire);
 			word &= word - 1;
 		}
 	}
@@ -295,8 +294,8 @@ __wait_for_readers(xtc_lrlock_t *lr)
 			uint32_t last = lr->last_seen_epochs[i];
 			uint32_t cur;
 			if ((last & 1u) == 0) continue;        /* idle in snapshot */
-			cur = atomic_load_explicit(&lr->epochs[i].epoch,
-			    memory_order_acquire);
+			cur = xtc_atomic_load_u32(&lr->epochs[i].epoch,
+			    xtc_mo_acquire);
 			if (XTC_UNLIKELY(cur == last)) { all_done = 0; break; }
 		}
 		if (XTC_LIKELY(all_done)) return;
@@ -341,8 +340,7 @@ __replay_oplog(xtc_lrlock_t *lr, void *target)
 static int
 __cow_ensure_write_copy(xtc_lrlock_t *lr)
 {
-	int read_idx = (int)atomic_load_explicit(&lr->read_idx,
-	    memory_order_acquire);
+	int read_idx = (int)xtc_atomic_load_u32(&lr->read_idx, xtc_mo_acquire);
 	int wr_idx   = 1 - read_idx;
 	if (lr->data[wr_idx] == NULL) {
 		size_t alloc;
@@ -420,12 +418,13 @@ xtc_lrlock_create_ex(const xtc_lrlock_opts_t *opts, xtc_lrlock_t **out)
 		if (lr->data[1] == NULL) { rc = XTC_E_RESOURCE; goto fail; }
 	}
 
-	atomic_store_explicit(&lr->read_idx, 0u, memory_order_relaxed);
+	xtc_atomic_store_u32(&lr->read_idx, 0u, xtc_mo_relaxed);
 
 	if ((rc = __os_calloc((size_t)max_readers, sizeof(epoch_entry_t),
 	    (void **)&lr->epochs)) != XTC_OK) goto fail;
-	if ((rc = __os_calloc((size_t)nb, sizeof(_Atomic uint64_t),
-	    (void **)&lr->active_mask)) != XTC_OK) goto fail;
+	if ((rc = __os_calloc((size_t)nb, sizeof(uint64_t),
+	         (void **)&lr->active_mask)) != XTC_OK)
+		goto fail;
 	if ((rc = __os_calloc((size_t)max_readers, sizeof(uint32_t),
 	    (void **)&lr->last_seen_epochs)) != XTC_OK) goto fail;
 	if ((rc = __os_calloc(1, lr->oplog_capacity, (void **)&lr->oplog)) != XTC_OK)
@@ -501,20 +500,20 @@ xtc_lrlock_read_begin(xtc_lrlock_t *lr)
 	enters = lr->epochs[slot].enters;
 	if (enters != 0) {
 		/* Nested read: epoch already odd; just acquire-load idx. */
-		idx = atomic_load_explicit(&lr->read_idx, memory_order_acquire);
+		idx = xtc_atomic_load_u32(&lr->read_idx, xtc_mo_acquire);
 		lr->epochs[slot].enters = enters + 1;
 		return lr->data[idx];
 	}
 
 	/* Step 1: announce activity in the bitmask. */
-	atomic_fetch_or_explicit(&lr->active_mask[slot / 64],
-	    (uint64_t)1 << (slot & 63u), memory_order_release);
+	xtc_atomic_fetch_or_u64(&lr->active_mask[slot / 64],
+	    (uint64_t)1 << (slot & 63u), xtc_mo_release);
 	/* Step 2: bump our epoch to odd. */
-	(void)atomic_fetch_add_explicit(&lr->epochs[slot].epoch, 1u,
-	    memory_order_acq_rel);
+	(void)xtc_atomic_fetch_add_u32(&lr->epochs[slot].epoch, 1u,
+	    xtc_mo_acq_rel);
 	/* Step 3: SeqCst fence -- guarantees writer sees our odd epoch
 	 * before we observe the current read_idx. */
-	atomic_thread_fence(memory_order_seq_cst);
+	xtc_atomic_thread_fence(xtc_mo_seq_cst);
 	/* Race window: our epoch is announced (odd) but we have not yet
 	 * loaded read_idx.  A concurrent publish must observe our odd
 	 * epoch and drain-wait for us.  A test pauses a reader here,
@@ -522,7 +521,7 @@ xtc_lrlock_read_begin(xtc_lrlock_t *lr)
 	 * sees a consistent buffer. */
 	XTC_INJECTION_POINT("lrlock.read.post_announce");
 	/* Step 4: load read_idx. */
-	idx = atomic_load_explicit(&lr->read_idx, memory_order_acquire);
+	idx = xtc_atomic_load_u32(&lr->read_idx, xtc_mo_acquire);
 	lr->epochs[slot].enters = 1;
 	return lr->data[idx];
 }
@@ -541,11 +540,11 @@ xtc_lrlock_read_end(xtc_lrlock_t *lr)
 	lr->epochs[slot].enters = enters;
 	if (enters == 0) {
 		/* Bump epoch to even. */
-		(void)atomic_fetch_add_explicit(&lr->epochs[slot].epoch, 1u,
-		    memory_order_acq_rel);
+		(void)xtc_atomic_fetch_add_u32(&lr->epochs[slot].epoch, 1u,
+		    xtc_mo_acq_rel);
 		/* Clear the active-reader bit. */
-		atomic_fetch_and_explicit(&lr->active_mask[slot / 64],
-		    ~((uint64_t)1 << (slot & 63u)), memory_order_release);
+		xtc_atomic_fetch_and_u64(&lr->active_mask[slot / 64],
+		    ~((uint64_t)1 << (slot & 63u)), xtc_mo_release);
 	}
 }
 /* XTC_NOALLOC_END */
@@ -566,7 +565,7 @@ xtc_lrlock_write_begin(xtc_lrlock_t *lr)
 			return NULL;
 		}
 	}
-	read_idx = (int)atomic_load_explicit(&lr->read_idx, memory_order_acquire);
+	read_idx = (int)xtc_atomic_load_u32(&lr->read_idx, xtc_mo_acquire);
 	return lr->data[1 - read_idx];
 }
 
@@ -589,7 +588,7 @@ xtc_lrlock_apply_op(xtc_lrlock_t *lr, const void *op, size_t op_size)
 	lr->oplog_used += entry;
 	lr->oplog_count++;
 
-	read_idx = (int)atomic_load_explicit(&lr->read_idx, memory_order_relaxed);
+	read_idx = (int)xtc_atomic_load_u32(&lr->read_idx, xtc_mo_relaxed);
 	if (lr->apply_fn != NULL)
 		lr->apply_fn(lr->data[1 - read_idx], op, op_size);
 }
@@ -606,8 +605,8 @@ __publish_common(xtc_lrlock_t *lr, int force_full_sync)
 		 * caller is treating the write copy as authoritative, so
 		 * we skip this step -- the post-swap sync below will copy
 		 * the writer's state to the now-stale buffer. */
-		old_idx = (int)atomic_load_explicit(&lr->read_idx,
-		    memory_order_relaxed);
+		old_idx =
+		    (int)xtc_atomic_load_u32(&lr->read_idx, xtc_mo_relaxed);
 		if (lr->sync_fn != NULL)
 			lr->sync_fn(lr->data[1 - old_idx], lr->data[old_idx],
 			    lr->data_size);
@@ -616,13 +615,13 @@ __publish_common(xtc_lrlock_t *lr, int force_full_sync)
 	}
 	lr->first_publish_done = 1;
 
-	atomic_thread_fence(memory_order_seq_cst);
+	xtc_atomic_thread_fence(xtc_mo_seq_cst);
 
-	old_idx = (int)atomic_load_explicit(&lr->read_idx, memory_order_relaxed);
+	old_idx = (int)xtc_atomic_load_u32(&lr->read_idx, xtc_mo_relaxed);
 	new_idx = 1 - old_idx;
-	(void)atomic_exchange_explicit(&lr->read_idx, (uint32_t)new_idx,
-	    memory_order_acq_rel);
-	atomic_thread_fence(memory_order_seq_cst);
+	(void)xtc_atomic_exchange_u32(&lr->read_idx, (uint32_t)new_idx,
+	    xtc_mo_acq_rel);
+	xtc_atomic_thread_fence(xtc_mo_seq_cst);
 
 	/* Race window: read_idx now points at the new buffer, but a
 	 * reader that loaded the old index before the swap is still on
@@ -696,7 +695,7 @@ xtc_lrlock_read_data(xtc_lrlock_t *lr)
 {
 	int idx;
 	if (lr == NULL) return NULL;
-	idx = (int)atomic_load_explicit(&lr->read_idx, memory_order_acquire);
+	idx = (int)xtc_atomic_load_u32(&lr->read_idx, xtc_mo_acquire);
 	return lr->data[idx];
 }
 
@@ -705,7 +704,7 @@ xtc_lrlock_write_data(xtc_lrlock_t *lr)
 {
 	int idx;
 	if (lr == NULL) return NULL;
-	idx = (int)atomic_load_explicit(&lr->read_idx, memory_order_acquire);
+	idx = (int)xtc_atomic_load_u32(&lr->read_idx, xtc_mo_acquire);
 	return lr->data[1 - idx];
 }
 

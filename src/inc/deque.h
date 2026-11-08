@@ -20,7 +20,7 @@
 #ifndef XTC_DEQUE_H
 #define XTC_DEQUE_H
 
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 #include <stdint.h>
 
 #include "xtc.h"
@@ -49,19 +49,19 @@ typedef struct xtc_deque {
 	 *   (to claim a slot) and by the owner (when popping the
 	 *   last item to break a tie with a thief).
 	 */
-	_Atomic int64_t  top;
-	_Atomic int64_t  bottom;
-	_Atomic(void *)  buf[XTC_DEQUE_CAP];
+	int64_t top;
+	int64_t bottom;
+	void *buf[XTC_DEQUE_CAP];
 } xtc_deque_t;
 
 static inline void
 xtc_deque_init(xtc_deque_t *d)
 {
 	int i;
-	atomic_store_explicit(&d->top, 0, memory_order_relaxed);
-	atomic_store_explicit(&d->bottom, 0, memory_order_relaxed);
+	xtc_atomic_store_i64(&d->top, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i64(&d->bottom, 0, xtc_mo_relaxed);
 	for (i = 0; i < XTC_DEQUE_CAP; i++)
-		atomic_store_explicit(&d->buf[i], NULL, memory_order_relaxed);
+		xtc_atomic_store_ptr(&d->buf[i], NULL, xtc_mo_relaxed);
 }
 
 /*
@@ -71,16 +71,15 @@ xtc_deque_init(xtc_deque_t *d)
 static inline int
 xtc_deque_push(xtc_deque_t *d, void *v)
 {
-	int64_t b = atomic_load_explicit(&d->bottom, memory_order_relaxed);
-	int64_t t = atomic_load_explicit(&d->top,    memory_order_acquire);
+	int64_t b = xtc_atomic_load_i64(&d->bottom, xtc_mo_relaxed);
+	int64_t t = xtc_atomic_load_i64(&d->top, xtc_mo_acquire);
 	if (b - t >= XTC_DEQUE_CAP) return XTC_E_AGAIN;
-	atomic_store_explicit(&d->buf[b & XTC_DEQUE_MASK], v,
-	    memory_order_relaxed);
+	xtc_atomic_store_ptr(&d->buf[b & XTC_DEQUE_MASK], v, xtc_mo_relaxed);
 	/* A release store, not fence + relaxed store: the same ordering, but
 	 * ThreadSanitizer does not model standalone fences, so the fence form
 	 * hid the push->steal edge and every write a thief makes to a stolen
 	 * task (q_next, inbox_next) was reported as a race. */
-	atomic_store_explicit(&d->bottom, b + 1, memory_order_release);
+	xtc_atomic_store_i64(&d->bottom, b + 1, xtc_mo_release);
 	return XTC_OK;
 }
 
@@ -94,30 +93,28 @@ xtc_deque_push(xtc_deque_t *d, void *v)
 static inline void *
 xtc_deque_pop(xtc_deque_t *d)
 {
-	int64_t b = atomic_load_explicit(&d->bottom, memory_order_relaxed) - 1;
+	int64_t b = xtc_atomic_load_i64(&d->bottom, xtc_mo_relaxed) - 1;
 	int64_t t;
 	void *x;
 
-	atomic_store_explicit(&d->bottom, b, memory_order_relaxed);
-	atomic_thread_fence(memory_order_seq_cst);
-	t = atomic_load_explicit(&d->top, memory_order_relaxed);
+	xtc_atomic_store_i64(&d->bottom, b, xtc_mo_relaxed);
+	xtc_atomic_thread_fence(xtc_mo_seq_cst);
+	t = xtc_atomic_load_i64(&d->top, xtc_mo_relaxed);
 
 	if (t > b) {
 		/* Empty. */
-		atomic_store_explicit(&d->bottom, t, memory_order_relaxed);
+		xtc_atomic_store_i64(&d->bottom, t, xtc_mo_relaxed);
 		return NULL;
 	}
 
-	x = atomic_load_explicit(&d->buf[b & XTC_DEQUE_MASK],
-	    memory_order_relaxed);
+	x = xtc_atomic_load_ptr(&d->buf[b & XTC_DEQUE_MASK], xtc_mo_relaxed);
 	if (t < b) return x;        /* uncontested */
 
 	/* t == b: last element, race with thief. */
-	if (!atomic_compare_exchange_strong_explicit(
-	        &d->top, &t, t + 1,
-	        memory_order_seq_cst, memory_order_relaxed))
+	if (!xtc_atomic_cas_i64(&d->top, &t, t + 1, xtc_mo_seq_cst,
+	        xtc_mo_relaxed))
 		x = NULL;             /* lost the race */
-	atomic_store_explicit(&d->bottom, b + 1, memory_order_relaxed);
+	xtc_atomic_store_i64(&d->bottom, b + 1, xtc_mo_relaxed);
 	return x;
 }
 
@@ -128,19 +125,17 @@ xtc_deque_pop(xtc_deque_t *d)
 static inline void *
 xtc_deque_steal(xtc_deque_t *d)
 {
-	int64_t t = atomic_load_explicit(&d->top, memory_order_acquire);
+	int64_t t = xtc_atomic_load_i64(&d->top, xtc_mo_acquire);
 	int64_t b;
 	void *x;
 
-	atomic_thread_fence(memory_order_seq_cst);
-	b = atomic_load_explicit(&d->bottom, memory_order_acquire);
+	xtc_atomic_thread_fence(xtc_mo_seq_cst);
+	b = xtc_atomic_load_i64(&d->bottom, xtc_mo_acquire);
 
 	if (t >= b) return NULL;    /* empty */
-	x = atomic_load_explicit(&d->buf[t & XTC_DEQUE_MASK],
-	    memory_order_relaxed);
-	if (!atomic_compare_exchange_strong_explicit(
-	        &d->top, &t, t + 1,
-	        memory_order_seq_cst, memory_order_relaxed))
+	x = xtc_atomic_load_ptr(&d->buf[t & XTC_DEQUE_MASK], xtc_mo_relaxed);
+	if (!xtc_atomic_cas_i64(&d->top, &t, t + 1, xtc_mo_seq_cst,
+	        xtc_mo_relaxed))
 		return NULL;          /* lost race */
 	return x;
 }
@@ -160,8 +155,8 @@ xtc_deque_take(xtc_deque_t *d)
 {
 	void *x;
 
-	while (atomic_load_explicit(&d->bottom, memory_order_relaxed) >
-	    atomic_load_explicit(&d->top, memory_order_acquire))
+	while (xtc_atomic_load_i64(&d->bottom, xtc_mo_relaxed) >
+	    xtc_atomic_load_i64(&d->top, xtc_mo_acquire))
 		if ((x = xtc_deque_steal(d)) != NULL)
 			return x;
 	return NULL;
@@ -174,8 +169,8 @@ xtc_deque_take(xtc_deque_t *d)
 static inline int64_t
 xtc_deque_len(const xtc_deque_t *d)
 {
-	int64_t b = atomic_load_explicit(&d->bottom, memory_order_acquire);
-	int64_t t = atomic_load_explicit(&d->top,    memory_order_acquire);
+	int64_t b = xtc_atomic_load_i64(&d->bottom, xtc_mo_acquire);
+	int64_t t = xtc_atomic_load_i64(&d->top, xtc_mo_acquire);
 	return b - t;
 }
 

@@ -25,7 +25,6 @@
 #include "xtc_sync.h"
 #include "proc_int.h"      /* owner-qualified lookup/send for join/stop */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -51,7 +50,7 @@ struct fsm_postponed {
 struct xtc_fsm {
 	xtc_pid_t             pid;
 	xtc_loop_t *loop; /* owner (exact resolve; see __resolve_on) */
-	_Atomic int           stop_requested;
+	int stop_requested;
 	int                   joined;
 };
 
@@ -212,8 +211,7 @@ fsm_entry(void *arg)
 		running = 0;
 
 	while (running &&
-	    !atomic_load_explicit(&r->handle->stop_requested,
-	        memory_order_acquire)) {
+	    !xtc_atomic_load_i32(&r->handle->stop_requested, xtc_mo_acquire)) {
 		void  *msg = NULL;
 		size_t size = 0;
 		int64_t to;
@@ -307,7 +305,7 @@ xtc_fsm_start(xtc_loop_t *loop, const xtc_fsm_callbacks_t *cb, void *state,
 		__os_free(h);
 		return rc;
 	}
-	atomic_store_explicit(&h->stop_requested, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&h->stop_requested, 0, xtc_mo_relaxed);
 	h->joined = 0;
 	r->cb = c;
 	r->state = state;
@@ -339,7 +337,7 @@ xtc_fsm_stop(xtc_fsm_t *fsm)
 {
 	uint8_t kick = 'S';
 	if (fsm == NULL) return XTC_E_INVAL;
-	atomic_store_explicit(&fsm->stop_requested, 1, memory_order_release);
+	xtc_atomic_store_i32(&fsm->stop_requested, 1, xtc_mo_release);
 	if (!xtc_pid_is_none(fsm->pid))
 		(void)__xtc_send_on(fsm->loop, fsm->pid, &kick, 1);
 	return XTC_OK;
@@ -411,7 +409,7 @@ int
 xtc_fsm_call(xtc_pid_t target, const void *req, size_t req_size,
              void **out_reply, size_t *out_size, int64_t timeout_ns)
 {
-	static _Atomic uint32_t g_tag = 1;
+	static uint32_t g_tag = 1;
 	uint8_t *buf;
 	uint32_t tag;
 	xtc_pid_t self;
@@ -424,7 +422,7 @@ xtc_fsm_call(xtc_pid_t target, const void *req, size_t req_size,
 	self = xtc_self();
 	if (xtc_pid_is_none(self)) return XTC_E_INVAL;   /* must call from a proc */
 
-	tag = atomic_fetch_add_explicit(&g_tag, 1, memory_order_relaxed);
+	tag = xtc_atomic_fetch_add_u32(&g_tag, 1, xtc_mo_relaxed);
 	msg_size = FSM_CALL_HDR + req_size;
 	if (__os_malloc(msg_size, (void **)&buf) != XTC_OK) return XTC_E_NOMEM;
 	buf[0] = 'C';

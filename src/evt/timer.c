@@ -132,9 +132,8 @@ __heap_push(xtc_loop_t *loop, xtc_timer_t *t)
 	}
 	/* The DST late-fire path re-pushes a node its pop already claimed;
 	 * make it cancellable again. */
-	if (atomic_load_explicit(&t->fired, memory_order_relaxed) ==
-	    XTC_TIMER_FIRED)
-		atomic_store_explicit(&t->fired, 0, memory_order_relaxed);
+	if (xtc_atomic_load_i32(&t->fired, xtc_mo_relaxed) == XTC_TIMER_FIRED)
+		xtc_atomic_store_i32(&t->fired, 0, xtc_mo_relaxed);
 	x.deadline_ns = t->deadline_ns;
 	x.t = t;
 	__sift_up(loop->timers, loop->n_timers++, x);
@@ -166,9 +165,9 @@ __xtc_timer_park_release(xtc_timer_t *t)
 {
 	if (t == NULL)
 		return;
-	if (atomic_load_explicit(&t->refs, memory_order_relaxed) == 0)
+	if (xtc_atomic_load_i32(&t->refs, xtc_mo_relaxed) == 0)
 		return;   /* defensive: no owner left */
-	if (atomic_fetch_sub_explicit(&t->refs, 1, memory_order_acq_rel) != 1)
+	if (xtc_atomic_fetch_sub_i32(&t->refs, 1, xtc_mo_acq_rel) != 1)
 		return;
 	if (t->from_slab)
 		xtc_slab_free((struct xtc_slab *)t->loop->timer_slab, t);
@@ -179,7 +178,7 @@ __xtc_timer_park_release(xtc_timer_t *t)
 static int
 __is_cancelled(xtc_timer_t *t)
 {
-	return atomic_load_explicit(&t->fired, memory_order_acquire) ==
+	return xtc_atomic_load_i32(&t->fired, xtc_mo_acquire) ==
 	    XTC_TIMER_CANCELLED;
 }
 
@@ -269,9 +268,9 @@ __xtc_timer_heap_pop_due(xtc_loop_t *loop, int64_t now_ns)
 			if (loop->timers[0].deadline_ns > now_ns) return NULL;
 			/* Claim it to fire; a concurrent cancel that got there
 			 * first wins, and the node is dropped below. */
-			if (atomic_compare_exchange_strong_explicit(&top->fired,
-			    &expect, XTC_TIMER_FIRED, memory_order_acq_rel,
-			    memory_order_acquire))
+			if (xtc_atomic_cas_i32(&top->fired, &expect,
+			        XTC_TIMER_FIRED, xtc_mo_acq_rel,
+			        xtc_mo_acquire))
 				return __heap_pop_unsafe(loop);
 		}
 		(void)__heap_pop_unsafe(loop);
@@ -321,13 +320,13 @@ xtc_timer_set(xtc_loop_t *loop, int64_t delay_ns, xtc_timer_fn fn, void *user,
 	t->deadline_ns = now_ns + delay_ns;
 	/* Owners: the heap, plus the caller's handle if one is returned.
 	 * With no handle the timer is freed as soon as it fires. */
-	atomic_store_explicit(&t->refs, out_timer != NULL ? 2 : 1,
-	    memory_order_relaxed);
+	xtc_atomic_store_i32(&t->refs, out_timer != NULL ? 2 : 1,
+	    xtc_mo_relaxed);
 	t->cb = fn;
 	t->user = user;
 	t->waiter = NULL;
-	t->cancelled = 0;
-	t->fired = 0;
+	xtc_atomic_store_i32(&t->cancelled, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&t->fired, 0, xtc_mo_seq_cst);
 	t->heap_idx = -1;
 	t->loop = loop;
 	t->from_slab = 1;
@@ -355,10 +354,10 @@ __xtc_timer_try_cancel(xtc_timer_t *timer)
 {
 	xtc_loop_t *loop = timer->loop;
 	int expect = 0;
-	if (!atomic_compare_exchange_strong_explicit(&timer->fired, &expect,
-	    XTC_TIMER_CANCELLED, memory_order_acq_rel, memory_order_acquire))
+	if (!xtc_atomic_cas_i32(&timer->fired, &expect, XTC_TIMER_CANCELLED,
+	        xtc_mo_acq_rel, xtc_mo_acquire))
 		return 0;
-	atomic_store_explicit(&timer->cancelled, 1, memory_order_release);
+	xtc_atomic_store_i32(&timer->cancelled, 1, xtc_mo_release);
 	XTC_PROBE_TIMER_CANCEL((uintptr_t)timer);
 	/*
 	 * On the loop's own thread, take the node out of the heap now (Tm13):

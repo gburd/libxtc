@@ -48,7 +48,6 @@
 #include "os_tuning.h"   /* __os_tuning_check: xtc_tuning_check wraps it */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -140,8 +139,8 @@ __reg_remove(const void *handle)
 /* ---- counter ---- */
 
 struct counter_shard {
-	_Alignas(XTC_CACHE_LINE) _Atomic uint64_t value;
-	uint8_t pad[XTC_CACHE_LINE - sizeof(_Atomic uint64_t)];
+	_Alignas(XTC_CACHE_LINE) uint64_t value;
+	uint8_t pad[XTC_CACHE_LINE - sizeof(uint64_t)];
 };
 
 struct xtc_counter {
@@ -187,18 +186,16 @@ void
 xtc_counter_inc(xtc_counter_t *c)
 {
 	if (XTC_UNLIKELY(c == NULL)) return;
-	atomic_fetch_add_explicit(
-	    &c->shards[__current_cpu(c->n_cpus)].value,
-	    1, memory_order_relaxed);
+	xtc_atomic_fetch_add_u64(&c->shards[__current_cpu(c->n_cpus)].value, 1,
+	    xtc_mo_relaxed);
 }
 
 void
 xtc_counter_add(xtc_counter_t *c, int64_t delta)
 {
 	if (XTC_UNLIKELY(c == NULL)) return;
-	atomic_fetch_add_explicit(
-	    &c->shards[__current_cpu(c->n_cpus)].value,
-	    (uint64_t)delta, memory_order_relaxed);
+	xtc_atomic_fetch_add_u64(&c->shards[__current_cpu(c->n_cpus)].value,
+	    (uint64_t)delta, xtc_mo_relaxed);
 }
 
 uint64_t
@@ -208,8 +205,8 @@ xtc_counter_read(const xtc_counter_t *c)
 	int i;
 	if (c == NULL) return 0;
 	for (i = 0; i < c->n_cpus; i++)
-		total += atomic_load_explicit(&c->shards[i].value,
-		    memory_order_relaxed);
+		total +=
+		    xtc_atomic_load_u64(&c->shards[i].value, xtc_mo_relaxed);
 	return total;
 }
 
@@ -217,7 +214,7 @@ xtc_counter_read(const xtc_counter_t *c)
 
 struct xtc_gauge {
 	char              name[XTC_STATS_NAME_MAX];
-	_Atomic int64_t   value;
+	int64_t value;
 };
 
 int
@@ -245,21 +242,21 @@ void
 xtc_gauge_set(xtc_gauge_t *g, int64_t v)
 {
 	if (XTC_UNLIKELY(g == NULL)) return;
-	atomic_store_explicit(&g->value, v, memory_order_relaxed);
+	xtc_atomic_store_i64(&g->value, v, xtc_mo_relaxed);
 }
 
 void
 xtc_gauge_add(xtc_gauge_t *g, int64_t delta)
 {
 	if (XTC_UNLIKELY(g == NULL)) return;
-	atomic_fetch_add_explicit(&g->value, delta, memory_order_relaxed);
+	xtc_atomic_fetch_add_i64(&g->value, delta, xtc_mo_relaxed);
 }
 
 int64_t
 xtc_gauge_read(const xtc_gauge_t *g)
 {
 	if (g == NULL) return 0;
-	return atomic_load_explicit(&g->value, memory_order_relaxed);
+	return xtc_atomic_load_i64(&g->value, xtc_mo_relaxed);
 }
 
 /* ---- histogram ----
@@ -279,8 +276,8 @@ xtc_gauge_read(const xtc_gauge_t *g)
 #define XTC_HIST_BUCKETS    (XTC_HIST_BASE_BITS * XTC_HIST_SUBS)
 
 struct hist_shard {
-	_Alignas(XTC_CACHE_LINE) _Atomic uint64_t buckets[XTC_HIST_BUCKETS];
-	_Atomic int64_t  max;
+	_Alignas(XTC_CACHE_LINE) uint64_t buckets[XTC_HIST_BUCKETS];
+	int64_t max;
 };
 
 struct xtc_hist {
@@ -374,12 +371,12 @@ xtc_hist_record(xtc_hist_t *h, int64_t value_ns)
 	if (XTC_UNLIKELY(h == NULL)) return;
 	b = __hist_bucket(value_ns);
 	s = &h->shards[__current_cpu(h->n_cpus)];
-	atomic_fetch_add_explicit(&s->buckets[b], 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_u64(&s->buckets[b], 1, xtc_mo_relaxed);
 	/* Exact max: a plain load; a CAS only for a new max. */
-	cur = atomic_load_explicit(&s->max, memory_order_relaxed);
+	cur = xtc_atomic_load_i64(&s->max, xtc_mo_relaxed);
 	while (XTC_UNLIKELY(value_ns > cur) &&
-	    !atomic_compare_exchange_weak_explicit(&s->max, &cur, value_ns,
-	    memory_order_relaxed, memory_order_relaxed))
+	    !xtc_atomic_cas_weak_i64(&s->max, &cur, value_ns, xtc_mo_relaxed,
+	        xtc_mo_relaxed))
 		;
 }
 
@@ -389,8 +386,8 @@ __hist_bucket_total(const xtc_hist_t *h, int b)
 	uint64_t total = 0;
 	int i;
 	for (i = 0; i < h->n_cpus; i++)
-		total += atomic_load_explicit(&h->shards[i].buckets[b],
-		    memory_order_relaxed);
+		total += xtc_atomic_load_u64(&h->shards[i].buckets[b],
+		    xtc_mo_relaxed);
 	return total;
 }
 
@@ -412,8 +409,7 @@ xtc_hist_max(const xtc_hist_t *h)
 	int i;
 	if (h == NULL) return 0;
 	for (i = 0; i < h->n_cpus; i++) {
-		v = atomic_load_explicit(&h->shards[i].max,
-		    memory_order_relaxed);
+		v = xtc_atomic_load_i64(&h->shards[i].max, xtc_mo_relaxed);
 		if (v > m) m = v;
 	}
 	return m;
@@ -479,9 +475,9 @@ struct dist_shard {
 	_Alignas(XTC_CACHE_LINE) uint64_t n;
 	double      mean;
 	double      m2;
-	atomic_flag lock;
-	uint8_t     pad[XTC_CACHE_LINE - sizeof(uint64_t)
-	    - 2 * sizeof(double) - sizeof(atomic_flag)];
+	uint8_t lock; /* test-and-set spinlock: 0 clear, 1 set */
+	uint8_t pad[XTC_CACHE_LINE - sizeof(uint64_t) - 2 * sizeof(double) -
+	    sizeof(uint8_t)];
 };
 
 struct xtc_dist {
@@ -501,15 +497,14 @@ static void
 __dist_shard_lock(struct dist_shard *s)
 {
 	__xtc_unsafe_enter();
-	while (atomic_flag_test_and_set_explicit(&s->lock,
-	    memory_order_acquire))
+	while (xtc_atomic_exchange_u8(&s->lock, 1, xtc_mo_acquire))
 		;
 }
 
 static void
 __dist_shard_unlock(struct dist_shard *s)
 {
-	atomic_flag_clear_explicit(&s->lock, memory_order_release);
+	xtc_atomic_store_u8(&s->lock, 0, xtc_mo_release);
 	__xtc_unsafe_leave();
 }
 
@@ -532,10 +527,9 @@ xtc_dist_create(const char *name, xtc_dist_t **out)
 		return rc;
 	}
 	memset(d->shards, 0, (size_t)d->n_cpus * sizeof *d->shards);
-	/* memset-0 is a cleared atomic_flag on every supported target. */
+	/* memset-0 already cleared the locks; the explicit clear is kept. */
 	for (i = 0; i < d->n_cpus; i++)
-		atomic_flag_clear_explicit(&d->shards[i].lock,
-		    memory_order_relaxed);
+		xtc_atomic_store_u8(&d->shards[i].lock, 0, xtc_mo_relaxed);
 	__reg_add(d, XTC_METRIC_DIST, d->name);
 	*out = d;
 	return XTC_OK;

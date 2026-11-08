@@ -10,7 +10,7 @@
 #define XTC_IO_INT_H
 
 #include "xtc_io.h"
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 
 #if defined(XTC_IO_BACKEND_EPOLL)
 /* nothing to predefine; epoll keeps tags via epoll_data_t */
@@ -170,7 +170,7 @@ struct xtc_io {
 #elif defined(XTC_IO_BACKEND_IOCP)
 	void                  *iocp;       /* HANDLE: the completion port */
 	void                  *afd;        /* HANDLE: \Device\Afd, port-associated */
-	_Atomic int            wakeup_pending; /* 1 = a wakeup completion is queued */
+	int wakeup_pending; /* 1 = a wakeup completion is queued */
 	struct __xtc_iocp_reg **reg_iocp;   /* live registration nodes (stable) */
 	int  n_reg;
 	int  cap_reg;
@@ -194,10 +194,10 @@ struct xtc_io {
 	int             *pending_del;
 	int              n_pending_del;
 	int              cap_pending_del;
-	_Atomic int      has_pending_del;
+	int has_pending_del;
 	pthread_mutex_t  del_lock;
 	pthread_t        owner_tid;
-	_Atomic int      owner_set;
+	int owner_set;
 #elif defined(XTC_IO_BACKEND_AIX)
 	int   ps;                          /* pollset_t */
 	void *reg_aix;                     /* struct __xtc_aix_reg * */
@@ -233,7 +233,7 @@ struct xtc_io {
 	int             *pending_del;    /* fds awaiting owner-thread unregister */
 	int              n_pending_del;
 	int              cap_pending_del;
-	_Atomic int      has_pending_del;  /* fast, lock-free "is queue non-empty?" */
+	int has_pending_del; /* fast, lock-free "is queue non-empty?" */
 	pthread_mutex_t  del_lock;        /* guards ONLY pending_del (not fds/ring) */
 	/*
 	 * The process-wide id of the loop that owns this io (loop->id),
@@ -256,10 +256,10 @@ struct xtc_io {
 	 * upgrades a COOP ring to SINGLE_ISSUER the same way.
 	 * owner_tid/owner_set mirror the owner for the debugger (xtc-rings).
 	 */
-	_Atomic uint64_t owner_tok;
-	_Atomic int      owner_active;    /* owner declared (set_owner), not left */
+	uint64_t owner_tok;
+	int owner_active; /* owner declared (set_owner), not left */
 	pthread_t        owner_tid;       /* the thread that polls this io */
-	_Atomic int      owner_set;       /* 1 once owner_tid is recorded */
+	int owner_set;                    /* 1 once owner_tid is recorded */
 	/*
 	 * Ring mode.  ring_flags: the IORING_SETUP_* the ring was built with
 	 * (rebuilds reuse them).  ring_single: SINGLE_ISSUER (the DEFER
@@ -317,10 +317,10 @@ struct xtc_io {
 	int             *pending_del;
 	int              n_pending_del;
 	int              cap_pending_del;
-	_Atomic int      has_pending_del;
+	int has_pending_del;
 	pthread_mutex_t  del_lock;
 	pthread_t        owner_tid;
-	_Atomic int      owner_set;
+	int owner_set;
 #elif defined(XTC_IO_BACKEND_SELECT)
 	/* Parallel fd[], interest[], tag[] arrays.  fd_set is built
 	 * each poll() call from these.  Capped at FD_SETSIZE. */
@@ -345,10 +345,10 @@ struct xtc_io {
 	int             *pending_del;
 	int              n_pending_del;
 	int              cap_pending_del;
-	_Atomic int      has_pending_del;
+	int has_pending_del;
 	pthread_mutex_t  del_lock;
 	pthread_t        owner_tid;
-	_Atomic int      owner_set;
+	int owner_set;
 #elif defined(XTC_IO_BACKEND_SIM)
 	/* Registered fds (tag map) for readiness simulation, a scripted
 	 * event queue ordered by virtual-time due, and an in-process

@@ -19,7 +19,6 @@
 #include "preempt_int.h"
 #include "xtc_sim.h"
 
-#include <stdatomic.h>
 #include <stdio.h>
 
 extern int __xtc_loop_step_once(xtc_loop_t *loop);
@@ -51,38 +50,38 @@ struct xtc_exec {
 	                                * _Atomic-qualified pointer to the void*
 	                                * allocator -- MSVC C4090.) */
 	__os_thread_t *workers;
-	_Atomic int   stop_flag;
+	int stop_flag;
 	int           started;
-	_Atomic int   service_mode;    /* 1: run until xtc_exec_stop, never
-	                                * idle-auto-stop (a supervised app is
-	                                * a long-running service, not a finite
-	                                * work pool that drains and exits).
-	                                * _Atomic: xtc_exec_set_service_mode may
-	                                * be called from any thread while
-	                                * xtc_exec_run's idle check reads it. */
+	int service_mode;                  /* 1: run until xtc_exec_stop, never
+	                                    * idle-auto-stop (a supervised app is
+	                                    * a long-running service, not a finite
+	                                    * work pool that drains and exits).
+	                                    * _Atomic: xtc_exec_set_service_mode may
+	                                    * be called from any thread while
+	                                    * xtc_exec_run's idle check reads it. */
 	int64_t       preempt_interval_ns; /* 0 = off (default); >0 arms a
 	                                    * per-worker preemption timer at
 	                                    * this CPU-time interval (Phase 1
 	                                    * cooperative-assisted preemption:
 	                                    * a tick makes xtc_yield_if_due
 	                                    * callers yield). */
-	_Atomic int   eager_rebalance;     /* 0 = off (default): steal only when
+	int eager_rebalance;               /* 0 = off (default): steal only when
 	                                    * fully idle.  1 = a run-queue-empty
 	                                    * loop steals before blocking, and
 	                                    * enqueuing migratable work nudges an
 	                                    * idle peer.  See
 	                                    * xtc_exec_set_eager_rebalance. */
-	_Atomic int   n_mig_loops;         /* loops whose n_mig_alive > 0,
+	int n_mig_loops;                   /* loops whose n_mig_alive > 0,
 	                                    * moved only on a loop's 0 <-> 1
 	                                    * edges (so it is read-mostly); may
 	                                    * be transiently off by one while
 	                                    * two edges race.  <= 0: nothing in
 	                                    * the executor can be stolen. */
-	_Atomic int   n_idle;              /* workers currently in their idle
+	int n_idle;                        /* workers currently in their idle
 	                                    * poll; lets a producer cheaply tell
 	                                    * whether any peer is worth nudging
 	                                    * (no thundering herd if all busy). */
-	_Atomic int   steal_backoff;       /* 0 = off (default): an idle worker
+	int steal_backoff;                 /* 0 = off (default): an idle worker
 	                                    * re-scans/polls on a fixed 1ms tick.
 	                                    * 1 = after a streak of idle turns a
 	                                    * worker grows its idle-poll timeout
@@ -111,8 +110,10 @@ __xtc_exec_try_steal(xtc_loop_t *me)
 	if (exec == NULL) return NULL;
 	n = exec->n_loops;
 	if (n <= 1) return NULL;
-	my_node = exec->loop_node ? atomic_load_explicit(
-	    (_Atomic int *)&exec->loop_node[me->exec_id], memory_order_relaxed) : 0;
+	my_node = exec->loop_node ?
+	    xtc_atomic_load_i32((int *)&exec->loop_node[me->exec_id],
+	        xtc_mo_relaxed) :
+	    0;
 
 	{
 		/* Steal-victim start point.  Under a deterministic sim the
@@ -139,9 +140,9 @@ __xtc_exec_try_steal(xtc_loop_t *me)
 		 * (-1, carrier not started) on either side matches anything,
 		 * so a fresh executor steals exactly as before. */
 		if (exec->loop_node && my_node >= 0) {
-			int vn = atomic_load_explicit(
-			    (_Atomic int *)&exec->loop_node[idx],
-			    memory_order_relaxed);
+			int vn =
+			    xtc_atomic_load_i32((int *)&exec->loop_node[idx],
+			        xtc_mo_relaxed);
 			if (vn >= 0 && vn != my_node) continue;
 		}
 		victim = exec->loops[idx];
@@ -217,8 +218,8 @@ __xtc_exec_worker(void *arg)
 	__os_thread_apply_default_qos();
 	/* Record NUMA placement so the steal pass-1 can prefer same-node. */
 	if (exec->loop_node != NULL)
-		atomic_store_explicit((_Atomic int *)&exec->loop_node[loop->exec_id],
-		    __os_numa_current_node(), memory_order_relaxed);
+		xtc_atomic_store_i32((int *)&exec->loop_node[loop->exec_id],
+		    __os_numa_current_node(), xtc_mo_relaxed);
 
 	/* Preemption Phase 1: if enabled, arm a per-worker time slice.  A
 	 * tick makes xtc_yield_if_due callers on this worker yield (see
@@ -250,8 +251,7 @@ __xtc_exec_worker(void *arg)
 	int64_t idle_poll_ns;
 	for (;;) {
 		int rc;
-		if (atomic_load_explicit(&exec->stop_flag,
-		    memory_order_relaxed))
+		if (xtc_atomic_load_i32(&exec->stop_flag, xtc_mo_relaxed))
 			break;
 		rc = __xtc_loop_step_once(loop);
 		if (rc < 0) {
@@ -292,8 +292,9 @@ __xtc_exec_worker(void *arg)
 			/* Backoff: default 1ms; if enabled, grow toward 32ms
 			 * across an idle streak (idle_streak counts turns that
 			 * produced no work).  Any real work resets the streak. */
-			if (atomic_load_explicit(&exec->steal_backoff,
-			    memory_order_relaxed) && idle_streak > 4) {
+			if (xtc_atomic_load_i32(&exec->steal_backoff,
+				xtc_mo_relaxed) &&
+			    idle_streak > 4) {
 				int shift = idle_streak - 4;
 				if (shift > 5) shift = 5;   /* cap the growth */
 				idle_poll_ns = (1LL << shift) * 1000 * 1000LL;
@@ -313,8 +314,8 @@ __xtc_exec_worker(void *arg)
 			/* Mark this worker idle across the poll so a peer
 			 * producing migratable work can nudge us (eager
 			 * rebalance); cleared the instant we wake. */
-			atomic_fetch_add_explicit(&exec->n_idle, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_i32(&exec->n_idle, 1,
+			    xtc_mo_relaxed);
 			/* Producers nudge only a sleeping loop: publish it and
 			 * re-check the inbox, or a wake pushed since the step's
 			 * idle check would wait out the whole poll. */
@@ -324,8 +325,8 @@ __xtc_exec_worker(void *arg)
 				    idle_poll_ns, &n_out);
 				__xtc_inbox_sleep_end(loop);
 			}
-			atomic_fetch_sub_explicit(&exec->n_idle, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_sub_i32(&exec->n_idle, 1,
+			    xtc_mo_relaxed);
 			XTC_PROBE_LOOP_POLL((int)loop->id, idle_poll_ns, n_out);
 			/*
 			 * Dispatch the events this poll reaped.  This poll is
@@ -368,8 +369,8 @@ __xtc_exec_worker(void *arg)
 			(void)__xtc_inbox_drain(loop);
 			/* Loop again; if exec stopped or no real work
 			 * appeared, we'll exit on the next iteration. */
-			if (atomic_load_explicit(&exec->stop_flag,
-			    memory_order_relaxed))
+			if (xtc_atomic_load_i32(&exec->stop_flag,
+				xtc_mo_relaxed))
 				break;
 		} else {
 			idle_streak = 0;   /* real work: reset the backoff */
@@ -420,9 +421,9 @@ xtc_exec_init(xtc_exec_t **out, int n_loops)
 	 * and records it.  calloc's 0 would read as "node 0" and falsely
 	 * match a node-0 device in xtc_batch_loop_for_device. */
 	for (i = 0; i < n_loops; i++)
-		atomic_store_explicit((_Atomic int *)&e->loop_node[i], -1,
-		    memory_order_relaxed);
-	atomic_store_explicit(&e->stop_flag, 0, memory_order_relaxed);
+		xtc_atomic_store_i32((int *)&e->loop_node[i], -1,
+		    xtc_mo_relaxed);
+	xtc_atomic_store_i32(&e->stop_flag, 0, xtc_mo_relaxed);
 	e->n_loops = n_loops;
 	e->started = 0;
 
@@ -488,11 +489,11 @@ __exec_has_work(xtc_exec_t *e)
 	int i;
 	for (i = 0; i < e->n_loops; i++) {
 		xtc_loop_t *l = e->loops[i];
-		if (atomic_load_explicit(&l->n_alive,
-		    memory_order_relaxed) > 0) return 1;
+		if (xtc_atomic_load_i32(&l->n_alive, xtc_mo_relaxed) > 0)
+			return 1;
 		if (xtc_deque_len(&l->deque) > 0) return 1;
-		if (atomic_load_explicit(&l->n_timers_pub,
-		    memory_order_relaxed) > 0) return 1;
+		if (xtc_atomic_load_i32(&l->n_timers_pub, xtc_mo_relaxed) > 0)
+			return 1;
 		if (__xtc_inbox_nonempty(&l->inbox)) return 1;
 	}
 	return 0;
@@ -503,8 +504,8 @@ void
 xtc_exec_set_service_mode(xtc_exec_t *e, int on)
 {
 	if (e != NULL)
-		atomic_store_explicit(&e->service_mode, on ? 1 : 0,
-		    memory_order_relaxed);
+		xtc_atomic_store_i32(&e->service_mode, on ? 1 : 0,
+		    xtc_mo_relaxed);
 }
 
 /* PUBLIC: int  xtc_exec_get_service_mode __P((xtc_exec_t *)); */
@@ -512,7 +513,7 @@ int
 xtc_exec_get_service_mode(xtc_exec_t *e)
 {
 	return (e != NULL) &&
-	    atomic_load_explicit(&e->service_mode, memory_order_relaxed);
+	    xtc_atomic_load_i32(&e->service_mode, xtc_mo_relaxed);
 }
 
 /* PUBLIC: void xtc_exec_set_eager_rebalance __P((xtc_exec_t *, int)); */
@@ -520,8 +521,8 @@ void
 xtc_exec_set_eager_rebalance(xtc_exec_t *e, int on)
 {
 	if (e != NULL)
-		atomic_store_explicit(&e->eager_rebalance, on ? 1 : 0,
-		    memory_order_relaxed);
+		xtc_atomic_store_i32(&e->eager_rebalance, on ? 1 : 0,
+		    xtc_mo_relaxed);
 }
 
 /* PUBLIC: int  xtc_exec_get_eager_rebalance __P((xtc_exec_t *)); */
@@ -529,7 +530,7 @@ int
 xtc_exec_get_eager_rebalance(xtc_exec_t *e)
 {
 	return (e != NULL) &&
-	    atomic_load_explicit(&e->eager_rebalance, memory_order_relaxed);
+	    xtc_atomic_load_i32(&e->eager_rebalance, xtc_mo_relaxed);
 }
 
 /* PUBLIC: void xtc_exec_set_steal_backoff __P((xtc_exec_t *, int)); */
@@ -537,8 +538,8 @@ void
 xtc_exec_set_steal_backoff(xtc_exec_t *e, int on)
 {
 	if (e != NULL)
-		atomic_store_explicit(&e->steal_backoff, on ? 1 : 0,
-		    memory_order_relaxed);
+		xtc_atomic_store_i32(&e->steal_backoff, on ? 1 : 0,
+		    xtc_mo_relaxed);
 }
 
 /* PUBLIC: int  xtc_exec_get_steal_backoff __P((xtc_exec_t *)); */
@@ -546,7 +547,7 @@ int
 xtc_exec_get_steal_backoff(xtc_exec_t *e)
 {
 	return (e != NULL) &&
-	    atomic_load_explicit(&e->steal_backoff, memory_order_relaxed);
+	    xtc_atomic_load_i32(&e->steal_backoff, xtc_mo_relaxed);
 }
 
 /*
@@ -577,12 +578,12 @@ __xtc_exec_steal_recheck_ns(xtc_loop_t *me)
 	 * flag and wakes us (the wake byte persists until our poll).  A
 	 * stale flag costs at most one spurious wake.
 	 */
-	if (atomic_load_explicit(&e->n_mig_loops, memory_order_relaxed) <= 0) {
-		atomic_store(&me->steal_sleep, 1);
-		if (atomic_load(&e->n_mig_loops) <= 0)
+	if (xtc_atomic_load_i32(&e->n_mig_loops, xtc_mo_relaxed) <= 0) {
+		xtc_atomic_store_i32(&me->steal_sleep, 1, xtc_mo_seq_cst);
+		if (xtc_atomic_load_i32(&e->n_mig_loops, xtc_mo_seq_cst) <= 0)
 			return 0;
 	}
-	if (atomic_load_explicit(&e->steal_backoff, memory_order_relaxed))
+	if (xtc_atomic_load_i32(&e->steal_backoff, xtc_mo_relaxed))
 		return 32 * 1000 * 1000LL;
 	return 1000 * 1000LL;
 }
@@ -599,20 +600,23 @@ __xtc_exec_mig_alive(xtc_loop_t *l, int delta)
 	int i, old;
 	if (e == NULL)
 		return;
-	old = atomic_fetch_add_explicit(&l->n_mig_alive, delta,
-	    memory_order_relaxed);
+	old = xtc_atomic_fetch_add_i32(&l->n_mig_alive, delta, xtc_mo_relaxed);
 	if (delta < 0) {
 		if (old == 1)                     /* 1 -> 0: down-edge */
-			atomic_fetch_sub(&e->n_mig_loops, 1);
+			xtc_atomic_fetch_sub_i32(&e->n_mig_loops, 1,
+			    xtc_mo_seq_cst);
 		return;
 	}
 	if (old != 0)
 		return;
-	atomic_fetch_add(&e->n_mig_loops, 1);  /* 0 -> 1: up-edge */
+	xtc_atomic_fetch_add_i32(&e->n_mig_loops, 1,
+	    xtc_mo_seq_cst); /* 0 -> 1: up-edge */
 	for (i = 0; i < e->n_loops; i++) {
 		xtc_loop_t *p = e->loops[i];
-		if (p != l && atomic_load(&p->steal_sleep) != 0 &&
-		    atomic_exchange(&p->steal_sleep, 0) != 0)
+		if (p != l &&
+		    xtc_atomic_load_i32(&p->steal_sleep, xtc_mo_seq_cst) != 0 &&
+		    xtc_atomic_exchange_i32(&p->steal_sleep, 0,
+		        xtc_mo_seq_cst) != 0)
 			(void)xtc_io_wakeup(p->io);
 	}
 }
@@ -632,9 +636,9 @@ __xtc_exec_nudge_idle_peer(xtc_loop_t *producer)
 	int i, n, start;
 
 	if (e == NULL ||
-	    !atomic_load_explicit(&e->eager_rebalance, memory_order_relaxed))
+	    !xtc_atomic_load_i32(&e->eager_rebalance, xtc_mo_relaxed))
 		return;
-	if (atomic_load_explicit(&e->n_idle, memory_order_relaxed) <= 0)
+	if (xtc_atomic_load_i32(&e->n_idle, xtc_mo_relaxed) <= 0)
 		return;   /* no idle peer worth waking */
 
 	n = e->n_loops;
@@ -679,18 +683,17 @@ xtc_exec_run(xtc_exec_t *e)
 {
 	int i, rc;
 	if (e == NULL) return XTC_E_INVAL;
-	atomic_store_explicit(&e->stop_flag, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&e->stop_flag, 0, xtc_mo_relaxed);
 	/* Seed the published timer counts (timers set before the run). */
 	for (i = 0; i < e->n_loops; i++)
-		atomic_store_explicit(&e->loops[i]->n_timers_pub,
-		    e->loops[i]->n_timers, memory_order_relaxed);
+		xtc_atomic_store_i32(&e->loops[i]->n_timers_pub,
+		    e->loops[i]->n_timers, xtc_mo_relaxed);
 
 	/* Spawn worker threads. */
 	for (i = 0; i < e->n_loops; i++) {
 		if ((rc = __os_thread_create(&e->workers[i],
 		    __xtc_exec_worker, e->loops[i])) != XTC_OK) {
-			atomic_store_explicit(&e->stop_flag, 1,
-			    memory_order_relaxed);
+			xtc_atomic_store_i32(&e->stop_flag, 1, xtc_mo_relaxed);
 			while (--i >= 0) {
 				(void)xtc_io_wakeup(e->loops[i]->io);
 				(void)__os_thread_join(&e->workers[i], NULL);
@@ -714,10 +717,9 @@ xtc_exec_run(xtc_exec_t *e)
 	 * loops -- would stop the whole application prematurely.
 	 */
 	for (;;) {
-		if (atomic_load_explicit(&e->stop_flag,
-		    memory_order_relaxed))
+		if (xtc_atomic_load_i32(&e->stop_flag, xtc_mo_relaxed))
 			break;
-		if (!atomic_load_explicit(&e->service_mode, memory_order_relaxed) &&
+		if (!xtc_atomic_load_i32(&e->service_mode, xtc_mo_relaxed) &&
 		    !__exec_has_work(e)) {
 			/*
 			 * Confirm with a small re-check window: a worker
@@ -726,8 +728,8 @@ xtc_exec_run(xtc_exec_t *e)
 			 */
 			(void)__os_sleep_ns(1 * 1000 * 1000LL);
 			if (!__exec_has_work(e)) {
-				atomic_store_explicit(&e->stop_flag, 1,
-				    memory_order_relaxed);
+				xtc_atomic_store_i32(&e->stop_flag, 1,
+				    xtc_mo_relaxed);
 				for (i = 0; i < e->n_loops; i++)
 					(void)xtc_io_wakeup(e->loops[i]->io);
 				break;
@@ -892,8 +894,7 @@ xtc_sim_check(xtc_exec_t *e)
 	for (i = 0; i < e->n_loops; i++) {
 		xtc_loop_t *l = e->loops[i];
 		int64_t len = (int64_t)xtc_deque_len(&l->deque);
-		int nalive = atomic_load_explicit(&l->n_alive,
-		    memory_order_relaxed);
+		int nalive = xtc_atomic_load_i32(&l->n_alive, xtc_mo_relaxed);
 		/* Deque length within [0, CAP]: a negative or oversized span
 		 * means top/bottom corruption or a torn steal. */
 		if (len < 0 || len > XTC_DEQUE_CAP)
@@ -954,10 +955,10 @@ xtc_sim_state_hash(xtc_exec_t *e)
 		xtc_loop_t *l = e->loops[i];
 		uint64_t v[4];
 		int k;
-		v[0] = atomic_load_explicit(&l->n_tasks_run, memory_order_relaxed);
-		v[1] = atomic_load_explicit(&l->n_steals, memory_order_relaxed);
-		v[2] = (uint64_t)(unsigned)atomic_load_explicit(&l->n_alive,
-		    memory_order_relaxed);
+		v[0] = xtc_atomic_load_u64(&l->n_tasks_run, xtc_mo_relaxed);
+		v[1] = xtc_atomic_load_u64(&l->n_steals, xtc_mo_relaxed);
+		v[2] = (uint64_t)(unsigned)xtc_atomic_load_i32(&l->n_alive,
+		    xtc_mo_relaxed);
 		v[3] = (uint64_t)(unsigned)l->n_timers;
 		for (k = 0; k < 4; k++) {
 			h ^= v[k];
@@ -1017,14 +1018,14 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 
 	xtc_sim_activate(seed);
 	xtc_sim_clock_enable(0);
-	atomic_store_explicit(&e->stop_flag, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&e->stop_flag, 0, xtc_mo_relaxed);
 	e->started = 1;
 
 	for (;;) {
 		int64_t now, dl;
 		int i, n_runnable = 0, pick, chosen = -1, rc;
 
-		if (atomic_load_explicit(&e->stop_flag, memory_order_relaxed))
+		if (xtc_atomic_load_i32(&e->stop_flag, xtc_mo_relaxed))
 			break;
 		if (max_steps > 0 && steps >= max_steps) {
 			e->started = 0;
@@ -1054,9 +1055,10 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 			if (dl < 0) {
 				int alive = 0;
 				for (i = 0; i < e->n_loops; i++)
-					alive += atomic_load_explicit(
-					    &e->loops[i]->n_alive,
-					    memory_order_relaxed);
+					alive +=
+					    xtc_atomic_load_i32(&e->loops[i]
+					                             ->n_alive,
+					        xtc_mo_relaxed);
 				e->started = 0;
 				xtc_sim_clock_disable();
 				__xtc_current_loop = saved;
@@ -1212,7 +1214,7 @@ xtc_exec_stop(xtc_exec_t *e)
 {
 	int i;
 	if (e == NULL) return XTC_E_INVAL;
-	atomic_store_explicit(&e->stop_flag, 1, memory_order_relaxed);
+	xtc_atomic_store_i32(&e->stop_flag, 1, xtc_mo_relaxed);
 	/* Wake every loop so they observe the flag. */
 	for (i = 0; i < e->n_loops; i++)
 		(void)xtc_io_wakeup(e->loops[i]->io);
@@ -1280,8 +1282,7 @@ __xtc_exec_loop_node(xtc_exec_t *e, int idx)
 	if (e == NULL || idx < 0 || idx >= e->n_loops
 	    || e->loop_node == NULL)
 		return -1;
-	return atomic_load_explicit((_Atomic int *)&e->loop_node[idx],
-	    memory_order_relaxed);
+	return xtc_atomic_load_i32((int *)&e->loop_node[idx], xtc_mo_relaxed);
 }
 
 /* PUBLIC: int xtc_exec_loop_stats __P((xtc_exec_t *, int, xtc_loop_stats_t *)); */
@@ -1295,10 +1296,8 @@ xtc_exec_loop_stats(xtc_exec_t *e, int idx, xtc_loop_stats_t *out)
 		return XTC_E_INVAL;
 	l = e->loops[idx];
 	full.size = sizeof full;
-	full.tasks_run = atomic_load_explicit(&l->n_tasks_run,
-	    memory_order_relaxed);
-	full.steals = atomic_load_explicit(&l->n_steals,
-	    memory_order_relaxed);
+	full.tasks_run = xtc_atomic_load_u64(&l->n_tasks_run, xtc_mo_relaxed);
+	full.steals = xtc_atomic_load_u64(&l->n_steals, xtc_mo_relaxed);
 	return __xtc_sized_out(out, &full, sizeof full);
 }
 
@@ -1314,8 +1313,8 @@ __pick_loop(xtc_exec_t *e)
 		return (int)__xtc_sim_rng_range(XTC_SIM_RNG_PLACE,
 		    (uint64_t)e->n_loops);
 	{
-		static _Atomic int rr;
-		int n = atomic_fetch_add_explicit(&rr, 1, memory_order_relaxed);
+		static int rr;
+		int n = xtc_atomic_fetch_add_i32(&rr, 1, xtc_mo_relaxed);
 		return n % e->n_loops;
 	}
 }

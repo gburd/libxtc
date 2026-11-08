@@ -12,7 +12,6 @@
 #include "os_errno.h"
 
 #include <errno.h>
-#include <stdatomic.h>
 
 /*
  * Optional override hook (internal __os_* surface; a public xtc_*
@@ -32,7 +31,7 @@ typedef int (*errno_hook_fn)(int);
  * initialiser for an _Atomic function pointer ("initializer element is
  * not a compile-time constant"), which broke the clang ThreadSanitizer
  * build on toolchains of that vintage. */
-static _Atomic errno_hook_fn __errno_hook;
+static errno_hook_fn __errno_hook;
 
 /*
  * PUBLIC: int __os_errno_map __P((int));
@@ -42,7 +41,7 @@ __os_errno_map(int e)
 {
 	errno_hook_fn hook;
 
-	hook = atomic_load_explicit(&__errno_hook, memory_order_relaxed);
+	hook = xtc_atomic_load_ptr(&__errno_hook, xtc_mo_relaxed);
 	if (hook != NULL) {
 		int rc = hook(e);
 		if (rc != 0)          /* 0 == "defer to the built-in table" */
@@ -96,8 +95,7 @@ __os_errno_map(int e)
 void
 __os_errno_set_hook(int (*fn)(int))
 {
-	atomic_store_explicit(&__errno_hook, (errno_hook_fn)fn,
-	    memory_order_relaxed);
+	xtc_atomic_store_ptr(&__errno_hook, (errno_hook_fn)fn, xtc_mo_relaxed);
 }
 
 /*
@@ -106,5 +104,5 @@ __os_errno_set_hook(int (*fn)(int))
 int
 (*__os_errno_get_hook(void))(int)
 {
-	return atomic_load_explicit(&__errno_hook, memory_order_relaxed);
+	return xtc_atomic_load_ptr(&__errno_hook, xtc_mo_relaxed);
 }

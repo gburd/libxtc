@@ -41,15 +41,15 @@
  */
 
 #include <stdint.h>
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 
-static _Atomic uint32_t read_idx;      /* 0 or 1: the active side */
-static _Atomic int       data[2];      /* the two copies */
-static _Atomic uint32_t  epoch;        /* one reader's epoch: even idle, odd active */
+static uint32_t read_idx; /* 0 or 1: the active side */
+static int data[2];       /* the two copies */
+static uint32_t epoch;    /* one reader's epoch: even idle, odd active */
 
 /* The writer records which side it is mutating so the reader can
  * cross-check it never reads a side under active mutation. */
-static _Atomic int       writing_side; /* -1 == no write in progress */
+static int writing_side; /* -1 == no write in progress */
 
 /* Reader: read_begin (announce + fence + load idx), read the value,
  * read_end (epoch -> even). */
@@ -60,26 +60,26 @@ reader(void)
 	int a, b;
 
 	/* Step 2: bump epoch to odd (announce active). */
-	(void)atomic_fetch_add_explicit(&epoch, 1u, memory_order_acq_rel);
+	(void)xtc_atomic_fetch_add_u32(&epoch, 1u, xtc_mo_acq_rel);
 	/* Step 3: SeqCst fence -- writer sees our odd epoch before we
 	 * observe read_idx. */
-	atomic_thread_fence(memory_order_seq_cst);
+	xtc_atomic_thread_fence(xtc_mo_seq_cst);
 	/* Step 4: load read_idx -- the side we will read. */
-	idx = atomic_load_explicit(&read_idx, memory_order_acquire);
+	idx = xtc_atomic_load_u32(&read_idx, xtc_mo_acquire);
 
 	/* Read the value twice: on the active side the writer must never
 	 * mutate it, so both reads see the same consistent value AND the
 	 * writer must not be mid-write on this side. */
-	a = atomic_load_explicit(&data[idx], memory_order_relaxed);
-	__CPROVER_assert(atomic_load_explicit(&writing_side,
-	    memory_order_relaxed) != (int)idx,
+	a = xtc_atomic_load_i32(&data[idx], xtc_mo_relaxed);
+	__CPROVER_assert(xtc_atomic_load_i32(&writing_side, xtc_mo_relaxed) !=
+	        (int)idx,
 	    "writer never mutates the side a reader is reading");
-	b = atomic_load_explicit(&data[idx], memory_order_relaxed);
+	b = xtc_atomic_load_i32(&data[idx], xtc_mo_relaxed);
 	__CPROVER_assert(a == b,
 	    "reader sees a stable snapshot on the active side");
 
 	/* read_end: epoch -> even. */
-	(void)atomic_fetch_add_explicit(&epoch, 1u, memory_order_acq_rel);
+	(void)xtc_atomic_fetch_add_u32(&epoch, 1u, xtc_mo_acq_rel);
 }
 
 /* __wait_for_readers: spin until the reader is no longer in the old
@@ -93,7 +93,7 @@ wait_for_readers(uint32_t last_seen)
 	if ((last_seen & 1u) == 0)
 		return;                 /* reader was idle at snapshot */
 	for (i = 0; i < DRAIN_SPINS; i++) {
-		uint32_t cur = atomic_load_explicit(&epoch, memory_order_acquire);
+		uint32_t cur = xtc_atomic_load_u32(&epoch, xtc_mo_acquire);
 		if (cur != last_seen)
 			return;             /* reader advanced: drained */
 	}
@@ -105,25 +105,24 @@ wait_for_readers(uint32_t last_seen)
 static void
 writer(void)
 {
-	int rd = (int)atomic_load_explicit(&read_idx, memory_order_acquire);
+	int rd = (int)xtc_atomic_load_u32(&read_idx, xtc_mo_acquire);
 	int wr = 1 - rd;
 	uint32_t snap;
 
 	/* Mutate the INACTIVE side in two steps (a racing read of this
 	 * side would be torn; the protocol must forbid such a read). */
-	atomic_store_explicit(&writing_side, wr, memory_order_relaxed);
-	atomic_store_explicit(&data[wr], 100, memory_order_relaxed);
-	atomic_store_explicit(&data[wr], 200, memory_order_relaxed);
-	atomic_store_explicit(&writing_side, -1, memory_order_relaxed);
+	xtc_atomic_store_i32(&writing_side, wr, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&data[wr], 100, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&data[wr], 200, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&writing_side, -1, xtc_mo_relaxed);
 
 	/* Publish: SeqCst fence, flip read_idx, SeqCst fence. */
-	atomic_thread_fence(memory_order_seq_cst);
-	(void)atomic_exchange_explicit(&read_idx, (uint32_t)wr,
-	    memory_order_acq_rel);
-	atomic_thread_fence(memory_order_seq_cst);
+	xtc_atomic_thread_fence(xtc_mo_seq_cst);
+	(void)xtc_atomic_exchange_u32(&read_idx, (uint32_t)wr, xtc_mo_acq_rel);
+	xtc_atomic_thread_fence(xtc_mo_seq_cst);
 
 	/* Drain: wait for any reader still in the pre-flip epoch. */
-	snap = atomic_load_explicit(&epoch, memory_order_acquire);
+	snap = xtc_atomic_load_u32(&epoch, xtc_mo_acquire);
 	wait_for_readers(snap);
 	/* After the drain the old side (rd) is safe to reuse -- but a
 	 * SECOND publish is out of this harness's bound. */
@@ -133,11 +132,11 @@ writer(void)
 int
 main(void)
 {
-	atomic_store_explicit(&read_idx, 0, memory_order_relaxed);
-	atomic_store_explicit(&data[0], 1, memory_order_relaxed);   /* stable */
-	atomic_store_explicit(&data[1], 1, memory_order_relaxed);
-	atomic_store_explicit(&epoch, 0, memory_order_relaxed);     /* even */
-	atomic_store_explicit(&writing_side, -1, memory_order_relaxed);
+	xtc_atomic_store_u32(&read_idx, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&data[0], 1, xtc_mo_relaxed); /* stable */
+	xtc_atomic_store_i32(&data[1], 1, xtc_mo_relaxed);
+	xtc_atomic_store_u32(&epoch, 0, xtc_mo_relaxed); /* even */
+	xtc_atomic_store_i32(&writing_side, -1, xtc_mo_relaxed);
 
 	__CPROVER_ASYNC_1: writer();
 	reader();

@@ -34,7 +34,6 @@
 #include "os_time.h"
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <string.h>
 
 /* Fiber waiter node (FIFO), identical shape to sync.c's. */
@@ -68,7 +67,7 @@ struct fut_oncomplete {
 struct future_cell {
 	pthread_mutex_t lock;
 	pthread_cond_t  cv;              /* thread waiters */
-	_Atomic int     refcnt;
+	int refcnt;
 	int             ready;           /* 0 pending, 1 completed */
 	intptr_t        value;
 	int             status;
@@ -91,7 +90,7 @@ cell_new(struct future_cell **out)
 		return rc;
 	(void)pthread_mutex_init(&c->lock, NULL);
 	(void)pthread_cond_init(&c->cv, NULL);
-	atomic_init(&c->refcnt, 0);
+	xtc_atomic_store_i32(&c->refcnt, 0, xtc_mo_relaxed);
 	c->ready = 0;
 	c->status = XTC_OK;
 	*out = c;
@@ -101,7 +100,7 @@ cell_new(struct future_cell **out)
 static void
 cell_ref(struct future_cell *c)
 {
-	(void)atomic_fetch_add_explicit(&c->refcnt, 1, memory_order_relaxed);
+	(void)xtc_atomic_fetch_add_i32(&c->refcnt, 1, xtc_mo_relaxed);
 }
 
 static void
@@ -109,7 +108,7 @@ cell_unref(struct future_cell *c)
 {
 	if (c == NULL)
 		return;
-	if (atomic_fetch_sub_explicit(&c->refcnt, 1, memory_order_acq_rel) == 1) {
+	if (xtc_atomic_fetch_sub_i32(&c->refcnt, 1, xtc_mo_acq_rel) == 1) {
 		/* Last ref.  No waiters can remain (each waiter holds the
 		 * future ref while parked), and callbacks fire at set-time,
 		 * so cbs is empty by now unless the cell was dropped never-set
@@ -662,10 +661,10 @@ xtc_future_then(xtc_future_t *src, xtc_future_then_fn fn, void *user,
 /* when_all: a shared counter; the last input to complete resolves. */
 struct all_ctx {
 	xtc_promise_t  *prom;
-	_Atomic int     remaining;
+	int remaining;
 	int             total;
-	_Atomic int     first_err;   /* first non-OK status, or XTC_OK */
-	_Atomic int     err_set;
+	int first_err; /* first non-OK status, or XTC_OK */
+	int err_set;
 };
 
 static void
@@ -675,16 +674,15 @@ all_on_complete(intptr_t value, int status, void *u)
 	(void)value;
 	if (status != XTC_OK) {
 		int expected = 0;
-		if (atomic_compare_exchange_strong_explicit(&a->err_set,
-		    &expected, 1, memory_order_acq_rel, memory_order_relaxed))
-			atomic_store_explicit(&a->first_err, status,
-			    memory_order_relaxed);
+		if (xtc_atomic_cas_i32(&a->err_set, &expected, 1,
+		        xtc_mo_acq_rel, xtc_mo_relaxed))
+			xtc_atomic_store_i32(&a->first_err, status,
+			    xtc_mo_relaxed);
 	}
-	if (atomic_fetch_sub_explicit(&a->remaining, 1,
-	    memory_order_acq_rel) == 1) {
-		int st = atomic_load_explicit(&a->err_set, memory_order_relaxed)
-		    ? atomic_load_explicit(&a->first_err, memory_order_relaxed)
-		    : XTC_OK;
+	if (xtc_atomic_fetch_sub_i32(&a->remaining, 1, xtc_mo_acq_rel) == 1) {
+		int st = xtc_atomic_load_i32(&a->err_set, xtc_mo_relaxed) ?
+		    xtc_atomic_load_i32(&a->first_err, xtc_mo_relaxed) :
+		    XTC_OK;
 		(void)xtc_promise_set(a->prom, (intptr_t)a->total, st);
 		__os_free(a);
 	}
@@ -711,9 +709,9 @@ xtc_future_when_all(xtc_future_t **futs, int n, xtc_future_t **out_fut)
 	}
 	a->prom = prom;
 	a->total = n;
-	atomic_init(&a->remaining, n);
-	atomic_init(&a->first_err, XTC_OK);
-	atomic_init(&a->err_set, 0);
+	xtc_atomic_store_i32(&a->remaining, n, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&a->first_err, XTC_OK, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&a->err_set, 0, xtc_mo_relaxed);
 
 	for (i = 0; i < n; i++) {
 		/* A registration that fails (its node allocation) means that
@@ -735,8 +733,8 @@ xtc_future_when_all(xtc_future_t **futs, int n, xtc_future_t **out_fut)
  * (promise_set is idempotent -- second set returns INVAL, harmless). */
 struct any_ctx {
 	xtc_promise_t *prom;
-	_Atomic int    done;
-	_Atomic int    remaining;   /* to free the ctx after all fire */
+	int done;
+	int remaining; /* to free the ctx after all fire */
 };
 
 static void
@@ -744,11 +742,10 @@ any_on_complete(intptr_t value, int status, void *u)
 {
 	struct any_ctx *a = u;
 	int expected = 0;
-	if (atomic_compare_exchange_strong_explicit(&a->done, &expected, 1,
-	    memory_order_acq_rel, memory_order_relaxed))
+	if (xtc_atomic_cas_i32(&a->done, &expected, 1, xtc_mo_acq_rel,
+	        xtc_mo_relaxed))
 		(void)xtc_promise_set(a->prom, value, status);
-	if (atomic_fetch_sub_explicit(&a->remaining, 1,
-	    memory_order_acq_rel) == 1)
+	if (xtc_atomic_fetch_sub_i32(&a->remaining, 1, xtc_mo_acq_rel) == 1)
 		__os_free(a);
 }
 
@@ -758,11 +755,10 @@ any_on_complete(intptr_t value, int status, void *u)
 static void
 any_retire_failed(struct any_ctx *a)
 {
-	if (atomic_fetch_sub_explicit(&a->remaining, 1,
-	    memory_order_acq_rel) == 1) {
+	if (xtc_atomic_fetch_sub_i32(&a->remaining, 1, xtc_mo_acq_rel) == 1) {
 		int expected = 0;
-		if (atomic_compare_exchange_strong_explicit(&a->done,
-		    &expected, 1, memory_order_acq_rel, memory_order_relaxed))
+		if (xtc_atomic_cas_i32(&a->done, &expected, 1, xtc_mo_acq_rel,
+		        xtc_mo_relaxed))
 			(void)xtc_promise_set(a->prom, 0, XTC_E_NOMEM);
 		__os_free(a);
 	}
@@ -788,8 +784,8 @@ xtc_future_when_any(xtc_future_t **futs, int n, xtc_future_t **out_fut)
 		return rc;
 	}
 	a->prom = prom;
-	atomic_init(&a->done, 0);
-	atomic_init(&a->remaining, n);
+	xtc_atomic_store_i32(&a->done, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&a->remaining, n, xtc_mo_relaxed);
 
 	for (i = 0; i < n; i++) {
 		/* As in when_all: a callback that cannot be registered still
@@ -808,15 +804,14 @@ xtc_future_when_any(xtc_future_t **futs, int n, xtc_future_t **out_fut)
 struct timeout_ctx {
 	xtc_promise_t *prom;
 	xtc_timer_t   *timer;       /* we hold its handle until we are freed */
-	_Atomic int    done;
-	_Atomic int    remaining;   /* source cb + timer cb both must retire it */
+	int done;
+	int remaining; /* source cb + timer cb both must retire it */
 };
 
 static void
 timeout_retire(struct timeout_ctx *t)
 {
-	if (atomic_fetch_sub_explicit(&t->remaining, 1,
-	    memory_order_acq_rel) == 1) {
+	if (xtc_atomic_fetch_sub_i32(&t->remaining, 1, xtc_mo_acq_rel) == 1) {
 		if (t->timer != NULL)
 			(void)xtc_timer_release(t->timer);
 		__os_free(t);
@@ -828,8 +823,8 @@ timeout_src_complete(intptr_t value, int status, void *u)
 {
 	struct timeout_ctx *t = u;
 	int expected = 0;
-	if (atomic_compare_exchange_strong_explicit(&t->done, &expected, 1,
-	    memory_order_acq_rel, memory_order_relaxed)) {
+	if (xtc_atomic_cas_i32(&t->done, &expected, 1, xtc_mo_acq_rel,
+	        xtc_mo_relaxed)) {
 		(void)xtc_promise_set(t->prom, value, status);
 		/* A cancel that stops the fire also retires for the timer
 		 * callback, which will now never run.  Before 1.55.1 nothing
@@ -846,8 +841,8 @@ timeout_fire(void *u)
 {
 	struct timeout_ctx *t = u;
 	int expected = 0;
-	if (atomic_compare_exchange_strong_explicit(&t->done, &expected, 1,
-	    memory_order_acq_rel, memory_order_relaxed))
+	if (xtc_atomic_cas_i32(&t->done, &expected, 1, xtc_mo_acq_rel,
+	        xtc_mo_relaxed))
 		(void)xtc_promise_set(t->prom, 0, XTC_E_AGAIN);
 	timeout_retire(t);
 }
@@ -875,15 +870,16 @@ xtc_future_with_timeout(xtc_future_t *src, int64_t timeout_ns,
 	}
 	t->prom = prom;
 	t->timer = NULL;
-	atomic_init(&t->done, 0);
-	atomic_init(&t->remaining, 2);   /* source cb + timer cb */
+	xtc_atomic_store_i32(&t->done, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&t->remaining, 2,
+	    xtc_mo_relaxed); /* source cb + timer cb */
 
 	/* Arm the timer first so a source that completes synchronously in
 	 * cell_on_complete still finds a timer to cancel. */
 	if ((rc = xtc_timer_set(loop, timeout_ns, timeout_fire, t,
 	    &t->timer)) != XTC_OK) {
 		/* No timer: fall back to a plain forward (no timeout). */
-		atomic_store_explicit(&t->remaining, 1, memory_order_relaxed);
+		xtc_atomic_store_i32(&t->remaining, 1, xtc_mo_relaxed);
 	}
 
 	/* A failed registration means the source's callback never runs:

@@ -43,27 +43,27 @@
  */
 
 #include <stdint.h>
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 
 #define XTC_RCU_NBUCKETS 4
 
-static _Atomic uint64_t g_epoch;             /* the global epoch */
-static _Atomic uint64_t reader_active;       /* reader's slot: 0 = not reading */
+static uint64_t g_epoch;       /* the global epoch */
+static uint64_t reader_active; /* reader's slot: 0 = not reading */
 
 /* The one retired object: its liveness and the epoch it was retired
  * at.  obj_live drops to 0 exactly when it is reclaimed. */
-static _Atomic int      obj_live;            /* 1 until reclaimed */
-static _Atomic int      obj_retired;         /* 1 once retired */
-static _Atomic uint64_t obj_retire_epoch;
+static int obj_live;    /* 1 until reclaimed */
+static int obj_retired; /* 1 once retired */
+static uint64_t obj_retire_epoch;
 
 /* retire: stamp with current epoch, mark retired (rcu.c buckets it on
  * e % N and frees it two epochs later). */
 static void
 rcu_retire(void)
 {
-	uint64_t e = atomic_load_explicit(&g_epoch, memory_order_relaxed);
-	atomic_store_explicit(&obj_retire_epoch, e, memory_order_relaxed);
-	atomic_store_explicit(&obj_retired, 1, memory_order_release);
+	uint64_t e = xtc_atomic_load_u64(&g_epoch, xtc_mo_relaxed);
+	xtc_atomic_store_u64(&obj_retire_epoch, e, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&obj_retired, 1, xtc_mo_release);
 }
 
 /* synchronize: advance epoch, drain readers in <= old, reclaim the
@@ -72,16 +72,16 @@ rcu_retire(void)
 static void
 rcu_synchronize(void)
 {
-	uint64_t old = atomic_load_explicit(&g_epoch, memory_order_acquire);
+	uint64_t old = xtc_atomic_load_u64(&g_epoch, xtc_mo_acquire);
 	uint64_t new_e = old + 1;
 	int i;
 
-	atomic_store_explicit(&g_epoch, new_e, memory_order_release);
+	xtc_atomic_store_u64(&g_epoch, new_e, xtc_mo_release);
 
 	/* Wait for the reader if it is active in epoch <= old. */
 	for (i = 0; i < DRAIN_SPINS; i++) {
-		uint64_t a = atomic_load_explicit(&reader_active,
-		    memory_order_acquire);
+		uint64_t a =
+		    xtc_atomic_load_u64(&reader_active, xtc_mo_acquire);
 		if (a == 0 || a > old)
 			break;              /* reader left, or entered after old */
 		if (i == DRAIN_SPINS - 1)
@@ -91,11 +91,10 @@ rcu_synchronize(void)
 	/* Reclaim the object iff it was retired and the global epoch has
 	 * advanced two full grace periods past its retire epoch (rcu.c:
 	 * bucket (E % N) is recycle-safe once epoch reaches E + 2). */
-	if (new_e >= 2 &&
-	    atomic_load_explicit(&obj_retired, memory_order_acquire) &&
-	    atomic_load_explicit(&obj_retire_epoch, memory_order_relaxed)
-	        <= new_e - 2) {
-		atomic_store_explicit(&obj_live, 0, memory_order_release);
+	if (new_e >= 2 && xtc_atomic_load_i32(&obj_retired, xtc_mo_acquire) &&
+	    xtc_atomic_load_u64(&obj_retire_epoch, xtc_mo_relaxed) <=
+	        new_e - 2) {
+		xtc_atomic_store_i32(&obj_live, 0, xtc_mo_release);
 	}
 }
 
@@ -110,29 +109,28 @@ rcu_synchronize(void)
 static void
 reader(void)
 {
-	uint64_t e = atomic_load_explicit(&g_epoch, memory_order_acquire);
+	uint64_t e = xtc_atomic_load_u64(&g_epoch, xtc_mo_acquire);
 	int have_ref;
 
-	atomic_store_explicit(&reader_active, e == 0 ? 1 : e,
-	    memory_order_release);   /* publish our entry epoch (nonzero) */
+	xtc_atomic_store_u64(&reader_active, e == 0 ? 1 : e,
+	    xtc_mo_release); /* publish our entry epoch (nonzero) */
 
 	/* Reach the object through the live structure: we get a reference
 	 * only if it is still linked (not yet retired).  A reader arriving
 	 * after the unlink simply never finds it. */
-	have_ref = (atomic_load_explicit(&obj_retired, memory_order_acquire)
-	    == 0) && (atomic_load_explicit(&obj_live, memory_order_acquire)
-	    == 1);
+	have_ref = (xtc_atomic_load_i32(&obj_retired, xtc_mo_acquire) == 0) &&
+	    (xtc_atomic_load_i32(&obj_live, xtc_mo_acquire) == 1);
 
 	if (have_ref) {
 		/* We hold a reference obtained inside the read-side, before
 		 * the object was retired.  It MUST stay live until we leave
 		 * the read-side -- reclaim may not free it out from under us. */
-		__CPROVER_assert(atomic_load_explicit(&obj_live,
-		    memory_order_acquire) == 1,
+		__CPROVER_assert(xtc_atomic_load_i32(&obj_live,
+		                     xtc_mo_acquire) == 1,
 		    "reader in a read-side never observes a freed object");
 	}
 
-	atomic_store_explicit(&reader_active, 0, memory_order_release);
+	xtc_atomic_store_u64(&reader_active, 0, xtc_mo_release);
 }
 
 /* The reclaimer: retire the object, then run two synchronize cycles
@@ -148,11 +146,11 @@ reclaimer(void)
 int
 main(void)
 {
-	atomic_store_explicit(&g_epoch, 1, memory_order_relaxed);
-	atomic_store_explicit(&reader_active, 0, memory_order_relaxed);
-	atomic_store_explicit(&obj_live, 1, memory_order_relaxed);
-	atomic_store_explicit(&obj_retired, 0, memory_order_relaxed);
-	atomic_store_explicit(&obj_retire_epoch, 0, memory_order_relaxed);
+	xtc_atomic_store_u64(&g_epoch, 1, xtc_mo_relaxed);
+	xtc_atomic_store_u64(&reader_active, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&obj_live, 1, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&obj_retired, 0, xtc_mo_relaxed);
+	xtc_atomic_store_u64(&obj_retire_epoch, 0, xtc_mo_relaxed);
 
 	__CPROVER_ASYNC_1: reader();
 	reclaimer();

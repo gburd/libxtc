@@ -106,7 +106,6 @@
 #include "xtc_rcu.h"
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 
 /*
@@ -149,14 +148,14 @@ __chash_next_pow2(size_t v)
 }
 
 struct chash_node {
-	_Atomic(struct chash_node *) next;
+	struct chash_node *next;
 	uint64_t                      hash;
 	void                          *key;    /* caller-owned */
-	_Atomic(void *)                value;  /* caller-owned */
+	void *value;                           /* caller-owned */
 };
 
 struct chash_bucket {
-	_Atomic(struct chash_node *) head;
+	struct chash_node *head;
 };
 
 struct chash_arr {
@@ -168,12 +167,12 @@ struct chash_arr {
 struct xtc_chash {
 	xtc_chash_cmp_fn             cmp;
 	xtc_chash_hash_fn            hash_fn;
-	_Atomic(struct chash_arr *)  arr;
+	struct chash_arr *arr;
 	pthread_mutex_t              stripe_locks[XTC_CHASH_NSTRIPES];
-	_Atomic size_t               count;
-	_Atomic int                  resizing;   /* 0 idle, 1 resize in progress */
+	size_t count;
+	int resizing; /* 0 idle, 1 resize in progress */
 	size_t                       min_n;      /* shrink floor: never below this */
-	_Atomic int                  auto_shrink;/* opt-in; default 0 (OFF) */
+	int auto_shrink;                         /* opt-in; default 0 (OFF) */
 };
 
 static void
@@ -216,11 +215,11 @@ xtc_chash_create(xtc_chash_cmp_fn cmp, xtc_chash_hash_fn hash_fn,
 
 	h->cmp = cmp;
 	h->hash_fn = hash_fn;
-	atomic_init(&h->arr, arr);
-	atomic_init(&h->count, (size_t)0);
-	atomic_init(&h->resizing, 0);
+	xtc_atomic_store_ptr(&h->arr, arr, xtc_mo_relaxed);
+	xtc_atomic_store_size(&h->count, (size_t)0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&h->resizing, 0, xtc_mo_relaxed);
 	h->min_n = n;
-	atomic_init(&h->auto_shrink, 0);
+	xtc_atomic_store_i32(&h->auto_shrink, 0, xtc_mo_relaxed);
 	for (i = 0; i < XTC_CHASH_NSTRIPES; i++)
 		(void)pthread_mutex_init(&h->stripe_locks[i], NULL);
 
@@ -236,13 +235,13 @@ xtc_chash_destroy(xtc_chash_t *h)
 	unsigned s;
 
 	if (h == NULL) return;
-	arr = atomic_load_explicit(&h->arr, memory_order_relaxed);
+	arr = xtc_atomic_load_ptr(&h->arr, xtc_mo_relaxed);
 	for (i = 0; i < arr->n; i++) {
-		struct chash_node *n = atomic_load_explicit(
-		    &arr->buckets[i].head, memory_order_relaxed);
+		struct chash_node *n =
+		    xtc_atomic_load_ptr(&arr->buckets[i].head, xtc_mo_relaxed);
 		while (n != NULL) {
-			struct chash_node *next = atomic_load_explicit(
-			    &n->next, memory_order_relaxed);
+			struct chash_node *next =
+			    xtc_atomic_load_ptr(&n->next, xtc_mo_relaxed);
 			__os_free(n);
 			n = next;
 		}
@@ -265,14 +264,13 @@ xtc_chash_get(xtc_chash_t *h, const void *key, void **out_value)
 	hh = h->hash_fn(key);
 	/* Caller's own read-side keeps this array (and every node we
 	 * walk into) alive; we take no lock of our own. */
-	arr = atomic_load_explicit(&h->arr, memory_order_acquire);
+	arr = xtc_atomic_load_ptr(&h->arr, xtc_mo_acquire);
 	idx = (size_t)(hh & (uint64_t)arr->mask);
-	for (n = atomic_load_explicit(&arr->buckets[idx].head,
-	    memory_order_acquire); n != NULL;
-	    n = atomic_load_explicit(&n->next, memory_order_acquire)) {
+	for (n = xtc_atomic_load_ptr(&arr->buckets[idx].head, xtc_mo_acquire);
+	     n != NULL; n = xtc_atomic_load_ptr(&n->next, xtc_mo_acquire)) {
 		if (n->hash == hh && h->cmp(n->key, key) == 0) {
-			*out_value = atomic_load_explicit(&n->value,
-			    memory_order_acquire);
+			*out_value =
+			    xtc_atomic_load_ptr(&n->value, xtc_mo_acquire);
 			return XTC_OK;
 		}
 	}
@@ -290,7 +288,7 @@ xtc_chash_insert(xtc_chash_t *h, void *key, void *value, void **out_old_value)
 	uint64_t hh;
 	struct chash_arr *arr;
 	struct chash_node *n, *new_node;
-	_Atomic(struct chash_node *) *head_slot;
+	struct chash_node **head_slot;
 	size_t idx, stripe;
 	size_t n_snapshot;   /* arr->n captured inside the read-side */
 
@@ -298,14 +296,14 @@ xtc_chash_insert(xtc_chash_t *h, void *key, void *value, void **out_old_value)
 	hh = h->hash_fn(key);
 
 	xtc_rcu_read_lock();
-	arr = atomic_load_explicit(&h->arr, memory_order_acquire);
+	arr = xtc_atomic_load_ptr(&h->arr, xtc_mo_acquire);
 	for (;;) {
 		idx = (size_t)(hh & (uint64_t)arr->mask);
 		stripe = __chash_stripe(idx);
 		(void)__xtc_mtx_lock(&h->stripe_locks[stripe]);
 		{
-			struct chash_arr *now = atomic_load_explicit(&h->arr,
-			    memory_order_acquire);
+			struct chash_arr *now =
+			    xtc_atomic_load_ptr(&h->arr, xtc_mo_acquire);
 			if (now == arr) break;
 			/* A grow raced in between: idx (and possibly stripe)
 			 * computed against the array we just LOST are stale.
@@ -318,9 +316,8 @@ xtc_chash_insert(xtc_chash_t *h, void *key, void *value, void **out_old_value)
 	}
 
 	head_slot = &arr->buckets[idx].head;
-	for (n = atomic_load_explicit(head_slot, memory_order_acquire);
-	    n != NULL;
-	    n = atomic_load_explicit(&n->next, memory_order_acquire)) {
+	for (n = xtc_atomic_load_ptr(head_slot, xtc_mo_acquire); n != NULL;
+	     n = xtc_atomic_load_ptr(&n->next, xtc_mo_acquire)) {
 		if (n->hash == hh && h->cmp(n->key, key) == 0) break;
 	}
 
@@ -328,9 +325,8 @@ xtc_chash_insert(xtc_chash_t *h, void *key, void *value, void **out_old_value)
 		/* Replace: chain linkage is untouched, one atomic store of
 		 * the value slot.  See the file header on why the caller
 		 * must retire (not free) the returned old value. */
-		void *old = atomic_load_explicit(&n->value,
-		    memory_order_relaxed);
-		atomic_store_explicit(&n->value, value, memory_order_release);
+		void *old = xtc_atomic_load_ptr(&n->value, xtc_mo_relaxed);
+		xtc_atomic_store_ptr(&n->value, value, xtc_mo_release);
 		(void)__xtc_mtx_unlock(&h->stripe_locks[stripe]);
 		xtc_rcu_read_unlock();
 		if (out_old_value != NULL) *out_old_value = old;
@@ -344,12 +340,12 @@ xtc_chash_insert(xtc_chash_t *h, void *key, void *value, void **out_old_value)
 	}
 	new_node->hash = hh;
 	new_node->key = key;
-	atomic_init(&new_node->value, value);
+	xtc_atomic_store_ptr(&new_node->value, value, xtc_mo_relaxed);
 	/* Build fully off to the side, then ONE release store splices it
 	 * in -- a reader sees either the old chain or this node complete. */
-	atomic_init(&new_node->next,
-	    atomic_load_explicit(head_slot, memory_order_relaxed));
-	atomic_store_explicit(head_slot, new_node, memory_order_release);
+	xtc_atomic_store_ptr(&new_node->next,
+	    xtc_atomic_load_ptr(head_slot, xtc_mo_relaxed), xtc_mo_relaxed);
+	xtc_atomic_store_ptr(head_slot, new_node, xtc_mo_release);
 	/*
 	 * Snapshot the bucket count BEFORE leaving the read-side.  `arr` is
 	 * the object __chash_resize hands to xtc_rcu_retire(); once this
@@ -365,8 +361,8 @@ xtc_chash_insert(xtc_chash_t *h, void *key, void *value, void **out_old_value)
 
 	if (out_old_value != NULL) *out_old_value = NULL;
 	{
-		size_t cnt = atomic_fetch_add_explicit(&h->count, 1,
-		    memory_order_relaxed) + 1;
+		size_t cnt =
+		    xtc_atomic_fetch_add_size(&h->count, 1, xtc_mo_relaxed) + 1;
 		/* Grow past 75% load factor.  n_snapshot is from before this
 		 * insert; a heuristic trigger, not exact -- fine, since grow
 		 * itself re-reads the live array. */
@@ -382,21 +378,21 @@ xtc_chash_remove(xtc_chash_t *h, const void *key, void **out_value)
 	uint64_t hh;
 	struct chash_arr *arr;
 	struct chash_node *n = NULL;
-	_Atomic(struct chash_node *) *slot;
+	struct chash_node **slot;
 	size_t idx, stripe;
 
 	if (h == NULL || key == NULL) return XTC_E_INVAL;
 	hh = h->hash_fn(key);
 
 	xtc_rcu_read_lock();
-	arr = atomic_load_explicit(&h->arr, memory_order_acquire);
+	arr = xtc_atomic_load_ptr(&h->arr, xtc_mo_acquire);
 	for (;;) {
 		idx = (size_t)(hh & (uint64_t)arr->mask);
 		stripe = __chash_stripe(idx);
 		(void)__xtc_mtx_lock(&h->stripe_locks[stripe]);
 		{
-			struct chash_arr *now = atomic_load_explicit(&h->arr,
-			    memory_order_acquire);
+			struct chash_arr *now =
+			    xtc_atomic_load_ptr(&h->arr, xtc_mo_acquire);
 			if (now == arr) break;
 			(void)__xtc_mtx_unlock(&h->stripe_locks[stripe]);
 			arr = now;
@@ -404,15 +400,14 @@ xtc_chash_remove(xtc_chash_t *h, const void *key, void **out_value)
 	}
 
 	slot = &arr->buckets[idx].head;
-	for (n = atomic_load_explicit(slot, memory_order_acquire); n != NULL;
-	    slot = &n->next, n = atomic_load_explicit(slot,
-	    memory_order_acquire)) {
+	for (n = xtc_atomic_load_ptr(slot, xtc_mo_acquire); n != NULL;
+	     slot = &n->next, n = xtc_atomic_load_ptr(slot, xtc_mo_acquire)) {
 		if (n->hash == hh && h->cmp(n->key, key) == 0) {
-			struct chash_node *nxt = atomic_load_explicit(
-			    &n->next, memory_order_acquire);
+			struct chash_node *nxt =
+			    xtc_atomic_load_ptr(&n->next, xtc_mo_acquire);
 			/* n's OWN next is left exactly as it was: a reader
 			 * already parked on n keeps walking it unaffected. */
-			atomic_store_explicit(slot, nxt, memory_order_release);
+			xtc_atomic_store_ptr(slot, nxt, xtc_mo_release);
 			break;
 		}
 	}
@@ -421,14 +416,12 @@ xtc_chash_remove(xtc_chash_t *h, const void *key, void **out_value)
 
 	if (n == NULL) return XTC_E_NOTFOUND;
 	if (out_value != NULL)
-		*out_value = atomic_load_explicit(&n->value,
-		    memory_order_relaxed);
+		*out_value = xtc_atomic_load_ptr(&n->value, xtc_mo_relaxed);
 	xtc_rcu_retire(n, __chash_node_free_cb);
 	{
-		size_t cnt = atomic_fetch_sub_explicit(&h->count, 1,
-		    memory_order_relaxed) - 1;
-		if (atomic_load_explicit(&h->auto_shrink,
-		    memory_order_relaxed))
+		size_t cnt =
+		    xtc_atomic_fetch_sub_size(&h->count, 1, xtc_mo_relaxed) - 1;
+		if (xtc_atomic_load_i32(&h->auto_shrink, xtc_mo_relaxed))
 			__chash_maybe_shrink(h, cnt);
 	}
 	return XTC_OK;
@@ -438,25 +431,23 @@ size_t
 xtc_chash_size(const xtc_chash_t *h)
 {
 	if (h == NULL) return 0;
-	return atomic_load_explicit(&((xtc_chash_t *)(uintptr_t)h)->count,
-	    memory_order_relaxed);
+	return xtc_atomic_load_size(&((xtc_chash_t *)(uintptr_t)h)->count,
+	    xtc_mo_relaxed);
 }
 
 void
 xtc_chash_set_auto_shrink(xtc_chash_t *h, int on)
 {
 	if (h == NULL) return;
-	atomic_store_explicit(&h->auto_shrink, on ? 1 : 0,
-	    memory_order_relaxed);
+	xtc_atomic_store_i32(&h->auto_shrink, on ? 1 : 0, xtc_mo_relaxed);
 }
 
 int
 xtc_chash_get_auto_shrink(const xtc_chash_t *h)
 {
 	if (h == NULL) return 0;
-	return atomic_load_explicit(
-	    &((xtc_chash_t *)(uintptr_t)h)->auto_shrink,
-	    memory_order_relaxed);
+	return xtc_atomic_load_i32(&((xtc_chash_t *)(uintptr_t)h)->auto_shrink,
+	    xtc_mo_relaxed);
 }
 
 /* Test-only (not PUBLIC): current bucket-array size, so a test can
@@ -467,8 +458,8 @@ __xtc_chash_nbuckets(const xtc_chash_t *h)
 {
 	struct chash_arr *arr;
 	if (h == NULL) return 0;
-	arr = atomic_load_explicit(
-	    &((xtc_chash_t *)(uintptr_t)h)->arr, memory_order_acquire);
+	arr = xtc_atomic_load_ptr(&((xtc_chash_t *)(uintptr_t)h)->arr,
+	    xtc_mo_acquire);
 	return arr->n;
 }
 
@@ -514,14 +505,14 @@ __chash_resize(xtc_chash_t *h, size_t (*want_new_n)(const struct chash_arr *,
 	unsigned s;
 	int expect = 0, ok = 1;
 
-	if (!atomic_compare_exchange_strong_explicit(&h->resizing, &expect, 1,
-	    memory_order_acq_rel, memory_order_relaxed))
+	if (!xtc_atomic_cas_i32(&h->resizing, &expect, 1, xtc_mo_acq_rel,
+	        xtc_mo_relaxed))
 		return;   /* someone else is already resizing */
 
 	for (s = 0; s < XTC_CHASH_NSTRIPES; s++)
 		(void)__xtc_mtx_lock(&h->stripe_locks[s]);
 
-	old_arr = atomic_load_explicit(&h->arr, memory_order_acquire);
+	old_arr = xtc_atomic_load_ptr(&h->arr, xtc_mo_acquire);
 	new_n = want_new_n(old_arr, h);
 
 	/* want_new_n returns 0 to abort (decision no longer holds against
@@ -542,9 +533,10 @@ __chash_resize(xtc_chash_t *h, size_t (*want_new_n)(const struct chash_arr *,
 
 	for (i = 0; i < old_arr->n && ok; i++) {
 		struct chash_node *n;
-		for (n = atomic_load_explicit(&old_arr->buckets[i].head,
-		    memory_order_acquire); n != NULL;
-		    n = atomic_load_explicit(&n->next, memory_order_acquire)) {
+		for (n = xtc_atomic_load_ptr(&old_arr->buckets[i].head,
+		         xtc_mo_acquire);
+		     n != NULL;
+		     n = xtc_atomic_load_ptr(&n->next, xtc_mo_acquire)) {
 			struct chash_node *dup;
 			size_t b;
 			if (__os_malloc(sizeof *dup, (void **)&dup) !=
@@ -554,15 +546,16 @@ __chash_resize(xtc_chash_t *h, size_t (*want_new_n)(const struct chash_arr *,
 			}
 			dup->hash = n->hash;
 			dup->key = n->key;
-			atomic_store_explicit(&dup->value,
-			    atomic_load_explicit(&n->value,
-			    memory_order_relaxed), memory_order_relaxed);
+			xtc_atomic_store_ptr(&dup->value,
+			    xtc_atomic_load_ptr(&n->value, xtc_mo_relaxed),
+			    xtc_mo_relaxed);
 			b = (size_t)(dup->hash & (uint64_t)new_arr->mask);
-			atomic_store_explicit(&dup->next,
-			    atomic_load_explicit(&new_arr->buckets[b].head,
-			    memory_order_relaxed), memory_order_relaxed);
-			atomic_store_explicit(&new_arr->buckets[b].head, dup,
-			    memory_order_relaxed);
+			xtc_atomic_store_ptr(&dup->next,
+			    xtc_atomic_load_ptr(&new_arr->buckets[b].head,
+			        xtc_mo_relaxed),
+			    xtc_mo_relaxed);
+			xtc_atomic_store_ptr(&new_arr->buckets[b].head, dup,
+			    xtc_mo_relaxed);
 		}
 	}
 
@@ -570,12 +563,13 @@ __chash_resize(xtc_chash_t *h, size_t (*want_new_n)(const struct chash_arr *,
 		/* Unwind: free every dup already linked into new_arr, then
 		 * new_arr itself.  old_arr is completely untouched. */
 		for (i = 0; i < new_arr->n; i++) {
-			struct chash_node *n = atomic_load_explicit(
-			    &new_arr->buckets[i].head, memory_order_relaxed);
+			struct chash_node *n =
+			    xtc_atomic_load_ptr(&new_arr->buckets[i].head,
+			        xtc_mo_relaxed);
 			while (n != NULL) {
 				struct chash_node *next =
-				    atomic_load_explicit(&n->next,
-				    memory_order_relaxed);
+				    xtc_atomic_load_ptr(&n->next,
+				        xtc_mo_relaxed);
 				__os_free(n);
 				n = next;
 			}
@@ -584,17 +578,18 @@ __chash_resize(xtc_chash_t *h, size_t (*want_new_n)(const struct chash_arr *,
 		goto done;
 	}
 
-	atomic_store_explicit(&h->arr, new_arr, memory_order_release);
+	xtc_atomic_store_ptr(&h->arr, new_arr, xtc_mo_release);
 
 	/* old_arr and every one of its original nodes are now
 	 * unreachable from h->arr but may still be mid-walk by a reader
 	 * that loaded old_arr before the swap -- retire, never free. */
 	for (i = 0; i < old_arr->n; i++) {
-		struct chash_node *n = atomic_load_explicit(
-		    &old_arr->buckets[i].head, memory_order_relaxed);
+		struct chash_node *n =
+		    xtc_atomic_load_ptr(&old_arr->buckets[i].head,
+		        xtc_mo_relaxed);
 		while (n != NULL) {
-			struct chash_node *next = atomic_load_explicit(
-			    &n->next, memory_order_relaxed);
+			struct chash_node *next =
+			    xtc_atomic_load_ptr(&n->next, xtc_mo_relaxed);
 			xtc_rcu_retire(n, __chash_node_free_cb);
 			n = next;
 		}
@@ -604,7 +599,7 @@ __chash_resize(xtc_chash_t *h, size_t (*want_new_n)(const struct chash_arr *,
 done:
 	for (s = 0; s < XTC_CHASH_NSTRIPES; s++)
 		(void)__xtc_mtx_unlock(&h->stripe_locks[s]);
-	atomic_store_explicit(&h->resizing, 0, memory_order_release);
+	xtc_atomic_store_i32(&h->resizing, 0, xtc_mo_release);
 	(void)ok;
 }
 
@@ -633,8 +628,8 @@ static size_t
 __chash_want_shrink(const struct chash_arr *old_arr, const xtc_chash_t *h)
 {
 	size_t new_n = old_arr->n / 2;
-	size_t cnt = atomic_load_explicit(
-	    &((xtc_chash_t *)(uintptr_t)h)->count, memory_order_relaxed);
+	size_t cnt = xtc_atomic_load_size(&((xtc_chash_t *)(uintptr_t)h)->count,
+	    xtc_mo_relaxed);
 	if (new_n < h->min_n)
 		return 0;
 	/* Low-water LF < 0.1875 (cnt*16 < n*3).  See __chash_maybe_shrink
@@ -692,7 +687,7 @@ __chash_maybe_shrink(xtc_chash_t *h, size_t cnt)
 	 * which takes the stripe locks and re-reads the live array itself.
 	 */
 	xtc_rcu_read_lock();
-	arr = atomic_load_explicit(&h->arr, memory_order_acquire);
+	arr = xtc_atomic_load_ptr(&h->arr, xtc_mo_acquire);
 	n = arr->n;
 	xtc_rcu_read_unlock();
 

@@ -19,7 +19,6 @@
 int __xtc_sup_abandon_wait(xtc_supervisor_t *sup);
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #if !defined(_WIN32)
@@ -44,12 +43,12 @@ struct app_kid {
 	/* pid's OWNER loop, stored before pid (constant per child index).
 	 * Through 2.1 PIDs were executor-relative, so pid alone could name
 	 * another standalone loop's proc -- shutdown killed one that way. */
-	_Atomic(xtc_loop_t *) owner;
-	_Atomic int          returned;  /* body returned during the drain */
+	xtc_loop_t *owner;
+	int returned; /* body returned during the drain */
 	struct app_kids     *kids;
 };
 struct app_kids {
-	_Atomic int          draining;  /* shutdown message sent */
+	int draining; /* shutdown message sent */
 	int                  n;
 	struct app_kid       k[];
 };
@@ -65,15 +64,15 @@ struct xtc_app {
 	int                no_tuning_check;   /* PLAN.md 19.21 */
 	struct app_kids   *kids;              /* static children (19.27.10) */
 	xtc_child_spec_t  *specs;             /* wrapped copies handed to sup */
-	_Atomic int        shutting_down;     /* xtc_app_shutdown entered */
-	_Atomic int        running;           /* inside xtc_app_run */
+	int shutting_down;                    /* xtc_app_shutdown entered */
+	int running;                          /* inside xtc_app_run */
 	int                leak_kids;         /* a survivor may still run */
 	/* xtc_app_drain_on_signal parameters (the watcher reads them). */
 	int64_t            sig_drain_ns, sig_force_ns;
 	xtc_app_drain_report_t *sig_report;
 	int                sig_armed;
 	__os_thread_t      sig_thr;           /* the signal-driven drain */
-	_Atomic int        sig_thr_started;
+	int sig_thr_started;
 };
 
 int
@@ -144,7 +143,9 @@ __kid_gone(struct app_kid *k)
 {
 	xtc_pid_t v = xtc_atomic_pid_load(&k->pid);
 	return !xtc_pid_is_none(v) &&
-	    !__xtc_proc_loop_contains(atomic_load(&k->owner), v);
+	    !__xtc_proc_loop_contains(xtc_atomic_load_ptr(&k->owner,
+	                                  xtc_mo_seq_cst),
+	        v);
 }
 
 /*
@@ -167,13 +168,14 @@ __kid_trampoline(void *arg)
 	/* seq_cst pid-store / draining-load pairs with the shutdown's
 	 * draining-store / pid-load: either we see draining, or it sees
 	 * our pid and messages us. */
-	atomic_store(&k->owner, __xtc_proc_self_loop(NULL));
+	xtc_atomic_store_ptr(&k->owner, __xtc_proc_self_loop(NULL),
+	    xtc_mo_seq_cst);
 	xtc_atomic_pid_store(&k->pid, xtc_self());
-	if (!atomic_load(&k->kids->draining))
+	if (!xtc_atomic_load_i32(&k->kids->draining, xtc_mo_seq_cst))
 		k->fn(k->arg);
-	if (!atomic_load(&k->kids->draining))
+	if (!xtc_atomic_load_i32(&k->kids->draining, xtc_mo_seq_cst))
 		return;                        /* ordinary exit */
-	atomic_store(&k->returned, 1);
+	xtc_atomic_store_i32(&k->returned, 1, xtc_mo_seq_cst);
 	if (k->policy != XTC_RESTART_PERMANENT)
 		return;
 	for (;;) {
@@ -251,16 +253,15 @@ xtc_app_run(xtc_app_t *a)
 	/* A multi-loop app runs every loop until the supervisor exits and
 	 * stops the executor; a single-loop app runs its one loop until the
 	 * supervisor exits and the loop drains. */
-	atomic_store_explicit(&a->running, 1, memory_order_release);
+	xtc_atomic_store_i32(&a->running, 1, xtc_mo_release);
 	rc = a->exec != NULL ? xtc_exec_run(a->exec) : xtc_loop_run(a->loop);
-	atomic_store_explicit(&a->running, 0, memory_order_release);
+	xtc_atomic_store_i32(&a->running, 0, xtc_mo_release);
 #if !defined(_WIN32)
 	/* A signal-triggered drain runs on its own thread (so an executor
 	 * stop cannot freeze it); its report is complete once joined. */
-	if (atomic_load_explicit(&a->sig_thr_started, memory_order_acquire)) {
+	if (xtc_atomic_load_i32(&a->sig_thr_started, xtc_mo_acquire)) {
 		(void)__os_thread_join(&a->sig_thr, NULL);
-		atomic_store_explicit(&a->sig_thr_started, 0,
-		    memory_order_relaxed);
+		xtc_atomic_store_i32(&a->sig_thr_started, 0, xtc_mo_relaxed);
 	}
 #endif
 	return rc;
@@ -298,7 +299,8 @@ __wait_kids(xtc_app_t *a, int64_t deadline, int force)
 			struct app_kid *k = &ks->k[i];
 			if (__kid_gone(k))
 				continue;
-			if (!force && atomic_load(&k->returned))
+			if (!force &&
+			    xtc_atomic_load_i32(&k->returned, xtc_mo_seq_cst))
 				continue;
 			pending++;
 			/* Re-kill the CURRENT incarnation each pass: a restart
@@ -306,7 +308,9 @@ __wait_kids(xtc_app_t *a, int64_t deadline, int force)
 			 * (xtc_exit_pid is idempotent per incarnation). */
 			if (force && !xtc_pid_is_none(v =
 			    xtc_atomic_pid_load(&k->pid)))
-				(void)__xtc_exit_pid_on(atomic_load(&k->owner),
+				(void)__xtc_exit_pid_on(
+				    xtc_atomic_load_ptr(&k->owner,
+				        xtc_mo_seq_cst),
 				    v, XTC_APP_SHUTDOWN_REASON);
 		}
 		(void)__os_clock_mono(&now);
@@ -340,7 +344,7 @@ xtc_app_shutdown(xtc_app_t *a, int64_t drain_ns, int64_t force_ns,
 	/* Nothing can drain unless xtc_app_run is driving the loop.  On a
 	 * multi-loop app the supervisor stops the executor when it exits,
 	 * which would freeze a shutdown running on a proc: plain thread only. */
-	if (!atomic_load_explicit(&a->running, memory_order_acquire) ||
+	if (!xtc_atomic_load_i32(&a->running, xtc_mo_acquire) ||
 	    (a->exec != NULL && !xtc_pid_is_none(self)))
 		return XTC_E_INVAL;
 	ks = a->kids;
@@ -351,10 +355,11 @@ xtc_app_shutdown(xtc_app_t *a, int64_t drain_ns, int64_t force_ns,
 	for (i = 0; i < ks->n; i++)
 		if (!xtc_pid_is_none(self) &&
 		    xtc_pid_eq(self, xtc_atomic_pid_load(&ks->k[i].pid)) &&
-		    self_loop == atomic_load(&ks->k[i].owner))
+		    self_loop ==
+		        xtc_atomic_load_ptr(&ks->k[i].owner, xtc_mo_seq_cst))
 			return XTC_E_INVAL;
-	if (!atomic_compare_exchange_strong_explicit(&a->shutting_down,
-	    &expected, 1, memory_order_acq_rel, memory_order_acquire))
+	if (!xtc_atomic_cas_i32(&a->shutting_down, &expected, 1, xtc_mo_acq_rel,
+	        xtc_mo_acquire))
 		return XTC_E_INVAL;              /* one shutdown per app */
 
 	(void)__os_clock_mono(&t0);
@@ -363,11 +368,12 @@ xtc_app_shutdown(xtc_app_t *a, int64_t drain_ns, int64_t force_ns,
 	r.n_children = ks->n;
 
 	/* 1-2. Cooperative phase: ask, then wait for return or exit. */
-	atomic_store(&ks->draining, 1);
+	xtc_atomic_store_i32(&ks->draining, 1, xtc_mo_seq_cst);
 	for (i = 0; i < ks->n; i++) {
 		xtc_pid_t v = xtc_atomic_pid_load(&ks->k[i].pid);
 		if (!xtc_pid_is_none(v))
-			(void)__xtc_send_on(atomic_load(&ks->k[i].owner),
+			(void)__xtc_send_on(xtc_atomic_load_ptr(&ks->k[i].owner,
+			                        xtc_mo_seq_cst),
 			    v, XTC_APP_SHUTDOWN_MSG,
 			    sizeof XTC_APP_SHUTDOWN_MSG);
 	}
@@ -375,7 +381,8 @@ xtc_app_shutdown(xtc_app_t *a, int64_t drain_ns, int64_t force_ns,
 	if ((rc = __os_calloc((size_t)ks->n + 1, 1, (void **)&forced)) != XTC_OK)
 		forced = NULL;          /* report degrades to counts-by-mask */
 	for (i = 0; i < ks->n; i++)
-		if (!atomic_load(&ks->k[i].returned) && !__kid_gone(&ks->k[i])) {
+		if (!xtc_atomic_load_i32(&ks->k[i].returned, xtc_mo_seq_cst) &&
+		    !__kid_gone(&ks->k[i])) {
 			if (forced != NULL) forced[i] = 1;
 			if (i < 64) r.forced_mask |= 1ULL << i;
 		}
@@ -473,7 +480,7 @@ __drain_watcher(void *arg)
 	void *m;
 	size_t sz;
 	for (;;) {
-		if (atomic_load_explicit(&a->shutting_down, memory_order_acquire) ||
+		if (xtc_atomic_load_i32(&a->shutting_down, xtc_mo_acquire) ||
 		    !xtc_sup_alive(a->root))
 			return;                      /* app is ending some other way */
 		rev = 0;
@@ -485,8 +492,8 @@ __drain_watcher(void *arg)
 		if (read(g_sig_pipe[0], buf, sizeof buf) > 0) {  /* XTC_BLOCKING_OK: O_NONBLOCK */
 			if (__os_thread_create(&a->sig_thr, __drain_thread,
 			    a) == XTC_OK)
-				atomic_store_explicit(&a->sig_thr_started, 1,
-				    memory_order_release);
+				xtc_atomic_store_i32(&a->sig_thr_started, 1,
+				    xtc_mo_release);
 			return;
 		}
 	}

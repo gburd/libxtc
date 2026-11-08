@@ -37,7 +37,6 @@
 #include <pthread.h>
 #include <setjmp.h>
 #include <signal.h>
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>    /* sysconf(_SC_PAGESIZE) for stack-overflow detection */
@@ -135,13 +134,13 @@ struct mon_entry  {
 	xtc_pid_t         target;
 	xtc_pid_t         watcher;
 	struct mon_entry *peer;   /* target side: the watcher's entry */
-	_Atomic int       refs;   /* watcher side: holders (1 or 2) */
+	int refs;                 /* watcher side: holders (1 or 2) */
 };
 
 /* M11.5b: pools for link_entry / mon_entry (fixed-size, hot path). */
-static _Atomic(xtc_slab_t *) __link_slab     = NULL;
-static _Atomic(xtc_slab_t *) __mon_slab      = NULL;
-static _Atomic(xtc_slab_t *) __env_slab      = NULL;
+static xtc_slab_t *__link_slab = NULL;
+static xtc_slab_t *__mon_slab = NULL;
+static xtc_slab_t *__env_slab = NULL;
 static pthread_mutex_t  __proc_slab_init_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /*
@@ -177,35 +176,32 @@ __proc_slabs_ensure(void)
 	 * plain read that TSan flags against the release store under the
 	 * lock -- the same fix applied to xtc_rcu's slab init.  Each pool
 	 * is published exactly once. */
-	if (atomic_load_explicit(&__link_slab, memory_order_acquire) != NULL &&
-	    atomic_load_explicit(&__mon_slab, memory_order_acquire) != NULL &&
-	    atomic_load_explicit(&__env_slab, memory_order_acquire) != NULL)
+	if (xtc_atomic_load_ptr(&__link_slab, xtc_mo_acquire) != NULL &&
+	    xtc_atomic_load_ptr(&__mon_slab, xtc_mo_acquire) != NULL &&
+	    xtc_atomic_load_ptr(&__env_slab, xtc_mo_acquire) != NULL)
 		return;
 	(void) __proc_mtx_lock(&__proc_slab_init_lock);
-	if (atomic_load_explicit(&__link_slab, memory_order_relaxed) == NULL) {
+	if (xtc_atomic_load_ptr(&__link_slab, xtc_mo_relaxed) == NULL) {
 		xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
 		xtc_slab_t *sl = NULL;
 		o.name = "proc.link"; o.obj_size = sizeof(struct link_entry);
 		if (xtc_slab_create(&o, &sl) == XTC_OK)
-			atomic_store_explicit(&__link_slab, sl,
-			    memory_order_release);
+			xtc_atomic_store_ptr(&__link_slab, sl, xtc_mo_release);
 	}
-	if (atomic_load_explicit(&__mon_slab, memory_order_relaxed) == NULL) {
+	if (xtc_atomic_load_ptr(&__mon_slab, xtc_mo_relaxed) == NULL) {
 		xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
 		xtc_slab_t *sl = NULL;
 		o.name = "proc.mon"; o.obj_size = sizeof(struct mon_entry);
 		if (xtc_slab_create(&o, &sl) == XTC_OK)
-			atomic_store_explicit(&__mon_slab, sl,
-			    memory_order_release);
+			xtc_atomic_store_ptr(&__mon_slab, sl, xtc_mo_release);
 	}
-	if (atomic_load_explicit(&__env_slab, memory_order_relaxed) == NULL) {
+	if (xtc_atomic_load_ptr(&__env_slab, xtc_mo_relaxed) == NULL) {
 		xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
 		xtc_slab_t *sl = NULL;
 		o.name = "proc.env";
 		o.obj_size = sizeof(struct envelope) + ENV_POOL_PAYLOAD;
 		if (xtc_slab_create(&o, &sl) == XTC_OK)
-			atomic_store_explicit(&__env_slab, sl,
-			    memory_order_release);
+			xtc_atomic_store_ptr(&__env_slab, sl, xtc_mo_release);
 	}
 	(void) __proc_mtx_unlock(&__proc_slab_init_lock);
 }
@@ -219,8 +215,10 @@ __env_alloc(size_t inline_size)
 	void *p = NULL;
 	if (inline_size <= ENV_POOL_PAYLOAD) {
 		__proc_slabs_ensure();
-		if (XTC_LIKELY(__env_slab != NULL) &&
-		    (e = xtc_slab_alloc(__env_slab)) != NULL) {
+		if (XTC_LIKELY(xtc_atomic_load_ptr(&__env_slab,
+		                   xtc_mo_seq_cst) != NULL) &&
+		    (e = xtc_slab_alloc(xtc_atomic_load_ptr(&__env_slab,
+		         xtc_mo_seq_cst))) != NULL) {
 			e->flags = ENV_F_SLAB;
 			e->ext = NULL;
 			return e;
@@ -265,7 +263,8 @@ __env_free(struct envelope *e)
 	if (e->ext != NULL)
 		__os_free(e->ext);
 	if ((e->flags & ENV_F_SLAB) != 0)
-		xtc_slab_free(__env_slab, e);
+		xtc_slab_free(xtc_atomic_load_ptr(&__env_slab, xtc_mo_seq_cst),
+		    e);
 	else
 		__os_free(e);
 }
@@ -291,8 +290,8 @@ __env_payload(const struct envelope *e)
 /* ---------- causal tracing + hybrid logical clock (xtc_trace.h) ---------- */
 
 #define XTC_TRACE_RING 8192u
-static _Atomic uint64_t __g_hlc;
-static _Atomic int      __trace_on;
+static uint64_t __g_hlc;
+static int __trace_on;
 static pthread_mutex_t  __trace_lock = PTHREAD_MUTEX_INITIALIZER;
 static xtc_trace_rec_t  __trace_ring[XTC_TRACE_RING];
 static uint64_t         __trace_seq;        /* total records ever written */
@@ -312,7 +311,7 @@ __hlc_tick(void)
 	uint64_t prev, next, pt = __phys_us();
 	do {
 		uint64_t pphys, plog;
-		prev = atomic_load_explicit(&__g_hlc, memory_order_relaxed);
+		prev = xtc_atomic_load_u64(&__g_hlc, xtc_mo_relaxed);
 		pphys = prev >> 16; plog = prev & 0xFFFF;
 		if (pt > pphys) {
 			next = pt << 16;
@@ -321,8 +320,8 @@ __hlc_tick(void)
 		} else {
 			next = (pphys << 16) | (plog + 1);
 		}
-	} while (!atomic_compare_exchange_weak_explicit(&__g_hlc, &prev, next,
-	    memory_order_relaxed, memory_order_relaxed));
+	} while (!xtc_atomic_cas_weak_u64(&__g_hlc, &prev, next, xtc_mo_relaxed,
+	    xtc_mo_relaxed));
 	return next;
 }
 
@@ -334,7 +333,7 @@ __hlc_update(uint64_t m)
 	do {
 		uint64_t pphys = 0, plog = 0, mphys = m >> 16, mlog = m & 0xFFFF;
 		uint64_t nphys, nlog;
-		prev = atomic_load_explicit(&__g_hlc, memory_order_relaxed);
+		prev = xtc_atomic_load_u64(&__g_hlc, xtc_mo_relaxed);
 		pphys = prev >> 16; plog = prev & 0xFFFF;
 		nphys = pphys;
 		if (mphys > nphys) nphys = mphys;
@@ -349,8 +348,8 @@ __hlc_update(uint64_t m)
 			nlog = 0;
 		if (nlog > 0xFFFF) { nphys++; nlog = 0; }
 		next = (nphys << 16) | (nlog & 0xFFFF);
-	} while (!atomic_compare_exchange_weak_explicit(&__g_hlc, &prev, next,
-	    memory_order_relaxed, memory_order_relaxed));
+	} while (!xtc_atomic_cas_weak_u64(&__g_hlc, &prev, next, xtc_mo_relaxed,
+	    xtc_mo_relaxed));
 	return next;
 }
 
@@ -359,10 +358,10 @@ __trace_record(int kind, xtc_pid_t self, xtc_pid_t peer, uint64_t hlc,
     uint64_t cause, uint32_t detail)
 {
 	/* Hot-path guard: a single relaxed load when tracing is off. */
-	if (!atomic_load_explicit(&__trace_on, memory_order_relaxed))
+	if (!xtc_atomic_load_i32(&__trace_on, xtc_mo_relaxed))
 		return;
 	(void) __proc_mtx_lock(&__trace_lock);
-	if (atomic_load_explicit(&__trace_on, memory_order_relaxed)) {
+	if (xtc_atomic_load_i32(&__trace_on, xtc_mo_relaxed)) {
 		xtc_trace_rec_t *r = &__trace_ring[__trace_seq % XTC_TRACE_RING];
 		r->hlc = hlc; r->cause = cause; r->kind = kind;
 		r->self = self; r->peer = peer; r->detail = detail;
@@ -375,39 +374,50 @@ __trace_record(int kind, xtc_pid_t self, xtc_pid_t peer, uint64_t hlc,
 static int
 __trace_active(void)
 {
-	return atomic_load_explicit(&__trace_on, memory_order_relaxed) != 0;
+	return xtc_atomic_load_i32(&__trace_on, xtc_mo_relaxed) != 0;
 }
 
-static _Atomic uint64_t __mon_ref_seq = 0;
+static uint64_t __mon_ref_seq = 0;
 
 static struct link_entry *
 __link_alloc(void)
 {
 	__proc_slabs_ensure();
-	if (__link_slab == NULL) return NULL;
-	return xtc_slab_alloc(__link_slab);
+	if (xtc_atomic_load_ptr(&__link_slab, xtc_mo_seq_cst) == NULL)
+		return NULL;
+	return xtc_slab_alloc(
+	    xtc_atomic_load_ptr(&__link_slab, xtc_mo_seq_cst));
 }
 static void __link_free(struct link_entry *e) {
 	if (e == NULL) return;
-	if (__link_slab) xtc_slab_free(__link_slab, e); else free(e);
+	if (xtc_atomic_load_ptr(&__link_slab, xtc_mo_seq_cst))
+		xtc_slab_free(xtc_atomic_load_ptr(&__link_slab, xtc_mo_seq_cst),
+		    e);
+	else
+		free(e); /* XTC_RAW_OK: unchanged; never reached */
 }
 static struct mon_entry *
 __mon_alloc(void)
 {
 	__proc_slabs_ensure();
-	if (__mon_slab == NULL) return NULL;
-	return xtc_slab_alloc(__mon_slab);
+	if (xtc_atomic_load_ptr(&__mon_slab, xtc_mo_seq_cst) == NULL)
+		return NULL;
+	return xtc_slab_alloc(xtc_atomic_load_ptr(&__mon_slab, xtc_mo_seq_cst));
 }
 static void __mon_free(struct mon_entry *e) {
 	if (e == NULL) return;
-	if (__mon_slab) xtc_slab_free(__mon_slab, e); else free(e);
+	if (xtc_atomic_load_ptr(&__mon_slab, xtc_mo_seq_cst))
+		xtc_slab_free(xtc_atomic_load_ptr(&__mon_slab, xtc_mo_seq_cst),
+		    e);
+	else
+		free(e); /* XTC_RAW_OK: unchanged; never reached */
 }
 /* Drop one holder of a watcher-side entry; free it with the last. */
 static void
 __mon_put(struct mon_entry *w)
 {
-	if (w != NULL && atomic_fetch_sub_explicit(&w->refs, 1,
-	    memory_order_acq_rel) == 1)
+	if (w != NULL &&
+	    xtc_atomic_fetch_sub_i32(&w->refs, 1, xtc_mo_acq_rel) == 1)
 		__mon_free(w);
 }
 
@@ -469,7 +479,7 @@ struct xtc_proc {
 	 * drains into the unbounded save queue and defeats mailbox_cap. */
 	struct envelope  *save_head;
 	struct envelope  *save_tail;
-	_Atomic size_t    mbox_saved;
+	size_t mbox_saved;
 
 	/* Receive coordination. */
 	xtc_waker_t       recv_waker;
@@ -546,19 +556,19 @@ struct xtc_proc {
 	/* Asynchronous kill (cross-process exit signal).  Set by
 	 * xtc_exit_pid; checked at every yield/recv parking point.
 	 * The flag carries the reason+1 so 0 means "no kill pending". */
-	_Atomic int kill_pending;
+	int kill_pending;
 
 	/* Kill-wake target: the task this proc's fiber runs as and the loop
 	 * it last yielded on, recorded by __xtc_proc_ctx_save at every yield
 	 * so xtc_exit_pid can make the proc runnable wherever it is parked. */
-	_Atomic(xtc_task_t *) run_task;
-	_Atomic(xtc_loop_t *) run_loop;
+	xtc_task_t *run_task;
+	xtc_loop_t *run_loop;
 	int                   yield_park;   /* last yield was a park (owner) */
 
 	/* xtc_proc_trap_exit: 1 = a linked peer's exit arrives as an 'E'
 	 * message; 0 (default) = a non-normal peer exit kills this proc.
 	 * Written by the owner, read by the exiting peer's thread. */
-	_Atomic int trap_exit;
+	int trap_exit;
 
 	/* A2 cancellation masking (MonadCancel uncancelable/poll).  While
 	 * mask_depth > 0 an asynchronous kill (xtc_exit_pid) delivered at a
@@ -577,8 +587,8 @@ struct xtc_proc {
 	 * has to be answerable from outside.  Relaxed on both sides -- these
 	 * are a sampled health signal (like run_state), not a synchronizing
 	 * read.  See xtc_proc_info's mask_depth / mask_deferred. */
-	_Atomic unsigned mask_depth;
-	_Atomic int   mask_deferred;   /* latched reason+1; 0 = none pending */
+	unsigned mask_depth;
+	int mask_deferred; /* latched reason+1; 0 = none pending */
 
 	/* A3 async causal trace: a small per-fiber ring of the recent
 	 * suspend/resume boundaries (park reason / resume) with a static
@@ -619,7 +629,7 @@ struct xtc_proc {
 	 * arena-group discard does.  Matches how xtc_sup / xtc_svr already
 	 * declare their own alive flags.
 	 */
-	_Atomic int alive;
+	int alive;
 
 	/*
 	 * Teardown-safety refcount.  A resolver (__table_lookup) takes a
@@ -631,7 +641,7 @@ struct xtc_proc {
 	 * the count reaches zero (see __proc_ref / __proc_release).  This
 	 * closes the resolve-then-deliver use-after-free race class
 	 * (KNOWN_ISSUES: DOWN-send vs teardown, blocking-pool wake). */
-	_Atomic int refs;
+	int refs;
 
 	/* Consumer-owned opaque per-proc pointer (xtc_proc_set_userdata /
 	 * xtc_proc_userdata).  NULL by default (the struct is calloc'd).
@@ -722,7 +732,7 @@ struct xtc_proc_table {
 	 * (so the slot state it describes is ordered), and this only needs
 	 * the increment/decrement not to be lost.
 	 */
-	_Atomic size_t        n_used;
+	size_t n_used;
 	pthread_mutex_t       stripes[XTC_PT_NSTRIPES];
 	/* Free slot indices (LIFO through slot.next_free) and the count of
 	 * slots ever handed out, so a spawn is O(1) instead of a scan from
@@ -824,22 +834,22 @@ static struct xtc_proc *__proc_reanchor(struct xtc_proc *self);
 #define LOOP_TABLE_MAX 1024
 #define LT_HCAP (2 * LOOP_TABLE_MAX)
 struct lt_entry {
-	_Atomic(xtc_loop_t *)            loop;
-	_Atomic(struct xtc_proc_table *) tbl;
+	xtc_loop_t *loop;
+	struct xtc_proc_table *tbl;
 };
 /* __lt_ih entry: the id is copied in so a reader never dereferences a
  * loop it has not validated (the loop may be mid-finalize). */
 struct lt_id_entry {
-	_Atomic uint32_t id;
-	_Atomic(xtc_loop_t *) loop;
-	_Atomic(struct xtc_proc_table *) tbl;
+	uint32_t id;
+	xtc_loop_t *loop;
+	struct xtc_proc_table *tbl;
 };
 static pthread_mutex_t __lt_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct lt_entry __lt[LOOP_TABLE_MAX];
 static int __lt_n;                                  /* under __lt_lock */
 static struct lt_entry __lt_h[LT_HCAP];
 static struct lt_id_entry __lt_ih[LT_HCAP];
-static _Atomic unsigned __lt_seq;
+static unsigned __lt_seq;
 
 static inline unsigned
 __lt_hash(const xtc_loop_t *loop)
@@ -871,28 +881,27 @@ __lt_id_hash(uint32_t id)
 static void
 __lt_write_begin(void)
 {
-	atomic_store_explicit(&__lt_seq,
-	    atomic_load_explicit(&__lt_seq, memory_order_relaxed) + 1u,
-	    memory_order_relaxed);
-	atomic_thread_fence(memory_order_release);
+	xtc_atomic_store_u32(&__lt_seq,
+	    xtc_atomic_load_u32(&__lt_seq, xtc_mo_relaxed) + 1u,
+	    xtc_mo_relaxed);
+	xtc_atomic_thread_fence(xtc_mo_release);
 }
 static void
 __lt_write_end(void)
 {
-	atomic_store_explicit(&__lt_seq,
-	    atomic_load_explicit(&__lt_seq, memory_order_relaxed) + 1u,
-	    memory_order_release);
+	xtc_atomic_store_u32(&__lt_seq,
+	    xtc_atomic_load_u32(&__lt_seq, xtc_mo_relaxed) + 1u,
+	    xtc_mo_release);
 }
 
 static void
 __lt_hash_put(xtc_loop_t *loop, struct xtc_proc_table *t)
 {
 	unsigned h = __lt_hash(loop);
-	while (atomic_load_explicit(&__lt_h[h].loop,
-	    memory_order_relaxed) != NULL)
+	while (xtc_atomic_load_ptr(&__lt_h[h].loop, xtc_mo_relaxed) != NULL)
 		h = (h + 1u) & (LT_HCAP - 1u);
-	atomic_store_explicit(&__lt_h[h].tbl, t, memory_order_release);
-	atomic_store_explicit(&__lt_h[h].loop, loop, memory_order_release);
+	xtc_atomic_store_ptr(&__lt_h[h].tbl, t, xtc_mo_release);
+	xtc_atomic_store_ptr(&__lt_h[h].loop, loop, xtc_mo_release);
 }
 
 static void
@@ -900,12 +909,11 @@ __lt_id_put(xtc_loop_t *loop, struct xtc_proc_table *t)
 {
 	uint32_t id = __lt_loop_id(loop);
 	unsigned h = __lt_id_hash(id);
-	while (atomic_load_explicit(&__lt_ih[h].loop, memory_order_relaxed) !=
-	    NULL)
+	while (xtc_atomic_load_ptr(&__lt_ih[h].loop, xtc_mo_relaxed) != NULL)
 		h = (h + 1u) & (LT_HCAP - 1u);
-	atomic_store_explicit(&__lt_ih[h].id, id, memory_order_release);
-	atomic_store_explicit(&__lt_ih[h].tbl, t, memory_order_release);
-	atomic_store_explicit(&__lt_ih[h].loop, loop, memory_order_release);
+	xtc_atomic_store_u32(&__lt_ih[h].id, id, xtc_mo_release);
+	xtc_atomic_store_ptr(&__lt_ih[h].tbl, t, xtc_mo_release);
+	xtc_atomic_store_ptr(&__lt_ih[h].loop, loop, xtc_mo_release);
 }
 
 /* Lock-free lookup of loop's table (NULL if none). */
@@ -916,24 +924,23 @@ __lt_find(xtc_loop_t *loop)
 	xtc_loop_t *l;
 	struct xtc_proc_table *t;
 	for (;;) {
-		seq = atomic_load_explicit(&__lt_seq, memory_order_acquire);
+		seq = xtc_atomic_load_u32(&__lt_seq, xtc_mo_acquire);
 		if (seq & 1u)
 			continue;              /* a writer is mid-change */
 		t = NULL;
 		for (h = __lt_hash(loop); ; h = (h + 1u) & (LT_HCAP - 1u)) {
-			l = atomic_load_explicit(&__lt_h[h].loop,
-			    memory_order_acquire);
+			l = xtc_atomic_load_ptr(&__lt_h[h].loop,
+			    xtc_mo_acquire);
 			if (l == NULL)
 				break;
 			if (l == loop) {
-				t = atomic_load_explicit(&__lt_h[h].tbl,
-				    memory_order_acquire);
+				t = xtc_atomic_load_ptr(&__lt_h[h].tbl,
+				    xtc_mo_acquire);
 				break;
 			}
 		}
-		atomic_thread_fence(memory_order_acquire);
-		if (atomic_load_explicit(&__lt_seq,
-		    memory_order_relaxed) == seq)
+		xtc_atomic_thread_fence(xtc_mo_acquire);
+		if (xtc_atomic_load_u32(&__lt_seq, xtc_mo_relaxed) == seq)
 			return t;
 	}
 }
@@ -952,28 +959,27 @@ __lt_find_id(uint32_t id, struct xtc_proc_table **out_tbl)
 	xtc_loop_t *l, *found;
 	struct xtc_proc_table *t;
 	for (;;) {
-		seq = atomic_load_explicit(&__lt_seq, memory_order_acquire);
+		seq = xtc_atomic_load_u32(&__lt_seq, xtc_mo_acquire);
 		if (seq & 1u)
 			continue;
 		found = NULL;
 		t = NULL;
 		for (h = __lt_id_hash(id), k = 0; k < LT_HCAP;
 		     h = (h + 1u) & (LT_HCAP - 1u), k++) {
-			l = atomic_load_explicit(&__lt_ih[h].loop,
-			    memory_order_acquire);
+			l = xtc_atomic_load_ptr(&__lt_ih[h].loop,
+			    xtc_mo_acquire);
 			if (l == NULL)
 				break;
-			if (atomic_load_explicit(&__lt_ih[h].id,
-			        memory_order_acquire) == id) {
+			if (xtc_atomic_load_u32(&__lt_ih[h].id,
+			        xtc_mo_acquire) == id) {
 				found = l;
-				t = atomic_load_explicit(&__lt_ih[h].tbl,
-				    memory_order_acquire);
+				t = xtc_atomic_load_ptr(&__lt_ih[h].tbl,
+				    xtc_mo_acquire);
 				break;
 			}
 		}
-		atomic_thread_fence(memory_order_acquire);
-		if (atomic_load_explicit(&__lt_seq, memory_order_relaxed) ==
-		    seq) {
+		xtc_atomic_thread_fence(xtc_mo_acquire);
+		if (xtc_atomic_load_u32(&__lt_seq, xtc_mo_relaxed) == seq) {
 			*out_tbl = t;
 			return found;
 		}
@@ -988,40 +994,36 @@ __lt_remove_locked(xtc_loop_t *loop)
 	struct xtc_proc_table *tbl = NULL;
 	int i, j;
 	for (i = 0; i < __lt_n; i++)
-		if (atomic_load_explicit(&__lt[i].loop,
-		    memory_order_relaxed) == loop)
+		if (xtc_atomic_load_ptr(&__lt[i].loop, xtc_mo_relaxed) == loop)
 			break;
 	if (i == __lt_n)
 		return NULL;
-	tbl = atomic_load_explicit(&__lt[i].tbl, memory_order_relaxed);
+	tbl = xtc_atomic_load_ptr(&__lt[i].tbl, xtc_mo_relaxed);
 	__lt_write_begin();
 	/* Dense array: move the last entry into the hole. */
 	__lt_n--;
-	atomic_store_explicit(&__lt[i].loop, atomic_load_explicit(
-	    &__lt[__lt_n].loop, memory_order_relaxed), memory_order_release);
-	atomic_store_explicit(&__lt[i].tbl, atomic_load_explicit(
-	    &__lt[__lt_n].tbl, memory_order_relaxed), memory_order_release);
-	atomic_store_explicit(&__lt[__lt_n].loop, NULL, memory_order_release);
-	atomic_store_explicit(&__lt[__lt_n].tbl, NULL, memory_order_release);
+	xtc_atomic_store_ptr(&__lt[i].loop,
+	    xtc_atomic_load_ptr(&__lt[__lt_n].loop, xtc_mo_relaxed),
+	    xtc_mo_release);
+	xtc_atomic_store_ptr(&__lt[i].tbl,
+	    xtc_atomic_load_ptr(&__lt[__lt_n].tbl, xtc_mo_relaxed),
+	    xtc_mo_release);
+	xtc_atomic_store_ptr(&__lt[__lt_n].loop, NULL, xtc_mo_release);
+	xtc_atomic_store_ptr(&__lt[__lt_n].tbl, NULL, xtc_mo_release);
 	/* Both hashes: rebuild from the dense array (no tombstones). */
 	for (j = 0; j < (int)LT_HCAP; j++) {
-		atomic_store_explicit(&__lt_h[j].loop, NULL,
-		    memory_order_relaxed);
-		atomic_store_explicit(&__lt_h[j].tbl, NULL,
-		    memory_order_relaxed);
-		atomic_store_explicit(&__lt_ih[j].loop, NULL,
-		    memory_order_relaxed);
-		atomic_store_explicit(&__lt_ih[j].tbl, NULL,
-		    memory_order_relaxed);
-		atomic_store_explicit(&__lt_ih[j].id, 0, memory_order_relaxed);
+		xtc_atomic_store_ptr(&__lt_h[j].loop, NULL, xtc_mo_relaxed);
+		xtc_atomic_store_ptr(&__lt_h[j].tbl, NULL, xtc_mo_relaxed);
+		xtc_atomic_store_ptr(&__lt_ih[j].loop, NULL, xtc_mo_relaxed);
+		xtc_atomic_store_ptr(&__lt_ih[j].tbl, NULL, xtc_mo_relaxed);
+		xtc_atomic_store_u32(&__lt_ih[j].id, 0, xtc_mo_relaxed);
 	}
 	for (j = 0; j < __lt_n; j++) {
-		__lt_hash_put(atomic_load_explicit(&__lt[j].loop,
-		    memory_order_relaxed), atomic_load_explicit(&__lt[j].tbl,
-		    memory_order_relaxed));
-		__lt_id_put(atomic_load_explicit(&__lt[j].loop,
-		                memory_order_relaxed),
-		    atomic_load_explicit(&__lt[j].tbl, memory_order_relaxed));
+		__lt_hash_put(xtc_atomic_load_ptr(&__lt[j].loop,
+		                  xtc_mo_relaxed),
+		    xtc_atomic_load_ptr(&__lt[j].tbl, xtc_mo_relaxed));
+		__lt_id_put(xtc_atomic_load_ptr(&__lt[j].loop, xtc_mo_relaxed),
+		    xtc_atomic_load_ptr(&__lt[j].tbl, xtc_mo_relaxed));
 	}
 	__lt_write_end();
 	return tbl;
@@ -1069,7 +1071,7 @@ __xtc_proc_loop_unregister(xtc_loop_t *loop)
 	tbl->slots = NULL;
 	tbl->cap = 0;
 	tbl->hw = 0;
-	atomic_store_explicit(&tbl->n_used, 0, memory_order_relaxed);
+	xtc_atomic_store_size(&tbl->n_used, 0, xtc_mo_relaxed);
 	(void) __proc_mtx_lock(&tbl->free_lock);
 	tbl->free_head = XTC_PT_FREE_NONE;
 	(void) __proc_mtx_unlock(&tbl->free_lock);
@@ -1085,8 +1087,8 @@ __xtc_proc_loop_unregister(xtc_loop_t *loop)
 		/* Under mbox_lock: a late sender either queued before this
 		 * (drained here) or sees the proc dead and drops its message. */
 		(void) __proc_mtx_lock(&p->mbox_lock);
-		atomic_store_explicit(&p->alive, 0, memory_order_relaxed);
-		atomic_store_explicit(&p->run_task, NULL, memory_order_relaxed);
+		xtc_atomic_store_i32(&p->alive, 0, xtc_mo_relaxed);
+		xtc_atomic_store_ptr(&p->run_task, NULL, xtc_mo_relaxed);
 		p->waker_armed = 0;
 		for (e = p->mbox_head; e != NULL; e = n) {
 			n = e->next;
@@ -1100,7 +1102,7 @@ __xtc_proc_loop_unregister(xtc_loop_t *loop)
 			__env_free(e);
 		}
 		p->save_head = p->save_tail = NULL;
-		atomic_store_explicit(&p->mbox_saved, 0, memory_order_relaxed);
+		xtc_atomic_store_size(&p->mbox_saved, 0, xtc_mo_relaxed);
 		for (le = p->links; le != NULL; le = next_le) {
 			next_le = le->next;
 			__link_free(le);
@@ -1174,8 +1176,8 @@ __table_get(xtc_loop_t *loop, struct xtc_proc_table **out)
 		t->inited = 1;
 	}
 	__lt_write_begin();
-	atomic_store_explicit(&__lt[__lt_n].tbl, t, memory_order_release);
-	atomic_store_explicit(&__lt[__lt_n].loop, loop, memory_order_release);
+	xtc_atomic_store_ptr(&__lt[__lt_n].tbl, t, xtc_mo_release);
+	xtc_atomic_store_ptr(&__lt[__lt_n].loop, loop, xtc_mo_release);
 	__lt_n++;
 	__lt_hash_put(loop, t);
 	__lt_id_put(loop, t);
@@ -1251,7 +1253,7 @@ take:
 	p->pid.loop_id = __lt_loop_id(p->loop);
 	p->pid.local_id = (uint32_t)idx;
 	p->pid.gen = ++t->slots[idx].gen;
-	atomic_fetch_add_explicit(&t->n_used, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_size(&t->n_used, 1, xtc_mo_relaxed);
 out:
 	__pt_unlock_all(t);
 	return rc;
@@ -1263,7 +1265,7 @@ static void
 __table_vacate_locked(struct xtc_proc_table *t, uint32_t local_id)
 {
 	t->slots[local_id].proc = NULL;
-	atomic_fetch_sub_explicit(&t->n_used, 1, memory_order_relaxed);
+	xtc_atomic_fetch_sub_size(&t->n_used, 1, xtc_mo_relaxed);
 	(void) __proc_mtx_lock(&t->free_lock);
 	t->slots[local_id].next_free = t->free_head;
 	t->free_head = local_id;
@@ -1279,7 +1281,7 @@ static void
 __proc_release(struct xtc_proc *p)
 {
 	if (p == NULL) return;
-	if (atomic_fetch_sub_explicit(&p->refs, 1, memory_order_acq_rel) == 1)
+	if (xtc_atomic_fetch_sub_i32(&p->refs, 1, xtc_mo_acq_rel) == 1)
 		__proc_free(p);
 }
 
@@ -1299,7 +1301,7 @@ __table_lookup(struct xtc_proc_table *t, uint32_t local_id, uint64_t gen)
 		 * owner ref, so a resolver either sees the live proc and pins
 		 * it here, or sees NULL -- never a freed pointer in between.
 		 * The caller must __proc_release when done. */
-		atomic_fetch_add_explicit(&p->refs, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_i32(&p->refs, 1, xtc_mo_relaxed);
 	}
 	(void) __proc_mtx_unlock(&t->stripes[st]);
 	return p;
@@ -1414,11 +1416,11 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e, int sys,
 	 * spurious-full buggify): those signals are bounded by the number of
 	 * links and monitors, not by traffic, and dropping one leaves a
 	 * supervisor waiting forever for a death it asked to observe. */
-	if (!atomic_load_explicit(&p->alive, memory_order_relaxed) ||
+	if (!xtc_atomic_load_i32(&p->alive, xtc_mo_relaxed) ||
 	    (!sys && p->mbox_cap > 0 &&
-	     (p->mbox_n +
-	      atomic_load_explicit(&p->mbox_saved, memory_order_relaxed))
-	     >= p->mbox_cap) ||
+	        (p->mbox_n +
+	            xtc_atomic_load_size(&p->mbox_saved, xtc_mo_relaxed)) >=
+	            p->mbox_cap) ||
 	    /* Buggify: under sim, when the "spurious_full" site is activated
 	     * for this run (a once-per-run seeded gate), report the mailbox
 	     * full on SOME sends (a fresh per-call seeded coin) even with
@@ -1428,9 +1430,9 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e, int sys,
 	     * FoundationDB's "smallest legal buffer" buggify.  The per-call
 	     * coin (25%) keeps sends eventually succeeding so senders that
 	     * retry make progress.  A no-op in production. */
-	    (!sys && atomic_load_explicit(&p->alive, memory_order_relaxed) &&
-	    XTC_SIM_BUGGIFY("proc.mbox.spurious_full") &&
-	     xtc_sim_fault(250))) {
+	    (!sys && xtc_atomic_load_i32(&p->alive, xtc_mo_relaxed) &&
+	        XTC_SIM_BUGGIFY("proc.mbox.spurious_full") &&
+	        xtc_sim_fault(250))) {
 		p->mbox_drop_total++;
 		(void) __proc_mtx_unlock(&p->mbox_lock);
 		if (queued != NULL) {
@@ -1474,8 +1476,8 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e, int sys,
 		/* Record the wake cause so xtc_proc_wait_fd / etc. can
 		 * tell why we resumed. */
 		if (p->task != NULL)
-			atomic_fetch_or_explicit(&p->task->wake_revents,
-			    XTC_WAIT_MAILBOX, memory_order_relaxed);
+			xtc_atomic_fetch_or_u32(&p->task->wake_revents,
+			    XTC_WAIT_MAILBOX, xtc_mo_relaxed);
 #if !XTC_DST_BUG(XTC_DST_BUG_LOSTWAKE)
 		/* The message is already queued, so a failed wake cannot be
 		 * rolled back.  Report it instead of returning XTC_OK over a
@@ -1618,9 +1620,9 @@ __proc_entry(void *arg)
 	 */
 	p->task = __xtc_current_task();
 	p->coro = __xtc_current_coro;
-	atomic_store_explicit(&p->run_loop, __xtc_current_loop_get(),
-	    memory_order_relaxed);
-	atomic_store_explicit(&p->run_task, p->task, memory_order_relaxed);
+	xtc_atomic_store_ptr(&p->run_loop, __xtc_current_loop_get(),
+	    xtc_mo_relaxed);
+	xtc_atomic_store_ptr(&p->run_task, p->task, xtc_mo_relaxed);
 	/*
 	 * Publish the reverse link too, from the fiber, while it is
 	 * unambiguously ours: a primitive that must not act on the wrong
@@ -1689,11 +1691,10 @@ __proc_entry(void *arg)
 		 * did not poll and the body then returned) is still this
 		 * proc's exit reason: a supervisor must see the kill, not a
 		 * clean exit. */
-		reason = atomic_load_explicit(&p->kill_pending,
-		    memory_order_acquire);
+		reason = xtc_atomic_load_i32(&p->kill_pending, xtc_mo_acquire);
 		if (reason == 0)
-			reason = atomic_load_explicit(&p->mask_deferred,
-			    memory_order_relaxed);
+			reason = xtc_atomic_load_i32(&p->mask_deferred,
+			    xtc_mo_relaxed);
 		if (reason != 0) {
 			p->exit_reason = reason - 1;
 			p->exit_kind = (p->exit_reason == 0) ? 0 : 1;
@@ -1713,7 +1714,7 @@ __proc_entry(void *arg)
 
 proc_exit:
 
-	atomic_store_explicit(&p->alive, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&p->alive, 0, xtc_mo_relaxed);
 	/* Run the proc's at-exit callbacks (release locks, reset memory,
 	 * close fds) before anyone observes the exit.  __current_proc is
 	 * still this proc, and we are past the fault handler's longjmp,
@@ -1724,7 +1725,7 @@ proc_exit:
 	/* No more parks: stop xtc_exit_pid waking this task (it is about to
 	 * complete).  Under mbox_lock, which the killer holds for its read. */
 	(void) __proc_mtx_lock(&p->mbox_lock);
-	atomic_store_explicit(&p->run_task, NULL, memory_order_relaxed);
+	xtc_atomic_store_ptr(&p->run_task, NULL, xtc_mo_relaxed);
 	(void) __proc_mtx_unlock(&p->mbox_lock);
 	/* __notify_links_and_monitors frees p (releases the slot,
 	 * destroys the mailbox lock, frees the struct), so snapshot the
@@ -1781,8 +1782,8 @@ __mon_watch_push(struct xtc_proc *self, struct mon_entry *w)
 
 	if (self->mon_n >= self->mon_sweep_at) {
 		for (pp = &self->monitors; (e = *pp) != NULL; ) {
-			if (atomic_load_explicit(&e->refs,
-			    memory_order_acquire) == 1) {
+			if (xtc_atomic_load_i32(&e->refs, xtc_mo_acquire) ==
+			    1) {
 				*pp = e->next;
 				__mon_free(e);
 				self->mon_n--;
@@ -1851,9 +1852,9 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	/* NOT left at calloc's 0: 0 is XTC_DOWN_KIND_CLEAN, so a zero here
 	 * would silently turn every xtc_exit_self(code) into a clean exit. */
 	p->exit_kind_override = -1;
-	atomic_store_explicit(&p->alive, 1, memory_order_relaxed);
+	xtc_atomic_store_i32(&p->alive, 1, xtc_mo_relaxed);
 	p->spawn_class = o.sched_class;
-	atomic_store_explicit(&p->refs, 1, memory_order_relaxed);   /* owner ref */
+	xtc_atomic_store_i32(&p->refs, 1, xtc_mo_relaxed); /* owner ref */
 	p->mbox_cap = o.mailbox_cap > 0 ? o.mailbox_cap : 4096;
 	/* Watermark level: a percent of cap (rounded down), clamped so a
 	 * positive percent yields at least 1.  0 percent disables it. */
@@ -1918,13 +1919,14 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 			rc = XTC_E_NOMEM;
 			goto undo_slot;
 		}
-		ref = atomic_fetch_add_explicit(&__mon_ref_seq, 1,
-		    memory_order_relaxed) + 1;
+		ref = xtc_atomic_fetch_add_u64(&__mon_ref_seq, 1,
+		          xtc_mo_relaxed) +
+		    1;
 		mw->ref = ref;
 		mw->target = spawned_pid;
 		mw->watcher = self->pid;
 		mw->peer = NULL;
-		atomic_store_explicit(&mw->refs, 2, memory_order_relaxed);
+		xtc_atomic_store_i32(&mw->refs, 2, xtc_mo_relaxed);
 		__mon_watch_push(self, mw);
 		mt->ref = ref;
 		mt->target = spawned_pid;
@@ -2043,21 +2045,21 @@ xtc_self(void)
 xtc_pid_t
 xtc_atomic_pid_load(const xtc_atomic_pid_t *a)
 {
-	_Atomic uint64_t *seq = (_Atomic uint64_t *)(uintptr_t)&a->seq_;
-	_Atomic uint64_t *w = (_Atomic uint64_t *)(uintptr_t)a->w_;
+	uint64_t *seq = (uint64_t *)(uintptr_t)&a->seq_;
+	uint64_t *w = (uint64_t *)(uintptr_t)a->w_;
 	uint64_t s1, s2, w0, w1;
 	xtc_pid_t p;
 
 	for (;;) {
-		s1 = atomic_load_explicit(seq, memory_order_seq_cst);
+		s1 = xtc_atomic_load_u64(seq, xtc_mo_seq_cst);
 		if (s1 & 1u) {
 			__os_pause();
 			continue;
 		}
-		w0 = atomic_load_explicit(&w[0], memory_order_relaxed);
-		w1 = atomic_load_explicit(&w[1], memory_order_relaxed);
-		atomic_thread_fence(memory_order_acquire);
-		s2 = atomic_load_explicit(seq, memory_order_relaxed);
+		w0 = xtc_atomic_load_u64(&w[0], xtc_mo_relaxed);
+		w1 = xtc_atomic_load_u64(&w[1], xtc_mo_relaxed);
+		xtc_atomic_thread_fence(xtc_mo_acquire);
+		s2 = xtc_atomic_load_u64(seq, xtc_mo_relaxed);
 		if (s1 == s2)
 			break;
 	}
@@ -2071,24 +2073,25 @@ xtc_atomic_pid_load(const xtc_atomic_pid_t *a)
 void
 xtc_atomic_pid_store(xtc_atomic_pid_t *a, xtc_pid_t p)
 {
-	_Atomic uint64_t *seq = (_Atomic uint64_t *)&a->seq_;
-	_Atomic uint64_t *w = (_Atomic uint64_t *)a->w_;
+	uint64_t *seq = (uint64_t *)&a->seq_;
+	uint64_t *w = (uint64_t *)a->w_;
 	uint64_t s;
 
 	__xtc_unsafe_enter();
-	s = atomic_load_explicit(seq, memory_order_relaxed);
+	s = xtc_atomic_load_u64(seq, xtc_mo_relaxed);
 	for (;;) {
-		if ((s & 1u) == 0 && atomic_compare_exchange_weak_explicit(seq,
-		    &s, s + 1, memory_order_acquire, memory_order_relaxed))
+		if ((s & 1u) == 0 &&
+		    xtc_atomic_cas_weak_u64(seq, &s, s + 1, xtc_mo_acquire,
+		        xtc_mo_relaxed))
 			break;
 		__os_pause();
-		s = atomic_load_explicit(seq, memory_order_relaxed);
+		s = xtc_atomic_load_u64(seq, xtc_mo_relaxed);
 	}
-	atomic_thread_fence(memory_order_release);
-	atomic_store_explicit(&w[0], (uint64_t)p.loop_id |
-	    (uint64_t)p.local_id << 32, memory_order_relaxed);
-	atomic_store_explicit(&w[1], p.gen, memory_order_relaxed);
-	atomic_store_explicit(seq, s + 2, memory_order_seq_cst);
+	xtc_atomic_thread_fence(xtc_mo_release);
+	xtc_atomic_store_u64(&w[0],
+	    (uint64_t)p.loop_id | (uint64_t)p.local_id << 32, xtc_mo_relaxed);
+	xtc_atomic_store_u64(&w[1], p.gen, xtc_mo_relaxed);
+	xtc_atomic_store_u64(seq, s + 2, xtc_mo_seq_cst);
 	__xtc_unsafe_leave();
 }
 
@@ -2179,18 +2182,17 @@ __xtc_proc_ctx_save(void)
 	 * wake it.  Called on every yield, owner fiber only.
 	 */
 	if (rp != NULL && t != NULL && rp->task == t &&
-	    atomic_load_explicit(&rp->alive, memory_order_relaxed)) {
+	    xtc_atomic_load_i32(&rp->alive, xtc_mo_relaxed)) {
 		rp->yield_park = t->park_requested ||
-		    atomic_load_explicit(&t->park_timer,
-		    memory_order_relaxed) != NULL ||
-		    atomic_load_explicit(&t->park_fd, memory_order_relaxed) !=
-		    __PARK_TOK_NONE ||
+		    xtc_atomic_load_ptr(&t->park_timer, xtc_mo_relaxed) !=
+		        NULL ||
+		    xtc_atomic_load_i64(&t->park_fd, xtc_mo_relaxed) !=
+		        __PARK_TOK_NONE ||
 		    c->_parked_on != NULL;
 		l = __xtc_current_loop_get();
-		if (l != NULL && atomic_load_explicit(&rp->run_loop,
-		    memory_order_relaxed) != l)
-			atomic_store_explicit(&rp->run_loop, l,
-			    memory_order_relaxed);
+		if (l != NULL &&
+		    xtc_atomic_load_ptr(&rp->run_loop, xtc_mo_relaxed) != l)
+			xtc_atomic_store_ptr(&rp->run_loop, l, xtc_mo_relaxed);
 	}
 	return __current_proc;
 }
@@ -2225,14 +2227,14 @@ __xtc_proc_ctx_restore(void *ctx)
 static inline unsigned
 __mask_depth(const struct xtc_proc *p)
 {
-	return atomic_load_explicit(&p->mask_depth, memory_order_relaxed);
+	return xtc_atomic_load_u32(&p->mask_depth, xtc_mo_relaxed);
 }
 
 static inline void
 __mask_depth_inc(struct xtc_proc *p)
 {
-	atomic_store_explicit(&p->mask_depth, __mask_depth(p) + 1u,
-	    memory_order_relaxed);
+	xtc_atomic_store_u32(&p->mask_depth, __mask_depth(p) + 1u,
+	    xtc_mo_relaxed);
 }
 
 /* Saturating at 0: mirrors the `if (mask_depth > 0) mask_depth--` guard
@@ -2243,26 +2245,25 @@ __mask_depth_dec(struct xtc_proc *p)
 {
 	unsigned d = __mask_depth(p);
 	if (d > 0)
-		atomic_store_explicit(&p->mask_depth, d - 1u,
-		    memory_order_relaxed);
+		xtc_atomic_store_u32(&p->mask_depth, d - 1u, xtc_mo_relaxed);
 }
 
 static inline void
 __mask_depth_set(struct xtc_proc *p, unsigned v)
 {
-	atomic_store_explicit(&p->mask_depth, v, memory_order_relaxed);
+	xtc_atomic_store_u32(&p->mask_depth, v, xtc_mo_relaxed);
 }
 
 static inline int
 __mask_deferred(const struct xtc_proc *p)
 {
-	return atomic_load_explicit(&p->mask_deferred, memory_order_relaxed);
+	return xtc_atomic_load_i32(&p->mask_deferred, xtc_mo_relaxed);
 }
 
 static inline void
 __mask_deferred_set(struct xtc_proc *p, int v)
 {
-	atomic_store_explicit(&p->mask_deferred, v, memory_order_relaxed);
+	xtc_atomic_store_i32(&p->mask_deferred, v, xtc_mo_relaxed);
 }
 
 /*
@@ -2281,7 +2282,7 @@ __xtc_proc_kill_deliver(struct xtc_proc *self)
 	int kp;
 	if (self == NULL)
 		return;
-	kp = atomic_load_explicit(&self->kill_pending, memory_order_acquire);
+	kp = xtc_atomic_load_i32(&self->kill_pending, xtc_mo_acquire);
 	if (kp == 0)
 		return;
 	if (__mask_depth(self) > 0) {
@@ -2329,14 +2330,14 @@ __xtc_proc_kill_poll(void)
  * the xtc_tail enable/disable discipline (observability must not tax
  * production).
  */
-static _Atomic int __ct_enabled;   /* 0 = off (default), 1 = on */
+static int __ct_enabled; /* 0 = off (default), 1 = on */
 
 /* PUBLIC: int xtc_trace_causal_enable __P((int)); */
 int
 xtc_trace_causal_enable(int on)
 {
-	return atomic_exchange_explicit(&__ct_enabled, on ? 1 : 0,
-	    memory_order_release);
+	return xtc_atomic_exchange_i32(&__ct_enabled, on ? 1 : 0,
+	    xtc_mo_release);
 }
 
 /*
@@ -2353,7 +2354,7 @@ __xtc_trace_causal(int kind, const char *site)
 {
 	struct xtc_proc *self;
 
-	if (atomic_load_explicit(&__ct_enabled, memory_order_relaxed) == 0)
+	if (xtc_atomic_load_i32(&__ct_enabled, xtc_mo_relaxed) == 0)
 		return;                 /* off: one branch, done */
 	self = __current_proc;
 	if (self == NULL)
@@ -2523,8 +2524,7 @@ xtc_proc_mailbox_stats(xtc_pid_t pid, xtc_mailbox_stats_t *uout)
 		return XTC_E_INVAL;
 	(void) __proc_mtx_lock(&p->mbox_lock);
 	out->depth = p->mbox_n;
-	out->saved = atomic_load_explicit(&p->mbox_saved,
-	    memory_order_relaxed);
+	out->saved = xtc_atomic_load_size(&p->mbox_saved, xtc_mo_relaxed);
 	out->peak = p->mbox_peak;
 	out->cap = p->mbox_cap;
 	out->recv_total = p->mbox_recv_total;
@@ -2665,8 +2665,10 @@ __send_ex(xtc_loop_t *owner, xtc_pid_t to, const void *data, size_t size,
 	if (XTC_UNLIKELY(p == NULL)) return XTC_E_INVAL;
 	/* p is pinned by the resolver ref; release on every exit below so a
 	 * concurrent exit cannot free it mid-delivery. */
-	if (XTC_UNLIKELY(!atomic_load_explicit(&p->alive,
-	    memory_order_relaxed))) { __proc_release(p); return XTC_E_INVAL; }
+	if (XTC_UNLIKELY(!xtc_atomic_load_i32(&p->alive, xtc_mo_relaxed))) {
+		__proc_release(p);
+		return XTC_E_INVAL;
+	}
 
 	/* Guard against size_t overflow in the envelope allocation:
 	 * a size near SIZE_MAX would wrap sizeof *e + size to a small
@@ -2754,16 +2756,18 @@ __exit_pid_on(xtc_loop_t *owner, xtc_pid_t target, int reason)
 	if (XTC_UNLIKELY(xtc_pid_is_none(target))) return XTC_E_INVAL;
 	p = __resolve_on(owner, target, NULL);
 	if (XTC_UNLIKELY(p == NULL)) return XTC_E_INVAL;
-	if (XTC_UNLIKELY(!atomic_load_explicit(&p->alive,
-	    memory_order_relaxed))) { __proc_release(p); return XTC_E_INVAL; }
+	if (XTC_UNLIKELY(!xtc_atomic_load_i32(&p->alive, xtc_mo_relaxed))) {
+		__proc_release(p);
+		return XTC_E_INVAL;
+	}
 
 	XTC_PROBE_PROC_KILL(XTC_PROBE_PID_ID(target), XTC_PROBE_PID_GEN(target),
 	    reason);
 	/* Encode reason so 0 means "no kill pending".  Negative reasons
 	 * are clamped to -1 so the encoded value stays nonzero. */
 	desired = (reason == 0) ? 1 : reason + 1;
-	(void)atomic_compare_exchange_strong_explicit(&p->kill_pending,
-	    &expected, desired, memory_order_release, memory_order_relaxed);
+	(void)xtc_atomic_cas_i32(&p->kill_pending, &expected, desired,
+	    xtc_mo_release, xtc_mo_relaxed);
 
 	/*
 	 * Make the target runnable wherever it is parked (sleep, sem,
@@ -2785,10 +2789,8 @@ __exit_pid_on(xtc_loop_t *owner, xtc_pid_t target, int reason)
 		p->waker_armed = 0;
 	} else {
 		xtc_waker_t wk;
-		wk.task = atomic_load_explicit(&p->run_task,
-		    memory_order_relaxed);
-		wk.loop = atomic_load_explicit(&p->run_loop,
-		    memory_order_relaxed);
+		wk.task = xtc_atomic_load_ptr(&p->run_task, xtc_mo_relaxed);
+		wk.loop = xtc_atomic_load_ptr(&p->run_loop, xtc_mo_relaxed);
 		if (wk.task != NULL && wk.loop != NULL)
 			rc = xtc_waker_wake(&wk);
 	}
@@ -2906,8 +2908,8 @@ __exit_pid_deadline_on(xtc_loop_t *owner, xtc_pid_t target, int reason,
 	for (;;) {
 		/* Gone => it observed the kill and unwound. */
 		p = __resolve_on(owner, target, NULL);
-		if (p == NULL || !atomic_load_explicit(&p->alive,
-		    memory_order_relaxed)) {
+		if (p == NULL ||
+		    !xtc_atomic_load_i32(&p->alive, xtc_mo_relaxed)) {
 			if (p != NULL)
 				__proc_release(p);
 			status = XTC_KILL_DELIVERED;
@@ -2978,7 +2980,7 @@ xtc_proc_wake(xtc_pid_t target)
 		return XTC_E_INVAL;
 	p = __resolve(target, NULL);
 	if (p == NULL) return XTC_OK;   /* gone: a wake is a harmless no-op */
-	if (!atomic_load_explicit(&p->alive, memory_order_relaxed)) {
+	if (!xtc_atomic_load_i32(&p->alive, xtc_mo_relaxed)) {
 		__proc_release(p); return XTC_OK;
 	}
 
@@ -3065,8 +3067,8 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 		while ((e = *link) != NULL) {
 			if (match(__env_payload(e), e->size, u)) {
 				*link = e->next;
-				atomic_fetch_sub_explicit(&self->mbox_saved, 1,
-				    memory_order_relaxed);
+				xtc_atomic_fetch_sub_size(&self->mbox_saved, 1,
+				    xtc_mo_relaxed);
 				if (self->save_tail == e)
 					self->save_tail = prev;
 				goto deliver;
@@ -3121,8 +3123,8 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 			e->next = NULL;
 			if (self->save_tail == NULL) self->save_head = self->save_tail = e;
 			else { self->save_tail->next = e; self->save_tail = e; }
-			atomic_fetch_add_explicit(&self->mbox_saved, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_size(&self->mbox_saved, 1,
+			    xtc_mo_relaxed);
 			(void) __proc_mtx_lock(&self->mbox_lock);
 		}
 
@@ -3211,8 +3213,8 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 
 		/* Re-check kill flag after yielding back; release the park
 		 * timer first so an unwind leaves none behind. */
-		if (atomic_load_explicit(&self->kill_pending,
-		    memory_order_acquire) != 0)
+		if (xtc_atomic_load_i32(&self->kill_pending, xtc_mo_acquire) !=
+		    0)
 			__xtc_task_cancel_park_timer(self->task);
 		__xtc_proc_kill_deliver(self);
 
@@ -3246,8 +3248,8 @@ deliver:
 				e->next = self->save_head;
 				self->save_head = e;
 				if (self->save_tail == NULL) self->save_tail = e;
-				atomic_fetch_add_explicit(&self->mbox_saved, 1,
-				    memory_order_relaxed);
+				xtc_atomic_fetch_add_size(&self->mbox_saved, 1,
+				    xtc_mo_relaxed);
 				return XTC_E_NOMEM;
 			}
 			memcpy(buf, e->data, e->size);
@@ -3473,8 +3475,7 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	 * lands in this window keeps its cause bits instead of having them
 	 * zeroed out from under it.
 	 */
-	atomic_store_explicit(&self->task->wake_revents, 0,
-	    memory_order_relaxed);
+	xtc_atomic_store_u32(&self->task->wake_revents, 0, xtc_mo_relaxed);
 
 	(void) __proc_mtx_lock(&self->mbox_lock);
 	if (self->mbox_n > 0 || self->save_head != NULL) {
@@ -3487,8 +3488,8 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		 * matching note in __do_recv's park point. */
 		(void)xtc_task_waker(self->task, &self->recv_waker);
 		self->waker_armed = 1;
-		kp_gap = atomic_load_explicit(&self->kill_pending,
-		    memory_order_acquire);
+		kp_gap =
+		    xtc_atomic_load_i32(&self->kill_pending, xtc_mo_acquire);
 	}
 	(void) __proc_mtx_unlock(&self->mbox_lock);
 	/*
@@ -3597,10 +3598,9 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		}
 	}
 	/* park_io first; the release-store publishes it. */
-	atomic_store_explicit(&self->task->park_io, wl->io,
-	    memory_order_relaxed);
-	atomic_store_explicit(&self->task->park_fd,
-	    __park_tok(self->task, fd), memory_order_release);
+	xtc_atomic_store_ptr(&self->task->park_io, wl->io, xtc_mo_relaxed);
+	xtc_atomic_store_i64(&self->task->park_fd, __park_tok(self->task, fd),
+	    xtc_mo_release);
 	had_fd = 1;
 
 	if (timeout_ns >= 0) {
@@ -3613,10 +3613,10 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		    __os_clock_mono(&now_ns) != XTC_OK) {
 			if (t) __os_free(t);
 			(void)xtc_io_del_fd(wl->io, fd);
-			atomic_store_explicit(&self->task->park_fd,
-			    __PARK_TOK_NONE, memory_order_relaxed);
-			atomic_store_explicit(&self->task->park_io, NULL,
-			    memory_order_relaxed);
+			xtc_atomic_store_i64(&self->task->park_fd,
+			    __PARK_TOK_NONE, xtc_mo_relaxed);
+			xtc_atomic_store_ptr(&self->task->park_io, NULL,
+			    xtc_mo_relaxed);
 			__wait_fd_disarm_waker(self);
 			return XTC_E_INTERNAL;
 		}
@@ -3625,26 +3625,27 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		t->user = NULL;
 		t->waiter = self->task;
 		t->heap_idx = -1;
-		t->cancelled = 0;
-		t->fired = 0;
+		xtc_atomic_store_i32(&t->cancelled, 0, xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&t->fired, 0, xtc_mo_seq_cst);
 		t->from_slab = 0;
-		atomic_store_explicit(&t->refs, 2, memory_order_relaxed);  /* heap + park_timer slot */
+		xtc_atomic_store_i32(&t->refs, 2,
+		    xtc_mo_relaxed); /* heap + park_timer slot */
 		t->loop = wl;
 		if (__xtc_timer_heap_push(wl, t) != XTC_OK) {
 			__os_free(t);
 			(void)xtc_io_del_fd(wl->io, fd);
-			atomic_store_explicit(&self->task->park_fd,
-			    __PARK_TOK_NONE, memory_order_relaxed);
-			atomic_store_explicit(&self->task->park_io, NULL,
-			    memory_order_relaxed);
+			xtc_atomic_store_i64(&self->task->park_fd,
+			    __PARK_TOK_NONE, xtc_mo_relaxed);
+			xtc_atomic_store_ptr(&self->task->park_io, NULL,
+			    xtc_mo_relaxed);
 			__wait_fd_disarm_waker(self);
 			return XTC_E_INTERNAL;
 		}
 		/* Refcounted park timer: not spliced onto all_timers (see
 		 * xtc_task_park_on_timer); the heap and the park_timer slot are
 		 * its two owners and the last to release frees it. */
-		atomic_store_explicit(&self->task->park_timer, t,
-		    memory_order_relaxed);
+		xtc_atomic_store_ptr(&self->task->park_timer, t,
+		    xtc_mo_relaxed);
 		had_timer = 1;
 	}
 
@@ -3741,10 +3742,9 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 
 	/* Sample wake_revents.  The dispatcher / mbox_deliver / timer cb
 	 * have set the bits we care about. */
-	revents = atomic_load_explicit(&self->task->wake_revents,
-	    memory_order_relaxed);
-	atomic_store_explicit(&self->task->wake_revents, 0,
-	    memory_order_relaxed);
+	revents =
+	    xtc_atomic_load_u32(&self->task->wake_revents, xtc_mo_relaxed);
+	xtc_atomic_store_u32(&self->task->wake_revents, 0, xtc_mo_relaxed);
 
 	/* Cleanup: unregister fd if still parked, cancel timer.  Use wl (the
 	 * loop we registered on), not the home loop.  If this fiber was woken
@@ -3760,43 +3760,52 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	 * and a test-then-use read leaked it when dispatch cleared the field
 	 * in between (see park_fd in loop_int.h). */
 	{
-	int64_t claimed_tok = atomic_exchange_explicit(&self->task->park_fd,
-	    __PARK_TOK_NONE, memory_order_acq_rel);
-	xtc_io_t *claimed_io =
-	    atomic_load_explicit(&self->task->park_io, memory_order_relaxed);
-	atomic_store_explicit(&self->task->park_io, NULL, memory_order_relaxed);
-	if (claimed_tok != __PARK_TOK_NONE) {
-		extern int __xtc_io_defer_del_fd(xtc_io_t *, int);
-		(void)had_fd;   /* documents intent: an fd was registered */
-		/*
-		 * ALWAYS route the unregister through __xtc_io_defer_del_fd,
-		 * never inline, and never gate it on a loop-identity test here.
-		 * The only thread that may touch wl->io's fd registry + SQ ring
-		 * is wl's own poll thread (TSan showed one io mutated inline
-		 * from 6 distinct threads before this routed through the defer
-		 * path), and the AUTHORITATIVE owner test is the one inside the
-		 * helper: pthread_equal(pthread_self(), io->owner_tid) against
-		 * an eagerly-recorded owner_tid.  It dels inline when we really
-		 * are the owner -- which it MUST, because deferring a same-
-		 * thread del would leave the stale registration in io->fds and
-		 * make the immediate re-register fail as a duplicate -- and
-		 * queues + nudges otherwise.  Do not second-guess that here.
-		 *
-		 * Specifically, do NOT substitute "__xtc_current_loop == wl" for
-		 * it.  A loop identity is not a thread identity: the binding is
-		 * a plain thread-local rebound by whichever loop a thread steps
-		 * (loop.c, __xtc_loop_step_once), not state carried by the coro.
-		 * And wl was latched BEFORE the park, so after a work-steal
-		 * migration comparing it answers the wrong question entirely.
-		 * Thread identity is the only sound basis for "may I touch this
-		 * ring", which is why the helper uses pthread_equal.
-		 *
-		 * For a backend whose registry is kernel-synchronized (epoll)
-		 * the defer is a safe passthrough. */
-		(void)__xtc_io_defer_del_fd(
-		    claimed_io != NULL ? claimed_io : wl->io,
-		    __park_tok_fd(claimed_tok));
-	}
+		int64_t claimed_tok =
+		    xtc_atomic_exchange_i64(&self->task->park_fd,
+		        __PARK_TOK_NONE, xtc_mo_acq_rel);
+		xtc_io_t *claimed_io =
+		    xtc_atomic_load_ptr(&self->task->park_io, xtc_mo_relaxed);
+		xtc_atomic_store_ptr(&self->task->park_io, NULL,
+		    xtc_mo_relaxed);
+		if (claimed_tok != __PARK_TOK_NONE) {
+			extern int __xtc_io_defer_del_fd(xtc_io_t *, int);
+			(void)
+			    had_fd; /* documents intent: an fd was registered */
+			/*
+			 * ALWAYS route the unregister through
+			 * __xtc_io_defer_del_fd, never inline, and never gate
+			 * it on a loop-identity test here. The only thread that
+			 * may touch wl->io's fd registry + SQ ring is wl's own
+			 * poll thread (TSan showed one io mutated inline from 6
+			 * distinct threads before this routed through the defer
+			 * path), and the AUTHORITATIVE owner test is the one
+			 * inside the helper: pthread_equal(pthread_self(),
+			 * io->owner_tid) against an eagerly-recorded owner_tid.
+			 * It dels inline when we really are the owner -- which
+			 * it MUST, because deferring a same- thread del would
+			 * leave the stale registration in io->fds and make the
+			 * immediate re-register fail as a duplicate -- and
+			 * queues + nudges otherwise.  Do not second-guess that
+			 * here.
+			 *
+			 * Specifically, do NOT substitute "__xtc_current_loop
+			 * == wl" for it.  A loop identity is not a thread
+			 * identity: the binding is a plain thread-local rebound
+			 * by whichever loop a thread steps (loop.c,
+			 * __xtc_loop_step_once), not state carried by the coro.
+			 * And wl was latched BEFORE the park, so after a
+			 * work-steal migration comparing it answers the wrong
+			 * question entirely. Thread identity is the only sound
+			 * basis for "may I touch this ring", which is why the
+			 * helper uses pthread_equal.
+			 *
+			 * For a backend whose registry is kernel-synchronized
+			 * (epoll) the defer is a safe passthrough. */
+			(void)__xtc_io_defer_del_fd(claimed_io != NULL ?
+			        claimed_io :
+			        wl->io,
+			    __park_tok_fd(claimed_tok));
+		}
 	}
 	if (had_timer) {
 		/*
@@ -3804,8 +3813,9 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		 * heap holds the other, so the last releaser frees it.  Same
 		 * shape as __xtc_task_cancel_park_timer.
 		 */
-		xtc_timer_t *pt = atomic_exchange_explicit(
-		    &self->task->park_timer, NULL, memory_order_relaxed);
+		xtc_timer_t *pt =
+		    xtc_atomic_exchange_ptr(&self->task->park_timer, NULL,
+		        xtc_mo_relaxed);
 		if (pt != NULL) {
 			(void)xtc_timer_cancel(pt);
 			__xtc_timer_park_release(pt);
@@ -4299,8 +4309,7 @@ __run_proc_at_exit(struct xtc_proc *p)
 	 */
 	if (p != NULL) {
 		__mask_depth_inc(p);
-		atomic_store_explicit(&p->kill_pending, 0,
-		    memory_order_release);
+		xtc_atomic_store_i32(&p->kill_pending, 0, xtc_mo_release);
 		__mask_deferred_set(p, 0);
 	}
 
@@ -4624,7 +4633,7 @@ xtc_cancel_requested(void)
 	struct xtc_proc *p = __current_proc;
 	if (p == NULL)
 		return 0;
-	if (atomic_load_explicit(&p->kill_pending, memory_order_acquire) != 0)
+	if (xtc_atomic_load_i32(&p->kill_pending, xtc_mo_acquire) != 0)
 		return 1;
 	return __mask_deferred(p) != 0;
 }
@@ -5030,7 +5039,7 @@ __peer_push_link(xtc_pid_t peer_pid, struct link_entry *e)
 	if (peer_pid.local_id < tbl->cap &&
 	    tbl->slots[peer_pid.local_id].proc == peer &&
 	    tbl->slots[peer_pid.local_id].gen == peer_pid.gen &&
-	    atomic_load_explicit(&peer->alive, memory_order_relaxed)) {
+	    xtc_atomic_load_i32(&peer->alive, xtc_mo_relaxed)) {
 		e->next = peer->links;
 		peer->links = e;
 		pushed = 1;
@@ -5055,7 +5064,7 @@ __peer_push_monitored_by(xtc_pid_t peer_pid, struct mon_entry *m)
 	if (peer_pid.local_id < tbl->cap &&
 	    tbl->slots[peer_pid.local_id].proc == peer &&
 	    tbl->slots[peer_pid.local_id].gen == peer_pid.gen &&
-	    atomic_load_explicit(&peer->alive, memory_order_relaxed)) {
+	    xtc_atomic_load_i32(&peer->alive, xtc_mo_relaxed)) {
 		m->next = peer->monitored_by;
 		peer->monitored_by = m;
 		pushed = 1;
@@ -5074,8 +5083,8 @@ xtc_link(xtc_pid_t other)
 	struct link_entry *le;
 	if (self == NULL) return XTC_E_INVAL;
 	peer = __resolve(other, NULL);
-	if (peer == NULL || !atomic_load_explicit(&peer->alive,
-	    memory_order_relaxed)) {
+	if (peer == NULL ||
+	    !xtc_atomic_load_i32(&peer->alive, xtc_mo_relaxed)) {
 		if (peer) __proc_release(peer);
 		return XTC_E_INVAL;
 	}
@@ -5131,8 +5140,8 @@ xtc_proc_trap_exit(int on)
 	struct xtc_proc *self = __proc_reanchor(__current_proc);
 	if (self == NULL)
 		return XTC_E_INVAL;
-	return atomic_exchange_explicit(&self->trap_exit, on ? 1 : 0,
-	    memory_order_relaxed);
+	return xtc_atomic_exchange_i32(&self->trap_exit, on ? 1 : 0,
+	    xtc_mo_relaxed);
 }
 
 /* PUBLIC: int xtc_monitor __P((xtc_pid_t, uint64_t *)); */
@@ -5144,8 +5153,8 @@ xtc_monitor(xtc_pid_t target, uint64_t *out_ref)
 	struct mon_entry *me;
 	if (self == NULL) return XTC_E_INVAL;
 	peer = __resolve(target, NULL);
-	if (peer == NULL || !atomic_load_explicit(&peer->alive,
-	    memory_order_relaxed)) {
+	if (peer == NULL ||
+	    !xtc_atomic_load_i32(&peer->alive, xtc_mo_relaxed)) {
 		/*
 		 * Target is already gone (it exited and was reaped between
 		 * the caller's spawn and this monitor -- a real race when the
@@ -5161,8 +5170,9 @@ xtc_monitor(xtc_pid_t target, uint64_t *out_ref)
 		 * that restarts on a crash treats NOPROC as "re-establish if
 		 * you would restart" but does NOT misclassify it as SIGSEGV.
 		 */
-		uint64_t ref = atomic_fetch_add_explicit(&__mon_ref_seq, 1,
-		    memory_order_relaxed) + 1;
+		uint64_t ref = xtc_atomic_fetch_add_u64(&__mon_ref_seq, 1,
+		                   xtc_mo_relaxed) +
+		    1;
 		XTC_PACK_PUSH
 		struct {
 			uint8_t kind;
@@ -5182,12 +5192,12 @@ xtc_monitor(xtc_pid_t target, uint64_t *out_ref)
 	__proc_release(peer);
 	me = __mon_alloc();
 	if (me == NULL) return XTC_E_NOMEM;
-	me->ref = atomic_fetch_add_explicit(&__mon_ref_seq, 1,
-	    memory_order_relaxed) + 1;
+	me->ref =
+	    xtc_atomic_fetch_add_u64(&__mon_ref_seq, 1, xtc_mo_relaxed) + 1;
 	me->target = target;
 	me->watcher = self->pid;
 	me->peer = NULL;
-	atomic_store_explicit(&me->refs, 1, memory_order_relaxed);
+	xtc_atomic_store_i32(&me->refs, 1, xtc_mo_relaxed);
 	{
 		struct mon_entry *m2 = __mon_alloc();
 		if (m2 != NULL) {
@@ -5195,17 +5205,15 @@ xtc_monitor(xtc_pid_t target, uint64_t *out_ref)
 			m2->target = target;
 			m2->watcher = self->pid;
 			m2->peer = me;
-			atomic_store_explicit(&m2->refs, 0,
-			    memory_order_relaxed);
+			xtc_atomic_store_i32(&m2->refs, 0, xtc_mo_relaxed);
 			/* The target holds `me` once m2 is on its list (it may
 			 * exit and drop it at once), so count it first.
 			 * Cross-loop-safe push onto the peer's monitored_by
 			 * list; drop the entry if the peer exited meanwhile. */
-			atomic_store_explicit(&me->refs, 2,
-			    memory_order_relaxed);
+			xtc_atomic_store_i32(&me->refs, 2, xtc_mo_relaxed);
 			if (!__peer_push_monitored_by(target, m2)) {
-				atomic_store_explicit(&me->refs, 1,
-				    memory_order_relaxed);
+				xtc_atomic_store_i32(&me->refs, 1,
+				    xtc_mo_relaxed);
 				__mon_free(m2);
 			}
 		}
@@ -5280,8 +5288,8 @@ __notify_links_and_monitors(struct xtc_proc *p)
 		next_le = le->next;
 		peer = __resolve(le->peer, NULL);
 		if (peer != NULL) {
-			trap = atomic_load_explicit(&peer->trap_exit,
-			    memory_order_relaxed);
+			trap = xtc_atomic_load_i32(&peer->trap_exit,
+			    xtc_mo_relaxed);
 			__proc_release(peer);
 			if (trap) {
 				if (__send_sys(le->peer, &exit_signal,
@@ -5377,10 +5385,9 @@ __fill_proc_info(struct xtc_proc *p, xtc_proc_info_t *info)
 	memset(info, 0, sizeof *info);
 	info->size = sizeof *info;
 	info->pid = p->pid;
-	info->alive = atomic_load_explicit(&p->alive,
-	    memory_order_relaxed);
+	info->alive = xtc_atomic_load_i32(&p->alive, xtc_mo_relaxed);
 	info->kill_pending =
-	    atomic_load_explicit(&p->kill_pending, memory_order_relaxed) ? 1 : 0;
+	    xtc_atomic_load_i32(&p->kill_pending, xtc_mo_relaxed) ? 1 : 0;
 	/* A2 mask state: the supervisor-side "is this fiber killable now?"
 	 * signal.  Sampled, like run_state -- and exact for the case that
 	 * matters, a fiber wedged inside a critical section, which by
@@ -5388,15 +5395,15 @@ __fill_proc_info(struct xtc_proc *p, xtc_proc_info_t *info)
 	info->mask_depth = __mask_depth(p);
 	info->mask_deferred = __mask_deferred(p);
 	if (p->task != NULL) {
-		int st = atomic_load_explicit(&p->task->state,
-		    memory_order_relaxed);   /* introspection snapshot */
+		int st = xtc_atomic_load_i32(&p->task->state,
+		    xtc_mo_relaxed); /* introspection snapshot */
 		info->run_state = st;
 		if (st == XTC_TS_PARKED) {
-			if (atomic_load_explicit(&p->task->park_fd,
-			    memory_order_relaxed) != __PARK_TOK_NONE)
+			if (xtc_atomic_load_i64(&p->task->park_fd,
+			        xtc_mo_relaxed) != __PARK_TOK_NONE)
 				info->park_reason = XTC_PARK_FD;
-			else if (atomic_load_explicit(&p->task->park_timer,
-			    memory_order_relaxed) != NULL)
+			else if (xtc_atomic_load_ptr(&p->task->park_timer,
+			             xtc_mo_relaxed) != NULL)
 				info->park_reason = XTC_PARK_TIMER;
 			/* else: possibly a mailbox park -- decided below from
 			 * waker_armed, which is read under mbox_lock.  It CANNOT
@@ -5431,8 +5438,7 @@ __fill_proc_info(struct xtc_proc *p, xtc_proc_info_t *info)
 	info->mbox_recv_total = p->mbox_recv_total;
 	info->mbox_drop_total = p->mbox_drop_total;
 	(void) __proc_mtx_unlock(&p->mbox_lock);
-	info->mbox_saved =
-	    atomic_load_explicit(&p->mbox_saved, memory_order_relaxed);
+	info->mbox_saved = xtc_atomic_load_size(&p->mbox_saved, xtc_mo_relaxed);
 }
 
 int
@@ -5456,11 +5462,12 @@ xtc_inspect_procs(xtc_inspect_proc_fn cb, void *user)
 	 */
 	(void) __proc_mtx_lock(&__lt_lock);
 	for (i = 0; i < LOOP_TABLE_MAX; i++) {
-		struct xtc_proc_table *tbl = atomic_load_explicit(&__lt[i].tbl,
-		    memory_order_relaxed);
+		struct xtc_proc_table *tbl =
+		    xtc_atomic_load_ptr(&__lt[i].tbl, xtc_mo_relaxed);
 		size_t s;
-		if (atomic_load_explicit(&__lt[i].loop,
-		    memory_order_relaxed) == NULL || tbl == NULL)
+		if (xtc_atomic_load_ptr(&__lt[i].loop, xtc_mo_relaxed) ==
+		        NULL ||
+		    tbl == NULL)
 			continue;
 		(void) __pt_lock_all(tbl);
 		for (s = 0; s < tbl->cap; s++) {
@@ -5509,10 +5516,10 @@ xtc_inspect_loops(xtc_inspect_loop_fn cb, void *user)
 
 	(void) __proc_mtx_lock(&__lt_lock);
 	for (i = 0; i < LOOP_TABLE_MAX; i++) {
-		struct xtc_proc_table *tbl = atomic_load_explicit(&__lt[i].tbl,
-		    memory_order_relaxed);
-		xtc_loop_t *loop = atomic_load_explicit(&__lt[i].loop,
-		    memory_order_relaxed);
+		struct xtc_proc_table *tbl =
+		    xtc_atomic_load_ptr(&__lt[i].tbl, xtc_mo_relaxed);
+		xtc_loop_t *loop =
+		    xtc_atomic_load_ptr(&__lt[i].loop, xtc_mo_relaxed);
 		size_t s, procs = 0;
 		if (loop == NULL || tbl == NULL)
 			continue;
@@ -5525,11 +5532,11 @@ xtc_inspect_loops(xtc_inspect_loop_fn cb, void *user)
 		infos[n].loop_id = (int)loop->id;
 		infos[n].n_procs = (int)procs;
 		infos[n].n_alive =
-		    atomic_load_explicit(&loop->n_alive, memory_order_relaxed);
+		    xtc_atomic_load_i32(&loop->n_alive, xtc_mo_relaxed);
 		infos[n].tasks_run =
-		    atomic_load_explicit(&loop->n_tasks_run, memory_order_relaxed);
+		    xtc_atomic_load_u64(&loop->n_tasks_run, xtc_mo_relaxed);
 		infos[n].steals =
-		    atomic_load_explicit(&loop->n_steals, memory_order_relaxed);
+		    xtc_atomic_load_u64(&loop->n_steals, xtc_mo_relaxed);
 		n++;
 	}
 	(void) __proc_mtx_unlock(&__lt_lock);
@@ -5554,11 +5561,12 @@ xtc_proc_info(xtc_pid_t pid, xtc_proc_info_t *out)
 
 	(void) __proc_mtx_lock(&__lt_lock);
 	for (i = 0; i < LOOP_TABLE_MAX && !found; i++) {
-		struct xtc_proc_table *tbl = atomic_load_explicit(&__lt[i].tbl,
-		    memory_order_relaxed);
+		struct xtc_proc_table *tbl =
+		    xtc_atomic_load_ptr(&__lt[i].tbl, xtc_mo_relaxed);
 		size_t s;
-		if (atomic_load_explicit(&__lt[i].loop,
-		    memory_order_relaxed) == NULL || tbl == NULL)
+		if (xtc_atomic_load_ptr(&__lt[i].loop, xtc_mo_relaxed) ==
+		        NULL ||
+		    tbl == NULL)
 			continue;
 		(void) __pt_lock_all(tbl);
 		for (s = 0; s < tbl->cap; s++) {
@@ -5616,8 +5624,7 @@ xtc_runtime_info(xtc_runtime_info_t *uout)
 int
 xtc_trace_enable(int on)
 {
-	return atomic_exchange_explicit(&__trace_on, on ? 1 : 0,
-	    memory_order_relaxed);
+	return xtc_atomic_exchange_i32(&__trace_on, on ? 1 : 0, xtc_mo_relaxed);
 }
 
 int
@@ -5632,7 +5639,7 @@ xtc_trace_reset(void)
 uint64_t
 xtc_hlc_now(void)
 {
-	return atomic_load_explicit(&__g_hlc, memory_order_relaxed);
+	return xtc_atomic_load_u64(&__g_hlc, xtc_mo_relaxed);
 }
 
 static int

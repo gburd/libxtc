@@ -43,17 +43,17 @@
  */
 
 #include <stdint.h>
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 
 /* The proc: a refcount + a "freed" flag the resolver must never see
  * set on a proc it holds. */
-static _Atomic int refs;
-static _Atomic int freed;      /* set to 1 the instant the struct is freed */
-static _Atomic int slot_live;  /* the table slot: 1 == proc attached, 0 == NULL */
+static int refs;
+static int freed;     /* set to 1 the instant the struct is freed */
+static int slot_live; /* the table slot: 1 == proc attached, 0 == NULL */
 
 /* The stripe lock (CAS spinlock): the SAME lock guards lookup and
  * detach, which is what serialises them. */
-static _Atomic int stripe;
+static int stripe;
 #define LOCK_SPINS 3
 static void
 stripe_lock(void)
@@ -61,8 +61,8 @@ stripe_lock(void)
 	int expected, i;
 	for (i = 0; i < LOCK_SPINS; i++) {
 		expected = 0;
-		if (atomic_compare_exchange_weak_explicit(&stripe,
-		    &expected, 1, memory_order_acquire, memory_order_relaxed))
+		if (xtc_atomic_cas_weak_i32(&stripe, &expected, 1,
+		        xtc_mo_acquire, xtc_mo_relaxed))
 			return;
 	}
 	__CPROVER_assume(0);           /* deeper contention than modelled */
@@ -70,21 +70,21 @@ stripe_lock(void)
 static void
 stripe_unlock(void)
 {
-	atomic_store_explicit(&stripe, 0, memory_order_release);
+	xtc_atomic_store_i32(&stripe, 0, xtc_mo_release);
 }
 
 /* __proc_free: mark freed (models the actual free). */
 static void
 proc_free(void)
 {
-	atomic_store_explicit(&freed, 1, memory_order_release);
+	xtc_atomic_store_i32(&freed, 1, xtc_mo_release);
 }
 
 /* __proc_release: drop a ref; free when the last one goes. */
 static void
 proc_release(void)
 {
-	if (atomic_fetch_sub_explicit(&refs, 1, memory_order_acq_rel) == 1)
+	if (xtc_atomic_fetch_sub_i32(&refs, 1, xtc_mo_acq_rel) == 1)
 		proc_free();
 }
 
@@ -95,10 +95,10 @@ table_lookup(void)
 {
 	int pinned = 0;
 	stripe_lock();
-	if (atomic_load_explicit(&slot_live, memory_order_relaxed)) {
+	if (xtc_atomic_load_i32(&slot_live, xtc_mo_relaxed)) {
 		/* Take a ref WHILE the stripe is held -- atomic with the
 		 * detach below. */
-		(void)atomic_fetch_add_explicit(&refs, 1, memory_order_relaxed);
+		(void)xtc_atomic_fetch_add_i32(&refs, 1, xtc_mo_relaxed);
 		pinned = 1;
 	}
 	stripe_unlock();
@@ -110,7 +110,7 @@ static void
 table_release(void)
 {
 	stripe_lock();
-	atomic_store_explicit(&slot_live, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&slot_live, 0, xtc_mo_relaxed);
 	stripe_unlock();
 }
 
@@ -120,8 +120,8 @@ static void
 resolver(void)
 {
 	if (table_lookup()) {
-		__CPROVER_assert(atomic_load_explicit(&freed,
-		    memory_order_acquire) == 0,
+		__CPROVER_assert(xtc_atomic_load_i32(&freed, xtc_mo_acquire) ==
+		        0,
 		    "resolver pins a LIVE proc, never a freed one (no UAF)");
 		proc_release();
 	}
@@ -139,10 +139,10 @@ teardown(void)
 int
 main(void)
 {
-	atomic_store_explicit(&refs, 1, memory_order_relaxed);      /* owner ref */
-	atomic_store_explicit(&freed, 0, memory_order_relaxed);
-	atomic_store_explicit(&slot_live, 1, memory_order_relaxed); /* attached */
-	atomic_store_explicit(&stripe, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&refs, 1, xtc_mo_relaxed); /* owner ref */
+	xtc_atomic_store_i32(&freed, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&slot_live, 1, xtc_mo_relaxed); /* attached */
+	xtc_atomic_store_i32(&stripe, 0, xtc_mo_relaxed);
 
 	__CPROVER_ASYNC_1: resolver();
 	teardown();

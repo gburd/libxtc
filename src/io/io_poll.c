@@ -23,7 +23,6 @@
 #include <poll.h>
 #include <unistd.h>
 #include <string.h>
-#include <stdatomic.h>
 #include <pthread.h>
 
 /* Wakeup pipe is always at slot 0; user fds start at 1. */
@@ -36,7 +35,7 @@ int xtc_io_del_fd(xtc_io_t *io, int fd);
 static int
 __is_owner(const xtc_io_t *io)
 {
-	return !atomic_load_explicit(&io->owner_set, memory_order_acquire) ||
+	return !xtc_atomic_load_i32(&io->owner_set, xtc_mo_acquire) ||
 	    pthread_equal(pthread_self(), io->owner_tid);
 }
 
@@ -46,7 +45,7 @@ static void
 __drain_pending_del(xtc_io_t *io)
 {
 	int i, n, local[32];
-	if (!atomic_load_explicit(&io->has_pending_del, memory_order_acquire))
+	if (!xtc_atomic_load_i32(&io->has_pending_del, xtc_mo_acquire))
 		return;
 	for (;;) {
 		(void)__xtc_mtx_lock(&io->del_lock);
@@ -59,8 +58,8 @@ __drain_pending_del(xtc_io_t *io)
 			io->pending_del[i - n] = io->pending_del[i];
 		io->n_pending_del -= n;
 		if (io->n_pending_del == 0)
-			atomic_store_explicit(&io->has_pending_del, 0,
-			    memory_order_relaxed);
+			xtc_atomic_store_i32(&io->has_pending_del, 0,
+			    xtc_mo_relaxed);
 		(void)__xtc_mtx_unlock(&io->del_lock);
 		for (i = 0; i < n; i++)
 			(void)xtc_io_del_fd(io, local[i]);
@@ -76,7 +75,7 @@ static void
 __apply_pending_del_for(xtc_io_t *io, int fd)
 {
 	int i, found = 0;
-	if (!atomic_load_explicit(&io->has_pending_del, memory_order_acquire))
+	if (!xtc_atomic_load_i32(&io->has_pending_del, xtc_mo_acquire))
 		return;
 	(void)__xtc_mtx_lock(&io->del_lock);
 	for (i = 0; i < io->n_pending_del; i++) {
@@ -87,8 +86,7 @@ __apply_pending_del_for(xtc_io_t *io, int fd)
 		i--;
 	}
 	if (io->n_pending_del == 0)
-		atomic_store_explicit(&io->has_pending_del, 0,
-		    memory_order_relaxed);
+		xtc_atomic_store_i32(&io->has_pending_del, 0, xtc_mo_relaxed);
 	(void)__xtc_mtx_unlock(&io->del_lock);
 	if (found)
 		(void)xtc_io_del_fd(io, fd);
@@ -98,9 +96,9 @@ void
 __xtc_io_set_owner(xtc_io_t *io)
 {
 	if (io != NULL &&
-	    !atomic_load_explicit(&io->owner_set, memory_order_relaxed)) {
+	    !xtc_atomic_load_i32(&io->owner_set, xtc_mo_relaxed)) {
 		io->owner_tid = pthread_self();
-		atomic_store_explicit(&io->owner_set, 1, memory_order_release);
+		xtc_atomic_store_i32(&io->owner_set, 1, xtc_mo_release);
 	}
 }
 
@@ -126,7 +124,7 @@ __xtc_io_defer_del_fd(xtc_io_t *io, int fd)
 		io->cap_pending_del = nc;
 	}
 	io->pending_del[io->n_pending_del++] = fd;
-	atomic_store_explicit(&io->has_pending_del, 1, memory_order_release);
+	xtc_atomic_store_i32(&io->has_pending_del, 1, xtc_mo_release);
 	(void)__xtc_mtx_unlock(&io->del_lock);
 	(void)xtc_io_wakeup(io);
 	return XTC_OK;
@@ -216,8 +214,8 @@ __xtc_io_backend_init(xtc_io_t *io)
 	io->slot_of = NULL;
 	io->slot_cap = 0;
 	io->pending_del = NULL; io->n_pending_del = io->cap_pending_del = 0;
-	atomic_store_explicit(&io->has_pending_del, 0, memory_order_relaxed);
-	atomic_store_explicit(&io->owner_set, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&io->has_pending_del, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&io->owner_set, 0, xtc_mo_relaxed);
 	if (pthread_mutex_init(&io->del_lock, NULL) != 0)
 		return XTC_E_INTERNAL;
 	/* __grow reallocs two arrays; if the second fails the first is

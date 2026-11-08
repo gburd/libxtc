@@ -29,7 +29,6 @@
 
 #include <errno.h>
 #include <limits.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -116,9 +115,10 @@ __net_nosigpipe(int fd)
 static void
 __win_wsa_init(void)
 {
-	static _Atomic int done = 0;
+	static int done = 0;
 	int expect = 0;
-	if (atomic_compare_exchange_strong(&done, &expect, 1)) {
+	if (xtc_atomic_cas_i32(&done, &expect, 1, xtc_mo_seq_cst,
+	        xtc_mo_seq_cst)) {
 		WSADATA wsa;
 		(void)WSAStartup(MAKEWORD(2, 2), &wsa);
 		/* No WSACleanup paired -- process-wide one-shot. */
@@ -157,7 +157,7 @@ xtc_net_setnonblock(int fd)
  * accountant an fd was charged to, so closing a descriptor xtc_net did
  * not create (a raw accept(2)'d fd) releases nothing, and a detach or
  * re-attach does not unbalance the fds already out. */
-static _Atomic(xtc_res_t *) __net_res;
+static xtc_res_t *__net_res;
 static pthread_mutex_t __net_fd_lock = PTHREAD_MUTEX_INITIALIZER;
 /* Direct-indexed by fd -- dense and RLIMIT_NOFILE-bounded on
  * POSIX; a Windows SOCKET is a handle value, still small in practice.
@@ -168,7 +168,7 @@ static size_t        __net_fd_cap;
 int
 xtc_res_attach_net(xtc_res_t *r)
 {
-	atomic_store_explicit(&__net_res, r, memory_order_release);
+	xtc_atomic_store_ptr(&__net_res, r, xtc_mo_release);
 	return XTC_OK;
 }
 
@@ -176,7 +176,7 @@ xtc_res_attach_net(xtc_res_t *r)
 static int
 __net_charge(xtc_res_t **out)
 {
-	xtc_res_t *r = atomic_load_explicit(&__net_res, memory_order_acquire);
+	xtc_res_t *r = xtc_atomic_load_ptr(&__net_res, xtc_mo_acquire);
 	*out = r;
 	return r == NULL ? XTC_OK : xtc_res_acquire(r, XTC_RES_FDS, 1);
 }
@@ -236,13 +236,13 @@ __net_settle(xtc_res_t *r, int rc, const int *out_fd)
  * a process without kTLS pays nothing; with it, one getsockopt(TCP_ULP)
  * per close.
  */
-static _Atomic int __net_ktls_seen;
+static int __net_ktls_seen;
 
 /* PUBLIC: void __xtc_net_ktls_seen __P((void)); */
 void
 __xtc_net_ktls_seen(void)
 {
-	atomic_store_explicit(&__net_ktls_seen, 1, memory_order_relaxed);
+	xtc_atomic_store_i32(&__net_ktls_seen, 1, xtc_mo_relaxed);
 }
 
 static void
@@ -254,7 +254,7 @@ __net_close_raw(int fd)
 	char ulp[16];
 	socklen_t ul = sizeof ulp;
 
-	if (atomic_load_explicit(&__net_ktls_seen, memory_order_relaxed) &&
+	if (xtc_atomic_load_i32(&__net_ktls_seen, xtc_mo_relaxed) &&
 	    getsockopt(fd, IPPROTO_TCP, TCP_ULP, ulp, &ul) == 0 && ul >= 3 &&
 	    memcmp(ulp, "tls", 3) == 0) {
 		__xtc_unsafe_enter();    /* the mask is this OS thread's */

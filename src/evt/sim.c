@@ -19,7 +19,6 @@
 #include "xtc_sim.h"
 #include "xtc_probes.h"
 
-#include <stdatomic.h>
 #include <pthread.h>
 #include <string.h>
 #include <stdio.h>
@@ -27,14 +26,14 @@
 
 /* Activation state is process-global and read on hot paths, so it is a
  * relaxed atomic flag rather than a lock. */
-static _Atomic int      g_sim_active;
+static int g_sim_active;
 static uint64_t         g_sim_stream[XTC_SIM_RNG_NSTREAMS];
 /* Adversarial-mode knobs (see xtc_sim.h); defined early because
  * xtc_sim_deactivate resets them.  Both OFF (0) by default. */
-static _Atomic int      g_sched_pessimal_pct;   /* per-1000; 0 = uniform */
-static _Atomic int      g_swizzle_pct;          /* per-1000; 0 = no reorder */
-static _Atomic int64_t  g_clock_skew_ns;        /* observer clock offset */
-static _Atomic int      g_clock_skew_jitter;    /* +/- ns seeded wobble */
+static int g_sched_pessimal_pct; /* per-1000; 0 = uniform */
+static int g_swizzle_pct;        /* per-1000; 0 = no reorder */
+static int64_t g_clock_skew_ns;  /* observer clock offset */
+static int g_clock_skew_jitter;  /* +/- ns seeded wobble */
 
 /* Semantic consistency check (FoundationDB's end-of-test consistency
  * workload): an optional callback the sim runs at quiescence, AFTER all
@@ -53,8 +52,8 @@ static void                 *g_consistency_arg;
  * clock, so time is a pure function of the schedule (hence the seed).
  * The scheduler advances it (later phase); phase 0/1 just establish the
  * seam and let a test drive it manually. */
-static _Atomic int      g_vclock_on;
-static _Atomic int64_t  g_vclock_ns;
+static int g_vclock_on;
+static int64_t g_vclock_ns;
 
 /* splitmix64: the standard finalizer used to derive independent streams
  * from a seed (the 0x9E3779B97F4A7C15 increment is the golden-ratio
@@ -72,7 +71,7 @@ splitmix64(uint64_t *s)
 int
 __xtc_sim_active(void)
 {
-	return atomic_load_explicit(&g_sim_active, memory_order_relaxed);
+	return xtc_atomic_load_i32(&g_sim_active, xtc_mo_relaxed);
 }
 
 /*
@@ -88,8 +87,8 @@ __xtc_sim_active(void)
  * a test rather than silently corrupting replay.  The count is queryable
  * so a harness can assert zero.
  */
-static _Atomic int g_nondet_count;
-static _Atomic int g_nondet_strict = 1;   /* abort on violation by default */
+static int g_nondet_count;
+static int g_nondet_strict = 1; /* abort on violation by default */
 
 /* PUBLIC: void __xtc_sim_nondeterminism __P((const char *)); */
 void
@@ -98,8 +97,8 @@ __xtc_sim_nondeterminism(const char *what)
 	if (!__xtc_sim_active())
 		return;
 	XTC_PROBE_SIM_NONDETERMINISM(what);
-	atomic_fetch_add_explicit(&g_nondet_count, 1, memory_order_relaxed);
-	if (atomic_load_explicit(&g_nondet_strict, memory_order_relaxed)) {
+	xtc_atomic_fetch_add_i32(&g_nondet_count, 1, xtc_mo_relaxed);
+	if (xtc_atomic_load_i32(&g_nondet_strict, xtc_mo_relaxed)) {
 		fprintf(stderr, "xtc DST determinism violation: %s called on a "
 		    "sim-reachable path (breaks seed replay)\n",
 		    what ? what : "(unknown)");
@@ -114,8 +113,7 @@ __xtc_sim_nondeterminism(const char *what)
 void
 xtc_sim_strict(int on)
 {
-	atomic_store_explicit(&g_nondet_strict, on ? 1 : 0,
-	    memory_order_relaxed);
+	xtc_atomic_store_i32(&g_nondet_strict, on ? 1 : 0, xtc_mo_relaxed);
 }
 
 /* PUBLIC: int xtc_sim_nondeterminism_count __P((void)); */
@@ -125,7 +123,7 @@ xtc_sim_strict(int on)
 int
 xtc_sim_nondeterminism_count(void)
 {
-	return atomic_load_explicit(&g_nondet_count, memory_order_relaxed);
+	return xtc_atomic_load_i32(&g_nondet_count, xtc_mo_relaxed);
 }
 
 /* PUBLIC: void xtc_sim_activate __P((uint64_t)); */
@@ -140,21 +138,22 @@ xtc_sim_activate(uint64_t seed)
 		uint64_t t = s + (uint64_t)(i + 1) * 0x9E3779B97F4A7C15ull;
 		g_sim_stream[i] = splitmix64(&t);
 	}
-	atomic_store_explicit(&g_nondet_count, 0, memory_order_relaxed);	atomic_store_explicit(&g_sim_active, 1, memory_order_release);
+	xtc_atomic_store_i32(&g_nondet_count, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&g_sim_active, 1, xtc_mo_release);
 }
 
 /* PUBLIC: void xtc_sim_deactivate __P((void)); */
 void
 xtc_sim_deactivate(void)
 {
-	atomic_store_explicit(&g_sim_active, 0, memory_order_release);
+	xtc_atomic_store_i32(&g_sim_active, 0, xtc_mo_release);
 	/* Reset adversarial-mode knobs so one run's setting does not leak
 	 * into the next in-process run (buggify/io-fault knobs are reset by
 	 * their own enable/disable; these have no such call on every run). */
-	atomic_store_explicit(&g_sched_pessimal_pct, 0, memory_order_release);
-	atomic_store_explicit(&g_swizzle_pct, 0, memory_order_release);
-	atomic_store_explicit(&g_clock_skew_ns, 0, memory_order_release);
-	atomic_store_explicit(&g_clock_skew_jitter, 0, memory_order_release);
+	xtc_atomic_store_i32(&g_sched_pessimal_pct, 0, xtc_mo_release);
+	xtc_atomic_store_i32(&g_swizzle_pct, 0, xtc_mo_release);
+	xtc_atomic_store_i64(&g_clock_skew_ns, 0, xtc_mo_release);
+	xtc_atomic_store_i32(&g_clock_skew_jitter, 0, xtc_mo_release);
 	g_consistency_fn = NULL;
 	g_consistency_arg = NULL;
 }
@@ -222,11 +221,11 @@ xtc_sim_fault(unsigned pct_per_1000)
  * under fault timing.  Production never reaches this (sim inactive).
  */
 #define XTC_SIM_FP_MAX 64
-static _Atomic int      g_fp_on;          /* fault points enabled */
+static int g_fp_on;                       /* fault points enabled */
 static unsigned         g_fp_pct;         /* per-1000 fire probability */
 static char             g_fp_name[XTC_SIM_FP_MAX][48];
-static _Atomic uint64_t g_fp_fires[XTC_SIM_FP_MAX];
-static _Atomic int      g_fp_n;           /* number of distinct names seen */
+static uint64_t g_fp_fires[XTC_SIM_FP_MAX];
+static int g_fp_n; /* number of distinct names seen */
 static pthread_mutex_t  g_fp_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Find (or register) the slot for `name`.  Returns the index, or -1 if
@@ -234,7 +233,7 @@ static pthread_mutex_t  g_fp_lock = PTHREAD_MUTEX_INITIALIZER;
 static int
 __fp_slot_locked(const char *name)
 {
-	int i, n = atomic_load_explicit(&g_fp_n, memory_order_relaxed);
+	int i, n = xtc_atomic_load_i32(&g_fp_n, xtc_mo_relaxed);
 	for (i = 0; i < n; i++)
 		if (strncmp(g_fp_name[i], name, sizeof g_fp_name[0]) == 0)
 			return i;
@@ -242,8 +241,8 @@ __fp_slot_locked(const char *name)
 		return -1;
 	(void)strncpy(g_fp_name[n], name, sizeof g_fp_name[0] - 1);
 	g_fp_name[n][sizeof g_fp_name[0] - 1] = '\0';
-	atomic_store_explicit(&g_fp_fires[n], 0, memory_order_relaxed);
-	atomic_store_explicit(&g_fp_n, n + 1, memory_order_relaxed);
+	xtc_atomic_store_u64(&g_fp_fires[n], 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&g_fp_n, n + 1, xtc_mo_relaxed);
 	return n;
 }
 
@@ -252,9 +251,9 @@ void
 xtc_sim_fault_points_enable(unsigned pct_per_1000)
 {
 	(void)pthread_mutex_lock(&g_fp_lock);
-	atomic_store_explicit(&g_fp_n, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&g_fp_n, 0, xtc_mo_relaxed);
 	g_fp_pct = pct_per_1000;
-	atomic_store_explicit(&g_fp_on, 1, memory_order_release);
+	xtc_atomic_store_i32(&g_fp_on, 1, xtc_mo_release);
 	(void)pthread_mutex_unlock(&g_fp_lock);
 }
 
@@ -262,7 +261,7 @@ xtc_sim_fault_points_enable(unsigned pct_per_1000)
 void
 xtc_sim_fault_points_disable(void)
 {
-	atomic_store_explicit(&g_fp_on, 0, memory_order_release);
+	xtc_atomic_store_i32(&g_fp_on, 0, xtc_mo_release);
 }
 
 /* PUBLIC: int xtc_sim_fault_point __P((const char *)); */
@@ -280,7 +279,7 @@ xtc_sim_fault_point(const char *name)
 	int slot, hit;
 	if (name == NULL)
 		return 0;
-	if (!atomic_load_explicit(&g_fp_on, memory_order_acquire))
+	if (!xtc_atomic_load_i32(&g_fp_on, xtc_mo_acquire))
 		return 0;
 	if (!__xtc_sim_active())
 		return 0;
@@ -288,8 +287,7 @@ xtc_sim_fault_point(const char *name)
 	(void)pthread_mutex_lock(&g_fp_lock);
 	slot = __fp_slot_locked(name);
 	if (slot >= 0 && hit)
-		atomic_fetch_add_explicit(&g_fp_fires[slot], 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_add_u64(&g_fp_fires[slot], 1, xtc_mo_relaxed);
 	else if (slot < 0)
 		hit = 0;   /* table full: cannot record, treat as no fire */
 	(void)pthread_mutex_unlock(&g_fp_lock);
@@ -306,11 +304,10 @@ xtc_sim_fault_point_fires(const char *name)
 	if (name == NULL)
 		return 0;
 	(void)pthread_mutex_lock(&g_fp_lock);
-	n = atomic_load_explicit(&g_fp_n, memory_order_relaxed);
+	n = xtc_atomic_load_i32(&g_fp_n, xtc_mo_relaxed);
 	for (i = 0; i < n; i++)
 		if (strncmp(g_fp_name[i], name, sizeof g_fp_name[0]) == 0) {
-			v = atomic_load_explicit(&g_fp_fires[i],
-			    memory_order_relaxed);
+			v = xtc_atomic_load_u64(&g_fp_fires[i], xtc_mo_relaxed);
 			break;
 		}
 	(void)pthread_mutex_unlock(&g_fp_lock);
@@ -324,7 +321,7 @@ xtc_sim_fault_point_fires(const char *name)
 int
 xtc_sim_fault_points_seen(void)
 {
-	return atomic_load_explicit(&g_fp_n, memory_order_relaxed);
+	return xtc_atomic_load_i32(&g_fp_n, xtc_mo_relaxed);
 }
 
 /* ---- Buggify (DST) ----
@@ -344,11 +341,11 @@ xtc_sim_fault_points_seen(void)
  * unaffected).
  */
 #define XTC_SIM_BUG_MAX 128
-static _Atomic int      g_bug_on;         /* buggify enabled */
+static int g_bug_on;                      /* buggify enabled */
 static unsigned         g_bug_pct;        /* per-1000 activation probability */
 static char             g_bug_name[XTC_SIM_BUG_MAX][48];
 static signed char      g_bug_decided[XTC_SIM_BUG_MAX]; /* -1 undecided, 0/1 */
-static _Atomic int      g_bug_n;
+static int g_bug_n;
 static pthread_mutex_t  g_bug_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Adversarial scheduler bias + completion/message swizzle (see
@@ -360,16 +357,15 @@ void
 xtc_sim_sched_pessimal(unsigned pct_per_1000)
 {
 	if (pct_per_1000 > 1000) pct_per_1000 = 1000;
-	atomic_store_explicit(&g_sched_pessimal_pct, (int)pct_per_1000,
-	    memory_order_release);
+	xtc_atomic_store_i32(&g_sched_pessimal_pct, (int)pct_per_1000,
+	    xtc_mo_release);
 }
 
 /* PUBLIC: int __xtc_sim_sched_pessimal_pct __P((void)); */
 int
 __xtc_sim_sched_pessimal_pct(void)
 {
-	return atomic_load_explicit(&g_sched_pessimal_pct,
-	    memory_order_acquire);
+	return xtc_atomic_load_i32(&g_sched_pessimal_pct, xtc_mo_acquire);
 }
 
 /* PUBLIC: void xtc_sim_swizzle_enable __P((unsigned)); */
@@ -377,22 +373,21 @@ void
 xtc_sim_swizzle_enable(unsigned pct_per_1000)
 {
 	if (pct_per_1000 > 1000) pct_per_1000 = 1000;
-	atomic_store_explicit(&g_swizzle_pct, (int)pct_per_1000,
-	    memory_order_release);
+	xtc_atomic_store_i32(&g_swizzle_pct, (int)pct_per_1000, xtc_mo_release);
 }
 
 /* PUBLIC: void xtc_sim_swizzle_disable __P((void)); */
 void
 xtc_sim_swizzle_disable(void)
 {
-	atomic_store_explicit(&g_swizzle_pct, 0, memory_order_release);
+	xtc_atomic_store_i32(&g_swizzle_pct, 0, xtc_mo_release);
 }
 
 /* PUBLIC: int __xtc_sim_swizzle_pct __P((void)); */
 int
 __xtc_sim_swizzle_pct(void)
 {
-	return atomic_load_explicit(&g_swizzle_pct, memory_order_acquire);
+	return xtc_atomic_load_i32(&g_swizzle_pct, xtc_mo_acquire);
 }
 
 /* PUBLIC: void xtc_sim_set_consistency_check __P((xtc_sim_consistency_fn, void *)); */
@@ -421,9 +416,9 @@ void
 xtc_sim_buggify_enable(unsigned pct_per_1000)
 {
 	(void)pthread_mutex_lock(&g_bug_lock);
-	atomic_store_explicit(&g_bug_n, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&g_bug_n, 0, xtc_mo_relaxed);
 	g_bug_pct = pct_per_1000;
-	atomic_store_explicit(&g_bug_on, 1, memory_order_release);
+	xtc_atomic_store_i32(&g_bug_on, 1, xtc_mo_release);
 	(void)pthread_mutex_unlock(&g_bug_lock);
 }
 
@@ -432,10 +427,10 @@ void
 xtc_sim_buggify_disable(void)
 {
 	(void)pthread_mutex_lock(&g_bug_lock);
-	atomic_store_explicit(&g_bug_on, 0, memory_order_release);
+	xtc_atomic_store_i32(&g_bug_on, 0, xtc_mo_release);
 	/* Reset the decision table so a subsequent run (or an
 	 * active-count query while disabled) reflects no activations. */
-	atomic_store_explicit(&g_bug_n, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&g_bug_n, 0, xtc_mo_relaxed);
 	(void)pthread_mutex_unlock(&g_bug_lock);
 }
 
@@ -452,12 +447,12 @@ xtc_sim_buggify(const char *name)
 	int i, n, decision;
 	if (name == NULL)
 		return 0;
-	if (!atomic_load_explicit(&g_bug_on, memory_order_acquire))
+	if (!xtc_atomic_load_i32(&g_bug_on, xtc_mo_acquire))
 		return 0;
 	if (!__xtc_sim_active())
 		return 0;
 	(void)pthread_mutex_lock(&g_bug_lock);
-	n = atomic_load_explicit(&g_bug_n, memory_order_relaxed);
+	n = xtc_atomic_load_i32(&g_bug_n, xtc_mo_relaxed);
 	for (i = 0; i < n; i++)
 		if (strncmp(g_bug_name[i], name, sizeof g_bug_name[0]) == 0) {
 			decision = g_bug_decided[i];
@@ -479,7 +474,7 @@ xtc_sim_buggify(const char *name)
 	(void)strncpy(g_bug_name[n], name, sizeof g_bug_name[0] - 1);
 	g_bug_name[n][sizeof g_bug_name[0] - 1] = '\0';
 	g_bug_decided[n] = (signed char)decision;
-	atomic_store_explicit(&g_bug_n, n + 1, memory_order_relaxed);
+	xtc_atomic_store_i32(&g_bug_n, n + 1, xtc_mo_relaxed);
 	(void)pthread_mutex_unlock(&g_bug_lock);
 	XTC_PROBE_SIM_BUGGIFY(name, decision);
 	return decision;
@@ -494,7 +489,7 @@ xtc_sim_buggify_active_count(void)
 {
 	int i, n, c = 0;
 	(void)pthread_mutex_lock(&g_bug_lock);
-	n = atomic_load_explicit(&g_bug_n, memory_order_relaxed);
+	n = xtc_atomic_load_i32(&g_bug_n, xtc_mo_relaxed);
 	for (i = 0; i < n; i++)
 		if (g_bug_decided[i] == 1)
 			c++;
@@ -512,7 +507,7 @@ xtc_sim_buggify_reached_count(void)
 {
 	int n;
 	(void)pthread_mutex_lock(&g_bug_lock);
-	n = atomic_load_explicit(&g_bug_n, memory_order_relaxed);
+	n = xtc_atomic_load_i32(&g_bug_n, xtc_mo_relaxed);
 	(void)pthread_mutex_unlock(&g_bug_lock);
 	return n;
 }
@@ -529,7 +524,7 @@ xtc_sim_buggify_site(int idx, char *buf, size_t buflen, int *out_activated)
 {
 	int n, rc = XTC_E_INVAL;
 	(void)pthread_mutex_lock(&g_bug_lock);
-	n = atomic_load_explicit(&g_bug_n, memory_order_relaxed);
+	n = xtc_atomic_load_i32(&g_bug_n, xtc_mo_relaxed);
 	if (idx >= 0 && idx < n) {
 		if (buf != NULL && buflen > 0) {
 			(void)strncpy(buf, g_bug_name[idx], buflen - 1);
@@ -560,7 +555,7 @@ xtc_sim_buggify_site(int idx, char *buf, size_t buflen, int *out_activated)
 int
 xtc_sim_buggify_fault(unsigned pct_per_1000)
 {
-	if (!atomic_load_explicit(&g_bug_on, memory_order_acquire))
+	if (!xtc_atomic_load_i32(&g_bug_on, xtc_mo_acquire))
 		return 0;
 	if (!__xtc_sim_active())
 		return 0;
@@ -582,9 +577,9 @@ xtc_sim_buggify_fault(unsigned pct_per_1000)
  * the dedicated IO stream, so enabling I/O faults does not perturb the
  * scheduling streams (stable replay regardless of I/O config).
  */
-static _Atomic int     g_io_faults_on;
-static _Atomic int64_t g_io_lat_min_ns;
-static _Atomic int64_t g_io_lat_max_ns;
+static int g_io_faults_on;
+static int64_t g_io_lat_min_ns;
+static int64_t g_io_lat_max_ns;
 static unsigned        g_io_fault_pct;     /* per-1000 op fault probability */
 
 /* PUBLIC: void xtc_sim_io_faults_enable __P((int64_t, int64_t, unsigned)); */
@@ -594,24 +589,24 @@ xtc_sim_io_faults_enable(int64_t lat_min_ns, int64_t lat_max_ns,
 {
 	if (lat_min_ns < 0) lat_min_ns = 0;
 	if (lat_max_ns < lat_min_ns) lat_max_ns = lat_min_ns;
-	atomic_store_explicit(&g_io_lat_min_ns, lat_min_ns, memory_order_relaxed);
-	atomic_store_explicit(&g_io_lat_max_ns, lat_max_ns, memory_order_relaxed);
+	xtc_atomic_store_i64(&g_io_lat_min_ns, lat_min_ns, xtc_mo_relaxed);
+	xtc_atomic_store_i64(&g_io_lat_max_ns, lat_max_ns, xtc_mo_relaxed);
 	g_io_fault_pct = fault_pct_per_1000;
-	atomic_store_explicit(&g_io_faults_on, 1, memory_order_release);
+	xtc_atomic_store_i32(&g_io_faults_on, 1, xtc_mo_release);
 }
 
 /* PUBLIC: void xtc_sim_io_faults_disable __P((void)); */
 void
 xtc_sim_io_faults_disable(void)
 {
-	atomic_store_explicit(&g_io_faults_on, 0, memory_order_release);
+	xtc_atomic_store_i32(&g_io_faults_on, 0, xtc_mo_release);
 }
 
 /* PUBLIC: int __xtc_sim_io_faults_active __P((void)); */
 int
 __xtc_sim_io_faults_active(void)
 {
-	return atomic_load_explicit(&g_io_faults_on, memory_order_acquire);
+	return xtc_atomic_load_i32(&g_io_faults_on, xtc_mo_acquire);
 }
 
 /* Disk-full (ENOSPC) injection: a seeded coin makes a WRITE fail with a
@@ -619,15 +614,15 @@ __xtc_sim_io_faults_active(void)
  * or a torn write -- the whole op fails, nothing persists), exercising a
  * storage engine's graceful-degradation path.  FoundationDB's disk-full
  * fault class.  Off by default. */
-static _Atomic int g_io_enospc_pct;   /* per-1000 write ENOSPC probability */
+static int g_io_enospc_pct; /* per-1000 write ENOSPC probability */
 
 /* PUBLIC: void xtc_sim_io_enospc_enable __P((unsigned)); */
 void
 xtc_sim_io_enospc_enable(unsigned pct_per_1000)
 {
 	if (pct_per_1000 > 1000) pct_per_1000 = 1000;
-	atomic_store_explicit(&g_io_enospc_pct, (int)pct_per_1000,
-	    memory_order_release);
+	xtc_atomic_store_i32(&g_io_enospc_pct, (int)pct_per_1000,
+	    xtc_mo_release);
 }
 
 /* PUBLIC: int __xtc_sim_io_enospc __P((void)); */
@@ -636,7 +631,7 @@ xtc_sim_io_enospc_enable(unsigned pct_per_1000)
 int
 __xtc_sim_io_enospc(void)
 {
-	int pct = atomic_load_explicit(&g_io_enospc_pct, memory_order_acquire);
+	int pct = xtc_atomic_load_i32(&g_io_enospc_pct, xtc_mo_acquire);
 	if (pct <= 0 || !__xtc_sim_active())
 		return 0;
 	return (int)__xtc_sim_rng_range(XTC_SIM_RNG_IO, 1000) < pct;
@@ -664,8 +659,8 @@ struct sim_stale_ent {
 	unsigned char buf[XTC_SIM_STALE_MAXLEN];
 };
 static struct sim_stale_ent g_stale[XTC_SIM_STALE_RING];
-static _Atomic int g_stale_head;
-static _Atomic int g_stale_pct;
+static int g_stale_head;
+static int g_stale_pct;
 static pthread_mutex_t g_stale_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* PUBLIC: void xtc_sim_io_stale_enable __P((unsigned)); */
@@ -677,15 +672,14 @@ xtc_sim_io_stale_enable(unsigned pct_per_1000)
 	 * its seed (this is the per-run arming point, like the other io
 	 * fault knobs). */
 	(void)pthread_mutex_lock(&g_stale_lock);
-	atomic_store_explicit(&g_stale_head, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&g_stale_head, 0, xtc_mo_relaxed);
 	{
 		int k;
 		for (k = 0; k < XTC_SIM_STALE_RING; k++)
 			g_stale[k].len = 0;
 	}
 	(void)pthread_mutex_unlock(&g_stale_lock);
-	atomic_store_explicit(&g_stale_pct, (int)pct_per_1000,
-	    memory_order_release);
+	xtc_atomic_store_i32(&g_stale_pct, (int)pct_per_1000, xtc_mo_release);
 }
 
 /* PUBLIC: void __xtc_sim_io_stale_record __P((int, uint64_t, const void *, int)); */
@@ -693,18 +687,18 @@ void
 __xtc_sim_io_stale_record(int fd, uint64_t off, const void *buf, int len)
 {
 	int h, cp;
-	if (atomic_load_explicit(&g_stale_pct, memory_order_acquire) <= 0 ||
+	if (xtc_atomic_load_i32(&g_stale_pct, xtc_mo_acquire) <= 0 ||
 	    !__xtc_sim_active() || buf == NULL || len <= 0)
 		return;
 	cp = len < XTC_SIM_STALE_MAXLEN ? len : XTC_SIM_STALE_MAXLEN;
 	(void)pthread_mutex_lock(&g_stale_lock);
-	h = atomic_load_explicit(&g_stale_head, memory_order_relaxed);
+	h = xtc_atomic_load_i32(&g_stale_head, xtc_mo_relaxed);
 	g_stale[h].fd = fd;
 	g_stale[h].off = off;
 	g_stale[h].len = cp;
 	memcpy(g_stale[h].buf, buf, (size_t)cp);
-	atomic_store_explicit(&g_stale_head, (h + 1) % XTC_SIM_STALE_RING,
-	    memory_order_relaxed);
+	xtc_atomic_store_i32(&g_stale_head, (h + 1) % XTC_SIM_STALE_RING,
+	    xtc_mo_relaxed);
 	(void)pthread_mutex_unlock(&g_stale_lock);
 }
 
@@ -713,13 +707,13 @@ int
 __xtc_sim_io_stale_read(int fd, uint64_t off, void *buf, int len)
 {
 	int pct, i, h, hit = 0;
-	if ((pct = atomic_load_explicit(&g_stale_pct, memory_order_acquire))
-	    <= 0 || !__xtc_sim_active() || buf == NULL || len <= 0)
+	if ((pct = xtc_atomic_load_i32(&g_stale_pct, xtc_mo_acquire)) <= 0 ||
+	    !__xtc_sim_active() || buf == NULL || len <= 0)
 		return 0;
 	if ((int)__xtc_sim_rng_range(XTC_SIM_RNG_IO, 1000) >= pct)
 		return 0;
 	(void)pthread_mutex_lock(&g_stale_lock);
-	h = atomic_load_explicit(&g_stale_head, memory_order_relaxed);
+	h = xtc_atomic_load_i32(&g_stale_head, xtc_mo_relaxed);
 	for (i = 0; i < XTC_SIM_STALE_RING; i++) {
 		int idx = (h - 1 - i + 2 * XTC_SIM_STALE_RING) %
 		    XTC_SIM_STALE_RING;
@@ -755,7 +749,7 @@ __xtc_sim_io_stale_read(int fd, uint64_t off, void *buf, int len)
 #define XTC_SIM_WB_FDS 8
 struct sim_wb_ent { int fd; uint64_t written_end; uint64_t durable_end; };
 static struct sim_wb_ent g_wb[XTC_SIM_WB_FDS];
-static _Atomic int g_wb_on;
+static int g_wb_on;
 static pthread_mutex_t g_wb_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* PUBLIC: void xtc_sim_io_wb_enable __P((int)); */
@@ -773,7 +767,7 @@ xtc_sim_io_wb_enable(int on)
 			g_wb[k].durable_end = 0;
 		}
 	}
-	atomic_store_explicit(&g_wb_on, on ? 1 : 0, memory_order_release);
+	xtc_atomic_store_i32(&g_wb_on, on ? 1 : 0, xtc_mo_release);
 	(void)pthread_mutex_unlock(&g_wb_lock);
 }
 
@@ -796,7 +790,7 @@ void
 __xtc_sim_io_wb_wrote(int fd, uint64_t end_off)
 {
 	struct sim_wb_ent *e;
-	if (!atomic_load_explicit(&g_wb_on, memory_order_acquire))
+	if (!xtc_atomic_load_i32(&g_wb_on, xtc_mo_acquire))
 		return;
 	(void)pthread_mutex_lock(&g_wb_lock);
 	e = wb_slot_locked(fd);
@@ -812,7 +806,7 @@ void
 __xtc_sim_io_wb_synced(int fd)
 {
 	struct sim_wb_ent *e;
-	if (!atomic_load_explicit(&g_wb_on, memory_order_acquire))
+	if (!xtc_atomic_load_i32(&g_wb_on, xtc_mo_acquire))
 		return;
 	(void)pthread_mutex_lock(&g_wb_lock);
 	e = wb_slot_locked(fd);
@@ -830,7 +824,7 @@ xtc_sim_io_durable_end(int fd)
 {
 	struct sim_wb_ent *e;
 	uint64_t d = 0;
-	if (!atomic_load_explicit(&g_wb_on, memory_order_acquire))
+	if (!xtc_atomic_load_i32(&g_wb_on, xtc_mo_acquire))
 		return 0;
 	(void)pthread_mutex_lock(&g_wb_lock);
 	e = wb_slot_locked(fd);
@@ -848,8 +842,8 @@ __xtc_sim_io_latency(void)
 	int64_t lo, hi;
 	if (!__xtc_sim_io_faults_active() || !__xtc_sim_active())
 		return 0;
-	lo = atomic_load_explicit(&g_io_lat_min_ns, memory_order_relaxed);
-	hi = atomic_load_explicit(&g_io_lat_max_ns, memory_order_relaxed);
+	lo = xtc_atomic_load_i64(&g_io_lat_min_ns, xtc_mo_relaxed);
+	hi = xtc_atomic_load_i64(&g_io_lat_max_ns, xtc_mo_relaxed);
 	if (hi <= lo)
 		return lo;
 	return lo + (int64_t)__xtc_sim_rng_range(XTC_SIM_RNG_IO,
@@ -882,7 +876,7 @@ __xtc_sim_io_should_fault(void)
  * Off by default; seeded on the IO stream so enabling does not perturb
  * the schedule.
  */
-static _Atomic int g_io_corrupt_on;
+static int g_io_corrupt_on;
 static unsigned    g_io_corrupt_pct;    /* per-1000 op corruption probability */
 
 /* PUBLIC: void xtc_sim_io_corrupt_enable __P((unsigned)); */
@@ -890,21 +884,21 @@ void
 xtc_sim_io_corrupt_enable(unsigned corrupt_pct_per_1000)
 {
 	g_io_corrupt_pct = corrupt_pct_per_1000;
-	atomic_store_explicit(&g_io_corrupt_on, 1, memory_order_release);
+	xtc_atomic_store_i32(&g_io_corrupt_on, 1, xtc_mo_release);
 }
 
 /* PUBLIC: void xtc_sim_io_corrupt_disable __P((void)); */
 void
 xtc_sim_io_corrupt_disable(void)
 {
-	atomic_store_explicit(&g_io_corrupt_on, 0, memory_order_release);
+	xtc_atomic_store_i32(&g_io_corrupt_on, 0, xtc_mo_release);
 }
 
 /* PUBLIC: int __xtc_sim_io_corrupt_active __P((void)); */
 int
 __xtc_sim_io_corrupt_active(void)
 {
-	return atomic_load_explicit(&g_io_corrupt_on, memory_order_acquire);
+	return xtc_atomic_load_i32(&g_io_corrupt_on, xtc_mo_acquire);
 }
 
 /* Draw whether this op is corrupted (per-1000, IO stream). */
@@ -987,10 +981,10 @@ __xtc_sim_io_flip_byte(int len)
  * perturb the schedule).  Off by default (min==max==0: inline delivery).
  */
 #define XTC_SIM_PART_MAX 64        /* == LOOP_TABLE_MAX in proc.c */
-static _Atomic int      g_part_on;
+static int g_part_on;
 static unsigned char    g_part_block[XTC_SIM_PART_MAX][XTC_SIM_PART_MAX];
-static _Atomic int64_t  g_net_lat_min_ns;
-static _Atomic int64_t  g_net_lat_max_ns;
+static int64_t g_net_lat_min_ns;
+static int64_t g_net_lat_max_ns;
 static pthread_mutex_t  g_part_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* PUBLIC: void xtc_sim_partition_set __P((int, int, int)); */
@@ -1016,7 +1010,7 @@ xtc_sim_partition_set(int src_loop_id, int dst_loop_id, int blocked)
 	g_part_block[src_loop_id][dst_loop_id] = blocked ? 1 : 0;
 	(void)pthread_mutex_unlock(&g_part_lock);
 	if (blocked)
-		atomic_store_explicit(&g_part_on, 1, memory_order_release);
+		xtc_atomic_store_i32(&g_part_on, 1, xtc_mo_release);
 }
 
 /* PUBLIC: void xtc_sim_partition_isolate __P((int)); */
@@ -1039,7 +1033,7 @@ xtc_sim_partition_isolate(int loop_id)
 		g_part_block[j][loop_id] = 1;
 	}
 	(void)pthread_mutex_unlock(&g_part_lock);
-	atomic_store_explicit(&g_part_on, 1, memory_order_release);
+	xtc_atomic_store_i32(&g_part_on, 1, xtc_mo_release);
 }
 
 /* PUBLIC: void xtc_sim_partition_clear __P((void)); */
@@ -1052,9 +1046,9 @@ xtc_sim_partition_clear(void)
 	(void)pthread_mutex_lock(&g_part_lock);
 	memset(g_part_block, 0, sizeof g_part_block);
 	(void)pthread_mutex_unlock(&g_part_lock);
-	atomic_store_explicit(&g_part_on, 0, memory_order_release);
-	atomic_store_explicit(&g_net_lat_min_ns, 0, memory_order_relaxed);
-	atomic_store_explicit(&g_net_lat_max_ns, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&g_part_on, 0, xtc_mo_release);
+	xtc_atomic_store_i64(&g_net_lat_min_ns, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i64(&g_net_lat_max_ns, 0, xtc_mo_relaxed);
 }
 
 /* PUBLIC: int __xtc_sim_partition_blocked __P((int, int)); */
@@ -1068,7 +1062,7 @@ int
 __xtc_sim_partition_blocked(int src_loop_id, int dst_loop_id)
 {
 	int b;
-	if (!atomic_load_explicit(&g_part_on, memory_order_acquire))
+	if (!xtc_atomic_load_i32(&g_part_on, xtc_mo_acquire))
 		return 0;
 	if (!__xtc_sim_active())
 		return 0;
@@ -1095,8 +1089,8 @@ xtc_sim_net_latency(int64_t min_ns, int64_t max_ns)
 {
 	if (min_ns < 0) min_ns = 0;
 	if (max_ns < min_ns) max_ns = min_ns;
-	atomic_store_explicit(&g_net_lat_min_ns, min_ns, memory_order_relaxed);
-	atomic_store_explicit(&g_net_lat_max_ns, max_ns, memory_order_relaxed);
+	xtc_atomic_store_i64(&g_net_lat_min_ns, min_ns, xtc_mo_relaxed);
+	xtc_atomic_store_i64(&g_net_lat_max_ns, max_ns, xtc_mo_relaxed);
 }
 
 /* PUBLIC: int64_t __xtc_sim_net_latency __P((void)); */
@@ -1109,8 +1103,8 @@ __xtc_sim_net_latency(void)
 	int64_t lo, hi;
 	if (!__xtc_sim_active())
 		return 0;
-	lo = atomic_load_explicit(&g_net_lat_min_ns, memory_order_relaxed);
-	hi = atomic_load_explicit(&g_net_lat_max_ns, memory_order_relaxed);
+	lo = xtc_atomic_load_i64(&g_net_lat_min_ns, xtc_mo_relaxed);
+	hi = xtc_atomic_load_i64(&g_net_lat_max_ns, xtc_mo_relaxed);
 	if (hi <= 0)
 		return 0;
 	if (hi <= lo)
@@ -1125,15 +1119,15 @@ __xtc_sim_net_latency(void)
 void
 xtc_sim_clock_enable(int64_t start_ns)
 {
-	atomic_store_explicit(&g_vclock_ns, start_ns, memory_order_relaxed);
-	atomic_store_explicit(&g_vclock_on, 1, memory_order_release);
+	xtc_atomic_store_i64(&g_vclock_ns, start_ns, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&g_vclock_on, 1, xtc_mo_release);
 }
 
 /* PUBLIC: void xtc_sim_clock_disable __P((void)); */
 void
 xtc_sim_clock_disable(void)
 {
-	atomic_store_explicit(&g_vclock_on, 0, memory_order_release);
+	xtc_atomic_store_i32(&g_vclock_on, 0, xtc_mo_release);
 }
 
 /* PUBLIC: void xtc_sim_clock_advance __P((int64_t)); */
@@ -1141,15 +1135,15 @@ void
 xtc_sim_clock_advance(int64_t delta_ns)
 {
 	if (delta_ns > 0)
-		(void)atomic_fetch_add_explicit(&g_vclock_ns, delta_ns,
-		    memory_order_relaxed);
+		(void)xtc_atomic_fetch_add_i64(&g_vclock_ns, delta_ns,
+		    xtc_mo_relaxed);
 }
 
 /* PUBLIC: void xtc_sim_clock_set __P((int64_t)); */
 void
 xtc_sim_clock_set(int64_t ns)
 {
-	atomic_store_explicit(&g_vclock_ns, ns, memory_order_relaxed);
+	xtc_atomic_store_i64(&g_vclock_ns, ns, xtc_mo_relaxed);
 }
 
 /*
@@ -1162,11 +1156,10 @@ xtc_sim_clock_set(int64_t ns)
 int
 __xtc_sim_vclock(int64_t *out_ns)
 {
-	if (!atomic_load_explicit(&g_vclock_on, memory_order_acquire))
+	if (!xtc_atomic_load_i32(&g_vclock_on, xtc_mo_acquire))
 		return 0;
 	if (out_ns != NULL)
-		*out_ns = atomic_load_explicit(&g_vclock_ns,
-		    memory_order_relaxed);
+		*out_ns = xtc_atomic_load_i64(&g_vclock_ns, xtc_mo_relaxed);
 	return 1;
 }
 
@@ -1198,10 +1191,9 @@ xtc_sim_clock_active(void)
 void
 xtc_sim_clock_skew(int64_t offset_ns, int jitter_ns)
 {
-	atomic_store_explicit(&g_clock_skew_ns, offset_ns,
-	    memory_order_release);
-	atomic_store_explicit(&g_clock_skew_jitter,
-	    jitter_ns < 0 ? 0 : jitter_ns, memory_order_release);
+	xtc_atomic_store_i64(&g_clock_skew_ns, offset_ns, xtc_mo_release);
+	xtc_atomic_store_i32(&g_clock_skew_jitter,
+	    jitter_ns < 0 ? 0 : jitter_ns, xtc_mo_release);
 }
 
 /* PUBLIC: int __xtc_sim_vclock_observed __P((int64_t *)); */
@@ -1216,11 +1208,11 @@ __xtc_sim_vclock_observed(int64_t *out_ns)
 {
 	int64_t base, off;
 	int jit;
-	if (!atomic_load_explicit(&g_vclock_on, memory_order_acquire))
+	if (!xtc_atomic_load_i32(&g_vclock_on, xtc_mo_acquire))
 		return 0;
-	base = atomic_load_explicit(&g_vclock_ns, memory_order_relaxed);
-	off = atomic_load_explicit(&g_clock_skew_ns, memory_order_relaxed);
-	jit = atomic_load_explicit(&g_clock_skew_jitter, memory_order_relaxed);
+	base = xtc_atomic_load_i64(&g_vclock_ns, xtc_mo_relaxed);
+	off = xtc_atomic_load_i64(&g_clock_skew_ns, xtc_mo_relaxed);
+	jit = xtc_atomic_load_i32(&g_clock_skew_jitter, xtc_mo_relaxed);
 	if (jit > 0 && __xtc_sim_active()) {
 		/* Seeded wobble in [-jit, +jit] from the IO stream (an
 		 * observation draw, distinct from scheduler decisions). */

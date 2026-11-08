@@ -14,7 +14,6 @@
 #include "xtc_inject.h"
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -38,7 +37,7 @@ struct point {
 static pthread_mutex_t __pts_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct point   *__pts[XTC_INJECT_MAX_NAMES];
 static int             __pts_n;
-static _Atomic int     __pts_attached_count;
+static int __pts_attached_count;
 
 static struct point *
 __inject_find_locked(const char *name)
@@ -77,8 +76,7 @@ xtc_inject_attach(const char *name, xtc_inject_fn fn, void *user)
 	p->cbs[p->n_cbs].fn   = fn;
 	p->cbs[p->n_cbs].user = user;
 	p->n_cbs++;
-	atomic_fetch_add_explicit(&__pts_attached_count, 1,
-	    memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&__pts_attached_count, 1, xtc_mo_relaxed);
 out:
 	(void)__xtc_mtx_unlock(&__pts_lock);
 	return rc;
@@ -96,8 +94,7 @@ xtc_inject_attach_wait(const char *name)
 	if (p->wait_attached) goto out;     /* idempotent */
 	p->wait_attached = 1;
 	p->wait_release  = 0;
-	atomic_fetch_add_explicit(&__pts_attached_count, 1,
-	    memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&__pts_attached_count, 1, xtc_mo_relaxed);
 out:
 	(void)__xtc_mtx_unlock(&__pts_lock);
 	return rc;
@@ -118,8 +115,8 @@ xtc_inject_detach(const char *name)
 		p->wait_attached = 0;
 		p->wait_release  = 1;        /* unblock any waiter */
 		(void)pthread_cond_broadcast(&p->cv);
-		atomic_fetch_sub_explicit(&__pts_attached_count, sub,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_sub_i32(&__pts_attached_count, sub,
+		    xtc_mo_relaxed);
 		rc = XTC_OK;
 	}
 	(void)__xtc_mtx_unlock(&__pts_lock);
@@ -143,8 +140,7 @@ xtc_inject_trigger(const char *name)
 	 * mutex.  This keeps XTC_INJECTION_POINT cheap enough to plant
 	 * in warm concurrency paths; for release builds it is elided
 	 * entirely by XTC_INJECT_DISABLE. */
-	if (atomic_load_explicit(&__pts_attached_count,
-	    memory_order_acquire) == 0)
+	if (xtc_atomic_load_i32(&__pts_attached_count, xtc_mo_acquire) == 0)
 		return;
 
 	(void)__xtc_mtx_lock(&__pts_lock);
@@ -191,8 +187,7 @@ xtc_inject_wakeup(const char *name)
 int
 xtc_inject_n_attached(void)
 {
-	return atomic_load_explicit(&__pts_attached_count,
-	    memory_order_relaxed);
+	return xtc_atomic_load_i32(&__pts_attached_count, xtc_mo_relaxed);
 }
 
 /*
@@ -215,8 +210,8 @@ xtc_inject_check(const char *name)
 {
 	struct point *p;
 	int hit = 0;
-	if (atomic_load_explicit(&__pts_attached_count,
-	    memory_order_relaxed) == 0) return 0;
+	if (xtc_atomic_load_i32(&__pts_attached_count, xtc_mo_relaxed) == 0)
+		return 0;
 	(void)__xtc_mtx_lock(&__pts_lock);
 	p = __inject_find_locked(name);
 	if (p != NULL && (p->n_cbs > 0 || p->wait_attached)) hit = 1;

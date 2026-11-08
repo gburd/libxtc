@@ -44,7 +44,6 @@
 #include "loop_int.h"    /* __xtc_current_loop: NULL loop == the caller's loop */
 #include "proc_int.h"    /* __xtc_exit_pid_on: owner-qualified kill */
 
-#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -53,9 +52,9 @@
 struct launch_box {
 	xtc_launch_fn      fn;
 	void              *arg;
-	_Atomic intptr_t   result;      /* fn's return, valid iff finished */
-	_Atomic int        finished;    /* 1 once fn returned cleanly */
-	_Atomic int refs;               /* launcher + child */
+	intptr_t result;                /* fn's return, valid iff finished */
+	int finished;                   /* 1 once fn returned cleanly */
+	int refs;                       /* launcher + child */
 	xtc_loop_t *loop;               /* launcher only: the child's owner */
 	xtc_pid_t child;                /* launcher only: NONE once reaped */
 };
@@ -63,7 +62,7 @@ struct launch_box {
 static void
 launch_box_put(struct launch_box *box)
 {
-	if (atomic_fetch_sub_explicit(&box->refs, 1, memory_order_acq_rel) == 1)
+	if (xtc_atomic_fetch_sub_i32(&box->refs, 1, xtc_mo_acq_rel) == 1)
 		__os_free(box);
 }
 
@@ -90,8 +89,8 @@ launch_child(void *arg)
 		return;
 	}
 	r = box->fn(box->arg);
-	atomic_store_explicit(&box->result, r, memory_order_release);
-	atomic_store_explicit(&box->finished, 1, memory_order_release);
+	xtc_atomic_store_iptr(&box->result, r, xtc_mo_release);
+	xtc_atomic_store_i32(&box->finished, 1, xtc_mo_release);
 }
 
 /*
@@ -173,9 +172,10 @@ xtc_launch(xtc_loop_t *loop, xtc_launch_fn fn, void *arg,
 		return XTC_E_NOMEM;
 	box->fn = fn;
 	box->arg = arg;
-	atomic_init(&box->result, 0);
-	atomic_init(&box->finished, 0);
-	atomic_init(&box->refs, 2); /* launcher + child */
+	xtc_atomic_store_iptr(&box->result, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&box->finished, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&box->refs, 2,
+	    xtc_mo_relaxed); /* launcher + child */
 
 	/* The guard's scope is opened before the spawn, so a failure here
 	 * leaves nothing to undo but the box. */
@@ -245,8 +245,8 @@ xtc_launch(xtc_loop_t *loop, xtc_launch_fn fn, void *arg,
 
 	/* The child is reaped: read the box, then drop our reference (the
 	 * guard, with nothing left to kill). */
-	finished = atomic_load_explicit(&box->finished, memory_order_acquire);
-	r = atomic_load_explicit(&box->result, memory_order_acquire);
+	finished = xtc_atomic_load_i32(&box->finished, xtc_mo_acquire);
+	r = xtc_atomic_load_iptr(&box->result, xtc_mo_acquire);
 	box->child = XTC_PID_NONE;
 	xtc_scope_close(scope);
 

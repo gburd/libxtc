@@ -188,7 +188,6 @@ child_pump_proc(void *a)
 
 #include <sys/wait.h>
 #include <signal.h>
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <unistd.h>
 #if defined(__FreeBSD__)
@@ -213,7 +212,7 @@ child_pump_proc(void *a)
  */
 struct __xproc_os {
 	xtc_osproc_t *os;
-	_Atomic int   refs;
+	int refs;
 };
 
 static void
@@ -221,7 +220,7 @@ __xproc_os_release(struct __xproc_os *h)
 {
 	if (h == NULL)
 		return;
-	if (atomic_fetch_sub_explicit(&h->refs, 1, memory_order_acq_rel) == 1) {
+	if (xtc_atomic_fetch_sub_i32(&h->refs, 1, xtc_mo_acq_rel) == 1) {
 		xtc_osproc_destroy(h->os);
 		__os_free(h);
 	}
@@ -322,7 +321,7 @@ xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg)
  * child too (same binary, same main), so the flag proves the child will
  * be caught.  Hosts that never call it keep the fork path unchanged.
  */
-static _Atomic int __xproc_hook_seen;
+static int __xproc_hook_seen;
 
 /* Exit status of a re-exec'd child that could not start its entry.  Each
  * cause is distinct so a monitor's DOWN (kind EXIT, exit_code N) says what
@@ -345,7 +344,7 @@ xtc_xproc_win_child_maybe(int argc, char **argv)
 	char *end = NULL;
 	int i, r;
 
-	atomic_store_explicit(&__xproc_hook_seen, 1, memory_order_release);
+	xtc_atomic_store_i32(&__xproc_hook_seen, 1, xtc_mo_release);
 	for (i = 1; i < argc; i++)
 		if (argv[i] != NULL && strcmp(argv[i], "--xtc-xproc-exec") == 0)
 			break;
@@ -489,7 +488,7 @@ xtc_xspawn(xtc_loop_t *loop, const char *name, xtc_xproc_root_fn root_fn,
 	 * with no handle able to reap it. */
 	if ((rc = __os_calloc(1, sizeof *p->hold, (void **)&p->hold)) != XTC_OK)
 		goto fail_arg;
-	atomic_store_explicit(&p->hold->refs, 1, memory_order_relaxed);
+	xtc_atomic_store_i32(&p->hold->refs, 1, xtc_mo_relaxed);
 
 	if ((rc = xtc_osproc_spawn(&oo, &p->os)) != XTC_OK) {
 		__os_free(p->hold);
@@ -584,7 +583,7 @@ xtc_xspawn_entry(xtc_loop_t *loop, const char *name, const char *entry,
 	 * the child (see __xproc_hook_seen).  Keep the fork path, with its
 	 * documented async-signal-safety caveat.  Also the fallback where
 	 * this platform cannot name its own executable. */
-	if (!atomic_load_explicit(&__xproc_hook_seen, memory_order_acquire) ||
+	if (!xtc_atomic_load_i32(&__xproc_hook_seen, xtc_mo_acquire) ||
 	    __xproc_self_exe(exe, sizeof exe) != XTC_OK)
 		return xtc_xspawn(loop, name, fn, arg, arg_len, out);
 
@@ -594,7 +593,7 @@ xtc_xspawn_entry(xtc_loop_t *loop, const char *name, const char *entry,
 		__os_free(p);
 		return rc;
 	}
-	atomic_store_explicit(&p->hold->refs, 1, memory_order_relaxed);
+	xtc_atomic_store_i32(&p->hold->refs, 1, xtc_mo_relaxed);
 
 	/* The child finds its control fd in XTC_CTRL_FD, which osproc's
 	 * exec path sets in the pre-built envp. */
@@ -697,7 +696,7 @@ __xproc_ensure_shadow(xtc_xproc_t *p)
 	if (p->have_shadow) return XTC_OK;
 	if ((rc = __os_calloc(1, sizeof *s, (void **)&s)) != XTC_OK)
 		return rc;
-	atomic_fetch_add_explicit(&p->hold->refs, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_i32(&p->hold->refs, 1, xtc_mo_relaxed);
 	s->hold = p->hold;
 	s->ctrl_fd = p->ctrl_fd;
 	/* Spawn the shadow; the caller binds to it BEFORE it can run
@@ -780,7 +779,7 @@ struct xtc_xproc {
 	int           ctrl_fd;     /* ctrl as an int for xtc_net_* framing */
 	long          os_pid;
 	DWORD         exit_code;
-	_Atomic int   exited;      /* set by the wait callback */
+	int exited; /* set by the wait callback */
 	xtc_pid_t     shadow;
 	int           have_shadow;
 };
@@ -809,9 +808,10 @@ __ntstatus_to_signal(DWORD code)
 static void
 __xproc_wsa_init(void)
 {
-	static _Atomic int done;
+	static int done;
 	int expected = 0;
-	if (atomic_compare_exchange_strong(&done, &expected, 1)) {
+	if (xtc_atomic_cas_i32(&done, &expected, 1, xtc_mo_seq_cst,
+	        xtc_mo_seq_cst)) {
 		WSADATA w;
 		(void)WSAStartup(MAKEWORD(2, 2), &w);
 	}
@@ -873,7 +873,7 @@ __xproc_exit_cb(PVOID ctx, BOOLEAN timedout)
 	(void)timedout;
 	if (GetExitCodeProcess(p->proc, &code))
 		p->exit_code = code;
-	atomic_store(&p->exited, 1);
+	xtc_atomic_store_i32(&p->exited, 1, xtc_mo_seq_cst);
 	/* This runs on a thread-pool thread, NOT the loop thread.  It must
 	 * NOT touch the proc table (xtc_send/__resolve take tbl->lock, which
 	 * the loop thread also holds inside xtc_monitor -- a cross-thread
@@ -905,7 +905,7 @@ win_shadow_proc(void *a)
 	 * shadow before it frees `s`. */
 	(void)xtc_proc_trap_exit(1);
 #endif
-	while (!atomic_load(&p->exited)) {
+	while (!xtc_atomic_load_i32(&p->exited, xtc_mo_seq_cst)) {
 		if (xtc_recv(&m, &n, 20LL * 1000 * 1000) == XTC_OK && m) {
 			__os_free(m); m = NULL;
 		}
@@ -1139,7 +1139,7 @@ xtc_xproc_win_child_maybe(int argc, char **argv)
 struct win_reader_ctx {
 	SOCKET     sock;
 	xtc_pid_t  root;
-	_Atomic int stop;
+	int stop;
 };
 
 static DWORD WINAPI
@@ -1150,7 +1150,8 @@ win_reader_thread(LPVOID a)
 		uint32_t be = 0;
 		size_t off = 0, len;
 		char *buf;
-		if (atomic_load(&r->stop)) break;
+		if (xtc_atomic_load_i32(&r->stop, xtc_mo_seq_cst))
+			break;
 		/* 4-byte big-endian length prefix (the xtc_net_frame layout). */
 		while (off < 4) {
 			int n = recv(r->sock, (char *)&be + off, (int)(4 - off), 0); /* XTC_BLOCKING_OK: dedicated reader thread */
@@ -1258,7 +1259,8 @@ xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg)
 	(void)xtc_loop_run(loop);
 
 	/* Root exited: stop the reader (close the socket unblocks its recv). */
-	if (rctxp) atomic_store(&rctxp->stop, 1);
+	if (rctxp)
+		xtc_atomic_store_i32(&rctxp->stop, 1, xtc_mo_seq_cst);
 	if (reader != NULL) {
 		(void)WaitForSingleObject(reader, 1000);
 		CloseHandle(reader);

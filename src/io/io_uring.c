@@ -57,8 +57,8 @@
  * and we silently keep the old behavior.
  */
 #define XTC_IOWQ_BOUND_DEFAULT   4u   /* per-ring bounded io-wq cap */
-static _Atomic unsigned __xtc_iowq_bound   = XTC_IOWQ_BOUND_DEFAULT;
-static _Atomic unsigned __xtc_iowq_unbound = 0u;   /* 0 = kernel default */
+static unsigned __xtc_iowq_bound = XTC_IOWQ_BOUND_DEFAULT;
+static unsigned __xtc_iowq_unbound = 0u; /* 0 = kernel default */
 
 /*
  * PUBLIC: void xtc_io_set_iowq_max_workers __P((unsigned, unsigned));
@@ -74,9 +74,8 @@ static _Atomic unsigned __xtc_iowq_unbound = 0u;   /* 0 = kernel default */
 XTC_API void
 xtc_io_set_iowq_max_workers(unsigned bound, unsigned unbound)
 {
-	atomic_store_explicit(&__xtc_iowq_bound, bound, memory_order_relaxed);
-	atomic_store_explicit(&__xtc_iowq_unbound, unbound,
-	    memory_order_relaxed);
+	xtc_atomic_store_u32(&__xtc_iowq_bound, bound, xtc_mo_relaxed);
+	xtc_atomic_store_u32(&__xtc_iowq_unbound, unbound, xtc_mo_relaxed);
 }
 
 extern int __xtc_io_drain_wakeup(xtc_io_t *io);
@@ -274,7 +273,7 @@ static void
 __owner_check(xtc_io_t *io)
 {
 #if defined(XTC_DIAGNOSTIC)
-	if (atomic_load_explicit(&io->owner_tok, memory_order_acquire) !=
+	if (xtc_atomic_load_u64(&io->owner_tok, xtc_mo_acquire) !=
 	    __self_tok()) {
 		fprintf(stderr, "XTC DIAGNOSTIC: io_uring SQ submit from a "
 		    "non-owner thread (io=%p): the submission queue is "
@@ -693,7 +692,7 @@ static const unsigned __xtc_uring_init_tiers[] = { XTC_URING_COOP, 0u };
 	((int)(sizeof __xtc_uring_init_tiers / sizeof __xtc_uring_init_tiers[0]))
 
 /* The DEFER tier, once refused by this kernel, is not tried again. */
-static _Atomic int __xtc_uring_no_defer;
+static int __xtc_uring_no_defer;
 
 /* Is this optional flag set refused by a test injection? */
 static int
@@ -750,10 +749,8 @@ __ring_cap_iowq(struct io_uring *ring)
 {
 	unsigned vals[2];
 
-	vals[0] = atomic_load_explicit(&__xtc_iowq_bound,
-	    memory_order_relaxed);
-	vals[1] = atomic_load_explicit(&__xtc_iowq_unbound,
-	    memory_order_relaxed);
+	vals[0] = xtc_atomic_load_u32(&__xtc_iowq_bound, xtc_mo_relaxed);
+	vals[1] = xtc_atomic_load_u32(&__xtc_iowq_unbound, xtc_mo_relaxed);
 	if (vals[0] != 0u || vals[1] != 0u)
 		(void)io_uring_register_iowq_max_workers(ring, vals);
 }
@@ -762,15 +759,16 @@ __ring_cap_iowq(struct io_uring *ring)
  * A per-thread owner token: unique for the life of the process, so a
  * thread that reuses a dead thread's pthread_t still reads as new.
  */
-static _Atomic uint64_t __xtc_uring_tok_next = 1;
+static uint64_t __xtc_uring_tok_next = 1;
 static XTC_THREAD_LOCAL uint64_t __xtc_uring_tok;
 
 static uint64_t
 __self_tok(void)
 {
 	if (__xtc_uring_tok == 0)
-		__xtc_uring_tok = atomic_fetch_add_explicit(
-		    &__xtc_uring_tok_next, 1, memory_order_relaxed);
+		__xtc_uring_tok =
+		    xtc_atomic_fetch_add_u64(&__xtc_uring_tok_next, 1,
+		        xtc_mo_relaxed);
 	return __xtc_uring_tok;
 }
 
@@ -804,15 +802,15 @@ __own(xtc_io_t *io, int run)
 	uint64_t me = __self_tok(), cur;
 	int rc, defer;
 
-	cur = atomic_load_explicit(&io->owner_tok, memory_order_relaxed);
+	cur = xtc_atomic_load_u64(&io->owner_tok, xtc_mo_relaxed);
 	defer = run && !io->ring_single && io->ring_try_defer &&
-	    !atomic_load_explicit(&__xtc_uring_no_defer, memory_order_relaxed);
+	    !xtc_atomic_load_i32(&__xtc_uring_no_defer, xtc_mo_relaxed);
 	if (cur == me && !defer)
 		return XTC_OK;
 	if (io->ring_dead)
 		return XTC_E_NOMEM;
 	if (cur != me && cur != 0 &&
-	    atomic_load_explicit(&io->owner_active, memory_order_acquire)) {
+	    xtc_atomic_load_i32(&io->owner_active, xtc_mo_acquire)) {
 #if defined(XTC_DIAGNOSTIC)
 		fprintf(stderr, "XTC DIAGNOSTIC: io_uring ring touched by a "
 		    "non-owner thread (io=%p) while its owner runs the loop: "
@@ -825,8 +823,8 @@ __own(xtc_io_t *io, int run)
 	    (rc = __ring_rebind(io, defer)) != XTC_OK)
 		return rc;
 	io->owner_tid = pthread_self();
-	atomic_store_explicit(&io->owner_set, 1, memory_order_relaxed);
-	atomic_store_explicit(&io->owner_tok, me, memory_order_release);
+	xtc_atomic_store_i32(&io->owner_set, 1, xtc_mo_relaxed);
+	xtc_atomic_store_u64(&io->owner_tok, me, xtc_mo_release);
 	return XTC_OK;
 }
 
@@ -877,8 +875,7 @@ __ring_rebind(xtc_io_t *io, int want_defer)
 	/* A pre-6.1 kernel: stop asking (but not for a test's refusal). */
 	if (want_defer && got != XTC_URING_DEFER &&
 	    !__tier_injected(XTC_URING_DEFER))
-		atomic_store_explicit(&__xtc_uring_no_defer, 1,
-		    memory_order_relaxed);
+		xtc_atomic_store_i32(&__xtc_uring_no_defer, 1, xtc_mo_relaxed);
 	__ring_cap_iowq(&nr);
 	io->ring = nr;
 	io->ring_flags = got;
@@ -994,13 +991,13 @@ __xtc_io_backend_init(xtc_io_t *io)
 	io->n_carry = io->cap_carry = 0;
 	io->n_rebinds = 0;
 	io->n_enter_submit = io->n_enter_wait = 0;
-	atomic_store_explicit(&io->owner_tok, 0, memory_order_relaxed);
-	atomic_store_explicit(&io->owner_active, 0, memory_order_relaxed);
+	xtc_atomic_store_u64(&io->owner_tok, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&io->owner_active, 0, xtc_mo_relaxed);
 	io->pending_del = NULL;
 	io->n_pending_del = 0;
 	io->cap_pending_del = 0;
-	atomic_store_explicit(&io->has_pending_del, 0, memory_order_relaxed);
-	atomic_store_explicit(&io->owner_set, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&io->has_pending_del, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&io->owner_set, 0, xtc_mo_relaxed);
 	io->tail_loop_id = XTC_TAIL_LOOP_NONE; /* label; the loop sets it */
 	if (pthread_mutex_init(&io->del_lock, NULL) != 0) {
 		io_uring_queue_exit(&io->ring);
@@ -1256,8 +1253,7 @@ __apply_pending_del_for(xtc_io_t *io, int fd)
 {
 	int found = 0, i, j;
 
-	if (atomic_load_explicit(&io->has_pending_del,
-	    memory_order_acquire) == 0)
+	if (xtc_atomic_load_i32(&io->has_pending_del, xtc_mo_acquire) == 0)
 		return;
 	(void)__xtc_mtx_lock(&io->del_lock);
 	for (i = 0; i < io->n_pending_del; i++) {
@@ -1270,8 +1266,7 @@ __apply_pending_del_for(xtc_io_t *io, int fd)
 		i--;                     /* re-test this slot: fd may repeat */
 	}
 	if (io->n_pending_del == 0)
-		atomic_store_explicit(&io->has_pending_del, 0,
-		    memory_order_relaxed);
+		xtc_atomic_store_i32(&io->has_pending_del, 0, xtc_mo_relaxed);
 	(void)__xtc_mtx_unlock(&io->del_lock);
 	if (found)
 		(void)xtc_io_del_fd(io, fd);
@@ -1499,8 +1494,9 @@ void
 __xtc_io_flush(xtc_io_t *io)
 {
 	if (io == NULL || io->ring_dead ||
-	    atomic_load_explicit(&io->owner_tok, memory_order_relaxed) !=
-	    __self_tok() || io_uring_sq_ready(&io->ring) == 0)
+	    xtc_atomic_load_u64(&io->owner_tok, xtc_mo_relaxed) !=
+	        __self_tok() ||
+	    io_uring_sq_ready(&io->ring) == 0)
 		return;
 	__xtc_unsafe_enter();
 	(void)__ring_submit(io);
@@ -1563,8 +1559,7 @@ __xtc_io_set_owner(xtc_io_t *io)
 		return;
 	__xtc_unsafe_enter();
 	if (__own(io, 1) == XTC_OK)
-		atomic_store_explicit(&io->owner_active, 1,
-		    memory_order_release);
+		xtc_atomic_store_i32(&io->owner_active, 1, xtc_mo_release);
 	__xtc_unsafe_leave();
 }
 
@@ -1659,8 +1654,7 @@ void
 __xtc_io_owner_leave(xtc_io_t *io)
 {
 	if (io == NULL ||
-	    atomic_load_explicit(&io->owner_tok, memory_order_relaxed) !=
-	        __self_tok())
+	    xtc_atomic_load_u64(&io->owner_tok, xtc_mo_relaxed) != __self_tok())
 		return;
 	__xtc_unsafe_enter();
 	if (io->n_aio > 0)
@@ -1671,7 +1665,7 @@ __xtc_io_owner_leave(xtc_io_t *io)
 	 * the retired nodes.  On a COOP ring the next owner submits them:
 	 * from here they would belong to a thread that may be about to
 	 * exit, and the kernel cancels an exiting task's requests. */
-	atomic_store_explicit(&io->owner_active, 0, memory_order_release);
+	xtc_atomic_store_i32(&io->owner_active, 0, xtc_mo_release);
 	__xtc_unsafe_leave();
 }
 
@@ -1705,7 +1699,7 @@ __xtc_io_defer_del_fd(xtc_io_t *io, int fd)
 	 * nothing to delete: answer as __del_fd would, without binding the
 	 * ring to this thread.
 	 */
-	cur = atomic_load_explicit(&io->owner_tok, memory_order_acquire);
+	cur = xtc_atomic_load_u64(&io->owner_tok, xtc_mo_acquire);
 	if (cur == 0)
 		return XTC_E_INVAL;
 	if (cur == __self_tok())
@@ -1723,7 +1717,7 @@ __xtc_io_defer_del_fd(xtc_io_t *io, int fd)
 		io->cap_pending_del = newcap;
 	}
 	io->pending_del[io->n_pending_del++] = fd;
-	atomic_store_explicit(&io->has_pending_del, 1, memory_order_release);
+	xtc_atomic_store_i32(&io->has_pending_del, 1, xtc_mo_release);
 	(void)__xtc_mtx_unlock(&io->del_lock);
 	/* Nudge the owner out of its I/O wait so it drains promptly. */
 	return xtc_io_wakeup(io);
@@ -1740,8 +1734,7 @@ __drain_pending_del(xtc_io_t *io)
 {
 	int local[32];
 	int n = 0, i;
-	if (atomic_load_explicit(&io->has_pending_del,
-	    memory_order_acquire) == 0)
+	if (xtc_atomic_load_i32(&io->has_pending_del, xtc_mo_acquire) == 0)
 		return;
 	for (;;) {
 		(void)__xtc_mtx_lock(&io->del_lock);
@@ -1758,8 +1751,8 @@ __drain_pending_del(xtc_io_t *io)
 			io->n_pending_del = r;
 		} else {
 			io->n_pending_del = 0;
-			atomic_store_explicit(&io->has_pending_del, 0,
-			    memory_order_relaxed);
+			xtc_atomic_store_i32(&io->has_pending_del, 0,
+			    xtc_mo_relaxed);
 		}
 		(void)__xtc_mtx_unlock(&io->del_lock);
 		for (i = 0; i < n; i++)
@@ -2190,10 +2183,11 @@ __xtc_io_uring_preempt_arm(xtc_io_t *io, int64_t interval_ns)
 			rc = io_uring_queue_init(8, &io->preempt_ring, 0);
 			if (rc >= 0) {
 				unsigned vals[2];
-				vals[0] = atomic_load_explicit(
-				    &__xtc_iowq_bound, memory_order_relaxed);
-				vals[1] = atomic_load_explicit(
-				    &__xtc_iowq_unbound, memory_order_relaxed);
+				vals[0] = xtc_atomic_load_u32(&__xtc_iowq_bound,
+				    xtc_mo_relaxed);
+				vals[1] =
+				    xtc_atomic_load_u32(&__xtc_iowq_unbound,
+				        xtc_mo_relaxed);
 				if (vals[0] != 0u || vals[1] != 0u)
 					(void)io_uring_register_iowq_max_workers(
 					    &io->preempt_ring, vals);

@@ -17,10 +17,6 @@
 #include "xtc_atomic.h"
 #include "xtc_compiler.h"
 
-/* shortcut: transitional -- library files still written against C11
- * atomics get <stdatomic.h> from here; dropped once src/ is converted. */
-#include <stdatomic.h>
-
 /*
  * Each takes a pointer to PLAIN storage (atomic operations applied to
  * its address), so ordinary loads and stores stay usable on the

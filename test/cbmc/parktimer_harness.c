@@ -40,19 +40,32 @@
  *	what is checked.  -DPLANT_UNCOND_CLEAR restores the 2.0 bug (an
  *	exchange instead of the CAS) and must FAIL.
  */
-#include <stdatomic.h>
+#include "xtc_atomic.h"
+/* The modelled pointers are int indexes (CBMC 5.x rejects pointers shared
+ * between threads), so the source's _ptr operations are the _i32 ones
+ * here; the transcribed blocks keep the source's spelling. */
+#undef xtc_atomic_load_ptr
+#undef xtc_atomic_store_ptr
+#undef xtc_atomic_exchange_ptr
+#undef xtc_atomic_cas_ptr
+#undef xtc_atomic_cas_weak_ptr
+#define xtc_atomic_load_ptr xtc_atomic_load_i32
+#define xtc_atomic_store_ptr xtc_atomic_store_i32
+#define xtc_atomic_exchange_ptr xtc_atomic_exchange_i32
+#define xtc_atomic_cas_ptr xtc_atomic_cas_i32
+#define xtc_atomic_cas_weak_ptr xtc_atomic_cas_weak_i32
 
 #define NONE	0
 #define T1	1
 #define T2	2
 #define XTC_TIMER_CANCELLED 2
 
-static _Atomic int park_timer;		/* the task's slot: a timer index */
-static _Atomic int refs[3];
-static _Atomic int fired[3];
-static _Atomic int over_release;
-static _Atomic int a_touched_t2;	/* loop A released a ref of T2 */
-static _Atomic int done;
+static int park_timer; /* the task's slot: a timer index */
+static int refs[3];
+static int fired[3];
+static int over_release;
+static int a_touched_t2; /* loop A released a ref of T2 */
+static int done;
 static int b_heap_dropped;
 _Bool nondet_bool(void);
 
@@ -64,11 +77,11 @@ park_release(int t)
 {
 	if (t == NONE)
 		return;
-	if (atomic_load_explicit(&refs[t], memory_order_relaxed) == 0) {
-		atomic_store(&over_release, 1);
+	if (xtc_atomic_load_i32(&refs[t], xtc_mo_relaxed) == 0) {
+		xtc_atomic_store_i32(&over_release, 1, xtc_mo_seq_cst);
 		return;
 	}
-	(void)atomic_fetch_sub_explicit(&refs[t], 1, memory_order_acq_rel);
+	(void)xtc_atomic_fetch_sub_i32(&refs[t], 1, xtc_mo_acq_rel);
 }
 
 /* src/evt/timer.c __xtc_timer_try_cancel: the fired CAS (the heap
@@ -78,13 +91,14 @@ static int
 try_cancel(int t)
 {
 	int expect = 0;
-	return atomic_compare_exchange_strong_explicit(&fired[t], &expect,
-	    XTC_TIMER_CANCELLED, memory_order_acq_rel, memory_order_acquire);
+	return xtc_atomic_cas_i32(&fired[t], &expect, XTC_TIMER_CANCELLED,
+	    xtc_mo_acq_rel, xtc_mo_acquire);
 }
 
 /* The drain's names for the drift-checked block (index encoding). */
-static struct { _Atomic int park_timer; } *const waiter =
-    (void *)&park_timer;
+static struct {
+	int park_timer;
+} *const waiter = (void *)&park_timer;
 #define due				T1
 #define NULL				NONE
 #define __xtc_timer_park_release	park_release
@@ -98,25 +112,27 @@ loop_a_fire_t1(void)
 
 	/* due->fired = 1 is a plain store in loop.c, after the !cancelled
 	 * test; the cancelled-after-pop path drops the heap ref only. */
-	if (atomic_compare_exchange_strong(&fired[T1], &expect, 1)) {
+	if (xtc_atomic_cas_i32(&fired[T1], &expect, 1, xtc_mo_seq_cst,
+	        xtc_mo_seq_cst)) {
 		/* (xtc_waker_wake runs here) */
 #ifdef PLANT_UNCOND_CLEAR
-		slot = atomic_exchange(&park_timer, NONE);
+		slot =
+		    xtc_atomic_exchange_i32(&park_timer, NONE, xtc_mo_seq_cst);
 		if (slot == T2)
-			atomic_store(&a_touched_t2, 1);
+			xtc_atomic_store_i32(&a_touched_t2, 1, xtc_mo_seq_cst);
 		park_release(slot);
 #else
 		/* BEGIN SOURCE src/evt/loop.c __xtc_drain_due_timers slot claim */
 				slot = due;
-				if (atomic_compare_exchange_strong_explicit(
-				    &waiter->park_timer, &slot, NULL,
-				    memory_order_relaxed, memory_order_relaxed))
-					__xtc_timer_park_release(due);
+		                if (xtc_atomic_cas_ptr(&waiter->park_timer,
+		                        &slot, NULL, xtc_mo_relaxed,
+		                        xtc_mo_relaxed))
+			                __xtc_timer_park_release(due);
 		/* END SOURCE */
 #endif
 	}
 	park_release(T1);	/* the heap reference of the popped timer */
-	atomic_fetch_add(&done, 1);
+	xtc_atomic_fetch_add_i32(&done, 1, xtc_mo_seq_cst);
 }
 #undef due
 #undef NULL
@@ -126,8 +142,7 @@ loop_a_fire_t1(void)
 static void
 cancel_park_timer(void)
 {
-	int pt = atomic_exchange_explicit(&park_timer, NONE,
-	    memory_order_relaxed);
+	int pt = xtc_atomic_exchange_i32(&park_timer, NONE, xtc_mo_relaxed);
 	if (pt != NONE) {
 		(void)try_cancel(pt);
 		park_release(pt);
@@ -140,46 +155,50 @@ fiber(void)
 {
 	cancel_park_timer();			/* drops T1's slot ref */
 	/* __xtc_task_park_on_timer_at on B: refs = 2, push, publish. */
-	atomic_store_explicit(&refs[T2], 2, memory_order_relaxed);
-	atomic_store_explicit(&park_timer, T2, memory_order_relaxed);
+	xtc_atomic_store_i32(&refs[T2], 2, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&park_timer, T2, xtc_mo_relaxed);
 	/* Parked on T2.  Either B fires T2 (its drain, same CAS shape as
 	 * A's) or something else wakes the fiber and it cancels T2. */
 	if (nondet_bool()) {
 		int slot = T2, expect = 0;
-		if (atomic_compare_exchange_strong(&fired[T2], &expect, 1)) {
-			if (atomic_compare_exchange_strong(&park_timer, &slot,
-			    NONE))
+		if (xtc_atomic_cas_i32(&fired[T2], &expect, 1, xtc_mo_seq_cst,
+		        xtc_mo_seq_cst)) {
+			if (xtc_atomic_cas_i32(&park_timer, &slot, NONE,
+			        xtc_mo_seq_cst, xtc_mo_seq_cst))
 				park_release(T2);
 		}
 		park_release(T2);	/* B's heap reference */
 		b_heap_dropped = 1;
 	}
 	cancel_park_timer();		/* the fiber's post-park cleanup */
-	atomic_fetch_add(&done, 1);
+	xtc_atomic_fetch_add_i32(&done, 1, xtc_mo_seq_cst);
 }
 
 int
 main(void)
 {
-	atomic_store(&refs[T1], 2);		/* heap + slot */
-	atomic_store(&park_timer, T1);
+	xtc_atomic_store_i32(&refs[T1], 2, xtc_mo_seq_cst); /* heap + slot */
+	xtc_atomic_store_i32(&park_timer, T1, xtc_mo_seq_cst);
 
 	__CPROVER_ASYNC_1: loop_a_fire_t1();
 	fiber();
 
-	__CPROVER_assume(atomic_load(&done) == 2);
-	__CPROVER_assert(!atomic_load(&over_release),
+	__CPROVER_assume(xtc_atomic_load_i32(&done, xtc_mo_seq_cst) == 2);
+	__CPROVER_assert(!xtc_atomic_load_i32(&over_release, xtc_mo_seq_cst),
 	    "no timer reference is released twice");
-	__CPROVER_assert(atomic_load(&refs[T1]) == 0,
+	__CPROVER_assert(xtc_atomic_load_i32(&refs[T1], xtc_mo_seq_cst) == 0,
 	    "T1 is freed exactly once (no leak)");
-	__CPROVER_assert(atomic_load(&refs[T2]) == (b_heap_dropped ? 0 : 1),
+	__CPROVER_assert(xtc_atomic_load_i32(&refs[T2], xtc_mo_seq_cst) ==
+	        (b_heap_dropped ? 0 : 1),
 	    "T2 keeps exactly the references still owed (B's heap ref "
 	    "until B pops or sweeps it)");
-	__CPROVER_assert(atomic_load(&park_timer) == NONE,
+	__CPROVER_assert(xtc_atomic_load_i32(&park_timer, xtc_mo_seq_cst) ==
+	        NONE,
 	    "the slot is clear");
-	__CPROVER_assert(!atomic_load(&a_touched_t2),
+	__CPROVER_assert(!xtc_atomic_load_i32(&a_touched_t2, xtc_mo_seq_cst),
 	    "loop A never releases a reference of B's timer");
-	__CPROVER_assert(b_heap_dropped || atomic_load(&fired[T2]) != 0,
+	__CPROVER_assert(b_heap_dropped ||
+	        xtc_atomic_load_i32(&fired[T2], xtc_mo_seq_cst) != 0,
 	    "no orphan: T2 left in B's heap is cancelled or fired");
 	return 0;
 }

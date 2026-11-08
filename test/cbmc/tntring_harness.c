@@ -33,7 +33,7 @@
  *	  -DPLANT_NO_WAKE     the producer never wakes a sleeping shard;
  *	  -DPLANT_NO_FULL     the producer ignores the capacity check.
  */
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -45,25 +45,26 @@ typedef int xtc_tnt_handle_t;
 typedef int xtc_tnt_message_t;
 
 typedef struct xtc_tnt_xring {
-	_Atomic uint32_t head;
-	_Atomic uint32_t tail;
+	uint32_t head;
+	uint32_t tail;
 	xtc_tnt_handle_t to[XTC_TNT_XSHARD_CAP];
 	xtc_tnt_message_t msg[XTC_TNT_XSHARD_CAP];
 } xtc_tnt_xring_t;
 
 typedef struct xtc_tnt_shard {
-	_Atomic int sleeping;
+	int sleeping;
 } xtc_tnt_shard_t;
 
 static xtc_tnt_xring_t R;
 static xtc_tnt_shard_t D;
-static _Atomic int wakes, pushes_done;
+static int wakes, pushes_done;
 static int got[4], ngot, refused;
 
 static int __xtc_sim_active(void) { return 0; }
 /* No pointer may cross threads in a CBMC 5.x concurrent model, so the
  * callees the copied code uses are macros over the globals. */
-#define shard_wake(s)		((void)atomic_fetch_add(&wakes, 1))
+#define shard_wake(s)                                                          \
+	((void)xtc_atomic_fetch_add_i32(&wakes, 1, xtc_mo_seq_cst))
 #define xtc_tnt_deliver(s, to, m) \
 	((void)(ngot < 4 ? (got[ngot] = *(m)) : 0), ngot++)
 
@@ -82,8 +83,8 @@ xring_push(xtc_tnt_handle_t to, xtc_tnt_message_t mv)
 {
 #define m (&mv)
 	/* BEGIN SOURCE src/orc/tnt.c xring_push */
-	uint32_t t = atomic_load_explicit(&r->tail, memory_order_relaxed);
-	uint32_t h = atomic_load_explicit(&r->head, memory_order_acquire);
+	uint32_t t = xtc_atomic_load_u32(&r->tail, xtc_mo_relaxed);
+	uint32_t h = xtc_atomic_load_u32(&r->head, xtc_mo_acquire);
 	uint32_t i;
 
 #ifndef PLANT_NO_FULL
@@ -93,9 +94,10 @@ xring_push(xtc_tnt_handle_t to, xtc_tnt_message_t mv)
 	i = t & (XTC_TNT_XSHARD_CAP - 1u);
 	r->to[i] = to;
 	r->msg[i] = *m;
-	atomic_store(&r->tail, t + 1u);
+	xtc_atomic_store_u32(&r->tail, t + 1u, xtc_mo_seq_cst);
 #ifndef PLANT_NO_WAKE
-	if (__xtc_sim_active() || atomic_load(&dst->sleeping))
+	if (__xtc_sim_active() ||
+	    xtc_atomic_load_i32(&dst->sleeping, xtc_mo_seq_cst))
 		shard_wake(dst);
 #endif
 	return XTC_TNT_SEND_OK;
@@ -107,15 +109,15 @@ static uint32_t
 xring_drain(void)
 {
 	/* BEGIN SOURCE src/orc/tnt.c xring_drain */
-	uint32_t h = atomic_load_explicit(&r->head, memory_order_relaxed);
-	uint32_t t = atomic_load_explicit(&r->tail, memory_order_acquire);
+	uint32_t h = xtc_atomic_load_u32(&r->head, xtc_mo_relaxed);
+	uint32_t t = xtc_atomic_load_u32(&r->tail, xtc_mo_acquire);
 	uint32_t n = t - h;
 
 	for (; h != t; h++) {
 		uint32_t i = h & (XTC_TNT_XSHARD_CAP - 1u);
 		(void)xtc_tnt_deliver(sh, r->to[i], &r->msg[i]);
 	}
-	atomic_store_explicit(&r->head, h, memory_order_release);
+	xtc_atomic_store_u32(&r->head, h, xtc_mo_release);
 	return n;
 	/* END SOURCE */
 }
@@ -125,9 +127,9 @@ xring_pending(void)
 {
 	/* BEGIN SOURCE src/orc/tnt.c xring_pending */
 	return r != NULL &&
-	    atomic_load(&((xtc_tnt_xring_t *)r)->tail) !=
-	    atomic_load_explicit(&((xtc_tnt_xring_t *)r)->head,
-	    memory_order_relaxed);
+	    xtc_atomic_load_u32(&((xtc_tnt_xring_t *)r)->tail,
+	        xtc_mo_seq_cst) !=
+	    xtc_atomic_load_u32(&((xtc_tnt_xring_t *)r)->head, xtc_mo_relaxed);
 	/* END SOURCE */
 }
 #undef r
@@ -143,7 +145,7 @@ producer(void)
 	for (m = 1; m <= 3; m++)
 		if (xring_push(0, m) != XTC_TNT_SEND_OK)
 			refused++;
-	atomic_store(&pushes_done, 1);
+	xtc_atomic_store_i32(&pushes_done, 1, xtc_mo_seq_cst);
 }
 
 int
@@ -151,15 +153,15 @@ main(void)
 {
 	int parked = 0, i;
 
-	atomic_store(&R.head, 0);
-	atomic_store(&R.tail, 0);
-	atomic_store(&D.sleeping, 0);
+	xtc_atomic_store_u32(&R.head, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_u32(&R.tail, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&D.sleeping, 0, xtc_mo_seq_cst);
 
 	__CPROVER_ASYNC_1: producer();
 
 	/* The destination's tick then park (xtc_tnt_shard_main). */
 	(void)xring_drain();
-	atomic_store(&D.sleeping, 1);
+	xtc_atomic_store_i32(&D.sleeping, 1, xtc_mo_seq_cst);
 #ifdef PLANT_NO_RECHECK
 	if (1) {
 #else
@@ -167,16 +169,19 @@ main(void)
 #endif
 		/* Parked: wakes only on a wake byte.  Let the producer finish,
 		 * then ask whether it is asleep with work queued. */
-		__CPROVER_assume(atomic_load(&pushes_done) == 1);
-		if (atomic_load(&wakes) == 0 && xring_pending())
+		__CPROVER_assume(
+		    xtc_atomic_load_i32(&pushes_done, xtc_mo_seq_cst) == 1);
+		if (xtc_atomic_load_i32(&wakes, xtc_mo_seq_cst) == 0 &&
+		    xring_pending())
 			parked = 1;
 	}
-	atomic_store(&D.sleeping, 0);
+	xtc_atomic_store_i32(&D.sleeping, 0, xtc_mo_seq_cst);
 	__CPROVER_assert(!parked,
 	    "no lost wake: never parked with a message queued and no wake");
 
 	/* Eventually everything is drained, in order. */
-	__CPROVER_assume(atomic_load(&pushes_done) == 1);
+	__CPROVER_assume(
+	    xtc_atomic_load_i32(&pushes_done, xtc_mo_seq_cst) == 1);
 	(void)xring_drain();
 	__CPROVER_assert(ngot + refused == 3,
 	    "every push delivered once or refused (none lost, none doubled)");

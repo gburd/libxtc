@@ -33,7 +33,20 @@
  *	the protocol is.  -DPLANT_NO_RETRY returns either probe's result
  *	without validating the sequence and must FAIL.
  */
-#include <stdatomic.h>
+#include "xtc_atomic.h"
+/* The modelled pointers are int indexes (CBMC 5.x rejects pointers shared
+ * between threads), so the source's _ptr operations are the _i32 ones
+ * here; the transcribed blocks keep the source's spelling. */
+#undef xtc_atomic_load_ptr
+#undef xtc_atomic_store_ptr
+#undef xtc_atomic_exchange_ptr
+#undef xtc_atomic_cas_ptr
+#undef xtc_atomic_cas_weak_ptr
+#define xtc_atomic_load_ptr xtc_atomic_load_i32
+#define xtc_atomic_store_ptr xtc_atomic_store_i32
+#define xtc_atomic_exchange_ptr xtc_atomic_exchange_i32
+#define xtc_atomic_cas_ptr xtc_atomic_cas_i32
+#define xtc_atomic_cas_weak_ptr xtc_atomic_cas_weak_i32
 #include <stdint.h>
 
 #define NULL		0
@@ -42,20 +55,20 @@
 
 typedef int xtc_loop_t;			/* a loop is its index; 0 = none */
 struct lt_entry {
-	_Atomic int loop;
-	_Atomic int tbl;
+	int loop;
+	int tbl;
 };
 static struct lt_entry __lt[LOOP_TABLE_MAX];
 static int __lt_n;
 static struct lt_entry __lt_h[LT_HCAP];
 struct lt_id_entry {
-	_Atomic unsigned id;
-	_Atomic int loop;
-	_Atomic int tbl;
+	unsigned id;
+	int loop;
+	int tbl;
 };
 static struct lt_id_entry __lt_ih[LT_HCAP];
-static _Atomic unsigned __lt_seq;
-static _Atomic int reader_done;
+static unsigned __lt_seq;
+static int reader_done;
 
 static unsigned
 __lt_hash(int loop)
@@ -80,17 +93,17 @@ __lt_id_hash(unsigned id)
 static void
 __lt_write_begin(void)
 {
-	atomic_store_explicit(&__lt_seq,
-	    atomic_load_explicit(&__lt_seq, memory_order_relaxed) + 1u,
-	    memory_order_relaxed);
-	atomic_thread_fence(memory_order_release);
+	xtc_atomic_store_u32(&__lt_seq,
+	    xtc_atomic_load_u32(&__lt_seq, xtc_mo_relaxed) + 1u,
+	    xtc_mo_relaxed);
+	xtc_atomic_thread_fence(xtc_mo_release);
 }
 static void
 __lt_write_end(void)
 {
-	atomic_store_explicit(&__lt_seq,
-	    atomic_load_explicit(&__lt_seq, memory_order_relaxed) + 1u,
-	    memory_order_release);
+	xtc_atomic_store_u32(&__lt_seq,
+	    xtc_atomic_load_u32(&__lt_seq, xtc_mo_relaxed) + 1u,
+	    xtc_mo_release);
 }
 
 static void
@@ -98,11 +111,10 @@ __lt_hash_put(int loop, int t)
 {
 	/* BEGIN SOURCE src/ptc/proc.c __lt_hash_put */
 	unsigned h = __lt_hash(loop);
-	while (atomic_load_explicit(&__lt_h[h].loop,
-	    memory_order_relaxed) != NULL)
+	while (xtc_atomic_load_ptr(&__lt_h[h].loop, xtc_mo_relaxed) != NULL)
 		h = (h + 1u) & (LT_HCAP - 1u);
-	atomic_store_explicit(&__lt_h[h].tbl, t, memory_order_release);
-	atomic_store_explicit(&__lt_h[h].loop, loop, memory_order_release);
+	xtc_atomic_store_ptr(&__lt_h[h].tbl, t, xtc_mo_release);
+	xtc_atomic_store_ptr(&__lt_h[h].loop, loop, xtc_mo_release);
 	/* END SOURCE */
 }
 
@@ -112,12 +124,11 @@ __lt_id_put(int loop, int t)
 	/* BEGIN SOURCE src/ptc/proc.c __lt_id_put */
 	uint32_t id = __lt_loop_id(loop);
 	unsigned h = __lt_id_hash(id);
-	while (atomic_load_explicit(&__lt_ih[h].loop, memory_order_relaxed) !=
-	    NULL)
+	while (xtc_atomic_load_ptr(&__lt_ih[h].loop, xtc_mo_relaxed) != NULL)
 		h = (h + 1u) & (LT_HCAP - 1u);
-	atomic_store_explicit(&__lt_ih[h].id, id, memory_order_release);
-	atomic_store_explicit(&__lt_ih[h].tbl, t, memory_order_release);
-	atomic_store_explicit(&__lt_ih[h].loop, loop, memory_order_release);
+	xtc_atomic_store_u32(&__lt_ih[h].id, id, xtc_mo_release);
+	xtc_atomic_store_ptr(&__lt_ih[h].tbl, t, xtc_mo_release);
+	xtc_atomic_store_ptr(&__lt_ih[h].loop, loop, xtc_mo_release);
 	/* END SOURCE */
 }
 
@@ -129,32 +140,31 @@ __lt_find_id(uint32_t id, int *out_tbl)
 	int t;
 	/* BEGIN SOURCE src/ptc/proc.c __lt_find_id */
 	for (;;) {
-		seq = atomic_load_explicit(&__lt_seq, memory_order_acquire);
+		seq = xtc_atomic_load_u32(&__lt_seq, xtc_mo_acquire);
 		if (seq & 1u)
 			continue;
 		found = NULL;
 		t = NULL;
 		for (h = __lt_id_hash(id), k = 0; k < LT_HCAP;
 		     h = (h + 1u) & (LT_HCAP - 1u), k++) {
-			l = atomic_load_explicit(&__lt_ih[h].loop,
-			    memory_order_acquire);
+			l = xtc_atomic_load_ptr(&__lt_ih[h].loop,
+			    xtc_mo_acquire);
 			if (l == NULL)
 				break;
-			if (atomic_load_explicit(&__lt_ih[h].id,
-			        memory_order_acquire) == id) {
+			if (xtc_atomic_load_u32(&__lt_ih[h].id,
+			        xtc_mo_acquire) == id) {
 				found = l;
-				t = atomic_load_explicit(&__lt_ih[h].tbl,
-				    memory_order_acquire);
+				t = xtc_atomic_load_ptr(&__lt_ih[h].tbl,
+				    xtc_mo_acquire);
 				break;
 			}
 		}
-		atomic_thread_fence(memory_order_acquire);
+		xtc_atomic_thread_fence(xtc_mo_acquire);
 #ifdef PLANT_NO_RETRY
 		*out_tbl = t;
 		return found;
 #endif
-		if (atomic_load_explicit(&__lt_seq, memory_order_relaxed) ==
-		    seq) {
+		if (xtc_atomic_load_u32(&__lt_seq, xtc_mo_relaxed) == seq) {
 			*out_tbl = t;
 			return found;
 		}
@@ -170,27 +180,26 @@ __lt_find(int loop)
 	int t;
 	/* BEGIN SOURCE src/ptc/proc.c __lt_find */
 	for (;;) {
-		seq = atomic_load_explicit(&__lt_seq, memory_order_acquire);
+		seq = xtc_atomic_load_u32(&__lt_seq, xtc_mo_acquire);
 		if (seq & 1u)
 			continue;              /* a writer is mid-change */
 		t = NULL;
 		for (h = __lt_hash(loop); ; h = (h + 1u) & (LT_HCAP - 1u)) {
-			l = atomic_load_explicit(&__lt_h[h].loop,
-			    memory_order_acquire);
+			l = xtc_atomic_load_ptr(&__lt_h[h].loop,
+			    xtc_mo_acquire);
 			if (l == NULL)
 				break;
 			if (l == loop) {
-				t = atomic_load_explicit(&__lt_h[h].tbl,
-				    memory_order_acquire);
+				t = xtc_atomic_load_ptr(&__lt_h[h].tbl,
+				    xtc_mo_acquire);
 				break;
 			}
 		}
-		atomic_thread_fence(memory_order_acquire);
+		xtc_atomic_thread_fence(xtc_mo_acquire);
 #ifdef PLANT_NO_RETRY
 		return t;
 #endif
-		if (atomic_load_explicit(&__lt_seq,
-		    memory_order_relaxed) == seq)
+		if (xtc_atomic_load_u32(&__lt_seq, xtc_mo_relaxed) == seq)
 			return t;
 	}
 	/* END SOURCE */
@@ -204,38 +213,34 @@ remove_loop(int loop)
 	int i, j;
 
 	for (i = 0; i < __lt_n; i++)
-		if (atomic_load_explicit(&__lt[i].loop,
-		    memory_order_relaxed) == loop)
+		if (xtc_atomic_load_i32(&__lt[i].loop, xtc_mo_relaxed) == loop)
 			break;
 	/* BEGIN SOURCE src/ptc/proc.c __lt_remove_locked */
 	__lt_write_begin();
 	/* Dense array: move the last entry into the hole. */
 	__lt_n--;
-	atomic_store_explicit(&__lt[i].loop, atomic_load_explicit(
-	    &__lt[__lt_n].loop, memory_order_relaxed), memory_order_release);
-	atomic_store_explicit(&__lt[i].tbl, atomic_load_explicit(
-	    &__lt[__lt_n].tbl, memory_order_relaxed), memory_order_release);
-	atomic_store_explicit(&__lt[__lt_n].loop, NULL, memory_order_release);
-	atomic_store_explicit(&__lt[__lt_n].tbl, NULL, memory_order_release);
+	xtc_atomic_store_ptr(&__lt[i].loop,
+	    xtc_atomic_load_ptr(&__lt[__lt_n].loop, xtc_mo_relaxed),
+	    xtc_mo_release);
+	xtc_atomic_store_ptr(&__lt[i].tbl,
+	    xtc_atomic_load_ptr(&__lt[__lt_n].tbl, xtc_mo_relaxed),
+	    xtc_mo_release);
+	xtc_atomic_store_ptr(&__lt[__lt_n].loop, NULL, xtc_mo_release);
+	xtc_atomic_store_ptr(&__lt[__lt_n].tbl, NULL, xtc_mo_release);
 	/* Both hashes: rebuild from the dense array (no tombstones). */
 	for (j = 0; j < (int)LT_HCAP; j++) {
-		atomic_store_explicit(&__lt_h[j].loop, NULL,
-		    memory_order_relaxed);
-		atomic_store_explicit(&__lt_h[j].tbl, NULL,
-		    memory_order_relaxed);
-		atomic_store_explicit(&__lt_ih[j].loop, NULL,
-		    memory_order_relaxed);
-		atomic_store_explicit(&__lt_ih[j].tbl, NULL,
-		    memory_order_relaxed);
-		atomic_store_explicit(&__lt_ih[j].id, 0, memory_order_relaxed);
+		xtc_atomic_store_ptr(&__lt_h[j].loop, NULL, xtc_mo_relaxed);
+		xtc_atomic_store_ptr(&__lt_h[j].tbl, NULL, xtc_mo_relaxed);
+		xtc_atomic_store_ptr(&__lt_ih[j].loop, NULL, xtc_mo_relaxed);
+		xtc_atomic_store_ptr(&__lt_ih[j].tbl, NULL, xtc_mo_relaxed);
+		xtc_atomic_store_u32(&__lt_ih[j].id, 0, xtc_mo_relaxed);
 	}
 	for (j = 0; j < __lt_n; j++) {
-		__lt_hash_put(atomic_load_explicit(&__lt[j].loop,
-		    memory_order_relaxed), atomic_load_explicit(&__lt[j].tbl,
-		    memory_order_relaxed));
-		__lt_id_put(atomic_load_explicit(&__lt[j].loop,
-		                memory_order_relaxed),
-		    atomic_load_explicit(&__lt[j].tbl, memory_order_relaxed));
+		__lt_hash_put(xtc_atomic_load_ptr(&__lt[j].loop,
+		                  xtc_mo_relaxed),
+		    xtc_atomic_load_ptr(&__lt[j].tbl, xtc_mo_relaxed));
+		__lt_id_put(xtc_atomic_load_ptr(&__lt[j].loop, xtc_mo_relaxed),
+		    xtc_atomic_load_ptr(&__lt[j].tbl, xtc_mo_relaxed));
 	}
 	__lt_write_end();
 	/* END SOURCE */
@@ -251,7 +256,7 @@ reader(void)
 		got = __lt_find_id(__lt_loop_id(want), &got_tbl);
 	else
 		got_tbl = __lt_find(want);
-	atomic_store(&reader_done, 1);
+	xtc_atomic_store_i32(&reader_done, 1, xtc_mo_seq_cst);
 }
 
 int
@@ -261,8 +266,8 @@ main(void)
 
 	/* Loops 1, 2, 3 with tables 11, 12, 13, registered in order. */
 	for (i = 0; i < 3; i++) {
-		atomic_store(&__lt[i].loop, i + 1);
-		atomic_store(&__lt[i].tbl, 11 + i);
+		xtc_atomic_store_i32(&__lt[i].loop, i + 1, xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&__lt[i].tbl, 11 + i, xtc_mo_seq_cst);
 		__lt_hash_put(i + 1, 11 + i);
 		__lt_id_put(i + 1, 11 + i);
 	}
@@ -274,7 +279,8 @@ main(void)
 	__CPROVER_ASYNC_1: reader();
 	remove_loop(1);
 
-	__CPROVER_assume(atomic_load(&reader_done) == 1);
+	__CPROVER_assume(
+	    xtc_atomic_load_i32(&reader_done, xtc_mo_seq_cst) == 1);
 	if (want == 1)
 		__CPROVER_assert(got_tbl == 11 || got_tbl == NULL,
 		    "the loop being removed: its own table or none");

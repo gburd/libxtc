@@ -49,7 +49,6 @@
 #include "xtc_inject.h"   /* slab.magazine_window test hook */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -125,7 +124,7 @@ static int   __win_chunk_free(void *p, size_t sz) { (void)sz; _aligned_free(p); 
 struct xtc_slab_shm_header {
 	uint64_t         magic;
 	uint64_t         version;
-	_Atomic uint64_t cursor;      /* next free offset from region start */
+	uint64_t cursor; /* next free offset from region start */
 	uint64_t         total_size;
 	/*
 	 * Cross-process free list.  Reclaimed slots are linked through
@@ -141,8 +140,8 @@ struct xtc_slab_shm_header {
 	 * from.  All of this lives in the shared header so reclamation is
 	 * visible to every attached process.
 	 */
-	_Atomic uint64_t free_off;    /* head of the offset free list (NIL = empty) */
-	_Atomic uint32_t free_lock;   /* 0 = unlocked, 1 = locked (spin) */
+	uint64_t free_off;  /* head of the offset free list (NIL = empty) */
+	uint32_t free_lock; /* 0 = unlocked, 1 = locked (spin) */
 	uint32_t         pad0;
 	uint64_t         slot_size;   /* per-slot stride, set by the creator */
 	uint8_t          reserved[8];
@@ -371,14 +370,14 @@ struct slab_chunk {
 #endif
 
 struct slab_stripe {
-	_Alignas(XTC_CACHE_LINE) _Atomic uint64_t alloc_fast;
-	_Atomic uint64_t alloc_slow;
-	_Atomic uint64_t free_fast;
-	_Atomic uint64_t free_slow;
-	_Atomic uint64_t ctor_fail;
+	_Alignas(XTC_CACHE_LINE) uint64_t alloc_fast;
+	uint64_t alloc_slow;
+	uint64_t free_fast;
+	uint64_t free_slow;
+	uint64_t ctor_fail;
 };
 
-static _Atomic unsigned           __slab_stripe_next;
+static unsigned __slab_stripe_next;
 static XTC_THREAD_LOCAL unsigned  __slab_stripe_tls;   /* 0 = unassigned */
 
 static struct slab_stripe *
@@ -397,15 +396,15 @@ struct xtc_slab {
 
 	/* Stats (atomic for lock-free read).  The per-alloc/free counters
 	 * live in `stripes` below; these are slow-path or rare. */
-	_Atomic uint64_t s_n_free;
-	_Atomic uint64_t s_n_chunks;
-	_Atomic uint64_t s_reaps;
-	_Atomic uint64_t s_oom_fails;
-	_Atomic uint64_t s_rz_violations;
+	uint64_t s_n_free;
+	uint64_t s_n_chunks;
+	uint64_t s_reaps;
+	uint64_t s_oom_fails;
+	uint64_t s_rz_violations;
 
 	/* Audit ring (only allocated if XTC_SLAB_AUDIT). */
 	struct audit_event *audit_ring;
-	_Atomic uint64_t    audit_pos;
+	uint64_t audit_pos;
 
 	/* Shared-memory bookkeeping: pointer to header in region. */
 	struct xtc_slab_shm_header *shm_hdr;
@@ -426,15 +425,17 @@ __stripe(xtc_slab_t *s)
 {
 	unsigned i = __slab_stripe_tls;
 	if (XTC_UNLIKELY(i == 0)) {
-		i = atomic_fetch_add_explicit(&__slab_stripe_next, 1,
-		    memory_order_relaxed) % XTC_SLAB_STRIPES + 1;
+		i = xtc_atomic_fetch_add_u32(&__slab_stripe_next, 1,
+		        xtc_mo_relaxed) %
+		        XTC_SLAB_STRIPES +
+		    1;
 		__slab_stripe_tls = i;
 	}
 	return &s->stripes[(i - 1) & (XTC_SLAB_STRIPES - 1)];
 }
 
-#define __STAT_INC(s, f) \
-	atomic_fetch_add_explicit(&__stripe(s)->f, 1, memory_order_relaxed)
+#define __STAT_INC(s, f)                                                       \
+	xtc_atomic_fetch_add_u64(&__stripe(s)->f, 1, xtc_mo_relaxed)
 
 static int64_t
 __now_ns_slab(void)
@@ -456,7 +457,7 @@ __audit_record(xtc_slab_t *s, void *obj, uint8_t op)
 	uint64_t pos;
 	struct audit_event *ev;
 	if (s->audit_ring == NULL) return;
-	pos = atomic_fetch_add_explicit(&s->audit_pos, 1, memory_order_relaxed);
+	pos = xtc_atomic_fetch_add_u64(&s->audit_pos, 1, xtc_mo_relaxed);
 	ev = &s->audit_ring[pos % XTC_AUDIT_N];
 	ev->obj = obj;
 	ev->op = op;
@@ -538,8 +539,8 @@ __rz_check(xtc_slab_t *s, void *slot)
 	front = __rz_front_at(s, slot);
 	if (front[1] != XTC_RZ_MAGIC ||
 	    *__rz_back_at(s, slot) != XTC_RZ_MAGIC) {
-		atomic_fetch_add_explicit(&s->s_rz_violations, 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_add_u64(&s->s_rz_violations, 1,
+		    xtc_mo_relaxed);
 		return 1;
 	}
 	return 0;
@@ -567,8 +568,8 @@ __chunk_new(xtc_slab_t *s)
 		/* Carve from the shared region using atomic CAS on the header cursor. */
 		uint64_t old_cursor, new_cursor;
 		for (;;) {
-			old_cursor = atomic_load_explicit(&s->shm_hdr->cursor,
-			    memory_order_acquire);
+			old_cursor = xtc_atomic_load_u64(&s->shm_hdr->cursor,
+			    xtc_mo_acquire);
 			new_cursor = old_cursor + total;
 			if (new_cursor > s->shm_hdr->total_size) {
 				if (s->opts.res != NULL)
@@ -576,11 +577,9 @@ __chunk_new(xtc_slab_t *s)
 					    (int64_t)total);
 				return NULL;
 			}
-			if (atomic_compare_exchange_weak_explicit(
-			    &s->shm_hdr->cursor,
-			    &old_cursor, new_cursor,
-			    memory_order_acq_rel,
-			    memory_order_acquire))
+			if (xtc_atomic_cas_weak_u64(&s->shm_hdr->cursor,
+			        &old_cursor, new_cursor, xtc_mo_acq_rel,
+			        xtc_mo_acquire))
 				break;
 			/* CAS failed, another process won; retry. */
 		}
@@ -633,9 +632,9 @@ __chunk_new(xtc_slab_t *s)
 	c->next = s->chunks;
 	s->chunks = c;
 	s->n_chunks++;
-	atomic_fetch_add_explicit(&s->s_n_chunks, 1, memory_order_relaxed);
-	atomic_fetch_add_explicit(&s->s_n_free,
-	    (uint64_t)s->objs_per_chunk, memory_order_relaxed);
+	xtc_atomic_fetch_add_u64(&s->s_n_chunks, 1, xtc_mo_relaxed);
+	xtc_atomic_fetch_add_u64(&s->s_n_free, (uint64_t)s->objs_per_chunk,
+	    xtc_mo_relaxed);
 	return c;
 }
 
@@ -818,21 +817,19 @@ xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 		if (hdr->magic != XTC_SHM_MAGIC) {
 			uint64_t expected = 0;
 			/* Try to be the initializer. */
-			if (atomic_compare_exchange_strong_explicit(
-			    (_Atomic uint64_t *)&hdr->magic,
-			    &expected, XTC_SHM_MAGIC,
-			    memory_order_acq_rel,
-			    memory_order_acquire)) {
+			if (xtc_atomic_cas_u64((uint64_t *)&hdr->magic,
+			        &expected, XTC_SHM_MAGIC, xtc_mo_acq_rel,
+			        xtc_mo_acquire)) {
 				/* We won the race; initialize header. */
 				hdr->version = XTC_SHM_VERSION;
 				hdr->total_size = s->opts.shm_size;
 				hdr->slot_size = (uint64_t)s->slot_size;
-				atomic_store_explicit(&hdr->free_off,
-				    XTC_SHM_FREE_NIL, memory_order_relaxed);
-				atomic_store_explicit(&hdr->free_lock, 0,
-				    memory_order_relaxed);
-				atomic_store_explicit(&hdr->cursor,
-				    XTC_SHM_HDR_SIZE, memory_order_release);
+				xtc_atomic_store_u64(&hdr->free_off,
+				    XTC_SHM_FREE_NIL, xtc_mo_relaxed);
+				xtc_atomic_store_u32(&hdr->free_lock, 0,
+				    xtc_mo_relaxed);
+				xtc_atomic_store_u64(&hdr->cursor,
+				    XTC_SHM_HDR_SIZE, xtc_mo_release);
 			} else {
 				/* Another process init'd; spin until magic visible. */
 				while (hdr->magic != XTC_SHM_MAGIC)
@@ -998,15 +995,14 @@ xtc_slab_destroy(xtc_slab_t *s)
 static void
 __shm_lock(struct xtc_slab_shm_header *hdr)
 {
-	while (atomic_exchange_explicit(&hdr->free_lock, 1,
-	    memory_order_acquire) != 0)
+	while (xtc_atomic_exchange_u32(&hdr->free_lock, 1, xtc_mo_acquire) != 0)
 		;   /* spin: held only for two memory ops */
 }
 
 static void
 __shm_unlock(struct xtc_slab_shm_header *hdr)
 {
-	atomic_store_explicit(&hdr->free_lock, 0, memory_order_release);
+	xtc_atomic_store_u32(&hdr->free_lock, 0, xtc_mo_release);
 }
 
 /* Pop a reclaimed slot offset, or XTC_SHM_FREE_NIL if the list is
@@ -1018,11 +1014,11 @@ __shm_free_pop(xtc_slab_t *s)
 	uint64_t off;
 
 	__shm_lock(hdr);
-	off = atomic_load_explicit(&hdr->free_off, memory_order_relaxed);
+	off = xtc_atomic_load_u64(&hdr->free_off, xtc_mo_relaxed);
 	if (off != XTC_SHM_FREE_NIL) {
 		/* The slot's first 8 bytes hold the next offset. */
 		uint64_t *link = (uint64_t *)((uint8_t *)s->opts.shm_base + off);
-		atomic_store_explicit(&hdr->free_off, *link, memory_order_relaxed);
+		xtc_atomic_store_u64(&hdr->free_off, *link, xtc_mo_relaxed);
 	}
 	__shm_unlock(hdr);
 	return off;
@@ -1036,8 +1032,8 @@ __shm_free_push(xtc_slab_t *s, uint64_t off)
 	uint64_t *link = (uint64_t *)((uint8_t *)s->opts.shm_base + off);
 
 	__shm_lock(hdr);
-	*link = atomic_load_explicit(&hdr->free_off, memory_order_relaxed);
-	atomic_store_explicit(&hdr->free_off, off, memory_order_relaxed);
+	*link = xtc_atomic_load_u64(&hdr->free_off, xtc_mo_relaxed);
+	xtc_atomic_store_u64(&hdr->free_off, off, xtc_mo_relaxed);
 	__shm_unlock(hdr);
 }
 
@@ -1051,12 +1047,12 @@ __shm_cursor_carve(xtc_slab_t *s)
 	uint64_t old, neu;
 
 	for (;;) {
-		old = atomic_load_explicit(&hdr->cursor, memory_order_acquire);
+		old = xtc_atomic_load_u64(&hdr->cursor, xtc_mo_acquire);
 		neu = old + (uint64_t)s->slot_size;
 		if (neu > hdr->total_size)
 			return XTC_SHM_FREE_NIL;   /* region full */
-		if (atomic_compare_exchange_weak_explicit(&hdr->cursor,
-		    &old, neu, memory_order_acq_rel, memory_order_acquire))
+		if (xtc_atomic_cas_weak_u64(&hdr->cursor, &old, neu,
+		        xtc_mo_acq_rel, xtc_mo_acquire))
 			return old;
 	}
 }
@@ -1082,8 +1078,8 @@ xtc_slab_alloc(xtc_slab_t *s)
 		if (off == XTC_SHM_FREE_NIL)
 			off = __shm_cursor_carve(s);
 		if (off == XTC_SHM_FREE_NIL) {
-			atomic_fetch_add_explicit(&s->s_oom_fails, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_u64(&s->s_oom_fails, 1,
+			    xtc_mo_relaxed);
 			if (s->opts.oom_policy == XTC_SLAB_OOM_ABORT) abort();
 			return NULL;
 		}
@@ -1128,13 +1124,12 @@ xtc_slab_alloc(xtc_slab_t *s)
 		slot = __pop_slot_locked(s);
 	}
 	if (XTC_UNLIKELY(slot == NULL)) {
-		atomic_fetch_add_explicit(&s->s_oom_fails, 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_add_u64(&s->s_oom_fails, 1, xtc_mo_relaxed);
 		(void)__xtc_mtx_unlock(&s->lock);
 		if (s->opts.oom_policy == XTC_SLAB_OOM_ABORT) abort();
 		return NULL;
 	}
-	atomic_fetch_sub_explicit(&s->s_n_free, 1, memory_order_relaxed);
+	xtc_atomic_fetch_sub_u64(&s->s_n_free, 1, xtc_mo_relaxed);
 	(void)__xtc_mtx_unlock(&s->lock);
 	__STAT_INC(s, alloc_slow);
 
@@ -1150,8 +1145,8 @@ have_slot:
 			} else {
 				(void)__xtc_mtx_lock(&s->lock);
 				__push_slot_locked(s, slot);
-				atomic_fetch_add_explicit(&s->s_n_free, 1,
-				    memory_order_relaxed);
+				xtc_atomic_fetch_add_u64(&s->s_n_free, 1,
+				    xtc_mo_relaxed);
 				(void)__xtc_mtx_unlock(&s->lock);
 			}
 			__STAT_INC(s, ctor_fail);   /* back out the alloc */
@@ -1227,7 +1222,7 @@ slow:
 	(void)__xtc_mtx_lock(&s->lock);
 	__push_slot_locked(s, slot);
 	(void)__xtc_mtx_unlock(&s->lock);
-	atomic_fetch_add_explicit(&s->s_n_free, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_u64(&s->s_n_free, 1, xtc_mo_relaxed);
 	__STAT_INC(s, free_slow);
 }
 
@@ -1249,8 +1244,9 @@ xtc_slab_reap(xtc_slab_t *s)
 					(void)__xtc_mtx_lock(&s->lock);
 					while (mag->n > 0) {
 						__push_slot_locked(s, mag->slots[--mag->n]);
-						atomic_fetch_add_explicit(&s->s_n_free, 1,
-						    memory_order_relaxed);
+						xtc_atomic_fetch_add_u64(
+						    &s->s_n_free, 1,
+						    xtc_mo_relaxed);
 						reaped++;
 					}
 					(void)__xtc_mtx_unlock(&s->lock);
@@ -1263,8 +1259,8 @@ xtc_slab_reap(xtc_slab_t *s)
 			(void)__xtc_mtx_lock(&s->lock);
 			while (mag->n > 0) {
 				__push_slot_locked(s, mag->slots[--mag->n]);
-				atomic_fetch_add_explicit(&s->s_n_free, 1,
-				    memory_order_relaxed);
+				xtc_atomic_fetch_add_u64(&s->s_n_free, 1,
+				    xtc_mo_relaxed);
 				reaped++;
 			}
 			(void)__xtc_mtx_unlock(&s->lock);
@@ -1279,11 +1275,10 @@ xtc_slab_reap(xtc_slab_t *s)
 			next = c->next;
 			*link = next;
 			s->n_chunks--;
-			atomic_fetch_sub_explicit(&s->s_n_chunks, 1,
-			    memory_order_relaxed);
-			atomic_fetch_sub_explicit(&s->s_n_free,
-			    (uint64_t)s->objs_per_chunk,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_sub_u64(&s->s_n_chunks, 1,
+			    xtc_mo_relaxed);
+			xtc_atomic_fetch_sub_u64(&s->s_n_free,
+			    (uint64_t)s->objs_per_chunk, xtc_mo_relaxed);
 			__chunk_release(s, c);
 			reaped += s->objs_per_chunk;
 		} else {
@@ -1291,7 +1286,7 @@ xtc_slab_reap(xtc_slab_t *s)
 		}
 	}
 	(void)__xtc_mtx_unlock(&s->lock);
-	atomic_fetch_add_explicit(&s->s_reaps, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_u64(&s->s_reaps, 1, xtc_mo_relaxed);
 	return reaped;
 }
 
@@ -1306,30 +1301,30 @@ xtc_slab_stat(const xtc_slab_t *s, xtc_slab_stats_t *uout)
 	out->alloc_fast = out->alloc_slow = out->free_fast = out->free_slow = 0;
 	for (i = 0; i < XTC_SLAB_STRIPES; i++) {
 		const struct slab_stripe *st = &s->stripes[i];
-		out->alloc_fast += atomic_load_explicit(&st->alloc_fast,
-		    memory_order_relaxed);
-		out->alloc_slow += atomic_load_explicit(&st->alloc_slow,
-		    memory_order_relaxed);
-		out->free_fast += atomic_load_explicit(&st->free_fast,
-		    memory_order_relaxed);
-		out->free_slow += atomic_load_explicit(&st->free_slow,
-		    memory_order_relaxed);
-		ctor_fail += atomic_load_explicit(&st->ctor_fail,
-		    memory_order_relaxed);
+		out->alloc_fast +=
+		    xtc_atomic_load_u64(&st->alloc_fast, xtc_mo_relaxed);
+		out->alloc_slow +=
+		    xtc_atomic_load_u64(&st->alloc_slow, xtc_mo_relaxed);
+		out->free_fast +=
+		    xtc_atomic_load_u64(&st->free_fast, xtc_mo_relaxed);
+		out->free_slow +=
+		    xtc_atomic_load_u64(&st->free_slow, xtc_mo_relaxed);
+		ctor_fail +=
+		    xtc_atomic_load_u64(&st->ctor_fail, xtc_mo_relaxed);
 	}
 	live = out->alloc_fast + out->alloc_slow - ctor_fail;
 	/* Clamp: a concurrent free counted before its alloc's stripe was
 	 * read must not wrap n_inuse to ~2^64. */
 	out->n_inuse = live > out->free_fast + out->free_slow ?
 	    live - (out->free_fast + out->free_slow) : 0;
-	out->n_free        = atomic_load_explicit(&s->s_n_free,     memory_order_relaxed);
-	out->n_chunks      = atomic_load_explicit(&s->s_n_chunks,   memory_order_relaxed);
+	out->n_free = xtc_atomic_load_u64(&s->s_n_free, xtc_mo_relaxed);
+	out->n_chunks = xtc_atomic_load_u64(&s->s_n_chunks, xtc_mo_relaxed);
 	out->bytes_inuse   = out->n_inuse * s->opts.obj_size;
 	out->bytes_total   = out->n_chunks * s->opts.chunk_size;
-	out->reaps         = atomic_load_explicit(&s->s_reaps,      memory_order_relaxed);
-	out->oom_fails     = atomic_load_explicit(&s->s_oom_fails,  memory_order_relaxed);
-	out->redzone_violations = atomic_load_explicit(&s->s_rz_violations,
-	    memory_order_relaxed);
+	out->reaps = xtc_atomic_load_u64(&s->s_reaps, xtc_mo_relaxed);
+	out->oom_fails = xtc_atomic_load_u64(&s->s_oom_fails, xtc_mo_relaxed);
+	out->redzone_violations =
+	    xtc_atomic_load_u64(&s->s_rz_violations, xtc_mo_relaxed);
 	return __xtc_sized_out(uout, &full, sizeof full);
 }
 

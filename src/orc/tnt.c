@@ -59,7 +59,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -158,8 +157,8 @@ typedef struct xtc_tnt_staged_io {
  * its tick.  head/tail are free-running; capacity is a power of two.
  */
 typedef struct xtc_tnt_xring {
-	_Alignas(64) _Atomic uint32_t head;      /* consumer */
-	_Alignas(64) _Atomic uint32_t tail;      /* producer */
+	_Alignas(64) uint32_t head; /* consumer */
+	_Alignas(64) uint32_t tail; /* producer */
 	_Alignas(64) xtc_tnt_handle_t to[XTC_TNT_XSHARD_CAP];
 	xtc_tnt_message_t msg[XTC_TNT_XSHARD_CAP];
 } xtc_tnt_xring_t;
@@ -211,7 +210,7 @@ typedef struct xtc_tnt_shard {
 	 * two parks.  Used on the sim park path (the production path uses
 	 * the self-wake pipe, which is level-triggered and does not have
 	 * this window). */
-	atomic_int         pending_wake;
+	int pending_wake;
 
 	/* Incoming cross-shard messages, one SPSC ring per source shard
 	 * (xin[src]), and one MPSC ring for senders that are not a shard
@@ -224,7 +223,7 @@ typedef struct xtc_tnt_shard {
 	 * ring producer writes the wake byte only then (Dekker with the
 	 * shard's last ring check, both seq_cst), so a busy shard costs its
 	 * cross-shard senders no system call. */
-	atomic_int         sleeping;
+	int sleeping;
 	/* Envelopes freed by dispatch, reused by deliver.  Owner-thread
 	 * only: every deliver runs on this shard's thread. */
 	struct xtc_tnt_envelope *env_free;
@@ -239,7 +238,7 @@ typedef struct xtc_tnt_shard {
 	 * pending frees the fiber, not its arg.  Guarded by comp_lock. */
 	struct xtc_tnt_timer_arg *timers;
 
-	atomic_int         stop;
+	int stop;
 	uint64_t           ticks;
 } xtc_tnt_shard_t;
 
@@ -258,7 +257,7 @@ typedef struct xtc_tnt_runtime {
 	xtc_exec_t       *exec;
 	xtc_tnt_shard_t      *shards[XTC_TNT_MAX_SHARDS];
 	int               shard_count;
-	atomic_int        stop;
+	int stop;
 } xtc_tnt_runtime_t;
 
 /* The live runtime (one per process; xtc_tnt_start is not re-entrant). */
@@ -371,7 +370,7 @@ shard_wake(xtc_tnt_shard_t *sh)
 	if (__xtc_sim_active()) {
 		/* Record the wake so a park racing this write does not lose
 		 * it, then wake a currently-parked shard via its mailbox. */
-		atomic_store(&sh->pending_wake, 1);
+		xtc_atomic_store_i32(&sh->pending_wake, 1, xtc_mo_seq_cst);
 		if (sh->self_pid.gen != 0)
 			(void)xtc_send(sh->self_pid, &b, 1);
 		return;
@@ -388,8 +387,8 @@ static xtc_tnt_send_result_t
 xring_push(xtc_tnt_xring_t *r, xtc_tnt_shard_t *dst, xtc_tnt_handle_t to,
     const xtc_tnt_message_t *m)
 {
-	uint32_t t = atomic_load_explicit(&r->tail, memory_order_relaxed);
-	uint32_t h = atomic_load_explicit(&r->head, memory_order_acquire);
+	uint32_t t = xtc_atomic_load_u32(&r->tail, xtc_mo_relaxed);
+	uint32_t h = xtc_atomic_load_u32(&r->head, xtc_mo_acquire);
 	uint32_t i;
 
 	if (t - h >= XTC_TNT_XSHARD_CAP)
@@ -401,8 +400,9 @@ xring_push(xtc_tnt_xring_t *r, xtc_tnt_shard_t *dst, xtc_tnt_handle_t to,
 	 * shard's store of `sleeping` and its seq_cst ring check before it
 	 * parks, at least one side sees the other (the push is drained, or
 	 * the wake is written).  Under sim, always wake (its own path). */
-	atomic_store(&r->tail, t + 1u);
-	if (__xtc_sim_active() || atomic_load(&dst->sleeping))
+	xtc_atomic_store_u32(&r->tail, t + 1u, xtc_mo_seq_cst);
+	if (__xtc_sim_active() ||
+	    xtc_atomic_load_i32(&dst->sleeping, xtc_mo_seq_cst))
 		shard_wake(dst);
 	return XTC_TNT_SEND_OK;
 }
@@ -414,15 +414,15 @@ xring_push(xtc_tnt_xring_t *r, xtc_tnt_shard_t *dst, xtc_tnt_handle_t to,
 static uint32_t
 xring_drain(xtc_tnt_xring_t *r, xtc_tnt_shard_t *sh)
 {
-	uint32_t h = atomic_load_explicit(&r->head, memory_order_relaxed);
-	uint32_t t = atomic_load_explicit(&r->tail, memory_order_acquire);
+	uint32_t h = xtc_atomic_load_u32(&r->head, xtc_mo_relaxed);
+	uint32_t t = xtc_atomic_load_u32(&r->tail, xtc_mo_acquire);
 	uint32_t n = t - h;
 
 	for (; h != t; h++) {
 		uint32_t i = h & (XTC_TNT_XSHARD_CAP - 1u);
 		(void)xtc_tnt_deliver(sh, r->to[i], &r->msg[i]);
 	}
-	atomic_store_explicit(&r->head, h, memory_order_release);
+	xtc_atomic_store_u32(&r->head, h, xtc_mo_release);
 	return n;
 }
 
@@ -630,7 +630,7 @@ xtc_tnt_courier_main(void *arg)
 	for (;;) {
 		int rc = xtc_proc_wait_fd(ca->fd, interest,
 		    1000LL * 1000 * 1000, &revents);
-		if (atomic_load(&sh->stop)) {
+		if (xtc_atomic_load_i32(&sh->stop, xtc_mo_seq_cst)) {
 			c.result = -ECANCELED;
 			goto post;
 		}
@@ -681,7 +681,8 @@ xtc_tnt_courier_main(void *arg)
 				int rc = xtc_proc_wait_fd(ca->fd,
 				    XTC_IO_WRITABLE | XTC_IO_HUP | XTC_IO_ERR,
 				    1000LL * 1000 * 1000, &revents);
-				if (atomic_load(&sh->stop)) {
+				if (xtc_atomic_load_i32(&sh->stop,
+				        xtc_mo_seq_cst)) {
 					c.result = -ECANCELED;
 					goto post;
 				}
@@ -1350,9 +1351,9 @@ xring_pending(const xtc_tnt_xring_t *r)
 	/* seq_cst tail load: the shard's half of the Dekker pair (see
 	 * xring_push). */
 	return r != NULL &&
-	    atomic_load(&((xtc_tnt_xring_t *)r)->tail) !=
-	    atomic_load_explicit(&((xtc_tnt_xring_t *)r)->head,
-	    memory_order_relaxed);
+	    xtc_atomic_load_u32(&((xtc_tnt_xring_t *)r)->tail,
+	        xtc_mo_seq_cst) !=
+	    xtc_atomic_load_u32(&((xtc_tnt_xring_t *)r)->head, xtc_mo_relaxed);
 }
 
 static int
@@ -1399,8 +1400,9 @@ xtc_tnt_shard_main(void *arg)
 	for (;;) {
 		(void)shard_tick(sh);
 
-		if (atomic_load(&sh->stop) || atomic_load(&sh->rt->stop)) {
-			atomic_store(&sh->stop, 1);
+		if (xtc_atomic_load_i32(&sh->stop, xtc_mo_seq_cst) ||
+		    xtc_atomic_load_i32(&sh->rt->stop, xtc_mo_seq_cst)) {
+			xtc_atomic_store_i32(&sh->stop, 1, xtc_mo_seq_cst);
 			break;
 		}
 
@@ -1418,7 +1420,9 @@ xtc_tnt_shard_main(void *arg)
 			int got = 0;
 			(void)__os_clock_mono(&now);
 			until = now + sh->spec->spin_ns;
-			while (now < until && !atomic_load(&sh->rt->stop)) {
+			while (now < until &&
+			    !xtc_atomic_load_i32(&sh->rt->stop,
+			        xtc_mo_seq_cst)) {
 				if (shard_has_ready(sh)) {
 					got = 1;
 					break;
@@ -1446,7 +1450,8 @@ xtc_tnt_shard_main(void *arg)
 			 * window before this park) is recorded in pending_wake;
 			 * consume it and re-tick immediately instead of parking,
 			 * so no wake is lost. */
-			if (atomic_exchange(&sh->pending_wake, 0))
+			if (xtc_atomic_exchange_i32(&sh->pending_wake, 0,
+			        xtc_mo_seq_cst))
 				continue;
 			/* Otherwise park on our own mailbox until shard_wake
 			 * sends a byte or the bounded timeout lets us re-check
@@ -1455,7 +1460,8 @@ xtc_tnt_shard_main(void *arg)
 			if (xtc_recv(&wm, &wn, 50LL * 1000 * 1000) == XTC_OK &&
 			    wm != NULL)
 				__os_free(wm);
-			atomic_store(&sh->pending_wake, 0);
+			xtc_atomic_store_i32(&sh->pending_wake, 0,
+			    xtc_mo_seq_cst);
 			continue;
 		}
 
@@ -1465,9 +1471,9 @@ xtc_tnt_shard_main(void *arg)
 		 * at the rings once more: a ring producer that pushed before
 		 * the store is seen here, one that pushes after it sees
 		 * sleeping == 1 and writes the wake byte. */
-		atomic_store(&sh->sleeping, 1);
+		xtc_atomic_store_i32(&sh->sleeping, 1, xtc_mo_seq_cst);
 		if (shard_has_ready(sh)) {
-			atomic_store(&sh->sleeping, 0);
+			xtc_atomic_store_i32(&sh->sleeping, 0, xtc_mo_seq_cst);
 			continue;
 		}
 		{
@@ -1479,7 +1485,7 @@ xtc_tnt_shard_main(void *arg)
 			while (read(sh->wake_rd, drain, sizeof(drain)) > 0)  /* XTC_BLOCKING_OK: nonblocking pipe drain after a ready wait */
 				;
 		}
-		atomic_store(&sh->sleeping, 0);
+		xtc_atomic_store_i32(&sh->sleeping, 0, xtc_mo_seq_cst);
 	}
 
 	tl_shard = NULL;
@@ -1580,9 +1586,9 @@ shard_init(xtc_tnt_runtime_t *rt, uint8_t id, xtc_tnt_shard_t **out)
 	sh->id = id;
 	sh->spec = spec;
 	sh->rt = rt;
-	atomic_init(&sh->stop, 0);
-	atomic_init(&sh->pending_wake, 0);
-	atomic_init(&sh->sleeping, 0);
+	xtc_atomic_store_i32(&sh->stop, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&sh->pending_wake, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&sh->sleeping, 0, xtc_mo_relaxed);
 	pthread_mutex_init(&sh->comp_lock, NULL);
 	pthread_mutex_init(&sh->spawn_lock, NULL);
 	pthread_mutex_init(&sh->ext_lock, NULL);
@@ -1595,14 +1601,14 @@ shard_init(xtc_tnt_runtime_t *rt, uint8_t id, xtc_tnt_shard_t **out)
 		if (__os_aligned_alloc(64, sizeof(xtc_tnt_xring_t),
 		    (void **)&sh->xin[i]) != XTC_OK)
 			goto fail;
-		atomic_init(&sh->xin[i]->head, 0);
-		atomic_init(&sh->xin[i]->tail, 0);
+		xtc_atomic_store_u32(&sh->xin[i]->head, 0, xtc_mo_relaxed);
+		xtc_atomic_store_u32(&sh->xin[i]->tail, 0, xtc_mo_relaxed);
 	}
 	if (__os_aligned_alloc(64, sizeof(xtc_tnt_xring_t),
 	    (void **)&sh->ext) != XTC_OK)
 		goto fail;
-	atomic_init(&sh->ext->head, 0);
-	atomic_init(&sh->ext->tail, 0);
+	xtc_atomic_store_u32(&sh->ext->head, 0, xtc_mo_relaxed);
+	xtc_atomic_store_u32(&sh->ext->tail, 0, xtc_mo_relaxed);
 
 	if (__os_calloc(XTC_TNT_COMPLETION_CAP, sizeof(xtc_tnt_completion_t),
 	    (void **)&sh->comp_ring) != XTC_OK || sh->comp_ring == NULL)
@@ -1756,7 +1762,7 @@ xtc_tnt_start(const xtc_tnt_spec_t *spec)
 		return XTC_E_NOMEM;
 	rt->spec = spec;
 	rt->shard_count = spec->shard_count;
-	atomic_init(&rt->stop, 0);
+	xtc_atomic_store_i32(&rt->stop, 0, xtc_mo_relaxed);
 
 	if (xtc_exec_init(&rt->exec, spec->shard_count) != XTC_OK) {
 		__os_free(rt);
@@ -1834,7 +1840,7 @@ __xtc_tnt_run_sim(const xtc_tnt_spec_t *spec, uint64_t seed, long max_steps)
 		return XTC_E_NOMEM;
 	rt->spec = spec;
 	rt->shard_count = spec->shard_count;
-	atomic_init(&rt->stop, 0);
+	xtc_atomic_store_i32(&rt->stop, 0, xtc_mo_relaxed);
 
 	if (xtc_exec_init(&rt->exec, spec->shard_count) != XTC_OK) {
 		__os_free(rt);
@@ -1856,7 +1862,7 @@ __xtc_tnt_run_sim(const xtc_tnt_spec_t *spec, uint64_t seed, long max_steps)
 		xtc_task_t *t = NULL;
 		if (xtc_exec_spawn_on(rt->exec, i, shard_bootstrap,
 		    rt->shards[i], &t) != XTC_OK) {
-			atomic_store(&rt->stop, 1);
+			xtc_atomic_store_i32(&rt->stop, 1, xtc_mo_seq_cst);
 			break;
 		}
 	}
@@ -1878,10 +1884,11 @@ xtc_tnt_stop(void)
 	int i;
 	if (rt == NULL)
 		return;
-	atomic_store(&rt->stop, 1);
+	xtc_atomic_store_i32(&rt->stop, 1, xtc_mo_seq_cst);
 	for (i = 0; i < rt->shard_count; i++) {
 		if (rt->shards[i]) {
-			atomic_store(&rt->shards[i]->stop, 1);
+			xtc_atomic_store_i32(&rt->shards[i]->stop, 1,
+			    xtc_mo_seq_cst);
 			shard_wake(rt->shards[i]);
 		}
 	}

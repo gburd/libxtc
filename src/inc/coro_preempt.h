@@ -17,7 +17,7 @@
 #ifndef XTC_CORO_PREEMPT_H
 #define XTC_CORO_PREEMPT_H
 
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 #include <stdint.h>
 
 /*
@@ -117,7 +117,7 @@ __in_preempt_slot(void)
  */
 extern uint64_t __xtc_preempt_xsave_mask __attribute__((visibility("hidden")));
 extern uint64_t __xtc_preempt_xsave_size __attribute__((visibility("hidden")));
-static _Atomic int g_xsave_probed;
+static int g_xsave_probed;
 
 /*
  * The interrupted PC, handed from the signal handler to the trampoline
@@ -141,7 +141,7 @@ __preempt_xsave_probe(void)
 	unsigned a, b, c, d, i, lo, hi;
 	uint64_t mask, size = 576;       /* legacy area + XSAVE header */
 
-	if (atomic_load_explicit(&g_xsave_probed, memory_order_acquire))
+	if (xtc_atomic_load_i32(&g_xsave_probed, xtc_mo_acquire))
 		return;
 	mask = 0;
 	if (__get_cpuid(1, &a, &b, &c, &d) && (c & bit_OSXSAVE) != 0 &&
@@ -158,9 +158,9 @@ __preempt_xsave_probe(void)
 		size = (size + 63) & ~63ull;
 	}
 	__xtc_preempt_xsave_size = size;
-	atomic_signal_fence(memory_order_release);
+	xtc_atomic_signal_fence(xtc_mo_release);
 	__xtc_preempt_xsave_mask = mask;
-	atomic_store_explicit(&g_xsave_probed, 1, memory_order_release);
+	xtc_atomic_store_i32(&g_xsave_probed, 1, xtc_mo_release);
 }
 #endif
 

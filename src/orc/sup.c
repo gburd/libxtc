@@ -24,7 +24,6 @@
 #endif
 
 #include <stdio.h>
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -60,11 +59,11 @@ struct xtc_supervisor {
 	int                    rr_cap;
 	int                    rr_n;
 
-	_Atomic int            n_restarts_total;
-	_Atomic int            n_alive;        /* children alive (atomic) */
-	_Atomic int            alive;
-	_Atomic int            stop_requested;
-	_Atomic int            abandon_wait;   /* __xtc_sup_abandon_wait */
+	int n_restarts_total;
+	int n_alive; /* children alive (atomic) */
+	int alive;
+	int stop_requested;
+	int abandon_wait; /* __xtc_sup_abandon_wait */
 	/* Stored by xtc_sup_start and again (same value)
 	 * by the supervisor proc itself, read from any thread. */
 	xtc_atomic_pid_t       sup_pid;
@@ -168,8 +167,8 @@ __record_restart(struct xtc_supervisor *sup, int64_t now)
 		    (size_t)(sup->rr_cap - 1) * sizeof *sup->recent_restarts);
 		sup->recent_restarts[sup->rr_cap - 1] = now;
 	}
-	(void)atomic_fetch_add_explicit(&sup->n_restarts_total, 1,
-	    memory_order_relaxed);
+	(void)xtc_atomic_fetch_add_i32(&sup->n_restarts_total, 1,
+	    xtc_mo_relaxed);
 }
 
 /* The loop a child is spawned on -- its OWNER loop (p->loop, unchanged by
@@ -196,8 +195,8 @@ __child_alive(struct xtc_supervisor *sup, struct child *c, int v)
 	if (c->alive == v)
 		return;
 	c->alive = v;
-	(void)atomic_fetch_add_explicit(&sup->n_alive, v ? 1 : -1,
-	    memory_order_relaxed);
+	(void)xtc_atomic_fetch_add_i32(&sup->n_alive, v ? 1 : -1,
+	    xtc_mo_relaxed);
 }
 
 static int
@@ -349,7 +348,7 @@ __wait_children_gone(struct xtc_supervisor *sup, int lo, int hi,
 	for (;;) {
 		/* The owner (xtc_app_shutdown) has already accounted for the
 		 * stragglers as survivors: stop waiting on them. */
-		if (atomic_load_explicit(&sup->abandon_wait, memory_order_acquire))
+		if (xtc_atomic_load_i32(&sup->abandon_wait, xtc_mo_acquire))
 			return 0;
 		pending = 0;
 		for (i = lo; i < hi; i++)
@@ -417,8 +416,7 @@ __do_one_for_all(struct xtc_supervisor *sup, int dead_idx)
 	if (sup->n_children > 0 &&
 	    __os_calloc((size_t)sup->n_children, sizeof *old,
 	    (void **)&old) != XTC_OK) {
-		atomic_store_explicit(&sup->stop_requested, 1,
-		    memory_order_release);
+		xtc_atomic_store_i32(&sup->stop_requested, 1, xtc_mo_release);
 		return;
 	}
 	for (i = 0; i < sup->n_children; i++)
@@ -433,16 +431,15 @@ __do_one_for_all(struct xtc_supervisor *sup, int dead_idx)
 	 * than run a replacement beside it -- stopping the supervisor is the
 	 * documented escalation, and its caller sees it exit. */
 	if (!__wait_children_gone_owned(sup, 0, sup->n_children, old)) {
-		atomic_store_explicit(&sup->stop_requested, 1,
-		    memory_order_release);
+		xtc_atomic_store_i32(&sup->stop_requested, 1, xtc_mo_release);
 		return;
 	}
 
 	for (i = 0; i < sup->n_children; i++) {
 		if (__spawn_child(sup, &sup->children[i]) != XTC_OK) {
 			/* Spawn failure aborts the supervisor. */
-			atomic_store_explicit(&sup->stop_requested, 1,
-			    memory_order_release);
+			xtc_atomic_store_i32(&sup->stop_requested, 1,
+			    xtc_mo_release);
 			return;
 		}
 	}
@@ -459,8 +456,7 @@ __do_rest_for_one(struct xtc_supervisor *sup, int dead_idx)
 	if (sup->n_children > 0 &&
 	    __os_calloc((size_t)sup->n_children, sizeof *old,
 	    (void **)&old) != XTC_OK) {
-		atomic_store_explicit(&sup->stop_requested, 1,
-		    memory_order_release);
+		xtc_atomic_store_i32(&sup->stop_requested, 1, xtc_mo_release);
 		return;
 	}
 	for (i = dead_idx; i < sup->n_children; i++)
@@ -473,15 +469,14 @@ __do_rest_for_one(struct xtc_supervisor *sup, int dead_idx)
 	/* As in one_for_all: no replacement until the old generation's
 	 * cleanup has completed; escalate (stop) if it does not. */
 	if (!__wait_children_gone_owned(sup, dead_idx, sup->n_children, old)) {
-		atomic_store_explicit(&sup->stop_requested, 1,
-		    memory_order_release);
+		xtc_atomic_store_i32(&sup->stop_requested, 1, xtc_mo_release);
 		return;
 	}
 
 	for (i = dead_idx; i < sup->n_children; i++) {
 		if (__spawn_child(sup, &sup->children[i]) != XTC_OK) {
-			atomic_store_explicit(&sup->stop_requested, 1,
-			    memory_order_release);
+			xtc_atomic_store_i32(&sup->stop_requested, 1,
+			    xtc_mo_release);
 			return;
 		}
 	}
@@ -569,7 +564,7 @@ __sup_exited(void *arg)
 	 * so the join timed out and -- correctly, since f6637ef -- freed
 	 * nothing: the supervisor leaked (LSan, 12_graceful_drain under ASan).
 	 */
-	atomic_store_explicit(&sup->alive, 0, memory_order_release);
+	xtc_atomic_store_i32(&sup->alive, 0, xtc_mo_release);
 	/* Read before the signal: a joiner may free sup once it is sent. */
 	exec = sup->opts.exec;
 	(void)xtc_notify_signal(sup->stopped);
@@ -598,7 +593,7 @@ __sup_entry(void *arg)
 		if (__spawn_child(sup, &sup->children[i]) != XTC_OK)
 			goto out; /* the children already spawned are killed */
 
-	while (!atomic_load_explicit(&sup->stop_requested, memory_order_acquire)) {
+	while (!xtc_atomic_load_i32(&sup->stop_requested, xtc_mo_acquire)) {
 		void *msg; size_t sz;
 		int rc;
 		struct down_signal d;
@@ -636,8 +631,7 @@ __sup_entry(void *arg)
 			continue;
 		__child_alive(sup, &sup->children[idx], 0);
 
-		if (atomic_load_explicit(&sup->stop_requested,
-		    memory_order_acquire))
+		if (xtc_atomic_load_i32(&sup->stop_requested, xtc_mo_acquire))
 			break;
 
 		if (!__should_restart(sup, &sup->children[idx], d.reason)) {
@@ -738,7 +732,7 @@ xtc_sup_start(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
 		__os_free(sup);
 		return XTC_E_NOSYS;
 	}
-	atomic_store_explicit(&sup->alive, 1, memory_order_relaxed);
+	xtc_atomic_store_i32(&sup->alive, 1, xtc_mo_relaxed);
 #if XTC_DST_BUG(XTC_DST_BUG_SUP_LOCKPARK)
 	(void)pthread_mutex_init(&sup->plant_lock, NULL);
 #endif
@@ -820,7 +814,7 @@ int
 xtc_sup_add_child(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
                   xtc_pid_t *out_pid)
 {
-	static _Atomic uint32_t tagctr;
+	static uint32_t tagctr;
 	struct add_child_msg a;
 	struct add_child_reply rep;
 	void *msg; size_t sz;
@@ -828,7 +822,7 @@ xtc_sup_add_child(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
 	int rc;
 
 	if (sup == NULL || spec == NULL) return XTC_E_INVAL;
-	if (!atomic_load_explicit(&sup->alive, memory_order_acquire))
+	if (!xtc_atomic_load_i32(&sup->alive, xtc_mo_acquire))
 		return XTC_E_INVAL;
 	memset(&a, 0, sizeof a);
 	if ((rc = __sup_spec_in(&a.spec, spec)) != XTC_OK)
@@ -840,7 +834,7 @@ xtc_sup_add_child(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
 	/* Record (pid, owner): through 2.1 a pid-only reply from the
 	 * supervisor's loop resolved loop_id 0 to ITS loop, not ours. */
 	a.reply_loop = __xtc_proc_self_loop(&a.reply);
-	a.tag = atomic_fetch_add_explicit(&tagctr, 1, memory_order_relaxed) + 1;
+	a.tag = xtc_atomic_fetch_add_u32(&tagctr, 1, xtc_mo_relaxed) + 1;
 	if (__xtc_send_on(sup->loop, __sup_pid_load(sup), &a, sizeof a)
 	    != XTC_OK)
 		return XTC_E_INTERNAL;
@@ -873,7 +867,7 @@ int
 xtc_sup_stop(xtc_supervisor_t *sup)
 {
 	if (sup == NULL) return XTC_E_INVAL;
-	atomic_store_explicit(&sup->stop_requested, 1, memory_order_release);
+	xtc_atomic_store_i32(&sup->stop_requested, 1, xtc_mo_release);
 	/* Send a one-byte kick so the supervisor wakes from its 100ms
 	 * recv-poll and observes stop_requested. */
 	{
@@ -919,7 +913,7 @@ int
 __xtc_sup_abandon_wait(xtc_supervisor_t *sup)
 {
 	if (sup == NULL) return XTC_E_INVAL;
-	atomic_store_explicit(&sup->abandon_wait, 1, memory_order_release);
+	xtc_atomic_store_i32(&sup->abandon_wait, 1, xtc_mo_release);
 	return XTC_OK;
 }
 
@@ -946,14 +940,17 @@ int xtc_sup_n_children(const xtc_supervisor_t *sup) {
 int xtc_sup_n_alive(const xtc_supervisor_t *sup) {
 	if (sup == NULL)
 		return 0;
-	return atomic_load_explicit(&((xtc_supervisor_t *)sup)->n_alive,
-	    memory_order_relaxed);
+	return xtc_atomic_load_i32(&((xtc_supervisor_t *)sup)->n_alive,
+	    xtc_mo_relaxed);
 }
 int xtc_sup_n_restarts(const xtc_supervisor_t *sup) {
-	return sup ? atomic_load_explicit(&((xtc_supervisor_t *)sup)->n_restarts_total,
-	    memory_order_relaxed) : 0;
+	return sup ?
+	    xtc_atomic_load_i32(&((xtc_supervisor_t *)sup)->n_restarts_total,
+	        xtc_mo_relaxed) :
+	    0;
 }
 int xtc_sup_alive(const xtc_supervisor_t *sup) {
-	return sup ? atomic_load_explicit(&((xtc_supervisor_t *)sup)->alive,
-	    memory_order_relaxed) : 0;
+	return sup ? xtc_atomic_load_i32(&((xtc_supervisor_t *)sup)->alive,
+	                 xtc_mo_relaxed) :
+	             0;
 }

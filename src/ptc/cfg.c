@@ -14,7 +14,6 @@
 
 #include <limits.h>
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #if defined(_WIN32)
@@ -705,7 +704,7 @@ static xtc_cfg_session_t *__cfg_bound_head;
  * (on one thread, or across a migration hand-off), and every later value
  * of the counter still counts that binding while it is linked, so an
  * exiting fiber that holds a binding never reads 0. */
-static _Atomic unsigned __cfg_nbound;
+static unsigned __cfg_nbound;
 static _Thread_local xtc_cfg_session_t *__cfg_ssn_tls;   /* off-fiber binds */
 
 /* Unlink `s` from the bound list if it is linked.  Called with the
@@ -719,8 +718,8 @@ __cfg_unbind_ssn_locked(xtc_cfg_session_t *s)
 			*link = b->bnext;
 			b->bnext = NULL;
 			b->owner = NULL;
-			atomic_fetch_sub_explicit(&__cfg_nbound, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_sub_u32(&__cfg_nbound, 1,
+			    xtc_mo_relaxed);
 			return;
 		}
 	}
@@ -737,8 +736,8 @@ __cfg_unbind_task_locked(xtc_task_t *t)
 			*link = b->bnext;
 			b->bnext = NULL;
 			b->owner = NULL;
-			atomic_fetch_sub_explicit(&__cfg_nbound, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_sub_u32(&__cfg_nbound, 1,
+			    xtc_mo_relaxed);
 			return b;
 		}
 	}
@@ -766,7 +765,7 @@ void
 __xtc_cfg_task_exit(xtc_task_t *t)
 {
 	if (t == NULL ||
-	    atomic_load_explicit(&__cfg_nbound, memory_order_relaxed) == 0)
+	    xtc_atomic_load_u32(&__cfg_nbound, xtc_mo_relaxed) == 0)
 		return;
 	(void)__xtc_mtx_lock(&__cfg_lock);
 	(void)__cfg_unbind_task_locked(t);
@@ -866,7 +865,7 @@ xtc_cfg_session_bind(xtc_cfg_session_t *s)
 		s->owner = me;
 		s->bnext = __cfg_bound_head;
 		__cfg_bound_head = s;
-		atomic_fetch_add_explicit(&__cfg_nbound, 1, memory_order_relaxed);
+		xtc_atomic_fetch_add_u32(&__cfg_nbound, 1, xtc_mo_relaxed);
 	}
 	(void)__xtc_mtx_unlock(&__cfg_lock);
 	return prev;

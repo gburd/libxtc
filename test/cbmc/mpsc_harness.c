@@ -38,7 +38,7 @@
  */
 
 #include <stdint.h>
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 #include <stddef.h>
 
 #define QCAP 4
@@ -54,7 +54,7 @@ static size_t mbox_n;      /* depth */
  * p->mbox_lock (a pthread_mutex) provides.  Acquire/release carry the
  * release/acquire ordering that publishes the payload written under
  * the lock to the consumer that pops under it. */
-static _Atomic int mbox_locked;
+static int mbox_locked;
 #define LOCK_SPINS 4
 static void
 mbox_lock(void)
@@ -62,8 +62,8 @@ mbox_lock(void)
 	int expected, i;
 	for (i = 0; i < LOCK_SPINS; i++) {
 		expected = 0;
-		if (atomic_compare_exchange_weak_explicit(&mbox_locked,
-		    &expected, 1, memory_order_acquire, memory_order_relaxed))
+		if (xtc_atomic_cas_weak_i32(&mbox_locked, &expected, 1,
+		        xtc_mo_acquire, xtc_mo_relaxed))
 			return;
 	}
 	/* Deeper contention than the modelled bound explores: prune this
@@ -74,7 +74,7 @@ mbox_lock(void)
 static void
 mbox_unlock(void)
 {
-	atomic_store_explicit(&mbox_locked, 0, memory_order_release);
+	xtc_atomic_store_i32(&mbox_locked, 0, xtc_mo_release);
 }
 
 /* __mbox_push_locked -- append at the tail, bump depth (the linked
@@ -119,7 +119,7 @@ main(void)
 	int i, j, e;
 
 	mbox_head = mbox_tail = mbox_n = 0;
-	atomic_store_explicit(&mbox_locked, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&mbox_locked, 0, xtc_mo_relaxed);
 
 	/* Two concurrent producers race each other under the mailbox
 	 * lock; CBMC explores every interleaving of their locked

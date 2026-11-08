@@ -58,7 +58,7 @@
  */
 
 #include <stdint.h>
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 
 #define XTC_OK          0
 #define XTC_E_RESOURCE  (-9)
@@ -70,7 +70,7 @@
 #define NACTORS  2      /* concurrent acquire+release pairs (> CAP) */
 
 /* The per-kind `used` counter -- the field res.c's CAS acts on. */
-static _Atomic int64_t used;
+static int64_t used;
 
 /* --- xtc_res_acquire: CAS core transcribed VERBATIM from res.c --- */
 static int
@@ -79,7 +79,7 @@ res_acquire(int64_t n)
 	int64_t cap = CAP, cur, next;
 
 	for (;;) {
-		cur = atomic_load_explicit(&used, memory_order_relaxed);
+		cur = xtc_atomic_load_i64(&used, xtc_mo_relaxed);
 		next = cur + n;
 #ifdef RES_BUG_OVER
 		/* planted bug XTC_DST_BUG_RESOVER: skip the cap check. */
@@ -89,9 +89,8 @@ res_acquire(int64_t n)
 #endif
 			return XTC_E_RESOURCE;
 		}
-		if (atomic_compare_exchange_weak_explicit(
-		        &used, &cur, next,
-		        memory_order_relaxed, memory_order_relaxed))
+		if (xtc_atomic_cas_weak_i64(&used, &cur, next, xtc_mo_relaxed,
+		        xtc_mo_relaxed))
 			break;
 	}
 	return XTC_OK;
@@ -106,9 +105,9 @@ res_release(int64_t n)
 	/* planted bug XTC_DST_BUG_RESLEAK: drop the decrement. */
 	return;
 #endif
-	prev = atomic_fetch_sub_explicit(&used, n, memory_order_relaxed);
+	prev = xtc_atomic_fetch_sub_i64(&used, n, xtc_mo_relaxed);
 	if (prev < n)
-		atomic_store_explicit(&used, 0, memory_order_relaxed);
+		xtc_atomic_store_i64(&used, 0, xtc_mo_relaxed);
 }
 
 /* One actor: charge 1 unit; if granted, assert the CAP invariant holds
@@ -132,7 +131,7 @@ actor(void)
 	int64_t u;
 	if (res_acquire(1) != XTC_OK)
 		return;                    /* cap full: correct backpressure */
-	u = atomic_load_explicit(&used, memory_order_relaxed);
+	u = xtc_atomic_load_i64(&used, xtc_mo_relaxed);
 	/* Non-vacuity: change `<= CAP` to `< CAP` and CBMC reports a
 	 * counterexample (used really reaches CAP under contention). */
 	__CPROVER_assert(u <= CAP,
@@ -143,7 +142,7 @@ actor(void)
 int
 main(void)
 {
-	atomic_store_explicit(&used, 0, memory_order_relaxed);
+	xtc_atomic_store_i64(&used, 0, xtc_mo_relaxed);
 
 	/* Property 1 (concurrent): NACTORS > CAP contenders race; CBMC
 	 * explores every interleaving of the used[] CAS.  Each asserts the

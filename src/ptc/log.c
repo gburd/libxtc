@@ -26,7 +26,6 @@
 #include "xtc_log.h"
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,14 +51,14 @@ struct xtc_log {
 	uint8_t         *ring;
 	size_t           record_stride;
 
-	_Atomic uint64_t head;          /* next slot to drain */
-	_Atomic uint64_t tail;          /* next slot to write */
-	_Atomic int      dropped;
+	uint64_t head; /* next slot to drain */
+	uint64_t tail; /* next slot to write */
+	int dropped;
 	pthread_mutex_t  drain_lock;    /* serialise drains across threads */
 };
 
 /* Process-wide default logger pointer (atomic). */
-static _Atomic uintptr_t __default_logger;
+static uintptr_t __default_logger;
 
 static int64_t
 __log_now_ns(void)
@@ -133,16 +132,16 @@ xtc_log_set_floor(xtc_log_t *log, xtc_log_level_t lvl)
 int
 xtc_log_set_default(xtc_log_t *log)
 {
-	atomic_store_explicit(&__default_logger, (uintptr_t)log,
-	    memory_order_release);
+	xtc_atomic_store_uptr(&__default_logger, (uintptr_t)log,
+	    xtc_mo_release);
 	return XTC_OK;
 }
 
 xtc_log_t *
 xtc_log_default(void)
 {
-	return (xtc_log_t *)atomic_load_explicit(&__default_logger,
-	    memory_order_acquire);
+	return (
+	    xtc_log_t *)xtc_atomic_load_uptr(&__default_logger, xtc_mo_acquire);
 }
 
 void
@@ -159,19 +158,17 @@ xtc_log_vwrite(xtc_log_t *log, xtc_log_level_t lvl,
 	if ((int)lvl < (int)log->opts.floor) return;
 
 	/* Claim a slot via fetch-add on tail. */
-	pos = atomic_fetch_add_explicit(&log->tail, 1, memory_order_relaxed);
+	pos = xtc_atomic_fetch_add_u64(&log->tail, 1, xtc_mo_relaxed);
 
 	/* If we're more than ring_size ahead of head, drop the oldest. */
 	{
-		uint64_t head = atomic_load_explicit(&log->head,
-		    memory_order_acquire);
+		uint64_t head = xtc_atomic_load_u64(&log->head, xtc_mo_acquire);
 		if (pos - head >= (uint64_t)log->opts.ring_size) {
 			uint64_t new_head = pos - (uint64_t)log->opts.ring_size + 1;
-			(void)atomic_compare_exchange_strong_explicit(&log->head,
-			    &head, new_head,
-			    memory_order_acq_rel, memory_order_acquire);
-			atomic_fetch_add_explicit(&log->dropped, 1,
-			    memory_order_relaxed);
+			(void)xtc_atomic_cas_u64(&log->head, &head, new_head,
+			    xtc_mo_acq_rel, xtc_mo_acquire);
+			xtc_atomic_fetch_add_i32(&log->dropped, 1,
+			    xtc_mo_relaxed);
 		}
 	}
 
@@ -203,10 +200,8 @@ xtc_log_drain(xtc_log_t *log)
 	if (log == NULL) return 0;
 	(void)pthread_mutex_lock(&log->drain_lock);
 	for (;;) {
-		uint64_t head = atomic_load_explicit(&log->head,
-		    memory_order_acquire);
-		uint64_t tail = atomic_load_explicit(&log->tail,
-		    memory_order_acquire);
+		uint64_t head = xtc_atomic_load_u64(&log->head, xtc_mo_acquire);
+		uint64_t tail = xtc_atomic_load_u64(&log->tail, xtc_mo_acquire);
 		uint8_t *slot;
 		struct log_record_hdr *hdr;
 		char    *body;
@@ -237,9 +232,8 @@ xtc_log_drain(xtc_log_t *log)
 			(void)wr;   /* best-effort log sink; a short write is tolerated */
 		}
 
-		(void)atomic_compare_exchange_strong_explicit(&log->head,
-		    &head, head + 1,
-		    memory_order_acq_rel, memory_order_acquire);
+		(void)xtc_atomic_cas_u64(&log->head, &head, head + 1,
+		    xtc_mo_acq_rel, xtc_mo_acquire);
 		n_drained++;
 	}
 	(void)pthread_mutex_unlock(&log->drain_lock);
@@ -250,6 +244,6 @@ int
 xtc_log_drop_count(const xtc_log_t *log)
 {
 	if (log == NULL) return 0;
-	return atomic_load_explicit(&((xtc_log_t *)log)->dropped,
-	    memory_order_relaxed);
+	return xtc_atomic_load_i32(&((xtc_log_t *)log)->dropped,
+	    xtc_mo_relaxed);
 }

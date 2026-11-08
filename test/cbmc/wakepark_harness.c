@@ -43,14 +43,14 @@
  *	Run: cbmc wakepark_harness.c --unwind 6
  */
 
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 
 enum { TS_RUNNING = 0, TS_PARKED = 1, TS_SCHEDULED = 2 };
 
-static _Atomic int state;          /* the task's run state */
-static _Atomic int wake_pending;   /* the v1.8.0 latch */
-static _Atomic int inbox_wake;     /* a WAKE message sits in the inbox */
-static _Atomic int wake_delivered; /* test bookkeeping: a wake was enqueued */
+static int state;          /* the task's run state */
+static int wake_pending;   /* the v1.8.0 latch */
+static int inbox_wake;     /* a WAKE message sits in the inbox */
+static int wake_delivered; /* test bookkeeping: a wake was enqueued */
 
 /* Cross-thread waker: the ONLY cross-thread step is enqueuing a WAKE
  * message into the loop's inbox (under inbox.lock in loop.c). */
@@ -61,8 +61,8 @@ waker(void)
 	 * so an observer that sees wake_delivered == 1 is guaranteed the
 	 * inbox store already happened (no "delivered but not enqueued"
 	 * artifact; the real enqueue is a single locked inbox push). */
-	atomic_store_explicit(&inbox_wake, 1, memory_order_release);
-	atomic_store_explicit(&wake_delivered, 1, memory_order_release);
+	xtc_atomic_store_i32(&inbox_wake, 1, xtc_mo_release);
+	xtc_atomic_store_i32(&wake_delivered, 1, xtc_mo_release);
 }
 
 /* The loop's park step, on the loop thread: drain the inbox, then act
@@ -79,22 +79,21 @@ park_step(void)
 	int s, woke;
 
 	/* --- inbox drain (XTC_INB_WAKE) --- */
-	woke = atomic_exchange_explicit(&inbox_wake, 0, memory_order_acquire);
+	woke = xtc_atomic_exchange_i32(&inbox_wake, 0, xtc_mo_acquire);
 	if (woke) {
-		s = atomic_load_explicit(&state, memory_order_relaxed);
+		s = xtc_atomic_load_i32(&state, xtc_mo_relaxed);
 		if (s == TS_PARKED)
-			atomic_store_explicit(&state, TS_SCHEDULED,
-			    memory_order_relaxed);
+			xtc_atomic_store_i32(&state, TS_SCHEDULED,
+			    xtc_mo_relaxed);
 		else
 			/* still RUNNING (the prepare/park window): latch it. */
-			atomic_store_explicit(&wake_pending, 1,
-			    memory_order_relaxed);
+			xtc_atomic_store_i32(&wake_pending, 1, xtc_mo_relaxed);
 	}
 	/* --- PENDING verdict: the task wants to park; consume the latch --- */
-	if (atomic_exchange_explicit(&wake_pending, 0, memory_order_relaxed))
-		atomic_store_explicit(&state, TS_SCHEDULED, memory_order_relaxed);
+	if (xtc_atomic_exchange_i32(&wake_pending, 0, xtc_mo_relaxed))
+		xtc_atomic_store_i32(&state, TS_SCHEDULED, xtc_mo_relaxed);
 	else
-		atomic_store_explicit(&state, TS_PARKED, memory_order_relaxed);
+		xtc_atomic_store_i32(&state, TS_PARKED, xtc_mo_relaxed);
 }
 
 int
@@ -103,10 +102,10 @@ main(void)
 	int final_state;
 
 	/* The task is RUNNING (armed its waker, about to return PENDING). */
-	atomic_store_explicit(&state, TS_RUNNING, memory_order_relaxed);
-	atomic_store_explicit(&wake_pending, 0, memory_order_relaxed);
-	atomic_store_explicit(&inbox_wake, 0, memory_order_relaxed);
-	atomic_store_explicit(&wake_delivered, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&state, TS_RUNNING, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&wake_pending, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&inbox_wake, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&wake_delivered, 0, xtc_mo_relaxed);
 
 	/* A cross-thread wake races the park step. */
 	__CPROVER_ASYNC_1: waker();
@@ -117,9 +116,9 @@ main(void)
 	 * PARKED -- the latch must have re-scheduled it.  (If the wake is
 	 * still in the inbox, a later step delivers it; that is not a lost
 	 * wake, so we only assert once the wake has been drained.) */
-	final_state = atomic_load_explicit(&state, memory_order_acquire);
-	if (atomic_load_explicit(&wake_delivered, memory_order_acquire)
-	    && atomic_load_explicit(&inbox_wake, memory_order_acquire) == 0) {
+	final_state = xtc_atomic_load_i32(&state, xtc_mo_acquire);
+	if (xtc_atomic_load_i32(&wake_delivered, xtc_mo_acquire) &&
+	    xtc_atomic_load_i32(&inbox_wake, xtc_mo_acquire) == 0) {
 		__CPROVER_assert(final_state == TS_SCHEDULED,
 		    "a drained wake re-schedules the task, never lost "
 		    "(the RUNNING->PARKED latch)");

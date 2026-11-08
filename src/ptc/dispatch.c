@@ -29,7 +29,6 @@
 #include "xtc_proc.h"
 #include "xtc_future.h"
 
-#include <stdatomic.h>
 
 /*
  * Per-dispatch context, owned by the spawned fiber and freed by its
@@ -42,7 +41,7 @@ struct dispatch_ctx {
 	int          (*fn)(void *arg);
 	void          *arg;
 	xtc_promise_t *prom;          /* set by fn's result or dropped */
-	_Atomic int    resolved;      /* 0 until the promise is set/dropped */
+	int resolved;                 /* 0 until the promise is set/dropped */
 };
 
 struct xtc_dispatch_handle {
@@ -66,7 +65,7 @@ __dispatch_finalize(void *v)
 	struct dispatch_ctx *c = v;
 	int was;
 
-	was = atomic_exchange_explicit(&c->resolved, 1, memory_order_acq_rel);
+	was = xtc_atomic_exchange_i32(&c->resolved, 1, xtc_mo_acq_rel);
 	if (!was)
 		xtc_promise_drop(c->prom);   /* fiber ended without a result */
 	__os_free(c);
@@ -90,8 +89,7 @@ __dispatch_entry(void *v)
 	 * carries ABORTED).  Registering first is the norm; this only
 	 * guards the pathological cap-exhausted spawn. */
 	if (xtc_proc_at_exit(__dispatch_finalize, c) != XTC_OK) {
-		was = atomic_exchange_explicit(&c->resolved, 1,
-		    memory_order_acq_rel);
+		was = xtc_atomic_exchange_i32(&c->resolved, 1, xtc_mo_acq_rel);
 		if (!was)
 			xtc_promise_drop(c->prom);
 		(void)c->fn(c->arg);
@@ -104,7 +102,7 @@ __dispatch_entry(void *v)
 	 * won the exchange (unwinding this fiber before we got here is not
 	 * possible on a single fiber, but a defensive check keeps the
 	 * set-once contract explicit), skip the set. */
-	was = atomic_exchange_explicit(&c->resolved, 1, memory_order_acq_rel);
+	was = xtc_atomic_exchange_i32(&c->resolved, 1, xtc_mo_acq_rel);
 	if (!was)
 		(void)xtc_promise_set(c->prom, (intptr_t)r, XTC_OK);
 	/* Return -> the at-exit finalizer runs; it sees resolved==1 and
@@ -143,7 +141,7 @@ xtc_dispatch(xtc_loop_t *loop, int (*fn)(void *), void *arg,
 	c->fn = fn;
 	c->arg = arg;
 	c->prom = prom;
-	atomic_store_explicit(&c->resolved, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&c->resolved, 0, xtc_mo_relaxed);
 
 	/* Spawn the fiber on `loop`.  Safe from any thread: a cross-thread
 	 * spawn posts to loop's MPSC inbox and pings its I/O backend (see

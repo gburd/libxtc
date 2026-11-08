@@ -94,9 +94,9 @@ void  (*__xtc_loop_fini_hook)(xtc_loop_t *loop) = NULL;
 int
 __xtc_inbox_init(struct xtc_inbox *ib)
 {
-	atomic_store_explicit(&ib->pub_head, NULL, memory_order_relaxed);
-	atomic_store_explicit(&ib->wake_head, NULL, memory_order_relaxed);
-	atomic_store_explicit(&ib->sleeping, 0, memory_order_relaxed);
+	xtc_atomic_store_ptr(&ib->pub_head, NULL, xtc_mo_relaxed);
+	xtc_atomic_store_ptr(&ib->wake_head, NULL, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&ib->sleeping, 0, xtc_mo_relaxed);
 	ib->inited = 1;
 	return XTC_OK;
 }
@@ -114,25 +114,25 @@ __xtc_inbox_fini(struct xtc_inbox *ib)
 	 * then free the task struct.  A WAKE entry, by contrast, is a task
 	 * that IS already tracked (parked, on all_tasks) and already freed,
 	 * so the wake stack is dropped without touching its tasks. */
-	for (t = atomic_load_explicit(&ib->pub_head, memory_order_acquire);
-	    t != NULL; t = n) {
+	for (t = xtc_atomic_load_ptr(&ib->pub_head, xtc_mo_acquire); t != NULL;
+	     t = n) {
 		n = t->inbox_next;
 		if (t->cleanup != NULL)
 			t->cleanup(t->cleanup_arg);
 		__os_free(t);
 	}
-	atomic_store_explicit(&ib->pub_head, NULL, memory_order_relaxed);
-	atomic_store_explicit(&ib->wake_head, NULL, memory_order_relaxed);
+	xtc_atomic_store_ptr(&ib->pub_head, NULL, xtc_mo_relaxed);
+	xtc_atomic_store_ptr(&ib->wake_head, NULL, xtc_mo_relaxed);
 	ib->inited = 0;
 }
 
 int
 __xtc_inbox_nonempty(const struct xtc_inbox *ib)
 {
-	return atomic_load_explicit(&((struct xtc_inbox *)ib)->pub_head,
-	    memory_order_acquire) != NULL ||
-	    atomic_load_explicit(&((struct xtc_inbox *)ib)->wake_head,
-	    memory_order_acquire) != NULL;
+	return xtc_atomic_load_ptr(&((struct xtc_inbox *)ib)->pub_head,
+	           xtc_mo_acquire) != NULL ||
+	    xtc_atomic_load_ptr(&((struct xtc_inbox *)ib)->wake_head,
+	        xtc_mo_acquire) != NULL;
 }
 
 /* XTC_NOALLOC_BEGIN: cross-loop inbox push + drain -- the per-wake path
@@ -142,12 +142,13 @@ __xtc_inbox_nonempty(const struct xtc_inbox *ib)
 /* Push t onto one of the inbox stacks.  The CAS (seq_cst) publishes the
  * task's fields to the drain's exchange. */
 static void
-__inbox_stack_push(_Atomic(xtc_task_t *) *head, xtc_task_t *t)
+__inbox_stack_push(xtc_task_t **head, xtc_task_t *t)
 {
-	xtc_task_t *old = atomic_load_explicit(head, memory_order_relaxed);
+	xtc_task_t *old = xtc_atomic_load_ptr(head, xtc_mo_relaxed);
 	do {
 		t->inbox_next = old;
-	} while (!atomic_compare_exchange_weak(head, &old, t));
+	} while (!xtc_atomic_cas_weak_ptr(head, &old, t, xtc_mo_seq_cst,
+	    xtc_mo_seq_cst));
 }
 
 /*
@@ -181,10 +182,12 @@ __xtc_inbox_push(xtc_loop_t *loop, enum xtc_inbox_kind k, xtc_task_t *t)
 	 * to the loop's next turn (an executor loop re-polls every
 	 * millisecond), so it must not be reported as a failed wake/spawn.
 	 */
-	if (atomic_load(&loop->inbox.sleeping) != 0 &&
-	    atomic_exchange(&loop->inbox.sleeping, 0) != 0 &&
+	if (xtc_atomic_load_i32(&loop->inbox.sleeping, xtc_mo_seq_cst) != 0 &&
+	    xtc_atomic_exchange_i32(&loop->inbox.sleeping, 0, xtc_mo_seq_cst) !=
+	        0 &&
 	    xtc_io_wakeup(loop->io) != XTC_OK)
-		atomic_store(&loop->inbox.sleeping, 1);   /* next push retries */
+		xtc_atomic_store_i32(&loop->inbox.sleeping, 1,
+		    xtc_mo_seq_cst); /* next push retries */
 	return XTC_OK;
 }
 
@@ -198,11 +201,12 @@ __xtc_inbox_push(xtc_loop_t *loop, enum xtc_inbox_kind k, xtc_task_t *t)
 int
 __xtc_inbox_sleep_begin(xtc_loop_t *loop)
 {
-	atomic_store(&loop->inbox.sleeping, 1);
-	if (atomic_load(&loop->inbox.pub_head) != NULL ||
-	    atomic_load(&loop->inbox.wake_head) != NULL) {
-		atomic_store_explicit(&loop->inbox.sleeping, 0,
-		    memory_order_relaxed);
+	xtc_atomic_store_i32(&loop->inbox.sleeping, 1, xtc_mo_seq_cst);
+	if (xtc_atomic_load_ptr(&loop->inbox.pub_head, xtc_mo_seq_cst) !=
+	        NULL ||
+	    xtc_atomic_load_ptr(&loop->inbox.wake_head, xtc_mo_seq_cst) !=
+	        NULL) {
+		xtc_atomic_store_i32(&loop->inbox.sleeping, 0, xtc_mo_relaxed);
 		return 1;
 	}
 	return 0;
@@ -214,7 +218,7 @@ __xtc_inbox_sleep_begin(xtc_loop_t *loop)
 void
 __xtc_inbox_sleep_end(xtc_loop_t *loop)
 {
-	atomic_store_explicit(&loop->inbox.sleeping, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&loop->inbox.sleeping, 0, xtc_mo_relaxed);
 }
 
 /* Reverse a LIFO-pushed chain into arrival order. */
@@ -253,11 +257,14 @@ __xtc_inbox_drain(xtc_loop_t *loop)
 	int64_t n_pub = 0;
 	int drained = 0;
 
-	if (atomic_load(&loop->inbox.pub_head) == NULL &&
-	    atomic_load(&loop->inbox.wake_head) == NULL)
+	if (xtc_atomic_load_ptr(&loop->inbox.pub_head, xtc_mo_seq_cst) ==
+	        NULL &&
+	    xtc_atomic_load_ptr(&loop->inbox.wake_head, xtc_mo_seq_cst) == NULL)
 		return 0;
-	pub = __inbox_reverse(atomic_exchange(&loop->inbox.pub_head, NULL));
-	wake = __inbox_reverse(atomic_exchange(&loop->inbox.wake_head, NULL));
+	pub = __inbox_reverse(xtc_atomic_exchange_ptr(&loop->inbox.pub_head,
+	    NULL, xtc_mo_seq_cst));
+	wake = __inbox_reverse(xtc_atomic_exchange_ptr(&loop->inbox.wake_head,
+	    NULL, xtc_mo_seq_cst));
 
 	/* Buggify: under DST, process one FEWER task this turn -- hold back
 	 * the last one and re-queue it for the next drain.  A WAKE / PUBLISH
@@ -335,7 +342,7 @@ __xtc_inbox_drain(xtc_loop_t *loop)
  * No loop is alive, so no pid of an earlier loop can still reach a
  * loop; a test that kept one across runs could alias, sim only.
  */
-static _Atomic uint64_t __loop_ids;
+static uint64_t __loop_ids;
 
 void __xtc_io_set_tail_loop_id(xtc_io_t *io, uint32_t id); /* io_int.h */
 
@@ -344,7 +351,7 @@ __xtc_loop_id_take(uint32_t *out)
 {
 	uint64_t o, n;
 	uint32_t last;
-	o = atomic_load_explicit(&__loop_ids, memory_order_relaxed);
+	o = xtc_atomic_load_u64(&__loop_ids, xtc_mo_relaxed);
 	do {
 		last = (uint32_t)o;
 #if defined(XTC_IO_BACKEND_SIM)
@@ -354,8 +361,8 @@ __xtc_loop_id_take(uint32_t *out)
 		if (last >= UINT32_MAX - 1u)
 			return XTC_E_RESOURCE;
 		n = (((o >> 32) + 1) << 32) | (uint64_t)(last + 1u);
-	} while (!atomic_compare_exchange_weak_explicit(&__loop_ids, &o, n,
-	    memory_order_relaxed, memory_order_relaxed));
+	} while (!xtc_atomic_cas_weak_u64(&__loop_ids, &o, n, xtc_mo_relaxed,
+	    xtc_mo_relaxed));
 	*out = last + 1u;
 	return XTC_OK;
 }
@@ -363,8 +370,8 @@ __xtc_loop_id_take(uint32_t *out)
 static void
 __xtc_loop_id_put(void)
 {
-	(void)atomic_fetch_sub_explicit(&__loop_ids, (uint64_t)1 << 32,
-	    memory_order_relaxed);
+	(void)xtc_atomic_fetch_sub_u64(&__loop_ids, (uint64_t)1 << 32,
+	    xtc_mo_relaxed);
 }
 
 /* PUBLIC: int xtc_loop_init __P((xtc_loop_t **)); */
@@ -400,8 +407,8 @@ xtc_loop_init(xtc_loop_t **out)
 	loop->task_free_n = 0;
 	loop->timers = NULL;
 	loop->n_timers = loop->cap_timers = 0;
-	atomic_store_explicit(&loop->n_alive, 0, memory_order_relaxed);
-	atomic_store_explicit(&loop->stop_requested, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&loop->n_alive, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&loop->stop_requested, 0, xtc_mo_relaxed);
 	loop->exec_id = -1;
 	loop->exec = NULL;
 	__xtc_io_set_tail_loop_id(loop->io, loop->id);
@@ -448,8 +455,9 @@ xtc_loop_fini(xtc_loop_t *loop)
 		 * symmetry with the running-path release.
 		 */
 		{
-			xtc_timer_t *pt = atomic_exchange_explicit(
-			    &t->park_timer, NULL, memory_order_relaxed);
+			xtc_timer_t *pt =
+			    xtc_atomic_exchange_ptr(&t->park_timer, NULL,
+			        xtc_mo_relaxed);
 			if (pt != NULL)
 				__xtc_timer_park_release(pt);
 		}
@@ -476,8 +484,7 @@ xtc_loop_fini(xtc_loop_t *loop)
 		for (i = 0; i < loop->n_timers; i++) {
 			xtc_timer_t *ht = loop->timers[i].t;
 			if (ht != NULL &&
-			    atomic_load_explicit(&ht->refs,
-			    memory_order_relaxed) > 0)
+			    xtc_atomic_load_i32(&ht->refs, xtc_mo_relaxed) > 0)
 				__xtc_timer_park_release(ht);  /* drop the heap ref; frees at 0 */
 		}
 	}
@@ -523,7 +530,7 @@ xtc_loop_stop(xtc_loop_t *loop)
 	if (loop == NULL) return XTC_E_INVAL;
 	/* Store BEFORE the wakeup: the wakeup is what makes the loop re-check,
 	 * so the flag must already be visible when it does. */
-	atomic_store_explicit(&loop->stop_requested, 1, memory_order_relaxed);
+	xtc_atomic_store_i32(&loop->stop_requested, 1, xtc_mo_relaxed);
 	(void)xtc_io_wakeup(loop->io);
 	return XTC_OK;
 }
@@ -850,7 +857,7 @@ __xtc_drain_due_timers(xtc_loop_t *loop)
 	for (;;) {
 		xtc_timer_t *due = __xtc_timer_heap_pop_due(loop, now_ns);
 		if (due == NULL) break;
-		if (!due->cancelled) {
+		if (!xtc_atomic_load_i32(&due->cancelled, xtc_mo_seq_cst)) {
 			/* Buggify: under DST, fire this timer slightly LATE once.
 			 * A timer firing late is always tolerated (deadlines are a
 			 * lower bound, not a promise of exact instant), so instead
@@ -872,7 +879,7 @@ __xtc_drain_due_timers(xtc_loop_t *loop)
 					continue;
 				/* push failed (OOM): fall through, fire now. */
 			}
-			due->fired = 1;
+			xtc_atomic_store_i32(&due->fired, 1, xtc_mo_seq_cst);
 			XTC_PROBE_TIMER_FIRE((uintptr_t)due, due->deadline_ns,
 			    now_ns);
 			if (due->cb != NULL) due->cb(due->user);
@@ -880,9 +887,8 @@ __xtc_drain_due_timers(xtc_loop_t *loop)
 				xtc_task_t *waiter = due->waiter;
 				xtc_waker_t w = { loop, waiter };
 				xtc_timer_t *slot;
-				atomic_fetch_or_explicit(
-				    &waiter->wake_revents,
-				    XTC_WAIT_TIMEOUT, memory_order_relaxed);
+				xtc_atomic_fetch_or_u32(&waiter->wake_revents,
+				    XTC_WAIT_TIMEOUT, xtc_mo_relaxed);
 				(void)xtc_waker_wake(&w);
 				/*
 				 * Clear the waiter's park_timer slot only if it
@@ -901,9 +907,9 @@ __xtc_drain_due_timers(xtc_loop_t *loop)
 				 * and holding it rules out ABA on `due`.
 				 */
 				slot = due;
-				if (atomic_compare_exchange_strong_explicit(
-				    &waiter->park_timer, &slot, NULL,
-				    memory_order_relaxed, memory_order_relaxed))
+				if (xtc_atomic_cas_ptr(&waiter->park_timer,
+				        &slot, NULL, xtc_mo_relaxed,
+				        xtc_mo_relaxed))
 					__xtc_timer_park_release(due);  /* XTC_NOALLOC_OK: bounded free of one park timer */
 			}
 			__xtc_timer_park_release(due);  /* XTC_NOALLOC_OK: drop the heap reference of the fired timer */
@@ -991,8 +997,8 @@ __xtc_loop_step(xtc_loop_t *loop)
 		    XTC_SIM_BUGGIFY("sched.runq.defer_ready") &&
 		    xtc_sim_buggify_fault(250)) {
 			xtc_task_t *other;
-			atomic_store_explicit(&t->state, XTC_TS_SCHEDULED,
-			    memory_order_release);
+			xtc_atomic_store_i32(&t->state, XTC_TS_SCHEDULED,
+			    xtc_mo_release);
 			(void)__xtc_loop_enqueue(loop, t);
 			other = __queue_pop(loop);
 			t = (other != NULL) ? other : __queue_pop(loop);
@@ -1008,8 +1014,7 @@ __xtc_loop_step(xtc_loop_t *loop)
 			__xtc_sched_service(loop, selected_lane);
 		}
 #endif
-		atomic_fetch_add_explicit(&loop->n_tasks_run, 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_add_u64(&loop->n_tasks_run, 1, xtc_mo_relaxed);
 		/* Record this run quantum's start when any time-accounting
 		 * feature is active: the cooperative yield watchdog, the L1
 		 * proportional-share scheduler (needs elapsed to accrue
@@ -1022,8 +1027,7 @@ __xtc_loop_step(xtc_loop_t *loop)
 			(void)__os_clock_mono(&s);
 			t->run_start_ns = s;   /* start of this run quantum */
 		}
-		atomic_store_explicit(&t->state, XTC_TS_RUNNING,
-		    memory_order_release);
+		xtc_atomic_store_i32(&t->state, XTC_TS_RUNNING, xtc_mo_release);
 		XTC_PROBE_TASK_RUN_START((uintptr_t)t, (int)loop->id,
 		    t->sched_class);
 		verdict = t->fn(t, t->user);
@@ -1090,8 +1094,8 @@ __xtc_loop_step(xtc_loop_t *loop)
 		}
 		switch (verdict) {
 		case XTC_TASK_DONE:
-			atomic_store_explicit(&t->state, XTC_TS_DONE,
-			    memory_order_release);
+			xtc_atomic_store_i32(&t->state, XTC_TS_DONE,
+			    xtc_mo_release);
 			/* Decrement the HOME loop's alive count (where spawn
 			 * incremented it), not the loop currently running the
 			 * task.  Under work stealing the two differ; keying on
@@ -1099,8 +1103,8 @@ __xtc_loop_step(xtc_loop_t *loop)
 			 * executor's idle detection terminates.  Same for the
 			 * resource release, which was acquired against the home
 			 * loop's accountant. */
-			atomic_fetch_sub_explicit(&t->loop->n_alive, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_sub_i32(&t->loop->n_alive, 1,
+			    xtc_mo_relaxed);
 			if (!t->pinned && t->loop->exec != NULL) {
 				extern void __xtc_exec_mig_alive(xtc_loop_t *, int);
 				__xtc_exec_mig_alive(t->loop, -1);
@@ -1151,8 +1155,8 @@ __xtc_loop_step(xtc_loop_t *loop)
 			}
 			break;
 		case XTC_TASK_RESCHED:
-			atomic_store_explicit(&t->state, XTC_TS_SCHEDULED,
-			    memory_order_release);
+			xtc_atomic_store_i32(&t->state, XTC_TS_SCHEDULED,
+			    xtc_mo_release);
 			(void)__xtc_loop_enqueue(loop, t);
 			break;
 		case XTC_TASK_PENDING:
@@ -1164,17 +1168,18 @@ __xtc_loop_step(xtc_loop_t *loop)
 			 * mailbox).  Without this, a foreign wake fired in the
 			 * prepare/park window would leave the task PARKED with no
 			 * further wakeup pending -> a hang. */
-			if (atomic_exchange_explicit(&t->wake_pending, 0,
-			    memory_order_acquire)) {
-				atomic_store_explicit(&t->state, XTC_TS_SCHEDULED,
-				    memory_order_release);
+			if (xtc_atomic_exchange_i32(&t->wake_pending, 0,
+			        xtc_mo_acquire)) {
+				xtc_atomic_store_i32(&t->state,
+				    XTC_TS_SCHEDULED, xtc_mo_release);
 				(void)__xtc_loop_enqueue(loop, t);
 			} else {
 				/* seq_cst store + the seq_cst exchange below pair
 				 * with __task_wake_claim's latch-then-load-state
 				 * (src/evt/task.c): of this re-check and a waker's
 				 * re-check, at least one sees the other's write. */
-				atomic_store(&t->state, XTC_TS_PARKED);
+				xtc_atomic_store_i32(&t->state, XTC_TS_PARKED,
+				    xtc_mo_seq_cst);
 				/*
 				 * NINTH SURFACE.  The exchange above and this
 				 * store are NOT one atomic step, so a waker can
@@ -1206,12 +1211,12 @@ __xtc_loop_step(xtc_loop_t *loop)
 				 * arrives concurrently with this re-check cannot
 				 * double-enqueue.
 				 */
-				if (atomic_exchange(&t->wake_pending, 0)) {
+				if (xtc_atomic_exchange_i32(&t->wake_pending, 0,
+				        xtc_mo_seq_cst)) {
 					int exp = XTC_TS_PARKED;
-					if (atomic_compare_exchange_strong_explicit(
-					    &t->state, &exp, XTC_TS_SCHEDULED,
-					    memory_order_acq_rel,
-					    memory_order_acquire))
+					if (xtc_atomic_cas_i32(&t->state, &exp,
+					        XTC_TS_SCHEDULED,
+					        xtc_mo_acq_rel, xtc_mo_acquire))
 						(void)__xtc_loop_enqueue(loop, t);
 				}
 			}
@@ -1224,7 +1229,8 @@ __xtc_loop_step(xtc_loop_t *loop)
 		if (loop->sched.policy.select != NULL) {
 			/* A pending verdict consumed by a latched wake is a yield. */
 			if (verdict == XTC_TASK_PENDING && t != NULL &&
-			    atomic_load_explicit(&t->state, memory_order_acquire) != XTC_TS_PARKED)
+			    xtc_atomic_load_i32(&t->state, xtc_mo_acquire) !=
+			        XTC_TS_PARKED)
 				verdict = XTC_TASK_RESCHED;
 			__xtc_sched_ran(loop, selected_lane, verdict);
 		}
@@ -1309,8 +1315,8 @@ __xtc_loop_step(xtc_loop_t *loop)
 		extern void *__xtc_exec_try_steal(xtc_loop_t *me);
 		xtc_task_t *stolen = __xtc_exec_try_steal(loop);
 		if (stolen != NULL) {
-			atomic_fetch_add_explicit(&loop->n_steals, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_u64(&loop->n_steals, 1,
+			    xtc_mo_relaxed);
 			stolen->q_next = NULL;
 			(void)__xtc_loop_enqueue(loop, stolen);
 			/* A steal skips this step's blocking poll, and a loop
@@ -1339,7 +1345,7 @@ __xtc_loop_step(xtc_loop_t *loop)
 	if ((rc = __os_clock_mono(&now_ns)) != XTC_OK) return rc;
 	next_deadline_ns = __xtc_timer_heap_next_deadline(loop);
 	if (next_deadline_ns < 0 &&
-	    atomic_load_explicit(&loop->n_alive, memory_order_relaxed) == 0)
+	    xtc_atomic_load_i32(&loop->n_alive, xtc_mo_relaxed) == 0)
 		return XTC_OK;
 
 	if (next_deadline_ns >= 0) {
@@ -1446,13 +1452,11 @@ xtc_loop_run(xtc_loop_t *loop)
 	loop->owner_set = 1;
 #endif
 
-	while (!atomic_load_explicit(&loop->stop_requested,
-	    memory_order_relaxed)) {
+	while (!xtc_atomic_load_i32(&loop->stop_requested, xtc_mo_relaxed)) {
 		/* The timer heap is consulted only when no task is alive (its
 		 * next-deadline peek pops cancelled heads, 13 instructions a
 		 * step on a yield-bound loop for nothing while tasks run). */
-		if (atomic_load_explicit(&loop->n_alive,
-		    memory_order_relaxed) <= 0 &&
+		if (xtc_atomic_load_i32(&loop->n_alive, xtc_mo_relaxed) <= 0 &&
 		    __xtc_timer_heap_next_deadline(loop) < 0)
 			break;
 		if ((rc = __xtc_loop_step(loop)) != XTC_OK) {
@@ -1462,7 +1466,7 @@ xtc_loop_run(xtc_loop_t *loop)
 		}
 	}
 
-	atomic_store_explicit(&loop->stop_requested, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&loop->stop_requested, 0, xtc_mo_relaxed);
 	/* Hand the io back (see the matching call in the exec worker). */
 	__xtc_io_owner_leave(loop->io);
 	__xtc_current_loop = saved;
@@ -1516,8 +1520,8 @@ __runq_nonempty(const xtc_loop_t *loop)
 
 	if (loop->q_head != NULL)
 		return 1;
-	if (atomic_load_explicit(&loop->deque.bottom, memory_order_relaxed) >
-	    atomic_load_explicit(&loop->deque.top, memory_order_relaxed))
+	if (xtc_atomic_load_i64(&loop->deque.bottom, xtc_mo_relaxed) >
+	    xtc_atomic_load_i64(&loop->deque.top, xtc_mo_relaxed))
 		return 1;
 	/* L1 proportional-share: a class-tagged task lives on its class's
 	 * own ready FIFO, never the shared deque, so those must be checked
@@ -1536,8 +1540,8 @@ int
 __xtc_loop_step_once(xtc_loop_t *loop)
 {
 	int rc = __loop_step_once(loop);
-	atomic_store_explicit(&loop->n_timers_pub, loop->n_timers,
-	    memory_order_relaxed);
+	xtc_atomic_store_i32(&loop->n_timers_pub, loop->n_timers,
+	    xtc_mo_relaxed);
 	return rc;
 }
 
@@ -1555,8 +1559,7 @@ __loop_step_once(xtc_loop_t *loop)
 	 * the DIAGNOSTIC owner guard (and any code consulting the binding)
 	 * must see the correct stepping loop, not a stale prior one. */
 	__xtc_current_loop = loop;
-	has_tasks =
-	    atomic_load_explicit(&loop->n_alive, memory_order_relaxed) > 0;
+	has_tasks = xtc_atomic_load_i32(&loop->n_alive, xtc_mo_relaxed) > 0;
 	has_timers = __xtc_timer_heap_next_deadline(loop) >= 0;
 	if (!has_tasks && !has_timers) {
 		/*
@@ -1602,8 +1605,8 @@ __loop_step_once(xtc_loop_t *loop)
 			}
 			stolen = __xtc_exec_try_steal(loop);
 			if (stolen != NULL) {
-				atomic_fetch_add_explicit(&loop->n_steals, 1,
-				    memory_order_relaxed);
+				xtc_atomic_fetch_add_u64(&loop->n_steals, 1,
+				    xtc_mo_relaxed);
 				stolen->q_next = NULL;
 				(void)__xtc_loop_enqueue(loop, stolen);
 			} else if (__runq_nonempty(loop) ||
@@ -1663,8 +1666,8 @@ xtc_yield_check(void)
 	 * yield-check -- that is Phase 2 (signal-context involuntary
 	 * yield). */
 	if (xtc_preempt_tick_pending()) {
-		atomic_fetch_add_explicit(&t->loop->n_yield_due, 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_add_u64(&t->loop->n_yield_due, 1,
+		    xtc_mo_relaxed);
 		return 1;
 	}
 	/*
@@ -1693,8 +1696,8 @@ xtc_yield_check(void)
 		xtc_loop_t *rl = __xtc_current_loop != NULL
 		    ? __xtc_current_loop : t->loop;
 		if (__xtc_io_uring_preempt_due(rl->io)) {
-			atomic_fetch_add_explicit(&rl->n_yield_due, 1,
-			    memory_order_relaxed);
+			xtc_atomic_fetch_add_u64(&rl->n_yield_due, 1,
+			    xtc_mo_relaxed);
 			return 1;
 		}
 	}
@@ -1703,8 +1706,8 @@ xtc_yield_check(void)
 		return 0;                       /* watchdog disabled */
 	(void)__os_clock_mono(&now);
 	if (now - t->run_start_ns >= budget) {
-		atomic_fetch_add_explicit(&t->loop->n_yield_due, 1,
-		    memory_order_relaxed);
+		xtc_atomic_fetch_add_u64(&t->loop->n_yield_due, 1,
+		    xtc_mo_relaxed);
 		return 1;
 	}
 	return 0;
@@ -1727,7 +1730,7 @@ xtc_yield_due_count(const xtc_loop_t *loop)
 {
 	if (loop == NULL)
 		return 0;
-	return atomic_load_explicit(&loop->n_yield_due, memory_order_relaxed);
+	return xtc_atomic_load_u64(&loop->n_yield_due, xtc_mo_relaxed);
 }
 
 /* ---- L3 over-budget stall watchdog -------------------------------- *
@@ -1766,7 +1769,7 @@ xtc_loop_stall_count(const xtc_loop_t *loop)
 {
 	if (loop == NULL)
 		return 0;
-	return atomic_load_explicit(&loop->n_stalls, memory_order_relaxed);
+	return xtc_atomic_load_u64(&loop->n_stalls, xtc_mo_relaxed);
 }
 
 /*
@@ -1782,7 +1785,7 @@ void
 __xtc_loop_stall_report(xtc_loop_t *loop, xtc_task_t *task, int64_t ran_ns,
     int64_t budget_ns)
 {
-	atomic_fetch_add_explicit(&loop->n_stalls, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_u64(&loop->n_stalls, 1, xtc_mo_relaxed);
 
 	if (loop->stall_cb != NULL) {
 		loop->stall_cb(loop, task, ran_ns, budget_ns,

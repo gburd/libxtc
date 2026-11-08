@@ -45,7 +45,7 @@
  */
 
 #include <stdint.h>
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 
 #define NKEYS 2
 #define GEN_OLD 0
@@ -55,22 +55,22 @@
  * generation g (0 == absent).  A generation is "complete" once fully
  * built; resize builds gen NEW completely before publishing it. */
 static int gen_val[2][NKEYS];
-static _Atomic int gen_complete[2];    /* 1 once the generation is fully built */
+static int gen_complete[2]; /* 1 once the generation is fully built */
 
 /* The published array pointer (h->arr): which generation a reader sees. */
-static _Atomic int published_gen;
+static int published_gen;
 
 /* xtc_chash_get: load the current array (acquire), look up the key.
  * Returns the value, or 0 if absent.  Takes no lock. */
 static int
 chash_get(int key)
 {
-	int g = atomic_load_explicit(&published_gen, memory_order_acquire);
+	int g = xtc_atomic_load_i32(&published_gen, xtc_mo_acquire);
 	/* A reader must NEVER observe a half-built published array: the
 	 * generation the pointer names is always fully constructed
 	 * (resize publishes only after building it completely). */
-	__CPROVER_assert(atomic_load_explicit(&gen_complete[g],
-	    memory_order_acquire) == 1,
+	__CPROVER_assert(xtc_atomic_load_i32(&gen_complete[g],
+	                     xtc_mo_acquire) == 1,
 	    "a lookup never sees a half-built array (publish is one store "
 	    "of a fully-built generation)");
 	return gen_val[g][key];
@@ -85,23 +85,23 @@ static void
 resize(void)
 {
 	int k;
-	int old_g = atomic_load_explicit(&published_gen, memory_order_relaxed);
+	int old_g = xtc_atomic_load_i32(&published_gen, xtc_mo_relaxed);
 	int new_g = 1 - old_g;
 
 	/* Build the new generation off to the side: duplicate every key's
 	 * value from the old array (chash.c dups every live node into the
 	 * new array).  Mark incomplete until fully built. */
-	atomic_store_explicit(&gen_complete[new_g], 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&gen_complete[new_g], 0, xtc_mo_relaxed);
 	for (k = 0; k < NKEYS; k++)
 		gen_val[new_g][k] = gen_val[old_g][k];
 	/* Fully built: mark complete BEFORE publishing (release), so the
 	 * reader's acquire-load of published_gen is ordered after this. */
-	atomic_store_explicit(&gen_complete[new_g], 1, memory_order_release);
+	xtc_atomic_store_i32(&gen_complete[new_g], 1, xtc_mo_release);
 
 	/* Publish: one release store swaps the array pointer.  A reader
 	 * loading it sees either old_g (complete) or new_g (complete),
 	 * never a partial array. */
-	atomic_store_explicit(&published_gen, new_g, memory_order_release);
+	xtc_atomic_store_i32(&published_gen, new_g, xtc_mo_release);
 }
 
 /* The reader: look up each key concurrently with the resize; every key
@@ -131,9 +131,9 @@ main(void)
 		gen_val[GEN_OLD][k] = k + 1;
 		gen_val[GEN_NEW][k] = 0;
 	}
-	atomic_store_explicit(&gen_complete[GEN_OLD], 1, memory_order_relaxed);
-	atomic_store_explicit(&gen_complete[GEN_NEW], 0, memory_order_relaxed);
-	atomic_store_explicit(&published_gen, GEN_OLD, memory_order_relaxed);
+	xtc_atomic_store_i32(&gen_complete[GEN_OLD], 1, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&gen_complete[GEN_NEW], 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&published_gen, GEN_OLD, xtc_mo_relaxed);
 
 	/* A resize races a concurrent reader; CBMC explores every
 	 * interleaving of the publish store and the reader's loads. */

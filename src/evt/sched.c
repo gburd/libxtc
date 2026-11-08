@@ -101,8 +101,8 @@ xtc_sched_policy_set(xtc_loop_t *loop, const xtc_sched_policy_t *policy)
 	int expected = 0, rc = XTC_OK;
 	if (loop == NULL)
 		return XTC_E_INVAL;
-	if (!atomic_compare_exchange_strong_explicit(&loop->sched.phase,
-	    &expected, 1, memory_order_acquire, memory_order_relaxed))
+	if (!xtc_atomic_cas_i32(&loop->sched.phase, &expected, 1,
+	        xtc_mo_acquire, xtc_mo_relaxed))
 		return XTC_E_AGAIN;
 	if (policy != NULL) {
 		if (policy->size != sizeof(*policy))
@@ -118,7 +118,7 @@ xtc_sched_policy_set(xtc_loop_t *loop, const xtc_sched_policy_t *policy)
 		else
 			memset(&loop->sched.policy, 0, sizeof(loop->sched.policy));
 	}
-	atomic_store_explicit(&loop->sched.phase, 0, memory_order_release);
+	xtc_atomic_store_i32(&loop->sched.phase, 0, xtc_mo_release);
 	return rc;
 #else
 	(void)loop;
@@ -155,12 +155,13 @@ __xtc_sched_freeze(xtc_loop_t *loop)
 	int expected;
 	/* Serialize with a finite pre-run descriptor copy, never user code. */
 	for (;;) {
-		expected = atomic_load_explicit(&loop->sched.phase, memory_order_acquire);
+		expected =
+		    xtc_atomic_load_i32(&loop->sched.phase, xtc_mo_acquire);
 		if (expected == 2)
 			return;
-		if (expected == 0 && atomic_compare_exchange_weak_explicit(
-		    &loop->sched.phase, &expected, 2, memory_order_acquire,
-		    memory_order_relaxed))
+		if (expected == 0 &&
+		    xtc_atomic_cas_weak_i32(&loop->sched.phase, &expected, 2,
+		        xtc_mo_acquire, xtc_mo_relaxed))
 			return;
 	}
 }

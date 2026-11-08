@@ -14,7 +14,6 @@
 #include "xtc_chan.h"
 #include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
 
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -22,10 +21,10 @@
 
 struct xtc_chan_oneshot {
 	xtc_res_t *res;
-	_Atomic int  state;       /* 0 empty, 1 written, 2 closed */
-	_Atomic(void *) value;
+	int state; /* 0 empty, 1 written, 2 closed */
+	void *value;
 	xtc_waker_t  waker;
-	_Atomic int  has_waker;
+	int has_waker;
 };
 
 int
@@ -43,9 +42,9 @@ xtc_chan_oneshot_create(xtc_res_t *res, xtc_chan_oneshot_t **out)
 		return rc;
 	}
 	c->res = res;
-	atomic_store_explicit(&c->state, 0, memory_order_relaxed);
-	atomic_store_explicit(&c->value, NULL, memory_order_relaxed);
-	atomic_store_explicit(&c->has_waker, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&c->state, 0, xtc_mo_relaxed);
+	xtc_atomic_store_ptr(&c->value, NULL, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&c->has_waker, 0, xtc_mo_relaxed);
 	*out = c;
 	return XTC_OK;
 }
@@ -63,12 +62,11 @@ xtc_chan_oneshot_send(xtc_chan_oneshot_t *c, void *msg)
 {
 	int expected = 0;
 	if (c == NULL) return XTC_E_INVAL;
-	if (!atomic_compare_exchange_strong_explicit(
-	        &c->state, &expected, 1,
-	        memory_order_release, memory_order_relaxed))
+	if (!xtc_atomic_cas_i32(&c->state, &expected, 1, xtc_mo_release,
+	        xtc_mo_relaxed))
 		return XTC_E_INVAL;       /* already sent or closed */
-	atomic_store_explicit(&c->value, msg, memory_order_release);
-	if (atomic_load_explicit(&c->has_waker, memory_order_acquire))
+	xtc_atomic_store_ptr(&c->value, msg, xtc_mo_release);
+	if (xtc_atomic_load_i32(&c->has_waker, xtc_mo_acquire))
 		(void)xtc_waker_wake(&c->waker);
 	return XTC_OK;
 }
@@ -77,9 +75,9 @@ int
 xtc_chan_oneshot_try_recv(xtc_chan_oneshot_t *c, void **out)
 {
 	if (c == NULL || out == NULL) return XTC_E_INVAL;
-	if (atomic_load_explicit(&c->state, memory_order_acquire) != 1)
+	if (xtc_atomic_load_i32(&c->state, xtc_mo_acquire) != 1)
 		return XTC_E_AGAIN;
-	*out = atomic_load_explicit(&c->value, memory_order_acquire);
+	*out = xtc_atomic_load_ptr(&c->value, xtc_mo_acquire);
 	return XTC_OK;
 }
 
@@ -88,9 +86,9 @@ xtc_chan_oneshot_set_waker(xtc_chan_oneshot_t *c, const xtc_waker_t *w)
 {
 	if (c == NULL || w == NULL) return XTC_E_INVAL;
 	c->waker = *w;
-	atomic_store_explicit(&c->has_waker, 1, memory_order_release);
+	xtc_atomic_store_i32(&c->has_waker, 1, xtc_mo_release);
 	/* If a value is already there, fire immediately (one-shot). */
-	if (atomic_load_explicit(&c->state, memory_order_acquire) == 1)
+	if (xtc_atomic_load_i32(&c->state, xtc_mo_acquire) == 1)
 		(void)xtc_waker_wake(&c->waker);
 	return XTC_OK;
 }
@@ -104,19 +102,17 @@ xtc_chan_oneshot_set_waker(xtc_chan_oneshot_t *c, const xtc_waker_t *w)
 struct xtc_chan_mpsc {
 	xtc_res_t *res;
 	size_t       cap;
-	_Atomic(void *) *slots;
+	void **slots;
 
 	/* Producer-side: multiple senders CAS head. */
-	_Alignas(XTC_CACHE_LINE)
-	_Atomic uint64_t  head;
+	_Alignas(XTC_CACHE_LINE) uint64_t head;
 
 	/* Consumer-side: single consumer advances tail. */
-	_Alignas(XTC_CACHE_LINE)
-	_Atomic uint64_t  tail;
+	_Alignas(XTC_CACHE_LINE) uint64_t tail;
 
-	_Atomic int       closed;
+	int closed;
 	xtc_waker_t       waker;
-	_Atomic int       has_waker;
+	int has_waker;
 };
 
 /* Verify head/tail are cache-line separated. */
@@ -164,13 +160,13 @@ xtc_chan_mpsc_create(xtc_res_t *res, size_t capacity, xtc_chan_mpsc_t **out)
 		return rc;
 	}
 	for (i = 0; i < capacity; i++)
-		atomic_store_explicit(&c->slots[i], NULL, memory_order_relaxed);
+		xtc_atomic_store_ptr(&c->slots[i], NULL, xtc_mo_relaxed);
 	c->res = res;
 	c->cap = capacity;
-	atomic_store_explicit(&c->head, 0, memory_order_relaxed);
-	atomic_store_explicit(&c->tail, 0, memory_order_relaxed);
-	atomic_store_explicit(&c->closed, 0, memory_order_relaxed);
-	atomic_store_explicit(&c->has_waker, 0, memory_order_relaxed);
+	xtc_atomic_store_u64(&c->head, 0, xtc_mo_relaxed);
+	xtc_atomic_store_u64(&c->tail, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&c->closed, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&c->has_waker, 0, xtc_mo_relaxed);
 	*out = c;
 	return XTC_OK;
 }
@@ -193,7 +189,7 @@ xtc_chan_mpsc_try_send(xtc_chan_mpsc_t *c, void *msg)
 {
 	uint64_t head, tail;
 	if (XTC_UNLIKELY(c == NULL)) return XTC_E_INVAL;
-	if (XTC_UNLIKELY(atomic_load_explicit(&c->closed, memory_order_acquire)))
+	if (XTC_UNLIKELY(xtc_atomic_load_i32(&c->closed, xtc_mo_acquire)))
 		return XTC_E_INVAL;
 	if (XTC_UNLIKELY(msg == NULL)) return XTC_E_INVAL;     /* NULL is the empty sentinel */
 
@@ -211,8 +207,8 @@ xtc_chan_mpsc_try_send(xtc_chan_mpsc_t *c, void *msg)
 	 * makes the preemption timer defer; it is a TLS increment. */
 	__xtc_unsafe_enter();
 	for (;;) {
-		head = atomic_load_explicit(&c->head, memory_order_relaxed);
-		tail = atomic_load_explicit(&c->tail, memory_order_acquire);
+		head = xtc_atomic_load_u64(&c->head, xtc_mo_relaxed);
+		tail = xtc_atomic_load_u64(&c->tail, xtc_mo_acquire);
 		if (XTC_UNLIKELY(head - tail >= c->cap) ||
 		    /* Buggify: under DST, occasionally report a not-yet-full
 		     * channel as full.  A legal pessimal choice -- try_send is
@@ -227,15 +223,14 @@ xtc_chan_mpsc_try_send(xtc_chan_mpsc_t *c, void *msg)
 				xtc_res_release(c->res, XTC_RES_CHAN_SLOTS, 1);
 			return XTC_E_AGAIN;
 		}
-		if (XTC_LIKELY(atomic_compare_exchange_weak_explicit(
-		        &c->head, &head, head + 1,
-		        memory_order_acq_rel, memory_order_relaxed)))
+		if (XTC_LIKELY(xtc_atomic_cas_weak_u64(&c->head, &head,
+		        head + 1, xtc_mo_acq_rel, xtc_mo_relaxed)))
 			break;
 	}
-	atomic_store_explicit(&c->slots[head & (c->cap - 1)], msg,
-	    memory_order_release);
+	xtc_atomic_store_ptr(&c->slots[head & (c->cap - 1)], msg,
+	    xtc_mo_release);
 	__xtc_unsafe_leave();
-	if (atomic_load_explicit(&c->has_waker, memory_order_acquire))
+	if (xtc_atomic_load_i32(&c->has_waker, xtc_mo_acquire))
 		(void)xtc_waker_wake(&c->waker);
 	return XTC_OK;
 }
@@ -246,10 +241,10 @@ xtc_chan_mpsc_try_recv(xtc_chan_mpsc_t *c, void **out)
 	uint64_t tail, head;
 	void *v;
 	if (XTC_UNLIKELY(c == NULL || out == NULL)) return XTC_E_INVAL;
-	tail = atomic_load_explicit(&c->tail, memory_order_relaxed);
-	head = atomic_load_explicit(&c->head, memory_order_acquire);
+	tail = xtc_atomic_load_u64(&c->tail, xtc_mo_relaxed);
+	head = xtc_atomic_load_u64(&c->head, xtc_mo_acquire);
 	if (XTC_UNLIKELY(tail >= head)) {
-		if (atomic_load_explicit(&c->closed, memory_order_acquire))
+		if (xtc_atomic_load_i32(&c->closed, xtc_mo_acquire))
 			return XTC_E_INVAL;
 		return XTC_E_AGAIN;
 	}
@@ -258,13 +253,12 @@ xtc_chan_mpsc_try_recv(xtc_chan_mpsc_t *c, void **out)
 	 * fiber on this very thread.  Report AGAIN without consuming; the
 	 * store fires the waker, and the next try_recv takes this slot (FIFO
 	 * order is kept: a later slot is never taken first). */
-	v = atomic_load_explicit(&c->slots[tail & (c->cap - 1)],
-	    memory_order_acquire);
+	v = xtc_atomic_load_ptr(&c->slots[tail & (c->cap - 1)], xtc_mo_acquire);
 	if (XTC_UNLIKELY(v == NULL))
 		return XTC_E_AGAIN;
-	atomic_store_explicit(&c->slots[tail & (c->cap - 1)], NULL,
-	    memory_order_relaxed);
-	atomic_store_explicit(&c->tail, tail + 1, memory_order_release);
+	xtc_atomic_store_ptr(&c->slots[tail & (c->cap - 1)], NULL,
+	    xtc_mo_relaxed);
+	xtc_atomic_store_u64(&c->tail, tail + 1, xtc_mo_release);
 	if (c->res != NULL)
 		xtc_res_release(c->res, XTC_RES_CHAN_SLOTS, 1);
 	*out = v;
@@ -276,9 +270,9 @@ xtc_chan_mpsc_set_waker(xtc_chan_mpsc_t *c, const xtc_waker_t *w)
 {
 	if (c == NULL || w == NULL) return XTC_E_INVAL;
 	c->waker = *w;
-	atomic_store_explicit(&c->has_waker, 1, memory_order_release);
-	if (atomic_load_explicit(&c->head, memory_order_acquire) >
-	    atomic_load_explicit(&c->tail, memory_order_acquire))
+	xtc_atomic_store_i32(&c->has_waker, 1, xtc_mo_release);
+	if (xtc_atomic_load_u64(&c->head, xtc_mo_acquire) >
+	    xtc_atomic_load_u64(&c->tail, xtc_mo_acquire))
 		(void)xtc_waker_wake(&c->waker);
 	return XTC_OK;
 }
@@ -287,8 +281,8 @@ int
 xtc_chan_mpsc_close(xtc_chan_mpsc_t *c)
 {
 	if (c == NULL) return XTC_E_INVAL;
-	atomic_store_explicit(&c->closed, 1, memory_order_release);
-	if (atomic_load_explicit(&c->has_waker, memory_order_acquire))
+	xtc_atomic_store_i32(&c->closed, 1, xtc_mo_release);
+	if (xtc_atomic_load_i32(&c->has_waker, xtc_mo_acquire))
 		(void)xtc_waker_wake(&c->waker);
 	return XTC_OK;
 }
@@ -298,8 +292,8 @@ xtc_chan_mpsc_len(const xtc_chan_mpsc_t *c)
 {
 	uint64_t head, tail;
 	if (c == NULL) return 0;
-	head = atomic_load_explicit(&c->head, memory_order_acquire);
-	tail = atomic_load_explicit(&c->tail, memory_order_acquire);
+	head = xtc_atomic_load_u64(&c->head, xtc_mo_acquire);
+	tail = xtc_atomic_load_u64(&c->tail, xtc_mo_acquire);
 	return (size_t)(head - tail);
 }
 
@@ -307,8 +301,8 @@ xtc_chan_mpsc_len(const xtc_chan_mpsc_t *c)
 
 struct xtc_chan_watch {
 	xtc_res_t *res;
-	_Atomic(void *) value;
-	_Atomic int     has_value;
+	void *value;
+	int has_value;
 };
 
 int
@@ -326,8 +320,8 @@ xtc_chan_watch_create(xtc_res_t *res, xtc_chan_watch_t **out)
 		return rc;
 	}
 	c->res = res;
-	atomic_store_explicit(&c->value, NULL, memory_order_relaxed);
-	atomic_store_explicit(&c->has_value, 0, memory_order_relaxed);
+	xtc_atomic_store_ptr(&c->value, NULL, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&c->has_value, 0, xtc_mo_relaxed);
 	*out = c;
 	return XTC_OK;
 }
@@ -344,8 +338,8 @@ int
 xtc_chan_watch_send(xtc_chan_watch_t *c, void *value)
 {
 	if (c == NULL) return XTC_E_INVAL;
-	atomic_store_explicit(&c->value, value, memory_order_release);
-	atomic_store_explicit(&c->has_value, 1, memory_order_release);
+	xtc_atomic_store_ptr(&c->value, value, xtc_mo_release);
+	xtc_atomic_store_i32(&c->has_value, 1, xtc_mo_release);
 	return XTC_OK;
 }
 
@@ -353,9 +347,9 @@ int
 xtc_chan_watch_recv(xtc_chan_watch_t *c, void **out)
 {
 	if (c == NULL || out == NULL) return XTC_E_INVAL;
-	if (!atomic_load_explicit(&c->has_value, memory_order_acquire))
+	if (!xtc_atomic_load_i32(&c->has_value, xtc_mo_acquire))
 		return XTC_E_AGAIN;
-	*out = atomic_load_explicit(&c->value, memory_order_acquire);
+	*out = xtc_atomic_load_ptr(&c->value, xtc_mo_acquire);
 	return XTC_OK;
 }
 
@@ -515,7 +509,7 @@ struct xtc_chan_broadcast {
 	size_t       cap;
 	void       **slots;
 	uint64_t    *seqs;          /* per-slot sequence number */
-	_Atomic uint64_t  pos;       /* monotonic publish counter */
+	uint64_t pos;               /* monotonic publish counter */
 	pthread_mutex_t   lock;
 	struct xtc_chan_broadcast_recv *recvs;
 };
@@ -541,7 +535,7 @@ xtc_chan_broadcast_create(xtc_res_t *res, size_t capacity,
 	    (void **)&c->seqs)) != XTC_OK) goto fail1;
 	c->res = res;
 	c->cap = capacity;
-	atomic_store_explicit(&c->pos, 0, memory_order_relaxed);
+	xtc_atomic_store_u64(&c->pos, 0, xtc_mo_relaxed);
 	(void)pthread_mutex_init(&c->lock, NULL);
 	*out = c;
 	return XTC_OK;
@@ -570,10 +564,10 @@ xtc_chan_broadcast_send(xtc_chan_broadcast_t *c, void *msg)
 	uint64_t seq;
 	if (c == NULL) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&c->lock);
-	seq = atomic_load_explicit(&c->pos, memory_order_relaxed);
+	seq = xtc_atomic_load_u64(&c->pos, xtc_mo_relaxed);
 	c->slots[seq % c->cap] = msg;
 	c->seqs[seq % c->cap]  = seq + 1;     /* +1 so 0 = unset */
-	atomic_store_explicit(&c->pos, seq + 1, memory_order_release);
+	xtc_atomic_store_u64(&c->pos, seq + 1, xtc_mo_release);
 	(void)__xtc_mtx_unlock(&c->lock);
 	return XTC_OK;
 }
@@ -589,7 +583,7 @@ xtc_chan_broadcast_subscribe(xtc_chan_broadcast_t *c,
 		return rc;
 	r->chan = c;
 	(void)__xtc_mtx_lock(&c->lock);
-	r->cursor = atomic_load_explicit(&c->pos, memory_order_acquire);
+	r->cursor = xtc_atomic_load_u64(&c->pos, xtc_mo_acquire);
 	r->next = c->recvs;
 	c->recvs = r;
 	(void)__xtc_mtx_unlock(&c->lock);
@@ -622,7 +616,7 @@ xtc_chan_broadcast_recv(xtc_chan_broadcast_recv_t *r, void **out, int *lagged)
 	if (lagged) *lagged = 0;
 
 	(void)__xtc_mtx_lock(&c->lock);
-	pos = atomic_load_explicit(&c->pos, memory_order_acquire);
+	pos = xtc_atomic_load_u64(&c->pos, xtc_mo_acquire);
 	if (r->cursor >= pos) {
 		(void)__xtc_mtx_unlock(&c->lock);
 		return XTC_E_AGAIN;
@@ -662,8 +656,8 @@ struct xtc_chan_demand {
 	int              closed;
 	xtc_waker_t      prod_waker; /* fired when demand is granted */
 	xtc_waker_t      cons_waker; /* fired when an item is sent */
-	_Atomic int      has_prod_waker;
-	_Atomic int      has_cons_waker;
+	int has_prod_waker;
+	int has_cons_waker;
 };
 
 int
@@ -691,8 +685,8 @@ xtc_chan_demand_create(xtc_res_t *res, size_t capacity,
 	(void)pthread_mutex_init(&c->lock, NULL);
 	c->res = res;
 	c->cap = capacity;
-	atomic_store_explicit(&c->has_prod_waker, 0, memory_order_relaxed);
-	atomic_store_explicit(&c->has_cons_waker, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&c->has_prod_waker, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&c->has_cons_waker, 0, xtc_mo_relaxed);
 	*out = c;
 	return XTC_OK;
 }
@@ -720,8 +714,7 @@ xtc_chan_demand_ask(xtc_chan_demand_t *c, size_t n)
 	fire = 1;
 	(void)__xtc_mtx_unlock(&c->lock);
 	/* Tell the producer there is demand to satisfy. */
-	if (fire && atomic_load_explicit(&c->has_prod_waker,
-	    memory_order_acquire))
+	if (fire && xtc_atomic_load_i32(&c->has_prod_waker, xtc_mo_acquire))
 		(void)xtc_waker_wake(&c->prod_waker);
 	return XTC_OK;
 }
@@ -745,8 +738,7 @@ xtc_chan_demand_send(xtc_chan_demand_t *c, void *msg)
 	fire = 1;
 out:
 	(void)__xtc_mtx_unlock(&c->lock);
-	if (fire && atomic_load_explicit(&c->has_cons_waker,
-	    memory_order_acquire))
+	if (fire && xtc_atomic_load_i32(&c->has_cons_waker, xtc_mo_acquire))
 		(void)xtc_waker_wake(&c->cons_waker);
 	return rc;
 }
@@ -801,7 +793,7 @@ xtc_chan_demand_set_producer_waker(xtc_chan_demand_t *c, const xtc_waker_t *w)
 	if (c == NULL || w == NULL) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&c->lock);
 	c->prod_waker = *w;
-	atomic_store_explicit(&c->has_prod_waker, 1, memory_order_release);
+	xtc_atomic_store_i32(&c->has_prod_waker, 1, xtc_mo_release);
 	if (c->demand > 0) wake_now = 1;   /* demand already waiting */
 	(void)__xtc_mtx_unlock(&c->lock);
 	if (wake_now)
@@ -816,7 +808,7 @@ xtc_chan_demand_set_consumer_waker(xtc_chan_demand_t *c, const xtc_waker_t *w)
 	if (c == NULL || w == NULL) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&c->lock);
 	c->cons_waker = *w;
-	atomic_store_explicit(&c->has_cons_waker, 1, memory_order_release);
+	xtc_atomic_store_i32(&c->has_cons_waker, 1, xtc_mo_release);
 	if (c->n > 0) wake_now = 1;        /* items already buffered */
 	(void)__xtc_mtx_unlock(&c->lock);
 	if (wake_now)
@@ -834,8 +826,7 @@ xtc_chan_demand_close(xtc_chan_demand_t *c)
 	fire = 1;
 	(void)__xtc_mtx_unlock(&c->lock);
 	/* Wake a parked consumer so it observes close and drains/exits. */
-	if (fire && atomic_load_explicit(&c->has_cons_waker,
-	    memory_order_acquire))
+	if (fire && xtc_atomic_load_i32(&c->has_cons_waker, xtc_mo_acquire))
 		(void)xtc_waker_wake(&c->cons_waker);
 	return XTC_OK;
 }

@@ -132,10 +132,10 @@ struct batch_mt {
 	 * driver-only astats fields (offloads/offload_*) stay plain. A relaxed
 	 * fetch-add is enough: these are monotonic totals, not ordering
 	 * barriers, and a wrap at 2^64 on a lifetime counter is a non-issue. */
-	_Atomic uint64_t n_queued;
-	_Atomic uint64_t n_rejections;
-	_Atomic int gate;           /* 0 open, 1 closed, 2 driver done */
-	_Atomic uint32_t inflight;  /* producers between gate and push */
+	uint64_t n_queued;
+	uint64_t n_rejections;
+	int gate;          /* 0 open, 1 closed, 2 driver done */
+	uint32_t inflight; /* producers between gate and push */
 };
 
 struct xtc_batch {
@@ -160,7 +160,7 @@ struct xtc_batch {
 	 * bracket) and submit_mt (off-thread) draw from the SAME atomic space
 	 * so handles are never reused across the two paths. last_handle above
 	 * mirrors the owner-loop view and backs the exhaustion test hook. */
-	_Atomic uint64_t handle_ctr;
+	uint64_t handle_ctr;
 	int closed, cancelling, callback, class_index;
 	/* Async offload (xtc_batch_create_async). async == 0 => classic sync
 	 * step; the fields below are unused and the engine takes the sync
@@ -326,9 +326,9 @@ batch_inc(uint64_t *n)
 /* Producer-side counter bump. Relaxed fetch-add from any thread; wrap at
  * 2^64 on a lifetime total is accepted (see struct batch_mt). */
 static void
-batch_inc_atomic(_Atomic uint64_t *n)
+batch_inc_atomic(uint64_t *n)
 {
-	(void)atomic_fetch_add_explicit(n, 1, memory_order_relaxed);
+	(void)xtc_atomic_fetch_add_u64(n, 1, xtc_mo_relaxed);
 }
 
 static int
@@ -345,13 +345,12 @@ batch_next_handle(xtc_batch_t *b)
 {
 	/* CAS, not fetch-add: the counter must never pass through a wrapped
 	 * value another producer could stamp. */
-	uint64_t cur =
-	    atomic_load_explicit(&b->handle_ctr, memory_order_relaxed);
+	uint64_t cur = xtc_atomic_load_u64(&b->handle_ctr, xtc_mo_relaxed);
 	do {
 		if (cur == UINT64_MAX)
 			return 0;
-	} while (!atomic_compare_exchange_weak_explicit(&b->handle_ctr, &cur,
-	    cur + 1, memory_order_relaxed, memory_order_relaxed));
+	} while (!xtc_atomic_cas_weak_u64(&b->handle_ctr, &cur, cur + 1,
+	    xtc_mo_relaxed, xtc_mo_relaxed));
 	return cur + 1;
 }
 
@@ -366,9 +365,8 @@ batch_owner(xtc_batch_t *b, int quiescent)
 		return XTC_OK;
 	if (__xtc_current_loop != NULL)
 		return XTC_E_INVAL;
-	if (quiescent
-	    || atomic_load_explicit(&b->loop->sched.phase, memory_order_acquire)
-	           == 0)
+	if (quiescent ||
+	    xtc_atomic_load_i32(&b->loop->sched.phase, xtc_mo_acquire) == 0)
 		return XTC_OK;
 	return XTC_E_INVAL;
 }
@@ -818,8 +816,8 @@ batch_mt_init(xtc_batch_t *b, uint32_t cap)
 	    || (rc = xtc_chan_mpmc_create(NULL, cap, &b->mt.cpool)) != XTC_OK)
 		return rc;
 	b->mt.cap = cap;
-	atomic_store_explicit(&b->mt.n_queued, 0, memory_order_relaxed);
-	atomic_store_explicit(&b->mt.n_rejections, 0, memory_order_relaxed);
+	xtc_atomic_store_u64(&b->mt.n_queued, 0, xtc_mo_relaxed);
+	xtc_atomic_store_u64(&b->mt.n_rejections, 0, xtc_mo_relaxed);
 	/* Seed each pool. A pool's capacity is cap, so its cap records always
 	 * fit. */
 	for (i = 0; i < cap; ++i)
@@ -1032,8 +1030,8 @@ batch_mt_drain(xtc_batch_t *b)
 static int
 batch_mt_idle(xtc_batch_t *b)
 {
-	return atomic_load_explicit(&b->mt.inflight, memory_order_seq_cst) == 0
-	    && xtc_chan_mpsc_len(b->mt.ring) == 0;
+	return xtc_atomic_load_u32(&b->mt.inflight, xtc_mo_seq_cst) == 0 &&
+	    xtc_chan_mpsc_len(b->mt.ring) == 0;
 }
 
 /* Driver side, closed group (gate >= 1, so no SUBMIT can enter any more):
@@ -1047,11 +1045,11 @@ batch_mt_quiesced(xtc_batch_t *b)
 {
 	if (b->mt.ring == NULL)
 		return 1;
-	if (atomic_load_explicit(&b->mt.gate, memory_order_relaxed) < 1)
-		atomic_store_explicit(&b->mt.gate, 1, memory_order_seq_cst);
+	if (xtc_atomic_load_i32(&b->mt.gate, xtc_mo_relaxed) < 1)
+		xtc_atomic_store_i32(&b->mt.gate, 1, xtc_mo_seq_cst);
 	if (!batch_mt_idle(b))
 		return 0;
-	atomic_store_explicit(&b->mt.gate, 2, memory_order_seq_cst);
+	xtc_atomic_store_i32(&b->mt.gate, 2, xtc_mo_seq_cst);
 	return batch_mt_idle(b);
 }
 
@@ -1070,18 +1068,17 @@ batch_mt_enter(xtc_batch_t *b, int limit, int count)
 	 * 1.56 regression from the "AGAIN after close" fix).  A refused
 	 * attempt now never touches `inflight`.  The announce-then-recheck
 	 * below still closes the race with a concurrent close. */
-	if (atomic_load_explicit(&b->mt.gate, memory_order_acquire) >= limit) {
+	if (xtc_atomic_load_i32(&b->mt.gate, xtc_mo_acquire) >= limit) {
 		if (count)
 			batch_inc_atomic(&b->mt.n_rejections);
 		return XTC_E_AGAIN;
 	}
-	(void)atomic_fetch_add_explicit(&b->mt.inflight, 1,
-	    memory_order_seq_cst);
-	if (atomic_load_explicit(&b->mt.gate, memory_order_seq_cst) >= limit) {
+	(void)xtc_atomic_fetch_add_u32(&b->mt.inflight, 1, xtc_mo_seq_cst);
+	if (xtc_atomic_load_i32(&b->mt.gate, xtc_mo_seq_cst) >= limit) {
 		if (count)
 			batch_inc_atomic(&b->mt.n_rejections);
-		(void)atomic_fetch_sub_explicit(&b->mt.inflight, 1,
-		    memory_order_release);
+		(void)xtc_atomic_fetch_sub_u32(&b->mt.inflight, 1,
+		    xtc_mo_release);
 		return XTC_E_AGAIN;
 	}
 	return XTC_OK;
@@ -1092,8 +1089,7 @@ static void
 batch_mt_leave(xtc_batch_t *b, int queued)
 {
 	batch_inc_atomic(queued ? &b->mt.n_queued : &b->mt.n_rejections);
-	(void)atomic_fetch_sub_explicit(&b->mt.inflight, 1,
-	    memory_order_release);
+	(void)xtc_atomic_fetch_sub_u32(&b->mt.inflight, 1, xtc_mo_release);
 }
 
 /* FUTURE kind: chain the device future to a completion token (see struct
@@ -1519,7 +1515,7 @@ void
 __xtc_batch_set_last_handle(xtc_batch_t *b, uint64_t last)
 {
 	b->last_handle = last;
-	atomic_store_explicit(&b->handle_ctr, last, memory_order_relaxed);
+	xtc_atomic_store_u64(&b->handle_ctr, last, xtc_mo_relaxed);
 }
 
 /* Test-only (not PUBLIC): push a raw control/submit record onto the mt ring
@@ -1621,7 +1617,7 @@ xtc_batch_create(xtc_loop_t *loop, const xtc_batch_opts_t *o, xtc_batch_t **out)
 		return XTC_E_INVAL;
 	if (__xtc_current_loop != NULL && __xtc_current_loop != loop)
 		return XTC_E_INVAL;
-	if (atomic_load_explicit(&loop->sched.phase, memory_order_acquire) != 0)
+	if (xtc_atomic_load_i32(&loop->sched.phase, xtc_mo_acquire) != 0)
 		return XTC_E_AGAIN;
 	if ((rc = batch_class_lane(loop, o->sched_class, &lane)) != XTC_OK)
 		return rc;
@@ -1658,7 +1654,7 @@ xtc_batch_create_async(xtc_loop_t *loop, const xtc_batch_async_opts_t *o,
 		return XTC_E_INVAL;
 	if (__xtc_current_loop != NULL && __xtc_current_loop != loop)
 		return XTC_E_INVAL;
-	if (atomic_load_explicit(&loop->sched.phase, memory_order_acquire) != 0)
+	if (xtc_atomic_load_i32(&loop->sched.phase, xtc_mo_acquire) != 0)
 		return XTC_E_AGAIN;
 	if ((rc = batch_class_lane(loop, o->sched_class, &lane)) != XTC_OK)
 		return rc;
@@ -1705,9 +1701,9 @@ xtc_batch_submit(xtc_batch_t *b, void *request, uint64_t charge, uint64_t *out)
 	if (rc == XTC_OK) {
 		if (out == NULL || charge == 0)
 			rc = XTC_E_INVAL;
-		else if (charge > b->opts.resource_capacity
-		         || atomic_load_explicit(&b->handle_ctr,
-		                memory_order_relaxed) == UINT64_MAX)
+		else if (charge > b->opts.resource_capacity ||
+		    xtc_atomic_load_u64(&b->handle_ctr, xtc_mo_relaxed) ==
+		        UINT64_MAX)
 			rc = XTC_E_RANGE;
 		else if (b->closed || b->live == b->opts.capacity
 		         || b->mt.n_held != 0)
@@ -1765,10 +1761,10 @@ xtc_batch_cancel(xtc_batch_t *b, uint64_t handle)
 		    && v >= b->opts.capacity) {
 			b->mt.recs[v - b->opts.capacity].cancel = 1;
 			(void)xtc_notify_signal(b->notify);
-		} else if (s == NULL && b->mt.ring != NULL
-		    && xtc_chan_mpsc_len(b->mt.ring) != 0 && handle != 0
-		    && handle <= atomic_load_explicit(&b->handle_ctr,
-		                     memory_order_relaxed))
+		} else if (s == NULL && b->mt.ring != NULL &&
+		    xtc_chan_mpsc_len(b->mt.ring) != 0 && handle != 0 &&
+		    handle <=
+		        xtc_atomic_load_u64(&b->handle_ctr, xtc_mo_relaxed))
 			rc = XTC_E_AGAIN;
 		else if (s == NULL)
 			rc = XTC_E_INVAL;
@@ -1958,11 +1954,11 @@ xtc_batch_close(xtc_batch_t *b, enum xtc_batch_close_mode mode)
 		else {
 			b->closed = 1;
 			b->cancelling |= mode == XTC_BATCH_CANCEL;
-			if (b->mt.ring != NULL
-			    && atomic_load_explicit(&b->mt.gate,
-			           memory_order_relaxed) == 0)
-				atomic_store_explicit(&b->mt.gate, 1,
-				    memory_order_seq_cst);
+			if (b->mt.ring != NULL &&
+			    xtc_atomic_load_i32(&b->mt.gate, xtc_mo_relaxed) ==
+			        0)
+				xtc_atomic_store_i32(&b->mt.gate, 1,
+				    xtc_mo_seq_cst);
 			/* The notify wakes an idle driver and a FUTURE await;
 			 * the proc wake ends a FENCE await, which then sees
 			 * b->cancelling and reports ABORTED. */
@@ -2060,10 +2056,11 @@ xtc_batch_get_async_stats(xtc_batch_t *b, xtc_batch_async_stats_t *out)
 			/* mt_queued/mt_rejections live in b->mt as atomics (the
 			 * producer path bumps them off-thread); read them with a
 			 * relaxed load rather than from the plain astats mirror. */
-			out->mt_queued = atomic_load_explicit(&b->mt.n_queued,
-			    memory_order_relaxed);
-			out->mt_rejections = atomic_load_explicit(
-			    &b->mt.n_rejections, memory_order_relaxed);
+			out->mt_queued = xtc_atomic_load_u64(&b->mt.n_queued,
+			    xtc_mo_relaxed);
+			out->mt_rejections =
+			    xtc_atomic_load_u64(&b->mt.n_rejections,
+			        xtc_mo_relaxed);
 			out->size = sizeof(*out);
 			out->version = XTC_BATCH_VERSION;
 		}
@@ -2103,8 +2100,8 @@ xtc_batch_loop_for_device(xtc_exec_t *exec, const xtc_accel_dev_t *dev,
 	 * executor runs, every call falls back to loop 0. */
 	for (i = 0; i < n_loops; ++i) {
 		extern int __xtc_exec_loop_node(xtc_exec_t *, int);
-		if (atomic_load_explicit(&xtc_exec_loop(exec, i)->sched.phase,
-		        memory_order_acquire) == 0)
+		if (xtc_atomic_load_i32(&xtc_exec_loop(exec, i)->sched.phase,
+		        xtc_mo_acquire) == 0)
 			continue;
 		if (__xtc_exec_loop_node(exec, i) == dev_node) {
 			*out_loop_idx = i;

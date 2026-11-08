@@ -100,9 +100,9 @@ struct xtc_osproc {
 	 * and its lifecycle (running -> exited-with-status, signalled) is
 	 * modelled here on the sim clock. */
 	int          is_sim;
-	_Atomic int  sim_done;     /* 1 once the fiber returned / was killed */
+	int sim_done;              /* 1 once the fiber returned / was killed */
 	int          sim_status;   /* raw waitpid-style status when done */
-	_Atomic int  sim_signal;   /* last signal delivered (0 = none) */
+	int sim_signal;            /* last signal delivered (0 = none) */
 };
 
 /* Argument for the simulated child fiber. */
@@ -112,7 +112,7 @@ struct sim_child_arg {
 	void  *arg;
 };
 
-static _Atomic long g_sim_pid_next = 1;   /* synthetic sim pids */
+static long g_sim_pid_next = 1; /* synthetic sim pids */
 
 static void
 sim_child_main(void *a)
@@ -125,13 +125,15 @@ sim_child_main(void *a)
 	 * child: model SIGKILL/SIGTERM/SIGINT as termination.  Otherwise run
 	 * the callback and encode its return as a normal exit status. */
 	r = ca->fn(-1, ca->arg);
-	if (atomic_load(&p->sim_signal) != 0 && !atomic_load(&p->sim_done)) {
+	if (xtc_atomic_load_i32(&p->sim_signal, xtc_mo_seq_cst) != 0 &&
+	    !xtc_atomic_load_i32(&p->sim_done, xtc_mo_seq_cst)) {
 		/* Killed by signal: encode as WIFSIGNALED (low 7 bits = sig). */
-		p->sim_status = atomic_load(&p->sim_signal) & 0x7f;
+		p->sim_status =
+		    xtc_atomic_load_i32(&p->sim_signal, xtc_mo_seq_cst) & 0x7f;
 	} else {
 		p->sim_status = (r & 0xff) << 8;   /* WIFEXITED, code r */
 	}
-	atomic_store(&p->sim_done, 1);
+	xtc_atomic_store_i32(&p->sim_done, 1, xtc_mo_seq_cst);
 	__os_free(ca);
 }
 
@@ -345,9 +347,10 @@ xtc_osproc_spawn(const xtc_osproc_opts_t *uopts, xtc_osproc_t **out)
 			return XTC_E_NOMEM;
 		}
 		p->is_sim = 1;
-		p->pid = (pid_t)atomic_fetch_add(&g_sim_pid_next, 1);
-		atomic_init(&p->sim_done, 0);
-		atomic_init(&p->sim_signal, 0);
+		p->pid = (pid_t)xtc_atomic_fetch_add_long(&g_sim_pid_next, 1,
+		    xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&p->sim_done, 0, xtc_mo_relaxed);
+		xtc_atomic_store_i32(&p->sim_signal, 0, xtc_mo_relaxed);
 		ca->p = p;
 		ca->fn = opts->fn;
 		ca->arg = opts->arg;
@@ -478,13 +481,13 @@ xtc_osproc_signal(const xtc_osproc_t *p, int sig)
 		 * mark the (not-yet-exited) child done with a signalled
 		 * status.  A cooperative child could also observe sim_signal. */
 		xtc_osproc_t *m = (xtc_osproc_t *)p;   /* atomics are mutable */
-		if (atomic_load(&m->sim_done))
+		if (xtc_atomic_load_i32(&m->sim_done, xtc_mo_seq_cst))
 			return XTC_E_INVAL;             /* already exited */
-		atomic_store(&m->sim_signal, sig);
+		xtc_atomic_store_i32(&m->sim_signal, sig, xtc_mo_seq_cst);
 		if (sig == 9 /*SIGKILL*/ || sig == 15 /*SIGTERM*/ ||
 		    sig == 2 /*SIGINT*/) {
 			m->sim_status = sig & 0x7f;     /* WIFSIGNALED */
-			atomic_store(&m->sim_done, 1);
+			xtc_atomic_store_i32(&m->sim_done, 1, xtc_mo_seq_cst);
 		}
 		return XTC_OK;
 	}
@@ -508,7 +511,8 @@ xtc_osproc_try_wait(xtc_osproc_t *p, int *status)
 			if (status != NULL) *status = p->status;
 			return XTC_OK;
 		}
-		if (!atomic_load(&((xtc_osproc_t *)p)->sim_done))
+		if (!xtc_atomic_load_i32(&((xtc_osproc_t *)p)->sim_done,
+		        xtc_mo_seq_cst))
 			return XTC_E_AGAIN;             /* still running */
 		((xtc_osproc_t *)p)->reaped = 1;
 		((xtc_osproc_t *)p)->status = p->sim_status;

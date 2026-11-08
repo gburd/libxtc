@@ -43,13 +43,12 @@
 
 #include <pthread.h>
 #include <sched.h>
-#include <stdatomic.h>
 #include <stdlib.h>
 
 #define XTC_RCU_NBUCKETS  4
 
 struct rcu_tls {
-	_Atomic uint64_t  active_epoch;   /* 0 = not in a read-side */
+	uint64_t active_epoch; /* 0 = not in a read-side */
 	int               nest;
 	struct rcu_tls   *next;           /* registered list (synchronize scans) */
 	/*
@@ -70,7 +69,7 @@ struct retired {
 };
 
 struct rcu_state {
-	_Atomic uint64_t   epoch;
+	uint64_t epoch;
 	pthread_mutex_t    lock;          /* guards: registry list, buckets */
 	struct rcu_tls    *registry;
 	struct retired    *buckets[XTC_RCU_NBUCKETS];
@@ -131,32 +130,32 @@ __rcu_ftbl_hash(const xtc_task_t *t)
  * every other reader below) loads them race-free with acquire ordering
  * rather than a plain read that TSan (correctly) flags as a data race
  * against the release store under the lock. */
-static _Atomic(xtc_slab_t *) __rcu_tls_slab     = NULL;
-static _Atomic(xtc_slab_t *) __rcu_retired_slab = NULL;
+static xtc_slab_t *__rcu_tls_slab = NULL;
+static xtc_slab_t *__rcu_retired_slab = NULL;
 static pthread_mutex_t __rcu_slab_init_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void
 __rcu_slabs_ensure(void)
 {
-	if (atomic_load_explicit(&__rcu_tls_slab, memory_order_acquire) != NULL &&
-	    atomic_load_explicit(&__rcu_retired_slab, memory_order_acquire) != NULL)
+	if (xtc_atomic_load_ptr(&__rcu_tls_slab, xtc_mo_acquire) != NULL &&
+	    xtc_atomic_load_ptr(&__rcu_retired_slab, xtc_mo_acquire) != NULL)
 		return;
 	(void)__xtc_mtx_lock(&__rcu_slab_init_lock);
-	if (atomic_load_explicit(&__rcu_tls_slab, memory_order_relaxed) == NULL) {
+	if (xtc_atomic_load_ptr(&__rcu_tls_slab, xtc_mo_relaxed) == NULL) {
 		xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
 		xtc_slab_t *sl = NULL;
 		o.name = "rcu.tls"; o.obj_size = sizeof(struct rcu_tls);
 		if (xtc_slab_create(&o, &sl) == XTC_OK)
-			atomic_store_explicit(&__rcu_tls_slab, sl,
-			    memory_order_release);
+			xtc_atomic_store_ptr(&__rcu_tls_slab, sl,
+			    xtc_mo_release);
 	}
-	if (atomic_load_explicit(&__rcu_retired_slab, memory_order_relaxed) == NULL) {
+	if (xtc_atomic_load_ptr(&__rcu_retired_slab, xtc_mo_relaxed) == NULL) {
 		xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
 		xtc_slab_t *sl = NULL;
 		o.name = "rcu.retired"; o.obj_size = sizeof(struct retired);
 		if (xtc_slab_create(&o, &sl) == XTC_OK)
-			atomic_store_explicit(&__rcu_retired_slab, sl,
-			    memory_order_release);
+			xtc_atomic_store_ptr(&__rcu_retired_slab, sl,
+			    xtc_mo_release);
 	}
 	(void)__xtc_mtx_unlock(&__rcu_slab_init_lock);
 }
@@ -168,8 +167,10 @@ __rcu_register(void)
 	struct rcu_tls *t;
 	if (__rcu_self != NULL) return XTC_OK;
 	__rcu_slabs_ensure();
-	if (__rcu_tls_slab == NULL) return XTC_E_RESOURCE;
-	t = xtc_slab_alloc(__rcu_tls_slab);
+	if (xtc_atomic_load_ptr(&__rcu_tls_slab, xtc_mo_seq_cst) == NULL)
+		return XTC_E_RESOURCE;
+	t = xtc_slab_alloc(
+	    xtc_atomic_load_ptr(&__rcu_tls_slab, xtc_mo_seq_cst));
 	if (t == NULL) return XTC_E_RESOURCE;
 	memset(t, 0, sizeof *t);
 	(void)__xtc_mtx_lock(&__rcu.lock);
@@ -194,7 +195,8 @@ __rcu_fiber_slot(xtc_task_t *cur)
 	size_t h;
 
 	__rcu_slabs_ensure();
-	if (__rcu_tls_slab == NULL) return NULL;
+	if (xtc_atomic_load_ptr(&__rcu_tls_slab, xtc_mo_seq_cst) == NULL)
+		return NULL;
 	h = __rcu_ftbl_hash(cur);
 
 	(void)__xtc_mtx_lock(&__rcu.lock);
@@ -205,7 +207,8 @@ __rcu_fiber_slot(xtc_task_t *cur)
 		}
 	(void)__xtc_mtx_unlock(&__rcu.lock);
 
-	t = xtc_slab_alloc(__rcu_tls_slab);
+	t = xtc_slab_alloc(
+	    xtc_atomic_load_ptr(&__rcu_tls_slab, xtc_mo_seq_cst));
 	if (t == NULL) return NULL;
 	memset(t, 0, sizeof *t);
 	t->owner = cur;
@@ -223,7 +226,10 @@ __rcu_fiber_slot(xtc_task_t *cur)
 		for (e = __rcu_ftbl[h]; e != NULL; e = e->tbl_next)
 			if (e->owner == cur) {
 				(void)__xtc_mtx_unlock(&__rcu.lock);
-				xtc_slab_free(__rcu_tls_slab, t);
+				xtc_slab_free(
+				    xtc_atomic_load_ptr(&__rcu_tls_slab,
+				        xtc_mo_seq_cst),
+				    t);
 				return e;
 			}
 	}
@@ -270,14 +276,22 @@ xtc_rcu_fini(void)
 		for (r = __rcu.buckets[b]; r != NULL; r = next_r) {
 			next_r = r->next;
 			r->fn(r->p);
-			if (__rcu_retired_slab) xtc_slab_free(__rcu_retired_slab, r);
+			if (xtc_atomic_load_ptr(&__rcu_retired_slab,
+			        xtc_mo_seq_cst))
+				xtc_slab_free(
+				    xtc_atomic_load_ptr(&__rcu_retired_slab,
+				        xtc_mo_seq_cst),
+				    r);
 			else __os_free(r);
 		}
 		__rcu.buckets[b] = NULL;
 	}
 	for (t = __rcu.registry; t != NULL; t = next_t) {
 		next_t = t->next;
-		if (__rcu_tls_slab) xtc_slab_free(__rcu_tls_slab, t);
+		if (xtc_atomic_load_ptr(&__rcu_tls_slab, xtc_mo_seq_cst))
+			xtc_slab_free(xtc_atomic_load_ptr(&__rcu_tls_slab,
+			                  xtc_mo_seq_cst),
+			    t);
 		else __os_free(t);
 	}
 	__rcu.registry = NULL;
@@ -287,8 +301,7 @@ xtc_rcu_fini(void)
 		__rcu_ftbl[b] = NULL;
 	__rcu_self = NULL;
 	__rcu.inited = 0;
-	atomic_store_explicit(&__rcu.epoch, XTC_RCU_EPOCH_START,
-	    memory_order_relaxed);
+	xtc_atomic_store_u64(&__rcu.epoch, XTC_RCU_EPOCH_START, xtc_mo_relaxed);
 	(void)__xtc_mtx_unlock(&__rcu.lock);
 }
 
@@ -298,10 +311,8 @@ xtc_rcu_read_lock(void)
 	struct rcu_tls *t = __rcu_reader_slot(1);
 	if (t == NULL) return;            /* OOM at register; degrade */
 	if (t->nest++ == 0) {
-		uint64_t e = atomic_load_explicit(&__rcu.epoch,
-		    memory_order_acquire);
-		atomic_store_explicit(&t->active_epoch, e,
-		    memory_order_release);
+		uint64_t e = xtc_atomic_load_u64(&__rcu.epoch, xtc_mo_acquire);
+		xtc_atomic_store_u64(&t->active_epoch, e, xtc_mo_release);
 	}
 }
 
@@ -311,8 +322,7 @@ xtc_rcu_read_unlock(void)
 	struct rcu_tls *t = __rcu_reader_slot(0);
 	if (t == NULL) return;
 	if (--t->nest == 0)
-		atomic_store_explicit(&t->active_epoch, 0,
-		    memory_order_release);
+		xtc_atomic_store_u64(&t->active_epoch, 0, xtc_mo_release);
 }
 
 void
@@ -323,10 +333,11 @@ xtc_rcu_retire(void *p, xtc_rcu_free_fn fn)
 	int b;
 	if (p == NULL || fn == NULL) return;
 	__rcu_slabs_ensure();
-	if (__rcu_retired_slab == NULL) {
+	if (xtc_atomic_load_ptr(&__rcu_retired_slab, xtc_mo_seq_cst) == NULL) {
 		fn(p); return;
 	}
-	r = xtc_slab_alloc(__rcu_retired_slab);
+	r = xtc_slab_alloc(
+	    xtc_atomic_load_ptr(&__rcu_retired_slab, xtc_mo_seq_cst));
 	if (r == NULL) {
 		/* Couldn't even record; fall back to immediate free.
 		 * Caller has lost the safety guarantee but at least
@@ -337,7 +348,7 @@ xtc_rcu_retire(void *p, xtc_rcu_free_fn fn)
 	r->p = p;
 	r->fn = fn;
 	(void)__xtc_mtx_lock(&__rcu.lock);
-	e = atomic_load_explicit(&__rcu.epoch, memory_order_relaxed);
+	e = xtc_atomic_load_u64(&__rcu.epoch, xtc_mo_relaxed);
 	b = (int)(e % XTC_RCU_NBUCKETS);
 	r->next = __rcu.buckets[b];
 	__rcu.buckets[b] = r;
@@ -354,9 +365,9 @@ xtc_rcu_synchronize(void)
 	struct retired *to_free, *r, *next;
 	int reclaim_bucket;
 
-	old = atomic_load_explicit(&__rcu.epoch, memory_order_acquire);
+	old = xtc_atomic_load_u64(&__rcu.epoch, xtc_mo_acquire);
 	new_e = old + 1;
-	atomic_store_explicit(&__rcu.epoch, new_e, memory_order_release);
+	xtc_atomic_store_u64(&__rcu.epoch, new_e, xtc_mo_release);
 
 	/* Wait for all readers active in epoch <= old to drain.
 	 * (Readers see the new epoch on their next read_lock.) */
@@ -364,8 +375,8 @@ xtc_rcu_synchronize(void)
 		int still_in_old = 0;
 		(void)__xtc_mtx_lock(&__rcu.lock);
 		for (t = __rcu.registry; t != NULL; t = t->next) {
-			uint64_t a = atomic_load_explicit(&t->active_epoch,
-			    memory_order_acquire);
+			uint64_t a = xtc_atomic_load_u64(&t->active_epoch,
+			    xtc_mo_acquire);
 			if (a != 0 && a <= old) { still_in_old = 1; break; }
 		}
 		(void)__xtc_mtx_unlock(&__rcu.lock);
@@ -403,7 +414,10 @@ xtc_rcu_synchronize(void)
 	for (r = to_free; r != NULL; r = next) {
 		next = r->next;
 		r->fn(r->p);
-		if (__rcu_retired_slab) xtc_slab_free(__rcu_retired_slab, r);
+		if (xtc_atomic_load_ptr(&__rcu_retired_slab, xtc_mo_seq_cst))
+			xtc_slab_free(xtc_atomic_load_ptr(&__rcu_retired_slab,
+			                  xtc_mo_seq_cst),
+			    r);
 		else __os_free(r);
 	}
 }
@@ -411,5 +425,5 @@ xtc_rcu_synchronize(void)
 uint64_t
 xtc_rcu_current_epoch(void)
 {
-	return atomic_load_explicit(&__rcu.epoch, memory_order_acquire);
+	return xtc_atomic_load_u64(&__rcu.epoch, xtc_mo_acquire);
 }

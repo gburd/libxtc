@@ -10,7 +10,7 @@
 #ifndef XTC_LOOP_INT_H
 #define XTC_LOOP_INT_H
 
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 #include <stdint.h>
 
 #include "xtc_loop.h"
@@ -44,11 +44,11 @@ struct xtc_task {
 	xtc_task_fn  fn;
 	void        *user;
 	xtc_loop_t  *loop;
-	_Atomic int  state;   /* xtc_task_state; atomic + CAS on PARKED->SCHEDULED
-	                       * so a cross-loop XTC_INB_WAKE drained on a peer
-	                       * loop cannot race the owning loop's dispatch
-	                       * write (the concurrent-commit task->state race,
-	                       * TSan-reported 2026-08-30). */
+	int state; /* xtc_task_state; atomic + CAS on PARKED->SCHEDULED
+	            * so a cross-loop XTC_INB_WAKE drained on a peer
+	            * loop cannot race the owning loop's dispatch
+	            * write (the concurrent-commit task->state race,
+	            * TSan-reported 2026-08-30). */
 	/* L1 proportional-share scheduler: index into loop->classes of the
 	 * run-class this task belongs to, or -1 for the default (implicit,
 	 * plain-FIFO) class.  Set at spawn from xtc_proc_opts_t.sched_class
@@ -94,7 +94,7 @@ struct xtc_task {
 	 * whether a cancel does anything, and the wake itself carries the
 	 * happens-before for the task's scheduling state.
 	 */
-	_Atomic(xtc_timer_t *) park_timer;
+	xtc_timer_t *park_timer;
 	/*
 	 * The fd this task is parked on, or -1.  ATOMIC, and every
 	 * unregister CLAIMS it with an exchange rather than testing then
@@ -133,7 +133,7 @@ struct xtc_task {
 	 * distinct value, so that CAS fails.  -1 (no park) is all ones;
 	 * __park_tok_fd() reads the fd, __PARK_TOK_NONE tests for none.
 	 */
-	_Atomic int64_t park_fd;
+	int64_t park_fd;
 	/*
 	 * The io that holds park_fd's registration.  Needed because the two
 	 * park entry points register on DIFFERENT ios -- xtc_task_park_on_fd
@@ -150,7 +150,7 @@ struct xtc_task {
 	 * same registration, so the dispatch claims only a park recorded on
 	 * the io that delivered the event (__xtc_loop_dispatch_event).
 	 */
-	_Atomic(struct xtc_io *) park_io;
+	struct xtc_io *park_io;
 	/* The generation of the next park token (owner fiber only). */
 	uint32_t     park_gen;
 	/* Voluntary park: when set by a primitive (e.g. xtc_amutex) just
@@ -170,7 +170,7 @@ struct xtc_task {
 	 * uint32_t RMW here is a data race (TSan-reportable).  All accesses
 	 * use relaxed atomics -- ordering is provided by the waker/mailbox
 	 * lock; the atomic only makes the OR itself race-free. */
-	_Atomic uint32_t wake_revents;
+	uint32_t wake_revents;
 
 	/* Latched cross-thread wake that arrived while this task was NOT yet
 	 * PARKED (the prepare/park race: a foreign xtc_waker_wake fires
@@ -179,7 +179,7 @@ struct xtc_task {
 	 * the wake; the RUNNING->PARKED transition consumes it and
 	 * re-schedules rather than parking, so the wake is never lost.
 	 * Set cross-thread, consumed on the owning loop's thread. */
-	_Atomic int wake_pending;
+	int wake_pending;
 
 	/* Doubly linked into loop->all_tasks so a completed task can be
 	 * unlinked in O(1) and recycled to the loop's task_slab (instead of
@@ -254,8 +254,8 @@ struct xtc_timer {
 	xtc_task_t  *waiter;        /* task to wake when fired (NULL if pure cb) */
 	int          heap_idx;      /* current position in heap (-1 if not in);
 	                             * owner-only */
-	_Atomic int  cancelled;     /* 1 once a cancel won (fired == CANCELLED) */
-	_Atomic int  fired;         /* 0, XTC_TIMER_FIRED or _CANCELLED */
+	int cancelled; /* 1 once a cancel won (fired == CANCELLED) */
+	int fired;     /* 0, XTC_TIMER_FIRED or _CANCELLED */
 	int          sim_late;      /* DST: 1 once a buggify late-fire bumped
 	                             * this timer's deadline (bump at most
 	                             * once so a late fire cannot spin);
@@ -263,7 +263,7 @@ struct xtc_timer {
 	int          from_slab;     /* 1: from loop->timer_slab (xtc_timer_set);
 	                             * 0: __os_calloc (the park timers of
 	                             * xtc_task_park_on_timer / wait_fd). */
-	_Atomic int  refs;          /* owners left: the heap, plus the task's
+	int refs;                   /* owners left: the heap, plus the task's
 	                             * park_timer slot (park timers) or the
 	                             * caller's handle (xtc_timer_set, until
 	                             * xtc_timer_release).  The last to release
@@ -290,13 +290,13 @@ enum xtc_inbox_kind {
  * touching WAKE entries, whose tasks the all_tasks walk already freed.
  */
 struct xtc_inbox {
-	_Atomic(struct xtc_task *) pub_head;
-	_Atomic(struct xtc_task *) wake_head;
+	struct xtc_task *pub_head;
+	struct xtc_task *wake_head;
 	/* 1 while the owner is in (or entering) a BLOCKING poll: a producer
 	 * writes the loop's wakeup fd only then (see __xtc_inbox_push and
 	 * __xtc_inbox_sleep_begin).  On the heads' line on purpose: a
 	 * producer has just CASed it, so the read is free. */
-	_Atomic int                sleeping;
+	int sleeping;
 	int                        inited;
 };
 
@@ -397,7 +397,7 @@ struct xtc_loop {
 
 	/* Live-task counter.  Atomic so cross-thread spawns/completions
 	 * can update it without lock. */
-	_Atomic int n_alive;
+	int n_alive;
 	/* Of n_alive, the unpinned (stealable) ones; same accounting.  Its
 	 * 0 <-> 1 edges move the executor's n_mig_loops; while that is 0
 	 * nothing can be stolen, so a run-queue-empty loop blocks until its
@@ -405,16 +405,16 @@ struct xtc_loop {
 	 * (__xtc_exec_steal_recheck_ns).  steal_sleep: set by a loop that
 	 * blocked on that basis; any loop's up-edge clears it and wakes the
 	 * loop. */
-	_Atomic int n_mig_alive;
-	_Atomic int steal_sleep;
+	int n_mig_alive;
+	int steal_sleep;
 
 	/* Per-loop work statistics (executor observability).  tasks_run
 	 * counts task steps executed on this loop; steals counts tasks
 	 * this loop successfully stole from a peer.  Relaxed atomics:
 	 * read-mostly counters, exactness across a concurrent read is
 	 * not required. */
-	_Atomic uint64_t n_tasks_run;
-	_Atomic uint64_t n_steals;
+	uint64_t n_tasks_run;
+	uint64_t n_steals;
 
 	/* I/O fairness: counts task runs since the last I/O poll.  When the
 	 * run queue never empties (busy-yielding fibers, e.g. a buffer
@@ -431,14 +431,14 @@ struct xtc_loop {
 	 * each step), for the executor supervisor's idle check, which must
 	 * not read the owner-only n_timers. */
 	unsigned int     pop_flip;
-	_Atomic int      n_timers_pub;
+	int n_timers_pub;
 
 	/* Cooperative yield watchdog (opt-in).  When yield_budget_ns > 0
 	 * the scheduler records each quantum's start time on the task and
 	 * xtc_yield_check reports a task over budget; n_yield_due counts
 	 * over-budget reports (telemetry). */
 	int64_t          yield_budget_ns;
-	_Atomic uint64_t n_yield_due;
+	uint64_t n_yield_due;
 
 	/* L1 proportional-share scheduler (opt-in).  n_classes == 0 (the
 	 * default) means no class was ever created and the scheduler uses
@@ -473,7 +473,7 @@ struct xtc_loop {
 	                          int64_t ran_ns, int64_t budget_ns,
 	                          void *user);
 	void            *stall_cb_user;
-	_Atomic uint64_t n_stalls;   /* over-budget reports (telemetry) */
+	uint64_t n_stalls; /* over-budget reports (telemetry) */
 
 	/* Set by xtc_loop_stop, read by xtc_loop_run's condition.  ATOMIC
 	 * because xtc_loop_stop is a cross-thread call by construction: it
@@ -483,7 +483,7 @@ struct xtc_loop {
 	 * loop from a foreign thread), and relaxed ordering is sufficient:
 	 * the wakeup's own release/acquire provides the ordering, this flag
 	 * only has to be seen eventually and its store must not tear. */
-	_Atomic int stop_requested;
+	int stop_requested;
 
 	/* Cross-thread inbox: wakers and remote spawns deposit here;
 	 * the owner drains in __xtc_loop_drain_inbox. */
@@ -536,7 +536,7 @@ struct xtc_loop {
 	 * owner).  task_free_mig: the free list for reclaimed MIGRATABLE task
 	 * structs, kept apart from task_free (pinned) so a stale waker naming
 	 * a thief loop can never re-queue a pinned task there. */
-	_Atomic(struct xtc_task *) dead_head;
+	struct xtc_task *dead_head;
 	struct xtc_task           *task_free_mig;
 
 	/* --- rr3 (fix155): bounded task-struct retention across threads ---
@@ -547,9 +547,9 @@ struct xtc_loop {
 	 * of always mallocing.  Indexed by pinned (0 migratable, 1 pinned),
 	 * kept apart like the free lists.  task_spare_n is written under the
 	 * lock and read relaxed for the plain-task cap.  See __task_alloc. */
-	_Atomic int                task_spare_lock;
+	int task_spare_lock;
 	struct xtc_task           *task_spare[2];
-	_Atomic int                task_spare_n;
+	int task_spare_n;
 
 	/* --- fu156: fiber stacks shared across threads ---
 	 * Stacks of this loop's finished tasks that the finishing thread's
@@ -561,9 +561,9 @@ struct xtc_loop {
 	 * counted up to XTC_LOOP_STACK_SPARE; the spare is filled only once
 	 * it gets there, so a loop only its own thread spawns onto (startup
 	 * spawns from main aside) keeps exactly the per-thread pool. */
-	_Atomic int                stack_spare_want;
-	_Atomic int                stack_spare_lock;
-	_Atomic int                stack_spare_n;
+	int stack_spare_want;
+	int stack_spare_lock;
+	int stack_spare_n;
 	size_t                     stack_spare_sz;
 	void                      *stack_spare[XTC_LOOP_STACK_SPARE];
 };

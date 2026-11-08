@@ -216,10 +216,10 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 	/* Parked on a timer or fd via xtc_task_park_on_*?  Stay parked.
 	 * See coro_uctx.c for the rationale. */
 	if (c->self != NULL &&
-	    (atomic_load_explicit(&c->self->park_timer,
-		memory_order_relaxed) != NULL ||
-	     atomic_load_explicit(&c->self->park_fd, memory_order_relaxed) !=
-	     __PARK_TOK_NONE)) {
+	    (xtc_atomic_load_ptr(&c->self->park_timer, xtc_mo_relaxed) !=
+	            NULL ||
+	        xtc_atomic_load_i64(&c->self->park_fd, xtc_mo_relaxed) !=
+	            __PARK_TOK_NONE)) {
 		return XTC_TASK_PENDING;
 	}
 	if (c->self != NULL && c->self->park_requested) {

@@ -73,7 +73,6 @@
 #include <signal.h>
 #include <stdio.h>
 #include <pthread.h>
-#include <stdatomic.h>
 #include <string.h>
 #include <time.h>
 #if defined(__linux__)
@@ -135,8 +134,8 @@ typedef struct {
 	timer_t          timer;        /* the per-thread timer */
 	int              have_timer;   /* 1 if `timer` is created */
 #endif
-	_Atomic uint64_t ticks;        /* total timer ticks observed */
-	_Atomic int      pending;      /* a tick fired, not yet consumed */
+	uint64_t ticks; /* total timer ticks observed */
+	int pending;    /* a tick fired, not yet consumed */
 } preempt_tls_t;
 
 static XTC_THREAD_LOCAL preempt_tls_t g_pt;
@@ -148,7 +147,7 @@ static XTC_THREAD_LOCAL preempt_tls_t g_pt;
  * handlers never collide. */
 #define XTC_PREEMPT_SIGNAL SIGVTALRM
 
-static _Atomic int g_handler_installed;
+static int g_handler_installed;
 
 /* Phase 2 (signal-context involuntary yield) opt-in.  When 0 (the
  * default, and Phase 1) the handler only records a tick and the yield
@@ -156,7 +155,7 @@ static _Atomic int g_handler_installed;
  * handler ALSO performs a resumable involuntary yield when it is safe.
  * A separate flag so Phase 1 users are never exposed to signal-context
  * stack redirection. */
-static _Atomic int g_involuntary_on;
+static int g_involuntary_on;
 
 /* Provided by the active coroutine substrate (coro_uctx.c does the real
  * resumable redirect; coro_fctx.c / coro_winfiber.c decline and return
@@ -269,7 +268,7 @@ struct preempt_region {
 	uintptr_t lo, hi;
 };
 static struct preempt_region g_regions[XTC_PREEMPT_REGIONS];
-static _Atomic int  g_nregions;
+static int g_nregions;
 static pthread_mutex_t g_regions_mu = PTHREAD_MUTEX_INITIALIZER;
 static int          g_regions_init;   /* under g_regions_mu */
 static int          g_regions_rc;     /* the init's verdict */
@@ -308,12 +307,12 @@ preempt_libc_pc(void)
 static int
 region_push(uintptr_t lo, uintptr_t hi)
 {
-	int n = atomic_load_explicit(&g_nregions, memory_order_relaxed);
+	int n = xtc_atomic_load_i32(&g_nregions, xtc_mo_relaxed);
 	if (n >= XTC_PREEMPT_REGIONS)
 		return XTC_E_RESOURCE;
 	g_regions[n].lo = lo;
 	g_regions[n].hi = hi;
-	atomic_store_explicit(&g_nregions, n + 1, memory_order_release);
+	xtc_atomic_store_i32(&g_nregions, n + 1, xtc_mo_release);
 	return XTC_OK;
 }
 
@@ -385,7 +384,7 @@ preempt_regions_init(const char **why)
 	    (uintptr_t)__start_xtc_preemptible)
 		(void)region_push((uintptr_t)__start_xtc_preemptible,
 		    (uintptr_t)__stop_xtc_preemptible);
-	if (atomic_load_explicit(&g_nregions, memory_order_relaxed) == 0) {
+	if (xtc_atomic_load_i32(&g_nregions, xtc_mo_relaxed) == 0) {
 		g_regions_norange = 1;
 		*why = self_in_main ?
 		    "libxtc is linked statically into the executable, which "
@@ -418,7 +417,7 @@ preempt_regions_init(const char **why)
 int
 __xtc_preempt_pc_ok(uintptr_t pc)
 {
-	int n = atomic_load_explicit(&g_nregions, memory_order_acquire), k;
+	int n = xtc_atomic_load_i32(&g_nregions, xtc_mo_acquire), k;
 	for (k = 0; k < n; k++)
 		if (pc >= g_regions[k].lo && pc < g_regions[k].hi)
 			return 1;
@@ -484,7 +483,7 @@ preempt_handler(int sig, siginfo_t *si, void *uctx)
 {
 	(void)sig;
 	(void)si;
-	atomic_fetch_add_explicit(&g_pt.ticks, 1, memory_order_relaxed);
+	xtc_atomic_fetch_add_u64(&g_pt.ticks, 1, xtc_mo_relaxed);
 	/*
 	 * Phase 2: a signal-context involuntary yield, but ONLY when it is
 	 * safe -- not inside a critical section (crit_depth) and not inside
@@ -497,9 +496,8 @@ preempt_handler(int sig, siginfo_t *si, void *uctx)
 	 * back to the cooperative pending flag.  g_unsafe_depth is read
 	 * directly (this handler runs on the same thread that maintains
 	 * it). */
-	if (atomic_load_explicit(&g_involuntary_on, memory_order_relaxed) &&
-	    g_unsafe_depth == 0 &&
-	    __xtc_proc_crit_depth() == 0 &&
+	if (xtc_atomic_load_i32(&g_involuntary_on, xtc_mo_relaxed) &&
+	    g_unsafe_depth == 0 && __xtc_proc_crit_depth() == 0 &&
 	    __xtc_coro_preempt(uctx)) {
 		/* The involuntary yield is armed: on sigreturn the scheduler
 		 * resumes and re-queues this fiber.  No pending flag needed. */
@@ -509,15 +507,14 @@ preempt_handler(int sig, siginfo_t *si, void *uctx)
 	XTC_PROBE_PREEMPT_TICK(0);
 	/* Unsafe, disabled, or no fiber to preempt: defer to the next
 	 * cooperative yield-check (Phase 1). */
-	atomic_store_explicit(&g_pt.pending, 1, memory_order_relaxed);
+	xtc_atomic_store_i32(&g_pt.pending, 1, xtc_mo_relaxed);
 }
 
 static void
 ensure_handler_installed(void)
 {
 	struct sigaction sa;
-	if (atomic_exchange_explicit(&g_handler_installed, 1,
-	    memory_order_acq_rel))
+	if (xtc_atomic_exchange_i32(&g_handler_installed, 1, xtc_mo_acq_rel))
 		return;
 	memset(&sa, 0, sizeof sa);
 	sa.sa_sigaction = preempt_handler;
@@ -602,7 +599,7 @@ xtc_preempt_arm(int64_t interval_ns)
 		return XTC_E_NOSYS;
 	}
 	g_pt.armed = 1;
-	atomic_store_explicit(&g_pt.pending, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&g_pt.pending, 0, xtc_mo_relaxed);
 	return XTC_OK;
 }
 
@@ -618,7 +615,7 @@ xtc_preempt_disarm(void)
 		g_pt.have_timer = 0;
 	}
 	g_pt.armed = 0;
-	atomic_store_explicit(&g_pt.pending, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&g_pt.pending, 0, xtc_mo_relaxed);
 	return XTC_OK;
 }
 
@@ -633,8 +630,8 @@ xtc_preempt_supported(void)
 	 * xtc_preempt_supported() and xtc_preempt_arm() agree: a compile-
 	 * time yes that arm() then refuses with NOSYS made a caller (and
 	 * test_preempt) assert on the mismatch. */
-	static _Atomic int cached = -1;   /* -1 unknown, 0 no, 1 yes */
-	int c = atomic_load_explicit(&cached, memory_order_relaxed);
+	static int cached = -1; /* -1 unknown, 0 no, 1 yes */
+	int c = xtc_atomic_load_i32(&cached, xtc_mo_relaxed);
 	if (c < 0) {
 		struct sigevent sev;
 		timer_t t;
@@ -653,7 +650,7 @@ xtc_preempt_supported(void)
 		} else {
 			c = 0;
 		}
-		atomic_store_explicit(&cached, c, memory_order_relaxed);
+		xtc_atomic_store_i32(&cached, c, xtc_mo_relaxed);
 	}
 	return c;
 }
@@ -806,7 +803,7 @@ xtc_preempt_arm(int64_t interval_ns)
 	g_kqt.have_helper = 1;
 
 	g_pt.armed = 1;
-	atomic_store_explicit(&g_pt.pending, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&g_pt.pending, 0, xtc_mo_relaxed);
 	return XTC_OK;
 }
 
@@ -832,7 +829,7 @@ xtc_preempt_disarm(void)
 		g_kqt.kq = -1;
 	}
 	g_pt.armed = 0;
-	atomic_store_explicit(&g_pt.pending, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&g_pt.pending, 0, xtc_mo_relaxed);
 	return XTC_OK;
 }
 
@@ -844,8 +841,8 @@ xtc_preempt_supported(void)
 	 * itself can fail (e.g. an fd-table limit), so probe once rather
 	 * than assume the compile-time XTC_HAVE_KQUEUE_TIMER guarantees a
 	 * live kqueue at runtime. */
-	static _Atomic int cached = -1;
-	int c = atomic_load_explicit(&cached, memory_order_relaxed);
+	static int cached = -1;
+	int c = xtc_atomic_load_i32(&cached, xtc_mo_relaxed);
 	if (c < 0) {
 		int kq = kqueue();
 		if (kq >= 0) {
@@ -854,7 +851,7 @@ xtc_preempt_supported(void)
 		} else {
 			c = 0;
 		}
-		atomic_store_explicit(&cached, c, memory_order_relaxed);
+		xtc_atomic_store_i32(&cached, c, xtc_mo_relaxed);
 	}
 	return c;
 }
@@ -910,8 +907,7 @@ xtc_preempt_set_involuntary(int on)
 	int rc;
 
 	if (!on) {
-		atomic_store_explicit(&g_involuntary_on, 0,
-		    memory_order_relaxed);
+		xtc_atomic_store_i32(&g_involuntary_on, 0, xtc_mo_relaxed);
 		return XTC_OK;
 	}
 	(void)__xtc_mtx_lock(&g_regions_mu);
@@ -939,7 +935,7 @@ xtc_preempt_set_involuntary(int on)
 	/* A static executable refused for want of a range is accepted once
 	 * xtc_preempt_region_add has supplied one. */
 	if (g_regions_rc != XTC_OK && g_regions_norange &&
-	    atomic_load_explicit(&g_nregions, memory_order_relaxed) > 0) {
+	    xtc_atomic_load_i32(&g_nregions, xtc_mo_relaxed) > 0) {
 		g_regions_rc = XTC_OK;
 		g_regions_norange = 0;
 	}
@@ -951,7 +947,7 @@ xtc_preempt_set_involuntary(int on)
 	__xtc_preempt_a64_sme =
 	    (getauxval(AT_HWCAP2) & (1UL << 23)) != 0;   /* HWCAP2_SME */
 #endif
-	atomic_store_explicit(&g_involuntary_on, 1, memory_order_relaxed);
+	xtc_atomic_store_i32(&g_involuntary_on, 1, xtc_mo_relaxed);
 	return XTC_OK;
 }
 
@@ -967,7 +963,7 @@ xtc_preempt_set_involuntary(int on)
 int
 __xtc_preempt_involuntary_enabled(void)
 {
-	return atomic_load_explicit(&g_involuntary_on, memory_order_relaxed);
+	return xtc_atomic_load_i32(&g_involuntary_on, xtc_mo_relaxed);
 }
 
 /* PUBLIC: uint64_t xtc_preempt_ticks __P((void)); */
@@ -976,7 +972,7 @@ __xtc_preempt_involuntary_enabled(void)
 uint64_t
 xtc_preempt_ticks(void)
 {
-	return atomic_load_explicit(&g_pt.ticks, memory_order_relaxed);
+	return xtc_atomic_load_u64(&g_pt.ticks, xtc_mo_relaxed);
 }
 
 /* PUBLIC: int xtc_preempt_tick_pending __P((void)); */
@@ -985,7 +981,7 @@ xtc_preempt_ticks(void)
 int
 xtc_preempt_tick_pending(void)
 {
-	return atomic_exchange_explicit(&g_pt.pending, 0, memory_order_relaxed);
+	return xtc_atomic_exchange_i32(&g_pt.pending, 0, xtc_mo_relaxed);
 }
 
 /* ---- async-signal-unsafe-region counter (Phase 2 prerequisite) ----

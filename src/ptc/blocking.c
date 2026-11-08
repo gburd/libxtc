@@ -46,7 +46,6 @@
 #include "os_time.h"    /* __os_sleep_ns */
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <errno.h>
 
 struct blk_work {

@@ -36,7 +36,20 @@
  *	  -DPLANT_PLAIN_PUSH  the push is load-then-store, not a CAS (two
  *	                      producers on one stack lose a task).
  */
-#include <stdatomic.h>
+#include "xtc_atomic.h"
+/* The modelled pointers are int indexes (CBMC 5.x rejects pointers shared
+ * between threads), so the source's _ptr operations are the _i32 ones
+ * here; the transcribed blocks keep the source's spelling. */
+#undef xtc_atomic_load_ptr
+#undef xtc_atomic_store_ptr
+#undef xtc_atomic_exchange_ptr
+#undef xtc_atomic_cas_ptr
+#undef xtc_atomic_cas_weak_ptr
+#define xtc_atomic_load_ptr xtc_atomic_load_i32
+#define xtc_atomic_store_ptr xtc_atomic_store_i32
+#define xtc_atomic_exchange_ptr xtc_atomic_exchange_i32
+#define xtc_atomic_cas_ptr xtc_atomic_cas_i32
+#define xtc_atomic_cas_weak_ptr xtc_atomic_cas_weak_i32
 
 #define XTC_OK 0
 _Bool nondet_bool(void);
@@ -53,16 +66,16 @@ typedef int xtc_task_t;			/* 0 = NULL */
 #define NULL NULL_T			/* the source's NULL tests, verbatim */
 static int inbox_next[3];
 struct xtc_inbox {
-	_Atomic int pub_head;
-	_Atomic int wake_head;
-	_Atomic int sleeping;
+	int pub_head;
+	int wake_head;
+	int sleeping;
 };
 enum xtc_inbox_kind { XTC_INB_PUBLISH, XTC_INB_WAKE };
 typedef struct { struct xtc_inbox inbox; void *io; } xtc_loop_t;
 
 static xtc_loop_t L;
-static _Atomic int wakeups;	/* bytes written to the wakeup fd */
-static _Atomic int pushed;
+static int wakeups; /* bytes written to the wakeup fd */
+static int pushed;
 static int drained_ct[3];
 
 #define XTC_SIM_FAULT_POINT(x)	((void)0)
@@ -70,22 +83,24 @@ static int
 xtc_io_wakeup(void *io)
 {
 	(void)io;
-	atomic_fetch_add(&wakeups, 1);
+	xtc_atomic_fetch_add_i32(&wakeups, 1, xtc_mo_seq_cst);
 	return XTC_OK;
 }
 
 /* src/evt/loop.c __inbox_stack_push, index-encoded (see above). */
 static void
-__inbox_stack_push(_Atomic int *head, xtc_task_t t)
+__inbox_stack_push(int *head, xtc_task_t t)
 {
-	xtc_task_t old = atomic_load_explicit(head, memory_order_relaxed);
+	xtc_task_t old = xtc_atomic_load_i32(head, xtc_mo_relaxed);
 #ifdef PLANT_PLAIN_PUSH
 	inbox_next[t] = old;
-	atomic_store(head, t);		/* load-then-store: not one RMW */
+	xtc_atomic_store_i32(head, t,
+	    xtc_mo_seq_cst); /* load-then-store: not one RMW */
 #else
 	do {
 		inbox_next[t] = old;
-	} while (!atomic_compare_exchange_weak(head, &old, t));
+	} while (!xtc_atomic_cas_weak_i32(head, &old, t, xtc_mo_seq_cst,
+	    xtc_mo_seq_cst));
 #endif
 }
 
@@ -97,10 +112,12 @@ __xtc_inbox_push(xtc_loop_t *loop, enum xtc_inbox_kind k, xtc_task_t t)
 	__inbox_stack_push(k == XTC_INB_PUBLISH ? &loop->inbox.pub_head :
 	    &loop->inbox.wake_head, t);
 #ifndef PLANT_NO_SLEEPCHK
-	if (atomic_load(&loop->inbox.sleeping) != 0 &&
-	    atomic_exchange(&loop->inbox.sleeping, 0) != 0 &&
+	if (xtc_atomic_load_i32(&loop->inbox.sleeping, xtc_mo_seq_cst) != 0 &&
+	    xtc_atomic_exchange_i32(&loop->inbox.sleeping, 0, xtc_mo_seq_cst) !=
+	        0 &&
 	    xtc_io_wakeup(loop->io) != XTC_OK)
-		atomic_store(&loop->inbox.sleeping, 1);   /* next push retries */
+		xtc_atomic_store_i32(&loop->inbox.sleeping, 1,
+		    xtc_mo_seq_cst); /* next push retries */
 	return XTC_OK;
 #endif
 	/* END SOURCE */
@@ -111,12 +128,13 @@ static int
 __xtc_inbox_sleep_begin(xtc_loop_t *loop)
 {
 	/* BEGIN SOURCE src/evt/loop.c __xtc_inbox_sleep_begin */
-	atomic_store(&loop->inbox.sleeping, 1);
+	xtc_atomic_store_i32(&loop->inbox.sleeping, 1, xtc_mo_seq_cst);
 #ifndef PLANT_NO_RECHECK
-	if (atomic_load(&loop->inbox.pub_head) != NULL ||
-	    atomic_load(&loop->inbox.wake_head) != NULL) {
-		atomic_store_explicit(&loop->inbox.sleeping, 0,
-		    memory_order_relaxed);
+	if (xtc_atomic_load_ptr(&loop->inbox.pub_head, xtc_mo_seq_cst) !=
+	        NULL ||
+	    xtc_atomic_load_ptr(&loop->inbox.wake_head, xtc_mo_seq_cst) !=
+	        NULL) {
+		xtc_atomic_store_i32(&loop->inbox.sleeping, 0, xtc_mo_relaxed);
 		return 1;
 	}
 #endif
@@ -127,7 +145,7 @@ __xtc_inbox_sleep_begin(xtc_loop_t *loop)
 static void
 __xtc_inbox_sleep_end(xtc_loop_t *loop)
 {
-	atomic_store_explicit(&loop->inbox.sleeping, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&loop->inbox.sleeping, 0, xtc_mo_relaxed);
 }
 
 /* The drain's detach (the reverse/re-push of deferred tasks is
@@ -138,8 +156,10 @@ drain(xtc_loop_t *loop)
 	xtc_task_t pub, wake, t;
 	int i;
 
-	pub = atomic_exchange(&loop->inbox.pub_head, NULL_T);
-	wake = atomic_exchange(&loop->inbox.wake_head, NULL_T);
+	pub = xtc_atomic_exchange_i32(&loop->inbox.pub_head, NULL_T,
+	    xtc_mo_seq_cst);
+	wake = xtc_atomic_exchange_i32(&loop->inbox.wake_head, NULL_T,
+	    xtc_mo_seq_cst);
 	for (i = 0, t = pub; t != NULL_T && i < 3; t = inbox_next[t], i++)
 		drained_ct[t]++;
 	for (i = 0, t = wake; t != NULL_T && i < 3; t = inbox_next[t], i++)
@@ -152,7 +172,7 @@ producer(int id)
 	enum xtc_inbox_kind k = nondet_bool() ? XTC_INB_PUBLISH :
 	    XTC_INB_WAKE;
 	(void)__xtc_inbox_push(&L, k, id);
-	atomic_fetch_add(&pushed, 1);
+	xtc_atomic_fetch_add_i32(&pushed, 1, xtc_mo_seq_cst);
 }
 static void p1(void) { producer(1); }
 static void p2(void) { producer(2); }
@@ -162,9 +182,9 @@ main(void)
 {
 	int blocked = 0, wk;
 
-	atomic_store(&L.inbox.pub_head, NULL_T);
-	atomic_store(&L.inbox.wake_head, NULL_T);
-	atomic_store(&L.inbox.sleeping, 0);
+	xtc_atomic_store_i32(&L.inbox.pub_head, NULL_T, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&L.inbox.wake_head, NULL_T, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&L.inbox.sleeping, 0, xtc_mo_seq_cst);
 
 	__CPROVER_ASYNC_1: p1();
 	__CPROVER_ASYNC_2: p2();
@@ -175,11 +195,14 @@ main(void)
 		/* The poll: it can only return if a wakeup byte is pending.
 		 * Wait for the producers to finish, then ask whether the
 		 * owner would still be asleep with work queued. */
-		__CPROVER_assume(atomic_load(&pushed) == 2);
-		wk = atomic_load(&wakeups);
+		__CPROVER_assume(
+		    xtc_atomic_load_i32(&pushed, xtc_mo_seq_cst) == 2);
+		wk = xtc_atomic_load_i32(&wakeups, xtc_mo_seq_cst);
 		if (wk == 0 &&
-		    (atomic_load(&L.inbox.pub_head) != NULL_T ||
-		    atomic_load(&L.inbox.wake_head) != NULL_T))
+		    (xtc_atomic_load_i32(&L.inbox.pub_head, xtc_mo_seq_cst) !=
+		            NULL_T ||
+		        xtc_atomic_load_i32(&L.inbox.wake_head,
+		            xtc_mo_seq_cst) != NULL_T))
 			blocked = 1;
 		__CPROVER_assert(wk <= 1,
 		    "at most one wakeup write per sleep");
@@ -188,7 +211,7 @@ main(void)
 	__CPROVER_assert(!blocked,
 	    "no lost nudge: never asleep with no wakeup and work queued");
 
-	__CPROVER_assume(atomic_load(&pushed) == 2);
+	__CPROVER_assume(xtc_atomic_load_i32(&pushed, xtc_mo_seq_cst) == 2);
 	drain(&L);
 	__CPROVER_assert(drained_ct[1] == 1 && drained_ct[2] == 1,
 	    "every pushed task drained exactly once");

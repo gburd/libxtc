@@ -48,11 +48,11 @@
  */
 
 #include <stdint.h>
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 
 /* Shared: kill_pending is the ONLY cross-thread field (atomic, exactly
  * as in proc.c).  mask_depth / mask_deferred are owner-only. */
-static _Atomic int kill_pending;   /* 0 = none; reason+1 otherwise */
+static int kill_pending;           /* 0 = none; reason+1 otherwise */
 static int mask_depth;             /* owner-only */
 static int mask_deferred;          /* owner-only latch: reason+1, 0 = none */
 static int acted;                  /* monotone: how many times the kill fired */
@@ -75,7 +75,7 @@ act(int reason_plus1)
 static void
 kill_deliver(void)
 {
-	int kp = atomic_load_explicit(&kill_pending, memory_order_acquire);
+	int kp = xtc_atomic_load_i32(&kill_pending, xtc_mo_acquire);
 	if (kp == 0)
 		return;
 	if (mask_depth > 0) {
@@ -137,14 +137,14 @@ killer(void)
 {
 	int expected = 0;
 	int desired = 2;      /* reason 1 -> encoded reason+1 == 2 */
-	(void)atomic_compare_exchange_strong_explicit(&kill_pending,
-	    &expected, desired, memory_order_release, memory_order_relaxed);
+	(void)xtc_atomic_cas_i32(&kill_pending, &expected, desired,
+	    xtc_mo_release, xtc_mo_relaxed);
 }
 
 int
 main(void)
 {
-	atomic_store_explicit(&kill_pending, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&kill_pending, 0, xtc_mo_relaxed);
 	mask_depth = 0;
 	mask_deferred = 0;
 	acted = 0;
@@ -189,8 +189,8 @@ main(void)
 	 * within this bounded window).
 	 */
 	{
-		int pending = atomic_load_explicit(&kill_pending,
-		    memory_order_acquire);
+		int pending =
+		    xtc_atomic_load_i32(&kill_pending, xtc_mo_acquire);
 		int did_fire = (acted != 0) || (pending != 0) ||
 		    (mask_deferred != 0);
 

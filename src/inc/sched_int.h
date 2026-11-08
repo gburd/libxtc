@@ -2,11 +2,11 @@
 #ifndef XTC_SCHED_INT_H
 #define XTC_SCHED_INT_H
 #include "xtc_sched.h"
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 #ifdef XTC_ENABLE_SCHED_POLICY
 struct xtc_sched_state {
 	/* 0: setup, 1: descriptor being copied, 2: permanently frozen. */
-	_Atomic int phase;
+	int phase;
 	xtc_sched_policy_t policy;
 	xtc_sched_stats_t stats;
 	uint64_t bypasses[17], runs[17];

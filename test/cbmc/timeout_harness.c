@@ -37,7 +37,7 @@
  *	  -DPLANT_RETIRE_ALWAYS     retire for the timer even when the
  *	                            cancel lost to the fire (a double free).
  */
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -49,23 +49,23 @@
 struct timeout_ctx {
 	void          *prom;
 	void          *timer;
-	_Atomic int    done;
-	_Atomic int    remaining;
+	int done;
+	int remaining;
 };
 
 static struct timeout_ctx ctx;
 static int the_timer;			/* stands for the xtc_timer_t */
-static _Atomic int fired;		/* the timer's claim word */
-static _Atomic int promise_sets;
-static _Atomic int frees;
-static _Atomic int timer_cb_ran;
-static _Atomic int done_ct;
+static int fired;                       /* the timer's claim word */
+static int promise_sets;
+static int frees;
+static int timer_cb_ran;
+static int done_ct;
 
 static void
 __os_free(void *p)
 {
 	(void)p;
-	atomic_fetch_add(&frees, 1);
+	xtc_atomic_fetch_add_i32(&frees, 1, xtc_mo_seq_cst);
 }
 static int
 xtc_timer_release(void *t)
@@ -78,9 +78,9 @@ xtc_promise_set(void *p, intptr_t v, int status)
 {
 	(void)p; (void)v; (void)status;
 	/* A use after free of the context would reach here with it freed. */
-	__CPROVER_assert(atomic_load(&frees) == 0,
+	__CPROVER_assert(xtc_atomic_load_i32(&frees, xtc_mo_seq_cst) == 0,
 	    "the promise is set while the context is live");
-	atomic_fetch_add(&promise_sets, 1);
+	xtc_atomic_fetch_add_i32(&promise_sets, 1, xtc_mo_seq_cst);
 	return XTC_OK;
 }
 /* timer.c __xtc_timer_try_cancel: the fired CAS (the heap removal it
@@ -90,16 +90,15 @@ __xtc_timer_try_cancel(void *timer)
 {
 	int expect = 0;
 	(void)timer;
-	return atomic_compare_exchange_strong_explicit(&fired, &expect,
-	    XTC_TIMER_CANCELLED, memory_order_acq_rel, memory_order_acquire);
+	return xtc_atomic_cas_i32(&fired, &expect, XTC_TIMER_CANCELLED,
+	    xtc_mo_acq_rel, xtc_mo_acquire);
 }
 
 static void
 timeout_retire(struct timeout_ctx *t)
 {
 	/* BEGIN SOURCE src/ptc/future.c timeout_retire */
-	if (atomic_fetch_sub_explicit(&t->remaining, 1,
-	    memory_order_acq_rel) == 1) {
+	if (xtc_atomic_fetch_sub_i32(&t->remaining, 1, xtc_mo_acq_rel) == 1) {
 		if (t->timer != NULL)
 			(void)xtc_timer_release(t->timer);
 		__os_free(t);
@@ -113,8 +112,8 @@ timeout_src_complete(intptr_t value, int status, void *u)
 	/* BEGIN SOURCE src/ptc/future.c timeout_src_complete */
 	struct timeout_ctx *t = u;
 	int expected = 0;
-	if (atomic_compare_exchange_strong_explicit(&t->done, &expected, 1,
-	    memory_order_acq_rel, memory_order_relaxed)) {
+	if (xtc_atomic_cas_i32(&t->done, &expected, 1, xtc_mo_acq_rel,
+	        xtc_mo_relaxed)) {
 		(void)xtc_promise_set(t->prom, value, status);
 #if defined(PLANT_NO_CANCEL_RETIRE)
 		/* Before 1.55.1: cancel the timer, retire nothing for it. */
@@ -142,8 +141,8 @@ timeout_fire(void *u)
 	/* BEGIN SOURCE src/ptc/future.c timeout_fire */
 	struct timeout_ctx *t = u;
 	int expected = 0;
-	if (atomic_compare_exchange_strong_explicit(&t->done, &expected, 1,
-	    memory_order_acq_rel, memory_order_relaxed))
+	if (xtc_atomic_cas_i32(&t->done, &expected, 1, xtc_mo_acq_rel,
+	        xtc_mo_relaxed))
 		(void)xtc_promise_set(t->prom, 0, XTC_E_AGAIN);
 	timeout_retire(t);
 	/* END SOURCE */
@@ -154,7 +153,7 @@ static void
 source(void)
 {
 	timeout_src_complete(42, XTC_OK, &ctx);
-	atomic_fetch_add(&done_ct, 1);
+	xtc_atomic_fetch_add_i32(&done_ct, 1, xtc_mo_seq_cst);
 }
 
 /* The loop pops the timer as due: claim the fire, run the callback. */
@@ -162,12 +161,12 @@ static void
 loop(void)
 {
 	int expect = 0;
-	if (atomic_compare_exchange_strong_explicit(&fired, &expect,
-	    XTC_TIMER_FIRED, memory_order_acq_rel, memory_order_acquire)) {
-		atomic_store(&timer_cb_ran, 1);
+	if (xtc_atomic_cas_i32(&fired, &expect, XTC_TIMER_FIRED, xtc_mo_acq_rel,
+	        xtc_mo_acquire)) {
+		xtc_atomic_store_i32(&timer_cb_ran, 1, xtc_mo_seq_cst);
 		timeout_fire(&ctx);
 	}
-	atomic_fetch_add(&done_ct, 1);
+	xtc_atomic_fetch_add_i32(&done_ct, 1, xtc_mo_seq_cst);
 }
 
 int
@@ -175,21 +174,25 @@ main(void)
 {
 	ctx.prom = &ctx;
 	ctx.timer = &the_timer;
-	atomic_store(&ctx.done, 0);
-	atomic_store(&ctx.remaining, 2);	/* source cb + timer cb */
+	xtc_atomic_store_i32(&ctx.done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&ctx.remaining, 2,
+	    xtc_mo_seq_cst); /* source cb + timer cb */
 
 	__CPROVER_ASYNC_1: loop();
 	source();
 
-	__CPROVER_assume(atomic_load(&done_ct) == 2);
-	__CPROVER_assert(atomic_load(&promise_sets) == 1,
+	__CPROVER_assume(xtc_atomic_load_i32(&done_ct, xtc_mo_seq_cst) == 2);
+	__CPROVER_assert(xtc_atomic_load_i32(&promise_sets, xtc_mo_seq_cst) ==
+	        1,
 	    "the promise is set exactly once");
-	__CPROVER_assert(atomic_load(&frees) == 1,
+	__CPROVER_assert(xtc_atomic_load_i32(&frees, xtc_mo_seq_cst) == 1,
 	    "the context is freed exactly once (no leak, no double free)");
-	__CPROVER_assert(atomic_load(&ctx.remaining) == 0,
+	__CPROVER_assert(xtc_atomic_load_i32(&ctx.remaining, xtc_mo_seq_cst) ==
+	        0,
 	    "every owner retired exactly once (no over-retire)");
-	__CPROVER_assert(atomic_load(&timer_cb_ran) ==
-	    (atomic_load(&fired) == XTC_TIMER_FIRED),
+	__CPROVER_assert(xtc_atomic_load_i32(&timer_cb_ran, xtc_mo_seq_cst) ==
+	        (xtc_atomic_load_i32(&fired, xtc_mo_seq_cst) ==
+	            XTC_TIMER_FIRED),
 	    "the timer callback runs iff its fire claim won");
 	return 0;
 }

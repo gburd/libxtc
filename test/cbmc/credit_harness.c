@@ -38,7 +38,7 @@
  */
 
 #include <stdint.h>
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 
 #define WINDOW   2      /* free credits (max in flight) */
 #define NACTORS  3      /* concurrent acquire+release pairs (> WINDOW) */
@@ -47,22 +47,21 @@
  * post an atomic increment.  This mirrors xtc_sem's counting core (the
  * part that enforces the bound); the parking/waking is irrelevant to
  * the count invariant. */
-static _Atomic int sem_free;
+static int sem_free;
 
 /* Observability + the property under test. */
-static _Atomic int in_flight;
+static int in_flight;
 
 /* sem_try_acquire(1): CAS-decrement if a credit is free; 0 == got it. */
 static int
 sem_try_acquire(void)
 {
-	int cur = atomic_load_explicit(&sem_free, memory_order_acquire);
+	int cur = xtc_atomic_load_i32(&sem_free, xtc_mo_acquire);
 	for (;;) {
 		if (cur <= 0)
 			return -1;              /* none free */
-		if (atomic_compare_exchange_weak_explicit(&sem_free,
-		    &cur, cur - 1,
-		    memory_order_acquire, memory_order_acquire))
+		if (xtc_atomic_cas_weak_i32(&sem_free, &cur, cur - 1,
+		        xtc_mo_acquire, xtc_mo_acquire))
 			return 0;
 	}
 }
@@ -71,7 +70,7 @@ sem_try_acquire(void)
 static void
 sem_post(void)
 {
-	(void)atomic_fetch_add_explicit(&sem_free, 1, memory_order_release);
+	(void)xtc_atomic_fetch_add_i32(&sem_free, 1, xtc_mo_release);
 }
 
 /* xtc_credit_acquire (try flavour) then credit_took_one. */
@@ -80,7 +79,7 @@ credit_acquire(void)
 {
 	if (sem_try_acquire() != 0)
 		return -1;                      /* XTC_E_AGAIN */
-	(void)atomic_fetch_add_explicit(&in_flight, 1, memory_order_relaxed);
+	(void)xtc_atomic_fetch_add_i32(&in_flight, 1, xtc_mo_relaxed);
 	return 0;
 }
 
@@ -88,7 +87,7 @@ credit_acquire(void)
 static void
 credit_release(void)
 {
-	(void)atomic_fetch_sub_explicit(&in_flight, 1, memory_order_relaxed);
+	(void)xtc_atomic_fetch_sub_i32(&in_flight, 1, xtc_mo_relaxed);
 	sem_post();
 #ifdef CREDIT_BUG
 	/* Planted bug XTC_DST_BUG_CREDITWIN: a second post over-admits. */
@@ -104,7 +103,7 @@ actor(void)
 	int n;
 	if (credit_acquire() != 0)
 		return;                         /* window full: correct */
-	n = atomic_load_explicit(&in_flight, memory_order_relaxed);
+	n = xtc_atomic_load_i32(&in_flight, xtc_mo_relaxed);
 	__CPROVER_assert(n >= 1 && n <= WINDOW,
 	    "in-flight never exceeds the credit window");
 	credit_release();
@@ -113,8 +112,8 @@ actor(void)
 int
 main(void)
 {
-	atomic_store_explicit(&sem_free, WINDOW, memory_order_relaxed);
-	atomic_store_explicit(&in_flight, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&sem_free, WINDOW, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&in_flight, 0, xtc_mo_relaxed);
 
 	/* NACTORS > WINDOW contenders race; CBMC explores every
 	 * interleaving of the semaphore atomics. */

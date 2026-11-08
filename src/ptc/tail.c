@@ -28,7 +28,7 @@
 
 #define XTC_TAIL_RING 16384u
 
-static _Atomic unsigned __tail_mask;    /* enabled sources; 0 = off */
+static unsigned __tail_mask; /* enabled sources; 0 = off */
 static pthread_mutex_t  __tail_lock = PTHREAD_MUTEX_INITIALIZER;
 static xtc_tail_rec_t   __tail_ring[XTC_TAIL_RING];
 static uint64_t         __tail_seq;     /* total records ever written */
@@ -49,7 +49,7 @@ __tail_now_ns(void)
 void
 __xtc_tail_emit(unsigned source, unsigned kind, xtc_pid_t pid, uint64_t detail)
 {
-	unsigned mask = atomic_load_explicit(&__tail_mask, memory_order_relaxed);
+	unsigned mask = xtc_atomic_load_u32(&__tail_mask, xtc_mo_relaxed);
 	xtc_tail_rec_t *r;
 
 	if ((mask & source) == 0)
@@ -69,8 +69,8 @@ __xtc_tail_emit(unsigned source, unsigned kind, xtc_pid_t pid, uint64_t detail)
 unsigned
 xtc_tail_enable(unsigned source_mask)
 {
-	return atomic_exchange_explicit(&__tail_mask, source_mask & XTC_TAIL_ALL,
-	    memory_order_release);
+	return xtc_atomic_exchange_u32(&__tail_mask, source_mask & XTC_TAIL_ALL,
+	    xtc_mo_release);
 }
 
 /* Fast predicate for hook points that must do extra work (e.g. read a
@@ -80,14 +80,14 @@ xtc_tail_enable(unsigned source_mask)
 int
 __xtc_tail_on(unsigned source)
 {
-	return (atomic_load_explicit(&__tail_mask, memory_order_relaxed)
-	    & source) != 0;
+	return (xtc_atomic_load_u32(&__tail_mask, xtc_mo_relaxed) & source) !=
+	    0;
 }
 
 void
 xtc_tail_disable(void)
 {
-	atomic_store_explicit(&__tail_mask, 0u, memory_order_release);
+	xtc_atomic_store_u32(&__tail_mask, 0u, xtc_mo_release);
 }
 
 int

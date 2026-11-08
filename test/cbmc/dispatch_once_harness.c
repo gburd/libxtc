@@ -41,13 +41,13 @@
  *	Run: cbmc dispatch_once_harness.c --unwind 3
  */
 
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 
 /* Shared: a foreign cancel request, set atomically from another thread
  * (xtc_dispatch_cancel -> xtc_exit_pid's release-CAS into kill_pending).
  * `resolved` is the one-shot gate both resolver points exchange on. */
- static _Atomic int cancel_req;
- static _Atomic int resolved;
+static int cancel_req;
+static int resolved;
 
 /* "Resolve" the promise: models xtc_promise_set OR xtc_promise_drop,
  * each of which consumes the one-shot promise.  A monotone counter --
@@ -66,8 +66,8 @@ static void
 foreign_cancel(void)
 {
 	int expected = 0;
-	(void)atomic_compare_exchange_strong_explicit(&cancel_req,
-	    &expected, 1, memory_order_release, memory_order_relaxed);
+	(void)xtc_atomic_cas_i32(&cancel_req, &expected, 1, xtc_mo_release,
+	    xtc_mo_relaxed);
 }
 
 /* The effect-return resolver (__dispatch_entry tail).  In the real code
@@ -78,9 +78,9 @@ static void
 effect_return(void)
 {
 	int was;
-	if (atomic_load_explicit(&cancel_req, memory_order_acquire))
+	if (xtc_atomic_load_i32(&cancel_req, xtc_mo_acquire))
 		return;   /* cancelled: unwind to the finalizer, no set here */
-	was = atomic_exchange_explicit(&resolved, 1, memory_order_acq_rel);
+	was = xtc_atomic_exchange_i32(&resolved, 1, xtc_mo_acq_rel);
 	if (!was)
 		resolve_once();   /* xtc_promise_set(value) */
 }
@@ -91,8 +91,7 @@ effect_return(void)
 static void
 finalize(void)
 {
-	int was = atomic_exchange_explicit(&resolved, 1,
-	    memory_order_acq_rel);
+	int was = xtc_atomic_exchange_i32(&resolved, 1, xtc_mo_acq_rel);
 	if (!was)
 		resolve_once();   /* xtc_promise_drop() -> ABORTED */
 }
@@ -100,8 +99,8 @@ finalize(void)
 int
 main(void)
 {
-	atomic_store_explicit(&cancel_req, 0, memory_order_relaxed);
-	atomic_store_explicit(&resolved, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&cancel_req, 0, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&resolved, 0, xtc_mo_relaxed);
 	resolves = 0;
 
 	/* A foreign cancel races the fiber.  CBMC picks whether/when it

@@ -35,7 +35,7 @@
  *	                    stores the same value, so the CAS succeeds
  *	                    against the newer park.
  */
-#include <stdatomic.h>
+#include "xtc_atomic.h"
 #include <stdint.h>
 
 #define F	7
@@ -43,11 +43,11 @@
 #define IO_B	2
 #define __PARK_TOK_NONE ((int64_t)-1)
 
-static _Atomic int reg[3];		/* reg[io]: io holds a reg for F */
-static _Atomic int64_t park_fd;		/* the claim word */
-static _Atomic int park_io;		/* 0 = none */
+static int reg[3];      /* reg[io]: io holds a reg for F */
+static int64_t park_fd; /* the claim word */
+static int park_io;     /* 0 = none */
 static uint32_t park_gen;
-static _Atomic int disp_done;
+static int disp_done;
 static int dup_seen;
 int nondet_int(void);
 
@@ -81,24 +81,24 @@ __park_tok_fd(int64_t tok)
 static void
 park(int io)
 {
-	if (atomic_load(&reg[io]) != 0)
+	if (xtc_atomic_load_i32(&reg[io], xtc_mo_seq_cst) != 0)
 		dup_seen = 1;		/* __reg_fd's duplicate: XTC_E_INVAL */
-	atomic_store(&reg[io], 1);
-	atomic_store_explicit(&park_io, io, memory_order_relaxed);
-	atomic_store_explicit(&park_fd, __park_tok(F), memory_order_release);
+	xtc_atomic_store_i32(&reg[io], 1, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&park_io, io, xtc_mo_relaxed);
+	xtc_atomic_store_i64(&park_fd, __park_tok(F), xtc_mo_release);
 }
 
 /* xtc_proc_wait_fd's post-park cleanup: claim, then del on that io. */
 static void
 cleanup(void)
 {
-	int64_t tok = atomic_exchange_explicit(&park_fd, __PARK_TOK_NONE,
-	    memory_order_acq_rel);
-	int io = atomic_load_explicit(&park_io, memory_order_relaxed);
+	int64_t tok =
+	    xtc_atomic_exchange_i64(&park_fd, __PARK_TOK_NONE, xtc_mo_acq_rel);
+	int io = xtc_atomic_load_i32(&park_io, xtc_mo_relaxed);
 
-	atomic_store_explicit(&park_io, 0, memory_order_relaxed);
+	xtc_atomic_store_i32(&park_io, 0, xtc_mo_relaxed);
 	if (tok != __PARK_TOK_NONE)
-		atomic_store(&reg[io], 0);
+		xtc_atomic_store_i32(&reg[io], 0, xtc_mo_seq_cst);
 }
 
 /* Loop A dispatches the readiness it reaped for the first park. */
@@ -112,9 +112,8 @@ dispatch_on_a(void)
 {
 	const struct ev *ev = &ev0;
 	const struct lp *loop = &loop_a;
-	int64_t claimed = atomic_load_explicit(&park_fd,
-	    memory_order_acquire);
-	int pio = atomic_load_explicit(&park_io, memory_order_relaxed);
+	int64_t claimed = xtc_atomic_load_i64(&park_fd, xtc_mo_acquire);
+	int pio = xtc_atomic_load_i32(&park_io, xtc_mo_relaxed);
 
 #ifdef PLANT_FD_ONLY
 	(void)pio;
@@ -125,11 +124,11 @@ dispatch_on_a(void)
 		if (__park_tok_fd(claimed) == ev->fd && pio == loop->io)
 	/* END SOURCE */
 #endif
-		(void)atomic_compare_exchange_strong_explicit(
-		    &park_fd, &claimed, __PARK_TOK_NONE,
-		    memory_order_acq_rel, memory_order_relaxed);
-	atomic_store(&reg[IO_A], 0);	/* xtc_io_del_fd(loop->io, ev->fd) */
-	atomic_store(&disp_done, 1);
+		(void)xtc_atomic_cas_i64(&park_fd, &claimed, __PARK_TOK_NONE,
+		    xtc_mo_acq_rel, xtc_mo_relaxed);
+	xtc_atomic_store_i32(&reg[IO_A], 0,
+	    xtc_mo_seq_cst); /* xtc_io_del_fd(loop->io, ev->fd) */
+	xtc_atomic_store_i32(&disp_done, 1, xtc_mo_seq_cst);
 }
 
 /*
@@ -172,10 +171,10 @@ main(void)
 		cleanup();
 	}
 
-	__CPROVER_assume(atomic_load(&disp_done) == 1);
+	__CPROVER_assume(xtc_atomic_load_i32(&disp_done, xtc_mo_seq_cst) == 1);
 	__CPROVER_assert(!dup_seen, "no register ever sees a duplicate");
-	__CPROVER_assert(atomic_load(&reg[IO_A]) == 0 &&
-	    atomic_load(&reg[IO_B]) == 0,
+	__CPROVER_assert(xtc_atomic_load_i32(&reg[IO_A], xtc_mo_seq_cst) == 0 &&
+	        xtc_atomic_load_i32(&reg[IO_B], xtc_mo_seq_cst) == 0,
 	    "no fd registration is orphaned");
 	return 0;
 }
