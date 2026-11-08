@@ -1371,8 +1371,8 @@ __xtc_loop_step(xtc_loop_t *loop)
 	 * /Ex5_quiesce_after_timer_drop; a 1-in-1,000 /Blk3 hang under
 	 * riscv64 emulation). */
 	if (loop->exec != NULL)
-		atomic_store_explicit(&loop->n_timers_pub, loop->n_timers,
-		    memory_order_relaxed);
+		xtc_atomic_store_i32(&loop->n_timers_pub, loop->n_timers,
+		    xtc_mo_relaxed);
 
 	for (i = 0; i < (int)(sizeof evs / sizeof evs[0]); i++)
 		evs[i].fd = -1;

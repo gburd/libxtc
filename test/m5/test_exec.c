@@ -1169,9 +1169,9 @@ test_migratable_self_identity(const MunitParameter p[], void *d)
 static int          g_ex5_rfd = -1, g_ex5_wfd = -1;
 static xtc_timer_t *g_ex5_timer;
 static xtc_pid_t    g_ex5_pid;
-static _Atomic int  g_ex5_parked;
-static _Atomic int  g_ex5_returned;
-static _Atomic int  g_ex5_pub = -1;
+static int g_ex5_parked;
+static int g_ex5_returned;
+static int g_ex5_pub = -1;
 
 static void
 ex5_never(void *u)
@@ -1189,7 +1189,7 @@ ex5_proc(void *arg)
 	    10LL * 1000 * 1000 * 1000, ex5_never, NULL, &g_ex5_timer);
 	for (;;) {
 		revents = 0;
-		atomic_fetch_add(&g_ex5_parked, 1);
+		xtc_atomic_fetch_add_i32(&g_ex5_parked, 1, xtc_mo_seq_cst);
 		(void)xtc_proc_wait_fd(g_ex5_rfd, XTC_IO_READABLE, -1, &revents);
 	}
 }
@@ -1199,7 +1199,9 @@ ex5_driver(void *arg)
 {
 	int i;
 	(void)arg;
-	for (i = 0; i < 2000 && atomic_load(&g_ex5_parked) < 1; i++)
+	for (i = 0;
+	     i < 2000 && xtc_atomic_load_i32(&g_ex5_parked, xtc_mo_seq_cst) < 1;
+	     i++)
 		(void)__os_sleep_ns(1000 * 1000LL);
 	(void)__os_sleep_ns(20 * 1000 * 1000LL);
 	(void)xtc_timer_cancel(g_ex5_timer);    /* foreign: marks only */
@@ -1207,15 +1209,19 @@ ex5_driver(void *arg)
 	 * in its next-deadline peek and blocks again, running nothing. */
 	(void)xtc_io_wakeup(xtc_exec_loop((xtc_exec_t *)arg, 0)->io);
 	(void)__os_sleep_ns(20 * 1000 * 1000LL);
-	atomic_store(&g_ex5_pub, atomic_load_explicit(
-	    &xtc_exec_loop((xtc_exec_t *)arg, 0)->n_timers_pub,
-	    memory_order_relaxed));
+	xtc_atomic_store_i32(&g_ex5_pub,
+	    xtc_atomic_load_i32(&xtc_exec_loop((xtc_exec_t *)arg, 0)
+	                             ->n_timers_pub,
+	        xtc_mo_relaxed),
+	    xtc_mo_seq_cst);
 	(void)xtc_exit_pid(g_ex5_pid, 0);
 	/* Bound the test: if the run has not returned in 5 s, it is the
 	 * hang; stop the executor so the assertion reports it. */
-	for (i = 0; i < 5000 && !atomic_load(&g_ex5_returned); i++)
+	for (i = 0;
+	     i < 5000 && !xtc_atomic_load_i32(&g_ex5_returned, xtc_mo_seq_cst);
+	     i++)
 		(void)__os_sleep_ns(1000 * 1000LL);
-	if (!atomic_load(&g_ex5_returned))
+	if (!xtc_atomic_load_i32(&g_ex5_returned, xtc_mo_seq_cst))
 		xtc_exec_stop((xtc_exec_t *)arg);
 	return NULL;
 }
@@ -1230,8 +1236,8 @@ test_quiesce_after_timer_drop(const MunitParameter p[], void *d)
 	int64_t t0 = 0, t1 = 0;
 	(void)p; (void)d;
 
-	atomic_store(&g_ex5_parked, 0);
-	atomic_store(&g_ex5_returned, 0);
+	xtc_atomic_store_i32(&g_ex5_parked, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ex5_returned, 0, xtc_mo_seq_cst);
 	if (xtc_test_make_pipe(&g_ex5_rfd, &g_ex5_wfd) != 0)
 		return MUNIT_SKIP;
 	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
@@ -1241,11 +1247,13 @@ test_quiesce_after_timer_drop(const MunitParameter p[], void *d)
 	(void)__os_clock_mono(&t0);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	(void)__os_clock_mono(&t1);
-	atomic_store(&g_ex5_returned, 1);
+	xtc_atomic_store_i32(&g_ex5_returned, 1, xtc_mo_seq_cst);
 	munit_assert_int(__os_thread_join(&drv, NULL), ==, XTC_OK);
-	munit_assert_int(atomic_load(&g_ex5_parked), >=, 1);
+	munit_assert_int(xtc_atomic_load_i32(&g_ex5_parked, xtc_mo_seq_cst), >=,
+	    1);
 	/* Blocked with an empty heap: the supervisor must read 0 timers. */
-	munit_assert_int(atomic_load(&g_ex5_pub), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_ex5_pub, xtc_mo_seq_cst), ==,
+	    0);
 	if (t1 - t0 >= 4LL * 1000 * 1000 * 1000)
 		munit_errorf("xtc_exec_run did not return after the last proc "
 		    "exited (%lld ms; stopped by the 5 s bound)",
