@@ -244,6 +244,15 @@ xtc_atomic_signal_fence(xtc_mo_t mo)
 /* mapping is the one MSVC's own <atomic> uses.                       */
 /* ------------------------------------------------------------------ */
 #include <intrin.h>
+#if defined(_M_ARM64) && defined(__has_include)
+#if __has_include(<arm_acle.h>)
+/* clang targeting ARM64 Windows (clang-cl, and the CI cross-check)
+ * declares __dmb only in <arm_acle.h> on some versions (19, 21).  MSVC's
+ * <intrin.h> declares it and MSVC ships no <arm_acle.h>, so this is
+ * clang-only without naming clang (a -U__clang__ build still needs it). */
+#include <arm_acle.h>
+#endif
+#endif
 
 #if !defined(_M_X64) && !defined(_M_ARM64)
 #error "xtc_atomic.h: MSVC backend supports x64 and ARM64 only"

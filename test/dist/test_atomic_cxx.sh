@@ -150,10 +150,19 @@ for cc in gcc clang; do
 done
 
 # MSVC backend through clang's MSVC-compatible targets.  The nix clang
-# wrapper adds -fPIC (hardening), which a Windows target rejects.
+# wrapper adds -fPIC (hardening), which a Windows target rejects.  The
+# probe includes <stddef.h> and <intrin.h> for BOTH targets: a clang
+# without its own Windows-target headers (FreeBSD's base clang) accepts
+# the target but cannot compile xtc.h for it, which is a SKIP, not a
+# FAIL.
 if command -v clang >/dev/null 2>&1 &&
-    printf 'int x;\n' | NIX_HARDENING_ENABLE='' clang \
-    --target=x86_64-pc-windows-msvc -ffreestanding -x c -c \
+    printf '#include <stddef.h>\n#include <intrin.h>\nint x;\n' | \
+    NIX_HARDENING_ENABLE='' clang --target=x86_64-pc-windows-msvc \
+    -ffreestanding -fms-extensions -fms-compatibility -x c -c \
+    -o "$work/probe.o" - >/dev/null 2>&1 &&
+    printf '#include <stddef.h>\n#include <intrin.h>\nint x;\n' | \
+    NIX_HARDENING_ENABLE='' clang --target=aarch64-pc-windows-msvc \
+    -ffreestanding -fms-extensions -fms-compatibility -x c -c \
     -o "$work/probe.o" - >/dev/null 2>&1; then
 	for tgt in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
 		for lang in c c++; do

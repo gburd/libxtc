@@ -22,6 +22,11 @@
 
 #if defined(_MSC_VER) && !defined(__clang__)
 #include <intrin.h>
+#if defined(_M_ARM64) && defined(__has_include)
+#if __has_include(<arm_acle.h>)
+#include <arm_acle.h> /* __yield: see xtc_atomic.h */
+#endif
+#endif
 #endif
 
 /*
