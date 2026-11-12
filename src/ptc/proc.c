@@ -47,8 +47,10 @@
  * finds the buffer ("can't find longjmp buf", llvm-project#228263), so
  * every kill or exit aborts a TSan run.  Under TSan on x86-64 the unwind
  * uses the compiler's builtin pair instead, which TSan does not
- * intercept; it carries only 1, so the code travels in exit_jv.  aarch64
- * clang has no __builtin_longjmp and keeps the libc pair.
+ * intercept.  It carries only 1, and so does the libc pair here: the
+ * exit code travels in the proc (exit_req), because a longjmp value of
+ * 0 arrives as 1 and so cannot carry every int.  aarch64 clang has no
+ * __builtin_longjmp and keeps the libc pair.
  */
 #if defined(__has_feature)
 #if __has_feature(thread_sanitizer) && defined(__x86_64__)
@@ -60,15 +62,11 @@
 #define XTC_EXIT_BUILTIN_JMP 1
 #endif
 #if defined(XTC_EXIT_BUILTIN_JMP)
-#define EXIT_SETJMP(p) (__builtin_setjmp((p)->exit_jb) ? (p)->exit_jv : 0)
-#define EXIT_LONGJMP(p, v)                                                     \
-	do {                                                                   \
-		(p)->exit_jv = (v) != 0 ? (v) : 1;                             \
-		__builtin_longjmp((p)->exit_jb, 1);                            \
-	} while (0)
+#define EXIT_SETJMP(p) __builtin_setjmp((p)->exit_jb)
+#define EXIT_LONGJMP(p) __builtin_longjmp((p)->exit_jb, 1)
 #else
 #define EXIT_SETJMP(p) setjmp((p)->exit_jb)
-#define EXIT_LONGJMP(p, v) longjmp((p)->exit_jb, (v))
+#define EXIT_LONGJMP(p) longjmp((p)->exit_jb, 1)
 #endif
 
 /* ---------- envelope ---------- */
@@ -492,11 +490,11 @@ struct xtc_proc {
 	/* Exit handling. */
 #if defined(XTC_EXIT_BUILTIN_JMP)
 	void *exit_jb[5]; /* __builtin_setjmp's buffer */
-	int exit_jv;      /* the longjmp value it cannot carry */
 #else
 	jmp_buf     exit_jb;
 #endif
 	int         exit_jb_set;
+	int exit_req; /* the code xtc_exit_self unwinds with */
 	int         exit_reason;
 	int         exit_kind;   /* xtc_down_kind_t: 0 clean, 1 exit, 2 signal */
 	/* -1, or the xtc_down_kind_t the NEXT xtc_exit_self must report,
@@ -554,9 +552,11 @@ struct xtc_proc {
 	int           n_recov;
 
 	/* Asynchronous kill (cross-process exit signal).  Set by
-	 * xtc_exit_pid; checked at every yield/recv parking point.
-	 * The flag carries the reason+1 so 0 means "no kill pending". */
-	int kill_pending;
+	 * xtc_exit_pid; checked at every yield/recv parking point.  A kill
+	 * word (__kill_word): 0 = no kill pending, else the flag bit and
+	 * the reason in one value, so the first-wins CAS publishes both
+	 * and every int reason, 0 and negatives included, is pending. */
+	int64_t kill_pending;
 
 	/* Kill-wake target: the task this proc's fiber runs as and the loop
 	 * it last yielded on, recorded by __xtc_proc_ctx_save at every yield
@@ -572,7 +572,7 @@ struct xtc_proc {
 
 	/* A2 cancellation masking (MonadCancel uncancelable/poll).  While
 	 * mask_depth > 0 an asynchronous kill (xtc_exit_pid) delivered at a
-	 * yield/recv point is DEFERRED, not acted on: the reason+1 is latched
+	 * yield/recv point is DEFERRED, not acted on: the kill word is latched
 	 * in mask_deferred and the unwind runs only when mask_depth falls
 	 * back to 0 (or when a poll region re-admits it).  This is what lets
 	 * a resource acquired in a masked region always register its release
@@ -588,7 +588,7 @@ struct xtc_proc {
 	 * are a sampled health signal (like run_state), not a synchronizing
 	 * read.  See xtc_proc_info's mask_depth / mask_deferred. */
 	unsigned mask_depth;
-	int mask_deferred; /* latched reason+1; 0 = none pending */
+	int64_t mask_deferred; /* latched kill word; 0 = none pending */
 
 	/* A3 async causal trace: a small per-fiber ring of the recent
 	 * suspend/resume boundaries (park reason / resume) with a static
@@ -1598,6 +1598,26 @@ static void __recov_release_all(struct xtc_proc *p);
  * registration, timeout timer) before the kill unwinds it. */
 static void __mask_drain(struct xtc_proc *p);
 static inline void __mask_depth_inc(struct xtc_proc *p);
+static inline int64_t __mask_deferred(const struct xtc_proc *p);
+
+/*
+ * The kill word that kill_pending and mask_deferred hold: bit 32 says a
+ * kill is pending and the low 32 bits carry its reason.  One 64-bit
+ * value, so xtc_exit_pid's first-wins CAS publishes the flag and the
+ * reason together, and no int reason (0, -1, INT_MIN) encodes as the
+ * "none pending" 0.
+ */
+static inline int64_t
+__kill_word(int reason)
+{
+	return (int64_t)((UINT64_C(1) << 32) | (uint32_t)reason);
+}
+
+static inline int
+__kill_word_reason(int64_t kw)
+{
+	return (int)(uint32_t)kw;
+}
 
 static intptr_t
 __proc_entry(void *arg)
@@ -1682,7 +1702,8 @@ __proc_entry(void *arg)
 		}
 	}
 
-	if ((reason = EXIT_SETJMP(p)) == 0) {
+	if (EXIT_SETJMP(p) == 0) {
+		int64_t kw;
 		p->exit_jb_set = 1;
 		p->fn(p->arg);
 		p->exit_reason = 0;        /* normal */
@@ -1691,16 +1712,15 @@ __proc_entry(void *arg)
 		 * did not poll and the body then returned) is still this
 		 * proc's exit reason: a supervisor must see the kill, not a
 		 * clean exit. */
-		reason = xtc_atomic_load_i32(&p->kill_pending, xtc_mo_acquire);
-		if (reason == 0)
-			reason = xtc_atomic_load_i32(&p->mask_deferred,
-			    xtc_mo_relaxed);
-		if (reason != 0) {
-			p->exit_reason = reason - 1;
+		kw = xtc_atomic_load_i64(&p->kill_pending, xtc_mo_acquire);
+		if (kw == 0)
+			kw = __mask_deferred(p);
+		if (kw != 0) {
+			p->exit_reason = __kill_word_reason(kw);
 			p->exit_kind = (p->exit_reason == 0) ? 0 : 1;
 		}
 	} else {
-		p->exit_reason = reason - 1;  /* offset so 0 is reachable */
+		p->exit_reason = p->exit_req;
 		/* xtc_exit_self(0) is a clean exit; any nonzero code is an
 		 * app EXIT status, kept in a field distinct from a signal so
 		 * a monitor never confuses xtc_exit_self(1) with SIGHUP.
@@ -2254,16 +2274,16 @@ __mask_depth_set(struct xtc_proc *p, unsigned v)
 	xtc_atomic_store_u32(&p->mask_depth, v, xtc_mo_relaxed);
 }
 
-static inline int
+static inline int64_t
 __mask_deferred(const struct xtc_proc *p)
 {
-	return xtc_atomic_load_i32(&p->mask_deferred, xtc_mo_relaxed);
+	return xtc_atomic_load_i64(&p->mask_deferred, xtc_mo_relaxed);
 }
 
 static inline void
-__mask_deferred_set(struct xtc_proc *p, int v)
+__mask_deferred_set(struct xtc_proc *p, int64_t kw)
 {
-	xtc_atomic_store_i32(&p->mask_deferred, v, xtc_mo_relaxed);
+	xtc_atomic_store_i64(&p->mask_deferred, kw, xtc_mo_relaxed);
 }
 
 /*
@@ -2279,18 +2299,18 @@ __mask_deferred_set(struct xtc_proc *p, int v)
 static void
 __xtc_proc_kill_deliver(struct xtc_proc *self)
 {
-	int kp;
+	int64_t kw;
 	if (self == NULL)
 		return;
-	kp = xtc_atomic_load_i32(&self->kill_pending, xtc_mo_acquire);
-	if (kp == 0)
+	kw = xtc_atomic_load_i64(&self->kill_pending, xtc_mo_acquire);
+	if (kw == 0)
 		return;
 	if (__mask_depth(self) > 0) {
 		if (__mask_deferred(self) == 0)
-			__mask_deferred_set(self, kp);  /* latch reason+1 */
+			__mask_deferred_set(self, kw); /* latch the kill */
 		return;
 	}
-	xtc_exit_self(kp - 1);
+	xtc_exit_self(__kill_word_reason(kw));
 }
 
 /*
@@ -2752,7 +2772,8 @@ static int
 __exit_pid_on(xtc_loop_t *owner, xtc_pid_t target, int reason)
 {
 	struct xtc_proc *p;
-	int expected = 0, desired, rc = XTC_OK;
+	int64_t expected = 0;
+	int rc = XTC_OK;
 	if (XTC_UNLIKELY(xtc_pid_is_none(target))) return XTC_E_INVAL;
 	p = __resolve_on(owner, target, NULL);
 	if (XTC_UNLIKELY(p == NULL)) return XTC_E_INVAL;
@@ -2763,11 +2784,9 @@ __exit_pid_on(xtc_loop_t *owner, xtc_pid_t target, int reason)
 
 	XTC_PROBE_PROC_KILL(XTC_PROBE_PID_ID(target), XTC_PROBE_PID_GEN(target),
 	    reason);
-	/* Encode reason so 0 means "no kill pending".  Negative reasons
-	 * are clamped to -1 so the encoded value stays nonzero. */
-	desired = (reason == 0) ? 1 : reason + 1;
-	(void)xtc_atomic_cas_i32(&p->kill_pending, &expected, desired,
-	    xtc_mo_release, xtc_mo_relaxed);
+	/* First kill wins: a later one finds the word nonzero. */
+	(void)xtc_atomic_cas_i64(&p->kill_pending, &expected,
+	    __kill_word(reason), xtc_mo_release, xtc_mo_relaxed);
 
 	/*
 	 * Make the target runnable wherever it is parked (sleep, sem,
@@ -3213,7 +3232,7 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 
 		/* Re-check kill flag after yielding back; release the park
 		 * timer first so an unwind leaves none behind. */
-		if (xtc_atomic_load_i32(&self->kill_pending, xtc_mo_acquire) !=
+		if (xtc_atomic_load_i64(&self->kill_pending, xtc_mo_acquire) !=
 		    0)
 			__xtc_task_cancel_park_timer(self->task);
 		__xtc_proc_kill_deliver(self);
@@ -3401,7 +3420,7 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	xtc_loop_t *wl = NULL;   /* the loop this fiber runs on (not its home) */
 	int tail_sched = 0;      /* xtc_tail SCHED enabled? (gates the clock) */
 	int64_t park_ns = 0;     /* park instant, for the park->run latency */
-	int kp_gap = 0;          /* kill latched in the check/arm window */
+	int64_t kp_gap = 0;      /* kill latched in the check/arm window */
 
 	if (out_revents == NULL || fd < 0 || interest == 0) return XTC_E_INVAL;
 	if (self == NULL) return XTC_E_INVAL;
@@ -3489,7 +3508,7 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		(void)xtc_task_waker(self->task, &self->recv_waker);
 		self->waker_armed = 1;
 		kp_gap =
-		    xtc_atomic_load_i32(&self->kill_pending, xtc_mo_acquire);
+		    xtc_atomic_load_i64(&self->kill_pending, xtc_mo_acquire);
 	}
 	(void) __proc_mtx_unlock(&self->mbox_lock);
 	/*
@@ -3892,7 +3911,8 @@ xtc_exit_self(int reason)
 	 * __proc_reanchor). */
 	struct xtc_proc *self = __proc_reanchor(__current_proc);
 	if (self == NULL || !self->exit_jb_set) return XTC_E_INVAL;
-	EXIT_LONGJMP(self, reason + 1);
+	self->exit_req = reason;
+	EXIT_LONGJMP(self);
 	/* NOTREACHED */
 	return XTC_OK;
 }
@@ -3920,7 +3940,8 @@ __xtc_exit_self_kind(int reason, int kind)
 	if (kind < XTC_DOWN_KIND_CLEAN || kind > XTC_DOWN_KIND_NOCONNECTION)
 		return XTC_E_INVAL;
 	self->exit_kind_override = kind;
-	EXIT_LONGJMP(self, reason + 1);
+	self->exit_req = reason;
+	EXIT_LONGJMP(self);
 	/* NOTREACHED */
 	return XTC_OK;
 }
@@ -4309,7 +4330,7 @@ __run_proc_at_exit(struct xtc_proc *p)
 	 */
 	if (p != NULL) {
 		__mask_depth_inc(p);
-		xtc_atomic_store_i32(&p->kill_pending, 0, xtc_mo_release);
+		xtc_atomic_store_i64(&p->kill_pending, 0, xtc_mo_release);
 		__mask_deferred_set(p, 0);
 	}
 
@@ -4545,13 +4566,13 @@ xtc_proc_recovery_untrack_fd(int fd)
 static void
 __mask_drain(struct xtc_proc *p)
 {
-	int kp;
+	int64_t kw;
 	if (p == NULL || __mask_depth(p) > 0)
 		return;
-	kp = __mask_deferred(p);
-	if (kp != 0) {
+	kw = __mask_deferred(p);
+	if (kw != 0) {
 		__mask_deferred_set(p, 0);
-		xtc_exit_self(kp - 1);
+		xtc_exit_self(__kill_word_reason(kw));
 	}
 }
 
@@ -4633,7 +4654,7 @@ xtc_cancel_requested(void)
 	struct xtc_proc *p = __current_proc;
 	if (p == NULL)
 		return 0;
-	if (xtc_atomic_load_i32(&p->kill_pending, xtc_mo_acquire) != 0)
+	if (xtc_atomic_load_i64(&p->kill_pending, xtc_mo_acquire) != 0)
 		return 1;
 	return __mask_deferred(p) != 0;
 }
@@ -5387,13 +5408,13 @@ __fill_proc_info(struct xtc_proc *p, xtc_proc_info_t *info)
 	info->pid = p->pid;
 	info->alive = xtc_atomic_load_i32(&p->alive, xtc_mo_relaxed);
 	info->kill_pending =
-	    xtc_atomic_load_i32(&p->kill_pending, xtc_mo_relaxed) ? 1 : 0;
+	    xtc_atomic_load_i64(&p->kill_pending, xtc_mo_relaxed) ? 1 : 0;
 	/* A2 mask state: the supervisor-side "is this fiber killable now?"
 	 * signal.  Sampled, like run_state -- and exact for the case that
 	 * matters, a fiber wedged inside a critical section, which by
 	 * definition is not running and so cannot be mutating them. */
 	info->mask_depth = __mask_depth(p);
-	info->mask_deferred = __mask_deferred(p);
+	info->mask_deferred = __mask_deferred(p) != 0 ? 1 : 0;
 	if (p->task != NULL) {
 		int st = xtc_atomic_load_i32(&p->task->state,
 		    xtc_mo_relaxed); /* introspection snapshot */

@@ -565,6 +565,133 @@ test_down_decode_ex_exit_vs_signal(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- every int is a deliverable exit reason.  The kill flag and the
+ *      exit unwind used to carry reason+1 so that 0 meant "none": -1
+ *      then encoded as 0, so xtc_exit_self(-1) read as CLEAN and
+ *      xtc_exit_pid(p, -1) returned XTC_OK and dropped the kill. ---- */
+struct down_case {
+	xtc_loop_t *loop;
+	xtc_proc_fn fn;
+	void *arg;
+	int kill; /* xtc_exit_pid the child after 5 ms */
+	int kill_reason;
+	int kill_rc;
+	int got; /* a DOWN arrived */
+	xtc_down_info_t di;
+};
+
+static void
+down_case_parent(void *arg)
+{
+	struct down_case *dc = arg;
+	xtc_pid_t child;
+	uint64_t ref = 0;
+	void *m = NULL;
+	size_t sz = 0;
+	if (xtc_proc_spawn_monitor(dc->loop, dc->fn, dc->arg, NULL, &child,
+	        &ref) != XTC_OK)
+		return;
+	if (dc->kill) {
+		(void)xtc_proc_sleep(5LL * 1000 * 1000);
+		dc->kill_rc = xtc_exit_pid(child, dc->kill_reason);
+	}
+	if (xtc_recv(&m, &sz, 2LL * 1000 * 1000 * 1000) != XTC_OK) {
+		(void)xtc_exit_pid(child, 9); /* let the loop drain */
+		(void)xtc_recv(&m, &sz, 2LL * 1000 * 1000 * 1000);
+		xtc_free(m);
+		return;
+	}
+	dc->di.size = sizeof dc->di;
+	if (xtc_down_decode_ex(m, sz, &dc->di) == XTC_OK)
+		dc->got = 1;
+	xtc_free(m);
+}
+
+/* Run `dc` on a fresh loop: spawn its child monitored, kill it if asked,
+ * and decode the DOWN into dc->di. */
+static void
+down_case_run(struct down_case *dc)
+{
+	xtc_pid_t parent;
+	munit_assert_int(xtc_loop_init(&dc->loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(dc->loop, down_case_parent, dc, NULL,
+	                     &parent),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(dc->loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(dc->loop), ==, XTC_OK);
+}
+
+static void
+exitneg1_child(void *arg)
+{
+	(void)arg;
+	(void)xtc_exit_self(-1);
+}
+
+static void
+parked_child(void *arg)
+{
+	void *m;
+	size_t sz;
+	(void)arg;
+	for (;;) {
+		if (xtc_recv(&m, &sz, -1) == XTC_OK)
+			xtc_free(m);
+	}
+}
+
+static int g_masked_after_leave;
+
+/* Masked across the kill: the sleep's delivery point latches it, and
+ * xtc_mask_leave honors it, so the statement after the leave never runs. */
+static void
+masked_child(void *arg)
+{
+	(void)arg;
+	(void)xtc_mask_enter();
+	(void)xtc_proc_sleep(20LL * 1000 * 1000);
+	(void)xtc_mask_leave();
+	xtc_atomic_store_i32(&g_masked_after_leave, 1, xtc_mo_seq_cst);
+}
+
+static MunitResult
+test_exit_reason_negative(const MunitParameter p[], void *d)
+{
+	struct down_case dc;
+	(void)p;
+	(void)d;
+
+	memset(&dc, 0, sizeof dc);
+	dc.fn = exitneg1_child;
+	down_case_run(&dc);
+	munit_assert_int(dc.got, ==, 1);
+	munit_assert_int(dc.di.kind, ==, XTC_DOWN_KIND_EXIT);
+	munit_assert_int(dc.di.exit_code, ==, -1);
+	munit_assert_int(dc.di.reason, ==, -1);
+
+	memset(&dc, 0, sizeof dc);
+	dc.fn = parked_child;
+	dc.kill = 1;
+	dc.kill_reason = -1;
+	down_case_run(&dc);
+	munit_assert_int(dc.kill_rc, ==, XTC_OK);
+	munit_assert_int(dc.got, ==, 1);
+	munit_assert_int(dc.di.reason, ==, -1);
+
+	memset(&dc, 0, sizeof dc);
+	xtc_atomic_store_i32(&g_masked_after_leave, 0, xtc_mo_seq_cst);
+	dc.fn = masked_child;
+	dc.kill = 1;
+	dc.kill_reason = -1;
+	down_case_run(&dc);
+	munit_assert_int(dc.got, ==, 1);
+	munit_assert_int(dc.di.reason, ==, -1);
+	munit_assert_int(xtc_atomic_load_i32(&g_masked_after_leave,
+	                     xtc_mo_seq_cst),
+	    ==, 0);
+	return MUNIT_OK;
+}
+
 /* Infinite-wait recv must PARK (not busy-reschedule): a waiter blocks
  * on xtc_recv(timeout = -1) while a sender, after parking ~120 ms on
  * a timer, sends one message.  The whole run consumes far less CPU
@@ -3046,6 +3173,7 @@ static MunitTest tests[] = {
 	{ "/spawn_link_atomic",  test_spawn_link_atomic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/spawn_rel_needs_proc", test_spawn_rel_needs_proc, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/down_decode_ex",      test_down_decode_ex_exit_vs_signal, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/exit_reason_negative", test_exit_reason_negative, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/recv_inf_parks",    test_recv_inf_parks,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/mailbox_stats",     test_mailbox_stats,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/save_queue_cap",    test_save_queue_cap,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
