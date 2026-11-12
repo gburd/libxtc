@@ -1611,13 +1611,21 @@ static inline int64_t __mask_deferred(const struct xtc_proc *p);
 static inline int64_t
 __kill_word(int reason)
 {
+#if XTC_DST_BUG(XTC_DST_BUG_EXITNEG)
+	return (int64_t)(int32_t)((uint32_t)reason + 1u); /* 2.1: reason+1 */
+#else
 	return (int64_t)((UINT64_C(1) << 32) | (uint32_t)reason);
+#endif
 }
 
 static inline int
 __kill_word_reason(int64_t kw)
 {
+#if XTC_DST_BUG(XTC_DST_BUG_EXITNEG)
+	return (int)((uint32_t)kw - 1u);
+#else
 	return (int)(uint32_t)kw;
+#endif
 }
 
 static intptr_t
@@ -1722,6 +1730,12 @@ __proc_entry(void *arg)
 		}
 	} else {
 		p->exit_reason = p->exit_req;
+#if XTC_DST_BUG(XTC_DST_BUG_EXITNEG)
+		/* 2.1 longjmp'd with reason+1: -1 sent 0, which arrives as 1,
+		 * i.e. reason 0. */
+		if (p->exit_reason == -1)
+			p->exit_reason = 0;
+#endif
 		/* xtc_exit_self(0) is a clean exit; any nonzero code is an
 		 * app EXIT status, kept in a field distinct from a signal so
 		 * a monitor never confuses xtc_exit_self(1) with SIGHUP.  An
@@ -1730,7 +1744,7 @@ __proc_entry(void *arg)
 		 * inference. */
 		if (p->exit_kind_override >= 0)
 			p->exit_kind = p->exit_kind_override;
-		else if (p->exit_killed)
+		else if (p->exit_killed && !XTC_DST_BUG(XTC_DST_BUG_KILLKIND))
 			p->exit_kind = 5; /* XTC_DOWN_KIND_KILLED */
 		else
 			p->exit_kind = (p->exit_reason == 0) ? 0 : 1;
@@ -1740,7 +1754,7 @@ __proc_entry(void *arg)
 	 * recovery path, however it leaves (xtc_exit_self with any code, a
 	 * return, a kill), and that is a crash.  The DOWN carries one int,
 	 * so the fault signal replaces the code the app passed. */
-	if (p->fault_sig != 0) {
+	if (p->fault_sig != 0 && !XTC_DST_BUG(XTC_DST_BUG_FAULTKIND)) {
 		p->exit_reason = p->fault_sig;
 		p->exit_kind = 2; /* XTC_DOWN_KIND_SIGNAL */
 	}

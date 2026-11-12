@@ -99,6 +99,10 @@ write_cases() {
 		"28;test_sim_launch;0;1;a message queued for the launcher did not survive xtc_launch" \
 		"29;test_sim_aio_migrate;0;1;aio reaper read a released xtc_aio_t" \
 		"30;test_sim_pid_xexec;0;0;MISDELIVERED" \
+		"31;test_sim_down_kind;0;1;(EXIT|KILL|MKILL)\\(code -1\\): want kind [15] code -1, got kind (0|-1) " \
+		"32;test_sim_down_kind;0;1;FRAME\\(code [0-9]+\\): want kind 2 code 11, got kind [01] " \
+		"33;test_sim_down_kind;0;1;M?KILL\\(code -?[0-9]+\\): want kind 5 code -?[0-9]+, got kind [01] " \
+		"34;test_sim_down_kind;0;1;INIT\\(code 0\\): want kind 1 code -2, got kind 0 " \
 		"35;test_sim_sup_strategy;0;1;on_child_down missed deaths" \
 		> "$1"
 }
@@ -140,6 +144,12 @@ write_cases() {
 #               touches an xtc_aio_t after the done store (the frame is dead once a
 #               kill-woken fiber sees done); the kill arm reports the late read
 # 30 PIDEXEC    proc.c mints exec-relative pids -> a pid reaches only its own proc
+# 31 EXITNEG    proc.c reason+1 kill/exit encoding -> every int exit reason is delivered
+#               (a -1 kill is dropped: the child is released at the end and its DOWN
+#               reads CLEAN; xtc_exit_self(-1) reads CLEAN)
+# 32 FAULTKIND  proc.c drops the fault override -> a user-frame fault reads SIGNAL
+# 33 KILLKIND   proc.c reports a kill as EXIT  -> a death by xtc_exit_pid reads KILLED
+# 34 INITEXIT   svr.c returns after a failed init -> a failed init reads EXIT(rc)
 # 35 SUP_HOOK_SIBLING sup.c drops the DOWNs of siblings a group restart killed
 #               -> on_child_down sees every child death once, before its respawn
 #

@@ -101,6 +101,17 @@
  *	                   to a pid of another executor reaches the proc in
  *	                   the same slot of the sender's own
  *	                   (test_sim_pid_xexec: MISDELIVERED).
+ *	 31  EXITNEG   -- proc.c encodes a kill and an exit code as reason+1
+ *	                   so that 0 means none, as 2.1 did: a kill with -1
+ *	                   is dropped and xtc_exit_self(-1) reads CLEAN
+ *	                   (test_sim_down_kind: misclassified or missing).
+ *	 32  FAULTKIND -- proc.c drops the contained-fault override, so a
+ *	                   fault in a user recovery frame reads EXIT
+ *	                   (test_sim_down_kind).
+ *	 33  KILLKIND  -- proc.c reports a death by xtc_exit_pid as EXIT,
+ *	                   not KILLED (test_sim_down_kind).
+ *	 34  INITEXIT  -- svr.c returns normally after a failed init, so the
+ *	                   server's DOWN reads CLEAN (test_sim_down_kind).
  *
  *	NOT plantable under DST (an honest gap, recorded so it is not
  *	mistaken for missing coverage): the xtc_amutex mutual-exclusion and
@@ -213,6 +224,10 @@
 #define XTC_DST_BUG_LAUNCH_EATMAIL 28
 
 #define XTC_DST_BUG_PIDEXEC 30     /* proc.c: 2.1 exec-relative pids */
+#define XTC_DST_BUG_EXITNEG 31     /* proc.c: reason+1 kill/exit encoding */
+#define XTC_DST_BUG_FAULTKIND 32   /* proc.c: user-frame fault reads EXIT */
+#define XTC_DST_BUG_KILLKIND 33    /* proc.c: a kill reads EXIT */
+#define XTC_DST_BUG_INITEXIT 34    /* svr.c: failed init returns CLEAN */
 
 /*
  * 35 SUP_HOOK_SIBLING: a one_for_all / rest_for_one restart never

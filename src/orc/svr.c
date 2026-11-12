@@ -40,6 +40,7 @@
 #include "xtc_sync.h"
 #include "xtc_async.h"    /* xtc_yield: buggify delay-dispatch site */
 #include "xtc_inject.h"   /* svr.reply.oom fault-injection point */
+#include "xtc_dst_inject.h"
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -320,7 +321,7 @@ out:
 	/* A failed init ends the server with init's code, so a monitor or
 	 * supervisor sees why it never served (xtc_svr_start returned
 	 * before init ran).  s is gone once the hook ran: use the copy. */
-	if (init_rc != XTC_OK)
+	if (init_rc != XTC_OK && !XTC_DST_BUG(XTC_DST_BUG_INITEXIT))
 		(void)xtc_exit_self(init_rc);
 }
 
