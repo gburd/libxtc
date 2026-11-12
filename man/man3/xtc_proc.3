@@ -773,6 +773,16 @@ untouched.  The recovered process releases its resources and calls
 .Fn xtc_exit_self ,
 so a supervisor observes the fault as a normal
 .Sq DOWN .
+A process that leaves after a contained fault without re-arming its
+frame (through
+.Fn xtc_exit_self
+with any code, a return, or a kill) reports
+.Dv XTC_DOWN_KIND_SIGNAL
+with the fault's signal: a contained crash is still a crash.  The DOWN
+carries one integer, so the signal replaces the code passed to
+.Fn xtc_exit_self .
+Re-arming the frame means the process recovered and carries on, and
+its later exit is classified as usual.
 .Fn xtc_proc_critical_enter
 and
 .Fn xtc_proc_critical_leave

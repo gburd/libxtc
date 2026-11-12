@@ -1177,7 +1177,73 @@ test_fault_contain(const MunitParameter p[], void *d)
 	munit_assert_int(s.cleanup_ran, ==, 1);   /* faulter recovered */
 	munit_assert_int(s.atexit_ran, ==, 1);     /* at-exit ran on fault */
 	munit_assert_int(s.saw_down, ==, 1);       /* sibling observed it */
-	munit_assert_int(s.reason, ==, FLT_REASON);
+	/* The recovery path passed FLT_REASON, but a contained crash is a
+	 * crash: the DOWN's one int carries the signal. */
+	munit_assert_int(s.reason, ==, SIGSEGV);
+	return MUNIT_OK;
+}
+
+/* A contained fault in the app's own recovery frame reports SIGNAL with
+ * the fault's signal, whatever code the recovery path exits with; a proc
+ * that recovers and re-arms has left the recovery path, so a later
+ * return is CLEAN. */
+static void
+uframe_child(void *arg)
+{
+	int how = (int)(intptr_t)arg;
+	int sig = xtc_proc_recovery_arm();
+	volatile uintptr_t addr = 0x10;
+	if (sig == 0) {
+		*(volatile int *)addr = 1; /* boom */
+		return;
+	}
+	if (how == 0)
+		(void)xtc_exit_self(sig); /* the documented way out */
+	if (how == 1)
+		(void)xtc_exit_self(0);
+	/* how == 2: recover, re-arm, carry on, return normally. */
+	if (xtc_proc_recovery_arm() != 0)
+		(void)xtc_exit_self(99); /* not reached: no second fault */
+}
+
+static MunitResult
+test_fault_user_frame_kind(const MunitParameter p[], void *d)
+{
+	struct down_case dc;
+	(void)p;
+	(void)d;
+
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+	return MUNIT_SKIP;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	return MUNIT_SKIP;
+#endif
+#endif
+
+	munit_assert_int(xtc_fault_guard_install(), ==, XTC_OK);
+	memset(&dc, 0, sizeof dc);
+	dc.fn = uframe_child;
+	dc.arg = (void *)(intptr_t)0;
+	down_case_run(&dc);
+	munit_assert_int(dc.got, ==, 1);
+	munit_assert_int(dc.di.kind, ==, XTC_DOWN_KIND_SIGNAL);
+	munit_assert_int(dc.di.signal, ==, SIGSEGV);
+
+	memset(&dc, 0, sizeof dc);
+	dc.fn = uframe_child;
+	dc.arg = (void *)(intptr_t)1;
+	down_case_run(&dc);
+	munit_assert_int(dc.got, ==, 1);
+	munit_assert_int(dc.di.kind, ==, XTC_DOWN_KIND_SIGNAL);
+	munit_assert_int(dc.di.signal, ==, SIGSEGV);
+
+	memset(&dc, 0, sizeof dc);
+	dc.fn = uframe_child;
+	dc.arg = (void *)(intptr_t)2;
+	down_case_run(&dc);
+	munit_assert_int(dc.got, ==, 1);
+	munit_assert_int(dc.di.kind, ==, XTC_DOWN_KIND_CLEAN);
 	return MUNIT_OK;
 }
 
@@ -3179,6 +3245,7 @@ static MunitTest tests[] = {
 	{ "/save_queue_cap",    test_save_queue_cap,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fault_contain",     test_fault_contain,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fault_early_contain", test_fault_early_contain, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/fault_user_frame_kind", test_fault_user_frame_kind, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/recovery_registry", test_recovery_registry, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fault_escalate",    test_fault_escalate,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/proc_at_exit",      test_proc_at_exit,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

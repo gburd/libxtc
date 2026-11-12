@@ -603,9 +603,13 @@ XTC_API int       xtc_proc_trap_exit(int on);
  *   0            -- clean exit (the target returned, or called
  *                   xtc_exit_self(0)).
  *   > 0          -- an application exit code the target passed to
- *                   xtc_exit_self(code) (including a contained fault
- *                   that ran xtc_exit_self(sig), which passes the
- *                   POSITIVE signal number, e.g. 11 for SIGSEGV).
+ *                   xtc_exit_self(code), or the POSITIVE signal number
+ *                   of a contained fault (e.g. 11 for SIGSEGV).  A proc
+ *                   that leaves through its recovery path reports the
+ *                   signal whatever code it passes; see
+ *                   xtc_proc_recovery_arm.
+ *   < 0          -- an application exit code, typically an XTC_E_*
+ *                   error code passed to xtc_exit_self.
  *   XTC_DOWN_NOPROC -- the monitor was registered on a target that had
  *                   ALREADY exited (the monitor raced the target's
  *                   exit), so its real exit reason was already reaped
@@ -721,6 +725,13 @@ int       __xtc_recovery_result(void);
  * The frame is disarmed automatically when a fault fires it (so a
  * fault during recovery escalates to process abort); re-arm or
  * xtc_proc_recovery_disarm() as needed.
+ *
+ * A proc that leaves after a contained fault without re-arming --
+ * xtc_exit_self with any code, a return, a kill -- reports
+ * XTC_DOWN_KIND_SIGNAL with the fault's signal: a contained crash is
+ * still a crash.  The DOWN carries one int, so the signal replaces the
+ * code passed to xtc_exit_self.  Re-arming means the proc recovered and
+ * carries on; its later exit is classified as usual.
  *
  * IMPORTANT: containment only unwinds the fiber's CALL STACK.  Any
  * resources the proc held at fault time -- locks, fds, allocations,
