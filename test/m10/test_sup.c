@@ -1334,12 +1334,20 @@ hk_exit7(void *a)
 	(void)xtc_exit_self(7);
 }
 
+/* A fault at a low non-NULL address, as test_proc's fault tests use:
+ * UBSan traps a NULL store before it faults, and this is not one. */
+static void
+hk_fault(void)
+{
+	volatile uintptr_t addr = 0x10;
+	*(volatile int *)addr = 1;
+}
+
 static void
 hk_crash(void *a)
 {
-	volatile int *np = NULL;
 	(void)a;
-	*np = 1;   /* contained under the default recovery frame */
+	hk_fault();   /* contained under the default recovery frame */
 }
 
 static void
@@ -1463,11 +1471,10 @@ static int g_hk_gen;
 static void
 hk_crash_once(void *a)
 {
-	volatile int *np = NULL;
 	(void)a;
 	if (xtc_atomic_fetch_add_i32(&g_hk_gen, 1, xtc_mo_relaxed) == 0) {
 		(void)xtc_proc_sleep(10 * NA_MS);
-		*np = 1;
+		hk_fault();
 	}
 	for (;;)
 		(void)xtc_proc_sleep(1000 * NA_MS);
