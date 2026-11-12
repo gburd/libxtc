@@ -25,6 +25,10 @@
 
 typedef struct xtc_reg xtc_reg_t;
 
+/* xtc_reg_visit's callback: one entry's pid and value.  Nonzero stops
+ * the walk. */
+typedef int (*xtc_reg_visit_fn)(xtc_pid_t pid, void *value, void *user);
+
 /*
  * PUBLIC: int       xtc_reg_create __P((xtc_reg_t **));
  * PUBLIC: void      xtc_reg_destroy __P((xtc_reg_t *));
@@ -39,6 +43,8 @@ typedef struct xtc_reg xtc_reg_t;
  * PUBLIC: int       xtc_reg_register_mon __P((xtc_reg_t *, const char *, xtc_pid_t));
  * PUBLIC: int       xtc_svr_call_name __P((xtc_reg_t *, const char *, const void *, size_t, void **, size_t *, int64_t));
  * PUBLIC: int       xtc_reg_members __P((xtc_reg_t *, const char *, int (*)(xtc_pid_t, void *), void *));
+ * PUBLIC: int       xtc_reg_put __P((xtc_reg_t *, const char *, xtc_pid_t, void *, unsigned));
+ * PUBLIC: int       xtc_reg_visit __P((xtc_reg_t *, const char *, xtc_reg_visit_fn, void *, int *));
  */
 XTC_API int  xtc_reg_create(xtc_reg_t **out);
 XTC_API void xtc_reg_destroy(xtc_reg_t *r);
@@ -97,5 +103,34 @@ XTC_API int  xtc_svr_call_name(xtc_reg_t *r, const char *name,
  * return stops the walk.  Returns the number of members visited. */
 XTC_API int  xtc_reg_members(xtc_reg_t *r, const char *key,
                              int (*fn)(xtc_pid_t pid, void *user), void *user);
+
+/*
+ * Entries that carry a value (2.2).
+ *
+ * xtc_reg_put registers name -> (pid, value).  `value` is opaque and
+ * owned by the caller: the registry stores it, hands it to
+ * xtc_reg_visit, and never dereferences or frees it.  Flags:
+ *   0                  a unique name; XTC_E_EXIST if it is taken
+ *   XTC_REG_DUP        a duplicate-key member (as xtc_reg_register_dup)
+ *   XTC_REG_MONITOR    also drop the entry when pid goes DOWN (needs the
+ *                      reaper; as xtc_reg_register_mon)
+ *
+ * xtc_reg_visit calls fn(pid, value, user) for each entry under `name`
+ * WITH THE REGISTRY LOCK HELD.  Remove an entry (xtc_reg_unregister,
+ * xtc_reg_unregister_pid, xtc_reg_drop_pid) before freeing its value, and
+ * the value cannot be freed while fn uses it.  fn must not park and must
+ * not call into the registry; xtc_proc_wake and atomics are fine.  A
+ * nonzero return stops the walk.  Returns XTC_OK if at least one entry
+ * was visited, XTC_E_NOTFOUND if none exists (a miss is authoritative);
+ * *out_n, if not NULL, gets the count.  There is deliberately no getter
+ * that returns the value: once the lock is dropped the value may be freed.
+ */
+#define XTC_REG_DUP     0x1u
+#define XTC_REG_MONITOR 0x2u
+
+XTC_API int  xtc_reg_put(xtc_reg_t *r, const char *name, xtc_pid_t pid,
+                         void *value, unsigned flags);
+XTC_API int  xtc_reg_visit(xtc_reg_t *r, const char *name,
+                           xtc_reg_visit_fn fn, void *user, int *out_n);
 
 #endif /* XTC_REG_H */

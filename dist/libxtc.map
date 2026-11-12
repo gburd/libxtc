@@ -74,4 +74,6 @@ XTC_2.0 {
 XTC_2.2 {
 	global:
 		xtc_tnt_send_from;
+		xtc_reg_put;
+		xtc_reg_visit;
 } XTC_2.0;

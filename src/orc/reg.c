@@ -38,6 +38,7 @@ struct reg_node {
 	xtc_pid_t        pid;
 	char            *name;          /* __os_strdup'd, owned by node */
 	int              dup;           /* 1 = duplicate-key (pub/sub) entry */
+	void            *value;         /* xtc_reg_put's caller-owned slot */
 };
 
 struct xtc_reg {
@@ -455,13 +456,16 @@ xtc_reg_reaper(void *arg)
 	(void)__xtc_mtx_unlock(&r->lock);
 }
 
-int
-xtc_reg_register_mon(xtc_reg_t *r, const char *name, xtc_pid_t pid)
+/*
+ * Ask the reaper (if one runs) to monitor `pid` so the entry `name` is
+ * dropped when pid goes DOWN; on a failed enrollment roll the entry back
+ * and report it.  Shared by xtc_reg_register_mon and xtc_reg_put with
+ * XTC_REG_MONITOR.  The entry is already in the table.
+ */
+static int
+__reg_enroll_mon(xtc_reg_t *r, const char *name, xtc_pid_t pid)
 {
 	int rc;
-	if (r == NULL || name == NULL) return XTC_E_INVAL;
-	if ((rc = xtc_reg_register(r, name, pid)) != XTC_OK)
-		return rc;
 	/* If a reaper is running, ask it to monitor pid so the entry is
 	 * auto-dropped on DOWN.  If none, this behaves as a plain register
 	 * (the caller may still xtc_reg_drop_pid manually). */
@@ -498,6 +502,116 @@ xtc_reg_register_mon(xtc_reg_t *r, const char *name, xtc_pid_t pid)
 		}
 	}
 	return XTC_OK;
+}
+
+int
+xtc_reg_register_mon(xtc_reg_t *r, const char *name, xtc_pid_t pid)
+{
+	int rc;
+	if (r == NULL || name == NULL) return XTC_E_INVAL;
+	if ((rc = xtc_reg_register(r, name, pid)) != XTC_OK)
+		return rc;
+	return __reg_enroll_mon(r, name, pid);
+}
+
+/*
+ * PUBLIC: int       xtc_reg_put __P((xtc_reg_t *, const char *, xtc_pid_t, void *, unsigned));
+ *
+ * One entry: name -> (pid, value), the general form of register /
+ * register_dup / register_mon.  A unique name that is taken is
+ * XTC_E_EXIST (xtc_reg_register says XTC_E_INVAL for the same thing; it
+ * keeps that for compatibility).  XTC_REG_DUP adds a duplicate-key
+ * member; putting the same (key, pid) twice is idempotent and keeps the
+ * first value.  XTC_REG_MONITOR enrolls pid with the reaper, as
+ * xtc_reg_register_mon does, rolling the entry back if that fails.
+ */
+int
+xtc_reg_put(xtc_reg_t *r, const char *name, xtc_pid_t pid, void *value,
+            unsigned flags)
+{
+	struct reg_node *node;
+	uint32_t h;
+	int dup, rc = XTC_OK;
+
+	if (r == NULL || name == NULL ||
+	    (flags & ~(XTC_REG_DUP | XTC_REG_MONITOR)) != 0)
+		return XTC_E_INVAL;
+	dup = (flags & XTC_REG_DUP) != 0;
+	h = __reg_hash(name);
+	(void)__xtc_mtx_lock(&r->lock);
+	/* Unique: any entry under the name blocks it.  Duplicate-key: only
+	 * the same (key, pid) is a no-op; a unique holder of the key does
+	 * not block group members, as with xtc_reg_register_dup. */
+	for (node = *__reg_bucket(r, h); node != NULL; node = node->next) {
+		if (node->hash != h || strcmp(node->name, name) != 0)
+			continue;
+		if (!dup) {
+#if !XTC_DST_BUG(XTC_DST_BUG_REGDUP)
+			rc = XTC_E_EXIST;
+			goto out;
+#endif
+		} else if (node->dup && xtc_pid_eq(node->pid, pid)) {
+			goto out;   /* already a member */
+		}
+	}
+	if ((rc = __os_calloc(1, sizeof *node, (void **)&node)) != XTC_OK)
+		goto out;
+	if ((rc = __os_strdup(name, &node->name)) != XTC_OK) {
+		__os_free(node);
+		goto out;
+	}
+	node->hash = h;
+	node->pid = pid;
+	node->dup = dup;
+	node->value = value;
+	__reg_insert_locked(r, node);
+out:
+	(void)__xtc_mtx_unlock(&r->lock);
+	if (rc == XTC_OK && (flags & XTC_REG_MONITOR) != 0)
+		rc = __reg_enroll_mon(r, name, pid);
+	return rc;
+}
+
+/*
+ * PUBLIC: int       xtc_reg_visit __P((xtc_reg_t *, const char *, xtc_reg_visit_fn, void *, int *));
+ *
+ * Call fn(pid, value, user) for each entry under `name`, holding the
+ * registry lock for the whole walk.  That is what makes the value safe to
+ * use: an owner that removes its entry (unregister / drop_pid) before it
+ * frees the value cannot free it while fn runs, because the removal waits
+ * for this lock.  So fn must be brief, must not park, and must not call
+ * into this registry (it would deadlock); xtc_proc_wake and atomic stores
+ * are fine.  A nonzero return from fn stops the walk.
+ *
+ * A miss is authoritative: XTC_E_NOTFOUND means no entry existed at the
+ * moment of the walk (unlike xtc_reg_whereis there is no simulated
+ * transient miss).  *out_n (optional) gets the number of entries visited.
+ */
+int
+xtc_reg_visit(xtc_reg_t *r, const char *name, xtc_reg_visit_fn fn,
+              void *user, int *out_n)
+{
+	struct reg_node *node;
+	uint32_t h;
+	int n = 0;
+
+	if (out_n != NULL)
+		*out_n = 0;
+	if (r == NULL || name == NULL || fn == NULL)
+		return XTC_E_INVAL;
+	h = __reg_hash(name);
+	(void)__xtc_mtx_lock(&r->lock);
+	for (node = *__reg_bucket(r, h); node != NULL; node = node->next) {
+		if (node->hash != h || strcmp(node->name, name) != 0)
+			continue;
+		n++;
+		if (fn(node->pid, node->value, user) != 0)
+			break;
+	}
+	(void)__xtc_mtx_unlock(&r->lock);
+	if (out_n != NULL)
+		*out_n = n;
+	return n > 0 ? XTC_OK : XTC_E_NOTFOUND;
 }
 
 int

@@ -17,7 +17,9 @@
 .Nm xtc_reg_reaper ,
 .Nm xtc_reg_register_mon ,
 .Nm xtc_svr_call_name ,
-.Nm xtc_reg_members
+.Nm xtc_reg_members ,
+.Nm xtc_reg_put ,
+.Nm xtc_reg_visit
 .Nd named process registry
 .Sh SYNOPSIS
 .In xtc.h
@@ -50,6 +52,10 @@
 .Fn xtc_svr_call_name "xtc_reg_t *r" "const char *name" "const void *req" "size_t req_size" "void **out_reply" "size_t *out_size" "int64_t timeout_ns"
 .Ft int
 .Fn xtc_reg_members "xtc_reg_t *r" "const char *key" "int (*fn)(xtc_pid_t, void *)" "void *user"
+.Ft int
+.Fn xtc_reg_put "xtc_reg_t *r" "const char *name" "xtc_pid_t pid" "void *value" "unsigned flags"
+.Ft int
+.Fn xtc_reg_visit "xtc_reg_t *r" "const char *name" "xtc_reg_visit_fn fn" "void *user" "int *out_n"
 .Sh DESCRIPTION
 .Nm xtc_reg
 is a name-to-pid registry.  Modeled on Erlang's
@@ -147,6 +153,78 @@ visits every pid registered under
 the callback runs UNDER the registry lock (keep it brief; do not
 re-enter the registry), a nonzero return stops the walk, and the return
 value is the number of members visited.
+.Ss Entries with a value
+.Fn xtc_reg_put
+registers
+.Fa name
+to
+.Fa pid
+and an opaque, caller-owned
+.Fa value
+(the registry stores it and never dereferences or frees it).
+With
+.Fa flags
+0 the name is unique and a taken name is
+.Dv XTC_E_EXIST ;
+.Dv XTC_REG_DUP
+adds a duplicate-key member (putting the same key and pid again is a
+no-op that keeps the first value);
+.Dv XTC_REG_MONITOR
+also drops the entry when
+.Fa pid
+goes DOWN, as
+.Fn xtc_reg_register_mon
+does (it needs the reaper, and rolls the entry back if enrollment fails).
+An entry made by
+.Fn xtc_reg_put
+is removed by the same calls as any other.
+.Pp
+.Fn xtc_reg_visit
+calls
+.Fa fn Ns Pq Fa pid , value , user
+for each entry under
+.Fa name
+with the registry lock held for the whole walk.
+That is the lifetime rule: an owner that removes its entry before it
+frees the value cannot free it while
+.Fa fn
+runs, because the removal waits for the lock.
+.Fa fn
+must therefore be brief, must not park, and must not call into the
+registry (it would deadlock);
+.Fn xtc_proc_wake
+and atomic stores are fine.
+A nonzero return stops the walk.
+It returns
+.Dv XTC_OK
+if at least one entry was visited and
+.Dv XTC_E_NOTFOUND
+if there was none; a miss is authoritative (unlike
+.Fn xtc_reg_whereis ,
+the simulator never fakes one).
+.Fa out_n ,
+if not NULL, gets the number visited.
+There is deliberately no call that returns the value: once the lock is
+dropped the value may already be freed.
+.Pp
+The pattern this serves, a stable id that reaches a live control struct
+and flips a bit in it:
+.Bd -literal -offset indent
+static int
+interrupt_fn(xtc_pid_t pid, void *value, void *user)
+{
+	struct backend *b = value;
+	xtc_atomic_fetch_or_u32(&b->pending, *(uint32_t *)user,
+	    xtc_mo_release);
+	(void)xtc_proc_wake(pid);
+	return 0;
+}
+
+/* owner, at start:  xtc_reg_put(reg, "backend:42", xtc_self(), b, 0);
+ * owner, at exit:   xtc_reg_unregister(reg, "backend:42"); then free b */
+uint32_t bit = INTERRUPT_CANCEL;
+rc = xtc_reg_visit(reg, "backend:42", interrupt_fn, &bit, NULL);
+.Ed
 .Sh EXAMPLES
 .Bd -literal -offset indent
 xtc_reg_t *r = xtc_app_registry(app);

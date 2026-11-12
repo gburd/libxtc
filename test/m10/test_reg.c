@@ -11,6 +11,7 @@
 #include "xtc_proc.h"
 #include "xtc_reg.h"
 #include "xtc_int.h"
+#include "os_thread.h"   /* the visit-lifetime test's second thread */
 
 #include <string.h>
 
@@ -495,6 +496,167 @@ test_reg_resize(const MunitParameter p[], void *d)
 #undef NBIG
 }
 
+/*
+ * xtc_reg_put / xtc_reg_visit (2.2): an entry carries a caller-owned
+ * value, and visit hands it to a callback under the registry lock.
+ */
+struct visit_acc {
+	int       n;
+	xtc_pid_t pid;
+	void     *value;
+	int       stop_after;
+};
+
+static int
+visit_acc_fn(xtc_pid_t pid, void *value, void *user)
+{
+	struct visit_acc *a = user;
+	a->n++;
+	a->pid = pid;
+	a->value = value;
+	return a->stop_after != 0 && a->n >= a->stop_after;
+}
+
+static MunitResult
+test_reg_put_visit(const MunitParameter p[], void *d)
+{
+	xtc_reg_t *r;
+	xtc_pid_t pa = { 0, 1, 1 }, pb = { 0, 2, 1 }, got;
+	int va = 1, vb = 2, n = -1;
+	struct visit_acc acc;
+	(void)p; (void)d;
+	munit_assert_int(xtc_reg_create(&r), ==, XTC_OK);
+
+	/* A unique name: the second put is XTC_E_EXIST, and the value comes
+	 * back through visit.  whereis still resolves the pid. */
+	munit_assert_int(xtc_reg_put(r, "b1", pa, &va, 0), ==, XTC_OK);
+	munit_assert_int(xtc_reg_put(r, "b1", pb, &vb, 0), ==, XTC_E_EXIST);
+	munit_assert_int(xtc_reg_register(r, "b1", pb), ==, XTC_E_INVAL);
+	memset(&acc, 0, sizeof acc);
+	munit_assert_int(xtc_reg_visit(r, "b1", visit_acc_fn, &acc, &n), ==,
+	    XTC_OK);
+	munit_assert_int(n, ==, 1);
+	munit_assert_true(xtc_pid_eq(acc.pid, pa));
+	munit_assert_ptr_equal(acc.value, &va);
+	munit_assert_int(xtc_reg_whereis(r, "b1", &got), ==, XTC_OK);
+	munit_assert_true(xtc_pid_eq(got, pa));
+
+	/* A miss is XTC_E_NOTFOUND with a count of 0, and fn never runs. */
+	memset(&acc, 0, sizeof acc);
+	munit_assert_int(xtc_reg_visit(r, "nobody", visit_acc_fn, &acc, &n),
+	    ==, XTC_E_NOTFOUND);
+	munit_assert_int(n, ==, 0);
+	munit_assert_int(acc.n, ==, 0);
+
+	/* Removal by any of the existing calls removes the value with it. */
+	munit_assert_int(xtc_reg_unregister(r, "b1"), ==, XTC_OK);
+	munit_assert_int(xtc_reg_visit(r, "b1", visit_acc_fn, &acc, NULL), ==,
+	    XTC_E_NOTFOUND);
+
+	/* Duplicate-key members, each with its own value; the same
+	 * (key, pid) again is idempotent and keeps the first value; a
+	 * nonzero return stops the walk. */
+	munit_assert_int(xtc_reg_put(r, "grp", pa, &va, XTC_REG_DUP), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_reg_put(r, "grp", pb, &vb, XTC_REG_DUP), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_reg_put(r, "grp", pb, &va, XTC_REG_DUP), ==,
+	    XTC_OK);
+	memset(&acc, 0, sizeof acc);
+	munit_assert_int(xtc_reg_visit(r, "grp", visit_acc_fn, &acc, &n), ==,
+	    XTC_OK);
+	munit_assert_int(n, ==, 2);
+	memset(&acc, 0, sizeof acc);
+	acc.stop_after = 1;
+	munit_assert_int(xtc_reg_visit(r, "grp", visit_acc_fn, &acc, &n), ==,
+	    XTC_OK);
+	munit_assert_int(n, ==, 1);
+	munit_assert_int(xtc_reg_drop_pid(r, pb), ==, 1);
+	memset(&acc, 0, sizeof acc);
+	munit_assert_int(xtc_reg_visit(r, "grp", visit_acc_fn, &acc, &n), ==,
+	    XTC_OK);
+	munit_assert_int(n, ==, 1);
+	munit_assert_ptr_equal(acc.value, &va);
+
+	/* Argument checks. */
+	munit_assert_int(xtc_reg_put(r, "x", pa, NULL, 0x80u), ==,
+	    XTC_E_INVAL);
+	munit_assert_int(xtc_reg_put(NULL, "x", pa, NULL, 0), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_reg_visit(r, "x", NULL, NULL, &n), ==,
+	    XTC_E_INVAL);
+	munit_assert_int(n, ==, 0);
+	xtc_reg_destroy(r);
+	return MUNIT_OK;
+}
+
+/*
+ * The lifetime guarantee the value slot exists for: an owner that
+ * removes its entry before freeing the value cannot free it while a
+ * visitor uses it.  One thread puts a fresh heap value, unregisters it
+ * and frees it at once, in a loop; another visits the name and reads
+ * through the value.  Under ASan a visitor that saw a freed value is a
+ * heap-use-after-free; without ASan the value's magic word must always
+ * be intact.  This is the PostgreSQL backend-interrupt pattern
+ * (lookup + use under the registry lock).
+ */
+#define PV_MAGIC 0x5a17c0deu
+struct pv_obj { unsigned magic; unsigned flips; };
+static xtc_reg_t *g_pv_reg;
+static int g_pv_stop, g_pv_bad, g_pv_hits;
+
+static int
+pv_visit_fn(xtc_pid_t pid, void *value, void *user)
+{
+	struct pv_obj *o = value;
+	(void)pid; (void)user;
+	if (o->magic != PV_MAGIC)
+		g_pv_bad++;
+	o->flips++;     /* the "set the interrupt bit" write */
+	g_pv_hits++;
+	return 0;
+}
+
+static void *
+pv_visitor(void *arg)
+{
+	(void)arg;
+	while (!xtc_atomic_load_i32(&g_pv_stop, xtc_mo_acquire))
+		(void)xtc_reg_visit(g_pv_reg, "backend:7", pv_visit_fn, NULL,
+		    NULL);
+	return NULL;
+}
+
+static MunitResult
+test_reg_visit_lifetime(const MunitParameter p[], void *d)
+{
+	__os_thread_t th = {0};
+	xtc_pid_t pa = { 0, 7, 1 };
+	int i;
+	(void)p; (void)d;
+	munit_assert_int(xtc_reg_create(&g_pv_reg), ==, XTC_OK);
+	g_pv_stop = g_pv_bad = g_pv_hits = 0;
+	munit_assert_int(__os_thread_create(&th, pv_visitor, NULL), ==, XTC_OK);
+	for (i = 0; i < 200000; i++) {
+		struct pv_obj *o;
+		o = xtc_malloc(sizeof *o);
+		munit_assert_not_null(o);
+		o->magic = PV_MAGIC;
+		o->flips = 0;
+		munit_assert_int(xtc_reg_put(g_pv_reg, "backend:7", pa, o, 0),
+		    ==, XTC_OK);
+		munit_assert_int(xtc_reg_unregister(g_pv_reg, "backend:7"), ==,
+		    XTC_OK);
+		o->magic = 0;   /* poison, then free: a late visitor sees it */
+		xtc_free(o);
+	}
+	xtc_atomic_store_i32(&g_pv_stop, 1, xtc_mo_release);
+	munit_assert_int(__os_thread_join(&th, NULL), ==, XTC_OK);
+	munit_assert_int(g_pv_bad, ==, 0);
+	munit_logf(MUNIT_LOG_INFO, "visit_lifetime: %d visits", g_pv_hits);
+	xtc_reg_destroy(g_pv_reg);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/reg_basic", test_reg_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reg_collisions", test_reg_collisions, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -503,6 +665,8 @@ static MunitTest tests[] = {
 	{ "/reg_dup_keys", test_reg_dup_keys, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reg_crash_aware", test_reg_crash_aware, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reg_mon_no_silent_loss", test_reg_mon_no_silent_loss, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/reg_put_visit", test_reg_put_visit, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/reg_visit_lifetime", test_reg_visit_lifetime, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10.5/reg", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

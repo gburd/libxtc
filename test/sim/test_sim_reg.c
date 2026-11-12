@@ -89,8 +89,15 @@ con_worker(void *arg)
 	xtc_pid_t got;
 	int rc;
 
-	rc = xtc_reg_register(g_reg, name, self);
-	if (rc == XTC_E_INVAL) {
+	/* Odd workers take the name with xtc_reg_put (2.2), even ones with
+	 * xtc_reg_register, so the at-most-one-holder invariant (and planted
+	 * bug 8, REGDUP) covers both paths.  A taken name is XTC_E_EXIST
+	 * from put and XTC_E_INVAL from register. */
+	if (id & 1)
+		rc = xtc_reg_put(g_reg, name, self, (void *)(intptr_t)(id + 1), 0);
+	else
+		rc = xtc_reg_register(g_reg, name, self);
+	if (rc == ((id & 1) ? XTC_E_EXIST : XTC_E_INVAL)) {
 		/* Name already taken by another fiber -- a legal, expected
 		 * loser; do not touch it.  Yield so a winner can proceed. */
 		xtc_yield();
