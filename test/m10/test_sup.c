@@ -1372,6 +1372,15 @@ test_down_hook_kinds(const MunitParameter p[], void *d)
 	xtc_pid_t pid;
 	(void)p; (void)d;
 
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+	return MUNIT_SKIP;   /* the sanitizer owns SIGSEGV (as test_proc's
+	                      * fault-containment tests) */
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	return MUNIT_SKIP;
+#  endif
+#endif
+
 	munit_assert_int(xtc_fault_guard_install(), ==, XTC_OK);
 	g_hk_n = 0;
 	g_hk_try_add = 1;
@@ -1475,6 +1484,15 @@ test_down_hook_group_restart(const MunitParameter p[], void *d)
 	xtc_pid_t pid;
 	(void)p; (void)d;
 
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+	return MUNIT_SKIP;   /* the sanitizer owns SIGSEGV (as test_proc's
+	                      * fault-containment tests) */
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	return MUNIT_SKIP;
+#  endif
+#endif
+
 	munit_assert_int(xtc_fault_guard_install(), ==, XTC_OK);
 	g_hk_n = 0;
 	g_hk_try_add = 0;
@@ -1506,6 +1524,58 @@ test_down_hook_group_restart(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* The same group-restart reporting without a fault (the sibling killed
+ * by a one_for_all restart, then the stop), so the sanitizer builds,
+ * which skip the fault tests, still run the hook path. */
+static void
+hk_exit5_once(void *a)
+{
+	(void)a;
+	if (xtc_atomic_fetch_add_i32(&g_hk_gen, 1, xtc_mo_relaxed) == 0) {
+		(void)xtc_proc_sleep(10 * NA_MS);
+		(void)xtc_exit_self(5);
+	}
+	for (;;)
+		(void)xtc_proc_sleep(1000 * NA_MS);
+}
+
+static MunitResult
+test_down_hook_group_nofault(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_child_spec_t ch[2] = { XTC_CHILD_SPEC_INIT, XTC_CHILD_SPEC_INIT };
+	xtc_supervisor_t *sup = NULL;
+	const struct hk_rec *r;
+	xtc_pid_t pid;
+	(void)p; (void)d;
+
+	g_hk_n = 0;
+	g_hk_try_add = 0;
+	xtc_atomic_store_i32(&g_hk_gen, 0, xtc_mo_relaxed);
+	ch[0].name = "exiter";  ch[0].fn = hk_exit5_once;
+	ch[1].name = "sibling"; ch[1].fn = hk_park;
+	ch[0].policy = ch[1].policy = XTC_RESTART_PERMANENT;
+	so.strategy = XTC_SUP_ONE_FOR_ALL;
+	so.on_child_down = hk_fn;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_sup_start(loop, &so, ch, 2, &sup), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, hk_stopper, sup, NULL, &pid), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_sup_join(sup, 0), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+
+	munit_assert_not_null(r = hk_find("exiter", 0));
+	munit_assert_int(r->kind, ==, XTC_DOWN_KIND_EXIT);
+	munit_assert_int(r->exit_code, ==, 5);
+	munit_assert_int(r->restarts_at_call, ==, 0);
+	munit_assert_not_null(r = hk_find("sibling", 0));
+	munit_assert_int(r->restarts_at_call, ==, 1);
+	munit_assert_int(g_hk_n, ==, 4);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/add_child_other_loop", test_add_child_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/supervisor_restarts",   test_supervisor_restarts, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1531,6 +1601,8 @@ static MunitTest tests[] = {
 	{ "/down_hook_group_restart", test_down_hook_group_restart, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/down_hook_old_opts", test_down_hook_old_opts, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/down_hook_group_nofault", test_down_hook_group_nofault, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
