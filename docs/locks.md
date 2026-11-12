@@ -198,6 +198,15 @@ slow path; both primitives are within a small constant factor on
 the fast path.  The cost relative to `xtc_lwlock` (section 3) is
 that there is no separation between readers and writers.
 
+The converse holds too: a lock that is never held across a park does
+not need `xtc_amutex_t`.  A critical section that only walks a list
+and sets a bit -- an atomic store, a non-blocking `xtc_proc_wake` --
+cannot block the loop thread, so a plain mutex is correct there, and
+the amutex's park machinery buys nothing.  Write the rule down at the
+lock ("nothing under this lock may park"); if that ever changes,
+convert it.  This is the shape `xtc_reg_visit` relies on: its callback
+runs under the registry's internal lock and must not park.
+
 ### `xtc_notify_t`  --  one-shot signalling
 
 A coroutine-aware condition variable.  The notify object holds

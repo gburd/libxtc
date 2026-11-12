@@ -6,6 +6,51 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## CHANGED (2.2): a DOWN says how the process really ended
+
+Four classification defects, each with a test that failed before:
+
+* A contained fault inside a user recovery frame (`xtc_proc_recovery_arm`
+  returned the signal, the proc cleaned up and called `xtc_exit_self`)
+  reported `XTC_DOWN_KIND_EXIT` with the code it passed -- a crash read as
+  an exit.  It now reports `XTC_DOWN_KIND_SIGNAL` with the fault's signal,
+  whatever code it passes (the DOWN carries one int, so the signal
+  replaces that code).  Re-arming the frame means the proc recovered and
+  carries on; its later exit is classified as usual.  Consequence: a
+  TRANSIENT child that recovers and exits 0 is now restarted.
+* `xtc_exit_self(-1)` reported CLEAN, and `xtc_exit_pid(p, -1)` returned
+  `XTC_OK` and killed nothing: the reason was stored as `reason + 1`, so -1
+  meant "no kill".  Every int is now a deliverable reason.
+* A kill is now `XTC_DOWN_KIND_KILLED` (5, appended), with the kill reason
+  in `exit_code`; it was `EXIT`, indistinguishable from `xtc_exit_self` of
+  the same code.  Supervisor kills (stop, group restart) and link kills
+  are KILLED too.  A consumer that tested `kind == EXIT` for a kill now
+  sees KILLED; a `switch` over the kind needs a `default`.
+* An `xtc_svr` whose `init` fails (and an `xtc_fsm` whose first `enter`
+  fails) ended with a normal return, a CLEAN DOWN: the failure was
+  invisible to a monitor.  It now exits `EXIT(rc)`.  Consequence: a
+  TRANSIENT supervised server with a failing init is restarted (bounded
+  by the restart intensity).
+
+The legacy `xtc_down_decode` `reason` is unchanged except for the first
+item (the signal instead of the passed code) and the second (-1 is now -1).
+
+## CHANGED (2.2): supervisors report child exits; registry entries carry a value
+
+`xtc_sup_opts_t.on_child_down` (appended) is called on the supervisor's
+fiber for every child DOWN, fully classified, before the restart decision
+-- including the siblings a one_for_all / rest_for_one restart kills and
+the children a stop kills.  Before 2.2 a killed sibling's DOWN matched no
+live child and was dropped.  `xtc_sup_add_child` from the supervisor's own
+fiber now returns `XTC_E_STATE` at once instead of waiting 5 s.  A
+supervisor with zero initial children is supported (the man page said it
+was not).
+
+`xtc_reg_put` registers name -> (pid, value); `xtc_reg_visit` hands each
+entry's value to a callback under the registry lock, so a value removed
+before it is freed cannot be freed mid-call.  New error codes
+`XTC_E_EXIST` (-13) and `XTC_E_STATE` (-14).
+
 ## FIXED (2.2): xtc_exec_run could fail to return after the last task finished
 
 The executor's supervisor stops the run when every loop is idle, and
