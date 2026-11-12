@@ -55,6 +55,9 @@ test_strerror_known(const MunitParameter params[], void *data)
 	munit_assert_string_equal(xtc_strerror(XTC_E_ABORTED),  "operation aborted");
 	munit_assert_string_equal(xtc_strerror(XTC_E_NOTFOUND), "requested item does not exist");
 	munit_assert_string_equal(xtc_strerror(XTC_E_IO),       "I/O error");
+	munit_assert_string_equal(xtc_strerror(XTC_E_EXIST),    "already exists");
+	munit_assert_string_equal(xtc_strerror(XTC_E_STATE),
+	    "not allowed in this state or context");
 	return MUNIT_OK;
 }
 

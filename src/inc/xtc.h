@@ -73,7 +73,10 @@ typedef enum xtc_err {
 	XTC_E_VERSION		= -9,	/* version mismatch (shm) */
 	XTC_E_ABORTED		= -10,	/* operation cancelled via abort token */
 	XTC_E_NOTFOUND		= -11,	/* requested item does not exist */
-	XTC_E_IO		= -12	/* I/O error (read/write/fsync failed) */
+	XTC_E_IO		= -12,	/* I/O error (read/write/fsync failed) */
+	XTC_E_EXIST		= -13,	/* already exists (a name is taken); 2.2 */
+	XTC_E_STATE		= -14	/* not allowed in this state or calling
+					 * context; 2.2 */
 } xtc_err_t;
 
 /*

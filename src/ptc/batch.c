@@ -334,7 +334,7 @@ batch_inc_atomic(uint64_t *n)
 static int
 batch_error(int rc)
 {
-	return rc <= XTC_E_INVAL && rc >= XTC_E_IO;
+	return rc <= XTC_E_INVAL && rc >= XTC_E_STATE;
 }
 
 /* Stamp the next group-global handle (0 reserved). Returns 0 on exhaustion

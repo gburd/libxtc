@@ -41,6 +41,8 @@ xtc_strerror(int e)
 	case XTC_E_ABORTED:	return "operation aborted";
 	case XTC_E_NOTFOUND:	return "requested item does not exist";
 	case XTC_E_IO:		return "I/O error";
+	case XTC_E_EXIST:	return "already exists";
+	case XTC_E_STATE:	return "not allowed in this state or context";
 	}
 	return "unknown";
 }
