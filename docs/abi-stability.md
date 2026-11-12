@@ -31,8 +31,11 @@ Versioning is `MAJOR.MINOR.PATCH`.  The intent:
   nothing removed, nothing renamed, no field of a public struct moved or
   resized.  New `XTC_E_*` codes only at the end of the enum; existing
   codes never change value.  New lock modes never inserted in the middle
-  of an enum.  A minor may APPEND a field to a size-first struct (below):
-  that is binary compatible in both directions.
+  of an enum.  New `xtc_down_kind_t` values are appended the same way
+  (2.2 added `XTC_DOWN_KIND_KILLED` = 5), so a consumer's switch over a
+  DOWN's `kind` needs a default.  A minor may APPEND a field to a
+  size-first struct (below): that is binary compatible in both
+  directions.
 - **MAJOR** (`x.0.0`).  Breaking changes allowed: new SONAME, new base
   symbol version.  Cadence is intentionally slow.
 

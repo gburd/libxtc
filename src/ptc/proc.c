@@ -497,6 +497,7 @@ struct xtc_proc {
 	int exit_req; /* the code xtc_exit_self unwinds with */
 	int         exit_reason;
 	int         exit_kind;   /* xtc_down_kind_t: 0 clean, 1 exit, 2 signal */
+	int exit_killed; /* the unwind is the delivery of an xtc_exit_pid */
 	/* -1, or the xtc_down_kind_t the NEXT xtc_exit_self must report,
 	 * set only by __xtc_exit_self_kind.  Lets a proc that stands in for
 	 * something else (the xproc shadow standing in for an OS child) say
@@ -1717,16 +1718,20 @@ __proc_entry(void *arg)
 			kw = __mask_deferred(p);
 		if (kw != 0) {
 			p->exit_reason = __kill_word_reason(kw);
-			p->exit_kind = (p->exit_reason == 0) ? 0 : 1;
+			p->exit_kind = 5; /* XTC_DOWN_KIND_KILLED */
 		}
 	} else {
 		p->exit_reason = p->exit_req;
 		/* xtc_exit_self(0) is a clean exit; any nonzero code is an
 		 * app EXIT status, kept in a field distinct from a signal so
-		 * a monitor never confuses xtc_exit_self(1) with SIGHUP.
-		 * __xtc_exit_self_kind may override that inference. */
+		 * a monitor never confuses xtc_exit_self(1) with SIGHUP.  An
+		 * unwind that delivers an xtc_exit_pid is KILLED, whatever
+		 * the reason.  __xtc_exit_self_kind may override that
+		 * inference. */
 		if (p->exit_kind_override >= 0)
 			p->exit_kind = p->exit_kind_override;
+		else if (p->exit_killed)
+			p->exit_kind = 5; /* XTC_DOWN_KIND_KILLED */
 		else
 			p->exit_kind = (p->exit_reason == 0) ? 0 : 1;
 	}
@@ -2319,6 +2324,7 @@ __xtc_proc_kill_deliver(struct xtc_proc *self)
 			__mask_deferred_set(self, kw); /* latch the kill */
 		return;
 	}
+	self->exit_killed = 1;
 	xtc_exit_self(__kill_word_reason(kw));
 }
 
@@ -3946,7 +3952,7 @@ __xtc_exit_self_kind(int reason, int kind)
 {
 	struct xtc_proc *self = __proc_reanchor(__current_proc);
 	if (self == NULL || !self->exit_jb_set) return XTC_E_INVAL;
-	if (kind < XTC_DOWN_KIND_CLEAN || kind > XTC_DOWN_KIND_NOCONNECTION)
+	if (kind < XTC_DOWN_KIND_CLEAN || kind > XTC_DOWN_KIND_KILLED)
 		return XTC_E_INVAL;
 	self->exit_kind_override = kind;
 	self->exit_req = reason;
@@ -4583,6 +4589,7 @@ __mask_drain(struct xtc_proc *p)
 	kw = __mask_deferred(p);
 	if (kw != 0) {
 		__mask_deferred_set(p, 0);
+		p->exit_killed = 1;
 		xtc_exit_self(__kill_word_reason(kw));
 	}
 }
@@ -5010,6 +5017,9 @@ xtc_down_decode_ex(const void *msg, size_t len, xtc_down_info_t *out)
 	} else if (ek == 2) {
 		info.kind = XTC_DOWN_KIND_SIGNAL;
 		info.signal = info.reason;
+	} else if (ek == 5) {
+		info.kind = XTC_DOWN_KIND_KILLED;
+		info.exit_code = info.reason;
 	} else if (ek == 1) {
 		info.kind = XTC_DOWN_KIND_EXIT;
 		info.exit_code = info.reason;

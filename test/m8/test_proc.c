@@ -692,6 +692,66 @@ test_exit_reason_negative(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+static void
+exit1_plain_child(void *arg)
+{
+	(void)arg;
+	(void)xtc_exit_self(1);
+}
+
+/* Masked across the kill and returns still masked: the kill latched in
+ * mask_deferred is never delivered, and the exit path still reports it. */
+static void
+masked_return_child(void *arg)
+{
+	(void)arg;
+	(void)xtc_mask_enter();
+	(void)xtc_proc_sleep(20LL * 1000 * 1000);
+}
+
+/* A death by xtc_exit_pid is KILLED with the kill's reason in exit_code,
+ * however the kill is delivered; an app's own xtc_exit_self(1) stays
+ * EXIT 1, so a monitor can tell the two apart. */
+static MunitResult
+test_down_kind_killed(const MunitParameter p[], void *d)
+{
+	static const struct {
+		xtc_proc_fn fn;
+		int reason;
+	} kc[] = {
+		{ parked_child, 1 },
+		{ parked_child, 0 },
+		{ parked_child, -1 },
+		{ masked_child, 1 },
+		{ masked_return_child, 3 },
+	};
+	struct down_case dc;
+	size_t i;
+	(void)p;
+	(void)d;
+
+	for (i = 0; i < sizeof kc / sizeof kc[0]; i++) {
+		memset(&dc, 0, sizeof dc);
+		dc.fn = kc[i].fn;
+		dc.kill = 1;
+		dc.kill_reason = kc[i].reason;
+		down_case_run(&dc);
+		munit_assert_int(dc.got, ==, 1);
+		munit_assert_int(dc.di.kind, ==, XTC_DOWN_KIND_KILLED);
+		munit_assert_int(dc.di.exit_code, ==, kc[i].reason);
+		munit_assert_int(dc.di.reason, ==, kc[i].reason);
+		munit_assert_int(dc.di.signal, ==, 0);
+	}
+
+	memset(&dc, 0, sizeof dc);
+	dc.fn = exit1_plain_child;
+	down_case_run(&dc);
+	munit_assert_int(dc.got, ==, 1);
+	munit_assert_int(dc.di.kind, ==, XTC_DOWN_KIND_EXIT);
+	munit_assert_int(dc.di.exit_code, ==, 1);
+	return MUNIT_OK;
+}
+
 /* Infinite-wait recv must PARK (not busy-reschedule): a waiter blocks
  * on xtc_recv(timeout = -1) while a sender, after parking ~120 ms on
  * a timer, sends one message.  The whole run consumes far less CPU
@@ -3240,6 +3300,7 @@ static MunitTest tests[] = {
 	{ "/spawn_rel_needs_proc", test_spawn_rel_needs_proc, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/down_decode_ex",      test_down_decode_ex_exit_vs_signal, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/exit_reason_negative", test_exit_reason_negative, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/down_kind_killed", test_down_kind_killed, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/recv_inf_parks",    test_recv_inf_parks,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/mailbox_stats",     test_mailbox_stats,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/save_queue_cap",    test_save_queue_cap,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

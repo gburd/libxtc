@@ -815,6 +815,52 @@ casts the message to its own unpacked mirror struct misreads the
 fields (the
 .Va reason
 in particular).  Use this helper rather than hand-rolling the layout.
+.Pp
+.Fn xtc_down_decode_ex
+decodes a
+.Sq DOWN
+or a link
+.Sq EXIT
+into an
+.Vt xtc_down_info_t
+whose
+.Va kind
+says how the target ended:
+.Bl -tag -width XTC_DOWN_KIND_NOCONNECTION
+.It Dv XTC_DOWN_KIND_CLEAN
+it returned, or called
+.Fn xtc_exit_self 0 .
+.It Dv XTC_DOWN_KIND_EXIT
+it called
+.Fn xtc_exit_self
+with a nonzero code (negative codes included), found in
+.Va exit_code .
+.It Dv XTC_DOWN_KIND_SIGNAL
+a contained fault, its signal in
+.Va signal .
+.It Dv XTC_DOWN_KIND_NOPROC
+the monitor was registered on a target already gone.
+.It Dv XTC_DOWN_KIND_NOCONNECTION
+the control channel of an
+.Xr xtc_xproc 3
+child died first.
+.It Dv XTC_DOWN_KIND_KILLED
+it was killed by
+.Fn xtc_exit_pid ,
+which is how a supervisor stops and group-restarts its children; the
+kill's reason is in
+.Va exit_code .
+New in 2.2: a consumer built against 2.1 saw such a death as
+.Dv XTC_DOWN_KIND_EXIT ,
+or as
+.Dv XTC_DOWN_KIND_CLEAN
+for a kill with reason 0.
+.El
+.Pp
+.Va reason
+is the single integer
+.Fn xtc_down_decode
+returns, for every kind.
 .Ss Paired cancellation mask
 .Fn xtc_mask_enter
 and

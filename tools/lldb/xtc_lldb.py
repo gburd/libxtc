@@ -355,7 +355,8 @@ def xtc_proc(debugger, command, result, internal_dict):
     print("  state   : %s" % _proc_state(pd), file=result)
     print("  alive   : %d  kill_pending=%d"
           % (_u(pd.GetChildMemberWithName("alive")),
-             _u(pd.GetChildMemberWithName("kill_pending"))), file=result)
+             1 if _u(pd.GetChildMemberWithName("kill_pending")) else 0),
+          file=result)
     print("  mailbox : depth=%d peak=%d cap=%d saved=%d recv=%d drop=%d"
           % (_u(pd.GetChildMemberWithName("mbox_n")),
              _u(pd.GetChildMemberWithName("mbox_peak")),

@@ -14,8 +14,8 @@
  *	smallest accepted.  A DOWN/EXIT message is attacker-shaped data
  *	once it crosses a node boundary (orc/node.c forwards it), so the
  *	decoder must never read past `len` or write past out->size.
- *	Also: on XTC_OK the classified kind is one of the five the header
- *	documents, and EXIT carries exit_code == reason.
+ *	Also: on XTC_OK the classified kind is one of the six the header
+ *	documents, and EXIT and KILLED carry exit_code == reason.
  */
 #include "xtc.h"
 #include "xtc_proc.h"
@@ -51,11 +51,13 @@ main(void)
 		    info->kind == XTC_DOWN_KIND_EXIT ||
 		    info->kind == XTC_DOWN_KIND_SIGNAL ||
 		    info->kind == XTC_DOWN_KIND_NOPROC ||
-		    info->kind == XTC_DOWN_KIND_NOCONNECTION,
-		    "decoded kind is one of the five documented kinds");
-		if (info->kind == XTC_DOWN_KIND_EXIT)
+		    info->kind == XTC_DOWN_KIND_NOCONNECTION ||
+		    info->kind == XTC_DOWN_KIND_KILLED,
+		    "decoded kind is one of the six documented kinds");
+		if (info->kind == XTC_DOWN_KIND_EXIT ||
+		    info->kind == XTC_DOWN_KIND_KILLED)
 			__CPROVER_assert(info->exit_code == info->reason,
-			    "EXIT carries exit_code == reason");
+			    "EXIT and KILLED carry exit_code == reason");
 	}
 	return 0;
 }
