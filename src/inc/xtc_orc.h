@@ -68,6 +68,34 @@ typedef struct xtc_child_spec {
  * and requires every element to carry that same size. */
 #define XTC_CHILD_SPEC_INIT { .size = sizeof(xtc_child_spec_t) }
 
+typedef struct xtc_supervisor xtc_supervisor_t;
+
+/*
+ * A child of the supervisor went DOWN (2.2).  Called on the supervisor's
+ * own fiber, BEFORE the supervisor decides whether to restart that child,
+ * once for each DOWN of a child it owns:
+ *   - a child that crashed, exited or was killed by someone else;
+ *   - a sibling the supervisor itself killed in a one_for_all /
+ *     rest_for_one restart, before that sibling is respawned (its DOWN has
+ *     kind XTC_DOWN_KIND_KILLED or EXIT, by the reason it was killed with);
+ *   - a child killed when the supervisor stops, before the stop completes.
+ * `spec` is the supervisor's copy of the child's spec, borrowed for the
+ * call: spec->name and spec->arg are a per-child identity that survives a
+ * restart (the pid does not).  `info` is the classified DOWN
+ * (xtc_down_decode_ex), borrowed.
+ *
+ * The hook observes; it cannot veto or change the restart.  It runs on the
+ * supervisor, so it must be brief and MUST NOT park (no xtc_recv,
+ * xtc_proc_sleep, blocking I/O, xtc_amutex): setting a flag, an atomic
+ * store, xtc_proc_wake and xtc_sup_stop are fine.  xtc_sup_add_child on
+ * this supervisor returns XTC_E_STATE from inside the hook.  Do not use a
+ * plain xtc_send to forward the DOWN: it honours the target's mailbox cap
+ * and can fail; record what you need and wake the reader instead.
+ */
+typedef void (*xtc_sup_down_fn)(xtc_supervisor_t *sup,
+                                const xtc_child_spec_t *spec,
+                                const xtc_down_info_t *info, void *user);
+
 typedef struct xtc_sup_opts {
 	size_t                 size;             /* sizeof(xtc_sup_opts_t) */
 	xtc_restart_strategy_t strategy;
@@ -83,6 +111,8 @@ typedef struct xtc_sup_opts {
 	                                          * XTC_E_RESOURCE at the cap) --
 	                                          * the simple_one_for_one pool
 	                                          * bound */
+	xtc_sup_down_fn        on_child_down;    /* NULL = none (2.2) */
+	void                  *on_child_down_user;
 } xtc_sup_opts_t;
 
 #define XTC_SUP_OPTS_DEFAULT { \
@@ -93,8 +123,6 @@ typedef struct xtc_sup_opts {
 	.exec         = NULL, \
 	.max_children = 0 \
 }
-
-typedef struct xtc_supervisor xtc_supervisor_t;
 
 /*
  * PUBLIC: int  xtc_sup_start __P((xtc_loop_t *, const xtc_sup_opts_t *, const xtc_child_spec_t *, int, xtc_supervisor_t **));

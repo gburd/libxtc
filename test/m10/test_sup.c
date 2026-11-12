@@ -7,6 +7,7 @@
 
 #include <pthread.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1267,6 +1268,244 @@ test_add_child_keeps_mail(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * on_child_down (2.2).  The embedder's hook sees every child DOWN, fully
+ * classified, before the supervisor decides the restart, keyed by the
+ * spec (a per-child identity the pid is not).  The PostgreSQL embedder's
+ * use: TEMPORARY children whose crash must escalate to a fail-stop.
+ */
+#define HK_MAX 64
+struct hk_rec {
+	const char     *name;
+	xtc_down_kind_t kind;
+	int             signal;
+	int             exit_code;
+	int             restarts_at_call;   /* n_restarts when the hook ran */
+	int             addchild_rc;        /* xtc_sup_add_child from the hook */
+};
+static struct hk_rec g_hk[HK_MAX];
+static int g_hk_n;
+static int g_hk_try_add;
+
+static void
+hk_fn(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
+      const xtc_down_info_t *info, void *user)
+{
+	struct hk_rec *r;
+	(void)user;
+	if (g_hk_n >= HK_MAX)
+		return;
+	r = &g_hk[g_hk_n++];
+	r->name = spec->name;
+	r->kind = info->kind;
+	r->signal = info->signal;
+	r->exit_code = info->exit_code;
+	r->restarts_at_call = xtc_sup_n_restarts(sup);
+	r->addchild_rc = 1;
+	if (g_hk_try_add) {
+		xtc_child_spec_t c = XTC_CHILD_SPEC_INIT;
+		c.name = "never";
+		c.fn = ac_quick;
+		c.policy = XTC_RESTART_TEMPORARY;
+		r->addchild_rc = xtc_sup_add_child(sup, &c, NULL);
+	}
+}
+
+static const struct hk_rec *
+hk_find(const char *name, int nth)
+{
+	int i;
+	for (i = 0; i < g_hk_n; i++)
+		if (strcmp(g_hk[i].name, name) == 0 && nth-- == 0)
+			return &g_hk[i];
+	return NULL;
+}
+
+static void
+hk_clean(void *a)
+{
+	(void)a;
+}
+
+static void
+hk_exit7(void *a)
+{
+	(void)a;
+	(void)xtc_exit_self(7);
+}
+
+static void
+hk_crash(void *a)
+{
+	volatile int *np = NULL;
+	(void)a;
+	*np = 1;   /* contained under the default recovery frame */
+}
+
+static void
+hk_park(void *a)
+{
+	(void)a;
+	for (;;)
+		(void)xtc_proc_sleep(1000 * NA_MS);
+}
+
+static void
+hk_stopper(void *a)
+{
+	(void)xtc_proc_sleep(50 * NA_MS);
+	(void)xtc_sup_stop((xtc_supervisor_t *)a);
+}
+
+/* Four TEMPORARY children -- clean, exit 7, a crash, and one parked until
+ * the supervisor stops -- report CLEAN, EXIT 7, SIGNAL 11 and the stop's
+ * kill, each once, by name; nothing is restarted. */
+static MunitResult
+test_down_hook_kinds(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_child_spec_t ch[4] = { XTC_CHILD_SPEC_INIT, XTC_CHILD_SPEC_INIT,
+	    XTC_CHILD_SPEC_INIT, XTC_CHILD_SPEC_INIT };
+	xtc_supervisor_t *sup = NULL;
+	const struct hk_rec *r;
+	xtc_pid_t pid;
+	(void)p; (void)d;
+
+	munit_assert_int(xtc_fault_guard_install(), ==, XTC_OK);
+	g_hk_n = 0;
+	g_hk_try_add = 1;
+	ch[0].name = "clean";  ch[0].fn = hk_clean;
+	ch[1].name = "exit7";  ch[1].fn = hk_exit7;
+	ch[2].name = "crash";  ch[2].fn = hk_crash;
+	ch[3].name = "parked"; ch[3].fn = hk_park;
+	for (int i = 0; i < 4; i++)
+		ch[i].policy = XTC_RESTART_TEMPORARY;
+	so.on_child_down = hk_fn;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_sup_start(loop, &so, ch, 4, &sup), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, hk_stopper, sup, NULL, &pid), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_sup_join(sup, 0), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+
+	munit_assert_int(g_hk_n, ==, 4);
+	munit_assert_not_null(r = hk_find("clean", 0));
+	munit_assert_int(r->kind, ==, XTC_DOWN_KIND_CLEAN);
+	munit_assert_not_null(r = hk_find("exit7", 0));
+	munit_assert_int(r->kind, ==, XTC_DOWN_KIND_EXIT);
+	munit_assert_int(r->exit_code, ==, 7);
+	munit_assert_not_null(r = hk_find("crash", 0));
+	munit_assert_int(r->kind, ==, XTC_DOWN_KIND_SIGNAL);
+	munit_assert_int(r->signal, ==, SIGSEGV);
+	/* The stop's kill: reported before the stop completed. */
+	munit_assert_not_null(r = hk_find("parked", 0));
+	munit_assert_int(r->kind, !=, XTC_DOWN_KIND_CLEAN);
+	munit_assert_int(r->kind, !=, XTC_DOWN_KIND_SIGNAL);
+	/* Calling into its own supervisor from the hook fails at once
+	 * instead of waiting 5 s on a reply only the hook's fiber sends. */
+	munit_assert_int(g_hk[0].addchild_rc, ==, XTC_E_STATE);
+	g_hk_try_add = 0;
+	return MUNIT_OK;
+}
+
+/* A caller built against 2.1 passes the old, shorter xtc_sup_opts_t: the
+ * library reads only its declared size, so the hook fields beyond it are
+ * NULL and nothing is called.  Garbage past the old size must be ignored. */
+static MunitResult
+test_down_hook_old_opts(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	union { xtc_sup_opts_t o; unsigned char b[sizeof(xtc_sup_opts_t)]; } u;
+	xtc_child_spec_t ch = XTC_CHILD_SPEC_INIT;
+	xtc_supervisor_t *sup = NULL;
+	xtc_pid_t pid;
+	(void)p; (void)d;
+
+	memset(u.b, 0xA5, sizeof u.b);      /* the 2.2 fields hold junk */
+	u.o.size = offsetof(xtc_sup_opts_t, on_child_down);   /* 2.1 size */
+	u.o.strategy = XTC_SUP_ONE_FOR_ONE;
+	u.o.max_restarts = 3;
+	u.o.period_ns = 5LL * 1000 * 1000 * 1000;
+	u.o.exec = NULL;
+	u.o.max_children = 0;
+	g_hk_n = 0;
+	ch.name = "clean";
+	ch.fn = hk_clean;
+	ch.policy = XTC_RESTART_TEMPORARY;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_sup_start(loop, &u.o, &ch, 1, &sup), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, hk_stopper, sup, NULL, &pid), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_sup_join(sup, 0), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+	munit_assert_int(g_hk_n, ==, 0);
+	return MUNIT_OK;
+}
+
+/* PERMANENT one_for_all: a crash reports SIGNAL before the restart it
+ * causes (the restart count is still 0 in the hook), and the sibling the
+ * restart kills is reported too, once, before the replacements run -- the
+ * DOWNs 2.1 dropped. */
+static int g_hk_gen;
+
+static void
+hk_crash_once(void *a)
+{
+	volatile int *np = NULL;
+	(void)a;
+	if (xtc_atomic_fetch_add_i32(&g_hk_gen, 1, xtc_mo_relaxed) == 0) {
+		(void)xtc_proc_sleep(10 * NA_MS);
+		*np = 1;
+	}
+	for (;;)
+		(void)xtc_proc_sleep(1000 * NA_MS);
+}
+
+static MunitResult
+test_down_hook_group_restart(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_child_spec_t ch[2] = { XTC_CHILD_SPEC_INIT, XTC_CHILD_SPEC_INIT };
+	xtc_supervisor_t *sup = NULL;
+	const struct hk_rec *r;
+	xtc_pid_t pid;
+	(void)p; (void)d;
+
+	munit_assert_int(xtc_fault_guard_install(), ==, XTC_OK);
+	g_hk_n = 0;
+	g_hk_try_add = 0;
+	xtc_atomic_store_i32(&g_hk_gen, 0, xtc_mo_relaxed);
+	ch[0].name = "crasher"; ch[0].fn = hk_crash_once;
+	ch[1].name = "sibling"; ch[1].fn = hk_park;
+	ch[0].policy = ch[1].policy = XTC_RESTART_PERMANENT;
+	so.strategy = XTC_SUP_ONE_FOR_ALL;
+	so.on_child_down = hk_fn;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_sup_start(loop, &so, ch, 2, &sup), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, hk_stopper, sup, NULL, &pid), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_sup_join(sup, 0), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+
+	munit_assert_int(xtc_atomic_load_i32(&g_hk_gen, xtc_mo_relaxed), ==, 2);
+	munit_assert_not_null(r = hk_find("crasher", 0));
+	munit_assert_int(r->kind, ==, XTC_DOWN_KIND_SIGNAL);
+	munit_assert_int(r->restarts_at_call, ==, 0);   /* before the restart */
+	munit_assert_not_null(r = hk_find("sibling", 0));
+	munit_assert_int(r->kind, !=, XTC_DOWN_KIND_SIGNAL);
+	munit_assert_int(r->restarts_at_call, ==, 1);   /* in the restart */
+	/* Then the stop kills both replacements: 4 reports in all. */
+	munit_assert_int(g_hk_n, ==, 4);
+	munit_assert_not_null(hk_find("crasher", 1));
+	munit_assert_not_null(hk_find("sibling", 1));
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/add_child_other_loop", test_add_child_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/supervisor_restarts",   test_supervisor_restarts, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1286,6 +1525,12 @@ static MunitTest tests[] = {
 	{ "/killed_sup_stops_children", test_killed_sup_stops_children, NULL,
 	    NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/add_child_keeps_mail", test_add_child_keeps_mail, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/down_hook_kinds", test_down_hook_kinds, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/down_hook_group_restart", test_down_hook_group_restart, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/down_hook_old_opts", test_down_hook_old_opts, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

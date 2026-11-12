@@ -99,6 +99,7 @@ write_cases() {
 		"28;test_sim_launch;0;1;a message queued for the launcher did not survive xtc_launch" \
 		"29;test_sim_aio_migrate;0;1;aio reaper read a released xtc_aio_t" \
 		"30;test_sim_pid_xexec;0;0;MISDELIVERED" \
+		"35;test_sim_sup_strategy;0;1;on_child_down missed deaths" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -139,6 +140,8 @@ write_cases() {
 #               touches an xtc_aio_t after the done store (the frame is dead once a
 #               kill-woken fiber sees done); the kill arm reports the late read
 # 30 PIDEXEC    proc.c mints exec-relative pids -> a pid reaches only its own proc
+# 35 SUP_HOOK_SIBLING sup.c drops the DOWNs of siblings a group restart killed
+#               -> on_child_down sees every child death once, before its respawn
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

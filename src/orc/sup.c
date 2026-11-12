@@ -33,6 +33,12 @@ struct child {
 	uint64_t         monitor_ref;
 	int              alive;
 	int              dynamic;   /* added by xtc_sup_add_child */
+	/* The incarnation the supervisor killed (group restart, stop) whose
+	 * DOWN has not been reported to on_child_down yet.  Its DOWN arrives
+	 * after `alive` is cleared and, for a group restart, may arrive after
+	 * the child is respawned, so it is matched by this pid. */
+	xtc_pid_t        killed_pid;
+	int              killed_pending;
 };
 
 /*
@@ -69,6 +75,7 @@ struct xtc_supervisor {
 	xtc_atomic_pid_t       sup_pid;
 	xtc_notify_t          *stopped;
 	xtc_pid_t             *restart_old;    /* a group restart's snapshot */
+	int                    in_hook;        /* on_child_down is running */
 #if XTC_DST_BUG(XTC_DST_BUG_SUP_LOCKPARK)
 	pthread_mutex_t        plant_lock;     /* 2.1.1's sup->lock shape */
 #endif
@@ -400,6 +407,9 @@ __kill_sibling(struct xtc_supervisor *sup, struct child *c)
 	(void)__xtc_exit_pid_on(__child_loop(sup, c), c->pid, 1);
 }
 
+static void __mark_killed(struct xtc_supervisor *sup, int lo, int hi);
+static void __drain_killed_downs(struct xtc_supervisor *sup);
+
 /* For one_for_all: after a child crash, kill every sibling that's
  * still alive, drain pending DOWN signals, then respawn all in
  * original order. */
@@ -421,6 +431,7 @@ __do_one_for_all(struct xtc_supervisor *sup, int dead_idx)
 	}
 	for (i = 0; i < sup->n_children; i++)
 		old[i] = sup->children[i].pid;
+	__mark_killed(sup, 0, sup->n_children);
 	for (i = 0; i < sup->n_children; i++)
 		if (sup->children[i].alive) __kill_sibling(sup, &sup->children[i]);
 	for (i = 0; i < sup->n_children; i++)
@@ -434,6 +445,13 @@ __do_one_for_all(struct xtc_supervisor *sup, int dead_idx)
 		xtc_atomic_store_i32(&sup->stop_requested, 1, xtc_mo_release);
 		return;
 	}
+	/* The killed siblings' DOWNs, before any of them is respawned.
+	 * Planted bug 35 (SUP_HOOK_SIBLING) skips this and the late match
+	 * in the receive loop: the 2.1 shape, where a killed sibling's DOWN
+	 * matched no live child and was dropped. */
+#if !XTC_DST_BUG(XTC_DST_BUG_SUP_HOOK_SIBLING)
+	__drain_killed_downs(sup);
+#endif
 
 	for (i = 0; i < sup->n_children; i++) {
 		if (__spawn_child(sup, &sup->children[i]) != XTC_OK) {
@@ -461,6 +479,7 @@ __do_rest_for_one(struct xtc_supervisor *sup, int dead_idx)
 	}
 	for (i = dead_idx; i < sup->n_children; i++)
 		old[i] = sup->children[i].pid;
+	__mark_killed(sup, dead_idx + 1, sup->n_children);
 	for (i = sup->n_children - 1; i > dead_idx; i--)
 		if (sup->children[i].alive) __kill_sibling(sup, &sup->children[i]);
 	for (i = dead_idx; i < sup->n_children; i++)
@@ -472,6 +491,9 @@ __do_rest_for_one(struct xtc_supervisor *sup, int dead_idx)
 		xtc_atomic_store_i32(&sup->stop_requested, 1, xtc_mo_release);
 		return;
 	}
+#if !XTC_DST_BUG(XTC_DST_BUG_SUP_HOOK_SIBLING)
+	__drain_killed_downs(sup);
+#endif
 
 	for (i = dead_idx; i < sup->n_children; i++) {
 		if (__spawn_child(sup, &sup->children[i]) != XTC_OK) {
@@ -494,6 +516,89 @@ __find_child_by_pid(struct xtc_supervisor *sup, xtc_pid_t p)
 	return -1;
 }
 
+/* The child whose supervisor-killed incarnation is `p`, or -1. */
+static int
+__find_killed_child(struct xtc_supervisor *sup, xtc_pid_t p)
+{
+	int i;
+	for (i = 0; i < sup->n_children; i++)
+		if (sup->children[i].killed_pending &&
+		    xtc_pid_eq(sup->children[i].killed_pid, p))
+			return i;
+	return -1;
+}
+
+/*
+ * Report one child DOWN to the embedder's on_child_down hook (2.2), once.
+ * Supervisor fiber only.  The hook gets the supervisor's own spec copy;
+ * it must not park (xtc_orc.h), and sup->in_hook makes a same-supervisor
+ * xtc_sup_add_child fail fast instead of waiting on its own mailbox.
+ */
+static void
+__report_down(struct xtc_supervisor *sup, int idx, const xtc_down_info_t *info)
+{
+	if (sup->opts.on_child_down == NULL)
+		return;
+	sup->in_hook = 1;
+	sup->opts.on_child_down(sup, &sup->children[idx].spec, info,
+	    sup->opts.on_child_down_user);
+	sup->in_hook = 0;
+}
+
+/* Mark children [lo, hi) that are alive as about to be killed by the
+ * supervisor, so their DOWNs are reported against the right spec. */
+static void
+__mark_killed(struct xtc_supervisor *sup, int lo, int hi)
+{
+	int i;
+	for (i = lo; i < hi; i++)
+		if (sup->children[i].alive) {
+			sup->children[i].killed_pid = sup->children[i].pid;
+			sup->children[i].killed_pending = 1;
+		}
+}
+
+/* A DOWN ('D') of a child the supervisor killed and has not reported. */
+static int
+__match_killed_down(const void *data, size_t size, void *u)
+{
+	struct xtc_supervisor *sup = u;
+	xtc_down_info_t info = XTC_DOWN_INFO_INIT;
+	if (size < 1 || *(const uint8_t *)data != 'D' ||
+	    xtc_down_decode_ex(data, size, &info) != XTC_OK)
+		return 0;
+	return __find_killed_child(sup, info.pid) >= 0;
+}
+
+/*
+ * Report the DOWNs of supervisor-killed children that are already in the
+ * mailbox (the wait for their cleanup has just finished, and a child
+ * sends its DOWN before it leaves the proc table), without blocking and
+ * leaving every other message queued.  A DOWN not yet here is reported
+ * later from the main loop by the same killed_pid match.
+ */
+static void
+__drain_killed_downs(struct xtc_supervisor *sup)
+{
+	void *msg;
+	size_t sz;
+	xtc_down_info_t info;
+	int idx;
+
+	if (sup->opts.on_child_down == NULL)
+		return;
+	while (xtc_recv_match(__match_killed_down, sup, &msg, &sz, 0) ==
+	    XTC_OK) {
+		info = (xtc_down_info_t)XTC_DOWN_INFO_INIT;
+		(void)xtc_down_decode_ex(msg, sz, &info);
+		__os_free(msg);
+		if ((idx = __find_killed_child(sup, info.pid)) < 0)
+			continue;
+		sup->children[idx].killed_pending = 0;
+		__report_down(sup, idx, &info);
+	}
+}
+
 /*
  * Shut the supervisor down: kill every still-alive child, wait (bounded)
  * for their cleanup, then announce the stop.  An xtc_proc_at_exit hook,
@@ -509,10 +614,8 @@ __find_child_by_pid(struct xtc_supervisor *sup, xtc_pid_t p)
  * __run_proc_at_exit), so the sleeping wait below is not unwound.
  */
 static void
-__sup_exited(void *arg)
+__sup_stop_children(struct xtc_supervisor *sup)
 {
-	struct xtc_supervisor *sup = arg;
-	xtc_exec_t *exec;
 	xtc_pid_t *old = NULL, *rold = sup->restart_old;
 	int k;
 
@@ -537,6 +640,7 @@ __sup_exited(void *arg)
 	    __os_calloc((size_t)sup->n_children, sizeof *old,
 	    (void **)&old) != XTC_OK)
 		old = NULL;             /* no memory: kill, do not wait */
+	__mark_killed(sup, 0, sup->n_children);
 	for (k = 0; k < sup->n_children; k++) {
 		if (old != NULL)
 			old[k] = sup->children[k].alive ? sup->children[k].pid :
@@ -554,6 +658,25 @@ __sup_exited(void *arg)
 		(void)__wait_children_gone(sup, 0, sup->n_children, old);
 		__os_free(old);
 	}
+	/* Children killed by this stop (and by an interrupted group
+	 * restart): report their DOWNs before announcing the stop.  Only a
+	 * live mailbox receives them, so this reports on the body's stop
+	 * path; from the at-exit hook (the supervisor itself was killed) the
+	 * mailbox is closed and the DOWNs are not delivered. */
+	__drain_killed_downs(sup);
+}
+
+static void
+__sup_exited(void *arg)
+{
+	struct xtc_supervisor *sup = arg;
+	xtc_exec_t *exec;
+
+	/* Normally the body has stopped the children already (with its
+	 * mailbox open, so their DOWNs reached on_child_down); this kills
+	 * whatever is still alive when the supervisor proc itself was
+	 * killed or faulted. */
+	__sup_stop_children(sup);
 
 	/*
 	 * `alive` drops only NOW, with the exit complete and `stopped` about
@@ -596,7 +719,7 @@ __sup_entry(void *arg)
 	while (!xtc_atomic_load_i32(&sup->stop_requested, xtc_mo_acquire)) {
 		void *msg; size_t sz;
 		int rc;
-		struct down_signal d;
+		xtc_down_info_t d;
 		int idx;
 		int64_t now;
 		uint8_t kind;
@@ -622,14 +745,36 @@ __sup_entry(void *arg)
 			}
 			continue;
 		}
-		if (kind != 'D' || sz < sizeof d) { __os_free(msg); continue; }
-		memcpy(&d, msg, sizeof d);
+		if (kind != 'D' || sz < sizeof(struct down_signal)) {
+			__os_free(msg);
+			continue;
+		}
+		/* The full classification (kind, signal, exit code), which
+		 * the hook reports; the restart policy still keys on reason. */
+		d = (xtc_down_info_t)XTC_DOWN_INFO_INIT;
+		if (xtc_down_decode_ex(msg, sz, &d) != XTC_OK) {
+			__os_free(msg);
+			continue;
+		}
 		__os_free(msg);
 
 		idx = __find_child_by_pid(sup, d.pid);
-		if (idx < 0)
+		if (idx < 0) {
+			/* A child the supervisor killed, whose DOWN came after
+			 * the drain: report it (once); there is nothing to
+			 * decide, it was already restarted or is stopping. */
+#if !XTC_DST_BUG(XTC_DST_BUG_SUP_HOOK_SIBLING)
+			if ((idx = __find_killed_child(sup, d.pid)) >= 0) {
+				sup->children[idx].killed_pending = 0;
+				__report_down(sup, idx, &d);
+			}
+#endif
 			continue;
+		}
 		__child_alive(sup, &sup->children[idx], 0);
+		/* Before the stop check and the restart decision, so a crash
+		 * during a stop is reported too. */
+		__report_down(sup, idx, &d);
 
 		if (xtc_atomic_load_i32(&sup->stop_requested, xtc_mo_acquire))
 			break;
@@ -678,8 +823,11 @@ __sup_entry(void *arg)
 	}
 
 out:
-	/* No hook (the at-exit table was full): shut down inline; only a
-	 * clean return gets here. */
+	/* Stop the children from the body, while this proc's mailbox still
+	 * takes their DOWNs (it closes when the proc starts exiting), so
+	 * on_child_down sees each of them.  The at-exit hook then finds none
+	 * alive.  No hook (the at-exit table was full): shut down inline. */
+	__sup_stop_children(sup);
 	if (!hooked)
 		__sup_exited(sup);
 }
@@ -829,6 +977,11 @@ xtc_sup_add_child(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
 		return rc;
 	if (xtc_pid_is_none(xtc_self()))
 		return XTC_E_INVAL;     /* must run inside a proc (awaits reply) */
+	/* From the supervisor's own fiber (its on_child_down hook, or a
+	 * child fn the supervisor runs inline -- it runs none) the request
+	 * would wait for a reply only this fiber can send: refuse at once. */
+	if (sup->in_hook || xtc_pid_eq(xtc_self(), __sup_pid_load(sup)))
+		return XTC_E_STATE;
 
 	a.kind = 'A';
 	/* Record (pid, owner): through 2.1 a pid-only reply from the

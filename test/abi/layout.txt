@@ -369,13 +369,15 @@ xtc_slab_stats_t.bytes_total off=72 size=8
 xtc_slab_stats_t.reaps off=80 size=8
 xtc_slab_stats_t.oom_fails off=88 size=8
 xtc_slab_stats_t.redzone_violations off=96 size=8
-xtc_sup_opts_t size=40 align=8
+xtc_sup_opts_t size=56 align=8
 xtc_sup_opts_t.size off=0 size=8
 xtc_sup_opts_t.strategy off=8 size=4
 xtc_sup_opts_t.max_restarts off=12 size=4
 xtc_sup_opts_t.period_ns off=16 size=8
 xtc_sup_opts_t.exec off=24 size=8
 xtc_sup_opts_t.max_children off=32 size=4
+xtc_sup_opts_t.on_child_down off=40 size=8
+xtc_sup_opts_t.on_child_down_user off=48 size=8
 xtc_svr_callbacks_t size=56 align=8
 xtc_svr_callbacks_t.size off=0 size=8
 xtc_svr_callbacks_t.init off=8 size=8

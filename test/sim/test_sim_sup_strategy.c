@@ -26,6 +26,13 @@
  *	    receive loop, so a kill left the children running and alive=1
  *	    (planted as SUP_NOHOOK).
  *
+ *	  - on_child_down (2.2): every child death the supervisor owns is
+ *	    reported to the hook exactly once -- the crashed child, the
+ *	    siblings a one_for_all / rest_for_one restart kills, and the
+ *	    children a stop kills -- and a sibling's report comes before
+ *	    that sibling is respawned.  2.1 dropped a killed sibling's DOWN
+ *	    (planted as SUP_HOOK_SIBLING).
+ *
  *	Each scenario is a pure function of the seed (the crash timing is
  *	drawn from the sim RNG), so a repeated seed reproduces the exact
  *	same spawn counts and supervisor-alive outcome -- the FoundationDB
@@ -55,14 +62,35 @@
 static int g_spawns[N_KIDS];
 static int g_running;        /* kids alive (their exit hook decrements) */
 static int g_join_rc;        /* the scenario's final xtc_sup_join */
+static int g_deaths[N_KIDS]; /* per-slot exits (each child's exit hook) */
+static int g_reports[N_KIDS];/* per-slot on_child_down calls */
+static int g_report_late;    /* a report after its slot's respawn */
 static xtc_pid_t  g_pids[N_KIDS];
 static xtc_supervisor_t *g_sup;
 
 static void
 kid_gone(void *arg)
 {
-	(void)arg;
+	int idx = (int)(intptr_t)arg;
 	xtc_atomic_fetch_sub_i32(&g_running, 1, xtc_mo_seq_cst);
+	xtc_atomic_fetch_add_i32(&g_deaths[idx], 1, xtc_mo_seq_cst);
+}
+
+/* on_child_down: count by slot (spec->arg is the slot -- the per-child
+ * identity), and check the report precedes the slot's next incarnation:
+ * a slot's k-th death is reported while it has had exactly k spawns. */
+static void
+on_down(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
+    const xtc_down_info_t *info, void *user)
+{
+	int idx = (int)(intptr_t)spec->arg;
+	int nth;
+	(void)sup; (void)info; (void)user;
+	if (idx < 0 || idx >= N_KIDS)
+		return;
+	nth = xtc_atomic_fetch_add_i32(&g_reports[idx], 1, xtc_mo_seq_cst) + 1;
+	if (xtc_atomic_load_i32(&g_spawns[idx], xtc_mo_seq_cst) != nth)
+		xtc_atomic_fetch_add_i32(&g_report_late, 1, xtc_mo_seq_cst);
 }
 
 /* A supervised child: record pid, bump my spawn counter, park forever
@@ -73,7 +101,7 @@ kid(void *arg)
 	int idx = (int)(intptr_t)arg;
 	g_pids[idx] = xtc_self();
 	xtc_atomic_fetch_add_i32(&g_spawns[idx], 1, xtc_mo_seq_cst);
-	if (xtc_proc_at_exit(kid_gone, NULL) == XTC_OK)
+	if (xtc_proc_at_exit(kid_gone, arg) == XTC_OK)
 		xtc_atomic_fetch_add_i32(&g_running, 1, xtc_mo_seq_cst);
 	for (;;) {
 		void *m = NULL;
@@ -213,9 +241,12 @@ run_scenario(uint64_t seed, xtc_restart_strategy_t strat,
 
 	for (i = 0; i < N_KIDS; i++) {
 		xtc_atomic_store_i32(&g_spawns[i], 0, xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&g_deaths[i], 0, xtc_mo_seq_cst);
+		xtc_atomic_store_i32(&g_reports[i], 0, xtc_mo_seq_cst);
 		g_pids[i] = (xtc_pid_t){0};
 	}
 	xtc_atomic_store_i32(&g_running, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_report_late, 0, xtc_mo_seq_cst);
 	g_sup = NULL;
 
 	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
@@ -235,6 +266,7 @@ run_scenario(uint64_t seed, xtc_restart_strategy_t strat,
 	opts.max_restarts = max_restarts;
 	opts.period_ns = 1000LL * 1000 * 1000;   /* 1 s window */
 	opts.exec = e;
+	opts.on_child_down = on_down;
 
 	if (xtc_sup_start(xtc_exec_loop(e, 0), &opts, kids, N_KIDS,
 	    &g_sup) != XTC_OK) {
@@ -284,6 +316,31 @@ run_scenario(uint64_t seed, xtc_restart_strategy_t strat,
 }
 
 /* Fingerprint the observable outcome for replay checking. */
+/* Every child death was reported once, and no report came after its
+ * slot's respawn.  Prints the first violation. */
+static int
+hook_ok(uint64_t seed, const char *what)
+{
+	int i;
+	for (i = 0; i < N_KIDS; i++) {
+		int dd = xtc_atomic_load_i32(&g_deaths[i], xtc_mo_seq_cst);
+		int rr = xtc_atomic_load_i32(&g_reports[i], xtc_mo_seq_cst);
+		if (dd != rr) {
+			printf("  seed 0x%016llx: %s: on_child_down missed "
+			       "deaths: slot %d died %d times, reported %d\n",
+			    (unsigned long long)seed, what, i, dd, rr);
+			return 0;
+		}
+	}
+	if (xtc_atomic_load_i32(&g_report_late, xtc_mo_seq_cst) != 0) {
+		printf("  seed 0x%016llx: %s: on_child_down reported %d "
+		       "deaths after the respawn\n", (unsigned long long)seed,
+		    what, xtc_atomic_load_i32(&g_report_late, xtc_mo_seq_cst));
+		return 0;
+	}
+	return 1;
+}
+
 static uint64_t
 fingerprint(int alive, int restarts, uint64_t state, int rc)
 {
@@ -328,6 +385,8 @@ main(int argc, char **argv)
 		/* every child spawned at least twice (initial + restart). */
 		else if (!(s0 >= 2 && s1 >= 2 && s2 >= 2 && s3 >= 2))
 			pass = 0;
+		if (!hook_ok(seed, "one_for_all"))
+			pass = 0;
 
 		/* --- REST_FOR_ONE: crash child 2 -> 2 and 3 restart, 0/1 do
 		 * NOT (they started before the victim). --- */
@@ -341,6 +400,8 @@ main(int argc, char **argv)
 		if (rc != XTC_OK) pass = 0;
 		else if (!(s0 == 1 && s1 == 1 && s2 >= 2 && s3 >= 2))
 			pass = 0;
+		if (!hook_ok(seed, "rest_for_one"))
+			pass = 0;
 
 		/* --- TEMPORARY policy: crashed child is NEVER restarted. --- */
 		rc = run_scenario(seed, XTC_SUP_ONE_FOR_ONE,
@@ -349,6 +410,8 @@ main(int argc, char **argv)
 		s0 = xtc_atomic_load_i32(&g_spawns[0], xtc_mo_seq_cst);
 		if (rc != XTC_OK) pass = 0;
 		else if (s0 != 1) pass = 0;     /* spawned once, never again */
+		if (!hook_ok(seed, "temporary"))
+			pass = 0;
 
 		/* --- TRANSIENT policy + NORMAL exit (reason 0): NO restart. */
 		rc = run_scenario(seed, XTC_SUP_ONE_FOR_ONE,
@@ -416,7 +479,9 @@ main(int argc, char **argv)
 		printf(
 		    "OK: supervisor-strategy DST -- %d seeds, all strategy/"
 		    "policy/intensity invariants hold, a supervisor killed at "
-		    "a seeded step takes its children with it, and replay\n",
+		    "a seeded step takes its children with it, every child "
+		    "death reaches on_child_down once and before its "
+		    "respawn, and replay\n",
 		    n);
 		return 0;
 	}

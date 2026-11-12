@@ -214,4 +214,13 @@
 
 #define XTC_DST_BUG_PIDEXEC 30     /* proc.c: 2.1 exec-relative pids */
 
+/*
+ * 35 SUP_HOOK_SIBLING: a one_for_all / rest_for_one restart never
+ * reports the siblings it killed to on_child_down (their DOWNs match no
+ * live child and are dropped, as every DOWN of a killed sibling was before
+ * 2.2), so the hook misses deaths (test_sim_sup_strategy: "on_child_down
+ * missed").
+ */
+#define XTC_DST_BUG_SUP_HOOK_SIBLING 35
+
 #endif /* XTC_DST_INJECT_H */

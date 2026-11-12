@@ -148,10 +148,11 @@ with
 set, or
 .Dv XTC_E_INVAL
 on bad args
-.Pq notably Fa n_children Em <= 0 ;
-empty supervisors not supported, see
-.Pa examples/06_sqlxtc/main.c
-for a one-listener-child workaround .
+.Pq a negative Fa n_children , No or Fa children No NULL with Fa n_children No > 0 .
+A supervisor with no initial children
+.Pq Fa n_children No == 0
+is supported: children are added later with
+.Fn xtc_sup_add_child .
 .Pp
 .Fn xtc_sup_add_child
 adds one child to a running supervisor from a
@@ -169,6 +170,85 @@ and takes only that reply from the caller's mailbox: other messages,
 monitor DOWNs included, stay queued.
 Before 2.1.2 it read and freed every message that arrived while it
 waited.
+.Pp
+From the supervisor's own fiber (in particular from an
+.Va on_child_down
+hook)
+.Fn xtc_sup_add_child
+returns
+.Er XTC_E_STATE
+at once: the supervisor cannot answer a request while it is the one
+waiting for the answer.
+.Ss Observing child exits
+Set
+.Va opts.on_child_down
+.Pq and optionally Va opts.on_child_down_user ,
+added in 2.2,
+to be told about every child exit:
+.Bd -literal -offset indent
+typedef void (*xtc_sup_down_fn)(xtc_supervisor_t *sup,
+    const xtc_child_spec_t *spec, const xtc_down_info_t *info,
+    void *user);
+.Ed
+.Pp
+The hook runs on the supervisor's fiber, once per DOWN of a child the
+supervisor owns, and
+.Em before
+the supervisor decides whether to restart that child.
+It is called for a child that crashed, exited or was killed by someone
+else; for each sibling a
+.Dv XTC_SUP_ONE_FOR_ALL
+or
+.Dv XTC_SUP_REST_FOR_ONE
+restart kills, before that sibling is respawned; and for each child a
+stop kills, before the stop completes.
+.Fa info
+is the classified DOWN
+.Pq see Fn xtc_down_decode_ex No in Xr xtc_proc 3 :
+.Va info->kind
+tells a crash
+.Pq Dv XTC_DOWN_KIND_SIGNAL , No signal in Va info->signal
+from an exit
+.Pq Dv XTC_DOWN_KIND_EXIT , No code in Va info->exit_code
+from a clean return.
+.Fa spec
+is the supervisor's copy of the child's spec;
+.Va spec->name
+and
+.Va spec->arg
+identify the child across restarts, which its pid does not.
+Both pointers are borrowed for the call.
+.Pp
+The hook observes; it cannot veto or alter the restart.
+It must be brief and must not park
+.Po no
+.Fn xtc_recv ,
+.Fn xtc_proc_sleep ,
+blocking I/O or
+.Vt xtc_amutex
+.Pc :
+recording the event, an atomic store,
+.Fn xtc_proc_wake
+and
+.Fn xtc_sup_stop
+are fine.
+Do not forward the DOWN with a plain
+.Fn xtc_send :
+it honours the receiver's mailbox cap and can fail.
+When the supervisor process itself is killed or faults, the children it
+kills on the way out are not reported: its mailbox is already closed.
+A caller built against an older
+.Vt xtc_sup_opts_t
+passes a smaller
+.Va size ,
+and gets no hook.
+.Pp
+A
+.Dv XTC_RESTART_TEMPORARY
+child with a hook is the way to own a child the embedder must never see
+restarted but must see die: for example, escalating a crash
+.Pq Dv XTC_DOWN_KIND_SIGNAL
+to a process-wide fail-stop while letting a clean exit pass.
 .Pp
 .Fn xtc_sup_stop
 asynchronously requests shutdown.  Children get
