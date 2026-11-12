@@ -211,15 +211,16 @@ __svr_entry(void *arg)
 {
 	struct xtc_svr *s = arg;
 	int hooked;
+	int init_rc = XTC_OK;
 	xtc_atomic_pid_store(&s->pid, xtc_self());
 	hooked = (xtc_proc_at_exit(__svr_exited, s) == XTC_OK);
 
 	if (s->cb.init != NULL) {
-		int rc;
 		__svr_cur = s;
-		rc = s->cb.init(s->state);
+		init_rc = s->cb.init(s->state);
 		__svr_cur = NULL;
-		if (rc != XTC_OK) goto out;
+		if (init_rc != XTC_OK)
+			goto out;
 	}
 	__svr_run_continue(s);   /* init may have armed a continuation */
 
@@ -316,6 +317,11 @@ out:
 	if (s->cb.terminate != NULL) s->cb.terminate(s->state, 0);
 	if (!hooked)
 		__svr_exited(s);
+	/* A failed init ends the server with init's code, so a monitor or
+	 * supervisor sees why it never served (xtc_svr_start returned
+	 * before init ran).  s is gone once the hook ran: use the copy. */
+	if (init_rc != XTC_OK)
+		(void)xtc_exit_self(init_rc);
 }
 
 /* ----- public API ------------------------------------------------ */

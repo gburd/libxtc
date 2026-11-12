@@ -466,11 +466,77 @@ test_fsm_call_keeps_mail(const MunitParameter p[], void *data)
 	return MUNIT_OK;
 }
 
+/* xtc_fsm_start returns before the initial enter() runs, so a failed
+ * enter() is reported by the machine's DOWN: kind EXIT with its code. */
+static int
+nomem_enter(void *st, int old_state, int new_state)
+{
+	(void)st;
+	(void)old_state;
+	(void)new_state;
+	return XTC_E_NOMEM;
+}
+
+struct enter_fail {
+	xtc_loop_t *loop;
+	xtc_fsm_t *fsm;
+	int start_rc;
+	int got;
+	xtc_down_info_t di;
+};
+
+static void
+enter_fail_watcher(void *arg)
+{
+	struct enter_fail *f = arg;
+	xtc_fsm_callbacks_t cb = DOOR_CB;
+	uint64_t ref;
+	void *m = NULL;
+	size_t sz;
+	cb.enter = nomem_enter;
+	/* The machine cannot run before this fiber yields: the monitor is
+	 * in place before enter() does. */
+	f->start_rc =
+	    xtc_fsm_start(f->loop, &cb, NULL, S_CLOSED, NULL, &f->fsm);
+	if (f->start_rc != XTC_OK ||
+	    xtc_monitor(xtc_fsm_pid(f->fsm), &ref) != XTC_OK)
+		return;
+	if (xtc_recv(&m, &sz, 2LL * 1000 * 1000 * 1000) != XTC_OK)
+		return;
+	f->di.size = sizeof f->di;
+	if (xtc_down_decode_ex(m, sz, &f->di) == XTC_OK)
+		f->got = 1;
+	xtc_free(m);
+}
+
+static MunitResult
+test_fsm_enter_fail_exits(const MunitParameter p[], void *data)
+{
+	struct enter_fail f;
+	(void)p;
+	(void)data;
+	memset(&f, 0, sizeof f);
+	munit_assert_int(xtc_loop_init(&f.loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(f.loop, enter_fail_watcher, &f, NULL,
+	                     NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(f.loop), ==, XTC_OK);
+	munit_assert_int(f.start_rc, ==, XTC_OK);
+	munit_assert_int(f.got, ==, 1);
+	munit_assert_int(f.di.kind, ==, XTC_DOWN_KIND_EXIT);
+	munit_assert_int(f.di.exit_code, ==, XTC_E_NOMEM);
+	munit_assert_int(xtc_fsm_join(f.fsm, 0), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(f.loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/fsm_basic", test_fsm_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fsm_state_timeout", test_fsm_state_timeout, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fsm_join_equal_pid_other_loop", test_fsm_join_equal_pid_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fsm_call_keeps_mail", test_fsm_call_keeps_mail, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/fsm_enter_fail_exits", test_fsm_enter_fail_exits, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

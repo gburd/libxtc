@@ -91,6 +91,10 @@ typedef struct xtc_svr_opts {
  * PUBLIC: xtc_svr_call_t *xtc_svr_call_save __P((const xtc_svr_call_t *));
  */
 
+/* Start is asynchronous: xtc_svr_start spawns the server and returns
+ * before init runs.  A failed init runs terminate and ends the server
+ * with xtc_exit_self(init's code): a monitor sees DOWN kind EXIT with
+ * that code (2.2; before, the DOWN was CLEAN). */
 XTC_API int       xtc_svr_start(xtc_loop_t *loop,
                                 const xtc_svr_callbacks_t *cb,
                                 void *state,

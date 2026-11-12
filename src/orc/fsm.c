@@ -202,13 +202,16 @@ fsm_entry(void *arg)
 	struct fsm_run *r = arg;
 	int stop_reason = XTC_FSM_REASON_NORMAL;
 	int running = 1;
+	int init_rc = XTC_OK;
 
 	r->handle->pid = xtc_self();
 
 	/* Initial state entry: enter(initial, initial). */
-	if (r->cb.enter != NULL &&
-	    r->cb.enter(r->state, r->cur_state, r->cur_state) != XTC_OK)
-		running = 0;
+	if (r->cb.enter != NULL) {
+		init_rc = r->cb.enter(r->state, r->cur_state, r->cur_state);
+		if (init_rc != XTC_OK)
+			running = 0;
+	}
 
 	while (running &&
 	    !xtc_atomic_load_i32(&r->handle->stop_requested, xtc_mo_acquire)) {
@@ -272,6 +275,11 @@ fsm_entry(void *arg)
 		r->cb.terminate(r->state, stop_reason);
 	fsm_pq_free(r);
 	__os_free(r);
+	/* A failed initial enter() ends the machine with its code, so a
+	 * monitor or supervisor sees why it never ran (xtc_fsm_start
+	 * returned before enter() did). */
+	if (init_rc != XTC_OK)
+		(void)xtc_exit_self(init_rc);
 }
 
 /* ---- public API ------------------------------------------------- */

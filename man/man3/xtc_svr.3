@@ -70,6 +70,26 @@ Called once at server start.  Returns
 to proceed or any
 .Dv XTC_E_*
 to abort startup.
+Start is asynchronous:
+.Fn xtc_svr_start
+spawns the server and returns before
+.Va init
+runs, so its
+.Dv XTC_OK
+does not mean init succeeded.
+A failed
+.Va init
+runs
+.Va terminate
+and ends the server proc with
+.Fn xtc_exit_self
+of init's code, so a monitor or supervisor sees a DOWN of kind
+.Dv XTC_DOWN_KIND_EXIT
+with that code in
+.Va exit_code
+.Pq for example \-2, Dv XTC_E_NOMEM .
+Before 2.2 the server returned normally and the DOWN was
+.Dv XTC_DOWN_KIND_CLEAN .
 .It Va handle_call
 Invoked on synchronous request from a client.  Must call
 .Fn xtc_svr_reply

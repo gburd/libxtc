@@ -89,6 +89,23 @@ in
 .Pq Fn enter No is called for it first
 and returns a handle in
 .Fa out .
+Start is asynchronous: it returns before that first
+.Fn enter
+runs.
+If the first
+.Fn enter
+fails, the machine runs
+.Fn terminate
+and its proc ends with
+.Fn xtc_exit_self
+of the
+.Fn enter
+code, so a monitor sees a DOWN of kind
+.Dv XTC_DOWN_KIND_EXIT
+with that code in
+.Va exit_code .
+Before 2.2 the proc returned normally and the DOWN was
+.Dv XTC_DOWN_KIND_CLEAN .
 .Fn xtc_fsm_stop
 asks the machine to stop (non-blocking; runs
 .Fn terminate ,

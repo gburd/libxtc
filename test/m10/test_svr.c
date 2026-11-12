@@ -1080,6 +1080,70 @@ test_svr_huge_timeout(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* xtc_svr_start returns before init runs, so a failed init is reported
+ * by the server's DOWN: kind EXIT with init's code. */
+static int
+nomem_init(void *st)
+{
+	(void)st;
+	return XTC_E_NOMEM;
+}
+
+static const xtc_svr_callbacks_t NOMEM_CB = {
+	.size = sizeof(xtc_svr_callbacks_t),
+	.init = nomem_init,
+};
+
+struct init_fail {
+	xtc_loop_t *loop;
+	xtc_svr_t *svr;
+	int start_rc;
+	int got;
+	xtc_down_info_t di;
+};
+
+static void
+init_fail_watcher(void *arg)
+{
+	struct init_fail *f = arg;
+	uint64_t ref;
+	void *m = NULL;
+	size_t sz;
+	/* The server cannot run before this fiber yields: the monitor is
+	 * in place before init does. */
+	f->start_rc = xtc_svr_start(f->loop, &NOMEM_CB, NULL, NULL, &f->svr);
+	if (f->start_rc != XTC_OK ||
+	    xtc_monitor(xtc_svr_pid(f->svr), &ref) != XTC_OK)
+		return;
+	if (xtc_recv(&m, &sz, 2LL * 1000 * 1000 * 1000) != XTC_OK)
+		return;
+	f->di.size = sizeof f->di;
+	if (xtc_down_decode_ex(m, sz, &f->di) == XTC_OK)
+		f->got = 1;
+	xtc_free(m);
+}
+
+static MunitResult
+test_svr_init_fail_exits(const MunitParameter p[], void *d)
+{
+	struct init_fail f;
+	(void)p;
+	(void)d;
+	memset(&f, 0, sizeof f);
+	munit_assert_int(xtc_loop_init(&f.loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(f.loop, init_fail_watcher, &f, NULL,
+	                     NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(f.loop), ==, XTC_OK);
+	munit_assert_int(f.start_rc, ==, XTC_OK);
+	munit_assert_int(f.got, ==, 1);
+	munit_assert_int(f.di.kind, ==, XTC_DOWN_KIND_EXIT);
+	munit_assert_int(f.di.exit_code, ==, XTC_E_NOMEM);
+	munit_assert_int(xtc_svr_join(f.svr, 0), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(f.loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static char *dying_modes[] = { "proc", "thread", NULL };
 static MunitParameterEnum dying_params[] = {
 	{ "caller", dying_modes }, { NULL, NULL }
@@ -1091,6 +1155,7 @@ static MunitTest tests[] = {
 	{ "/call_abortable", test_svr_call_abortable, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/deferred_reply", test_svr_deferred_reply, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/handle_continue", test_svr_handle_continue, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/init_fail_exits", test_svr_init_fail_exits, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/call_off_loop",  test_svr_call_off_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/off_loop_late_reply", test_svr_off_loop_late_reply, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/inproc_late_replies", test_svr_inproc_late_replies, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

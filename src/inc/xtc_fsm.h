@@ -142,7 +142,10 @@ typedef struct xtc_fsm_opts {
  * Start a state machine on `loop`.  It runs as its own xtc_proc,
  * beginning in `initial_state` (for which enter() is called before the
  * first event).  The returned handle lets a caller query/stop/join it
- * from outside.
+ * from outside.  Start is asynchronous: it returns before that first
+ * enter() runs.  If it fails, terminate() runs and the proc ends with
+ * xtc_exit_self(enter's code): a monitor sees DOWN kind EXIT with that
+ * code (2.2; before, the DOWN was CLEAN).
  */
 XTC_API int       xtc_fsm_start(xtc_loop_t *loop,
                                 const xtc_fsm_callbacks_t *cb,
