@@ -19,6 +19,9 @@
 #include <string.h>
 #if !defined(_WIN32)
 #include <signal.h>        /* pthread_sigmask -- block signals on spawned threads */
+#else
+#include <windows.h>       /* SetThreadAffinityMask: MinGW's winpthreads
+                            * <pthread.h> does not pull it in */
 #endif
 #if defined(__FreeBSD__) || defined(__DragonFly__)
 #include <sys/param.h>
