@@ -1691,6 +1691,15 @@ __proc_entry(void *arg)
 		else
 			p->exit_kind = (p->exit_reason == 0) ? 0 : 1;
 	}
+	/* A contained fault resumed into the app's own recovery frame, and
+	 * the frame was not re-armed since: the proc is leaving through its
+	 * recovery path, however it leaves (xtc_exit_self with any code, a
+	 * return, a kill), and that is a crash.  The DOWN carries one int,
+	 * so the fault signal replaces the code the app passed. */
+	if (p->fault_sig != 0) {
+		p->exit_reason = p->fault_sig;
+		p->exit_kind = 2; /* XTC_DOWN_KIND_SIGNAL */
+	}
 	p->recovery_armed = 0;   /* past the body; no more auto-recovery */
 
 proc_exit:
@@ -4150,6 +4159,7 @@ __xtc_proc_recovery_slot(void)
 	struct xtc_proc *p = __current_proc;
 	if (p == NULL)
 		return &__recovery_dummy;
+	p->fault_sig = 0; /* re-armed: the proc left its recovery path */
 	p->recovery_armed = 1;
 	return &p->recovery_buf;
 }
@@ -4167,6 +4177,7 @@ __xtc_recovery_prep(void)
 	if (p == NULL)
 		return;
 	p->recovery_fired = 0;
+	p->fault_sig = 0; /* re-armed: the proc left its recovery path */
 	p->recovery_armed = 1;
 }
 

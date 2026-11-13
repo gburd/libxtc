@@ -10,6 +10,7 @@
  * monitor -- the other proc on the loop never notices.  Exit 0 = the
  * fault was contained and all the post-conditions hold.
  */
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -109,7 +110,9 @@ main(void)
 		printf("FAIL: tracked fd was not closed (double close succeeded)\n"); return 1;
 	}
 	if (!g_saw_down)     { printf("FAIL: monitor did not observe DOWN\n"); return 1; }
-	if (g_reason != FLT_REASON) { printf("FAIL: DOWN reason=%d\n", g_reason); return 1; }
+	/* The recovery path exits with FLT_REASON, but a contained crash is
+	 * reported as one: the DOWN carries the signal. */
+	if (g_reason != SIGSEGV) { printf("FAIL: DOWN reason=%d\n", g_reason); return 1; }
 
 	printf("OK: Windows VEH contained the access violation; recovery "
 	       "registry released fd+callback; monitor saw DOWN(reason=%d)\n",
