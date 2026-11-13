@@ -44,6 +44,8 @@
 
 /* io_net.c: the recovery close of a socket xtc_net charged. */
 int __xtc_net_close_charged(int fd);
+/* blocking.c: wait out the loop's fibers parked in xtc_blocking_run. */
+void __xtc_blocking_loop_fini(xtc_loop_t *loop);
 
 /*
  * The exit unwind (xtc_exit_self -> __proc_entry).  glibc 2.44 changed
@@ -1021,6 +1023,10 @@ __xtc_proc_loop_unregister(xtc_loop_t *loop)
 	struct xtc_proc_slot *slots;
 	size_t k, cap;
 
+	/* Before anything of the loop is torn down: a pool worker still
+	 * running a parked fiber's offload writes into that fiber's frame
+	 * and wakes its task when it finishes. */
+	__xtc_blocking_loop_fini(loop);
 	(void) __proc_mtx_lock(&__lt_lock);
 	tbl = __lt_remove_locked(loop);
 	(void) __proc_mtx_unlock(&__lt_lock);

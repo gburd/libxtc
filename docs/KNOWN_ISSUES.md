@@ -109,6 +109,20 @@ charged with `xtc_net_close`, which refunds the unit; any other fd is
 closed as before.  `/m7/res_meter/net_recovery_close` fails on 2.1.2
 (1 unit still charged) and passes on 2.1.3.
 
+## FIXED (2.1.3): finalizing a loop freed fibers parked in xtc_blocking_run
+
+`xtc_blocking_run` keeps its work item on the parked fiber's stack; the
+pool worker writes the result there and wakes the fiber's task when `fn`
+returns.  `xtc_loop_fini` (and so `xtc_exec_fini` and `xtc_app_destroy`)
+freed the tasks and stacks of every fiber still on the loop without
+looking at the pool, so a fiber parked in `xtc_blocking_run` was freed
+under the worker: the result store and the wake landed in freed memory
+(AddressSanitizer: heap-use-after-free in `xtc_waker_wake`).  The
+finalize now waits until no fiber of the loop is parked on the pool, so
+it can take as long as the loop's longest offload; nothing is cancelled.
+`/m9/blocking/loop_fini_waits` fails on 2.1.2 (`xtc_loop_fini` returned
+with `fn` still running) and passes on 2.1.3.
+
 ## FIXED (2.1.2): a cross-shard xtc_tnt_send could lose messages
 
 **What it was.**  Through 2.1.1 an `xtc_tnt_send` to an Isolate on

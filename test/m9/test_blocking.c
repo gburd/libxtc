@@ -233,6 +233,65 @@ test_file_offload(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- loop teardown with a fiber parked on the pool ----
+ * The loop is stopped and finalized while a fiber waits in
+ * xtc_blocking_run.  fn writes into that fiber's frame when it returns,
+ * and the pool then wakes the fiber's task, so xtc_loop_fini must not
+ * free either before fn is done.  Through 2.1.2 it did not wait: fn and
+ * the wake landed in freed memory (ASan: heap-use-after-free in
+ * xtc_waker_wake), and xtc_loop_fini returned with fn still running. */
+static _Atomic int g_fini_fn_done;
+
+static int
+fini_slow_fn(void *arg)
+{
+	struct timespec ts = { 0, 200 * 1000000L };
+	(void)nanosleep(&ts, NULL);
+	*(volatile int *)arg = 42;
+	atomic_store_explicit(&g_fini_fn_done, 1, memory_order_seq_cst);
+	return 0;
+}
+
+static void
+fini_parker(void *arg)
+{
+	int in_frame = 0;
+	int out = -1;
+	(void)arg;
+	(void)xtc_blocking_run(fini_slow_fn, &in_frame, &out);
+}
+
+static void
+fini_stopper(void *arg)
+{
+	(void)xtc_proc_sleep(30LL * 1000 * 1000);
+	(void)xtc_loop_stop(arg);
+}
+
+static MunitResult
+test_loop_fini_waits(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	(void)p;
+	(void)d;
+
+	atomic_store_explicit(&g_fini_fn_done, 0, memory_order_seq_cst);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, fini_parker, NULL, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, fini_stopper, loop, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load_explicit(&g_fini_fn_done,
+	                     memory_order_seq_cst),
+	    ==, 0);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load_explicit(&g_fini_fn_done,
+	                     memory_order_seq_cst),
+	    ==, 1);
+	return MUNIT_OK;
+}
+
 /* ---- clean shutdown (and restart) ---- */
 static MunitResult
 test_shutdown(const MunitParameter p[], void *d)
@@ -579,6 +638,7 @@ static MunitTest tests[] = {
 	{ "/pool_size",  test_pool_size,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/file_offload", test_file_offload,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/shutdown",   test_shutdown,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/loop_fini_waits", test_loop_fini_waits, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = {
