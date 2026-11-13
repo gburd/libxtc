@@ -34,13 +34,14 @@ import argparse
 MAGIC = 0x5854434C          # "XTCL"
 FLAG_LE = 1
 
-SOURCES = {1: "SCHED", 2: "MSG", 4: "IO", 8: "OS"}
+SOURCES = {1: "SCHED", 2: "MSG", 4: "IO", 8: "OS", 16: "APP"}
 KINDS = {
     0: "SPAWN", 1: "EXIT", 2: "WAKE", 3: "RUN", 4: "PARK",
     5: "SEND", 6: "RECV", 7: "MBOX_HWM", 8: "LOOP_POLL",
     9: "PARK_TASK", 10: "REAP", 11: "SUBMIT", 12: "SUBMIT_FAIL",
     13: "POLL_FULL",
     14: "LIFECYCLE_DROP",
+    15: "LABEL",
 }
 # detail-field meaning per kind, for the human column
 DETAIL = {
@@ -104,6 +105,9 @@ class Event:
 
     @property
     def kind_name(self):
+        # An APP event's kind is the application's own number.
+        if self.source == 16:
+            return "APP%d" % self.kind
         return KINDS.get(self.kind, "?%d" % self.kind)
 
 

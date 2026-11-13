@@ -607,6 +607,157 @@ test_tail_reap(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * Application events and a foreign thread's identity (davros report 03).
+ * A plain "device" thread registers, names an app kind, records step
+ * begin/end around a send to a proc; the proc receives it.  The tail must
+ * hold the two APP records under the thread's pseudo-pid, a SPAWN of
+ * that pid, and a LABEL from the proc; xtc_trace must show the thread as
+ * the SEND's self and the RECV's peer, which was XTC_PID_NONE.  The
+ * dial9 dump must carry the proc's name, the label and the kind's name.
+ */
+#include "xtc_trace.h"
+
+static xtc_pid_t g_app_rx, g_app_dev;
+static int g_app_rc[6];
+
+static void
+app_rx(void *a)
+{
+	void *m = NULL;
+	size_t n = 0;
+	(void)a;
+	(void)xtc_proc_set_label("req-42");
+	if (xtc_recv(&m, &n, 2000LL * 1000 * 1000) == XTC_OK)
+		free(m);
+}
+
+static void *
+app_device(void *a)
+{
+	(void)a;
+	g_app_rc[0] = xtc_thread_register("device", &g_app_dev);
+	g_app_rc[1] = xtc_tail_app_name(3, "step");
+	g_app_rc[2] = xtc_tail_app(3, 1); /* step began */
+	g_app_rc[3] = xtc_send(g_app_rx, "done", 5);
+	g_app_rc[4] = xtc_tail_app(3, 2); /* step ended */
+	g_app_rc[5] = xtc_tail_app(XTC_TAIL_APP_KIND_MAX + 1, 0);
+	return NULL;
+}
+
+struct app_seen {
+	int app, spawn_dev, label, send_from_dev, recv_from_dev;
+};
+
+static int
+app_tail_cb(const xtc_tail_rec_t *r, void *user)
+{
+	struct app_seen *s = user;
+	if (r->source == XTC_TAIL_APP && r->kind == 3 &&
+	    xtc_pid_eq(r->pid, g_app_dev))
+		s->app++;
+	if (r->source == XTC_TAIL_SCHED && r->kind == XTC_TAIL_SPAWN &&
+	    xtc_pid_eq(r->pid, g_app_dev))
+		s->spawn_dev++;
+	if (r->source == XTC_TAIL_SCHED && r->kind == XTC_TAIL_LABEL &&
+	    xtc_pid_eq(r->pid, g_app_rx))
+		s->label++;
+	return 0;
+}
+
+static int
+app_trace_cb(const xtc_trace_rec_t *r, void *user)
+{
+	struct app_seen *s = user;
+	if (r->kind == XTC_TRACE_SEND && xtc_pid_eq(r->self, g_app_dev) &&
+	    xtc_pid_eq(r->peer, g_app_rx))
+		s->send_from_dev++;
+	if (r->kind == XTC_TRACE_RECV && xtc_pid_eq(r->self, g_app_rx) &&
+	    xtc_pid_eq(r->peer, g_app_dev))
+		s->recv_from_dev++;
+	return 0;
+}
+
+/* Find needle in the n-byte dump (it holds NULs and binary). */
+static int
+mem_has(const uint8_t *hay, size_t n, const char *needle)
+{
+	size_t k = strlen(needle), i;
+	for (i = 0; i + k <= n; i++)
+		if (memcmp(hay + i, needle, k) == 0)
+			return 1;
+	return 0;
+}
+
+static MunitResult
+test_tail_app_foreign(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
+	struct app_seen seen;
+	pthread_t th;
+	xtc_pid_t self_pid;
+	int fds[2], i;
+	static uint8_t buf[1 << 20];
+	size_t got = 0;
+	ssize_t r;
+	(void)p;
+	(void)d;
+
+	(void)xtc_tail_reset();
+	(void)xtc_trace_reset();
+	(void)xtc_tail_enable(XTC_TAIL_SCHED | XTC_TAIL_APP);
+	(void)xtc_trace_enable(1);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	o.name = "engine";
+	munit_assert_int(xtc_proc_spawn(loop, app_rx, NULL, &o, &g_app_rx), ==,
+	    XTC_OK);
+	munit_assert_int(pthread_create(&th, NULL, app_device, NULL), ==, 0);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)pthread_join(th, NULL);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	(void)xtc_trace_enable(0);
+
+	for (i = 0; i < 5; i++)
+		munit_assert_int(g_app_rc[i], ==, XTC_OK);
+	munit_assert_int(g_app_rc[5], ==, XTC_E_INVAL);
+	munit_assert_uint(g_app_dev.loop_id, ==, XTC_LOOP_FOREIGN);
+	munit_assert_uint(g_app_dev.gen, ==, 1);
+	/* The identity names the sender; it reaches nothing. */
+	munit_assert_int(xtc_send(g_app_dev, "x", 2), ==, XTC_E_INVAL);
+
+	memset(&seen, 0, sizeof seen);
+	munit_assert_int(xtc_tail_read(app_tail_cb, &seen), ==, XTC_OK);
+	munit_assert_int(seen.app, ==, 2);
+	munit_assert_int(seen.spawn_dev, ==, 1);
+	munit_assert_int(seen.label, ==, 1);
+	(void)xtc_trace_dump(app_trace_cb, &seen);
+	munit_assert_int(seen.send_from_dev, ==, 1);
+	munit_assert_int(seen.recv_from_dev, ==, 1);
+
+	/* The dial9 dump carries the names as pooled strings. */
+	munit_assert_int(pipe(fds), ==, 0);
+	munit_assert_int(xtc_tail_dump_dial9(fds[1]), ==, XTC_OK);
+	(void)close(fds[1]);
+	while ((r = read(fds[0], buf + got, sizeof buf - got)) > 0)
+		got += (size_t)r;
+	(void)close(fds[0]);
+	munit_assert_true(mem_has(buf, got, "XtcAppEvent"));
+	munit_assert_true(mem_has(buf, got, "XtcLabelEvent"));
+	munit_assert_true(mem_has(buf, got, "engine"));
+	munit_assert_true(mem_has(buf, got, "device"));
+	munit_assert_true(mem_has(buf, got, "req-42"));
+	munit_assert_true(mem_has(buf, got, "step"));
+
+	/* A proc cannot register; a second registration is the same pid. */
+	munit_assert_int(xtc_thread_register("again", &self_pid), ==, XTC_OK);
+	munit_assert_int(xtc_thread_register("again", NULL), ==, XTC_OK);
+	munit_assert_uint(self_pid.loop_id, ==, XTC_LOOP_FOREIGN);
+	munit_assert_false(xtc_pid_eq(self_pid, g_app_dev));
+	xtc_tail_disable();
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/sched",        test_tail_sched,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/disabled",     test_tail_disabled,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -616,6 +767,7 @@ static MunitTest tests[] = {
 	{ "/park_fd",      test_tail_park_fd,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/park_fd_off",  test_tail_park_fd_disabled, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reap",         test_tail_reap,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/app_foreign",  test_tail_app_foreign,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m12/tail", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

@@ -145,6 +145,17 @@ dump_proc_cb(const xtc_proc_info_t *pi, void *user)
 	    pi->mask_deferred ? " WEDGED(kill-deferred)" :
 	        (pi->mask_depth ? " MASKED" : ""),
 	    pi->alive ? "" : " DEAD");
+	/* 2.2: the critical-section depth, the spawn name and the label on
+	 * an indented line under it, only when one is set, so the state line
+	 * (which tools parse) reads as it did. */
+	if (pi->crit_depth != 0)
+		dump_fmt(fd, "    crit=%u", pi->crit_depth);
+	if (pi->name[0] != '\0')
+		dump_fmt(fd, "    name=%s", pi->name);
+	if (pi->label[0] != '\0')
+		dump_fmt(fd, "    label=%s", pi->label);
+	if (pi->crit_depth != 0 || pi->name[0] != '\0' || pi->label[0] != '\0')
+		dump_str(fd, "\n");
 
 	/* A3 async causal trace: splice "how did this fiber get here" --
 	 * the recent park/resume chain -- onto the state line above, when

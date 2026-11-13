@@ -53,6 +53,19 @@ typedef struct xtc_pid {
 
 #define XTC_PID_NONE ((xtc_pid_t){0, 0, 0})
 
+/*
+ * The loop_id of a plain thread's identity (xtc_thread_register, 2.2).
+ * No loop has this id (xtc_loop_init stops below it), so such a pid
+ * reaches no proc: it only names the sender of that thread's messages
+ * and trace events.
+ */
+#define XTC_LOOP_FOREIGN 0xFFFFFFFEu
+
+/* The bounds of a proc's name and label as introspection reports them
+ * (xtc_proc_info_t), NUL included: longer strings are truncated. */
+#define XTC_PROC_NAME_MAX  32
+#define XTC_PROC_LABEL_MAX 64
+
 static inline int
 xtc_pid_eq(xtc_pid_t a, xtc_pid_t b)
 {
@@ -99,7 +112,9 @@ typedef void (*xtc_proc_fn)(void *arg);
 
 typedef struct xtc_proc_opts {
 	size_t      size;          /* sizeof(xtc_proc_opts_t): XTC_PROC_OPTS_INIT */
-	const char *name;          /* optional, for debug */
+	const char *name;          /* optional: xtc_proc_info, xtc_dump and
+	                            * the tail SPAWN event show it (copied,
+	                            * up to XTC_PROC_NAME_MAX - 1 bytes) */
 	size_t      mailbox_cap;   /* 0 = default */
 	/* Mailbox watermark: when an accepted message brings the depth to
 	 * this percent of mailbox_cap (1..100; 0 = disabled), the callback
@@ -169,6 +184,8 @@ typedef struct xtc_mailbox_stats {
  * PUBLIC: int   xtc_proc_set_userdata __P((void *));
  * PUBLIC: void *xtc_proc_userdata __P((void));
  * PUBLIC: int   xtc_proc_set_class __P((xtc_exec_class_t));
+ * PUBLIC: int   xtc_proc_set_label __P((const char *));
+ * PUBLIC: int   xtc_thread_register __P((const char *, xtc_pid_t *));
  * PUBLIC: int       xtc_send __P((xtc_pid_t, const void *, size_t));
  * PUBLIC: int       xtc_send_owned __P((xtc_pid_t, void *, size_t));
  * PUBLIC: int       xtc_recv __P((void **, size_t *, int64_t));
@@ -376,6 +393,29 @@ XTC_API void      xtc_atomic_pid_store(xtc_atomic_pid_t *a, xtc_pid_t p);
  * off a proc.
  */
 XTC_API int   xtc_proc_set_userdata(void *ud);
+
+/*
+ * Label the CALLING proc with what it is serving now ("chatcmpl-abc123"),
+ * shown wherever its name is: xtc_proc_info_t.label, xtc_dump, and an
+ * XTC_TAIL_LABEL tail event.  Copied, up to XTC_PROC_LABEL_MAX - 1
+ * bytes; NULL or "" clears it.  Set it as often as you like.  XTC_OK, or
+ * XTC_E_INVAL off a proc.
+ */
+XTC_API int   xtc_proc_set_label(const char *label);
+
+/*
+ * Give the calling plain thread (not a proc: one with no loop, such as
+ * a device worker) an identity: a pseudo-pid {XTC_LOOP_FOREIGN, n, 1}
+ * in *out_pid (out_pid may be NULL).  From then on the thread's
+ * xtc_send carries it as the sender (an xtc_trace SEND/RECV peer, the
+ * tail's records), and xtc_tail_app records it as the pid, so the hop
+ * from that thread joins the traces.  `name` goes to the tail as a SPAWN
+ * of that pid.  The pid reaches no proc: a send to it fails with
+ * XTC_E_INVAL.  xtc_self() stays XTC_PID_NONE on the thread.  Calling it
+ * again returns the same pid.  XTC_OK, XTC_E_STATE on a proc, or
+ * XTC_E_RESOURCE after 2^32 registrations.
+ */
+XTC_API int   xtc_thread_register(const char *name, xtc_pid_t *out_pid);
 XTC_API void *xtc_proc_userdata(void);
 
 /*

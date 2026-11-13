@@ -13,7 +13,9 @@
 .Nm xtc_tail_from_env ,
 .Nm xtc_tail_spill_dial9 ,
 .Nm xtc_tail_count ,
-.Nm xtc_tail_dropped
+.Nm xtc_tail_dropped ,
+.Nm xtc_tail_app ,
+.Nm xtc_tail_app_name
 .Nd runtime microscope (individual scheduler-event recording)
 .Sh LIBRARY
 .Lb libxtc
@@ -39,6 +41,10 @@
 .Fn xtc_tail_count "void"
 .Ft uint64_t
 .Fn xtc_tail_dropped "void"
+.Ft int
+.Fn xtc_tail_app "unsigned kind" "uint64_t detail"
+.Ft int
+.Fn xtc_tail_app_name "unsigned kind" "const char *name"
 .Sh DESCRIPTION
 .Nm xtc_tail
 is a runtime microscope: it records every INDIVIDUAL runtime event,
@@ -61,11 +67,68 @@ turns on the named event sources -- a bitwise OR of
 (proc spawn / exit / wake / run),
 .Dv XTC_TAIL_MSG
 (message send / receive / mailbox depth high-water),
+.Dv XTC_TAIL_APP
+(the application's own events, below),
 .Dv XTC_TAIL_IO ,
 and
 .Dv XTC_TAIL_OS
-(the latter two reserved for the staged build-out).  The mask REPLACES
+(the latter two reserved).  The mask REPLACES
 the current one and the previous mask is returned.
+.Pp
+.Fn xtc_tail_app
+records an application event: a batched step began or ended, a request
+was admitted or finished, whatever explains the scheduler events around
+it.
+.Fa kind
+is the application's own number, 0 to
+.Dv XTC_TAIL_APP_KIND_MAX
+(255), and
+.Fa detail
+is free for it; the record's source is
+.Dv XTC_TAIL_APP
+and its pid the caller: its proc, its
+.Fn xtc_thread_register
+.Pq Xr xtc_proc 3
+pseudo-pid, or
+.Dv XTC_PID_NONE
+from an unregistered thread.
+It may be called from any thread, and costs one relaxed load when
+.Dv XTC_TAIL_APP
+is off.
+.Fn xtc_tail_app_name
+names a kind (copied, up to 31 bytes;
+.Dv NULL
+clears it).
+Both return
+.Dv XTC_OK ,
+or
+.Dv XTC_E_INVAL
+for a kind above the maximum.
+.Pp
+Since 2.2 a SPAWN record carries the proc's name
+.Pq Va xtc_proc_opts_t.name
+or the registered thread's, and
+.Fn xtc_proc_set_label
+records an
+.Dv XTC_TAIL_LABEL
+event carrying the label.
+The strings are not in
+.Vt xtc_tail_rec_t ,
+whose layout is fixed:
+.Fn xtc_tail_dump_dial9
+writes them as pooled strings (a SPAWN's name as its
+.Va spawn_loc ,
+which the viewer shows as the task's origin; a label as an
+.Li XtcLabelEvent ) ,
+and an application event as an
+.Li XtcAppEvent
+with fields
+.Va kind ,
+.Va name
+(its
+.Fn xtc_tail_app_name )
+and
+.Va detail .
 .Fn xtc_tail_disable
 turns off all recording.
 .Fn xtc_tail_reset
@@ -206,12 +269,14 @@ are PRESENT remain valid regardless.
 .Fn xtc_tail_disable
 returns no value.
 .Sh NOTES
-Phase 1 implements the SCHED source (proc spawn / exit / park / run with
-park-to-run latency) and the MSG source (send / receive / mailbox-depth
-high-water), the in-process read, and the compact portable binary dump.
-The IO and OS sources, an on-disk spill with rotation, and the offline
-viewer are staged follow-ons; the record layout and the source mask are
-stable so they extend the format without a break.
+Implemented: the SCHED source (proc spawn / exit / park / run with
+park-to-run latency, and the loop, submit and reap events below), the
+MSG source (send / receive / mailbox-depth high-water), the APP source,
+the in-process read, the compact portable binary dump (read by
+.Pa tools/xtc-tail.py ) ,
+the dial9 dump, and spill to a directory.
+The IO and OS sources are reserved; the record layout and the source
+mask are stable so they extend the format without a break.
 .Pp
 Which parks are recorded, precisely, because the coverage is not uniform:
 a
@@ -458,4 +523,11 @@ xtc_tail_disable();
 .Xr xtc_stats 3 ,
 .Xr xtc_trace 3 ,
 .Xr xtc_inspect 3 ,
+.Xr xtc_proc 3 ,
 .Xr xtc 7
+.Sh HISTORY
+.Fn xtc_tail_app ,
+.Fn xtc_tail_app_name ,
+.Dv XTC_TAIL_APP ,
+.Dv XTC_TAIL_LABEL
+and the names in SPAWN records appeared in xtc 2.2.

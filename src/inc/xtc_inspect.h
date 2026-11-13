@@ -90,6 +90,20 @@ typedef struct xtc_proc_info {
 	uint64_t  mbox_recv_total;  /* messages ever accepted */
 	uint64_t  mbox_drop_total;  /* messages ever rejected (full/dead) */
 	size_t    stack_size;       /* fiber stack bytes (opts or default); 2.2 */
+	/*
+	 * 2.2 (check XTC_FIELD_OK before reading).  crit_depth is the
+	 * xtc_proc_critical_enter nesting depth: a fault inside one is not
+	 * contained.  A proc that stays at crit_depth > 0 is the wedge a
+	 * watchdog looks for.  Sampled like mask_depth.  name is the
+	 * xtc_proc_opts_t.name the proc was spawned with (an
+	 * xtc_child_spec_t.name for a supervised child), label the last
+	 * xtc_proc_set_label; both truncated and NUL-terminated, "" when
+	 * unset.  A label being rewritten while it is read can come out as
+	 * a mix of the two.
+	 */
+	unsigned crit_depth;
+	char name[XTC_PROC_NAME_MAX];
+	char label[XTC_PROC_LABEL_MAX];
 } xtc_proc_info_t;
 
 /* Set before xtc_proc_info(); the library writes at most .size bytes.  An

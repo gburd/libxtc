@@ -443,6 +443,18 @@ as in the debugger view:
     }
     xtc_inspect_procs(show, NULL);
 
+Since 2.2 the snapshot also names the proc: `info.name` is the
+`xtc_proc_opts_t.name` it was spawned with (a supervised child's
+`xtc_child_spec_t.name`), `info.label` the last `xtc_proc_set_label` it
+made ("chatcmpl-abc123", say, once a request proc knows what it serves),
+and `info.crit_depth` its `xtc_proc_critical_enter` depth, so "engine
+inside a critical section for 2 s" is visible from outside.  Check
+`XTC_FIELD_OK(p, crit_depth)` first if the program may run on an older
+library.  A plain thread that sends to procs (a device worker) can take
+an identity with `xtc_thread_register`, which makes it the sender of its
+messages in `xtc_trace` and the pid of its `xtc_tail_app` events instead
+of `XTC_PID_NONE`.
+
 Link/monitor topology is deliberately absent from the live snapshot (a
 proc mutates those lists lock-free, so a cross-thread walk would race);
 for that you still need the debugger's `xtc-proc`, which runs against a
@@ -471,8 +483,12 @@ dump and a `gdb` session read alike:
       loop 0  procs=2 alive=2 tasks_run=3 steals=0
     procs:
       <0.0.1> parked    park=timer   mbox=2/4096 peak=2 recv=2 drop=0
+        crit=1    name=engine    label=step-1182
       <0.1.1> running   park=-       mbox=0/4096 peak=0 recv=0 drop=0
     === end dump ===
+
+The indented line under a proc appears only when it has a name, a label
+or a critical section open.
 
 The C backtrace is symbolized on glibc, macOS, and the BSDs (execinfo)
 and on musl via the compiler's builtin `_Unwind_Backtrace` (frames

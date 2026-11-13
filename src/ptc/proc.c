@@ -519,7 +519,11 @@ struct xtc_proc {
 	xtc_recovery_buf_t recovery_buf;
 	volatile sig_atomic_t recovery_armed;
 	volatile sig_atomic_t recovery_fired;   /* Windows: set by the VEH */
-	volatile sig_atomic_t crit_depth;
+	/* xtc_proc_critical_enter depth.  A lock-free atomic, not volatile
+	 * sig_atomic_t: the owner writes it, its own signal handler reads it
+	 * (C11 7.14.1.1 allows a lock-free atomic there), and xtc_proc_info
+	 * reads it from other threads.  Relaxed everywhere. */
+	int crit_depth;
 	volatile sig_atomic_t fault_sig;
 
 	/* Per-proc at-exit callbacks, run LIFO on the exit path -- both a
@@ -657,6 +661,15 @@ struct xtc_proc {
 	 * xtc_proc_at_exit's arg (the consumer owns whatever it points to);
 	 * it is simply dropped when the proc is freed. */
 	void             *userdata;
+
+	/* Introspection strings (xtc_proc_opts_t.name at spawn,
+	 * xtc_proc_set_label later), NUL-terminated and truncated.  Written
+	 * only by the spawner before the proc runs, and by the proc itself;
+	 * a foreign reader (xtc_proc_info under the table lock) copies them
+	 * byte by byte with relaxed loads, so a label being rewritten reads
+	 * as a mix of old and new, never past the end. */
+	char name[XTC_PROC_NAME_MAX];
+	char label[XTC_PROC_LABEL_MAX];
 
 	/* L1 proportional-share scheduler: the class handle from
 	 * xtc_proc_opts_t.sched_class, stashed at spawn and applied by
@@ -1657,7 +1670,8 @@ __proc_entry(void *arg)
 	 * use-after-free.  Self-binding from the running coroutine closes
 	 * both: we are the task, and p is live for as long as we run.
 	 */
-	p->task = __xtc_current_task();
+	/* Atomic: xtc_proc_info reads it from other threads. */
+	xtc_atomic_store_ptr(&p->task, __xtc_current_task(), xtc_mo_relaxed);
 	p->coro = __xtc_current_coro;
 	xtc_atomic_store_ptr(&p->run_loop, __xtc_current_loop_get(),
 	    xtc_mo_relaxed);
@@ -1856,6 +1870,32 @@ __mon_watch_push(struct xtc_proc *self, struct mon_entry *w)
 	self->mon_n++;
 }
 
+/* Copy src into dst[n] one relaxed byte store at a time, NUL-padded, so
+ * a concurrent __str_snap reader never races a plain store. */
+static void
+__str_publish(char *dst, size_t n, const char *src)
+{
+	size_t i = 0;
+	if (src != NULL)
+		for (; i + 1 < n && src[i] != '\0'; i++)
+			xtc_atomic_store_u8((uint8_t *)&dst[i], (uint8_t)src[i],
+			    xtc_mo_relaxed);
+	for (; i < n; i++)
+		xtc_atomic_store_u8((uint8_t *)&dst[i], 0, xtc_mo_relaxed);
+}
+
+/* Copy a string another thread may be rewriting (__str_publish); the
+ * result is always NUL-terminated within n. */
+static void
+__str_snap(char *dst, const char *src, size_t n)
+{
+	size_t i;
+	for (i = 0; i + 1 < n; i++)
+		dst[i] = (char)xtc_atomic_load_u8((const uint8_t *)&src[i],
+		    xtc_mo_relaxed);
+	dst[n - 1] = '\0';
+}
+
 /*
  * Shared spawn core.  `rel` selects the parent<->child relationship
  * established ATOMICALLY, before the child is enqueued and can run:
@@ -1916,6 +1956,10 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	xtc_atomic_store_i32(&p->alive, 1, xtc_mo_relaxed);
 	p->spawn_class = o.sched_class;
 	p->stack_size = o.stack_size != 0 ? o.stack_size : xtc_stack_size();
+	/* p is not in a table yet, so no reader can see it: a plain copy
+	 * (the table lock that publishes it orders the bytes). */
+	if (o.name != NULL)
+		(void)xtc_strlcpy(p->name, o.name, sizeof p->name);
 	xtc_atomic_store_i32(&p->refs, 1, xtc_mo_relaxed); /* owner ref */
 	p->mbox_cap = o.mailbox_cap > 0 ? o.mailbox_cap : 4096;
 	/* Watermark level: a percent of cap (rounded down), clamped so a
@@ -2053,7 +2097,8 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	}
 	(void)t;   /* p->task / p->coro are set by __proc_entry, not here */
 
-	__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_SPAWN, spawned_pid, 0);
+	__xtc_tail_emit_str(XTC_TAIL_SCHED, XTC_TAIL_SPAWN, spawned_pid, 0,
+	    o.name);
 	XTC_PROBE_PROC_SPAWN(XTC_PROBE_PID_ID(spawned_pid),
 	    XTC_PROBE_PID_GEN(spawned_pid),
 	    __current_proc != NULL ? XTC_PROBE_PID_ID(__current_proc->pid) : 0,
@@ -2091,6 +2136,56 @@ xtc_pid_t
 xtc_self(void)
 {
 	return __current_proc != NULL ? __current_proc->pid : XTC_PID_NONE;
+}
+
+/*
+ * Foreign-thread identities (xtc_thread_register).  A plain thread that
+ * registers gets a pseudo-pid {XTC_LOOP_FOREIGN, n, 1}: n counts up from
+ * 1 and is never reused, and no proc table holds loop id
+ * XTC_LOOP_FOREIGN, so the pid resolves to nothing (a send to it is
+ * XTC_E_INVAL, like any dead pid).  It is the sender identity of that
+ * thread's xtc_send, xtc_trace and xtc_tail events; xtc_self() stays
+ * XTC_PID_NONE off a proc, as every caller of it expects.
+ */
+static uint32_t __foreign_ids;
+static XTC_THREAD_LOCAL xtc_pid_t __foreign_self;
+
+/* The identity a send from this context carries: the proc's pid, a
+ * registered thread's pseudo-pid, or XTC_PID_NONE.  tail.c's xtc_tail_app
+ * uses it too. */
+xtc_pid_t
+__xtc_sender_pid(void)
+{
+	if (__current_proc != NULL)
+		return __current_proc->pid;
+	return __foreign_self;
+}
+
+/* PUBLIC: int xtc_thread_register __P((const char *, xtc_pid_t *)); */
+int
+xtc_thread_register(const char *name, xtc_pid_t *out_pid)
+{
+	uint32_t n;
+	xtc_pid_t pid;
+
+	if (__current_proc != NULL)
+		return XTC_E_STATE; /* a proc has its own pid */
+	if (!xtc_pid_is_none(__foreign_self)) {
+		if (out_pid != NULL)
+			*out_pid = __foreign_self;
+		return XTC_OK; /* already registered: same identity */
+	}
+	n = xtc_atomic_fetch_add_u32(&__foreign_ids, 1, xtc_mo_relaxed) + 1u;
+	if (n == 0)
+		return XTC_E_RESOURCE; /* 2^32 registrations: wrapped */
+	pid.loop_id = XTC_LOOP_FOREIGN;
+	pid.local_id = n;
+	pid.gen = 1;
+	__foreign_self = pid;
+	__xtc_tail_emit_str(XTC_TAIL_SCHED, XTC_TAIL_SPAWN, pid, 0, name);
+	if (out_pid != NULL)
+		*out_pid = pid;
+	return XTC_OK;
 }
 
 /*
@@ -2184,6 +2279,19 @@ void *
 xtc_proc_userdata(void)
 {
 	return __current_proc != NULL ? __current_proc->userdata : NULL;
+}
+
+/* PUBLIC: int   xtc_proc_set_label __P((const char *)); */
+int
+xtc_proc_set_label(const char *label)
+{
+	struct xtc_proc *p = __current_proc;
+	if (p == NULL)
+		return XTC_E_INVAL; /* not on a proc */
+	__str_publish(p->label, sizeof p->label, label);
+	__xtc_tail_emit_str(XTC_TAIL_SCHED, XTC_TAIL_LABEL, p->pid, 0,
+	    p->label);
+	return XTC_OK;
 }
 
 /* PUBLIC: int   xtc_proc_set_class __P((xtc_exec_class_t)); */
@@ -2759,7 +2867,7 @@ __send_ex(xtc_loop_t *owner, xtc_pid_t to, const void *data, size_t size,
 	}
 	if (XTC_UNLIKELY(e == NULL)) { __proc_release(p); return XTC_E_NOMEM; }
 	e->next = NULL;
-	e->from = xtc_self();
+	e->from = __xtc_sender_pid();
 	e->size = size;
 
 	/* Causal tracing: stamp the envelope with the sender's HLC and
@@ -4141,7 +4249,7 @@ __xtc_fault_handler(int sig, siginfo_t *si, void *uctx)
 	}
 
 	if (!stack_overflow && p != NULL && p->recovery_armed &&
-	    p->crit_depth == 0) {
+	    xtc_atomic_load_i32(&p->crit_depth, xtc_mo_relaxed) == 0) {
 		/* One-shot: a fault during recovery/cleanup must escalate
 		 * rather than loop back here. */
 		p->recovery_armed = 0;
@@ -4233,7 +4341,8 @@ __xtc_veh(EXCEPTION_POINTERS *ep)
 	}
 
 	p = __current_proc;
-	if (p != NULL && p->recovery_armed && p->crit_depth == 0) {
+	if (p != NULL && p->recovery_armed &&
+	    xtc_atomic_load_i32(&p->crit_depth, xtc_mo_relaxed) == 0) {
 		p->recovery_armed = 0;          /* one-shot */
 		p->fault_sig = __xtc_veh_code_to_signo(code);
 		p->recovery_fired = 1;          /* arm helper reads this */
@@ -4376,16 +4485,24 @@ xtc_proc_recovery_disarm(void)
 void
 xtc_proc_critical_enter(void)
 {
-	if (__current_proc != NULL)
-		__current_proc->crit_depth++;
+	struct xtc_proc *p = __current_proc;
+	if (p != NULL)
+		xtc_atomic_store_i32(&p->crit_depth,
+		    xtc_atomic_load_i32(&p->crit_depth, xtc_mo_relaxed) + 1,
+		    xtc_mo_relaxed);
 }
 
 /* PUBLIC: void xtc_proc_critical_leave __P((void)); */
 void
 xtc_proc_critical_leave(void)
 {
-	if (__current_proc != NULL && __current_proc->crit_depth > 0)
-		__current_proc->crit_depth--;
+	struct xtc_proc *p = __current_proc;
+	int d;
+	if (p == NULL)
+		return;
+	d = xtc_atomic_load_i32(&p->crit_depth, xtc_mo_relaxed);
+	if (d > 0)
+		xtc_atomic_store_i32(&p->crit_depth, d - 1, xtc_mo_relaxed);
 }
 
 /* PUBLIC: int __xtc_proc_crit_depth __P((void)); */
@@ -4397,7 +4514,9 @@ xtc_proc_critical_leave(void)
 int
 __xtc_proc_crit_depth(void)
 {
-	return __current_proc != NULL ? (int)__current_proc->crit_depth : 0;
+	return __current_proc != NULL ?
+	    xtc_atomic_load_i32(&__current_proc->crit_depth, xtc_mo_relaxed) :
+	    0;
 }
 
 /* ---------- per-proc at-exit hooks + proc-scoped memory ---------- */
@@ -5540,6 +5659,8 @@ __proc_free(struct xtc_proc *p)
 static void
 __fill_proc_info(struct xtc_proc *p, xtc_proc_info_t *info)
 {
+	xtc_task_t *task;
+
 	memset(info, 0, sizeof *info);
 	info->size = sizeof *info;
 	info->pid = p->pid;
@@ -5553,15 +5674,20 @@ __fill_proc_info(struct xtc_proc *p, xtc_proc_info_t *info)
 	info->mask_depth = __mask_depth(p);
 	info->mask_deferred = __mask_deferred(p) != 0 ? 1 : 0;
 	info->stack_size = p->stack_size;
-	if (p->task != NULL) {
-		int st = xtc_atomic_load_i32(&p->task->state,
+	info->crit_depth =
+	    (unsigned)xtc_atomic_load_i32(&p->crit_depth, xtc_mo_relaxed);
+	__str_snap(info->name, p->name, sizeof info->name);
+	__str_snap(info->label, p->label, sizeof info->label);
+	task = xtc_atomic_load_ptr(&p->task, xtc_mo_relaxed);
+	if (task != NULL) {
+		int st = xtc_atomic_load_i32(&task->state,
 		    xtc_mo_relaxed); /* introspection snapshot */
 		info->run_state = st;
 		if (st == XTC_TS_PARKED) {
-			if (xtc_atomic_load_i64(&p->task->park_fd,
+			if (xtc_atomic_load_i64(&task->park_fd,
 			        xtc_mo_relaxed) != __PARK_TOK_NONE)
 				info->park_reason = XTC_PARK_FD;
-			else if (xtc_atomic_load_ptr(&p->task->park_timer,
+			else if (xtc_atomic_load_ptr(&task->park_timer,
 			             xtc_mo_relaxed) != NULL)
 				info->park_reason = XTC_PARK_TIMER;
 			/* else: possibly a mailbox park -- decided below from

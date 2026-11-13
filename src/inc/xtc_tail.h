@@ -16,12 +16,13 @@
  *	against a normal one.  It is OFF by default and one branch when
  *	disabled -- observability must not tax production.
  *
- *	Phase 1 (this): the SCHED source (proc spawn / exit / wake / run)
- *	over a bounded per-process ring, an in-process read callback, and a
- *	versioned binary dump to an fd.  The IO/OS sources, on-disk spill
- *	with rotation, and the offline viewer are staged follow-ons (see
- *	the roadmap); the record format and API are designed to accept them
- *	without a break.
+ *	Implemented: the SCHED source (proc spawn / exit / park / run and
+ *	the loop, submit and reap events below), the MSG source (send /
+ *	receive / mailbox depth), the APP source (the application's own
+ *	events), a bounded per-process ring, an in-process read callback,
+ *	a versioned binary dump (tools/xtc-tail.py reads it), a dial9 dump
+ *	the dial9 viewer opens, and spill to a directory.  The IO and OS
+ *	sources are reserved.
  */
 
 #ifndef XTC_TAIL_H
@@ -39,10 +40,12 @@
  * on).  Phase 1 implements SCHED; the others are reserved so the mask is
  * stable across the staged build-out. */
 #define XTC_TAIL_SCHED  (1u << 0)   /* proc spawn/exit/wake/run */
-#define XTC_TAIL_MSG    (1u << 1)   /* reserved: send/recv/mailbox depth */
+#define XTC_TAIL_MSG    (1u << 1)   /* send/recv/mailbox depth */
 #define XTC_TAIL_IO     (1u << 2)   /* reserved: fd reg/del/completion */
 #define XTC_TAIL_OS     (1u << 3)   /* reserved: per-loop CPU/RSS sampling */
-#define XTC_TAIL_ALL    (XTC_TAIL_SCHED | XTC_TAIL_MSG | XTC_TAIL_IO | XTC_TAIL_OS)
+#define XTC_TAIL_APP    (1u << 4)   /* the application's own events (2.2) */
+#define XTC_TAIL_ALL    (XTC_TAIL_SCHED | XTC_TAIL_MSG | XTC_TAIL_IO | \
+                         XTC_TAIL_OS | XTC_TAIL_APP)
 
 /* Event kinds recorded by the SCHED source. */
 enum xtc_tail_kind {
@@ -231,8 +234,28 @@ enum xtc_tail_kind {
 	 * real fix, and is a consumer-visible design change); it makes the
 	 * loss DIAGNOSABLE instead of silent, which is the prerequisite.
 	 */
-	XTC_TAIL_LIFECYCLE_DROP = 14
+	XTC_TAIL_LIFECYCLE_DROP = 14,
+	/*
+	 * A proc set its label (xtc_proc_set_label).  pid is the proc; the
+	 * label rides with the record (the dial9 dump's XtcLabelEvent).
+	 * Like a SPAWN, which carries the proc's xtc_proc_opts_t.name (or a
+	 * thread's xtc_thread_register name) the same way.  2.2.
+	 */
+	XTC_TAIL_LABEL = 15
 };
+
+/*
+ * The application's own events, source XTC_TAIL_APP (2.2): a batched
+ * step began or ended, a request was admitted or finished -- the reasons
+ * behind the scheduler events around them.  `kind` is the caller's, 0..
+ * XTC_TAIL_APP_KIND_MAX; xtc_tail_app_name gives a kind a name the dial9
+ * dump carries (an XtcAppEvent with fields kind, name, detail).  The
+ * record's pid is the caller: its proc, its xtc_thread_register pseudo-
+ * pid, or XTC_PID_NONE from an unregistered thread.  Callable from any
+ * thread; one relaxed load and nothing else when XTC_TAIL_APP is off.
+ * XTC_OK, or XTC_E_INVAL for a kind above the maximum.
+ */
+#define XTC_TAIL_APP_KIND_MAX 255u
 
 /*
  * XTC_TAIL_SUBMIT_FAIL detail encoding.  Below this value the detail is a
@@ -286,6 +309,8 @@ typedef int (*xtc_tail_fn)(const xtc_tail_rec_t *rec, void *user);
  * PUBLIC: int      xtc_tail_spill_dial9 __P((const char *));
  * PUBLIC: size_t   xtc_tail_count __P((void));
  * PUBLIC: uint64_t xtc_tail_dropped __P((void));
+ * PUBLIC: int      xtc_tail_app __P((unsigned, uint64_t));
+ * PUBLIC: int      xtc_tail_app_name __P((unsigned, const char *));
  */
 
 /* Enable the named sources (a bitwise-OR of XTC_TAIL_*).  Returns the
@@ -324,6 +349,13 @@ XTC_API unsigned xtc_tail_from_env(void);
  * exist), named xtc-tail-<pid>-<ns>.d9.  The way to get a trace off a
  * deployed box; rotation/budget is the operator's (a dir + a cleanup rule). */
 XTC_API int      xtc_tail_spill_dial9(const char *dir);
+
+/* Record an application event (see XTC_TAIL_APP above). */
+XTC_API int      xtc_tail_app(unsigned kind, uint64_t detail);
+
+/* Name an application event kind for the dial9 dump (copied, up to 31
+ * bytes; NULL or "" clears it).  Any thread.  XTC_OK or XTC_E_INVAL. */
+XTC_API int      xtc_tail_app_name(unsigned kind, const char *name);
 
 /* Number of records currently buffered. */
 XTC_API size_t   xtc_tail_count(void);

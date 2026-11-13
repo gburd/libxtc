@@ -112,6 +112,9 @@ typedef struct xtc_proc_info {
         uint64_t  mbox_recv_total;  /* messages ever accepted */
         uint64_t  mbox_drop_total;  /* messages ever rejected */
         size_t    stack_size;       /* fiber stack bytes; 2.2 */
+        unsigned  crit_depth;       /* 2.2: critical sections */
+        char      name[XTC_PROC_NAME_MAX];   /* 2.2 */
+        char      label[XTC_PROC_LABEL_MAX]; /* 2.2 */
 } xtc_proc_info_t;
 .Ed
 .Pp
@@ -219,7 +222,32 @@ in force at its spawn
 Added in 2.2; check
 .Fn XTC_FIELD_OK info stack_size
 in an info handed to a callback.
+.It Va crit_depth
+The
+.Fn xtc_proc_critical_enter
+nesting depth
+.Pq Xr xtc_proc 3 :
+a fault inside a critical section is not contained.
+A proc that stays above 0 is wedged inside one.
+Sampled, like
+.Va mask_depth .
+.It Va name
+The name the proc was spawned with
+.Pq Va xtc_proc_opts_t.name , or a supervised child's Va xtc_child_spec_t.name ,
+truncated and NUL-terminated;
+.Qq
+for an unnamed proc.
+.It Va label
+The proc's last
+.Fn xtc_proc_set_label ,
+the same way.
+A label being rewritten while it is read can come out as a mix of the
+two.
 .El
+.Pp
+The last three fields appeared in 2.2: check
+.Fn XTC_FIELD_OK info crit_depth
+before reading them when the program may run on an older library.
 .Pp
 .Vt enum xtc_proc_run_state
 mirrors the scheduler task state:

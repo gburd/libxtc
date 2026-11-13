@@ -139,7 +139,7 @@ argument of the USDT probes (the executor index, or -1, through 2.1).
 A pid no longer says which executor slot its proc lives on; code that
 read the slot out of `loop_id` must record it (a proc can read its own
 with `xtc_exec_loop_id()`).  `xtc_sim_partition_set` is still keyed by
-executor slot + 1.  4,294,967,294 loop inits exhaust the
+executor slot + 1.  4,294,967,293 loop inits exhaust the
 ids; `xtc_loop_init` then fails with `XTC_E_RESOURCE`.  The
 standalone-loop workaround (`examples/16_l2book`) is no longer needed.
 
@@ -260,6 +260,34 @@ included.
 with `xtc_hist_quantiles` instead.  The sum makes `xtc_hist_record` one
 atomic add dearer: 8.2 to 13.1 ns uncontended on one x86-64 core.  A
 log-linear sum wraps at 2^64 (read by Prometheus as a counter reset).
+
+## CHANGED (2.2): procs have names and labels; application tail events; thread identities
+
+Through 2.1 `xtc_proc_opts_t.name` and `xtc_child_spec_t.name` were
+accepted and dropped, so every introspection surface showed anonymous
+pids, and a plain thread's `xtc_send` carried `XTC_PID_NONE`, so a trace
+broke at the hop from a device worker.  Now (symbol version `XTC_2.2`):
+
+- the name is copied at spawn and shown in `xtc_proc_info_t.name`
+  (appended), the `xtc_dump` proc lines and the tail SPAWN record (the
+  dial9 `spawn_loc`);
+- `xtc_proc_set_label` labels the calling proc (`xtc_proc_info_t.label`,
+  `xtc_dump`, an `XTC_TAIL_LABEL` event);
+- `xtc_proc_info_t.crit_depth` reports the `xtc_proc_critical_enter`
+  depth;
+- `xtc_tail_app(kind, detail)` and `xtc_tail_app_name(kind, name)` record
+  the application's own events under the new `XTC_TAIL_APP` source (a
+  dial9 `XtcAppEvent`);
+- `xtc_thread_register(name, &pid)` gives a plain thread a pseudo-pid
+  (`loop_id` = `XTC_LOOP_FOREIGN`) that its sends carry as the sender
+  and its `xtc_tail_app` events as their pid.  It reaches no proc.
+
+`xtc_proc_info_t` grows from 96 to 200 bytes (an append; a consumer
+built against 2.1 keeps reading its prefix).  The string fields are not
+in `xtc_tail_rec_t`, whose layout is frozen: the XTCL dump does not carry
+them, the dial9 dump does.  To keep `XTC_LOOP_FOREIGN` out of the loop
+id space, `xtc_loop_init` now stops one id earlier, after 4,294,967,293
+inits.
 
 ## Linux/XFS: io_uring WAL writes go to io-wq unless the filesystem has `lazytime`
 

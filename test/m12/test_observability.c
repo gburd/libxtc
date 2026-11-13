@@ -815,6 +815,122 @@ test_inspect_park_reason(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * Names, labels and the critical-section depth (davros report 03).
+ * xtc_proc_opts_t.name and xtc_child_spec_t.name used to be accepted and
+ * dropped, and xtc_proc_info_t had no crit_depth, so a /debug/procs page
+ * saw anonymous pids and could not tell a proc wedged in a critical
+ * section.  A proc spawned "engine" labels itself, enters two critical
+ * sections and parks; a supervised child named "listener" parks; the
+ * probe reads both and dumps.
+ */
+#include "xtc_orc.h"
+#include "xtc_dump.h"
+
+static xtc_pid_t g_nm_engine;
+static xtc_proc_info_t g_nm_eng_info, g_nm_kid_info;
+static int g_nm_kid_found, g_nm_label_rc_off, g_nm_dump_fd = -1;
+
+static void
+nm_engine(void *a)
+{
+	(void)a;
+	(void)xtc_proc_set_label("chatcmpl-abc123 with a label that is longer"
+	                         " than XTC_PROC_LABEL_MAX bytes, to be cut");
+	xtc_proc_critical_enter();
+	xtc_proc_critical_enter();
+	(void)xtc_proc_sleep(100LL * 1000 * 1000);
+	xtc_proc_critical_leave();
+	xtc_proc_critical_leave();
+}
+
+static void
+nm_kid(void *a)
+{
+	(void)a;
+	(void)xtc_proc_sleep(100LL * 1000 * 1000);
+}
+
+static int
+nm_find_kid(const xtc_proc_info_t *info, void *user)
+{
+	(void)user;
+	if (strcmp(info->name, "listener") == 0) {
+		g_nm_kid_info = *info;
+		g_nm_kid_found = 1;
+	}
+	return 0;
+}
+
+static void
+nm_probe(void *a)
+{
+	xtc_supervisor_t *sup = a;
+	(void)xtc_proc_sleep(10LL * 1000 * 1000); /* both are parked */
+	g_nm_eng_info.size = sizeof g_nm_eng_info;
+	(void)xtc_proc_info(g_nm_engine, &g_nm_eng_info);
+	(void)xtc_inspect_procs(nm_find_kid, NULL);
+	xtc_dump(g_nm_dump_fd);
+	(void)xtc_sup_stop(sup);
+}
+
+static MunitResult
+test_inspect_name_label_crit(const MunitParameter p[], void *d)
+{
+	char tmpl[] = "/tmp/xtc_nm_dump_XXXXXX", buf[16384];
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_child_spec_t kid = XTC_CHILD_SPEC_INIT;
+	xtc_supervisor_t *sup = NULL;
+	ssize_t n;
+	(void)p;
+	(void)d;
+
+	g_nm_label_rc_off = xtc_proc_set_label("off a proc");
+	munit_assert_int(g_nm_label_rc_off, ==, XTC_E_INVAL);
+	g_nm_dump_fd = mkstemp(tmpl);
+	munit_assert_int(g_nm_dump_fd, >=, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	o.name = "engine";
+	munit_assert_int(xtc_proc_spawn(loop, nm_engine, NULL, &o,
+	                     &g_nm_engine),
+	    ==, XTC_OK);
+	kid.name = "listener";
+	kid.fn = nm_kid;
+	kid.policy = XTC_RESTART_TEMPORARY;
+	munit_assert_int(xtc_sup_start(loop, &so, &kid, 1, &sup), ==, XTC_OK);
+	o.name = NULL;
+	munit_assert_int(xtc_proc_spawn(loop, nm_probe, sup, &o, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)xtc_sup_join(sup, 1000LL * 1000 * 1000);
+	(void)xtc_loop_fini(loop);
+
+	munit_assert_true(XTC_FIELD_OK(&g_nm_eng_info, label));
+	munit_assert_string_equal(g_nm_eng_info.name, "engine");
+	munit_assert_size(strlen(g_nm_eng_info.label), ==,
+	    XTC_PROC_LABEL_MAX - 1);
+	munit_assert_int(strncmp(g_nm_eng_info.label, "chatcmpl-abc123 ", 16),
+	    ==, 0);
+	munit_assert_uint(g_nm_eng_info.crit_depth, ==, 2);
+	munit_assert_int(g_nm_kid_found, ==, 1);
+	munit_assert_uint(g_nm_kid_info.crit_depth, ==, 0);
+	munit_assert_string_equal(g_nm_kid_info.label, "");
+
+	munit_assert_int(lseek(g_nm_dump_fd, 0, SEEK_SET), ==, 0);
+	n = read(g_nm_dump_fd, buf, sizeof buf - 1);
+	munit_assert_int((int)n, >, 0);
+	buf[n] = '\0';
+	(void)close(g_nm_dump_fd);
+	(void)unlink(tmpl);
+	munit_assert_not_null(strstr(buf,
+	    "    crit=2    name=engine    "
+	    "label=chatcmpl-abc123 "));
+	munit_assert_not_null(strstr(buf, "    name=listener\n"));
+	return MUNIT_OK;
+}
+
 /* Off-loop: xtc_proc_info for an unknown pid is NOTFOUND, not a crash. */
 static MunitResult
 test_inspect_notfound(const MunitParameter p[], void *d)
@@ -947,6 +1063,7 @@ static MunitTest tests[] = {
 	{ "/inspect/procs",        test_inspect_procs,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/inspect/park_reason",  test_inspect_park_reason,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/inspect/notfound",     test_inspect_notfound,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/inspect/name_label_crit", test_inspect_name_label_crit, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/trace/causal",         test_trace_causal,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/log/basic",            test_log_basic,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/log/drop_on_full",     test_log_drop_on_full,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

@@ -27,11 +27,28 @@
 #include <unistd.h>
 
 #define XTC_TAIL_RING 16384u
+#define XTC_TAIL_STR_MAX 48u /* a name or label, NUL included */
+#define XTC_TAIL_APP_KINDS 256u
+#define XTC_TAIL_APP_NAME_MAX 32u
 
 static unsigned __tail_mask; /* enabled sources; 0 = off */
 static pthread_mutex_t  __tail_lock = PTHREAD_MUTEX_INITIALIZER;
 static xtc_tail_rec_t   __tail_ring[XTC_TAIL_RING];
 static uint64_t         __tail_seq;     /* total records ever written */
+
+/* The string a record carries (a SPAWN's proc or thread name, a LABEL's
+ * label), by ring slot; "" for a record without one.  Allocated by the
+ * first xtc_tail_enable, so a process that never enables the tail pays
+ * nothing; NULL if that allocation failed (records then carry no
+ * string).  Under __tail_lock, like the ring. */
+static char (*__tail_str)[XTC_TAIL_STR_MAX];
+
+/* xtc_tail_app_name's table, under __tail_lock. */
+static char __tail_app_names[XTC_TAIL_APP_KINDS][XTC_TAIL_APP_NAME_MAX];
+
+/* Serializes dial9 dumps, which share one static copy of that table
+ * (8 KiB: too big for a fiber stack). */
+static pthread_mutex_t __tail_dump_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static uint64_t
 __tail_now_ns(void)
@@ -47,30 +64,81 @@ __tail_now_ns(void)
  * enabled.  Never fails, never blocks a fiber.
  */
 void
-__xtc_tail_emit(unsigned source, unsigned kind, xtc_pid_t pid, uint64_t detail)
+__xtc_tail_emit_str(unsigned source, unsigned kind, xtc_pid_t pid,
+    uint64_t detail, const char *str)
 {
 	unsigned mask = xtc_atomic_load_u32(&__tail_mask, xtc_mo_relaxed);
 	xtc_tail_rec_t *r;
+	uint64_t slot;
 
 	if ((mask & source) == 0)
 		return;                 /* source off: one branch, done */
 
 	(void)__xtc_mtx_lock(&__tail_lock);
-	r = &__tail_ring[__tail_seq % XTC_TAIL_RING];
+	slot = __tail_seq % XTC_TAIL_RING;
+	r = &__tail_ring[slot];
 	r->ts_ns = __tail_now_ns();
 	r->source = source;
 	r->kind = kind;
 	r->pid = pid;
 	r->detail = detail;
+	if (__tail_str != NULL)
+		(void)xtc_strlcpy(__tail_str[slot], str != NULL ? str : "",
+		    XTC_TAIL_STR_MAX);
 	__tail_seq++;
 	(void)__xtc_mtx_unlock(&__tail_lock);
+}
+
+void
+__xtc_tail_emit(unsigned source, unsigned kind, xtc_pid_t pid, uint64_t detail)
+{
+	__xtc_tail_emit_str(source, kind, pid, detail, NULL);
 }
 
 unsigned
 xtc_tail_enable(unsigned source_mask)
 {
+	void *strs;
+
+	/* The string table, once: off every hot path, and a failure only
+	 * means records carry no names. */
+	if ((source_mask & XTC_TAIL_ALL) != 0 &&
+	    xtc_atomic_load_ptr(&__tail_str, xtc_mo_relaxed) == NULL &&
+	    __os_calloc(XTC_TAIL_RING, XTC_TAIL_STR_MAX, &strs) == XTC_OK) {
+		(void)__xtc_mtx_lock(&__tail_lock);
+		if (__tail_str == NULL) {
+			xtc_atomic_store_ptr(&__tail_str, strs, xtc_mo_relaxed);
+			strs = NULL;
+		}
+		(void)__xtc_mtx_unlock(&__tail_lock);
+		if (strs != NULL)
+			__os_free(strs);
+	}
 	return xtc_atomic_exchange_u32(&__tail_mask, source_mask & XTC_TAIL_ALL,
 	    xtc_mo_release);
+}
+
+/* PUBLIC: int xtc_tail_app __P((unsigned, uint64_t)); */
+int
+xtc_tail_app(unsigned kind, uint64_t detail)
+{
+	if (kind >= XTC_TAIL_APP_KINDS)
+		return XTC_E_INVAL;
+	__xtc_tail_emit(XTC_TAIL_APP, kind, __xtc_sender_pid(), detail);
+	return XTC_OK;
+}
+
+/* PUBLIC: int xtc_tail_app_name __P((unsigned, const char *)); */
+int
+xtc_tail_app_name(unsigned kind, const char *name)
+{
+	if (kind >= XTC_TAIL_APP_KINDS)
+		return XTC_E_INVAL;
+	(void)__xtc_mtx_lock(&__tail_lock);
+	(void)xtc_strlcpy(__tail_app_names[kind], name != NULL ? name : "",
+	    XTC_TAIL_APP_NAME_MAX);
+	(void)__xtc_mtx_unlock(&__tail_lock);
+	return XTC_OK;
 }
 
 /* Fast predicate for hook points that must do extra work (e.g. read a
@@ -112,18 +180,25 @@ xtc_tail_count(void)
 /* Snapshot the ring (oldest first) into a caller-provided visitor.  The
  * snapshot is taken under the lock, then visited outside it. */
 static int
-__tail_snapshot(xtc_tail_rec_t **out, size_t *out_n)
+__tail_snapshot_ex(xtc_tail_rec_t **out, size_t *out_n,
+    char (**out_str)[XTC_TAIL_STR_MAX],
+    char (*app_names)[XTC_TAIL_APP_NAME_MAX])
 {
 	xtc_tail_rec_t *snap;
+	char(*str)[XTC_TAIL_STR_MAX] = NULL;
 	uint64_t n, start, i;
 	int rc;
 
 	(void)__xtc_mtx_lock(&__tail_lock);
+	if (app_names != NULL)
+		memcpy(app_names, __tail_app_names, sizeof __tail_app_names);
 	n = __tail_seq < XTC_TAIL_RING ? __tail_seq : XTC_TAIL_RING;
 	start = __tail_seq < XTC_TAIL_RING ? 0 : __tail_seq % XTC_TAIL_RING;
 	if (n == 0) {
 		(void)__xtc_mtx_unlock(&__tail_lock);
 		*out = NULL; *out_n = 0;
+		if (out_str != NULL)
+			*out_str = NULL;
 		return XTC_OK;
 	}
 	if ((rc = __os_malloc((size_t)n * sizeof(*snap), (void **)&snap))
@@ -131,12 +206,27 @@ __tail_snapshot(xtc_tail_rec_t **out, size_t *out_n)
 		(void)__xtc_mtx_unlock(&__tail_lock);
 		return rc;
 	}
-	for (i = 0; i < n; i++)
+	if (out_str != NULL && __tail_str != NULL &&
+	    __os_malloc((size_t)n * XTC_TAIL_STR_MAX, (void **)&str) != XTC_OK)
+		str = NULL; /* the dump goes out without names */
+	for (i = 0; i < n; i++) {
 		snap[i] = __tail_ring[(start + i) % XTC_TAIL_RING];
+		if (str != NULL)
+			memcpy(str[i], __tail_str[(start + i) % XTC_TAIL_RING],
+			    XTC_TAIL_STR_MAX);
+	}
 	(void)__xtc_mtx_unlock(&__tail_lock);
 	*out = snap;
 	*out_n = (size_t)n;
+	if (out_str != NULL)
+		*out_str = str;
 	return XTC_OK;
+}
+
+static int
+__tail_snapshot(xtc_tail_rec_t **out, size_t *out_n)
+{
+	return __tail_snapshot_ex(out, out_n, NULL, NULL);
 }
 
 int
@@ -309,7 +399,8 @@ out:
  */
 #define XTC_D9_TID_CLOCK_SYNC   200
 #define XTC_D9_TID_SEG_META     201
-#define XTC_D9_MAX_KIND          15   /* one past XTC_TAIL_LIFECYCLE_DROP */
+#define XTC_D9_TID_APP 202 /* every XTC_TAIL_APP kind */
+#define XTC_D9_MAX_KIND 16 /* one past XTC_TAIL_LABEL */
 
 /* One field of a schema: wire name + field-type tag. */
 struct xtc_d9_field { const char *name; uint8_t type; };
@@ -352,6 +443,21 @@ static const struct xtc_d9_field XTC_D9_F_XTC[] = {
 	{ "worker_id", XTC_D9_FT_VARINT },
 	{ "task_id",   XTC_D9_FT_VARINT },
 	{ "detail",    XTC_D9_FT_I64 },
+};
+/* A proc's label (xtc_proc_set_label). */
+static const struct xtc_d9_field XTC_D9_F_LABEL[] = {
+	{ "worker_id", XTC_D9_FT_VARINT },
+	{ "task_id", XTC_D9_FT_VARINT },
+	{ "label", XTC_D9_FT_POOLED_STR },
+};
+/* An application event (xtc_tail_app): its kind, the kind's registered
+ * name, and the caller's detail. */
+static const struct xtc_d9_field XTC_D9_F_APP[] = {
+	{ "worker_id", XTC_D9_FT_VARINT },
+	{ "task_id", XTC_D9_FT_VARINT },
+	{ "kind", XTC_D9_FT_U32 },
+	{ "name", XTC_D9_FT_POOLED_STR },
+	{ "detail", XTC_D9_FT_I64 },
 };
 /* framing schemas. */
 static const struct xtc_d9_field XTC_D9_F_CLOCK[] = {
@@ -402,6 +508,8 @@ __xtc_d9_kind_schema(unsigned kind)
 	    { "XtcPollFullEvent", XTC_D9_F_XTC, XTC_D9_NF(XTC_D9_F_XTC) };
 	static const struct xtc_d9_schema_def xtc_lcd =
 	    { "XtcLifecycleDropEvent", XTC_D9_F_XTC, XTC_D9_NF(XTC_D9_F_XTC) };
+	static const struct xtc_d9_schema_def xtc_label = { "XtcLabelEvent",
+		XTC_D9_F_LABEL, XTC_D9_NF(XTC_D9_F_LABEL) };
 	switch (kind) {
 	case XTC_TAIL_RUN:        return &poll_start;
 	case XTC_TAIL_SPAWN:      return &task_spawn;
@@ -418,6 +526,8 @@ __xtc_d9_kind_schema(unsigned kind)
 	case XTC_TAIL_SUBMIT_FAIL:return &xtc_subf;
 	case XTC_TAIL_POLL_FULL:  return &xtc_pf;
 	case XTC_TAIL_LIFECYCLE_DROP: return &xtc_lcd;
+	case XTC_TAIL_LABEL:
+		return &xtc_label;
 	default:                  return NULL;
 	}
 }
@@ -501,24 +611,78 @@ __xtc_d9_evhdr(uint8_t *buf, uint16_t type_id, uint64_t delta)
 }
 
 /* PUBLIC: int xtc_tail_dump_dial9 __P((int)); */
+/*
+ * The pool id of a record's string (a SPAWN's name, a LABEL's label), or
+ * POOL_LOC ("xtc-proc") when it has none.  Each distinct string is
+ * written once, as its own String Pool frame, before the first event
+ * that references it; ids are dense from POOL_FIRST.  A linear search
+ * over the strings already written: a dump is an explicit diagnostic
+ * call, and a ring holds at most XTC_TAIL_RING records.
+ */
+struct d9_pool {
+	const char (*strs)[XTC_TAIL_STR_MAX]; /* the snapshot's strings */
+	size_t *first; /* per pool id - POOL_FIRST: a snapshot index */
+	size_t n;
+	int nomem;
+};
+
+static int
+__d9_pool_id(int fd, struct d9_pool *pl, size_t i, uint32_t *out_id,
+    uint32_t fallback)
+{
+	size_t k;
+	int rc;
+
+	if (pl->strs == NULL || pl->first == NULL || pl->strs[i][0] == '\0') {
+		*out_id = fallback;
+		return XTC_OK;
+	}
+	for (k = 0; k < pl->n; k++)
+		if (strcmp(pl->strs[pl->first[k]], pl->strs[i]) == 0) {
+			*out_id = 3u + (uint32_t)k;
+			return XTC_OK;
+		}
+	if ((rc = __xtc_d9_write_strpool(fd, 3u + (uint32_t)pl->n,
+	         pl->strs[i])) != XTC_OK)
+		return rc;
+	pl->first[pl->n] = i;
+	*out_id = 3u + (uint32_t)pl->n++;
+	return XTC_OK;
+}
+
 int
 xtc_tail_dump_dial9(int fd)
 {
 	xtc_tail_rec_t *snap = NULL;
+	char(*strs)[XTC_TAIL_STR_MAX] = NULL;
+	static char app_names[XTC_TAIL_APP_KINDS][XTC_TAIL_APP_NAME_MAX];
+	uint32_t app_pool[XTC_TAIL_APP_KINDS];
+	struct d9_pool pl;
 	size_t n = 0, i;
 	uint8_t hdr[5];
 	uint8_t seen[XTC_D9_MAX_KIND];
 	uint64_t base_ts = 0;
-	int have_base = 0;
+	int have_base = 0, app_seen = 0;
 	int rc;
-	/* Pool id 1 = the spawn_loc/service string (a single interned name,
-	 * since libxtc does not carry a per-proc source location).  Pool id 2
-	 * = the backend name.  Emitted up front. */
+	/* Pool id 1 = the spawn_loc/service string for a proc with no name.
+	 * Pool id 2 = the backend name.  Emitted up front.  Ids from 3 are
+	 * the records' own strings, then the app kinds' names. */
 	const uint32_t POOL_LOC = 1, POOL_BACKEND = 2;
 
 	if (fd < 0) return XTC_E_INVAL;
-	if ((rc = __tail_snapshot(&snap, &n)) != XTC_OK) return rc;
+	(void)__xtc_mtx_lock(&__tail_dump_lock);
+	if ((rc = __tail_snapshot_ex(&snap, &n, &strs, app_names)) != XTC_OK) {
+		(void)__xtc_mtx_unlock(&__tail_dump_lock);
+		return rc;
+	}
 	memset(seen, 0, sizeof seen);
+	memset(app_pool, 0, sizeof app_pool);
+	memset(&pl, 0, sizeof pl);
+	pl.strs = (const char(*)[XTC_TAIL_STR_MAX])strs;
+	/* At most one distinct string per record (n <= XTC_TAIL_RING). */
+	if (strs != NULL &&
+	    __os_malloc(n * sizeof *pl.first, (void **)&pl.first) != XTC_OK)
+		pl.first = NULL; /* names are dropped, the trace is not */
 
 	/* Header. */
 	hdr[0] = XTC_D9_MAGIC0; hdr[1] = XTC_D9_MAGIC1;
@@ -579,16 +743,46 @@ xtc_tail_dump_dial9(int fd)
 		size_t off;
 		uint64_t ts = snap[i].ts_ns;
 		uint64_t delta, task_id, worker_id;
+		uint32_t str_id = POOL_LOC;
 
-		if (kind >= XTC_D9_MAX_KIND) continue;
-		def = __xtc_d9_kind_schema(kind);
-		if (def == NULL) continue;
-
-		if (!seen[kind]) {
-			if ((rc = __xtc_d9_write_schema(fd, (uint16_t)kind,
-			    def)) != XTC_OK) goto out;
-			seen[kind] = 1;
+		if (snap[i].source == XTC_TAIL_APP) {
+			static const struct xtc_d9_schema_def app_def = {
+				"XtcAppEvent", XTC_D9_F_APP,
+				XTC_D9_NF(XTC_D9_F_APP)
+			};
+			if (!app_seen) {
+				if ((rc = __xtc_d9_write_schema(fd,
+				         XTC_D9_TID_APP, &app_def)) != XTC_OK)
+					goto out;
+				app_seen = 1;
+			}
+			if (kind < XTC_TAIL_APP_KINDS && app_pool[kind] == 0 &&
+			    app_names[kind][0] != '\0') {
+				app_pool[kind] = 3u + (uint32_t)n + kind;
+				if ((rc = __xtc_d9_write_strpool(fd,
+				         app_pool[kind], app_names[kind])) !=
+				    XTC_OK)
+					goto out;
+			}
+			def = &app_def;
+		} else {
+			if (kind >= XTC_D9_MAX_KIND)
+				continue;
+			def = __xtc_d9_kind_schema(kind);
+			if (def == NULL)
+				continue;
+			if (!seen[kind]) {
+				if ((rc = __xtc_d9_write_schema(fd,
+				         (uint16_t)kind, def)) != XTC_OK)
+					goto out;
+				seen[kind] = 1;
+			}
 		}
+		if ((kind == XTC_TAIL_SPAWN || kind == XTC_TAIL_LABEL) &&
+		    snap[i].source == XTC_TAIL_SCHED &&
+		    (rc = __d9_pool_id(fd, &pl, i, &str_id, POOL_LOC)) !=
+		        XTC_OK)
+			goto out;
 
 		/* Timestamp base + reset (spec's three triggers). */
 		if (!have_base || ts < base_ts ||
@@ -605,9 +799,28 @@ xtc_tail_dump_dial9(int fd)
 
 		task_id = __xtc_d9_task_id(snap[i].pid);
 		worker_id = (uint64_t)snap[i].pid.loop_id;
-		off = __xtc_d9_evhdr(buf, (uint16_t)kind, delta);
+		off = __xtc_d9_evhdr(buf,
+		    snap[i].source == XTC_TAIL_APP ? (uint16_t)XTC_D9_TID_APP :
+		                                     (uint16_t)kind,
+		    delta);
 
 		/* Fields in the exact schema order for this kind. */
+		if (snap[i].source == XTC_TAIL_APP) {
+			__leb128(buf, &off, worker_id);
+			__leb128(buf, &off, task_id);
+			__tail_le32(buf + off, kind);
+			off += 4;
+			__tail_le32(buf + off,
+			    kind < XTC_TAIL_APP_KINDS && app_pool[kind] != 0 ?
+			        app_pool[kind] :
+			        POOL_LOC);
+			off += 4;
+			__tail_le64(buf + off, snap[i].detail);
+			off += 8;
+			if ((rc = __tail_write_all(fd, buf, off)) != XTC_OK)
+				goto out;
+			continue;
+		}
 		switch (kind) {
 		case XTC_TAIL_RUN:   /* PollStartEvent */
 			__leb128(buf, &off, worker_id);          /* worker_id */
@@ -616,9 +829,18 @@ xtc_tail_dump_dial9(int fd)
 			__tail_le32(buf + off, POOL_LOC); off += 4; /* spawn_loc */
 			break;
 		case XTC_TAIL_SPAWN: /* TaskSpawnEvent */
+			/* spawn_loc carries the proc's name (the viewer shows
+			 * it as the task's origin), "xtc-proc" without one. */
 			__leb128(buf, &off, task_id);            /* task_id */
-			__tail_le32(buf + off, POOL_LOC); off += 4; /* spawn_loc */
+			__tail_le32(buf + off, str_id);
+			off += 4;                                /* spawn_loc */
 			buf[off++] = 0;                          /* instrumented */
+			break;
+		case XTC_TAIL_LABEL: /* XtcLabelEvent */
+			__leb128(buf, &off, worker_id);
+			__leb128(buf, &off, task_id);
+			__tail_le32(buf + off, str_id);
+			off += 4;
 			break;
 		case XTC_TAIL_EXIT:  /* TaskTerminateEvent */
 			__leb128(buf, &off, task_id);            /* task_id */
@@ -641,6 +863,11 @@ xtc_tail_dump_dial9(int fd)
 	}
 out:
 	if (snap != NULL) __os_free(snap);
+	if (strs != NULL)
+		__os_free(strs);
+	if (pl.first != NULL)
+		__os_free(pl.first);
+	(void)__xtc_mtx_unlock(&__tail_dump_lock);
 	return rc;
 }
 

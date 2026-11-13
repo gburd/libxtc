@@ -332,9 +332,10 @@ __xtc_inbox_drain(xtc_loop_t *loop)
  * Process-wide loop ids (2.2).  One word: live loops in the high half,
  * the last id handed out in the low half.  An id is never handed out
  * twice, so a pid of a finalized loop resolves to nothing rather than to
- * a later loop.  Ids run 1..0xFFFFFFFE (0 is XTC_PID_NONE's, 0xFFFFFFFF
- * XTC_TAIL_LOOP_NONE); after 4,294,967,294 loop inits xtc_loop_init
- * fails with XTC_E_RESOURCE instead of wrapping.
+ * a later loop.  Ids run 1..0xFFFFFFFD (0 is XTC_PID_NONE's, 0xFFFFFFFE
+ * XTC_LOOP_FOREIGN's, 0xFFFFFFFF XTC_TAIL_LOOP_NONE); after
+ * 4,294,967,293 loop inits xtc_loop_init fails with XTC_E_RESOURCE
+ * instead of wrapping.
  *
  * DST: the sim backend restarts the ids at 1 when a loop is created and
  * none is alive, so the pids of a sim run are a function of its seed
@@ -358,7 +359,7 @@ __xtc_loop_id_take(uint32_t *out)
 		if ((o >> 32) == 0)
 			last = 0;
 #endif
-		if (last >= UINT32_MAX - 1u)
+		if (last >= XTC_LOOP_FOREIGN - 1u)
 			return XTC_E_RESOURCE;
 		n = (((o >> 32) + 1) << 32) | (uint64_t)(last + 1u);
 	} while (!xtc_atomic_cas_weak_u64(&__loop_ids, &o, n, xtc_mo_relaxed,

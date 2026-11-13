@@ -31,6 +31,7 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <pthread.h>
 
 #include "xtc.h"
 #include "xtc_loop.h"
@@ -49,7 +50,20 @@ static void
 worker(void *a)
 {
 	(void)a;
+	(void)xtc_proc_set_label("req-7");
 	(void)xtc_proc_sleep(1000);
+}
+
+/* A plain thread with an identity records two application events. */
+static void *
+app_thread(void *a)
+{
+	(void)a;
+	(void)xtc_thread_register("device", NULL);
+	(void)xtc_tail_app_name(1, "step");
+	(void)xtc_tail_app(1, 10);
+	(void)xtc_tail_app(2, 20); /* a kind with no name */
+	return NULL;
 }
 
 static uint32_t
@@ -159,17 +173,26 @@ main(int argc, char **argv)
 	int have_base = 0;
 	int events = 0, schemas = 0, resets = 0, pools = 0;
 	int saw_spawn = 0, saw_exit = 0, saw_clock = 0, saw_seg = 0;
+	int saw_app = 0, saw_label = 0, names = 0;
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
+	pthread_t th;
 
 	snprintf(path, sizeof path, "%s/xtc_d9_%d.bin",
 	    (argc > 1) ? argv[1] : "/tmp", (int)getpid());
 
-	xtc_tail_enable(XTC_TAIL_SCHED);
+	xtc_tail_enable(XTC_TAIL_SCHED | XTC_TAIL_APP);
+	if (pthread_create(&th, NULL, app_thread, NULL) != 0 ||
+	    pthread_join(th, NULL) != 0) {
+		printf("SKIP: thread failed\n");
+		return 77;
+	}
 	if (xtc_loop_init(&lp) != XTC_OK) {
 		printf("SKIP: loop_init failed\n");
 		return 77;
 	}
 	for (i = 0; i < 3; i++) {
-		if (xtc_proc_spawn(lp, worker, NULL, NULL, NULL) != XTC_OK) {
+		o.name = i == 0 ? "engine" : NULL; /* one named, two not */
+		if (xtc_proc_spawn(lp, worker, NULL, &o, NULL) != XTC_OK) {
 			printf("SKIP: spawn failed\n");
 			(void)xtc_loop_fini(lp);
 			return 77;
@@ -235,6 +258,13 @@ main(int argc, char **argv)
 				pid = rd_le32(buf + off); off += 4;
 				dl = rd_le32(buf + off); off += 4;
 				if (off + dl > (size_t)sz) { printf("FAIL: pool data trunc\n"); return 1; }
+				if ((dl == 6 &&
+				        (!memcmp(buf + off, "engine", 6) ||
+				            !memcmp(buf + off, "device", 6))) ||
+				    (dl == 5 &&
+				        !memcmp(buf + off, "req-7", 5)) ||
+				    (dl == 4 && !memcmp(buf + off, "step", 4)))
+					names++;
 				off += dl;
 				if (g_npool < 64) g_pool[g_npool++] = pid;
 			}
@@ -271,6 +301,10 @@ main(int argc, char **argv)
 			events++;
 			if (!strcmp(s->name, "TaskSpawnEvent"))     saw_spawn = 1;
 			if (!strcmp(s->name, "TaskTerminateEvent")) saw_exit = 1;
+			if (!strcmp(s->name, "XtcAppEvent"))
+				saw_app++;
+			if (!strcmp(s->name, "XtcLabelEvent"))
+				saw_label++;
 		} else {
 			printf("FAIL: unknown frame tag 0x%02x\n", tag);
 			return 1;
@@ -288,6 +322,14 @@ main(int argc, char **argv)
 		return 1;
 	}
 	if (pools == 0) { printf("FAIL: no string pool frame\n"); return 1; }
+	/* 2.2: the proc and thread names, the label and the app kind's name
+	 * each reach the pool once; two app events, three labels. */
+	if (names != 4 || saw_app != 2 || saw_label != 3) {
+		printf("FAIL: names %d (want 4), XtcAppEvent %d (want 2), "
+		       "XtcLabelEvent %d (want 3)\n",
+		    names, saw_app, saw_label);
+		return 1;
+	}
 	printf("OK: dial9 trace -- %d schemas, %d events, %d pools, %d resets, "
 	    "spec-conformant, per-schema fields + framing validated\n",
 	    schemas, events, pools, resets);

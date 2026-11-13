@@ -22,6 +22,15 @@
 void __xtc_tail_emit(unsigned source, unsigned kind, xtc_pid_t pid,
                      uint64_t detail);
 
+/* __xtc_tail_emit with a string the record carries (a SPAWN's name, a
+ * LABEL's label), copied and truncated; NULL for none. */
+void __xtc_tail_emit_str(unsigned source, unsigned kind, xtc_pid_t pid,
+    uint64_t detail, const char *str);
+
+/* The identity the calling context's events and sends carry: its proc's
+ * pid, its xtc_thread_register pseudo-pid, or XTC_PID_NONE (proc.c). */
+xtc_pid_t __xtc_sender_pid(void);
+
 /* 1 if `source` is currently enabled.  A hook point uses this to guard
  * extra work (e.g. a clock read) so a disabled tail costs one branch
  * and has no side effects. */

@@ -86,4 +86,8 @@ XTC_2.2 {
 		xtc_hist_set_scale;
 		xtc_metrics_write_prometheus;
 		xtc_metrics_set_help;
+		xtc_proc_set_label;
+		xtc_thread_register;
+		xtc_tail_app;
+		xtc_tail_app_name;
 } XTC_2.0;

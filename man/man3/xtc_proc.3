@@ -11,6 +11,8 @@
 .Nm xtc_proc_set_userdata ,
 .Nm xtc_proc_userdata ,
 .Nm xtc_proc_set_class ,
+.Nm xtc_proc_set_label ,
+.Nm xtc_thread_register ,
 .Nm xtc_send ,
 .Nm xtc_send_owned ,
 .Nm xtc_recv ,
@@ -47,6 +49,10 @@
 .Fn xtc_proc_spawn_monitor "xtc_loop_t *loop" "xtc_proc_fn fn" "void *arg" "const xtc_proc_opts_t *opts" "xtc_pid_t *out_pid" "uint64_t *out_ref"
 .Ft xtc_pid_t
 .Fn xtc_self "void"
+.Ft int
+.Fn xtc_proc_set_label "const char *label"
+.Ft int
+.Fn xtc_thread_register "const char *name" "xtc_pid_t *out_pid"
 .Ft int
 .Fn xtc_send "xtc_pid_t target" "const void *data" "size_t size"
 .Ft int
@@ -1008,6 +1014,66 @@ returns
 .Dv NULL
 there.
 .Pp
+A proc's
+.Va xtc_proc_opts_t.name
+(for a supervised child, its
+.Va xtc_child_spec_t.name )
+is copied at spawn, up to
+.Dv XTC_PROC_NAME_MAX
+\- 1 bytes, and shown by
+.Xr xtc_inspect 3 ,
+.Xr xtc_dump 3
+and the
+.Xr xtc_tail 3
+SPAWN event.
+.Fn xtc_proc_set_label
+gives the calling proc a label of what it is serving now (a request
+id), up to
+.Dv XTC_PROC_LABEL_MAX
+\- 1 bytes, shown in the same places; the tail records an
+.Dv XTC_TAIL_LABEL
+event each time it is set.
+.Dv NULL
+or
+.Qq
+clears it.
+It returns
+.Dv XTC_E_INVAL
+off a proc.
+.Pp
+.Fn xtc_thread_register
+gives the calling plain thread (one that is not a proc, such as a
+device worker) an identity: a pseudo-pid whose
+.Va loop_id
+is
+.Dv XTC_LOOP_FOREIGN ,
+stored in
+.Fa *out_pid
+.Pq which may be Dv NULL .
+From then on the thread's
+.Fn xtc_send
+carries it as the sender, so the
+.Xr xtc_trace 3
+SEND and RECV records of that hop name the thread instead of
+.Dv XTC_PID_NONE ,
+and its
+.Fn xtc_tail_app
+events carry it as their pid.
+.Fa name
+is recorded as a tail SPAWN of the pseudo-pid.
+The pseudo-pid reaches no proc: a send to it returns
+.Dv XTC_E_INVAL .
+.Fn xtc_self
+stays
+.Dv XTC_PID_NONE
+on the thread, and a second call returns the same pid.
+It returns
+.Dv XTC_OK ,
+.Dv XTC_E_STATE
+on a proc, or
+.Dv XTC_E_RESOURCE
+after 2^32 registrations.
+.Pp
 .Fn xtc_proc_set_class
 places the calling proc's task in a proportional-share scheduling
 class (created with
@@ -1082,3 +1148,7 @@ xtc_proc_spawn(loop, server, NULL, NULL, &pid);
 .Sh HISTORY
 .Nm
 appeared in xtc 0.1.
+.Fn xtc_proc_set_label
+and
+.Fn xtc_thread_register
+appeared in xtc 2.2; before it a proc's name was accepted and dropped.
