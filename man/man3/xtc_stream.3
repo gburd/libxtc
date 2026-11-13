@@ -92,8 +92,16 @@ retry spins), so use
 only with a source that will eventually produce or finish.
 .Pp
 .Fn xtc_stream_from_demand
-adapts a demand channel into a stream: each pull grants one unit of
-demand and returns the next buffered item.  It does not own the channel.
+adapts a demand channel into a stream: each pull keeps one unit of
+demand outstanding, granting one only when the channel has none, and
+returns the next buffered item.
+So the producer runs at most one item ahead of the consumer however
+often an empty stream is pulled, and a consumer that pulls more slowly
+slows the producer down.
+Demand granted by other callers of
+.Fn xtc_chan_demand_ask
+adds to that unit.
+It does not own the channel.
 .Sh RETURN VALUES
 All functions except
 .Fn xtc_stream_destroy

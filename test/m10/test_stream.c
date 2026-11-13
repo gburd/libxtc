@@ -109,10 +109,15 @@ test_stream_from_demand(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_chan_demand_create(NULL, 8, &ch), ==, XTC_OK);
 	munit_assert_int(xtc_stream_from_demand(ch, &s), ==, XTC_OK);
 
-	/* Nothing sent, no demand: pulling grants demand but finds nothing. */
-	munit_assert_int(xtc_stream_next(s, &v), ==, XTC_E_AGAIN);
+	/* Nothing sent, no demand: pulling grants demand but finds nothing.
+	 * Polling the empty stream again grants nothing more: a consumer
+	 * waiting for one item leaves one unit outstanding (through 2.1
+	 * every pull added one, so the producer was not held back). */
+	for (i = 0; i < 10; i++)
+		munit_assert_int(xtc_stream_next(s, &v), ==, XTC_E_AGAIN);
+	munit_assert_size(xtc_chan_demand_outstanding(ch), ==, 1);
 
-	/* The pull above granted 1 unit of demand; a producer can now send
+	/* The pulls above granted 1 unit of demand; a producer can now send
 	 * one.  Grant a couple more and fill the buffer. */
 	munit_assert_int(xtc_chan_demand_ask(ch, 3), ==, XTC_OK);
 	for (i = 0; i < 3; i++)

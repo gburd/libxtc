@@ -456,6 +456,24 @@ thread.  An exit costs one relaxed load when no proc holds entries.
 example; both are corrected, and it now says a destructor must not call
 `xtc_pdict_*` (it runs under the dictionary's lock).
 
+## FIXED (2.2): a demand stream granted demand on every empty pull
+
+**What it was.**  `xtc_stream_from_demand` granted one unit of demand on
+every `xtc_stream_next`, including a pull that found the channel empty.
+`xtc_stream_for_each` retries an empty pull once per yield, so while the
+producer was idle the outstanding demand grew by one per consumer
+wakeup, and the producer was then held back only by the channel's
+capacity, not by the consumer: after 10 empty pulls the channel showed
+10 outstanding and the producer could send 10 items to a consumer
+waiting for one.
+
+**Fix.**  A pull grants one unit only when the channel has none
+outstanding, so the producer runs at most one item ahead of the
+consumer however often an empty stream is pulled.  Demand the
+application grants itself with `xtc_chan_demand_ask` still adds to
+that unit.  `test/m10/test_stream` `/from_demand` (10 empty pulls, then
+`outstanding == 1`) failed before (10) and passes after.
+
 ## Linux/XFS: io_uring WAL writes go to io-wq unless the filesystem has `lazytime`
 
 On XFS mounted without `lazytime`, a write that must update the file's

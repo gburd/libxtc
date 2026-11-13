@@ -70,8 +70,12 @@ xtc_stream_next(xtc_stream_t *s, void **out)
 	case S_DEMAND: {
 		void *v = NULL;
 		int rc;
-		/* Grant one unit of demand, then try to pull one item. */
-		(void)xtc_chan_demand_ask(s->ch, 1);
+		/* Keep one unit of demand open, then try to pull one item.
+		 * Granting only when none is outstanding holds the producer to
+		 * one item ahead of the consumer however often an empty stream
+		 * is polled (xtc_stream_for_each polls once per yield). */
+		if (xtc_chan_demand_outstanding(s->ch) == 0)
+			(void)xtc_chan_demand_ask(s->ch, 1);
 		rc = xtc_chan_demand_try_recv(s->ch, &v);
 		if (rc == XTC_OK) { *out = v; return XTC_OK; }
 		if (rc == XTC_E_INVAL) return XTC_E_NOTFOUND;  /* closed+drained */

@@ -87,9 +87,11 @@ XTC_API int  xtc_stream_filter(xtc_stream_t *s,
 XTC_API int  xtc_stream_for_each(xtc_stream_t *s,
                                  int (*fn)(void *v, void *user), void *user);
 
-/* Adapt a demand channel into a stream: each pull grants one unit of
- * demand and returns the next buffered item (XTC_E_AGAIN until one
- * arrives, XTC_E_NOTFOUND once the channel is closed and drained). */
+/* Adapt a demand channel into a stream: each pull keeps one unit of
+ * demand outstanding (it grants one only when none is) and returns the
+ * next buffered item (XTC_E_AGAIN until one arrives, XTC_E_NOTFOUND once
+ * the channel is closed and drained).  So the producer runs at most one
+ * item ahead of the consumer, however often an empty stream is pulled. */
 XTC_API int  xtc_stream_from_demand(xtc_chan_demand_t *ch, xtc_stream_t **out);
 
 #ifdef __cplusplus
