@@ -7,6 +7,7 @@
 int       xtc_reg_put __P((xtc_reg_t *, const char *, xtc_pid_t, void *, unsigned));
 int       xtc_reg_visit __P((xtc_reg_t *, const char *, xtc_reg_visit_fn, void *, int *));
 int __xtc_sup_abandon_wait __P((xtc_supervisor_t *));
+int __xtc_sup_start_ex __P((xtc_loop_t *, const xtc_sup_opts_t *, const xtc_child_spec_t *, int, void (*)(void *), void *, xtc_supervisor_t **));
 int xtc_launch __P((xtc_loop_t *, xtc_launch_fn, void *, int64_t, const xtc_launch_opts_t *, intptr_t *));
 int xtc_sup_add_child __P((xtc_supervisor_t *, const xtc_child_spec_t *, xtc_pid_t *));
 int xtc_sup_join __P((xtc_supervisor_t *, int64_t));
@@ -18,6 +19,7 @@ int xtc_tnt_start __P((const xtc_tnt_spec_t *));
 uint8_t xtc_tnt_shard_id __P((void));
 void *xtc_tnt_recv_take __P((xtc_tnt_message_t *));
 void *xtc_tnt_scratch_arena __P((size_t));
+void __xtc_reg_reaper_set __P((xtc_reg_t *, xtc_pid_t));
 void xtc_tnt_register_timer __P((uint64_t, uint16_t));
 void xtc_tnt_stop __P((void));
 xtc_svr_call_t *xtc_svr_call_save __P((const xtc_svr_call_t *));

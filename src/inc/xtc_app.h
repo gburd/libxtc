@@ -142,13 +142,16 @@ typedef struct xtc_app_drain_report {
 XTC_API int        xtc_app_create(const xtc_app_opts_t *opts, xtc_app_t **out);
 XTC_API void       xtc_app_destroy(xtc_app_t *app);
 
-/* Start the root supervisor with `n_children` initial children. */
+/* Start the root supervisor with `n_children` initial children, and the
+ * registry's reaper (xtc_reg_reaper) on the app's loop. */
 XTC_API int        xtc_app_start(xtc_app_t *app,
                                  const xtc_child_spec_t *children,
                                  int n_children);
 
-/* Run the loop until the supervisor exits or xtc_app_stop is called.
- * On return, xtc_app_destroy may be called. */
+/* Run the loop until the root supervisor exits (xtc_app_stop, restart-
+ * intensity give-up, a kill) or an xtc_app_shutdown completes.  Other
+ * procs still parked on the app's loop do not keep it running.  On
+ * return, xtc_app_destroy may be called. */
 XTC_API int        xtc_app_run(xtc_app_t *app);
 
 /* Asynchronously request the app to stop (kicks the root sup).  NOT a

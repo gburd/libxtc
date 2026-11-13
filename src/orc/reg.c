@@ -14,6 +14,7 @@
 #include "xtc_reg.h"
 #include "xtc_proc.h"      /* reaper proc: monitor + recv + drop-on-DOWN */
 #include "xtc_svr.h"       /* xtc_svr_call_name via-dispatch */
+#include "xtc_app.h"       /* xtc_app_is_shutdown_msg: the reaper drains */
 #include "xtc_sim.h"       /* XTC_SIM_BUGGIFY / xtc_sim_fault (DST) */
 #include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
 #include "xtc_tail.h"      /* XTC_TAIL_LIFECYCLE_DROP kind */
@@ -396,11 +397,17 @@ void
 xtc_reg_reaper(void *arg)
 {
 	struct xtc_reg *r = arg;
+	xtc_pid_t self = xtc_self();
 	if (r == NULL) return;
+	/* Killed before it first ran (xtc_app_start that failed after
+	 * spawning it): the registry may be gone, so do not touch it. */
+	if (xtc_cancel_requested())
+		return;
 
-	/* Publish the reaper's pid so xtc_reg_register_mon can reach it. */
+	/* Publish the reaper's pid so xtc_reg_register_mon can reach it.  A
+	 * second reaper for the same registry takes over enrollment. */
 	(void)__xtc_mtx_lock(&r->lock);
-	r->reaper = xtc_self();
+	r->reaper = self;
 	xtc_atomic_store_i32(&r->has_reaper, 1, xtc_mo_release);
 	(void)__xtc_mtx_unlock(&r->lock);
 
@@ -414,6 +421,11 @@ xtc_reg_reaper(void *arg)
 			break;               /* loop torn down */
 		if (msg == NULL)
 			continue;
+		/* Run as an app's supervised child, it drains like one. */
+		if (xtc_app_is_shutdown_msg(msg, len)) {
+			__os_free(msg);
+			break;
+		}
 
 		/* A monitor request from xtc_reg_register_mon. */
 		if (len == sizeof(struct reg_reaper_msg)) {
@@ -450,9 +462,27 @@ xtc_reg_reaper(void *arg)
 
 	/* Reaper exiting: clear the published pid so later _register_mon
 	 * calls fall back to a plain register rather than sending into a
-	 * dead mailbox. */
+	 * dead mailbox -- unless another reaper has taken over since. */
 	(void)__xtc_mtx_lock(&r->lock);
-	xtc_atomic_store_i32(&r->has_reaper, 0, xtc_mo_release);
+	if (xtc_pid_eq(r->reaper, self))
+		xtc_atomic_store_i32(&r->has_reaper, 0, xtc_mo_release);
+	(void)__xtc_mtx_unlock(&r->lock);
+}
+
+/*
+ * Publish (or, with XTC_PID_NONE, withdraw) a reaper pid before the
+ * reaper first runs, so an enrollment sent meanwhile waits in its
+ * mailbox.  xtc_app_start uses it for the app's own reaper.
+ *
+ * PUBLIC: void __xtc_reg_reaper_set __P((xtc_reg_t *, xtc_pid_t));
+ */
+void
+__xtc_reg_reaper_set(xtc_reg_t *r, xtc_pid_t pid)
+{
+	(void)__xtc_mtx_lock(&r->lock);
+	r->reaper = pid;
+	xtc_atomic_store_i32(&r->has_reaper, !xtc_pid_is_none(pid),
+	    xtc_mo_release);
 	(void)__xtc_mtx_unlock(&r->lock);
 }
 

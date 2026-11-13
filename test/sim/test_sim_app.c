@@ -17,6 +17,11 @@
  *	    name (xtc_reg_whereis), send a seeded value, await the reply,
  *	    and record it -- proving the registry is usable across the app
  *	    lifecycle and cross-loop messaging works within the app;
+ *	  - each client, and an unsupervised proc spawned on loop 1 before
+ *	    the run, names itself with xtc_reg_register_mon and then exits;
+ *	    the app's own reaper must drop every such name, also the one
+ *	    registered before loop 0 has run the reaper (2.2: the reaper is
+ *	    published at xtc_app_start; planted as APP_REAPER_LATE);
  *	  - once all clients are satisfied, a coordinator stops the app
  *	    (xtc_app_stop), which stops the root supervisor and the
  *	    executor, so the run quiesces.
@@ -24,7 +29,9 @@
  *	Invariants (per seed):
  *	  (a) every client resolved the server by name and got the correct
  *	      reply (value + 1) -- no lost registration / lost message;
- *	  (b) the registry held exactly the server's name while running;
+ *	  (b) the server's name was registered while running, and at the
+ *	      end it is the only name left (no monitored name outlived its
+ *	      proc);
  *	  (c) clean quiescence (XTC_OK), no deadlock;
  *	  (d) REPLAY: identical fingerprint for a repeated seed.
  */
@@ -54,6 +61,8 @@ static xtc_app_t *g_app;
 static int g_replies_ok;     /* clients that got the right reply */
 static int g_clients_done;   /* clients that finished */
 static int g_reg_count_seen; /* registry count observed by server */
+static int g_mon_fail;       /* xtc_reg_register_mon calls that failed */
+static int g_reg_count_end;  /* registry count once the clients are gone */
 
 /* Request/reply envelope: sender pid + a value. */
 struct req { xtc_pid_t from; int value; };
@@ -92,6 +101,11 @@ client(void *arg)
 	int tries;
 	int val = (int)(id * 100 +
 	    (int)__xtc_sim_rng_range(XTC_SIM_RNG_APP, 50));
+	char nm[16];
+
+	(void)snprintf(nm, sizeof nm, "client.%d", id);
+	if (xtc_reg_register_mon(g_reg, nm, xtc_self()) != XTC_OK)
+		xtc_atomic_fetch_add_i32(&g_mon_fail, 1, xtc_mo_seq_cst);
 
 	for (tries = 0; tries < 100; tries++) {
 		if (xtc_reg_whereis(g_reg, SVC_NAME, &svc) == XTC_OK &&
@@ -125,7 +139,19 @@ client(void *arg)
 	xtc_atomic_fetch_add_i32(&g_clients_done, 1, xtc_mo_seq_cst);
 }
 
-/* COORDINATOR: wait until all clients are done, then stop the app. */
+/* EARLY: an unsupervised proc the embedder spawned on loop 1 before the
+ * run.  It names itself first thing and exits; in the seeds where loop 1
+ * runs before loop 0, that is before the app's reaper has run. */
+static void
+early(void *arg)
+{
+	(void)arg;
+	if (xtc_reg_register_mon(g_reg, "early", xtc_self()) != XTC_OK)
+		xtc_atomic_fetch_add_i32(&g_mon_fail, 1, xtc_mo_seq_cst);
+}
+
+/* COORDINATOR: wait until all clients are done, give the reaper time to
+ * drop their names, count what is left, then stop the app. */
 static void
 coordinator(void *arg)
 {
@@ -138,6 +164,8 @@ coordinator(void *arg)
 		(void)xtc_proc_sleep(1000 * 1000LL);
 	}
 	(void)xtc_proc_sleep(5 * 1000 * 1000LL);
+	xtc_atomic_store_i32(&g_reg_count_end, xtc_reg_count(g_reg),
+	    xtc_mo_seq_cst);
 	if (g_app != NULL)
 		(void)xtc_app_stop(g_app);
 }
@@ -154,6 +182,8 @@ run_one(uint64_t seed, int *out_replies, uint64_t *out_state)
 	xtc_atomic_store_i32(&g_replies_ok, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_clients_done, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_reg_count_seen, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_mon_fail, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_reg_count_end, -1, xtc_mo_seq_cst);
 	g_app = NULL;
 	g_reg = NULL;
 
@@ -197,6 +227,7 @@ run_one(uint64_t seed, int *out_replies, uint64_t *out_state)
 	    NULL, NULL);
 
 	exec = xtc_app_exec(g_app);
+	(void)xtc_proc_spawn(xtc_exec_loop(exec, 1), early, NULL, NULL, NULL);
 	rc = xtc_sim_exec_run(exec, seed, 5000000);
 
 	if (out_replies != NULL)
@@ -231,8 +262,19 @@ main(int argc, char **argv)
 		if (rc != XTC_OK) pass = 0;
 		else if (replies != N_CLIENTS) pass = 0;  /* all got value+1 */
 		else if (xtc_atomic_load_i32(&g_reg_count_seen,
-		             xtc_mo_seq_cst) != 1)
+		             xtc_mo_seq_cst) < 1)
 			pass = 0;
+		else if (xtc_atomic_load_i32(&g_mon_fail, xtc_mo_seq_cst) != 0)
+			pass = 0;
+		else if (xtc_atomic_load_i32(&g_reg_count_end,
+		             xtc_mo_seq_cst) != 1) {
+			printf("  seed 0x%016llx: a monitored name outlived "
+			       "its proc (%d names left, want 1)\n",
+			    (unsigned long long)seed,
+			    xtc_atomic_load_i32(&g_reg_count_end,
+			        xtc_mo_seq_cst));
+			pass = 0;
+		}
 
 		if (pass) {
 			rc2 = run_one(seed, &replies2, &st2);
@@ -242,17 +284,21 @@ main(int argc, char **argv)
 
 		if (!pass) {
 			printf("  seed 0x%016llx: FAIL (replies=%d/%d rc=%d "
-			       "reg_count=%d)\n",
+			       "reg_count=%d mon_fail=%d)\n",
 			    (unsigned long long)seed, replies, N_CLIENTS, rc,
 			    xtc_atomic_load_i32(&g_reg_count_seen,
-			        xtc_mo_seq_cst));
+			        xtc_mo_seq_cst),
+			    xtc_atomic_load_i32(&g_mon_fail, xtc_mo_seq_cst));
 			fails++;
 		}
 	}
 
 	if (fails == 0) {
-		printf("OK: app-lifecycle DST -- %d seeds, registry + "
-		    "cross-loop request/reply + clean stop, all replay\n", n);
+		printf(
+		    "OK: app-lifecycle DST -- %d seeds, registry + "
+		    "cross-loop request/reply + the app's reaper drops every "
+		    "monitored name + clean stop, all replay\n",
+		    n);
 		return 0;
 	}
 	printf("FAIL: %d/%d app-lifecycle seeds failed\n", fails, n);

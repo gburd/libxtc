@@ -14,9 +14,16 @@
 #include "xtc_io.h"        /* XTC_IO_READABLE */
 #include "xtc_proc.h"
 #include "os_tuning.h"
+#include "xtc_dst_inject.h"
 
-/* sup.c, internal: stop the root supervisor's child-cleanup wait. */
+/* sup.c, internal: stop the root supervisor's child-cleanup wait, and
+ * start it with an exit callback. */
 int __xtc_sup_abandon_wait(xtc_supervisor_t *sup);
+int __xtc_sup_start_ex(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
+    const xtc_child_spec_t *children, int n_children, void (*exit_fn)(void *),
+    void *exit_arg, xtc_supervisor_t **out_sup);
+/* reg.c, internal: publish a reaper pid before the reaper first runs. */
+void __xtc_reg_reaper_set(xtc_reg_t *r, xtc_pid_t pid);
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -59,6 +66,7 @@ struct xtc_app {
 	xtc_exec_t        *exec;       /* non-NULL for a multi-loop app */
 	int                owns_loop;
 	xtc_reg_t         *reg;
+	xtc_pid_t reaper; /* reg's reaper, on loop (0) */
 	xtc_supervisor_t  *root;
 	xtc_sup_opts_t     sup_opts;
 	int                no_tuning_check;   /* PLAN.md 19.21 */
@@ -196,6 +204,32 @@ __app_halt(xtc_app_t *a)
 		(void)xtc_loop_stop(a->loop);
 }
 
+/*
+ * The root supervisor is exiting (stop, restart-intensity give-up, a
+ * kill), on its own fiber, with its children stopped.  Stop the app's
+ * registry reaper, and end xtc_app_run on an owned single loop the way
+ * the supervisor's executor stop ends it on a multi-loop app.  Through
+ * 2.2 a single-loop xtc_app_run waited for the loop to drain, so any
+ * other parked proc (a registry reaper, spawned as xtc_reg.h said) kept
+ * it running forever after the supervisor gave up.
+ *
+ * Not stopped: a loop xtc_app_run is not driving (`running` is clear;
+ * the supervisor runs on this loop, so then someone else runs it), a
+ * BORROWED loop (the embedder's; it runs on until it drains, and the
+ * reaper leaves now), and a loop an xtc_app_shutdown is draining (it
+ * stops the loop itself at its end, after the report is written).
+ */
+static void
+__app_root_exited(void *arg)
+{
+	xtc_app_t *a = arg;
+	if (!xtc_pid_is_none(a->reaper))
+		(void)__xtc_exit_pid_on(a->loop, a->reaper, 0);
+	if (a->owns_loop && xtc_atomic_load_i32(&a->running, xtc_mo_acquire) &&
+	    !xtc_atomic_load_i32(&a->shutting_down, xtc_mo_acquire))
+		(void)xtc_loop_stop(a->loop);
+}
+
 int
 xtc_app_start(xtc_app_t *a, const xtc_child_spec_t *children, int n)
 {
@@ -234,9 +268,28 @@ xtc_app_start(xtc_app_t *a, const xtc_child_spec_t *children, int n)
 		a->specs[i].fn = __kid_trampoline;
 		a->specs[i].arg = &a->kids->k[i];
 	}
-	if ((rc = xtc_sup_start(a->loop, &a->sup_opts, a->specs, n,
-	    &a->root)) == XTC_OK)
+	/* The registry's reaper, so xtc_reg_register_mon on
+	 * xtc_app_registry(app) drops a dead pid's names with no setup.
+	 * Published now, not when it first runs: a child on another loop may
+	 * register before loop 0 runs the reaper, and its enrollment then
+	 * waits in the reaper's mailbox instead of going unmonitored.
+	 * Spawned before the supervisor, so on a single loop it runs first. */
+	if ((rc = xtc_proc_spawn(a->loop, xtc_reg_reaper, a->reg, NULL,
+	         &a->reaper)) != XTC_OK)
+		goto fail;
+	/* Planted bug 44 (APP_REAPER_LATE): the reaper publishes itself only
+	 * when it first runs, the shape of a hand-spawned reaper. */
+	if (!XTC_DST_BUG(XTC_DST_BUG_APP_REAPER_LATE))
+		__xtc_reg_reaper_set(a->reg, a->reaper);
+	if ((rc = __xtc_sup_start_ex(a->loop, &a->sup_opts, a->specs, n,
+	         __app_root_exited, a, &a->root)) == XTC_OK)
 		return XTC_OK;
+	/* The reaper has not run (it runs on this loop's next step) and
+	 * returns at once with the kill pending, never touching the
+	 * registry. */
+	__xtc_reg_reaper_set(a->reg, XTC_PID_NONE);
+	(void)__xtc_exit_pid_on(a->loop, a->reaper, 0);
+	a->reaper = XTC_PID_NONE;
 fail:
 	if (a->specs) __os_free(a->specs);
 	__os_free(a->kids);
@@ -569,6 +622,7 @@ out:
 void
 xtc_app_destroy(xtc_app_t *a)
 {
+	int joined = 1;
 	if (a == NULL) return;
 #if !defined(_WIN32)
 	if (a->sig_armed) {
@@ -581,11 +635,22 @@ xtc_app_destroy(xtc_app_t *a)
 #endif
 	/* Best-effort: if the supervisor is still alive we let the
 	 * caller handle that.  Join with a generous timeout. */
-	if (a->root != NULL)
-		(void)xtc_sup_join(a->root, 5LL * 1000 * 1000 * 1000);
-	if (a->reg)  xtc_reg_destroy(a->reg);
+	if (a->root != NULL &&
+	    xtc_sup_join(a->root, 5LL * 1000 * 1000 * 1000) != XTC_OK)
+		joined = 0;
+	/* A supervisor that did not exit on a BORROWED loop can still run
+	 * when the embedder next runs that loop, and its exit callback
+	 * (__app_root_exited) and the reaper use the app and its registry:
+	 * leak them rather than free them under it.  An owned loop or
+	 * executor frees those procs below, unrun. */
+	if (!joined && !a->owns_loop && a->exec == NULL)
+		return;
+	/* The registry outlives the loops: a proc freed with them (the
+	 * reaper, frozen by the stop) holds it. */
 	if (a->exec) (void)xtc_exec_fini(a->exec);
 	if (a->loop && a->owns_loop) (void)xtc_loop_fini(a->loop);
+	if (a->reg)
+		xtc_reg_destroy(a->reg);
 	if (a->specs) __os_free(a->specs);
 	/* A masked-forever survivor keeps a pointer into kids, so leak it in
 	 * that case (bytes per child); free otherwise. */

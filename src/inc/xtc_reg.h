@@ -75,11 +75,15 @@ XTC_API int  xtc_reg_unregister_pid(xtc_reg_t *r, const char *key, xtc_pid_t pid
  * entries removed. */
 XTC_API int  xtc_reg_drop_pid(xtc_reg_t *r, xtc_pid_t pid);
 
-/* The crash-aware registry.  Spawn ONE proc with this body and the
- * registry as its argument (xtc_proc_spawn(loop, xtc_reg_reaper, reg,
- * ...)).  It registers itself, then auto-drops any pid registered via
+/* The crash-aware registry.  A proc with this body and the registry as
+ * its argument registers itself, then auto-drops any pid registered via
  * xtc_reg_register_mon when that pid goes DOWN -- the automatic form of
- * xtc_reg_drop_pid.  Runs until its loop is torn down. */
+ * xtc_reg_drop_pid.  xtc_app_start runs one for xtc_app_registry(app)
+ * and stops it with the root supervisor.  For a registry of your own,
+ * spawn one (xtc_proc_spawn(loop, xtc_reg_reaper, reg, ...)) or make it
+ * a supervised child.  It runs until it is killed or receives
+ * XTC_APP_SHUTDOWN_MSG; it parks meanwhile, so a plain xtc_loop_run of
+ * its loop does not return until one of those happens. */
 XTC_API void xtc_reg_reaper(void *reg);
 
 /* Register `name` -> `pid` (like xtc_reg_register) AND, if a reaper proc

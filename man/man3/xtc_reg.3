@@ -103,15 +103,24 @@ everything" cleanup an embedder calls when a process exits or a
 connection closes.
 .Pp
 .Fn xtc_reg_reaper
-is the CRASH-AWARE registry: spawn one process with this body and the
-registry as its argument
-.Pq Fn xtc_proc_spawn loop xtc_reg_reaper reg ... .
-It registers itself, then monitors every pid registered via
+is the CRASH-AWARE registry: a process with this body and the registry
+as its argument registers itself, then monitors every pid registered via
 .Fn xtc_reg_register_mon
 and calls
 .Fn xtc_reg_drop_pid
 automatically when such a pid goes DOWN -- the automatic form of the
-manual cleanup.  It runs until its loop is torn down.
+manual cleanup.
+.Xr xtc_app_start 3
+runs one for
+.Fn xtc_app_registry
+and stops it with the root supervisor.  For a registry of your own,
+spawn one
+.Pq Fn xtc_proc_spawn loop xtc_reg_reaper reg ...
+or make it a supervised child.  It runs until it is killed or receives
+.Dv XTC_APP_SHUTDOWN_MSG ;
+it parks meanwhile, so a plain
+.Xr xtc_loop_run 3
+of its loop does not return until one of those happens.
 .Fn xtc_reg_register_mon
 registers
 .Fa name No -> Fa pid

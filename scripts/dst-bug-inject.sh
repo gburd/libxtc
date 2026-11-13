@@ -104,6 +104,7 @@ write_cases() {
 		"33;test_sim_down_kind;0;1;M?KILL\\(code -?[0-9]+\\): want kind 5 code -?[0-9]+, got kind [01] " \
 		"34;test_sim_down_kind;0;1;INIT\\(code 0\\): want kind 1 code -2, got kind 0 " \
 		"35;test_sim_sup_strategy;0;1;on_child_down missed deaths" \
+		"44;test_sim_app;0;1;a monitored name outlived its proc" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -152,6 +153,9 @@ write_cases() {
 # 34 INITEXIT   svr.c returns after a failed init -> a failed init reads EXIT(rc)
 # 35 SUP_HOOK_SIBLING sup.c drops the DOWNs of siblings a group restart killed
 #               -> on_child_down sees every child death once, before its respawn
+# 44 APP_REAPER_LATE app.c does not publish its reaper at xtc_app_start
+#               -> a name registered with register_mon before the reaper first
+#               runs is still dropped when its proc dies
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.
