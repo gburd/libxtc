@@ -168,10 +168,38 @@ snapshot.
 .Pp
 .Fn xtc_slab_pressure_listen
 attaches a callback that fires when Linux PSI memory pressure is
-detected.  When triggered, all registered slab caches are reaped.
-Returns
+detected.  When triggered, all registered slab caches are reaped, then
+.Fa fn Ns ( 2 , Fa user )
+runs on the listener's own thread, never on a loop: it may block
+briefly and must not park.
+The trigger is
+.Ql some 150000 2000000 :
+150 ms of memory stall in a 2 s window, the shortest window the kernel
+lets an unprivileged process use.
+With
+.Fa psi_path
+.Dv NULL
+the listener uses the calling process's cgroup v2
+.Pa memory.pressure
+(the pressure a
+.Pa memory.max
+or
+.Pa memory.high
+limit produces), and falls back to
+.Pa /proc/pressure/memory ;
+an explicit path is used alone.
+.Fn xtc_slab_pressure_listen_ex
+does the same and returns a handle that
+.Fn xtc_slab_pressure_stop
+stops.
+Both return
 .Dv XTC_E_NOSYS
-on platforms without PSI.
+only without PSI (no such file, or not Linux),
+.Dv XTC_E_INVAL
+when the kernel refuses the trigger, and
+.Dv XTC_E_IO
+when the file cannot be opened for writing (no permission, or not a
+PSI file).
 .Pp
 .Fn xtc_slab_reaper_spawn
 spawns an

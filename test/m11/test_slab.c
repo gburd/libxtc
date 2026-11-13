@@ -1059,7 +1059,7 @@ test_backtrace(const MunitParameter p[], void *d)
 static MunitResult
 test_pressure_listen_ex_stop(const MunitParameter p[], void *d)
 {
-	xtc_slab_pressure_t *h = NULL;
+	xtc_slab_pressure_t *h = NULL, *h2 = NULL;
 	int rc;
 	(void)p; (void)d;
 
@@ -1069,9 +1069,22 @@ test_pressure_listen_ex_stop(const MunitParameter p[], void *d)
 	/* Stopping a NULL handle is rejected, not a crash. */
 	munit_assert_int(xtc_slab_pressure_stop(NULL), ==, XTC_E_INVAL);
 
+	/* NOSYS only where there is no PSI.  Through 2.2 the default
+	 * trigger used a 1 s window, which the kernel refuses to an
+	 * unprivileged process, and every failure read as NOSYS. */
 	rc = xtc_slab_pressure_listen_ex(NULL, NULL, NULL, &h);
-	if (rc == XTC_E_NOSYS) {
-		/* No PSI on this platform/kernel/container -- nothing to stop. */
+#if defined(__linux__)
+	if (rc == XTC_E_NOSYS)
+		munit_assert_int(access("/proc/pressure/memory", F_OK), !=, 0);
+	/* A file that exists but is not PSI fails, and not as NOSYS: a
+	 * directory cannot be opened for writing. */
+	munit_assert_int(xtc_slab_pressure_listen_ex("/proc", NULL, NULL, &h2),
+	    ==, XTC_E_IO);
+	munit_assert_ptr_null(h2);
+#endif
+	if (rc == XTC_E_NOSYS || rc == XTC_E_IO) {
+		/* No PSI, or a kernel that keeps triggers to privileged
+		 * processes and no writable cgroup file. */
 		munit_assert_ptr_null(h);
 		return MUNIT_SKIP;
 	}
