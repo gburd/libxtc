@@ -19,9 +19,10 @@ systems -- Redis, SQLite, Kafka, Seastar/Tina, PostgreSQL -- rebuilt on
 libxtc. Each server has its own page below covering **the software that
 inspired it**, how the libxtc version is **similar and different**, **how
 it works**, and the **advantages and challenges** of building it on
-libxtc. The standalone teaching examples (01--04, 10) are built **and run**
-by `make check` itself, and the larger systems (06 sqlxtc, 07 kaka, 11 lorb)
-are built and exercised by the CI `examples` job -- so none of it rots.
+libxtc. The standalone teaching examples (01--04, 10, 17--19) are built
+**and run** by `make check` itself, and the larger systems (06 sqlxtc,
+07 kaka, 11 lorb) are built and exercised by the CI `examples` job -- so
+none of it rots.
 (08 tnt binds a fixed TCP port and is timing-fragile, so it is built but not
 run automatically; see its target comment in `dist/Makefile.in`.)
 
@@ -111,6 +112,19 @@ tracer finds and a debugger does not. The
 `tools/dtrace/xtc_lock_contention.d` and `xtc_park_latency.d` against it.
 Source:
 [`examples/15_usdt/convoy.c`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/15_usdt/convoy.c).
+
+## Concurrency patterns in small services (17--19)
+
+[Three small services]({{ '/examples/patterns/' | relative_url }}) put
+building blocks no large example uses to work:
+`17_checkout` runs each order as an `xtc_saga` over connections from an
+`xtc_pool`, with the request context in the process dictionary
+(`xtc_pdict`); `18_clickstream` counts distinct users across four front
+ends with `xtc_stream` pipelines, a Bloom filter that drops redelivered
+log lines, and HyperLogLog sketches merged at the end; `19_edgeacl` serves
+an IP access table from an `xtc_cskip` read under RCU on four loops while a
+feed rewrites it, with per-session `xtc_cfg` settings.  Each prints
+deterministic output that `make check` compares with a recorded copy.
 
 ## Reading suggestion
 

@@ -195,6 +195,9 @@ here as the git submodule `examples/`: clone with `--recurse-submodules`
 | `10_circuit_breaker.c` | The circuit-breaker pattern as an `xtc_fsm` (gen_statem) | `make check` (runs, asserts) |
 | `11_lorb/` | A price-time limit order book / matching engine, with benchmarks | CI (in-process tests) |
 | `12_continuous_batching/` | Continuous batching: requests join and leave a vector between iterations (needs `--enable-sched-policy`) | `make check` in an enabled build (runs, asserts) |
+| `17_checkout/` | A checkout as an `xtc_saga` over pooled connections (`xtc_pool`), request context in `xtc_pdict` | `make check` (runs, diffs output) |
+| `18_clickstream/` | Log analytics: `xtc_stream` pipelines, Bloom-filter dedup, merged HyperLogLog | `make check` (runs, diffs output) |
+| `19_edgeacl/` | An IP range table in `xtc_cskip` read under RCU while it changes; per-session `xtc_cfg` | `make check` (runs, diffs output) |
 
 ## Built on three traditions
 

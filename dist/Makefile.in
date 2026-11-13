@@ -1080,7 +1080,7 @@ soak-mem: soak_mem_bound
 # -------------------------------------------------------------------------
 # Examples -- self-contained demos.
 # -------------------------------------------------------------------------
-examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker tnt_echo
+examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker tnt_echo 17_checkout 18_clickstream 19_edgeacl
 
 # check-examples: BUILD and RUN the standalone teaching examples as part of
 # `make check`.  Previously `make check` did not build examples at all and
@@ -1095,6 +1095,10 @@ examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_brea
 # target comment).  04_lockmgr_demo runs a randomized deadlock workload and
 # takes a few seconds, which is acceptable for the coverage it buys.
 #
+# 17_checkout, 18_clickstream and 19_edgeacl print deterministic output,
+# and each run is compared with the example's expected.txt as well as
+# exit-checked, so a change in what they report fails here too.
+#
 # Then the --help lint (examples/check_help.sh): every example binary,
 # INCLUDING the tnt_echo server, must exit 0 within 2 s printing a usage
 # line.  tnt_echo used to atoi("--help") into "listen on 7777" and block
@@ -1104,7 +1108,7 @@ examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_brea
 # (The TLS doc snippet, docs/_includes/snippets/14_tls_echo.c, is gated by
 # test/docs/test_doc_snippets.sh like every other snippet; that gate links
 # the build's XTC_TLS_LIBS.)
-check-examples: check-continuous-batching check-gpu-batching check-hetero-batching check-l2book 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker tnt_echo usdt_convoy
+check-examples: check-continuous-batching check-gpu-batching check-hetero-batching check-l2book 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker tnt_echo usdt_convoy 17_checkout 18_clickstream 19_edgeacl
 	@rm -f check-skips-examples.txt; \
 	for t in 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo \
 	          10_circuit_breaker 'usdt_convoy convoy' 'usdt_convoy fixed' \
@@ -1112,9 +1116,17 @@ check-examples: check-continuous-batching check-gpu-batching check-hetero-batchi
 		printf 'running example: %s\n' "$$t"; \
 		./$$t >/dev/null || { echo "  [examples] FAIL: $$t exited non-zero"; exit 1; }; \
 	done; \
+	for t in 17_checkout 18_clickstream 19_edgeacl; do \
+		printf 'running example: %s\n' "$$t"; \
+		./$$t >$$t.out || { echo "  [examples] FAIL: $$t exited non-zero"; cat $$t.out; exit 1; }; \
+		diff -u $(srcdir)/../examples/$$t/expected.txt $$t.out || \
+		    { echo "  [examples] FAIL: $$t output differs from examples/$$t/expected.txt"; exit 1; }; \
+		rm -f $$t.out; \
+	done; \
 	sh $(srcdir)/../examples/check_help.sh ./01_hello ./02_pingpong \
 	    ./03_supervised_app ./04_lockmgr_demo ./10_circuit_breaker \
-	    ./tnt_echo ./usdt_convoy || exit 1; \
+	    ./tnt_echo ./usdt_convoy ./17_checkout ./18_clickstream \
+	    ./19_edgeacl || exit 1; \
 	echo "  [examples] OK: teaching examples build and run clean"
 
 # 16_l2book: the order-book engine's unit + differential + determinism
@@ -1223,6 +1235,23 @@ usdt_convoy: $(srcdir)/../examples/15_usdt/convoy.c $(STATIC_LIB)
 10_circuit_breaker: $(srcdir)/../examples/10_circuit_breaker.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-o $@ $(srcdir)/../examples/10_circuit_breaker.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+# examples/17-19: concurrency patterns in small services (saga + pool +
+# pdict; stream + Bloom + HLL; cskip + cfg sessions).
+17_checkout: $(srcdir)/../examples/17_checkout/checkout.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../examples/17_checkout/checkout.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+18_clickstream: $(srcdir)/../examples/18_clickstream/clickstream.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../examples/18_clickstream/clickstream.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+19_edgeacl: $(srcdir)/../examples/19_edgeacl/edgeacl.c $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(srcdir)/../examples/19_edgeacl/edgeacl.c \
 		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
 
 # check-rexis: examples/05_rexis (the README flagship) and its test suite
@@ -2499,6 +2528,7 @@ clean:
 	$(RM) $(LIB_OBJS) $(STATIC_LIB) $(TESTS_C) $(TESTS_PBT) compile_commands.json
 	$(RM) check-skips-c.txt check-skips-sh.txt check-skips-pbt.txt check-skips-examples.txt .tests-c.out .tests-sh.out .tests-c.rc .tests-sh.rc
 	$(RM) soak_mem_bound continuous_batching bench_continuous_batching mandel hetero usdt_convoy
+	$(RM) 17_checkout 18_clickstream 19_edgeacl 17_checkout.out 18_clickstream.out 19_edgeacl.out
 	$(RM) $(FUZZ_BINS)
 	$(RM) $(SHARED_LIB_REAL) $(SHARED_LIB_SONAME) $(SHARED_LIB_LINKNAME)
 	$(RM) libxtc.exp xtc_probes.o xtc_probes_dtrace.h
