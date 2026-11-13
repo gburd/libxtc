@@ -78,4 +78,12 @@ XTC_2.2 {
 		xtc_reg_visit;
 		xtc_log_swap_default;
 		xtc_tuning_check_ex;
+		xtc_hist_create_bounds;
+		xtc_hist_record_value;
+		xtc_hist_quantiles;
+		xtc_hist_sum;
+		xtc_hist_iterate;
+		xtc_hist_set_scale;
+		xtc_metrics_write_prometheus;
+		xtc_metrics_set_help;
 } XTC_2.0;

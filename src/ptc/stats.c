@@ -47,12 +47,15 @@
 #include "xtc_stats.h"
 #include "os_tuning.h"   /* __os_tuning_check: xtc_tuning_check wraps it */
 
+#include <errno.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <math.h> /* HUGE_VAL (a constant: no -lm) */
 #if defined(__linux__)
 #include <sched.h>
 #endif
@@ -101,6 +104,7 @@ struct stats_registry_entry {
 	const void          *handle;
 	xtc_metric_kind_t    kind;
 	char                 name[XTC_STATS_NAME_MAX];
+	char *help; /* xtc_metric_set_help; NULL = none */
 	struct stats_registry_entry *next;
 };
 
@@ -129,6 +133,8 @@ __reg_remove(const void *handle)
 	for (link = &__reg_head; (e = *link) != NULL; link = &e->next) {
 		if (e->handle == handle) {
 			*link = e->next;
+			if (e->help != NULL)
+				__os_free(e->help);
 			__os_free(e);
 			break;
 		}
@@ -278,12 +284,32 @@ xtc_gauge_read(const xtc_gauge_t *g)
 struct hist_shard {
 	_Alignas(XTC_CACHE_LINE) uint64_t buckets[XTC_HIST_BUCKETS];
 	int64_t max;
+	uint64_t sum; /* of the recorded values; a wrap reads as a reset */
+};
+
+/*
+ * A fixed-bound histogram (xtc_hist_create_bounds): the caller's upper
+ * bounds, ascending, and one count per bound plus the +Inf bucket.  A
+ * value lands in the first bucket whose bound is >= it (Prometheus's
+ * `le`).  The sum is a double, stored as its bits and added with a CAS
+ * (uncontended unless two threads share a shard).
+ */
+#define XTC_HIST_BOUNDS_MAX 64
+
+struct bhist_shard {
+	_Alignas(XTC_CACHE_LINE) uint64_t buckets[XTC_HIST_BOUNDS_MAX + 1];
+	uint64_t sum_bits; /* a double */
 };
 
 struct xtc_hist {
 	char                name[XTC_STATS_NAME_MAX];
 	int                 n_cpus;
-	struct hist_shard  *shards;
+	struct hist_shard *shards; /* log-linear; NULL for a bounds hist */
+	int n_bounds;              /* bounds hist only */
+	double bounds[XTC_HIST_BOUNDS_MAX];
+	struct bhist_shard *bshards; /* bounds hist only */
+	uint64_t scale_bits;         /* a double: the exposition factor
+	                              * (xtc_hist_set_scale) */
 };
 
 static int
@@ -330,6 +356,15 @@ __hist_bucket_upper_bound(int idx)
 	return ((int64_t)1 << base) | (sub >> (XTC_HIST_SUB_BITS - base));
 }
 
+static uint64_t
+__hist_one_bits(void)
+{
+	double one = 1.0;
+	uint64_t bits;
+	memcpy(&bits, &one, sizeof bits);
+	return bits;
+}
+
 int
 xtc_hist_create(const char *name, xtc_hist_t **out)
 {
@@ -339,6 +374,7 @@ xtc_hist_create(const char *name, xtc_hist_t **out)
 	if ((rc = __os_calloc(1, sizeof *h, (void **)&h)) != XTC_OK) return rc;
 	strncpy(h->name, name, XTC_STATS_NAME_MAX - 1);
 	h->n_cpus = __ncpus();
+	h->scale_bits = __hist_one_bits();
 	/* hist_shard is _Alignas(XTC_CACHE_LINE); same as the counter
 	 * shards, the array base must be cache-line aligned. */
 	if ((rc = __os_aligned_alloc(XTC_CACHE_LINE,
@@ -353,13 +389,98 @@ xtc_hist_create(const char *name, xtc_hist_t **out)
 	return XTC_OK;
 }
 
+/* PUBLIC: int xtc_hist_create_bounds __P((const char *, const double *, int,
+ * xtc_hist_t **)); */
+int
+xtc_hist_create_bounds(const char *name, const double *upper_bounds,
+    int n_bounds, xtc_hist_t **out)
+{
+	xtc_hist_t *h;
+	int rc, i;
+
+	if (name == NULL || out == NULL || upper_bounds == NULL ||
+	    n_bounds < 1 || n_bounds > XTC_HIST_BOUNDS_MAX)
+		return XTC_E_INVAL;
+	/* Finite, >= 0 and strictly ascending (a NaN fails each test). */
+	for (i = 0; i < n_bounds; i++)
+		if (!(upper_bounds[i] >= 0.0 && upper_bounds[i] < 1e300) ||
+		    (i > 0 && !(upper_bounds[i] > upper_bounds[i - 1])))
+			return XTC_E_INVAL;
+	if ((rc = __os_calloc(1, sizeof *h, (void **)&h)) != XTC_OK)
+		return rc;
+	strncpy(h->name, name, XTC_STATS_NAME_MAX - 1);
+	h->n_cpus = __ncpus();
+	h->scale_bits = __hist_one_bits();
+	h->n_bounds = n_bounds;
+	memcpy(h->bounds, upper_bounds, (size_t)n_bounds * sizeof h->bounds[0]);
+	/* bhist_shard is over-aligned: allocate the array aligned. */
+	if ((rc = __os_aligned_alloc(XTC_CACHE_LINE,
+	         (size_t)h->n_cpus * sizeof *h->bshards,
+	         (void **)&h->bshards)) != XTC_OK) {
+		__os_free(h);
+		return rc;
+	}
+	memset(h->bshards, 0, (size_t)h->n_cpus * sizeof *h->bshards);
+	__reg_add(h, XTC_METRIC_HIST, h->name);
+	*out = h;
+	return XTC_OK;
+}
+
 void
 xtc_hist_destroy(xtc_hist_t *h)
 {
 	if (h == NULL) return;
 	__reg_remove(h);
-	__os_aligned_free(h->shards);
+	if (h->shards != NULL)
+		__os_aligned_free(h->shards);
+	if (h->bshards != NULL)
+		__os_aligned_free(h->bshards);
 	__os_free(h);
+}
+
+/* Record into a fixed-bound histogram: a binary search for the first
+ * bound >= v, one atomic add to that bucket and one to the sum. */
+static void
+__bhist_record(xtc_hist_t *h, double v)
+{
+	struct bhist_shard *s;
+	int lo = 0, hi = h->n_bounds, mid;
+	uint64_t old, bits;
+	double sum;
+
+	if (!(v >= 0.0))
+		v = 0.0; /* negative and NaN count as 0 */
+	while (lo < hi) {
+		mid = (lo + hi) / 2;
+		if (v <= h->bounds[mid])
+			hi = mid;
+		else
+			lo = mid + 1;
+	}
+	s = &h->bshards[__current_cpu(h->n_cpus)];
+	xtc_atomic_fetch_add_u64(&s->buckets[lo], 1, xtc_mo_relaxed);
+	old = xtc_atomic_load_u64(&s->sum_bits, xtc_mo_relaxed);
+	do {
+		memcpy(&sum, &old, sizeof sum);
+		sum += v;
+		memcpy(&bits, &sum, sizeof bits);
+	} while (!xtc_atomic_cas_weak_u64(&s->sum_bits, &old, bits,
+	    xtc_mo_relaxed, xtc_mo_relaxed));
+}
+
+/* PUBLIC: void xtc_hist_record_value __P((xtc_hist_t *, double)); */
+void
+xtc_hist_record_value(xtc_hist_t *h, double v)
+{
+	if (XTC_UNLIKELY(h == NULL))
+		return;
+	if (h->bshards != NULL) {
+		__bhist_record(h, v);
+		return;
+	}
+	if (!(v >= 0.0))
+		v = 0.0;
+	xtc_hist_record(h, v < 9.2e18 ? (int64_t)(v + 0.5) : INT64_MAX);
 }
 
 void
@@ -369,9 +490,15 @@ xtc_hist_record(xtc_hist_t *h, int64_t value_ns)
 	struct hist_shard *s;
 	int64_t cur;
 	if (XTC_UNLIKELY(h == NULL)) return;
+	if (XTC_UNLIKELY(h->bshards != NULL)) {
+		__bhist_record(h, (double)value_ns);
+		return;
+	}
 	b = __hist_bucket(value_ns);
 	s = &h->shards[__current_cpu(h->n_cpus)];
 	xtc_atomic_fetch_add_u64(&s->buckets[b], 1, xtc_mo_relaxed);
+	xtc_atomic_fetch_add_u64(&s->sum, value_ns > 0 ? (uint64_t)value_ns : 0,
+	    xtc_mo_relaxed);
 	/* Exact max: a plain load; a CAS only for a new max. */
 	cur = xtc_atomic_load_i64(&s->max, xtc_mo_relaxed);
 	while (XTC_UNLIKELY(value_ns > cur) &&
@@ -391,12 +518,28 @@ __hist_bucket_total(const xtc_hist_t *h, int b)
 	return total;
 }
 
+static uint64_t
+__bhist_bucket_total(const xtc_hist_t *h, int b)
+{
+	uint64_t total = 0;
+	int i;
+	for (i = 0; i < h->n_cpus; i++)
+		total += xtc_atomic_load_u64(&h->bshards[i].buckets[b],
+		    xtc_mo_relaxed);
+	return total;
+}
+
 uint64_t
 xtc_hist_count(const xtc_hist_t *h)
 {
 	uint64_t total = 0;
 	int b;
 	if (h == NULL) return 0;
+	if (h->bshards != NULL) {
+		for (b = 0; b <= h->n_bounds; b++)
+			total += __bhist_bucket_total(h, b);
+		return total;
+	}
 	for (b = 0; b < XTC_HIST_BUCKETS; b++)
 		total += __hist_bucket_total(h, b);
 	return total;
@@ -407,7 +550,8 @@ xtc_hist_max(const xtc_hist_t *h)
 {
 	int64_t m = 0, v;
 	int i;
-	if (h == NULL) return 0;
+	if (h == NULL || h->bshards != NULL)
+		return 0;
 	for (i = 0; i < h->n_cpus; i++) {
 		v = xtc_atomic_load_i64(&h->shards[i].max, xtc_mo_relaxed);
 		if (v > m) m = v;
@@ -415,24 +559,36 @@ xtc_hist_max(const xtc_hist_t *h)
 	return m;
 }
 
-/*
- * Nearest rank: the smallest recorded value v with at least ceil(q *
- * count) values <= v, reported as the upper bound of v's bucket (as
- * HdrHistogram does) and never above the exact max.  So the answer is
- * >= the true quantile and within one sub-bucket (1/16) of it.  The
- * buckets are read twice (count, then the walk); they only grow, so the
- * walk always reaches the target.
- */
-int64_t
-xtc_hist_quantile(const xtc_hist_t *h, double q)
+/* PUBLIC: double xtc_hist_sum __P((const xtc_hist_t *)); */
+double
+xtc_hist_sum(const xtc_hist_t *h)
 {
-	uint64_t total, target, running = 0;
+	double sum = 0.0, v;
+	uint64_t bits;
+	int i;
+	if (h == NULL)
+		return 0.0;
+	for (i = 0; i < h->n_cpus; i++) {
+		if (h->bshards != NULL) {
+			bits = xtc_atomic_load_u64(&h->bshards[i].sum_bits,
+			    xtc_mo_relaxed);
+			memcpy(&v, &bits, sizeof v);
+			sum += v;
+		} else {
+			sum += (double)xtc_atomic_load_u64(&h->shards[i].sum,
+			    xtc_mo_relaxed);
+		}
+	}
+	return sum;
+}
+
+/* The rank a quantile q of `total` values asks for (nearest rank). */
+static uint64_t
+__hist_rank(uint64_t total, double q)
+{
+	uint64_t target;
 	double want;
-	int64_t max, lb, ub;
-	int b;
-	if (h == NULL) return 0;
-	total = xtc_hist_count(h);
-	if (total == 0) return 0;
+
 	if (!(q > 0.0)) q = 0.0; else if (q > 1.0) q = 1.0;   /* NaN -> 0 */
 	want = (double)total * q;
 	target = (uint64_t)want;
@@ -441,23 +597,171 @@ xtc_hist_quantile(const xtc_hist_t *h, double q)
 	if (want - (double)target > want * 1e-12) target++;
 	if (target < 1) target = 1;
 	if (target > total) target = total;
-	for (b = 0; b < XTC_HIST_BUCKETS; b++) {
-		running += __hist_bucket_total(h, b);
-		if (running >= target)
-			break;
-	}
-	if (b == XTC_HIST_BUCKETS) b--;   /* unreachable: buckets only grow */
-	/* The max is read after the buckets, so it covers every value they
-	 * counted, except a record still between its add and its max
-	 * update: a max below this bucket is that one, and is ignored.  The
-	 * top bucket also holds every value >= 2^40: it answers the max. */
-	max = xtc_hist_max(h);
+	return target;
+}
+
+/*
+ * The answer for a quantile whose rank landed in bucket b: the bucket's
+ * upper bound (as HdrHistogram does), never above the exact max.  The
+ * max is read after the buckets, so it covers every value they counted,
+ * except a record still between its add and its max update: a max below
+ * this bucket is that one, and is ignored.  The top bucket also holds
+ * every value >= 2^40: it answers the max.
+ */
+static int64_t
+__hist_answer(int b, int64_t max)
+{
+	int64_t lb, ub;
+
 	if (b == 0) return max > 0 ? 1 : 0;   /* values <= 1; max is never < 0 */
 	lb = __hist_bucket_lower_bound(b);
 	ub = __hist_bucket_upper_bound(b);
 	if (max >= lb && (max < ub || b == XTC_HIST_BUCKETS - 1))
 		return max;
 	return ub;
+}
+
+/*
+ * Nearest rank: for each q, the smallest recorded value v with at least
+ * ceil(q * count) values <= v, reported as described above, so >= the
+ * true quantile and within one sub-bucket (1/16) of it.  Two passes over
+ * the shards whatever the number of quantiles: one for the count, one
+ * walk that settles every rank.  The buckets only grow between them, so
+ * the walk reaches every target.  A fixed-bound histogram has no
+ * quantiles: every answer is 0.
+ */
+/* PUBLIC: int xtc_hist_quantiles __P((const xtc_hist_t *, const double *, int,
+ * int64_t *, uint64_t *)); */
+int
+xtc_hist_quantiles(const xtc_hist_t *h, const double *qs, int n, int64_t *out,
+    uint64_t *out_count)
+{
+	uint64_t total, running = 0, lo;
+	int64_t max;
+	int b, i, left;
+
+	if (h == NULL || n < 0 || (n > 0 && (qs == NULL || out == NULL)))
+		return XTC_E_INVAL;
+	total = xtc_hist_count(h);
+	if (out_count != NULL)
+		*out_count = total;
+	for (i = 0; i < n; i++)
+		out[i] = 0;
+	if (h->bshards != NULL || total == 0 || n == 0)
+		return XTC_OK;
+
+	/* Settle the ranks in one walk: each bucket decides every
+	 * quantile whose rank it reaches.  out[i] holds the bucket index
+	 * + 1 until the max is known. */
+	left = n;
+	for (b = 0; b < XTC_HIST_BUCKETS && left > 0; b++) {
+		lo = running;
+		running += __hist_bucket_total(h, b);
+		if (running == lo && b < XTC_HIST_BUCKETS - 1)
+			continue;
+		for (i = 0; i < n; i++)
+			if (out[i] == 0 &&
+			    (running >= __hist_rank(total, qs[i]) ||
+			        b == XTC_HIST_BUCKETS - 1)) {
+				out[i] = b + 1;
+				left--;
+			}
+	}
+	max = xtc_hist_max(h);
+	for (i = 0; i < n; i++)
+		out[i] = __hist_answer(out[i] > 0 ? (int)out[i] - 1 :
+		                                    XTC_HIST_BUCKETS - 1,
+		    max);
+	return XTC_OK;
+}
+
+int64_t
+xtc_hist_quantile(const xtc_hist_t *h, double q)
+{
+	int64_t v = 0;
+	if (xtc_hist_quantiles(h, &q, 1, &v, NULL) != XTC_OK)
+		return 0;
+	return v;
+}
+
+/*
+ * One bucket at a time, lowest first: (lower, upper] in the recorded
+ * unit, and the bucket's count summed over the shards.  A log-linear
+ * histogram visits only its non-empty buckets; a fixed-bound one visits
+ * every bucket, since its bounds are the schema a dashboard keys on.
+ */
+/* PUBLIC: int xtc_hist_iterate __P((const xtc_hist_t *, xtc_hist_bucket_fn,
+ * void *)); */
+int
+xtc_hist_iterate(const xtc_hist_t *h, xtc_hist_bucket_fn fn, void *user)
+{
+	double lower, upper;
+	uint64_t c;
+	int b, n = 0;
+
+	if (h == NULL || fn == NULL)
+		return XTC_E_INVAL;
+	if (h->bshards != NULL) {
+		for (b = 0; b <= h->n_bounds; b++) {
+			lower = b == 0 ? 0.0 : h->bounds[b - 1];
+			upper = b < h->n_bounds ? h->bounds[b] : HUGE_VAL;
+			n++;
+			if (fn(lower, upper, __bhist_bucket_total(h, b),
+			        user) != 0)
+				break;
+		}
+		return n;
+	}
+	for (b = 0; b < XTC_HIST_BUCKETS; b++) {
+		if ((c = __hist_bucket_total(h, b)) == 0)
+			continue;
+		lower =
+		    b == 0 ? 0.0 : (double)(__hist_bucket_lower_bound(b) - 1);
+		upper = b == XTC_HIST_BUCKETS - 1 ?
+		    HUGE_VAL :
+		    (double)__hist_bucket_upper_bound(b);
+		n++;
+		if (fn(lower, upper, c, user) != 0)
+			break;
+	}
+	return n;
+}
+
+/* PUBLIC: int xtc_hist_set_scale __P((xtc_hist_t *, double)); */
+int
+xtc_hist_set_scale(xtc_hist_t *h, double scale)
+{
+	uint64_t bits;
+	if (h == NULL || !(scale > 0.0 && scale < 1e300))
+		return XTC_E_INVAL;
+	memcpy(&bits, &scale, sizeof bits);
+	xtc_atomic_store_u64(&h->scale_bits, bits, xtc_mo_relaxed);
+	return XTC_OK;
+}
+
+static double
+__hist_scale(const xtc_hist_t *h)
+{
+	uint64_t bits = xtc_atomic_load_u64(&h->scale_bits, xtc_mo_relaxed);
+	double scale;
+	memcpy(&scale, &bits, sizeof scale);
+	return scale;
+}
+
+/* v * scale, computed as v / round(1 / scale) when scale is the
+ * reciprocal of a whole number (1e-9, 1e-6, ...): one correctly rounded
+ * division, so 3071 ns prints as 3.071e-06, where 3071 * 1e-9 prints
+ * 3.0710000000000003e-06. */
+static double
+__hist_scaled(double v, double scale)
+{
+	double inv = 1.0 / scale, r;
+	if (scale < 1.0 && inv < 9e15) {
+		r = (double)(int64_t)(inv + 0.5);
+		if (1.0 / r == scale)
+			return v / r;
+	}
+	return v * scale;
 }
 
 /* ---- dist (mergeable online mean/variance) ----
@@ -669,67 +973,310 @@ xtc_metrics_iterate(xtc_metric_visit_fn fn, void *user)
 	return n;
 }
 
-static int
-__dump_prom_visit(const char *name, xtc_metric_kind_t kind,
-    const void *handle, void *user)
+/* PUBLIC: int xtc_metrics_set_help __P((const void *, const char *)); */
+int
+xtc_metrics_set_help(const void *metric, const char *help)
 {
-	int fd = (int)(intptr_t)user;
-	char buf[1024];   /* 6 lines of a 63-byte name + a number each */
-	int n = 0;
-	switch (kind) {
+	struct stats_registry_entry *e;
+	char *copy = NULL, *old = NULL;
+	int rc;
+
+	if (metric == NULL)
+		return XTC_E_INVAL;
+	if (help != NULL && (rc = __os_strdup(help, &copy)) != XTC_OK)
+		return rc;
+	rc = XTC_E_NOTFOUND;
+	(void)__xtc_mtx_lock(&__stats_reg_lock);
+	for (e = __reg_head; e != NULL; e = e->next) {
+		if (e->handle == metric) {
+			old = e->help;
+			e->help = copy;
+			copy = NULL;
+			rc = XTC_OK;
+			break;
+		}
+	}
+	(void)__xtc_mtx_unlock(&__stats_reg_lock);
+	if (old != NULL)
+		__os_free(old);
+	if (copy != NULL)
+		__os_free(copy);
+	return rc;
+}
+
+/*
+ * A growable text buffer for the exposition.  On an allocation failure
+ * it latches `nomem` and drops the rest; the caller reports XTC_E_NOMEM.
+ */
+struct prom_buf {
+	char *p;
+	size_t len, cap;
+	int nomem;
+};
+
+static void __pb_printf(struct prom_buf *b, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+
+static void
+__pb_printf(struct prom_buf *b, const char *fmt, ...)
+{
+	va_list ap;
+	size_t ncap;
+	char *np;
+	int n;
+
+	if (b->nomem)
+		return;
+	for (;;) {
+		va_start(ap, fmt);
+		n = vsnprintf(b->p + b->len, b->cap - b->len, fmt, ap);
+		va_end(ap);
+		if (n < 0) {
+			b->nomem = 1;
+			return;
+		}
+		if ((size_t)n < b->cap - b->len) {
+			b->len += (size_t)n;
+			return;
+		}
+		ncap = b->cap * 2 + (size_t)n;
+		if (__os_realloc(b->p, ncap, (void **)&np) != XTC_OK) {
+			b->nomem = 1;
+			return;
+		}
+		b->p = np;
+		b->cap = ncap;
+	}
+}
+
+/* A sample value: the shortest form that reads back as the same
+ * double, with ".0" on an integral value (as the Prometheus Python
+ * client writes `le`, so vLLM-style bucket labels come out identical);
+ * +Inf, -Inf and NaN as the text format spells them. */
+static void
+__pb_float(struct prom_buf *b, double v)
+{
+	char t[40];
+	int prec;
+
+	if (v != v) {
+		__pb_printf(b, "NaN");
+		return;
+	}
+	if (v > 1.7976931348623157e308) {
+		__pb_printf(b, "+Inf");
+		return;
+	}
+	if (v < -1.7976931348623157e308) {
+		__pb_printf(b, "-Inf");
+		return;
+	}
+	for (prec = 15; prec <= 17; prec++) {
+		(void)snprintf(t, sizeof t, "%.*g", prec, v);
+		if (strtod(t, NULL) == v)
+			break;
+	}
+	if (strpbrk(t, ".en") == NULL)
+		__pb_printf(b, "%s.0", t);
+	else
+		__pb_printf(b, "%s", t);
+}
+
+/* The family name: every character outside [a-zA-Z0-9_:] becomes '_',
+ * and a leading digit gets a '_' in front ("rexis.requests" ->
+ * "rexis_requests"). */
+static void
+__prom_name(char *out, size_t outsz, const char *name)
+{
+	size_t i = 0, o = 0;
+	char c;
+
+	if (name[0] >= '0' && name[0] <= '9' && o + 1 < outsz)
+		out[o++] = '_';
+	for (; name[i] != '\0' && o + 1 < outsz; i++) {
+		c = name[i];
+		out[o++] = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		               (c >= '0' && c <= '9') || c == '_' || c == ':') ?
+		    c :
+		    '_';
+	}
+	if (o == 0 && o + 1 < outsz)
+		out[o++] = '_';
+	out[o] = '\0';
+}
+
+/* # HELP (escaped: backslash and newline) and # TYPE lines. */
+static void
+__prom_header(struct prom_buf *b, const char *n, const char *help,
+    const char *type)
+{
+	const char *c;
+
+	if (help != NULL) {
+		__pb_printf(b, "# HELP %s ", n);
+		for (c = help; *c != '\0'; c++) {
+			if (*c == '\\')
+				__pb_printf(b, "\\\\");
+			else if (*c == '\n')
+				__pb_printf(b, "\\n");
+			else
+				__pb_printf(b, "%c", *c);
+		}
+		__pb_printf(b, "\n");
+	}
+	__pb_printf(b, "# TYPE %s %s\n", n, type);
+}
+
+static void
+__prom_bucket(struct prom_buf *b, const char *n, double le, uint64_t cum)
+{
+	__pb_printf(b, "%s_bucket{le=\"", n);
+	__pb_float(b, le);
+	__pb_printf(b, "\"} %llu\n", (unsigned long long)cum);
+}
+
+/*
+ * A histogram family: cumulative _bucket{le=...} series ending in +Inf,
+ * then _sum and _count.  A fixed-bound histogram writes every bound, so
+ * the series a dashboard keys on are always present; a log-linear one
+ * writes the buckets that have ever held a value (they never empty).
+ * Bounds and the sum are multiplied by the histogram's scale.
+ */
+static void
+__prom_hist(struct prom_buf *b, const char *n, const xtc_hist_t *h)
+{
+	uint64_t cum = 0, c;
+	double scale = __hist_scale(h);
+	int i;
+
+	/* One pass, so _count is exactly the +Inf bucket even while other
+	 * threads record. */
+	if (h->bshards != NULL) {
+		for (i = 0; i <= h->n_bounds; i++) {
+			cum += __bhist_bucket_total(h, i);
+			if (i < h->n_bounds)
+				__prom_bucket(b, n,
+				    __hist_scaled(h->bounds[i], scale), cum);
+		}
+	} else {
+		for (i = 0; i < XTC_HIST_BUCKETS; i++) {
+			if ((c = __hist_bucket_total(h, i)) == 0)
+				continue;
+			cum += c;
+			if (i < XTC_HIST_BUCKETS - 1)
+				__prom_bucket(b, n,
+				    __hist_scaled((double)
+				                      __hist_bucket_upper_bound(
+				                          i),
+				        scale),
+				    cum);
+		}
+	}
+	__prom_bucket(b, n, HUGE_VAL, cum);
+	__pb_printf(b, "%s_sum ", n);
+	__pb_float(b, __hist_scaled(xtc_hist_sum(h), scale));
+	__pb_printf(b, "\n%s_count %llu\n", n, (unsigned long long)cum);
+}
+
+/* One registry entry as one family (two for a dist). */
+static void
+__prom_entry(struct prom_buf *b, const struct stats_registry_entry *e)
+{
+	char n[XTC_STATS_NAME_MAX + 2];
+	uint64_t cnt;
+	double mean;
+
+	__prom_name(n, sizeof n, e->name);
+	switch (e->kind) {
 	case XTC_METRIC_COUNTER:
-		n = snprintf(buf, sizeof buf,
-		    "# TYPE %s counter\n%s %llu\n", name, name,
+		__prom_header(b, n, e->help, "counter");
+		__pb_printf(b, "%s %llu\n", n,
 		    (unsigned long long)xtc_counter_read(
-		        (const xtc_counter_t *)handle));
+		        (const xtc_counter_t *)e->handle));
 		break;
 	case XTC_METRIC_GAUGE:
-		n = snprintf(buf, sizeof buf,
-		    "# TYPE %s gauge\n%s %lld\n", name, name,
-		    (long long)xtc_gauge_read(
-		        (const xtc_gauge_t *)handle));
+		__prom_header(b, n, e->help, "gauge");
+		__pb_printf(b, "%s %lld\n", n,
+		    (long long)xtc_gauge_read((const xtc_gauge_t *)e->handle));
 		break;
-	case XTC_METRIC_HIST: {
-		const xtc_hist_t *h = (const xtc_hist_t *)handle;
-		uint64_t cnt = xtc_hist_count(h);
-		int64_t p50 = xtc_hist_quantile(h, 0.50);
-		int64_t p99 = xtc_hist_quantile(h, 0.99);
-		int64_t p999 = xtc_hist_quantile(h, 0.999);
-		int64_t max = xtc_hist_max(h);
-		n = snprintf(buf, sizeof buf,
-		    "# TYPE %s histogram\n"
-		    "%s_count %llu\n"
-		    "%s_p50 %lld\n"
-		    "%s_p99 %lld\n"
-		    "%s_p999 %lld\n"
-		    "%s_max %lld\n",
-		    name, name, (unsigned long long)cnt,
-		    name, (long long)p50,
-		    name, (long long)p99,
-		    name, (long long)p999,
-		    name, (long long)max);
+	case XTC_METRIC_HIST:
+		__prom_header(b, n, e->help, "histogram");
+		__prom_hist(b, n, (const xtc_hist_t *)e->handle);
 		break;
-	}
-	case XTC_METRIC_DIST: {
-		const xtc_dist_t *dd = (const xtc_dist_t *)handle;
-		n = snprintf(buf, sizeof buf,
-		    "# TYPE %s summary\n"
-		    "%s_count %llu\n"
-		    "%s_mean %.17g\n"
-		    "%s_variance %.17g\n"
-		    "%s_stddev %.17g\n",
-		    name, name,
-		    (unsigned long long)xtc_dist_count(dd),
-		    name, xtc_dist_mean(dd),
-		    name, xtc_dist_variance(dd),
-		    name, xtc_dist_stddev(dd));
+	case XTC_METRIC_DIST:
+		/* A summary with no quantiles: mean = _sum / _count.  The
+		 * standard deviation, which a summary cannot carry, is its
+		 * own gauge family. */
+		cnt = xtc_dist_count((const xtc_dist_t *)e->handle);
+		mean = xtc_dist_mean((const xtc_dist_t *)e->handle);
+		__prom_header(b, n, e->help, "summary");
+		__pb_printf(b, "%s_sum ", n);
+		__pb_float(b, mean * (double)cnt);
+		__pb_printf(b, "\n%s_count %llu\n", n, (unsigned long long)cnt);
+		if (e->help != NULL)
+			__pb_printf(b,
+			    "# HELP %s_stddev standard deviation of "
+			    "%s\n",
+			    n, n);
+		__pb_printf(b, "# TYPE %s_stddev gauge\n%s_stddev ", n, n);
+		__pb_float(b, xtc_dist_stddev((const xtc_dist_t *)e->handle));
+		__pb_printf(b, "\n");
 		break;
 	}
+}
+
+/*
+ * Render every registered metric in the Prometheus text format (0.0.4)
+ * into one buffer under the registry lock, then hand the page to fn
+ * with no lock held, so fn may block or park.
+ */
+/* PUBLIC: int xtc_metrics_write_prometheus __P((xtc_metrics_write_fn, void *));
+ */
+int
+xtc_metrics_write_prometheus(xtc_metrics_write_fn fn, void *user)
+{
+	struct stats_registry_entry *e;
+	struct prom_buf b;
+	int n = 0, rc;
+
+	if (fn == NULL)
+		return XTC_E_INVAL;
+	memset(&b, 0, sizeof b);
+	b.cap = 4096;
+	if ((rc = __os_malloc(b.cap, (void **)&b.p)) != XTC_OK)
+		return rc;
+	b.p[0] = '\0';
+	(void)__xtc_mtx_lock(&__stats_reg_lock);
+	for (e = __reg_head; e != NULL && !b.nomem; e = e->next) {
+		__prom_entry(&b, e);
+		n++;
 	}
-	if (n >= (int)sizeof buf) n = (int)sizeof buf - 1;   /* never write past buf */
-	if (n > 0 && fd >= 0) {
-		ssize_t w = write(fd, buf, (size_t)n);  /* XTC_BLOCKING_OK: dump path */
-		(void)w;
+	(void)__xtc_mtx_unlock(&__stats_reg_lock);
+	if (b.nomem)
+		rc = XTC_E_NOMEM;
+	else if (fn(b.p, b.len, user) != 0)
+		rc = XTC_E_IO;
+	else
+		rc = n;
+	__os_free(b.p);
+	return rc;
+}
+
+/* Write all of buf to the fd, retrying short writes and EINTR. */
+static int
+__prom_fd_sink(const char *buf, size_t len, void *user)
+{
+	int fd = (int)(intptr_t)user;
+	ssize_t w;
+
+	while (len > 0) {
+		w = write(fd, buf, len); /* XTC_BLOCKING_OK: dump path */
+		if (w < 0 && errno == EINTR)
+			continue;
+		if (w <= 0)
+			return -1;
+		buf += w;
+		len -= (size_t)w;
 	}
 	return 0;
 }
@@ -738,7 +1285,8 @@ int
 xtc_metrics_dump_prometheus(int fd)
 {
 	if (fd < 0) return XTC_E_INVAL;
-	return xtc_metrics_iterate(__dump_prom_visit, (void *)(intptr_t)fd);
+	return xtc_metrics_write_prometheus(__prom_fd_sink,
+	    (void *)(intptr_t)fd);
 }
 
 /*

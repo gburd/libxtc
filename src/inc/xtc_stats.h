@@ -103,11 +103,17 @@ typedef int (*xtc_tuning_fn)(const xtc_tuning_finding_t *f, void *user);
  * PUBLIC: int64_t   xtc_gauge_read __P((const xtc_gauge_t *));
  *
  * PUBLIC: int       xtc_hist_create __P((const char *, xtc_hist_t **));
+ * PUBLIC: int       xtc_hist_create_bounds __P((const char *, const double *, int, xtc_hist_t **));
  * PUBLIC: void      xtc_hist_destroy __P((xtc_hist_t *));
  * PUBLIC: void      xtc_hist_record __P((xtc_hist_t *, int64_t));
+ * PUBLIC: void      xtc_hist_record_value __P((xtc_hist_t *, double));
  * PUBLIC: int64_t   xtc_hist_quantile __P((const xtc_hist_t *, double));
+ * PUBLIC: int       xtc_hist_quantiles __P((const xtc_hist_t *, const double *, int, int64_t *, uint64_t *));
  * PUBLIC: uint64_t  xtc_hist_count __P((const xtc_hist_t *));
  * PUBLIC: int64_t   xtc_hist_max __P((const xtc_hist_t *));
+ * PUBLIC: double    xtc_hist_sum __P((const xtc_hist_t *));
+ * PUBLIC: int       xtc_hist_iterate __P((const xtc_hist_t *, xtc_hist_bucket_fn, void *));
+ * PUBLIC: int       xtc_hist_set_scale __P((xtc_hist_t *, double));
  *
  * PUBLIC: int       xtc_dist_create __P((const char *, xtc_dist_t **));
  * PUBLIC: void      xtc_dist_destroy __P((xtc_dist_t *));
@@ -119,6 +125,8 @@ typedef int (*xtc_tuning_fn)(const xtc_tuning_finding_t *f, void *user);
  *
  * PUBLIC: int       xtc_metrics_iterate __P((xtc_metric_visit_fn, void *));
  * PUBLIC: int       xtc_metrics_dump_prometheus __P((int));
+ * PUBLIC: int       xtc_metrics_write_prometheus __P((xtc_metrics_write_fn, void *));
+ * PUBLIC: int       xtc_metrics_set_help __P((const void *, const char *));
  *
  * PUBLIC: void      xtc_tuning_check __P((void));
  * PUBLIC: int       xtc_tuning_check_ex __P((xtc_tuning_fn, void *));
@@ -143,6 +151,65 @@ XTC_API int64_t   xtc_hist_quantile(const xtc_hist_t *h, double q);
 XTC_API uint64_t  xtc_hist_count(const xtc_hist_t *h);
 XTC_API int64_t   xtc_hist_max(const xtc_hist_t *h);
 
+/*
+ * A histogram with the caller's bucket upper bounds instead of the
+ * log-linear ones: n_bounds (1..64) finite values, >= 0 and strictly
+ * ascending, copied at creation; a +Inf bucket is implicit.  A value v
+ * counts in the first bucket whose bound is >= v (Prometheus's `le`),
+ * so the exposition carries exactly these `le` labels and a dashboard
+ * written against them (vLLM's TTFT bounds, say) works unchanged.
+ * Values are unit-free doubles: record them with xtc_hist_record_value
+ * (xtc_hist_record converts its integer).  It keeps counts and a sum
+ * only: xtc_hist_quantile, _quantiles and _max answer 0.
+ * XTC_E_INVAL for a NULL argument or bad bounds.
+ */
+XTC_API int       xtc_hist_create_bounds(const char *name,
+                      const double *upper_bounds, int n_bounds,
+                      xtc_hist_t **out);
+
+/* Record a unit-free value: into a fixed-bound histogram as is, into a
+ * log-linear one rounded to an integer.  Negative and NaN count as 0. */
+XTC_API void      xtc_hist_record_value(xtc_hist_t *h, double v);
+
+/*
+ * Several quantiles, and the count, from one merge of the shards:
+ * xtc_hist_quantile merges every shard on each call, so a reader that
+ * wants p50, p99 and the count pays one merge here instead of three.
+ * out[i] answers qs[i] (n >= 0; out_count may be NULL).  XTC_OK, or
+ * XTC_E_INVAL for a NULL h, or NULL qs/out with n > 0.
+ */
+XTC_API int       xtc_hist_quantiles(const xtc_hist_t *h, const double *qs,
+                      int n, int64_t *out, uint64_t *out_count);
+
+/* The sum of every recorded value (a negative xtc_hist_record value
+ * counts as 0, as in its bucket).  A log-linear sum is exact below
+ * 2^53 and wraps at 2^64, which a scrape reads as a counter reset. */
+XTC_API double    xtc_hist_sum(const xtc_hist_t *h);
+
+/*
+ * Visit the buckets lowest first: fn(lower, upper, count, user) for the
+ * bucket (lower, upper] (the first also holds 0; upper is HUGE_VAL for
+ * the last one), count merged over the shards and not cumulative.  A
+ * log-linear histogram visits only its non-empty buckets, a fixed-bound
+ * one every bucket.
+ * Bounds are in the recorded unit (the scale does not apply).  Returns
+ * the number of buckets visited (a nonzero fn return stops after that
+ * one), or XTC_E_INVAL.
+ */
+typedef int (*xtc_hist_bucket_fn)(double lower, double upper,
+                                  uint64_t count, void *user);
+XTC_API int       xtc_hist_iterate(const xtc_hist_t *h, xtc_hist_bucket_fn fn,
+                      void *user);
+
+/*
+ * The factor the Prometheus exposition multiplies this histogram's
+ * bucket bounds and sum by (default 1.0): 1e-9 exposes a nanosecond
+ * histogram in seconds, the Prometheus base unit (name it *_seconds).
+ * The recorded values and every other accessor are unaffected.
+ * XTC_E_INVAL for a NULL h or a scale that is not a positive number.
+ */
+XTC_API int       xtc_hist_set_scale(xtc_hist_t *h, double scale);
+
 XTC_API int       xtc_dist_create(const char *name, xtc_dist_t **out);
 XTC_API void      xtc_dist_destroy(xtc_dist_t *d);
 XTC_API void      xtc_dist_record(xtc_dist_t *d, double value);
@@ -152,7 +219,45 @@ XTC_API double    xtc_dist_variance(const xtc_dist_t *d);
 XTC_API double    xtc_dist_stddev(const xtc_dist_t *d);
 
 XTC_API int       xtc_metrics_iterate(xtc_metric_visit_fn fn, void *user);
+
+/*
+ * The registry in the Prometheus text exposition format (0.0.4), which
+ * `promtool check metrics` accepts.  Each metric is one family named
+ * after it with every character outside [a-zA-Z0-9_:] made '_'
+ * ("rexis.requests" -> rexis_requests), led by its help text if it has
+ * one (xtc_metrics_set_help):
+ *   counter    # TYPE counter, one sample
+ *   gauge      # TYPE gauge, one sample
+ *   hist       # TYPE histogram: cumulative _bucket{le="..."} through
+ *              le="+Inf", _sum, _count.  A fixed-bound histogram writes
+ *              every bound; a log-linear one the upper bound of each
+ *              bucket that ever held a value.  Bounds and _sum are
+ *              multiplied by xtc_hist_set_scale's factor.
+ *   dist       # TYPE summary with _sum and _count (mean = _sum /
+ *              _count) and no quantiles, then a <name>_stddev gauge.
+ * The counter suffix (_total) and the unit (_seconds) are the
+ * registered name's job.  Through 2.1 a hist was _count/_p50/_p99/
+ * _p999/_max and a dist _count/_mean/_variance/_stddev, which Prometheus
+ * rejects; read quantiles with xtc_hist_quantiles instead.
+ *
+ * xtc_metrics_write_prometheus renders the whole page into one buffer
+ * and calls fn(buf, len, user) once, with no lock held (fn may block or
+ * park); xtc_metrics_dump_prometheus writes it to fd.  Both return the
+ * number of metrics written, or XTC_E_INVAL, XTC_E_NOMEM, or XTC_E_IO
+ * (fn returned nonzero, or a write(2) failed).
+ */
+typedef int (*xtc_metrics_write_fn)(const char *buf, size_t len, void *user);
+XTC_API int       xtc_metrics_write_prometheus(xtc_metrics_write_fn fn,
+                      void *user);
 XTC_API int       xtc_metrics_dump_prometheus(int fd);
+
+/*
+ * Attach help text (copied) to a registered counter, gauge, hist or dist
+ * handle: the # HELP line of its family.  NULL removes it.  XTC_OK,
+ * XTC_E_NOTFOUND if the handle is not registered, XTC_E_INVAL, or
+ * XTC_E_NOMEM.
+ */
+XTC_API int       xtc_metrics_set_help(const void *metric, const char *help);
 
 /*
  * Run libxtc's host-tuning advisor: a battery of cheap, read-only

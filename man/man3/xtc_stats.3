@@ -15,10 +15,16 @@
 .Nm xtc_gauge_read ,
 .Nm xtc_gauge_destroy ,
 .Nm xtc_hist_create ,
+.Nm xtc_hist_create_bounds ,
 .Nm xtc_hist_record ,
+.Nm xtc_hist_record_value ,
 .Nm xtc_hist_quantile ,
+.Nm xtc_hist_quantiles ,
 .Nm xtc_hist_count ,
 .Nm xtc_hist_max ,
+.Nm xtc_hist_sum ,
+.Nm xtc_hist_iterate ,
+.Nm xtc_hist_set_scale ,
 .Nm xtc_hist_destroy ,
 .Nm xtc_dist_create ,
 .Nm xtc_dist_record ,
@@ -29,6 +35,8 @@
 .Nm xtc_dist_destroy ,
 .Nm xtc_metrics_iterate ,
 .Nm xtc_metrics_dump_prometheus ,
+.Nm xtc_metrics_write_prometheus ,
+.Nm xtc_metrics_set_help ,
 .Nm xtc_tuning_check ,
 .Nm xtc_tuning_check_ex
 .Nd runtime statistics: counters, gauges, histograms
@@ -55,14 +63,26 @@
 .Fn xtc_gauge_destroy "xtc_gauge_t *g"
 .Ft int
 .Fn xtc_hist_create "const char *name" "xtc_hist_t **out"
+.Ft int
+.Fn xtc_hist_create_bounds "const char *name" "const double *upper_bounds" "int n_bounds" "xtc_hist_t **out"
 .Ft void
 .Fn xtc_hist_record "xtc_hist_t *h" "int64_t value_ns"
+.Ft void
+.Fn xtc_hist_record_value "xtc_hist_t *h" "double v"
 .Ft int64_t
 .Fn xtc_hist_quantile "const xtc_hist_t *h" "double q"
+.Ft int
+.Fn xtc_hist_quantiles "const xtc_hist_t *h" "const double *qs" "int n" "int64_t *out" "uint64_t *out_count"
 .Ft uint64_t
 .Fn xtc_hist_count "const xtc_hist_t *h"
 .Ft int64_t
 .Fn xtc_hist_max "const xtc_hist_t *h"
+.Ft double
+.Fn xtc_hist_sum "const xtc_hist_t *h"
+.Ft int
+.Fn xtc_hist_iterate "const xtc_hist_t *h" "xtc_hist_bucket_fn fn" "void *user"
+.Ft int
+.Fn xtc_hist_set_scale "xtc_hist_t *h" "double scale"
 .Ft void
 .Fn xtc_hist_destroy "xtc_hist_t *h"
 .Ft int
@@ -83,6 +103,10 @@
 .Fn xtc_metrics_iterate "xtc_metric_visit_fn fn" "void *user"
 .Ft int
 .Fn xtc_metrics_dump_prometheus "int fd"
+.Ft int
+.Fn xtc_metrics_write_prometheus "xtc_metrics_write_fn fn" "void *user"
+.Ft int
+.Fn xtc_metrics_set_help "const void *metric" "const char *help"
 .Ft void
 .Fn xtc_tuning_check "void"
 .Ft int
@@ -140,10 +164,12 @@ The buckets are log-linear: 40 powers of two from 1 ns to
 Values below 16 are exact; a larger value's bucket is at most 1/16 of
 the value wide.
 Each shard also keeps the exact largest value it recorded.
-A record is one atomic add to its bucket and one relaxed load of the
-shard's maximum
+A record is one atomic add to its bucket, one to the shard's sum, and
+one relaxed load of the shard's maximum
 .Pq a compare-and-swap only for a new maximum ;
 the count is the sum of the buckets, computed on read.
+The sum, new in 2.2, costs about 5 ns per record
+.Pq 8.2 to 13.1 ns uncontended on one x86-64 core .
 .Fn xtc_hist_quantile
 returns the nearest-rank quantile: the smallest recorded value
 .Fa v
@@ -166,14 +192,81 @@ raise the maximum.
 .Fn xtc_hist_max
 returns the largest value recorded
 .Pq 0 for an empty histogram ,
-and
 .Fn xtc_hist_count
-the number of values.
+the number of values, and
+.Fn xtc_hist_sum
+their sum
+.Pq a negative value counts as 0, as in its bucket; exact below 2^53, and it wraps at 2^64, which a scrape reads as a counter reset .
 In 1.59 and earlier the top bucket was 2^24 ns
 .Pq 16.8 ms ,
 every larger value was counted there, a quantile was the bucket's
 .Em lower
 bound, and there was no maximum: a 500 ms stall read as about 16 ms.
+.Fn xtc_hist_quantile
+merges every shard on each call;
+.Fn xtc_hist_quantiles
+answers
+.Fa n
+quantiles
+.Fa ( qs[i]
+into
+.Fa out[i] )
+and the count
+.Pq into Fa out_count , which may be Dv NULL
+from two passes over the shards, so a reader that wants p50, p99 and
+the count pays for one quantile instead of three.
+.Fn xtc_hist_iterate
+calls
+.Fa fn Ns (lower, upper, count, user)
+for each non-empty bucket, lowest first: the bucket holds the values
+above
+.Fa lower
+and up to
+.Fa upper
+.Pq the first also holds 0; the last bucket's upper is Dv HUGE_VAL ,
+and count is merged over the shards, not cumulative.
+It returns the number of buckets visited
+.Pq a nonzero return from Fa fn stops after that one .
+.Pp
+.Fn xtc_hist_create_bounds
+makes a histogram with the caller's bucket upper bounds instead:
+.Fa n_bounds
+.Pq 1 to 64
+finite values, at least 0 and strictly ascending, copied at creation,
+with an implicit +Inf bucket.
+A value counts in the first bucket whose bound is at or above it
+.Pq Prometheus's Li le ,
+so its exposition carries exactly those
+.Li le
+labels and a dashboard written against them
+.Pq vLLM's time-to-first-token bounds, say
+works unchanged.
+Its values are unit-free doubles:
+.Fn xtc_hist_record_value
+records one as is
+.Pq into a log-linear histogram, rounded to an integer ,
+and
+.Fn xtc_hist_record
+converts its integer.
+Negative and NaN values count as 0.
+A fixed-bound histogram keeps counts and a sum only:
+.Fn xtc_hist_quantile ,
+.Fn xtc_hist_quantiles
+and
+.Fn xtc_hist_max
+answer 0, and
+.Fn xtc_hist_iterate
+visits every bucket, empty or not.
+A record is a binary search over the bounds, one atomic add to the
+bucket, and a compare-and-swap on the shard's sum.
+.Pp
+.Fn xtc_hist_set_scale
+sets the factor the Prometheus exposition multiplies the histogram's
+bucket bounds and sum by
+.Pq default 1.0 ;
+1e-9 exposes a nanosecond histogram in seconds, the Prometheus base
+unit.
+The recorded values and every other accessor are unaffected.
 .It
 Dists are per-CPU sharded.
 Each shard holds a Welford triple
@@ -243,52 +336,135 @@ and
 pair register and release a dist the same way.
 The registry supports walking via
 .Fn xtc_metrics_iterate
-or dumping in Prometheus exposition format via
-.Fn xtc_metrics_dump_prometheus
-to a file descriptor.
+or rendering in the Prometheus text exposition format
+.Pq see Sx PROMETHEUS OUTPUT .
+.Fn xtc_metrics_set_help
+attaches help text
+.Pq copied; Dv NULL removes it
+to a registered counter, gauge, histogram or dist handle; it becomes
+the family's
+.Li # HELP
+line, with backslash and newline escaped.
+It returns
+.Dv XTC_E_NOTFOUND
+for a handle that is not registered.
 .Sh EXAMPLES
 .Bd -literal -offset indent
+static const double ttft_bounds[] = {
+	0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5,
+	0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0, 160.0,
+	640.0, 2560.0
+};
 xtc_counter_t *requests;
-xtc_hist_t    *latency;
+xtc_hist_t    *latency, *ttft;
 
-xtc_counter_create("rexis.requests", &requests);
-xtc_hist_create  ("rexis.req_latency_ns", &latency);
+xtc_counter_create("rexis_requests_total", &requests);
+xtc_hist_create("rexis_req_latency_seconds", &latency);
+xtc_hist_set_scale(latency, 1e-9);      /* recorded in ns */
+xtc_hist_create_bounds("rexis_time_to_first_token_seconds",
+    ttft_bounds, 22, &ttft);
+xtc_metrics_set_help(ttft, "Time to first token in seconds.");
 
 /* Hot path: */
-int64_t t0 = now_ns();
+int64_t t0 = xtc_clock_mono();
 handle_request();
 xtc_counter_inc(requests);
-xtc_hist_record(latency, now_ns() - t0);
+xtc_hist_record(latency, xtc_clock_mono() - t0);
+xtc_hist_record_value(ttft, first_token_s);
 
-/* Periodic dump (e.g. via xtc_timer): */
-xtc_metrics_dump_prometheus(scrape_fd);
+/* The scrape handler: */
+xtc_metrics_write_prometheus(send_page, conn);
 .Ed
 .Sh PROMETHEUS OUTPUT
+.Fn xtc_metrics_write_prometheus
+renders every registered metric in the Prometheus text exposition
+format, version 0.0.4, into one buffer under the registry lock, then
+calls
+.Fa fn Ns (buf, len, user)
+once with no lock held, so
+.Fa fn
+may block or park.
 .Fn xtc_metrics_dump_prometheus
-emits, for each metric:
+writes the same page to
+.Fa fd ,
+retrying short writes.
+Both return the number of metrics written, or
+.Dv XTC_E_INVAL ,
+.Dv XTC_E_NOMEM ,
+or
+.Dv XTC_E_IO
+(when
+.Fa fn
+returns nonzero or a write fails).
+.Pp
+Each metric is one family named after it with every character outside
+[a-zA-Z0-9_:] made
+.Sq _
+and a leading digit prefixed with one
+.Pq Li rexis.requests No becomes Li rexis_requests .
+The counter suffix
+.Pq Li _total
+and the unit
+.Pq Li _seconds
+are the registered name's job.
+A histogram writes cumulative
+.Li _bucket{le="..."}
+samples ending in
+.Li le="+Inf" ,
+then
+.Li _sum
+and
+.Li _count ;
+a fixed-bound one writes every bound, a log-linear one the upper bound
+of each bucket that has ever held a value.
+A dist is a
+.Li summary
+with
+.Li _sum
+and
+.Li _count
+.Pq mean = sum / count
+and no quantiles, followed by a
+.Li <name>_stddev
+gauge.
+For the example above:
 .Bd -literal -offset indent
-# TYPE rexis.requests counter
-rexis.requests 12345
-# TYPE rexis.queue_depth gauge
-rexis.queue_depth 42
-# TYPE rexis.req_latency_ns histogram
-rexis.req_latency_ns_count 12345
-rexis.req_latency_ns_p50 1500
-rexis.req_latency_ns_p99 9800
-rexis.req_latency_ns_p999 24000
-rexis.req_latency_ns_max 183167000
-# TYPE rexis.batch_size summary
-rexis.batch_size_count 12345
-rexis.batch_size_mean 37.5
-rexis.batch_size_variance 12.25
-rexis.batch_size_stddev 3.5
+# HELP rexis_time_to_first_token_seconds Time to first token in seconds.
+# TYPE rexis_time_to_first_token_seconds histogram
+rexis_time_to_first_token_seconds_bucket{le="0.001"} 0
+rexis_time_to_first_token_seconds_bucket{le="0.005"} 12
+\&...
+rexis_time_to_first_token_seconds_bucket{le="2560.0"} 931
+rexis_time_to_first_token_seconds_bucket{le="+Inf"} 931
+rexis_time_to_first_token_seconds_sum 61.42
+rexis_time_to_first_token_seconds_count 931
+# TYPE rexis_req_latency_seconds histogram
+rexis_req_latency_seconds_bucket{le="1.023e-06"} 4
+\&...
+rexis_req_latency_seconds_bucket{le="+Inf"} 12345
+rexis_req_latency_seconds_sum 18.517
+rexis_req_latency_seconds_count 12345
+# TYPE rexis_requests_total counter
+rexis_requests_total 12345
 .Ed
 .Pp
-A trivial scrape server reads
-.Fa fd
-and forwards to HTTP.  See
-.Pa examples/05_rexis/metrics.c
-for an example dump-on-timer pattern.
+Through 2.1 a histogram was written as
+.Li _count , _p50 , _p99 , _p999
+and
+.Li _max ,
+a dist as
+.Li _mean , _variance
+and
+.Li _stddev ,
+and names were not sanitized: Prometheus rejects such a page.
+Read quantiles with
+.Fn xtc_hist_quantiles
+instead.
+.Pp
+A scrape handler hands the page from
+.Fn xtc_metrics_write_prometheus
+to its HTTP response; see
+.Pa docs/_includes/snippets/stats_prometheus.c .
 .Pp
 .Fn xtc_tuning_check
 runs libxtc's host-tuning advisor: cheap, read-only probes (CPU
@@ -384,5 +560,14 @@ for per-carrier internals).
 .Xr perf-stat 1
 .Sh HISTORY
 Appeared in xtc 0.1.
-.Fn xtc_tuning_check_ex
-appeared in xtc 2.2.
+.Fn xtc_tuning_check_ex ,
+.Fn xtc_hist_create_bounds ,
+.Fn xtc_hist_record_value ,
+.Fn xtc_hist_quantiles ,
+.Fn xtc_hist_sum ,
+.Fn xtc_hist_iterate ,
+.Fn xtc_hist_set_scale ,
+.Fn xtc_metrics_write_prometheus
+and
+.Fn xtc_metrics_set_help
+appeared in xtc 2.2, as did the valid Prometheus exposition.

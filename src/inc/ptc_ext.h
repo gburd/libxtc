@@ -4,6 +4,7 @@
 #ifndef PTC_EXT_H
 #define PTC_EXT_H
 
+double xtc_hist_sum __P((const xtc_hist_t *));
 int   xtc_proc_set_class __P((xtc_exec_class_t));
 int   xtc_proc_set_userdata __P((void *));
 int  xtc_cfg_get_string_copy __P((const char *, char **));
@@ -49,10 +50,16 @@ int xtc_exit_pid __P((xtc_pid_t, int));
 int xtc_exit_pid_deadline __P((xtc_pid_t, int, int64_t, int *));
 int xtc_exit_self __P((int));
 int xtc_fault_guard_install __P((void));
+int xtc_hist_create_bounds __P((const char *, const double *, int, xtc_hist_t **));
+int xtc_hist_iterate __P((const xtc_hist_t *, xtc_hist_bucket_fn, void *));
+int xtc_hist_quantiles __P((const xtc_hist_t *, const double *, int, int64_t *, uint64_t *));
+int xtc_hist_set_scale __P((xtc_hist_t *, double));
 int xtc_inject_check __P((const char *));
 int xtc_link __P((xtc_pid_t));
 int xtc_mask_enter __P((void));
 int xtc_mask_leave __P((void));
+int xtc_metrics_set_help __P((const void *, const char *));
+int xtc_metrics_write_prometheus __P((xtc_metrics_write_fn, void *));
 int xtc_monitor __P((xtc_pid_t, uint64_t *));
 int xtc_preempt_arm __P((int64_t));
 int xtc_preempt_disarm __P((void));
@@ -112,6 +119,7 @@ void xtc_atomic_pid_store __P((xtc_atomic_pid_t *, xtc_pid_t));
 void xtc_batch_router_destroy __P((xtc_batch_router_t *));
 void xtc_dispatch_handle_free __P((xtc_dispatch_handle_t *));
 void xtc_dump __P((int));
+void xtc_hist_record_value __P((xtc_hist_t *, double));
 void xtc_lwlock_track_enable __P((int));
 void xtc_lwlock_track_reset __P((void));
 void xtc_lwlock_track_set_handler __P((xtc_lwlock_track_fn, void *));

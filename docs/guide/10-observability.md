@@ -173,7 +173,14 @@ something reads it:
   the property that matters below. They span 1 ns to 2^40 ns (about 18
   minutes) at 16 buckets per power of two; a quantile is its bucket's upper
   bound, so it is never below the true value and at most 1/16 above it, and
-  `xtc_hist_max` is exact.
+  `xtc_hist_max` and `xtc_hist_sum` are exact. `xtc_hist_quantiles` answers
+  several quantiles from one merge, and `xtc_hist_iterate` hands out the
+  buckets themselves for an HDR or OpenMetrics export.
+- **Fixed-bound histograms** (`xtc_hist_create_bounds`) take the caller's
+  bucket upper bounds and unit-free values (`xtc_hist_record_value`), for
+  metrics whose bounds are a published schema: vLLM's time-to-first-token
+  or tokens-per-step buckets, which Grafana dashboards and alerts key on.
+  They keep counts and a sum, sharded the same way.
 - **Gauges** are a single atomic `int64_t`: wait-free reads, atomic-store
   writes, for a value that moves up and down (queue depth, live connections).
 - **`xtc_dist`** adds mergeable online mean/variance: each shard keeps a
@@ -222,11 +229,12 @@ approximate quantiles actually combine.
 **3. A `MetricRegistry` + reporter framework (Dropwizard's `ConsoleReporter`,
 `JmxReporter`, `GraphiteReporter`, `CsvReporter`).** Not re-incorporated,
 because libxtc already has the parts worth having: a registry you walk with
-`xtc_metrics_iterate`, and a Prometheus text dump via
-`xtc_metrics_dump_prometheus`. Additional transports -- Graphite, JMX, CSV, a
-push gateway -- are a consumer integration choice, not a library concern. We
-expose the data and the iterator; the consumer wires whatever transport its
-deployment already speaks.
+`xtc_metrics_iterate`, and the Prometheus text exposition via
+`xtc_metrics_write_prometheus` (to a callback, for an HTTP handler) or
+`xtc_metrics_dump_prometheus` (to an fd). Additional transports -- Graphite,
+JMX, CSV, a push gateway -- are a consumer integration choice, not a library
+concern. We expose the data and the iterator; the consumer wires whatever
+transport its deployment already speaks.
 
 **4. Probability distributions, statistical inference, and regression (the
 bulk of Apache Commons Statistics: roughly 35 distributions, t-tests, ANOVA,
@@ -261,3 +269,17 @@ for a cohesive view.
 The rate over a window is still the monitoring layer's `rate()` over
 `demo.ops`; the library's job ends at exposing the raw count and the
 mergeable distribution.
+
+### A Prometheus /metrics page
+
+`xtc_metrics_write_prometheus` renders the registry in the Prometheus text
+format and hands the page to a callback with no lock held. Each metric is one
+family; a histogram is the standard cumulative `_bucket{le="..."}` series with
+`_sum` and `_count`, and names are made legal (`rexis.requests` becomes
+`rexis_requests`). `xtc_metrics_set_help` gives a family its `# HELP` line, and
+`xtc_hist_set_scale(h, 1e-9)` exposes a nanosecond histogram in seconds, the
+Prometheus base unit. Through 2.1 the dump wrote `_p50`/`_p99` samples under a
+`histogram` type, which Prometheus rejects; the page below passes
+`promtool check metrics`.
+
+{% include snippet.html file="stats_prometheus.c" region="full" %}

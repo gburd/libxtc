@@ -230,6 +230,37 @@ header said it returns the prior default; it returns `XTC_OK`, and the
 header now says so.  The new `xtc_log_swap_default(log, &prev)` returns
 the replaced logger in one atomic exchange.
 
+## FIXED (2.2): xtc_metrics_dump_prometheus wrote a page Prometheus rejects
+
+**What it was.**  A histogram was written as `# TYPE x histogram` with
+`x_count`, `x_p50`, `x_p99`, `x_p999` and `x_max` samples, which are not
+histogram series; a dist as a `summary` of `_mean`, `_variance` and
+`_stddev`; names went out verbatim, so `rexis.requests` was an illegal
+name; there was no `# HELP`; and each family went through a 1 KiB buffer
+that truncated silently.  `promtool check metrics` stops at line 1
+("invalid metric name in comment").  `xtc_hist` also had no sum, no bucket
+access and no fixed bounds, so an application could not build a standard
+Prometheus histogram on it.
+
+**Fix.**  The exposition is the text format 0.0.4: names have every
+character outside `[a-zA-Z0-9_:]` made `_`, a histogram is cumulative
+`_bucket{le="..."}` through `le="+Inf"` plus `_sum` and `_count`, a dist is
+a summary with `_sum` and `_count` and a separate `_stddev` gauge, and the
+page is built in one growable buffer.  New (symbol version `XTC_2.2`):
+`xtc_metrics_write_prometheus` (the page to a callback, no lock held),
+`xtc_metrics_set_help`, `xtc_hist_sum`, `xtc_hist_iterate`,
+`xtc_hist_quantiles` (several quantiles from one merge: p50 + p99 + max +
+count went from 97 us to 41 us with 48 shards), `xtc_hist_set_scale`
+(expose ns as seconds), and fixed-bound histograms
+(`xtc_hist_create_bounds`, `xtc_hist_record_value`) whose `le` labels are
+exactly the caller's bounds.  promtool 3.12 accepts the new page, lint
+included.
+
+**Caveats.**  Anything parsing the old `_p50` lines must read quantiles
+with `xtc_hist_quantiles` instead.  The sum makes `xtc_hist_record` one
+atomic add dearer: 8.2 to 13.1 ns uncontended on one x86-64 core.  A
+log-linear sum wraps at 2^64 (read by Prometheus as a counter reset).
+
 ## Linux/XFS: io_uring WAL writes go to io-wq unless the filesystem has `lazytime`
 
 On XFS mounted without `lazytime`, a write that must update the file's
