@@ -96,6 +96,19 @@ the kill's reason (CLEAN for 0).  `test/sim/test_sim_down_kind` checks
 every ending under the simulator, and planted bugs 30 to 32 put each
 fault back and are caught on seed 1.
 
+## FIXED (2.1.3): a recovery-tracked socket kept its XTC_RES_FDS unit
+
+A proc that tracks an fd with `xtc_proc_recovery_track_fd` has the
+recovery registry close it at exit or on a contained fault.  The registry
+closed every fd with a raw close, so a socket `xtc_net` had charged to an
+accountant (`xtc_res_attach_net`) kept its `XTC_RES_FDS` unit until the
+kernel handed the same fd number to another `xtc_net` socket.  A server
+that sets `caps.fds` to its connection cap lost one connection slot per
+faulted request until then.  The registry now closes a socket `xtc_net`
+charged with `xtc_net_close`, which refunds the unit; any other fd is
+closed as before.  `/m7/res_meter/net_recovery_close` fails on 2.1.2
+(1 unit still charged) and passes on 2.1.3.
+
 ## FIXED (2.1.2): a cross-shard xtc_tnt_send could lose messages
 
 **What it was.**  Through 2.1.1 an `xtc_tnt_send` to an Isolate on

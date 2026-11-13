@@ -42,6 +42,9 @@
 #include <string.h>
 #include <unistd.h>    /* sysconf(_SC_PAGESIZE) for stack-overflow detection */
 
+/* io_net.c: the recovery close of a socket xtc_net charged. */
+int __xtc_net_close_charged(int fd);
+
 /*
  * The exit unwind (xtc_exit_self -> __proc_entry).  glibc 2.44 changed
  * setjmp's pointer mangling and TSan's longjmp interceptor no longer
@@ -4436,7 +4439,9 @@ __recov_run(const struct xtc_recov_rec *r)
 {
 	switch (r->kind) {
 	case XTC_RECOV_FD:
-		if (r->fd >= 0)
+		/* An xtc_net socket charged to an accountant goes back
+		 * through xtc_net, or its XTC_RES_FDS unit stays charged. */
+		if (r->fd >= 0 && !__xtc_net_close_charged(r->fd))
 			(void)xtc_fs_close(r->fd);
 		break;
 	case XTC_RECOV_MCTX:

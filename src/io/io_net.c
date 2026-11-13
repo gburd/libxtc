@@ -291,6 +291,29 @@ xtc_net_close(int fd)
 	__net_close_raw(fd);
 }
 
+/*
+ * PUBLIC: int __xtc_net_close_charged __P((int));
+ *
+ * The proc recovery registry's close: when xtc_net charged fd to an
+ * accountant, close it as xtc_net_close does (refund the XTC_RES_FDS
+ * unit, kTLS bracket, closesocket on Windows) and return 1.  Otherwise
+ * return 0 and leave fd open for the caller's own close.
+ */
+int
+__xtc_net_close_charged(int fd)
+{
+	int charged = 0;
+
+	if (fd < 0)
+		return 0;
+	(void)__xtc_mtx_lock(&__net_fd_lock);
+	charged = (size_t)fd < __net_fd_cap && __net_fd_res[fd] != NULL;
+	(void)__xtc_mtx_unlock(&__net_fd_lock);
+	if (charged)
+		xtc_net_close(fd);
+	return charged;
+}
+
 /* ----- TCP knobs ----------------------------------------- */
 
 int

@@ -788,6 +788,10 @@ struct xtc_mctx *xtc_proc_mctx(void);
  *   xtc_proc_recovery_track_locks(mgr, locker, release_all);
  *   xtc_proc_recovery_track(fn, arg);        // generic fn(arg)
  *
+ * A tracked fd that xtc_net created while an accountant was attached
+ * (xtc_res_attach_net) is closed with xtc_net_close, so its XTC_RES_FDS
+ * unit is refunded; any other fd is closed with xtc_fs_close.
+ *
  * xtc_proc_recovery_cleanup() releases everything registered (LIFO).
  * It is the DEFAULT recovery action and is ALSO callable from a custom
  * recovery block to finish the standard bits after the block's own

@@ -25,6 +25,8 @@
 #include "xtc_res.h"
 #include "xtc_mctx.h"
 #include "xtc_net.h"
+#include "xtc_loop.h"
+#include "xtc_proc.h"
 
 static MunitResult
 test_mctx_mem_cap(const MunitParameter p[], void *d)
@@ -220,6 +222,62 @@ test_net_accept_fds_cap(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_res_attach_net(NULL), ==, XTC_OK);
 	return MUNIT_OK;
 }
+
+/* A socket handed to the proc recovery registry is released through
+ * xtc_net, so its unit comes back when the proc exits (or faults: both
+ * run the same registry walk).  Through 2.1.2 the registry closed it with
+ * a raw close and the unit stayed charged until the fd number came back
+ * from another xtc_net call.  A pipe tracked next to it, which xtc_net
+ * never charged, is still closed. */
+struct recov_net {
+	xtc_res_t *r;
+	int sock, pipe_rd, pipe_wr;
+	int64_t used_in;
+};
+
+static void
+recov_net_proc(void *arg)
+{
+	struct recov_net *s = arg;
+	int pfd[2];
+
+	if (xtc_net_udp_socket(XTC_NET_INET, NULL, 0, &s->sock) != XTC_OK ||
+	    pipe(pfd) != 0)
+		return;
+	s->pipe_rd = pfd[0];
+	s->pipe_wr = pfd[1];
+	(void)xtc_proc_recovery_track_fd(s->sock);
+	(void)xtc_proc_recovery_track_fd(s->pipe_wr);
+	s->used_in = xtc_res_used(s->r, XTC_RES_FDS);
+}
+
+static MunitResult
+test_net_recovery_close(const MunitParameter p[], void *d)
+{
+	xtc_res_t r;
+	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+	xtc_loop_t *loop = NULL;
+	struct recov_net s = { &r, -1, -1, -1, -1 };
+	char b;
+	(void)p;
+	(void)d;
+
+	munit_assert_int(xtc_res_init(&r, &caps), ==, XTC_OK);
+	munit_assert_int(xtc_res_attach_net(&r), ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, recov_net_proc, &s, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_assert_int(s.sock, >=, 0);
+	munit_assert_int64(s.used_in, ==, 1);
+	munit_assert_int64(xtc_res_used(&r, XTC_RES_FDS), ==, 0);
+	/* The pipe's write end was closed: its read end sees EOF. */
+	munit_assert_int((int)read(s.pipe_rd, &b, 1), ==, 0);
+	(void)close(s.pipe_rd);
+	munit_assert_int(xtc_res_attach_net(NULL), ==, XTC_OK);
+	return MUNIT_OK;
+}
 #endif
 
 static MunitTest tests[] = {
@@ -227,6 +285,7 @@ static MunitTest tests[] = {
 	{ "/net_fds_cap",  test_net_fds_cap,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #if !defined(_WIN32)
 	{ "/net_accept_fds_cap", test_net_accept_fds_cap, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/net_recovery_close", test_net_recovery_close, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #endif
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
