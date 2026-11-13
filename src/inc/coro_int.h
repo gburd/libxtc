@@ -111,15 +111,24 @@ extern XTC_THREAD_LOCAL struct xtc_coro *__xtc_current_coro;
 int  __xtc_coro_step(xtc_task_t *self, void *user);
 
 /*
- * Internal spawn with an explicit pin flag.  The public xtc_async wraps
- * this with pinned=1 (the long-standing default: a coro's task is not
- * work-stealable).  pinned=0 places the task on the stealable deque so
- * it can migrate across loops -- used by the proc layer when
- * xtc_proc_opts_t.migratable is set.  Every coro backend
- * (coro_fctx/uctx/winfiber) defines it.
+ * Internal spawn with an explicit pin flag and stack size.  The public
+ * xtc_async wraps this with pinned=1 (the long-standing default: a
+ * coro's task is not work-stealable) and stack_sz=0.  pinned=0 places
+ * the task on the stealable deque so it can migrate across loops --
+ * used by the proc layer when xtc_proc_opts_t.migratable is set.
+ * stack_sz is the fiber's usable stack in bytes, already normalized by
+ * __xtc_stack_size_norm; 0 is the process default (xtc_stack_size()).
+ * Every coro backend (coro_fctx/uctx/winfiber) defines both.
  */
 int  __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
-                    xtc_task_t **out_task);
+                    size_t stack_sz, xtc_task_t **out_task);
+
+/*
+ * Validate a requested fiber stack size and round it up to a whole page:
+ * the size xtc_set_stack_size and xtc_proc_opts_t.stack_size accept.
+ * XTC_E_INVAL below the 16 KiB minimum (or when rounding overflows).
+ */
+int  __xtc_stack_size_norm(size_t bytes, size_t *out);
 
 /* The task wrapping the currently-running coroutine on this thread,
  * or NULL when not running inside a coroutine.  Lets lower-level

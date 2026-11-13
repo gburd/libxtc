@@ -21,6 +21,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,6 +33,7 @@
 #include "xtc_proc.h"
 #include "xtc_async.h"
 #include "xtc_int.h"
+#include "xtc_inspect.h"  /* xtc_proc_info: the per-proc stack size */
 #include "loop_int.h"     /* free-list / spare counts for the N2 case */
 
 /* Detect AddressSanitizer portably (nested #if -- a bare
@@ -783,8 +785,173 @@ test_reclaim_kill_running(const MunitParameter p[], void *d)
 }
 #endif /* __linux__ */
 
+/* ---- xtc_proc_opts_t.stack_size: one proc's stack, not every proc's ----
+ *
+ * A proc spawned with a 1 MiB stack recurses through ~900 KiB of it,
+ * while procs with the default (64 KiB) stack run next to it.  Each proc
+ * reports its own size through xtc_proc_info and checks that the stack
+ * it runs on has that size: the address of a local is between the stack
+ * base and base + size, where the base is the end of the guard page
+ * found in /proc/self/maps.  Rounds alternate which size finishes first,
+ * each on a fresh thread, so each size is in turn the first stack the
+ * thread's pool (which keeps one size) is offered: a pool that recycled
+ * across sizes would put the next default proc on a 1 MiB stack, or the
+ * next big proc on 64 KiB, where the recursion hits the guard page. */
+#define BIG_STACK (1024 * 1024)
+#define BIG_DEPTH (900 * 1024)
+#define SZ_ROUNDS 64
+
+static int g_sz_ok, g_sz_bad;
+
+/* Consume about `left` bytes of stack in 4 KiB frames. */
+static __attribute__((noinline)) unsigned
+sz_recurse(size_t left)
+{
+	volatile unsigned char frame[4096];
+	size_t i;
+	for (i = 0; i < sizeof frame; i += 512)
+		frame[i] = (unsigned char)left;
+	if (left <= sizeof frame)
+		return frame[0];
+	return sz_recurse(left - sizeof frame) + frame[512];
+}
+
+#if defined(__linux__) && !defined(XTC_UNDER_ASAN)
+#include <stdio.h>
+/* The usable size of the stack holding `addr`: the mapping just above a
+ * PROT_NONE guard, which is the fiber stack's layout.  0 if not found. */
+static size_t
+sz_mapped_stack(uintptr_t addr)
+{
+	FILE *f = fopen("/proc/self/maps", "r");
+	char line[512], perm[8];
+	unsigned long lo, hi, prev_hi = 0;
+	int prev_guard = 0;
+	size_t got = 0;
+	if (f == NULL)
+		return 0;
+	while (fgets(line, sizeof line, f) != NULL) {
+		if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perm) != 3)
+			continue;
+		if (addr >= lo && addr < hi && prev_guard && prev_hi == lo) {
+			got = (size_t)(hi - lo);
+			break;
+		}
+		prev_guard = strncmp(perm, "---p", 4) == 0;
+		prev_hi = hi;
+	}
+	fclose(f);
+	return got;
+}
+#endif
+
+static void
+sz_proc(void *arg)
+{
+	size_t want = (size_t)(uintptr_t)arg;
+	xtc_proc_info_t info = XTC_PROC_INFO_INIT;
+	volatile char here = 0;
+	int ok = 1;
+
+	if (xtc_proc_info(xtc_self(), &info) != XTC_OK ||
+	    info.stack_size != want)
+		ok = 0;
+#if defined(__linux__) && !defined(XTC_UNDER_ASAN)
+	/* Under ASan the local lives on the fake stack, not the fiber's. */
+	if (sz_mapped_stack((uintptr_t)&here) != want)
+		ok = 0;
+#endif
+	(void)here;
+	if (want == BIG_STACK)
+		(void)sz_recurse(BIG_DEPTH);
+	xtc_yield();
+	if (ok)
+		xtc_atomic_fetch_add_i32(&g_sz_ok, 1, xtc_mo_seq_cst);
+	else
+		xtc_atomic_fetch_add_i32(&g_sz_bad, 1, xtc_mo_seq_cst);
+}
+
+/* One round on a fresh thread, whose stack pool starts empty: `first`
+ * runs to completion (its stack is the first one the pool is offered),
+ * then `second` and another `first` are spawned onto that pool. */
+struct sz_round {
+	size_t first, second;
+	int rc;
+};
+
+static int
+sz_spawn(xtc_loop_t *loop, size_t want, const xtc_proc_opts_t *big)
+{
+	return xtc_proc_spawn(loop, sz_proc, (void *)(uintptr_t)want,
+	    want == BIG_STACK ? big : NULL, NULL);
+}
+
+static void *
+sz_round_thread(void *arg)
+{
+	struct sz_round *r = arg;
+	xtc_proc_opts_t big = XTC_PROC_OPTS_INIT;
+	xtc_loop_t *loop = NULL;
+
+	/* Not a page multiple: rounded up (1 MiB - 100 -> 1 MiB). */
+	big.stack_size = BIG_STACK - 100;
+	r->rc = xtc_loop_init(&loop);
+	if (r->rc == XTC_OK)
+		r->rc = sz_spawn(loop, r->first, &big);
+	if (r->rc == XTC_OK)
+		r->rc = xtc_loop_run(loop);
+	if (r->rc == XTC_OK)
+		r->rc = sz_spawn(loop, r->second, &big);
+	if (r->rc == XTC_OK)
+		r->rc = sz_spawn(loop, r->first, &big);
+	if (r->rc == XTC_OK)
+		r->rc = xtc_loop_run(loop);
+	if (loop != NULL)
+		(void)xtc_loop_fini(loop);
+	return NULL;
+}
+
+static MunitResult
+test_proc_stack_size(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_proc_opts_t bad = XTC_PROC_OPTS_INIT;
+	struct sz_round r;
+	pthread_t t;
+	int i;
+	(void)p;
+	(void)d;
+
+	xtc_atomic_store_i32(&g_sz_ok, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_sz_bad, 0, xtc_mo_seq_cst);
+
+	/* Below the minimum: refused, nothing spawned. */
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	bad.stack_size = 8 * 1024;
+	munit_assert_int(xtc_proc_spawn(loop, sz_proc, NULL, &bad, NULL), ==,
+	    XTC_E_INVAL);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+
+	/* Alternate which size the empty pool is offered first. */
+	for (i = 0; i < SZ_ROUNDS; i++) {
+		r.first = (i & 1) ? xtc_stack_size() : BIG_STACK;
+		r.second = (i & 1) ? BIG_STACK : xtc_stack_size();
+		r.rc = XTC_E_INTERNAL;
+		munit_assert_int(pthread_create(&t, NULL, sz_round_thread, &r),
+		    ==, 0);
+		munit_assert_int(pthread_join(t, NULL), ==, 0);
+		munit_assert_int(r.rc, ==, XTC_OK);
+	}
+	munit_assert_int(xtc_atomic_load_i32(&g_sz_bad, xtc_mo_seq_cst), ==, 0);
+	munit_assert_int(xtc_atomic_load_i32(&g_sz_ok, xtc_mo_seq_cst), ==,
+	    3 * SZ_ROUNDS);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/off_by_default", test_off_by_default, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/proc_stack_size", test_proc_stack_size, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reclaim_correct", test_reclaim_correct, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },

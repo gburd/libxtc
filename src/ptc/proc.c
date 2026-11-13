@@ -664,6 +664,7 @@ struct xtc_proc {
 	 * class there avoids racing a cross-loop spawn that begins running
 	 * before the spawner's next statement).  NULL = default class. */
 	xtc_exec_class_t  spawn_class;
+	size_t stack_size; /* fiber stack bytes, fixed at spawn */
 
 	/* Links & monitors. */
 	struct link_entry *links;
@@ -1890,6 +1891,9 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	if (opts != NULL &&
 	    (rc = __xtc_sized_in(&o, NULL, sizeof o, opts, 0)) != XTC_OK)
 		return rc;
+	if (o.stack_size != 0 &&
+	    (rc = __xtc_stack_size_norm(o.stack_size, &o.stack_size)) != XTC_OK)
+		return rc;
 
 	/* Install the fiber-context preservation hooks (so a yield/await
 	 * inside a proc keeps __current_proc pointing at this proc on
@@ -1911,6 +1915,7 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	p->exit_kind_override = -1;
 	xtc_atomic_store_i32(&p->alive, 1, xtc_mo_relaxed);
 	p->spawn_class = o.sched_class;
+	p->stack_size = o.stack_size != 0 ? o.stack_size : xtc_stack_size();
 	xtc_atomic_store_i32(&p->refs, 1, xtc_mo_relaxed); /* owner ref */
 	p->mbox_cap = o.mailbox_cap > 0 ? o.mailbox_cap : 4096;
 	/* Watermark level: a percent of cap (rounded down), clamped so a
@@ -2006,7 +2011,8 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	 * migratable == 0) stays pinned -- byte-identical to prior
 	 * behavior. */
 	pinned = o.migratable ? 0 : 1;
-	if ((rc = __xtc_async_ex(loop, __proc_entry, p, pinned, &t)) != XTC_OK) {
+	rc = __xtc_async_ex(loop, __proc_entry, p, pinned, o.stack_size, &t);
+	if (rc != XTC_OK) {
 		/* Undo the parent-side link/monitor we added above (removed
 		 * by the child pid, which never got to run), then the
 		 * child-side entries on p.  Before 1.50 the comment here said
@@ -5546,6 +5552,7 @@ __fill_proc_info(struct xtc_proc *p, xtc_proc_info_t *info)
 	 * definition is not running and so cannot be mutating them. */
 	info->mask_depth = __mask_depth(p);
 	info->mask_deferred = __mask_deferred(p) != 0 ? 1 : 0;
+	info->stack_size = p->stack_size;
 	if (p->task != NULL) {
 		int st = xtc_atomic_load_i32(&p->task->state,
 		    xtc_mo_relaxed); /* introspection snapshot */

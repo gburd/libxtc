@@ -155,6 +155,8 @@ overrides it for subsequent
 calls; the value is rounded up to a page multiple, and a sub-16\u00a0KiB
 request returns
 .Dv XTC_E_INVAL .
+A process can have its own size instead
+.Pq Va xtc_proc_opts_t.stack_size , Xr xtc_proc 3 .
 .Sh RETURN VALUES
 .Dv XTC_OK
 on success;

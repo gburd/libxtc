@@ -149,6 +149,7 @@ self_check(void *arg)
 	/* The opts prefix set mailbox_cap = 7; everything past it defaulted. */
 	CHECK(xtc_proc_info(xtc_self(), &full) == XTC_OK);
 	CHECK(full.mbox_cap == 7);
+	CHECK(full.stack_size == xtc_stack_size());
 	CHECK(full.size == sizeof(xtc_proc_info_t));
 
 	/* OLDER output struct: written only up to its size. */

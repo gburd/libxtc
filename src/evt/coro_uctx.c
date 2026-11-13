@@ -199,18 +199,31 @@ xtc_stack_size(void)
 }
 
 int
-xtc_set_stack_size(size_t bytes)
+__xtc_stack_size_norm(size_t bytes, size_t *out)
 {
 	long pg;
+	size_t page;
 	if (bytes < 16 * 1024)
 		return XTC_E_INVAL;
 	pg = sysconf(_SC_PAGESIZE);
-	if (pg <= 0) pg = 4096;
+	page = pg > 0 ? (size_t)pg : 4096u;
 	/* Round up to page multiple. */
-	if (bytes % (size_t)pg != 0)
-		bytes += (size_t)pg - (bytes % (size_t)pg);
-	__xtc_stack_size = bytes;
+	if (bytes % page != 0) {
+		if (bytes > SIZE_MAX - page)
+			return XTC_E_INVAL;
+		bytes += page - (bytes % page);
+	}
+	*out = bytes;
 	return XTC_OK;
+}
+
+int
+xtc_set_stack_size(size_t bytes)
+{
+	int rc = __xtc_stack_size_norm(bytes, &bytes);
+	if (rc == XTC_OK)
+		__xtc_stack_size = bytes;
+	return rc;
 }
 
 
@@ -511,7 +524,7 @@ __coro_task_cleanup(void *coro)
  */
 int
 __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
-    xtc_task_t **out_task)
+    size_t stack_sz, xtc_task_t **out_task)
 {
 	struct xtc_coro *c;
 	xtc_task_t *t;
@@ -529,7 +542,7 @@ __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
 	pg = sysconf(_SC_PAGESIZE);
 	if (pg <= 0) pg = 4096;
 	guard = (size_t)pg;
-	c->stack_sz = __xtc_stack_size;
+	c->stack_sz = stack_sz != 0 ? stack_sz : __xtc_stack_size;
 	total = c->stack_sz + guard;
 
 	base = __stack_pool_get(c->stack_sz);
@@ -632,7 +645,7 @@ __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
 int
 xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
 {
-	return __xtc_async_ex(loop, fn, arg, 1, out_task);
+	return __xtc_async_ex(loop, fn, arg, 1, 0, out_task);
 }
 
 /*

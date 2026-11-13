@@ -89,6 +89,7 @@ typedef struct xtc_proc_info {
 	size_t    mbox_saved;       /* selective-receive save queue */
 	uint64_t  mbox_recv_total;  /* messages ever accepted */
 	uint64_t  mbox_drop_total;  /* messages ever rejected (full/dead) */
+	size_t    stack_size;       /* fiber stack bytes (opts or default); 2.2 */
 } xtc_proc_info_t;
 
 /* Set before xtc_proc_info(); the library writes at most .size bytes.  An

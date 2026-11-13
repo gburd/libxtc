@@ -121,8 +121,8 @@ co-operatively with all other procs and tasks on that loop.
 .Fa opts
 is optional
 .Pq Dv NULL No means all defaults
-and may set the name, mailbox capacity and watermark, migratability and
-scheduling class.  Initialize it with
+and may set the name, mailbox capacity and watermark, migratability,
+scheduling class and stack size.  Initialize it with
 .Dv XTC_PROC_OPTS_INIT ,
 or a designated initializer that sets
 .Va .size = sizeof(xtc_proc_opts_t) :
@@ -133,6 +133,25 @@ and a
 .Va size
 of 0 is
 .Er XTC_E_INVAL .
+.Pp
+.Va stack_size
+(0 by default) gives this process a fiber stack of that many bytes
+instead of the process-wide
+.Fn xtc_stack_size ,
+so one deep-recursing process does not make every stack bigger.
+It is checked and rounded like
+.Fn xtc_set_stack_size :
+below 16 KiB the spawn fails with
+.Er XTC_E_INVAL ,
+and a size that is not a page multiple is rounded up.
+Stacks of the default size are recycled between processes on a thread;
+a stack of any other size is mapped at spawn and unmapped at exit,
+never recycled into a default-size slot or out of one.
+The size a process runs with is
+.Va stack_size
+in its
+.Fn xtc_proc_info
+.Pq Xr xtc_inspect 3 .
 .Pp
 A process is pinned to
 .Fa loop

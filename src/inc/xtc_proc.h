@@ -129,6 +129,15 @@ typedef struct xtc_proc_opts {
 	 * classes on its loop.  INSPIRED BY Glommio.
 	 */
 	xtc_exec_class_t sched_class;
+	/*
+	 * This proc's fiber stack in bytes; 0 (the default) is the
+	 * process-wide xtc_stack_size().  Validated and rounded like
+	 * xtc_set_stack_size: below 16 KiB the spawn fails with
+	 * XTC_E_INVAL; otherwise rounded up to a whole page.  A stack of a
+	 * non-default size is mapped for the proc and unmapped at its exit,
+	 * never recycled.  2.2.
+	 */
+	size_t      stack_size;
 } xtc_proc_opts_t;
 
 /* All defaults.  Add fields with a designated initializer that sets .size

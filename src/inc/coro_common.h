@@ -104,8 +104,14 @@ __xtc_vg_deregister_slow(unsigned id)
  * takes no lock.  Bounded so idle threads do not hoard memory.
  *
  * Stacks are pooled only at the current __xtc_stack_size; a stack freed
- * at a different size (after xtc_set_stack_size) is munmap'd, not
- * pooled, so the pool never hands back a wrong-sized stack. */
+ * at a different size (after xtc_set_stack_size, or a proc spawned with
+ * its own xtc_proc_opts_t.stack_size) is munmap'd, not pooled, so the
+ * pool never hands back a wrong-sized stack.  Both the pool and the
+ * per-loop spare below hold ONE size (the first entry's), so letting a
+ * rare large stack in would also evict the default-size stacks every
+ * other spawn reuses; a per-size pool would cost a lookup on the spawn
+ * path for a case that is not hot. */
+static size_t __xtc_stack_size; /* the substrate's default; defined there */
 #define XTC_STACK_POOL_MAX 64
 struct stack_pool {
 	void   *slots[XTC_STACK_POOL_MAX];
@@ -136,6 +142,8 @@ static void *
 __stack_pool_get(size_t stack_sz)
 {
 	struct stack_pool *p = &__stack_pool;
+	if (stack_sz != __xtc_stack_size)
+		return NULL;
 	if (p->n > 0 && p->size == stack_sz)
 		return p->slots[--p->n];
 	return NULL;
@@ -147,6 +155,8 @@ static int
 __stack_pool_put(void *base, size_t stack_sz)
 {
 	struct stack_pool *p = &__stack_pool;
+	if (stack_sz != __xtc_stack_size)
+		return 0;
 	if (!p->atexit_armed) {
 		if (__os_thread_atexit(__stack_pool_drain, NULL) != XTC_OK)
 			return 0;     /* cannot drain at exit: do not pool */
@@ -198,6 +208,8 @@ __stack_spare_get(xtc_loop_t *l, size_t stack_sz)
 {
 	void *base = NULL;
 	int n;
+	if (stack_sz != __xtc_stack_size)
+		return NULL;
 	if (__xtc_current_loop != l &&
 	    xtc_atomic_load_i32(&l->stack_spare_want, xtc_mo_relaxed) <
 	        XTC_LOOP_STACK_SPARE)
@@ -221,6 +233,8 @@ static int
 __stack_spare_put(xtc_loop_t *l, void *base, size_t stack_sz)
 {
 	int n, ok = 0;
+	if (stack_sz != __xtc_stack_size)
+		return 0;
 	if (xtc_atomic_load_i32(&l->stack_spare_want, xtc_mo_relaxed) <
 	        XTC_LOOP_STACK_SPARE ||
 	    xtc_atomic_load_i32(&l->stack_spare_n, xtc_mo_relaxed) >=

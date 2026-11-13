@@ -111,6 +111,7 @@ typedef struct xtc_proc_info {
         size_t    mbox_saved;       /* selective-receive save queue */
         uint64_t  mbox_recv_total;  /* messages ever accepted */
         uint64_t  mbox_drop_total;  /* messages ever rejected */
+        size_t    stack_size;       /* fiber stack bytes; 2.2 */
 } xtc_proc_info_t;
 .Ed
 .Pp
@@ -208,6 +209,16 @@ Lifetime count of messages accepted.
 .It Va mbox_drop_total
 Lifetime count of messages rejected because the mailbox was full or
 the proc was dead.
+.It Va stack_size
+The proc's fiber stack in bytes: its
+.Va xtc_proc_opts_t.stack_size
+rounded to a page, or the
+.Fn xtc_stack_size
+in force at its spawn
+.Pq Xr xtc_async 3 .
+Added in 2.2; check
+.Fn XTC_FIELD_OK info stack_size
+in an info handed to a callback.
 .El
 .Pp
 .Vt enum xtc_proc_run_state
