@@ -79,6 +79,7 @@ esac
 # dispatch_once_harness u3      ~0.1s  B1 future resolved exactly once
 # wakepark_harness      u6      ~0.1s  v1.8.0 wake latch
 # chash_resize_harness  u6      ~0.2s  build-then-swap publish
+# logring_harness       u2/4    ~240s  xtc_log slot-sequence ring (2.1.3)
 HARNESSES='
 deque_harness      --unwind 4
 lwlock_harness     --unwind 4
@@ -96,6 +97,7 @@ res_harness        --unwind 3
 hlc_harness        --unwind 4
 fdclaim_harness    --unwind 3
 tntring_harness    --unwind 4
+logring_harness    --unwind 2 --unwindset writer.0:3,drain_one.0:4,drain_one.1:4,main.0:3
 '
 
 want="${*:-}"

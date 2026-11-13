@@ -170,6 +170,27 @@ still written.  A thread's own alternate stack of at least 16 KiB is
 kept.  `/dump/guard_and_crash_handler` and
 `/m8/proc/fault_guard_altstack` fail on 2.1.2 and pass on 2.1.3.
 
+## FIXED (2.1.3): xtc_log printed records a writer had not finished
+
+A writer claimed a slot with a fetch-add of the ring's tail and then
+filled it; `xtc_log_drain` printed every slot below the tail.  A slot
+claimed but not yet filled went to the sink as whatever it held before
+(an empty body, level TRACE, timestamp 0, or an older record's text),
+and the drain then moved past it, so the real record was never printed.
+On overflow the writer moved the head with a CAS it did not retry, so
+the drain could re-read overwritten slots.  Now each slot carries a
+sequence word (D. Vyukov's bounded queue): a writer claims a position
+only when its slot is free for that lap and publishes it when filled,
+and the drain stops at the first slot not yet published.  A full ring
+still drops the oldest record; if that record is mid-write or mid-read,
+the writer drops its own instead of waiting.  Both are counted, so
+printed plus `xtc_log_drop_count` equals written.  Records are formatted
+before a slot is claimed, so no caller code runs while one is held.
+`/log/mpsc` in `test/m12/test_observability` (4 writers, 1 drain, rings
+of 4, 64 and 65,536) fails on 2.1.2 and passes on 2.1.3, and
+`test/cbmc/logring_harness.c` checks the ring over every interleaving of
+two writers and the drain on a ring that overflows.
+
 ## FIXED (2.1.2): a cross-shard xtc_tnt_send could lose messages
 
 **What it was.**  Through 2.1.1 an `xtc_tnt_send` to an Isolate on

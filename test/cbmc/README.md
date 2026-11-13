@@ -40,6 +40,7 @@ are exposed at 2-3 concurrent actors, which is well within reach.
 | `hlc_harness.c`         | `src/ptc/proc.c` HLC         | hybrid logical clock is monotonic + causal (update > remote stamp) under concurrent tick/update | u4 | verbatim __hlc_tick/_update |
 | `fdclaim_harness.c`     | `src/evt/task.c` fd-readiness claim | a stale readiness event never orphans a newer park of the same fd (2.1.2) | u3 | claim statement drift-checked |
 | `tntring_harness.c`     | `src/orc/tnt.c` cross-shard ring | per-(source, destination) SPSC ring vs the shard's drain-then-park: no lost wake, FIFO, none lost or doubled, a full ring refuses (2.1.2) | u4 | push/drain/pending drift-checked |
+| `logring_harness.c`     | `src/ptc/log.c` record ring | two writers racing the drainer on an overflowing ring: the drainer never takes a slot a writer claimed but has not filled, takes each record once, in each writer's order, and taken + dropped = written (the 2.1.2 drain printed unwritten slots) | u2 (loops u3-u4) | drift-checked claim/drop/take/publish/give-back |
 
 Every harness above VERIFIES SUCCESSFUL at the listed bound; each also has
 a negative check (injecting the classic bug makes CBMC report the

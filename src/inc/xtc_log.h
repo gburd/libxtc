@@ -11,12 +11,15 @@
  *	    buffer per logger; bounded latency.
  *	  - Cooperative: log calls don't block the loop; a background
  *	    consumer drains the ring and writes to the sink.
- *	  - Structured: severity + message + key/value pairs.
- *	  - Lossy under pressure: when the ring is full we drop the
- *	    oldest record and bump a counter so callers know about it.
+ *	  - A level and a printf-formatted message per record.
+ *	  - Lossy under pressure: when the ring is full the oldest record
+ *	    is dropped (or, if it is being written or read at that moment,
+ *	    the new one) and a counter is bumped so callers know about it.
  *	    Better than blocking the loop.
- *	  - Thread-safe: writers and the consumer can be on different
- *	    OS threads; ring uses lock-free MPSC enqueue.
+ *	  - Thread-safe: writers on any threads and one drain at a time;
+ *	    the enqueue is lock-free.  A drain hands the sink only whole
+ *	    records, each writer's in the order it wrote them, and stops
+ *	    at a record that is still being written.
  *
  *	Sinks supported:
  *	  - stderr/stdout (default)
@@ -24,8 +27,9 @@
  *	  - custom callback (user-supplied function)
  *
  *	Levels follow the usual syslog ordering: TRACE < DEBUG < INFO < WARN
- *	< ERROR < FATAL.  At configure-time the floor is set; calls
- *	below the floor are eliminated by the macro to a no-op.
+ *	< ERROR < FATAL.  A record below the logger's floor returns at once,
+ *	before formatting (a runtime check; the macros do not compile calls
+ *	out).
  */
 
 #ifndef XTC_LOG_H
@@ -100,8 +104,8 @@ XTC_API int  xtc_log_set_floor(xtc_log_t *log, xtc_log_level_t lvl);
 XTC_API int  xtc_log_set_default(xtc_log_t *log);
 XTC_API xtc_log_t *xtc_log_default(void);
 
-/* Append a record to the ring.  Non-blocking; if the ring is full
- * the oldest record is dropped and a counter is bumped. */
+/* Format a record and append it to the ring.  Non-blocking, any
+ * thread; a full ring drops a record and bumps the drop counter. */
 #if defined(__GNUC__) || defined(__clang__)
 #  define XTC_LOG_PRINTF_FMT __attribute__((format(printf, 3, 4)))
 #else
@@ -113,13 +117,15 @@ XTC_API void xtc_log_write(xtc_log_t *log, xtc_log_level_t lvl,
 XTC_API void xtc_log_vwrite(xtc_log_t *log, xtc_log_level_t lvl,
                             const char *fmt, va_list ap);
 
-/* Drain the ring synchronously: read every queued record and write
- * it to the sink.  Returns the number of records drained.  Useful
- * for tests; in production a dedicated consumer thread/proc would
- * call this periodically. */
+/* Drain the ring synchronously: write every finished record to the
+ * sink, oldest first, stopping at one a writer is still filling (the
+ * next drain resumes there).  Returns the number of records drained.
+ * A drain with a sink_fd does a blocking write(2): in a server, call it
+ * from a plain thread or the blocking pool, not a loop thread. */
 XTC_API int  xtc_log_drain(xtc_log_t *log);
 
-/* Number of records dropped because the ring was full. */
+/* Number of records dropped because the ring was full.  Records the
+ * drain wrote plus this equals records written above the floor. */
 XTC_API int  xtc_log_drop_count(const xtc_log_t *log);
 
 /* Convenience macros: pass through the default logger.  Calls below

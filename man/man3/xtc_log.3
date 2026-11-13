@@ -43,8 +43,18 @@
 .Nm xtc_log
 is a predictable-latency logger: callers append records to an
 in-memory ring buffer; a sink consumer drains the ring on a timer
-or explicit flush.  Producers never block; if the ring is full,
-the oldest record is dropped silently.
+or explicit flush.  Producers never block.
+Writers may run on any thread, concurrently with one another and with
+the drain.
+A record reaches the sink whole or not at all, and each writer's
+records reach it in the order it wrote them; the drain stops at a
+record a writer is still filling and the next drain resumes there.
+When the ring is full the writer drops the oldest record to make
+room, or, if that record is at that moment being written or read,
+drops its own; either way
+.Fn xtc_log_drop_count
+counts it, so records printed plus records dropped equals records
+written.
 .Pp
 Levels:
 .Dv XTC_LOG_DEBUG ,
@@ -98,10 +108,12 @@ reports how many records were dropped because the ring was full.
 xtc_log_t *log;
 xtc_log_opts_t opts = XTC_LOG_OPTS_DEFAULT;
 opts.sink_fd = STDOUT_FILENO;
-opts.min_level = XTC_LOG_INFO;
+opts.floor = XTC_LOG_INFO;
 
 xtc_log_create(&opts, &log);
+xtc_log_set_default(log);
 XTC_LOG_INFO_F("server started on port %d", port);
+xtc_log_drain(log);    /* from a thread that may block on the sink */
 .Ed
 .Sh SEE ALSO
 .Xr xtc_cfg 3 ,
@@ -109,3 +121,5 @@ XTC_LOG_INFO_F("server started on port %d", port);
 .Xr xtc 7
 .Sh HISTORY
 Appeared in xtc 0.1.
+The guarantee that a drain never hands the sink a record a writer has
+not finished appeared in xtc 2.1.3.
