@@ -301,8 +301,7 @@ client_thread(void *arg)
 
 /* -------------------------------------------------------------------
  * Bind an ephemeral loopback TCP listen socket; return the fd and set
- * *out_port to the kernel-assigned port.  (xtc_net_listen rejects
- * port 0, so bind directly here.)
+ * *out_port to the kernel-assigned port.
  * ----------------------------------------------------------------- */
 static int
 bind_ephemeral(int *out_port)

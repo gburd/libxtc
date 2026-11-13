@@ -193,6 +193,11 @@ on Linux.
 .Fn xtc_net_listen
 opens a non-blocking listening socket bound to
 .Fa host : Ns Fa port .
+.Fa port
+0 asks the kernel for a free port; read it back with
+.Xr getsockname 2 .
+Through 2.1 port 0 returned
+.Er XTC_E_INVAL .
 .Fa fam
 selects address family
 .Po Dv XTC_NET_INET ,

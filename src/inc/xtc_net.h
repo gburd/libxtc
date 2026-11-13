@@ -75,7 +75,8 @@ typedef struct xtc_tcp_opts {
  * PUBLIC: int xtc_dns_resolve __P((const char *, int, xtc_net_family_t, char *, size_t));
  */
 
-/* TCP listen socket.  `host` may be NULL/"" for any-address.  Returns
+/* TCP listen socket.  `host` may be NULL/"" for any-address; `port` 0
+ * means kernel-assigned (read it back with getsockname(2)).  Returns
  * the listening fd; caller registers it with xtc_io_reg_fd for accept
  * readiness.  The accept-queue depth is the default: SOMAXCONN, or 4096
  * if that is smaller, clamped by the kernel to its own limit
