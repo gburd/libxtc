@@ -12,14 +12,16 @@
  *	    a proc as it processes work
  *	  - test-time per-proc state injection
  *
- *	Implementation: tiny linked list inside `struct xtc_proc`.
- *	Linear lookup; entries usually <16 per proc.  M11.5 swaps in
- *	a small hash table once we have one.
+ *	Implementation: a side table keyed by pid, one linked list of
+ *	entries per proc.  Linear lookup; entries usually <16 per proc.
  *
- *	All entries live in process memory and are freed at proc exit.
- *	Values are caller-owned `void *`; the store stores the pointer
- *	verbatim (no deep copy).  If a value's lifetime should match
- *	the proc, register a destructor via `xtc_pdict_put_with_dtor`.
+ *	All entries live in process memory and are freed at proc exit,
+ *	after the proc's xtc_proc_at_exit hooks (or by xtc_loop_fini for
+ *	a proc still alive then).  Values are caller-owned `void *`; the
+ *	store stores the pointer verbatim (no deep copy).  If a value's
+ *	lifetime should match the proc, register a destructor via
+ *	`xtc_pdict_put_with_dtor`.  Destructors run under the dictionary's
+ *	lock: a destructor must not call xtc_pdict_*.
  */
 
 #ifndef XTC_PDICT_H

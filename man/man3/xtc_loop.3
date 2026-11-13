@@ -129,7 +129,9 @@ and the loop struct itself.
 Processes still alive on the loop
 .Pq parked in a receive, a sleep, or any other wait
 are torn down with it: their queued messages, link and monitor
-entries, and memory context are released, but their
+entries,
+.Xr xtc_pdict 3
+entries (each destructor runs) and memory context are released, but their
 .Fn xtc_proc_at_exit
 callbacks are not run and no
 .Dq DOWN

@@ -908,6 +908,68 @@ test_pdict_dtor(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * A proc that returns, or is torn down by xtc_loop_fini, holding pdict
+ * entries has them released: each destructor runs once.  Before 2.1.3
+ * nothing released them (0 of PD_EXIT_PROCS destructors ran).
+ */
+#define PD_EXIT_PROCS 3
+static _Atomic int g_pd_exit_dtors;
+static void
+pd_exit_dtor(void *v)
+{
+	(void)v;
+	atomic_fetch_add_explicit(&g_pd_exit_dtors, 1, memory_order_seq_cst);
+}
+static void
+pd_exit_returner(void *arg)
+{
+	(void)arg;
+	(void)xtc_pdict_put_with_dtor("ctx", NULL, pd_exit_dtor);
+	(void)xtc_pdict_put_with_dtor("span", NULL, pd_exit_dtor);
+}
+static void
+pd_exit_sleeper(void *arg)
+{
+	(void)arg;
+	(void)xtc_pdict_put_with_dtor("ctx", NULL, pd_exit_dtor);
+	(void)xtc_loop_stop((xtc_loop_t *)arg);
+	(void)xtc_proc_sleep((int64_t)3600 * 1000000000);
+}
+
+static MunitResult
+test_pdict_exit_cleanup(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	int i;
+	(void)p;
+	(void)d;
+	atomic_store_explicit(&g_pd_exit_dtors, 0, memory_order_seq_cst);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	for (i = 0; i < PD_EXIT_PROCS; i++)
+		munit_assert_int(xtc_proc_spawn(loop, pd_exit_returner, NULL,
+		                     NULL, NULL),
+		    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load_explicit(&g_pd_exit_dtors,
+	                     memory_order_seq_cst),
+	    ==, 2 * PD_EXIT_PROCS);
+
+	/* A proc still parked when the loop is finalized. */
+	munit_assert_int(xtc_proc_spawn(loop, pd_exit_sleeper, loop, NULL,
+	                     NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load_explicit(&g_pd_exit_dtors,
+	                     memory_order_seq_cst),
+	    ==, 2 * PD_EXIT_PROCS);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load_explicit(&g_pd_exit_dtors,
+	                     memory_order_seq_cst),
+	    ==, 2 * PD_EXIT_PROCS + 1);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/pdict/basic",          test_pdict_basic,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/inspect/procs",        test_inspect_procs,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -925,6 +987,7 @@ static MunitTest tests[] = {
 	{ "/inject/wait",          test_inject_wait,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/pdict/outside_proc",   test_pdict_outside_proc,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/pdict/dtor",           test_pdict_dtor,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/pdict/exit_cleanup",   test_pdict_exit_cleanup,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/res/alert",            test_res_alert,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

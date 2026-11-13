@@ -269,6 +269,25 @@ loops, a receiver gone in flight, a run cut short by its step budget,
 sends under buggify) fails all 16 of its seeds on 2.1.2 and passes on
 2.1.3; planted bug 34 restores the old admission and is caught at seed 1.
 
+## FIXED (2.1.3): pdict entries were never released at proc exit
+
+`xtc_pdict.h` and xtc_pdict(3) say a proc's entries are freed when it
+exits and that a destructor registered with `xtc_pdict_put_with_dtor`
+runs then.  Nothing called into the dictionary on the exit path, so
+every entry a proc did not clear itself stayed in the side table for the
+life of the process and its destructor never ran.  The proc exit path
+now releases the proc's entries after its `xtc_proc_at_exit` hooks (so a
+hook can still read them), running each destructor once, however the
+proc ends (return, `xtc_exit_self`, a kill, a contained fault).
+`xtc_loop_fini` does the same for a proc it tears down while parked;
+those destructors run on the finalizing thread.  An exit costs one
+relaxed load when no proc holds entries.
+`/m12/observability/pdict/exit_cleanup` fails on 2.1.2 (0 of 6
+destructors) and passes on 2.1.3.  xtc_pdict(3) also gave the wrong
+`xtc_pdict_get` signature and a 3-argument `xtc_pdict_put` in its
+example; both are corrected, and it says a destructor must not call
+`xtc_pdict_*` (it runs under the dictionary's lock).
+
 ## FIXED (2.1.2): a cross-shard xtc_tnt_send could lose messages
 
 **What it was.**  Through 2.1.1 an `xtc_tnt_send` to an Isolate on

@@ -90,6 +90,11 @@ void      __xtc_proc_kill_poll(void);
  * recycled for another proc. */
 void      __xtc_cfg_task_exit(xtc_task_t *t);
 
+/* Release the pdict entries of proc `pid`, running their destructors
+ * (pdict.c).  Called on the proc exit path after the at-exit hooks, and
+ * by xtc_loop_fini for a proc it tears down. */
+void __xtc_pdict_proc_exit(xtc_pid_t pid);
+
 /* xtc_exit_pid makes a target parked anywhere runnable (except inside
  * xtc_await), so a park site re-checks promptly and can deliver the kill. */
 #define XTC_HAVE_PROC_KILL_WAKE 1
