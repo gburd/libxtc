@@ -21,6 +21,8 @@
 #include "xtc_orc.h"
 #include "xtc_inspect.h"
 #include "xtc_int.h"
+#include "loop_int.h" /* task->pinned: a spec's migratable */
+#include "coro_int.h" /* __xtc_current_task */
 
 /* Shared counter that flapping children bump on each spawn. */
 static int g_spawn_count;
@@ -1583,6 +1585,125 @@ test_down_hook_group_nofault(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * 2.2: a child spec carries the xtc_proc_opts_t knobs (mailbox watermark,
+ * scheduling class, migratable), applied to EVERY incarnation; and
+ * xtc_sup_child_restarts counts per static child.  The child sends two
+ * messages to itself (cap 4, watermark 50%: the second crosses), checks
+ * its task is stealable, parks once (its resume runs in its class), and
+ * exits 1 the first time (TRANSIENT restart), 0 the second.  Davros report 05.
+ */
+static int g_ks_wm, g_ks_runs, g_ks_pinned, g_ks_wm_bad;
+static xtc_pid_t g_ks_pid[2];
+
+static void
+ks_wm(xtc_pid_t self, size_t depth, size_t cap, void *user)
+{
+	int n = xtc_atomic_load_i32(&g_ks_runs, xtc_mo_seq_cst);
+	if (user != (void *)&g_ks_wm || depth != 2 || cap != 4 || n < 1 ||
+	    n > 2 || !xtc_pid_eq(self, g_ks_pid[n - 1]))
+		xtc_atomic_fetch_add_i32(&g_ks_wm_bad, 1, xtc_mo_seq_cst);
+	xtc_atomic_fetch_add_i32(&g_ks_wm, 1, xtc_mo_seq_cst);
+}
+
+static void
+ks_kid(void *arg)
+{
+	int n;
+	(void)arg;
+	n = xtc_atomic_load_i32(&g_ks_runs, xtc_mo_seq_cst);
+	if (n < 2)
+		g_ks_pid[n] = xtc_self();
+	xtc_atomic_fetch_add_i32(&g_ks_runs, 1, xtc_mo_seq_cst);
+	if (__xtc_current_task()->pinned)
+		xtc_atomic_fetch_add_i32(&g_ks_pinned, 1, xtc_mo_seq_cst);
+	(void)xtc_send(xtc_self(), "a", 1);
+	(void)xtc_send(xtc_self(), "b", 1);
+	/* A park: the resume is scheduled through the child's class. */
+	(void)xtc_proc_sleep(1000 * 1000);
+	if (n == 0)
+		(void)xtc_exit_self(1);
+}
+
+static void
+ks_steady(void *arg)
+{
+	void *m;
+	size_t sz;
+	(void)arg;
+	for (;;)
+		if (xtc_recv(&m, &sz, -1) == XTC_OK)
+			__os_free(m);
+}
+
+static void
+ks_driver(void *arg)
+{
+	xtc_supervisor_t *sup = arg;
+	int i;
+	for (i = 0; i < 2000 &&
+	     (xtc_atomic_load_i32(&g_ks_runs, xtc_mo_seq_cst) < 2 ||
+	         xtc_sup_n_alive(sup) > 1);
+	     i++)
+		(void)xtc_proc_sleep(1000 * 1000);
+	(void)xtc_sup_stop(sup);
+}
+
+static MunitResult
+test_spec_proc_opts(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	xtc_supervisor_t *sup;
+	xtc_child_spec_t kids[2] = { XTC_CHILD_SPEC_INIT, XTC_CHILD_SPEC_INIT };
+	xtc_exec_class_t cls;
+	int n = -1;
+	(void)p;
+	(void)d;
+
+	g_ks_wm = g_ks_runs = g_ks_pinned = g_ks_wm_bad = 0;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_exec_class_create(loop, 10, 0, &cls), ==, XTC_OK);
+	kids[0].name = "ks";
+	kids[0].fn = ks_kid;
+	kids[0].policy = XTC_RESTART_TRANSIENT;
+	kids[0].mailbox_cap = 4;
+	kids[0].mailbox_watermark_pct = 50;
+	kids[0].mailbox_watermark_fn = ks_wm;
+	kids[0].mailbox_watermark_user = &g_ks_wm;
+	kids[0].sched_class = cls;
+	kids[0].migratable = 1;
+	kids[1].name = "steady";
+	kids[1].fn = ks_steady;
+	kids[1].policy = XTC_RESTART_PERMANENT;
+	munit_assert_int(xtc_sup_start(loop, NULL, kids, 2, &sup), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, ks_driver, sup, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+
+	munit_assert_int(xtc_atomic_load_i32(&g_ks_runs, xtc_mo_seq_cst), ==,
+	    2);
+	munit_assert_int(xtc_atomic_load_i32(&g_ks_wm, xtc_mo_seq_cst), ==, 2);
+	munit_assert_int(xtc_atomic_load_i32(&g_ks_wm_bad, xtc_mo_seq_cst), ==,
+	    0);
+	munit_assert_int(xtc_atomic_load_i32(&g_ks_pinned, xtc_mo_seq_cst), ==,
+	    0);
+	munit_assert_uint64(xtc_exec_class_runs(cls), >=, 2);
+	munit_assert_int(xtc_sup_child_restarts(sup, 0, &n), ==, XTC_OK);
+	munit_assert_int(n, ==, 1);
+	munit_assert_int(xtc_sup_child_restarts(sup, 1, &n), ==, XTC_OK);
+	munit_assert_int(n, ==, 0);
+	munit_assert_int(xtc_sup_n_restarts(sup), ==, 1);
+	munit_assert_int(xtc_sup_child_restarts(sup, 2, &n), ==,
+	    XTC_E_NOTFOUND);
+	munit_assert_int(xtc_sup_child_restarts(sup, -1, &n), ==,
+	    XTC_E_NOTFOUND);
+	munit_assert_int(xtc_sup_child_restarts(sup, 0, NULL), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_sup_child_restarts(NULL, 0, &n), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_sup_join(sup, 1000LL * 1000 * 1000), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/add_child_other_loop", test_add_child_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/supervisor_restarts",   test_supervisor_restarts, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1610,6 +1731,8 @@ static MunitTest tests[] = {
 	{ "/down_hook_old_opts", test_down_hook_old_opts, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/down_hook_group_nofault", test_down_hook_group_nofault, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/spec_proc_opts", test_spec_proc_opts, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

@@ -126,17 +126,18 @@ typedef struct xtc_app_drain_report {
 #define XTC_APP_DRAIN_REPORT_INIT { .size = sizeof(xtc_app_drain_report_t) }
 
 /*
- * PUBLIC: int        xtc_app_create __P((const xtc_app_opts_t *, xtc_app_t **));
- * PUBLIC: void       xtc_app_destroy __P((xtc_app_t *));
- * PUBLIC: int        xtc_app_start __P((xtc_app_t *, const xtc_child_spec_t *, int));
- * PUBLIC: int        xtc_app_run __P((xtc_app_t *));
- * PUBLIC: int        xtc_app_stop __P((xtc_app_t *));
- * PUBLIC: xtc_loop_t *xtc_app_loop __P((const xtc_app_t *));
- * PUBLIC: xtc_exec_t *xtc_app_exec __P((const xtc_app_t *));
- * PUBLIC: xtc_reg_t  *xtc_app_registry __P((const xtc_app_t *));
- * PUBLIC: int        xtc_app_shutdown __P((xtc_app_t *, int64_t, int64_t, xtc_app_drain_report_t *));
- * PUBLIC: int        xtc_app_drain_on_signal __P((xtc_app_t *, int64_t, int64_t, xtc_app_drain_report_t *));
- * PUBLIC: int        xtc_app_is_shutdown_msg __P((const void *, size_t));
+ * PUBLIC: int        xtc_app_create __P((const xtc_app_opts_t *, xtc_app_t
+ * **)); PUBLIC: void       xtc_app_destroy __P((xtc_app_t *)); PUBLIC: int
+ * xtc_app_start __P((xtc_app_t *, const xtc_child_spec_t *, int)); PUBLIC: int
+ * xtc_app_run __P((xtc_app_t *)); PUBLIC: int        xtc_app_stop
+ * __P((xtc_app_t *)); PUBLIC: xtc_loop_t *xtc_app_loop __P((const xtc_app_t
+ * *)); PUBLIC: xtc_exec_t *xtc_app_exec __P((const xtc_app_t *)); PUBLIC:
+ * xtc_reg_t  *xtc_app_registry __P((const xtc_app_t *)); PUBLIC:
+ * xtc_supervisor_t *xtc_app_supervisor __P((const xtc_app_t *)); PUBLIC: int
+ * xtc_app_shutdown __P((xtc_app_t *, int64_t, int64_t, xtc_app_drain_report_t
+ * *)); PUBLIC: int        xtc_app_drain_on_signal __P((xtc_app_t *, int64_t,
+ * int64_t, xtc_app_drain_report_t *)); PUBLIC: int xtc_app_is_shutdown_msg
+ * __P((const void *, size_t));
  */
 
 XTC_API int        xtc_app_create(const xtc_app_opts_t *opts, xtc_app_t **out);
@@ -191,5 +192,12 @@ XTC_API xtc_loop_t *xtc_app_loop(const xtc_app_t *app);
 XTC_API xtc_exec_t *xtc_app_exec(const xtc_app_t *app);
 
 XTC_API xtc_reg_t  *xtc_app_registry(const xtc_app_t *app);
+
+/* The root supervisor (2.2), for xtc_sup_n_restarts,
+ * xtc_sup_child_restarts (index = position in the xtc_app_start array),
+ * xtc_sup_n_alive and xtc_sup_add_child.  NULL before xtc_app_start.
+ * Borrowed: valid until xtc_app_destroy; do not xtc_sup_stop or
+ * xtc_sup_join it (use xtc_app_stop / xtc_app_shutdown). */
+XTC_API xtc_supervisor_t *xtc_app_supervisor(const xtc_app_t *app);
 
 #endif /* XTC_APP_H */

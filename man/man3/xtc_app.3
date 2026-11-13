@@ -14,7 +14,8 @@
 .Nm xtc_app_is_shutdown_msg ,
 .Nm xtc_app_loop ,
 .Nm xtc_app_exec ,
-.Nm xtc_app_registry
+.Nm xtc_app_registry ,
+.Nm xtc_app_supervisor
 .Nd OTP-style application container
 .Sh SYNOPSIS
 .In xtc.h
@@ -41,6 +42,8 @@
 .Fn xtc_app_exec "const xtc_app_t *app"
 .Ft "xtc_reg_t *"
 .Fn xtc_app_registry "const xtc_app_t *app"
+.Ft "xtc_supervisor_t *"
+.Fn xtc_app_supervisor "const xtc_app_t *app"
 .Sh DESCRIPTION
 .Nm xtc_app
 is the L4 application container -- a root supervisor plus a
@@ -95,6 +98,34 @@ on
 .Fn xtc_app_registry
 drops a dead process's names with no setup; the reaper stops when the
 root supervisor does.
+.Fn xtc_app_supervisor ,
+added in 2.2, returns the root supervisor
+.Pq NULL before Fn xtc_app_start ,
+so the app can read
+.Fn xtc_sup_n_restarts ,
+.Fn xtc_sup_child_restarts
+.Pq Fa index No is the child's position in the Fn xtc_app_start No array
+and
+.Fn xtc_sup_n_alive
+or add dynamic children; see
+.Xr xtc_supervisor 3 .
+The pointer is borrowed until
+.Fn xtc_app_destroy ;
+stop the app with
+.Fn xtc_app_stop
+or
+.Fn xtc_app_shutdown ,
+not
+.Fn xtc_sup_stop ,
+and never
+.Fn xtc_sup_join
+it.
+An
+.Va on_child_down
+hook in
+.Fa opts.sup
+receives the caller's own child spec, as given to
+.Fn xtc_app_start .
 .Fn xtc_app_exec
 returns the underlying
 .Xr xtc_exec 3

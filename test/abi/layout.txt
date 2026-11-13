@@ -110,7 +110,7 @@ xtc_cfg_spec_t.n_enum_labels off=80 size=4
 xtc_cfg_spec_t.validator off=88 size=8
 xtc_cfg_spec_t.on_change off=96 size=8
 xtc_cfg_spec_t.cb_user off=104 size=8
-xtc_child_spec_t size=56 align=8
+xtc_child_spec_t size=88 align=8
 xtc_child_spec_t.size off=0 size=8
 xtc_child_spec_t.name off=8 size=8
 xtc_child_spec_t.fn off=16 size=8
@@ -118,6 +118,11 @@ xtc_child_spec_t.arg off=24 size=8
 xtc_child_spec_t.policy off=32 size=4
 xtc_child_spec_t.mailbox_cap off=40 size=8
 xtc_child_spec_t.loop off=48 size=4
+xtc_child_spec_t.mailbox_watermark_fn off=56 size=8
+xtc_child_spec_t.mailbox_watermark_user off=64 size=8
+xtc_child_spec_t.sched_class off=72 size=8
+xtc_child_spec_t.mailbox_watermark_pct off=80 size=4
+xtc_child_spec_t.migratable off=84 size=4
 xtc_dio_sched_spec_t size=152 align=8
 xtc_dio_sched_spec_t.n_genes off=0 size=4
 xtc_dio_sched_spec_t.min off=4 size=32

@@ -294,6 +294,23 @@ g2_inputs(void)
 		CHECK(xtc_sup_join(sup, -1) == XTC_OK);
 	CHECK(xtc_atomic_load_i32(&g_kid_runs, xtc_mo_seq_cst) >= 3);
 
+	/* A 2.1 child spec (ends at loop, 56 bytes on LP64), heap-allocated
+	 * at exactly that size: the 2.2 knobs past it read as defaults. */
+	kids = xalloc(offsetof(xtc_child_spec_t, mailbox_watermark_fn));
+	memset(kids, 0, offsetof(xtc_child_spec_t, mailbox_watermark_fn));
+	((xtc_child_spec_t *)(void *)kids)->size =
+	    offsetof(xtc_child_spec_t, mailbox_watermark_fn);
+	((xtc_child_spec_t *)(void *)kids)->fn = kid;
+	((xtc_child_spec_t *)(void *)kids)->policy = XTC_RESTART_TEMPORARY;
+	CHECK(xtc_sup_start(loop, NULL, (const xtc_child_spec_t *)(void *)kids,
+	          1, &sup) == XTC_OK);
+	free(kids);
+	if (sup != NULL)
+		CHECK(xtc_sup_stop(sup) == XTC_OK);
+	CHECK(xtc_loop_run(loop) == XTC_OK);
+	if (sup != NULL)
+		CHECK(xtc_sup_join(sup, -1) == XTC_OK);
+
 	/* Mixed element sizes and size 0 are refused. */
 	memset(zk, 0, sizeof zk);
 	zk[0].size = sizeof zk[0];

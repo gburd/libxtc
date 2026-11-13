@@ -33,6 +33,7 @@ struct child {
 	uint64_t         monitor_ref;
 	int              alive;
 	int              dynamic;   /* added by xtc_sup_add_child */
+	int index;                  /* static: position in the start array */
 	/* The incarnation the supervisor killed (group restart, stop) whose
 	 * DOWN has not been reported to on_child_down yet.  Its DOWN arrives
 	 * after `alive` is cleared and, for a group restart, may arrive after
@@ -66,6 +67,11 @@ struct xtc_supervisor {
 	int                    rr_n;
 
 	int n_restarts_total;
+	/* Per static child (index into the xtc_sup_start array), read from
+	 * any thread.  A separate array from `children`, which the
+	 * supervisor fiber reallocs (dynamic children) under readers. */
+	int *child_restarts;
+	int n_static;
 	int n_alive; /* children alive (atomic) */
 	int alive;
 	int stop_requested;
@@ -171,7 +177,7 @@ __intensity_exceeded(struct xtc_supervisor *sup, int64_t now)
 }
 
 static void
-__record_restart(struct xtc_supervisor *sup, int64_t now)
+__record_restart(struct xtc_supervisor *sup, const struct child *c, int64_t now)
 {
 	if (sup->rr_n < sup->rr_cap) {
 		sup->recent_restarts[sup->rr_n++] = now;
@@ -184,6 +190,9 @@ __record_restart(struct xtc_supervisor *sup, int64_t now)
 	}
 	(void)xtc_atomic_fetch_add_i32(&sup->n_restarts_total, 1,
 	    xtc_mo_relaxed);
+	if (!c->dynamic)
+		(void)xtc_atomic_fetch_add_i32(&sup->child_restarts[c->index],
+		    1, xtc_mo_relaxed);
 }
 
 /* The loop a child is spawned on -- its OWNER loop (p->loop, unchanged by
@@ -224,6 +233,11 @@ __spawn_child(struct xtc_supervisor *sup, struct child *c)
 	pop.size = sizeof pop;
 	pop.name = c->spec.name;
 	pop.mailbox_cap = c->spec.mailbox_cap;
+	pop.mailbox_watermark_pct = c->spec.mailbox_watermark_pct;
+	pop.mailbox_watermark_fn = c->spec.mailbox_watermark_fn;
+	pop.mailbox_watermark_user = c->spec.mailbox_watermark_user;
+	pop.migratable = c->spec.migratable;
+	pop.sched_class = c->spec.sched_class;
 	/*
 	 * ATOMIC spawn+monitor, not spawn-then-monitor.
 	 *
@@ -809,7 +823,7 @@ __sup_entry(void *arg)
 		XTC_PROBE_SUP_RESTART((uintptr_t)sup, XTC_PROBE_PID_ID(d.pid),
 		    XTC_PROBE_PID_GEN(d.pid), d.reason);
 		(void)__os_clock_mono(&now);
-		__record_restart(sup, now);
+		__record_restart(sup, &sup->children[idx], now);
 		if (__intensity_exceeded(sup, now))
 			break;
 
@@ -921,12 +935,19 @@ __xtc_sup_start_ex(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
 	if (n_children > 0) {
 		if ((rc = __os_calloc((size_t)n_children, sizeof *sup->children,
 		    (void **)&sup->children)) != XTC_OK) goto fail1;
+		if ((rc = __os_calloc((size_t)n_children,
+		         sizeof *sup->child_restarts,
+		         (void **)&sup->child_restarts)) != XTC_OK)
+			goto fail2;
 	}
 	sup->n_children = n_children;
-	for (i = 0; i < n_children; i++)
+	sup->n_static = n_children;
+	for (i = 0; i < n_children; i++) {
+		sup->children[i].index = i;
 		if ((rc = __sup_spec_in(&sup->children[i].spec,
 		    (const char *)children + (size_t)i * stride)) != XTC_OK)
 			goto fail2;
+	}
 
 	if ((rc = xtc_notify_create(&sup->stopped)) != XTC_OK) goto fail2;
 
@@ -946,7 +967,9 @@ __xtc_sup_start_ex(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
 	return XTC_OK;
 
 fail3:	xtc_notify_destroy(sup->stopped);
-fail2:	__os_free(sup->children);
+fail2:
+	__os_free(sup->child_restarts);
+	__os_free(sup->children);
 fail1:	__os_free(sup->recent_restarts);
 fail0:	__os_free(sup);
 	return rc;
@@ -1109,6 +1132,7 @@ xtc_sup_join(xtc_supervisor_t *sup, int64_t timeout_ns)
 		return (rc == XTC_E_AGAIN) ? XTC_E_AGAIN : rc;   /* still running */
 
 	xtc_notify_destroy(sup->stopped);
+	__os_free(sup->child_restarts);
 	__os_free(sup->children);
 	__os_free(sup->recent_restarts);
 	__os_free(sup);
@@ -1131,6 +1155,19 @@ int xtc_sup_n_restarts(const xtc_supervisor_t *sup) {
 	        xtc_mo_relaxed) :
 	    0;
 }
+/* PUBLIC: int xtc_sup_child_restarts __P((const xtc_supervisor_t *, int, int
+ * *)); */
+int
+xtc_sup_child_restarts(const xtc_supervisor_t *sup, int index, int *out)
+{
+	if (sup == NULL || out == NULL)
+		return XTC_E_INVAL;
+	if (index < 0 || index >= sup->n_static)
+		return XTC_E_NOTFOUND;
+	*out = xtc_atomic_load_i32(&sup->child_restarts[index], xtc_mo_relaxed);
+	return XTC_OK;
+}
+
 int xtc_sup_alive(const xtc_supervisor_t *sup) {
 	return sup ? xtc_atomic_load_i32(&((xtc_supervisor_t *)sup)->alive,
 	                 xtc_mo_relaxed) :

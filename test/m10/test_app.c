@@ -895,6 +895,7 @@ test_app_hook_spec(const MunitParameter p[], void *d)
 	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
 	xtc_child_spec_t k = XTC_CHILD_SPEC_INIT;
 	xtc_app_t *a;
+	int n = -1;
 	(void)p;
 	(void)d;
 	g_hs_own = g_hs_other = 0;
@@ -908,9 +909,17 @@ test_app_hook_spec(const MunitParameter p[], void *d)
 	k.arg = &g_hs_own;
 	k.policy = XTC_RESTART_TRANSIENT;
 	munit_assert_int(xtc_app_create(&ao, &a), ==, XTC_OK);
+	munit_assert_null(xtc_app_supervisor(a)); /* not started */
 	munit_assert_int(xtc_app_start(a, &k, 1), ==, XTC_OK);
+	munit_assert_not_null(xtc_app_supervisor(a));
 	munit_assert_int(xtc_app_run(a), ==, XTC_OK);
+	/* The app's root supervisor, and its per-child restart count. */
+	munit_assert_int(xtc_sup_n_restarts(xtc_app_supervisor(a)), ==, 2);
+	munit_assert_int(xtc_sup_child_restarts(xtc_app_supervisor(a), 0, &n),
+	    ==, XTC_OK);
+	munit_assert_int(n, ==, 2);
 	xtc_app_destroy(a);
+	munit_assert_null(xtc_app_supervisor(NULL));
 	munit_assert_int(g_hs_own, ==, 2);   /* the first exit + the restart */
 	munit_assert_int(g_hs_other, ==, 0);
 	return MUNIT_OK;

@@ -691,3 +691,10 @@ xtc_app_destroy(xtc_app_t *a)
 xtc_loop_t *xtc_app_loop(const xtc_app_t *a)     { return a ? a->loop : NULL; }
 xtc_exec_t *xtc_app_exec(const xtc_app_t *a)     { return a ? a->exec : NULL; }
 xtc_reg_t  *xtc_app_registry(const xtc_app_t *a) { return a ? a->reg  : NULL; }
+
+/* PUBLIC: xtc_supervisor_t *xtc_app_supervisor __P((const xtc_app_t *)); */
+xtc_supervisor_t *
+xtc_app_supervisor(const xtc_app_t *a)
+{
+	return a != NULL ? a->root : NULL;
+}

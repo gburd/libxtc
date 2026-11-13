@@ -73,21 +73,23 @@ XTC_2.0 {
 
 XTC_2.2 {
 	global:
-		xtc_tnt_send_from;
+		xtc_app_supervisor;
+		xtc_hist_create_bounds;
+		xtc_hist_iterate;
+		xtc_hist_quantiles;
+		xtc_hist_record_value;
+		xtc_hist_set_scale;
+		xtc_hist_sum;
+		xtc_log_swap_default;
+		xtc_metrics_set_help;
+		xtc_metrics_write_prometheus;
+		xtc_proc_set_label;
 		xtc_reg_put;
 		xtc_reg_visit;
-		xtc_log_swap_default;
-		xtc_tuning_check_ex;
-		xtc_hist_create_bounds;
-		xtc_hist_record_value;
-		xtc_hist_quantiles;
-		xtc_hist_sum;
-		xtc_hist_iterate;
-		xtc_hist_set_scale;
-		xtc_metrics_write_prometheus;
-		xtc_metrics_set_help;
-		xtc_proc_set_label;
-		xtc_thread_register;
+		xtc_sup_child_restarts;
 		xtc_tail_app;
 		xtc_tail_app_name;
+		xtc_thread_register;
+		xtc_tnt_send_from;
+		xtc_tuning_check_ex;
 } XTC_2.0;

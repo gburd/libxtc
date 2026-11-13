@@ -11,7 +11,8 @@
 .Nm xtc_sup_alive ,
 .Nm xtc_sup_n_children ,
 .Nm xtc_sup_n_alive ,
-.Nm xtc_sup_n_restarts
+.Nm xtc_sup_n_restarts ,
+.Nm xtc_sup_child_restarts
 .Nd OTP-style supervisor trees
 .Sh SYNOPSIS
 .In xtc.h
@@ -32,6 +33,8 @@
 .Fn xtc_sup_n_alive "const xtc_supervisor_t *sup"
 .Ft int
 .Fn xtc_sup_n_restarts "const xtc_supervisor_t *sup"
+.Ft int
+.Fn xtc_sup_child_restarts "const xtc_supervisor_t *sup" "int index" "int *out"
 .Sh DESCRIPTION
 .Nm xtc_supervisor
 is an OTP-style supervisor: it owns a set of child specs, spawns
@@ -109,6 +112,38 @@ for a
 .Va size
 of 0 or elements of different sizes.
 .Pp
+.Sy Child spec:
+.Bd -literal -offset indent
+typedef struct xtc_child_spec {
+	size_t               size;   /* XTC_CHILD_SPEC_INIT */
+	const char          *name;
+	xtc_proc_fn          fn;
+	void                *arg;
+	xtc_restart_policy_t policy;
+	size_t               mailbox_cap;
+	int                  loop;
+	/* 2.2 */
+	void  (*mailbox_watermark_fn)(xtc_pid_t, size_t, size_t, void *);
+	void                *mailbox_watermark_user;
+	xtc_exec_class_t     sched_class;
+	int                  mailbox_watermark_pct;
+	int                  migratable;
+} xtc_child_spec_t;
+.Ed
+.Pp
+The 2.2 fields are the
+.Vt xtc_proc_opts_t
+knobs of the same names
+.Pq Xr xtc_proc 3 ,
+applied to every incarnation of the child: the first start and each
+restart, so a child does not set them on itself.
+.Va sched_class
+must have been created
+.Pq Xr xtc_exec_class_create 3
+on the loop the child is placed on; one from another loop is ignored,
+as for
+.Fn xtc_proc_spawn .
+.Pp
 .Sy Restart intensity:
 .Va opts.max_restarts
 restarts within
@@ -140,6 +175,24 @@ is removed from the supervisor and no longer counted (before 1.55.1 its
 slot was kept forever);
 .Fn xtc_sup_n_alive
 returns only the currently-live children (pool utilization).
+.Fn xtc_sup_n_restarts
+counts the supervisor's restart decisions;
+.Fn xtc_sup_child_restarts ,
+added in 2.2, stores in
+.Fa *out
+the count for the static child at
+.Fa index
+in the
+.Fn xtc_sup_start
+.Pq or Xr xtc_app_start 3
+array.  A one_for_all or rest_for_one restart counts for the child that
+died, not for the siblings restarted with it, so the per-child counts
+sum to
+.Fn xtc_sup_n_restarts
+less the restarts of dynamic children.  It may be called from any
+thread and returns
+.Er XTC_E_NOTFOUND
+for an index outside the static array.
 .Pp
 .Fn xtc_sup_start
 spawns the supervisor and its initial children.  Returns
