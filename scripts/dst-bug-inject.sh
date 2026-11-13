@@ -105,6 +105,7 @@ write_cases() {
 		"34;test_sim_down_kind;0;1;INIT\\(code 0\\): want kind 1 code -2, got kind 0 " \
 		"35;test_sim_sup_strategy;0;1;on_child_down missed deaths" \
 		"44;test_sim_app;0;1;a monitored name outlived its proc" \
+		"45;test_sim_demonitor;0;1;a DOWN arrived after xtc_demonitor returned XTC_OK" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -156,6 +157,8 @@ write_cases() {
 # 44 APP_REAPER_LATE app.c does not publish its reaper at xtc_app_start
 #               -> a name registered with register_mon before the reaper first
 #               runs is still dropped when its proc dies
+# 45 DEMON_INFLIGHT proc.c queues a DOWN that was in flight at xtc_demonitor
+#               -> a monitor turned off while on delivers no DOWN, ever
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

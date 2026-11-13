@@ -116,6 +116,7 @@ struct envelope {
 #define ENV_F_SLAB  1u           /* header came from __env_slab */
 #define ENV_F_OWNED 2u           /* ext is the xtc_send_owned caller's buffer */
 #define ENV_F_TRAIL 4u           /* header lives inside the ext block */
+#define ENV_F_SYS 8u             /* a DOWN / link EXIT the library sent */
 #define ENV_TRAIL_OFF(n)  (((n) + 15) & ~(size_t)15)
 
 /* ---------- proc ---------- */
@@ -137,7 +138,12 @@ struct mon_entry  {
 	xtc_pid_t         target;
 	xtc_pid_t         watcher;
 	struct mon_entry *peer;   /* target side: the watcher's entry */
-	int refs;                 /* watcher side: holders (1 or 2) */
+	int refs;                 /* watcher side: holders (1 to 3) */
+	/* Watcher side, under the WATCHER's mbox_lock: the DOWN reached the
+	 * mailbox; xtc_demonitor turned the monitor off, so a DOWN still in
+	 * flight is dropped instead of queued. */
+	int down_queued;
+	int cancelled;
 };
 
 /* M11.5b: pools for link_entry / mon_entry (fixed-size, hot path). */
@@ -1423,13 +1429,29 @@ __mbox_pop_locked(struct xtc_proc *p)
  * already told succeeded, so a refused e is the library's to free. */
 static int
 __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e, int sys,
-    int *queued)
+    int *queued, struct mon_entry *mon)
 {
 	int armed, rc = XTC_OK;
 	int wm_fire = 0;
 	size_t wm_depth = 0, wm_cap = 0;
 	xtc_waker_t wk = { 0 };
 	(void) __proc_mtx_lock(&p->mbox_lock);
+	/* A monitor's DOWN (mon is the watcher's entry): dropped if the
+	 * watcher has called xtc_demonitor, else recorded as queued.  Both
+	 * under this lock, which xtc_demonitor takes to decide, so a DOWN is
+	 * either seen by it in the mailbox or never queued. */
+	if (mon != NULL) {
+#if !XTC_DST_BUG(XTC_DST_BUG_DEMON_INFLIGHT)
+		if (mon->cancelled) {
+			(void)__proc_mtx_unlock(&p->mbox_lock);
+			if (queued != NULL)
+				*queued = 1; /* delivered, then demonitored */
+			__env_free(e);
+			return XTC_OK;
+		}
+#endif
+		mon->down_queued = 1;
+	}
 	/* Reject if proc is dead, or capped and full.
 	 * Note: precedence bug fix -- the original used
 	 *   if (!alive || cap > 0 ? mbox_n >= cap : 0)
@@ -1535,7 +1557,12 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e, int sys,
  * a use-after-free (surfaced by DST machine-death + net-latency: a
  * deferred delivery to a proc killed inside the deferral window).
  */
-struct __mbox_deferred { xtc_pid_t pid; struct envelope *e; int sys; };
+struct __mbox_deferred {
+	xtc_pid_t pid;
+	struct envelope *e;
+	int sys;
+	struct mon_entry *mon; /* a DOWN's watcher entry; holds a ref */
+};
 
 /* Forward decl (definition at __resolve below): the deferred callback
  * re-resolves the target by pid at fire time. */
@@ -1547,15 +1574,17 @@ __mbox_deferred_run(void *arg)
 	struct __mbox_deferred *d = arg;
 	struct xtc_proc *p = __resolve(d->pid, NULL);
 	if (p != NULL) {
-		(void)__mbox_deliver_locked(p, d->e, d->sys, NULL);
+		(void)__mbox_deliver_locked(p, d->e, d->sys, NULL, d->mon);
 		__proc_release(p);
 	} else
 		__env_free(d->e);   /* target gone: drop the delayed message */
+	__mon_put(d->mon);
 	__os_free(d);
 }
 
 static int
-__mbox_deliver(struct xtc_proc *p, struct envelope *e, int sys, int *queued)
+__mbox_deliver(struct xtc_proc *p, struct envelope *e, int sys, int *queued,
+    struct mon_entry *mon)
 {
 	/*
 	 * DST cross-loop network model (sim only; a single relaxed load
@@ -1595,12 +1624,21 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e, int sys, int *queued)
 					d->pid = p->pid;
 					d->e = e;
 					d->sys = sys;
+					/* The watcher entry must outlive the
+					 * sender's hold on it: the delivery
+					 * marks it later. */
+					d->mon = mon;
+					if (mon != NULL)
+						(void)xtc_atomic_fetch_add_i32(
+						    &mon->refs, 1,
+						    xtc_mo_relaxed);
 					if (__xtc_io_sim_defer_cb(dst->io,
 					    now + lat, __mbox_deferred_run,
 					    d) == XTC_OK) {
 						*queued = 1;  /* in flight: ours */
 						return XTC_OK;
 					}
+					__mon_put(mon);
 					__os_free(d);
 				}
 				/* alloc/defer failed: deliver inline (correct,
@@ -1608,7 +1646,7 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e, int sys, int *queued)
 			}
 		}
 	}
-	return __mbox_deliver_locked(p, e, sys, queued);
+	return __mbox_deliver_locked(p, e, sys, queued, mon);
 }
 
 /* ---------- spawn entry trampoline ---------- */
@@ -2032,6 +2070,7 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 		mw->target = spawned_pid;
 		mw->watcher = self->pid;
 		mw->peer = NULL;
+		mw->down_queued = mw->cancelled = 0;
 		xtc_atomic_store_i32(&mw->refs, 2, xtc_mo_relaxed);
 		__mon_watch_push(self, mw);
 		mt->ref = ref;
@@ -2787,10 +2826,10 @@ __xtc_proc_self_loop(xtc_pid_t *out_pid)
 	return self != NULL ? self->loop : NULL;
 }
 
-static int __send_ex(xtc_loop_t *, xtc_pid_t, const void *, size_t, void *,
-    int);
-#define __send_on(o, t, d, n)  __send_ex((o), (t), (d), (n), NULL, 0)
-#define __send_sys(t, d, n)    __send_ex(NULL, (t), (d), (n), NULL, 1)
+static int __send_ex(xtc_loop_t *, xtc_pid_t, const void *, size_t, void *, int,
+    struct mon_entry *);
+#define __send_on(o, t, d, n) __send_ex((o), (t), (d), (n), NULL, 0, NULL)
+#define __send_sys(t, d, n) __send_ex(NULL, (t), (d), (n), NULL, 1, NULL)
 
 /* PUBLIC: int xtc_send __P((xtc_pid_t, const void *, size_t)); */
 int
@@ -2805,7 +2844,7 @@ xtc_send_owned(xtc_pid_t to, void *buf, size_t size)
 {
 	if (buf == NULL)
 		return size == 0 ? __send_on(NULL, to, NULL, 0) : XTC_E_INVAL;
-	return __send_ex(NULL, to, buf, size, buf, 0);
+	return __send_ex(NULL, to, buf, size, buf, 0, NULL);
 }
 
 /* Owner-qualified xtc_send (see __resolve_on); owner NULL -> XTC_E_INVAL. */
@@ -2820,10 +2859,11 @@ __xtc_send_on(xtc_loop_t *owner, xtc_pid_t to, const void *data, size_t size)
 /* xtc_send resolved in `owner`'s table (NULL: by pid alone).  sys = 1
  * for a DOWN / link EXIT (bypasses mailbox_cap, see __mbox_deliver_locked).
  * owned != NULL (== data): xtc_send_owned -- the buffer itself becomes the
- * payload; it is the library's only if the message is queued. */
+ * payload; it is the library's only if the message is queued.  mon: a
+ * monitor DOWN's watcher entry (the caller holds a ref), else NULL. */
 static int
 __send_ex(xtc_loop_t *owner, xtc_pid_t to, const void *data, size_t size,
-    void *owned, int sys)
+    void *owned, int sys, struct mon_entry *mon)
 {
 	struct xtc_proc *p;
 	xtc_loop_t *target;
@@ -2869,6 +2909,8 @@ __send_ex(xtc_loop_t *owner, xtc_pid_t to, const void *data, size_t size,
 	e->next = NULL;
 	e->from = __xtc_sender_pid();
 	e->size = size;
+	if (sys)
+		e->flags |= ENV_F_SYS;
 
 	/* Causal tracing: stamp the envelope with the sender's HLC and
 	 * record the send.  Off the hot path entirely when tracing is
@@ -2887,7 +2929,7 @@ __send_ex(xtc_loop_t *owner, xtc_pid_t to, const void *data, size_t size,
 	XTC_PROBE_MSG_SEND(XTC_PROBE_PID_ID(e->from), XTC_PROBE_PID_GEN(e->from),
 	    XTC_PROBE_PID_ID(to), XTC_PROBE_PID_GEN(to), size);
 
-	rc = __mbox_deliver(p, e, sys, &queued);
+	rc = __mbox_deliver(p, e, sys, &queued, mon);
 	__proc_release(p);
 	/* xtc_send_owned reports the ownership outcome: XTC_OK iff queued.
 	 * (Both wake paths behind a queued message are infallible today, so
@@ -5474,6 +5516,7 @@ xtc_monitor(xtc_pid_t target, uint64_t *out_ref)
 	me->target = target;
 	me->watcher = self->pid;
 	me->peer = NULL;
+	me->down_queued = me->cancelled = 0;
 	xtc_atomic_store_i32(&me->refs, 1, xtc_mo_relaxed);
 	{
 		struct mon_entry *m2 = __mon_alloc();
@@ -5498,6 +5541,155 @@ xtc_monitor(xtc_pid_t target, uint64_t *out_ref)
 	__mon_watch_push(self, me);
 	if (out_ref) *out_ref = me->ref;
 	return XTC_OK;
+}
+
+/*
+ * Unlink the target-side entry of the watcher entry `w` from the target's
+ * monitored_by list, under the target's table lock (as
+ * __peer_push_monitored_by pushes it).  Returns the unlinked entry, or
+ * NULL if the target has exited (its exit detached the list and will drop
+ * the entry itself) or the entry is not there.
+ */
+static struct mon_entry *
+__peer_drop_monitored_by(xtc_pid_t peer_pid, const struct mon_entry *w)
+{
+	xtc_loop_t *lp = NULL;
+	struct xtc_proc_table *tbl;
+	struct xtc_proc *peer;
+	struct mon_entry **pp, *m = NULL;
+	peer = __resolve(peer_pid, &lp);
+	if (peer == NULL || lp == NULL) {
+		if (peer)
+			__proc_release(peer);
+		return NULL;
+	}
+	tbl = __table_for(lp, 0);
+	if (tbl == NULL) {
+		__proc_release(peer);
+		return NULL;
+	}
+	(void)__proc_mtx_lock(&tbl->stripes[__pt_stripe(peer_pid.local_id)]);
+	if (peer_pid.local_id < tbl->cap &&
+	    tbl->slots[peer_pid.local_id].proc == peer &&
+	    tbl->slots[peer_pid.local_id].gen == peer_pid.gen) {
+		for (pp = &peer->monitored_by; *pp != NULL; pp = &(*pp)->next)
+			if ((*pp)->peer == w) {
+				m = *pp;
+				*pp = m->next;
+				break;
+			}
+	}
+	(void)__proc_mtx_unlock(&tbl->stripes[__pt_stripe(peer_pid.local_id)]);
+	__proc_release(peer);
+	return m;
+}
+
+/* A DOWN the library sent for monitor `ref`. */
+static int
+__env_is_down(const struct envelope *e, uint64_t ref)
+{
+	const unsigned char *d = __env_payload(e);
+	uint64_t r;
+	if ((e->flags & ENV_F_SYS) == 0 || e->size < 1 + sizeof r ||
+	    d[0] != 'D')
+		return 0;
+	memcpy(&r, d + 1, sizeof r);
+	return r == ref;
+}
+
+/*
+ * Remove and free the DOWN for monitor `ref` from the calling proc's save
+ * queue and mailbox, if it is there.  Owner only: the save queue is the
+ * owner's, the mailbox is walked under mbox_lock.
+ */
+static void
+__mbox_flush_down(struct xtc_proc *self, uint64_t ref)
+{
+	struct envelope **pp, *e, *prev = NULL, *found = NULL;
+
+	for (pp = &self->save_head; (e = *pp) != NULL; pp = &e->next) {
+		if (__env_is_down(e, ref)) {
+			*pp = e->next;
+			if (self->save_tail == e)
+				self->save_tail = prev;
+			xtc_atomic_fetch_sub_size(&self->mbox_saved, 1,
+			    xtc_mo_relaxed);
+			__env_free(e);
+			return;
+		}
+		prev = e;
+	}
+	prev = NULL;
+	(void)__proc_mtx_lock(&self->mbox_lock);
+	for (pp = &self->mbox_head; (e = *pp) != NULL; pp = &e->next) {
+		if (__env_is_down(e, ref)) {
+			*pp = e->next;
+			if (self->mbox_tail == e)
+				self->mbox_tail = prev;
+			self->mbox_n--;
+			if (self->mbox_wm_lvl > 0 &&
+			    self->mbox_n < self->mbox_wm_lvl)
+				self->mbox_wm_fired = 0;
+			found = e;
+			break;
+		}
+		prev = e;
+	}
+	(void)__proc_mtx_unlock(&self->mbox_lock);
+	__env_free(found);
+}
+
+/* PUBLIC: int xtc_demonitor __P((uint64_t, int)); */
+/*
+ * Turn off a monitor the calling proc created (xtc_monitor,
+ * xtc_proc_spawn_monitor).  XTC_OK: it was on and is now off; no DOWN for
+ * it reached the mailbox and none will.  XTC_E_NOTFOUND: there is no such
+ * monitor on, because its DOWN was already delivered (or ref is not one
+ * of the caller's).  XTC_DEMONITOR_FLUSH also removes that DOWN from the
+ * mailbox, so after it no DOWN with this ref is or will be in the
+ * caller's mailbox, whichever code is returned.
+ *
+ * The race with the target's exit is decided under the caller's own
+ * mbox_lock, which every DOWN delivery takes: either the DOWN was queued
+ * first (down_queued, the monitor fired) or the monitor is cancelled
+ * first and the delivery drops the DOWN.  The target-side entry is then
+ * unlinked, so a long-lived target that is called many times does not
+ * keep one entry per finished call until it exits.
+ */
+int
+xtc_demonitor(uint64_t ref, int flags)
+{
+	struct xtc_proc *self = __proc_reanchor(__current_proc);
+	struct mon_entry **pp, *w = NULL, *t;
+	int fired = 1;
+
+	if (self == NULL)
+		return XTC_E_STATE;
+	if (ref == 0 || (flags & ~XTC_DEMONITOR_FLUSH) != 0)
+		return XTC_E_INVAL;
+	for (pp = &self->monitors; *pp != NULL; pp = &(*pp)->next)
+		if ((*pp)->ref == ref) {
+			w = *pp;
+			*pp = w->next;
+			self->mon_n--;
+			break;
+		}
+	if (w != NULL) {
+		(void)__proc_mtx_lock(&self->mbox_lock);
+		fired = w->down_queued;
+		if (!fired)
+			w->cancelled = 1;
+		(void)__proc_mtx_unlock(&self->mbox_lock);
+		if (!fired &&
+		    (t = __peer_drop_monitored_by(w->target, w)) != NULL) {
+			__mon_free(t);
+			__mon_put(w); /* the target's hold */
+		}
+		__mon_put(w); /* the list's hold */
+	}
+	if (fired && (flags & XTC_DEMONITOR_FLUSH) != 0)
+		__mbox_flush_down(self, ref);
+	return fired ? XTC_E_NOTFOUND : XTC_OK;
 }
 
 /* On exit: notify links + monitors. */
@@ -5592,8 +5784,8 @@ __notify_links_and_monitors(struct xtc_proc *p)
 		 * leaves the watcher waiting forever for a terminal event).
 		 * What can still fail is a watcher already gone, or an
 		 * allocation; record it rather than lose it silently. */
-		if (__send_sys(me->watcher, &down_signal,
-		    sizeof down_signal) != XTC_OK)
+		if (__send_ex(NULL, me->watcher, &down_signal,
+		        sizeof down_signal, NULL, 1, me->peer) != XTC_OK)
 			__xtc_tail_emit(XTC_TAIL_SCHED,
 			    XTC_TAIL_LIFECYCLE_DROP, p->pid, 0);
 		/* The DOWN is sent: release the watcher's entry so the

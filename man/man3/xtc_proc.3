@@ -28,6 +28,7 @@
 .Nm xtc_unlink ,
 .Nm xtc_proc_trap_exit ,
 .Nm xtc_monitor ,
+.Nm xtc_demonitor ,
 .Nm xtc_proc_mailbox_stats ,
 .Nm xtc_fault_guard_install ,
 .Nm xtc_proc_recovery_arm ,
@@ -83,6 +84,8 @@
 .Fn xtc_proc_trap_exit "int on"
 .Ft int
 .Fn xtc_monitor "xtc_pid_t target" "uint64_t *out_ref"
+.Ft int
+.Fn xtc_demonitor "uint64_t ref" "int flags"
 .Ft int
 .Fn xtc_proc_mailbox_stats "xtc_pid_t pid" "xtc_mailbox_stats_t *out"
 .Ft int
@@ -723,6 +726,50 @@ DOWN and EXIT messages are not subject to
 they are bounded by the number of monitors and links, so a watcher
 whose mailbox is full still receives them.  Releases before 1.55.1
 dropped them in that case.
+.Pp
+.Fn xtc_demonitor ,
+added in 2.2, turns off a monitor the calling process created, by the
+.Fa ref
+.Fn xtc_monitor
+or
+.Fn xtc_proc_spawn_monitor
+returned.  It returns
+.Dv XTC_OK
+when the monitor was still on: no DOWN for it reached the mailbox and
+none will, even one the target sent an instant earlier that is still on
+its way.  It returns
+.Er XTC_E_NOTFOUND
+when the DOWN was already delivered (or
+.Fa ref
+is not one of the caller's monitors).  With
+.Dv XTC_DEMONITOR_FLUSH
+in
+.Fa flags
+that delivered DOWN is also removed from the mailbox and the
+selective-receive save queue, so after the call no DOWN with this
+.Fa ref
+is or will be there, whichever code is returned; other messages are
+left alone.
+.Er XTC_E_INVAL
+for
+.Fa ref
+0 or an unknown flag,
+.Er XTC_E_STATE
+off a process.  This is Erlang's
+.Fn demonitor Ref [flush] ,
+the end of a request/reply that monitors the server for the duration of
+the call:
+.Bd -literal -offset indent
+uint64_t ref;
+xtc_monitor(server, &ref);
+xtc_send(server, &req, sizeof req);
+/* wait for the reply, or a DOWN carrying ref */
+xtc_demonitor(ref, XTC_DEMONITOR_FLUSH);
+.Ed
+.Pp
+Without it every finished call left a live monitor, and the server's
+next exit delivered a stale DOWN to every caller that had ever called
+it.
 .Pp
 .Fn xtc_proc_mailbox_stats
 snapshots a process's mailbox into

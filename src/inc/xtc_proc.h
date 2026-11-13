@@ -201,6 +201,7 @@ typedef struct xtc_mailbox_stats {
  * PUBLIC: int       xtc_unlink __P((xtc_pid_t));
  * PUBLIC: int       xtc_proc_trap_exit __P((int));
  * PUBLIC: int       xtc_monitor __P((xtc_pid_t, uint64_t *));
+ * PUBLIC: int       xtc_demonitor __P((uint64_t, int));
  */
 
 XTC_API int       xtc_proc_spawn(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
@@ -688,6 +689,27 @@ xtc_down_is_noproc(int reason)
  * above).  Registering a monitor on an ALREADY-dead target is not an
  * error: it delivers an immediate DOWN with reason XTC_DOWN_NOPROC. */
 XTC_API int       xtc_monitor(xtc_pid_t target, uint64_t *out_ref);
+
+/*
+ * Turn off a monitor the calling proc created (2.2), by its reference
+ * (from xtc_monitor or xtc_proc_spawn_monitor).  Returns:
+ *   XTC_OK          -- the monitor was on and is now off: no DOWN for it
+ *                      reached the mailbox, and none will;
+ *   XTC_E_NOTFOUND  -- no such monitor is on: its DOWN was already
+ *                      delivered (the target ended first), or ref is not
+ *                      one of the caller's;
+ *   XTC_E_INVAL     -- ref 0, or an unknown flag;
+ *   XTC_E_STATE     -- not called from a proc.
+ * With XTC_DEMONITOR_FLUSH a delivered DOWN for the monitor is also
+ * removed from the caller's mailbox (and save queue): after the call no
+ * DOWN with this ref is, or will be, in the mailbox, whichever code is
+ * returned.  The request/reply pattern:
+ *   xtc_monitor(server, &ref); send the request;
+ *   wait for the reply or a DOWN with ref;
+ *   on the reply: xtc_demonitor(ref, XTC_DEMONITOR_FLUSH).
+ */
+#define XTC_DEMONITOR_FLUSH 0x1
+XTC_API int xtc_demonitor(uint64_t ref, int flags);
 
 /* Snapshot a process's mailbox statistics into *out.  Returns XTC_OK,
  * or XTC_E_INVAL if the pid is dead / unknown.  Safe to call from any

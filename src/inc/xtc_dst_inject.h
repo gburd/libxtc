@@ -248,4 +248,13 @@
  */
 #define XTC_DST_BUG_APP_REAPER_LATE 44
 
+/*
+ * 45 DEMON_INFLIGHT: a DOWN that is in flight (sent, not yet queued: the
+ * simulator's cross-loop latency) when the watcher calls xtc_demonitor is
+ * still queued afterwards: the delivery ignores the cancel.  The watcher
+ * then holds a DOWN for a monitor it turned off (test_sim_demonitor: "a
+ * DOWN arrived after xtc_demonitor").
+ */
+#define XTC_DST_BUG_DEMON_INFLIGHT 45
+
 #endif /* XTC_DST_INJECT_H */

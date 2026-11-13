@@ -396,6 +396,124 @@ test_monitor(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---------- demonitor (2.2) ---------- */
+
+/*
+ * xtc_demonitor: a monitor turned off before its target exits delivers no
+ * DOWN; one whose DOWN was already queued reports XTC_E_NOTFOUND, and
+ * XTC_DEMONITOR_FLUSH removes that DOWN while leaving other mail and
+ * other monitors' DOWNs alone.
+ */
+struct dm_state {
+	int rc_live, rc_fired, rc_unknown, rc_bad, rc_flushed_again;
+	int stray_downs, other_mail, kept_down, n_left;
+	xtc_pid_t parked;
+	xtc_loop_t *loop;
+};
+
+static void
+dm_parked(void *arg)
+{
+	void *m;
+	size_t sz;
+	(void)arg;
+	for (;;) {
+		if (xtc_recv(&m, &sz, -1) != XTC_OK)
+			return;
+		if (sz == 1 && *(char *)m == 'q') {
+			__os_free(m);
+			return;
+		}
+		__os_free(m);
+	}
+}
+
+static void
+dm_quick(void *arg)
+{
+	(void)arg;
+	(void)xtc_exit_self(5);
+}
+
+static void
+dm_watcher(void *arg)
+{
+	struct dm_state *s = arg;
+	xtc_loop_t *loop = s->loop;
+	xtc_pid_t q1, q2;
+	uint64_t r_live, r_fired, r_keep;
+	void *m;
+	size_t sz;
+	int i;
+	xtc_down_info_t di = XTC_DOWN_INFO_INIT;
+
+	/* 1. On, then off while the target lives: no DOWN, ever, for any of
+	 * 1000 monitors of the same live target. */
+	for (i = 0; i < 1000; i++) {
+		if (xtc_monitor(s->parked, &r_live) != XTC_OK)
+			return;
+		s->rc_live = xtc_demonitor(r_live, 0);
+		if (s->rc_live != XTC_OK)
+			return;
+	}
+	/* 2. A monitor whose DOWN is queued: NOTFOUND; FLUSH removes only
+	 * that DOWN.  Mail and another monitor's DOWN stay. */
+	if (xtc_proc_spawn_monitor(loop, dm_quick, NULL, NULL, &q1, &r_fired) !=
+	        XTC_OK ||
+	    xtc_proc_spawn_monitor(loop, dm_quick, NULL, NULL, &q2, &r_keep) !=
+	        XTC_OK)
+		return;
+	(void)xtc_send(xtc_self(), "mail", 4);
+	(void)xtc_proc_sleep(5 * 1000 * 1000); /* both quick ones exit */
+	s->rc_fired = xtc_demonitor(r_fired, XTC_DEMONITOR_FLUSH);
+	s->rc_flushed_again = xtc_demonitor(r_fired, XTC_DEMONITOR_FLUSH);
+	s->rc_unknown = xtc_demonitor(0xdeadbeefULL, 0);
+	s->rc_bad = xtc_demonitor(r_keep, 0x80);
+	/* 3. Tell the parked target to exit, then drain. */
+	(void)xtc_send(s->parked, "q", 1);
+	(void)xtc_proc_sleep(5 * 1000 * 1000);
+	while (xtc_recv(&m, &sz, 0) == XTC_OK) {
+		s->n_left++;
+		if (sz == 4 && memcmp(m, "mail", 4) == 0)
+			s->other_mail++;
+		else if (xtc_down_decode_ex(m, sz, &di) == XTC_OK &&
+		    di.ref == r_keep)
+			s->kept_down++;
+		else
+			s->stray_downs++;
+		__os_free(m);
+	}
+}
+
+static MunitResult
+test_demonitor(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	struct dm_state s;
+	(void)p;
+	(void)d;
+	memset(&s, 0, sizeof s);
+	munit_assert_int(xtc_demonitor(1, 0), ==, XTC_E_STATE); /* no proc */
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	s.loop = loop;
+	munit_assert_int(xtc_proc_spawn(loop, dm_parked, NULL, NULL, &s.parked),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, dm_watcher, &s, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_assert_int(s.rc_live, ==, XTC_OK);
+	munit_assert_int(s.rc_fired, ==, XTC_E_NOTFOUND);
+	munit_assert_int(s.rc_flushed_again, ==, XTC_E_NOTFOUND);
+	munit_assert_int(s.rc_unknown, ==, XTC_E_NOTFOUND);
+	munit_assert_int(s.rc_bad, ==, XTC_E_INVAL);
+	munit_assert_int(s.other_mail, ==, 1);
+	munit_assert_int(s.kept_down, ==, 1);
+	munit_assert_int(s.stray_downs, ==, 0); /* none of the 1000 */
+	munit_assert_int(s.n_left, ==, 2);
+	return MUNIT_OK;
+}
+
 /* ---------- atomic spawn_monitor / spawn_link ---------- */
 
 static void
@@ -3356,6 +3474,8 @@ static MunitTest tests[] = {
 	{ "/userdata",          test_userdata,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/selective_receive", test_selective_receive,NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/monitor",           test_monitor,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/demonitor", test_demonitor, NULL, NULL, MUNIT_TEST_OPTION_NONE,
+	    NULL },
 	{ "/spawn_monitor_atomic", test_spawn_monitor_atomic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/spawn_link_atomic",  test_spawn_link_atomic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/spawn_rel_needs_proc", test_spawn_rel_needs_proc, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
