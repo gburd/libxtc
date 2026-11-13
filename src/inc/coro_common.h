@@ -295,15 +295,19 @@ xtc_stack_reclaim_count(void)
 
 /*
  * Reclaim the unused tail of the current fiber's stack.  Called from a
- * PARK path with `sp` = the fiber's current stack pointer (a stack
- * address captured by the caller just before it jumps to the
- * scheduler).  Stacks grow DOWN, so the unused region is
- * [stack_base + guard, sp - keep), page-aligned inward.  No-op unless
- * the reclaimable span exceeds one page (avoids fault churn on shallow
+ * PARK path just before it jumps to the scheduler.  Stacks grow DOWN, so
+ * the unused region is [stack_base + guard, sp - keep), page-aligned
+ * inward, where sp is this function's own frame address: below every
+ * frame of the parking call chain, and on the fiber's real stack.  (A
+ * local's address is not: AddressSanitizer's use-after-return detection
+ * moves locals to a heap fake stack, and the reclaim never fired under
+ * it.)  noinline keeps the frame below the caller's.  An sp outside the
+ * fiber's stack is refused rather than trusted.  No-op unless the
+ * reclaimable span exceeds one page (avoids fault churn on shallow
  * fibers).
  */
-static void
-coro_stack_shrink(struct xtc_coro *c, void *sp)
+__attribute__((noinline)) static void
+coro_stack_shrink(struct xtc_coro *c)
 {
 	long pgl;
 	size_t page, keep;
@@ -318,7 +322,9 @@ coro_stack_shrink(struct xtc_coro *c, void *sp)
 	keep = xtc_atomic_load_size(&g_reclaim_keep, xtc_mo_seq_cst);
 
 	base = (uintptr_t)c->stack + guard;      /* first usable byte */
-	hi = (uintptr_t)sp;
+	hi = (uintptr_t)__builtin_frame_address(0);
+	if (hi >= base + c->stack_sz)
+		return; /* not on this fiber's stack */
 	if (hi <= base + keep)
 		return;                  /* SP too close to the base */
 	/* Reclaimable tail: [base, hi - keep), rounded to whole pages so we
@@ -336,7 +342,7 @@ int      xtc_stack_reclaim_enable(size_t k) { (void)k; return XTC_E_NOSYS; }
 void     xtc_stack_reclaim_disable(void) { }
 int      xtc_stack_reclaim_enabled(void) { return 0; }
 uint64_t xtc_stack_reclaim_count(void) { return 0; }
-#define coro_stack_shrink(c, sp)  ((void)(c), (void)(sp))
+#define coro_stack_shrink(c) ((void)(c))
 #endif
 
 #endif  /* XTC_CORO_COMMON_H */

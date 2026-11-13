@@ -182,19 +182,12 @@ test_reclaim_correct(const MunitParameter p[], void *d)
 	after = xtc_stack_reclaim_count();
 
 	/* Deep frames (16 KiB) parked many times -> the tail above SP is
-	 * well over a page, so reclaim must have fired at least once.
-	 * EXCEPT under AddressSanitizer: ASan relocates fiber frames to a
-	 * heap fake-stack (detect_stack_use_after_return), so the running
-	 * SP is not inside the fiber's mmap'd stack and the reclaim
-	 * correctly DECLINES (its geometry check finds SP out of range) --
-	 * a safe no-op, not a bug.  There the round-trip correctness (all
-	 * sentinels survived, asserted in run_workers) is the thing that
-	 * matters; the fire-count is expected to stay 0. */
-#ifdef XTC_UNDER_ASAN
-	(void)before; (void)after;
-#else
+	 * well over a page, so reclaim must have fired at least once.  Also
+	 * under AddressSanitizer with detect_stack_use_after_return: its
+	 * fake stack moves locals to the heap, so the park must take SP
+	 * from its frame, not from a local (through 2.2 it did not, and
+	 * the count stayed 0). */
 	munit_assert_uint64(after, >, before);
-#endif
 
 	xtc_stack_reclaim_disable();
 	munit_assert_int(xtc_stack_reclaim_enabled(), ==, 0);

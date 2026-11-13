@@ -722,10 +722,9 @@ xtc_yield(void)
 {
 	struct xtc_coro *c = __xtc_current_coro;
 	void *pctx;
-	volatile char probe;
 	if (c == NULL) return;
 	/* S1: return the unused stack tail below our SP before parking. */
-	coro_stack_shrink(c, (void *)&probe);
+	coro_stack_shrink(c);
 	/* Preserve the process layer's per-fiber TLS across the yield --
 	 * see the coro_fctx.c xtc_yield for the rationale.  Guard the whole
 	 * save/swap/restore against involuntary preemption: a redirect
