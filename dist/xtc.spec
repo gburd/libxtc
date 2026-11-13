@@ -12,7 +12,7 @@
 %global sover 2
 
 Name:           libxtc
-Version:        2.1.2
+Version:        2.1.3
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,35 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Mon Nov 16 2026 Greg Burd <greg@burd.me> - 2.1.3-1
+  xtc_exec_run no longer fails, rarely, to return after its last task
+  finishes.  A DOWN now says how a proc ended: a contained fault in a
+  user recovery frame reports SIGNAL, an exit or kill with reason -1 is
+  delivered, and a server or fsm whose init fails ends EXIT with the
+  failure code (a TRANSIENT child in either case is now restarted).
+  Memory safety: finalizing a loop no longer frees a fiber parked in
+  xtc_blocking_run, xtc_log_drain no longer prints unfinished records,
+  an RCU thread reader registers again after xtc_rcu_fini, and a killed
+  xtc_fsm frees its state.  Contract fixes: recovery-closed sockets
+  refund XTC_RES_FDS, the fault guard and crash handler compose, the PSI
+  listener works unprivileged, xtc_net_listen takes port 0, a
+  single-loop xtc_app_run returns when its supervisor exits,
+  xtc_fsm_call notices a stopped machine, pdict entries are released at
+  exit, demand streams keep one unit open, the library's fd waits no
+  longer spin on queued mail, and stack reclaim fires under ASan.  Fiber
+  RCU read-sides take no lock.  Every installed header has extern "C".
+  The simulator's net latency no longer drops accepted sends, a
+  partition no longer drops a DOWN or link EXIT, and a timed wait off a
+  fiber in a run no longer reads the wall clock.  A fiber switch with
+  stack reclaim off no longer calls into it.  MinGW-w64 builds
+  again.  Out of memory, xtc_rcu never frees under a reader and
+  xtc_lrlock loses no write; a fire-and-forget xtc_async coroutine is
+  reclaimed when it returns; XTC_AIO_FORCE_OFFLOAD is not read inside a
+  simulation run.  Two maintainer-approved exceptions: XTC_API on every
+  installed declaration (no ELF change), and a new installed
+  xtc_version.h with the version and backend macros.  The __os_*.3 pages
+  are no longer installed.
+
 * Thu Nov 05 2026 Greg Burd <greg@burd.me> - 2.1.2-1
   Memory safety and data loss: a stale readiness event no longer
   steals a newer park of the fd; a combinator whose callback cannot be

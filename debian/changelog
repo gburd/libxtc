@@ -1,3 +1,129 @@
+libxtc (2.1.3-1) unstable; urgency=medium
+
+  * PATCH release on the 2.1 LTS line: fixes, plus two exceptions the
+    maintainer approved (below).  ABI-compatible with 2.0.0 and 2.1.0 to
+    2.1.2 (abidiff against 2.1.2: no change; the same 762 exported
+    symbols; SONAME libxtc.so.2).
+  * Executor: xtc_exec_run could fail to return after the last task
+    finished.  A loop that dropped its last timer and then blocked in
+    its poll left the old timer count published, so the run never saw
+    every loop idle (about 1 run in 1,000 of one test under riscv64
+    qemu-user).  The loop now publishes the count before it blocks.
+  * DOWN classification (each a behaviour change that makes the DOWN
+    match the documented contract):
+    - A contained fault in a user recovery frame reported EXIT with the
+      code the app passed; it now reports SIGNAL with the fault's
+      signal, however the proc leaves, until the frame is re-armed.  A
+      TRANSIENT child that recovers and then exits 0 is now restarted.
+    - xtc_exit_self(-1) reported CLEAN, and xtc_exit_pid(p, -1) returned
+      XTC_OK but killed nothing (the reason was stored as reason + 1).
+      Every int is now a deliverable exit and kill reason, masked or
+      not.
+    - An xtc_svr whose init fails, and an xtc_fsm whose first enter()
+      fails, ended CLEAN; they now end with EXIT and the failure code.
+      A TRANSIENT supervised server whose init fails is now restarted,
+      bounded by the restart intensity.
+    - No new kind: a kill still reads as EXIT with its reason (CLEAN
+      for 0), as on 2.1.2.
+  * Memory safety:
+    - xtc_loop_fini (and xtc_exec_fini, xtc_app_destroy) freed a fiber
+      parked in xtc_blocking_run while the pool still ran its fn; the
+      result store and the wake landed in freed memory.  The finalize
+      now waits for the loop's offloads.
+    - xtc_log_drain printed ring slots a writer had claimed but not
+      filled (empty or stale records) and lost the real ones; the ring
+      is now a per-slot sequence queue and the drain stops at an
+      unfinished record.  Printed plus dropped equals written.
+    - An RCU reader thread that read before xtc_rcu_fini kept writing
+      its freed slot after xtc_rcu_init, and synchronize did not wait
+      for it.
+    - An xtc_fsm killed or exiting mid-dispatch leaked its run state,
+      postponed events and the message being dispatched.
+    - Out of memory, xtc_rcu_retire freed the object at once, under its
+      readers, and a reader that got no slot was not waited for; a
+      retirement that cannot be recorded is now leaked and reported (an
+      XTC_TAIL_LIFECYCLE_DROP event), and a slotless reader is waited
+      for.
+    - Out of memory, xtc_lrlock_apply_op dropped the op from both
+      copies; it is now applied and the next publish copies the whole
+      block.
+  * Contract fixes:
+    - A socket tracked with xtc_proc_recovery_track_fd now refunds its
+      XTC_RES_FDS unit when the registry closes it.
+    - xtc_fault_guard_install and xtc_crash_handler_install compose in
+      either order: the guard contains proc faults and hands the others
+      to the handler it displaced, and keeps a thread's own alternate
+      signal stack (ASan's).
+    - xtc_slab_pressure_listen works unprivileged (a 2 s PSI window,
+      the process's cgroup memory.pressure first) and reports
+      XTC_E_INVAL or XTC_E_IO instead of XTC_E_NOSYS when PSI exists.
+    - xtc_net_listen accepts port 0 (kernel-assigned).
+    - A single-loop xtc_app_run returns when the root supervisor exits,
+      whatever else is parked on the loop.
+    - xtc_fsm_call returns XTC_E_NOTFOUND within about 25 ms of the
+      machine ending, instead of waiting out its timeout.
+    - A proc's pdict entries are released, and their destructors run,
+      when it exits.
+    - xtc_stream_from_demand keeps one unit of demand open instead of
+      adding one per empty pull.
+    - The library's own fd waits (xtc_net frame and TLS transfers,
+      xtc_osproc_wait, the accelerator fence) no longer spin while the
+      caller has unread mail: a frame send to a peer on the same loop
+      hung, a wait on a child burned CPU.
+    - Stack reclaim fires under AddressSanitizer.
+    - A coroutine spawned with xtc_async(..., NULL) is reclaimed when it
+      returns (400,000 of them: 129 MB to 4.2 MB).
+    - XTC_AIO_FORCE_OFFLOAD is read through the environment wrapper and
+      never inside a simulation run.
+  * Performance: an RCU read-side on a fiber no longer takes the RCU
+    lock (8 fiber readers: about 1,900 ns to 9 ns per empty bracket).
+    A fiber switch with stack reclaim off (the default) no longer calls
+    into the reclaim code; the stack-reclaim fix for AddressSanitizer
+    had made it a call on every yield.
+  * C++: every installed header has extern "C", so a C++ program can
+    link against libxtc (530 of 628 functions failed to link before).
+  * Exception 1, approved by the maintainer: XTC_API on the 81 installed
+    declarations that lacked it (a Windows DLL would not have exported
+    them).  No ELF change: libxtc.so already exported every one.
+  * Exception 2, approved by the maintainer: a new installed header,
+    xtc_version.h, generated by configure and meson, so an installed
+    consumer's XTC_VERSION_* macros read 2.1.3, not
+    0.0.0-unconfigured, and XTC_TLS_ENABLED and XTC_IO_BACKEND_* are
+    defined.
+  * Install: the internal __os_*.3 man pages are no longer installed.
+    xtc_res.h, xtc_lwlock.h and the four headers that include xtc_res.h
+    stay C only with g++ on 2.1 (_Atomic struct members).
+  * Simulator: net latency no longer drops a send it accepted when the
+    mailbox fills in flight, and a message in flight at a loop's end is
+    freed.  A partition (xtc_sim_partition_set, _isolate) no longer
+    drops a monitor's DOWN or a link's EXIT, which nothing resent, so a
+    supervisor on another loop missed the death of a child that died
+    behind the cut; user messages are still cut.  Planted bug 67.  A
+    timed plain-thread wait (notify, semaphore, locks, gate, future,
+    lock manager) made on the simulator's own thread outside a fiber
+    during a run read the wall clock, which the determinism guard
+    trips on, and slept its timeout; it now expires at once.  Planted
+    bug 68.
+  * Docs: xtc_log_set_default returns XTC_OK (not the prior default);
+    the supervisor's default restart intensity is 3 in 5 seconds; an
+    empty supervisor is supported; xtc_proc_sleep needs a process; an
+    xtc_task_spawn handle names the task only until it is done;
+    xtc_lwlock parks any fiber; xtc_rwlock blocks the OS thread;
+    xtc_strerror(3) lists every code; the installed headers no longer
+    cite milestone plans; getting-started and xtc_proc(3) release a
+    received message with xtc_free, not free(3).
+  * Each fix has a test that fails on 2.1.2 (or, for the performance
+    change, a measurement).  New DST tests test_sim_fsm_call,
+    test_sim_net_inflight, test_sim_wait_fd_only and
+    test_sim_offloop_wait; planted bugs 30-36, 63-65, 67 and 68 put each
+    fault back and are caught; the seed corpus pins
+    33 and 34.  New gates: every installed declaration is XTC_API, every
+    installed header compiles alone, and example and snippet code
+    includes only installed headers.
+  * Build: MinGW-w64 compiles again (os_thread.c includes <windows.h>).
+
+ -- Greg Burd <greg@burd.me>  Mon, 16 Nov 2026 09:00:00 -0500
+
 libxtc (2.1.2-1) unstable; urgency=medium
 
   * PATCH release on the 2.1 LTS line: fixes only.  ABI-compatible with
