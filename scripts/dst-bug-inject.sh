@@ -92,6 +92,9 @@ write_cases() {
 		"27;test_sim_sup_strategy;0;1;children outlived a killed supervisor" \
 		"28;test_sim_launch;0;1;a message queued for the launcher did not survive xtc_launch" \
 		"29;test_sim_aio_migrate;0;1;aio reaper read a released xtc_aio_t" \
+		"30;test_sim_down_kind;0;1;(EXIT|KILL|MKILL)\\(code -1\\): want kind 1 code -1, got kind (0|-1) " \
+		"31;test_sim_down_kind;0;1;FRAME\\(code [0-9]+\\): want kind 2 code 11, got kind [01] " \
+		"32;test_sim_down_kind;0;1;INIT\\(code 0\\): want kind 1 code -2, got kind 0 " \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -131,6 +134,11 @@ write_cases() {
 # 29 AIO_TAG_AFTER_DONE io_sim.c reads a->tag after done -> the reaper never
 #               touches an xtc_aio_t after the done store (the frame is dead once a
 #               kill-woken fiber sees done); the kill arm reports the late read
+# 30 EXITNEG    proc.c reason+1 kill/exit encoding -> every int exit reason is delivered
+#               (a -1 kill is dropped: the child is released at the end and its DOWN
+#               reads CLEAN; xtc_exit_self(-1) reads CLEAN)
+# 31 FAULTKIND  proc.c drops the fault override -> a user-frame fault reads SIGNAL
+# 32 INITEXIT   svr.c returns after a failed init -> a failed init reads EXIT(rc)
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

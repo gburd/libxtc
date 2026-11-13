@@ -95,6 +95,15 @@
  *	                   the LEFT sibling it resumes at the page's first key
  *	                   and skips the keys that moved
  *	                   (test_sim_btree_scan: skipped anchor).
+ *	 30  EXITNEG   -- proc.c encodes a kill and an exit code as reason+1
+ *	                   so that 0 means none, as 2.1.2 did: a kill with -1
+ *	                   is dropped and xtc_exit_self(-1) reads CLEAN
+ *	                   (test_sim_down_kind: misclassified or missing).
+ *	 31  FAULTKIND -- proc.c drops the contained-fault override, so a
+ *	                   fault in a user recovery frame reads EXIT
+ *	                   (test_sim_down_kind).
+ *	 32  INITEXIT  -- svr.c returns normally after a failed init, so the
+ *	                   server's DOWN reads CLEAN (test_sim_down_kind).
  *
  *	NOT plantable under DST (an honest gap, recorded so it is not
  *	mistaken for missing coverage): the xtc_amutex mutual-exclusion and
@@ -205,5 +214,9 @@
  * message queued for the launcher did not survive xtc_launch").
  */
 #define XTC_DST_BUG_LAUNCH_EATMAIL 28
+
+#define XTC_DST_BUG_EXITNEG 30   /* proc.c: reason+1 kill/exit encoding */
+#define XTC_DST_BUG_FAULTKIND 31 /* proc.c: user-frame fault reads EXIT */
+#define XTC_DST_BUG_INITEXIT 32  /* svr.c: failed init returns CLEAN */
 
 #endif /* XTC_DST_INJECT_H */
