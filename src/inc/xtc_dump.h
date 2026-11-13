@@ -64,7 +64,10 @@ XTC_API void xtc_panic(const char *file, int line, const char *fmt, ...) XTC_NOR
  * SIGILL) that emits a backtrace + best-effort runtime dump to stderr,
  * then re-raises the signal with the default disposition (so a core is
  * still produced).  Returns XTC_OK, or XTC_E_NOSYS where unsupported.
- * Idempotent.  Does NOT install SIGCHLD/SIGTERM/etc. -- only faults. */
+ * Idempotent.  Does NOT install SIGCHLD/SIGTERM/etc. -- only faults.
+ * Composes with xtc_fault_guard_install in either order: the guard keeps
+ * SIGSEGV/SIGBUS/SIGFPE/SIGILL and contains proc faults, and a fault it
+ * cannot contain is dumped by this handler. */
 XTC_API int xtc_crash_handler_install(void);
 
 /* Log `fmt`/..., dump runtime state, and abort. */

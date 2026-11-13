@@ -748,6 +748,14 @@ faults
 and
 .Dv SIGILL
 on an alternate signal stack.
+A thread that already has an alternate signal stack of at least 16 KiB
+(AddressSanitizer's, a language runtime's) keeps it; otherwise the
+guard installs its own.
+A fault the guard does not contain goes to the action it displaced
+when it was installed (an application's handler, a sanitizer's, or
+.Xr xtc_crash_handler_install 3 ,
+which may also be installed after the guard), then to the default
+action, so the process still dies with a core.
 .Pp
 Fault containment is PER-OS-THREAD:
 .Fn xtc_fault_guard_install

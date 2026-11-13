@@ -153,6 +153,23 @@ the file cannot be opened for writing.  These are existing codes.
 `/m11/slab/pressure_listen_ex_stop` fails on 2.1.2 on a host with PSI
 (NOSYS although `/proc/pressure/memory` exists) and passes on 2.1.3.
 
+## FIXED (2.1.3): the fault guard and the crash handler overwrote each other
+
+`xtc_fault_guard_install` and `xtc_crash_handler_install` each installed
+their SIGSEGV, SIGBUS, SIGFPE and SIGILL handlers over whatever was
+there, so the last one called won.  With the crash handler last, a
+fault in a proc was not contained and the process died; with the guard
+last, a fault it cannot contain (on a plain thread, in a critical
+section, a stack overflow) died with no dump.  The guard also replaced
+any alternate signal stack the thread already had, which made
+AddressSanitizer abort at thread exit.  Now the guard keeps those four
+signals, hands a fault it cannot contain to the action it displaced (an
+application's handler, a sanitizer's, or the crash handler, installed
+before or after it), then dies with the default action so a core is
+still written.  A thread's own alternate stack of at least 16 KiB is
+kept.  `/dump/guard_and_crash_handler` and
+`/m8/proc/fault_guard_altstack` fail on 2.1.2 and pass on 2.1.3.
+
 ## FIXED (2.1.2): a cross-shard xtc_tnt_send could lose messages
 
 **What it was.**  Through 2.1.1 an `xtc_tnt_send` to an Isolate on

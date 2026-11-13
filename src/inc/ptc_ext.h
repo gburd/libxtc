@@ -12,6 +12,7 @@ int  xtc_cfg_reload __P((void));
 int  xtc_dispatch __P((xtc_loop_t *, int (*)(void *), void *, xtc_future_t **, xtc_dispatch_handle_t **));
 int  xtc_dispatch_cancel __P((xtc_dispatch_handle_t *));
 int __xtc_exit_self_kind __P((int, int));
+int __xtc_fault_sig_install __P((int, const struct sigaction *));
 int __xtc_preempt_pc_ok __P((uintptr_t));
 int __xtc_proc_crit_depth __P((void));
 int __xtc_unsafe_depth __P((void));
