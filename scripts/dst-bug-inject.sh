@@ -110,6 +110,7 @@ write_cases() {
 		"47;test_sim_sup_name;0;1;the registry named a dead incarnation" \
 		"48;test_sim_send_wait;0;1;a sender waited with room in the mailbox" \
 		"49;test_sim_send_wait;0;1;a message sent with XTC_OK was lost" \
+		"50;test_sim_wait_fd_only;0;1;a receive after a mail-blind wait was never woken" \
 		"60;test_sim_sup_child;0;1;a child ran before the one before it was up" \
 		"61;test_sim_sup_child;0;1;a nested supervisor's give-up did not reach its parent" \
 		"62;test_sim_sup_child;0;1;a drain did not reach a nested supervisor's child" \
@@ -174,6 +175,8 @@ write_cases() {
 #               -> no xtc_send_wait sender stays parked while there is room
 # 49 SIM_DROP_LATE proc.c admits a latency-deferred send unchecked, drops it
 #               full at delivery -> a send told XTC_OK under net latency arrives
+# 50 FDONLY_STALE proc.c recv keeps a mail-blind wait's waker bit
+#               -> a receive after an XTC_WAIT_FD_ONLY wait is woken by mail
 # 60 SUP_WAIT_SKIP sup.c wait_children does not wait for a server/sup child
 #               -> each child starts only once the one before it is up
 # 61 SUP_NESTED_CLEAN sup.c a nested supervisor's give-up exits cleanly

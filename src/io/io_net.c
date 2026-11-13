@@ -1097,8 +1097,12 @@ __net_wait_fd(int fd, uint32_t interest, int64_t deadline_ns)
 	}
 	if (!xtc_pid_is_none(xtc_self())) {
 		uint32_t revents = 0;
-		return xtc_proc_wait_fd(fd, interest, to, &revents) == XTC_OK
-		    ? 0 : -1;
+		/* Mail-blind: the caller's queued messages are its own, and a
+		 * mail wake here would retry the transfer without yielding. */
+		if (xtc_proc_wait_fd(fd, interest | XTC_WAIT_FD_ONLY, to,
+		        &revents) != XTC_OK)
+			return -1;
+		return 0;
 	}
 #if !defined(_WIN32)
 	{

@@ -41,8 +41,6 @@ int __xtc_accel_fence_wait(int, int64_t, int (*)(void *), void *);
 #if defined(XTC_HAVE_ACCEL)
 #include <stdio.h>
 #include <dirent.h>
-#include <errno.h>
-#include <poll.h>
 #include <unistd.h>
 
 /*
@@ -147,59 +145,17 @@ xtc_accel_probe(xtc_accel_dev_t *out, int max, int *out_n)
 	return XTC_OK;
 }
 
-#if defined(XTC_HAVE_ACCEL)
-/* Mail-blind back-off while the caller's mailbox is non-empty (see
- * __xtc_accel_fence_wait). */
-#define FENCE_NAP_MIN_NS (50LL * 1000)
-#define FENCE_NAP_MAX_NS (1000LL * 1000)
-
-/* Is a message waiting in the calling proc's mailbox (or save queue)?
- * xtc_proc_wait_fd returns at once, without parking, while one is. */
-static int
-fence_mail_pending(void)
-{
-	xtc_mailbox_stats_t st = XTC_MAILBOX_STATS_INIT;
-	if (xtc_proc_mailbox_stats(xtc_self(), &st) != XTC_OK)
-		return 0;
-	return st.depth > 0 || st.saved > 0;
-}
-
-/* Zero-timeout readiness probe of the fence fd. XTC_OK = signalled (or
- * ERR/HUP, the same verdict xtc_proc_wait_fd gives), XTC_E_AGAIN = not
- * yet, XTC_E_INVAL = not an open fd. */
-static int
-fence_probe(int fd)
-{
-	struct pollfd p;
-	int n;
-	p.fd = fd;
-	p.events = POLLIN;
-	p.revents = 0;
-	do {
-		n = poll(&p, 1, 0); /* XTC_BLOCKING_OK: zero timeout */
-	} while (n < 0 && errno == EINTR);
-	if (n < 0 || (p.revents & POLLNVAL))
-		return XTC_E_INVAL;
-	return n > 0 ? XTC_OK : XTC_E_AGAIN;
-}
-#endif
-
 /*
  * Internal (batch.c): wait for fence_fd until the absolute
  * __os_clock_mono deadline deadline_ns (< 0: none).  After every wake,
  * stop(arg) (if non-NULL) is consulted; true returns XTC_E_ABORTED, so a
  * caller can end the wait by making stop true and waking the fiber with
- * xtc_proc_wake.  Any other wake -- a stray xtc_proc_wake, mail -- re-waits
- * for the time left, never for less.
+ * xtc_proc_wake.  Any other wake (a stray xtc_proc_wake) re-waits for the
+ * time left, never for less.
  *
- * Mail: xtc_proc_wait_fd never parks while the caller's mailbox is
- * non-empty, and this wait must not consume the caller's messages.  While
- * mail is pending the fiber therefore probes the fd and sleeps, backing
- * off from 50 us to 1 ms per probe: at most 1 ms extra fence latency and
- * about a thousand wakeups a second, instead of the busy loop that starved
- * the whole loop before.  Once the mailbox is empty again it parks on the
- * fd as usual.  The clock is __os_clock_mono, which the simulator
- * virtualizes.
+ * Mail: the wait is mail-blind (XTC_WAIT_FD_ONLY), so it parks on the fd
+ * whatever the caller's mailbox holds and leaves the messages for the
+ * caller.  The clock is __os_clock_mono, which the simulator virtualizes.
  */
 int
 __xtc_accel_fence_wait(int fence_fd, int64_t deadline_ns,
@@ -207,7 +163,7 @@ __xtc_accel_fence_wait(int fence_fd, int64_t deadline_ns,
 {
 #if defined(XTC_HAVE_ACCEL)
 	const uint32_t interest = XTC_IO_READABLE | XTC_IO_ERR | XTC_IO_HUP;
-	int64_t now = 0, remaining, nap = FENCE_NAP_MIN_NS;
+	int64_t now = 0, remaining;
 	uint32_t revents;
 	int rc;
 
@@ -221,27 +177,14 @@ __xtc_accel_fence_wait(int fence_fd, int64_t deadline_ns,
 			(void)__os_clock_mono(&now);
 			remaining = deadline_ns > now ? deadline_ns - now : 0;
 		}
-		if (fence_mail_pending()) {
-			if ((rc = fence_probe(fence_fd)) != XTC_E_AGAIN)
-				return rc;
-			if (remaining == 0)
-				return XTC_E_AGAIN;
-			if (remaining > 0 && nap > remaining)
-				nap = remaining;
-			if (xtc_proc_sleep(nap) != XTC_OK)
-				return XTC_E_INVAL;          /* not on a proc */
-			if (nap < FENCE_NAP_MAX_NS)
-				nap *= 2;
-			continue;
-		}
-		nap = FENCE_NAP_MIN_NS;
 		revents = 0;
-		rc = xtc_proc_wait_fd(fence_fd, interest, remaining, &revents);
+		rc = xtc_proc_wait_fd(fence_fd, interest | XTC_WAIT_FD_ONLY,
+		    remaining, &revents);
 		if (rc != XTC_OK)
 			return rc;          /* AGAIN = deadline, INVAL = bad fd */
 		if (revents & interest)
 			return XTC_OK;      /* the fence signalled */
-		/* Mail, a stray wake, or a stop request: re-evaluate. */
+		/* A stray wake or a stop request: re-evaluate. */
 	}
 #else
 	(void)fence_fd;

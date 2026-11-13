@@ -293,6 +293,14 @@
 #define XTC_DST_BUG_SIM_DROP_LATE 49
 
 /*
+ * 50 FDONLY_STALE: xtc_recv arms its waker without clearing the
+ * mail-blind bit an earlier XTC_WAIT_FD_ONLY wait set, so a receive
+ * after such a wait is never woken by mail (test_sim_wait_fd_only: "a
+ * receive after a mail-blind wait was never woken").
+ */
+#define XTC_DST_BUG_FDONLY_STALE 50
+
+/*
  * 60 SUP_WAIT_SKIP: a supervisor started with wait_children does not wait
  * for a server or supervisor child's start: it spawns the next child at
  * once and reports the start as done, so a child whose init fails is not

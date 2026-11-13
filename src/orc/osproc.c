@@ -554,8 +554,9 @@ xtc_osproc_wait(xtc_osproc_t *p, int *status, int64_t timeout_ns)
 		if (p->pidfd >= 0) {
 			/* Park on the pidfd: readable once the child exits. */
 			uint32_t revents = 0;
-			int prc = xtc_proc_wait_fd(p->pidfd, XTC_IO_READABLE,
-			    timeout_ns, &revents);
+			int prc = xtc_proc_wait_fd(p->pidfd,
+			    XTC_IO_READABLE | XTC_WAIT_FD_ONLY, timeout_ns,
+			    &revents);
 			if (prc == XTC_E_AGAIN)
 				return XTC_E_AGAIN; /* timeout */
 			/* Woken (or wait_fd unusable off a loop): reap below. */

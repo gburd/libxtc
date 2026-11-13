@@ -466,6 +466,26 @@ An earlier release reported
 for every bit-less wake whenever a timeout had merely been SUPPLIED,
 which made an explicit wake indistinguishable from an expiry.
 .Pp
+With
+.Dv XTC_WAIT_FD_ONLY
+or'ed into
+.Fa interest
+(2.2) the wait is mail-blind: it parks even when the mailbox already
+holds a message, a message sent during the park does not end it, and
+.Fa *out_revents
+never carries
+.Dv XTC_WAIT_MAILBOX .
+The fd, the timeout, a kill and
+.Fn xtc_proc_wake
+still end it.
+Use it to finish an fd operation, such as a write to a slow client,
+while peers keep sending the proc messages it reads afterwards:
+without the flag such a wait returns at once on every pass while mail
+is queued, and the caller spins.
+The flag is not an fd interest; at least one
+.Dv XTC_IO_*
+bit is still required.
+.Pp
 A kill delivered while the proc is parked here ends the park and
 unwinds the fiber, and the park's scheduler resources
 .Pq the fd registration and the timeout timer

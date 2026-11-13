@@ -608,9 +608,20 @@ XTC_API int       xtc_recv_correlate(const void *corr_value, size_t corr_size,
  *
  * The mailbox is left untouched (caller still calls xtc_recv to
  * actually drain).
+ *
+ * XTC_WAIT_FD_ONLY in `interest` (2.2) makes the wait mail-blind: it
+ * parks even when the mailbox holds a message, a message arriving
+ * during the park does not wake it, and *out_revents never carries
+ * XTC_WAIT_MAILBOX.  The fd, the timeout, a kill and xtc_proc_wake
+ * still end it.  For a proc that must finish an fd operation (a write
+ * to a slow client) while peers keep sending it messages it will read
+ * afterwards: without the flag that wait returns at once on every
+ * pass and the proc spins.  The flag is not an fd interest; at least
+ * one XTC_IO_* bit is still required.
  */
 #define XTC_WAIT_MAILBOX  0x10000u   /* in out_revents only */
 #define XTC_WAIT_TIMEOUT  0x20000u   /* in out_revents only */
+#define XTC_WAIT_FD_ONLY 0x40000u    /* in interest only: ignore mail */
 
 XTC_API int       xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
                                     uint32_t *out_revents);
