@@ -470,6 +470,12 @@ xtc_trace_rec_t.kind off=16 size=4
 xtc_trace_rec_t.self off=24 size=16
 xtc_trace_rec_t.peer off=40 size=16
 xtc_trace_rec_t.detail off=56 size=4
+xtc_tuning_finding_t size=40 align=8
+xtc_tuning_finding_t.size off=0 size=8
+xtc_tuning_finding_t.probe off=8 size=8
+xtc_tuning_finding_t.current off=16 size=8
+xtc_tuning_finding_t.recommended off=24 size=8
+xtc_tuning_finding_t.advice off=32 size=8
 xtc_waker_t size=16 align=8
 xtc_waker_t.loop off=0 size=8
 xtc_waker_t.task off=8 size=8

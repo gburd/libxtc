@@ -89,6 +89,7 @@ int xtc_tail_dump_dial9 __P((int));
 int xtc_tail_spill_dial9 __P((const char *));
 int xtc_trace_causal_dump __P((xtc_pid_t, xtc_causal_fn, void *));
 int xtc_trace_causal_enable __P((int));
+int xtc_tuning_check_ex __P((xtc_tuning_fn, void *));
 int xtc_uncancelable __P((int (*)(void *), void *));
 int xtc_unlink __P((xtc_pid_t));
 int64_t xtc_res_high __P((const xtc_res_t *, xtc_res_kind_t));

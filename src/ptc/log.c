@@ -260,6 +260,16 @@ xtc_log_set_default(xtc_log_t *log)
 	return XTC_OK;
 }
 
+int
+xtc_log_swap_default(xtc_log_t *log, xtc_log_t **out_prev)
+{
+	if (out_prev == NULL)
+		return XTC_E_INVAL;
+	*out_prev = (xtc_log_t *)xtc_atomic_exchange_uptr(&__default_logger,
+	    (uintptr_t)log, xtc_mo_acq_rel);
+	return XTC_OK;
+}
+
 xtc_log_t *
 xtc_log_default(void)
 {

@@ -10,6 +10,7 @@
 #define XTC_OS_TUNING_H
 
 #include "xtc_export.h"
+#include "xtc_stats.h" /* xtc_tuning_fn */
 
 /*
  * Run a battery of cheap, read-only host-tuning probes and log one
@@ -29,6 +30,12 @@
  * gate; xtc_app_start and stats.c's xtc_tuning_check call it directly.
  */
 void __os_tuning_check(void);
+
+/* The structured form behind xtc_tuning_check_ex: each finding goes to
+ * fn (which may be NULL); returns the number of findings.
+ * __os_tuning_check is this with a callback that logs each advice line
+ * as "[tuning] <advice>". */
+int __os_tuning_check_ex(xtc_tuning_fn fn, void *user);
 
 #if defined(__linux__)
 /*

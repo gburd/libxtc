@@ -230,7 +230,7 @@ log_via_vwrite(xtc_log_t *log, xtc_log_level_t lvl, const char *fmt, ...)
 static MunitResult
 test_log_default_vwrite(const MunitParameter p[], void *d)
 {
-	xtc_log_t *log, *saved;
+	xtc_log_t *log, *saved, *prev;
 	xtc_log_opts_t opts = XTC_LOG_OPTS_DEFAULT;
 	(void)p; (void)d;
 
@@ -263,6 +263,15 @@ test_log_default_vwrite(const MunitParameter p[], void *d)
 
 	/* NULL-arg guards. */
 	munit_assert_int(xtc_log_set_floor(NULL, XTC_LOG_INFO), ==, XTC_E_INVAL);
+
+	/* swap_default hands back the logger it replaced, atomically. */
+	munit_assert_int(xtc_log_swap_default(NULL, &prev), ==, XTC_OK);
+	munit_assert_ptr_equal(prev, log);
+	munit_assert_null(xtc_log_default());
+	munit_assert_int(xtc_log_swap_default(log, &prev), ==, XTC_OK);
+	munit_assert_null(prev);
+	munit_assert_ptr_equal(xtc_log_default(), log);
+	munit_assert_int(xtc_log_swap_default(log, NULL), ==, XTC_E_INVAL);
 
 	/* Restore the process default before destroying ours. */
 	munit_assert_int(xtc_log_set_default(saved), ==, XTC_OK);

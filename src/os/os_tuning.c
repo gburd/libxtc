@@ -55,6 +55,7 @@
 #include "xtc_int.h"
 #include "os_tuning.h"
 #include "xtc_log.h"
+#include "xtc_stats.h" /* xtc_tuning_finding_t, xtc_tuning_fn */
 
 #if defined(__linux__)
 
@@ -131,19 +132,17 @@ read_first_line(const char *path, char *buf, size_t bufsize)
  * parseable -- not a finding), 0 = already tuned, 1 = recommend. */
 
 static int
-governor_needs_rec(void)
+governor_needs_rec(char *buf, size_t bufsize)
 {
-	char buf[64];
-	if (read_first_line(GOVERNOR_PATH, buf, sizeof buf) != 0)
+	if (read_first_line(GOVERNOR_PATH, buf, bufsize) != 0)
 		return -1;
 	return strcmp(buf, "performance") != 0;
 }
 
 static int
-pstate_needs_rec(void)
+pstate_needs_rec(char *buf, size_t bufsize)
 {
-	char buf[16];
-	if (read_first_line(PSTATE_STATUS_PATH, buf, sizeof buf) != 0)
+	if (read_first_line(PSTATE_STATUS_PATH, buf, bufsize) != 0)
 		return -1;   /* driver not loaded: not our call, see header */
 	return strcmp(buf, "passive") == 0;
 }
@@ -152,11 +151,10 @@ pstate_needs_rec(void)
  * active setting.  Recommend "madvise" when "always" or "never" is
  * active; an unexpected format (no brackets) is skipped, not flagged. */
 static int
-thp_needs_rec(void)
+thp_needs_rec(char *buf, size_t bufsize)
 {
-	char buf[128];
 	char *lb, *rb;
-	if (read_first_line(THP_PATH, buf, sizeof buf) != 0)
+	if (read_first_line(THP_PATH, buf, bufsize) != 0)
 		return -1;
 	lb = strchr(buf, '[');
 	rb = strchr(buf, ']');
@@ -164,7 +162,8 @@ thp_needs_rec(void)
 		return -1;
 	*rb = '\0';
 	lb++;
-	return strcmp(lb, "always") == 0 || strcmp(lb, "never") == 0;
+	memmove(buf, lb, strlen(lb) + 1); /* buf = the active setting */
+	return strcmp(buf, "always") == 0 || strcmp(buf, "never") == 0;
 }
 
 /* Threshold: above 10.  10 is the commonly recommended ceiling for a
@@ -173,12 +172,11 @@ thp_needs_rec(void)
  * well before it needs to, trading throughput for headroom this kind
  * of workload does not want. */
 static int
-swappiness_needs_rec(void)
+swappiness_needs_rec(char *buf, size_t bufsize)
 {
-	char buf[16];
 	char *end;
 	long v;
-	if (read_first_line(SWAPPINESS_PATH, buf, sizeof buf) != 0)
+	if (read_first_line(SWAPPINESS_PATH, buf, bufsize) != 0)
 		return -1;
 	v = strtol(buf, &end, 10);
 	if (end == buf)
@@ -187,12 +185,11 @@ swappiness_needs_rec(void)
 }
 
 static int
-autogroup_needs_rec(void)
+autogroup_needs_rec(char *buf, size_t bufsize)
 {
-	char buf[8];
 	char *end;
 	long v;
-	if (read_first_line(AUTOGROUP_PATH, buf, sizeof buf) != 0)
+	if (read_first_line(AUTOGROUP_PATH, buf, bufsize) != 0)
 		return -1;
 	v = strtol(buf, &end, 10);
 	if (end == buf)
@@ -243,49 +240,107 @@ uring_blocked(void)
 #endif
 }
 
-void
-__os_tuning_check(void)
+/*
+ * One finding per probe that is not in its recommended state: hand it to
+ * fn and count it.  `current` is the value the probe read; the other
+ * strings are constants.  Stops early (and still counts the finding fn
+ * refused) when fn returns nonzero.
+ */
+struct tuning_run {
+	xtc_tuning_fn fn;
+	void *user;
+	int n;
+	int stop;
+};
+
+static void
+tuning_report(struct tuning_run *r, const char *probe, const char *current,
+    const char *recommended, const char *advice)
 {
-	if (governor_needs_rec() > 0)
-		XTC_LOG_INFO_F(
-		    "[tuning] cpu governor is not 'performance' -- "
+	xtc_tuning_finding_t f;
+
+	if (r->stop)
+		return;
+	memset(&f, 0, sizeof f);
+	f.size = sizeof f;
+	f.probe = probe;
+	f.current = current;
+	f.recommended = recommended;
+	f.advice = advice;
+	r->n++;
+	if (r->fn != NULL && r->fn(&f, r->user) != 0)
+		r->stop = 1;
+}
+
+int
+__os_tuning_check_ex(xtc_tuning_fn fn, void *user)
+{
+	struct tuning_run r;
+	char cur[128];
+
+	memset(&r, 0, sizeof r);
+	r.fn = fn;
+	r.user = user;
+	if (governor_needs_rec(cur, sizeof cur) > 0)
+		tuning_report(&r, "governor", cur, "performance",
+		    "cpu governor is not 'performance' -- "
 		    "set it (e.g. cpupower frequency-set -g performance) "
 		    "for a latency-sensitive workload");
-	if (pstate_needs_rec() > 0)
-		XTC_LOG_INFO_F(
-		    "[tuning] intel_pstate is in 'passive' mode -- switch "
+	if (pstate_needs_rec(cur, sizeof cur) > 0)
+		tuning_report(&r, "intel_pstate", cur, "active",
+		    "intel_pstate is in 'passive' mode -- switch "
 		    "back to 'active' (drop intel_pstate=passive from the "
 		    "kernel cmdline) unless you deliberately pinned "
 		    "frequencies yourself; passive mode gives up "
 		    "intel_pstate's HWP-aware boost management");
-	if (thp_needs_rec() > 0)
-		XTC_LOG_INFO_F(
-		    "[tuning] transparent_hugepage is not 'madvise' -- set "
+	if (thp_needs_rec(cur, sizeof cur) > 0)
+		tuning_report(&r, "thp", cur, "madvise",
+		    "transparent_hugepage is not 'madvise' -- set "
 		    "it (echo madvise > "
 		    "/sys/kernel/mm/transparent_hugepage/enabled) to avoid "
 		    "'always'/'never' compaction stalls and latency spikes");
-	if (swappiness_needs_rec() > 0)
-		XTC_LOG_INFO_F(
-		    "[tuning] vm.swappiness is above 10 -- lower it "
+	if (swappiness_needs_rec(cur, sizeof cur) > 0)
+		tuning_report(&r, "swappiness", cur, "10",
+		    "vm.swappiness is above 10 -- lower it "
 		    "(sysctl vm.swappiness=10 or less) so the kernel does "
 		    "not reclaim anonymous pages under mild memory pressure");
-	if (autogroup_needs_rec() > 0)
-		XTC_LOG_INFO_F(
-		    "[tuning] kernel.sched_autogroup_enabled is 1 -- "
+	if (autogroup_needs_rec(cur, sizeof cur) > 0)
+		tuning_report(&r, "autogroup", cur, "0",
+		    "kernel.sched_autogroup_enabled is 1 -- "
 		    "disable it (sysctl kernel.sched_autogroup_enabled=0) "
 		    "for a latency-sensitive server workload");
 	if (uring_blocked())
-		XTC_LOG_INFO_F(
-		    "[tuning] io_uring_setup(2) returned EPERM -- seccomp "
+		tuning_report(&r, "io_uring", "EPERM", "permitted",
+		    "io_uring_setup(2) returned EPERM -- seccomp "
 		    "(or an LSM) is blocking io_uring; xtc falls back to "
 		    "epoll, which costs throughput/latency under load");
+	return r.n;
 }
 
 #else /* !__linux__: every probe targets a Linux-only knob. */
 
-void
-__os_tuning_check(void)
+int
+__os_tuning_check_ex(xtc_tuning_fn fn, void *user)
 {
+	(void)fn;
+	(void)user;
+	return 0;
 }
 
 #endif
+
+/* The logging form: one XTC_LOG_INFO line per finding, through the
+ * process-wide default logger. */
+static int
+tuning_log(const xtc_tuning_finding_t *f, void *user)
+{
+	(void)user;
+	XTC_LOG_INFO_F("[tuning] %s", f->advice);
+	return 0;
+}
+
+void
+__os_tuning_check(void)
+{
+	(void)__os_tuning_check_ex(tuning_log, NULL);
+}

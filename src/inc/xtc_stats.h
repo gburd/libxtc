@@ -64,6 +64,32 @@ typedef int (*xtc_metric_visit_fn)(const char *name,
                                     void *user);
 
 /*
+ * One finding of the host-tuning advisor (xtc_tuning_check_ex).  The
+ * library hands it out, so it carries the library's size: check
+ * XTC_FIELD_OK(f, field) before reading a field newer than the oldest
+ * library you support.  Every string is valid only during the callback.
+ *
+ *   probe        a stable name to alert on: "governor", "intel_pstate",
+ *                "thp", "swappiness", "autogroup", "io_uring"
+ *   current      the value the probe read ("powersave", "always", "60",
+ *                "EPERM", ...)
+ *   recommended  the value the advisor recommends ("performance",
+ *                "madvise", "10", ...)
+ *   advice       one English sentence: the line xtc_tuning_check logs,
+ *                without its "[tuning] " prefix
+ */
+typedef struct xtc_tuning_finding {
+	size_t size; /* the LIBRARY's sizeof: see XTC_FIELD_OK */
+	const char *probe;
+	const char *current;
+	const char *recommended;
+	const char *advice;
+} xtc_tuning_finding_t;
+
+/* xtc_tuning_check_ex's callback: nonzero stops the check. */
+typedef int (*xtc_tuning_fn)(const xtc_tuning_finding_t *f, void *user);
+
+/*
  * PUBLIC: int       xtc_counter_create __P((const char *, xtc_counter_t **));
  * PUBLIC: void      xtc_counter_destroy __P((xtc_counter_t *));
  * PUBLIC: void      xtc_counter_inc __P((xtc_counter_t *));
@@ -95,6 +121,7 @@ typedef int (*xtc_metric_visit_fn)(const char *name,
  * PUBLIC: int       xtc_metrics_dump_prometheus __P((int));
  *
  * PUBLIC: void      xtc_tuning_check __P((void));
+ * PUBLIC: int       xtc_tuning_check_ex __P((xtc_tuning_fn, void *));
  */
 
 XTC_API int       xtc_counter_create(const char *name, xtc_counter_t **out);
@@ -136,15 +163,26 @@ XTC_API int       xtc_metrics_dump_prometheus(int fd);
  * well-tuned host; Linux-only (a no-op elsewhere); never writes /proc
  * or /sys.
  *
- * This is the ONE diagnostic libxtc itself emits through xtc_log, and
- * it is the intended way to get those lines into an application's log
+ * This is the intended way to get those lines into an application's log
  * sink on the xtc_exec / xtc_loop bring-up path (xtc_app_start already
  * calls it by default; a consumer that stands up carriers via
  * xtc_exec_init should call xtc_tuning_check() once at startup, after
  * installing its xtc_log_set_default sink, to receive the advisories).
- * Otherwise xtc_log is application-fill: libxtc streams no other
- * internal log lines today.  Safe to call more than once.
+ * Safe to call more than once.  With no default logger installed the
+ * lines go nowhere: an application that wants the findings without a
+ * process-wide logger uses xtc_tuning_check_ex.
  */
 XTC_API void      xtc_tuning_check(void);
+
+/*
+ * The same probes, with each finding handed to fn(f, user) on the
+ * calling thread instead of logged; no global state is read or written,
+ * so concurrent callers and other threads' logging do not interfere.
+ * Returns the number of findings (0 on a well-tuned host and on every
+ * non-Linux host), counting one fn stopped at.  fn may be NULL to only
+ * count.  The probes read /proc and /sys: call it off a loop thread (the
+ * blocking pool) in a server.
+ */
+XTC_API int xtc_tuning_check_ex(xtc_tuning_fn fn, void *user);
 
 #endif /* XTC_STATS_H */

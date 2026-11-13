@@ -215,6 +215,21 @@ over every interleaving of two writers and the drain on a ring that
 overflows, and fails on the 2.1 drain and on a drop that skips the
 written check.
 
+## CHANGED (2.2): xtc_tuning_check_ex hands the findings to the caller
+
+`xtc_tuning_check` reports only through the process-wide default
+logger, so an application that wanted the findings had to install its
+logger as the default around the call and catch other threads' messages
+with them.  `xtc_tuning_check_ex(fn, user)` (symbol version `XTC_2.2`)
+runs the same probes and calls `fn` once per finding with an
+`xtc_tuning_finding_t` (probe name, current value, recommended value,
+advice text) on the calling thread; it touches no global state and
+returns the number of findings.  `xtc_tuning_check` is now that with a
+callback that logs, and logs the same lines.  The `xtc_log_set_default`
+header said it returns the prior default; it returns `XTC_OK`, and the
+header now says so.  The new `xtc_log_swap_default(log, &prev)` returns
+the replaced logger in one atomic exchange.
+
 ## Linux/XFS: io_uring WAL writes go to io-wq unless the filesystem has `lazytime`
 
 On XFS mounted without `lazytime`, a write that must update the file's

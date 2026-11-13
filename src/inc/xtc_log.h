@@ -84,6 +84,7 @@ typedef struct xtc_log_opts {
  * PUBLIC: void xtc_log_destroy __P((xtc_log_t *));
  * PUBLIC: int  xtc_log_set_floor __P((xtc_log_t *, xtc_log_level_t));
  * PUBLIC: int  xtc_log_set_default __P((xtc_log_t *));
+ * PUBLIC: int  xtc_log_swap_default __P((xtc_log_t *, xtc_log_t **));
  * PUBLIC: xtc_log_t *xtc_log_default __P((void));
  *
  * PUBLIC: void xtc_log_write __P((xtc_log_t *, xtc_log_level_t, const char *, ...));
@@ -98,10 +99,22 @@ XTC_API void xtc_log_destroy(xtc_log_t *log);
 
 XTC_API int  xtc_log_set_floor(xtc_log_t *log, xtc_log_level_t lvl);
 
-/* Set the process-wide default logger.  Subsequent macro-driven
- * calls (XTC_LOG_INFO, etc.) route here.  Returns the prior default
- * (or NULL if none). */
+/*
+ * Set the process-wide default logger (NULL: none).  The XTC_LOG_*_F
+ * macros and libxtc's own diagnostics (the tuning advisor, a loop's
+ * over-budget warning, a slab redzone report, an executor step error)
+ * write to it.  There is no default until one is set, and those
+ * messages are dropped until then.  Returns XTC_OK.
+ *
+ * xtc_log_swap_default does the same and returns the logger it replaced
+ * in *out_prev (NULL if none), in one atomic exchange, so two threads
+ * swapping cannot lose each other's logger.  NB: a writer that loaded
+ * the old default just before the swap may still be inside
+ * xtc_log_write on it, so do not destroy a logger right after swapping
+ * it out unless no other thread can be logging.
+ */
 XTC_API int  xtc_log_set_default(xtc_log_t *log);
+XTC_API int xtc_log_swap_default(xtc_log_t *log, xtc_log_t **out_prev);
 XTC_API xtc_log_t *xtc_log_default(void);
 
 /* Format a record and append it to the ring.  Non-blocking, any

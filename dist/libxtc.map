@@ -76,4 +76,6 @@ XTC_2.2 {
 		xtc_tnt_send_from;
 		xtc_reg_put;
 		xtc_reg_visit;
+		xtc_log_swap_default;
+		xtc_tuning_check_ex;
 } XTC_2.0;

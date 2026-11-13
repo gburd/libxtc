@@ -29,7 +29,8 @@
 .Nm xtc_dist_destroy ,
 .Nm xtc_metrics_iterate ,
 .Nm xtc_metrics_dump_prometheus ,
-.Nm xtc_tuning_check
+.Nm xtc_tuning_check ,
+.Nm xtc_tuning_check_ex
 .Nd runtime statistics: counters, gauges, histograms
 .Sh SYNOPSIS
 .In xtc.h
@@ -84,6 +85,8 @@
 .Fn xtc_metrics_dump_prometheus "int fd"
 .Ft void
 .Fn xtc_tuning_check "void"
+.Ft int
+.Fn xtc_tuning_check_ex "xtc_tuning_fn fn" "void *user"
 .Sh DESCRIPTION
 .Nm xtc_stats
 is the runtime telemetry layer.  Three metric kinds:
@@ -300,8 +303,6 @@ no-op elsewhere), and never writes
 .Pa /proc
 or
 .Pa /sys .
-This is the one diagnostic libxtc itself emits through
-.Xr xtc_log 3 :
 .Xr xtc_app_start 3
 calls it by default, but a consumer that brings carriers up directly
 via
@@ -310,10 +311,66 @@ should call
 .Fn xtc_tuning_check
 once at startup, after installing its
 .Fn xtc_log_set_default
-sink, to receive the advisories.  Otherwise
-.Xr xtc_log 3
-is application-fill -- libxtc streams no other internal log lines --
-and
+sink, to receive the advisories.
+With no default logger the lines go nowhere.
+.Pp
+.Fn xtc_tuning_check_ex
+runs the same probes and hands each finding to
+.Fa fn
+on the calling thread instead of logging it, so it reads and writes no
+global state.
+It returns the number of findings (0 on a well-tuned host and on every
+non-Linux host); a nonzero return from
+.Fa fn
+stops the check after that finding, and
+.Fa fn
+may be
+.Dv NULL
+to only count.
+Each finding is an
+.Vt xtc_tuning_finding_t
+the library hands out (check
+.Fn XTC_FIELD_OK
+before reading a field newer than your oldest supported library);
+its strings are valid only during the callback:
+.Bl -tag -width recommended -offset indent
+.It Va probe
+a stable name to alert on:
+.Dq governor ,
+.Dq intel_pstate ,
+.Dq thp ,
+.Dq swappiness ,
+.Dq autogroup ,
+.Dq io_uring .
+.It Va current
+the value the probe read, for example
+.Dq powersave
+or
+.Dq 60 .
+.It Va recommended
+the value the advisor recommends, for example
+.Dq performance
+or
+.Dq 10 .
+.It Va advice
+one English sentence: the line
+.Fn xtc_tuning_check
+logs, without its
+.Dq [tuning]
+prefix.
+.El
+.Bd -literal -offset indent
+static int
+show(const xtc_tuning_finding_t *f, void *user)
+{
+	printf("%s: %s (recommended: %s)\n", f->probe, f->current,
+	    f->recommended);
+	return 0;
+}
+
+int n = xtc_tuning_check_ex(show, NULL);
+.Ed
+.Pp
 .Nm xtc_metrics
 is likewise a registry the application populates; libxtc registers no
 internal metrics (use
@@ -327,3 +384,5 @@ for per-carrier internals).
 .Xr perf-stat 1
 .Sh HISTORY
 Appeared in xtc 0.1.
+.Fn xtc_tuning_check_ex
+appeared in xtc 2.2.

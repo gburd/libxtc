@@ -11,6 +11,7 @@
 .Nm xtc_log_drain ,
 .Nm xtc_log_set_floor ,
 .Nm xtc_log_set_default ,
+.Nm xtc_log_swap_default ,
 .Nm xtc_log_default ,
 .Nm xtc_log_drop_count ,
 .Nm XTC_LOG_DEBUG_F ,
@@ -35,6 +36,8 @@
 .Fn xtc_log_set_floor "xtc_log_t *log" "xtc_log_level_t lvl"
 .Ft int
 .Fn xtc_log_set_default "xtc_log_t *log"
+.Ft int
+.Fn xtc_log_swap_default "xtc_log_t *log" "xtc_log_t **out_prev"
 .Ft "xtc_log_t *"
 .Fn xtc_log_default "void"
 .Ft int
@@ -96,9 +99,26 @@ before formatting.
 .Fn xtc_log_set_default
 installs
 .Fa log
+(or
+.Dv NULL )
 as the process-wide default the
 .Fn XTC_LOG_*_F
-macros route through, and
+macros route through, and returns
+.Dv XTC_OK .
+libxtc's own diagnostics (the
+.Xr xtc_stats 3
+tuning advisor, a loop's over-budget warning, a slab redzone report,
+an executor step error) go to the same default; there is no default
+until one is set, and those messages are dropped until then.
+.Fn xtc_log_swap_default
+does the same and stores the logger it replaced in
+.Fa *out_prev ,
+in one atomic exchange.
+A writer that loaded the old default just before the swap may still be
+inside
+.Fn xtc_log_write
+on it, so do not destroy a logger right after swapping it out unless
+no other thread can be logging.
 .Fn xtc_log_default
 returns the current default.
 .Fn xtc_log_drop_count
@@ -121,5 +141,6 @@ xtc_log_drain(log);    /* from a thread that may block on the sink */
 .Xr xtc 7
 .Sh HISTORY
 Appeared in xtc 0.1.
-The guarantee that a drain never hands the sink a record a writer has
-not finished appeared in xtc 2.2.
+.Fn xtc_log_swap_default
+appeared in xtc 2.2, as did the guarantee that a drain never hands the
+sink a record a writer has not finished.

@@ -24,6 +24,7 @@
 #include "xtc.h"
 #include "xtc_int.h"
 #include "xtc_log.h"
+#include "xtc_stats.h"
 #include "os_tuning.h"
 
 #if defined(__linux__)
@@ -376,6 +377,107 @@ test_all_tuned_is_silent(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ----- the callback form: structured findings, no logger --------- */
+
+struct findings {
+	int n;
+	char probe[8][16];
+	char current[8][32];
+	char recommended[8][16];
+	int advice_ok;
+};
+
+static int
+collect(const xtc_tuning_finding_t *f, void *user)
+{
+	struct findings *fs = user;
+	munit_assert_true(XTC_FIELD_OK(f, advice));
+	if (fs->n < 8) {
+		(void)snprintf(fs->probe[fs->n], sizeof fs->probe[0], "%s",
+		    f->probe);
+		(void)snprintf(fs->current[fs->n], sizeof fs->current[0], "%s",
+		    f->current);
+		(void)snprintf(fs->recommended[fs->n],
+		    sizeof fs->recommended[0], "%s", f->recommended);
+		if (f->advice != NULL && strlen(f->advice) > 20)
+			fs->advice_ok++;
+	}
+	fs->n++;
+	return 0;
+}
+
+static int
+stop_after_one(const xtc_tuning_finding_t *f, void *user)
+{
+	(void)f;
+	++*(int *)user;
+	return 1;
+}
+
+static MunitResult
+test_check_ex_findings(const MunitParameter p[], void *d)
+{
+	char gov[64], thp[128], swp[64];
+	struct findings fs;
+	xtc_log_t *log;
+	xtc_log_opts_t opts = XTC_LOG_OPTS_DEFAULT;
+	int calls = 0;
+	(void)p;
+	(void)d;
+
+	write_fixture(gov, sizeof gov, "powersave\n");
+	write_fixture(thp, sizeof thp, "[always] madvise never\n");
+	write_fixture(swp, sizeof swp, "60\n");
+	__xtc_os_tuning_governor_path_override(gov);
+	__xtc_os_tuning_pstate_status_path_override("/nonexistent/xtc");
+	__xtc_os_tuning_thp_path_override(thp);
+	__xtc_os_tuning_swappiness_path_override(swp);
+	__xtc_os_tuning_autogroup_path_override("/nonexistent/xtc");
+	__xtc_os_tuning_uring_force(1);
+
+	/* A default logger is installed, and must stay silent: the callback
+	 * form does not log. */
+	g_log_n = 0;
+	memset(g_log_buf, 0, sizeof g_log_buf);
+	opts.sink = sink_capture;
+	opts.sink_fd = -1;
+	munit_assert_int(xtc_log_create(&opts, &log), ==, XTC_OK);
+	xtc_log_set_default(log);
+
+	memset(&fs, 0, sizeof fs);
+	munit_assert_int(xtc_tuning_check_ex(collect, &fs), ==, 4);
+	munit_assert_int(fs.n, ==, 4);
+	munit_assert_string_equal(fs.probe[0], "governor");
+	munit_assert_string_equal(fs.current[0], "powersave");
+	munit_assert_string_equal(fs.recommended[0], "performance");
+	munit_assert_string_equal(fs.probe[1], "thp");
+	munit_assert_string_equal(fs.current[1], "always");
+	munit_assert_string_equal(fs.recommended[1], "madvise");
+	munit_assert_string_equal(fs.probe[2], "swappiness");
+	munit_assert_string_equal(fs.current[2], "60");
+	munit_assert_string_equal(fs.recommended[2], "10");
+	munit_assert_string_equal(fs.probe[3], "io_uring");
+	munit_assert_string_equal(fs.current[3], "EPERM");
+	munit_assert_int(fs.advice_ok, ==, 4);
+
+	/* NULL counts; a nonzero return stops after that finding. */
+	munit_assert_int(xtc_tuning_check_ex(NULL, NULL), ==, 4);
+	munit_assert_int(xtc_tuning_check_ex(stop_after_one, &calls), ==, 1);
+	munit_assert_int(calls, ==, 1);
+
+	munit_assert_int(xtc_log_drain(log), ==, 0);
+	xtc_log_set_default(NULL);
+	xtc_log_destroy(log);
+
+	/* The logging form still writes the same lines, prefix included. */
+	munit_assert_not_null(
+	    strstr(run_check(), "[tuning] cpu governor is not 'performance'"));
+	(void)unlink(gov);
+	(void)unlink(thp);
+	(void)unlink(swp);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/governor_needs_rec",     test_governor_needs_rec,     setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/governor_already_tuned", test_governor_already_tuned, setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
@@ -397,6 +499,7 @@ static MunitTest tests[] = {
 	{ "/uring_blocked",          test_uring_blocked,          setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/uring_usable",           test_uring_usable,           setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/all_tuned_is_silent",    test_all_tuned_is_silent,    setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/check_ex_findings",      test_check_ex_findings,      setup, teardown, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m1/tuning", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

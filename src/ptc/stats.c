@@ -755,3 +755,10 @@ xtc_tuning_check(void)
 {
 	__os_tuning_check();
 }
+
+/* PUBLIC: int xtc_tuning_check_ex __P((xtc_tuning_fn, void *)); */
+int
+xtc_tuning_check_ex(xtc_tuning_fn fn, void *user)
+{
+	return __os_tuning_check_ex(fn, user);
+}
