@@ -6,14 +6,25 @@
  *	Predictable async logger implementation.
  *
  *	Internal model:
- *	  - Fixed-size ring of fixed-size records.
- *	  - Each record carries: level + monotonic timestamp +
- *	    null-terminated formatted text (truncated to record_max).
- *	  - Producer side: claim slot via atomic FAA on tail; if the
- *	    tail catches the head, drop the OLDEST record by bumping
- *	    head past it (dropped += 1).
- *	  - Consumer side (xtc_log_drain): atomic load head; while
- *	    head < tail, write[head] -> sink, head++.
+ *	  - Fixed-size ring of fixed-size slots.  Each slot carries a
+ *	    sequence word, the level, a monotonic timestamp and up to
+ *	    record_max bytes of formatted text.
+ *	  - The sequence word is D. Vyukov's bounded-queue protocol: slot
+ *	    i starts at seq = i.  A writer claims position pos only when
+ *	    its slot reads seq == pos (free for this lap), by a CAS of tail
+ *	    from pos to pos + 1, fills the slot, and publishes it with a
+ *	    release store of seq = pos + 1.  A consumer takes position h
+ *	    only when its slot reads seq == h + 1 (published), by a CAS of
+ *	    head from h to h + 1, and gives the slot back for the next lap
+ *	    with seq = h + ring_size.  So the drainer never reads a slot a
+ *	    writer has claimed but not filled: it stops there, and the
+ *	    records behind it wait for the next drain, in order.
+ *	  - Full ring: the writer consumes the oldest record itself (the
+ *	    same CAS of head the drainer uses) without printing it, counts
+ *	    it in `dropped`, and claims the freed slot.  If the oldest
+ *	    record is at that instant being written or read, the writer
+ *	    drops its own record instead (also counted), so a writer never
+ *	    spins on another thread.
  *
  *	The dropped-oldest-on-full policy is the predictable choice:
  *	logging a hot loop never blocks the loop; the cost is that
@@ -24,6 +35,7 @@
 
 #include "xtc_int.h"
 #include "xtc_log.h"
+#include "preempt_int.h" /* __xtc_unsafe_enter/leave */
 
 #include <pthread.h>
 #include <stdarg.h>
@@ -33,26 +45,26 @@
 #include <time.h>
 #include <unistd.h>
 
-#define XTC_LOG_HDR \
-	xtc_log_level_t level; \
-	int64_t         ts_ns; \
-	int             len
-
-struct log_record_hdr {
-	XTC_LOG_HDR;
+/* One ring slot; record_max bytes of text follow it. */
+struct log_slot {
+	uint64_t seq; /* see the internal model above */
+	xtc_log_level_t level;
+	int len;
+	int64_t ts_ns;
 };
 
 struct xtc_log {
 	xtc_log_opts_t   opts;
 
-	/* Ring storage: opts.ring_size records of (header + record_max
-	 * bytes of text).  Total bytes = ring_size *
-	 * (sizeof(hdr) + record_max). */
+	/* Ring storage: opts.ring_size slots of record_stride bytes (the
+	 * slot header plus record_max bytes of text, rounded up so every
+	 * slot's seq word is aligned). */
 	uint8_t         *ring;
 	size_t           record_stride;
+	uint64_t n_slots;
 
-	uint64_t head; /* next slot to drain */
-	uint64_t tail; /* next slot to write */
+	uint64_t head; /* next record to drain or drop */
+	uint64_t tail; /* next position to claim */
 	int dropped;
 	pthread_mutex_t  drain_lock;    /* serialise drains across threads */
 };
@@ -82,11 +94,111 @@ __lvl_name(xtc_log_level_t l)
 	return "?????";
 }
 
+static struct log_slot *
+__log_slot(const xtc_log_t *log, uint64_t pos)
+{
+	return (struct log_slot *)(void *)(log->ring +
+	    (size_t)(pos % log->n_slots) * log->record_stride);
+}
+
+/*
+ * The ring is full: position pos needs the slot that still holds record
+ * pos - n_slots, the oldest.  Consume that record without printing it
+ * and count it, so the caller can claim the slot.  Returns 0, having
+ * done nothing, when the oldest record is still being written (its seq
+ * is not published) or already being read (head moved past it), so the
+ * caller drops its own record instead of waiting.
+ */
+static int
+__log_drop_oldest(xtc_log_t *log, uint64_t pos)
+{
+	uint64_t h = pos - log->n_slots;
+	struct log_slot *s = __log_slot(log, h);
+
+	if (xtc_atomic_load_u64(&log->head, xtc_mo_relaxed) != h ||
+	    xtc_atomic_load_u64(&s->seq, xtc_mo_acquire) != h + 1 ||
+	    !xtc_atomic_cas_u64(&log->head, &h, h + 1, xtc_mo_relaxed,
+	        xtc_mo_relaxed))
+		return 0;
+	xtc_atomic_store_u64(&s->seq, h + log->n_slots, xtc_mo_release);
+	xtc_atomic_fetch_add_i32(&log->dropped, 1, xtc_mo_relaxed);
+	return 1;
+}
+
+/*
+ * Claim the next ring position for a record.  Returns its slot, with the
+ * position in *out_pos, or NULL when the record is dropped (counted):
+ * the ring is full and its oldest record is mid-write or mid-read.  The
+ * caller fills the slot and publishes it with seq = *out_pos + 1.
+ */
+static struct log_slot *
+__log_claim(xtc_log_t *log, uint64_t *out_pos)
+{
+	uint64_t pos, seq, was;
+	struct log_slot *s;
+
+	pos = xtc_atomic_load_u64(&log->tail, xtc_mo_relaxed);
+	for (;;) {
+		s = __log_slot(log, pos);
+		seq = xtc_atomic_load_u64(&s->seq, xtc_mo_acquire);
+		if (seq == pos) {
+			if (xtc_atomic_cas_weak_u64(&log->tail, &pos, pos + 1,
+			        xtc_mo_relaxed, xtc_mo_relaxed))
+				break;
+		} else if (seq > pos) {
+			pos = xtc_atomic_load_u64(&log->tail, xtc_mo_relaxed);
+		} else if (!__log_drop_oldest(log, pos)) {
+			/* The tail moved (retry), the slot came free (retry),
+			 * or the oldest record is mid-write or mid-read:
+			 * drop this record rather than wait for a thread. */
+			was = pos;
+			pos = xtc_atomic_load_u64(&log->tail, xtc_mo_relaxed);
+			seq = xtc_atomic_load_u64(&s->seq, xtc_mo_acquire);
+			if (pos == was && seq < pos) {
+				xtc_atomic_fetch_add_i32(&log->dropped, 1,
+				    xtc_mo_relaxed);
+				return NULL;
+			}
+		}
+	}
+	*out_pos = pos;
+	return s;
+}
+
+/*
+ * Take the oldest published record for the drainer (which holds
+ * drain_lock).  Returns its slot, with its position in *out_h, or NULL
+ * when the ring is empty or its oldest record is not written yet.  The
+ * caller reads the slot and gives it back with seq = *out_h + n_slots.
+ */
+static struct log_slot *
+__log_take(xtc_log_t *log, uint64_t *out_h)
+{
+	uint64_t h, seq;
+	struct log_slot *s;
+
+	for (;;) {
+		h = xtc_atomic_load_u64(&log->head, xtc_mo_relaxed);
+		s = __log_slot(log, h);
+		seq = xtc_atomic_load_u64(&s->seq, xtc_mo_acquire);
+		if (seq < h + 1)
+			return NULL; /* empty, or record h is not written */
+		if (seq == h + 1 &&
+		    xtc_atomic_cas_u64(&log->head, &h, h + 1, xtc_mo_relaxed,
+		        xtc_mo_relaxed))
+			break;
+		/* A full-ring writer dropped record h first: look again. */
+	}
+	*out_h = h;
+	return s;
+}
+
 int
 xtc_log_create(const xtc_log_opts_t *opts, xtc_log_t **out)
 {
 	xtc_log_t *log;
 	xtc_log_opts_t defaults = XTC_LOG_OPTS_DEFAULT, o = defaults;
+	uint64_t i;
 	int rc;
 
 	if (out == NULL) return XTC_E_INVAL;
@@ -97,15 +209,26 @@ xtc_log_create(const xtc_log_opts_t *opts, xtc_log_t **out)
 		return rc;
 	log->opts = o;
 	if (log->opts.ring_size  <= 0) log->opts.ring_size  = 4096;
+	/* One slot cannot tell "published" (seq = pos + 1) from "free for
+	 * the next lap" (seq = pos + ring_size). */
+	if (log->opts.ring_size == 1)
+		log->opts.ring_size = 2;
 	if (log->opts.record_max <= 0) log->opts.record_max = 256;
-	log->record_stride = sizeof(struct log_record_hdr) +
-	    (size_t)log->opts.record_max;
+	log->record_stride =
+	    sizeof(struct log_slot) + (size_t)log->opts.record_max;
+	log->record_stride =
+	    (log->record_stride + _Alignof(struct log_slot) - 1) &
+	    ~(size_t)(_Alignof(struct log_slot) - 1);
+	log->n_slots = (uint64_t)log->opts.ring_size;
 
 	if ((rc = __os_calloc((size_t)log->opts.ring_size, log->record_stride,
 	    (void **)&log->ring)) != XTC_OK) {
 		__os_free(log);
 		return rc;
 	}
+	for (i = 0; i < log->n_slots; i++)
+		xtc_atomic_store_u64(&__log_slot(log, i)->seq, i,
+		    xtc_mo_relaxed);
 	(void)pthread_mutex_init(&log->drain_lock, NULL);
 	*out = log;
 	return XTC_OK;
@@ -149,39 +272,38 @@ xtc_log_vwrite(xtc_log_t *log, xtc_log_level_t lvl,
                const char *fmt, va_list ap)
 {
 	uint64_t pos;
-	uint8_t *slot;
-	struct log_record_hdr *hdr;
-	char    *body;
+	struct log_slot *s;
+	char text[1024];
+	int64_t ts;
 	int      n;
 
 	if (log == NULL || fmt == NULL) return;
 	if ((int)lvl < (int)log->opts.floor) return;
 
-	/* Claim a slot via fetch-add on tail. */
-	pos = xtc_atomic_fetch_add_u64(&log->tail, 1, xtc_mo_relaxed);
-
-	/* If we're more than ring_size ahead of head, drop the oldest. */
-	{
-		uint64_t head = xtc_atomic_load_u64(&log->head, xtc_mo_acquire);
-		if (pos - head >= (uint64_t)log->opts.ring_size) {
-			uint64_t new_head = pos - (uint64_t)log->opts.ring_size + 1;
-			(void)xtc_atomic_cas_u64(&log->head, &head, new_head,
-			    xtc_mo_acq_rel, xtc_mo_acquire);
-			xtc_atomic_fetch_add_i32(&log->dropped, 1,
-			    xtc_mo_relaxed);
-		}
-	}
-
-	slot = log->ring + (pos % (uint64_t)log->opts.ring_size) * log->record_stride;
-	hdr  = (struct log_record_hdr *)slot;
-	body = (char *)(slot + sizeof *hdr);
-
-	hdr->level = lvl;
-	hdr->ts_ns = __log_now_ns();
-	n = vsnprintf(body, (size_t)log->opts.record_max, fmt, ap);
+	/* Format before claiming a slot, so no caller code (the format's
+	 * arguments) runs while a slot is claimed and unpublished: the
+	 * drainer stops at such a slot.  The drain prints at most a
+	 * 1024-byte line, so a longer record was never printed whole. */
+	ts = __log_now_ns();
+	n = vsnprintf(text, sizeof text, fmt, ap);
 	if (n < 0) n = 0;
+	if (n >= (int)sizeof text)
+		n = (int)sizeof text - 1;
 	if (n >= log->opts.record_max) n = log->opts.record_max - 1;
-	hdr->len = n;
+
+	/* Claim to publish is a memcpy; keep the timer from preempting a
+	 * fiber inside it. */
+	__xtc_unsafe_enter();
+	if ((s = __log_claim(log, &pos)) == NULL) {
+		__xtc_unsafe_leave();
+		return;
+	}
+	s->level = lvl;
+	s->ts_ns = ts;
+	s->len = n;
+	memcpy(s + 1, text, (size_t)n);
+	xtc_atomic_store_u64(&s->seq, pos + 1, xtc_mo_release);
+	__xtc_unsafe_leave();
 }
 
 void
@@ -196,44 +318,44 @@ xtc_log_write(xtc_log_t *log, xtc_log_level_t lvl, const char *fmt, ...)
 int
 xtc_log_drain(xtc_log_t *log)
 {
-	int n_drained = 0;
+	struct log_slot *s;
+	xtc_log_level_t lvl;
+	uint64_t h;
+	char line[1024];
+	int line_len, n_drained = 0;
+
 	if (log == NULL) return 0;
 	(void)pthread_mutex_lock(&log->drain_lock);
 	for (;;) {
-		uint64_t head = xtc_atomic_load_u64(&log->head, xtc_mo_acquire);
-		uint64_t tail = xtc_atomic_load_u64(&log->tail, xtc_mo_acquire);
-		uint8_t *slot;
-		struct log_record_hdr *hdr;
-		char    *body;
-		char     line[1024];
-		int      line_len;
-
-		if (head >= tail) break;
-
-		slot = log->ring + (head % (uint64_t)log->opts.ring_size) *
-		    log->record_stride;
-		hdr  = (struct log_record_hdr *)slot;
-		body = (char *)(slot + sizeof *hdr);
-
-		line_len = snprintf(line, sizeof line,
-		    "[%lld.%09lld] %s %.*s\n",
-		    (long long)(hdr->ts_ns / 1000000000LL),
-		    (long long)(hdr->ts_ns % 1000000000LL),
-		    __lvl_name(hdr->level),
-		    hdr->len, body);
+		/* Format out of the slot and give the slot back, then call
+		 * the sink with no slot held. */
+		__xtc_unsafe_enter();
+		if ((s = __log_take(log, &h)) == NULL) {
+			__xtc_unsafe_leave();
+			break;
+		}
+		lvl = s->level;
+		line_len =
+		    snprintf(line, sizeof line, "[%lld.%09lld] %s %.*s\n",
+		        (long long)(s->ts_ns / 1000000000LL),
+		        (long long)(s->ts_ns % 1000000000LL), __lvl_name(lvl),
+		        s->len, (const char *)(s + 1));
+		xtc_atomic_store_u64(&s->seq, h + log->n_slots, xtc_mo_release);
+		__xtc_unsafe_leave();
 		if (line_len < 0) line_len = 0;
-		if (line_len > (int)sizeof line) line_len = (int)sizeof line;
+		if (line_len >=
+		    (int)sizeof line) { /* truncated: keep the newline */
+			line_len = (int)sizeof line - 1;
+			line[line_len - 1] = '\n';
+		}
 
 		if (log->opts.sink != NULL)
-			(void)log->opts.sink(log->opts.sink_user, hdr->level,
-			    line, (size_t)line_len);
+			(void)log->opts.sink(log->opts.sink_user, lvl, line,
+			    (size_t)line_len);
 		else if (log->opts.sink_fd >= 0) {
 			ssize_t wr = write(log->opts.sink_fd, line, (size_t)line_len);   /* XTC_BLOCKING_OK: log writer thread is dedicated */
 			(void)wr;   /* best-effort log sink; a short write is tolerated */
 		}
-
-		(void)xtc_atomic_cas_u64(&log->head, &head, head + 1,
-		    xtc_mo_acq_rel, xtc_mo_acquire);
 		n_drained++;
 	}
 	(void)pthread_mutex_unlock(&log->drain_lock);

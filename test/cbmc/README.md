@@ -64,6 +64,7 @@ are exposed at 2-3 concurrent actors, which is well within reach.
 | `tntring_harness.c`     | `src/orc/tnt.c` cross-shard ring | per-(source, destination) SPSC ring vs the shard's drain-then-park: no lost wake, FIFO, none lost or doubled, a full ring refuses | u4 | drift-checked push/drain/pending |
 | `ltreg_harness.c`       | `src/ptc/proc.c` loop registry | the lock-free seqlock lookups on every send/wake (by loop, and by pid.loop_id since 2.2) find a still-registered loop while another is removed and both hashes rebuilt in place, and a by-id hit never pairs a loop with another loop's table | u5 | drift-checked find/find_id/put/id_put/remove |
 | `combinator_harness.c`  | `src/ptc/future.c` when_all / when_any | registration (which may fail) racing an input's fire: set once, freed once, the right status (2.1.2: a failed registration was ignored) | u3 | drift-checked callbacks + registration |
+| `logring_harness.c`     | `src/ptc/log.c` record ring | two writers racing the drainer on an overflowing ring: the drainer never takes a slot a writer claimed but has not filled, takes each record once, in each writer's order, and taken + dropped = written (the 2.1 drain printed unwritten slots) | u2 (loops u3-u4) | drift-checked claim/drop/take/publish/give-back |
 
 Real-code harnesses (`real/`, library source compiled unchanged):
 

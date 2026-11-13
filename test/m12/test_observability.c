@@ -90,9 +90,130 @@ test_log_drop_on_full(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_log_create(&opts, &log), ==, XTC_OK);
 	for (i = 0; i < 100; i++)
 		xtc_log_write(log, XTC_LOG_INFO, "msg %d", i);
-	munit_assert_int(xtc_log_drop_count(log), >, 0);
-	(void)xtc_log_drain(log);
+	munit_assert_int(xtc_log_drop_count(log), ==, 92);
+	/* The oldest are dropped: the newest 8 come out, in order. */
+	munit_assert_int(xtc_log_drain(log), ==, 8);
+	g_log_buf[g_log_n] = '\0';
+	munit_assert_null(strstr(g_log_buf, "msg 91\n"));
+	munit_assert_not_null(strstr(g_log_buf, "msg 92\n"));
+	munit_assert_ptr(strstr(g_log_buf, "msg 92\n"), <,
+	    strstr(g_log_buf, "msg 99\n"));
 	xtc_log_destroy(log);
+	return MUNIT_OK;
+}
+
+/*
+ * Several writer threads and one drainer thread (report 09).  Every record
+ * the sink sees must be one whole record ("W<t>:<seq>:" and 200 copies of
+ * one letter), each writer's records must arrive in the order it wrote
+ * them, and printed + dropped must equal written.  Before the per-slot
+ * sequence the drainer printed slots a writer had claimed but not filled
+ * (an empty body, level TRACE, timestamp 0) and lost the real record.
+ */
+#define MPSC_WRITERS 4
+#define MPSC_RECS 50000
+
+static int g_mpsc_bad;
+static int g_mpsc_lines;
+static int g_mpsc_last[MPSC_WRITERS];
+static int g_mpsc_stop;
+static xtc_log_t *g_mpsc_log;
+
+static int
+sink_mpsc(void *user, xtc_log_level_t lvl, const char *line, size_t n)
+{
+	const char *p = strstr(line, " W");
+	char *end;
+	long t, seq;
+	size_t k = 0;
+	char c;
+	(void)user;
+	g_mpsc_lines++;
+	if (lvl != XTC_LOG_INFO || p == NULL) {
+		g_mpsc_bad++;
+		return 0;
+	}
+	t = strtol(p + 2, &end, 10);
+	if (*end != ':' || t < 0 || t >= MPSC_WRITERS) {
+		g_mpsc_bad++;
+		return 0;
+	}
+	seq = strtol(end + 1, &end, 10);
+	if (*end != ':' || seq <= g_mpsc_last[t]) {
+		g_mpsc_bad++;
+		return 0;
+	}
+	g_mpsc_last[t] = (int)seq;
+	c = end[1];
+	while (end + 1 + k < line + n && end[1 + k] == c)
+		k++;
+	if (k != 200 || end[1 + k] != '\n')
+		g_mpsc_bad++;
+	return 0;
+}
+
+static void *
+mpsc_writer(void *arg)
+{
+	int t = (int)(intptr_t)arg, s;
+	char fill[201];
+	for (s = 0; s < MPSC_RECS; s++) {
+		memset(fill, 'a' + (s + t) % 26, 200);
+		fill[200] = '\0';
+		xtc_log_write(g_mpsc_log, XTC_LOG_INFO, "W%d:%d:%s", t, s,
+		    fill);
+	}
+	return NULL;
+}
+
+static void *
+mpsc_drainer(void *arg)
+{
+	(void)arg;
+	while (!xtc_atomic_load_i32(&g_mpsc_stop, xtc_mo_acquire))
+		(void)xtc_log_drain(g_mpsc_log);
+	(void)xtc_log_drain(g_mpsc_log);
+	return NULL;
+}
+
+static MunitResult
+test_log_mpsc(const MunitParameter p[], void *d)
+{
+	static const int rings[] = { 4, 64, 65536 };
+	pthread_t w[MPSC_WRITERS], dr;
+	xtc_log_opts_t opts = XTC_LOG_OPTS_DEFAULT;
+	int r, i;
+	(void)p;
+	(void)d;
+
+	for (r = 0; r < (int)(sizeof rings / sizeof rings[0]); r++) {
+		g_mpsc_bad = g_mpsc_lines = 0;
+		for (i = 0; i < MPSC_WRITERS; i++)
+			g_mpsc_last[i] = -1;
+		xtc_atomic_store_i32(&g_mpsc_stop, 0, xtc_mo_relaxed);
+		opts.ring_size = rings[r];
+		opts.sink = sink_mpsc;
+		opts.sink_fd = -1;
+		munit_assert_int(xtc_log_create(&opts, &g_mpsc_log), ==,
+		    XTC_OK);
+		munit_assert_int(pthread_create(&dr, NULL, mpsc_drainer, NULL),
+		    ==, 0);
+		for (i = 0; i < MPSC_WRITERS; i++)
+			munit_assert_int(pthread_create(&w[i], NULL,
+			                     mpsc_writer, (void *)(intptr_t)i),
+			    ==, 0);
+		for (i = 0; i < MPSC_WRITERS; i++)
+			(void)pthread_join(w[i], NULL);
+		xtc_atomic_store_i32(&g_mpsc_stop, 1, xtc_mo_release);
+		(void)pthread_join(dr, NULL);
+		munit_logf(MUNIT_LOG_INFO,
+		    "ring %d: lines %d bad %d dropped %d", rings[r],
+		    g_mpsc_lines, g_mpsc_bad, xtc_log_drop_count(g_mpsc_log));
+		munit_assert_int(g_mpsc_bad, ==, 0);
+		munit_assert_int(g_mpsc_lines + xtc_log_drop_count(g_mpsc_log),
+		    ==, MPSC_WRITERS * MPSC_RECS);
+		xtc_log_destroy(g_mpsc_log);
+	}
 	return MUNIT_OK;
 }
 
@@ -820,6 +941,7 @@ static MunitTest tests[] = {
 	{ "/trace/causal",         test_trace_causal,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/log/basic",            test_log_basic,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/log/drop_on_full",     test_log_drop_on_full,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/log/mpsc",             test_log_mpsc,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/log/default_vwrite",   test_log_default_vwrite,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/cfg/int",              test_cfg_int,              NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/cfg/string",           test_cfg_string,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

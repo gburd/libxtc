@@ -85,6 +85,7 @@ esac
 # dispatch_once_harness u3      ~0.1s  B1 future resolved exactly once
 # wakepark_harness      u6      ~0.1s  v1.8.0 wake latch
 # chash_resize_harness  u6      ~0.2s  build-then-swap publish
+# logring_harness       u2/4    ~240s  xtc_log slot-sequence ring (2.2)
 HARNESSES='
 deque_harness      --unwind 4
 lwlock_harness     --unwind 4
@@ -108,6 +109,7 @@ timeout_harness    --unwind 3
 combinator_harness --unwind 3
 ltreg_harness      --unwind 5 --object-bits 10
 tntring_harness    --unwind 4
+logring_harness    --unwind 2 --unwindset writer.0:3,drain_one.0:4,drain_one.1:4,main.0:3
 '
 
 # Checks every concurrent harness also runs.  --pointer-check cannot be

@@ -189,6 +189,32 @@ has no `__builtin_longjmp`, so aarch64 keeps the libc pair (TSan on
 aarch64 with glibc 2.44 was not tested), and an application's own
 `longjmp` under TSan on glibc 2.44 still hits the upstream bug.
 
+## FIXED (2.2): xtc_log printed records a writer had not finished
+
+**What it was.**  A writer claimed a slot with a fetch-add of the ring's
+tail and then filled it; `xtc_log_drain` printed every slot below the
+tail.  A slot claimed but not yet filled went to the sink as whatever it
+held before (an empty body, level TRACE, timestamp 0, or an older
+record's text), and the drain then moved past it, so the real record was
+never printed.  On overflow the writer moved the head with a CAS it did
+not retry, so the drain could re-read overwritten slots.  With one
+writer and one drain thread on a 65,536-record ring (nothing wraps),
+11,269 of 200,000 printed lines were torn.
+
+**Fix.**  Each slot carries a sequence word (D. Vyukov's bounded queue):
+a writer claims a position only when its slot is free for that lap,
+publishes it when filled, and the drain stops at the first slot not yet
+published.  A full ring still drops the oldest record; if that record is
+mid-write or mid-read, the writer drops its own instead of waiting.
+Both are counted, so printed plus `xtc_log_drop_count` equals written.
+Records are formatted before a slot is claimed, so no caller code runs
+while one is held.  `test/m12/test_observability` `/log/mpsc` (4 writers,
+1 drain, rings of 4, 64 and 65,536) failed with 25,441 torn records
+before and passes after; `test/cbmc/logring_harness.c` proves the ring
+over every interleaving of two writers and the drain on a ring that
+overflows, and fails on the 2.1 drain and on a drop that skips the
+written check.
+
 ## Linux/XFS: io_uring WAL writes go to io-wq unless the filesystem has `lazytime`
 
 On XFS mounted without `lazytime`, a write that must update the file's
