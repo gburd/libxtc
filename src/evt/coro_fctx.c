@@ -656,11 +656,10 @@ xtc_yield(void)
 {
 	struct xtc_coro *c = __xtc_current_coro;
 	void *pctx;
-	volatile char probe;     /* address approximates the current SP */
 	if (c == NULL) return;
 	/* S1: return the unused stack tail below our SP to the OS before we
-	 * park.  &probe is a live local, so the reclaim never crosses it. */
-	coro_stack_shrink(c, (void *)&probe);
+	 * park. */
+	coro_stack_shrink(c);
 	/* Preserve the process layer's per-fiber TLS across the yield:
 	 * the scheduler runs other fibers (which overwrite it) before we
 	 * resume.  Without this a proc resumes running as whatever proc

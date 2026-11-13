@@ -123,6 +123,19 @@ it can take as long as the loop's longest offload; nothing is cancelled.
 `/m9/blocking/loop_fini_waits` fails on 2.1.2 (`xtc_loop_fini` returned
 with `fn` still running) and passes on 2.1.3.
 
+## FIXED (2.1.3): stack reclaim never fired under AddressSanitizer
+
+A parking fiber returned the unused tail of its stack using the address
+of a local as its stack pointer.  AddressSanitizer's use-after-return
+detection (on by default in current gcc and clang runtimes) moves locals
+to a heap fake stack, so the reclaim declined every time and
+`xtc_stack_reclaim_count` stayed 0 in sanitizer builds.  The reclaim now
+takes the address of its own frame, which is always on the fiber's
+stack, and refuses an address outside it.
+`/m14/stack_reclaim/reclaim_correct` under ASan with
+`detect_stack_use_after_return=1` fails on 2.1.2 (count 0) and passes on
+2.1.3.
+
 ## FIXED (2.1.2): a cross-shard xtc_tnt_send could lose messages
 
 **What it was.**  Through 2.1.1 an `xtc_tnt_send` to an Isolate on
