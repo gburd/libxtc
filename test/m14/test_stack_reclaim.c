@@ -816,7 +816,21 @@ sz_recurse(size_t left)
 	return sz_recurse(left - sizeof frame) + frame[512];
 }
 
-#if defined(__linux__) && !defined(XTC_UNDER_ASAN)
+/* The mapping check holds only where the fiber stack is its own
+ * mapping: ASan's fake stack moves the local off it, and under TSan the
+ * kernel merges the stack with neighbouring anonymous mappings. */
+#if defined(__SANITIZE_THREAD__)
+# define SZ_NO_MAPS 1
+#elif defined(__has_feature)
+# if __has_feature(thread_sanitizer)
+#  define SZ_NO_MAPS 1
+# endif
+#endif
+#if defined(XTC_UNDER_ASAN)
+# define SZ_NO_MAPS 1
+#endif
+
+#if defined(__linux__) && !defined(SZ_NO_MAPS)
 #include <stdio.h>
 /* The usable size of the stack holding `addr`: the mapping just above a
  * PROT_NONE guard, which is the fiber stack's layout.  0 if not found. */
@@ -856,8 +870,7 @@ sz_proc(void *arg)
 	if (xtc_proc_info(xtc_self(), &info) != XTC_OK ||
 	    info.stack_size != want)
 		ok = 0;
-#if defined(__linux__) && !defined(XTC_UNDER_ASAN)
-	/* Under ASan the local lives on the fake stack, not the fiber's. */
+#if defined(__linux__) && !defined(SZ_NO_MAPS)
 	if (sz_mapped_stack((uintptr_t)&here) != want)
 		ok = 0;
 #endif
