@@ -6,9 +6,11 @@
 
 int       xtc_reg_put __P((xtc_reg_t *, const char *, xtc_pid_t, void *, unsigned));
 int       xtc_reg_visit __P((xtc_reg_t *, const char *, xtc_reg_visit_fn, void *, int *));
+int __xtc_reg_set __P((xtc_reg_t *, const char *, xtc_pid_t));
 int __xtc_sup_abandon_wait __P((xtc_supervisor_t *));
 int __xtc_sup_start_ex __P((xtc_loop_t *, const xtc_sup_opts_t *, const xtc_child_spec_t *, int, void (*)(void *), void *, xtc_supervisor_t **));
 int xtc_launch __P((xtc_loop_t *, xtc_launch_fn, void *, int64_t, const xtc_launch_opts_t *, intptr_t *));
+int xtc_reg_whereis_wait __P((xtc_reg_t *, const char *, xtc_pid_t, int64_t, xtc_pid_t *));
 int xtc_sup_add_child __P((xtc_supervisor_t *, const xtc_child_spec_t *, xtc_pid_t *));
 int xtc_sup_child_restarts __P((const xtc_supervisor_t *, int, int *));
 int xtc_sup_join __P((xtc_supervisor_t *, int64_t));

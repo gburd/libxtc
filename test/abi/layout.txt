@@ -110,7 +110,7 @@ xtc_cfg_spec_t.n_enum_labels off=80 size=4
 xtc_cfg_spec_t.validator off=88 size=8
 xtc_cfg_spec_t.on_change off=96 size=8
 xtc_cfg_spec_t.cb_user off=104 size=8
-xtc_child_spec_t size=88 align=8
+xtc_child_spec_t size=96 align=8
 xtc_child_spec_t.size off=0 size=8
 xtc_child_spec_t.name off=8 size=8
 xtc_child_spec_t.fn off=16 size=8
@@ -121,8 +121,9 @@ xtc_child_spec_t.loop off=48 size=4
 xtc_child_spec_t.mailbox_watermark_fn off=56 size=8
 xtc_child_spec_t.mailbox_watermark_user off=64 size=8
 xtc_child_spec_t.sched_class off=72 size=8
-xtc_child_spec_t.mailbox_watermark_pct off=80 size=4
-xtc_child_spec_t.migratable off=84 size=4
+xtc_child_spec_t.reg_name off=80 size=8
+xtc_child_spec_t.mailbox_watermark_pct off=88 size=4
+xtc_child_spec_t.migratable off=92 size=4
 xtc_dio_sched_spec_t size=152 align=8
 xtc_dio_sched_spec_t.n_genes off=0 size=4
 xtc_dio_sched_spec_t.min off=4 size=32
@@ -379,7 +380,7 @@ xtc_slab_stats_t.bytes_total off=72 size=8
 xtc_slab_stats_t.reaps off=80 size=8
 xtc_slab_stats_t.oom_fails off=88 size=8
 xtc_slab_stats_t.redzone_violations off=96 size=8
-xtc_sup_opts_t size=56 align=8
+xtc_sup_opts_t size=64 align=8
 xtc_sup_opts_t.size off=0 size=8
 xtc_sup_opts_t.strategy off=8 size=4
 xtc_sup_opts_t.max_restarts off=12 size=4
@@ -388,6 +389,7 @@ xtc_sup_opts_t.exec off=24 size=8
 xtc_sup_opts_t.max_children off=32 size=4
 xtc_sup_opts_t.on_child_down off=40 size=8
 xtc_sup_opts_t.on_child_down_user off=48 size=8
+xtc_sup_opts_t.registry off=56 size=8
 xtc_svr_callbacks_t size=56 align=8
 xtc_svr_callbacks_t.size off=0 size=8
 xtc_svr_callbacks_t.init off=8 size=8

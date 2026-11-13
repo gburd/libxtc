@@ -19,7 +19,8 @@
 .Nm xtc_svr_call_name ,
 .Nm xtc_reg_members ,
 .Nm xtc_reg_put ,
-.Nm xtc_reg_visit
+.Nm xtc_reg_visit ,
+.Nm xtc_reg_whereis_wait
 .Nd named process registry
 .Sh SYNOPSIS
 .In xtc.h
@@ -56,6 +57,8 @@
 .Fn xtc_reg_put "xtc_reg_t *r" "const char *name" "xtc_pid_t pid" "void *value" "unsigned flags"
 .Ft int
 .Fn xtc_reg_visit "xtc_reg_t *r" "const char *name" "xtc_reg_visit_fn fn" "void *user" "int *out_n"
+.Ft int
+.Fn xtc_reg_whereis_wait "xtc_reg_t *r" "const char *name" "xtc_pid_t not_pid" "int64_t timeout_ns" "xtc_pid_t *out_pid"
 .Sh DESCRIPTION
 .Nm xtc_reg
 is a name-to-pid registry.  Modeled on Erlang's
@@ -234,6 +237,51 @@ interrupt_fn(xtc_pid_t pid, void *value, void *user)
 uint32_t bit = INTERRUPT_CANCEL;
 rc = xtc_reg_visit(reg, "backend:42", interrupt_fn, &bit, NULL);
 .Ed
+.Ss Waiting for a name
+.Fn xtc_reg_whereis_wait ,
+added in 2.2, parks until
+.Fa name
+names a live process other than
+.Fa not_pid
+.Pq Dv XTC_PID_NONE No for any ,
+then stores it in
+.Fa *out_pid .
+It is woken by the registration itself (an insert under the name, or a
+supervisor giving a child's name to its next incarnation), not by a
+timer, so a client whose server died picks up the restarted one as soon
+as it is registered:
+.Bd -literal -offset indent
+xtc_pid_t eng;
+if (xtc_reg_whereis_wait(reg, "engine", dead_pid, 5000000000LL,
+    &eng) == XTC_OK)
+	xtc_send(eng, &req, sizeof req);
+.Ed
+.Pp
+A name that still names a dead process does not satisfy the wait.  The
+lookup is exact: unlike
+.Fn xtc_reg_whereis
+it never reports a simulated transient miss.  From a process it parks
+the fiber, and a waiter that is killed is unlinked from the registry on
+the way out; from a plain thread it blocks the thread.
+.Fa timeout_ns
+< 0 waits forever, 0 looks once.  It returns
+.Dv XTC_OK ,
+.Er XTC_E_AGAIN
+when the time ran out,
+.Er XTC_E_INVAL
+for a NULL argument, or
+.Er XTC_E_NOMEM
+/
+.Er XTC_E_RESOURCE
+if the wait could not be set up.
+.Pp
+The supervisor names a child itself when its spec sets
+.Va reg_name
+.Pq Xr xtc_supervisor 3 ;
+an
+.Xr xtc_app 3
+child is named in
+.Fn xtc_app_registry .
 .Sh EXAMPLES
 .Bd -literal -offset indent
 xtc_reg_t *r = xtc_app_registry(app);

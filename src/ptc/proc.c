@@ -1356,6 +1356,23 @@ __xtc_proc_loop_contains(xtc_loop_t *loop, xtc_pid_t pid)
 	return found;
 }
 
+/* 1 iff `pid` names a live proc (resolved by its loop id, any thread):
+ * its body has not yet ended.  A proc in its exit hooks is no longer
+ * alive.  A snapshot: the proc may exit right after. */
+static struct xtc_proc *__resolve(xtc_pid_t pid, xtc_loop_t **out);
+int
+__xtc_proc_alive(xtc_pid_t pid)
+{
+	struct xtc_proc *p;
+	int alive;
+	if (xtc_pid_is_none(pid))
+		return 0;
+	p = __resolve(pid, NULL);
+	alive = p != NULL && xtc_atomic_load_i32(&p->alive, xtc_mo_relaxed);
+	__proc_release(p);
+	return alive;
+}
+
 /* Test seam: set the generation of FREE slot `local_id` on `loop`, so a
  * test can reach a generation a real run would need 2^32 spawns of one
  * slot to reach.  XTC_E_INVAL if the slot is out of range or occupied. */

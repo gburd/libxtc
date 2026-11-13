@@ -24,6 +24,10 @@
  * and a global info scan could not establish this join). */
 int __xtc_proc_loop_contains(xtc_loop_t *, xtc_pid_t);
 
+/* 1 iff pid names a live proc (its body has not ended), from any thread;
+ * a snapshot.  0 for XTC_PID_NONE or a proc gone or in its exit hooks. */
+int __xtc_proc_alive(xtc_pid_t pid);
+
 /* The calling proc's OWNER loop: the one it was spawned on, whose table
  * holds its slot (p->loop).  Unchanged by work-stealing migration, so it
  * is NOT necessarily the loop the fiber is running on.  NULL off a proc.

@@ -257,4 +257,21 @@
  */
 #define XTC_DST_BUG_DEMON_INFLIGHT 45
 
+/*
+ * 46 REG_WAIT_NOWAKE: a registration does not wake xtc_reg_whereis_wait
+ * callers, so a client waiting for a restarted child's name finds it only
+ * when its timeout expires (test_sim_sup_name: "a name wait timed out
+ * with the name registered").
+ */
+#define XTC_DST_BUG_REG_WAIT_NOWAKE 46
+
+/*
+ * 47 SUP_NAME_STALE: the supervisor does not drop a child's name when the
+ * child dies (the 2.1 shape, where nothing did unless a reaper was
+ * running), so between the death and the next registration the name
+ * names a dead pid (test_sim_sup_name: "the registry named a dead
+ * incarnation").
+ */
+#define XTC_DST_BUG_SUP_NAME_STALE 47
+
 #endif /* XTC_DST_INJECT_H */

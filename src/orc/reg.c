@@ -15,6 +15,8 @@
 #include "xtc_proc.h"      /* reaper proc: monitor + recv + drop-on-DOWN */
 #include "xtc_svr.h"       /* xtc_svr_call_name via-dispatch */
 #include "xtc_app.h"       /* xtc_app_is_shutdown_msg: the reaper drains */
+#include "xtc_sync.h"      /* xtc_notify: xtc_reg_whereis_wait */
+#include "proc_int.h"      /* __xtc_proc_alive */
 #include "xtc_sim.h"       /* XTC_SIM_BUGGIFY / xtc_sim_fault (DST) */
 #include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
 #include "xtc_tail.h"      /* XTC_TAIL_LIFECYCLE_DROP kind */
@@ -42,6 +44,16 @@ struct reg_node {
 	void            *value;         /* xtc_reg_put's caller-owned slot */
 };
 
+/* An xtc_reg_whereis_wait caller.  Heap-allocated and linked on the
+ * registry under its lock; every insert of an entry whose name hashes to
+ * `hash` signals it, and it re-checks. */
+struct reg_waiter {
+	struct reg_waiter *next;
+	uint32_t hash;
+	xtc_notify_t *wake;
+	struct xtc_reg *reg; /* for the kill-path unlink */
+};
+
 struct xtc_reg {
 	pthread_mutex_t   lock;
 	struct reg_node **buckets;      /* nbuckets heads */
@@ -49,6 +61,7 @@ struct xtc_reg {
 	int               n;            /* live entry count */
 	int has_reaper; /* 1 once a reaper proc has registered */
 	xtc_pid_t         reaper;       /* the reaper's pid (valid if has_reaper) */
+	struct reg_waiter *waiters;     /* xtc_reg_whereis_wait callers */
 };
 
 /* Wire message a caller sends to the reaper proc: "monitor `pid`; when
@@ -117,6 +130,26 @@ __reg_bucket(struct xtc_reg *r, uint32_t h)
 	return &r->buckets[h & (r->nbuckets - 1)];
 }
 
+/* Wake every xtc_reg_whereis_wait caller waiting on a name with hash h
+ * (a spurious wake for a colliding name only makes it re-check).  Called
+ * with r->lock held; xtc_notify_signal takes only the notify's own lock.
+ * Planted bug 46 (REG_WAIT_NOWAKE) skips it: a waiter then sees a new
+ * registration only when its timeout expires. */
+static void
+__reg_wake_locked(struct xtc_reg *r, uint32_t h)
+{
+	struct reg_waiter *w;
+#if !XTC_DST_BUG(XTC_DST_BUG_REG_WAIT_NOWAKE)
+	for (w = r->waiters; w != NULL; w = w->next)
+		if (w->hash == h)
+			(void)xtc_notify_signal(w->wake);
+#else
+	(void)r;
+	(void)h;
+	(void)w;
+#endif
+}
+
 /*
  * Insert a fresh node (head-insert), doubling the bucket array first if
  * the table is at load factor 1.  Called with r->lock held.  A failed
@@ -147,6 +180,7 @@ __reg_insert_locked(struct xtc_reg *r, struct reg_node *node)
 	node->next = *head;
 	*head = node;
 	r->n++;
+	__reg_wake_locked(r, node->hash);
 }
 
 /* Find a node by name in its bucket.  Called with r->lock held. */
@@ -642,6 +676,174 @@ xtc_reg_visit(xtc_reg_t *r, const char *name, xtc_reg_visit_fn fn,
 	if (out_n != NULL)
 		*out_n = n;
 	return n > 0 ? XTC_OK : XTC_E_NOTFOUND;
+}
+
+/*
+ * Replace-or-insert name -> pid as a unique entry, for the supervisor's
+ * child names: an entry under `name` (unique, of any earlier incarnation)
+ * is overwritten in place, so the name is never absent between two
+ * incarnations and never names two.  Returns XTC_OK or XTC_E_NOMEM.
+ *
+ * PUBLIC: int __xtc_reg_set __P((xtc_reg_t *, const char *, xtc_pid_t));
+ */
+int
+__xtc_reg_set(xtc_reg_t *r, const char *name, xtc_pid_t pid)
+{
+	struct reg_node *node;
+	uint32_t h;
+	int rc = XTC_OK;
+	h = __reg_hash(name);
+	(void)__xtc_mtx_lock(&r->lock);
+	for (node = *__reg_bucket(r, h); node != NULL; node = node->next)
+		if (node->hash == h && !node->dup &&
+		    strcmp(node->name, name) == 0)
+			break;
+	if (node != NULL) {
+		node->pid = pid;
+		node->value = NULL;
+		__reg_wake_locked(r, h);
+		goto out;
+	}
+	if ((rc = __os_calloc(1, sizeof *node, (void **)&node)) != XTC_OK)
+		goto out;
+	if ((rc = __os_strdup(name, &node->name)) != XTC_OK) {
+		__os_free(node);
+		goto out;
+	}
+	node->hash = h;
+	node->pid = pid;
+	__reg_insert_locked(r, node);
+out:
+	(void)__xtc_mtx_unlock(&r->lock);
+	return rc;
+}
+
+/* The pid of an entry under `name` that is alive and not `not_pid`, if
+ * any.  Called with r->lock held. */
+static int
+__reg_pick_live_locked(struct xtc_reg *r, const char *name, uint32_t h,
+    xtc_pid_t not_pid, xtc_pid_t *out)
+{
+	struct reg_node *node;
+	for (node = *__reg_bucket(r, h); node != NULL; node = node->next)
+		if (node->hash == h && strcmp(node->name, name) == 0 &&
+		    !xtc_pid_eq(node->pid, not_pid) &&
+		    __xtc_proc_alive(node->pid)) {
+			*out = node->pid;
+			return 1;
+		}
+	return 0;
+}
+
+/* Unlink and free a waiter: the normal return of xtc_reg_whereis_wait,
+ * and its scope finalizer when the waiting proc is killed or faults.
+ * NB: the argument is the heap waiter itself, never a stack struct of
+ * the waiting frame -- a kill runs the finalizer after unwinding it. */
+static void
+__reg_waiter_drop(void *arg)
+{
+	struct reg_waiter *w = arg, **pp;
+	struct xtc_reg *r = w->reg;
+	(void)__xtc_mtx_lock(&r->lock);
+	for (pp = &r->waiters; *pp != NULL; pp = &(*pp)->next)
+		if (*pp == w) {
+			*pp = w->next;
+			break;
+		}
+	(void)__xtc_mtx_unlock(&r->lock);
+	xtc_notify_destroy(w->wake);
+	__os_free(w);
+}
+
+/*
+ * PUBLIC: int xtc_reg_whereis_wait __P((xtc_reg_t *, const char *, xtc_pid_t, int64_t, xtc_pid_t *));
+ *
+ * Park until `name` names a live pid other than `not_pid`, woken by the
+ * registration (an insert or a replacement of the name), not by a
+ * timer.  The common use: a client whose server died waits for the
+ * supervisor to register the next incarnation (not_pid = the dead one).
+ * The lookup is exact (no simulated transient miss, unlike
+ * xtc_reg_whereis).  From a proc it parks the fiber; from a plain thread
+ * it blocks the thread.  Kill-safe: a killed waiter is unlinked by a
+ * scope finalizer before its wait state is freed.
+ */
+int
+xtc_reg_whereis_wait(xtc_reg_t *r, const char *name, xtc_pid_t not_pid,
+    int64_t timeout_ns, xtc_pid_t *out_pid)
+{
+	struct reg_waiter *w = NULL;
+	xtc_scope_t *sc = NULL;
+	uint32_t h;
+	int64_t deadline = 0, now = 0;
+	int rc;
+
+	if (r == NULL || name == NULL || out_pid == NULL)
+		return XTC_E_INVAL;
+	h = __reg_hash(name);
+	(void)__xtc_mtx_lock(&r->lock);
+	if (__reg_pick_live_locked(r, name, h, not_pid, out_pid)) {
+		(void)__xtc_mtx_unlock(&r->lock);
+		return XTC_OK;
+	}
+	(void)__xtc_mtx_unlock(&r->lock);
+	if (timeout_ns == 0)
+		return XTC_E_AGAIN;
+
+	/* Waiter state on the heap, linked under the lock it is checked
+	 * under, so an insert between the miss above and the park below
+	 * still signals it (the notify stores one signal). */
+	if ((rc = __os_calloc(1, sizeof *w, (void **)&w)) != XTC_OK)
+		return rc;
+	if ((rc = xtc_notify_create(&w->wake)) != XTC_OK) {
+		__os_free(w);
+		return rc;
+	}
+	w->hash = h;
+	w->reg = r;
+	(void)__xtc_mtx_lock(&r->lock);
+	w->next = r->waiters;
+	r->waiters = w;
+	(void)__xtc_mtx_unlock(&r->lock);
+	if (!xtc_pid_is_none(xtc_self())) {
+		if ((sc = xtc_scope_open()) == NULL) {
+			__reg_waiter_drop(w);
+			return XTC_E_RESOURCE;
+		}
+		if (xtc_scope_defer(sc, __reg_waiter_drop, w) != XTC_OK) {
+			xtc_scope_close(sc);
+			__reg_waiter_drop(w);
+			return XTC_E_RESOURCE;
+		}
+	}
+
+	if (timeout_ns > 0) {
+		(void)__os_clock_mono(&deadline);
+		deadline = timeout_ns > INT64_MAX - deadline ?
+		    INT64_MAX :
+		    deadline + timeout_ns;
+	}
+	for (;;) {
+		int64_t wait_ns = -1;
+		(void)__xtc_mtx_lock(&r->lock);
+		rc = __reg_pick_live_locked(r, name, h, not_pid, out_pid) ?
+		    XTC_OK :
+		    XTC_E_AGAIN;
+		(void)__xtc_mtx_unlock(&r->lock);
+		if (rc == XTC_OK)
+			break;
+		if (timeout_ns > 0) {
+			(void)__os_clock_mono(&now);
+			if (now >= deadline)
+				break;
+			wait_ns = deadline - now;
+		}
+		(void)xtc_notify_wait(w->wake, wait_ns);
+	}
+	if (sc != NULL)
+		xtc_scope_close(sc); /* runs __reg_waiter_drop */
+	else
+		__reg_waiter_drop(w);
+	return rc;
 }
 
 int

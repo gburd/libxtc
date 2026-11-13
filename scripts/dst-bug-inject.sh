@@ -106,6 +106,8 @@ write_cases() {
 		"35;test_sim_sup_strategy;0;1;on_child_down missed deaths" \
 		"44;test_sim_app;0;1;a monitored name outlived its proc" \
 		"45;test_sim_demonitor;0;1;a DOWN arrived after xtc_demonitor returned XTC_OK" \
+		"46;test_sim_sup_name;0;1;a name wait was not woken by the registration" \
+		"47;test_sim_sup_name;0;1;the registry named a dead incarnation" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -159,6 +161,10 @@ write_cases() {
 #               runs is still dropped when its proc dies
 # 45 DEMON_INFLIGHT proc.c queues a DOWN that was in flight at xtc_demonitor
 #               -> a monitor turned off while on delivers no DOWN, ever
+# 46 REG_WAIT_NOWAKE reg.c does not wake xtc_reg_whereis_wait on a registration
+#               -> a client waiting for a restarted child's name wakes with it
+# 47 SUP_NAME_STALE sup.c does not drop a dead child's reg_name
+#               -> the registry never names a dead incarnation
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

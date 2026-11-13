@@ -49,6 +49,8 @@ typedef enum xtc_restart_policy {
  * one so it places children across loops and owns the executor's stop on
  * its own exit. */
 struct xtc_exec;
+/* The process registry (xtc_reg.h), for child names. */
+struct xtc_reg;
 
 typedef struct xtc_child_spec {
 	size_t                size;       /* sizeof(xtc_child_spec_t): XTC_CHILD_SPEC_INIT */
@@ -72,6 +74,16 @@ typedef struct xtc_child_spec {
 	    void *user);
 	void *mailbox_watermark_user;
 	xtc_exec_class_t sched_class; /* NULL = the plain FIFO class */
+	/*
+	 * 2.2: a name the supervisor registers for every incarnation of the
+	 * child in its registry (xtc_sup_opts_t.registry; an xtc_app's own),
+	 * replacing the previous incarnation's entry, and removes when the
+	 * child dies.  Clients find the current incarnation with
+	 * xtc_reg_whereis, or wait for the next one with
+	 * xtc_reg_whereis_wait.  NULL = none.  Must stay valid for the
+	 * supervisor's life; at most one child per name.
+	 */
+	const char *reg_name;
 	int mailbox_watermark_pct;    /* 0 = off, 1..100 */
 	int migratable;               /* 1 = work-stealable */
 } xtc_child_spec_t;
@@ -126,6 +138,9 @@ typedef struct xtc_sup_opts {
 	                                          * bound */
 	xtc_sup_down_fn        on_child_down;    /* NULL = none (2.2) */
 	void                  *on_child_down_user;
+	/* 2.2: the registry for child specs' reg_name.  xtc_app sets its
+	 * own; NULL = no names.  Must outlive the supervisor. */
+	struct xtc_reg *registry;
 } xtc_sup_opts_t;
 
 #define XTC_SUP_OPTS_DEFAULT { \

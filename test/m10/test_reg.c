@@ -12,6 +12,7 @@
 #include "xtc_reg.h"
 #include "xtc_int.h"
 #include "os_thread.h"   /* the visit-lifetime test's second thread */
+#include <pthread.h>
 
 #include <string.h>
 
@@ -657,6 +658,132 @@ test_reg_visit_lifetime(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * xtc_reg_whereis_wait (2.2): parks until the name names a live pid
+ * other than not_pid, woken by the registration.  A fiber waiter and a
+ * plain-thread waiter both wake within a few ms of the register (the
+ * timeout is 5 s); not_pid and a dead holder are skipped; timeout 0 and
+ * a bounded timeout return XTC_E_AGAIN; a killed waiter is unlinked.
+ */
+#define WW_MS (1000LL * 1000)
+static xtc_loop_t *g_ww_loop;
+struct ww {
+	xtc_reg_t *r;
+	xtc_pid_t holder, got_fiber, got_thread, dead;
+	int rc_fiber, rc_thread, rc_none, rc_bounded, rc_dead;
+	int64_t fiber_ns, thread_ns;
+	int thread_started;
+};
+
+static void
+ww_holder(void *arg)
+{
+	void *m;
+	size_t sz;
+	(void)arg;
+	(void)xtc_recv(&m, &sz, 2000 * WW_MS);
+	xtc_free(m);
+}
+
+static void
+ww_dead(void *arg)
+{
+	(void)arg;
+}
+
+static void
+ww_waiter(void *arg)
+{
+	struct ww *w = arg;
+	int64_t t0 = xtc_clock_mono();
+	w->rc_fiber = xtc_reg_whereis_wait(w->r, "svc", XTC_PID_NONE,
+	    5000 * WW_MS, &w->got_fiber);
+	w->fiber_ns = xtc_clock_mono() - t0;
+}
+
+/* Parks in the wait until it is killed. */
+static void
+ww_victim(void *arg)
+{
+	struct ww *w = arg;
+	xtc_pid_t p;
+	(void)xtc_reg_whereis_wait(w->r, "never", XTC_PID_NONE, -1, &p);
+}
+
+static void *
+ww_thread(void *arg)
+{
+	struct ww *w = arg;
+	int64_t t0 = xtc_clock_mono();
+	xtc_atomic_store_i32(&w->thread_started, 1, xtc_mo_seq_cst);
+	w->rc_thread = xtc_reg_whereis_wait(w->r, "svc", XTC_PID_NONE,
+	    5000 * WW_MS, &w->got_thread);
+	w->thread_ns = xtc_clock_mono() - t0;
+	return NULL;
+}
+
+static void
+ww_driver(void *arg)
+{
+	struct ww *w = arg;
+	xtc_pid_t p, victim;
+	/* A name that names a dead pid is not a hit. */
+	(void)xtc_proc_spawn(g_ww_loop, ww_dead, NULL, NULL, &w->dead);
+	(void)xtc_proc_sleep(2 * WW_MS);
+	(void)xtc_reg_register(w->r, "gone", w->dead);
+	w->rc_dead = xtc_reg_whereis_wait(w->r, "gone", XTC_PID_NONE, 0, &p);
+	w->rc_none = xtc_reg_whereis_wait(w->r, "svc", XTC_PID_NONE, 0, &p);
+	w->rc_bounded =
+	    xtc_reg_whereis_wait(w->r, "svc", XTC_PID_NONE, 5 * WW_MS, &p);
+	(void)xtc_proc_spawn(g_ww_loop, ww_waiter, w, NULL, NULL);
+	(void)xtc_proc_spawn(g_ww_loop, ww_victim, w, NULL, &victim);
+	while (!xtc_atomic_load_i32(&w->thread_started, xtc_mo_seq_cst))
+		(void)xtc_proc_sleep(1 * WW_MS);
+	(void)xtc_proc_sleep(20 * WW_MS); /* all three parked */
+	(void)xtc_exit_pid(victim, 1);
+	(void)xtc_proc_spawn(g_ww_loop, ww_holder, NULL, NULL, &w->holder);
+	(void)xtc_reg_register(w->r, "svc", w->holder);
+	(void)xtc_proc_sleep(20 * WW_MS);
+	/* not_pid: the only holder is excluded, so no hit. */
+	if (xtc_reg_whereis_wait(w->r, "svc", w->holder, 0, &p) != XTC_E_AGAIN)
+		w->rc_none = 99;
+	(void)xtc_send(w->holder, "q", 1);
+}
+
+static MunitResult
+test_reg_whereis_wait(const MunitParameter p[], void *d)
+{
+	struct ww w;
+	pthread_t th;
+	(void)p;
+	(void)d;
+	memset(&w, 0, sizeof w);
+	munit_assert_int(xtc_loop_init(&g_ww_loop), ==, XTC_OK);
+	munit_assert_int(xtc_reg_create(&w.r), ==, XTC_OK);
+	munit_assert_int(xtc_reg_whereis_wait(NULL, "x", XTC_PID_NONE, 0,
+	                     &w.got_fiber),
+	    ==, XTC_E_INVAL);
+	munit_assert_int(pthread_create(&th, NULL, ww_thread, &w), ==, 0);
+	munit_assert_int(xtc_proc_spawn(g_ww_loop, ww_driver, &w, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(g_ww_loop), ==, XTC_OK);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+	munit_assert_int(w.rc_dead, ==, XTC_E_AGAIN);
+	munit_assert_int(w.rc_none, ==, XTC_E_AGAIN);
+	munit_assert_int(w.rc_bounded, ==, XTC_E_AGAIN);
+	munit_assert_int(w.rc_fiber, ==, XTC_OK);
+	munit_assert_true(xtc_pid_eq(w.got_fiber, w.holder));
+	munit_assert_int(w.rc_thread, ==, XTC_OK);
+	munit_assert_true(xtc_pid_eq(w.got_thread, w.holder));
+	/* Woken by the registration (~20 ms after parking), not the 5 s
+	 * timeout. */
+	munit_assert_int64(w.fiber_ns, <, 1000 * WW_MS);
+	munit_assert_int64(w.thread_ns, <, 1000 * WW_MS);
+	xtc_reg_destroy(w.r);
+	munit_assert_int(xtc_loop_fini(g_ww_loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/reg_basic", test_reg_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reg_collisions", test_reg_collisions, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -667,6 +794,8 @@ static MunitTest tests[] = {
 	{ "/reg_mon_no_silent_loss", test_reg_mon_no_silent_loss, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reg_put_visit", test_reg_put_visit, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reg_visit_lifetime", test_reg_visit_lifetime, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/reg_whereis_wait", test_reg_whereis_wait, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10.5/reg", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

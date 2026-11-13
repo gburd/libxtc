@@ -19,6 +19,7 @@
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "xtc_orc.h"
+#include "xtc_reg.h"
 #include "xtc_inspect.h"
 #include "xtc_int.h"
 #include "loop_int.h" /* task->pinned: a spec's migratable */
@@ -1704,6 +1705,99 @@ test_spec_proc_opts(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * 2.2: a child spec's reg_name.  The supervisor registers each
+ * incarnation in opts.registry, replacing the last one's entry, and
+ * drops the name when the child dies.  A client blocked in
+ * xtc_reg_whereis_wait (not_pid = the dead incarnation) gets the next one
+ * as soon as it is registered.  Reports 08 item 1 and 12 item 2: through
+ * 2.2 the embedder registered the name itself and could find the
+ * predecessor's entry still there.
+ */
+#define NM_MS (1000LL * 1000)
+static xtc_reg_t *g_nm_reg;
+static int g_nm_runs;
+static xtc_pid_t g_nm_first, g_nm_second, g_nm_seen;
+static int g_nm_wait_rc, g_nm_stale, g_nm_gone_rc;
+static int64_t g_nm_wait_ns;
+
+static void
+nm_engine(void *arg)
+{
+	void *m;
+	size_t sz;
+	int n = xtc_atomic_fetch_add_i32(&g_nm_runs, 1, xtc_mo_seq_cst);
+	(void)arg;
+	if (n == 0) {
+		g_nm_first = xtc_self();
+		(void)xtc_proc_sleep(10 * NM_MS);
+		(void)xtc_exit_self(1); /* crash: TRANSIENT restart */
+	}
+	g_nm_second = xtc_self();
+	for (;;)
+		if (xtc_recv(&m, &sz, -1) == XTC_OK)
+			xtc_free(m);
+}
+
+static void
+nm_client(void *arg)
+{
+	xtc_supervisor_t *sup = arg;
+	xtc_pid_t p = XTC_PID_NONE;
+	int64_t t0;
+	/* The first incarnation, by name. */
+	(void)xtc_reg_whereis_wait(g_nm_reg, "engine", XTC_PID_NONE,
+	    1000 * NM_MS, &p);
+	/* Its death is followed by the next incarnation's registration. */
+	t0 = xtc_clock_mono();
+	g_nm_wait_rc = xtc_reg_whereis_wait(g_nm_reg, "engine", p, 5000 * NM_MS,
+	    &g_nm_seen);
+	g_nm_wait_ns = xtc_clock_mono() - t0;
+	if (xtc_pid_eq(g_nm_seen, p))
+		g_nm_stale = 1;
+	(void)xtc_sup_stop(sup);
+	(void)xtc_proc_sleep(20 * NM_MS);
+	/* The stop unnamed the last incarnation. */
+	g_nm_gone_rc = xtc_reg_whereis(g_nm_reg, "engine", &p);
+}
+
+static MunitResult
+test_spec_reg_name(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	xtc_supervisor_t *sup;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_child_spec_t k = XTC_CHILD_SPEC_INIT;
+	(void)p;
+	(void)d;
+	g_nm_runs = 0;
+	g_nm_wait_rc = g_nm_stale = g_nm_gone_rc = -99;
+	g_nm_stale = 0;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_reg_create(&g_nm_reg), ==, XTC_OK);
+	so.registry = g_nm_reg;
+	k.name = "engine";
+	k.reg_name = "engine";
+	k.fn = nm_engine;
+	k.policy = XTC_RESTART_TRANSIENT;
+	munit_assert_int(xtc_sup_start(loop, &so, &k, 1, &sup), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, nm_client, sup, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_sup_join(sup, 1000 * NM_MS), ==, XTC_OK);
+	munit_assert_int(g_nm_runs, ==, 2);
+	munit_assert_int(g_nm_wait_rc, ==, XTC_OK);
+	munit_assert_int(g_nm_stale, ==, 0);
+	munit_assert_true(xtc_pid_eq(g_nm_seen, g_nm_second));
+	munit_assert_false(xtc_pid_eq(g_nm_seen, g_nm_first));
+	munit_assert_int64(g_nm_wait_ns, <, 1000 * NM_MS);
+	munit_assert_int(g_nm_gone_rc, !=, XTC_OK);
+	munit_assert_int(xtc_reg_count(g_nm_reg), ==, 0);
+	xtc_reg_destroy(g_nm_reg);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/add_child_other_loop", test_add_child_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/supervisor_restarts",   test_supervisor_restarts, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1733,6 +1827,8 @@ static MunitTest tests[] = {
 	{ "/down_hook_group_nofault", test_down_hook_group_nofault, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/spec_proc_opts", test_spec_proc_opts, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/spec_reg_name", test_spec_reg_name, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

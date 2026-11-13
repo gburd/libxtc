@@ -126,6 +126,7 @@ typedef struct xtc_child_spec {
 	void  (*mailbox_watermark_fn)(xtc_pid_t, size_t, size_t, void *);
 	void                *mailbox_watermark_user;
 	xtc_exec_class_t     sched_class;
+	const char          *reg_name;
 	int                  mailbox_watermark_pct;
 	int                  migratable;
 } xtc_child_spec_t;
@@ -143,6 +144,25 @@ must have been created
 on the loop the child is placed on; one from another loop is ignored,
 as for
 .Fn xtc_proc_spawn .
+.Pp
+.Va reg_name ,
+when set together with
+.Va opts.registry
+.Pq an Xr xtc_app 3 No sets its own registry ,
+is a name the supervisor registers for each incarnation of the child
+as soon as it is spawned, replacing the previous incarnation's entry,
+and removes when the child dies (its own exit, a sibling restart, a
+stop), before it restarts it.  So the name never names a dead
+incarnation once the supervisor has seen its death, and a client finds
+the current incarnation with
+.Fn xtc_reg_whereis
+or waits for the next with
+.Fn xtc_reg_whereis_wait
+.Pq Xr xtc_reg 3 .
+If the registration fails (out of memory), the child is killed with
+.Er XTC_E_NOMEM
+rather than left running unnamed.  The string must stay valid for the
+supervisor's life, and at most one child may use a name.
 .Pp
 .Sy Restart intensity:
 .Va opts.max_restarts

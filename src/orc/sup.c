@@ -15,6 +15,7 @@
 #include "xtc_exec.h"
 #include "xtc_proc.h"
 #include "xtc_sync.h"
+#include "xtc_reg.h"       /* child names (spec.reg_name) */
 #include "proc_int.h"      /* __xtc_proc_loop_contains: owner-qualified presence */
 #include "xtc_probes.h"
 #include "xtc_dst_inject.h"
@@ -223,6 +224,30 @@ __child_alive(struct xtc_supervisor *sup, struct child *c, int v)
 	    xtc_mo_relaxed);
 }
 
+/* reg.c, internal: replace-or-insert a unique name. */
+int __xtc_reg_set(xtc_reg_t *r, const char *name, xtc_pid_t pid);
+
+/*
+ * The child's name (spec.reg_name) is dropped from the registry, if it
+ * still names this incarnation (unregister_pid matches the pid, so a name
+ * already given to the next incarnation stays).  Supervisor fiber, on
+ * every death of the child: its own DOWN, a group restart's kill, a stop.
+ * Planted bug 47 (SUP_NAME_STALE) skips it.
+ */
+static void
+__child_unname(struct xtc_supervisor *sup, const struct child *c, xtc_pid_t pid)
+{
+#if !XTC_DST_BUG(XTC_DST_BUG_SUP_NAME_STALE)
+	if (sup->opts.registry != NULL && c->spec.reg_name != NULL)
+		(void)xtc_reg_unregister_pid(sup->opts.registry,
+		    c->spec.reg_name, pid);
+#else
+	(void)sup;
+	(void)c;
+	(void)pid;
+#endif
+}
+
 static int
 __spawn_child(struct xtc_supervisor *sup, struct child *c)
 {
@@ -274,6 +299,17 @@ __spawn_child(struct xtc_supervisor *sup, struct child *c)
 	    &c->pid, &c->monitor_ref);
 	if (rc != XTC_OK) return rc;
 	__child_alive(sup, c, 1);
+	/* Name the new incarnation (replacing any earlier one's entry, so
+	 * the name never names two).  The child may already be running on
+	 * another loop; until this returns, a client's xtc_reg_whereis
+	 * misses it and xtc_reg_whereis_wait waits for it.  A failed
+	 * registration (out of memory) is not left as a silently unnamed
+	 * child: it is killed with XTC_E_NOMEM, a death the supervisor's
+	 * policy and hook see. */
+	if (sup->opts.registry != NULL && c->spec.reg_name != NULL &&
+	    __xtc_reg_set(sup->opts.registry, c->spec.reg_name, c->pid) !=
+	        XTC_OK)
+		(void)__xtc_exit_pid_on(target, c->pid, XTC_E_NOMEM);
 	return XTC_OK;
 }
 
@@ -577,6 +613,10 @@ __mark_killed(struct xtc_supervisor *sup, int lo, int hi)
 		if (sup->children[i].alive) {
 			sup->children[i].killed_pid = sup->children[i].pid;
 			sup->children[i].killed_pending = 1;
+			/* Unnamed before the kill: no client is sent to a child
+			 * the supervisor is taking down. */
+			__child_unname(sup, &sup->children[i],
+			    sup->children[i].pid);
 		}
 }
 
@@ -796,6 +836,7 @@ __sup_entry(void *arg)
 			continue;
 		}
 		__child_alive(sup, &sup->children[idx], 0);
+		__child_unname(sup, &sup->children[idx], d.pid);
 		/* Before the stop check and the restart decision, so a crash
 		 * during a stop is reported too. */
 		__report_down(sup, idx, &d);

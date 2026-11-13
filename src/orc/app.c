@@ -149,6 +149,7 @@ xtc_app_create(const xtc_app_opts_t *opts, xtc_app_t **out)
 
 	a->sup_opts = so;
 	a->sup_opts.exec = a->exec;   /* NULL for single-loop; drives stop */
+	a->sup_opts.registry = a->reg; /* child specs' reg_name */
 	if (so.on_child_down != NULL) {
 		a->user_down = so.on_child_down;
 		a->user_down_arg = so.on_child_down_user;

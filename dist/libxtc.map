@@ -87,6 +87,7 @@ XTC_2.2 {
 		xtc_proc_set_label;
 		xtc_reg_put;
 		xtc_reg_visit;
+		xtc_reg_whereis_wait;
 		xtc_sup_child_restarts;
 		xtc_tail_app;
 		xtc_tail_app_name;

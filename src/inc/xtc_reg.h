@@ -19,6 +19,7 @@
 #include "xtc_export.h"
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "xtc.h"
 #include "xtc_proc.h"
@@ -45,6 +46,7 @@ typedef int (*xtc_reg_visit_fn)(xtc_pid_t pid, void *value, void *user);
  * PUBLIC: int       xtc_reg_members __P((xtc_reg_t *, const char *, int (*)(xtc_pid_t, void *), void *));
  * PUBLIC: int       xtc_reg_put __P((xtc_reg_t *, const char *, xtc_pid_t, void *, unsigned));
  * PUBLIC: int       xtc_reg_visit __P((xtc_reg_t *, const char *, xtc_reg_visit_fn, void *, int *));
+ * PUBLIC: int       xtc_reg_whereis_wait __P((xtc_reg_t *, const char *, xtc_pid_t, int64_t, xtc_pid_t *));
  */
 XTC_API int  xtc_reg_create(xtc_reg_t **out);
 XTC_API void xtc_reg_destroy(xtc_reg_t *r);
@@ -136,5 +138,21 @@ XTC_API int  xtc_reg_put(xtc_reg_t *r, const char *name, xtc_pid_t pid,
                          void *value, unsigned flags);
 XTC_API int  xtc_reg_visit(xtc_reg_t *r, const char *name,
                            xtc_reg_visit_fn fn, void *user, int *out_n);
+
+/*
+ * Wait for a name (2.2): park until `name` names a LIVE pid other than
+ * `not_pid`, then store it in *out_pid.  Woken by the registration (any
+ * insert under the name, and a supervisor's replacement of a child's
+ * name; see xtc_child_spec_t.reg_name), not by a timer.  The use: a
+ * client whose server died waits for the next incarnation, passing the
+ * dead pid as not_pid (XTC_PID_NONE: any live holder).  The lookup is
+ * exact; a miss is not retried by the caller.  From a proc it parks the
+ * fiber (kill-safe); from a plain thread it blocks the thread.
+ * timeout_ns: < 0 forever, 0 look once, > 0 bound.  Returns XTC_OK,
+ * XTC_E_AGAIN when the time ran out, XTC_E_INVAL for a NULL argument,
+ * XTC_E_NOMEM / XTC_E_RESOURCE if the wait could not be set up.
+ */
+XTC_API int xtc_reg_whereis_wait(xtc_reg_t *r, const char *name,
+    xtc_pid_t not_pid, int64_t timeout_ns, xtc_pid_t *out_pid);
 
 #endif /* XTC_REG_H */
