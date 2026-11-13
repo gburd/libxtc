@@ -234,12 +234,11 @@ static const xtc_tnt_type_t types[] = {
 int
 main(void)
 {
-	xtc_tnt_spec_t spec;
+	xtc_tnt_spec_t spec = XTC_TNT_SPEC_INIT;
 	pthread_t th[2], wd;
 	uint64_t d, x, o;
 	int rc, i;
 
-	memset(&spec, 0, sizeof spec);
 	spec.name = "xshard";
 	spec.types = types;
 	spec.n_types = 3;

@@ -468,7 +468,7 @@ static const xtc_tnt_type_t test_types[] = {
 int
 main(void)
 {
-	xtc_tnt_spec_t spec;
+	xtc_tnt_spec_t spec = XTC_TNT_SPEC_INIT;
 	int rc;
 	int sv[2] = { -1, -1 };
 	int echo_fd = -1;
@@ -478,7 +478,6 @@ main(void)
 
 	memset(&g_res, 0, sizeof(g_res));
 
-	memset(&spec, 0, sizeof(spec));
 	spec.name = "tnt-test";
 	spec.types = test_types;
 	spec.n_types = 5;

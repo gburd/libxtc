@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <pthread.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
@@ -41,6 +42,7 @@
 #include "xtc_res.h"
 #include "xtc_log.h"
 #include "xtc_cfg.h"
+#include "xtc_tnt.h"
 
 static int fails;
 
@@ -109,6 +111,16 @@ struct old_tls_opts {             /* ends at ca_file */
 	const char *cert_file;
 	const char *key_file;
 	const char *ca_file;
+};
+struct old_tnt_spec { /* ends at boot_type: spin_ns defaults */
+	size_t size;
+	const char *name;
+	const xtc_tnt_type_t *types;
+	int n_types;
+	int shard_count;
+	uint32_t scratch_size;
+	uint32_t recv_buf_size;
+	int boot_type;
 };
 
 static void *
@@ -468,6 +480,138 @@ g4_ptc(void)
 	(void)xtc_cfg_unregister("abi.n1");
 }
 
+/* ---- G5: tnt spec (size-first since 2.2) ---------------------------- */
+
+static int g_tnt_booted;
+static int g_tnt_returned;
+static uint64_t g_tnt_steps;
+
+static xtc_tnt_transition_t
+t_boot(void *self, const void *args, size_t n)
+{
+	(void)self;
+	(void)args;
+	(void)n;
+	xtc_atomic_store_i32(&g_tnt_booted, 1, xtc_mo_seq_cst);
+	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
+}
+
+static xtc_tnt_transition_t
+t_idle(void *self, xtc_tnt_message_t *msg)
+{
+	(void)self;
+	(void)msg;
+	return XTC_TNT_TRANSITION_WAIT_MESSAGE;
+}
+
+static const xtc_tnt_type_t t_types[] = {
+	{ .id = 0,
+	    .name = "boot",
+	    .slot_count = 1,
+	    .stride = 8,
+	    .mailbox_capacity = 1,
+	    .budget_weight = 1,
+	    .init_fn = t_boot,
+	    .handler_fn = t_idle },
+};
+
+static int
+t_sum_steps(const xtc_loop_info_t *li, void *user)
+{
+	*(uint64_t *)user += li->tasks_run;
+	return 0;
+}
+
+/*
+ * Once the boot isolate is up, leave the system idle for 100 ms, count the
+ * task steps every loop ran, and stop it.  An idle shard that parks runs a
+ * handful of steps; one that busy-polls (spin_ns > 0) runs one per yield,
+ * hundreds of thousands.  A start that returned (refused) needs no stop.
+ */
+static void *
+t_stopper(void *arg)
+{
+	uint64_t n = 0;
+	int i;
+
+	(void)arg;
+	for (i = 0;
+	     i < 5000 && !xtc_atomic_load_i32(&g_tnt_booted, xtc_mo_seq_cst);
+	     i++) {
+		if (xtc_atomic_load_i32(&g_tnt_returned, xtc_mo_seq_cst))
+			return NULL;
+		(void)xtc_sleep_ns(1000000);
+	}
+	(void)xtc_sleep_ns(100LL * 1000 * 1000);
+	(void)xtc_inspect_loops(t_sum_steps, &n);
+	g_tnt_steps = n;
+	xtc_tnt_stop();
+	return NULL;
+}
+
+static int
+t_run(const void *spec)
+{
+	pthread_t th;
+	int rc;
+
+	xtc_atomic_store_i32(&g_tnt_booted, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_tnt_returned, 0, xtc_mo_seq_cst);
+	g_tnt_steps = 0;
+	if (pthread_create(&th, NULL, t_stopper, NULL) != 0) {
+		perror("pthread_create");
+		exit(2);
+	}
+	rc = xtc_tnt_start((const xtc_tnt_spec_t *)spec);
+	xtc_atomic_store_i32(&g_tnt_returned, 1, xtc_mo_seq_cst);
+	(void)pthread_join(th, NULL);
+	return rc;
+}
+
+static void
+g5_tnt(void)
+{
+	struct old_tnt_spec *os;
+	xtc_tnt_spec_t full = XTC_TNT_SPEC_INIT;
+
+	full.types = t_types;
+	full.n_types = 1;
+	full.shard_count = 1;
+	full.boot_type = 0;
+
+	/* size 0, or short of the size field: refused before anything runs
+	 * (t_run, so a library that ran it anyway stops and fails here). */
+	full.size = 0;
+	CHECK(t_run(&full) == XTC_E_INVAL);
+	full.size = sizeof(size_t) - 1;
+	CHECK(t_run(&full) == XTC_E_INVAL);
+
+	/* A spec that ends at boot_type, allocated at exactly that size:
+	 * boot_type is read (the boot isolate runs), spin_ns is 0. */
+	os = xalloc(sizeof *os);
+	memset(os, 0, sizeof *os);
+	os->size = sizeof *os;
+	os->name = "abi-tnt";
+	os->types = t_types;
+	os->n_types = 1;
+	os->shard_count = 1;
+	os->boot_type = 0;
+	CHECK(t_run(os) == XTC_OK);
+	free(os);
+	CHECK(xtc_atomic_load_i32(&g_tnt_booted, xtc_mo_seq_cst));
+	CHECK(g_tnt_steps < 1000);
+
+	/* The same cut in a full struct with a 60 s spin_ns past .size: the
+	 * library must not read it, so the idle shard parks. */
+	full.size = offsetof(xtc_tnt_spec_t, spin_ns);
+	full.spin_ns = 60LL * 1000 * 1000 * 1000;
+	CHECK(t_run(&full) == XTC_OK);
+	CHECK(xtc_atomic_load_i32(&g_tnt_booted, xtc_mo_seq_cst));
+	CHECK(g_tnt_steps < 1000);
+	printf("  [abi] tnt: idle shard ran %llu steps in 100 ms\n",
+	    (unsigned long long)g_tnt_steps);
+}
+
 int
 main(void)
 {
@@ -522,6 +666,7 @@ main(void)
 	g2_inputs();
 	g3_io();
 	g4_ptc();
+	g5_tnt();
 	if (fails != 0) {
 		fprintf(stderr, "  [abi] FAIL: %d size-contract check(s)\n",
 		    fails);

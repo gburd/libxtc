@@ -51,6 +51,27 @@ entry's value to a callback under the registry lock, so a value removed
 before it is freed cannot be freed mid-call.  New error codes
 `XTC_E_EXIST` (-13) and `XTC_E_STATE` (-14).
 
+## CHANGED (2.2): `xtc_tnt_spec_t` is size-first
+
+`xtc_tnt_spec_t` now starts with `size_t size`, like every other
+caller-allocated struct (2.0 entry below).  Initialize it with
+`XTC_TNT_SPEC_INIT` or a designated initializer that sets `.size =
+sizeof(xtc_tnt_spec_t)`; a zeroed spec (`memset`, `= { 0 }`) is refused
+with `XTC_E_INVAL`.  `xtc_tnt_start` reads no further than `.size` (a
+field past it is 0) and keeps its own copy of the spec, so the caller's
+struct need not outlive the call; the `types` table is still borrowed for
+the whole run.  On x86-64 the struct is 56 bytes (40 in 2.1, which had no
+`spin_ns`), and every 2.1 field moved by 8.
+
+Why: 2.2 also appended `spin_ns`, and the spec had no size field, so a 2.2
+library would have read `spin_ns` past the end of a spec compiled against
+2.1's header.  This is a layout change in a minor release, allowed only
+because `xtc_tnt.h` is in the experimental tier (`docs/abi-stability.md`):
+a caller rebuilt against 2.2 is fine, a 2.1 binary that uses `xtc_tnt` is
+not and must be rebuilt.  `test/abi/test_abi_sized` checks size 0, a spec
+that ends at `boot_type` (`spin_ns` reads as 0), and a nonzero `spin_ns`
+past `.size` (ignored).
+
 ## FIXED (2.2): xtc_exec_run could fail to return after the last task finished
 
 The executor's supervisor stops the run when every loop is idle, and

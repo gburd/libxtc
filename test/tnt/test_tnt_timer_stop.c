@@ -73,10 +73,9 @@ static const xtc_tnt_type_t types[] = {
 int
 main(void)
 {
-	xtc_tnt_spec_t spec;
+	xtc_tnt_spec_t spec = XTC_TNT_SPEC_INIT;
 	int rc;
 
-	memset(&spec, 0, sizeof spec);
 	spec.name = "timerstop";
 	spec.types = types;
 	spec.n_types = 1;

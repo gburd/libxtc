@@ -847,11 +847,10 @@ test_tnt_shard_id(const MunitParameter p[], void *d)
 		  .mailbox_capacity = 1, .budget_weight = 1,
 		  .init_fn = tnt_probe_init, .handler_fn = tnt_done },
 	};
-	xtc_tnt_spec_t spec;
+	xtc_tnt_spec_t spec = XTC_TNT_SPEC_INIT;
 	int rc;
 	(void)p; (void)d;
-	munit_assert_uint8(xtc_tnt_shard_id(), ==, 0);   /* outside a shard */
-	memset(&spec, 0, sizeof spec);
+	munit_assert_uint8(xtc_tnt_shard_id(), ==, 0); /* outside a shard */
 	spec.name = "ar-tnt"; spec.types = types; spec.n_types = 2;
 	spec.shard_count = 2; spec.boot_type = 0;
 	alarm(20);   /* a missed stop would block xtc_tnt_start forever */

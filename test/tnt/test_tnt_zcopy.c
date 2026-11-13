@@ -205,7 +205,7 @@ int
 main(void)
 {
 	struct __os_alloc_hook h;
-	xtc_tnt_spec_t spec;
+	xtc_tnt_spec_t spec = XTC_TNT_SPEC_INIT;
 	char back[16];
 	int sv[2], rc, fail = 0;
 	ssize_t n;
@@ -226,7 +226,6 @@ main(void)
 	h.aligned_free = c_aligned_free;
 	(void)__os_alloc_set_hook(&h);
 
-	memset(&spec, 0, sizeof spec);
 	spec.name = "tnt-zcopy";
 	spec.types = types;
 	spec.n_types = 2;

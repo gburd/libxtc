@@ -253,7 +253,7 @@ typedef struct xtc_tnt_spawn_req {
 
 /* Runtime: the whole system. */
 typedef struct xtc_tnt_runtime {
-	const xtc_tnt_spec_t *spec;
+	xtc_tnt_spec_t spec; /* the caller's, copied up to its .size */
 	xtc_exec_t       *exec;
 	xtc_tnt_shard_t      *shards[XTC_TNT_MAX_SHARDS];
 	int               shard_count;
@@ -1576,7 +1576,7 @@ static int
 shard_init(xtc_tnt_runtime_t *rt, uint8_t id, xtc_tnt_shard_t **out)
 {
 	xtc_tnt_shard_t *sh = NULL;
-	const xtc_tnt_spec_t *spec = rt->spec;
+	const xtc_tnt_spec_t *spec = &rt->spec;
 	int i;
 	int pfd[2];
 	uint32_t scratch_cap;
@@ -1745,32 +1745,52 @@ shard_destroy(xtc_tnt_shard_t *sh)
 	__os_free(sh);
 }
 
+/*
+ * Copy the caller's spec into *dst, reading no further than its .size (a
+ * field past it is 0), and validate the copy.  The runtime keeps the copy,
+ * so the caller's struct need not outlive the call; its types table is
+ * still borrowed for the run.
+ */
+static int
+spec_in(xtc_tnt_spec_t *dst, const xtc_tnt_spec_t *spec)
+{
+	int rc;
+
+	if (spec == NULL)
+		return XTC_E_INVAL;
+	if ((rc = __xtc_sized_in(dst, NULL, sizeof *dst, spec, 0)) != XTC_OK)
+		return rc;
+	if (dst->n_types <= 0 || dst->n_types > XTC_TNT_MAX_TYPES)
+		return XTC_E_INVAL;
+	if (dst->shard_count <= 0 || dst->shard_count > XTC_TNT_MAX_SHARDS)
+		return XTC_E_INVAL;
+	return XTC_OK;
+}
+
 int
-xtc_tnt_start(const xtc_tnt_spec_t *spec)
+xtc_tnt_start(const xtc_tnt_spec_t *uspec)
 {
 	xtc_tnt_runtime_t *rt = NULL;
+	xtc_tnt_spec_t spec;
 	int i;
 	int rc;
 
-	if (spec == NULL || spec->n_types <= 0 ||
-	    spec->n_types > XTC_TNT_MAX_TYPES)
-		return XTC_E_INVAL;
-	if (spec->shard_count <= 0 || spec->shard_count > XTC_TNT_MAX_SHARDS)
-		return XTC_E_INVAL;
+	if ((rc = spec_in(&spec, uspec)) != XTC_OK)
+		return rc;
 
 	if (__os_calloc(1, sizeof(*rt), (void **)&rt) != XTC_OK)
 		return XTC_E_NOMEM;
 	rt->spec = spec;
-	rt->shard_count = spec->shard_count;
+	rt->shard_count = spec.shard_count;
 	xtc_atomic_store_i32(&rt->stop, 0, xtc_mo_relaxed);
 
-	if (xtc_exec_init(&rt->exec, spec->shard_count) != XTC_OK) {
+	if (xtc_exec_init(&rt->exec, spec.shard_count) != XTC_OK) {
 		__os_free(rt);
 		return XTC_E_INTERNAL;
 	}
 	xtc_exec_set_service_mode(rt->exec, 1);
 
-	for (i = 0; i < spec->shard_count; i++) {
+	for (i = 0; i < spec.shard_count; i++) {
 		if (shard_init(rt, (uint8_t)i, &rt->shards[i]) != 0) {
 			(void)xtc_exec_fini(rt->exec);
 			__os_free(rt);
@@ -1783,7 +1803,7 @@ xtc_tnt_start(const xtc_tnt_spec_t *spec)
 	/* Place one shard bootstrap task on each loop.  Each bootstrap
 	 * runs on its target loop and spawns that loop's long-lived shard
 	 * proc, then completes. */
-	for (i = 0; i < spec->shard_count; i++) {
+	for (i = 0; i < spec.shard_count; i++) {
 		xtc_task_t *t = NULL;
 		if (xtc_exec_spawn_on(rt->exec, i, shard_bootstrap,
 		    rt->shards[i], &t) != XTC_OK) {
@@ -1824,31 +1844,29 @@ xtc_tnt_start(const xtc_tnt_spec_t *spec)
  * PUBLIC-TEST: int __xtc_tnt_run_sim __P((const xtc_tnt_spec_t *, uint64_t, long));
  */
 int
-__xtc_tnt_run_sim(const xtc_tnt_spec_t *spec, uint64_t seed, long max_steps)
+__xtc_tnt_run_sim(const xtc_tnt_spec_t *uspec, uint64_t seed, long max_steps)
 {
 	xtc_tnt_runtime_t *rt = NULL;
+	xtc_tnt_spec_t spec;
 	int i;
 	int rc;
 
-	if (spec == NULL || spec->n_types <= 0 ||
-	    spec->n_types > XTC_TNT_MAX_TYPES)
-		return XTC_E_INVAL;
-	if (spec->shard_count <= 0 || spec->shard_count > XTC_TNT_MAX_SHARDS)
-		return XTC_E_INVAL;
+	if ((rc = spec_in(&spec, uspec)) != XTC_OK)
+		return rc;
 
 	if (__os_calloc(1, sizeof(*rt), (void **)&rt) != XTC_OK)
 		return XTC_E_NOMEM;
 	rt->spec = spec;
-	rt->shard_count = spec->shard_count;
+	rt->shard_count = spec.shard_count;
 	xtc_atomic_store_i32(&rt->stop, 0, xtc_mo_relaxed);
 
-	if (xtc_exec_init(&rt->exec, spec->shard_count) != XTC_OK) {
+	if (xtc_exec_init(&rt->exec, spec.shard_count) != XTC_OK) {
 		__os_free(rt);
 		return XTC_E_INTERNAL;
 	}
 	xtc_exec_set_service_mode(rt->exec, 1);
 
-	for (i = 0; i < spec->shard_count; i++) {
+	for (i = 0; i < spec.shard_count; i++) {
 		if (shard_init(rt, (uint8_t)i, &rt->shards[i]) != 0) {
 			(void)xtc_exec_fini(rt->exec);
 			__os_free(rt);
@@ -1858,7 +1876,7 @@ __xtc_tnt_run_sim(const xtc_tnt_spec_t *spec, uint64_t seed, long max_steps)
 
 	g_rt = rt;
 
-	for (i = 0; i < spec->shard_count; i++) {
+	for (i = 0; i < spec.shard_count; i++) {
 		xtc_task_t *t = NULL;
 		if (xtc_exec_spawn_on(rt->exec, i, shard_bootstrap,
 		    rt->shards[i], &t) != XTC_OK) {

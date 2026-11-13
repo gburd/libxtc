@@ -220,8 +220,14 @@ typedef struct xtc_tnt_type {
  * Tina's SystemSpec, trimmed to this slice.  At boot xtc_tnt_start carves
  * every arena from boot-time slab caches (one per type per shard) and
  * never mallocs on the hot path again (disciplinary, per the doc).
+ *
+ * Size-first (2.2), like every caller-allocated struct: set .size to
+ * sizeof(xtc_tnt_spec_t), or start from XTC_TNT_SPEC_INIT.  xtc_tnt_start
+ * reads no further than .size (a field past it is 0) and keeps its own
+ * copy; the types table is borrowed for the run.
  */
 typedef struct xtc_tnt_spec {
+	size_t size; /* XTC_TNT_SPEC_INIT */
 	const char       *name;
 	const xtc_tnt_type_t *types;        /* descriptor table */
 	int               n_types;
@@ -230,18 +236,19 @@ typedef struct xtc_tnt_spec {
 	uint32_t          recv_buf_size;/* per-recv reactor buffer bytes */
 	/* Optional: a type id to auto-spawn one instance of on shard 0
 	 * once the runtime is up (Tina's boot spec spawns a root).  Set to
-	 * a negative value (default after memset) to disable; the canonical
-	 * use is a "driver" or "root supervisor" isolate.  -1 = none. */
+	 * a negative value to disable (0 is a type id); the canonical use
+	 * is a "driver" or "root supervisor" isolate.  -1 = none. */
 	int               boot_type;
 	/* Busy-poll before parking: an idle shard keeps checking its rings
 	 * for up to spin_ns before it parks on its wake pipe.  It trades a
 	 * core for latency (no wake syscall, no context switch on the next
 	 * message) -- what a matching engine wants and a server sharing its
-	 * cores does not.  0 (the default after memset) parks at once, as
-	 * before.  Ignored under deterministic simulation.  Added in 2.2:
-	 * an older caller's spec, zero-initialised, gets 0. */
+	 * cores does not.  0 (the default) parks at once.  Ignored under
+	 * deterministic simulation.  Added in 2.2. */
 	int64_t           spin_ns;
 } xtc_tnt_spec_t;
+
+#define XTC_TNT_SPEC_INIT { .size = sizeof(xtc_tnt_spec_t) }
 
 /* ---- Send results -------------------------------------------------
  *
@@ -357,7 +364,8 @@ void *xtc_tnt_scratch_arena(size_t size);
  * Validate the spec, carve all arenas from boot-time slab caches, pin
  * one shard proc per loop, and enter the run loop.  Blocks until the
  * system stops (xtc_tnt_stop from any thread, or all shards idle).  Returns
- * XTC_OK-style 0 on clean shutdown, negative on a boot failure.
+ * XTC_OK-style 0 on clean shutdown, negative on a boot failure: XTC_E_INVAL
+ * for a spec whose .size is 0 or that names no types or shards.
  */
 int xtc_tnt_start(const xtc_tnt_spec_t *spec);
 

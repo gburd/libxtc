@@ -1,6 +1,6 @@
 .\" Copyright (c) 2026, The XTC Project
 .\" Use of this source code is governed by the ISC License.
-.Dd June 30, 2026
+.Dd November 13, 2026
 .Dt XTC_TNT 3
 .Os
 .Sh NAME
@@ -86,6 +86,30 @@ per-tick dispatch budget, and
 callbacks
 .Pc ,
 the shard count, and an optional boot Isolate auto-spawned on shard 0.
+.Pp
+.Vt xtc_tnt_spec_t
+is size-first, like every caller-allocated libxtc struct.
+Initialize it with
+.Dv XTC_TNT_SPEC_INIT ,
+or a designated initializer that sets
+.Va .size = sizeof(xtc_tnt_spec_t) :
+.Fn xtc_tnt_start
+reads only the first
+.Va size
+bytes, so a field the caller's header does not have is 0, and a
+.Va size
+of 0 is
+.Er XTC_E_INVAL .
+The runtime keeps a copy of the spec, so the caller's struct need not
+outlive the call; the
+.Va types
+table it points to is used for the whole run and must stay valid until
+.Fn xtc_tnt_start
+returns.
+.Va spin_ns ,
+when positive, makes an idle shard check its rings for up to that many
+nanoseconds before it parks
+.Pq it trades a core for latency; ignored under simulation .
 .Ss Lifecycle
 .Fn xtc_tnt_start
 validates the spec, carves every arena from boot-time
@@ -238,7 +262,10 @@ returns
 on clean shutdown, or a negative
 .Dv XTC_E_*
 .Po e.g.
-.Dv XTC_E_INVAL ,
+.Dv XTC_E_INVAL
+for a spec whose
+.Va size
+is 0 or that names no types or shards,
 .Dv XTC_E_NOMEM
 .Pc
 on a boot failure.
@@ -333,3 +360,11 @@ echo_handler(void *self_raw, xtc_tnt_message_t *msg)
 .Xr xtc 7
 .Sh HISTORY
 Appeared in xtc 0.1.
+In 2.2
+.Vt xtc_tnt_spec_t
+became size-first
+.Pq a Va size No first member and Dv XTC_TNT_SPEC_INIT
+and gained
+.Va spin_ns ;
+the header is in the experimental tier, so a minor release may change its
+layout.

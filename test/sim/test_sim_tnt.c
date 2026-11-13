@@ -339,12 +339,11 @@ static const xtc_tnt_type_t test_types[] = {
 static uint64_t
 run_one(uint64_t seed, int *pass_out, int *rc_out)
 {
-	xtc_tnt_spec_t spec;
+	xtc_tnt_spec_t spec = XTC_TNT_SPEC_INIT;
 	int rc;
 	uint64_t fp;
 
 	memset(&g_res, 0, sizeof(g_res));
-	memset(&spec, 0, sizeof(spec));
 	spec.name = "tnt-sim";
 	spec.types = test_types;
 	spec.n_types = 4;
