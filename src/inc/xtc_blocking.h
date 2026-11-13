@@ -37,6 +37,10 @@
  * (offload queue full, 65536 waiting calls) or XTC_E_RESOURCE (no pool
  * thread could start) are returned WITHOUT running fn.
  *
+ * Finalizing the loop (xtc_loop_fini, and so xtc_exec_fini and
+ * xtc_app_destroy) while a process of it is parked here waits for fn to
+ * return, since the pool writes the parked frame and wakes its task.
+ *
  * PUBLIC: int  xtc_blocking_run __P((int (*)(void *), void *, int *));
  */
 XTC_API int xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result);

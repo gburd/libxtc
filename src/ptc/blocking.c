@@ -27,6 +27,13 @@
  *	so the caller cannot see completion -- and return, freeing w --
  *	until the worker has released the lock and stopped touching w.
  *	An off-loop caller waits on g_done_cv under the same lock.
+ *
+ *	Loop teardown.  A fiber caller's work item is on g_fly from enqueue
+ *	until the worker publishes completion.  xtc_loop_fini frees the
+ *	tasks and stacks of fibers still parked here, so it first waits
+ *	(__xtc_blocking_loop_fini) until no item on g_fly belongs to the
+ *	loop: the worker would otherwise write w and wake a freed task, and
+ *	fn's argument usually lives in the same freed frame.
  */
 
 #include "xtc_int.h"
@@ -57,6 +64,8 @@ struct blk_work {
 	int              fiber;        /* 1: fiber caller (wake waker), 0: thread */
 	int              detached;     /* 1: fire-and-forget; worker frees it */
 	struct blk_work *next;
+	struct blk_work *fly_prev; /* g_fly links; g_done_lock */
+	struct blk_work *fly_next;
 };
 
 #define BLK_MAX_THREADS 64
@@ -65,6 +74,8 @@ static pthread_mutex_t   g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t    g_cv = PTHREAD_COND_INITIALIZER;
 static pthread_mutex_t   g_done_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t    g_done_cv = PTHREAD_COND_INITIALIZER;
+static struct blk_work *g_fly; /* fiber items not yet done; g_done_lock */
+static int g_fly_waiters;      /* loop finis waiting on g_fly; g_done_lock */
 static struct blk_work  *g_head;          /* queue head (dequeue) */
 static struct blk_work  *g_tail;          /* queue tail (enqueue) */
 static __os_thread_t     g_threads[BLK_MAX_THREADS];
@@ -93,6 +104,30 @@ blk_auto_size(void)
 	return n;
 }
 
+/* Link / unlink a fiber caller's item on g_fly.  g_done_lock held. */
+static void
+blk_fly_link(struct blk_work *w)
+{
+	w->fly_prev = NULL;
+	w->fly_next = g_fly;
+	if (g_fly != NULL)
+		g_fly->fly_prev = w;
+	g_fly = w;
+}
+
+static void
+blk_fly_unlink(struct blk_work *w)
+{
+	if (w->fly_prev != NULL)
+		w->fly_prev->fly_next = w->fly_next;
+	else
+		g_fly = w->fly_next;
+	if (w->fly_next != NULL)
+		w->fly_next->fly_prev = w->fly_prev;
+	if (g_fly_waiters > 0)
+		(void)pthread_cond_broadcast(&g_done_cv);
+}
+
 /* Publish w's result and wake its caller.  Last touch of w: once
  * g_done_lock is released the caller may return and free it. */
 static void
@@ -102,6 +137,7 @@ blk_complete(struct blk_work *w, int r)
 	w->result = r;
 	w->done = 1;
 	if (w->fiber) {
+		blk_fly_unlink(w);
 		/* A cross-thread wake posts to the loop's inbox, which
 		 * allocates; a dropped wake would park the caller forever,
 		 * so wait out an allocation failure instead. */
@@ -322,7 +358,13 @@ xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result)
 	 * xtc_exit_pid_deadline reports as XTC_KILL_DEFERRED.
 	 */
 	(void)xtc_mask_enter();
+	(void)__xtc_mtx_lock(&g_done_lock);
+	blk_fly_link(&w);
+	(void)__xtc_mtx_unlock(&g_done_lock);
 	if ((rc = blk_enqueue(&w)) != XTC_OK) {
+		(void)__xtc_mtx_lock(&g_done_lock);
+		blk_fly_unlink(&w);
+		(void)__xtc_mtx_unlock(&g_done_lock);
 		(void)xtc_mask_leave();
 		return rc;
 	}
@@ -458,6 +500,37 @@ xtc_blocking_submit(int (*fn)(void *), void *arg)
 	if ((rc = blk_enqueue(w)) != XTC_OK)
 		__os_free(w);
 	return rc;
+}
+
+/*
+ * PUBLIC: void __xtc_blocking_loop_fini __P((xtc_loop_t *));
+ *
+ * xtc_loop_fini, before it frees any task: wait until no fiber of
+ * `loop` is parked in xtc_blocking_run, so the pool never writes into
+ * a freed fiber frame or wakes a freed task.  A fiber belongs to the
+ * loop when it is its home loop or the loop its waker names (a stolen
+ * fiber).  Waits as long as fn runs; a queued fn is run first.
+ */
+void
+__xtc_blocking_loop_fini(xtc_loop_t *loop)
+{
+	struct blk_work *w;
+
+	(void)__xtc_mtx_lock(&g_done_lock);
+	for (;;) {
+		for (w = g_fly; w != NULL; w = w->fly_next)
+			if (w->waker.loop == loop ||
+			    w->waker.task->loop == loop)
+				break;
+		if (w == NULL)
+			break;
+		g_fly_waiters++;
+		/* Loop teardown runs off any loop. */
+		(void)pthread_cond_wait(&g_done_cv,
+		    &g_done_lock); /* XTC_BLOCKING_OK */
+		g_fly_waiters--;
+	}
+	(void)__xtc_mtx_unlock(&g_done_lock);
 }
 
 void
