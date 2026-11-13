@@ -450,6 +450,12 @@ if not called from a proc.
 .Fn xtc_exit_self
 terminates the calling process; cleanup runs and any links /
 monitors fire.
+The reason may be any
+.Vt int ;
+0 is a clean exit, and every other value, negative ones included,
+reaches links and monitors as given, for
+.Fn xtc_exit_pid
+as well.
 .Pp
 .Fn xtc_exit_pid
 terminates another process by pid.  Asynchronous: it sets the kill and

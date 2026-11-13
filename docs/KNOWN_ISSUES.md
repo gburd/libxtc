@@ -33,6 +33,69 @@ blocked: 1 before the fix (3 of 3 runs), 0 after.  The riscv64 hammer:
 hardware (an 8-core riscv64 board) the hang did not occur in 104,000
 runs before the fix: the window is a few instructions wide.
 
+## FIXED (2.1.3): a contained crash in a user recovery frame was reported as EXIT
+
+`xtc_proc.h` documents `XTC_DOWN_KIND_SIGNAL` as the kind of a contained
+fault.  A fault caught by the default frame got it, but a fault resumed
+into the app's own frame (`xtc_proc_recovery_arm()` returned the signal,
+the app cleaned up and called `xtc_exit_self(sig)` as the header says
+to) reached the monitor as `XTC_DOWN_KIND_EXIT` with `exit_code` 11.  An
+embedder that treats a SIGNAL DOWN as a crash could not see the crash.
+
+A proc that leaves after a contained fault without re-arming its frame
+now reports `XTC_DOWN_KIND_SIGNAL` with the fault's signal, however it
+leaves (`xtc_exit_self` with any code, a return, a kill).  The DOWN
+carries one int, so the signal replaces the code the app passed, and a
+legacy `xtc_down_decode` reader gets the signal too.  Re-arming the frame
+means the proc recovered and carries on; its later exit is classified as
+usual.
+
+Behaviour change: a TRANSIENT supervised child that recovers from a
+contained fault and then calls `xtc_exit_self(0)` is now restarted (its
+reason is 11, not 0).  An app that means to recover and stay up re-arms
+its frame.  `/m8/proc/fault_user_frame_kind` and `/m8/proc/fault_contain`
+fail on 2.1.2 (kind 1 for 2; reason 42 for 11) and pass on 2.1.3.
+
+## FIXED (2.1.3): an exit or a kill with reason -1 was lost
+
+Through 2.1.2 the kill flag, the latch for a kill that lands while the
+target is masked, and the `xtc_exit_self` unwind all stored the reason
+as reason + 1, so that 0 could mean "none".  Reason -1 (`XTC_E_INVAL`,
+and what most error-code exits pass) then encoded as 0:
+`xtc_exit_self(-1)` reached the monitor as `XTC_DOWN_KIND_CLEAN` reason
+0, and `xtc_exit_pid(p, -1)` returned `XTC_OK` but recorded no kill, so
+the target ran on.  Every int is now a deliverable reason: -1 reads as
+`XTC_DOWN_KIND_EXIT` `exit_code` -1, and a -1 kill unwinds the target
+whether or not it is masked.  `/m8/proc/exit_reason_negative` fails on
+2.1.2 in each of its three cases and passes on 2.1.3.
+
+## FIXED (2.1.3): a server whose init failed looked like a clean stop
+
+`xtc_svr_start` returns before `init` runs.  When `init` failed, the
+server proc returned normally, so its DOWN was `XTC_DOWN_KIND_CLEAN`
+reason 0, the same as a server stopped on request.  An `xtc_fsm` whose
+first `enter()` failed did the same.  The server now ends with
+`xtc_exit_self` of init's code after `terminate` runs, so a monitor sees
+`XTC_DOWN_KIND_EXIT` with that code in `exit_code` (for example -2,
+`XTC_E_NOMEM`); the fsm does the same with the code of its first
+`enter()`.  `xtc_svr_join` and `xtc_fsm_join` are unchanged.
+
+Behaviour change: a TRANSIENT supervised server whose init fails is now
+restarted, bounded by the supervisor's restart intensity; before, its
+CLEAN DOWN meant no restart.  `/m10.5/svr/init_fail_exits` and
+`/m10.5/fsm/fsm_enter_fail_exits` fail on 2.1.2 (kind 0 for 1) and pass
+on 2.1.3.
+
+All three change behaviour in a patch release.  `docs/abi-stability.md`
+allows that for behaviour that contradicts the documentation, and each
+did: the header names SIGNAL as a contained fault's kind, a kill and an
+exit code are documented as delivered, and a DOWN reason of 0 means a
+clean end.  No symbol, enum value, error code or struct layout changed;
+2.1 has no `XTC_DOWN_KIND_KILLED`, so a kill still reads as EXIT with
+the kill's reason (CLEAN for 0).  `test/sim/test_sim_down_kind` checks
+every ending under the simulator, and planted bugs 30 to 32 put each
+fault back and are caught on seed 1.
+
 ## FIXED (2.1.2): a cross-shard xtc_tnt_send could lose messages
 
 **What it was.**  Through 2.1.1 an `xtc_tnt_send` to an Isolate on
