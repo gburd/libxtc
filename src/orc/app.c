@@ -46,6 +46,7 @@ struct app_kid {
 	xtc_proc_fn          fn;
 	void                *arg;
 	xtc_restart_policy_t policy;
+	xtc_child_spec_t spec;          /* the caller's spec, for the hook */
 	xtc_atomic_pid_t     pid;       /* XTC_PID_NONE = not yet run */
 	/* pid's OWNER loop, stored before pid (constant per child index).
 	 * Through 2.1 PIDs were executor-relative, so pid alone could name
@@ -69,6 +70,8 @@ struct xtc_app {
 	xtc_pid_t reaper; /* reg's reaper, on loop (0) */
 	xtc_supervisor_t  *root;
 	xtc_sup_opts_t     sup_opts;
+	xtc_sup_down_fn user_down; /* the caller's on_child_down */
+	void *user_down_arg;
 	int                no_tuning_check;   /* PLAN.md 19.21 */
 	struct app_kids   *kids;              /* static children (19.27.10) */
 	xtc_child_spec_t  *specs;             /* wrapped copies handed to sup */
@@ -82,6 +85,25 @@ struct xtc_app {
 	__os_thread_t      sig_thr;           /* the signal-driven drain */
 	int sig_thr_started;
 };
+
+static void __kid_trampoline(void *arg);
+
+/*
+ * The root supervisor's on_child_down, when the caller set one.  The
+ * supervisor holds the app's copies of the static specs, whose fn and arg
+ * are __kid_trampoline and the app's slot: hand the caller's hook the
+ * caller's own spec instead, so spec->arg is the identity the caller gave
+ * the child.  A dynamic child (xtc_sup_add_child) is not wrapped.
+ */
+static void
+__app_child_down(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
+    const xtc_down_info_t *info, void *user)
+{
+	xtc_app_t *a = user;
+	if (spec->fn == __kid_trampoline)
+		spec = &((const struct app_kid *)spec->arg)->spec;
+	a->user_down(sup, spec, info, a->user_down_arg);
+}
 
 int
 xtc_app_create(const xtc_app_opts_t *opts, xtc_app_t **out)
@@ -127,6 +149,12 @@ xtc_app_create(const xtc_app_opts_t *opts, xtc_app_t **out)
 
 	a->sup_opts = so;
 	a->sup_opts.exec = a->exec;   /* NULL for single-loop; drives stop */
+	if (so.on_child_down != NULL) {
+		a->user_down = so.on_child_down;
+		a->user_down_arg = so.on_child_down_user;
+		a->sup_opts.on_child_down = __app_child_down;
+		a->sup_opts.on_child_down_user = a;
+	}
 	a->no_tuning_check = opts->no_tuning_check;
 	*out = a;
 	return XTC_OK;
@@ -264,6 +292,7 @@ xtc_app_start(xtc_app_t *a, const xtc_child_spec_t *children, int n)
 		a->kids->k[i].fn = a->specs[i].fn;
 		a->kids->k[i].arg = a->specs[i].arg;
 		a->kids->k[i].policy = a->specs[i].policy;
+		a->kids->k[i].spec = a->specs[i];
 		a->kids->k[i].kids = a->kids;
 		a->specs[i].fn = __kid_trampoline;
 		a->specs[i].arg = &a->kids->k[i];

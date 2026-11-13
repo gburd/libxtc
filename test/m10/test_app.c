@@ -863,6 +863,59 @@ test_app_reaper_builtin(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* The root supervisor's on_child_down sees the caller's own spec: its
+ * fn and arg, not the app's internal wrapper (through 2.2 it got the
+ * wrapper, so spec->arg was not the identity the caller gave). */
+static int g_hs_own, g_hs_other;
+
+static void
+hs_kid(void *arg)
+{
+	(void)arg;
+	(void)xtc_exit_self(3);
+}
+
+static void
+hs_hook(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
+    const xtc_down_info_t *info, void *user)
+{
+	(void)sup;
+	(void)info;
+	if (spec->fn == hs_kid && spec->arg == (void *)&g_hs_own &&
+	    user == (void *)&g_hs_other)
+		g_hs_own++;
+	else
+		g_hs_other++;
+}
+
+static MunitResult
+test_app_hook_spec(const MunitParameter p[], void *d)
+{
+	xtc_app_opts_t ao = XTC_APP_OPTS_DEFAULT;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_child_spec_t k = XTC_CHILD_SPEC_INIT;
+	xtc_app_t *a;
+	(void)p;
+	(void)d;
+	g_hs_own = g_hs_other = 0;
+	ao.no_tuning_check = 1;
+	so.max_restarts = 1;
+	so.on_child_down = hs_hook;
+	so.on_child_down_user = &g_hs_other;
+	ao.sup = &so;
+	k.name = "k";
+	k.fn = hs_kid;
+	k.arg = &g_hs_own;
+	k.policy = XTC_RESTART_TRANSIENT;
+	munit_assert_int(xtc_app_create(&ao, &a), ==, XTC_OK);
+	munit_assert_int(xtc_app_start(a, &k, 1), ==, XTC_OK);
+	munit_assert_int(xtc_app_run(a), ==, XTC_OK);
+	xtc_app_destroy(a);
+	munit_assert_int(g_hs_own, ==, 2);   /* the first exit + the restart */
+	munit_assert_int(g_hs_other, ==, 0);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/app_basic", test_app_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/app_multiloop", test_app_multiloop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -877,6 +930,8 @@ static MunitTest tests[] = {
 	{ "/giveup_returns", test_app_giveup_returns, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reaper_builtin", test_app_reaper_builtin, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/hook_spec", test_app_hook_spec, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
