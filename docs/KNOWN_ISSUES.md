@@ -136,6 +136,23 @@ stack, and refuses an address outside it.
 `detect_stack_use_after_return=1` fails on 2.1.2 (count 0) and passes on
 2.1.3.
 
+## FIXED (2.1.3): the PSI pressure listener failed unprivileged, and every failure read as NOSYS
+
+`xtc_slab_pressure_listen` registered the trigger "some 150000 1000000"
+(a 1 s window), which the kernel refuses to a process without
+`CAP_SYS_RESOURCE`: it accepts only windows that are a multiple of 2 s.
+Every failure, that one included, returned `XTC_E_NOSYS`, so an
+unprivileged process on a kernel with PSI was told it had none.  The
+trigger is now "some 150000 2000000" (150 ms of stall in 2 s).  With
+`psi_path` NULL the listener tries the calling process's cgroup v2
+`memory.pressure` first (the pressure a `memory.max` limit produces),
+then `/proc/pressure/memory`; an explicit path is used alone.
+`XTC_E_NOSYS` now means no PSI (no such file, or not Linux);
+`XTC_E_INVAL` means the kernel refused the trigger and `XTC_E_IO` that
+the file cannot be opened for writing.  These are existing codes.
+`/m11/slab/pressure_listen_ex_stop` fails on 2.1.2 on a host with PSI
+(NOSYS although `/proc/pressure/memory` exists) and passes on 2.1.3.
+
 ## FIXED (2.1.2): a cross-shard xtc_tnt_send could lose messages
 
 **What it was.**  Through 2.1.1 an `xtc_tnt_send` to an Isolate on

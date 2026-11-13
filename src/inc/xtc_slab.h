@@ -220,11 +220,18 @@ XTC_API int   xtc_slab_stat(const xtc_slab_t *slab, xtc_slab_stats_t *out);
 XTC_API xtc_slab_off_t xtc_slab_offset(const xtc_slab_t *slab, const void *p);
 XTC_API void          *xtc_slab_resolve(const xtc_slab_t *slab, xtc_slab_off_t off);
 
-/* Install a process-wide memory-pressure listener.  On Linux, opens
- * /proc/pressure/memory in poll mode at the "some" trigger (>10 ms
- * stall in 1s); on platforms without PSI, returns XTC_E_NOSYS.  When
- * pressure fires, all registered slab caches receive a reap call.
- * `psi_path` is "/proc/pressure/memory" by default (NULL = use it).
+/* Install a process-wide memory-pressure listener.  On Linux it
+ * registers the PSI trigger "some 150000 2000000" (150 ms of memory
+ * stall in a 2 s window, the shortest window an unprivileged process may
+ * use) and polls it on a thread of its own.  When pressure fires, all
+ * registered slab caches are reaped, then fn(2, user) runs ON THAT
+ * THREAD (never on a loop): it may block briefly, must not park.
+ * `psi_path` NULL tries the calling process's cgroup v2
+ * memory.pressure, then /proc/pressure/memory; a path is used alone.
+ * Returns XTC_E_NOSYS without PSI (no such file, or not Linux),
+ * XTC_E_INVAL when the kernel refuses the trigger, XTC_E_IO when the
+ * file cannot be opened for writing (permission) or the write fails
+ * otherwise.
  */
 XTC_API int   xtc_slab_pressure_listen(const char *psi_path,
                                        xtc_slab_pressure_fn fn,

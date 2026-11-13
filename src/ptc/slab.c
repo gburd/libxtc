@@ -1405,8 +1405,11 @@ xtc_slab_reap_all(void)
 /* ---- Linux PSI memory-pressure listener ---- */
 
 #if defined(__linux__)
+#include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <stdio.h>
+#include "os_errno.h" /* __os_errno_map */
 struct psi_listener {
 	pthread_t              th;
 	xtc_slab_pressure_fn   fn;
@@ -1435,6 +1438,75 @@ __psi_thread(void *arg)
 	return NULL;
 }
 
+/*
+ * The calling process's own cgroup v2 memory.pressure file, from the
+ * "0::<path>" line of /proc/self/cgroup.  0 and the path in `buf`, or -1
+ * (cgroup v1 only, or the path does not fit).
+ *
+ * shortcut: assumes cgroup2 is mounted at /sys/fs/cgroup (true on every
+ * unified-hierarchy host); a hybrid host's /sys/fs/cgroup/unified is not
+ * found and the caller falls back to /proc/pressure/memory.
+ */
+static int
+__psi_cgroup_path(char *buf, size_t n)
+{
+	char line[1024];
+	FILE *f;
+	int rc = -1;
+	size_t len;
+	int w;
+
+	f = fopen("/proc/self/cgroup", "r"); /* XTC_BLOCKING_OK */
+	if (f == NULL)
+		return -1;
+	while (fgets(line, sizeof line, f) != NULL) {
+		if (strncmp(line, "0::", 3) != 0)
+			continue;
+		len = strlen(line);
+		if (len == 0 || line[len - 1] != '\n')
+			break; /* truncated: no usable path */
+		line[len - 1] = '\0';
+		w = snprintf(buf, n, "/sys/fs/cgroup%s/memory.pressure",
+		    strcmp(line + 3, "/") == 0 ? "" : line + 3);
+		if (w > 0 && (size_t)w < n)
+			rc = 0;
+		break;
+	}
+	(void)fclose(f);
+	return rc;
+}
+
+/*
+ * Open the PSI file and register the trigger.  The fd, or a negative
+ * XTC_E_*: XTC_E_NOSYS when the file does not exist (no PSI), XTC_E_INVAL
+ * when the kernel refuses the trigger, else the mapped open/write errno
+ * (XTC_E_IO for a permission failure).
+ */
+static int
+__psi_open(const char *path)
+{
+	/* 150 ms of stall in a 2 s window.  An unprivileged process (no
+	 * CAP_SYS_RESOURCE) may only use a window that is a multiple of
+	 * 2 s; the kernel refused the 1 s window this used through 2.1.2.
+	 * The newline matters: the kernel overwrites the last byte written
+	 * with NUL. */
+	static const char trigger[] = "some 150000 2000000\n";
+	int fd, e;
+
+	fd = open(path, O_RDWR);
+	if (fd < 0 && (errno == ENOENT || errno == ENOTDIR))
+		return XTC_E_NOSYS;
+	if (fd < 0)
+		return __os_errno_map(errno);
+	/* PSI register, one-shot at startup. */
+	if (write(fd, trigger, sizeof trigger - 1) < 0) { /* XTC_BLOCKING_OK */
+		e = errno;
+		(void)close(fd);
+		return __os_errno_map(e);
+	}
+	return fd;
+}
+
 int
 xtc_slab_pressure_listen_ex(const char *psi_path,
                             xtc_slab_pressure_fn fn, void *user,
@@ -1442,20 +1514,24 @@ xtc_slab_pressure_listen_ex(const char *psi_path,
 {
 	struct psi_listener *l;
 	int fd;
-	const char *path = psi_path ? psi_path : "/proc/pressure/memory";
-	const char *trigger = "some 150000 1000000\n";  /* 150ms in 1s */
+	char cg[1024];
 	int rc;
 	int pipefd[2];
 
 	if (out == NULL) return XTC_E_INVAL;
 	*out = NULL;
 
-	fd = open(path, O_RDWR);
-	if (fd < 0) return XTC_E_NOSYS;     /* PSI not available */
-	if (write(fd, trigger, strlen(trigger)) < 0) {  /* XTC_BLOCKING_OK: PSI register, one-shot at startup */
-		(void)close(fd);
-		return XTC_E_NOSYS;
-	}
+	/* The default is the process's own cgroup, whose pressure is the
+	 * one a memory limit (memory.max) produces and which a delegated
+	 * cgroup lets an unprivileged process watch; then the system-wide
+	 * file.  An explicit path is used alone. */
+	if (psi_path != NULL)
+		fd = __psi_open(psi_path);
+	else if (__psi_cgroup_path(cg, sizeof cg) != 0 ||
+	    (fd = __psi_open(cg)) < 0)
+		fd = __psi_open("/proc/pressure/memory");
+	if (fd < 0)
+		return fd;
 	if ((rc = __os_calloc(1, sizeof *l, (void **)&l)) != XTC_OK) {
 		(void)close(fd); return rc;
 	}
