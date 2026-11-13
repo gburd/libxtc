@@ -24,6 +24,7 @@
 #include "xtc_orc.h"
 #include "xtc_sync.h"
 #include "proc_int.h"      /* owner-qualified lookup/send for join/stop */
+#include "xtc_sim.h"       /* __xtc_sim_active: the reply-vs-DOWN window */
 
 #include <stdint.h>
 #include <string.h>
@@ -72,6 +73,7 @@ struct fsm_run {
 	struct fsm_postponed      *pq_tail;
 	/* a pending state timeout deadline, or -1 if none */
 	int64_t                    timeout_ns;   /* relative, armed per result */
+	void *inflight;                          /* message being dispatched */
 };
 
 /* ---- postponed-event queue -------------------------------------- */
@@ -203,12 +205,14 @@ fsm_apply(struct fsm_run *r, xtc_fsm_result_t res, int *out_stop_reason)
  * ran inline after the event loop, which a kill or xtc_exit_self unwinds
  * past, so the run state (and any postponed events) leaked: LSan, 80
  * bytes per killed machine.  The same fix svr.c (1.55.1) and sup.c
- * (2.1.2) got.
+ * (2.1.2) got.  It also frees the message being dispatched, as svr.c
+ * does: an event() that calls xtc_exit_self leaves it in flight.
  */
 static void
 fsm_exited(void *arg)
 {
 	struct fsm_run *r = arg;
+	__os_free(r->inflight); /* an event() that exited mid-dispatch */
 	fsm_pq_free(r);
 	__os_free(r);
 }
@@ -258,16 +262,18 @@ fsm_entry(void *arg)
 		if (size == 0) { __os_free(msg); continue; }
 
 		kind = ((uint8_t *)msg)[0];
+		r->inflight = msg;
 
 		if (size == 1 && kind == 'S') {   /* stop kick */
+			r->inflight = NULL;
 			__os_free(msg);
 			break;
 		}
 
 		if (kind == 'E') {
 			const void *pl = size > 1 ? (uint8_t *)msg + 1 : NULL;
-			running = fsm_dispatch(r, pl, size - 1, NULL, &stop_reason);
-			__os_free(msg);
+			running =
+			    fsm_dispatch(r, pl, size - 1, NULL, &stop_reason);
 		} else if (kind == 'C' && size >= FSM_CALL_HDR) {
 			struct xtc_fsm_call call;
 			const void *pl;
@@ -284,10 +290,10 @@ fsm_entry(void *arg)
 			 * gets an empty reply so the caller does not hang. */
 			if (!call.replied)
 				(void)xtc_fsm_reply(&call, NULL, 0);
-			__os_free(msg);
-		} else {
-			__os_free(msg);   /* malformed */
 		}
+		/* An event, a call, or malformed: done with it. */
+		r->inflight = NULL;
+		__os_free(msg);
 	}
 
 	if (r->cb.terminate != NULL)
@@ -422,15 +428,30 @@ xtc_fsm_send(xtc_pid_t target, const void *ev, size_t len)
 
 /* Any fsm reply (by its trailing magic); the tag is checked by the caller. */
 static int
-__match_fsm_reply(const void *data, size_t size, void *u)
+__fsm_is_reply(const void *data, size_t size)
 {
 	const uint8_t *p = data;
-	(void)u;
 	if (size < FSM_REPLY_HDR)
 		return 0;
 	p += size - sizeof FSM_REPLY_MAGIC;
 	return memcmp(p, FSM_REPLY_MAGIC, sizeof FSM_REPLY_MAGIC) == 0;
 }
+
+/* Any fsm reply, or the DOWN of this call's monitor of the machine (u:
+ * the ref, NULL for replies only). */
+static int
+__match_fsm_reply(const void *data, size_t size, void *u)
+{
+	xtc_down_info_t di = XTC_DOWN_INFO_INIT;
+	if (__fsm_is_reply(data, size))
+		return 1;
+	return u != NULL && size > 0 && *(const uint8_t *)data == 'D' &&
+	    xtc_down_decode_ex(data, size, &di) == XTC_OK &&
+	    di.ref == *(const uint64_t *)u;
+}
+
+static int __fsm_wait_reply(uint32_t tag, uint64_t mref, int64_t timeout_ns,
+    void **out_reply, size_t *out_size);
 
 int
 xtc_fsm_call(xtc_pid_t target, const void *req, size_t req_size,
@@ -441,7 +462,7 @@ xtc_fsm_call(xtc_pid_t target, const void *req, size_t req_size,
 	uint32_t tag;
 	xtc_pid_t self;
 	size_t msg_size;
-	int64_t deadline = 0;
+	uint64_t mref = 0;
 	int rc;
 
 	if (req_size > 0 && req == NULL) return XTC_E_INVAL;
@@ -456,8 +477,36 @@ xtc_fsm_call(xtc_pid_t target, const void *req, size_t req_size,
 	memcpy(buf + 1, &self, sizeof self);
 	memcpy(buf + 1 + sizeof self, &tag, 4);
 	if (req_size > 0) memcpy(buf + FSM_CALL_HDR, req, req_size);
+	/* Monitor the machine for the call: its DOWN ends the wait (through
+	 * 2.2 a machine that stopped mid-call left the caller waiting out
+	 * its whole timeout, forever with -1). */
+	if ((rc = xtc_monitor(target, &mref)) != XTC_OK) {
+		__os_free(buf);
+		return rc;
+	}
 	rc = xtc_send_owned(target, buf, msg_size);
-	if (rc != XTC_OK) { __os_free(buf); return rc; }
+	if (rc != XTC_OK) {
+		__os_free(buf);
+		(void)xtc_demonitor(mref, XTC_DEMONITOR_FLUSH);
+		return rc;
+	}
+	rc = __fsm_wait_reply(tag, mref, timeout_ns, out_reply, out_size);
+	(void)xtc_demonitor(mref, XTC_DEMONITOR_FLUSH);
+	return rc;
+}
+
+/*
+ * The reply wait of xtc_fsm_call: the reply tagged `tag`, or the
+ * machine's DOWN (mref) -- then XTC_E_NOTFOUND, after one non-blocking
+ * look for a reply queued ahead of it (one more 25 ms look under the
+ * simulator, whose seeded cross-loop latency can reorder the two).
+ */
+static int
+__fsm_wait_reply(uint32_t tag, uint64_t mref, int64_t timeout_ns,
+    void **out_reply, size_t *out_size)
+{
+	int64_t deadline = 0;
+	int rc, gone = 0;
 
 	/*
 	 * Wait for the reply with a selective receive, under ONE deadline.
@@ -478,12 +527,22 @@ xtc_fsm_call(xtc_pid_t target, const void *req, size_t req_size,
 		if (timeout_ns >= 0) {
 			(void)__os_clock_mono(&now);
 			if (now >= deadline)
-				return XTC_E_AGAIN;
+				return gone ? XTC_E_NOTFOUND : XTC_E_AGAIN;
 			to = deadline - now;
 		}
-		rc = xtc_recv_match(__match_fsm_reply, NULL, &rmsg, &rsize, to);
+		if (gone)
+			to = __xtc_sim_active() ? 25LL * 1000 * 1000 : 0;
+		rc = xtc_recv_match(__match_fsm_reply, gone ? NULL : &mref,
+		    &rmsg, &rsize, to);
+		if (rc == XTC_E_AGAIN && gone)
+			return XTC_E_NOTFOUND;
 		if (rc != XTC_OK)
 			return rc; /* XTC_E_AGAIN on timeout */
+		if (!__fsm_is_reply(rmsg, rsize)) {
+			__os_free(rmsg); /* the machine's DOWN */
+			gone = 1;
+			continue;
+		}
 		memcpy(&rtag, (uint8_t *)rmsg + rsize - FSM_REPLY_HDR, 4);
 		if (rtag != tag) {
 			__os_free(rmsg); /* a late reply: drop */

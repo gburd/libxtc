@@ -110,8 +110,11 @@ XTC_API xtc_pid_t xtc_svr_pid(const xtc_svr_t *svr);
  * proc or from a plain thread.  Returns:
  *   XTC_OK          -- *out_reply / *out_size populated
  *   XTC_E_AGAIN     -- timeout
- *   XTC_E_NOTFOUND  -- the server exited before replying (noticed
- *                      within ~25 ms; any timeout, including -1)
+ *   XTC_E_NOTFOUND  -- the server exited before replying (noticed at
+ *                      once, any timeout including -1: an in-proc caller
+ *                      monitors the server for the call and demonitors
+ *                      it after, a plain thread is woken by the server's
+ *                      exit; 2.2 -- through 2.1 a 25 ms liveness poll)
  *   XTC_E_INVAL     -- bad pid / not a server / server already gone
  * A timed-out, aborted or server-gone call only stops the CALLER
  * waiting.  A reply the server sends afterwards to an off-proc caller is

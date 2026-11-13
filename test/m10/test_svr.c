@@ -842,8 +842,11 @@ test_svr_server_dies_mid_call(const MunitParameter p[], void *d)
 	}
 	munit_assert_int(xtc_atomic_load_i32(&a.rc, xtc_mo_seq_cst), ==,
 	    XTC_E_NOTFOUND);
+	/* At once (2.2): the handler sleeps 20 ms and exits; through 2.2 the
+	 * call polled the server's liveness every 25 ms, so it returned 20 to
+	 * 45 ms after the call.  10 ms of slack for a loaded host. */
 	munit_assert_int64(xtc_atomic_load_i64(&a.elapsed_ns, xtc_mo_seq_cst),
-	    <, 2LL * 1000 * 1000 * 1000);
+	    <, 30LL * 1000 * 1000);
 	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	return MUNIT_OK;
@@ -1149,6 +1152,76 @@ static MunitParameterEnum dying_params[] = {
 	{ "caller", dying_modes }, { NULL, NULL }
 };
 
+/*
+ * A call from a long-lived proc leaves nothing behind (2.2): xtc_svr_call
+ * monitors the server only for the call.  Through 2.2 there was no
+ * demonitor; a monitoring implementation without one would hand the
+ * caller a stale DOWN for every finished call when the server later
+ * exits.  Here 50 calls, then the server stops: the caller's mailbox
+ * holds only the message it sent itself.
+ */
+static int
+echo_call(void *st, const void *req, size_t n, xtc_svr_call_t *call)
+{
+	(void)st;
+	(void)xtc_svr_reply(call, req, n);
+	return XTC_SVR_CONTINUE;
+}
+
+struct stale_args {
+	xtc_svr_t *svr;
+	int ok, left, stray;
+};
+
+static void
+stale_caller(void *arg)
+{
+	struct stale_args *a = arg;
+	void *r, *m;
+	size_t rn, sz;
+	int i;
+	for (i = 0; i < 50; i++) {
+		r = NULL;
+		if (xtc_svr_call(xtc_svr_pid(a->svr), "x", 1, &r, &rn,
+		        1000LL * 1000 * 1000) == XTC_OK)
+			a->ok++;
+		xtc_free(r);
+	}
+	(void)xtc_send(xtc_self(), "mine", 4);
+	(void)xtc_svr_stop(a->svr);
+	(void)xtc_proc_sleep(50LL * 1000 * 1000); /* the server exits */
+	while (xtc_recv(&m, &sz, 0) == XTC_OK) {
+		a->left++;
+		if (sz != 4 || memcmp(m, "mine", 4) != 0)
+			a->stray++;
+		xtc_free(m);
+	}
+}
+
+static MunitResult
+test_svr_call_leaves_no_monitor(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_svr_callbacks_t cb = XTC_SVR_CALLBACKS_INIT;
+	struct stale_args a;
+	(void)p;
+	(void)d;
+	memset(&a, 0, sizeof a);
+	cb.handle_call = echo_call;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_svr_start(loop, &cb, NULL, NULL, &a.svr), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, stale_caller, &a, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(a.ok, ==, 50);
+	munit_assert_int(a.left, ==, 1);
+	munit_assert_int(a.stray, ==, 0);
+	munit_assert_int(xtc_svr_join(a.svr, 1000LL * 1000 * 1000), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/svr_basic", test_svr_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/call_name", test_svr_call_name, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1162,6 +1235,8 @@ static MunitTest tests[] = {
 	{ "/inproc_reply_not_spoofed", test_svr_inproc_reply_not_spoofed, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/huge_timeout", test_svr_huge_timeout, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/server_dies_mid_call", test_svr_server_dies_mid_call, NULL, NULL, MUNIT_TEST_OPTION_NONE, dying_params },
+	{ "/call_leaves_no_monitor", test_svr_call_leaves_no_monitor, NULL,
+	    NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10.5/svr", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

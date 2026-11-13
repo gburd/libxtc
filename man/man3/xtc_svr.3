@@ -118,10 +118,16 @@ with the reply,
 .Dv XTC_E_AGAIN
 on timeout,
 .Dv XTC_E_NOTFOUND
-if the server exits before replying (checked about every 25 ms, so an
-infinite-timeout call does not hang on a dead server), or
+if the server exits before replying, or
 .Dv XTC_E_INVAL
 for bad arguments or a server that is already gone.
+The exit is noticed at once, with any timeout: an in-process caller
+monitors the server for the duration of the call and turns the monitor
+off
+.Pq Fn xtc_demonitor No with Dv XTC_DEMONITOR_FLUSH ,
+so a finished call leaves no monitor and no DOWN behind; an external
+thread is woken by the server's exit.
+Through 2.2 the call polled the server's liveness about every 25 ms.
 A call that stops waiting (timeout, abort, server exit) only stops the
 caller.  A reply the server sends later to an off-process caller is
 discarded, and that

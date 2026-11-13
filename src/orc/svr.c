@@ -46,9 +46,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-static int __recv_reply_for_tag(uint64_t tag, xtc_pid_t target, void **out,
-                                size_t *out_size, int64_t timeout_ns,
-                                xtc_abort_token_t *tok);
+static int __recv_reply_for_tag(uint64_t tag, uint64_t mref, xtc_pid_t target,
+    void **out, size_t *out_size, int64_t timeout_ns, xtc_abort_token_t *tok);
 
 #define SVR_REPLY_HDR 16
 static const uint8_t SVR_REPLY_MAGIC[8] = {
@@ -105,6 +104,8 @@ struct __svr_reply_slot {
 	void           *data;
 	size_t          size;
 	int             replied;
+	xtc_pid_t target; /* the server called */
+	int gone;         /* the server exited without replying */
 };
 
 #define SVR_SLOT_BUCKETS 64          /* power of two */
@@ -139,9 +140,16 @@ struct xtc_svr_call {
 	int                       heap;        /* 1 == heap copy from _save */
 };
 
-/* Slice length for reply waits: the abort token and the server's
- * liveness are re-checked between slices. */
-#define SVR_WAIT_SLICE_NS (25LL * 1000 * 1000)
+/*
+ * Slice length for reply waits.  A server's exit ends a wait at once (a
+ * DOWN for an in-proc caller, the server's exit hook for a plain thread),
+ * so the slice is only a backstop: the abort token is polled every
+ * SVR_ABORT_SLICE_NS, and liveness every SVR_LIVE_SLICE_NS for the one
+ * death that sends neither (the server's loop finalized under the call).
+ * Through 2.2 every wait polled liveness every 25 ms.
+ */
+#define SVR_ABORT_SLICE_NS (25LL * 1000 * 1000)
+#define SVR_LIVE_SLICE_NS (1000LL * 1000 * 1000)
 
 /* Has the server exited?  Resolves the pid the same way xtc_send does,
  * from a proc or a plain thread. */
@@ -193,6 +201,29 @@ __svr_run_continue(struct xtc_svr *s)
  * path, so after any other exit xtc_svr_join never returned XTC_OK and
  * the server object leaked; the message being dispatched leaked too.
  */
+/*
+ * Wake every plain-thread caller still waiting on server `pid`: the
+ * server is exiting and will not reply.  A slot is linked before its
+ * request is sent and a send to a server already exiting fails, so a
+ * waiting slot is either here or its send failed.
+ */
+static void
+__svr_slots_gone(xtc_pid_t pid)
+{
+	struct __svr_reply_slot *slot;
+	int i;
+	for (i = 0; i < SVR_SLOT_BUCKETS; i++) {
+		struct __svr_slot_bucket *b = __svr_slot_bucket((uint64_t)i);
+		(void)__xtc_mtx_lock(&b->lock);
+		for (slot = b->head; slot != NULL; slot = slot->next)
+			if (!slot->replied && xtc_pid_eq(slot->target, pid)) {
+				slot->gone = 1;
+				(void)xtc_notify_signal(slot->done);
+			}
+		(void)__xtc_mtx_unlock(&b->lock);
+	}
+}
+
 static void
 __svr_exited(void *arg)
 {
@@ -204,6 +235,7 @@ __svr_exited(void *arg)
 		s->inflight = NULL;
 	}
 	xtc_atomic_store_i32(&s->alive, 0, xtc_mo_release);
+	__svr_slots_gone(xtc_atomic_pid_load(&s->pid));
 	(void)xtc_notify_signal(s->stopped);   /* s may be freed after this */
 }
 
@@ -426,18 +458,20 @@ __svr_deadline(int64_t timeout_ns)
 
 /* The next wait slice before `deadline`, or -1 once it has passed. */
 static int64_t
-__svr_slice(int64_t deadline)
+__svr_slice(int64_t deadline, const xtc_abort_token_t *tok)
 {
-	int64_t now = 0;
-	if (deadline < 0) return SVR_WAIT_SLICE_NS;
+	int64_t now = 0, sl;
+	sl = tok != NULL ? SVR_ABORT_SLICE_NS : SVR_LIVE_SLICE_NS;
+	if (deadline < 0)
+		return sl;
 	(void)__os_clock_mono(&now);
 	if (now >= deadline) return -1;
-	return (deadline - now < SVR_WAIT_SLICE_NS) ? deadline - now
-	                                            : SVR_WAIT_SLICE_NS;
+	return (deadline - now < sl) ? deadline - now : sl;
 }
 
-/* Off-proc wait on a registered slot.  XTC_OK when signalled; the
- * caller re-reads slot->replied under its bucket lock either way. */
+/* Off-proc wait on a registered slot.  XTC_OK when signalled (a reply,
+ * or the server's exit: the caller re-reads slot->replied and
+ * slot->gone under its bucket lock either way). */
 static int
 __svr_wait_slot(struct __svr_reply_slot *slot, xtc_pid_t target,
                 int64_t timeout_ns, xtc_abort_token_t *tok)
@@ -448,7 +482,7 @@ __svr_wait_slot(struct __svr_reply_slot *slot, xtc_pid_t target,
 	for (;;) {
 		if (tok != NULL && xtc_abort_token_is_aborted(tok))
 			return XTC_E_ABORTED;
-		w = __svr_slice(deadline);
+		w = __svr_slice(deadline, tok);
 		rc = xtc_notify_wait(slot->done, w < 0 ? 0 : w);
 		if (rc != XTC_E_AGAIN) return rc;
 		if (w < 0) return XTC_E_AGAIN;           /* timed out */
@@ -458,15 +492,16 @@ __svr_wait_slot(struct __svr_reply_slot *slot, xtc_pid_t target,
 
 /*
  * Internal call implementation shared by xtc_svr_call (tok == NULL)
- * and xtc_svr_call_abortable (tok != NULL).  The reply wait is sliced
- * (SVR_WAIT_SLICE_NS) so the abort token and the server's liveness are
- * re-checked while waiting: XTC_E_ABORTED if the token fires first,
- * XTC_E_NOTFOUND if the server exits without replying (before 1.55.1 a
- * server that died mid-call left an infinite-timeout caller parked
- * forever).  A timeout, abort or server exit only stops the CALLER
- * waiting.  A later reply to an off-proc caller is discarded; to an
- * in-proc caller it lands in its mailbox and is dropped by that proc's
- * next in-proc call (see __recv_reply_for_tag).
+ * and xtc_svr_call_abortable (tok != NULL).  XTC_E_ABORTED if the token
+ * fires first, XTC_E_NOTFOUND if the server exits without replying,
+ * noticed at once: an in-proc caller monitors the server for the call
+ * (and demonitors with flush after the reply), a plain thread is woken by
+ * the server's exit hook.  (Before 1.55.1 a server that died mid-call
+ * left an infinite-timeout caller parked forever; through 2.2 the death
+ * was found by a 25 ms liveness poll.)  A timeout, abort or server exit
+ * only stops the CALLER waiting.  A later reply to an off-proc caller is
+ * discarded; to an in-proc caller it lands in its mailbox and is dropped
+ * by that proc's next in-proc call (see __recv_reply_for_tag).
  */
 static int
 __svr_call(xtc_pid_t target, const void *req, size_t req_size,
@@ -498,6 +533,7 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 		    xtc_atomic_fetch_add_u64(&g_next_tag, 1, xtc_mo_relaxed) +
 		    1;
 		xtc_pid_t self_pid = xtc_self();
+		uint64_t mref = 0;
 
 		msg_size = SVR_PCALL_HDR + req_size;
 		if (__os_malloc(msg_size, (void **)&buf) != XTC_OK)
@@ -508,12 +544,20 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 		memcpy(buf + 2 + sizeof self_pid, &tag, 8);
 		if (req_size > 0) memcpy(buf + SVR_PCALL_HDR, req, req_size);
 
+		/* Monitor the server for the call: its DOWN ends the wait. */
+		if ((rc = xtc_monitor(target, &mref)) != XTC_OK) {
+			__os_free(buf);
+			return rc;
+		}
 		/* Move the frame (no second copy); ours again on error. */
 		rc = xtc_send_owned(target, buf, msg_size);
-		if (rc != XTC_OK) { __os_free(buf); return rc; }
-
-		return __recv_reply_for_tag(tag, target, out_reply, out_size,
-		    timeout_ns, tok);
+		if (rc == XTC_OK)
+			rc = __recv_reply_for_tag(tag, mref, target, out_reply,
+			    out_size, timeout_ns, tok);
+		else
+			__os_free(buf);
+		(void)xtc_demonitor(mref, XTC_DEMONITOR_FLUSH);
+		return rc;
 	}
 
 	memset(&slot, 0, sizeof slot);
@@ -526,6 +570,7 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 	}
 	slot.id = xtc_atomic_fetch_add_u64(&__svr_slot_seq, 1, xtc_mo_relaxed) +
 	    1; /* never 0 (the pid path) */
+	slot.target = target;
 	b = __svr_slot_bucket(slot.id);
 	(void)__xtc_mtx_lock(&b->lock);
 	slot.next = b->head;
@@ -551,6 +596,8 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 		*out_reply = slot.data;
 		*out_size = slot.size;
 		rc = XTC_OK;
+	} else if (slot.gone && rc == XTC_OK) {
+		rc = XTC_E_NOTFOUND; /* woken by the server's exit */
 	}
 	(void)__xtc_mtx_unlock(&b->lock);
 	xtc_notify_destroy(slot.done);
@@ -695,24 +742,35 @@ xtc_svr_call_save(const xtc_svr_call_t *call)
 }
 
 /* In-proc receive helper.  The predicate takes ANY svr reply (magic
- * suffix); other messages stay queued for the proc.  A proc has at most
- * one in-proc call outstanding (the caller waits here), so a reply whose
- * tag is not the current one answers an earlier call that already gave
- * up (timeout, abort, server exit): it is dropped here, so late replies
- * never pile up in the save queue or slow later calls. */
+ * suffix) and the DOWN of this call's monitor of the server (u: the
+ * ref, or NULL for replies only); other messages stay queued for the
+ * proc.  A proc has at most one in-proc call outstanding (the caller
+ * waits here), so a reply whose tag is not the current one answers an
+ * earlier call that already gave up (timeout, abort, server exit): it is
+ * dropped here, so late replies never pile up in the save queue or slow
+ * later calls. */
 static int
-__match_svr_reply(const void *data, size_t size, void *u)
+__svr_is_reply(const void *data, size_t size)
 {
-	(void)u;
 	return size >= SVR_REPLY_HDR &&
 	    memcmp((const uint8_t *)data + size - sizeof SVR_REPLY_MAGIC,
 	    SVR_REPLY_MAGIC, sizeof SVR_REPLY_MAGIC) == 0;
 }
 
 static int
-__recv_reply_for_tag(uint64_t tag, xtc_pid_t target, void **out,
-                     size_t *out_size, int64_t timeout_ns,
-                     xtc_abort_token_t *tok)
+__match_svr_reply(const void *data, size_t size, void *u)
+{
+	xtc_down_info_t di = XTC_DOWN_INFO_INIT;
+	if (__svr_is_reply(data, size))
+		return 1;
+	return u != NULL && size > 0 && *(const uint8_t *)data == 'D' &&
+	    xtc_down_decode_ex(data, size, &di) == XTC_OK &&
+	    di.ref == *(const uint64_t *)u;
+}
+
+static int
+__recv_reply_for_tag(uint64_t tag, uint64_t mref, xtc_pid_t target, void **out,
+    size_t *out_size, int64_t timeout_ns, xtc_abort_token_t *tok)
 {
 	void  *msg = NULL;
 	size_t size = 0;
@@ -720,17 +778,30 @@ __recv_reply_for_tag(uint64_t tag, xtc_pid_t target, void **out,
 	uint64_t got;
 	int    rc, gone = 0;
 
-	/* Sliced so the abort token and the server's liveness are polled
-	 * between mailbox waits (see __svr_call).  Once the server is seen
-	 * gone, one more slice is allowed for a reply sent just before the
-	 * exit and still in flight (cross-loop delivery can be deferred). */
+	/* The server's DOWN (mref) ends the wait.  A reply the server sent
+	 * before exiting is queued ahead of its DOWN (both are delivered
+	 * synchronously from the server's fiber, in that order), so once the
+	 * DOWN is seen one non-blocking look takes such a reply, and then the
+	 * call is XTC_E_NOTFOUND.  Under the simulator a cross-loop delivery
+	 * can be deferred by a seeded latency drawn per message, so a DOWN
+	 * can overtake the reply: there one more slice is allowed for it.
+	 * Sliced otherwise only for the abort token and the liveness backstop
+	 * (SVR_LIVE_SLICE_NS). */
 	for (;;) {
 		if (tok != NULL && xtc_abort_token_is_aborted(tok))
 			return XTC_E_ABORTED;
-		w = __svr_slice(deadline);
-		rc = xtc_recv_match(__match_svr_reply, NULL, &msg, &size,
-		    w < 0 ? 0 : w);
+		w = !gone              ? __svr_slice(deadline, tok) :
+		    __xtc_sim_active() ? SVR_ABORT_SLICE_NS :
+		                         0;
+		rc = xtc_recv_match(__match_svr_reply, gone ? NULL : &mref,
+		    &msg, &size, w < 0 ? 0 : w);
 		if (rc == XTC_OK) {
+			if (!__svr_is_reply(msg, size)) {
+				__os_free(msg); /* the server's DOWN */
+				msg = NULL;
+				gone = 1;
+				continue;
+			}
 			memcpy(&got, (uint8_t *)msg + size - SVR_REPLY_HDR,
 			    sizeof got);
 			if (got == tag) break;
