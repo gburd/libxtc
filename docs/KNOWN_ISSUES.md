@@ -191,6 +191,18 @@ of 4, 64 and 65,536) fails on 2.1.2 and passes on 2.1.3, and
 `test/cbmc/logring_harness.c` checks the ring over every interleaving of
 two writers and the drain on a ring that overflows.
 
+## FIXED (2.1.3): xtc_net_listen refused port 0
+
+`xtc_net_listen` and `xtc_net_listen_backlog` returned `XTC_E_INVAL`
+for port 0, while `xtc_net_udp_socket` accepts it as kernel-assigned
+the way bind(2) does.  A program that runs several servers in parallel
+had to bind a raw socket to port 0, read the port, close it and listen
+on it again, which races with every other process on the host.  Port 0
+now asks the kernel for a free port; read it back with getsockname(2).
+Negative ports and ports above 65535 are still `XTC_E_INVAL`, and
+`xtc_net_dial` still requires a real port.  `/m2/net/tcp_listen_dial`
+fails on 2.1.2 (-1 for 0) and passes on 2.1.3.
+
 ## FIXED (2.1.2): a cross-shard xtc_tnt_send could lose messages
 
 **What it was.**  Through 2.1.1 an `xtc_tnt_send` to an Isolate on

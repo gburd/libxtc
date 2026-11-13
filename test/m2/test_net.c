@@ -48,7 +48,8 @@ test_tcp_listen_dial(const MunitParameter p[], void *d)
 	 * stricter port-reuse semantics; skip the round-trip part and
 	 * just verify the API rejects bad args. */
 	(void)xtc_net_setnonblock(-1);
-	munit_assert_int(xtc_net_listen(XTC_NET_INET, NULL, 0, &opts, &listen_fd),
+	munit_assert_int(xtc_net_listen(XTC_NET_INET, NULL, -1, &opts,
+	                     &listen_fd),
 	    ==, XTC_E_INVAL);
 	return MUNIT_OK;
 #endif
@@ -56,28 +57,24 @@ test_tcp_listen_dial(const MunitParameter p[], void *d)
 	/* Trigger WSAStartup on Windows via any xtc_net call. */
 	(void)xtc_net_setnonblock(-1);
 
-	munit_assert_int(xtc_net_listen(XTC_NET_INET, NULL, 0, &opts, &listen_fd),
-	    ==, XTC_E_INVAL);   /* port=0 invalid */
-
-	munit_assert_int(xtc_net_listen(XTC_NET_INET, "127.0.0.1", 0, &opts, &listen_fd),
+	munit_assert_int(xtc_net_listen(XTC_NET_INET, NULL, -1, &opts,
+	                     &listen_fd),
+	    ==, XTC_E_INVAL);
+	munit_assert_int(xtc_net_listen(XTC_NET_INET, NULL, 65536, &opts,
+	                     &listen_fd),
 	    ==, XTC_E_INVAL);
 
-	/* Pick a free port: bind to port 0 via raw socket then close. */
-	{
-		int probe = (int)socket(AF_INET, SOCK_STREAM, 0);
-		struct sockaddr_in s; memset(&s, 0, sizeof s);
-		socklen_t l = sizeof s;
-		s.sin_family = AF_INET; s.sin_port = 0;
-		s.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-		bind(probe, (struct sockaddr *)&s, sizeof s);
-		getsockname(probe, (struct sockaddr *)&s, &l);
-		port = ntohs(s.sin_port);
-		close(probe);
-	}
-
-	munit_assert_int(xtc_net_listen(XTC_NET_INET, "127.0.0.1", port, &opts, &listen_fd),
+	/* Port 0: the kernel picks a free port; getsockname reads it back. */
+	munit_assert_int(xtc_net_listen(XTC_NET_INET, "127.0.0.1", 0, &opts,
+	                     &listen_fd),
 	    ==, XTC_OK);
 	munit_assert_int(listen_fd, >=, 0);
+	memset(&sa, 0, sizeof sa);
+	munit_assert_int(getsockname(listen_fd, (struct sockaddr *)&sa, &salen),
+	    ==, 0);
+	port = ntohs(sa.sin_port);
+	munit_assert_int(port, >, 0);
+	salen = sizeof sa;
 
 	munit_assert_int(xtc_net_dial(XTC_NET_INET, "127.0.0.1", port, &opts, &client_fd),
 	    ==, XTC_OK);

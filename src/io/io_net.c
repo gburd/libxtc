@@ -468,7 +468,9 @@ __net_listen_raw(xtc_net_family_t fam, const char *host, int port,
 	int af;
 
 	WSA_INIT_ONCE();
-	if (out_fd == NULL || port <= 0 || port > 65535 || backlog < 0 ||
+	/* Port 0 asks the kernel for a free port, as bind(2) does; the
+	 * caller reads it back with getsockname(2). */
+	if (out_fd == NULL || port < 0 || port > 65535 || backlog < 0 ||
 	    (opts != NULL && opts->size < sizeof(size_t)))
 		return XTC_E_INVAL;
 	if (backlog == 0)
