@@ -282,8 +282,9 @@ broke at the hop from a device worker.  Now (symbol version `XTC_2.2`):
   (`loop_id` = `XTC_LOOP_FOREIGN`) that its sends carry as the sender
   and its `xtc_tail_app` events as their pid.  It reaches no proc.
 
-`xtc_proc_info_t` grows from 96 to 200 bytes (an append; a consumer
-built against 2.1 keeps reading its prefix).  The string fields are not
+`xtc_proc_info_t` grows from 96 to 208 bytes (an append of these
+fields after 2.2's `stack_size`; a consumer built against 2.1 keeps
+reading its prefix).  The string fields are not
 in `xtc_tail_rec_t`, whose layout is frozen: the XTCL dump does not carry
 them, the dial9 dump does.  To keep `XTC_LOOP_FOREIGN` out of the loop
 id space, `xtc_loop_init` now stops one id earlier, after 4,294,967,293
