@@ -288,6 +288,20 @@ destructors) and passes on 2.1.3.  xtc_pdict(3) also gave the wrong
 example; both are corrected, and it says a destructor must not call
 `xtc_pdict_*` (it runs under the dictionary's lock).
 
+## FIXED (2.1.3): a demand stream granted demand on every empty pull
+
+`xtc_stream_from_demand` granted one unit of demand on every
+`xtc_stream_next`, including a pull that found the channel empty.
+`xtc_stream_for_each` retries an empty pull once per yield, so while the
+producer was idle the outstanding demand grew by one per consumer
+wakeup, and the producer was then held back only by the channel's
+capacity, not by the consumer.  A pull now grants one unit only when the
+channel has none outstanding, so the producer runs at most one item
+ahead of the consumer however often an empty stream is pulled.  Demand
+the application grants itself with `xtc_chan_demand_ask` still adds to
+that unit.  `/m10.8/stream/from_demand` (10 empty pulls, then
+`outstanding == 1`) fails on 2.1.2 (10) and passes on 2.1.3.
+
 ## FIXED (2.1.2): a cross-shard xtc_tnt_send could lose messages
 
 **What it was.**  Through 2.1.1 an `xtc_tnt_send` to an Isolate on
