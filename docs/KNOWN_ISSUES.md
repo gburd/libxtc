@@ -220,6 +220,17 @@ since a process freed with them may hold it.
 `/m10.5/app/giveup_returns` fails on 2.1.2 (`xtc_app_run` still running
 after 3 s) and passes on 2.1.3.
 
+## FIXED (2.1.3): a killed xtc_fsm leaked its run state and postponed events
+
+A machine freed its run state and its queue of postponed events inline
+after its event loop.  A kill (`xtc_exit_pid`), an `event()` that calls
+`xtc_exit_self`, or a contained fault unwinds past that code, so each
+such exit leaked the state and every postponed event.  The free is now
+an `xtc_proc_at_exit` hook, which runs on every exit, as `xtc_svr` and
+the supervisor already did.  `/m10.5/fsm/fsm_killed_frees` fails on
+2.1.2 (a postponed event still allocated after the join) and passes on
+2.1.3.
+
 ## FIXED (2.1.2): a cross-shard xtc_tnt_send could lose messages
 
 **What it was.**  Through 2.1.1 an `xtc_tnt_send` to an Isolate on

@@ -14,6 +14,7 @@
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "xtc_fsm.h"
+#include "os_alloc.h" /* __os_alloc_set_hook: track one block */
 
 /* States for a tiny door: CLOSED -> OPEN -> CLOSED. */
 enum { S_CLOSED = 0, S_OPEN = 1, S_LOCKED = 2 };
@@ -524,6 +525,106 @@ test_fsm_enter_fail_exits(const MunitParameter p[], void *data)
 	return MUNIT_OK;
 }
 
+/*
+ * A machine that is killed (xtc_exit_pid) frees its run state and its
+ * postponed events.  Before 2.1.3 both were freed inline after the event
+ * loop, which the kill unwinds past (LSan: 102 blocks for 51 killed
+ * machines).  The allocator hook tracks every block whose size is near
+ * the postponed event's distinctive size: one must not outlive the join.
+ */
+#define KF_LEN 3001 /* distinctive event size */
+
+static struct __os_alloc_hook g_kf_saved;
+static void *g_kf_live[8];
+
+static int
+kf_mine(size_t sz)
+{
+	return sz >= KF_LEN && sz < KF_LEN + 64;
+}
+
+static void *
+kf_malloc(size_t sz)
+{
+	void *p = g_kf_saved.malloc(sz);
+	int i;
+	if (p != NULL && kf_mine(sz))
+		for (i = 0; i < 8; i++)
+			if (g_kf_live[i] == NULL) {
+				g_kf_live[i] = p;
+				break;
+			}
+	return p;
+}
+
+static void
+kf_free(void *p)
+{
+	int i;
+	for (i = 0; p != NULL && i < 8; i++)
+		if (g_kf_live[i] == p)
+			g_kf_live[i] = NULL;
+	g_kf_saved.free(p);
+}
+
+static xtc_fsm_result_t
+kf_event(void *st, int state, const void *msg, size_t len, xtc_fsm_call_t *call)
+{
+	xtc_fsm_result_t r = { XTC_FSM_POSTPONE, 0, 0 };
+	(void)st;
+	(void)state;
+	(void)msg;
+	(void)len;
+	(void)call;
+	return r;
+}
+
+static xtc_pid_t g_kf_pid;
+
+static void
+kf_killer(void *arg)
+{
+	static char ev[KF_LEN];
+	(void)arg;
+	(void)xtc_fsm_send(g_kf_pid, ev, sizeof ev);
+	(void)xtc_proc_sleep(2LL * 1000 * 1000);
+	(void)xtc_exit_pid(g_kf_pid, 1);
+}
+
+static MunitResult
+test_fsm_killed_frees(const MunitParameter p[], void *data)
+{
+	xtc_loop_t *loop;
+	xtc_fsm_t *fsm;
+	xtc_fsm_callbacks_t cb = XTC_FSM_CALLBACKS_INIT;
+	struct __os_alloc_hook my;
+	int i, live = 0;
+	(void)p;
+	(void)data;
+	cb.event = kf_event;
+	memset(g_kf_live, 0, sizeof g_kf_live);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(__os_alloc_get_hook(&g_kf_saved), ==, XTC_OK);
+	my = g_kf_saved;
+	my.malloc = kf_malloc;
+	my.free = kf_free;
+	munit_assert_int(__os_alloc_set_hook(&my), ==, XTC_OK);
+	munit_assert_int(xtc_fsm_start(loop, &cb, NULL, 0, NULL, &fsm), ==,
+	    XTC_OK);
+	g_kf_pid = xtc_fsm_pid(fsm);
+	munit_assert_int(xtc_proc_spawn(loop, kf_killer, NULL, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_fsm_join(fsm, 0), ==, XTC_OK);
+	munit_assert_int(__os_alloc_set_hook(&g_kf_saved), ==, XTC_OK);
+	for (i = 0; i < 8; i++)
+		if (g_kf_live[i] != NULL)
+			live++;
+	munit_assert_int(live, ==, 0);
+	(void)xtc_loop_fini(loop);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/fsm_basic", test_fsm_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fsm_state_timeout", test_fsm_state_timeout, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -531,6 +632,8 @@ static MunitTest tests[] = {
 	{ "/fsm_call_keeps_mail", test_fsm_call_keeps_mail, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fsm_enter_fail_exits", test_fsm_enter_fail_exits, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/fsm_killed_frees", test_fsm_killed_frees, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

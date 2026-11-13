@@ -197,6 +197,23 @@ fsm_apply(struct fsm_run *r, xtc_fsm_result_t res, int *out_stop_reason)
 
 /* ---- the machine proc ------------------------------------------- */
 
+/*
+ * Free the machine's run state: an xtc_proc_at_exit hook, so it runs on
+ * every exit of the machine's proc -- a stop, an event() that calls
+ * xtc_exit_self, an xtc_exit_pid kill, a contained fault.  Until 2.1.3 it
+ * ran inline after the event loop, which a kill or xtc_exit_self unwinds
+ * past, so the run state (and any postponed events) leaked: LSan, 80
+ * bytes per killed machine.  The same fix svr.c (1.55.1) and sup.c
+ * (2.1.2) got.
+ */
+static void
+fsm_exited(void *arg)
+{
+	struct fsm_run *r = arg;
+	fsm_pq_free(r);
+	__os_free(r);
+}
+
 static void
 fsm_entry(void *arg)
 {
@@ -204,8 +221,10 @@ fsm_entry(void *arg)
 	int stop_reason = XTC_FSM_REASON_NORMAL;
 	int running = 1;
 	int init_rc = XTC_OK;
+	int hooked;
 
 	r->handle->pid = xtc_self();
+	hooked = (xtc_proc_at_exit(fsm_exited, r) == XTC_OK);
 
 	/* Initial state entry: enter(initial, initial). */
 	if (r->cb.enter != NULL) {
@@ -275,8 +294,8 @@ fsm_entry(void *arg)
 
 	if (r->cb.terminate != NULL)
 		r->cb.terminate(r->state, stop_reason);
-	fsm_pq_free(r);
-	__os_free(r);
+	if (!hooked)
+		fsm_exited(r);
 	/* A failed initial enter() ends the machine with its code, so a
 	 * monitor or supervisor sees why it never ran (xtc_fsm_start
 	 * returned before enter() did). */
