@@ -95,7 +95,18 @@ and
 .Dv SIGILL
 that emits a backtrace and a best-effort runtime dump to standard
 error, then re-raises the signal with its default disposition so a
-core is still produced.  It is idempotent and installs handlers only
+core is still produced.  It composes with
+.Xr xtc_fault_guard_install 3
+in either order and on repeated calls: the guard keeps
+.Dv SIGSEGV , SIGBUS , SIGFPE
+and
+.Dv SIGILL ,
+contains a fault in a process that can be unwound, and hands every
+other fault (one on a plain thread, in a critical section, a stack
+overflow) to this handler, which dumps and dies;
+.Dv SIGABRT
+is always this handler's.
+It is idempotent and installs handlers only
 for faults -- never for
 .Dv SIGCHLD , SIGTERM ,
 or other signals an embedder may manage.  It returns

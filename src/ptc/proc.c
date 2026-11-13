@@ -3997,6 +3997,82 @@ static volatile sig_atomic_t __fault_guard_installed;
  * instruction.  SIGABRT is deliberately excluded -- abort() is an
  * intentional, usually-unrecoverable signal. */
 static const int __fault_signals[] = { SIGSEGV, SIGBUS, SIGFPE, SIGILL };
+#define XTC_NFAULT_SIGNALS 4
+
+/*
+ * What an uncontained fault escalates to, per signal: the action the
+ * guard displaced when it was installed (an application's, a
+ * sanitizer's, or xtc_crash_handler_install's), or the crash handler
+ * installed after the guard (__xtc_fault_sig_install).  Written under
+ * __fault_lock by the installers, read by the handler.
+ */
+static struct sigaction __fault_prev[XTC_NFAULT_SIGNALS];
+static pthread_mutex_t __fault_lock = PTHREAD_MUTEX_INITIALIZER;
+static volatile sig_atomic_t __fault_escalating;
+
+static int
+__fault_sig_index(int sig)
+{
+	int i;
+	for (i = 0; i < XTC_NFAULT_SIGNALS; i++)
+		if (__fault_signals[i] == sig)
+			return i;
+	return -1;
+}
+
+/*
+ * Hand an uncontained fault to the action the guard displaced, then die
+ * with the default action (so a core is produced) if that returns or
+ * there is none.  The displaced handler is called directly with the
+ * fault's siginfo and context, so a sanitizer or crash reporter sees the
+ * real faulting address.  A fault inside that handler goes straight to
+ * the default action.
+ */
+static void
+__fault_escalate(int sig, siginfo_t *si, void *uctx)
+{
+	struct sigaction sa;
+	int i = __fault_sig_index(sig);
+
+	if (i >= 0 && !__fault_escalating) {
+		__fault_escalating = 1;
+		sa = __fault_prev[i];
+		if ((sa.sa_flags & SA_SIGINFO) && sa.sa_sigaction != NULL)
+			sa.sa_sigaction(sig, si, uctx);
+		else if (!(sa.sa_flags & SA_SIGINFO) &&
+		    sa.sa_handler != SIG_DFL && sa.sa_handler != SIG_IGN)
+			sa.sa_handler(sig);
+	}
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = SIG_DFL;
+	(void)sigemptyset(&sa.sa_mask);
+	(void)sigaction(sig, &sa, NULL);
+	(void)raise(sig);
+}
+
+/*
+ * PUBLIC: int __xtc_fault_sig_install __P((int, const struct sigaction *));
+ *
+ * Install `act` for `sig`, under the fault guard when the guard owns
+ * sig: then `act` becomes what an uncontained fault escalates to, and
+ * the guard keeps the signal.  xtc_crash_handler_install uses it, so the
+ * two installers compose in either order and on every repeated call.
+ * Returns sigaction's result.
+ */
+int
+__xtc_fault_sig_install(int sig, const struct sigaction *act)
+{
+	int i = __fault_sig_index(sig);
+	int rc = 0;
+
+	(void)__xtc_mtx_lock(&__fault_lock);
+	if (__fault_guard_installed && i >= 0)
+		__fault_prev[i] = *act;
+	else
+		rc = sigaction(sig, act, NULL);
+	(void)__xtc_mtx_unlock(&__fault_lock);
+	return rc;
+}
 
 /*
  * Process-wide fault handler.  The faulting coroutine is the faulting
@@ -4006,8 +4082,10 @@ static const int __fault_signals[] = { SIGSEGV, SIGBUS, SIGFPE, SIGILL };
  * contain the fault by siglongjmp'ing back to the frame
  * (async-signal-safe); the proc then runs its cleanup and
  * xtc_exit_self, delivering DOWN to its monitors.  Otherwise the
- * fault escalates: restore the default disposition and re-raise so
- * the whole process dies (a torn critical section cannot be unwound).
+ * fault escalates (__fault_escalate): the action the guard displaced
+ * runs (a crash handler's dump, a sanitizer's report), then the default
+ * disposition is restored and the signal re-raised so the whole process
+ * dies (a torn critical section cannot be unwound).
  *
  * Async-signal-safety of the handler->siglongjmp window.  Every
  * operation here is async-signal-safe (POSIX.1 "Signal Concepts"):
@@ -4019,7 +4097,8 @@ static const int __fault_signals[] = { SIGSEGV, SIGBUS, SIGFPE, SIGILL };
  * own instruction stream, so no second agent is mutating them at
  * fault time); siglongjmp(), which is on the async-signal-safe list;
  * and on the escalation path memset() (pure computation),
- * sigemptyset(), sigaction(), and raise() -- all async-signal-safe.
+ * sigemptyset(), sigaction(), and raise() -- all async-signal-safe --
+ * after the displaced handler, whose own safety is its owner's.
  * No heap, stdio, or locking is touched.  The proc's cleanup (at-exit
  * hooks, lock release, xtc_exit_self) runs AFTER the siglongjmp, in
  * normal context -- never in the handler.  SA_NODEFER keeps a fault
@@ -4032,7 +4111,6 @@ __xtc_fault_handler(int sig, siginfo_t *si, void *uctx)
 	struct xtc_proc *p = __current_proc;
 	struct xtc_coro *c = __xtc_current_coro;
 	int stack_overflow = 0;
-	(void)uctx;
 
 	/*
 	 * Stack-overflow detection.  A fault whose address lies in (or just
@@ -4065,15 +4143,7 @@ __xtc_fault_handler(int sig, siginfo_t *si, void *uctx)
 		siglongjmp(p->recovery_buf, sig);
 		/* NOTREACHED */
 	}
-	/* Escalate to process abort with the default disposition. */
-	{
-		struct sigaction sa;
-		memset(&sa, 0, sizeof sa);
-		sa.sa_handler = SIG_DFL;
-		(void)sigemptyset(&sa.sa_mask);
-		(void)sigaction(sig, &sa, NULL);
-	}
-	(void)raise(sig);
+	__fault_escalate(sig, si, uctx);
 }
 #endif /* !_WIN32 */
 
@@ -4189,34 +4259,49 @@ xtc_fault_guard_install(void)
 	return XTC_OK;
 #else
 	struct sigaction sa;
-	stack_t ss;
-	size_t i;
+	stack_t ss, cur;
+	int i, rc = XTC_OK;
 	/* 64 KiB is ample for a handler that only siglongjmps; a fixed
 	 * size avoids SIGSTKSZ (no longer a compile-time constant on
 	 * recent glibc).  Thread-local so each loop thread that installs
 	 * the guard gets its own stack. */
 	static XTC_THREAD_LOCAL char altstack[65536];
 
-	memset(&ss, 0, sizeof ss);
-	ss.ss_sp = altstack;
-	ss.ss_size = sizeof altstack;
-	ss.ss_flags = 0;
-	(void)sigaltstack(&ss, NULL);
+	/* Keep an alternate stack the thread already has (ASan's, a
+	 * language runtime's): its owner unmaps it at thread exit and
+	 * aborts if it was replaced.  The handler's own frames are small;
+	 * MINSIGSTKSZ-class stacks are refused as too small for the
+	 * displaced handler the guard may chain to. */
+	if (sigaltstack(NULL, &cur) != 0 || (cur.ss_flags & SS_DISABLE) ||
+	    cur.ss_size < 16384) {
+		memset(&ss, 0, sizeof ss);
+		ss.ss_sp = altstack;
+		ss.ss_size = sizeof altstack;
+		ss.ss_flags = 0;
+		(void)sigaltstack(&ss, NULL);
+	}
 
-	if (__fault_guard_installed)
+	(void)__xtc_mtx_lock(&__fault_lock);
+	if (__fault_guard_installed) {
+		(void)__xtc_mtx_unlock(&__fault_lock);
 		return XTC_OK;          /* process-wide sigaction: once */
-
+	}
 	memset(&sa, 0, sizeof sa);
 	sa.sa_sigaction = __xtc_fault_handler;
 	(void)sigemptyset(&sa.sa_mask);
 	sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
-	for (i = 0; i < sizeof __fault_signals / sizeof __fault_signals[0];
-	    i++) {
-		if (sigaction(__fault_signals[i], &sa, NULL) != 0)
-			return XTC_E_INTERNAL;
+	/* What each signal had before is what an uncontained fault on it
+	 * escalates to (__fault_escalate). */
+	for (i = 0; i < XTC_NFAULT_SIGNALS; i++) {
+		if (sigaction(__fault_signals[i], &sa, &__fault_prev[i]) != 0) {
+			rc = XTC_E_INTERNAL;
+			break;
+		}
 	}
-	__fault_guard_installed = 1;
-	return XTC_OK;
+	if (rc == XTC_OK)
+		__fault_guard_installed = 1;
+	(void)__xtc_mtx_unlock(&__fault_lock);
+	return rc;
 #endif
 }
 

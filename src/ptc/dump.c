@@ -289,6 +289,9 @@ crash_handler(int sig)
 	raise(sig);
 }
 
+/* proc.c: install under the fault guard when the guard owns sig. */
+int __xtc_fault_sig_install(int sig, const struct sigaction *act);
+
 /* PUBLIC: int xtc_crash_handler_install __P((void)); */
 int
 xtc_crash_handler_install(void)
@@ -302,9 +305,13 @@ xtc_crash_handler_install(void)
 	sigemptyset(&sa.sa_mask);
 	/* SA_NODEFER so a fault inside the handler hits the re-entrancy
 	 * guard rather than being silently blocked. */
-	sa.sa_flags = SA_NODEFER;
+	sa.sa_flags = SA_NODEFER | SA_ONSTACK;
+	/* Through the fault guard: for a signal the guard owns, the crash
+	 * handler becomes what an uncontained fault escalates to, and the
+	 * guard keeps containing proc faults, whichever was installed first
+	 * and however often either is called. */
 	for (i = 0; i < sizeof sigs / sizeof sigs[0]; i++)
-		(void)sigaction(sigs[i], &sa, NULL);
+		(void)__xtc_fault_sig_install(sigs[i], &sa);
 	return XTC_OK;
 }
 

@@ -1346,6 +1346,67 @@ test_fault_early_contain(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* The guard keeps an alternate signal stack the thread already has: its
+ * owner (ASan, a language runtime) unmaps it at thread exit, and ASan
+ * aborts in UnsetAlternateSignalStack when it was replaced.  Through 2.2
+ * the guard always installed its own.  A thread with none, or with one
+ * too small for the handler, gets the guard's.  Runs under ASan too (no
+ * fault is raised), where thread exit is the check. */
+#if !defined(_WIN32)
+static char alt_own[65536];
+
+static void *
+alt_thread(void *arg)
+{
+	int have = *(int *)arg;
+	stack_t ss, after;
+	memset(&ss, 0, sizeof ss);
+	if (have) {
+		ss.ss_sp = alt_own;
+		ss.ss_size = sizeof alt_own;
+		if (sigaltstack(&ss, NULL) != 0)
+			return (void *)1;
+	}
+	(void)sigaltstack(NULL, &ss);
+	if (xtc_fault_guard_install() != XTC_OK ||
+	    sigaltstack(NULL, &after) != 0)
+		return (void *)2;
+	if (have && (ss.ss_flags & SS_DISABLE) == 0 && after.ss_sp != ss.ss_sp)
+		return (void *)3; /* replaced */
+	if ((after.ss_flags & SS_DISABLE) != 0 || after.ss_size < 16384)
+		return (void *)4; /* no usable stack */
+	if (have) {
+		ss.ss_flags = SS_DISABLE;
+		(void)sigaltstack(&ss, NULL);
+	}
+	return NULL;
+}
+#endif
+
+static MunitResult
+test_fault_guard_altstack(const MunitParameter p[], void *d)
+{
+#if defined(_WIN32)
+	(void)p;
+	(void)d;
+	return MUNIT_SKIP; /* no sigaltstack; the VEH runs on the thread */
+#else
+	pthread_t t;
+	void *res;
+	int have;
+	(void)p;
+	(void)d;
+
+	for (have = 0; have <= 1; have++) {
+		munit_assert_int(pthread_create(&t, NULL, alt_thread, &have),
+		    ==, 0);
+		munit_assert_int(pthread_join(t, &res), ==, 0);
+		munit_assert_ptr_null(res);
+	}
+	return MUNIT_OK;
+#endif
+}
+
 /* Escalate path: a fault INSIDE a critical section must NOT be
  * contained -- shared state may be torn -- so it takes the whole
  * process down.  Verified in a forked child: the child arms a
@@ -3309,6 +3370,7 @@ static MunitTest tests[] = {
 	{ "/fault_user_frame_kind", test_fault_user_frame_kind, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/recovery_registry", test_recovery_registry, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fault_escalate",    test_fault_escalate,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/fault_guard_altstack", test_fault_guard_altstack, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/proc_at_exit",      test_proc_at_exit,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/pid_local_id_ceiling", test_pid_local_id_ceiling, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/pid_gen_no_wrap", test_pid_gen_no_wrap, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

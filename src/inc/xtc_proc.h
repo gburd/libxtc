@@ -691,8 +691,13 @@ typedef sigjmp_buf xtc_recovery_buf_t;
 /* Install the process-wide fault handler.  On POSIX it registers a
  * SIGSEGV/SIGBUS/SIGFPE/SIGILL handler on an alternate signal stack
  * (call once per loop thread for the alt stack; the handler is
- * installed once).  On Windows it registers a Vectored Exception
- * Handler.  Returns XTC_OK on success. */
+ * installed once).  A thread that already has an alternate stack of at
+ * least 16 KiB (ASan's, a language runtime's) keeps it.  A fault the
+ * guard cannot contain (no proc, a critical section, a stack overflow)
+ * goes to the handler the guard displaced -- an application's, a
+ * sanitizer's, or xtc_crash_handler_install's (in either install order)
+ * -- and then to the default action.  On Windows it registers a
+ * Vectored Exception Handler.  Returns XTC_OK on success. */
 int       xtc_fault_guard_install(void);
 
 /* Internal arm-slot for the xtc_proc_recovery_arm() macro (POSIX). */
