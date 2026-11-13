@@ -434,6 +434,28 @@ received, `XTC_E_DEADLK`); fixed, all pass, and the allocation auditor
 counts no message left behind.  Planted bug 49 (`SIM_DROP_LATE`)
 restores the old admission and is caught at seed 1.
 
+## FIXED (2.2): pdict entries were never released at proc exit
+
+**What it was.**  `xtc_pdict.h` and xtc_pdict(3) say a proc's entries
+are freed when it exits and that a destructor registered with
+`xtc_pdict_put_with_dtor` runs then.  Nothing called into the
+dictionary on the exit path, so every entry a proc did not clear itself
+stayed in the side table for the life of the process and its destructor
+never ran: three procs that put an entry with a destructor and returned
+ran it 0 times.
+
+**Fix.**  The proc exit path releases the proc's entries after its
+`xtc_proc_at_exit` hooks (so a hook can still read them), running each
+destructor once, however the proc ends (return, `xtc_exit_self`, a
+kill, a contained fault).  `xtc_loop_fini` does the same for a proc it
+tears down while parked; those destructors run on the finalizing
+thread.  An exit costs one relaxed load when no proc holds entries.
+`test/m12/test_observability` `/pdict/exit_cleanup` failed before (0 of
+6 destructors) and passes after.  xtc_pdict(3) also gave the wrong
+`xtc_pdict_get` signature and a 3-argument `xtc_pdict_put` in its
+example; both are corrected, and it now says a destructor must not call
+`xtc_pdict_*` (it runs under the dictionary's lock).
+
 ## Linux/XFS: io_uring WAL writes go to io-wq unless the filesystem has `lazytime`
 
 On XFS mounted without `lazytime`, a write that must update the file's

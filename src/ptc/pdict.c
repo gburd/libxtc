@@ -12,15 +12,17 @@
  *	    a tiny side-table mapping (xtc_pid -> dict head pointer)
  *	    protected by a mutex.  Linear scan is fine; at most ~hundreds
  *	    of procs hold dict state at once in typical workloads.
- *	  - Cleanup-on-exit is the responsibility of M16+ (when xtc_proc
- *	    grows a destructor hook).  For now, callers should call
- *	    xtc_pdict_clear() before their proc returns.
+ *	  - A proc's entries are released when it exits: the proc exit
+ *	    path calls __xtc_pdict_proc_exit after the proc's at-exit
+ *	    hooks, which runs each destructor and drops the side-table
+ *	    node.  xtc_loop_fini does the same for a proc it tears down.
  */
 
 #include "xtc_int.h"
 #include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
 #include "xtc_pdict.h"
 #include "xtc_proc.h"
+#include "proc_int.h" /* __xtc_pdict_proc_exit */
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -42,6 +44,13 @@ struct pdict_table_entry {
 
 static pthread_mutex_t __pd_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct pdict_table_entry *__pd_head;
+/* Side-table nodes linked on __pd_head, written under __pd_lock.  Read
+ * without it by __xtc_pdict_proc_exit so a proc exit takes the global
+ * lock only when some proc holds entries.  A proc's put happens-before
+ * its exit (on one thread, or across a migration hand-off), and the
+ * count includes that proc's node while it is linked, so an exiting
+ * proc that holds entries never reads 0. */
+static unsigned __pd_ntables;
 
 static struct pdict_table_entry *
 __pdict_find_locked(xtc_pid_t pid)
@@ -61,6 +70,7 @@ __pdict_get_or_create_locked(xtc_pid_t pid)
 	te->pid = pid;
 	te->next = __pd_head;
 	__pd_head = te;
+	xtc_atomic_fetch_add_u32(&__pd_ntables, 1, xtc_mo_relaxed);
 	return te;
 }
 
@@ -72,6 +82,8 @@ __remove_table_locked(xtc_pid_t pid)
 		if (xtc_pid_eq(te->pid, pid)) {
 			*link = te->next;
 			__os_free(te);
+			xtc_atomic_fetch_sub_u32(&__pd_ntables, 1,
+			    xtc_mo_relaxed);
 			return;
 		}
 	}
@@ -191,15 +203,15 @@ xtc_pdict_count(void)
 	return n;
 }
 
-int
-xtc_pdict_clear(void)
+/* Run every destructor of `pid`'s entries and free them and the
+ * side-table node.  Takes __pd_lock. */
+static void
+__pdict_clear_pid(xtc_pid_t pid)
 {
-	xtc_pid_t self = xtc_self();
 	struct pdict_table_entry *te;
 	struct pdict_entry *e, *next;
-	if (xtc_pid_is_none(self)) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&__pd_lock);
-	te = __pdict_find_locked(self);
+	te = __pdict_find_locked(pid);
 	if (te) {
 		for (e = te->head; e != NULL; e = next) {
 			next = e->next;
@@ -207,8 +219,27 @@ xtc_pdict_clear(void)
 			__os_free(e->key);
 			__os_free(e);
 		}
-		__remove_table_locked(self);
+		__remove_table_locked(pid);
 	}
 	(void)__xtc_mtx_unlock(&__pd_lock);
+}
+
+int
+xtc_pdict_clear(void)
+{
+	xtc_pid_t self = xtc_self();
+	if (xtc_pid_is_none(self))
+		return XTC_E_INVAL;
+	__pdict_clear_pid(self);
 	return XTC_OK;
+}
+
+/* Release the entries of the proc `pid`, which is exiting or being torn
+ * down by xtc_loop_fini.  Called from proc.c only. */
+void
+__xtc_pdict_proc_exit(xtc_pid_t pid)
+{
+	if (xtc_atomic_load_u32(&__pd_ntables, xtc_mo_relaxed) == 0)
+		return;
+	__pdict_clear_pid(pid);
 }

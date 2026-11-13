@@ -18,8 +18,8 @@
 .Fn xtc_pdict_put "const char *key" "void *value"
 .Ft int
 .Fn xtc_pdict_put_with_dtor "const char *key" "void *value" "xtc_pdict_dtor_fn dtor"
-.Ft "void *"
-.Fn xtc_pdict_get "const char *key"
+.Ft int
+.Fn xtc_pdict_get "const char *key" "void **value"
 .Ft int
 .Fn xtc_pdict_erase "const char *key"
 .Ft int
@@ -32,9 +32,19 @@ is a per-process dictionary similar to Erlang's
 .Sq put/get/erase .
 Each
 .Xr xtc_proc 3
-has its own private key-value store; entries are auto-cleaned
-when the proc exits, optionally invoking a destructor on each
-value.
+has its own private key-value store.
+When the proc exits, however it exits, its remaining entries are
+removed after its
+.Fn xtc_proc_at_exit
+hooks have run, and each entry's destructor, if it has one, is invoked
+on its value.
+A proc still alive when its loop is finalized has its entries
+removed by
+.Fn xtc_loop_fini
+.Pq see Xr xtc_loop 3
+the same way; there the destructors run on the thread calling
+.Fn xtc_loop_fini ,
+not on the proc.
 .Pp
 The store lives in a side-table keyed by pid rather than embedded
 in the proc struct, so adding a pdict entry doesn't affect the
@@ -57,7 +67,10 @@ when the entry is replaced or erased, and on every entry when the
 proc exits.
 .Pp
 .Fn xtc_pdict_get
-returns the current value or NULL.
+stores the current value of
+.Fa key
+in
+.Fa *value .
 .Pp
 .Fn xtc_pdict_erase
 removes the entry, invoking the dtor if registered.
@@ -66,18 +79,47 @@ removes the entry, invoking the dtor if registered.
 returns the number of entries in the calling proc's dictionary;
 .Fn xtc_pdict_clear
 removes them all, invoking each registered dtor.
+.Pp
+Destructors run with the dictionary's internal lock held, so a
+destructor must not call any
+.Fn xtc_pdict_*
+function.
+.Sh RETURN VALUES
+.Fn xtc_pdict_put ,
+.Fn xtc_pdict_put_with_dtor ,
+.Fn xtc_pdict_get ,
+.Fn xtc_pdict_erase
+and
+.Fn xtc_pdict_clear
+return
+.Dv XTC_OK
+on success and
+.Dv XTC_E_INVAL
+when called outside a proc, for a NULL argument, or (get and erase)
+when
+.Fa key
+is absent.
+The puts return
+.Dv XTC_E_NOMEM
+when an entry cannot be allocated.
+.Fn xtc_pdict_count
+returns the number of entries, 0 outside a proc.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 static void my_dtor(void *p) { free(p); }
 
 /* Stash a per-request scratch buffer in the dict. */
 char *buf = malloc(4096);
-xtc_pdict_put("scratch", buf, my_dtor);
+xtc_pdict_put_with_dtor("scratch", buf, my_dtor);
 
 /* Later in the same proc... */
-char *b = xtc_pdict_get("scratch");
+void *b;
+if (xtc_pdict_get("scratch", &b) == XTC_OK)
+        use(b);
+/* No clear needed: my_dtor frees buf when the proc exits. */
 .Ed
 .Sh SEE ALSO
+.Xr xtc_loop 3 ,
 .Xr xtc_proc 3 ,
 .Xr xtc_mctx 3 ,
 .Xr xtc 7

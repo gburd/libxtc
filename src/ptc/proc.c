@@ -1183,6 +1183,7 @@ __xtc_proc_loop_unregister(xtc_loop_t *loop)
 			__mon_free(me);
 		}
 		p->monitored_by = NULL;
+		__xtc_pdict_proc_exit(p->pid);
 		if (p->proc_mctx != NULL) {
 			xtc_mctx_destroy(p->proc_mctx);
 			p->proc_mctx = NULL;
@@ -5186,6 +5187,7 @@ __run_proc_at_exit(struct xtc_proc *p)
 	for (i = p->n_at_exit - 1; i >= 0; i--)
 		p->at_exit[i].fn(p->at_exit[i].arg);
 	p->n_at_exit = 0;
+	__xtc_pdict_proc_exit(p->pid);
 	__xtc_cfg_task_exit(p->task);
 	if (p->proc_mctx != NULL) {
 		xtc_mctx_destroy(p->proc_mctx);
