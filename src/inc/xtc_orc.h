@@ -138,15 +138,14 @@ typedef struct xtc_sup_opts {
 }
 
 /*
- * PUBLIC: int  xtc_sup_start __P((xtc_loop_t *, const xtc_sup_opts_t *, const
- * xtc_child_spec_t *, int, xtc_supervisor_t **)); PUBLIC: int xtc_sup_add_child
- * __P((xtc_supervisor_t *, const xtc_child_spec_t *, xtc_pid_t *)); PUBLIC: int
- * xtc_sup_stop __P((xtc_supervisor_t *)); PUBLIC: int  xtc_sup_n_children
- * __P((const xtc_supervisor_t *)); PUBLIC: int  xtc_sup_n_alive __P((const
- * xtc_supervisor_t *)); PUBLIC: int  xtc_sup_n_restarts __P((const
- * xtc_supervisor_t *)); PUBLIC: int  xtc_sup_alive __P((const xtc_supervisor_t
- * *)); PUBLIC: int  xtc_sup_child_restarts __P((const xtc_supervisor_t *, int,
- * int *));
+ * PUBLIC: int  xtc_sup_start __P((xtc_loop_t *, const xtc_sup_opts_t *, const xtc_child_spec_t *, int, xtc_supervisor_t **));
+ * PUBLIC: int  xtc_sup_add_child __P((xtc_supervisor_t *, const xtc_child_spec_t *, xtc_pid_t *));
+ * PUBLIC: int  xtc_sup_stop __P((xtc_supervisor_t *));
+ * PUBLIC: int  xtc_sup_n_children __P((const xtc_supervisor_t *));
+ * PUBLIC: int  xtc_sup_n_alive __P((const xtc_supervisor_t *));
+ * PUBLIC: int  xtc_sup_n_restarts __P((const xtc_supervisor_t *));
+ * PUBLIC: int  xtc_sup_alive __P((const xtc_supervisor_t *));
+ * PUBLIC: int  xtc_sup_child_restarts __P((const xtc_supervisor_t *, int, int *));
  */
 
 /*

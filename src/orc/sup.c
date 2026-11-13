@@ -1155,8 +1155,7 @@ int xtc_sup_n_restarts(const xtc_supervisor_t *sup) {
 	        xtc_mo_relaxed) :
 	    0;
 }
-/* PUBLIC: int xtc_sup_child_restarts __P((const xtc_supervisor_t *, int, int
- * *)); */
+/* PUBLIC: int xtc_sup_child_restarts __P((const xtc_supervisor_t *, int, int *)); */
 int
 xtc_sup_child_restarts(const xtc_supervisor_t *sup, int index, int *out)
 {
