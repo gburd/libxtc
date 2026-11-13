@@ -877,7 +877,7 @@ class XtcProc(gdb.Command):
               % (str(p), _pid_str(p["pid"]), str(p["loop"])))
         print("  state        : %s" % _proc_state(p))
         print("  alive        : %d   kill_pending=%d"
-              % (int(p["alive"]), int(p["kill_pending"])))
+              % (int(p["alive"]), 1 if int(p["kill_pending"]) else 0))
         print("  mailbox      : depth=%d peak=%d cap=%d saved=%d recv_total=%d drop_total=%d"
               % (int(p["mbox_n"]), int(p["mbox_peak"]), int(p["mbox_cap"]),
                  int(p["mbox_saved"]), int(p["mbox_recv_total"]),

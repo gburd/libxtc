@@ -19,7 +19,7 @@
  *	cancellation unwinds the fiber (the A1+A2 guarantee).
  *
  *	WHAT IS MODELLED (transcribed from proc.c):
- *	  remote:  CAS kill_pending 0 -> reason+1 (release) -- xtc_exit_pid.
+ *	  remote:  CAS kill_pending 0 -> kill word (release) -- xtc_exit_pid.
  *	  owner (single fiber, so mask_depth/mask_deferred are owner-only,
  *	         no atomics -- exactly as in proc.c):
  *	    mask++          (xtc_uncancelable enter)
@@ -52,9 +52,9 @@
 
 /* Shared: kill_pending is the ONLY cross-thread field (atomic, exactly
  * as in proc.c).  mask_depth / mask_deferred are owner-only. */
-static _Atomic int kill_pending;   /* 0 = none; reason+1 otherwise */
+static _Atomic int64_t kill_pending; /* 0 = none; else flag bit | reason */
 static int mask_depth;             /* owner-only */
-static int mask_deferred;          /* owner-only latch: reason+1, 0 = none */
+static int64_t mask_deferred;      /* owner-only latch: kill word, 0 = none */
 static int acted;                  /* monotone: how many times the kill fired */
 
 /* "Act" on a kill: the real code unwinds via xtc_exit_self, which does
@@ -64,9 +64,9 @@ static int acted;                  /* monotone: how many times the kill fired */
  * The invariant is that `acted` ends at exactly 1 when the remote fired. */
 static int gone;               /* set once the fiber has unwound */
 static void
-act(int reason_plus1)
+act(int64_t kw)
 {
-	(void)reason_plus1;
+	(void)kw;
 	acted++;
 	gone = 1;                  /* xtc_exit_self does not return */
 }
@@ -75,7 +75,7 @@ act(int reason_plus1)
 static void
 kill_deliver(void)
 {
-	int kp = atomic_load_explicit(&kill_pending, memory_order_acquire);
+	int64_t kp = atomic_load_explicit(&kill_pending, memory_order_acquire);
 	if (kp == 0)
 		return;
 	if (mask_depth > 0) {
@@ -90,7 +90,7 @@ kill_deliver(void)
 static void
 mask_drain(void)
 {
-	int kp;
+	int64_t kp;
 	if (mask_depth > 0)
 		return;
 	kp = mask_deferred;
@@ -123,7 +123,7 @@ owner(void)
 }
 
 /*
- * Remote killer: xtc_exit_pid's release-CAS (0 -> reason+1, first wins).
+ * Remote killer: xtc_exit_pid's release-CAS (0 -> kill word, first wins).
  *
  * Deliberately keeps NO separate "did I fire" flag.  An earlier version
  * set a helper global here and branched on it in main(); CBMC is free to
@@ -135,8 +135,8 @@ owner(void)
 static void
 killer(void)
 {
-	int expected = 0;
-	int desired = 2;      /* reason 1 -> encoded reason+1 == 2 */
+	int64_t expected = 0;
+	int64_t desired = (int64_t)((UINT64_C(1) << 32) | 1u); /* reason 1 */
 	(void)atomic_compare_exchange_strong_explicit(&kill_pending,
 	    &expected, desired, memory_order_release, memory_order_relaxed);
 }
@@ -189,8 +189,8 @@ main(void)
 	 * within this bounded window).
 	 */
 	{
-		int pending = atomic_load_explicit(&kill_pending,
-		    memory_order_acquire);
+		int64_t pending =
+		    atomic_load_explicit(&kill_pending, memory_order_acquire);
 		int did_fire = (acted != 0) || (pending != 0) ||
 		    (mask_deferred != 0);
 
