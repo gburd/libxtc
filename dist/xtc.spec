@@ -12,7 +12,7 @@
 %global sover 2
 
 Name:           libxtc
-Version:        2.1.1
+Version:        2.2.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,19 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Fri Nov 13 2026 Greg Burd <greg@burd.me> - 2.2.0-1
+- MINOR on 2.x; SONAME libxtc.so.2, three new exports in XTC_2.2.  New:
+  xtc_atomic.h and xtc_compiler.h (every installed header now compiles
+  as C++), xtc_reg_put / xtc_reg_visit, the supervisor's on_child_down
+  hook, XTC_DOWN_KIND_KILLED, XTC_E_EXIST / XTC_E_STATE,
+  xtc_tnt_send_from and spec.spin_ns.  Changed: xtc_tnt_spec_t is
+  size-first (experimental tier; rebuild xtc_tnt users); a contained
+  fault in a user recovery frame is SIGNAL, -1 is a deliverable exit
+  reason, a kill is KILLED, a failed server init is EXIT(rc).  Fixed: a
+  pid reaches its proc across executors; xtc_exec_run returns after the
+  last task; armed xtc_tnt timers are freed at stop; the MinGW build;
+  and the 2.1.2 fixes.
+
 * Thu Oct 29 2026 Greg Burd <greg@burd.me> - 2.1.1-1
 - PATCH on 2.1: fixes only, ABI-compatible with 2.0.0 and 2.1.0.  Under
   ThreadSanitizer on glibc 2.44 (x86-64) a proc exit or kill no longer

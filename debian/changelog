@@ -1,3 +1,75 @@
+libxtc (2.2.0-1) unstable; urgency=medium
+
+  * MINOR release on 2.x: new API, behaviour changes listed below, and the
+    fixes 2.1.2 shipped plus later ones.  SONAME stays libxtc.so.2.  The
+    library exports 2.1.2's 761 functions, each still in XTC_2.0, plus 3
+    new ones in the new XTC_2.2 version node; none was removed.  Stable-
+    tier structs only grew at the end (xtc_sup_opts_t 40 -> 56 bytes);
+    the experimental xtc_tnt_spec_t changed layout (below).
+  * New API:
+    - xtc_atomic.h and xtc_compiler.h, two stable headers included by
+      xtc.h: xtc_atomic_<op>_<type>(p, ..., order) on plain storage with
+      an explicit memory order on every call, and the compiler
+      directives (XTC_LIKELY, XTC_CACHE_LINE, XTC_THREAD_LOCAL, ...).
+      The library, tests and examples use them in place of C11 _Atomic,
+      so every installed header compiles as C++ (g++ and clang++ -std=
+      c++17) and MSVC no longer needs /experimental:c11atomics.  The
+      API discipline gate rejects C11 atomics outside xtc_atomic.h.
+    - xtc_reg_put / xtc_reg_visit: a registry entry carries a caller-owned
+      value, and xtc_reg_visit hands it to a callback under the registry
+      lock (XTC_REG_DUP, XTC_REG_MONITOR flags).
+    - xtc_sup_opts_t.on_child_down: the supervisor reports every child
+      DOWN, fully classified, before its restart decision, including
+      siblings a group restart kills and children a stop kills.
+    - XTC_DOWN_KIND_KILLED (5, appended): a death by xtc_exit_pid, a
+      supervisor kill or a link kill.
+    - XTC_E_EXIST (-13) and XTC_E_STATE (-14), appended.
+    - xtc_tnt_send_from: a thread-safe send to an Isolate from outside
+      any handler.  xtc_tnt_spec_t.spin_ns: an idle shard busy-polls its
+      rings before it parks.
+  * Changed:
+    - xtc_tnt_spec_t is size-first: set .size with XTC_TNT_SPEC_INIT; a
+      zeroed spec is refused with XTC_E_INVAL.  xtc_tnt_start keeps a
+      copy of the spec.  Every field moved by 8 bytes (40 -> 56), allowed
+      because xtc_tnt.h is experimental; rebuild code that uses xtc_tnt.
+    - A contained fault in a user recovery frame reports kind SIGNAL
+      with the fault's signal, whatever code the recovery path passes.
+    - Every int is a deliverable exit reason: xtc_exit_self(-1) no
+      longer reads as CLEAN, and xtc_exit_pid(p, -1) kills.
+    - A kill reports XTC_DOWN_KIND_KILLED instead of EXIT.
+    - An xtc_svr whose init fails, and an xtc_fsm whose first enter
+      fails, ends with EXIT(rc) instead of CLEAN.  A TRANSIENT child that
+      fails its init, or recovers from a fault and exits 0, is now
+      restarted.
+    - xtc_sup_add_child from the supervisor's own fiber returns
+      XTC_E_STATE at once instead of waiting 5 s.
+  * Fixes:
+    - A pid names its loop by a process-wide id, so xtc_send between two
+      xtc_execs (or two standalone loops) reaches the addressed proc; it
+      was delivered to the proc in the same slot of the sender's
+      executor.  xtc_tnt runs on its own executor, so any program with
+      xtc_tnt and its own executor hit it.
+    - xtc_exec_run returns after the last task finishes: a loop
+      published its timer count only after a step returned, so a step
+      that dropped its last timer and then blocked kept a stale count.
+    - A timer still armed when xtc_tnt stops is freed (32 bytes leaked
+      per pending timer).
+    - MinGW: os_thread.c includes <windows.h>; the library did not
+      compile.
+    - The 2.1.2 fixes (stale readiness events, fault-recovery re-walks,
+      scope finalizers, supervisor shutdown and group restart, mailbox
+      replies, future combinators, AIO reaper and loop teardown, the
+      executable-stack note, cross-shard xtc_tnt_send, illumos AIO).
+  * Tests: CBMC harnesses that link the library source unchanged, a
+    drift gate for the transcribed ones, and harnesses for the loop
+    registry and the xtc_tnt ring; DST of DOWN classification and of
+    pids across executors; planted bugs 30-35 the simulator catches.
+  * Examples moved to their own repository (libxtc-examples), carried as
+    the examples/ submodule; 16_l2book, an order book on xtc_tnt and
+    fibers, joins check-examples.
+
+ -- Greg Burd <greg@burd.me>  Fri, 13 Nov 2026 09:00:00 -0500
+
 libxtc (2.1.1-1) unstable; urgency=medium
 
   * PATCH release on 2.1: fixes only.  ABI-compatible with 2.0.0 and
