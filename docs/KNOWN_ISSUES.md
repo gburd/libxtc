@@ -502,6 +502,13 @@ seeing a freed node).  `test/m13/test_rcu` `/fiber_readers_migrate`
 runs eight migratable reader fibers holding read-sides across yields
 on four loops against a synchronizing writer.
 
+The same generation now covers OS threads.  `xtc_rcu_fini` freed every
+thread's reader slot but cleared only its caller's pointer to it, so
+another thread that had read before the fini kept writing the freed slot
+after an `xtc_rcu_init`, synchronize did not scan it, and an object that
+thread held was freed under it (`test/m13/test_rcu`
+`/thread_reader_after_fini` failed before, passes after).
+
 ## Linux/XFS: io_uring WAL writes go to io-wq unless the filesystem has `lazytime`
 
 On XFS mounted without `lazytime`, a write that must update the file's

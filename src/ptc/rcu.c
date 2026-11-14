@@ -90,15 +90,26 @@ struct rcu_state {
 
 static struct rcu_state __rcu = { XTC_RCU_EPOCH_START,
     PTHREAD_MUTEX_INITIALIZER, NULL, {0}, 0 };
-static XTC_THREAD_LOCAL struct rcu_tls *__rcu_self = NULL;
+/*
+ * This thread's reader slot and the __rcu_gen it was registered in, in
+ * one thread-local so the read-side fast path reaches one TLS block.
+ * xtc_rcu_fini frees every slot but can clear only its caller's
+ * pointer; another thread learns its slot is gone from the generation.
+ */
+struct rcu_self {
+	struct rcu_tls *slot;
+	uint32_t gen;
+};
+static XTC_THREAD_LOCAL struct rcu_self __rcu_self;
 
 /*
  * The registry's generation.  xtc_rcu_fini frees every registered slot
  * and bumps this, so a slot pointer cached by a fiber (task->rcu_slot)
- * that is older than the current generation names freed memory and is
- * looked up again.  Starts at 1 so a zeroed task (generation 0) never
- * matches.  Written under __rcu.lock; read by a fiber with acquire, so
- * a fiber that sees the new value also sees the emptied table.
+ * or by another thread (__rcu_self) that is older than the current
+ * generation names freed memory and is looked up again.  Starts at 1 so
+ * a zeroed task or thread (generation 0) never matches.  Written under
+ * __rcu.lock; read with acquire, so a reader that sees the new value
+ * also sees the emptied table.
  */
 static uint32_t __rcu_gen = 1;
 
@@ -176,12 +187,21 @@ __rcu_slabs_ensure(void)
 	(void)__xtc_mtx_unlock(&__rcu_slab_init_lock);
 }
 
-/* Lazy registration of the per-thread slot. */
-static int
-__rcu_register(void)
+/* Out of line and cold: the slow paths of a read-side, kept out of
+ * the inlined fast path. */
+#if defined(_MSC_VER)
+#define RCU_SLOW __declspec(noinline)
+#else
+#define RCU_SLOW __attribute__((noinline, cold))
+#endif
+
+/* Register a slot for this thread in generation `gen` (the caller's
+ * read of __rcu_gen).  On OOM the thread has no slot. */
+RCU_SLOW static int
+__rcu_register(uint32_t gen)
 {
 	struct rcu_tls *t;
-	if (__rcu_self != NULL) return XTC_OK;
+	__rcu_self.slot = NULL;
 	__rcu_slabs_ensure();
 	if (xtc_atomic_load_ptr(&__rcu_tls_slab, xtc_mo_seq_cst) == NULL)
 		return XTC_E_RESOURCE;
@@ -193,7 +213,8 @@ __rcu_register(void)
 	t->next = __rcu.registry;
 	__rcu.registry = t;
 	(void)__xtc_mtx_unlock(&__rcu.lock);
-	__rcu_self = t;
+	__rcu_self.slot = t;
+	__rcu_self.gen = gen;
 	return XTC_OK;
 }
 
@@ -262,7 +283,7 @@ __rcu_fiber_slot(xtc_task_t *cur)
  * older registry generation: look it up under __rcu.lock, creating it
  * on first use, and cache it in the task.  NULL on OOM.
  */
-static struct rcu_tls *
+RCU_SLOW static struct rcu_tls *
 __rcu_fiber_slot_refresh(xtc_task_t *cur, uint32_t gen)
 {
 	cur->rcu_slot = __rcu_fiber_slot(cur);
@@ -284,19 +305,22 @@ static inline struct rcu_tls *
 __rcu_reader_slot(int create)
 {
 	xtc_task_t *cur = __xtc_current_task();
+	uint32_t gen = xtc_atomic_load_u32(&__rcu_gen, xtc_mo_acquire);
+	struct rcu_self *self;
 	if (cur != NULL) {
-		uint32_t gen = xtc_atomic_load_u32(&__rcu_gen, xtc_mo_acquire);
 		if (XTC_LIKELY(cur->rcu_slot != NULL &&
 		        (cur->rcu_gen == gen ||
 		            XTC_DST_BUG(XTC_DST_BUG_RCU_SLOT_GEN))))
 			return cur->rcu_slot;
 		return __rcu_fiber_slot_refresh(cur, gen);
 	}
-	if (XTC_UNLIKELY(__rcu_self == NULL)) {
-		if (!create) return NULL;
-		(void)__rcu_register();
-	}
-	return __rcu_self;
+	self = &__rcu_self;
+	if (XTC_LIKELY(self->slot != NULL && self->gen == gen))
+		return self->slot;
+	if (!create)
+		return NULL;
+	(void)__rcu_register(gen);
+	return self->slot;
 }
 
 int
@@ -342,11 +366,11 @@ xtc_rcu_fini(void)
 	 * just drop the table's bucket heads and the thread slot pointer. */
 	for (b = 0; b < XTC_RCU_FTBL_SIZE; b++)
 		__rcu_ftbl[b] = NULL;
-	/* Every slot a fiber cached is freed above: retire them all. */
+	/* Every slot a fiber or thread cached is freed above: retire them. */
 	xtc_atomic_store_u32(&__rcu_gen,
 	    xtc_atomic_load_u32(&__rcu_gen, xtc_mo_relaxed) + 1u,
 	    xtc_mo_release);
-	__rcu_self = NULL;
+	__rcu_self.slot = NULL;
 	__rcu.inited = 0;
 	xtc_atomic_store_u64(&__rcu.epoch, XTC_RCU_EPOCH_START, xtc_mo_relaxed);
 	(void)__xtc_mtx_unlock(&__rcu.lock);

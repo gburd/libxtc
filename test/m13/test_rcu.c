@@ -220,6 +220,90 @@ test_reader_before_first_sync(const MunitParameter p[], void *d)
 }
 
 /*
+ * A thread that registered before an xtc_rcu_fini + xtc_rcu_init (taken
+ * while it was between read-sides) must still hold off reclamation in a
+ * read-side after them.  fini freed the thread's slot and cleared only
+ * the calling thread's pointer, so the reader kept writing a freed slot
+ * that synchronize no longer scanned, and the object was freed under it.
+ */
+static int g_fi_inside;
+static int g_fi_freed_inside;
+
+static void
+fi_free(void *p)
+{
+	if (xtc_atomic_load_i32(&g_fi_inside, xtc_mo_seq_cst))
+		xtc_atomic_store_i32(&g_fi_freed_inside, 1, xtc_mo_seq_cst);
+	free(p);
+}
+
+static void *
+fi_reader(void *arg)
+{
+	struct timespec ts = { 0, 100 * 1000 };
+	(void)arg;
+	xtc_rcu_read_lock(); /* register this thread's slot */
+	xtc_rcu_read_unlock();
+	xtc_atomic_store_i32(&g_phase, 1, xtc_mo_seq_cst);
+	while (xtc_atomic_load_i32(&g_phase, xtc_mo_seq_cst) < 2)
+		nanosleep(&ts, NULL);
+	xtc_rcu_read_lock(); /* after fini + init */
+	xtc_atomic_store_i32(&g_fi_inside, 1, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_phase, 3, xtc_mo_seq_cst);
+	while (xtc_atomic_load_i32(&g_phase, xtc_mo_seq_cst) < 4)
+		nanosleep(&ts, NULL);
+	xtc_atomic_store_i32(&g_fi_inside, 0, xtc_mo_seq_cst);
+	xtc_rcu_read_unlock();
+	return NULL;
+}
+
+static void *
+fi_writer(void *arg)
+{
+	int i;
+	(void)arg;
+	for (i = 0; i < 3; i++)
+		xtc_rcu_synchronize();
+	return NULL;
+}
+
+static MunitResult
+test_thread_reader_after_fini(const MunitParameter p[], void *d)
+{
+	struct timespec ts = { 0, 100 * 1000 };
+	struct timespec hold = { 0, 50 * 1000 * 1000 }; /* 50 ms */
+	pthread_t rd, wr;
+	(void)p;
+	(void)d;
+
+	xtc_atomic_store_i32(&g_phase, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_fi_inside, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_fi_freed_inside, 0, xtc_mo_seq_cst);
+	munit_assert_int(xtc_rcu_init(), ==, XTC_OK);
+	munit_assert_int(pthread_create(&rd, NULL, fi_reader, NULL), ==, 0);
+	while (xtc_atomic_load_i32(&g_phase, xtc_mo_seq_cst) < 1)
+		nanosleep(&ts, NULL);
+	xtc_rcu_fini();
+	munit_assert_int(xtc_rcu_init(), ==, XTC_OK);
+	xtc_atomic_store_i32(&g_phase, 2, xtc_mo_seq_cst);
+	while (xtc_atomic_load_i32(&g_phase, xtc_mo_seq_cst) < 3)
+		nanosleep(&ts, NULL);
+	xtc_rcu_retire(malloc(64), fi_free);
+	munit_assert_int(pthread_create(&wr, NULL, fi_writer, NULL), ==, 0);
+	nanosleep(&hold, NULL);
+	xtc_atomic_store_i32(&g_phase, 4, xtc_mo_seq_cst);
+	pthread_join(wr, NULL);
+	pthread_join(rd, NULL);
+	xtc_rcu_synchronize();
+	xtc_rcu_synchronize();
+	munit_assert_int(xtc_atomic_load_i32(&g_fi_freed_inside,
+	                     xtc_mo_seq_cst),
+	    ==, 0);
+	xtc_rcu_fini();
+	return MUNIT_OK;
+}
+
+/*
  * Migratable reader fibers on a 4-loop executor hold read-sides across
  * yields (so a read-side can end on another loop's thread) while a
  * writer fiber swaps, retires and synchronizes.  A reader must never see
@@ -345,6 +429,8 @@ static MunitTest tests[] = {
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fiber_readers_migrate", test_fiber_readers_migrate, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/thread_reader_after_fini", test_thread_reader_after_fini, NULL,
+	    NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m13/rcu", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
