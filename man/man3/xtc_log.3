@@ -1,6 +1,6 @@
 .\" Copyright (c) 2026, The XTC Project
 .\" Use of this source code is governed by the ISC License.
-.Dd May 28, 2026
+.Dd November 13, 2026
 .Dt XTC_LOG 3
 .Os
 .Sh NAME
@@ -14,6 +14,10 @@
 .Nm xtc_log_swap_default ,
 .Nm xtc_log_default ,
 .Nm xtc_log_drop_count ,
+.Nm xtc_logf ,
+.Nm xtc_logf_to ,
+.Nm xtc_logf_impl ,
+.Nm xtc_logarg ,
 .Nm XTC_LOG_DEBUG_F ,
 .Nm XTC_LOG_INFO_F ,
 .Nm XTC_LOG_WARN_F ,
@@ -42,6 +46,20 @@
 .Fn xtc_log_default "void"
 .Ft int
 .Fn xtc_log_drop_count "const xtc_log_t *log"
+.Ft void
+.Fn xtc_logf "xtc_log_level_t lvl" "const char *fmt" "..."
+.Ft void
+.Fn xtc_logf_to "xtc_log_t *log" "xtc_log_level_t lvl" "const char *fmt" "..."
+.Ft void
+.Fo xtc_logf_impl
+.Fa "xtc_log_t *log"
+.Fa "xtc_log_level_t lvl"
+.Fa "const char *fmt"
+.Fa "int nargs"
+.Fa "const xtc_logarg_t *args"
+.Fc
+.Ft xtc_logarg_t
+.Fn xtc_logarg "value"
 .Sh DESCRIPTION
 .Nm xtc_log
 is a predictable-latency logger: callers append records to an
@@ -123,6 +141,153 @@ no other thread can be logging.
 returns the current default.
 .Fn xtc_log_drop_count
 reports how many records were dropped because the ring was full.
+.Ss Typed records
+.Fn xtc_logf
+writes a record to the default logger, and
+.Fn xtc_logf_to
+to
+.Fa log .
+They are function-like macros.
+Each
+.Ql {}
+in
+.Fa fmt
+takes the next argument and formats it by that argument's own type, so a
+call has no conversion letter to get wrong and no
+.Dv PRIu64 :
+.Bd -literal -offset indent
+xtc_logf(XTC_LOG_INFO, "loop {} drained {} bytes in {} us",
+    loop_id, nbytes, us);
+.Ed
+.Pp
+An argument of any integer type prints as its value, whatever its width
+or signedness:
+.Vt int8_t
+to
+.Vt uint64_t ,
+.Vt size_t ,
+.Vt ssize_t ,
+.Vt ptrdiff_t ,
+.Vt intptr_t ,
+.Vt off_t ,
+.Vt pid_t ,
+an enumeration,
+.Vt char ,
+and
+.Vt _Bool
+(0 or 1).
+A character literal is an
+.Vt int
+in C, so
+.Ql 'x'
+prints 120.
+A
+.Vt float
+or
+.Vt double
+prints as with
+.Ql %g .
+A
+.Vt "char *"
+or
+.Vt "const char *"
+prints as the string, and a null one as
+.Ql (null) .
+Any other object pointer prints as
+.Ql 0x
+and its address in hex.
+With
+.In xtc_proc.h ,
+an
+.Vt xtc_pid_t
+prints as
+.Ql <loop_id.local_id.gen> .
+A struct or union argument does not compile; nor does a function pointer
+in C++ (C converts one to a data pointer, which ISO C leaves undefined,
+and
+.Fl Wpedantic
+warns).
+gcc gives a bit-field a type of its own, which gcc 14 rejects: cast it.
+.Pp
+A spec after a colon changes the format:
+.Bl -tag -width "{:08x}" -offset indent
+.It Li {:x} {:X}
+hex, lower or upper case
+.It Li {:o}
+octal
+.It Li {:8}
+at least 8 characters, padded on the left with spaces
+.It Li {:08x}
+zero-filled to 8 characters (for a number)
+.It Li {:.3}
+3 decimal places for a floating value, at most 3 characters of a string
+.It Li {:p}
+an address in hex, a string's included
+.El
+.Pp
+A negative integer in hex or octal prints as its two's complement in its
+own width: an
+.Vt int8_t
+of \-1 is
+.Ql ff .
+A spec letter that does not apply to the argument's type is ignored.
+.Ql {{
+and
+.Ql }}
+print one brace.
+A brace that does not start a well-formed placeholder prints as itself
+and is not counted.
+.Pp
+A call takes at most 16 arguments after
+.Fa fmt ;
+a 17th is a compile error.
+When the placeholders and the arguments do not match, the record is still
+written, starting with a marker such as
+.Ql "[xtc_logf: 2 args, 3 {}] " ;
+a placeholder with no argument prints as written, and an argument with no
+placeholder is not printed.
+The marker comes first so that truncation to
+.Va record_max
+cannot cut it off.
+A mismatch is never undefined behaviour.
+.Pp
+The record path is the one
+.Fn xtc_log_write
+takes: the level floor (checked before any formatting), the ring, the
+sink, the 1024-byte line and
+.Va record_max
+truncation, and
+.Fn xtc_log_drop_count .
+As with any function call, each argument is evaluated once, before the
+level is checked.
+.Pp
+C needs C11
+.Pq Li _Generic ;
+Microsoft C needs
+.Li /std:c11
+(Visual Studio 2019 16.8 or later), which also selects the conforming
+preprocessor the argument count relies on.
+C++ needs C++11: the same calls resolve through overloads of
+.Fn xtc_logarg ,
+and a scoped enumeration needs a cast.
+Under C++98 the header still compiles, without
+.Fn xtc_logf .
+.Pp
+.Fn xtc_logarg
+converts one value to an
+.Vt xtc_logarg_t ,
+and
+.Fn xtc_logf_impl
+formats
+.Fa fmt
+with the
+.Fa nargs
+converted arguments in
+.Fa args
+and appends the record; the macros expand to these two.
+Calling them directly is supported, but
+.Fn xtc_logf
+is the interface.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 xtc_log_t *log;
@@ -133,6 +298,7 @@ opts.floor = XTC_LOG_INFO;
 xtc_log_create(&opts, &log);
 xtc_log_set_default(log);
 XTC_LOG_INFO_F("server started on port %d", port);
+xtc_logf(XTC_LOG_INFO, "listening on {} with {} workers", port, nworkers);
 xtc_log_drain(log);    /* from a thread that may block on the sink */
 .Ed
 .Sh SEE ALSO
@@ -144,3 +310,9 @@ Appeared in xtc 0.1.
 .Fn xtc_log_swap_default
 appeared in xtc 2.2, as did the guarantee that a drain never hands the
 sink a record a writer has not finished.
+.Fn xtc_logf ,
+.Fn xtc_logf_to ,
+.Fn xtc_logf_impl ,
+and
+.Fn xtc_logarg
+appeared in xtc 2.2.

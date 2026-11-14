@@ -41,6 +41,7 @@
 #include "xtc_io.h"
 #include "xtc_fs.h"
 #include "xtc_xproc.h"
+#include "xtc_log.h"
 #include "os_time.h"
 
 #define CHECK(cond) do { \
@@ -49,6 +50,26 @@
 		return 1; \
 	} \
 } while (0)
+
+/* xtc_logf under cl /std:c11 (_Generic, the conforming preprocessor):
+ * the drained record must be exactly this text. */
+static char s_logf_rec[256];
+static int
+smoke_logf_sink(void *user, xtc_log_level_t lvl, const char *buf, size_t len)
+{
+	const char *body = (const char *)memchr(buf, ']', len);
+
+	(void)user;
+	(void)lvl;
+	if (body == NULL || len - (size_t)(body - buf) < 9 ||
+	    len - (size_t)(body - buf) - 9 >= sizeof s_logf_rec)
+		return -1;
+	body += 8;
+	len -= (size_t)(body - buf) + 1;
+	memcpy(s_logf_rec, body, len);
+	s_logf_rec[len] = '\0';
+	return 0;
+}
 
 /* Fault containment: a proc arms a recovery frame, then dereferences a
  * wild pointer.  On Windows the access violation is caught by the
@@ -825,6 +846,28 @@ main(int argc, char **argv)
 		printf("  ok   xtc_xproc: re-exec child spawn+send+monitor, "
 		    "DOWN reason=42\n");
 		(void)xtc_loop_fini(loop);
+	}
+
+	/* --- xtc_logf --- */
+	{
+		xtc_log_opts_t lo = XTC_LOG_OPTS_DEFAULT;
+		xtc_log_t *lg = NULL;
+		const char *want = "18446744073709551615 -9223372036854775808 "
+		                   "42 0000beef <1.2.3> (null)";
+		xtc_pid_t lp = { 1, 2, 3 };
+		uint64_t big = UINT64_MAX;
+		int64_t neg = INT64_MIN;
+		size_t z = 42;
+
+		lo.sink = smoke_logf_sink;
+		lo.sink_fd = -1;
+		CHECK(xtc_log_create(&lo, &lg) == XTC_OK);
+		xtc_logf_to(lg, XTC_LOG_INFO, "{} {} {} {:08x} {} {}", big, neg,
+		    z, 0xbeefu, lp, (const char *)NULL);
+		CHECK(xtc_log_drain(lg) == 1);
+		CHECK(strcmp(s_logf_rec, want) == 0);
+		xtc_log_destroy(lg);
+		printf("  ok   xtc_logf: %s\n", s_logf_rec);
 	}
 
 	printf("All MSVC smoke checks passed.\n");

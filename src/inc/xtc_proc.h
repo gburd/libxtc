@@ -25,6 +25,7 @@
 #include <stdint.h>
 
 #include "xtc.h"
+#include "xtc_log.h" /* xtc_logarg_t, for an xtc_pid_t in xtc_logf */
 #include "xtc_loop.h"
 #include "xtc_async.h"
 #include "xtc_exec.h"   /* xtc_exec_class_t for xtc_proc_opts_t.sched_class */
@@ -79,6 +80,31 @@ xtc_pid_is_none(xtc_pid_t p)
 {
 	return p.loop_id == 0 && p.local_id == 0 && p.gen == 0;
 }
+
+/* An xtc_pid_t as an xtc_logf argument: {} prints <loop_id.local_id.gen>.
+ * xtc_log.h is included above, so this hook replaces its empty one. */
+static inline xtc_logarg_t
+xtc__logarg_pid(xtc_pid_t p)
+{
+	xtc_logarg_t a;
+
+	a.kind = XTC_LOGARG_PID;
+	a.size = (int)sizeof p;
+	a.v.pid.loop_id = p.loop_id;
+	a.v.pid.local_id = p.local_id;
+	a.v.pid.gen = p.gen;
+	return a;
+}
+#ifdef __cplusplus
+extern "C++" inline xtc_logarg_t
+xtc_logarg(xtc_pid_t p)
+{
+	return xtc__logarg_pid(p);
+}
+#else
+#undef XTC__LOGARG_PID
+#define XTC__LOGARG_PID xtc_pid_t: xtc__logarg_pid,
+#endif
 
 /*
  * A pid published from one thread and read on others.  A 16-byte pid

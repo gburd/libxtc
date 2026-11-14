@@ -8,11 +8,15 @@
 
 #include <pthread.h>
 #include <stdarg.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include "munit.h"
@@ -276,6 +280,284 @@ test_log_default_vwrite(const MunitParameter p[], void *d)
 	/* Restore the process default before destroying ours. */
 	munit_assert_int(xtc_log_set_default(saved), ==, XTC_OK);
 	xtc_log_destroy(log);
+	return MUNIT_OK;
+}
+
+/*
+ * xtc_logf: typed arguments, no conversion letters.  Each call is drained
+ * at once and its record text (the line after "[ts] LEVEL ") compared
+ * whole, so a wrong digit, a stray byte, or a missing mismatch marker all
+ * fail.  record_max 1024 keeps the long cases whole.
+ */
+static xtc_log_t *g_logf_log;
+static char g_logf_rec[1100];
+
+static int
+sink_logf(void *user, xtc_log_level_t lvl, const char *buf, size_t len)
+{
+	const char *body;
+
+	(void)user;
+	(void)lvl;
+	/* "[sec.nsec] LEVEL text\n": the text starts after the level. */
+	body = memchr(buf, ']', len);
+	munit_assert_not_null(body);
+	body += 8;
+	len -= (size_t)(body - buf) + 1;
+	munit_assert_size(len, <, sizeof g_logf_rec);
+	memcpy(g_logf_rec, body, len);
+	g_logf_rec[len] = '\0';
+	return 0;
+}
+
+/* Drain the one record a xtc_logf call wrote and compare its text. */
+#define LOGF_IS(want)                                                          \
+	do {                                                                   \
+		g_logf_rec[0] = '\0';                                          \
+		munit_assert_int(xtc_log_drain(g_logf_log), ==, 1);            \
+		munit_assert_string_equal(g_logf_rec, (want));                 \
+	} while (0)
+
+static void
+logf_open(xtc_log_level_t floor)
+{
+	xtc_log_opts_t opts = XTC_LOG_OPTS_DEFAULT;
+
+	opts.sink = sink_logf;
+	opts.sink_fd = -1;
+	opts.floor = floor;
+	opts.record_max = 1024;
+	munit_assert_int(xtc_log_create(&opts, &g_logf_log), ==, XTC_OK);
+}
+
+enum logf_color { LOGF_RED, LOGF_GREEN };
+
+/* Every integer typedef prints its value, at both extremes. */
+static MunitResult
+test_logf_types(const MunitParameter p[], void *d)
+{
+	int8_t i8 = INT8_MIN;
+	int16_t i16 = INT16_MIN;
+	int32_t i32 = INT32_MIN;
+	int64_t i64 = INT64_MIN;
+	uint8_t u8 = UINT8_MAX;
+	uint16_t u16 = UINT16_MAX;
+	uint32_t u32 = UINT32_MAX;
+	uint64_t u64 = UINT64_MAX;
+	size_t z = SIZE_MAX;
+	ssize_t sz = -1;
+	ptrdiff_t pd = PTRDIFF_MIN;
+	intptr_t ip = INTPTR_MIN;
+	uintptr_t up = UINTPTR_MAX;
+	pid_t pid = 12345;
+	off_t off = -((off_t)1 << (8 * sizeof(off_t) - 2));
+	xtc_pid_t xp = { 7, 8, 0xFFFFFFFFFFFFFFFFull };
+	enum logf_color col = LOGF_GREEN;
+	bool yes = true, no = false;
+	char ch = 'A';
+	unsigned char uch = 200;
+	signed char sch = -100;
+	short sh = -2;
+	unsigned short ush = 65535;
+	long lg = -3;
+	unsigned long ulg = 3;
+	long long llg = LLONG_MIN;
+	unsigned long long ullg = ULLONG_MAX;
+	char exp[256];
+	(void)p;
+	(void)d;
+
+	logf_open(XTC_LOG_INFO);
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{} {} {} {}", i8, i16, i32, i64);
+	LOGF_IS("-128 -32768 -2147483648 -9223372036854775808");
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{} {} {} {}", u8, u16, u32, u64);
+	LOGF_IS("255 65535 4294967295 18446744073709551615");
+
+	/* The pointer-sized types differ by data model: compare with what
+	 * the right printf conversion prints on this target. */
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{} {} {} {} {}", z, sz, pd, ip,
+	    up);
+	(void)snprintf(exp, sizeof exp, "%zu %zd %td %jd %ju", z, sz, pd,
+	    (intmax_t)ip, (uintmax_t)up);
+	LOGF_IS(exp);
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{} {} {}", pid, off, xp);
+	(void)snprintf(exp, sizeof exp, "12345 %jd <7.8.18446744073709551615>",
+	    (intmax_t)off);
+	LOGF_IS(exp);
+
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{} {} {} {} {} {}", col, yes, no,
+	    ch, uch, sch);
+	LOGF_IS("1 1 0 65 200 -100");
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{} {} {} {} {} {}", sh, ush, lg,
+	    ulg, llg, ullg);
+	LOGF_IS("-2 65535 -3 3 -9223372036854775808 18446744073709551615");
+
+	/* Literals: an int, a negative long long, an unsigned suffix. */
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{} {} {}", 42, -5LL, 7u);
+	LOGF_IS("42 -5 7");
+	xtc_log_destroy(g_logf_log);
+	return MUNIT_OK;
+}
+
+static int g_logf_calls;
+
+static int
+logf_count(void)
+{
+	return ++g_logf_calls;
+}
+
+/* Doubles, strings (NULL too), and pointers. */
+static MunitResult
+test_logf_values(const MunitParameter p[], void *d)
+{
+	char *ns = NULL;
+	const char *cs = "const";
+	char buf[] = "array";
+	int obj, *ip = &obj;
+	const void *cvp = &obj;
+	char exp[256];
+	float f = 1.5f;
+	(void)p;
+	(void)d;
+
+	logf_open(XTC_LOG_INFO);
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{} {} {} {}", 0.5, f, 1e100,
+	    -0.25);
+	LOGF_IS("0.5 1.5 1e+100 -0.25");
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "[{}] [{}] [{}] [{}]", ns, cs,
+	    buf, "lit");
+	LOGF_IS("[(null)] [const] [array] [lit]");
+
+	/* Pointers print as 0x and hex on every platform. */
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{} {} {}", ip, cvp, (void *)0);
+	(void)snprintf(exp, sizeof exp, "0x%jx 0x%jx 0x0",
+	    (uintmax_t)(uintptr_t)ip, (uintmax_t)(uintptr_t)cvp);
+	LOGF_IS(exp);
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{:p}", cs);
+	(void)snprintf(exp, sizeof exp, "0x%jx", (uintmax_t)(uintptr_t)cs);
+	LOGF_IS(exp);
+
+	/* Each argument is evaluated once. */
+	g_logf_calls = 0;
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{}", logf_count());
+	LOGF_IS("1");
+	munit_assert_int(g_logf_calls, ==, 1);
+	xtc_log_destroy(g_logf_log);
+	return MUNIT_OK;
+}
+
+/* The spec mini-language and literal braces. */
+static MunitResult
+test_logf_specs(const MunitParameter p[], void *d)
+{
+	int8_t m8 = -1;
+	int32_t m32 = -1;
+	int64_t m64 = -1;
+	(void)p;
+	(void)d;
+
+	logf_open(XTC_LOG_INFO);
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{:x} {:X} {:o} {}", 255, 0xABCu,
+	    8, UINT64_MAX);
+	LOGF_IS("ff ABC 10 18446744073709551615");
+
+	/* Width and zero fill, numbers and strings. */
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "[{:08x}] [{:8}] [{:08}] [{:6}]",
+	    0xbeefu, 42, -42, "ab");
+	LOGF_IS("[0000beef] [      42] [-0000042] [    ab]");
+
+	/* A negative integer in hex is its own width's two's complement. */
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{:x} {:x} {:X} {:o}", m8, m32,
+	    m64, m8);
+	LOGF_IS("ff ffffffff FFFFFFFFFFFFFFFF 377");
+
+	/* Precision: decimal places of a double, characters of a string. */
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{:.3} {:.0} [{:8.2}] [{:.2}]",
+	    3.14159, 2.5, 2.25, "abcdef");
+	LOGF_IS("3.142 2 [    2.25] [ab]");
+
+	/* {{ and }} are braces; a brace that is not a placeholder is text,
+	 * and does not count as one. */
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{{}} {{{}}} }{ {x} {:q} {:.} {",
+	    1);
+	LOGF_IS("{} {1} }{ {x} {:q} {:.} {");
+	xtc_log_destroy(g_logf_log);
+	return MUNIT_OK;
+}
+
+/* Zero and sixteen arguments, mismatches both ways, and the floor. */
+static MunitResult
+test_logf_counts(const MunitParameter p[], void *d)
+{
+	xtc_log_t *saved;
+	(void)p;
+	(void)d;
+
+	logf_open(XTC_LOG_INFO);
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "plain");
+	LOGF_IS("plain");
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO,
+	    "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}", 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1,
+	    2, 3, 4, 5, 6);
+	LOGF_IS("1234567890123456");
+
+	/* Too few arguments: the record is marked and the extra {} kept. */
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "a={} b={} c={:x}", 1, 2);
+	LOGF_IS("[xtc_logf: 2 args, 3 {}] a=1 b=2 c={:x}");
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "none {}");
+	LOGF_IS("[xtc_logf: 0 args, 1 {}] none {}");
+	/* Too many: marked, the extra arguments not printed. */
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "one={}", 1, "two", 3.0);
+	LOGF_IS("[xtc_logf: 3 args, 1 {}] one=1");
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{{}}", 1);
+	LOGF_IS("[xtc_logf: 1 arg, 0 {}] {}");
+
+	/* The direct call tolerates what the macros never pass. */
+	xtc_logf_impl(g_logf_log, XTC_LOG_INFO, "{}", 1, NULL);
+	LOGF_IS("[xtc_logf: 0 args, 1 {}] {}");
+	xtc_logf_impl(g_logf_log, XTC_LOG_INFO, NULL, 0, NULL);
+	xtc_logf_impl(NULL, XTC_LOG_INFO, "x", 0, NULL);
+	munit_assert_int(xtc_log_drain(g_logf_log), ==, 0);
+
+	/* Below the floor: nothing.  xtc_logf goes to the default logger. */
+	xtc_logf_to(g_logf_log, XTC_LOG_DEBUG, "quiet {}", 1);
+	munit_assert_int(xtc_log_drain(g_logf_log), ==, 0);
+	munit_assert_int(xtc_log_swap_default(g_logf_log, &saved), ==, XTC_OK);
+	xtc_logf(XTC_LOG_WARN, "default {}", 9);
+	LOGF_IS("default 9");
+	munit_assert_int(xtc_log_set_default(saved), ==, XTC_OK);
+	munit_assert_int(xtc_log_drop_count(g_logf_log), ==, 0);
+	xtc_log_destroy(g_logf_log);
+	return MUNIT_OK;
+}
+
+/* A long record is truncated to record_max with the marker intact, and a
+ * full ring drops oldest, exactly as xtc_log_write does. */
+static MunitResult
+test_logf_ring(const MunitParameter p[], void *d)
+{
+	xtc_log_opts_t opts = XTC_LOG_OPTS_DEFAULT;
+	char big[2000];
+	int i;
+	(void)p;
+	(void)d;
+
+	memset(big, 'z', sizeof big - 1);
+	big[sizeof big - 1] = '\0';
+	opts.sink = sink_logf;
+	opts.sink_fd = -1;
+	opts.record_max = 32;
+	opts.ring_size = 4;
+	munit_assert_int(xtc_log_create(&opts, &g_logf_log), ==, XTC_OK);
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{} {}", big);
+	LOGF_IS("[xtc_logf: 1 arg, 2 {}] zzzzzzz");
+	for (i = 0; i < 10; i++)
+		xtc_logf_to(g_logf_log, XTC_LOG_INFO, "n={}", i);
+	munit_assert_int(xtc_log_drop_count(g_logf_log), ==, 6);
+	munit_assert_int(xtc_log_drain(g_logf_log), ==, 4);
+	munit_assert_string_equal(g_logf_rec, "n=9");
+	xtc_log_destroy(g_logf_log);
 	return MUNIT_OK;
 }
 
@@ -1069,6 +1351,11 @@ static MunitTest tests[] = {
 	{ "/log/drop_on_full",     test_log_drop_on_full,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/log/mpsc",             test_log_mpsc,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/log/default_vwrite",   test_log_default_vwrite,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/logf/types",           test_logf_types,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/logf/values",          test_logf_values,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/logf/specs",           test_logf_specs,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/logf/counts",          test_logf_counts,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/logf/ring",            test_logf_ring,            NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/cfg/int",              test_cfg_int,              NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/cfg/string",           test_cfg_string,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/cfg/load_file",        test_cfg_load_file,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

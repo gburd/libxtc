@@ -277,28 +277,19 @@ xtc_log_default(void)
 	    xtc_log_t *)xtc_atomic_load_uptr(&__default_logger, xtc_mo_acquire);
 }
 
-void
-xtc_log_vwrite(xtc_log_t *log, xtc_log_level_t lvl,
-               const char *fmt, va_list ap)
+/*
+ * Append a formatted record of n bytes to the ring: the one record path
+ * of xtc_log_vwrite and xtc_logf_impl, which format first, so no caller
+ * code (the format's arguments) runs while a slot is claimed and
+ * unpublished (the drainer stops at such a slot).
+ */
+static void
+__log_append(xtc_log_t *log, xtc_log_level_t lvl, int64_t ts, const char *text,
+    int n)
 {
 	uint64_t pos;
 	struct log_slot *s;
-	char text[1024];
-	int64_t ts;
-	int      n;
 
-	if (log == NULL || fmt == NULL) return;
-	if ((int)lvl < (int)log->opts.floor) return;
-
-	/* Format before claiming a slot, so no caller code (the format's
-	 * arguments) runs while a slot is claimed and unpublished: the
-	 * drainer stops at such a slot.  The drain prints at most a
-	 * 1024-byte line, so a longer record was never printed whole. */
-	ts = __log_now_ns();
-	n = vsnprintf(text, sizeof text, fmt, ap);
-	if (n < 0) n = 0;
-	if (n >= (int)sizeof text)
-		n = (int)sizeof text - 1;
 	if (n >= log->opts.record_max) n = log->opts.record_max - 1;
 
 	/* Claim to publish is a memcpy; keep the timer from preempting a
@@ -317,12 +308,302 @@ xtc_log_vwrite(xtc_log_t *log, xtc_log_level_t lvl,
 }
 
 void
+xtc_log_vwrite(xtc_log_t *log, xtc_log_level_t lvl, const char *fmt, va_list ap)
+{
+	char text[1024];
+	int64_t ts;
+	int n;
+
+	if (log == NULL || fmt == NULL)
+		return;
+	if ((int)lvl < (int)log->opts.floor)
+		return;
+
+	/* The drain prints at most a 1024-byte line, so a longer record
+	 * was never printed whole. */
+	ts = __log_now_ns();
+	n = vsnprintf(text, sizeof text, fmt, ap);
+	if (n < 0)
+		n = 0;
+	if (n >= (int)sizeof text)
+		n = (int)sizeof text - 1;
+	__log_append(log, lvl, ts, text, n);
+}
+
+void
 xtc_log_write(xtc_log_t *log, xtc_log_level_t lvl, const char *fmt, ...)
 {
 	va_list ap;
 	va_start(ap, fmt);
 	xtc_log_vwrite(log, lvl, fmt, ap);
 	va_end(ap);
+}
+
+/* The record text an xtc_logf call is formatted into. */
+struct logf_out {
+	char *buf;
+	size_t cap; /* bytes of text buf holds; one more for the NUL */
+	size_t len; /* bytes written, at most cap */
+};
+
+/* One placeholder's spec: "{}" or "{:[0][width][.prec][x|X|o|p]}". */
+struct logf_spec {
+	int zero;  /* '0' flag: zero-fill a number to the width */
+	int width; /* 0: none */
+	int prec;  /* -1: none */
+	char conv; /* 0 (by type), 'x', 'X', 'o' or 'p' */
+};
+
+/* Append n bytes of s to o, as many as fit.  o NULL: count only. */
+static void
+__logf_put(struct logf_out *o, const char *s, size_t n)
+{
+	if (o == NULL)
+		return;
+	if (n > o->cap - o->len)
+		n = o->cap - o->len;
+	memcpy(o->buf + o->len, s, n);
+	o->len += n;
+}
+
+/* Append a printf-formatted piece to o, truncated to what fits. */
+static void
+__logf_printf(struct logf_out *o, const char *fmt, ...) XTC_PRINTF_FMT(2, 3);
+
+static void
+__logf_printf(struct logf_out *o, const char *fmt, ...)
+{
+	va_list ap;
+	int n;
+
+	va_start(ap, fmt);
+	n = vsnprintf(o->buf + o->len, o->cap - o->len + 1, fmt, ap);
+	va_end(ap);
+	if (n < 0)
+		return;
+	if ((size_t)n > o->cap - o->len)
+		n = (int)(o->cap - o->len);
+	o->len += (size_t)n;
+}
+
+/* Read a decimal width or precision at *pp (at least one digit). */
+static int
+__logf_num(const char **pp)
+{
+	const char *p = *pp;
+	int v = 0;
+
+	/* Capped at the longest record text, so it cannot overflow. */
+	for (; (unsigned)(*p - '0') <= 9; p++) {
+		v = v * 10 + (*p - '0');
+		if (v > 1023)
+			v = 1023;
+	}
+	*pp = p;
+	return v;
+}
+
+/*
+ * f points at a '{'.  Returns the length of the placeholder there, with
+ * its spec in *sp, or 0 when the brace does not start one (it then prints
+ * as itself).
+ */
+static int
+__logf_spec(const char *f, struct logf_spec *sp)
+{
+	const char *p = f + 1;
+
+	sp->zero = 0;
+	sp->width = 0;
+	sp->prec = -1;
+	sp->conv = 0;
+	if (*p == '}')
+		return 2;
+	if (*p++ != ':')
+		return 0;
+	if (*p == '0') {
+		sp->zero = 1;
+		p++;
+	}
+	if ((unsigned)(*p - '0') <= 9)
+		sp->width = __logf_num(&p);
+	if (*p == '.') {
+		p++;
+		if ((unsigned)(*p - '0') > 9)
+			return 0;
+		sp->prec = __logf_num(&p);
+	}
+	if (*p == 'x' || *p == 'X' || *p == 'o' || *p == 'p')
+		sp->conv = *p++;
+	if (*p != '}')
+		return 0;
+	return (int)(p + 1 - f);
+}
+
+/* An unsigned value in the spec's base, width and fill. */
+static void
+__logf_uint(struct logf_out *o, const struct logf_spec *sp,
+    unsigned long long u)
+{
+	switch (sp->conv) {
+	case 'x':
+		__logf_printf(o, sp->zero ? "%0*llx" : "%*llx", sp->width, u);
+		break;
+	case 'X':
+		__logf_printf(o, sp->zero ? "%0*llX" : "%*llX", sp->width, u);
+		break;
+	case 'o':
+		__logf_printf(o, sp->zero ? "%0*llo" : "%*llo", sp->width, u);
+		break;
+	default:
+		__logf_printf(o, sp->zero ? "%0*llu" : "%*llu", sp->width, u);
+		break;
+	}
+}
+
+/* A signed value; hex and octal show its two's complement in its width. */
+static void
+__logf_int(struct logf_out *o, const struct logf_spec *sp,
+    const xtc_logarg_t *a)
+{
+	unsigned long long u = (unsigned long long)a->v.i;
+
+	if (sp->conv == 'x' || sp->conv == 'X' || sp->conv == 'o') {
+		if (a->size > 0 && (size_t)a->size < sizeof u)
+			u &= (1ULL << (8 * a->size)) - 1;
+		__logf_uint(o, sp, u);
+		return;
+	}
+	__logf_printf(o, sp->zero ? "%0*lld" : "%*lld", sp->width, a->v.i);
+}
+
+/* An address as 0x and hex, the same on every platform. */
+static void
+__logf_ptr(struct logf_out *o, const struct logf_spec *sp, const void *p)
+{
+	char tmp[2 + 2 * sizeof(unsigned long long) + 1];
+
+	(void)snprintf(tmp, sizeof tmp, "0x%llx",
+	    (unsigned long long)(uintptr_t)p);
+	__logf_printf(o, "%*s", sp->width, tmp);
+}
+
+/* Format one argument by its kind and the placeholder's spec.  A spec
+ * letter that does not apply to the kind is ignored. */
+static void
+__logf_arg(struct logf_out *o, const struct logf_spec *sp,
+    const xtc_logarg_t *a)
+{
+	char tmp[48];
+	const char *s;
+
+	switch (a->kind) {
+	case XTC_LOGARG_INT:
+		__logf_int(o, sp, a);
+		break;
+	case XTC_LOGARG_UINT:
+		__logf_uint(o, sp, a->v.u);
+		break;
+	case XTC_LOGARG_DOUBLE:
+		if (sp->prec >= 0)
+			__logf_printf(o, sp->zero ? "%0*.*f" : "%*.*f",
+			    sp->width, sp->prec, a->v.d);
+		else
+			__logf_printf(o, sp->zero ? "%0*g" : "%*g", sp->width,
+			    a->v.d);
+		break;
+	case XTC_LOGARG_STR:
+		if (sp->conv == 'p') {
+			__logf_ptr(o, sp, a->v.s);
+			break;
+		}
+		s = a->v.s != NULL ? a->v.s : "(null)";
+		if (sp->prec >= 0)
+			__logf_printf(o, "%*.*s", sp->width, sp->prec, s);
+		else
+			__logf_printf(o, "%*s", sp->width, s);
+		break;
+	case XTC_LOGARG_PTR:
+		__logf_ptr(o, sp, a->v.p);
+		break;
+	case XTC_LOGARG_PID:
+		(void)snprintf(tmp, sizeof tmp, "<%u.%u.%llu>",
+		    (unsigned)a->v.pid.loop_id, (unsigned)a->v.pid.local_id,
+		    (unsigned long long)a->v.pid.gen);
+		__logf_printf(o, "%*s", sp->width, tmp);
+		break;
+	default:
+		__logf_put(o, "{?}", 3);
+		break;
+	}
+}
+
+/*
+ * Walk fmt, formatting placeholder k with args[k] into o (o NULL: only
+ * count).  A placeholder past the last argument prints as written.
+ * Returns the number of placeholders.
+ */
+static int
+__logf_render(struct logf_out *o, const char *f, int nargs,
+    const xtc_logarg_t *args)
+{
+	struct logf_spec sp;
+	size_t n;
+	int k, nph = 0;
+
+	for (;;) {
+		n = strcspn(f, "{}");
+		__logf_put(o, f, n);
+		f += n;
+		if (*f == '\0')
+			break;
+		if (f[1] == f[0]) {
+			/* {{ or }}: one literal brace */
+			__logf_put(o, f, 1);
+			f += 2;
+		} else if (*f == '{' && (k = __logf_spec(f, &sp)) > 0) {
+			if (o != NULL && nph < nargs)
+				__logf_arg(o, &sp, &args[nph]);
+			else
+				__logf_put(o, f, (size_t)k);
+			nph++;
+			f += k;
+		} else {
+			__logf_put(o, f, 1);
+			f++;
+		}
+	}
+	return nph;
+}
+
+void
+xtc_logf_impl(xtc_log_t *log, xtc_log_level_t lvl, const char *fmt, int nargs,
+    const xtc_logarg_t *args)
+{
+	char text[1024];
+	struct logf_out o;
+	int64_t ts;
+	int nph;
+
+	if (log == NULL || fmt == NULL)
+		return;
+	if ((int)lvl < (int)log->opts.floor)
+		return;
+	if (nargs < 0 || args == NULL)
+		nargs = 0;
+
+	/* Count the placeholders first, so a mismatch is marked at the front
+	 * of the record, where truncation to record_max cannot cut it. */
+	ts = __log_now_ns();
+	o.buf = text;
+	o.cap = sizeof text - 1;
+	o.len = 0;
+	nph = __logf_render(NULL, fmt, nargs, args);
+	if (nph != nargs)
+		__logf_printf(&o, "[xtc_logf: %d arg%s, %d {}] ", nargs,
+		    nargs == 1 ? "" : "s", nph);
+	(void)__logf_render(&o, fmt, nargs, args);
+	__log_append(log, lvl, ts, text, (int)o.len);
 }
 
 int

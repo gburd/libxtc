@@ -283,3 +283,28 @@ Prometheus base unit. Through 2.1 the dump wrote `_p50`/`_p99` samples under a
 `promtool check metrics`.
 
 {% include snippet.html file="stats_prometheus.c" region="full" %}
+
+## Logging without format strings to get wrong
+
+`xtc_log` is the ring-buffer logger the rest of this page assumes: a writer
+formats a record and appends it without blocking, and a drain hands the
+records to a file descriptor or a callback. `xtc_log_write` takes a printf
+format, which in C means one conversion per type and a `PRIu64` for every
+`uint64_t`; a `%d` for a `size_t` compiles with at most a warning and prints
+garbage on another data model.
+
+`xtc_logf` (2.2) takes `{}` instead. The macro picks each argument's type at
+compile time (C11 `_Generic`; overloads in C++), so the same call is right
+for an `int8_t`, a `size_t`, an `int64_t` at its minimum, a `double`, a
+string or a pointer, on 32- and 64-bit targets alike. `{:x}`, `{:08x}`,
+`{:6}` and `{:.2}` add hex, zero fill, width and precision, and a doubled
+brace prints one brace. A call takes up to 16 arguments (a 17th does not compile),
+and a count mismatch still writes the record, marked at the front, instead
+of reading a missing argument off the stack.
+
+{% include snippet.html file="20_logf.c" region="logf" %}
+
+Both calls share one record path: the same level floor, ring, sink and drop
+count. `xtc_logf` writes to the default logger, `xtc_logf_to(log, ...)` to a
+given one. See [`xtc_log(3)`]({{ '/reference/api-index/' | relative_url }})
+for the full list of argument types and specs.

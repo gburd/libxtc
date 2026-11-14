@@ -82,6 +82,7 @@ XTC_2.2 {
 		xtc_hist_set_scale;
 		xtc_hist_sum;
 		xtc_log_swap_default;
+		xtc_logf_impl;
 		xtc_metrics_set_help;
 		xtc_metrics_write_prometheus;
 		xtc_proc_set_label;

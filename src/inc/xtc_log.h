@@ -11,7 +11,8 @@
  *	    buffer per logger; bounded latency.
  *	  - Cooperative: log calls don't block the loop; a background
  *	    consumer drains the ring and writes to the sink.
- *	  - A level and a printf-formatted message per record.
+ *	  - A level and a message per record, printf-formatted
+ *	    (xtc_log_write) or typed (xtc_logf, below).
  *	  - Lossy under pressure: when the ring is full the oldest record
  *	    is dropped (or, if it is being written or read at that moment,
  *	    the new one) and a counter is bumped so callers know about it.
@@ -96,6 +97,8 @@ typedef struct xtc_log_opts {
  *
  * PUBLIC: int  xtc_log_drain __P((xtc_log_t *));
  * PUBLIC: int  xtc_log_drop_count __P((const xtc_log_t *));
+ *
+ * PUBLIC: void xtc_logf_impl __P((xtc_log_t *, xtc_log_level_t, const char *, int, const xtc_logarg_t *));
  */
 
 XTC_API int  xtc_log_create(const xtc_log_opts_t *opts, xtc_log_t **out);
@@ -157,8 +160,317 @@ XTC_API int  xtc_log_drop_count(const xtc_log_t *log);
 #define XTC_LOG_ERROR_F(...) XTC_LOG(XTC_LOG_ERROR, __VA_ARGS__)
 #define XTC_LOG_FATAL_F(...) XTC_LOG(XTC_LOG_FATAL, __VA_ARGS__)
 
+/*
+ * Typed logging (2.2): xtc_logf(lvl, fmt, ...) writes to the default
+ * logger, xtc_logf_to(log, lvl, fmt, ...) to log.
+ *
+ *	xtc_logf(XTC_LOG_INFO, "loop {} drained {} bytes in {} us", id, n, us);
+ *
+ * Each {} takes the next argument and formats it by the argument's own
+ * type, so there is no conversion letter to get wrong and no PRIu64.
+ * Every integer type prints as its value (int8_t to uint64_t, size_t,
+ * ssize_t, off_t, pid_t, an enum, a char; _Bool as 0 or 1), a floating
+ * type as %g, a char * or const char * as the string (NULL as "(null)"),
+ * any other object pointer as 0x and its address in hex, and an xtc_pid_t
+ * (with xtc_proc.h) as <loop_id.local_id.gen>.  A character literal is an
+ * int in C, so 'x' prints 120.  A struct or union does not compile, nor does a
+ * function pointer in C++ (C converts one to a data pointer, which ISO C
+ * leaves undefined: -Wpedantic warns).  gcc gives a bit-field a type of
+ * its own, which gcc 14 rejects (and older gcc warns about): cast it.
+ *
+ * A spec after a colon changes the format: {:x} {:X} {:o} hex and octal
+ * (a negative integer in its own width's two's complement), {:p} as an
+ * address (a string's too), {:8} a minimum width, {:08x} zero-filled, and
+ * {:.3} the decimal places of a double or the most characters taken from
+ * a string.  {{ and }} print a brace; a brace that does not start a
+ * placeholder prints as itself.
+ *
+ * At most 16 arguments: a 17th is a compile error.  A record whose
+ * placeholders and arguments do not match is still written, prefixed
+ * with "[xtc_logf: 2 args, 3 {}] " (at the front, so truncation to
+ * record_max cannot cut it off); a placeholder with no argument prints as
+ * written.  The level floor, the ring, the sink and the drop count are
+ * xtc_log_write's.  Each argument is evaluated once, before the level is
+ * checked, as a function's would be.
+ *
+ * C needs C11 (_Generic; MSVC: /std:c11, Visual Studio 2019 16.8 or
+ * later, which also selects the conforming preprocessor the argument
+ * count needs).  C++ needs C++11; the same calls resolve through
+ * overloads of xtc_logarg (a scoped enum needs a cast).  xtc_logarg(x)
+ * converts one value; xtc_logf_impl is the function the macros call with
+ * the converted arguments.
+ */
+enum {
+	XTC_LOGARG_INT = 1, /* v.i: a signed integer of `size` bytes */
+	XTC_LOGARG_UINT,    /* v.u: an unsigned integer or _Bool */
+	XTC_LOGARG_DOUBLE,  /* v.d */
+	XTC_LOGARG_STR,     /* v.s, may be NULL */
+	XTC_LOGARG_PTR,     /* v.p */
+	XTC_LOGARG_PID      /* v.pid: an xtc_pid_t */
+};
+
+/* One converted xtc_logf argument.  Make it with xtc_logarg(x). */
+typedef struct xtc_logarg {
+	int kind; /* XTC_LOGARG_* */
+	int size; /* sizeof the integer, for {:x} of a negative one */
+	union {
+		long long i;
+		unsigned long long u;
+		double d;
+		const char *s;
+		const void *p;
+		struct {
+			uint32_t loop_id;
+			uint32_t local_id;
+			uint64_t gen;
+		} pid;
+	} v;
+} xtc_logarg_t;
+
+/* Format fmt with the nargs arguments in args and append the record, as
+ * xtc_log_write does.  Called by the xtc_logf macros. */
+XTC_API void xtc_logf_impl(xtc_log_t *log, xtc_log_level_t lvl, const char *fmt,
+    int nargs, const xtc_logarg_t *args);
+
+static inline xtc_logarg_t
+xtc__logarg_mk_i(long long v, size_t size)
+{
+	xtc_logarg_t a;
+
+	a.kind = XTC_LOGARG_INT;
+	a.size = (int)size;
+	a.v.i = v;
+	return a;
+}
+
+static inline xtc_logarg_t
+xtc__logarg_mk_u(unsigned long long v, size_t size)
+{
+	xtc_logarg_t a;
+
+	a.kind = XTC_LOGARG_UINT;
+	a.size = (int)size;
+	a.v.u = v;
+	return a;
+}
+
+static inline xtc_logarg_t
+xtc__logarg_mk_d(double v)
+{
+	xtc_logarg_t a;
+
+	a.kind = XTC_LOGARG_DOUBLE;
+	a.size = (int)sizeof v;
+	a.v.d = v;
+	return a;
+}
+
+static inline xtc_logarg_t
+xtc__logarg_mk_ld(long double v)
+{
+	return xtc__logarg_mk_d((double)v);
+}
+
+static inline xtc_logarg_t
+xtc__logarg_mk_s(const char *v)
+{
+	xtc_logarg_t a;
+
+	a.kind = XTC_LOGARG_STR;
+	a.size = (int)sizeof v;
+	a.v.s = v;
+	return a;
+}
+
+/* Through uintptr_t: a volatile pointee's address is printed, not read. */
+static inline xtc_logarg_t
+xtc__logarg_mk_p(const volatile void *v)
+{
+	xtc_logarg_t a;
+
+	a.kind = XTC_LOGARG_PTR;
+	a.size = (int)sizeof v;
+	a.v.p = (const void *)(uintptr_t)v;
+	return a;
+}
+
+/*
+ * The integer types, X(suffix, type, maker): one converter per type, so
+ * each knows its own width without a sizeof of the argument (which a
+ * bit-field would not allow).
+ */
+#define XTC__LOGARG_INTS(X)                                                    \
+	X(c, char, xtc__logarg_mk_i)                                           \
+	X(sc, signed char, xtc__logarg_mk_i)                                   \
+	X(s, short, xtc__logarg_mk_i)                                          \
+	X(i, int, xtc__logarg_mk_i)                                            \
+	X(l, long, xtc__logarg_mk_i)                                           \
+	X(ll, long long, xtc__logarg_mk_i)                                     \
+	X(uc, unsigned char, xtc__logarg_mk_u)                                 \
+	X(us, unsigned short, xtc__logarg_mk_u)                                \
+	X(u, unsigned int, xtc__logarg_mk_u)                                   \
+	X(ul, unsigned long, xtc__logarg_mk_u)                                 \
+	X(ull, unsigned long long, xtc__logarg_mk_u)
+
 #ifdef __cplusplus
 }
 #endif
+
+/* C++98 still compiles this header, without xtc_logf.  MSVC sets
+ * __cplusplus to 199711L unless /Zc:__cplusplus; _MSVC_LANG is right. */
+#if defined(__cplusplus) &&                                                    \
+    (__cplusplus >= 201103L || (defined(_MSVC_LANG) && _MSVC_LANG >= 201103L))
+extern "C++" {
+#define XTC__LOGARG_CXX_DEF(sfx, T, mk)                                        \
+	inline xtc_logarg_t xtc_logarg(T v)                                    \
+	{                                                                      \
+		return mk(v, sizeof v);                                        \
+	}
+XTC__LOGARG_INTS(XTC__LOGARG_CXX_DEF)
+#undef XTC__LOGARG_CXX_DEF
+
+inline xtc_logarg_t
+xtc_logarg(bool v)
+{
+	return xtc__logarg_mk_u(v, sizeof v);
+}
+
+inline xtc_logarg_t
+xtc_logarg(double v)
+{
+	return xtc__logarg_mk_d(v);
+}
+
+inline xtc_logarg_t
+xtc_logarg(long double v)
+{
+	return xtc__logarg_mk_ld(v);
+}
+
+inline xtc_logarg_t
+xtc_logarg(const char *v)
+{
+	return xtc__logarg_mk_s(v);
+}
+
+/* Any other object pointer.  A char * prefers the overload above. */
+template <typename T>
+inline xtc_logarg_t
+xtc_logarg(const volatile T *v)
+{
+	return xtc__logarg_mk_p(v);
+}
+
+/* A function pointer would otherwise convert to bool and print 1. */
+template <typename R, typename... P>
+xtc_logarg_t xtc_logarg(R (*)(P...)) = delete;
+
+inline void
+xtc__logf_cxx(xtc_log_t *log, xtc_log_level_t lvl, const char *fmt)
+{
+	xtc_logf_impl(log, lvl, fmt, 0, nullptr);
+}
+
+/* By value, so an array argument decays as it does in C. */
+template <typename... A>
+inline void
+xtc__logf_cxx(xtc_log_t *log, xtc_log_level_t lvl, const char *fmt, A... a)
+{
+	static_assert(sizeof...(A) <= 16,
+	    "xtc_logf takes at most 16 arguments");
+	const xtc_logarg_t args[] = { xtc_logarg(a)... };
+
+	xtc_logf_impl(log, lvl, fmt, (int)sizeof...(A), args);
+}
+}
+
+#define xtc_logf_to(log, lvl, ...) xtc__logf_cxx((log), (lvl), __VA_ARGS__)
+#define xtc_logf(lvl, ...) xtc_logf_to(xtc_log_default(), (lvl), __VA_ARGS__)
+
+#elif !defined(__cplusplus)
+
+#define XTC__LOGARG_C_DEF(sfx, T, mk)                                          \
+	static inline xtc_logarg_t xtc__logarg_##sfx(T v)                      \
+	{                                                                      \
+		return mk(v, sizeof v);                                        \
+	}
+XTC__LOGARG_INTS(XTC__LOGARG_C_DEF)
+#undef XTC__LOGARG_C_DEF
+
+/* xtc_proc.h, which includes this header, redefines it to add xtc_pid_t. */
+#define XTC__LOGARG_PID
+#define XTC__LOGARG_ASSOC(sfx, T, mk) T: xtc__logarg_##sfx,
+#define xtc_logarg(x)                                                          \
+	_Generic((x),                                                          \
+	    XTC__LOGARG_INTS(XTC__LOGARG_ASSOC) XTC__LOGARG_PID                \
+	    _Bool: xtc__logarg_uc,                                             \
+	    float: xtc__logarg_mk_d,                                           \
+	    double: xtc__logarg_mk_d,                                          \
+	    long double: xtc__logarg_mk_ld,                                    \
+	    char *: xtc__logarg_mk_s,                                          \
+	    const char *: xtc__logarg_mk_s,                                    \
+	    default: xtc__logarg_mk_p)(x)
+
+/*
+ * Count the arguments after the format (0 to 16) and pick XTC__LOGF_<n>.
+ * With 17 to 31 the count is E, which names an undeclared identifier: a
+ * compile error that says what is wrong.
+ */
+#define xtc_logf_to(log, lvl, ...)                                             \
+	XTC__LOGF_CAT(XTC__LOGF_, XTC__LOGF_N(__VA_ARGS__))                    \
+	((log), (lvl), __VA_ARGS__)
+#define XTC__LOGF_CAT(a, b) XTC__LOGF_CAT_(a, b)
+#define XTC__LOGF_CAT_(a, b) a##b
+#define XTC__LOGF_N(...)                                                       \
+	XTC__LOGF_PICK(__VA_ARGS__, E, E, E, E, E, E, E, E, E, E, E, E, E, E,  \
+	    E, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, ~)
+#define XTC__LOGF_PICK(_1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, \
+    _14, _15, _16, _17, _18, _19, _20, _21, _22, _23, _24, _25, _26, _27, _28, \
+    _29, _30, _31, _32, n, ...)                                                \
+	n
+#define XTC__LOGF_E(...) xtc_logf_takes_at_most_16_arguments
+
+#define XTC__LOGF_0(log, lvl, fmt) xtc_logf_impl(log, lvl, fmt, 0, NULL)
+#define XTC__LOGF_ARR(log, lvl, fmt, n, ...)                                   \
+	xtc_logf_impl(log, lvl, fmt, n,                                        \
+	    (const xtc_logarg_t[]) { XTC__LOGA_##n(__VA_ARGS__) })
+#define XTC__LOGF_1(l, v, f, ...) XTC__LOGF_ARR(l, v, f, 1, __VA_ARGS__)
+#define XTC__LOGF_2(l, v, f, ...) XTC__LOGF_ARR(l, v, f, 2, __VA_ARGS__)
+#define XTC__LOGF_3(l, v, f, ...) XTC__LOGF_ARR(l, v, f, 3, __VA_ARGS__)
+#define XTC__LOGF_4(l, v, f, ...) XTC__LOGF_ARR(l, v, f, 4, __VA_ARGS__)
+#define XTC__LOGF_5(l, v, f, ...) XTC__LOGF_ARR(l, v, f, 5, __VA_ARGS__)
+#define XTC__LOGF_6(l, v, f, ...) XTC__LOGF_ARR(l, v, f, 6, __VA_ARGS__)
+#define XTC__LOGF_7(l, v, f, ...) XTC__LOGF_ARR(l, v, f, 7, __VA_ARGS__)
+#define XTC__LOGF_8(l, v, f, ...) XTC__LOGF_ARR(l, v, f, 8, __VA_ARGS__)
+#define XTC__LOGF_9(l, v, f, ...) XTC__LOGF_ARR(l, v, f, 9, __VA_ARGS__)
+#define XTC__LOGF_10(l, v, f, ...) XTC__LOGF_ARR(l, v, f, 10, __VA_ARGS__)
+#define XTC__LOGF_11(l, v, f, ...) XTC__LOGF_ARR(l, v, f, 11, __VA_ARGS__)
+#define XTC__LOGF_12(l, v, f, ...) XTC__LOGF_ARR(l, v, f, 12, __VA_ARGS__)
+#define XTC__LOGF_13(l, v, f, ...) XTC__LOGF_ARR(l, v, f, 13, __VA_ARGS__)
+#define XTC__LOGF_14(l, v, f, ...) XTC__LOGF_ARR(l, v, f, 14, __VA_ARGS__)
+#define XTC__LOGF_15(l, v, f, ...) XTC__LOGF_ARR(l, v, f, 15, __VA_ARGS__)
+#define XTC__LOGF_16(l, v, f, ...) XTC__LOGF_ARR(l, v, f, 16, __VA_ARGS__)
+
+/* XTC__LOGA_<n>(a1, ..., an): the n converted arguments. */
+#define XTC__LOGA_1(a) xtc_logarg(a)
+#define XTC__LOGA_2(a, ...) xtc_logarg(a), XTC__LOGA_1(__VA_ARGS__)
+#define XTC__LOGA_3(a, ...) xtc_logarg(a), XTC__LOGA_2(__VA_ARGS__)
+#define XTC__LOGA_4(a, ...) xtc_logarg(a), XTC__LOGA_3(__VA_ARGS__)
+#define XTC__LOGA_5(a, ...) xtc_logarg(a), XTC__LOGA_4(__VA_ARGS__)
+#define XTC__LOGA_6(a, ...) xtc_logarg(a), XTC__LOGA_5(__VA_ARGS__)
+#define XTC__LOGA_7(a, ...) xtc_logarg(a), XTC__LOGA_6(__VA_ARGS__)
+#define XTC__LOGA_8(a, ...) xtc_logarg(a), XTC__LOGA_7(__VA_ARGS__)
+#define XTC__LOGA_9(a, ...) xtc_logarg(a), XTC__LOGA_8(__VA_ARGS__)
+#define XTC__LOGA_10(a, ...) xtc_logarg(a), XTC__LOGA_9(__VA_ARGS__)
+#define XTC__LOGA_11(a, ...) xtc_logarg(a), XTC__LOGA_10(__VA_ARGS__)
+#define XTC__LOGA_12(a, ...) xtc_logarg(a), XTC__LOGA_11(__VA_ARGS__)
+#define XTC__LOGA_13(a, ...) xtc_logarg(a), XTC__LOGA_12(__VA_ARGS__)
+#define XTC__LOGA_14(a, ...) xtc_logarg(a), XTC__LOGA_13(__VA_ARGS__)
+#define XTC__LOGA_15(a, ...) xtc_logarg(a), XTC__LOGA_14(__VA_ARGS__)
+#define XTC__LOGA_16(a, ...) xtc_logarg(a), XTC__LOGA_15(__VA_ARGS__)
+
+#define xtc_logf(lvl, ...) xtc_logf_to(xtc_log_default(), (lvl), __VA_ARGS__)
+
+#endif /* C */
 
 #endif /* XTC_LOG_H */

@@ -81,7 +81,8 @@ struct with a tail, and `size` 0.
 
 Not size-first, deliberately: element types of arrays the library
 strides at its own `sizeof` (`xtc_io_event_t`, `xtc_accel_dev_t`,
-`xtc_msg_t`, the batch item/result and scheduler lane types) and plain
+`xtc_msg_t`, `xtc_logarg_t`, the batch item/result and scheduler lane
+types) and plain
 value types (`xtc_pid_t`, `xtc_pt_t`, `xtc_waker_t`, the trace and tail
 record types).  Their layout is frozen by the layout gate; growing one
 means a new type and a new function.  The lock layer is frozen too
