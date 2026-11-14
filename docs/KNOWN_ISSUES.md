@@ -324,6 +324,13 @@ freed slot, and DST catches it as a reader seeing a freed node).
 holding read-sides across yields on four loops against a synchronizing
 writer.
 
+The same generation now covers OS threads.  `xtc_rcu_fini` freed every
+thread's reader slot but cleared only its caller's pointer to it, so
+another thread that had read before the fini kept writing the freed slot
+after an `xtc_rcu_init`, synchronize did not scan it, and an object that
+thread held was freed under it.  `/m13/rcu/thread_reader_after_fini`
+fails on 2.1.2 and passes on 2.1.3.
+
 ## FIXED (2.1.2): a cross-shard xtc_tnt_send could lose messages
 
 **What it was.**  Through 2.1.1 an `xtc_tnt_send` to an Isolate on
