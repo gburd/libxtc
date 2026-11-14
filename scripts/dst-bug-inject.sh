@@ -97,6 +97,7 @@ write_cases() {
 		"32;test_sim_down_kind;0;1;INIT\\(code 0\\): want kind 1 code -2, got kind 0 " \
 		"33;test_sim_fsm_call;0;1;a call outlived the machine" \
 		"34;test_sim_net_inflight;0;1;a message sent with XTC_OK was lost" \
+		"35;test_sim_rcu;0;0;fiber that lived through xtc_rcu_fini was invisible" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -145,6 +146,9 @@ write_cases() {
 #               -> a call notices a machine that ended within ~one wait slice
 # 34 SIM_DROP_LATE proc.c admits a latency-deferred send unchecked, drops it
 #               full at delivery -> a send told XTC_OK under net latency arrives
+# 35 RCU_SLOT_GEN rcu.c: a fiber's cached reader slot skips the generation
+#               check -> a fiber that lives through xtc_rcu_fini stays visible to
+#               synchronize (it would publish into a freed slot)
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

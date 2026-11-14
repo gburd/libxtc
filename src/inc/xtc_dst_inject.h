@@ -236,4 +236,13 @@
  */
 #define XTC_DST_BUG_SIM_DROP_LATE 34
 
+/*
+ * 35 RCU_SLOT_GEN: a fiber's read-side uses the reader slot cached in its
+ * task without checking the registry generation, so after an
+ * xtc_rcu_fini + xtc_rcu_init it publishes into a freed, unregistered
+ * slot and synchronize frees a node under it (test_sim_rcu reinit phase:
+ * "a fiber that lived through xtc_rcu_fini was invisible").
+ */
+#define XTC_DST_BUG_RCU_SLOT_GEN 35
+
 #endif /* XTC_DST_INJECT_H */

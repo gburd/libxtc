@@ -302,6 +302,28 @@ the application grants itself with `xtc_chan_demand_ask` still adds to
 that unit.  `/m10.8/stream/from_demand` (10 empty pulls, then
 `outstanding == 1`) fails on 2.1.2 (10) and passes on 2.1.3.
 
+## FIXED (2.1.3): an RCU read-side on a fiber took a global lock
+
+`xtc_rcu_read_lock` and `xtc_rcu_read_unlock` on a fiber (any fiber, in
+every build) looked the fiber's reader slot up in a table under the RCU
+subsystem's one mutex, twice per bracket.  So `xtc_cskip` and
+`xtc_chash` readers on fibers serialized on that lock, contrary to
+xtc_rcu.h ("no atomic compare-exchange on the fast path") and
+xtc_cskip(3).  On a 48-core x86-64 host an empty bracket on 2.1.2 cost,
+with one fiber per loop, 45 ns with one reader, 530-570 ns with four and
+1,770-1,940 ns with eight.  A fiber now caches its reader slot in its
+task the first time it enters a read-side, so later brackets take no
+lock: 8.3-8.9 ns for one to eight readers.  The slot stays per fiber,
+not per thread, because a fiber may yield, park or migrate to another
+loop inside a read-side; the simulator takes the same path.
+`xtc_rcu_fini` bumps a generation that retires every cached slot, so a
+fiber that lives through a fini and an init registers again
+(`test_sim_rcu`'s reinit phase; planted bug 35 makes the fiber keep the
+freed slot, and DST catches it as a reader seeing a freed node).
+`/m13/rcu/fiber_readers_migrate` runs eight migratable reader fibers
+holding read-sides across yields on four loops against a synchronizing
+writer.
+
 ## FIXED (2.1.2): a cross-shard xtc_tnt_send could lose messages
 
 **What it was.**  Through 2.1.1 an `xtc_tnt_send` to an Isolate on
