@@ -14,6 +14,9 @@
 #include "xtc.h"
 #include "xtc_int.h"
 #include "xtc_rcu.h"
+#include "xtc_exec.h"
+#include "xtc_proc.h"
+#include "xtc_async.h"
 
 /* Counter incremented by the free function. */
 static int g_freed_count;
@@ -216,10 +219,131 @@ test_reader_before_first_sync(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * Migratable reader fibers on a 4-loop executor hold read-sides across
+ * yields (so a read-side can end on another loop's thread) while a
+ * writer fiber swaps, retires and synchronizes.  A reader must never see
+ * a freed node, and every node must be reclaimed.  The reader slot of a
+ * fiber is per fiber, not per thread: a per-thread slot would be
+ * incremented on one thread and decremented on another.
+ */
+#define MIG_LOOPS 4
+#define MIG_READERS 8
+#define MIG_ITERS 2000
+#define MIG_SWAPS 400
+#define MIG_LIVE 0x11FE11FE11FE11FEULL
+
+struct mig_node {
+	uint64_t sentinel;
+	long gen;
+};
+static struct mig_node *g_mig_ptr;
+static int g_mig_bad;
+static int g_mig_alloc;
+static int g_mig_freed;
+static int g_mig_readers_left;
+
+static void
+mig_free(void *p)
+{
+	struct mig_node *n = p;
+	xtc_atomic_store_u64(&n->sentinel, 0, xtc_mo_release);
+	xtc_atomic_fetch_add_i32(&g_mig_freed, 1, xtc_mo_relaxed);
+	free(n);
+}
+
+static struct mig_node *
+mig_new(long gen)
+{
+	struct mig_node *n = malloc(sizeof *n);
+	munit_assert_not_null(n);
+	xtc_atomic_store_u64(&n->sentinel, MIG_LIVE, xtc_mo_relaxed);
+	n->gen = gen;
+	xtc_atomic_fetch_add_i32(&g_mig_alloc, 1, xtc_mo_relaxed);
+	return n;
+}
+
+static void
+mig_reader(void *arg)
+{
+	int i;
+	(void)arg;
+	for (i = 0; i < MIG_ITERS; i++) {
+		struct mig_node *n;
+		xtc_rcu_read_lock();
+		n = xtc_atomic_load_ptr(&g_mig_ptr, xtc_mo_acquire);
+		if ((i & 3) == 0)
+			xtc_yield(); /* the read-side may resume elsewhere */
+		if (xtc_atomic_load_u64(&n->sentinel, xtc_mo_acquire) !=
+		    MIG_LIVE)
+			xtc_atomic_fetch_add_i32(&g_mig_bad, 1, xtc_mo_relaxed);
+		xtc_rcu_read_unlock();
+	}
+	xtc_atomic_fetch_sub_i32(&g_mig_readers_left, 1, xtc_mo_release);
+}
+
+static void
+mig_writer(void *arg)
+{
+	int i;
+	(void)arg;
+	for (i = 1; i <= MIG_SWAPS; i++) {
+		struct mig_node *old = xtc_atomic_exchange_ptr(&g_mig_ptr,
+		    mig_new(i + 1), xtc_mo_acq_rel);
+		xtc_rcu_retire(old, mig_free);
+		xtc_rcu_synchronize();
+	}
+	while (xtc_atomic_load_i32(&g_mig_readers_left, xtc_mo_acquire) > 0)
+		xtc_yield();
+}
+
+static MunitResult
+test_fiber_readers_migrate(const MunitParameter p[], void *d)
+{
+	xtc_exec_t *ex = NULL;
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
+	struct mig_node *old;
+	int i;
+	(void)p;
+	(void)d;
+
+	xtc_atomic_store_i32(&g_mig_bad, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_mig_alloc, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_mig_freed, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_mig_readers_left, MIG_READERS, xtc_mo_seq_cst);
+	munit_assert_int(xtc_rcu_init(), ==, XTC_OK);
+	xtc_atomic_store_ptr(&g_mig_ptr, mig_new(1), xtc_mo_release);
+	munit_assert_int(xtc_exec_init(&ex, MIG_LOOPS), ==, XTC_OK);
+	o.migratable = 1;
+	for (i = 0; i < MIG_READERS; i++) {
+		xtc_loop_t *l = xtc_exec_loop(ex, (unsigned)(i % MIG_LOOPS));
+		munit_assert_int(xtc_proc_spawn(l, mig_reader, NULL, &o, NULL),
+		    ==, XTC_OK);
+	}
+	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(ex, 0), mig_writer, NULL,
+	                     NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_exec_run(ex), ==, XTC_OK);
+	munit_assert_int(xtc_exec_fini(ex), ==, XTC_OK);
+
+	old = xtc_atomic_exchange_ptr(&g_mig_ptr, NULL, xtc_mo_acq_rel);
+	xtc_rcu_retire(old, mig_free);
+	for (i = 0; i < 4; i++)
+		xtc_rcu_synchronize();
+	munit_assert_int(xtc_atomic_load_i32(&g_mig_bad, xtc_mo_seq_cst), ==,
+	    0);
+	munit_assert_int(xtc_atomic_load_i32(&g_mig_freed, xtc_mo_seq_cst), ==,
+	    xtc_atomic_load_i32(&g_mig_alloc, xtc_mo_seq_cst));
+	xtc_rcu_fini();
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/basic",          test_basic,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/blocks_reclaim", test_blocks_reclaim,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reader_before_first_sync", test_reader_before_first_sync, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/fiber_readers_migrate", test_fiber_readers_migrate, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

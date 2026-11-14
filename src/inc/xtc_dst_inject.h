@@ -112,6 +112,11 @@
  *	                   not KILLED (test_sim_down_kind).
  *	 34  INITEXIT  -- svr.c returns normally after a failed init, so the
  *	                   server's DOWN reads CLEAN (test_sim_down_kind).
+ *	 54  RCU_SLOT_GEN -- rcu.c skips the registry-generation check on a
+ *	                   fiber's cached reader slot, so a fiber that read
+ *	                   through xtc_rcu_fini publishes into a freed slot
+ *	                   that synchronize does not scan (test_sim_rcu: a
+ *	                   reader saw a freed node).
  *
  *	NOT plantable under DST (an honest gap, recorded so it is not
  *	mistaken for missing coverage): the xtc_amutex mutual-exclusion and
@@ -308,6 +313,9 @@
  * (test_sim_external: "a lane delivered out of order").
  */
 #define XTC_DST_BUG_EXT_LANE 53
+
+/* rcu.c: a fiber's cached reader slot, no generation check. */
+#define XTC_DST_BUG_RCU_SLOT_GEN 54
 
 /*
  * 60 SUP_WAIT_SKIP: a supervisor started with wait_children does not wait

@@ -175,6 +175,163 @@ rcu_writer(void *arg)
 	xtc_atomic_fetch_add_i32(&g_wr_done, 1, xtc_mo_relaxed);
 }
 
+/*
+ * Reinit phase: reader fibers that live through an xtc_rcu_fini +
+ * xtc_rcu_init (taken while none of them is inside a read-side, as the
+ * contract requires) must still be seen by synchronize afterwards.  A
+ * fiber caches its reader slot in its task; fini frees every slot, so a
+ * fiber that kept using the cached one would publish into a freed,
+ * unregistered slot and a writer's synchronize would free a node under
+ * it (plant 54, RCU_SLOT_GEN).  Each reader holds its round-2 read-side
+ * across RI_HOLD yields so the writers' grace periods overlap it.
+ */
+#define RI_READERS 4
+#define RI_HOLD 4
+static int g_ri_phase;  /* 0 round 1, 1 reinit done */
+static int g_ri_round1; /* readers done with round 1 */
+
+static void
+ri_reader(void *arg)
+{
+	int id = (int)(intptr_t)arg;
+	int it, k;
+
+	for (it = 0; it < 2; it++) { /* round 1: cache the slot */
+		xtc_rcu_read_lock();
+		rcu_fold((long)id);
+		xtc_rcu_read_unlock();
+		xtc_yield();
+	}
+	xtc_atomic_fetch_add_i32(&g_ri_round1, 1, xtc_mo_relaxed);
+	while (xtc_atomic_load_i32(&g_ri_phase, xtc_mo_acquire) == 0)
+		xtc_yield();
+	for (it = 0; it < RCU_RD_ITERS; it++) {
+		struct node *n;
+		uint64_t gen0;
+
+		xtc_rcu_read_lock();
+		n = xtc_atomic_load_ptr(&g_ptr, xtc_mo_acquire);
+		gen0 = n->gen;
+		for (k = 0; k < RI_HOLD; k++) {
+			xtc_yield();
+			if (xtc_atomic_load_u64(&n->sentinel, xtc_mo_acquire) !=
+			        NODE_LIVE_MAGIC ||
+			    n->gen != gen0)
+				xtc_atomic_fetch_add_i32(&g_uaf, 1,
+				    xtc_mo_relaxed);
+		}
+		rcu_fold((long)(gen0 + id));
+		xtc_rcu_read_unlock();
+		xtc_yield();
+	}
+	xtc_atomic_fetch_add_i32(&g_rd_done, 1, xtc_mo_relaxed);
+}
+
+/* Reinit the RCU subsystem once every reader is between read-sides. */
+static void
+ri_reinit(void *arg)
+{
+	(void)arg;
+	while (xtc_atomic_load_i32(&g_ri_round1, xtc_mo_acquire) < RI_READERS)
+		xtc_yield();
+	xtc_rcu_fini();
+	(void)xtc_rcu_init();
+	xtc_atomic_store_i32(&g_ri_phase, 1, xtc_mo_release);
+}
+
+static void
+ri_writer(void *arg)
+{
+	while (xtc_atomic_load_i32(&g_ri_phase, xtc_mo_acquire) == 0)
+		xtc_yield();
+	rcu_writer(arg);
+}
+
+static int
+run_reinit(uint64_t seed, int *out_uaf, int *out_rd, int *out_wr,
+    long *out_hash, uint64_t *out_state)
+{
+	xtc_exec_t *e = NULL;
+	struct node *last;
+	int i, rc;
+
+	xtc_atomic_store_ptr(&g_ptr, NULL, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_uaf, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_rd_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_wr_done, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ri_phase, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_ri_round1, 0, xtc_mo_seq_cst);
+	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
+
+	if (xtc_rcu_init() != XTC_OK)
+		return -1;
+	xtc_atomic_store_ptr(&g_ptr, node_new(1), xtc_mo_release);
+	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
+		return -1;
+	for (i = 0; i < RI_READERS + RCU_WRITERS + 1; i++) {
+		xtc_loop_t *l = xtc_exec_loop(e, (unsigned)(i % N_LOOPS));
+		if (i < RI_READERS)
+			(void)xtc_proc_spawn(l, ri_reader, (void *)(intptr_t)i,
+			    NULL, NULL);
+		else if (i < RI_READERS + RCU_WRITERS)
+			(void)xtc_proc_spawn(l, ri_writer,
+			    (void *)(intptr_t)(i - RI_READERS), NULL, NULL);
+		else
+			(void)xtc_proc_spawn(l, ri_reinit, NULL, NULL, NULL);
+	}
+
+	rc = xtc_sim_exec_run(e, seed, 5000000);
+
+	last = xtc_atomic_exchange_ptr(&g_ptr, NULL, xtc_mo_acq_rel);
+	if (last != NULL)
+		xtc_rcu_retire(last, node_free);
+	for (i = 0; i < 4; i++)
+		xtc_rcu_synchronize();
+	*out_uaf = xtc_atomic_load_i32(&g_uaf, xtc_mo_seq_cst);
+	*out_rd = xtc_atomic_load_i32(&g_rd_done, xtc_mo_seq_cst);
+	*out_wr = xtc_atomic_load_i32(&g_wr_done, xtc_mo_seq_cst);
+	*out_hash = xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
+	*out_state = xtc_sim_state_hash(e);
+	(void)xtc_exec_fini(e);
+	xtc_rcu_fini();
+	return rc;
+}
+
+/* Run the reinit phase twice on one seed: it must pass and replay. */
+static int
+check_reinit(uint64_t seed)
+{
+	int uaf1 = 0, rd1 = 0, wr1 = 0, uaf2 = 0, rd2 = 0, wr2 = 0;
+	long h1 = 0, h2 = 0;
+	uint64_t s1 = 0, s2 = 0;
+
+	if (run_reinit(seed, &uaf1, &rd1, &wr1, &h1, &s1) != XTC_OK) {
+		printf("FAIL: reinit: run did not quiesce (seed %llx)\n",
+		    (unsigned long long)seed);
+		return 1;
+	}
+	(void)run_reinit(seed, &uaf2, &rd2, &wr2, &h2, &s2);
+	printf("rcu reinit seed %llx: rd=%d wr=%d uaf=%d hash=%ld\n",
+	    (unsigned long long)seed, rd1, wr1, uaf1, h1);
+	if (uaf1 != 0) {
+		printf("FAIL: reinit: reader observed a FREED/TORN node %d "
+		       "time(s) -- a fiber that lived through xtc_rcu_fini was "
+		       "invisible to synchronize\n",
+		    uaf1);
+		return 1;
+	}
+	if (rd1 != RI_READERS || wr1 != RCU_WRITERS) {
+		printf("FAIL: reinit: not all fibers finished (rd=%d wr=%d)\n",
+		    rd1, wr1);
+		return 1;
+	}
+	if (uaf1 != uaf2 || rd1 != rd2 || wr1 != wr2 || h1 != h2 || s1 != s2) {
+		printf("FAIL: reinit: did not replay (hash %ld/%ld)\n", h1, h2);
+		return 1;
+	}
+	return 0;
+}
+
 static int
 run_rcu(uint64_t seed, int *out_rd, int *out_wr, int *out_uaf,
     int *out_alloc, int *out_freed, long *out_hash, uint64_t *out_state)
@@ -324,10 +481,14 @@ main(void)
 		}
 	}
 
+	if (check_reinit(0x5C0FF) != 0 || check_reinit(0xB1DE7) != 0)
+		return 1;
+
 	printf("OK: rcu under DST -- per-fiber reader slot keeps read-sides "
 	    "isolated (no reader saw a freed node), cooperative-yield "
 	    "synchronize drains without hanging, every retired node "
-	    "reclaimed; replayed byte-identically and a different seed "
+	    "reclaimed, fibers that live through xtc_rcu_fini stay "
+	    "visible; replayed byte-identically and a different seed "
 	    "reorders but stays consistent\n");
 	return 0;
 }

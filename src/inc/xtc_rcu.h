@@ -64,8 +64,11 @@ XTC_API void xtc_rcu_fini(void);
  * between lock and unlock see a consistent snapshot of any
  * RCU-protected pointer that was loaded after the lock.
  *
- * Lock/unlock are nestable on the same thread (refcount-style).
- * No system call, no atomic compare-exchange on the fast path. */
+ * Lock/unlock are nestable on the same thread or fiber
+ * (refcount-style).  A read-side on a fiber may span a yield, a park
+ * or a migration to another loop.  No system call, no lock, no atomic
+ * compare-exchange on the fast path (a fiber's first read-side takes a
+ * lock once, to register its slot). */
 XTC_API void xtc_rcu_read_lock(void);
 XTC_API void xtc_rcu_read_unlock(void);
 

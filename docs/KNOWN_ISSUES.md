@@ -474,6 +474,34 @@ application grants itself with `xtc_chan_demand_ask` still adds to
 that unit.  `test/m10/test_stream` `/from_demand` (10 empty pulls, then
 `outstanding == 1`) failed before (10) and passes after.
 
+## FIXED (2.2): an RCU read-side on a fiber took a global lock
+
+**What it was.**  `xtc_rcu_read_lock` and `xtc_rcu_read_unlock` on a
+fiber (any fiber, in every build) looked the fiber's reader slot up in a
+table under the RCU subsystem's one mutex, twice per bracket.  So
+`xtc_cskip` and `xtc_chash` readers on fibers serialized on that lock,
+contrary to xtc_rcu.h ("wait-free readers ... no atomic
+compare-exchange on the fast path") and xtc_cskip(3).  On a 48-core
+x86-64 host an empty bracket cost 7-8 ns on OS threads and, with one
+fiber per loop, 47 ns with one reader, 390-510 ns with four and
+1,930-2,060 ns with eight.  Eight fibers doing `xtc_cskip_floor` on a
+1,024-key map took 3,340-3,810 ns per lookup against 85-95 ns on
+threads.
+
+**Fix.**  A fiber caches its reader slot in its task the first time it
+enters a read-side, so later brackets take no lock: an empty bracket
+costs 9.4-10.4 ns on a fiber for one to eight readers (7-9 ns on
+threads, unchanged), and the eight-fiber `xtc_cskip_floor` costs
+87-89 ns.  The slot stays per fiber, not per thread, because a fiber may
+yield, park or migrate to another loop inside a read-side; the
+simulator takes the same path.  `xtc_rcu_fini` bumps a generation that
+retires every cached slot, so a fiber that lives through a fini and an
+init registers again (`test_sim_rcu`'s reinit phase; planted bug 54
+makes the fiber keep the freed slot, and DST catches it as a reader
+seeing a freed node).  `test/m13/test_rcu` `/fiber_readers_migrate`
+runs eight migratable reader fibers holding read-sides across yields
+on four loops against a synchronizing writer.
+
 ## Linux/XFS: io_uring WAL writes go to io-wq unless the filesystem has `lazytime`
 
 On XFS mounted without `lazytime`, a write that must update the file's

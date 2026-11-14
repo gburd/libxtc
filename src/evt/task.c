@@ -245,9 +245,13 @@ __task_alloc(xtc_loop_t *loop, int pinned, xtc_task_t **out)
 	t = __task_freelist_pop(loop, pinned);
 	if (t != NULL) {
 		int typestable = t->typestable;
+		void *rcu_slot = t->rcu_slot;
+		uint32_t rcu_gen = t->rcu_gen;
 		__task_zero_recycled(t);
 		t->recyclable = 1;
 		t->typestable = typestable;
+		t->rcu_slot = rcu_slot;
+		t->rcu_gen = rcu_gen;
 		*out = t;
 		return XTC_OK;
 	}

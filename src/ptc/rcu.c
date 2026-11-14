@@ -16,20 +16,22 @@
  *	Bucket E gets freed when the global epoch reaches E+2 (one
  *	full grace period of buffer ahead).
  *
- *	DST (deterministic simulation): under the single-thread sim
- *	every fiber shares one OS thread and hence one thread-local
- *	__rcu_self slot, so overlapping read-sides from different
- *	fibers would corrupt each other's active_epoch and could free
- *	a node a concurrent reader still holds.  So when running
- *	INSIDE a fiber (__xtc_current_task() != NULL) the reader slot
- *	is keyed on the CURRENT TASK instead of the thread (each fiber
+ *	Fibers: many fibers share one OS thread, and a fiber may yield,
+ *	park or migrate to another loop's thread inside a read-side, so
+ *	a fiber cannot use the thread's __rcu_self slot: overlapping
+ *	read-sides would corrupt each other's active_epoch, and a fiber
+ *	that unlocks on another thread would unbalance both threads'
+ *	slots.  So when running INSIDE a fiber (__xtc_current_task() !=
+ *	NULL) the reader slot is keyed on the CURRENT TASK (each fiber
  *	gets its own struct rcu_tls, still registered into the same
  *	global registry synchronize scans), and synchronize's drain
  *	loop yields to the loop (xtc_yield) instead of sched_yield so
- *	reader fibers actually run and drain.  Both paths are PURELY
- *	ADDITIVE and gated on __xtc_current_task(): off a fiber (OS
- *	threads, the blocking pool, non-sim builds) the code is
- *	byte-identical to the original -- __rcu_self + sched_yield.
+ *	reader fibers actually run and drain, in every build and under
+ *	the simulator alike.  The task caches its slot (task->rcu_slot),
+ *	so only a fiber's first read-side takes __rcu.lock; later ones
+ *	cost one out-of-line load more than a thread's.  Off a fiber
+ *	(OS threads, the blocking pool) the path is __rcu_self +
+ *	sched_yield.
  */
 
 #include "xtc_int.h"
@@ -40,6 +42,8 @@
 #include "xtc_proc.h"      /* __xtc_proc_ctx_save/restore */
 #include "proc_int.h"   /* __xtc_proc_ctx_save/restore (internal) */
 #include "coro_int.h"      /* __xtc_current_task */
+#include "loop_int.h"      /* struct xtc_task: rcu_slot / rcu_gen */
+#include "xtc_dst_inject.h"
 
 #include <pthread.h>
 #include <sched.h>
@@ -52,7 +56,7 @@ struct rcu_tls {
 	int               nest;
 	struct rcu_tls   *next;           /* registered list (synchronize scans) */
 	/*
-	 * Owning fiber for slots keyed on a task (DST path).  NULL for
+	 * Owning fiber for slots keyed on a task.  NULL for
 	 * the OS-thread slot pointed at by __rcu_self.  Also used as the
 	 * hash-table key so read_lock can find "my" slot again and so a
 	 * recycled task pointer reuses its slot (keeps the fiber-slot
@@ -89,19 +93,29 @@ static struct rcu_state __rcu = { XTC_RCU_EPOCH_START,
 static XTC_THREAD_LOCAL struct rcu_tls *__rcu_self = NULL;
 
 /*
- * DST reader-slot re-keying.  Under the single-thread sim ALL fibers
- * share one OS thread, hence one __rcu_self slot -- fiber A's
- * read_lock (which publishes the global epoch into active_epoch)
- * would collide with fiber B's, corrupting the per-reader epoch that
- * synchronize() scans, and could free a node a concurrent reader
- * still holds.  So when running INSIDE a fiber (__xtc_current_task()
- * != NULL) the reader slot is keyed on the CURRENT TASK instead of
- * the thread: each fiber gets its own struct rcu_tls.  That slot
- * still registers into the SAME global __rcu.registry, so nothing in
- * synchronize's scan changes -- only WHERE "my slot" pointer lives.
+ * The registry's generation.  xtc_rcu_fini frees every registered slot
+ * and bumps this, so a slot pointer cached by a fiber (task->rcu_slot)
+ * that is older than the current generation names freed memory and is
+ * looked up again.  Starts at 1 so a zeroed task (generation 0) never
+ * matches.  Written under __rcu.lock; read by a fiber with acquire, so
+ * a fiber that sees the new value also sees the emptied table.
+ */
+static uint32_t __rcu_gen = 1;
+
+/*
+ * Fiber reader slots.  All fibers of a loop share one OS thread, hence
+ * one __rcu_self slot -- fiber A's read_lock (which publishes the
+ * global epoch into active_epoch) would collide with fiber B's,
+ * corrupting the per-reader epoch that synchronize() scans, and a
+ * fiber that migrates inside a read-side would unlock another thread's
+ * slot.  So when running INSIDE a fiber (__xtc_current_task() != NULL)
+ * the reader slot is keyed on the CURRENT TASK instead of the thread:
+ * each fiber gets its own struct rcu_tls.  That slot still registers
+ * into the SAME global __rcu.registry, so nothing in synchronize's
+ * scan changes -- only WHERE "my slot" pointer lives.
  *
- * Off a fiber (OS threads, the blocking pool, non-sim builds) the
- * path is byte-identical to before: __rcu_self, sched_yield().
+ * Off a fiber (OS threads, the blocking pool) the path is __rcu_self,
+ * sched_yield().
  *
  * The fiber slots are held in a tiny open-chained hash table keyed on
  * the xtc_task_t pointer, guarded by __rcu.lock (same lock that
@@ -111,7 +125,9 @@ static XTC_THREAD_LOCAL struct rcu_tls *__rcu_self = NULL;
  * table -- stays bounded by peak concurrent fibers, not total
  * spawned).  A leftover slot from an exited fiber is always at
  * active_epoch==0 (read_unlock cleared it), so it never blocks
- * reclamation; all slots are freed at xtc_rcu_fini.
+ * reclamation; all slots are freed at xtc_rcu_fini.  The table is
+ * the slow path: a task caches the slot it found (task->rcu_slot, see
+ * __rcu_reader_slot), so a fiber looks it up once.
  */
 #define XTC_RCU_FTBL_SIZE 64
 static struct rcu_tls *__rcu_ftbl[XTC_RCU_FTBL_SIZE];  /* guarded by __rcu.lock */
@@ -182,7 +198,7 @@ __rcu_register(void)
 }
 
 /*
- * Return the reader slot for the CURRENT fiber (DST path), creating
+ * Return the reader slot for the CURRENT fiber, creating
  * and registering it on first use, reusing an existing slot for a
  * recycled task pointer.  Callers hold nothing; this takes __rcu.lock
  * internally.  Returns NULL only on OOM (caller degrades to no-op,
@@ -241,15 +257,42 @@ __rcu_fiber_slot(xtc_task_t *cur)
 	return t;
 }
 
-/* The reader slot for the calling context: the fiber slot when on a
- * fiber (DST), else the OS-thread slot.  NULL on OOM. */
+/*
+ * The calling fiber's slot when its cached one is missing or from an
+ * older registry generation: look it up under __rcu.lock, creating it
+ * on first use, and cache it in the task.  NULL on OOM.
+ */
 static struct rcu_tls *
+__rcu_fiber_slot_refresh(xtc_task_t *cur, uint32_t gen)
+{
+	cur->rcu_slot = __rcu_fiber_slot(cur);
+	cur->rcu_gen = gen;
+	return cur->rcu_slot;
+}
+
+/*
+ * The reader slot for the calling context: the fiber slot when on a
+ * fiber, else the OS-thread slot.  NULL on OOM.  A fiber's slot is
+ * cached in its task, tagged with the registry generation it was found
+ * in, so only the first bracket of a fiber (or the first after an
+ * xtc_rcu_fini) takes __rcu.lock.  The task fields are touched only by
+ * the fiber running on the task, so they need no lock; a migration
+ * hands the fiber, and these fields with it, to the next thread.
+ * Inline: this is the whole read-side fast path.
+ */
+static inline struct rcu_tls *
 __rcu_reader_slot(int create)
 {
 	xtc_task_t *cur = __xtc_current_task();
-	if (cur != NULL)
-		return __rcu_fiber_slot(cur);
-	if (__rcu_self == NULL) {
+	if (cur != NULL) {
+		uint32_t gen = xtc_atomic_load_u32(&__rcu_gen, xtc_mo_acquire);
+		if (XTC_LIKELY(cur->rcu_slot != NULL &&
+		        (cur->rcu_gen == gen ||
+		            XTC_DST_BUG(XTC_DST_BUG_RCU_SLOT_GEN))))
+			return cur->rcu_slot;
+		return __rcu_fiber_slot_refresh(cur, gen);
+	}
+	if (XTC_UNLIKELY(__rcu_self == NULL)) {
 		if (!create) return NULL;
 		(void)__rcu_register();
 	}
@@ -299,6 +342,10 @@ xtc_rcu_fini(void)
 	 * just drop the table's bucket heads and the thread slot pointer. */
 	for (b = 0; b < XTC_RCU_FTBL_SIZE; b++)
 		__rcu_ftbl[b] = NULL;
+	/* Every slot a fiber cached is freed above: retire them all. */
+	xtc_atomic_store_u32(&__rcu_gen,
+	    xtc_atomic_load_u32(&__rcu_gen, xtc_mo_relaxed) + 1u,
+	    xtc_mo_release);
 	__rcu_self = NULL;
 	__rcu.inited = 0;
 	xtc_atomic_store_u64(&__rcu.epoch, XTC_RCU_EPOCH_START, xtc_mo_relaxed);

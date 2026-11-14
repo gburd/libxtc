@@ -48,8 +48,14 @@ blocks until all currently-active readers have exited.  Used by
 writers that want to free old state synchronously rather than via
 the deferred-retire path.
 .Pp
-The implementation tracks per-thread epoch counters in a
-TLS-registered linked list.  Retired records bucket by epoch;
+The implementation tracks per-reader epoch counters in a registered
+linked list: one per OS thread, and one per fiber when the reader runs
+on a fiber, because a fiber may yield, park, or migrate to another
+loop inside a read-side critical section.
+A fiber looks its counter up under a lock on its first
+.Fn xtc_rcu_read_lock
+and keeps it, so later read-side sections on the fiber take no lock.
+Retired records bucket by epoch;
 records two epochs old are guaranteed safe to free.
 .Pp
 .Fn xtc_rcu_current_epoch

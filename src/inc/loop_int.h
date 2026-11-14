@@ -223,6 +223,14 @@ struct xtc_task {
 	int              reclaim;
 	int              typestable;   /* once reclaimed: never freed before fini */
 	struct xtc_task *dead_next;
+
+	/* xtc_rcu: the reader slot of the fiber running on this task and
+	 * the RCU generation it belongs to (rcu.c), so a read-side bracket
+	 * on a fiber finds its slot without the RCU lock.  Only the fiber
+	 * running on the task touches them; they survive recycling, as the
+	 * slot is keyed on the task pointer anyway. */
+	void *rcu_slot;
+	uint32_t rcu_gen;
 };
 
 /*
