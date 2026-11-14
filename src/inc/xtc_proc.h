@@ -83,6 +83,7 @@ xtc_pid_is_none(xtc_pid_t p)
 
 /* An xtc_pid_t as an xtc_logf argument: {} prints <loop_id.local_id.gen>.
  * xtc_log.h is included above, so this hook replaces its empty one. */
+#ifndef __cplusplus
 static inline xtc_logarg_t
 xtc__logarg_pid(xtc_pid_t p)
 {
@@ -95,13 +96,6 @@ xtc__logarg_pid(xtc_pid_t p)
 	a.v.pid.gen = p.gen;
 	return a;
 }
-#ifdef __cplusplus
-extern "C++" inline xtc_logarg_t
-xtc_logarg(xtc_pid_t p)
-{
-	return xtc__logarg_pid(p);
-}
-#else
 #undef XTC__LOGARG_PID
 #define XTC__LOGARG_PID xtc_pid_t: xtc__logarg_pid,
 #endif

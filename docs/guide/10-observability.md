@@ -294,7 +294,7 @@ format, which in C means one conversion per type and a `PRIu64` for every
 garbage on another data model.
 
 `xtc_logf` (2.2) takes `{}` instead. The macro picks each argument's type at
-compile time (C11 `_Generic`; overloads in C++), so the same call is right
+compile time (C11 `_Generic`), so the same call is right
 for an `int8_t`, a `size_t`, an `int64_t` at its minimum, a `double`, a
 string or a pointer, on 32- and 64-bit targets alike. `{:x}`, `{:08x}`,
 `{:6}` and `{:.2}` add hex, zero fill, width and precision, and a doubled
@@ -306,5 +306,6 @@ of reading a missing argument off the stack.
 
 Both calls share one record path: the same level floor, ring, sink and drop
 count. `xtc_logf` writes to the default logger, `xtc_logf_to(log, ...)` to a
-given one. See [`xtc_log(3)`]({{ '/reference/api-index/' | relative_url }})
+given one. The macros are C only: a C++ file that includes `xtc_log.h` gets
+`xtc_log_write` but not `xtc_logf`. See [`xtc_log(3)`]({{ '/reference/api-index/' | relative_url }})
 for the full list of argument types and specs.

@@ -202,9 +202,8 @@ an
 .Vt xtc_pid_t
 prints as
 .Ql <loop_id.local_id.gen> .
-A struct or union argument does not compile; nor does a function pointer
-in C++ (C converts one to a data pointer, which ISO C leaves undefined,
-and
+A struct or union argument does not compile; a function pointer converts
+to a data pointer, which ISO C leaves undefined (and
 .Fl Wpedantic
 warns).
 gcc gives a bit-field a type of its own, which gcc 14 rejects: cast it.
@@ -267,11 +266,15 @@ Microsoft C needs
 .Li /std:c11
 (Visual Studio 2019 16.8 or later), which also selects the conforming
 preprocessor the argument count relies on.
-C++ needs C++11: the same calls resolve through overloads of
+In C++ the header declares
+.Fn xtc_logf_impl
+but not
+.Fn xtc_logf ,
+.Fn xtc_logf_to ,
+or
 .Fn xtc_logarg ,
-and a scoped enumeration needs a cast.
-Under C++98 the header still compiles, without
-.Fn xtc_logf .
+which are C only; C++ code logs with
+.Fn xtc_log_write .
 .Pp
 .Fn xtc_logarg
 converts one value to an

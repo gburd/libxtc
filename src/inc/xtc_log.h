@@ -173,10 +173,10 @@ XTC_API int  xtc_log_drop_count(const xtc_log_t *log);
  * type as %g, a char * or const char * as the string (NULL as "(null)"),
  * any other object pointer as 0x and its address in hex, and an xtc_pid_t
  * (with xtc_proc.h) as <loop_id.local_id.gen>.  A character literal is an
- * int in C, so 'x' prints 120.  A struct or union does not compile, nor does a
- * function pointer in C++ (C converts one to a data pointer, which ISO C
- * leaves undefined: -Wpedantic warns).  gcc gives a bit-field a type of
- * its own, which gcc 14 rejects (and older gcc warns about): cast it.
+ * int in C, so 'x' prints 120.  A struct or union does not compile, and a
+ * function pointer converts to a data pointer, which ISO C leaves
+ * undefined (-Wpedantic warns).  gcc gives a bit-field a type of its
+ * own, which gcc 14 rejects (and older gcc warns about): cast it.
  *
  * A spec after a colon changes the format: {:x} {:X} {:o} hex and octal
  * (a negative integer in its own width's two's complement), {:p} as an
@@ -195,8 +195,8 @@ XTC_API int  xtc_log_drop_count(const xtc_log_t *log);
  *
  * C needs C11 (_Generic; MSVC: /std:c11, Visual Studio 2019 16.8 or
  * later, which also selects the conforming preprocessor the argument
- * count needs).  C++ needs C++11; the same calls resolve through
- * overloads of xtc_logarg (a scoped enum needs a cast).  xtc_logarg(x)
+ * count needs).  The macros and xtc_logarg are C only: a C++ translation
+ * unit does not see them (xtc_log_write works there).  xtc_logarg(x)
  * converts one value; xtc_logf_impl is the function the macros call with
  * the converted arguments.
  */
@@ -232,6 +232,7 @@ typedef struct xtc_logarg {
 XTC_API void xtc_logf_impl(xtc_log_t *log, xtc_log_level_t lvl, const char *fmt,
     int nargs, const xtc_logarg_t *args);
 
+#ifndef __cplusplus
 static inline xtc_logarg_t
 xtc__logarg_mk_i(long long v, size_t size)
 {
@@ -311,83 +312,6 @@ xtc__logarg_mk_p(const volatile void *v)
 	X(u, unsigned int, xtc__logarg_mk_u)                                   \
 	X(ul, unsigned long, xtc__logarg_mk_u)                                 \
 	X(ull, unsigned long long, xtc__logarg_mk_u)
-
-#ifdef __cplusplus
-}
-#endif
-
-/* C++98 still compiles this header, without xtc_logf.  MSVC sets
- * __cplusplus to 199711L unless /Zc:__cplusplus; _MSVC_LANG is right. */
-#if defined(__cplusplus) &&                                                    \
-    (__cplusplus >= 201103L || (defined(_MSVC_LANG) && _MSVC_LANG >= 201103L))
-extern "C++" {
-#define XTC__LOGARG_CXX_DEF(sfx, T, mk)                                        \
-	inline xtc_logarg_t xtc_logarg(T v)                                    \
-	{                                                                      \
-		return mk(v, sizeof v);                                        \
-	}
-XTC__LOGARG_INTS(XTC__LOGARG_CXX_DEF)
-#undef XTC__LOGARG_CXX_DEF
-
-inline xtc_logarg_t
-xtc_logarg(bool v)
-{
-	return xtc__logarg_mk_u(v, sizeof v);
-}
-
-inline xtc_logarg_t
-xtc_logarg(double v)
-{
-	return xtc__logarg_mk_d(v);
-}
-
-inline xtc_logarg_t
-xtc_logarg(long double v)
-{
-	return xtc__logarg_mk_ld(v);
-}
-
-inline xtc_logarg_t
-xtc_logarg(const char *v)
-{
-	return xtc__logarg_mk_s(v);
-}
-
-/* Any other object pointer.  A char * prefers the overload above. */
-template <typename T>
-inline xtc_logarg_t
-xtc_logarg(const volatile T *v)
-{
-	return xtc__logarg_mk_p(v);
-}
-
-/* A function pointer would otherwise convert to bool and print 1. */
-template <typename R, typename... P>
-xtc_logarg_t xtc_logarg(R (*)(P...)) = delete;
-
-inline void
-xtc__logf_cxx(xtc_log_t *log, xtc_log_level_t lvl, const char *fmt)
-{
-	xtc_logf_impl(log, lvl, fmt, 0, nullptr);
-}
-
-/* By value, so an array argument decays as it does in C. */
-template <typename... A>
-inline void
-xtc__logf_cxx(xtc_log_t *log, xtc_log_level_t lvl, const char *fmt, A... a)
-{
-	static_assert(sizeof...(A) <= 16,
-	    "xtc_logf takes at most 16 arguments");
-	const xtc_logarg_t args[] = { xtc_logarg(a)... };
-
-	xtc_logf_impl(log, lvl, fmt, (int)sizeof...(A), args);
-}
-}
-
-#define xtc_logf_to(log, lvl, ...) xtc__logf_cxx((log), (lvl), __VA_ARGS__)
-#define xtc_logf(lvl, ...) xtc_logf_to(xtc_log_default(), (lvl), __VA_ARGS__)
-
-#elif !defined(__cplusplus)
 
 #define XTC__LOGARG_C_DEF(sfx, T, mk)                                          \
 	static inline xtc_logarg_t xtc__logarg_##sfx(T v)                      \
@@ -471,6 +395,10 @@ XTC__LOGARG_INTS(XTC__LOGARG_C_DEF)
 
 #define xtc_logf(lvl, ...) xtc_logf_to(xtc_log_default(), (lvl), __VA_ARGS__)
 
-#endif /* C */
+#endif /* !__cplusplus */
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_LOG_H */
