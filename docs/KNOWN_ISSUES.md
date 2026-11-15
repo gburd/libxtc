@@ -72,6 +72,77 @@ not and must be rebuilt.  `test/abi/test_abi_sized` checks size 0, a spec
 that ends at `boot_type` (`spin_ns` reads as 0), and a nonzero `spin_ns`
 past `.size` (ignored).
 
+## CHANGED (2.2): a single-loop `xtc_app_run` returns when the root supervisor exits
+
+`xtc_app.h` said `xtc_app_run` runs "until the supervisor exits".  A
+multi-loop app did; a single-loop app ran its loop until no task was
+alive, so any other parked proc (a registry reaper spawned by hand, as
+`xtc_reg.h` advised, or a background ticker) kept `xtc_app_run` from
+returning forever after `xtc_app_stop` or a restart-intensity give-up.
+Now the root supervisor's exit stops an owned loop that `xtc_app_run` is
+driving.  A borrowed loop (`xtc_app_opts_t.loop`) is left alone, as
+before.  Consequence: a proc the embedder spawned on an owned app loop no
+longer keeps the run going after the supervisor has gone; it is torn down
+with the loop at `xtc_app_destroy`.
+
+`xtc_app_start` also spawns the registry's reaper on the app's loop, so
+`xtc_reg_register_mon` on `xtc_app_registry(app)` drops a dead pid's
+names with no setup.  An embedder that spawns its own reaper for the app
+registry may keep it (the second reaper takes over enrollment) or delete
+it.
+
+## CHANGED (2.2): `xtc_svr_call` and `xtc_fsm_call` monitor the target
+
+Both now hold a monitor of the server (machine) for the duration of an
+in-proc call and turn it off with `xtc_demonitor(ref,
+XTC_DEMONITOR_FLUSH)` before they return, so a dead target fails the call
+at once with `XTC_E_NOTFOUND`.  Before, `xtc_svr_call` polled the
+server's liveness every 25 ms, and `xtc_fsm_call` had no liveness check
+and waited out its whole timeout (forever with -1).  A finished call
+leaves no monitor and no DOWN in the caller's mailbox.  An off-proc
+(plain thread) `xtc_svr_call` is woken by the server's exit instead of
+the poll.  Consequence: a caller that counted on the timeout to learn
+that the target died now gets `XTC_E_NOTFOUND` sooner; one with an abort
+token still sees the token polled every 25 ms.
+
+## CHANGED (2.2): an app's `on_child_down` sees the caller's spec
+
+`xtc_app_start` wraps each child's `fn` and `arg` in the app's drain
+trampoline.  An `on_child_down` hook set through `xtc_app_opts_t.sup`
+was handed the wrapped spec: `spec->fn` was the trampoline and
+`spec->arg` an internal pointer, not the identity the caller gave the
+child.  It now gets the caller's own spec.  A dynamic child
+(`xtc_sup_add_child`) was never wrapped and is unchanged.
+
+## CHANGED (2.2): `xtc_net_listen` accepts port 0
+
+Port 0 is passed to `bind(2)`, so the kernel picks a free port, which
+the caller reads back with `getsockname(2)`.  Before, port 0 was
+`XTC_E_INVAL` (while `xtc_net_udp_socket` already accepted it).
+Negative ports and ports above 65535 are still `XTC_E_INVAL`;
+`xtc_net_dial` still requires a real port.
+
+## CHANGED (2.2): child specs and server, machine and supervisor options grew
+
+Fields appended to size-first structs, so a caller built against 2.1
+keeps working (the fields past its `.size` read as their defaults):
+
+* `xtc_child_spec_t`: `mailbox_watermark_fn`, `mailbox_watermark_user`,
+  `sched_class`, `reg_name`, `mailbox_watermark_pct`, `migratable`
+  (56 -> 96 bytes on LP64), applied to every incarnation of the child.
+* `xtc_svr_opts_t`: the same proc knobs (`sched_class` and the
+  watermark fields) and `wait_init` (24 -> 56 bytes).
+* `xtc_fsm_opts_t`: `wait_init` (24 -> 32 bytes).
+* `xtc_sup_opts_t`: `registry` (for `reg_name`) and `wait_children`,
+  after 2.2's `on_child_down` (40 -> 72 bytes over 2.1).
+
+`wait_init` and `wait_children` make the start synchronous: the start
+returns init's code (the first child's failure) and must be called from
+a proc or from a thread while another thread runs the loop, else
+`XTC_E_STATE`.  Left 0 the start is asynchronous, as before.  New
+`xtc_svr_child_main` and `xtc_sup_child_main` (symbol version `XTC_2.2`)
+run a server or a nested supervisor as a supervised child.
+
 ## FIXED (2.2): xtc_exec_run could fail to return after the last task finished
 
 The executor's supervisor stops the run when every loop is idle, and
