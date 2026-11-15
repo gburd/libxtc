@@ -1015,7 +1015,7 @@ struct prom_buf {
 };
 
 static void __pb_printf(struct prom_buf *b, const char *fmt, ...)
-    __attribute__((format(printf, 2, 3)));
+    XTC_PRINTF_FMT(2, 3);
 
 static void
 __pb_printf(struct prom_buf *b, const char *fmt, ...)
