@@ -90,6 +90,10 @@
 #include "xtc_proc.h"
 #include "xtc_loop.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_slab xtc_slab_t;
 
 /* Offset handle for shared-memory caches (a base-relative offset). */
@@ -262,5 +266,9 @@ XTC_API int   xtc_slab_reap_all(void);
  * Returns the proc's pid (XTC_PID_NONE on failure). */
 int   xtc_slab_reaper_spawn(xtc_loop_t *loop, int64_t interval_ns,
                             xtc_pid_t *out_pid);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_SLAB_H */

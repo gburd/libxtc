@@ -46,6 +46,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_counter xtc_counter_t;
 typedef struct xtc_gauge   xtc_gauge_t;
 typedef struct xtc_hist    xtc_hist_t;
@@ -289,5 +293,9 @@ XTC_API void      xtc_tuning_check(void);
  * blocking pool) in a server.
  */
 XTC_API int xtc_tuning_check_ex(xtc_tuning_fn fn, void *user);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_STATS_H */

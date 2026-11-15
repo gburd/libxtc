@@ -52,6 +52,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_cskip xtc_cskip_t;
 
 /* Key comparator, qsort(3) convention: <0 if a<b, 0 if equal, >0 if
@@ -138,5 +142,9 @@ XTC_API int    xtc_cskip_floor(xtc_cskip_t *s, const void *key,
 /* Approximate live entry count (an atomic counter; exact with no
  * concurrent writers). */
 XTC_API size_t xtc_cskip_size(const xtc_cskip_t *s);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_CSKIP_H */

@@ -31,6 +31,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef void (*xtc_pdict_dtor_fn)(void *value);
 
 /*
@@ -58,5 +62,9 @@ XTC_API int  xtc_pdict_erase(const char *key);
 
 XTC_API int  xtc_pdict_count(void);
 XTC_API int  xtc_pdict_clear(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_PDICT_H */

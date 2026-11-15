@@ -27,6 +27,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * A one-shot snapshot of the process runtime environment.
  *
@@ -90,5 +94,9 @@ typedef struct xtc_runtime_info {
  *	xtc_res_used(r, XTC_RES_MEM_BYTES) against r->caps.mem_bytes.
  */
 XTC_API int xtc_runtime_info(xtc_runtime_info_t *out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_RUNTIME_H */

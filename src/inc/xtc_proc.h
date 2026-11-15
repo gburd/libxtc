@@ -30,6 +30,23 @@
 #include "xtc_async.h"
 #include "xtc_exec.h"   /* xtc_exec_class_t for xtc_proc_opts_t.sched_class */
 
+#if (defined(__sun) || defined(__illumos__)) && !defined(__EXTENSIONS__)
+/* illumos/Solaris gate sigjmp_buf / sigsetjmp / siglongjmp behind a
+ * feature-test macro; under -std=c11 (strict ISO C) <setjmp.h> hides
+ * them.  A consumer that includes this PUBLIC header need not know to
+ * set the macro itself, so expose the POSIX setjmp surface here before
+ * the include.  No effect on other platforms. */
+#define __EXTENSIONS__ 1
+#endif
+#include <setjmp.h>
+#if defined(_WIN32)
+#include <windows.h> /* CONTEXT, RtlCaptureContext (recovery) */
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Process identifier (16 bytes; 2.0).  Encodes the loop ID, a per-loop
  * slot index, and the slot's generation, so a stale pid (after a
@@ -807,18 +824,7 @@ int       xtc_proc_mailbox_stats(xtc_pid_t pid, xtc_mailbox_stats_t *out);
  * abort (POSIX re-raise; Windows EXCEPTION_CONTINUE_SEARCH ->
  * 0xC0000005), preserving PG's critical-section PANIC semantics.
  */
-#if (defined(__sun) || defined(__illumos__)) && !defined(__EXTENSIONS__)
-/* illumos/Solaris gate sigjmp_buf / sigsetjmp / siglongjmp behind a
- * feature-test macro; under -std=c11 (strict ISO C) <setjmp.h> hides
- * them.  A consumer that includes this PUBLIC header need not know to
- * set the macro itself, so expose the POSIX setjmp surface here before
- * the include.  No effect on other platforms. */
-#define __EXTENSIONS__ 1
-#endif
-#include <setjmp.h>
-
 #if defined(_WIN32)
-#include <windows.h>
 /*
  * Windows recovery uses CONTEXT capture/restore rather than
  * setjmp/longjmp.  The fault is caught by a Vectored Exception Handler
@@ -1203,5 +1209,9 @@ static inline int xtc_down_is_exit_reason(int reason)
  * (__xtc_proc_ctx_save / __xtc_proc_ctx_restore) is library-internal
  * (the __ prefix) and lives in "proc_int.h", not in this installed
  * public header. */
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_PROC_H */

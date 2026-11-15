@@ -35,6 +35,10 @@
 #ifndef XTC_EXPORT_H
 #define XTC_EXPORT_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #if defined(_WIN32) && defined(XTC_BUILDING_DLL)
 #  define XTC_API __declspec(dllexport)
 #elif defined(_WIN32) && defined(XTC_DLL)
@@ -64,6 +68,10 @@
 #  define XTC_DEPRECATED(msg) __declspec(deprecated(msg))
 #else
 #  define XTC_DEPRECATED(msg)
+#endif
+
+#ifdef __cplusplus
+}
 #endif
 
 #endif /* XTC_EXPORT_H */

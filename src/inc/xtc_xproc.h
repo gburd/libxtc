@@ -42,6 +42,10 @@
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_xproc xtc_xproc_t;
 
 /* A cross-process pid: the child handle plus (reserved) a node-local pid
@@ -178,5 +182,9 @@ XTC_API int  xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *
  * has the hook, which is what enables re-exec for xtc_xspawn_entry.
  */
 XTC_API int  xtc_xproc_win_child_maybe(int argc, char **argv);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_XPROC_H */

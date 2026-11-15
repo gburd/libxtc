@@ -55,6 +55,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_saga xtc_saga_t;
 
 /*
@@ -142,5 +146,9 @@ XTC_API int  xtc_saga_last_error(const xtc_saga_t *s);
 /* 1 if any compensation itself failed during the last run (the
  * unrecoverable-saga condition), 0 otherwise. */
 XTC_API int  xtc_saga_compensate_failed(const xtc_saga_t *s);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_SAGA_H */

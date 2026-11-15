@@ -27,6 +27,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Flags for xtc_fs_open (mapped to O_* / _O_* per platform). */
 #define XTC_FS_READ    0x01u   /* open for reading */
 #define XTC_FS_WRITE   0x02u   /* open for writing */
@@ -99,5 +103,9 @@ int xtc_fs_mkstemp(char *tmpl, int *out_fd);    /* tmpl ends in "XXXXXX" */
 int  xtc_fs_dir_open(const char *path, xtc_fs_dir_t **out);
 int  xtc_fs_dir_next(xtc_fs_dir_t *d, const char **out_name);  /* *out_name == NULL at end */
 void xtc_fs_dir_close(xtc_fs_dir_t *d);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_FS_H */

@@ -58,6 +58,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_bloom xtc_bloom_t;
 typedef struct xtc_hll   xtc_hll_t;
 
@@ -136,5 +140,9 @@ XTC_API int      xtc_hll_merge(xtc_hll_t *dst, const xtc_hll_t *src);
 
 /* Free the sketch.  A NULL argument is a no-op. */
 XTC_API void     xtc_hll_fini(xtc_hll_t *h);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_PROB_H */

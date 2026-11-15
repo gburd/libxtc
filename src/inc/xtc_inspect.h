@@ -30,6 +30,10 @@
 #include "xtc.h"
 #include "xtc_proc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Run state of a proc (mirrors the scheduler task state). */
 enum xtc_proc_run_state {
 	XTC_PROC_SCHEDULED = 0,
@@ -154,5 +158,9 @@ XTC_API int xtc_inspect_loops(xtc_inspect_loop_fn cb, void *user);
  * XTC_OK on success, XTC_E_NOTFOUND if no live proc has that pid,
  * XTC_E_INVAL on a NULL out-pointer or an out->size of 0. */
 XTC_API int xtc_proc_info(xtc_pid_t pid, xtc_proc_info_t *out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_INSPECT_H */

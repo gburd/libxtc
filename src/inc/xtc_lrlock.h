@@ -60,6 +60,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_lrlock xtc_lrlock_t;
 
 /* Apply a single operation to one copy.  Must be deterministic. */
@@ -172,5 +176,9 @@ XTC_API int   xtc_alrlock_create(size_t data_size,
                                  xtc_lrlock_t **out);
 XTC_API int   xtc_alrlock_create_ex(const xtc_lrlock_opts_t *opts,
                                     xtc_lrlock_t **out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_LRLOCK_H */

@@ -30,6 +30,10 @@
 #include "xtc.h"
 #include "xtc_chan.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_stream xtc_stream_t;
 
 /*
@@ -87,5 +91,9 @@ XTC_API int  xtc_stream_for_each(xtc_stream_t *s,
  * demand and returns the next buffered item (XTC_E_AGAIN until one
  * arrives, XTC_E_NOTFOUND once the channel is closed and drained). */
 XTC_API int  xtc_stream_from_demand(xtc_chan_demand_t *ch, xtc_stream_t **out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_STREAM_H */

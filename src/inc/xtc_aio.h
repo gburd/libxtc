@@ -33,6 +33,10 @@
 #include <sys/uio.h>     /* struct iovec (POSIX scatter/gather) */
 #endif
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * PUBLIC: int xtc_aio_pread __P((int, void *, uint32_t, int64_t));
  * PUBLIC: int xtc_aio_pwrite __P((int, const void *, uint32_t, int64_t));
@@ -85,5 +89,9 @@ XTC_API int xtc_aio_fdatasync(int fd);   /* data only (the page/WAL flush hot pa
  * stable API; it lives in "aio_int.h", not in this installed public
  * header.
  */
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_AIO_H */

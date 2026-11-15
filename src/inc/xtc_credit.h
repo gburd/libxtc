@@ -38,6 +38,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_credit xtc_credit_t;
 
 /*
@@ -78,5 +82,9 @@ XTC_API unsigned xtc_credit_peak(const xtc_credit_t *c);
 
 /* The configured window size. */
 XTC_API unsigned xtc_credit_window(const xtc_credit_t *c);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_CREDIT_H */

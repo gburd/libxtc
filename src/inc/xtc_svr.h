@@ -35,6 +35,10 @@
 #include "xtc_proc.h"
 #include "xtc_sync.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Result codes for handle_call / handle_cast / handle_info: the
  * callback may either keep running (XTC_SVR_CONTINUE) or request
  * the server to stop (XTC_SVR_STOP).  handle_call may also defer its
@@ -229,5 +233,9 @@ XTC_API void xtc_svr_child_main(void *arg);
  * out) until the deferred reply is sent.
  */
 XTC_API xtc_svr_call_t *xtc_svr_call_save(const xtc_svr_call_t *call);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_SVR_H */

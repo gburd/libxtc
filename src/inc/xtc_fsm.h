@@ -48,6 +48,10 @@
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * What the event() callback asks the machine to do next:
  *
@@ -198,5 +202,9 @@ XTC_API int       xtc_fsm_call(xtc_pid_t target,
  * release the call handle.  Each call must be replied exactly once. */
 XTC_API int       xtc_fsm_reply(xtc_fsm_call_t *call,
                                 const void *reply, size_t size);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_FSM_H */

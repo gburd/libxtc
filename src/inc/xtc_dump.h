@@ -39,6 +39,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #if defined(__GNUC__) || defined(__clang__)
 #  define XTC_NORETURN __attribute__((noreturn))
 #else
@@ -82,5 +86,9 @@ XTC_API int xtc_crash_handler_install(void);
 /* Like XTC_ASSERT but with a custom printf-style message. */
 #define XTC_ASSERT_F(cond, ...) \
 	do { if (!(cond)) xtc_panic(__FILE__, __LINE__, __VA_ARGS__); } while (0)
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_DUMP_H */

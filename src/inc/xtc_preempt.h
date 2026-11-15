@@ -21,6 +21,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Arm a per-thread preemption timer that fires every `interval_ns` of
  * THIS thread's CPU time (not wall time), delivering SIGVTALRM to this
@@ -62,5 +66,9 @@ XTC_API int      xtc_preempt_tick_pending(void);
  * "preempt_int.h" (the __ prefix marks them internal, so they must not
  * appear in this installed public header).
  */
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_PREEMPT_H */

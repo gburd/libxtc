@@ -24,6 +24,10 @@
 #include "xtc.h"
 #include "xtc_proc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_reg xtc_reg_t;
 
 /* xtc_reg_visit's callback: one entry's pid and value.  Nonzero stops
@@ -169,5 +173,9 @@ XTC_API int xtc_reg_whereis_wait(xtc_reg_t *r, const char *name,
  */
 XTC_API int xtc_reg_send_wait(xtc_reg_t *r, const char *name,
     const void *data, size_t size, int64_t timeout_ns);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_REG_H */

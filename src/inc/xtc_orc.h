@@ -28,6 +28,10 @@
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Restart strategies.  All four are implemented; xtc_sup_start returns
  * XTC_E_NOSYS for any other value.
@@ -265,5 +269,9 @@ typedef struct xtc_sup_child {
 #define XTC_SUP_CHILD_INIT { .size = sizeof(xtc_sup_child_t) }
 
 XTC_API void xtc_sup_child_main(void *arg);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_ORC_H */

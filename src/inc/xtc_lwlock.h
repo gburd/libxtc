@@ -44,6 +44,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #ifndef XTC_LWLOCK_MAX_BACKENDS
 #define XTC_LWLOCK_MAX_BACKENDS 4096   /* power of 2; bits 0..11 = shared count */
 #endif
@@ -124,5 +128,9 @@ XTC_API void  xtc_lwlock_track_enable(int on);
 XTC_API long  xtc_lwlock_track_violations(void);
 XTC_API void  xtc_lwlock_track_reset(void);
 XTC_API void  xtc_lwlock_track_set_handler(xtc_lwlock_track_fn fn, void *user);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_LWLOCK_H */

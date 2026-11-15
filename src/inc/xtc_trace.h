@@ -39,6 +39,10 @@
 #include "xtc.h"
 #include "xtc_proc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 enum xtc_trace_kind {
 	XTC_TRACE_SEND  = 0,   /* self sent a message to peer */
 	XTC_TRACE_RECV  = 1,   /* self received a message from peer */
@@ -136,5 +140,9 @@ XTC_API int xtc_trace_causal_enable(int on);
  * if no live proc has that pid, or XTC_E_INVAL on a NULL callback.  When
  * the trace is disabled a live proc simply has an empty ring (0). */
 XTC_API int xtc_trace_causal_dump(xtc_pid_t pid, xtc_causal_fn cb, void *user);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_TRACE_H */

@@ -32,6 +32,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef void (*xtc_rcu_free_fn)(void *p);
 
 /*
@@ -76,5 +80,9 @@ XTC_API void xtc_rcu_retire(void *p, xtc_rcu_free_fn fn);
 XTC_API void xtc_rcu_synchronize(void);
 
 XTC_API uint64_t xtc_rcu_current_epoch(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_RCU_H */

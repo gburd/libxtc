@@ -35,6 +35,10 @@
 #include "xtc_orc.h"
 #include "xtc_reg.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_app xtc_app_t;
 
 typedef struct xtc_app_opts {
@@ -199,5 +203,9 @@ XTC_API xtc_reg_t  *xtc_app_registry(const xtc_app_t *app);
  * Borrowed: valid until xtc_app_destroy; do not xtc_sup_stop or
  * xtc_sup_join it (use xtc_app_stop / xtc_app_shutdown). */
 XTC_API xtc_supervisor_t *xtc_app_supervisor(const xtc_app_t *app);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_APP_H */

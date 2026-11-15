@@ -57,6 +57,10 @@ typedef SSIZE_T ssize_t;
 #  include <sys/types.h>         /* real ssize_t (POSIX, MinGW, Cygwin) */
 #endif
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Open flags for xtc_bdev_open (subset of xtc_fs flags that make sense
  * for a block device; mapped to O_* per platform). */
 #define XTC_BDEV_READ    0x01u   /* open for reading */
@@ -115,5 +119,9 @@ XTC_API ssize_t xtc_bdev_pwrite(xtc_bdev_t *b, const void *buf, size_t n, uint64
  * Returns XTC_OK or a negative XTC_E_* code.
  */
 XTC_API int xtc_bdev_flush(xtc_bdev_t *b);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_BDEV_H */

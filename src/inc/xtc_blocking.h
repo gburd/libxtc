@@ -26,6 +26,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Run fn(arg) on a blocking-pool thread and park the calling process
  * until it completes; fn's return value is stored in *out_result.
@@ -103,5 +107,9 @@ XTC_API int xtc_blocking_pool_size(int nthreads);
  * PUBLIC: void xtc_blocking_shutdown __P((void));
  */
 XTC_API void xtc_blocking_shutdown(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_BLOCKING_H */

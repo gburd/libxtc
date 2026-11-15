@@ -28,6 +28,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_pool xtc_pool_t;
 
 /*
@@ -68,5 +72,9 @@ XTC_API size_t xtc_pool_available(const xtc_pool_t *p);
 
 /* Total resources added to the pool (free + checked out). */
 XTC_API size_t xtc_pool_capacity(const xtc_pool_t *p);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_POOL_H */

@@ -29,6 +29,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_iosched xtc_iosched_t;
 
 typedef struct xtc_iosched_opts {
@@ -70,5 +74,9 @@ XTC_API int  xtc_iosched_write(xtc_iosched_t *s, const void *buf, uint32_t len,
 XTC_API int  xtc_iosched_flush(xtc_iosched_t *s);
 
 XTC_API void xtc_iosched_get_stats(const xtc_iosched_t *s, xtc_iosched_stats_t *out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_IOSCHED_H */

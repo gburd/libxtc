@@ -38,6 +38,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef enum xtc_res_kind {
 	XTC_RES_TASKS = 0,        /* live xtc_task_t allocations */
 	XTC_RES_CHANNELS = 1,     /* live xtc_chan_* objects */
@@ -174,5 +178,9 @@ XTC_API int  xtc_res_set_alert_fn(xtc_res_t *r,
 struct xtc_mctx;
 XTC_API int  xtc_res_attach_mctx(xtc_res_t *r, struct xtc_mctx *m);
 XTC_API int  xtc_res_attach_net(xtc_res_t *r);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_RES_H */
