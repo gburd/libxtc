@@ -97,9 +97,9 @@ All compiled with zero warnings (clang/gcc `-Wall -Wextra`; MSVC
 `tls_schannel.c` on the native ARM64 compile -- nothing needed fixing.
 The library sources no longer write C11 `_Atomic`: every atomic goes
 through `xtc_atomic.h`, which under MSVC uses the Interlocked
-intrinsics and ISO-volatile loads and stores on plain fields, in C and
-C++.  That MSVC backend is compile-checked for x64 and ARM64 by
-`test/dist/test_atomic_cxx.sh` through clang's MSVC targets; it has
+intrinsics and ISO-volatile loads and stores on plain fields.  That
+MSVC backend is compile-checked for x64 and ARM64 by
+`test/dist/test_header_cxx.sh` through clang's MSVC targets; it has
 not yet been built with cl and run on a Windows host since the library
 moved onto it, so the build still passes `/std:c11
 /experimental:c11atomics` (harmless without `_Atomic`) until that run.  clang and gcc accept `-std=c11`

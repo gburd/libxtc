@@ -68,7 +68,7 @@ typedef enum xtc_mo {
 } xtc_mo_t;
 
 /* Backend selection.  XTC_ATOMIC_FORCE_C11 / XTC_ATOMIC_FORCE_MSVC are
- * test hooks (test/m1/test_xtc_atomic.c, test/dist/test_atomic_cxx.sh). */
+ * test hooks (test/m1/test_xtc_atomic.c, test/dist/test_header_cxx.sh). */
 #if defined(XTC_ATOMIC_FORCE_C11)
 #define XTC__ATOMIC_C11 1
 #elif defined(_MSC_VER) &&                                                     \

@@ -13,7 +13,7 @@
  *	Built twice: test_xtc_atomic (the compiler's own backend, __atomic
  *	builtins on gcc/clang) and test_xtc_atomic_c11 (-DXTC_ATOMIC_FORCE_C11,
  *	the <stdatomic.h> fallback), so both backends run here.  The MSVC
- *	backend is compiled by test/dist/test_atomic_cxx.sh (clang targeting
+ *	backend is compiled by test/dist/test_header_cxx.sh (clang targeting
  *	*-windows-msvc) and built + run by the windows-msvc CI job.
  */
 
