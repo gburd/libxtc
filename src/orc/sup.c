@@ -306,6 +306,7 @@ __spawn_child_ex(struct xtc_supervisor *sup, struct child *c, int ack)
 	pop.mailbox_watermark_user = c->spec.mailbox_watermark_user;
 	pop.migratable = c->spec.migratable;
 	pop.sched_class = c->spec.sched_class;
+	pop.stack_size = c->spec.stack_size;
 	/*
 	 * ATOMIC spawn+monitor, not spawn-then-monitor.
 	 *

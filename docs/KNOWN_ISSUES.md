@@ -128,8 +128,9 @@ Fields appended to size-first structs, so a caller built against 2.1
 keeps working (the fields past its `.size` read as their defaults):
 
 * `xtc_child_spec_t`: `mailbox_watermark_fn`, `mailbox_watermark_user`,
-  `sched_class`, `reg_name`, `mailbox_watermark_pct`, `migratable`
-  (56 -> 96 bytes on LP64), applied to every incarnation of the child.
+  `sched_class`, `reg_name`, `mailbox_watermark_pct`, `migratable`,
+  `stack_size` (56 -> 104 bytes on LP64), applied to every incarnation
+  of the child.
 * `xtc_svr_opts_t`: the same proc knobs (`sched_class` and the
   watermark fields) and `wait_init` (24 -> 56 bytes).
 * `xtc_fsm_opts_t`: `wait_init` (24 -> 32 bytes).

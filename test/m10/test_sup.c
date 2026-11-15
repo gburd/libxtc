@@ -1591,7 +1591,7 @@ test_down_hook_group_nofault(const MunitParameter p[], void *d)
 
 /*
  * 2.2: a child spec carries the xtc_proc_opts_t knobs (mailbox watermark,
- * scheduling class, migratable), applied to EVERY incarnation; and
+ * scheduling class, migratable, stack size), applied to EVERY incarnation; and
  * xtc_sup_child_restarts counts per static child.  The child sends two
  * messages to itself (cap 4, watermark 50%: the second crosses), checks
  * its task is stealable, parks once (its resume runs in its class), and
@@ -1599,6 +1599,11 @@ test_down_hook_group_nofault(const MunitParameter p[], void *d)
  */
 static int g_ks_wm, g_ks_runs, g_ks_pinned, g_ks_wm_bad;
 static xtc_pid_t g_ks_pid[2];
+
+/* A spec stack well above the default (256 KiB). */
+#define KS_STACK (1024u * 1024u)
+static int g_ks_big;
+static xtc_proc_info_t g_ks_info = XTC_PROC_INFO_INIT;
 
 static void
 ks_wm(xtc_pid_t self, size_t depth, size_t cap, void *user)
@@ -1618,6 +1623,9 @@ ks_kid(void *arg)
 	n = xtc_atomic_load_i32(&g_ks_runs, xtc_mo_seq_cst);
 	if (n < 2)
 		g_ks_pid[n] = xtc_self();
+	if (xtc_proc_info(xtc_self(), &g_ks_info) == XTC_OK &&
+	    g_ks_info.stack_size >= KS_STACK)
+		xtc_atomic_fetch_add_i32(&g_ks_big, 1, xtc_mo_seq_cst);
 	xtc_atomic_fetch_add_i32(&g_ks_runs, 1, xtc_mo_seq_cst);
 	if (__xtc_current_task()->pinned)
 		xtc_atomic_fetch_add_i32(&g_ks_pinned, 1, xtc_mo_seq_cst);
@@ -1664,7 +1672,7 @@ test_spec_proc_opts(const MunitParameter p[], void *d)
 	(void)p;
 	(void)d;
 
-	g_ks_wm = g_ks_runs = g_ks_pinned = g_ks_wm_bad = 0;
+	g_ks_wm = g_ks_runs = g_ks_pinned = g_ks_wm_bad = g_ks_big = 0;
 	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_exec_class_create(loop, 10, 0, &cls), ==, XTC_OK);
 	kids[0].name = "ks";
@@ -1676,6 +1684,7 @@ test_spec_proc_opts(const MunitParameter p[], void *d)
 	kids[0].mailbox_watermark_user = &g_ks_wm;
 	kids[0].sched_class = cls;
 	kids[0].migratable = 1;
+	kids[0].stack_size = KS_STACK;
 	kids[1].name = "steady";
 	kids[1].fn = ks_steady;
 	kids[1].policy = XTC_RESTART_PERMANENT;
@@ -1692,6 +1701,8 @@ test_spec_proc_opts(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_atomic_load_i32(&g_ks_pinned, xtc_mo_seq_cst), ==,
 	    0);
 	munit_assert_uint64(xtc_exec_class_runs(cls), >=, 2);
+	/* Both incarnations ran on the spec's stack size. */
+	munit_assert_int(xtc_atomic_load_i32(&g_ks_big, xtc_mo_seq_cst), ==, 2);
 	munit_assert_int(xtc_sup_child_restarts(sup, 0, &n), ==, XTC_OK);
 	munit_assert_int(n, ==, 1);
 	munit_assert_int(xtc_sup_child_restarts(sup, 1, &n), ==, XTC_OK);
