@@ -91,3 +91,8 @@ test_sim_scope          2          1   bug25 SCOPE_UNMASKED_FIN: kill in a parki
 test_sim_sup_strategy   1          1   bug26 SUP_LOCKPARK: supervisor slept in a group restart holding sup->lock; fixed "sup: never hold a lock across the group-restart wait"
 test_sim_sup_strategy   2          1   bug27 SUP_NOHOOK: a killed supervisor left its children running; fixed "sup: a killed supervisor takes its children with it"
 test_sim_launch         1          1   bug28 LAUNCH_EATMAIL: xtc_launch freed the caller's queued DOWN and mail; fixed "orc: library calls take only their own reply from the caller's mailbox"
+# p166/sup (2.2).  The send-wait DST runs under the simulator's net latency;
+# seed 1 FAILED on db5a2408 (a send told XTC_OK dropped at its deferred
+# delivery: "sent 194, received 50", rc XTC_E_DEADLK) and FAILS on its planted
+# build (-DXTC_DST_INJECT_BUG=49).
+test_sim_send_wait      0          1   bug49 SIM_DROP_LATE: a latency-deferred send told XTC_OK was dropped when the mailbox filled in flight; fixed "proc: the simulator's net latency no longer drops a send it accepted"

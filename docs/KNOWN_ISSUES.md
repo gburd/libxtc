@@ -290,6 +290,34 @@ them, the dial9 dump does.  To keep `XTC_LOOP_FOREIGN` out of the loop
 id space, `xtc_loop_init` now stops one id earlier, after 4,294,967,293
 inits.
 
+## FIXED (2.2): the simulator's net latency dropped sends it had accepted
+
+**What it was.**  Under `xtc_sim_net_latency` a cross-loop `xtc_send`
+returned `XTC_OK` at once and the mailbox decided at delivery, when the
+seeded latency ran out.  A capped mailbox that filled in the meantime
+dropped the message, and so did the simulator's spurious-full buggify,
+whose coin was drawn at delivery; either way the sender had been told
+`XTC_OK` for a message that never arrived.  Ten sends to a sleeping
+cap-2 receiver all returned `XTC_OK` and two arrived; with no cap, net
+latency plus buggify lost an `XTC_OK` send in 42 of 64 seeds.  A DST run
+that combined net latency with mailbox caps or buggify could report a
+lost message, or `XTC_E_DEADLK` from a receiver waiting for it, that no
+real build produces.  A message still
+in flight when a loop was finalized also leaked.  Only simulator runs
+were affected: net latency does not exist outside them.
+
+**Fix.**  The mailbox admits a deferred send when it is sent, under its
+lock, as it admits an inline one: a full mailbox refuses it with
+`XTC_E_AGAIN`, and an admitted one holds its room until it lands.  At
+delivery only the receiver's death can drop it.  A message dropped in
+flight (a dead receiver, a finalized loop) is freed.  `test_sim_send_wait`
+now runs under net latency and adds a cap-2 burst, a receiver that exits
+inside the latency window and a run cut off by its step budget: on 2.2
+before the fix 16 of 16 seeds fail (194 sent with `XTC_OK`, 50
+received, `XTC_E_DEADLK`); fixed, all pass, and the allocation auditor
+counts no message left behind.  Planted bug 49 (`SIM_DROP_LATE`)
+restores the old admission and is caught at seed 1.
+
 ## Linux/XFS: io_uring WAL writes go to io-wq unless the filesystem has `lazytime`
 
 On XFS mounted without `lazytime`, a write that must update the file's

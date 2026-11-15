@@ -109,6 +109,7 @@ write_cases() {
 		"46;test_sim_sup_name;0;1;a name wait was not woken by the registration" \
 		"47;test_sim_sup_name;0;1;the registry named a dead incarnation" \
 		"48;test_sim_send_wait;0;1;a sender waited with room in the mailbox" \
+		"49;test_sim_send_wait;0;1;a message sent with XTC_OK was lost" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -168,6 +169,8 @@ write_cases() {
 #               -> the registry never names a dead incarnation
 # 48 ROOM_SAVEQ  proc.c: a save-queue take does not wake room waiters
 #               -> no xtc_send_wait sender stays parked while there is room
+# 49 SIM_DROP_LATE proc.c admits a latency-deferred send unchecked, drops it
+#               full at delivery -> a send told XTC_OK under net latency arrives
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

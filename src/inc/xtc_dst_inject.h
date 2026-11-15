@@ -283,4 +283,13 @@
  */
 #define XTC_DST_BUG_ROOM_SAVEQ 48
 
+/*
+ * 49 SIM_DROP_LATE: a send the simulator's net latency puts in flight is
+ * admitted without a look at the mailbox (the 2.1 shape) and, when it
+ * lands in a mailbox that filled meanwhile, dropped although its sender
+ * was told XTC_OK (test_sim_send_wait: "a message sent with XTC_OK was
+ * lost").
+ */
+#define XTC_DST_BUG_SIM_DROP_LATE 49
+
 #endif /* XTC_DST_INJECT_H */
