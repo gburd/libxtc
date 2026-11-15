@@ -45,7 +45,7 @@
 #include "proc_int.h"   /* __xtc_proc_ctx_save/restore */
 #include "loop_int.h"   /* struct xtc_task: park_requested */
 #include "coro_int.h"   /* __xtc_current_task */
-#include "xtc_sim.h"   /* __xtc_sim_active: run inline under simulation */
+#include "sim_int.h"    /* __xtc_sim_active: run inline under simulation */
 #include "xtc_probes.h"
 
 #include "os_thread.h"

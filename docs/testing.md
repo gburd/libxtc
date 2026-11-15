@@ -59,6 +59,27 @@ extra:
   code, so a test cannot silently become non-deterministic; every sim
   run proves its own determinism.
 
+### Simulating your own application
+
+The simulator is a supported (experimental) API, not only libxtc's own
+test rig: `xtc_sim.h` is installed, and a library configured
+`--with-io-backend=sim` installs as `libxtc-sim.a` with `xtc-sim.pc`, so
+a test of your program links it with `pkg-config --static --libs
+xtc-sim`.  Spawn your procs on an `xtc_exec`, run
+`xtc_sim_exec_run(exec, seed, budget)`, check your invariants, and run
+the seed again to prove the replay.  Draw scripted choices from
+`xtc_sim_rand` (an application stream that never moves the schedule),
+mark decision points with `XTC_SIM_BUGGIFY("name")`, and plant a known
+bug behind `XTC_DST_BUG(n)` to measure how fast a sweep catches it.  A
+simulated device hands out an fd it owns and makes it ready at a seeded
+virtual time with `xtc_sim_fd_ready_at`, so a fiber parked in
+`xtc_accel_wait_fence` runs under the simulator unchanged; a completion
+a real OS thread produces is given a seeded delivery time with
+`xtc_sim_external_begin` / `xtc_sim_external_complete`.  The full
+surface is `xtc_sim(3)`.
+
+{% include snippet.html file="20_dst_app.c" region="full" %}
+
 DST has already found and fixed real library bugs -- a lock-manager
 bad-free reachable only when a lock was held at destroy, a cross-thread
 wake race, buffer-manager pin races in the sqlxtc example. Those are in

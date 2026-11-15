@@ -26,7 +26,7 @@
 #include "aio_int.h"      /* __xtc_aio_done_set: cross-thread completion flag */
 #include "xtc_aio.h"
 #include <sys/uio.h>
-#include "xtc_sim.h"
+#include "sim_int.h"
 #include "xtc_inject.h"     /* sim.aio.wake_after_done: opt-in buggify */
 #include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
 
@@ -193,6 +193,20 @@ __xtc_io_defer_del_fd(xtc_io_t *io, int fd)
 	return xtc_io_del_fd(io, fd);
 }
 
+/*
+ * Does a scheduled readiness (xtc_sim_fd_ready_at) apply to registration
+ * r?  1 and its due time when one is scheduled for r's fd with a bit r's
+ * interest asks for (HUP and ERR always count, as on every backend).
+ */
+static int
+sim_fd_ready_match(const struct __xtc_sim_reg *r, int64_t *out_due)
+{
+	uint32_t rev = 0;
+	if (!__xtc_sim_fd_ready(r->fd, out_due, &rev))
+		return 0;
+	return (rev & (r->interest | XTC_IO_HUP | XTC_IO_ERR)) != 0;
+}
+
 /* ---- wakeup (in-process flag) ---- */
 
 int
@@ -219,6 +233,7 @@ __xtc_io_sim_next_due(xtc_io_t *io)
 	struct __xtc_sim_io *s;
 	struct __xtc_sim_ev *e;
 	int64_t best = -1;
+	int i;
 	if (io == NULL || io->sim == NULL)
 		return -1;
 	s = io->sim;
@@ -234,6 +249,16 @@ __xtc_io_sim_next_due(xtc_io_t *io)
 	for (e = s->events; e != NULL; e = e->next)
 		if (best < 0 || e->due_ns < best)
 			best = e->due_ns;
+	/* A registration that a scheduled readiness (xtc_sim_fd_ready_at)
+	 * matches is pending work at its due time.  Once due, poll delivers
+	 * it, and the dispatch deletes the registration; a due readiness
+	 * with no matching registration is not work. */
+	for (i = 0; i < s->n_reg; i++) {
+		int64_t due;
+		if (sim_fd_ready_match(&s->regs[i], &due) &&
+		    (best < 0 || due < best))
+			best = due;
+	}
 	return best;
 }
 
@@ -277,8 +302,10 @@ sim_events_insert(struct __xtc_sim_io *s, struct __xtc_sim_ev *ev)
  * fires the receiver's waker when it becomes due.  Because the event
  * sits on the target loop's event store, __xtc_io_sim_next_due reports
  * it, so the sim scheduler advances the clock to it and never mistakes
- * an in-flight delayed message for a deadlock.  `drop` (may be NULL)
- * releases arg when the loop is finalized before the event is due.
+ * an in-flight delayed message for a deadlock.  drop(arg), if non-NULL,
+ * runs instead of fn when the io is finalized with fn still pending (a
+ * deferred envelope must be freed, and xtc_sim_external_begin's token
+ * released, either way).
  */
 int
 __xtc_io_sim_defer_cb(xtc_io_t *io, int64_t due_ns, void (*fn)(void *),
@@ -368,7 +395,7 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 {
 	struct __xtc_sim_io *s;
 	int64_t now = 0;
-	int idx = 0;
+	int idx = 0, i;
 	struct __xtc_sim_ev **pp;
 
 	(void)timeout_ns;   /* sim never blocks on a timeout */
@@ -385,6 +412,30 @@ xtc_io_poll(xtc_io_t *io, xtc_io_event_t *events, int max,
 		events[idx].tag = NULL;
 		events[idx].flags = XTC_IO_WAKEUP;
 		events[idx].fd = -1;
+		idx++;
+	}
+
+	/* Scheduled readiness (xtc_sim_fd_ready_at) that is due: one event
+	 * per matching registration, in registration order (a function of
+	 * the run, so it replays).  The dispatch deletes the registration,
+	 * so a waiter is reported once per park, like a one-shot poll. */
+	for (i = 0; i < s->n_reg && idx < max; i++) {
+		int64_t due;
+		uint32_t rev = 0;
+		if (!sim_fd_ready_match(&s->regs[i], &due) || due > now)
+			continue;
+		(void)__xtc_sim_fd_ready(s->regs[i].fd, &due, &rev);
+#if !XTC_DST_BUG(XTC_DST_BUG_FDREADY_EDGE)
+		events[idx].flags =
+		    rev & (s->regs[i].interest | XTC_IO_HUP | XTC_IO_ERR);
+#else
+		/* planted bug: the readiness fires once, then is gone */
+		events[idx].flags =
+		    rev & (s->regs[i].interest | XTC_IO_HUP | XTC_IO_ERR);
+		(void)xtc_sim_fd_ready_at(s->regs[i].fd, 0, 0);
+#endif
+		events[idx].tag = s->regs[i].tag;
+		events[idx].fd = s->regs[i].fd;
 		idx++;
 	}
 

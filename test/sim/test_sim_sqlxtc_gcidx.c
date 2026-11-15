@@ -48,7 +48,7 @@
 #include "xtc.h"
 #include "xtc_exec.h"
 #include "xtc_proc.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 
 #include "bufmgr.h"
 #include "btree.h"

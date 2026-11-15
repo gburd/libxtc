@@ -26,7 +26,7 @@
 
 #include "pbt_common.h"
 #include "xtc.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 
 #if defined(XTC_HAVE_HEGEL)
 

@@ -24,7 +24,7 @@
 
 #include "munit.h"
 #include "xtc_int.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 #include "os_crypto.h"
 
 #if defined(XTC_TLS_BACKEND_OPENSSL)

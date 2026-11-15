@@ -41,7 +41,7 @@
 #include "xtc.h"
 #include "xtc_exec.h"
 #include "xtc_proc.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 
 #define N_LOOPS   4
 #define N_PROCS   24          /* many short-lived monitored procs */

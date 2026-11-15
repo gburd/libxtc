@@ -1,19 +1,152 @@
 .\" Copyright (c) 2026, The XTC Project
 .\" Use of this source code is governed by the ISC License.
-.Dd October 27, 2026
+.Dd November 13, 2026
 .Dt XTC_SIM 3
 .Os
 .Sh NAME
+.Nm xtc_sim_exec_run ,
+.Nm xtc_sim_active ,
+.Nm xtc_sim_rand ,
+.Nm xtc_sim_activate ,
+.Nm xtc_sim_deactivate ,
+.Nm xtc_sim_strict ,
+.Nm xtc_sim_nondeterminism_count ,
+.Nm xtc_sim_check ,
+.Nm xtc_sim_state_hash ,
+.Nm xtc_sim_set_consistency_check ,
+.Nm xtc_sim_fd_ready_at ,
+.Nm xtc_sim_external_begin ,
+.Nm xtc_sim_external_complete ,
+.Nm xtc_sim_buggify_enable ,
+.Nm xtc_sim_buggify_disable ,
+.Nm xtc_sim_buggify ,
+.Nm xtc_sim_buggify_fault ,
+.Nm xtc_sim_buggify_active_count ,
+.Nm xtc_sim_buggify_reached_count ,
+.Nm xtc_sim_buggify_site ,
+.Nm xtc_sim_fault ,
+.Nm xtc_sim_fault_points_enable ,
+.Nm xtc_sim_fault_points_disable ,
+.Nm xtc_sim_fault_point ,
+.Nm xtc_sim_fault_point_fires ,
+.Nm xtc_sim_fault_points_seen ,
+.Nm xtc_sim_io_faults_enable ,
+.Nm xtc_sim_io_faults_disable ,
+.Nm xtc_sim_io_corrupt_enable ,
+.Nm xtc_sim_io_corrupt_disable ,
+.Nm xtc_sim_io_enospc_enable ,
+.Nm xtc_sim_io_stale_enable ,
+.Nm xtc_sim_io_wb_enable ,
+.Nm xtc_sim_io_durable_end ,
+.Nm xtc_sim_partition_set ,
+.Nm xtc_sim_partition_isolate ,
+.Nm xtc_sim_partition_clear ,
+.Nm xtc_sim_net_latency ,
+.Nm xtc_sim_sched_pessimal ,
+.Nm xtc_sim_swizzle_enable ,
+.Nm xtc_sim_swizzle_disable ,
 .Nm xtc_sim_clock_enable ,
 .Nm xtc_sim_clock_disable ,
 .Nm xtc_sim_clock_advance ,
 .Nm xtc_sim_clock_set ,
-.Nm xtc_sim_clock_active
-.Nd the deterministic simulator's virtual clock
+.Nm xtc_sim_clock_active ,
+.Nm xtc_sim_clock_skew ,
+.Nm XTC_SIM_BUGGIFY ,
+.Nm XTC_SIM_FAULT_POINT ,
+.Nm XTC_DST_BUG
+.Nd deterministic simulation testing of an application
 .Sh LIBRARY
 .Lb libxtc
+(the simulator runs only in a library configured with
+.Fl -with-io-backend=sim ,
+installed as
+.Pa libxtc-sim.a ,
+pkg-config
+.Sy xtc-sim )
 .Sh SYNOPSIS
 .In xtc_sim.h
+.Ft int
+.Fn xtc_sim_exec_run "struct xtc_exec *e" "uint64_t seed" "long max_steps"
+.Ft int
+.Fn xtc_sim_active "void"
+.Ft uint64_t
+.Fn xtc_sim_rand "uint64_t bound"
+.Ft void
+.Fn xtc_sim_activate "uint64_t seed"
+.Ft void
+.Fn xtc_sim_deactivate "void"
+.Ft void
+.Fn xtc_sim_strict "int on"
+.Ft int
+.Fn xtc_sim_nondeterminism_count "void"
+.Ft int
+.Fn xtc_sim_check "struct xtc_exec *e"
+.Ft uint64_t
+.Fn xtc_sim_state_hash "struct xtc_exec *e"
+.Ft void
+.Fn xtc_sim_set_consistency_check "xtc_sim_consistency_fn fn" "void *arg"
+.Ft int
+.Fn xtc_sim_fd_ready_at "int fd" "int64_t due_ns" "uint32_t revents"
+.Ft int
+.Fn xtc_sim_external_begin "int lane" "int64_t max_delay_ns" "xtc_sim_ext_t **out"
+.Ft int
+.Fn xtc_sim_external_complete "xtc_sim_ext_t *tok" "void (*fn)(void *)" "void *arg"
+.Ft void
+.Fn xtc_sim_buggify_enable "unsigned pct_per_1000"
+.Ft void
+.Fn xtc_sim_buggify_disable "void"
+.Ft int
+.Fn xtc_sim_buggify "const char *name"
+.Ft int
+.Fn xtc_sim_buggify_fault "unsigned pct_per_1000"
+.Ft int
+.Fn xtc_sim_buggify_active_count "void"
+.Ft int
+.Fn xtc_sim_buggify_reached_count "void"
+.Ft int
+.Fn xtc_sim_buggify_site "int idx" "char *buf" "size_t buflen" "int *out_activated"
+.Ft int
+.Fn xtc_sim_fault "unsigned pct_per_1000"
+.Ft void
+.Fn xtc_sim_fault_points_enable "unsigned pct_per_1000"
+.Ft void
+.Fn xtc_sim_fault_points_disable "void"
+.Ft int
+.Fn xtc_sim_fault_point "const char *name"
+.Ft uint64_t
+.Fn xtc_sim_fault_point_fires "const char *name"
+.Ft int
+.Fn xtc_sim_fault_points_seen "void"
+.Ft void
+.Fn xtc_sim_io_faults_enable "int64_t lat_min_ns" "int64_t lat_max_ns" "unsigned fault_pct_per_1000"
+.Ft void
+.Fn xtc_sim_io_faults_disable "void"
+.Ft void
+.Fn xtc_sim_io_corrupt_enable "unsigned corrupt_pct_per_1000"
+.Ft void
+.Fn xtc_sim_io_corrupt_disable "void"
+.Ft void
+.Fn xtc_sim_io_enospc_enable "unsigned pct_per_1000"
+.Ft void
+.Fn xtc_sim_io_stale_enable "unsigned pct_per_1000"
+.Ft void
+.Fn xtc_sim_io_wb_enable "int on"
+.Ft uint64_t
+.Fn xtc_sim_io_durable_end "int fd"
+.Ft void
+.Fn xtc_sim_partition_set "int src_loop_id" "int dst_loop_id" "int blocked"
+.Ft void
+.Fn xtc_sim_partition_isolate "int loop_id"
+.Ft void
+.Fn xtc_sim_partition_clear "void"
+.Ft void
+.Fn xtc_sim_net_latency "int64_t min_ns" "int64_t max_ns"
+.Ft void
+.Fn xtc_sim_sched_pessimal "unsigned pct_per_1000"
+.Ft void
+.Fn xtc_sim_swizzle_enable "unsigned pct_per_1000"
+.Ft void
+.Fn xtc_sim_swizzle_disable "void"
 .Ft void
 .Fn xtc_sim_clock_enable "int64_t start_ns"
 .Ft void
@@ -24,43 +157,327 @@
 .Fn xtc_sim_clock_set "int64_t ns"
 .Ft int
 .Fn xtc_sim_clock_active "void"
+.Ft void
+.Fn xtc_sim_clock_skew "int64_t offset_ns" "int jitter_ns"
+.Fd #define XTC_SIM_BUGGIFY(name)
+.Fd #define XTC_SIM_FAULT_POINT(name)
+.Fd #define XTC_DST_BUG(n)
 .Sh DESCRIPTION
-These are test seams of the deterministic simulator
-.Pq Pa xtc_sim.h
-is not an installed header.
-While the virtual clock is enabled,
-.Fn xtc_clock_mono
-.Pq Xr xtc_free 3
-returns virtual time, a pure function of the run's schedule, instead of
-the host's monotonic clock.
+The simulator runs an application's procs on one thread, under an
+interleaving and a virtual clock decided by a seed, and injects faults
+drawn from the same seed.
+The same seed and configuration replay byte for byte, so a failing seed
+is a reproducer.
+The header is
+.Sy @stability experimental :
+its surface may change in a minor release.
+Every function links in every build.
+Off a sim build they are dormant:
 .Fn xtc_sim_exec_run
-enables it at time 0 for every run and disables it at the end.
+and
+.Fn xtc_sim_fd_ready_at
+return
+.Dv XTC_E_NOSYS ,
+the fault and buggify calls return 0, and the knobs have no effect.
+.Ss Running
+.Fn xtc_sim_exec_run
+activates the simulator with
+.Fa seed ,
+enables the virtual clock at 0, and steps the loops of
+.Fa e
+until no proc can run and no timer or simulated event is pending, the
+step budget
+.Fa max_steps
+runs out (0 or less: none), or
+.Fn xtc_exec_stop
+is called.
+It deactivates the simulator before it returns.
+Spawn the procs before the call.
 .Pp
-.Fn xtc_sim_clock_enable
-turns the virtual clock on at
-.Fa start_ns ;
-.Fn xtc_sim_clock_disable
-turns it off.
+.Fn xtc_sim_active
+is 1 while a run (or
+.Fn xtc_sim_activate )
+is active.
+.Fn xtc_sim_rand
+draws a value in
+.Bq 0, Fa bound
+from the run's application stream, which no runtime decision draws from,
+so a new draw in the application never moves the schedule; outside a
+run it is
+.Fn xtc_rand_u64
+modulo
+.Fa bound .
+Draw every scripted choice of a test from it.
+.Pp
+.Fn xtc_sim_activate
+and
+.Fn xtc_sim_deactivate
+start and stop the seeded streams outside
+.Fn xtc_sim_exec_run ,
+to draw from them in a unit test.
+.Pp
+The determinism guard traps a sim-reachable read of the real clock, the
+environment or a raw thread id: in strict mode (the default) it aborts
+and names the source;
+.Fn xtc_sim_strict
+with 0 makes it count instead, and
+.Fn xtc_sim_nondeterminism_count
+reads the count since the last activation.
+.Fn xtc_sim_check
+runs the structural invariants the scheduler checks after every step;
+.Fn xtc_sim_state_hash
+digests the loops' logical counters, for a replay comparison.
+.Fn xtc_sim_set_consistency_check
+installs a callback the run calls once at quiescence; a nonzero result
+is the run's result.
+It is cleared at the end of every run.
+.Ss Simulated devices and threads
+.Fn xtc_sim_fd_ready_at
+makes
+.Fa fd
+ready for
+.Fa revents
+.Pq Dv XTC_IO_READABLE , XTC_IO_WRITABLE , XTC_IO_HUP , XTC_IO_ERR
+from virtual time
+.Fa due_ns
+on.
+A simulated device hands its client an fd it owns (a pipe, an eventfd)
+as a completion fence and schedules it; a proc parked on it through
+.Fn xtc_proc_wait_fd
+or
+.Fn xtc_accel_wait_fence
+wakes at
+.Fa due_ns .
+The readiness is a level: every waiter whose interest overlaps
+.Fa revents
+wakes from
+.Fa due_ns
+on, including one that starts waiting later.
+A second call for the same fd replaces the schedule;
+.Fa revents
+0 withdraws it.
+No schedule survives the end of a run.
+The fd is never read or written.
+.Pp
+.Fn xtc_sim_external_begin
+and
+.Fn xtc_sim_external_complete
+bring a completion that a plain OS thread produces, such as a device
+worker that must not run on a fiber, under the seed.
+.Fn xtc_sim_external_begin ,
+called on a fiber of the run before the work is handed to the thread,
+fixes the delivery's due time at now plus a seeded delay in
+.Bq 0, Fa max_delay_ns ;
+a
+.Fa lane
+from 0 to 15 delivers that lane in begin order, and -1 draws each delay
+freely.
+The thread calls
+.Fn xtc_sim_external_complete
+when its work is done.
+At the due time the simulator waits, in real time, for that call if it
+has not happened, then runs
+.Fa fn Ns Pq Fa arg
+on its own thread, outside any proc (a
+.Fn xtc_send
+from there is a send from a foreign thread).
+The thread's real speed therefore never reaches the run.
+Call
+.Fn xtc_sim_external_complete
+exactly once per token, also when the work failed.
+Outside a run
+.Fn xtc_sim_external_begin
+stores NULL in
+.Fa *out ,
+and
+.Fn xtc_sim_external_complete
+with a NULL token calls
+.Fa fn Ns Pq Fa arg
+at once, so production code calls both unconditionally.
+.Ss Pessimal paths and faults
+.Fn XTC_SIM_BUGGIFY
+.Pq Fn xtc_sim_buggify
+marks a decision point where the code may take a legal but pessimal
+path: the smallest batch, a spurious retry, the slow branch.
+The first time a run reaches a name, a coin with the
+.Fn xtc_sim_buggify_enable
+probability decides it, and every later reach of that name in the run
+gets the same answer.
+.Fn xtc_sim_buggify_fault
+is a fresh per-call coin from the same stream, for
+.Ql if (XTC_SIM_BUGGIFY(name) && xtc_sim_buggify_fault(250)) .
+.Fn xtc_sim_buggify_reached_count ,
+.Fn xtc_sim_buggify_active_count
+and
+.Fn xtc_sim_buggify_site
+report which sites a run reached and which were active, so a sweep can
+measure the fault space it covered.
+.Fn xtc_sim_fault
+is a per-call coin on the fault stream.
+.Fn XTC_SIM_FAULT_POINT
+.Pq Fn xtc_sim_fault_point
+marks a critical section;
+.Fn xtc_sim_fault_points_enable ,
+.Fn xtc_sim_fault_point_fires
+and
+.Fn xtc_sim_fault_points_seen
+arm and count them.
+.Pp
+.Fn xtc_sim_io_faults_enable
+defers file-AIO completions by a seeded latency and fails a fraction of
+them (a short transfer, or EIO on a sync).
+.Fn xtc_sim_io_corrupt_enable
+tears writes (a prefix persists, full success is reported) and flips a
+byte of reads.
+.Fn xtc_sim_io_enospc_enable
+fails writes with ENOSPC.
+.Fn xtc_sim_io_stale_enable
+returns an overwritten version on reads.
+.Fn xtc_sim_io_wb_enable
+models a write-back cache: after a simulated crash,
+.Fn xtc_sim_io_durable_end
+is the last byte of
+.Fa fd
+that an fsync confirmed.
+.Pp
+.Fn xtc_sim_partition_set ,
+.Fn xtc_sim_partition_isolate
+and
+.Fn xtc_sim_partition_clear
+drop messages between loops (identified by executor slot + 1);
+.Fn xtc_sim_net_latency
+delays each cross-loop message by a seeded latency.
+.Fn xtc_sim_sched_pessimal
+starves loops on purpose;
+.Fn xtc_sim_swizzle_enable
+reorders deliveries one slot.
+.Ss Planted bugs
+.Fn XTC_DST_BUG n
+is 1 only in a build made with
+.Fl DXTC_DST_INJECT_BUG Ns = Ns Ar n ,
+and 0 otherwise.
+Guard a deliberate defect with it and prove that a sweep of a few seeds
+catches it: that bug-detection latency, not code coverage, is the
+measure of a simulation test.
+.Ss Clock
+.Fn xtc_sim_exec_run
+drives the virtual clock itself.
+.Fn xtc_sim_clock_enable ,
+.Fn xtc_sim_clock_disable ,
 .Fn xtc_sim_clock_advance
-moves it forward by
-.Fa delta_ns ,
 and
 .Fn xtc_sim_clock_set
-sets it to
-.Fa ns .
-.Pp
+drive it by hand outside a run;
 .Fn xtc_sim_clock_active
-tells code that derives a wall-clock-like value from
+says whether it is on.
+Under the virtual clock,
 .Fn xtc_clock_mono
-whether it is inside a run.
-Such code must not add an offset sampled from real time while the
-virtual clock is active: the offset carries real time into the run, and
-two runs of one seed then differ.
-The determinism guard cannot see this case, because the real clock was
-read before the run started.
+returns virtual time.
+Code that derives a wall-clock-like value must then add a fixed
+constant to it, never an offset sampled from real time: such an offset
+carries real time into the run, and the guard cannot see it.
+.Fn xtc_sim_clock_skew
+offsets (and jitters) what fibers read without changing when timers
+fire.
 .Sh RETURN VALUES
-.Fn xtc_sim_clock_active
-returns 1 while the virtual clock is enabled, else 0.
-The other functions return no value.
+.Fn xtc_sim_exec_run
+returns
+.Dv XTC_OK
+at quiescence or on
+.Fn xtc_exec_stop ,
+.Dv XTC_E_AGAIN
+when the budget ran out with work left,
+.Dv XTC_E_DEADLK
+when procs are alive but nothing can wake them,
+.Dv XTC_E_INTERNAL
+on a broken structural invariant or a counted determinism violation,
+the consistency check's nonzero result,
+.Dv XTC_E_NOSYS
+off a sim build, or
+.Dv XTC_E_INVAL
+for a NULL executor.
+.Pp
+.Fn xtc_sim_fd_ready_at
+returns
+.Dv XTC_OK ,
+.Dv XTC_E_INVAL
+(a negative fd or time, a bit outside the four above),
+.Dv XTC_E_RESOURCE
+(64 fds already scheduled), or
+.Dv XTC_E_NOSYS .
+.Fn xtc_sim_external_begin
+returns
+.Dv XTC_OK ,
+.Dv XTC_E_INVAL
+(NULL
+.Fa out ,
+a negative delay, a lane past 15),
+.Dv XTC_E_STATE
+(under a run but not on one of its fibers), or
+.Dv XTC_E_NOMEM .
+.Fn xtc_sim_external_complete
+returns
+.Dv XTC_OK .
+.Fn xtc_sim_buggify_site
+returns
+.Dv XTC_OK ,
+or
+.Dv XTC_E_INVAL
+past the last site.
+The predicates and counters return the value described above.
+.Sh EXAMPLES
+A test of an application's own proc: one seed sweep, each seed run
+twice to prove the replay.
+.Bd -literal -offset indent
+static int total;
+
+static void
+worker(void *arg)
+{
+	int i, n = 1 + (int)xtc_sim_rand(8);
+	(void)arg;
+	for (i = 0; i < n; i++) {
+		if (XTC_SIM_BUGGIFY("worker.slow"))
+			xtc_proc_sleep(1000000);
+		total++;
+	}
+}
+
+static int
+run(uint64_t seed, int *out)
+{
+	xtc_exec_t *e;
+	int i, rc;
+	total = 0;
+	xtc_exec_init(&e, 2);
+	for (i = 0; i < 4; i++)
+		xtc_proc_spawn(xtc_exec_loop(e, i % 2), worker, NULL,
+		    NULL, NULL);
+	xtc_sim_buggify_enable(500);
+	rc = xtc_sim_exec_run(e, seed, 100000);
+	xtc_sim_buggify_disable();
+	xtc_exec_fini(e);
+	*out = total;
+	return rc;
+}
+.Ed
+.Pp
+The complete program is
+.Pa docs/_includes/snippets/20_dst_app.c ;
+it compiles in every build and runs only against a sim build.
 .Sh SEE ALSO
-.Xr xtc_free 3
+.Xr xtc_accel 3 ,
+.Xr xtc_exec 3 ,
+.Xr xtc_free 3 ,
+.Xr xtc_proc 3
+.Sh HISTORY
+The simulator appeared in xtc 1.0.
+The header was installed, and
+.Fn xtc_sim_active ,
+.Fn xtc_sim_rand ,
+.Fn xtc_sim_fd_ready_at ,
+.Fn xtc_sim_external_begin ,
+.Fn xtc_sim_external_complete
+and the public
+.Fn XTC_DST_BUG
+were added, in xtc 2.2.

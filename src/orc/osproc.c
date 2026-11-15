@@ -17,7 +17,7 @@
 #include "xtc_proc.h"
 #include "xtc_io.h"
 #include "xtc_net.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 #include "loop_int.h"   /* __xtc_current_loop: place the sim child fiber */
 #include "os_sharp.h"   /* __os_env_get / __os_strlcpy */
 

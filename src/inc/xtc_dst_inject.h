@@ -133,21 +133,14 @@
 #ifndef XTC_DST_INJECT_H
 #define XTC_DST_INJECT_H
 
-/*
- * XTC_DST_BUG(n) is 1 iff the build activated planted bug n.  Zero in
- * every normal build (XTC_DST_INJECT_BUG undefined), so all injection
- * sites vanish.  Exactly one bug is active per injected build.
- */
-#if defined(XTC_DST_INJECT_BUG)
-# define XTC_DST_BUG(n)  ((XTC_DST_INJECT_BUG) == (n))
-#else
-# define XTC_DST_BUG(n)  (0)
-#endif
+/* XTC_DST_BUG(n) is 1 iff the build activated planted bug n (xtc_sim.h,
+ * where an application's planted bugs get it too). */
+#include "xtc_sim.h"
 
-/* Symbolic ids (keep in sync with scripts/dst-bug-inject.sh). */
+/* Symbolic ids (keep in sync with scripts/dst-bug-inject.sh).  The
+ * sqlxtc engine's ids (3, 17-23) live in examples/06_sqlxtc/sx_dst.h. */
 #define XTC_DST_BUG_LOSTWAKE   1   /* proc.c: drop a mailbox waker fire */
 #define XTC_DST_BUG_LOCKEXCL   2   /* lock_mgr.c: grant a conflicting lock */
-#define XTC_DST_BUG_NODURABLE  3   /* wal.c: skip fdatasync, still ack */
 #define XTC_DST_BUG_CREDITWIN  4   /* credit.c: double-post the free-credit sem */
 #define XTC_DST_BUG_RESLEAK    5   /* res.c: drop the release decrement */
 #define XTC_DST_BUG_RESOVER    6   /* res.c: skip the acquire cap check */
@@ -162,13 +155,6 @@
 #define XTC_DST_BUG_BATCHDONE  14  /* batch.c: retain completed vector member */
 #define XTC_DST_BUG_SCHEDFAIR  15  /* sched.c: bypass mandatory fairness override */
 #define XTC_DST_BUG_BATCHDROP  16  /* batch.c: drop a held mt hand-in */
-#define XTC_DST_BUG_WALKILL    17  /* wal.c: commit not masked against kills */
-#define XTC_DST_BUG_IDXSKIP    18  /* xstore.c: an index rebuild skips one index */
-#define XTC_DST_BUG_EVICTNOWB  19  /* bufmgr.c: evict a dirty page unwritten */
-#define XTC_DST_BUG_OCKDROP    20  /* wal.c: an online-checkpoint copy round drops its last frame */
-#define XTC_DST_BUG_PRUNEHZN   21  /* xstore.c: prune-on-write deletes the version at the horizon */
-#define XTC_DST_BUG_SHIFTLO    22  /* btree.c: a resumed cursor skips the lo-fence re-check */
-#define XTC_DST_BUG_GCBATCH    23  /* xstore.c: version GC forgets its row at a batch boundary */
 /*
  * 29 AIO_TAG_AFTER_DONE: src/io/io_sim.c's AIO reaper publishes done and
  * only then reads a->tag, the order every native reaper had until 2.1.2.
@@ -299,6 +285,29 @@
  * receive after a mail-blind wait was never woken").
  */
 #define XTC_DST_BUG_FDONLY_STALE 50
+
+/*
+ * 51 FDREADY_EDGE: io_sim.c reports a scheduled readiness
+ * (xtc_sim_fd_ready_at) once and forgets it, an edge where the contract
+ * is a level, so a proc that waits on the fd after the first waiter
+ * consumed it never wakes (test_sim_fd_ready: "a waiter after the due
+ * time never saw the readiness").
+ */
+#define XTC_DST_BUG_FDREADY_EDGE 51
+
+/*
+ * 52 EXT_NOWAIT: an external completion's due event runs without waiting
+ * for xtc_sim_external_complete, so a slow producer's delivery is lost
+ * (test_sim_external: "an external completion was not delivered").
+ */
+#define XTC_DST_BUG_EXT_NOWAIT 52
+
+/*
+ * 53 EXT_LANE: xtc_sim_external_begin ignores the lane, so a FIFO lane's
+ * later completion can be delivered before an earlier one
+ * (test_sim_external: "a lane delivered out of order").
+ */
+#define XTC_DST_BUG_EXT_LANE 53
 
 /*
  * 60 SUP_WAIT_SKIP: a supervisor started with wait_children does not wait

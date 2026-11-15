@@ -664,6 +664,7 @@ XTC_SHLIB_LINKNAME
 XTC_PLATFORM_LIBS
 XTC_URING_LIBS
 XTC_URING_CFLAGS
+XTC_INSTALL_NAME
 XTC_IO_BACKEND
 XTC_LIBUNWIND_LIBS
 XTC_LIBUNWIND_CFLAGS
@@ -5257,6 +5258,20 @@ esac
 printf "%s\n" "$xtc_io_backend" >&6; }
 XTC_IO_BACKEND=$xtc_io_backend
 
+# A sim build is the deterministic-simulation library a DST test links:
+# `make install` names it libxtc-sim.a with xtc-sim.pc, next to (not in
+# place of) a native libxtc.a in the same prefix.  It is static only.
+xtc_install_name=xtc
+if test "x$xtc_io_backend" = xsim
+then :
+  xtc_install_name=xtc-sim
+   if test "x$xtc_enable_shared" = xyes
+then :
+  as_fn_error $? "--with-io-backend=sim builds the static test library libxtc-sim.a only; drop --enable-shared" "$LINENO" 5
+fi
+fi
+XTC_INSTALL_NAME=$xtc_install_name
+
 XTC_URING_CFLAGS=$uring_cflags
 
 XTC_URING_LIBS=$uring_libs
@@ -6154,7 +6169,7 @@ XTC_PC_LIBS_PRIVATE=$xtc_pc_libs_private
 # -------------------------------------------------------------------------
 ac_config_files="$ac_config_files Makefile:../dist/Makefile.in"
 
-ac_config_files="$ac_config_files xtc.pc:../dist/xtc.pc.in"
+ac_config_files="$ac_config_files $xtc_install_name.pc:../dist/xtc.pc.in"
 
 cat >confcache <<\_ACEOF
 # This file is a shell script that caches the results of configure
@@ -6847,7 +6862,7 @@ do
   case $ac_config_target in
     "xtc_config.h") CONFIG_HEADERS="$CONFIG_HEADERS xtc_config.h:../dist/xtc_config.h.in" ;;
     "Makefile") CONFIG_FILES="$CONFIG_FILES Makefile:../dist/Makefile.in" ;;
-    "xtc.pc") CONFIG_FILES="$CONFIG_FILES xtc.pc:../dist/xtc.pc.in" ;;
+    "$xtc_install_name.pc") CONFIG_FILES="$CONFIG_FILES $xtc_install_name.pc:../dist/xtc.pc.in" ;;
 
   *) as_fn_error $? "invalid argument: '$ac_config_target'" "$LINENO" 5;;
   esac

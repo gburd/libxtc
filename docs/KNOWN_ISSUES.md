@@ -144,6 +144,46 @@ a proc or from a thread while another thread runs the loop, else
 `xtc_svr_child_main` and `xtc_sup_child_main` (symbol version `XTC_2.2`)
 run a server or a nested supervisor as a supervised child.
 
+## CHANGED (2.2): the simulator is an installed, experimental API
+
+`xtc_sim.h` is installed, in the experimental tier, so an application can
+write deterministic simulation tests against an installed libxtc.  A
+library configured `--with-io-backend=sim` installs as `libxtc-sim.a`
+with `xtc-sim.pc`, beside the native `libxtc.a` in the same prefix; link
+a DST test with `pkg-config --static --libs xtc-sim`.  The header now
+holds only the application-facing API; the hooks the runtime itself
+calls (`__xtc_sim_rng_range`, `__xtc_sim_active`, the I/O-fault draws)
+moved to an internal header and are no longer declared to consumers.
+New: `xtc_sim_active()`, `xtc_sim_rand(bound)` (the application
+stream), `xtc_sim_fd_ready_at(fd, due_ns, revents)` (a simulated
+device's fence fd becomes ready at a virtual time),
+`xtc_sim_external_begin` / `_complete` (a completion an OS thread
+produces is delivered at a seeded virtual time), and `XTC_DST_BUG(n)`
+for an application's planted bugs.  See `xtc_sim(3)`.
+
+Behaviour change: `xtc_sim_exec_run` on a library that was not built
+`--with-io-backend=sim` returns `XTC_E_NOSYS` and runs nothing.  It used
+to step the loops over the native backend and return `XTC_OK`, a run
+that was neither deterministic nor sure to return (a native poll can
+block), reported as a replay.
+
+## CHANGED (2.2): `XTC_WAIT_FD_ONLY`, and library fd waits no longer wake for mail
+
+`xtc_proc_wait_fd(fd, interest | XTC_WAIT_FD_ONLY, ...)` waits on the fd
+and the timeout only: it parks whatever the mailbox holds, a message
+does not end it, and `XTC_WAIT_MAILBOX` is never reported.  A kill and
+`xtc_proc_wake` still end it.  Without the flag the wait returns at once
+while mail is queued, so a proc finishing a write to a slow client while
+peers send it messages spun (4.5 million returns in 200 ms, measured).
+
+The library's own fd waits that are not receives had the same defect
+and now use the flag: with one unread message in the caller's mailbox,
+`xtc_net_send_frame` (and `_framev`, `_recv_frame`) to a slow peer on the
+same loop hung the loop, `xtc_osproc_wait` spun for the child's
+lifetime, and `xtc_accel_wait_fence` (and the batch FENCE kind) polled
+every 50 us to 1 ms.  Each now parks; the mail stays queued for the
+caller.
+
 ## FIXED (2.2): xtc_exec_run could fail to return after the last task finished
 
 The executor's supervisor stops the run when every loop is idle, and
@@ -1606,14 +1646,12 @@ and no existing public struct changed size.  See `xtc_batch(3)`, the
 scheduling guide, and `examples/13_gpu_batching` (OpenCL Mandelbrot) and
 `examples/14_hetero_batching` (GPU + NPU capstone).
 
-**Limitation: the FENCE exec kind is native-only.**  The simulation
-backend has no hook to make an arbitrary registered fd become ready at a
-virtual time, so a FENCE group (which parks on a device fd) is not
-sim-reachable and is tested natively, like `xtc_accel_run_blocking`.
-This is a deliberate scope decision, not a defect: sim coverage of async
-offload uses the FUTURE kind, which has no fd and no clock and replays
-byte-identically.  A real-fd fence under DST would need a new sim
-fd-readiness primitive and is explicitly deferred.
+**Limitation through 2.1: the FENCE exec kind was native-only.**  The
+simulation backend had no hook to make a registered fd ready at a
+virtual time, so a FENCE group (which parks on a device fd) was not
+sim-reachable.  2.2 adds that hook, `xtc_sim_fd_ready_at` (below); the
+FENCE kind and `xtc_accel_wait_fence` now run under DST with a
+simulated device's fd (test_sim_fd_ready).
 
 **Limitation (NOT a libxtc bug): Intel compute-runtime 26.18 GPU
 readback segfault.**  On a Lunar-Lake Arc iGPU with Intel

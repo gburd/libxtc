@@ -71,7 +71,7 @@
 #include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
 #include "xtc_cskip.h"
 #include "xtc_rcu.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 
 #include <pthread.h>
 #include <stdint.h>

@@ -332,6 +332,7 @@ LIB_HDRS_PUBLIC	= \
 	$(srcdir)/../src/inc/xtc_log.h \
 	$(srcdir)/../src/inc/xtc_loop.h \
 	$(srcdir)/../src/inc/xtc_sched.h \
+	$(srcdir)/../src/inc/xtc_sim.h \
 	$(srcdir)/../src/inc/xtc_lrlock.h \
 	$(srcdir)/../src/inc/xtc_lwlock.h \
 	$(srcdir)/../src/inc/xtc_mctx.h \
@@ -369,6 +370,10 @@ LIB_HDRS_PUBLIC	= \
 	$(srcdir)/../src/inc/xtc_tnt.h \
 	$(srcdir)/../src/inc/xtc_trace.h
 STATIC_LIB	= libxtc.a
+# The installed names: libxtc.a / xtc.pc, or for a sim build (the DST
+# test library) libxtc-sim.a / xtc-sim.pc, so both can share a prefix.
+INSTALL_NAME	= @XTC_INSTALL_NAME@
+INSTALL_LIB	= lib$(INSTALL_NAME).a
 
 # Shared library is built only when configure was run with
 # --enable-shared (XTC_ENABLE_SHARED=yes).  Selected here so the
@@ -2456,11 +2461,11 @@ install: all
 	$(INSTALL) -d $(DESTDIR)$(includedir)
 	$(INSTALL) -d $(DESTDIR)$(mandir)/man3
 	$(INSTALL) -d $(DESTDIR)$(mandir)/man7
-	$(INSTALL_DATA) $(STATIC_LIB) $(DESTDIR)$(libdir)/$(STATIC_LIB)
+	$(INSTALL_DATA) $(STATIC_LIB) $(DESTDIR)$(libdir)/$(INSTALL_LIB)
 	for h in $(LIB_HDRS_PUBLIC); do \
 		$(INSTALL_DATA) $$h $(DESTDIR)$(includedir)/; \
 	done
-	$(INSTALL_DATA) xtc.pc $(DESTDIR)$(libdir)/pkgconfig/xtc.pc
+	$(INSTALL_DATA) $(INSTALL_NAME).pc $(DESTDIR)$(libdir)/pkgconfig/$(INSTALL_NAME).pc
 	@if [ "$(XTC_ENABLE_SHARED)" = yes ]; then \
 		echo "installing shared library"; \
 		$(INSTALL_PROGRAM) $(SHARED_LIB_REAL) \
@@ -2478,11 +2483,11 @@ install: all
 	done
 
 uninstall:
-	$(RM) $(DESTDIR)$(libdir)/$(STATIC_LIB)
+	$(RM) $(DESTDIR)$(libdir)/$(INSTALL_LIB)
 	$(RM) $(DESTDIR)$(libdir)/$(SHARED_LIB_REAL)
 	$(RM) $(DESTDIR)$(libdir)/$(SHARED_LIB_SONAME)
 	$(RM) $(DESTDIR)$(libdir)/$(SHARED_LIB_LINKNAME)
-	$(RM) $(DESTDIR)$(libdir)/pkgconfig/xtc.pc
+	$(RM) $(DESTDIR)$(libdir)/pkgconfig/$(INSTALL_NAME).pc
 	for h in $(LIB_HDRS_PUBLIC); do \
 		$(RM) $(DESTDIR)$(includedir)/`basename $$h`; \
 	done
@@ -2500,7 +2505,7 @@ clean:
 	rm -rf *.dSYM
 
 distclean: clean
-	$(RM) Makefile xtc_config.h xtc.pc config.log config.status
+	$(RM) Makefile xtc_config.h $(INSTALL_NAME).pc config.log config.status
 	$(RM) -r autom4te.cache
 
 

@@ -95,7 +95,7 @@
 #include "xtc_exec.h"
 #include "xtc_proc.h"
 #include "xtc_async.h"      /* xtc_yield */
-#include "xtc_sim.h"
+#include "sim_int.h"
 #include "bufmgr.h"
 #include "btree.h"
 #include "wal.h"

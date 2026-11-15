@@ -12,7 +12,7 @@
 #include "xtc_chan.h"
 #include "xtc_svr.h"
 #include "xtc_async.h"     /* xtc_yield */
-#include "xtc_sim.h"
+#include "sim_int.h"
 
 /*
  * DST coverage of the BUGGIFY sites planted beyond test_sim_buggify /

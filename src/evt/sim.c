@@ -16,7 +16,9 @@
  */
 
 #include "xtc_int.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
+#include "xtc_io.h"         /* XTC_IO_*: xtc_sim_fd_ready_at */
+#include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
 #include "xtc_probes.h"
 
 #include <pthread.h>
@@ -74,6 +76,14 @@ __xtc_sim_active(void)
 	return xtc_atomic_load_i32(&g_sim_active, xtc_mo_relaxed);
 }
 
+/* PUBLIC: int xtc_sim_active __P((void)); */
+/* The public spelling of __xtc_sim_active, for application tests. */
+int
+xtc_sim_active(void)
+{
+	return __xtc_sim_active();
+}
+
 /*
  * Determinism guard (FoundationDB/TigerBeetle discipline: nondeterminism
  * must be impossible to introduce SILENTLY, not merely avoided by
@@ -126,6 +136,8 @@ xtc_sim_nondeterminism_count(void)
 	return xtc_atomic_load_i32(&g_nondet_count, xtc_mo_relaxed);
 }
 
+static void __ext_reset(void);
+
 /* PUBLIC: void xtc_sim_activate __P((uint64_t)); */
 void
 xtc_sim_activate(uint64_t seed)
@@ -139,14 +151,18 @@ xtc_sim_activate(uint64_t seed)
 		g_sim_stream[i] = splitmix64(&t);
 	}
 	xtc_atomic_store_i32(&g_nondet_count, 0, xtc_mo_relaxed);
+	__ext_reset();
 	xtc_atomic_store_i32(&g_sim_active, 1, xtc_mo_release);
 }
+
+static void __fd_ready_reset(void);
 
 /* PUBLIC: void xtc_sim_deactivate __P((void)); */
 void
 xtc_sim_deactivate(void)
 {
 	xtc_atomic_store_i32(&g_sim_active, 0, xtc_mo_release);
+	__fd_ready_reset();
 	/* Reset adversarial-mode knobs so one run's setting does not leak
 	 * into the next in-process run (buggify/io-fault knobs are reset by
 	 * their own enable/disable; these have no such call on every run). */
@@ -177,6 +193,22 @@ __xtc_sim_rng_range(int s, uint64_t bound)
 	 * 64-bit draw with a small bound is negligible and -- crucially --
 	 * deterministic. */
 	return __xtc_sim_rng(s) % bound;
+}
+
+/* PUBLIC: uint64_t xtc_sim_rand __P((uint64_t)); */
+/*
+ * An application draw in [0, bound): the APP stream inside a run, which
+ * no runtime decision site draws from, so an application's draws never
+ * move the schedule; xtc_rand_u64 outside one.
+ */
+uint64_t
+xtc_sim_rand(uint64_t bound)
+{
+	if (bound == 0)
+		return 0;
+	if (__xtc_sim_active())
+		return __xtc_sim_rng_range(XTC_SIM_RNG_APP, bound);
+	return xtc_rand_u64() % bound;
 }
 
 /* ---- seeded fault injection ---- */
@@ -1225,4 +1257,303 @@ __xtc_sim_vclock_observed(int64_t *out_ns)
 		*out_ns = v < 0 ? 0 : v;   /* never report a negative clock */
 	}
 	return 1;
+}
+
+/* ---- scheduled fd readiness (DST) ----
+ *
+ * The sim backend has no kernel poller: until xtc_sim_fd_ready_at, no
+ * fd ever became ready under a run, so a proc parked on an fd woke only
+ * by its timeout, mail or a kill.  This table makes an fd the test owns
+ * (a pipe or eventfd standing for a device fence) ready at a virtual
+ * time.  The readiness is a LEVEL: from due on, every registration of
+ * the fd whose interest overlaps revents fires (io_sim.c), so a waiter
+ * that registers after the due time still sees it, as poll(2) would.
+ * One entry per fd; a later call replaces it; revents 0 withdraws it.
+ * Cleared by xtc_sim_deactivate, so no run inherits another's.
+ */
+#define XTC_SIM_FD_READY_MAX 64
+struct sim_fd_ready {
+	int fd; /* -1: free slot */
+	int64_t due_ns;
+	uint32_t revents;
+};
+static struct sim_fd_ready g_fdr[XTC_SIM_FD_READY_MAX];
+static int g_fdr_n; /* slots in use at the front of g_fdr (xtc_atomic) */
+static pthread_mutex_t g_fdr_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void
+__fd_ready_reset(void)
+{
+	(void)pthread_mutex_lock(&g_fdr_lock);
+	xtc_atomic_store_i32(&g_fdr_n, 0, xtc_mo_relaxed);
+	(void)pthread_mutex_unlock(&g_fdr_lock);
+}
+
+/* PUBLIC: int xtc_sim_fd_ready_at __P((int, int64_t, uint32_t)); */
+/*
+ * Make fd ready for revents (XTC_IO_* bits) from virtual time due_ns on,
+ * for every proc that waits on it under the run.  Replaces an earlier
+ * schedule for the same fd; revents 0 removes it.  XTC_E_INVAL for a
+ * negative fd or due time, or a revents bit outside READABLE, WRITABLE,
+ * HUP and ERR; XTC_E_RESOURCE when 64 fds are already scheduled;
+ * XTC_E_NOSYS off a sim build.  Call it from inside a run (a proc of the
+ * simulated device) or before xtc_sim_exec_run; the schedule is cleared
+ * at the end of every run.  The fd itself is never read or written: a
+ * waiter that then reads it reads what the test wrote there.
+ */
+int
+xtc_sim_fd_ready_at(int fd, int64_t due_ns, uint32_t revents)
+{
+	const uint32_t ok =
+	    XTC_IO_READABLE | XTC_IO_WRITABLE | XTC_IO_HUP | XTC_IO_ERR;
+#if defined(XTC_IO_BACKEND_SIM)
+	int i, n, rc = XTC_OK;
+#endif
+
+	if (fd < 0 || due_ns < 0 || (revents & ~ok) != 0)
+		return XTC_E_INVAL;
+#if !defined(XTC_IO_BACKEND_SIM)
+	return XTC_E_NOSYS;
+#else
+	(void)pthread_mutex_lock(&g_fdr_lock);
+	n = xtc_atomic_load_i32(&g_fdr_n, xtc_mo_relaxed);
+	for (i = 0; i < n && g_fdr[i].fd != fd; i++)
+		;
+	if (revents == 0) {
+		if (i < n) {
+			g_fdr[i] = g_fdr[n - 1];
+			xtc_atomic_store_i32(&g_fdr_n, n - 1, xtc_mo_relaxed);
+		}
+	} else if (i == n && n == XTC_SIM_FD_READY_MAX) {
+		rc = XTC_E_RESOURCE;
+	} else {
+		if (i == n)
+			xtc_atomic_store_i32(&g_fdr_n, n + 1, xtc_mo_relaxed);
+		g_fdr[i].fd = fd;
+		g_fdr[i].due_ns = due_ns;
+		g_fdr[i].revents = revents;
+	}
+	(void)pthread_mutex_unlock(&g_fdr_lock);
+	return rc;
+#endif
+}
+
+/* PUBLIC: int __xtc_sim_fd_ready __P((int, int64_t *, uint32_t *)); */
+int
+__xtc_sim_fd_ready(int fd, int64_t *out_due_ns, uint32_t *out_revents)
+{
+	int i, n, found = 0;
+	/* The sim scheduler asks for every registration on every step:
+	 * nothing scheduled (every run that does not use the seam) costs
+	 * one load. */
+	if (xtc_atomic_load_i32(&g_fdr_n, xtc_mo_relaxed) == 0)
+		return 0;
+	(void)pthread_mutex_lock(&g_fdr_lock);
+	n = xtc_atomic_load_i32(&g_fdr_n, xtc_mo_relaxed);
+	for (i = 0; i < n; i++) {
+		if (g_fdr[i].fd != fd)
+			continue;
+		*out_due_ns = g_fdr[i].due_ns;
+		*out_revents = g_fdr[i].revents;
+		found = 1;
+		break;
+	}
+	(void)pthread_mutex_unlock(&g_fdr_lock);
+	return found;
+}
+
+/* ---- external completions (DST) ----
+ *
+ * A completion produced by a plain OS thread (a device worker running
+ * model compute, a vendor callback thread) cannot be scheduled by the
+ * sim: the thread runs on the kernel's schedule.  These two calls give
+ * it a seeded virtual time instead.  begin() runs on a fiber of the run
+ * before the work is handed to the thread and fixes the completion's due
+ * time; complete() runs on the thread when the work is done and records
+ * the delivery function.  At the due time the sim thread waits (in real
+ * time) for complete() if the thread has not called it yet, then runs
+ * fn(arg) on the sim thread.  So when the delivery happens is a function
+ * of the seed alone, whatever the thread's real speed, and the
+ * application's real thread code runs unchanged.
+ *
+ * Outside a run (production, or a native build) begin() hands out a
+ * token that complete() recognizes as inert: fn(arg) runs at once on the
+ * calling thread, which is the production behaviour.
+ */
+struct xtc_sim_ext {
+	pthread_mutex_t lock;
+	int done; /* complete() has run */
+	void (*fn)(void *);
+	void *arg;
+};
+
+/* Lanes: a lane's completions are delivered in begin order (a device
+ * queue is FIFO).  The due time of the newest begin per lane. */
+#define XTC_SIM_EXT_LANES 16
+static int64_t g_ext_lane_due[XTC_SIM_EXT_LANES];
+
+/* How long, in real time, the run waits for a producer at a due time
+ * before it gives up and names the cause. */
+#define XTC_SIM_EXT_WAIT_MS 60000
+
+int __xtc_sim_ext_schedule(int64_t due_ns, void (*run)(void *),
+    void (*drop)(void *), void *arg);
+
+/*
+ * Wait for complete() on x, in real time; returns its fn and arg.  The
+ * run does not advance meanwhile, so a producer that waits for the run
+ * to do something first can never complete: after a minute that is
+ * reported and the process aborts, the way a determinism violation is.
+ */
+static void
+__ext_wait(struct xtc_sim_ext *x, void (**fn)(void *), void **arg)
+{
+	int waited_ms = 0;
+	for (;;) {
+		(void)pthread_mutex_lock(&x->lock);
+		if (x->done) {
+			*fn = x->fn;
+			*arg = x->arg;
+			(void)pthread_mutex_unlock(&x->lock);
+			return;
+		}
+		(void)pthread_mutex_unlock(&x->lock);
+		if (waited_ms++ == XTC_SIM_EXT_WAIT_MS) {
+			fprintf(stderr,
+			    "xtc DST: an external completion "
+			    "(xtc_sim_external_begin) was not completed after "
+			    "%d s of real time; its producer must not wait on "
+			    "the run to call xtc_sim_external_complete\n",
+			    XTC_SIM_EXT_WAIT_MS / 1000);
+			abort();
+		}
+		(void)__os_sleep_ns(1000 * 1000);
+	}
+}
+
+/* The due event: wait for the producer, then deliver. */
+static void
+__ext_due(void *a)
+{
+	struct xtc_sim_ext *x = a;
+	void (*fn)(void *) = NULL;
+	void *arg = NULL;
+#if XTC_DST_BUG(XTC_DST_BUG_EXT_NOWAIT)
+	/* planted bug: deliver whatever is there now; a token the producer
+	 * has not completed is dropped (and leaked, so its late complete()
+	 * stays a valid write) */
+	(void)pthread_mutex_lock(&x->lock);
+	fn = x->done ? x->fn : NULL;
+	arg = x->arg;
+	(void)pthread_mutex_unlock(&x->lock);
+	if (fn == NULL)
+		return;
+#else
+	__ext_wait(x, &fn, &arg);
+#endif
+	(void)pthread_mutex_destroy(&x->lock);
+	__os_free(x);
+	if (fn != NULL)
+		fn(arg);
+}
+
+/* The loop was finalized with the event pending: the delivery is lost
+ * with the loop, as a message to a dead proc is. */
+static void
+__ext_drop(void *a)
+{
+	struct xtc_sim_ext *x = a;
+	void (*fn)(void *) = NULL;
+	void *arg = NULL;
+	__ext_wait(x, &fn, &arg);
+	(void)pthread_mutex_destroy(&x->lock);
+	__os_free(x);
+}
+
+/* PUBLIC: int xtc_sim_external_begin __P((int, int64_t, xtc_sim_ext_t **)); */
+/*
+ * Announce an external completion.  Under a run (a sim build, called on
+ * a fiber of the run), its delivery is due at now + a seeded delay in
+ * [0, max_delay_ns]; lane >= 0 (0..15) keeps the lane's deliveries in
+ * begin order (a later begin is never due before an earlier one), -1
+ * draws freely.  *out is the token for xtc_sim_external_complete.
+ * Outside a run *out is NULL, which complete() treats as "deliver now".
+ * XTC_E_INVAL for a NULL out, a negative delay or a lane past 15;
+ * XTC_E_STATE under a run but off a fiber of it (no loop to schedule
+ * the delivery on); XTC_E_NOMEM.
+ */
+int
+xtc_sim_external_begin(int lane, int64_t max_delay_ns, xtc_sim_ext_t **out)
+{
+	struct xtc_sim_ext *x;
+	int64_t now = 0, due;
+	int rc;
+
+	if (out == NULL)
+		return XTC_E_INVAL;
+	*out = NULL;
+	if (max_delay_ns < 0 || lane < -1 || lane >= XTC_SIM_EXT_LANES)
+		return XTC_E_INVAL;
+#if defined(XTC_IO_BACKEND_SIM)
+	if (!__xtc_sim_active())
+		return XTC_OK;
+#else
+	return XTC_OK; /* no run outside a sim build: deliver at complete */
+#endif
+	(void)__xtc_sim_vclock(&now);
+	due = now +
+	    (int64_t)__xtc_sim_rng_range(XTC_SIM_RNG_EXT,
+	        (uint64_t)max_delay_ns + 1);
+#if !XTC_DST_BUG(XTC_DST_BUG_EXT_LANE)
+	if (lane >= 0 && due < g_ext_lane_due[lane])
+		due = g_ext_lane_due[lane];
+#endif
+	if ((rc = __os_calloc(1, sizeof *x, (void **)&x)) != XTC_OK)
+		return rc;
+	(void)pthread_mutex_init(&x->lock, NULL);
+	rc = __xtc_sim_ext_schedule(due, __ext_due, __ext_drop, x);
+	if (rc != XTC_OK) {
+		(void)pthread_mutex_destroy(&x->lock);
+		__os_free(x);
+		return rc;
+	}
+	if (lane >= 0)
+		g_ext_lane_due[lane] = due;
+	*out = x;
+	return XTC_OK;
+}
+
+/* PUBLIC: int xtc_sim_external_complete __P((xtc_sim_ext_t *, void (*)(void *), void *)); */
+/*
+ * Deliver an external completion, from any thread.  A NULL token (begun
+ * outside a run) runs fn(arg) now, on the calling thread.  A token begun
+ * under a run records fn(arg) and returns; the sim runs fn(arg) on its
+ * own thread at the due time (fn may be NULL: the event is only a point
+ * in virtual time).  Call it exactly once per begun token, including
+ * when the work failed (deliver the failure through fn): until it is
+ * called the run waits at the due time.  The token is invalid after.
+ */
+int
+xtc_sim_external_complete(xtc_sim_ext_t *t, void (*fn)(void *), void *arg)
+{
+	if (t == NULL) {
+		if (fn != NULL)
+			fn(arg);
+		return XTC_OK;
+	}
+	(void)pthread_mutex_lock(&t->lock);
+	t->fn = fn;
+	t->arg = arg;
+	t->done = 1;
+	(void)pthread_mutex_unlock(&t->lock);
+	return XTC_OK;
+}
+
+/* Per-run reset of the lane order (xtc_sim_activate). */
+static void
+__ext_reset(void)
+{
+	int i;
+	for (i = 0; i < XTC_SIM_EXT_LANES; i++)
+		g_ext_lane_due[i] = 0;
 }

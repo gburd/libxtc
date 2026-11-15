@@ -42,7 +42,7 @@
 #include "xtc_net.h"
 #include "xtc_proc.h"
 #include "xtc_async.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 #include "xtc_slab.h"
 #include "xtc_stats.h"
 #include "xtc_tail.h"

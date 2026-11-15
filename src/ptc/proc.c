@@ -12,7 +12,7 @@
 #include "xtc_int.h"
 #include "xtc_inject.h"
 #include "xtc_sync.h"       /* xtc_notify: senders waiting for room */
-#include "xtc_sim.h"
+#include "sim_int.h"
 #include "xtc_dst_inject.h"
 #include "xtc_proc.h"
 #include "proc_int.h"   /* __xtc_proc_ctx_save/restore (internal) */

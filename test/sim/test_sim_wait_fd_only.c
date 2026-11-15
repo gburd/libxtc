@@ -76,7 +76,7 @@ static struct run g_r;
 static unsigned
 pick_loop(void)
 {
-	return (unsigned)__xtc_sim_rng_range(XTC_SIM_RNG_APP, N_LOOPS);
+	return (unsigned)xtc_sim_rand(N_LOOPS);
 }
 
 static void
@@ -204,17 +204,14 @@ plan(void *arg)
 	struct run *r = arg;
 	int k;
 
-	r->t_ns = (5 + (int64_t)__xtc_sim_rng_range(XTC_SIM_RNG_APP, 16)) * MS;
+	r->t_ns = (5 + (int64_t)xtc_sim_rand(16)) * MS;
 	for (k = 0; k < 2; k++) {
-		r->burst[k] = 1 + (int)__xtc_sim_rng_range(XTC_SIM_RNG_APP, 6);
+		r->burst[k] = 1 + (int)xtc_sim_rand(6);
 		r->gap_ns[k] = r->t_ns / (2 * r->burst[k] + 1);
 	}
-	r->late_ns = r->t_ns +
-	    (1 + (int64_t)__xtc_sim_rng_range(XTC_SIM_RNG_APP, 8)) * MS;
-	r->kill_ns =
-	    (3 + (int64_t)__xtc_sim_rng_range(XTC_SIM_RNG_APP, 10)) * MS;
-	r->wake_ns =
-	    (1 + (int64_t)__xtc_sim_rng_range(XTC_SIM_RNG_APP, 20)) * MS;
+	r->late_ns = r->t_ns + (1 + (int64_t)xtc_sim_rand(8)) * MS;
+	r->kill_ns = (3 + (int64_t)xtc_sim_rand(10)) * MS;
+	r->wake_ns = (1 + (int64_t)xtc_sim_rand(20)) * MS;
 	(void)xtc_proc_spawn(xtc_exec_loop(r->e, pick_loop()), waiter, r, NULL,
 	    &r->waiter);
 	(void)xtc_proc_spawn(xtc_exec_loop(r->e, pick_loop()), sender,

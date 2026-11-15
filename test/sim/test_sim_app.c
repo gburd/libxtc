@@ -50,7 +50,7 @@
 #include "xtc_orc.h"
 #include "xtc_app.h"
 #include "xtc_reg.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 
 #define N_LOOPS   3
 #define N_CLIENTS 4

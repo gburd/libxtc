@@ -52,7 +52,7 @@
 #include "xtc_proc.h"
 #include "xtc_orc.h"
 #include "xtc_inspect.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 
 #define N_LOOPS 2
 #define N_KIDS  4

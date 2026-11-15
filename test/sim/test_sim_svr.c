@@ -10,7 +10,7 @@
 #include "xtc_exec.h"
 #include "xtc_proc.h"
 #include "xtc_svr.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 
 /*
  * DST coverage of the L4 gen_server (src/orc/svr.c) under the seeded

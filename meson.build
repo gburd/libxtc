@@ -453,6 +453,13 @@ lib_sources += files('src/io/tls_' + tls_backend + '.c')
 xtc_c_args = ['-DXTC_BUILDING_DLL', '-D_DEFAULT_SOURCE', '-Wpedantic']
 
 build_shared = get_option('shared')
+# A sim build is the deterministic-simulation test library: it installs as
+# libxtc-sim.a with xtc-sim.pc, beside a native libxtc in the same prefix,
+# static only (mirrors XTC_INSTALL_NAME in dist/configure.ac).
+lib_name = io_backend == 'sim' ? 'xtc-sim' : 'xtc'
+if io_backend == 'sim' and build_shared
+  error('io-backend=sim builds the static test library libxtc-sim.a only; drop -Dshared=true')
+endif
 
 # ELF version script (dist/libxtc.map) restricts the shared-lib exported ABI
 # to the public xtc_* / __xtc_* surface, hiding the internal __os_* layer --
@@ -514,7 +521,7 @@ if build_shared
   )
   xtc_static = xtc_lib.get_static_lib()
 else
-  xtc_lib = static_library('xtc',
+  xtc_lib = static_library(lib_name,
     sources : lib_srcs_final,
     objects : lib_objects,
     include_directories : inc,
@@ -556,6 +563,7 @@ install_headers(
   'src/inc/xtc_log.h',
   'src/inc/xtc_loop.h',
   'src/inc/xtc_sched.h',
+  'src/inc/xtc_sim.h',
   'src/inc/xtc_lrlock.h',
   'src/inc/xtc_lwlock.h',
   'src/inc/xtc_mctx.h',
@@ -597,8 +605,8 @@ install_headers(
 # pkg-config metadata.  Mirrors dist/xtc.pc.in.
 pkg = import('pkgconfig')
 pkg.generate(
-  name : 'xtc',
-  description : 'High-performance async/concurrency runtime for C',
+  name : lib_name,
+  description : 'High-performance async/concurrency runtime for C (' + io_backend + ' backend)',
   url : 'https://codeberg.org/gregburd/libxtc',
   version : meson.project_version(),
   libraries : xtc_lib,

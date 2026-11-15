@@ -42,7 +42,7 @@
 #include "../../examples/06_sqlxtc/wal.c"
 
 #include "xtc_exec.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 
 #define N_LOOPS   3
 #define N_CMT     6

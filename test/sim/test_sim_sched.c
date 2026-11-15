@@ -6,7 +6,7 @@
 #include "xtc_loop.h"
 #include "xtc_exec.h"
 #include "xtc_proc.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 
 /*
  * DST phase 3 driver: a multi-loop executor with cross-loop messaging

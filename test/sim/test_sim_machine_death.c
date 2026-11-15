@@ -10,7 +10,7 @@
 #include "xtc_exec.h"
 #include "xtc_proc.h"
 #include "xtc_orc.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 
 /*
  * DST coverage of MACHINE-DEATH / proc-kill (FoundationDB "kill a

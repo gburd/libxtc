@@ -17,7 +17,10 @@
  *	a pollable sync_file / dma-fence fd, exactly the object epoll
  *	already waits on.  That is the ONLY thing this module does: it
  *	parks a fiber on such a completion and wakes it when the device
- *	is done, deterministically-testable under the sim backend.
+ *	is done.  Under the deterministic simulator the fence path runs as
+ *	is: a simulated device hands out an fd it owns and schedules it
+ *	ready at a seeded virtual time with xtc_sim_fd_ready_at
+ *	(xtc_sim.h).
  *
  *	WHAT THIS MODULE IS NOT, and never becomes:
  *	  - NOT a tensor / compute library.  It marshals no weights, runs

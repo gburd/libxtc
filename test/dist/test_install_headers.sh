@@ -122,5 +122,53 @@ for h in "$prefix"/include/xtc*.h; do
 done
 [ $bad -eq 0 ] || exit 1
 
-echo "  [install-headers] OK: consumer compiles + links against the installed public headers; each header is self-contained"
+# The simulation library: a sim build installs libxtc-sim.a and
+# xtc-sim.pc into the same prefix, and an application's own DST test
+# (docs/_includes/snippets/20_dst_app.c, xtc_sim.h only) builds against
+# the installed headers with `pkg-config xtc-sim` and runs its seeds.
+sbuild="$work/build-sim"
+mkdir -p "$sbuild"
+if ! (
+	cd "$sbuild"
+	"$XTC_SRC_DIR/dist/configure" --prefix="$prefix" \
+	    --with-io-backend=sim --with-tls=none >/dev/null 2>&1
+	make -j"$(nproc 2>/dev/null || echo 2)" libxtc.a xtc-sim.pc \
+	    >/dev/null 2>&1
+	"${MAKE:-make}" install >/dev/null 2>&1
+); then
+	echo "  [install-headers] FAIL: the sim build did not build or install"
+	exit 1
+fi
+for f in lib/libxtc-sim.a lib/libxtc.a lib/pkgconfig/xtc-sim.pc \
+    lib/pkgconfig/xtc.pc include/xtc_sim.h; do
+	test -f "$prefix/$f" || {
+		echo "  [install-headers] FAIL: $f not installed"; exit 1; }
+done
+if command -v pkg-config >/dev/null 2>&1 &&
+    pkg-config --exists xtc-sim 2>/dev/null; then
+	scflags="$(pkg-config --cflags xtc-sim)"
+	slibs="$(pkg-config --libs --static xtc-sim)"
+else
+	spriv="$(sed -n 's/^Libs.private:[[:space:]]*//p' \
+	    "$prefix/lib/pkgconfig/xtc-sim.pc")"
+	scflags="-I$prefix/include"
+	slibs="-L$prefix/lib -lxtc-sim $spriv -lpthread"
+fi
+# shellcheck disable=SC2086
+if ! $CC -std=c11 -D_GNU_SOURCE $scflags \
+    "$XTC_SRC_DIR/docs/_includes/snippets/20_dst_app.c" $slibs \
+    -o "$work/dst_app" 2> "$work/cc.err"; then
+	echo "  [install-headers] FAIL: a DST test did not build against" \
+	    "the installed xtc-sim"
+	head -20 "$work/cc.err" >&2
+	exit 1
+fi
+if ! "$work/dst_app" > "$work/dst_app.out" 2>&1 ||
+    ! grep -q 'seeds, each replayed' "$work/dst_app.out"; then
+	echo "  [install-headers] FAIL: the installed-xtc-sim DST test failed:"
+	cat "$work/dst_app.out" >&2
+	exit 1
+fi
+
+echo "  [install-headers] OK: consumer compiles + links against the installed public headers; each header is self-contained; an application DST test builds against the installed xtc-sim and replays"
 exit 0

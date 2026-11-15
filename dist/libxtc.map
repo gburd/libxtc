@@ -92,6 +92,11 @@ XTC_2.2 {
 		xtc_room_decode;
 		xtc_send_notify;
 		xtc_send_wait;
+		xtc_sim_active;
+		xtc_sim_external_begin;
+		xtc_sim_external_complete;
+		xtc_sim_fd_ready_at;
+		xtc_sim_rand;
 		xtc_sup_child_main;
 		xtc_sup_child_restarts;
 		xtc_svr_child_main;

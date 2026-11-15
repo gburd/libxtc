@@ -34,7 +34,7 @@
 #include "os_time.h"     /* __os_clock_mono */
 /* __xtc_sim_active, __xtc_sim_rng and the stream id; sim.c is always
  * linked into libxtc. */
-#include "xtc_sim.h"
+#include "sim_int.h"
 
 /* Per-thread state: RNG_UNSEEDED auto-seeds on the next draw off the
  * simulator; RNG_AUTO was seeded from the clock; RNG_EXPLICIT by

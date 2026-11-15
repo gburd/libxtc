@@ -16,7 +16,7 @@
 #include "xtc_sync.h"
 #include "xtc_proc.h"
 #include "proc_int.h"   /* __xtc_proc_ctx_save/restore (internal) */
-#include "xtc_sim.h"       /* XTC_SIM_BUGGIFY / xtc_sim_fault (DST) */
+#include "sim_int.h"    /* XTC_SIM_BUGGIFY / xtc_sim_fault (DST) */
 #include "loop_int.h"
 #include "coro_int.h"
 #include "xtc_probes.h"

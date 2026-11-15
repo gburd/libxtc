@@ -111,6 +111,9 @@ write_cases() {
 		"48;test_sim_send_wait;0;1;a sender waited with room in the mailbox" \
 		"49;test_sim_send_wait;0;1;a message sent with XTC_OK was lost" \
 		"50;test_sim_wait_fd_only;0;1;a receive after a mail-blind wait was never woken" \
+		"51;test_sim_fd_ready;0;1;a waiter after the due time never saw the readiness" \
+		"52;test_sim_external;0;1;an external completion was not delivered" \
+		"53;test_sim_external;0;1;a lane delivered out of order" \
 		"60;test_sim_sup_child;0;1;a child ran before the one before it was up" \
 		"61;test_sim_sup_child;0;1;a nested supervisor's give-up did not reach its parent" \
 		"62;test_sim_sup_child;0;1;a drain did not reach a nested supervisor's child" \
@@ -177,6 +180,9 @@ write_cases() {
 #               full at delivery -> a send told XTC_OK under net latency arrives
 # 50 FDONLY_STALE proc.c recv keeps a mail-blind wait's waker bit
 #               -> a receive after an XTC_WAIT_FD_ONLY wait is woken by mail
+# 51 FDREADY_EDGE io_sim.c reports a scheduled readiness once -> the readiness is a level
+# 52 EXT_NOWAIT  sim.c delivers without waiting for the producer -> every external completion arrives
+# 53 EXT_LANE    sim.c ignores the lane -> a lane delivers in begin order
 # 60 SUP_WAIT_SKIP sup.c wait_children does not wait for a server/sup child
 #               -> each child starts only once the one before it is up
 # 61 SUP_NESTED_CLEAN sup.c a nested supervisor's give-up exits cleanly

@@ -17,7 +17,7 @@
 #include "xtc_async.h"
 #include "xtc_preempt.h"
 #include "preempt_int.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 
 #include <stdio.h>
 
@@ -30,6 +30,8 @@ extern int __xtc_loop_step_once(xtc_loop_t *loop);
  * while letting the sim scheduler account for in-flight deferred AIO. */
 #if defined(XTC_IO_BACKEND_SIM)
 extern int64_t __xtc_io_sim_next_due(xtc_io_t *io);
+extern int __xtc_io_sim_defer_cb(xtc_io_t *io, int64_t due_ns,
+    void (*fn)(void *), void (*drop)(void *), void *arg);
 #else
 static inline int64_t __xtc_io_sim_next_due(xtc_io_t *io)
 { (void)io; return -1; }
@@ -976,14 +978,35 @@ xtc_sim_state_hash(xtc_exec_t *e)
  * Activate sim (seed) + the virtual clock, then drive the loops
  * deterministically until quiescence (no runnable loop and no pending
  * timer), the step budget is hit, or xtc_exec_stop is called.  max_steps
- * <= 0 means unbounded.  Returns XTC_OK on clean quiescence, XTC_E_AGAIN
+ * <= 0 means unbounded.  XTC_E_NOSYS off a sim build.  Returns XTC_OK on
+ * clean quiescence, XTC_E_AGAIN
  * if the step budget was exhausted with work remaining (a possible
  * livelock -- inspect), XTC_E_DEADLK if the system stopped with procs
  * still alive but all parked (a deadlock: no waker can arrive), or a
  * negative code on a loop-step error / invariant violation.
  */
+static int __sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps);
+
 int
 xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
+{
+#if defined(XTC_IO_BACKEND_SIM)
+	return __sim_exec_run(e, seed, max_steps);
+#else
+	/* A native backend's poll blocks and its fds become ready on the
+	 * kernel's schedule, not the seed's: such a run would be neither
+	 * deterministic nor sure to return.  Refuse it instead of reporting
+	 * a replay that never happened. */
+	(void)e;
+	(void)seed;
+	(void)max_steps;
+	(void)__sim_exec_run;
+	return XTC_E_NOSYS;
+#endif
+}
+
+static int
+__sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 {
 	long steps = 0;
 	xtc_loop_t *saved;
@@ -1208,6 +1231,32 @@ xtc_sim_exec_run(xtc_exec_t *e, uint64_t seed, long max_steps)
 	if (xtc_sim_nondeterminism_count() > 0)
 		return XTC_E_INTERNAL;
 	return XTC_OK;
+}
+
+/* PUBLIC: int __xtc_sim_ext_schedule __P((int64_t, void (*)(void *), void (*)(void *), void *)); */
+/*
+ * xtc_sim_external_begin's due event (sim.c), on the calling fiber's
+ * loop: the loop that runs the delivery, so the sim scheduler advances
+ * the clock to it.  drop runs instead of run when the loop is finalized
+ * first.  XTC_E_STATE off a loop; XTC_E_NOSYS off a sim build (sim.c
+ * never calls it there).
+ */
+int
+__xtc_sim_ext_schedule(int64_t due_ns, void (*run)(void *),
+    void (*drop)(void *), void *arg)
+{
+#if defined(XTC_IO_BACKEND_SIM)
+	xtc_loop_t *l = __xtc_current_loop;
+	if (l == NULL || l->io == NULL)
+		return XTC_E_STATE;
+	return __xtc_io_sim_defer_cb(l->io, due_ns, run, drop, arg);
+#else
+	(void)due_ns;
+	(void)run;
+	(void)drop;
+	(void)arg;
+	return XTC_E_NOSYS;
+#endif
 }
 
 /* PUBLIC: int xtc_exec_stop __P((xtc_exec_t *)); */

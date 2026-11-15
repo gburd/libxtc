@@ -62,7 +62,7 @@
 #include "xtc_proc.h"
 #include "xtc_chan.h"
 #include "xtc_lockmgr.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 
 #include "bufmgr.h"
 #include "btree.h"

@@ -1,21 +1,30 @@
 /*-
  * Copyright (c) 2026, The XTC Project
+ * @stability experimental
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_sim.h
- *	Deterministic Simulation Testing (DST) seams.
+ *	Deterministic simulation testing (DST): run an application's
+ *	procs under a seeded, single-threaded schedule against a virtual
+ *	clock, inject faults, and replay any failing seed exactly.
  *
- *	Phase 0 is the seeded PRNG tree: a single root seed splits into
- *	per-stream sub-streams so a draw at one decision site (steal
- *	victim, placement, lock victim, fault toggle) does not perturb
- *	another site's sequence -- the FoundationDB discipline that keeps
- *	a replay stable when a new draw site is added.
+ *	A test builds against a libxtc configured --with-io-backend=sim
+ *	(installed as libxtc-sim.a, pkg-config xtc-sim), creates an
+ *	xtc_exec, spawns its procs, and calls xtc_sim_exec_run(exec, seed,
+ *	budget).  The same seed and configuration replay byte-identically;
+ *	a sweep over seeds explores interleavings.  Decision points in the
+ *	application draw from xtc_sim_rand (seeded inside a run) and branch
+ *	on XTC_SIM_BUGGIFY (a pessimal path taken on a seeded once-per-run
+ *	coin).  xtc_sim_fd_ready_at makes an fd the test owns readable at a
+ *	virtual time (a simulated device fence), and
+ *	xtc_sim_external_begin / _complete schedule a completion that a
+ *	plain OS thread produces at a seeded virtual time.
  *
- *	When sim is INACTIVE (the production default) __xtc_sim_active()
- *	is 0 and the runtime's existing ad-hoc randomness is used
- *	unchanged; the call sites consult __xtc_sim_active() and only draw
- *	from the seeded tree under sim.  This module compiles into every
- *	build but is dormant unless a sim run activates it.
+ *	Every function here is linkable in every build.  Off a sim build
+ *	they are dormant: xtc_sim_exec_run returns XTC_E_NOSYS, the fault
+ *	and buggify knobs never fire, xtc_sim_rand falls back to
+ *	xtc_rand_u64, and xtc_sim_external_complete calls its function at
+ *	once.  Experimental: the surface may change in a minor release.
  */
 
 #ifndef XTC_SIM_H
@@ -26,50 +35,42 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Well-known PRNG streams.  Each scheduler-relevant random draw site
- * owns a stream so adding a draw in one site cannot shift another. */
-enum xtc_sim_stream {
-	XTC_SIM_RNG_SCHED   = 0,   /* which runnable loop advances next */
-	XTC_SIM_RNG_STEAL   = 1,   /* work-stealing victim selection */
-	XTC_SIM_RNG_PLACE   = 2,   /* round-robin proc/task placement */
-	XTC_SIM_RNG_LOCKVIC = 3,   /* lock-manager deadlock victim */
-	XTC_SIM_RNG_IO      = 4,   /* simulated I/O latency / completion order */
-	XTC_SIM_RNG_FAULT   = 5,   /* fault-injection toggles */
-	XTC_SIM_RNG_APP     = 6,   /* application/test draws */
-	XTC_SIM_RNG_BUGGIFY = 7,   /* buggify per-call activation coins */
-	XTC_SIM_RNG_RAND    = 8,   /* xtc_rand_u64 on an un-seeded thread */
-	XTC_SIM_RNG_NSTREAMS
-};
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /*
  * 1 while a deterministic simulation run is active (set by
- * xtc_sim_activate, cleared by xtc_sim_deactivate).  Hot-path call
- * sites branch on this to decide between seeded and ad-hoc randomness.
+ * xtc_sim_activate, and so by xtc_sim_exec_run; cleared by
+ * xtc_sim_deactivate), else 0.  Always 0 off a sim build.
  *
- * PUBLIC: int      __xtc_sim_active __P((void));
- * PUBLIC: void     __xtc_sim_nondeterminism __P((const char *));
+ * PUBLIC: int      xtc_sim_active __P((void));
+ * PUBLIC: uint64_t xtc_sim_rand __P((uint64_t));
  * PUBLIC: void     xtc_sim_strict __P((int));
  * PUBLIC: int      xtc_sim_nondeterminism_count __P((void));
  * PUBLIC: void     xtc_sim_activate __P((uint64_t));
  * PUBLIC: void     xtc_sim_deactivate __P((void));
- * PUBLIC: uint64_t __xtc_sim_rng __P((int));
- * PUBLIC: uint64_t __xtc_sim_rng_range __P((int, uint64_t));
  * PUBLIC: void     xtc_sim_clock_enable __P((int64_t));
  * PUBLIC: void     xtc_sim_clock_disable __P((void));
  * PUBLIC: void     xtc_sim_clock_advance __P((int64_t));
  * PUBLIC: void     xtc_sim_clock_set __P((int64_t));
- * PUBLIC: int      __xtc_sim_vclock __P((int64_t *));
  * PUBLIC: int      xtc_sim_clock_active __P((void));
  */
-XTC_API int      __xtc_sim_active(void);
+XTC_API int      xtc_sim_active(void);
 
-/* Determinism guard.  A sim-reachable primitive that would break seed
- * replay (real clock, env read, raw thread id) calls
- * __xtc_sim_nondeterminism(what); during a sim run it records the
- * violation and, in strict mode (default), aborts naming the source.
- * xtc_sim_strict toggles abort-vs-count; xtc_sim_nondeterminism_count
- * lets a harness assert zero to PROVE a run was fully deterministic. */
-XTC_API void     __xtc_sim_nondeterminism(const char *what);
+/* An application draw: a uniform value in [0, bound) from the run's
+ * application stream, which no runtime decision draws from, so adding a
+ * draw never moves the schedule.  Seeded and replayed inside a run;
+ * outside one (or off a sim build) it is xtc_rand_u64() % bound.
+ * bound 0 returns 0. */
+XTC_API uint64_t xtc_sim_rand(uint64_t bound);
+
+/* Determinism guard.  Under a run, a sim-reachable primitive that would
+ * break seed replay (a real clock, an environment read, a raw thread id)
+ * records a violation and, in strict mode (the default), aborts naming
+ * the source.  xtc_sim_strict toggles abort-versus-count;
+ * xtc_sim_nondeterminism_count lets a harness assert zero to prove a
+ * run was deterministic. */
 XTC_API void     xtc_sim_strict(int on);
 XTC_API int      xtc_sim_nondeterminism_count(void);
 
@@ -89,18 +90,10 @@ XTC_API int      xtc_sim_nondeterminism_count(void);
 XTC_API void     xtc_sim_clock_skew(int64_t offset_ns, int jitter_ns);
 
 /* Activate sim with a root seed (also resets every stream).  Idempotent
- * re-activation re-seeds.  Test-only; never called in production. */
+ * re-activation re-seeds.  xtc_sim_exec_run does this itself; call it
+ * directly only to draw seeded values outside a run.  Test-only. */
 XTC_API void     xtc_sim_activate(uint64_t seed);
 XTC_API void     xtc_sim_deactivate(void);
-
-/* Draw the next 64-bit value from stream `s` (0..XTC_SIM_RNG_NSTREAMS-1).
- * Deterministic given the activation seed.  Undefined if sim inactive
- * (callers must gate on __xtc_sim_active()). */
-XTC_API uint64_t __xtc_sim_rng(int s);
-
-/* Convenience: a uniform value in [0, bound) from stream `s`.  bound==0
- * returns 0. */
-XTC_API uint64_t __xtc_sim_rng_range(int s, uint64_t bound);
 
 /* Deterministic fault toggle: returns 1 with probability
  * pct_per_1000/1000, drawn from the dedicated FAULT stream (so enabling
@@ -142,16 +135,10 @@ XTC_API int      xtc_sim_fault_points_seen(void);
  *
  * PUBLIC: void    xtc_sim_io_faults_enable __P((int64_t, int64_t, unsigned));
  * PUBLIC: void    xtc_sim_io_faults_disable __P((void));
- * PUBLIC: int     __xtc_sim_io_faults_active __P((void));
- * PUBLIC: int64_t __xtc_sim_io_latency __P((void));
- * PUBLIC: int     __xtc_sim_io_should_fault __P((void));
  */
 XTC_API void    xtc_sim_io_faults_enable(int64_t lat_min_ns, int64_t lat_max_ns,
                     unsigned fault_pct_per_1000);
 XTC_API void    xtc_sim_io_faults_disable(void);
-XTC_API int     __xtc_sim_io_faults_active(void);
-XTC_API int64_t __xtc_sim_io_latency(void);
-XTC_API int     __xtc_sim_io_should_fault(void);
 
 /*
  * Simulated TORN / CORRUPT writes and reads (DST) -- the torn-page fault
@@ -167,15 +154,9 @@ XTC_API int     __xtc_sim_io_should_fault(void);
  *
  * PUBLIC: void xtc_sim_io_corrupt_enable __P((unsigned));
  * PUBLIC: void xtc_sim_io_corrupt_disable __P((void));
- * PUBLIC: int  __xtc_sim_io_corrupt_active __P((void));
- * PUBLIC: int  __xtc_sim_io_torn_prefix __P((int));
- * PUBLIC: int  __xtc_sim_io_flip_byte __P((int));
  */
 XTC_API void xtc_sim_io_corrupt_enable(unsigned corrupt_pct_per_1000);
 XTC_API void xtc_sim_io_corrupt_disable(void);
-XTC_API int  __xtc_sim_io_corrupt_active(void);
-XTC_API int  __xtc_sim_io_torn_prefix(int full_len);
-XTC_API int  __xtc_sim_io_flip_byte(int len);
 
 /*
  * Disk-full (ENOSPC) injection: a seeded coin makes a WRITE fail with a
@@ -185,10 +166,8 @@ XTC_API int  __xtc_sim_io_flip_byte(int len);
  * default; reset via enable(0).  A no-op outside a sim run.
  *
  * PUBLIC: void xtc_sim_io_enospc_enable __P((unsigned));
- * PUBLIC: int  __xtc_sim_io_enospc __P((void));
  */
 XTC_API void xtc_sim_io_enospc_enable(unsigned pct_per_1000);
-XTC_API int  __xtc_sim_io_enospc(void);
 
 /*
  * Stale-data reads (FoundationDB's "the disk returns an OLD durable
@@ -200,12 +179,8 @@ XTC_API int  __xtc_sim_io_enospc(void);
  * arms it and resets the ring for the run.  A no-op outside a sim run.
  *
  * PUBLIC: void xtc_sim_io_stale_enable __P((unsigned));
- * PUBLIC: void __xtc_sim_io_stale_record __P((int, uint64_t, const void *, int));
- * PUBLIC: int  __xtc_sim_io_stale_read __P((int, uint64_t, void *, int));
  */
 XTC_API void xtc_sim_io_stale_enable(unsigned pct_per_1000);
-XTC_API void __xtc_sim_io_stale_record(int fd, uint64_t off, const void *buf, int len);
-XTC_API int  __xtc_sim_io_stale_read(int fd, uint64_t off, void *buf, int len);
 
 /*
  * Write-back cache crash model (FoundationDB's simulated disk): pwrite
@@ -221,13 +196,9 @@ XTC_API int  __xtc_sim_io_stale_read(int fd, uint64_t off, void *buf, int len);
  * unless armed; bounded fd table.
  *
  * PUBLIC: void     xtc_sim_io_wb_enable __P((int));
- * PUBLIC: void     __xtc_sim_io_wb_wrote __P((int, uint64_t));
- * PUBLIC: void     __xtc_sim_io_wb_synced __P((int));
  * PUBLIC: uint64_t xtc_sim_io_durable_end __P((int));
  */
 XTC_API void     xtc_sim_io_wb_enable(int on);
-XTC_API void     __xtc_sim_io_wb_wrote(int fd, uint64_t end_off);
-XTC_API void     __xtc_sim_io_wb_synced(int fd);
 XTC_API uint64_t xtc_sim_io_durable_end(int fd);
 
 /*
@@ -251,16 +222,12 @@ XTC_API uint64_t xtc_sim_io_durable_end(int fd);
  * PUBLIC: void    xtc_sim_partition_set __P((int, int, int));
  * PUBLIC: void    xtc_sim_partition_isolate __P((int));
  * PUBLIC: void    xtc_sim_partition_clear __P((void));
- * PUBLIC: int     __xtc_sim_partition_blocked __P((int, int));
  * PUBLIC: void    xtc_sim_net_latency __P((int64_t, int64_t));
- * PUBLIC: int64_t __xtc_sim_net_latency __P((void));
  */
 XTC_API void    xtc_sim_partition_set(int src_loop_id, int dst_loop_id, int blocked);
 XTC_API void    xtc_sim_partition_isolate(int loop_id);
 XTC_API void    xtc_sim_partition_clear(void);
-XTC_API int     __xtc_sim_partition_blocked(int src_loop_id, int dst_loop_id);
 XTC_API void    xtc_sim_net_latency(int64_t min_ns, int64_t max_ns);
-XTC_API int64_t __xtc_sim_net_latency(void);
 
 /* Plant a critical-section fault point in runtime code.  A single
  * relaxed load in production (sim inactive); under sim with points
@@ -308,17 +275,14 @@ XTC_API int  xtc_sim_buggify_fault(unsigned pct_per_1000);
 # define XTC_SIM_BUGGIFY(name)  xtc_sim_buggify(name)
 #endif
 
-/* Virtual (logical) clock.  When enabled, __os_clock_mono returns the
+/* Virtual (logical) clock.  When enabled, xtc_clock_mono returns the
  * virtual time instead of the host monotonic clock, so time is a pure
- * function of the schedule.  Test/scheduler-only. */
+ * function of the schedule.  xtc_sim_exec_run enables it at 0 for the
+ * run.  Test/scheduler-only. */
 XTC_API void     xtc_sim_clock_enable(int64_t start_ns);
 XTC_API void     xtc_sim_clock_disable(void);
 XTC_API void     xtc_sim_clock_advance(int64_t delta_ns);
 XTC_API void     xtc_sim_clock_set(int64_t ns);
-
-/* Query the virtual clock: returns 1 and writes *out_ns when active,
- * 0 otherwise.  The single seam __os_clock_mono consults. */
-XTC_API int      __xtc_sim_vclock(int64_t *out_ns);
 
 /* 1 while the virtual clock is active (inside a deterministic run), so
  * xtc_clock_mono returns virtual time; 0 otherwise.  For code that
@@ -333,10 +297,14 @@ XTC_API int      xtc_sim_clock_active(void);
  * cooperatively-scheduled entities on the calling thread under a
  * seed-determined interleaving, until quiescence, the step budget
  * (max_steps; <= 0 = unbounded), or xtc_exec_stop.  Requires a sim
- * build (--with-io-backend=sim).  Returns XTC_OK on quiescence,
- * XTC_E_AGAIN if the budget was hit with work remaining, or a negative
- * code on a loop-step error.  Declared opaquely (xtc_exec is defined in
- * xtc_exec.h).
+ * build (--with-io-backend=sim): any other build returns XTC_E_NOSYS
+ * and runs nothing.  Returns XTC_OK on quiescence (or on
+ * xtc_exec_stop), XTC_E_AGAIN if the budget was hit with work
+ * remaining, XTC_E_DEADLK if procs are alive but nothing can wake them,
+ * XTC_E_INTERNAL on a determinism violation (count mode) or a broken
+ * structural invariant, the consistency check's nonzero result, or a
+ * negative code on a loop-step error.  Declared opaquely (xtc_exec is
+ * defined in xtc_exec.h).
  *
  * PUBLIC: int xtc_sim_exec_run __P((struct xtc_exec *, uint64_t, long));
  */
@@ -370,10 +338,8 @@ XTC_API uint64_t xtc_sim_state_hash(struct xtc_exec *e);
  * opt in from an adversarial test / swarm.  A no-op outside a sim run.
  *
  * PUBLIC: void xtc_sim_sched_pessimal __P((unsigned));
- * PUBLIC: int  __xtc_sim_sched_pessimal_pct __P((void));
  */
 XTC_API void xtc_sim_sched_pessimal(unsigned pct_per_1000);
-XTC_API int  __xtc_sim_sched_pessimal_pct(void);
 
 /*
  * Completion / message SWIZZLE (reorder), independent of latency.  The
@@ -391,11 +357,9 @@ XTC_API int  __xtc_sim_sched_pessimal_pct(void);
  *
  * PUBLIC: void xtc_sim_swizzle_enable __P((unsigned));
  * PUBLIC: void xtc_sim_swizzle_disable __P((void));
- * PUBLIC: int  __xtc_sim_swizzle_pct __P((void));
  */
 XTC_API void xtc_sim_swizzle_enable(unsigned pct_per_1000);
 XTC_API void xtc_sim_swizzle_disable(void);
-XTC_API int  __xtc_sim_swizzle_pct(void);
 
 /*
  * Semantic consistency check (FoundationDB's end-of-test consistency
@@ -409,10 +373,87 @@ XTC_API int  __xtc_sim_swizzle_pct(void);
  * production.
  *
  * PUBLIC: void xtc_sim_set_consistency_check __P((xtc_sim_consistency_fn, void *));
- * PUBLIC: int  __xtc_sim_run_consistency_check __P((void));
  */
 typedef int (*xtc_sim_consistency_fn)(void *arg);
 XTC_API void xtc_sim_set_consistency_check(xtc_sim_consistency_fn fn, void *arg);
-XTC_API int  __xtc_sim_run_consistency_check(void);
+
+/*
+ * Scheduled fd readiness: make fd ready for `revents` (XTC_IO_READABLE,
+ * _WRITABLE, _HUP, _ERR) from virtual time due_ns on.  A simulated
+ * device hands its client a real fd it owns (a pipe or an eventfd) as a
+ * completion fence and schedules it: a proc parked on the fd
+ * (xtc_proc_wait_fd, xtc_accel_wait_fence) wakes at due_ns, replayed
+ * from the seed.  The readiness is level: every registration of the fd
+ * whose interest overlaps revents fires from due_ns on, including one
+ * made after due_ns.  A later call for the fd replaces the schedule and
+ * revents 0 withdraws it; every run ends with none.  The fd is never
+ * read or written.  XTC_E_INVAL (negative fd or time, another bit in
+ * revents), XTC_E_RESOURCE (64 fds already scheduled), XTC_E_NOSYS off
+ * a sim build.
+ *
+ * PUBLIC: int xtc_sim_fd_ready_at __P((int, int64_t, uint32_t));
+ */
+XTC_API int xtc_sim_fd_ready_at(int fd, int64_t due_ns, uint32_t revents);
+
+/*
+ * External completions: give a completion that a plain OS thread
+ * produces (a device worker, a vendor runtime's callback thread) a
+ * seeded virtual time, so the application's real thread code runs under
+ * a simulation and its delivery still replays.
+ *
+ *     xtc_sim_ext_t *tok;
+ *     xtc_sim_external_begin(0, 2 * MS, &tok);  // on the engine fiber
+ *     hand_to_device_thread(job, tok);
+ *     ...                                       // on the device thread
+ *     xtc_sim_external_complete(tok, deliver, job);  // deliver(job)
+ *                                                    // calls xtc_send
+ *
+ * begin, on a fiber of the run, fixes the delivery's due time: now plus
+ * a seeded delay in [0, max_delay_ns].  lane 0..15 keeps one lane's
+ * deliveries in begin order (a FIFO device queue); -1 draws each delay
+ * freely.  complete, from any thread, records fn(arg); at the due time
+ * the simulator waits (in real time) for complete if the thread has not
+ * called it yet, then runs fn(arg) on its own thread, outside any proc
+ * (xtc_send from there is a send from a foreign thread).  Call complete
+ * exactly once per token, also when the work failed.
+ *
+ * Outside a run, begin stores NULL and complete(NULL, fn, arg) calls
+ * fn(arg) at once on the calling thread: production code calls both
+ * unconditionally.  begin returns XTC_E_INVAL (NULL out, a negative
+ * delay, a lane past 15), XTC_E_STATE (under a run but not on one of its
+ * fibers), or XTC_E_NOMEM.
+ *
+ * PUBLIC: int xtc_sim_external_begin __P((int, int64_t, xtc_sim_ext_t **));
+ * PUBLIC: int xtc_sim_external_complete __P((xtc_sim_ext_t *, void (*)(void *), void *));
+ */
+typedef struct xtc_sim_ext xtc_sim_ext_t;
+XTC_API int xtc_sim_external_begin(int lane, int64_t max_delay_ns,
+                xtc_sim_ext_t **out);
+XTC_API int xtc_sim_external_complete(xtc_sim_ext_t *tok,
+                void (*fn)(void *), void *arg);
+
+/*
+ * Planted bugs (the "bug-detection latency" yardstick).  Guard a
+ * deliberate defect with XTC_DST_BUG(n) and build the test once with
+ * -DXTC_DST_INJECT_BUG=n: the DST run must then fail within a few seeds,
+ * proving the simulation catches that class of bug.  XTC_DST_BUG(n) is
+ * 1 only in the build that defines XTC_DST_INJECT_BUG to n, and 0 in
+ * every other build, so the defect never reaches a normal build.  The
+ * ids are the application's own; libxtc's planted bugs use the same
+ * mechanism with ids it reserves for itself.
+ *
+ *     #if !XTC_DST_BUG(3)
+ *         fsync_before_ack(wal);
+ *     #endif
+ */
+#if defined(XTC_DST_INJECT_BUG)
+# define XTC_DST_BUG(n)  ((XTC_DST_INJECT_BUG) == (n))
+#else
+# define XTC_DST_BUG(n)  (0)
+#endif
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_SIM_H */

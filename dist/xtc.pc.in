@@ -4,17 +4,18 @@
 # Use of this source code is governed by the ISC License.
 #
 # Substituted at configure time into the build directory as xtc.pc and
-# installed to $(libdir)/pkgconfig/xtc.pc by `make install`.
+# installed to $(libdir)/pkgconfig/xtc.pc by `make install`.  A sim build
+# (--with-io-backend=sim) writes xtc-sim.pc for libxtc-sim.a instead.
 
 prefix=@prefix@
 exec_prefix=@exec_prefix@
 libdir=@libdir@
 includedir=@includedir@
 
-Name: xtc
-Description: High-performance async/concurrency runtime for C
+Name: @XTC_INSTALL_NAME@
+Description: High-performance async/concurrency runtime for C (@XTC_IO_BACKEND@ backend)
 URL: https://codeberg.org/gregburd/libxtc
 Version: @XTC_VERSION_FULL@
 Cflags: -I${includedir}
-Libs: -L${libdir} -lxtc
+Libs: -L${libdir} -l@XTC_INSTALL_NAME@
 Libs.private: @XTC_PC_LIBS_PRIVATE@

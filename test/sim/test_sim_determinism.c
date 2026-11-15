@@ -30,7 +30,7 @@
 #include "xtc.h"
 #include "xtc_exec.h"
 #include "xtc_proc.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 
 static int g_inject; /* worker injects a violation when set */
 static int g_ran;

@@ -188,7 +188,9 @@ the contract is still moving), `xtc_dio_sched.h` and `xtc_iosched.h`
 points), `xtc_pkey.h` (one-platform memory-protection keys),
 `xtc_tailcall.h` (compiler-dependent build aid),
 `xtc_preempt_involuntary.h` (involuntary preemption: Linux x86-64 and
-aarch64 only, and its safe-point contract is new in 2.0).
+aarch64 only, and its safe-point contract is new in 2.0), `xtc_sim.h`
+(the deterministic simulator's application API, installed in 2.2; the
+set of fault knobs is still growing).
 `xtc_preempt.h` (the preemption timer and cooperative preemption) is
 stable.
 
@@ -247,6 +249,7 @@ stable.
 | `xtc_runtime.h` | stable |
 | `xtc_saga.h` | stable |
 | `xtc_sched.h` | experimental |
+| `xtc_sim.h` | experimental |
 | `xtc_slab.h` | stable |
 | `xtc_stats.h` | stable |
 | `xtc_stream.h` | stable |

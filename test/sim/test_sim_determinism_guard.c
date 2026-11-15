@@ -35,7 +35,7 @@
 #include <string.h>
 
 #include "xtc.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 #include "os_thread.h"   /* __os_thread_t, __os_thread_self */
 
 /*

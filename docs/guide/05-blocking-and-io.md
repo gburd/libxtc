@@ -106,8 +106,10 @@ above instead.
 > runtime -- not Level Zero, CUDA, Vulkan, or OpenVINO -- and owns no
 > tensors, no device memory, no model format. Your code (or the vendor
 > runtime it links) submits the work and produces the fence;
-> libxtc's job is only to park a fiber on that fence and wake it,
-> deterministically-testable under the [simulator]({{ '/testing/' | relative_url }}).
+> libxtc's job is only to park a fiber on that fence and wake it. Under
+> the [simulator]({{ '/testing/' | relative_url }}) the same fence path
+> runs: a simulated device hands out an fd it owns and makes it ready at
+> a seeded virtual time with `xtc_sim_fd_ready_at` (`xtc_sim(3)`).
 > That boundary is what keeps this a concurrency primitive rather than
 > a compute-runtime shim. Built only where the platform has the
 > DRM/accel subsystem (auto-detected; `--without-accel` to force off).

@@ -480,6 +480,15 @@ case "$xtc_io_backend" in
 esac
 AC_MSG_RESULT([$xtc_io_backend])
 AC_SUBST([XTC_IO_BACKEND], [$xtc_io_backend])
+# A sim build is the deterministic-simulation library a DST test links:
+# `make install` names it libxtc-sim.a with xtc-sim.pc, next to (not in
+# place of) a native libxtc.a in the same prefix.  It is static only.
+xtc_install_name=xtc
+AS_IF([test "x$xtc_io_backend" = xsim],
+  [xtc_install_name=xtc-sim
+   AS_IF([test "x$xtc_enable_shared" = xyes],
+     [AC_MSG_ERROR([--with-io-backend=sim builds the static test library libxtc-sim.a only; drop --enable-shared])])])
+AC_SUBST([XTC_INSTALL_NAME], [$xtc_install_name])
 AC_SUBST([XTC_URING_CFLAGS], [$uring_cflags])
 AC_SUBST([XTC_URING_LIBS],   [$uring_libs])
 
@@ -901,5 +910,5 @@ AC_SUBST([XTC_PC_LIBS_PRIVATE], [$xtc_pc_libs_private])
 # Output.
 # -------------------------------------------------------------------------
 AC_CONFIG_FILES([Makefile:../dist/Makefile.in])
-AC_CONFIG_FILES([xtc.pc:../dist/xtc.pc.in])
+AC_CONFIG_FILES([$xtc_install_name.pc:../dist/xtc.pc.in])
 AC_OUTPUT

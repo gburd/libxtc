@@ -137,8 +137,8 @@ fi
 # on an xtc_recv buffer hiding in a HEADER, plus 17 dead internal-header
 # includes, all invisible to the old check):
 #   - scan .h as well as .c;
-#   - flag an #include of an INTERNAL header (xtc_int.h is not installed,
-#     and os_*.h is the internal os layer), not just symbol references.
+#   - flag an #include of an INTERNAL header (any header `make install`
+#     does not ship), not just symbol references.
 rule3_fatal=1
 ex_src=$(find "$ROOT/examples" -name '*.c' -o -name '*.h' 2>/dev/null)
 consumer=$(printf '%s\n' "$ex_src" | while IFS= read -r f; do
@@ -147,16 +147,27 @@ consumer=$(printf '%s\n' "$ex_src" | while IFS= read -r f; do
 	| grep -vE 'XTC_RAW_OK|/\*|//' \
 	| grep -vE '^[0-9]+:[[:space:]]*\*' | sed "s#^#$f:#"
 done)
+# An example may include an xtc_*.h only if `make install` ships it
+# (LIB_HDRS_PUBLIC): an uninstalled xtc_*.h (xtc_int.h, xtc_dst_inject.h,
+# xtc_probes.h, xtc_ext.h) is as internal as os_*.h or a *_int.h, and a
+# consumer of an installed libxtc could not build the example.
+installed=$(sed -n '/^LIB_HDRS_PUBLIC/,/xtc_trace\.h$/p' "$ROOT/dist/Makefile.in" |
+	grep -oE 'xtc[a-z0-9_]*\.h' | sort -u)
 inc_viol=$(printf '%s\n' "$ex_src" | while IFS= read -r f; do
 	[ -n "$f" ] || continue
-	grep -nE '^[[:space:]]*#[[:space:]]*include[[:space:]]*"(xtc_int\.h|os_[a-z_]+\.h)"' \
-	    "$f" 2>/dev/null | sed "s#^#$f:#"
+	grep -nE '^[[:space:]]*#[[:space:]]*include[[:space:]]*"(xtc[a-z0-9_]*|os_[a-z_]+|[a-z_]+_int|[a-z_]+_ext)\.h"' \
+	    "$f" 2>/dev/null | while IFS= read -r hit; do
+		h=$(printf '%s\n' "$hit" | sed -E 's/.*"([a-z0-9_]+\.h)".*/\1/')
+		printf '%s\n' "$installed" | grep -qx "$h" ||
+		    printf '%s:%s\n' "$f" "$hit"
+	done
 done)
 if [ -n "$inc_viol" ]; then
 	n=$(printf '%s\n' "$inc_viol" | grep -c .)
 	echo "  [api] FAIL RULE 3: $n consumer/example file(s) #include an"
-	echo "        INTERNAL header (xtc_int.h is not installed; os_*.h is the"
-	echo "        internal os layer).  Use the public xtc_*.h headers."
+	echo "        INTERNAL header (not in LIB_HDRS_PUBLIC: xtc_int.h,"
+	echo "        xtc_dst_inject.h, os_*.h, *_int.h, *_ext.h).  Use the"
+	echo "        installed xtc_*.h headers."
 	printf '%s\n' "$inc_viol" | sed 's/^/        /'
 	fail=1
 fi

@@ -22,7 +22,7 @@
 
 #include "xtc_int.h"
 #include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
-#include "xtc_sim.h"
+#include "sim_int.h"
 #include "xtc_dst_inject.h"
 #include "xtc_lockmgr.h"
 #include "xtc_slab.h"

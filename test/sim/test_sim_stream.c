@@ -54,7 +54,7 @@
 #include "xtc_exec.h"
 #include "xtc_proc.h"
 #include "xtc_chan.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 
 #define N_LOOPS   2
 #define N_REQS    8

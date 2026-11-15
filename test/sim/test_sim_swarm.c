@@ -12,7 +12,7 @@
 #include "xtc_exec.h"
 #include "xtc_proc.h"
 #include "xtc_aio.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 
 /*
  * DST SWARM / SOAK -- a large, shardable seed sweep over the RICH set of

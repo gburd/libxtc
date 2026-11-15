@@ -16,8 +16,8 @@ MANDIR="$XTC_SRC_DIR/man/man3"
 
 # The installed public header set, as enumerated by LIB_HDRS_PUBLIC in
 # the build.  Fall back to xtc.h + all xtc_*.h if the Makefile is
-# absent.  Excludes internal-only headers (xtc_sim.h, xtc_tailcall.h,
-# *_ext.h) which are not installed.
+# absent.  Excludes internal-only headers (*_int.h, *_ext.h,
+# xtc_dst_inject.h) which are not installed.
 hdrs=$(awk '
 	/^LIB_HDRS_PUBLIC[ \t]*=/ { grab = 1 }
 	grab {

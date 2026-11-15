@@ -58,7 +58,7 @@
 #include "xtc_proc.h"
 #include "xtc_aio.h"
 #include "xtc_inject.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 
 #define N_LOOPS    8
 #define N_WORKERS  24     /* > N_LOOPS, all spawned on loop 0 => heavy steal */
