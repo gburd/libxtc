@@ -504,6 +504,32 @@ single line carries a `/* XTC_RAW_OK: reason */` (or the existing
 Before cutting a release, run the gate (it is in make check, and CI runs
 it); it must print `[api] OK`.
 
+## C++: coexistence only (gate: test/dist/test_header_cxx.sh, in make check + CI)
+
+libxtc is a C11 library with no C++ API (maintainer decision
+2026-11-14).  Someone who wants this kind of runtime in C++ should use
+Seastar.  What C++ gets is coexistence, and only that:
+
+- Every installed header (LIB_HDRS_PUBLIC in dist/Makefile.in, the same
+  list as meson.build's install_headers) wraps its declarations in
+  `#ifdef __cplusplus` / `extern "C" {` / `#endif`, opened after the
+  header's includes and closed before its include guard's `#endif`.
+  No `#include` inside the block.  A new installed header gets the
+  block in the commit that adds it.
+- Every installed header compiles alone in a C++ translation unit, and a
+  C++ program that includes all of them links against libxtc.a and
+  runs.  test_header_cxx.sh checks both (g++ and clang++, C++11 and
+  C++20) and the MSVC targets; dist/build_msvc.bat does the same with
+  cl /TP.  test/msvc/cxx_coexist.cpp must include exactly
+  LIB_HDRS_PUBLIC (the gate fails otherwise).
+- Do NOT add C++-only features: no overloads, templates, `extern "C++"`,
+  `constexpr`, `decltype`, C++ spellings of a C macro, or C++-specific
+  behaviour.  A C convenience that C++ cannot compile (a `_Generic`
+  macro, a static inline helper) goes inside `#ifndef __cplusplus`, so
+  a C++ unit simply does not see it: xtc_logf and all of xtc_atomic.h
+  and xtc_compiler.h are C only.
+- Do NOT add C++ tests beyond that gate.
+
 ## Documentation site (docs/, Jekyll, both Pages)
 
 The docs/ tree is a Jekyll site that builds and deploys to BOTH GitHub

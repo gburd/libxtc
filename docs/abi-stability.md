@@ -280,6 +280,20 @@ The documentation side of the contract is gated:
 - `test/docs/test_doc_snippets.sh` -- every code snippet in the docs
   compiles and runs against the freshly built library.
 
+## C++ (ENFORCED: coexistence only)
+
+libxtc is a C11 library and has no C++ API.  A C++ program can include
+every installed header and link the library: each header declares its
+functions inside `extern "C"`, and `test/dist/test_header_cxx.sh` (in
+`make check`) compiles each installed header alone as C++11 and C++20
+with g++ and clang++ and links and runs a C++ program that includes all
+of them and references every function they declare; `dist/build_msvc.bat`
+does the same with `cl /TP`.  That is the whole promise.  C-only
+conveniences (`xtc_logf`, `xtc_atomic.h`, `xtc_compiler.h`) are not
+visible in a C++ translation unit, there are no overloads or templates,
+and an `XTC_*_DEFAULT` initializer that uses designated initializers
+needs C++20.  For this kind of runtime in C++, use Seastar.
+
 ## Frozen surfaces (POLICY, layout ENFORCED)
 
 The lock layer is the widest-consumed surface, so it is committed

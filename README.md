@@ -302,7 +302,9 @@ current status -- the live status is this table plus KNOWN_ISSUES.
 ## Building
 
 xtc is BSD-style C11.  No external deps beyond libc, pthreads, and
-optionally `liburing`/`OpenSSL`.  Clone with `--recurse-submodules` to
+optionally `liburing`/`OpenSSL`.  A C++ program can include the headers
+and link libxtc, but libxtc offers no C++ API; for this kind of runtime
+in C++, use Seastar.  Clone with `--recurse-submodules` to
 get the examples (`examples/`, a submodule); the library builds and
 tests without them, and `make check` names what it skipped.
 
