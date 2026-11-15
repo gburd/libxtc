@@ -37,19 +37,24 @@
  *	BEFORE the operation.  No 16-byte operations (a pid is published
  *	with xtc_atomic_pid_t, xtc_proc.h).
  *
- *	Backends: gcc / clang (also clang-cl, icx) in C and C++ use the
- *	__atomic builtins, the same ones <stdatomic.h> expands to, so the
- *	code is instruction-for-instruction what C11 atomics give.  MSVC
- *	(C and C++, x64 and ARM64) uses the Interlocked intrinsics and
- *	ISO-volatile loads and stores with explicit barriers; an RMW is
- *	always a full barrier there (never weaker than asked).  Any other C11
- *	compiler: <stdatomic.h> casts.  The order must be a constant for
- *	the expected code: a non-constant order is run as seq_cst by gcc
- *	(stronger, never weaker).
+ *	Backends: gcc / clang (also clang-cl, icx) use the __atomic
+ *	builtins, the same ones <stdatomic.h> expands to, so the code is
+ *	instruction-for-instruction what C11 atomics give.  MSVC (x64 and
+ *	ARM64) uses the Interlocked intrinsics and ISO-volatile loads and
+ *	stores with explicit barriers; an RMW is always a full barrier there
+ *	(never weaker than asked).  Any other C11 compiler: <stdatomic.h>
+ *	casts.  The order must be a constant for the expected code: a
+ *	non-constant order is run as seq_cst by gcc (stronger, never weaker).
+ *
+ *	C only.  In a C++ translation unit (xtc.h includes this header) it
+ *	declares nothing: libxtc has no C++ API, and no installed header
+ *	uses these functions in code a C++ unit sees.
  */
 
 #ifndef XTC_ATOMIC_H
 #define XTC_ATOMIC_H
+
+#ifndef __cplusplus
 
 #include <stddef.h>
 #include <stdint.h>
@@ -76,8 +81,6 @@ typedef enum xtc_mo {
 #define XTC__ATOMIC_MSVC 1
 #elif defined(__GNUC__) || defined(__clang__)
 #define XTC__ATOMIC_GNU 1
-#elif defined(__cplusplus)
-#error "xtc_atomic.h: no C++ atomics backend for this compiler"
 #elif defined(__STDC_NO_ATOMICS__)
 #error "xtc_atomic.h: this C compiler has no atomics"
 #else
@@ -157,56 +160,6 @@ XTC__ATOMIC_TYPES(XTC__ATOMIC_GNU_DEF)
 /* The pointer operations are type-generic: pp is a T ** for any object
  * or function pointer type T *, and the value is a T *.  A non-pointer
  * operand is a compile-time error. */
-#if defined(__cplusplus)
-/* C++: templates whose value parameter is not deduced, so NULL, 0 and a
- * function name convert to the operand's own pointer type, as they do
- * in C. */
-extern "C++" {
-/* Defined for pointer types only, so a non-pointer operand fails to
- * compile; ::type is also the non-deduced value parameter. */
-template <typename P> struct xtc__atomic_id;
-template <typename T> struct xtc__atomic_id<T *> {
-	typedef T *type;
-};
-template <typename P>
-XTC__AI typename xtc__atomic_id<P>::type
-xtc__atomic_load_ptr(P const *pp, int mo)
-{
-	return __atomic_load_n(pp, mo);
-}
-template <typename P>
-XTC__AI void
-xtc__atomic_store_ptr(P *pp, typename xtc__atomic_id<P>::type v, int mo)
-{
-	__atomic_store_n(pp, v, mo);
-}
-template <typename P>
-XTC__AI typename xtc__atomic_id<P>::type
-xtc__atomic_exchange_ptr(P *pp, typename xtc__atomic_id<P>::type v, int mo)
-{
-	return __atomic_exchange_n(pp, v, mo);
-}
-template <typename P>
-XTC__AI int
-xtc__atomic_cas_ptr(P *pp, P *expect, typename xtc__atomic_id<P>::type v,
-    bool weak, int success, int failure)
-{
-	return __atomic_compare_exchange_n(pp, expect, v, weak, success,
-	    failure);
-}
-}
-#define xtc_atomic_load_ptr(pp, mo) xtc__atomic_load_ptr((pp), (int)(mo))
-#define xtc_atomic_store_ptr(pp, v, mo)                                        \
-	xtc__atomic_store_ptr((pp), (v), (int)(mo))
-#define xtc_atomic_exchange_ptr(pp, v, mo)                                     \
-	xtc__atomic_exchange_ptr((pp), (v), (int)(mo))
-#define xtc_atomic_cas_ptr(pp, expect, desired, success, failure)              \
-	xtc__atomic_cas_ptr((pp), (expect), (desired), false, (int)(success),  \
-	    (int)(failure))
-#define xtc_atomic_cas_weak_ptr(pp, expect, desired, success, failure)         \
-	xtc__atomic_cas_ptr((pp), (expect), (desired), true, (int)(success),   \
-	    (int)(failure))
-#else
 #define XTC__PTR_CHK(pp)                                                       \
 	((void)sizeof(char[__builtin_classify_type(*(pp)) == 5 ? 1 : -1]))
 #define xtc_atomic_load_ptr(pp, mo)                                            \
@@ -223,7 +176,6 @@ xtc__atomic_cas_ptr(P *pp, P *expect, typename xtc__atomic_id<P>::type v,
 	(XTC__PTR_CHK(pp),                                                     \
 	    (int)__atomic_compare_exchange_n((pp), (expect), (desired), 1,     \
 	        (int)(success), (int)(failure)))
-#endif
 
 XTC__AI void
 xtc_atomic_thread_fence(xtc_mo_t mo)
@@ -399,20 +351,13 @@ xtc__ms_cas_ptr(void **p, void **expect, void *desired)
 	*expect = old;
 	return 0;
 }
-/* The result is void * in C (it converts to T * on assignment); C++
- * casts it back to the operand's own type. */
-#if defined(__cplusplus)
-#define XTC__MS_PCAST(pp, e) ((decltype(+*(pp)))(e))
-#else
-#define XTC__MS_PCAST(pp, e) (e)
-#endif
-#define xtc_atomic_load_ptr(pp, mo)                                            \
-	XTC__MS_PCAST(pp, xtc__ms_load_ptr((void *const *)(pp), (mo)))
+/* The result is void *, which converts to the operand's T * on
+ * assignment. */
+#define xtc_atomic_load_ptr(pp, mo) xtc__ms_load_ptr((void *const *)(pp), (mo))
 #define xtc_atomic_store_ptr(pp, v, mo)                                        \
 	xtc__ms_store_ptr((void **)(pp), (void *)(v), (mo))
 #define xtc_atomic_exchange_ptr(pp, v, mo)                                     \
-	XTC__MS_PCAST(pp,                                                      \
-	    _InterlockedExchangePointer((void *volatile *)(pp), (void *)(v)))
+	_InterlockedExchangePointer((void *volatile *)(pp), (void *)(v))
 #define xtc_atomic_cas_ptr(pp, expect, desired, success, failure)              \
 	xtc__ms_cas_ptr((void **)(pp), (void **)(expect), (void *)(desired))
 #define xtc_atomic_cas_weak_ptr(pp, expect, desired, success, failure)         \
@@ -536,5 +481,7 @@ xtc_atomic_signal_fence(xtc_mo_t mo)
 	atomic_signal_fence(XTC__MO(mo));
 }
 #endif
+
+#endif /* !__cplusplus */
 
 #endif /* XTC_ATOMIC_H */

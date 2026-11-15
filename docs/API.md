@@ -104,7 +104,9 @@ the same `__atomic` builtins.  MSVC gets an Interlocked backend.
 `XTC_ALIGNED(n)`, `XTC_THREAD_LOCAL`, `XTC_CPU_RELAX()` and the bit
 scans `xtc_ctz64` / `xtc_clz64` / `xtc_popcount64` (and `32` forms).
 The older out-of-line `xtc_atomic_i64_load` / `xtc_atomic_i64_add` stay
-exported; they are the `_i64` functions with `xtc_mo_seq_cst`.
+exported; they are the `_i64` functions with `xtc_mo_seq_cst`.  Both
+headers are C only: a C++ translation unit that includes `xtc.h` sees
+neither.
 
 {% include snippet.html file="19_atomic.c" region="full" %}
 

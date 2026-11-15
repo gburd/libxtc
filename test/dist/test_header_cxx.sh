@@ -16,11 +16,12 @@
 #      defines) and runs.  A declaration without extern "C" fails the
 #      link: the C++ compiler mangles the name and libxtc.a has no such
 #      symbol.  The program's include list must be LIB_HDRS_PUBLIC.
-#  (c) xtc.h, and with it the MSVC branches of xtc_atomic.h and
-#      xtc_compiler.h, compiles through clang's *-windows-msvc targets
-#      for x86_64 and aarch64, as C and as C++; a second pass with
-#      __clang__ undefined takes every cl.exe-only branch.  Syntax only,
-#      nothing linked or run (a cross clang has no Windows SDK headers).
+#  (c) xtc.h compiles through clang's *-windows-msvc targets for x86_64
+#      and aarch64, as C (where it carries the MSVC branches of
+#      xtc_atomic.h and xtc_compiler.h, which are C only) and as C++; a
+#      second pass with __clang__ undefined takes every cl.exe-only
+#      branch.  Syntax only, nothing linked or run (a cross clang has no
+#      Windows SDK headers).
 #      dist/build_msvc.bat (the windows-msvc CI job) compiles every
 #      installed header with cl /TP and links a C++ program against
 #      xtc.lib on a Windows host.

@@ -19,8 +19,8 @@
 #include <stdint.h> /* int64_t for the public clock / atomic helpers */
 
 /* Portable compiler directives and atomics on plain storage
- * (xtc_atomic(3)).  Outside the extern "C" block: they are all
- * static inline or macros, valid C and C++. */
+ * (xtc_atomic(3)): static inline functions and macros, C only (a C++
+ * translation unit sees neither). */
 #include "xtc_compiler.h"
 #include "xtc_atomic.h"
 

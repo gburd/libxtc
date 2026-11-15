@@ -216,12 +216,12 @@ the number of leading zero bits; both are undefined for 0.
 .Fn xtc_popcount64
 counts the set bits.
 .Ss Backends
-gcc and clang (also clang-cl), in C and C++, use the
+gcc and clang (also clang-cl) use the
 .Sy __atomic
 builtins, the ones
 .In stdatomic.h
 itself expands to, so the code is what C11 atomics give.
-MSVC (C and C++, x64 and ARM64) uses the Interlocked intrinsics and
+MSVC (x64 and ARM64) uses the Interlocked intrinsics and
 ISO-volatile loads and stores with explicit barriers, and needs no
 .Fl experimental:c11atomics ;
 a read-modify-write there is always a full barrier, never weaker than
@@ -231,6 +231,11 @@ Any other C11 compiler uses
 There are no 16-byte operations; a pid is published with
 .Vt xtc_atomic_pid_t
 .Pq Xr xtc_proc 3 .
+.Pp
+Both headers are C only: in a C++ translation unit they declare nothing,
+and
+.In xtc.h
+includes them without effect there.
 .Pp
 .Fn xtc_atomic_i64_load
 and

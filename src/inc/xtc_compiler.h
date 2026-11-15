@@ -10,13 +10,17 @@
  *	Portable compiler directives: branch hints, cache-line size and
  *	alignment, thread-local storage, the spin-wait hint, and bit
  *	scans.  One spelling for gcc, clang, MSVC and other C11 compilers,
- *	in C and C++, so neither the library nor a consumer writes a raw
- *	__builtin_* / __attribute__ / __declspec.  Included by xtc.h.
- *	See xtc_atomic(3).
+ *	so neither the library nor a consumer writes a raw __builtin_* /
+ *	__attribute__ / __declspec.  Included by xtc.h.  See xtc_atomic(3).
+ *
+ *	C only: in a C++ translation unit this header declares nothing (no
+ *	installed header uses these directives in code a C++ unit sees).
  */
 
 #ifndef XTC_COMPILER_H
 #define XTC_COMPILER_H
+
+#ifndef __cplusplus
 
 #include <stdint.h>
 
@@ -57,24 +61,17 @@
  * An object stricter than max_align_t on the heap needs
  * xtc_aligned_alloc, not xtc_malloc.
  */
-#if defined(__cplusplus)
-#define XTC_ALIGNED(n) alignas(n)
-#else
 #define XTC_ALIGNED(n) _Alignas(n)
-#endif
 
 /*
  * XTC_THREAD_LOCAL -- thread-local storage class.  Spelled the way each
  * compiler implements it most cheaply (MSVC and clang-cl
- * __declspec(thread), gcc/clang __thread); the C11 / C++11 keyword
- * elsewhere.
+ * __declspec(thread), gcc/clang __thread); the C11 keyword elsewhere.
  */
 #if defined(_MSC_VER)
 #define XTC_THREAD_LOCAL __declspec(thread)
 #elif defined(__GNUC__) || defined(__clang__)
 #define XTC_THREAD_LOCAL __thread
-#elif defined(__cplusplus)
-#define XTC_THREAD_LOCAL thread_local
 #else
 #define XTC_THREAD_LOCAL _Thread_local
 #endif
@@ -240,5 +237,7 @@ xtc_popcount32(uint32_t v)
 	return xtc_popcount64(v);
 }
 #endif
+
+#endif /* !__cplusplus */
 
 #endif /* XTC_COMPILER_H */
