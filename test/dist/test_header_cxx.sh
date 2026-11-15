@@ -57,11 +57,16 @@ if [ -z "$hdrs" ]; then
 fi
 
 # The link line the library was configured with (liburing, TLS, ...).
+# make check passes the configure-time CFLAGS/LDFLAGS as
+# XTC_SNIPPET_CFLAGS/LDFLAGS, as it does for the doc snippets: a
+# -fsanitize library needs the matching runtime on the C++ link too.
 LIBS="-lpthread -lm"
 if [ -f "$XTC_BUILD_DIR/Makefile" ]; then
 	LIBS="$(sed -n 's/^LIBS[[:space:]]*=[[:space:]]*//p' \
 	    "$XTC_BUILD_DIR/Makefile" | head -1) $LIBS"
 fi
+SAN_LDFLAGS=$(printf '%s\n' "${XTC_SNIPPET_LDFLAGS:-}" |
+    grep -oE -- '-fsanitize=[^ ]+' | tr '\n' ' ') || true
 
 # The functions to reference in (b): an xtc_* name followed by "(" in an
 # installed header with comments stripped, that is also a text symbol in
@@ -174,7 +179,8 @@ for cxx in g++ clang++; do
 	fi
 	leg "$cxx/link($nfuncs-fns)" "$cxx" -std=c++11 $WARN \
 	    -Wno-deprecated-declarations -I"$INC" -I"$XTC_BUILD_DIR" \
-	    -o "$work/a.out" "$PROG" "$work/refs.cc" "$LIB" $LIBS
+	    $SAN_LDFLAGS -o "$work/a.out" "$PROG" "$work/refs.cc" "$LIB" \
+	    $LIBS
 done
 
 # (c) The MSVC targets.  The nix clang wrapper adds -fPIC (hardening),
