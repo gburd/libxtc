@@ -29,6 +29,9 @@
 .Nm xtc_proc_trap_exit ,
 .Nm xtc_monitor ,
 .Nm xtc_demonitor ,
+.Nm xtc_send_wait ,
+.Nm xtc_send_notify ,
+.Nm xtc_room_decode ,
 .Nm xtc_proc_mailbox_stats ,
 .Nm xtc_fault_guard_install ,
 .Nm xtc_proc_recovery_arm ,
@@ -86,6 +89,12 @@
 .Fn xtc_monitor "xtc_pid_t target" "uint64_t *out_ref"
 .Ft int
 .Fn xtc_demonitor "uint64_t ref" "int flags"
+.Ft int
+.Fn xtc_send_wait "xtc_pid_t to" "const void *data" "size_t size" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_send_notify "xtc_pid_t to" "uint64_t *out_ref"
+.Ft int
+.Fn xtc_room_decode "const void *msg" "size_t len" "xtc_room_info_t *out"
 .Ft int
 .Fn xtc_proc_mailbox_stats "xtc_pid_t pid" "xtc_mailbox_stats_t *out"
 .Ft int
@@ -770,6 +779,68 @@ xtc_demonitor(ref, XTC_DEMONITOR_FLUSH);
 Without it every finished call left a live monitor, and the server's
 next exit delivered a stale DOWN to every caller that had ever called
 it.
+.Ss Waiting for mailbox room
+Added in 2.2.  A mailbox has room when its messages plus its
+selective-receive save queue are at most half its
+.Fa mailbox_cap ,
+so a sender that was refused is not refused again at once.
+.Fn xtc_send_wait
+is
+.Fn xtc_send
+that waits for room instead of returning
+.Er XTC_E_AGAIN :
+from a process it parks the fiber, from a plain thread it blocks the
+thread.  The receiver's own takes wake it, not a timer.
+.Fa timeout_ns
+< 0 waits forever, 0 behaves as
+.Fn xtc_send ,
+> 0 bounds the wait.  It returns
+.Fn xtc_send Ns 's
+codes:
+.Er XTC_E_AGAIN
+when the time runs out, and
+.Er XTC_E_INVAL
+for a dead target, at once or when the target exits while the sender
+waits.  It is for a plain thread reporting to a process, such as a
+device worker.  A process that must not block on one slow receiver uses
+.Fn xtc_send_notify
+instead: after
+.Fn xtc_send
+fails with
+.Er XTC_E_AGAIN ,
+it keeps the message and asks for one ROOM message, which arrives when
+the receiver has room (at once if it already has), or with
+.Va gone
+set to 1 when the receiver exits first:
+.Bd -literal -offset indent
+uint64_t ref;
+xtc_room_info_t ri = XTC_ROOM_INFO_INIT;
+if (xtc_send(to, &job, sizeof job) == XTC_E_AGAIN &&
+    xtc_send_notify(to, &ref) == XTC_OK) {
+	/* keep job; later, in the receive loop: */
+	if (xtc_room_decode(msg, len, &ri) == XTC_OK && ri.ref == ref &&
+	    !ri.gone)
+		xtc_send(to, &job, sizeof job);
+}
+.Ed
+.Pp
+The ROOM message bypasses the caller's own mailbox cap.
+.Fn xtc_send_notify
+returns
+.Er XTC_E_STATE
+off a process and
+.Er XTC_E_INVAL
+for a dead or
+.Dv XTC_PID_NONE
+target.
+.Fn xtc_room_decode
+returns
+.Dv XTC_OK
+and fills
+.Fa out
+.Pq up to Va out->size
+for a ROOM message, else
+.Er XTC_E_INVAL .
 .Pp
 .Fn xtc_proc_mailbox_stats
 snapshots a process's mailbox into

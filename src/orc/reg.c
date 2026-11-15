@@ -846,6 +846,51 @@ xtc_reg_whereis_wait(xtc_reg_t *r, const char *name, xtc_pid_t not_pid,
 	return rc;
 }
 
+/*
+ * PUBLIC: int       xtc_reg_send_wait __P((xtc_reg_t *, const char *, const void *, size_t, int64_t));
+ *
+ * Send to whatever live proc `name` names, waiting while it is
+ * unregistered (a supervised child between incarnations) and while its
+ * mailbox is full: xtc_reg_whereis_wait, then xtc_send_wait.  A holder
+ * that dies before or during the send (XTC_E_INVAL) is excluded and the
+ * next one waited for.  XTC_OK means the message is in a live
+ * incarnation's mailbox; if that incarnation dies before taking it, the
+ * message is lost with its mailbox, as any queued message is.  One
+ * deadline for the whole call.  From a proc it parks the fiber; from a
+ * plain thread it blocks it.
+ */
+int
+xtc_reg_send_wait(xtc_reg_t *r, const char *name, const void *data,
+                  size_t size, int64_t timeout_ns)
+{
+	xtc_pid_t dead = XTC_PID_NONE, to;
+	int64_t deadline = 0, now = 0, left = timeout_ns;
+	int rc;
+
+	if (r == NULL || name == NULL || (size > 0 && data == NULL))
+		return XTC_E_INVAL;
+	if (timeout_ns > 0) {
+		(void)__os_clock_mono(&deadline);
+		deadline = timeout_ns > INT64_MAX - deadline ? INT64_MAX :
+		    deadline + timeout_ns;
+	}
+	for (;;) {
+		if (timeout_ns > 0) {
+			(void)__os_clock_mono(&now);
+			if (now >= deadline)
+				return XTC_E_AGAIN;
+			left = deadline - now;
+		}
+		if ((rc = xtc_reg_whereis_wait(r, name, dead, left, &to)) !=
+		    XTC_OK)
+			return rc;
+		rc = xtc_send_wait(to, data, size, left);
+		if (rc != XTC_E_INVAL)
+			return rc;
+		dead = to;      /* died under us: wait for the next one */
+	}
+}
+
 int
 xtc_svr_call_name(xtc_reg_t *r, const char *name,
                   const void *req, size_t req_size,

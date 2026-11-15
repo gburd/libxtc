@@ -5,6 +5,7 @@
 #define ORC_EXT_H
 
 int       xtc_reg_put __P((xtc_reg_t *, const char *, xtc_pid_t, void *, unsigned));
+int       xtc_reg_send_wait __P((xtc_reg_t *, const char *, const void *, size_t, int64_t));
 int       xtc_reg_visit __P((xtc_reg_t *, const char *, xtc_reg_visit_fn, void *, int *));
 int __xtc_reg_set __P((xtc_reg_t *, const char *, xtc_pid_t));
 int __xtc_sup_abandon_wait __P((xtc_supervisor_t *));

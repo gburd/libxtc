@@ -11,6 +11,7 @@
 
 #include "xtc_int.h"
 #include "xtc_inject.h"
+#include "xtc_sync.h"       /* xtc_notify: senders waiting for room */
 #include "xtc_sim.h"
 #include "xtc_dst_inject.h"
 #include "xtc_proc.h"
@@ -494,6 +495,15 @@ struct xtc_proc {
 	xtc_waker_t       recv_waker;
 	int               waker_armed;
 
+	/* Senders waiting for room in this mailbox (xtc_send_wait,
+	 * xtc_send_notify), FIFO, under mbox_lock.  The owner reads `room`
+	 * without the lock (seq_cst) after each take to skip the lock when
+	 * nobody waits; room_closed (under mbox_lock) is set when the proc
+	 * exits, after which nobody may wait. */
+	struct room_waiter *room;
+	struct room_waiter *room_tail;
+	int                 room_closed;
+
 	/* Entry. */
 	xtc_proc_fn fn;
 	void       *arg;
@@ -834,6 +844,7 @@ __current_proc_slot(void)
 }
 #define __current_proc (*__current_proc_slot())
 static void __xtc_proc_kill_check(void);   /* installed as the resume kill hook */
+static void __room_fire(struct xtc_proc *p, int gone);
 static struct xtc_proc *__proc_reanchor(struct xtc_proc *self);
 
 /*
@@ -1127,6 +1138,7 @@ __xtc_proc_loop_unregister(xtc_loop_t *loop)
 		p->mbox_head = p->mbox_tail = NULL;
 		p->mbox_n = 0;
 		(void) __proc_mtx_unlock(&p->mbox_lock);
+		__room_fire(p, 1);
 		for (e = p->save_head; e != NULL; e = n) {
 			n = e->next;
 			__env_free(e);
@@ -1423,6 +1435,144 @@ __mbox_push_locked(struct xtc_proc *p, struct envelope *e)
 		    (uint64_t)p->mbox_peak);
 	}
 	p->mbox_recv_total++;
+}
+
+/*
+ * A sender waiting for room in a mailbox.  WAIT: xtc_send_wait, parked
+ * on `wake` (its own heap node; a kill unlinks it through a scope
+ * finalizer).  NOTE: xtc_send_notify, one per (caller, target), answered
+ * with an 'R' ROOM message.  Linked on the target, under its mbox_lock.
+ */
+struct room_waiter {
+	struct room_waiter *next;
+	int                 note;      /* 1 = NOTE, 0 = WAIT */
+	int                 linked;    /* on the target's list */
+	int                 gone;      /* fired because the target exited */
+	/* WAIT */
+	xtc_notify_t       *wake;
+	struct xtc_proc    *target;    /* pinned by a resolver ref */
+	/* NOTE */
+	xtc_pid_t           from;
+	uint64_t            ref;
+};
+
+/* The room a waiter needs: at most half of cap in use (mailbox + save
+ * queue), so a woken sender is not refused again at once.  The seq_cst
+ * load pairs with the owner's seq_cst decrement of mbox_saved on a
+ * save-queue take (see __room_check).  Called with p->mbox_lock held. */
+static int
+__room_ok_locked(const struct xtc_proc *p)
+{
+	return p->mbox_n + xtc_atomic_load_size(&p->mbox_saved,
+	                       xtc_mo_seq_cst) <= p->mbox_cap / 2;
+}
+
+/* Append w.  The head is published seq_cst: the owner reads it without
+ * the lock.  Called with p->mbox_lock held. */
+static void
+__room_link_locked(struct xtc_proc *p, struct room_waiter *w)
+{
+	w->next = NULL;
+	w->linked = 1;
+	if (p->room_tail == NULL)
+		xtc_atomic_store_ptr(&p->room, w, xtc_mo_seq_cst);
+	else
+		p->room_tail->next = w;
+	p->room_tail = w;
+}
+
+/* Unlink w if linked.  Called with p->mbox_lock held. */
+static void
+__room_unlink_locked(struct xtc_proc *p, struct room_waiter *w)
+{
+	struct room_waiter *cur, *prev = NULL;
+	if (!w->linked)
+		return;
+	for (cur = xtc_atomic_load_ptr(&p->room, xtc_mo_relaxed); cur != NULL;
+	    prev = cur, cur = cur->next)
+		if (cur == w)
+			break;
+	if (cur != NULL) {
+		if (prev == NULL)
+			xtc_atomic_store_ptr(&p->room, w->next, xtc_mo_seq_cst);
+		else
+			prev->next = w->next;
+		if (p->room_tail == w)
+			p->room_tail = prev;
+	}
+	w->linked = 0;
+}
+
+static int __send_ex(xtc_loop_t *, xtc_pid_t, const void *, size_t, void *,
+    int, struct mon_entry *);
+
+/*
+ * Wake the senders waiting on p's mailbox: all of them when the proc
+ * exits (gone), else those that the room below half of cap allows, from
+ * the head.  WAIT nodes are signalled under the lock (the notify lives in
+ * the waiter's node, which it frees only after unlinking under this same
+ * lock); NOTE nodes are unlinked here and answered with a ROOM message
+ * after the unlock (a send takes another proc's mbox_lock).
+ */
+static void
+__room_fire(struct xtc_proc *p, int gone)
+{
+	struct room_waiter *notes = NULL, **ntail = &notes, *w, *next;
+	size_t budget;
+	XTC_PACK_PUSH
+	struct {
+		uint8_t   kind;
+		uint64_t  ref;
+		xtc_pid_t pid;
+		uint8_t   gone;
+	} XTC_PACKED rm;
+	XTC_PACK_POP
+
+	(void) __proc_mtx_lock(&p->mbox_lock);
+	if (gone)
+		p->room_closed = 1;
+	/* Wake as many as there is room for (each sends one message), not
+	 * the whole list: the rest stay queued for the next take. */
+	budget = __room_ok_locked(p) ? p->mbox_cap - p->mbox_n -
+	        xtc_atomic_load_size(&p->mbox_saved, xtc_mo_relaxed) :
+	                                0;
+	while ((w = xtc_atomic_load_ptr(&p->room, xtc_mo_relaxed)) != NULL &&
+	    (gone || budget-- > 0)) {
+		__room_unlink_locked(p, w);
+		w->gone = gone;
+		if (w->note) {
+			w->next = NULL;
+			*ntail = w;
+			ntail = &w->next;
+		} else {
+			(void)xtc_notify_signal(w->wake);
+		}
+	}
+	(void) __proc_mtx_unlock(&p->mbox_lock);
+	for (w = notes; w != NULL; w = next) {
+		next = w->next;
+		rm.kind = 'R';
+		rm.ref = w->ref;
+		rm.pid = p->pid;
+		rm.gone = (uint8_t)w->gone;
+		/* sys: bypasses the CALLER's cap (it asked for this). */
+		(void)__send_ex(NULL, w->from, &rm, sizeof rm, NULL, 1, NULL);
+		__os_free(w);
+	}
+}
+
+/* After the owner took a message: wake room waiters if any.  A mailbox
+ * pop is under mbox_lock, so it is ordered with a waiter's link by the
+ * lock.  A save-queue take is not: its seq_cst decrement of mbox_saved
+ * and this seq_cst load, against the waiter's seq_cst publish of `room`
+ * and seq_cst read of mbox_saved (__room_link_locked, __room_ok_locked),
+ * mean either the owner sees the waiter or the waiter sees the room. */
+static inline void
+__room_check(struct xtc_proc *p)
+{
+	if (XTC_UNLIKELY(xtc_atomic_load_ptr(&p->room, xtc_mo_seq_cst) !=
+	        NULL))
+		__room_fire(p, 0);
 }
 
 static struct envelope *
@@ -1842,6 +1992,9 @@ __proc_entry(void *arg)
 proc_exit:
 
 	xtc_atomic_store_i32(&p->alive, 0, xtc_mo_relaxed);
+	/* Senders waiting for room learn the proc is gone (a send to it
+	 * now fails), and no new one may wait. */
+	__room_fire(p, 1);
 	/* Run the proc's at-exit callbacks (release locks, reset memory,
 	 * close fds) before anyone observes the exit.  __current_proc is
 	 * still this proc, and we are past the fault handler's longjmp,
@@ -2864,6 +3017,214 @@ xtc_send_owned(xtc_pid_t to, void *buf, size_t size)
 	return __send_ex(NULL, to, buf, size, buf, 0, NULL);
 }
 
+/* ---------- waiting for mailbox room (2.2) ---------- */
+
+/* The kill-path cleanup of an xtc_send_wait waiter (scope finalizer),
+ * and its normal one: unlink from the target, unpin it, free.  The
+ * argument is the heap node, never the waiting frame. */
+static void
+__room_wait_drop(void *arg)
+{
+	struct room_waiter *w = arg;
+	(void) __proc_mtx_lock(&w->target->mbox_lock);
+	__room_unlink_locked(w->target, w);
+	(void) __proc_mtx_unlock(&w->target->mbox_lock);
+	__proc_release(w->target);
+	xtc_notify_destroy(w->wake);
+	__os_free(w);
+}
+
+/*
+ * One wait for room in p's mailbox (p pinned by the caller's ref, which
+ * the waiter takes over).  Returns XTC_OK when woken by a take,
+ * XTC_ROOM_NOW when the room was there already (nothing to wait for),
+ * XTC_E_INVAL if p exited, XTC_E_AGAIN at the deadline (-1: none), or an
+ * allocation error.  The caller retries the send after the first two.
+ */
+#define XTC_ROOM_NOW 1
+static int
+__room_wait(struct xtc_proc *p, int64_t deadline)
+{
+	struct room_waiter *w = NULL;
+	xtc_scope_t *sc = NULL;
+	int64_t now = 0, wait_ns = -1;
+	int rc, gone;
+
+	if ((rc = __os_calloc(1, sizeof *w, (void **)&w)) != XTC_OK) {
+		__proc_release(p);
+		return rc;
+	}
+	if ((rc = xtc_notify_create(&w->wake)) != XTC_OK) {
+		__os_free(w);
+		__proc_release(p);
+		return rc;
+	}
+	w->target = p;
+	(void) __proc_mtx_lock(&p->mbox_lock);
+	if (p->room_closed || !xtc_atomic_load_i32(&p->alive,
+	        xtc_mo_relaxed)) {
+		(void) __proc_mtx_unlock(&p->mbox_lock);
+		__room_wait_drop(w);
+		return XTC_E_INVAL;
+	}
+	if (__room_ok_locked(p)) {
+		(void) __proc_mtx_unlock(&p->mbox_lock);
+		__room_wait_drop(w);
+		return XTC_ROOM_NOW;
+	}
+	__room_link_locked(p, w);
+	(void) __proc_mtx_unlock(&p->mbox_lock);
+	if (__current_proc != NULL) {
+		if ((sc = xtc_scope_open()) == NULL ||
+		    xtc_scope_defer(sc, __room_wait_drop, w) != XTC_OK) {
+			xtc_scope_close(sc);
+			__room_wait_drop(w);
+			return XTC_E_RESOURCE;
+		}
+	}
+	if (deadline >= 0) {
+		(void)__os_clock_mono(&now);
+		wait_ns = now < deadline ? deadline - now : 0;
+	}
+	rc = xtc_notify_wait(w->wake, wait_ns);
+	(void) __proc_mtx_lock(&p->mbox_lock);
+	__room_unlink_locked(p, w);
+	gone = w->gone;
+	(void) __proc_mtx_unlock(&p->mbox_lock);
+	if (sc != NULL)
+		xtc_scope_close(sc);    /* runs __room_wait_drop */
+	else
+		__room_wait_drop(w);
+	if (gone)
+		return XTC_E_INVAL;
+	return rc == XTC_OK ? XTC_OK : XTC_E_AGAIN;
+}
+
+/* PUBLIC: int xtc_send_wait __P((xtc_pid_t, const void *, size_t, int64_t)); */
+/*
+ * xtc_send that waits for room instead of failing with XTC_E_AGAIN: from
+ * a proc it parks the fiber, from a plain thread it blocks the thread.
+ * Woken by the receiver's take that brings its mailbox to half of cap or
+ * below, not by a timer.  A dead target is XTC_E_INVAL at once, as for
+ * xtc_send, and a target that exits while the sender waits ends the wait
+ * with XTC_E_INVAL.
+ */
+int
+xtc_send_wait(xtc_pid_t to, const void *data, size_t size,
+              int64_t timeout_ns)
+{
+	struct xtc_proc *p;
+	int64_t deadline = -1, now = 0;
+	int rc;
+
+	if (timeout_ns > 0) {
+		(void)__os_clock_mono(&deadline);
+		deadline = timeout_ns > INT64_MAX - deadline ? INT64_MAX :
+		    deadline + timeout_ns;
+	}
+	for (;;) {
+		rc = __send_on(NULL, to, data, size);
+		if (rc != XTC_E_AGAIN || timeout_ns == 0)
+			return rc;
+		if (deadline >= 0) {
+			(void)__os_clock_mono(&now);
+			if (now >= deadline)
+				return XTC_E_AGAIN;
+		}
+		if ((p = __resolve(to, NULL)) == NULL)
+			return XTC_E_INVAL;
+		rc = __room_wait(p, deadline);
+		if (rc == XTC_OK || rc == XTC_E_AGAIN)
+			continue;       /* woken: retry; deadline: returns above */
+		if (rc != XTC_ROOM_NOW)
+			return rc;
+		/* The send was refused although there is room (the
+		 * simulator's spurious-full buggify, a partition): let time
+		 * pass rather than spin. */
+		if (__current_proc != NULL)
+			(void)xtc_proc_sleep(1000LL * 1000);
+		else
+			(void)__os_sleep_ns(1000LL * 1000);
+	}
+}
+
+/* PUBLIC: int xtc_send_notify __P((xtc_pid_t, uint64_t *)); */
+/*
+ * Ask to be told when `to`'s mailbox has room: the calling proc receives
+ * one ROOM message (xtc_room_decode) carrying *out_ref when the mailbox
+ * is at half of cap or below, at once if it is already, or with gone set
+ * when `to` exits first.  For a proc that must not block on one slow
+ * receiver: after xtc_send fails with XTC_E_AGAIN, keep the message,
+ * call this, and retry the send when the ROOM message arrives.
+ */
+int
+xtc_send_notify(xtc_pid_t to, uint64_t *out_ref)
+{
+	struct xtc_proc *self = __proc_reanchor(__current_proc), *p;
+	struct room_waiter *w;
+	int now_room;
+	int rc;
+
+	if (self == NULL)
+		return XTC_E_STATE;
+	if (out_ref == NULL || xtc_pid_is_none(to))
+		return XTC_E_INVAL;
+	if ((p = __resolve(to, NULL)) == NULL)
+		return XTC_E_INVAL;
+	if ((rc = __os_calloc(1, sizeof *w, (void **)&w)) != XTC_OK) {
+		__proc_release(p);
+		return rc;
+	}
+	w->note = 1;
+	w->from = self->pid;
+	w->ref = xtc_atomic_fetch_add_u64(&__mon_ref_seq, 1,
+	             xtc_mo_relaxed) +
+	    1;
+	*out_ref = w->ref;
+	(void) __proc_mtx_lock(&p->mbox_lock);
+	if (p->room_closed || !xtc_atomic_load_i32(&p->alive,
+	        xtc_mo_relaxed)) {
+		(void) __proc_mtx_unlock(&p->mbox_lock);
+		__proc_release(p);
+		__os_free(w);
+		return XTC_E_INVAL;
+	}
+	__room_link_locked(p, w);
+	now_room = __room_ok_locked(p);
+	(void) __proc_mtx_unlock(&p->mbox_lock);
+	if (now_room)
+		__room_fire(p, 0);      /* answers this one at once */
+	__proc_release(p);
+	return XTC_OK;
+}
+
+/* PUBLIC: int xtc_room_decode __P((const void *, size_t, xtc_room_info_t *)); */
+int
+xtc_room_decode(const void *msg, size_t len, xtc_room_info_t *out)
+{
+	XTC_PACK_PUSH
+	struct {
+		uint8_t   kind;
+		uint64_t  ref;
+		xtc_pid_t pid;
+		uint8_t   gone;
+	} XTC_PACKED rm;
+	XTC_PACK_POP
+	xtc_room_info_t info;
+
+	if (msg == NULL || len != sizeof rm || !__XTC_SIZED_OUT_OK(out))
+		return XTC_E_INVAL;
+	memcpy(&rm, msg, sizeof rm);
+	if (rm.kind != 'R')
+		return XTC_E_INVAL;
+	memset(&info, 0, sizeof info);
+	info.size = sizeof info;
+	info.pid = rm.pid;
+	info.ref = rm.ref;
+	info.gone = rm.gone;
+	return __xtc_sized_out(out, &info, sizeof info);
+}
+
 /* Owner-qualified xtc_send (see __resolve_on); owner NULL -> XTC_E_INVAL. */
 int
 __xtc_send_on(xtc_loop_t *owner, xtc_pid_t to, const void *data, size_t size)
@@ -3244,6 +3605,7 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 	struct xtc_proc *self = __current_proc, *prev_self;
 	struct envelope *e, **link, *mark;
 	int64_t deadline = -1;
+	int from_save = 0;
 
 	/*
 	 * Act on the RUNNING fiber's proc, not the thread-local, which a
@@ -3297,10 +3659,12 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 		while ((e = *link) != NULL) {
 			if (match(__env_payload(e), e->size, u)) {
 				*link = e->next;
+				/* seq_cst: the room-waiter handshake. */
 				xtc_atomic_fetch_sub_size(&self->mbox_saved, 1,
-				    xtc_mo_relaxed);
+				    xtc_mo_seq_cst);
 				if (self->save_tail == e)
 					self->save_tail = prev;
+				from_save = 1;
 				goto deliver;
 			}
 			prev = e;
@@ -3459,6 +3823,10 @@ deliver:
 	 * the waker leaves a stale timer in the heap, keeping the loop
 	 * alive until the deadline (a needless wait of up to timeout_ns). */
 	__xtc_task_cancel_park_timer(self->task);
+	/* A take made room: wake senders waiting for it.  Planted bug 48
+	 * (ROOM_SAVEQ) skips it for a take from the save queue. */
+	if (!from_save || !XTC_DST_BUG(XTC_DST_BUG_ROOM_SAVEQ))
+		__room_check(self);
 	{
 		void *buf = NULL;
 		if (e->ext != NULL) {
@@ -5630,8 +5998,9 @@ __mbox_flush_down(struct xtc_proc *self, uint64_t ref)
 			if (self->save_tail == e)
 				self->save_tail = prev;
 			xtc_atomic_fetch_sub_size(&self->mbox_saved, 1,
-			    xtc_mo_relaxed);
+			    xtc_mo_seq_cst);
 			__env_free(e);
+			__room_check(self);
 			return;
 		}
 		prev = e;
@@ -5654,6 +6023,7 @@ __mbox_flush_down(struct xtc_proc *self, uint64_t ref)
 	}
 	(void)__proc_mtx_unlock(&self->mbox_lock);
 	__env_free(found);
+	__room_check(self);
 }
 
 /* PUBLIC: int xtc_demonitor __P((uint64_t, int)); */

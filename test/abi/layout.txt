@@ -313,6 +313,11 @@ xtc_res_t.alert_pct off=200 size=48
 xtc_res_t.alert_armed off=248 size=24
 xtc_res_t.alert_fn off=272 size=8
 xtc_res_t.alert_user off=280 size=8
+xtc_room_info_t size=40 align=8
+xtc_room_info_t.size off=0 size=8
+xtc_room_info_t.pid off=8 size=16
+xtc_room_info_t.ref off=24 size=8
+xtc_room_info_t.gone off=32 size=4
 xtc_runtime_info_t size=48 align=8
 xtc_runtime_info_t.size off=0 size=8
 xtc_runtime_info_t.n_loops off=8 size=4

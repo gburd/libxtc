@@ -514,6 +514,176 @@ test_demonitor(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---------- waiting for mailbox room (2.2) ---------- */
+
+/*
+ * A receiver with cap 4 that drains slowly (one message per 2 ms).  A
+ * plain thread and a proc each send 20 messages with xtc_send_wait; none
+ * is refused and each of the 40 arrives exactly once.
+ * A proc that must not block uses xtc_send_notify: a ROOM message comes
+ * when the mailbox has room again, and a gone=1 one when the receiver
+ * exits.  The receiver drains half its messages with xtc_recv_match from
+ * the save queue, the path a plain mailbox pop does not cover.
+ */
+#define SW_N   20
+#define SW_CAP 4
+struct sw_state {
+	xtc_pid_t rx;
+	int got_thread, got_proc, order_bad, rc_bad;
+	unsigned char seen[2 * SW_N];
+	int room_ok, room_gone, room_dead_rc, notify_stale;
+	int64_t thread_ns;
+};
+
+static int
+sw_match_odd(const void *data, size_t size, void *u)
+{
+	(void)u;
+	return size == sizeof(int) && (*(const int *)data & 1) == 1;
+}
+
+static void
+sw_rx(void *arg)
+{
+	struct sw_state *s = arg;
+	int total = 0, v, slot;
+	void *m;
+	size_t sz;
+	while (total < 2 * SW_N) {
+		/* Odd values first, from the save queue when they are behind
+		 * an even one. */
+		if (xtc_recv_match(sw_match_odd, NULL, &m, &sz,
+		        2000LL * 1000) != XTC_OK &&
+		    xtc_recv(&m, &sz, 2000LL * 1000) != XTC_OK)
+			continue;
+		memcpy(&v, m, sizeof v);
+		xtc_free(m);
+		total++;
+		slot = v >= 1000 ? SW_N + v - 1000 : v;
+		if (slot < 0 || slot >= 2 * SW_N || s->seen[slot]++ != 0)
+			s->order_bad++;         /* out of range or a duplicate */
+		if (v >= 1000)
+			s->got_proc++;
+		else
+			s->got_thread++;
+		(void)xtc_proc_sleep(2LL * 1000 * 1000);
+	}
+	/* The notifier's last request is answered by this exit. */
+	(void)xtc_proc_sleep(20LL * 1000 * 1000);
+}
+
+static void
+sw_proc_sender(void *arg)
+{
+	struct sw_state *s = arg;
+	int i, v;
+	for (i = 0; i < SW_N; i++) {
+		v = 1000 + i;
+		if (xtc_send_wait(s->rx, &v, sizeof v, 5000LL * 1000 * 1000) !=
+		    XTC_OK)
+			s->rc_bad++;
+	}
+}
+
+static void *
+sw_thread_sender(void *arg)
+{
+	struct sw_state *s = arg;
+	int i;
+	int64_t t0 = xtc_clock_mono();
+	for (i = 0; i < SW_N; i++)
+		if (xtc_send_wait(s->rx, &i, sizeof i, 5000LL * 1000 * 1000) !=
+		    XTC_OK)
+			s->rc_bad++;
+	s->thread_ns = xtc_clock_mono() - t0;
+	return NULL;
+}
+
+/* xtc_send_notify: ROOM once the busy receiver drains; then, with the
+ * receiver idle in its final sleep, fill its mailbox, ask again (no room:
+ * no answer yet) and get gone=1 when it exits; after that, XTC_E_INVAL. */
+static int
+sw_room(struct sw_state *s, uint64_t ref, xtc_room_info_t *ri)
+{
+	void *m;
+	size_t sz;
+	int ok;
+	for (;;) {
+		if (xtc_recv(&m, &sz, 5000LL * 1000 * 1000) != XTC_OK)
+			return 0;
+		ok = xtc_room_decode(m, sz, ri) == XTC_OK;
+		xtc_free(m);
+		if (!ok)
+			continue;
+		if (ri->ref != ref || !xtc_pid_eq(ri->pid, s->rx))
+			s->notify_stale++;
+		return 1;
+	}
+}
+
+static void
+sw_notifier(void *arg)
+{
+	struct sw_state *s = arg;
+	xtc_room_info_t ri = XTC_ROOM_INFO_INIT;
+	uint64_t ref;
+	int i;
+
+	(void)xtc_proc_sleep(30LL * 1000 * 1000);      /* senders busy */
+	if (xtc_send_notify(s->rx, &ref) != XTC_OK || !sw_room(s, ref, &ri))
+		return;
+	if (!ri.gone)
+		s->room_ok++;
+	while (s->got_thread + s->got_proc < 2 * SW_N)
+		(void)xtc_proc_sleep(1LL * 1000 * 1000);
+	for (i = 0; i < SW_CAP; i++)
+		(void)xtc_send(s->rx, "f", 1);
+	if (xtc_send_notify(s->rx, &ref) != XTC_OK || !sw_room(s, ref, &ri))
+		return;
+	if (ri.gone)
+		s->room_gone++;
+	s->room_dead_rc = xtc_send_notify(s->rx, &ref);
+}
+
+static MunitResult
+test_send_wait(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
+	struct sw_state s;
+	pthread_t th;
+	uint64_t ref;
+	xtc_room_info_t ri = XTC_ROOM_INFO_INIT;
+	(void)p;
+	(void)d;
+	memset(&s, 0, sizeof s);
+	munit_assert_int(xtc_send_notify(XTC_PID_NONE, &ref), ==, XTC_E_STATE);
+	munit_assert_int(xtc_room_decode("x", 1, &ri), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	o.mailbox_cap = SW_CAP;
+	munit_assert_int(xtc_proc_spawn(loop, sw_rx, &s, &o, &s.rx), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, sw_proc_sender, &s, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, sw_notifier, &s, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(pthread_create(&th, NULL, sw_thread_sender, &s), ==, 0);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+	/* After the receiver is gone: a dead target is XTC_E_INVAL at once. */
+	munit_assert_int(xtc_send_wait(s.rx, "x", 1, -1), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_assert_int(s.rc_bad, ==, 0);
+	munit_assert_int(s.got_thread, ==, SW_N);
+	munit_assert_int(s.got_proc, ==, SW_N);
+	munit_assert_int(s.order_bad, ==, 0);
+	munit_assert_int(s.notify_stale, ==, 0);
+	munit_assert_int(s.room_ok, ==, 1);
+	munit_assert_int(s.room_gone, ==, 1);
+	munit_assert_int(s.room_dead_rc, ==, XTC_E_INVAL);
+	return MUNIT_OK;
+}
+
 /* ---------- atomic spawn_monitor / spawn_link ---------- */
 
 static void
@@ -3475,6 +3645,8 @@ static MunitTest tests[] = {
 	{ "/selective_receive", test_selective_receive,NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/monitor",           test_monitor,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/demonitor", test_demonitor, NULL, NULL, MUNIT_TEST_OPTION_NONE,
+	    NULL },
+	{ "/send_wait", test_send_wait, NULL, NULL, MUNIT_TEST_OPTION_NONE,
 	    NULL },
 	{ "/spawn_monitor_atomic", test_spawn_monitor_atomic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/spawn_link_atomic",  test_spawn_link_atomic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

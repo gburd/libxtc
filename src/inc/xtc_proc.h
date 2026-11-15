@@ -202,6 +202,9 @@ typedef struct xtc_mailbox_stats {
  * PUBLIC: int       xtc_proc_trap_exit __P((int));
  * PUBLIC: int       xtc_monitor __P((xtc_pid_t, uint64_t *));
  * PUBLIC: int       xtc_demonitor __P((uint64_t, int));
+ * PUBLIC: int       xtc_send_wait __P((xtc_pid_t, const void *, size_t, int64_t));
+ * PUBLIC: int       xtc_send_notify __P((xtc_pid_t, uint64_t *));
+ * PUBLIC: int       xtc_room_decode __P((const void *, size_t, xtc_room_info_t *));
  */
 
 XTC_API int       xtc_proc_spawn(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
@@ -710,6 +713,46 @@ XTC_API int       xtc_monitor(xtc_pid_t target, uint64_t *out_ref);
  */
 #define XTC_DEMONITOR_FLUSH 0x1
 XTC_API int xtc_demonitor(uint64_t ref, int flags);
+
+/*
+ * Waiting for room in a full mailbox (2.2).  A mailbox "has room" when
+ * its messages plus its save queue are at most half its cap, so a sender
+ * that was refused is not refused again at once.
+ *
+ * xtc_send_wait is xtc_send that waits for room instead of returning
+ * XTC_E_AGAIN: from a proc it parks the fiber, from a plain thread it
+ * blocks the thread.  It is woken by the receiver taking messages, not
+ * by a timer.  timeout_ns: < 0 forever, 0 = xtc_send, > 0 bound.
+ * Returns xtc_send's codes: XTC_OK, XTC_E_AGAIN when the time ran out,
+ * XTC_E_INVAL for a dead target (at once, or when the target exits while
+ * the sender waits), XTC_E_NOMEM.  For a plain thread reporting to a proc
+ * (a device or I/O worker).  A proc that must not block on one slow
+ * receiver uses xtc_send_notify instead.
+ *
+ * xtc_send_notify asks for one ROOM message, sent to the calling proc
+ * when `to`'s mailbox has room (at once if it has now), or when `to`
+ * exits first (then .gone is 1).  *out_ref names it.  The message
+ * bypasses the caller's own mailbox cap; decode it with xtc_room_decode.
+ * Returns XTC_OK, XTC_E_INVAL for a dead or NONE target or a NULL
+ * out_ref, XTC_E_STATE off a proc, XTC_E_NOMEM.
+ *
+ * xtc_room_decode: XTC_OK if (msg, len) is a ROOM message (out filled up
+ * to out->size), else XTC_E_INVAL.
+ */
+typedef struct xtc_room_info {
+	size_t    size;   /* sizeof(xtc_room_info_t): XTC_ROOM_INFO_INIT */
+	xtc_pid_t pid;    /* the receiver that has room (or exited) */
+	uint64_t  ref;    /* the xtc_send_notify reference */
+	int       gone;   /* 1: the receiver exited; a send to it fails */
+} xtc_room_info_t;
+
+#define XTC_ROOM_INFO_INIT { .size = sizeof(xtc_room_info_t) }
+
+XTC_API int xtc_send_wait(xtc_pid_t to, const void *data, size_t size,
+                          int64_t timeout_ns);
+XTC_API int xtc_send_notify(xtc_pid_t to, uint64_t *out_ref);
+XTC_API int xtc_room_decode(const void *msg, size_t len,
+                            xtc_room_info_t *out);
 
 /* Snapshot a process's mailbox statistics into *out.  Returns XTC_OK,
  * or XTC_E_INVAL if the pid is dead / unknown.  Safe to call from any

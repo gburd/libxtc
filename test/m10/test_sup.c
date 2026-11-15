@@ -1798,6 +1798,123 @@ test_spec_reg_name(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * xtc_reg_send_wait (2.2): a plain thread reports 30 results to a
+ * supervised, named engine with a cap-2 mailbox that crashes after every
+ * 10 messages it takes (once its mailbox is empty, so no accepted report
+ * dies with it).  Each report reaches a live incarnation (the counts sum
+ * to 30 across the incarnations) and no send fails.  A name that never
+ * arrives ends the wait at its timeout, from a thread and from a proc.
+ * Every wait in the test is bounded.  Report 08 item 2.
+ */
+static xtc_reg_t *g_rs_reg;
+static int g_rs_got, g_rs_runs, g_rs_fail, g_rs_done;
+
+static void
+rs_engine(void *arg)
+{
+	void *m;
+	size_t sz;
+	int n = 0;
+	xtc_mailbox_stats_t st = XTC_MAILBOX_STATS_INIT;
+	(void)arg;
+	xtc_atomic_fetch_add_i32(&g_rs_runs, 1, xtc_mo_seq_cst);
+	for (;;) {
+		if (xtc_recv(&m, &sz, -1) != XTC_OK)
+			continue;
+		xtc_free(m);
+		xtc_atomic_fetch_add_i32(&g_rs_got, 1, xtc_mo_seq_cst);
+		(void)xtc_proc_sleep(500LL * 1000);    /* slower than the thread */
+		if (++n >= 10 && xtc_proc_mailbox_stats(xtc_self(), &st) ==
+		        XTC_OK && st.depth == 0)
+			(void)xtc_exit_self(1);
+	}
+}
+
+static int64_t g_rs_never_thread_ns, g_rs_never_proc_ns;
+static int g_rs_never_thread_rc, g_rs_never_proc_rc;
+
+static void *
+rs_thread(void *arg)
+{
+	int i;
+	int64_t t0;
+	(void)arg;
+	for (i = 0; i < 30; i++)
+		if (xtc_reg_send_wait(g_rs_reg, "engine", &i, sizeof i,
+		        5000 * NM_MS) != XTC_OK)
+			g_rs_fail++;
+	/* A name that never arrives: the bound ends the wait. */
+	t0 = xtc_clock_mono();
+	g_rs_never_thread_rc = xtc_reg_send_wait(g_rs_reg, "never", "a", 1,
+	    50 * NM_MS);
+	g_rs_never_thread_ns = xtc_clock_mono() - t0;
+	xtc_atomic_store_i32(&g_rs_done, 1, xtc_mo_seq_cst);
+	return NULL;
+}
+
+/* Stops the supervisor once the thread is done and every report landed,
+ * or after 10 s, so the test cannot hang. */
+static void
+rs_stopper(void *arg)
+{
+	xtc_supervisor_t *sup = arg;
+	int64_t t0 = xtc_clock_mono();
+	g_rs_never_proc_rc = xtc_reg_send_wait(g_rs_reg, "never", "a", 1,
+	    50 * NM_MS);
+	g_rs_never_proc_ns = xtc_clock_mono() - t0;
+	while ((!xtc_atomic_load_i32(&g_rs_done, xtc_mo_seq_cst) ||
+	           xtc_atomic_load_i32(&g_rs_got, xtc_mo_seq_cst) < 30) &&
+	    xtc_clock_mono() - t0 < 10000 * NM_MS)
+		(void)xtc_proc_sleep(1 * NM_MS);
+	(void)xtc_sup_stop(sup);
+}
+
+static MunitResult
+test_reg_send_wait(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	xtc_supervisor_t *sup;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_child_spec_t k = XTC_CHILD_SPEC_INIT;
+	pthread_t th;
+	(void)p;
+	(void)d;
+	g_rs_got = g_rs_runs = g_rs_fail = g_rs_done = 0;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_reg_create(&g_rs_reg), ==, XTC_OK);
+	so.registry = g_rs_reg;
+	so.max_restarts = 10;
+	k.name = "engine";
+	k.reg_name = "engine";
+	k.fn = rs_engine;
+	k.mailbox_cap = 2;
+	k.policy = XTC_RESTART_PERMANENT;
+	munit_assert_int(xtc_sup_start(loop, &so, &k, 1, &sup), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, rs_stopper, sup, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(pthread_create(&th, NULL, rs_thread, NULL), ==, 0);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+	munit_assert_int(xtc_sup_join(sup, 1000 * NM_MS), ==, XTC_OK);
+	munit_assert_int(g_rs_fail, ==, 0);
+	munit_assert_int(g_rs_got, ==, 30);
+	munit_assert_int(g_rs_runs, >=, 2);   /* at least one restart */
+	munit_assert_int(g_rs_never_thread_rc, ==, XTC_E_AGAIN);
+	munit_assert_int(g_rs_never_proc_rc, ==, XTC_E_AGAIN);
+	munit_assert_int64(g_rs_never_thread_ns, >=, 50 * NM_MS);
+	munit_assert_int64(g_rs_never_thread_ns, <, 1000 * NM_MS);
+	munit_assert_int64(g_rs_never_proc_ns, >=, 50 * NM_MS);
+	munit_assert_int64(g_rs_never_proc_ns, <, 1000 * NM_MS);
+	munit_assert_int(xtc_reg_send_wait(NULL, "x", "a", 1, 0), ==,
+	    XTC_E_INVAL);
+	munit_assert_int(xtc_reg_send_wait(g_rs_reg, "none", "a", 1, 0), ==,
+	    XTC_E_AGAIN);
+	xtc_reg_destroy(g_rs_reg);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/add_child_other_loop", test_add_child_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/supervisor_restarts",   test_supervisor_restarts, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1829,6 +1946,8 @@ static MunitTest tests[] = {
 	{ "/spec_proc_opts", test_spec_proc_opts, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/spec_reg_name", test_spec_reg_name, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/reg_send_wait", test_reg_send_wait, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

@@ -86,8 +86,12 @@ XTC_2.2 {
 		xtc_metrics_write_prometheus;
 		xtc_proc_set_label;
 		xtc_reg_put;
+		xtc_reg_send_wait;
 		xtc_reg_visit;
 		xtc_reg_whereis_wait;
+		xtc_room_decode;
+		xtc_send_notify;
+		xtc_send_wait;
 		xtc_sup_child_restarts;
 		xtc_tail_app;
 		xtc_tail_app_name;

@@ -47,6 +47,7 @@ typedef int (*xtc_reg_visit_fn)(xtc_pid_t pid, void *value, void *user);
  * PUBLIC: int       xtc_reg_put __P((xtc_reg_t *, const char *, xtc_pid_t, void *, unsigned));
  * PUBLIC: int       xtc_reg_visit __P((xtc_reg_t *, const char *, xtc_reg_visit_fn, void *, int *));
  * PUBLIC: int       xtc_reg_whereis_wait __P((xtc_reg_t *, const char *, xtc_pid_t, int64_t, xtc_pid_t *));
+ * PUBLIC: int       xtc_reg_send_wait __P((xtc_reg_t *, const char *, const void *, size_t, int64_t));
  */
 XTC_API int  xtc_reg_create(xtc_reg_t **out);
 XTC_API void xtc_reg_destroy(xtc_reg_t *r);
@@ -154,5 +155,19 @@ XTC_API int  xtc_reg_visit(xtc_reg_t *r, const char *name,
  */
 XTC_API int xtc_reg_whereis_wait(xtc_reg_t *r, const char *name,
     xtc_pid_t not_pid, int64_t timeout_ns, xtc_pid_t *out_pid);
+
+/*
+ * Send to a name (2.2): xtc_reg_whereis_wait for a live holder, then
+ * xtc_send_wait (xtc_proc.h) for room in its mailbox.  A holder that dies
+ * before or during the send is skipped and the next one waited for.
+ * XTC_OK: the message is in a live incarnation's mailbox (if that one
+ * dies before taking it, the message is lost with the mailbox).  One
+ * deadline for the whole call.  For a device or I/O thread that reports
+ * to a supervised service which may be restarting.  Returns XTC_OK,
+ * XTC_E_AGAIN when the time ran out, XTC_E_INVAL for a NULL argument,
+ * XTC_E_NOMEM.
+ */
+XTC_API int xtc_reg_send_wait(xtc_reg_t *r, const char *name,
+    const void *data, size_t size, int64_t timeout_ns);
 
 #endif /* XTC_REG_H */

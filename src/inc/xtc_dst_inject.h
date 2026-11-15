@@ -274,4 +274,13 @@
  */
 #define XTC_DST_BUG_SUP_NAME_STALE 47
 
+/*
+ * 48 ROOM_SAVEQ: a receive that takes its message from the selective-
+ * receive save queue does not wake the senders waiting for room, so a
+ * sender blocked in xtc_send_wait on a receiver that drains with
+ * xtc_recv_match stays parked (test_sim_send_wait: "a sender waited with
+ * room in the mailbox").
+ */
+#define XTC_DST_BUG_ROOM_SAVEQ 48
+
 #endif /* XTC_DST_INJECT_H */

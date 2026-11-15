@@ -20,7 +20,8 @@
 .Nm xtc_reg_members ,
 .Nm xtc_reg_put ,
 .Nm xtc_reg_visit ,
-.Nm xtc_reg_whereis_wait
+.Nm xtc_reg_whereis_wait ,
+.Nm xtc_reg_send_wait
 .Nd named process registry
 .Sh SYNOPSIS
 .In xtc.h
@@ -59,6 +60,8 @@
 .Fn xtc_reg_visit "xtc_reg_t *r" "const char *name" "xtc_reg_visit_fn fn" "void *user" "int *out_n"
 .Ft int
 .Fn xtc_reg_whereis_wait "xtc_reg_t *r" "const char *name" "xtc_pid_t not_pid" "int64_t timeout_ns" "xtc_pid_t *out_pid"
+.Ft int
+.Fn xtc_reg_send_wait "xtc_reg_t *r" "const char *name" "const void *data" "size_t size" "int64_t timeout_ns"
 .Sh DESCRIPTION
 .Nm xtc_reg
 is a name-to-pid registry.  Modeled on Erlang's
@@ -274,6 +277,27 @@ for a NULL argument, or
 /
 .Er XTC_E_RESOURCE
 if the wait could not be set up.
+.Pp
+.Fn xtc_reg_send_wait ,
+also added in 2.2, sends
+.Fa data
+to whatever live process
+.Fa name
+names: it waits as
+.Fn xtc_reg_whereis_wait
+does while the name is unregistered, and as
+.Xr xtc_send_wait 3
+does while that process's mailbox is full.  A holder that dies before
+or during the send is skipped and the next one waited for.
+.Dv XTC_OK
+means the message is in a live incarnation's mailbox; one that dies
+before taking it loses it with its mailbox, as for any message.
+.Er XTC_E_AGAIN
+means
+.Fa timeout_ns
+(one deadline for the whole call) ran out.  It is the call a device or
+I/O thread uses to report to a supervised service that may be
+restarting.
 .Pp
 The supervisor names a child itself when its spec sets
 .Va reg_name
