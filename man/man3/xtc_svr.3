@@ -107,6 +107,27 @@ not call/cast .
 Called on graceful shutdown; cleanup hook.
 .El
 .Pp
+.Sy Options
+.Pq Vt xtc_svr_opts_t ,
+or
+.Dv NULL
+for the defaults:
+.Bl -tag -width "mailbox_watermark_pct" -offset indent
+.It Va name
+For logs and introspection.
+.It Va mailbox_cap
+The server's mailbox cap; 0 is the default.
+.It Va sched_class
+.It Va mailbox_watermark_pct , Va mailbox_watermark_fn , Va mailbox_watermark_user
+2.2: the
+.Vt xtc_proc_opts_t
+knobs of the same names, applied to the server's proc, so a server
+need not set its class on itself in
+.Va init .
+.Va sched_class
+must have been created on the server's loop.
+.El
+.Pp
 .Fn xtc_svr_call
 sends a request and blocks until reply or timeout.  In-process
 callers

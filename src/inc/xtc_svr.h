@@ -73,6 +73,17 @@ typedef struct xtc_svr_opts {
 	size_t      size;          /* sizeof(xtc_svr_opts_t): XTC_SVR_OPTS_INIT */
 	const char *name;          /* optional, for logs */
 	size_t      mailbox_cap;   /* 0 = default */
+	/*
+	 * 2.2: the xtc_proc_opts_t knobs, for the server's proc (see
+	 * xtc_proc_opts_t for their meaning), so a server need not set them
+	 * on itself in init.  sched_class must have been created on the
+	 * server's loop.
+	 */
+	void (*mailbox_watermark_fn)(xtc_pid_t self, size_t depth, size_t cap,
+	    void *user);
+	void *mailbox_watermark_user;
+	xtc_exec_class_t sched_class; /* NULL = the plain FIFO class */
+	int mailbox_watermark_pct;    /* 0 = off, 1..100 */
 } xtc_svr_opts_t;
 
 #define XTC_SVR_OPTS_INIT { .size = sizeof(xtc_svr_opts_t) }

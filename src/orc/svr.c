@@ -390,6 +390,10 @@ xtc_svr_start(xtc_loop_t *loop, const xtc_svr_callbacks_t *cb, void *state,
 
 	pop.name = o.name;
 	pop.mailbox_cap = o.mailbox_cap;
+	pop.mailbox_watermark_pct = o.mailbox_watermark_pct;
+	pop.mailbox_watermark_fn = o.mailbox_watermark_fn;
+	pop.mailbox_watermark_user = o.mailbox_watermark_user;
+	pop.sched_class = o.sched_class;
 	rc = xtc_proc_spawn(loop, __svr_entry, s, &pop, &pid);
 	if (rc != XTC_OK) {
 		xtc_notify_destroy(s->stopped);

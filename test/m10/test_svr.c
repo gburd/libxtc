@@ -1222,6 +1222,85 @@ test_svr_call_leaves_no_monitor(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * 2.2: xtc_svr_opts_t carries the proc knobs.  A server started with a
+ * scheduling class runs in it (the class counts its runs), and a cap-4
+ * mailbox with a 50% watermark fires the callback once, with the
+ * server's pid, when two messages are queued.  Report 15: a server had
+ * name and mailbox_cap only, and set its class on itself in init.
+ */
+static int g_so_wm, g_so_wm_bad;
+static xtc_pid_t g_so_pid;
+
+static void
+so_wm(xtc_pid_t self, size_t depth, size_t cap, void *user)
+{
+	if (user != (void *)&g_so_wm || depth != 2 || cap != 4 ||
+	    !xtc_pid_eq(self, g_so_pid))
+		g_so_wm_bad++;
+	g_so_wm++;
+}
+
+static int
+so_init(void *st)
+{
+	(void)st;
+	g_so_pid = xtc_self();
+	/* Two messages queued before the first recv: the watermark (2 of
+	 * 4) fires on the second. */
+	(void)xtc_send(xtc_self(), "a", 1);
+	(void)xtc_send(xtc_self(), "b", 1);
+	return XTC_OK;
+}
+
+static int
+so_info(void *st, const void *msg, size_t size)
+{
+	(void)st;
+	(void)msg;
+	(void)size;
+	return XTC_SVR_CONTINUE;
+}
+
+static void
+so_stopper(void *arg)
+{
+	(void)xtc_proc_sleep(5LL * 1000 * 1000);
+	(void)xtc_svr_stop(arg);
+}
+
+static MunitResult
+test_svr_opts_proc_knobs(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_svr_callbacks_t cb = XTC_SVR_CALLBACKS_INIT;
+	xtc_svr_opts_t o = XTC_SVR_OPTS_INIT;
+	xtc_exec_class_t cls;
+	xtc_svr_t *svr = NULL;
+	(void)p;
+	(void)d;
+	g_so_wm = g_so_wm_bad = 0;
+	cb.init = so_init;
+	cb.handle_info = so_info;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_exec_class_create(loop, 1, 0, &cls), ==, XTC_OK);
+	o.mailbox_cap = 4;
+	o.mailbox_watermark_pct = 50;
+	o.mailbox_watermark_fn = so_wm;
+	o.mailbox_watermark_user = &g_so_wm;
+	o.sched_class = cls;
+	munit_assert_int(xtc_svr_start(loop, &cb, NULL, &o, &svr), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, so_stopper, svr, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(g_so_wm, ==, 1);
+	munit_assert_int(g_so_wm_bad, ==, 0);
+	munit_assert_uint64(xtc_exec_class_runs(cls), >=, 1);
+	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/svr_basic", test_svr_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/call_name", test_svr_call_name, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1237,6 +1316,8 @@ static MunitTest tests[] = {
 	{ "/server_dies_mid_call", test_svr_server_dies_mid_call, NULL, NULL, MUNIT_TEST_OPTION_NONE, dying_params },
 	{ "/call_leaves_no_monitor", test_svr_call_leaves_no_monitor, NULL,
 	    NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/opts_proc_knobs", test_svr_opts_proc_knobs, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10.5/svr", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

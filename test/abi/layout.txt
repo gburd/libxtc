@@ -403,10 +403,14 @@ xtc_svr_callbacks_t.handle_cast off=24 size=8
 xtc_svr_callbacks_t.handle_info off=32 size=8
 xtc_svr_callbacks_t.terminate off=40 size=8
 xtc_svr_callbacks_t.handle_continue off=48 size=8
-xtc_svr_opts_t size=24 align=8
+xtc_svr_opts_t size=56 align=8
 xtc_svr_opts_t.size off=0 size=8
 xtc_svr_opts_t.name off=8 size=8
 xtc_svr_opts_t.mailbox_cap off=16 size=8
+xtc_svr_opts_t.mailbox_watermark_fn off=24 size=8
+xtc_svr_opts_t.mailbox_watermark_user off=32 size=8
+xtc_svr_opts_t.sched_class off=40 size=8
+xtc_svr_opts_t.mailbox_watermark_pct off=48 size=4
 xtc_tail_hdr_t size=24 align=8
 xtc_tail_hdr_t.magic off=0 size=4
 xtc_tail_hdr_t.version off=4 size=4

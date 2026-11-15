@@ -264,6 +264,8 @@ g2_inputs(void)
 	xtc_svr_t *svr = NULL;
 	xtc_sup_opts_t zs = XTC_SUP_OPTS_DEFAULT;
 	xtc_child_spec_t zk[2];
+	xtc_svr_opts_t *so2;
+	xtc_svr_callbacks_t zcb = XTC_SVR_CALLBACKS_INIT;
 	int i;
 
 	CHECK(xtc_loop_init(&loop) == XTC_OK);
@@ -338,6 +340,21 @@ g2_inputs(void)
 	if (svr != NULL)
 		CHECK(xtc_svr_join(svr, -1) == XTC_OK);
 	CHECK(g_init_ran);
+
+	/* 2.1 svr opts (end at mailbox_cap), heap-allocated at exactly that
+	 * size: the 2.2 proc knobs past it read as defaults. */
+	so2 = xalloc(offsetof(xtc_svr_opts_t, mailbox_watermark_fn));
+	so2->size = offsetof(xtc_svr_opts_t, mailbox_watermark_fn);
+	so2->name = "old";
+	so2->mailbox_cap = 8;
+	CHECK(xtc_svr_start(loop, (const xtc_svr_callbacks_t *)(void *)&zcb,
+	          NULL, so2, &svr) == XTC_OK);
+	free(so2);
+	if (svr != NULL)
+		CHECK(xtc_svr_stop(svr) == XTC_OK);
+	CHECK(xtc_loop_run(loop) == XTC_OK);
+	if (svr != NULL)
+		CHECK(xtc_svr_join(svr, -1) == XTC_OK);
 	CHECK(xtc_loop_fini(loop) == XTC_OK);
 
 	/* loop stats, older view */
