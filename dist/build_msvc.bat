@@ -88,16 +88,17 @@ echo BUILD OK: xtc.lib + smoke.exe
 smoke.exe
 
 rem --- 4b. C++ coexistence (test/dist/test_header_cxx.sh on POSIX): each
-rem         installed header compiles alone with cl /TP, and a C++ program
+rem         installed header compiles alone as C++ (cl /Tp), and a C++ program
 rem         that includes all of them links against xtc.lib and runs.
 rem         The header list is the program's own include list, which
 rem         test_header_cxx.sh holds to LIB_HDRS_PUBLIC. ---
-echo [4b/5] cl /TP: installed headers as C++, cxx_coexist.exe
-set CXXFLAGS=/nologo /TP /std:c++17 /EHsc /W3 /WX /MT /D_WIN32 /DWIN32_LEAN_AND_MEAN /D_CRT_SECURE_NO_WARNINGS %INC%
+echo [4b/5] cl /Tp: installed headers as C++, cxx_coexist.exe
+rem  /Tp marks one file C++; /TP would also hand xtc.lib to the C++ parser.
+set CXXFLAGS=/nologo /std:c++17 /EHsc /W3 /WX /MT /D_WIN32 /DWIN32_LEAN_AND_MEAN /D_CRT_SECURE_NO_WARNINGS %INC%
 set CXX_HDR_FAIL=0
 for /f "tokens=2 delims=<>" %%H in ('findstr /b /c:"#include <xtc" "%XTC_SRC%\test\msvc\cxx_coexist.cpp"') do (
   echo #include ^<%%H^> > cxx_one.cpp
-  cl %CXXFLAGS% /c /Fo:cxx_one.obj cxx_one.cpp > cxx_one.log 2>&1
+  cl %CXXFLAGS% /c /Fo:cxx_one.obj /Tpcxx_one.cpp > cxx_one.log 2>&1
   if errorlevel 1 (
     echo   [cxx] %%H does not compile as C++
     set CXX_HDR_FAIL=1
@@ -106,7 +107,7 @@ for /f "tokens=2 delims=<>" %%H in ('findstr /b /c:"#include <xtc" "%XTC_SRC%\te
 )
 if not "!CXX_HDR_FAIL!"=="0" goto :fail
 cl %CXXFLAGS% /Fe:cxx_coexist.exe ^
-   "%XTC_SRC%\test\msvc\cxx_coexist.cpp" ^
+   /Tp"%XTC_SRC%\test\msvc\cxx_coexist.cpp" ^
    xtc.lib ws2_32.lib ntdll.lib dbghelp.lib
 if errorlevel 1 goto :fail
 cxx_coexist.exe
