@@ -117,6 +117,40 @@ region around a two-step update so a kill cannot split it, and
 [`xtc_trace_causal_enable`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_trace.3)
 so a fault dump shows how the worker got to where it crashed.
 
+### Servers and supervisors as children
+
+A child spec names a process body, so any of these can be a child: a
+plain function, a gen_server, or another supervisor. Name
+`xtc_svr_child_main` as the body and an `xtc_svr_child_t` (callbacks and
+state) as its argument, and the child process *is* the server: a crash
+restarts it, a drain reaches its `handle_info`, and there is no server
+handle to join. Name `xtc_sup_child_main` with an `xtc_sup_child_t` and
+the child is a nested supervisor with its own strategy and restart
+budget: the failures it can absorb stay inside it, and when its budget is
+spent it exits with `XTC_E_RESOURCE`, which its parent treats like any
+other crashed child. That is the escalation in the tree above.
+
+`wait_children` makes a supervisor start its children in order, each
+once the one before it is up: a server child is up when its `init` has
+returned, a nested supervisor when its own children are. The start then
+returns the first failure (`init`'s code) instead of `XTC_OK`, so a
+dependent child never starts against a server that did not.
+
+{% include snippet.html file="04_sup_tree.c" region="full" %}
+
+The `kv` server answers by name through the registry the root names its
+children in, and the pool's three crashes per run stay inside the pool
+until its budget is gone; the root restarts the pool once, and when the
+second run spends its budget too, the root's own budget is gone and it
+stops.
+
+{: .not_chosen }
+> **A keeper process per server.** Before 2.2 a supervised gen_server
+> needed a plain child that started the server, linked to it and
+> mirrored its exits, so a restart took two spawns and an extra fiber
+> stack, and a drain never reached the server. With the server as the
+> child there is nothing in between.
+
 {: .not_chosen }
 > **Defensive error handling everywhere.** The alternative to
 > supervision is to make every function check and recover from every

@@ -141,6 +141,23 @@ typedef struct xtc_sup_opts {
 	/* 2.2: the registry for child specs' reg_name.  xtc_app sets its
 	 * own; NULL = no names.  Must outlive the supervisor. */
 	struct xtc_reg *registry;
+	/*
+	 * 2.2: 1 = start the children in order, each once the one before it
+	 * is up, and fail the start on the first that is not: xtc_sup_start
+	 * returns that child's failure (its init's code for a server child,
+	 * the first failure of a nested supervisor's own start, XTC_E_NOTFOUND
+	 * for a child that ended without a code), the supervisor and the
+	 * children it started are gone, and *out_sup is untouched.  A child
+	 * is up when it has started: at once for a plain body; after init for
+	 * xtc_svr_child_main; once its own children are up for
+	 * xtc_sup_child_main.  Legal from a proc (it parks) or a thread while
+	 * another thread runs the loop; else XTC_E_STATE.  The children of a
+	 * nested supervisor are waited for too.  xtc_app_start cannot wait
+	 * (its loop runs later, in xtc_app_run): with wait_children the app's
+	 * supervisor still starts in order and, on a failure, stops, and
+	 * xtc_app_run returns the failure.  0 = start them all at once.
+	 */
+	int wait_children;
 } xtc_sup_opts_t;
 
 #define XTC_SUP_OPTS_DEFAULT { \
@@ -212,5 +229,37 @@ XTC_API int  xtc_sup_alive(const xtc_supervisor_t *sup);
  */
 XTC_API int
 xtc_sup_child_restarts(const xtc_supervisor_t *sup, int index, int *out);
+
+/*
+ * A supervisor as a supervised child (2.2): name xtc_sup_child_main as a
+ * child spec's fn and a const xtc_sup_child_t * as its arg, and the child
+ * proc IS a nested supervisor with its own strategy and restart budget
+ * (opts.max_restarts in opts.period_ns).  A failure it cannot absorb
+ * stays inside it until the budget runs out; then it stops its children
+ * and exits with XTC_E_RESOURCE, which its parent sees as a failed child
+ * (a TRANSIENT or PERMANENT spec restarts the whole subtree).
+ *
+ *   - XTC_APP_SHUTDOWN_MSG (an xtc_app drain) is forwarded to each of its
+ *     children; it stops restarting, and returns once they have all
+ *     ended, so the drain covers the subtree.
+ *   - opts.exec is ignored: a nested supervisor places its children on
+ *     its own loop and never stops the app's executor.  opts.registry is
+ *     not inherited from the parent: set it for reg_name children.
+ *
+ * The xtc_sup_child_t, its opts and its children must outlive the
+ * parent supervisor.
+ *
+ * PUBLIC: void xtc_sup_child_main __P((void *));
+ */
+typedef struct xtc_sup_child {
+	size_t size;                /* sizeof(xtc_sup_child_t) */
+	const xtc_sup_opts_t *opts; /* NULL = XTC_SUP_OPTS_DEFAULT */
+	const xtc_child_spec_t *children;
+	int n_children;
+} xtc_sup_child_t;
+
+#define XTC_SUP_CHILD_INIT { .size = sizeof(xtc_sup_child_t) }
+
+XTC_API void xtc_sup_child_main(void *arg);
 
 #endif /* XTC_ORC_H */

@@ -96,3 +96,7 @@ test_sim_launch         1          1   bug28 LAUNCH_EATMAIL: xtc_launch freed th
 # delivery: "sent 194, received 50", rc XTC_E_DEADLK) and FAILS on its planted
 # build (-DXTC_DST_INJECT_BUG=49).
 test_sim_send_wait      0          1   bug49 SIM_DROP_LATE: a latency-deferred send told XTC_OK was dropped when the mailbox filled in flight; fixed "proc: the simulator's net latency no longer drops a send it accepted"
+# p166/sup (2.2, report 15).  Seed 1 (a crashing worker under a nested
+# supervisor) FAILS on each planted build: bug 60 SUP_WAIT_SKIP, 61
+# SUP_NESTED_CLEAN, 62 SUP_NESTED_NODRAIN.
+test_sim_sup_child      0          1   bug60/61/62: ordered start, nested give-up reaches the parent, drain reaches the subtree; added with "orc: servers and supervisors as supervised children; synchronous start"

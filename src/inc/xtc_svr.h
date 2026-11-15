@@ -84,6 +84,15 @@ typedef struct xtc_svr_opts {
 	void *mailbox_watermark_user;
 	xtc_exec_class_t sched_class; /* NULL = the plain FIFO class */
 	int mailbox_watermark_pct;    /* 0 = off, 1..100 */
+	/*
+	 * 2.2: 1 = xtc_svr_start returns only after init has run, with
+	 * init's code: on failure the server is gone, *out is untouched, and
+	 * no join is needed.  Legal from a proc (it parks) or from a thread
+	 * while another thread runs the server's loop; anywhere else (a
+	 * thread that runs the loop itself, a loop nobody runs yet)
+	 * XTC_E_STATE, since init could never run.  0 = asynchronous.
+	 */
+	int wait_init;
 } xtc_svr_opts_t;
 
 #define XTC_SVR_OPTS_INIT { .size = sizeof(xtc_svr_opts_t) }
@@ -102,10 +111,10 @@ typedef struct xtc_svr_opts {
  * PUBLIC: xtc_svr_call_t *xtc_svr_call_save __P((const xtc_svr_call_t *));
  */
 
-/* Start is asynchronous: xtc_svr_start spawns the server and returns
- * before init runs.  A failed init runs terminate and ends the server
- * with xtc_exit_self(init's code): a monitor sees DOWN kind EXIT with
- * that code (2.2; before, the DOWN was CLEAN). */
+/* Start is asynchronous unless opts->wait_init: xtc_svr_start spawns
+ * the server and returns before init runs.  A failed init runs terminate
+ * and ends the server with xtc_exit_self(init's code): a monitor sees
+ * DOWN kind EXIT with that code (2.2; before, the DOWN was CLEAN). */
 XTC_API int       xtc_svr_start(xtc_loop_t *loop,
                                 const xtc_svr_callbacks_t *cb,
                                 void *state,
@@ -170,6 +179,37 @@ XTC_API int xtc_svr_reply(xtc_svr_call_t *call,
  * Returns XTC_E_INVAL if called outside a server callback.
  */
 XTC_API int xtc_svr_continue(void *cont);
+
+/*
+ * A server as a supervised child (2.2).  Name xtc_svr_child_main as a
+ * child spec's fn and a const xtc_svr_child_t * as its arg: the child
+ * proc IS the server, so a crash restarts it, a drain reaches it, and
+ * there is no xtc_svr_t to join (the proc frees its own state on every
+ * exit).  Each incarnation runs init on the same `state`.
+ *
+ *   - XTC_APP_SHUTDOWN_MSG (an xtc_app drain) is handed to handle_info
+ *     like any other message, so the server can finish and return
+ *     XTC_SVR_STOP; a server with no handle_info stops at once.
+ *   - init's failure ends the incarnation with xtc_exit_self(init's code),
+ *     a failure a TRANSIENT spec restarts.  A supervisor started with
+ *     wait_children (xtc_orc.h) waits for init and fails its start with
+ *     that code.
+ *   - Clients find the server by the spec's reg_name: xtc_svr_call_name,
+ *     or xtc_reg_whereis_wait across a restart.
+ *
+ * The xtc_svr_child_t and its callbacks must outlive the supervisor.
+ *
+ * PUBLIC: void      xtc_svr_child_main __P((void *));
+ */
+typedef struct xtc_svr_child {
+	size_t size; /* sizeof(xtc_svr_child_t) */
+	const xtc_svr_callbacks_t *cb;
+	void *state;
+} xtc_svr_child_t;
+
+#define XTC_SVR_CHILD_INIT { .size = sizeof(xtc_svr_child_t) }
+
+XTC_API void xtc_svr_child_main(void *arg);
 
 /*
  * Deferred reply (gen_server:reply/2).  The xtc_svr_call_t passed to

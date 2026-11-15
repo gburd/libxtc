@@ -19,6 +19,10 @@
 #include "proc_int.h"      /* __xtc_proc_loop_contains: owner-qualified presence */
 #include "xtc_probes.h"
 #include "xtc_dst_inject.h"
+#include "xtc_svr.h"  /* xtc_svr_child_main: a child that acks its start */
+#include "xtc_app.h"  /* XTC_APP_SHUTDOWN_MSG: a nested supervisor's drain */
+#include "loop_int.h" /* __xtc_loop_may_wait: wait_children */
+#include "xtc_sim.h"  /* __xtc_sim_active: the ack-vs-DOWN window */
 #if XTC_DST_BUG(XTC_DST_BUG_SUP_LOCKPARK)
 #include "preempt_int.h"
 #include <pthread.h>
@@ -41,6 +45,11 @@ struct child {
 	 * the child is respawned, so it is matched by this pid. */
 	xtc_pid_t        killed_pid;
 	int              killed_pending;
+	/* A wait_children start took this child's DOWN before its start
+	 * acknowledgement (the simulator's latency can reorder the two):
+	 * the child had started, and the main loop handles the DOWN. */
+	xtc_down_info_t early_down;
+	int early_pending;
 };
 
 /*
@@ -87,6 +96,19 @@ struct xtc_supervisor {
 	 * before `stopped` is signalled (the owner is still alive). */
 	void (*exit_fn)(void *);
 	void *exit_arg;
+	/* wait_children (2.2): the start's outcome, signalled once the
+	 * children are up (start_rc XTC_OK) or one failed (its code).  NULL
+	 * when nobody waits. */
+	xtc_notify_t *started;
+	int start_rc;
+	int start_told; /* started has been signalled */
+	/* Two parties release the handle: the supervisor's exit, and its
+	 * owner (xtc_sup_join, or a waiting start that failed or whose
+	 * caller was killed).  Each adds one as its last access; the second
+	 * frees. */
+	int release;
+	int nested;   /* xtc_sup_child_main: a supervisor that is a child */
+	int draining; /* nested: a drain arrived; restart nothing */
 #if XTC_DST_BUG(XTC_DST_BUG_SUP_LOCKPARK)
 	pthread_mutex_t        plant_lock;     /* 2.1.1's sup->lock shape */
 #endif
@@ -95,6 +117,10 @@ struct xtc_supervisor {
 int __xtc_sup_start_ex(xtc_loop_t *, const xtc_sup_opts_t *,
     const xtc_child_spec_t *, int, void (*)(void *), void *,
     xtc_supervisor_t **);
+static int __sup_build(xtc_loop_t *, const xtc_sup_opts_t *,
+    const xtc_child_spec_t *, int, struct xtc_supervisor **);
+/* svr.c: the synchronous-start wait (wait_children). */
+int __xtc_orc_start_wait(xtc_notify_t *, void (*)(void *), void *);
 
 static xtc_pid_t
 __sup_pid_load(struct xtc_supervisor *sup)
@@ -248,8 +274,25 @@ __child_unname(struct xtc_supervisor *sup, const struct child *c, xtc_pid_t pid)
 #endif
 }
 
+/* app.c: the app's wrapper around a static child's fn, and the spec
+ * fn it wraps (NULL when fn is not the wrapper). */
+xtc_proc_fn __xtc_app_kid_fn(xtc_proc_fn fn, void *arg);
+
+/*
+ * Whether a child acknowledges its start (it is a server or supervisor
+ * child, xtc_svr_child_main / xtc_sup_child_main, possibly under the
+ * app's wrapper), so a wait_children start waits for that.  Any other
+ * body is up once spawned.
+ */
 static int
-__spawn_child(struct xtc_supervisor *sup, struct child *c)
+__child_acks(const struct child *c)
+{
+	xtc_proc_fn fn = __xtc_app_kid_fn(c->spec.fn, c->spec.arg);
+	return fn == xtc_svr_child_main || fn == xtc_sup_child_main;
+}
+
+static int
+__spawn_child_ex(struct xtc_supervisor *sup, struct child *c, int ack)
 {
 	xtc_proc_opts_t pop;
 	xtc_loop_t *target = __child_loop(sup, c);
@@ -295,8 +338,10 @@ __spawn_child(struct xtc_supervisor *sup, struct child *c)
 	 * proc), including the restart paths and __handle_add_child, so that
 	 * holds at all call sites.
 	 */
-	rc = xtc_proc_spawn_monitor(target, c->spec.fn, c->spec.arg, &pop,
-	    &c->pid, &c->monitor_ref);
+	rc = ack ? __xtc_proc_spawn_monitor_ack(target, c->spec.fn, c->spec.arg,
+	               &pop, &c->pid, &c->monitor_ref) :
+	           xtc_proc_spawn_monitor(target, c->spec.fn, c->spec.arg, &pop,
+	               &c->pid, &c->monitor_ref);
 	if (rc != XTC_OK) return rc;
 	__child_alive(sup, c, 1);
 	/* Name the new incarnation (replacing any earlier one's entry, so
@@ -311,6 +356,12 @@ __spawn_child(struct xtc_supervisor *sup, struct child *c)
 	        XTC_OK)
 		(void)__xtc_exit_pid_on(target, c->pid, XTC_E_NOMEM);
 	return XTC_OK;
+}
+
+static int
+__spawn_child(struct xtc_supervisor *sup, struct child *c)
+{
+	return __spawn_child_ex(sup, c, 0);
 }
 
 /* Handle an ADD_CHILD control message inside the supervisor proc, so
@@ -728,6 +779,48 @@ __sup_stop_children(struct xtc_supervisor *sup)
 	__drain_killed_downs(sup);
 }
 
+/* Signal a waiting xtc_sup_start with rc, once. */
+static void
+__sup_tell_start(struct xtc_supervisor *sup, int rc)
+{
+	if (sup->started == NULL || sup->start_told)
+		return;
+	sup->start_told = 1;
+	sup->start_rc = rc;
+	(void)xtc_notify_signal(sup->started);
+}
+
+/* Free a supervisor handle (its exit has completed, nobody uses it). */
+static void
+__sup_free(struct xtc_supervisor *sup)
+{
+	xtc_notify_destroy(sup->stopped);
+	if (sup->started != NULL)
+		xtc_notify_destroy(sup->started);
+	__os_free(sup->child_restarts);
+	__os_free(sup->children);
+	__os_free(sup->recent_restarts);
+	__os_free(sup);
+}
+
+/* One party (the exit, or the owner) is done with sup; the second frees. */
+static void
+__sup_release(struct xtc_supervisor *sup)
+{
+	if (xtc_atomic_fetch_add_i32(&sup->release, 1, xtc_mo_acq_rel) == 1)
+		__sup_free(sup);
+}
+
+/* A supervisor nobody will join (a wait_children start that failed or
+ * whose caller was killed): stop it; it goes when it has exited. */
+static void
+__sup_orphan(void *arg)
+{
+	struct xtc_supervisor *sup = arg;
+	(void)xtc_sup_stop(sup);
+	__sup_release(sup);
+}
+
 static void
 __sup_exited(void *arg)
 {
@@ -751,10 +844,13 @@ __sup_exited(void *arg)
 	 */
 	if (sup->exit_fn != NULL)
 		sup->exit_fn(sup->exit_arg);
+	/* Killed while starting: a waiting xtc_sup_start fails. */
+	__sup_tell_start(sup, XTC_E_NOTFOUND);
 	xtc_atomic_store_i32(&sup->alive, 0, xtc_mo_release);
-	/* Read before the signal: a joiner may free sup once it is sent. */
+	/* Read before the release: the owner may free sup after it. */
 	exec = sup->opts.exec;
 	(void)xtc_notify_signal(sup->stopped);
+	__sup_release(sup);
 	/* Root of a multi-loop app: stopping the supervisor stops the whole
 	 * application -- release the executor so xtc_exec_run (driving all
 	 * loops) returns.  This fires on an intentional xtc_sup_stop, on a
@@ -763,11 +859,209 @@ __sup_exited(void *arg)
 		(void)xtc_exec_stop(exec);
 }
 
+/*
+ * A child's DOWN, d, in the main loop: mark it dead, unname it, report
+ * it, then restart it as its policy and the strategy say.  Returns 0 to
+ * keep supervising, 1 to stop (a stop was requested, or the restart
+ * budget is spent).  Supervisor fiber.
+ */
+static int
+__child_down(struct xtc_supervisor *sup, const xtc_down_info_t *d)
+{
+	int64_t now;
+	int idx = __find_child_by_pid(sup, d->pid);
+
+	if (idx < 0) {
+		/* A child the supervisor killed, whose DOWN came after the
+		 * drain: report it (once); there is nothing to decide, it was
+		 * already restarted or is stopping. */
+#if !XTC_DST_BUG(XTC_DST_BUG_SUP_HOOK_SIBLING)
+		if ((idx = __find_killed_child(sup, d->pid)) >= 0) {
+			sup->children[idx].killed_pending = 0;
+			__report_down(sup, idx, d);
+		}
+#endif
+		return 0;
+	}
+	__child_alive(sup, &sup->children[idx], 0);
+	__child_unname(sup, &sup->children[idx], d->pid);
+	/* Before the stop check and the restart decision, so a crash during
+	 * a stop is reported too. */
+	__report_down(sup, idx, d);
+
+	if (xtc_atomic_load_i32(&sup->stop_requested, xtc_mo_acquire))
+		return 1;
+	/* A draining nested supervisor restarts nothing, and is done when
+	 * the last child has ended. */
+	if (sup->draining)
+		return xtc_atomic_load_i32(&sup->n_alive, xtc_mo_relaxed) == 0;
+
+	if (!__should_restart(sup, &sup->children[idx], d->reason)) {
+		/* A dynamic child that is not coming back (TEMPORARY, or
+		 * TRANSIENT after a normal exit) leaves the table, as in OTP.
+		 * Before 1.55.1 its slot stayed forever: 20000 short-lived pool
+		 * workers left n_children at 20000 and made every add and DOWN
+		 * scan them.  Order-preserving removal, so rest_for_one
+		 * ordering is unchanged. */
+		if (sup->children[idx].dynamic) {
+			memmove(&sup->children[idx], &sup->children[idx + 1],
+			    (size_t)(sup->n_children - idx - 1) *
+			        sizeof(struct child));
+			sup->n_children--;
+		}
+		return 0;
+	}
+
+	XTC_PROBE_SUP_RESTART((uintptr_t)sup, XTC_PROBE_PID_ID(d->pid),
+	    XTC_PROBE_PID_GEN(d->pid), d->reason);
+	(void)__os_clock_mono(&now);
+	__record_restart(sup, &sup->children[idx], now);
+	if (__intensity_exceeded(sup, now)) {
+		/* A nested supervisor's give-up is a failure its parent
+		 * restarts (the root's ends the app).  Planted bug 61
+		 * (SUP_NESTED_CLEAN) exits cleanly instead. */
+		if (sup->nested && !XTC_DST_BUG(XTC_DST_BUG_SUP_NESTED_CLEAN))
+			sup->start_rc = XTC_E_RESOURCE;
+		return 1;
+	}
+
+	switch (sup->opts.strategy) {
+	case XTC_SUP_ONE_FOR_ONE:
+		(void)__spawn_child(sup, &sup->children[idx]);
+		break;
+	case XTC_SUP_ONE_FOR_ALL:
+		__do_one_for_all(sup, idx);
+		break;
+	case XTC_SUP_REST_FOR_ONE:
+		__do_rest_for_one(sup, idx);
+		break;
+	case XTC_SUP_SIMPLE_OFO:
+		/* simple_one_for_one is dynamic-only: children spawned via
+		 * xtc_sup_add_child are automatically one-for-one'd here.
+		 * No-op for static children. */
+		(void)__spawn_child(sup, &sup->children[idx]);
+		break;
+	}
+	return 0;
+}
+
+/* The start acknowledgement ('K', the monitor ref) of `u` (struct
+ * child *). */
+static int
+__match_ack(const void *data, size_t size, void *u)
+{
+	const struct child *c = u;
+	uint64_t ref;
+	if (size != 1 + sizeof ref || *(const uint8_t *)data != 'K')
+		return 0;
+	memcpy(&ref, (const uint8_t *)data + 1, sizeof ref);
+	return ref == c->monitor_ref;
+}
+
+/* A start acknowledgement ('K', the monitor ref) or a DOWN of the child
+ * being started, `u` (struct child *), or the stop kick of xtc_sup_stop. */
+static int
+__match_start(const void *data, size_t size, void *u)
+{
+	const struct child *c = u;
+	xtc_down_info_t info = XTC_DOWN_INFO_INIT;
+
+	if (size == 1 && *(const uint8_t *)data == 'X')
+		return 1;
+	if (__match_ack(data, size, u))
+		return 1;
+	return size >= 1 && *(const uint8_t *)data == 'D' &&
+	    xtc_down_decode_ex(data, size, &info) == XTC_OK &&
+	    xtc_pid_eq(info.pid, c->pid);
+}
+
+/*
+ * Start the static children.  Without wait_children all at once.  With
+ * it, in order, each once the one before it is up: a child that
+ * acknowledges its start (__child_acks) is waited for, and its DOWN
+ * first fails the start with its exit code, or XTC_E_NOTFOUND when it
+ * carries none.  An xtc_sup_stop ends the start (XTC_OK: the main loop
+ * then stops).  Planted bug 60 (SUP_WAIT_SKIP) never waits.  Returns
+ * XTC_OK or the failure; on a failure the caller stops what started.
+ */
+static int
+__start_children(struct xtc_supervisor *sup)
+{
+	xtc_down_info_t d;
+	void *msg;
+	size_t sz;
+	int i, ack, rc;
+
+	for (i = 0; i < sup->n_children; i++) {
+		struct child *c = &sup->children[i];
+		ack = sup->opts.wait_children && __child_acks(c) &&
+		    !XTC_DST_BUG(XTC_DST_BUG_SUP_WAIT_SKIP);
+		if ((rc = __spawn_child_ex(sup, c, ack)) != XTC_OK)
+			return rc;
+		while (ack) {
+			if ((rc = xtc_recv_match(__match_start, c, &msg, &sz,
+			         -1)) != XTC_OK)
+				return rc;
+			if (*(const uint8_t *)msg == 'X') {
+				__os_free(msg); /* the stop kick */
+				if (xtc_atomic_load_i32(&sup->stop_requested,
+				        xtc_mo_acquire))
+					return XTC_OK;
+				continue;
+			}
+			if (*(const uint8_t *)msg != 'K')
+				break; /* the child's DOWN */
+			__os_free(msg);
+			ack = 0;
+		}
+		if (!ack)
+			continue;
+		d = (xtc_down_info_t)XTC_DOWN_INFO_INIT;
+		(void)xtc_down_decode_ex(msg, sz, &d);
+		__os_free(msg);
+		/* The child acks before it can exit, and outside the simulator
+		 * both reach us in that order; the simulator's latency can
+		 * reorder them, so look for the ack a little longer there. */
+		if (__xtc_sim_active() &&
+		    xtc_recv_match(__match_ack, c, &msg, &sz,
+		        25LL * 1000 * 1000) == XTC_OK) {
+			__os_free(msg);
+			c->early_down = d;
+			c->early_pending = 1;
+			continue;
+		}
+		__child_alive(sup, c, 0);
+		__child_unname(sup, c, d.pid);
+		__report_down(sup, i, &d);
+		return d.kind == XTC_DOWN_KIND_EXIT && d.exit_code != 0 ?
+		    d.exit_code :
+		    XTC_E_NOTFOUND;
+	}
+	return XTC_OK;
+}
+
+/* A nested supervisor's drain: pass XTC_APP_SHUTDOWN_MSG to every live
+ * child, and restart nothing from now on.  Returns 1 when no child is
+ * left to wait for. */
+static int
+__sup_drain(struct xtc_supervisor *sup)
+{
+	int i;
+	sup->draining = 1;
+	for (i = 0; i < sup->n_children; i++)
+		if (sup->children[i].alive)
+			(void)__xtc_send_on(__child_loop(sup,
+			                        &sup->children[i]),
+			    sup->children[i].pid, XTC_APP_SHUTDOWN_MSG,
+			    sizeof XTC_APP_SHUTDOWN_MSG);
+	return xtc_atomic_load_i32(&sup->n_alive, xtc_mo_relaxed) == 0;
+}
+
 static void
 __sup_entry(void *arg)
 {
 	struct xtc_supervisor *sup = arg;
-	int i, hooked;
+	int hooked, rc, i;
 
 	xtc_atomic_pid_store(&sup->sup_pid, xtc_self());
 #if XTC_DST_BUG(XTC_DST_BUG_SUP_NOHOOK)
@@ -776,16 +1070,28 @@ __sup_entry(void *arg)
 	hooked = (xtc_proc_at_exit(__sup_exited, sup) == XTC_OK);
 #endif
 
+	/* The start's outcome goes to a waiting xtc_sup_start (`started`)
+	 * or, for a nested supervisor, to its parent (the ack; a failure
+	 * is our exit code, from __sup_exited). */
+	rc = __start_children(sup);
+	__sup_tell_start(sup, rc);
+	if (rc != XTC_OK) {
+		sup->start_rc = rc;
+		goto out; /* the children already spawned are killed */
+	}
+	__xtc_proc_start_ack();
+	/* DOWNs the start took ahead of an acknowledgement, in order. */
 	for (i = 0; i < sup->n_children; i++)
-		if (__spawn_child(sup, &sup->children[i]) != XTC_OK)
-			goto out; /* the children already spawned are killed */
+		if (sup->children[i].early_pending) {
+			sup->children[i].early_pending = 0;
+			if (__child_down(sup, &sup->children[i].early_down))
+				goto out;
+		}
 
 	while (!xtc_atomic_load_i32(&sup->stop_requested, xtc_mo_acquire)) {
-		void *msg; size_t sz;
-		int rc;
+		void *msg;
+		size_t sz;
 		xtc_down_info_t d;
-		int idx;
-		int64_t now;
 		uint8_t kind;
 
 		/* Receive ANY message (not a selective match): DOWN signals
@@ -809,6 +1115,15 @@ __sup_entry(void *arg)
 			}
 			continue;
 		}
+		/* Planted bug 62 (SUP_NESTED_NODRAIN) drops the drain. */
+		if (sup->nested && sz == sizeof XTC_APP_SHUTDOWN_MSG &&
+		    memcmp(msg, XTC_APP_SHUTDOWN_MSG, sz) == 0 &&
+		    !XTC_DST_BUG(XTC_DST_BUG_SUP_NESTED_NODRAIN)) {
+			__os_free(msg);
+			if (__sup_drain(sup))
+				break;
+			continue;
+		}
 		if (kind != 'D' || sz < sizeof(struct down_signal)) {
 			__os_free(msg);
 			continue;
@@ -821,73 +1136,15 @@ __sup_entry(void *arg)
 			continue;
 		}
 		__os_free(msg);
-
-		idx = __find_child_by_pid(sup, d.pid);
-		if (idx < 0) {
-			/* A child the supervisor killed, whose DOWN came after
-			 * the drain: report it (once); there is nothing to
-			 * decide, it was already restarted or is stopping. */
-#if !XTC_DST_BUG(XTC_DST_BUG_SUP_HOOK_SIBLING)
-			if ((idx = __find_killed_child(sup, d.pid)) >= 0) {
-				sup->children[idx].killed_pending = 0;
-				__report_down(sup, idx, &d);
-			}
-#endif
-			continue;
-		}
-		__child_alive(sup, &sup->children[idx], 0);
-		__child_unname(sup, &sup->children[idx], d.pid);
-		/* Before the stop check and the restart decision, so a crash
-		 * during a stop is reported too. */
-		__report_down(sup, idx, &d);
-
-		if (xtc_atomic_load_i32(&sup->stop_requested, xtc_mo_acquire))
+		if (__child_down(sup, &d))
 			break;
-
-		if (!__should_restart(sup, &sup->children[idx], d.reason)) {
-			/* A dynamic child that is not coming back (TEMPORARY, or
-			 * TRANSIENT after a normal exit) leaves the table, as in
-			 * OTP.  Before 1.55.1 its slot stayed forever: 20000
-			 * short-lived pool workers left n_children at 20000 and
-			 * made every add and DOWN scan them.  Order-preserving
-			 * removal, so rest_for_one ordering is unchanged. */
-			if (sup->children[idx].dynamic) {
-				memmove(&sup->children[idx],
-				    &sup->children[idx + 1],
-				    (size_t)(sup->n_children - idx - 1) *
-				    sizeof(struct child));
-				sup->n_children--;
-			}
-			continue;
-		}
-
-		XTC_PROBE_SUP_RESTART((uintptr_t)sup, XTC_PROBE_PID_ID(d.pid),
-		    XTC_PROBE_PID_GEN(d.pid), d.reason);
-		(void)__os_clock_mono(&now);
-		__record_restart(sup, &sup->children[idx], now);
-		if (__intensity_exceeded(sup, now))
-			break;
-
-		switch (sup->opts.strategy) {
-		case XTC_SUP_ONE_FOR_ONE:
-			(void)__spawn_child(sup, &sup->children[idx]);
-			break;
-		case XTC_SUP_ONE_FOR_ALL:
-			__do_one_for_all(sup, idx);
-			break;
-		case XTC_SUP_REST_FOR_ONE:
-			__do_rest_for_one(sup, idx);
-			break;
-		case XTC_SUP_SIMPLE_OFO:
-			/* simple_one_for_one is dynamic-only: children
-			 * spawned via xtc_sup_add_child are automatically
-			 * one-for-one'd here.  No-op for static children. */
-			(void)__spawn_child(sup, &sup->children[idx]);
-			break;
-		}
 	}
 
 out:
+	/* A nested supervisor that failed to start or gave up exits with
+	 * the failure, which its parent sees.  Read now: sup may be freed by
+	 * the exit below. */
+	rc = sup->nested ? sup->start_rc : XTC_OK;
 	/* Stop the children from the body, while this proc's mailbox still
 	 * takes their DOWNs (it closes when the proc starts exiting), so
 	 * on_child_down sees each of them.  The at-exit hook then finds none
@@ -895,6 +1152,8 @@ out:
 	__sup_stop_children(sup);
 	if (!hooked)
 		__sup_exited(sup);
+	if (rc != XTC_OK)
+		(void)xtc_exit_self(rc);
 }
 
 /* A caller's child spec, read up to its .size (unset fields default to 0). */
@@ -921,24 +1180,29 @@ xtc_sup_start(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
  *
  * PUBLIC: int __xtc_sup_start_ex __P((xtc_loop_t *, const xtc_sup_opts_t *, const xtc_child_spec_t *, int, void (*)(void *), void *, xtc_supervisor_t **));
  */
-int
-__xtc_sup_start_ex(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
-    const xtc_child_spec_t *children, int n_children, void (*exit_fn)(void *),
-    void *exit_arg, xtc_supervisor_t **out_sup)
+/*
+ * Validate the options and child array and build a supervisor handle for
+ * `loop` (not yet running).  The options are the caller's, already read
+ * to their .size when `o` comes from __xtc_sized_in.  On failure nothing
+ * is left allocated.
+ */
+static int
+__sup_build(xtc_loop_t *loop, const xtc_sup_opts_t *o,
+    const xtc_child_spec_t *children, int n_children,
+    struct xtc_supervisor **out)
 {
-	xtc_supervisor_t *sup;
-	xtc_sup_opts_t   defaults = XTC_SUP_OPTS_DEFAULT, o = defaults;
-	int rc;
-	xtc_pid_t pid;
-	int i;
+	struct xtc_supervisor *sup;
 	size_t stride = 0;
+	int i, rc;
 
-	if (loop == NULL || out_sup == NULL || n_children < 0 ||
+	if (loop == NULL || n_children < 0 ||
 	    (n_children > 0 && children == NULL))
 		return XTC_E_INVAL;
-	if (opts != NULL &&
-	    (rc = __xtc_sized_in(&o, &defaults, sizeof o, opts, 0)) != XTC_OK)
-		return rc;
+	if (o->strategy != XTC_SUP_ONE_FOR_ONE &&
+	    o->strategy != XTC_SUP_ONE_FOR_ALL &&
+	    o->strategy != XTC_SUP_REST_FOR_ONE &&
+	    o->strategy != XTC_SUP_SIMPLE_OFO)
+		return XTC_E_NOSYS;
 	/* The array strides at its elements' own size, which all agree. */
 	if (n_children > 0) {
 		stride = children[0].size;
@@ -954,16 +1218,7 @@ __xtc_sup_start_ex(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
 	if ((rc = __os_calloc(1, sizeof *sup, (void **)&sup)) != XTC_OK)
 		return rc;
 	sup->loop = loop;
-	sup->opts = o;
-	sup->exit_fn = exit_fn;
-	sup->exit_arg = exit_arg;
-	if (sup->opts.strategy != XTC_SUP_ONE_FOR_ONE &&
-	    sup->opts.strategy != XTC_SUP_ONE_FOR_ALL &&
-	    sup->opts.strategy != XTC_SUP_REST_FOR_ONE &&
-	    sup->opts.strategy != XTC_SUP_SIMPLE_OFO) {
-		__os_free(sup);
-		return XTC_E_NOSYS;
-	}
+	sup->opts = *o;
 	xtc_atomic_store_i32(&sup->alive, 1, xtc_mo_relaxed);
 #if XTC_DST_BUG(XTC_DST_BUG_SUP_LOCKPARK)
 	(void)pthread_mutex_init(&sup->plant_lock, NULL);
@@ -991,6 +1246,49 @@ __xtc_sup_start_ex(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
 	}
 
 	if ((rc = xtc_notify_create(&sup->stopped)) != XTC_OK) goto fail2;
+	*out = sup;
+	return XTC_OK;
+
+fail2:
+	__os_free(sup->child_restarts);
+	__os_free(sup->children);
+fail1:
+	__os_free(sup->recent_restarts);
+fail0:
+	__os_free(sup);
+	return rc;
+}
+
+int
+__xtc_sup_start_ex(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
+    const xtc_child_spec_t *children, int n_children, void (*exit_fn)(void *),
+    void *exit_arg, xtc_supervisor_t **out_sup)
+{
+	xtc_supervisor_t *sup;
+	xtc_sup_opts_t defaults = XTC_SUP_OPTS_DEFAULT, o = defaults;
+	int rc, wait;
+	xtc_pid_t pid;
+
+	if (out_sup == NULL)
+		return XTC_E_INVAL;
+	if (opts != NULL &&
+	    (rc = __xtc_sized_in(&o, &defaults, sizeof o, opts, 0)) != XTC_OK)
+		return rc;
+	/* A waiting start needs the loop to run while it waits.  The app
+	 * (exit_fn set) starts before its loop runs, so it never waits: its
+	 * supervisor still starts in order and stops on a failure, which
+	 * xtc_app_run returns. */
+	wait = o.wait_children && exit_fn == NULL;
+	if (wait && !__xtc_loop_may_wait(loop))
+		return XTC_E_STATE;
+	if ((rc = __sup_build(loop, &o, children, n_children, &sup)) != XTC_OK)
+		return rc;
+	sup->exit_fn = exit_fn;
+	sup->exit_arg = exit_arg;
+	if (wait && (rc = xtc_notify_create(&sup->started)) != XTC_OK) {
+		__sup_free(sup);
+		return rc;
+	}
 
 	/*
 	 * Plain spawn, deliberately: nothing monitors the supervisor proc from
@@ -1001,19 +1299,25 @@ __xtc_sup_start_ex(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
 	 * from outside any proc (see the tests, which call it from the test
 	 * function).  Callers wanting the supervisor's exit use xtc_sup_join.
 	 */
-	if ((rc = xtc_proc_spawn(loop, __sup_entry, sup, NULL, &pid)) != XTC_OK)
-		goto fail3;
+	if ((rc = xtc_proc_spawn(loop, __sup_entry, sup, NULL, &pid)) !=
+	    XTC_OK) {
+		__sup_free(sup);
+		return rc;
+	}
 	xtc_atomic_pid_store(&sup->sup_pid, pid);
+	if (wait) {
+		/* The start's outcome.  A failed supervisor is stopping on its
+		 * own: orphan it, nobody joins. */
+		if ((rc = __xtc_orc_start_wait(sup->started, __sup_orphan,
+		         sup)) == XTC_OK)
+			rc = sup->start_rc;
+		if (rc != XTC_OK) {
+			__sup_orphan(sup);
+			return rc;
+		}
+	}
 	*out_sup = sup;
 	return XTC_OK;
-
-fail3:	xtc_notify_destroy(sup->stopped);
-fail2:
-	__os_free(sup->child_restarts);
-	__os_free(sup->children);
-fail1:	__os_free(sup->recent_restarts);
-fail0:	__os_free(sup);
-	return rc;
 }
 
 /*
@@ -1171,12 +1475,7 @@ xtc_sup_join(xtc_supervisor_t *sup, int64_t timeout_ns)
 	if (sup == NULL) return XTC_E_INVAL;
 	if ((rc = xtc_notify_wait(sup->stopped, timeout_ns)) != XTC_OK)
 		return (rc == XTC_E_AGAIN) ? XTC_E_AGAIN : rc;   /* still running */
-
-	xtc_notify_destroy(sup->stopped);
-	__os_free(sup->child_restarts);
-	__os_free(sup->children);
-	__os_free(sup->recent_restarts);
-	__os_free(sup);
+	__sup_release(sup);
 	return XTC_OK;
 }
 
@@ -1206,6 +1505,48 @@ xtc_sup_child_restarts(const xtc_supervisor_t *sup, int index, int *out)
 		return XTC_E_NOTFOUND;
 	*out = xtc_atomic_load_i32(&sup->child_restarts[index], xtc_mo_relaxed);
 	return XTC_OK;
+}
+
+/* PUBLIC: int __xtc_sup_start_rc __P((const xtc_supervisor_t *)); */
+/* The root supervisor's start failure (wait_children), for xtc_app_run:
+ * XTC_OK while none.  Read after the supervisor has exited. */
+int
+__xtc_sup_start_rc(const xtc_supervisor_t *sup)
+{
+	return sup != NULL && sup->opts.wait_children ? sup->start_rc : XTC_OK;
+}
+
+/* PUBLIC: void xtc_sup_child_main __P((void *)); */
+void
+xtc_sup_child_main(void *arg)
+{
+	xtc_sup_child_t sc = XTC_SUP_CHILD_INIT;
+	xtc_sup_opts_t defaults = XTC_SUP_OPTS_DEFAULT, o = defaults;
+	struct xtc_supervisor *sup = NULL;
+	int rc;
+
+	/* A bad arg ends the child with the error, which the parent sees. */
+	rc = arg == NULL ? XTC_E_INVAL :
+	                   __xtc_sized_in(&sc, NULL, sizeof sc, arg, 0);
+	if (rc == XTC_OK && sc.opts != NULL)
+		rc = __xtc_sized_in(&o, &defaults, sizeof o, sc.opts, 0);
+	if (rc == XTC_OK) {
+		o.exec = NULL; /* never the app's executor */
+		/* Its parent waiting for it means it waits for its own. */
+		if (__xtc_proc_start_ack_wanted())
+			o.wait_children = 1;
+		rc = __sup_build(__xtc_proc_self_loop(NULL), &o, sc.children,
+		    sc.n_children, &sup);
+	}
+	if (rc != XTC_OK) {
+		(void)xtc_exit_self(rc);
+		return;
+	}
+	sup->nested = 1;
+	/* Nobody joins a nested supervisor: its exit is its own release
+	 * and this body's. */
+	sup->release = 1;
+	__sup_entry(sup);
 }
 
 int xtc_sup_alive(const xtc_supervisor_t *sup) {

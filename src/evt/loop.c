@@ -1452,6 +1452,7 @@ xtc_loop_run(xtc_loop_t *loop)
 	loop->owner_tid = pthread_self();
 	loop->owner_set = 1;
 #endif
+	xtc_atomic_store_i32(&loop->running, 1, xtc_mo_release);
 
 	while (!xtc_atomic_load_i32(&loop->stop_requested, xtc_mo_relaxed)) {
 		/* The timer heap is consulted only when no task is alive (its
@@ -1461,17 +1462,29 @@ xtc_loop_run(xtc_loop_t *loop)
 		    __xtc_timer_heap_next_deadline(loop) < 0)
 			break;
 		if ((rc = __xtc_loop_step(loop)) != XTC_OK) {
+			xtc_atomic_store_i32(&loop->running, 0, xtc_mo_release);
 			__xtc_io_owner_leave(loop->io);
 			__xtc_current_loop = saved;
 			return rc;
 		}
 	}
 
+	xtc_atomic_store_i32(&loop->running, 0, xtc_mo_release);
 	xtc_atomic_store_i32(&loop->stop_requested, 0, xtc_mo_relaxed);
 	/* Hand the io back (see the matching call in the exec worker). */
 	__xtc_io_owner_leave(loop->io);
 	__xtc_current_loop = saved;
 	return XTC_OK;
+}
+
+/* PUBLIC: int __xtc_loop_may_wait __P((xtc_loop_t *)); */
+int
+__xtc_loop_may_wait(xtc_loop_t *loop)
+{
+	if (__xtc_current_task() != NULL)
+		return 1;
+	return loop != NULL && __xtc_current_loop != loop &&
+	    xtc_atomic_load_i32(&loop->running, xtc_mo_acquire);
 }
 
 /*

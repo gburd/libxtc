@@ -124,6 +124,14 @@ typedef struct xtc_fsm_opts {
 	size_t      size;         /* sizeof(xtc_fsm_opts_t): XTC_FSM_OPTS_INIT */
 	const char *name;         /* optional, for logs */
 	size_t      mailbox_cap;  /* 0 = default */
+	/*
+	 * 2.2: 1 = xtc_fsm_start returns only after the initial enter() has
+	 * run, with its code: on failure the machine is gone, *out is
+	 * untouched, and no join is needed.  Legal from a proc or from a
+	 * thread while another thread runs the loop; else XTC_E_STATE.  As
+	 * xtc_svr_opts_t.wait_init.
+	 */
+	int wait_init;
 } xtc_fsm_opts_t;
 
 #define XTC_FSM_OPTS_INIT { .size = sizeof(xtc_fsm_opts_t) }
@@ -142,8 +150,9 @@ typedef struct xtc_fsm_opts {
  * Start a state machine on `loop`.  It runs as its own xtc_proc,
  * beginning in `initial_state` (for which enter() is called before the
  * first event).  The returned handle lets a caller query/stop/join it
- * from outside.  Start is asynchronous: it returns before that first
- * enter() runs.  If it fails, terminate() runs and the proc ends with
+ * from outside.  Start is asynchronous unless opts->wait_init: it
+ * returns before that first enter() runs.  If it fails, terminate() runs
+ * and the proc ends with
  * xtc_exit_self(enter's code): a monitor sees DOWN kind EXIT with that
  * code (2.2; before, the DOWN was CLEAN).
  */

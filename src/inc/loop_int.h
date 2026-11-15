@@ -485,6 +485,12 @@ struct xtc_loop {
 	 * only has to be seen eventually and its store must not tear. */
 	int stop_requested;
 
+	/* A thread is running this loop now (xtc_loop_run, an executor
+	 * worker, or the simulator's xtc_sim_exec_run), so another thread
+	 * may block waiting for a fiber on it.  Atomic; written by that
+	 * thread, read by any (__xtc_loop_may_wait). */
+	int running;
+
 	/* Cross-thread inbox: wakers and remote spawns deposit here;
 	 * the owner drains in __xtc_loop_drain_inbox. */
 	struct xtc_inbox inbox;
@@ -684,6 +690,12 @@ int  __xtc_inbox_drain(xtc_loop_t *loop);  /* owner-only; drains into local queu
  * else 0 (block, then call end). */
 int  __xtc_inbox_sleep_begin(xtc_loop_t *loop);
 void __xtc_inbox_sleep_end(xtc_loop_t *loop);
+
+/* Whether the caller may wait for a fiber on `loop` (a synchronous
+ * start): it is itself a fiber (it parks, and the loop runs on), or the
+ * loop is running on another thread.  0 on a plain thread whose loop
+ * nobody runs, or that runs the loop itself between steps. */
+int __xtc_loop_may_wait(xtc_loop_t *loop);
 
 /* Per-thread cursor: which loop the calling thread is running.
  * NULL on threads that aren't loop owners. */

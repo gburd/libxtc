@@ -110,6 +110,9 @@ write_cases() {
 		"47;test_sim_sup_name;0;1;the registry named a dead incarnation" \
 		"48;test_sim_send_wait;0;1;a sender waited with room in the mailbox" \
 		"49;test_sim_send_wait;0;1;a message sent with XTC_OK was lost" \
+		"60;test_sim_sup_child;0;1;a child ran before the one before it was up" \
+		"61;test_sim_sup_child;0;1;a nested supervisor's give-up did not reach its parent" \
+		"62;test_sim_sup_child;0;1;a drain did not reach a nested supervisor's child" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -171,6 +174,12 @@ write_cases() {
 #               -> no xtc_send_wait sender stays parked while there is room
 # 49 SIM_DROP_LATE proc.c admits a latency-deferred send unchecked, drops it
 #               full at delivery -> a send told XTC_OK under net latency arrives
+# 60 SUP_WAIT_SKIP sup.c wait_children does not wait for a server/sup child
+#               -> each child starts only once the one before it is up
+# 61 SUP_NESTED_CLEAN sup.c a nested supervisor's give-up exits cleanly
+#               -> a spent subtree is a failure its parent restarts
+# 62 SUP_NESTED_NODRAIN sup.c a nested supervisor drops XTC_APP_SHUTDOWN_MSG
+#               -> an app drain reaches the children of a nested supervisor
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

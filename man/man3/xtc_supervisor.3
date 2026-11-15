@@ -12,7 +12,8 @@
 .Nm xtc_sup_n_children ,
 .Nm xtc_sup_n_alive ,
 .Nm xtc_sup_n_restarts ,
-.Nm xtc_sup_child_restarts
+.Nm xtc_sup_child_restarts ,
+.Nm xtc_sup_child_main
 .Nd OTP-style supervisor trees
 .Sh SYNOPSIS
 .In xtc.h
@@ -35,6 +36,8 @@
 .Fn xtc_sup_n_restarts "const xtc_supervisor_t *sup"
 .Ft int
 .Fn xtc_sup_child_restarts "const xtc_supervisor_t *sup" "int index" "int *out"
+.Ft void
+.Fn xtc_sup_child_main "void *arg"
 .Sh DESCRIPTION
 .Nm xtc_supervisor
 is an OTP-style supervisor: it owns a set of child specs, spawns
@@ -227,6 +230,82 @@ A supervisor with no initial children
 .Pq Fa n_children No == 0
 is supported: children are added later with
 .Fn xtc_sup_add_child .
+.Pp
+The start is asynchronous: the supervisor spawns its children after
+.Fn xtc_sup_start
+has returned.
+2.2: with
+.Va opts.wait_children
+set, it starts them in order, each once the one before it is up, and
+.Fn xtc_sup_start
+returns the outcome.
+A child is up as soon as it is spawned, except a server child
+.Pq Fn xtc_svr_child_main No in Xr xtc_svr 3 ,
+which is up once its
+.Va init
+has returned, and a supervisor child
+.Pq Fn xtc_sup_child_main ,
+which is up once its own children are (it waits for them in turn).
+The first child that is not up fails the start: the supervisor stops
+the children it started and exits,
+.Fa *out_sup
+is untouched, nothing needs joining, and the call returns that child's
+failure: its
+.Va init
+code, the nested supervisor's own start failure, or
+.Er XTC_E_NOTFOUND
+for a child that ended without a code.
+The call must come from a process (it parks) or from a thread while
+another thread runs
+.Fa loop ;
+anywhere else it returns
+.Er XTC_E_STATE ,
+since no child could start while it waits.
+.Xr xtc_app_start 3
+cannot wait (the app's loop runs later, in
+.Fn xtc_app_run ) :
+with
+.Va wait_children
+the app's supervisor still starts its children in order and stops on a
+failure, and
+.Fn xtc_app_run
+returns the failure.
+.Pp
+.Ss A supervisor as a child
+2.2:
+.Fn xtc_sup_child_main
+is a process body a child spec names, with a
+.Vt "const xtc_sup_child_t *"
+as its
+.Va arg :
+.Bd -literal -offset indent
+typedef struct xtc_sup_child {
+	size_t                  size;      /* XTC_SUP_CHILD_INIT */
+	const xtc_sup_opts_t   *opts;      /* NULL = defaults */
+	const xtc_child_spec_t *children;
+	int                     n_children;
+} xtc_sup_child_t;
+.Ed
+.Pp
+The child process is a nested supervisor with its own strategy and
+restart budget.
+A failure it can absorb stays inside it; once its budget is spent it
+stops its children and exits with
+.Er XTC_E_RESOURCE ,
+a failure its parent's policy restarts
+.Pq the whole subtree comes back .
+An
+.Xr xtc_app 3
+drain's
+.Dv XTC_APP_SHUTDOWN_MSG
+sent to it is passed to each of its children; it restarts nothing from
+then on and returns once they have all ended.
+.Va opts->exec
+is ignored (it places its children on its own loop and never stops an
+executor), and
+.Va opts->registry
+is not inherited from the parent.
+The struct, its options and its children must outlive the parent.
 .Pp
 .Fn xtc_sup_add_child
 adds one child to a running supervisor from a

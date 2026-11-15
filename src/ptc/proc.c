@@ -517,6 +517,13 @@ struct xtc_proc {
 	struct room_waiter *room_tail;
 	int                 room_closed;
 
+	/* A start acknowledgement the spawner waits for (2.2: a supervisor
+	 * starting its children with wait_children): __xtc_proc_start_ack
+	 * sends {'K', ack_ref} to ack_to once, from the proc's own fiber.
+	 * Set at spawn, before the proc runs; owner-only after that. */
+	xtc_pid_t ack_to;
+	uint64_t ack_ref;
+
 	/* Entry. */
 	xtc_proc_fn fn;
 	void       *arg;
@@ -2207,12 +2214,14 @@ __str_snap(char *dst, const char *src, size_t n)
  *   0 -- none (plain spawn)
  *   1 -- link (bidirectional fate, like Erlang spawn_link)
  *   2 -- monitor (unidirectional DOWN to the caller, like spawn_monitor)
+ *   3 -- monitor, and the child acknowledges its start to the caller
+ *        (__xtc_proc_start_ack) with the monitor's reference
  * For rel != 0 the caller MUST be a process (__current_proc != NULL);
  * the relationship is installed on both the child's and the parent's
  * lists while we still hold the child `p` and its slot, so there is no
  * window in which the child exists but is not yet linked/monitored --
  * closing the race that a spawn-then-link idiom leaves open.
- * out_ref (rel == 2) receives the monitor reference.
+ * out_ref (rel >= 2) receives the monitor reference.
  */
 static int
 __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
@@ -2320,7 +2329,7 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 		lp->peer = spawned_pid;
 		lp->next = self->links;
 		self->links = lp;
-	} else if (rel == 2) {   /* monitor: DOWN flows child -> parent */
+	} else if (rel >= 2) { /* monitor: DOWN flows child -> parent */
 		uint64_t ref;
 		struct mon_entry *mw = __mon_alloc();  /* on watcher (parent) */
 		struct mon_entry *mt = __mon_alloc();  /* on target (child) */
@@ -2347,6 +2356,10 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 		mt->next = p->monitored_by;
 		p->monitored_by = mt;
 		if (out_ref) *out_ref = ref;
+		if (rel == 3) {
+			p->ack_to = self->pid;
+			p->ack_ref = ref;
+		}
 	}
 
 	/* Spawn the underlying coroutine.  Once xtc_async enqueues the
@@ -2377,7 +2390,7 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 				}
 				pp = &(*pp)->next;
 			}
-		} else if (rel == 2) {
+		} else if (rel >= 2) {
 			struct mon_entry **pp = &self->monitors;
 			while (*pp != NULL) {
 				if (xtc_pid_eq((*pp)->target, spawned_pid)) {
@@ -2435,6 +2448,21 @@ xtc_proc_spawn_monitor(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
                        uint64_t *out_ref)
 {
 	return __proc_spawn_core(loop, fn, arg, opts, out_pid, 2, out_ref);
+}
+
+/*
+ * xtc_proc_spawn_monitor whose child acknowledges its start: the child's
+ * __xtc_proc_start_ack sends the caller {'K', *out_ref} (a sys message,
+ * past any mailbox cap), and a child that dies first sends only its
+ * DOWN.  The caller must be a process.
+ *
+ * PUBLIC: int __xtc_proc_spawn_monitor_ack __P((xtc_loop_t *, xtc_proc_fn, void *, const xtc_proc_opts_t *, xtc_pid_t *, uint64_t *));
+ */
+int
+__xtc_proc_spawn_monitor_ack(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
+    const xtc_proc_opts_t *opts, xtc_pid_t *out_pid, uint64_t *out_ref)
+{
+	return __proc_spawn_core(loop, fn, arg, opts, out_pid, 3, out_ref);
 }
 
 /* PUBLIC: xtc_pid_t xtc_self __P((void)); */
@@ -3293,6 +3321,37 @@ xtc_send_notify(xtc_pid_t to, uint64_t *out_ref)
 		__room_fire(p, 0);      /* answers this one at once */
 	__proc_release(p);
 	return XTC_OK;
+}
+
+/* PUBLIC: int __xtc_proc_start_ack_wanted __P((void)); */
+/* 1 iff the calling proc's spawner waits for its start acknowledgement. */
+int
+__xtc_proc_start_ack_wanted(void)
+{
+	struct xtc_proc *self = __proc_reanchor(__current_proc);
+	return self != NULL && !xtc_pid_is_none(self->ack_to);
+}
+
+/* PUBLIC: void __xtc_proc_start_ack __P((void)); */
+/* Acknowledge the calling proc's start to its spawner, once; a no-op
+ * when nobody waits for it. */
+void
+__xtc_proc_start_ack(void)
+{
+	struct xtc_proc *self = __proc_reanchor(__current_proc);
+	XTC_PACK_PUSH
+	struct {
+		uint8_t kind;
+		uint64_t ref;
+	} XTC_PACKED ack;
+	XTC_PACK_POP
+
+	if (self == NULL || xtc_pid_is_none(self->ack_to))
+		return;
+	ack.kind = 'K';
+	ack.ref = self->ack_ref;
+	(void)__send_sys(self->ack_to, &ack, sizeof ack);
+	self->ack_to = XTC_PID_NONE;
 }
 
 /* PUBLIC: int xtc_room_decode __P((const void *, size_t, xtc_room_info_t *)); */

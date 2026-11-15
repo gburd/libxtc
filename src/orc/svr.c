@@ -41,6 +41,9 @@
 #include "xtc_async.h"    /* xtc_yield: buggify delay-dispatch site */
 #include "xtc_inject.h"   /* svr.reply.oom fault-injection point */
 #include "xtc_dst_inject.h"
+#include "xtc_app.h"  /* XTC_APP_SHUTDOWN_MSG: a child server's drain */
+#include "loop_int.h" /* __xtc_loop_may_wait: wait_init */
+#include "proc_int.h" /* __xtc_proc_start_ack, __xtc_proc_self_loop */
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -74,6 +77,19 @@ struct xtc_svr {
 	int                   cont_pending;
 	void                 *cont_arg;
 	void                 *inflight;   /* message being dispatched */
+	/* wait_init (2.2): the server signals `started` after init, with
+	 * init's code in init_rc.  NULL when nobody waits. */
+	xtc_notify_t *started;
+	int init_rc;
+	int start_told; /* started has been signalled */
+	/* xtc_svr_child_main: the server is a supervisor's child; its own
+	 * at-exit hook frees it (there is no handle to join). */
+	int child;
+	/* Two parties release the handle: the server's exit hook, and its
+	 * owner (xtc_svr_join, or __svr_orphan for a handle nobody will
+	 * join: a failed wait_init start, or one whose caller was killed).
+	 * Each adds one as its last access; the second frees. */
+	int release;
 };
 
 /* The server whose callback is currently running on this thread, so
@@ -224,6 +240,25 @@ __svr_slots_gone(xtc_pid_t pid)
 	}
 }
 
+/* Free a server handle and its notifies. */
+static void
+__svr_free(struct xtc_svr *s)
+{
+	if (s->stopped != NULL)
+		xtc_notify_destroy(s->stopped);
+	if (s->started != NULL)
+		xtc_notify_destroy(s->started);
+	__os_free(s);
+}
+
+/* One party (exit hook or owner) is done with s; the second frees it. */
+static void
+__svr_release(struct xtc_svr *s)
+{
+	if (xtc_atomic_fetch_add_i32(&s->release, 1, xtc_mo_acq_rel) == 1)
+		__svr_free(s);
+}
+
 static void
 __svr_exited(void *arg)
 {
@@ -236,7 +271,83 @@ __svr_exited(void *arg)
 	}
 	xtc_atomic_store_i32(&s->alive, 0, xtc_mo_release);
 	__svr_slots_gone(xtc_atomic_pid_load(&s->pid));
-	(void)xtc_notify_signal(s->stopped);   /* s may be freed after this */
+	/* Killed before init returned: a waiting xtc_svr_start fails. */
+	if (s->started != NULL && !s->start_told) {
+		s->start_told = 1;
+		s->init_rc = XTC_E_NOTFOUND;
+		(void)xtc_notify_signal(s->started);
+	}
+	if (s->child) {
+		__svr_free(s); /* a child server has no handle */
+		return;
+	}
+	(void)xtc_notify_signal(s->stopped);
+	__svr_release(s);
+}
+
+/* A handle nobody will join: stop the server; the handle goes when the
+ * server has exited. */
+static void
+__svr_orphan(void *arg)
+{
+	struct xtc_svr *s = arg;
+	(void)xtc_svr_stop(s);
+	__svr_release(s);
+}
+
+/*
+ * A synchronous start's wait (2.2: svr and fsm wait_init, a supervisor's
+ * wait_children): wait for `started`, from a proc (parked) or a plain
+ * thread.  On a proc a kill can land in the wait, and the caller then
+ * never sees the handle: a scope finalizer hands obj to orphan(obj),
+ * which stops it and frees it once it has exited.  Returns XTC_OK when
+ * started was signalled, or XTC_E_RESOURCE (no scope).  The caller has
+ * checked __xtc_loop_may_wait.
+ */
+struct __start_guard {
+	void (*orphan)(void *);
+	void *obj;
+	int armed;
+};
+
+static void
+__start_guard_fire(void *arg)
+{
+	struct __start_guard *g = arg;
+	if (g->armed)
+		g->orphan(g->obj);
+	__os_free(g);
+}
+
+/* PUBLIC: int __xtc_orc_start_wait __P((xtc_notify_t *, void (*)(void *), void *)); */
+int
+__xtc_orc_start_wait(xtc_notify_t *started, void (*orphan)(void *), void *obj)
+{
+	struct __start_guard *g = NULL;
+	xtc_scope_t *sc = NULL;
+	int rc;
+
+	if (!xtc_pid_is_none(xtc_self())) {
+		if ((rc = __os_malloc(sizeof *g, (void **)&g)) != XTC_OK)
+			return rc;
+		g->orphan = orphan;
+		g->obj = obj;
+		g->armed = 1;
+		if ((sc = xtc_scope_open()) == NULL ||
+		    xtc_scope_defer(sc, __start_guard_fire, g) != XTC_OK) {
+			g->armed = 0;
+			if (sc != NULL)
+				xtc_scope_close(sc);
+			__os_free(g);
+			return XTC_E_RESOURCE;
+		}
+	}
+	rc = xtc_notify_wait(started, -1);
+	if (g != NULL) {
+		g->armed = 0;
+		xtc_scope_close(sc); /* frees g */
+	}
+	return rc;
 }
 
 static void
@@ -252,9 +363,19 @@ __svr_entry(void *arg)
 		__svr_cur = s;
 		init_rc = s->cb.init(s->state);
 		__svr_cur = NULL;
-		if (init_rc != XTC_OK)
-			goto out;
 	}
+	/* A waiting xtc_svr_start returns now (on failure it orphans s, so
+	 * s stays valid until our exit hook); a waiting supervisor is told
+	 * the child is up.  Both before a continuation: that is the point of
+	 * xtc_svr_continue. */
+	if (s->started != NULL) {
+		s->start_told = 1;
+		s->init_rc = init_rc;
+		(void)xtc_notify_signal(s->started);
+	}
+	if (init_rc != XTC_OK)
+		goto out;
+	__xtc_proc_start_ack();
 	__svr_run_continue(s);   /* init may have armed a continuation */
 
 	while (!xtc_atomic_load_i32(&s->stop_requested, xtc_mo_acquire)) {
@@ -337,6 +458,10 @@ __svr_entry(void *arg)
 			__svr_cur = s;
 			if (s->cb.handle_info != NULL)
 				cont = s->cb.handle_info(s->state, msg, size);
+			else if (s->child &&
+			    size == sizeof XTC_APP_SHUTDOWN_MSG &&
+			    memcmp(msg, XTC_APP_SHUTDOWN_MSG, size) == 0)
+				cont = XTC_SVR_STOP; /* a drain, unhandled */
 		}
 
 		__svr_cur = NULL;
@@ -377,14 +502,18 @@ xtc_svr_start(xtc_loop_t *loop, const xtc_svr_callbacks_t *cb, void *state,
 	if (opts != NULL &&
 	    (rc = __xtc_sized_in(&o, NULL, sizeof o, opts, 0)) != XTC_OK)
 		return rc;
+	/* A waiting start needs init to run while we wait. */
+	if (o.wait_init && !__xtc_loop_may_wait(loop))
+		return XTC_E_STATE;
 	if ((rc = __os_calloc(1, sizeof *s, (void **)&s)) != XTC_OK) return rc;
 	s->loop = loop;
 	s->cb = c;
 	s->state = state;
 	xtc_atomic_store_i32(&s->alive, 1, xtc_mo_relaxed);
 
-	if ((rc = xtc_notify_create(&s->stopped)) != XTC_OK) {
-		__os_free(s);
+	if ((rc = xtc_notify_create(&s->stopped)) != XTC_OK ||
+	    (o.wait_init && (rc = xtc_notify_create(&s->started)) != XTC_OK)) {
+		__svr_free(s);
 		return rc;
 	}
 
@@ -396,13 +525,54 @@ xtc_svr_start(xtc_loop_t *loop, const xtc_svr_callbacks_t *cb, void *state,
 	pop.sched_class = o.sched_class;
 	rc = xtc_proc_spawn(loop, __svr_entry, s, &pop, &pid);
 	if (rc != XTC_OK) {
-		xtc_notify_destroy(s->stopped);
-		__os_free(s);
+		__svr_free(s);
 		return rc;
 	}
 	xtc_atomic_pid_store(&s->pid, pid);
+	if (o.wait_init) {
+		/* init_rc is written before the signal (the notify's lock
+		 * orders it).  A failed server is exiting on its own: orphan
+		 * it, nobody joins. */
+		if ((rc = __xtc_orc_start_wait(s->started, __svr_orphan, s)) ==
+		    XTC_OK)
+			rc = s->init_rc;
+		if (rc != XTC_OK) {
+			__svr_orphan(s);
+			return rc;
+		}
+	}
 	*out = s;
 	return XTC_OK;
+}
+
+/* PUBLIC: void xtc_svr_child_main __P((void *)); */
+void
+xtc_svr_child_main(void *arg)
+{
+	xtc_svr_child_t sc = XTC_SVR_CHILD_INIT;
+	struct xtc_svr *s;
+	int rc;
+
+	/* A bad spec arg ends the child with the error, which its
+	 * supervisor sees (and a TRANSIENT spec retries until its budget). */
+	rc = arg == NULL ? XTC_E_INVAL :
+	                   __xtc_sized_in(&sc, NULL, sizeof sc, arg, 0);
+	if (rc == XTC_OK && sc.cb == NULL)
+		rc = XTC_E_INVAL;
+	if (rc == XTC_OK &&
+	    (rc = __os_calloc(1, sizeof *s, (void **)&s)) == XTC_OK &&
+	    (rc = __xtc_sized_in(&s->cb, NULL, sizeof s->cb, sc.cb, 0)) !=
+	        XTC_OK)
+		__os_free(s);
+	if (rc != XTC_OK) {
+		(void)xtc_exit_self(rc);
+		return;
+	}
+	s->loop = __xtc_proc_self_loop(NULL);
+	s->state = sc.state;
+	s->child = 1;
+	xtc_atomic_store_i32(&s->alive, 1, xtc_mo_relaxed);
+	__svr_entry(s);
 }
 
 int
@@ -435,8 +605,7 @@ xtc_svr_join(xtc_svr_t *s, int64_t timeout_ns)
 	 */
 	if (rc != XTC_OK)
 		return rc;
-	xtc_notify_destroy(s->stopped);
-	__os_free(s);
+	__svr_release(s);
 	return XTC_OK;
 }
 

@@ -21,6 +21,9 @@
 #include "xtc_orc.h"
 #include "xtc_reg.h"
 #include "xtc_inspect.h"
+#include "xtc_svr.h"
+#include "xtc_app.h"
+#include "proc_int.h" /* __xtc_proc_self_loop */
 #include "xtc_int.h"
 #include "loop_int.h" /* task->pinned: a spec's migratable */
 #include "coro_int.h" /* __xtc_current_task */
@@ -1915,6 +1918,347 @@ test_reg_send_wait(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * 2.2 (B10): xtc_sup_opts_t.wait_children.  Children are a server child
+ * whose init records the order it ran in, then a plain child that
+ * records when it first runs.  From a proc, the start returns only after
+ * the server's init ran and the plain child runs after it.  A second
+ * supervisor whose server child's init fails returns that code
+ * (XTC_E_NOMEM) with *out untouched, and the plain child after it never
+ * runs.  From a thread with the loop not running: XTC_E_STATE.  From a
+ * thread while another thread runs the loop: the start waits, XTC_OK.
+ */
+static int g_wc_seq, g_wc_svr_at, g_wc_kid_at, g_wc_kid_runs;
+static int g_wc_fail_init;
+
+static int
+wc_init(void *st)
+{
+	(void)st;
+	(void)xtc_proc_sleep(2LL * 1000 * 1000); /* a slow init */
+	g_wc_svr_at = ++g_wc_seq;
+	return g_wc_fail_init ? XTC_E_NOMEM : XTC_OK;
+}
+
+static void
+wc_kid(void *arg)
+{
+	void *m;
+	size_t sz;
+	(void)arg;
+	g_wc_kid_runs++;
+	if (g_wc_kid_at == 0)
+		g_wc_kid_at = ++g_wc_seq;
+	while (xtc_recv(&m, &sz, -1) == XTC_OK)
+		xtc_free(m);
+}
+
+static xtc_svr_callbacks_t g_wc_cb = { .size = sizeof(xtc_svr_callbacks_t),
+	.init = wc_init };
+static xtc_svr_child_t g_wc_svr = { .size = sizeof(xtc_svr_child_t),
+	.cb = &g_wc_cb };
+
+static void
+wc_specs(xtc_child_spec_t kids[2])
+{
+	kids[0] = (xtc_child_spec_t)XTC_CHILD_SPEC_INIT;
+	kids[0].name = "svr";
+	kids[0].fn = xtc_svr_child_main;
+	kids[0].arg = &g_wc_svr;
+	kids[0].policy = XTC_RESTART_TRANSIENT;
+	kids[1] = (xtc_child_spec_t)XTC_CHILD_SPEC_INIT;
+	kids[1].name = "kid";
+	kids[1].fn = wc_kid;
+	kids[1].policy = XTC_RESTART_PERMANENT;
+}
+
+struct wc_drive {
+	xtc_loop_t *loop;
+	int ok_rc, fail_rc, svr_at, kid_at, at_return, kid_runs_after_fail;
+	xtc_supervisor_t *ok, *fail;
+};
+
+static void
+wc_driver(void *arg)
+{
+	struct wc_drive *w = arg;
+	xtc_child_spec_t kids[2];
+	xtc_sup_opts_t o = XTC_SUP_OPTS_DEFAULT;
+	o.wait_children = 1;
+	wc_specs(kids);
+	w->ok_rc = xtc_sup_start(w->loop, &o, kids, 2, &w->ok);
+	w->at_return = g_wc_seq;
+	(void)xtc_proc_sleep(5LL * 1000 * 1000);
+	w->svr_at = g_wc_svr_at;
+	w->kid_at = g_wc_kid_at;
+	if (w->ok_rc == XTC_OK)
+		(void)xtc_sup_stop(w->ok);
+	(void)xtc_proc_sleep(5LL * 1000 * 1000);
+	g_wc_fail_init = 1;
+	g_wc_kid_runs = 0;
+	w->fail_rc = xtc_sup_start(w->loop, &o, kids, 2, &w->fail);
+	(void)xtc_proc_sleep(5LL * 1000 * 1000);
+	w->kid_runs_after_fail = g_wc_kid_runs;
+}
+
+struct wc_thread {
+	xtc_loop_t *loop;
+	int rc;
+	int running; /* the loop runs: the keepalive proc is on it */
+	xtc_supervisor_t *sup;
+};
+
+static void *
+wc_thread_start(void *arg)
+{
+	struct wc_thread *t = arg;
+	xtc_child_spec_t kids[2];
+	xtc_sup_opts_t o = XTC_SUP_OPTS_DEFAULT;
+	xtc_supervisor_t *sup = NULL;
+	o.wait_children = 1;
+	wc_specs(kids);
+	/* Before the loop runs the start would be XTC_E_STATE. */
+	while (!xtc_atomic_load_i32(&t->running, xtc_mo_seq_cst))
+		(void)xtc_sleep_ns(1000 * 1000);
+	t->rc = xtc_sup_start(t->loop, &o, kids, 2, &sup);
+	if (t->rc == XTC_OK) {
+		(void)xtc_sup_stop(sup);
+		xtc_atomic_store_ptr(&t->sup, sup, xtc_mo_seq_cst);
+	}
+	return NULL;
+}
+
+static void
+wc_keepalive(void *arg)
+{
+	struct wc_thread *t = arg;
+	int i;
+	xtc_atomic_store_i32(&t->running, 1, xtc_mo_seq_cst);
+	/* Keep the loop running until the thread's start has returned and
+	 * its supervisor has exited. */
+	for (i = 0; i < 2000 &&
+	     (xtc_atomic_load_ptr(&t->sup, xtc_mo_seq_cst) == NULL ||
+	         xtc_sup_alive(xtc_atomic_load_ptr(&t->sup, xtc_mo_seq_cst)));
+	     i++)
+		(void)xtc_proc_sleep(1LL * 1000 * 1000);
+}
+
+static MunitResult
+test_sup_wait_children(const MunitParameter p[], void *d)
+{
+	struct wc_drive w;
+	struct wc_thread t;
+	xtc_child_spec_t kids[2];
+	xtc_sup_opts_t o = XTC_SUP_OPTS_DEFAULT;
+	xtc_supervisor_t *sup = NULL;
+	pthread_t th;
+	(void)p;
+	(void)d;
+	memset(&w, 0, sizeof w);
+	g_wc_seq = g_wc_svr_at = g_wc_kid_at = g_wc_fail_init = 0;
+	munit_assert_int(xtc_loop_init(&w.loop), ==, XTC_OK);
+	o.wait_children = 1;
+	wc_specs(kids);
+	munit_assert_int(xtc_sup_start(w.loop, &o, kids, 2, &sup), ==,
+	    XTC_E_STATE);
+	munit_assert_ptr_null(sup);
+	munit_assert_int(xtc_proc_spawn(w.loop, wc_driver, &w, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(w.loop), ==, XTC_OK);
+	munit_assert_int(w.ok_rc, ==, XTC_OK);
+	munit_assert_int(w.at_return, >=, 1); /* init ran before return */
+	munit_assert_int(w.svr_at, ==, 1);
+	munit_assert_int(w.kid_at, ==, 2); /* the kid ran after init */
+	munit_assert_int(w.fail_rc, ==, XTC_E_NOMEM);
+	munit_assert_ptr_null(w.fail);
+	munit_assert_int(w.kid_runs_after_fail, ==, 0);
+	munit_assert_int(xtc_sup_join(w.ok, 1000LL * 1000 * 1000), ==, XTC_OK);
+
+	/* A thread while another thread runs the loop. */
+	memset(&t, 0, sizeof t);
+	g_wc_fail_init = 0;
+	t.loop = w.loop;
+	munit_assert_int(xtc_proc_spawn(w.loop, wc_keepalive, &t, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(pthread_create(&th, NULL, wc_thread_start, &t), ==, 0);
+	munit_assert_int(xtc_loop_run(w.loop), ==, XTC_OK);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+	munit_assert_int(t.rc, ==, XTC_OK);
+	munit_assert_int(xtc_sup_join(t.sup, 1000LL * 1000 * 1000), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(w.loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/*
+ * 2.2 (report 15): xtc_sup_child_main, a nested supervisor as a child.
+ * The root has a nested supervisor (budget: 2 restarts) over one worker
+ * that crashes on every start, and a steady sibling.  The worker's
+ * crashes stay inside the nested supervisor until its budget is spent;
+ * then it exits with XTC_E_RESOURCE, and the root (TRANSIENT spec)
+ * restarts the whole subtree once before it is stopped: the sibling is
+ * never restarted.  A drain (XTC_APP_SHUTDOWN_MSG to the nested
+ * supervisor) is forwarded to its children and the nested supervisor
+ * returns once they are gone.
+ */
+static int g_ns_crashes, g_ns_drained, g_ns_steady_runs, g_ns_crash_mode;
+static xtc_down_info_t g_ns_down;
+static int g_ns_downs;
+
+static void
+ns_worker(void *arg)
+{
+	void *m;
+	size_t sz;
+	(void)arg;
+	if (g_ns_crash_mode) {
+		g_ns_crashes++;
+		(void)xtc_exit_self(9);
+	}
+	while (xtc_recv(&m, &sz, -1) == XTC_OK) {
+		int drain = xtc_app_is_shutdown_msg(m, sz);
+		xtc_free(m);
+		if (drain) {
+			g_ns_drained++;
+			return;
+		}
+	}
+}
+
+static void
+ns_steady(void *arg)
+{
+	void *m;
+	size_t sz;
+	(void)arg;
+	g_ns_steady_runs++;
+	while (xtc_recv(&m, &sz, -1) == XTC_OK)
+		xtc_free(m);
+}
+
+static void
+ns_root_down(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
+    const xtc_down_info_t *info, void *user)
+{
+	(void)sup;
+	(void)user;
+	if (spec->fn == xtc_sup_child_main) {
+		g_ns_down = *info;
+		g_ns_downs++;
+	}
+}
+
+static xtc_sup_opts_t g_ns_opts = { .size = sizeof(xtc_sup_opts_t),
+	.strategy = XTC_SUP_ONE_FOR_ONE,
+	.max_restarts = 2,
+	.period_ns = 5LL * 1000 * 1000 * 1000 };
+static xtc_child_spec_t g_ns_kids[1] = { { .size = sizeof(xtc_child_spec_t),
+    .name = "worker",
+    .fn = ns_worker,
+    .policy = XTC_RESTART_PERMANENT } };
+static xtc_sup_child_t g_ns_child = { .size = sizeof(xtc_sup_child_t),
+	.opts = &g_ns_opts,
+	.children = g_ns_kids,
+	.n_children = 1 };
+
+struct ns_drive {
+	xtc_supervisor_t *root;
+	xtc_pid_t nested;
+	int nested_gone;
+};
+
+static void
+ns_driver(void *arg)
+{
+	struct ns_drive *dr = arg;
+	int i;
+	/* Crash mode: wait for the subtree's two give-ups. */
+	for (i = 0; i < 2000 && g_ns_downs < 2; i++)
+		(void)xtc_proc_sleep(1LL * 1000 * 1000);
+	(void)xtc_sup_stop(dr->root);
+}
+
+static MunitResult
+test_sup_nested_child(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_child_spec_t kids[2] = { XTC_CHILD_SPEC_INIT, XTC_CHILD_SPEC_INIT };
+	xtc_sup_opts_t ro = XTC_SUP_OPTS_DEFAULT;
+	struct ns_drive dr;
+	(void)p;
+	(void)d;
+	memset(&dr, 0, sizeof dr);
+	g_ns_crashes = g_ns_drained = g_ns_steady_runs = g_ns_downs = 0;
+	g_ns_crash_mode = 1;
+	kids[0].name = "nested";
+	kids[0].fn = xtc_sup_child_main;
+	kids[0].arg = &g_ns_child;
+	kids[0].policy = XTC_RESTART_TRANSIENT;
+	kids[1].name = "steady";
+	kids[1].fn = ns_steady;
+	kids[1].policy = XTC_RESTART_PERMANENT;
+	ro.max_restarts = 1;
+	ro.on_child_down = ns_root_down;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_sup_start(loop, &ro, kids, 2, &dr.root), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, ns_driver, &dr, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	/* Each nested run: the first start and 2 restarts, the third
+	 * crash spends the budget.  Two nested runs (root restarted the
+	 * subtree once). */
+	munit_assert_int(g_ns_crashes, ==, 6);
+	munit_assert_int(g_ns_downs, >=, 2);
+	munit_assert_int(g_ns_down.kind, ==, XTC_DOWN_KIND_EXIT);
+	munit_assert_int(g_ns_down.exit_code, ==, XTC_E_RESOURCE);
+	munit_assert_int(g_ns_steady_runs, ==, 1);
+	munit_assert_int(xtc_sup_join(dr.root, 1000LL * 1000 * 1000), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/* The drain half: a nested supervisor forwards XTC_APP_SHUTDOWN_MSG to
+ * its children and returns once they have ended (CLEAN DOWN). */
+static void
+ns_drainer(void *arg)
+{
+	xtc_pid_t pid;
+	uint64_t ref;
+	void *m;
+	size_t sz;
+	xtc_down_info_t di = XTC_DOWN_INFO_INIT;
+	int *out = arg;
+	if (xtc_proc_spawn_monitor(__xtc_proc_self_loop(NULL),
+	        xtc_sup_child_main, &g_ns_child, NULL, &pid, &ref) != XTC_OK)
+		return;
+	(void)xtc_proc_sleep(2LL * 1000 * 1000);
+	(void)xtc_send(pid, XTC_APP_SHUTDOWN_MSG, sizeof XTC_APP_SHUTDOWN_MSG);
+	if (xtc_recv(&m, &sz, 1000LL * 1000 * 1000) == XTC_OK &&
+	    xtc_down_decode_ex(m, sz, &di) == XTC_OK)
+		*out = di.kind == XTC_DOWN_KIND_CLEAN ? 1 : -1;
+	xtc_free(m);
+}
+
+static MunitResult
+test_sup_nested_drain(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	int clean = 0;
+	(void)p;
+	(void)d;
+	g_ns_drained = 0;
+	g_ns_crash_mode = 0;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, ns_drainer, &clean, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(g_ns_drained, ==, 1);
+	munit_assert_int(clean, ==, 1);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/add_child_other_loop", test_add_child_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/supervisor_restarts",   test_supervisor_restarts, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1948,6 +2292,12 @@ static MunitTest tests[] = {
 	{ "/spec_reg_name", test_spec_reg_name, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reg_send_wait", test_reg_send_wait, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/wait_children", test_sup_wait_children, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/nested_child", test_sup_nested_child, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/nested_drain", test_sup_nested_drain, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

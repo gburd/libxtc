@@ -14,6 +14,7 @@
 #include "xtc_proc.h"
 #include "xtc_fsm.h"
 #include "os_alloc.h" /* __os_alloc_set_hook: track one block */
+#include "xtc_alloc_audit.h"
 
 /* States for a tiny door: CLOSED -> OPEN -> CLOSED. */
 enum { S_CLOSED = 0, S_OPEN = 1, S_LOCKED = 2 };
@@ -703,6 +704,86 @@ test_fsm_call_machine_stops(const MunitParameter p[], void *data)
 	return MUNIT_OK;
 }
 
+/*
+ * 2.2 (B10): xtc_fsm_opts_t.wait_init.  A waiting start from a proc
+ * returns the initial enter()'s code (XTC_E_NOMEM, *out untouched,
+ * nothing to join, nothing left behind) or XTC_OK once enter() ran; from
+ * a thread whose loop is not running, XTC_E_STATE.
+ */
+static int g_fw_entered;
+
+static int
+fw_enter_ok(void *st, int old_state, int new_state)
+{
+	(void)st;
+	(void)old_state;
+	(void)new_state;
+	g_fw_entered++;
+	return XTC_OK;
+}
+
+struct fsm_wait {
+	xtc_loop_t *loop;
+	xtc_fsm_t *bad, *good;
+	int bad_rc, good_rc, entered_at_return;
+	size_t live0, live1;
+};
+
+static void
+fsm_wait_driver(void *arg)
+{
+	struct fsm_wait *w = arg;
+	xtc_fsm_callbacks_t bad = DOOR_CB, good = DOOR_CB;
+	xtc_fsm_opts_t o = XTC_FSM_OPTS_INIT;
+	o.wait_init = 1;
+	bad.enter = nomem_enter;
+	good.enter = fw_enter_ok;
+	/* One failed start first: one-time caches stay. */
+	(void)xtc_fsm_start(w->loop, &bad, NULL, S_CLOSED, &o, &w->bad);
+	(void)xtc_proc_sleep(5LL * 1000 * 1000);
+	xtc_alloc_audit_stats(&w->live0, NULL);
+	w->bad_rc = xtc_fsm_start(w->loop, &bad, NULL, S_CLOSED, &o, &w->bad);
+	(void)xtc_proc_sleep(5LL * 1000 * 1000);
+	xtc_alloc_audit_stats(&w->live1, NULL);
+	w->good_rc =
+	    xtc_fsm_start(w->loop, &good, NULL, S_CLOSED, &o, &w->good);
+	w->entered_at_return = g_fw_entered;
+	if (w->good_rc == XTC_OK)
+		(void)xtc_fsm_stop(w->good);
+}
+
+static MunitResult
+test_fsm_wait_init(const MunitParameter p[], void *data)
+{
+	struct fsm_wait w;
+	xtc_fsm_callbacks_t cb = DOOR_CB;
+	xtc_fsm_opts_t o = XTC_FSM_OPTS_INIT;
+	xtc_fsm_t *f = NULL;
+	(void)p;
+	(void)data;
+	memset(&w, 0, sizeof w);
+	g_fw_entered = 0;
+	munit_assert_int(xtc_loop_init(&w.loop), ==, XTC_OK);
+	o.wait_init = 1;
+	munit_assert_int(xtc_fsm_start(w.loop, &cb, NULL, S_CLOSED, &o, &f), ==,
+	    XTC_E_STATE);
+	munit_assert_ptr_null(f);
+	munit_assert_int(xtc_alloc_audit_enable(1), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(w.loop, fsm_wait_driver, &w, NULL,
+	                     NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(w.loop), ==, XTC_OK);
+	(void)xtc_alloc_audit_enable(0);
+	munit_assert_int(w.bad_rc, ==, XTC_E_NOMEM);
+	munit_assert_ptr_null(w.bad);
+	munit_assert_size(w.live1, ==, w.live0);
+	munit_assert_int(w.good_rc, ==, XTC_OK);
+	munit_assert_int(w.entered_at_return, ==, 1);
+	munit_assert_int(xtc_fsm_join(w.good, 0), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(w.loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/fsm_basic", test_fsm_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fsm_state_timeout", test_fsm_state_timeout, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -714,6 +795,8 @@ static MunitTest tests[] = {
 	{ "/fsm_killed_frees", test_fsm_killed_frees, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fsm_call_machine_stops", test_fsm_call_machine_stops, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/fsm_wait_init", test_fsm_wait_init, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

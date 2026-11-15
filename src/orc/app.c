@@ -19,6 +19,7 @@
 /* sup.c, internal: stop the root supervisor's child-cleanup wait, and
  * start it with an exit callback. */
 int __xtc_sup_abandon_wait(xtc_supervisor_t *sup);
+int __xtc_sup_start_rc(const xtc_supervisor_t *sup);
 int __xtc_sup_start_ex(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
     const xtc_child_spec_t *children, int n_children, void (*exit_fn)(void *),
     void *exit_arg, xtc_supervisor_t **out_sup);
@@ -87,6 +88,17 @@ struct xtc_app {
 };
 
 static void __kid_trampoline(void *arg);
+
+/* PUBLIC: xtc_proc_fn __xtc_app_kid_fn __P((xtc_proc_fn, void *)); */
+/* The body a child spec runs: the caller's fn behind the app's
+ * trampoline (sup.c asks whether a child acknowledges its start). */
+xtc_proc_fn
+__xtc_app_kid_fn(xtc_proc_fn fn, void *arg)
+{
+	if (fn == __kid_trampoline)
+		return ((const struct app_kid *)arg)->fn;
+	return fn;
+}
 
 /*
  * The root supervisor's on_child_down, when the caller set one.  The
@@ -339,6 +351,10 @@ xtc_app_run(xtc_app_t *a)
 	xtc_atomic_store_i32(&a->running, 1, xtc_mo_release);
 	rc = a->exec != NULL ? xtc_exec_run(a->exec) : xtc_loop_run(a->loop);
 	xtc_atomic_store_i32(&a->running, 0, xtc_mo_release);
+	/* With wait_children, a child that failed to start stopped the
+	 * supervisor: that failure is the run's result. */
+	if (rc == XTC_OK && a->root != NULL && !xtc_sup_alive(a->root))
+		rc = __xtc_sup_start_rc(a->root);
 #if !defined(_WIN32)
 	/* A signal-triggered drain runs on its own thread (so an executor
 	 * stop cannot freeze it); its report is complete once joined. */

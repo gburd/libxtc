@@ -151,10 +151,11 @@ xtc_fsm_callbacks_t.size off=0 size=8
 xtc_fsm_callbacks_t.enter off=8 size=8
 xtc_fsm_callbacks_t.event off=16 size=8
 xtc_fsm_callbacks_t.terminate off=24 size=8
-xtc_fsm_opts_t size=24 align=8
+xtc_fsm_opts_t size=32 align=8
 xtc_fsm_opts_t.size off=0 size=8
 xtc_fsm_opts_t.name off=8 size=8
 xtc_fsm_opts_t.mailbox_cap off=16 size=8
+xtc_fsm_opts_t.wait_init off=24 size=4
 xtc_fsm_result_t size=16 align=8
 xtc_fsm_result_t.action off=0 size=4
 xtc_fsm_result_t.next_state off=4 size=4
@@ -385,7 +386,12 @@ xtc_slab_stats_t.bytes_total off=72 size=8
 xtc_slab_stats_t.reaps off=80 size=8
 xtc_slab_stats_t.oom_fails off=88 size=8
 xtc_slab_stats_t.redzone_violations off=96 size=8
-xtc_sup_opts_t size=64 align=8
+xtc_sup_child_t size=32 align=8
+xtc_sup_child_t.size off=0 size=8
+xtc_sup_child_t.opts off=8 size=8
+xtc_sup_child_t.children off=16 size=8
+xtc_sup_child_t.n_children off=24 size=4
+xtc_sup_opts_t size=72 align=8
 xtc_sup_opts_t.size off=0 size=8
 xtc_sup_opts_t.strategy off=8 size=4
 xtc_sup_opts_t.max_restarts off=12 size=4
@@ -395,6 +401,7 @@ xtc_sup_opts_t.max_children off=32 size=4
 xtc_sup_opts_t.on_child_down off=40 size=8
 xtc_sup_opts_t.on_child_down_user off=48 size=8
 xtc_sup_opts_t.registry off=56 size=8
+xtc_sup_opts_t.wait_children off=64 size=4
 xtc_svr_callbacks_t size=56 align=8
 xtc_svr_callbacks_t.size off=0 size=8
 xtc_svr_callbacks_t.init off=8 size=8
@@ -403,6 +410,10 @@ xtc_svr_callbacks_t.handle_cast off=24 size=8
 xtc_svr_callbacks_t.handle_info off=32 size=8
 xtc_svr_callbacks_t.terminate off=40 size=8
 xtc_svr_callbacks_t.handle_continue off=48 size=8
+xtc_svr_child_t size=24 align=8
+xtc_svr_child_t.size off=0 size=8
+xtc_svr_child_t.cb off=8 size=8
+xtc_svr_child_t.state off=16 size=8
 xtc_svr_opts_t size=56 align=8
 xtc_svr_opts_t.size off=0 size=8
 xtc_svr_opts_t.name off=8 size=8
@@ -411,6 +422,7 @@ xtc_svr_opts_t.mailbox_watermark_fn off=24 size=8
 xtc_svr_opts_t.mailbox_watermark_user off=32 size=8
 xtc_svr_opts_t.sched_class off=40 size=8
 xtc_svr_opts_t.mailbox_watermark_pct off=48 size=4
+xtc_svr_opts_t.wait_init off=52 size=4
 xtc_tail_hdr_t size=24 align=8
 xtc_tail_hdr_t.magic off=0 size=4
 xtc_tail_hdr_t.version off=4 size=4

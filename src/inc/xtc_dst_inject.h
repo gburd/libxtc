@@ -292,4 +292,30 @@
  */
 #define XTC_DST_BUG_SIM_DROP_LATE 49
 
+/*
+ * 60 SUP_WAIT_SKIP: a supervisor started with wait_children does not wait
+ * for a server or supervisor child's start: it spawns the next child at
+ * once and reports the start as done, so a child whose init fails is not
+ * a start failure, and a later child runs before an earlier one is up
+ * (test_sim_sup_child: "a child ran before the one before it was up").
+ */
+#define XTC_DST_BUG_SUP_WAIT_SKIP 60
+
+/*
+ * 61 SUP_NESTED_CLEAN: a nested supervisor (xtc_sup_child_main) that
+ * spends its restart budget exits cleanly, so a TRANSIENT parent spec
+ * never restarts the subtree and the service stays down
+ * (test_sim_sup_child: "a nested supervisor's give-up did not reach its
+ * parent").
+ */
+#define XTC_DST_BUG_SUP_NESTED_CLEAN 61
+
+/*
+ * 62 SUP_NESTED_NODRAIN: a nested supervisor drops XTC_APP_SHUTDOWN_MSG
+ * instead of passing it to its children, so an app drain force-cancels
+ * the subtree (test_sim_sup_child: "a drain did not reach a nested
+ * supervisor's child").
+ */
+#define XTC_DST_BUG_SUP_NESTED_NODRAIN 62
+
 #endif /* XTC_DST_INJECT_H */

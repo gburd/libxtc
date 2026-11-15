@@ -13,7 +13,8 @@
 .Nm xtc_svr_reply ,
 .Nm xtc_svr_continue ,
 .Nm xtc_svr_call_save ,
-.Nm xtc_svr_pid
+.Nm xtc_svr_pid ,
+.Nm xtc_svr_child_main
 .Nd gen_server-style request/reply server abstraction
 .Sh SYNOPSIS
 .In xtc.h
@@ -38,6 +39,8 @@
 .Fn xtc_svr_call_save "const xtc_svr_call_t *call"
 .Ft xtc_pid_t
 .Fn xtc_svr_pid "const xtc_svr_t *s"
+.Ft void
+.Fn xtc_svr_child_main "void *arg"
 .Sh DESCRIPTION
 .Nm xtc_svr
 is the gen_server analog: a long-lived process that handles
@@ -126,7 +129,81 @@ need not set its class on itself in
 .Va init .
 .Va sched_class
 must have been created on the server's loop.
+.It Va wait_init
+2.2: when set,
+.Fn xtc_svr_start
+returns only after
+.Va init
+has run, with init's code.
+On a failure the server is gone,
+.Fa out
+is untouched, and nothing needs joining.
+It must be called from a process (it parks) or from a thread while
+another thread runs
+.Fa loop ;
+anywhere else
+.Pq the caller runs Fa loop No itself, or nobody runs it yet
+it returns
+.Er XTC_E_STATE ,
+since init could not run while it waits.
 .El
+.Pp
+.Sy A server as a supervised child
+(2.2).
+.Fn xtc_svr_child_main
+is a process body a child spec names
+.Pq Xr xtc_supervisor 3 ,
+with a
+.Vt "const xtc_svr_child_t *"
+as its
+.Va arg :
+.Bd -literal -offset indent
+typedef struct xtc_svr_child {
+	size_t                     size;  /* XTC_SVR_CHILD_INIT */
+	const xtc_svr_callbacks_t *cb;
+	void                      *state;
+} xtc_svr_child_t;
+.Ed
+.Pp
+The child process is the server, so a crash restarts it, the
+supervisor stops it, and there is no
+.Vt xtc_svr_t
+to join: the process frees its own state on every exit.
+Each incarnation runs
+.Va init
+on the same
+.Va state .
+The mailbox and the proc knobs come from the child spec, not from an
+.Vt xtc_svr_opts_t .
+An
+.Xr xtc_app 3
+drain's
+.Dv XTC_APP_SHUTDOWN_MSG
+reaches
+.Va handle_info
+like any message, so the server can finish its work and return
+.Dv XTC_SVR_STOP ;
+a server without
+.Va handle_info
+stops on it.
+A failed
+.Va init
+ends the incarnation with its code, which a
+.Dv XTC_RESTART_TRANSIENT
+spec restarts; a supervisor started with
+.Va wait_children
+waits for
+.Va init
+and fails its start with that code.
+Clients find the server by the spec's
+.Va reg_name :
+.Xr xtc_svr_call_name 3
+calls the current incarnation, and
+.Fn xtc_reg_whereis_wait
+waits for the next one.
+The
+.Vt xtc_svr_child_t
+and its callbacks must outlive the supervisor.
 .Pp
 .Fn xtc_svr_call
 sends a request and blocks until reply or timeout.  In-process
@@ -259,6 +336,20 @@ xtc_svr_start(loop, &cb, &state, NULL, &s);
 void *reply; size_t reply_sz;
 xtc_svr_call(xtc_svr_pid(s), req, req_sz, &reply, &reply_sz,
              5000LL * 1000 * 1000);
+.Ed
+A server under a supervisor, found by name:
+.Bd -literal -offset indent
+static xtc_svr_child_t upd = { .size = sizeof(xtc_svr_child_t),
+    .cb = &update_cb, .state = &update_state };
+xtc_child_spec_t k = XTC_CHILD_SPEC_INIT;
+k.name = k.reg_name = "update";
+k.fn = xtc_svr_child_main;
+k.arg = &upd;
+k.policy = XTC_RESTART_TRANSIENT;
+k.sched_class = background;
+/* ... xtc_app_start(app, &k, 1) ... then, from any proc: */
+xtc_svr_call_name(xtc_app_registry(app), "update", req, req_sz,
+    &reply, &reply_sz, 5000LL * 1000 * 1000);
 .Ed
 .Sh SEE ALSO
 .Xr xtc_supervisor 3 ,

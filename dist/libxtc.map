@@ -92,7 +92,9 @@ XTC_2.2 {
 		xtc_room_decode;
 		xtc_send_notify;
 		xtc_send_wait;
+		xtc_sup_child_main;
 		xtc_sup_child_restarts;
+		xtc_svr_child_main;
 		xtc_tail_app;
 		xtc_tail_app_name;
 		xtc_thread_register;

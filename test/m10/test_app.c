@@ -13,6 +13,7 @@
 #include "xtc.h"
 #include "xtc_app.h"
 #include "xtc_proc.h"
+#include "xtc_svr.h"
 #include "xtc_int.h"
 
 static int g_kid_ran;
@@ -925,6 +926,166 @@ test_app_hook_spec(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * 2.2 (report 15): an xtc_svr and a nested supervisor as children of the
+ * app's root supervisor.  An xtc_app_shutdown drain reaches the server's
+ * handle_info (it stops) and the nested supervisor (it forwards the
+ * message to its worker and returns when the worker has), and both are
+ * reported drained, not forced.  Through 2.2 a server started from a
+ * keeper child never saw XTC_APP_SHUTDOWN_MSG.
+ */
+static int g_as_svr_drained, g_as_wk_drained, g_as_up;
+
+static int
+as_svr_init(void *st)
+{
+	(void)st;
+	xtc_atomic_fetch_add_i32(&g_as_up, 1, xtc_mo_seq_cst);
+	return XTC_OK;
+}
+
+static int
+as_svr_info(void *st, const void *msg, size_t n)
+{
+	(void)st;
+	if (!xtc_app_is_shutdown_msg(msg, n))
+		return XTC_SVR_CONTINUE;
+	xtc_atomic_store_i32(&g_as_svr_drained, 1, xtc_mo_seq_cst);
+	return XTC_SVR_STOP;
+}
+
+static void
+as_worker(void *arg)
+{
+	void *m;
+	size_t sz;
+	(void)arg;
+	xtc_atomic_fetch_add_i32(&g_as_up, 1, xtc_mo_seq_cst);
+	while (xtc_recv(&m, &sz, -1) == XTC_OK) {
+		int drain = xtc_app_is_shutdown_msg(m, sz);
+		xtc_free(m);
+		if (drain) {
+			xtc_atomic_store_i32(&g_as_wk_drained, 1,
+			    xtc_mo_seq_cst);
+			return;
+		}
+	}
+}
+
+static xtc_svr_callbacks_t g_as_cb = { .size = sizeof(xtc_svr_callbacks_t),
+	.init = as_svr_init,
+	.handle_info = as_svr_info };
+static xtc_svr_child_t g_as_svr = { .size = sizeof(xtc_svr_child_t),
+	.cb = &g_as_cb };
+static xtc_child_spec_t g_as_wk[1] = { { .size = sizeof(xtc_child_spec_t),
+    .name = "worker",
+    .fn = as_worker,
+    .policy = XTC_RESTART_TRANSIENT } };
+static xtc_sup_child_t g_as_sub = { .size = sizeof(xtc_sup_child_t),
+	.children = g_as_wk,
+	.n_children = 1 };
+
+static void *
+as_thread(void *arg)
+{
+	struct dr_run *r = arg;
+	while (xtc_atomic_load_i32(&g_as_up, xtc_mo_seq_cst) < 2)
+		(void)xtc_sleep_ns(1 * MS);
+	r->rc = xtc_app_shutdown(r->app, r->drain_ns, r->force_ns, &r->rep);
+	return NULL;
+}
+
+static MunitResult
+test_app_svr_and_sub_children(const MunitParameter p[], void *d)
+{
+	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+	xtc_child_spec_t kids[2] = { XTC_CHILD_SPEC_INIT, XTC_CHILD_SPEC_INIT };
+	xtc_app_drain_report_t init = XTC_APP_DRAIN_REPORT_INIT;
+	struct dr_run r;
+	pthread_t th;
+	(void)p;
+	(void)d;
+	memset(&r, 0, sizeof r);
+	g_as_svr_drained = g_as_wk_drained = g_as_up = 0;
+	r.rep = init;
+	r.drain_ns = 2000 * MS;
+	r.force_ns = 1000 * MS;
+	kids[0].name = "svr";
+	kids[0].fn = xtc_svr_child_main;
+	kids[0].arg = &g_as_svr;
+	kids[0].policy = XTC_RESTART_TRANSIENT;
+	kids[1].name = "sub";
+	kids[1].fn = xtc_sup_child_main;
+	kids[1].arg = &g_as_sub;
+	kids[1].policy = XTC_RESTART_TRANSIENT;
+	opts.no_tuning_check = 1;
+	munit_assert_int(xtc_app_create(&opts, &r.app), ==, XTC_OK);
+	munit_assert_int(xtc_app_start(r.app, kids, 2), ==, XTC_OK);
+	munit_assert_int(pthread_create(&th, NULL, as_thread, &r), ==, 0);
+	munit_assert_int(xtc_app_run(r.app), ==, XTC_OK);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+	munit_assert_int(r.rc, ==, XTC_OK);
+	munit_assert_int(r.rep.n_drained, ==, 2);
+	munit_assert_int(r.rep.n_forced, ==, 0);
+	munit_assert_int(g_as_svr_drained, ==, 1);
+	munit_assert_int(g_as_wk_drained, ==, 1);
+	xtc_app_destroy(r.app);
+	return MUNIT_OK;
+}
+
+/*
+ * 2.2 (B10): an app's supervisor with wait_children starts its children
+ * in order and, when a server child's init fails, stops: xtc_app_run
+ * returns init's code, and the child after it never ran.
+ */
+static int g_aw_kid_runs;
+
+static int
+aw_init_fail(void *st)
+{
+	(void)st;
+	return XTC_E_IO;
+}
+
+static void
+aw_kid(void *arg)
+{
+	(void)arg;
+	g_aw_kid_runs++;
+}
+
+static MunitResult
+test_app_wait_children_fail(const MunitParameter p[], void *d)
+{
+	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_child_spec_t kids[2] = { XTC_CHILD_SPEC_INIT, XTC_CHILD_SPEC_INIT };
+	xtc_svr_callbacks_t cb = XTC_SVR_CALLBACKS_INIT;
+	xtc_svr_child_t sc = XTC_SVR_CHILD_INIT;
+	xtc_app_t *app = NULL;
+	(void)p;
+	(void)d;
+	g_aw_kid_runs = 0;
+	cb.init = aw_init_fail;
+	sc.cb = &cb;
+	kids[0].name = "svr";
+	kids[0].fn = xtc_svr_child_main;
+	kids[0].arg = &sc;
+	kids[0].policy = XTC_RESTART_TRANSIENT;
+	kids[1].name = "after";
+	kids[1].fn = aw_kid;
+	kids[1].policy = XTC_RESTART_TEMPORARY;
+	so.wait_children = 1;
+	opts.sup = &so;
+	opts.no_tuning_check = 1;
+	munit_assert_int(xtc_app_create(&opts, &app), ==, XTC_OK);
+	munit_assert_int(xtc_app_start(app, kids, 2), ==, XTC_OK);
+	munit_assert_int(xtc_app_run(app), ==, XTC_E_IO);
+	munit_assert_int(g_aw_kid_runs, ==, 0);
+	xtc_app_destroy(app);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/app_basic", test_app_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/app_multiloop", test_app_multiloop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -941,6 +1102,10 @@ static MunitTest tests[] = {
 	{ "/reaper_builtin", test_app_reaper_builtin, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/hook_spec", test_app_hook_spec, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/svr_and_sub_children", test_app_svr_and_sub_children, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/wait_children_fail", test_app_wait_children_fail, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

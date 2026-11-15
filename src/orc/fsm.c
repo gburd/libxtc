@@ -24,6 +24,7 @@
 #include "xtc_orc.h"
 #include "xtc_sync.h"
 #include "proc_int.h"      /* owner-qualified lookup/send for join/stop */
+#include "loop_int.h"      /* __xtc_loop_may_wait: wait_init */
 #include "xtc_sim.h"       /* __xtc_sim_active: the reply-vs-DOWN window */
 
 #include <stdint.h>
@@ -53,7 +54,38 @@ struct xtc_fsm {
 	xtc_loop_t *loop; /* owner (exact resolve; see __resolve_on) */
 	int stop_requested;
 	int                   joined;
+	/* wait_init (2.2): signalled after the initial enter(), with its
+	 * code in init_rc; NULL when nobody waits. */
+	xtc_notify_t *started;
+	int init_rc;
+	int start_told; /* started has been signalled */
+	/* A handle nobody will join (a failed or killed wait_init start):
+	 * the machine's exit hook and __fsm_orphan each add one, and
+	 * whichever comes second frees it. */
+	int orphan;
 };
+
+/* svr.c: the synchronous-start wait. */
+int __xtc_orc_start_wait(xtc_notify_t *, void (*)(void *), void *);
+
+static void
+__fsm_free(struct xtc_fsm *h)
+{
+	if (h->started != NULL)
+		xtc_notify_destroy(h->started);
+	__os_free(h);
+}
+
+/* A handle nobody will join: stop the machine, free the handle once the
+ * machine has exited (now, or from its exit hook). */
+static void
+__fsm_orphan(void *arg)
+{
+	struct xtc_fsm *h = arg;
+	(void)xtc_fsm_stop(h);
+	if (xtc_atomic_fetch_add_i32(&h->orphan, 1, xtc_mo_acq_rel) == 1)
+		__fsm_free(h);
+}
 
 /* Per-call reply handle handed to event(); the caller of xtc_fsm_call
  * blocks on a tagged recv, so reply just sends <tag><payload> back. */
@@ -212,9 +244,20 @@ static void
 fsm_exited(void *arg)
 {
 	struct fsm_run *r = arg;
+	struct xtc_fsm *h = r->handle;
 	__os_free(r->inflight); /* an event() that exited mid-dispatch */
 	fsm_pq_free(r);
 	__os_free(r);
+	if (h->started == NULL)
+		return;
+	/* Killed before enter() returned: a waiting xtc_fsm_start fails. */
+	if (!h->start_told) {
+		h->start_told = 1;
+		h->init_rc = XTC_E_NOTFOUND;
+		(void)xtc_notify_signal(h->started);
+	}
+	if (xtc_atomic_fetch_add_i32(&h->orphan, 1, xtc_mo_acq_rel) == 1)
+		__fsm_free(h);
 }
 
 static void
@@ -234,6 +277,13 @@ fsm_entry(void *arg)
 		init_rc = r->cb.enter(r->state, r->cur_state, r->cur_state);
 		if (init_rc != XTC_OK)
 			running = 0;
+	}
+	/* A waiting xtc_fsm_start returns now; on failure it orphans the
+	 * handle, which stays valid until fsm_exited. */
+	if (r->handle->started != NULL) {
+		r->handle->start_told = 1;
+		r->handle->init_rc = init_rc;
+		(void)xtc_notify_signal(r->handle->started);
 	}
 
 	while (running &&
@@ -331,11 +381,15 @@ xtc_fsm_start(xtc_loop_t *loop, const xtc_fsm_callbacks_t *cb, void *state,
 	if (opts != NULL &&
 	    (rc = __xtc_sized_in(&o, NULL, sizeof o, opts, 0)) != XTC_OK)
 		return rc;
+	if (o.wait_init && !__xtc_loop_may_wait(loop))
+		return XTC_E_STATE; /* enter() could not run while we wait */
 
 	if ((rc = __os_calloc(1, sizeof(*h), (void **)&h)) != XTC_OK)
 		return rc;
-	if ((rc = __os_calloc(1, sizeof(*r), (void **)&r)) != XTC_OK) {
-		__os_free(h);
+	if ((rc = __os_calloc(1, sizeof(*r), (void **)&r)) != XTC_OK ||
+	    (o.wait_init && (rc = xtc_notify_create(&h->started)) != XTC_OK)) {
+		__os_free(r);
+		__fsm_free(h);
 		return rc;
 	}
 	xtc_atomic_store_i32(&h->stop_requested, 0, xtc_mo_relaxed);
@@ -351,16 +405,25 @@ xtc_fsm_start(xtc_loop_t *loop, const xtc_fsm_callbacks_t *cb, void *state,
 	pop.size = sizeof pop;
 	pop.name = o.name;
 	pop.mailbox_cap = o.mailbox_cap;
+	h->loop = loop;
 	rc = xtc_proc_spawn(loop, fsm_entry, r, &pop, &pid);
 	if (rc != XTC_OK) {
 		__os_free(r);
-		__os_free(h);
+		__fsm_free(h);
 		return rc;
 	}
 	/* h->pid is set by fsm_entry via xtc_self(); the spawn out-pid is
 	 * the same value and is available synchronously here. */
 	h->pid = pid;
-	h->loop = loop;
+	if (o.wait_init) {
+		if ((rc = __xtc_orc_start_wait(h->started, __fsm_orphan, h)) ==
+		    XTC_OK)
+			rc = h->init_rc;
+		if (rc != XTC_OK) {
+			__fsm_orphan(h);
+			return rc;
+		}
+	}
 	*out = h;
 	return XTC_OK;
 }
@@ -399,7 +462,9 @@ xtc_fsm_join(xtc_fsm_t *fsm, int64_t timeout_ns)
 			waited += step;
 		}
 	}
-	__os_free(fsm);
+	/* A wait_init machine's exit hook added its share: the handle is
+	 * the joiner's to free. */
+	__fsm_free(fsm);
 	return XTC_OK;
 }
 

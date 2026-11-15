@@ -17,6 +17,9 @@
 #include "xtc_svr.h"
 #include "xtc_reg.h"
 #include "xtc_int.h"
+#include "xtc_alloc_audit.h"
+#include "xtc_app.h"
+#include "xtc_orc.h"
 
 /* A trivial counter-server: cast to increment, call to read. */
 struct counter_state {
@@ -1301,6 +1304,299 @@ test_svr_opts_proc_knobs(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * 2.2 (B10): xtc_svr_opts_t.wait_init.  From a proc, a waiting start
+ * returns init's code: XTC_E_NOMEM for a failing init, with *out
+ * untouched and nothing to join (the handle goes with the server), and
+ * XTC_OK for a good one, after init ran.  From a plain thread with the
+ * loop not running, XTC_E_STATE (init could never run).  The allocation
+ * auditor sees nothing left behind by the failed start.
+ */
+static int g_wi_inited;
+
+static int
+wi_init_ok(void *st)
+{
+	(void)st;
+	g_wi_inited++;
+	return XTC_OK;
+}
+
+struct wait_init {
+	xtc_loop_t *loop;
+	int bad_rc, good_rc, inited_at_return;
+	xtc_svr_t *bad, *good;
+	size_t live0, live1;
+};
+
+static void
+wait_init_driver(void *arg)
+{
+	struct wait_init *w = arg;
+	xtc_svr_callbacks_t good = XTC_SVR_CALLBACKS_INIT;
+	xtc_svr_opts_t o = XTC_SVR_OPTS_INIT;
+	o.wait_init = 1;
+	good.init = wi_init_ok;
+	/* One failed start first: process-wide caches (slabs, the scope
+	 * pool) are made once and kept. */
+	(void)xtc_svr_start(w->loop, &NOMEM_CB, NULL, &o, &w->bad);
+	(void)xtc_proc_sleep(5LL * 1000 * 1000);
+	xtc_alloc_audit_stats(&w->live0, NULL);
+	w->bad_rc = xtc_svr_start(w->loop, &NOMEM_CB, NULL, &o, &w->bad);
+	/* The failed server finishes exiting on this loop. */
+	(void)xtc_proc_sleep(5LL * 1000 * 1000);
+	xtc_alloc_audit_stats(&w->live1, NULL);
+	w->good_rc = xtc_svr_start(w->loop, &good, NULL, &o, &w->good);
+	w->inited_at_return = g_wi_inited;
+	if (w->good_rc == XTC_OK)
+		(void)xtc_svr_stop(w->good);
+}
+
+static MunitResult
+test_svr_wait_init(const MunitParameter p[], void *d)
+{
+	struct wait_init w;
+	xtc_svr_opts_t o = XTC_SVR_OPTS_INIT;
+	xtc_svr_t *s = NULL;
+	(void)p;
+	(void)d;
+	memset(&w, 0, sizeof w);
+	g_wi_inited = 0;
+	munit_assert_int(xtc_loop_init(&w.loop), ==, XTC_OK);
+	o.wait_init = 1;
+	munit_assert_int(xtc_svr_start(w.loop, &NOMEM_CB, NULL, &o, &s), ==,
+	    XTC_E_STATE);
+	munit_assert_ptr_null(s);
+	munit_assert_int(xtc_alloc_audit_enable(1), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(w.loop, wait_init_driver, &w, NULL,
+	                     NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(w.loop), ==, XTC_OK);
+	(void)xtc_alloc_audit_enable(0);
+	munit_assert_int(w.bad_rc, ==, XTC_E_NOMEM);
+	munit_assert_ptr_null(w.bad);
+	munit_assert_size(w.live1, ==, w.live0);
+	munit_assert_int(w.good_rc, ==, XTC_OK);
+	munit_assert_int(w.inited_at_return, ==, 1);
+	munit_assert_int(xtc_svr_join(w.good, 1000LL * 1000 * 1000), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_fini(w.loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/*
+ * A proc killed while it waits in a wait_init start: the server it was
+ * starting is stopped and its handle freed (the start's scope finalizer
+ * orphans it), whether the kill lands before init ends or after.
+ */
+static int g_wk_svr_ran, g_wk_svr_stopped;
+
+static int
+wk_init_slow(void *st)
+{
+	(void)st;
+	g_wk_svr_ran++;
+	(void)xtc_proc_sleep(10LL * 1000 * 1000);
+	return XTC_OK;
+}
+
+static void
+wk_terminate(void *st, int reason)
+{
+	(void)st;
+	(void)reason;
+	g_wk_svr_stopped++;
+}
+
+static void
+wk_starter(void *arg)
+{
+	xtc_loop_t *loop = arg;
+	xtc_svr_callbacks_t cb = XTC_SVR_CALLBACKS_INIT;
+	xtc_svr_opts_t o = XTC_SVR_OPTS_INIT;
+	xtc_svr_t *s = NULL;
+	cb.init = wk_init_slow;
+	cb.terminate = wk_terminate;
+	o.wait_init = 1;
+	(void)xtc_svr_start(loop, &cb, NULL, &o, &s);
+	g_wk_svr_ran = -100; /* not reached: killed in the wait */
+}
+
+struct wk_drive {
+	xtc_loop_t *loop;
+	size_t live0, live1;
+};
+
+static void
+wk_driver(void *arg)
+{
+	struct wk_drive *w = arg;
+	xtc_pid_t pid;
+	int i;
+	/* Round 0 warms the caches; round 1 is measured. */
+	for (i = 0; i < 2; i++) {
+		if (i == 1)
+			xtc_alloc_audit_stats(&w->live0, NULL);
+		if (xtc_proc_spawn(w->loop, wk_starter, w->loop, NULL, &pid) !=
+		    XTC_OK)
+			return;
+		(void)xtc_proc_sleep(2LL * 1000 * 1000); /* inside init */
+		(void)xtc_exit_pid(pid, 5);
+		(void)xtc_proc_sleep(30LL * 1000 * 1000); /* all exit */
+	}
+	xtc_alloc_audit_stats(&w->live1, NULL);
+	/* A server left running would keep the loop up: end the run so the
+	 * assertions report it. */
+	(void)xtc_loop_stop(w->loop);
+}
+
+static MunitResult
+test_svr_wait_init_killed(const MunitParameter p[], void *d)
+{
+	struct wk_drive w;
+	(void)p;
+	(void)d;
+	memset(&w, 0, sizeof w);
+	g_wk_svr_ran = g_wk_svr_stopped = 0;
+	munit_assert_int(xtc_loop_init(&w.loop), ==, XTC_OK);
+	munit_assert_int(xtc_alloc_audit_enable(1), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(w.loop, wk_driver, &w, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(w.loop), ==, XTC_OK);
+	(void)xtc_alloc_audit_enable(0);
+	munit_assert_int(g_wk_svr_ran, ==, 2);
+	munit_assert_int(g_wk_svr_stopped, ==, 2);
+	munit_assert_size(w.live1, ==, w.live0);
+	munit_assert_int(xtc_loop_fini(w.loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
+
+/*
+ * 2.2 (report 15): xtc_svr_child_main makes the server the supervised
+ * child.  A server whose handler crashes on request is restarted by the
+ * supervisor on the same state (the count survives), answers by its
+ * reg_name after the restart, and a drain (XTC_APP_SHUTDOWN_MSG) reaches
+ * its handle_info, which stops it.  No xtc_svr_t exists to join.
+ */
+struct sc_state {
+	int inits, count, drained;
+};
+
+static int
+sc_init(void *st)
+{
+	((struct sc_state *)st)->inits++;
+	return XTC_OK;
+}
+
+static int
+sc_call(void *st, const void *req, size_t n, xtc_svr_call_t *call)
+{
+	struct sc_state *s = st;
+	if (n == 5 && memcmp(req, "crash", 5) == 0)
+		(void)xtc_exit_self(7);
+	s->count++;
+	(void)xtc_svr_reply(call, &s->count, sizeof s->count);
+	return XTC_SVR_CONTINUE;
+}
+
+static int
+sc_info(void *st, const void *msg, size_t n)
+{
+	if (xtc_app_is_shutdown_msg(msg, n)) {
+		((struct sc_state *)st)->drained = 1;
+		return XTC_SVR_STOP;
+	}
+	return XTC_SVR_CONTINUE;
+}
+
+struct sc_drive {
+	xtc_reg_t *reg;
+	xtc_supervisor_t *sup;
+	int c1, c2, c3, crash_rc;
+	xtc_pid_t first, second;
+};
+
+static int
+sc_call_int(xtc_reg_t *reg, const char *req, int *out)
+{
+	void *rep = NULL;
+	size_t n = 0;
+	int rc;
+	rc = xtc_svr_call_name(reg, "counter", req, strlen(req), &rep, &n,
+	    1000LL * 1000 * 1000);
+	if (rc == XTC_OK && n == sizeof *out)
+		memcpy(out, rep, sizeof *out);
+	xtc_free(rep);
+	return rc;
+}
+
+static void
+sc_driver(void *arg)
+{
+	struct sc_drive *dr = arg;
+	(void)xtc_reg_whereis_wait(dr->reg, "counter", XTC_PID_NONE,
+	    1000LL * 1000 * 1000, &dr->first);
+	(void)sc_call_int(dr->reg, "inc", &dr->c1);
+	(void)sc_call_int(dr->reg, "inc", &dr->c2);
+	dr->crash_rc = sc_call_int(dr->reg, "crash", &dr->c3);
+	(void)xtc_reg_whereis_wait(dr->reg, "counter", dr->first,
+	    1000LL * 1000 * 1000, &dr->second);
+	(void)sc_call_int(dr->reg, "inc", &dr->c3);
+	/* The drain an xtc_app_shutdown sends: handle_info stops it. */
+	(void)xtc_send(dr->second, XTC_APP_SHUTDOWN_MSG,
+	    sizeof XTC_APP_SHUTDOWN_MSG);
+	(void)xtc_proc_sleep(10LL * 1000 * 1000);
+	(void)xtc_sup_stop(dr->sup);
+}
+
+static MunitResult
+test_svr_child_main(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_svr_callbacks_t cb = XTC_SVR_CALLBACKS_INIT;
+	xtc_svr_child_t sc = XTC_SVR_CHILD_INIT;
+	xtc_child_spec_t kid = XTC_CHILD_SPEC_INIT;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	struct sc_state st;
+	struct sc_drive dr;
+	(void)p;
+	(void)d;
+	memset(&st, 0, sizeof st);
+	memset(&dr, 0, sizeof dr);
+	cb.init = sc_init;
+	cb.handle_call = sc_call;
+	cb.handle_info = sc_info;
+	sc.cb = &cb;
+	sc.state = &st;
+	kid.name = "counter";
+	kid.reg_name = "counter";
+	kid.fn = xtc_svr_child_main;
+	kid.arg = &sc;
+	kid.policy = XTC_RESTART_TRANSIENT;
+	munit_assert_int(xtc_reg_create(&dr.reg), ==, XTC_OK);
+	so.registry = dr.reg;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_sup_start(loop, &so, &kid, 1, &dr.sup), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, sc_driver, &dr, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(dr.c1, ==, 1);
+	munit_assert_int(dr.c2, ==, 2);
+	munit_assert_int(dr.crash_rc, ==, XTC_E_NOTFOUND);
+	munit_assert_false(xtc_pid_eq(dr.first, dr.second));
+	munit_assert_int(dr.c3, ==, 3); /* same state after the restart */
+	munit_assert_int(st.inits, ==, 2);
+	munit_assert_int(st.drained, ==, 1);
+	munit_assert_int(xtc_sup_n_restarts(dr.sup), ==, 1);
+	munit_assert_int(xtc_sup_join(dr.sup, 1000LL * 1000 * 1000), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_reg_destroy(dr.reg);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/svr_basic", test_svr_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/call_name", test_svr_call_name, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1317,6 +1613,12 @@ static MunitTest tests[] = {
 	{ "/call_leaves_no_monitor", test_svr_call_leaves_no_monitor, NULL,
 	    NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/opts_proc_knobs", test_svr_opts_proc_knobs, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/wait_init", test_svr_wait_init, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/wait_init_killed", test_svr_wait_init_killed, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/child_main", test_svr_child_main, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

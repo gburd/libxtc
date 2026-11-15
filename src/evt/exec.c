@@ -213,6 +213,7 @@ __xtc_exec_worker(void *arg)
 	loop->owner_tid = pthread_self();
 	loop->owner_set = 1;
 #endif
+	xtc_atomic_store_i32(&loop->running, 1, xtc_mo_release);
 	/* Bias this reactor thread onto the performance (P) cores on
 	 * asymmetric hardware (Apple Silicon); no-op elsewhere. */
 	__os_thread_apply_default_qos();
@@ -382,6 +383,7 @@ __xtc_exec_worker(void *arg)
 		__xtc_io_uring_preempt_disarm(loop->io);
 		(void)xtc_preempt_disarm();
 	}
+	xtc_atomic_store_i32(&loop->running, 0, xtc_mo_release);
 	/* Hand the io back: in-flight AIO on a SINGLE_ISSUER io_uring ring
 	 * can only be reaped by this thread (see __xtc_io_owner_leave). */
 	__xtc_io_owner_leave(loop->io);

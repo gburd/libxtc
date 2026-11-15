@@ -106,6 +106,28 @@ with that code in
 .Va exit_code .
 Before 2.2 the proc returned normally and the DOWN was
 .Dv XTC_DOWN_KIND_CLEAN .
+.Pp
+2.2: with
+.Va opts->wait_init
+set,
+.Fn xtc_fsm_start
+returns only after the first
+.Fn enter
+has run, with its code.
+On a failure the machine is gone,
+.Fa out
+is untouched, and nothing needs joining.
+It must be called from a process (it parks) or from a thread while
+another thread runs
+.Fa loop ;
+anywhere else
+.Pq the caller runs Fa loop No itself, or nobody runs it yet
+it returns
+.Er XTC_E_STATE ,
+since
+.Fn enter
+could not run while it waits.
+.Pp
 .Fn xtc_fsm_stop
 asks the machine to stop (non-blocking; runs
 .Fn terminate ,

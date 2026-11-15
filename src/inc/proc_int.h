@@ -35,6 +35,17 @@ int __xtc_proc_alive(xtc_pid_t pid);
  * unambiguous identity; record it on the proc's own fiber. */
 xtc_loop_t *__xtc_proc_self_loop(xtc_pid_t *out_pid);
 
+/* Startup acknowledgement (2.2, a supervisor's wait_children): a child
+ * spawned with __xtc_proc_spawn_monitor_ack sends the spawner one sys
+ * message {'K', monitor ref} when it calls __xtc_proc_start_ack (a server
+ * after init, a nested supervisor once its children are up); a child that
+ * dies first sends only its DOWN.  __xtc_proc_start_ack_wanted: 1 iff the
+ * calling proc's spawner waits for that. */
+int __xtc_proc_spawn_monitor_ack(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
+    const xtc_proc_opts_t *opts, xtc_pid_t *out_pid, uint64_t *out_ref);
+int __xtc_proc_start_ack_wanted(void);
+void __xtc_proc_start_ack(void);
+
 /* xtc_exit_pid_deadline resolved in `owner`'s table only, so an equal pid
  * on another loop is never signalled.  owner must be non-NULL and alive
  * (not finalized) for the call; XTC_E_INVAL if NULL. */
