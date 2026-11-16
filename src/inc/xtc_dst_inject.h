@@ -373,4 +373,12 @@
  */
 #define XTC_DST_BUG_SUP_NESTED_NODRAIN 62
 
+/*
+ * 67 PART_SYSDROP: the simulator's partition cuts system messages too, so
+ * a monitor's DOWN or a link's EXIT from a proc on an isolated loop is
+ * dropped for good (test_sim_partition: "a DOWN or link EXIT was lost
+ * under a partition").
+ */
+#define XTC_DST_BUG_PART_SYSDROP 67
+
 #endif /* XTC_DST_INJECT_H */

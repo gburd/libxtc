@@ -1880,10 +1880,15 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e, int sys, int *queued,
 	/*
 	 * DST cross-loop network model (sim only; a single relaxed load
 	 * gates it out of production).  Loops are identified by executor
-	 * slot + 1 (0 == standalone; see xtc_sim.h).  A partition cut DROPS the
-	 * message via the sender's existing soft-full path (XTC_E_AGAIN); a
-	 * net-latency window DEFERS the delivery to now + a seeded latency so
+	 * slot + 1 (0 == standalone; see xtc_sim.h).  A partition cut DROPS a
+	 * user message via the sender's existing soft-full path (XTC_E_AGAIN);
+	 * a net-latency window DEFERS the delivery to now + a seeded latency so
 	 * delivery ORDER is part of the replayable schedule.  Off by default.
+	 *
+	 * A sys message (a DOWN, a link EXIT) crosses the cut: in a real
+	 * process it is never dropped (__mbox_refuses_locked), and no sender
+	 * retries it, so cutting it would leave a watcher waiting forever for
+	 * a death no production build can lose.
 	 */
 	if (__xtc_sim_active()) {
 		xtc_loop_t *src = __xtc_current_loop;
@@ -1894,7 +1899,8 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e, int sys, int *queued,
 		    : (dst->exec_id < 0 ? 0 : dst->exec_id + 1);
 		int cross = (src != NULL && dst != NULL && src != dst);
 
-		if (cross && __xtc_sim_partition_blocked(src_id, dst_id)) {
+		if (cross && (!sys || XTC_DST_BUG(XTC_DST_BUG_PART_SYSDROP)) &&
+		    __xtc_sim_partition_blocked(src_id, dst_id)) {
 			/* Partitioned: drop like a soft-full mailbox.  The
 			 * sender already handles XTC_E_AGAIN, so a partitioned
 			 * peer never deadlocks the sim. */

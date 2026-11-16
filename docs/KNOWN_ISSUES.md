@@ -434,6 +434,35 @@ received, `XTC_E_DEADLK`); fixed, all pass, and the allocation auditor
 counts no message left behind.  Planted bug 49 (`SIM_DROP_LATE`)
 restores the old admission and is caught at seed 1.
 
+## FIXED (2.2): DST runs that partitioned loops could lose DOWN and EXIT signals
+
+**What it was.**  The simulator's partition (`xtc_sim_partition_set`,
+`xtc_sim_partition_isolate`) cut every message between the loops it
+separated, system messages included.  A monitor's DOWN or a link's EXIT
+from a proc on the far side of the cut was dropped, and nothing sends
+one again, so the watcher never learned of the death, even after the
+partition healed.  No real build can do this: inside a process a DOWN
+or an EXIT is never dropped (it bypasses the mailbox cap for that
+reason), and a real network that loses a link reports it.  A DST run
+with a supervisor on another loop than its child could then report a
+child that was never restarted, a liveness failure, or `XTC_E_DEADLK`
+from a watcher waiting for the DOWN, none of them a bug in the code
+under test.  A watcher on loop 1 that monitored a proc on loop 0 and
+isolated loop 0 got no DOWN; without the partition it got one.  Only
+simulator runs were affected.
+
+**Fix.**  A system message (a DOWN, a link EXIT, the library's room and
+start notices) crosses a partition; a user message is still dropped and
+its sender still gets `XTC_E_AGAIN`.  Under net latency a system message
+is deferred like any other and is dropped in flight only if its receiver
+dies.  `test_sim_partition` adds a monitor and a trapped link across an
+isolated loop: the victim's send to the watcher is refused and its DOWN
+and EXIT both arrive, inline and under net latency.  Before the fix it
+fails ("down 0 exit 0, want 1 1").  Planted bug 67 (`PART_SYSDROP`)
+restores the old cut and is caught at the test's seed.  The partition
+does not report a lost link as `XTC_DOWN_KIND_NOCONNECTION`, as a
+distributed runtime would; the simulator models one process.
+
 ## FIXED (2.2): pdict entries were never released at proc exit
 
 **What it was.**  `xtc_pdict.h` and xtc_pdict(3) say a proc's entries

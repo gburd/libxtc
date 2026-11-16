@@ -100,3 +100,7 @@ test_sim_send_wait      0          1   bug49 SIM_DROP_LATE: a latency-deferred s
 # supervisor) FAILS on each planted build: bug 60 SUP_WAIT_SKIP, 61
 # SUP_NESTED_CLEAN, 62 SUP_NESTED_NODRAIN.
 test_sim_sup_child      0          1   bug60/61/62: ordered start, nested give-up reaches the parent, drain reaches the subtree; added with "orc: servers and supervisors as supervised children; synchronous start"
+# p166/simdown (2.2).  The partition DST's built-in seed: a DOWN and a link
+# EXIT across an isolated loop.  FAILS on 40c560fb ("down 0 exit 0") and on
+# the planted build (-DXTC_DST_INJECT_BUG=67).
+test_sim_partition      -          -   bug67 PART_SYSDROP: a partition dropped a DOWN and a link EXIT for good; fixed "proc: a DOWN or link EXIT crosses the simulator's partition"

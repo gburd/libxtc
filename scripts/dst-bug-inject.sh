@@ -121,6 +121,7 @@ write_cases() {
 		"60;test_sim_sup_child;0;1;a child ran before the one before it was up" \
 		"61;test_sim_sup_child;0;1;a nested supervisor's give-up did not reach its parent" \
 		"62;test_sim_sup_child;0;1;a drain did not reach a nested supervisor's child" \
+		"67;test_sim_partition;0;0;a DOWN or link EXIT was lost under a partition" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -203,6 +204,8 @@ write_cases() {
 #               -> a spent subtree is a failure its parent restarts
 # 62 SUP_NESTED_NODRAIN sup.c a nested supervisor drops XTC_APP_SHUTDOWN_MSG
 #               -> an app drain reaches the children of a nested supervisor
+# 67 PART_SYSDROP proc.c the sim's partition cuts DOWN and link EXIT too
+#               -> a death across a cut still reaches its watcher
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

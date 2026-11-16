@@ -357,7 +357,9 @@ that an fsync confirmed.
 .Fn xtc_sim_partition_isolate
 and
 .Fn xtc_sim_partition_clear
-drop messages between loops (identified by executor slot + 1);
+drop messages between loops (identified by executor slot + 1).
+A monitor's DOWN and a link's EXIT still cross a cut, as they would in a
+real process;
 .Fn xtc_sim_net_latency
 delays each cross-loop message by a seeded latency.
 .Fn xtc_sim_sched_pessimal

@@ -215,9 +215,11 @@ XTC_API uint64_t xtc_sim_io_durable_end(int fd);
  * standalone).  Not pid.loop_id, which since 2.2 is a process-wide id.
  * A blocked edge makes __mbox_deliver DROP the message via the sender's
  * existing soft-full path (XTC_E_AGAIN), so a partitioned peer never
- * deadlocks the sim.  Scope: the in-process cross-loop path only -- the
- * real cross-machine raw-socket transport (io_net.c) cannot run under
- * the single-thread sim and is NOT modelled here.
+ * deadlocks the sim.  A monitor's DOWN and a link's EXIT still cross the
+ * cut: a real process never drops one, and nobody resends it.  Scope: the
+ * in-process cross-loop path only -- the real cross-machine raw-socket
+ * transport (io_net.c) cannot run under the single-thread sim and is NOT
+ * modelled here.
  *
  * PUBLIC: void    xtc_sim_partition_set __P((int, int, int));
  * PUBLIC: void    xtc_sim_partition_isolate __P((int));
