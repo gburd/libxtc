@@ -509,6 +509,25 @@ after an `xtc_rcu_init`, synchronize did not scan it, and an object that
 thread held was freed under it (`test/m13/test_rcu`
 `/thread_reader_after_fini` failed before, passes after).
 
+## FIXED (2.2, 2.1.3): a fire-and-forget `xtc_async` coroutine was kept until `xtc_loop_fini`
+
+**What it was.**  A coroutine spawned with `xtc_async(loop, fn, arg,
+NULL)` has no handle, so nobody can await it, but its task and its
+coroutine state stayed on the loop until `xtc_loop_fini`, as a handed-out
+handle's must.  400,000 such coroutines on one loop held 129 MB of RSS
+at the end of the run; 400,000 procs, which are reclaimed when they
+finish, held 4.4 MB.
+
+**Fix.**  A coroutine spawned without a handle is reclaimed when it
+returns, by the same path a proc's fiber takes.  A handle that was
+handed out keeps its lifetime, so `xtc_await` can still read its result
+until `xtc_loop_fini`.  The 400,000-coroutine run now holds 4.2 MB (on a
+48-core x86-64 host, io_uring build, three runs each: 129,220-129,228
+KiB before, 4,248 KiB after).  `test/m4/test_async`
+`/C12_async_detached_reclaimed` (20,000 fire-and-forget coroutines,
+allocations counted through the allocator hook) left 40,001
+allocations before and passes after.
+
 ## FIXED (2.2, 2.1.3): out of memory, `xtc_lrlock_apply_op` lost the write
 
 **What it was.**  When the operation log could not grow to hold a new
