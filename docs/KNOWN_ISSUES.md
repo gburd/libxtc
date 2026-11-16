@@ -6,6 +6,24 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## FIXED (2.1.3): `XTC_AIO_FORCE_OFFLOAD` could change a simulation run
+
+**What it was.**  The `xtc_aio_*` calls read `XTC_AIO_FORCE_OFFLOAD`
+with a raw `getenv` on first use, even inside a simulation run, which
+bypassed the determinism guard (API rule 1).  With the variable set, a
+sim run sent every operation down the offload path, which the simulator
+runs inline, so no completion was deferred or faulted: the run depended
+on how the process was launched, not on the seed.
+
+**Fix.**  The variable is read through `__os_env_get`, and only off the
+simulator; inside a run the offload is forced only when a test asks for
+it explicitly.  A plain replacement of `getenv` would have been wrong:
+`__os_env_get` trips the guard under the simulator, and strict mode
+aborts.  The API-discipline gate now flags a raw `getenv` in library
+code.  `test_sim_iofault` sets `XTC_AIO_FORCE_OFFLOAD=1` before its
+runs: before, the seeded run saw 0 injected faults and failed; after,
+it sees 5 and replays.
+
 ## FIXED (2.1.3): a fire-and-forget `xtc_async` coroutine was kept until `xtc_loop_fini`
 
 **What it was.**  A coroutine spawned with `xtc_async(loop, fn, arg,

@@ -6,9 +6,10 @@
 #  RULE 1 (library uses the __os_* wrappers): library code (src/, minus the
 #    wrapper implementations themselves) must not call the RAW cross-platform
 #    primitives the __os_* layer wraps -- malloc/calloc/realloc/free/strdup,
-#    pthread_create, clock_gettime/gettimeofday/nanosleep/usleep -- because the
-#    wrappers add the alloc hook (embedder accounting), preemption-safety
-#    brackets, and portability.  Raw calls bypass all three.
+#    pthread_create, clock_gettime/gettimeofday/nanosleep/usleep, getenv --
+#    because the wrappers add the alloc hook (embedder accounting),
+#    preemption-safety brackets, portability, and the determinism guard (an
+#    environment read under the simulator).  Raw calls bypass them.
 #
 #  RULE 2 (no ignored __os_ alloc rc): never "(void)__os_malloc(...)",
 #    _calloc, _realloc, _strdup or _aligned_alloc (a voided strdup once
@@ -93,8 +94,14 @@ raw_time=$(printf '%s\n' "$lib_c" | while IFS= read -r f; do
 	| sed "s#^#$f:#"
 done | filter_markers)
 
+raw_env=$(printf '%s\n' "$lib_c" | while IFS= read -r f; do
+	strip_comments "$f" | grep -nE '(^|[^_[:alnum:]])(secure_)?getenv[[:space:]]*\(' \
+	    2>/dev/null | sed "s#^#$f:#"
+done | filter_markers)
+
 for label in "raw alloc:$raw_alloc" "raw free:$raw_free" \
-             "raw pthread_create:$raw_thr" "raw clock/sleep:$raw_time"; do
+             "raw pthread_create:$raw_thr" "raw clock/sleep:$raw_time" \
+             "raw getenv:$raw_env"; do
 	name=${label%%:*}; body=${label#*:}
 	if [ -n "$body" ]; then
 		echo "  [api] FAIL RULE 1 ($name -- use the __os_* wrapper, or mark XTC_RAW_OK):"
