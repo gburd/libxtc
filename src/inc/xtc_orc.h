@@ -4,10 +4,10 @@
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_orc.h
- *	L4 orchestration: supervisor.  M10 ships ONE_FOR_ONE strategy
- *	with restart intensity (max-N-restarts-per-W-seconds).  The
- *	other strategies (one_for_all, rest_for_one, simple_one_for_one)
- *	and the gen_server / app / registry layer arrive in M10.5.
+ *	L4 orchestration: the supervisor, with the four OTP restart
+ *	strategies (one_for_one, one_for_all, rest_for_one,
+ *	simple_one_for_one) and restart intensity
+ *	(max-N-restarts-per-W-seconds).
  *
  *	A supervisor is itself an xtc_proc that monitors its children
  *	and acts on their DOWN messages.  Restart intensity is enforced
@@ -32,16 +32,14 @@ extern "C" {
 #endif
 
 /*
- * Restart strategies.  M10 implements ONE_FOR_ONE; the others have
- * named slots so callers can configure for the future and get a
- * clear XTC_E_NOSYS for an unrecognized strategy value.  All four
- * strategies below are implemented.
+ * Restart strategies.  All four are implemented; xtc_sup_start returns
+ * XTC_E_NOSYS for any other value.
  */
 typedef enum xtc_restart_strategy {
-	XTC_SUP_ONE_FOR_ONE  = 0,
-	XTC_SUP_ONE_FOR_ALL  = 1,    /* M10.5 */
-	XTC_SUP_REST_FOR_ONE = 2,    /* M10.5 */
-	XTC_SUP_SIMPLE_OFO   = 3     /* M10.5 */
+	XTC_SUP_ONE_FOR_ONE = 0,
+	XTC_SUP_ONE_FOR_ALL = 1,
+	XTC_SUP_REST_FOR_ONE = 2,
+	XTC_SUP_SIMPLE_OFO = 3
 } xtc_restart_strategy_t;
 
 typedef enum xtc_restart_policy {

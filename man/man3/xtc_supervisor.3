@@ -113,8 +113,9 @@ of 0 or elements of different sizes.
 .Va opts.max_restarts
 restarts within
 .Va opts.period_ns
-exhausts the supervisor; it gives up and exits.  Default:
-1 in 5 seconds.
+exhausts the supervisor; it gives up and exits.  Default
+.Pq Dv XTC_SUP_OPTS_DEFAULT :
+3 restarts in 5 seconds.
 .Pp
 .Sy Bounded dynamic pool:
 for the
