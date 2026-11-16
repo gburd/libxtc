@@ -115,6 +115,8 @@ write_cases() {
 		"52;test_sim_external;0;1;an external completion was not delivered" \
 		"53;test_sim_external;0;1;a lane delivered out of order" \
 		"54;test_sim_rcu;0;0;fiber that lived through xtc_rcu_fini was invisible" \
+		"63;test_sim_rcu;0;0;a slotless reader saw a freed node" \
+		"64;test_sim_rcu;0;0;an unrecorded retire freed a node under a reader" \
 		"60;test_sim_sup_child;0;1;a child ran before the one before it was up" \
 		"61;test_sim_sup_child;0;1;a nested supervisor's give-up did not reach its parent" \
 		"62;test_sim_sup_child;0;1;a drain did not reach a nested supervisor's child" \
@@ -187,6 +189,11 @@ write_cases() {
 # 54 RCU_SLOT_GEN rcu.c: a fiber's cached reader slot skips the generation
 #               check -> a fiber that lives through xtc_rcu_fini stays visible to
 #               synchronize (it would publish into a freed slot)
+# 63 RCU_NOSLOT rcu.c does not count a read-side that got no reader slot
+#               -> out of memory, synchronize still waits for every reader
+# 64 RCU_RETIRE_FREE rcu.c frees an unrecordable retirement at once
+#               -> out of memory, a retired object is leaked, never freed
+#               under a reader
 # 60 SUP_WAIT_SKIP sup.c wait_children does not wait for a server/sup child
 #               -> each child starts only once the one before it is up
 # 61 SUP_NESTED_CLEAN sup.c a nested supervisor's give-up exits cleanly

@@ -58,6 +58,18 @@ and keeps it, so later read-side sections on the fiber take no lock.
 Retired records bucket by epoch;
 records two epochs old are guaranteed safe to free.
 .Pp
+Out of memory,
+.Nm xtc_rcu
+never frees an object under a reader.
+A retirement that cannot be recorded is leaked instead, and reported as
+an
+.Dv XTC_TAIL_LIFECYCLE_DROP
+event of
+.Xr xtc_tail 3 .
+A read-side that cannot get its per-reader counter still holds off
+.Fn xtc_rcu_synchronize
+until it ends.
+.Pp
 .Fn xtc_rcu_current_epoch
 returns the current value of the global epoch counter.  It is
 intended for diagnostics and tests -- the counter advances on each

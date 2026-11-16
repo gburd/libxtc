@@ -117,6 +117,11 @@
  *	                   through xtc_rcu_fini publishes into a freed slot
  *	                   that synchronize does not scan (test_sim_rcu: a
  *	                   reader saw a freed node).
+ *	 63  RCU_NOSLOT -- rcu.c does not count a read-side that got no
+ *	                   reader slot, so synchronize frees under it
+ *	                   (test_sim_rcu).
+ *	 64  RCU_RETIRE_FREE -- rcu.c frees an unrecordable retirement at
+ *	                   once, under its readers (test_sim_rcu).
  *
  *	NOT plantable under DST (an honest gap, recorded so it is not
  *	mistaken for missing coverage): the xtc_amutex mutual-exclusion and
@@ -316,6 +321,22 @@
 
 /* rcu.c: a fiber's cached reader slot, no generation check. */
 #define XTC_DST_BUG_RCU_SLOT_GEN 54
+
+/*
+ * 63 RCU_NOSLOT: a read-side that could not get a reader slot (out of
+ * memory) is not counted, so synchronize does not wait for it and a
+ * writer frees a node under it (test_sim_rcu: "a slotless reader saw a
+ * freed node").
+ */
+#define XTC_DST_BUG_RCU_NOSLOT 63
+
+/*
+ * 64 RCU_RETIRE_FREE: a retirement that cannot be recorded (out of
+ * memory) frees the object at once instead of leaking it, under the
+ * readers that still hold it (test_sim_rcu: "an unrecorded retire freed
+ * a node under a reader").
+ */
+#define XTC_DST_BUG_RCU_RETIRE_FREE 64
 
 /*
  * 60 SUP_WAIT_SKIP: a supervisor started with wait_children does not wait
