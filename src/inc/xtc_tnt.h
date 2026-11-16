@@ -31,6 +31,8 @@
 #ifndef XTC_TNT_H
 #define XTC_TNT_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -285,8 +287,8 @@ typedef enum xtc_tnt_io_result {
  * destination) SPSC ring and reaches the mailbox on the destination's
  * next tick; a full ring is reported as XTC_TNT_SEND_MAILBOX_FULL.  FIFO
  * holds per (sender shard, receiver). */
-xtc_tnt_send_result_t xtc_tnt_send(xtc_tnt_handle_t to, uint16_t tag,
-                           const void *payload, size_t payload_size);
+XTC_API xtc_tnt_send_result_t xtc_tnt_send(xtc_tnt_handle_t to, uint16_t tag,
+    const void *payload, size_t payload_size);
 
 /* Send from OUTSIDE any handler (a proc, a plain thread): thread-safe.
  * `source` is what the receiver sees as msg->body.user.source.  The
@@ -294,15 +296,15 @@ xtc_tnt_send_result_t xtc_tnt_send(xtc_tnt_handle_t to, uint16_t tag,
  * mailbox on the target's next tick; a full ring drops it with
  * XTC_TNT_SEND_MAILBOX_FULL.  Valid only while the system is running
  * (between xtc_tnt_start and its return). */
-xtc_tnt_send_result_t xtc_tnt_send_from(xtc_tnt_handle_t source,
-                           xtc_tnt_handle_t to, uint16_t tag,
-                           const void *payload, size_t payload_size);
+XTC_API xtc_tnt_send_result_t xtc_tnt_send_from(xtc_tnt_handle_t source,
+    xtc_tnt_handle_t to, uint16_t tag, const void *payload,
+    size_t payload_size);
 
 /* Spawn a new Isolate of type_id on the CURRENT shard.  The child's
  * init_fn runs immediately (not deferred).  Returns the new handle in
  * *out_handle on success. */
-xtc_tnt_spawn_error_t xtc_tnt_spawn(uint8_t type_id, const void *args,
-                            size_t args_size, xtc_tnt_handle_t *out_handle);
+XTC_API xtc_tnt_spawn_error_t xtc_tnt_spawn(uint8_t type_id, const void *args,
+    size_t args_size, xtc_tnt_handle_t *out_handle);
 
 /* I/O effects.  These stage an operation into the current turn frame;
  * the shard commits it into xtc_aio / the net layer only if the
@@ -310,12 +312,13 @@ xtc_tnt_spawn_error_t xtc_tnt_spawn(uint8_t type_id, const void *args,
 
 /* Stage a recv on fd into a reactor buffer; on completion the Isolate
  * receives a XTC_TNT_IO_TAG_RECV_COMPLETE message. */
-xtc_tnt_io_result_t xtc_tnt_submit_recv(int fd);
+XTC_API xtc_tnt_io_result_t xtc_tnt_submit_recv(int fd);
 
 /* Stage a send of buffer[0..len) on fd; buffer must live inside the
  * Isolate struct (it is read at commit time, after the handler
  * returns).  On completion: XTC_TNT_IO_TAG_SEND_COMPLETE. */
-xtc_tnt_io_result_t xtc_tnt_io_send(int fd, const void *buffer, size_t len);
+XTC_API xtc_tnt_io_result_t xtc_tnt_io_send(int fd, const void *buffer,
+    size_t len);
 
 /* Zero-copy I/O.  The reactor buffer of a RECV_COMPLETE message is
  * freed when the handler returns; xtc_tnt_recv_take(msg), called in the
@@ -329,26 +332,27 @@ xtc_tnt_io_result_t xtc_tnt_io_send(int fd, const void *buffer, size_t len);
  * completed, or when the handler does not return XTC_TNT_WAIT_IO (the
  * op is never committed); on any other result the caller still owns it.
  * Echoing a received chunk is then recv_take + io_send_owned: no copy. */
-xtc_tnt_io_result_t xtc_tnt_io_send_owned(int fd, void *buffer, size_t len);
-void *xtc_tnt_recv_take(xtc_tnt_message_t *msg);
+XTC_API xtc_tnt_io_result_t xtc_tnt_io_send_owned(int fd, void *buffer,
+    size_t len);
+XTC_API void *xtc_tnt_recv_take(xtc_tnt_message_t *msg);
 
 /* Stage a close of fd; on completion: XTC_TNT_IO_TAG_CLOSE_COMPLETE. */
-xtc_tnt_io_result_t xtc_tnt_submit_close(int fd);
+XTC_API xtc_tnt_io_result_t xtc_tnt_submit_close(int fd);
 
 /* Register a one-shot timer; after duration_ns the Isolate receives a
  * message with the given tag. */
-void xtc_tnt_register_timer(uint64_t duration_ns, uint16_t tag);
+XTC_API void xtc_tnt_register_timer(uint64_t duration_ns, uint16_t tag);
 
 /* The current Isolate's identity. */
-xtc_tnt_handle_t xtc_tnt_self(void);
+XTC_API xtc_tnt_handle_t xtc_tnt_self(void);
 
 /* The current shard's 0-based id. */
-uint8_t xtc_tnt_shard_id(void);
+XTC_API uint8_t xtc_tnt_shard_id(void);
 
 /* The shard-wide scratch arena, reset before every handler call.  For
  * per-turn temporaries only; do not retain across handler returns.
  * Returns a bump pointer of `size` bytes, or NULL if exhausted. */
-void *xtc_tnt_scratch_arena(size_t size);
+XTC_API void *xtc_tnt_scratch_arena(size_t size);
 
 /* ---- Ergonomic helpers -------------------------------------------- */
 
@@ -367,18 +371,18 @@ void *xtc_tnt_scratch_arena(size_t size);
  * XTC_OK-style 0 on clean shutdown, negative on a boot failure: XTC_E_INVAL
  * for a spec whose .size is 0 or that names no types or shards.
  */
-int xtc_tnt_start(const xtc_tnt_spec_t *spec);
+XTC_API int xtc_tnt_start(const xtc_tnt_spec_t *spec);
 
 /* Request the running system to stop (kicks every shard).  Safe to
  * call from a signal handler or another thread. */
-void xtc_tnt_stop(void);
+XTC_API void xtc_tnt_stop(void);
 
 /* Spawn an Isolate from OUTSIDE the shard fibers (e.g. from main before
  * xtc_tnt_start, or from a non-isolate listener).  Routes the spawn onto
  * the target shard and runs the init synchronously on that shard's next
  * tick.  shard is 0..shard_count-1.  Thread-safe. */
-xtc_tnt_spawn_error_t xtc_tnt_spawn_on(uint8_t shard, uint8_t type_id,
-                               const void *args, size_t args_size);
+XTC_API xtc_tnt_spawn_error_t xtc_tnt_spawn_on(uint8_t shard, uint8_t type_id,
+    const void *args, size_t args_size);
 
 #ifdef __cplusplus
 }

@@ -509,6 +509,29 @@ after an `xtc_rcu_init`, synchronize did not scan it, and an object that
 thread held was freed under it (`test/m13/test_rcu`
 `/thread_reader_after_fini` failed before, passes after).
 
+## FIXED (2.2, 2.1.3): 83 installed declarations lacked `XTC_API`
+
+**What it was.**  `XTC_API` marks a declaration for export from a
+Windows DLL (xtc_export.h); 83 functions in the installed headers had
+none: 26 in xtc.h (`xtc_strerror`, `xtc_malloc`, `xtc_free`,
+`xtc_clock_mono`, ...), 22 in xtc_fs.h, 15 each in xtc_proc.h (with the
+recovery-frame hook `__xtc_proc_recovery_slot`) and xtc_tnt.h, 2 in
+xtc_net.h, and one each in xtc_exec.h, xtc_slab.h and xtc_dio_sched.h.
+The three Windows recovery hooks (`__xtc_recovery_prep`, `_ctx`,
+`_result`) had none either.  A DLL build would not have exported them,
+and a consumer would have failed to link.  xtc.h, xtc_fs.h and
+xtc_tnt.h did not include xtc_export.h at all.  Nothing changed on ELF
+or Mach-O, where `XTC_API` is empty: every one of these was already
+exported from libxtc.so through the version script.
+
+**Fix.**  Every declaration carries `XTC_API`, and the three headers
+include xtc_export.h.  `test/dist/test_header_api.sh` (in `make check`)
+prints every declaration the installed headers make, on the host's,
+the `_WIN32`, the `__APPLE__` and the `__FreeBSD__` branches, and fails
+on one without `XTC_API`: 83 names before, none after (796
+declarations).  The Windows build is still a static `xtc.lib`; see
+docs/windows-matrix.md.
+
 ## FIXED (2.2, 2.1.3): `XTC_AIO_FORCE_OFFLOAD` could change a simulation run
 
 **What it was.**  The `xtc_aio_*` calls read `XTC_AIO_FORCE_OFFLOAD`

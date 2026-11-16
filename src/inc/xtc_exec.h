@@ -137,7 +137,7 @@ XTC_API int  xtc_exec_get_eager_rebalance(xtc_exec_t *exec);
 XTC_API void xtc_exec_set_steal_backoff(xtc_exec_t *exec, int on);
 XTC_API int  xtc_exec_get_steal_backoff(xtc_exec_t *exec);
 
-int  xtc_exec_set_preempt(xtc_exec_t *exec, int64_t interval_ns);
+XTC_API int xtc_exec_set_preempt(xtc_exec_t *exec, int64_t interval_ns);
 XTC_API int  xtc_exec_stop(xtc_exec_t *exec);
 
 XTC_API int  xtc_exec_n_loops(xtc_exec_t *exec);

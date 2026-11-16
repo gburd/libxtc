@@ -180,7 +180,7 @@ has no tier or more than one, and if the table below is out of date with
 the headers; it regenerates the table with `XTC_TIERS_UPDATE=1`.
 
 Why each experimental header is experimental: `xtc_tnt.h` (the
-stackless isolate layer, young, no `XTC_API` on its entry points),
+stackless isolate layer, young),
 `xtc_accel.h` (attached-compute bridge, one backend, scope still
 moving), `xtc_batch.h` and `xtc_sched.h` (continuous batching and the
 scheduler policy hooks; both already carry a size/version pair because
