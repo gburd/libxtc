@@ -333,6 +333,25 @@ xtc_config_h = configure_file(
   configuration : cdata,
 )
 
+# The installed xtc_version.h: the version, the backends and ucontext for
+# a consumer (mirrors configure.ac's XTC_*_MACRO substitutions).
+vdata = configuration_data()
+vdata.set('XTC_VERSION_MAJOR', ver_parts[0].to_int())
+vdata.set('XTC_VERSION_MINOR', ver_parts[1].to_int())
+vdata.set('XTC_VERSION_PATCH', ver_parts[2].to_int())
+vdata.set('XTC_VERSION_FULL', ver)
+vdata.set('XTC_TLS_BACKEND_MACRO', tls_macro[tls_backend])
+vdata.set('XTC_IO_BACKEND_MACRO', io_macro[io_backend])
+vdata.set('XTC_UCONTEXT_DEFINE', cdata.has('XTC_HAVE_UCONTEXT')
+  ? '#define XTC_HAVE_UCONTEXT 1' : '/* #undef XTC_HAVE_UCONTEXT */')
+xtc_version_h = configure_file(
+  input : 'dist/xtc_version.h.in',
+  output : 'xtc_version.h',
+  configuration : vdata,
+  install : true,
+  install_dir : get_option('includedir'),
+)
+
 message('xtc meson: io-backend=' + io_backend + ' tls=' + tls_backend
   + ' accel=' + (have_accel ? 'yes' : 'no') + ' usdt=' + probes_mode)
 

@@ -31,13 +31,19 @@ extern "C" {
 #endif
 
 /*
- * Compile-time version macros.
- * These values come from configure-time substitution into xtc_config.h
- * via the build system; if xtc_config.h is unavailable (rare; e.g. when
- * a consumer parses just this header), they fall back to known-bad
- * sentinels so a missing build is detected loudly.
+ * Compile-time version macros, and what the build selected: its TLS and
+ * I/O backends and ucontext.  An installed libxtc carries them in
+ * xtc_version.h, which configure (or meson) generates from
+ * dist/xtc_version.h.in; the library's own build also has its private
+ * xtc_config.h, which defines the same names with the same values.  A
+ * header used without either (parsed on its own, or a hand-made build)
+ * falls back to known-bad sentinels, so a missing build is detected
+ * loudly.
  */
 #if defined(__has_include)
+# if __has_include("xtc_version.h")
+#  include "xtc_version.h"
+# endif
 # if __has_include("xtc_config.h")
 #  include "xtc_config.h"
 # endif

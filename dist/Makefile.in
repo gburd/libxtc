@@ -2495,6 +2495,7 @@ install: all
 	for h in $(LIB_HDRS_PUBLIC); do \
 		$(INSTALL_DATA) $$h $(DESTDIR)$(includedir)/; \
 	done
+	$(INSTALL_DATA) xtc_version.h $(DESTDIR)$(includedir)/
 	$(INSTALL_DATA) $(INSTALL_NAME).pc $(DESTDIR)$(libdir)/pkgconfig/$(INSTALL_NAME).pc
 	@if [ "$(XTC_ENABLE_SHARED)" = yes ]; then \
 		echo "installing shared library"; \
@@ -2521,6 +2522,7 @@ uninstall:
 	for h in $(LIB_HDRS_PUBLIC); do \
 		$(RM) $(DESTDIR)$(includedir)/`basename $$h`; \
 	done
+	$(RM) $(DESTDIR)$(includedir)/xtc_version.h
 
 # -------------------------------------------------------------------------
 # Cleanup.
@@ -2536,7 +2538,7 @@ clean:
 	rm -rf *.dSYM
 
 distclean: clean
-	$(RM) Makefile xtc_config.h $(INSTALL_NAME).pc config.log config.status
+	$(RM) Makefile xtc_config.h xtc_version.h $(INSTALL_NAME).pc config.log config.status
 	$(RM) -r autom4te.cache
 
 
