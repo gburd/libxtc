@@ -420,9 +420,9 @@ xtc_lwlock_acquire(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 			return XTC_OK;
 		}
 
-		/* Fiber-park path (DST): a caller inside a fiber PARKS instead
-		 * of pthread_cond_wait, yielding to the sim scheduler.  Purely
-		 * additive; gated on running inside a fiber. */
+		/* Fiber-park path: a caller inside a fiber (any build, the
+		 * simulator included) PARKS instead of pthread_cond_wait, so
+		 * the other fibers on its loop keep running. */
 		{
 			xtc_task_t *cur = __xtc_current_task();
 			if (cur != NULL) {

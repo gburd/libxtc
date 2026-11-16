@@ -86,8 +86,13 @@ is a user tag for diagnostics (groups locks by purpose so
 profilers can attribute contention).
 .Pp
 .Fn xtc_lwlock_acquire
-blocks until the calling thread holds the lock in
-.Fa mode :
+waits until the caller holds the lock in
+.Fa mode .
+Inside a fiber
+.Pq a process or an Xr xtc_async 3 No coroutine
+a contended acquire parks the fiber, so the other fibers on its loop
+keep running; on a plain thread it waits on a condition variable.
+The modes:
 .Bl -tag -width "XTC_LW_EXCLUSIVE" -offset indent
 .It Dv XTC_LW_SHARED
 Multiple threads can hold the lock concurrently in shared mode.
