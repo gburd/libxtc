@@ -24,6 +24,7 @@
 #include "xtc_orc.h"
 #include "xtc_sync.h"
 #include "proc_int.h"      /* owner-qualified lookup/send for join/stop */
+#include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
 
 #include <stdatomic.h>
 #include <stdint.h>
@@ -73,6 +74,7 @@ struct fsm_run {
 	struct fsm_postponed      *pq_tail;
 	/* a pending state timeout deadline, or -1 if none */
 	int64_t                    timeout_ns;   /* relative, armed per result */
+	void *inflight;                          /* message being dispatched */
 };
 
 /* ---- postponed-event queue -------------------------------------- */
@@ -204,12 +206,14 @@ fsm_apply(struct fsm_run *r, xtc_fsm_result_t res, int *out_stop_reason)
  * ran inline after the event loop, which a kill or xtc_exit_self unwinds
  * past, so the run state (and any postponed events) leaked: LSan, 80
  * bytes per killed machine.  The same fix svr.c (1.55.1) and sup.c
- * (2.1.2) got.
+ * (2.1.2) got.  It also frees the message being dispatched, as svr.c
+ * does: an event() that calls xtc_exit_self leaves it in flight.
  */
 static void
 fsm_exited(void *arg)
 {
 	struct fsm_run *r = arg;
+	__os_free(r->inflight); /* an event() that exited mid-dispatch */
 	fsm_pq_free(r);
 	__os_free(r);
 }
@@ -260,16 +264,18 @@ fsm_entry(void *arg)
 		if (size == 0) { __os_free(msg); continue; }
 
 		kind = ((uint8_t *)msg)[0];
+		r->inflight = msg;
 
 		if (size == 1 && kind == 'S') {   /* stop kick */
+			r->inflight = NULL;
 			__os_free(msg);
 			break;
 		}
 
 		if (kind == 'E') {
 			const void *pl = size > 1 ? (uint8_t *)msg + 1 : NULL;
-			running = fsm_dispatch(r, pl, size - 1, NULL, &stop_reason);
-			__os_free(msg);
+			running =
+			    fsm_dispatch(r, pl, size - 1, NULL, &stop_reason);
 		} else if (kind == 'C' && size >= FSM_CALL_HDR) {
 			struct xtc_fsm_call call;
 			const void *pl;
@@ -286,10 +292,10 @@ fsm_entry(void *arg)
 			 * gets an empty reply so the caller does not hang. */
 			if (!call.replied)
 				(void)xtc_fsm_reply(&call, NULL, 0);
-			__os_free(msg);
-		} else {
-			__os_free(msg);   /* malformed */
 		}
+		/* An event, a call, or malformed: done with it. */
+		r->inflight = NULL;
+		__os_free(msg);
 	}
 
 	if (r->cb.terminate != NULL)
@@ -422,6 +428,21 @@ xtc_fsm_send(xtc_pid_t target, const void *ev, size_t len)
 	return rc;
 }
 
+/*
+ * Reply waits are sliced so the machine's liveness is checked between
+ * slices: a machine that stops or dies without replying fails the call
+ * with XTC_E_NOTFOUND within about one slice, as xtc_svr_call does.
+ */
+#define FSM_WAIT_SLICE_NS (25LL * 1000 * 1000)
+
+/* Has the machine's proc exited?  Resolves the pid as xtc_send does. */
+static int
+__fsm_gone(xtc_pid_t target)
+{
+	xtc_mailbox_stats_t st = XTC_MAILBOX_STATS_INIT;
+	return xtc_proc_mailbox_stats(target, &st) != XTC_OK;
+}
+
 /* Any fsm reply (by its trailing magic); the tag is checked by the caller. */
 static int
 __match_fsm_reply(const void *data, size_t size, void *u)
@@ -444,7 +465,7 @@ xtc_fsm_call(xtc_pid_t target, const void *req, size_t req_size,
 	xtc_pid_t self;
 	size_t msg_size;
 	int64_t deadline = 0;
-	int rc;
+	int rc, gone = 0;
 
 	if (req_size > 0 && req == NULL) return XTC_E_INVAL;
 	if (req_size > SIZE_MAX - FSM_CALL_HDR) return XTC_E_INVAL;
@@ -466,7 +487,12 @@ xtc_fsm_call(xtc_pid_t target, const void *req, size_t req_size,
 	 * Until 2.1.2 this was a plain xtc_recv that freed every message
 	 * that was not its reply (the caller's other mail, a monitor DOWN
 	 * included).  A reply whose tag is not ours answers an earlier
-	 * call that timed out, and is dropped.
+	 * call that timed out, and is dropped.  The wait is sliced
+	 * (FSM_WAIT_SLICE_NS) to check the machine's liveness; once it is
+	 * seen gone, one more slice is allowed for a reply it sent just
+	 * before it exited that is still in flight (a cross-loop delivery
+	 * can be deferred).  Through 2.1.2 a machine that stopped mid-call
+	 * left the caller waiting out its whole timeout, forever with -1.
 	 */
 	if (timeout_ns >= 0) {
 		(void)__os_clock_mono(&deadline);
@@ -476,16 +502,26 @@ xtc_fsm_call(xtc_pid_t target, const void *req, size_t req_size,
 		void *rmsg = NULL;
 		size_t rsize = 0;
 		uint32_t rtag;
-		int64_t to = -1, now = 0;
+		int64_t to = FSM_WAIT_SLICE_NS, now = 0;
 		if (timeout_ns >= 0) {
 			(void)__os_clock_mono(&now);
 			if (now >= deadline)
-				return XTC_E_AGAIN;
-			to = deadline - now;
+				return gone ? XTC_E_NOTFOUND : XTC_E_AGAIN;
+			if (deadline - now < to)
+				to = deadline - now;
 		}
 		rc = xtc_recv_match(__match_fsm_reply, NULL, &rmsg, &rsize, to);
+		if (rc == XTC_E_AGAIN) {
+			if (gone)
+				return XTC_E_NOTFOUND;
+			/* Planted bug 33 (FSMCALL_NOLIVE): no liveness check,
+			 * the 2.1.2 wait. */
+			if (!XTC_DST_BUG(XTC_DST_BUG_FSMCALL_NOLIVE))
+				gone = __fsm_gone(target);
+			continue; /* the deadline check returns XTC_E_AGAIN */
+		}
 		if (rc != XTC_OK)
-			return rc; /* XTC_E_AGAIN on timeout */
+			return rc;
 		memcpy(&rtag, (uint8_t *)rmsg + rsize - FSM_REPLY_HDR, 4);
 		if (rtag != tag) {
 			__os_free(rmsg); /* a late reply: drop */

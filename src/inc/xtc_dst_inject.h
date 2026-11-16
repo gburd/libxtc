@@ -219,4 +219,12 @@
 #define XTC_DST_BUG_FAULTKIND 31 /* proc.c: user-frame fault reads EXIT */
 #define XTC_DST_BUG_INITEXIT 32  /* svr.c: failed init returns CLEAN */
 
+/*
+ * 33 FSMCALL_NOLIVE: xtc_fsm_call waits for its reply with no check that
+ * the machine is alive, as 2.1.2 did, so a call made just before the
+ * machine exits, is killed or stops waits out its whole timeout
+ * (test_sim_fsm_call: "a call outlived the machine").
+ */
+#define XTC_DST_BUG_FSMCALL_NOLIVE 33
+
 #endif /* XTC_DST_INJECT_H */

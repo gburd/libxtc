@@ -95,6 +95,7 @@ write_cases() {
 		"30;test_sim_down_kind;0;1;(EXIT|KILL|MKILL)\\(code -1\\): want kind 1 code -1, got kind (0|-1) " \
 		"31;test_sim_down_kind;0;1;FRAME\\(code [0-9]+\\): want kind 2 code 11, got kind [01] " \
 		"32;test_sim_down_kind;0;1;INIT\\(code 0\\): want kind 1 code -2, got kind 0 " \
+		"33;test_sim_fsm_call;0;1;a call outlived the machine" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -139,6 +140,8 @@ write_cases() {
 #               reads CLEAN; xtc_exit_self(-1) reads CLEAN)
 # 31 FAULTKIND  proc.c drops the fault override -> a user-frame fault reads SIGNAL
 # 32 INITEXIT   svr.c returns after a failed init -> a failed init reads EXIT(rc)
+# 33 FSMCALL_NOLIVE fsm.c: a call does not check the machine is alive
+#               -> a call notices a machine that ended within ~one wait slice
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

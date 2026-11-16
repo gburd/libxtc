@@ -625,6 +625,80 @@ test_fsm_killed_frees(const MunitParameter p[], void *data)
 	return MUNIT_OK;
 }
 
+/*
+ * A machine that dies while a call waits on it: xtc_fsm_call checks the
+ * machine's liveness between 25 ms wait slices, so the caller gets
+ * XTC_E_NOTFOUND within about one slice.  Through 2.1.2 there was no
+ * liveness check at all; the caller waited out its whole timeout (here
+ * 2 s).  The call leaves nothing behind in the caller's mailbox, and the
+ * call message the machine was dispatching when it exited is freed (an
+ * ASan build reports it otherwise).
+ */
+static xtc_fsm_result_t
+stop_event(void *st, int state, const void *msg, size_t len,
+    xtc_fsm_call_t *call)
+{
+	xtc_fsm_result_t r = { XTC_FSM_KEEP, 0, 0 };
+	(void)st;
+	(void)state;
+	(void)msg;
+	(void)len;
+	(void)call;
+	(void)xtc_exit_self(3); /* the call is never replied */
+	return r;
+}
+
+struct stop_call {
+	xtc_pid_t fsm_pid;
+	int rc;
+	int64_t elapsed_ns;
+	int left;
+};
+
+static void
+stop_caller(void *arg)
+{
+	struct stop_call *c = arg;
+	void *rep = NULL, *m;
+	size_t rn = 0, sz;
+	int64_t t0 = xtc_clock_mono();
+	c->rc =
+	    xtc_fsm_call(c->fsm_pid, "?", 1, &rep, &rn, 2000LL * 1000 * 1000);
+	c->elapsed_ns = xtc_clock_mono() - t0;
+	xtc_free(rep);
+	(void)xtc_proc_sleep(10LL * 1000 * 1000);
+	while (xtc_recv(&m, &sz, 0) == XTC_OK) {
+		c->left++;
+		xtc_free(m);
+	}
+}
+
+static MunitResult
+test_fsm_call_machine_stops(const MunitParameter p[], void *data)
+{
+	xtc_loop_t *loop;
+	xtc_fsm_t *fsm;
+	xtc_fsm_callbacks_t cb = XTC_FSM_CALLBACKS_INIT;
+	struct stop_call c;
+	(void)p;
+	(void)data;
+	memset(&c, 0, sizeof c);
+	cb.event = stop_event;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_fsm_start(loop, &cb, NULL, 0, NULL, &fsm), ==,
+	    XTC_OK);
+	c.fsm_pid = xtc_fsm_pid(fsm);
+	munit_assert_int(xtc_proc_spawn(loop, stop_caller, &c, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(c.rc, ==, XTC_E_NOTFOUND);
+	munit_assert_int64(c.elapsed_ns, <, 500LL * 1000 * 1000);
+	munit_assert_int(c.left, ==, 0);
+	(void)xtc_fsm_join(fsm, 0);
+	(void)xtc_loop_fini(loop);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/fsm_basic", test_fsm_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fsm_state_timeout", test_fsm_state_timeout, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -634,6 +708,8 @@ static MunitTest tests[] = {
 	{ "/fsm_enter_fail_exits", test_fsm_enter_fail_exits, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fsm_killed_frees", test_fsm_killed_frees, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/fsm_call_machine_stops", test_fsm_call_machine_stops, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

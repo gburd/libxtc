@@ -231,6 +231,24 @@ the supervisor already did.  `/m10.5/fsm/fsm_killed_frees` fails on
 2.1.2 (a postponed event still allocated after the join) and passes on
 2.1.3.
 
+## FIXED (2.1.3): xtc_fsm_call waited out its timeout on a machine that had stopped
+
+`xtc_fsm_call` waited for its reply with no check that the machine was
+still alive, so a machine that stopped, was killed or faulted before it
+replied left the caller waiting out its whole timeout, forever with -1.
+The wait now checks the machine's liveness between 25 ms slices, as
+`xtc_svr_call` does, and returns `XTC_E_NOTFOUND` (an existing code)
+within about one slice of the machine's exit; a reply sent just before
+the exit is still taken.  A machine whose `event()` exits while it
+dispatches a message also frees that message now.
+`/m10.5/fsm/fsm_call_machine_stops` fails on 2.1.2 (`XTC_E_AGAIN` after
+the 2 s timeout) and passes on 2.1.3, and `test/sim/test_sim_fsm_call`
+(a machine that exits, is killed or stops while calls wait on it, under
+net latency) fails 22 of its 24 seeds on 2.1.2; planted bug 33 puts the
+old wait back.  On main (2.2) the call monitors the machine instead,
+with the new `xtc_demonitor`; 2.1 cannot add that symbol, so
+`xtc_svr_call` keeps its 25 ms poll here too.
+
 ## FIXED (2.1.2): a cross-shard xtc_tnt_send could lose messages
 
 **What it was.**  Through 2.1.1 an `xtc_tnt_send` to an Isolate on

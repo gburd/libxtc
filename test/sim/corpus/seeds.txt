@@ -91,3 +91,6 @@ test_sim_scope          2          1   bug25 SCOPE_UNMASKED_FIN: kill in a parki
 test_sim_sup_strategy   1          1   bug26 SUP_LOCKPARK: supervisor slept in a group restart holding sup->lock; fixed "sup: never hold a lock across the group-restart wait"
 test_sim_sup_strategy   2          1   bug27 SUP_NOHOOK: a killed supervisor left its children running; fixed "sup: a killed supervisor takes its children with it"
 test_sim_launch         1          1   bug28 LAUNCH_EATMAIL: xtc_launch freed the caller's queued DOWN and mail; fixed "orc: library calls take only their own reply from the caller's mailbox"
+# lts/2.1 (2.1.3).  Seed offset 1 FAILS on the 2.1.2-shape library (13a1996c)
+# and on its planted build (-DXTC_DST_INJECT_BUG=33), passes fixed.
+test_sim_fsm_call       1          1   bug33 FSMCALL_NOLIVE: xtc_fsm_call waited out its timeout on a machine that had ended; fixed "fsm: a call notices a stopped machine, and a mid-dispatch exit frees its message"

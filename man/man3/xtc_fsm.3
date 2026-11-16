@@ -135,6 +135,11 @@ It takes only its reply from the caller's mailbox; other messages,
 monitor DOWNs included, stay queued.
 Before 2.1.2 it read and freed every message that arrived while it
 waited.
+It checks between 25 ms wait slices that the machine is still alive,
+so a machine that stops or dies without replying fails the call with
+.Er XTC_E_NOTFOUND
+within about one slice; through 2.1.2 the caller waited out its whole
+timeout.
 Inside
 .Fn event ,
 when
@@ -152,7 +157,10 @@ code;
 .Fn xtc_fsm_call
 returns
 .Dv XTC_E_AGAIN
-on timeout and must be called from within a process.
+on timeout,
+.Er XTC_E_NOTFOUND
+when the machine ends without replying, and must be called from within
+a process.
 .Fn xtc_fsm_join
 returns
 .Dv XTC_E_AGAIN

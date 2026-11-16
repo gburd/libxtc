@@ -176,7 +176,10 @@ XTC_API int       xtc_fsm_send(xtc_pid_t target, const void *ev, size_t len);
 /* Synchronous event: deliver `req`, block until the machine replies or
  * timeout_ns elapses.  On XTC_OK, *out_reply / *out_size receive a
  * heap buffer the caller must xtc_free.  Returns XTC_E_AGAIN on
- * timeout, XTC_E_INVAL on bad arguments. */
+ * timeout, XTC_E_NOTFOUND if the machine stops (or dies) without
+ * replying -- noticed within about 25 ms by a liveness check between
+ * wait slices (2.1.3; before, the caller waited out its timeout) --
+ * XTC_E_INVAL on bad arguments.  Must be called from a proc. */
 XTC_API int       xtc_fsm_call(xtc_pid_t target,
                                const void *req, size_t req_size,
                                void **out_reply, size_t *out_size,
