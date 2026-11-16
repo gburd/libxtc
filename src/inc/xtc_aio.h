@@ -14,13 +14,16 @@
  *	engine (io_uring on Linux, IOCP on Windows) the call uses it; where
  *	it does not, the call transparently offloads to the blocking thread
  *	pool -- the SAME API and the same observable behavior (the fiber
- *	parks, the loop keeps running, the call returns the byte count or a
- *	negative errno).  The caller never branches on the platform.
+ *	parks, the loop keeps running, the call returns the byte count or an
+ *	error).  The caller never branches on the platform.
  *
  *	Must be called from a fiber running on a loop; off a loop the op
- *	runs synchronously.  Returns the byte count transferred (>= 0) or
- *	a negative errno; xtc_aio_fsync returns 0 or a negative errno.
- *	See xtc_aio(3).
+ *	runs synchronously.  Returns the byte count transferred (>= 0) or,
+ *	on failure, XTC_E_SYS(errno) -- the system-error band of xtc.h, so
+ *	xtc_err_errno(rc) gives the errno and xtc_strerror(rc) its text;
+ *	xtc_aio_fsync returns 0 or XTC_E_SYS(errno).  (Through 2.1 these
+ *	returned a raw negative errno, which collides with the XTC_E_*
+ *	codes: -EIO is XTC_E_AGAIN.)  See xtc_aio(3).
  */
 
 #ifndef XTC_AIO_H
@@ -59,16 +62,15 @@ XTC_API int xtc_aio_pwrite(int fd, const void *buf, uint32_t len, int64_t off);
  * writer, PostgreSQL's smgr/md layer, any readv/writev consumer) can
  * move to libxtc without flattening or looping.  Same semantics as the
  * scalar calls: the fiber parks and the loop stays live; returns the
- * total byte count transferred (>= 0) or a negative errno.
+ * total byte count transferred (>= 0) or XTC_E_SYS(errno).
  *
  * Where the host has io_uring the op is submitted natively
  * (IORING_OP_READV/WRITEV); elsewhere it transparently offloads to the
  * blocking pool (preadv/pwritev on a worker thread) -- identical
  * observable behavior, as with the scalar API.  iovcnt must be in
- * [1, IOV_MAX]; out of range returns -EINVAL (the AIO surface's
- * negative-errno convention), so a caller cannot force an unbounded
- * submission.  Direct-I/O builds validate each iovec base and the
- * total length against the device alignment.
+ * [1, IOV_MAX]; out of range returns XTC_E_SYS(EINVAL), so a caller
+ * cannot force an unbounded submission.  Direct-I/O builds validate each
+ * iovec base and the total length against the device alignment.
  *
  * POSIX only: Windows lacks preadv/pwritev and struct iovec; a
  * WSABUF/OVERLAPPED-scatter port is future work, so these are not

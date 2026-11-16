@@ -6,6 +6,8 @@
 
 const char *xtc_strerror __P((int));
 const char *xtc_version_string __P((void));
+int xtc_err_errno __P((int));
+int xtc_err_from_errno __P((int));
 int xtc_version_components __P((int *, int *, int *));
 
 #endif /* XTC_EXT_H */

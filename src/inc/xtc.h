@@ -80,6 +80,33 @@ typedef enum xtc_err {
 } xtc_err_t;
 
 /*
+ * The system-error band (2.2).  A call that fails with an operating
+ * system error the XTC_E_* codes do not name returns XTC_E_SYS(errno):
+ * XTC_E_SYS_BASE minus the errno, so the band lies below every XTC_E_*
+ * code and a raw negative errno (which collides with them: -EIO is
+ * XTC_E_AGAIN, -EBADF is XTC_E_VERSION) never leaves the library.
+ * xtc_err_errno(rc) recovers the errno; xtc_strerror renders the band as
+ * "system error: <the C library's text>".
+ */
+#define XTC_E_SYS_BASE (-4096)
+#define XTC_E_SYS(e) (XTC_E_SYS_BASE - (e))
+
+/*
+ * xtc_err_errno --
+ *	The errno inside the system-error band: e for rc == XTC_E_SYS(e),
+ *	e > 0, and 0 for any other rc (XTC_OK, an XTC_E_* code, a count).
+ *	The one-call migration for a caller that compared an xtc_aio_*
+ *	result against -EIO: `xtc_err_errno(rc) == EIO`.
+ *
+ * xtc_err_from_errno --
+ *	XTC_E_SYS(e) for an errno e given either sign (e or -e); XTC_OK for
+ *	0.  A value too large to fit the band is XTC_E_INTERNAL.  For
+ *	callers that wrap their own system calls in the same space.
+ */
+int xtc_err_errno(int rc);
+int xtc_err_from_errno(int neg_or_pos_errno);
+
+/*
  * Size-first structs (docs/abi-stability.md, "Caller-allocated structs").
  * Every public option / info / stats struct the caller allocates starts
  * with `size_t size`, which the caller sets to sizeof its view of the
@@ -120,6 +147,9 @@ int xtc_version_components(int *major, int *minor, int *patch);
  *	The pointer is to static storage; the caller must not free it.
  *	Returns a pointer to "unknown" for codes outside the known set
  *	rather than NULL, so callers can chain into log lines safely.
+ *	A code in the system-error band (XTC_E_SYS(e)) reads
+ *	"system error: " and the C library's text for e; that string is
+ *	per thread and valid until the thread's next xtc_strerror call.
  *	See M0_CLAIMS.md [C6].
  */
 const char *xtc_strerror(int xtc_err);

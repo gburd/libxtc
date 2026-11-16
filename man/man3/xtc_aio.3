@@ -42,7 +42,7 @@ it; where it does not, the call uses a transparent fallback that
 presents the
 .Em same API and the same observable behavior
 .Pq the fiber parks, the loop keeps running other work, the call
-returns bytes-transferred or a negative errno .
+returns bytes-transferred or an error .
 A consumer never has to branch on the platform.  Branching with
 .Dv #ifdef
 between a native-AIO and a non-AIO path is permitted if a consumer
@@ -203,18 +203,62 @@ return the number of bytes transferred
 a short read at end of file returns the partial count, not an error.
 .Fn xtc_aio_fsync
 returns 0.
-On failure each returns a negative
+On failure each returns
+.Fn XTC_E_SYS errno ,
+the system-error band of
+.In xtc.h :
+.Fn xtc_err_errno rc
+gives the
 .Va errno
-value
-.Pq e.g. Li -EIO .
+.Pq e.g. Dv EIO
+and
+.Xr xtc_strerror 3
+renders it.
+.Fn xtc_aio_preadv
+and
+.Fn xtc_aio_pwritev
+return
+.Fn XTC_E_SYS EINVAL
+for an
+.Fa iovcnt
+outside [1,
+.Dv IOV_MAX ]
+or a NULL
+.Fa iov .
 When the operation would be offloaded to the blocking pool (no native
 asynchronous backend for it) and the pool refuses the work, the call
 returns
-.Li -EAGAIN
+.Fn XTC_E_SYS EAGAIN
 (the pool queue is full) or
-.Li -ENOMEM
+.Fn XTC_E_SYS ENOMEM
 (no pool thread could be started) without performing the operation,
 rather than running the system call on the loop thread.
+.Pp
+Through 2.1 a failure was returned as a raw negative
+.Va errno ,
+which collides with the
+.Dv XTC_E_*
+codes
+.Po
+.Li -EIO
+is
+.Dv XTC_E_AGAIN
+.Pc .
+A caller that compared the result against
+.Li -EIO
+compares
+.Fn xtc_err_errno rc
+against
+.Dv EIO
+instead.
+The
+.Fa res
+field of an
+.Vt xtc_aio_t
+submitted through
+.Xr xtc_io 3
+still holds the raw negative
+.Va errno .
 .Sh CONTEXT
 Call from a fiber running on a loop for the async path; off a loop the
 operation runs synchronously on the calling thread.  The buffer must
@@ -227,7 +271,11 @@ Page a 4 KiB block out and read it back, off the fiber's loop:
 .Bd -literal -offset indent
 int n = xtc_aio_pwrite(fd, page, 4096, (int64_t)pid * 4096);
 if (n != 4096) return -1;
-if (xtc_aio_fsync(fd) != 0) return -1;
+if ((n = xtc_aio_fsync(fd)) != 0) {
+        if (xtc_err_errno(n) == EIO)
+                log_lost_page(pid, xtc_strerror(n));
+        return -1;
+}
 n = xtc_aio_pread(fd, page, 4096, (int64_t)pid * 4096);
 .Ed
 .Sh SEE ALSO

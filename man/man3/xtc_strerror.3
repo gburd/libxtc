@@ -4,12 +4,21 @@
 .Dt XTC_STRERROR 3
 .Os
 .Sh NAME
-.Nm xtc_strerror
-.Nd return a stable English description of an xtc error code
+.Nm xtc_strerror ,
+.Nm xtc_err_errno ,
+.Nm xtc_err_from_errno ,
+.Nm XTC_E_SYS
+.Nd describe an xtc error code; the system-error band
 .Sh SYNOPSIS
 .In xtc.h
 .Ft const char *
 .Fn xtc_strerror "int xtc_err"
+.Ft int
+.Fn xtc_err_errno "int rc"
+.Ft int
+.Fn xtc_err_from_errno "int neg_or_pos_errno"
+.Fd #define XTC_E_SYS_BASE (-4096)
+.Fd #define XTC_E_SYS(e) (XTC_E_SYS_BASE - (e))
 .Sh DESCRIPTION
 The
 .Fn xtc_strerror
@@ -31,8 +40,76 @@ it never returns
 The returned pointer is to static storage and must not be freed.
 The exact text for each known code is part of the API contract for
 log-message stability and changes only on a major version bump.
+.Ss The system-error band
+A call that fails with an operating system error that no
+.Dv XTC_E_*
+code names returns
+.Fn XTC_E_SYS errno ,
+the value
+.Dv XTC_E_SYS_BASE
+minus the
+.Va errno .
+The band lies below every
+.Dv XTC_E_*
+code, so a system error can never be read as one.
+A raw negative
+.Va errno
+would collide:
+.Li -EIO
+equals
+.Dv XTC_E_AGAIN
+and
+.Li -EBADF
+equals
+.Dv XTC_E_VERSION .
+.Xr xtc_aio 3
+and
+.Xr xtc_iosched 3
+return the band since 2.2.
+.Pp
+.Fn xtc_strerror
+renders a code in the band as
+.Dq system error:
+followed by the C library's text for the
+.Va errno ,
+obtained with the thread-safe
+.Fn strerror_r
+.Pq Fn strerror_s No on Windows .
+That string lives in a per-thread buffer and stays valid until the
+same thread calls
+.Fn xtc_strerror
+again; every other result is static.
+.Pp
+.Fn xtc_err_errno
+returns the
+.Va errno
+inside the band, and 0 for any value outside it
+.Pq Dv XTC_OK , an Dv XTC_E_* No code, a byte count .
+.Pp
+.Fn xtc_err_from_errno
+returns
+.Fn XTC_E_SYS e
+for an
+.Va errno
+given with either sign, and
+.Dv XTC_OK
+for 0, so code that wraps its own system calls can report in the
+same space.
 .Sh RETURN VALUES
-A non-NULL pointer to a NUL-terminated string.
+.Fn xtc_strerror
+returns a non-NULL pointer to a NUL-terminated string.
+.Fn xtc_err_errno
+returns a positive
+.Va errno
+or 0.
+.Fn xtc_err_from_errno
+returns a value in the band,
+.Dv XTC_OK ,
+or
+.Dv XTC_E_INTERNAL
+for a value larger than any
+.Va errno
+.Pq above 65535 .
 .Sh EXAMPLES
 .Bd -literal -offset indent
 #include <stdio.h>
@@ -42,9 +119,19 @@ void log_rc(int rc) {
         if (rc != XTC_OK)
                 fprintf(stderr, "xtc error: %s\en", xtc_strerror(rc));
 }
+
+/* Retry a write the disk refused for lack of space, after a cleanup. */
+int n = xtc_aio_pwrite(fd, buf, len, off);
+if (n < 0 && xtc_err_errno(n) == ENOSPC && free_some_space() == 0)
+        n = xtc_aio_pwrite(fd, buf, len, off);
 .Ed
 .Sh SEE ALSO
-.Xr xtc 7 ,
-.Xr xtc_version_string 3
+.Xr xtc_aio 3 ,
+.Xr xtc_version_string 3 ,
+.Xr xtc 7
 .Sh HISTORY
-First appeared in xtc 0.0.1.
+.Fn xtc_strerror
+first appeared in xtc 0.0.1;
+.Fn xtc_err_errno ,
+.Fn xtc_err_from_errno
+and the band in xtc 2.2.

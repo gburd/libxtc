@@ -549,7 +549,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 	switch (a->op) {
 	case XTC_AIO_PREAD:
 		n = pread(a->fd, a->buf, a->len, (off_t)a->off);  /* XTC_BLOCKING_OK: sim inline file op */
-		res = n < 0 ? -1 : (int)n;
+		res = n < 0 ? -errno : (int)n;
 		/* Stale read: on a seeded coin, replace the just-read bytes
 		 * with a PRIOR durable version of this exact (fd,off) -- the
 		 * bytes are well-formed but out of date, so recovery/cache
@@ -570,8 +570,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 		 * (nothing persists), before the torn-write model -- a hard
 		 * error the caller must degrade on, not a silent short tail. */
 		if (__xtc_sim_io_enospc()) {
-			res = -1;
-			errno = ENOSPC;
+			res = -ENOSPC;
 			break;
 		}
 		/* Stale-data model: before overwriting, snapshot the CURRENT
@@ -599,7 +598,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 		if (n > 0)
 			__xtc_sim_io_wb_wrote(a->fd, a->off + (uint64_t)n);
 		if (n < 0)
-			res = -1;
+			res = -errno;
 		else if (persist < (int)a->len)
 			res = (int)a->len;   /* torn: report full despite short persist */
 		else
@@ -607,26 +606,26 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 		break;
 	}
 	case XTC_AIO_FSYNC:
-		res = fsync(a->fd) == 0 ? 0 : -1;
+		res = fsync(a->fd) == 0 ? 0 : -errno;
 		if (res == 0) __xtc_sim_io_wb_synced(a->fd);
 		break;
 	case XTC_AIO_FDATASYNC:
 #if defined(__APPLE__)
-		res = fsync(a->fd) == 0 ? 0 : -1;
+		res = fsync(a->fd) == 0 ? 0 : -errno;
 #else
-		res = fdatasync(a->fd) == 0 ? 0 : -1;
+		res = fdatasync(a->fd) == 0 ? 0 : -errno;
 #endif
 		if (res == 0) __xtc_sim_io_wb_synced(a->fd);
 		break;
 	case XTC_AIO_PREADV:
 		n = preadv(a->fd, (const struct iovec *)a->iov, a->iovcnt,
 		    (off_t)a->off);  /* XTC_BLOCKING_OK: sim inline file op */
-		res = n < 0 ? -1 : (int)n;
+		res = n < 0 ? -errno : (int)n;
 		break;
 	case XTC_AIO_PWRITEV:
 		n = pwritev(a->fd, (const struct iovec *)a->iov, a->iovcnt,
 		    (off_t)a->off); /* XTC_BLOCKING_OK: sim inline file op */
-		res = n < 0 ? -1 : (int)n;
+		res = n < 0 ? -errno : (int)n;
 		break;
 	default:
 		return XTC_E_INVAL;
@@ -645,7 +644,7 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 		res = 1 + (int)__xtc_sim_rng_range(XTC_SIM_RNG_IO, (uint64_t)res);
 	} else if (res == 0 && (a->op == XTC_AIO_FSYNC ||
 	    a->op == XTC_AIO_FDATASYNC) && __xtc_sim_io_should_fault()) {
-		res = -1;   /* fsync/fdatasync EIO */
+		res = -EIO; /* fsync/fdatasync EIO */
 	}
 
 	if (__xtc_sim_io_faults_active() && a->tag != NULL && io->sim != NULL) {

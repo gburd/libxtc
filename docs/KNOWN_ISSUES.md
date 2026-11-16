@@ -509,6 +509,42 @@ after an `xtc_rcu_init`, synchronize did not scan it, and an object that
 thread held was freed under it (`test/m13/test_rcu`
 `/thread_reader_after_fini` failed before, passes after).
 
+## CHANGED (2.2): `xtc_aio_*` return system errors in their own band, `XTC_E_SYS(errno)`
+
+**What it was.**  `xtc_aio_pread`, `_pwrite`, `_preadv`, `_pwritev`,
+`_fsync` and `_fdatasync` (and `xtc_iosched_write` / `_flush`, which
+pass their failures on) returned a failed operation as a raw negative
+`errno` through the same `int` the `XTC_E_*` codes use, and the two
+spaces overlap: -1 to -14 are both errnos and `XTC_E_*` codes.  `-EIO`
+equals `XTC_E_AGAIN`, `-EBADF` equals `XTC_E_VERSION`, `-EAGAIN` equals
+`XTC_E_NOTFOUND`, `-ENOMEM` equals `XTC_E_IO`, so `xtc_strerror` named
+the wrong error: a read of a bad fd printed "version mismatch".
+
+**Change.**  New in `xtc.h` (symbol version `XTC_2.2`):
+`XTC_E_SYS_BASE` (-4096), `XTC_E_SYS(e)` (= `XTC_E_SYS_BASE - e`),
+`int xtc_err_errno(int rc)` (the `errno` inside the band, else 0), and
+`int xtc_err_from_errno(int neg_or_pos_errno)`.  `xtc_strerror` reads a
+code in the band as "system error: " plus the C library's text
+(`strerror_r`, `strerror_s` on Windows, in a per-thread buffer).  The
+six `xtc_aio_*` calls and the two `xtc_iosched_*` calls now return
+`XTC_E_SYS(errno)` for every system error, including a refused
+blocking-pool offload (`XTC_E_SYS(EAGAIN)` / `XTC_E_SYS(ENOMEM)`) and
+an out-of-range `iovcnt` (`XTC_E_SYS(EINVAL)`).  No errno return was
+kept as it was, because every one of them collides or can collide with
+an `XTC_E_*` code.  The `res` field of an `xtc_aio_t` submitted with
+`xtc_io_aio_submit` still holds the raw negative `errno`, and the
+experimental tnt I/O completion's `body.io.result` is unchanged.  The
+simulator's file AIO now reports the `errno` it simulates (`EIO` for a
+faulted fsync, `ENOSPC` for a full disk) instead of -1.  A code from
+-15 down to -4095 still reads as "unknown".
+
+**Migrating.**  A caller that tested `rc < 0` or compared the byte count
+needs no change.  A caller that compared against a negative errno uses
+the band: `rc == -EIO` becomes `xtc_err_errno(rc) == EIO`, which is the
+one-call migration.  `test/m4/test_aio` `/badfd` and `/badfd_offload`
+(pread, pwrite and fdatasync of fd -1) failed before with `-9 == -4105`
+and pass after.
+
 ## Linux/XFS: io_uring WAL writes go to io-wq unless the filesystem has `lazytime`
 
 On XFS mounted without `lazytime`, a write that must update the file's

@@ -146,14 +146,28 @@ aio_blk_fn(void *arg)
 }
 
 /*
+ * The xtc_aio_* result for an op's raw result: the byte count (or 0)
+ * unchanged, and a negative errno (what the kernel, the offload syscall
+ * and every completion backend produce) moved into the system-error
+ * band, so it can never be mistaken for an XTC_E_* code (-EIO is
+ * XTC_E_AGAIN).  xtc_aio_t.res itself keeps the raw negative errno.
+ */
+static int
+aio_result(int res)
+{
+	return res < 0 ? xtc_err_from_errno(res) : res;
+}
+
+/*
  * xtc_blocking_run already runs the work synchronously off a loop (and
  * under the simulator) and returns XTC_OK, so a non-OK result means the
  * pool REFUSED the work on a loop: its queue is full (XTC_E_AGAIN) or
  * no pool thread could be started (XTC_E_RESOURCE).  Running the
  * syscall inline here would block every fiber on the loop -- the stall
  * the pool exists to prevent -- so report it to the aio caller as a
- * negative errno instead, the convention every xtc_aio_* result uses.
- * Leaves *rc (the syscall's result) alone when the work ran.
+ * negative errno instead, the convention of every raw op result
+ * (aio_result moves it into the system-error band).  Leaves *rc (the
+ * syscall's result) alone when the work ran.
  */
 static void
 aio_blk_refused(int brc, int *rc)
@@ -172,7 +186,7 @@ aio_offload(int op, int fd, void *buf, uint32_t len, int64_t off)
 	memset(&b, 0, sizeof b);
 	b.fd = fd; b.op = op; b.buf = buf; b.len = len; b.off = off;
 	aio_blk_refused(xtc_blocking_run(aio_blk_fn, &b, &rc), &rc);
-	return rc;
+	return aio_result(rc);
 }
 
 #if !defined(_WIN32)
@@ -185,7 +199,7 @@ aio_offload_v(int op, int fd, const struct iovec *iov, int iovcnt,
 	memset(&b, 0, sizeof b);
 	b.fd = fd; b.op = op; b.off = off; b.iov = iov; b.iovcnt = iovcnt;
 	aio_blk_refused(xtc_blocking_run(aio_blk_fn, &b, &rc), &rc);
-	return rc;
+	return aio_result(rc);
 }
 #endif
 
@@ -358,7 +372,7 @@ aio_do(int op, int fd, void *buf, uint32_t len, int64_t off)
 		}
 	}
 	AIO_KILL_POINT();
-	return a.res;
+	return aio_result(a.res);
 }
 
 /* PUBLIC: int xtc_aio_pread __P((int, void *, uint32_t, int64_t)); */
@@ -404,7 +418,7 @@ aio_do_v(int op, int fd, const struct iovec *iov, int iovcnt, int64_t off)
 	int          rc;
 
 	if (iov == NULL || iovcnt < 1 || iovcnt > IOV_MAX)
-		return -EINVAL;   /* bounded submission; negative-errno contract */
+		return XTC_E_SYS(EINVAL); /* bounded submission */
 
 #if defined(XTC_DIAGNOSTIC)
 	/* Direct I/O: every iovec base must meet the memory alignment, the
@@ -469,7 +483,7 @@ aio_do_v(int op, int fd, const struct iovec *iov, int iovcnt, int64_t off)
 	XTC_PROBE_AIO_DONE((uintptr_t)&a, op, a.res);
 	AIO_SIM_RELEASE(loop, &a);
 	AIO_KILL_POINT();
-	return a.res;
+	return aio_result(a.res);
 }
 
 /* PUBLIC: int xtc_aio_preadv __P((int, const struct iovec *, int, int64_t)); */

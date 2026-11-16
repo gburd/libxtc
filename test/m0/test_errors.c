@@ -12,6 +12,8 @@
 
 #include "xtc.h"
 #include "munit.h"
+#include <errno.h>
+#include <stdio.h>
 #include <string.h>
 #include <limits.h>
 #include <stdint.h>
@@ -135,9 +137,51 @@ static MunitResult
 test_strerror_unknown_safe(const MunitParameter params[], void *data)
 {
 	(void)params; (void)data;
-	munit_assert_string_equal(xtc_strerror(-9999),    "unknown");
+	munit_assert_string_equal(xtc_strerror(-99),      "unknown");
+	/* -9999 reads "unknown" through 2.1; since 2.2 it is in the
+	 * system-error band (errno 5903), see /sys_band. */
+	munit_assert_string_equal(xtc_strerror(-99999),   "unknown");
 	munit_assert_string_equal(xtc_strerror(INT_MAX),  "unknown");
 	munit_assert_not_null(xtc_strerror(INT_MIN));
+	return MUNIT_OK;
+}
+
+/* The system-error band: below every XTC_E_* code, round-trips an
+ * errno of either sign, and renders as "system error: <libc text>". */
+static MunitResult
+test_sys_band(const MunitParameter params[], void *data)
+{
+	char want[160];
+	int e;
+	(void)params; (void)data;
+
+	munit_assert_int(XTC_E_SYS(EIO), <, XTC_E_STATE);
+	munit_assert_int(XTC_E_SYS(EIO), !=, -EIO);
+	munit_assert_int(xtc_err_from_errno(-EIO), ==, XTC_E_SYS(EIO));
+	munit_assert_int(xtc_err_from_errno(EIO), ==, XTC_E_SYS(EIO));
+	munit_assert_int(xtc_err_from_errno(0), ==, XTC_OK);
+	munit_assert_int(xtc_err_from_errno(INT_MIN), ==, XTC_E_INTERNAL);
+	munit_assert_int(xtc_err_from_errno(INT_MAX), ==, XTC_E_INTERNAL);
+	for (e = 1; e < 200; e++)
+		munit_assert_int(xtc_err_errno(xtc_err_from_errno(-e)), ==, e);
+
+	/* Outside the band: 0, every XTC_E_*, counts, a raw -errno. */
+	munit_assert_int(xtc_err_errno(XTC_OK), ==, 0);
+	munit_assert_int(xtc_err_errno(XTC_E_STATE), ==, 0);
+	munit_assert_int(xtc_err_errno(XTC_E_IO), ==, 0);
+	munit_assert_int(xtc_err_errno(4096), ==, 0);
+	munit_assert_int(xtc_err_errno(-EIO), ==, 0);
+	munit_assert_int(xtc_err_errno(XTC_E_SYS_BASE), ==, 0);
+	munit_assert_int(xtc_err_errno(INT_MIN), ==, 0);
+
+	(void)snprintf(want, sizeof want, "system error: %s", strerror(ENOSPC));
+	munit_assert_string_equal(xtc_strerror(XTC_E_SYS(ENOSPC)), want);
+	munit_assert_not_null(
+	    strstr(xtc_strerror(XTC_E_SYS(9999)), "system error: "));
+	/* The band does not change the text of the codes it sits below. */
+	munit_assert_string_equal(xtc_strerror(XTC_E_AGAIN),
+	    "resource temporarily unavailable");
+	munit_assert_string_equal(xtc_strerror(XTC_E_SYS_BASE), "unknown");
 	return MUNIT_OK;
 }
 
@@ -151,6 +195,8 @@ static MunitTest tests[] = {
 	{ "/c6_strerror_unknown",    test_strerror_unknown_safe,
 	    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/public_utils",           test_public_utils,
+	    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/sys_band",               test_sys_band,
 	    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };

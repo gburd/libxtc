@@ -12,6 +12,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>  /* snprintf */
+#include <string.h> /* strerror_r / strerror_s */
 
 #include "xtc.h"
 #include "os_alloc.h"
@@ -22,11 +24,90 @@
 #include "os_cpu.h"      /* CPU/NUMA topology, exposed as xtc_* below */
 
 /*
+ * The largest errno the band carries.  Every platform's errno values are
+ * far below it; a larger value would leave int's range near INT_MIN.
+ */
+#define XTC_SYS_ERRNO_MAX 65535
+
+/*
+ * PUBLIC: int xtc_err_errno __P((int));
+ */
+int
+xtc_err_errno(int rc)
+{
+	if (rc > XTC_E_SYS_BASE || rc < XTC_E_SYS(XTC_SYS_ERRNO_MAX))
+		return 0;
+	return XTC_E_SYS_BASE - rc; /* rc == XTC_E_SYS_BASE is errno 0 */
+}
+
+/*
+ * PUBLIC: int xtc_err_from_errno __P((int));
+ */
+int
+xtc_err_from_errno(int e)
+{
+	if (e < 0) {
+		if (e < -XTC_SYS_ERRNO_MAX)
+			return XTC_E_INTERNAL;
+		e = -e;
+	}
+	if (e == 0)
+		return XTC_OK;
+	if (e > XTC_SYS_ERRNO_MAX)
+		return XTC_E_INTERNAL;
+	return XTC_E_SYS(e);
+}
+
+/*
+ * The C library's text for errno `e`, written into buf.  Thread-safe:
+ * strerror_r (POSIX) or strerror_s (Windows CRT), never strerror.
+ * glibc with _GNU_SOURCE declares the GNU strerror_r, which returns a
+ * pointer that may not be buf; every other libc has the XSI form, which
+ * fills buf and returns 0.
+ */
+static void
+__sys_strerror(int e, char *buf, size_t n)
+{
+#if defined(_WIN32)
+	if (strerror_s(buf, n, e) != 0)
+		buf[0] = '\0';
+#elif defined(__GLIBC__) && defined(_GNU_SOURCE)
+	const char *m = strerror_r(e, buf, n);
+	if (m != buf)
+		(void)__os_strlcpy(buf, m != NULL ? m : "", n);
+#else
+	if (strerror_r(e, buf, n) != 0)
+		buf[0] = '\0';
+#endif
+	if (buf[0] == '\0')
+		(void)snprintf(buf, n, "errno %d", e);
+}
+
+/*
+ * "system error: <text>" for a code in the band, in a per-thread buffer:
+ * the pointer stays valid until this thread's next xtc_strerror.
+ */
+static XTC_THREAD_LOCAL char xtc_strerror_buf[128];
+
+static const char *
+__strerror_sys(int e)
+{
+	static const char pfx[] = "system error: ";
+	(void)__os_strlcpy(xtc_strerror_buf, pfx, sizeof xtc_strerror_buf);
+	__sys_strerror(e, xtc_strerror_buf + sizeof pfx - 1,
+	    sizeof xtc_strerror_buf - (sizeof pfx - 1));
+	return xtc_strerror_buf;
+}
+
+/*
  * PUBLIC: const char *xtc_strerror __P((int));
  */
 const char *
 xtc_strerror(int e)
 {
+	int sys = xtc_err_errno(e);
+	if (sys != 0)
+		return __strerror_sys(sys);
 	switch ((xtc_err_t)e) {
 	case XTC_OK:		return "ok";
 	case XTC_E_INVAL:	return "invalid argument";

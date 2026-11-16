@@ -66,11 +66,13 @@ XTC_API void xtc_iosched_destroy(xtc_iosched_t *s);
 /* Queue a write at off.  The buffer must remain valid until the next
  * flush completes.  When the queue reaches the current batch size an
  * implicit flush runs (issuing the batch and possibly parking the
- * writer fiber).  Returns XTC_OK, or a negative errno from a flush. */
+ * writer fiber).  Returns XTC_OK, or the XTC_E_SYS(errno) of a failed
+ * flush write. */
 XTC_API int  xtc_iosched_write(xtc_iosched_t *s, const void *buf, uint32_t len,
                                int64_t off);
 
-/* Issue all queued writes now.  Returns XTC_OK or a negative errno. */
+/* Issue all queued writes now.  Returns XTC_OK, XTC_E_INVAL for a NULL
+ * scheduler, or the XTC_E_SYS(errno) of the first failed write. */
 XTC_API int  xtc_iosched_flush(xtc_iosched_t *s);
 
 XTC_API void xtc_iosched_get_stats(const xtc_iosched_t *s, xtc_iosched_stats_t *out);

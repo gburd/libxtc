@@ -16,6 +16,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
 
 #include "munit.h"
 #include "xtc.h"
@@ -271,8 +272,8 @@ test_aiov_bounds(const MunitParameter p[], void *d)
 	close(g_badv.fd);
 	unlink(tmpl);
 
-	munit_assert_int(g_badv.wrote, <, 0);   /* iovcnt 0 rejected */
-	munit_assert_int(g_badv.rd, <, 0);      /* NULL iov rejected */
+	munit_assert_int(g_badv.wrote, ==, XTC_E_SYS(EINVAL)); /* iovcnt 0 */
+	munit_assert_int(g_badv.rd, ==, XTC_E_SYS(EINVAL));    /* NULL iov */
 	return MUNIT_OK;
 }
 #endif /* !_WIN32 -- vectored AIO */
@@ -398,6 +399,63 @@ test_aio_timer_churn(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * A failed op returns XTC_E_SYS(errno), native and offloaded alike.  An
+ * op on fd -1 fails with EBADF; through 2.1 it returned -EBADF, which is
+ * XTC_E_VERSION ("version mismatch").  NB: not a just-closed fd -- the
+ * loop's ring and eventfd would reuse its number, and the read would
+ * wait on the loop's own eventfd forever.
+ */
+static int g_badfd_rc[3];
+static void
+badfd_proc(void *arg)
+{
+	int fd = (int)(intptr_t)arg;
+	char b[16];
+	g_badfd_rc[0] = xtc_aio_pread(fd, b, sizeof b, 0);
+	g_badfd_rc[1] = xtc_aio_pwrite(fd, b, sizeof b, 0);
+	g_badfd_rc[2] = xtc_aio_fdatasync(fd);
+}
+
+static MunitResult
+run_badfd(int force_offload)
+{
+	xtc_loop_t *loop = NULL;
+	int fd = -1, i;
+
+	__xtc_aio_force_offload(force_offload);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, badfd_proc, (void *)(intptr_t)fd,
+	                     NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+	__xtc_aio_force_offload(0);
+	for (i = 0; i < 3; i++) {
+		munit_assert_int(g_badfd_rc[i], ==, XTC_E_SYS(EBADF));
+		munit_assert_int(xtc_err_errno(g_badfd_rc[i]), ==, EBADF);
+		munit_assert_not_null(strstr(xtc_strerror(g_badfd_rc[i]),
+		    "system error: "));
+	}
+	/* Also off a loop (the inline path). */
+	munit_assert_int(xtc_aio_fsync(fd), ==, XTC_E_SYS(EBADF));
+	return MUNIT_OK;
+}
+
+static MunitResult
+test_aio_badfd(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return run_badfd(0);
+}
+
+static MunitResult
+test_aio_badfd_offload(const MunitParameter p[], void *d)
+{
+	(void)p; (void)d;
+	return run_badfd(1);
+}
+
 static MunitTest tests[] = {
 	{ "/roundtrip",         test_aio_roundtrip,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/roundtrip_offload", test_aio_roundtrip_offload, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -408,6 +466,8 @@ static MunitTest tests[] = {
 #endif
 	{ "/short_read",        test_aio_short_read,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/timer_churn",       test_aio_timer_churn,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/badfd",             test_aio_badfd,             NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/badfd_offload",     test_aio_badfd_offload,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/aio", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

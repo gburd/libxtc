@@ -98,9 +98,12 @@ and
 .Fn xtc_iosched_flush
 return
 .Dv XTC_OK
-on success or a negative errno / 
-.Dv XTC_E_*
-code from the underlying flush.
+on success,
+.Dv XTC_E_INVAL
+for a bad argument, or the
+.Fn XTC_E_SYS errno
+of the first failed write of a flush
+.Pq see Xr xtc_aio 3 .
 .Sh SEE ALSO
 .Xr xtc_aio 3 ,
 .Xr xtc_dio_sched 3 ,

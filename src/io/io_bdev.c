@@ -52,9 +52,9 @@ struct xtc_bdev {
 #define BDEV_DEFAULT_LOGICAL   512u
 #define BDEV_DEFAULT_PHYSICAL  4096u
 
-/* Map a positive errno (see call sites; the negative-errno aio
- * convention is negated to positive before we get here) to a stable
- * XTC_E_ code via the canonical OS-layer mapper. */
+/* Map a positive errno (an xtc_aio_* failure, XTC_E_SYS(e), is unwrapped
+ * with xtc_err_errno before we get here) to a stable XTC_E_ code via the
+ * canonical OS-layer mapper. */
 static int
 errno_to_xtc(int e)
 {
@@ -330,7 +330,7 @@ xtc_bdev_pread(xtc_bdev_t *b, void *buf, size_t n, uint64_t off)
 
 	r = xtc_aio_pread(b->fd, buf, (uint32_t)n, (int64_t)off);
 	if (r < 0)
-		return errno_to_xtc(-r);
+		return errno_to_xtc(xtc_err_errno(r));
 	return (ssize_t)r;
 }
 
@@ -350,7 +350,7 @@ xtc_bdev_pwrite(xtc_bdev_t *b, const void *buf, size_t n, uint64_t off)
 
 	r = xtc_aio_pwrite(b->fd, buf, (uint32_t)n, (int64_t)off);
 	if (r < 0)
-		return errno_to_xtc(-r);
+		return errno_to_xtc(xtc_err_errno(r));
 	return (ssize_t)r;
 }
 
@@ -362,5 +362,5 @@ xtc_bdev_flush(xtc_bdev_t *b)
 	if (b == NULL)
 		return XTC_E_INVAL;
 	r = xtc_aio_fsync(b->fd);
-	return r == 0 ? XTC_OK : errno_to_xtc(-r);
+	return r == 0 ? XTC_OK : errno_to_xtc(xtc_err_errno(r));
 }
