@@ -456,10 +456,104 @@ test_async_releases_stack(const MunitParameter p[], void *d)
 }
 #endif
 
+/*
+ * C12: a coroutine spawned without a handle (xtc_async(..., NULL)) is
+ * reclaimed when it finishes, as a proc's fiber is: nobody can await
+ * it.  Its task and coro stayed until xtc_loop_fini, so 400,000
+ * fire-and-forget fibers held 129 MB against 4.4 MB for as many procs.
+ * Counted here through the allocator hook: 20,000 of them, at most 64
+ * alive at once, must leave far fewer than one allocation each behind
+ * while the loop still runs.
+ */
+#include "os_alloc.h"
+#include <stdatomic.h>
+#define C12_N 20000L
+static struct __os_alloc_hook g_c12_real;
+static atomic_long g_c12_live; /* allocations minus frees under the hook */
+static long g_c12_done;
+static long g_c12_left;
+
+static void *
+c12_malloc(size_t sz)
+{
+	atomic_fetch_add_explicit(&g_c12_live, 1, memory_order_relaxed);
+	return g_c12_real.malloc(sz);
+}
+
+static void *
+c12_calloc(size_t n, size_t sz)
+{
+	atomic_fetch_add_explicit(&g_c12_live, 1, memory_order_relaxed);
+	return g_c12_real.calloc(n, sz);
+}
+
+static void
+c12_free(void *p)
+{
+	if (p != NULL)
+		atomic_fetch_sub_explicit(&g_c12_live, 1, memory_order_relaxed);
+	g_c12_real.free(p);
+}
+
+static intptr_t
+c12_leaf(void *arg)
+{
+	(void)arg;
+	g_c12_done++;
+	return 0;
+}
+
+static intptr_t
+c12_driver(void *arg)
+{
+	xtc_loop_t *loop = arg;
+	struct __os_alloc_hook h;
+	long i, live0;
+
+	h = g_c12_real;
+	h.malloc = c12_malloc;
+	h.calloc = c12_calloc;
+	h.free = c12_free;
+	(void)__os_alloc_set_hook(&h);
+	live0 = atomic_load_explicit(&g_c12_live, memory_order_relaxed);
+	for (i = 0; i < C12_N; i++) {
+		if (xtc_async(loop, c12_leaf, NULL, NULL) != XTC_OK)
+			break;
+		if ((i & 63) == 63)
+			while (g_c12_done <= i - 64)
+				xtc_yield();
+	}
+	while (g_c12_done < i)
+		xtc_yield();
+	xtc_yield(); /* the last one's DONE handler runs after it returns */
+	g_c12_left = atomic_load_explicit(&g_c12_live, memory_order_relaxed) - live0;
+	(void)__os_alloc_set_hook(&g_c12_real);
+	return 0;
+}
+
+static MunitResult
+test_async_detached_reclaimed(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	(void)p;
+	(void)d;
+	munit_assert_int(__os_alloc_get_hook(&g_c12_real), ==, XTC_OK);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_async(loop, c12_driver, loop, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_logf(MUNIT_LOG_INFO, "%ld coroutines left %ld allocations",
+	    g_c12_done, g_c12_left);
+	munit_assert_long(g_c12_done, ==, C12_N);
+	munit_assert_long(g_c12_left, <, 1000);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 #if defined(__linux__)
 	{ "/C11_async_releases_stack", test_async_releases_stack, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #endif
+	{ "/C12_async_detached_reclaimed", test_async_detached_reclaimed, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #if defined(FPE_TEST)
 	{ "/C10_fp_env_per_fiber", test_fp_env_per_fiber, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #endif

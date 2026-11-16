@@ -94,6 +94,11 @@ can read the result again, until
 .Fn xtc_loop_fini .
 The coroutine's stack does not: it is returned to the thread's stack
 pool as soon as the coroutine returns.
+A coroutine spawned with a
+.Dv NULL
+.Fa out_task
+has no handle and cannot be awaited, so its task and its coroutine
+state are released too when it returns, as a process's are.
 .Pp
 .Fn xtc_yield
 returns control to the loop.  The next loop step resumes the coroutine

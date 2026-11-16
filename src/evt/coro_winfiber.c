@@ -97,6 +97,7 @@ __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
 	c->stack_sz = __xtc_stack_size;
 	c->fn = fn;
 	c->arg = arg;
+	c->detached = (out_task == NULL);
 	/*
 	 * CreateFiberEx(dwStackCommitSize, dwStackReserveSize, ...).
 	 * Commit only a small initial amount and let the OS grow the stack
@@ -194,12 +195,13 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 			(void)xtc_waker_wake(&w);
 			c->waiter = NULL;
 		}
-		/* lifetime: a finished PROC fiber is reclaimed by the loop's
-		 * DONE handler (task.c __xtc_task_reclaim).  Its task handle
-		 * was never handed out; an xtc_async task's was, so that one
-		 * stays until xtc_loop_fini.  c->proc is set by __proc_entry
-		 * before the body runs and never cleared. */
-		if (c->proc != NULL)
+		/* lifetime: a finished PROC fiber, and an xtc_async fiber
+		 * spawned without a handle, are reclaimed by the loop's DONE
+		 * handler (task.c __xtc_task_reclaim): nobody can await them.
+		 * An xtc_async task whose handle was handed out stays until
+		 * xtc_loop_fini.  c->proc is set by __proc_entry before the
+		 * body runs and never cleared. */
+		if (c->proc != NULL || c->detached)
 			self->reclaim = 1;
 		/* Do NOT destroy here: the task's cleanup
 		 * (__coro_task_cleanup) releases the fiber + coro struct

@@ -402,13 +402,14 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 			(void)xtc_waker_wake(&w);
 			c->waiter = NULL;
 		}
-		/* lifetime: a finished PROC fiber is reclaimed by the loop's
-		 * DONE handler (task.c __xtc_task_reclaim).  Its task handle
-		 * was never handed out; an xtc_async task's was, so that task
-		 * and its coro stay until xtc_loop_fini (the stack does not).
-		 * c->proc is set by __proc_entry before the body runs and never
+		/* lifetime: a finished PROC fiber, and an xtc_async fiber
+		 * spawned without a handle, are reclaimed by the loop's DONE
+		 * handler (task.c __xtc_task_reclaim): nobody can await them.
+		 * An xtc_async task whose handle was handed out stays, with
+		 * its coro, until xtc_loop_fini (the stack does not).  c->proc
+		 * is set by __proc_entry before the body runs and never
 		 * cleared. */
-		if (c->proc != NULL)
+		if (c->proc != NULL || c->detached)
 			self->reclaim = 1;
 		else
 			/* A bare xtc_async coroutine keeps its task + coro for
@@ -562,6 +563,7 @@ __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
 	c->arg = arg;
 	c->done = 0;
 	c->waiter = NULL;
+	c->detached = (out_task == NULL);
 
 	if (getcontext(&c->ctx) != 0) {
 		__coro_destroy(c);

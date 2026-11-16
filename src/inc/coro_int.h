@@ -65,6 +65,7 @@ struct xtc_coro {
 	 */
 	void        *proc;          /* struct xtc_proc * */
 	xtc_task_t  *waiter;        /* task awaiting this one (or NULL) */
+	int detached; /* no handle was handed out: reclaim at DONE */
 
 	/*
 	 * When non-NULL, this coroutine has just registered itself as

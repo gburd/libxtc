@@ -51,7 +51,9 @@ typedef intptr_t (*xtc_coro_fn)(void *arg);
  * xtc_async --
  *	Spawn fn(arg) as a stackful coroutine.  Returns immediately
  *	with the task handle in *out_task.  The fiber starts in the
- *	scheduled state and runs on the next loop step.
+ *	scheduled state and runs on the next loop step.  With a NULL
+ *	out_task nobody can await it, so it is released when it returns;
+ *	a handed-out handle stays valid until xtc_loop_fini.
  */
 XTC_API int      xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg,
                            xtc_task_t **out_task);
