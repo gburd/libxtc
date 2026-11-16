@@ -413,6 +413,7 @@ TESTS_SH	= \
 	$(abs_top_srcdir)/../test/dist/test_deprecated.sh \
 	$(abs_top_srcdir)/../test/dist/test_header_cxx.sh \
 	$(abs_top_srcdir)/../test/dist/test_header_api.sh \
+	$(abs_top_srcdir)/../test/dist/test_header_alone.sh \
 	$(abs_top_srcdir)/../test/dist/test_stability_tiers.sh \
 	$(abs_top_srcdir)/../test/dist/test_api_reach.sh \
 	$(abs_top_srcdir)/../test/dist/test_s_perm.sh \

@@ -147,7 +147,10 @@ fi
 #   - flag an #include of an INTERNAL header (any header `make install`
 #     does not ship), not just symbol references.
 rule3_fatal=1
-ex_src=$(find "$ROOT/examples" -name '*.c' -o -name '*.h' 2>/dev/null)
+# The examples and the documentation's snippets are both consumer code.
+ex_src=$(find "$ROOT/examples" "$ROOT/docs/_includes/snippets" \
+    \( -name '*.c' -o -name '*.h' \) 2>/dev/null |
+    grep -vE '/examples/06_sqlxtc/(sqlite|lime)/')
 consumer=$(printf '%s\n' "$ex_src" | while IFS= read -r f; do
 	[ -n "$f" ] || continue
 	grep -nE '\b__os_[a-z]|\b__xtc_[a-z]' "$f" 2>/dev/null \
@@ -162,9 +165,10 @@ installed=$(sed -n '/^LIB_HDRS_PUBLIC/,/xtc_trace\.h$/p' "$ROOT/dist/Makefile.in
 	grep -oE 'xtc[a-z0-9_]*\.h' | sort -u)
 inc_viol=$(printf '%s\n' "$ex_src" | while IFS= read -r f; do
 	[ -n "$f" ] || continue
-	grep -nE '^[[:space:]]*#[[:space:]]*include[[:space:]]*"(xtc[a-z0-9_]*|os_[a-z_]+|[a-z_]+_int|[a-z_]+_ext)\.h"' \
+	# "x.h" or <x.h>: an installed header may be named either way.
+	grep -nE '^[[:space:]]*#[[:space:]]*include[[:space:]]*["<](xtc[a-z0-9_]*|os_[a-z_]+|[a-z_]+_int|[a-z_]+_ext)\.h[">]' \
 	    "$f" 2>/dev/null | while IFS= read -r hit; do
-		h=$(printf '%s\n' "$hit" | sed -E 's/.*"([a-z0-9_]+\.h)".*/\1/')
+		h=$(printf '%s\n' "$hit" | sed -E 's/.*["<]([a-z0-9_]+\.h)[">].*/\1/')
 		printf '%s\n' "$installed" | grep -qx "$h" ||
 		    printf '%s:%s\n' "$f" "$hit"
 	done
