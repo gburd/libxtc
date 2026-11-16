@@ -144,26 +144,45 @@ fi
 # on an xtc_recv buffer hiding in a HEADER, plus 17 dead internal-header
 # includes, all invisible to the old check):
 #   - scan .h as well as .c;
-#   - flag an #include of an INTERNAL header (xtc_int.h is not installed,
-#     and os_*.h is the internal os layer), not just symbol references.
+#   - flag an #include of an INTERNAL header (any header `make install`
+#     does not ship), not just symbol references.
 rule3_fatal=1
-ex_src=$(find "$ROOT/examples" -name '*.c' -o -name '*.h' 2>/dev/null)
+# The examples and the documentation's snippets are both consumer code.
+ex_src=$(find "$ROOT/examples" "$ROOT/docs/_includes/snippets" \
+    \( -name '*.c' -o -name '*.h' \) 2>/dev/null |
+    grep -vE '/examples/06_sqlxtc/(sqlite|lime)/')
 consumer=$(printf '%s\n' "$ex_src" | while IFS= read -r f; do
 	[ -n "$f" ] || continue
 	grep -nE '\b__os_[a-z]|\b__xtc_[a-z]' "$f" 2>/dev/null \
 	| grep -vE 'XTC_RAW_OK|/\*|//' \
 	| grep -vE '^[0-9]+:[[:space:]]*\*' | sed "s#^#$f:#"
 done)
+# A consumer may include an xtc_*.h only if `make install` ships it
+# (LIB_HDRS_PUBLIC).  Exception on this branch, by name: the sqlxtc
+# example's DST build includes xtc_sim.h and xtc_dst_inject.h, which 2.1
+# does not install (2.2 installs xtc_sim.h, API plan B11).
+installed=$(sed -n '/^LIB_HDRS_PUBLIC/,/xtc_trace\.h$/p' "$ROOT/dist/Makefile.in" |
+	grep -oE 'xtc[a-z0-9_]*\.h' | sort -u)
 inc_viol=$(printf '%s\n' "$ex_src" | while IFS= read -r f; do
 	[ -n "$f" ] || continue
-	grep -nE '^[[:space:]]*#[[:space:]]*include[[:space:]]*"(xtc_int\.h|os_[a-z_]+\.h)"' \
-	    "$f" 2>/dev/null | sed "s#^#$f:#"
+	# "x.h" or <x.h>: an installed header may be named either way.
+	grep -nE '^[[:space:]]*#[[:space:]]*include[[:space:]]*["<](xtc[a-z0-9_]*|os_[a-z_]+|[a-z_]+_int|[a-z_]+_ext)\.h[">]' \
+	    "$f" 2>/dev/null | while IFS= read -r hit; do
+		h=$(printf '%s\n' "$hit" | sed -E 's/.*["<]([a-z0-9_]+\.h)[">].*/\1/')
+		case "$f:$h" in
+		*/examples/06_sqlxtc/*:xtc_sim.h|*/examples/06_sqlxtc/*:xtc_dst_inject.h)
+			continue ;;
+		esac
+		printf '%s\n' "$installed" | grep -qx "$h" ||
+		    printf '%s:%s\n' "$f" "$hit"
+	done
 done)
 if [ -n "$inc_viol" ]; then
 	n=$(printf '%s\n' "$inc_viol" | grep -c .)
 	echo "  [api] FAIL RULE 3: $n consumer/example file(s) #include an"
-	echo "        INTERNAL header (xtc_int.h is not installed; os_*.h is the"
-	echo "        internal os layer).  Use the public xtc_*.h headers."
+	echo "        INTERNAL header (not in LIB_HDRS_PUBLIC: xtc_int.h,"
+	echo "        os_*.h, *_int.h, *_ext.h).  Use the installed xtc_*.h"
+	echo "        headers."
 	printf '%s\n' "$inc_viol" | sed 's/^/        /'
 	fail=1
 fi
