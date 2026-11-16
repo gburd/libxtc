@@ -1079,6 +1079,9 @@ xtc_dns_resolve(const char *hostname, int port,
  * loop they fall back to poll(2) (POSIX).
  */
 #include "xtc_proc.h"   /* XTC_LAYER_OK: cooperative-wait frame helpers; poll(2) off-loop (see Layering note above) */
+/* proc.c: the library's mail-blind xtc_proc_wait_fd. */
+int __xtc_proc_wait_fd_only(int fd, uint32_t interest, int64_t timeout_ns,
+    uint32_t *out_revents);
 #include "xtc_io.h"
 #include "os_time.h"
 #if !defined(_WIN32)
@@ -1097,8 +1100,12 @@ __net_wait_fd(int fd, uint32_t interest, int64_t deadline_ns)
 	}
 	if (!xtc_pid_is_none(xtc_self())) {
 		uint32_t revents = 0;
-		return xtc_proc_wait_fd(fd, interest, to, &revents) == XTC_OK
-		    ? 0 : -1;
+		/* Mail-blind: the caller's queued messages are its own, and a
+		 * mail wake here would retry the transfer without yielding. */
+		if (__xtc_proc_wait_fd_only(fd, interest, to, &revents) !=
+		    XTC_OK)
+			return -1;
+		return 0;
 	}
 #if !defined(_WIN32)
 	{

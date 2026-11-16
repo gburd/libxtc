@@ -331,6 +331,24 @@ after an `xtc_rcu_init`, synchronize did not scan it, and an object that
 thread held was freed under it.  `/m13/rcu/thread_reader_after_fini`
 fails on 2.1.2 and passes on 2.1.3.
 
+## FIXED (2.1.3): the library's own fd waits spun while the caller had mail
+
+`xtc_proc_wait_fd` returns at once, without parking, while the caller's
+mailbox holds a message, as documented.  The library's fd waits that are
+not receives used it too, so a proc with an unread message spun in them:
+`xtc_net_send_frame` (and the other frame and TLS transfers) to a peer
+on the same loop retried without yielding, so the peer never ran and the
+loop hung; `xtc_osproc_wait` on a 300 ms child burned 0.30 s of CPU; and
+`xtc_accel_wait_fence` slept 50 us to 1 ms between `poll(2)` probes
+while mail was queued.  These waits are now mail-blind: they park on the
+fd whatever the mailbox holds, a message arriving during the park does
+not wake them, and the messages are left for the caller.  A kill and
+`xtc_proc_wake` still end them.  `xtc_proc_wait_fd` itself is unchanged;
+2.2 adds `XTC_WAIT_FD_ONLY` for an application's own mail-blind wait,
+which 2.1 does not have.  `/m2/net_frame/with_mail` hangs on 2.1.2 and
+passes on 2.1.3, and `/m10/osproc/wait_with_mail` fails on 2.1.2 (0.30 s
+of CPU for a 300 ms child) and passes on 2.1.3.
+
 ## FIXED (2.1.2): a cross-shard xtc_tnt_send could lose messages
 
 **What it was.**  Through 2.1.1 an `xtc_tnt_send` to an Isolate on

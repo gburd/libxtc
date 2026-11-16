@@ -490,6 +490,8 @@ struct xtc_proc {
 	/* Receive coordination. */
 	xtc_waker_t       recv_waker;
 	int               waker_armed;
+	int waker_no_mail; /* armed by a mail-blind wait_fd: mail does not
+	                    * fire it (under mbox_lock) */
 
 	/* Entry. */
 	xtc_proc_fn fn;
@@ -1466,7 +1468,9 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e, int sys,
 		wm_depth = p->mbox_n;
 		wm_cap = p->mbox_cap;
 	}
-	armed = p->waker_armed;
+	/* A mail-blind wait (__xtc_proc_wait_fd_only) does not wake for
+	 * mail; the message waits for the receiver's next recv. */
+	armed = p->waker_armed && !p->waker_no_mail;
 	/* Wake the parked receiver UNDER mbox_lock, as xtc_proc_wake and
 	 * xtc_exit_pid do.  The receiver clears waker_armed under this lock
 	 * after it resumes, and its exit takes it too, so while we hold it
@@ -3224,6 +3228,9 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 					(void)xtc_task_waker(self->task,
 					    &self->recv_waker);
 					self->waker_armed = 1;
+#if !XTC_DST_BUG(XTC_DST_BUG_FDONLY_STALE)
+					self->waker_no_mail = 0;
+#endif
 				}
 				(void) __proc_mtx_unlock(&self->mbox_lock);
 				break;
@@ -3502,9 +3509,16 @@ __wait_fd_closed(int fd)
 #endif
 }
 
-int
-xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
-                 uint32_t *out_revents)
+/*
+ * xtc_proc_wait_fd, and with fd_only the library's mail-blind form
+ * (__xtc_proc_wait_fd_only): it parks even when the mailbox holds a
+ * message, a message arriving during the park does not wake it, and
+ * *out_revents never carries XTC_WAIT_MAILBOX.  The fd, the timeout, a
+ * kill and xtc_proc_wake still end it.
+ */
+static int
+__proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
+    uint32_t *out_revents, int fd_only)
 {
 	struct xtc_proc *self = __current_proc;
 	uint32_t revents;
@@ -3591,7 +3605,7 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	    memory_order_relaxed);
 
 	(void) __proc_mtx_lock(&self->mbox_lock);
-	if (self->mbox_n > 0 || self->save_head != NULL) {
+	if (!fd_only && (self->mbox_n > 0 || self->save_head != NULL)) {
 		*out_revents |= XTC_WAIT_MAILBOX;
 	} else {
 		/* Populate recv_waker + set waker_armed together under
@@ -3601,6 +3615,7 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 		 * matching note in __do_recv's park point. */
 		(void)xtc_task_waker(self->task, &self->recv_waker);
 		self->waker_armed = 1;
+		self->waker_no_mail = fd_only;
 		kp_gap = atomic_load_explicit(&self->kill_pending,
 		    memory_order_acquire);
 	}
@@ -3927,9 +3942,10 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	}
 
 	/* Check the mailbox again -- a message may have arrived without
-	 * tripping the waker race-window. */
+	 * tripping the waker race-window.  A mail-blind wait reports no
+	 * mail: the bit would turn its timeout into an XTC_OK. */
 	(void) __proc_mtx_lock(&self->mbox_lock);
-	if (self->mbox_n > 0 || self->save_head != NULL) {
+	if (!fd_only && (self->mbox_n > 0 || self->save_head != NULL)) {
 		revents |= XTC_WAIT_MAILBOX;
 	}
 	(void) __proc_mtx_unlock(&self->mbox_lock);
@@ -3983,6 +3999,29 @@ xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
 	if (revents == (uint32_t)XTC_WAIT_TIMEOUT)
 		return XTC_E_AGAIN;
 	return XTC_OK;
+}
+
+int
+xtc_proc_wait_fd(int fd, uint32_t interest, int64_t timeout_ns,
+                 uint32_t *out_revents)
+{
+	return __proc_wait_fd(fd, interest, timeout_ns, out_revents, 0);
+}
+
+/*
+ * PUBLIC: int __xtc_proc_wait_fd_only __P((int, uint32_t, int64_t, uint32_t *));
+ *
+ * The library's mail-blind xtc_proc_wait_fd, for its own fd waits that
+ * are not receives (xtc_net's frame and TLS waits, xtc_osproc_wait, the
+ * accelerator fence): the caller's queued messages are its own, and a
+ * mail-sensitive wait returns at once while one is queued, so the
+ * caller's retry loop spun.  Not exported.
+ */
+int
+__xtc_proc_wait_fd_only(int fd, uint32_t interest, int64_t timeout_ns,
+    uint32_t *out_revents)
+{
+	return __proc_wait_fd(fd, interest, timeout_ns, out_revents, 1);
 }
 
 /* ---------- exit / link / monitor ---------- */

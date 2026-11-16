@@ -347,12 +347,72 @@ test_frame_one_segment(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- with_mail: a frame send with mail queued parks, then completes ----
+ * The sender has one unread message and sends a 4 MiB frame (more than
+ * the socket buffer) to a receiver on the same loop that reads only
+ * after 100 ms.  The frame's wait must park on the fd and leave the mail
+ * alone.  Through 2.1.2 it used a mail-sensitive wait, which returned at
+ * once without yielding, so the receiver never ran and the loop hung. */
+static int g_wm_rc = 99, g_wm_depth = -1, g_wm_got;
+static int g_wm_sv[2];
+static uint8_t g_wm_buf[4u << 20];
+
+static void
+wm_sender(void *arg)
+{
+	xtc_mailbox_stats_t st = XTC_MAILBOX_STATS_INIT;
+	(void)arg;
+	(void)xtc_send(xtc_self(), "m", 1);
+	g_wm_rc = xtc_net_send_frame(g_wm_sv[0], g_wm_buf, sizeof g_wm_buf);
+	if (xtc_proc_mailbox_stats(xtc_self(), &st) == XTC_OK)
+		g_wm_depth = (int)st.depth;
+}
+
+static void
+wm_receiver(void *arg)
+{
+	void *m = NULL;
+	size_t n = 0;
+	(void)arg;
+	(void)xtc_proc_sleep(100LL * 1000 * 1000);
+	if (xtc_net_recv_frame(g_wm_sv[1], &m, &n, 0, 5000LL * 1000 * 1000) ==
+	        XTC_OK &&
+	    n == sizeof g_wm_buf)
+		g_wm_got = 1;
+	xtc_free(m);
+}
+
+static MunitResult
+test_frame_with_mail(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	(void)p;
+	(void)d;
+	munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, g_wm_sv), ==, 0);
+	(void)xtc_net_setnonblock(g_wm_sv[0]);
+	(void)xtc_net_setnonblock(g_wm_sv[1]);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, wm_sender, NULL, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, wm_receiver, NULL, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_assert_int(g_wm_rc, ==, XTC_OK);
+	munit_assert_int(g_wm_depth, ==, 1);
+	munit_assert_int(g_wm_got, ==, 1);
+	xtc_net_close(g_wm_sv[0]);
+	xtc_net_close(g_wm_sv[1]);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/roundtrip", test_frame_roundtrip, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/cap",       test_frame_cap,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/truncated", test_frame_truncated, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/framev",    test_frame_framev,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/one_segment", test_frame_one_segment, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/with_mail", test_frame_with_mail, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = {

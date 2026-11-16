@@ -98,6 +98,7 @@ write_cases() {
 		"33;test_sim_fsm_call;0;1;a call outlived the machine" \
 		"34;test_sim_net_inflight;0;1;a message sent with XTC_OK was lost" \
 		"35;test_sim_rcu;0;0;fiber that lived through xtc_rcu_fini was invisible" \
+		"36;test_sim_wait_fd_only;0;1;a receive after a mail-blind wait was never woken" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -149,6 +150,8 @@ write_cases() {
 # 35 RCU_SLOT_GEN rcu.c: a fiber's cached reader slot skips the generation
 #               check -> a fiber that lives through xtc_rcu_fini stays visible to
 #               synchronize (it would publish into a freed slot)
+# 36 FDONLY_STALE proc.c: xtc_recv arms without clearing the mail-blind bit
+#               -> a receive after a mail-blind fd wait is woken by mail
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

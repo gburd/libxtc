@@ -15,6 +15,7 @@ int __xtc_exit_self_kind __P((int, int));
 int __xtc_fault_sig_install __P((int, const struct sigaction *));
 int __xtc_preempt_pc_ok __P((uintptr_t));
 int __xtc_proc_crit_depth __P((void));
+int __xtc_proc_wait_fd_only __P((int, uint32_t, int64_t, uint32_t *));
 int __xtc_unsafe_depth __P((void));
 int xtc_aio_fdatasync __P((int));
 int xtc_aio_fsync __P((int));

@@ -269,12 +269,76 @@ test_signal(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- wait with mail queued ----
+ * xtc_osproc_wait leaves the caller's mail alone, so a message queued
+ * before the wait must not end its park on the pidfd.  Through 2.1.2 the
+ * wait used a mail-sensitive xtc_proc_wait_fd and spun for the child's
+ * whole life (a 300 ms child cost 300 ms of CPU).  Bound: 100 ms of
+ * process CPU for a 300 ms child; the message is still there after. */
+static _Atomic int g_mw_ok;
+static double g_mw_cpu;
+
+static double
+mw_cpu_secs(void)
+{
+	struct timespec ts;
+	if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) != 0)
+		return 0;
+	return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+static void
+mail_wait_proc(void *arg)
+{
+	xtc_osproc_t *h = NULL;
+	xtc_osproc_opts_t o;
+	xtc_mailbox_stats_t st = XTC_MAILBOX_STATS_INIT;
+	char *const argv[] = { "/bin/sh", "-c", "sleep 0.3", NULL };
+	int status = 0;
+	double c0;
+	(void)arg;
+
+	memset(&o, 0, sizeof o);
+	o.size = sizeof o;
+	o.argv = argv;
+	(void)xtc_send(xtc_self(), "m", 1);
+	if (xtc_osproc_spawn(&o, &h) != XTC_OK)
+		return;
+	c0 = mw_cpu_secs();
+	if (xtc_osproc_wait(h, &status, 5000LL * 1000 * 1000) == XTC_OK &&
+	    WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+	    xtc_proc_mailbox_stats(xtc_self(), &st) == XTC_OK && st.depth == 1)
+		atomic_store_explicit(&g_mw_ok, 1, memory_order_seq_cst);
+	g_mw_cpu = mw_cpu_secs() - c0;
+	xtc_osproc_destroy(h);
+}
+
+static MunitResult
+test_wait_with_mail(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_pid_t pid;
+	(void)p;
+	(void)d;
+	atomic_store_explicit(&g_mw_ok, 0, memory_order_seq_cst);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, mail_wait_proc, NULL, NULL, &pid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	munit_assert_int(atomic_load_explicit(&g_mw_ok, memory_order_seq_cst),
+	    ==, 1);
+	munit_assert_double(g_mw_cpu, <, 0.1);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/bad_opts",     test_bad_opts,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/exec",         test_exec_true_false, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/no_fd_leak",   test_no_fd_leak,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fn_ctrl_wait", test_fn_ctrl_wait,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/signal",       test_signal,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/wait_with_mail", test_wait_with_mail, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 

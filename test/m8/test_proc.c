@@ -2771,6 +2771,121 @@ test_wait_fd_closed_fd_is_inval(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	return MUNIT_OK;
 }
+
+/* [wait_fd/fd_only] __xtc_proc_wait_fd_only, the library's mail-blind
+ * wait (its frame, TLS, osproc and fence waits use it; there is no public
+ * flag on 2.1).  The waiter waits READABLE on a pipe with one message
+ * already queued while a peer sends it 20 more, 2 ms apart, then writes
+ * the pipe at ~60 ms.  Each wait must park until the fd fires (one
+ * return, revents READABLE, no MAILBOX bit), then a 30 ms wait on the
+ * drained pipe must end by its timeout although mail is queued, and a
+ * kill must still end an infinite mail-blind wait.  A mail-sensitive wait
+ * returned at once with XTC_WAIT_MAILBOX, and a retry loop around it spun. */
+int __xtc_proc_wait_fd_only(int, uint32_t, int64_t, uint32_t *);
+static int g_fo_rd, g_fo_wr, g_fo_returns, g_fo_rc1, g_fo_rev1, g_fo_rc2;
+static int g_fo_rev2, g_fo_depth, g_fo_killed_parked;
+static xtc_pid_t g_fo_victim;
+
+static void
+fo_waiter(void *arg)
+{
+	xtc_mailbox_stats_t st = XTC_MAILBOX_STATS_INIT;
+	uint32_t rev = 0;
+	char c;
+	(void)arg;
+	(void)xtc_send(xtc_self(), "pre", 3);
+	do {
+		rev = 0;
+		g_fo_rc1 = __xtc_proc_wait_fd_only(g_fo_rd, XTC_IO_READABLE,
+		    1000LL * 1000 * 1000, &rev);
+		g_fo_returns++;
+	} while (g_fo_rc1 == XTC_OK && (rev & XTC_IO_READABLE) == 0 &&
+	    g_fo_returns < 1000);
+	g_fo_rev1 = (int)rev;
+	if ((rev & XTC_IO_READABLE) == 0)
+		return; /* the pipe is not written yet: reading would block */
+	munit_assert_int((int)read(g_fo_rd, &c, 1), ==, 1);
+	rev = 0;
+	g_fo_rc2 = __xtc_proc_wait_fd_only(g_fo_rd, XTC_IO_READABLE,
+	    30LL * 1000 * 1000, &rev);
+	g_fo_rev2 = (int)rev;
+	(void)xtc_proc_mailbox_stats(xtc_self(), &st);
+	g_fo_depth = (int)st.depth;
+}
+
+static void
+fo_sender(void *arg)
+{
+	int i;
+	(void)arg;
+	for (i = 0; i < 20; i++) {
+		(void)xtc_proc_sleep(2LL * 1000 * 1000);
+		(void)xtc_send(g_fo_victim, "m", 1);
+	}
+	(void)xtc_proc_sleep(20LL * 1000 * 1000);
+	munit_assert_int((int)write(g_fo_wr, "x", 1), ==, 1);
+}
+
+static void
+fo_kill_victim(void *arg)
+{
+	uint32_t rev = 0;
+	(void)arg;
+	(void)xtc_send(xtc_self(), "pre", 3);
+	(void)__xtc_proc_wait_fd_only(g_fo_rd, XTC_IO_READABLE, -1, &rev);
+	g_fo_killed_parked = -1; /* the kill must unwind, not return */
+}
+
+static void
+fo_killer(void *arg)
+{
+	xtc_proc_info_t info = XTC_PROC_INFO_INIT;
+	(void)arg;
+	(void)xtc_proc_sleep(10LL * 1000 * 1000);
+	(void)xtc_send(g_fo_victim, "m", 1);
+	(void)xtc_proc_sleep(10LL * 1000 * 1000);
+	if (xtc_proc_info(g_fo_victim, &info) == XTC_OK &&
+	    info.park_reason == XTC_PARK_FD && g_fo_killed_parked == 0)
+		g_fo_killed_parked = 1;
+	(void)xtc_exit_pid(g_fo_victim, 1);
+}
+
+static MunitResult
+test_wait_fd_fd_only(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_pid_t pid;
+	(void)p;
+	(void)d;
+	g_fo_returns = 0;
+	g_fo_killed_parked = 0;
+	munit_assert_int(xtc_test_make_pipe(&g_fo_rd, &g_fo_wr), ==, 0);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, fo_waiter, NULL, NULL,
+	                     &g_fo_victim),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, fo_sender, NULL, NULL, &pid), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(g_fo_returns, ==, 1);
+	munit_assert_int(g_fo_rc1, ==, XTC_OK);
+	munit_assert_int(g_fo_rev1, ==, (int)XTC_IO_READABLE);
+	munit_assert_int(g_fo_rc2, ==, XTC_E_AGAIN);
+	munit_assert_int(g_fo_rev2, ==, (int)XTC_WAIT_TIMEOUT);
+	munit_assert_int(g_fo_depth, ==, 21); /* every message kept */
+
+	munit_assert_int(xtc_proc_spawn(loop, fo_kill_victim, NULL, NULL,
+	                     &g_fo_victim),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, fo_killer, NULL, NULL, &pid), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(g_fo_killed_parked, ==, 1);
+
+	xtc_test_close_pipe(g_fo_rd, g_fo_wr);
+	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	return MUNIT_OK;
+}
 #endif /* !_WIN32 */
 
 /* [at_exit/park_after_kill] An at-exit hook may PARK even when the proc
@@ -3221,6 +3336,7 @@ static MunitTest tests[] = {
 	{ "/wait_fd_mailbox_wake_not_lost", test_wait_fd_mailbox_wake_not_lost, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/wait_fd_kill_wake_not_lost", test_wait_fd_kill_wake_not_lost, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/wait_fd_closed_fd_is_inval", test_wait_fd_closed_fd_is_inval, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/wait_fd_fd_only", test_wait_fd_fd_only, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #endif
 	{ "/at_exit_park_after_kill", test_at_exit_park_after_kill, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/at_exit_park_clean_control", test_at_exit_park_clean_control, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

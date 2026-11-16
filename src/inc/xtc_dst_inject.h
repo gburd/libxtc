@@ -245,4 +245,12 @@
  */
 #define XTC_DST_BUG_RCU_SLOT_GEN 35
 
+/*
+ * 36 FDONLY_STALE: xtc_recv arms its waker without clearing the
+ * mail-blind bit an earlier __xtc_proc_wait_fd_only set, so a receive
+ * after such a wait is never woken by mail (test_sim_wait_fd_only: "a
+ * receive after a mail-blind wait was never woken").
+ */
+#define XTC_DST_BUG_FDONLY_STALE 36
+
 #endif /* XTC_DST_INJECT_H */

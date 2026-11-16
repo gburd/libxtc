@@ -21,6 +21,10 @@
 #include "loop_int.h"   /* __xtc_current_loop: place the sim child fiber */
 #include "os_sharp.h"   /* __os_env_get / __os_strlcpy */
 
+/* proc.c: the library's mail-blind xtc_proc_wait_fd. */
+int __xtc_proc_wait_fd_only(int fd, uint32_t interest, int64_t timeout_ns,
+    uint32_t *out_revents);
+
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -550,8 +554,8 @@ xtc_osproc_wait(xtc_osproc_t *p, int *status, int64_t timeout_ns)
 		if (p->pidfd >= 0) {
 			/* Park on the pidfd: readable once the child exits. */
 			uint32_t revents = 0;
-			int prc = xtc_proc_wait_fd(p->pidfd, XTC_IO_READABLE,
-			    timeout_ns, &revents);
+			int prc = __xtc_proc_wait_fd_only(p->pidfd,
+			    XTC_IO_READABLE, timeout_ns, &revents);
 			if (prc == XTC_E_AGAIN)
 				return XTC_E_AGAIN; /* timeout */
 			/* Woken (or wait_fd unusable off a loop): reap below. */
