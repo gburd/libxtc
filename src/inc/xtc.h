@@ -15,6 +15,8 @@
 #ifndef XTC_H
 #define XTC_H
 
+#include "xtc_export.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -94,7 +96,7 @@ typedef enum xtc_err {
  *	The pointer is to static storage; the caller must not free it.
  *	See M0_CLAIMS.md [C1].
  */
-const char *xtc_version_string(void);
+XTC_API const char *xtc_version_string(void);
 
 /*
  * xtc_version_components --
@@ -103,7 +105,7 @@ const char *xtc_version_string(void);
  *	On NULL out-pointers returns XTC_E_INVAL.
  *	See M0_CLAIMS.md [C2].
  */
-int xtc_version_components(int *major, int *minor, int *patch);
+XTC_API int xtc_version_components(int *major, int *minor, int *patch);
 
 /*
  * xtc_strerror --
@@ -113,7 +115,7 @@ int xtc_version_components(int *major, int *minor, int *patch);
  *	rather than NULL, so callers can chain into log lines safely.
  *	See M0_CLAIMS.md [C6].
  */
-const char *xtc_strerror(int xtc_err);
+XTC_API const char *xtc_strerror(int xtc_err);
 
 /*
  * xtc_free --
@@ -129,7 +131,7 @@ const char *xtc_strerror(int xtc_err);
  *	This is the public name for the library allocator's deallocation
  *	entry point; it is safe to call from any thread.
  */
-void xtc_free(void *p);
+XTC_API void xtc_free(void *p);
 
 /*
  * xtc_malloc / xtc_calloc / xtc_realloc --
@@ -150,9 +152,9 @@ void xtc_free(void *p);
  *	surface; an embedder that needs a custom allocator is building
  *	against the source tree, not the installed API.
  */
-void *xtc_malloc(size_t size);
-void *xtc_calloc(size_t n, size_t size);
-void *xtc_realloc(void *p, size_t size);
+XTC_API void *xtc_malloc(size_t size);
+XTC_API void *xtc_calloc(size_t n, size_t size);
+XTC_API void *xtc_realloc(void *p, size_t size);
 
 /*
  * xtc_aligned_alloc / xtc_aligned_free --
@@ -168,8 +170,8 @@ void *xtc_realloc(void *p, size_t size);
  *	freeable pointer, not NULL.  For a struct with an over-aligned
  *	member.
  */
-void *xtc_aligned_alloc(size_t align, size_t size);
-void  xtc_aligned_free(void *p);
+XTC_API void *xtc_aligned_alloc(size_t align, size_t size);
+XTC_API void xtc_aligned_free(void *p);
 
 /*
  * xtc_clock_mono / xtc_clock_real --
@@ -190,8 +192,8 @@ void  xtc_aligned_free(void *p);
  *	physical component from xtc_clock_mono plus a single epoch offset
  *	sampled at startup.
  */
-int64_t xtc_clock_mono(void);
-int64_t xtc_clock_real(void);
+XTC_API int64_t xtc_clock_mono(void);
+XTC_API int64_t xtc_clock_real(void);
 
 /*
  * xtc_sleep_ns --
@@ -201,7 +203,7 @@ int64_t xtc_clock_real(void);
  *	so a consumer never needs raw nanosleep.  Returns XTC_OK, or a
  *	negative XTC_E_* on interruption/error.
  */
-int xtc_sleep_ns(int64_t ns);
+XTC_API int xtc_sleep_ns(int64_t ns);
 
 /*
  * xtc_atomic_i64_load / xtc_atomic_i64_add --
@@ -210,8 +212,8 @@ int xtc_sleep_ns(int64_t ns);
  *	consumer needs for a shared counter / token bucket without reaching
  *	for the internal __os_atomic_* macros or a compiler builtin.
  */
-int64_t xtc_atomic_i64_load(const int64_t *p);
-int64_t xtc_atomic_i64_add(int64_t *p, int64_t delta);
+XTC_API int64_t xtc_atomic_i64_load(const int64_t *p);
+XTC_API int64_t xtc_atomic_i64_add(int64_t *p, int64_t delta);
 
 /*
  * xtc_env_get / xtc_env_set --
@@ -232,8 +234,8 @@ int64_t xtc_atomic_i64_add(int64_t *p, int64_t delta);
  *	(XTC_E_INVAL for a NULL/empty/'='-containing name, XTC_E_NOMEM if
  *	the environment cannot grow).
  */
-const char *xtc_env_get(const char *name);
-int         xtc_env_set(const char *name, const char *value, int overwrite);
+XTC_API const char *xtc_env_get(const char *name);
+XTC_API int xtc_env_set(const char *name, const char *value, int overwrite);
 
 /*
  * xtc_rand_u64 / xtc_rand_seed --
@@ -252,8 +254,8 @@ int         xtc_env_set(const char *name, const char *value, int overwrite);
  *	This is NOT a cryptographic generator; do not use it for keys or
  *	security tokens.
  */
-uint64_t xtc_rand_u64(void);
-void     xtc_rand_seed(uint64_t seed);
+XTC_API uint64_t xtc_rand_u64(void);
+XTC_API void xtc_rand_seed(uint64_t seed);
 
 /*
  * xtc_strlcpy / xtc_strlcat --
@@ -265,8 +267,8 @@ void     xtc_rand_seed(uint64_t seed);
  *	xtc_strlcat.  A return value >= dstsize means the result was
  *	truncated.  Pure; no allocation.
  */
-size_t xtc_strlcpy(char *dst, const char *src, size_t dstsize);
-size_t xtc_strlcat(char *dst, const char *src, size_t dstsize);
+XTC_API size_t xtc_strlcpy(char *dst, const char *src, size_t dstsize);
+XTC_API size_t xtc_strlcat(char *dst, const char *src, size_t dstsize);
 
 /*
  * xtc_ncpus / xtc_numa_nnodes / xtc_numa_node_of_cpu /
@@ -285,10 +287,10 @@ size_t xtc_strlcat(char *dst, const char *src, size_t dstsize);
  *
  *	All are cheap cached queries, safe from any thread.
  */
-int xtc_ncpus(void);
-int xtc_numa_nnodes(void);
-int xtc_numa_node_of_cpu(int cpu);
-int xtc_numa_current_node(void);
+XTC_API int xtc_ncpus(void);
+XTC_API int xtc_numa_nnodes(void);
+XTC_API int xtc_numa_node_of_cpu(int cpu);
+XTC_API int xtc_numa_current_node(void);
 
 #ifdef __cplusplus
 }

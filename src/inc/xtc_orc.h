@@ -139,7 +139,7 @@ XTC_API int  xtc_sup_add_child(xtc_supervisor_t *sup, const xtc_child_spec_t *sp
  * Must be called from outside the supervisor's loop thread.
  * timeout_ns < 0 = forever, 0 = poll-once.  After a successful join
  * the handle is invalid. */
-int  xtc_sup_join(xtc_supervisor_t *sup, int64_t timeout_ns);
+XTC_API int xtc_sup_join(xtc_supervisor_t *sup, int64_t timeout_ns);
 
 XTC_API int  xtc_sup_n_children(const xtc_supervisor_t *sup);
 XTC_API int  xtc_sup_n_alive(const xtc_supervisor_t *sup);

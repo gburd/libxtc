@@ -186,9 +186,9 @@ XTC_API int xtc_dns_resolve(const char *hostname, int port,
  * sendmsg(2) (one TCP segment for a small frame), and recv_frame reads
  * straight into the frame it returns.
  */
-int xtc_net_send_frame(int fd, const void *buf, size_t len);
-int xtc_net_recv_frame(int fd, void **out, size_t *out_len,
-                       size_t max_len, int64_t timeout_ns);
+XTC_API int xtc_net_send_frame(int fd, const void *buf, size_t len);
+XTC_API int xtc_net_recv_frame(int fd, void **out, size_t *out_len,
+    size_t max_len, int64_t timeout_ns);
 
 #if !defined(_WIN32)
 /*

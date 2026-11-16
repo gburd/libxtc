@@ -24,6 +24,8 @@
 #ifndef XTC_FS_H
 #define XTC_FS_H
 
+#include "xtc_export.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -59,14 +61,16 @@ typedef struct xtc_fs_stat {
 typedef struct xtc_fs_dir xtc_fs_dir_t;
 
 /* ---- file handles (int fd; composes with xtc_aio_* and read/write) ---- */
-int xtc_fs_open(const char *path, uint32_t flags, int *out_fd);
-int xtc_fs_close(int fd);
-int xtc_fs_pread(int fd, void *buf, size_t n, int64_t off, size_t *out_done);
-int xtc_fs_pwrite(int fd, const void *buf, size_t n, int64_t off, size_t *out_done);
-int xtc_fs_fsync(int fd);          /* data + metadata durable */
-int xtc_fs_fdatasync(int fd);      /* data durable (metadata best-effort) */
-int xtc_fs_ftruncate(int fd, int64_t len);
-int xtc_fs_fsize(int fd, int64_t *out_size);
+XTC_API int xtc_fs_open(const char *path, uint32_t flags, int *out_fd);
+XTC_API int xtc_fs_close(int fd);
+XTC_API int
+xtc_fs_pread(int fd, void *buf, size_t n, int64_t off, size_t *out_done);
+XTC_API int
+xtc_fs_pwrite(int fd, const void *buf, size_t n, int64_t off, size_t *out_done);
+XTC_API int xtc_fs_fsync(int fd);     /* data + metadata durable */
+XTC_API int xtc_fs_fdatasync(int fd); /* data durable (metadata best-effort) */
+XTC_API int xtc_fs_ftruncate(int fd, int64_t len);
+XTC_API int xtc_fs_fsize(int fd, int64_t *out_size);
 
 /* ---- direct I/O alignment ---- */
 /*
@@ -77,32 +81,35 @@ int xtc_fs_fsize(int fd, int64_t *out_size);
  * direct op on fd requires whether or not fd is currently in direct
  * mode, so callers can align proactively.  Returns XTC_OK.
  */
-int xtc_fs_dio_align(int fd, size_t *mem, size_t *off, size_t *len);
+XTC_API int xtc_fs_dio_align(int fd, size_t *mem, size_t *off, size_t *len);
 
 /*
  * Allocate a buffer suitable for direct I/O on fd: address-aligned to
  * the memory requirement and size rounded up to the length granularity.
  * Free with xtc_fs_dio_free.  Returns XTC_OK or XTC_E_NOMEM.
  */
-int  xtc_fs_dio_alloc(int fd, size_t size, void **out);
-void xtc_fs_dio_free(void *p);
+XTC_API int xtc_fs_dio_alloc(int fd, size_t size, void **out);
+XTC_API void xtc_fs_dio_free(void *p);
 
 /* ---- namespace operations ---- */
-int xtc_fs_stat(const char *path, xtc_fs_stat_t *out);
-int xtc_fs_exists(const char *path);            /* returns 1 (yes) or 0 (no) */
-int xtc_fs_unlink(const char *path);
-int xtc_fs_rename(const char *from, const char *to);   /* atomic replace */
-int xtc_fs_mkdir(const char *path);
-int xtc_fs_rmdir(const char *path);
+XTC_API int xtc_fs_stat(const char *path, xtc_fs_stat_t *out);
+XTC_API int xtc_fs_exists(const char *path); /* returns 1 (yes) or 0 (no) */
+XTC_API int xtc_fs_unlink(const char *path);
+XTC_API int
+xtc_fs_rename(const char *from, const char *to); /* atomic replace */
+XTC_API int xtc_fs_mkdir(const char *path);
+XTC_API int xtc_fs_rmdir(const char *path);
 
 /* ---- temporary files ---- */
-int xtc_fs_tmpdir(char *buf, size_t cap);       /* $TMPDIR/$TMP/$TEMP, else /tmp */
-int xtc_fs_mkstemp(char *tmpl, int *out_fd);    /* tmpl ends in "XXXXXX" */
+XTC_API int
+xtc_fs_tmpdir(char *buf, size_t cap); /* $TMPDIR/$TMP/$TEMP, else /tmp */
+XTC_API int xtc_fs_mkstemp(char *tmpl, int *out_fd); /* tmpl ends in "XXXXXX" */
 
 /* ---- directory iteration ---- */
-int  xtc_fs_dir_open(const char *path, xtc_fs_dir_t **out);
-int  xtc_fs_dir_next(xtc_fs_dir_t *d, const char **out_name);  /* *out_name == NULL at end */
-void xtc_fs_dir_close(xtc_fs_dir_t *d);
+XTC_API int xtc_fs_dir_open(const char *path, xtc_fs_dir_t **out);
+XTC_API int xtc_fs_dir_next(xtc_fs_dir_t *d,
+    const char **out_name); /* *out_name == NULL at end */
+XTC_API void xtc_fs_dir_close(xtc_fs_dir_t *d);
 
 #ifdef __cplusplus
 }

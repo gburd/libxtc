@@ -533,14 +533,16 @@ not a hidden one.
 
 ### Shared-library (DLL) symbol export -- a real gap
 
-The meson `both_libraries` build produces a `.dll` on Windows, but the
-library has no `__declspec(dllexport)` / `-fvisibility` machinery and no
-`.def` file, so MSVC exports NOTHING from the DLL by default -- a Windows
-SHARED build is currently unusable (the STATIC `xtc.lib` is what the MSVC
-smoke build and the santorini matrix exercise).  Adding an export
-mechanism (a generated `.def` from the public symbol set, or an
-XTC_API `__declspec` macro on every public prototype) is tracked as
-future work; today the honest statement is "Windows = static lib only."
+Every function an installed header declares carries `XTC_API`
+(xtc_export.h): `__declspec(dllexport)` while the library builds with
+`XTC_BUILDING_DLL`, `__declspec(dllimport)` in a consumer that defines
+`XTC_DLL`, and nothing elsewhere.  `test/dist/test_header_api.sh` (in
+`make check`) fails if a declaration lacks it, on the host's branch of
+the headers and on the `_WIN32`, `__APPLE__` and `__FreeBSD__` ones.
+The build itself is still static only: neither `dist/build_msvc.bat`
+nor the santorini matrix links a `.dll`, so no Windows run has loaded
+the library as one.  Today the honest statement is "Windows = static
+lib; the export annotations a DLL needs are complete and gated."
 
 ### unlink() of a file with open handles
 

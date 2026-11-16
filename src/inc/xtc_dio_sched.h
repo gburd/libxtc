@@ -82,8 +82,8 @@ XTC_API void xtc_dio_sched_report(xtc_dio_sched_t *g, double fitness);
  * n_phenos; for a single phenotype this is equivalent to
  * xtc_dio_sched_report).  Each phenotype advances and breeds its own
  * genes independently against its own fitness. */
-void xtc_dio_sched_report_multi(xtc_dio_sched_t *g, const double *fitness,
-                                int n);
+XTC_API void
+xtc_dio_sched_report_multi(xtc_dio_sched_t *g, const double *fitness, int n);
 
 /* Best gene-set found so far and its fitness.  Either pointer may be
  * NULL.  This is the set to use once tuning has converged / frozen. */

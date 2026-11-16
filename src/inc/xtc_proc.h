@@ -654,7 +654,7 @@ XTC_API int       xtc_monitor(xtc_pid_t target, uint64_t *out_ref);
 /* Snapshot a process's mailbox statistics into *out.  Returns XTC_OK,
  * or XTC_E_INVAL if the pid is dead / unknown.  Safe to call from any
  * thread. */
-int       xtc_proc_mailbox_stats(xtc_pid_t pid, xtc_mailbox_stats_t *out);
+XTC_API int xtc_proc_mailbox_stats(xtc_pid_t pid, xtc_mailbox_stats_t *out);
 
 /* ---- R1: per-fiber fault containment ----
  *
@@ -698,10 +698,10 @@ typedef sigjmp_buf xtc_recovery_buf_t;
  * sanitizer's, or xtc_crash_handler_install's (in either install order)
  * -- and then to the default action.  On Windows it registers a
  * Vectored Exception Handler.  Returns XTC_OK on success. */
-int       xtc_fault_guard_install(void);
+XTC_API int xtc_fault_guard_install(void);
 
 /* Internal arm-slot for the xtc_proc_recovery_arm() macro (POSIX). */
-xtc_recovery_buf_t *__xtc_proc_recovery_slot(void);
+XTC_API xtc_recovery_buf_t *__xtc_proc_recovery_slot(void);
 
 #if defined(_WIN32)
 /* Windows recovery-arm helpers (used by the macro below).
@@ -709,9 +709,9 @@ xtc_recovery_buf_t *__xtc_proc_recovery_slot(void);
  * __xtc_recovery_ctx returns the CONTEXT to capture into;
  * __xtc_recovery_result returns 0 on the arming pass and the fault
  * code when the VEH has restored the context. */
-void      __xtc_recovery_prep(void);
-CONTEXT  *__xtc_recovery_ctx(void);
-int       __xtc_recovery_result(void);
+XTC_API void __xtc_recovery_prep(void);
+XTC_API CONTEXT *__xtc_recovery_ctx(void);
+XTC_API int __xtc_recovery_result(void);
 #endif
 
 /*
@@ -760,13 +760,13 @@ int       __xtc_recovery_result(void);
 #endif
 
 /* Disarm the calling process's recovery frame. */
-void      xtc_proc_recovery_disarm(void);
+XTC_API void xtc_proc_recovery_disarm(void);
 
 /* Critical section: while crit_depth > 0, a fault is NOT contained --
  * it escalates to process abort, because shared state may be torn.
  * Nestable.  Mirrors PG's START_CRIT_SECTION / END_CRIT_SECTION. */
-void      xtc_proc_critical_enter(void);
-void      xtc_proc_critical_leave(void);
+XTC_API void xtc_proc_critical_enter(void);
+XTC_API void xtc_proc_critical_leave(void);
 
 /* Register a callback to run when the calling process exits -- on a
  * normal return OR a contained-fault recovery (after
@@ -777,13 +777,13 @@ void      xtc_proc_critical_leave(void);
  * xtc_lock_release_all so no lock-manager lock outlives the proc, or
  * a memory-context reset.  Up to a small fixed number per proc;
  * returns XTC_E_RESOURCE past the limit, XTC_E_INVAL off a proc. */
-int       xtc_proc_at_exit(void (*fn)(void *), void *arg);
+XTC_API int xtc_proc_at_exit(void (*fn)(void *), void *arg);
 
 /* A memory context scoped to the calling process: created lazily on
  * first call, destroyed automatically on proc exit (a backstop so a
  * faulted session's allocations are reclaimed even if its recovery
  * block itself faults).  Returns NULL off a proc.  See xtc_mctx.h. */
-struct xtc_mctx *xtc_proc_mctx(void);
+XTC_API struct xtc_mctx *xtc_proc_mctx(void);
 
 /*
  * Recovery resource registry.
@@ -827,13 +827,13 @@ struct xtc_mctx *xtc_proc_mctx(void);
  * Each registration returns XTC_OK, XTC_E_RESOURCE past the per-proc
  * limit, or XTC_E_INVAL off a proc / on a bad argument.
  */
-int  xtc_proc_recovery_track_fd(int fd);
-int  xtc_proc_recovery_track_mctx(struct xtc_mctx *mctx);
-int  xtc_proc_recovery_track_locks(void *mgr, uint64_t locker,
-                                   void (*release_all)(void *, uint64_t));
-int  xtc_proc_recovery_track(void (*fn)(void *), void *arg);
-int  xtc_proc_recovery_untrack_fd(int fd);
-void xtc_proc_recovery_cleanup(void);
+XTC_API int xtc_proc_recovery_track_fd(int fd);
+XTC_API int xtc_proc_recovery_track_mctx(struct xtc_mctx *mctx);
+XTC_API int xtc_proc_recovery_track_locks(void *mgr, uint64_t locker,
+    void (*release_all)(void *, uint64_t));
+XTC_API int xtc_proc_recovery_track(void (*fn)(void *), void *arg);
+XTC_API int xtc_proc_recovery_untrack_fd(int fd);
+XTC_API void xtc_proc_recovery_cleanup(void);
 
 /*
  * Arm a recovery frame whose default recovered action is to release
@@ -988,8 +988,8 @@ XTC_API int xtc_bracket(int (*acquire)(void **res, void *ud),
  * on-wire layout.  The DOWN/EXIT signals are sent packed; a mismatched
  * (unpacked) mirror struct misreads `reason`.  Returns XTC_OK if msg
  * is a DOWN, XTC_E_INVAL otherwise.  out_pid / out_reason may be NULL. */
-int       xtc_down_decode(const void *msg, size_t len,
-                          xtc_pid_t *out_pid, int *out_reason);
+XTC_API int xtc_down_decode(const void *msg, size_t len, xtc_pid_t *out_pid,
+    int *out_reason);
 
 /*
  * Self-describing DOWN classification (requested by embedders whose

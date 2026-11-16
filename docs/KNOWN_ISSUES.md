@@ -6,6 +6,34 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## FIXED (2.1.3): 81 installed declarations lacked `XTC_API`
+
+**What it was.**  `XTC_API` marks a declaration for export from a
+Windows DLL (xtc_export.h); 81 functions in the installed headers had
+none: 24 in xtc.h (`xtc_strerror`, `xtc_malloc`, `xtc_free`,
+`xtc_clock_mono`, ...), 22 in xtc_fs.h, 15 in xtc_proc.h (with the
+recovery-frame hook `__xtc_proc_recovery_slot`), 14 in xtc_tnt.h, 2 in
+xtc_net.h, and one each in xtc_exec.h, xtc_slab.h, xtc_dio_sched.h and
+xtc_orc.h (`xtc_sup_join`).  The three Windows recovery hooks
+(`__xtc_recovery_prep`, `_ctx`, `_result`) had none either.  A DLL
+build would not have exported them, and a consumer would have failed
+to link.  xtc.h, xtc_fs.h and xtc_tnt.h did not include xtc_export.h.
+
+**Fix.**  Every declaration carries `XTC_API`, and the three headers
+include xtc_export.h.  `test/dist/test_header_api.sh` (in `make check`)
+prints every declaration the installed headers make, on the host's,
+the `_WIN32`, the `__APPLE__` and the `__FreeBSD__` branches, and fails
+on one without `XTC_API`: 81 names before (84 on `_WIN32`), none after
+(719 declarations).  The Windows build is still a static `xtc.lib`; see
+docs/M_WINDOWS_MATRIX.md.
+
+**An exception to the 2.1.x rule, approved by the maintainer.**  On
+ELF and Mach-O `XTC_API` expands to nothing, and every one of these
+functions was already exported from 2.1.2's libxtc.so (version node
+`XTC_2.0`, through the `xtc_*` glob of dist/libxtc.map), so the shared
+library's symbol set does not change; abidiff against 2.1.2 reports no
+change.  The exception matters only for a Windows DLL build.
+
 ## FIXED (2.1.3): `XTC_AIO_FORCE_OFFLOAD` could change a simulation run
 
 **What it was.**  The `xtc_aio_*` calls read `XTC_AIO_FORCE_OFFLOAD`

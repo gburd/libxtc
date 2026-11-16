@@ -264,8 +264,8 @@ XTC_API int   xtc_slab_reap_all(void);
  * `interval_ns` and logs the count via xtc_log.  The proc runs
  * forever; supervise it or rely on loop teardown to kill it.
  * Returns the proc's pid (XTC_PID_NONE on failure). */
-int   xtc_slab_reaper_spawn(xtc_loop_t *loop, int64_t interval_ns,
-                            xtc_pid_t *out_pid);
+XTC_API int xtc_slab_reaper_spawn(xtc_loop_t *loop, int64_t interval_ns,
+    xtc_pid_t *out_pid);
 
 #ifdef __cplusplus
 }
