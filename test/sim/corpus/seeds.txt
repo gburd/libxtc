@@ -95,3 +95,7 @@ test_sim_launch         1          1   bug28 LAUNCH_EATMAIL: xtc_launch freed th
 # and on its planted build (-DXTC_DST_INJECT_BUG=N), passes fixed.
 test_sim_fsm_call       1          1   bug33 FSMCALL_NOLIVE: xtc_fsm_call waited out its timeout on a machine that had ended; fixed "fsm: a call notices a stopped machine, and a mid-dispatch exit frees its message"
 test_sim_net_inflight   0          1   bug34 SIM_DROP_LATE: a latency-deferred send told XTC_OK was dropped when the mailbox filled in flight; fixed "proc: the simulator's net latency no longer drops a send it accepted"
+# A DOWN and a link EXIT across an isolated loop (test_sim_partition's
+# built-in seed).  FAILS on a0d3ffd3 ("down 0 exit 0") and on the planted
+# build (-DXTC_DST_INJECT_BUG=67).
+test_sim_partition      -          -   bug67 PART_SYSDROP: a partition dropped a DOWN and a link EXIT for good; fixed "proc: a DOWN or link EXIT crosses the simulator's partition"

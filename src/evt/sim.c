@@ -977,7 +977,8 @@ __xtc_sim_io_flip_byte(int len)
  * [0, XTC_SIM_PART_MAX).  A blocked edge causes __mbox_deliver to DROP
  * the message the same way a soft-full mailbox does (return XTC_E_AGAIN;
  * the sender already handles that path), so a partitioned peer never
- * deadlocks the sim.  Off by default (no edge blocked).
+ * deadlocks the sim.  System messages (a DOWN, a link EXIT) are not cut
+ * (see __mbox_deliver).  Off by default (no edge blocked).
  *
  * Latency: when a [min,max] window is set, each cross-loop delivery is
  * deferred to now + a seeded draw from the IO stream (reusing the IO

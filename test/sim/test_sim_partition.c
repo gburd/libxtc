@@ -45,6 +45,8 @@
  *       order-sensitive arrival hash, and the sim state hash (delivery
  *       under a seeded latency is order-deterministic);
  *   (d) with the partition CLEARED, all 12 sends deliver.
+ *   (e) an ASYMMETRIC one-way cut lands 8 of 12 and still quiesces.
+ *   (f) a DOWN and a link EXIT cross the cut (see sys_run_once).
  */
 
 #define N_LOOPS 4
@@ -226,6 +228,115 @@ run_once(uint64_t seed, int partition, int *out_arrived, long *out_hash,
 	return rc;
 }
 
+/*
+ * (f) System messages cross the cut.  A watcher on loop 1 monitors the
+ * victim on loop 0 and links to it (trapping exits), then isolates the
+ * victim's loop.  The victim sends the watcher a user message, which the
+ * cut drops (the victim sees XTC_E_AGAIN), and exits with code 7.  Its
+ * DOWN and its link EXIT must still arrive: in a real process neither is
+ * ever dropped, and a real network that loses a link reports it rather
+ * than going silent, so a lost one is a state no production build can
+ * reach, and it left a cross-loop supervisor waiting forever.
+ */
+static xtc_pid_t g_sys_victim, g_sys_watcher;
+static int g_sys_send_rc; /* the victim's send across the cut */
+static int g_sys_down;    /* DOWNs from the victim, exit code 7 */
+static int g_sys_exit;    /* link EXITs from the victim, exit code 7 */
+static int g_sys_other;   /* anything else the watcher received */
+
+static void
+sys_victim(void *arg)
+{
+	long tag = 1;
+	(void)arg;
+	/* Virtual time: the watcher monitors, links and cuts first. */
+	(void)xtc_proc_sleep(10 * 1000 * 1000LL);
+	g_sys_send_rc = xtc_send(g_sys_watcher, &tag, sizeof tag);
+	(void)xtc_exit_self(7);
+}
+
+static void
+sys_watcher(void *arg)
+{
+	uint64_t ref = 0;
+	int i;
+	(void)arg;
+	(void)xtc_proc_trap_exit(1);
+	if (xtc_monitor(g_sys_victim, &ref) != XTC_OK ||
+	    xtc_link(g_sys_victim) != XTC_OK)
+		return;
+	xtc_sim_partition_isolate(1); /* the victim's loop: slot 0 + 1 */
+	/* Take everything that arrives within a second of virtual time. */
+	for (i = 0; i < 4; i++) {
+		xtc_down_info_t di = XTC_DOWN_INFO_INIT;
+		void *m = NULL;
+		size_t n = 0;
+		if (xtc_recv(&m, &n, 1000 * 1000 * 1000LL) != XTC_OK)
+			break;
+		if (xtc_down_decode_ex(m, n, &di) == XTC_OK &&
+		    xtc_pid_eq(di.pid, g_sys_victim) &&
+		    di.kind == XTC_DOWN_KIND_EXIT && di.exit_code == 7) {
+			if (di.ref == ref)
+				g_sys_down++;
+			else if (di.ref == 0)
+				g_sys_exit++;
+			else
+				g_sys_other++;
+		} else {
+			g_sys_other++;
+		}
+		free(m);
+	}
+}
+
+/* Run (f) once, with or without net latency (which defers the DOWN and
+ * the EXIT through the latency path).  Returns 0 if every check held. */
+static int
+sys_run_once(uint64_t seed, int latency)
+{
+	xtc_exec_t *e = NULL;
+	int rc;
+
+	g_sys_send_rc = 1;
+	g_sys_down = g_sys_exit = g_sys_other = 0;
+	xtc_sim_partition_clear();
+	if (xtc_exec_init(&e, 2) != XTC_OK)
+		return 1;
+	if (latency)
+		xtc_sim_net_latency(10 * 1000LL, 500 * 1000LL);
+	if (xtc_proc_spawn(xtc_exec_loop(e, 0), sys_victim, NULL, NULL,
+	        &g_sys_victim) != XTC_OK ||
+	    xtc_proc_spawn(xtc_exec_loop(e, 1), sys_watcher, NULL, NULL,
+	        &g_sys_watcher) != XTC_OK) {
+		(void)xtc_exec_fini(e);
+		return 1;
+	}
+	rc = xtc_sim_exec_run(e, seed, 1000000);
+	xtc_sim_partition_clear();
+	(void)xtc_exec_fini(e);
+	printf("sys-message run (latency %d): rc=%d send=%d down=%d exit=%d "
+	       "other=%d\n",
+	    latency, rc, g_sys_send_rc, g_sys_down, g_sys_exit, g_sys_other);
+	if (rc != XTC_OK) {
+		printf("FAIL: the sys-message run did not quiesce (rc %d)\n",
+		    rc);
+		return 1;
+	}
+	if (g_sys_send_rc != XTC_E_AGAIN || g_sys_other != 0) {
+		printf("FAIL: a user message crossed the cut (send rc %d, "
+		       "%d stray message(s))\n",
+		    g_sys_send_rc, g_sys_other);
+		return 1;
+	}
+	if (g_sys_down != 1 || g_sys_exit != 1) {
+		printf("FAIL: a DOWN or link EXIT was lost under a partition "
+		       "(down %d exit %d, want 1 1)\n",
+		    g_sys_down, g_sys_exit);
+		return 1;
+	}
+	return 0;
+}
+
 int
 main(void)
 {
@@ -301,6 +412,10 @@ main(void)
 			return 1;
 		}
 	}
+
+	/* (f) a DOWN and a link EXIT cross the cut, inline and deferred. */
+	if (sys_run_once(0x9A27, 0) != 0 || sys_run_once(0x9A27, 1) != 0)
+		return 1;
 
 	printf("OK: simulated network partition under DST -- A|B cut drops "
 	    "cross-group messages (4/12 land, connected groups intact), the "

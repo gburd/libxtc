@@ -417,6 +417,27 @@ loops, a receiver gone in flight, a run cut short by its step budget,
 sends under buggify) fails all 16 of its seeds on 2.1.2 and passes on
 2.1.3; planted bug 34 restores the old admission and is caught at seed 1.
 
+## FIXED (2.1.3): DST runs that partitioned loops could lose DOWN and EXIT signals
+
+The simulator's partition (`xtc_sim_partition_set`,
+`xtc_sim_partition_isolate`) cut every message between the loops it
+separated, system messages included.  A monitor's DOWN or a link's EXIT
+from a proc on the far side of the cut was dropped, and nothing sends
+one again, so the watcher never learned of the death, even after the
+partition healed.  No real build can do this: inside a process a DOWN
+or an EXIT is never dropped, and a real network that loses a link
+reports it.  A DST run with a supervisor on another loop than its child
+could then report a child that was never restarted, or `XTC_E_DEADLK`
+from a watcher waiting for the DOWN, none of them a bug in the code
+under test.  Only simulator runs were affected.  A system message now
+crosses a partition; a user message is still dropped and its sender
+still gets `XTC_E_AGAIN`.  `test_sim_partition` adds a monitor and a
+trapped link across an isolated loop, inline and under net latency: on
+2.1.3 before the fix the DOWN and the EXIT never arrive, fixed both do.
+Planted bug 67 restores the old cut and is caught at the test's seed.
+The partition does not report a lost link as
+`XTC_DOWN_KIND_NOCONNECTION`; the simulator models one process.
+
 ## FIXED (2.1.3): pdict entries were never released at proc exit
 
 `xtc_pdict.h` and xtc_pdict(3) say a proc's entries are freed when it
