@@ -44,6 +44,9 @@
 #include "coro_int.h"      /* __xtc_current_task */
 #include "loop_int.h"      /* struct xtc_task: rcu_slot / rcu_gen */
 #include "xtc_dst_inject.h"
+#include "xtc_inject.h" /* rcu.slot_oom / rcu.retire_oom (DST) */
+#include "xtc_tail.h"   /* XTC_TAIL_LIFECYCLE_DROP */
+#include "tail_int.h"   /* __xtc_tail_emit */
 
 #include <pthread.h>
 #include <sched.h>
@@ -65,12 +68,14 @@ struct rcu_tls {
 	 */
 	xtc_task_t       *owner;
 	struct rcu_tls   *tbl_next;       /* fiber-slot hash bucket chain */
+	int heap;                         /* from the heap, not the slab */
 };
 
 struct retired {
 	void              *p;
 	xtc_rcu_free_fn    fn;
 	struct retired    *next;
+	int heap; /* from the heap, not the slab */
 };
 
 struct rcu_state {
@@ -100,6 +105,7 @@ static struct rcu_state __rcu = { XTC_RCU_EPOCH_START,
 struct rcu_self {
 	struct rcu_tls *slot;
 	uint32_t gen;
+	int noslot; /* nesting of read-sides entered without a slot */
 };
 static XTC_THREAD_LOCAL struct rcu_self __rcu_self;
 
@@ -113,6 +119,20 @@ static XTC_THREAD_LOCAL struct rcu_self __rcu_self;
  * also sees the emptied table.
  */
 static _Atomic uint32_t __rcu_gen = 1;
+
+/*
+ * Read-sides entered with no reader slot (both the slab and the heap
+ * failed), in every thread and fiber.  synchronize waits while it is
+ * nonzero: such a reader has no epoch to compare, so it holds off every
+ * grace period until it leaves.  Each context counts its own nesting
+ * (rcu_self.noslot, task->rcu_noslot) and keeps using the count until
+ * its outermost read-side ends, so a nested read_lock never mixes the
+ * two kinds of bracket.
+ */
+static _Atomic int __rcu_noslot;
+
+/* Retirements that could not be recorded, and so were leaked. */
+static _Atomic uint64_t __rcu_leaked;
 
 /*
  * Fiber reader slots.  All fibers of a loop share one OS thread, hence
@@ -188,6 +208,54 @@ __rcu_slabs_ensure(void)
 	(void)__xtc_mtx_unlock(&__rcu_slab_init_lock);
 }
 
+/* The two record slabs (NULL until created, or if creation failed). */
+static xtc_slab_t *
+__rcu_tls(void)
+{
+	return atomic_load_explicit(&__rcu_tls_slab, memory_order_seq_cst);
+}
+
+static xtc_slab_t *
+__rcu_ret(void)
+{
+	return atomic_load_explicit(&__rcu_retired_slab, memory_order_seq_cst);
+}
+
+/*
+ * A zeroed RCU record (a reader slot or a retirement) from `slab`, or
+ * from the heap when the slab is missing or empty.  A record that
+ * cannot be had is a reader synchronize cannot see, or an object that
+ * must be freed under its readers, so the slab is only the fast path.
+ * *heap says where it came from, for __rcu_rec_free.  NULL only when
+ * the heap fails too, or when a test armed the injection point
+ * `oom_point` (test_sim_rcu runs out of memory that way: an allocator
+ * that failed would fail the simulator too).
+ */
+static void *
+__rcu_rec_alloc(xtc_slab_t *slab, size_t sz, const char *oom_point, int *heap)
+{
+	void *r = NULL;
+
+	if (xtc_inject_check(oom_point))
+		return NULL;
+	if (slab != NULL)
+		r = xtc_slab_alloc(slab);
+	*heap = (r == NULL);
+	if (r == NULL && __os_malloc(sz, &r) != XTC_OK)
+		return NULL;
+	memset(r, 0, sz);
+	return r;
+}
+
+static void
+__rcu_rec_free(xtc_slab_t *slab, void *r, int heap)
+{
+	if (heap)
+		__os_free(r);
+	else
+		xtc_slab_free(slab, r);
+}
+
 /* Out of line and cold: the slow paths of a read-side, kept out of
  * the inlined fast path. */
 #if defined(_MSC_VER)
@@ -202,12 +270,13 @@ RCU_SLOW static int
 __rcu_register(uint32_t gen)
 {
 	struct rcu_tls *t;
+	int heap;
 	__rcu_self.slot = NULL;
 	__rcu_slabs_ensure();
-	if (__rcu_tls_slab == NULL) return XTC_E_RESOURCE;
-	t = xtc_slab_alloc(__rcu_tls_slab);
-	if (t == NULL) return XTC_E_RESOURCE;
-	memset(t, 0, sizeof *t);
+	t = __rcu_rec_alloc(__rcu_tls(), sizeof *t, "rcu.slot_oom", &heap);
+	if (t == NULL)
+		return XTC_E_NOMEM;
+	t->heap = heap;
 	(void)__xtc_mtx_lock(&__rcu.lock);
 	t->next = __rcu.registry;
 	__rcu.registry = t;
@@ -221,17 +290,17 @@ __rcu_register(uint32_t gen)
  * Return the reader slot for the CURRENT fiber, creating
  * and registering it on first use, reusing an existing slot for a
  * recycled task pointer.  Callers hold nothing; this takes __rcu.lock
- * internally.  Returns NULL only on OOM (caller degrades to no-op,
- * matching the OS-thread OOM behaviour).
+ * internally.  Returns NULL only when no record can be had at all (the
+ * caller then counts the read-side in __rcu_noslot).
  */
 static struct rcu_tls *
 __rcu_fiber_slot(xtc_task_t *cur)
 {
 	struct rcu_tls *t;
 	size_t h;
+	int heap;
 
 	__rcu_slabs_ensure();
-	if (__rcu_tls_slab == NULL) return NULL;
 	h = __rcu_ftbl_hash(cur);
 
 	(void)__xtc_mtx_lock(&__rcu.lock);
@@ -242,9 +311,9 @@ __rcu_fiber_slot(xtc_task_t *cur)
 		}
 	(void)__xtc_mtx_unlock(&__rcu.lock);
 
-	t = xtc_slab_alloc(__rcu_tls_slab);
+	t = __rcu_rec_alloc(__rcu_tls(), sizeof *t, "rcu.slot_oom", &heap);
 	if (t == NULL) return NULL;
-	memset(t, 0, sizeof *t);
+	t->heap = heap;
 	t->owner = cur;
 
 	(void)__xtc_mtx_lock(&__rcu.lock);
@@ -260,7 +329,7 @@ __rcu_fiber_slot(xtc_task_t *cur)
 		for (e = __rcu_ftbl[h]; e != NULL; e = e->tbl_next)
 			if (e->owner == cur) {
 				(void)__xtc_mtx_unlock(&__rcu.lock);
-				xtc_slab_free(__rcu_tls_slab, t);
+				__rcu_rec_free(__rcu_tls(), t, t->heap);
 				return e;
 			}
 	}
@@ -275,11 +344,15 @@ __rcu_fiber_slot(xtc_task_t *cur)
 /*
  * The calling fiber's slot when its cached one is missing or from an
  * older registry generation: look it up under __rcu.lock, creating it
- * on first use, and cache it in the task.  NULL on OOM.
+ * on first use, and cache it in the task.  NULL on OOM, and inside a
+ * read-side the fiber entered without a slot (it stays slotless until
+ * that one ends).
  */
 RCU_SLOW static struct rcu_tls *
 __rcu_fiber_slot_refresh(xtc_task_t *cur, uint32_t gen)
 {
+	if (cur->rcu_noslot > 0)
+		return NULL;
 	cur->rcu_slot = __rcu_fiber_slot(cur);
 	cur->rcu_gen = gen;
 	return cur->rcu_slot;
@@ -311,10 +384,22 @@ __rcu_reader_slot(int create)
 	self = &__rcu_self;
 	if (XTC_LIKELY(self->slot != NULL && self->gen == gen))
 		return self->slot;
-	if (!create)
+	if (!create || self->noslot > 0)
 		return NULL;
 	(void)__rcu_register(gen);
 	return self->slot;
+}
+
+/*
+ * The calling context's count of read-sides entered without a slot:
+ * its task's when on a fiber (a fiber may migrate inside one), else
+ * the thread's.
+ */
+RCU_SLOW static int *
+__rcu_noslot_nest(void)
+{
+	xtc_task_t *cur = __xtc_current_task();
+	return cur != NULL ? &cur->rcu_noslot : &__rcu_self.noslot;
 }
 
 int
@@ -337,15 +422,13 @@ xtc_rcu_fini(void)
 		for (r = __rcu.buckets[b]; r != NULL; r = next_r) {
 			next_r = r->next;
 			r->fn(r->p);
-			if (__rcu_retired_slab) xtc_slab_free(__rcu_retired_slab, r);
-			else __os_free(r);
+			__rcu_rec_free(__rcu_ret(), r, r->heap);
 		}
 		__rcu.buckets[b] = NULL;
 	}
 	for (t = __rcu.registry; t != NULL; t = next_t) {
 		next_t = t->next;
-		if (__rcu_tls_slab) xtc_slab_free(__rcu_tls_slab, t);
-		else __os_free(t);
+		__rcu_rec_free(__rcu_tls(), t, t->heap);
 	}
 	__rcu.registry = NULL;
 	/* Fiber slots were registered into __rcu.registry (freed above);
@@ -367,7 +450,16 @@ void
 xtc_rcu_read_lock(void)
 {
 	struct rcu_tls *t = __rcu_reader_slot(1);
-	if (t == NULL) return;            /* OOM at register; degrade */
+	if (XTC_UNLIKELY(t == NULL)) {
+		/* No slot to publish an epoch in: count the read-side, so
+		 * synchronize waits for it all the same. */
+		if (!XTC_DST_BUG(XTC_DST_BUG_RCU_NOSLOT)) {
+			++*__rcu_noslot_nest();
+			(void)atomic_fetch_add_explicit(&__rcu_noslot, 1,
+			    memory_order_seq_cst);
+		}
+		return;
+	}
 	if (t->nest++ == 0) {
 		uint64_t e = atomic_load_explicit(&__rcu.epoch,
 		    memory_order_acquire);
@@ -380,7 +472,16 @@ void
 xtc_rcu_read_unlock(void)
 {
 	struct rcu_tls *t = __rcu_reader_slot(0);
-	if (t == NULL) return;
+	int *noslot;
+	if (XTC_UNLIKELY(t == NULL)) {
+		noslot = __rcu_noslot_nest();
+		if (*noslot > 0) {
+			--*noslot;
+			(void)atomic_fetch_sub_explicit(&__rcu_noslot, 1,
+			    memory_order_seq_cst);
+		}
+		return;
+	}
 	if (--t->nest == 0)
 		atomic_store_explicit(&t->active_epoch, 0,
 		    memory_order_release);
@@ -391,20 +492,28 @@ xtc_rcu_retire(void *p, xtc_rcu_free_fn fn)
 {
 	struct retired *r;
 	uint64_t e;
-	int b;
+	int b, heap;
 	if (p == NULL || fn == NULL) return;
 	__rcu_slabs_ensure();
-	if (__rcu_retired_slab == NULL) {
-		fn(p); return;
-	}
-	r = xtc_slab_alloc(__rcu_retired_slab);
+	r = __rcu_rec_alloc(__rcu_ret(), sizeof *r, "rcu.retire_oom", &heap);
 	if (r == NULL) {
-		/* Couldn't even record; fall back to immediate free.
-		 * Caller has lost the safety guarantee but at least
-		 * we don't leak.  This is best-effort. */
-		fn(p);
+		/*
+		 * Nowhere to record it.  Freeing it now could free it under
+		 * a reader, and waiting for a grace period here deadlocks
+		 * chash, which retires while holding the stripe locks its
+		 * readers take.  So leak it, count it, and say so.
+		 */
+		if (XTC_DST_BUG(XTC_DST_BUG_RCU_RETIRE_FREE)) {
+			fn(p);
+			return;
+		}
+		(void)atomic_fetch_add_explicit(&__rcu_leaked, 1,
+		    memory_order_relaxed);
+		__xtc_tail_emit(XTC_TAIL_SCHED, XTC_TAIL_LIFECYCLE_DROP,
+		    xtc_self(), (uint64_t)(int64_t)XTC_E_NOMEM);
 		return;
 	}
+	r->heap = heap;
 	r->p = p;
 	r->fn = fn;
 	(void)__xtc_mtx_lock(&__rcu.lock);
@@ -440,6 +549,9 @@ xtc_rcu_synchronize(void)
 			if (a != 0 && a <= old) { still_in_old = 1; break; }
 		}
 		(void)__xtc_mtx_unlock(&__rcu.lock);
+		if (atomic_load_explicit(&__rcu_noslot, memory_order_seq_cst) >
+		    0)
+			still_in_old = 1;
 		if (!still_in_old) break;
 		/*
 		 * Hand control to a reader so it can leave the old epoch.
@@ -474,8 +586,7 @@ xtc_rcu_synchronize(void)
 	for (r = to_free; r != NULL; r = next) {
 		next = r->next;
 		r->fn(r->p);
-		if (__rcu_retired_slab) xtc_slab_free(__rcu_retired_slab, r);
-		else __os_free(r);
+		__rcu_rec_free(__rcu_ret(), r, r->heap);
 	}
 }
 
@@ -483,4 +594,12 @@ uint64_t
 xtc_rcu_current_epoch(void)
 {
 	return atomic_load_explicit(&__rcu.epoch, memory_order_acquire);
+}
+
+/* Test-only (not PUBLIC): retirements leaked because they could not be
+ * recorded. */
+uint64_t
+__xtc_rcu_leaked(void)
+{
+	return atomic_load_explicit(&__rcu_leaked, memory_order_relaxed);
 }

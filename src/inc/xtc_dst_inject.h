@@ -253,4 +253,23 @@
  */
 #define XTC_DST_BUG_FDONLY_STALE 36
 
+/*
+ * 37..62 are main's (2.2) ids; these keep main's numbers so a planted
+ * bug means the same thing on both branches.
+ *
+ * 63 RCU_NOSLOT: a read-side that could not get a reader slot (out of
+ * memory) is not counted, so synchronize does not wait for it and a
+ * writer frees a node under it (test_sim_rcu: "a slotless reader saw a
+ * freed node").
+ */
+#define XTC_DST_BUG_RCU_NOSLOT 63
+
+/*
+ * 64 RCU_RETIRE_FREE: a retirement that cannot be recorded (out of
+ * memory) frees the object at once instead of leaking it, under the
+ * readers that still hold it (test_sim_rcu: "an unrecorded retire freed
+ * a node under a reader").
+ */
+#define XTC_DST_BUG_RCU_RETIRE_FREE 64
+
 #endif /* XTC_DST_INJECT_H */

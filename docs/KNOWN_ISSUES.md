@@ -6,6 +6,32 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## FIXED (2.1.3): out of memory, `xtc_rcu` freed objects under their readers
+
+**What it was.**  `xtc_rcu_retire` records a retirement in a slab.  When
+that slab could not be created, or had no free record and could not
+grow, it called the free function at once, under any reader still
+holding the object: a use-after-free under memory pressure.  A reader
+whose first `xtc_rcu_read_lock` could not get a reader slot was ignored,
+so `xtc_rcu_synchronize` did not wait for it and freed objects under it
+too.
+
+**Fix.**  A record the slab cannot give comes from the heap.  When the
+heap fails as well, the retirement is leaked, counted, and reported as
+an `XTC_TAIL_LIFECYCLE_DROP` tail event (detail `XTC_E_NOMEM`): the
+object is never freed, rather than freed early.  Retire does not wait
+for a grace period instead, because `xtc_chash` retires while holding
+the stripe locks its readers take, so a wait there deadlocks.  A reader
+that gets no slot is counted, and `xtc_rcu_synchronize` waits until
+every such read-side has ended; that context stays slotless until its
+outermost read-side ends.  `test/m13/test_rcu` `/retire_oom` (6,000
+retirements under a reader with the slab and then the heap failing) and
+`/reader_oom` (a slotless reader) failed before (6,000 and 1 objects
+freed under the reader) and pass after.  `test_sim_rcu`'s out-of-memory
+phase runs the same two cases under DST; planted bugs 63 (an uncounted
+slotless reader) and 64 (an unrecorded retirement freed at once) are
+both caught on every seed.
+
 ## FIXED (2.1.3): xtc_exec_run could fail to return after the last task finished
 
 The executor's supervisor stops the run when every loop is idle, and

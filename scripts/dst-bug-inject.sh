@@ -99,6 +99,8 @@ write_cases() {
 		"34;test_sim_net_inflight;0;1;a message sent with XTC_OK was lost" \
 		"35;test_sim_rcu;0;0;fiber that lived through xtc_rcu_fini was invisible" \
 		"36;test_sim_wait_fd_only;0;1;a receive after a mail-blind wait was never woken" \
+		"63;test_sim_rcu;0;0;a slotless reader saw a freed node" \
+		"64;test_sim_rcu;0;0;an unrecorded retire freed a node under a reader" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -152,6 +154,11 @@ write_cases() {
 #               synchronize (it would publish into a freed slot)
 # 36 FDONLY_STALE proc.c: xtc_recv arms without clearing the mail-blind bit
 #               -> a receive after a mail-blind fd wait is woken by mail
+# 63 RCU_NOSLOT rcu.c does not count a read-side that got no reader slot
+#               -> out of memory, synchronize still waits for every reader
+# 64 RCU_RETIRE_FREE rcu.c frees an unrecordable retirement at once
+#               -> out of memory, a retired object is leaked, never freed
+#               under a reader
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

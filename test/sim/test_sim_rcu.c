@@ -14,6 +14,7 @@
 #include "xtc_rcu.h"
 #include "xtc_async.h"     /* xtc_yield */
 #include "xtc_sim.h"
+#include "xtc_inject.h"
 
 /*
  * DST coverage of RCU epoch reclamation (src/ptc/rcu.c) -- the LAST
@@ -339,6 +340,229 @@ check_reinit(uint64_t seed)
 	return 0;
 }
 
+/*
+ * Out-of-memory phase.  xtc_rcu must never free under a reader when it
+ * has no memory.  Reader 0 enters its read-side with no slot (the
+ * "rcu.slot_oom" injection point fails its slot allocation) and holds
+ * it for OO_HOLD0 yields, far longer than the writer's grace periods
+ * take; synchronize must still wait for it (plant 63, RCU_NOSLOT).  The
+ * writer's second retirement cannot be recorded ("rcu.retire_oom"),
+ * while a reader holds that node: it must be leaked, not freed (plant
+ * 64, RCU_RETIRE_FREE).  The writer swaps only once a reader holds the
+ * node it retires, so each plant frees a node under a reader on every
+ * seed.  The test frees the leaked node itself at the end.
+ */
+#define OO_READERS 4
+#define OO_HOLD0 200
+#define OO_WR_ITERS 6
+static _Atomic(struct node *) g_oo_hold[OO_READERS]; /* held inside, or NULL */
+static struct node *g_oo_leak; /* the unrecorded retirement */
+
+static void
+oo_noop(const char *name, void *user)
+{
+	(void)name;
+	(void)user;
+}
+
+static void
+oo_hold(int id, int n_yields)
+{
+	struct node *n;
+	uint64_t gen0;
+	int k;
+
+	n = atomic_load_explicit(&g_ptr, memory_order_acquire);
+	gen0 = n->gen;
+	atomic_store_explicit(&g_oo_hold[id], n, memory_order_release);
+	for (k = 0; k < n_yields; k++) {
+		xtc_yield();
+		if (atomic_load_explicit(&n->sentinel, memory_order_acquire) !=
+		        NODE_LIVE_MAGIC ||
+		    n->gen != gen0)
+			atomic_fetch_add_explicit(&g_uaf, 1,
+			    memory_order_relaxed);
+	}
+	atomic_store_explicit(&g_oo_hold[id], NULL, memory_order_release);
+	rcu_fold((long)(gen0 + id));
+}
+
+static void
+oo_reader(void *arg)
+{
+	int id = (int)(intptr_t)arg;
+
+	if (id == 0) {
+		/* No yield between attach and detach: only this fiber's
+		 * slot allocation fails. */
+		(void)xtc_inject_attach("rcu.slot_oom", oo_noop, NULL);
+		xtc_rcu_read_lock();
+		(void)xtc_inject_detach("rcu.slot_oom");
+		oo_hold(0, OO_HOLD0);
+		xtc_rcu_read_unlock();
+	} else {
+		while (atomic_load_explicit(&g_wr_done, memory_order_acquire) ==
+		    0) {
+			xtc_rcu_read_lock();
+			oo_hold(id, RI_HOLD);
+			xtc_rcu_read_unlock();
+			xtc_yield();
+		}
+	}
+	atomic_fetch_add_explicit(&g_rd_done, 1, memory_order_relaxed);
+}
+
+/* 1 if reader `id` (or any reader, id < 0) holds the published node. */
+static int
+oo_held(int id)
+{
+	struct node *cur = atomic_load_explicit(&g_ptr, memory_order_acquire);
+	int i;
+
+	for (i = 0; i < OO_READERS; i++)
+		if ((id < 0 || i == id) &&
+		    atomic_load_explicit(&g_oo_hold[i], memory_order_acquire) ==
+		        cur)
+			return 1;
+	return 0;
+}
+
+static void
+oo_writer(void *arg)
+{
+	struct node *old, *nu;
+	int it, k;
+
+	(void)arg;
+	for (it = 0; it < OO_WR_ITERS; it++) {
+		if (it < 2)
+			while (!oo_held(it == 0 ? 0 : -1))
+				xtc_yield();
+		old = atomic_load_explicit(&g_ptr, memory_order_acquire);
+		nu = node_new(old->gen + 1);
+		if (nu == NULL)
+			break;
+		old =
+		    atomic_exchange_explicit(&g_ptr, nu, memory_order_acq_rel);
+		if (it == 1) {
+			g_oo_leak = old;
+			(void)xtc_inject_attach("rcu.retire_oom", oo_noop,
+			    NULL);
+			xtc_rcu_retire(old, node_free);
+			(void)xtc_inject_detach("rcu.retire_oom");
+		} else {
+			xtc_rcu_retire(old, node_free);
+		}
+		for (k = 0; k < 3; k++)
+			xtc_rcu_synchronize();
+		rcu_fold((long)(nu->gen * 7));
+		xtc_yield();
+	}
+	atomic_store_explicit(&g_wr_done, 1, memory_order_release);
+}
+
+extern uint64_t __xtc_rcu_leaked(void);
+
+static int
+run_oom(uint64_t seed, int *out_uaf, int *out_rd, long *out_hash,
+    uint64_t *out_state, uint64_t *out_leaked)
+{
+	xtc_exec_t *e = NULL;
+	struct node *last;
+	uint64_t leaked0;
+	int i, rc;
+
+	atomic_store_explicit(&g_ptr, NULL, memory_order_seq_cst);
+	atomic_store_explicit(&g_alloc, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_freed, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_uaf, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_rd_done, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_wr_done, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_hash, 0, memory_order_seq_cst);
+	for (i = 0; i < OO_READERS; i++)
+		atomic_store_explicit(&g_oo_hold[i], NULL,
+		    memory_order_seq_cst);
+	g_oo_leak = NULL;
+	leaked0 = __xtc_rcu_leaked();
+
+	if (xtc_rcu_init() != XTC_OK)
+		return -1;
+	atomic_store_explicit(&g_ptr, node_new(1), memory_order_release);
+	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
+		return -1;
+	for (i = 0; i <= OO_READERS; i++) {
+		xtc_loop_t *l = xtc_exec_loop(e, (unsigned)(i % N_LOOPS));
+		if (i < OO_READERS)
+			(void)xtc_proc_spawn(l, oo_reader, (void *)(intptr_t)i,
+			    NULL, NULL);
+		else
+			(void)xtc_proc_spawn(l, oo_writer, NULL, NULL, NULL);
+	}
+
+	rc = xtc_sim_exec_run(e, seed, 5000000);
+
+	last = atomic_exchange_explicit(&g_ptr, NULL, memory_order_acq_rel);
+	if (last != NULL)
+		xtc_rcu_retire(last, node_free);
+	for (i = 0; i < 4; i++)
+		xtc_rcu_synchronize();
+	*out_uaf = atomic_load_explicit(&g_uaf, memory_order_seq_cst);
+	*out_rd = atomic_load_explicit(&g_rd_done, memory_order_seq_cst);
+	*out_hash = atomic_load_explicit(&g_hash, memory_order_seq_cst);
+	*out_state = xtc_sim_state_hash(e);
+	*out_leaked = __xtc_rcu_leaked() - leaked0;
+	/* Every node is freed or is the one leak, which is still live. */
+	if (g_oo_leak != NULL && *out_leaked == 1) {
+		if (atomic_load_explicit(&g_oo_leak->sentinel,
+		        memory_order_acquire) != NODE_LIVE_MAGIC)
+			*out_uaf += 1;
+		node_free(g_oo_leak);
+	}
+	if (atomic_load_explicit(&g_freed, memory_order_seq_cst) !=
+	    atomic_load_explicit(&g_alloc, memory_order_seq_cst))
+		*out_uaf += 1000;
+	(void)xtc_exec_fini(e);
+	xtc_rcu_fini();
+	return rc;
+}
+
+static int
+check_oom(uint64_t seed)
+{
+	int uaf1 = 0, rd1 = 0, uaf2 = 0, rd2 = 0;
+	long h1 = 0, h2 = 0;
+	uint64_t s1 = 0, s2 = 0, lk1 = 0, lk2 = 0;
+
+	if (run_oom(seed, &uaf1, &rd1, &h1, &s1, &lk1) != XTC_OK) {
+		printf("FAIL: oom: run did not quiesce (seed %llx)\n",
+		    (unsigned long long)seed);
+		return 1;
+	}
+	(void)run_oom(seed, &uaf2, &rd2, &h2, &s2, &lk2);
+	printf("rcu oom seed %llx: rd=%d uaf=%d leaked=%llu hash=%ld\n",
+	    (unsigned long long)seed, rd1, uaf1, (unsigned long long)lk1, h1);
+	if (lk1 != 1) {
+		printf("FAIL: oom: an unrecorded retire freed a node under a "
+		       "reader (leaked %llu, want 1)\n",
+		    (unsigned long long)lk1);
+		return 1;
+	}
+	if (uaf1 != 0) {
+		printf("FAIL: oom: a slotless reader saw a freed node (%d)\n",
+		    uaf1);
+		return 1;
+	}
+	if (rd1 != OO_READERS) {
+		printf("FAIL: oom: not all readers finished (rd=%d)\n", rd1);
+		return 1;
+	}
+	if (uaf1 != uaf2 || rd1 != rd2 || h1 != h2 || s1 != s2 || lk1 != lk2) {
+		printf("FAIL: oom: did not replay (hash %ld/%ld)\n", h1, h2);
+		return 1;
+	}
+	return 0;
+}
+
 static int
 run_rcu(uint64_t seed, int *out_rd, int *out_wr, int *out_uaf,
     int *out_alloc, int *out_freed, long *out_hash, uint64_t *out_state)
@@ -490,12 +714,15 @@ main(void)
 
 	if (check_reinit(0x5C0FF) != 0 || check_reinit(0xB1DE7) != 0)
 		return 1;
+	if (check_oom(0x5C0FF) != 0 || check_oom(0xB1DE7) != 0)
+		return 1;
 
 	printf("OK: rcu under DST -- per-fiber reader slot keeps read-sides "
 	       "isolated (no reader saw a freed node), cooperative-yield "
 	       "synchronize drains without hanging, every retired node "
 	       "reclaimed, fibers that live through xtc_rcu_fini stay "
-	       "visible; replayed byte-identically and a different seed "
+	       "visible, nothing freed under a reader out of memory; "
+	       "replayed byte-identically and a different seed "
 	       "reorders but stays consistent\n");
 	return 0;
 }

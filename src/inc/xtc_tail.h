@@ -234,6 +234,11 @@ enum xtc_tail_kind {
 	 * lifecycle route or an explicit failed-observation state is the
 	 * real fix, and is a consumer-visible design change); it makes the
 	 * loss DIAGNOSABLE instead of silent, which is the prerequisite.
+	 *
+	 * xtc_rcu_retire emits it too (pid = the caller, detail =
+	 * XTC_E_NOMEM as an int64_t) when it has no memory to record a
+	 * retirement and leaks the object rather than free it under its
+	 * readers.
 	 */
 	XTC_TAIL_LIFECYCLE_DROP = 14
 };

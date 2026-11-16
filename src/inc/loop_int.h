@@ -231,6 +231,7 @@ struct xtc_task {
 	 * slot is keyed on the task pointer anyway. */
 	void *rcu_slot;
 	uint32_t rcu_gen;
+	int rcu_noslot; /* read-sides entered without a slot (rcu.c) */
 };
 
 /*

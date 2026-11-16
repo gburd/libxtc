@@ -18,6 +18,8 @@
 #include "xtc_exec.h"
 #include "xtc_proc.h"
 #include "xtc_async.h"
+#include "xtc_tail.h"
+#include "xtc_inject.h"
 
 /* Counter incremented by the free function. */
 static _Atomic int g_freed_count;
@@ -418,6 +420,198 @@ test_fiber_readers_migrate(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * Out of memory, xtc_rcu must never free under a reader.  A retirement
+ * it cannot record in its slab goes on the heap; one it cannot record
+ * at all is leaked and counted (it used to be freed at once, under the
+ * readers).  A reader that cannot get a slot is still waited for (it
+ * used to be invisible to synchronize).  The allocator hook fails
+ * calloc (the slab cannot grow: a new chunk's header is a calloc) and
+ * then malloc (no heap either), and the slabs are exhausted first.
+ */
+#define OOM_N 3000
+static atomic_int g_oom_inside;
+static atomic_int g_oom_freed_inside;
+static atomic_int g_oom_freed;
+static char g_oom_obj[2 * OOM_N];
+
+static void *
+oom_fail_calloc(size_t n, size_t sz)
+{
+	(void)n;
+	(void)sz;
+	return NULL;
+}
+static void *
+oom_fail_malloc(size_t sz)
+{
+	(void)sz;
+	return NULL;
+}
+static void *
+oom_fail_aligned(size_t a, size_t sz)
+{
+	(void)a;
+	(void)sz;
+	return NULL;
+}
+
+static void
+oom_free(void *p)
+{
+	(void)p;
+	if (atomic_load_explicit(&g_oom_inside, memory_order_seq_cst))
+		atomic_store_explicit(&g_oom_freed_inside, 1,
+		    memory_order_seq_cst);
+	atomic_fetch_add_explicit(&g_oom_freed, 1, memory_order_seq_cst);
+}
+
+static int
+oom_count_drops(const xtc_tail_rec_t *rec, void *user)
+{
+	if (rec->kind == XTC_TAIL_LIFECYCLE_DROP)
+		++*(int *)user;
+	return 0;
+}
+
+extern uint64_t __xtc_rcu_leaked(void);
+
+static MunitResult
+test_retire_oom(const MunitParameter p[], void *d)
+{
+	struct __os_alloc_hook saved, failing;
+	uint64_t leaked0, leaked;
+	int i, drops = 0;
+	(void)p;
+	(void)d;
+
+	atomic_store_explicit(&g_oom_inside, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_oom_freed_inside, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_oom_freed, 0, memory_order_seq_cst);
+	munit_assert_int(xtc_rcu_init(), ==, XTC_OK);
+	(void)xtc_tail_reset();
+	(void)xtc_tail_enable(XTC_TAIL_SCHED);
+	leaked0 = __xtc_rcu_leaked();
+	munit_assert_int(__os_alloc_get_hook(&saved), ==, XTC_OK);
+
+	xtc_rcu_read_lock();
+	atomic_store_explicit(&g_oom_inside, 1, memory_order_seq_cst);
+	failing = saved;
+	failing.calloc = oom_fail_calloc;
+	munit_assert_int(__os_alloc_set_hook(&failing), ==, XTC_OK);
+	for (i = 0; i < OOM_N; i++) /* exhaust the slab: heap records */
+		xtc_rcu_retire(&g_oom_obj[i], oom_free);
+	failing.malloc = oom_fail_malloc;
+	munit_assert_int(__os_alloc_set_hook(&failing), ==, XTC_OK);
+	for (i = OOM_N; i < 2 * OOM_N; i++) /* no record at all: leaked */
+		xtc_rcu_retire(&g_oom_obj[i], oom_free);
+	munit_assert_int(__os_alloc_set_hook(&saved), ==, XTC_OK);
+	munit_assert_int(atomic_load_explicit(&g_oom_freed,
+	                     memory_order_seq_cst),
+	    ==, 0);
+	atomic_store_explicit(&g_oom_inside, 0, memory_order_seq_cst);
+	xtc_rcu_read_unlock();
+
+	for (i = 0; i < 3; i++)
+		xtc_rcu_synchronize();
+	leaked = __xtc_rcu_leaked() - leaked0;
+	munit_assert_int(atomic_load_explicit(&g_oom_freed_inside,
+	                     memory_order_seq_cst),
+	    ==, 0);
+	munit_assert_uint64(leaked, >, 0);
+	munit_assert_uint64((uint64_t)atomic_load_explicit(&g_oom_freed,
+	                        memory_order_seq_cst) +
+	        leaked,
+	    ==, 2 * OOM_N);
+	(void)xtc_tail_read(oom_count_drops, &drops);
+	munit_assert_uint64((uint64_t)drops, ==, leaked);
+	xtc_tail_disable();
+	xtc_rcu_fini();
+	return MUNIT_OK;
+}
+
+static void
+oom_inject(const char *name, void *user)
+{
+	(void)name;
+	(void)user;
+}
+
+static void *
+oom_syncer(void *arg)
+{
+	int i;
+	(void)arg;
+	for (i = 0; i < 3; i++)
+		xtc_rcu_synchronize();
+	return NULL;
+}
+
+static MunitResult
+test_reader_oom(const MunitParameter p[], void *d)
+{
+	struct __os_alloc_hook saved, failing;
+	struct timespec hold = { 0, 50 * 1000 * 1000 }; /* 50 ms */
+	pthread_t sy;
+	(void)p;
+	(void)d;
+
+	atomic_store_explicit(&g_oom_inside, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_oom_freed_inside, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_oom_freed, 0, memory_order_seq_cst);
+	munit_assert_int(__os_alloc_get_hook(&saved), ==, XTC_OK);
+	failing = saved;
+	failing.calloc = oom_fail_calloc;
+	failing.malloc = oom_fail_malloc;
+	failing.aligned = oom_fail_aligned;
+
+	/* This thread's first read-side, with no memory for its slot: the
+	 * allocator fails (the test runs in a fresh process, so the slot
+	 * slab is not there yet either), and the injection point makes it
+	 * fail without a fork too. */
+	munit_assert_int(xtc_inject_attach("rcu.slot_oom", oom_inject, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(__os_alloc_set_hook(&failing), ==, XTC_OK);
+	xtc_rcu_read_lock();
+	munit_assert_int(__os_alloc_set_hook(&saved), ==, XTC_OK);
+	munit_assert_int(xtc_inject_detach("rcu.slot_oom"), ==, XTC_OK);
+	atomic_store_explicit(&g_oom_inside, 1, memory_order_seq_cst);
+	xtc_rcu_read_lock(); /* nested, still without a slot */
+	xtc_rcu_read_unlock();
+
+	xtc_rcu_retire(&g_oom_obj[0], oom_free);
+	munit_assert_int(pthread_create(&sy, NULL, oom_syncer, NULL), ==, 0);
+	nanosleep(&hold, NULL);
+	munit_assert_int(atomic_load_explicit(&g_oom_freed,
+	                     memory_order_seq_cst),
+	    ==, 0);
+	atomic_store_explicit(&g_oom_inside, 0, memory_order_seq_cst);
+	xtc_rcu_read_unlock();
+	pthread_join(sy, NULL);
+	munit_assert_int(atomic_load_explicit(&g_oom_freed_inside,
+	                     memory_order_seq_cst),
+	    ==, 0);
+	munit_assert_int(atomic_load_explicit(&g_oom_freed,
+	                     memory_order_seq_cst),
+	    ==, 1);
+
+	/* With memory back, the next read-side gets a slot. */
+	xtc_rcu_read_lock();
+	xtc_rcu_retire(&g_oom_obj[1], oom_free);
+	munit_assert_int(pthread_create(&sy, NULL, oom_syncer, NULL), ==, 0);
+	nanosleep(&hold, NULL);
+	munit_assert_int(atomic_load_explicit(&g_oom_freed,
+	                     memory_order_seq_cst),
+	    ==, 1);
+	xtc_rcu_read_unlock();
+	pthread_join(sy, NULL);
+	munit_assert_int(atomic_load_explicit(&g_oom_freed,
+	                     memory_order_seq_cst),
+	    ==, 2);
+	xtc_rcu_fini();
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/basic",          test_basic,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/blocks_reclaim", test_blocks_reclaim,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -427,6 +621,10 @@ static MunitTest tests[] = {
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/thread_reader_after_fini", test_thread_reader_after_fini, NULL,
 	    NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/retire_oom", test_retire_oom, NULL, NULL, MUNIT_TEST_OPTION_NONE,
+	    NULL },
+	{ "/reader_oom", test_reader_oom, NULL, NULL, MUNIT_TEST_OPTION_NONE,
+	    NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m13/rcu", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };
