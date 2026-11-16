@@ -51,7 +51,7 @@
 #include "xtc_orc.h"
 #include "xtc_proc.h"
 #include "xtc_reg.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 #include "xtc_svr.h"
 
 #define N_LOOPS 3

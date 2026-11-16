@@ -47,7 +47,7 @@
 #include "xtc_alloc_audit.h"
 #include "xtc_exec.h"
 #include "xtc_proc.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 
 #define N_LOOPS 3
 #define N_RX    2

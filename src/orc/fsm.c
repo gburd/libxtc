@@ -25,7 +25,7 @@
 #include "xtc_sync.h"
 #include "proc_int.h"      /* owner-qualified lookup/send for join/stop */
 #include "loop_int.h"      /* __xtc_loop_may_wait: wait_init */
-#include "xtc_sim.h"       /* __xtc_sim_active: the reply-vs-DOWN window */
+#include "sim_int.h"       /* __xtc_sim_active: the reply-vs-DOWN window */
 
 #include <stdint.h>
 #include <string.h>

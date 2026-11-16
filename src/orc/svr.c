@@ -34,7 +34,7 @@
 
 #include "xtc_int.h"
 #include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
-#include "xtc_sim.h"       /* XTC_SIM_BUGGIFY: DST pessimal-path injection */
+#include "sim_int.h"       /* XTC_SIM_BUGGIFY; __xtc_sim_active */
 #include "xtc_svr.h"
 #include "xtc_proc.h"
 #include "xtc_sync.h"

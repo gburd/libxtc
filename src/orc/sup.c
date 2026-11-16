@@ -22,7 +22,7 @@
 #include "xtc_svr.h"  /* xtc_svr_child_main: a child that acks its start */
 #include "xtc_app.h"  /* XTC_APP_SHUTDOWN_MSG: a nested supervisor's drain */
 #include "loop_int.h" /* __xtc_loop_may_wait: wait_children */
-#include "xtc_sim.h"  /* __xtc_sim_active: the ack-vs-DOWN window */
+#include "sim_int.h"  /* __xtc_sim_active: the ack-vs-DOWN window */
 #if XTC_DST_BUG(XTC_DST_BUG_SUP_LOCKPARK)
 #include "preempt_int.h"
 #include <pthread.h>
