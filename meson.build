@@ -633,9 +633,13 @@ pkg.generate(
 )
 
 # -----------------------------------------------------------------------------
-# Man pages.  Install the whole man3/ + man7/ set (mirrors `make install`).
+# Man pages.  Install man3/ + man7/ (mirrors `make install`), minus the
+# __os_*.3 pages of the internal OS layer, which a consumer may not call.
 # -----------------------------------------------------------------------------
-install_subdir('man/man3', install_dir : 'share/man', strip_directory : false)
+install_subdir('man/man3', install_dir : 'share/man', strip_directory : false,
+  exclude_files : run_command('sh', '-c', 'cd "$1" && ls __*.3', 'sh',
+    meson.project_source_root() / 'man' / 'man3', check : true)
+    .stdout().strip().split('\n'))
 install_subdir('man/man7', install_dir : 'share/man', strip_directory : false)
 
 # -----------------------------------------------------------------------------

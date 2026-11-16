@@ -509,6 +509,18 @@ after an `xtc_rcu_init`, synchronize did not scan it, and an object that
 thread held was freed under it (`test/m13/test_rcu`
 `/thread_reader_after_fini` failed before, passes after).
 
+## CHANGED (2.2, 2.1.3): the `__os_*.3` man pages are no longer installed
+
+`make install` and `meson install` installed the ten man pages of the
+internal OS layer (`__os_alloc.3`, `__os_atomic.3`, `__os_cpu.3`,
+`__os_crypto.3`, `__os_errno.3`, `__os_mutex.3`, `__os_thread.3`,
+`__os_time.3`, `__os_tls.3`, `__os_tuning.3`), which document functions
+a consumer may not call (API rule 3).  They stay in the source tree for
+the library's own developers, and the four public pages that cited them
+(`xtc_alloc_audit`, `xtc_atomic`, `xtc_io`, `xtc_loop`) now point at
+public pages.  `test/dist/test_install_headers.sh` fails if any `__*`
+page is installed: before, all ten were.
+
 ## FIXED (2.2, 2.1.3): an installed consumer saw version 0.0.0 and no TLS
 
 **What it was.**  `xtc.h` took `XTC_VERSION_MAJOR` and friends from the
