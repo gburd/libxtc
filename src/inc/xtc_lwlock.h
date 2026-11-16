@@ -24,13 +24,18 @@
  *	  + No fairness guarantees beyond FIFO wakeup order.
  *	  + Cache-line-aligned struct (avoid false sharing).
  *	  - Caller must release in reverse order of acquire.
- *	  - No timeout/cancellable acquire (use xtc_amutex/xtc_rwlock for
- *	    those scenarios).
+ *	  - No timeout/cancellable acquire (use xtc_amutex, or xtc_arwlock
+ *	    for a reader/writer lock, for those scenarios).
+ *
+ *	A contended acquire inside a fiber (a process or an xtc_async
+ *	coroutine, in every build) parks the fiber, so other fibers on its
+ *	loop keep running; on a plain thread it waits on a condition
+ *	variable.
  *
  *	Trade-offs vs xtc_lrlock:
  *	  + Multiple writers (serialized).
  *	  + No second copy of the data.
- *	  + Reads aren't wait-free \u2014 they CAS the state word.
+ *	  + Reads aren't wait-free: they CAS the state word.
  *	  - Bigger contention surface; pick lrlock for read-mostly.
  */
 
@@ -68,11 +73,10 @@ typedef struct xtc_lwlock {
 	uint16_t          tranche;       /* user-tag; for diagnostics only */
 	uint8_t           initialised;
 	uint8_t           pad_;
-	/* DST fiber-park wait queue (protected by wait_mu).  Only touched
-	 * when a caller acquires from inside a fiber under the sim
-	 * scheduler; the production OS-thread path uses wait_cv and never
-	 * reads/writes these.  Opaque here -- struct fiber_waiter lives in
-	 * lock_lw.c. */
+	/* Fiber-park wait queue (protected by wait_mu).  Only touched when
+	 * a caller acquires from inside a fiber, in any build; the plain
+	 * thread path uses wait_cv and never reads/writes these.  Opaque
+	 * here -- struct fiber_waiter lives in lock_lw.c. */
 	void             *wq_head;
 	void             *wq_tail;
 } xtc_lwlock_t;
