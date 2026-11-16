@@ -198,6 +198,27 @@ slow path; both primitives are within a small constant factor on
 the fast path.  The cost relative to `xtc_lwlock` (section 3) is
 that there is no separation between readers and writers.
 
+### `xtc_arwlock_t` and `xtc_rwlock_t`  --  reader/writer locks
+
+`xtc_arwlock_t` is the reader/writer analogue of `xtc_amutex_t`: a
+contended reader or writer parks its fiber, so the loop keeps running,
+and a holder may park (on I/O, a sleep, a receive) while it holds the
+lock.  Off a loop the waiter blocks on a condition variable.  Waiters
+queue FIFO, so a stream of readers cannot starve a writer.
+
+    int  xtc_arwlock_create (xtc_arwlock_t **out);
+    void xtc_arwlock_destroy(xtc_arwlock_t *r);
+    int  xtc_arwlock_rdlock (xtc_arwlock_t *r, int64_t timeout_ns);
+    int  xtc_arwlock_wrlock (xtc_arwlock_t *r, int64_t timeout_ns);
+    int  xtc_arwlock_unlock (xtc_arwlock_t *r);
+
+`xtc_rwlock_t` has the same shape and writer priority, but a contended
+acquire **blocks the OS thread** on a pthread condition variable; it
+does not park the fiber.  Two processes on one loop therefore deadlock
+when one waits while the other holds the lock across a park: the
+waiter blocks the thread the holder needs to run.  Use it only between
+plain threads, and `xtc_arwlock_t` on a loop.
+
 ### `xtc_notify_t`  --  one-shot signalling
 
 A coroutine-aware condition variable.  The notify object holds
@@ -561,9 +582,17 @@ flowchart TD
     RH -->|Yes| RW["xtc_lwlock<br/>or xtc_lrlock"]:::leaf
     RH -->|No| AM["xtc_amutex"]:::leaf
     NM -->|Yes| LM2["xtc_lockmgr"]:::leaf
-    NM -->|No| OM["__os_mutex_t"]:::leaf
+    NM -->|No| OM["xtc_amutex<br/>(no park inside)"]:::leaf
     classDef leaf fill:#e6f6ec,stroke:#2e9e57,stroke-width:2px;
 ```
+
+The `__os_*` primitives of layer L0 are not on the tree: they are the
+library's own, and an application may not call them (API rule 3).  A
+critical section that never parks is cheap under `xtc_amutex` too: on
+one loop the lock is a flag check (see the coroutine model below), and
+off a loop the caller waits on a condition variable.  For
+shared/exclusive access with waiters that park, use `xtc_arwlock`
+(section 2).
 
 For **signalling** rather than mutual exclusion:
 
