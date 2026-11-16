@@ -75,8 +75,12 @@ timers, issue I/O) and hand it the thread with `xtc_loop_run`.
 
 `xtc_yield` gives the CPU back but asks to be rescheduled immediately.
 The more useful suspension waits for something. The simplest is a timer:
-inside a fiber, `xtc_proc_sleep(ns)` parks *this fiber* for `ns`
-nanoseconds while the loop keeps running everything else.
+inside a process (a fiber started with `xtc_proc_spawn`; see
+[processes]({{ '/guide/03-processes-and-messages/' | relative_url }})),
+`xtc_proc_sleep(ns)` parks *this fiber* for `ns` nanoseconds while the
+loop keeps running everything else. It needs the process: in a bare
+`xtc_async` coroutine it returns `XTC_E_INVAL` at once, without
+sleeping, so give the work a process when it has to wait on time.
 
 {: .warning }
 > Do not call `xtc_sleep_ns` inside a fiber -- it sleeps the whole OS
@@ -136,9 +140,9 @@ sorted correctly through 20 in-qsort yields: yes
 - A fiber is a suspendable call stack; switching is a user-space
   register swap.
 - The loop schedules ready fibers and parks the rest on the OS poller.
-- `xtc_yield` reschedules immediately; `xtc_proc_sleep` suspends on a
-  timer; `xtc_await` suspends on another task -- all without blocking
-  the thread.
+- `xtc_yield` reschedules immediately; `xtc_proc_sleep` suspends a
+  process on a timer; `xtc_await` suspends on another task -- all without
+  blocking the thread.
 
 The bare coroutine is the foundation. The next layer up gives each unit
 of work an identity and a mailbox, so units can be addressed and can
