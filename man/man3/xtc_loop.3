@@ -65,17 +65,24 @@ runnable; its return value tells the loop what to do next:
 The task is finished.
 A task created with
 .Fn xtc_task_spawn
-or
+is recycled as soon as it finishes: its struct goes back to the loop's
+free list and the next spawn on the loop may return the same pointer,
+so its handle names that task only until it returns
+.Dv XTC_TASK_DONE .
+A coroutine created with
 .Xr xtc_async 3
-is reaped at
+and a handle is reaped at
 .Fn xtc_loop_fini ,
-so the handle it returned stays valid until then.
+so that handle stays valid, and
+.Fn xtc_await
+can read its result, until then.
 The fiber of a process
 .Pq Xr xtc_proc 3 ,
-whose task handle is never handed out, is reclaimed as soon as it
-finishes: its stack returns to a small per-thread cache (or is
-unmapped) and its task is recycled, so memory and mappings track the
-number of live processes, not the number ever spawned.
+whose task handle is never handed out, and a coroutine created without
+one, are reclaimed as soon as they finish: the stack returns to a small
+per-thread cache (or is unmapped) and the task is recycled, so memory
+and mappings track the number of live fibers, not the number ever
+spawned.
 .It Dv XTC_TASK_RESCHED
 Re-queue the task at the back of the run queue: it runs again only
 after every task already queued.  This holds for pinned and migratable
@@ -156,7 +163,9 @@ is invoked with the task handle and the
 pointer the caller supplied at spawn.
 The handle written to
 .Fa *out_task
-is valid for the lifetime of the loop.
+is valid until the task returns
+.Dv XTC_TASK_DONE ;
+see above.
 .Sh WAKERS
 .Fn xtc_task_waker
 fills a

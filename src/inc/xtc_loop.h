@@ -117,6 +117,11 @@ XTC_API int  xtc_loop_wake(xtc_loop_t *loop);
 struct xtc_res;
 XTC_API struct xtc_res *xtc_loop_res(xtc_loop_t *loop);
 
+/*
+ * Spawn fn(task, user) as a plain task.  *out_task (may be NULL) names
+ * the task until it returns XTC_TASK_DONE: the struct is then recycled,
+ * and a later spawn on the loop may return the same pointer.
+ */
 XTC_API int  xtc_task_spawn(xtc_loop_t *loop, xtc_task_fn fn, void *user,
                             xtc_task_t **out_task);
 XTC_API int  xtc_task_waker(xtc_task_t *task, xtc_waker_t *out);
