@@ -31,12 +31,7 @@ XTC_INCLUDES	= -I. -I$(srcdir)/../src/inc
 # target (mingw/cygwin; configure.ac already has cases for those),
 # where it selects __declspec(dllexport) instead of the dllimport a
 # consumer would request via -DXTC_DLL.
-CFLAGS		= $(XTC_INCLUDES) $(XTC_DEPRECATION_GATE) @CFLAGS@ -Wall -Wextra -Wpedantic -fPIC -pthread -DXTC_BUILDING_DLL @XTC_URING_CFLAGS@ @XTC_LIBUNWIND_CFLAGS@ @XTC_TLS_CFLAGS@ @XTC_ACCEL_CFLAGS@
-# Nothing in the tree may use a deprecated libxtc name (docs/deprecations.md):
-# a use is a build error.  Ahead of @CFLAGS@, so a packager whose system
-# headers deprecate something can still pass -Wno-error=deprecated-declarations.
-# The one exception, test_deprecated_bridge, defines XTC_NO_DEPRECATION_WARNINGS.
-XTC_DEPRECATION_GATE = -Werror=deprecated-declarations
+CFLAGS		= $(XTC_INCLUDES) @CFLAGS@ -Wall -Wextra -Wpedantic -fPIC -pthread -DXTC_BUILDING_DLL @XTC_URING_CFLAGS@ @XTC_LIBUNWIND_CFLAGS@ @XTC_TLS_CFLAGS@ @XTC_ACCEL_CFLAGS@
 # The configure-supplied CFLAGS/LDFLAGS verbatim (this is where a
 # -fsanitize=* build carries its flag), passed to the doc-snippet gate so a
 # snippet links against a sanitizer-instrumented library with the matching

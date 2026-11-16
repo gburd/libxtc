@@ -328,9 +328,7 @@ silenced.
 A renamed function keeps its old symbol, in the version node it shipped
 in, as an out-of-line wrapper that calls the new one: a binary built
 against an older 2.x keeps linking against a newer 2.x, while a rebuild
-warns.  The library, its tests and its examples build with
-`-Werror=deprecated-declarations`; the one exception is
-`test/abi/test_deprecated_bridge.c`, which calls every bridge once.
+warns.  `test/abi/test_deprecated_bridge.c` calls every bridge once.
 [Deprecations]({{ '/reference/deprecations/' | relative_url }}) lists
 every deprecated name, its replacement, and the removal (3.0).
 

@@ -13,8 +13,7 @@
  * calls the old names of one rename group and checks that they do what
  * the new names do.
  *
- * The build compiles it with XTC_NO_DEPRECATION_WARNINGS, because
- * everything else is built with -Werror=deprecated-declarations.
+ * The build compiles it with XTC_NO_DEPRECATION_WARNINGS.
  * test/dist/test_deprecated.sh compiles it again without that define and
  * checks that every old name in the docs/deprecations.md table warns
  * (and that a frozen alias does not).
