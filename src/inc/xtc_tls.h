@@ -71,7 +71,8 @@
  * or SChannel.  It is NOT defined for --with-tls=none (the NOSYS
  * stubs).  Callers and tests use it to gate code that needs a working
  * handshake without caring which backend provides it.  The selecting
- * XTC_TLS_BACKEND_* macro comes from xtc_config.h via configure.
+ * XTC_TLS_BACKEND_* macro comes from xtc_version.h (installed) or the
+ * build's xtc_config.h, through xtc.h.
  */
 #if defined(XTC_TLS_BACKEND_OPENSSL)  || \
     defined(XTC_TLS_BACKEND_MBEDTLS)  || \

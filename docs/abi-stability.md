@@ -322,8 +322,10 @@ What you can query today, from the public API:
 
 - `xtc_version_string()` / the `XTC_VERSION_*` macros -- the version.
 - `xtc_runtime_info()` -- loop count, CPU counts, NUMA node count.
-- The configure-time `xtc_config.h` defines (`XTC_IO_BACKEND_*`,
-  `XTC_HAVE_*`) -- which backend a given build selected.
+- The installed `xtc_version.h` (included by `xtc.h`): the version,
+  the `XTC_TLS_BACKEND_*` and `XTC_IO_BACKEND_*` the build selected, and
+  `XTC_HAVE_UCONTEXT`.  `XTC_TLS_ENABLED` (`xtc_tls.h`) follows from
+  the TLS backend.
 
 Because the I/O backend and coroutine substrate are chosen at
 **configure** time, not runtime, "which backend am I on" is a

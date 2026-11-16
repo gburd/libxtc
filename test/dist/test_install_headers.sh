@@ -105,6 +105,60 @@ if ! $CC -std=c11 -D_GNU_SOURCE $cflags "$work/consumer.c" \
 	exit 1
 fi
 
+# The compile-time facts the installed headers state must be the
+# library's own: xtc.h's version macros (they read 0.0.0-unconfigured
+# when no installed header carried them), xtc_tls.h's XTC_TLS_ENABLED
+# (undefined for every installed consumer, though the library had TLS),
+# and an XTC_IO_BACKEND_* name.
+test -f "$prefix/include/xtc_version.h" || {
+	echo "  [install-headers] FAIL: xtc_version.h not installed"; exit 1; }
+want_ver=$(cat "$XTC_SRC_DIR/dist/version.in")
+want_tls=1
+grep -q '^XTC_TLS_BACKEND[[:space:]]*=[[:space:]]*none' "$build/Makefile" &&
+    want_tls=0
+cat > "$work/ver.c" <<'EOF'
+#include <stdio.h>
+#include <string.h>
+#include <xtc.h>
+#include <xtc_tls.h>
+
+int
+main(void)
+{
+	int ma = -1, mi = -1, pa = -1, tls = 0, io = 0;
+#if defined(XTC_TLS_ENABLED)
+	tls = 1;
+#endif
+#if defined(XTC_IO_BACKEND_URING) || defined(XTC_IO_BACKEND_EPOLL) || \
+    defined(XTC_IO_BACKEND_KQUEUE) || defined(XTC_IO_BACKEND_POLL) || \
+    defined(XTC_IO_BACKEND_SELECT) || defined(XTC_IO_BACKEND_IOCP) || \
+    defined(XTC_IO_BACKEND_SOLARIS) || defined(XTC_IO_BACKEND_AIX)
+	io = 1;
+#endif
+	(void)xtc_version_components(&ma, &mi, &pa);
+	printf("%s tls=%d io=%d same=%d\n", XTC_VERSION_STRING, tls, io,
+	    ma == XTC_VERSION_MAJOR && mi == XTC_VERSION_MINOR &&
+	        pa == XTC_VERSION_PATCH &&
+	        strcmp(xtc_version_string(), XTC_VERSION_STRING) == 0);
+	return 0;
+}
+EOF
+# cflags/libs intentionally word-split (each holds several flags).
+# shellcheck disable=SC2086
+if ! $CC -std=c11 -D_GNU_SOURCE $cflags "$work/ver.c" $libs \
+    -o "$work/ver" 2> "$work/cc.err"; then
+	echo "  [install-headers] FAIL: the version probe did not build"
+	head -20 "$work/cc.err" >&2
+	exit 1
+fi
+got=$("$work/ver")
+want="$want_ver tls=$want_tls io=1 same=1"
+if [ "$got" != "$want" ]; then
+	echo "  [install-headers] FAIL: an installed consumer sees \"$got\"," \
+	    "want \"$want\""
+	exit 1
+fi
+
 # Every installed header must be self-contained: compiles as the FIRST
 # and ONLY include (a header that leans on a type its own includes do
 # not provide -- e.g. size_t without <stddef.h> -- breaks a consumer
@@ -122,5 +176,5 @@ for h in "$prefix"/include/xtc*.h; do
 done
 [ $bad -eq 0 ] || exit 1
 
-echo "  [install-headers] OK: consumer compiles + links against the installed public headers; each header is self-contained"
+echo "  [install-headers] OK: consumer compiles + links against the installed public headers; they state the library's version, TLS and I/O backend ($got); each header is self-contained"
 exit 0

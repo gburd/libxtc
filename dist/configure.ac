@@ -668,6 +668,18 @@ AS_CASE([$xtc_tls_backend],
   [none],     [AC_DEFINE([XTC_TLS_BACKEND_NONE],     1, [No TLS backend; NOSYS stubs])])
 
 AC_SUBST([XTC_TLS_BACKEND], [$xtc_tls_backend])
+
+# The installed xtc_version.h (dist/xtc_version.h.in) names the backends,
+# the version and ucontext for a consumer, as xtc_config.h does for the
+# library.
+xtc_tls_backend_macro=XTC_TLS_BACKEND_`echo "$xtc_tls_backend" | tr a-z A-Z`
+xtc_io_backend_macro=XTC_IO_BACKEND_`echo "$xtc_io_backend" | tr a-z A-Z`
+AS_IF([test "x$xtc_have_ucontext" = xyes],
+  [xtc_ucontext_define='#define XTC_HAVE_UCONTEXT 1'],
+  [xtc_ucontext_define='/* #undef XTC_HAVE_UCONTEXT */'])
+AC_SUBST([XTC_TLS_BACKEND_MACRO], [$xtc_tls_backend_macro])
+AC_SUBST([XTC_IO_BACKEND_MACRO], [$xtc_io_backend_macro])
+AC_SUBST([XTC_UCONTEXT_DEFINE], [$xtc_ucontext_define])
 AC_SUBST([XTC_TLS_CFLAGS])
 AC_SUBST([XTC_TLS_LIBS])
 
@@ -877,4 +889,5 @@ AC_SUBST([XTC_PC_LIBS_PRIVATE], [$xtc_pc_libs_private])
 # -------------------------------------------------------------------------
 AC_CONFIG_FILES([Makefile:../dist/Makefile.in])
 AC_CONFIG_FILES([xtc.pc:../dist/xtc.pc.in])
+AC_CONFIG_FILES([xtc_version.h:../dist/xtc_version.h.in])
 AC_OUTPUT

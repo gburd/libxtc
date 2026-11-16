@@ -1,0 +1,37 @@
+/*-
+ * Copyright (c) 2026, The XTC Project
+ * @stability stable
+ * Use of this source code is governed by the ISC License.
+ *
+ * xtc_version.h -- generated from dist/xtc_version.h.in by configure (or
+ * by meson) and installed next to xtc.h, which includes it.
+ *	What this build of libxtc is: its version, its TLS backend, its I/O
+ *	backend and whether the platform has ucontext, as macros a consumer
+ *	can test at compile time.  docs/abi-stability.md ("No capability
+ *	query API") says why these are compile-time facts.  The build's
+ *	private xtc_config.h defines the same names, with the same values,
+ *	for the library's own sources.
+ */
+
+#ifndef XTC_VERSION_H
+#define XTC_VERSION_H
+
+/* The library version, from dist/version.in. */
+#define XTC_VERSION_MAJOR @XTC_VERSION_MAJOR@
+#define XTC_VERSION_MINOR @XTC_VERSION_MINOR@
+#define XTC_VERSION_PATCH @XTC_VERSION_PATCH@
+#define XTC_VERSION_STRING "@XTC_VERSION_FULL@"
+
+/* The TLS backend, one of XTC_TLS_BACKEND_OPENSSL, _MBEDTLS, _GNUTLS,
+ * _WOLFSSL, _SCHANNEL or _NONE.  xtc_tls.h defines XTC_TLS_ENABLED for
+ * every one but _NONE. */
+#define @XTC_TLS_BACKEND_MACRO@ 1
+
+/* The I/O backend, one of XTC_IO_BACKEND_URING, _EPOLL, _KQUEUE, _POLL,
+ * _SELECT, _IOCP, _SOLARIS, _AIX or _SIM. */
+#define @XTC_IO_BACKEND_MACRO@ 1
+
+/* XTC_HAVE_UCONTEXT: defined when the platform has swapcontext. */
+@XTC_UCONTEXT_DEFINE@
+
+#endif /* XTC_VERSION_H */

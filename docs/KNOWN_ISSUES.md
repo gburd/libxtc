@@ -6,6 +6,33 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## FIXED (2.1.3): an installed consumer saw version 0.0.0 and no TLS
+
+**What it was.**  `xtc.h` took `XTC_VERSION_MAJOR` and friends from the
+build's `xtc_config.h`, and `xtc_tls.h` derived `XTC_TLS_ENABLED` from
+its `XTC_TLS_BACKEND_*`; neither build system installed that header.  So
+a program built against an installed libxtc read `XTC_VERSION_STRING`
+as "0.0.0-unconfigured" and `XTC_VERSION_MAJOR` as 0, while
+`xtc_version_string()` returned the real version, and
+`XTC_TLS_ENABLED` was undefined even for a library with TLS.
+
+**Fix.**  configure and meson generate `xtc_version.h` from
+`dist/xtc_version.h.in` and install it next to `xtc.h`, which includes
+it.  It defines the four version macros, the one `XTC_TLS_BACKEND_*`
+and the one `XTC_IO_BACKEND_*` the build selected, and
+`XTC_HAVE_UCONTEXT` when the platform has `swapcontext`; the private
+`xtc_config.h` stays uninstalled.  The only macro values that change
+are the sentinels becoming true values.  `test/dist/test_install_headers.sh`
+builds a consumer against the installed headers: before it saw
+"0.0.0-unconfigured tls=0 io=0 same=0", after "2.1.2 tls=1 io=1
+same=1" (before the 2.1.3 version bump).  A `meson install` ships it
+too.
+
+**An exception to the 2.1.x rule, approved by the maintainer.**  This
+is a new installed header in a patch release.  It adds no symbol and
+no type; the only macro values a consumer sees change are the
+sentinels above becoming the library's true values.
+
 ## FIXED (2.1.3): 81 installed declarations lacked `XTC_API`
 
 **What it was.**  `XTC_API` marks a declaration for export from a
