@@ -86,11 +86,19 @@ void __xtc_blocking_loop_fini(xtc_loop_t *loop);
  * linkable in every build -- mirrors exec.c's __xtc_io_sim_next_due. */
 #if defined(XTC_IO_BACKEND_SIM)
 extern int __xtc_io_sim_defer_cb(xtc_io_t *io, int64_t due_ns,
-    void (*fn)(void *), void *arg);
+    void (*fn)(void *), void (*drop)(void *), void *arg);
 #else
-static inline int __xtc_io_sim_defer_cb(xtc_io_t *io, int64_t due_ns,
-    void (*fn)(void *), void *arg)
-{ (void)io; (void)due_ns; (void)fn; (void)arg; return XTC_E_NOSYS; }
+static inline int
+__xtc_io_sim_defer_cb(xtc_io_t *io, int64_t due_ns, void (*fn)(void *),
+    void (*drop)(void *), void *arg)
+{
+	(void)io;
+	(void)due_ns;
+	(void)fn;
+	(void)drop;
+	(void)arg;
+	return XTC_E_NOSYS;
+}
 #endif
 
 /*
@@ -473,6 +481,11 @@ struct xtc_proc {
 	struct envelope  *save_head;
 	struct envelope  *save_tail;
 	_Atomic size_t    mbox_saved;
+	/* Messages admitted but still in flight to this mailbox (the
+	 * simulator's cross-loop latency), under mbox_lock.  They count
+	 * against mailbox_cap like queued ones: the sender was told XTC_OK,
+	 * so the delivery must not find the mailbox full. */
+	size_t mbox_inflight;
 
 	/* Receive coordination. */
 	xtc_waker_t       recv_waker;
@@ -1362,46 +1375,68 @@ __mbox_pop_locked(struct xtc_proc *p)
 	return e;
 }
 
-/* queued != NULL: a synchronous send, told whether e was queued; a
- * refused e is then handed back (__env_reject: an owned buffer returns
- * to its caller).  queued == NULL: a deferred delivery the sender was
- * already told succeeded, so a refused e is the library's to free. */
+/*
+ * Whether p's mailbox refuses a message now: the proc is dead, or the
+ * message is not a sys one and the mailbox is full (queued, saved and in
+ * flight count against the cap), or the simulator's spurious-full
+ * buggify fires.  Called with p->mbox_lock held.
+ */
 static int
-__mbox_deliver_locked(struct xtc_proc *p, struct envelope *e, int sys,
-    int *queued)
+__mbox_refuses_locked(struct xtc_proc *p, int sys)
 {
-	int armed, rc = XTC_OK;
-	int wm_fire = 0;
-	size_t wm_depth = 0, wm_cap = 0;
-	xtc_waker_t wk = { 0 };
-	(void) __proc_mtx_lock(&p->mbox_lock);
-	/* Reject if proc is dead, or capped and full.
-	 * Note: precedence bug fix -- the original used
-	 *   if (!alive || cap > 0 ? mbox_n >= cap : 0)
-	 * which parses as (!alive || cap>0) ? ... and produced
-	 * surprising behaviour on platforms where alive timing
-	 * differed.  Explicit parens. */
+	if (!atomic_load_explicit(&p->alive, memory_order_relaxed))
+		return 1;
 	/* sys: a DOWN / link EXIT.  It bypasses mailbox_cap (and the
 	 * spurious-full buggify): those signals are bounded by the number of
 	 * links and monitors, not by traffic, and dropping one leaves a
 	 * supervisor waiting forever for a death it asked to observe. */
-	if (!atomic_load_explicit(&p->alive, memory_order_relaxed) ||
-	    (!sys && p->mbox_cap > 0 &&
-	     (p->mbox_n +
-	      atomic_load_explicit(&p->mbox_saved, memory_order_relaxed))
-	     >= p->mbox_cap) ||
-	    /* Buggify: under sim, when the "spurious_full" site is activated
-	     * for this run (a once-per-run seeded gate), report the mailbox
-	     * full on SOME sends (a fresh per-call seeded coin) even with
-	     * room to spare.  Reporting XTC_E_AGAIN early is a LEGAL outcome
-	     * (the cap is a soft backpressure limit), so this exercises every
-	     * sender's drop/retry handling under the seeded schedule --
-	     * FoundationDB's "smallest legal buffer" buggify.  The per-call
-	     * coin (25%) keeps sends eventually succeeding so senders that
-	     * retry make progress.  A no-op in production. */
-	    (!sys && atomic_load_explicit(&p->alive, memory_order_relaxed) &&
-	    XTC_SIM_BUGGIFY("proc.mbox.spurious_full") &&
-	     xtc_sim_fault(250))) {
+	if (sys)
+		return 0;
+	if (p->mbox_cap > 0 &&
+	    p->mbox_n + p->mbox_inflight +
+	            atomic_load_explicit(&p->mbox_saved,
+	                memory_order_relaxed) >=
+	        p->mbox_cap)
+		return 1;
+	/* Buggify: under sim, when the "spurious_full" site is activated for
+	 * this run (a once-per-run seeded gate), report the mailbox full on
+	 * SOME sends (a fresh per-call seeded coin) even with room to spare.
+	 * Reporting XTC_E_AGAIN early is a LEGAL outcome (the cap is a soft
+	 * backpressure limit), so this exercises every sender's drop/retry
+	 * handling under the seeded schedule -- FoundationDB's "smallest
+	 * legal buffer" buggify.  The per-call coin (25%) keeps sends
+	 * eventually succeeding so senders that retry make progress.  A
+	 * no-op in production. */
+	return XTC_SIM_BUGGIFY("proc.mbox.spurious_full") && xtc_sim_fault(250);
+}
+
+/* queued != NULL: a synchronous send, told whether e was queued; a
+ * refused e is then handed back (__env_reject: an owned buffer returns
+ * to its caller).  queued == NULL: a deferred delivery (the simulator's
+ * net latency) that __mbox_defer admitted when it was sent, holding a
+ * slot in mbox_inflight unless it is sys; it is queued unless the proc
+ * died meanwhile, and a dropped e is the library's to free. */
+static int
+__mbox_deliver_locked(struct xtc_proc *p, struct envelope *e, int sys,
+    int *queued)
+{
+	int armed, refused, rc = XTC_OK;
+	int wm_fire = 0;
+	size_t wm_depth = 0, wm_cap = 0;
+	xtc_waker_t wk = { 0 };
+	(void) __proc_mtx_lock(&p->mbox_lock);
+#if !XTC_DST_BUG(XTC_DST_BUG_SIM_DROP_LATE)
+	if (queued == NULL && !sys)
+		p->mbox_inflight--;
+	/* An admitted deferred delivery is refused only by a death: its
+	 * room was reserved when it was sent. */
+	if (queued == NULL)
+		refused =
+		    !atomic_load_explicit(&p->alive, memory_order_relaxed);
+	else
+#endif
+		refused = __mbox_refuses_locked(p, sys);
+	if (refused) {
 		p->mbox_drop_total++;
 		(void) __proc_mtx_unlock(&p->mbox_lock);
 		if (queued != NULL) {
@@ -1465,10 +1500,11 @@ __mbox_deliver_locked(struct xtc_proc *p, struct envelope *e, int sys,
 /*
  * DST net-latency: a deferred cross-loop delivery.  The sim I/O backend
  * runs this on the TARGET loop's poll drain at now + a seeded latency
- * (enqueued by __mbox_deliver below).  It pushes into the mailbox via
- * __mbox_deliver_locked -- the identical production path -- so a delayed
- * message behaves exactly like an on-time one, just observed later in
- * virtual time.
+ * (enqueued by __mbox_defer below).  The mailbox admitted the message
+ * when it was sent, as it admits an on-time one, and holds its room
+ * (mbox_inflight); the delivery pushes it via __mbox_deliver_locked, the
+ * production path, so a delayed message behaves like an on-time one,
+ * observed later in virtual time.
  *
  * The target is captured by PID, not by pointer: between scheduling the
  * deferral and it firing (a virtual-time window the seeded schedule may
@@ -1497,6 +1533,72 @@ __mbox_deferred_run(void *arg)
 	} else
 		__env_free(d->e);   /* target gone: drop the delayed message */
 	__os_free(d);
+}
+
+/* A deferred delivery its loop drops unrun: the loop is finalized with
+ * the message still in flight (a run stopped by its step budget, an
+ * executor shut down).  The event sits on the target's home loop, whose
+ * fini has already released every proc of that loop, so the reserved
+ * room has no mailbox left to return to: free the message. */
+static void
+__mbox_deferred_drop(void *arg)
+{
+	struct __mbox_deferred *d = arg;
+	__env_free(d->e);
+	__os_free(d);
+}
+
+/*
+ * Put e in flight to p for lat ns of virtual time.  The mailbox admits
+ * it now, under its lock, as an inline delivery would: a refused send
+ * returns XTC_E_AGAIN (e is still the caller's), an admitted one takes a
+ * slot in mbox_inflight that its delivery gives back, so a sender told
+ * XTC_OK never has its message dropped for want of room.  A sys message
+ * bypasses the cap and is not counted.  Any other error: nothing was
+ * done, deliver inline.
+ */
+static int
+__mbox_defer(struct xtc_proc *p, struct envelope *e, int sys, int64_t lat)
+{
+	struct __mbox_deferred *d = NULL;
+	int64_t now = 0;
+	int refused;
+
+	if (__os_malloc(sizeof *d, (void **)&d) != XTC_OK)
+		return XTC_E_NOMEM;
+#if !XTC_DST_BUG(XTC_DST_BUG_SIM_DROP_LATE)
+	if (!sys) {
+		(void)__proc_mtx_lock(&p->mbox_lock);
+		refused = __mbox_refuses_locked(p, 0);
+		if (refused)
+			p->mbox_drop_total++;
+		else
+			p->mbox_inflight++;
+		(void)__proc_mtx_unlock(&p->mbox_lock);
+		if (refused) {
+			__os_free(d);
+			return XTC_E_AGAIN;
+		}
+	}
+#else
+	(void)refused;
+#endif
+	(void)__os_clock_mono(&now);
+	d->pid = p->pid;
+	d->e = e;
+	d->sys = sys;
+	if (__xtc_io_sim_defer_cb(p->loop->io, now + lat, __mbox_deferred_run,
+	        __mbox_deferred_drop, d) == XTC_OK)
+		return XTC_OK;
+#if !XTC_DST_BUG(XTC_DST_BUG_SIM_DROP_LATE)
+	if (!sys) {
+		(void)__proc_mtx_lock(&p->mbox_lock);
+		p->mbox_inflight--;
+		(void)__proc_mtx_unlock(&p->mbox_lock);
+	}
+#endif
+	__os_free(d);
+	return XTC_E_NOMEM;
 }
 
 static int
@@ -1532,25 +1634,19 @@ __mbox_deliver(struct xtc_proc *p, struct envelope *e, int sys, int *queued)
 		}
 		if (cross && dst->io != NULL) {
 			int64_t lat = __xtc_sim_net_latency();
-			if (lat > 0) {
-				struct __mbox_deferred *d = NULL;
-				if (__os_malloc(sizeof *d, (void **)&d) == XTC_OK) {
-					int64_t now = 0;
-					(void)__os_clock_mono(&now);
-					d->pid = p->pid;
-					d->e = e;
-					d->sys = sys;
-					if (__xtc_io_sim_defer_cb(dst->io,
-					    now + lat, __mbox_deferred_run,
-					    d) == XTC_OK) {
-						*queued = 1;  /* in flight: ours */
-						return XTC_OK;
-					}
-					__os_free(d);
-				}
-				/* alloc/defer failed: deliver inline (correct,
-				 * just not delayed). */
+			int drc = lat > 0 ? __mbox_defer(p, e, sys, lat) :
+			                    XTC_E_NOSYS;
+			if (drc == XTC_OK) {
+				*queued = 1; /* in flight: ours */
+				return XTC_OK;
 			}
+			if (drc == XTC_E_AGAIN) {
+				*queued = 0;
+				__env_reject(e);
+				return XTC_E_AGAIN;
+			}
+			/* No latency, or alloc/defer failed: deliver inline
+			 * (correct, just not delayed). */
 		}
 	}
 	return __mbox_deliver_locked(p, e, sys, queued);

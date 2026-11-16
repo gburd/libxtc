@@ -227,4 +227,13 @@
  */
 #define XTC_DST_BUG_FSMCALL_NOLIVE 33
 
+/*
+ * 34 SIM_DROP_LATE: a send the simulator's net latency puts in flight is
+ * admitted without a look at the mailbox (the 2.1.2 shape) and, when it
+ * lands in a mailbox that filled meanwhile, dropped although its sender
+ * was told XTC_OK (test_sim_net_inflight: "a message sent with XTC_OK
+ * was lost").
+ */
+#define XTC_DST_BUG_SIM_DROP_LATE 34
+
 #endif /* XTC_DST_INJECT_H */

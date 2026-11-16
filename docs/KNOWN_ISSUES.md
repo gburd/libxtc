@@ -249,6 +249,26 @@ old wait back.  On main (2.2) the call monitors the machine instead,
 with the new `xtc_demonitor`; 2.1 cannot add that symbol, so
 `xtc_svr_call` keeps its 25 ms poll here too.
 
+## FIXED (2.1.3): the simulator's net latency dropped sends it had accepted
+
+Under `xtc_sim_net_latency` a cross-loop `xtc_send` returned `XTC_OK` at
+once and the mailbox decided at delivery, when the seeded latency ran
+out.  A capped mailbox that filled in the meantime dropped the message,
+and so did the simulator's spurious-full buggify, whose coin was drawn at
+delivery; either way the sender had been told `XTC_OK` for a message
+that never arrived.  A DST run that combined net latency with mailbox
+caps or buggify could report a lost message that no real build loses.
+A message still in flight when a loop was finalized also leaked.  Only
+simulator runs were affected: net latency does not exist outside them.
+The mailbox now admits a deferred send when it is sent, under its lock,
+as it admits an inline one: a full mailbox refuses it with
+`XTC_E_AGAIN`, and an admitted one holds its room until it lands.  At
+delivery only the receiver's death can drop it, and a message dropped in
+flight is freed.  `test/sim/test_sim_net_inflight` (a cap-2 burst across
+loops, a receiver gone in flight, a run cut short by its step budget,
+sends under buggify) fails all 16 of its seeds on 2.1.2 and passes on
+2.1.3; planted bug 34 restores the old admission and is caught at seed 1.
+
 ## FIXED (2.1.2): a cross-shard xtc_tnt_send could lose messages
 
 **What it was.**  Through 2.1.1 an `xtc_tnt_send` to an Isolate on

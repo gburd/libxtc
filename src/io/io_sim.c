@@ -57,6 +57,7 @@ struct __xtc_sim_ev {
 	 * message delivery driven by xtc_sim_net_latency): invoked when the
 	 * event becomes due instead of publishing readiness / an AIO. */
 	void    (*cb)(void *);
+	void (*cb_drop)(void *); /* releases cb_arg if cb never runs */
 	void     *cb_arg;
 	struct __xtc_sim_ev *next;
 };
@@ -90,7 +91,12 @@ __xtc_io_backend_fini(xtc_io_t *io)
 	struct __xtc_sim_ev *e, *n;
 	if (s == NULL)
 		return;
-	for (e = s->events; e != NULL; e = n) { n = e->next; __os_free(e); }
+	for (e = s->events; e != NULL; e = n) {
+		n = e->next;
+		if (e->cb_drop != NULL)
+			e->cb_drop(e->cb_arg);
+		__os_free(e);
+	}
 	if (s->regs != NULL) __os_free(s->regs);
 	__os_free(s);
 	io->sim = NULL;
@@ -262,7 +268,7 @@ sim_events_insert(struct __xtc_sim_io *s, struct __xtc_sim_ev *ev)
 	*pp = ev;
 }
 
-/* PUBLIC: int __xtc_io_sim_defer_cb __P((xtc_io_t *, int64_t, void (*)(void *), void *)); */
+/* PUBLIC: int __xtc_io_sim_defer_cb __P((xtc_io_t *, int64_t, void (*)(void *), void (*)(void *), void *)); */
 /*
  * Enqueue a generic callback to run at virtual time `due_ns` on this
  * loop's poll drain (in due order).  Used by the cross-loop message-
@@ -271,11 +277,12 @@ sim_events_insert(struct __xtc_sim_io *s, struct __xtc_sim_ev *ev)
  * fires the receiver's waker when it becomes due.  Because the event
  * sits on the target loop's event store, __xtc_io_sim_next_due reports
  * it, so the sim scheduler advances the clock to it and never mistakes
- * an in-flight delayed message for a deadlock.
+ * an in-flight delayed message for a deadlock.  `drop` (may be NULL)
+ * releases arg when the loop is finalized before the event is due.
  */
 int
 __xtc_io_sim_defer_cb(xtc_io_t *io, int64_t due_ns, void (*fn)(void *),
-    void *arg)
+    void (*drop)(void *), void *arg)
 {
 	struct __xtc_sim_io *s;
 	struct __xtc_sim_ev *ev;
@@ -287,6 +294,7 @@ __xtc_io_sim_defer_cb(xtc_io_t *io, int64_t due_ns, void (*fn)(void *),
 	ev->due_ns = due_ns;
 	ev->fd = -1;
 	ev->cb = fn;
+	ev->cb_drop = drop;
 	ev->cb_arg = arg;
 	sim_events_insert(s, ev);
 	return XTC_OK;
