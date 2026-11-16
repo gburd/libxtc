@@ -40,6 +40,7 @@
 #include <xtc_log.h>
 #include <xtc_loop.h>
 #include <xtc_sched.h>
+#include <xtc_sim.h>
 #include <xtc_lrlock.h>
 #include <xtc_lwlock.h>
 #include <xtc_mctx.h>
