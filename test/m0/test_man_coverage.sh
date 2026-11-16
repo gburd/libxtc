@@ -129,3 +129,24 @@ if [ -n "$bad" ]; then
 	exit 1
 fi
 echo "  [D4c] OK: every PUBLIC: marker's return type matches its prototype"
+
+# [D4d] xtc_strerror(3)'s table lists every code of xtc.h's xtc_err enum
+# with its value, so appending a code without documenting it fails here.
+bad=""
+codes=$(sed -n '/^typedef enum xtc_err {/,/} xtc_err_t;/p' "$INC/xtc.h" |
+    sed -n 's/^[[:space:]]*\(XTC_[A-Z_]*\)[[:space:]]*=[[:space:]]*\(-*[0-9]*\).*/\1:\2/p')
+for cv in $codes; do
+	c=${cv%%:*}
+	v=$(printf '%s' "${cv#*:}" | sed 's/-/\\\\-/')
+	grep -qE "^\.It Dv $c Ta $v Ta " "$MANDIR/xtc_strerror.3" ||
+	    bad="$bad $c"
+done
+if [ -z "$codes" ]; then
+	echo "  [D4d] FAIL: no xtc_err enum found in xtc.h" >&2
+	exit 1
+fi
+if [ -n "$bad" ]; then
+	echo "  [D4d] FAIL: xtc_strerror.3's code table lacks:$bad" >&2
+	exit 1
+fi
+echo "  [D4d] OK: xtc_strerror.3 lists all $(echo "$codes" | wc -w | tr -d ' ') codes of xtc_err with their values"
