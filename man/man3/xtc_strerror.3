@@ -40,6 +40,31 @@ it never returns
 The returned pointer is to static storage and must not be freed.
 The exact text for each known code is part of the API contract for
 log-message stability and changes only on a major version bump.
+.Pp
+The codes, their values, and the text each one reads as:
+.Bl -column "XTC_E_RESOURCE" "-14" -offset indent
+.It Sy Code Ta Sy Value Ta Sy Text
+.It Dv XTC_OK Ta 0 Ta Dq ok
+.It Dv XTC_E_INVAL Ta \-1 Ta Dq invalid argument
+.It Dv XTC_E_NOMEM Ta \-2 Ta Dq out of memory
+.It Dv XTC_E_NOSYS Ta \-3 Ta Dq not implemented on this platform
+.It Dv XTC_E_RANGE Ta \-4 Ta Dq numeric out of range
+.It Dv XTC_E_AGAIN Ta \-5 Ta Dq resource temporarily unavailable
+.It Dv XTC_E_INTERNAL Ta \-6 Ta Dq internal invariant violation
+.It Dv XTC_E_RESOURCE Ta \-7 Ta Dq resource cap reached
+.It Dv XTC_E_DEADLK Ta \-8 Ta Dq deadlock victim
+.It Dv XTC_E_VERSION Ta \-9 Ta Dq version mismatch
+.It Dv XTC_E_ABORTED Ta \-10 Ta Dq operation aborted
+.It Dv XTC_E_NOTFOUND Ta \-11 Ta Dq requested item does not exist
+.It Dv XTC_E_IO Ta \-12 Ta Dq I/O error
+.It Dv XTC_E_EXIST Ta \-13 Ta Dq already exists
+.It Dv XTC_E_STATE Ta \-14 Ta Dq not allowed in this state or context
+.El
+.Pp
+.Dv XTC_E_EXIST
+and
+.Dv XTC_E_STATE
+appeared in xtc 2.2.
 .Ss The system-error band
 A call that fails with an operating system error that no
 .Dv XTC_E_*
