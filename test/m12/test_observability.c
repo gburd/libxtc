@@ -331,7 +331,10 @@ logf_open(xtc_log_level_t floor)
 }
 
 enum logf_color { LOGF_RED, LOGF_GREEN };
-struct logf_bits { unsigned u3 : 3; int s4 : 4; };
+struct logf_bits {
+	unsigned u3 : 3;
+	int s4 : 4;
+};
 
 /* Every integer typedef prints its value, at both extremes. */
 static MunitResult

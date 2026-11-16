@@ -795,8 +795,9 @@ dying_do_call(struct dying_args *a)
 	    xtc_svr_call(a->target, "q", 1, &reply, &rsz,
 	        5LL * 1000 * 1000 * 1000),
 	    xtc_mo_seq_cst);
-	xtc_atomic_store_i64(&a->elapsed_ns, xtc_clock_mono() -
-	    xtc_atomic_load_i64(&g_dying_exit_ns, xtc_mo_seq_cst),
+	xtc_atomic_store_i64(&a->elapsed_ns,
+	    xtc_clock_mono() -
+	        xtc_atomic_load_i64(&g_dying_exit_ns, xtc_mo_seq_cst),
 	    xtc_mo_seq_cst);
 	xtc_free(reply);
 }

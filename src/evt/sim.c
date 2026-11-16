@@ -135,11 +135,13 @@ __xtc_sim_require_run(const char *what)
 	if (__xtc_sim_active())
 		return XTC_OK;
 	if (xtc_atomic_exchange_i32(&warned, 1, xtc_mo_relaxed) == 0)
-		fprintf(stderr, "xtc: %s outside a simulation run on a "
+		fprintf(stderr,
+		    "xtc: %s outside a simulation run on a "
 		    "--with-io-backend=sim library returns XTC_E_STATE: the "
 		    "sim backend has no kernel poller, so the loop would spin "
 		    "on fds it cannot see.  Drive the procs with "
-		    "xtc_sim_exec_run, or link a native libxtc.\n", what);
+		    "xtc_sim_exec_run, or link a native libxtc.\n",
+		    what);
 	return XTC_E_STATE;
 #else
 	(void)what;

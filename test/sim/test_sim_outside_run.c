@@ -100,8 +100,8 @@ main(void)
 
 	/* An executor, outside any run. */
 	if (xtc_exec_init(&e, 2) != XTC_OK ||
-	    xtc_proc_spawn(xtc_exec_loop(e, 0), reader, NULL, NULL,
-	        NULL) != XTC_OK) {
+	    xtc_proc_spawn(xtc_exec_loop(e, 0), reader, NULL, NULL, NULL) !=
+	        XTC_OK) {
 		printf("FAIL: setup of the executor\n");
 		return 1;
 	}
@@ -117,8 +117,8 @@ main(void)
 
 	/* The same program under a run is driven as before. */
 	if (xtc_exec_init(&e, 2) != XTC_OK ||
-	    xtc_proc_spawn(xtc_exec_loop(e, 1), sleeper, NULL, NULL,
-	        NULL) != XTC_OK) {
+	    xtc_proc_spawn(xtc_exec_loop(e, 1), sleeper, NULL, NULL, NULL) !=
+	        XTC_OK) {
 		printf("FAIL: setup of the sim run\n");
 		return 1;
 	}
@@ -131,8 +131,8 @@ main(void)
 	(void)xtc_exec_fini(e);
 
 	printf("OK: outside a sim run xtc_loop_run and xtc_exec_run return "
-	    "XTC_E_STATE at once (a proc parked on a real pipe would spin "
-	    "the sim backend forever); xtc_sim_exec_run still drives the "
-	    "procs\n");
+	       "XTC_E_STATE at once (a proc parked on a real pipe would spin "
+	       "the sim backend forever); xtc_sim_exec_run still drives the "
+	       "procs\n");
 	return 0;
 }
