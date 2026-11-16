@@ -149,10 +149,11 @@ with
 set, or
 .Dv XTC_E_INVAL
 on bad args
-.Pq notably Fa n_children Em <= 0 ;
-empty supervisors not supported, see
-.Pa examples/06_sqlxtc/main.c
-for a one-listener-child workaround .
+.Pq a negative Fa n_children , No or Fa children No NULL with Fa n_children No > 0 .
+A supervisor with no initial children
+.Pq Fa n_children No == 0
+is supported: children are added later with
+.Fn xtc_sup_add_child .
 .Pp
 .Fn xtc_sup_add_child
 adds one child to a running supervisor from a
