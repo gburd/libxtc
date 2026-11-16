@@ -147,8 +147,10 @@ XTC_API int        xtc_app_start(xtc_app_t *app,
                                  const xtc_child_spec_t *children,
                                  int n_children);
 
-/* Run the loop until the supervisor exits or xtc_app_stop is called.
- * On return, xtc_app_destroy may be called. */
+/* Run the loop until the root supervisor exits (xtc_app_stop, restart-
+ * intensity give-up, a kill) or an xtc_app_shutdown completes.  Other
+ * procs still parked on the app's loop do not keep it running.  On
+ * return, xtc_app_destroy may be called. */
 XTC_API int        xtc_app_run(xtc_app_t *app);
 
 /* Asynchronously request the app to stop (kicks the root sup).  NOT a

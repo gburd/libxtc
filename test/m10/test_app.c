@@ -703,6 +703,95 @@ test_app_shutdown_equal_pid_other_loop(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- the root supervisor's exit ends xtc_app_run (davros report 12) ---- */
+#include "xtc_reg.h"
+
+static void
+gu_crasher(void *arg)
+{
+	(void)arg;
+	(void)xtc_proc_sleep(1 * MS);
+	(void)xtc_exit_self(7);
+}
+
+/* An unsupervised proc parked forever on the app's loop. */
+static void
+gu_parked(void *arg)
+{
+	void *m;
+	size_t s;
+	(void)arg;
+	for (;;)
+		if (xtc_recv(&m, &s, -1) == XTC_OK)
+			__os_free(m);
+}
+
+struct gu_run {
+	xtc_app_t *app;
+	int rc;
+	_Atomic int done;
+};
+
+static void *
+gu_thread(void *arg)
+{
+	struct gu_run *r = arg;
+	r->rc = xtc_app_run(r->app);
+	atomic_store_explicit(&r->done, 1, memory_order_seq_cst);
+	return NULL;
+}
+
+/* A single-loop app whose supervisor gives up (restart intensity) while
+ * another proc is parked on its loop: xtc_app_run returns.  `extra` is
+ * the parked proc's body: a registry reaper spawned as xtc_reg.h says
+ * ("spawn ONE proc with this body"), or any proc. */
+static void
+gu_case(xtc_proc_fn extra, int use_reg)
+{
+	xtc_app_opts_t ao = XTC_APP_OPTS_DEFAULT;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_child_spec_t kid = XTC_CHILD_SPEC_INIT;
+	struct gu_run r;
+	pthread_t th;
+	xtc_pid_t pid;
+	int i;
+
+	memset(&r, 0, sizeof r);
+	ao.no_tuning_check = 1;
+	so.max_restarts = 1;
+	so.period_ns = 60LL * 1000 * MS;
+	ao.sup = &so;
+	kid.name = "crasher";
+	kid.fn = gu_crasher;
+	kid.policy = XTC_RESTART_TRANSIENT;
+	munit_assert_int(xtc_app_create(&ao, &r.app), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(xtc_app_loop(r.app), extra,
+	                     use_reg ? (void *)xtc_app_registry(r.app) : NULL,
+	                     NULL, &pid),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_app_start(r.app, &kid, 1), ==, XTC_OK);
+	munit_assert_int(pthread_create(&th, NULL, gu_thread, &r), ==, 0);
+	for (i = 0;
+	     i < 300 && !atomic_load_explicit(&r.done, memory_order_seq_cst);
+	     i++)
+		(void)__os_sleep_ns(10 * MS);
+	munit_assert_int(atomic_load_explicit(&r.done, memory_order_seq_cst),
+	    ==, 1);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+	munit_assert_int(r.rc, ==, XTC_OK);
+	xtc_app_destroy(r.app);
+}
+
+static MunitResult
+test_app_giveup_returns(const MunitParameter p[], void *d)
+{
+	(void)p;
+	(void)d;
+	gu_case(gu_parked, 0);
+	gu_case(xtc_reg_reaper, 1);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/app_basic", test_app_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/app_multiloop", test_app_multiloop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -714,6 +803,8 @@ static MunitTest tests[] = {
 	{ "/drain_on_sigterm", test_app_drain_on_sigterm, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/stop_waits_cleanup_multiloop", test_app_stop_waits_cleanup_multiloop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/shutdown_equal_pid_other_loop", test_app_shutdown_equal_pid_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/giveup_returns", test_app_giveup_returns, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m10.5/app", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

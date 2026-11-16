@@ -5,6 +5,7 @@
 #define ORC_EXT_H
 
 int __xtc_sup_abandon_wait __P((xtc_supervisor_t *));
+int __xtc_sup_start_ex __P((xtc_loop_t *, const xtc_sup_opts_t *, const xtc_child_spec_t *, int, void (*)(void *), void *, xtc_supervisor_t **));
 int xtc_launch __P((xtc_loop_t *, xtc_launch_fn, void *, int64_t, const xtc_launch_opts_t *, intptr_t *));
 int xtc_sup_add_child __P((xtc_supervisor_t *, const xtc_child_spec_t *, xtc_pid_t *));
 int xtc_sup_join __P((xtc_supervisor_t *, int64_t));

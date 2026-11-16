@@ -15,8 +15,12 @@
 #include "xtc_proc.h"
 #include "os_tuning.h"
 
-/* sup.c, internal: stop the root supervisor's child-cleanup wait. */
+/* sup.c, internal: stop the root supervisor's child-cleanup wait, and
+ * start it with an exit callback. */
 int __xtc_sup_abandon_wait(xtc_supervisor_t *sup);
+int __xtc_sup_start_ex(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
+    const xtc_child_spec_t *children, int n_children, void (*exit_fn)(void *),
+    void *exit_arg, xtc_supervisor_t **out_sup);
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -194,6 +198,31 @@ __app_halt(xtc_app_t *a)
 		(void)xtc_loop_stop(a->loop);
 }
 
+/*
+ * The root supervisor is exiting (stop, restart-intensity give-up, a
+ * kill), on its own fiber, with its children stopped.  End xtc_app_run
+ * on an owned single loop the way the supervisor's executor stop ends it
+ * on a multi-loop app.  Through 2.1.2 a single-loop xtc_app_run waited
+ * for the loop to drain, so any other parked proc (a registry reaper,
+ * spawned as xtc_reg.h says) kept it running forever after the
+ * supervisor gave up.
+ *
+ * Not stopped: a loop xtc_app_run is not driving (`running` is clear;
+ * the supervisor runs on this loop, so then someone else runs it), a
+ * BORROWED loop (the embedder's; it runs on until it drains), and a loop
+ * an xtc_app_shutdown is draining (it stops the loop itself at its end,
+ * after the report is written).
+ */
+static void
+__app_root_exited(void *arg)
+{
+	xtc_app_t *a = arg;
+	if (a->owns_loop &&
+	    atomic_load_explicit(&a->running, memory_order_acquire) &&
+	    !atomic_load_explicit(&a->shutting_down, memory_order_acquire))
+		(void)xtc_loop_stop(a->loop);
+}
+
 int
 xtc_app_start(xtc_app_t *a, const xtc_child_spec_t *children, int n)
 {
@@ -232,8 +261,8 @@ xtc_app_start(xtc_app_t *a, const xtc_child_spec_t *children, int n)
 		a->specs[i].fn = __kid_trampoline;
 		a->specs[i].arg = &a->kids->k[i];
 	}
-	if ((rc = xtc_sup_start(a->loop, &a->sup_opts, a->specs, n,
-	    &a->root)) == XTC_OK)
+	if ((rc = __xtc_sup_start_ex(a->loop, &a->sup_opts, a->specs, n,
+	         __app_root_exited, a, &a->root)) == XTC_OK)
 		return XTC_OK;
 fail:
 	if (a->specs) __os_free(a->specs);
@@ -562,6 +591,7 @@ out:
 void
 xtc_app_destroy(xtc_app_t *a)
 {
+	int joined = 1;
 	if (a == NULL) return;
 #if !defined(_WIN32)
 	if (a->sig_armed) {
@@ -574,11 +604,22 @@ xtc_app_destroy(xtc_app_t *a)
 #endif
 	/* Best-effort: if the supervisor is still alive we let the
 	 * caller handle that.  Join with a generous timeout. */
-	if (a->root != NULL)
-		(void)xtc_sup_join(a->root, 5LL * 1000 * 1000 * 1000);
-	if (a->reg)  xtc_reg_destroy(a->reg);
+	if (a->root != NULL &&
+	    xtc_sup_join(a->root, 5LL * 1000 * 1000 * 1000) != XTC_OK)
+		joined = 0;
+	/* A supervisor that did not exit on a BORROWED loop can still run
+	 * when the embedder next runs that loop, and its exit callback
+	 * (__app_root_exited) uses the app: leak the app rather than free it
+	 * under it.  An owned loop or executor frees the supervisor below,
+	 * unrun. */
+	if (!joined && !a->owns_loop && a->exec == NULL)
+		return;
+	/* The registry outlives the loops: a proc freed with them (a
+	 * registry reaper parked when the loop stopped) holds it. */
 	if (a->exec) (void)xtc_exec_fini(a->exec);
 	if (a->loop && a->owns_loop) (void)xtc_loop_fini(a->loop);
+	if (a->reg)
+		xtc_reg_destroy(a->reg);
 	if (a->specs) __os_free(a->specs);
 	/* A masked-forever survivor keeps a pointer into kids, so leak it in
 	 * that case (bytes per child); free otherwise. */

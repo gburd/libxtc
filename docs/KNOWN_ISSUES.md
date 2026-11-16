@@ -203,6 +203,23 @@ Negative ports and ports above 65535 are still `XTC_E_INVAL`, and
 `xtc_net_dial` still requires a real port.  `/m2/net/tcp_listen_dial`
 fails on 2.1.2 (-1 for 0) and passes on 2.1.3.
 
+## FIXED (2.1.3): a single-loop xtc_app_run did not return when the supervisor exited
+
+`xtc_app.h` says `xtc_app_run` runs until the root supervisor exits.
+On a multi-loop app the supervisor stops the executor as it exits, so
+that held.  A single-loop app ran `xtc_loop_run`, which returns only
+when no process is left on the loop, and nothing stopped the loop when
+the supervisor gave up (restart intensity), was killed, or stopped after
+`xtc_app_stop`.  Any other process parked on the loop, a registry reaper
+spawned as `xtc_reg.h` says for one, kept `xtc_app_run` from returning,
+forever.  The supervisor's exit now stops an app-owned loop while
+`xtc_app_run` drives it; a loop the app borrowed (`opts.loop`) is left
+to the embedder, and an `xtc_app_shutdown` in progress still stops the
+loop itself.  `xtc_app_destroy` frees the registry after the loops,
+since a process freed with them may hold it.
+`/m10.5/app/giveup_returns` fails on 2.1.2 (`xtc_app_run` still running
+after 3 s) and passes on 2.1.3.
+
 ## FIXED (2.1.2): a cross-shard xtc_tnt_send could lose messages
 
 **What it was.**  Through 2.1.1 an `xtc_tnt_send` to an Isolate on

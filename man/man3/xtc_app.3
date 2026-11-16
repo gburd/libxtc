@@ -117,16 +117,30 @@ above 1 makes the app own an N-loop executor; the root supervisor runs
 on loop 0 and children are placed by
 .Fa xtc_child_spec_t.loop .
 .Ss Stopping
+.Fn xtc_app_run
+returns when the root supervisor exits: after
+.Fn xtc_app_stop ,
+when it gives up (restart intensity), or when it is killed.  It stops
+the app's loop (or executor) then, whatever other processes are still
+parked there.  Through 2.1.2 a single-loop
+.Fn xtc_app_run
+instead waited for the loop to drain, so any parked process (a registry
+reaper, for one) kept it running forever.  A loop the app borrowed
+.Pq Fa opts.loop
+is the embedder's and is not stopped.
+.Pp
 .Fn xtc_app_stop
 is NOT a drain.  It asks the root supervisor to stop and returns at
 once; the supervisor then
 .Fn xtc_exit_pid Ns s
-every child with reason 1 and does not wait for their cleanup.  A child
-masked with
+every child with reason 1 and waits at most 5 seconds for their
+cleanup.  A child masked with
 .Fn xtc_mask_enter
-never observes that kill, and
+never observes that kill; the supervisor exits after the 5 seconds,
 .Fn xtc_app_run
-then never returns.
+returns, and
+.Fn xtc_app_destroy
+frees the still-parked child with the loop.
 .Ss Graceful drain
 .Fn xtc_app_shutdown
 is the bounded, reported drain:

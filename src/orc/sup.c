@@ -70,10 +70,18 @@ struct xtc_supervisor {
 	xtc_atomic_pid_t       sup_pid;
 	xtc_notify_t          *stopped;
 	xtc_pid_t             *restart_old;    /* a group restart's snapshot */
+	/* __xtc_sup_start_ex: called on the supervisor's fiber as it exits,
+	 * before `stopped` is signalled (the owner is still alive). */
+	void (*exit_fn)(void *);
+	void *exit_arg;
 #if XTC_DST_BUG(XTC_DST_BUG_SUP_LOCKPARK)
 	pthread_mutex_t        plant_lock;     /* 2.1.1's sup->lock shape */
 #endif
 };
+
+int __xtc_sup_start_ex(xtc_loop_t *, const xtc_sup_opts_t *,
+    const xtc_child_spec_t *, int, void (*)(void *), void *,
+    xtc_supervisor_t **);
 
 static xtc_pid_t
 __sup_pid_load(struct xtc_supervisor *sup)
@@ -569,6 +577,8 @@ __sup_exited(void *arg)
 	 * so the join timed out and -- correctly, since f6637ef -- freed
 	 * nothing: the supervisor leaked (LSan, 12_graceful_drain under ASan).
 	 */
+	if (sup->exit_fn != NULL)
+		sup->exit_fn(sup->exit_arg);
 	atomic_store_explicit(&sup->alive, 0, memory_order_release);
 	/* Read before the signal: a joiner may free sup once it is sent. */
 	exec = sup->opts.exec;
@@ -702,6 +712,23 @@ xtc_sup_start(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
               const xtc_child_spec_t *children, int n_children,
               xtc_supervisor_t **out_sup)
 {
+	return __xtc_sup_start_ex(loop, opts, children, n_children, NULL, NULL,
+	    out_sup);
+}
+
+/*
+ * xtc_sup_start with an exit callback, for xtc_app: exit_fn(exit_arg)
+ * runs on the supervisor's fiber on every exit of the supervisor proc
+ * (stop, restart-intensity give-up, a kill), after its children are
+ * stopped and before xtc_sup_join can return.  It must not park.
+ *
+ * PUBLIC: int __xtc_sup_start_ex __P((xtc_loop_t *, const xtc_sup_opts_t *, const xtc_child_spec_t *, int, void (*)(void *), void *, xtc_supervisor_t **));
+ */
+int
+__xtc_sup_start_ex(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
+    const xtc_child_spec_t *children, int n_children, void (*exit_fn)(void *),
+    void *exit_arg, xtc_supervisor_t **out_sup)
+{
 	xtc_supervisor_t *sup;
 	xtc_sup_opts_t   defaults = XTC_SUP_OPTS_DEFAULT, o = defaults;
 	int rc;
@@ -731,6 +758,8 @@ xtc_sup_start(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
 		return rc;
 	sup->loop = loop;
 	sup->opts = o;
+	sup->exit_fn = exit_fn;
+	sup->exit_arg = exit_arg;
 	if (sup->opts.strategy != XTC_SUP_ONE_FOR_ONE &&
 	    sup->opts.strategy != XTC_SUP_ONE_FOR_ALL &&
 	    sup->opts.strategy != XTC_SUP_REST_FOR_ONE &&
