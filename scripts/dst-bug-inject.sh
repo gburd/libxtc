@@ -101,6 +101,7 @@ write_cases() {
 		"36;test_sim_wait_fd_only;0;1;a receive after a mail-blind wait was never woken" \
 		"63;test_sim_rcu;0;0;a slotless reader saw a freed node" \
 		"64;test_sim_rcu;0;0;an unrecorded retire freed a node under a reader" \
+		"65;test_sim_lrlock;0;0;a write was lost .* when the oplog could not grow" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -159,6 +160,8 @@ write_cases() {
 # 64 RCU_RETIRE_FREE rcu.c frees an unrecordable retirement at once
 #               -> out of memory, a retired object is leaked, never freed
 #               under a reader
+# 65 LRLOCK_OPLOG_DROP lock_lr.c drops an op the oplog cannot grow to hold
+#               -> out of memory, an applied op reaches both copies
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

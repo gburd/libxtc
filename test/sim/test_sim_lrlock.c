@@ -13,6 +13,7 @@
 #include "xtc_lrlock.h"
 #include "xtc_async.h"     /* xtc_yield */
 #include "xtc_sim.h"
+#include "xtc_inject.h"
 
 /*
  * DST coverage of the Left-Right lock (src/ptc/lock_lr.c): wait-free
@@ -135,6 +136,152 @@ lr_writer(void *arg)
 	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
 }
 
+/*
+ * Out-of-memory phase: the lock's oplog holds two ops and cannot grow
+ * (the "lrlock.oplog.grow_fail" injection point), and each write logs
+ * OO_OPS.  An op the oplog cannot hold must still reach both copies:
+ * right after its publish the writer reads its own last value back,
+ * and at the end both copies must hold the last value written (plant
+ * 65, LRLOCK_OPLOG_DROP, drops the op instead).
+ */
+#define OO_OPS 4
+static atomic_int g_lost; /* a write was missing from a copy */
+static long g_last;       /* the last base published */
+
+static void
+oo_noop(const char *name, void *user)
+{
+	(void)name;
+	(void)user;
+}
+
+static void
+oo_writer(void *arg)
+{
+	int id = (int)(intptr_t)arg;
+	const struct payload *p;
+	long base = 0;
+	int it, k;
+
+	for (it = 0; it < ITERS; it++) {
+		(void)xtc_lrlock_write_begin(g_lr);
+		/* No yield until the detach: only this write's grow fails. */
+		(void)xtc_inject_attach("lrlock.oplog.grow_fail", oo_noop,
+		    NULL);
+		for (k = 0; k < OO_OPS; k++) {
+			base = (long)((id + 1) * 1000 + it * 10 + k);
+			xtc_lrlock_apply_op(g_lr, &base, sizeof base);
+		}
+		(void)xtc_inject_detach("lrlock.oplog.grow_fail");
+		xtc_lrlock_publish(g_lr);
+		xtc_lrlock_write_end(g_lr);
+		p = xtc_lrlock_read_begin(g_lr);
+		if (p != NULL) {
+			if (p->hi != base)
+				atomic_fetch_add_explicit(&g_lost, 1,
+				    memory_order_relaxed);
+			xtc_lrlock_read_end(g_lr);
+		}
+		g_last = base;
+		fold(base);
+		xtc_yield();
+	}
+	atomic_fetch_add_explicit(&g_done, 1, memory_order_relaxed);
+}
+
+static int
+run_oom(uint64_t seed, int *out_done, int *out_torn, int *out_lost,
+    long *out_hash, uint64_t *out_state)
+{
+	xtc_lrlock_opts_t o = { 0 };
+	xtc_exec_t *e = NULL;
+	const struct payload *p;
+	int i, rc, copy, next = 0;
+
+	atomic_store_explicit(&g_torn, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_no_slot, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_done, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_lost, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_hash, 0, memory_order_seq_cst);
+	g_last = 0;
+
+	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
+		return -1;
+	o.name = "lr.oom";
+	o.data_size = sizeof(struct payload);
+	o.apply_fn = pl_apply;
+	o.sync_fn = pl_sync;
+	o.oplog_capacity = 32; /* two ops */
+	if (xtc_lrlock_create_ex(&o, &g_lr) != XTC_OK) {
+		(void)xtc_exec_fini(e);
+		return -1;
+	}
+	for (i = 0; i < WRITERS; i++)
+		(void)xtc_proc_spawn(xtc_exec_loop(e,
+		                         (unsigned)(next++ % N_LOOPS)),
+		    oo_writer, (void *)(intptr_t)i, NULL, NULL);
+	for (i = 0; i < READERS; i++)
+		(void)xtc_proc_spawn(xtc_exec_loop(e,
+		                         (unsigned)(next++ % N_LOOPS)),
+		    lr_reader, (void *)(intptr_t)i, NULL, NULL);
+
+	rc = xtc_sim_exec_run(e, seed, 5000000);
+
+	/* Both copies: read one, swap with an empty publish, read the
+	 * other. */
+	for (copy = 0; copy < 2; copy++) {
+		p = xtc_lrlock_read_begin(g_lr);
+		if (p->hi != g_last || p->lo != g_last)
+			atomic_fetch_add_explicit(&g_lost, 1,
+			    memory_order_relaxed);
+		xtc_lrlock_read_end(g_lr);
+		(void)xtc_lrlock_write_begin(g_lr);
+		xtc_lrlock_publish(g_lr);
+		xtc_lrlock_write_end(g_lr);
+	}
+	*out_done = atomic_load_explicit(&g_done, memory_order_seq_cst);
+	*out_torn = atomic_load_explicit(&g_torn, memory_order_seq_cst);
+	*out_lost = atomic_load_explicit(&g_lost, memory_order_seq_cst);
+	*out_hash = atomic_load_explicit(&g_hash, memory_order_seq_cst);
+	*out_state = xtc_sim_state_hash(e);
+	xtc_lrlock_destroy(g_lr);
+	g_lr = NULL;
+	(void)xtc_exec_fini(e);
+	return rc;
+}
+
+static int
+check_oom(uint64_t seed)
+{
+	int d1 = 0, t1 = 0, l1 = 0, d2 = 0, t2 = 0, l2 = 0;
+	long h1 = 0, h2 = 0;
+	uint64_t s1 = 0, s2 = 0;
+
+	if (run_oom(seed, &d1, &t1, &l1, &h1, &s1) != XTC_OK) {
+		printf("FAIL: oom: run did not quiesce (seed %llx)\n",
+		    (unsigned long long)seed);
+		return 1;
+	}
+	(void)run_oom(seed, &d2, &t2, &l2, &h2, &s2);
+	printf("lrlock oom seed %llx: done=%d torn=%d lost=%d hash=%ld\n",
+	    (unsigned long long)seed, d1, t1, l1, h1);
+	if (l1 != 0) {
+		printf("FAIL: oom: a write was lost (%d) when the oplog could "
+		       "not grow\n",
+		    l1);
+		return 1;
+	}
+	if (d1 != READERS + WRITERS || t1 != 0) {
+		printf("FAIL: oom: done=%d torn=%d\n", d1, t1);
+		return 1;
+	}
+	if (d1 != d2 || t1 != t2 || l1 != l2 || h1 != h2 || s1 != s2) {
+		printf("FAIL: oom: did not replay (hash %ld/%ld)\n", h1, h2);
+		return 1;
+	}
+	return 0;
+}
+
 static int
 run_lr(uint64_t seed, int *out_done, int *out_torn, int *out_no_slot,
     long *out_hash, uint64_t *out_state)
@@ -228,8 +375,12 @@ main(void)
 		    "torn=%d)\n", d3, t3); return 1;
 	}
 
+	if (check_oom(0x1EF7) != 0 || check_oom(0x2FA8) != 0)
+		return 1;
+
 	printf("OK: lrlock wait-free reads never torn under a concurrent "
-	    "writer, publish is atomic, replayed; different seed reorders "
-	    "and stays consistent\n");
+	       "writer, publish is atomic, no write lost when the oplog "
+	       "cannot grow, replayed; different seed reorders and stays "
+	       "consistent\n");
 	return 0;
 }

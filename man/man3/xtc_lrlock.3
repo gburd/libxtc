@@ -144,6 +144,13 @@ be deterministic
 For non-deterministic mutations, use
 .Fn xtc_lrlock_publish_full_sync
 which copies the entire data block instead of replaying ops.
+If the operation log cannot grow to hold an operation (out of memory),
+the operation is still applied to the writer's copy, and the next
+publish copies the whole data block, with the lock's
+.Fa sync_fn ,
+or
+.Xr memcpy 3
+when it has none, instead of replaying the log.
 .Pp
 .Fn xtc_lrlock_read_data
 and

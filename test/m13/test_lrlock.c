@@ -372,6 +372,83 @@ test_lrlock_oplog_grow(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * An op the oplog cannot grow to hold must still reach both copies.
+ * xtc_lrlock_apply_op returned without applying it, so the write was
+ * lost from both.  The allocator fails realloc while the writer logs
+ * more ops than the oplog has room for, once before the lock's first
+ * publish and once after it; a second publish with no ops then reads
+ * the other copy, which must match.
+ */
+static void *
+lr_fail_realloc(void *q, size_t sz)
+{
+	(void)q;
+	(void)sz;
+	return NULL;
+}
+
+static void
+lost_write(xtc_lrlock_t *lr, int base)
+{
+	struct __os_alloc_hook saved, failing;
+	struct op_set s;
+	int i;
+
+	munit_assert_int(__os_alloc_get_hook(&saved), ==, XTC_OK);
+	failing = saved;
+	failing.realloc = lr_fail_realloc;
+	munit_assert_not_null(xtc_lrlock_write_begin(lr));
+	munit_assert_int(__os_alloc_set_hook(&failing), ==, XTC_OK);
+	for (i = 0; i < 16; i++) {
+		s.key = i;
+		s.value = base + i;
+		xtc_lrlock_apply_op(lr, &s, sizeof s);
+	}
+	munit_assert_int(__os_alloc_set_hook(&saved), ==, XTC_OK);
+	xtc_lrlock_publish(lr);
+	xtc_lrlock_write_end(lr);
+}
+
+static void
+lost_check(xtc_lrlock_t *lr, int base)
+{
+	const struct dict *rd;
+	int copy, i;
+
+	for (copy = 0; copy < 2; copy++) {
+		rd = xtc_lrlock_read_begin(lr);
+		munit_assert_int(rd->n, ==, 16);
+		for (i = 0; i < 16; i++)
+			munit_assert_int(rd->items[i].value, ==, base + i);
+		xtc_lrlock_read_end(lr);
+		(void)xtc_lrlock_write_begin(lr); /* swap to the other copy */
+		xtc_lrlock_publish(lr);
+		xtc_lrlock_write_end(lr);
+	}
+}
+
+static MunitResult
+test_lrlock_oplog_oom(const MunitParameter p[], void *d)
+{
+	xtc_lrlock_t *lr;
+	xtc_lrlock_opts_t o = { 0 };
+	(void)p;
+	(void)d;
+	o.name = "oom";
+	o.data_size = sizeof(struct dict);
+	o.apply_fn = apply_set;
+	o.sync_fn = sync_dict;
+	o.oplog_capacity = 32; /* two ops; the third needs a grow */
+	munit_assert_int(xtc_lrlock_create_ex(&o, &lr), ==, XTC_OK);
+	lost_write(lr, 100); /* before the first publish */
+	lost_check(lr, 100);
+	lost_write(lr, 200); /* after it */
+	lost_check(lr, 200);
+	xtc_lrlock_destroy(lr);
+	return MUNIT_OK;
+}
+
 /* ---- thread-churn slot reclamation (regression) -------------
  *
  * Before slot reclamation, each new thread consumed one of the
@@ -535,6 +612,7 @@ static MunitTest tests[] = {
 	{ "/lrlock_cow_basic", test_lrlock_cow_basic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/lrlock_cow_concurrent", test_lrlock_cow_concurrent, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/lrlock_oplog_grow", test_lrlock_oplog_grow, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/lrlock_oplog_oom", test_lrlock_oplog_oom, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/lrlock_max_readers", test_lrlock_max_readers, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/alrlock_alias", test_alrlock_alias, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/lrlock_thread_churn", test_lrlock_thread_churn, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

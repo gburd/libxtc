@@ -272,4 +272,11 @@
  */
 #define XTC_DST_BUG_RCU_RETIRE_FREE 64
 
+/*
+ * 65 LRLOCK_OPLOG_DROP: xtc_lrlock_apply_op returns without applying an
+ * op the oplog cannot grow to hold, so the write is lost from both
+ * copies (test_sim_lrlock: "a write was lost").
+ */
+#define XTC_DST_BUG_LRLOCK_OPLOG_DROP 65
+
 #endif /* XTC_DST_INJECT_H */
