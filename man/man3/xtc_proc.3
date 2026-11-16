@@ -420,6 +420,12 @@ The collected messages are written to
 is set to the count actually delivered (which may be less than
 .Fa n_expected
 if the timeout fires first).
+The caller owns each delivered
+.Va data
+buffer, as for
+.Fn xtc_recv ,
+and releases it with
+.Xr xtc_free 3 .
 .Pp
 .Fn xtc_proc_wait_fd
 blocks until any of:

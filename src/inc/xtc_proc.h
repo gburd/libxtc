@@ -574,7 +574,7 @@ XTC_API int       xtc_recv_match(xtc_match_fn match_fn, void *user_data,
  * receives.  Returns XTC_OK on full collection; XTC_E_AGAIN if
  * the timeout fires before n_expected matches arrive (in which
  * case `*out_n` is the number actually collected; out_msgs[0..*out_n]
- * are still owned by the caller and must be freed).
+ * are still owned by the caller and must be freed with xtc_free).
  *
  * This is the canonical helper for fork-join and request-reply
  * patterns: pick a correlation id, send N children a request
@@ -582,7 +582,8 @@ XTC_API int       xtc_recv_match(xtc_match_fn match_fn, void *user_data,
  * bytes equal the id.  Avoids manual save-queue management.
  *
  * Each delivered message conforms to the same ownership contract
- * as xtc_recv: the caller owns the buffer and must free() it.
+ * as xtc_recv: the caller owns the buffer and frees it with xtc_free
+ * (not free(3): the library may use its own allocator).
  */
 typedef struct xtc_msg {
 	void   *data;
