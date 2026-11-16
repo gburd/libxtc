@@ -5,7 +5,7 @@
  *
  * src/inc/xtc_loop.h
  *	The L2 single-thread event loop, run-queue, timer-heap, and
- *	task state machine.  See M3_CLAIMS.md.
+ *	task state machine.  See xtc_loop(3).
  */
 
 #ifndef XTC_LOOP_H
@@ -43,8 +43,7 @@ typedef int (*xtc_task_fn)(xtc_task_t *self, void *user);
 
 /*
  * The waker is a value-type cookie (loop, task) used to re-schedule
- * a parked task.  In M3 wakers are valid only on the owning thread;
- * cross-thread wake arrives in M5.
+ * a parked task.  xtc_waker_wake may be called from any thread.
  */
 typedef struct xtc_waker {
 	xtc_loop_t *loop;

@@ -4,15 +4,16 @@
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_sync.h
- *	L3 synchronization primitives.  M9 ships:
+ *	L3 synchronization primitives:
  *
  *	  notify       Tokio-style one-shot wake-of-any-waiter
  *	  semaphore    counting; backpressure currency
  *	  abort_source Seastar-style structured cancellation
- *
- *	The full M9 surface (mutex, rwlock, barrier, gate) lands in
- *	M9.5 alongside the lock-manager work in M13.  These three are
- *	the minimum needed for the M10 supervisor.
+ *	  amutex       mutex whose waiters park the fiber
+ *	  arwlock      reader/writer lock whose waiters park the fiber
+ *	  rwlock       reader/writer lock that blocks the OS thread
+ *	  barrier      N-party rendezvous
+ *	  gate         count in-flight work, then close and wait for it
  */
 
 #ifndef XTC_SYNC_H

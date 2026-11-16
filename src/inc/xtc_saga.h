@@ -11,25 +11,18 @@
  *	step's error code.  All steps succeeding returns XTC_OK.
  *
  *	This is the saga pattern (distributed-transaction compensation,
- *	as used for multi-service workflows and, per PLAN.md 19.5, the
- *	intended replication-coordination and extension-flow use case):
+ *	as used for multi-service workflows, replication coordination
+ *	and extension flows):
  *	there is no two-phase-commit coordinator, no lock held across
  *	steps -- just a forward action and a hand-written undo for each
  *	step, run by ordinary synchronous-looking C called from a fiber.
  *
- *	NOTE on PLAN.md's original sketch: it proposed building this on
- *	a hypothetical "xtc_future" type with an "await()" call.  Neither
- *	exists in this codebase (grep confirms no xtc_future, no await()
- *	besides the real xtc_await in xtc_async.h, which is a coroutine
- *	join primitive, not a generic future).  A saga step is a plain
- *	function call, not a spawned task: xtc_saga_run calls each step
- *	function directly on the CALLING fiber, in order, exactly like
- *	calling a chain of ordinary functions.  A step is free to spawn
- *	an xtc_proc / use xtc_async / call xtc_await internally and block
- *	until that sub-work finishes -- the saga does not need its own
- *	future type to support that, because xtc_await already exists for
- *	it.  Sagas thus fit directly on top of the real primitives (fibers,
- *	xtc_proc, xtc_async/xtc_await) with no new async abstraction.
+ *	A saga step is a plain function call, not a spawned task:
+ *	xtc_saga_run calls each step function directly on the CALLING
+ *	fiber, in order, exactly like calling a chain of ordinary
+ *	functions.  A step is free to spawn an xtc_proc, use xtc_async /
+ *	xtc_await or wait on an xtc_future internally, and block until
+ *	that sub-work finishes; the saga needs no async type of its own.
  *
  *	A compensation that itself fails is a documented UNRECOVERABLE
  *	SAGA condition: the runtime does not swallow it.  xtc_saga_run

@@ -16,12 +16,12 @@
  *	against a normal one.  It is OFF by default and one branch when
  *	disabled -- observability must not tax production.
  *
- *	Phase 1 (this): the SCHED source (proc spawn / exit / wake / run)
- *	over a bounded per-process ring, an in-process read callback, and a
- *	versioned binary dump to an fd.  The IO/OS sources, on-disk spill
- *	with rotation, and the offline viewer are staged follow-ons (see
- *	the roadmap); the record format and API are designed to accept them
- *	without a break.
+ *	Implemented: the SCHED source (proc spawn / exit / park / run and
+ *	the loop, submit and reap events below), the MSG source (send /
+ *	receive / mailbox depth), a bounded per-process ring, an
+ *	in-process read callback, a versioned binary dump
+ *	(tools/xtc-tail.py reads it), a dial9 dump, and spill to a
+ *	directory.  The IO and OS sources are reserved.
  */
 
 #ifndef XTC_TAIL_H
@@ -40,10 +40,10 @@ extern "C" {
 #endif
 
 /* Event sources, an enable mask (dial9-style: pay only for what you turn
- * on).  Phase 1 implements SCHED; the others are reserved so the mask is
- * stable across the staged build-out. */
+ * on).  SCHED and MSG record events; IO and OS are reserved, so the
+ * mask is stable when they are added. */
 #define XTC_TAIL_SCHED  (1u << 0)   /* proc spawn/exit/wake/run */
-#define XTC_TAIL_MSG    (1u << 1)   /* reserved: send/recv/mailbox depth */
+#define XTC_TAIL_MSG    (1u << 1)   /* send/recv/mailbox depth */
 #define XTC_TAIL_IO     (1u << 2)   /* reserved: fd reg/del/completion */
 #define XTC_TAIL_OS     (1u << 3)   /* reserved: per-loop CPU/RSS sampling */
 #define XTC_TAIL_ALL    (XTC_TAIL_SCHED | XTC_TAIL_MSG | XTC_TAIL_IO | XTC_TAIL_OS)

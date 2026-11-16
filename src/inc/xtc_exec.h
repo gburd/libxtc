@@ -7,9 +7,7 @@
  *	The L2 multi-loop executor.  Owns N xtc_loop instances, each
  *	running on its own OS thread.  Tasks may be spawned on any loop
  *	from any thread; cross-thread wakers go through a per-loop MPSC
- *	inbox + xtc_io_wakeup pingback.
- *
- *	See M5_CLAIMS.md.
+ *	inbox + xtc_io_wakeup pingback.  See xtc_exec(3).
  */
 
 #ifndef XTC_EXEC_H

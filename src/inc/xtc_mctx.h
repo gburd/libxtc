@@ -16,10 +16,8 @@
  *	cleanup callbacks bottom-up, then frees all chunks.  Reset
  *	frees chunks but keeps children alive.
  *
- *	M11 deliberately ships a simple-but-correct allocator first
- *	(every allocation = malloc + chain).  M11.5 will swap in slab
- *	caches for fixed-size hot paths and arena-free for large
- *	short-lived contexts.  The public API doesn't change.
+ *	Every allocation is one allocator call chained into its context;
+ *	destroying or resetting the context frees the chain.
  *
  *	Thread-safety: each context carries an optional pthread mutex.
  *	The default factory makes contexts unlocked for the per-loop

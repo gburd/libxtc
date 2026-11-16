@@ -5,8 +5,7 @@
  *
  * src/inc/xtc_rcu.h
  *	Read-Copy-Update epoch reclamation.  Wait-free readers,
- *	deferred-reclaim writers.  This is the foundation that
- *	xtc_lrlock (M13b) and xtc_chash (M11.5) build on.
+ *	deferred-reclaim writers.  xtc_chash and xtc_cskip build on it.
  *
  *	Model:
  *	  - A global epoch counter advances on each "grace period".
@@ -16,10 +15,9 @@
  *	    the object is held until every thread has either left its
  *	    read-side or moved to a strictly newer epoch.
  *
- *	This first cut uses a single global epoch + a per-thread slot
- *	registered lazily.  A periodic helper (or any writer's call to
- *	xtc_rcu_synchronize) advances the epoch.  M13a-rev2 will ship
- *	a per-NUMA-node bucketing for scaling.
+ *	There is one global epoch and a reader slot per thread (per
+ *	fiber on a fiber), registered lazily.  A writer's call to
+ *	xtc_rcu_synchronize advances the epoch.
  */
 
 #ifndef XTC_RCU_H

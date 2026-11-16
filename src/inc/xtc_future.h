@@ -6,7 +6,7 @@
  * of this distribution.
  *
  * src/inc/xtc_future.h
- *	Futures and promises (PLAN.md 2.4.1) -- a one-shot awaitable
+ *	Futures and promises -- a one-shot awaitable
  *	value with a write half (xtc_promise_t) and a read half
  *	(xtc_future_t), plus combinators (then / map / when_all /
  *	when_any / with_timeout).

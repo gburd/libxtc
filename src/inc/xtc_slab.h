@@ -58,7 +58,7 @@
  *	      5. Either process can now alloc; the other can resolve
  *	         the offset to access the object.
  *
- *	Debug flags (M11.5a):
+ *	Debug flags:
  *	  REDZONE   -- 16-byte guard before+after each object; checked
  *	              on free
  *	  AUDIT     -- small ring of recent (alloc, free, who, when)

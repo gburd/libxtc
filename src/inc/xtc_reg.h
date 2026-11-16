@@ -4,7 +4,7 @@
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_reg.h
- *	Process registry: name -> xtc_pid_t lookup.  M10.5.
+ *	Process registry: name -> xtc_pid_t lookup.
  *
  *	Erlang's gen_server-via-name pattern: spawn a service, register
  *	it under a stable name, and the rest of the system finds it by

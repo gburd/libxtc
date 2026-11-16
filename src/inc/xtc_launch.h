@@ -4,8 +4,8 @@
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_launch.h
- *	Bounded-time / cancellable work: xtc_launch (M_PREEMPTION Phase 3,
- *	the libinger launch(f, timeout) model, reimplemented natively).
+ *	Bounded-time / cancellable work: xtc_launch (the libinger
+ *	launch(f, timeout) model, reimplemented natively).
  *
  *	Run fn(arg) on a child fiber with a one-shot DEADLINE.  If fn
  *	finishes within the deadline, its return value is delivered; if it

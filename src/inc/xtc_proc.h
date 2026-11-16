@@ -5,8 +5,8 @@
  *
  * src/inc/xtc_proc.h
  *	Lightweight processes with mailboxes, selective receive,
- *	links, monitors, and explicit exit.  M8 ships the core; the
- *	`xtc_orc` supervisor (M10) sits on top of these primitives.
+ *	links, monitors, and explicit exit.  The supervisors of
+ *	xtc_orc.h sit on top of these primitives.
  *
  *	A process is a coroutine with identity (xtc_pid_t) plus a
  *	mailbox.  Send is fire-and-forget; the message is copied into

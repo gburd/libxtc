@@ -68,6 +68,15 @@ backend; limited to descriptors below
 .Dv FD_SETSIZE .
 .El
 .Pp
+The installed
+.In xtc_version.h
+names the backend a build selected with one
+.Dv XTC_IO_BACKEND_*
+macro
+.Pq Dv XTC_IO_BACKEND_URING , XTC_IO_BACKEND_EPOLL , No and so on ;
+.Fn xtc_io_backend_name
+names it at run time.
+.Pp
 Registration, modification and removal are O(1) on every backend.
 A wait on
 .Sy poll

@@ -74,7 +74,7 @@ typedef struct xtc_app_opts {
 }
 
 /*
- * Graceful drain (PLAN.md 19.20 / 19.27.10).
+ * Graceful drain.
  *
  * xtc_app_shutdown(app, drain_ns, force_ns, report):
  *   1. sends XTC_APP_SHUTDOWN_MSG to every static child (the children
@@ -111,7 +111,7 @@ typedef struct xtc_app_opts {
 #define XTC_APP_SHUTDOWN_REASON  1     /* force-cancel exit reason */
 
 /*
- * Size-versioned (PLAN.md 18.1): set .size = sizeof(xtc_app_drain_report_t)
+ * Size-versioned: set .size = sizeof(xtc_app_drain_report_t)
  * before the call (XTC_APP_DRAIN_REPORT_INIT does).  The library writes
  * only the first .size bytes, so fields appended in a later minor release
  * are invisible to, and harmless for, a caller built against this one.

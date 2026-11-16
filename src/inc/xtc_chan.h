@@ -4,19 +4,24 @@
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_chan.h
- *	The L3 channel taxonomy.  M7 ships three:
+ *	The L3 channels:
  *
- *	  oneshot:  one sender, one receiver, exactly-one message.
- *	  mpsc:     bounded multi-producer single-consumer queue.
- *	  watch:    many-to-many "latest value wins" slot (one frame).
+ *	  oneshot:    one sender, one receiver, exactly-one message.
+ *	  mpsc:       bounded multi-producer single-consumer queue.
+ *	  watch:      many-to-many "latest value wins" slot (one frame).
+ *	  mpmc:       bounded multi-producer multi-consumer queue.
+ *	  broadcast:  every receiver sees every message.
+ *	  demand:     a queue whose producer sends only against granted
+ *	              demand (backpressure).
  *
- *	mpmc and broadcast arrive in M7.5.  All channels have explicit
- *	bounded capacity; out-of-capacity behaviour is documented per
- *	type and tracked via xtc_res so callers cannot exhaust memory.
+ *	All channels have explicit bounded capacity; out-of-capacity
+ *	behaviour is documented per type and tracked via xtc_res so
+ *	callers cannot exhaust memory.
  *
- *	Each channel exposes both a blocking variant (caller parks on
- *	a waker if the queue is full/empty) and a non-blocking variant
- *	(returns XTC_E_AGAIN immediately).
+ *	Every send and receive is non-blocking: it returns XTC_E_AGAIN
+ *	when the channel is full or empty.  A fiber that wants to wait
+ *	registers a waker (the _set_waker calls) and parks until it
+ *	fires, then tries again.
  */
 
 #ifndef XTC_CHAN_H
@@ -131,9 +136,8 @@ XTC_API int  xtc_chan_watch_recv(xtc_chan_watch_t *c, void **out);
 typedef struct xtc_chan_mpmc xtc_chan_mpmc_t;
 
 /*
- * Bounded multi-producer multi-consumer queue.  M7.5 ships a
- * mutex-protected ring; the lock-free Vyukov variant is a future
- * optimisation.  Out-of-capacity behaviour matches mpsc:
+ * Bounded multi-producer multi-consumer queue: a mutex-protected
+ * ring.  Out-of-capacity behaviour matches mpsc:
  * try_send returns XTC_E_AGAIN, callers register a waker if they
  * want to wait.
  *

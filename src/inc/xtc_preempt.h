@@ -6,10 +6,12 @@
  * src/inc/xtc_preempt.h
  *	Per-worker preemption timer seam.
  *
- *	Phase 0 (this): a per-thread CPU-time interval timer whose handler
- *	records a tick.  No preemption yet -- the seam later phases build
- *	on.  OFF by default (nothing arms it unless xtc_preempt_arm is
- *	called); the cooperative fast path is unchanged when unused.
+ *	A per-thread CPU-time interval timer whose handler records a
+ *	tick.  A fiber that calls xtc_yield_if_due() yields at the next
+ *	tick; nothing is preempted involuntarily (that is
+ *	xtc_preempt_involuntary.h, experimental).  OFF by default
+ *	(nothing arms it unless xtc_preempt_arm is called); the
+ *	cooperative fast path is unchanged when unused.
  */
 
 #ifndef XTC_PREEMPT_H
@@ -51,12 +53,12 @@ XTC_API int      xtc_preempt_disarm(void);
  * platform, 0 otherwise (arm returns NOSYS then). */
 XTC_API int      xtc_preempt_supported(void);
 
-/* Total timer ticks this thread has observed since arming (Phase 0
- * seam-works metric / telemetry). */
+/* Total timer ticks this thread has observed since arming
+ * (telemetry). */
 XTC_API uint64_t xtc_preempt_ticks(void);
 
 /* 1 if a timer tick fired and is unconsumed; consumes (clears) it.
- * Phase 1 consults this at safe points to decide whether to yield. */
+ * xtc_yield_if_due() consults this to decide whether to yield. */
 XTC_API int      xtc_preempt_tick_pending(void);
 
 /*
