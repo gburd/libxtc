@@ -19,10 +19,10 @@ systems -- Redis, SQLite, Kafka, Seastar/Tina, PostgreSQL -- rebuilt on
 libxtc. Each server has its own page below covering **the software that
 inspired it**, how the libxtc version is **similar and different**, **how
 it works**, and the **advantages and challenges** of building it on
-libxtc. The standalone teaching examples (01--04, 10, 17--19) are built
-**and run** by `make check` itself, and the larger systems (06 sqlxtc,
-07 kaka, 11 lorb) are built and exercised by the CI `examples` job -- so
-none of it rots.
+libxtc. The standalone teaching examples (01--04, 10, 17--19) and 20
+jobq are built **and run** by `make check` itself, and the larger
+systems (06 sqlxtc, 07 kaka, 11 lorb) are built and exercised by the CI
+`examples` job -- so none of it rots.
 (08 tnt binds a fixed TCP port and is timing-fragile, so it is built but not
 run automatically; see its target comment in `dist/Makefile.in`.)
 
@@ -125,6 +125,18 @@ log lines, and HyperLogLog sketches merged at the end; `19_edgeacl` serves
 an IP access table from an `xtc_cskip` read under RCU on four loops while a
 feed rewrites it, with per-session `xtc_cfg` settings.  Each prints
 deterministic output that `make check` compares with a recorded copy.
+
+## Simulation testing your own program (20)
+
+[20_jobq]({{ '/examples/jobq/' | relative_url }}) is a job queue with
+leases and fencing tokens, plus the deterministic simulation test that
+hunts its bugs, built on the installed `xtc_sim.h` alone.  The same
+service runs on real threads and under the simulator.  The harness draws
+a fault mix per seed, runs a nemesis that kills processes and cuts loops
+off the network, checks the service's invariants at quiescence, and runs
+every seed twice to prove the replay.  Three planted bugs are each caught
+within seven seeds.  It is the template for testing your own program the
+way libxtc tests itself.
 
 ## Reading suggestion
 

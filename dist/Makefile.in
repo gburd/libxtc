@@ -1092,7 +1092,7 @@ soak-mem: soak_mem_bound
 # -------------------------------------------------------------------------
 # Examples -- self-contained demos.
 # -------------------------------------------------------------------------
-examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker tnt_echo 17_checkout 18_clickstream 19_edgeacl
+examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker tnt_echo 17_checkout 18_clickstream 19_edgeacl 20_jobq
 
 # check-examples: BUILD and RUN the standalone teaching examples as part of
 # `make check`.  Previously `make check` did not build examples at all and
@@ -1120,7 +1120,7 @@ examples: 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_brea
 # (The TLS doc snippet, docs/_includes/snippets/14_tls_echo.c, is gated by
 # test/docs/test_doc_snippets.sh like every other snippet; that gate links
 # the build's XTC_TLS_LIBS.)
-check-examples: check-continuous-batching check-gpu-batching check-hetero-batching check-l2book 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker tnt_echo usdt_convoy 17_checkout 18_clickstream 19_edgeacl
+check-examples: check-continuous-batching check-gpu-batching check-hetero-batching check-l2book check-jobq 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo 10_circuit_breaker tnt_echo usdt_convoy 17_checkout 18_clickstream 19_edgeacl
 	@rm -f check-skips-examples.txt; \
 	for t in 01_hello 02_pingpong 03_supervised_app 04_lockmgr_demo \
 	          10_circuit_breaker 'usdt_convoy convoy' 'usdt_convoy fixed' \
@@ -1156,6 +1156,67 @@ check-l2book: $(STATIC_LIB)
 	    { echo "  [examples] FAIL: 16_l2book (make -C examples/16_l2book check)"; exit 1; }; \
 	$(MAKE) -C $(srcdir)/../examples/16_l2book clean >/dev/null; \
 	echo "  [examples] OK: 16_l2book engine tests + venue self-test"
+
+# examples/20_jobq: a job queue with leases and fencing tokens, and its own
+# deterministic simulation test (dst.c, the public xtc_sim.h only).  The
+# service runs once on real threads (20_jobq), then the harness runs 300
+# seeds, each twice (about 1 s).  The harness needs a simulation library:
+# in a --with-io-backend=sim build that is this one; otherwise it is built
+# in jobq-sim/ (configured once, then rebuilt incrementally) with this
+# build's compiler and CFLAGS, so an ASan or UBSan build simulates under
+# the sanitizer too.  check-jobq-sweep runs a longer sweep:
+#   make check-jobq-sweep JOBQ_SEEDS=100000 JOBQ_BASE=0
+JOBQ_DIR   = $(srcdir)/../examples/20_jobq
+JOBQ_SRCS  = $(JOBQ_DIR)/jobq.c $(JOBQ_DIR)/jobq.h
+JOBQ_SEEDS = 20000
+JOBQ_BASE  = 0
+
+20_jobq: $(JOBQ_DIR)/main.c $(JOBQ_SRCS) $(STATIC_LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) \
+		-o $@ $(JOBQ_DIR)/main.c $(JOBQ_DIR)/jobq.c \
+		$(STATIC_LIB) $(LDFLAGS) $(LIBS)
+
+.PHONY: 20_jobq_dst check-jobq check-jobq-sweep
+20_jobq_dst: $(JOBQ_DIR)/dst.c $(JOBQ_SRCS) $(STATIC_LIB)
+	@if grep -q '^#define XTC_IO_BACKEND_SIM 1' xtc_config.h; then \
+		sim=.; \
+	else \
+		sim=jobq-sim; \
+		if [ ! -f $$sim/Makefile ]; then \
+			mkdir -p $$sim && ( cd $$sim && CC='$(CC)' \
+			    CFLAGS='$(SNIPPET_SAN_CFLAGS)' \
+			    LDFLAGS='$(SNIPPET_SAN_LDFLAGS)' \
+			    $(abs_top_srcdir)/configure --with-io-backend=sim \
+			    --with-tls=none --without-liburing \
+			    --enable-diagnostic >configure.log 2>&1 ) || \
+			{ echo "  [examples] FAIL: 20_jobq: the simulation" \
+			    "library did not configure ($$sim/configure.log)"; \
+			    $(RM) $$sim/Makefile; exit 1; }; \
+		fi; \
+		$(MAKE) -C $$sim libxtc.a >$$sim/make.log 2>&1 || \
+		    { echo "  [examples] FAIL: 20_jobq: the simulation" \
+		    "library did not build ($$sim/make.log)"; exit 1; }; \
+	fi; \
+	$(CC) -std=c11 -D_GNU_SOURCE $(SNIPPET_SAN_CFLAGS) -I$$sim \
+	    -I$(srcdir)/../src/inc -o $@ $(JOBQ_DIR)/dst.c $(JOBQ_DIR)/jobq.c \
+	    $$sim/libxtc.a $(SNIPPET_SAN_LDFLAGS) -pthread $(LIBS)
+
+check-jobq: 20_jobq 20_jobq_dst
+	@./20_jobq || { echo "  [examples] FAIL: 20_jobq exited non-zero"; \
+	    exit 1; }; \
+	./20_jobq_dst 0 300 >20_jobq_dst.out 2>&1 || \
+	    { cat 20_jobq_dst.out; \
+	    echo "  [examples] FAIL: 20_jobq_dst (the seed above replays it)"; \
+	    exit 1; }; \
+	grep -q '^OK: 300 seeds' 20_jobq_dst.out || \
+	    { cat 20_jobq_dst.out; \
+	    echo "  [examples] FAIL: 20_jobq_dst did not simulate"; exit 1; }; \
+	$(RM) 20_jobq_dst.out; \
+	sh $(srcdir)/../examples/check_help.sh ./20_jobq ./20_jobq_dst || exit 1; \
+	echo "  [examples] OK: 20_jobq on threads + 300 DST seeds, each replayed"
+
+check-jobq-sweep: 20_jobq_dst
+	./20_jobq_dst $(JOBQ_BASE) $(JOBQ_SEEDS)
 
 # Without the examples submodule (configure says so): skip, and say what.
 .PHONY: check-examples-skip
@@ -2549,6 +2610,8 @@ clean:
 	$(RM) check-skips-c.txt check-skips-sh.txt check-skips-pbt.txt check-skips-examples.txt .tests-c.out .tests-sh.out .tests-c.rc .tests-sh.rc
 	$(RM) soak_mem_bound continuous_batching bench_continuous_batching mandel hetero usdt_convoy
 	$(RM) 17_checkout 18_clickstream 19_edgeacl 17_checkout.out 18_clickstream.out 19_edgeacl.out
+	$(RM) 20_jobq 20_jobq_dst 20_jobq_dst.out
+	$(RM) -r jobq-sim
 	$(RM) $(FUZZ_BINS)
 	$(RM) $(SHARED_LIB_REAL) $(SHARED_LIB_SONAME) $(SHARED_LIB_LINKNAME)
 	$(RM) libxtc.exp xtc_probes.o xtc_probes_dtrace.h

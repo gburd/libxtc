@@ -80,6 +80,15 @@ surface is `xtc_sim(3)`.
 
 {% include snippet.html file="20_dst_app.c" region="full" %}
 
+The [jobq example]({{ '/examples/jobq/' | relative_url }}) takes this all
+the way, for a job queue with leases and fencing tokens.  Its harness
+gives each seed a fault mix and a nemesis that kills processes and cuts
+loops off the network.  It checks safety and liveness invariants at
+quiescence, measures the fault space each sweep covered, and carries
+three planted bugs that each fail within seven seeds.  Its page lists
+the steps to adopt DST for your own program and the simulator's limits
+to design around.
+
 DST has already found and fixed real library bugs -- a lock-manager
 bad-free reachable only when a lock was held at destroy, a cross-thread
 wake race, buffer-manager pin races in the sqlxtc example. Those are in

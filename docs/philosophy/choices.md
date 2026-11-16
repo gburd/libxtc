@@ -80,7 +80,9 @@ deterministic simulation: the whole concurrent system replays from a
 seed under a pessimal scheduler with injected partitions, latency, disk
 faults, and crashes. A failing seed reproduces exactly, every time.
 Sanitizers and stress tests still run -- as a complement, not the
-primary defense.
+primary defense.  The simulator is not only libxtc's own: `xtc_sim.h` is
+installed, and the [jobq example]({{ '/examples/jobq/' | relative_url }})
+shows an application testing itself with it.
 
 ## A native library, not a framework or a language
 
