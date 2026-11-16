@@ -210,7 +210,13 @@ XTC_API int  xtc_arwlock_unlock(xtc_arwlock_t *r);
 typedef struct xtc_rwlock xtc_rwlock_t;
 
 /*
- * Reader/writer lock with writer priority (writers don't starve).
+ * Reader/writer lock with writer priority (writers don't starve).  A
+ * contended acquire BLOCKS THE OS THREAD (pthread mutex and condition
+ * variable); it does not park the fiber.  So two procs on one loop
+ * deadlock if one waits while the other holds the lock across a park
+ * (a sleep, I/O, a receive): the waiter blocks the thread the holder
+ * needs to run.  On a loop use xtc_arwlock, the parking reader/writer
+ * lock above; this one is for plain threads.
  *
  * PUBLIC: int  xtc_rwlock_create __P((xtc_rwlock_t **));
  * PUBLIC: void xtc_rwlock_destroy __P((xtc_rwlock_t *));
