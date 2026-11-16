@@ -13,6 +13,7 @@ Reference material to use after the [Guide]({{ '/guide/' | relative_url }}):
 - [Locks and synchronization]({{ '/reference/locks/' | relative_url }})
 - [Manual pages]({{ '/reference/man-pages/' | relative_url }})
 - [ABI stability]({{ '/reference/abi-stability/' | relative_url }})
+- [Deprecations]({{ '/reference/deprecations/' | relative_url }})
 - [Known issues]({{ '/reference/known-issues/' | relative_url }})
 - [Security policy](https://codeberg.org/gregburd/libxtc/src/branch/main/SECURITY.md)
   -- supported versions, private reporting, the disclosure timeline.

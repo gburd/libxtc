@@ -469,7 +469,9 @@ lib_sources += files('src/io/tls_' + tls_backend + '.c')
 # Windows).  -D_DEFAULT_SOURCE is added globally by configure so public
 # headers see POSIX under -std=c11.  -Wpedantic to match the autotools warn
 # set; the .S files are excluded from -Wpedantic by the assembler anyway.
-xtc_c_args = ['-DXTC_BUILDING_DLL', '-D_DEFAULT_SOURCE', '-Wpedantic']
+xtc_c_args = ['-DXTC_BUILDING_DLL', '-D_DEFAULT_SOURCE', '-Wpedantic',
+  # No deprecated libxtc name in the tree (docs/deprecations.md).
+  '-Werror=deprecated-declarations']
 
 build_shared = get_option('shared')
 # A sim build is the deterministic-simulation test library: it installs as

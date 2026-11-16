@@ -70,6 +70,35 @@ extern "C" {
 #  define XTC_DEPRECATED(msg)
 #endif
 
+/*
+ * XTC_DEPRECATED_ENUM(msg) -- the same mark on one enumerator, written
+ * after its name: `XTC_OLD XTC_DEPRECATED_ENUM("use XTC_NEW") = XTC_NEW`.
+ * gcc and clang only; MSVC has no per-enumerator form, so there it is a
+ * plain alias.
+ *
+ * XTC_DEPRECATED_MACRO(pragma) -- mark a #define alias: write
+ * `XTC_DEPRECATED_MACRO(clang deprecated(XTC_OLD, "use XTC_NEW"))` after
+ * the #define.  Only clang can mark a macro (-Wdeprecated-pragma); every
+ * other compiler accepts the alias silently.
+ */
+#if defined(XTC_NO_DEPRECATION_WARNINGS)
+#define XTC_DEPRECATED_ENUM(msg)
+#elif defined(__GNUC__) || defined(__clang__)
+#define XTC_DEPRECATED_ENUM(msg) __attribute__((deprecated(msg)))
+#else
+#define XTC_DEPRECATED_ENUM(msg)
+#endif
+
+#if !defined(XTC_NO_DEPRECATION_WARNINGS) && defined(__clang__) &&             \
+    defined(__has_warning)
+#if __has_warning("-Wdeprecated-pragma")
+#define XTC_DEPRECATED_MACRO(p) _Pragma(#p)
+#endif
+#endif
+#ifndef XTC_DEPRECATED_MACRO
+#define XTC_DEPRECATED_MACRO(p)
+#endif
+
 #ifdef __cplusplus
 }
 #endif

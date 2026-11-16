@@ -87,6 +87,26 @@ echo.
 echo BUILD OK: xtc.lib + smoke.exe
 smoke.exe
 
+rem --- 4a. Deprecated-name bridges (test/dist/test_deprecated.sh on POSIX):
+rem         test_deprecated_bridge.c, the one file that uses the old 2.x
+rem         names, builds under /WX with XTC_NO_DEPRECATION_WARNINGS and
+rem         runs; without the define (no /WX) it still compiles, the
+rem         __declspec(deprecated) marks reported as C4996 warnings. ---
+echo [4a/5] cl test_deprecated_bridge.exe
+cl %CFLAGS% /DXTC_NO_DEPRECATION_WARNINGS /Fe:test_deprecated_bridge.exe ^
+   "%XTC_SRC%\test\abi\test_deprecated_bridge.c" ^
+   xtc.lib ws2_32.lib ntdll.lib dbghelp.lib
+if errorlevel 1 goto :fail
+test_deprecated_bridge.exe
+if errorlevel 1 goto :fail
+set CFLAGS_NOWX=%CFLAGS:/WX=%
+cl %CFLAGS_NOWX% /c /Fo:bridge_warn.obj "%XTC_SRC%\test\abi\test_deprecated_bridge.c" > bridge_warn.log 2>&1
+if errorlevel 1 (
+  call :dump_log bridge_warn.log
+  goto :fail
+)
+echo   [deprecated] OK: bridges run, and compile with their marks on (no /WX)
+
 rem --- 4b. C++ coexistence (test/dist/test_header_cxx.sh on POSIX): each
 rem         installed header compiles alone as C++ (cl /Tp), and a C++ program
 rem         that includes all of them links against xtc.lib and runs.

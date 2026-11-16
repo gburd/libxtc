@@ -319,8 +319,20 @@ It expands to `__attribute__((deprecated(msg)))` on gcc and clang,
 `[[deprecated(msg)]]` in C++14 and later, and
 `__declspec(deprecated(msg))` on MSVC; defining
 `XTC_NO_DEPRECATION_WARNINGS` before including any header silences it.
-`test/dist/test_deprecated.sh` (in `make check`) proves a use compiles,
-warns with the message in C and C++, and can be silenced.
+`XTC_DEPRECATED_ENUM(msg)` marks one enumerator (gcc and clang) and
+`XTC_DEPRECATED_MACRO(clang deprecated(NAME, msg))` marks a `#define`
+alias (clang only).  `test/dist/test_deprecated.sh` (in `make check`)
+proves a use compiles, warns with the message in C and C++, and can be
+silenced.
+
+A renamed function keeps its old symbol, in the version node it shipped
+in, as an out-of-line wrapper that calls the new one: a binary built
+against an older 2.x keeps linking against a newer 2.x, while a rebuild
+warns.  The library, its tests and its examples build with
+`-Werror=deprecated-declarations`; the one exception is
+`test/abi/test_deprecated_bridge.c`, which calls every bridge once.
+[Deprecations]({{ '/reference/deprecations/' | relative_url }}) lists
+every deprecated name, its replacement, and the removal (3.0).
 
 The lifecycle:
 
@@ -333,7 +345,8 @@ The lifecycle:
 | 5. Removed | No earlier than the next MAJOR after the minor that deprecated it. | Symbol absent; build error. |
 
 An experimental-tier symbol may skip straight from live to removed in
-any minor.  Nothing is deprecated as of 2.0.
+any minor.  Nothing was deprecated in 2.0 or 2.1; 2.2 deprecates the
+names in the rename map, all removed in 3.0.
 
 ## No capability query API
 

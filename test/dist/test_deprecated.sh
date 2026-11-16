@@ -38,4 +38,48 @@ if [ -n "$cxx" ]; then
 		exit 1
 	}
 fi
+
+# The bridge test (test/abi/test_deprecated_bridge.c) is the one file that
+# uses deprecated libxtc names.  Built without XTC_NO_DEPRECATION_WARNINGS,
+# every old name in docs/deprecations.md must warn there, except a row
+# marked "macro" (only clang can mark a macro); a row marked "frozen" (an
+# alias with no warning) must NOT warn.  A missing warning means the old
+# name lost its mark, or the bridge test does not use it.
+br="$SRC/test/abi/test_deprecated_bridge.c"
+tbl="$SRC/docs/deprecations.md"
+if [ -n "${XTC_BUILD_DIR:-}" ] && [ -f "$XTC_BUILD_DIR/libxtc.a" ]; then
+	LC_ALL=C $CC -std=c11 -D_GNU_SOURCE -Wall -I"$SRC/src/inc" \
+		-I"$XTC_BUILD_DIR" -c -o "$work/bridge.o" "$br" 2> "$work/warn4" || {
+		echo "  [deprecated] FAIL: the bridge test does not compile" >&2
+		cat "$work/warn4" >&2
+		exit 1
+	}
+	# Old-name column (backticks and a trailing () stripped), Kind column.
+	sed -n '/<!-- renames:begin -->/,/<!-- renames:end -->/p' "$tbl" |
+		awk -F'|' 'NR > 3 && NF > 4 {
+			n = $2; gsub(/[` ]/, "", n); sub(/[(][)]$/, "", n)
+			k = $4; gsub(/ /, "", k); print n, k }' > "$work/old"
+	nold=0
+	bad=""
+	while read -r o k; do
+		nold=$((nold + 1))
+		case "$k" in
+		*frozen*)
+			if grep -qF "'$o' is deprecated" "$work/warn4"; then
+				bad="$bad $o(frozen-but-warns)"
+			fi ;;
+		*macro*) ;;
+		*)
+			grep -qF "'$o' is deprecated" "$work/warn4" ||
+				bad="$bad $o" ;;
+		esac
+	done < "$work/old"
+	if [ -n "$bad" ]; then
+		echo "  [deprecated] FAIL: docs/deprecations.md rows whose warning" \
+			"in test_deprecated_bridge.c is wrong:$bad" >&2
+		exit 1
+	fi
+	echo "  [deprecated] OK: the $nold old names in docs/deprecations.md" \
+		"warn in the bridge test (frozen ones do not)"
+fi
 echo "  [deprecated] OK: XTC_DEPRECATED warns with its message (C${cxx:+, C++}), and is silenceable"
