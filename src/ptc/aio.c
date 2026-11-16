@@ -235,6 +235,11 @@ aio_do(int op, int fd, void *buf, uint32_t len, int64_t off)
 	xtc_aio_t    a;
 	int          rc;
 
+	/* POSIX reports EBADF for a negative fd; the Windows CRT calls for
+	 * one (_get_osfhandle, _commit, _read) end the process instead. */
+	if (fd < 0)
+		return XTC_E_SYS(EBADF);
+
 #if defined(XTC_DIAGNOSTIC)
 	/* Direct I/O requires the buffer address, file offset and transfer
 	 * length to meet the device's alignment.  In a DIAGNOSTIC build,
