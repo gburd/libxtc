@@ -8,11 +8,11 @@
  *	readiness, poll for ready events, wake the poller from another
  *	thread.
  *
- *	Exactly one backend is compiled in per binary (configure-time).
- *	M2 ships poll(2) and epoll; later milestones add io_uring,
- *	kqueue, IOCP, Solaris event ports, and AIX pollset.
- *
- *	See M2_CLAIMS.md.
+ *	Exactly one backend is compiled in per binary (configure-time):
+ *	io_uring, epoll, kqueue, poll(2), select(2), IOCP, Solaris event
+ *	ports, AIX pollset, or the deterministic simulator.  The
+ *	installed xtc_version.h names it (XTC_IO_BACKEND_*).  See
+ *	xtc_io(3).
  */
 
 #ifndef XTC_IO_H
@@ -31,7 +31,7 @@ typedef struct xtc_io xtc_io_t;
 
 /*
  * Event flag bits.  Stable across minor versions; new flags appear
- * at higher bit positions only (PLAN.md (S)18).
+ * at higher bit positions only.
  */
 #define XTC_IO_READABLE  0x01u
 #define XTC_IO_WRITABLE  0x02u

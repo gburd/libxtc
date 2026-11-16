@@ -4,12 +4,12 @@
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_chash.h
- *	RCU-protected concurrent hash table.  M13a's primary xtc_rcu
- *	consumer: chained buckets, an array of per-bucket mutexes for
- *	writers (insert/remove/put serialize only within their own
- *	bucket -- disjoint buckets proceed fully in parallel), and
- *	xtc_rcu for readers, so xtc_chash_get takes NO lock at all --
- *	it is wait-free, bounded only by the chain length it walks.
+ *	RCU-protected concurrent hash table: chained buckets, an array
+ *	of per-bucket mutexes for writers (insert/remove/put serialize
+ *	only within their own bucket -- disjoint buckets proceed fully
+ *	in parallel), and xtc_rcu for readers, so xtc_chash_get takes
+ *	NO lock at all -- it is wait-free, bounded only by the chain
+ *	length it walks.
  *
  *	Storage convention: caller-owned `void *` key and value,
  *	same as xtc_pdict / xtc_chan (the store keeps the pointers

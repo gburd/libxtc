@@ -23,7 +23,7 @@
  *	Storage model:
  *	  - Single global registry keyed by name.
  *	  - Mutex-protected list (linear scan; suitable for ~hundreds
- *	    of vars; M11.5 swaps in xtc_chash for thousands).
+ *	    of vars).
  *	  - Each var holds its declared type + current value via union.
  *
  *	Per-session / per-database scoping (the override-stack model) is

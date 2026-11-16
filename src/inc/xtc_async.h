@@ -4,11 +4,10 @@
  * Use of this source code is governed by the ISC License.
  *
  * src/inc/xtc_async.h
- *	The L2 coroutine surface.  Stackful fibers via ucontext (M4),
+ *	The L2 coroutine surface: stackful fibers (fcontext assembly
+ *	where there is a port, else ucontext; Win32 fibers on Windows),
  *	protothreads (always available), and the macros that let user
- *	code write sync-looking async logic.
- *
- *	See M4_CLAIMS.md.
+ *	code write sync-looking async logic.  See xtc_async(3).
  */
 
 #ifndef XTC_ASYNC_H
@@ -93,13 +92,13 @@ XTC_API uint64_t xtc_yield_due_count(const xtc_loop_t *loop);
 
 /*
  * Default fiber stack size in bytes.  Configurable per process via
- * xtc_set_stack_size().  M4 default: 64 KiB.
+ * xtc_set_stack_size().  Default: 64 KiB.
  */
 XTC_API size_t   xtc_stack_size(void);
 XTC_API int      xtc_set_stack_size(size_t bytes);
 
 /*
- * Stack-memory reclamation on park (Lever S1, M_PREEMPTION section 8).
+ * Stack-memory reclamation on park.
  *
  * A parked stackful fiber commits only the pages it touched but its
  * mmap'd stack RESERVES the full configured size.  With reclaim ON, a
@@ -131,13 +130,12 @@ XTC_API uint64_t xtc_stack_reclaim_count(void);
 
 /*
  * XTC_COOP_REGION { ... } --
- *	A block that is guaranteed to run to completion without the
- *	scheduler interleaving another task between its statements.
- *	M4 implementation: the macro is a documentation marker only,
- *	because the M4 scheduler is single-threaded and never
- *	preempts a running coroutine outside an explicit yield point.
- *	M5 (multi-loop) hardens this by setting a per-task "do not
- *	steal" flag for the duration of the block.
+ *	A documentation marker for a block that contains no yield point,
+ *	so no other task on the loop runs between its statements.  It
+ *	expands to nothing: a fiber is never preempted outside a yield
+ *	point unless involuntary preemption (xtc_preempt_involuntary.h)
+ *	is armed, and it does not stop another loop's thread from running
+ *	at the same time.
  */
 #define XTC_COOP_REGION  /* see xtc_async(3) */
 

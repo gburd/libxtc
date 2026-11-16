@@ -6,11 +6,9 @@
  * of this distribution.
  *
  * src/inc/xtc_net.h
- *	Networking helpers built on top of xtc_io.  These are the
- *	first slice of M19.1: TCP knobs + Unix domain sockets +
- *	cred-passing.  Future passes will add accept scaling
- *	(SO_REUSEPORT distribution), TCP_USER_TIMEOUT, congestion
- *	algorithm selection, etc.
+ *	Networking helpers built on top of xtc_io: TCP and UDP sockets,
+ *	TCP knobs, Unix domain sockets, credential passing, DNS, and
+ *	length-prefixed frames.
  *
  *	The socket family is identified by xtc_net_family_t; xtc owns
  *	the fd and exposes it for direct use with xtc_io_reg_fd /

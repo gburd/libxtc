@@ -7,9 +7,10 @@
  * of this distribution.
  *
  * src/inc/xtc.h
- *	The single public header for the xtc library.
- *	See M0_CLAIMS.md [C4]: including this header alone is sufficient
- *	to use every M0-public API.
+ *	The base public header: version, error codes, xtc_strerror, the
+ *	allocator, clocks, environment, random numbers, strings and CPU
+ *	topology.  Every other public header includes it.  Each subsystem
+ *	has its own header (xtc_loop.h, xtc_proc.h, ...).
  */
 
 #ifndef XTC_H
@@ -136,7 +137,6 @@ XTC_API int xtc_err_from_errno(int neg_or_pos_errno);
  * xtc_version_string --
  *	Return the library version as a NUL-terminated SemVer 2.0 string.
  *	The pointer is to static storage; the caller must not free it.
- *	See M0_CLAIMS.md [C1].
  */
 XTC_API const char *xtc_version_string(void);
 
@@ -145,7 +145,6 @@ XTC_API const char *xtc_version_string(void);
  *	Decompose the version into three integers.
  *	On success returns XTC_OK and writes *major, *minor, *patch.
  *	On NULL out-pointers returns XTC_E_INVAL.
- *	See M0_CLAIMS.md [C2].
  */
 XTC_API int xtc_version_components(int *major, int *minor, int *patch);
 
@@ -158,7 +157,7 @@ XTC_API int xtc_version_components(int *major, int *minor, int *patch);
  *	A code in the system-error band (XTC_E_SYS(e)) reads
  *	"system error: " and the C library's text for e; that string is
  *	per thread and valid until the thread's next xtc_strerror call.
- *	See M0_CLAIMS.md [C6].
+ *	xtc_strerror(3) lists every code and its text.
  */
 XTC_API const char *xtc_strerror(int xtc_err);
 

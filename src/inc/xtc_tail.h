@@ -41,8 +41,8 @@ extern "C" {
 #endif
 
 /* Event sources, an enable mask (dial9-style: pay only for what you turn
- * on).  Phase 1 implements SCHED; the others are reserved so the mask is
- * stable across the staged build-out. */
+ * on).  SCHED, MSG and APP record events; IO and OS are reserved, so the
+ * mask is stable when they are added. */
 #define XTC_TAIL_SCHED  (1u << 0)   /* proc spawn/exit/wake/run */
 #define XTC_TAIL_MSG    (1u << 1)   /* send/recv/mailbox depth */
 #define XTC_TAIL_IO     (1u << 2)   /* reserved: fd reg/del/completion */

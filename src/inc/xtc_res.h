@@ -55,7 +55,7 @@ typedef enum xtc_res_kind {
 
 /*
  * Caps.  Zero means "no cap" (unbounded; debug only).  Defaults
- * pick reasonable values for a 4-loop M5 executor on a workstation.
+ * pick reasonable values for a 4-loop executor on a workstation.
  */
 typedef struct xtc_res_caps {
 	size_t  size;             /* sizeof(xtc_res_caps_t): XTC_RES_CAPS_DEFAULT */
