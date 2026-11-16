@@ -28,6 +28,8 @@
 #include "xtc_tail.h"     /* SCHED source: the aio park/resume pair */
 #include "tail_int.h"     /* __xtc_tail_emit / __xtc_tail_on (internal) */
 #include "xtc_probes.h"
+#include "os_sharp.h" /* __os_env_get */
+#include "sim_int.h"  /* __xtc_sim_active */
 
 #include <errno.h>
 #include <string.h>
@@ -45,7 +47,6 @@ extern int __xtc_dio_is_direct(int fd);
 #  include <sys/uio.h>     /* preadv/pwritev, struct iovec */
 #  include <limits.h>      /* IOV_MAX */
 #endif
-#include <stdlib.h>        /* getenv */
 
 #ifndef IOV_MAX
 #  define IOV_MAX 1024
@@ -59,10 +60,13 @@ extern int __xtc_dio_is_direct(int fd);
  * with io_uring): a consumer's "write once, runs as AIO everywhere"
  * expectation is only credible if the non-native path is actually
  * tested where the tests run.  0 = auto (native where available),
- * 1 = always offload.  Resolved from XTC_AIO_FORCE_OFFLOAD on first use
- * and overridable via __xtc_aio_force_offload().
+ * 1 = always offload.  __xtc_aio_force_offload() sets it; until then it
+ * comes from XTC_AIO_FORCE_OFFLOAD, read on first use, but never inside
+ * a simulation run: the environment is host state the seed does not
+ * decide, so there it is 0 unless the test set it.
  */
-static int g_force_offload = -1; /* -1 = unresolved */
+static int g_force_offload = -1; /* -1 = not set: use the environment */
+static int g_force_env = -1;     /* XTC_AIO_FORCE_OFFLOAD; -1 = unread */
 
 /* PUBLIC (internal): set by tests / tuning to force the offload path. */
 void
@@ -85,11 +89,20 @@ aio_offload_forced(void)
 	 * store is harmless.  Relaxed suffices -- there is no other state to
 	 * order against, only this flag's own visibility.
 	 */
+	char e[2];
 	int v = xtc_atomic_load_i32(&g_force_offload, xtc_mo_relaxed);
+	if (v >= 0)
+		return v;
+	if (__xtc_sim_active())
+		return 0;
+	v = xtc_atomic_load_i32(&g_force_env, xtc_mo_relaxed);
 	if (v < 0) {
-		const char *e = getenv("XTC_AIO_FORCE_OFFLOAD");
-		v = (e != NULL && e[0] == '1') ? 1 : 0;
-		xtc_atomic_store_i32(&g_force_offload, v, xtc_mo_relaxed);
+		v = 0;
+		if (__os_env_get("XTC_AIO_FORCE_OFFLOAD", e, sizeof e) ==
+		        XTC_OK &&
+		    e[0] == '1')
+			v = 1;
+		xtc_atomic_store_i32(&g_force_env, v, xtc_mo_relaxed);
 	}
 	return v;
 }

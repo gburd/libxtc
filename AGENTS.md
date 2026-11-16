@@ -475,7 +475,7 @@ single line carries a `/* XTC_RAW_OK: reason */` (or the existing
 
 1. LIBRARY code uses the `__os_*` wrappers, never the raw wrapped
    primitives (malloc/calloc/realloc/free/strdup, pthread_create,
-   clock_gettime/gettimeofday/nanosleep/usleep).  The wrappers add the
+   clock_gettime/gettimeofday/nanosleep/usleep, getenv).  The wrappers add the
    allocator hook (embedder accounting), the async-signal-unsafe
    bracket, and portability; raw calls bypass all three (and a raw
    malloc handed to a caller who frees it with xtc_free/__os_free is a

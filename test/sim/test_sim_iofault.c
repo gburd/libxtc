@@ -157,6 +157,13 @@ main(void)
 	long h1 = 0, h2 = 0;
 	uint64_t s1 = 0, s2 = 0;
 
+	/* The environment is host state the seed does not decide, so it
+	 * must not change a run.  XTC_AIO_FORCE_OFFLOAD=1 used to be read
+	 * (with a raw getenv) inside the run and sent every op down the
+	 * offload path, which runs it inline and so never deferred or
+	 * faulted it: the run below saw no fault. */
+	(void)setenv("XTC_AIO_FORCE_OFFLOAD", "1", 1);
+
 	rc = run_once(0x10FA, &d1, &h1, &f1, &s1);
 	if (rc != XTC_OK) {
 		printf("FAIL: io-fault run did not quiesce (rc=%d) -- "
