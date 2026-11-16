@@ -206,7 +206,8 @@ A struct or union argument does not compile; a function pointer converts
 to a data pointer, which ISO C leaves undefined (and
 .Fl Wpedantic
 warns).
-gcc gives a bit-field a type of its own, which gcc 14 rejects: cast it.
+A bit-field no wider than an int prints as its value;
+gcc gives a wider one a type of its own: cast it.
 .Pp
 A spec after a colon changes the format:
 .Bl -tag -width "{:08x}" -offset indent

@@ -175,8 +175,8 @@ XTC_API int  xtc_log_drop_count(const xtc_log_t *log);
  * (with xtc_proc.h) as <loop_id.local_id.gen>.  A character literal is an
  * int in C, so 'x' prints 120.  A struct or union does not compile, and a
  * function pointer converts to a data pointer, which ISO C leaves
- * undefined (-Wpedantic warns).  gcc gives a bit-field a type of its
- * own, which gcc 14 rejects (and older gcc warns about): cast it.
+ * undefined (-Wpedantic warns).  A bit-field no wider than an int prints
+ * as its value; gcc gives a wider one a type of its own: cast it.
  *
  * A spec after a colon changes the format: {:x} {:X} {:o} hex and octal
  * (a negative integer in its own width's two's complement), {:p} as an
@@ -333,7 +333,21 @@ XTC__LOGARG_INTS(XTC__LOGARG_C_DEF)
 	    long double: xtc__logarg_mk_ld,                                    \
 	    char *: xtc__logarg_mk_s,                                          \
 	    const char *: xtc__logarg_mk_s,                                    \
-	    default: xtc__logarg_mk_p)(x)
+	    default: XTC__LOGARG_PROMOTED(x))(x)
+
+/*
+ * Not one of the types above: select on the type after the integer
+ * promotions.  cl matches an enum only by its own type, and gcc gives a
+ * bit-field one of its own; an enum, and a bit-field no wider than an
+ * int, promote to int or unsigned int.  Anything else (a pointer, an
+ * array) goes on to the pointer converter.  The operand is not
+ * evaluated.
+ */
+#define XTC__LOGARG_PROMOTED(x)                                                \
+	_Generic(1 ? (x) : (x),                                                \
+	    int: xtc__logarg_i,                                                \
+	    unsigned int: xtc__logarg_u,                                       \
+	    default: xtc__logarg_mk_p)
 
 /*
  * Count the arguments after the format (0 to 16) and pick XTC__LOGF_<n>.

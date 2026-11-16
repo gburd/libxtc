@@ -331,6 +331,7 @@ logf_open(xtc_log_level_t floor)
 }
 
 enum logf_color { LOGF_RED, LOGF_GREEN };
+struct logf_bits { unsigned u3 : 3; int s4 : 4; };
 
 /* Every integer typedef prints its value, at both extremes. */
 static MunitResult
@@ -349,10 +350,13 @@ test_logf_types(const MunitParameter p[], void *d)
 	ptrdiff_t pd = PTRDIFF_MIN;
 	intptr_t ip = INTPTR_MIN;
 	uintptr_t up = UINTPTR_MAX;
+#if !defined(_WIN32) /* the CRT has no pid_t */
 	pid_t pid = 12345;
+#endif
 	off_t off = -((off_t)1 << (8 * sizeof(off_t) - 2));
 	xtc_pid_t xp = { 7, 8, 0xFFFFFFFFFFFFFFFFull };
 	enum logf_color col = LOGF_GREEN;
+	struct logf_bits bits = { 5, -3 };
 	bool yes = true, no = false;
 	char ch = 'A';
 	unsigned char uch = 200;
@@ -380,14 +384,20 @@ test_logf_types(const MunitParameter p[], void *d)
 	(void)snprintf(exp, sizeof exp, "%zu %zd %td %jd %ju", z, sz, pd,
 	    (intmax_t)ip, (uintmax_t)up);
 	LOGF_IS(exp);
-	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{} {} {}", pid, off, xp);
-	(void)snprintf(exp, sizeof exp, "12345 %jd <7.8.18446744073709551615>",
+#if !defined(_WIN32)
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{}", pid);
+	LOGF_IS("12345");
+#endif
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{} {}", off, xp);
+	(void)snprintf(exp, sizeof exp, "%jd <7.8.18446744073709551615>",
 	    (intmax_t)off);
 	LOGF_IS(exp);
 
 	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{} {} {} {} {} {}", col, yes, no,
 	    ch, uch, sch);
 	LOGF_IS("1 1 0 65 200 -100");
+	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{} {}", bits.u3, bits.s4);
+	LOGF_IS("5 -3");
 	xtc_logf_to(g_logf_log, XTC_LOG_INFO, "{} {} {} {} {} {}", sh, ush, lg,
 	    ulg, llg, ullg);
 	LOGF_IS("-2 65535 -3 3 -9223372036854775808 18446744073709551615");
