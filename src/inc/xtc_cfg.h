@@ -53,6 +53,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef enum xtc_cfg_kind {
 	XTC_CFG_BOOL   = 1,
 	XTC_CFG_INT    = 2,
@@ -347,5 +351,9 @@ XTC_API int  xtc_cfg_ssn_set_string(xtc_cfg_session_t *s, const char *name,
                                     const char *v, xtc_cfg_source_t src);
 XTC_API int  xtc_cfg_ssn_set_enum(xtc_cfg_session_t *s, const char *name,
                                   int v, xtc_cfg_source_t src);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_CFG_H */

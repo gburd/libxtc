@@ -22,6 +22,10 @@
 #include "xtc_loop.h"
 #include "xtc_async.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_exec xtc_exec_t;
 
 /*
@@ -264,5 +268,9 @@ XTC_API void xtc_loop_set_stall_cb(xtc_loop_t *loop, xtc_stall_cb cb,
                                    void *user);
 XTC_API void xtc_exec_set_stall_budget(xtc_exec_t *exec, int64_t budget_ns);
 XTC_API uint64_t xtc_loop_stall_count(const xtc_loop_t *loop);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_EXEC_H */

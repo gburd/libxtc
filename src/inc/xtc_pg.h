@@ -29,6 +29,10 @@
 #include "xtc_proc.h"
 #include "xtc_reg.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * PUBLIC: int xtc_pg_join __P((xtc_reg_t *, const char *, xtc_pid_t));
  * PUBLIC: int xtc_pg_leave __P((xtc_reg_t *, const char *, xtc_pid_t));
@@ -65,5 +69,9 @@ XTC_API int xtc_pg_send(xtc_reg_t *reg, const char *group,
  * call.  Returns the number of members the message was sent to. */
 XTC_API int xtc_pg_send_owned(xtc_reg_t *reg, const char *group,
                               void *buf, size_t size);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_PG_H */

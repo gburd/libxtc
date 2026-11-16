@@ -49,6 +49,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_future  xtc_future_t;
 typedef struct xtc_promise xtc_promise_t;
 
@@ -192,5 +196,9 @@ XTC_API int  xtc_future_when_any(xtc_future_t **futs, int n,
  */
 XTC_API int  xtc_future_with_timeout(xtc_future_t *src, int64_t timeout_ns,
              xtc_future_t **out_fut);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_FUTURE_H */

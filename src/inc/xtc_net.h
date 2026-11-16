@@ -28,6 +28,14 @@
 
 #include "xtc.h"
 
+#if !defined(_WIN32)
+#include <sys/uio.h> /* struct iovec */
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef enum xtc_net_family {
 	XTC_NET_INET     = 0,
 	XTC_NET_INET6    = 1,
@@ -183,7 +191,6 @@ int xtc_net_recv_frame(int fd, void **out, size_t *out_len,
                        size_t max_len, int64_t timeout_ns);
 
 #if !defined(_WIN32)
-#include <sys/uio.h>    /* struct iovec */
 /*
  * PUBLIC: int xtc_net_send_framev __P((int, const struct iovec *, int));
  *
@@ -199,6 +206,10 @@ int xtc_net_recv_frame(int fd, void **out, size_t *out_len,
  * xtc_net_send_frame.  POSIX only.
  */
 XTC_API int xtc_net_send_framev(int fd, const struct iovec *iov, int iovcnt);
+#endif
+
+#ifdef __cplusplus
+}
 #endif
 
 #endif /* XTC_NET_H */

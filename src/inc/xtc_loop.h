@@ -17,6 +17,10 @@
 
 #include "xtc_io.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_loop  xtc_loop_t;
 typedef struct xtc_task  xtc_task_t;
 typedef struct xtc_timer xtc_timer_t;
@@ -150,5 +154,9 @@ XTC_API int  xtc_timer_cancel(xtc_timer_t *timer);
  * Returns XTC_OK, or XTC_E_INVAL for NULL.  Any thread.
  */
 XTC_API int  xtc_timer_release(xtc_timer_t *timer);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_LOOP_H */

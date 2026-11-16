@@ -51,6 +51,10 @@
 #include "xtc_loop.h"
 #include "xtc_future.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_dispatch_handle xtc_dispatch_handle_t;
 
 /*
@@ -106,5 +110,9 @@ XTC_API int  xtc_dispatch_cancel(xtc_dispatch_handle_t *h);
  * xtc_dispatch, or if xtc_dispatch_cancel was already called.
  */
 XTC_API void xtc_dispatch_handle_free(xtc_dispatch_handle_t *h);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_DISPATCH_H */

@@ -25,6 +25,10 @@
 #include "xtc.h"
 #include "xtc_loop.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Every blocking call below that parks a fiber (notify_wait,
  * sem_acquire, amutex_lock, arwlock_rdlock/wrlock, barrier_wait,
@@ -268,5 +272,9 @@ XTC_API int  xtc_gate_leave(xtc_gate_t *g);
 XTC_API int  xtc_gate_close(xtc_gate_t *g);
 XTC_API int  xtc_gate_drain(xtc_gate_t *g, int64_t timeout_ns);
 XTC_API int  xtc_gate_count(const xtc_gate_t *g);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_SYNC_H */

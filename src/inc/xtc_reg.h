@@ -23,6 +23,10 @@
 #include "xtc.h"
 #include "xtc_proc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_reg xtc_reg_t;
 
 /*
@@ -97,5 +101,9 @@ XTC_API int  xtc_svr_call_name(xtc_reg_t *r, const char *name,
  * return stops the walk.  Returns the number of members visited. */
 XTC_API int  xtc_reg_members(xtc_reg_t *r, const char *key,
                              int (*fn)(xtc_pid_t pid, void *user), void *user);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_REG_H */

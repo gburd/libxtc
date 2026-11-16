@@ -46,6 +46,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_counter xtc_counter_t;
 typedef struct xtc_gauge   xtc_gauge_t;
 typedef struct xtc_hist    xtc_hist_t;
@@ -146,5 +150,9 @@ XTC_API int       xtc_metrics_dump_prometheus(int fd);
  * internal log lines today.  Safe to call more than once.
  */
 XTC_API void      xtc_tuning_check(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_STATS_H */

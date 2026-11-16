@@ -31,6 +31,10 @@
 #include "xtc_loop.h"
 #include "xtc_res.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ----- oneshot ----------------------------------------------------- */
 
 typedef struct xtc_chan_oneshot xtc_chan_oneshot_t;
@@ -248,5 +252,9 @@ XTC_API int    xtc_chan_demand_set_consumer_waker(xtc_chan_demand_t *c,
 
 /* Close the channel; subsequent sends fail, buffered items still drain. */
 XTC_API int    xtc_chan_demand_close(xtc_chan_demand_t *c);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_CHAN_H */

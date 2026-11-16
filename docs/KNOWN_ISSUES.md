@@ -349,6 +349,27 @@ which 2.1 does not have.  `/m2/net_frame/with_mail` hangs on 2.1.2 and
 passes on 2.1.3, and `/m10/osproc/wait_with_mail` fails on 2.1.2 (0.30 s
 of CPU for a 300 ms child) and passes on 2.1.3.
 
+## FIXED (2.1.3): a C++ program could not link against most headers
+
+libxtc is a C library; what a C++ program gets is coexistence: it may
+include the installed headers and link the library.  Through 2.1.2, 53
+of the 61 installed headers declared their functions without
+`extern "C"`, so a C++ compiler mangled the names and `libxtc.a` had no
+such symbols: a C++ unit that takes the address of every function the
+installed headers declare failed to link with 620 of 718 names
+unresolved.  Every installed header now opens `extern "C"` after its
+includes and closes it before its include guard ends; three headers
+(`xtc_net.h`, `xtc_proc.h`, `xtc_bdev.h`) move a system include up so
+it stays outside the block.  The C view of every header is unchanged.
+
+Not fixed on 2.1, by design: six headers do not compile as C++ with g++
+because they declare `_Atomic` struct members, which is not C++:
+`xtc_res.h`, `xtc_lwlock.h`, and `xtc_chan.h`, `xtc_slab.h`,
+`xtc_svr.h` and `xtc_stream.h`, which include `xtc_res.h`.  clang++
+accepts `_Atomic` as an extension and compiles all 61.  On 2.1 those six
+are C only with g++; 2.2 removes the `_Atomic` members, which changes
+the headers too much for a patch release.
+
 ## FIXED (2.1.2): a cross-shard xtc_tnt_send could lose messages
 
 **What it was.**  Through 2.1.1 an `xtc_tnt_send` to an Isolate on

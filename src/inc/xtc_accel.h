@@ -75,6 +75,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Device kind -- an OBSERVABILITY TAG only (see the header comment); it
  * never changes how a fence is waited on. */
 typedef enum xtc_accel_kind {
@@ -142,5 +146,9 @@ XTC_API int xtc_accel_wait_fence(int fence_fd, int64_t timeout_ns);
  */
 XTC_API int xtc_accel_run_blocking(int (*fn)(void *), void *arg,
             int *out_result);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_ACCEL_H */

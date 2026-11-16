@@ -29,6 +29,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * PUBLIC: int xtc_pkey_supported __P((void));
  * PUBLIC: int xtc_pkey_alloc __P((int *));
@@ -55,5 +59,9 @@ XTC_API int xtc_pkey_set_access(int key, int allow_read, int allow_write);
 
 /* Release a key. */
 XTC_API int xtc_pkey_free(int key);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_PKEY_H */

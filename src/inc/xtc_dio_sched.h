@@ -29,6 +29,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define XTC_DIO_SCHED_MAX_GENES 8
 
 typedef struct xtc_dio_sched xtc_dio_sched_t;
@@ -87,5 +91,9 @@ XTC_API void xtc_dio_sched_best(const xtc_dio_sched_t *g, int *out_genes, double
 
 XTC_API double   xtc_dio_sched_mutation_rate(const xtc_dio_sched_t *g);
 XTC_API uint64_t xtc_dio_sched_generation(const xtc_dio_sched_t *g);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_DIO_SCHED_H */

@@ -43,6 +43,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef enum xtc_log_level {
 	XTC_LOG_TRACE = 0,
 	XTC_LOG_DEBUG = 1,
@@ -139,5 +143,9 @@ XTC_API int  xtc_log_drop_count(const xtc_log_t *log);
 #define XTC_LOG_WARN_F(...)  XTC_LOG(XTC_LOG_WARN,  __VA_ARGS__)
 #define XTC_LOG_ERROR_F(...) XTC_LOG(XTC_LOG_ERROR, __VA_ARGS__)
 #define XTC_LOG_FATAL_F(...) XTC_LOG(XTC_LOG_FATAL, __VA_ARGS__)
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_LOG_H */

@@ -46,6 +46,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Mark a function preemptible: it is placed in the xtc_preemptible
  * section, which the safe-point check trusts even in a static build
@@ -86,5 +90,9 @@ XTC_API int xtc_preempt_involuntary_supported(void);
  * libxtc's own text; XTC_E_RESOURCE when the table (32 ranges) is full.
  * Ranges cannot be removed. */
 XTC_API int xtc_preempt_region_add(const void *start, const void *end);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_PREEMPT_INVOLUNTARY_H */

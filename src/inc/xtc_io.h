@@ -23,6 +23,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_io xtc_io_t;
 
 /*
@@ -118,10 +122,10 @@ typedef struct xtc_aio {
 	 * init path, where xtc_io_aio_submit clears it).
 	 *
 	 * Why not `_Atomic int`: layout is identical either way (gcc and
-	 * clang, x86-64), but `_Atomic` is not valid C++, and this header has
-	 * no extern "C" guard of its own (xtc.h has one; xtc_io.h is also
-	 * includable directly).  g++ -std=c++17 compiles this header today
-	 * and would fail outright with `'_Atomic' does not name a type`.
+	 * clang, x86-64), but `_Atomic` is not valid C++, and a C++ program
+	 * must be able to include this header (test/dist/test_header_cxx.sh).
+	 * g++ -std=c++17 compiles it today and would fail outright with
+	 * `'_Atomic' does not name a type`.
 	 * Consumers allocate xtc_aio_t on the stack, so that is a source
 	 * break for every C++ embedder, in exchange for nothing the helper
 	 * accesses do not already provide.  Do not "upgrade" it.
@@ -193,5 +197,9 @@ XTC_API int          xtc_io_wakeup(xtc_io_t *io);
  */
 XTC_API void         xtc_io_set_iowq_max_workers(unsigned bound,
                                                  unsigned unbound);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_IO_H */

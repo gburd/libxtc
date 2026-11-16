@@ -52,6 +52,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_lockmgr xtc_lockmgr_t;
 typedef uint64_t           xtc_locker_t;     /* opaque locker ID */
 
@@ -266,5 +270,9 @@ XTC_API int  xtc_lockmgr_failchk(xtc_lockmgr_t *mgr, xtc_locker_t locker);
 XTC_API int  xtc_lockmgr_stat(const xtc_lockmgr_t *mgr, xtc_lockmgr_stat_t *out);
 XTC_API int  xtc_lockmgr_n_held(const xtc_lockmgr_t *mgr);
 XTC_API int  xtc_lockmgr_n_waiting(const xtc_lockmgr_t *mgr);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_LOCKMGR_H */

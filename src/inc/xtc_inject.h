@@ -40,6 +40,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define XTC_INJECT_NAME_MAX  64
 
 typedef void (*xtc_inject_fn)(const char *name, void *user);
@@ -88,6 +92,10 @@ XTC_API int  xtc_inject_check(const char *name);
 # define XTC_INJECTION_POINT(name)  ((void)0)
 #else
 # define XTC_INJECTION_POINT(name)  xtc_inject_trigger(name)
+#endif
+
+#ifdef __cplusplus
+}
 #endif
 
 #endif /* XTC_INJECT_H */

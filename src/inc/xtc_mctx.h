@@ -37,6 +37,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_mctx xtc_mctx_t;
 
 typedef enum xtc_mctx_flags {
@@ -230,5 +234,9 @@ XTC_API int     xtc_arena_group_discard(xtc_arena_group_t *g, int reason,
 
 /* Current member count (live + not-yet-reaped).  0 on NULL. */
 XTC_API int     xtc_arena_group_size(xtc_arena_group_t *g);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_MCTX_H */

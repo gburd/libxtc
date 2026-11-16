@@ -35,6 +35,10 @@
 #include "xtc.h"
 #include "xtc_proc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Event sources, an enable mask (dial9-style: pay only for what you turn
  * on).  Phase 1 implements SCHED; the others are reserved so the mask is
  * stable across the staged build-out. */
@@ -383,5 +387,9 @@ typedef struct xtc_tail_hdr {
 	uint32_t count;      /* number of events that follow */
 	uint64_t base_ts_ns; /* timestamp of the first event (deltas from here) */
 } xtc_tail_hdr_t;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_TAIL_H */

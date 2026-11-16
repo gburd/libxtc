@@ -41,6 +41,10 @@
 #ifndef XTC_TAILCALL_H
 #define XTC_TAILCALL_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* musttail is a *statement* attribute, not a function attribute.
  * Both clang's `[[clang::musttail]]` and gcc-15's
  * `__attribute__((musttail))` are accepted as statement attributes,
@@ -72,6 +76,10 @@
 	}))
 #else
 # define XTC_TAIL_CALL(expr)  (XTC_MUSTTAIL expr)
+#endif
+
+#ifdef __cplusplus
+}
 #endif
 
 #endif /* XTC_TAILCALL_H */

@@ -21,6 +21,10 @@
 
 #include "xtc_loop.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Coroutine entry function.  The argument is the user's `arg`; the
  * return value is recovered by the awaiter via xtc_await().
@@ -157,5 +161,9 @@ typedef struct xtc_pt {
 
 #define XTC_PT_DONE     2
 #define XTC_PT_YIELDED  0
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_ASYNC_H */

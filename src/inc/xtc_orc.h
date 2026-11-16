@@ -27,6 +27,10 @@
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Restart strategies.  M10 implements ONE_FOR_ONE; the others have
  * named slots so callers can configure for the future and get a
@@ -143,5 +147,9 @@ XTC_API int  xtc_sup_n_children(const xtc_supervisor_t *sup);
 XTC_API int  xtc_sup_n_alive(const xtc_supervisor_t *sup);
 XTC_API int  xtc_sup_n_restarts(const xtc_supervisor_t *sup);
 XTC_API int  xtc_sup_alive(const xtc_supervisor_t *sup);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_ORC_H */

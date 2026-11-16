@@ -79,6 +79,10 @@
 
 #include "xtc.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct xtc_chash xtc_chash_t;
 
 /* Key comparator: qsort(3) convention, but chash only ever tests the
@@ -177,5 +181,9 @@ XTC_API size_t xtc_chash_size(const xtc_chash_t *h);
  */
 XTC_API void   xtc_chash_set_auto_shrink(xtc_chash_t *h, int on);
 XTC_API int    xtc_chash_get_auto_shrink(const xtc_chash_t *h);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* XTC_CHASH_H */
