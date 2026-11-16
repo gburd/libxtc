@@ -2408,6 +2408,7 @@ install: all
 			$(DESTDIR)$(libdir)/$(SHARED_LIB_LINKNAME); \
 	fi
 	for m in $(srcdir)/../man/man3/*.3; do \
+		case "$$m" in */__*) continue ;; esac; \
 		$(INSTALL_DATA) $$m $(DESTDIR)$(mandir)/man3/; \
 	done
 	for m in $(srcdir)/../man/man7/*.7; do \

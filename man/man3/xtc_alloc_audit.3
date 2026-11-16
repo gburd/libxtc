@@ -23,8 +23,7 @@ that made it, so a test can assert a process freed everything it
 allocated before it died.
 .Pp
 .Fn xtc_alloc_audit_enable
-with a non-zero argument wraps the current allocator hook
-.Pq Xr __os_alloc 3 :
+with a non-zero argument wraps the library's current allocator:
 each allocation calls the previous (downstream) allocator and is
 recorded in a hash table keyed by pointer; each free or realloc
 removes or re-keys the record.  The table's own nodes are allocated
@@ -59,7 +58,7 @@ The auditor serializes every allocation and free on a global mutex,
 so it is a debug and test tool, not for production hot paths.  It is
 off by default.
 .Sh SEE ALSO
-.Xr __os_alloc 3 ,
+.Xr xtc_free 3 ,
 .Xr xtc_proc 3
 .Sh AUTHORS
 The

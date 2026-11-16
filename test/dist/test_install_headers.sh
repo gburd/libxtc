@@ -105,6 +105,17 @@ if ! $CC -std=c11 -D_GNU_SOURCE $cflags "$work/consumer.c" \
 	exit 1
 fi
 
+# The man pages of the internal OS layer (man/man3/__os_*.3) document
+# an API a consumer may not call, so they are not installed; the public
+# pages are.
+test -f "$prefix/share/man/man3/xtc_loop.3" || {
+	echo "  [install-headers] FAIL: xtc_loop.3 not installed"; exit 1; }
+inst_os=$(cd "$prefix/share/man/man3" && ls __* 2>/dev/null || true)
+if [ -n "$inst_os" ]; then
+	echo "  [install-headers] FAIL: internal man pages installed:" $inst_os
+	exit 1
+fi
+
 # The compile-time facts the installed headers state must be the
 # library's own: xtc.h's version macros (they read 0.0.0-unconfigured
 # when no installed header carried them), xtc_tls.h's XTC_TLS_ENABLED
