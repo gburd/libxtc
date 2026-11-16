@@ -4,7 +4,7 @@ parent: Examples
 nav_order: 15
 permalink: /examples/jobq/
 lede: >-
-  A job queue with leases and fencing tokens, and the deterministic simulation test that hunts its bugs -- the template for testing your own program the way libxtc tests itself.
+  A job queue with leases and fencing tokens, and the deterministic simulation test that hunts its bugs: the template for testing your own program the way libxtc tests itself.
 ---
 
 1. TOC
