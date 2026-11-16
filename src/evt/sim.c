@@ -116,6 +116,37 @@ __xtc_sim_nondeterminism(const char *what)
 	}
 }
 
+/* PUBLIC: int __xtc_sim_require_run __P((const char *)); */
+/*
+ * The entry guard of xtc_loop_run and xtc_exec_run on a sim build.  The
+ * sim I/O backend has no kernel poller: its xtc_io_poll never blocks and
+ * never looks at a real fd, so a loop driven outside a simulation run
+ * spins a core forever on a socket or pipe it cannot see become ready.
+ * Returns XTC_OK during a run (xtc_sim_exec_run, or an explicit
+ * xtc_sim_activate) and XTC_E_STATE outside one, after saying why on
+ * stderr, once per process.  Off a sim build it always returns XTC_OK.
+ */
+int
+__xtc_sim_require_run(const char *what)
+{
+#if defined(XTC_IO_BACKEND_SIM)
+	static int warned;
+
+	if (__xtc_sim_active())
+		return XTC_OK;
+	if (xtc_atomic_exchange_i32(&warned, 1, xtc_mo_relaxed) == 0)
+		fprintf(stderr, "xtc: %s outside a simulation run on a "
+		    "--with-io-backend=sim library returns XTC_E_STATE: the "
+		    "sim backend has no kernel poller, so the loop would spin "
+		    "on fds it cannot see.  Drive the procs with "
+		    "xtc_sim_exec_run, or link a native libxtc.\n", what);
+	return XTC_E_STATE;
+#else
+	(void)what;
+	return XTC_OK;
+#endif
+}
+
 /* PUBLIC: void xtc_sim_strict __P((int)); */
 /* Toggle strict mode: nonzero aborts on a determinism violation (the
  * default), zero only counts them (for a diagnostic sweep that wants to

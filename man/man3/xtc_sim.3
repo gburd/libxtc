@@ -179,6 +179,19 @@ and
 return
 .Dv XTC_E_NOSYS ,
 the fault and buggify calls return 0, and the knobs have no effect.
+The reverse holds on a sim build: its I/O backend has no kernel poller,
+so outside a run
+.Fn xtc_loop_run
+.Pq Xr xtc_loop 3
+and
+.Fn xtc_exec_run
+.Pq Xr xtc_exec 3
+return
+.Dv XTC_E_STATE
+at once (and say why on stderr, once) instead of spinning on fds they
+cannot see.
+A program's real binary links a native libxtc; its simulation test
+links the sim one.
 .Ss Running
 .Fn xtc_sim_exec_run
 activates the simulator with

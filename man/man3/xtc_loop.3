@@ -263,6 +263,13 @@ on a bad argument;
 on allocation failure;
 .Dv XTC_E_INTERNAL
 on platform failure.
+On a library built
+.Fl -with-io-backend=sim ,
+.Fn xtc_loop_run
+returns
+.Dv XTC_E_STATE
+outside a simulation run: see
+.Xr xtc_sim 3 .
 .Sh THREAD SAFETY
 M3 is single-thread.
 A loop must be created, run, and finalised by the same OS thread.

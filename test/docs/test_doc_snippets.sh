@@ -36,6 +36,14 @@ if [ ! -f "$LIB" ]; then
 	echo "[docs] SKIP: no static library at $LIB (build libxtc first)" >&2
 	exit 0
 fi
+# The snippets are programs that run their loops for real.  A sim build's
+# xtc_loop_run returns XTC_E_STATE outside a simulation run, so every
+# snippet with a loop would fail for a reason that is not the doc's.
+if nm "$LIB" 2>/dev/null | grep -q ' T __xtc_io_sim_next_due$'; then
+	echo "[docs] FAIL: $LIB is a --with-io-backend=sim build; the snippets" \
+	    "need a native backend (point XTC_BUILD at one)" >&2
+	exit 1
+fi
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/xtc-docsnip.XXXXXX")
 # Remove the whole scratch tree on exit.  Must be a recursive remove, not

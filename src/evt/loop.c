@@ -21,7 +21,7 @@
 #include "os_time.h"
 #include "os_backtrace.h"
 #include "xtc_log.h"
-#include "xtc_sim.h"
+#include "sim_int.h"
 #include "xtc_inject.h"   /* loop.enqueue.fifo_link test hook */
 
 #include <stdint.h>
@@ -1432,6 +1432,8 @@ xtc_loop_run(xtc_loop_t *loop)
 	int rc;
 	xtc_loop_t *saved;
 	if (loop == NULL) return XTC_E_INVAL;
+	if ((rc = __xtc_sim_require_run("xtc_loop_run")) != XTC_OK)
+		return rc;
 #ifdef XTC_ENABLE_SCHED_POLICY
 	__xtc_sched_freeze(loop);
 #endif

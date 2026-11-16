@@ -687,6 +687,8 @@ xtc_exec_run(xtc_exec_t *e)
 {
 	int i, rc;
 	if (e == NULL) return XTC_E_INVAL;
+	if ((rc = __xtc_sim_require_run("xtc_exec_run")) != XTC_OK)
+		return rc;
 	xtc_atomic_store_i32(&e->stop_flag, 0, xtc_mo_relaxed);
 	/* Seed the published timer counts (timers set before the run). */
 	for (i = 0; i < e->n_loops; i++)

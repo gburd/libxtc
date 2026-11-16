@@ -165,7 +165,11 @@ Behaviour change: `xtc_sim_exec_run` on a library that was not built
 `--with-io-backend=sim` returns `XTC_E_NOSYS` and runs nothing.  It used
 to step the loops over the native backend and return `XTC_OK`, a run
 that was neither deterministic nor sure to return (a native poll can
-block), reported as a replay.
+block), reported as a replay.  The converse: on a sim build,
+`xtc_loop_run` and `xtc_exec_run` outside a simulation run return
+`XTC_E_STATE` and say why on stderr once.  The sim backend has no kernel
+poller, so such a loop used to spin a core forever on any real fd (the
+TCP echo snippet ran until killed).
 
 ## CHANGED (2.2): `XTC_WAIT_FD_ONLY`, and library fd waits no longer wake for mail
 

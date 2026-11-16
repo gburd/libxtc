@@ -91,4 +91,9 @@ XTC_API int      __xtc_sim_run_consistency_check(void);
 XTC_API int      __xtc_sim_fd_ready(int fd, int64_t *out_due_ns,
                      uint32_t *out_revents);
 
+/* XTC_OK during a run, XTC_E_STATE (said once on stderr) outside one on
+ * a sim build: the entry guard of xtc_loop_run and xtc_exec_run, which
+ * the sim backend cannot drive on real fds (sim.c). */
+XTC_API int      __xtc_sim_require_run(const char *what);
+
 #endif /* XTC_SIM_INT_H */
