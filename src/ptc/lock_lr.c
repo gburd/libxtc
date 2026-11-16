@@ -27,6 +27,7 @@
 #include "xtc_lrlock.h"
 #include "coro_int.h"      /* __xtc_current_task: fiber-aware publish wait */
 #include "xtc_async.h"     /* xtc_yield */
+#include "xtc_dst_inject.h"
 
 #include <pthread.h>
 #include <sched.h>
@@ -204,6 +205,7 @@ struct xtc_lrlock {
 	size_t               oplog_used;
 	size_t               oplog_capacity;
 	int                  oplog_count;
+	int oplog_lost; /* an op is not logged: full sync */
 
 	pthread_mutex_t      writer_mutex;
 	int                  writer_owned;     /* debug aid */
@@ -254,6 +256,10 @@ __oplog_grow(xtc_lrlock_t *lr, size_t needed)
 	void  *p = NULL;
 	if (new_cap == 0) new_cap = XTC_LRLOCK_OPLOG_INITIAL;
 	while (new_cap < lr->oplog_used + needed) new_cap *= 2;
+	/* test_sim_lrlock fails the grow this way (a failing allocator
+	 * would fail the simulator too). */
+	if (xtc_inject_check("lrlock.oplog.grow_fail"))
+		return XTC_E_RESOURCE;
 	if (__os_realloc(lr->oplog, new_cap, &p) != XTC_OK) return XTC_E_RESOURCE;
 	lr->oplog = p;
 	lr->oplog_capacity = new_cap;
@@ -333,6 +339,41 @@ __replay_oplog(xtc_lrlock_t *lr, void *target)
 			lr->apply_fn(target, lr->oplog + pos, hdr.op_size);
 		pos += XTC_ALIGN(hdr.op_size, 8);
 	}
+}
+
+/* Copy all of `src` to `dst`: the caller's sync_fn, else a memcpy. */
+static void
+__full_sync(xtc_lrlock_t *lr, void *dst, const void *src)
+{
+	if (lr->sync_fn != NULL)
+		lr->sync_fn(dst, src, lr->data_size);
+	else
+		memcpy(dst, src, lr->data_size);
+}
+
+/*
+ * The oplog could not grow, so an op cannot be logged for the replay
+ * that brings the other copy up to date at publish.  Make the write
+ * copy authoritative instead: the next publish copies all of it to the
+ * stale copy (__publish_common), and later ops of this write are not
+ * logged.  Before the first publish the write copy is not a base yet
+ * (the first publish rebuilds it from the read copy plus the log), so
+ * rebuild it here the same way, before the unlogged op is applied.
+ */
+static void
+__oplog_lost(xtc_lrlock_t *lr, void *wr)
+{
+	int read_idx;
+
+	if (!lr->first_publish_done) {
+		read_idx =
+		    (int)xtc_atomic_load_u32(&lr->read_idx, xtc_mo_relaxed);
+		__full_sync(lr, wr, lr->data[read_idx]);
+		if (lr->oplog_used > 0)
+			__replay_oplog(lr, wr);
+		lr->first_publish_done = 1;
+	}
+	lr->oplog_lost = 1;
 }
 
 /* ---- COW: ensure data[1] exists and matches data[0] ---- */
@@ -579,16 +620,21 @@ xtc_lrlock_apply_op(xtc_lrlock_t *lr, const void *op, size_t op_size)
 	if (op_size > UINT32_MAX) return;
 	hdr.op_size = (uint32_t)op_size;
 
-	entry = sizeof hdr + XTC_ALIGN(op_size, 8);
-	if (lr->oplog_used + entry > lr->oplog_capacity) {
-		if (__oplog_grow(lr, entry) != XTC_OK) return;
-	}
-	memcpy(lr->oplog + lr->oplog_used, &hdr, sizeof hdr);
-	memcpy(lr->oplog + lr->oplog_used + sizeof hdr, op, op_size);
-	lr->oplog_used += entry;
-	lr->oplog_count++;
-
 	read_idx = (int)xtc_atomic_load_u32(&lr->read_idx, xtc_mo_relaxed);
+	entry = sizeof hdr + XTC_ALIGN(op_size, 8);
+	if (!lr->oplog_lost && lr->oplog_used + entry > lr->oplog_capacity &&
+	    __oplog_grow(lr, entry) != XTC_OK) {
+		if (XTC_DST_BUG(XTC_DST_BUG_LRLOCK_OPLOG_DROP))
+			return;
+		__oplog_lost(lr, lr->data[1 - read_idx]);
+	}
+	if (!lr->oplog_lost) {
+		memcpy(lr->oplog + lr->oplog_used, &hdr, sizeof hdr);
+		memcpy(lr->oplog + lr->oplog_used + sizeof hdr, op, op_size);
+		lr->oplog_used += entry;
+		lr->oplog_count++;
+	}
+
 	if (lr->apply_fn != NULL)
 		lr->apply_fn(lr->data[1 - read_idx], op, op_size);
 }
@@ -634,8 +680,11 @@ __publish_common(xtc_lrlock_t *lr, int force_full_sync)
 	__snapshot_epochs(lr);
 	__wait_for_readers(lr);
 
-	/* Bring the now-stale copy up to date. */
-	if (force_full_sync) {
+	/* Bring the now-stale copy up to date.  An op the oplog could not
+	 * hold is only in the new copy, so copy all of it then. */
+	if (lr->oplog_lost) {
+		__full_sync(lr, lr->data[old_idx], lr->data[new_idx]);
+	} else if (force_full_sync) {
 		if (lr->sync_fn != NULL)
 			lr->sync_fn(lr->data[old_idx], lr->data[new_idx],
 			    lr->data_size);
@@ -653,6 +702,7 @@ __publish_common(xtc_lrlock_t *lr, int force_full_sync)
 
 	lr->oplog_used  = 0;
 	lr->oplog_count = 0;
+	lr->oplog_lost = 0;
 
 	/* COW: hint to the OS that the now-stale copy can be freed.
 	 * Next write_begin will memcpy from the (current) read copy,

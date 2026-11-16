@@ -122,6 +122,8 @@
  *	                   (test_sim_rcu).
  *	 64  RCU_RETIRE_FREE -- rcu.c frees an unrecordable retirement at
  *	                   once, under its readers (test_sim_rcu).
+ *	 65  LRLOCK_OPLOG_DROP -- lock_lr.c drops an op the oplog cannot
+ *	                   grow to hold (test_sim_lrlock).
  *
  *	NOT plantable under DST (an honest gap, recorded so it is not
  *	mistaken for missing coverage): the xtc_amutex mutual-exclusion and
@@ -337,6 +339,13 @@
  * a node under a reader").
  */
 #define XTC_DST_BUG_RCU_RETIRE_FREE 64
+
+/*
+ * 65 LRLOCK_OPLOG_DROP: xtc_lrlock_apply_op returns without applying an
+ * op the oplog cannot grow to hold, so the write is lost from both
+ * copies (test_sim_lrlock: "a write was lost").
+ */
+#define XTC_DST_BUG_LRLOCK_OPLOG_DROP 65
 
 /*
  * 60 SUP_WAIT_SKIP: a supervisor started with wait_children does not wait

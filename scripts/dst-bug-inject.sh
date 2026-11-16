@@ -117,6 +117,7 @@ write_cases() {
 		"54;test_sim_rcu;0;0;fiber that lived through xtc_rcu_fini was invisible" \
 		"63;test_sim_rcu;0;0;a slotless reader saw a freed node" \
 		"64;test_sim_rcu;0;0;an unrecorded retire freed a node under a reader" \
+		"65;test_sim_lrlock;0;0;a write was lost .* when the oplog could not grow" \
 		"60;test_sim_sup_child;0;1;a child ran before the one before it was up" \
 		"61;test_sim_sup_child;0;1;a nested supervisor's give-up did not reach its parent" \
 		"62;test_sim_sup_child;0;1;a drain did not reach a nested supervisor's child" \
@@ -194,6 +195,8 @@ write_cases() {
 # 64 RCU_RETIRE_FREE rcu.c frees an unrecordable retirement at once
 #               -> out of memory, a retired object is leaked, never freed
 #               under a reader
+# 65 LRLOCK_OPLOG_DROP lock_lr.c drops an op the oplog cannot grow to hold
+#               -> out of memory, an applied op reaches both copies
 # 60 SUP_WAIT_SKIP sup.c wait_children does not wait for a server/sup child
 #               -> each child starts only once the one before it is up
 # 61 SUP_NESTED_CLEAN sup.c a nested supervisor's give-up exits cleanly

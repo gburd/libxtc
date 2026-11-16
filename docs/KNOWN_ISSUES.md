@@ -509,6 +509,24 @@ after an `xtc_rcu_init`, synchronize did not scan it, and an object that
 thread held was freed under it (`test/m13/test_rcu`
 `/thread_reader_after_fini` failed before, passes after).
 
+## FIXED (2.2, 2.1.3): out of memory, `xtc_lrlock_apply_op` lost the write
+
+**What it was.**  When the operation log could not grow to hold a new
+operation, `xtc_lrlock_apply_op` returned without applying it, so the
+write was lost from both copies and the caller, which gets no return
+code, could not know.
+
+**Fix.**  The operation is applied to the writer's copy, the rest of
+that write is not logged, and the next publish copies the whole data
+block to the other copy (the lock's `sync_fn`, or `memcpy` without one).
+Before the lock's first publish the writer's copy is first rebuilt
+from the read copy and the log, as that publish would have done.
+`test/m13/test_lrlock` `/lrlock_oplog_oom` (16 ops into a two-op log
+with realloc failing, before and after the first publish, both copies
+checked) failed before (`rd->n == 16 (2 == 16)`) and passes after.
+`test_sim_lrlock`'s out-of-memory phase runs it under DST, and planted
+bug 65 (drop the op) is caught on both built-in seeds.
+
 ## FIXED (2.2, 2.1.3): out of memory, `xtc_rcu` freed objects under their readers
 
 **What it was.**  `xtc_rcu_retire` records a retirement in a slab.  When
