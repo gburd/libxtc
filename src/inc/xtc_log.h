@@ -102,9 +102,12 @@ XTC_API void xtc_log_destroy(xtc_log_t *log);
 
 XTC_API int  xtc_log_set_floor(xtc_log_t *log, xtc_log_level_t lvl);
 
-/* Set the process-wide default logger.  Subsequent macro-driven
- * calls (XTC_LOG_INFO, etc.) route here.  Returns the prior default
- * (or NULL if none). */
+/* Set the process-wide default logger (NULL: none).  The XTC_LOG_*_F
+ * macros and libxtc's own diagnostics (the tuning advisor, a loop's
+ * over-budget warning, a slab redzone report, an executor step error, a
+ * refused involuntary-preemption opt-in) write to it.  There is no
+ * default until one is set, and those messages are dropped until then.
+ * Returns XTC_OK. */
 XTC_API int  xtc_log_set_default(xtc_log_t *log);
 XTC_API xtc_log_t *xtc_log_default(void);
 

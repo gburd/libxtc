@@ -96,9 +96,17 @@ before formatting.
 .Fn xtc_log_set_default
 installs
 .Fa log
+(or
+.Dv NULL )
 as the process-wide default the
 .Fn XTC_LOG_*_F
-macros route through, and
+macros route through, and returns
+.Dv XTC_OK .
+libxtc's own diagnostics (the
+.Xr xtc_stats 3
+tuning advisor, a loop's over-budget warning, a slab redzone report,
+an executor step error) go to the same default; there is no default until one is set, and those
+messages are dropped until then.
 .Fn xtc_log_default
 returns the current default.
 .Fn xtc_log_drop_count
