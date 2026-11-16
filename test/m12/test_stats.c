@@ -12,6 +12,7 @@
 #include "xtc_stats.h"
 #include "xtc_int.h"
 
+#include <math.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -346,7 +347,9 @@ collect_page(const char *buf, size_t len, void *user)
 {
 	char **out = user;
 	munit_assert_size(strlen(buf), ==, len);
-	*out = strdup(buf);
+	*out = malloc(len + 1);
+	munit_assert_not_null(*out);
+	memcpy(*out, buf, len + 1);
 	return 0;
 }
 
@@ -390,7 +393,7 @@ test_hist_bounds(const MunitParameter p[], void *d)
 	static const double bad1[] = { 1.0, 1.0 }, bad2[] = { -1.0 };
 	xtc_hist_t *h, *bad;
 	char *page = NULL;
-	double nan = 0.0 / 0.0;
+	double nan = NAN;
 	struct bucket_rec r;
 	(void)p;
 	(void)d;

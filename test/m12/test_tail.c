@@ -722,7 +722,7 @@ test_tail_app_foreign(const MunitParameter p[], void *d)
 		munit_assert_int(g_app_rc[i], ==, XTC_OK);
 	munit_assert_int(g_app_rc[5], ==, XTC_E_INVAL);
 	munit_assert_uint(g_app_dev.loop_id, ==, XTC_LOOP_FOREIGN);
-	munit_assert_uint(g_app_dev.gen, ==, 1);
+	munit_assert_uint64(g_app_dev.gen, ==, 1);
 	/* The identity names the sender; it reaches nothing. */
 	munit_assert_int(xtc_send(g_app_dev, "x", 2), ==, XTC_E_INVAL);
 

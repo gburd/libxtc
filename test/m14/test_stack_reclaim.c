@@ -804,7 +804,12 @@ test_reclaim_kill_running(const MunitParameter p[], void *d)
 static int g_sz_ok, g_sz_bad;
 
 /* Consume about `left` bytes of stack in 4 KiB frames. */
-static __attribute__((noinline)) unsigned
+#if defined(_MSC_VER)
+#define SZ_NOINLINE __declspec(noinline)
+#else
+#define SZ_NOINLINE __attribute__((noinline))
+#endif
+static SZ_NOINLINE unsigned
 sz_recurse(size_t left)
 {
 	volatile unsigned char frame[4096];
