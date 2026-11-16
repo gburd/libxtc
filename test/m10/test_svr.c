@@ -766,11 +766,15 @@ test_svr_off_loop_late_reply(const MunitParameter p[], void *d)
  * and from a plain thread, and the server is joinable.
  * ================================================================ */
 
+static int64_t g_dying_exit_ns; /* when the handler exits */
+
 static int
 dying_handle_call(void *st, const void *req, size_t size, xtc_svr_call_t *call)
 {
 	(void)st; (void)req; (void)size; (void)call;
 	(void)xtc_proc_sleep(20LL * 1000 * 1000);
+	xtc_atomic_store_i64(&g_dying_exit_ns, xtc_clock_mono(),
+	    xtc_mo_seq_cst);
 	xtc_exit_self(3);
 	return XTC_SVR_CONTINUE;
 }
@@ -787,12 +791,12 @@ dying_do_call(struct dying_args *a)
 {
 	void  *reply = NULL;
 	size_t rsz = 0;
-	int64_t t0 = xtc_clock_mono();
 	xtc_atomic_store_i32(&a->rc,
 	    xtc_svr_call(a->target, "q", 1, &reply, &rsz,
 	        5LL * 1000 * 1000 * 1000),
 	    xtc_mo_seq_cst);
-	xtc_atomic_store_i64(&a->elapsed_ns, xtc_clock_mono() - t0,
+	xtc_atomic_store_i64(&a->elapsed_ns, xtc_clock_mono() -
+	    xtc_atomic_load_i64(&g_dying_exit_ns, xtc_mo_seq_cst),
 	    xtc_mo_seq_cst);
 	xtc_free(reply);
 }
@@ -846,10 +850,12 @@ test_svr_server_dies_mid_call(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_atomic_load_i32(&a.rc, xtc_mo_seq_cst), ==,
 	    XTC_E_NOTFOUND);
 	/* At once (2.2): the handler sleeps 20 ms and exits; through 2.2 the
-	 * call polled the server's liveness every 25 ms, so it returned 20 to
-	 * 45 ms after the call.  10 ms of slack for a loaded host. */
+	 * call polled the server's liveness every 25 ms from the call, so it
+	 * returned 30 ms after the exit (on a 48-core x86-64 host).  Timed
+	 * from the exit, not the call: the 20 ms sleep takes up to 31 ms on a
+	 * 15.6 ms Windows tick.  10 ms of slack for a loaded host. */
 	munit_assert_int64(xtc_atomic_load_i64(&a.elapsed_ns, xtc_mo_seq_cst),
-	    <, 30LL * 1000 * 1000);
+	    <, 10LL * 1000 * 1000);
 	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
 	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
 	return MUNIT_OK;
