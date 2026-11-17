@@ -208,7 +208,7 @@ XTC_API int  xtc_arwlock_unlock(xtc_arwlock_t *r);
 
 /* ----- rwlock ----------------------------------------------------- */
 
-typedef struct xtc_rwlock xtc_rwlock_t;
+typedef struct xtc_rwlock xtc_thrd_rwlock_t;
 
 /*
  * Reader/writer lock with writer priority (writers don't starve).  A
@@ -217,19 +217,21 @@ typedef struct xtc_rwlock xtc_rwlock_t;
  * deadlock if one waits while the other holds the lock across a park
  * (a sleep, I/O, a receive): the waiter blocks the thread the holder
  * needs to run.  On a loop use xtc_arwlock, the parking reader/writer
- * lock above; this one is for plain threads.
+ * lock above; this one is for plain threads.  The _thrd_ in the name
+ * says so (2.2); the old xtc_rwlock_* names are deprecated, and 3.0
+ * gives the xtc_rwlock name to the fiber lock.
  *
- * PUBLIC: int  xtc_rwlock_create __P((xtc_rwlock_t **));
- * PUBLIC: void xtc_rwlock_destroy __P((xtc_rwlock_t *));
- * PUBLIC: int  xtc_rwlock_rdlock __P((xtc_rwlock_t *, int64_t));
- * PUBLIC: int  xtc_rwlock_wrlock __P((xtc_rwlock_t *, int64_t));
- * PUBLIC: int  xtc_rwlock_unlock __P((xtc_rwlock_t *));
+ * PUBLIC: int  xtc_thrd_rwlock_create __P((xtc_thrd_rwlock_t **));
+ * PUBLIC: void xtc_thrd_rwlock_destroy __P((xtc_thrd_rwlock_t *));
+ * PUBLIC: int  xtc_thrd_rwlock_rdlock __P((xtc_thrd_rwlock_t *, int64_t));
+ * PUBLIC: int  xtc_thrd_rwlock_wrlock __P((xtc_thrd_rwlock_t *, int64_t));
+ * PUBLIC: int  xtc_thrd_rwlock_unlock __P((xtc_thrd_rwlock_t *));
  */
-XTC_API int  xtc_rwlock_create(xtc_rwlock_t **out);
-XTC_API void xtc_rwlock_destroy(xtc_rwlock_t *r);
-XTC_API int  xtc_rwlock_rdlock(xtc_rwlock_t *r, int64_t timeout_ns);
-XTC_API int  xtc_rwlock_wrlock(xtc_rwlock_t *r, int64_t timeout_ns);
-XTC_API int  xtc_rwlock_unlock(xtc_rwlock_t *r);
+XTC_API int  xtc_thrd_rwlock_create(xtc_thrd_rwlock_t **out);
+XTC_API void xtc_thrd_rwlock_destroy(xtc_thrd_rwlock_t *r);
+XTC_API int  xtc_thrd_rwlock_rdlock(xtc_thrd_rwlock_t *r, int64_t timeout_ns);
+XTC_API int  xtc_thrd_rwlock_wrlock(xtc_thrd_rwlock_t *r, int64_t timeout_ns);
+XTC_API int  xtc_thrd_rwlock_unlock(xtc_thrd_rwlock_t *r);
 
 /* ----- barrier ---------------------------------------------------- */
 
@@ -287,6 +289,18 @@ XTC_DEPRECATED("use xtc_gate_shutdown")
 XTC_API int xtc_gate_close(xtc_gate_t *g);
 XTC_DEPRECATED("use xtc_amutex_create_flags")
 XTC_API int xtc_amutex_create_ex(xtc_amutex_t **out, unsigned flags);
+XTC_DEPRECATED("use xtc_thrd_rwlock_t (blocks the OS thread) or xtc_arwlock_t")
+typedef xtc_thrd_rwlock_t xtc_rwlock_t;
+XTC_DEPRECATED("use xtc_thrd_rwlock_create")
+XTC_API int xtc_rwlock_create(xtc_thrd_rwlock_t **out);
+XTC_DEPRECATED("use xtc_thrd_rwlock_destroy")
+XTC_API void xtc_rwlock_destroy(xtc_thrd_rwlock_t *r);
+XTC_DEPRECATED("use xtc_thrd_rwlock_rdlock")
+XTC_API int xtc_rwlock_rdlock(xtc_thrd_rwlock_t *r, int64_t timeout_ns);
+XTC_DEPRECATED("use xtc_thrd_rwlock_wrlock")
+XTC_API int xtc_rwlock_wrlock(xtc_thrd_rwlock_t *r, int64_t timeout_ns);
+XTC_DEPRECATED("use xtc_thrd_rwlock_unlock")
+XTC_API int xtc_rwlock_unlock(xtc_thrd_rwlock_t *r);
 
 #ifdef __cplusplus
 }

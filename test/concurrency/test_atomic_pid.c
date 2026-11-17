@@ -184,7 +184,7 @@ main(int argc, char **argv)
 		if (pthread_create(&wt[i], NULL, writer,
 		    (void *)(uintptr_t)i) != 0)
 			return 77;
-	(void)xtc_sleep_ns(run_ns);
+	(void)xtc_thrd_sleep_ns(run_ns);
 	xtc_atomic_store_i32(&g_stop, 1, xtc_mo_seq_cst);
 	for (i = 0; i < N_WRITERS; i++)
 		(void)pthread_join(wt[i], NULL);

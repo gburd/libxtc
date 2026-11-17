@@ -167,7 +167,7 @@ watchdog(void *arg)
 	(void)arg;
 	for (i = 0; i < 600 && !xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
 	     i++)
-		xtc_sleep_ns(100LL * 1000 * 1000);
+		xtc_thrd_sleep_ns(100LL * 1000 * 1000);
 	if (!xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst)) {
 		xtc_atomic_store_i32(&g_timed_out, 1, xtc_mo_seq_cst);
 		xtc_tnt_stop();
@@ -183,7 +183,7 @@ ext_thread(void *arg)
 
 	while (xtc_atomic_load_i32(&g_sinks_up, xtc_mo_seq_cst) < NSHARD &&
 	    !xtc_atomic_load_i32(&g_timed_out, xtc_mo_seq_cst))
-		xtc_sleep_ns(1000000);
+		xtc_thrd_sleep_ns(1000000);
 	for (seq = 0;
 	     seq < N && !xtc_atomic_load_i32(&g_timed_out, xtc_mo_seq_cst);) {
 		h.src = id;
@@ -195,7 +195,7 @@ ext_thread(void *arg)
 		        TAG_HIT, &h, sizeof h) == XTC_TNT_SEND_OK)
 			seq++;
 		else
-			xtc_sleep_ns(10000);
+			xtc_thrd_sleep_ns(10000);
 	}
 	xtc_atomic_fetch_add_i32(&g_ext_done, 1, xtc_mo_seq_cst);
 	return NULL;

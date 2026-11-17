@@ -492,9 +492,9 @@ single line carries a `/* XTC_RAW_OK: reason */` (or the existing
    `__os_*` / `__xtc_*` surface.  The examples are the consumer
    exemplar and must stay clean -- if a consumer needs a primitive, add
    the public `xtc_*` for it (this is why xtc_malloc/_calloc/_realloc/
-   _aligned_alloc/_aligned_free, xtc_clock_mono/_real, xtc_sleep_ns,
+   _aligned_alloc/_aligned_free, xtc_clock_mono/_real, xtc_thrd_sleep_ns,
    xtc_atomic_i64_load/_add exist).  Inside a fiber use xtc_proc_sleep,
-   not xtc_sleep_ns (which blocks the OS thread).
+   not xtc_thrd_sleep_ns (which blocks the OS thread).
 
 4. No NAKED block-scoped variables: a bare `{ ... }` introduced only to
    scope a variable is forbidden.  Block-scoped declarations are fine in

@@ -134,7 +134,7 @@ fi
 # Now a HARD gate.  It was historically a warning because the public xtc_*
 # surface did not yet cover everything the examples needed; that is no
 # longer true -- xtc_malloc/_calloc/_realloc/_free/_aligned_*, the clocks
-# (xtc_clock_mono/_real), xtc_sleep_ns, xtc_atomic_i64_*, xtc_rand_*,
+# (xtc_clock_mono/_real), xtc_thrd_sleep_ns, xtc_atomic_i64_*, xtc_rand_*,
 # xtc_strlcpy/_strlcat, and the CPU/NUMA topology (xtc_ncpus,
 # xtc_numa_nnodes/_node_of_cpu/_current_node) all ship.  If a consumer
 # needs something else, the fix is to add the public xtc_* for it (AGENTS.md

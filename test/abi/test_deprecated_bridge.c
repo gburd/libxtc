@@ -473,6 +473,25 @@ bridge_misc_b(void)
 	xtc_lwlock_destroy(&lw);
 }
 
+/* _thrd_: xtc_rwlock_* -> xtc_thrd_rwlock_*, xtc_sleep_ns ->
+ * xtc_thrd_sleep_ns (both block the calling OS thread). */
+static void
+bridge_thrd(void)
+{
+	xtc_rwlock_t *rw = NULL;
+
+	CHECK(xtc_rwlock_create(&rw) == XTC_OK && rw != NULL);
+	CHECK(xtc_rwlock_rdlock(rw, -1) == XTC_OK);
+	CHECK(xtc_rwlock_rdlock(rw, -1) == XTC_OK);
+	CHECK(xtc_rwlock_wrlock(rw, 0) != XTC_OK);
+	CHECK(xtc_rwlock_unlock(rw) == XTC_OK);
+	CHECK(xtc_rwlock_unlock(rw) == XTC_OK);
+	CHECK(xtc_rwlock_wrlock(rw, -1) == XTC_OK);
+	CHECK(xtc_rwlock_unlock(rw) == XTC_OK);
+	xtc_rwlock_destroy(rw);
+	CHECK(xtc_sleep_ns(1000) == XTC_OK);
+}
+
 int
 main(void)
 {
@@ -493,6 +512,7 @@ main(void)
 	bridge_fn_types();
 	bridge_enums();
 	bridge_misc_b();
+	bridge_thrd();
 	printf("  [bridge] OK: every deprecated name still works\n");
 	return 0;
 }

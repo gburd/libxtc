@@ -48,6 +48,10 @@ awk '
 	if [ ! -f "$page" ]; then
 		continue   # coverage test catches this
 	fi
+	# A deprecated name's page is a ".so man3/<page>.3" alias; check the
+	# page it points at.
+	so=$(sed -n 's/^\.so man3\/\(.*\)$/\1/p' "$page")
+	[ -z "$so" ] || page="$MANDIR/$so"
 	if ! grep -qiE "(RETURN VALUE|RETURNS)" "$page"; then
 		echo "  [D6] FAIL: $fn.3 has no RETURN VALUE section" >&2
 		exit 1

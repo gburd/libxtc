@@ -110,7 +110,7 @@ main(void)
 		return 2;
 	}
 	/* Let the supervisors reach their first xtc_recv park. */
-	(void)xtc_sleep_ns(50 * 1000 * 1000LL);
+	(void)xtc_thrd_sleep_ns(50 * 1000 * 1000LL);
 
 	/* Drive the burst from THIS (foreign) thread.  DIRECT cross-thread
 	 * spawn onto each loop (the report's simplest repro: bypass the
@@ -121,7 +121,7 @@ main(void)
 		int k = s % N_LOOPS;
 		xtc_pid_t child;
 		int sc;
-		(void)xtc_sleep_ns(60 * 1000LL);   /* ~60us: let loop k re-park */
+		(void)xtc_thrd_sleep_ns(60 * 1000LL);   /* ~60us: let loop k re-park */
 		/* Plain foreign spawn (the report's simplest repro): the
 		 * caller is a foreign OS thread, NOT a proc, so spawn_monitor
 		 * (which requires a proc caller) does not apply -- xtc_proc_spawn
@@ -141,13 +141,13 @@ main(void)
 	for (i = 0; i < 6000; i++) {
 		if (xtc_atomic_load_i32(&g_ran, xtc_mo_seq_cst) >= N_SPAWN)
 			break;
-		(void)xtc_sleep_ns(5 * 1000 * 1000LL);
+		(void)xtc_thrd_sleep_ns(5 * 1000 * 1000LL);
 	}
 	/* Grace drain: the last procs bumped g_ran in their body but their
 	 * task/coro teardown runs on the loop's NEXT step -- give the loops
 	 * a moment to reap them so xtc_exec_destroy has nothing outstanding
 	 * (otherwise LeakSanitizer flags the un-reaped tasks). */
-	(void)xtc_sleep_ns(100 * 1000 * 1000LL);
+	(void)xtc_thrd_sleep_ns(100 * 1000 * 1000LL);
 
 	(void)xtc_exec_stop(g_e);
 	(void)pthread_join(th, NULL);

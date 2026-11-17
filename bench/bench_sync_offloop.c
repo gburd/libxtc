@@ -220,7 +220,7 @@ main(int argc, char **argv)
 	(void)getrusage(RUSAGE_SELF, &u0);
 	t0 = xtc_clock_mono();
 	xtc_atomic_store_i32(&g_go, 1, xtc_mo_release);
-	(void)xtc_sleep_ns((int64_t)secs * 1000000000LL);
+	(void)xtc_thrd_sleep_ns((int64_t)secs * 1000000000LL);
 	xtc_atomic_store_i32(&g_stop, 1, xtc_mo_seq_cst);
 	t1 = xtc_clock_mono();
 	(void)getrusage(RUSAGE_SELF, &u1);

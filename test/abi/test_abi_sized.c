@@ -576,9 +576,9 @@ t_stopper(void *arg)
 	     i++) {
 		if (xtc_atomic_load_i32(&g_tnt_returned, xtc_mo_seq_cst))
 			return NULL;
-		(void)xtc_sleep_ns(1000000);
+		(void)xtc_thrd_sleep_ns(1000000);
 	}
-	(void)xtc_sleep_ns(100LL * 1000 * 1000);
+	(void)xtc_thrd_sleep_ns(100LL * 1000 * 1000);
 	(void)xtc_inspect_loops(t_sum_steps, &n);
 	g_tnt_steps = n;
 	xtc_tnt_stop();

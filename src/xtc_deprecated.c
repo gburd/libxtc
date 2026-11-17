@@ -489,3 +489,41 @@ xtc_lwlock_acquire_cond(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 {
 	return xtc_lwlock_try_acquire(lock, mode);
 }
+
+/* Group (D9): the OS-thread-blocking calls with a fiber twin take _thrd_. */
+
+int
+xtc_rwlock_create(xtc_thrd_rwlock_t **out)
+{
+	return xtc_thrd_rwlock_create(out);
+}
+
+void
+xtc_rwlock_destroy(xtc_thrd_rwlock_t *r)
+{
+	xtc_thrd_rwlock_destroy(r);
+}
+
+int
+xtc_rwlock_rdlock(xtc_thrd_rwlock_t *r, int64_t timeout_ns)
+{
+	return xtc_thrd_rwlock_rdlock(r, timeout_ns);
+}
+
+int
+xtc_rwlock_wrlock(xtc_thrd_rwlock_t *r, int64_t timeout_ns)
+{
+	return xtc_thrd_rwlock_wrlock(r, timeout_ns);
+}
+
+int
+xtc_rwlock_unlock(xtc_thrd_rwlock_t *r)
+{
+	return xtc_thrd_rwlock_unlock(r);
+}
+
+int
+xtc_sleep_ns(int64_t ns)
+{
+	return xtc_thrd_sleep_ns(ns);
+}

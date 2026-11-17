@@ -279,7 +279,7 @@ dr_thread(void *arg)
 {
 	struct dr_run *r = arg;
 	while (xtc_atomic_load_i32(&g_dr_started, xtc_mo_seq_cst) < r->n_kids)
-		(void)xtc_sleep_ns(1 * MS);
+		(void)xtc_thrd_sleep_ns(1 * MS);
 	r->rc = xtc_app_shutdown(r->app, r->drain_ns, r->force_ns, &r->rep);
 	return NULL;
 }
@@ -990,7 +990,7 @@ as_thread(void *arg)
 {
 	struct dr_run *r = arg;
 	while (xtc_atomic_load_i32(&g_as_up, xtc_mo_seq_cst) < 2)
-		(void)xtc_sleep_ns(1 * MS);
+		(void)xtc_thrd_sleep_ns(1 * MS);
 	r->rc = xtc_app_shutdown(r->app, r->drain_ns, r->force_ns, &r->rep);
 	return NULL;
 }

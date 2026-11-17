@@ -1656,9 +1656,9 @@ struct xtc_rwlock {
 };
 
 int
-xtc_rwlock_create(xtc_rwlock_t **out)
+xtc_thrd_rwlock_create(xtc_thrd_rwlock_t **out)
 {
-	xtc_rwlock_t *r;
+	xtc_thrd_rwlock_t *r;
 	int rc;
 	if (out == NULL) return XTC_E_INVAL;
 	if ((rc = __os_calloc(1, sizeof *r, (void **)&r)) != XTC_OK) return rc;
@@ -1669,7 +1669,7 @@ xtc_rwlock_create(xtc_rwlock_t **out)
 }
 
 void
-xtc_rwlock_destroy(xtc_rwlock_t *r)
+xtc_thrd_rwlock_destroy(xtc_thrd_rwlock_t *r)
 {
 	if (r == NULL) return;
 	(void)pthread_cond_destroy(&r->cv);
@@ -1678,8 +1678,8 @@ xtc_rwlock_destroy(xtc_rwlock_t *r)
 }
 
 static int
-__rwlock_wait(xtc_rwlock_t *r, int64_t timeout_ns,
-              int (*ready)(xtc_rwlock_t *))
+__rwlock_wait(xtc_thrd_rwlock_t *r, int64_t timeout_ns,
+              int (*ready)(xtc_thrd_rwlock_t *))
 {
 	if (timeout_ns == 0) return ready(r) ? XTC_OK : XTC_E_AGAIN;
 	if (timeout_ns < 0) {
@@ -1697,15 +1697,15 @@ __rwlock_wait(xtc_rwlock_t *r, int64_t timeout_ns,
 	}
 }
 
-static int __can_grant_read(xtc_rwlock_t *r) {
+static int __can_grant_read(xtc_thrd_rwlock_t *r) {
 	return !r->writer && r->waiting_writers == 0;
 }
-static int __can_grant_write(xtc_rwlock_t *r) {
+static int __can_grant_write(xtc_thrd_rwlock_t *r) {
 	return !r->writer && r->readers == 0;
 }
 
 int
-xtc_rwlock_rdlock(xtc_rwlock_t *r, int64_t timeout_ns)
+xtc_thrd_rwlock_rdlock(xtc_thrd_rwlock_t *r, int64_t timeout_ns)
 {
 	int rc;
 	if (r == NULL) return XTC_E_INVAL;
@@ -1717,7 +1717,7 @@ xtc_rwlock_rdlock(xtc_rwlock_t *r, int64_t timeout_ns)
 }
 
 int
-xtc_rwlock_wrlock(xtc_rwlock_t *r, int64_t timeout_ns)
+xtc_thrd_rwlock_wrlock(xtc_thrd_rwlock_t *r, int64_t timeout_ns)
 {
 	int rc;
 	if (r == NULL) return XTC_E_INVAL;
@@ -1732,7 +1732,7 @@ xtc_rwlock_wrlock(xtc_rwlock_t *r, int64_t timeout_ns)
 }
 
 int
-xtc_rwlock_unlock(xtc_rwlock_t *r)
+xtc_thrd_rwlock_unlock(xtc_thrd_rwlock_t *r)
 {
 	if (r == NULL) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&r->lock);

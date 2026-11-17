@@ -166,13 +166,13 @@ test_macos_kqueue_timer(const MunitParameter p[], void *d)
 	 * CPU-time filter), unlike the POSIX per-thread CPU-time timer --
 	 * so ticks accrue on elapsed time whether or not this thread is
 	 * busy.  A bounded sleep-poll loop (not a CPU burn) is therefore
-	 * the correct way to observe it, and cannot hang: xtc_sleep_ns is
+	 * the correct way to observe it, and cannot hang: xtc_thrd_sleep_ns is
 	 * the public thread-sleep wrapper (see xtc.h), never a raw
 	 * nanosleep. */
 	{
 		int tries = 0;
 		while (xtc_preempt_ticks() == t0 && tries < 200) {
-			(void)xtc_sleep_ns(5 * 1000 * 1000LL);   /* 5 ms */
+			(void)xtc_thrd_sleep_ns(5 * 1000 * 1000LL);   /* 5 ms */
 			tries++;
 		}
 	}
@@ -184,7 +184,7 @@ test_macos_kqueue_timer(const MunitParameter p[], void *d)
 
 	munit_assert_int(xtc_preempt_disarm(), ==, XTC_OK);
 	t1 = xtc_preempt_ticks();
-	(void)xtc_sleep_ns(50 * 1000 * 1000LL);   /* 50 ms: well past disarm */
+	(void)xtc_thrd_sleep_ns(50 * 1000 * 1000LL);   /* 50 ms: well past disarm */
 	t2 = xtc_preempt_ticks();
 	munit_assert_uint64(t2, ==, t1);       /* disarm stopped the helper */
 

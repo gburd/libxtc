@@ -2030,7 +2030,7 @@ wc_thread_start(void *arg)
 	wc_specs(kids);
 	/* Before the loop runs the start would be XTC_E_STATE. */
 	while (!xtc_atomic_load_i32(&t->running, xtc_mo_seq_cst))
-		(void)xtc_sleep_ns(1000 * 1000);
+		(void)xtc_thrd_sleep_ns(1000 * 1000);
 	t->rc = xtc_sup_start(t->loop, &o, kids, 2, &sup);
 	if (t->rc == XTC_OK) {
 		(void)xtc_sup_stop(sup);

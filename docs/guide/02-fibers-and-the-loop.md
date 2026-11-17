@@ -83,8 +83,8 @@ loop keeps running everything else. It needs the process: in a bare
 sleeping, so give the work a process when it has to wait on time.
 
 {: .warning }
-> Do not call `xtc_sleep_ns` inside a fiber -- it sleeps the whole OS
-> thread and stalls every other fiber on the loop. `xtc_sleep_ns` is for
+> Do not call `xtc_thrd_sleep_ns` inside a fiber -- it sleeps the whole OS
+> thread and stalls every other fiber on the loop. `xtc_thrd_sleep_ns` is for
 > ordinary thread code; `xtc_proc_sleep` is the fiber-friendly form.
 > This distinction -- a blocking call vs. a suspending call -- is the
 > single most important habit in libxtc, and

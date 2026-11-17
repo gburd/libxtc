@@ -187,7 +187,7 @@ fe_watchdog(void *arg)
 	(void)arg;
 	for (i = 0; i < 500 && !xtc_atomic_load_i32(&fe_done, xtc_mo_seq_cst);
 	     i++)
-		(void)xtc_sleep_ns(10LL * 1000 * 1000);
+		(void)xtc_thrd_sleep_ns(10LL * 1000 * 1000);
 	if (!xtc_atomic_load_i32(&fe_done, xtc_mo_seq_cst))
 		munit_error("xtc_stream_for_each livelocked the loop");
 	return NULL;

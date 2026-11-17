@@ -172,18 +172,18 @@ test_amutex_mutex(const MunitParameter p[], void *d)
 static MunitResult
 test_rwlock_basic(const MunitParameter p[], void *d)
 {
-	xtc_rwlock_t *r;
+	xtc_thrd_rwlock_t *r;
 	(void)p; (void)d;
-	munit_assert_int(xtc_rwlock_create(&r), ==, XTC_OK);
-	munit_assert_int(xtc_rwlock_rdlock(r, 0), ==, XTC_OK);
-	munit_assert_int(xtc_rwlock_rdlock(r, 0), ==, XTC_OK);
-	munit_assert_int(xtc_rwlock_wrlock(r, 0), ==, XTC_E_AGAIN); /* readers held */
-	munit_assert_int(xtc_rwlock_unlock(r), ==, XTC_OK);
-	munit_assert_int(xtc_rwlock_unlock(r), ==, XTC_OK);
-	munit_assert_int(xtc_rwlock_wrlock(r, 0), ==, XTC_OK);
-	munit_assert_int(xtc_rwlock_rdlock(r, 0), ==, XTC_E_AGAIN); /* writer held */
-	munit_assert_int(xtc_rwlock_unlock(r), ==, XTC_OK);
-	xtc_rwlock_destroy(r);
+	munit_assert_int(xtc_thrd_rwlock_create(&r), ==, XTC_OK);
+	munit_assert_int(xtc_thrd_rwlock_rdlock(r, 0), ==, XTC_OK);
+	munit_assert_int(xtc_thrd_rwlock_rdlock(r, 0), ==, XTC_OK);
+	munit_assert_int(xtc_thrd_rwlock_wrlock(r, 0), ==, XTC_E_AGAIN); /* readers held */
+	munit_assert_int(xtc_thrd_rwlock_unlock(r), ==, XTC_OK);
+	munit_assert_int(xtc_thrd_rwlock_unlock(r), ==, XTC_OK);
+	munit_assert_int(xtc_thrd_rwlock_wrlock(r, 0), ==, XTC_OK);
+	munit_assert_int(xtc_thrd_rwlock_rdlock(r, 0), ==, XTC_E_AGAIN); /* writer held */
+	munit_assert_int(xtc_thrd_rwlock_unlock(r), ==, XTC_OK);
+	xtc_thrd_rwlock_destroy(r);
 	return MUNIT_OK;
 }
 
@@ -448,7 +448,7 @@ to_hold_sleep(void *arg)
 	 * and the loop only checks deadlines when it next wakes.  400 ms is
 	 * ~20x the deadline and still fast, so the assertion "the waiter
 	 * timed out while the lock was held" cannot flip on timer slop. */
-	(void)xtc_sleep_ns(400 * 1000 * 1000LL);   /* 400 ms */
+	(void)xtc_thrd_sleep_ns(400 * 1000 * 1000LL);   /* 400 ms */
 	return 0;
 }
 

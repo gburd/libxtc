@@ -19,11 +19,11 @@
 .Nm xtc_arwlock_wrlock ,
 .Nm xtc_arwlock_unlock ,
 .Nm xtc_rwlock ,
-.Nm xtc_rwlock_create ,
-.Nm xtc_rwlock_destroy ,
-.Nm xtc_rwlock_rdlock ,
-.Nm xtc_rwlock_wrlock ,
-.Nm xtc_rwlock_unlock ,
+.Nm xtc_thrd_rwlock_create ,
+.Nm xtc_thrd_rwlock_destroy ,
+.Nm xtc_thrd_rwlock_rdlock ,
+.Nm xtc_thrd_rwlock_wrlock ,
+.Nm xtc_thrd_rwlock_unlock ,
 .Nm xtc_notify ,
 .Nm xtc_notify_create ,
 .Nm xtc_notify_destroy ,
@@ -56,7 +56,13 @@
 .Nm xtc_abort_token_is_aborted ,
 .Nm xtc_abort_token_reason ,
 .Nm xtc_gate_close ,
-.Nm xtc_amutex_create_ex
+.Nm xtc_amutex_create_ex ,
+.Nm xtc_rwlock_t ,
+.Nm xtc_rwlock_create ,
+.Nm xtc_rwlock_destroy ,
+.Nm xtc_rwlock_rdlock ,
+.Nm xtc_rwlock_wrlock ,
+.Nm xtc_rwlock_unlock
 .Nd async synchronisation primitives
 .Sh SYNOPSIS
 .In xtc.h
@@ -86,15 +92,15 @@
 .Ft int
 .Fn xtc_arwlock_unlock "xtc_arwlock_t *rw"
 .Ft int
-.Fn xtc_rwlock_create "xtc_rwlock_t **out"
+.Fn xtc_thrd_rwlock_create "xtc_thrd_rwlock_t **out"
 .Ft void
-.Fn xtc_rwlock_destroy "xtc_rwlock_t *rw"
+.Fn xtc_thrd_rwlock_destroy "xtc_thrd_rwlock_t *rw"
 .Ft int
-.Fn xtc_rwlock_rdlock "xtc_rwlock_t *rw" "int64_t timeout_ns"
+.Fn xtc_thrd_rwlock_rdlock "xtc_thrd_rwlock_t *rw" "int64_t timeout_ns"
 .Ft int
-.Fn xtc_rwlock_wrlock "xtc_rwlock_t *rw" "int64_t timeout_ns"
+.Fn xtc_thrd_rwlock_wrlock "xtc_thrd_rwlock_t *rw" "int64_t timeout_ns"
 .Ft int
-.Fn xtc_rwlock_unlock "xtc_rwlock_t *rw"
+.Fn xtc_thrd_rwlock_unlock "xtc_thrd_rwlock_t *rw"
 .Ft int
 .Fn xtc_notify_create "xtc_notify_t **out"
 .Ft void
@@ -219,12 +225,12 @@ condition variable: a blocked acquire blocks the OS thread (it does
 NOT park the fiber).  Use
 .Vt xtc_arwlock
 instead on the hot path of an event loop.
-.Fn xtc_rwlock_create ,
-.Fn xtc_rwlock_destroy ,
-.Fn xtc_rwlock_rdlock ,
-.Fn xtc_rwlock_wrlock ,
+.Fn xtc_thrd_rwlock_create ,
+.Fn xtc_thrd_rwlock_destroy ,
+.Fn xtc_thrd_rwlock_rdlock ,
+.Fn xtc_thrd_rwlock_wrlock ,
 and
-.Fn xtc_rwlock_unlock
+.Fn xtc_thrd_rwlock_unlock
 mirror the async variant.
 .It Vt xtc_notify
 A 0-or-1 latch.
@@ -384,6 +390,28 @@ Use
 Use
 .Fn xtc_amutex_create_flags ;
 arguments reordered: (flags, out).
+.It Vt xtc_rwlock_t
+Use
+.Vt xtc_thrd_rwlock_t ;
+3.0 gives the xtc_rwlock_t name to the fiber lock (xtc_arwlock_t today).
+.It Fn xtc_rwlock_create
+Use
+.Fn xtc_thrd_rwlock_create ;
+same arguments; blocks the OS thread (on a loop use xtc_arwlock_create).
+.It Fn xtc_rwlock_destroy
+Use
+.Fn xtc_thrd_rwlock_destroy .
+.It Fn xtc_rwlock_rdlock
+Use
+.Fn xtc_thrd_rwlock_rdlock ;
+same arguments; blocks the OS thread (on a loop use xtc_arwlock_rdlock).
+.It Fn xtc_rwlock_wrlock
+Use
+.Fn xtc_thrd_rwlock_wrlock ;
+same arguments; blocks the OS thread (on a loop use xtc_arwlock_wrlock).
+.It Fn xtc_rwlock_unlock
+Use
+.Fn xtc_thrd_rwlock_unlock .
 .El
 .Sh SEE ALSO
 .Xr xtc_async 3 ,

@@ -157,6 +157,12 @@ XTC_2.2 {
 		xtc_svr_child_main;
 		xtc_tail_app;
 		xtc_tail_app_name;
+		xtc_thrd_rwlock_create;
+		xtc_thrd_rwlock_destroy;
+		xtc_thrd_rwlock_rdlock;
+		xtc_thrd_rwlock_unlock;
+		xtc_thrd_rwlock_wrlock;
+		xtc_thrd_sleep_ns;
 		xtc_thread_register;
 		xtc_timer_detach;
 		xtc_tnt_run;

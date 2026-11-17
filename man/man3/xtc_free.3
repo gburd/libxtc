@@ -12,13 +12,14 @@
 .Nm xtc_aligned_free ,
 .Nm xtc_clock_mono ,
 .Nm xtc_clock_real ,
-.Nm xtc_sleep_ns ,
+.Nm xtc_thrd_sleep_ns ,
 .Nm xtc_atomic_i64_load ,
 .Nm xtc_atomic_i64_add ,
 .Nm xtc_ncpus ,
 .Nm xtc_numa_nnodes ,
 .Nm xtc_numa_node_of_cpu ,
-.Nm xtc_numa_current_node
+.Nm xtc_numa_current_node ,
+.Nm xtc_sleep_ns
 .Nd public allocation, clock, sleep, and atomic helpers
 .Sh SYNOPSIS
 .In xtc.h
@@ -39,7 +40,7 @@
 .Ft int64_t
 .Fn xtc_clock_real "void"
 .Ft int
-.Fn xtc_sleep_ns "int64_t ns"
+.Fn xtc_thrd_sleep_ns "int64_t ns"
 .Ft int64_t
 .Fn xtc_atomic_i64_load "const int64_t *p"
 .Ft int64_t
@@ -116,7 +117,7 @@ and
 .Fn xtc_clock_real
 read the monotonic and real clocks in nanoseconds (returning 0 on the
 rare query failure).
-.Fn xtc_sleep_ns
+.Fn xtc_thrd_sleep_ns
 sleeps the calling OS THREAD; inside a fiber use
 .Xr xtc_proc_sleep 3
 instead, which parks the fiber without blocking the loop.
@@ -158,7 +159,7 @@ return the allocated pointer, or
 on failure.
 .Fn xtc_clock_mono No and Fn xtc_clock_real No return a nanosecond count
 (0 on failure).
-.Fn xtc_sleep_ns
+.Fn xtc_thrd_sleep_ns
 returns
 .Dv XTC_OK
 after sleeping at least
@@ -193,6 +194,17 @@ or 0 when the topology is unavailable.
 .Fn xtc_numa_current_node
 returns the calling thread's current node, or 0.
 None of these fail.
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Fn xtc_sleep_ns
+Use
+.Fn xtc_thrd_sleep_ns ;
+same arguments; blocks the OS thread (in a fiber use xtc_proc_sleep).
+.El
 .Sh SEE ALSO
 .Xr xtc_proc 3 ,
 .Xr xtc_net 3 ,

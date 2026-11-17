@@ -97,6 +97,12 @@ result keeps working until it moves to the new name.
 | `xtc_reg_unregister_pid()` | `xtc_reg_del()` | function | same arguments; a miss is XTC_E_NOTFOUND (the old name: XTC_E_INVAL) |
 | `xtc_reg_whereis()` | `xtc_reg_get()` | function | same arguments; a miss is XTC_E_NOTFOUND (the old name: XTC_E_INVAL) |
 | `XTC_RES_CAPS_DEFAULT` | `XTC_RES_CAPS_INIT` | macro |  |
+| `xtc_rwlock_create()` | `xtc_thrd_rwlock_create()` | function | same arguments; blocks the OS thread (on a loop use xtc_arwlock_create) |
+| `xtc_rwlock_destroy()` | `xtc_thrd_rwlock_destroy()` | function |  |
+| `xtc_rwlock_rdlock()` | `xtc_thrd_rwlock_rdlock()` | function | same arguments; blocks the OS thread (on a loop use xtc_arwlock_rdlock) |
+| `xtc_rwlock_t` | `xtc_thrd_rwlock_t` | type | 3.0 gives the xtc_rwlock_t name to the fiber lock (xtc_arwlock_t today) |
+| `xtc_rwlock_unlock()` | `xtc_thrd_rwlock_unlock()` | function |  |
+| `xtc_rwlock_wrlock()` | `xtc_thrd_rwlock_wrlock()` | function | same arguments; blocks the OS thread (on a loop use xtc_arwlock_wrlock) |
 | `xtc_scope_close()` | `xtc_scope_leave()` | function |  |
 | `xtc_scope_open()` | `xtc_scope_enter()` | function |  |
 | `xtc_set_stack_size()` | `xtc_runtime_set_stack_size()` | function |  |
@@ -104,6 +110,7 @@ result keeps working until it moves to the new name.
 | `xtc_slab_pressure_listen()` | `xtc_slab_pressure_create()` | function | the handle is now returned: pass an out pointer and keep (or never destroy) it |
 | `xtc_slab_pressure_listen_ex()` | `xtc_slab_pressure_create()` | function | same arguments |
 | `xtc_slab_pressure_stop()` | `xtc_slab_pressure_destroy()` | function | the new name returns void; the old one returns XTC_E_INVAL for NULL, XTC_E_NOSYS without PSI, else XTC_OK |
+| `xtc_sleep_ns()` | `xtc_thrd_sleep_ns()` | function | same arguments; blocks the OS thread (in a fiber use xtc_proc_sleep) |
 | `xtc_stack_reclaim_disable()` | `xtc_runtime_set_stack_reclaim()` | function | call it with 0 |
 | `xtc_stack_reclaim_enable()` | `xtc_runtime_set_stack_reclaim()` | function | keep_bytes 0 now means off; the old 0 (one page) is the page size |
 | `xtc_stack_reclaim_enabled()` | `xtc_runtime_get_stack_reclaim()` | function | nonzero (the keep margin) when on |
@@ -135,13 +142,29 @@ because `enum xtc_x` and `xtc_x_t` name the same type:
 `xtc_causal_kind_t`, and the tag `enum xtc_down_kind` for
 `xtc_down_kind_t`.
 
+## The `_thrd_` names
+
+A call named `xtc_thrd_*` blocks the calling OS thread.  It has a fiber
+twin that parks instead, and code on a loop uses the twin.  2.2 gives
+the qualifier to the two such calls that lacked it:
+`xtc_thrd_rwlock_*` (twin: `xtc_arwlock_*`) and `xtc_thrd_sleep_ns`
+(twin: `xtc_proc_sleep`).  Calls that park a fiber and block only when
+called off one (`xtc_osproc_wait`, the `xtc_lockmgr_*` waits,
+`xtc_lwlock_acquire`, `xtc_barrier_wait`, `xtc_future_wait`) keep their
+names, and so do the calls whose purpose is to be a thread's body
+(`xtc_loop_run`, `xtc_exec_run`, `xtc_app_run`, `xtc_tnt_run`).
+
 ## Planned for 3.0 (not done in 2.x)
 
+- Every name in the table above is removed, and `src/xtc_deprecated.c`
+  with it.
 - `xtc_arwlock_*` / `xtc_arwlock_t` (the fiber-parking reader/writer
   lock) becomes `xtc_rwlock_*` / `xtc_rwlock_t`, reusing the name the
   blocking OS-thread lock gave up in 2.2 (it is `xtc_thrd_rwlock_*`
   now).  3.0 removes the deprecated `xtc_rwlock_*` bridges first, so a
   2.x program that still calls them fails to build against 3.0 instead
-  of silently changing from a thread lock to a fiber lock.
-- The frozen lock-layer aliases (`XTC_LWLOCK_*`, `xtc_lwlock_try_acquire`)
-  become the only names.
+  of silently changing from a thread lock to a fiber lock.  The struct
+  tag of the thread lock (`struct xtc_rwlock`) is renamed then too; in
+  2.x it stays, so the old and new typedef names are one type.
+- The frozen lock-layer aliases (`XTC_LWLOCK_*`, `xtc_lwlock_try_acquire`,
+  `XTC_LOCKMGR_OPTS_INIT`) become the only names.

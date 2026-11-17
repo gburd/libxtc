@@ -240,14 +240,14 @@ XTC_API int64_t xtc_clock_mono(void);
 XTC_API int64_t xtc_clock_real(void);
 
 /*
- * xtc_sleep_ns --
+ * xtc_thrd_sleep_ns --
  *	Sleep the CALLING OS THREAD for at least `ns` nanoseconds.  This
  *	is a THREAD sleep (blocking); inside a fiber use xtc_proc_sleep
  *	instead, which parks the fiber and keeps the loop live.  Provided
  *	so a consumer never needs raw nanosleep.  Returns XTC_OK, or a
  *	negative XTC_E_* on interruption/error.
  */
-XTC_API int xtc_sleep_ns(int64_t ns);
+XTC_API int xtc_thrd_sleep_ns(int64_t ns);
 
 /*
  * xtc_atomic_i64_load / xtc_atomic_i64_add --
@@ -336,6 +336,12 @@ XTC_API int xtc_ncpus(void);
 XTC_API int xtc_numa_nnodes(void);
 XTC_API int xtc_numa_node_of_cpu(int cpu);
 XTC_API int xtc_numa_current_node(void);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_thrd_sleep_ns")
+XTC_API int xtc_sleep_ns(int64_t ns);
 
 #ifdef __cplusplus
 }

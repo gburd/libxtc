@@ -98,7 +98,7 @@ test_public_utils(const MunitParameter params[], void *data)
 	t1 = xtc_clock_mono();
 	munit_assert_int64(t1, >=, t0);
 	munit_assert_int64(xtc_clock_real(), >, 0);
-	(void)xtc_sleep_ns(1000);       /* 1us; returns XTC_OK off a loop */
+	(void)xtc_thrd_sleep_ns(1000);       /* 1us; returns XTC_OK off a loop */
 
 	/* atomics on a plain int64. */
 	munit_assert_int64(xtc_atomic_i64_add(&a, 5), ==, 0);   /* returns prior */

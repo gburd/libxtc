@@ -8,7 +8,7 @@
  *	  - xtc_res_set_alert accepted pct 0 and 1.0 (documented open
  *	    interval (0.0, 1.0));
  *	  - xtc_res_set_cap(-5) silently made the kind unbounded;
- *	  - xtc_sleep_ns(-5) returned an undocumented -1 (it is
+ *	  - xtc_thrd_sleep_ns(-5) returned an undocumented -1 (it is
  *	    XTC_E_INVAL; pinned here so the documented code cannot drift);
  *	  - an xtc_slab redzone violation wrote to the process's stderr
  *	    from library code instead of going through xtc_log.
@@ -65,8 +65,8 @@ static MunitResult
 test_sleep_negative(const MunitParameter p[], void *d)
 {
 	(void)p; (void)d;
-	munit_assert_int(xtc_sleep_ns(-5), ==, XTC_E_INVAL);
-	munit_assert_int(xtc_sleep_ns(0), ==, XTC_OK);
+	munit_assert_int(xtc_thrd_sleep_ns(-5), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_thrd_sleep_ns(0), ==, XTC_OK);
 	return MUNIT_OK;
 }
 

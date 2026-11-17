@@ -570,7 +570,7 @@ ol_thread(void *arg)
 
 	/* Wait until the server pid is published and the loop is running. */
 	while (!xtc_atomic_load_i32(&a->started, xtc_mo_seq_cst))
-		(void)xtc_sleep_ns(1000 * 1000LL);
+		(void)xtc_thrd_sleep_ns(1000 * 1000LL);
 
 	/* xtc_self() is NONE here (not a proc), so this takes the off-loop
 	 * branch. */
@@ -690,7 +690,7 @@ late_scrub_and_hold(void)
 	size_t i;
 	int bad = 0;
 	for (i = 0; i < sizeof buf; i++) buf[i] = 0x5a;
-	(void)xtc_sleep_ns(600LL * 1000 * 1000);
+	(void)xtc_thrd_sleep_ns(600LL * 1000 * 1000);
 	for (i = 0; i < sizeof buf; i++)
 		if (buf[i] != 0x5a) bad++;
 	return bad;
@@ -710,7 +710,7 @@ late_thread(void *arg)
 	size_t rsz = 0;
 	int rc;
 
-	(void)xtc_sleep_ns(50LL * 1000 * 1000);   /* let the loop start */
+	(void)xtc_thrd_sleep_ns(50LL * 1000 * 1000);   /* let the loop start */
 	rc = xtc_svr_call(a->target, "q", 1, &reply, &rsz,
 	    50LL * 1000 * 1000);
 	xtc_atomic_store_i32(&a->rc, rc, xtc_mo_seq_cst);
@@ -812,7 +812,7 @@ static void *
 dying_caller_thread(void *arg)
 {
 	struct dying_args *a = arg;
-	(void)xtc_sleep_ns(50LL * 1000 * 1000);
+	(void)xtc_thrd_sleep_ns(50LL * 1000 * 1000);
 	dying_do_call(a);
 	(void)xtc_loop_stop(a->loop);
 	return NULL;
@@ -1056,7 +1056,7 @@ bigto_thread(void *arg)
 	    INT64_MAX);
 	xtc_free(r);
 	while (xtc_atomic_load_i32(&a->proc_rc, xtc_mo_seq_cst) == -12345)
-		(void)xtc_sleep_ns(1000000);
+		(void)xtc_thrd_sleep_ns(1000000);
 	(void)xtc_svr_stop(a->svr);
 	return NULL;
 }
