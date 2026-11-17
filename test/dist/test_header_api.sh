@@ -55,13 +55,16 @@ printf '%s\n' 'typedef struct _CONTEXT { int x; } CONTEXT;' \
     'void RtlCaptureContext(CONTEXT *);' > "$work/win/windows.h"
 
 # Print the declarations of one platform branch: every top-level line the
-# compiler prints back that declares an xtc_ / __xtc_ function.  Defining
+# compiler prints back that declares an xtc_ / __xtc_ function.  clang 19
+# and later print a leading attribute before the return type, clang 18 and
+# earlier after the declarator; the sed moves it behind, so one awk serves.  Defining
 # XTC_EXPORT_H first keeps xtc_export.h from redefining the marker.
 decls() {
 	"$CLANG" -std=gnu11 -fsyntax-only -Xclang -ast-print \
 	    -DXTC_EXPORT_H '-DXTC_API=__attribute__((annotate("xtc_api")))' \
 	    '-DXTC_DEPRECATED(m)=' "$@" -I"$INC" "$work/all.c" \
 	    2> "$work/err" |
+	    sed 's/^__attribute__((annotate("xtc_api"))) \(.*\)$/\1 __attribute__((annotate("xtc_api")))/' |
 	    awk '/^[^ \t}#][^(]*[ *]_*xtc_[A-Za-z0-9_]+\(/ &&
 	        !/^static/ && !/^typedef/'
 }
