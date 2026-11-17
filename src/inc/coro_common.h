@@ -314,18 +314,16 @@ xtc_stack_reclaim_count(void)
  * it.)  noinline keeps the frame below the caller's.  An sp outside the
  * fiber's stack is refused rather than trusted.  No-op unless the
  * reclaimable span exceeds one page (avoids fault churn on shallow
- * fibers).
+ * fibers).  Reached only through coro_stack_shrink, which has checked
+ * that reclaim is on and c has a stack.
  */
 __attribute__((noinline)) static void
-coro_stack_shrink(struct xtc_coro *c)
+coro_stack_shrink_slow(struct xtc_coro *c)
 {
 	long pgl;
 	size_t page, keep;
 	uintptr_t lo, hi, guard, base;
 
-	if (c == NULL || c->stack == NULL ||
-	    !xtc_atomic_load_i32(&g_reclaim_on, xtc_mo_seq_cst))
-		return;
 	pgl = sysconf(_SC_PAGESIZE);
 	page = (pgl > 0) ? (size_t)pgl : 4096u;
 	guard = page;                    /* one guard page at the base */
@@ -346,6 +344,21 @@ coro_stack_shrink(struct xtc_coro *c)
 	if (madvise((void *)lo, (size_t)(hi - lo), MADV_DONTNEED) == 0)
 		(void)xtc_atomic_fetch_add_u64(&g_reclaim_count, 1,
 		    xtc_mo_seq_cst);
+}
+
+/*
+ * The park path's entry to the reclaim: inline, so a yield with reclaim
+ * off (the default) pays a load and a branch, not a call (a call on
+ * every xtc_yield cost about 4 ns, 68.5 -> 72.1 ns per fiber switch).
+ * The work stays out of line in coro_stack_shrink_slow for its frame
+ * address.
+ */
+static inline void
+coro_stack_shrink(struct xtc_coro *c)
+{
+	if (c != NULL && c->stack != NULL &&
+	    xtc_atomic_load_i32(&g_reclaim_on, xtc_mo_seq_cst))
+		coro_stack_shrink_slow(c);
 }
 #else  /* no MADV_DONTNEED: reclaim is a no-op */
 int
