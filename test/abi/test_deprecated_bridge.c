@@ -24,6 +24,7 @@
 #include "xtc.h"
 #include "xtc_batch.h"
 #include "xtc_chan.h"
+#include "xtc_dispatch.h"
 #include "xtc_exec.h"
 #include "xtc_io.h"
 #include "xtc_loop.h"
@@ -189,6 +190,33 @@ bridge_slab_pressure(void)
 	}
 }
 
+/* detach: dispatch_handle_free / timer_release -> *_detach.  A detached
+ * timer still fires. */
+static int g_timer_fired;
+
+static void
+timer_fn(void *arg)
+{
+	(void)arg;
+	g_timer_fired++;
+}
+
+static void
+bridge_detach(void)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_timer_t *t = NULL;
+
+	xtc_dispatch_handle_free(NULL);
+	CHECK(xtc_timer_release(NULL) == XTC_E_INVAL);
+	CHECK(xtc_loop_create(&loop) == XTC_OK);
+	CHECK(xtc_timer_set(loop, 1000, timer_fn, NULL, &t) == XTC_OK);
+	CHECK(xtc_timer_release(t) == XTC_OK);
+	CHECK(xtc_loop_run(loop) == XTC_OK);
+	CHECK(g_timer_fired == 1);
+	xtc_loop_destroy(loop);
+}
+
 int
 main(void)
 {
@@ -198,6 +226,7 @@ main(void)
 	bridge_shutdown();
 	bridge_scope();
 	bridge_slab_pressure();
+	bridge_detach();
 	printf("  [bridge] OK: every deprecated name still works\n");
 	return 0;
 }

@@ -73,7 +73,7 @@ typedef struct xtc_dispatch_handle xtc_dispatch_handle_t;
  *   out_handle -- on XTC_OK, receives an opaque cancel handle.  May be
  *                 NULL if the caller never needs to cancel (fire and
  *                 await).  If non-NULL, the caller MUST eventually pass
- *                 it to xtc_dispatch_cancel OR xtc_dispatch_handle_free
+ *                 it to xtc_dispatch_cancel OR xtc_dispatch_detach
  *                 to release it (cancel frees it too).
  *
  * Returns XTC_OK, XTC_E_INVAL (NULL loop / fn / out_future),
@@ -102,13 +102,19 @@ XTC_API int  xtc_dispatch(xtc_loop_t *loop, int (*fn)(void *), void *arg,
 XTC_API int  xtc_dispatch_cancel(xtc_dispatch_handle_t *h);
 
 /*
- * PUBLIC: void xtc_dispatch_handle_free __P((xtc_dispatch_handle_t *));
+ * PUBLIC: void xtc_dispatch_detach __P((xtc_dispatch_handle_t *));
  *
  * Release a cancel handle WITHOUT cancelling (the caller decided it
  * will never cancel this dispatch).  A no-op on NULL.  Do not use the
  * handle after this.  Not needed if out_handle was passed NULL to
  * xtc_dispatch, or if xtc_dispatch_cancel was already called.
  */
+XTC_API void xtc_dispatch_detach(xtc_dispatch_handle_t *h);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_dispatch_detach")
 XTC_API void xtc_dispatch_handle_free(xtc_dispatch_handle_t *h);
 
 #ifdef __cplusplus

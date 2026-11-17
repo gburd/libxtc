@@ -53,6 +53,7 @@ result keeps working until it moves to the new name.
 | `xtc_chan_demand_close()` | `xtc_chan_demand_shutdown()` | function |  |
 | `xtc_chan_mpmc_close()` | `xtc_chan_mpmc_shutdown()` | function |  |
 | `xtc_chan_mpsc_close()` | `xtc_chan_mpsc_shutdown()` | function |  |
+| `xtc_dispatch_handle_free()` | `xtc_dispatch_detach()` | function |  |
 | `xtc_exec_fini()` | `xtc_exec_destroy()` | function | the new name returns void; the old one returns XTC_E_INVAL for NULL, else XTC_OK |
 | `xtc_exec_init()` | `xtc_exec_create()` | function | arguments changed: (const xtc_exec_opts_t *opts, out), n_loops is opts->n_loops |
 | `xtc_gate_close()` | `xtc_gate_shutdown()` | function |  |
@@ -69,6 +70,7 @@ result keeps working until it moves to the new name.
 | `xtc_slab_pressure_listen()` | `xtc_slab_pressure_create()` | function | the handle is now returned: pass an out pointer and keep (or never destroy) it |
 | `xtc_slab_pressure_listen_ex()` | `xtc_slab_pressure_create()` | function | same arguments |
 | `xtc_slab_pressure_stop()` | `xtc_slab_pressure_destroy()` | function | the new name returns void; the old one returns XTC_E_INVAL for NULL, XTC_E_NOSYS without PSI, else XTC_OK |
+| `xtc_timer_release()` | `xtc_timer_detach()` | function |  |
 <!-- renames:end -->
 
 ## Planned for 3.0 (not done in 2.x)

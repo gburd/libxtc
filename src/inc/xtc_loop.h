@@ -69,7 +69,7 @@ typedef void (*xtc_timer_fn)(void *user);
  *
  * PUBLIC: int  xtc_timer_set __P((xtc_loop_t *, int64_t, xtc_timer_fn, void *, xtc_timer_t **));
  * PUBLIC: int  xtc_timer_cancel __P((xtc_timer_t *));
- * PUBLIC: int  xtc_timer_release __P((xtc_timer_t *));
+ * PUBLIC: int  xtc_timer_detach __P((xtc_timer_t *));
  */
 XTC_API int  xtc_loop_create(xtc_loop_t **out);
 XTC_API void xtc_loop_destroy(xtc_loop_t *loop);
@@ -148,7 +148,7 @@ XTC_API int  xtc_timer_set(xtc_loop_t *loop, int64_t delay_ns,
                            xtc_timer_fn fn, void *user, xtc_timer_t **out_timer);
 XTC_API int  xtc_timer_cancel(xtc_timer_t *timer);
 /*
- * xtc_timer_release --
+ * xtc_timer_detach --
  * Give up the handle xtc_timer_set returned.  The timer is unaffected (a
  * pending one still fires unless cancelled first); its memory is
  * reclaimed once it has fired or been cancelled and the handle is
@@ -157,7 +157,7 @@ XTC_API int  xtc_timer_cancel(xtc_timer_t *timer);
  * Pass NULL as xtc_timer_set's out_timer to need no handle at all.
  * Returns XTC_OK, or XTC_E_INVAL for NULL.  Any thread.
  */
-XTC_API int  xtc_timer_release(xtc_timer_t *timer);
+XTC_API int  xtc_timer_detach(xtc_timer_t *timer);
 
 /*
  * Deprecated names (docs/deprecations.md): removed in 3.0.
@@ -166,6 +166,8 @@ XTC_DEPRECATED("use xtc_loop_create")
 XTC_API int xtc_loop_init(xtc_loop_t **out);
 XTC_DEPRECATED("use xtc_loop_destroy")
 XTC_API int xtc_loop_fini(xtc_loop_t *loop);
+XTC_DEPRECATED("use xtc_timer_detach")
+XTC_API int xtc_timer_release(xtc_timer_t *timer);
 
 #ifdef __cplusplus
 }

@@ -538,11 +538,11 @@ tm14_set_proc(void *a)
 	for (i = 0; i < TM14_N; i++) {
 		munit_assert_int(xtc_timer_set(g_tm14_loop, 1000, tm14_cb, NULL,
 		    &t), ==, XTC_OK);
-		munit_assert_int(xtc_timer_release(t), ==, XTC_OK);
+		munit_assert_int(xtc_timer_detach(t), ==, XTC_OK);
 		munit_assert_int(xtc_timer_set(g_tm14_loop, XTC_NS_PER_SEC,
 		    tm14_cb, NULL, &t), ==, XTC_OK);
 		munit_assert_int(xtc_timer_cancel(t), ==, XTC_OK);
-		munit_assert_int(xtc_timer_release(t), ==, XTC_OK);
+		munit_assert_int(xtc_timer_detach(t), ==, XTC_OK);
 		munit_assert_int(xtc_timer_set(g_tm14_loop, 1000, tm14_cb, NULL,
 		    NULL), ==, XTC_OK);
 		if (i % 1000 == 999)
@@ -675,7 +675,7 @@ tm15_proc(void *a)
 		munit_assert_int(xtc_timer_cancel(g_tm15_h[i]), ==, XTC_OK);
 		if (i % 512 == 0)
 			tm15_check(g_tm15_loop);
-		munit_assert_int(xtc_timer_release(g_tm15_h[i]), ==, XTC_OK);
+		munit_assert_int(xtc_timer_detach(g_tm15_h[i]), ==, XTC_OK);
 	}
 	munit_assert_int(g_tm15_loop->n_timers, ==, 0);
 }

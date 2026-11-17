@@ -184,9 +184,9 @@ xtc_dispatch_cancel(xtc_dispatch_handle_t *h)
 	return XTC_OK;
 }
 
-/* PUBLIC: void xtc_dispatch_handle_free __P((xtc_dispatch_handle_t *)); */
+/* PUBLIC: void xtc_dispatch_detach __P((xtc_dispatch_handle_t *)); */
 void
-xtc_dispatch_handle_free(xtc_dispatch_handle_t *h)
+xtc_dispatch_detach(xtc_dispatch_handle_t *h)
 {
 	__os_free(h);
 }

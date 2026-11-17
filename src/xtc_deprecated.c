@@ -29,6 +29,7 @@
 #include "xtc_batch.h"
 #include "xtc_proc.h"
 #include "xtc_slab.h"
+#include "xtc_dispatch.h"
 
 /* Group: loop / io / bloom / hll lifecycle (create / destroy). */
 
@@ -197,4 +198,18 @@ xtc_slab_pressure_stop(xtc_slab_pressure_t *handle)
 	xtc_slab_pressure_destroy(handle);
 	return XTC_OK;
 #endif
+}
+
+/* Group: detach (give up a handle; the thing continues). */
+
+void
+xtc_dispatch_handle_free(xtc_dispatch_handle_t *h)
+{
+	xtc_dispatch_detach(h);
+}
+
+int
+xtc_timer_release(xtc_timer_t *timer)
+{
+	return xtc_timer_detach(timer);
 }

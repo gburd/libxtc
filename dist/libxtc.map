@@ -81,6 +81,7 @@ XTC_2.2 {
 		xtc_chan_mpmc_shutdown;
 		xtc_chan_mpsc_shutdown;
 		xtc_demonitor;
+		xtc_dispatch_detach;
 		xtc_err_errno;
 		xtc_err_from_errno;
 		xtc_exec_create;
@@ -127,6 +128,7 @@ XTC_2.2 {
 		xtc_tail_app;
 		xtc_tail_app_name;
 		xtc_thread_register;
+		xtc_timer_detach;
 		xtc_tnt_send_from;
 		xtc_tuning_check_ex;
 } XTC_2.0;

@@ -275,7 +275,7 @@ struct xtc_timer {
 	int refs;                   /* owners left: the heap, plus the task's
 	                             * park_timer slot (park timers) or the
 	                             * caller's handle (xtc_timer_set, until
-	                             * xtc_timer_release).  The last to release
+	                             * xtc_timer_detach).  The last to release
 	                             * frees the node.  Either owner may run on a
 	                             * different thread (a517a32), so atomic. */
 	xtc_loop_t  *loop;          /* back-pointer for cancel-by-handle */

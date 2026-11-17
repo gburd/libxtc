@@ -126,7 +126,7 @@ void xtc_alloc_audit_proc_leaks __P((xtc_pid_t, size_t *, size_t *));
 void xtc_alloc_audit_stats __P((size_t *, size_t *));
 void xtc_atomic_pid_store __P((xtc_atomic_pid_t *, xtc_pid_t));
 void xtc_batch_router_destroy __P((xtc_batch_router_t *));
-void xtc_dispatch_handle_free __P((xtc_dispatch_handle_t *));
+void xtc_dispatch_detach __P((xtc_dispatch_handle_t *));
 void xtc_dump __P((int));
 void xtc_lwlock_track_enable __P((int));
 void xtc_lwlock_track_reset __P((void));

@@ -68,7 +68,7 @@ __os_free(void *p)
 	xtc_atomic_fetch_add_i32(&frees, 1, xtc_mo_seq_cst);
 }
 static int
-xtc_timer_release(void *t)
+xtc_timer_detach(void *t)
 {
 	(void)t;
 	return XTC_OK;
@@ -100,7 +100,7 @@ timeout_retire(struct timeout_ctx *t)
 	/* BEGIN SOURCE src/ptc/future.c timeout_retire */
 	if (xtc_atomic_fetch_sub_i32(&t->remaining, 1, xtc_mo_acq_rel) == 1) {
 		if (t->timer != NULL)
-			(void)xtc_timer_release(t->timer);
+			(void)xtc_timer_detach(t->timer);
 		__os_free(t);
 	}
 	/* END SOURCE */

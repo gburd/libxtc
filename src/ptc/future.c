@@ -813,7 +813,7 @@ timeout_retire(struct timeout_ctx *t)
 {
 	if (xtc_atomic_fetch_sub_i32(&t->remaining, 1, xtc_mo_acq_rel) == 1) {
 		if (t->timer != NULL)
-			(void)xtc_timer_release(t->timer);
+			(void)xtc_timer_detach(t->timer);
 		__os_free(t);
 	}
 }

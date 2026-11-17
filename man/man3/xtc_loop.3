@@ -17,9 +17,10 @@
 .Nm xtc_waker_wake ,
 .Nm xtc_timer_set ,
 .Nm xtc_timer_cancel ,
-.Nm xtc_timer_release ,
+.Nm xtc_timer_detach ,
 .Nm xtc_loop_init ,
-.Nm xtc_loop_fini
+.Nm xtc_loop_fini ,
+.Nm xtc_timer_release
 .Nd L2 single-thread event loop, tasks, wakers, timers
 .Sh SYNOPSIS
 .In xtc_loop.h
@@ -51,7 +52,7 @@
 .Ft int
 .Fn xtc_timer_cancel "xtc_timer_t *timer"
 .Ft int
-.Fn xtc_timer_release "xtc_timer_t *timer"
+.Fn xtc_timer_detach "xtc_timer_t *timer"
 .Sh DESCRIPTION
 The L2 event loop drives a single OS thread.
 A loop owns one
@@ -229,7 +230,7 @@ The handle written to
 remains valid, including after the timer has fired
 .Pq see Fn xtc_timer_cancel ,
 until it is passed to
-.Fn xtc_timer_release
+.Fn xtc_timer_detach
 or the loop is finalised.
 .Fa out
 may be
@@ -244,7 +245,7 @@ A cancel on the loop's own thread removes the timer from the heap at
 once; a cancel from another thread marks it, and the loop drops it
 before the heap next grows, so cancelled timers never accumulate.
 .Pp
-.Fn xtc_timer_release
+.Fn xtc_timer_detach
 gives up the handle.
 It does not cancel: a pending timer still fires unless it was
 cancelled first.
@@ -256,7 +257,7 @@ that is never released keeps its timer (about 128 bytes) allocated
 until
 .Fn xtc_loop_destroy ,
 which on a long-running loop is unbounded growth.
-.Fn xtc_timer_release
+.Fn xtc_timer_detach
 was added in 1.55.1; before it, every
 .Fn xtc_timer_set
 timer, and every
@@ -265,7 +266,7 @@ was retained until
 .Fn xtc_loop_destroy .
 .Fn xtc_timer_cancel
 and
-.Fn xtc_timer_release
+.Fn xtc_timer_detach
 may be called from any thread.
 .Sh RETURN VALUES
 .Dv XTC_OK
@@ -320,6 +321,9 @@ Use
 Use
 .Fn xtc_loop_destroy ;
 the new name returns void; the old one returns XTC_E_INVAL for NULL, else XTC_OK.
+.It Fn xtc_timer_release
+Use
+.Fn xtc_timer_detach .
 .El
 .Sh SEE ALSO
 .Xr xtc_io 3 ,

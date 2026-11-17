@@ -1970,7 +1970,7 @@ th_armer(void *arg)
 		abort();
 	}
 	(void)xtc_timer_cancel(far_tm);
-	(void)xtc_timer_release(far_tm);
+	(void)xtc_timer_detach(far_tm);
 	xtc_atomic_store_i32(&g_th_stop, 1, xtc_mo_seq_cst);
 }
 

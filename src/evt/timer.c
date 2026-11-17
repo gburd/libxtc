@@ -38,7 +38,7 @@ __timer_slab_ensure(xtc_loop_t *loop)
 	o.name = "loop.timer";
 	o.obj_size = sizeof(xtc_timer_t);
 	/* No per-thread magazine: a timer's last reference may be dropped on
-	 * any thread (xtc_timer_release, a cross-thread cancel), and a
+	 * any thread (xtc_timer_detach, a cross-thread cancel), and a
 	 * magazine on a thread other than the one that destroys the slab at
 	 * loop_fini would be left holding slots of a freed slab.  Until timers
 	 * were reclaimed during the run the magazine was always empty anyway,
@@ -387,9 +387,9 @@ xtc_timer_cancel(xtc_timer_t *timer)
 	return XTC_OK;
 }
 
-/* PUBLIC: int xtc_timer_release __P((xtc_timer_t *)); */
+/* PUBLIC: int xtc_timer_detach __P((xtc_timer_t *)); */
 int
-xtc_timer_release(xtc_timer_t *timer)
+xtc_timer_detach(xtc_timer_t *timer)
 {
 	/* Only xtc_timer_set hands out handles (from_slab); a park timer is
 	 * never the caller's to release. */

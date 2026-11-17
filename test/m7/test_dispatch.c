@@ -215,7 +215,7 @@ test_handle_free(const MunitParameter p[], void *d)
 	    xtc_dispatch(fixture_loop(&f), effect_return_7, NULL, &fut, &h),
 	    ==, XTC_OK);
 	munit_assert_not_null(h);
-	xtc_dispatch_handle_free(h);   /* release, do not cancel */
+	xtc_dispatch_detach(h);   /* release, do not cancel */
 	munit_assert_int(xtc_future_wait(fut, &out, -1), ==, XTC_OK);
 	munit_assert_llong((long long)out, ==, 7);
 	fixture_stop(&f);
@@ -237,7 +237,7 @@ test_inval(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_dispatch(loop, effect_return_7, NULL, NULL, NULL),
 	    ==, XTC_E_INVAL);
 	munit_assert_int(xtc_dispatch_cancel(NULL), ==, XTC_E_INVAL);
-	xtc_dispatch_handle_free(NULL);   /* no-op, no crash */
+	xtc_dispatch_detach(NULL);   /* no-op, no crash */
 	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
