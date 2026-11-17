@@ -15,7 +15,8 @@
 .Nm xtc_app_loop ,
 .Nm xtc_app_exec ,
 .Nm xtc_app_registry ,
-.Nm xtc_app_supervisor
+.Nm xtc_app_supervisor ,
+.Nm XTC_APP_OPTS_DEFAULT
 .Nd OTP-style application container
 .Sh SYNOPSIS
 .In xtc.h
@@ -65,11 +66,11 @@ A process registry where children can find each other by name
 .Pp
 Typical usage:
 .Bd -literal -offset indent
-xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
-xtc_sup_opts_t sup = XTC_SUP_OPTS_DEFAULT;
+xtc_app_opts_t opts = XTC_APP_OPTS_INIT;
+xtc_sup_opts_t sup = XTC_SUP_OPTS_INIT;
 sup.strategy = XTC_SUP_ONE_FOR_ONE;
 opts.name = "my_service";
-opts.sup = &sup;               /* NULL = XTC_SUP_OPTS_DEFAULT */
+opts.sup = &sup;               /* NULL = XTC_SUP_OPTS_INIT */
 
 xtc_app_t *app;
 xtc_app_create(&opts, &app);
@@ -137,8 +138,8 @@ Every struct passed in carries a
 .Va size
 member that the caller sets to the size of its own view
 .Po the
-.Dv XTC_APP_OPTS_DEFAULT ,
-.Dv XTC_SUP_OPTS_DEFAULT
+.Dv XTC_APP_OPTS_INIT ,
+.Dv XTC_SUP_OPTS_INIT
 and
 .Dv XTC_CHILD_SPEC_INIT
 initializers do it
@@ -328,6 +329,16 @@ returns 1 for the drain request and 0 otherwise.
 .Sh EXAMPLES
 .Pa docs/_includes/snippets/12_graceful_drain.c
 starts workers, sends itself SIGTERM, drains and exits 0.
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Dv XTC_APP_OPTS_DEFAULT
+Use
+.Dv XTC_APP_OPTS_INIT .
+.El
 .Sh SEE ALSO
 .Xr xtc_supervisor 3 ,
 .Xr xtc_proc 3 ,

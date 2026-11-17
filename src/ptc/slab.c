@@ -726,7 +726,7 @@ int
 xtc_slab_create(const xtc_slab_opts_t *opts, xtc_slab_t **out)
 {
 	xtc_slab_t *s;
-	xtc_slab_opts_t defaults = XTC_SLAB_OPTS_DEFAULT, o;
+	xtc_slab_opts_t defaults = XTC_SLAB_OPTS_INIT, o;
 	int rc;
 	size_t slot;
 

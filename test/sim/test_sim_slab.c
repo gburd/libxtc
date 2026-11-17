@@ -102,7 +102,7 @@ run_slab(uint64_t seed, int *out_done, int *out_dbl,
     int *out_null, uint64_t *out_inuse, long *out_hash, uint64_t *out_state)
 {
 	xtc_exec_t *e = NULL;
-	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_INIT;
 	xtc_slab_stats_t st;
 	int i, rc;
 

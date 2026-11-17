@@ -121,8 +121,8 @@ int
 xtc_app_create(const xtc_app_opts_t *opts, xtc_app_t **out)
 {
 	xtc_app_t *a;
-	xtc_app_opts_t defaults = XTC_APP_OPTS_DEFAULT, o = defaults;
-	xtc_sup_opts_t sdef = XTC_SUP_OPTS_DEFAULT, so = sdef;
+	xtc_app_opts_t defaults = XTC_APP_OPTS_INIT, o = defaults;
+	xtc_sup_opts_t sdef = XTC_SUP_OPTS_INIT, so = sdef;
 	int rc;
 	if (out == NULL) return XTC_E_INVAL;
 	if (opts != NULL &&

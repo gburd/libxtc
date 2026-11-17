@@ -38,7 +38,7 @@ capture(void *user, xtc_log_level_t lvl, const char *line, size_t len)
 int
 main(void)
 {
-	xtc_log_opts_t opts = XTC_LOG_OPTS_DEFAULT;
+	xtc_log_opts_t opts = XTC_LOG_OPTS_INIT;
 	xtc_log_t *log;
 	uint32_t loop_id = 3;
 	uint64_t nbytes = 1ull << 40;

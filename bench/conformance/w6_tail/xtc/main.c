@@ -323,7 +323,7 @@ main(int argc, char **argv)
 	parse_args(argc, argv, &gens, &ops, &cap);
 
 	/* ---- xtc_res: set chan_slots cap to --cap ---- */
-	caps           = (xtc_res_caps_t)XTC_RES_CAPS_DEFAULT;
+	caps           = (xtc_res_caps_t)XTC_RES_CAPS_INIT;
 	caps.chan_slots = cap;
 
 	if (xtc_res_init(&res, &caps) != XTC_OK) {

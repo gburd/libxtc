@@ -58,7 +58,7 @@ typedef enum xtc_res_kind {
  * pick reasonable values for a 4-loop executor on a workstation.
  */
 typedef struct xtc_res_caps {
-	size_t  size;             /* sizeof(xtc_res_caps_t): XTC_RES_CAPS_DEFAULT */
+	size_t  size;             /* sizeof(xtc_res_caps_t): XTC_RES_CAPS_INIT */
 	int64_t tasks;            /* default 100000 */
 	int64_t channels;         /* default 4096 */
 	int64_t chan_slots;       /* default 1000000 */
@@ -67,7 +67,7 @@ typedef struct xtc_res_caps {
 	int64_t inbox_msgs;       /* default 65536 (per loop, not global) */
 } xtc_res_caps_t;
 
-#define XTC_RES_CAPS_DEFAULT { \
+#define XTC_RES_CAPS_INIT { \
 	.size        = sizeof(xtc_res_caps_t), \
 	.tasks       = 100000,            \
 	.channels    = 4096,              \
@@ -178,6 +178,12 @@ XTC_API int  xtc_res_set_alert_fn(xtc_res_t *r,
 struct xtc_mctx;
 XTC_API int  xtc_res_attach_mctx(xtc_res_t *r, struct xtc_mctx *m);
 XTC_API int  xtc_res_attach_net(xtc_res_t *r);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+#define XTC_RES_CAPS_DEFAULT XTC_RES_CAPS_INIT
+XTC_DEPRECATED_MACRO(clang deprecated(XTC_RES_CAPS_DEFAULT, "use XTC_RES_CAPS_INIT"))
 
 #ifdef __cplusplus
 }

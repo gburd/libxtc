@@ -165,7 +165,7 @@ unit tests only.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 /* Called automatically by xtc_app_start(); to opt out: */
-xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+xtc_app_opts_t opts = XTC_APP_OPTS_INIT;
 opts.no_tuning_check = 1;
 xtc_app_create(&opts, &app);
 .Ed

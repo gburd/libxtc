@@ -308,7 +308,7 @@ static MunitResult
 test_lock_put(const MunitParameter p[], void *d)
 {
 	xtc_lockmgr_t *m;
-	xtc_lockmgr_opts_t opts = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_lockmgr_opts_t opts = XTC_LOCKMGR_OPTS_INIT;
 	xtc_locker_t l;
 	(void)p; (void)d;
 	opts.detect_mode = XTC_LOCK_DETECT_NONE;
@@ -336,7 +336,7 @@ static MunitResult
 test_lockmgr_admin(const MunitParameter p[], void *d)
 {
 	xtc_lockmgr_t *m;
-	xtc_lockmgr_opts_t opts = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_lockmgr_opts_t opts = XTC_LOCKMGR_OPTS_INIT;
 	xtc_locker_t l;
 	int n;
 	(void)p; (void)d;
@@ -489,7 +489,7 @@ test_sup_n_children(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	xtc_supervisor_t *sup;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[3];
 	xtc_pid_t watcher_pid;
 	(void)p; (void)d;

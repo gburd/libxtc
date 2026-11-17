@@ -47,8 +47,8 @@ static MunitResult
 test_app_basic(const MunitParameter p[], void *d)
 {
 	xtc_app_t *a;
-	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
-	xtc_sup_opts_t sup_opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_app_opts_t opts = XTC_APP_OPTS_INIT;
+	xtc_sup_opts_t sup_opts = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[1];
 	xtc_pid_t dpid;
 	(void)p; (void)d;
@@ -133,8 +133,8 @@ static MunitResult
 test_app_multiloop(const MunitParameter p[], void *d)
 {
 	xtc_app_t *a;
-	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
-	xtc_sup_opts_t sup_opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_app_opts_t opts = XTC_APP_OPTS_INIT;
+	xtc_sup_opts_t sup_opts = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[5];
 	xtc_pid_t dpid;
 	int i;
@@ -287,7 +287,7 @@ dr_thread(void *arg)
 static void
 dr_go(struct dr_run *r, xtc_child_spec_t *kids, int n, int n_loops)
 {
-	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+	xtc_app_opts_t opts = XTC_APP_OPTS_INIT;
 	xtc_app_drain_report_t init = XTC_APP_DRAIN_REPORT_INIT;
 	pthread_t th;
 
@@ -441,7 +441,7 @@ static MunitResult
 test_app_shutdown_inval(const MunitParameter p[], void *d)
 {
 	xtc_app_t *a;
-	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+	xtc_app_opts_t opts = XTC_APP_OPTS_INIT;
 	xtc_app_drain_report_t rep = XTC_APP_DRAIN_REPORT_INIT;
 	xtc_pid_t dpid;
 	(void)p; (void)d;
@@ -490,7 +490,7 @@ static MunitResult
 test_app_drain_on_sigterm(const MunitParameter p[], void *d)
 {
 	xtc_app_t *a;
-	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+	xtc_app_opts_t opts = XTC_APP_OPTS_INIT;
 	xtc_app_drain_report_t init = XTC_APP_DRAIN_REPORT_INIT;
 	xtc_child_spec_t kids[2];
 	struct sigaction before, after;
@@ -534,7 +534,7 @@ static MunitResult
 test_app_drain_on_sigterm(const MunitParameter p[], void *d)
 {
 	xtc_app_t *a;
-	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+	xtc_app_opts_t opts = XTC_APP_OPTS_INIT;
 	(void)p; (void)d;
 	opts.no_tuning_check = 1;
 	munit_assert_int(xtc_app_create(&opts, &a), ==, XTC_OK);
@@ -591,7 +591,7 @@ static MunitResult
 test_app_stop_waits_cleanup_multiloop(const MunitParameter p[], void *d)
 {
 	xtc_app_t *a;
-	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+	xtc_app_opts_t opts = XTC_APP_OPTS_INIT;
 	xtc_child_spec_t kids[3];
 	int i;
 	(void)p; (void)d;
@@ -767,8 +767,8 @@ gu_thread(void *arg)
 static void
 gu_case(xtc_proc_fn extra, int use_reg)
 {
-	xtc_app_opts_t ao = XTC_APP_OPTS_DEFAULT;
-	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_app_opts_t ao = XTC_APP_OPTS_INIT;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kid = XTC_CHILD_SPEC_INIT;
 	struct gu_run r;
 	pthread_t th;
@@ -847,7 +847,7 @@ rm_driver(void *arg)
 static MunitResult
 test_app_reaper_builtin(const MunitParameter p[], void *d)
 {
-	xtc_app_opts_t ao = XTC_APP_OPTS_DEFAULT;
+	xtc_app_opts_t ao = XTC_APP_OPTS_INIT;
 	xtc_pid_t dp;
 	(void)p;
 	(void)d;
@@ -892,8 +892,8 @@ hs_hook(xtc_supervisor_t *sup, const xtc_child_spec_t *spec,
 static MunitResult
 test_app_hook_spec(const MunitParameter p[], void *d)
 {
-	xtc_app_opts_t ao = XTC_APP_OPTS_DEFAULT;
-	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_app_opts_t ao = XTC_APP_OPTS_INIT;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t k = XTC_CHILD_SPEC_INIT;
 	xtc_app_t *a;
 	int n = -1;
@@ -998,7 +998,7 @@ as_thread(void *arg)
 static MunitResult
 test_app_svr_and_sub_children(const MunitParameter p[], void *d)
 {
-	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+	xtc_app_opts_t opts = XTC_APP_OPTS_INIT;
 	xtc_child_spec_t kids[2] = { XTC_CHILD_SPEC_INIT, XTC_CHILD_SPEC_INIT };
 	xtc_app_drain_report_t init = XTC_APP_DRAIN_REPORT_INIT;
 	struct dr_run r;
@@ -1057,8 +1057,8 @@ aw_kid(void *arg)
 static MunitResult
 test_app_wait_children_fail(const MunitParameter p[], void *d)
 {
-	xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
-	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_app_opts_t opts = XTC_APP_OPTS_INIT;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[2] = { XTC_CHILD_SPEC_INIT, XTC_CHILD_SPEC_INIT };
 	xtc_svr_callbacks_t cb = XTC_SVR_CALLBACKS_INIT;
 	xtc_svr_child_t sc = XTC_SVR_CHILD_INIT;

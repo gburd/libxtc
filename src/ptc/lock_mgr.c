@@ -404,7 +404,7 @@ int
 xtc_lockmgr_create(const xtc_lockmgr_opts_t *opts, xtc_lockmgr_t **out)
 {
 	xtc_lockmgr_t *m;
-	xtc_lockmgr_opts_t defaults = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_lockmgr_opts_t defaults = XTC_LOCKMGR_OPTS_INIT;
 	int rc, i;
 	if (out == NULL) return XTC_E_INVAL;
 	if (opts == NULL) opts = &defaults;
@@ -419,7 +419,7 @@ xtc_lockmgr_create(const xtc_lockmgr_opts_t *opts, xtc_lockmgr_t **out)
 
 	/* M11.5b: lock_entry pool now backed by xtc_slab. */
 	{
-		xtc_slab_opts_t so = XTC_SLAB_OPTS_DEFAULT;
+		xtc_slab_opts_t so = XTC_SLAB_OPTS_INIT;
 		so.name = "lockmgr.lock_entry";
 		so.obj_size = sizeof(struct lock_entry);
 		if ((rc = xtc_slab_create(&so, &m->pool.slab)) != XTC_OK) {

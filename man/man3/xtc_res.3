@@ -14,7 +14,8 @@
 .Nm xtc_res_set_alert ,
 .Nm xtc_res_set_alert_fn ,
 .Nm xtc_res_attach_mctx ,
-.Nm xtc_res_attach_net
+.Nm xtc_res_attach_net ,
+.Nm XTC_RES_CAPS_DEFAULT
 .Nd resource accountant with hard caps and high-water alerts
 .Sh SYNOPSIS
 .In xtc.h
@@ -77,7 +78,7 @@ Cross-loop inbox messages in flight
 .Pp
 Caps are supplied as an
 .Vt xtc_res_caps_t ;
-.Dv XTC_RES_CAPS_DEFAULT
+.Dv XTC_RES_CAPS_INIT
 gives reasonable values for a multi-loop executor on a workstation,
 and sets the
 .Va size
@@ -310,7 +311,7 @@ as in the example below.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 xtc_res_t res;
-xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+xtc_res_caps_t caps = XTC_RES_CAPS_INIT;
 caps.mem_bytes = 100 * 1024 * 1024;       /* 100 MiB */
 caps.tasks     = 10000;
 caps.fds       = 4096;
@@ -331,6 +332,16 @@ if (ptr == NULL) {
 xtc_free(ptr);
 xtc_res_release(&res, XTC_RES_MEM_BYTES, sz);
 .Ed
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Dv XTC_RES_CAPS_DEFAULT
+Use
+.Dv XTC_RES_CAPS_INIT .
+.El
 .Sh SEE ALSO
 .Xr xtc_log 3 ,
 .Xr xtc_mctx 3 ,

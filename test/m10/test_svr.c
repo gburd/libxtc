@@ -1564,7 +1564,7 @@ test_svr_child_main(const MunitParameter p[], void *d)
 	xtc_svr_callbacks_t cb = XTC_SVR_CALLBACKS_INIT;
 	xtc_svr_child_t sc = XTC_SVR_CHILD_INIT;
 	xtc_child_spec_t kid = XTC_CHILD_SPEC_INIT;
-	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_INIT;
 	struct sc_state st;
 	struct sc_drive dr;
 	(void)p;

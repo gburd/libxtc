@@ -258,7 +258,7 @@ run_one(uint64_t seed, int adversarial, int *out_committed, int *out_received,
 	wal_opts_t wo = {0};
 	bm_opts_t bo = BM_OPTS_DEFAULT;
 	bm_t *bm = NULL;
-	xtc_lockmgr_opts_t lo = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_lockmgr_opts_t lo = XTC_LOCKMGR_OPTS_INIT;
 	lo.detect_mode = XTC_LOCK_DETECT_ON_BLOCK;   /* no detector thread under sim */
 	sx_db *ddl = NULL;
 	struct worker_arg wa[N_WORKERS];

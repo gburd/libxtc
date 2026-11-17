@@ -74,7 +74,7 @@ client(void *arg)
 	struct run *r = arg;
 	xtc_child_spec_t kids[2] = { XTC_CHILD_SPEC_INIT,
 		XTC_CHILD_SPEC_INIT };
-	xtc_sup_opts_t o = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t o = XTC_SUP_OPTS_INIT;
 	void *reply;
 	size_t len;
 

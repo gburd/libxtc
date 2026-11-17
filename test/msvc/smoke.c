@@ -474,7 +474,7 @@ main(int argc, char **argv)
 	/* --- slab cache (Win32 TLS magazines) --- */
 	{
 		xtc_slab_t *s = NULL;
-		xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
+		xtc_slab_opts_t o = XTC_SLAB_OPTS_INIT;
 		void *p, *q;
 		o.obj_size = 64;
 		CHECK(xtc_slab_create(&o, &s) == XTC_OK);
@@ -688,7 +688,7 @@ main(int argc, char **argv)
 	 * SKIPPED (not failed): a smoke test must not wedge on a busy port. */
 	{
 		static const int ports[3] = { 47654, 47655, 47656 };
-		xtc_tcp_opts_t topts = XTC_TCP_OPTS_DEFAULT;
+		xtc_tcp_opts_t topts = XTC_TCP_OPTS_INIT;
 		int listen_fd = -1;
 		int pi, rc = XTC_E_INTERNAL;
 		for (pi = 0; pi < 3; pi++) {
@@ -850,7 +850,7 @@ main(int argc, char **argv)
 
 	/* --- xtc_logf --- */
 	{
-		xtc_log_opts_t lo = XTC_LOG_OPTS_DEFAULT;
+		xtc_log_opts_t lo = XTC_LOG_OPTS_INIT;
 		xtc_log_t *lg = NULL;
 		const char *want = "18446744073709551615 -9223372036854775808 "
 		                   "42 0000beef <1.2.3> (null)";

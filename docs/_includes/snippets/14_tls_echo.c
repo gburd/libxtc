@@ -212,7 +212,7 @@ int
 main(void)
 {
 	xtc_tls_opts_t sopts, copts;
-	xtc_tcp_opts_t topts = XTC_TCP_OPTS_DEFAULT;
+	xtc_tcp_opts_t topts = XTC_TCP_OPTS_INIT;
 	struct shared  sh;
 	char           dir[] = "/tmp/xtc-tls-snippet.XXXXXX";
 	char           cert[600] = "", key[600] = "";

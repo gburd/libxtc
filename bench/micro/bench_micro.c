@@ -246,7 +246,7 @@ bench_slab_alloc_free(void)
 {
 	long iters = 10000000L * g_scale, i;
 	xtc_slab_t *s = NULL;
-	xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
+	xtc_slab_opts_t o = XTC_SLAB_OPTS_INIT;
 	int64_t t0, t1;
 
 	o.name = "bench";

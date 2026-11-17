@@ -174,7 +174,7 @@ static MunitResult
 test_res_caps(const MunitParameter p[], void *d)
 {
 	xtc_res_t r;
-	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+	xtc_res_caps_t caps = XTC_RES_CAPS_INIT;
 	xtc_chan_mpsc_t *c1, *c2;
 	(void)p; (void)d;
 	caps.channels = 1;

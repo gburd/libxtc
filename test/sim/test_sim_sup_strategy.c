@@ -233,7 +233,7 @@ run_scenario(uint64_t seed, xtc_restart_strategy_t strat,
     uint64_t *out_state)
 {
 	xtc_exec_t *e = NULL;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[N_KIDS];
 	struct reaper_arg ra;
 	struct hammer_arg ha;

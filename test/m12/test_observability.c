@@ -54,7 +54,7 @@ static MunitResult
 test_log_basic(const MunitParameter p[], void *d)
 {
 	xtc_log_t *log;
-	xtc_log_opts_t opts = XTC_LOG_OPTS_DEFAULT;
+	xtc_log_opts_t opts = XTC_LOG_OPTS_INIT;
 	(void)p; (void)d;
 
 	g_log_n = 0;
@@ -83,7 +83,7 @@ static MunitResult
 test_log_drop_on_full(const MunitParameter p[], void *d)
 {
 	xtc_log_t *log;
-	xtc_log_opts_t opts = XTC_LOG_OPTS_DEFAULT;
+	xtc_log_opts_t opts = XTC_LOG_OPTS_INIT;
 	int i;
 	(void)p; (void)d;
 	g_log_n = 0;
@@ -185,7 +185,7 @@ test_log_mpsc(const MunitParameter p[], void *d)
 {
 	static const int rings[] = { 4, 64, 65536 };
 	pthread_t w[MPSC_WRITERS], dr;
-	xtc_log_opts_t opts = XTC_LOG_OPTS_DEFAULT;
+	xtc_log_opts_t opts = XTC_LOG_OPTS_INIT;
 	int r, i;
 	(void)p;
 	(void)d;
@@ -235,7 +235,7 @@ static MunitResult
 test_log_default_vwrite(const MunitParameter p[], void *d)
 {
 	xtc_log_t *log, *saved, *prev;
-	xtc_log_opts_t opts = XTC_LOG_OPTS_DEFAULT;
+	xtc_log_opts_t opts = XTC_LOG_OPTS_INIT;
 	(void)p; (void)d;
 
 	/* Save the current process default (may be NULL: no auto-default). */
@@ -321,7 +321,7 @@ sink_logf(void *user, xtc_log_level_t lvl, const char *buf, size_t len)
 static void
 logf_open(xtc_log_level_t floor)
 {
-	xtc_log_opts_t opts = XTC_LOG_OPTS_DEFAULT;
+	xtc_log_opts_t opts = XTC_LOG_OPTS_INIT;
 
 	opts.sink = sink_logf;
 	opts.sink_fd = -1;
@@ -550,7 +550,7 @@ test_logf_counts(const MunitParameter p[], void *d)
 static MunitResult
 test_logf_ring(const MunitParameter p[], void *d)
 {
-	xtc_log_opts_t opts = XTC_LOG_OPTS_DEFAULT;
+	xtc_log_opts_t opts = XTC_LOG_OPTS_INIT;
 	char big[2000];
 	int i;
 	(void)p;
@@ -886,7 +886,7 @@ static MunitResult
 test_res_alert(const MunitParameter p[], void *d)
 {
 	xtc_res_t r;
-	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+	xtc_res_caps_t caps = XTC_RES_CAPS_INIT;
 	(void)p; (void)d;
 	caps.tasks = 100;
 	munit_assert_int(xtc_res_init(&r, &caps), ==, XTC_OK);
@@ -1175,7 +1175,7 @@ test_inspect_name_label_crit(const MunitParameter p[], void *d)
 	char tmpl[] = "/tmp/xtc_nm_dump_XXXXXX", buf[16384];
 	xtc_loop_t *loop = NULL;
 	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
-	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kid = XTC_CHILD_SPEC_INIT;
 	xtc_supervisor_t *sup = NULL;
 	ssize_t n;

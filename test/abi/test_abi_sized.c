@@ -262,7 +262,7 @@ g2_inputs(void)
 	xtc_loop_stats_t lz = XTC_LOOP_STATS_INIT;
 	xtc_supervisor_t *sup = NULL;
 	xtc_svr_t *svr = NULL;
-	xtc_sup_opts_t zs = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t zs = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t zk[2];
 	xtc_svr_opts_t *so2;
 	xtc_svr_callbacks_t zcb = XTC_SVR_CALLBACKS_INIT;
@@ -387,7 +387,7 @@ g3_io(void)
 	struct old_tcp_opts *to;
 	struct old_fs_stat *fo;
 	struct old_tls_opts *lo;
-	xtc_tcp_opts_t tz = XTC_TCP_OPTS_DEFAULT;
+	xtc_tcp_opts_t tz = XTC_TCP_OPTS_INIT;
 	xtc_fs_stat_t fz = XTC_FS_STAT_INIT;
 	xtc_aio_t az = XTC_AIO_INIT;
 	xtc_io_t *io = NULL;
@@ -454,7 +454,7 @@ g4_ptc(void)
 	struct old_res_caps *rc;
 	struct old_log_opts *lo;
 	struct old_cfg_spec *cs;
-	xtc_slab_opts_t sz = XTC_SLAB_OPTS_DEFAULT;
+	xtc_slab_opts_t sz = XTC_SLAB_OPTS_INIT;
 	xtc_slab_t *slab = NULL;
 	xtc_res_t res;
 	xtc_log_t *log = NULL;

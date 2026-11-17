@@ -48,7 +48,7 @@ static MunitResult
 test_set_cap_negative(const MunitParameter p[], void *d)
 {
 	xtc_res_t r;
-	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+	xtc_res_caps_t caps = XTC_RES_CAPS_INIT;
 	(void)p; (void)d;
 	caps.tasks = 10;
 	munit_assert_int(xtc_res_init(&r, &caps), ==, XTC_OK);
@@ -88,8 +88,8 @@ static MunitResult
 test_redzone_via_log(const MunitParameter p[], void *d)
 {
 	xtc_slab_t *s;
-	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
-	xtc_log_opts_t lo = XTC_LOG_OPTS_DEFAULT;
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_INIT;
+	xtc_log_opts_t lo = XTC_LOG_OPTS_INIT;
 	xtc_log_t *log;
 	xtc_slab_stats_t st = XTC_SLAB_STATS_INIT;
 	uint8_t *o;

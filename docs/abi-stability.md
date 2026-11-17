@@ -49,7 +49,7 @@ Every public struct that a caller allocates and the library reads or
 writes -- option, spec, callback, info and stats structs -- starts with
 `size_t size`, which the caller sets to `sizeof` its own view of the
 struct.  Each struct has an initializer that does it
-(`XTC_PROC_OPTS_INIT`, `XTC_SUP_OPTS_DEFAULT`, `XTC_TLS_OPTS_INIT`, ...),
+(`XTC_PROC_OPTS_INIT`, `XTC_SUP_OPTS_INIT`, `XTC_TLS_OPTS_INIT`, ...),
 or a designated initializer can: `{ .size = sizeof(xtc_proc_opts_t),
 .name = "w" }`.
 
@@ -291,7 +291,7 @@ of them and references every function they declare; `dist/build_msvc.bat`
 does the same with `cl /TP`.  That is the whole promise.  C-only
 conveniences (`xtc_logf`, `xtc_atomic.h`, `xtc_compiler.h`) are not
 visible in a C++ translation unit, there are no overloads or templates,
-and an `XTC_*_DEFAULT` initializer that uses designated initializers
+and an `XTC_*_INIT` initializer that uses designated initializers
 needs C++20.  For this kind of runtime in C++, use Seastar.
 
 ## Frozen surfaces (POLICY, layout ENFORCED)

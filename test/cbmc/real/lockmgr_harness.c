@@ -164,7 +164,7 @@ any_mode(void)
 int
 main(void)
 {
-	xtc_lockmgr_opts_t opts = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_lockmgr_opts_t opts = XTC_LOCKMGR_OPTS_INIT;
 	xtc_lockmgr_t *m;
 	xtc_locker_t L[2];
 	static const char obj[] = "o";

@@ -710,7 +710,7 @@ static MunitResult
 test_slab_reaper_spawn(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
+	xtc_slab_opts_t o = XTC_SLAB_OPTS_INIT;
 	struct reap_st s;
 	(void)p; (void)d;
 	memset(&s, 0, sizeof s);
@@ -891,7 +891,7 @@ static int
 tuning_says_governor(const char *governor)
 {
 	char path[] = "/tmp/xtc_ar_gov_XXXXXX";
-	xtc_log_opts_t o = XTC_LOG_OPTS_DEFAULT;
+	xtc_log_opts_t o = XTC_LOG_OPTS_INIT;
 	xtc_log_t *log = NULL;
 	int fd = mkstemp(path);
 	munit_assert_int(fd, >=, 0);

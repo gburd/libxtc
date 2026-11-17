@@ -14,7 +14,7 @@
  *	Typical usage:
  *
  *	    xtc_app_t *app;
- *	    xtc_app_opts_t opts = XTC_APP_OPTS_DEFAULT;
+ *	    xtc_app_opts_t opts = XTC_APP_OPTS_INIT;
  *	    xtc_app_create(&opts, &app);
  *	    xtc_app_start(app, child_specs, n_children);
  *	    xtc_app_run(app);              // blocks until app stops
@@ -56,7 +56,7 @@ typedef struct xtc_app_opts {
 	                                * __os_tuning_check() power/kernel-
 	                                * tuning advisor probe xtc_app_start
 	                                * runs by default */
-	/* Root-supervisor settings, or NULL for XTC_SUP_OPTS_DEFAULT.  A
+	/* Root-supervisor settings, or NULL for XTC_SUP_OPTS_INIT.  A
 	 * pointer, not an embedded struct: a sized struct embedded by value
 	 * would move every field after it whenever it grew.  Read (copied)
 	 * by xtc_app_create; need not outlive the call.  Its .exec is
@@ -64,7 +64,7 @@ typedef struct xtc_app_opts {
 	const xtc_sup_opts_t *sup;
 } xtc_app_opts_t;
 
-#define XTC_APP_OPTS_DEFAULT { \
+#define XTC_APP_OPTS_INIT { \
 	.size = sizeof(xtc_app_opts_t), \
 	.name = NULL, \
 	.loop = NULL, \
@@ -203,6 +203,12 @@ XTC_API xtc_reg_t  *xtc_app_registry(const xtc_app_t *app);
  * Borrowed: valid until xtc_app_destroy; do not xtc_sup_stop or
  * xtc_sup_join it (use xtc_app_stop / xtc_app_shutdown). */
 XTC_API xtc_supervisor_t *xtc_app_supervisor(const xtc_app_t *app);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+#define XTC_APP_OPTS_DEFAULT XTC_APP_OPTS_INIT
+XTC_DEPRECATED_MACRO(clang deprecated(XTC_APP_OPTS_DEFAULT, "use XTC_APP_OPTS_INIT"))
 
 #ifdef __cplusplus
 }

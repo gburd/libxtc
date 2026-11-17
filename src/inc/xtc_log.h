@@ -74,7 +74,7 @@ typedef struct xtc_log_opts {
 	void            *sink_user;
 } xtc_log_opts_t;
 
-#define XTC_LOG_OPTS_DEFAULT { \
+#define XTC_LOG_OPTS_INIT { \
 	.size       = sizeof(xtc_log_opts_t), \
 	.ring_size  = 4096, \
 	.record_max = 256, \
@@ -410,6 +410,12 @@ XTC__LOGARG_INTS(XTC__LOGARG_C_DEF)
 #define xtc_logf(lvl, ...) xtc_logf_to(xtc_log_default(), (lvl), __VA_ARGS__)
 
 #endif /* !__cplusplus */
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+#define XTC_LOG_OPTS_DEFAULT XTC_LOG_OPTS_INIT
+XTC_DEPRECATED_MACRO(clang deprecated(XTC_LOG_OPTS_DEFAULT, "use XTC_LOG_OPTS_INIT"))
 
 #ifdef __cplusplus
 }

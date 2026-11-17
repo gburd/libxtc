@@ -165,7 +165,7 @@ main(int argc, char **argv)
 		return 1;
 	}
 	for (i = 0; i < loops; i++) {
-		xtc_res_caps_t c = XTC_RES_CAPS_DEFAULT;
+		xtc_res_caps_t c = XTC_RES_CAPS_INIT;
 		c.tasks = total + 1024;
 		c.inbox_msgs = total + 1024;
 		c.mem_bytes = 200L * 1024 * 1024 * 1024;

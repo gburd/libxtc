@@ -35,7 +35,7 @@ static MunitResult
 test_tcp_listen_dial(const MunitParameter p[], void *d)
 {
 	int listen_fd = -1, client_fd = -1, accept_fd;
-	xtc_tcp_opts_t opts = XTC_TCP_OPTS_DEFAULT;
+	xtc_tcp_opts_t opts = XTC_TCP_OPTS_INIT;
 	struct sockaddr_in sa;
 	socklen_t salen = sizeof sa;
 	int port;
@@ -105,7 +105,7 @@ test_tcp_listen_dial(const MunitParameter p[], void *d)
 static int
 backlog_fill(int (*listen_fn)(int, int *), int arg, int n)
 {
-	xtc_tcp_opts_t opts = XTC_TCP_OPTS_DEFAULT;
+	xtc_tcp_opts_t opts = XTC_TCP_OPTS_INIT;
 	struct sockaddr_in s;
 	socklen_t l = sizeof s;
 	struct pollfd *pf;
@@ -145,7 +145,7 @@ static int g_bl_port;
 static int
 bl_default(int unused, int *out)
 {
-	xtc_tcp_opts_t opts = XTC_TCP_OPTS_DEFAULT;
+	xtc_tcp_opts_t opts = XTC_TCP_OPTS_INIT;
 	(void)unused;
 	return xtc_net_listen(XTC_NET_INET, "127.0.0.1", g_bl_port, &opts, out);
 }
@@ -153,7 +153,7 @@ bl_default(int unused, int *out)
 static int
 bl_explicit(int backlog, int *out)
 {
-	xtc_tcp_opts_t opts = XTC_TCP_OPTS_DEFAULT;
+	xtc_tcp_opts_t opts = XTC_TCP_OPTS_INIT;
 	return xtc_net_listen_backlog(XTC_NET_INET, "127.0.0.1", g_bl_port,
 	    &opts, backlog, out);
 }
@@ -180,7 +180,7 @@ test_listen_backlog(const MunitParameter p[], void *d)
 	struct rlimit rl;
 	FILE *f;
 	int somax = 0, got, fd = -1;
-	xtc_tcp_opts_t opts = XTC_TCP_OPTS_DEFAULT;
+	xtc_tcp_opts_t opts = XTC_TCP_OPTS_INIT;
 	(void)p; (void)d;
 
 	f = fopen("/proc/sys/net/core/somaxconn", "r");
@@ -222,7 +222,7 @@ static MunitResult
 test_tcp_knobs(const MunitParameter p[], void *d)
 {
 	int fd;
-	xtc_tcp_opts_t opts = XTC_TCP_OPTS_DEFAULT;
+	xtc_tcp_opts_t opts = XTC_TCP_OPTS_INIT;
 	int v;
 	socklen_t l;
 	(void)p; (void)d;

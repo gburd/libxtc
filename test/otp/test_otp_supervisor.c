@@ -112,7 +112,7 @@ test_one_for_one_basic(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	xtc_supervisor_t *sup;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[2];
 	xtc_pid_t wpid;
 	(void)p; (void)d;
@@ -159,7 +159,7 @@ test_one_for_all(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	xtc_supervisor_t *sup;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[2];
 	xtc_pid_t wpid;
 	(void)p; (void)d;
@@ -220,7 +220,7 @@ test_rest_for_one(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	xtc_supervisor_t *sup;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[3];
 	xtc_pid_t wpid;
 	(void)p; (void)d;
@@ -291,7 +291,7 @@ test_permanent_restarts_on_normal_exit(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	xtc_supervisor_t *sup;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[1];
 	xtc_pid_t wpid;
 	(void)p; (void)d;
@@ -344,7 +344,7 @@ test_temporary_no_restart(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	xtc_supervisor_t *sup;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[1];
 	xtc_pid_t wpid;
 	(void)p; (void)d;
@@ -383,7 +383,7 @@ test_intensity_exceeded(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	xtc_supervisor_t *sup;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[1];
 	(void)p; (void)d;
 	xtc_atomic_store_i32(&g_flap_count, 0, xtc_mo_seq_cst);
@@ -429,7 +429,7 @@ test_count_children(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	xtc_supervisor_t *sup;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[5];
 	xtc_pid_t wpid;
 	int i;
@@ -485,7 +485,7 @@ test_scale_start_stop_many(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	xtc_supervisor_t *sup;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[50];
 	xtc_pid_t wpid;
 	int i;
@@ -532,7 +532,7 @@ test_hanging_restart_loop(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	xtc_supervisor_t *sup;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[1];
 	int n_restarts;
 	(void)p; (void)d;
@@ -594,7 +594,7 @@ test_count_restarting_children(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	xtc_supervisor_t *sup;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[3];
 	xtc_pid_t wpid;
 	int i;

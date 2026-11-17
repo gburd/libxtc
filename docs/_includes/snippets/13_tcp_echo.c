@@ -154,7 +154,7 @@ done:
 int
 main(void)
 {
-	xtc_tcp_opts_t     topts = XTC_TCP_OPTS_DEFAULT;
+	xtc_tcp_opts_t     topts = XTC_TCP_OPTS_INIT;
 	struct client_args ca;
 	xtc_loop_t        *loop;
 	xtc_pid_t          cpid;

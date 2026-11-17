@@ -34,7 +34,7 @@ __timer_slab_ensure(xtc_loop_t *loop)
 {
 	xtc_slab_opts_t o;
 	if (loop->timer_slab != NULL) return XTC_OK;
-	o = (xtc_slab_opts_t)XTC_SLAB_OPTS_DEFAULT;
+	o = (xtc_slab_opts_t)XTC_SLAB_OPTS_INIT;
 	o.name = "loop.timer";
 	o.obj_size = sizeof(xtc_timer_t);
 	/* No per-thread magazine: a timer's last reference may be dropped on

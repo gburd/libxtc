@@ -24,6 +24,7 @@
 
 #include "xtc.h"
 #include "xtc_alloc_audit.h"
+#include "xtc_app.h"
 #include "xtc_async.h"
 #include "xtc_batch.h"
 #include "xtc_blocking.h"
@@ -31,12 +32,17 @@
 #include "xtc_dispatch.h"
 #include "xtc_exec.h"
 #include "xtc_io.h"
+#include "xtc_lockmgr.h"
+#include "xtc_log.h"
 #include "xtc_loop.h"
+#include "xtc_net.h"
+#include "xtc_orc.h"
 #include "xtc_pg.h"
 #include "xtc_preempt_involuntary.h"
 #include "xtc_prob.h"
 #include "xtc_proc.h"
 #include "xtc_reg.h"
+#include "xtc_res.h"
 #include "xtc_runtime.h"
 #include "xtc_slab.h"
 #include "xtc_sync.h"
@@ -326,6 +332,28 @@ bridge_reg(void)
 	xtc_reg_destroy(r);
 }
 
+/* *_DEFAULT -> *_INIT: each old initializer is the same object. */
+static void
+bridge_init(void)
+{
+	xtc_app_opts_t a0 = XTC_APP_OPTS_DEFAULT, a1 = XTC_APP_OPTS_INIT;
+	xtc_lockmgr_opts_t l0 = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_lockmgr_opts_t l1 = XTC_LOCKMGR_OPTS_INIT;
+	xtc_log_opts_t g0 = XTC_LOG_OPTS_DEFAULT, g1 = XTC_LOG_OPTS_INIT;
+	xtc_tcp_opts_t t0 = XTC_TCP_OPTS_DEFAULT, t1 = XTC_TCP_OPTS_INIT;
+	xtc_sup_opts_t s0 = XTC_SUP_OPTS_DEFAULT, s1 = XTC_SUP_OPTS_INIT;
+	xtc_res_caps_t r0 = XTC_RES_CAPS_DEFAULT, r1 = XTC_RES_CAPS_INIT;
+	xtc_slab_opts_t b0 = XTC_SLAB_OPTS_DEFAULT, b1 = XTC_SLAB_OPTS_INIT;
+
+	CHECK(a0.size == a1.size && a0.n_loops == a1.n_loops);
+	CHECK(l0.n_partitions == l1.n_partitions);
+	CHECK(g0.size == g1.size && g0.ring_size == g1.ring_size);
+	CHECK(t0.size == t1.size && t0.nodelay == t1.nodelay);
+	CHECK(s0.size == s1.size && s0.max_restarts == s1.max_restarts);
+	CHECK(r0.size == r1.size && r0.tasks == r1.tasks);
+	CHECK(b0.size == b1.size && b0.align == b1.align);
+}
+
 int
 main(void)
 {
@@ -340,6 +368,7 @@ main(void)
 	bridge_xproc();
 	bridge_runtime();
 	bridge_reg();
+	bridge_init();
 	printf("  [bridge] OK: every deprecated name still works\n");
 	return 0;
 }

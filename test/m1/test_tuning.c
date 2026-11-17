@@ -55,7 +55,7 @@ static const char *
 run_check(void)
 {
 	xtc_log_t *log;
-	xtc_log_opts_t opts = XTC_LOG_OPTS_DEFAULT;
+	xtc_log_opts_t opts = XTC_LOG_OPTS_INIT;
 
 	g_log_n = 0;
 	memset(g_log_buf, 0, sizeof g_log_buf);
@@ -420,7 +420,7 @@ test_check_ex_findings(const MunitParameter p[], void *d)
 	char gov[64], thp[128], swp[64];
 	struct findings fs;
 	xtc_log_t *log;
-	xtc_log_opts_t opts = XTC_LOG_OPTS_DEFAULT;
+	xtc_log_opts_t opts = XTC_LOG_OPTS_INIT;
 	int calls = 0;
 	(void)p;
 	(void)d;

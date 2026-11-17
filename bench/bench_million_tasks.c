@@ -110,7 +110,7 @@ main(int argc, char **argv)
 	/* Lift resource caps for the million-task scenario. */
 	{
 		xtc_res_t *r = xtc_loop_res(loop);
-		xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+		xtc_res_caps_t caps = XTC_RES_CAPS_INIT;
 		caps.tasks       = (int64_t)n_tasks * 2;
 		caps.inbox_msgs  = (int64_t)n_tasks * 2;
 		caps.mem_bytes   = 8LL * 1024 * 1024 * 1024;     /* 8 GiB */

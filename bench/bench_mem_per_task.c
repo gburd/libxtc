@@ -100,7 +100,7 @@ rss_kib(void)
 static void
 measure(int n_tasks, size_t stack_bytes)
 {
-	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+	xtc_res_caps_t caps = XTC_RES_CAPS_INIT;
 	long rss_before, rss_after;
 	int i;
 

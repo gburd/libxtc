@@ -54,6 +54,16 @@ if [ -n "${XTC_BUILD_DIR:-}" ] && [ -f "$XTC_BUILD_DIR/libxtc.a" ]; then
 		cat "$work/warn4" >&2
 		exit 1
 	}
+	# Only clang can mark a macro: compile once more with clang, when
+	# there is one, to check the macro rows.
+	: > "$work/warn5"
+	if command -v clang >/dev/null 2>&1; then
+		LC_ALL=C clang -std=c11 -D_GNU_SOURCE -Wall -I"$SRC/src/inc" \
+			-I"$XTC_BUILD_DIR" -c -o "$work/bridge5.o" "$br" \
+			2> "$work/warn5" || : > "$work/warn5"
+		grep -q 'deprecated' "$work/warn5" || : > "$work/warn5"
+		[ -s "$work/warn5" ] && CLANG_SEEN=clang
+	fi
 	# Old-name column (backticks and a trailing () stripped), Kind column.
 	sed -n '/<!-- renames:begin -->/,/<!-- renames:end -->/p' "$tbl" |
 		awk -F'|' 'NR > 3 && NF > 4 {
@@ -68,7 +78,10 @@ if [ -n "${XTC_BUILD_DIR:-}" ] && [ -f "$XTC_BUILD_DIR/libxtc.a" ]; then
 			if grep -qF "'$o' is deprecated" "$work/warn4"; then
 				bad="$bad $o(frozen-but-warns)"
 			fi ;;
-		*macro*) ;;
+		*macro*)
+			[ -s "$work/warn5" ] || continue
+			grep -qF "macro '$o' has been marked as deprecated" \
+				"$work/warn5" || bad="$bad $o(clang)" ;;
 		*)
 			grep -qF "'$o' is deprecated" "$work/warn4" ||
 				bad="$bad $o" ;;
@@ -109,6 +122,7 @@ if [ -n "${XTC_BUILD_DIR:-}" ] && [ -f "$XTC_BUILD_DIR/libxtc.a" ]; then
 		exit 1
 	fi
 	echo "  [deprecated] OK: the $nold old names in docs/deprecations.md" \
-		"warn in the bridge test (frozen ones do not)"
+		"warn in the bridge test (frozen ones do not; macros checked" \
+		"with ${CLANG_SEEN:-no clang})"
 fi
 echo "  [deprecated] OK: XTC_DEPRECATED warns with its message (C${cxx:+, C++}), and is silenceable"

@@ -217,8 +217,8 @@ coordinator(void *arg)
 static int
 run_one(uint64_t seed, uint64_t *out_trace, uint64_t *out_state)
 {
-	xtc_app_opts_t ao = XTC_APP_OPTS_DEFAULT;
-	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_app_opts_t ao = XTC_APP_OPTS_INIT;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[2];
 	xtc_exec_t *e;
 	xtc_pid_t probe;

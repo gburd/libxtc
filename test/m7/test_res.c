@@ -26,7 +26,7 @@ static MunitResult
 test_init(const MunitParameter p[], void *d)
 {
 	xtc_res_t r;
-	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+	xtc_res_caps_t caps = XTC_RES_CAPS_INIT;
 	(void)p; (void)d;
 
 	/* NULL accountant rejected. */
@@ -49,7 +49,7 @@ static MunitResult
 test_acquire_release(const MunitParameter p[], void *d)
 {
 	xtc_res_t r;
-	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+	xtc_res_caps_t caps = XTC_RES_CAPS_INIT;
 	(void)p; (void)d;
 	caps.channels = 4;
 	munit_assert_int(xtc_res_init(&r, &caps), ==, XTC_OK);
@@ -105,7 +105,7 @@ static MunitResult
 test_acquire_overflow(const MunitParameter p[], void *d)
 {
 	xtc_res_t r;
-	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+	xtc_res_caps_t caps = XTC_RES_CAPS_INIT;
 	(void)p; (void)d;
 
 	caps.mem_bytes = INT64_MAX;
@@ -134,7 +134,7 @@ test_acquire_overflow(const MunitParameter p[], void *d)
 	 * (cap <= 0 skips the cap test entirely) must still refuse a charge
 	 * that would wrap `used` negative.
 	 */
-	caps = (xtc_res_caps_t)XTC_RES_CAPS_DEFAULT;
+	caps = (xtc_res_caps_t)XTC_RES_CAPS_INIT;
 	caps.fds = 0;                     /* 0 == uncapped */
 	munit_assert_int(xtc_res_init(&r, &caps), ==, XTC_OK);
 	munit_assert_int(xtc_res_acquire(&r, XTC_RES_FDS, INT64_MAX - 1),
@@ -152,7 +152,7 @@ static MunitResult
 test_query_guards(const MunitParameter p[], void *d)
 {
 	xtc_res_t r;
-	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+	xtc_res_caps_t caps = XTC_RES_CAPS_INIT;
 	(void)p; (void)d;
 	munit_assert_int(xtc_res_init(&r, &caps), ==, XTC_OK);
 
@@ -170,7 +170,7 @@ static MunitResult
 test_set_cap(const MunitParameter p[], void *d)
 {
 	xtc_res_t r;
-	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+	xtc_res_caps_t caps = XTC_RES_CAPS_INIT;
 	xtc_res_kind_t k;
 	(void)p; (void)d;
 	munit_assert_int(xtc_res_init(&r, &caps), ==, XTC_OK);
@@ -203,7 +203,7 @@ static MunitResult
 test_alert(const MunitParameter p[], void *d)
 {
 	xtc_res_t r;
-	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+	xtc_res_caps_t caps = XTC_RES_CAPS_INIT;
 	(void)p; (void)d;
 	caps.tasks = 100;
 	munit_assert_int(xtc_res_init(&r, &caps), ==, XTC_OK);

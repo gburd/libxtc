@@ -32,7 +32,7 @@ static MunitResult
 test_mctx_mem_cap(const MunitParameter p[], void *d)
 {
 	xtc_res_t r;
-	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+	xtc_res_caps_t caps = XTC_RES_CAPS_INIT;
 	xtc_mctx_t *m = NULL, *child = NULL, *plain = NULL;
 	void *a, *b;
 	int64_t hdr;
@@ -105,7 +105,7 @@ static MunitResult
 test_net_fds_cap(const MunitParameter p[], void *d)
 {
 	xtc_res_t r;
-	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+	xtc_res_caps_t caps = XTC_RES_CAPS_INIT;
 	int a = -1, b = -1, c = -1, e = -1;
 	(void)p; (void)d;
 
@@ -162,8 +162,8 @@ static MunitResult
 test_net_accept_fds_cap(const MunitParameter p[], void *d)
 {
 	xtc_res_t r;
-	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
-	xtc_tcp_opts_t to = XTC_TCP_OPTS_DEFAULT;
+	xtc_res_caps_t caps = XTC_RES_CAPS_INIT;
+	xtc_tcp_opts_t to = XTC_TCP_OPTS_INIT;
 	struct sockaddr_in sa;
 	socklen_t sl = sizeof sa;
 	int lfd = -1, c1 = -1, c2 = -1, a1 = -1, a2 = -1, i, rc;
@@ -255,7 +255,7 @@ static MunitResult
 test_net_recovery_close(const MunitParameter p[], void *d)
 {
 	xtc_res_t r;
-	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+	xtc_res_caps_t caps = XTC_RES_CAPS_INIT;
 	xtc_loop_t *loop = NULL;
 	struct recov_net s = { &r, -1, -1, -1, -1 };
 	char b;

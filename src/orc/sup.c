@@ -1265,7 +1265,7 @@ __xtc_sup_start_ex(xtc_loop_t *loop, const xtc_sup_opts_t *opts,
     void *exit_arg, xtc_supervisor_t **out_sup)
 {
 	xtc_supervisor_t *sup;
-	xtc_sup_opts_t defaults = XTC_SUP_OPTS_DEFAULT, o = defaults;
+	xtc_sup_opts_t defaults = XTC_SUP_OPTS_INIT, o = defaults;
 	int rc, wait;
 	xtc_pid_t pid;
 
@@ -1521,7 +1521,7 @@ void
 xtc_sup_child_main(void *arg)
 {
 	xtc_sup_child_t sc = XTC_SUP_CHILD_INIT;
-	xtc_sup_opts_t defaults = XTC_SUP_OPTS_DEFAULT, o = defaults;
+	xtc_sup_opts_t defaults = XTC_SUP_OPTS_INIT, o = defaults;
 	struct xtc_supervisor *sup = NULL;
 	int rc;
 

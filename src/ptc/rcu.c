@@ -189,7 +189,7 @@ __rcu_slabs_ensure(void)
 		return;
 	(void)__xtc_mtx_lock(&__rcu_slab_init_lock);
 	if (xtc_atomic_load_ptr(&__rcu_tls_slab, xtc_mo_relaxed) == NULL) {
-		xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
+		xtc_slab_opts_t o = XTC_SLAB_OPTS_INIT;
 		xtc_slab_t *sl = NULL;
 		o.name = "rcu.tls"; o.obj_size = sizeof(struct rcu_tls);
 		if (xtc_slab_create(&o, &sl) == XTC_OK)
@@ -197,7 +197,7 @@ __rcu_slabs_ensure(void)
 			    xtc_mo_release);
 	}
 	if (xtc_atomic_load_ptr(&__rcu_retired_slab, xtc_mo_relaxed) == NULL) {
-		xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
+		xtc_slab_opts_t o = XTC_SLAB_OPTS_INIT;
 		xtc_slab_t *sl = NULL;
 		o.name = "rcu.retired"; o.obj_size = sizeof(struct retired);
 		if (xtc_slab_create(&o, &sl) == XTC_OK)

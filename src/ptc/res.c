@@ -35,7 +35,7 @@ xtc_res_init(xtc_res_t *r, const xtc_res_caps_t *caps)
 	int i;
 	if (r == NULL) return XTC_E_INVAL;
 	if (caps == NULL) {
-		xtc_res_caps_t d = XTC_RES_CAPS_DEFAULT;
+		xtc_res_caps_t d = XTC_RES_CAPS_INIT;
 		/* Container/cgroup awareness (PLAN.md 19.15): never let the
 		 * default tracked-allocation cap exceed what the process can
 		 * actually use.  __os_mem_max reports cgroup v2 memory.max on a
@@ -51,7 +51,7 @@ xtc_res_init(xtc_res_t *r, const xtc_res_caps_t *caps)
 		r->caps = d;
 	} else {
 		/* A cap past the caller's .size takes its default. */
-		xtc_res_caps_t d = XTC_RES_CAPS_DEFAULT;
+		xtc_res_caps_t d = XTC_RES_CAPS_INIT;
 		int rc = __xtc_sized_in(&r->caps, &d, sizeof d, caps, 0);
 		if (rc != XTC_OK)
 			return rc;

@@ -286,7 +286,7 @@ run_part_b(uint64_t seed, int *out_restarts, int *out_spawns,
     uint64_t *out_state)
 {
 	xtc_exec_t *e = NULL;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[N_KIDS];
 	int i, rc;
 

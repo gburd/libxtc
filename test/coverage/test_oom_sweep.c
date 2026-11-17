@@ -754,7 +754,7 @@ test_mctx(const MunitParameter p[], void *d)
 static int
 step_slab(int *ok)
 {
-	xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
+	xtc_slab_opts_t o = XTC_SLAB_OPTS_INIT;
 	xtc_slab_t *sl = NULL;
 	void *obj = NULL;
 	int rc;

@@ -1498,8 +1498,8 @@ arena_init(xtc_tnt_shard_t *sh, int idx, const xtc_tnt_type_t *type)
 {
 	xtc_tnt_arena_t *ar = &sh->arenas[idx];
 	uint32_t i;
-	xtc_slab_opts_t mopts = XTC_SLAB_OPTS_DEFAULT;
-	xtc_slab_opts_t sopts = XTC_SLAB_OPTS_DEFAULT;
+	xtc_slab_opts_t mopts = XTC_SLAB_OPTS_INIT;
+	xtc_slab_opts_t sopts = XTC_SLAB_OPTS_INIT;
 	char nbuf[64];
 
 	memset(ar, 0, sizeof(*ar));

@@ -331,7 +331,7 @@ int
 main(void)
 {
 	int listen_fd;
-	xtc_app_opts_t app_opts = XTC_APP_OPTS_DEFAULT;
+	xtc_app_opts_t app_opts = XTC_APP_OPTS_INIT;
 	xtc_child_spec_t kids[1];
 	xtc_pid_t pid_slots[8];
 	pthread_t client;

@@ -62,7 +62,7 @@ actor(void)
 int
 main(void)
 {
-	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+	xtc_res_caps_t caps = XTC_RES_CAPS_INIT;
 	int64_t start;
 
 	CAP = nondet_int64();

@@ -200,21 +200,21 @@ __proc_slabs_ensure(void)
 		return;
 	(void) __proc_mtx_lock(&__proc_slab_init_lock);
 	if (xtc_atomic_load_ptr(&__link_slab, xtc_mo_relaxed) == NULL) {
-		xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
+		xtc_slab_opts_t o = XTC_SLAB_OPTS_INIT;
 		xtc_slab_t *sl = NULL;
 		o.name = "proc.link"; o.obj_size = sizeof(struct link_entry);
 		if (xtc_slab_create(&o, &sl) == XTC_OK)
 			xtc_atomic_store_ptr(&__link_slab, sl, xtc_mo_release);
 	}
 	if (xtc_atomic_load_ptr(&__mon_slab, xtc_mo_relaxed) == NULL) {
-		xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
+		xtc_slab_opts_t o = XTC_SLAB_OPTS_INIT;
 		xtc_slab_t *sl = NULL;
 		o.name = "proc.mon"; o.obj_size = sizeof(struct mon_entry);
 		if (xtc_slab_create(&o, &sl) == XTC_OK)
 			xtc_atomic_store_ptr(&__mon_slab, sl, xtc_mo_release);
 	}
 	if (xtc_atomic_load_ptr(&__env_slab, xtc_mo_relaxed) == NULL) {
-		xtc_slab_opts_t o = XTC_SLAB_OPTS_DEFAULT;
+		xtc_slab_opts_t o = XTC_SLAB_OPTS_INIT;
 		xtc_slab_t *sl = NULL;
 		o.name = "proc.env";
 		o.obj_size = sizeof(struct envelope) + ENV_POOL_PAYLOAD;

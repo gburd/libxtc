@@ -168,7 +168,7 @@ typedef struct xtc_sup_opts {
 	int wait_children;
 } xtc_sup_opts_t;
 
-#define XTC_SUP_OPTS_DEFAULT { \
+#define XTC_SUP_OPTS_INIT { \
 	.size         = sizeof(xtc_sup_opts_t), \
 	.strategy     = XTC_SUP_ONE_FOR_ONE, \
 	.max_restarts = 3, \
@@ -261,7 +261,7 @@ xtc_sup_child_restarts(const xtc_supervisor_t *sup, int index, int *out);
  */
 typedef struct xtc_sup_child {
 	size_t size;                /* sizeof(xtc_sup_child_t) */
-	const xtc_sup_opts_t *opts; /* NULL = XTC_SUP_OPTS_DEFAULT */
+	const xtc_sup_opts_t *opts; /* NULL = XTC_SUP_OPTS_INIT */
 	const xtc_child_spec_t *children;
 	int n_children;
 } xtc_sup_child_t;
@@ -269,6 +269,12 @@ typedef struct xtc_sup_child {
 #define XTC_SUP_CHILD_INIT { .size = sizeof(xtc_sup_child_t) }
 
 XTC_API void xtc_sup_child_main(void *arg);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+#define XTC_SUP_OPTS_DEFAULT XTC_SUP_OPTS_INIT
+XTC_DEPRECATED_MACRO(clang deprecated(XTC_SUP_OPTS_DEFAULT, "use XTC_SUP_OPTS_INIT"))
 
 #ifdef __cplusplus
 }

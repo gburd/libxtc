@@ -108,7 +108,7 @@ run_contend(uint64_t seed, int *out_done, int *out_pairs,
     uint64_t *out_order, uint64_t *out_state)
 {
 	xtc_exec_t *e = NULL;
-	xtc_lockmgr_opts_t opts = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_lockmgr_opts_t opts = XTC_LOCKMGR_OPTS_INIT;
 	int i, rc;
 
 	/* ON_BLOCK detection: synchronous, no background thread (which
@@ -206,7 +206,7 @@ run_deadlock(uint64_t seed, int *out_done, int *out_deadlk, int *out_ok,
     uint64_t *out_state)
 {
 	xtc_exec_t *e = NULL;
-	xtc_lockmgr_opts_t opts = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_lockmgr_opts_t opts = XTC_LOCKMGR_OPTS_INIT;
 	int rc;
 
 	opts.detect_mode = XTC_LOCK_DETECT_ON_BLOCK;
@@ -346,7 +346,7 @@ run_reget(uint64_t seed, int *out_done, int *out_viol, int *out_grants,
     uint64_t *out_state)
 {
 	xtc_exec_t *e = NULL;
-	xtc_lockmgr_opts_t opts = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_lockmgr_opts_t opts = XTC_LOCKMGR_OPTS_INIT;
 	int i, rc;
 
 	/* NO deadlock detection: a victim's locks are released by the

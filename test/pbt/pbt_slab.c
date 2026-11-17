@@ -43,7 +43,7 @@ static void
 prop_alloc_free_balance(hegel_test_case *tc, void *u)
 {
 	xtc_slab_t *s;
-	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_INIT;
 	xtc_slab_stats_t stats = XTC_SLAB_STATS_INIT;
 	int n, i;
 	void **ptrs;
@@ -70,7 +70,7 @@ static void
 prop_random_interleave(hegel_test_case *tc, void *u)
 {
 	xtc_slab_t *s;
-	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_INIT;
 	xtc_slab_stats_t stats = XTC_SLAB_STATS_INIT;
 	int n, i, n_live = 0;
 	void *ptrs[64] = {0};
@@ -107,7 +107,7 @@ static void
 prop_shm_offset_roundtrip_single_process(hegel_test_case *tc, void *u)
 {
 	xtc_slab_t *s;
-	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_INIT;
 	void *shm;
 	void *p1, *p2;
 	xtc_slab_off_t o1, o2;

@@ -409,7 +409,7 @@ main(int argc, char *argv[])
 	pthread_t         *cli_tids = NULL;
 	pthread_attr_t     tattr;
 	struct client_args ca;
-	xtc_tcp_opts_t     opts    = XTC_TCP_OPTS_DEFAULT;
+	xtc_tcp_opts_t     opts    = XTC_TCP_OPTS_INIT;
 	uint64_t           t0, t1, elapsed_ns;
 	struct rusage      ru;
 	uint64_t           cpu_us, rss_kb;

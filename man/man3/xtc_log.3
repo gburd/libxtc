@@ -21,7 +21,8 @@
 .Nm XTC_LOG_DEBUG_F ,
 .Nm XTC_LOG_INFO_F ,
 .Nm XTC_LOG_WARN_F ,
-.Nm XTC_LOG_ERROR_F
+.Nm XTC_LOG_ERROR_F ,
+.Nm XTC_LOG_OPTS_DEFAULT
 .Nd async ring-buffer logger
 .Sh SYNOPSIS
 .In xtc.h
@@ -295,7 +296,7 @@ is the interface.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 xtc_log_t *log;
-xtc_log_opts_t opts = XTC_LOG_OPTS_DEFAULT;
+xtc_log_opts_t opts = XTC_LOG_OPTS_INIT;
 opts.sink_fd = STDOUT_FILENO;
 opts.floor = XTC_LOG_INFO;
 
@@ -305,6 +306,16 @@ XTC_LOG_INFO_F("server started on port %d", port);
 xtc_logf(XTC_LOG_INFO, "listening on {} with {} workers", port, nworkers);
 xtc_log_drain(log);    /* from a thread that may block on the sink */
 .Ed
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Dv XTC_LOG_OPTS_DEFAULT
+Use
+.Dv XTC_LOG_OPTS_INIT .
+.El
 .Sh SEE ALSO
 .Xr xtc_cfg 3 ,
 .Xr xtc_stats 3 ,

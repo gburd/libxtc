@@ -22,7 +22,7 @@ static MunitResult
 test_modes(const MunitParameter p[], void *d)
 {
 	xtc_lockmgr_t *m;
-	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_INIT;
 	xtc_locker_t l1, l2;
 	const char *obj = "obj";
 	(void)p; (void)d;
@@ -73,7 +73,7 @@ contender(void *arg)
 static MunitResult
 test_wait_grant(const MunitParameter p[], void *d)
 {
-	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_INIT;
 	xtc_locker_t l1, l2;
 	pthread_t th;
 	struct timespec ts = { 0, 50 * 1000 * 1000 };  /* 50ms */
@@ -139,7 +139,7 @@ dl_t2(void *arg)
 static MunitResult
 test_deadlock(const MunitParameter p[], void *d)
 {
-	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_INIT;
 	xtc_locker_t l1, l2;
 	pthread_t th1, th2;
 	int t1, t2;
@@ -178,7 +178,7 @@ static MunitResult
 test_9_modes(const MunitParameter p[], void *d)
 {
 	xtc_lockmgr_t *m;
-	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_INIT;
 	xtc_locker_t l1, l2;
 	const char *obj = "row";
 	(void)p; (void)d;
@@ -219,7 +219,7 @@ static MunitResult
 test_custom_matrix(const MunitParameter p[], void *d)
 {
 	xtc_lockmgr_t *m;
-	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_INIT;
 	xtc_locker_t l1, l2;
 	static const uint8_t custom[3 * 3] = {
 		0, 0, 0,
@@ -249,7 +249,7 @@ static MunitResult
 test_upgrade_downgrade(const MunitParameter p[], void *d)
 {
 	xtc_lockmgr_t *m;
-	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_INIT;
 	xtc_locker_t l1, l2;
 	(void)p; (void)d;
 	o.detect_mode = XTC_LOCK_DETECT_NONE;
@@ -274,7 +274,7 @@ static MunitResult
 test_lock_vec(const MunitParameter p[], void *d)
 {
 	xtc_lockmgr_t *m;
-	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_INIT;
 	xtc_locker_t l1;
 	xtc_lock_req_t reqs[3];
 	int executed = 0;
@@ -313,7 +313,7 @@ static MunitResult
 test_lock_vec_rollback(const MunitParameter p[], void *d)
 {
 	xtc_lockmgr_t *m;
-	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_INIT;
 	xtc_locker_t a, b;
 	xtc_lock_req_t r[4];
 	int ex = -1;
@@ -402,7 +402,7 @@ static MunitResult
 test_stats_failchk(const MunitParameter p[], void *d)
 {
 	xtc_lockmgr_t *m;
-	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_INIT;
 	xtc_lockmgr_stat_t s;
 	xtc_locker_t l1, l2;
 	(void)p; (void)d;
@@ -458,7 +458,7 @@ static void *onblk_t2(void *arg) {
 static MunitResult
 test_detect_on_block(const MunitParameter p[], void *d)
 {
-	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_INIT;
 	xtc_locker_t l1, l2;
 	pthread_t th1, th2;
 	int t1, t2;
@@ -494,7 +494,7 @@ static xtc_lockmgr_t *
 rr_mgr(xtc_locker_t *a, xtc_locker_t *b)
 {
 	xtc_lockmgr_t *m = NULL;
-	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_INIT;
 	o.detect_mode = XTC_LOCK_DETECT_NONE;
 	munit_assert_int(xtc_lockmgr_create(&o, &m), ==, XTC_OK);
 	munit_assert_int(xtc_lockmgr_id(m, a), ==, XTC_OK);
@@ -727,7 +727,7 @@ static MunitResult
 test_kill_then_release(const MunitParameter p[], void *d)
 {
 	const char *wt = munit_parameters_get(p, "wait");
-	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_DEFAULT;
+	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_INIT;
 	xtc_loop_t *loop = NULL;
 	(void)d;
 	o.detect_mode = XTC_LOCK_DETECT_NONE;

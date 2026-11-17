@@ -120,7 +120,7 @@ typedef struct xtc_lockmgr_opts {
 	int            n_modes;           /* 0 = default 9 */
 } xtc_lockmgr_opts_t;
 
-#define XTC_LOCKMGR_OPTS_DEFAULT { \
+#define XTC_LOCKMGR_OPTS_INIT { \
 	.n_partitions       = 64, \
 	.detect_interval_ns = 100LL * 1000 * 1000, \
 	.victim             = XTC_LOCK_VICTIM_DEFAULT, \
@@ -270,6 +270,11 @@ XTC_API int  xtc_lockmgr_failchk(xtc_lockmgr_t *mgr, xtc_locker_t locker);
 XTC_API int  xtc_lockmgr_stat(const xtc_lockmgr_t *mgr, xtc_lockmgr_stat_t *out);
 XTC_API int  xtc_lockmgr_n_held(const xtc_lockmgr_t *mgr);
 XTC_API int  xtc_lockmgr_n_waiting(const xtc_lockmgr_t *mgr);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+#define XTC_LOCKMGR_OPTS_DEFAULT XTC_LOCKMGR_OPTS_INIT
 
 #ifdef __cplusplus
 }

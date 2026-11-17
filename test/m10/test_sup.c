@@ -75,7 +75,7 @@ test_supervisor_restarts(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	xtc_supervisor_t *sup;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[1];
 	xtc_pid_t watcher_pid;
 	(void)p; (void)d;
@@ -150,7 +150,7 @@ test_one_for_all(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	xtc_supervisor_t *sup;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[2];
 	xtc_pid_t wpid;
 	(void)p; (void)d;
@@ -227,7 +227,7 @@ test_rest_for_one(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	xtc_supervisor_t *sup;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[3];
 	xtc_pid_t wpid;
 	(void)p; (void)d;
@@ -281,7 +281,7 @@ test_intensity_exceeded(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	xtc_supervisor_t *sup;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[1];
 	(void)p; (void)d;
 
@@ -349,7 +349,7 @@ static MunitResult
 test_simple_one_for_one(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_supervisor_t *sup = NULL;
 	struct sofo_state st = { NULL, 0 };
 	xtc_proc_opts_t popts = XTC_PROC_OPTS_INIT;
@@ -413,7 +413,7 @@ static MunitResult
 test_pool_max_children(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_supervisor_t *sup = NULL;
 	struct pool_state st = { NULL, XTC_OK, 0 };
 	xtc_proc_opts_t popts = XTC_PROC_OPTS_INIT;
@@ -591,7 +591,7 @@ run_overlap_case(xtc_restart_strategy_t strategy)
 {
 	xtc_loop_t *loop = NULL;
 	xtc_supervisor_t *sup = NULL;
-	xtc_sup_opts_t o = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t o = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t cs[3];
 	int i;
 
@@ -702,7 +702,7 @@ join_thread(void *a)
 static MunitResult
 test_join_timeout_keeps_sup(const MunitParameter p[], void *d)
 {
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[1];
 	xtc_loop_t *loop = NULL;
 	pthread_t t;
@@ -840,7 +840,7 @@ test_one_for_all_equal_pid_other_loop(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *la = NULL, *lb = NULL;
 	xtc_supervisor_t *sup;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t kids[2];
 	xtc_pid_t by[8], wpid;
 	pthread_t th;
@@ -907,7 +907,7 @@ static MunitResult
 test_add_child_other_loop(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *ls = NULL, *lc = NULL, *lb = NULL;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_supervisor_t *sup = NULL;
 	struct xadd x = { NULL, -1, 0 };
 	xtc_pid_t by[8], cpid;
@@ -982,7 +982,7 @@ static MunitResult
 test_simple_ofo_reclaims_dead(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_sup_opts_t opts = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t opts = XTC_SUP_OPTS_INIT;
 	xtc_supervisor_t *sup = NULL;
 	struct reclaim_state st;
 	(void)p; (void)d;
@@ -1068,7 +1068,7 @@ test_n_alive_during_group_restart(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
 	xtc_child_spec_t ch[2] = { XTC_CHILD_SPEC_INIT, XTC_CHILD_SPEC_INIT };
-	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_INIT;
 	xtc_pid_t pid;
 	(void)p;
 	(void)d;
@@ -1174,7 +1174,7 @@ test_killed_sup_stops_children(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
 	xtc_child_spec_t ch = XTC_CHILD_SPEC_INIT;
-	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_INIT;
 	xtc_pid_t pid;
 	(void)p;
 	(void)d;
@@ -1254,7 +1254,7 @@ static MunitResult
 test_add_child_keeps_mail(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_INIT;
 	xtc_pid_t pid;
 	(void)p;
 	(void)d;
@@ -1378,7 +1378,7 @@ static MunitResult
 test_down_hook_kinds(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t ch[4] = { XTC_CHILD_SPEC_INIT, XTC_CHILD_SPEC_INIT,
 	    XTC_CHILD_SPEC_INIT, XTC_CHILD_SPEC_INIT };
 	xtc_supervisor_t *sup = NULL;
@@ -1490,7 +1490,7 @@ static MunitResult
 test_down_hook_group_restart(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t ch[2] = { XTC_CHILD_SPEC_INIT, XTC_CHILD_SPEC_INIT };
 	xtc_supervisor_t *sup = NULL;
 	const struct hk_rec *r;
@@ -1556,7 +1556,7 @@ static MunitResult
 test_down_hook_group_nofault(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
-	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t ch[2] = { XTC_CHILD_SPEC_INIT, XTC_CHILD_SPEC_INIT };
 	xtc_supervisor_t *sup = NULL;
 	const struct hk_rec *r;
@@ -1780,7 +1780,7 @@ test_spec_reg_name(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	xtc_supervisor_t *sup;
-	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t k = XTC_CHILD_SPEC_INIT;
 	(void)p;
 	(void)d;
@@ -1889,7 +1889,7 @@ test_reg_send_wait(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	xtc_supervisor_t *sup;
-	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t k = XTC_CHILD_SPEC_INIT;
 	pthread_t th;
 	(void)p;
@@ -1994,7 +1994,7 @@ wc_driver(void *arg)
 {
 	struct wc_drive *w = arg;
 	xtc_child_spec_t kids[2];
-	xtc_sup_opts_t o = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t o = XTC_SUP_OPTS_INIT;
 	o.wait_children = 1;
 	wc_specs(kids);
 	w->ok_rc = xtc_sup_start(w->loop, &o, kids, 2, &w->ok);
@@ -2024,7 +2024,7 @@ wc_thread_start(void *arg)
 {
 	struct wc_thread *t = arg;
 	xtc_child_spec_t kids[2];
-	xtc_sup_opts_t o = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t o = XTC_SUP_OPTS_INIT;
 	xtc_supervisor_t *sup = NULL;
 	o.wait_children = 1;
 	wc_specs(kids);
@@ -2060,7 +2060,7 @@ test_sup_wait_children(const MunitParameter p[], void *d)
 	struct wc_drive w;
 	struct wc_thread t;
 	xtc_child_spec_t kids[2];
-	xtc_sup_opts_t o = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t o = XTC_SUP_OPTS_INIT;
 	xtc_supervisor_t *sup = NULL;
 	pthread_t th;
 	(void)p;
@@ -2193,7 +2193,7 @@ test_sup_nested_child(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
 	xtc_child_spec_t kids[2] = { XTC_CHILD_SPEC_INIT, XTC_CHILD_SPEC_INIT };
-	xtc_sup_opts_t ro = XTC_SUP_OPTS_DEFAULT;
+	xtc_sup_opts_t ro = XTC_SUP_OPTS_INIT;
 	struct ns_drive dr;
 	(void)p;
 	(void)d;

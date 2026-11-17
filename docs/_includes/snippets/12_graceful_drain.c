@@ -72,7 +72,7 @@ operator(void *arg)
 int
 main(void)
 {
-	xtc_app_opts_t         opts = XTC_APP_OPTS_DEFAULT;
+	xtc_app_opts_t         opts = XTC_APP_OPTS_INIT;
 	xtc_app_drain_report_t rep = XTC_APP_DRAIN_REPORT_INIT;
 	xtc_child_spec_t       kids[4] = {
 		{ .size = sizeof(xtc_child_spec_t), .name = "w0", .fn = worker, .arg = (void *)0,

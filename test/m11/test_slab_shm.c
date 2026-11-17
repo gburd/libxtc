@@ -153,7 +153,7 @@ test_shm_basic_fork(const MunitParameter p[], void *d)
 	void *shm_addr = NULL;
 	int shm_fd = -1;
 	xtc_slab_t *slab = NULL;
-	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_INIT;
 	struct test_payload *obj;
 	xtc_slab_off_t off;
 	pid_t pid;
@@ -199,7 +199,7 @@ test_shm_basic_fork(const MunitParameter p[], void *d)
 	if (pid == 0) {
 		/* Child process. */
 		xtc_slab_t *child_slab = NULL;
-		xtc_slab_opts_t child_opts = XTC_SLAB_OPTS_DEFAULT;
+		xtc_slab_opts_t child_opts = XTC_SLAB_OPTS_INIT;
 		struct test_payload *child_obj;
 		xtc_slab_off_t child_off;
 		void *child_shm_addr = NULL;
@@ -274,7 +274,7 @@ test_shm_alloc_in_child(const MunitParameter p[], void *d)
 	void *shm_addr = NULL;
 	int shm_fd = -1;
 	xtc_slab_t *slab = NULL;
-	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_INIT;
 	pid_t pid;
 	int status;
 	volatile xtc_slab_off_t *offset_slot;
@@ -303,7 +303,7 @@ test_shm_alloc_in_child(const MunitParameter p[], void *d)
 	if (pid == 0) {
 		/* Child: allocate and write. */
 		xtc_slab_t *child_slab = NULL;
-		xtc_slab_opts_t child_opts = XTC_SLAB_OPTS_DEFAULT;
+		xtc_slab_opts_t child_opts = XTC_SLAB_OPTS_INIT;
 		struct test_payload *child_obj;
 		void *child_shm_addr = NULL;
 		int child_fd;
@@ -381,7 +381,7 @@ test_shm_concurrent_alloc(const MunitParameter p[], void *d)
 	void *shm_addr = NULL;
 	int shm_fd = -1;
 	xtc_slab_t *slab = NULL;
-	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_INIT;
 	pid_t pid;
 	int status;
 	struct test_payload *parent_objs[CONC_ALLOCS];
@@ -416,7 +416,7 @@ test_shm_concurrent_alloc(const MunitParameter p[], void *d)
 	if (pid == 0) {
 		/* Child: allocate CONC_ALLOCS objects concurrently with parent. */
 		xtc_slab_t *child_slab = NULL;
-		xtc_slab_opts_t child_opts = XTC_SLAB_OPTS_DEFAULT;
+		xtc_slab_opts_t child_opts = XTC_SLAB_OPTS_INIT;
 		struct test_payload *child_objs[CONC_ALLOCS];
 		void *child_shm_addr = NULL;
 		int child_fd;
@@ -517,7 +517,7 @@ test_shm_size_too_small(const MunitParameter p[], void *d)
 	void *shm_addr = NULL;
 	int shm_fd = -1;
 	xtc_slab_t *slab = NULL;
-	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_INIT;
 	size_t tiny_size = 128;  /* Too small for header + default 64K chunk. */
 	(void)p; (void)d;
 
@@ -551,7 +551,7 @@ test_shm_resolve_invalid_offset(const MunitParameter p[], void *d)
 	void *shm_addr = NULL;
 	int shm_fd = -1;
 	xtc_slab_t *slab = NULL;
-	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_INIT;
 	(void)p; (void)d;
 
 	make_shm_name(shm_name, sizeof(shm_name), "invalid");
@@ -596,7 +596,7 @@ test_shm_reclaim_cross_process(const MunitParameter p[], void *d)
 	void *shm_addr = NULL;
 	int shm_fd = -1;
 	xtc_slab_t *slab = NULL;
-	xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+	xtc_slab_opts_t opts = XTC_SLAB_OPTS_INIT;
 	volatile int *ready_flag;
 	volatile xtc_slab_off_t *freed;   /* [XP_N] freed offsets */
 	void *objs[XP_N];
@@ -640,7 +640,7 @@ test_shm_reclaim_cross_process(const MunitParameter p[], void *d)
 		void *caddr = NULL;
 		int cfd;
 		xtc_slab_t *cslab = NULL;
-		xtc_slab_opts_t copts = XTC_SLAB_OPTS_DEFAULT;
+		xtc_slab_opts_t copts = XTC_SLAB_OPTS_INIT;
 		volatile int *cready;
 		volatile xtc_slab_off_t *cfreed;
 		int ok = 1;

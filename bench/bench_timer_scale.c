@@ -134,7 +134,7 @@ main(int argc, char **argv)
 		return 1;
 	}
 	for (i = 0; i < loops; i++) {
-		xtc_res_caps_t c = XTC_RES_CAPS_DEFAULT;
+		xtc_res_caps_t c = XTC_RES_CAPS_INIT;
 		/* Each round arms `batch` timers; the loop holds at most one
 		 * round's worth live at a time, but timer structs live on the
 		 * per-loop slab / all_timers until fini, so budget generously. */

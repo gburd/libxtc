@@ -333,7 +333,7 @@ int
 main(void)
 {
     xtc_loop_t *loop;
-    xtc_tcp_opts_t opts = XTC_TCP_OPTS_DEFAULT;
+    xtc_tcp_opts_t opts = XTC_TCP_OPTS_INIT;
     int listen_fd;
     xtc_pid_t pid;
 

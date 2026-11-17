@@ -58,7 +58,7 @@ communicate with small, fixed messages by design.
 
 The resource accountant tracks bounded resources and rejects an acquire
 past the cap with `XTC_E_RESOURCE`. These are the defaults
-(`XTC_RES_CAPS_DEFAULT`); set your own with `xtc_res_set_cap` or an
+(`XTC_RES_CAPS_INIT`); set your own with `xtc_res_set_cap` or an
 `xtc_res_caps_t` at init.
 
 | Resource (`xtc_res_kind_t`) | Default cap | Meaning |

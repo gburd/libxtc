@@ -21,7 +21,8 @@
 .Nm xtc_net_udp_socket ,
 .Nm xtc_net_udp_sendto ,
 .Nm xtc_net_udp_recvfrom ,
-.Nm xtc_dns_resolve
+.Nm xtc_dns_resolve ,
+.Nm XTC_TCP_OPTS_DEFAULT
 .Nd networking helpers
 .Sh SYNOPSIS
 .In xtc.h
@@ -156,7 +157,7 @@ allowed to block.
 controlled by
 .Vt xtc_tcp_opts_t
 .Po start from
-.Dv XTC_TCP_OPTS_DEFAULT ,
+.Dv XTC_TCP_OPTS_INIT ,
 which also sets the
 .Fa size
 member to the caller's
@@ -337,7 +338,7 @@ set by the caller.
 Releases before 1.50 let a send to a closed peer kill the process.
 .Sh EXAMPLES
 .Bd -literal -offset indent
-xtc_tcp_opts_t opts = XTC_TCP_OPTS_DEFAULT;
+xtc_tcp_opts_t opts = XTC_TCP_OPTS_INIT;
 opts.keepalive = 1;
 opts.keepidle_s = 60;
 
@@ -355,6 +356,16 @@ for (;;) {
     /* spawn a per-conn xtc_proc... */
 }
 .Ed
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Dv XTC_TCP_OPTS_DEFAULT
+Use
+.Dv XTC_TCP_OPTS_INIT .
+.El
 .Sh SEE ALSO
 .Xr xtc_io 3 ,
 .Xr xtc_proc 3 ,

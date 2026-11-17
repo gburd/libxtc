@@ -17,7 +17,8 @@
 .Nm xtc_slab_reaper_spawn ,
 .Nm xtc_slab_pressure_listen ,
 .Nm xtc_slab_pressure_listen_ex ,
-.Nm xtc_slab_pressure_stop
+.Nm xtc_slab_pressure_stop ,
+.Nm XTC_SLAB_OPTS_DEFAULT
 .Nd slab + magazine allocator
 .Sh SYNOPSIS
 .In xtc.h
@@ -127,7 +128,7 @@ is required and must set
 and
 .Fa opts->obj_size ;
 start from
-.Dv XTC_SLAB_OPTS_DEFAULT ,
+.Dv XTC_SLAB_OPTS_INIT ,
 which also sets
 .Fa opts->size
 to the caller's
@@ -212,7 +213,7 @@ that periodically calls
 .Bd -literal -offset indent
 struct widget { int id; char name[32]; };
 
-xtc_slab_opts_t opts = XTC_SLAB_OPTS_DEFAULT;
+xtc_slab_opts_t opts = XTC_SLAB_OPTS_INIT;
 opts.name = "widgets";
 opts.obj_size = sizeof(struct widget);
 opts.flags = XTC_SLAB_REDZONE | XTC_SLAB_AUDIT;
@@ -245,6 +246,9 @@ same arguments.
 Use
 .Fn xtc_slab_pressure_destroy ;
 the new name returns void; the old one returns XTC_E_INVAL for NULL, XTC_E_NOSYS without PSI, else XTC_OK.
+.It Dv XTC_SLAB_OPTS_DEFAULT
+Use
+.Dv XTC_SLAB_OPTS_INIT .
 .El
 .Sh SEE ALSO
 .Xr xtc_mctx 3 ,

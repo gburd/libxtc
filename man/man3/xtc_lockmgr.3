@@ -19,7 +19,8 @@
 .Nm xtc_lockmgr_stat ,
 .Nm xtc_lockmgr_n_held ,
 .Nm xtc_lockmgr_n_waiting ,
-.Nm xtc_lockmgr_failchk
+.Nm xtc_lockmgr_failchk ,
+.Nm XTC_LOCKMGR_OPTS_DEFAULT
 .Nd transactional lock manager with deadlock detection
 .Sh SYNOPSIS
 .In xtc.h
@@ -313,6 +314,17 @@ index in
 See
 .Pa examples/04_lockmgr_demo.c
 for a deck-shuffled randomised picker.
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Dv XTC_LOCKMGR_OPTS_DEFAULT
+Use
+.Dv XTC_LOCKMGR_OPTS_INIT ;
+frozen lock layer: an alias, no warning; 3.0 keeps only XTC_LOCKMGR_OPTS_INIT.
+.El
 .Sh SEE ALSO
 .Xr xtc_lwlock 3 ,
 .Xr xtc_lrlock 3 ,

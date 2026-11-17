@@ -13,7 +13,8 @@
 .Nm xtc_sup_n_alive ,
 .Nm xtc_sup_n_restarts ,
 .Nm xtc_sup_child_restarts ,
-.Nm xtc_sup_child_main
+.Nm xtc_sup_child_main ,
+.Nm XTC_SUP_OPTS_DEFAULT
 .Nd OTP-style supervisor trees
 .Sh SYNOPSIS
 .In xtc.h
@@ -97,7 +98,7 @@ Never restart; one-shot.
 .Pp
 .Sy Sized structs:
 .Vt xtc_sup_opts_t
-.Pq Dv XTC_SUP_OPTS_DEFAULT
+.Pq Dv XTC_SUP_OPTS_INIT
 and every
 .Vt xtc_child_spec_t
 .Pq Dv XTC_CHILD_SPEC_INIT
@@ -173,7 +174,7 @@ supervisor's life, and at most one child may use a name.
 restarts within
 .Va opts.period_ns
 exhausts the supervisor; it gives up and exits.  Default
-.Pq Dv XTC_SUP_OPTS_DEFAULT :
+.Pq Dv XTC_SUP_OPTS_INIT :
 3 restarts in 5 seconds.
 .Pp
 .Sy Bounded dynamic pool:
@@ -443,6 +444,16 @@ supervisor left its children running unsupervised and
 returned
 .Er XTC_E_AGAIN
 forever.
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Dv XTC_SUP_OPTS_DEFAULT
+Use
+.Dv XTC_SUP_OPTS_INIT .
+.El
 .Sh SEE ALSO
 .Xr xtc_app 3 ,
 .Xr xtc_proc 3 ,

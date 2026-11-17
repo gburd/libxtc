@@ -48,6 +48,7 @@ result keeps working until it moves to the new name.
 | Old (deprecated in 2.2) | New (2.2) | Kind | Notes |
 |---|---|---|---|
 | `xtc_alloc_audit_enable()` | `xtc_runtime_set_alloc_audit()` | function |  |
+| `XTC_APP_OPTS_DEFAULT` | `XTC_APP_OPTS_INIT` | macro |  |
 | `xtc_batch_close()` | `xtc_batch_shutdown()` | function |  |
 | `xtc_blocking_pool_size()` | `xtc_runtime_set_blocking_threads()` | function | "too late" is XTC_E_STATE under the new name, XTC_E_INVAL under the old |
 | `xtc_bloom_fini()` | `xtc_bloom_destroy()` | function |  |
@@ -64,6 +65,8 @@ result keeps working until it moves to the new name.
 | `xtc_io_fini()` | `xtc_io_destroy()` | function | the new name returns void; the old one returns XTC_E_INVAL for NULL, else XTC_OK |
 | `xtc_io_init()` | `xtc_io_create()` | function |  |
 | `xtc_io_set_iowq_max_workers()` | `xtc_runtime_set_iowq_workers()` | function |  |
+| `XTC_LOCKMGR_OPTS_DEFAULT` | `XTC_LOCKMGR_OPTS_INIT` | frozen | frozen lock layer: an alias, no warning; 3.0 keeps only XTC_LOCKMGR_OPTS_INIT |
+| `XTC_LOG_OPTS_DEFAULT` | `XTC_LOG_OPTS_INIT` | macro |  |
 | `xtc_loop_fini()` | `xtc_loop_destroy()` | function | the new name returns void; the old one returns XTC_E_INVAL for NULL, else XTC_OK |
 | `xtc_loop_init()` | `xtc_loop_create()` | function |  |
 | `xtc_pg_join()` | `xtc_pg_subscribe()` | function |  |
@@ -75,9 +78,11 @@ result keeps working until it moves to the new name.
 | `xtc_reg_unregister()` | `xtc_reg_del()` | function | call it as xtc_reg_del(r, name, XTC_PID_NONE); a miss is XTC_E_NOTFOUND (the old name: XTC_E_INVAL) |
 | `xtc_reg_unregister_pid()` | `xtc_reg_del()` | function | same arguments; a miss is XTC_E_NOTFOUND (the old name: XTC_E_INVAL) |
 | `xtc_reg_whereis()` | `xtc_reg_get()` | function | same arguments; a miss is XTC_E_NOTFOUND (the old name: XTC_E_INVAL) |
+| `XTC_RES_CAPS_DEFAULT` | `XTC_RES_CAPS_INIT` | macro |  |
 | `xtc_scope_close()` | `xtc_scope_leave()` | function |  |
 | `xtc_scope_open()` | `xtc_scope_enter()` | function |  |
 | `xtc_set_stack_size()` | `xtc_runtime_set_stack_size()` | function |  |
+| `XTC_SLAB_OPTS_DEFAULT` | `XTC_SLAB_OPTS_INIT` | macro |  |
 | `xtc_slab_pressure_listen()` | `xtc_slab_pressure_create()` | function | the handle is now returned: pass an out pointer and keep (or never destroy) it |
 | `xtc_slab_pressure_listen_ex()` | `xtc_slab_pressure_create()` | function | same arguments |
 | `xtc_slab_pressure_stop()` | `xtc_slab_pressure_destroy()` | function | the new name returns void; the old one returns XTC_E_INVAL for NULL, XTC_E_NOSYS without PSI, else XTC_OK |
@@ -85,6 +90,8 @@ result keeps working until it moves to the new name.
 | `xtc_stack_reclaim_enable()` | `xtc_runtime_set_stack_reclaim()` | function | keep_bytes 0 now means off; the old 0 (one page) is the page size |
 | `xtc_stack_reclaim_enabled()` | `xtc_runtime_get_stack_reclaim()` | function | nonzero (the keep margin) when on |
 | `xtc_stack_size()` | `xtc_runtime_get_stack_size()` | function |  |
+| `XTC_SUP_OPTS_DEFAULT` | `XTC_SUP_OPTS_INIT` | macro |  |
+| `XTC_TCP_OPTS_DEFAULT` | `XTC_TCP_OPTS_INIT` | macro |  |
 | `xtc_timer_release()` | `xtc_timer_detach()` | function |  |
 | `xtc_tnt_start()` | `xtc_tnt_run()` | function | same arguments; it blocks until the system stops, as before |
 | `xtc_xlink()` | `xtc_xproc_link()` | function |  |

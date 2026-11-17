@@ -197,7 +197,7 @@ int
 xtc_log_create(const xtc_log_opts_t *opts, xtc_log_t **out)
 {
 	xtc_log_t *log;
-	xtc_log_opts_t defaults = XTC_LOG_OPTS_DEFAULT, o = defaults;
+	xtc_log_opts_t defaults = XTC_LOG_OPTS_INIT, o = defaults;
 	uint64_t i;
 	int rc;
 

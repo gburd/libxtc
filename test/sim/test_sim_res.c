@@ -108,7 +108,7 @@ run_one(uint64_t seed, int *out_succ, int *out_rej, int *out_over,
     int64_t *out_final_used, int64_t *out_high, uint64_t *out_state)
 {
 	xtc_exec_t *e = NULL;
-	xtc_res_caps_t caps = XTC_RES_CAPS_DEFAULT;
+	xtc_res_caps_t caps = XTC_RES_CAPS_INIT;
 	int i, rc;
 
 	xtc_atomic_store_i32(&g_success, 0, xtc_mo_seq_cst);

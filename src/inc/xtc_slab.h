@@ -154,7 +154,7 @@ typedef struct xtc_slab_opts {
 	size_t                 shm_size;
 } xtc_slab_opts_t;
 
-#define XTC_SLAB_OPTS_DEFAULT { \
+#define XTC_SLAB_OPTS_INIT { \
 	.size = sizeof(xtc_slab_opts_t), \
 	.name = "anon", \
 	.obj_size = 0, \
@@ -270,6 +270,8 @@ XTC_API int xtc_slab_pressure_listen_ex(const char *psi_path,
     xtc_slab_pressure_fn fn, void *user, xtc_slab_pressure_t **out);
 XTC_DEPRECATED("use xtc_slab_pressure_destroy")
 XTC_API int xtc_slab_pressure_stop(xtc_slab_pressure_t *handle);
+#define XTC_SLAB_OPTS_DEFAULT XTC_SLAB_OPTS_INIT
+XTC_DEPRECATED_MACRO(clang deprecated(XTC_SLAB_OPTS_DEFAULT, "use XTC_SLAB_OPTS_INIT"))
 
 #ifdef __cplusplus
 }
