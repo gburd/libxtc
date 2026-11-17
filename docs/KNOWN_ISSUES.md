@@ -6,6 +6,149 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## CHANGED (2.2): one name per verb; the old names still work until 3.0
+
+2.2 renames part of the API so that one verb has one meaning:
+`create`/`destroy` for a handle the library allocates (`xtc_loop_init`
+is now `xtc_loop_create`, `xtc_exec_init(&e, n)` is
+`xtc_exec_create(&opts, &e)`), `shutdown` for closing a channel, gate or
+batch to new work, `put`/`get`/`del` for the registry (seven verbs
+before), `_INIT` for every initializer macro, `_fn` for callback types,
+`xtc_coro_spawn`/`xtc_coro_join` for `xtc_async`/`xtc_await`,
+`xtc_xproc_*` for the cross-process calls, `xtc_runtime_set_<k>` and
+`_get_<k>` pairs for the process knobs, prefixed constants and a
+typedef for every public enum, and `_thrd_` on the two calls that
+block an OS thread and have a fiber twin (`xtc_thrd_rwlock_*`,
+`xtc_thrd_sleep_ns`).  [Deprecations]({{ '/reference/deprecations/' |
+relative_url }}) lists every old name with its replacement: 64
+functions, 6 macros, 4 types, 4 enumerators, and 4 frozen lock-layer
+aliases.
+
+Nothing a 2.1 binary uses went away.  Each old function is still
+exported at `XTC_2.0`, as a wrapper that calls the new one (the new
+names are `XTC_2.2` symbols; abidiff against 2.1.2 reports 0 functions
+removed, 99 added), so a binary built against 2.1 runs on 2.2 without a
+rebuild.  A rebuild warns: the old declarations carry
+`XTC_DEPRECATED` (`-Wdeprecated-declarations` on gcc and clang, C4996
+on MSVC), and `XTC_NO_DEPRECATION_WARNINGS` silences that while a code
+base migrates.  An old `*_fini` keeps its `int` result
+(`XTC_E_INVAL` for NULL); the new `*_destroy` returns `void`.  Where an
+old name kept a different error code (`xtc_reg_register` reports a
+taken name as `XTC_E_INVAL`, `xtc_reg_put` as `XTC_E_EXIST`), the
+table says so.  3.0 removes every old name, then gives the
+`xtc_rwlock` name to the fiber-parking `xtc_arwlock`.
+
+libxtc's own build, tests and examples compile with
+`-Werror=deprecated-declarations`, so none of them uses an old name;
+`test/abi/test_deprecated_bridge` calls each old name once, and
+`test/dist/test_deprecated.sh` checks that every table row warns.
+
+## CHANGED (2.2): `xtc_logf`, a typed log call
+
+`xtc_logf(lvl, "loop {} drained {} bytes", id, n)` (and `xtc_logf_to`
+for a given logger) formats each `{}` from its argument's type, picked
+by `_Generic`: every integer type, `size_t` and `int64_t` included,
+pointers, strings, `double` and `bool`, with no `PRIu64`.  `{:x}`,
+`{:08x}` and `{:.3}` set the base, width and precision.  A call takes
+at most 16 arguments; a count that does not match the placeholders
+writes the record with a marker in front (`[xtc_logf: 2 args, 3 {}]`),
+never undefined behaviour.  It is C only: the macros are not defined in
+a C++ translation unit, which can call `xtc_logf_impl` itself.  New
+symbol: `xtc_logf_impl` (`XTC_2.2`).  See xtc_log(3).
+
+## CHANGED (2.2): C++ code includes the headers and links; libxtc stays C
+
+libxtc is a C11 library.  What a C++ program gets is coexistence: every
+installed header has `extern "C"` and compiles in a C++ translation
+unit, and the program links.  Through 2.1.2, 52 of the installed
+headers declared their functions without `extern "C"`, so a C++ caller
+of almost any function failed to link.  `xtc_atomic.h` and
+`xtc_compiler.h` (2.2, `xtc_atomic_<op>_<type>` on plain storage and
+the compiler directives) are C only and expand to nothing in C++; the
+library and its headers no longer use C11 `_Atomic`, so `xtc_res.h`,
+`xtc_lwlock.h` and the headers that include them compile with g++ too
+(the layout of `xtc_lwlock_t` and `xtc_res_t` is unchanged).  There is
+no C++ API: no overloads, no templates.  `test/dist/test_header_cxx.sh`
+(in `make check`) compiles every installed header as C++98, C++11 and
+C++20 with g++ and clang++, and links a C++ program that takes the
+address of every declared function.
+
+## CHANGED (2.2): waiting for mailbox room and for a name; `xtc_demonitor`
+
+New in `XTC_2.2`:
+
+- `xtc_send_wait(to, data, size, timeout_ns)` waits for room in a full
+  mailbox instead of returning `XTC_E_AGAIN`; from a proc it parks the
+  fiber, from a plain thread it blocks the thread.  `xtc_send_notify`
+  asks for one ROOM message (`xtc_room_decode`) when there is room, or
+  when the receiver exits.  A mailbox has room when it holds at most
+  half its cap.
+- `xtc_reg_whereis_wait(r, name, not_pid, timeout_ns, &pid)` returns a
+  live holder of a name other than `not_pid`, waiting for a
+  registration, and `xtc_reg_send_wait` sends to whichever incarnation
+  holds the name.  A supervisor registers each child's
+  `xtc_child_spec_t.reg_name` itself (in `xtc_sup_opts_t.registry`)
+  and removes it when the child dies.
+- `xtc_demonitor(ref, flags)` turns a monitor off; with
+  `XTC_DEMONITOR_FLUSH` it also removes a DOWN for that monitor already
+  in the mailbox.
+- `xtc_app_supervisor(app)` and `xtc_sup_child_restarts(sup, index,
+  &n)` read an app's root supervisor and a child's restart count.
+
+## FIXED (2.2): a fault guard and a crash handler installed together overwrote each other
+
+`xtc_fault_guard_install` and `xtc_crash_handler_install` each set the
+SIGSEGV, SIGBUS, SIGFPE and SIGILL handlers over whatever was there, so
+the one called last won: with the crash handler last a fault in a proc
+was not contained, and with the guard last a fault it cannot contain
+(a plain thread, a critical section, a stack overflow) died with no
+dump.  The guard also replaced the thread's alternate signal stack,
+which made AddressSanitizer abort at thread exit.  Now the guard hands a
+fault it cannot contain to the action it displaced (an application's
+handler, a sanitizer's, or the crash handler, installed before or after
+it), then dies with the default action so a core is still written, and
+it keeps a thread's own alternate stack.  `/dump/guard_and_crash_handler`
+(`test/m12/test_dump`) and `/m8/proc/fault_guard_altstack` fail on 2.1.2
+and pass on 2.2.
+
+## FIXED (2.2): finalizing a loop freed fibers parked in `xtc_blocking_run`
+
+`xtc_blocking_run` keeps its work item on the parked fiber's stack; the
+pool worker writes the result there and wakes the fiber when `fn`
+returns.  `xtc_loop_destroy` (then `xtc_loop_fini`, and so the executor
+and app teardown) freed every fiber still on the loop without looking
+at the pool, so the result store and the wake of a fiber parked in
+`xtc_blocking_run` landed in freed memory.  The teardown now waits until
+no fiber of the loop is parked on the pool, so it takes as long as the
+loop's longest offload; nothing is cancelled.
+`/m9/blocking/loop_fini_waits` fails on 2.1.2 and passes on 2.2.
+
+## FIXED (2.2): smaller contract fixes
+
+- A socket tracked with `xtc_proc_recovery_track_fd` kept its
+  `XTC_RES_FDS` unit when the recovery registry closed it, so a server
+  capped at N connections lost a slot per faulted request; it is now
+  closed with `xtc_net_close`, which refunds the unit
+  (`/m7/res_meter/net_recovery_close`).
+- The memory-pressure listener (`xtc_slab_pressure_create`, formerly
+  `xtc_slab_pressure_listen`) registered a 1 s PSI window, which the
+  kernel refuses to an unprivileged process, and every failure read as
+  `XTC_E_NOSYS`.  The trigger is now 150 ms in a 2 s window, the
+  process's own cgroup `memory.pressure` is tried first, and a refused
+  trigger is `XTC_E_INVAL`, an unopenable file `XTC_E_IO`
+  (`/m11/slab/pressure_listen_ex_stop`).
+- Stack reclaim never fired under AddressSanitizer: it took a local's
+  address as the stack pointer, and ASan moves locals to a heap fake
+  stack.  It now uses its own frame's address
+  (`/m14/stack_reclaim/reclaim_correct`).
+- A killed `xtc_fsm` (or one whose `event()` exits, or that faults)
+  leaked its run state and postponed events; they are freed from an
+  at-exit hook (`/m10.5/fsm/fsm_killed_frees`).
+- A timer still armed when `xtc_tnt` stops is freed (32 bytes leaked
+  per pending timer).
+- The MinGW-w64 build compiles again (`os_thread.c` lacked
+  `<windows.h>`).
+
 ## CHANGED (2.2): a DOWN says how the process really ended
 
 Four classification defects, each with a test that failed before:
@@ -57,7 +200,8 @@ before it is freed cannot be freed mid-call.  New error codes
 caller-allocated struct (2.0 entry below).  Initialize it with
 `XTC_TNT_SPEC_INIT` or a designated initializer that sets `.size =
 sizeof(xtc_tnt_spec_t)`; a zeroed spec (`memset`, `= { 0 }`) is refused
-with `XTC_E_INVAL`.  `xtc_tnt_start` reads no further than `.size` (a
+with `XTC_E_INVAL`.  `xtc_tnt_run` (formerly `xtc_tnt_start`) reads no
+further than `.size` (a
 field past it is 0) and keeps its own copy of the spec, so the caller's
 struct need not outlive the call; the `types` table is still borrowed for
 the whole run.  On x86-64 the struct is 56 bytes (40 in 2.1, which had no
@@ -86,10 +230,10 @@ longer keeps the run going after the supervisor has gone; it is torn down
 with the loop at `xtc_app_destroy`.
 
 `xtc_app_start` also spawns the registry's reaper on the app's loop, so
-`xtc_reg_register_mon` on `xtc_app_registry(app)` drops a dead pid's
-names with no setup.  An embedder that spawns its own reaper for the app
-registry may keep it (the second reaper takes over enrollment) or delete
-it.
+`xtc_reg_put(..., XTC_REG_MONITOR)` on `xtc_app_registry(app)` drops a
+dead pid's names with no setup.  An embedder that spawns its own reaper
+for the app registry may keep it (the second reaper takes over
+enrollment) or delete it.
 
 ## CHANGED (2.2): `xtc_svr_call` and `xtc_fsm_call` monitor the target
 
@@ -231,7 +375,7 @@ one exec and one standalone loop were finalized, 2 of 6 sends to their
 dead pids were accepted and delivered to the new loops' procs.
 
 **Fix.**  `loop_id` is the loop's process-wide id: every
-`xtc_loop_init`, on an executor or standalone, takes the next id from a
+`xtc_loop_create`, on an executor or standalone, takes the next id from a
 counter that starts at 1 and never reuses one, and a send resolves the
 pid through a lock-free hash of the registered loops keyed by that id.
 A pid names one proc from any loop of any exec, and a pid of a
@@ -256,7 +400,7 @@ A pid no longer says which executor slot its proc lives on; code that
 read the slot out of `loop_id` must record it (a proc can read its own
 with `xtc_exec_loop_id()`).  `xtc_sim_partition_set` is still keyed by
 executor slot + 1.  4,294,967,293 loop inits exhaust the
-ids; `xtc_loop_init` then fails with `XTC_E_RESOURCE`.  The
+ids; `xtc_loop_create` then fails with `XTC_E_RESOURCE`.  The
 standalone-loop workaround (`examples/16_l2book`) is no longer needed.
 
 ## FIXED (2.2): a cross-shard xtc_tnt_send could lose messages
@@ -331,20 +475,22 @@ over every interleaving of two writers and the drain on a ring that
 overflows, and fails on the 2.1 drain and on a drop that skips the
 written check.
 
-## CHANGED (2.2): xtc_tuning_check_ex hands the findings to the caller
+## CHANGED (2.2): `xtc_runtime_tuning_check_ex` hands the findings to the caller
 
-`xtc_tuning_check` reports only through the process-wide default
-logger, so an application that wanted the findings had to install its
-logger as the default around the call and catch other threads' messages
-with them.  `xtc_tuning_check_ex(fn, user)` (symbol version `XTC_2.2`)
-runs the same probes and calls `fn` once per finding with an
+`xtc_tuning_check` (2.2: `xtc_runtime_tuning_check`) reports only
+through the process-wide default logger, so an application that wanted
+the findings had to install its logger as the default around the call
+and catch other threads' messages with them.
+`xtc_runtime_tuning_check_ex(fn, user)` (symbol version `XTC_2.2`) runs
+the same probes and calls `fn` once per finding with an
 `xtc_tuning_finding_t` (probe name, current value, recommended value,
 advice text) on the calling thread; it touches no global state and
-returns the number of findings.  `xtc_tuning_check` is now that with a
-callback that logs, and logs the same lines.  The `xtc_log_set_default`
-header said it returns the prior default; it returns `XTC_OK`, and the
-header now says so.  The new `xtc_log_swap_default(log, &prev)` returns
-the replaced logger in one atomic exchange.
+returns the number of findings.  `xtc_runtime_tuning_check` is now that
+with a callback that logs, and logs the same lines.  The
+`xtc_log_set_default` header said it returns the prior default; it
+returns `XTC_OK`, and the header now says so.  The new
+`xtc_log_swap_default(log, &prev)` returns the replaced logger in one
+atomic exchange.
 
 ## FIXED (2.2): xtc_metrics_dump_prometheus wrote a page Prometheus rejects
 
@@ -403,7 +549,7 @@ fields after 2.2's `stack_size`; a consumer built against 2.1 keeps
 reading its prefix).  The string fields are not
 in `xtc_tail_rec_t`, whose layout is frozen: the XTCL dump does not carry
 them, the dial9 dump does.  To keep `XTC_LOOP_FOREIGN` out of the loop
-id space, `xtc_loop_init` now stops one id earlier, after 4,294,967,293
+id space, `xtc_loop_create` now stops one id earlier, after 4,294,967,293
 inits.
 
 ## FIXED (2.2): the simulator's net latency dropped sends it had accepted
@@ -476,7 +622,7 @@ ran it 0 times.
 **Fix.**  The proc exit path releases the proc's entries after its
 `xtc_proc_at_exit` hooks (so a hook can still read them), running each
 destructor once, however the proc ends (return, `xtc_exit_self`, a
-kill, a contained fault).  `xtc_loop_fini` does the same for a proc it
+kill, a contained fault).  `xtc_loop_destroy` does the same for a proc it
 tears down while parked; those destructors run on the finalizing
 thread.  An exit costs one relaxed load when no proc holds entries.
 `test/m12/test_observability` `/pdict/exit_cleanup` failed before (0 of
@@ -612,7 +758,7 @@ code.  `test_sim_iofault` sets `XTC_AIO_FORCE_OFFLOAD=1` before its
 runs: before, the seeded run saw 0 injected faults and failed; after,
 it sees 5 and replays.
 
-## FIXED (2.2, 2.1.3): a fire-and-forget `xtc_async` coroutine was kept until `xtc_loop_fini`
+## FIXED (2.2, 2.1.3): a fire-and-forget coroutine was kept until its loop was destroyed
 
 **What it was.**  A coroutine spawned with `xtc_async(loop, fn, arg,
 NULL)` has no handle, so nobody can await it, but its task and its
@@ -623,8 +769,9 @@ finish, held 4.4 MB.
 
 **Fix.**  A coroutine spawned without a handle is reclaimed when it
 returns, by the same path a proc's fiber takes.  A handle that was
-handed out keeps its lifetime, so `xtc_await` can still read its result
-until `xtc_loop_fini`.  The 400,000-coroutine run now holds 4.2 MB (on a
+handed out keeps its lifetime, so `xtc_coro_join` (2.2's name for
+`xtc_await`) can still read its result until `xtc_loop_destroy`.  The
+400,000-coroutine run now holds 4.2 MB (on a
 48-core x86-64 host, io_uring build, three runs each: 129,220-129,228
 KiB before, 4,248 KiB after).  `test/m4/test_async`
 `/C12_async_detached_reclaimed` (20,000 fire-and-forget coroutines,

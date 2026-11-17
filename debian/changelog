@@ -1,74 +1,134 @@
 libxtc (2.2.0-1) unstable; urgency=medium
 
-  * MINOR release on 2.x: new API, behaviour changes listed below, and the
-    fixes 2.1.2 shipped plus later ones.  SONAME stays libxtc.so.2.  The
-    library exports 2.1.2's 761 functions, each still in XTC_2.0, plus 3
-    new ones in the new XTC_2.2 version node; none was removed.  Stable-
-    tier structs only grew at the end (xtc_sup_opts_t 40 -> 56 bytes);
-    the experimental xtc_tnt_spec_t changed layout (below).
+  * MINOR release on 2.x: new API, renamed API with the old names kept,
+    behaviour changes listed below, and the fixes 2.1.2 and 2.1.3 ship
+    plus later ones.  SONAME stays libxtc.so.2.  The library exports
+    2.1.2's 761 functions, each still at XTC_2.0, plus 99 new ones in a
+    new XTC_2.2 node; none was removed (abidiff against 2.1.2: status 4,
+    0 removed, 99 added).  Stable-tier structs only grew at the end; the
+    experimental xtc_tnt_spec_t changed layout (below).  A 2.1.2 consumer
+    built against 2.1.2's headers runs against 2.2.0 (scripts/compat-
+    check.sh v2.1.2).
+  * Renamed, the old names kept until 3.0 (docs/deprecations.md lists
+    all 82): create/destroy for handles the library allocates (loop, io,
+    exec, bloom, hll, slab pressure listener), shutdown for channels,
+    gates and batches, put/get/del for the registry, *_INIT for every
+    initializer, *_fn for callback types, xtc_coro_spawn/xtc_coro_join
+    for xtc_async/xtc_await, xtc_xproc_* for the cross-process calls,
+    xtc_runtime_set_<k>/_get_<k> for the process knobs, prefixed
+    constants and a typedef for every public enum, and xtc_thrd_rwlock_*
+    and xtc_thrd_sleep_ns for the calls that block an OS thread.  Each
+    old function stays exported at XTC_2.0 as a wrapper; a rebuild that
+    uses one warns (XTC_DEPRECATED; XTC_NO_DEPRECATION_WARNINGS silences
+    it).  The library, tests and examples build with
+    -Werror=deprecated-declarations.
   * New API:
-    - xtc_atomic.h and xtc_compiler.h, two stable headers included by
-      xtc.h: xtc_atomic_<op>_<type>(p, ..., order) on plain storage with
-      an explicit memory order on every call, and the compiler
-      directives (XTC_LIKELY, XTC_CACHE_LINE, XTC_THREAD_LOCAL, ...).
-      The library, tests and examples use them in place of C11 _Atomic,
-      so every installed header compiles as C++ (g++ and clang++ -std=
-      c++17) and MSVC no longer needs /experimental:c11atomics.  The
-      API discipline gate rejects C11 atomics outside xtc_atomic.h.
-    - xtc_reg_put / xtc_reg_visit: a registry entry carries a caller-owned
-      value, and xtc_reg_visit hands it to a callback under the registry
-      lock (XTC_REG_DUP, XTC_REG_MONITOR flags).
-    - xtc_sup_opts_t.on_child_down: the supervisor reports every child
-      DOWN, fully classified, before its restart decision, including
-      siblings a group restart kills and children a stop kills.
-    - XTC_DOWN_KIND_KILLED (5, appended): a death by xtc_exit_pid, a
-      supervisor kill or a link kill.
+    - xtc_logf(lvl, "loop {} drained {} bytes", id, n): a typed log call
+      whose {} placeholders take their format from the argument's type
+      (no PRIu64), with {:x}, {:08x} and {:.3}; a count mismatch writes
+      a marked record.  C only.
+    - The errno band: XTC_E_SYS_BASE, XTC_E_SYS(e), xtc_err_errno and
+      xtc_err_from_errno; the xtc_aio_* calls return XTC_E_SYS(errno).
+    - xtc_sim.h is installed (experimental): a program can write its own
+      deterministic simulation tests against an installed libxtc, linked
+      with libxtc-sim.a (pkg-config xtc-sim).  New: xtc_sim_active,
+      xtc_sim_rand, xtc_sim_fd_ready_at, xtc_sim_external_begin and
+      _complete, XTC_DST_BUG(n).
+    - xtc_atomic.h and xtc_compiler.h, two stable C headers included by
+      xtc.h: xtc_atomic_<op>_<type>(p, ..., order) on plain storage, and
+      the compiler directives (XTC_LIKELY, XTC_CACHE_LINE, ...).  The
+      library no longer uses C11 _Atomic.
+    - Supervision: xtc_sup_opts_t.on_child_down reports every child DOWN
+      before the restart decision; XTC_DOWN_KIND_KILLED (5, appended);
+      child specs carry the proc knobs (mailbox watermark, scheduling
+      class, migratable, stack_size) and a reg_name the supervisor
+      registers; servers and supervisors run as supervised children
+      (xtc_svr_child_main, xtc_sup_child_main); an opt-in synchronous
+      start (wait_init, wait_children); xtc_app_supervisor and
+      xtc_sup_child_restarts.
+    - Messaging: xtc_send_wait and xtc_send_notify wait for mailbox room;
+      xtc_reg_whereis_wait and xtc_reg_send_wait wait for a name;
+      xtc_demonitor (XTC_DEMONITOR_FLUSH); registry entries carry a
+      caller-owned value (xtc_reg_put, xtc_reg_visit); XTC_WAIT_FD_ONLY
+      for an fd wait that does not wake for mail.
+    - xtc_proc_opts_t.stack_size; proc names and labels
+      (xtc_proc_set_label), xtc_proc_info_t.crit_depth, application tail
+      events (xtc_tail_app), and xtc_thread_register for a plain
+      thread's sends.
+    - Metrics: a valid Prometheus exposition (xtc_metrics_write_prometheus,
+      sums and buckets, xtc_hist_create_bounds); xtc_runtime_tuning_check_ex
+      hands the findings to a callback; xtc_log_swap_default.
+    - xtc_tnt_send_from, a thread-safe send to an Isolate from outside
+      any handler; xtc_tnt_spec_t.spin_ns.
     - XTC_E_EXIST (-13) and XTC_E_STATE (-14), appended.
-    - xtc_tnt_send_from: a thread-safe send to an Isolate from outside
-      any handler.  xtc_tnt_spec_t.spin_ns: an idle shard busy-polls its
-      rings before it parks.
+    - A generated, installed xtc_version.h: an installed consumer's
+      XTC_VERSION_* macros read the real version, and XTC_TLS_ENABLED and
+      XTC_IO_BACKEND_* are defined.
   * Changed:
+    - Every installed header has extern "C" and compiles as C++ (g++ and
+      clang++, C++98 to C++20), so a C++ program includes and links;
+      libxtc has no C++ API.
     - xtc_tnt_spec_t is size-first: set .size with XTC_TNT_SPEC_INIT; a
-      zeroed spec is refused with XTC_E_INVAL.  xtc_tnt_start keeps a
-      copy of the spec.  Every field moved by 8 bytes (40 -> 56), allowed
-      because xtc_tnt.h is experimental; rebuild code that uses xtc_tnt.
-    - A contained fault in a user recovery frame reports kind SIGNAL
-      with the fault's signal, whatever code the recovery path passes.
-    - Every int is a deliverable exit reason: xtc_exit_self(-1) no
-      longer reads as CLEAN, and xtc_exit_pid(p, -1) kills.
-    - A kill reports XTC_DOWN_KIND_KILLED instead of EXIT.
-    - An xtc_svr whose init fails, and an xtc_fsm whose first enter
-      fails, ends with EXIT(rc) instead of CLEAN.  A TRANSIENT child that
-      fails its init, or recovers from a fault and exits 0, is now
+      zeroed spec is refused with XTC_E_INVAL.  Every field moved by 8
+      bytes (40 -> 56), allowed because xtc_tnt.h is experimental;
+      rebuild code that uses xtc_tnt.
+    - A DOWN says how the process ended: a contained fault in a user
+      recovery frame reports SIGNAL; -1 is a deliverable exit and kill
+      reason; a kill is KILLED, not EXIT; a server or fsm whose init
+      fails ends EXIT(rc).  A TRANSIENT child in these cases is now
       restarted.
-    - xtc_sup_add_child from the supervisor's own fiber returns
-      XTC_E_STATE at once instead of waiting 5 s.
+    - xtc_svr_call and xtc_fsm_call monitor their target: a dead target
+      fails the call at once with XTC_E_NOTFOUND.
+    - A single-loop xtc_app_run returns when the root supervisor exits.
+    - xtc_net_listen accepts port 0.
+    - On a sim build, xtc_loop_run and xtc_exec_run outside a simulation
+      run return XTC_E_STATE; on a native build xtc_sim_exec_run returns
+      XTC_E_NOSYS.
+    - XTC_API is on every installed declaration (a Windows DLL now
+      exports them all); the internal __os_*.3 man pages are no longer
+      installed.
   * Fixes:
     - A pid names its loop by a process-wide id, so xtc_send between two
-      xtc_execs (or two standalone loops) reaches the addressed proc; it
-      was delivered to the proc in the same slot of the sender's
-      executor.  xtc_tnt runs on its own executor, so any program with
-      xtc_tnt and its own executor hit it.
-    - xtc_exec_run returns after the last task finishes: a loop
-      published its timer count only after a step returned, so a step
-      that dropped its last timer and then blocked kept a stale count.
-    - A timer still armed when xtc_tnt stops is freed (32 bytes leaked
-      per pending timer).
-    - MinGW: os_thread.c includes <windows.h>; the library did not
-      compile.
+      executors or standalone loops reaches the addressed proc.
+    - xtc_exec_run returns after the last task finishes.
+    - Out of memory, xtc_rcu never frees an object under its readers,
+      and xtc_lrlock_apply_op no longer loses the write.
+    - A coroutine spawned without a handle is reclaimed when it returns
+      (400,000 of them: 129 MB to 4.2 MB).
+    - Finalizing a loop no longer frees a fiber parked in
+      xtc_blocking_run; xtc_log no longer prints records a writer had not
+      finished; a killed xtc_fsm frees its run state; a proc's pdict
+      entries are released at exit; an RCU thread reader registers again
+      after xtc_rcu_fini; a timer armed when xtc_tnt stops is freed.
+    - An RCU read-side on a fiber takes no lock (8 fiber readers: about
+      1,900 ns to 10 ns per empty bracket).
+    - A demand stream keeps one unit of demand open, not one per pull.
+    - The library's fd waits (xtc_net frames, xtc_osproc_wait, the
+      accelerator fence) no longer spin while the caller has mail.
+    - A recovery-closed socket refunds its XTC_RES_FDS unit; the fault
+      guard and the crash handler compose; the PSI listener works
+      unprivileged; stack reclaim fires under AddressSanitizer;
+      XTC_AIO_FORCE_OFFLOAD is never read inside a simulation run.
+    - Simulator: net latency no longer drops a send it accepted, and a
+      partition no longer drops a DOWN or a link EXIT.
+    - MinGW-w64 builds again.
     - The 2.1.2 fixes (stale readiness events, fault-recovery re-walks,
       scope finalizers, supervisor shutdown and group restart, mailbox
       replies, future combinators, AIO reaper and loop teardown, the
       executable-stack note, cross-shard xtc_tnt_send, illumos AIO).
-  * Tests: CBMC harnesses that link the library source unchanged, a
-    drift gate for the transcribed ones, and harnesses for the loop
-    registry and the xtc_tnt ring; DST of DOWN classification and of
-    pids across executors; planted bugs 30-35 the simulator catches.
+  * Tests and gates: CBMC harnesses that link the library source; DST
+    of DOWN classification, pids across executors and partitions;
+    planted bugs 30-35, 44-54, 60-65 and 67 the simulator catches; gates
+    for XTC_API, standalone and C++ header compilation, and the
+    deprecation bridges.
   * Examples moved to their own repository (libxtc-examples), carried as
-    the examples/ submodule; 16_l2book, an order book on xtc_tnt and
-    fibers, joins check-examples.
+    the examples/ submodule.  New: 16_l2book (an order book on xtc_tnt
+    and fibers), 17_checkout (saga, pool, pdict), 18_clickstream
+    (stream, Bloom, HyperLogLog), 19_edgeacl (cskip under RCU, cfg
+    sessions), and 20_jobq (a job queue with its own deterministic
+    simulation test, built on xtc_sim.h).
 
- -- Greg Burd <greg@burd.me>  Fri, 13 Nov 2026 09:00:00 -0500
+ -- Greg Burd <greg@burd.me>  Tue, 17 Nov 2026 09:00:00 -0500
 
 libxtc (2.1.1-1) unstable; urgency=medium
 

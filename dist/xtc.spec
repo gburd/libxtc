@@ -82,18 +82,29 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
-* Fri Nov 13 2026 Greg Burd <greg@burd.me> - 2.2.0-1
-- MINOR on 2.x; SONAME libxtc.so.2, three new exports in XTC_2.2.  New:
-  xtc_atomic.h and xtc_compiler.h (every installed header now compiles
-  as C++), xtc_reg_put / xtc_reg_visit, the supervisor's on_child_down
-  hook, XTC_DOWN_KIND_KILLED, XTC_E_EXIST / XTC_E_STATE,
-  xtc_tnt_send_from and spec.spin_ns.  Changed: xtc_tnt_spec_t is
-  size-first (experimental tier; rebuild xtc_tnt users); a contained
-  fault in a user recovery frame is SIGNAL, -1 is a deliverable exit
-  reason, a kill is KILLED, a failed server init is EXIT(rc).  Fixed: a
-  pid reaches its proc across executors; xtc_exec_run returns after the
-  last task; armed xtc_tnt timers are freed at stop; the MinGW build;
-  and the 2.1.2 fixes.
+* Tue Nov 17 2026 Greg Burd <greg@burd.me> - 2.2.0-1
+- MINOR on 2.x; SONAME libxtc.so.2.  2.1.2's 761 functions stay at
+  XTC_2.0 and 99 new ones are in XTC_2.2; none removed.  Renamed with the
+  old names kept until 3.0 (docs/deprecations.md, 82 names):
+  create/destroy, shutdown, registry put/get/del, *_INIT, *_fn,
+  xtc_coro_spawn/xtc_coro_join, xtc_xproc_*, xtc_runtime_set_/_get_
+  knobs, prefixed enums, xtc_thrd_rwlock_* and xtc_thrd_sleep_ns; a
+  rebuild that uses an old name warns.  New: xtc_logf (typed {}
+  placeholders, C only), the XTC_E_SYS(errno) band, an installed
+  experimental xtc_sim.h for an application's own DST, xtc_atomic.h and
+  xtc_compiler.h, supervision hooks and a synchronous start, waiting for
+  mailbox room and for a name, xtc_demonitor, proc names and labels,
+  per-proc stack size, a valid Prometheus exposition, an installed
+  xtc_version.h.  Changed: every installed header has extern "C" and
+  compiles as C++; xtc_tnt_spec_t is size-first (experimental tier;
+  rebuild xtc_tnt users); a DOWN says how a proc ended (SIGNAL, KILLED,
+  EXIT(rc)); XTC_API on every installed declaration.  Fixed: pids across
+  executors, xtc_exec_run's return, rcu and lrlock out of memory,
+  fire-and-forget coroutines, loop teardown under xtc_blocking_run,
+  unfinished log records, fiber RCU read-sides without a lock, fd waits
+  spinning on mail, the simulator's latency and partition losses, the
+  MinGW build, and the 2.1.2 fixes.  Examples are the libxtc-examples
+  submodule; 16-20 are new.
 
 * Thu Oct 29 2026 Greg Burd <greg@burd.me> - 2.1.1-1
 - PATCH on 2.1: fixes only, ABI-compatible with 2.0.0 and 2.1.0.  Under
