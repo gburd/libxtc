@@ -557,6 +557,12 @@ __xproc_self_exe(char *buf, size_t bufsz)
 	uint32_t len = (uint32_t)bufsz;
 	if (_NSGetExecutablePath(buf, &len) != 0) return XTC_E_NOSYS;
 	return XTC_OK;
+#elif defined(__sun)
+	/* illumos/Solaris: /proc/self/path/a.out links to the executable. */
+	ssize_t n = readlink("/proc/self/path/a.out", buf, bufsz - 1);
+	if (n <= 0 || (size_t)n >= bufsz - 1) return XTC_E_NOSYS;
+	buf[n] = '\0';
+	return XTC_OK;
 #else
 	(void)buf; (void)bufsz;
 	return XTC_E_NOSYS;
