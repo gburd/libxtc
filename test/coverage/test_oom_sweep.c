@@ -451,7 +451,7 @@ step_cfg(int *ok)
 		arm();
 		rc = xtc_cfg_session_create(&ss);
 		if (rc == XTC_OK)
-			rc = xtc_cfg_ssn_set_string(ss, "oom.str", "sess",
+			rc = xtc_cfg_session_set_string(ss, "oom.str", "sess",
 			    XTC_CFG_SRC_SESSION);
 		disarm();
 		if (ss != NULL) {

@@ -55,6 +55,12 @@ result keeps working until it moves to the new name.
 | `xtc_blocking_pool_size()` | `xtc_runtime_set_blocking_threads()` | function | "too late" is XTC_E_STATE under the new name, XTC_E_INVAL under the old |
 | `xtc_bloom_fini()` | `xtc_bloom_destroy()` | function |  |
 | `xtc_bloom_init()` | `xtc_bloom_create()` | function | arguments reordered: (n_expected, fp_rate, out) |
+| `xtc_cfg_ssn_set_bool()` | `xtc_cfg_session_set_bool()` | function |  |
+| `xtc_cfg_ssn_set_double()` | `xtc_cfg_session_set_double()` | function |  |
+| `xtc_cfg_ssn_set_enum()` | `xtc_cfg_session_set_enum()` | function |  |
+| `xtc_cfg_ssn_set_int()` | `xtc_cfg_session_set_int()` | function |  |
+| `xtc_cfg_ssn_set_int64()` | `xtc_cfg_session_set_int64()` | function |  |
+| `xtc_cfg_ssn_set_string()` | `xtc_cfg_session_set_string()` | function |  |
 | `xtc_chan_demand_close()` | `xtc_chan_demand_shutdown()` | function |  |
 | `xtc_chan_mpmc_close()` | `xtc_chan_mpmc_shutdown()` | function |  |
 | `xtc_chan_mpsc_close()` | `xtc_chan_mpsc_shutdown()` | function |  |

@@ -27,6 +27,7 @@
 #include "xtc_app.h"
 #include "xtc_async.h"
 #include "xtc_batch.h"
+#include "xtc_cfg.h"
 #include "xtc_blocking.h"
 #include "xtc_chan.h"
 #include "xtc_dispatch.h"
@@ -375,6 +376,25 @@ bridge_coro(void)
 	xtc_loop_destroy(loop);
 }
 
+/* cfg sessions: xtc_cfg_ssn_set_* -> xtc_cfg_session_set_*.  With no
+ * session bound and a NULL session, each refuses alike. */
+static void
+bridge_cfg_session(void)
+{
+	CHECK(xtc_cfg_ssn_set_bool(NULL, "x", 1, XTC_CFG_SRC_SESSION) ==
+	    XTC_E_INVAL);
+	CHECK(xtc_cfg_ssn_set_int(NULL, "x", 1, XTC_CFG_SRC_SESSION) ==
+	    XTC_E_INVAL);
+	CHECK(xtc_cfg_ssn_set_int64(NULL, "x", 1, XTC_CFG_SRC_SESSION) ==
+	    XTC_E_INVAL);
+	CHECK(xtc_cfg_ssn_set_double(NULL, "x", 1.0, XTC_CFG_SRC_SESSION) ==
+	    XTC_E_INVAL);
+	CHECK(xtc_cfg_ssn_set_string(NULL, "x", "v", XTC_CFG_SRC_SESSION) ==
+	    XTC_E_INVAL);
+	CHECK(xtc_cfg_ssn_set_enum(NULL, "x", 1, XTC_CFG_SRC_SESSION) ==
+	    XTC_E_INVAL);
+}
+
 int
 main(void)
 {
@@ -391,6 +411,7 @@ main(void)
 	bridge_reg();
 	bridge_init();
 	bridge_coro();
+	bridge_cfg_session();
 	printf("  [bridge] OK: every deprecated name still works\n");
 	return 0;
 }

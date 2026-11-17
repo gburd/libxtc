@@ -139,17 +139,17 @@ test_cfg_ssn_set_kinds(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_cfg_session_create(&s), ==, XTC_OK);
 
 	/* NULL session with nothing bound has no target. */
-	munit_assert_int(xtc_cfg_ssn_set_bool(NULL, "ar.b", 1,
+	munit_assert_int(xtc_cfg_session_set_bool(NULL, "ar.b", 1,
 	    XTC_CFG_SRC_SESSION), ==, XTC_E_INVAL);
 
 	munit_assert_ptr_null(xtc_cfg_session_bind(s));
-	munit_assert_int(xtc_cfg_ssn_set_bool(NULL, "ar.b", 1,
+	munit_assert_int(xtc_cfg_session_set_bool(NULL, "ar.b", 1,
 	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
-	munit_assert_int(xtc_cfg_ssn_set_int64(s, "ar.i64", 9000000000LL,
+	munit_assert_int(xtc_cfg_session_set_int64(s, "ar.i64", 9000000000LL,
 	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
-	munit_assert_int(xtc_cfg_ssn_set_double(s, "ar.d", 0.25,
+	munit_assert_int(xtc_cfg_session_set_double(s, "ar.d", 0.25,
 	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
-	munit_assert_int(xtc_cfg_ssn_set_enum(s, "ar.e", 2,
+	munit_assert_int(xtc_cfg_session_set_enum(s, "ar.e", 2,
 	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
 
 	/* The bound session sees its overrides (name-keyed and via ref). */
@@ -165,26 +165,26 @@ test_cfg_ssn_set_kinds(const MunitParameter p[], void *d)
 
 	/* Bounds apply per kind (out of bounds is XTC_E_RANGE, the 1.50
 	 * contract in xtc_cfg.h); a rejected set changes nothing. */
-	munit_assert_int(xtc_cfg_ssn_set_bool(s, "ar.b", 2,
+	munit_assert_int(xtc_cfg_session_set_bool(s, "ar.b", 2,
 	    XTC_CFG_SRC_SESSION), ==, XTC_E_RANGE);
-	munit_assert_int(xtc_cfg_ssn_set_int64(s, "ar.i64", 0,
+	munit_assert_int(xtc_cfg_session_set_int64(s, "ar.i64", 0,
 	    XTC_CFG_SRC_SESSION), ==, XTC_E_RANGE);          /* < min */
-	munit_assert_int(xtc_cfg_ssn_set_double(s, "ar.d", 1.5,
+	munit_assert_int(xtc_cfg_session_set_double(s, "ar.d", 1.5,
 	    XTC_CFG_SRC_SESSION), ==, XTC_E_RANGE);          /* > max */
-	munit_assert_int(xtc_cfg_ssn_set_enum(s, "ar.e", 3,
+	munit_assert_int(xtc_cfg_session_set_enum(s, "ar.e", 3,
 	    XTC_CFG_SRC_SESSION), ==, XTC_E_RANGE);          /* no label 3 */
-	munit_assert_int(xtc_cfg_ssn_set_enum(s, "ar.e", -1,
+	munit_assert_int(xtc_cfg_session_set_enum(s, "ar.e", -1,
 	    XTC_CFG_SRC_SESSION), ==, XTC_E_RANGE);
 	/* Kind mismatch: an int64 setter on a double knob. */
-	munit_assert_int(xtc_cfg_ssn_set_int64(s, "ar.d", 5,
+	munit_assert_int(xtc_cfg_session_set_int64(s, "ar.d", 5,
 	    XTC_CFG_SRC_SESSION), ==, XTC_E_INVAL);
-	munit_assert_int(xtc_cfg_ssn_set_double(s, "ar.nope", 0.1,
+	munit_assert_int(xtc_cfg_session_set_double(s, "ar.nope", 0.1,
 	    XTC_CFG_SRC_SESSION), ==, XTC_E_INVAL);
 	munit_assert_int(xtc_cfg_get_enum("ar.e", &e), ==, XTC_OK);
 	munit_assert_int(e, ==, 2);
 
 	/* Source precedence: a lower-ranked source is refused silently. */
-	munit_assert_int(xtc_cfg_ssn_set_double(s, "ar.d", 0.75,
+	munit_assert_int(xtc_cfg_session_set_double(s, "ar.d", 0.75,
 	    XTC_CFG_SRC_FILE), ==, XTC_OK);
 	munit_assert_int(xtc_cfg_get_double("ar.d", &dv), ==, XTC_OK);
 	munit_assert_double(dv, ==, 0.25);

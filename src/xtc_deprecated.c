@@ -39,6 +39,7 @@
 #include "xtc_runtime.h"
 #include "xtc_reg.h"
 #include "xtc_async.h"
+#include "xtc_cfg.h"
 
 /* Group: loop / io / bloom / hll lifecycle (create / destroy). */
 
@@ -399,4 +400,48 @@ int
 xtc_await(xtc_task_t *t, intptr_t *result)
 {
 	return xtc_coro_join(t, result);
+}
+
+/* Group (tier B): cfg session setters (session, never ssn). */
+
+int
+xtc_cfg_ssn_set_bool(xtc_cfg_session_t *s, const char *name, int v,
+    xtc_cfg_source_t src)
+{
+	return xtc_cfg_session_set_bool(s, name, v, src);
+}
+
+int
+xtc_cfg_ssn_set_int(xtc_cfg_session_t *s, const char *name, int v,
+    xtc_cfg_source_t src)
+{
+	return xtc_cfg_session_set_int(s, name, v, src);
+}
+
+int
+xtc_cfg_ssn_set_int64(xtc_cfg_session_t *s, const char *name,
+    int64_t v, xtc_cfg_source_t src)
+{
+	return xtc_cfg_session_set_int64(s, name, v, src);
+}
+
+int
+xtc_cfg_ssn_set_double(xtc_cfg_session_t *s, const char *name,
+    double v, xtc_cfg_source_t src)
+{
+	return xtc_cfg_session_set_double(s, name, v, src);
+}
+
+int
+xtc_cfg_ssn_set_string(xtc_cfg_session_t *s, const char *name,
+    const char *v, xtc_cfg_source_t src)
+{
+	return xtc_cfg_session_set_string(s, name, v, src);
+}
+
+int
+xtc_cfg_ssn_set_enum(xtc_cfg_session_t *s, const char *name, int v,
+    xtc_cfg_source_t src)
+{
+	return xtc_cfg_session_set_enum(s, name, v, src);
 }

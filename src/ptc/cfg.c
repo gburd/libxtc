@@ -1057,8 +1057,8 @@ __cfg_ssn_apply(xtc_cfg_session_t *s, struct cfg_var *var,
  * one condition, one code.  Releases before 1.50 returned XTC_E_INVAL
  * here for it.  Bounds are checked before the validator, same order. */
 #define DEF_SSN_SET_NUM(sfx, K, field, ctype, okexpr)                     \
-int xtc_cfg_ssn_set_##sfx(xtc_cfg_session_t *s, const char *name,         \
-                          ctype v, xtc_cfg_source_t src) {                \
+int xtc_cfg_session_set_##sfx(xtc_cfg_session_t *s, const char *name,     \
+                              ctype v, xtc_cfg_source_t src) {            \
 	struct cfg_var *cv; union cfg_val val; int rc = XTC_E_INVAL;      \
 	if (name == NULL) return XTC_E_INVAL;                             \
 	if (s == NULL) s = __cfg_ssn_current_ext();                       \
@@ -1092,8 +1092,8 @@ DEF_SSN_SET_NUM(enum,   XTC_CFG_ENUM,   v_enum,   int,
                 (v >= 0 && v < cv->n_enum_labels))
 
 int
-xtc_cfg_ssn_set_string(xtc_cfg_session_t *s, const char *name,
-                       const char *v, xtc_cfg_source_t src)
+xtc_cfg_session_set_string(xtc_cfg_session_t *s, const char *name,
+                           const char *v, xtc_cfg_source_t src)
 {
 	struct cfg_var *cv;
 	union cfg_val val;

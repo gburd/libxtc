@@ -77,6 +77,12 @@ XTC_2.2 {
 		xtc_batch_shutdown;
 		xtc_bloom_create;
 		xtc_bloom_destroy;
+		xtc_cfg_session_set_bool;
+		xtc_cfg_session_set_double;
+		xtc_cfg_session_set_enum;
+		xtc_cfg_session_set_int;
+		xtc_cfg_session_set_int64;
+		xtc_cfg_session_set_string;
 		xtc_chan_demand_shutdown;
 		xtc_chan_mpmc_shutdown;
 		xtc_chan_mpsc_shutdown;

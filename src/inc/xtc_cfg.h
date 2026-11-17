@@ -289,12 +289,12 @@ typedef enum xtc_cfg_source {
  * PUBLIC: int  xtc_cfg_session_abort __P((xtc_cfg_session_t *));
  * PUBLIC: int  xtc_cfg_session_source __P((xtc_cfg_session_t *, const char *, xtc_cfg_source_t *));
  * PUBLIC: int  xtc_cfg_session_reset __P((xtc_cfg_session_t *, const char *));
- * PUBLIC: int  xtc_cfg_ssn_set_bool __P((xtc_cfg_session_t *, const char *, int, xtc_cfg_source_t));
- * PUBLIC: int  xtc_cfg_ssn_set_int __P((xtc_cfg_session_t *, const char *, int, xtc_cfg_source_t));
- * PUBLIC: int  xtc_cfg_ssn_set_int64 __P((xtc_cfg_session_t *, const char *, int64_t, xtc_cfg_source_t));
- * PUBLIC: int  xtc_cfg_ssn_set_double __P((xtc_cfg_session_t *, const char *, double, xtc_cfg_source_t));
- * PUBLIC: int  xtc_cfg_ssn_set_string __P((xtc_cfg_session_t *, const char *, const char *, xtc_cfg_source_t));
- * PUBLIC: int  xtc_cfg_ssn_set_enum __P((xtc_cfg_session_t *, const char *, int, xtc_cfg_source_t));
+ * PUBLIC: int  xtc_cfg_session_set_bool __P((xtc_cfg_session_t *, const char *, int, xtc_cfg_source_t));
+ * PUBLIC: int  xtc_cfg_session_set_int __P((xtc_cfg_session_t *, const char *, int, xtc_cfg_source_t));
+ * PUBLIC: int  xtc_cfg_session_set_int64 __P((xtc_cfg_session_t *, const char *, int64_t, xtc_cfg_source_t));
+ * PUBLIC: int  xtc_cfg_session_set_double __P((xtc_cfg_session_t *, const char *, double, xtc_cfg_source_t));
+ * PUBLIC: int  xtc_cfg_session_set_string __P((xtc_cfg_session_t *, const char *, const char *, xtc_cfg_source_t));
+ * PUBLIC: int  xtc_cfg_session_set_enum __P((xtc_cfg_session_t *, const char *, int, xtc_cfg_source_t));
  */
 
 /* Lifecycle.  A fresh session has no overrides and one (base) level.
@@ -339,18 +339,40 @@ XTC_API int  xtc_cfg_session_reset(xtc_cfg_session_t *s, const char *name);
  * Out of bounds is XTC_E_RANGE, as for the global setters (releases
  * before 1.50 returned XTC_E_INVAL here); a validator rejection is
  * XTC_E_INVAL on both. */
-XTC_API int  xtc_cfg_ssn_set_bool(xtc_cfg_session_t *s, const char *name,
-                                  int v, xtc_cfg_source_t src);
-XTC_API int  xtc_cfg_ssn_set_int(xtc_cfg_session_t *s, const char *name,
-                                 int v, xtc_cfg_source_t src);
-XTC_API int  xtc_cfg_ssn_set_int64(xtc_cfg_session_t *s, const char *name,
-                                   int64_t v, xtc_cfg_source_t src);
-XTC_API int  xtc_cfg_ssn_set_double(xtc_cfg_session_t *s, const char *name,
-                                    double v, xtc_cfg_source_t src);
-XTC_API int  xtc_cfg_ssn_set_string(xtc_cfg_session_t *s, const char *name,
-                                    const char *v, xtc_cfg_source_t src);
-XTC_API int  xtc_cfg_ssn_set_enum(xtc_cfg_session_t *s, const char *name,
-                                  int v, xtc_cfg_source_t src);
+XTC_API int  xtc_cfg_session_set_bool(xtc_cfg_session_t *s, const char *name,
+                                      int v, xtc_cfg_source_t src);
+XTC_API int  xtc_cfg_session_set_int(xtc_cfg_session_t *s, const char *name,
+                                     int v, xtc_cfg_source_t src);
+XTC_API int  xtc_cfg_session_set_int64(xtc_cfg_session_t *s, const char *name,
+                                       int64_t v, xtc_cfg_source_t src);
+XTC_API int  xtc_cfg_session_set_double(xtc_cfg_session_t *s, const char *name,
+                                        double v, xtc_cfg_source_t src);
+XTC_API int  xtc_cfg_session_set_string(xtc_cfg_session_t *s, const char *name,
+                                        const char *v, xtc_cfg_source_t src);
+XTC_API int  xtc_cfg_session_set_enum(xtc_cfg_session_t *s, const char *name,
+                                      int v, xtc_cfg_source_t src);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_cfg_session_set_bool")
+XTC_API int xtc_cfg_ssn_set_bool(xtc_cfg_session_t *s, const char *name, int v,
+    xtc_cfg_source_t src);
+XTC_DEPRECATED("use xtc_cfg_session_set_int")
+XTC_API int xtc_cfg_ssn_set_int(xtc_cfg_session_t *s, const char *name, int v,
+    xtc_cfg_source_t src);
+XTC_DEPRECATED("use xtc_cfg_session_set_int64")
+XTC_API int xtc_cfg_ssn_set_int64(xtc_cfg_session_t *s, const char *name,
+    int64_t v, xtc_cfg_source_t src);
+XTC_DEPRECATED("use xtc_cfg_session_set_double")
+XTC_API int xtc_cfg_ssn_set_double(xtc_cfg_session_t *s, const char *name,
+    double v, xtc_cfg_source_t src);
+XTC_DEPRECATED("use xtc_cfg_session_set_string")
+XTC_API int xtc_cfg_ssn_set_string(xtc_cfg_session_t *s, const char *name,
+    const char *v, xtc_cfg_source_t src);
+XTC_DEPRECATED("use xtc_cfg_session_set_enum")
+XTC_API int xtc_cfg_ssn_set_enum(xtc_cfg_session_t *s, const char *name, int v,
+    xtc_cfg_source_t src);
 
 #ifdef __cplusplus
 }

@@ -813,7 +813,7 @@ test_session_scoping(const MunitParameter p[], void *d)
 	/* Bind A, SET; the bare getter now sees A's value; B and the global
 	 * value are untouched. */
 	munit_assert_ptr_null(xtc_cfg_session_bind(a));
-	munit_assert_int(xtc_cfg_ssn_set_int(NULL, "s.work_mem", 65536,
+	munit_assert_int(xtc_cfg_session_set_int(NULL, "s.work_mem", 65536,
 	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
 	munit_assert_int(xtc_cfg_get_int("s.work_mem", &v), ==, XTC_OK);
 	munit_assert_int(v, ==, 65536);
@@ -832,16 +832,16 @@ test_session_scoping(const MunitParameter p[], void *d)
 	 * bounds is XTC_E_RANGE, the same code the global setter returns
 	 * (pre-1.50 the session path returned XTC_E_INVAL). */
 	(void)xtc_cfg_session_bind(a);
-	munit_assert_int(xtc_cfg_ssn_set_int(NULL, "s.work_mem", 1,
+	munit_assert_int(xtc_cfg_session_set_int(NULL, "s.work_mem", 1,
 	    XTC_CFG_SRC_SESSION), ==, XTC_E_RANGE);   /* below min */
 
 	/* (3) Source precedence: a LOWER-ranked source cannot clobber a
 	 * higher one at the same level; an equal-or-higher one can. */
-	munit_assert_int(xtc_cfg_ssn_set_int(NULL, "s.work_mem", 8192,
+	munit_assert_int(xtc_cfg_session_set_int(NULL, "s.work_mem", 8192,
 	    XTC_CFG_SRC_FILE), ==, XTC_OK);       /* FILE < SESSION: refused */
 	munit_assert_int(xtc_cfg_get_int("s.work_mem", &v), ==, XTC_OK);
 	munit_assert_int(v, ==, 65536);           /* SESSION value still wins */
-	munit_assert_int(xtc_cfg_ssn_set_int(NULL, "s.work_mem", 131072,
+	munit_assert_int(xtc_cfg_session_set_int(NULL, "s.work_mem", 131072,
 	    XTC_CFG_SRC_OVERRIDE), ==, XTC_OK);   /* OVERRIDE > SESSION: wins */
 	munit_assert_int(xtc_cfg_get_int("s.work_mem", &v), ==, XTC_OK);
 	munit_assert_int(v, ==, 131072);
@@ -852,7 +852,7 @@ test_session_scoping(const MunitParameter p[], void *d)
 	/* (4) Transactional stack: a value set inside a pushed level that
 	 * ABORTs reverts; one that COMMITs survives. */
 	munit_assert_int(xtc_cfg_session_push(NULL), ==, XTC_OK);
-	munit_assert_int(xtc_cfg_ssn_set_int(NULL, "s.work_mem", 262144,
+	munit_assert_int(xtc_cfg_session_set_int(NULL, "s.work_mem", 262144,
 	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
 	munit_assert_int(xtc_cfg_get_int("s.work_mem", &v), ==, XTC_OK);
 	munit_assert_int(v, ==, 262144);          /* visible within the level */
@@ -861,7 +861,7 @@ test_session_scoping(const MunitParameter p[], void *d)
 	munit_assert_int(v, ==, 131072);          /* reverted to pre-push */
 
 	munit_assert_int(xtc_cfg_session_push(NULL), ==, XTC_OK);
-	munit_assert_int(xtc_cfg_ssn_set_int(NULL, "s.work_mem", 524288,
+	munit_assert_int(xtc_cfg_session_set_int(NULL, "s.work_mem", 524288,
 	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
 	munit_assert_int(xtc_cfg_session_commit(NULL), ==, XTC_OK);
 	munit_assert_int(xtc_cfg_get_int("s.work_mem", &v), ==, XTC_OK);
@@ -877,7 +877,7 @@ test_session_scoping(const MunitParameter p[], void *d)
 	munit_assert_int(v, ==, 4096);            /* back to global default */
 
 	/* (6) String overrides are per-session and freed on destroy. */
-	munit_assert_int(xtc_cfg_ssn_set_string(NULL, "s.tz", "America/New_York",
+	munit_assert_int(xtc_cfg_session_set_string(NULL, "s.tz", "America/New_York",
 	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
 	munit_assert_int(xtc_cfg_get_string("s.tz", &sv), ==, XTC_OK);
 	munit_assert_string_equal(sv, "America/New_York");
@@ -923,7 +923,7 @@ fiber_ssn_body(void *a)
 		arg->failed = 1;
 	/* A session SET after the yield lands on our own session, and the
 	 * peer's later reads must not see it. */
-	if (xtc_cfg_ssn_set_int(NULL, "fs.knob", arg->expect + 1,
+	if (xtc_cfg_session_set_int(NULL, "fs.knob", arg->expect + 1,
 	    XTC_CFG_SRC_OVERRIDE) != XTC_OK) arg->failed = 1;
 	if (xtc_proc_sleep(5 * 1000 * 1000) != XTC_OK) arg->failed = 1;
 	if (xtc_cfg_get_int("fs.knob", &v) != XTC_OK || v != arg->expect + 1)
@@ -953,9 +953,9 @@ test_session_per_fiber(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_cfg_session_create(&b), ==, XTC_OK);
 	/* Seed each session's override from OUTSIDE any fiber (explicit
 	 * session argument, no binding involved). */
-	munit_assert_int(xtc_cfg_ssn_set_int(a, "fs.knob", 11,
+	munit_assert_int(xtc_cfg_session_set_int(a, "fs.knob", 11,
 	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
-	munit_assert_int(xtc_cfg_ssn_set_int(b, "fs.knob", 22,
+	munit_assert_int(xtc_cfg_session_set_int(b, "fs.knob", 22,
 	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
 
 	aa.mine = a; aa.expect = 11;
@@ -1046,7 +1046,7 @@ test_session_unbound_at_exit(const MunitParameter p[], void *d)
 	spec.name = "se.work_mem"; spec.kind = XTC_CFG_INT; spec.dflt.d_int = 4;
 	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
 	munit_assert_int(xtc_cfg_session_create(&arg.s), ==, XTC_OK);
-	munit_assert_int(xtc_cfg_ssn_set_int(arg.s, "se.work_mem", 11,
+	munit_assert_int(xtc_cfg_session_set_int(arg.s, "se.work_mem", 11,
 	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
 	munit_assert_int(xtc_loop_create(&arg.loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(arg.loop, ssn_exit_driver, &arg, NULL,
@@ -1092,12 +1092,12 @@ test_unregister_ordering(const MunitParameter p[], void *d)
 	spec.dflt.d_string = "UTC";
 	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
 	munit_assert_int(xtc_cfg_session_create(&s), ==, XTC_OK);
-	munit_assert_int(xtc_cfg_ssn_set_string(s, "u.tz", "America/New_York",
+	munit_assert_int(xtc_cfg_session_set_string(s, "u.tz", "America/New_York",
 	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
 	/* A pushed level with its own override too, so teardown walks more
 	 * than one level holding the entry. */
 	munit_assert_int(xtc_cfg_session_push(s), ==, XTC_OK);
-	munit_assert_int(xtc_cfg_ssn_set_string(s, "u.tz", "Europe/Berlin",
+	munit_assert_int(xtc_cfg_session_set_string(s, "u.tz", "Europe/Berlin",
 	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
 	munit_assert_int(xtc_cfg_unregister("u.tz"), ==, XTC_OK);
 	/* Gone from the registry immediately, session override or not. */
@@ -1117,7 +1117,7 @@ test_unregister_ordering(const MunitParameter p[], void *d)
 	spec.name = "u.mem"; spec.kind = XTC_CFG_INT; spec.dflt.d_int = 64;
 	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
 	munit_assert_int(xtc_cfg_session_create(&s), ==, XTC_OK);
-	munit_assert_int(xtc_cfg_ssn_set_int(s, "u.mem", 128,
+	munit_assert_int(xtc_cfg_session_set_int(s, "u.mem", 128,
 	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
 	xtc_cfg_session_destroy(s);
 	munit_assert_int(xtc_cfg_get_int("u.mem", &v), ==, XTC_OK);
@@ -1134,7 +1134,7 @@ test_unregister_ordering(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_cfg_register(&spec), ==, XTC_OK);
 	munit_assert_int(xtc_cfg_session_create(&s), ==, XTC_OK);
 	(void)xtc_cfg_session_bind(s);
-	munit_assert_int(xtc_cfg_ssn_set_string(NULL, "u.str2", "sessval",
+	munit_assert_int(xtc_cfg_session_set_string(NULL, "u.str2", "sessval",
 	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
 	munit_assert_int(xtc_cfg_unregister("u.str2"), ==, XTC_OK);
 	munit_assert_int(xtc_cfg_session_reset(NULL, "u.str2"), ==,
@@ -1271,22 +1271,22 @@ test_range_code_consistent(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_cfg_set_bool("rc.bool", 2), ==, XTC_E_RANGE);
 	munit_assert_int(xtc_cfg_set_enum("rc.enum", 3), ==, XTC_E_RANGE);
 	/* Session path: THE REGRESSION -- these were XTC_E_INVAL. */
-	munit_assert_int(xtc_cfg_ssn_set_int(ss, "rc.int", 11,
+	munit_assert_int(xtc_cfg_session_set_int(ss, "rc.int", 11,
 	    XTC_CFG_SRC_SESSION), ==, XTC_E_RANGE);
-	munit_assert_int(xtc_cfg_ssn_set_int64(ss, "rc.i64", -1,
+	munit_assert_int(xtc_cfg_session_set_int64(ss, "rc.i64", -1,
 	    XTC_CFG_SRC_SESSION), ==, XTC_E_RANGE);
-	munit_assert_int(xtc_cfg_ssn_set_double(ss, "rc.dbl", 2.5,
+	munit_assert_int(xtc_cfg_session_set_double(ss, "rc.dbl", 2.5,
 	    XTC_CFG_SRC_SESSION), ==, XTC_E_RANGE);
-	munit_assert_int(xtc_cfg_ssn_set_bool(ss, "rc.bool", 2,
+	munit_assert_int(xtc_cfg_session_set_bool(ss, "rc.bool", 2,
 	    XTC_CFG_SRC_SESSION), ==, XTC_E_RANGE);
-	munit_assert_int(xtc_cfg_ssn_set_enum(ss, "rc.enum", 3,
+	munit_assert_int(xtc_cfg_session_set_enum(ss, "rc.enum", 3,
 	    XTC_CFG_SRC_SESSION), ==, XTC_E_RANGE);
 	/* Control: a validator rejection is INVAL on both paths, and an
 	 * in-bounds session set still applies. */
 	munit_assert_int(xtc_cfg_set_int("rc.even", 3), ==, XTC_E_INVAL);
-	munit_assert_int(xtc_cfg_ssn_set_int(ss, "rc.even", 3,
+	munit_assert_int(xtc_cfg_session_set_int(ss, "rc.even", 3,
 	    XTC_CFG_SRC_SESSION), ==, XTC_E_INVAL);
-	munit_assert_int(xtc_cfg_ssn_set_int(ss, "rc.int", 7,
+	munit_assert_int(xtc_cfg_session_set_int(ss, "rc.int", 7,
 	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
 	munit_assert_ptr_null(xtc_cfg_session_bind(ss));
 	munit_assert_int(xtc_cfg_get_int("rc.int", &v), ==, XTC_OK);
@@ -1388,7 +1388,7 @@ test_get_string_copy(const MunitParameter p[], void *d)
 
 	/* Resolves through the bound session like get_string. */
 	munit_assert_int(xtc_cfg_session_create(&ss), ==, XTC_OK);
-	munit_assert_int(xtc_cfg_ssn_set_string(ss, "gsc.str", "sess",
+	munit_assert_int(xtc_cfg_session_set_string(ss, "gsc.str", "sess",
 	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
 	munit_assert_ptr_null(xtc_cfg_session_bind(ss));
 	munit_assert_int(xtc_cfg_get_string_copy("gsc.str", &cp), ==, XTC_OK);

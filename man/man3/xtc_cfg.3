@@ -39,6 +39,12 @@
 .Nm xtc_cfg_session_abort ,
 .Nm xtc_cfg_session_source ,
 .Nm xtc_cfg_session_reset ,
+.Nm xtc_cfg_session_set_bool ,
+.Nm xtc_cfg_session_set_int ,
+.Nm xtc_cfg_session_set_int64 ,
+.Nm xtc_cfg_session_set_double ,
+.Nm xtc_cfg_session_set_string ,
+.Nm xtc_cfg_session_set_enum ,
 .Nm xtc_cfg_ssn_set_bool ,
 .Nm xtc_cfg_ssn_set_int ,
 .Nm xtc_cfg_ssn_set_int64 ,
@@ -120,17 +126,17 @@
 .Ft int
 .Fn xtc_cfg_session_reset "xtc_cfg_session_t *s" "const char *name"
 .Ft int
-.Fn xtc_cfg_ssn_set_bool "xtc_cfg_session_t *s" "const char *name" "int v" "xtc_cfg_source_t src"
+.Fn xtc_cfg_session_set_bool "xtc_cfg_session_t *s" "const char *name" "int v" "xtc_cfg_source_t src"
 .Ft int
-.Fn xtc_cfg_ssn_set_int "xtc_cfg_session_t *s" "const char *name" "int v" "xtc_cfg_source_t src"
+.Fn xtc_cfg_session_set_int "xtc_cfg_session_t *s" "const char *name" "int v" "xtc_cfg_source_t src"
 .Ft int
-.Fn xtc_cfg_ssn_set_int64 "xtc_cfg_session_t *s" "const char *name" "int64_t v" "xtc_cfg_source_t src"
+.Fn xtc_cfg_session_set_int64 "xtc_cfg_session_t *s" "const char *name" "int64_t v" "xtc_cfg_source_t src"
 .Ft int
-.Fn xtc_cfg_ssn_set_double "xtc_cfg_session_t *s" "const char *name" "double v" "xtc_cfg_source_t src"
+.Fn xtc_cfg_session_set_double "xtc_cfg_session_t *s" "const char *name" "double v" "xtc_cfg_source_t src"
 .Ft int
-.Fn xtc_cfg_ssn_set_string "xtc_cfg_session_t *s" "const char *name" "const char *v" "xtc_cfg_source_t src"
+.Fn xtc_cfg_session_set_string "xtc_cfg_session_t *s" "const char *name" "const char *v" "xtc_cfg_source_t src"
 .Ft int
-.Fn xtc_cfg_ssn_set_enum "xtc_cfg_session_t *s" "const char *name" "int v" "xtc_cfg_source_t src"
+.Fn xtc_cfg_session_set_enum "xtc_cfg_session_t *s" "const char *name" "int v" "xtc_cfg_source_t src"
 .Sh DESCRIPTION
 .Nm xtc_cfg
 is a typed runtime configuration registry, modeled on PostgreSQL's
@@ -324,13 +330,13 @@ folds it into its parent (the values survive), and
 .Fn xtc_cfg_session_abort
 discards it -- backing SET LOCAL, SET inside a rolled-back transaction,
 function-local SET, and subtransactions.
-.Fn xtc_cfg_ssn_set_bool ,
-.Fn xtc_cfg_ssn_set_int ,
-.Fn xtc_cfg_ssn_set_int64 ,
-.Fn xtc_cfg_ssn_set_double ,
-.Fn xtc_cfg_ssn_set_string ,
+.Fn xtc_cfg_session_set_bool ,
+.Fn xtc_cfg_session_set_int ,
+.Fn xtc_cfg_session_set_int64 ,
+.Fn xtc_cfg_session_set_double ,
+.Fn xtc_cfg_session_set_string ,
 and
-.Fn xtc_cfg_ssn_set_enum
+.Fn xtc_cfg_session_set_enum
 set a per-session override at the current level, each carrying a source
 rank
 .Po Dv XTC_CFG_SRC_DEFAULT
@@ -394,7 +400,7 @@ returns nothing and is NULL-safe.
 Releases before 1.50 returned
 .Dv XTC_E_INVAL
 from the per-session setters
-.Pq Fn xtc_cfg_ssn_set_*
+.Pq Fn xtc_cfg_session_set_*
 for an out-of-bounds value, while the global setters already returned
 .Dv XTC_E_RANGE ;
 both now return
@@ -431,6 +437,31 @@ xtc_cfg_ref_t ref;
 if (xtc_cfg_ref("rexis.max_clients", &ref) == XTC_OK)
 	(void)xtc_cfg_ref_get_int(ref, &v);
 .Ed
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Fn xtc_cfg_ssn_set_bool
+Use
+.Fn xtc_cfg_session_set_bool .
+.It Fn xtc_cfg_ssn_set_int
+Use
+.Fn xtc_cfg_session_set_int .
+.It Fn xtc_cfg_ssn_set_int64
+Use
+.Fn xtc_cfg_session_set_int64 .
+.It Fn xtc_cfg_ssn_set_double
+Use
+.Fn xtc_cfg_session_set_double .
+.It Fn xtc_cfg_ssn_set_string
+Use
+.Fn xtc_cfg_session_set_string .
+.It Fn xtc_cfg_ssn_set_enum
+Use
+.Fn xtc_cfg_session_set_enum .
+.El
 .Sh SEE ALSO
 .Xr xtc_log 3 ,
 .Xr xtc_stats 3 ,
