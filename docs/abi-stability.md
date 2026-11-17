@@ -115,6 +115,33 @@ v1.59.0 to the 2.0 tree reports status 4 (struct size changes on
 function) with the 1.x SONAME, because the major bump is a separate
 release commit.
 
+v2.1.2 to 2.2.0 reports status 4: 0 functions removed, 99 added (the
+`XTC_2.2` node: new calls and the new names of the renamed ones; every
+old name keeps its `XTC_2.0` symbol), and 8 changed, all through struct
+pointers in their parameters:
+
+| function | struct (bytes, x86-64) | change |
+|---|---|---|
+| `xtc_proc_spawn` | `xtc_proc_opts_t` 56 -> 64 | appended `stack_size` |
+| `xtc_inspect_procs` | `xtc_proc_info_t` 96 -> 208 | appended `stack_size`, `crit_depth`, `name`, `label` |
+| `xtc_app_start` | `xtc_child_spec_t` 56 -> 104 | appended the proc knobs, `reg_name`, `stack_size` |
+| `xtc_app_create` | `xtc_sup_opts_t` 40 -> 72 (via `xtc_app_opts_t.sup`) | appended `on_child_down`, `registry`, `wait_children` |
+| `xtc_svr_start` | `xtc_svr_opts_t` 24 -> 56 | appended the proc knobs, `wait_init` |
+| `xtc_fsm_start` | `xtc_fsm_opts_t` 24 -> 32 | appended `wait_init` |
+| `xtc_tnt_start` | `xtc_tnt_spec_t` 40 -> 56 | became size-first: a leading `size` moved every field |
+| `xtc_lwlock_acquire` | `xtc_lwlock_t` 128 -> 128 | `state` lost its `_Atomic` qualifier; same layout |
+
+The first six are appends to size-first structs, which a minor may
+make.  `xtc_tnt_spec_t` is in the experimental tier, and its change is
+the one a 2.1 binary must rebuild for (KNOWN_ISSUES, "CHANGED (2.2):
+`xtc_tnt_spec_t` is size-first").  `xtc_lwlock_t` keeps every offset
+(the layout gate's table is unchanged); the qualifier went so the header
+compiles in C++.  The `xtc_app_create` entry also lists the library's
+private `struct xtc_loop`, which the script sees because its header
+directory is all of `src/inc`; `xtc_loop_t` is opaque in the installed
+headers.  `scripts/compat-check.sh v2.1.2` runs 2.1.2's consumer against
+2.2.0's `libxtc.a` and `libxtc.so`.
+
 ## Symbol versions and the export set (ENFORCED)
 
 `dist/libxtc.map` is an ELF version script whose base node, `XTC_2.0`,
