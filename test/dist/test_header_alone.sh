@@ -17,7 +17,9 @@
 # through xtc_proc.h's recovery-frame API.  It goes away when that API
 # moves to its own header (API plan B5); until then the list is exact:
 # a header that fails and is not on it fails the gate, and so does one
-# on it that compiles, so the list cannot go stale.
+# on it that compiles, so the list cannot go stale.  Where xtc_proc.h
+# itself compiles under strict c11 (the C library exposes sigjmp_buf, as
+# illumos does), the allowed set is empty instead.
 #
 # The C++ side (each header alone with g++ and clang++) is
 # test/dist/test_header_cxx.sh.
@@ -90,6 +92,12 @@ for cc in gcc clang; do
 	: > "$work/why"
 	bad=$(failing "$cc" "-std=c11" | sort)
 	want=$(printf '%s\n' $STRICT_ALLOW | sort)
+	# Where xtc_proc.h compiles alone under strict c11, the C library
+	# exposes sigjmp_buf to ISO C (illumos, through the __EXTENSIONS__
+	# xtc_proc.h defines there): nothing is then allowed to fail.
+	if [ -z "$(printf '%s\n' "$bad" | grep -xF xtc_proc.h || true)" ]; then
+		want=
+	fi
 	new=$(printf '%s\n' "$bad" | grep -vxF "$want" | grep . || true)
 	gone=$(printf '%s\n' "$want" | grep -vxF "$bad" | grep . || true)
 	if [ -n "$new" ]; then
@@ -103,7 +111,7 @@ for cc in gcc clang; do
 		    "drop it from STRICT_ALLOW:" $gone >&2
 		fail=1
 	fi
-	ran="$ran $cc(-std=c11, $(printf '%s\n' $STRICT_ALLOW | grep -c .) allowed)"
+	ran="$ran $cc(-std=c11, $(printf '%s\n' $want | grep -c . || true) allowed)"
 done
 [ "$fail" -eq 0 ] || exit 1
 if [ -z "$ran" ]; then
