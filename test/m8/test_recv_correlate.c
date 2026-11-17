@@ -174,10 +174,45 @@ test_correlate_out_of_order(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* A timeout of 0 polls: replies already queued are collected at once.
+ * Through 2.2.0 the expired deadline was tested before the first receive,
+ * so a 0 timeout returned XTC_E_AGAIN with out_n 0 and the replies queued. */
+static int g_poll_rc = -99, g_poll_n = -1, g_poll_empty_rc = -99;
+static void
+poll_main(void *a)
+{
+	uint32_t id = 7, other = 8;
+	xtc_msg_t m[3];
+	int i, n = -1;
+	(void)a;
+	for (i = 0; i < 3; i++)
+		(void)xtc_send(xtc_self(), &id, sizeof id);
+	g_poll_rc = xtc_recv_correlate(&id, sizeof id, 3, m, &g_poll_n, 0);
+	for (i = 0; i < g_poll_n; i++)
+		__os_free(m[i].data);
+	g_poll_empty_rc = xtc_recv_correlate(&other, sizeof other, 1, m, &n, 0);
+}
+static MunitResult
+test_correlate_timeout_zero(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	(void)p; (void)d;
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, poll_main, NULL, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(g_poll_rc, ==, XTC_OK);
+	munit_assert_int(g_poll_n, ==, 3);
+	munit_assert_int(g_poll_empty_rc, ==, XTC_E_AGAIN);
+	xtc_loop_destroy(loop);
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/correlate_fork_join", test_correlate_fork_join, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/correlate_bad_args",  test_correlate_bad_args,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/correlate_out_of_order", test_correlate_out_of_order, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/correlate_timeout_zero", test_correlate_timeout_zero, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = {
