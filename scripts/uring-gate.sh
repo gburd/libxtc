@@ -121,6 +121,40 @@ dd if=/dev/zero of="$dat" bs=1M count=256 status=none
 #     same caps: 1 ring at bound 64 doing writes + fdatasync over 64 files
 #     made 121 distinct io-wq workers (64 alive at once); 32 rings at
 #     bound 4 made 128.  The fan-out is the kernel's, not libxtc's.
+#     sqlxtc LEAK: the server runs -t <CPUs> loops, and each idle loop
+#     keeps libxtc's single-shot wakeup-pipe POLL_ADD armed on
+#     io->wakeup_rfd (re-armed on every reap).  The script SIGTERMs the
+#     server after its clients disconnect (bpftrace on accept / close:
+#     35 accepts, 35 closes, 0 accepted fds open at exit), so the polls
+#     left at exit are the idle loops' (32 of 96 loops on a 96-CPU host,
+#     all on pipe read ends).  The server tears down in order, and the
+#     kernel's ring exit work ends those polls -ECANCELED on kworker
+#     threads 53-95 ms after the process is gone.  uringscope stops at
+#     its child's exit and traces only that process tree, so it never
+#     sees the cancels and reports each poll armed more than 2 s before
+#     as never completed.  The count is the number of idle loops at exit,
+#     not leaked requests: LEAK in 22 of 30 runs on v2.1.2, 2.1.3 and
+#     2.2.0 alike (Linux 6.12, XFS), every soak correct.
+#   rexis OVERFLOW: test_rexis_budgets /idle_conns_hold_no_buffers closes
+#     800 idle connections at once.  Their single-shot POLL_ADDs
+#     (POLLIN | POLLRDHUP) complete together, and when more than 512 land
+#     between two reaps the loop's 512-entry CQ overflows.  The kernel
+#     keeps them (IORING_FEAT_NODROP) and the next io_uring_peek_cqe
+#     flushes them (GETEVENTS when IORING_SQ_CQ_OVERFLOW is set): bpftrace
+#     on __io_cqring_overflow_flush and io_uring_release shows every
+#     overflowed CQE reaped and the overflow list empty when the ring is
+#     closed.  The batch one enter posts is 340-484 CQEs on v2.1.2 and
+#     390-558 on 2.2.0, which overflows only past 512.  Control, plain
+#     liburing, Linux 6.12, the same ring (256 SQ / 512 CQ,
+#     DEFER_TASKRUN | SINGLE_ISSUER): 512 polls completing at once do not
+#     overflow, 513 do, and all are reaped exactly once.
+#   rexis LEAK: the same run's flushed CQEs.  The kernel copies an
+#     overflowed CQE into the ring without the io_uring_complete
+#     tracepoint, so uringscope never sees those requests complete: the
+#     completions it misses equal the OVERFLOW count (67 of 67, 1 of 1 in
+#     the runs measured), and the ones still in its table at the end are
+#     reported as never completed, so LEAK is at most the OVERFLOW count
+#     (2 for those 67, 0 for that 1).
 # wal_kill runs one mode per process.  All six modes in one process build
 #   and tear down an 8-loop executor six times, and uringscope 0.3.0 then
 #   reported REAP-LAG in 11 of 32 runs (1/16 on v1.59.0 too) with a p99 of
@@ -158,9 +192,9 @@ wal_kill_big|PUNT|$sx/test_wal_kill big
 wal_kill_mid|PUNT|$sx/test_wal_kill mid
 wal_kill_writer||$sx/test_wal_kill writer
 crash_oracle|PUNT,WORKERS|$sx/test_crash_oracle 4 1
-rexis||make -C $build check-rexis
+rexis|OVERFLOW,LEAK|make -C $build check-rexis
 kaka_soak|PUNT,WORKERS|@wrap env KAKA_BROKER=$src/examples/07_kaka/kaka-broker KAKA_SOAK=$src/examples/07_kaka/kaka_soak SECS=15 bash $src/examples/07_kaka/test_kaka_soak.sh
-sqlxtc_iosoak|PUNT,WORKERS|@wrap env SQLXTC_SERVER=$sx/sqlxtc-server SECS=20 CLIENTS=32 bash $src/test/sqlxtc/test_sqlxtc_iosoak.sh
+sqlxtc_iosoak|PUNT,WORKERS,LEAK|@wrap env SQLXTC_SERVER=$sx/sqlxtc-server SECS=20 CLIENTS=32 bash $src/test/sqlxtc/test_sqlxtc_iosoak.sh
 EOF
 }
 
