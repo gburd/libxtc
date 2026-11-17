@@ -38,6 +38,7 @@
 #include "xtc_xproc.h"
 #include "xtc_runtime.h"
 #include "xtc_reg.h"
+#include "xtc_async.h"
 
 /* Group: loop / io / bloom / hll lifecycle (create / destroy). */
 
@@ -383,4 +384,19 @@ int
 xtc_reg_whereis(xtc_reg_t *r, const char *name, xtc_pid_t *out_pid)
 {
 	return reg_old_rc(xtc_reg_get(r, name, out_pid));
+}
+
+/* Group (tier B): stackful coroutines (async / await -> coro spawn / join). */
+
+int
+xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg,
+    xtc_task_t **out_task)
+{
+	return xtc_coro_spawn(loop, fn, arg, out_task);
+}
+
+int
+xtc_await(xtc_task_t *t, intptr_t *result)
+{
+	return xtc_coro_join(t, result);
 }

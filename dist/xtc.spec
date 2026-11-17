@@ -107,7 +107,7 @@ make check
   notify hand-off without the lock, timed parks with one clock read
   less (proc_send_recv +11.2%).  An xtc_amutex release frees the mutex
   and wakes the head waiter (4 loops: 157k -> 2.12M acquires/s); a
-  finished xtc_async coroutine releases its stack at once.  Builds
+  finished xtc_coro_spawn coroutine releases its stack at once.  Builds
   -Werror against OpenSSL 4.0, gcc 16, clang 23.  This spec now
   packages libxtc.so.2 and every header (2.0.0's spec did not build).
 * Thu Sep 24 2026 Greg Burd <greg@burd.me> - 1.50.0-1

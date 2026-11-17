@@ -26,7 +26,7 @@ extern "C" {
 
 /*
  * Coroutine entry function.  The argument is the user's `arg`; the
- * return value is recovered by the awaiter via xtc_await().
+ * return value is recovered by the awaiter via xtc_coro_join().
  *
  * The signature uses intptr_t so any pointer or fixed-width integer
  * fits without per-call allocation.  Wider returns can be done by
@@ -35,8 +35,8 @@ extern "C" {
 typedef intptr_t (*xtc_coro_fn)(void *arg);
 
 /*
- * PUBLIC: int      xtc_async __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
- * PUBLIC: int      xtc_await __P((xtc_task_t *, intptr_t *));
+ * PUBLIC: int      xtc_coro_spawn __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
+ * PUBLIC: int      xtc_coro_join __P((xtc_task_t *, intptr_t *));
  * PUBLIC: void     xtc_yield __P((void));
  * PUBLIC: void     xtc_yield_set_budget __P((xtc_loop_t *, int64_t));
  * PUBLIC: int      xtc_yield_check __P((void));
@@ -45,25 +45,25 @@ typedef intptr_t (*xtc_coro_fn)(void *arg);
  */
 
 /*
- * xtc_async --
+ * xtc_coro_spawn --
  *	Spawn fn(arg) as a stackful coroutine.  Returns immediately
  *	with the task handle in *out_task.  The fiber starts in the
  *	scheduled state and runs on the next loop step.  With a NULL
  *	out_task nobody can await it, so it is released when it returns;
  *	a handed-out handle stays valid until xtc_loop_fini.
  */
-XTC_API int      xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg,
-                           xtc_task_t **out_task);
+XTC_API int      xtc_coro_spawn(xtc_loop_t *loop, xtc_coro_fn fn, void *arg,
+                                xtc_task_t **out_task);
 
 /*
- * xtc_await --
+ * xtc_coro_join --
  *	Wait for `t` to complete and recover its return value into
  *	*result.  Must be called from inside a coroutine spawned via
- *	xtc_async (or from the main thread before xtc_loop_run).
+ *	xtc_coro_spawn (or from the main thread before xtc_loop_run).
  *
  *	Returns XTC_OK on success.
  */
-XTC_API int      xtc_await(xtc_task_t *t, intptr_t *result);
+XTC_API int      xtc_coro_join(xtc_task_t *t, intptr_t *result);
 
 /*
  * xtc_yield --
@@ -167,6 +167,11 @@ XTC_DEPRECATED("use xtc_runtime_set_stack_reclaim")
 XTC_API void xtc_stack_reclaim_disable(void);
 XTC_DEPRECATED("use xtc_runtime_get_stack_reclaim")
 XTC_API int xtc_stack_reclaim_enabled(void);
+XTC_DEPRECATED("use xtc_coro_spawn")
+XTC_API int xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg,
+    xtc_task_t **out_task);
+XTC_DEPRECATED("use xtc_coro_join")
+XTC_API int xtc_await(xtc_task_t *t, intptr_t *result);
 
 #ifdef __cplusplus
 }

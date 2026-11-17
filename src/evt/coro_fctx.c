@@ -17,8 +17,8 @@
  *	and coro_fctx.c provides the substrate symbols; the other
  *	compiles to an empty unit.
  *
- *	Surface and contract are identical to coro_uctx.c: xtc_async,
- *	__xtc_coro_step, xtc_await, xtc_yield, xtc_runtime_get_stack_size /
+ *	Surface and contract are identical to coro_uctx.c: xtc_coro_spawn,
+ *	__xtc_coro_step, xtc_coro_join, xtc_yield, xtc_runtime_get_stack_size /
  *	xtc_runtime_set_stack_size, plus the busy-loop-avoidance verdict logic
  *	(return PENDING when parked on an awaitee, a timer, or an fd).
  *
@@ -146,7 +146,7 @@ static XTC_THREAD_LOCAL struct __san_sched_tls __san_sched_tls_v;
 /* Reached through a non-inlinable accessor so every access names the
  * CURRENT thread's slot: a migratable fiber resumes from the jump on
  * another OS thread and clang keeps the TLS address live across it
- * (xtc_await/__coro_entry then touched the OLD thread's bounds).  Same
+ * (xtc_coro_join/__coro_entry then touched the OLD thread's bounds).  Same
  * fix as coro_uctx.c. */
 __attribute__((noinline))
 static struct __san_sched_tls *
@@ -230,7 +230,7 @@ static XTC_THREAD_LOCAL void *g_sched_fctx_tls = NULL;
 /*
  * Read through a non-inlinable accessor so a fiber always jumps back to
  * the scheduler of the thread it is running on NOW.  A migratable fiber
- * can finish (or re-park, in xtc_await's loop) on another OS thread than
+ * can finish (or re-park, in xtc_coro_join's loop) on another OS thread than
  * the one it started on, and on aarch64 the compiler keeps the thread
  * pointer (tpidr_el0) in a callee-saved register across calls:
  * __coro_entry read it at entry and, after the fiber body returned on
@@ -311,7 +311,7 @@ __coro_entry(void *transfer)
 	__xtc_current_coro = c;
 	/* A new fiber is not a proc until __proc_entry says so: clear the
 	 * proc TLS the previous fiber on this thread left behind, or a bare
-	 * xtc_async coroutine runs (and yields) as that proc -- xtc_self()
+	 * xtc_coro_spawn coroutine runs (and yields) as that proc -- xtc_self()
 	 * names it, xtc_recv steals its mail, and once it is freed every
 	 * yield's kill check reads freed memory (review156 B1). */
 	if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(NULL);
@@ -413,18 +413,18 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 			(void)xtc_waker_wake(&w);
 			c->waiter = NULL;
 		}
-		/* lifetime: a finished PROC fiber, and an xtc_async fiber
-		 * spawned without a handle, are reclaimed by the loop's DONE
-		 * handler (task.c __xtc_task_reclaim): nobody can await them.
-		 * An xtc_async task whose handle was handed out stays, with
-		 * its coro, until xtc_loop_destroy (the stack does not).
-		 * c->proc is set by __proc_entry before the body runs and
-		 * never cleared. */
+		/* lifetime: a finished PROC fiber, and an xtc_coro_spawn
+		 * fiber spawned without a handle, are reclaimed by the loop's
+		 * DONE handler (task.c __xtc_task_reclaim): nobody can join
+		 * them.  An xtc_coro_spawn task whose handle was handed out
+		 * stays, with its coro, until xtc_loop_destroy (the stack does
+		 * not).  c->proc is set by __proc_entry before the body runs
+		 * and never cleared. */
 		if (c->proc != NULL || c->detached)
 			self->reclaim = 1;
 		else
-			/* A bare xtc_async coroutine keeps its task + coro for
-			 * xtc_await until xtc_loop_destroy, but not its stack:
+			/* A bare xtc_coro_spawn coroutine keeps its task + coro for
+			 * xtc_coro_join until xtc_loop_destroy, but not its stack:
 			 * 20,000 async/await pairs held 20,000 stacks (two
 			 * mappings each) until fini.  We are on the scheduler
 			 * stack, so the finished fiber's is idle. */
@@ -456,9 +456,9 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 }
 
 /* Give a coro's fiber stack back (the thread's pool, the loop's spare,
- * or munmap) and forget it.  Idempotent: a finished xtc_async coroutine
+ * or munmap) and forget it.  Idempotent: a finished xtc_coro_spawn coroutine
  * releases its stack at once (__xtc_coro_step), and the coro struct --
- * which xtc_await reads the result from -- is freed at xtc_loop_destroy. */
+ * which xtc_coro_join reads the result from -- is freed at xtc_loop_destroy. */
 static void
 __coro_release_stack(struct xtc_coro *c)
 {
@@ -509,7 +509,7 @@ __coro_task_cleanup(void *coro)
 }
 
 /*
- * PUBLIC: int xtc_async __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
+ * PUBLIC: int xtc_coro_spawn __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
  */
 int
 __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
@@ -597,7 +597,7 @@ __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
 }
 
 /*
- * PUBLIC: int xtc_async __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
+ * PUBLIC: int xtc_coro_spawn __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
  *
  * The public entry: spawns a PINNED coroutine (its underlying task is
  * not work-stealable), preserving the long-standing default.  Internal
@@ -606,16 +606,16 @@ __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
  * with pinned=0.
  */
 int
-xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
+xtc_coro_spawn(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
 {
 	return __xtc_async_ex(loop, fn, arg, 1, 0, out_task);
 }
 
 /*
- * PUBLIC: int xtc_await __P((xtc_task_t *, intptr_t *));
+ * PUBLIC: int xtc_coro_join __P((xtc_task_t *, intptr_t *));
  */
 int
-xtc_await(xtc_task_t *t, intptr_t *result)
+xtc_coro_join(xtc_task_t *t, intptr_t *result)
 {
 	struct xtc_coro *me;
 	struct xtc_coro *target;

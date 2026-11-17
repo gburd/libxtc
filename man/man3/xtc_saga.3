@@ -206,7 +206,7 @@ itself provide concurrency or timeouts.  A step that needs to await
 asynchronous work
 .Pq an RPC, a spawned sub-task
 does so internally using the existing primitives
-.Pq Xr xtc_async 3 Ns 's Fn xtc_await , Xr xtc_proc 3 Ns 's Fn xtc_recv
+.Pq Xr xtc_coro_spawn 3 Ns 's Fn xtc_coro_join , Xr xtc_proc 3 Ns 's Fn xtc_recv
 and simply blocks the calling fiber until that work resolves before
 returning -- a saga step is an ordinary function, not a new async
 abstraction.

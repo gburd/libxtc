@@ -49,6 +49,8 @@ result keeps working until it moves to the new name.
 |---|---|---|---|
 | `xtc_alloc_audit_enable()` | `xtc_runtime_set_alloc_audit()` | function |  |
 | `XTC_APP_OPTS_DEFAULT` | `XTC_APP_OPTS_INIT` | macro |  |
+| `xtc_async()` | `xtc_coro_spawn()` | function |  |
+| `xtc_await()` | `xtc_coro_join()` | function |  |
 | `xtc_batch_close()` | `xtc_batch_shutdown()` | function |  |
 | `xtc_blocking_pool_size()` | `xtc_runtime_set_blocking_threads()` | function | "too late" is XTC_E_STATE under the new name, XTC_E_INVAL under the old |
 | `xtc_bloom_fini()` | `xtc_bloom_destroy()` | function |  |

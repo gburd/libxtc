@@ -63,10 +63,10 @@ main(void)
 
 	if (xtc_loop_create(&loop) != XTC_OK)
 		return 1;
-	if (xtc_async(loop, sorter, data, &task) != XTC_OK)
+	if (xtc_coro_spawn(loop, sorter, data, &task) != XTC_OK)
 		return 1;
 	(void)xtc_loop_run(loop);
-	(void)xtc_await(task, &ok);
+	(void)xtc_coro_join(task, &ok);
 
 	printf("sorted correctly through %d in-qsort yields: %s\n",
 	    g_yields, ok == 0 ? "yes" : "no");

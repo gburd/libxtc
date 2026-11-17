@@ -15,7 +15,7 @@
 
 #include "xtc.h"        /* error codes, XTC_OK */
 #include "xtc_loop.h"   /* the event loop */
-#include "xtc_async.h"  /* xtc_async / xtc_await / xtc_yield */
+#include "xtc_async.h"  /* xtc_coro_spawn / xtc_coro_join / xtc_yield */
 
 /* A coroutine body.  It takes a void* and returns an intptr_t; libxtc
  * runs it on a fiber, so it may cooperatively yield the CPU back to the
@@ -42,7 +42,7 @@ main(void)
 
 	/* Spawn the coroutine.  It does not run yet -- it is queued on the
 	 * loop and will run when we call xtc_loop_run(). */
-	if (xtc_async(loop, square, (void *)(intptr_t)7, &task) != XTC_OK)
+	if (xtc_coro_spawn(loop, square, (void *)(intptr_t)7, &task) != XTC_OK)
 		return 1;
 
 	/* Drive the loop until every task has finished. */
@@ -50,7 +50,7 @@ main(void)
 		return 1;
 
 	/* The task is done; collect its return value. */
-	(void)xtc_await(task, &result);
+	(void)xtc_coro_join(task, &result);
 	printf("result = %lld\n", (long long)result);
 
 	xtc_loop_destroy(loop);

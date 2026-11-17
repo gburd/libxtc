@@ -29,8 +29,8 @@ test_basic(const MunitParameter p[], void *d)
 	intptr_t r = 0;
 	(void)p; (void)d;
 	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
-	munit_assert_int(xtc_async(loop, add_one, &v, &t), ==, XTC_OK);
-	munit_assert_int(xtc_await(t, &r), ==, XTC_OK);
+	munit_assert_int(xtc_coro_spawn(loop, add_one, &v, &t), ==, XTC_OK);
+	munit_assert_int(xtc_coro_join(t, &r), ==, XTC_OK);
 	munit_assert_int((int)r, ==, 42);
 	xtc_loop_destroy(loop);
 	return MUNIT_OK;
@@ -58,8 +58,8 @@ test_yield(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	yield_count = 0;
 	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
-	munit_assert_int(xtc_async(loop, yielding_coro, &n, &t), ==, XTC_OK);
-	munit_assert_int(xtc_await(t, &r), ==, XTC_OK);
+	munit_assert_int(xtc_coro_spawn(loop, yielding_coro, &n, &t), ==, XTC_OK);
+	munit_assert_int(xtc_coro_join(t, &r), ==, XTC_OK);
 	munit_assert_int((int)r, ==, 5);
 	xtc_loop_destroy(loop);
 	return MUNIT_OK;
@@ -87,8 +87,8 @@ test_locals_survive(const MunitParameter p[], void *d)
 	intptr_t r = 0;
 	(void)p; (void)d;
 	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
-	munit_assert_int(xtc_async(loop, locals_test, NULL, &t), ==, XTC_OK);
-	munit_assert_int(xtc_await(t, &r), ==, XTC_OK);
+	munit_assert_int(xtc_coro_spawn(loop, locals_test, NULL, &t), ==, XTC_OK);
+	munit_assert_int(xtc_coro_join(t, &r), ==, XTC_OK);
 	munit_assert_int((int)r, ==, 600);
 	xtc_loop_destroy(loop);
 	return MUNIT_OK;
@@ -117,7 +117,7 @@ test_many_coros(const MunitParameter p[], void *d)
 	for (i = 0; i < MANY; i++) {
 		ctxs[i].seed = i;
 		ctxs[i].sum = 0;
-		munit_assert_int(xtc_async(loop, many_coro, &ctxs[i], &tasks[i]),
+		munit_assert_int(xtc_coro_spawn(loop, many_coro, &ctxs[i], &tasks[i]),
 		    ==, XTC_OK);
 	}
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
@@ -142,10 +142,10 @@ test_coro_done(const MunitParameter p[], void *d)
 	intptr_t r = 0;
 	(void)p; (void)d;
 	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
-	munit_assert_int(xtc_async(loop, trivial, NULL, &t), ==, XTC_OK);
+	munit_assert_int(xtc_coro_spawn(loop, trivial, NULL, &t), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	/* After loop_run, the coro is done.  Awaiting yields its result. */
-	munit_assert_int(xtc_await(t, &r), ==, XTC_OK);
+	munit_assert_int(xtc_coro_join(t, &r), ==, XTC_OK);
 	munit_assert_int((int)r, ==, 77);
 	xtc_loop_destroy(loop);
 	return MUNIT_OK;
@@ -162,8 +162,8 @@ static intptr_t outer(void *arg) {
 	struct outer_ctx *o = arg;
 	xtc_task_t *child = NULL;
 	intptr_t r = 0;
-	(void)xtc_async(o->loop, inner, &o->n, &child);
-	(void)xtc_await(child, &r);
+	(void)xtc_coro_spawn(o->loop, inner, &o->n, &child);
+	(void)xtc_coro_join(child, &r);
 	return r + 1;
 }
 
@@ -177,8 +177,8 @@ test_nested(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	ctx.loop = loop; ctx.n = 21;
-	munit_assert_int(xtc_async(loop, outer, &ctx, &t), ==, XTC_OK);
-	munit_assert_int(xtc_await(t, &r), ==, XTC_OK);
+	munit_assert_int(xtc_coro_spawn(loop, outer, &ctx, &t), ==, XTC_OK);
+	munit_assert_int(xtc_coro_join(t, &r), ==, XTC_OK);
 	munit_assert_int((int)r, ==, 21 * 2 + 1);
 	xtc_loop_destroy(loop);
 	return MUNIT_OK;
@@ -272,8 +272,8 @@ test_yield_watchdog(const MunitParameter p[], void *d)
 	/* Budget set before the first dispatch so the hog's quanta are
 	 * timed from the start. */
 	xtc_yield_set_budget(loop, 2LL * 1000 * 1000);   /* 2ms */
-	munit_assert_int(xtc_async(loop, yc_hog, NULL, &hog), ==, XTC_OK);
-	munit_assert_int(xtc_async(loop, yc_ticker, NULL, &tick), ==, XTC_OK);
+	munit_assert_int(xtc_coro_spawn(loop, yc_hog, NULL, &hog), ==, XTC_OK);
+	munit_assert_int(xtc_coro_spawn(loop, yc_ticker, NULL, &tick), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
 	munit_assert_int(g_yc_over, ==, 1);                 /* saw over-budget */
@@ -370,8 +370,8 @@ test_fp_env_per_fiber(const MunitParameter p[], void *d)
 	if ((g_fpe_def & (FPE_UP | FPE_DOWN)) != 0)
 		return MUNIT_SKIP;   /* not started in the default modes */
 	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
-	munit_assert_int(xtc_async(loop, fpe_a, NULL, NULL), ==, XTC_OK);
-	munit_assert_int(xtc_async(loop, fpe_b, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_coro_spawn(loop, fpe_a, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_coro_spawn(loop, fpe_b, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	xtc_loop_destroy(loop);
 	munit_logf(MUNIT_LOG_INFO, "default %#llx: B start %#llx end %#llx "
@@ -389,11 +389,11 @@ test_fp_env_per_fiber(const MunitParameter p[], void *d)
 
 #if defined(__linux__)
 /*
- * C11: a finished xtc_async coroutine gives its fiber stack back at once.
- * Its task and coro stay until xtc_loop_destroy (xtc_await reads the result
+ * C11: a finished xtc_coro_spawn coroutine gives its fiber stack back at once.
+ * Its task and coro stay until xtc_loop_destroy (xtc_coro_join reads the result
  * through them), but the stack did too: 20,000 async/await pairs held
  * 20,000 stacks -- two mappings each, 48 -> 40,048 lines of
- * /proc/self/maps -- so a long-lived loop using xtc_async ran into the
+ * /proc/self/maps -- so a long-lived loop using xtc_coro_spawn ran into the
  * kernel's mapping limit after ~32 K of them.  Asserted: 4,000 pairs grow
  * the mapping count by less than 100 (the stacks are pooled and reused),
  * and every result still reads back after the coroutines finished.
@@ -428,10 +428,10 @@ c11_parent(void *arg)
 	for (i = 0; i < 4000; i++) {
 		xtc_task_t *t = NULL;
 		intptr_t r = -1;
-		if (xtc_async(loop, c11_child, (void *)(intptr_t)i, &t) != XTC_OK ||
-		    xtc_await(t, &r) != XTC_OK || r != i * 3)
+		if (xtc_coro_spawn(loop, c11_child, (void *)(intptr_t)i, &t) != XTC_OK ||
+		    xtc_coro_join(t, &r) != XTC_OK || r != i * 3)
 			g_c11_bad++;
-		if (xtc_await(t, &r) != XTC_OK || r != i * 3)
+		if (xtc_coro_join(t, &r) != XTC_OK || r != i * 3)
 			g_c11_bad++;   /* a second await reads the kept result */
 	}
 	g_c11_after = c11_maps();
@@ -444,7 +444,7 @@ test_async_releases_stack(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	(void)p; (void)d;
 	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
-	munit_assert_int(xtc_async(loop, c11_parent, loop, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_coro_spawn(loop, c11_parent, loop, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	xtc_loop_destroy(loop);
 	munit_logf(MUNIT_LOG_INFO, "/proc/self/maps lines: %ld -> %ld over "

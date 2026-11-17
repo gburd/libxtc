@@ -354,6 +354,27 @@ bridge_init(void)
 	CHECK(b0.size == b1.size && b0.align == b1.align);
 }
 
+/* coroutines: xtc_async / xtc_await -> xtc_coro_spawn / xtc_coro_join. */
+static intptr_t
+coro_fn(void *arg)
+{
+	return (intptr_t)arg + 1;
+}
+
+static void
+bridge_coro(void)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_task_t *t = NULL;
+	intptr_t r = 0;
+
+	CHECK(xtc_loop_create(&loop) == XTC_OK);
+	CHECK(xtc_async(loop, coro_fn, (void *)(intptr_t)41, &t) == XTC_OK);
+	CHECK(xtc_loop_run(loop) == XTC_OK);
+	CHECK(xtc_await(t, &r) == XTC_OK && r == 42);
+	xtc_loop_destroy(loop);
+}
+
 int
 main(void)
 {
@@ -369,6 +390,7 @@ main(void)
 	bridge_runtime();
 	bridge_reg();
 	bridge_init();
+	bridge_coro();
 	printf("  [bridge] OK: every deprecated name still works\n");
 	return 0;
 }

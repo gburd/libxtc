@@ -13,7 +13,7 @@ H="$XTC_SRC_DIR/src/inc/xtc_async.h"
 LIVE=$(sed '/Deprecated names (docs\/deprecations.md)/,/^#ifdef __cplusplus/d' "$H")
 
 # Public functions.
-fns=$(printf "%s\n" "$LIVE" | grep -oE 'xtc_(async|await|yield|stack_size|set_stack_size)\b' | sort -u)
+fns=$(printf "%s\n" "$LIVE" | grep -oE 'xtc_(coro_spawn|coro_join|yield[a-z_]*)\b' | sort -u)
 for fn in $fns; do
 	if ! grep -q "$fn" "$PAGE"; then
 		echo "  [D10] FAIL: $PAGE missing $fn" >&2

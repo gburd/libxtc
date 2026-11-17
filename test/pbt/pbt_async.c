@@ -59,7 +59,7 @@ prop_yield_count(hegel_test_case *tc, void *u)
 	for (i = 0; i < n; i++) {
 		st[i].target = (int)hegel_draw_int(tc, hegel_integers(0, 30));
 		st[i].observed = 0;
-		hegel_assume(xtc_async(loop, yc_coro, &st[i], &ts[i]) == XTC_OK);
+		hegel_assume(xtc_coro_spawn(loop, yc_coro, &st[i], &ts[i]) == XTC_OK);
 	}
 	hegel_assume(xtc_loop_run(loop) == XTC_OK);
 	for (i = 0; i < n; i++)
@@ -83,8 +83,8 @@ static intptr_t nc_outer(void *p) {
 	xtc_task_t *child = NULL;
 	intptr_t r = 0;
 	struct nc_arg a = { o->v };
-	(void)xtc_async(o->loop, nc_inner, &a, &child);
-	(void)xtc_await(child, &r);
+	(void)xtc_coro_spawn(o->loop, nc_inner, &a, &child);
+	(void)xtc_coro_join(child, &r);
 	return r;
 }
 
@@ -108,11 +108,11 @@ prop_nested_compose(hegel_test_case *tc, void *u)
 	for (i = 0; i < n; i++) {
 		outers[i].loop = loop;
 		outers[i].v    = (int)hegel_draw_int(tc, hegel_integers(0, 1000));
-		hegel_assume(xtc_async(loop, nc_outer, &outers[i], &ts[i]) == XTC_OK);
+		hegel_assume(xtc_coro_spawn(loop, nc_outer, &outers[i], &ts[i]) == XTC_OK);
 	}
 	hegel_assume(xtc_loop_run(loop) == XTC_OK);
 	for (i = 0; i < n; i++) {
-		hegel_assume(xtc_await(ts[i], &results[i]) == XTC_OK);
+		hegel_assume(xtc_coro_join(ts[i], &results[i]) == XTC_OK);
 		hegel_assume(results[i] == (intptr_t)(outers[i].v * 3 + 7));
 	}
 	free(outers); free(ts); free(results);

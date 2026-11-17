@@ -2086,8 +2086,8 @@ test_amutex_no_starve(const MunitParameter p[], void *d)
 	g_ns_rounds = 0; g_ns_got_at = -1; g_ns_stop = 0;
 	munit_assert_int(xtc_amutex_create(&g_ns_m), ==, XTC_OK);
 	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
-	munit_assert_int(xtc_async(loop, nst_barger, NULL, NULL), ==, XTC_OK);
-	munit_assert_int(xtc_async(loop, nst_waiter, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_coro_spawn(loop, nst_barger, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_coro_spawn(loop, nst_waiter, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	xtc_loop_destroy(loop);
 	xtc_amutex_destroy(g_ns_m);

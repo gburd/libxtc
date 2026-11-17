@@ -205,7 +205,7 @@ test_self(const MunitParameter p[], void *d)
 /* ---------- a bare coroutine is not a proc (review156 B1) ---------- */
 
 /*
- * A bare xtc_async coroutine that yields while a proc is parked used to
+ * A bare xtc_coro_spawn coroutine that yields while a proc is parked used to
  * inherit that proc as its current proc (the proc TLS carried across
  * the coroutine's yield), so xtc_self() named the proc and, once the
  * proc exited and was freed, every later yield read freed memory in the
@@ -271,7 +271,7 @@ test_bare_coro_not_a_proc(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, bare_victim, &s, NULL, &pid),
 	    ==, XTC_OK);
-	munit_assert_int(xtc_async(loop, bare_coro, &s, &t), ==, XTC_OK);
+	munit_assert_int(xtc_coro_spawn(loop, bare_coro, &s, &t), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, bare_waiter, &s, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);

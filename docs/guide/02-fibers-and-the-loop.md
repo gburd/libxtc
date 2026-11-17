@@ -92,7 +92,7 @@ sleeping, so give the work a process when it has to wait on time.
 
 ## Awaiting a value across fibers
 
-`xtc_await` (from chapter 1) blocks the *caller* until a task finishes.
+`xtc_coro_join` (from chapter 1) blocks the *caller* until a task finishes.
 Called from ordinary thread code after `xtc_loop_run` returns, it simply
 reads the already-computed result. Called from *inside* another fiber,
 it suspends that fiber until the awaited task completes -- letting you
@@ -141,7 +141,7 @@ sorted correctly through 20 in-qsort yields: yes
   register swap.
 - The loop schedules ready fibers and parks the rest on the OS poller.
 - `xtc_yield` reschedules immediately; `xtc_proc_sleep` suspends a
-  process on a timer; `xtc_await` suspends on another task -- all without
+  process on a timer; `xtc_coro_join` suspends on another task -- all without
   blocking the thread.
 
 The bare coroutine is the foundation. The next layer up gives each unit

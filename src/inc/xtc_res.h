@@ -11,7 +11,7 @@
  *	XTC_E_RESOURCE; release is unconditional.
  *
  *	WHAT IS METERED -- exactly, nothing else is charged by libxtc:
- *	  TASKS, INBOX_MSGS  every task spawned on a loop (xtc_async,
+ *	  TASKS, INBOX_MSGS  every task spawned on a loop (xtc_coro_spawn,
  *	      xtc_proc_spawn, ...) against that loop's own accountant
  *	      (xtc_loop_res); cross-thread spawns also charge INBOX_MSGS.
  *	  CHANNELS, CHAN_SLOTS  channels created with a non-NULL res.

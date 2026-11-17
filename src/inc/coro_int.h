@@ -22,7 +22,7 @@
 
 /*
  * The fiber context attached to an xtc_task_t when it was spawned
- * via xtc_async.  Lives in the per-task arena (currently malloc).
+ * via xtc_coro_spawn.  Lives in the per-task arena (currently malloc).
  */
 struct xtc_coro {
 #if defined(_WIN32)
@@ -113,7 +113,7 @@ int  __xtc_coro_step(xtc_task_t *self, void *user);
 
 /*
  * Internal spawn with an explicit pin flag and stack size.  The public
- * xtc_async wraps this with pinned=1 (the long-standing default: a
+ * xtc_coro_spawn wraps this with pinned=1 (the long-standing default: a
  * coro's task is not work-stealable) and stack_sz=0.  pinned=0 places
  * the task on the stealable deque so it can migrate across loops --
  * used by the proc layer when xtc_proc_opts_t.migratable is set.
@@ -148,7 +148,7 @@ void __xtc_coro_stack_spare_fini(xtc_loop_t *loop);
 struct xtc_coro *__xtc_current_coro_get(void);
 
 /*
- * xtc_await's kill point, at the top of each park round (all three
+ * xtc_coro_join's kill point, at the top of each park round (all three
  * substrates).  The first round has nothing pending unless the kill came
  * first, and a later round runs only after a wake: if that wake was not
  * the target's completion and a kill is pending, stop being the target's

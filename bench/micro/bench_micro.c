@@ -502,7 +502,7 @@ bench_fiber_switch(void)
 	g_yield_iters = 10000000L * g_scale;
 	if (xtc_loop_create(&loop) != XTC_OK)
 		return -1.0;
-	if (xtc_async(loop, yield_coro, NULL, &t) != XTC_OK) {
+	if (xtc_coro_spawn(loop, yield_coro, NULL, &t) != XTC_OK) {
 		xtc_loop_destroy(loop);
 		return -1.0;
 	}

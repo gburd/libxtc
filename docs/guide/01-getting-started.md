@@ -13,8 +13,8 @@ lede: >-
 
 This chapter takes you from an empty directory to a running libxtc
 program, then explains every line of it. By the end you will understand
-the three calls at the heart of the library -- `xtc_async`,
-`xtc_loop_run`, and `xtc_await` -- and why a *fiber* lets you write
+the three calls at the heart of the library -- `xtc_coro_spawn`,
+`xtc_loop_run`, and `xtc_coro_join` -- and why a *fiber* lets you write
 concurrent code that reads like ordinary straight-line C.
 
 ## Installing
@@ -76,8 +76,8 @@ kqueue, or IOCP, chosen at configure time). `xtc_loop_run` drives it,
 resuming ready fibers one at a time on this thread until there is no
 more work, then returns.
 
-**The task** ([`xtc_async`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_async.3)).
-`xtc_async(loop, fn, arg, &task)` allocates a fiber -- a small,
+**The task** ([`xtc_coro_spawn`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_async.3)).
+`xtc_coro_spawn(loop, fn, arg, &task)` allocates a fiber -- a small,
 independently switchable call stack -- and queues `fn(arg)` to run on
 it. It does *not* run `fn` yet; it returns immediately with a handle.
 
@@ -88,8 +88,8 @@ loop next schedules it, execution continues on the line after the yield.
 This is the whole trick: a blocking-looking call becomes a suspension
 point, and one thread can interleave many fibers.
 
-**The await** ([`xtc_await`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_async.3)).
-After the loop has run the task to completion, `xtc_await(task, &result)`
+**The await** ([`xtc_coro_join`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_async.3)).
+After the loop has run the task to completion, `xtc_coro_join(task, &result)`
 reads the `intptr_t` the coroutine returned.
 
 {: .rationale }
@@ -119,7 +119,7 @@ Nearly every program follows the same skeleton:
 
 1. **Create** a loop (or, for the multi-core case, an *executor* of
    several loops -- see [Blocking work and I/O]({{ '/guide/05-blocking-and-io/' | relative_url }})).
-2. **Spawn** the initial work with `xtc_async` (for a bare coroutine) or
+2. **Spawn** the initial work with `xtc_coro_spawn` (for a bare coroutine) or
    `xtc_proc_spawn` (for a supervised, message-passing process --
    [Processes and messages]({{ '/guide/03-processes-and-messages/' | relative_url }})).
 3. **Run** the loop.

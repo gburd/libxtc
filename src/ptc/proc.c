@@ -1975,7 +1975,7 @@ __proc_entry(void *arg)
 	/*
 	 * Bind the proc to its task/coro HERE, not in xtc_proc_spawn.  On a
 	 * cross-loop spawn the target loop may already be running, so this
-	 * coroutine can begin executing the instant xtc_async enqueues it --
+	 * coroutine can begin executing the instant xtc_coro_spawn enqueues it --
 	 * before the spawning thread runs its next statement.  If the
 	 * spawner set p->task afterward, two bugs followed: (1) this proc's
 	 * own self->task uses (xtc_proc_sleep, recv, wait_fd) would read an
@@ -2296,14 +2296,14 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 		__os_free(p);
 		return rc;
 	}
-	/* Capture the pid before the spawn: once xtc_async enqueues the
+	/* Capture the pid before the spawn: once xtc_coro_spawn enqueues the
 	 * task, p may be reaped on another thread, so reading p->pid for
 	 * out_pid afterward would be a use-after-free. */
 	spawned_pid = p->pid;
 
 	/*
 	 * ATOMIC link/monitor: establish the parent<->child relationship
-	 * NOW, before xtc_async makes the child runnable.  We hold p and
+	 * NOW, before xtc_coro_spawn makes the child runnable.  We hold p and
 	 * its slot, and self is the calling process; adding to both lists
 	 * here means that even if the child runs and exits the instant it
 	 * is enqueued, its __notify_links_and_monitors already sees the
@@ -2367,7 +2367,7 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 		}
 	}
 
-	/* Spawn the underlying coroutine.  Once xtc_async enqueues the
+	/* Spawn the underlying coroutine.  Once xtc_coro_spawn enqueues the
 	 * task it may run immediately on another loop's thread, so we must
 	 * NOT touch p afterward: the proc binds itself to its task/coro in
 	 * __proc_entry (see there).  Touching p here would race a reap.
@@ -3530,7 +3530,7 @@ __exit_pid_on(xtc_loop_t *owner, xtc_pid_t target, int reason)
 	 * the PARKED->SCHEDULED CAS, or latches wake_pending if the target is
 	 * still RUNNING.  Done under mbox_lock: the exit path clears run_task
 	 * under the same lock before the task can complete, so a non-NULL
-	 * run_task names a live task.  xtc_await delivers it once it has
+	 * run_task names a live task.  xtc_coro_join delivers it once it has
 	 * stopped being its target's waiter (AWAIT_KILL_POLL, coro_int.h).
 	 * A woken park is never unwound inside xtc_yield (see
 	 * __xtc_proc_kill_check), so this wake is safe for every park site.

@@ -1125,7 +1125,7 @@ __xtc_loop_step(xtc_loop_t *loop)
 			 * unchanged.
 			 *
 			 * The `t->fn != __xtc_coro_step` guard closes a
-			 * cross-thread-spawn teardown leak: xtc_async sets
+			 * cross-thread-spawn teardown leak: xtc_coro_spawn sets
 			 * t->cleanup only AFTER __xtc_task_spawn_ex makes the
 			 * task visible (it pushes an XTC_INB_PUBLISH to the
 			 * target loop's inbox for a foreign spawn).  A short-

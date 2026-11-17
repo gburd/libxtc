@@ -40,7 +40,7 @@ from here can silently rot against the API.
 1. [Getting started]({{ '/guide/01-getting-started/' | relative_url }}) -- install, build, and
    run your first coroutine; the anatomy of a libxtc program.
 2. [Fibers and the event loop]({{ '/guide/02-fibers-and-the-loop/' | relative_url }}) -- how
-   `xtc_async`, `xtc_yield`, and `xtc_await` actually work, and why
+   `xtc_coro_spawn`, `xtc_yield`, and `xtc_coro_join` actually work, and why
    a fiber is not a thread.
 3. [Processes and messages]({{ '/guide/03-processes-and-messages/' | relative_url }}) -- spawn,
    send, receive; the shared-nothing discipline.

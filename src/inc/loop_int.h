@@ -742,7 +742,7 @@ extern void  (*__xtc_fiber_ctx_restore)(void *);
 extern void  (*__xtc_fiber_kill_check)(void);
 
 /* Deliver a pending kill now, at a park site that has undone its own
- * state (xtc_await, after unregistering as the target's waiter): unwinds
+ * state (xtc_coro_join, after unregistering as the target's waiter): unwinds
  * via xtc_exit_self, or latches the kill if the proc is masked and
  * returns.  Installed by proc.c (__xtc_proc_kill_poll); NULL without a
  * process layer. */

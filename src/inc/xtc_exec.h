@@ -200,7 +200,7 @@ XTC_API int  xtc_exec_loop_stats(xtc_exec_t *exec, int idx, xtc_loop_stats_t *ou
 
 /*
  * Spawns.  These are the multi-loop equivalents of xtc_task_spawn /
- * xtc_async; they may be called from any thread.
+ * xtc_coro_spawn; they may be called from any thread.
  */
 XTC_API int  xtc_exec_spawn(xtc_exec_t *exec, xtc_task_fn fn, void *user,
                             xtc_task_t **out_task);

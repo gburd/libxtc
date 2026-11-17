@@ -265,7 +265,7 @@ __coro_entry(void)
 	__san_switch_done(c->san_fake_stack);   /* arrived on the coro stack */
 	/* A new fiber is not a proc until __proc_entry says so: clear the
 	 * proc TLS the previous fiber on this thread left behind, or a bare
-	 * xtc_async coroutine runs (and yields) as that proc -- xtc_self()
+	 * xtc_coro_spawn coroutine runs (and yields) as that proc -- xtc_self()
 	 * names it, xtc_recv steals its mail, and once it is freed every
 	 * yield's kill check reads freed memory (review156 B1). */
 	if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(NULL);
@@ -416,18 +416,18 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 			(void)xtc_waker_wake(&w);
 			c->waiter = NULL;
 		}
-		/* lifetime: a finished PROC fiber, and an xtc_async fiber
-		 * spawned without a handle, are reclaimed by the loop's DONE
-		 * handler (task.c __xtc_task_reclaim): nobody can await them.
-		 * An xtc_async task whose handle was handed out stays, with
-		 * its coro, until xtc_loop_destroy (the stack does not).
-		 * c->proc is set by __proc_entry before the body runs and
-		 * never cleared. */
+		/* lifetime: a finished PROC fiber, and an xtc_coro_spawn
+		 * fiber spawned without a handle, are reclaimed by the loop's
+		 * DONE handler (task.c __xtc_task_reclaim): nobody can join
+		 * them.  An xtc_coro_spawn task whose handle was handed out
+		 * stays, with its coro, until xtc_loop_destroy (the stack does
+		 * not).  c->proc is set by __proc_entry before the body runs
+		 * and never cleared. */
 		if (c->proc != NULL || c->detached)
 			self->reclaim = 1;
 		else
-			/* A bare xtc_async coroutine keeps its task + coro for
-			 * xtc_await until xtc_loop_destroy, but not its stack:
+			/* A bare xtc_coro_spawn coroutine keeps its task + coro for
+			 * xtc_coro_join until xtc_loop_destroy, but not its stack:
 			 * 20,000 async/await pairs held 20,000 stacks (two
 			 * mappings each) until fini.  We are on the scheduler
 			 * stack, so the finished fiber's is idle. */
@@ -470,9 +470,9 @@ __xtc_coro_step(xtc_task_t *self, void *user)
  * via the all_tasks walk.
  */
 /* Give a coro's fiber stack back (the thread's pool, the loop's spare,
- * or munmap) and forget it.  Idempotent: a finished xtc_async coroutine
+ * or munmap) and forget it.  Idempotent: a finished xtc_coro_spawn coroutine
  * releases its stack at once (__xtc_coro_step), and the coro struct --
- * which xtc_await reads the result from -- is freed at xtc_loop_destroy. */
+ * which xtc_coro_join reads the result from -- is freed at xtc_loop_destroy. */
 static void
 __coro_release_stack(struct xtc_coro *c)
 {
@@ -522,7 +522,7 @@ __coro_task_cleanup(void *coro)
 }
 
 /*
- * PUBLIC: int xtc_async __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
+ * PUBLIC: int xtc_coro_spawn __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
  */
 int
 __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
@@ -618,7 +618,7 @@ __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
 	/* The trampoline reads __xtc_current_coro on entry; that cursor is
 	 * set by __xtc_coro_step when the loop first runs us, so we don't
 	 * need to touch it here.  Critically, we must NOT clobber the
-	 * caller's cursor when xtc_async is invoked from inside another
+	 * caller's cursor when xtc_coro_spawn is invoked from inside another
 	 * coroutine. */
 	makecontext(&c->ctx, __coro_entry, 0);
 #if defined(XTC_TSAN_FIBERS)
@@ -640,22 +640,22 @@ __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
 }
 
 /*
- * PUBLIC: int xtc_async __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
+ * PUBLIC: int xtc_coro_spawn __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
  *
  * Public entry: spawns a PINNED coroutine (default, unchanged).
  * Internal callers wanting a migratable coro use __xtc_async_ex.
  */
 int
-xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
+xtc_coro_spawn(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
 {
 	return __xtc_async_ex(loop, fn, arg, 1, 0, out_task);
 }
 
 /*
- * PUBLIC: int xtc_await __P((xtc_task_t *, intptr_t *));
+ * PUBLIC: int xtc_coro_join __P((xtc_task_t *, intptr_t *));
  */
 int
-xtc_await(xtc_task_t *t, intptr_t *result)
+xtc_coro_join(xtc_task_t *t, intptr_t *result)
 {
 	struct xtc_coro *me;
 	struct xtc_coro *target;

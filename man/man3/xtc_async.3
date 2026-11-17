@@ -4,8 +4,8 @@
 .Dt XTC_ASYNC 3
 .Os
 .Sh NAME
-.Nm xtc_async ,
-.Nm xtc_await ,
+.Nm xtc_coro_spawn ,
+.Nm xtc_coro_join ,
 .Nm xtc_yield ,
 .Nm xtc_yield_set_budget ,
 .Nm xtc_yield_check ,
@@ -16,14 +16,16 @@
 .Nm XTC_PT_BEGIN ,
 .Nm XTC_PT_END ,
 .Nm XTC_PT_YIELD ,
-.Nm XTC_PT_WAIT_UNTIL
+.Nm XTC_PT_WAIT_UNTIL ,
+.Nm xtc_async ,
+.Nm xtc_await
 .Nd L2 stackful coroutines and protothreads
 .Sh SYNOPSIS
 .In xtc_async.h
 .Ft int
-.Fn xtc_async "xtc_loop_t *loop" "xtc_coro_fn fn" "void *arg" "xtc_task_t **out_task"
+.Fn xtc_coro_spawn "xtc_loop_t *loop" "xtc_coro_fn fn" "void *arg" "xtc_task_t **out_task"
 .Ft int
-.Fn xtc_await "xtc_task_t *t" "intptr_t *result"
+.Fn xtc_coro_join "xtc_task_t *t" "intptr_t *result"
 .Ft void
 .Fn xtc_yield "void"
 .Ft void
@@ -44,7 +46,7 @@ XTC_PT_YIELD(pt)
 XTC_PT_WAIT_UNTIL(pt, condition)
 .Ed
 .Sh DESCRIPTION
-.Nm xtc_async
+.Nm xtc_coro_spawn
 spawns
 .Fa "fn(arg)"
 as a stackful coroutine attached to
@@ -60,11 +62,11 @@ A coroutine may freely use stack-resident locals; they are preserved
 across
 .Fn xtc_yield
 and
-.Fn xtc_await .
+.Fn xtc_coro_join .
 This is the headline contract that distinguishes fibers from
 protothreads.
 .Pp
-.Fn xtc_await
+.Fn xtc_coro_join
 blocks the caller until the awaited coroutine has returned, then
 writes the coroutine's
 .Vt intptr_t
@@ -83,7 +85,7 @@ in
 .Pc .
 .Pp
 The task handle stays valid, and
-.Fn xtc_await
+.Fn xtc_coro_join
 can read the result again, until
 .Fn xtc_loop_destroy .
 The coroutine's stack does not: it is returned to the thread's stack
@@ -150,7 +152,7 @@ repeatedly until it returns
 returns the default per-coroutine stack size in bytes.  
 .Fn xtc_runtime_set_stack_size
 overrides it for subsequent
-.Fn xtc_async
+.Fn xtc_coro_spawn
 calls; the value is rounded up to a page multiple, and a sub-16\u00a0KiB
 request returns
 .Dv XTC_E_INVAL .
@@ -189,12 +191,25 @@ int main(void) {
         int v = 21;
         intptr_t r;
         xtc_loop_create(&loop);
-        xtc_async(loop, multiply, &v, &t);
-        xtc_await(t, &r);     /* r == 42 */
+        xtc_coro_spawn(loop, multiply, &v, &t);
+        xtc_coro_join(t, &r);     /* r == 42 */
         xtc_loop_destroy(loop);
         return 0;
 }
 .Ed
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Fn xtc_async
+Use
+.Fn xtc_coro_spawn .
+.It Fn xtc_await
+Use
+.Fn xtc_coro_join .
+.El
 .Sh SEE ALSO
 .Xr xtc_loop 3 ,
 .Xr xtc_io 3 ,

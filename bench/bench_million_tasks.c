@@ -122,7 +122,7 @@ main(int argc, char **argv)
 	 * mprotect splits mapping); /proc/sys/vm/max_map_count limits
 	 * how many tasks can coexist.  On Linux the default is 65530
 	 * (kernel < 6.0) or 1M (newer); we degrade gracefully when
-	 * hit -- xtc_async returns a non-OK rc, no crash. */
+	 * hit -- xtc_coro_spawn returns a non-OK rc, no crash. */
 	if (xtc_runtime_set_stack_size(16 * 1024) != XTC_OK) {
 		fprintf(stderr, "set_stack_size failed\n");
 		return 1;
@@ -132,10 +132,10 @@ main(int argc, char **argv)
 
 	for (i = 0; i < n_tasks; i++) {
 		xtc_task_t *t;
-		int rc = xtc_async(loop, task_fn, NULL, &t);
+		int rc = xtc_coro_spawn(loop, task_fn, NULL, &t);
 		if (rc != XTC_OK) {
 			fprintf(stderr,
-			    "xtc_async failed at task %d: rc=%d\n", i, rc);
+			    "xtc_coro_spawn failed at task %d: rc=%d\n", i, rc);
 			break;
 		}
 		if (i % 100000 == 0 && i > 0) {

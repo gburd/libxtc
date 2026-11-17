@@ -18,7 +18,7 @@
  *	rather than standing up a whole process and mailbox.
  *
  *	Model.  A future carries an intptr_t value and an int status
- *	(the same value/status shape xtc_await uses: the status is an
+ *	(the same value/status shape xtc_coro_join uses: the status is an
  *	XTC_* code, XTC_OK on a normal completion).  A promise is set
  *	EXACTLY ONCE; the future is then READY forever and every awaiter
  *	-- present or future -- observes the same (value, status).

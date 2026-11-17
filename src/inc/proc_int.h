@@ -112,7 +112,7 @@ void      __xtc_cfg_task_exit(xtc_task_t *t);
 void __xtc_pdict_proc_exit(xtc_pid_t pid);
 
 /* xtc_exit_pid makes a target parked anywhere runnable (except inside
- * xtc_await), so a park site re-checks promptly and can deliver the kill. */
+ * xtc_coro_join), so a park site re-checks promptly and can deliver the kill. */
 #define XTC_HAVE_PROC_KILL_WAKE 1
 
 #endif /* XTC_PROC_INT_H */

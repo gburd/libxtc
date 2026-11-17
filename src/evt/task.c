@@ -310,7 +310,7 @@ __xtc_task_free(xtc_task_t *t)
  * stock kernel (vm.max_map_count 65530) every spawn failed after ~32K.
  *
  * The coro step marks a finished proc fiber (t->reclaim; a proc's task
- * handle is never handed out, unlike xtc_async's out_task) and the loop's
+ * handle is never handed out, unlike xtc_coro_spawn's out_task) and the loop's
  * DONE handler calls __xtc_task_reclaim on the scheduler stack, after the
  * switch back, so the dead fiber stack is no longer executing:
  *
@@ -331,7 +331,7 @@ __xtc_task_free(xtc_task_t *t)
  * high-water count of live tasks) and is freed at xtc_loop_destroy.  A late
  * waker then lands on a valid task struct -- a no-op on a DONE task, at
  * worst one spurious wake of the next incarnation, which every park site
- * already tolerates (xtc_await re-parks until its target is done).  The
+ * already tolerates (xtc_coro_join re-parks until its target is done).  The
  * free lists are split by pinned-ness so that spurious wake can never
  * move a pinned task to a thief loop.
  */
@@ -433,7 +433,7 @@ __xtc_task_spawn_ex(xtc_loop_t *loop, xtc_task_fn fn, void *user,
  * __xtc_task_spawn_ex plus a fini-time cleanup hook.  The hook is stored
  * BEFORE the task is enqueued or published to another loop's inbox, so
  * the loop that runs it (possibly on another thread, possibly to DONE)
- * never sees a half-initialized task.  xtc_async passes its coro teardown
+ * never sees a half-initialized task.  xtc_coro_spawn passes its coro teardown
  * here; storing it after the spawn returned was a TSan-reported race.
  */
 int

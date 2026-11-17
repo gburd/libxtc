@@ -4,7 +4,7 @@
  *
  * test/m8/test_kill_late.c
  *	When does xtc_exit_pid reach a proc that is parked?
- *	  /await         a proc parked in xtc_await on a task that runs for
+ *	  /await         a proc parked in xtc_coro_join on a task that runs for
  *	                 another 2 s is killed: its DOWN must arrive at once
  *	                 (before 2.0 it arrived only when the awaited task
  *	                 finished), and the awaited task must still finish and
@@ -52,7 +52,7 @@ now_ns(void)
 	return xtc_clock_mono();
 }
 
-/* The awaited task: an xtc_async coroutine that sleeps g_slow_ns in 1 ms
+/* The awaited task: an xtc_coro_spawn coroutine that sleeps g_slow_ns in 1 ms
  * steps (a coroutine, not a proc: xtc_yield only, no proc sleep). */
 static intptr_t
 slow_task(void *arg)
@@ -73,7 +73,7 @@ await_victim(void *arg)
 	if (g_masked)
 		munit_assert_int(xtc_mask_enter(), ==, XTC_OK);
 	xtc_atomic_store_i32(&g_victim_parked, 1, xtc_mo_seq_cst);
-	(void)xtc_await(g_slow, &r);
+	(void)xtc_coro_join(g_slow, &r);
 	if (g_masked) {
 		/* The kill was latched, not delivered, while masked. */
 		munit_assert_int((int)r, ==, 42);
@@ -151,7 +151,7 @@ driver(void *arg)
 		xtc_free(m);
 	if (g_slow != NULL) {
 		/* The awaited task is intact for another awaiter. */
-		g_second_ok = xtc_await(g_slow, &g_second_r) == XTC_OK;
+		g_second_ok = xtc_coro_join(g_slow, &g_second_r) == XTC_OK;
 	}
 }
 
@@ -169,7 +169,7 @@ run(void (*victim)(void *), int with_slow)
 	g_victim_fn = victim;
 	munit_assert_int(xtc_loop_create(&g_loop), ==, XTC_OK);
 	if (with_slow)
-		munit_assert_int(xtc_async(g_loop, slow_task, NULL, &g_slow),
+		munit_assert_int(xtc_coro_spawn(g_loop, slow_task, NULL, &g_slow),
 		    ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(g_loop, driver, NULL, NULL, NULL), ==,
 	    XTC_OK);

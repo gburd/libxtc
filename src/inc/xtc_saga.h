@@ -20,9 +20,10 @@
  *	A saga step is a plain function call, not a spawned task:
  *	xtc_saga_run calls each step function directly on the CALLING
  *	fiber, in order, exactly like calling a chain of ordinary
- *	functions.  A step is free to spawn an xtc_proc, use xtc_async /
- *	xtc_await or wait on an xtc_future internally, and block until
- *	that sub-work finishes; the saga needs no async type of its own.
+ *	functions.  A step is free to spawn an xtc_proc, use
+ *	xtc_coro_spawn / xtc_coro_join or wait on an xtc_future
+ *	internally, and block until that sub-work finishes; the saga needs
+ *	no async type of its own.
  *
  *	A compensation that itself fails is a documented UNRECOVERABLE
  *	SAGA condition: the runtime does not swallow it.  xtc_saga_run

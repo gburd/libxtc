@@ -75,7 +75,7 @@ __coro_entry(LPVOID arg)
 	struct xtc_coro *c = arg;
 	/* A new fiber is not a proc until __proc_entry says so: clear the
 	 * proc TLS the previous fiber on this thread left behind, or a bare
-	 * xtc_async coroutine runs (and yields) as that proc -- xtc_self()
+	 * xtc_coro_spawn coroutine runs (and yields) as that proc -- xtc_self()
 	 * names it, xtc_recv steals its mail, and once it is freed every
 	 * yield's kill check reads freed memory (review156 B1). */
 	if (__xtc_fiber_ctx_restore) __xtc_fiber_ctx_restore(NULL);
@@ -102,7 +102,7 @@ __coro_task_cleanup(void *coro)
 }
 
 /*
- * PUBLIC: int xtc_async __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
+ * PUBLIC: int xtc_coro_spawn __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
  */
 int
 __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
@@ -163,13 +163,13 @@ __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
 }
 
 /*
- * PUBLIC: int xtc_async __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
+ * PUBLIC: int xtc_coro_spawn __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
  *
  * Public entry: spawns a PINNED coroutine (default, unchanged).
  * Internal callers wanting a migratable coro use __xtc_async_ex.
  */
 int
-xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
+xtc_coro_spawn(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
 {
 	return __xtc_async_ex(loop, fn, arg, 1, 0, out_task);
 }
@@ -215,12 +215,12 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 			(void)xtc_waker_wake(&w);
 			c->waiter = NULL;
 		}
-		/* lifetime: a finished PROC fiber, and an xtc_async fiber
-		 * spawned without a handle, are reclaimed by the loop's DONE
-		 * handler (task.c __xtc_task_reclaim): nobody can await them.
-		 * An xtc_async task whose handle was handed out stays until
-		 * xtc_loop_destroy.  c->proc is set by __proc_entry before the
-		 * body runs and never cleared. */
+		/* lifetime: a finished PROC fiber, and an xtc_coro_spawn
+		 * fiber spawned without a handle, are reclaimed by the loop's
+		 * DONE handler (task.c __xtc_task_reclaim): nobody can join
+		 * them.  An xtc_coro_spawn task whose handle was handed out
+		 * stays until xtc_loop_destroy.  c->proc is set by __proc_entry
+		 * before the body runs and never cleared. */
 		if (c->proc != NULL || c->detached)
 			self->reclaim = 1;
 		/* Do NOT destroy here: the task's cleanup
@@ -252,10 +252,10 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 }
 
 /*
- * PUBLIC: int xtc_await __P((xtc_task_t *, intptr_t *));
+ * PUBLIC: int xtc_coro_join __P((xtc_task_t *, intptr_t *));
  */
 int
-xtc_await(xtc_task_t *t, intptr_t *result)
+xtc_coro_join(xtc_task_t *t, intptr_t *result)
 {
 	struct xtc_coro *me, *target;
 

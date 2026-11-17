@@ -1402,7 +1402,7 @@ int
 xtc_exec_async(xtc_exec_t *e, xtc_coro_fn fn, void *arg, xtc_task_t **out)
 {
 	if (e == NULL) return XTC_E_INVAL;
-	return xtc_async(e->loops[__pick_loop(e)], fn, arg, out);
+	return xtc_coro_spawn(e->loops[__pick_loop(e)], fn, arg, out);
 }
 
 /* PUBLIC: int xtc_exec_async_on __P((xtc_exec_t *, int, xtc_coro_fn, void *, xtc_task_t **)); */
@@ -1412,7 +1412,7 @@ xtc_exec_async_on(xtc_exec_t *e, int idx, xtc_coro_fn fn, void *arg,
 {
 	if (e == NULL) return XTC_E_INVAL;
 	if (idx < 0 || idx >= e->n_loops) return XTC_E_INVAL;
-	return xtc_async(e->loops[idx], fn, arg, out);
+	return xtc_coro_spawn(e->loops[idx], fn, arg, out);
 }
 
 /* --- L1 proportional-share scheduling classes ---------------------- *

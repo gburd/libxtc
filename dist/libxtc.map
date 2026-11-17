@@ -80,6 +80,8 @@ XTC_2.2 {
 		xtc_chan_demand_shutdown;
 		xtc_chan_mpmc_shutdown;
 		xtc_chan_mpsc_shutdown;
+		xtc_coro_join;
+		xtc_coro_spawn;
 		xtc_demonitor;
 		xtc_dispatch_detach;
 		xtc_err_errno;
