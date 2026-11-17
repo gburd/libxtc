@@ -73,6 +73,25 @@ no C++ API: no overloads, no templates.  `test/dist/test_header_cxx.sh`
 C++20 with g++ and clang++, and links a C++ program that takes the
 address of every declared function.
 
+## CHANGED (2.2): batch groups on a running loop; variable charge and preemption
+
+A batch group can now be created on a loop that is running, from code
+on that loop: `xtc_batch_create` and `xtc_batch_create_async` returned
+`XTC_E_AGAIN` once the loop had run.  A group a process creates that way
+belongs to it, and the owner's exit (return, `xtc_exit_self`, a kill, a
+contained fault) closes the group with `XTC_BATCH_CANCEL`, so a
+supervised engine that restarts destroys the group its predecessor left
+and creates its own.  `xtc_batch_recharge` grows or shrinks a member's
+reservation (growth only into free units, else `XTC_E_AGAIN`), and
+`xtc_batch_preempt` takes an admitted member back, freeing its units at
+once and putting it first in the waiting list with its handle.
+`xtc_batch_stats_t` gained `preemptions`, and
+`xtc_batch_async_stats_t` gained `busy_ns` and `idle_with_work_ns` (a
+2.1-sized struct of either is still accepted).  A group
+created before the first run behaves as before; FIFO admission is
+unchanged.  See `xtc_batch(3)` RUN-TIME CREATION and VARIABLE CHARGE AND
+PREEMPTION.
+
 ## CHANGED (2.2): waiting for mailbox room and for a name; `xtc_demonitor`
 
 New in `XTC_2.2`:

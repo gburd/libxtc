@@ -19,6 +19,11 @@
 
 #include "xtc_proc.h"
 
+/* Remove the calling proc's newest at-exit hook (fn, arg) while it runs
+ * (proc.c).  XTC_OK, XTC_E_NOTFOUND (absent, or the proc is exiting),
+ * XTC_E_INVAL off a proc. */
+int __xtc_proc_at_exit_cancel(void (*fn)(void *), void *arg);
+
 /* Owner/quiescent lookup on a live loop, including procs still in exit hooks.
  * One table probe, no registry walk (through 2.1 PIDs were executor-relative
  * and a global info scan could not establish this join). */

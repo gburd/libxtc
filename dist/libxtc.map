@@ -75,6 +75,8 @@ XTC_2.2 {
 	global:
 		xtc_amutex_create_flags;
 		xtc_app_supervisor;
+		xtc_batch_preempt;
+		xtc_batch_recharge;
 		xtc_batch_shutdown;
 		xtc_bloom_create;
 		xtc_bloom_destroy;

@@ -67,6 +67,20 @@ finish naturally. After the drivers exit, the application reads final
 statistics, destroys the groups, and finalizes the loop. `xtc_loop_stop`
 would not provide that drain guarantee.
 
+## A group owned by a restartable engine
+
+`--mode=restart` (libxtc 2.2) puts the group inside a supervised engine.
+The engine creates the group itself on the running loop, so the group
+belongs to it: when the engine dies, libxtc closes the group with
+`XTC_BATCH_CANCEL` and its unfinished requests complete with
+`XTC_E_ABORTED`. The restarted incarnation destroys the old group once
+its driver has ended, creates a new one, and resubmits what did not
+finish. A watcher kills the first incarnation mid-batch; the run ends with
+two incarnations and every request done once, checked against the scalar
+reference. `xtc_batch(3)` RUN-TIME CREATION has the contract, and VARIABLE
+CHARGE AND PREEMPTION the calls (`xtc_batch_recharge`, `xtc_batch_preempt`)
+a scheduler with a growing reservation uses.
+
 ## Build and check
 
 Configure libxtc with `--enable-sched-policy` and build `libxtc.a`. In
@@ -76,7 +90,7 @@ See the [README](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/1
 and [Makefile](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/12_continuous_batching/Makefile)
 for the build contract and command-line options.
 
-`--self-test` checks exact scalar results, one terminal callback per accepted
+`--self-test` also runs the restart mode. It checks exact scalar results, one terminal callback per accepted
 request, cancellation, capacity retry, BLOCKED/resume, heartbeat progress,
 released resources, and per-group completion order. Success ends with
 `continuous batching self-test: PASS (4 mode/policy combinations)`.

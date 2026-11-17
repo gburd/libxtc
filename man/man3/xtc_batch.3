@@ -7,6 +7,7 @@ xtc_batch_submit_mt, xtc_batch_cancel, xtc_batch_cancel_mt,
 xtc_batch_resume, xtc_batch_resume_mt,
 xtc_batch_shutdown, xtc_batch_destroy, xtc_batch_get_stats,
 xtc_batch_get_async_stats,
+xtc_batch_recharge, xtc_batch_preempt,
 xtc_batch_loop_for_device, xtc_batch_router_create,
 xtc_batch_router_destroy, xtc_batch_route,
 xtc_batch_close \- bounded continuous batching
@@ -31,6 +32,9 @@ int xtc_batch_destroy(xtc_batch_t *group);
 int xtc_batch_get_stats(xtc_batch_t *group, xtc_batch_stats_t *out);
 int xtc_batch_get_async_stats(xtc_batch_t *group,
                     xtc_batch_async_stats_t *out);
+int xtc_batch_recharge(xtc_batch_t *group, uint64_t handle,
+                    uint64_t charge);
+int xtc_batch_preempt(xtc_batch_t *group, uint64_t handle);
 int xtc_batch_loop_for_device(xtc_exec_t *exec,
                     const xtc_accel_dev_t *dev, int *out_loop_idx);
 int xtc_batch_router_create(xtc_batch_t **groups, int n,
@@ -56,12 +60,15 @@ a supplied class must belong to this loop and cannot be registered to another
 batch group. Ordinary non-batch processes may share that class. The class
 registration remains reserved until successful group destruction.
 .PP
-Create is allowed only before the loop's first run or simulation step.
-Setup must be externally serialized against execution. All storage is allocated
+Create is allowed before the loop's first run or simulation step, with setup
+externally serialized against execution, and (2.2) at any time from code
+running on that loop; see RUN-TIME CREATION. A loop that has run is refused
+from anywhere else with XTC_E_AGAIN. All storage is allocated
 before publishing the driver; create failure publishes no group. Allocation
 size arithmetic is checked, including on 32-bit targets.
 .PP
-Submit accepts a fixed maximum resource charge in 1..resource_capacity.
+Submit accepts a resource charge in 1..resource_capacity; it stays fixed
+unless the application changes it (see VARIABLE CHARGE AND PREEMPTION).
 Slots include both waiting and active requests. Admission to the active set is
 strict first-come, first-served: a younger request cannot bypass an older one
 whose charge does not fit. READY and BLOCKED requests both occupy active slots
@@ -124,7 +131,116 @@ still being written by its producer, the call returns XTC_E_AGAIN; retry.
 .PP
 Resume changes a live BLOCKED request to READY. Duplicate resume on READY is
 harmless. WAITING and terminal requests are not resumable and return XTC_E_INVAL.
-Resume does not release or reacquire a blocked request's fixed resource charge.
+Resume does not release or reacquire a blocked request's resource charge.
+.SH RUN-TIME CREATION
+From 2.2,
+.B xtc_batch_create
+and
+.B xtc_batch_create_async
+also work on a loop that is running, when called from code running on that
+loop (a process, a task, or a callback of another group). The lane attach,
+the storage and the driver spawn then happen on the loop's own thread between
+two scheduler steps, which is where the scheduler reads the lane arrays, so
+no lock is needed and the lane-selection policy
+.RB ( xtc_sched_continuous_set )
+sees the new lane at its next pick. A class lane can carry one group at a
+time, as before; after destroy the lane can carry a new one.
+.PP
+A group created by a process on its running loop belongs to that process.
+When the owner ends, by returning, by xtc_exit_self, by a kill or by a
+contained fault, the group is closed with XTC_BATCH_CANCEL at the driver's
+next boundary or wake: members not yet terminal end with XTC_E_ABORTED
+(their complete callback runs, once), an outstanding offload is collected
+with XTC_BATCH_EXEC_ABORTED, then the driver ends. Results already recorded,
+DONE included, are kept, as for a cancel close. The group is not freed
+until some process on the loop calls
+.BR xtc_batch_destroy ;
+it returns XTC_E_AGAIN until the driver has ended, so the caller retries
+after a yield. A group created before the first run, or by a task or other
+non-process code, has no owner, as in 2.1.
+.PP
+That is the shape for a supervised engine that restarts: each incarnation
+destroys the group the previous one left (its owner died, so it is closing)
+and creates its own on the same running loop, then resubmits the requests
+the old group aborted:
+.nf
+static xtc_batch_t *g; /* survives the incarnation */
+
+static void
+engine(void *arg)
+{
+	if (g != NULL) {
+		while (xtc_batch_destroy(g) == XTC_E_AGAIN)
+			xtc_yield();
+		g = NULL;
+	}
+	if (xtc_batch_create_async(loop, &opts, &g) != XTC_OK)
+		return;
+	resubmit_unfinished(g);
+	...
+}
+.fi
+The engine is the only owner of its group; the supervisor knows nothing of
+it and needs no batch-specific child spec. The batch DST
+.RI ( test/sim/test_sim_batch.c )
+runs that engine as a TRANSIENT supervised child, kills it at a seeded step,
+and checks the new incarnation recreates its group and finishes every
+request.
+.SH VARIABLE CHARGE AND PREEMPTION
+.B xtc_batch_recharge
+sets a live member's charge to
+.I charge
+(1..resource_capacity, else XTC_E_INVAL for 0 and XTC_E_RANGE above). A
+waiting member, or a cross-loop hand-in held for a slot, just takes the new
+charge for its admission (a handle still on the cross-loop ring is drained
+first; XTC_E_AGAIN when an earlier hand-in is still being written, as for
+.BR xtc_batch_cancel ).
+An admitted member's reservation shrinks at once,
+or grows into free units; a growth that does not fit returns XTC_E_AGAIN and
+changes nothing, which is the caller's cue to preempt.
+.PP
+.B xtc_batch_preempt
+takes an admitted member (READY or BLOCKED, or in flight inside its own
+collect after XTC_BATCH_EXEC_OK) back: its whole reservation is released at
+once, and the member waits again, keeping its handle and request pointer,
+at the head of the waiting list; it is readmitted READY, also when it was
+BLOCKED. A member preempted inside the callback whose
+vector holds it has that callback's result ignored. Preempting a waiting or
+terminal member returns XTC_E_INVAL; preempting a member whose offload may
+still be running (inside submit, in flight outside its collect, or in a
+collect that saw anything but XTC_BATCH_EXEC_OK) returns XTC_E_AGAIN,
+because the device may still own its buffers. A cancel that already landed
+on a preempted member still ends it, with XTC_E_ABORTED. Preemptions are
+counted in the statistics.
+.PP
+Preempt is a call, not a result state, because the units must be free in
+the same callback that needs them. With a result state the units would be
+released only after step or collect returned, so a recharge in that callback
+would still fail; and at the next boundary FCFS would readmit the preempted
+member, first in line, into the units it had just freed, so the growth that
+caused the preemption would fail again, every time.
+.PP
+Both calls are allowed from the owner loop outside callbacks and, from the
+driver itself, inside the group's callbacks (step, submit, collect, complete,
+cancel_hint); a peer process that runs while a callback is suspended gets
+XTC_E_DEADLK, as for every other mutator. The usual sequence, inside collect:
+.nf
+if (xtc_batch_recharge(g, a->handle, a->charge + 1) == XTC_E_AGAIN &&
+    xtc_batch_preempt(g, victim->handle) == XTC_OK &&
+    xtc_batch_recharge(g, a->handle, a->charge + 1) == XTC_OK)
+	a->charge++; /* victim waits, first in line, at its own charge */
+.fi
+.PP
+POLICY. Admission stays strict first-come, first-served, and a preempted
+member is first: preempted members wait ahead of every member never
+admitted, in handle order among themselves, so at the next boundary with a
+free active slot and room for its charge the preempted member is admitted
+before anyone else. It is not readmitted into units a growth took, because
+admission runs only at a boundary, after the callback that grew. A member
+that is preempted again every time it returns can never finish: that is an
+application policy (pick a victim that did not just come back, or one by
+age), and the library does not override it. Recharge the victim down before
+it returns if it should come back smaller.
 .SH ASYNC OFFLOAD
 .B xtc_batch_create_async
 builds a group whose step is a split
@@ -268,11 +384,23 @@ layer wakes parked fibers on kill (otherwise at the device's completion or
 exec_timeout_ns). A BLOCKING wait always lasts until the closure returns.
 .PP
 .B xtc_batch_get_async_stats
-reports offloads, offload_timeouts, offload_errors, mt_queued, and
-mt_rejections through a separate
+reports offloads, offload_timeouts, offload_errors, mt_queued,
+mt_rejections, and (2.2) busy_ns and idle_with_work_ns through a separate
 xtc_batch_async_stats_t (size and version checked like the synchronous
-statistics); the synchronous xtc_batch_stats_t is unchanged.
+statistics; a 2.1 caller's struct, ending at mt_rejections, still gets that
+prefix).
 On a synchronous group these counters are zero.
+.I busy_ns
+is the time an offload was outstanding, from submit's return to the start
+of its collect; a SYNC offload adds nothing.
+.I idle_with_work_ns
+is the time between a collect's return and the next submit while members
+were ready: the completion callbacks, the boundary and the loop's other
+work, which is the driver's own share of how full the device is kept. A
+boundary with no ready member ends that interval without counting the
+wait for new work. Both use the monotonic clock, which the simulator
+virtualizes, and saturate at UINT64_MAX. "How full did the GPU stay" is
+busy_ns over the wall time of the measurement.
 .SH CROSS-LOOP ADMISSION
 .B xtc_batch_submit_mt,
 .B xtc_batch_cancel_mt,
@@ -375,7 +503,8 @@ issuing mt calls when destroy runs (the owner-outlives-group discipline); the
 loop that owns the group must outlive every loop that submits to it.
 .PP
 Destroy requires a closed group, no borrowed requests or callback, and driver
-absence from the process table. An exit hook flag or alive==0 is insufficient:
+absence from the process table. Any process on the owner loop may destroy a
+finished group, not only the one that created it. An exit hook flag or alive==0 is insufficient:
 other exit hooks may still be parked. Destroy and statistics additionally allow
 externally synchronized quiescent calls after executor return, with the loop
 still allocated. These are not general thread-safe operations; a NULL current
@@ -447,10 +576,15 @@ build;
 returns NULL on a NULL router.
 .SH STATISTICS
 The snapshot includes queued, ready, blocked, reserved_units, iterations,
-completed, cancelled, failed, rejections, max_vector, and total_members.
+completed, cancelled, failed, rejections, max_vector, total_members, and
+(2.2) preemptions, the
+.B xtc_batch_preempt
+calls that took a member back. A 2.1 caller's shorter struct (size up to
+total_members) is still accepted and gets that prefix.
 Queued means waiting for admission; ready and blocked count active members.
 Queued includes cross-loop hand-ins held for a slot.
 Iteration and membership totals measure vector calls and their occupancy.
+Preempted members count in queued while they wait again.
 Terminal counters advance after completion delivery returns (or after an
 interrupted delivery is retired). Rejections count owner-loop
 xtc_batch_submit calls that failed after owner/callback validation; refused
@@ -462,8 +596,10 @@ XTC_E_INVAL indicates malformed arguments, descriptor size, foreign ownership,
 foreign class, invalid close mode, or an unavailable handle.
 XTC_E_VERSION indicates an unsupported descriptor version.
 XTC_E_RANGE indicates charge, allocation arithmetic, or handle exhaustion.
-XTC_E_AGAIN indicates full/closed admission, creation after first execution,
-or destruction before shutdown has completed.
+XTC_E_AGAIN indicates full/closed admission, creation on a loop that has run
+from outside it, destruction before the driver has ended, a recharge growth
+that does not fit, or a preempt while the member's offload may still be
+running.
 XTC_E_DEADLK indicates mutation during a callback.
 XTC_E_NOMEM indicates allocation failure during create.
 .SH DEPRECATED

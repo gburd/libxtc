@@ -104,6 +104,14 @@ typedef struct xtc_batch_async_stats {
 	 * resume_mt rejected because the ring or record pool was full, or
 	 * submit_mt refused because the group was closed. */
 	uint64_t mt_queued, mt_rejections;
+	/* 2.2 (a caller's 2.1-sized struct is still accepted and gets the
+	 * prefix), monotonic clock ns, virtual under the simulator.
+	 * busy_ns: an offload outstanding, from submit's return to
+	 * collect's start (0 for SYNC).  idle_with_work_ns: no offload
+	 * outstanding while members were ready, from a collect's return to
+	 * the next submit -- the driver's own share of keeping a device
+	 * busy. */
+	uint64_t busy_ns, idle_with_work_ns;
 } xtc_batch_async_stats_t;
 
 typedef struct xtc_batch_stats {
@@ -111,12 +119,18 @@ typedef struct xtc_batch_stats {
 	uint32_t queued, ready, blocked;
 	uint64_t reserved_units, iterations, completed, cancelled, failed;
 	uint64_t rejections, max_vector, total_members;
+	/* 2.2 (a caller's 2.1-sized struct is still accepted and gets the
+	 * prefix): xtc_batch_preempt calls that took a member back. */
+	uint64_t preemptions;
 } xtc_batch_stats_t;
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* Setup is externally serialized, before the loop's first run/step. */
+/* Before the loop's first run/step (externally serialized setup), or, once
+ * it runs, from code running on that loop (2.2).  A group a proc creates
+ * on its running loop belongs to that proc: its exit, of any kind,
+ * cancel-closes the group.  See xtc_batch(3) RUN-TIME CREATION. */
 XTC_API int
 xtc_batch_create(xtc_loop_t *, const xtc_batch_opts_t *, xtc_batch_t **);
 /* Mutations: pre-run or actual owner loop only; callbacks in flight => DEADLK.
@@ -131,6 +145,19 @@ XTC_API int xtc_batch_shutdown(xtc_batch_t *, enum xtc_batch_close_mode);
  * => INVAL. Feature-disabled builds return NOSYS for every batch operation. */
 XTC_API int xtc_batch_destroy(xtc_batch_t *);
 XTC_API int xtc_batch_get_stats(xtc_batch_t *, xtc_batch_stats_t *);
+/* 2.2.  Variable charge.  xtc_batch_recharge sets a live member's charge
+ * (1..resource_capacity): a waiting member's for its admission, an
+ * admitted one's reservation, growing only into free units (else
+ * XTC_E_AGAIN, nothing changed) or shrinking at once.  xtc_batch_preempt
+ * takes an admitted member back: its whole reservation is released at
+ * once and it waits again at the head of the waiting list, keeping its
+ * handle and request.  Both are allowed on the owner loop and inside
+ * the group's own callbacks (a preempt then a recharge in one collect
+ * makes room for another member), and return XTC_E_DEADLK to a peer
+ * proc while a callback is in flight.  See xtc_batch(3) VARIABLE CHARGE
+ * AND PREEMPTION. */
+XTC_API int xtc_batch_recharge(xtc_batch_t *, uint64_t, uint64_t);
+XTC_API int xtc_batch_preempt(xtc_batch_t *, uint64_t);
 /* Async-offload group. Same lifecycle as xtc_batch_create; the step is the
  * submit/collect pair in opts. submit_mt/placement are NOT part of this.
  * Disabled builds return NOSYS. */

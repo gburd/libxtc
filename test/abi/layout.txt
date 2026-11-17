@@ -48,7 +48,7 @@ xtc_batch_async_opts_t.collect off=56 size=8
 xtc_batch_async_opts_t.complete off=64 size=8
 xtc_batch_async_opts_t.cancel_hint off=72 size=8
 xtc_batch_async_opts_t.user off=80 size=8
-xtc_batch_async_stats_t size=48 align=8
+xtc_batch_async_stats_t size=64 align=8
 xtc_batch_async_stats_t.size off=0 size=4
 xtc_batch_async_stats_t.version off=4 size=4
 xtc_batch_async_stats_t.offloads off=8 size=8
@@ -56,6 +56,8 @@ xtc_batch_async_stats_t.offload_timeouts off=16 size=8
 xtc_batch_async_stats_t.offload_errors off=24 size=8
 xtc_batch_async_stats_t.mt_queued off=32 size=8
 xtc_batch_async_stats_t.mt_rejections off=40 size=8
+xtc_batch_async_stats_t.busy_ns off=48 size=8
+xtc_batch_async_stats_t.idle_with_work_ns off=56 size=8
 xtc_batch_exec_t size=32 align=8
 xtc_batch_exec_t.kind off=0 size=4
 xtc_batch_exec_t.fence_fd off=4 size=4
@@ -78,7 +80,7 @@ xtc_batch_opts_t.user off=48 size=8
 xtc_batch_result_t size=8 align=4
 xtc_batch_result_t.state off=0 size=4
 xtc_batch_result_t.error off=4 size=4
-xtc_batch_stats_t size=88 align=8
+xtc_batch_stats_t size=96 align=8
 xtc_batch_stats_t.size off=0 size=4
 xtc_batch_stats_t.version off=4 size=4
 xtc_batch_stats_t.queued off=8 size=4
@@ -92,6 +94,7 @@ xtc_batch_stats_t.failed off=56 size=8
 xtc_batch_stats_t.rejections off=64 size=8
 xtc_batch_stats_t.max_vector off=72 size=8
 xtc_batch_stats_t.total_members off=80 size=8
+xtc_batch_stats_t.preemptions off=88 size=8
 xtc_causal_rec_t size=16 align=8
 xtc_causal_rec_t.kind off=0 size=4
 xtc_causal_rec_t.site off=8 size=8

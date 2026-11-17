@@ -5149,6 +5149,36 @@ xtc_proc_at_exit(void (*fn)(void *), void *arg)
 	return XTC_OK;
 }
 
+/* PUBLIC: int __xtc_proc_at_exit_cancel __P((void (*)(void *), void *)); */
+/*
+ * Remove the calling proc's newest at-exit hook (fn, arg), so a library
+ * object the proc destroys while it runs (a batch group it owns) frees
+ * its hook slot at once instead of holding one of the
+ * XTC_PROC_MAX_ATEXIT slots until the proc exits.  XTC_OK when removed;
+ * XTC_E_NOTFOUND when not registered or when the proc is already in its
+ * exit walk (then the walk calls the hook as usual); XTC_E_INVAL off a
+ * proc.
+ */
+int
+__xtc_proc_at_exit_cancel(void (*fn)(void *), void *arg)
+{
+	struct xtc_proc *p = __current_proc;
+	int i, j;
+	if (p == NULL)
+		return XTC_E_INVAL;
+	if (!xtc_atomic_load_i32(&p->alive, xtc_mo_relaxed))
+		return XTC_E_NOTFOUND;
+	for (i = p->n_at_exit - 1; i >= 0; i--) {
+		if (p->at_exit[i].fn != fn || p->at_exit[i].arg != arg)
+			continue;
+		for (j = i; j < p->n_at_exit - 1; j++)
+			p->at_exit[j] = p->at_exit[j + 1];
+		p->n_at_exit--;
+		return XTC_OK;
+	}
+	return XTC_E_NOTFOUND;
+}
+
 /* Run a proc's at-exit callbacks (LIFO) and tear down its scoped
  * memory context.  Called once on the exit path, with __current_proc
  * still set and outside signal context. */

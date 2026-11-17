@@ -392,4 +392,26 @@
  */
 #define XTC_DST_BUG_SIM_OFFLOOP_WAIT 68
 
+/*
+ * 69 BATCH_OWNER_KEEP: the at-exit hook of a proc that created a batch
+ * group on its running loop does nothing, so the dead owner's group stays
+ * open: its members never end and its driver never finishes
+ * (test_sim_batch: "a dead owner's group was not closed").
+ */
+#define XTC_DST_BUG_BATCH_OWNER_KEEP 69
+
+/*
+ * 70 BATCH_PREEMPT_KEEP: xtc_batch_preempt moves the member back to the
+ * waiting list but keeps its reservation, so the units it was taken back
+ * for are not free (test_sim_batch: "preempt did not free the units").
+ */
+#define XTC_DST_BUG_BATCH_PREEMPT_KEEP 70
+
+/*
+ * 71 BATCH_RECHARGE_OVER: xtc_batch_recharge grows a reservation without
+ * checking the free units, so the group reserves more than
+ * resource_capacity (test_sim_batch: "reservation over capacity").
+ */
+#define XTC_DST_BUG_BATCH_RECHARGE_OVER 71
+
 #endif /* XTC_DST_INJECT_H */

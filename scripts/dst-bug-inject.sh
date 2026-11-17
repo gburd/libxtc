@@ -123,6 +123,9 @@ write_cases() {
 		"62;test_sim_sup_child;0;1;a drain did not reach a nested supervisor's child" \
 		"67;test_sim_partition;0;0;a DOWN or link EXIT was lost under a partition" \
 		"68;test_sim_external;0;0;a delivery fn's wait did not return at once" \
+		"69;test_sim_batch;0;1;a dead owner's group was not closed" \
+		"70;test_sim_batch;0;1;preempt did not free the units" \
+		"71;test_sim_batch;0;1;reservation over capacity" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -209,6 +212,12 @@ write_cases() {
 #               -> a death across a cut still reaches its watcher
 # 68 SIM_OFFLOOP_WAIT sim.c a delivery fn's wait reads the wall clock or
 #               blocks -> a wait no fiber can end returns at once
+# 69 BATCH_OWNER_KEEP batch.c a group's owner exits, the group stays open
+#               -> a restarted engine can destroy the old group and recreate
+# 70 BATCH_PREEMPT_KEEP batch.c preempt keeps the member's units
+#               -> preempt frees the units in the same callback
+# 71 BATCH_RECHARGE_OVER batch.c recharge grows past the free units
+#               -> reserved_units never exceeds resource_capacity
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

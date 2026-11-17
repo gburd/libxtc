@@ -87,7 +87,11 @@ value types (`xtc_pid_t`, `xtc_pt_t`, `xtc_waker_t`, the trace and tail
 record types).  Their layout is frozen by the layout gate; growing one
 means a new type and a new function.  The lock layer is frozen too
 (below).  The experimental batch and scheduler-policy structs keep their
-own `uint32_t size, version` pair with an exact-size check.
+own `uint32_t size, version` pair with an exact-size check; when one
+grows, the library also accepts each earlier exact size (2.2:
+`xtc_batch_stats_t` 88 -> 96, `preemptions` appended, and
+`xtc_batch_async_stats_t` 48 -> 64, `busy_ns` and `idle_with_work_ns`
+appended; a 2.1-sized struct still gets its prefix).
 
 ## Struct layout gate (ENFORCED)
 

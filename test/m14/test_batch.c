@@ -294,6 +294,7 @@ lifecycle(void)
 	 */
 	assert(xtc_loop_run(c.loop) == XTC_OK);
 	assert(c.a.calls == 0 && c.a.completions == 4);
+	/* After a run, only code on the loop may create (rt_tests below). */
 	assert(xtc_batch_create(c.loop, &o, &unused) == XTC_E_AGAIN);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
 	xtc_loop_destroy(c.loop);
@@ -2917,6 +2918,492 @@ async_hint_on_landing(void)
 	}
 }
 
+/* ----- 2.2: run-time creation, owner death, variable charge ---------- */
+
+/* A minimal SYNC group: every member CONTINUEs until its `left` runs
+ * out.  rt->grow_hook, when set, runs inside step (the callback). */
+struct rt_req {
+	int left, completions, outcome, ran;
+	uint64_t h;
+};
+struct rt {
+	xtc_loop_t *loop;
+	xtc_batch_t *batch;
+	struct rt_req r[6];
+	int steps, done;
+	int (*grow_hook)(struct rt *, const xtc_batch_item_t *, size_t);
+	int hook_rc[4];
+	uint64_t order[16];
+	int n_order;
+	xtc_pid_t owner;
+};
+
+static int
+rt_step(const xtc_batch_item_t *items, xtc_batch_result_t *results, size_t n,
+    void *user)
+{
+	struct rt *c = user;
+	struct rt_req *q;
+	size_t i;
+	c->steps++;
+	if (c->grow_hook != NULL && c->grow_hook(c, items, n) != 0)
+		c->grow_hook = NULL;
+	for (i = 0; i < n; ++i) {
+		q = items[i].request;
+		q->ran++;
+		if (c->n_order < 16)
+			c->order[c->n_order++] = items[i].handle;
+		results[i].state =
+		    --q->left <= 0 ? XTC_BATCH_DONE : XTC_BATCH_CONTINUE;
+	}
+	return XTC_OK;
+}
+
+static void
+rt_complete(uint64_t handle, void *request, int outcome, void *user)
+{
+	struct rt_req *q = request;
+	(void)handle;
+	(void)user;
+	q->completions++;
+	assert(q->completions == 1);
+	q->outcome = outcome;
+}
+
+static xtc_batch_opts_t
+rt_opts(struct rt *c, uint32_t cap, uint32_t active, uint64_t units)
+{
+	xtc_batch_opts_t o = { .size = sizeof(o),
+		.version = XTC_BATCH_VERSION,
+		.capacity = cap,
+		.max_active = active,
+		.resource_capacity = units,
+		.step = rt_step,
+		.complete = rt_complete,
+		.user = c };
+	return o;
+}
+
+/* A proc on the running loop creates a group (2.2.0: XTC_E_AGAIN), runs
+ * work through it, closes, waits for the driver, destroys it, and does
+ * that 12 times: more than XTC_PROC_MAX_ATEXIT (8), so destroy must
+ * give back the owner's at-exit slot. */
+static void
+rt_creator(void *arg)
+{
+	struct rt *c = arg;
+	xtc_batch_opts_t o = rt_opts(c, 2, 2, 4);
+	int round, i;
+	for (round = 0; round < 12; ++round) {
+		memset(c->r, 0, sizeof c->r);
+		assert(xtc_batch_create(c->loop, &o, &c->batch) == XTC_OK);
+		for (i = 0; i < 2; ++i) {
+			c->r[i].left = 1 + i;
+			assert(xtc_batch_submit(c->batch, &c->r[i], 1,
+			           &c->r[i].h) == XTC_OK);
+		}
+		while (c->r[0].completions + c->r[1].completions < 2)
+			xtc_yield();
+		assert(xtc_batch_shutdown(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+		while (xtc_batch_destroy(c->batch) == XTC_E_AGAIN)
+			xtc_yield();
+		assert(c->r[0].outcome == XTC_OK && c->r[1].outcome == XTC_OK);
+	}
+	c->done = 1;
+}
+
+static void
+rt_create_on_running_loop(void)
+{
+	struct rt c = { 0 };
+	xtc_batch_opts_t o = rt_opts(&c, 2, 2, 4);
+	xtc_batch_t *g = NULL;
+	xtc_loop_t *other;
+	xtc_pid_t pid;
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
+	assert(xtc_loop_create(&other) == XTC_OK);
+	assert(xtc_proc_spawn(c.loop, rt_creator, &c, NULL, &pid) == XTC_OK);
+	assert(xtc_loop_run(c.loop) == XTC_OK);
+	assert(c.done);
+	/* The loop has run: off it, creation is still refused. */
+	assert(xtc_batch_create(c.loop, &o, &g) == XTC_E_AGAIN);
+	/* From another loop's code, a foreign loop is XTC_E_INVAL. */
+	__xtc_current_loop = other;
+	assert(xtc_batch_create(c.loop, &o, &g) == XTC_E_INVAL);
+	__xtc_current_loop = NULL;
+	xtc_loop_destroy(c.loop);
+	xtc_loop_destroy(other);
+	puts("batch-rt: create/destroy on a running loop, 12 rounds OK");
+}
+
+/* The owner dies (kill, fault-free exit with a code, plain return) with a
+ * member BLOCKED and one waiting: the group is cancel-closed, both end
+ * XTC_E_ABORTED, the driver ends, and a successor proc destroys the
+ * group and creates a new one on the same loop. */
+struct rt_owner {
+	struct rt c;
+	int how; /* 0 return, 1 xtc_exit_self(7), 2 killed */
+	xtc_batch_t *old;
+	int recreated;
+};
+
+static int
+rt_block_step(const xtc_batch_item_t *items, xtc_batch_result_t *results,
+    size_t n, void *user)
+{
+	size_t i;
+	(void)items;
+	(void)user;
+	for (i = 0; i < n; ++i)
+		results[i].state = XTC_BATCH_BLOCKED;
+	return XTC_OK;
+}
+
+static void
+rt_owner_body(void *arg)
+{
+	struct rt_owner *w = arg;
+	xtc_batch_opts_t o = rt_opts(&w->c, 4, 1, 4);
+	o.step = rt_block_step;
+	assert(xtc_batch_create(w->c.loop, &o, &w->old) == XTC_OK);
+	assert(xtc_batch_submit(w->old, &w->c.r[0], 1, &w->c.r[0].h) == XTC_OK);
+	assert(xtc_batch_submit(w->old, &w->c.r[1], 1, &w->c.r[1].h) == XTC_OK);
+	xtc_yield();
+	xtc_yield();
+	if (w->how == 1)
+		(void)xtc_exit_self(7);
+	if (w->how == 2)
+		for (;;)
+			(void)xtc_proc_sleep(1000000);
+}
+
+static void
+rt_successor(void *arg)
+{
+	struct rt_owner *w = arg;
+	xtc_batch_opts_t o = rt_opts(&w->c, 2, 2, 4);
+	xtc_batch_t *fresh = NULL;
+	uint64_t h;
+	int turns = 0;
+	if (w->how == 2) {
+		xtc_yield();
+		xtc_yield();
+		assert(xtc_exit_pid(w->c.owner, 9) == XTC_OK);
+	}
+	/* The old group belongs to the dead owner: wait for its driver.  A
+	 * group the owner's death left open never finishes. */
+	while (xtc_batch_destroy(w->old) == XTC_E_AGAIN) {
+		if (++turns > 10000) {
+			fprintf(stderr,
+			    "FAIL: a dead owner's group was not "
+			    "closed\n");
+			exit(1);
+		}
+		xtc_yield();
+	}
+	assert(
+	    w->c.r[0].completions == 1 && w->c.r[0].outcome == XTC_E_ABORTED);
+	assert(
+	    w->c.r[1].completions == 1 && w->c.r[1].outcome == XTC_E_ABORTED);
+	/* The restarted incarnation's group, on the same running loop. */
+	assert(xtc_batch_create(w->c.loop, &o, &fresh) == XTC_OK);
+	w->c.r[2].left = 1;
+	assert(xtc_batch_submit(fresh, &w->c.r[2], 1, &h) == XTC_OK);
+	while (w->c.r[2].completions == 0)
+		xtc_yield();
+	assert(w->c.r[2].outcome == XTC_OK);
+	assert(xtc_batch_shutdown(fresh, XTC_BATCH_DRAIN) == XTC_OK);
+	while (xtc_batch_destroy(fresh) == XTC_E_AGAIN)
+		xtc_yield();
+	w->recreated = 1;
+}
+
+static void
+rt_owner_death(void)
+{
+	struct rt_owner w;
+	xtc_pid_t pid;
+	for (w.how = 0; w.how < 3; ++w.how) {
+		int how = w.how;
+		memset(&w, 0, sizeof w);
+		w.how = how;
+		assert(xtc_loop_create(&w.c.loop) == XTC_OK);
+		assert(xtc_proc_spawn(w.c.loop, rt_owner_body, &w, NULL,
+		           &w.c.owner) == XTC_OK);
+		assert(xtc_proc_spawn(w.c.loop, rt_successor, &w, NULL, &pid) ==
+		    XTC_OK);
+		assert(xtc_loop_run(w.c.loop) == XTC_OK);
+		assert(w.recreated);
+		xtc_loop_destroy(w.c.loop);
+	}
+	puts("batch-rt: owner return/exit/kill cancel-closes its group; "
+	     "successor recreates OK");
+}
+
+/* Requirement scenario for preempt: pool of 4 units, A (2) and B (2)
+ * admitted, C (1) waiting.  In one step A needs one more unit: recharge
+ * fails (pool full), preempt B, recharge(A, 3) now succeeds -- all in
+ * the same callback.  B goes to the head of the waiting list, ahead of
+ * C, and is readmitted only once A's growth leaves room: never into the
+ * unit A just took.  Planted bug 70 (preempt keeps B's units) fails the
+ * second recharge. */
+static int
+rt_grow_once(struct rt *c, const xtc_batch_item_t *items, size_t n)
+{
+	xtc_batch_stats_t s = { .size = sizeof(s),
+		.version = XTC_BATCH_VERSION };
+	(void)items;
+	if (n != 2)
+		return 0;
+	c->hook_rc[0] = xtc_batch_recharge(c->batch, c->r[0].h, 3);
+	c->hook_rc[1] = xtc_batch_preempt(c->batch, c->r[1].h);
+	c->hook_rc[2] = xtc_batch_recharge(c->batch, c->r[0].h, 3);
+	assert(xtc_batch_get_stats(c->batch, &s) == XTC_OK);
+	c->hook_rc[3] = (int)s.reserved_units;
+	return 1;
+}
+
+static void
+rt_drain_peer(void *arg)
+{
+	struct rt *c = arg;
+	while (
+	    c->r[0].completions + c->r[1].completions + c->r[2].completions < 3)
+		xtc_yield();
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+}
+
+static void
+rt_preempt_makes_room(void)
+{
+	struct rt c = { 0 };
+	xtc_batch_opts_t o = rt_opts(&c, 3, 2, 4);
+	xtc_batch_stats_t s = { .size = sizeof(s),
+		.version = XTC_BATCH_VERSION };
+	xtc_pid_t pid;
+	int i, a_last = -1, b_first_after = -1;
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
+	assert(xtc_batch_create(c.loop, &o, &c.batch) == XTC_OK);
+	c.r[0].left = 3; /* A */
+	c.r[1].left = 2; /* B */
+	c.r[2].left = 1; /* C */
+	assert(xtc_batch_submit(c.batch, &c.r[0], 2, &c.r[0].h) == XTC_OK);
+	assert(xtc_batch_submit(c.batch, &c.r[1], 2, &c.r[1].h) == XTC_OK);
+	assert(xtc_batch_submit(c.batch, &c.r[2], 1, &c.r[2].h) == XTC_OK);
+	c.grow_hook = rt_grow_once;
+	assert(xtc_proc_spawn(c.loop, rt_drain_peer, &c, NULL, &pid) == XTC_OK);
+	assert(xtc_loop_run(c.loop) == XTC_OK);
+	assert(c.hook_rc[0] == XTC_E_AGAIN); /* pool full */
+	assert(c.hook_rc[1] == XTC_OK);
+	assert(c.hook_rc[2] == XTC_OK); /* B's units free in the same step */
+	assert(c.hook_rc[3] == 3);      /* A's 3, B's released */
+	for (i = 0; i < 3; ++i)
+		assert(c.r[i].completions == 1 && c.r[i].outcome == XTC_OK);
+	/* B's result in the step that preempted it was ignored: it ran its
+	 * full two rounds after readmission. */
+	assert(c.r[1].ran == 3 || c.r[1].ran == 2);
+	/* B was readmitted only after A finished (A holds 3 of 4, B needs
+	 * 2), and before C (head of the waiting list). */
+	for (i = 0; i < c.n_order; ++i)
+		if (c.order[i] == c.r[0].h)
+			a_last = i;
+	for (i = 2; i < c.n_order; ++i)
+		if (c.order[i] == c.r[1].h) {
+			b_first_after = i;
+			break;
+		}
+	assert(b_first_after > a_last);
+	for (i = 0; i < c.n_order; ++i)
+		if (c.order[i] == c.r[2].h)
+			assert(i > b_first_after);
+	assert(xtc_batch_get_stats(c.batch, &s) == XTC_OK);
+	assert(s.preemptions == 1 && s.reserved_units == 0);
+	assert(xtc_batch_destroy(c.batch) == XTC_OK);
+	xtc_loop_destroy(c.loop);
+	puts("batch-rt: preempt + recharge in one step makes room; preempted "
+	     "member readmitted first, after the growth OK");
+}
+
+static void
+rt_close_peer(void *arg)
+{
+	struct rt *c = arg;
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+}
+
+/* Contract edges: owner-loop calls before the run, ranges, states. */
+static void
+rt_charge_contract(void)
+{
+	struct rt c = { 0 };
+	xtc_batch_opts_t o = rt_opts(&c, 3, 1, 4);
+	xtc_batch_stats_t s = { .size = sizeof(s),
+		.version = XTC_BATCH_VERSION };
+	struct {
+		uint32_t size, version, queued, ready, blocked;
+		uint64_t reserved_units, iterations, completed, cancelled,
+		    failed, rejections, max_vector, total_members;
+	} s21 = { .size = sizeof(s21), .version = XTC_BATCH_VERSION };
+	xtc_pid_t pid;
+	assert(sizeof(s21) == offsetof(xtc_batch_stats_t, preemptions));
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
+	assert(xtc_batch_create(c.loop, &o, &c.batch) == XTC_OK);
+	c.r[0].left = 1;
+	assert(xtc_batch_submit(c.batch, &c.r[0], 2, &c.r[0].h) == XTC_OK);
+	assert(xtc_batch_recharge(c.batch, c.r[0].h, 0) == XTC_E_INVAL);
+	assert(xtc_batch_recharge(c.batch, c.r[0].h, 5) == XTC_E_RANGE);
+	assert(xtc_batch_recharge(c.batch, 999, 1) == XTC_E_INVAL);
+	assert(xtc_batch_recharge(NULL, 1, 1) == XTC_E_INVAL);
+	/* Waiting: the charge is only its admission size. */
+	assert(xtc_batch_recharge(c.batch, c.r[0].h, 4) == XTC_OK);
+	assert(xtc_batch_preempt(c.batch, c.r[0].h) == XTC_E_INVAL);
+	assert(xtc_batch_preempt(c.batch, 999) == XTC_E_INVAL);
+	assert(xtc_batch_preempt(NULL, 1) == XTC_E_INVAL);
+	assert(xtc_batch_get_stats(c.batch, &s) == XTC_OK);
+	assert(s.reserved_units == 0 && s.preemptions == 0);
+	/* The 2.1-sized stats struct still works and gets the prefix. */
+	assert(
+	    xtc_batch_get_stats(c.batch, (xtc_batch_stats_t *)&s21) == XTC_OK);
+	assert(s21.queued == 1 && s21.size == sizeof(s21));
+	s21.size = sizeof(s21) + 4;
+	assert(xtc_batch_get_stats(c.batch, (xtc_batch_stats_t *)&s21) ==
+	    XTC_E_INVAL);
+	assert(xtc_proc_spawn(c.loop, rt_close_peer, &c, NULL, &pid) == XTC_OK);
+	assert(xtc_loop_run(c.loop) == XTC_OK);
+	assert(c.r[0].completions == 1 && c.r[0].outcome == XTC_OK);
+	/* Terminal handle. */
+	assert(xtc_batch_recharge(c.batch, c.r[0].h, 1) == XTC_E_INVAL);
+	assert(xtc_batch_destroy(c.batch) == XTC_OK);
+	xtc_loop_destroy(c.loop);
+	puts("batch-rt: recharge/preempt contract edges, 2.1 stats size OK");
+}
+
+/* busy_ns / idle_with_work_ns.  A FUTURE group with A (1 round) and B
+ * (2 rounds): the device (a peer) resolves each op 20 ms after submit;
+ * A's complete callback takes 10 ms, inside the window between the
+ * first collect and the second submit, while B is ready. */
+struct bi {
+	xtc_loop_t *loop;
+	xtc_batch_t *batch;
+	xtc_promise_t *prom;
+	int left[2], done;
+};
+
+static int
+bi_submit(const xtc_batch_item_t *items, size_t n, void *user,
+    xtc_batch_exec_t *exec)
+{
+	struct bi *c = user;
+	xtc_future_t *f = NULL;
+	(void)items;
+	(void)n;
+	if (xtc_future_create(&c->prom, &f) != XTC_OK)
+		return XTC_E_NOMEM;
+	exec->kind = XTC_BATCH_EXEC_FUTURE;
+	exec->future = f;
+	return XTC_OK;
+}
+
+static int
+bi_collect(const xtc_batch_item_t *items, xtc_batch_result_t *results, size_t n,
+    int exec_status, void *user)
+{
+	size_t i;
+	int *left;
+	(void)user;
+	assert(exec_status == XTC_BATCH_EXEC_OK);
+	for (i = 0; i < n; ++i) {
+		left = items[i].request;
+		results[i].state =
+		    --*left == 0 ? XTC_BATCH_DONE : XTC_BATCH_CONTINUE;
+	}
+	return XTC_OK;
+}
+
+static void
+bi_complete(uint64_t handle, void *request, int outcome, void *user)
+{
+	struct bi *c = user;
+	(void)handle;
+	assert(outcome == XTC_OK);
+	if (request == &c->left[0])
+		assert(xtc_proc_sleep(10 * 1000 * 1000) == XTC_OK);
+	c->done++;
+}
+
+static void
+bi_device(void *arg)
+{
+	struct bi *c = arg;
+	xtc_promise_t *p;
+	while (c->done < 2) {
+		if ((p = c->prom) != NULL) {
+			c->prom = NULL;
+			assert(xtc_proc_sleep(20 * 1000 * 1000) == XTC_OK);
+			xtc_promise_set(p, 0, XTC_OK);
+		}
+		xtc_yield();
+	}
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+}
+
+static void
+rt_busy_idle(void)
+{
+	struct bi c = { 0 };
+	xtc_batch_async_opts_t o = { .size = sizeof(o),
+		.version = XTC_BATCH_VERSION,
+		.capacity = 2,
+		.max_active = 2,
+		.resource_capacity = 2,
+		.submit = bi_submit,
+		.collect = bi_collect,
+		.complete = bi_complete,
+		.user = &c };
+	xtc_batch_async_stats_t as = { .size = sizeof(as),
+		.version = XTC_BATCH_VERSION };
+	struct {
+		uint32_t size, version;
+		uint64_t offloads, offload_timeouts, offload_errors, mt_queued,
+		    mt_rejections;
+	} as21 = { .size = sizeof(as21), .version = XTC_BATCH_VERSION };
+	xtc_pid_t pid;
+	uint64_t h;
+	assert(sizeof(as21) == offsetof(xtc_batch_async_stats_t, busy_ns));
+	c.left[0] = 1;
+	c.left[1] = 2;
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
+	assert(xtc_batch_create_async(c.loop, &o, &c.batch) == XTC_OK);
+	assert(xtc_batch_submit(c.batch, &c.left[0], 1, &h) == XTC_OK);
+	assert(xtc_batch_submit(c.batch, &c.left[1], 1, &h) == XTC_OK);
+	assert(xtc_proc_spawn(c.loop, bi_device, &c, NULL, &pid) == XTC_OK);
+	assert(xtc_loop_run(c.loop) == XTC_OK);
+	assert(xtc_batch_get_async_stats(c.batch, &as) == XTC_OK);
+	assert(as.offloads == 2);
+	/* Two 20 ms device ops; one 10 ms completion with B ready.  The
+	 * upper bounds only catch a timer that never stops. */
+	assert(as.busy_ns >= 40 * 1000 * 1000 && as.busy_ns < 4000000000ull);
+	assert(as.idle_with_work_ns >= 10 * 1000 * 1000 &&
+	    as.idle_with_work_ns < as.busy_ns);
+	assert(xtc_batch_get_async_stats(c.batch,
+	           (xtc_batch_async_stats_t *)&as21) == XTC_OK);
+	assert(as21.offloads == 2 && as21.size == sizeof(as21));
+	assert(xtc_batch_destroy(c.batch) == XTC_OK);
+	xtc_loop_destroy(c.loop);
+	printf("batch-rt: busy %.1f ms, idle with work %.1f ms OK\n",
+	    as.busy_ns / 1e6, as.idle_with_work_ns / 1e6);
+}
+
+static void
+rt_tests(void)
+{
+	rt_create_on_running_loop();
+	rt_owner_death();
+	rt_preempt_makes_room();
+	rt_charge_contract();
+	rt_busy_idle();
+}
+
 static void
 async_contract_tests(void)
 {
@@ -2972,6 +3459,7 @@ main(int argc, char **argv)
 	stop_is_not_drain();
 	masked_wait_kill();
 	involuntary_callback();
+	rt_tests();
 	async_tests();
 #else
 	(void)argc;

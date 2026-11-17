@@ -27,9 +27,11 @@ main(void)
 }
 #else
 #include "xtc_async.h"
+#include "xtc_atomic.h"
 #include "xtc_batch.h"
 #include "xtc_exec.h"
 #include "xtc_future.h"
+#include "xtc_orc.h"
 #include "xtc_proc.h"
 #include "xtc_sim.h"
 
@@ -526,6 +528,8 @@ arun(uint64_t seed, struct trace *trace)
 {
 	struct afix f = {0};
 	xtc_batch_async_opts_t o = {0};
+	xtc_batch_async_stats_t as = { .size = sizeof(as),
+		.version = XTC_BATCH_VERSION };
 	xtc_exec_t *exec = NULL;
 	xtc_pid_t pid;
 	unsigned i;
@@ -565,6 +569,13 @@ arun(uint64_t seed, struct trace *trace)
 	    "async step budget/determinism guard");
 	arequire(&f, f.terminals == ANREQ && f.completed + f.cancelled == ANREQ,
 	    "async terminal conservation");
+	/* Each offload waits out the producer's virtual delay (>= 50 ns),
+	 * which busy_ns, on the virtual clock, must account for. */
+	arequire(&f,
+	    xtc_batch_get_async_stats(f.batch, &as) == XTC_OK &&
+	        as.busy_ns >= 50 * as.offloads,
+	    "async busy_ns");
+	aevent(&f, 103, as.busy_ns, as.idle_with_work_ns, as.offloads);
 	for (i = 0; i < ANREQ; ++i)
 		arequire(&f, f.req[i].terminal, "async member finalized");
 	arequire(&f, xtc_sim_check(exec) == XTC_OK, "async sim invariants");
@@ -802,6 +813,376 @@ mrun(uint64_t seed, struct trace *trace)
 	xtc_exec_destroy(exec);
 }
 
+/* --------------------------------------------------------------------------
+ * 2.2: a supervised engine that owns its group (run-time create), with a
+ * growing charge and preemption.  A TRANSIENT engine child of a
+ * supervisor on loop 0 creates an async SYNC group on the RUNNING loop,
+ * with a 6-unit pool and 4 active slots.  Each member starts at charge 1
+ * and grows by one unit per step it runs (to at most 3), the KV-cache
+ * shape; when the pool is full, collect preempts another admitted member
+ * and grows into its units in the same collect.  At a seeded step a
+ * killer on loop 1 kills the engine; the supervisor restarts it, and the
+ * new incarnation destroys the old group (its owner died, so it is
+ * cancel-closed) and creates a new one, resubmitting every request the
+ * old group aborted.  Every request ends XTC_OK in the end.
+ *
+ * Invariants:
+ *   - reserved_units never exceeds the pool ("reservation over capacity");
+ *   - preempt frees the units at once: the grow right after it succeeds
+ *     ("preempt did not free the units");
+ *   - head of line: a preempted member waits ahead of every member never
+ *     admitted, so no member runs its first step while a preempted one
+ *     is still waiting ("a waiting member was admitted ahead of a
+ *     preempted one"), and at a boundary with a free active slot and a
+ *     free unit every preempted member (charge 1) is admitted ("a
+ *     preempted member was not readmitted with room free");
+ *   - progress: a preempted member runs again within PREEMPT_BOUND group
+ *     steps ("a preempted member was never readmitted");
+ *   - a dead owner's group is closed: the new incarnation's destroy of it
+ *     succeeds within OWNER_BOUND turns ("a dead owner's group was not
+ *     closed").
+ * The victim is never a member readmitted in the same collect, so an
+ * application cannot starve one member by preempting it as it returns.
+ */
+#define ENREQ 6
+#define EUNITS 6
+#define EACTIVE 4
+#define PREEMPT_BOUND 64
+#define OWNER_BOUND 4000
+struct ereq {
+	uint64_t h, charge;
+	int done, outcome, runs, need, gen, seen;
+	long preempted_at;  /* group step of the preempt, or -1 */
+	long readmitted_at; /* group step it came back, or -1 */
+};
+struct efix {
+	uint64_t seed;
+	xtc_exec_t *exec;
+	xtc_supervisor_t *sup;
+	xtc_batch_t *g;
+	xtc_pid_t engine;
+	struct ereq r[ENREQ];
+	long steps, kill_step;
+	int incarnations, kill_now, kills, done, preempts, regrows, finished;
+	const char *bad;
+	struct trace *trace;
+};
+
+static void
+efail(struct efix *f, const char *why)
+{
+	if (f->bad == NULL)
+		f->bad = why;
+}
+
+static void
+eevent(struct efix *f, uint64_t k, uint64_t a, uint64_t b, uint64_t c)
+{
+	struct trace *t = f->trace;
+	if (t->used + 4 > TRACE_WORDS) {
+		efail(f, "etrace capacity");
+		return;
+	}
+	t->words[t->used++] = k;
+	t->words[t->used++] = a;
+	t->words[t->used++] = b;
+	t->words[t->used++] = c;
+}
+
+static int
+esubmit(const xtc_batch_item_t *items, size_t n, void *user,
+    xtc_batch_exec_t *exec)
+{
+	(void)items;
+	(void)n;
+	(void)user;
+	exec->kind = XTC_BATCH_EXEC_SYNC;
+	return XTC_OK;
+}
+
+static uint64_t
+ereserved(struct efix *f)
+{
+	xtc_batch_stats_t s = { .size = sizeof(s),
+		.version = XTC_BATCH_VERSION };
+	if (xtc_batch_get_stats(f->g, &s) != XTC_OK)
+		return 0;
+	return s.reserved_units;
+}
+
+/* Grow items[i] by one unit; when the pool is full, preempt another
+ * member of this vector (the youngest that did not just come back) and
+ * grow into its units. */
+static void
+egrow(struct efix *f, const xtc_batch_item_t *items, size_t n, size_t i)
+{
+	struct ereq *q = items[i].request, *v;
+	size_t j, victim = n;
+	int rc;
+	if (q->charge >= EUNITS / 2)
+		return;
+	rc = xtc_batch_recharge(f->g, q->h, q->charge + 1);
+	if (rc == XTC_OK) {
+		q->charge++;
+		return;
+	}
+	if (rc != XTC_E_AGAIN) {
+		efail(f, "recharge rc");
+		return;
+	}
+	for (j = 0; j < n; ++j) {
+		v = items[j].request;
+		if (j != i && v->preempted_at < 0 &&
+		    v->readmitted_at != f->steps &&
+		    (victim == n || items[j].handle > items[victim].handle))
+			victim = j;
+	}
+	if (victim == n)
+		return;
+	v = items[victim].request;
+	if (xtc_batch_preempt(f->g, v->h) != XTC_OK) {
+		efail(f, "preempt rc");
+		return;
+	}
+	v->preempted_at = f->steps;
+	v->charge = 1;
+	if (xtc_batch_recharge(f->g, v->h, 1) != XTC_OK)
+		efail(f, "recharge of a waiting member");
+	f->preempts++;
+	if (xtc_batch_recharge(f->g, q->h, q->charge + 1) != XTC_OK) {
+		efail(f, "preempt did not free the units");
+		return;
+	}
+	q->charge++;
+	eevent(f, 300, (uint64_t)(q - f->r), (uint64_t)(v - f->r), q->charge);
+}
+
+static int
+ein(const xtc_batch_item_t *items, size_t n, const struct ereq *q)
+{
+	size_t i;
+	for (i = 0; i < n; ++i)
+		if (items[i].request == q)
+			return 1;
+	return 0;
+}
+
+static int
+ecollect(const xtc_batch_item_t *items, xtc_batch_result_t *results, size_t n,
+    int exec_status, void *user)
+{
+	struct efix *f = user;
+	struct ereq *q;
+	uint64_t held;
+	size_t i;
+	int k;
+	f->steps++;
+	if (exec_status != XTC_BATCH_EXEC_OK)
+		efail(f, "exec status");
+	/* A first-time member admitted while a preempted one still waits
+	 * outside this vector jumped the line. */
+	for (i = 0; i < n; ++i) {
+		q = items[i].request;
+		if (q->seen)
+			continue;
+		q->seen = 1;
+		for (k = 0; k < ENREQ; ++k)
+			if (f->r[k].preempted_at >= 0 &&
+			    f->r[k].preempted_at < f->steps - 1 &&
+			    !ein(items, n, &f->r[k]))
+				efail(f,
+				    "a waiting member was admitted ahead "
+				    "of a preempted one");
+	}
+	for (i = 0; i < n; ++i) {
+		q = items[i].request;
+		if (q->preempted_at >= 0) {
+			q->preempted_at = -1;
+			q->readmitted_at = f->steps;
+			f->regrows++;
+		}
+	}
+	/* Head of line, checked before this collect changes anything. */
+	held = ereserved(f);
+	for (k = 0; k < ENREQ; ++k)
+		if (f->r[k].preempted_at >= 0 && n < EACTIVE &&
+		    held + f->r[k].charge <= EUNITS)
+			efail(f,
+			    "a preempted member was not readmitted with "
+			    "room free");
+	for (i = 0; i < n; ++i) {
+		q = items[i].request;
+		if (q->preempted_at >= 0)
+			continue; /* preempted earlier in this collect */
+		q->runs++;
+		results[i].state =
+		    q->runs >= q->need ? XTC_BATCH_DONE : XTC_BATCH_CONTINUE;
+		if (results[i].state == XTC_BATCH_CONTINUE)
+			egrow(f, items, n, i);
+	}
+	if (ereserved(f) > EUNITS)
+		efail(f, "reservation over capacity");
+	for (k = 0; k < ENREQ; ++k)
+		if (f->r[k].preempted_at >= 0 &&
+		    f->steps - f->r[k].preempted_at > PREEMPT_BOUND)
+			efail(f, "a preempted member was never readmitted");
+	if (f->incarnations == 1 && f->steps == f->kill_step)
+		f->kill_now = 1;
+	eevent(f, 301, n, ereserved(f), (uint64_t)f->steps);
+	return XTC_OK;
+}
+
+static void
+ecomplete(uint64_t handle, void *request, int outcome, void *user)
+{
+	struct efix *f = user;
+	struct ereq *q = request;
+	(void)handle;
+	q->outcome = outcome;
+	q->preempted_at = -1;
+	if (outcome == XTC_OK) {
+		q->done = 1;
+		f->done++;
+	} else if (outcome != XTC_E_ABORTED)
+		efail(f, "a member failed");
+	eevent(f, 302, (uint64_t)(q - f->r), (uint64_t)(int64_t)outcome,
+	    (uint64_t)q->gen);
+}
+
+/* Destroy f->g once its driver has ended; 0, or -1 after OWNER_BOUND. */
+static int
+edestroy(struct efix *f)
+{
+	int turns = 0;
+	while (xtc_batch_destroy(f->g) == XTC_E_AGAIN) {
+		if (++turns > OWNER_BOUND)
+			return -1;
+		xtc_yield();
+	}
+	f->g = NULL;
+	return 0;
+}
+
+/* The supervised engine: destroy a dead incarnation's group, create its
+ * own on the running loop, (re)submit what is not done, wait, close. */
+static void
+engine(void *arg)
+{
+	struct efix *f = arg;
+	xtc_batch_async_opts_t o = { .size = sizeof(o),
+		.version = XTC_BATCH_VERSION,
+		.capacity = ENREQ,
+		.max_active = EACTIVE,
+		.resource_capacity = EUNITS,
+		.submit = esubmit,
+		.collect = ecollect,
+		.complete = ecomplete,
+		.user = f };
+	int i;
+	f->engine = xtc_self();
+	f->incarnations++;
+	if (f->g != NULL && edestroy(f) != 0) {
+		efail(f, "a dead owner's group was not closed");
+		(void)xtc_sup_stop(f->sup);
+		return;
+	}
+	if (xtc_batch_create_async(xtc_exec_loop(f->exec, 0), &o, &f->g) !=
+	    XTC_OK) {
+		efail(f, "run-time create");
+		(void)xtc_sup_stop(f->sup);
+		return;
+	}
+	for (i = 0; i < ENREQ; ++i) {
+		if (f->r[i].done)
+			continue;
+		f->r[i].charge = 1;
+		f->r[i].runs = 0;
+		f->r[i].seen = 0;
+		f->r[i].preempted_at = -1;
+		f->r[i].readmitted_at = -1;
+		f->r[i].gen = f->incarnations;
+		if (xtc_batch_submit(f->g, &f->r[i], 1, &f->r[i].h) != XTC_OK)
+			efail(f, "engine submit");
+	}
+	while (f->done < ENREQ && f->bad == NULL)
+		(void)xtc_proc_sleep(100 * 1000);
+	(void)xtc_batch_shutdown(f->g, XTC_BATCH_DRAIN);
+	if (edestroy(f) != 0)
+		efail(f, "the engine's own group did not finish");
+	f->finished = 1;
+	(void)xtc_sup_stop(f->sup);
+}
+
+/* Kills the first engine incarnation at the seeded step collect flags. */
+static void
+ekiller(void *arg)
+{
+	struct efix *f = arg;
+	while (!f->kill_now && !f->finished)
+		xtc_yield();
+	if (f->kill_now && !f->finished && f->done < ENREQ) {
+		f->kills++;
+		(void)xtc_exit_pid(f->engine, 9);
+	}
+}
+
+static int
+erun(uint64_t seed, struct trace *trace, int *out_restarted)
+{
+	static struct efix f;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_INIT;
+	xtc_child_spec_t kid = XTC_CHILD_SPEC_INIT;
+	int i, rc;
+	memset(&f, 0, sizeof f);
+	f.seed = seed;
+	f.trace = trace;
+	trace->used = 0;
+	f.kill_step = 2 + (long)(seed % 5);
+	for (i = 0; i < ENREQ; ++i) {
+		f.r[i].need = 3 + (int)((seed * (2 * (uint64_t)i + 5)) % 6);
+		f.r[i].preempted_at = -1;
+		f.r[i].readmitted_at = -1;
+	}
+	if (xtc_exec_create(&(xtc_exec_opts_t) { .size =
+	                                             sizeof(xtc_exec_opts_t),
+	                        .n_loops = 2 },
+	        &f.exec) != XTC_OK)
+		return -1;
+	kid.name = "engine";
+	kid.fn = engine;
+	kid.arg = &f;
+	kid.policy = XTC_RESTART_TRANSIENT;
+	so.max_restarts = 5;
+	if (xtc_sup_start(xtc_exec_loop(f.exec, 0), &so, &kid, 1, &f.sup) !=
+	    XTC_OK)
+		return -1;
+	(void)xtc_proc_spawn(xtc_exec_loop(f.exec, 1), ekiller, &f, NULL, NULL);
+	rc = xtc_sim_exec_run(f.exec, seed, 4000000);
+	if (f.bad == NULL && rc != XTC_OK)
+		f.bad = "the run did not quiesce";
+	if (f.bad == NULL && f.done != ENREQ)
+		f.bad = "a request did not finish";
+	if (f.bad == NULL && f.kills > 0 && f.incarnations < 2)
+		f.bad = "the killed engine was not restarted";
+	for (i = 0; f.bad == NULL && i < ENREQ; ++i)
+		if (f.r[i].outcome != XTC_OK)
+			f.bad = "a request ended without XTC_OK";
+	if (f.sup != NULL)
+		(void)xtc_sup_join(f.sup, 0);
+	xtc_exec_destroy(f.exec);
+	if (f.bad != NULL) {
+		fprintf(stderr,
+		    "FAIL: ebatch seed=%" PRIu64 " steps=%ld "
+		    "incarnations=%d kills=%d preempts=%d: %s\n",
+		    seed, f.steps, f.incarnations, f.kills, f.preempts, f.bad);
+		return -1;
+	}
+	*out_restarted = f.incarnations >= 2;
+	eevent(&f, 303, (uint64_t)f.preempts, (uint64_t)f.regrows,
+	    (uint64_t)f.incarnations);
+	return f.preempts;
+}
+
 static uint64_t
 number(const char *text)
 {
@@ -822,7 +1203,9 @@ main(int argc, char **argv)
 	static struct trace first, replay;
 	static struct trace afirst, areplay;
 	static struct trace mfirst, mreplay;
-	uint64_t base = 1, count = 64, i;
+	static struct trace efirst, ereplay;
+	uint64_t base = 1, count = 64, i, epreempts = 0, erestarts = 0;
+	int ep, er = 0;
 	if (argc > 3) {
 		fprintf(stderr, "usage: %s [base-seed [count]]\n", argv[0]);
 		return 2;
@@ -860,11 +1243,35 @@ main(int argc, char **argv)
 			    " event replay differs\n", base + i);
 			return 1;
 		}
+		if ((ep = erun(base + i, &efirst, &er)) < 0 ||
+		    erun(base + i, &ereplay, &er) != ep)
+			return 1;
+		if (efirst.used != ereplay.used ||
+		    memcmp(efirst.words, ereplay.words,
+		        efirst.used * sizeof(efirst.words[0])) != 0) {
+			fprintf(stderr,
+			    "FAIL: ebatch seed=%" PRIu64
+			    " event replay differs\n",
+			    base + i);
+			return 1;
+		}
+		epreempts += (uint64_t)ep;
+		erestarts += (uint64_t)er;
+	}
+	/* The sweep must reach both paths it is there to check. */
+	if (count >= 8 && (epreempts == 0 || erestarts == 0)) {
+		fprintf(stderr,
+		    "FAIL: ebatch sweep reached preempts=%" PRIu64
+		    " restarts=%" PRIu64 "\n",
+		    epreempts, erestarts);
+		return 1;
 	}
 	printf("OK: batch seeds=%" PRIu64 "..%" PRIu64
-	    " replayed twice; real driver + async offload (FUTURE) + "
-	    "cross-loop admission (mt), two-loop, bounded progress\n",
-	    base, base + count - 1);
+	       " replayed twice; real driver + async offload (FUTURE) + "
+	       "cross-loop admission (mt), two-loop, bounded progress; "
+	       "supervised engine: run-time group per incarnation, %" PRIu64
+	       " restarts, %" PRIu64 " preempts\n",
+	    base, base + count - 1, erestarts, epreempts);
 	return 0;
 }
 #endif

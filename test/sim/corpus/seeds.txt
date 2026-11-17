@@ -28,7 +28,7 @@ test_sim_reg            -          -   bug8 REGDUP: registry at-most-one-holder 
 # bug 9 SAGAORDER -- exact reverse-order compensation
 test_sim_saga           -          -   bug9 SAGAORDER: saga compensates in exact reverse
 # bugs10..14 batch ownership, admission, resources, wake and membership
-test_sim_batch         1          1   d1365d9 bug10..14: each mutation caught at direct seed1, clean replay passes
+test_sim_batch         1          1   d1365d9 bug10..14: each mutation caught at direct seed1, clean replay passes; 2.2 bug69..71 (owner close, preempt frees, recharge cap) caught at seed 1 by the supervised-engine scenario
 # Real pre-fix policy failure: defer_ready replaced a mandatory fair choice.
 test_sim_sched_policy  1          1   d1365d9: pre-fix defer_ready gap10 exceeded bound7; bug15 fairness override also caught
 #
