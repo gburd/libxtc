@@ -3474,6 +3474,8 @@ main(int argc, char **argv)
 	assert(xtc_batch_shutdown(NULL, XTC_BATCH_CANCEL) == XTC_E_NOSYS);
 	assert(xtc_batch_destroy(NULL) == XTC_E_NOSYS);
 	assert(xtc_batch_get_stats(NULL, NULL) == XTC_E_NOSYS);
+	assert(xtc_batch_recharge(NULL, 1, 1) == XTC_E_NOSYS);
+	assert(xtc_batch_preempt(NULL, 1) == XTC_E_NOSYS);
 	{
 		int idx = -42;
 		xtc_accel_dev_t dev;
