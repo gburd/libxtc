@@ -103,7 +103,7 @@ void xtc_exec_set_stall_budget __P((xtc_exec_t *, int64_t));
 void xtc_exec_set_steal_backoff __P((xtc_exec_t *, int));
 void xtc_loop_destroy __P((xtc_loop_t *));
 void xtc_loop_set_stall_budget __P((xtc_loop_t *, int64_t));
-void xtc_loop_set_stall_cb __P((xtc_loop_t *, xtc_stall_cb, void *));
+void xtc_loop_set_stall_cb __P((xtc_loop_t *, xtc_stall_fn, void *));
 void xtc_sim_activate __P((uint64_t));
 void xtc_sim_buggify_disable __P((void));
 void xtc_sim_buggify_enable __P((unsigned));

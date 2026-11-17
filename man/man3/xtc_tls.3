@@ -30,7 +30,9 @@
 .Nm xtc_tls_get_server_cert_hash ,
 .Nm xtc_tls_enable_ktls ,
 .Nm xtc_tls_ktls_active ,
-.Nm xtc_tls_sendfile
+.Nm xtc_tls_sendfile ,
+.Nm xtc_tls_passphrase_cb_t ,
+.Nm xtc_tls_sni_cb_t
 .Nd TLS over async sockets
 .Sh SYNOPSIS
 .In xtc.h
@@ -453,6 +455,19 @@ kernel flushes a queued record, and
 holds it off; a raw
 .Xr close 2
 does not.
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Vt xtc_tls_passphrase_cb_t
+Use
+.Vt xtc_tls_passphrase_fn .
+.It Vt xtc_tls_sni_cb_t
+Use
+.Vt xtc_tls_sni_fn .
+.El
 .Sh SEE ALSO
 .Xr xtc_io 3 ,
 .Xr xtc_net 3 ,

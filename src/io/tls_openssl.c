@@ -112,9 +112,9 @@ struct xtc_tls_ctx {
 	SSL_CTX         *ssl_ctx;
 	unsigned char   *alpn_protos;      /* wire-form copy; NULL if unset */
 	unsigned int     alpn_protos_len;  /* byte count of alpn_protos */
-	xtc_tls_passphrase_cb_t passphrase_cb;   /* NULL if unset */
+	xtc_tls_passphrase_fn passphrase_cb;   /* NULL if unset */
 	void            *passphrase_userdata;
-	xtc_tls_sni_cb_t sni_cb;           /* NULL if unset (SERVER only) */
+	xtc_tls_sni_fn sni_cb;           /* NULL if unset (SERVER only) */
 	void            *sni_userdata;
 };
 
@@ -185,7 +185,7 @@ alpn_select_cb(SSL *ssl,
  * Passphrase callback shim.
  *
  * OpenSSL's pem_password_cb hands us (buf, size, rwflag, userdata); we
- * route to the caller's xtc_tls_passphrase_cb_t.  userdata is the ctx,
+ * route to the caller's xtc_tls_passphrase_fn.  userdata is the ctx,
  * from which we read the caller's cb + userdata (set via
  * SSL_CTX_set_default_passwd_cb_userdata).  With no caller cb we return
  * 0 (empty passphrase) rather than prompting -- a server must not block
@@ -948,11 +948,11 @@ xtc_tls_destroy(xtc_tls_t *tls)
 
 /* -------------------------------------------------------------------------
  * PUBLIC: int  xtc_tls_ctx_set_sni_cb __P((xtc_tls_ctx_t *,
- * PUBLIC:                              xtc_tls_sni_cb_t, void *));
+ * PUBLIC:                              xtc_tls_sni_fn, void *));
  * ----------------------------------------------------------------------- */
 
 int
-xtc_tls_ctx_set_sni_cb(xtc_tls_ctx_t *ctx, xtc_tls_sni_cb_t cb, void *userdata)
+xtc_tls_ctx_set_sni_cb(xtc_tls_ctx_t *ctx, xtc_tls_sni_fn cb, void *userdata)
 {
 	if (ctx == NULL)
 		return XTC_E_INVAL;

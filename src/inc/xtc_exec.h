@@ -271,14 +271,14 @@ XTC_API uint64_t xtc_exec_class_vruntime(xtc_exec_class_t cls);
  * report count (telemetry).
  *
  * PUBLIC: void xtc_loop_set_stall_budget __P((xtc_loop_t *, int64_t));
- * PUBLIC: void xtc_loop_set_stall_cb __P((xtc_loop_t *, xtc_stall_cb, void *));
+ * PUBLIC: void xtc_loop_set_stall_cb __P((xtc_loop_t *, xtc_stall_fn, void *));
  * PUBLIC: void xtc_exec_set_stall_budget __P((xtc_exec_t *, int64_t));
  * PUBLIC: uint64_t xtc_loop_stall_count __P((const xtc_loop_t *));
  */
-typedef void (*xtc_stall_cb)(xtc_loop_t *loop, xtc_task_t *task,
+typedef void (*xtc_stall_fn)(xtc_loop_t *loop, xtc_task_t *task,
                              int64_t ran_ns, int64_t budget_ns, void *user);
 XTC_API void xtc_loop_set_stall_budget(xtc_loop_t *loop, int64_t budget_ns);
-XTC_API void xtc_loop_set_stall_cb(xtc_loop_t *loop, xtc_stall_cb cb,
+XTC_API void xtc_loop_set_stall_cb(xtc_loop_t *loop, xtc_stall_fn cb,
                                    void *user);
 XTC_API void xtc_exec_set_stall_budget(xtc_exec_t *exec, int64_t budget_ns);
 XTC_API uint64_t xtc_loop_stall_count(const xtc_loop_t *loop);
@@ -290,6 +290,7 @@ XTC_DEPRECATED("use xtc_exec_create")
 XTC_API int xtc_exec_init(xtc_exec_t **out, int n_loops);
 XTC_DEPRECATED("use xtc_exec_destroy")
 XTC_API int xtc_exec_fini(xtc_exec_t *exec);
+XTC_DEPRECATED("use xtc_stall_fn") typedef xtc_stall_fn xtc_stall_cb;
 
 #ifdef __cplusplus
 }

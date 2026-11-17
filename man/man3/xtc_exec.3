@@ -35,7 +35,8 @@
 .Nm xtc_loop_set_stall_cb ,
 .Nm xtc_loop_stall_count ,
 .Nm xtc_exec_init ,
-.Nm xtc_exec_fini
+.Nm xtc_exec_fini ,
+.Nm xtc_stall_cb
 .Nd L2 multi-loop work-stealing executor
 .Sh SYNOPSIS
 .In xtc_exec.h
@@ -96,7 +97,7 @@
 .Ft void
 .Fn xtc_loop_set_stall_budget "xtc_loop_t *loop" "int64_t budget_ns"
 .Ft void
-.Fn xtc_loop_set_stall_cb "xtc_loop_t *loop" "xtc_stall_cb cb" "void *user"
+.Fn xtc_loop_set_stall_cb "xtc_loop_t *loop" "xtc_stall_fn cb" "void *user"
 .Ft uint64_t
 .Fn xtc_loop_stall_count "const xtc_loop_t *loop"
 .Sh DESCRIPTION
@@ -483,6 +484,9 @@ arguments changed: (const xtc_exec_opts_t *opts, out), n_loops is opts->n_loops.
 Use
 .Fn xtc_exec_destroy ;
 the new name returns void; the old one returns XTC_E_INVAL for NULL, else XTC_OK.
+.It Vt xtc_stall_cb
+Use
+.Vt xtc_stall_fn .
 .El
 .Sh SEE ALSO
 .Xr xtc_loop 3 ,

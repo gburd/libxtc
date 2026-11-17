@@ -47,6 +47,7 @@
 #include "xtc_runtime.h"
 #include "xtc_slab.h"
 #include "xtc_sync.h"
+#include "xtc_tls.h"
 #include "xtc_tnt.h"
 #include "xtc_xproc.h"
 
@@ -395,6 +396,32 @@ bridge_cfg_session(void)
 	    XTC_E_INVAL);
 }
 
+/* callback types: _cb / _cb_t -> _fn.  The old names are the same
+ * types, so they pass where the new ones are expected. */
+static void
+stall_cb(xtc_loop_t *loop, xtc_task_t *task, int64_t ran, int64_t budget,
+    void *user)
+{
+	(void)loop;
+	(void)task;
+	(void)ran;
+	(void)budget;
+	(void)user;
+}
+
+static void
+bridge_fn_types(void)
+{
+	xtc_stall_cb s = stall_cb;
+	xtc_stall_fn s2 = s;
+	xtc_tls_passphrase_cb_t p = NULL;
+	xtc_tls_passphrase_fn p2 = p;
+	xtc_tls_sni_cb_t n = NULL;
+	xtc_tls_sni_fn n2 = n;
+
+	CHECK(s2 == stall_cb && p2 == NULL && n2 == NULL);
+}
+
 int
 main(void)
 {
@@ -412,6 +439,7 @@ main(void)
 	bridge_init();
 	bridge_coro();
 	bridge_cfg_session();
+	bridge_fn_types();
 	printf("  [bridge] OK: every deprecated name still works\n");
 	return 0;
 }

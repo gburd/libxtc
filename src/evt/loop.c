@@ -1768,9 +1768,9 @@ xtc_loop_set_stall_budget(xtc_loop_t *loop, int64_t budget_ns)
 		loop->stall_budget_ns = budget_ns < 0 ? 0 : budget_ns;
 }
 
-/* PUBLIC: void xtc_loop_set_stall_cb __P((xtc_loop_t *, xtc_stall_cb, void *)); */
+/* PUBLIC: void xtc_loop_set_stall_cb __P((xtc_loop_t *, xtc_stall_fn, void *)); */
 void
-xtc_loop_set_stall_cb(xtc_loop_t *loop, xtc_stall_cb cb, void *user)
+xtc_loop_set_stall_cb(xtc_loop_t *loop, xtc_stall_fn cb, void *user)
 {
 	if (loop != NULL) {
 		loop->stall_cb = cb;

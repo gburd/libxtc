@@ -465,7 +465,7 @@ fail:
  * implementation).  Uniform API -> XTC_E_NOSYS, matching the accessor
  * stubs. */
 int
-xtc_tls_ctx_set_sni_cb(xtc_tls_ctx_t *ctx, xtc_tls_sni_cb_t cb, void *userdata)
+xtc_tls_ctx_set_sni_cb(xtc_tls_ctx_t *ctx, xtc_tls_sni_fn cb, void *userdata)
 {
 	(void)ctx; (void)cb; (void)userdata;
 	return XTC_E_NOSYS;

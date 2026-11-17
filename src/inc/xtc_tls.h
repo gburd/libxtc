@@ -170,7 +170,7 @@ typedef enum xtc_tls_verify_mode {
  * than prompting interactively -- a server must never block on a tty.
  * ----------------------------------------------------------------------- */
 
-typedef int (*xtc_tls_passphrase_cb_t)(char *buf, int size, void *userdata);
+typedef int (*xtc_tls_passphrase_fn)(char *buf, int size, void *userdata);
 
 /* -------------------------------------------------------------------------
  * Options.
@@ -270,7 +270,7 @@ typedef struct xtc_tls_opts {
 	const char             *crl_file;
 	const char             *crl_dir;
 	int                     prefer_server_ciphers;
-	xtc_tls_passphrase_cb_t passphrase_cb;
+	xtc_tls_passphrase_fn passphrase_cb;
 	void                   *passphrase_userdata;
 } xtc_tls_opts_t;
 
@@ -382,16 +382,16 @@ XTC_API int  xtc_tls_create(xtc_tls_ctx_t *ctx, int fd, xtc_tls_t **out);
  * XTC_E_NOSYS.
  * ----------------------------------------------------------------------- */
 
-typedef xtc_tls_ctx_t *(*xtc_tls_sni_cb_t)(xtc_tls_t *tls,
+typedef xtc_tls_ctx_t *(*xtc_tls_sni_fn)(xtc_tls_t *tls,
                                            const char *server_name,
                                            void *userdata);
 
 /*
  * PUBLIC: int  xtc_tls_ctx_set_sni_cb __P((xtc_tls_ctx_t *,
- * PUBLIC:                              xtc_tls_sni_cb_t, void *));
+ * PUBLIC:                              xtc_tls_sni_fn, void *));
  */
 XTC_API int  xtc_tls_ctx_set_sni_cb(xtc_tls_ctx_t *ctx,
-                                    xtc_tls_sni_cb_t cb, void *userdata);
+                                    xtc_tls_sni_fn cb, void *userdata);
 
 /* -------------------------------------------------------------------------
  * Custom transport (caller owns recv/send instead of an fd).
@@ -742,6 +742,13 @@ XTC_API int  xtc_tls_get_peer_serial(const xtc_tls_t *tls, char *buf, size_t len
  */
 XTC_API int  xtc_tls_get_server_cert_hash(const xtc_tls_t *tls,
                 unsigned char *buf, size_t buflen, size_t *out_len);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_tls_passphrase_fn")
+typedef xtc_tls_passphrase_fn xtc_tls_passphrase_cb_t;
+XTC_DEPRECATED("use xtc_tls_sni_fn") typedef xtc_tls_sni_fn xtc_tls_sni_cb_t;
 
 #ifdef __cplusplus
 }

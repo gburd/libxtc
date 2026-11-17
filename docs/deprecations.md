@@ -98,9 +98,12 @@ result keeps working until it moves to the new name.
 | `xtc_stack_reclaim_enable()` | `xtc_runtime_set_stack_reclaim()` | function | keep_bytes 0 now means off; the old 0 (one page) is the page size |
 | `xtc_stack_reclaim_enabled()` | `xtc_runtime_get_stack_reclaim()` | function | nonzero (the keep margin) when on |
 | `xtc_stack_size()` | `xtc_runtime_get_stack_size()` | function |  |
+| `xtc_stall_cb` | `xtc_stall_fn` | type |  |
 | `XTC_SUP_OPTS_DEFAULT` | `XTC_SUP_OPTS_INIT` | macro |  |
 | `XTC_TCP_OPTS_DEFAULT` | `XTC_TCP_OPTS_INIT` | macro |  |
 | `xtc_timer_release()` | `xtc_timer_detach()` | function |  |
+| `xtc_tls_passphrase_cb_t` | `xtc_tls_passphrase_fn` | type |  |
+| `xtc_tls_sni_cb_t` | `xtc_tls_sni_fn` | type |  |
 | `xtc_tnt_start()` | `xtc_tnt_run()` | function | same arguments; it blocks until the system stops, as before |
 | `xtc_xlink()` | `xtc_xproc_link()` | function |  |
 | `xtc_xmonitor()` | `xtc_xproc_monitor()` | function |  |
