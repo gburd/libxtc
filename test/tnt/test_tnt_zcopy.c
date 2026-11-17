@@ -238,7 +238,7 @@ main(void)
 	 * closes, which stops the runtime. */
 	if (shutdown(sv[0], SHUT_WR) != 0)
 		return 1;
-	rc = xtc_tnt_start(&spec);
+	rc = xtc_tnt_run(&spec);
 	(void)__os_alloc_set_hook(&g_down);
 	if (rc == XTC_E_NOSYS)
 		return 77;

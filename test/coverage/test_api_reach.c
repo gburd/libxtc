@@ -857,8 +857,8 @@ test_tnt_shard_id(const MunitParameter p[], void *d)
 	munit_assert_uint8(xtc_tnt_shard_id(), ==, 0); /* outside a shard */
 	spec.name = "ar-tnt"; spec.types = types; spec.n_types = 2;
 	spec.shard_count = 2; spec.boot_type = 0;
-	alarm(20);   /* a missed stop would block xtc_tnt_start forever */
-	rc = xtc_tnt_start(&spec);
+	alarm(20);   /* a missed stop would block xtc_tnt_run forever */
+	rc = xtc_tnt_run(&spec);
 	alarm(0);
 	if (rc == XTC_E_NOSYS)
 		return MUNIT_SKIP;

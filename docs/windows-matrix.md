@@ -186,7 +186,7 @@ same CFLAGS/`/WX` as the gate).  The curated 16-test subset grew to a
   cross-shard-wake bug" reading was wrong: `src/orc/tnt.c` is wrapped in
   `#if !defined(_WIN32)` and its Windows half is `XTC_E_NOSYS` stubs, so
   there is no tnt runtime on Windows to have a bug in (probe on the host:
-  `xtc_tnt_start rc=-3`).  It also did not COMPILE under MSVC after
+  `xtc_tnt_run rc=-3`).  It also did not COMPILE under MSVC after
   `53e6ea1` added a file-scope `<sys/socket.h>`.  The POSIX body is now
   `_WIN32`-guarded with a Windows `main()` that reports 77/SKIP, and
   `tnt:test_tnt` is IN the gate (`MUNIT_PLAIN`, the standalone-driver

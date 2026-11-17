@@ -254,7 +254,7 @@ main(void)
 		printf("FAIL: pthread_create\n");
 		return 1;
 	}
-	rc = xtc_tnt_start(&spec);
+	rc = xtc_tnt_run(&spec);
 	xtc_atomic_store_i32(&g_done, 1, xtc_mo_seq_cst);
 	for (i = 0; i < 2; i++)
 		(void)pthread_join(th[i], NULL);

@@ -71,6 +71,7 @@ result keeps working until it moves to the new name.
 | `xtc_slab_pressure_listen_ex()` | `xtc_slab_pressure_create()` | function | same arguments |
 | `xtc_slab_pressure_stop()` | `xtc_slab_pressure_destroy()` | function | the new name returns void; the old one returns XTC_E_INVAL for NULL, XTC_E_NOSYS without PSI, else XTC_OK |
 | `xtc_timer_release()` | `xtc_timer_detach()` | function |  |
+| `xtc_tnt_start()` | `xtc_tnt_run()` | function | same arguments; it blocks until the system stops, as before |
 <!-- renames:end -->
 
 ## Planned for 3.0 (not done in 2.x)

@@ -219,12 +219,12 @@ typedef struct xtc_tnt_type {
 
 /* ---- System spec --------------------------------------------------
  *
- * Tina's SystemSpec, trimmed to this slice.  At boot xtc_tnt_start carves
+ * Tina's SystemSpec, trimmed to this slice.  At boot xtc_tnt_run carves
  * every arena from boot-time slab caches (one per type per shard) and
  * never mallocs on the hot path again (disciplinary, per the doc).
  *
  * Size-first (2.2), like every caller-allocated struct: set .size to
- * sizeof(xtc_tnt_spec_t), or start from XTC_TNT_SPEC_INIT.  xtc_tnt_start
+ * sizeof(xtc_tnt_spec_t), or start from XTC_TNT_SPEC_INIT.  xtc_tnt_run
  * reads no further than .size (a field past it is 0) and keeps its own
  * copy; the types table is borrowed for the run.
  */
@@ -295,7 +295,7 @@ XTC_API xtc_tnt_send_result_t xtc_tnt_send(xtc_tnt_handle_t to, uint16_t tag,
  * message goes into the target shard's external ring and reaches the
  * mailbox on the target's next tick; a full ring drops it with
  * XTC_TNT_SEND_MAILBOX_FULL.  Valid only while the system is running
- * (between xtc_tnt_start and its return). */
+ * (between xtc_tnt_run and its return). */
 XTC_API xtc_tnt_send_result_t xtc_tnt_send_from(xtc_tnt_handle_t source,
     xtc_tnt_handle_t to, uint16_t tag, const void *payload,
     size_t payload_size);
@@ -371,18 +371,24 @@ XTC_API void *xtc_tnt_scratch_arena(size_t size);
  * XTC_OK-style 0 on clean shutdown, negative on a boot failure: XTC_E_INVAL
  * for a spec whose .size is 0 or that names no types or shards.
  */
-XTC_API int xtc_tnt_start(const xtc_tnt_spec_t *spec);
+XTC_API int xtc_tnt_run(const xtc_tnt_spec_t *spec);
 
 /* Request the running system to stop (kicks every shard).  Safe to
  * call from a signal handler or another thread. */
 XTC_API void xtc_tnt_stop(void);
 
 /* Spawn an Isolate from OUTSIDE the shard fibers (e.g. from main before
- * xtc_tnt_start, or from a non-isolate listener).  Routes the spawn onto
+ * xtc_tnt_run, or from a non-isolate listener).  Routes the spawn onto
  * the target shard and runs the init synchronously on that shard's next
  * tick.  shard is 0..shard_count-1.  Thread-safe. */
 XTC_API xtc_tnt_spawn_error_t xtc_tnt_spawn_on(uint8_t shard, uint8_t type_id,
     const void *args, size_t args_size);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_tnt_run")
+XTC_API int xtc_tnt_start(const xtc_tnt_spec_t *spec);
 
 #ifdef __cplusplus
 }

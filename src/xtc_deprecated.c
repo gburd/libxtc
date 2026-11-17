@@ -30,6 +30,7 @@
 #include "xtc_proc.h"
 #include "xtc_slab.h"
 #include "xtc_dispatch.h"
+#include "xtc_tnt.h"
 
 /* Group: loop / io / bloom / hll lifecycle (create / destroy). */
 
@@ -212,4 +213,12 @@ int
 xtc_timer_release(xtc_timer_t *timer)
 {
 	return xtc_timer_detach(timer);
+}
+
+/* Group: tnt (the call that drives the system until it stops is run). */
+
+int
+xtc_tnt_start(const xtc_tnt_spec_t *spec)
+{
+	return xtc_tnt_run(spec);
 }

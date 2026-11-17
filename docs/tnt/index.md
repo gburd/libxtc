@@ -145,7 +145,7 @@ All functions are in
 [`xtc_tnt(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_tnt.3):
 
 - **Lifecycle** --
-  [`xtc_tnt_start`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_tnt.3) /
+  [`xtc_tnt_run`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_tnt.3) /
   [`xtc_tnt_stop`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_tnt.3):
   bring the sharded scheduler up and down from a spec (shard count,
   Isolate type table, arena sizes).

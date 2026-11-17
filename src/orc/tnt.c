@@ -260,7 +260,7 @@ typedef struct xtc_tnt_runtime {
 	int stop;
 } xtc_tnt_runtime_t;
 
-/* The live runtime (one per process; xtc_tnt_start is not re-entrant). */
+/* The live runtime (one per process; xtc_tnt_run is not re-entrant). */
 static xtc_tnt_runtime_t *g_rt = NULL;
 
 /* Thread-local current turn frame.  Set while a handler runs. */
@@ -710,7 +710,7 @@ post:
 /* ---- Ambient ctx_* API -------------------------------------------- */
 
 /*
- * PUBLIC: int xtc_tnt_start __P((const xtc_tnt_spec_t *));
+ * PUBLIC: int xtc_tnt_run __P((const xtc_tnt_spec_t *));
  * PUBLIC: void xtc_tnt_stop __P((void));
  * PUBLIC: xtc_tnt_spawn_error_t xtc_tnt_spawn_on __P((uint8_t, uint8_t, const void *, size_t));
  *
@@ -1768,7 +1768,7 @@ spec_in(xtc_tnt_spec_t *dst, const xtc_tnt_spec_t *spec)
 }
 
 int
-xtc_tnt_start(const xtc_tnt_spec_t *uspec)
+xtc_tnt_run(const xtc_tnt_spec_t *uspec)
 {
 	xtc_tnt_runtime_t *rt = NULL;
 	xtc_tnt_spec_t spec;
@@ -1826,7 +1826,7 @@ xtc_tnt_start(const xtc_tnt_spec_t *uspec)
 
 /*
  * DST harness entry (internal, test-only).  Bring up exactly the same
- * shard runtime as xtc_tnt_start, but drive the loops with the seeded
+ * shard runtime as xtc_tnt_run, but drive the loops with the seeded
  * deterministic simulator (xtc_sim_exec_run) instead of the production
  * xtc_exec_run.  This exercises tnt's deterministic actor core -- spawn
  * / arena allocation, mailbox delivery (drop-on-full, stale-handle,
@@ -1925,7 +1925,7 @@ xtc_tnt_stop(void)
 #include <stddef.h>
 
 int
-xtc_tnt_start(const xtc_tnt_spec_t *spec)
+xtc_tnt_run(const xtc_tnt_spec_t *spec)
 { (void)spec; return XTC_E_NOSYS; }
 
 void

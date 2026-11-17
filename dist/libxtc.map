@@ -129,6 +129,7 @@ XTC_2.2 {
 		xtc_tail_app_name;
 		xtc_thread_register;
 		xtc_timer_detach;
+		xtc_tnt_run;
 		xtc_tnt_send_from;
 		xtc_tuning_check_ex;
 } XTC_2.0;

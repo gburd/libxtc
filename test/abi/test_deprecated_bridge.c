@@ -20,6 +20,7 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "xtc.h"
 #include "xtc_batch.h"
@@ -34,6 +35,7 @@
 #include "xtc_reg.h"
 #include "xtc_slab.h"
 #include "xtc_sync.h"
+#include "xtc_tnt.h"
 
 #define CHECK(c)                                                               \
 	do {                                                                   \
@@ -217,6 +219,19 @@ bridge_detach(void)
 	xtc_loop_destroy(loop);
 }
 
+/* tnt: start (blocks) -> run.  A spec of size 0 is refused before boot
+ * (XTC_E_NOSYS where tnt is not built). */
+static void
+bridge_tnt(void)
+{
+	xtc_tnt_spec_t spec;
+	int rc;
+
+	memset(&spec, 0, sizeof spec);
+	rc = xtc_tnt_start(&spec);
+	CHECK(rc == XTC_E_INVAL || rc == XTC_E_NOSYS);
+}
+
 int
 main(void)
 {
@@ -227,6 +242,7 @@ main(void)
 	bridge_scope();
 	bridge_slab_pressure();
 	bridge_detach();
+	bridge_tnt();
 	printf("  [bridge] OK: every deprecated name still works\n");
 	return 0;
 }

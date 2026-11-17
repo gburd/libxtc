@@ -598,7 +598,7 @@ t_run(const void *spec)
 		perror("pthread_create");
 		exit(2);
 	}
-	rc = xtc_tnt_start((const xtc_tnt_spec_t *)spec);
+	rc = xtc_tnt_run((const xtc_tnt_spec_t *)spec);
 	xtc_atomic_store_i32(&g_tnt_returned, 1, xtc_mo_seq_cst);
 	(void)pthread_join(th, NULL);
 	return rc;

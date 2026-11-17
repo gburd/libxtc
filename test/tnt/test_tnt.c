@@ -33,7 +33,7 @@
  * stubs (the shard couriers need POSIX socket I/O).  This scenario
  * needs socketpair(AF_UNIX) and unistd write/read, none of which exist
  * on Winsock, so the whole driver reduces to the same SKIP the POSIX
- * build reports when xtc_tnt_start answers XTC_E_NOSYS.  Deciding it
+ * build reports when xtc_tnt_run answers XTC_E_NOSYS.  Deciding it
  * at COMPILE time is what lets test_tnt be part of the MSVC gate:
  * the source does not even reference <sys/socket.h> there, so it
  * builds, and it reports 77/SKIP honestly instead of failing to
@@ -45,7 +45,7 @@ int
 main(void)
 {
 	printf("SKIP: xtc_tnt is not supported on this platform "
-	    "(src/orc/tnt.c is POSIX-only; xtc_tnt_start -> XTC_E_NOSYS)\n");
+	    "(src/orc/tnt.c is POSIX-only; xtc_tnt_run -> XTC_E_NOSYS)\n");
 	return 77;
 }
 #else
@@ -83,7 +83,7 @@ static results_t g_res;
 #define T_DRIVER  3
 #define T_ECHO    4   /* staged-io echo over a socketpair */
 
-/* Set by main() BEFORE xtc_tnt_start; -1 means "not staged".  Read by the
+/* Set by main() BEFORE xtc_tnt_run; -1 means "not staged".  Read by the
  * driver on its first tick, which is inside the runtime -- xtc_tnt_spawn_on
  * needs the runtime to exist, so the spawn cannot happen before start. */
 static int g_echo_fd = -1;
@@ -506,15 +506,15 @@ main(void)
 		}
 	}
 
-	rc = xtc_tnt_start(&spec);
+	rc = xtc_tnt_run(&spec);
 	if (rc == XTC_E_NOSYS) {
 		/* tnt is a POSIX feature: its I/O couriers use raw sockets,
-		 * so xtc_tnt_start is a NOSYS stub on non-POSIX targets
+		 * so xtc_tnt_run is a NOSYS stub on non-POSIX targets
 		 * (Windows -- see the #else in src/orc/tnt.c).  The runtime
 		 * never runs, so the scenario counters would all be zero;
 		 * that is not a failure, it is "unsupported here".  Skip. */
 		printf("SKIP: xtc_tnt is not supported on this platform "
-		    "(xtc_tnt_start -> XTC_E_NOSYS)\n");
+		    "(xtc_tnt_run -> XTC_E_NOSYS)\n");
 		return 77;
 	}
 	(void)rc;

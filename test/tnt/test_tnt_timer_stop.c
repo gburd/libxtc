@@ -81,7 +81,7 @@ main(void)
 	spec.n_types = 1;
 	spec.shard_count = 1;
 	spec.boot_type = 0;
-	rc = xtc_tnt_start(&spec);
+	rc = xtc_tnt_run(&spec);
 	if (rc != 0 || xtc_atomic_load_i32(&g_armed, xtc_mo_seq_cst) != NARM) {
 		printf("FAIL: rc=%d armed=%d\n", rc,
 		    xtc_atomic_load_i32(&g_armed, xtc_mo_seq_cst));

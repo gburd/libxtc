@@ -4,7 +4,7 @@
 .Dt XTC_TNT 3
 .Os
 .Sh NAME
-.Nm xtc_tnt_start ,
+.Nm xtc_tnt_run ,
 .Nm xtc_tnt_stop ,
 .Nm xtc_tnt_spawn_on ,
 .Nm xtc_tnt_spawn ,
@@ -18,13 +18,14 @@
 .Nm xtc_tnt_register_timer ,
 .Nm xtc_tnt_self ,
 .Nm xtc_tnt_shard_id ,
-.Nm xtc_tnt_scratch_arena
+.Nm xtc_tnt_scratch_arena ,
+.Nm xtc_tnt_start
 .Nd Tina-faithful stackless Isolate layer
 .Sh SYNOPSIS
 .In xtc.h
 .In xtc_tnt.h
 .Ft int
-.Fn xtc_tnt_start "const xtc_tnt_spec_t *spec"
+.Fn xtc_tnt_run "const xtc_tnt_spec_t *spec"
 .Ft void
 .Fn xtc_tnt_stop "void"
 .Ft xtc_tnt_spawn_error_t
@@ -93,7 +94,7 @@ Initialize it with
 .Dv XTC_TNT_SPEC_INIT ,
 or a designated initializer that sets
 .Va .size = sizeof(xtc_tnt_spec_t) :
-.Fn xtc_tnt_start
+.Fn xtc_tnt_run
 reads only the first
 .Va size
 bytes, so a field the caller's header does not have is 0, and a
@@ -104,14 +105,14 @@ The runtime keeps a copy of the spec, so the caller's struct need not
 outlive the call; the
 .Va types
 table it points to is used for the whole run and must stay valid until
-.Fn xtc_tnt_start
+.Fn xtc_tnt_run
 returns.
 .Va spin_ns ,
 when positive, makes an idle shard check its rings for up to that many
 nanoseconds before it parks
 .Pq it trades a core for latency; ignored under simulation .
 .Ss Lifecycle
-.Fn xtc_tnt_start
+.Fn xtc_tnt_run
 validates the spec, carves every arena from boot-time
 .Xr xtc_slab 3
 caches, pins one shard proc per loop, and runs until the system stops.
@@ -256,7 +257,7 @@ voluntary failure; the slot is torn down
 .Pq let it crash .
 .El
 .Sh RETURN VALUES
-.Fn xtc_tnt_start
+.Fn xtc_tnt_run
 returns
 .Dv XTC_OK
 on clean shutdown, or a negative
@@ -352,6 +353,17 @@ echo_handler(void *self_raw, xtc_tnt_message_t *msg)
     }
 }
 .Ed
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Fn xtc_tnt_start
+Use
+.Fn xtc_tnt_run ;
+same arguments; it blocks until the system stops, as before.
+.El
 .Sh SEE ALSO
 .Xr xtc_svr 3 ,
 .Xr xtc_proc 3 ,
