@@ -359,6 +359,21 @@ __rcu_fiber_slot_refresh(xtc_task_t *cur, uint32_t gen)
 }
 
 /*
+ * The calling thread's slot, looked up again: missing, or from an older
+ * registry generation.  Registers one in generation `gen`.  NULL on OOM,
+ * and inside a read-side the thread entered without a slot (it stays
+ * slotless until that one ends).
+ */
+RCU_SLOW static struct rcu_tls *
+__rcu_thread_slot_refresh(uint32_t gen)
+{
+	if (__rcu_self.noslot > 0)
+		return NULL;
+	(void)__rcu_register(gen);
+	return __rcu_self.slot;
+}
+
+/*
  * The reader slot for the calling context: the fiber slot when on a
  * fiber, else the OS-thread slot.  NULL on OOM.  A fiber's slot is
  * cached in its task, tagged with the registry generation it was found
@@ -384,10 +399,9 @@ __rcu_reader_slot(int create)
 	self = &__rcu_self;
 	if (XTC_LIKELY(self->slot != NULL && self->gen == gen))
 		return self->slot;
-	if (!create || self->noslot > 0)
+	if (!create)
 		return NULL;
-	(void)__rcu_register(gen);
-	return self->slot;
+	return __rcu_thread_slot_refresh(gen);
 }
 
 /*
@@ -400,6 +414,31 @@ __rcu_noslot_nest(void)
 {
 	xtc_task_t *cur = __xtc_current_task();
 	return cur != NULL ? &cur->rcu_noslot : &__rcu_self.noslot;
+}
+
+/*
+ * A read-side entered without a reader slot: count it in the caller's
+ * nesting and in __rcu_noslot, so synchronize waits for it.  Out of
+ * line, so the read side's fast path keeps no frame or branch for it.
+ */
+RCU_SLOW static void
+__rcu_noslot_enter(void)
+{
+	if (XTC_DST_BUG(XTC_DST_BUG_RCU_NOSLOT))
+		return;
+	++*__rcu_noslot_nest();
+	(void)atomic_fetch_add_explicit(&__rcu_noslot, 1, memory_order_seq_cst);
+}
+
+/* The matching exit, for a read-side that had no slot. */
+RCU_SLOW static void
+__rcu_noslot_leave(void)
+{
+	int *noslot = __rcu_noslot_nest();
+	if (*noslot <= 0)
+		return;
+	--*noslot;
+	(void)atomic_fetch_sub_explicit(&__rcu_noslot, 1, memory_order_seq_cst);
 }
 
 int
@@ -451,13 +490,7 @@ xtc_rcu_read_lock(void)
 {
 	struct rcu_tls *t = __rcu_reader_slot(1);
 	if (XTC_UNLIKELY(t == NULL)) {
-		/* No slot to publish an epoch in: count the read-side, so
-		 * synchronize waits for it all the same. */
-		if (!XTC_DST_BUG(XTC_DST_BUG_RCU_NOSLOT)) {
-			++*__rcu_noslot_nest();
-			(void)atomic_fetch_add_explicit(&__rcu_noslot, 1,
-			    memory_order_seq_cst);
-		}
+		__rcu_noslot_enter();
 		return;
 	}
 	if (t->nest++ == 0) {
@@ -472,14 +505,8 @@ void
 xtc_rcu_read_unlock(void)
 {
 	struct rcu_tls *t = __rcu_reader_slot(0);
-	int *noslot;
 	if (XTC_UNLIKELY(t == NULL)) {
-		noslot = __rcu_noslot_nest();
-		if (*noslot > 0) {
-			--*noslot;
-			(void)atomic_fetch_sub_explicit(&__rcu_noslot, 1,
-			    memory_order_seq_cst);
-		}
+		__rcu_noslot_leave();
 		return;
 	}
 	if (--t->nest == 0)
