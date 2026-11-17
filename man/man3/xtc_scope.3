@@ -5,23 +5,25 @@
 .Os
 .Sh NAME
 .Nm xtc_scope ,
-.Nm xtc_scope_open ,
+.Nm xtc_scope_enter ,
 .Nm xtc_scope_defer ,
-.Nm xtc_scope_close ,
+.Nm xtc_scope_leave ,
 .Nm xtc_bracket ,
 .Nm xtc_uncancelable ,
 .Nm xtc_cancel_poll ,
-.Nm xtc_cancel_requested
+.Nm xtc_cancel_requested ,
+.Nm xtc_scope_open ,
+.Nm xtc_scope_close
 .Nd runtime-enforced resource scope and cancellation masking
 .Sh SYNOPSIS
 .In xtc.h
 .In xtc_proc.h
 .Ft xtc_scope_t *
-.Fn xtc_scope_open "void"
+.Fn xtc_scope_enter "void"
 .Ft int
 .Fn xtc_scope_defer "xtc_scope_t *s" "xtc_finalizer_fn fn" "void *arg"
 .Ft void
-.Fn xtc_scope_close "xtc_scope_t *s"
+.Fn xtc_scope_leave "xtc_scope_t *s"
 .Ft int
 .Fn xtc_bracket "int (*acquire)(void **res, void *ud)" "int (*use)(void *res, void *ud)" "void (*release)(void *res, void *ud)" "void *ud"
 .Ft int
@@ -44,7 +46,7 @@ and
 .Fn MonadCancel.uncancelable .
 .Ss Resource scope
 A scope is a dynamically-scoped region on the calling process.
-.Fn xtc_scope_open
+.Fn xtc_scope_enter
 opens one and returns a handle (or
 .Dv NULL
 off a process or on resource exhaustion).
@@ -52,14 +54,14 @@ off a process or on resource exhaustion).
 registers a finalizer
 .Fa fn Ns Pq Fa arg
 into the scope.
-.Fn xtc_scope_close
+.Fn xtc_scope_leave
 runs the deferred finalizers in strict LIFO order and releases the
 scope.
 .Pp
 The guarantee is that the finalizers run
 .Em on every exit path
 while the scope is open, not only on
-.Fn xtc_scope_close :
+.Fn xtc_scope_leave :
 a normal return, an
 .Xr xtc_exit_self 3 ,
 an asynchronous kill
@@ -74,7 +76,7 @@ unwind closes the inner scopes first.
 The finalizers run with cancellation masked
 .Pq see Fn xtc_uncancelable ,
 on
-.Fn xtc_scope_close
+.Fn xtc_scope_leave
 and on an unwind.  A kill delivered while a finalizer parks is
 deferred until the last finalizer has run and then unwinds the
 process; it cannot skip the older finalizers.  A finalizer that needs
@@ -83,7 +85,7 @@ to be cancellable can wrap its parking work in
 Each finalizer runs at most once: if one exits or faults, the older
 ones still run on the process's unwind.  Before 2.1.2 the finalizers
 of
-.Fn xtc_scope_close
+.Fn xtc_scope_leave
 ran unmasked, and a kill in a parking finalizer dropped the older
 ones.
 .Ss Bracket
@@ -144,7 +146,7 @@ returns non-zero if cancellation is pending for the calling process
 \(em either requested and not yet delivered, or deferred by a mask \(em
 so a masked region can choose to unwind early and cleanly.
 .Sh RETURN VALUES
-.Fn xtc_scope_open
+.Fn xtc_scope_enter
 returns a scope handle, or
 .Dv NULL
 off a process or when the recovery registry is full.
@@ -186,6 +188,19 @@ static void rel(void *res, void *ud) { (void)ud; xtc_free(res); }
 
 int rc = xtc_bracket(acq, use, rel, NULL);
 .Ed
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Fn xtc_scope_open
+Use
+.Fn xtc_scope_enter .
+.It Fn xtc_scope_close
+Use
+.Fn xtc_scope_leave .
+.El
 .Sh SEE ALSO
 .Xr xtc_exit_self 3 ,
 .Xr xtc_proc 3 ,
@@ -199,7 +214,7 @@ Scopes and masking are per-process
 they require a running process
 .Pq Xr xtc_proc 3 .
 Off a process,
-.Fn xtc_scope_open
+.Fn xtc_scope_enter
 returns
 .Dv NULL ,
 .Fn xtc_bracket

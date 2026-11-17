@@ -64,6 +64,8 @@ result keeps working until it moves to the new name.
 | `xtc_loop_init()` | `xtc_loop_create()` | function |  |
 | `xtc_pg_join()` | `xtc_pg_subscribe()` | function |  |
 | `xtc_pg_leave()` | `xtc_pg_unsubscribe()` | function |  |
+| `xtc_scope_close()` | `xtc_scope_leave()` | function |  |
+| `xtc_scope_open()` | `xtc_scope_enter()` | function |  |
 <!-- renames:end -->
 
 ## Planned for 3.0 (not done in 2.x)

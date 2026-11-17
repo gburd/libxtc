@@ -27,6 +27,7 @@
 #include "xtc_chan.h"
 #include "xtc_sync.h"
 #include "xtc_batch.h"
+#include "xtc_proc.h"
 
 /* Group: loop / io / bloom / hll lifecycle (create / destroy). */
 
@@ -148,4 +149,18 @@ int
 xtc_batch_close(xtc_batch_t *b, enum xtc_batch_close_mode mode)
 {
 	return xtc_batch_shutdown(b, mode);
+}
+
+/* Group: scope (a region: enter / leave). */
+
+xtc_scope_t *
+xtc_scope_open(void)
+{
+	return xtc_scope_enter();
+}
+
+void
+xtc_scope_close(xtc_scope_t *s)
+{
+	xtc_scope_leave(s);
 }

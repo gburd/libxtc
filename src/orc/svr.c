@@ -333,11 +333,11 @@ __xtc_orc_start_wait(xtc_notify_t *started, void (*orphan)(void *), void *obj)
 		g->orphan = orphan;
 		g->obj = obj;
 		g->armed = 1;
-		if ((sc = xtc_scope_open()) == NULL ||
+		if ((sc = xtc_scope_enter()) == NULL ||
 		    xtc_scope_defer(sc, __start_guard_fire, g) != XTC_OK) {
 			g->armed = 0;
 			if (sc != NULL)
-				xtc_scope_close(sc);
+				xtc_scope_leave(sc);
 			__os_free(g);
 			return XTC_E_RESOURCE;
 		}
@@ -345,7 +345,7 @@ __xtc_orc_start_wait(xtc_notify_t *started, void (*orphan)(void *), void *obj)
 	rc = xtc_notify_wait(started, -1);
 	if (g != NULL) {
 		g->armed = 0;
-		xtc_scope_close(sc); /* frees g */
+		xtc_scope_leave(sc); /* frees g */
 	}
 	return rc;
 }

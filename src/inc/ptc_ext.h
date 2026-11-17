@@ -138,11 +138,11 @@ void xtc_proc_recovery_cleanup __P((void));
 void xtc_proc_recovery_disarm __P((void));
 void xtc_res_release __P((xtc_res_t *, xtc_res_kind_t, int64_t));
 void xtc_res_set_cap __P((xtc_res_t *, xtc_res_kind_t, int64_t));
-void xtc_scope_close __P((xtc_scope_t *));
+void xtc_scope_leave __P((xtc_scope_t *));
 void xtc_tuning_check __P((void));
 xtc_batch_t *xtc_batch_route __P((xtc_batch_router_t *, uint64_t));
 xtc_pid_t xtc_atomic_pid_load __P((const xtc_atomic_pid_t *));
 xtc_pid_t xtc_self __P((void));
-xtc_scope_t *xtc_scope_open __P((void));
+xtc_scope_t *xtc_scope_enter __P((void));
 
 #endif /* PTC_EXT_H */

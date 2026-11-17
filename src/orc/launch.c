@@ -179,7 +179,7 @@ xtc_launch(xtc_loop_t *loop, xtc_launch_fn fn, void *arg,
 
 	/* The guard's scope is opened before the spawn, so a failure here
 	 * leaves nothing to undo but the box. */
-	if ((scope = xtc_scope_open()) == NULL) {
+	if ((scope = xtc_scope_enter()) == NULL) {
 		__os_free(box);
 		return XTC_E_RESOURCE;
 	}
@@ -194,7 +194,7 @@ xtc_launch(xtc_loop_t *loop, xtc_launch_fn fn, void *arg,
 	rc = xtc_proc_spawn_monitor(loop, launch_child, box, &popts, &child,
 	    &mref);
 	if (rc != XTC_OK) {
-		xtc_scope_close(scope);
+		xtc_scope_leave(scope);
 		__os_free(box);
 		return rc;
 	}
@@ -232,7 +232,7 @@ xtc_launch(xtc_loop_t *loop, xtc_launch_fn fn, void *arg,
 			/* A receive error (NOMEM copying the DOWN out): the
 			 * guard cancels the child, which still holds its own
 			 * reference to the box. */
-			xtc_scope_close(scope);
+			xtc_scope_leave(scope);
 			return rc;
 		}
 		if (xtc_down_decode_ex(m, n, &di) == XTC_OK &&
@@ -248,7 +248,7 @@ xtc_launch(xtc_loop_t *loop, xtc_launch_fn fn, void *arg,
 	finished = xtc_atomic_load_i32(&box->finished, xtc_mo_acquire);
 	r = xtc_atomic_load_iptr(&box->result, xtc_mo_acquire);
 	box->child = XTC_PID_NONE;
-	xtc_scope_close(scope);
+	xtc_scope_leave(scope);
 
 	if (timed_out)
 		return XTC_E_AGAIN;     /* deadline: cancelled, try-again/timeout */

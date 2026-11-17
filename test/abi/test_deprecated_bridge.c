@@ -29,6 +29,7 @@
 #include "xtc_loop.h"
 #include "xtc_pg.h"
 #include "xtc_prob.h"
+#include "xtc_proc.h"
 #include "xtc_reg.h"
 #include "xtc_sync.h"
 
@@ -128,6 +129,42 @@ bridge_shutdown(void)
 	CHECK(rc == XTC_E_INVAL || rc == XTC_E_NOSYS);
 }
 
+/* scope: open / close -> enter / leave.  The finalizer runs on the old
+ * close.  Off a proc there is no scope, so this runs inside one. */
+static int g_scope_fin;
+
+static void
+scope_fin(void *arg)
+{
+	(void)arg;
+	g_scope_fin++;
+}
+
+static void
+scope_proc(void *arg)
+{
+	xtc_scope_t *s;
+
+	(void)arg;
+	s = xtc_scope_open();
+	CHECK(s != NULL);
+	CHECK(xtc_scope_defer(s, scope_fin, NULL) == XTC_OK);
+	xtc_scope_close(s);
+}
+
+static void
+bridge_scope(void)
+{
+	xtc_loop_t *loop = NULL;
+
+	CHECK(xtc_scope_open() == NULL);
+	CHECK(xtc_loop_create(&loop) == XTC_OK);
+	CHECK(xtc_proc_spawn(loop, scope_proc, NULL, NULL, NULL) == XTC_OK);
+	CHECK(xtc_loop_run(loop) == XTC_OK);
+	xtc_loop_destroy(loop);
+	CHECK(g_scope_fin == 1);
+}
+
 int
 main(void)
 {
@@ -135,6 +172,7 @@ main(void)
 	bridge_exec();
 	bridge_pg();
 	bridge_shutdown();
+	bridge_scope();
 	printf("  [bridge] OK: every deprecated name still works\n");
 	return 0;
 }

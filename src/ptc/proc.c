@@ -3205,9 +3205,9 @@ __room_wait(struct xtc_proc *p, int64_t deadline)
 	__room_link_locked(p, w);
 	(void) __proc_mtx_unlock(&p->mbox_lock);
 	if (__current_proc != NULL) {
-		if ((sc = xtc_scope_open()) == NULL ||
+		if ((sc = xtc_scope_enter()) == NULL ||
 		    xtc_scope_defer(sc, __room_wait_drop, w) != XTC_OK) {
-			xtc_scope_close(sc);
+			xtc_scope_leave(sc);
 			__room_wait_drop(w);
 			return XTC_E_RESOURCE;
 		}
@@ -3222,7 +3222,7 @@ __room_wait(struct xtc_proc *p, int64_t deadline)
 	gone = w->gone;
 	(void) __proc_mtx_unlock(&p->mbox_lock);
 	if (sc != NULL)
-		xtc_scope_close(sc);    /* runs __room_wait_drop */
+		xtc_scope_leave(sc);    /* runs __room_wait_drop */
 	else
 		__room_wait_drop(w);
 	if (gone)
@@ -5520,7 +5520,7 @@ xtc_cancel_requested(void)
  * unwind -- normal return, xtc_exit_self, an async kill, OR a
  * fault-guard-contained crash -- runs the same LIFO cleanup that
  * releases fds/locks/mctx, which now includes closing every still-open
- * scope's deferred finalizers.  xtc_scope_close on the happy path runs
+ * scope's deferred finalizers.  xtc_scope_leave on the happy path runs
  * them and detaches the marker.  Scopes nest: each is its own marker,
  * so an outer unwind closes inner-then-outer LIFO (the recovery stack
  * is walked high-index-first).
@@ -5529,7 +5529,7 @@ xtc_cancel_requested(void)
 struct xtc_scope {
 	struct xtc_proc *owner;      /* proc this scope belongs to */
 	int              closed;     /* no more defers */
-	int              closing;    /* xtc_scope_close raised the mask */
+	int              closing;    /* xtc_scope_leave raised the mask */
 #define XTC_SCOPE_MAX_DEFER 32
 	struct { xtc_finalizer_fn fn; void *arg; } fin[XTC_SCOPE_MAX_DEFER];
 	int              n_fin;
@@ -5559,7 +5559,7 @@ __scope_run(struct xtc_scope *s)
 
 /* Recovery-marker trampoline: the registry invokes fn(arg) on an
  * unwind.  Runs the finalizers but does NOT free the scope struct --
- * the marker's presence means the caller never reached xtc_scope_close,
+ * the marker's presence means the caller never reached xtc_scope_leave,
  * so the struct is freed here too (the recovery path owns it now). */
 static void
 __scope_recover_cb(void *arg)
@@ -5567,7 +5567,7 @@ __scope_recover_cb(void *arg)
 	struct xtc_scope *s = arg;
 	if (s == NULL)
 		return;
-	/* A finalizer faulted or exited inside xtc_scope_close: give back
+	/* A finalizer faulted or exited inside xtc_scope_leave: give back
 	 * the mask the close raised, so a recovery block that carries on
 	 * is not left uncancelable.  The walk running this is masked. */
 	if (s->closing)
@@ -5597,9 +5597,9 @@ __scope_drop_marker(struct xtc_proc *p, struct xtc_scope *s)
 	}
 }
 
-/* PUBLIC: xtc_scope_t *xtc_scope_open __P((void)); */
+/* PUBLIC: xtc_scope_t *xtc_scope_enter __P((void)); */
 xtc_scope_t *
-xtc_scope_open(void)
+xtc_scope_enter(void)
 {
 	struct xtc_proc *p = __current_proc;
 	struct xtc_scope *s = NULL;
@@ -5641,7 +5641,7 @@ xtc_scope_defer(xtc_scope_t *s, xtc_finalizer_fn fn, void *arg)
 }
 
 /*
- * PUBLIC: void xtc_scope_close __P((xtc_scope_t *));
+ * PUBLIC: void xtc_scope_leave __P((xtc_scope_t *));
  *
  * The finalizers run MASKED (Cats Effect runs Resource finalizers
  * uncancelable for the same reason): a kill delivered at a park inside
@@ -5653,7 +5653,7 @@ xtc_scope_defer(xtc_scope_t *s, xtc_finalizer_fn fn, void *arg)
  * dropped every older finalizer and leaked the scope.
  */
 void
-xtc_scope_close(xtc_scope_t *s)
+xtc_scope_leave(xtc_scope_t *s)
 {
 	struct xtc_proc *p;
 	if (s == NULL)
@@ -5731,7 +5731,7 @@ xtc_bracket(int (*acquire)(void **res, void *ud),
 		return arc;
 	}
 	{
-		struct xtc_scope *s = xtc_scope_open();
+		struct xtc_scope *s = xtc_scope_enter();
 		struct __bracket_rel *br = NULL;
 		if (s == NULL) {
 			/* Cannot guarantee release via a scope; release now
@@ -5742,7 +5742,7 @@ xtc_bracket(int (*acquire)(void **res, void *ud),
 			return XTC_E_RESOURCE;
 		}
 		if (__os_calloc(1, sizeof *br, (void **)&br) != XTC_OK) {
-			xtc_scope_close(s);
+			xtc_scope_leave(s);
 			release(res, ud);
 			__mask_depth_dec(p);
 			__mask_drain(p);
@@ -5757,7 +5757,7 @@ xtc_bracket(int (*acquire)(void **res, void *ud),
 		__mask_depth_dec(p);
 		__mask_drain(p);        /* if killed, scope unwind releases */
 		urc = use(res, ud);
-		xtc_scope_close(s);     /* runs release + frees br */
+		xtc_scope_leave(s);     /* runs release + frees br */
 		return urc;
 	}
 }

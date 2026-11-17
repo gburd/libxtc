@@ -34,7 +34,7 @@ using_a_scope(void *arg)
 	xtc_scope_t *s;
 	(void)arg;
 
-	s = xtc_scope_open();          /* opens on the calling process */
+	s = xtc_scope_enter();          /* opens on the calling process */
 	if (s == NULL)
 		return;
 
@@ -44,7 +44,7 @@ using_a_scope(void *arg)
 
 	/* ... work with the resources ... */
 
-	xtc_scope_close(s);            /* runs: index.db, then data.db */
+	xtc_scope_leave(s);            /* runs: index.db, then data.db */
 }
 /* !endregion scope */
 

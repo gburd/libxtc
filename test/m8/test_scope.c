@@ -57,13 +57,13 @@ scope_normal_proc(void *arg)
 {
 	xtc_scope_t *s;
 	(void)arg;
-	s = xtc_scope_open();
+	s = xtc_scope_enter();
 	if (s == NULL)
 		return;
 	(void)xtc_scope_defer(s, fin_tag, (void *)(intptr_t)1);
 	(void)xtc_scope_defer(s, fin_tag, (void *)(intptr_t)2);
 	(void)xtc_scope_defer(s, fin_tag, (void *)(intptr_t)3);
-	xtc_scope_close(s);
+	xtc_scope_leave(s);
 }
 
 static MunitResult
@@ -92,7 +92,7 @@ scope_exit_proc(void *arg)
 {
 	xtc_scope_t *s;
 	(void)arg;
-	s = xtc_scope_open();
+	s = xtc_scope_enter();
 	if (s == NULL)
 		return;
 	(void)xtc_scope_defer(s, fin_tag, (void *)(intptr_t)10);
@@ -142,7 +142,7 @@ scope_crash_proc(void *arg)
 	xtc_scope_t *s;
 	(void)arg;
 	xtc_proc_recovery_arm_clean();   /* default: cleanup + exit on fault */
-	s = xtc_scope_open();
+	s = xtc_scope_enter();
 	if (s == NULL)
 		return;
 	(void)xtc_scope_defer(s, fin_tag, (void *)(intptr_t)100);
@@ -151,7 +151,7 @@ scope_crash_proc(void *arg)
 		volatile uintptr_t addr = 0x10;
 		*(volatile int *)addr = 1;   /* boom -- contained fault */
 	}
-	xtc_scope_close(s);              /* NOTREACHED */
+	xtc_scope_leave(s);              /* NOTREACHED */
 }
 
 static MunitResult
@@ -306,13 +306,13 @@ mask_target_proc(void *arg)
 {
 	xtc_scope_t *s;
 	(void)arg;
-	s = xtc_scope_open();
+	s = xtc_scope_enter();
 	if (s == NULL)
 		return;
 	(void)xtc_uncancelable(masked_body, s);
 	/* On return from the masked region a deferred kill is honored at
 	 * the next park; the scope's finalizer runs on the unwind. */
-	xtc_scope_close(s);   /* may not reach if killed after unmask */
+	xtc_scope_leave(s);   /* may not reach if killed after unmask */
 }
 
 static void
@@ -359,7 +359,7 @@ test_offproc_safe(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	/* Off a proc: scope_open returns NULL, bracket honors the contract
 	 * directly, uncancelable just runs the body. */
-	munit_assert_ptr_null(xtc_scope_open());
+	munit_assert_ptr_null(xtc_scope_enter());
 	log_reset();
 	munit_assert_int(xtc_bracket(bk_acquire, bk_use_ok, bk_release, NULL),
 	    ==, XTC_OK);
@@ -408,7 +408,7 @@ rw_killer(void *x)
 static void
 rw_fault_target(void *x)
 {
-	xtc_scope_t *a = xtc_scope_open(), *b = xtc_scope_open();
+	xtc_scope_t *a = xtc_scope_enter(), *b = xtc_scope_enter();
 	volatile uintptr_t bad = 0x10;
 	(void)x;
 	if (a == NULL || b == NULL)
@@ -424,7 +424,7 @@ rw_fault_target(void *x)
 static void
 rw_cleanup_target(void *x)
 {
-	xtc_scope_t *a = xtc_scope_open(), *b = xtc_scope_open();
+	xtc_scope_t *a = xtc_scope_enter(), *b = xtc_scope_enter();
 	(void)x;
 	if (a == NULL || b == NULL)
 		return;
@@ -537,7 +537,7 @@ test_recovery_record_exits_once(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
-/* ---------- 8. A6: xtc_scope_close runs its finalizers masked ---------- */
+/* ---------- 8. A6: xtc_scope_leave runs its finalizers masked ---------- */
 
 /*
  * effects case 1: a scope with an older finalizer and a parking one is
@@ -574,13 +574,13 @@ cl_fin_exit(void *a)
 static void
 cl_kill_target(void *a)
 {
-	xtc_scope_t *s = xtc_scope_open();
+	xtc_scope_t *s = xtc_scope_enter();
 	(void)a;
 	if (s == NULL)
 		return;
 	(void)xtc_scope_defer(s, cl_fin_old, NULL);
 	(void)xtc_scope_defer(s, cl_fin_park, NULL);
-	xtc_scope_close(s);
+	xtc_scope_leave(s);
 	xtc_atomic_store_i32(&g_after_close, 1,
 	    xtc_mo_seq_cst); /* the latched kill fires first */
 }
@@ -588,13 +588,13 @@ cl_kill_target(void *a)
 static void
 cl_exit_target(void *a)
 {
-	xtc_scope_t *s = xtc_scope_open();
+	xtc_scope_t *s = xtc_scope_enter();
 	(void)a;
 	if (s == NULL)
 		return;
 	(void)xtc_scope_defer(s, cl_fin_old, NULL);
 	(void)xtc_scope_defer(s, cl_fin_exit, NULL);
-	xtc_scope_close(s);
+	xtc_scope_leave(s);
 	xtc_atomic_store_i32(&g_after_close, 1,
 	    xtc_mo_seq_cst); /* NOTREACHED: cl_fin_exit exits */
 }

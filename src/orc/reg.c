@@ -805,12 +805,12 @@ xtc_reg_whereis_wait(xtc_reg_t *r, const char *name, xtc_pid_t not_pid,
 	r->waiters = w;
 	(void)__xtc_mtx_unlock(&r->lock);
 	if (!xtc_pid_is_none(xtc_self())) {
-		if ((sc = xtc_scope_open()) == NULL) {
+		if ((sc = xtc_scope_enter()) == NULL) {
 			__reg_waiter_drop(w);
 			return XTC_E_RESOURCE;
 		}
 		if (xtc_scope_defer(sc, __reg_waiter_drop, w) != XTC_OK) {
-			xtc_scope_close(sc);
+			xtc_scope_leave(sc);
 			__reg_waiter_drop(w);
 			return XTC_E_RESOURCE;
 		}
@@ -840,7 +840,7 @@ xtc_reg_whereis_wait(xtc_reg_t *r, const char *name, xtc_pid_t not_pid,
 		(void)xtc_notify_wait(w->wake, wait_ns);
 	}
 	if (sc != NULL)
-		xtc_scope_close(sc); /* runs __reg_waiter_drop */
+		xtc_scope_leave(sc); /* runs __reg_waiter_drop */
 	else
 		__reg_waiter_drop(w);
 	return rc;

@@ -1099,25 +1099,25 @@ XTC_API int xtc_mask_leave(void);
  * "this WILL be released on EVERY exit path" a MECHANISM, not a manner.
  *
  * Open a scope on the calling proc, defer finalizers into it, and close
- * it.  Finalizers run LIFO -- on the normal xtc_scope_close, AND on an
+ * it.  Finalizers run LIFO -- on the normal xtc_scope_leave, AND on an
  * error return, xtc_exit_self, an async kill (xtc_exit_pid), or a
  * fault-guard-contained crash, because the scope is pushed as a marker
  * on the same recovery registry that releases fds and locks on unwind.
  * Scopes nest; an outer unwind closes inner-then-outer LIFO.
  *
- * xtc_scope_open returns NULL off a proc or on resource exhaustion.
+ * xtc_scope_enter returns NULL off a proc or on resource exhaustion.
  */
 typedef struct xtc_scope xtc_scope_t;
 typedef void (*xtc_finalizer_fn)(void *arg);
 
 /*
- * PUBLIC: xtc_scope_t *xtc_scope_open __P((void));
+ * PUBLIC: xtc_scope_t *xtc_scope_enter __P((void));
  * PUBLIC: int  xtc_scope_defer __P((xtc_scope_t *, xtc_finalizer_fn, void *));
- * PUBLIC: void xtc_scope_close __P((xtc_scope_t *));
+ * PUBLIC: void xtc_scope_leave __P((xtc_scope_t *));
  */
-XTC_API xtc_scope_t *xtc_scope_open(void);
+XTC_API xtc_scope_t *xtc_scope_enter(void);
 XTC_API int  xtc_scope_defer(xtc_scope_t *s, xtc_finalizer_fn fn, void *arg);
-XTC_API void xtc_scope_close(xtc_scope_t *s);
+XTC_API void xtc_scope_leave(xtc_scope_t *s);
 
 /*
  * bracket sugar (acquire -> use -> guaranteed release), the load-bearing
@@ -1210,6 +1210,14 @@ static inline int xtc_down_is_exit_reason(int reason)
  * (__xtc_proc_ctx_save / __xtc_proc_ctx_restore) is library-internal
  * (the __ prefix) and lives in "proc_int.h", not in this installed
  * public header. */
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_scope_enter")
+XTC_API xtc_scope_t *xtc_scope_open(void);
+XTC_DEPRECATED("use xtc_scope_leave")
+XTC_API void xtc_scope_close(xtc_scope_t *s);
 
 #ifdef __cplusplus
 }

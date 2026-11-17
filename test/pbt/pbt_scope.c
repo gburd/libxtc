@@ -47,14 +47,14 @@ static void sc1_proc(void *arg)
 	static struct sc1_cell cells[SC_MAX];
 	xtc_scope_t *sc;
 	int i;
-	sc = xtc_scope_open();
+	sc = xtc_scope_enter();
 	if (sc == NULL) return;
 	for (i = 0; i < s->n; i++) {
 		cells[i].s = s;
 		cells[i].tag = i;
 		(void)xtc_scope_defer(sc, sc1_fin, &cells[i]);
 	}
-	xtc_scope_close(sc);
+	xtc_scope_leave(sc);
 	/* Verify LIFO: seq should be n-1, n-2, ..., 0. */
 	s->ok = (s->m == s->n);
 	for (i = 0; i < s->m && s->ok; i++)
@@ -97,7 +97,7 @@ static void sc2_proc(void *arg)
 	int i;
 	/* Open depth nested scopes, defer one finalizer per level. */
 	for (i = 0; i < s->depth; i++) {
-		sc[i] = xtc_scope_open();
+		sc[i] = xtc_scope_enter();
 		if (sc[i] == NULL) return;
 		cells[i].s = s;
 		cells[i].level = i;
@@ -105,7 +105,7 @@ static void sc2_proc(void *arg)
 	}
 	/* Close inner->outer (highest index first). */
 	for (i = s->depth - 1; i >= 0; i--)
-		xtc_scope_close(sc[i]);
+		xtc_scope_leave(sc[i]);
 	/* seq should be depth-1, depth-2, ..., 0. */
 	s->ok = (s->m == s->depth);
 	for (i = 0; i < s->m && s->ok; i++)

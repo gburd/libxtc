@@ -185,7 +185,7 @@ worker(void *arg)
 
 	xtc_atomic_store_i32(&g_started[w], 1, xtc_mo_seq_cst);
 
-	s = xtc_scope_open();
+	s = xtc_scope_enter();
 	if (s == NULL) {
 		xtc_exit_self(0);
 		return;
@@ -232,7 +232,7 @@ worker(void *arg)
 	/* Normal path (and the abort path parks here): close the scope.
 	 * If an abort was delivered it unwinds before/at a park and the
 	 * recovery registry closes the still-open scope. */
-	xtc_scope_close(s);
+	xtc_scope_leave(s);
 	xtc_exit_self(0);
 }
 
@@ -535,7 +535,7 @@ main(int argc, char **argv)
 			if (sk != 0)
 				printf("  seed 0x%016llx: a scope finalizer "
 				       "was skipped after a kill inside "
-				       "xtc_scope_close (%d of %d close+kill "
+				       "xtc_scope_leave (%d of %d close+kill "
 				       "workers)\n",
 				    (unsigned long long)seed, sk, ck);
 			printf("  seed 0x%016llx: FAIL (started=%d all_fin=%d "
@@ -563,7 +563,7 @@ main(int argc, char **argv)
 		    "masked-acquire release on every exit path (normal close, "
 		    "seeded abort mid-scope, seeded contained fault mid-scope, "
 		    "seeded kill inside the fault's recovery walk, seeded kill "
-		    "inside xtc_scope_close); no finalizer eaten by a mid-mask "
+		    "inside xtc_scope_leave); no finalizer eaten by a mid-mask "
 		    "abort, every recovery record ran once; replay-identical "
 		    "(disruptions across the sweep: %d aborts, %d faults, %d "
 		    "fault+kills, %d close+kills, %d seeds left all workers "
