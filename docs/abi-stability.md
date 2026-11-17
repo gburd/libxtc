@@ -131,16 +131,19 @@ pointers in their parameters:
 | `xtc_tnt_start` | `xtc_tnt_spec_t` 40 -> 56 | became size-first: a leading `size` moved every field |
 | `xtc_lwlock_acquire` | `xtc_lwlock_t` 128 -> 128 | `state` lost its `_Atomic` qualifier; same layout |
 
-The first six are appends to size-first structs, which a minor may
-make.  `xtc_tnt_spec_t` is in the experimental tier, and its change is
-the one a 2.1 binary must rebuild for (KNOWN_ISSUES, "CHANGED (2.2):
+The first six are appends to size-first structs, which a minor may make.
+`xtc_tnt_spec_t` is in the experimental tier, and its change is the one
+a 2.1 binary must rebuild for (KNOWN_ISSUES, "CHANGED (2.2):
 `xtc_tnt_spec_t` is size-first").  `xtc_lwlock_t` keeps every offset
 (the layout gate's table is unchanged); the qualifier went so the header
 compiles in C++.  The `xtc_app_create` entry also lists the library's
 private `struct xtc_loop`, which the script sees because its header
 directory is all of `src/inc`; `xtc_loop_t` is opaque in the installed
-headers.  `scripts/compat-check.sh v2.1.2` runs 2.1.2's consumer against
-2.2.0's `libxtc.a` and `libxtc.so`.
+headers.  Given only the installed headers, abidiff reports one more
+entry of the same kind, `xtc_chan_broadcast_create`, through
+`xtc_res_t`: its `_Atomic` counters became plain fields at the same
+offsets, as in `xtc_lwlock_t`.  `scripts/compat-check.sh v2.1.2` runs
+2.1.2's consumer against 2.2.0's `libxtc.a` and `libxtc.so`.
 
 ## Symbol versions and the export set (ENFORCED)
 
