@@ -103,6 +103,7 @@ write_cases() {
 		"64;test_sim_rcu;0;0;an unrecorded retire freed a node under a reader" \
 		"65;test_sim_lrlock;0;0;a write was lost .* when the oplog could not grow" \
 		"67;test_sim_partition;0;0;a DOWN or link EXIT was lost under a partition" \
+		"68;test_sim_offloop_wait;0;0;a timed wait off a fiber did not return at once" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -165,6 +166,8 @@ write_cases() {
 #               -> out of memory, an applied op reaches both copies
 # 67 PART_SYSDROP proc.c the sim's partition cuts DOWN and link EXIT too
 #               -> a death across a cut still reaches its watcher
+# 68 SIM_OFFLOOP_WAIT sim.c a timed wait off a fiber reads the wall
+#               clock -> a wait no fiber can end expires at once
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

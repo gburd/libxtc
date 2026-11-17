@@ -287,4 +287,14 @@
  */
 #define XTC_DST_BUG_PART_SYSDROP 67
 
+/*
+ * 68 SIM_OFFLOOP_WAIT: a timed wait on the simulator's own thread off a
+ * fiber behaves as in 2.1.2: it takes its deadline from the wall clock,
+ * so a test's xtc_notify_wait, xtc_future_wait or timed lock between
+ * xtc_sim_activate and xtc_sim_deactivate trips the determinism guard
+ * (test_sim_offloop_wait: "a timed wait off a fiber did not return at
+ * once").
+ */
+#define XTC_DST_BUG_SIM_OFFLOOP_WAIT 68
+
 #endif /* XTC_DST_INJECT_H */

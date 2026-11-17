@@ -73,6 +73,19 @@ XTC_API void     __xtc_sim_nondeterminism(const char *what);
 XTC_API void     xtc_sim_strict(int on);
 XTC_API int      xtc_sim_nondeterminism_count(void);
 
+/* 1 on the simulator's own thread, off any fiber, during a run (a
+ * test's code between xtc_sim_activate and xtc_sim_deactivate): a
+ * blocking wait there can never end, since no fiber runs and no virtual
+ * time passes while it blocks.  __xtc_sim_cond_deadline is the absolute
+ * pthread_cond_timedwait deadline for a plain-thread wait of timeout_ns
+ * >= 0: there, 1 and an already-passed deadline (the wait expires at
+ * once, no clock read); elsewhere, 0 and the wall clock plus timeout_ns.
+ * Every timed plain-thread wait in the library takes its deadline from
+ * it (sim.c). */
+struct timespec;
+XTC_API int __xtc_sim_offloop_wait(void);
+XTC_API int __xtc_sim_cond_deadline(int64_t timeout_ns, struct timespec *ts);
+
 /* Clock skew (FoundationDB "the clock is not perfect").  The scheduler
  * still schedules timers against the true virtual clock, but a fiber
  * that reads the clock (xtc_proc time, timeout math) observes

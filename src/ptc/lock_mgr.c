@@ -735,12 +735,8 @@ __do_acquire_locked(xtc_lockmgr_t *m, struct lock_partition *p,
 				(void)pthread_cond_wait(&e->cv, &p->lock);
 			} else {
 				struct timespec ts;
-				int64_t now;
 				int wait_rc;
-				(void)__os_clock_real(&now);
-				now += timeout_ns;
-				ts.tv_sec  = (time_t)(now / 1000000000LL);
-				ts.tv_nsec = (long)(now % 1000000000LL);
+				(void)__xtc_sim_cond_deadline(timeout_ns, &ts);
 				wait_rc = pthread_cond_timedwait(&e->cv,
 				    &p->lock, &ts);
 				if (wait_rc != 0 && !e->granted &&

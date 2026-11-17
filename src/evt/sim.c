@@ -17,10 +17,13 @@
 
 #include "xtc_int.h"
 #include "xtc_sim.h"
+#include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
 #include "xtc_probes.h"
+#include "coro_int.h" /* __xtc_current_task */
 
 #include <stdatomic.h>
 #include <pthread.h>
+#include <time.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -128,6 +131,61 @@ xtc_sim_nondeterminism_count(void)
 	return atomic_load_explicit(&g_nondet_count, memory_order_relaxed);
 }
 
+/* PUBLIC: int __xtc_sim_offloop_wait __P((void)); */
+/*
+ * 1 when the caller is the simulator's own thread, outside any fiber,
+ * during a run: a test's code between xtc_sim_activate and
+ * xtc_sim_deactivate, or a plain task the run steps.  A blocking wait
+ * there can never be ended by the run, because the run is this thread
+ * and it is blocked: no fiber runs and no virtual time passes.  Any
+ * other thread gets 0, and so does every thread of a native build.
+ * g_sim_thread marks the thread that called xtc_sim_activate, until
+ * xtc_sim_deactivate.
+ */
+static XTC_THREAD_LOCAL int g_sim_thread;
+
+int
+__xtc_sim_offloop_wait(void)
+{
+#if defined(XTC_IO_BACKEND_SIM) && !XTC_DST_BUG(XTC_DST_BUG_SIM_OFFLOOP_WAIT)
+	return g_sim_thread && __xtc_sim_active() &&
+	    __xtc_current_task() == NULL;
+#else
+	/* A native build's loops run on their own threads, which can end
+	 * the wait (and bug 68 plants the 2.1.2 waits). */
+	return 0;
+#endif
+}
+
+/* PUBLIC: int __xtc_sim_cond_deadline __P((int64_t, struct timespec *)); */
+/*
+ * The absolute pthread_cond_timedwait deadline for a plain-thread wait
+ * of timeout_ns (>= 0).  Returns 1 and an already-passed deadline when
+ * the wait is made on the simulator's thread off a fiber during a run
+ * (see __xtc_sim_offloop_wait): virtual time cannot pass while the only
+ * thread is blocked, so the wait expires at once and never reads the
+ * wall clock.  Otherwise returns 0 and now + timeout_ns on the wall
+ * clock, the clock pthread_cond_timedwait measures.  Every timed
+ * plain-thread wait in the library takes its deadline from here, so no
+ * wall-clock read is left on a sim-reachable path.
+ */
+int
+__xtc_sim_cond_deadline(int64_t timeout_ns, struct timespec *ts)
+{
+	int64_t now = 0;
+
+	if (__xtc_sim_offloop_wait()) {
+		ts->tv_sec = 0;
+		ts->tv_nsec = 0;
+		return 1;
+	}
+	(void)__os_clock_real(&now);
+	now = timeout_ns > INT64_MAX - now ? INT64_MAX : now + timeout_ns;
+	ts->tv_sec = (time_t)(now / 1000000000LL);
+	ts->tv_nsec = (long)(now % 1000000000LL);
+	return 0;
+}
+
 /* PUBLIC: void xtc_sim_activate __P((uint64_t)); */
 void
 xtc_sim_activate(uint64_t seed)
@@ -140,6 +198,7 @@ xtc_sim_activate(uint64_t seed)
 		uint64_t t = s + (uint64_t)(i + 1) * 0x9E3779B97F4A7C15ull;
 		g_sim_stream[i] = splitmix64(&t);
 	}
+	g_sim_thread = 1;
 	atomic_store_explicit(&g_nondet_count, 0, memory_order_relaxed);	atomic_store_explicit(&g_sim_active, 1, memory_order_release);
 }
 
@@ -148,6 +207,7 @@ void
 xtc_sim_deactivate(void)
 {
 	atomic_store_explicit(&g_sim_active, 0, memory_order_release);
+	g_sim_thread = 0;
 	/* Reset adversarial-mode knobs so one run's setting does not leak
 	 * into the next in-process run (buggify/io-fault knobs are reset by
 	 * their own enable/disable; these have no such call on every run). */

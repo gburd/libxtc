@@ -417,6 +417,24 @@ loops, a receiver gone in flight, a run cut short by its step budget,
 sends under buggify) fails all 16 of its seeds on 2.1.2 and passes on
 2.1.3; planted bug 34 restores the old admission and is caught at seed 1.
 
+## FIXED (2.1.3): a timed wait off a fiber read the wall clock in a simulation run
+
+A plain-thread wait with a timeout (`xtc_notify_wait`, `xtc_sem_acquire`,
+`xtc_amutex_lock`, `xtc_arwlock_*lock`, `xtc_rwlock_*lock`,
+`xtc_gate_drain`, `xtc_future_wait`, `xtc_lock_get`) took its deadline
+from the wall clock.  Made on the simulator's own thread outside any
+fiber while a run was active (a test's code between `xtc_sim_activate`
+and `xtc_sim_deactivate`, or a plain task the run steps), that read
+tripped the determinism guard, which aborts the run in strict mode, and
+the wait slept its whole timeout in real time although nothing could
+end it: no fiber runs and no virtual time passes while the only thread
+is blocked.  Such a wait now expires at once with `XTC_E_AGAIN` and
+reads no clock.  `test_sim_offloop_wait` makes one timed wait on each of
+the eight primitives in both places: before the fix the guard counts 8
+violations in each case and the run fails; fixed, it counts none.
+Planted bug 68 (`SIM_OFFLOOP_WAIT`) restores the wall-clock deadline and
+is caught.  Only simulator runs were affected.
+
 ## FIXED (2.1.3): DST runs that partitioned loops could lose DOWN and EXIT signals
 
 The simulator's partition (`xtc_sim_partition_set`,
