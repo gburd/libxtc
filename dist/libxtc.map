@@ -97,6 +97,8 @@ XTC_2.2 {
 		xtc_loop_destroy;
 		xtc_metrics_set_help;
 		xtc_metrics_write_prometheus;
+		xtc_pg_subscribe;
+		xtc_pg_unsubscribe;
 		xtc_proc_set_label;
 		xtc_reg_put;
 		xtc_reg_send_wait;

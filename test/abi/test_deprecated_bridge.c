@@ -25,7 +25,9 @@
 #include "xtc_exec.h"
 #include "xtc_io.h"
 #include "xtc_loop.h"
+#include "xtc_pg.h"
 #include "xtc_prob.h"
+#include "xtc_reg.h"
 
 #define CHECK(c)                                                               \
 	do {                                                                   \
@@ -76,11 +78,28 @@ bridge_exec(void)
 	CHECK(xtc_exec_fini(NULL) == XTC_E_INVAL);
 }
 
+/* pg: join / leave -> subscribe / unsubscribe. */
+static void
+bridge_pg(void)
+{
+	xtc_reg_t *r = NULL;
+	xtc_pid_t p = { 1, 1, 1 };
+
+	CHECK(xtc_reg_create(&r) == XTC_OK && r != NULL);
+	CHECK(xtc_pg_join(r, "g", p) == XTC_OK);
+	CHECK(xtc_reg_count(r) == 1);
+	CHECK(xtc_pg_leave(r, "g", p) == XTC_OK);
+	CHECK(xtc_reg_count(r) == 0);
+	CHECK(xtc_pg_leave(r, "g", p) == XTC_E_INVAL);
+	xtc_reg_destroy(r);
+}
+
 int
 main(void)
 {
 	bridge_lifecycle();
 	bridge_exec();
+	bridge_pg();
 	printf("  [bridge] OK: every deprecated name still works\n");
 	return 0;
 }

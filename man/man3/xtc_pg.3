@@ -4,20 +4,22 @@
 .Dt XTC_PG 3
 .Os
 .Sh NAME
-.Nm xtc_pg_join ,
-.Nm xtc_pg_leave ,
+.Nm xtc_pg_subscribe ,
+.Nm xtc_pg_unsubscribe ,
 .Nm xtc_pg_members ,
 .Nm xtc_pg_send ,
-.Nm xtc_pg_send_owned
+.Nm xtc_pg_send_owned ,
+.Nm xtc_pg_join ,
+.Nm xtc_pg_leave
 .Nd process groups (pub/sub and fan-out)
 .Sh LIBRARY
 .Lb libxtc
 .Sh SYNOPSIS
 .In xtc_pg.h
 .Ft int
-.Fn xtc_pg_join "xtc_reg_t *reg" "const char *group" "xtc_pid_t pid"
+.Fn xtc_pg_subscribe "xtc_reg_t *reg" "const char *group" "xtc_pid_t pid"
 .Ft int
-.Fn xtc_pg_leave "xtc_reg_t *reg" "const char *group" "xtc_pid_t pid"
+.Fn xtc_pg_unsubscribe "xtc_reg_t *reg" "const char *group" "xtc_pid_t pid"
 .Ft int
 .Fn xtc_pg_members "xtc_reg_t *reg" "const char *group" "int (*fn)(xtc_pid_t, void *)" "void *user"
 .Ft int
@@ -35,7 +37,7 @@ registry
 .Pq see Fn xtc_reg_register_dup ,
 so many pids share one key.
 .Pp
-.Fn xtc_pg_join
+.Fn xtc_pg_subscribe
 adds
 .Fa pid
 to
@@ -44,7 +46,7 @@ to
 process typically joins itself with
 .Fn xtc_self .
 .Pp
-.Fn xtc_pg_leave
+.Fn xtc_pg_unsubscribe
 removes
 .Fa pid
 from
@@ -79,9 +81,9 @@ of N costs N - 1.
 belongs to the library on return, whatever happened: it was moved, or
 it was freed because no member took it.
 .Sh RETURN VALUES
-.Fn xtc_pg_join
+.Fn xtc_pg_subscribe
 and
-.Fn xtc_pg_leave
+.Fn xtc_pg_unsubscribe
 return
 .Dv XTC_OK
 on success or a negative
@@ -98,7 +100,7 @@ Single node only.  Cross-node process groups need the distributed
 module, which is not built.  Until the registry gains a monitor that
 auto-unregisters a member on its DOWN, a crashed member lingers in the
 group until something calls
-.Fn xtc_pg_leave
+.Fn xtc_pg_unsubscribe
 for it; a stale-member
 .Fn xtc_pg_send
 is a harmless no-op.
@@ -107,12 +109,25 @@ is a harmless no-op.
 xtc_reg_t *r = xtc_app_registry(app);
 
 /* Each subscriber joins the topic. */
-xtc_pg_join(r, "chat:lobby", xtc_self());
+xtc_pg_subscribe(r, "chat:lobby", xtc_self());
 
 /* A publisher fans a message out to all subscribers. */
 int n = xtc_pg_send(r, "chat:lobby", line, len);
 /* n = number of subscribers that received it */
 .Ed
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Fn xtc_pg_join
+Use
+.Fn xtc_pg_subscribe .
+.It Fn xtc_pg_leave
+Use
+.Fn xtc_pg_unsubscribe .
+.El
 .Sh SEE ALSO
 .Xr xtc_reg 3 ,
 .Xr xtc_proc 3 ,

@@ -43,7 +43,7 @@ subscriber(void *arg)
 {
 	(void)arg;
 	void *m = NULL; size_t n = 0;
-	(void)xtc_pg_join(g_reg, "topic", xtc_self());
+	(void)xtc_pg_subscribe(g_reg, "topic", xtc_self());
 	xtc_atomic_fetch_add_i32(&g_ready, 1, xtc_mo_relaxed);
 	if (xtc_recv(&m, &n, 2000LL * 1000 * 1000) == XTC_OK) {
 		if (n == sizeof(int) && *(int *)m == PAYLOAD)

@@ -57,6 +57,8 @@ result keeps working until it moves to the new name.
 | `xtc_io_init()` | `xtc_io_create()` | function |  |
 | `xtc_loop_fini()` | `xtc_loop_destroy()` | function | the new name returns void; the old one returns XTC_E_INVAL for NULL, else XTC_OK |
 | `xtc_loop_init()` | `xtc_loop_create()` | function |  |
+| `xtc_pg_join()` | `xtc_pg_subscribe()` | function |  |
+| `xtc_pg_leave()` | `xtc_pg_unsubscribe()` | function |  |
 <!-- renames:end -->
 
 ## Planned for 3.0 (not done in 2.x)

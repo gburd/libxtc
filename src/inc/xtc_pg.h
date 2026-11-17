@@ -34,8 +34,8 @@ extern "C" {
 #endif
 
 /*
- * PUBLIC: int xtc_pg_join __P((xtc_reg_t *, const char *, xtc_pid_t));
- * PUBLIC: int xtc_pg_leave __P((xtc_reg_t *, const char *, xtc_pid_t));
+ * PUBLIC: int xtc_pg_subscribe __P((xtc_reg_t *, const char *, xtc_pid_t));
+ * PUBLIC: int xtc_pg_unsubscribe __P((xtc_reg_t *, const char *, xtc_pid_t));
  * PUBLIC: int xtc_pg_members __P((xtc_reg_t *, const char *, int (*)(xtc_pid_t, void *), void *));
  * PUBLIC: int xtc_pg_send __P((xtc_reg_t *, const char *, const void *, size_t));
  * PUBLIC: int xtc_pg_send_owned __P((xtc_reg_t *, const char *, void *, size_t));
@@ -43,10 +43,10 @@ extern "C" {
 
 /* Add `pid` to group `group` (idempotent).  Typically the caller joins
  * itself with xtc_self(). */
-XTC_API int xtc_pg_join(xtc_reg_t *reg, const char *group, xtc_pid_t pid);
+XTC_API int xtc_pg_subscribe(xtc_reg_t *reg, const char *group, xtc_pid_t pid);
 
 /* Remove `pid` from `group`.  XTC_E_INVAL if not a member. */
-XTC_API int xtc_pg_leave(xtc_reg_t *reg, const char *group, xtc_pid_t pid);
+XTC_API int xtc_pg_unsubscribe(xtc_reg_t *reg, const char *group, xtc_pid_t pid);
 
 /* Visit every member pid of `group` (callback runs under the registry
  * lock -- keep it brief; do not re-enter the registry).  A nonzero
@@ -69,6 +69,14 @@ XTC_API int xtc_pg_send(xtc_reg_t *reg, const char *group,
  * call.  Returns the number of members the message was sent to. */
 XTC_API int xtc_pg_send_owned(xtc_reg_t *reg, const char *group,
                               void *buf, size_t size);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_pg_subscribe")
+XTC_API int xtc_pg_join(xtc_reg_t *reg, const char *group, xtc_pid_t pid);
+XTC_DEPRECATED("use xtc_pg_unsubscribe")
+XTC_API int xtc_pg_leave(xtc_reg_t *reg, const char *group, xtc_pid_t pid);
 
 #ifdef __cplusplus
 }

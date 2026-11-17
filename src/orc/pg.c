@@ -13,14 +13,14 @@
 #include "xtc_pg.h"
 
 int
-xtc_pg_join(xtc_reg_t *reg, const char *group, xtc_pid_t pid)
+xtc_pg_subscribe(xtc_reg_t *reg, const char *group, xtc_pid_t pid)
 {
 	if (reg == NULL || group == NULL) return XTC_E_INVAL;
 	return xtc_reg_register_dup(reg, group, pid);
 }
 
 int
-xtc_pg_leave(xtc_reg_t *reg, const char *group, xtc_pid_t pid)
+xtc_pg_unsubscribe(xtc_reg_t *reg, const char *group, xtc_pid_t pid)
 {
 	if (reg == NULL || group == NULL) return XTC_E_INVAL;
 	return xtc_reg_unregister_pid(reg, group, pid);

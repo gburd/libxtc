@@ -23,6 +23,7 @@
 #include "xtc_io.h"
 #include "xtc_prob.h"
 #include "xtc_exec.h"
+#include "xtc_pg.h"
 
 /* Group: loop / io / bloom / hll lifecycle (create / destroy). */
 
@@ -98,4 +99,16 @@ xtc_exec_fini(xtc_exec_t *exec)
 		return XTC_E_INVAL;
 	xtc_exec_destroy(exec);
 	return XTC_OK;
+}
+
+int
+xtc_pg_join(xtc_reg_t *reg, const char *group, xtc_pid_t pid)
+{
+	return xtc_pg_subscribe(reg, group, pid);
+}
+
+int
+xtc_pg_leave(xtc_reg_t *reg, const char *group, xtc_pid_t pid)
+{
+	return xtc_pg_unsubscribe(reg, group, pid);
 }

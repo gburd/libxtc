@@ -3,7 +3,7 @@
  * Use of this source code is governed by the ISC License.
  *
  * test/m10/test_pg.c
- *	R6 process groups (xtc_pg_join/leave/members/send) over the
+ *	R6 process groups (xtc_pg_subscribe/leave/members/send) over the
  *	duplicate-key registry.  A group of subscriber procs each parks in
  *	xtc_recv; the test joins their pids to a group and broadcasts, then
  *	asserts every subscriber received exactly the broadcast.
@@ -40,18 +40,18 @@ test_pg_membership(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	munit_assert_int(xtc_reg_create(&r), ==, XTC_OK);
 
-	munit_assert_int(xtc_pg_join(r, "g", a), ==, XTC_OK);
-	munit_assert_int(xtc_pg_join(r, "g", b), ==, XTC_OK);
-	munit_assert_int(xtc_pg_join(r, "g", c), ==, XTC_OK);
-	munit_assert_int(xtc_pg_join(r, "g", a), ==, XTC_OK);  /* idempotent */
+	munit_assert_int(xtc_pg_subscribe(r, "g", a), ==, XTC_OK);
+	munit_assert_int(xtc_pg_subscribe(r, "g", b), ==, XTC_OK);
+	munit_assert_int(xtc_pg_subscribe(r, "g", c), ==, XTC_OK);
+	munit_assert_int(xtc_pg_subscribe(r, "g", a), ==, XTC_OK);  /* idempotent */
 	n = 0;
 	munit_assert_int(xtc_pg_members(r, "g", count_cb, &n), ==, 3);
 	munit_assert_int(n, ==, 3);
 
-	munit_assert_int(xtc_pg_leave(r, "g", b), ==, XTC_OK);
+	munit_assert_int(xtc_pg_unsubscribe(r, "g", b), ==, XTC_OK);
 	n = 0;
 	munit_assert_int(xtc_pg_members(r, "g", count_cb, &n), ==, 2);
-	munit_assert_int(xtc_pg_leave(r, "g", b), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_pg_unsubscribe(r, "g", b), ==, XTC_E_INVAL);
 
 	/* An empty group sends to nobody. */
 	munit_assert_int(xtc_pg_send(r, "empty", "x", 1), ==, 0);
@@ -99,7 +99,7 @@ test_pg_broadcast(const MunitParameter p[], void *d)
 		memset(&st[i], 0, sizeof st[i]);
 		munit_assert_int(xtc_proc_spawn(loop, sub_proc, &st[i], NULL,
 		    &pid[i]), ==, XTC_OK);
-		munit_assert_int(xtc_pg_join(r, "topic", pid[i]), ==, XTC_OK);
+		munit_assert_int(xtc_pg_subscribe(r, "topic", pid[i]), ==, XTC_OK);
 	}
 
 	/* Broadcast before running the loop; the messages queue in each
@@ -165,7 +165,7 @@ test_pg_send_owned(const MunitParameter p[], void *d)
 		for (i = 0; i < n; i++) {
 			munit_assert_int(xtc_proc_spawn(loop, own_sub, NULL,
 			    NULL, &pid), ==, XTC_OK);
-			munit_assert_int(xtc_pg_join(r, "t", pid), ==, XTC_OK);
+			munit_assert_int(xtc_pg_subscribe(r, "t", pid), ==, XTC_OK);
 		}
 		xtc_atomic_store_i32(&g_own_same, 0, xtc_mo_seq_cst);
 		xtc_atomic_store_i32(&g_own_got, 0, xtc_mo_seq_cst);
