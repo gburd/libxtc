@@ -264,7 +264,8 @@ g2_inputs(void)
 	xtc_svr_t *svr = NULL;
 	xtc_sup_opts_t zs = XTC_SUP_OPTS_INIT;
 	xtc_child_spec_t zk[2];
-	xtc_svr_opts_t *so2;
+	void *so2;
+	xtc_svr_opts_t sz2 = XTC_SVR_OPTS_INIT;
 	xtc_svr_callbacks_t zcb = XTC_SVR_CALLBACKS_INIT;
 	int i;
 
@@ -297,13 +298,16 @@ g2_inputs(void)
 	CHECK(xtc_atomic_load_i32(&g_kid_runs, xtc_mo_seq_cst) >= 3);
 
 	/* A 2.1 child spec (ends at loop, 56 bytes on LP64), heap-allocated
-	 * at exactly that size: the 2.2 knobs past it read as defaults. */
-	kids = xalloc(offsetof(xtc_child_spec_t, mailbox_watermark_fn));
-	memset(kids, 0, offsetof(xtc_child_spec_t, mailbox_watermark_fn));
-	((xtc_child_spec_t *)(void *)kids)->size =
-	    offsetof(xtc_child_spec_t, mailbox_watermark_fn);
-	((xtc_child_spec_t *)(void *)kids)->fn = kid;
-	((xtc_child_spec_t *)(void *)kids)->policy = XTC_RESTART_TEMPORARY;
+	 * at exactly that size: the 2.2 knobs past it read as defaults.  It
+	 * is filled through a full-size local and copied, because a store
+	 * through an xtc_child_spec_t pointer into the short block is itself
+	 * an access past the allocation (UBSan object-size). */
+	memset(&zk[0], 0, sizeof zk[0]);
+	zk[0].size = offsetof(xtc_child_spec_t, mailbox_watermark_fn);
+	zk[0].fn = kid;
+	zk[0].policy = XTC_RESTART_TEMPORARY;
+	kids = xalloc(zk[0].size);
+	memcpy(kids, &zk[0], zk[0].size);
 	CHECK(xtc_sup_start(loop, NULL, (const xtc_child_spec_t *)(void *)kids,
 	          1, &sup) == XTC_OK);
 	free(kids);
@@ -342,13 +346,15 @@ g2_inputs(void)
 	CHECK(g_init_ran);
 
 	/* 2.1 svr opts (end at mailbox_cap), heap-allocated at exactly that
-	 * size: the 2.2 proc knobs past it read as defaults. */
-	so2 = xalloc(offsetof(xtc_svr_opts_t, mailbox_watermark_fn));
-	so2->size = offsetof(xtc_svr_opts_t, mailbox_watermark_fn);
-	so2->name = "old";
-	so2->mailbox_cap = 8;
+	 * size: the 2.2 proc knobs past it read as defaults.  Filled through
+	 * a full-size local, as the child spec above is. */
+	sz2.size = offsetof(xtc_svr_opts_t, mailbox_watermark_fn);
+	sz2.name = "old";
+	sz2.mailbox_cap = 8;
+	so2 = xalloc(sz2.size);
+	memcpy(so2, &sz2, sz2.size);
 	CHECK(xtc_svr_start(loop, (const xtc_svr_callbacks_t *)(void *)&zcb,
-	          NULL, so2, &svr) == XTC_OK);
+	          NULL, (const xtc_svr_opts_t *)so2, &svr) == XTC_OK);
 	free(so2);
 	if (svr != NULL)
 		CHECK(xtc_svr_stop(svr) == XTC_OK);
