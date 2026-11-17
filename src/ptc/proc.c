@@ -3461,11 +3461,13 @@ xtc_recv_correlate(const void *corr_value, size_t corr_size,
 
 	while (collected < n_expected) {
 		int64_t per_call_to = -1;
+		/* A reply already queued is collected even when the deadline
+		 * has passed: an expired deadline only stops the wait, so a
+		 * timeout of 0 polls the mailbox instead of returning empty. */
 		if (deadline >= 0) {
 			int64_t now;
 			(void)__os_clock_mono(&now);
-			if (now >= deadline) break;
-			per_call_to = deadline - now;
+			per_call_to = now >= deadline ? 0 : deadline - now;
 		}
 		rc = __do_recv(__corr_match, &ctx,
 		    &out_msgs[collected].data,
