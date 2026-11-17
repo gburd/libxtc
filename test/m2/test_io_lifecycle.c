@@ -10,6 +10,7 @@
 #include "munit.h"
 #include "xtc.h"
 #include "xtc_io.h"
+#include "xtc_runtime.h"
 
 static MunitResult
 test_init_fini(const MunitParameter p[], void *d)
@@ -63,11 +64,11 @@ test_iowq_hint(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	/* Best-effort io-wq worker cap hint (a uring tunable; a no-op on
 	 * other backends).  Setting it must not perturb normal init/fini. */
-	xtc_io_set_iowq_max_workers(8, 16);
+	xtc_runtime_set_iowq_workers(8, 16);
 	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	xtc_io_destroy(io);
 	/* Zero means "kernel default" -- also accepted. */
-	xtc_io_set_iowq_max_workers(0, 0);
+	xtc_runtime_set_iowq_workers(0, 0);
 	return MUNIT_OK;
 }
 

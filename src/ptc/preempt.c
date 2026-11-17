@@ -68,6 +68,7 @@
 #include "xtc_log.h"
 #include "preempt_int.h"
 #include "xtc_probes.h"
+#include "xtc_runtime.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -224,7 +225,7 @@ __xtc_preempt_errno_set(int e)
 #if defined(__aarch64__) && defined(__linux__)
 /* 1 when the CPU has SME: the aarch64 trampoline then leaves streaming
  * mode, turns ZA off and clears TPIDR2_EL0 before its xtc_yield.  Set by
- * xtc_preempt_set_involuntary before the first redirect can happen. */
+ * xtc_runtime_set_preempt_involuntary before the first redirect can happen. */
 XTC_PREEMPT_HIDDEN int __xtc_preempt_a64_sme;
 #endif
 #endif
@@ -883,7 +884,7 @@ xtc_preempt_supported(void)
 
 #endif
 
-/* PUBLIC: int xtc_preempt_set_involuntary __P((int)); */
+/* PUBLIC: int xtc_runtime_set_preempt_involuntary __P((int)); */
 /*
  * Enable (on != 0) or disable signal-context involuntary yield (Phase
  * 2).  When enabled AND a per-worker timer is armed, a tick preempts
@@ -900,7 +901,7 @@ xtc_preempt_supported(void)
  * log once.  Disabling always succeeds.
  */
 int
-xtc_preempt_set_involuntary(int on)
+xtc_runtime_set_preempt_involuntary(int on)
 {
 	extern int __xtc_coro_preempt_effective(void);
 	const char *why = NULL;
@@ -925,10 +926,10 @@ xtc_preempt_set_involuntary(int on)
 			 * stderr too, once (a refused opt-in must not be
 			 * silent). */
 			xtc_log_write(xtc_log_default(), XTC_LOG_ERROR,
-			    "xtc_preempt_set_involuntary: involuntary "
+			    "xtc_runtime_set_preempt_involuntary: involuntary "
 			    "preemption stays off: %s", why);
 			fprintf(stderr, "XTC DIAGNOSTIC: "
-			    "xtc_preempt_set_involuntary: involuntary "
+			    "xtc_runtime_set_preempt_involuntary: involuntary "
 			    "preemption stays off: %s\n", why);
 		}
 	}
@@ -949,6 +950,13 @@ xtc_preempt_set_involuntary(int on)
 #endif
 	xtc_atomic_store_i32(&g_involuntary_on, 1, xtc_mo_relaxed);
 	return XTC_OK;
+}
+
+/* PUBLIC: int xtc_runtime_get_preempt_involuntary __P((void)); */
+int
+xtc_runtime_get_preempt_involuntary(void)
+{
+	return xtc_atomic_load_i32(&g_involuntary_on, xtc_mo_relaxed);
 }
 
 /*

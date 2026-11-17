@@ -110,7 +110,7 @@ XTC_API int  xtc_exec_run(xtc_exec_t *exec);
  *     policy as separate knobs means a consumer who wants some procs
  *     movable does not have to pay an executor-wide policy's runtime
  *     cost, and vice versa.
- *   - Distinct from xtc_preempt_set_involuntary, which is a
+ *   - Distinct from xtc_runtime_set_preempt_involuntary, which is a
  *     PROCESS-WIDE toggle (no xtc_exec_t argument) governing the
  *     signal-context preemption redirect, not scoped to one executor.
  *

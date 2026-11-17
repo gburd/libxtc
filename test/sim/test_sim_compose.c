@@ -49,6 +49,7 @@
 #include "xtc_chan.h"
 #include "xtc_lockmgr.h"
 #include "xtc_sim.h"
+#include "xtc_runtime.h"
 
 #include "bufmgr.h"
 #include "btree.h"
@@ -367,7 +368,7 @@ main(int argc, char **argv)
 
 	/* SQL on a fiber needs sqlxtc's 512 KiB stack (main.c): the 64 KiB
 	 * default overflows in bt_insert_leaf on FreeBSD/clang. */
-	if (xtc_set_stack_size(512u * 1024u) != XTC_OK)
+	if (xtc_runtime_set_stack_size(512u * 1024u) != XTC_OK)
 		return 1;
 	if (argc > 1) base = strtoull(argv[1], NULL, 0);
 	if (argc > 2) n = atoi(argv[2]);

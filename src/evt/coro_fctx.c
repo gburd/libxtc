@@ -18,8 +18,8 @@
  *	compiles to an empty unit.
  *
  *	Surface and contract are identical to coro_uctx.c: xtc_async,
- *	__xtc_coro_step, xtc_await, xtc_yield, xtc_stack_size /
- *	xtc_set_stack_size, plus the busy-loop-avoidance verdict logic
+ *	__xtc_coro_step, xtc_await, xtc_yield, xtc_runtime_get_stack_size /
+ *	xtc_runtime_set_stack_size, plus the busy-loop-avoidance verdict logic
  *	(return PENDING when parked on an awaitee, a timer, or an fd).
  *
  *	The fcontext model (see the asm headers):
@@ -53,6 +53,7 @@
 #if defined(XTC_CORO_FCTX)
 
 #include "xtc_async.h"
+#include "xtc_runtime.h"
 #include "loop_int.h"
 #include "coro_int.h"
 #include "xtc_inject.h"   /* coro.switch_window test hook */
@@ -259,11 +260,11 @@ __sched_fctx_slot(void)
  * and the jump.  See coro_preempt.h. */
 #include "coro_preempt.h"
 
-/* Default stack size; configurable via xtc_set_stack_size(). */
+/* Default stack size; configurable via xtc_runtime_set_stack_size(). */
 static size_t __xtc_stack_size = 64 * 1024;
 
 size_t
-xtc_stack_size(void)
+xtc_runtime_get_stack_size(void)
 {
 	return __xtc_stack_size;
 }
@@ -288,7 +289,7 @@ __xtc_stack_size_norm(size_t bytes, size_t *out)
 }
 
 int
-xtc_set_stack_size(size_t bytes)
+xtc_runtime_set_stack_size(size_t bytes)
 {
 	int rc = __xtc_stack_size_norm(bytes, &bytes);
 	if (rc == XTC_OK)

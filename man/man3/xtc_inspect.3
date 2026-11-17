@@ -216,7 +216,7 @@ the proc was dead.
 The proc's fiber stack in bytes: its
 .Va xtc_proc_opts_t.stack_size
 rounded to a page, or the
-.Fn xtc_stack_size
+.Fn xtc_runtime_get_stack_size
 in force at its spawn
 .Pq Xr xtc_async 3 .
 Added in 2.2; check

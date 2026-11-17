@@ -18,6 +18,7 @@
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "xtc_alloc_audit.h"
+#include "xtc_runtime.h"
 #include "os_alloc.h"
 
 struct audit_state {
@@ -62,7 +63,7 @@ test_proc_leaks(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	memset(&s, 0, sizeof s);
-	munit_assert_int(xtc_alloc_audit_enable(1), ==, XTC_OK);
+	munit_assert_int(xtc_runtime_set_alloc_audit(1), ==, XTC_OK);
 
 	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	opts.name = "leaker";
@@ -102,7 +103,7 @@ test_proc_leaks(const MunitParameter p[], void *d)
 	munit_assert_size(cnt, ==, 0);
 
 	xtc_loop_destroy(loop);
-	munit_assert_int(xtc_alloc_audit_enable(0), ==, XTC_OK);
+	munit_assert_int(xtc_runtime_set_alloc_audit(0), ==, XTC_OK);
 	return MUNIT_OK;
 }
 
@@ -156,7 +157,7 @@ test_failed_realloc_keeps_record(const MunitParameter p[], void *d)
 	oom_on_realloc = 0;
 	munit_assert_int(__os_alloc_set_hook(&oom_h), ==, XTC_OK);
 
-	munit_assert_int(xtc_alloc_audit_enable(1), ==, XTC_OK);
+	munit_assert_int(xtc_runtime_set_alloc_audit(1), ==, XTC_OK);
 	xtc_alloc_audit_stats(&cnt0, &bytes0);
 
 	munit_assert_int(__os_malloc(64, &p0), ==, XTC_OK);
@@ -192,7 +193,7 @@ test_failed_realloc_keeps_record(const MunitParameter p[], void *d)
 	xtc_alloc_audit_stats(&cnt, &bytes);
 	munit_assert_size(cnt, ==, cnt0);
 
-	munit_assert_int(xtc_alloc_audit_enable(0), ==, XTC_OK);
+	munit_assert_int(xtc_runtime_set_alloc_audit(0), ==, XTC_OK);
 	munit_assert_int(__os_alloc_set_hook(&down_h), ==, XTC_OK);
 	return MUNIT_OK;
 }

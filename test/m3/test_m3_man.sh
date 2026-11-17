@@ -9,8 +9,12 @@ H="$XTC_SRC_DIR/src/inc/xtc_loop.h"
 
 [ -f "$PAGE" ] || { echo "  [D9] FAIL: $PAGE missing" >&2; exit 1; }
 
+# The header minus its "Deprecated names" block: an old name is
+# documented on the page of its replacement (docs/deprecations.md).
+LIVE=$(sed '/Deprecated names (docs\/deprecations.md)/,/^#ifdef __cplusplus/d' "$H")
+
 # Public functions: anything xtc_(loop|task|waker|timer)_*.
-fns=$(grep -oE 'xtc_(loop|task|waker|timer)_[a-z_]+' "$H" | sort -u)
+fns=$(printf "%s\n" "$LIVE" | grep -oE 'xtc_(loop|task|waker|timer)_[a-z_]+' | sort -u)
 for fn in $fns; do
 	if ! grep -q "$fn" "$PAGE"; then
 		echo "  [D9] FAIL: $PAGE missing $fn" >&2

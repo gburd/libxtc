@@ -1,0 +1,195 @@
+.\" Copyright (c) 2026, The XTC Project
+.\" Use of this source code is governed by the ISC License.
+.Dd November 16, 2026
+.Dt XTC_RUNTIME 3
+.Os
+.Sh NAME
+.Nm xtc_runtime_set_stack_size ,
+.Nm xtc_runtime_get_stack_size ,
+.Nm xtc_runtime_set_stack_reclaim ,
+.Nm xtc_runtime_get_stack_reclaim ,
+.Nm xtc_runtime_set_blocking_threads ,
+.Nm xtc_runtime_get_blocking_threads ,
+.Nm xtc_runtime_set_preempt_involuntary ,
+.Nm xtc_runtime_get_preempt_involuntary ,
+.Nm xtc_runtime_set_iowq_workers ,
+.Nm xtc_runtime_get_iowq_workers ,
+.Nm xtc_runtime_set_alloc_audit ,
+.Nm xtc_runtime_get_alloc_audit ,
+.Nm xtc_set_stack_size ,
+.Nm xtc_stack_size ,
+.Nm xtc_stack_reclaim_enable ,
+.Nm xtc_stack_reclaim_disable ,
+.Nm xtc_stack_reclaim_enabled ,
+.Nm xtc_blocking_pool_size ,
+.Nm xtc_preempt_set_involuntary ,
+.Nm xtc_io_set_iowq_max_workers ,
+.Nm xtc_alloc_audit_enable
+.Nd process-global runtime knobs
+.Sh SYNOPSIS
+.In xtc_runtime.h
+.Ft int
+.Fn xtc_runtime_set_stack_size "size_t bytes"
+.Ft size_t
+.Fn xtc_runtime_get_stack_size "void"
+.Ft int
+.Fn xtc_runtime_set_stack_reclaim "size_t keep_bytes"
+.Ft size_t
+.Fn xtc_runtime_get_stack_reclaim "void"
+.Ft int
+.Fn xtc_runtime_set_blocking_threads "int nthreads"
+.Ft int
+.Fn xtc_runtime_get_blocking_threads "void"
+.Ft int
+.Fn xtc_runtime_set_preempt_involuntary "int on"
+.Ft int
+.Fn xtc_runtime_get_preempt_involuntary "void"
+.Ft void
+.Fn xtc_runtime_set_iowq_workers "unsigned bound" "unsigned unbound"
+.Ft void
+.Fn xtc_runtime_get_iowq_workers "unsigned *out_bound" "unsigned *out_unbound"
+.Ft int
+.Fn xtc_runtime_set_alloc_audit "int on"
+.Ft int
+.Fn xtc_runtime_get_alloc_audit "void"
+.Sh DESCRIPTION
+These calls configure the process as a whole.
+Each setter has a getter that reads back the value in force.
+A knob read when the thing it sizes is created is set before that
+.Pq Dq before first use ;
+the others may change at any time.
+.Bl -tag -width Ds
+.It Fn xtc_runtime_set_stack_size
+The default stack size of a fiber created afterward, in bytes, rounded
+up to a whole page; any time.
+.Dv XTC_E_INVAL
+below 16 KiB.
+The default is 64 KiB; a proc may ask for its own size
+.Pq Xr xtc_proc 3 .
+.It Fn xtc_runtime_set_stack_reclaim
+A nonzero
+.Fa keep_bytes
+turns on reclamation of a parked fiber's unused stack tail, leaving
+.Fa keep_bytes
+mapped below its stack pointer; 0 turns it off; any time
+.Pq Xr xtc_stack_reclaim 3 .
+.Dv XTC_E_NOSYS
+where the platform cannot reclaim, and it stays off.
+The getter returns 0 when it is off.
+Off by default.
+.It Fn xtc_runtime_set_blocking_threads
+Pin the blocking-offload pool
+.Pq Xr xtc_blocking 3
+at
+.Fa nthreads
+threads, 1 to 64, before its first use.
+.Dv XTC_E_STATE
+once the pool has started,
+.Dv XTC_E_INVAL
+out of range.
+The getter returns 0 while the pool sizes itself, the default.
+.It Fn xtc_runtime_set_preempt_involuntary
+Turn signal-context preemption on or off
+.Pq Xr xtc_preempt_involuntary 3 ;
+any time.
+.Dv XTC_E_NOSYS
+where it is not supported, and it stays off.
+Off by default.
+.It Fn xtc_runtime_set_iowq_workers
+The io_uring io-wq worker caps per ring, for bounded and unbounded
+work; 0 leaves the kernel default for that class.
+Before the rings are created
+.Pq Xr xtc_io 3 .
+Other backends record the values and ignore them.
+The default is (4, 0).
+.It Fn xtc_runtime_set_alloc_audit
+Turn the per-proc allocation auditor on or off
+.Pq Xr xtc_alloc_audit 3 ;
+any time.
+.Dv XTC_E_NOMEM
+if its table cannot be allocated.
+.El
+.Sh RETURN VALUES
+The int-returning setters return
+.Dv XTC_OK
+or the error named above.
+The getters cannot fail.
+.Sh ENVIRONMENT
+The library reads these variables, through its own environment
+wrapper, and never while the simulator is running:
+.Bl -tag -width Ds
+.It Ev XTC_TAIL_ENABLE
+At startup, turns the tail ring on: any value other than
+.Ql 0 ,
+.Ql off
+or
+.Ql false
+enables the scheduler source,
+.Ql all
+every source
+.Pq Xr xtc_tail 3 .
+.It Ev XTC_CTRL_FD
+In a child started by
+.Xr xtc_osproc 3
+or
+.Xr xtc_xproc 3 :
+the number of its inherited control socket.
+The parent sets it.
+.It Ev XTC_AIO_FORCE_OFFLOAD
+.Ql 1
+sends every
+.Xr xtc_aio 3
+operation to the offload pool instead of the native backend; a
+testing aid.
+.It Ev PATH
+.Xr xtc_osproc 3
+searches it for a program named without a slash.
+.It Ev TMPDIR , TMP , TEMP
+The directory for temporary files, in that order.
+.El
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Fn xtc_set_stack_size
+Use
+.Fn xtc_runtime_set_stack_size .
+.It Fn xtc_stack_size
+Use
+.Fn xtc_runtime_get_stack_size .
+.It Fn xtc_stack_reclaim_enable
+Use
+.Fn xtc_runtime_set_stack_reclaim ;
+keep_bytes 0 now means off; the old 0 (one page) is the page size.
+.It Fn xtc_stack_reclaim_disable
+Use
+.Fn xtc_runtime_set_stack_reclaim ;
+call it with 0.
+.It Fn xtc_stack_reclaim_enabled
+Use
+.Fn xtc_runtime_get_stack_reclaim ;
+nonzero (the keep margin) when on.
+.It Fn xtc_blocking_pool_size
+Use
+.Fn xtc_runtime_set_blocking_threads ;
+"too late" is XTC_E_STATE under the new name, XTC_E_INVAL under the old.
+.It Fn xtc_preempt_set_involuntary
+Use
+.Fn xtc_runtime_set_preempt_involuntary .
+.It Fn xtc_io_set_iowq_max_workers
+Use
+.Fn xtc_runtime_set_iowq_workers .
+.It Fn xtc_alloc_audit_enable
+Use
+.Fn xtc_runtime_set_alloc_audit .
+.El
+.Sh SEE ALSO
+.Xr xtc_inspect 3 ,
+.Xr xtc_blocking 3 ,
+.Xr xtc_stack_reclaim 3 ,
+.Xr xtc 7
+.Sh HISTORY
+The set and get pairs first appeared in xtc 2.2.0, replacing per-module
+setters that remain as deprecated names until 3.0.

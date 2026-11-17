@@ -8,7 +8,11 @@ H="$XTC_SRC_DIR/src/inc/xtc_exec.h"
 
 [ -f "$PAGE" ] || { echo "  [D11] FAIL: $PAGE missing" >&2; exit 1; }
 
-fns=$(grep -oE 'xtc_exec_[a-z_]+' "$H" | sort -u)
+# The header minus its "Deprecated names" block: an old name is
+# documented on the page of its replacement (docs/deprecations.md).
+LIVE=$(sed '/Deprecated names (docs\/deprecations.md)/,/^#ifdef __cplusplus/d' "$H")
+
+fns=$(printf "%s\n" "$LIVE" | grep -oE 'xtc_exec_[a-z_]+' | sort -u)
 for fn in $fns; do
 	if ! grep -q "$fn" "$PAGE"; then
 		echo "  [D11] FAIL: $PAGE missing $fn" >&2

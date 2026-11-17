@@ -721,6 +721,7 @@ preempt_tick_raw(void)
 #include "xtc_inject.h"
 #include "xtc_preempt.h"
 #include "xtc_proc.h"
+#include "xtc_runtime.h"
 
 static long g_mp_peer_runs;
 static int g_mp_arm, g_mp_hits, g_mp_stop;
@@ -801,13 +802,13 @@ test_magazine_preempt(const MunitParameter p[], void *d)
 	 * CPU-time interval never elapses, so every tick is our raise. */
 	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
 	    ==, XTC_OK);
-	xtc_preempt_set_involuntary(1);
+	xtc_runtime_set_preempt_involuntary(1);
 	munit_assert_int(xtc_proc_spawn(l, mp_owner, NULL, NULL, NULL), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_proc_spawn(l, mp_peer, NULL, NULL, NULL), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	xtc_preempt_set_involuntary(0);
+	xtc_runtime_set_preempt_involuntary(0);
 	xtc_exec_destroy(e);
 	(void)xtc_inject_detach("slab.magazine_window");
 	xtc_slab_destroy(g_slab);

@@ -32,6 +32,7 @@
 #include "xtc_async.h"
 #include "xtc_res.h"
 #include "xtc_int.h"
+#include "xtc_runtime.h"
 
 static int64_t g_completions;
 static int g_iters_per_task;
@@ -122,7 +123,7 @@ main(int argc, char **argv)
 	 * how many tasks can coexist.  On Linux the default is 65530
 	 * (kernel < 6.0) or 1M (newer); we degrade gracefully when
 	 * hit -- xtc_async returns a non-OK rc, no crash. */
-	if (xtc_set_stack_size(16 * 1024) != XTC_OK) {
+	if (xtc_runtime_set_stack_size(16 * 1024) != XTC_OK) {
 		fprintf(stderr, "set_stack_size failed\n");
 		return 1;
 	}

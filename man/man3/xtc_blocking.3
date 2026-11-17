@@ -7,7 +7,6 @@
 .Nm xtc_blocking_run ,
 .Nm xtc_blocking_run_off_loop ,
 .Nm xtc_blocking_submit ,
-.Nm xtc_blocking_pool_size ,
 .Nm xtc_blocking_shutdown
 .Nd offload blocking work to a thread pool without stalling the loop
 .Sh SYNOPSIS
@@ -19,8 +18,6 @@
 .Fn xtc_blocking_run_off_loop "int (*fn)(void *)" "void *arg" "int *out_result"
 .Ft int
 .Fn xtc_blocking_submit "int (*fn)(void *)" "void *arg"
-.Ft int
-.Fn xtc_blocking_pool_size "int nthreads"
 .Ft void
 .Fn xtc_blocking_shutdown "void"
 .Sh DESCRIPTION
@@ -108,7 +105,7 @@ runs (or has
 .Fa fn
 free it); there is no completion signal.
 .Pp
-.Fn xtc_blocking_pool_size
+.Fn xtc_runtime_set_blocking_threads
 pins the pool to a fixed
 .Fa nthreads
 worker threads, overriding the automatic default.  It must be called
@@ -198,7 +195,7 @@ per concurrent call) and, when
 failed, ran
 .Fa fn
 inline on the loop thread, stalling every other process on that loop.
-.Fn xtc_blocking_pool_size
+.Fn xtc_runtime_set_blocking_threads
 returns
 .Dv XTC_OK ,
 or

@@ -49,6 +49,7 @@
 #include "xtc_preempt.h"
 #if !defined(PS_BEFORE)
 #include "xtc_preempt_involuntary.h"
+#include "xtc_runtime.h"
 #endif
 
 #if !defined(__has_feature)
@@ -69,10 +70,10 @@ extern int __xtc_preempt_pc_ok(uintptr_t pc);
  * safe-point check (void set_involuntary, no involuntary header) to show
  * them failing there: cc -DPS_BEFORE ... */
 #if defined(PS_BEFORE)
-#define XTC_PS_ENABLE() xtc_preempt_set_involuntary(1)
+#define XTC_PS_ENABLE() xtc_runtime_set_preempt_involuntary(1)
 #else
 #define XTC_PS_ENABLE() \
-	munit_assert_int(xtc_preempt_set_involuntary(1), ==, XTC_OK)
+	munit_assert_int(xtc_runtime_set_preempt_involuntary(1), ==, XTC_OK)
 #endif
 
 static int g_ready, g_done;
@@ -121,7 +122,7 @@ ps_run(void (*fn)(void *), int n)
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	xtc_atomic_store_i32(&g_done, 1, xtc_mo_seq_cst);
 	(void)pthread_join(kt, NULL);
-	(void)xtc_preempt_set_involuntary(0);
+	(void)xtc_runtime_set_preempt_involuntary(0);
 	xtc_exec_destroy(e);
 }
 
@@ -344,7 +345,7 @@ test_ps_classify(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	if (ps_skip() != MUNIT_OK)
 		return MUNIT_SKIP;
-	munit_assert_int(xtc_preempt_set_involuntary(1), ==, XTC_OK);
+	munit_assert_int(xtc_runtime_set_preempt_involuntary(1), ==, XTC_OK);
 	munit_assert_int(__xtc_preempt_pc_ok(
 	    (uintptr_t)&ps_classify_dummy), ==, 1);   /* XTC_PREEMPTIBLE */
 	/* This binary links libxtc.a, so the rest of the executable is not
@@ -354,7 +355,7 @@ test_ps_classify(const MunitParameter p[], void *d)
 	munit_assert_int(__xtc_preempt_pc_ok(g_libc_pc), ==, 0);   /* libc */
 	munit_assert_int(__xtc_preempt_pc_ok((uintptr_t)&xtc_yield), ==, 0);
 	munit_assert_int(__xtc_preempt_pc_ok(
-	    (uintptr_t)&xtc_preempt_set_involuntary), ==, 0);   /* libxtc */
+	    (uintptr_t)&xtc_runtime_set_preempt_involuntary), ==, 0);   /* libxtc */
 	/* A data range (a stand-in for a JIT buffer) is not preemptible
 	 * until added; libxtc's own text can never be added. */
 	munit_assert_int(__xtc_preempt_pc_ok((uintptr_t)&g_jit[8]), ==, 0);
@@ -370,7 +371,7 @@ test_ps_classify(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_preempt_region_add((const void *)(g_libc_pc - 64),
 	    (const void *)(g_libc_pc + 64)), ==, XTC_E_INVAL);
 
-	(void)xtc_preempt_set_involuntary(0);
+	(void)xtc_runtime_set_preempt_involuntary(0);
 	return MUNIT_OK;
 }
 
@@ -385,7 +386,7 @@ test_ps_tick_cost(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	if (ps_skip() != MUNIT_OK)
 		return MUNIT_SKIP;
-	munit_assert_int(xtc_preempt_set_involuntary(1), ==, XTC_OK);
+	munit_assert_int(xtc_runtime_set_preempt_involuntary(1), ==, XTC_OK);
 	pcs[0] = (uintptr_t)&ps_classify_dummy;
 	pcs[1] = (uintptr_t)&g_jit[0];
 	pcs[2] = (uintptr_t)&xtc_yield;
@@ -393,7 +394,7 @@ test_ps_tick_cost(const MunitParameter p[], void *d)
 	for (k = 0; k < n; k++)
 		sink += __xtc_preempt_pc_ok(pcs[k % 3]);
 	t1 = xtc_clock_mono();
-	(void)xtc_preempt_set_involuntary(0);
+	(void)xtc_runtime_set_preempt_involuntary(0);
 	munit_logf(MUNIT_LOG_INFO, "safe-point check: %.1f ns per tick",
 	    (double)(t1 - t0) / (double)n);
 	munit_assert_int(sink, >, 0);

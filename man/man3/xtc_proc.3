@@ -155,10 +155,10 @@ of 0 is
 .Va stack_size
 (0 by default) gives this process a fiber stack of that many bytes
 instead of the process-wide
-.Fn xtc_stack_size ,
+.Fn xtc_runtime_get_stack_size ,
 so one deep-recursing process does not make every stack bigger.
 It is checked and rounded like
-.Fn xtc_set_stack_size :
+.Fn xtc_runtime_set_stack_size :
 below 16 KiB the spawn fails with
 .Er XTC_E_INVAL ,
 and a size that is not a page multiple is rounded up.
@@ -208,7 +208,7 @@ A loop holds as many live processes as memory and its
 caps
 .Pq Dv XTC_RES_TASKS , No 100,000 by default
 allow; each costs a fiber stack
-.Pq Fn xtc_set_stack_size , Xr xtc_async 3 .
+.Pq Fn xtc_runtime_set_stack_size , Xr xtc_async 3 .
 A spawn the caps refuse fails with
 .Dv XTC_E_RESOURCE
 and spawns nothing.

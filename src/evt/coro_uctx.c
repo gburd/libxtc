@@ -52,6 +52,7 @@ typedef int __xtc_coro_uctx_unused;
 #else
 
 #include "xtc_async.h"
+#include "xtc_runtime.h"
 #include "loop_int.h"
 #include "coro_int.h"
 
@@ -189,11 +190,11 @@ __san_coro_bottom(const struct xtc_coro *c)
 /* Per-thread cursor -- the coroutine currently executing on this thread. */
 XTC_THREAD_LOCAL struct xtc_coro *__xtc_current_coro = NULL;
 
-/* Default stack size; configurable via xtc_set_stack_size(). */
+/* Default stack size; configurable via xtc_runtime_set_stack_size(). */
 static size_t __xtc_stack_size = 64 * 1024;
 
 size_t
-xtc_stack_size(void)
+xtc_runtime_get_stack_size(void)
 {
 	return __xtc_stack_size;
 }
@@ -218,7 +219,7 @@ __xtc_stack_size_norm(size_t bytes, size_t *out)
 }
 
 int
-xtc_set_stack_size(size_t bytes)
+xtc_runtime_set_stack_size(size_t bytes)
 {
 	int rc = __xtc_stack_size_norm(bytes, &bytes);
 	if (rc == XTC_OK)

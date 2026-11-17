@@ -59,7 +59,7 @@ configure.ac probes for it:
 The coroutine substrate has two interchangeable implementations,
 selected at compile time, presenting an identical surface
 (`xtc_async`, `__xtc_coro_step`, `xtc_await`, `xtc_yield`,
-`xtc_stack_size`):
+`xtc_runtime_get_stack_size`):
 
   * `src/evt/coro_uctx.c` -- the ucontext implementation, used when
     `XTC_HAVE_UCONTEXT` is defined and fcontext is not the platform

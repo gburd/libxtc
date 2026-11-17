@@ -33,6 +33,7 @@
 #include "xtc_exec.h"
 #include "xtc_proc.h"
 #include "xtc_alloc_audit.h"
+#include "xtc_runtime.h"
 #include "os_alloc.h"    /* test-only: a counting allocator hook */
 
 #include <stdint.h>
@@ -84,11 +85,11 @@ audited_run2(xtc_proc_fn a, void *aa, xtc_proc_fn b, xtc_pid_t *ra)
 {
 	size_t c0 = 0, c1 = 0;
 	run2(a, aa, b, ra, ra);
-	munit_assert_int(xtc_alloc_audit_enable(1), ==, XTC_OK);
+	munit_assert_int(xtc_runtime_set_alloc_audit(1), ==, XTC_OK);
 	xtc_alloc_audit_stats(&c0, NULL);
 	run2(a, aa, b, ra, ra);
 	xtc_alloc_audit_stats(&c1, NULL);
-	(void)xtc_alloc_audit_enable(0);
+	(void)xtc_runtime_set_alloc_audit(0);
 	return c1 > c0 ? c1 - c0 : 0;
 }
 

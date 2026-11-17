@@ -8,8 +8,12 @@ H="$XTC_SRC_DIR/src/inc/xtc_async.h"
 
 [ -f "$PAGE" ] || { echo "  [D10] FAIL: $PAGE missing" >&2; exit 1; }
 
+# The header minus its "Deprecated names" block: an old name is
+# documented on the page of its replacement (docs/deprecations.md).
+LIVE=$(sed '/Deprecated names (docs\/deprecations.md)/,/^#ifdef __cplusplus/d' "$H")
+
 # Public functions.
-fns=$(grep -oE 'xtc_(async|await|yield|stack_size|set_stack_size)\b' "$H" | sort -u)
+fns=$(printf "%s\n" "$LIVE" | grep -oE 'xtc_(async|await|yield|stack_size|set_stack_size)\b' | sort -u)
 for fn in $fns; do
 	if ! grep -q "$fn" "$PAGE"; then
 		echo "  [D10] FAIL: $PAGE missing $fn" >&2

@@ -9,8 +9,12 @@ H="$XTC_SRC_DIR/src/inc/xtc_io.h"
 
 [ -f "$PAGE" ] || { echo "  [D8] FAIL: $PAGE missing" >&2; exit 1; }
 
+# The header minus its "Deprecated names" block: an old name is
+# documented on the page of its replacement (docs/deprecations.md).
+LIVE=$(sed '/Deprecated names (docs\/deprecations.md)/,/^#ifdef __cplusplus/d' "$H")
+
 # Functions
-fns=$(grep -oE 'xtc_io_[a-z_]+' "$H" | sort -u)
+fns=$(printf "%s\n" "$LIVE" | grep -oE 'xtc_io_[a-z_]+' | sort -u)
 for fn in $fns; do
 	if ! grep -q "$fn" "$PAGE"; then
 		echo "  [D8] FAIL: man page missing function $fn" >&2
@@ -19,7 +23,7 @@ for fn in $fns; do
 done
 
 # Flag macros
-flags=$(grep -oE 'XTC_IO_[A-Z]+' "$H" | sort -u)
+flags=$(printf "%s\n" "$LIVE" | grep -oE 'XTC_IO_[A-Z]+' | sort -u)
 for f in $flags; do
 	if ! grep -q "$f" "$PAGE"; then
 		echo "  [D8] FAIL: man page missing flag $f" >&2

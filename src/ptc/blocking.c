@@ -42,6 +42,7 @@
 #include "xtc_proc.h"
 #include "xtc_loop.h"   /* xtc_task_waker / xtc_waker_wake */
 #include "xtc_async.h"  /* xtc_yield */
+#include "xtc_runtime.h"
 #include "proc_int.h"   /* __xtc_proc_ctx_save/restore */
 #include "loop_int.h"   /* struct xtc_task: park_requested */
 #include "coro_int.h"   /* __xtc_current_task */
@@ -240,19 +241,32 @@ blk_grow_locked(void)
 		g_nstarted++;
 }
 
+/* PUBLIC: int xtc_runtime_set_blocking_threads __P((int)); */
 int
-xtc_blocking_pool_size(int nthreads)
+xtc_runtime_set_blocking_threads(int nthreads)
 {
 	int rc = XTC_OK;
 	(void)__xtc_mtx_lock(&g_lock);
 	if (g_started)
-		rc = XTC_E_INVAL;          /* too late */
+		rc = XTC_E_STATE; /* too late: the pool is up */
 	else if (nthreads >= 1 && nthreads <= BLK_MAX_THREADS)
 		g_nthreads = nthreads;
 	else
 		rc = XTC_E_INVAL;
 	(void)__xtc_mtx_unlock(&g_lock);
 	return rc;
+}
+
+/* PUBLIC: int xtc_runtime_get_blocking_threads __P((void)); */
+int
+xtc_runtime_get_blocking_threads(void)
+{
+	int n;
+
+	(void)__xtc_mtx_lock(&g_lock);
+	n = g_nthreads;
+	(void)__xtc_mtx_unlock(&g_lock);
+	return n;
 }
 
 /*

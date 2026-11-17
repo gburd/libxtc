@@ -23,7 +23,7 @@ mkdir -p "$OUT"
 # Categories: each is "slug|Title|space-separated man3 basenames (no .3)".
 # A page not listed in any category lands in "other".
 cat_defs='
-basics|Foundational basics|xtc_free xtc_stats xtc_log xtc_strerror xtc_cfg xtc_version_string xtc_version_components
+basics|Foundational basics|xtc_free xtc_runtime xtc_stats xtc_log xtc_strerror xtc_cfg xtc_version_string xtc_version_components
 event|Event runtime (L2)|xtc_loop xtc_exec xtc_async xtc_sched xtc_batch
 proc|Processes and messaging (L3)|xtc_proc xtc_chan xtc_svr xtc_osproc xtc_stream
 sync|Synchronization and locks (L3)|xtc_sync xtc_lwlock xtc_lrlock xtc_lockmgr xtc_rcu xtc_credit

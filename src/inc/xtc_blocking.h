@@ -84,9 +84,10 @@ XTC_API int xtc_blocking_run_off_loop(int (*fn)(void *), void *arg,
 XTC_API int xtc_blocking_submit(int (*fn)(void *), void *arg);
 
 /*
- * Pin the pool to a fixed size (worker threads), overriding the
- * automatic default.  Must be called before the first xtc_blocking_run
- * / xtc_blocking_submit; later calls return XTC_E_INVAL (too late).
+ * The pool can be pinned to a fixed size (worker threads), overriding
+ * the automatic default, with xtc_runtime_set_blocking_threads
+ * (xtc_runtime.h), before the first xtc_blocking_run /
+ * xtc_blocking_submit.
  *
  * By DEFAULT the pool auto-sizes: it starts with a CPU-scaled number of
  * workers (max(4, online CPUs), capped at 64) and grows on demand up to
@@ -94,10 +95,7 @@ XTC_API int xtc_blocking_submit(int (*fn)(void *), void *arg);
  * offload path is not an artificial bottleneck on a large host nor
  * over-provisioned on a small one.  Setting an explicit size disables
  * the growth and fixes the pool at exactly that many threads.
- *
- * PUBLIC: int  xtc_blocking_pool_size __P((int));
  */
-XTC_API int xtc_blocking_pool_size(int nthreads);
 
 /*
  * Stop the pool, joining its threads.  Idempotent; for orderly
@@ -107,6 +105,12 @@ XTC_API int xtc_blocking_pool_size(int nthreads);
  * PUBLIC: void xtc_blocking_shutdown __P((void));
  */
 XTC_API void xtc_blocking_shutdown(void);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_runtime_set_blocking_threads")
+XTC_API int xtc_blocking_pool_size(int nthreads);
 
 #ifdef __cplusplus
 }

@@ -47,7 +47,9 @@ result keeps working until it moves to the new name.
 <!-- renames:begin -->
 | Old (deprecated in 2.2) | New (2.2) | Kind | Notes |
 |---|---|---|---|
+| `xtc_alloc_audit_enable()` | `xtc_runtime_set_alloc_audit()` | function |  |
 | `xtc_batch_close()` | `xtc_batch_shutdown()` | function |  |
+| `xtc_blocking_pool_size()` | `xtc_runtime_set_blocking_threads()` | function | "too late" is XTC_E_STATE under the new name, XTC_E_INVAL under the old |
 | `xtc_bloom_fini()` | `xtc_bloom_destroy()` | function |  |
 | `xtc_bloom_init()` | `xtc_bloom_create()` | function | arguments reordered: (n_expected, fp_rate, out) |
 | `xtc_chan_demand_close()` | `xtc_chan_demand_shutdown()` | function |  |
@@ -61,15 +63,22 @@ result keeps working until it moves to the new name.
 | `xtc_hll_init()` | `xtc_hll_create()` | function | arguments reordered: (precision, out) |
 | `xtc_io_fini()` | `xtc_io_destroy()` | function | the new name returns void; the old one returns XTC_E_INVAL for NULL, else XTC_OK |
 | `xtc_io_init()` | `xtc_io_create()` | function |  |
+| `xtc_io_set_iowq_max_workers()` | `xtc_runtime_set_iowq_workers()` | function |  |
 | `xtc_loop_fini()` | `xtc_loop_destroy()` | function | the new name returns void; the old one returns XTC_E_INVAL for NULL, else XTC_OK |
 | `xtc_loop_init()` | `xtc_loop_create()` | function |  |
 | `xtc_pg_join()` | `xtc_pg_subscribe()` | function |  |
 | `xtc_pg_leave()` | `xtc_pg_unsubscribe()` | function |  |
+| `xtc_preempt_set_involuntary()` | `xtc_runtime_set_preempt_involuntary()` | function |  |
 | `xtc_scope_close()` | `xtc_scope_leave()` | function |  |
 | `xtc_scope_open()` | `xtc_scope_enter()` | function |  |
+| `xtc_set_stack_size()` | `xtc_runtime_set_stack_size()` | function |  |
 | `xtc_slab_pressure_listen()` | `xtc_slab_pressure_create()` | function | the handle is now returned: pass an out pointer and keep (or never destroy) it |
 | `xtc_slab_pressure_listen_ex()` | `xtc_slab_pressure_create()` | function | same arguments |
 | `xtc_slab_pressure_stop()` | `xtc_slab_pressure_destroy()` | function | the new name returns void; the old one returns XTC_E_INVAL for NULL, XTC_E_NOSYS without PSI, else XTC_OK |
+| `xtc_stack_reclaim_disable()` | `xtc_runtime_set_stack_reclaim()` | function | call it with 0 |
+| `xtc_stack_reclaim_enable()` | `xtc_runtime_set_stack_reclaim()` | function | keep_bytes 0 now means off; the old 0 (one page) is the page size |
+| `xtc_stack_reclaim_enabled()` | `xtc_runtime_get_stack_reclaim()` | function | nonzero (the keep margin) when on |
+| `xtc_stack_size()` | `xtc_runtime_get_stack_size()` | function |  |
 | `xtc_timer_release()` | `xtc_timer_detach()` | function |  |
 | `xtc_tnt_start()` | `xtc_tnt_run()` | function | same arguments; it blocks until the system stops, as before |
 | `xtc_xlink()` | `xtc_xproc_link()` | function |  |

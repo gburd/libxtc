@@ -42,6 +42,7 @@ cat >"$T/p.c" <<'PROBE'
 #include <stdio.h>
 #include "xtc.h"
 #include "xtc_preempt_involuntary.h"
+#include "xtc_runtime.h"
 #if defined(WITH_MARK)
 XTC_PREEMPTIBLE int marked(int x);
 XTC_PREEMPTIBLE int marked(int x) { return x * 3 + 1; }
@@ -62,10 +63,10 @@ main(int argc, char **argv)
 		printf("unsupported\n");
 		return 0;
 	}
-	a = xtc_preempt_set_involuntary(1);
-	(void)xtc_preempt_set_involuntary(0);
+	a = xtc_runtime_set_preempt_involuntary(1);
+	(void)xtc_runtime_set_preempt_involuntary(0);
 	b = xtc_preempt_region_add(region, region + sizeof region);
-	c = xtc_preempt_set_involuntary(1);
+	c = xtc_runtime_set_preempt_involuntary(1);
 	printf("enable=%d add=%d enable_after_add=%d\n", a, b, c);
 	return 0;
 }

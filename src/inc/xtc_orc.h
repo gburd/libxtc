@@ -91,7 +91,7 @@ typedef struct xtc_child_spec {
 	int mailbox_watermark_pct;    /* 0 = off, 1..100 */
 	int migratable;               /* 1 = work-stealable */
 	/* 2.2: the child's fiber stack in bytes, as
-	 * xtc_proc_opts_t.stack_size (0 = xtc_stack_size()); a size below
+	 * xtc_proc_opts_t.stack_size (0 = xtc_runtime_get_stack_size()); a size below
 	 * 16 KiB fails the spawn with XTC_E_INVAL. */
 	size_t stack_size;
 } xtc_child_spec_t;

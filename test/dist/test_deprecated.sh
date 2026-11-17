@@ -74,6 +74,19 @@ if [ -n "${XTC_BUILD_DIR:-}" ] && [ -f "$XTC_BUILD_DIR/libxtc.a" ]; then
 				bad="$bad $o" ;;
 		esac
 	done < "$work/old"
+	# Every function row has a deprecated declaration in some installed
+	# header's "Deprecated names" block, and each such declaration has a
+	# row: the two lists are the same set.
+	for h in "$SRC"/src/inc/xtc*.h; do
+		sed -n '/Deprecated names (docs\/deprecations.md)/,/^#ifdef __cplusplus/p' "$h"
+	done | grep -oE 'xtc_[a-z0-9_]+[(]' | tr -d '(' | sort -u > "$work/decl"
+	awk '$2 == "function" { print $1 }' "$work/old" | sort -u > "$work/rows"
+	if ! cmp -s "$work/decl" "$work/rows"; then
+		echo "  [deprecated] FAIL: header \"Deprecated names\" blocks and the" \
+			"docs/deprecations.md function rows differ (< header, > table):" >&2
+		diff "$work/decl" "$work/rows" | grep '^[<>]' >&2
+		exit 1
+	fi
 	if [ -n "$bad" ]; then
 		echo "  [deprecated] FAIL: docs/deprecations.md rows whose warning" \
 			"in test_deprecated_bridge.c is wrong:$bad" >&2

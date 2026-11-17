@@ -15,6 +15,7 @@
 #include "xtc_fsm.h"
 #include "os_alloc.h" /* __os_alloc_set_hook: track one block */
 #include "xtc_alloc_audit.h"
+#include "xtc_runtime.h"
 
 /* States for a tiny door: CLOSED -> OPEN -> CLOSED. */
 enum { S_CLOSED = 0, S_OPEN = 1, S_LOCKED = 2 };
@@ -768,12 +769,12 @@ test_fsm_wait_init(const MunitParameter p[], void *data)
 	munit_assert_int(xtc_fsm_start(w.loop, &cb, NULL, S_CLOSED, &o, &f), ==,
 	    XTC_E_STATE);
 	munit_assert_ptr_null(f);
-	munit_assert_int(xtc_alloc_audit_enable(1), ==, XTC_OK);
+	munit_assert_int(xtc_runtime_set_alloc_audit(1), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(w.loop, fsm_wait_driver, &w, NULL,
 	                     NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(w.loop), ==, XTC_OK);
-	(void)xtc_alloc_audit_enable(0);
+	(void)xtc_runtime_set_alloc_audit(0);
 	munit_assert_int(w.bad_rc, ==, XTC_E_NOMEM);
 	munit_assert_ptr_null(w.bad);
 	munit_assert_size(w.live1, ==, w.live0);

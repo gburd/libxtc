@@ -23,16 +23,21 @@
 #include <string.h>
 
 #include "xtc.h"
+#include "xtc_alloc_audit.h"
+#include "xtc_async.h"
 #include "xtc_batch.h"
+#include "xtc_blocking.h"
 #include "xtc_chan.h"
 #include "xtc_dispatch.h"
 #include "xtc_exec.h"
 #include "xtc_io.h"
 #include "xtc_loop.h"
 #include "xtc_pg.h"
+#include "xtc_preempt_involuntary.h"
 #include "xtc_prob.h"
 #include "xtc_proc.h"
 #include "xtc_reg.h"
+#include "xtc_runtime.h"
 #include "xtc_slab.h"
 #include "xtc_sync.h"
 #include "xtc_tnt.h"
@@ -251,6 +256,51 @@ bridge_xproc(void)
 	CHECK(xtc_xlink(NULL) == XTC_E_INVAL);
 }
 
+/* runtime knobs: the per-module setters -> xtc_runtime_set_ / _get_.
+ * Each old call is checked against the new getter. */
+static void
+bridge_runtime(void)
+{
+	size_t before = xtc_runtime_get_stack_size();
+	unsigned b = 0, u = 0;
+	int rc;
+
+	CHECK(xtc_set_stack_size(128 * 1024) == XTC_OK);
+	CHECK(xtc_stack_size() == 128 * 1024);
+	CHECK(xtc_runtime_get_stack_size() == 128 * 1024);
+	CHECK(xtc_set_stack_size(1024) == XTC_E_INVAL);
+	CHECK(xtc_runtime_set_stack_size(before) == XTC_OK);
+
+	rc = xtc_stack_reclaim_enable(0);
+	if (rc == XTC_OK) {
+		CHECK(xtc_stack_reclaim_enabled() == 1);
+		CHECK(xtc_runtime_get_stack_reclaim() > 0);
+	} else {
+		CHECK(rc == XTC_E_NOSYS);
+	}
+	xtc_stack_reclaim_disable();
+	CHECK(xtc_stack_reclaim_enabled() == 0);
+
+	/* The pool has not started in this program: a pin succeeds.  Out of
+	 * range stays XTC_E_INVAL. */
+	CHECK(xtc_blocking_pool_size(0) == XTC_E_INVAL);
+	CHECK(xtc_blocking_pool_size(3) == XTC_OK);
+	CHECK(xtc_runtime_get_blocking_threads() == 3);
+
+	CHECK(xtc_preempt_set_involuntary(0) == XTC_OK);
+	CHECK(xtc_runtime_get_preempt_involuntary() == 0);
+
+	xtc_io_set_iowq_max_workers(2, 7);
+	xtc_runtime_get_iowq_workers(&b, &u);
+	CHECK(b == 2 && u == 7);
+	xtc_runtime_set_iowq_workers(4, 0);
+
+	CHECK(xtc_alloc_audit_enable(1) == XTC_OK);
+	CHECK(xtc_runtime_get_alloc_audit() == 1);
+	CHECK(xtc_alloc_audit_enable(0) == XTC_OK);
+	CHECK(xtc_runtime_get_alloc_audit() == 0);
+}
+
 int
 main(void)
 {
@@ -263,6 +313,7 @@ main(void)
 	bridge_detach();
 	bridge_tnt();
 	bridge_xproc();
+	bridge_runtime();
 	printf("  [bridge] OK: every deprecated name still works\n");
 	return 0;
 }

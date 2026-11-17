@@ -57,6 +57,7 @@ orchestration, I/O, storage, observability):
 - [`xtc_rcu(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_rcu.3) -- epoch-based read-copy-update
 - [`xtc_reg(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_reg.3) -- named process registry
 - [`xtc_res(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_res.3) -- resource accountant with hard caps and high-water alerts
+- [`xtc_runtime(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_runtime.3) -- process-global runtime knobs
 - [`xtc_sched(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_sched.3) -- optional runtime lane policies
 - [`xtc_slab(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_slab.3) -- slab + magazine allocator
 - [`xtc_stack_reclaim(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_stack_reclaim.3) -- reclaim a parked fiber's unused stack memory

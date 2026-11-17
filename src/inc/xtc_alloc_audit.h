@@ -27,15 +27,13 @@ extern "C" {
 #endif
 
 /*
- * PUBLIC: int  xtc_alloc_audit_enable __P((int));
  * PUBLIC: void xtc_alloc_audit_stats __P((size_t *, size_t *));
  * PUBLIC: void xtc_alloc_audit_proc_leaks __P((xtc_pid_t, size_t *, size_t *));
  */
 
-/* Enable (on != 0) or disable the auditor.  Enabling wraps the
- * current allocator hook; disabling restores it.  Returns XTC_OK, or
- * XTC_E_NOMEM if the tracking table could not be allocated. */
-XTC_API int  xtc_alloc_audit_enable(int on);
+/* The auditor is turned on and off with xtc_runtime_set_alloc_audit
+ * (xtc_runtime.h): enabling wraps the current allocator hook, disabling
+ * restores it. */
 
 /* Total live (unfreed) allocations and their byte sum across all
  * owners.  Either pointer may be NULL. */
@@ -47,6 +45,12 @@ XTC_API void xtc_alloc_audit_stats(size_t *out_count, size_t *out_bytes);
  * the process's xtc_proc_at_exit hook or after it is reaped. */
 XTC_API void xtc_alloc_audit_proc_leaks(xtc_pid_t pid, size_t *out_count,
                                         size_t *out_bytes);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_runtime_set_alloc_audit")
+XTC_API int xtc_alloc_audit_enable(int on);
 
 #ifdef __cplusplus
 }

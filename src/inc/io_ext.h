@@ -59,7 +59,8 @@ void __xtc_io_sim_aio_release __P((xtc_io_t *, const xtc_aio_t *));
 void __xtc_net_ktls_seen __P((void));
 void xtc_bdev_close __P((xtc_bdev_t *));
 void xtc_io_destroy __P((xtc_io_t *));
-void xtc_io_set_iowq_max_workers __P((unsigned, unsigned));
+void xtc_runtime_get_iowq_workers __P((unsigned *, unsigned *));
+void xtc_runtime_set_iowq_workers __P((unsigned, unsigned));
 void xtc_tls_ctx_destroy __P((xtc_tls_ctx_t *));
 void xtc_tls_destroy __P((xtc_tls_t *));
 

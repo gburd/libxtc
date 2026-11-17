@@ -11,8 +11,6 @@
 .Nm xtc_yield_check ,
 .Nm xtc_yield_if_due ,
 .Nm xtc_yield_due_count ,
-.Nm xtc_stack_size ,
-.Nm xtc_set_stack_size ,
 .Nm XTC_COOP_REGION ,
 .Nm XTC_PT_THREAD ,
 .Nm XTC_PT_BEGIN ,
@@ -36,10 +34,6 @@
 .Fn xtc_yield_if_due "void"
 .Ft uint64_t
 .Fn xtc_yield_due_count "const xtc_loop_t *loop"
-.Ft size_t
-.Fn xtc_stack_size "void"
-.Ft int
-.Fn xtc_set_stack_size "size_t bytes"
 .Pp
 Macros:
 .Bd -literal -offset indent
@@ -57,7 +51,7 @@ as a stackful coroutine attached to
 .Fa loop .
 The coroutine runs on its own stack (default 64\u00a0KiB; configurable
 via
-.Fn xtc_set_stack_size )
+.Fn xtc_runtime_set_stack_size )
 guarded by an unmapped page so stack overflow surfaces as
 .Dv SIGSEGV
 rather than silent memory corruption.
@@ -152,9 +146,9 @@ when it yields.  The caller drives the protothread by calling it
 repeatedly until it returns
 .Dv XTC_PT_DONE .
 .Sh STACK MANAGEMENT
-.Fn xtc_stack_size
+.Fn xtc_runtime_get_stack_size
 returns the default per-coroutine stack size in bytes.  
-.Fn xtc_set_stack_size
+.Fn xtc_runtime_set_stack_size
 overrides it for subsequent
 .Fn xtc_async
 calls; the value is rounded up to a page multiple, and a sub-16\u00a0KiB

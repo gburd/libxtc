@@ -30,6 +30,7 @@
 #include "xtc_blocking.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
+#include "xtc_runtime.h"
 #include "os_time.h"
 
 /* A blocking function: sleep `arg` milliseconds, return arg * 2. */
@@ -532,10 +533,12 @@ test_pool_size(const MunitParameter p[], void *d)
 	/* Reset the pool so pool_size is "before first start" again. */
 	xtc_blocking_shutdown();
 	/* Out-of-range sizes rejected. */
-	munit_assert_int(xtc_blocking_pool_size(0), ==, XTC_E_INVAL);
-	munit_assert_int(xtc_blocking_pool_size(100000), ==, XTC_E_INVAL);
-	/* A valid pin succeeds. */
-	munit_assert_int(xtc_blocking_pool_size(2), ==, XTC_OK);
+	munit_assert_int(xtc_runtime_set_blocking_threads(0), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_runtime_set_blocking_threads(100000), ==,
+	    XTC_E_INVAL);
+	/* A valid pin succeeds, and reads back. */
+	munit_assert_int(xtc_runtime_set_blocking_threads(2), ==, XTC_OK);
+	munit_assert_int(xtc_runtime_get_blocking_threads(), ==, 2);
 
 	/* Start the pool for real via a fiber that offloads. */
 	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
@@ -545,8 +548,10 @@ test_pool_size(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	xtc_loop_destroy(loop);
 
-	/* Too late now: the pool is live, so pinning is rejected. */
-	munit_assert_int(xtc_blocking_pool_size(4), ==, XTC_E_INVAL);
+	/* Too late now: the pool is live, so pinning is a state error (the
+	 * old name reports it as XTC_E_INVAL; see the bridge test). */
+	munit_assert_int(xtc_runtime_set_blocking_threads(4), ==, XTC_E_STATE);
+	munit_assert_int(xtc_runtime_get_blocking_threads(), ==, 2);
 
 	xtc_blocking_shutdown();
 	return MUNIT_OK;

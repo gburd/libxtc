@@ -14,7 +14,7 @@
  *	immediately (so all N are live simultaneously), measure RSS
  *	again, and report (delta_RSS / N) = marginal bytes per live
  *	task.  Repeat across a sweep of stack sizes via
- *	xtc_set_stack_size().  Park-immediately keeps every fiber's
+ *	xtc_runtime_set_stack_size().  Park-immediately keeps every fiber's
  *	stack committed at its minimum, isolating the structural cost.
  *
  *	Usage: bench_mem_per_task [n_tasks]   (default 100000)
@@ -43,6 +43,7 @@
 #include "xtc_async.h"
 #include "xtc_proc.h"
 #include "xtc_res.h"
+#include "xtc_runtime.h"
 
 static int g_parked;
 static xtc_loop_t *g_loop;
@@ -103,7 +104,7 @@ measure(int n_tasks, size_t stack_bytes)
 	long rss_before, rss_after;
 	int i;
 
-	(void)xtc_set_stack_size(stack_bytes);
+	(void)xtc_runtime_set_stack_size(stack_bytes);
 	xtc_atomic_store_i32(&g_parked, 0, xtc_mo_seq_cst);
 
 	if (xtc_loop_create(&g_loop) != XTC_OK) {

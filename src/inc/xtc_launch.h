@@ -17,7 +17,7 @@
  *
  *	Precise-timeout on a RUNAWAY (a fn that never reaches a cooperative
  *	yield point) requires involuntary preemption to be enabled on the
- *	executor (xtc_exec_set_preempt + xtc_preempt_set_involuntary(1), on
+ *	executor (xtc_exec_set_preempt + xtc_runtime_set_preempt_involuntary(1), on
  *	the arches where it is effective); otherwise a purely-uncooperative
  *	fn can only be cancelled once it next reaches a safe point.  A
  *	cooperating fn (one that yields, recvs, or does I/O) is bounded at

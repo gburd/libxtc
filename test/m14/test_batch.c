@@ -12,6 +12,7 @@
 #include "xtc_async.h"
 #include "xtc_blocking.h"
 #include "xtc_future.h"
+#include "xtc_runtime.h"
 #include "loop_int.h"
 #include "proc_int.h" /* XTC_HAVE_PROC_KILL_WAKE */
 #include <assert.h>
@@ -342,11 +343,11 @@ involuntary_callback(void)
     && !__has_feature(address_sanitizer) && !__has_feature(thread_sanitizer)
 	extern int __xtc_coro_preempt_effective(void);
 	if (__xtc_coro_preempt_effective() && xtc_preempt_supported()) {
-		xtc_preempt_set_involuntary(1);
+		xtc_runtime_set_preempt_involuntary(1);
 		assert(xtc_preempt_arm(1000000) == XTC_OK);
 		scenario(14);
 		assert(xtc_preempt_disarm() == XTC_OK);
-		xtc_preempt_set_involuntary(0);
+		xtc_runtime_set_preempt_involuntary(0);
 	} else
 		puts("batch: involuntary callback test skipped (substrate)");
 #else

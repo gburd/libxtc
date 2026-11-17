@@ -259,7 +259,7 @@ not an executor-wide policy
 Keeping eligibility and policy separate means a consumer who wants some
 procs movable does not pay an executor-wide policy's runtime cost, and
 vice versa.
-.It Xr xtc_preempt 3 Ns 's Fn xtc_preempt_set_involuntary
+.It Xr xtc_preempt 3 Ns 's Fn xtc_runtime_set_preempt_involuntary
 is a PROCESS-WIDE toggle
 .Pq no Vt xtc_exec_t argument
 governing the signal-context preemption redirect, not scoped to one

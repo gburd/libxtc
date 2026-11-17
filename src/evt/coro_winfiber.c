@@ -19,6 +19,7 @@
 #if defined(_WIN32)
 
 #include "xtc_async.h"
+#include "xtc_runtime.h"
 #include "loop_int.h"
 #include "coro_int.h"
 
@@ -28,11 +29,11 @@
 /* Per-thread cursor -- the coroutine currently executing on this thread. */
 XTC_THREAD_LOCAL struct xtc_coro *__xtc_current_coro = NULL;
 
-/* Default stack size; configurable via xtc_set_stack_size(). */
+/* Default stack size; configurable via xtc_runtime_set_stack_size(). */
 static size_t __xtc_stack_size = 64 * 1024;
 
 size_t
-xtc_stack_size(void)
+xtc_runtime_get_stack_size(void)
 {
 	return __xtc_stack_size;
 }
@@ -56,7 +57,7 @@ __xtc_stack_size_norm(size_t bytes, size_t *out)
 }
 
 int
-xtc_set_stack_size(size_t bytes)
+xtc_runtime_set_stack_size(size_t bytes)
 {
 	int rc = __xtc_stack_size_norm(bytes, &bytes);
 	if (rc == XTC_OK)
@@ -312,9 +313,16 @@ xtc_yield(void)
  * substrate -- fiber stacks are owned by the OS, not mmap'd by us, so
  * there is no unused tail we may madvise away.  The API is present so
  * callers need not ifdef. */
-int      xtc_stack_reclaim_enable(size_t k) { (void)k; return XTC_E_NOSYS; }
-void     xtc_stack_reclaim_disable(void) { }
-int      xtc_stack_reclaim_enabled(void) { return 0; }
+int
+xtc_runtime_set_stack_reclaim(size_t k)
+{
+	return k == 0 ? XTC_OK : XTC_E_NOSYS;
+}
+size_t
+xtc_runtime_get_stack_reclaim(void)
+{
+	return 0;
+}
 uint64_t xtc_stack_reclaim_count(void) { return 0; }
 
 /* PUBLIC: int __xtc_coro_preempt __P((void *)); */

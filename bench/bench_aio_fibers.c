@@ -42,7 +42,7 @@
  *	Usage:
  *	  bench_aio_fibers <file> [fibers] [ops_each] [bytes] [op] [iowq_cap]
  *	    op: read | write | fsync | fdatasync   (default read)
- *	    iowq_cap: 0 = leave the shipped default, N = xtc_io_set_iowq_max_workers(N,0)
+ *	    iowq_cap: 0 = leave the shipped default, N = xtc_runtime_set_iowq_workers(N,0)
  *
  *	MUST run against a real block device (AGENTS.md: durable benchmarks on
  *	real NVMe, never tmpfs) or the numbers measure page cache.
@@ -79,6 +79,7 @@
 #include "xtc_io.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
+#include "xtc_runtime.h"
 
 #define MAX_FIBERS 512
 
@@ -268,7 +269,7 @@ main(int argc, char **argv)
 	 * read once per ring at init, which is exactly the ordering
 	 * constraint the public knob documents. */
 	if (iowq_cap > 0)
-		xtc_io_set_iowq_max_workers((unsigned)iowq_cap, 0);
+		xtc_runtime_set_iowq_workers((unsigned)iowq_cap, 0);
 
 	g_fd = open(path, (g_op == OP_READ ? O_RDONLY : O_RDWR) | O_CREAT,
 	    0644);

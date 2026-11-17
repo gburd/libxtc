@@ -33,6 +33,7 @@
 #include "xtc_res.h"
 #include "xtc_inject.h"   /* drive the wait_fd check/arm window deterministically */
 #include "xtc_exec.h"     /* >64-loop executor (M10) */
+#include "xtc_runtime.h"
 
 /* Process CPU seconds, portably.  POSIX: CLOCK_PROCESS_CPUTIME_ID.
  * Windows: GetProcessTimes (kernel+user), which IS the clean Win32
@@ -1860,7 +1861,7 @@ test_pid_local_id_ceiling(const MunitParameter p[], void *d)
 	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_pid_t *pids;
 	struct xtc_res *res;
-	size_t old_stack = xtc_stack_size();
+	size_t old_stack = xtc_runtime_get_stack_size();
 	uint32_t i, n = 0, max_local = 0;
 	int rc = XTC_OK;
 	(void)p; (void)d;
@@ -1870,7 +1871,7 @@ test_pid_local_id_ceiling(const MunitParameter p[], void *d)
 		return MUNIT_SKIP;
 	xtc_atomic_store_i32(&g_a1_ok, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_a1_bad, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_set_stack_size(16 * 1024), ==, XTC_OK);
+	munit_assert_int(xtc_runtime_set_stack_size(16 * 1024), ==, XTC_OK);
 	munit_assert_int(xtc_loop_create(&lp), ==, XTC_OK);
 	res = xtc_loop_res(lp);
 	munit_assert_ptr_not_null(res);
@@ -1904,7 +1905,7 @@ test_pid_local_id_ceiling(const MunitParameter p[], void *d)
 			(void)xtc_exit_pid(pids[i], 1);
 		(void)xtc_loop_run(lp);
 		xtc_loop_destroy(lp);
-		(void)xtc_set_stack_size(old_stack);
+		(void)xtc_runtime_set_stack_size(old_stack);
 		free(pids);
 		return MUNIT_SKIP;
 	}
@@ -1920,7 +1921,7 @@ test_pid_local_id_ceiling(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_atomic_load_i32(&g_a1_ok, xtc_mo_seq_cst), ==,
 	    (int)n);
 	xtc_loop_destroy(lp);
-	(void)xtc_set_stack_size(old_stack);
+	(void)xtc_runtime_set_stack_size(old_stack);
 	free(pids);
 	return MUNIT_OK;
 }

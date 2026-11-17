@@ -18,6 +18,10 @@
  *	The old symbols stay in the XTC_2.0 node of dist/libxtc.map (its
  *	xtc_* glob); their new names are listed in XTC_2.2.
  */
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
+
 #include "xtc.h"
 #include "xtc_loop.h"
 #include "xtc_io.h"
@@ -32,6 +36,7 @@
 #include "xtc_dispatch.h"
 #include "xtc_tnt.h"
 #include "xtc_xproc.h"
+#include "xtc_runtime.h"
 
 /* Group: loop / io / bloom / hll lifecycle (create / destroy). */
 
@@ -257,4 +262,76 @@ int
 xtc_xlink(xtc_xproc_t *p)
 {
 	return xtc_xproc_link(p);
+}
+
+/* Group: process-global knobs (xtc_runtime_set_ / _get_). */
+
+int
+xtc_set_stack_size(size_t bytes)
+{
+	return xtc_runtime_set_stack_size(bytes);
+}
+
+size_t
+xtc_stack_size(void)
+{
+	return xtc_runtime_get_stack_size();
+}
+
+int
+xtc_stack_reclaim_enable(size_t keep_bytes)
+{
+	/* 0 meant "the default margin, one page"; under the new name 0 is
+	 * off, so the bridge passes the page explicitly. */
+#if defined(_WIN32)
+	(void)keep_bytes;
+	return XTC_E_NOSYS; /* no reclaim on the Win32 fiber substrate */
+#else
+	long pg;
+
+	if (keep_bytes == 0) {
+		pg = sysconf(_SC_PAGESIZE);
+		keep_bytes = pg > 0 ? (size_t)pg : 4096u;
+	}
+	return xtc_runtime_set_stack_reclaim(keep_bytes);
+#endif
+}
+
+void
+xtc_stack_reclaim_disable(void)
+{
+	(void)xtc_runtime_set_stack_reclaim(0);
+}
+
+int
+xtc_stack_reclaim_enabled(void)
+{
+	return xtc_runtime_get_stack_reclaim() != 0;
+}
+
+int
+xtc_blocking_pool_size(int nthreads)
+{
+	int rc = xtc_runtime_set_blocking_threads(nthreads);
+
+	/* Before 2.2 "too late" was XTC_E_INVAL; the old name keeps it. */
+	return rc == XTC_E_STATE ? XTC_E_INVAL : rc;
+}
+
+int
+xtc_preempt_set_involuntary(int on)
+{
+	return xtc_runtime_set_preempt_involuntary(on);
+}
+
+void
+xtc_io_set_iowq_max_workers(unsigned bound, unsigned unbound)
+{
+	xtc_runtime_set_iowq_workers(bound, unbound);
+}
+
+int
+xtc_alloc_audit_enable(int on)
+{
+	return xtc_runtime_set_alloc_audit(on);
 }

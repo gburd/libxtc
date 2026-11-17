@@ -13,6 +13,7 @@
 #include "xtc_int.h"
 #include "io_int.h"
 #include "xtc_inject.h"
+#include "xtc_runtime.h"
 
 #include <errno.h>
 
@@ -286,18 +287,34 @@ xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a)
 #endif
 
 #if !defined(XTC_IO_BACKEND_URING)
+/* Recorded so the getter reads back what was set; nothing reads them. */
+static unsigned __xtc_iowq_bound = 4u;
+static unsigned __xtc_iowq_unbound = 0u;
+
 /*
- * PUBLIC: void xtc_io_set_iowq_max_workers __P((unsigned, unsigned));
+ * PUBLIC: void xtc_runtime_set_iowq_workers __P((unsigned, unsigned));
  *
  * io-wq worker caps are an io_uring-specific concept; on every other
- * backend this is a linkable no-op (there is no kernel io-wq pool to
+ * backend the values are only recorded (there is no kernel io-wq pool to
  * cap).  The real implementation lives in io_uring.c.
  */
 void
-xtc_io_set_iowq_max_workers(unsigned bound, unsigned unbound)
+xtc_runtime_set_iowq_workers(unsigned bound, unsigned unbound)
 {
-	(void)bound;
-	(void)unbound;
+	xtc_atomic_store_u32(&__xtc_iowq_bound, bound, xtc_mo_relaxed);
+	xtc_atomic_store_u32(&__xtc_iowq_unbound, unbound, xtc_mo_relaxed);
+}
+
+/* PUBLIC: void xtc_runtime_get_iowq_workers __P((unsigned *, unsigned *)); */
+void
+xtc_runtime_get_iowq_workers(unsigned *out_bound, unsigned *out_unbound)
+{
+	if (out_bound != NULL)
+		*out_bound =
+		    xtc_atomic_load_u32(&__xtc_iowq_bound, xtc_mo_relaxed);
+	if (out_unbound != NULL)
+		*out_unbound =
+		    xtc_atomic_load_u32(&__xtc_iowq_unbound, xtc_mo_relaxed);
 }
 #endif
 

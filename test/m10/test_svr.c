@@ -20,6 +20,7 @@
 #include "xtc_alloc_audit.h"
 #include "xtc_app.h"
 #include "xtc_orc.h"
+#include "xtc_runtime.h"
 
 /* A trivial counter-server: cast to increment, call to read. */
 struct counter_state {
@@ -1374,12 +1375,12 @@ test_svr_wait_init(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_svr_start(w.loop, &NOMEM_CB, NULL, &o, &s), ==,
 	    XTC_E_STATE);
 	munit_assert_ptr_null(s);
-	munit_assert_int(xtc_alloc_audit_enable(1), ==, XTC_OK);
+	munit_assert_int(xtc_runtime_set_alloc_audit(1), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(w.loop, wait_init_driver, &w, NULL,
 	                     NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(w.loop), ==, XTC_OK);
-	(void)xtc_alloc_audit_enable(0);
+	(void)xtc_runtime_set_alloc_audit(0);
 	munit_assert_int(w.bad_rc, ==, XTC_E_NOMEM);
 	munit_assert_ptr_null(w.bad);
 	munit_assert_size(w.live1, ==, w.live0);
@@ -1466,11 +1467,11 @@ test_svr_wait_init_killed(const MunitParameter p[], void *d)
 	memset(&w, 0, sizeof w);
 	g_wk_svr_ran = g_wk_svr_stopped = 0;
 	munit_assert_int(xtc_loop_create(&w.loop), ==, XTC_OK);
-	munit_assert_int(xtc_alloc_audit_enable(1), ==, XTC_OK);
+	munit_assert_int(xtc_runtime_set_alloc_audit(1), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(w.loop, wk_driver, &w, NULL, NULL), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_loop_run(w.loop), ==, XTC_OK);
-	(void)xtc_alloc_audit_enable(0);
+	(void)xtc_runtime_set_alloc_audit(0);
 	munit_assert_int(g_wk_svr_ran, ==, 2);
 	munit_assert_int(g_wk_svr_stopped, ==, 2);
 	munit_assert_size(w.live1, ==, w.live0);

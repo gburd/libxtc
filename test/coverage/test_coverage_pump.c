@@ -26,6 +26,7 @@
 #include "xtc_lockmgr.h"
 #include "xtc_orc.h"
 #include "xtc_int.h"
+#include "xtc_runtime.h"
 
 /* ----- coro_uctx: stack_size ----------------------------------- */
 
@@ -34,17 +35,17 @@ test_stack_size(const MunitParameter p[], void *d)
 {
 	size_t orig;
 	(void)p; (void)d;
-	orig = xtc_stack_size();
+	orig = xtc_runtime_get_stack_size();
 	munit_assert_size(orig, >=, 16 * 1024);
 
-	munit_assert_int(xtc_set_stack_size(128 * 1024), ==, XTC_OK);
-	munit_assert_size(xtc_stack_size(), ==, 128 * 1024);
+	munit_assert_int(xtc_runtime_set_stack_size(128 * 1024), ==, XTC_OK);
+	munit_assert_size(xtc_runtime_get_stack_size(), ==, 128 * 1024);
 
 	/* Reject too-small. */
-	munit_assert_int(xtc_set_stack_size(8 * 1024), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_runtime_set_stack_size(8 * 1024), ==, XTC_E_INVAL);
 
 	/* Restore. */
-	(void)xtc_set_stack_size(orig);
+	(void)xtc_runtime_set_stack_size(orig);
 	return MUNIT_OK;
 }
 

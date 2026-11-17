@@ -65,20 +65,19 @@ extern "C" {
 #endif
 
 /*
- * PUBLIC: int xtc_preempt_set_involuntary __P((int));
  * PUBLIC: int xtc_preempt_involuntary_supported __P((void));
  * PUBLIC: int xtc_preempt_region_add __P((const void *, const void *));
  */
 
-/* Enable (on != 0) or disable involuntary preemption, process-wide.  It
- * acts on threads whose preemption timer is armed (xtc_preempt_arm,
- * xtc_exec_set_preempt).  Off by default.  Returns XTC_OK; enabling
- * returns XTC_E_NOSYS, and leaves it off, where
- * xtc_preempt_involuntary_supported() is 0 or no preemptible range can
- * be trusted (a static executable with no XTC_PREEMPTIBLE function and
- * no region added; adding one later lifts that refusal); the reason is
- * reported once, at XTC_LOG_ERROR and on stderr. */
-XTC_API int xtc_preempt_set_involuntary(int on);
+/* Involuntary preemption is turned on and off, process-wide, with
+ * xtc_runtime_set_preempt_involuntary (xtc_runtime.h).  It acts on
+ * threads whose preemption timer is armed (xtc_preempt_arm,
+ * xtc_exec_set_preempt).  Off by default.  Enabling returns XTC_E_NOSYS,
+ * and leaves it off, where xtc_preempt_involuntary_supported() is 0 or no
+ * preemptible range can be trusted (a static executable with no
+ * XTC_PREEMPTIBLE function and no region added; adding one later lifts
+ * that refusal); the reason is reported once, at XTC_LOG_ERROR and on
+ * stderr. */
 
 /* 1 if this build and platform implement the involuntary redirect
  * (Linux x86-64 on ucontext or glibc fcontext; Linux aarch64), else 0. */
@@ -90,6 +89,12 @@ XTC_API int xtc_preempt_involuntary_supported(void);
  * libxtc's own text; XTC_E_RESOURCE when the table (32 ranges) is full.
  * Ranges cannot be removed. */
 XTC_API int xtc_preempt_region_add(const void *start, const void *end);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_runtime_set_preempt_involuntary")
+XTC_API int xtc_preempt_set_involuntary(int on);
 
 #ifdef __cplusplus
 }

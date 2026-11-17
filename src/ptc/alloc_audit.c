@@ -18,6 +18,7 @@
 #include "xtc_alloc_audit.h"
 #include "os_alloc.h"
 #include "xtc_proc.h"
+#include "xtc_runtime.h"
 
 #include <pthread.h>
 #include <string.h>
@@ -161,9 +162,9 @@ static const struct __os_alloc_hook g_audit_hook = {
 	__a_aligned, __a_aligned_free
 };
 
-/* PUBLIC: int xtc_alloc_audit_enable __P((int)); */
+/* PUBLIC: int xtc_runtime_set_alloc_audit __P((int)); */
 int
-xtc_alloc_audit_enable(int on)
+xtc_runtime_set_alloc_audit(int on)
 {
 	int rc = XTC_OK;
 	(void)__xtc_mtx_lock(&g_mu);
@@ -189,6 +190,18 @@ xtc_alloc_audit_enable(int on)
 out:
 	(void)__xtc_mtx_unlock(&g_mu);
 	return rc;
+}
+
+/* PUBLIC: int xtc_runtime_get_alloc_audit __P((void)); */
+int
+xtc_runtime_get_alloc_audit(void)
+{
+	int on;
+
+	(void)__xtc_mtx_lock(&g_mu);
+	on = g_on;
+	(void)__xtc_mtx_unlock(&g_mu);
+	return on;
 }
 
 /* PUBLIC: void xtc_alloc_audit_stats __P((size_t *, size_t *)); */

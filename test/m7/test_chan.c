@@ -22,6 +22,7 @@
 #include "xtc_preempt.h"
 #include "xtc_preempt_involuntary.h"
 #include "xtc_proc.h"
+#include "xtc_runtime.h"
 
 /* ----- oneshot ---------------------------------------------------- */
 
@@ -518,7 +519,7 @@ test_mpsc_involuntary_preempt(const MunitParameter p[], void *d)
 	 * stall); test_preempt_p2 /red_zone_flags is the sensitive guard. */
 	memset(&x, 0, sizeof x);
 	munit_assert_int(xtc_chan_mpsc_create(NULL, 64, &x.c), ==, XTC_OK);
-	munit_assert_int(xtc_preempt_set_involuntary(1), ==, XTC_OK);
+	munit_assert_int(xtc_runtime_set_preempt_involuntary(1), ==, XTC_OK);
 	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
 	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0), pr_consumer, &x,
@@ -529,7 +530,7 @@ test_mpsc_involuntary_preempt(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	xtc_atomic_store_i32(&x.done, 1, xtc_mo_seq_cst);
 	(void)pthread_join(w, NULL);
-	(void)xtc_preempt_set_involuntary(0);
+	(void)xtc_runtime_set_preempt_involuntary(0);
 	munit_assert_int(xtc_atomic_load_i32(&x.bad, xtc_mo_seq_cst), ==, 0);
 	munit_assert_uint64(xtc_atomic_load_u64(&x.recvd, xtc_mo_seq_cst), ==,
 	    xtc_atomic_load_u64(&x.sent, xtc_mo_seq_cst));

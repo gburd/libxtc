@@ -47,6 +47,7 @@
 #include "xtc_alloc_audit.h"
 #include "xtc_exec.h"
 #include "xtc_proc.h"
+#include "xtc_runtime.h"
 #include "sim_int.h"
 
 #define N_LOOPS 3
@@ -379,8 +380,8 @@ main(int argc, char **argv)
 	/* The auditor counts live allocations for (f).  One warm-up run
 	 * first: process-wide caches (slabs, the proc-table free list) are
 	 * made once and kept. */
-	if (xtc_alloc_audit_enable(1) != XTC_OK) {
-		printf("FAIL: xtc_alloc_audit_enable\n");
+	if (xtc_runtime_set_alloc_audit(1) != XTC_OK) {
+		printf("FAIL: xtc_runtime_set_alloc_audit\n");
 		return 1;
 	}
 	(void)if_run(0x9E3779B97F4A7C15ull, 50000000, &i);
@@ -435,7 +436,7 @@ main(int argc, char **argv)
 		printf("FAIL: %d/%d send-wait seeds failed\n", fails, n);
 		return 1;
 	}
-	(void)xtc_alloc_audit_enable(0);
+	(void)xtc_runtime_set_alloc_audit(0);
 	printf("OK: send-wait DST -- %d seeds, %d senders x %d messages into "
 	       "cap-%d mailboxes (mailbox and save-queue takes) under net "
 	       "latency, every message once, no lost room wakeup, every "

@@ -127,6 +127,7 @@ cat > "$TMPD/prog.c" <<'PROGEOF'
 #include "xtc_proc.h"
 #include "xtc_res.h"
 #include "xtc_tail.h"
+#include "xtc_runtime.h"
 
 #define N 70000
 
@@ -148,7 +149,7 @@ main(void)
 	xtc_pid_t pid;
 	int i;
 
-	(void)xtc_set_stack_size(16 * 1024);
+	(void)xtc_runtime_set_stack_size(16 * 1024);
 	if (xtc_loop_create(&lp) != XTC_OK)
 		return 2;
 	r = xtc_loop_res(lp);

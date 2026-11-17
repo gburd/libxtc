@@ -87,6 +87,7 @@ preempt_tick_raw(void)
 #include "xtc_fs.h"
 #include "xtc_inject.h"
 #include "xtc_io.h"
+#include "xtc_runtime.h"
 
 #if !defined(__has_feature)
 #  define __has_feature(x) 0
@@ -158,7 +159,7 @@ test_p2_preempt_tight_loop(const MunitParameter p[], void *d)
 	/* Enable the timer (1 ms slices) AND the signal-context
 	 * involuntary yield. */
 	munit_assert_int(xtc_exec_set_preempt(e, 1 * 1000 * 1000LL), ==, XTC_OK);
-	xtc_preempt_set_involuntary(1);
+	xtc_runtime_set_preempt_involuntary(1);
 
 	/* One pure-tight-loop runaway (no yield points) + peers. */
 	(void)xtc_proc_spawn(l, runaway,
@@ -182,7 +183,7 @@ test_p2_preempt_tight_loop(const MunitParameter p[], void *d)
 	 * peers may not have run until the runaway finished; we only
 	 * assert the runaway completed there.
 	 */
-	xtc_preempt_set_involuntary(0);
+	xtc_runtime_set_preempt_involuntary(0);
 	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
@@ -218,7 +219,7 @@ test_p2_peers_progress_on_ucontext(const MunitParameter p[], void *d)
 	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	l = xtc_exec_loop(e, 0);
 	munit_assert_int(xtc_exec_set_preempt(e, 1 * 1000 * 1000LL), ==, XTC_OK);
-	xtc_preempt_set_involuntary(1);
+	xtc_runtime_set_preempt_involuntary(1);
 
 	(void)xtc_proc_spawn(l, runaway,
 	    (void *)(intptr_t)(400ULL * 1000 * 1000), NULL, NULL);
@@ -260,7 +261,7 @@ test_p2_peers_progress_on_ucontext(const MunitParameter p[], void *d)
 			munit_assert_int(peers, >, 0);
 	}
 
-	xtc_preempt_set_involuntary(0);
+	xtc_runtime_set_preempt_involuntary(0);
 	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
@@ -365,12 +366,12 @@ test_p2_vector_state(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
 	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_set_preempt(e, 50LL * 1000), ==, XTC_OK);
-	xtc_preempt_set_involuntary(1);
+	xtc_runtime_set_preempt_involuntary(1);
 	for (i = 0; i < 4; i++)
 		munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0),
 		    p2_vec_spinner, (void *)(intptr_t)i, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	xtc_preempt_set_involuntary(0);
+	xtc_runtime_set_preempt_involuntary(0);
 	xtc_exec_destroy(e);
 	munit_logf(MUNIT_LOG_INFO,
 	    "%ld checks (avx2 %d avx512 %d), %ld corrupted",
@@ -455,12 +456,12 @@ test_p2_red_zone_flags(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
 	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_set_preempt(e, 50LL * 1000), ==, XTC_OK);
-	xtc_preempt_set_involuntary(1);
+	xtc_runtime_set_preempt_involuntary(1);
 	for (i = 0; i < 4; i++)
 		munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0),
 		    p2_rz_spinner, (void *)(intptr_t)i, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	xtc_preempt_set_involuntary(0);
+	xtc_runtime_set_preempt_involuntary(0);
 	xtc_exec_destroy(e);
 	munit_logf(MUNIT_LOG_INFO,
 	    "%ld probes, red zone clobbered %ld, flags "
@@ -839,13 +840,13 @@ p2_cb_run(int mode)
 	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
 	    ==, XTC_OK);
-	xtc_preempt_set_involuntary(1);
+	xtc_runtime_set_preempt_involuntary(1);
 	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0), p2_cb_target,
 	    NULL, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0), p2_cb_peer,
 	    NULL, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	xtc_preempt_set_involuntary(0);
+	xtc_runtime_set_preempt_involuntary(0);
 	xtc_exec_destroy(e);
 	munit_logf(MUNIT_LOG_INFO,
 	    "mode %d: %ld/%d ticks preempted, target "
@@ -1067,12 +1068,12 @@ p2_a64_run(void (*fn)(void *))
 	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
 	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_set_preempt(e, 50LL * 1000), ==, XTC_OK);
-	xtc_preempt_set_involuntary(1);
+	xtc_runtime_set_preempt_involuntary(1);
 	for (i = 0; i < 4; i++)
 		munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0), fn,
 		    (void *)(intptr_t)i, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	xtc_preempt_set_involuntary(0);
+	xtc_runtime_set_preempt_involuntary(0);
 	xtc_exec_destroy(e);
 	munit_logf(MUNIT_LOG_INFO, "%ld involuntary slices",
 	    xtc_atomic_load_long(&g_a64_slices, xtc_mo_seq_cst));
@@ -1307,13 +1308,13 @@ p2_a64cb_run(int mode)
 	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
 	    ==, XTC_OK);
-	xtc_preempt_set_involuntary(1);
+	xtc_runtime_set_preempt_involuntary(1);
 	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0), p2_a64cb_target,
 	    NULL, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0), p2_a64cb_peer,
 	    NULL, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	xtc_preempt_set_involuntary(0);
+	xtc_runtime_set_preempt_involuntary(0);
 	xtc_exec_destroy(e);
 	munit_logf(MUNIT_LOG_INFO,
 	    "mode %d: %ld/%d ticks preempted, target "
@@ -1514,7 +1515,7 @@ sw_run(int peer_submits)
 	 * CPU-time interval never elapses, so every tick is our raise. */
 	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
 	    ==, XTC_OK);
-	xtc_preempt_set_involuntary(1);
+	xtc_runtime_set_preempt_involuntary(1);
 	munit_assert_int(xtc_proc_spawn(l, sw_writer, NULL, NULL, NULL), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_proc_spawn(l, sw_peer, NULL, NULL, NULL), ==,
@@ -1523,7 +1524,7 @@ sw_run(int peer_submits)
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	xtc_atomic_store_i32(&g_sw_done, 1, xtc_mo_seq_cst);
 	(void)pthread_join(wd, NULL);
-	xtc_preempt_set_involuntary(0);
+	xtc_runtime_set_preempt_involuntary(0);
 	xtc_exec_destroy(e);
 	(void)xtc_inject_detach("io.uring.sqe_reserved");
 	(void)close(g_sw_fd);
@@ -1657,13 +1658,13 @@ test_p2_switch_window_declines(const MunitParameter p[], void *d)
 	l = xtc_exec_loop(e, 0);
 	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
 	    ==, XTC_OK);
-	xtc_preempt_set_involuntary(1);
+	xtc_runtime_set_preempt_involuntary(1);
 	munit_assert_int(xtc_proc_spawn(l, swd_target, NULL, NULL, NULL), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_proc_spawn(l, swd_peer, NULL, NULL, NULL), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	xtc_preempt_set_involuntary(0);
+	xtc_runtime_set_preempt_involuntary(0);
 	xtc_exec_destroy(e);
 	(void)xtc_inject_detach("coro.switch_window");
 
@@ -1831,7 +1832,7 @@ test_p2_runq_lost_wake(const MunitParameter p[], void *d)
 	g_rq_loop = xtc_exec_loop(e, 0);
 	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
 	    ==, XTC_OK);
-	xtc_preempt_set_involuntary(1);
+	xtc_runtime_set_preempt_involuntary(1);
 	munit_assert_int(xtc_exec_spawn_on(e, 0, rq_target, NULL,
 	    &g_rq_target), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(g_rq_loop, rq_peer, NULL, NULL,
@@ -1842,7 +1843,7 @@ test_p2_runq_lost_wake(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	xtc_atomic_store_i32(&g_rq_done, 1, xtc_mo_seq_cst);
 	(void)pthread_join(wd, NULL);
-	xtc_preempt_set_involuntary(0);
+	xtc_runtime_set_preempt_involuntary(0);
 	xtc_exec_destroy(e);
 	(void)xtc_inject_detach("loop.enqueue.fifo_link");
 
@@ -2005,13 +2006,13 @@ test_p2_timer_heap_lost_timer(const MunitParameter p[], void *d)
 	g_th_loop = xtc_exec_loop(e, 0);
 	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
 	    ==, XTC_OK);
-	xtc_preempt_set_involuntary(1);
+	xtc_runtime_set_preempt_involuntary(1);
 	munit_assert_int(xtc_proc_spawn(g_th_loop, th_armer, NULL, NULL,
 	    NULL), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(g_th_loop, th_peer, NULL, NULL,
 	    NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	xtc_preempt_set_involuntary(0);
+	xtc_runtime_set_preempt_involuntary(0);
 	xtc_exec_destroy(e);
 	(void)xtc_inject_detach("timer.heap.sift_up");
 

@@ -13,7 +13,6 @@
 .Nm xtc_io_poll ,
 .Nm xtc_io_aio_submit ,
 .Nm xtc_io_wakeup ,
-.Nm xtc_io_set_iowq_max_workers ,
 .Nm xtc_io_init ,
 .Nm xtc_io_fini
 .Nd L1 event-notification engine
@@ -38,8 +37,6 @@
 .Fn xtc_io_aio_submit "xtc_io_t *io" "xtc_aio_t *a"
 .Ft int
 .Fn xtc_io_wakeup "xtc_io_t *io"
-.Ft void
-.Fn xtc_io_set_iowq_max_workers "unsigned bound" "unsigned unbound"
 .Sh DESCRIPTION
 .Nm xtc_io
 is the L1 readiness-notification engine.
@@ -284,7 +281,7 @@ for (int i = 0; i < n; i++) {
 }
 .Ed
 .Pp
-.Fn xtc_io_set_iowq_max_workers
+.Fn xtc_runtime_set_iowq_workers
 caps the per-ring
 .Xr io_uring 7
 kernel io-wq worker pool applied to every ring created afterward:

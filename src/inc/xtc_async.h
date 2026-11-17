@@ -42,8 +42,6 @@ typedef intptr_t (*xtc_coro_fn)(void *arg);
  * PUBLIC: int      xtc_yield_check __P((void));
  * PUBLIC: int      xtc_yield_if_due __P((void));
  * PUBLIC: uint64_t xtc_yield_due_count __P((const xtc_loop_t *));
- * PUBLIC: size_t   xtc_stack_size __P((void));
- * PUBLIC: int      xtc_set_stack_size __P((size_t));
  */
 
 /*
@@ -91,11 +89,9 @@ XTC_API int      xtc_yield_if_due(void);
 XTC_API uint64_t xtc_yield_due_count(const xtc_loop_t *loop);
 
 /*
- * Default fiber stack size in bytes.  Configurable per process via
- * xtc_set_stack_size().  Default: 64 KiB.
+ * The default fiber stack size (64 KiB) is a process knob:
+ * xtc_runtime_set_stack_size / xtc_runtime_get_stack_size (xtc_runtime.h).
  */
-XTC_API size_t   xtc_stack_size(void);
-XTC_API int      xtc_set_stack_size(size_t bytes);
 
 /*
  * Stack-memory reclamation on park.
@@ -113,19 +109,15 @@ XTC_API int      xtc_set_stack_size(size_t bytes);
  * Portable: a no-op where madvise/MADV_DONTNEED is unavailable
  * (Windows) and on the Win32-fiber substrate (whose stacks the OS
  * owns).  OFF by default (the cooperative fast path is unchanged); a
- * process-wide opt-in.  keep_bytes is the live margin left mapped below
- * the saved SP (0 selects a sensible default of one page); the reclaim
- * only fires when the reclaimable tail exceeds a page, to avoid fault
- * churn on shallow, frequently-woken fibers.
+ * process-wide opt-in: xtc_runtime_set_stack_reclaim(keep_bytes)
+ * (xtc_runtime.h), where keep_bytes is the live margin left mapped below
+ * the saved SP and 0 turns it off.  The reclaim only fires when the
+ * reclaimable tail exceeds a page, to avoid fault churn on shallow,
+ * frequently-woken fibers.  xtc_stack_reclaim_count reports how many
+ * reclaims have run.
  *
- * PUBLIC: int  xtc_stack_reclaim_enable __P((size_t));
- * PUBLIC: void xtc_stack_reclaim_disable __P((void));
- * PUBLIC: int  xtc_stack_reclaim_enabled __P((void));
  * PUBLIC: uint64_t xtc_stack_reclaim_count __P((void));
  */
-XTC_API int      xtc_stack_reclaim_enable(size_t keep_bytes);
-XTC_API void     xtc_stack_reclaim_disable(void);
-XTC_API int      xtc_stack_reclaim_enabled(void);
 XTC_API uint64_t xtc_stack_reclaim_count(void);
 
 /*
@@ -161,6 +153,20 @@ typedef struct xtc_pt {
 
 #define XTC_PT_DONE     2
 #define XTC_PT_YIELDED  0
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_runtime_set_stack_size")
+XTC_API int xtc_set_stack_size(size_t bytes);
+XTC_DEPRECATED("use xtc_runtime_get_stack_size")
+XTC_API size_t xtc_stack_size(void);
+XTC_DEPRECATED("use xtc_runtime_set_stack_reclaim")
+XTC_API int xtc_stack_reclaim_enable(size_t keep_bytes);
+XTC_DEPRECATED("use xtc_runtime_set_stack_reclaim")
+XTC_API void xtc_stack_reclaim_disable(void);
+XTC_DEPRECATED("use xtc_runtime_get_stack_reclaim")
+XTC_API int xtc_stack_reclaim_enabled(void);
 
 #ifdef __cplusplus
 }

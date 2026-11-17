@@ -104,7 +104,7 @@ __xtc_vg_deregister_slow(unsigned id)
  * takes no lock.  Bounded so idle threads do not hoard memory.
  *
  * Stacks are pooled only at the current __xtc_stack_size; a stack freed
- * at a different size (after xtc_set_stack_size, or a proc spawned with
+ * at a different size (after xtc_runtime_set_stack_size, or a proc spawned with
  * its own xtc_proc_opts_t.stack_size) is munmap'd, not pooled, so the
  * pool never hands back a wrong-sized stack.  Both the pool and the
  * per-loop spare below hold ONE size (the first entry's), so letting a
@@ -278,27 +278,23 @@ static size_t g_reclaim_keep = 0;    /* live margin below SP */
 static uint64_t g_reclaim_count = 0; /* madvise calls made */
 
 int
-xtc_stack_reclaim_enable(size_t keep_bytes)
+xtc_runtime_set_stack_reclaim(size_t keep_bytes)
 {
-	long pg = sysconf(_SC_PAGESIZE);
-	size_t page = (pg > 0) ? (size_t)pg : 4096u;
-	if (keep_bytes == 0)
-		keep_bytes = page;      /* default live margin: one page */
+	if (keep_bytes == 0) {
+		xtc_atomic_store_i32(&g_reclaim_on, 0, xtc_mo_seq_cst);
+		return XTC_OK;
+	}
 	xtc_atomic_store_size(&g_reclaim_keep, keep_bytes, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_reclaim_on, 1, xtc_mo_seq_cst);
 	return XTC_OK;
 }
 
-void
-xtc_stack_reclaim_disable(void)
+size_t
+xtc_runtime_get_stack_reclaim(void)
 {
-	xtc_atomic_store_i32(&g_reclaim_on, 0, xtc_mo_seq_cst);
-}
-
-int
-xtc_stack_reclaim_enabled(void)
-{
-	return xtc_atomic_load_i32(&g_reclaim_on, xtc_mo_seq_cst);
+	if (!xtc_atomic_load_i32(&g_reclaim_on, xtc_mo_seq_cst))
+		return 0;
+	return xtc_atomic_load_size(&g_reclaim_keep, xtc_mo_seq_cst);
 }
 
 uint64_t
@@ -352,9 +348,16 @@ coro_stack_shrink(struct xtc_coro *c)
 		    xtc_mo_seq_cst);
 }
 #else  /* no MADV_DONTNEED: reclaim is a no-op */
-int      xtc_stack_reclaim_enable(size_t k) { (void)k; return XTC_E_NOSYS; }
-void     xtc_stack_reclaim_disable(void) { }
-int      xtc_stack_reclaim_enabled(void) { return 0; }
+int
+xtc_runtime_set_stack_reclaim(size_t k)
+{
+	return k == 0 ? XTC_OK : XTC_E_NOSYS;
+}
+size_t
+xtc_runtime_get_stack_reclaim(void)
+{
+	return 0;
+}
 uint64_t xtc_stack_reclaim_count(void) { return 0; }
 #define coro_stack_shrink(c) ((void)(c))
 #endif

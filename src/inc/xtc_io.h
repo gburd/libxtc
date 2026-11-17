@@ -147,7 +147,6 @@ typedef struct xtc_aio {
  * PUBLIC: int          xtc_io_aio_submit __P((xtc_io_t *, xtc_aio_t *));
  * PUBLIC: int          xtc_io_wakeup __P((xtc_io_t *));
  *
- * PUBLIC: void         xtc_io_set_iowq_max_workers __P((unsigned, unsigned));
  */
 
 /* Lifecycle. */
@@ -189,14 +188,9 @@ XTC_API int          xtc_io_aio_submit(xtc_io_t *io, xtc_aio_t *a);
 XTC_API int          xtc_io_wakeup(xtc_io_t *io);
 
 /*
- * Cap the per-ring io_uring io-wq kernel worker pool (Linux io_uring
- * backend only; a no-op on other backends).  See the implementation
- * comment in io_uring.c: prevents N carriers on an M-core box from
- * accumulating N*M idle io-wq kernel threads.  Call before the
- * executor/loop creates its rings.
+ * The per-ring io_uring io-wq kernel worker caps are a process knob:
+ * xtc_runtime_set_iowq_workers (xtc_runtime.h).
  */
-XTC_API void         xtc_io_set_iowq_max_workers(unsigned bound,
-                                                 unsigned unbound);
 
 /*
  * Deprecated names (docs/deprecations.md): removed in 3.0.
@@ -205,6 +199,8 @@ XTC_DEPRECATED("use xtc_io_create")
 XTC_API int xtc_io_init(xtc_io_t **out);
 XTC_DEPRECATED("use xtc_io_destroy")
 XTC_API int xtc_io_fini(xtc_io_t *io);
+XTC_DEPRECATED("use xtc_runtime_set_iowq_workers")
+XTC_API void xtc_io_set_iowq_max_workers(unsigned bound, unsigned unbound);
 
 #ifdef __cplusplus
 }

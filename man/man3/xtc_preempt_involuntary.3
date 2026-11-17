@@ -4,15 +4,12 @@
 .Dt XTC_PREEMPT_INVOLUNTARY 3
 .Os
 .Sh NAME
-.Nm xtc_preempt_set_involuntary ,
 .Nm xtc_preempt_involuntary_supported ,
 .Nm xtc_preempt_region_add ,
 .Nm XTC_PREEMPTIBLE
 .Nd involuntary (signal-context) preemption, EXPERIMENTAL
 .Sh SYNOPSIS
 .In xtc_preempt_involuntary.h
-.Ft int
-.Fn xtc_preempt_set_involuntary "int on"
 .Ft int
 .Fn xtc_preempt_involuntary_supported "void"
 .Ft int
@@ -32,7 +29,7 @@ This header is
 .Pq docs/abi-stability.md :
 its contract may change in any minor release.
 .Pp
-.Fn xtc_preempt_set_involuntary
+.Fn xtc_runtime_set_preempt_involuntary
 turns it on
 .Pq Fa on No != 0
 or off, process-wide.
@@ -128,7 +125,7 @@ AMX tile state (not saved), and the aarch64 guarded control stack.
 macOS, Windows, x86-64 musl and the single-file amalgamation have no
 redirect: there a tick always falls back to the cooperative path.
 .Sh RETURN VALUES
-.Fn xtc_preempt_set_involuntary
+.Fn xtc_runtime_set_preempt_involuntary
 returns
 .Dv XTC_OK ;
 enabling returns
@@ -162,7 +159,7 @@ crunch(double *v, size_t n)     /* pure computation */
 	...
 }
 
-if (xtc_preempt_set_involuntary(1) != XTC_OK)
+if (xtc_runtime_set_preempt_involuntary(1) != XTC_OK)
 	/* cooperative preemption only: yield in long loops */;
 .Ed
 .Sh SEE ALSO

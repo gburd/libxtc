@@ -72,6 +72,7 @@
 #include "xtc_exec.h"
 #include "xtc_loop.h"
 #include "xtc_proc.h"
+#include "xtc_runtime.h"
 #include "sim_int.h"
 
 #include "bufmgr.h"
@@ -868,7 +869,7 @@ round_child(int last)
 	const char *kind;
 	int r;
 
-	if (xtc_set_stack_size(512u * 1024u) != XTC_OK || sx_init() != SX_OK)
+	if (xtc_runtime_set_stack_size(512u * 1024u) != XTC_OK || sx_init() != SX_OK)
 		return 3;
 	sx_storage_set_checkpoint(1ull << 40);   /* no periodic checkpoint proc */
 	for (g_seg = 0; g_seg < nseg; g_seg++) {

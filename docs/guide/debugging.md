@@ -354,7 +354,7 @@ immediately before the action, and dump immediately after.
 libxtc can attribute live allocations to the proc that made them.  In
 the program, early:
 
-    xtc_alloc_audit_enable(1);
+    xtc_runtime_set_alloc_audit(1);
 
 then at any point (or from a test):
 

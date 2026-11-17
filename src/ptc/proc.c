@@ -2274,7 +2274,7 @@ __proc_spawn_core(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 	p->exit_kind_override = -1;
 	xtc_atomic_store_i32(&p->alive, 1, xtc_mo_relaxed);
 	p->spawn_class = o.sched_class;
-	p->stack_size = o.stack_size != 0 ? o.stack_size : xtc_stack_size();
+	p->stack_size = o.stack_size != 0 ? o.stack_size : xtc_runtime_get_stack_size();
 	/* p is not in a table yet, so no reader can see it: a plain copy
 	 * (the table lock that publishes it orders the bytes). */
 	if (o.name != NULL)

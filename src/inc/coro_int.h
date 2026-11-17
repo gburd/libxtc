@@ -118,7 +118,7 @@ int  __xtc_coro_step(xtc_task_t *self, void *user);
  * the task on the stealable deque so it can migrate across loops --
  * used by the proc layer when xtc_proc_opts_t.migratable is set.
  * stack_sz is the fiber's usable stack in bytes, already normalized by
- * __xtc_stack_size_norm; 0 is the process default (xtc_stack_size()).
+ * __xtc_stack_size_norm; 0 is the process default (xtc_runtime_get_stack_size()).
  * Every coro backend (coro_fctx/uctx/winfiber) defines both.
  */
 int  __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
@@ -126,7 +126,7 @@ int  __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
 
 /*
  * Validate a requested fiber stack size and round it up to a whole page:
- * the size xtc_set_stack_size and xtc_proc_opts_t.stack_size accept.
+ * the size xtc_runtime_set_stack_size and xtc_proc_opts_t.stack_size accept.
  * XTC_E_INVAL below the 16 KiB minimum (or when rounding overflows).
  */
 int  __xtc_stack_size_norm(size_t bytes, size_t *out);

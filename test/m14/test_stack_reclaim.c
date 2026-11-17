@@ -34,6 +34,7 @@
 #include "xtc_async.h"
 #include "xtc_int.h"
 #include "xtc_inspect.h"  /* xtc_proc_info: the per-proc stack size */
+#include "xtc_runtime.h"
 #include "loop_int.h"     /* free-list / spare counts for the N2 case */
 
 /* Detect AddressSanitizer portably (nested #if -- a bare
@@ -153,7 +154,7 @@ static MunitResult
 test_off_by_default(const MunitParameter p[], void *d)
 {
 	(void)p; (void)d;
-	munit_assert_int(xtc_stack_reclaim_enabled(), ==, 0);
+	munit_assert_size(xtc_runtime_get_stack_reclaim(), ==, 0);
 	munit_assert_uint64(xtc_stack_reclaim_count(), ==, 0);
 	/* Run a workload with reclaim off; count must stay 0. */
 	if (run_workers(4, 8) != MUNIT_OK)
@@ -169,17 +170,17 @@ test_reclaim_correct(const MunitParameter p[], void *d)
 	uint64_t before, after;
 	(void)p; (void)d;
 
-	if (xtc_stack_reclaim_enable(0) != XTC_OK) {
+	if (xtc_runtime_set_stack_reclaim(4096) != XTC_OK) {
 		/* No MADV_DONTNEED on this platform: the API declines and the
 		 * feature is a documented no-op.  Nothing to prove. */
-		munit_assert_int(xtc_stack_reclaim_enabled(), ==, 0);
+		munit_assert_size(xtc_runtime_get_stack_reclaim(), ==, 0);
 		return MUNIT_OK;
 	}
-	munit_assert_int(xtc_stack_reclaim_enabled(), ==, 1);
+	munit_assert_size(xtc_runtime_get_stack_reclaim(), ==, 4096);
 
 	before = xtc_stack_reclaim_count();
 	if (run_workers(4, 16) != MUNIT_OK) {
-		xtc_stack_reclaim_disable();
+		xtc_runtime_set_stack_reclaim(0);
 		return MUNIT_FAIL;
 	}
 	after = xtc_stack_reclaim_count();
@@ -192,8 +193,8 @@ test_reclaim_correct(const MunitParameter p[], void *d)
 	 * the count stayed 0). */
 	munit_assert_uint64(after, >, before);
 
-	xtc_stack_reclaim_disable();
-	munit_assert_int(xtc_stack_reclaim_enabled(), ==, 0);
+	xtc_runtime_set_stack_reclaim(0);
+	munit_assert_size(xtc_runtime_get_stack_reclaim(), ==, 0);
 	return MUNIT_OK;
 }
 
@@ -955,8 +956,8 @@ test_proc_stack_size(const MunitParameter p[], void *d)
 
 	/* Alternate which size the empty pool is offered first. */
 	for (i = 0; i < SZ_ROUNDS; i++) {
-		r.first = (i & 1) ? xtc_stack_size() : BIG_STACK;
-		r.second = (i & 1) ? BIG_STACK : xtc_stack_size();
+		r.first = (i & 1) ? xtc_runtime_get_stack_size() : BIG_STACK;
+		r.second = (i & 1) ? BIG_STACK : xtc_runtime_get_stack_size();
 		r.rc = XTC_E_INTERNAL;
 		munit_assert_int(pthread_create(&t, NULL, sz_round_thread, &r),
 		    ==, 0);

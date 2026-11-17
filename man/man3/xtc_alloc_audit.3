@@ -2,15 +2,12 @@
 .Dt XTC_ALLOC_AUDIT 3
 .Os
 .Sh NAME
-.Nm xtc_alloc_audit_enable ,
 .Nm xtc_alloc_audit_stats ,
 .Nm xtc_alloc_audit_proc_leaks
 .Nd debug allocation auditor with per-process leak detection
 .Sh SYNOPSIS
 .In xtc.h
 .In xtc_alloc_audit.h
-.Ft int
-.Fn xtc_alloc_audit_enable "int on"
 .Ft void
 .Fn xtc_alloc_audit_stats "size_t *out_count" "size_t *out_bytes"
 .Ft void
@@ -22,7 +19,7 @@ process
 that made it, so a test can assert a process freed everything it
 allocated before it died.
 .Pp
-.Fn xtc_alloc_audit_enable
+.Fn xtc_runtime_set_alloc_audit
 with a non-zero argument wraps the library's current allocator:
 each allocation calls the previous (downstream) allocator and is
 recorded in a hash table keyed by pointer; each free or realloc
@@ -47,7 +44,7 @@ This is the per-process leak check: call it from the process's
 .Xr xtc_proc_at_exit 3
 hook, or after the process is reaped, to confirm it leaked nothing.
 .Sh RETURN VALUES
-.Fn xtc_alloc_audit_enable
+.Fn xtc_runtime_set_alloc_audit
 returns
 .Dv XTC_OK
 on success or

@@ -95,6 +95,62 @@ typedef struct xtc_runtime_info {
  */
 XTC_API int xtc_runtime_info(xtc_runtime_info_t *out);
 
+/*
+ * Process-global knobs (2.2).  Each set_ has a get_ that reads back the
+ * value in force.  "Before first use" knobs are read when the thing they
+ * size is created; set them before that.
+ *
+ * stack_size        default fiber stack bytes (16 KiB minimum, rounded up
+ *                   to a page); any time, for fibers created afterward.
+ *                   XTC_E_INVAL below 16 KiB.  Default 64 KiB.
+ * stack_reclaim     keep_bytes > 0 turns on madvise-reclaim of a parked
+ *                   fiber's unused stack tail, leaving keep_bytes mapped
+ *                   below its SP; 0 turns it off.  Any time.
+ *                   XTC_E_NOSYS where the platform cannot reclaim (it
+ *                   stays off).  get_ returns 0 when off.  Default off.
+ * blocking_threads  pin the blocking-offload pool (xtc_blocking.h) at n
+ *                   threads, 1..64; before the pool's first use.
+ *                   XTC_E_STATE once it has started, XTC_E_INVAL out of
+ *                   range.  get_ returns 0 when the pool sizes itself
+ *                   (the default).
+ * preempt_involuntary  on != 0 enables signal-context preemption
+ *                   (xtc_preempt_involuntary.h); any time.  XTC_E_NOSYS
+ *                   where unsupported, and it stays off.  Default off.
+ * iowq_workers      io_uring io-wq worker caps per ring (bounded,
+ *                   unbounded; 0 = the kernel default); before the rings
+ *                   are created.  Other backends accept and ignore it.
+ *                   Default (4, 0).
+ * alloc_audit       on != 0 wraps the allocator hook to track per-proc
+ *                   allocations (xtc_alloc_audit.h); any time.
+ *                   XTC_E_NOMEM if the table cannot be allocated.
+ *
+ * PUBLIC: int    xtc_runtime_set_stack_size __P((size_t));
+ * PUBLIC: size_t xtc_runtime_get_stack_size __P((void));
+ * PUBLIC: int    xtc_runtime_set_stack_reclaim __P((size_t));
+ * PUBLIC: size_t xtc_runtime_get_stack_reclaim __P((void));
+ * PUBLIC: int    xtc_runtime_set_blocking_threads __P((int));
+ * PUBLIC: int    xtc_runtime_get_blocking_threads __P((void));
+ * PUBLIC: int    xtc_runtime_set_preempt_involuntary __P((int));
+ * PUBLIC: int    xtc_runtime_get_preempt_involuntary __P((void));
+ * PUBLIC: void   xtc_runtime_set_iowq_workers __P((unsigned, unsigned));
+ * PUBLIC: void   xtc_runtime_get_iowq_workers __P((unsigned *, unsigned *));
+ * PUBLIC: int    xtc_runtime_set_alloc_audit __P((int));
+ * PUBLIC: int    xtc_runtime_get_alloc_audit __P((void));
+ */
+XTC_API int    xtc_runtime_set_stack_size(size_t bytes);
+XTC_API size_t xtc_runtime_get_stack_size(void);
+XTC_API int    xtc_runtime_set_stack_reclaim(size_t keep_bytes);
+XTC_API size_t xtc_runtime_get_stack_reclaim(void);
+XTC_API int    xtc_runtime_set_blocking_threads(int nthreads);
+XTC_API int    xtc_runtime_get_blocking_threads(void);
+XTC_API int    xtc_runtime_set_preempt_involuntary(int on);
+XTC_API int    xtc_runtime_get_preempt_involuntary(void);
+XTC_API void   xtc_runtime_set_iowq_workers(unsigned bound, unsigned unbound);
+XTC_API void   xtc_runtime_get_iowq_workers(unsigned *out_bound,
+                                            unsigned *out_unbound);
+XTC_API int    xtc_runtime_set_alloc_audit(int on);
+XTC_API int    xtc_runtime_get_alloc_audit(void);
+
 #ifdef __cplusplus
 }
 #endif

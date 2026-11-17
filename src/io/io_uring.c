@@ -20,6 +20,7 @@
 #if defined(XTC_IO_BACKEND_URING)
 
 #include "io_int.h"
+#include "xtc_runtime.h"
 #include "xtc_tail.h"    /* xtc_pid_t, XTC_TAIL_REAP */
 #include "tail_int.h"   /* XTC_TAIL_REAP: the CQE-consumed event */
 #include "aio_int.h"      /* __xtc_aio_done_set: cross-thread completion flag */
@@ -50,7 +51,7 @@
  * values[0] = bounded max, values[1] = unbounded max (0 = leave the
  * kernel default for that class).  Process-global, read once per ring
  * at init; settable before the executor starts via
- * xtc_io_set_iowq_max_workers.  0 for a field means "leave kernel
+ * xtc_runtime_set_iowq_workers.  0 for a field means "leave kernel
  * default"; the shipped default caps the BOUNDED pool (the one that
  * scales with nr_cpus) to a small value and leaves unbounded alone.
  * On kernels without the register op (< 5.15) the call returns ENOSYS
@@ -61,7 +62,7 @@ static unsigned __xtc_iowq_bound = XTC_IOWQ_BOUND_DEFAULT;
 static unsigned __xtc_iowq_unbound = 0u; /* 0 = kernel default */
 
 /*
- * PUBLIC: void xtc_io_set_iowq_max_workers __P((unsigned, unsigned));
+ * PUBLIC: void xtc_runtime_set_iowq_workers __P((unsigned, unsigned));
  *
  * Set the per-ring io_uring io-wq worker caps applied to every ring
  * created afterward: bound = bounded-work workers (the ones that scale
@@ -72,10 +73,22 @@ static unsigned __xtc_iowq_unbound = 0u; /* 0 = kernel default */
  * operation.
  */
 XTC_API void
-xtc_io_set_iowq_max_workers(unsigned bound, unsigned unbound)
+xtc_runtime_set_iowq_workers(unsigned bound, unsigned unbound)
 {
 	xtc_atomic_store_u32(&__xtc_iowq_bound, bound, xtc_mo_relaxed);
 	xtc_atomic_store_u32(&__xtc_iowq_unbound, unbound, xtc_mo_relaxed);
+}
+
+/* PUBLIC: void xtc_runtime_get_iowq_workers __P((unsigned *, unsigned *)); */
+XTC_API void
+xtc_runtime_get_iowq_workers(unsigned *out_bound, unsigned *out_unbound)
+{
+	if (out_bound != NULL)
+		*out_bound =
+		    xtc_atomic_load_u32(&__xtc_iowq_bound, xtc_mo_relaxed);
+	if (out_unbound != NULL)
+		*out_unbound =
+		    xtc_atomic_load_u32(&__xtc_iowq_unbound, xtc_mo_relaxed);
 }
 
 extern int __xtc_io_drain_wakeup(xtc_io_t *io);

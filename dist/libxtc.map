@@ -111,6 +111,18 @@ XTC_2.2 {
 		xtc_reg_visit;
 		xtc_reg_whereis_wait;
 		xtc_room_decode;
+		xtc_runtime_get_alloc_audit;
+		xtc_runtime_get_blocking_threads;
+		xtc_runtime_get_iowq_workers;
+		xtc_runtime_get_preempt_involuntary;
+		xtc_runtime_get_stack_reclaim;
+		xtc_runtime_get_stack_size;
+		xtc_runtime_set_alloc_audit;
+		xtc_runtime_set_blocking_threads;
+		xtc_runtime_set_iowq_workers;
+		xtc_runtime_set_preempt_involuntary;
+		xtc_runtime_set_stack_reclaim;
+		xtc_runtime_set_stack_size;
 		xtc_scope_enter;
 		xtc_scope_leave;
 		xtc_send_notify;
