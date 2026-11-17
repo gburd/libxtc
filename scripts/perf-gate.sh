@@ -166,24 +166,31 @@ build() {
 		echo "perf-gate: $tag ($ref) failed to build; see $t/build" >&2
 		exit 2
 	}
-	# Both sides build the CANDIDATE's bench sources against their own
-	# library: a bench the base release predates still measures the
-	# base's library (benches use only the public xtc_* API), and a
-	# bench whose source changed cannot fake a difference.  Compiled here,
-	# not through the ref's Makefile, which may predate the bench.
+	# Each side builds its OWN bench sources against its own headers and
+	# library: across a release that renames API (2.2 deprecates the 2.1
+	# names and adds xtc_atomic.h), one side's benches do not compile
+	# against the other side's headers.  A bench the ref predates falls
+	# back to the candidate's source, so it still measures the ref's
+	# library (benches use only the public xtc_* API); a bench whose
+	# source differs between the sides is named in host.txt, because a
+	# change in the bench itself can move its number.  Compiled here, not
+	# through the ref's Makefile, which may predate the bench.
 	libs=$(sed -n 's/^LIBS[[:space:]]*=//p' "$t/build/Makefile")
 	cflags="-O2 -g -std=c11 -D_DEFAULT_SOURCE -I$t/build -I$t/src/src/inc"
 	for f in micro/bench_micro bench_hop bench_sync_offloop bench_timer_scale \
 	    bench_exec_scale; do
-		[ -f "$out/cand-bench/$f.c" ] || continue
+		bs="$t/src/bench/$f.c"
+		[ -f "$bs" ] || bs="$out/cand-bench/$f.c"
+		[ -f "$bs" ] || continue
 		# shellcheck disable=SC2086
-		${CC:-cc} $cflags -o "$t/build/${f##*/}" "$out/cand-bench/$f.c" \
+		${CC:-cc} $cflags -o "$t/build/${f##*/}" "$bs" \
 		    "$t/build/libxtc.a" -pthread -lm $libs >> "$t/build/make.log" 2>&1 || \
 		    echo "perf-gate: $tag: ${f##*/} did not build" >&2
 	done
 	sx="$t/src/examples/06_sqlxtc"
-	if [ -f "$out/cand-bench/bench_wal.c" ]; then
-		cp "$out/cand-bench/bench_wal.c" "$sx/bench_wal.c"
+	[ -f "$sx/bench_wal.c" ] || [ ! -f "$out/cand-bench/bench_wal.c" ] || \
+	    cp "$out/cand-bench/bench_wal.c" "$sx/bench_wal.c"
+	if [ -f "$sx/bench_wal.c" ]; then
 		# bench_wal links the ref's own wal.c, the engine under test; a
 		# wal.c too old for the bench's calls fails here and the cell is
 		# skipped for that side (reported, not judged).
@@ -227,7 +234,7 @@ run_cell() {
 QUAL=qualified
 preflight
 echo "perf-gate: base $base_ref, candidate $cand_ref, REPS=$REPS -> $out"
-# The candidate's bench sources, shared by both sides (see build()).
+# The candidate's bench sources, for a bench the base predates (see build()).
 mkdir -p "$out/cand-bench/micro"
 for f in micro/bench_micro bench_hop bench_sync_offloop bench_timer_scale \
     bench_exec_scale; do
@@ -248,6 +255,11 @@ build base "$base_ref"
 build cand "$cand_ref"
 echo "base $(cat "$out/base/rev") $base_ref" >> "$out/host.txt"
 echo "cand $(cat "$out/cand/rev") $cand_ref" >> "$out/host.txt"
+for f in bench/micro/bench_micro bench/bench_hop bench/bench_sync_offloop \
+    bench/bench_timer_scale bench/bench_exec_scale examples/06_sqlxtc/bench_wal; do
+	cmp -s "$out/base/src/$f.c" "$out/cand/src/$f.c" 2>/dev/null || \
+	    echo "bench source differs between the sides: $f.c" >> "$out/host.txt"
+done
 
 echo "cell,rep,side,value,qual" > "$out/results.csv"
 rep=1
