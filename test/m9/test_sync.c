@@ -226,7 +226,7 @@ test_gate(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_gate_enter(g), ==, XTC_OK);
 	munit_assert_int(xtc_gate_enter(g), ==, XTC_OK);
 	munit_assert_int(xtc_gate_count(g), ==, 2);
-	munit_assert_int(xtc_gate_close(g), ==, XTC_OK);
+	munit_assert_int(xtc_gate_shutdown(g), ==, XTC_OK);
 	munit_assert_int(xtc_gate_enter(g), ==, XTC_E_INVAL);
 	munit_assert_int(xtc_gate_drain(g, 0), ==, XTC_E_AGAIN);
 	munit_assert_int(xtc_gate_leave(g), ==, XTC_OK);
@@ -935,7 +935,7 @@ kw_driver(void *a)
 	munit_assert_int(xtc_proc_spawn_monitor(g_kw_loop, kw_victim,
 	    NULL, NULL, &g_kw_victim, &ref), ==, XTC_OK);
 	for (i = 0; i < 10; i++) xtc_yield();    /* victim parks */
-	if (g_kw_kind == 5) (void)xtc_gate_close(g_kw_g);
+	if (g_kw_kind == 5) (void)xtc_gate_shutdown(g_kw_g);
 	munit_assert_int(xtc_exit_pid(g_kw_victim, 9), ==, XTC_OK);
 	/* Past a timed victim's 50 ms deadline, so its own timer resumes
 	 * it while it is still queued. */

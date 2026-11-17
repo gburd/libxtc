@@ -134,7 +134,7 @@ test_stream_from_demand(const MunitParameter p[], void *d)
 
 	/* Empty but open: XTC_E_AGAIN.  After close+drain: XTC_E_NOTFOUND. */
 	munit_assert_int(xtc_stream_next(s, &v), ==, XTC_E_AGAIN);
-	munit_assert_int(xtc_chan_demand_close(ch), ==, XTC_OK);
+	munit_assert_int(xtc_chan_demand_shutdown(ch), ==, XTC_OK);
 	munit_assert_int(xtc_stream_next(s, &v), ==, XTC_E_NOTFOUND);
 
 	xtc_stream_destroy(s);          /* does NOT free ch */
@@ -175,7 +175,7 @@ fe_producer(void *arg)
 		if (xtc_chan_demand_send(c->ch, &c->items[i]) == XTC_OK) i++;
 		else xtc_yield();   /* no demand yet */
 	}
-	(void)xtc_chan_demand_close(c->ch);
+	(void)xtc_chan_demand_shutdown(c->ch);
 }
 /* Polls a done flag rather than being pthread_cancel'd: the MSVC
  * pthread shim (src/inc/compat/pthread.h) has no pthread_cancel. */

@@ -244,7 +244,7 @@ gate_closer(void *arg)
 	/* Let some workers enter first. */
 	xtc_yield(); xtc_yield();
 	xtc_atomic_store_i32(&g_gate_closed, 1, xtc_mo_relaxed);
-	(void)xtc_gate_close(g_gate);
+	(void)xtc_gate_shutdown(g_gate);
 	/* Drain: parks the fiber until every entered worker has left.
 	 * Positive timeout so a stuck worker surfaces, not a hang. */
 	rc = xtc_gate_drain(g_gate, 1000000000LL);

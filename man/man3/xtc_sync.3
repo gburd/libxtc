@@ -45,7 +45,7 @@
 .Nm xtc_gate_destroy ,
 .Nm xtc_gate_enter ,
 .Nm xtc_gate_leave ,
-.Nm xtc_gate_close ,
+.Nm xtc_gate_shutdown ,
 .Nm xtc_gate_drain ,
 .Nm xtc_gate_count ,
 .Nm xtc_abort_source ,
@@ -54,7 +54,8 @@
 .Nm xtc_abort_source_fire ,
 .Nm xtc_abort_source_token ,
 .Nm xtc_abort_token_is_aborted ,
-.Nm xtc_abort_token_reason
+.Nm xtc_abort_token_reason ,
+.Nm xtc_gate_close
 .Nd async synchronisation primitives
 .Sh SYNOPSIS
 .In xtc.h
@@ -128,7 +129,7 @@
 .Ft int
 .Fn xtc_gate_leave "xtc_gate_t *g"
 .Ft int
-.Fn xtc_gate_close "xtc_gate_t *g"
+.Fn xtc_gate_shutdown "xtc_gate_t *g"
 .Ft int
 .Fn xtc_gate_drain "xtc_gate_t *g" "int64_t timeout_ns"
 .Ft int
@@ -285,7 +286,7 @@ manage the object.
 and
 .Fn xtc_gate_leave
 bracket in-flight work;
-.Fn xtc_gate_close
+.Fn xtc_gate_shutdown
 rejects new entrants;
 .Fn xtc_gate_drain
 parks until the in-flight count reaches zero or the
@@ -368,6 +369,16 @@ or
 .It
 For cancellation propagation:
 .Vt xtc_abort_source .
+.El
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Fn xtc_gate_close
+Use
+.Fn xtc_gate_shutdown .
 .El
 .Sh SEE ALSO
 .Xr xtc_async 3 ,

@@ -88,7 +88,7 @@ test_mpsc_set_waker(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_chan_mpsc_try_send(c, &item), ==, XTC_OK);
 	munit_assert_int(xtc_chan_mpsc_set_waker(c, &inert), ==, XTC_OK);
 	/* Close fires the registered waker too. */
-	munit_assert_int(xtc_chan_mpsc_close(c), ==, XTC_OK);
+	munit_assert_int(xtc_chan_mpsc_shutdown(c), ==, XTC_OK);
 	xtc_chan_mpsc_destroy(c);
 	return MUNIT_OK;
 }
@@ -249,7 +249,7 @@ test_demand_backpressure(const MunitParameter p[], void *d)
 	munit_assert_size(xtc_chan_demand_outstanding(c), ==, 6);
 
 	/* Close: buffered items still drain, then XTC_E_INVAL. */
-	munit_assert_int(xtc_chan_demand_close(c), ==, XTC_OK);
+	munit_assert_int(xtc_chan_demand_shutdown(c), ==, XTC_OK);
 	munit_assert_int(xtc_chan_demand_send(c, &items[4]), ==, XTC_E_INVAL);
 	for (i = 0; i < 4; i++)
 		munit_assert_int(xtc_chan_demand_try_recv(c, &out), ==, XTC_OK);

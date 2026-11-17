@@ -121,7 +121,7 @@ xtc_batch_create(xtc_loop_t *, const xtc_batch_opts_t *, xtc_batch_t **);
 XTC_API int xtc_batch_submit(xtc_batch_t *, void *, uint64_t, uint64_t *);
 XTC_API int xtc_batch_cancel(xtc_batch_t *, uint64_t);
 XTC_API int xtc_batch_resume(xtc_batch_t *, uint64_t);
-XTC_API int xtc_batch_close(xtc_batch_t *, enum xtc_batch_close_mode);
+XTC_API int xtc_batch_shutdown(xtc_batch_t *, enum xtc_batch_close_mode);
 /* Destroy/stats also permit externally synchronized quiescent post-run calls.
  * Close -> run until driver ends -> destroy -> loop/exec fini. Stop is not
  * drain. Initialize output size/version; unknown version => VERSION, wrong size
@@ -193,6 +193,12 @@ XTC_API int xtc_batch_router_create(xtc_batch_t **groups, int n,
     xtc_batch_router_t **out);
 XTC_API void xtc_batch_router_destroy(xtc_batch_router_t *);
 XTC_API xtc_batch_t *xtc_batch_route(xtc_batch_router_t *, uint64_t key);
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_batch_shutdown")
+XTC_API int xtc_batch_close(xtc_batch_t *b, enum xtc_batch_close_mode mode);
+
 #ifdef __cplusplus
 }
 #endif

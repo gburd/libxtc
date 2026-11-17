@@ -261,14 +261,14 @@ typedef struct xtc_gate xtc_gate_t;
  *    do_work();
  *    xtc_gate_leave(g);
  *    ...
- *    xtc_gate_close(g);
+ *    xtc_gate_shutdown(g);
  *    xtc_gate_drain(g, timeout_ns);    // wait for in-flight ops to finish
  *
  * PUBLIC: int  xtc_gate_create __P((xtc_gate_t **));
  * PUBLIC: void xtc_gate_destroy __P((xtc_gate_t *));
  * PUBLIC: int  xtc_gate_enter __P((xtc_gate_t *));
  * PUBLIC: int  xtc_gate_leave __P((xtc_gate_t *));
- * PUBLIC: int  xtc_gate_close __P((xtc_gate_t *));
+ * PUBLIC: int  xtc_gate_shutdown __P((xtc_gate_t *));
  * PUBLIC: int  xtc_gate_drain __P((xtc_gate_t *, int64_t));
  * PUBLIC: int  xtc_gate_count __P((const xtc_gate_t *));
  */
@@ -276,9 +276,15 @@ XTC_API int  xtc_gate_create(xtc_gate_t **out);
 XTC_API void xtc_gate_destroy(xtc_gate_t *g);
 XTC_API int  xtc_gate_enter(xtc_gate_t *g);
 XTC_API int  xtc_gate_leave(xtc_gate_t *g);
-XTC_API int  xtc_gate_close(xtc_gate_t *g);
+XTC_API int  xtc_gate_shutdown(xtc_gate_t *g);
 XTC_API int  xtc_gate_drain(xtc_gate_t *g, int64_t timeout_ns);
 XTC_API int  xtc_gate_count(const xtc_gate_t *g);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_gate_shutdown")
+XTC_API int xtc_gate_close(xtc_gate_t *g);
 
 #ifdef __cplusplus
 }

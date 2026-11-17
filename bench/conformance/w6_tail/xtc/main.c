@@ -197,7 +197,7 @@ gen_fn(void *arg_)
 	 */
 	if (xtc_atomic_fetch_add_i32(&sh->gens_done, 1, xtc_mo_acq_rel) + 1 ==
 	    sh->n_gens)
-		xtc_chan_mpsc_close(sh->chan);
+		xtc_chan_mpsc_shutdown(sh->chan);
 
 	return NULL;
 }

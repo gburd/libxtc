@@ -370,7 +370,7 @@ owner(void *arg)
 	      "duration pool outlasts window (raise --requests)");
 	while (b->terminal < b->target)
 		xtc_yield();
-	must(xtc_batch_close(b->batch, XTC_BATCH_DRAIN));
+	must(xtc_batch_shutdown(b->batch, XTC_BATCH_DRAIN));
 }
 
 /* Independent scalar oracle: each component derives its needed coefficients

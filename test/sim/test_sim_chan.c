@@ -102,7 +102,7 @@ mpmc_producer(void *arg)
 	if (xtc_atomic_fetch_add_i32(&g_mpmc_prod_done, 1, xtc_mo_relaxed) +
 	        1 ==
 	    MPMC_PROD)
-		(void)xtc_chan_mpmc_close(g_mpmc);   /* last producer closes */
+		(void)xtc_chan_mpmc_shutdown(g_mpmc);   /* last producer closes */
 }
 
 static void

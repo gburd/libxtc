@@ -81,7 +81,7 @@ typedef struct xtc_chan_mpsc xtc_chan_mpsc_t;
  * PUBLIC: int  xtc_chan_mpsc_try_send __P((xtc_chan_mpsc_t *, void *));
  * PUBLIC: int  xtc_chan_mpsc_try_recv __P((xtc_chan_mpsc_t *, void **));
  * PUBLIC: int  xtc_chan_mpsc_set_waker __P((xtc_chan_mpsc_t *, const xtc_waker_t *));
- * PUBLIC: int  xtc_chan_mpsc_close __P((xtc_chan_mpsc_t *));
+ * PUBLIC: int  xtc_chan_mpsc_shutdown __P((xtc_chan_mpsc_t *));
  * PUBLIC: size_t xtc_chan_mpsc_len __P((const xtc_chan_mpsc_t *));
  */
 XTC_API int    xtc_chan_mpsc_create(xtc_res_t *res, size_t capacity,
@@ -112,7 +112,7 @@ XTC_API int    xtc_chan_mpsc_set_waker(xtc_chan_mpsc_t *c, const xtc_waker_t *w)
  * Close the channel.  Subsequent sends fail; pending receives drain
  * the buffer then return XTC_E_INVAL on the next call.
  */
-XTC_API int    xtc_chan_mpsc_close(xtc_chan_mpsc_t *c);
+XTC_API int    xtc_chan_mpsc_shutdown(xtc_chan_mpsc_t *c);
 
 XTC_API size_t xtc_chan_mpsc_len(const xtc_chan_mpsc_t *c);
 
@@ -145,7 +145,7 @@ typedef struct xtc_chan_mpmc xtc_chan_mpmc_t;
  * PUBLIC: void   xtc_chan_mpmc_destroy __P((xtc_chan_mpmc_t *));
  * PUBLIC: int    xtc_chan_mpmc_try_send __P((xtc_chan_mpmc_t *, void *));
  * PUBLIC: int    xtc_chan_mpmc_try_recv __P((xtc_chan_mpmc_t *, void **));
- * PUBLIC: int    xtc_chan_mpmc_close __P((xtc_chan_mpmc_t *));
+ * PUBLIC: int    xtc_chan_mpmc_shutdown __P((xtc_chan_mpmc_t *));
  * PUBLIC: size_t xtc_chan_mpmc_len __P((const xtc_chan_mpmc_t *));
  */
 XTC_API int    xtc_chan_mpmc_create(xtc_res_t *res, size_t capacity,
@@ -153,7 +153,7 @@ XTC_API int    xtc_chan_mpmc_create(xtc_res_t *res, size_t capacity,
 XTC_API void   xtc_chan_mpmc_destroy(xtc_chan_mpmc_t *c);
 XTC_API int    xtc_chan_mpmc_try_send(xtc_chan_mpmc_t *c, void *msg);
 XTC_API int    xtc_chan_mpmc_try_recv(xtc_chan_mpmc_t *c, void **out);
-XTC_API int    xtc_chan_mpmc_close(xtc_chan_mpmc_t *c);
+XTC_API int    xtc_chan_mpmc_shutdown(xtc_chan_mpmc_t *c);
 XTC_API size_t xtc_chan_mpmc_len(const xtc_chan_mpmc_t *c);
 
 /* ----- broadcast --------------------------------------------------- */
@@ -224,7 +224,7 @@ typedef struct xtc_chan_demand xtc_chan_demand_t;
  * PUBLIC: size_t xtc_chan_demand_len __P((const xtc_chan_demand_t *));
  * PUBLIC: int    xtc_chan_demand_set_producer_waker __P((xtc_chan_demand_t *, const xtc_waker_t *));
  * PUBLIC: int    xtc_chan_demand_set_consumer_waker __P((xtc_chan_demand_t *, const xtc_waker_t *));
- * PUBLIC: int    xtc_chan_demand_close __P((xtc_chan_demand_t *));
+ * PUBLIC: int    xtc_chan_demand_shutdown __P((xtc_chan_demand_t *));
  */
 XTC_API int    xtc_chan_demand_create(xtc_res_t *res, size_t capacity,
                                       xtc_chan_demand_t **out);
@@ -255,7 +255,17 @@ XTC_API int    xtc_chan_demand_set_consumer_waker(xtc_chan_demand_t *c,
                                                   const xtc_waker_t *w);
 
 /* Close the channel; subsequent sends fail, buffered items still drain. */
-XTC_API int    xtc_chan_demand_close(xtc_chan_demand_t *c);
+XTC_API int    xtc_chan_demand_shutdown(xtc_chan_demand_t *c);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_chan_mpsc_shutdown")
+XTC_API int xtc_chan_mpsc_close(xtc_chan_mpsc_t *c);
+XTC_DEPRECATED("use xtc_chan_mpmc_shutdown")
+XTC_API int xtc_chan_mpmc_close(xtc_chan_mpmc_t *c);
+XTC_DEPRECATED("use xtc_chan_demand_shutdown")
+XTC_API int xtc_chan_demand_close(xtc_chan_demand_t *c);
 
 #ifdef __cplusplus
 }

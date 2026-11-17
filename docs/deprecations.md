@@ -47,10 +47,15 @@ result keeps working until it moves to the new name.
 <!-- renames:begin -->
 | Old (deprecated in 2.2) | New (2.2) | Kind | Notes |
 |---|---|---|---|
+| `xtc_batch_close()` | `xtc_batch_shutdown()` | function |  |
 | `xtc_bloom_fini()` | `xtc_bloom_destroy()` | function |  |
 | `xtc_bloom_init()` | `xtc_bloom_create()` | function | arguments reordered: (n_expected, fp_rate, out) |
+| `xtc_chan_demand_close()` | `xtc_chan_demand_shutdown()` | function |  |
+| `xtc_chan_mpmc_close()` | `xtc_chan_mpmc_shutdown()` | function |  |
+| `xtc_chan_mpsc_close()` | `xtc_chan_mpsc_shutdown()` | function |  |
 | `xtc_exec_fini()` | `xtc_exec_destroy()` | function | the new name returns void; the old one returns XTC_E_INVAL for NULL, else XTC_OK |
 | `xtc_exec_init()` | `xtc_exec_create()` | function | arguments changed: (const xtc_exec_opts_t *opts, out), n_loops is opts->n_loops |
+| `xtc_gate_close()` | `xtc_gate_shutdown()` | function |  |
 | `xtc_hll_fini()` | `xtc_hll_destroy()` | function |  |
 | `xtc_hll_init()` | `xtc_hll_create()` | function | arguments reordered: (precision, out) |
 | `xtc_io_fini()` | `xtc_io_destroy()` | function | the new name returns void; the old one returns XTC_E_INVAL for NULL, else XTC_OK |

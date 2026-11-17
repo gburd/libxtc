@@ -278,7 +278,7 @@ xtc_chan_mpsc_set_waker(xtc_chan_mpsc_t *c, const xtc_waker_t *w)
 }
 
 int
-xtc_chan_mpsc_close(xtc_chan_mpsc_t *c)
+xtc_chan_mpsc_shutdown(xtc_chan_mpsc_t *c)
 {
 	if (c == NULL) return XTC_E_INVAL;
 	xtc_atomic_store_i32(&c->closed, 1, xtc_mo_release);
@@ -476,7 +476,7 @@ xtc_chan_mpmc_try_recv(xtc_chan_mpmc_t *c, void **out)
 }
 
 int
-xtc_chan_mpmc_close(xtc_chan_mpmc_t *c)
+xtc_chan_mpmc_shutdown(xtc_chan_mpmc_t *c)
 {
 	if (c == NULL) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&c->lock);
@@ -817,7 +817,7 @@ xtc_chan_demand_set_consumer_waker(xtc_chan_demand_t *c, const xtc_waker_t *w)
 }
 
 int
-xtc_chan_demand_close(xtc_chan_demand_t *c)
+xtc_chan_demand_shutdown(xtc_chan_demand_t *c)
 {
 	int fire = 0;
 	if (c == NULL) return XTC_E_INVAL;

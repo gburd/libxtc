@@ -833,17 +833,17 @@ static void
 batch_mt_fini(xtc_batch_t *b)
 {
 	if (b->mt.ring != NULL) {
-		(void)xtc_chan_mpsc_close(b->mt.ring);
+		(void)xtc_chan_mpsc_shutdown(b->mt.ring);
 		xtc_chan_mpsc_destroy(b->mt.ring);
 		b->mt.ring = NULL;
 	}
 	if (b->mt.pool != NULL) {
-		(void)xtc_chan_mpmc_close(b->mt.pool);
+		(void)xtc_chan_mpmc_shutdown(b->mt.pool);
 		xtc_chan_mpmc_destroy(b->mt.pool);
 		b->mt.pool = NULL;
 	}
 	if (b->mt.cpool != NULL) {
-		(void)xtc_chan_mpmc_close(b->mt.cpool);
+		(void)xtc_chan_mpmc_shutdown(b->mt.cpool);
 		xtc_chan_mpmc_destroy(b->mt.cpool);
 		b->mt.cpool = NULL;
 	}
@@ -1940,9 +1940,9 @@ xtc_batch_resume_mt(xtc_batch_t *b, uint64_t handle)
 #endif
 }
 
-/* PUBLIC: int xtc_batch_close __P((xtc_batch_t *, enum xtc_batch_close_mode)); */
+/* PUBLIC: int xtc_batch_shutdown __P((xtc_batch_t *, enum xtc_batch_close_mode)); */
 int
-xtc_batch_close(xtc_batch_t *b, enum xtc_batch_close_mode mode)
+xtc_batch_shutdown(xtc_batch_t *b, enum xtc_batch_close_mode mode)
 {
 #ifdef XTC_ENABLE_SCHED_POLICY
 	int rc;

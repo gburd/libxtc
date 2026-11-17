@@ -1893,7 +1893,7 @@ xtc_gate_leave(xtc_gate_t *g)
 }
 
 int
-xtc_gate_close(xtc_gate_t *g)
+xtc_gate_shutdown(xtc_gate_t *g)
 {
 	if (g == NULL) return XTC_E_INVAL;
 	(void)__xtc_mtx_lock(&g->lock);

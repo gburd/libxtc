@@ -16,14 +16,14 @@
 .Nm xtc_chan_mpsc_try_send ,
 .Nm xtc_chan_mpsc_try_recv ,
 .Nm xtc_chan_mpsc_set_waker ,
-.Nm xtc_chan_mpsc_close ,
+.Nm xtc_chan_mpsc_shutdown ,
 .Nm xtc_chan_mpsc_len ,
 .Nm xtc_chan_mpmc ,
 .Nm xtc_chan_mpmc_create ,
 .Nm xtc_chan_mpmc_destroy ,
 .Nm xtc_chan_mpmc_try_send ,
 .Nm xtc_chan_mpmc_try_recv ,
-.Nm xtc_chan_mpmc_close ,
+.Nm xtc_chan_mpmc_shutdown ,
 .Nm xtc_chan_mpmc_len ,
 .Nm xtc_chan_watch ,
 .Nm xtc_chan_watch_create ,
@@ -46,6 +46,9 @@
 .Nm xtc_chan_demand_len ,
 .Nm xtc_chan_demand_set_producer_waker ,
 .Nm xtc_chan_demand_set_consumer_waker ,
+.Nm xtc_chan_demand_shutdown ,
+.Nm xtc_chan_mpsc_close ,
+.Nm xtc_chan_mpmc_close ,
 .Nm xtc_chan_demand_close
 .Nd typed channels for cross-task message passing
 .Sh SYNOPSIS
@@ -72,7 +75,7 @@
 .Ft int
 .Fn xtc_chan_mpsc_set_waker "xtc_chan_mpsc_t *c" "const xtc_waker_t *w"
 .Ft int
-.Fn xtc_chan_mpsc_close "xtc_chan_mpsc_t *c"
+.Fn xtc_chan_mpsc_shutdown "xtc_chan_mpsc_t *c"
 .Ft size_t
 .Fn xtc_chan_mpsc_len "const xtc_chan_mpsc_t *c"
 .Ft int
@@ -84,7 +87,7 @@
 .Ft int
 .Fn xtc_chan_mpmc_try_recv "xtc_chan_mpmc_t *c" "void **out"
 .Ft int
-.Fn xtc_chan_mpmc_close "xtc_chan_mpmc_t *c"
+.Fn xtc_chan_mpmc_shutdown "xtc_chan_mpmc_t *c"
 .Ft size_t
 .Fn xtc_chan_mpmc_len "const xtc_chan_mpmc_t *c"
 .Ft int
@@ -126,7 +129,7 @@
 .Ft int
 .Fn xtc_chan_demand_set_consumer_waker "xtc_chan_demand_t *c" "const xtc_waker_t *w"
 .Ft int
-.Fn xtc_chan_demand_close "xtc_chan_demand_t *c"
+.Fn xtc_chan_demand_shutdown "xtc_chan_demand_t *c"
 .Sh DESCRIPTION
 .Nm xtc_chan
 provides typed channel primitives for cross-task / cross-process /
@@ -161,7 +164,7 @@ and
 move messages without parking;
 .Fn xtc_chan_mpsc_set_waker
 arms an async waker;
-.Fn xtc_chan_mpsc_close
+.Fn xtc_chan_mpsc_shutdown
 marks the channel closed; and
 .Fn xtc_chan_mpsc_len
 reports the queued count.
@@ -182,7 +185,7 @@ serialising both sides via per-slot sequence numbers
 .Fn xtc_chan_mpmc_create ,
 .Fn xtc_chan_mpmc_try_send ,
 .Fn xtc_chan_mpmc_try_recv ,
-.Fn xtc_chan_mpmc_close ,
+.Fn xtc_chan_mpmc_shutdown ,
 .Fn xtc_chan_mpmc_len ,
 and
 .Fn xtc_chan_mpmc_destroy
@@ -245,7 +248,7 @@ report the un-consumed demand and the buffered item count.
 fires when the consumer grants demand;
 .Fn xtc_chan_demand_set_consumer_waker
 fires when the producer sends an item;
-.Fn xtc_chan_demand_close
+.Fn xtc_chan_demand_shutdown
 closes the channel (buffered items still drain).
 .El
 .Pp
@@ -292,6 +295,22 @@ if (xtc_chan_mpsc_try_recv(q, &item) == XTC_OK) {
     free(item);
 }
 .Ed
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Fn xtc_chan_mpsc_close
+Use
+.Fn xtc_chan_mpsc_shutdown .
+.It Fn xtc_chan_mpmc_close
+Use
+.Fn xtc_chan_mpmc_shutdown .
+.It Fn xtc_chan_demand_close
+Use
+.Fn xtc_chan_demand_shutdown .
+.El
 .Sh SEE ALSO
 .Xr xtc_proc 3 ,
 .Xr xtc_res 3 ,

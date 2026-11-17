@@ -22,12 +22,15 @@
 #include <stdlib.h>
 
 #include "xtc.h"
+#include "xtc_batch.h"
+#include "xtc_chan.h"
 #include "xtc_exec.h"
 #include "xtc_io.h"
 #include "xtc_loop.h"
 #include "xtc_pg.h"
 #include "xtc_prob.h"
 #include "xtc_reg.h"
+#include "xtc_sync.h"
 
 #define CHECK(c)                                                               \
 	do {                                                                   \
@@ -94,12 +97,44 @@ bridge_pg(void)
 	xtc_reg_destroy(r);
 }
 
+/* close -> shutdown: a shut-down channel refuses a send; a shut-down
+ * gate refuses an enter. */
+static void
+bridge_shutdown(void)
+{
+	xtc_chan_mpsc_t *a = NULL;
+	xtc_chan_mpmc_t *b = NULL;
+	xtc_chan_demand_t *c = NULL;
+	xtc_gate_t *g = NULL;
+	int x = 1, rc;
+
+	CHECK(xtc_chan_mpsc_create(NULL, 4, &a) == XTC_OK);
+	CHECK(xtc_chan_mpsc_close(a) == XTC_OK);
+	CHECK(xtc_chan_mpsc_try_send(a, &x) != XTC_OK);
+	xtc_chan_mpsc_destroy(a);
+	CHECK(xtc_chan_mpmc_create(NULL, 4, &b) == XTC_OK);
+	CHECK(xtc_chan_mpmc_close(b) == XTC_OK);
+	CHECK(xtc_chan_mpmc_try_send(b, &x) != XTC_OK);
+	xtc_chan_mpmc_destroy(b);
+	CHECK(xtc_chan_demand_create(NULL, 4, &c) == XTC_OK);
+	CHECK(xtc_chan_demand_close(c) == XTC_OK);
+	CHECK(xtc_chan_demand_send(c, &x) != XTC_OK);
+	xtc_chan_demand_destroy(c);
+	CHECK(xtc_gate_create(&g) == XTC_OK);
+	CHECK(xtc_gate_close(g) == XTC_OK);
+	CHECK(xtc_gate_enter(g) != XTC_OK);
+	xtc_gate_destroy(g);
+	rc = xtc_batch_close(NULL, XTC_BATCH_DRAIN);
+	CHECK(rc == XTC_E_INVAL || rc == XTC_E_NOSYS);
+}
+
 int
 main(void)
 {
 	bridge_lifecycle();
 	bridge_exec();
 	bridge_pg();
+	bridge_shutdown();
 	printf("  [bridge] OK: every deprecated name still works\n");
 	return 0;
 }

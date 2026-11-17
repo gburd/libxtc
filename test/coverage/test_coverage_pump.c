@@ -120,7 +120,7 @@ test_chan_mpsc_full_api(const MunitParameter p[], void *d)
 		(void)l2; (void)dummy_task;
 	}
 
-	munit_assert_int(xtc_chan_mpsc_close(c), ==, XTC_OK);
+	munit_assert_int(xtc_chan_mpsc_shutdown(c), ==, XTC_OK);
 	/* Drained: receive remaining (try_recv returns OK with the
 	 * one queued item).  Note: try_recv assigns to **out, but our
 	 * pointer-typed `out` was already declared.  Just use it. */
@@ -152,7 +152,7 @@ test_chan_mpmc_full_api(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_chan_mpmc_try_send(c, &marker), ==, XTC_OK);
 	munit_assert_size(xtc_chan_mpmc_len(c), ==, 1);
 
-	munit_assert_int(xtc_chan_mpmc_close(c), ==, XTC_OK);
+	munit_assert_int(xtc_chan_mpmc_shutdown(c), ==, XTC_OK);
 	munit_assert_int(xtc_chan_mpmc_try_recv(c, &out), ==, XTC_OK);
 	munit_assert_int(xtc_chan_mpmc_try_send(c, &marker), ==, XTC_E_INVAL);
 

@@ -5,10 +5,11 @@
 xtc_batch_create, xtc_batch_create_async, xtc_batch_submit,
 xtc_batch_submit_mt, xtc_batch_cancel, xtc_batch_cancel_mt,
 xtc_batch_resume, xtc_batch_resume_mt,
-xtc_batch_close, xtc_batch_destroy, xtc_batch_get_stats,
+xtc_batch_shutdown, xtc_batch_destroy, xtc_batch_get_stats,
 xtc_batch_get_async_stats,
 xtc_batch_loop_for_device, xtc_batch_router_create,
-xtc_batch_router_destroy, xtc_batch_route \- bounded continuous batching
+xtc_batch_router_destroy, xtc_batch_route,
+xtc_batch_close \- bounded continuous batching
 .SH SYNOPSIS
 .nf
 #include <xtc_batch.h>
@@ -25,7 +26,7 @@ int xtc_batch_cancel(xtc_batch_t *group, uint64_t handle);
 int xtc_batch_cancel_mt(xtc_batch_t *group, uint64_t handle);
 int xtc_batch_resume(xtc_batch_t *group, uint64_t handle);
 int xtc_batch_resume_mt(xtc_batch_t *group, uint64_t handle);
-int xtc_batch_close(xtc_batch_t *group, enum xtc_batch_close_mode mode);
+int xtc_batch_shutdown(xtc_batch_t *group, enum xtc_batch_close_mode mode);
 int xtc_batch_destroy(xtc_batch_t *group);
 int xtc_batch_get_stats(xtc_batch_t *group, xtc_batch_stats_t *out);
 int xtc_batch_get_async_stats(xtc_batch_t *group,
@@ -357,7 +358,7 @@ After a stopped run, route close through an owner process and run again.
 .PP
 With cross-loop producers the same order holds and extends to the ring.
 Once
-.B xtc_batch_close
+.B xtc_batch_shutdown
 has returned, every
 .B xtc_batch_submit_mt
 returns XTC_E_AGAIN without issuing a handle. A submit_mt that races close
@@ -465,6 +466,14 @@ XTC_E_AGAIN indicates full/closed admission, creation after first execution,
 or destruction before shutdown has completed.
 XTC_E_DEADLK indicates mutation during a callback.
 XTC_E_NOMEM indicates allocation failure during create.
+.SH DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see docs/deprecations.md.
+A rebuild that uses one warns.
+.TP
+.B xtc_batch_close
+Use
+.BR xtc_batch_shutdown .
 .SH SEE ALSO
 .BR xtc_accel (3),
 .BR xtc_exec (3),

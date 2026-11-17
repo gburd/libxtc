@@ -115,7 +115,7 @@ main(void)
 
 	/* !region lifecycle */
 	/* Close, run until the driver ends, destroy, then fini. */
-	if (xtc_batch_close(d.group, XTC_BATCH_DRAIN) != XTC_OK ||
+	if (xtc_batch_shutdown(d.group, XTC_BATCH_DRAIN) != XTC_OK ||
 	    xtc_loop_run(loop) != XTC_OK ||
 	    xtc_batch_get_stats(d.group, &st) != XTC_OK ||
 	    xtc_batch_destroy(d.group) != XTC_OK)

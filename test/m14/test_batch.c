@@ -62,7 +62,7 @@ step(const xtc_batch_item_t *items, xtc_batch_result_t *results, size_t n,
 	c->driver = xtc_self();
 	if (c->mode == 9) {
 		assert(xtc_proc_at_exit(parking_hook, c) == XTC_OK);
-		assert(xtc_batch_close(c->batch, XTC_BATCH_CANCEL)
+		assert(xtc_batch_shutdown(c->batch, XTC_BATCH_CANCEL)
 		       == XTC_E_DEADLK);
 	}
 	if (c->mode == 10) {
@@ -76,7 +76,7 @@ step(const xtc_batch_item_t *items, xtc_batch_result_t *results, size_t n,
 	}
 	if (n == 2)
 		c->vector2++;
-	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_E_DEADLK);
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_DRAIN) == XTC_E_DEADLK);
 	assert(xtc_batch_submit(c->batch, NULL, 1, &h) == XTC_E_DEADLK);
 	assert(xtc_batch_get_stats(c->batch, &stats) == XTC_OK);
 	if (c->mode == 14) {
@@ -153,7 +153,7 @@ peer(void *arg)
 	if (c->mode == 6 || c->mode == 14) {
 		assert(c->in_callback);
 		assert(xtc_batch_cancel(c->batch, c->ha) == XTC_E_DEADLK);
-		assert(xtc_batch_close(c->batch, XTC_BATCH_CANCEL)
+		assert(xtc_batch_shutdown(c->batch, XTC_BATCH_CANCEL)
 		       == XTC_E_DEADLK);
 		assert(xtc_batch_destroy(c->batch) == XTC_E_DEADLK);
 		c->peer = 1;
@@ -185,10 +185,10 @@ peer(void *arg)
 	if (c->mode == 7) { /* first submission after empty driver parked */
 		assert(xtc_batch_submit(c->batch, &c->a, 1, &h) == XTC_OK);
 	}
-	assert(xtc_batch_close(c->batch, c->mode == 8 ? XTC_BATCH_CANCEL :
+	assert(xtc_batch_shutdown(c->batch, c->mode == 8 ? XTC_BATCH_CANCEL :
 	                                                XTC_BATCH_DRAIN)
 	       == XTC_OK);
-	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
 	if (c->mode == 10 || c->mode == 12)
 		return; /* unexpected driver exit already completed cleanup */
 	assert(xtc_batch_destroy(c->batch) == XTC_E_AGAIN);
@@ -286,8 +286,8 @@ lifecycle(void)
 	}
 	assert(xtc_batch_submit(c.batch, &c.a, 1, &h[4]) == XTC_E_AGAIN);
 	/* Distinct requests for the exactly-once callback assertion. */
-	assert(xtc_batch_close(c.batch, XTC_BATCH_CANCEL) == XTC_OK);
-	assert(xtc_batch_close(c.batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(c.batch, XTC_BATCH_CANCEL) == XTC_OK);
+	assert(xtc_batch_shutdown(c.batch, XTC_BATCH_DRAIN) == XTC_OK);
 	assert(xtc_batch_destroy(c.batch) == XTC_E_AGAIN);
 	/* Complete tracks per request, so this fixture uses another callback.
 	 */
@@ -301,7 +301,7 @@ lifecycle(void)
 	assert(xtc_loop_create(&c.loop) == XTC_OK);
 	o = options(&c);
 	assert(xtc_batch_create(c.loop, &o, &c.batch) == XTC_OK);
-	assert(xtc_batch_close(c.batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(c.batch, XTC_BATCH_DRAIN) == XTC_OK);
 	assert(xtc_batch_destroy(c.batch) == XTC_E_AGAIN);
 	assert(xtc_loop_run(c.loop) == XTC_OK);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
@@ -320,12 +320,12 @@ independent_loop_teardown(void)
 	assert(xtc_batch_create(a.loop, &o, &a.batch) == XTC_OK);
 	o = options(&b);
 	assert(xtc_batch_create(b.loop, &o, &b.batch) == XTC_OK);
-	assert(xtc_batch_close(a.batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(a.batch, XTC_BATCH_DRAIN) == XTC_OK);
 	assert(xtc_loop_run(a.loop) == XTC_OK);
 	/* Equal PID values on standalone loops must not join another driver. */
 	assert(xtc_batch_destroy(a.batch) == XTC_OK);
 	assert(xtc_batch_destroy(b.batch) == XTC_E_AGAIN);
-	assert(xtc_batch_close(b.batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(b.batch, XTC_BATCH_DRAIN) == XTC_OK);
 	assert(xtc_loop_run(b.loop) == XTC_OK);
 	assert(xtc_batch_destroy(b.batch) == XTC_OK);
 	xtc_loop_destroy(a.loop);
@@ -365,7 +365,7 @@ close_peer(void *arg)
 {
 	struct context *c = arg;
 	assert(xtc_batch_destroy(c->batch) == XTC_E_AGAIN);
-	assert(xtc_batch_close(c->batch, XTC_BATCH_CANCEL) == XTC_OK);
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_CANCEL) == XTC_OK);
 }
 static void
 stop_is_not_drain(void)
@@ -399,7 +399,7 @@ kill_peer(void *arg)
 	for (i = 0; i < 4; i++)
 		xtc_yield();
 	assert(c->a.completions == 0); /* kill alone does not wake notify */
-	assert(xtc_batch_close(c->batch, XTC_BATCH_CANCEL) == XTC_OK);
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_CANCEL) == XTC_OK);
 }
 static void
 masked_wait_kill(void)
@@ -437,7 +437,7 @@ exhaust_peer(void *arg)
 	assert(xtc_batch_cancel(c->batch, 1) == XTC_E_INVAL);
 	assert(xtc_batch_get_stats(c->batch, &s) == XTC_OK);
 	assert(s.completed == 1 && s.rejections == 2 && s.queued == 0);
-	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
 }
 
 static void
@@ -517,7 +517,7 @@ charge_limits(void)
 	assert(xtc_batch_submit(c.batch, &c.b, 2, &c.hb) == XTC_OK);
 	assert(xtc_batch_submit(c.batch, &c.c, 1, &c.hc) == XTC_OK);
 	assert(xtc_batch_submit(c.batch, &d, UINT64_MAX, &h) == XTC_OK);
-	assert(xtc_batch_close(c.batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(c.batch, XTC_BATCH_DRAIN) == XTC_OK);
 	assert(xtc_loop_run(c.loop) == XTC_OK);
 	assert(c.calls == 3 && c.a.completions == 1 && c.b.completions == 1
 	       && c.c.completions == 1 && d.completions == 1);
@@ -623,7 +623,7 @@ allocation_failures(void)
 		attempts = alloc_attempt;
 		fail_at = 0;
 		if (rc == XTC_OK) {
-			assert(xtc_batch_close(c.batch, XTC_BATCH_CANCEL)
+			assert(xtc_batch_shutdown(c.batch, XTC_BATCH_CANCEL)
 			       == XTC_OK);
 			assert(xtc_loop_run(c.loop) == XTC_OK);
 			assert(xtc_batch_destroy(c.batch) == XTC_OK);
@@ -683,7 +683,7 @@ noalloc_peer(void *arg)
 	assert(c->a.calls == 1);
 	assert(xtc_batch_resume(c->batch, c->ha) == XTC_OK);
 	assert(xtc_batch_cancel(c->batch, c->ha) == XTC_OK);
-	assert(xtc_batch_close(c->batch, XTC_BATCH_CANCEL) == XTC_OK);
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_CANCEL) == XTC_OK);
 }
 
 static void
@@ -879,14 +879,14 @@ future_peer(void *arg)
 		}
 		xtc_yield();
 	}
-	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
 }
 
 static void
 drain_peer(void *arg)
 {
 	struct actx *c = arg;
-	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
 }
 
 static void
@@ -1035,7 +1035,7 @@ async_timeout(void)
 	o = aopts(&c);
 	assert(xtc_batch_create_async(c.loop, &o, &c.batch) == XTC_OK);
 	async_submit(&c, 0, 1);
-	assert(xtc_batch_close(c.batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(c.batch, XTC_BATCH_DRAIN) == XTC_OK);
 	async_finish(&c, 1);
 	assert(c.req[0].completions == 1 && c.req[0].outcome == XTC_E_IO);
 	assert(c.last_exec_status == XTC_BATCH_EXEC_TIMEOUT);
@@ -1045,7 +1045,7 @@ async_timeout(void)
 }
 
 /* Teardown-while-parked (the B1 regression): the driver parks on a FUTURE that
- * never resolves; xtc_batch_close(CANCEL) signals the group notify, which the
+ * never resolves; xtc_batch_shutdown(CANCEL) signals the group notify, which the
  * engine's FUTURE await also waits on, so the await wakes, observes the cancel,
  * and batch_collect_inflight finalizes the in-flight member exactly once
  * (collect still runs so the app can free its device buffer) with no leak/UAF.
@@ -1059,7 +1059,7 @@ teardown_peer(void *arg)
 	for (i = 0; i < 8; ++i)
 		xtc_yield();
 	assert(c->submit_calls == 1 && c->collect_calls == 0);
-	assert(xtc_batch_close(c->batch, XTC_BATCH_CANCEL) == XTC_OK);
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_CANCEL) == XTC_OK);
 }
 
 static void
@@ -1106,7 +1106,7 @@ teardown_resolved_peer(void *arg)
 		c->pending_prom = NULL;
 		c->pending_fut = NULL;
 	}
-	assert(xtc_batch_close(c->batch, XTC_BATCH_CANCEL) == XTC_OK);
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_CANCEL) == XTC_OK);
 }
 
 static void
@@ -1153,7 +1153,7 @@ cancel_wake_peer(void *arg)
 	assert(c->submit_calls == 1 && c->collect_calls == 0);
 	/* No sleep, no promise resolution: the cancel promise is the only wake
 	 * source for the never-resolving device future. */
-	assert(xtc_batch_close(c->batch, XTC_BATCH_CANCEL) == XTC_OK);
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_CANCEL) == XTC_OK);
 }
 
 static void
@@ -1196,7 +1196,7 @@ fence_peer(void *arg)
 		xtc_yield();
 	/* Signal the fence: the eventfd becomes readable, waking the await. */
 	assert(write(c->fence_fd, &one, sizeof(one)) == (ssize_t)sizeof(one));
-	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
 }
 
 static void
@@ -1371,7 +1371,7 @@ mt_controller_fn(void *arg)
 	    xtc_atomic_load_i32(&c->producers_done, xtc_mo_relaxed) <
 	        c->n_producers)
 		xtc_yield();
-	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
 }
 
 static void
@@ -1470,7 +1470,7 @@ mt_overflow(void)
 	assert(xtc_batch_submit_mt(c.batch, &c.req[0], 999, &h) == XTC_E_RANGE);
 	/* Close + run: every accepted hand-in still completes exactly once
 	 * (ABORTED by the cancel-close), then the driver exits. */
-	assert(xtc_batch_close(c.batch, XTC_BATCH_CANCEL) == XTC_OK);
+	assert(xtc_batch_shutdown(c.batch, XTC_BATCH_CANCEL) == XTC_OK);
 	assert(xtc_exec_run(c.exec) == XTC_OK);
 	assert(
 	    xtc_atomic_load_i32(&c.completed, xtc_mo_seq_cst) == 5 - rejects);
@@ -1497,7 +1497,7 @@ mt_disabled(void)
 	assert(xtc_batch_submit_mt(c.batch, &c.req[0], 1, &h) == XTC_E_NOSYS);
 	assert(xtc_batch_cancel_mt(c.batch, 1) == XTC_E_NOSYS);
 	assert(xtc_batch_resume_mt(c.batch, 1) == XTC_E_NOSYS);
-	assert(xtc_batch_close(c.batch, XTC_BATCH_CANCEL) == XTC_OK);
+	assert(xtc_batch_shutdown(c.batch, XTC_BATCH_CANCEL) == XTC_OK);
 	assert(xtc_exec_run(c.exec) == XTC_OK);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
 	xtc_exec_destroy(c.exec);
@@ -1602,7 +1602,7 @@ mt_stale_owner(void *arg)
 	assert(xtc_batch_resume_mt(c->batch, h) == XTC_OK);
 	while (c->req[0].completions == 0 || c->req[1].completions == 0)
 		xtc_yield();
-	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
 }
 
 static void
@@ -1820,7 +1820,7 @@ mt_bounded_controller_fn(void *arg)
 	while (xtc_atomic_load_i32(&c->completed, xtc_mo_relaxed) < c->n_req &&
 	    ++guard < 200000)
 		xtc_yield();
-	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
 }
 
 static void
@@ -1915,7 +1915,7 @@ mt_close_owner(void *arg)
 	struct mt_ctx *c = arg;
 	while (xtc_atomic_load_i32(&g_close.ok, xtc_mo_seq_cst) < 200)
 		xtc_yield();
-	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
 	xtc_atomic_store_i32(&g_close.closed, 1, xtc_mo_seq_cst);
 }
 
@@ -1937,7 +1937,7 @@ mt_closed(void)
 	o.complete = mt_count_complete;
 	assert(xtc_batch_create_async(xtc_exec_loop(c.exec, 0), &o, &c.batch)
 	       == XTC_OK);
-	assert(xtc_batch_close(c.batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(c.batch, XTC_BATCH_DRAIN) == XTC_OK);
 	assert(xtc_batch_submit_mt(c.batch, NULL, 1, &h) == XTC_E_AGAIN);
 	assert(h == 77);
 	assert(xtc_exec_run(c.exec) == XTC_OK);
@@ -2028,7 +2028,7 @@ mt_handle_exhaustion(void)
 		assert(pthread_join(th[i], NULL) == 0);
 	assert(xtc_atomic_load_i32(&e.bad, xtc_mo_seq_cst) == 0 &&
 	    xtc_atomic_load_i32(&e.ok, xtc_mo_seq_cst) == 8);
-	assert(xtc_batch_close(c.batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(c.batch, XTC_BATCH_DRAIN) == XTC_OK);
 	assert(xtc_exec_run(c.exec) == XTC_OK);
 	assert(xtc_atomic_load_i32(&c.completed, xtc_mo_seq_cst) == 8);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
@@ -2202,7 +2202,7 @@ sv_owner(void *arg)
 		while ((rc = xtc_batch_resume(v->batch, v->h0)) == XTC_E_DEADLK)
 			xtc_yield();
 	}
-	while ((rc = xtc_batch_close(v->batch, XTC_BATCH_DRAIN))
+	while ((rc = xtc_batch_shutdown(v->batch, XTC_BATCH_DRAIN))
 	       == XTC_E_DEADLK)
 		xtc_yield();
 	assert(rc == XTC_OK);
@@ -2385,7 +2385,7 @@ struct place_ctx {
 
 /* One closer fiber per shard loop: wait until every member has completed
  * (the shared atomic, bumped by mt_complete on each driver loop) then close
- * THIS loop's group. xtc_batch_close is owner-loop-only, so each group must
+ * THIS loop's group. xtc_batch_shutdown is owner-loop-only, so each group must
  * be closed from a fiber on its own loop -- there is no cross-loop close_mt;
  * this is the documented create-on-chosen-loop discipline for teardown too. */
 static void
@@ -2395,7 +2395,7 @@ place_closer_fn(void *arg)
 	int id = xtc_exec_loop_id();
 	while (xtc_atomic_load_i32(&pc->mc->completed, xtc_mo_acquire) < pc->n)
 		xtc_yield();
-	assert(xtc_batch_close(pc->g[id], XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(pc->g[id], XTC_BATCH_DRAIN) == XTC_OK);
 }
 
 /* router: 4 real groups (one per loop), stable key->shard, destroy frees
@@ -2681,7 +2681,7 @@ static void
 oc_peer_drain(void *arg)
 {
 	struct oc *c = arg;
-	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
 }
 
 /* MAJOR 1: FENCE wait errors used to reach collect as EXEC_OK. */
@@ -2742,7 +2742,7 @@ async_blocking_refused(void)
 	assert(xtc_loop_create(&c->loop) == XTC_OK);
 	assert(xtc_batch_create_async(c->loop, &o, &c->batch) == XTC_OK);
 	assert(xtc_batch_submit(c->batch, NULL, 1, &h) == XTC_OK);
-	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
 	assert(xtc_loop_run(c->loop) == XTC_OK);
 	assert(xtc_batch_get_async_stats(c->batch, &as) == XTC_OK);
 	assert(c->statuses[0] == XTC_E_INVAL && c->outcome == XTC_E_INVAL);
@@ -2778,7 +2778,7 @@ oc_peer_stray(void *arg)
 		xtc_yield();
 	(void)xtc_proc_sleep(20000000);
 	(void)xtc_proc_wake(c->driver);
-	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
 }
 
 static void
@@ -2803,7 +2803,7 @@ oc_peer_cancel(void *arg)
 	while (xtc_atomic_load_i32(&c->submits, xtc_mo_seq_cst) == 0)
 		xtc_yield();
 	(void)xtc_proc_sleep(20000000);
-	assert(xtc_batch_close(c->batch, XTC_BATCH_CANCEL) == XTC_OK);
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_CANCEL) == XTC_OK);
 }
 
 static void
@@ -2864,7 +2864,7 @@ oc_peer_owner_cancel(void *arg)
 		xtc_yield();
 	(void)xtc_proc_sleep(20000000);
 	assert(xtc_batch_cancel(c->batch, 1) == XTC_OK);
-	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
+	assert(xtc_batch_shutdown(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
 }
 
 static void *
@@ -2890,7 +2890,7 @@ async_hint_on_landing(void)
 		    kind ? XTC_BATCH_EXEC_FENCE : XTC_BATCH_EXEC_FUTURE, 0);
 #if !defined(__linux__) || !defined(XTC_HAVE_ACCEL)
 		if (kind) {
-			assert(xtc_batch_close(c->batch, XTC_BATCH_CANCEL)
+			assert(xtc_batch_shutdown(c->batch, XTC_BATCH_CANCEL)
 			       == XTC_OK);
 			assert(xtc_loop_run(c->loop) == XTC_OK);
 			assert(xtc_batch_destroy(c->batch) == XTC_OK);
@@ -2982,7 +2982,7 @@ main(int argc, char **argv)
 	assert(xtc_batch_cancel_mt(NULL, 0) == XTC_E_NOSYS);
 	assert(xtc_batch_resume(NULL, 0) == XTC_E_NOSYS);
 	assert(xtc_batch_resume_mt(NULL, 0) == XTC_E_NOSYS);
-	assert(xtc_batch_close(NULL, XTC_BATCH_CANCEL) == XTC_E_NOSYS);
+	assert(xtc_batch_shutdown(NULL, XTC_BATCH_CANCEL) == XTC_E_NOSYS);
 	assert(xtc_batch_destroy(NULL) == XTC_E_NOSYS);
 	assert(xtc_batch_get_stats(NULL, NULL) == XTC_E_NOSYS);
 	{

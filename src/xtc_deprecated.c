@@ -24,6 +24,9 @@
 #include "xtc_prob.h"
 #include "xtc_exec.h"
 #include "xtc_pg.h"
+#include "xtc_chan.h"
+#include "xtc_sync.h"
+#include "xtc_batch.h"
 
 /* Group: loop / io / bloom / hll lifecycle (create / destroy). */
 
@@ -101,6 +104,8 @@ xtc_exec_fini(xtc_exec_t *exec)
 	return XTC_OK;
 }
 
+/* Group: pg (join / leave -> subscribe / unsubscribe). */
+
 int
 xtc_pg_join(xtc_reg_t *reg, const char *group, xtc_pid_t pid)
 {
@@ -111,4 +116,36 @@ int
 xtc_pg_leave(xtc_reg_t *reg, const char *group, xtc_pid_t pid)
 {
 	return xtc_pg_unsubscribe(reg, group, pid);
+}
+
+/* Group: close -> shutdown (stop accepting work; queued work drains). */
+
+int
+xtc_chan_mpsc_close(xtc_chan_mpsc_t *c)
+{
+	return xtc_chan_mpsc_shutdown(c);
+}
+
+int
+xtc_chan_mpmc_close(xtc_chan_mpmc_t *c)
+{
+	return xtc_chan_mpmc_shutdown(c);
+}
+
+int
+xtc_chan_demand_close(xtc_chan_demand_t *c)
+{
+	return xtc_chan_demand_shutdown(c);
+}
+
+int
+xtc_gate_close(xtc_gate_t *g)
+{
+	return xtc_gate_shutdown(g);
+}
+
+int
+xtc_batch_close(xtc_batch_t *b, enum xtc_batch_close_mode mode)
+{
+	return xtc_batch_shutdown(b, mode);
 }

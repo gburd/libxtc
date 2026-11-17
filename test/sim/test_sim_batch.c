@@ -310,7 +310,7 @@ owner(void *arg)
 			/* There is resource space but NO active slot. Submit only after
 			 * both block: a cap mutant is caught without vector overflow. */
 			submit(f, 10, 1, 0);
-			require(f, xtc_batch_close(f->batch, XTC_BATCH_DRAIN) == XTC_OK,
+			require(f, xtc_batch_shutdown(f->batch, XTC_BATCH_DRAIN) == XTC_OK,
 			    "drain close");
 			for (i = 0; i < 4; ++i)
 				tick(f);
@@ -318,8 +318,8 @@ owner(void *arg)
 			    "DRAIN discarded blocked work/active cap");
 			for (i = 8; i <= 10; ++i)
 				f->req[i].expected = XTC_E_ABORTED;
-			require(f, xtc_batch_close(f->batch, XTC_BATCH_CANCEL) == XTC_OK &&
-			    xtc_batch_close(f->batch, XTC_BATCH_DRAIN) == XTC_OK,
+			require(f, xtc_batch_shutdown(f->batch, XTC_BATCH_CANCEL) == XTC_OK &&
+			    xtc_batch_shutdown(f->batch, XTC_BATCH_DRAIN) == XTC_OK,
 			    "cancel escalation/idempotence");
 			require(f, xtc_batch_submit(f->batch, &f->req[11], 1, &h) == XTC_E_AGAIN,
 			    "closed admission accepted");
@@ -517,7 +517,7 @@ aproducer(void *arg)
 		} else
 			xtc_yield();
 	}
-	arequire(f, xtc_batch_close(f->batch, XTC_BATCH_DRAIN) == XTC_OK,
+	arequire(f, xtc_batch_shutdown(f->batch, XTC_BATCH_DRAIN) == XTC_OK,
 	    "async drain close");
 }
 
@@ -746,7 +746,7 @@ mcontroller(void *arg)
 		    "mt accepted hand-in never completed");
 		mrequire(f, xtc_proc_sleep(50) == XTC_OK, "mt controller tick");
 	}
-	mrequire(f, xtc_batch_close(f->batch, XTC_BATCH_DRAIN) == XTC_OK,
+	mrequire(f, xtc_batch_shutdown(f->batch, XTC_BATCH_DRAIN) == XTC_OK,
 	    "mt drain close");
 }
 

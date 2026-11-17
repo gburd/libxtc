@@ -93,7 +93,7 @@ a_producer(void *arg)
 	}
 	if (xtc_atomic_fetch_add_i32(&g_a_prod_done, 1, xtc_mo_relaxed) + 1 ==
 	    A_PROD)
-		(void)xtc_chan_mpmc_close(g_ch);
+		(void)xtc_chan_mpmc_shutdown(g_ch);
 }
 
 static void

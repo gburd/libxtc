@@ -29,7 +29,6 @@ int xtc_aio_pwritev __P((int, const struct iovec *, int, int64_t));
 int xtc_alloc_audit_enable __P((int));
 int xtc_batch_cancel __P((xtc_batch_t *, uint64_t));
 int xtc_batch_cancel_mt __P((xtc_batch_t *, uint64_t));
-int xtc_batch_close __P((xtc_batch_t *, enum xtc_batch_close_mode));
 int xtc_batch_create __P((xtc_loop_t *, const xtc_batch_opts_t *, xtc_batch_t **));
 int xtc_batch_create_async __P((xtc_loop_t *, const xtc_batch_async_opts_t *, xtc_batch_t **));
 int xtc_batch_destroy __P((xtc_batch_t *));
@@ -39,6 +38,7 @@ int xtc_batch_loop_for_device __P((xtc_exec_t *, const xtc_accel_dev_t *, int *)
 int xtc_batch_resume __P((xtc_batch_t *, uint64_t));
 int xtc_batch_resume_mt __P((xtc_batch_t *, uint64_t));
 int xtc_batch_router_create __P((xtc_batch_t **, int, xtc_batch_router_t **));
+int xtc_batch_shutdown __P((xtc_batch_t *, enum xtc_batch_close_mode));
 int xtc_batch_submit __P((xtc_batch_t *, void *, uint64_t, uint64_t *));
 int xtc_batch_submit_mt __P((xtc_batch_t *, void *, uint64_t, uint64_t *));
 int xtc_blocking_run_off_loop __P((int (*)(void *), void *, int *));
