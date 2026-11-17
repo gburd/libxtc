@@ -445,8 +445,9 @@ oom_workload(void)
 	 * sweep caught it). */
 	{
 		xtc_exec_t *e = NULL;
-		if (xtc_exec_init(&e, 2) == XTC_OK)
-			(void)xtc_exec_fini(e);
+		if (xtc_exec_create(&(xtc_exec_opts_t){
+		    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &e) == XTC_OK)
+			xtc_exec_destroy(e);
 	}
 
 	/* Synchronisation primitives: each is a small heap object with its

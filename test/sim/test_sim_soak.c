@@ -110,7 +110,8 @@ run_once(uint64_t seed, int skew, uint64_t *out_state, long *out_app,
 	xtc_atomic_store_i32(&g_sleeps, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_app_hash, 0, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK)
 		return -1;
 
 	/* Clock skew: a fiber that reads the clock for its timeout math
@@ -142,7 +143,7 @@ run_once(uint64_t seed, int skew, uint64_t *out_state, long *out_app,
 	*out_app = xtc_atomic_load_long(&g_app_hash, xtc_mo_seq_cst);
 	*out_done = xtc_atomic_load_i32(&g_replies, xtc_mo_seq_cst) +
 	    xtc_atomic_load_i32(&g_sleeps, xtc_mo_seq_cst);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

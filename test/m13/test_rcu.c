@@ -399,7 +399,8 @@ test_fiber_readers_migrate(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_mig_readers_left, MIG_READERS, xtc_mo_seq_cst);
 	munit_assert_int(xtc_rcu_init(), ==, XTC_OK);
 	xtc_atomic_store_ptr(&g_mig_ptr, mig_new(1), xtc_mo_release);
-	munit_assert_int(xtc_exec_init(&ex, MIG_LOOPS), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = MIG_LOOPS }, &ex), ==, XTC_OK);
 	o.migratable = 1;
 	for (i = 0; i < MIG_READERS; i++) {
 		xtc_loop_t *l = xtc_exec_loop(ex, (unsigned)(i % MIG_LOOPS));
@@ -410,7 +411,7 @@ test_fiber_readers_migrate(const MunitParameter p[], void *d)
 	                     NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(ex), ==, XTC_OK);
-	munit_assert_int(xtc_exec_fini(ex), ==, XTC_OK);
+	xtc_exec_destroy(ex);
 
 	old = xtc_atomic_exchange_ptr(&g_mig_ptr, NULL, xtc_mo_acq_rel);
 	xtc_rcu_retire(old, mig_free);

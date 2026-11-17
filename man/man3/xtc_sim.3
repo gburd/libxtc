@@ -462,14 +462,15 @@ run(uint64_t seed, int *out)
 	xtc_exec_t *e;
 	int i, rc;
 	total = 0;
-	xtc_exec_init(&e, 2);
+	xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &e);
 	for (i = 0; i < 4; i++)
 		xtc_proc_spawn(xtc_exec_loop(e, i % 2), worker, NULL,
 		    NULL, NULL);
 	xtc_sim_buggify_enable(500);
 	rc = xtc_sim_exec_run(e, seed, 100000);
 	xtc_sim_buggify_disable();
-	xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	*out = total;
 	return rc;
 }

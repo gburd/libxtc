@@ -145,7 +145,8 @@ xtc_app_create(const xtc_app_opts_t *opts, xtc_app_t **out)
 		/* Multi-loop app: own an executor; the root supervisor runs on
 		 * loop 0 and (via sup_opts.exec) places children across loops
 		 * and stops the executor when it exits. */
-		if ((rc = xtc_exec_init(&a->exec, opts->n_loops)) != XTC_OK)
+		if ((rc = xtc_exec_create(&(xtc_exec_opts_t){
+		    .size = sizeof(xtc_exec_opts_t), .n_loops = opts->n_loops }, &a->exec)) != XTC_OK)
 			goto fail;
 		/* A supervised app is a long-running service: run until the
 		 * supervisor stops the executor, never idle-auto-stop. */
@@ -174,7 +175,7 @@ xtc_app_create(const xtc_app_opts_t *opts, xtc_app_t **out)
 
 fail:
 	if (a->reg) xtc_reg_destroy(a->reg);
-	if (a->exec) (void)xtc_exec_fini(a->exec);
+	if (a->exec) xtc_exec_destroy(a->exec);
 	if (a->loop && a->owns_loop) xtc_loop_destroy(a->loop);
 	if (a->name) __os_free(a->name);
 	__os_free(a);
@@ -693,7 +694,7 @@ xtc_app_destroy(xtc_app_t *a)
 		return;
 	/* The registry outlives the loops: a proc freed with them (the
 	 * reaper, frozen by the stop) holds it. */
-	if (a->exec) (void)xtc_exec_fini(a->exec);
+	if (a->exec) xtc_exec_destroy(a->exec);
 	if (a->loop && a->owns_loop) xtc_loop_destroy(a->loop);
 	if (a->reg)
 		xtc_reg_destroy(a->reg);

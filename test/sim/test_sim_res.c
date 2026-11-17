@@ -121,7 +121,8 @@ run_one(uint64_t seed, int *out_succ, int *out_rej, int *out_over,
 	if (xtc_res_init(&g_res, &caps) != XTC_OK)
 		return -1;
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK)
 		return -1;
 	xtc_exec_set_service_mode(e, 1);
 
@@ -141,7 +142,7 @@ run_one(uint64_t seed, int *out_succ, int *out_rej, int *out_over,
 	if (out_final_used) *out_final_used = xtc_res_used(&g_res, XTC_RES_TASKS);
 	if (out_high) *out_high = xtc_res_high(&g_res, XTC_RES_TASKS);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

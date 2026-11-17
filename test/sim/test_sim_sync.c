@@ -126,9 +126,10 @@ run_sem(uint64_t seed, int use_buggify, int *out_done, int *out_peak,
 	xtc_atomic_store_i32(&g_sem_done, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_sem_hash, 0, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 	if (xtc_sem_create(SEM_CAP, &g_sem) != XTC_OK) {
-		(void)xtc_exec_fini(e); return -1;
+		xtc_exec_destroy(e); return -1;
 	}
 	if (use_buggify)
 		xtc_sim_buggify_enable(1000);   /* every site coin live */
@@ -146,7 +147,7 @@ run_sem(uint64_t seed, int use_buggify, int *out_done, int *out_peak,
 	if (use_buggify) xtc_sim_buggify_disable();
 	xtc_sem_destroy(g_sem);
 	g_sem = NULL;
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 
@@ -192,9 +193,10 @@ run_barrier(uint64_t seed, int *out_done, int *out_bad, uint64_t *out_state)
 	xtc_atomic_store_i32(&g_bar_bad, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_bar_done, 0, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 	if (xtc_barrier_create(BAR_PARTIES, &g_bar) != XTC_OK) {
-		(void)xtc_exec_fini(e); return -1;
+		xtc_exec_destroy(e); return -1;
 	}
 	for (i = 0; i < BAR_PARTIES; i++)
 		(void)xtc_proc_spawn(xtc_exec_loop(e, (unsigned)(i % N_LOOPS)),
@@ -207,7 +209,7 @@ run_barrier(uint64_t seed, int *out_done, int *out_bad, uint64_t *out_state)
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_barrier_destroy(g_bar);
 	g_bar = NULL;
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 
@@ -262,9 +264,10 @@ run_gate(uint64_t seed, int *out_left, int *out_after, int *out_drained,
 	xtc_atomic_store_i32(&g_gate_after, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_gate_drained, 0, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 	if (xtc_gate_create(&g_gate) != XTC_OK) {
-		(void)xtc_exec_fini(e); return -1;
+		xtc_exec_destroy(e); return -1;
 	}
 	for (i = 0; i < GATE_WORK; i++)
 		(void)xtc_proc_spawn(xtc_exec_loop(e, (unsigned)(i % N_LOOPS)),
@@ -280,7 +283,7 @@ run_gate(uint64_t seed, int *out_left, int *out_after, int *out_drained,
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_gate_destroy(g_gate);
 	g_gate = NULL;
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

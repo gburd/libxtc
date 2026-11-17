@@ -519,7 +519,8 @@ test_mpsc_involuntary_preempt(const MunitParameter p[], void *d)
 	memset(&x, 0, sizeof x);
 	munit_assert_int(xtc_chan_mpsc_create(NULL, 64, &x.c), ==, XTC_OK);
 	munit_assert_int(xtc_preempt_set_involuntary(1), ==, XTC_OK);
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0), pr_consumer, &x,
 	    NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0), pr_producer, &x,
@@ -535,7 +536,7 @@ test_mpsc_involuntary_preempt(const MunitParameter p[], void *d)
 	munit_assert_uint64(xtc_atomic_load_u64(&x.sent, xtc_mo_seq_cst), >, 0);
 	munit_logf(MUNIT_LOG_INFO, "sent=recvd=%llu",
 	    (unsigned long long)xtc_atomic_load_u64(&x.sent, xtc_mo_seq_cst));
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	xtc_chan_mpsc_destroy(x.c);
 	return MUNIT_OK;
 }

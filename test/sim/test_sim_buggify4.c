@@ -141,7 +141,8 @@ run_once(uint64_t seed, unsigned bug_pct, int *out_replies, int *out_sleeps,
 	xtc_atomic_store_i32(&g_sleeps, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 	if (bug_pct > 0) xtc_sim_buggify_enable(bug_pct);
 	else             xtc_sim_buggify_disable();
 
@@ -165,7 +166,7 @@ run_once(uint64_t seed, unsigned bug_pct, int *out_replies, int *out_sleeps,
 	*out_bug     = xtc_sim_buggify_active_count();
 
 	xtc_sim_buggify_disable();
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 
@@ -228,7 +229,8 @@ run_b(uint64_t seed, unsigned bug_pct, int *out_done, long *out_hash,
 	}
 	(void)ftruncate(g_b_fd, (off_t)B_WORKERS * B_REGION);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) { close(g_b_fd); return -1; }
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) { close(g_b_fd); return -1; }
 	if (bug_pct > 0) xtc_sim_buggify_enable(bug_pct);
 	else             xtc_sim_buggify_disable();
 
@@ -248,7 +250,7 @@ run_b(uint64_t seed, unsigned bug_pct, int *out_done, long *out_hash,
 
 	xtc_sim_io_faults_disable();
 	xtc_sim_buggify_disable();
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	close(g_b_fd);
 	g_b_fd = -1;
 	return rc;

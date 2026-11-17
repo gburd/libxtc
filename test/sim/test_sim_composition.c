@@ -217,7 +217,8 @@ run_composition(uint64_t seed, int *mon, int *down, int *lnk, int *ex,
 	xtc_atomic_store_long(&g_tally, 0, xtc_mo_seq_cst);
 	g_live_procs = 0;
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK)
 		return -1;
 	for (i = 0; i < N_DRIVERS; i++)
 		(void)xtc_proc_spawn(xtc_exec_loop(e, i % N_LOOPS), driver,
@@ -238,7 +239,7 @@ run_composition(uint64_t seed, int *mon, int *down, int *lnk, int *ex,
 	(void)xtc_inspect_procs(count_live_cb, NULL);
 	*live = g_live_procs;
 
-	xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

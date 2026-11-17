@@ -151,7 +151,8 @@ test_p2_preempt_tight_loop(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_peer, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_runaway_done, 0, xtc_mo_seq_cst);
 
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	l = xtc_exec_loop(e, 0);
 
 	/* Enable the timer (1 ms slices) AND the signal-context
@@ -182,7 +183,7 @@ test_p2_preempt_tight_loop(const MunitParameter p[], void *d)
 	 * assert the runaway completed there.
 	 */
 	xtc_preempt_set_involuntary(0);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -213,7 +214,8 @@ test_p2_peers_progress_on_ucontext(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_peer, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_runaway_done, 0, xtc_mo_seq_cst);
 
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	l = xtc_exec_loop(e, 0);
 	munit_assert_int(xtc_exec_set_preempt(e, 1 * 1000 * 1000LL), ==, XTC_OK);
 	xtc_preempt_set_involuntary(1);
@@ -259,7 +261,7 @@ test_p2_peers_progress_on_ucontext(const MunitParameter p[], void *d)
 	}
 
 	xtc_preempt_set_involuntary(0);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -360,7 +362,8 @@ test_p2_vector_state(const MunitParameter p[], void *d)
 		return MUNIT_SKIP;
 	xtc_atomic_store_long(&g_vec_bad, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_vec_checks, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_set_preempt(e, 50LL * 1000), ==, XTC_OK);
 	xtc_preempt_set_involuntary(1);
 	for (i = 0; i < 4; i++)
@@ -368,7 +371,7 @@ test_p2_vector_state(const MunitParameter p[], void *d)
 		    p2_vec_spinner, (void *)(intptr_t)i, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	xtc_preempt_set_involuntary(0);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	munit_logf(MUNIT_LOG_INFO,
 	    "%ld checks (avx2 %d avx512 %d), %ld corrupted",
 	    xtc_atomic_load_long(&g_vec_checks, xtc_mo_seq_cst), g_vec_avx2,
@@ -449,7 +452,8 @@ test_p2_red_zone_flags(const MunitParameter p[], void *d)
 	xtc_atomic_store_long(&g_rz_bad, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_fl_bad, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_rz_n, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_set_preempt(e, 50LL * 1000), ==, XTC_OK);
 	xtc_preempt_set_involuntary(1);
 	for (i = 0; i < 4; i++)
@@ -457,7 +461,7 @@ test_p2_red_zone_flags(const MunitParameter p[], void *d)
 		    p2_rz_spinner, (void *)(intptr_t)i, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	xtc_preempt_set_involuntary(0);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	munit_logf(MUNIT_LOG_INFO,
 	    "%ld probes, red zone clobbered %ld, flags "
 	    "lost %ld",
@@ -831,7 +835,8 @@ p2_cb_run(int mode)
 	xtc_atomic_store_long(&g_cb_tgt_bad, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_cb_preempted, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_cb_stop, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
 	    ==, XTC_OK);
 	xtc_preempt_set_involuntary(1);
@@ -841,7 +846,7 @@ p2_cb_run(int mode)
 	    NULL, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	xtc_preempt_set_involuntary(0);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	munit_logf(MUNIT_LOG_INFO,
 	    "mode %d: %ld/%d ticks preempted, target "
 	    "bad %ld, peer bad %ld of %ld",
@@ -1059,7 +1064,8 @@ p2_a64_run(void (*fn)(void *))
 	munit_assert_int(__xtc_coro_preempt_effective(), ==, 1);
 	xtc_atomic_store_i32(&g_a64_last, -1, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_a64_slices, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_set_preempt(e, 50LL * 1000), ==, XTC_OK);
 	xtc_preempt_set_involuntary(1);
 	for (i = 0; i < 4; i++)
@@ -1067,7 +1073,7 @@ p2_a64_run(void (*fn)(void *))
 		    (void *)(intptr_t)i, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	xtc_preempt_set_involuntary(0);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	munit_logf(MUNIT_LOG_INFO, "%ld involuntary slices",
 	    xtc_atomic_load_long(&g_a64_slices, xtc_mo_seq_cst));
 	munit_assert_long(xtc_atomic_load_long(&g_a64_slices, xtc_mo_seq_cst),
@@ -1297,7 +1303,8 @@ p2_a64cb_run(int mode)
 	xtc_atomic_store_long(&g_a64cb_tgt_bad, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_a64cb_preempted, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_a64cb_stop, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
 	    ==, XTC_OK);
 	xtc_preempt_set_involuntary(1);
@@ -1307,7 +1314,7 @@ p2_a64cb_run(int mode)
 	    NULL, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	xtc_preempt_set_involuntary(0);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	munit_logf(MUNIT_LOG_INFO,
 	    "mode %d: %ld/%d ticks preempted, target "
 	    "bad %ld, peer bad %ld of %ld",
@@ -1500,7 +1507,8 @@ sw_run(int peer_submits)
 	munit_assert_int(xtc_inject_attach("io.uring.sqe_reserved",
 	    sw_raise_in_window, NULL), ==, XTC_OK);
 
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	l = xtc_exec_loop(e, 0);
 	/* Arms the handler + unblocks the signal on the worker; the 10 s
 	 * CPU-time interval never elapses, so every tick is our raise. */
@@ -1516,7 +1524,7 @@ sw_run(int peer_submits)
 	xtc_atomic_store_i32(&g_sw_done, 1, xtc_mo_seq_cst);
 	(void)pthread_join(wd, NULL);
 	xtc_preempt_set_involuntary(0);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	(void)xtc_inject_detach("io.uring.sqe_reserved");
 	(void)close(g_sw_fd);
 
@@ -1644,7 +1652,8 @@ test_p2_switch_window_declines(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_swd_ctrl_pending, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_inject_attach("coro.switch_window",
 	    swd_raise_in_window, NULL), ==, XTC_OK);
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	l = xtc_exec_loop(e, 0);
 	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
 	    ==, XTC_OK);
@@ -1655,7 +1664,7 @@ test_p2_switch_window_declines(const MunitParameter p[], void *d)
 	    XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	xtc_preempt_set_involuntary(0);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	(void)xtc_inject_detach("coro.switch_window");
 
 	if (xtc_atomic_load_i32(&g_swd_hits, xtc_mo_seq_cst) == 0)
@@ -1817,7 +1826,8 @@ test_p2_runq_lost_wake(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_inject_attach("loop.enqueue.fifo_link",
 	    rq_raise_in_window, NULL), ==, XTC_OK);
 
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	g_rq_loop = xtc_exec_loop(e, 0);
 	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
 	    ==, XTC_OK);
@@ -1833,7 +1843,7 @@ test_p2_runq_lost_wake(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_rq_done, 1, xtc_mo_seq_cst);
 	(void)pthread_join(wd, NULL);
 	xtc_preempt_set_involuntary(0);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	(void)xtc_inject_detach("loop.enqueue.fifo_link");
 
 	if (xtc_atomic_load_i32(&g_rq_hits, xtc_mo_seq_cst) == 0)
@@ -1990,7 +2000,8 @@ test_p2_timer_heap_lost_timer(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_inject_attach("timer.heap.sift_up",
 	    th_raise_in_window, NULL), ==, XTC_OK);
 
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	g_th_loop = xtc_exec_loop(e, 0);
 	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
 	    ==, XTC_OK);
@@ -2001,7 +2012,7 @@ test_p2_timer_heap_lost_timer(const MunitParameter p[], void *d)
 	    NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	xtc_preempt_set_involuntary(0);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	(void)xtc_inject_detach("timer.heap.sift_up");
 
 	if (xtc_atomic_load_i32(&g_th_hits, xtc_mo_seq_cst) == 0)

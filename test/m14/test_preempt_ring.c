@@ -98,7 +98,8 @@ test_ring_timeslice(const MunitParameter p[], void *d)
 	xtc_atomic_store_long(&g_yields, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_ullong(&g_signal_ticks, 0, xtc_mo_seq_cst);
 
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);   /* single loop */
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);   /* single loop */
 	l = xtc_exec_loop(e, 0);
 
 	/* Enable preemption at 1 ms per slice.  On uring this arms the
@@ -128,7 +129,7 @@ test_ring_timeslice(const MunitParameter p[], void *d)
 	/* The loop's yield-due telemetry climbed (the ring source fed it). */
 	munit_assert_uint64(xtc_yield_due_count(l), >, 0);
 
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -145,7 +146,8 @@ test_ring_timeslice(const MunitParameter p[], void *d)
  * the same.  Fixed by keying on the RUNNING loop (__xtc_current_loop),
  * whose ring the calling thread owns by construction.
  *
- * test_ring_timeslice above cannot reach that: it uses xtc_exec_init(&e, 1)
+ * test_ring_timeslice above cannot reach that: it uses xtc_exec_create(&(xtc_exec_opts_t){
+     .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e)
  * -- a SINGLE loop -- so the home and running loop are always the same.
  * This case is the multi-loop counterpart: MIGRATABLE compute fibers all
  * spawned on loop 0 of an 8-loop executor with eager rebalance, so peers
@@ -203,7 +205,8 @@ test_ring_crossloop(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_xl_done, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_xl_yields, 0, xtc_mo_seq_cst);
 
-	munit_assert_int(xtc_exec_init(&e, 8), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 8 }, &e), ==, XTC_OK);
 	/* Eager rebalance so idle peers actively steal, maximizing the number
 	 * of fibers running with t->loop != __xtc_current_loop. */
 	xtc_exec_set_eager_rebalance(e, 1);
@@ -230,7 +233,7 @@ test_ring_crossloop(const MunitParameter p[], void *d)
 	munit_assert_long(xtc_atomic_load_long(&g_xl_yields, xtc_mo_seq_cst), >,
 	    0);
 
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 

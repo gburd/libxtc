@@ -84,7 +84,8 @@ run_spawn(int n_loops, long per_loop)
 	long total = (long)n_loops * per_loop;
 
 	if (n_loops > 64) n_loops = 64;
-	if (xtc_exec_init(&ex, n_loops) != XTC_OK) {
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = n_loops }, &ex) != XTC_OK) {
 		printf("  exec_init(%d) failed\n", n_loops);
 		return;
 	}
@@ -100,7 +101,7 @@ run_spawn(int n_loops, long per_loop)
 	}
 	(void)xtc_exec_run(ex);
 	t1 = now_ms();
-	(void)xtc_exec_fini(ex);
+	xtc_exec_destroy(ex);
 
 	sec = (t1 - t0) / 1000.0;
 	rate = sec > 0 ?

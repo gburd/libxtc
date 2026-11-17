@@ -107,7 +107,8 @@ main(int argc, char **argv)
 	g_same = atoi(argv[4]);
 	if (g_loops < 1 || g_loops > MAX_LOOPS || g_cpl < 1 || g_iters < 1)
 		return 2;
-	if (xtc_exec_init(&e, g_loops) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = g_loops }, &e) != XTC_OK)
 		return 1;
 	for (i = 0; i < g_loops; i++)
 		if (xtc_proc_spawn(xtc_exec_loop(e, i), owner_proc,
@@ -132,6 +133,6 @@ main(int argc, char **argv)
 	    (double)(t1 - t0) / per,
 	    (double)xtc_atomic_load_u64(&g_total, xtc_mo_seq_cst) * 1e9 /
 	        (double)(t1 - t0));
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return 0;
 }

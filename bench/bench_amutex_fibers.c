@@ -96,7 +96,8 @@ main(int argc, char **argv)
 	if (loops < 1 || fibers < 1 || secs < 1)
 		return 2;
 	if (xtc_amutex_create(&g_m) != XTC_OK ||
-	    xtc_exec_init(&e, loops) != XTC_OK)
+	    xtc_exec_create(&(xtc_exec_opts_t){
+	        .size = sizeof(xtc_exec_opts_t), .n_loops = loops }, &e) != XTC_OK)
 		return 1;
 	for (i = 0; i < fibers; i++)
 		if (xtc_proc_spawn(xtc_exec_loop(e, i % loops), worker, NULL,
@@ -112,7 +113,7 @@ main(int argc, char **argv)
 	    (double)xtc_atomic_load_u64(&g_ops, xtc_mo_seq_cst) * 1e9 /
 	        (double)(t1 - t0),
 	    xtc_atomic_load_i32(&g_viol, xtc_mo_seq_cst));
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	xtc_amutex_destroy(g_m);
 	return xtc_atomic_load_i32(&g_viol, xtc_mo_seq_cst) ? 1 : 0;
 }

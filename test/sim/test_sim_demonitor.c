@@ -143,7 +143,8 @@ run_one(uint64_t seed, uint64_t *out_trace, uint64_t *out_state)
 
 	memset(g_w, 0, sizeof g_w);
 	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK)
 		return -1;
 	xtc_sim_net_latency(10 * 1000LL, 500 * 1000LL);
 	for (i = 0; i < N_WATCHERS; i++) {
@@ -158,7 +159,7 @@ run_one(uint64_t seed, uint64_t *out_trace, uint64_t *out_state)
 		tr = tr * 31u + g_w[i].trace;
 	*out_trace = tr;
 	*out_state = xtc_sim_state_hash(e);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

@@ -86,14 +86,15 @@ run_seed(uint64_t seed)
 	xtc_exec_t *e = NULL;
 	int rc;
 	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 	xtc_sim_sched_pessimal(500);   /* 50% pessimal (starve/monopolize) */
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), spawner, e, NULL, NULL);
 	/* Drive deterministically.  If a cross-loop owner violation occurs
 	 * the DIAGNOSTIC guard aborts here; otherwise the run must reach
 	 * clean quiescence with every worker done. */
 	rc = xtc_sim_exec_run(e, seed, 20000000);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	if (rc != XTC_OK) {
 		printf("FAIL: seed %llu did not quiesce cleanly (rc=%d)\n",
 		    (unsigned long long)seed, rc);

@@ -53,7 +53,8 @@ run_once(uint64_t seed, int *out_done, uint64_t *out_state_hash)
 	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_trace_hash, 0, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) { *out_done = -1; return -1; }
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) { *out_done = -1; return -1; }
 	for (w = 0; w < N_WORKERS; w++) {
 		/* Spawn round-robin across loops; under sim the placement is
 		 * itself seeded (XTC_SIM_RNG_PLACE), so spawn LOCATION also
@@ -65,7 +66,7 @@ run_once(uint64_t seed, int *out_done, uint64_t *out_state_hash)
 	*out_done = xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
 	if (out_state_hash != NULL)
 		*out_state_hash = xtc_sim_state_hash(e);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return xtc_atomic_load_long(&g_trace_hash, xtc_mo_seq_cst);
 }
 

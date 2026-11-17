@@ -185,7 +185,8 @@ run_once(uint64_t seed, int *out_verified, int *out_detected,
 	}
 	(void)ftruncate(g_fd, (off_t)N_WORKERS * PAGE);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) { close(g_fd); return -1; }
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) { close(g_fd); return -1; }
 
 	/* Seeded latency so ops defer + interleave (the completion order is
 	 * part of the schedule), and torn/corrupt injection at ~35% so a
@@ -209,7 +210,7 @@ run_once(uint64_t seed, int *out_verified, int *out_detected,
 
 	xtc_sim_io_corrupt_disable();
 	xtc_sim_io_faults_disable();
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	close(g_fd);
 	g_fd = -1;
 	return rc;

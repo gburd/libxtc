@@ -128,7 +128,8 @@ run_once(int eager)
 	int i;
 
 	xtc_atomic_store_i32(&g_workers_done, 0, xtc_mo_seq_cst);
-	if (xtc_exec_init(&e, LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = LOOPS }, &e) != XTC_OK)
 		return (uint64_t)-1;
 	g_exec = e;
 	xtc_exec_set_service_mode(e, 1);         /* stop only via _stop */
@@ -139,14 +140,14 @@ run_once(int eager)
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), spawner, e, NULL, NULL);
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), watcher, NULL, NULL, NULL);
 
-	if (xtc_exec_run(e) != XTC_OK) { (void)xtc_exec_fini(e); return (uint64_t)-1; }
+	if (xtc_exec_run(e) != XTC_OK) { xtc_exec_destroy(e); return (uint64_t)-1; }
 
 	for (i = 0; i < LOOPS; i++) {
 		xtc_loop_stats_t st = XTC_LOOP_STATS_INIT;
 		if (xtc_exec_loop_stats(e, i, &st) == XTC_OK)
 			total_steals += st.steals;
 	}
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return total_steals;
 }
 
@@ -160,7 +161,8 @@ main(void)
 	alarm(60);
 
 	/* Getter/setter round-trip + default-off, on a throwaway exec. */
-	if (xtc_exec_init(&ge, 1) == XTC_OK) {
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &ge) == XTC_OK) {
 		if (xtc_exec_get_eager_rebalance(ge) != 0 ||
 		    xtc_exec_get_service_mode(ge) != 0) {
 			printf("FAIL: eager_rebalance/service_mode not 0 by "
@@ -196,7 +198,7 @@ main(void)
 			printf("FAIL: steal_backoff getter did not reflect off\n");
 			return 1;
 		}
-		(void)xtc_exec_fini(ge);
+		xtc_exec_destroy(ge);
 	}
 
 	if (__os_ncpus() < 2) {

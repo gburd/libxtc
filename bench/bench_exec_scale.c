@@ -159,7 +159,8 @@ main(int argc, char **argv)
 	}
 	memset(g_ctr, 0, sizeof g_ctr);
 
-	if (xtc_exec_init(&e, loops) != XTC_OK) {
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = loops }, &e) != XTC_OK) {
 		fprintf(stderr, "exec_init failed\n");
 		return 1;
 	}
@@ -218,7 +219,7 @@ main(int argc, char **argv)
 	printf("mode=%-5s loops=%-3d done=%-10ld %7.3fs  %8.0f tasks/sec "
 	    "(%.2f M/s)\n", mode, loops, done, s, done / s, done / s / 1e6);
 
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	/* Self-check: the scheduler must retire essentially every unit.  A
 	 * dropped task would silently inflate throughput, so fail loudly.
 	 * Allow the integer-division remainder: total/loops (spawn/churn)

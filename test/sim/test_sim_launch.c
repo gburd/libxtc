@@ -197,7 +197,8 @@ run_one(uint64_t seed, int *out_fin, int *out_to, int *out_clean,
 	for (i = 0; i < N_LAUNCH; i++)
 		xtc_atomic_store_i32(&g_mailed[i], 0, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK)
 		return -1;
 	xtc_exec_set_service_mode(e, 1);
 
@@ -221,7 +222,7 @@ run_one(uint64_t seed, int *out_fin, int *out_to, int *out_clean,
 	if (out_lost)
 		*out_lost = xtc_atomic_load_i32(&g_lost, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

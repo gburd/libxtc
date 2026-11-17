@@ -128,7 +128,8 @@ main(int argc, char **argv)
 	g_batch = batch;
 	memset(g_ctr, 0, sizeof g_ctr);
 
-	if (xtc_exec_init(&e, loops) != XTC_OK) {
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = loops }, &e) != XTC_OK) {
 		fprintf(stderr, "exec_init failed\n");
 		return 1;
 	}
@@ -169,7 +170,7 @@ main(int argc, char **argv)
 	    loops, rounds, batch, armed, fired, s,
 	    armed / s, armed / s / 1e6);
 
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 
 	/* Self-check: exactly the odd (un-cancelled) half must fire.  A
 	 * miscount would mean the cancel path or the deadline-park firing

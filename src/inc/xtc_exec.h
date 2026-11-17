@@ -39,8 +39,19 @@ typedef struct xtc_exec xtc_exec_t;
 typedef struct xtc_run_class *xtc_exec_class_t;
 
 /*
- * PUBLIC: int  xtc_exec_init __P((xtc_exec_t **, int));
- * PUBLIC: int  xtc_exec_fini __P((xtc_exec_t *));
+ * Creation options (size-first: set .size, or start from
+ * XTC_EXEC_OPTS_INIT; a NULL opts means every default).
+ */
+typedef struct xtc_exec_opts {
+	size_t size;    /* sizeof(xtc_exec_opts_t): XTC_EXEC_OPTS_INIT */
+	int    n_loops; /* loops (one OS thread each); <= 0: one per CPU */
+} xtc_exec_opts_t;
+
+#define XTC_EXEC_OPTS_INIT { .size = sizeof(xtc_exec_opts_t) }
+
+/*
+ * PUBLIC: int  xtc_exec_create __P((const xtc_exec_opts_t *, xtc_exec_t **));
+ * PUBLIC: void xtc_exec_destroy __P((xtc_exec_t *));
  * PUBLIC: int  xtc_exec_run __P((xtc_exec_t *));
  * PUBLIC: void xtc_exec_set_service_mode __P((xtc_exec_t *, int));
  * PUBLIC: int  xtc_exec_get_service_mode __P((xtc_exec_t *));
@@ -62,7 +73,12 @@ typedef struct xtc_run_class *xtc_exec_class_t;
  */
 
 /*
- * Lifecycle.  n_loops <= 0 selects __os_ncpus().
+ * Lifecycle.  xtc_exec_create makes an executor of opts->n_loops loops
+ * (<= 0, or a NULL opts: one per online CPU).  It returns XTC_E_INVAL
+ * for a NULL out or an opts whose .size is 0, XTC_E_VERSION for an opts
+ * from a newer header that sets a field this library lacks.
+ * xtc_exec_destroy joins nothing (call it after xtc_exec_run returns),
+ * frees every loop, and is a no-op on NULL.
  *
  * `xtc_exec_run` blocks the calling thread until the executor stops:
  *   - all spawned tasks DONE and all timers fired/cancelled, or
@@ -70,8 +86,8 @@ typedef struct xtc_run_class *xtc_exec_class_t;
  *
  * On return all worker threads have been joined.
  */
-XTC_API int  xtc_exec_init(xtc_exec_t **out, int n_loops);
-XTC_API int  xtc_exec_fini(xtc_exec_t *exec);
+XTC_API int  xtc_exec_create(const xtc_exec_opts_t *opts, xtc_exec_t **out);
+XTC_API void xtc_exec_destroy(xtc_exec_t *exec);
 XTC_API int  xtc_exec_run(xtc_exec_t *exec);
 
 /*
@@ -81,7 +97,7 @@ XTC_API int  xtc_exec_run(xtc_exec_t *exec);
  *
  *   - Named xtc_exec_set_<name> / xtc_exec_get_<name>, boolean knobs
  *     take/return a plain `int` (0/1).
- *   - Takes effect immediately; no xtc_exec_init/_fini needed to
+ *   - Takes effect immediately; no xtc_exec_create/_destroy needed to
  *     change it, and it is safe to call from any thread at any time
  *     (each knob is a single atomic field on the exec).
  *   - The doc comment states not just the EFFECT but the COST: a
@@ -266,6 +282,14 @@ XTC_API void xtc_loop_set_stall_cb(xtc_loop_t *loop, xtc_stall_cb cb,
                                    void *user);
 XTC_API void xtc_exec_set_stall_budget(xtc_exec_t *exec, int64_t budget_ns);
 XTC_API uint64_t xtc_loop_stall_count(const xtc_loop_t *loop);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_exec_create")
+XTC_API int xtc_exec_init(xtc_exec_t **out, int n_loops);
+XTC_DEPRECATED("use xtc_exec_destroy")
+XTC_API int xtc_exec_fini(xtc_exec_t *exec);
 
 #ifdef __cplusplus
 }

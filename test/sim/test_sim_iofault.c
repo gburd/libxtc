@@ -121,7 +121,8 @@ run_once(uint64_t seed, int *out_done, long *out_rhash, int *out_faults,
 	}
 	(void)ftruncate(g_fd, (off_t)N_WORKERS * REGION);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) { close(g_fd); return -1; }
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) { close(g_fd); return -1; }
 
 	/* Enable I/O faults: 100us-2ms seeded latency, ~12% op fault rate.
 	 * Also inject ENOSPC on ~8% of writes: a hard disk-full error the
@@ -144,7 +145,7 @@ run_once(uint64_t seed, int *out_done, long *out_rhash, int *out_faults,
 
 	xtc_sim_io_faults_disable();
 	xtc_sim_io_enospc_enable(0);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	close(g_fd);
 	g_fd = -1;
 	return rc;

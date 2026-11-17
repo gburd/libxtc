@@ -253,7 +253,8 @@ run_once(uint64_t seed, int adversarial, struct run_out *out)
 		if (bt_insert(g_bt, k, (uint16_t)strlen(k), "aaaa", 4) != XTC_OK)
 			return -1;
 	}
-	if (xtc_exec_init(&exec, N_LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &exec) != XTC_OK)
 		return -1;
 	xtc_sim_io_faults_enable(20 * 1000LL, 200 * 1000LL, 0);
 	if (adversarial) {
@@ -277,7 +278,7 @@ run_once(uint64_t seed, int adversarial, struct run_out *out)
 	xtc_sim_io_faults_disable();
 	xtc_sim_sched_pessimal(0);
 	xtc_sim_buggify_disable();
-	(void)xtc_exec_fini(exec);
+	xtc_exec_destroy(exec);
 	if (rc != XTC_OK) {
 		bt_close(g_bt);
 		bm_destroy(g_bm);

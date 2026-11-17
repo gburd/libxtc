@@ -275,7 +275,7 @@ XTC_API int       xtc_metrics_set_help(const void *metric, const char *help);
  * This is the intended way to get those lines into an application's log
  * sink on the xtc_exec / xtc_loop bring-up path (xtc_app_start already
  * calls it by default; a consumer that stands up carriers via
- * xtc_exec_init should call xtc_tuning_check() once at startup, after
+ * xtc_exec_create should call xtc_tuning_check() once at startup, after
  * installing its xtc_log_set_default sink, to receive the advisories).
  * Safe to call more than once.  With no default logger installed the
  * lines go nowhere: an application that wants the findings without a

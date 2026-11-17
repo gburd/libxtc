@@ -267,7 +267,8 @@ run_reinit(uint64_t seed, int *out_uaf, int *out_rd, int *out_wr,
 	if (xtc_rcu_init() != XTC_OK)
 		return -1;
 	xtc_atomic_store_ptr(&g_ptr, node_new(1), xtc_mo_release);
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK)
 		return -1;
 	for (i = 0; i < RI_READERS + RCU_WRITERS + 1; i++) {
 		xtc_loop_t *l = xtc_exec_loop(e, (unsigned)(i % N_LOOPS));
@@ -293,7 +294,7 @@ run_reinit(uint64_t seed, int *out_uaf, int *out_rd, int *out_wr,
 	*out_wr = xtc_atomic_load_i32(&g_wr_done, xtc_mo_seq_cst);
 	*out_hash = xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
 	*out_state = xtc_sim_state_hash(e);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	xtc_rcu_fini();
 	return rc;
 }
@@ -572,7 +573,8 @@ run_rcu(uint64_t seed, int *out_rd, int *out_wr, int *out_uaf,
 	if (seed_node == NULL) { xtc_rcu_fini(); return -1; }
 	xtc_atomic_store_ptr(&g_ptr, seed_node, xtc_mo_release);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) {
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) {
 		free(seed_node); xtc_rcu_fini(); return -1;
 	}
 	for (i = 0; i < RCU_WRITERS; i++)
@@ -604,7 +606,7 @@ run_rcu(uint64_t seed, int *out_rd, int *out_wr, int *out_uaf,
 	*out_freed = xtc_atomic_load_i32(&g_freed, xtc_mo_seq_cst);
 	*out_hash = xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	xtc_rcu_fini();
 	return rc;
 }

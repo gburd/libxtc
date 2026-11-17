@@ -85,7 +85,8 @@ main(void)
 	pthread_create(&wd, NULL, watchdog, NULL);
 	pthread_detach(wd);
 
-	if (xtc_exec_init(&exec, NLOOPS) != XTC_OK) {
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = NLOOPS }, &exec) != XTC_OK) {
 		fprintf(stderr, "exec_init\n");
 		return 1;
 	}
@@ -101,7 +102,7 @@ main(void)
 		fprintf(stderr, "exec_run\n");
 		return 1;
 	}
-	(void)xtc_exec_fini(exec);
+	xtc_exec_destroy(exec);
 
 	if (xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst) != NPROCS) {
 		fprintf(stderr, "FAIL: only %d/%d procs done (%ld calls)\n",

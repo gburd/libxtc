@@ -121,7 +121,8 @@ main(int argc, char **argv)
 	memset(&o, 0, sizeof o);
 	o.size = sizeof o;
 	o.migratable = 1;
-	if (xtc_exec_init(&e, 3) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 3 }, &e) != XTC_OK)
 		return 1;
 	if (pthread_create(&th, NULL, stopper, NULL) != 0)
 		return 1;

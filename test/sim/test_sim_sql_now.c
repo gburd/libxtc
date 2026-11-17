@@ -121,10 +121,11 @@ run_one(uint64_t seed, char *out)
 	int rc;
 	g_out[0] = '\0';
 	g_ok = 0;
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 1), querier, e, NULL, NULL);
 	rc = xtc_sim_exec_run(e, seed, 2000000);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	snprintf(out, OUTCAP, "%s", g_out);
 	return (rc == XTC_OK && g_ok) ? 0 : -1;
 }

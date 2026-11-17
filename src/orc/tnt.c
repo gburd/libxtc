@@ -1784,7 +1784,8 @@ xtc_tnt_start(const xtc_tnt_spec_t *uspec)
 	rt->shard_count = spec.shard_count;
 	xtc_atomic_store_i32(&rt->stop, 0, xtc_mo_relaxed);
 
-	if (xtc_exec_init(&rt->exec, spec.shard_count) != XTC_OK) {
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = spec.shard_count }, &rt->exec) != XTC_OK) {
 		__os_free(rt);
 		return XTC_E_INTERNAL;
 	}
@@ -1792,7 +1793,7 @@ xtc_tnt_start(const xtc_tnt_spec_t *uspec)
 
 	for (i = 0; i < spec.shard_count; i++) {
 		if (shard_init(rt, (uint8_t)i, &rt->shards[i]) != 0) {
-			(void)xtc_exec_fini(rt->exec);
+			xtc_exec_destroy(rt->exec);
 			__os_free(rt);
 			return XTC_E_NOMEM;
 		}
@@ -1815,7 +1816,7 @@ xtc_tnt_start(const xtc_tnt_spec_t *uspec)
 	/* Run.  Blocks until xtc_tnt_stop / exec stop. */
 	rc = xtc_exec_run(rt->exec);
 
-	(void)xtc_exec_fini(rt->exec);
+	xtc_exec_destroy(rt->exec);
 	g_rt = NULL;
 	for (i = 0; i < rt->shard_count; i++)
 		shard_destroy(rt->shards[i]);
@@ -1860,7 +1861,8 @@ __xtc_tnt_run_sim(const xtc_tnt_spec_t *uspec, uint64_t seed, long max_steps)
 	rt->shard_count = spec.shard_count;
 	xtc_atomic_store_i32(&rt->stop, 0, xtc_mo_relaxed);
 
-	if (xtc_exec_init(&rt->exec, spec.shard_count) != XTC_OK) {
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = spec.shard_count }, &rt->exec) != XTC_OK) {
 		__os_free(rt);
 		return XTC_E_INTERNAL;
 	}
@@ -1868,7 +1870,7 @@ __xtc_tnt_run_sim(const xtc_tnt_spec_t *uspec, uint64_t seed, long max_steps)
 
 	for (i = 0; i < spec.shard_count; i++) {
 		if (shard_init(rt, (uint8_t)i, &rt->shards[i]) != 0) {
-			(void)xtc_exec_fini(rt->exec);
+			xtc_exec_destroy(rt->exec);
 			__os_free(rt);
 			return XTC_E_NOMEM;
 		}
@@ -1887,7 +1889,7 @@ __xtc_tnt_run_sim(const xtc_tnt_spec_t *uspec, uint64_t seed, long max_steps)
 
 	rc = xtc_sim_exec_run(rt->exec, seed, max_steps);
 
-	(void)xtc_exec_fini(rt->exec);
+	xtc_exec_destroy(rt->exec);
 	g_rt = NULL;
 	for (i = 0; i < rt->shard_count; i++)
 		shard_destroy(rt->shards[i]);

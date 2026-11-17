@@ -118,8 +118,9 @@ main(void)
 	signal(SIGALRM, on_alarm);
 	alarm(60);   /* generous: the bug hangs FOREVER, healthy finishes in ~1s */
 
-	if (xtc_exec_init(&e, LOOPS) != XTC_OK) {
-		printf("SKIP: xtc_exec_init failed\n");
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = LOOPS }, &e) != XTC_OK) {
+		printf("SKIP: xtc_exec_create failed\n");
 		return 77;
 	}
 	xtc_exec_set_eager_rebalance(e, 1);
@@ -132,17 +133,17 @@ main(void)
 		if (xtc_proc_spawn(xtc_exec_loop(e, 0), committer, NULL,
 		    &o, &p) != XTC_OK) {
 			printf("SKIP: spawn %d failed\n", i);
-			(void)xtc_exec_fini(e);
+			xtc_exec_destroy(e);
 			return 77;
 		}
 	}
 
 	if (xtc_exec_run(e) != XTC_OK) {
 		printf("FAIL: xtc_exec_run returned nonzero\n");
-		(void)xtc_exec_fini(e);
+		xtc_exec_destroy(e);
 		return 1;
 	}
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	alarm(0);
 
 	if (xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst) != WORKERS) {

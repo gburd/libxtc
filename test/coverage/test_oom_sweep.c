@@ -539,13 +539,14 @@ step_exec(int *ok)
 	xtc_exec_t *e = NULL;
 	int rc;
 	arm();
-	rc = xtc_exec_init(&e, 3);
+	rc = xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 3 }, &e);
 	disarm();
 	*ok = 1;
 	if (rc == XTC_OK) {
 		*ok = (e != NULL && xtc_exec_n_loops(e) == 3 &&
 		    xtc_exec_loop(e, 2) != NULL);
-		if (e != NULL && xtc_exec_fini(e) != XTC_OK) *ok = 0;
+		if (e != NULL) xtc_exec_destroy(e);
 	}
 	return rc;
 }

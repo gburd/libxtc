@@ -175,7 +175,8 @@ test_exec_wide_budget(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	reset();
 
-	munit_assert_int(xtc_exec_init(&e, 2), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &e), ==, XTC_OK);
 	xtc_exec_set_stall_budget(e, 5 * 1000 * 1000LL);
 	for (i = 0; i < 2; i++)
 		xtc_loop_set_stall_cb(xtc_exec_loop(e, i), stall_cb, NULL);
@@ -187,7 +188,7 @@ test_exec_wide_budget(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_atomic_load_i32(&g_stall_reports, xtc_mo_seq_cst),
 	    >, 0); /* tripped */
 
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 

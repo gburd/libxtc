@@ -380,14 +380,15 @@ test_owned_crossthread(const MunitParameter p[], void *d)
 {
 	xtc_exec_t *e;
 	(void)p; (void)d;
-	munit_assert_int(xtc_exec_init(&e, 2), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &e), ==, XTC_OK);
 	/* Procs are pinned to their spawn loop by default: two threads. */
 	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0), xt_rx, NULL, NULL,
 	    NULL), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 1), xt_tx, NULL, NULL,
 	    NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	munit_assert_int(xtc_atomic_load_i32(&g_xt_got, xtc_mo_seq_cst), ==,
 	    XT_N);
 	munit_assert_int(xtc_atomic_load_i32(&g_xt_ok, xtc_mo_seq_cst), ==,

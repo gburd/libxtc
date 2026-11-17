@@ -269,7 +269,8 @@ run_once(uint64_t seed, uint64_t *out_verified, uint64_t *out_mismatch,
 		return -1;
 	}
 
-	if (xtc_exec_init(&exec, N_LOOPS) != XTC_OK) {
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &exec) != XTC_OK) {
 		bm_destroy(g_bm);
 		unlink(path);
 		return -1;
@@ -286,7 +287,7 @@ run_once(uint64_t seed, uint64_t *out_verified, uint64_t *out_mismatch,
 	if (bm_provider_spawn(g_bm, xtc_exec_loop(exec, 0), 1LL * 1000 * 1000,
 	    &pp) != XTC_OK) {
 		xtc_sim_io_faults_disable();
-		(void)xtc_exec_fini(exec);
+		xtc_exec_destroy(exec);
 		bm_destroy(g_bm);
 		unlink(path);
 		return -1;
@@ -303,7 +304,7 @@ run_once(uint64_t seed, uint64_t *out_verified, uint64_t *out_mismatch,
 			bm_provider_stop(g_bm);
 			(void)xtc_sim_exec_run(exec, seed, 20000000);
 			xtc_sim_io_faults_disable();
-			(void)xtc_exec_fini(exec);
+			xtc_exec_destroy(exec);
 			bm_destroy(g_bm);
 			unlink(path);
 			return -1;
@@ -319,7 +320,7 @@ run_once(uint64_t seed, uint64_t *out_verified, uint64_t *out_mismatch,
 		*out_state = xtc_sim_state_hash(exec);
 
 	xtc_sim_io_faults_disable();
-	(void)xtc_exec_fini(exec);
+	xtc_exec_destroy(exec);
 
 	/* Final single-threaded consistency sweep (sim now inactive). */
 	*out_bad = final_check(out_content);

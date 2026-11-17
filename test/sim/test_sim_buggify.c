@@ -102,7 +102,8 @@ run_once(uint64_t seed, unsigned bug_pct, int *out_delivered,
 	int i;
 	xtc_atomic_store_i32(&g_delivered, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) { *out_delivered = -1; return; }
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) { *out_delivered = -1; return; }
 
 	if (bug_pct > 0)
 		xtc_sim_buggify_enable(bug_pct);
@@ -127,7 +128,7 @@ run_once(uint64_t seed, unsigned bug_pct, int *out_delivered,
 	*out_bug_active = xtc_sim_buggify_active_count();
 
 	xtc_sim_buggify_disable();
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 }
 
 int

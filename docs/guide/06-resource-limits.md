@@ -76,7 +76,7 @@ dashboard can show both current use and how often the cap bit.
 libxtc's thread count is *structurally* bounded, not just budgeted:
 
 - **Loop threads** -- one per core under the executor. You choose how
-  many cores to use (`xtc_exec_init`); concurrency comes from fibers, not
+  many cores to use (`xtc_exec_create`); concurrency comes from fibers, not
   from spawning threads, so the thread count does not grow with load.
 - **The blocking pool** -- `xtc_blocking_run` work runs on a pool that
   grows *on demand* only up to a hard cap (64 by default). A flood of

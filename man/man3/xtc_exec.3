@@ -4,8 +4,8 @@
 .Dt XTC_EXEC 3
 .Os
 .Sh NAME
-.Nm xtc_exec_init ,
-.Nm xtc_exec_fini ,
+.Nm xtc_exec_create ,
+.Nm xtc_exec_destroy ,
 .Nm xtc_exec_run ,
 .Nm xtc_exec_set_service_mode ,
 .Nm xtc_exec_get_service_mode ,
@@ -33,14 +33,16 @@
 .Nm xtc_exec_set_stall_budget ,
 .Nm xtc_loop_set_stall_budget ,
 .Nm xtc_loop_set_stall_cb ,
-.Nm xtc_loop_stall_count
+.Nm xtc_loop_stall_count ,
+.Nm xtc_exec_init ,
+.Nm xtc_exec_fini
 .Nd L2 multi-loop work-stealing executor
 .Sh SYNOPSIS
 .In xtc_exec.h
 .Ft int
-.Fn xtc_exec_init "xtc_exec_t **out" "int n_loops"
-.Ft int
-.Fn xtc_exec_fini "xtc_exec_t *exec"
+.Fn xtc_exec_create "const xtc_exec_opts_t *opts" "xtc_exec_t **out"
+.Ft void
+.Fn xtc_exec_destroy "xtc_exec_t *exec"
 .Ft int
 .Fn xtc_exec_run "xtc_exec_t *exec"
 .Ft void
@@ -110,12 +112,23 @@ runs again only after every task queued before it.  The inbox is
 lock-free and intrusive (no allocation per wake), so a cross-thread wake
 cannot fail.
 .Sh LIFECYCLE
-.Fn xtc_exec_init
+.Fn xtc_exec_create
 constructs an executor with
-.Fa n_loops
-loops; non-positive values default to a small reasonable count.
-.Fn xtc_exec_fini
-joins every worker, frees every loop.
+.Fa opts->n_loops
+loops; a non-positive count, or a
+.Dv NULL
+.Fa opts ,
+gives one loop per online CPU.
+.Fa opts
+is size-first: set its
+.Va size ,
+or start from
+.Dv XTC_EXEC_OPTS_INIT .
+.Fn xtc_exec_destroy
+frees every loop (call it after
+.Fn xtc_exec_run
+has returned); it returns nothing and does nothing on
+.Dv NULL .
 .Pp
 .Fn xtc_exec_run
 spawns
@@ -404,7 +417,23 @@ migrates.
 .Dv XTC_OK
 on success;
 .Dv XTC_E_INVAL
-on a bad argument;
+on a bad argument
+.Po
+for
+.Fn xtc_exec_create ,
+a
+.Dv NULL
+.Fa out
+or an
+.Fa opts
+whose
+.Va size
+is 0
+.Pc ;
+.Dv XTC_E_VERSION
+when
+.Fa opts
+comes from a newer header and sets a field this library does not have;
 .Dv XTC_E_NOMEM
 on allocation failure;
 .Dv XTC_E_INTERNAL
@@ -431,14 +460,30 @@ static intptr_t hello(void *arg) {
 
 int main(void) {
         xtc_exec_t *e;
-        xtc_exec_init(&e, 4);
+        xtc_exec_create(&(xtc_exec_opts_t){
+            .size = sizeof(xtc_exec_opts_t), .n_loops = 4 }, &e);
         for (int i = 0; i < 4; i++)
                 xtc_exec_async(e, hello, NULL, NULL);
         xtc_exec_run(e);
-        xtc_exec_fini(e);
+        xtc_exec_destroy(e);
         return 0;
 }
 .Ed
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Fn xtc_exec_init
+Use
+.Fn xtc_exec_create ;
+arguments changed: (const xtc_exec_opts_t *opts, out), n_loops is opts->n_loops.
+.It Fn xtc_exec_fini
+Use
+.Fn xtc_exec_destroy ;
+the new name returns void; the old one returns XTC_E_INVAL for NULL, else XTC_OK.
+.El
 .Sh SEE ALSO
 .Xr xtc_loop 3 ,
 .Xr xtc_async 3 ,

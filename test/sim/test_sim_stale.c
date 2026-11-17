@@ -150,7 +150,8 @@ run_once(uint64_t seed, int *out_stale, int *out_reg, long *out_hash,
 		close(g_fd); g_fd = -1; return -1;
 	}
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) {
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) {
 		close(g_fd); g_fd = -1; return -1;
 	}
 
@@ -177,7 +178,7 @@ run_once(uint64_t seed, int *out_stale, int *out_reg, long *out_hash,
 
 	xtc_sim_io_stale_enable(0);
 	xtc_sim_io_faults_disable();
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	close(g_fd);
 	g_fd = -1;
 	return rc;

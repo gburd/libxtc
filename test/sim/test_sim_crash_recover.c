@@ -366,7 +366,8 @@ run_once_inproc(uint64_t seed, long *out_crash_at, int *out_acked,
 	}
 	sx_close(dbsetup); dbsetup = NULL;
 
-	if (xtc_exec_init(&g_exec, N_LOOPS) != XTC_OK) { ret = -1; goto cleanup_engine1; }
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &g_exec) != XTC_OK) { ret = -1; goto cleanup_engine1; }
 
 	/* Deferred, seeded-latency WAL I/O completions -- NO injected
 	 * errors (an fsync EIO would be a spurious durability loss); the
@@ -377,7 +378,7 @@ run_once_inproc(uint64_t seed, long *out_crash_at, int *out_acked,
 	/* WAL group-commit writer on loop 0. */
 	if (wal_writer_spawn(g_wal, xtc_exec_loop(g_exec, 0), &wp) != XTC_OK) {
 		xtc_sim_io_faults_disable();
-		(void)xtc_exec_fini(g_exec); g_exec = NULL;
+		xtc_exec_destroy(g_exec); g_exec = NULL;
 		ret = -1; goto cleanup_engine1;
 	}
 
@@ -391,7 +392,7 @@ run_once_inproc(uint64_t seed, long *out_crash_at, int *out_acked,
 			(void)xtc_exec_stop(g_exec);
 			(void)xtc_sim_exec_run(g_exec, seed, 5000000);
 			xtc_sim_io_faults_disable();
-			(void)xtc_exec_fini(g_exec); g_exec = NULL;
+			xtc_exec_destroy(g_exec); g_exec = NULL;
 			ret = -1; goto cleanup_engine1;
 		}
 	}
@@ -403,7 +404,7 @@ run_once_inproc(uint64_t seed, long *out_crash_at, int *out_acked,
 	 * hang / scheduler bug we must not paper over. */
 	*out_crash_at = xtc_atomic_load_long(&g_crash_at, xtc_mo_seq_cst);
 	xtc_sim_io_faults_disable();
-	(void)xtc_exec_fini(g_exec); g_exec = NULL;
+	xtc_exec_destroy(g_exec); g_exec = NULL;
 	if (rc != XTC_OK) { ret = -2; goto cleanup_engine1; }
 
 	/* Tally the acked (durable) set the workers observed, and capture the

@@ -142,9 +142,10 @@ run_contend(uint64_t seed, int *out_done, int *out_wins, int *out_badr,
 	for (i = 0; i < CON_NAMES; i++)
 		xtc_atomic_store_i32(&g_held[i], 0, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 	if (xtc_reg_create(&g_reg) != XTC_OK) {
-		(void)xtc_exec_fini(e); return -1;
+		xtc_exec_destroy(e); return -1;
 	}
 	for (i = 0; i < CON_WORK; i++)
 		(void)xtc_proc_spawn(xtc_exec_loop(e, (unsigned)(i % N_LOOPS)),
@@ -161,7 +162,7 @@ run_contend(uint64_t seed, int *out_done, int *out_wins, int *out_badr,
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_reg_destroy(g_reg);
 	g_reg = NULL;
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 
@@ -222,9 +223,10 @@ run_churn(uint64_t seed, int use_buggify, int *out_done, int *out_ok,
 	xtc_atomic_store_i32(&g_creg_bad, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_creg_done, 0, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 	if (xtc_reg_create(&g_creg) != XTC_OK) {
-		(void)xtc_exec_fini(e); return -1;
+		xtc_exec_destroy(e); return -1;
 	}
 	if (use_buggify) xtc_sim_buggify_enable(1000);
 	for (i = 0; i < CHURN_WORK; i++)
@@ -241,7 +243,7 @@ run_churn(uint64_t seed, int use_buggify, int *out_done, int *out_ok,
 	if (use_buggify) xtc_sim_buggify_disable();
 	xtc_reg_destroy(g_creg);
 	g_creg = NULL;
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 
@@ -315,9 +317,10 @@ run_pg(uint64_t seed, int *out_done, int *out_bad, long *out_hash,
 	xtc_atomic_store_i32(&g_pg_done, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_pg_hash, 0, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return XTC_E_NOMEM;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return XTC_E_NOMEM;
 	if (xtc_reg_create(&g_preg) != XTC_OK) {
-		(void)xtc_exec_fini(e); return XTC_E_NOMEM;
+		xtc_exec_destroy(e); return XTC_E_NOMEM;
 	}
 	for (i = 0; i < PG_WORK; i++)
 		(void)xtc_proc_spawn(xtc_exec_loop(e, (unsigned)(i % N_LOOPS)),
@@ -334,7 +337,7 @@ run_pg(uint64_t seed, int *out_done, int *out_bad, long *out_hash,
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_reg_destroy(g_preg);
 	g_preg = NULL;
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

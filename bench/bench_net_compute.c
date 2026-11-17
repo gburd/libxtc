@@ -322,8 +322,9 @@ run_server(int port, int n_loops, unsigned compute)
 	g_srv.listen_fd = fd;
 	g_srv.compute = compute;
 
-	if (xtc_exec_init(&e, n_loops) != XTC_OK) {
-		fprintf(stderr, "xtc_exec_init failed\n");
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = n_loops }, &e) != XTC_OK) {
+		fprintf(stderr, "xtc_exec_create failed\n");
 		(void)close(fd);
 		return 1;
 	}
@@ -337,7 +338,7 @@ run_server(int port, int n_loops, unsigned compute)
 		o.name = "accept";
 		if (xtc_proc_spawn(lp, accept_fiber, lp, &o, NULL) != XTC_OK) {
 			fprintf(stderr, "spawn accept failed\n");
-			(void)xtc_exec_fini(e);
+			xtc_exec_destroy(e);
 			(void)close(fd);
 			return 1;
 		}
@@ -380,7 +381,7 @@ run_server(int port, int n_loops, unsigned compute)
 			    cpu_s * 1e6 / (double)reqs);
 		printf("\n");
 	}
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	(void)close(fd);
 	return 0;
 }

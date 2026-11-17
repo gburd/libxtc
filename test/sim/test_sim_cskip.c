@@ -223,7 +223,8 @@ run_cskip(uint64_t seed, int *out_rd, int *out_wr, int *out_uaf, int *out_ord,
 		xtc_atomic_store_i32(&g_valfreed[i], 0, xtc_mo_seq_cst);
 	}
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) {
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) {
 		xtc_cskip_destroy(g_s); xtc_rcu_fini(); return -1;
 	}
 	for (i = 0; i < CK_WRITERS; i++)

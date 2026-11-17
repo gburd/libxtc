@@ -188,14 +188,15 @@ run_part_a(uint64_t seed, int *out_exit, int *out_down, long *out_hash,
 	xtc_atomic_store_i32(&g_victim_idx, -1, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_victim_time, -1, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK)
 		return -1;
 
 	for (i = 0; i < N_WORKERS; i++) {
 		xtc_loop_t *l = xtc_exec_loop(e, (unsigned)(i % N_LOOPS));
 		if (xtc_proc_spawn(l, worker, NULL, NULL,
 		    &g_workers[i]) != XTC_OK) {
-			(void)xtc_exec_fini(e);
+			xtc_exec_destroy(e);
 			return -1;
 		}
 	}
@@ -222,7 +223,7 @@ run_part_a(uint64_t seed, int *out_exit, int *out_down, long *out_hash,
 		*out_state = xtc_sim_state_hash(e);
 	*out_victim = xtc_atomic_load_i32(&g_victim_idx, xtc_mo_seq_cst);
 	*out_time = xtc_atomic_load_long(&g_victim_time, xtc_mo_seq_cst);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 
@@ -294,7 +295,8 @@ run_part_b(uint64_t seed, int *out_restarts, int *out_spawns,
 	for (i = 0; i < N_KIDS; i++)
 		g_kid_pids[i] = (xtc_pid_t){0};
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK)
 		return -1;
 
 	opts.exec = e;
@@ -319,7 +321,7 @@ run_part_b(uint64_t seed, int *out_restarts, int *out_spawns,
 
 	if (xtc_sup_start(xtc_exec_loop(e, 0), &opts, kids, N_KIDS,
 	    &g_sup) != XTC_OK) {
-		(void)xtc_exec_fini(e);
+		xtc_exec_destroy(e);
 		return -1;
 	}
 
@@ -338,7 +340,7 @@ run_part_b(uint64_t seed, int *out_restarts, int *out_spawns,
 	 * its struct is reclaimed (no leak under ASan). */
 	if (g_sup != NULL)
 		(void)xtc_sup_join(g_sup, 0);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 
@@ -421,7 +423,8 @@ run_part_c(uint64_t seed, int *out_ok, int *out_rx, uint64_t *out_state)
 	int rc;
 	xtc_atomic_store_i32(&g_reboot_ok, -1, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_reboot_rx, 0, xtc_mo_seq_cst);
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK)
 		return -1;
 	xtc_exec_set_service_mode(e, 1);
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), reboot_driver, e, NULL, NULL);
@@ -431,7 +434,7 @@ run_part_c(uint64_t seed, int *out_ok, int *out_rx, uint64_t *out_state)
 	if (out_rx)
 		*out_rx = xtc_atomic_load_i32(&g_reboot_rx, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

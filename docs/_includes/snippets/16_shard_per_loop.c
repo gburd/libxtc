@@ -121,7 +121,8 @@ main(void)
 	int64_t total = 0;
 	int i, k;
 
-	if (xtc_exec_init(&ex, NLOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = NLOOPS }, &ex) != XTC_OK)
 		return 1;
 	for (i = 0; i < NLOOPS; i++)
 		if (xtc_proc_spawn(xtc_exec_loop(ex, i), owner_proc, NULL,
@@ -132,7 +133,7 @@ main(void)
 		    (void *)(intptr_t)i, NULL, NULL) != XTC_OK)
 			return 1;
 	(void)xtc_exec_run(ex);     /* returns when every proc has exited */
-	(void)xtc_exec_fini(ex);
+	xtc_exec_destroy(ex);
 
 	for (i = 0; i < NLOOPS; i++)
 		for (k = 0; k < NKEYS; k++)

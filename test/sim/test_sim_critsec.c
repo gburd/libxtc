@@ -103,7 +103,8 @@ run_once(uint64_t seed, unsigned pct, struct run_result *r)
 	xtc_atomic_store_long(&g_app_hash, 0, xtc_mo_seq_cst);
 	memset(r, 0, sizeof *r);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) { r->rc = -1; return; }
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) { r->rc = -1; return; }
 
 	/* Enable fault points BEFORE the run; xtc_sim_exec_run activates
 	 * sim (which the points also require). */
@@ -129,7 +130,7 @@ run_once(uint64_t seed, unsigned pct, struct run_result *r)
 	r->points_seen = xtc_sim_fault_points_seen();
 
 	xtc_sim_fault_points_disable();
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 }
 
 /* A steal-inducing workload: spawn many unpinned TASKS (xtc_task_spawn,
@@ -157,7 +158,8 @@ run_steal(uint64_t seed, unsigned pct, struct run_result *r)
 	int i;
 	xtc_atomic_store_i32(&g_steal_done, 0, xtc_mo_seq_cst);
 	memset(r, 0, sizeof *r);
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) { r->rc = -1; return; }
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) { r->rc = -1; return; }
 	xtc_sim_fault_points_enable(pct);
 	l0 = xtc_exec_loop(e, 0);
 	for (i = 0; i < N_STEAL_WORKERS; i++)
@@ -169,7 +171,7 @@ run_steal(uint64_t seed, unsigned pct, struct run_result *r)
 	    xtc_sim_fault_point_fires("sched.enqueue.post_deque_push");
 	r->points_seen = xtc_sim_fault_points_seen();
 	xtc_sim_fault_points_disable();
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 }
 
 int

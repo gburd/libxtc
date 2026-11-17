@@ -379,7 +379,8 @@ run_one(uint64_t seed, uint64_t *out_hash, int *out_viol, int *out_recovered,
 	sx_close(ddl); ddl = NULL;
 
 	if (xtc_lockmgr_create(&lo, &g_mgr) != XTC_OK) goto engine;
-	if (xtc_exec_init(&g_exec, N_LOOPS) != XTC_OK) goto lockmgr;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &g_exec) != XTC_OK) goto lockmgr;
 	xtc_exec_set_service_mode(g_exec, 1);
 	xtc_sim_io_faults_enable(50 * 1000LL, 500 * 1000LL, 0);
 	if (xtc_chan_mpsc_create(NULL, 512, &g_chan) != XTC_OK) goto exec;
@@ -416,7 +417,7 @@ run_one(uint64_t seed, uint64_t *out_hash, int *out_viol, int *out_recovered,
 	xtc_sim_io_faults_disable();
 	xtc_sim_io_wb_enable(0);
 	if (g_chan) { void *m; while (xtc_chan_mpsc_try_recv(g_chan,&m)==XTC_OK && m) free(m); xtc_chan_mpsc_destroy(g_chan); g_chan = NULL; }
-	(void)xtc_exec_fini(g_exec); g_exec = NULL;
+	xtc_exec_destroy(g_exec); g_exec = NULL;
 	/* Do NOT gracefully destroy the lockmgr here: the crash
 	 * (xtc_exec_stop) may have killed a worker mid-lock-hold or
 	 * mid-acquire, leaving lock-table state a real crashed process
@@ -486,7 +487,7 @@ verified:
 
 exec:   if (g_chan) xtc_chan_mpsc_destroy(g_chan);
 	xtc_sim_io_faults_disable();
-	if (g_exec) (void)xtc_exec_fini(g_exec);
+	if (g_exec) xtc_exec_destroy(g_exec);
 lockmgr: if (g_mgr) xtc_lockmgr_destroy(g_mgr);
 engine: xstore_set_wal(NULL);
 	if (g_bt) bt_close(g_bt);

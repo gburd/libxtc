@@ -143,7 +143,8 @@ run_mctx(uint64_t seed, int *out_done, int *out_cleanups, int *out_bad,
 	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 	for (i = 0; i < WORKERS; i++)
 		(void)xtc_proc_spawn(xtc_exec_loop(e, (unsigned)(i % N_LOOPS)),
 		    mctx_worker, (void *)(intptr_t)i, NULL, NULL);
@@ -155,7 +156,7 @@ run_mctx(uint64_t seed, int *out_done, int *out_cleanups, int *out_bad,
 	*out_bad = xtc_atomic_load_i32(&g_acct_bad, xtc_mo_seq_cst);
 	*out_hash = xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

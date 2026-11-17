@@ -794,7 +794,8 @@ test_magazine_preempt(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_mp_win_preempted, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_inject_attach("slab.magazine_window",
 	    mp_raise_in_window, NULL), ==, XTC_OK);
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	l = xtc_exec_loop(e, 0);
 	/* Arms the handler + unblocks the signal on the worker; the 10 s
 	 * CPU-time interval never elapses, so every tick is our raise. */
@@ -807,7 +808,7 @@ test_magazine_preempt(const MunitParameter p[], void *d)
 	    XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	xtc_preempt_set_involuntary(0);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	(void)xtc_inject_detach("slab.magazine_window");
 	xtc_slab_destroy(g_slab);
 	if (xtc_atomic_load_i32(&g_mp_hits, xtc_mo_seq_cst) == 0)

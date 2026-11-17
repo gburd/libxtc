@@ -1907,7 +1907,7 @@ test_aio_migrate_wake: $(srcdir)/../test/concurrency/test_aio_migrate_wake.c \
 
 # Signal-mask regression guard: no runtime thread steals a process-
 # directed signal (carrier SIGCHLD-to-scheduler bug).  Standalone (it
-# spins an exec and can hit the documented xtc_exec_fini teardown leak,
+# spins an exec and can hit the documented xtc_exec_destroy teardown leak,
 # so it is not in the leak-checked make check set).  Returns 0/1/77.
 test_thread_sigmask: $(srcdir)/../test/m1/test_thread_sigmask.c $(STATIC_LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) \

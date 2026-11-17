@@ -117,9 +117,10 @@ run_slab(uint64_t seed, int *out_done, int *out_dbl,
 	opts.chunk_size = 4096;      /* small chunks -> exercise slow path */
 	opts.magazine_size = 4;      /* small magazine -> more misses */
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 	if (xtc_slab_create(&opts, &g_slab) != XTC_OK) {
-		(void)xtc_exec_fini(e); return -1;
+		xtc_exec_destroy(e); return -1;
 	}
 	for (i = 0; i < WORKERS; i++)
 		(void)xtc_proc_spawn(xtc_exec_loop(e, (unsigned)(i % N_LOOPS)),
@@ -138,7 +139,7 @@ run_slab(uint64_t seed, int *out_done, int *out_dbl,
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_slab_destroy(g_slab);
 	g_slab = NULL;
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

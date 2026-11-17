@@ -292,10 +292,11 @@ run_lr(uint64_t seed, int *out_done, int *out_torn, int *out_no_slot,
 	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 	if (xtc_lrlock_create(sizeof(struct payload), pl_apply, pl_sync,
 	    "lr.dst", &g_lr) != XTC_OK) {
-		(void)xtc_exec_fini(e); return -1;
+		xtc_exec_destroy(e); return -1;
 	}
 	/* Initialise both copies to a consistent zero payload, then mark
 	 * ready so the first publish need not full-sync from garbage. */
@@ -322,7 +323,7 @@ run_lr(uint64_t seed, int *out_done, int *out_torn, int *out_no_slot,
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_lrlock_destroy(g_lr);
 	g_lr = NULL;
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

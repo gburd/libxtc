@@ -159,7 +159,9 @@ run(uint64_t seed, struct out *o)
 	xtc_atomic_store_i32(&g_wrong, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_dead_ok, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_fold, 0, xtc_mo_seq_cst);
-	if (xtc_exec_init(&a, NL) != XTC_OK || xtc_exec_init(&b, NL) !=
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = NL }, &a) != XTC_OK || xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = NL }, &b) !=
 	    XTC_OK || spawn_side(a, 0, 0, NULL) != 0 ||
 	    spawn_side(b, 1, 1, sender) != 0) {
 		o->rc[0] = XTC_E_NOMEM;
@@ -171,16 +173,17 @@ run(uint64_t seed, struct out *o)
 	o->st[0] = xtc_sim_state_hash(a);
 	for (i = 0; i < NL; i++)
 		g_dead[i] = g_rx[0][i];
-	(void)xtc_exec_fini(a);
-	if (xtc_exec_init(&c, NL) != XTC_OK ||
+	xtc_exec_destroy(a);
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = NL }, &c) != XTC_OK ||
 	    spawn_side(c, 2, 1, dead_sender) != 0) {
 		o->rc[2] = XTC_E_NOMEM;
 		return;
 	}
 	o->rc[2] = xtc_sim_exec_run(c, seed ^ 0xC, 1000000);
 	o->st[2] = xtc_sim_state_hash(c);
-	(void)xtc_exec_fini(c);
-	(void)xtc_exec_fini(b);
+	xtc_exec_destroy(c);
+	xtc_exec_destroy(b);
 	for (s = 0; s < 3; s++)
 		for (i = 0; i < NL; i++) {
 			fold_pid(g_rx[s][i]);

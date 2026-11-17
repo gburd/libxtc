@@ -202,7 +202,8 @@ run_one(uint64_t seed, uint64_t *out_trace, uint64_t *out_state)
 	memset(g_nt, 0, sizeof g_nt);
 	g_notified = g_notes = g_stuck = g_tx_done = g_sent = 0;
 	g_trace = 0;
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK)
 		return -1;
 	o.mailbox_cap = CAP;
 	for (i = 0; i < N_RX; i++) {
@@ -227,7 +228,7 @@ run_one(uint64_t seed, uint64_t *out_trace, uint64_t *out_state)
 	xtc_sim_net_latency(0, 0);
 	*out_trace = g_trace;
 	*out_state = xtc_sim_state_hash(e);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 
@@ -306,7 +307,8 @@ if_run(uint64_t seed, long max_steps, int *grew)
 
 	g_if_ok[0] = g_if_ok[1] = g_if_got = g_if_late = 0;
 	xtc_alloc_audit_stats(&c0, NULL);
-	if (xtc_exec_init(&e, 2) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &e) != XTC_OK)
 		return -1;
 	o.mailbox_cap = IF_CAP;
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), if_receiver, NULL, &o,
@@ -319,7 +321,7 @@ if_run(uint64_t seed, long max_steps, int *grew)
 	xtc_sim_net_latency(10 * 1000LL, 200 * 1000LL);
 	rc = xtc_sim_exec_run(e, seed, max_steps);
 	xtc_sim_net_latency(0, 0);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	xtc_alloc_audit_stats(&c1, NULL);
 	*grew = c1 > c0 ? (int)(c1 - c0) : 0;
 	return rc;

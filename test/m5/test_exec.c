@@ -30,21 +30,57 @@ test_init_fini(const MunitParameter p[], void *d)
 {
 	xtc_exec_t *e;
 	(void)p; (void)d;
-	munit_assert_int(xtc_exec_init(&e, 4), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 4 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_n_loops(e), ==, 4);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 
 	/* Ex1.b: n_loops <= 0 defaults to __os_ncpus(). */
-	munit_assert_int(xtc_exec_init(&e, 0), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 0 }, &e), ==, XTC_OK);
 	{
 		int expect = __os_ncpus();
 		if (expect <= 0) expect = 4;
 		munit_assert_int(xtc_exec_n_loops(e), ==, expect);
 	}
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 
-	munit_assert_int(xtc_exec_init(NULL, 4), ==, XTC_E_INVAL);
-	munit_assert_int(xtc_exec_fini(NULL), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 4 }, NULL), ==, XTC_E_INVAL);
+	xtc_exec_destroy(NULL);
+
+	return MUNIT_OK;
+}
+
+/* The opts struct is size-first: NULL is every default, size 0 is
+ * refused, and a newer header's nonzero tail is XTC_E_VERSION. */
+static MunitResult
+test_create_opts(const MunitParameter p[], void *d)
+{
+	unsigned char big[sizeof(xtc_exec_opts_t) + 8];
+	xtc_exec_opts_t o = XTC_EXEC_OPTS_INIT;
+	size_t bsz = sizeof big;
+	int expect = __os_ncpus();
+	xtc_exec_t *e;
+
+	(void)p; (void)d;
+	if (expect <= 0) expect = 4;
+	munit_assert_int(xtc_exec_create(NULL, &e), ==, XTC_OK);
+	munit_assert_int(xtc_exec_n_loops(e), ==, expect);
+	xtc_exec_destroy(e);
+	o.size = 0;
+	munit_assert_int(xtc_exec_create(&o, &e), ==, XTC_E_INVAL);
+	memset(big, 0, sizeof big);
+	memcpy(big, &bsz, sizeof bsz);
+	((xtc_exec_opts_t *)(void *)big)->n_loops = 2;
+	big[sizeof big - 1] = 1;
+	munit_assert_int(xtc_exec_create((const xtc_exec_opts_t *)(void *)big,
+	    &e), ==, XTC_E_VERSION);
+	big[sizeof big - 1] = 0;
+	munit_assert_int(xtc_exec_create((const xtc_exec_opts_t *)(void *)big,
+	    &e), ==, XTC_OK);
+	munit_assert_int(xtc_exec_n_loops(e), ==, 2);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -54,9 +90,10 @@ test_run_until_done(const MunitParameter p[], void *d)
 {
 	xtc_exec_t *e;
 	(void)p; (void)d;
-	munit_assert_int(xtc_exec_init(&e, 2), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -66,12 +103,14 @@ test_n_loops(const MunitParameter p[], void *d)
 {
 	xtc_exec_t *e;
 	(void)p; (void)d;
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_n_loops(e), ==, 1);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
-	munit_assert_int(xtc_exec_init(&e, 7), ==, XTC_OK);
+	xtc_exec_destroy(e);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 7 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_n_loops(e), ==, 7);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -89,11 +128,12 @@ test_spawn(const MunitParameter p[], void *d)
 	xtc_exec_t *e;
 	(void)p; (void)d;
 	__os_atomic_store_i32(&sp1_ran, 0);
-	munit_assert_int(xtc_exec_init(&e, 4), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 4 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_spawn(e, sp1_task, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	munit_assert_int(__os_atomic_load_i32(&sp1_ran), ==, 1);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -110,13 +150,14 @@ test_spawn_on(const MunitParameter p[], void *d)
 {
 	xtc_exec_t *e;
 	(void)p; (void)d;
-	munit_assert_int(xtc_exec_init(&e, 4), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 4 }, &e), ==, XTC_OK);
 	sp2_observed_id = -1;
 	munit_assert_int(xtc_exec_spawn_on(e, 2, sp2_task, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	munit_assert_int(sp2_observed_id, ==, 2);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -137,7 +178,8 @@ test_n_spawned_sum(const MunitParameter p[], void *d)
 	int i;
 	int64_t expected = 0;
 	(void)p; (void)d;
-	munit_assert_int(xtc_exec_init(&e, 4), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 4 }, &e), ==, XTC_OK);
 	__os_atomic_store_i64(&sp3_counter, 0);
 	for (i = 0; i < SP3_N; i++) {
 		expected += i + 1;
@@ -146,7 +188,7 @@ test_n_spawned_sum(const MunitParameter p[], void *d)
 	}
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	munit_assert_int64(__os_atomic_load_i64(&sp3_counter), ==, expected);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -177,13 +219,14 @@ test_shard_id(const MunitParameter p[], void *d)
 
 	for (i = 0; i < 32; i++) __os_atomic_store_i32(&g_shard_ran[i], 0);
 	__os_atomic_store_i32(&g_shard_count_seen, 0);
-	munit_assert_int(xtc_exec_init(&e, n), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = n }, &e), ==, XTC_OK);
 	/* Pin one probe to each shard so every shard id is observed. */
 	for (i = 0; i < n; i++)
 		munit_assert_int(xtc_exec_spawn_on(e, i, shard_probe, NULL, NULL),
 		    ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 
 	/* Every shard 0..n-1 ran and reported the full count. */
 	for (i = 0; i < n; i++)
@@ -207,7 +250,8 @@ test_policy_knobs(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_exec_get_eager_rebalance(NULL), ==, 0);
 	munit_assert_int(xtc_exec_get_steal_backoff(NULL), ==, 0);
 
-	munit_assert_int(xtc_exec_init(&e, 2), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &e), ==, XTC_OK);
 
 	/* Each knob toggles and reads back both states. */
 	munit_assert_int(xtc_exec_get_service_mode(e), ==, 0);
@@ -228,7 +272,7 @@ test_policy_knobs(const MunitParameter p[], void *d)
 	xtc_exec_set_steal_backoff(e, 0);
 	munit_assert_int(xtc_exec_get_steal_backoff(e), ==, 0);
 
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -259,7 +303,8 @@ test_accessors_errors(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_exec_async_on(NULL, 0, noop_coro, NULL, NULL),
 	    ==, XTC_E_INVAL);
 
-	munit_assert_int(xtc_exec_init(&e, 3), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 3 }, &e), ==, XTC_OK);
 
 	/* loop: valid idx returns non-NULL, out-of-range returns NULL. */
 	munit_assert_not_null(xtc_exec_loop(e, 0));
@@ -293,7 +338,7 @@ test_accessors_errors(const MunitParameter p[], void *d)
 	    ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -316,7 +361,8 @@ test_exec_class_accessors(const MunitParameter p[], void *d)
 	munit_assert_int64(xtc_exec_class_runs(NULL), ==, 0);
 	munit_assert_int64(xtc_exec_class_vruntime(NULL), ==, 0);
 
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	loop = xtc_exec_loop(e, 0);
 	munit_assert_not_null(loop);
 
@@ -336,7 +382,7 @@ test_exec_class_accessors(const MunitParameter p[], void *d)
 	munit_assert_int64(xtc_exec_class_runs(c), ==, 0);      /* not run yet */
 	munit_assert_int64(xtc_exec_class_vruntime(c), ==, 0);
 
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -400,7 +446,8 @@ test_blocking_resume_on_exec(const MunitParameter p[], void *d)
 	 * idle poll -- not step's blocking poll -- is what reaps the
 	 * completion pipe.  If that idle poll drops the event, the fiber is
 	 * stranded: the reported fiber-resume lost-wakeup. */
-	munit_assert_int(xtc_exec_init(&e, 4), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 4 }, &e), ==, XTC_OK);
 	xtc_exec_set_eager_rebalance(e, 1);   /* force idle peers to steal */
 	for (i = 0; i < BLK1_N; i++) {
 		opts.name = "blk";
@@ -415,7 +462,7 @@ test_blocking_resume_on_exec(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	munit_assert_int(xtc_atomic_load_i32(&g_blk1_done, xtc_mo_seq_cst), ==,
 	    BLK1_N);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -496,7 +543,8 @@ test_concurrent_commit_resume(const MunitParameter p[], void *d)
 
 	xtc_atomic_store_i32(&g_blk2_done, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_blk2_lock, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_exec_init(&e, 12), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 12 }, &e), ==, XTC_OK);
 	xtc_exec_set_eager_rebalance(e, 1);
 	for (i = 0; i < BLK2_FIBERS; i++) {
 		opts.name = "blk2";
@@ -510,7 +558,7 @@ test_concurrent_commit_resume(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	munit_assert_int(xtc_atomic_load_i32(&g_blk2_done, xtc_mo_seq_cst), ==,
 	    BLK2_FIBERS);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -601,7 +649,8 @@ test_cross_loop_del_fd(const MunitParameter p[], void *d)
 		if (xtc_test_make_pipe(&g_blk3_rfd[i], &g_blk3_wfd[i]) != 0)
 			return MUNIT_SKIP;   /* no pipes available */
 	}
-	munit_assert_int(xtc_exec_init(&e, 8), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 8 }, &e), ==, XTC_OK);
 	xtc_exec_set_eager_rebalance(e, 1);
 	munit_assert_int(__os_thread_create(&poker, blk3_poker, NULL),
 	    ==, XTC_OK);
@@ -618,7 +667,7 @@ test_cross_loop_del_fd(const MunitParameter p[], void *d)
 	munit_assert_int(__os_thread_join(&poker, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_atomic_load_i32(&g_blk3_done, xtc_mo_seq_cst), ==,
 	    BLK3_FIBERS);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	for (i = 0; i < BLK3_FIBERS; i++)
 		xtc_test_close_pipe(g_blk3_rfd[i], g_blk3_wfd[i]);
 	return MUNIT_OK;
@@ -698,7 +747,8 @@ test_cross_loop_state_timer(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_blk4_done, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_blk4_ready, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_blk4_stop, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_exec_init(&e, 8), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 8 }, &e), ==, XTC_OK);
 	xtc_exec_set_eager_rebalance(e, 1);
 	munit_assert_int(__os_thread_create(&poker, blk4_poker, NULL),
 	    ==, XTC_OK);
@@ -713,7 +763,7 @@ test_cross_loop_state_timer(const MunitParameter p[], void *d)
 	munit_assert_int(__os_thread_join(&poker, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_atomic_load_i32(&g_blk4_done, xtc_mo_seq_cst), ==,
 	    BLK4_FIBERS);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -809,7 +859,8 @@ test_migratable_timer_resume(const MunitParameter p[], void *d)
 	nloops = __os_ncpus();
 	if (nloops > 8) nloops = 8;
 	if (nloops < 2) nloops = 2;
-	munit_assert_int(xtc_exec_init(&e, nloops), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = nloops }, &e), ==, XTC_OK);
 	xtc_exec_set_eager_rebalance(e, 1);
 	for (i = 0; i < BLK5_FIBERS; i++) {
 		opts.name = "blk5";
@@ -820,7 +871,7 @@ test_migratable_timer_resume(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	munit_assert_int(xtc_atomic_load_i32(&g_blk5_done, xtc_mo_seq_cst), ==,
 	    BLK5_FIBERS);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 #endif
 }
@@ -918,7 +969,8 @@ test_migratable_waitfd_resume(const MunitParameter p[], void *d)
 	int i;
 	xtc_atomic_store_i32(&g_blk6_done, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_blk6_lock, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_exec_init(&e, 8), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 8 }, &e), ==, XTC_OK);
 	xtc_exec_set_eager_rebalance(e, 1);
 	for (i = 0; i < BLK6_FIBERS; i++) {
 		opts.name = "blk6";
@@ -929,7 +981,7 @@ test_migratable_waitfd_resume(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	munit_assert_int(xtc_atomic_load_i32(&g_blk6_done, xtc_mo_seq_cst), ==,
 	    BLK6_FIBERS);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 #endif
 }
@@ -1125,7 +1177,8 @@ test_migratable_self_identity(const MunitParameter p[], void *d)
 	nloops = __os_ncpus();
 	if (nloops > 8) nloops = 8;
 	if (nloops < 2) nloops = 2;
-	munit_assert_int(xtc_exec_init(&e, nloops), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = nloops }, &e), ==, XTC_OK);
 	xtc_exec_set_eager_rebalance(e, 1);
 	for (i = 0; i < BLK8_FIBERS; i++) {
 		opts.name = "blk8";
@@ -1138,7 +1191,7 @@ test_migratable_self_identity(const MunitParameter p[], void *d)
 	    BLK8_FIBERS);
 	munit_assert_int(xtc_atomic_load_i32(&g_blk8_wrong, xtc_mo_seq_cst), ==,
 	    0);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 #endif
 }
@@ -1240,7 +1293,8 @@ test_quiesce_after_timer_drop(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_ex5_returned, 0, xtc_mo_seq_cst);
 	if (xtc_test_make_pipe(&g_ex5_rfd, &g_ex5_wfd) != 0)
 		return MUNIT_SKIP;
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0), ex5_proc, e,
 	    &opts, &pid), ==, XTC_OK);
 	munit_assert_int(__os_thread_create(&drv, ex5_driver, e), ==, XTC_OK);
@@ -1258,13 +1312,14 @@ test_quiesce_after_timer_drop(const MunitParameter p[], void *d)
 		munit_errorf("xtc_exec_run did not return after the last proc "
 		    "exited (%lld ms; stopped by the 5 s bound)",
 		    (long long)((t1 - t0) / 1000000));
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	xtc_test_close_pipe(g_ex5_rfd, g_ex5_wfd);
 	return MUNIT_OK;
 }
 
 static MunitTest tests[] = {
 	{ "/Ex1_Ex2_init_fini",       test_init_fini,       NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/create_opts",              test_create_opts,     NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Ex3_run_until_done",      test_run_until_done,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Ex4_n_loops",             test_n_loops,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/Ex5_quiesce_after_timer_drop", test_quiesce_after_timer_drop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

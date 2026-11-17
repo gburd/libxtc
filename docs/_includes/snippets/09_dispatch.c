@@ -54,7 +54,8 @@ main(void)
 	xtc_future_t *fut = NULL;
 	intptr_t out = 0;
 
-	if (xtc_exec_init(&g_exec, 2) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &g_exec) != XTC_OK)
 		return 1;
 	xtc_exec_set_service_mode(g_exec, 1);
 	if (pthread_create(&th, NULL, run_exec, NULL) != 0)
@@ -73,7 +74,7 @@ main(void)
 
 	(void)xtc_exec_stop(g_exec);
 	(void)pthread_join(th, NULL);
-	(void)xtc_exec_fini(g_exec);
+	xtc_exec_destroy(g_exec);
 	return out == 42 ? 0 : 1;
 }
 /* !endregion submit */

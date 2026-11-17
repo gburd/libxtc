@@ -99,7 +99,8 @@ main(void)
 	}
 
 	/* An executor, outside any run. */
-	if (xtc_exec_init(&e, 2) != XTC_OK ||
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &e) != XTC_OK ||
 	    xtc_proc_spawn(xtc_exec_loop(e, 0), reader, NULL, NULL, NULL) !=
 	        XTC_OK) {
 		printf("FAIL: setup of the executor\n");
@@ -113,10 +114,11 @@ main(void)
 		    xtc_strerror(rc), g_ran);
 		return 1;
 	}
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 
 	/* The same program under a run is driven as before. */
-	if (xtc_exec_init(&e, 2) != XTC_OK ||
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &e) != XTC_OK ||
 	    xtc_proc_spawn(xtc_exec_loop(e, 1), sleeper, NULL, NULL, NULL) !=
 	        XTC_OK) {
 		printf("FAIL: setup of the sim run\n");
@@ -128,7 +130,7 @@ main(void)
 		    xtc_strerror(rc), g_ran);
 		return 1;
 	}
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 
 	printf("OK: outside a sim run xtc_loop_run and xtc_exec_run return "
 	       "XTC_E_STATE at once (a proc parked on a real pipe would spin "

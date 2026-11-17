@@ -305,8 +305,9 @@ main(int argc, char **argv)
 		nloops = 4;
 	if (nloops > 16)
 		nloops = 16;
-	if (xtc_exec_init(&e, nloops) != XTC_OK) {
-		fprintf(stderr, "xtc_exec_init failed\n");
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = nloops }, &e) != XTC_OK) {
+		fprintf(stderr, "xtc_exec_create failed\n");
 		free(g_lat);
 		(void)close(g_fd);
 		return 1;
@@ -320,7 +321,7 @@ main(int argc, char **argv)
 		if (xtc_proc_spawn(xtc_exec_loop(e, i % nloops), aio_fiber,
 		    (void *)(intptr_t)i, &o, NULL) != XTC_OK) {
 			fprintf(stderr, "spawn failed at %d\n", i);
-			(void)xtc_exec_fini(e);
+			xtc_exec_destroy(e);
 			free(g_lat);
 			(void)close(g_fd);
 			return 1;
@@ -374,7 +375,7 @@ main(int argc, char **argv)
 		    xtc_atomic_load_i32(&g_peak_iowq, xtc_mo_seq_cst));
 	}
 
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	free(g_lat);
 	(void)close(g_fd);
 	return 0;

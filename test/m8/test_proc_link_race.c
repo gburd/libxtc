@@ -85,7 +85,8 @@ test_link_race(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_exec_init(&g_exec, N_LOOPS), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &g_exec), ==, XTC_OK);
 	for (i = 0; i < N_LINKERS; i++) {
 		xtc_loop_t *l = xtc_exec_loop(g_exec, i % N_LOOPS);
 		munit_assert_ptr_not_null(l);
@@ -94,7 +95,7 @@ test_link_race(const MunitParameter p[], void *d)
 		                   NULL, NULL), ==, XTC_OK);
 	}
 	munit_assert_int(xtc_exec_run(g_exec), ==, XTC_OK);
-	munit_assert_int(xtc_exec_fini(g_exec), ==, XTC_OK);
+	xtc_exec_destroy(g_exec);
 
 	/* Every linker ran to completion (the run drained without a crash
 	 * or a sanitizer abort on the freed peer struct). */

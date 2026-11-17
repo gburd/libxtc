@@ -356,7 +356,8 @@ run(uint64_t seed, struct trace *trace)
 		f.req[i].id = i;
 		f.req[i].left = 1 + (unsigned)((seed * (2 * i + 1) + i) % 7);
 	}
-	require(&f, xtc_exec_init(&exec, 2) == XTC_OK, "exec init");
+	require(&f, xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &exec) == XTC_OK, "exec init");
 	opts.size = sizeof(opts);
 	opts.version = XTC_BATCH_VERSION;
 	opts.capacity = CAPACITY;
@@ -384,7 +385,7 @@ run(uint64_t seed, struct trace *trace)
 	    f.completed == 5 && f.cancelled == 6, "final terminal conservation");
 	require(&f, xtc_sim_check(exec) == XTC_OK, "sim structural invariants");
 	require(&f, xtc_batch_destroy(f.batch) == XTC_OK, "driver did not exit");
-	require(&f, xtc_exec_fini(exec) == XTC_OK, "exec fini");
+	xtc_exec_destroy(exec);
 }
 
 /* --------------------------------------------------------------------------
@@ -536,7 +537,8 @@ arun(uint64_t seed, struct trace *trace)
 		f.req[i].id = i;
 		f.req[i].left = 1 + (unsigned)((seed * (2 * i + 3) + i) % 4);
 	}
-	arequire(&f, xtc_exec_init(&exec, 2) == XTC_OK, "async exec init");
+	arequire(&f, xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &exec) == XTC_OK, "async exec init");
 	o.size = sizeof(o);
 	o.version = XTC_BATCH_VERSION;
 	o.capacity = CAPACITY;
@@ -567,7 +569,7 @@ arun(uint64_t seed, struct trace *trace)
 		arequire(&f, f.req[i].terminal, "async member finalized");
 	arequire(&f, xtc_sim_check(exec) == XTC_OK, "async sim invariants");
 	arequire(&f, xtc_batch_destroy(f.batch) == XTC_OK, "async destroy");
-	arequire(&f, xtc_exec_fini(exec) == XTC_OK, "async exec fini");
+	xtc_exec_destroy(exec);
 }
 
 /* --------------------------------------------------------------------------
@@ -763,7 +765,8 @@ mrun(uint64_t seed, struct trace *trace)
 		f.req[i].id = i;
 		f.req[i].left = 1 + (unsigned)((seed * (2 * i + 1) + i) % 3);
 	}
-	mrequire(&f, xtc_exec_init(&exec, 2) == XTC_OK, "mt exec init");
+	mrequire(&f, xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &exec) == XTC_OK, "mt exec init");
 	o.size = sizeof(o);
 	o.version = XTC_BATCH_VERSION;
 	o.capacity = ACTIVE;
@@ -796,7 +799,7 @@ mrun(uint64_t seed, struct trace *trace)
 		mrequire(&f, f.req[i].terminal, "mt member finalized");
 	mrequire(&f, xtc_sim_check(exec) == XTC_OK, "mt sim invariants");
 	mrequire(&f, xtc_batch_destroy(f.batch) == XTC_OK, "mt destroy");
-	mrequire(&f, xtc_exec_fini(exec) == XTC_OK, "mt exec fini");
+	xtc_exec_destroy(exec);
 }
 
 static uint64_t

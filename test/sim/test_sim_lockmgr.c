@@ -121,9 +121,10 @@ run_contend(uint64_t seed, int *out_done, int *out_pairs,
 	xtc_atomic_store_u64(&g_order_hash, 1469598103934665603ULL,
 	    xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 	if (xtc_lockmgr_create(&opts, &g_mgr) != XTC_OK) {
-		xtc_exec_fini(e); return -1;
+		xtc_exec_destroy(e); return -1;
 	}
 	for (i = 0; i < N_WORK; i++) {
 		xtc_loop_t *l = xtc_exec_loop(e, (unsigned)(i % N_LOOPS));
@@ -142,7 +143,7 @@ run_contend(uint64_t seed, int *out_done, int *out_pairs,
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_lockmgr_destroy(g_mgr);
 	g_mgr = NULL;
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 
@@ -217,9 +218,10 @@ run_deadlock(uint64_t seed, int *out_done, int *out_deadlk, int *out_ok,
 	xtc_atomic_store_i32(&g_dl_deadlk, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_dl_done, 0, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, 2) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &e) != XTC_OK) return -1;
 	if (xtc_lockmgr_create(&opts, &g_dl_mgr) != XTC_OK) {
-		xtc_exec_fini(e); return -1;
+		xtc_exec_destroy(e); return -1;
 	}
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), dl_worker, &g_dl_a, NULL, NULL);
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 1), dl_worker, &g_dl_b, NULL, NULL);
@@ -231,7 +233,7 @@ run_deadlock(uint64_t seed, int *out_done, int *out_deadlk, int *out_ok,
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_lockmgr_destroy(g_dl_mgr);
 	g_dl_mgr = NULL;
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 
@@ -360,9 +362,10 @@ run_reget(uint64_t seed, int *out_done, int *out_viol, int *out_grants,
 	xtc_atomic_store_i32(&g_rr_grants, 0, xtc_mo_seq_cst);
 	for (i = 0; i < RR_WORK; i++)
 		xtc_atomic_store_u32(&g_rr_held[i], 0, xtc_mo_seq_cst);
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 	if (xtc_lockmgr_create(&opts, &g_rr_mgr) != XTC_OK) {
-		xtc_exec_fini(e); return -1;
+		xtc_exec_destroy(e); return -1;
 	}
 	for (i = 0; i < RR_WORK; i++)
 		(void)xtc_proc_spawn(xtc_exec_loop(e, (unsigned)(i % N_LOOPS)),
@@ -374,7 +377,7 @@ run_reget(uint64_t seed, int *out_done, int *out_viol, int *out_grants,
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_lockmgr_destroy(g_rr_mgr);
 	g_rr_mgr = NULL;
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

@@ -339,7 +339,7 @@ make check
   home loop -- a work-stolen fiber mutated a peer loop's io_uring ring.
 - fix(evt): latch wake_pending on the same-loop wake path too, closing a
   dropped-wake window measured at ~1 in 7200 wakes.
-- fix(evt): plug an exec->loop_node leak on the xtc_exec_init unwind.
+- fix(evt): plug an exec->loop_node leak on the xtc_exec_create unwind.
 - Security/robustness: cap pid local ids at 65536 (uint16_t truncation),
   bracket chash RCU reads, hook all four determinism-guard classes.
 - io(uring): attach the preempt ring's io-wq to the loop's main ring.
@@ -444,7 +444,7 @@ make check
   Valgrind CI + tag-triggered release workflows.
 
 * Wed Jul 08 2026 Greg Burd <greg@burd.me> - 1.7.0-1
-- Migrate PBT to the official hegel-c; fix the primary xtc_exec_fini teardown leak.
+- Migrate PBT to the official hegel-c; fix the primary xtc_exec_destroy teardown leak.
 
 * Wed Jul 08 2026 Greg Burd <greg@burd.me> - 1.6.0-1
 - Fiber-aware left-right lock (xtc_alrlock_create/_ex); large docs-site expansion

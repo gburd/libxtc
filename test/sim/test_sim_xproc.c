@@ -86,7 +86,8 @@ run_xproc(uint64_t seed, int *out_done, int *out_bad, uint64_t *out_state)
 	for (i = 0; i < 4; i++)
 		(void)xtc_xproc_register_entry(g_names[i], g_fns[i]);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 	for (i = 0; i < N_WORKERS; i++)
 		(void)xtc_proc_spawn(xtc_exec_loop(e, (unsigned)(i % N_LOOPS)),
 		    worker, (void *)(intptr_t)i, NULL, NULL);
@@ -96,7 +97,7 @@ run_xproc(uint64_t seed, int *out_done, int *out_bad, uint64_t *out_state)
 	*out_done = xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
 	*out_bad = xtc_atomic_load_i32(&g_bad, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

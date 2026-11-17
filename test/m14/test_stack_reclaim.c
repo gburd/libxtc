@@ -132,7 +132,8 @@ run_workers(int n, int rounds)
 	xtc_atomic_store_i32(&g_ok, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
 
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	l = xtc_exec_loop(e, 0);
 	for (i = 0; i < n; i++)
 		(void)xtc_proc_spawn(l, worker, (void *)(intptr_t)rounds,
@@ -143,7 +144,7 @@ run_workers(int n, int rounds)
 	munit_assert_int(xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst), ==, n);
 	munit_assert_int(xtc_atomic_load_i32(&g_ok, xtc_mo_seq_cst), ==,
 	    n); /* all sentinels survived */
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -497,7 +498,8 @@ test_reclaim_migratable(const MunitParameter p[], void *d)
 	life_spawn_fail = -1;
 	xtc_atomic_store_long(&life_live, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&life_mig_done, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_exec_init(&life_exec, LIFE_LOOPS), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = LIFE_LOOPS }, &life_exec), ==, XTC_OK);
 	xtc_exec_set_service_mode(life_exec, 1);
 	m0 = life_maps();
 	r0 = life_status_kb("VmRSS:");
@@ -512,7 +514,7 @@ test_reclaim_migratable(const MunitParameter p[], void *d)
 		if (xtc_exec_loop_stats(life_exec, i, &st) == XTC_OK)
 			steals += (int64_t)st.steals;
 	}
-	(void)xtc_exec_fini(life_exec);
+	xtc_exec_destroy(life_exec);
 	m1 = life_maps();
 	maps_grow = life_maps_peak - m0;
 	rss_grow = life_rss_peak - r0;
@@ -708,7 +710,8 @@ xs_run(int mode)
 	xs_mode = mode;
 	xs_fail = -1;
 	xs_rss_grow = 0;
-	munit_assert_int(xtc_exec_init(&xs_exec, 2), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &xs_exec), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(xs_exec, 0),
 	    xs_acceptor, NULL, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(xs_exec), ==, XTC_OK);
@@ -721,7 +724,7 @@ xs_run(int mode)
 		    xs_list_len(l->task_spare[0]) +
 		    xs_list_len(l->task_spare[1]);
 	}
-	(void)xtc_exec_fini(xs_exec);
+	xtc_exec_destroy(xs_exec);
 	printf("  cross-loop mode %d: %d spawns, %ld task structs kept, "
 	    "rss +%ld kB from 10%% to the end (%.1f B/spawn)\n", mode, XS_N,
 	    kept, xs_rss_grow, xs_rss_grow * 1024.0 / (XS_N * 0.9));

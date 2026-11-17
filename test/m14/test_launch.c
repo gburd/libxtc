@@ -154,7 +154,8 @@ test_launch(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_compose_ok, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_driver_done, 0, xtc_mo_seq_cst);
 
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	l = xtc_exec_loop(e, 0);
 	xtc_exec_set_service_mode(e, 1);
 
@@ -179,7 +180,7 @@ test_launch(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_atomic_load_i32(&g_compose_ok, xtc_mo_seq_cst), ==,
 	    1);
 
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 

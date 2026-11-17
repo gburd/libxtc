@@ -147,7 +147,8 @@ buggify_fairness(uint64_t seed)
 
 	for (faults = 0; faults <= 1; faults++) {
 		memset(&c, 0, sizeof c);
-		assert(xtc_exec_init(&exec, 1) == XTC_OK);
+		assert(xtc_exec_create(&(xtc_exec_opts_t){
+		    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &exec) == XTC_OK);
 		c.loop = xtc_exec_loop(exec, 0);
 		__xtc_current_loop = c.loop;
 		p.size = sizeof p;
@@ -181,7 +182,7 @@ buggify_fairness(uint64_t seed)
 		assert(c.done == 4 && c.step == 4000 && c.ran == 4000);
 		for (i = 0; i < 4; i++)
 			assert(c.count[i] == 1000);
-		assert(xtc_exec_fini(exec) == XTC_OK);
+		xtc_exec_destroy(exec);
 	}
 	xtc_sim_buggify_disable();
 }
@@ -232,7 +233,8 @@ deterministic_policy(void)
 	for (seed = 1; seed <= 32; seed++) {
 		memset(r, 0, sizeof r);
 		for (repeat = 0; repeat < 2; repeat++) {
-			assert(xtc_exec_init(&exec, 1) == XTC_OK);
+			assert(xtc_exec_create(&(xtc_exec_opts_t){
+			    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &exec) == XTC_OK);
 			loop = xtc_exec_loop(exec, 0);
 			p.user = &r[repeat];
 			assert(xtc_sched_policy_set(loop, &p) == XTC_OK);
@@ -248,7 +250,7 @@ deterministic_policy(void)
 			assert(xtc_sim_exec_run(exec, seed, 10000) == XTC_OK);
 			assert(r[repeat].done == 4 && r[repeat].runs == 84);
 			assert(xtc_sched_policy_set(loop, NULL) == XTC_E_AGAIN);
-			assert(xtc_exec_fini(exec) == XTC_OK);
+			xtc_exec_destroy(exec);
 		}
 		assert(r[0].hash == r[1].hash);
 	}

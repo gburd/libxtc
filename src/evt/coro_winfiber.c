@@ -202,7 +202,7 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 	 * and yielded).  Give it back to whoever runs here -- the outer
 	 * coroutine's proc when this step is nested, else NO proc -- or
 	 * xtc_self() / xtc_mask_enter / xtc_proc_critical_enter on this
-	 * thread act on that fiber's proc, which a later xtc_exec_fini
+	 * thread act on that fiber's proc, which a later xtc_exec_destroy
 	 * frees (test_sim_stop_tls; the heap corruption in
 	 * test_sim_compose_crash). */
 	if (__xtc_fiber_ctx_restore)

@@ -656,7 +656,8 @@ test_sim_check(const MunitParameter p[], void *d)
 	int saved;
 	(void)p; (void)d;
 	munit_assert_int(xtc_sim_check(NULL), ==, XTC_E_INVAL);
-	munit_assert_int(xtc_exec_init(&e, 2), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_sim_check(e), ==, XTC_OK);
 	/* Plant one corruption the checker names (negative free-list
 	 * count) and require it to be caught, then restore. */
@@ -666,7 +667,7 @@ test_sim_check(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_sim_check(e), ==, XTC_E_INTERNAL);
 	l->task_free_n = saved;
 	munit_assert_int(xtc_sim_check(e), ==, XTC_OK);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 

@@ -45,7 +45,7 @@
  *
  * Memory discipline: every run builds a fresh exec, spawns a BOUNDED set
  * of procs (N_LOOPS loops, a fixed pair/sleeper count), and frees all
- * per-run state (xtc_exec_fini, partition_clear, buggify_disable) before
+ * per-run state (xtc_exec_destroy, partition_clear, buggify_disable) before
  * the next seed -- so a large sweep stays memory-bounded (no growth
  * across seeds).
  *
@@ -451,7 +451,8 @@ run_once(uint64_t seed, const struct scenario *sc, uint64_t *out_state,
 	xtc_sim_io_faults_disable();
 	g_torn_fd = -1;
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK)
 		return -1;
 
 	for (i = 0; i < N_PAIRS; i++) {
@@ -554,7 +555,7 @@ run_once(uint64_t seed, const struct scenario *sc, uint64_t *out_state,
 	xtc_sim_io_corrupt_disable();
 	xtc_sim_io_faults_disable();
 	if (g_torn_fd >= 0) { close(g_torn_fd); g_torn_fd = -1; }
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

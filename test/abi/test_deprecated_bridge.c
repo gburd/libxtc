@@ -22,6 +22,7 @@
 #include <stdlib.h>
 
 #include "xtc.h"
+#include "xtc_exec.h"
 #include "xtc_io.h"
 #include "xtc_loop.h"
 #include "xtc_prob.h"
@@ -61,10 +62,25 @@ bridge_lifecycle(void)
 	xtc_hll_fini(h);
 }
 
+/* exec: xtc_exec_init(out, n) / xtc_exec_fini -> xtc_exec_create(opts,
+ * out) / xtc_exec_destroy. */
+static void
+bridge_exec(void)
+{
+	xtc_exec_t *e = NULL;
+
+	CHECK(xtc_exec_init(&e, 3) == XTC_OK && e != NULL);
+	CHECK(xtc_exec_n_loops(e) == 3);
+	CHECK(xtc_exec_fini(e) == XTC_OK);
+	CHECK(xtc_exec_init(NULL, 1) == XTC_E_INVAL);
+	CHECK(xtc_exec_fini(NULL) == XTC_E_INVAL);
+}
+
 int
 main(void)
 {
 	bridge_lifecycle();
+	bridge_exec();
 	printf("  [bridge] OK: every deprecated name still works\n");
 	return 0;
 }

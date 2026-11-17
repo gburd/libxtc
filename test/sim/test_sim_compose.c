@@ -292,7 +292,8 @@ run_one(uint64_t seed, int adversarial, int *out_committed, int *out_received,
 
 	if (xtc_lockmgr_create(&lo, &g_mgr) != XTC_OK) goto engine;
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) goto lockmgr;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) goto lockmgr;
 	xtc_exec_set_service_mode(e, 1);
 
 	/* Seeded WAL I/O latency reorders group-commit fsyncs across runs
@@ -343,7 +344,7 @@ run_one(uint64_t seed, int adversarial, int *out_committed, int *out_received,
 	xtc_sim_io_faults_disable();
 	if (g_chan) xtc_chan_mpsc_destroy(g_chan);
 exec:
-	if (e) { (void)xtc_exec_fini(e); }
+	if (e) { xtc_exec_destroy(e); }
 lockmgr:
 	if (g_mgr) xtc_lockmgr_destroy(g_mgr);
 engine:

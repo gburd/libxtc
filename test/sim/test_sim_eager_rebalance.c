@@ -100,19 +100,20 @@ run_once(uint64_t seed, int eager, uint64_t *out_state, int *out_done)
 	int i, rc;
 
 	xtc_atomic_store_i32(&g_workers_done, 0, xtc_mo_seq_cst);
-	if (xtc_exec_init(&e, LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = LOOPS }, &e) != XTC_OK)
 		return -1;
 	xtc_exec_set_eager_rebalance(e, eager);
 
 	if (xtc_proc_spawn(xtc_exec_loop(e, 0), spawner, e, NULL, NULL)
 	    != XTC_OK) {
-		(void)xtc_exec_fini(e);
+		xtc_exec_destroy(e);
 		return -1;
 	}
 
 	rc = xtc_sim_exec_run(e, seed, 2000000);
 	if (rc != XTC_OK) {
-		(void)xtc_exec_fini(e);
+		xtc_exec_destroy(e);
 		return -1;
 	}
 
@@ -125,7 +126,7 @@ run_once(uint64_t seed, int eager, uint64_t *out_state, int *out_done)
 	if (out_done)
 		*out_done =
 		    xtc_atomic_load_i32(&g_workers_done, xtc_mo_seq_cst);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return total_steals;
 }
 

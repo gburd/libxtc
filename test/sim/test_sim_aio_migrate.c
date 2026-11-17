@@ -155,7 +155,8 @@ run_kill(uint64_t seed)
 	if (g_fd < 0)
 		return -1;
 	(void)unlink(path);
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) {
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) {
 		close(g_fd);
 		return -1;
 	}
@@ -178,7 +179,7 @@ run_kill(uint64_t seed)
 	(void)xtc_inject_detach("sim.aio.wake_after_done");
 	xtc_sim_buggify_disable();
 	xtc_sim_io_faults_disable();
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	close(g_fd);
 	if (rc != XTC_OK || g_downs != N_WORKERS || g_bad_downs != 0) {
 		printf("  seed 0x%016llx: FAIL kill arm (rc=%d done=%d "
@@ -206,7 +207,8 @@ run_once(uint64_t seed, int migratable, long *out_commits, uint64_t *out_state)
 		return -1;
 	(void)unlink(path);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) { close(g_fd); return -1; }
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) { close(g_fd); return -1; }
 	xtc_exec_set_eager_rebalance(e, 1);
 	xtc_sim_io_faults_enable(50 * 1000LL, 500 * 1000LL, 0);
 
@@ -225,7 +227,7 @@ run_once(uint64_t seed, int migratable, long *out_commits, uint64_t *out_state)
 	if (out_state)   *out_state = xtc_sim_state_hash(e);
 
 	xtc_sim_io_faults_disable();
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	close(g_fd);
 	return done;
 }

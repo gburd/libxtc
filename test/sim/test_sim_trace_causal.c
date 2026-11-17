@@ -121,7 +121,8 @@ run_one_inproc(uint64_t seed, int *out_started, int *out_ok, uint64_t *out_state
 		g_nsleep[i] = 0;
 	}
 
-	if (xtc_exec_init(&g_exec, N_LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &g_exec) != XTC_OK)
 		return -1;
 	xtc_exec_set_service_mode(g_exec, 1);
 
@@ -136,7 +137,7 @@ run_one_inproc(uint64_t seed, int *out_started, int *out_ok, uint64_t *out_state
 		xtc_loop_t *l = xtc_exec_loop(g_exec, i % N_LOOPS);
 		g_warg[i].id = i;
 		if (xtc_proc_spawn(l, worker, &g_warg[i], NULL, NULL) != XTC_OK) {
-			(void)xtc_exec_fini(g_exec);
+			xtc_exec_destroy(g_exec);
 			g_exec = NULL;
 			return -2;
 		}
@@ -165,7 +166,7 @@ run_one_inproc(uint64_t seed, int *out_started, int *out_ok, uint64_t *out_state
 	if (out_ok)      *out_ok = ok;
 	if (out_state)   *out_state = xtc_sim_state_hash(g_exec);
 
-	(void)xtc_exec_fini(g_exec);
+	xtc_exec_destroy(g_exec);
 	g_exec = NULL;
 	return rc;
 }

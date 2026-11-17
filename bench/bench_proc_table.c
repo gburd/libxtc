@@ -142,7 +142,8 @@ run_once(int senders)
 	xtc_atomic_store_long(&g_sends_done, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_senders_done, 0, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, (unsigned)senders) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = (unsigned)senders }, &e) != XTC_OK)
 		return -1.0;
 	g_exec = e;
 	xtc_exec_set_service_mode(e, 1);
@@ -150,11 +151,11 @@ run_once(int senders)
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), spawner, e, NULL, NULL);
 
 	t0 = now_sec();
-	if (xtc_exec_run(e) != XTC_OK) { (void)xtc_exec_fini(e); return -1.0; }
+	if (xtc_exec_run(e) != XTC_OK) { xtc_exec_destroy(e); return -1.0; }
 	t1 = now_sec();
 
 	total = xtc_atomic_load_long(&g_sends_done, xtc_mo_seq_cst);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return (t1 > t0) ? (double)total / (t1 - t0) : 0.0;
 }
 

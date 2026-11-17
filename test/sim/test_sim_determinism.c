@@ -57,7 +57,8 @@ run_one(uint64_t seed, int inject, int *out_violations)
 	int rc;
 	xtc_atomic_store_i32(&g_ran, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_inject, inject, xtc_mo_seq_cst);
-	if (xtc_exec_init(&e, 2) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &e) != XTC_OK)
 		return -999;
 	/* Count-only mode so an injected violation does not abort the test
 	 * process -- we want to OBSERVE the count and the run's rc. */
@@ -69,7 +70,7 @@ run_one(uint64_t seed, int inject, int *out_violations)
 	 * deactivate until the next activate). */
 	if (out_violations)
 		*out_violations = xtc_sim_nondeterminism_count();
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

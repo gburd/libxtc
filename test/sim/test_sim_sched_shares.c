@@ -112,14 +112,15 @@ run_once(uint64_t seed, int use_classes, uint64_t *out_runs_a,
 
 	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_total_runs, 0, xtc_mo_seq_cst);
-	if (xtc_exec_init(&e, 1) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e) != XTC_OK)
 		return -1;
 	loop = xtc_exec_loop(e, 0);
 
 	if (use_classes) {
 		if (xtc_exec_class_create(loop, 3, 0, &ca) != XTC_OK ||
 		    xtc_exec_class_create(loop, 1, 0, &cb) != XTC_OK) {
-			(void)xtc_exec_fini(e);
+			xtc_exec_destroy(e);
 			return -1;
 		}
 	}
@@ -130,13 +131,13 @@ run_once(uint64_t seed, int use_classes, uint64_t *out_runs_a,
 	ctx.use_classes = use_classes;
 
 	if (xtc_proc_spawn(loop, spawner, &ctx, NULL, NULL) != XTC_OK) {
-		(void)xtc_exec_fini(e);
+		xtc_exec_destroy(e);
 		return -1;
 	}
 
 	rc = xtc_sim_exec_run(e, seed, 2000000);
 	if (rc != XTC_OK) {
-		(void)xtc_exec_fini(e);
+		xtc_exec_destroy(e);
 		return -1;
 	}
 
@@ -145,7 +146,7 @@ run_once(uint64_t seed, int use_classes, uint64_t *out_runs_a,
 	if (out_state)  *out_state = xtc_sim_state_hash(e);
 	if (out_done)
 		*out_done = xtc_atomic_load_i32(&g_done, xtc_mo_seq_cst);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return 0;
 }
 
@@ -213,7 +214,8 @@ run_latency(uint64_t seed, int *out_first_step)
 
 	xtc_atomic_store_i32(&g_lat_first_step, -1, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_step_counter, 0, xtc_mo_seq_cst);
-	if (xtc_exec_init(&e, 1) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e) != XTC_OK)
 		return -1;
 	loop = xtc_exec_loop(e, 0);
 
@@ -221,24 +223,24 @@ run_latency(uint64_t seed, int *out_first_step)
 	 * a tight latency bound so it is picked promptly. */
 	if (xtc_exec_class_create(loop, 1, 0, &hogc) != XTC_OK ||
 	    xtc_exec_class_create(loop, 100, 1000 * 1000LL, &latc) != XTC_OK) {
-		(void)xtc_exec_fini(e);
+		xtc_exec_destroy(e);
 		return -1;
 	}
 	ctx.loop = loop;
 	ctx.hogc = hogc;
 	ctx.latc = latc;
 	if (xtc_proc_spawn(loop, lat_spawner, &ctx, NULL, NULL) != XTC_OK) {
-		(void)xtc_exec_fini(e);
+		xtc_exec_destroy(e);
 		return -1;
 	}
 	if (xtc_sim_exec_run(e, seed, 2000000) != XTC_OK) {
-		(void)xtc_exec_fini(e);
+		xtc_exec_destroy(e);
 		return -1;
 	}
 	if (out_first_step)
 		*out_first_step =
 		    xtc_atomic_load_i32(&g_lat_first_step, xtc_mo_seq_cst);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return 0;
 }
 

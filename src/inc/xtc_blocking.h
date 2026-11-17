@@ -41,7 +41,7 @@ extern "C" {
  * (offload queue full, 65536 waiting calls) or XTC_E_RESOURCE (no pool
  * thread could start) are returned WITHOUT running fn.
  *
- * Finalizing the loop (xtc_loop_destroy, and so xtc_exec_fini and
+ * Finalizing the loop (xtc_loop_destroy, and so xtc_exec_destroy and
  * xtc_app_destroy) while a process of it is parked here waits for fn to
  * return, since the pool writes the parked frame and wakes its task.
  *

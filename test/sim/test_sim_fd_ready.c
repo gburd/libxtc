@@ -180,12 +180,13 @@ run_one(uint64_t seed, uint64_t *out)
 	for (k = 0; k < N_JOBS; k++)
 		if (pipe(r->j[k].fd) != 0)
 			return -1;
-	if (xtc_exec_init(&r->e, N_LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &r->e) != XTC_OK)
 		return -1;
 	(void)xtc_proc_spawn(xtc_exec_loop(r->e, 0), plan, r, NULL, NULL);
 	rc = xtc_sim_exec_run(r->e, seed, 2000000);
 	*out = digest(r, xtc_sim_state_hash(r->e));
-	(void)xtc_exec_fini(r->e);
+	xtc_exec_destroy(r->e);
 	for (k = 0; k < N_JOBS; k++) {
 		(void)close(r->j[k].fd[0]);
 		(void)close(r->j[k].fd[1]);

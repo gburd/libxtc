@@ -358,7 +358,8 @@ g2_inputs(void)
 	xtc_loop_destroy(loop);
 
 	/* loop stats, older view */
-	CHECK(xtc_exec_init(&ex, 1) == XTC_OK);
+	CHECK(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &ex) == XTC_OK);
 	if (ex != NULL) {
 		ls = xalloc(sizeof *ls);
 		ls->size = sizeof *ls;
@@ -367,7 +368,7 @@ g2_inputs(void)
 		free(ls);
 		lz.size = 0;
 		CHECK(xtc_exec_loop_stats(ex, 0, &lz) == XTC_E_INVAL);
-		CHECK(xtc_exec_fini(ex) == XTC_OK);
+		xtc_exec_destroy(ex);
 	}
 }
 

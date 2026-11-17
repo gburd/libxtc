@@ -403,7 +403,8 @@ test_exec_run_twice(const MunitParameter p[], void *d)
 
 	for (i = 0; i < NLOOPS; i++)
 		work_open(&w[i], path[i], sizeof path[i]);
-	munit_assert_int(xtc_exec_init(&e, NLOOPS), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = NLOOPS }, &e), ==, XTC_OK);
 	for (run = 0; run < 3; run++) {
 		for (i = 0; i < NLOOPS; i++) {
 			w[i].round = run;
@@ -420,7 +421,7 @@ test_exec_run_twice(const MunitParameter p[], void *d)
 			    ==, run + 1);
 		}
 	}
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	for (i = 0; i < NLOOPS; i++)
 		work_close(&w[i], path[i]);
 	return MUNIT_OK;

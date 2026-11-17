@@ -744,7 +744,8 @@ test_sem_conservation(const MunitParameter p[], void *d)
 		xtc_atomic_store_i32(&g_cw_late, 0, xtc_mo_seq_cst);
 		xtc_atomic_store_i32(&g_cw_done, 0, xtc_mo_seq_cst);
 		munit_assert_int(xtc_sem_create(0, &g_cw_sem), ==, XTC_OK);
-		munit_assert_int(xtc_exec_init(&e, CW_LOOPS), ==, XTC_OK);
+		munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+		    .size = sizeof(xtc_exec_opts_t), .n_loops = CW_LOOPS }, &e), ==, XTC_OK);
 		for (i = 0; i < CW_WAITERS; i++)
 			munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e,
 			    i % CW_LOOPS), cw_waiter, (void *)(intptr_t)i,
@@ -752,7 +753,7 @@ test_sem_conservation(const MunitParameter p[], void *d)
 		munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, 0),
 		    cw_poster, NULL, NULL, NULL), ==, XTC_OK);
 		munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-		(void)xtc_exec_fini(e);
+		xtc_exec_destroy(e);
 		munit_assert_int(xtc_atomic_load_i32(&g_cw_done,
 		                     xtc_mo_seq_cst),
 		    ==, CW_WAITERS);
@@ -1213,11 +1214,12 @@ test_kill_after_park_while_running(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_notify_create(&g_kw_n), ==, XTC_OK);
 	munit_assert_int(xtc_amutex_create(&g_kw_m), ==, XTC_OK);
 	munit_assert_int(xtc_future_new_pair(&g_kr_pr, &g_kr_f), ==, XTC_OK);
-	munit_assert_int(xtc_exec_init(&g_kr_e, 2), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &g_kr_e), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(g_kr_e, 1), kr_killer,
 	    NULL, NULL, &pid), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(g_kr_e), ==, XTC_OK);
-	munit_assert_int(xtc_exec_fini(g_kr_e), ==, XTC_OK);
+	xtc_exec_destroy(g_kr_e);
 	/* The killed waiter never consumed the future (and only kind 1 used
 	 * it); settle and consume it so the cell is released.  The set may
 	 * already have happened on the killer's fallback path. */

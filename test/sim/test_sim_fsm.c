@@ -123,10 +123,11 @@ run_turnstile(uint64_t seed, int *out_proc, int *out_acc, int *out_rej,
 	memset(&g_ts, 0, sizeof g_ts);
 	xtc_atomic_store_i32(&g_senders_done, 0, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 	if (xtc_fsm_start(xtc_exec_loop(e, 0), &TS_CB, &g_ts, ST_LOCKED, NULL,
 	    &g_fsm) != XTC_OK) {
-		(void)xtc_exec_fini(e); return -1;
+		xtc_exec_destroy(e); return -1;
 	}
 	g_fsm_pid = xtc_fsm_pid(g_fsm);
 
@@ -143,7 +144,7 @@ run_turnstile(uint64_t seed, int *out_proc, int *out_acc, int *out_rej,
 	*out_fold = g_ts.fold;
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	if (g_fsm != NULL) { (void)xtc_fsm_join(g_fsm, 0); g_fsm = NULL; }
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

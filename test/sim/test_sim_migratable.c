@@ -163,7 +163,8 @@ run_once(uint64_t seed, int migratable, uint64_t *out_state_hash,
 	xtc_atomic_store_i32(&g_downs, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_workers_done, 0, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 
 	/* Crank the steal + pessimal-placement knobs so the deterministic
 	 * scheduler actively moves runnable work onto idle loops -- this is
@@ -193,7 +194,7 @@ run_once(uint64_t seed, int migratable, uint64_t *out_state_hash,
 		*out_done =
 		    xtc_atomic_load_i32(&g_workers_done, xtc_mo_seq_cst);
 
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return xtc_atomic_load_i32(&g_self_ok, xtc_mo_seq_cst);
 }
 

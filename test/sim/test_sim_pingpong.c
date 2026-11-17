@@ -71,7 +71,8 @@ run_once(uint64_t seed, int *out_replies)
 	int i;
 	xtc_atomic_store_i32(&g_replies, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) { *out_replies = -1; return -1; }
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) { *out_replies = -1; return -1; }
 
 	for (i = 0; i < N_PAIRS; i++) {
 		/* pong on loop i%N, ping on a DIFFERENT loop (i+1)%N -- forces
@@ -86,7 +87,7 @@ run_once(uint64_t seed, int *out_replies)
 	}
 	(void)xtc_sim_exec_run(e, seed, 2000000);
 	*out_replies = xtc_atomic_load_i32(&g_replies, xtc_mo_seq_cst);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
 }
 

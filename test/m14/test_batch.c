@@ -1402,7 +1402,8 @@ mt_multiproducer(void)
 	c.n_producers = 2;
 	for (i = 0; i < c.n_req; ++i)
 		c.req[i].left = (i % 3) + 1; /* variable length 1..3 */
-	assert(xtc_exec_init(&c.exec, 3) == XTC_OK);
+	assert(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 3 }, &c.exec) == XTC_OK);
 	o = mt_opts(&c, 8, 8);
 	assert(xtc_batch_create_async(xtc_exec_loop(c.exec, 0), &o, &c.batch)
 	       == XTC_OK);
@@ -1428,7 +1429,7 @@ mt_multiproducer(void)
 		assert(as.mt_rejections == 0);
 	}
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
-	assert(xtc_exec_fini(c.exec) == XTC_OK);
+	xtc_exec_destroy(c.exec);
 	puts("batch-mt: 2 producer loops, reply-future completion, exactly-once OK");
 }
 
@@ -1446,7 +1447,8 @@ mt_overflow(void)
 	xtc_batch_async_stats_t as = { .size = sizeof(as),
 		                       .version = XTC_BATCH_VERSION };
 	c.n_req = 0;
-	assert(xtc_exec_init(&c.exec, 1) == XTC_OK);
+	assert(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &c.exec) == XTC_OK);
 	/* mt_queue_cap 2 (rounds to 2); the free-pool holds 2 records. The
 	 * driver proc exists but the executor is NOT running, so nothing drains
 	 * the ring: the 3rd claim finds the pool empty -> AGAIN. */
@@ -1476,7 +1478,7 @@ mt_overflow(void)
 		assert(c.req[i].completions == 1
 		       && c.req[i].outcome == XTC_E_ABORTED);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
-	assert(xtc_exec_fini(c.exec) == XTC_OK);
+	xtc_exec_destroy(c.exec);
 	puts("batch-mt: ring overflow -> AGAIN, rejections counted, no leak OK");
 }
 
@@ -1487,7 +1489,8 @@ mt_disabled(void)
 	struct mt_ctx c = { 0 };
 	xtc_batch_async_opts_t o;
 	uint64_t h;
-	assert(xtc_exec_init(&c.exec, 1) == XTC_OK);
+	assert(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &c.exec) == XTC_OK);
 	o = mt_opts(&c, 4, 0); /* mt_queue_cap 0 */
 	assert(xtc_batch_create_async(xtc_exec_loop(c.exec, 0), &o, &c.batch)
 	       == XTC_OK);
@@ -1497,7 +1500,7 @@ mt_disabled(void)
 	assert(xtc_batch_close(c.batch, XTC_BATCH_CANCEL) == XTC_OK);
 	assert(xtc_exec_run(c.exec) == XTC_OK);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
-	assert(xtc_exec_fini(c.exec) == XTC_OK);
+	xtc_exec_destroy(c.exec);
 	puts("batch-mt: mt_queue_cap 0 -> submit_mt NOSYS OK");
 }
 
@@ -1611,7 +1614,8 @@ mt_stale_cancels(void)
 	xtc_pid_t pid;
 	memset(&g_stale, 0, sizeof g_stale);
 	g_stale.c = &c;
-	assert(xtc_exec_init(&c.exec, 2) == XTC_OK);
+	assert(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &c.exec) == XTC_OK);
 	o = mt_opts(&c, 1, 4); /* one slot, mt_queue_cap 4 */
 	o.submit = mt_block_submit;
 	o.collect = mt_block_collect;
@@ -1629,7 +1633,7 @@ mt_stale_cancels(void)
 	assert(xtc_batch_get_stats(c.batch, &s) == XTC_OK);
 	assert(s.completed == 13 && s.cancelled == 1 && s.rejections == 0);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
-	assert(xtc_exec_fini(c.exec) == XTC_OK);
+	xtc_exec_destroy(c.exec);
 	puts("batch-mt: stale cancels discarded; a later cancel is never lost OK");
 }
 
@@ -1647,7 +1651,8 @@ mt_cancel_in_ring(void)
 	c.n_req = 1;
 	c.n_producers = 0;
 	c.req[0].left = 2;
-	assert(xtc_exec_init(&c.exec, 1) == XTC_OK);
+	assert(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &c.exec) == XTC_OK);
 	o = mt_opts(&c, 4, 4);
 	assert(xtc_batch_create_async(xtc_exec_loop(c.exec, 0), &o, &c.batch)
 	       == XTC_OK);
@@ -1662,7 +1667,7 @@ mt_cancel_in_ring(void)
 	assert(c.req[0].ran == 0);
 	mt_conservation(&c);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
-	assert(xtc_exec_fini(c.exec) == XTC_OK);
+	xtc_exec_destroy(c.exec);
 	puts("batch-mt: cancel of a handle still in the ring applied at boundary OK");
 }
 
@@ -1750,7 +1755,8 @@ mt_contended_pool(void)
 	const int per = 64, nprod = 3;
 	c.n_req = per * nprod;
 	c.n_producers = nprod;
-	assert(xtc_exec_init(&c.exec, 4) == XTC_OK);
+	assert(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 4 }, &c.exec) == XTC_OK);
 	/* Small pool/ring (4) relative to the hand-in count forces repeated
 	 * claim/release recycling, so claims from the 3 producer threads
 	 * overlap on the SAME few records -- the exact window B2 lives in. */
@@ -1777,7 +1783,7 @@ mt_contended_pool(void)
 	assert(admitted == c.n_req);
 	mt_conservation(&c);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
-	assert(xtc_exec_fini(c.exec) == XTC_OK);
+	xtc_exec_destroy(c.exec);
 	puts("batch-mt: contended free-pool, concurrent claims, exactly-once OK");
 }
 
@@ -1830,7 +1836,8 @@ mt_full_hold(void)
 	hc.c = &c;
 	g_hold = &hc;
 	c.n_req = 6;
-	assert(xtc_exec_init(&c.exec, 1) == XTC_OK);
+	assert(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &c.exec) == XTC_OK);
 	o = mt_opts(&c, 2, 8);
 	o.submit = mt_count_submit;
 	o.collect = mt_count_collect;
@@ -1848,7 +1855,7 @@ mt_full_hold(void)
 	assert(xtc_batch_get_stats(c.batch, &s) == XTC_OK);
 	assert(s.rejections == 0 && s.completed == 6 && s.queued == 0);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
-	assert(xtc_exec_fini(c.exec) == XTC_OK);
+	xtc_exec_destroy(c.exec);
 	puts("batch-mt: hand-ins beyond capacity held, all completed in order OK");
 }
 
@@ -1922,7 +1929,8 @@ mt_closed(void)
 	uint64_t h = 77;
 	int i;
 	/* (a) closed pre-run, then after the driver has exited. */
-	assert(xtc_exec_init(&c.exec, 1) == XTC_OK);
+	assert(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &c.exec) == XTC_OK);
 	o = mt_opts(&c, 4, 4);
 	o.submit = mt_count_submit;
 	o.collect = mt_count_collect;
@@ -1938,12 +1946,13 @@ mt_closed(void)
 	assert(
 	    h == 77 && xtc_atomic_load_i32(&c.completed, xtc_mo_seq_cst) == 0);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
-	assert(xtc_exec_fini(c.exec) == XTC_OK);
+	xtc_exec_destroy(c.exec);
 	/* (b) producers racing close(DRAIN). */
 	memset(&c, 0, sizeof c);
 	memset(&g_close, 0, sizeof g_close);
 	g_close.c = &c;
-	assert(xtc_exec_init(&c.exec, 1) == XTC_OK);
+	assert(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &c.exec) == XTC_OK);
 	o = mt_opts(&c, 4, 8);
 	o.submit = mt_count_submit;
 	o.collect = mt_count_collect;
@@ -1960,7 +1969,7 @@ mt_closed(void)
 	assert(xtc_atomic_load_i32(&c.completed, xtc_mo_seq_cst) ==
 	    xtc_atomic_load_i32(&g_close.ok, xtc_mo_seq_cst));
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
-	assert(xtc_exec_fini(c.exec) == XTC_OK);
+	xtc_exec_destroy(c.exec);
 	printf("batch-mt: closed group refuses submit_mt; %d hand-ins racing "
 	       "close all completed once OK\n",
 	    xtc_atomic_load_i32(&g_close.ok, xtc_mo_seq_cst));
@@ -2003,7 +2012,8 @@ mt_handle_exhaustion(void)
 	xtc_batch_async_opts_t o;
 	pthread_t th[4];
 	int i;
-	assert(xtc_exec_init(&c.exec, 1) == XTC_OK);
+	assert(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &c.exec) == XTC_OK);
 	o = mt_opts(&c, 4, 32);
 	o.submit = mt_count_submit;
 	o.collect = mt_count_collect;
@@ -2022,7 +2032,7 @@ mt_handle_exhaustion(void)
 	assert(xtc_exec_run(c.exec) == XTC_OK);
 	assert(xtc_atomic_load_i32(&c.completed, xtc_mo_seq_cst) == 8);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
-	assert(xtc_exec_fini(c.exec) == XTC_OK);
+	xtc_exec_destroy(c.exec);
 	puts("batch-mt: concurrent handle exhaustion never wraps OK");
 }
 
@@ -2218,7 +2228,8 @@ mt_control_starvation(int mode)
 	int i;
 	memset(v, 0, sizeof *v);
 	v->mode = mode;
-	assert(xtc_exec_init(&ex, 1) == XTC_OK);
+	assert(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &ex) == XTC_OK);
 	assert(xtc_batch_create_async(xtc_exec_loop(ex, 0), &o, &v->batch)
 	       == XTC_OK);
 	assert(xtc_proc_spawn(xtc_exec_loop(ex, 0), sv_owner, v, NULL, &pid)
@@ -2256,7 +2267,7 @@ mt_control_starvation(int mode)
 		assert(v->req[0].outcome == XTC_OK);
 	}
 	assert(xtc_batch_destroy(v->batch) == XTC_OK);
-	assert(xtc_exec_fini(ex) == XTC_OK);
+	xtc_exec_destroy(ex);
 }
 
 /* NIT companion: an owner-loop cancel of an mt handle still in the ring
@@ -2271,7 +2282,8 @@ mt_owner_cancel_in_ring(void)
 	uint64_t h;
 	c.n_req = 1;
 	c.req[0].left = 1;
-	assert(xtc_exec_init(&c.exec, 1) == XTC_OK);
+	assert(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &c.exec) == XTC_OK);
 	o = mt_opts(&c, 4, 4);
 	assert(xtc_batch_create_async(xtc_exec_loop(c.exec, 0), &o, &c.batch)
 	       == XTC_OK);
@@ -2284,7 +2296,7 @@ mt_owner_cancel_in_ring(void)
 	assert(c.req[0].completions == 1 && c.req[0].outcome == XTC_E_ABORTED);
 	assert(c.req[0].ran == 0);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
-	assert(xtc_exec_fini(c.exec) == XTC_OK);
+	xtc_exec_destroy(c.exec);
 	puts("batch-mt: owner cancel of an undrained mt handle applied OK");
 }
 
@@ -2321,7 +2333,8 @@ placement_loop_for_device(void)
 	xtc_accel_dev_t devs[8];
 	xtc_accel_dev_t synth;
 	int n_found = 0, n_loops, idx, i, rc;
-	assert(xtc_exec_init(&exec, 3) == XTC_OK);
+	assert(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 3 }, &exec) == XTC_OK);
 	n_loops = xtc_exec_n_loops(exec);
 	assert(n_loops == 3);
 	/* NULL-arg validation. */
@@ -2355,7 +2368,7 @@ placement_loop_for_device(void)
 	idx = -42;
 	assert(xtc_batch_loop_for_device(exec, &synth, &idx) == XTC_OK);
 	assert(idx == 0);
-	assert(xtc_exec_fini(exec) == XTC_OK);
+	xtc_exec_destroy(exec);
 	puts("batch-place: loop_for_device valid index + loop-0 fallback OK");
 }
 
@@ -2401,7 +2414,8 @@ placement_router(void)
 	pc.n = 4;
 	pc.mc = &mc;
 	mc.n_req = 0;
-	assert(xtc_exec_init(&pc.exec, 4) == XTC_OK);
+	assert(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 4 }, &pc.exec) == XTC_OK);
 	for (i = 0; i < pc.n; ++i) {
 		o = mt_opts(&mc, 4, 0);
 		assert(xtc_batch_create_async(xtc_exec_loop(pc.exec, i), &o,
@@ -2445,7 +2459,7 @@ placement_router(void)
 		assert(pc.req[i].outcome == XTC_OK);
 		assert(xtc_batch_destroy(pc.g[i]) == XTC_OK);
 	}
-	assert(xtc_exec_fini(pc.exec) == XTC_OK);
+	xtc_exec_destroy(pc.exec);
 	puts("batch-place: router N groups + hash, destroy frees only router OK");
 }
 

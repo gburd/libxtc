@@ -54,7 +54,8 @@ exec_runner(void *a)
 static void
 fixture_start(struct fixture *f)
 {
-	munit_assert_int(xtc_exec_init(&f->exec, 2), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &f->exec), ==, XTC_OK);
 	xtc_exec_set_service_mode(f->exec, 1);
 	xtc_atomic_store_i32(&f->running, 0, xtc_mo_seq_cst);
 	munit_assert_int(pthread_create(&f->th, NULL, exec_runner, f), ==, 0);
@@ -75,7 +76,7 @@ fixture_stop(struct fixture *f)
 {
 	munit_assert_int(xtc_exec_stop(f->exec), ==, XTC_OK);
 	(void)pthread_join(f->th, NULL);
-	munit_assert_int(xtc_exec_fini(f->exec), ==, XTC_OK);
+	xtc_exec_destroy(f->exec);
 }
 
 /* ---- effect fns ---- */

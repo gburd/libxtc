@@ -61,10 +61,11 @@ test_native_build(const MunitParameter p[], void *d)
 
 	if (strcmp(xtc_io_backend_name(), "sim") == 0)
 		return MUNIT_SKIP;
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_sim_exec_run(e, 7, 1000), ==, XTC_E_NOSYS);
 	munit_assert_int(xtc_sim_active(), ==, 0);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	munit_assert_int(xtc_sim_fd_ready_at(0, 1, XTC_IO_READABLE), ==,
 	    XTC_E_NOSYS);
 	munit_assert_int(xtc_sim_fd_ready_at(-1, 1, XTC_IO_READABLE), ==,

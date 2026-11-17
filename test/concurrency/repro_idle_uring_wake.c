@@ -17,7 +17,7 @@
  * NOTE: run standalone (`make repro_idle_uring_wake && ./repro_idle_uring_wake`),
  * not as part of the leak-checked `make check` C-test set: it foreign-
  * spawns many procs onto a service-mode executor and exposes a separate,
- * pre-existing xtc_exec_fini teardown leak (cross-thread-spawned procs
+ * pre-existing xtc_exec_destroy teardown leak (cross-thread-spawned procs
  * that ran+exited are not fully reclaimed at fini -- see
  * docs/KNOWN_ISSUES.md).  The lost-wakeup guarantee this test checks is
  * ALSO covered leak-clean under DST by test/sim/test_sim_wake_park.c.
@@ -86,7 +86,8 @@ main(void)
 	pthread_t th;
 	int i, s;
 
-	if (xtc_exec_init(&g_e, N_LOOPS) != XTC_OK) {
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &g_e) != XTC_OK) {
 		fprintf(stderr, "SKIP: exec_init failed (backend/resource unavailable)\n");
 		return 77;   /* automake SKIP convention */
 	}
@@ -144,13 +145,13 @@ main(void)
 	}
 	/* Grace drain: the last procs bumped g_ran in their body but their
 	 * task/coro teardown runs on the loop's NEXT step -- give the loops
-	 * a moment to reap them so xtc_exec_fini has nothing outstanding
+	 * a moment to reap them so xtc_exec_destroy has nothing outstanding
 	 * (otherwise LeakSanitizer flags the un-reaped tasks). */
 	(void)xtc_sleep_ns(100 * 1000 * 1000LL);
 
 	(void)xtc_exec_stop(g_e);
 	(void)pthread_join(th, NULL);
-	(void)xtc_exec_fini(g_e);
+	xtc_exec_destroy(g_e);
 
 	{
 		int ran = xtc_atomic_load_i32(&g_ran, xtc_mo_seq_cst);

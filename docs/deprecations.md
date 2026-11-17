@@ -49,6 +49,8 @@ result keeps working until it moves to the new name.
 |---|---|---|---|
 | `xtc_bloom_fini()` | `xtc_bloom_destroy()` | function |  |
 | `xtc_bloom_init()` | `xtc_bloom_create()` | function | arguments reordered: (n_expected, fp_rate, out) |
+| `xtc_exec_fini()` | `xtc_exec_destroy()` | function | the new name returns void; the old one returns XTC_E_INVAL for NULL, else XTC_OK |
+| `xtc_exec_init()` | `xtc_exec_create()` | function | arguments changed: (const xtc_exec_opts_t *opts, out), n_loops is opts->n_loops |
 | `xtc_hll_fini()` | `xtc_hll_destroy()` | function |  |
 | `xtc_hll_init()` | `xtc_hll_create()` | function | arguments reordered: (precision, out) |
 | `xtc_io_fini()` | `xtc_io_destroy()` | function | the new name returns void; the old one returns XTC_E_INVAL for NULL, else XTC_OK |

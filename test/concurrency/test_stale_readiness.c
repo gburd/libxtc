@@ -74,7 +74,8 @@ test_stale_event_other_io(const MunitParameter p[], void *d)
 	(void)p;
 	(void)d;
 
-	munit_assert_int(xtc_exec_init(&e, 2), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &e), ==, XTC_OK);
 	a = xtc_exec_loop(e, 0);
 	b = xtc_exec_loop(e, 1);
 	munit_assert_ptr_not_null(a);
@@ -107,7 +108,7 @@ test_stale_event_other_io(const MunitParameter p[], void *d)
 
 	(void)close(sv[0]);
 	(void)close(sv[1]);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 

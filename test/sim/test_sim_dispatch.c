@@ -76,7 +76,8 @@ run_once(uint64_t seed, int *out_ran, int *out_resolved)
 	xtc_atomic_store_i32(&g_resolved, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) {
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) {
 		*out_ran = -1; *out_resolved = -1; return -1;
 	}
 
@@ -100,7 +101,7 @@ run_once(uint64_t seed, int *out_ran, int *out_resolved)
 	(void)xtc_sim_exec_run(e, seed, 2000000);
 	*out_ran = xtc_atomic_load_i32(&g_ran, xtc_mo_seq_cst);
 	*out_resolved = xtc_atomic_load_i32(&g_resolved, xtc_mo_seq_cst);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return xtc_atomic_load_long(&g_hash, xtc_mo_seq_cst);
 }
 

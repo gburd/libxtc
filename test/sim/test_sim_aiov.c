@@ -136,7 +136,8 @@ run_one(uint64_t seed, int *out_ok, long *out_hash, uint64_t *out_state)
 		(void)unlink(path);
 	}
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) { close(g_fd); return -1; }
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) { close(g_fd); return -1; }
 	xtc_exec_set_service_mode(e, 1);
 
 	/* Seeded vectored-completion latency so concurrent ops interleave
@@ -158,7 +159,7 @@ run_one(uint64_t seed, int *out_ok, long *out_hash, uint64_t *out_state)
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 
 	xtc_sim_io_faults_disable();
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	close(g_fd);
 	return rc;
 }

@@ -91,7 +91,8 @@ test_xloop_recursive(const MunitParameter p[], void *d)
 	__os_atomic_store_i32(&g_done, 0);
 	munit_assert_int(xtc_amutex_create_ex(&g_m, XTC_AMUTEX_RECURSIVE),
 	    ==, XTC_OK);
-	munit_assert_int(xtc_exec_init(&e, n_loops), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = n_loops }, &e), ==, XTC_OK);
 	for (i = 0; i < workers; i++) {
 		xtc_loop_t *l = xtc_exec_loop(e, (unsigned)(i % n_loops));
 		munit_assert_int(
@@ -99,7 +100,7 @@ test_xloop_recursive(const MunitParameter p[], void *d)
 		    ==, XTC_OK);
 	}
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	xtc_amutex_destroy(g_m);
 
 	/* Every worker finished (no crash / no lost-wakeup deadlock). */

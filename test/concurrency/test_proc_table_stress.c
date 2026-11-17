@@ -135,7 +135,8 @@ main(void)
 
 	alarm(60);   /* hang guard */
 
-	if (xtc_exec_init(&e, LOOPS) != XTC_OK) {
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = LOOPS }, &e) != XTC_OK) {
 		printf("SKIP: cannot init executor\n");
 		return 77;
 	}
@@ -180,7 +181,7 @@ main(void)
 
 	(void)xtc_exec_stop(e);
 	pthread_join(et, NULL);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 
 	{
 		int total = xtc_atomic_load_i32(&g_recv_total, xtc_mo_seq_cst);

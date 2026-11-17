@@ -723,8 +723,9 @@ segment(uint64_t rs, int crash)
 	    crash ? (long)(mix(rs ^ 0x637574ull) % (uint64_t)(NW * g_ops + 1)) :
 	            -1L,
 	    xtc_mo_seq_cst);
-	if (xtc_exec_init(&g_exec, N_LOOPS) != XTC_OK) {
-		FAILF("xtc_exec_init failed");
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &g_exec) != XTC_OK) {
+		FAILF("xtc_exec_create failed");
 		return -1;
 	}
 	if (sx_storage_run(xtc_exec_loop(g_exec, 0)) != SX_OK) {
@@ -787,7 +788,7 @@ segment(uint64_t rs, int crash)
 		g_sh->last_clean = 0;
 		return 1;                  /* the process dies here: no close */
 	}
-	(void)xtc_exec_fini(g_exec);
+	xtc_exec_destroy(g_exec);
 	g_exec = NULL;
 	sx_storage_bm_stats(&bs);
 	g_sh->evicted += bs.evicted;

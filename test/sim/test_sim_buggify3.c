@@ -133,11 +133,12 @@ run_a(uint64_t seed, unsigned bug_pct, int *out_cons, int *out_dupdrop,
 	for (i = 0; i < A_TOTAL; i++)
 		xtc_atomic_store_i32(&g_a_seen[i], 0, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 	if (bug_pct > 0) xtc_sim_buggify_enable(bug_pct);
 	else             xtc_sim_buggify_disable();
 	if (xtc_chan_mpmc_create(NULL, 4, &g_ch) != XTC_OK) {
-		(void)xtc_exec_fini(e); return -1;
+		xtc_exec_destroy(e); return -1;
 	}
 	for (i = 0; i < A_PROD; i++)
 		(void)xtc_proc_spawn(xtc_exec_loop(e, (unsigned)(i % N_LOOPS)),
@@ -160,7 +161,7 @@ run_a(uint64_t seed, unsigned bug_pct, int *out_cons, int *out_dupdrop,
 	xtc_chan_mpmc_destroy(g_ch);
 	g_ch = NULL;
 	xtc_sim_buggify_disable();
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 
@@ -264,13 +265,14 @@ run_b(uint64_t seed, unsigned bug_pct, int *out_calls, int *out_timeouts,
 	xtc_atomic_store_long(&g_b_hash, 0, xtc_mo_seq_cst);
 	memset(&st, 0, sizeof st);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 	if (bug_pct > 0) xtc_sim_buggify_enable(bug_pct);
 	else             xtc_sim_buggify_disable();
 
 	cb.handle_call = b_call;
 	if (xtc_svr_start(xtc_exec_loop(e, 0), &cb, &st, NULL, &g_bsvr)
-	    != XTC_OK) { (void)xtc_exec_fini(e); return -1; }
+	    != XTC_OK) { xtc_exec_destroy(e); return -1; }
 	g_bsvr_pid = xtc_svr_pid(g_bsvr);
 
 	for (i = 0; i < B_CLIENTS; i++)
@@ -293,7 +295,7 @@ run_b(uint64_t seed, unsigned bug_pct, int *out_calls, int *out_timeouts,
 		(void)xtc_svr_join(g_bsvr, 0);
 		g_bsvr = NULL;
 	}
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

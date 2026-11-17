@@ -78,11 +78,12 @@ run_stats(uint64_t seed, int *out_done, uint64_t *out_ctr, int64_t *out_gauge,
 	int i, rc;
 
 	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 	if (xtc_counter_create("dst.ctr", &g_ctr) != XTC_OK ||
 	    xtc_gauge_create("dst.gauge", &g_gauge) != XTC_OK ||
 	    xtc_hist_create("dst.hist", &g_hist) != XTC_OK) {
-		(void)xtc_exec_fini(e); return -1;
+		xtc_exec_destroy(e); return -1;
 	}
 	for (i = 0; i < WORKERS; i++)
 		(void)xtc_proc_spawn(xtc_exec_loop(e, (unsigned)(i % N_LOOPS)),
@@ -103,7 +104,7 @@ run_stats(uint64_t seed, int *out_done, uint64_t *out_ctr, int64_t *out_gauge,
 	xtc_hist_destroy(g_hist);   g_hist = NULL;
 	xtc_gauge_destroy(g_gauge); g_gauge = NULL;
 	xtc_counter_destroy(g_ctr); g_ctr = NULL;
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

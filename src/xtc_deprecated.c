@@ -22,6 +22,7 @@
 #include "xtc_loop.h"
 #include "xtc_io.h"
 #include "xtc_prob.h"
+#include "xtc_exec.h"
 
 /* Group: loop / io / bloom / hll lifecycle (create / destroy). */
 
@@ -77,4 +78,24 @@ void
 xtc_hll_fini(xtc_hll_t *h)
 {
 	xtc_hll_destroy(h);
+}
+
+/* Group: exec (create takes an opts struct; destroy is void). */
+
+int
+xtc_exec_init(xtc_exec_t **out, int n_loops)
+{
+	xtc_exec_opts_t o = XTC_EXEC_OPTS_INIT;
+
+	o.n_loops = n_loops;
+	return xtc_exec_create(&o, out);
+}
+
+int
+xtc_exec_fini(xtc_exec_t *exec)
+{
+	if (exec == NULL)
+		return XTC_E_INVAL;
+	xtc_exec_destroy(exec);
+	return XTC_OK;
 }

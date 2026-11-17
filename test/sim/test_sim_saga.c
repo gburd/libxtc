@@ -226,7 +226,8 @@ run_once(uint64_t seed, int *out_done, int *out_n_failed,
 	xtc_atomic_store_long(&g_outcome_hash, 0, xtc_mo_seq_cst);
 	memset(g_results, 0, sizeof g_results);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) { *out_done = -1; return -1; }
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) { *out_done = -1; return -1; }
 	for (w = 0; w < N_WORKERS; w++) {
 		xtc_loop_t *l = xtc_exec_loop(e, (unsigned)(w % N_LOOPS));
 		(void)xtc_proc_spawn(l, worker, (void *)(intptr_t)w, NULL, NULL);
@@ -237,7 +238,7 @@ run_once(uint64_t seed, int *out_done, int *out_n_failed,
 	*out_outcome_hash =
 	    xtc_atomic_load_long(&g_outcome_hash, xtc_mo_seq_cst);
 	if (out_state) *out_state = xtc_sim_state_hash(e);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 
 	*out_violation = NULL;
 	for (w = 0; w < N_WORKERS; w++) {

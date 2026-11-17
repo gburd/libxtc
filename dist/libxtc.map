@@ -79,6 +79,8 @@ XTC_2.2 {
 		xtc_demonitor;
 		xtc_err_errno;
 		xtc_err_from_errno;
+		xtc_exec_create;
+		xtc_exec_destroy;
 		xtc_hist_create_bounds;
 		xtc_hist_iterate;
 		xtc_hist_quantiles;

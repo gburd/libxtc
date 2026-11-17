@@ -143,11 +143,12 @@ run_mpmc(uint64_t seed, int *out_prod, int *out_cons, int *out_dupdrop,
 	for (i = 0; i < MPMC_TOTAL; i++)
 		xtc_atomic_store_i32(&g_mpmc_seen[i], 0, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 	/* Small cap so producers actually block on a full channel and the
 	 * backpressure/retry interleaving is exercised. */
 	if (xtc_chan_mpmc_create(NULL, 4, &g_mpmc) != XTC_OK) {
-		(void)xtc_exec_fini(e); return -1;
+		xtc_exec_destroy(e); return -1;
 	}
 	for (i = 0; i < MPMC_PROD; i++)
 		(void)xtc_proc_spawn(xtc_exec_loop(e, (unsigned)(i % N_LOOPS)),
@@ -170,7 +171,7 @@ run_mpmc(uint64_t seed, int *out_prod, int *out_cons, int *out_dupdrop,
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_chan_mpmc_destroy(g_mpmc);
 	g_mpmc = NULL;
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 
@@ -231,9 +232,10 @@ run_watch(uint64_t seed, int *out_reads, int *out_bad, uint64_t *out_state)
 	xtc_atomic_store_i32(&g_watch_regress, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_watch_bogus, 0, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 	if (xtc_chan_watch_create(NULL, &g_watch) != XTC_OK) {
-		(void)xtc_exec_fini(e); return -1;
+		xtc_exec_destroy(e); return -1;
 	}
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), watch_writer, NULL, NULL, NULL);
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 1), watch_reader, NULL, NULL, NULL);
@@ -247,7 +249,7 @@ run_watch(uint64_t seed, int *out_reads, int *out_bad, uint64_t *out_state)
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_chan_watch_destroy(g_watch);
 	g_watch = NULL;
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 
@@ -337,11 +339,12 @@ run_broadcast(uint64_t seed, int *out_recv, int *out_bad, long *out_hash,
 	xtc_atomic_store_i32(&g_bc_bad, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_bc_hash, 0, xtc_mo_seq_cst);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 	/* Ring bigger than BC_N so a keeping-up subscriber never lags,
 	 * giving a clean "contiguous full sequence" invariant. */
 	if (xtc_chan_broadcast_create(NULL, 32, &g_bc) != XTC_OK) {
-		(void)xtc_exec_fini(e); return -1;
+		xtc_exec_destroy(e); return -1;
 	}
 	for (i = 0; i < BC_SUBS; i++) {
 		args[i].id = i;
@@ -360,7 +363,7 @@ run_broadcast(uint64_t seed, int *out_recv, int *out_bad, long *out_hash,
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_chan_broadcast_destroy(g_bc);
 	g_bc = NULL;
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

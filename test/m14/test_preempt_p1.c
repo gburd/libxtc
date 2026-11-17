@@ -77,7 +77,8 @@ test_p1_timeslice(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_compute_done, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_yields, 0, xtc_mo_seq_cst);
 
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);   /* single loop */
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);   /* single loop */
 	l = xtc_exec_loop(e, 0);
 
 	/* Enable preemption at 1 ms of CPU time per slice.  NO manual
@@ -106,7 +107,7 @@ test_p1_timeslice(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_atomic_load_i32(&g_peer_progress, xtc_mo_seq_cst),
 	    >, 0); /* peers ran */
 
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 

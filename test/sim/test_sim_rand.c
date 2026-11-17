@@ -64,13 +64,14 @@ run_one(uint64_t seed, uint64_t *out)
 	int rc, i;
 	g_ndraw = 0;
 	g_done = 0;
-	if (xtc_exec_init(&g_exec, N_LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &g_exec) != XTC_OK)
 		return -1;
 	for (i = 0; i < N_FIBERS; i++)
 		(void)xtc_proc_spawn(xtc_exec_loop(g_exec, i % N_LOOPS), drawer,
 		    NULL, NULL, NULL);
 	rc = xtc_sim_exec_run(g_exec, seed, 1000000);
-	(void)xtc_exec_fini(g_exec);
+	xtc_exec_destroy(g_exec);
 	memcpy(out, g_draw, sizeof g_draw);
 	return (rc == XTC_OK && g_ndraw == N_FIBERS * N_DRAW) ? 0 : -1;
 }

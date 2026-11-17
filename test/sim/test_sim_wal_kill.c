@@ -308,7 +308,8 @@ run_one(uint64_t seed, struct result *res)
 	memset(&wo, 0, sizeof wo);
 	wo.path = path;
 	if (wal_open(&wo, &g_wal) != XTC_OK ||
-	    xtc_exec_init(&g_exec, N_LOOPS) != XTC_OK)
+	    xtc_exec_create(&(xtc_exec_opts_t){
+	        .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &g_exec) != XTC_OK)
 		return 1;
 	xtc_sim_io_wb_enable(1);
 	xtc_sim_io_faults_enable(20 * 1000LL, 300 * 1000LL, 0);
@@ -345,7 +346,7 @@ run_one(uint64_t seed, struct result *res)
 		dump_state();
 		return 1;
 	}
-	(void)xtc_exec_fini(g_exec);
+	xtc_exec_destroy(g_exec);
 	g_exec = NULL;
 
 	/* The crash: only what an fdatasync covered survives. */

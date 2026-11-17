@@ -127,7 +127,8 @@ main(void)
 	 * mask), then rely on libxtc to block it on its own threads. */
 	pthread_sigmask(SIG_UNBLOCK, &only_usr1, &prev);
 
-	if (xtc_exec_init(&g_e, N_LOOPS) != XTC_OK) {
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &g_e) != XTC_OK) {
 		fprintf(stderr, "SKIP: exec_init failed\n");
 		return 77;
 	}
@@ -157,7 +158,7 @@ main(void)
 
 	(void)xtc_exec_stop(g_e);
 	(void)pthread_join(th, NULL);
-	(void)xtc_exec_fini(g_e);
+	xtc_exec_destroy(g_e);
 
 	{
 		int m = xtc_atomic_load_i32(&g_on_main, xtc_mo_seq_cst),

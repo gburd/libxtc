@@ -49,7 +49,8 @@ run(uint64_t seed, int classes, int faults)
 	xtc_loop_t *loop;
 	unsigned i;
 
-	assert(xtc_exec_init(&exec, 1) == XTC_OK);
+	assert(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &exec) == XTC_OK);
 	loop = xtc_exec_loop(exec, 0);
 	if (classes) {
 		assert(xtc_exec_class_create(loop, 3, 0, &lanes[0]) == XTC_OK);
@@ -81,7 +82,7 @@ run(uint64_t seed, int classes, int faults)
 	for (i = 0; i < t.n; i++)
 		printf("%u", t.ids[i]);
 	putchar('\n');
-	assert(xtc_exec_fini(exec) == XTC_OK);
+	xtc_exec_destroy(exec);
 	xtc_sim_buggify_disable();
 }
 

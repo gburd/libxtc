@@ -109,7 +109,8 @@ ps_run(void (*fn)(void *), int n)
 	xtc_atomic_store_i32(&g_done, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_ops, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&g_bad, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_exec_init(&e, 1), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 1 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_set_preempt(e, 10LL * 1000 * 1000 * 1000),
 	    ==, XTC_OK);
 	XTC_PS_ENABLE();
@@ -121,7 +122,7 @@ ps_run(void (*fn)(void *), int n)
 	xtc_atomic_store_i32(&g_done, 1, xtc_mo_seq_cst);
 	(void)pthread_join(kt, NULL);
 	(void)xtc_preempt_set_involuntary(0);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 }
 
 static MunitResult

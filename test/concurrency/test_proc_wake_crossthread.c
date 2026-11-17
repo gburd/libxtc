@@ -118,7 +118,8 @@ one_round(void)
 
 	xtc_atomic_store_i32(&g_woke, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_ready, 0, xtc_mo_seq_cst);
-	if (xtc_exec_init(&g_e, 3) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 3 }, &g_e) != XTC_OK)
 		return 77;
 	xtc_exec_set_service_mode(g_e, 1);
 	if (xtc_proc_spawn(xtc_exec_loop(g_e, 0), waiter, NULL, NULL, NULL)
@@ -129,7 +130,7 @@ one_round(void)
 
 	(void)xtc_exec_run(g_e);
 	pthread_join(th, NULL);
-	(void)xtc_exec_fini(g_e);
+	xtc_exec_destroy(g_e);
 	close(g_pr);
 	close(g_pw);
 	return xtc_atomic_load_i32(&g_woke, xtc_mo_seq_cst) ? 0 : 1;

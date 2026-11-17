@@ -190,13 +190,14 @@ test_kill_stress(const MunitParameter p[], void *d)
 
 	signal(SIGALRM, on_alarm);
 	alarm(900); /* healthy: ~1 s plain, a few minutes under TSan */
-	munit_assert_int(xtc_exec_init(&g_exec, LOOPS), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = LOOPS }, &g_exec), ==, XTC_OK);
 	xtc_exec_set_eager_rebalance(g_exec, 1);
 	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(g_exec, LOOPS - 1), boss,
 	                     NULL, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(g_exec), ==, XTC_OK);
-	(void)xtc_exec_fini(g_exec);
+	xtc_exec_destroy(g_exec);
 	alarm(0);
 	close(g_fd);
 

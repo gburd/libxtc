@@ -257,7 +257,8 @@ run_one(uint64_t seed, int *out_ok, uint64_t *out_state)
 		return -1;
 	}
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) {
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) {
 		xtc_chan_mpsc_destroy(cn.c2s);
 		xtc_chan_mpsc_destroy(cn.s2c);
 		return -1;
@@ -276,7 +277,7 @@ run_one(uint64_t seed, int *out_ok, uint64_t *out_state)
 		*out_ok = xtc_atomic_load_i32(&g_ok, xtc_mo_seq_cst);
 	if (out_state != NULL) *out_state = xtc_sim_state_hash(e);
 
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	/* Drain any leftover chunks so nothing leaks. */
 	{
 		void *m;

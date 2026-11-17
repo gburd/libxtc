@@ -180,7 +180,9 @@ main(void)
 	struct ids ids;
 	int i, j, fail = 0, total = 0, wrong = 0;
 
-	if (xtc_exec_init(&A, 2) != XTC_OK || xtc_exec_init(&B, 2) != XTC_OK ||
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &A) != XTC_OK || xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &B) != XTC_OK ||
 	    xtc_loop_create(&S0) != XTC_OK || xtc_loop_create(&S1) != XTC_OK) {
 		printf("FAIL: setup\n");
 		return 1;
@@ -248,9 +250,10 @@ main(void)
 	/* Phase 2: pids of finalized loops. */
 	g_dead[0] = pid[0];
 	g_dead[1] = pid[5];
-	(void)xtc_exec_fini(A);
+	xtc_exec_destroy(A);
 	xtc_loop_destroy(S1);
-	if (xtc_exec_init(&C, 2) != XTC_OK || xtc_loop_create(&S2) != XTC_OK) {
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &C) != XTC_OK || xtc_loop_create(&S2) != XTC_OK) {
 		printf("FAIL: setup 2\n");
 		return 1;
 	}
@@ -279,8 +282,8 @@ main(void)
 		fail = 1;
 	}
 
-	(void)xtc_exec_fini(B);
-	(void)xtc_exec_fini(C);
+	xtc_exec_destroy(B);
+	xtc_exec_destroy(C);
 	xtc_loop_destroy(S0);
 	xtc_loop_destroy(S2);
 	if (fail)

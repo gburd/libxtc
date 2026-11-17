@@ -52,7 +52,8 @@ run(uint64_t seed, int *out_total, int *out_expect, uint64_t *out_hash)
 	int i, rc;
 
 	total = expect = 0;
-	if (xtc_exec_init(&e, 2) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &e) != XTC_OK)
 		return XTC_E_NOMEM;
 	for (i = 0; i < 4; i++)
 		(void)xtc_proc_spawn(xtc_exec_loop(e, i % 2), worker, NULL,
@@ -61,7 +62,7 @@ run(uint64_t seed, int *out_total, int *out_expect, uint64_t *out_hash)
 	rc = xtc_sim_exec_run(e, seed, 100000);
 	xtc_sim_buggify_disable();
 	*out_hash = xtc_sim_state_hash(e);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	*out_total = total;
 	*out_expect = expect;
 	return rc;

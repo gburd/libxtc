@@ -430,7 +430,8 @@ test_exec_full_api(const MunitParameter p[], void *d)
 	int n_loops;
 	(void)p; (void)d;
 	xtc_atomic_store_i32(&counter, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_exec_init(&e, 2), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &e), ==, XTC_OK);
 	n_loops = xtc_exec_n_loops(e);
 	munit_assert_int(n_loops, ==, 2);
 
@@ -455,7 +456,7 @@ test_exec_full_api(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_exec_stop(e), ==, XTC_OK);
 
 	(void)exec_simple_task;   /* silence unused */
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 

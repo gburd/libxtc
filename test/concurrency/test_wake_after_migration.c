@@ -150,8 +150,9 @@ main(void)
 		return 77;
 	}
 
-	if (xtc_exec_init(&e, LOOPS) != XTC_OK) {
-		printf("FAIL: xtc_exec_init\n");
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = LOOPS }, &e) != XTC_OK) {
+		printf("FAIL: xtc_exec_create\n");
 		return 1;
 	}
 	g_exec = e;
@@ -168,7 +169,7 @@ main(void)
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 1), stopper, NULL, NULL, NULL);
 
 	rc = xtc_exec_run(e);
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 
 	if (rc != XTC_OK) {
 		printf("FAIL: xtc_exec_run rc=%d\n", rc);

@@ -75,8 +75,9 @@ run_amutex(uint64_t seed, long *out_count, int *out_done, uint64_t *out_state)
 	int i, rc;
 	g_mu_count = 0;
 	xtc_atomic_store_i32(&g_mu_done, 0, xtc_mo_seq_cst);
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
-	if (xtc_amutex_create(&g_mu) != XTC_OK) { xtc_exec_fini(e); return -1; }
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
+	if (xtc_amutex_create(&g_mu) != XTC_OK) { xtc_exec_destroy(e); return -1; }
 	for (i = 0; i < N_MUWORK; i++) {
 		xtc_loop_t *l = xtc_exec_loop(e, (unsigned)(i % N_LOOPS));
 		(void)xtc_proc_spawn(l, mu_worker, NULL, NULL, NULL);
@@ -87,7 +88,7 @@ run_amutex(uint64_t seed, long *out_count, int *out_done, uint64_t *out_state)
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_amutex_destroy(g_mu);
 	g_mu = NULL;
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 
@@ -136,8 +137,9 @@ run_arwlock(uint64_t seed, long *out_ver, int *out_done, int *out_torn,
 	g_rw_version = 0;
 	xtc_atomic_store_i32(&g_rw_done, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_rw_torn, 0, xtc_mo_seq_cst);
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
-	if (xtc_arwlock_create(&g_rw) != XTC_OK) { xtc_exec_fini(e); return -1; }
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
+	if (xtc_arwlock_create(&g_rw) != XTC_OK) { xtc_exec_destroy(e); return -1; }
 	for (i = 0; i < N_RDWORK; i++) {
 		xtc_loop_t *l = xtc_exec_loop(e, (unsigned)(i % N_LOOPS));
 		(void)xtc_proc_spawn(l, rw_reader, NULL, NULL, NULL);
@@ -153,7 +155,7 @@ run_arwlock(uint64_t seed, long *out_ver, int *out_done, int *out_torn,
 	if (out_state) *out_state = xtc_sim_state_hash(e);
 	xtc_arwlock_destroy(g_rw);
 	g_rw = NULL;
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

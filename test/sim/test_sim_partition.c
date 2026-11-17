@@ -133,7 +133,8 @@ run_once(uint64_t seed, int partition, int *out_arrived, long *out_hash,
 	xtc_atomic_store_long(&g_arr_hash, 0, xtc_mo_seq_cst);
 
 	xtc_sim_partition_clear();       /* start from a healed network */
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK)
 		return -1;
 
 	/*
@@ -164,7 +165,7 @@ run_once(uint64_t seed, int partition, int *out_arrived, long *out_hash,
 		xtc_loop_t *l = xtc_exec_loop(e, (unsigned)j);
 		if (xtc_proc_spawn(l, receiver, &g_recv_arg[j], NULL,
 		    &rpid[j]) != XTC_OK) {
-			(void)xtc_exec_fini(e);
+			xtc_exec_destroy(e);
 			return -1;
 		}
 	}
@@ -220,7 +221,7 @@ run_once(uint64_t seed, int partition, int *out_arrived, long *out_hash,
 		*out_state = xtc_sim_state_hash(e);
 
 	xtc_sim_partition_clear();       /* heal for the next run */
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

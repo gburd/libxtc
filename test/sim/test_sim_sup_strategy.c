@@ -249,7 +249,8 @@ run_scenario(uint64_t seed, xtc_restart_strategy_t strat,
 	xtc_atomic_store_i32(&g_report_late, 0, xtc_mo_seq_cst);
 	g_sup = NULL;
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK)
 		return -1;
 
 	for (i = 0; i < N_KIDS; i++) {
@@ -270,7 +271,7 @@ run_scenario(uint64_t seed, xtc_restart_strategy_t strat,
 
 	if (xtc_sup_start(xtc_exec_loop(e, 0), &opts, kids, N_KIDS,
 	    &g_sup) != XTC_OK) {
-		(void)xtc_exec_fini(e);
+		xtc_exec_destroy(e);
 		return -1;
 	}
 
@@ -311,7 +312,7 @@ run_scenario(uint64_t seed, xtc_restart_strategy_t strat,
 		g_sup = NULL;
 	}
 
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

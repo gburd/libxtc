@@ -7,7 +7,7 @@
  *	the "crash the run here" idiom of the composition-crash DST), the
  *	calling thread is no longer on a proc: xtc_self() is XTC_PID_NONE,
  *	xtc_mask_enter / xtc_mask_leave return XTC_E_INVAL (no-ops), and
- *	none of them touches the stopped proc -- which xtc_exec_fini frees.
+ *	none of them touches the stopped proc -- which xtc_exec_destroy frees.
  *
  *	The scheduler left this thread's current-proc pointer naming the
  *	last proc it ran when that proc stopped the executor.  Once the
@@ -19,7 +19,7 @@
  *
  *	Per seed: N loops, M procs that each yield a few times; one of them
  *	stops the executor mid-run.  After xtc_sim_exec_run and again after
- *	xtc_exec_fini the checks above must hold.  Run it under valgrind or
+ *	xtc_exec_destroy the checks above must hold.  Run it under valgrind or
  *	ASan for the use-after-free half; the value checks fail without
  *	any tool.
  */
@@ -80,7 +80,8 @@ run_one(uint64_t seed)
 {
 	int i, bad = 0, rc;
 	xtc_atomic_store_i32(&g_steps, 0, xtc_mo_seq_cst);
-	if (xtc_exec_init(&g_exec, N_LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &g_exec) != XTC_OK)
 		return 1;
 	for (i = 0; i < N_PROCS; i++)
 		if (xtc_proc_spawn(xtc_exec_loop(g_exec, i % N_LOOPS), worker,
@@ -89,9 +90,9 @@ run_one(uint64_t seed)
 	rc = xtc_sim_exec_run(g_exec, seed, 1000000);
 	(void)rc;               /* stopped early: any return is fine here */
 	bad |= check("after the run");
-	(void)xtc_exec_fini(g_exec);
+	xtc_exec_destroy(g_exec);
 	g_exec = NULL;
-	bad |= check("after xtc_exec_fini");
+	bad |= check("after xtc_exec_destroy");
 	return bad;
 }
 

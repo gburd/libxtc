@@ -393,14 +393,21 @@ __xtc_exec_worker(void *arg)
 	return NULL;
 }
 
-/* PUBLIC: int xtc_exec_init __P((xtc_exec_t **, int)); */
+/* PUBLIC: int xtc_exec_create __P((const xtc_exec_opts_t *, xtc_exec_t **)); */
 int
-xtc_exec_init(xtc_exec_t **out, int n_loops)
+xtc_exec_create(const xtc_exec_opts_t *opts, xtc_exec_t **out)
 {
+	xtc_exec_opts_t o;
 	xtc_exec_t *e;
-	int rc, i;
+	int rc, i, n_loops;
 
 	if (out == NULL) return XTC_E_INVAL;
+	/* Read the caller's opts only up to its .size: unset fields default. */
+	memset(&o, 0, sizeof o);
+	if (opts != NULL &&
+	    (rc = __xtc_sized_in(&o, NULL, sizeof o, opts, 0)) != XTC_OK)
+		return rc;
+	n_loops = o.n_loops;
 
 	if (n_loops <= 0) {
 		n_loops = __os_ncpus();
@@ -453,12 +460,13 @@ xtc_exec_init(xtc_exec_t **out, int n_loops)
 	return XTC_OK;
 }
 
-/* PUBLIC: int xtc_exec_fini __P((xtc_exec_t *)); */
-int
-xtc_exec_fini(xtc_exec_t *e)
+/* PUBLIC: void xtc_exec_destroy __P((xtc_exec_t *)); */
+void
+xtc_exec_destroy(xtc_exec_t *e)
 {
 	int i;
-	if (e == NULL) return XTC_E_INVAL;
+	if (e == NULL)
+		return;
 	for (i = 0; i < e->n_loops; i++)
 		if (e->loops[i] != NULL)
 			xtc_loop_destroy(e->loops[i]);
@@ -466,7 +474,6 @@ xtc_exec_fini(xtc_exec_t *e)
 	__os_free(e->workers);
 	__os_free(e->loop_node);
 	__os_free(e);
-	return XTC_OK;
 }
 
 /*

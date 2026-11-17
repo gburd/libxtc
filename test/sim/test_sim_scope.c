@@ -289,7 +289,8 @@ run_one_inproc(uint64_t seed, int *out_started, int *out_all_fin, int *out_rel,
 		g_disrupt[i] = DIS_NONE;
 	}
 
-	if (xtc_exec_init(&g_exec, N_LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &g_exec) != XTC_OK)
 		return -1;
 	xtc_exec_set_service_mode(g_exec, 1);
 
@@ -325,7 +326,7 @@ run_one_inproc(uint64_t seed, int *out_started, int *out_all_fin, int *out_rel,
 		g_warg[i].id = i;
 		if (xtc_proc_spawn(l, worker, &g_warg[i], NULL,
 		    &g_worker_pid[i]) != XTC_OK) {
-			(void)xtc_exec_fini(g_exec);
+			xtc_exec_destroy(g_exec);
 			g_exec = NULL;
 			return -2;
 		}
@@ -381,7 +382,7 @@ run_one_inproc(uint64_t seed, int *out_started, int *out_all_fin, int *out_rel,
 		*out_skipped = skipped;
 	if (out_state)   *out_state = xtc_sim_state_hash(g_exec);
 
-	(void)xtc_exec_fini(g_exec);
+	xtc_exec_destroy(g_exec);
 	g_exec = NULL;
 	return rc;
 }

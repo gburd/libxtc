@@ -3742,14 +3742,15 @@ test_many_loops(const MunitParameter p[], void *d)
 	int i;
 	(void)p; (void)d;
 	xtc_atomic_store_i32(&m10_ran, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_exec_init(&e, M10_NL), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = M10_NL }, &e), ==, XTC_OK);
 	for (i = 0; i < M10_NL; i++)
 		munit_assert_int(xtc_proc_spawn(xtc_exec_loop(e, i), m10_proc,
 		    NULL, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	munit_assert_int(xtc_atomic_load_i32(&m10_ran, xtc_mo_seq_cst), ==,
 	    M10_NL);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 

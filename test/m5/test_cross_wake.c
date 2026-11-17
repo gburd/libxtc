@@ -73,12 +73,13 @@ test_basic(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	s.parker_runs = 0; s.init_done = 0; s.max_runs = 2; s.wake_calls = 0;
 	wa.s = &s; wa.n_wakes = 1;
-	munit_assert_int(xtc_exec_init(&e, 4), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 4 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_spawn_on(e, 0, parker_fn, &s, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_spawn_on(e, 1, waker_fn,  &wa, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	munit_assert_int(__os_atomic_load_i32(&s.parker_runs), ==, 2);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -93,13 +94,14 @@ test_after_done(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	s.parker_runs = 0; s.init_done = 0; s.max_runs = 2; s.wake_calls = 0;
 	wa.s = &s; wa.n_wakes = 1;
-	munit_assert_int(xtc_exec_init(&e, 4), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 4 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_spawn_on(e, 0, parker_fn, &s, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_spawn_on(e, 1, waker_fn,  &wa, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	/* Now both tasks DONE.  Fire the captured waker -- must be safe. */
 	munit_assert_int(xtc_waker_wake(&s.parker_waker), ==, XTC_OK);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -118,14 +120,15 @@ test_concurrent(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	s.parker_runs = 0; s.init_done = 0; s.max_runs = 2; s.wake_calls = 0;
 	wa.s = &s; wa.n_wakes = 50;
-	munit_assert_int(xtc_exec_init(&e, 4), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 4 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_spawn_on(e, 0, parker_fn, &s, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_spawn_on(e, 1, waker_fn,  &wa, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	observed = __os_atomic_load_i32(&s.parker_runs);
 	munit_assert_int(observed, >=, 2);                  /* initial + at least one wake */
 	munit_assert_int(observed, <=, wa.n_wakes + 1);     /* idempotent cap */
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -168,7 +171,8 @@ test_loop_wake_foreign(const MunitParameter p[], void *d)
 	struct foreign_args fa;
 	(void)p; (void)d;
 	s.parker_runs = 0; s.init_done = 0; s.max_runs = 2; s.wake_calls = 0;
-	munit_assert_int(xtc_exec_init(&e, 4), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 4 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_spawn_on(e, 0, parker_fn, &s, NULL), ==, XTC_OK);
 	/* NULL loop -> XTC_E_INVAL (guard). */
 	munit_assert_int(xtc_loop_wake(NULL), ==, XTC_E_INVAL);
@@ -179,7 +183,7 @@ test_loop_wake_foreign(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);   /* must quiesce */
 	munit_assert_int(__os_thread_join(&thr, NULL), ==, XTC_OK);
 	munit_assert_int(__os_atomic_load_i32(&s.parker_runs), ==, 2);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -224,13 +228,14 @@ test_wake_no_alloc(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	s.parker_runs = 0; s.init_done = 0; s.max_runs = 2; s.wake_calls = 0;
 	m11_wake_rc = -12345;
-	munit_assert_int(xtc_exec_init(&e, 2), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_spawn_on(e, 0, parker_fn, &s, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_spawn_on(e, 1, m11_waker_fn, &s, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	munit_assert_int(m11_wake_rc, ==, XTC_OK);
 	munit_assert_int(__os_atomic_load_i32(&s.parker_runs), ==, 2);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -276,7 +281,8 @@ test_inbox_res_wake_symmetric(const MunitParameter p[], void *d)
 	s.parker_runs = 0; s.init_done = 0; s.max_runs = M1_WAKES + 1;
 	s.wake_calls = 0;
 	wa.s = &s; wa.n_wakes = M1_WAKES;
-	munit_assert_int(xtc_exec_init(&e, 2), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &e), ==, XTC_OK);
 	r0 = xtc_loop_res(xtc_exec_loop(e, 0));
 	munit_assert_ptr_not_null(r0);
 	munit_assert_int(xtc_res_acquire(r0, XTC_RES_INBOX_MSGS, M1_HELD),
@@ -286,7 +292,7 @@ test_inbox_res_wake_symmetric(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	munit_assert_int(__os_atomic_load_i32(&s.parker_runs), ==, M1_WAKES + 1);
 	munit_assert_int64(xtc_res_used(r0, XTC_RES_INBOX_MSGS), ==, M1_HELD);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	return MUNIT_OK;
 }
 
@@ -371,7 +377,8 @@ test_wake_running_loop_no_write(const MunitParameter p[], void *d)
 	s.wake_calls = 0;
 	xtc_atomic_store_i32(&g_cw6_done, 0, xtc_mo_seq_cst);
 	g_cw6_writes = -1;
-	munit_assert_int(xtc_exec_init(&e, 2), ==, XTC_OK);
+	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &e), ==, XTC_OK);
 	munit_assert_int(xtc_exec_spawn_on(e, 0, cw6_spinner_fn, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_exec_spawn_on(e, 0, parker_fn, &s, NULL), ==, XTC_OK);
@@ -379,7 +386,7 @@ test_wake_running_loop_no_write(const MunitParameter p[], void *d)
 	    ==, XTC_OK);
 	munit_assert_int(xtc_exec_run(e), ==, XTC_OK);
 	munit_assert_int(__os_atomic_load_i32(&s.parker_runs), ==, CW6_WAKES + 1);
-	munit_assert_int(xtc_exec_fini(e), ==, XTC_OK);
+	xtc_exec_destroy(e);
 	munit_logf(MUNIT_LOG_INFO, "%d wakes to a running loop: %ld write(2)s",
 	    CW6_WAKES, g_cw6_writes);
 	munit_assert_long(g_cw6_writes, >=, 0);

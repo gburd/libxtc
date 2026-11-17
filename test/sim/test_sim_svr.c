@@ -206,13 +206,14 @@ run_once(uint64_t seed, int *out_calls, long *out_sum, long *out_hash,
 	xtc_atomic_store_long(&g_max_reply, 0, xtc_mo_seq_cst);
 	memset(&st, 0, sizeof st);
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK) return -1;
+	if (xtc_exec_create(&(xtc_exec_opts_t){
+	    .size = sizeof(xtc_exec_opts_t), .n_loops = N_LOOPS }, &e) != XTC_OK) return -1;
 
 	cb.handle_call = acc_call;
 	cb.handle_cast = acc_cast;
 	if (xtc_svr_start(xtc_exec_loop(e, 0), &cb, &st, NULL, &g_svr)
 	    != XTC_OK) {
-		(void)xtc_exec_fini(e);
+		xtc_exec_destroy(e);
 		return -1;
 	}
 	g_svr_pid = xtc_svr_pid(g_svr);
@@ -242,7 +243,7 @@ run_once(uint64_t seed, int *out_calls, long *out_sum, long *out_hash,
 		(void)xtc_svr_join(g_svr, 0);
 		g_svr = NULL;
 	}
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

@@ -167,14 +167,15 @@ main(int argc, char **argv)
 		xtc_loop_destroy(loop);
 	} else {
 		xtc_exec_t *e;
-		if (xtc_exec_init(&e, 2) != XTC_OK ||
+		if (xtc_exec_create(&(xtc_exec_opts_t){
+		    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &e) != XTC_OK ||
 		    xtc_proc_spawn(xtc_exec_loop(e, 0), rx_proc, NULL, &o,
 		    NULL) != XTC_OK ||
 		    xtc_proc_spawn(xtc_exec_loop(e, 1), tx_proc, NULL, NULL,
 		    NULL) != XTC_OK)
 			return 1;
 		(void)xtc_exec_run(e);
-		(void)xtc_exec_fini(e);
+		xtc_exec_destroy(e);
 	}
 	secs = (double)(g_t1 - g_t0) / 1e9;
 	printf("%s %zu %d %ld %.4f %.0f %.1f %llu\n", argv[1], g_size, loops,
