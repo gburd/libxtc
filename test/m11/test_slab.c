@@ -41,6 +41,7 @@
 #  define munmap(p, sz)  ((void)(sz), free(p), 0)
 #else
 #  include <sys/mman.h>
+#  include <unistd.h>
 #endif
 
 #include "munit.h"
