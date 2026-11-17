@@ -311,7 +311,7 @@ xtc_app_start(xtc_app_t *a, const xtc_child_spec_t *children, int n)
 		a->specs[i].fn = __kid_trampoline;
 		a->specs[i].arg = &a->kids->k[i];
 	}
-	/* The registry's reaper, so xtc_reg_register_mon on
+	/* The registry's reaper, so xtc_reg_put on
 	 * xtc_app_registry(app) drops a dead pid's names with no setup.
 	 * Published now, not when it first runs: a child on another loop may
 	 * register before loop 0 runs the reaper, and its enrollment then

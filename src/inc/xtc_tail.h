@@ -228,7 +228,7 @@ enum xtc_tail_kind {
 	 *
 	 * Reachable because the delivery sites discard the send result:
 	 * __notify_links_and_monitors does (void)xtc_send for each DOWN/EXIT
-	 * (src/ptc/proc.c), and xtc_reg_register_mon does the same for its
+	 * (src/ptc/proc.c), and xtc_reg_put does the same for its
 	 * reaper enrollment while still returning XTC_OK (src/orc/reg.c).  A
 	 * mailbox saturated by ORDINARY traffic therefore silently defeats
 	 * lifecycle observation -- the bounded mailbox is correct

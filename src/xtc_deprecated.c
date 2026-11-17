@@ -37,6 +37,7 @@
 #include "xtc_tnt.h"
 #include "xtc_xproc.h"
 #include "xtc_runtime.h"
+#include "xtc_reg.h"
 
 /* Group: loop / io / bloom / hll lifecycle (create / destroy). */
 
@@ -125,7 +126,10 @@ xtc_pg_join(xtc_reg_t *reg, const char *group, xtc_pid_t pid)
 int
 xtc_pg_leave(xtc_reg_t *reg, const char *group, xtc_pid_t pid)
 {
-	return xtc_pg_unsubscribe(reg, group, pid);
+	int rc = xtc_pg_unsubscribe(reg, group, pid);
+
+	/* Before 2.2 a non-member was XTC_E_INVAL. */
+	return rc == XTC_E_NOTFOUND ? XTC_E_INVAL : rc;
 }
 
 /* Group: close -> shutdown (stop accepting work; queued work drains). */
@@ -334,4 +338,49 @@ int
 xtc_alloc_audit_enable(int on)
 {
 	return xtc_runtime_set_alloc_audit(on);
+}
+
+/* Group: registry (put / get / del).  The old calls reported a taken name
+ * and a miss as XTC_E_INVAL; they still do. */
+
+static int
+reg_old_rc(int rc)
+{
+	return (rc == XTC_E_EXIST || rc == XTC_E_NOTFOUND) ? XTC_E_INVAL : rc;
+}
+
+int
+xtc_reg_register(xtc_reg_t *r, const char *name, xtc_pid_t pid)
+{
+	return reg_old_rc(xtc_reg_put(r, name, pid, NULL, 0));
+}
+
+int
+xtc_reg_register_dup(xtc_reg_t *r, const char *key, xtc_pid_t pid)
+{
+	return reg_old_rc(xtc_reg_put(r, key, pid, NULL, XTC_REG_DUP));
+}
+
+int
+xtc_reg_register_mon(xtc_reg_t *r, const char *name, xtc_pid_t pid)
+{
+	return reg_old_rc(xtc_reg_put(r, name, pid, NULL, XTC_REG_MONITOR));
+}
+
+int
+xtc_reg_unregister(xtc_reg_t *r, const char *name)
+{
+	return reg_old_rc(xtc_reg_del(r, name, XTC_PID_NONE));
+}
+
+int
+xtc_reg_unregister_pid(xtc_reg_t *r, const char *key, xtc_pid_t pid)
+{
+	return reg_old_rc(xtc_reg_del(r, key, pid));
+}
+
+int
+xtc_reg_whereis(xtc_reg_t *r, const char *name, xtc_pid_t *out_pid)
+{
+	return reg_old_rc(xtc_reg_get(r, name, out_pid));
 }

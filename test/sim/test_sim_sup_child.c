@@ -201,12 +201,12 @@ drainer(void *arg)
 		(void)xtc_proc_sleep(1 * MS);
 	if (g_crashy)
 		g_crashy = 0; /* the next subtree incarnation serves */
-	for (i = 0; i < 2000 && xtc_reg_whereis(reg, "pool", &pid) != XTC_OK;
+	for (i = 0; i < 2000 && xtc_reg_get(reg, "pool", &pid) != XTC_OK;
 	     i++)
 		(void)xtc_proc_sleep(1 * MS);
 	(void)xtc_proc_sleep(5 * MS);
 	for (i = 0; i < 3; i++)
-		if (xtc_reg_whereis(reg, names[i], &pid) == XTC_OK)
+		if (xtc_reg_get(reg, names[i], &pid) == XTC_OK)
 			(void)xtc_send(pid, XTC_APP_SHUTDOWN_MSG,
 			    sizeof XTC_APP_SHUTDOWN_MSG);
 	for (i = 0; i < 200 && !(g_conf_drained && g_wk_drained); i++)

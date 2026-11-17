@@ -301,6 +301,31 @@ bridge_runtime(void)
 	CHECK(xtc_runtime_get_alloc_audit() == 0);
 }
 
+/* registry: register* / unregister* / whereis -> put / del / get.  A
+ * taken name and a miss stay XTC_E_INVAL under the old names. */
+static void
+bridge_reg(void)
+{
+	xtc_reg_t *r = NULL;
+	xtc_pid_t a = { 1, 1, 1 }, b = { 1, 2, 1 }, got;
+
+	CHECK(xtc_reg_create(&r) == XTC_OK && r != NULL);
+	CHECK(xtc_reg_register(r, "n", a) == XTC_OK);
+	CHECK(xtc_reg_register(r, "n", b) == XTC_E_INVAL);
+	CHECK(xtc_reg_whereis(r, "n", &got) == XTC_OK && xtc_pid_eq(got, a));
+	CHECK(xtc_reg_whereis(r, "none", &got) == XTC_E_INVAL);
+	CHECK(xtc_reg_unregister(r, "n") == XTC_OK);
+	CHECK(xtc_reg_unregister(r, "n") == XTC_E_INVAL);
+	CHECK(xtc_reg_register_dup(r, "g", a) == XTC_OK);
+	CHECK(xtc_reg_register_dup(r, "g", b) == XTC_OK);
+	CHECK(xtc_reg_count(r) == 2);
+	CHECK(xtc_reg_unregister_pid(r, "g", a) == XTC_OK);
+	CHECK(xtc_reg_unregister_pid(r, "g", a) == XTC_E_INVAL);
+	CHECK(xtc_reg_register_mon(r, "m", a) == XTC_OK);
+	CHECK(xtc_reg_count(r) == 2);
+	xtc_reg_destroy(r);
+}
+
 int
 main(void)
 {
@@ -314,6 +339,7 @@ main(void)
 	bridge_tnt();
 	bridge_xproc();
 	bridge_runtime();
+	bridge_reg();
 	printf("  [bridge] OK: every deprecated name still works\n");
 	return 0;
 }

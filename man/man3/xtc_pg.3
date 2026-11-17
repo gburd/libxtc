@@ -34,7 +34,7 @@ Phoenix
 and Discord-presence pattern.  A group is a duplicate-key entry in an
 .Xr xtc_reg 3
 registry
-.Pq see Fn xtc_reg_register_dup ,
+.Pq see Fn xtc_reg_put No with Dv XTC_REG_DUP ,
 so many pids share one key.
 .Pp
 .Fn xtc_pg_subscribe
@@ -52,7 +52,7 @@ removes
 from
 .Fa group ,
 returning
-.Dv XTC_E_INVAL
+.Dv XTC_E_NOTFOUND
 if it was not a member.
 .Pp
 .Fn xtc_pg_members
@@ -126,7 +126,8 @@ Use
 .Fn xtc_pg_subscribe .
 .It Fn xtc_pg_leave
 Use
-.Fn xtc_pg_unsubscribe .
+.Fn xtc_pg_unsubscribe ;
+a non-member is XTC_E_NOTFOUND (the old name: XTC_E_INVAL).
 .El
 .Sh SEE ALSO
 .Xr xtc_reg 3 ,

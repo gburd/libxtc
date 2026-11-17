@@ -265,8 +265,7 @@ __child_unname(struct xtc_supervisor *sup, const struct child *c, xtc_pid_t pid)
 {
 #if !XTC_DST_BUG(XTC_DST_BUG_SUP_NAME_STALE)
 	if (sup->opts.registry != NULL && c->spec.reg_name != NULL)
-		(void)xtc_reg_unregister_pid(sup->opts.registry,
-		    c->spec.reg_name, pid);
+		(void)xtc_reg_del(sup->opts.registry, c->spec.reg_name, pid);
 #else
 	(void)sup;
 	(void)c;
@@ -347,7 +346,7 @@ __spawn_child_ex(struct xtc_supervisor *sup, struct child *c, int ack)
 	__child_alive(sup, c, 1);
 	/* Name the new incarnation (replacing any earlier one's entry, so
 	 * the name never names two).  The child may already be running on
-	 * another loop; until this returns, a client's xtc_reg_whereis
+	 * another loop; until this returns, a client's xtc_reg_get
 	 * misses it and xtc_reg_whereis_wait waits for it.  A failed
 	 * registration (out of memory) is not left as a silently unnamed
 	 * child: it is killed with XTC_E_NOMEM, a death the supervisor's

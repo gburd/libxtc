@@ -1772,7 +1772,7 @@ nm_client(void *arg)
 	(void)xtc_sup_stop(sup);
 	(void)xtc_proc_sleep(20 * NM_MS);
 	/* The stop unnamed the last incarnation. */
-	g_nm_gone_rc = xtc_reg_whereis(g_nm_reg, "engine", &p);
+	g_nm_gone_rc = xtc_reg_get(g_nm_reg, "engine", &p);
 }
 
 static MunitResult

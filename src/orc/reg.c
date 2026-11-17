@@ -195,66 +195,53 @@ __reg_find_locked(struct xtc_reg *r, const char *name, uint32_t h)
 	return NULL;
 }
 
-int
-xtc_reg_register(xtc_reg_t *r, const char *name, xtc_pid_t pid)
-{
-	struct reg_node *node;
-	uint32_t h;
-	int rc = XTC_OK;
-	if (r == NULL || name == NULL) return XTC_E_INVAL;
-	h = __reg_hash(name);
-	(void)__xtc_mtx_lock(&r->lock);
-#if XTC_DST_BUG(XTC_DST_BUG_REGDUP)
-	/* planted bug (REGDUP): skip the already-registered check -> a
-	 * second pid can register a name a first still holds, so two winners
-	 * hold one name at once and test_sim_reg's at-most-one-holder
-	 * invariant fires (g_bad_dup). */
-#else
-	if (__reg_find_locked(r, name, h) != NULL) { rc = XTC_E_INVAL; goto out; }
-#endif
-	if ((rc = __os_calloc(1, sizeof *node, (void **)&node)) != XTC_OK)
-		goto out;
-	if ((rc = __os_strdup(name, &node->name)) != XTC_OK) {
-		__os_free(node);
-		goto out;
-	}
-	node->hash = h;
-	node->pid = pid;
-	__reg_insert_locked(r, node);
-out:
-	(void)__xtc_mtx_unlock(&r->lock);
-	return rc;
-}
 
+/*
+ * PUBLIC: int       xtc_reg_del __P((xtc_reg_t *, const char *, xtc_pid_t));
+ *
+ * Remove one entry under `name`: with pid XTC_PID_NONE the most recent
+ * one (for a unique name, its only entry), otherwise the one for (name,
+ * pid).  Either kind, unique or duplicate-key.  XTC_E_NOTFOUND if none
+ * matches.
+ */
 int
-xtc_reg_unregister(xtc_reg_t *r, const char *name)
+xtc_reg_del(xtc_reg_t *r, const char *name, xtc_pid_t pid)
 {
 	struct reg_node **link, *node;
 	uint32_t h;
-	int rc = XTC_E_INVAL;
+	int any = xtc_pid_is_none(pid);
+	int rc = XTC_E_NOTFOUND;
 	if (r == NULL || name == NULL) return XTC_E_INVAL;
 	h = __reg_hash(name);
 	(void)__xtc_mtx_lock(&r->lock);
 	for (link = __reg_bucket(r, h); (node = *link) != NULL;
 	    link = &node->next) {
-		if (node->hash == h && strcmp(node->name, name) == 0) {
-			*link = node->next;      /* unlink by link pointer */
-			__os_free(node->name);
-			__os_free(node);
-			r->n--;
-			rc = XTC_OK;
-			break;
-		}
+		if (node->hash != h || strcmp(node->name, name) != 0)
+			continue;
+		if (!any && !xtc_pid_eq(node->pid, pid))
+			continue;
+		*link = node->next;      /* unlink by link pointer */
+		__os_free(node->name);
+		__os_free(node);
+		r->n--;
+		rc = XTC_OK;
+		break;
 	}
 	(void)__xtc_mtx_unlock(&r->lock);
 	return rc;
 }
 
+/*
+ * PUBLIC: int       xtc_reg_get __P((xtc_reg_t *, const char *, xtc_pid_t *));
+ *
+ * The pid of the most recent entry under `name` (for a unique name, its
+ * holder).  XTC_E_NOTFOUND on a miss.
+ */
 int
-xtc_reg_whereis(xtc_reg_t *r, const char *name, xtc_pid_t *out_pid)
+xtc_reg_get(xtc_reg_t *r, const char *name, xtc_pid_t *out_pid)
 {
 	struct reg_node *node;
-	int rc = XTC_E_INVAL;
+	int rc = XTC_E_NOTFOUND;
 	if (r == NULL || name == NULL || out_pid == NULL) return XTC_E_INVAL;
 	/*
 	 * Buggify: under DST, occasionally report a registered name as
@@ -266,7 +253,7 @@ xtc_reg_whereis(xtc_reg_t *r, const char *name, xtc_pid_t *out_pid)
 	 * is inactive.
 	 */
 	if (XTC_SIM_BUGGIFY("reg.whereis.transient_miss") && xtc_sim_fault(250))
-		return XTC_E_INVAL;
+		return XTC_E_NOTFOUND;
 	(void)__xtc_mtx_lock(&r->lock);
 	node = __reg_find_locked(r, name, __reg_hash(name));
 	if (node != NULL) {
@@ -286,72 +273,6 @@ xtc_reg_count(const xtc_reg_t *r)
 	n = r->n;
 	(void)__xtc_mtx_unlock((pthread_mutex_t *)&r->lock);
 	return n;
-}
-
-/*
- * Duplicate-key (pub/sub, group-membership) registration: unlike
- * xtc_reg_register, many pids may share one key.  This is the substrate
- * for process groups (xtc_pg).  Registering the same (key, pid) twice is
- * idempotent (returns XTC_OK without adding a second node).
- */
-int
-xtc_reg_register_dup(xtc_reg_t *r, const char *key, xtc_pid_t pid)
-{
-	struct reg_node *node;
-	uint32_t h;
-	int rc = XTC_OK;
-	if (r == NULL || key == NULL) return XTC_E_INVAL;
-	h = __reg_hash(key);
-	(void)__xtc_mtx_lock(&r->lock);
-	/* Idempotent: skip if this exact (key, pid) is already present. */
-	for (node = *__reg_bucket(r, h); node != NULL; node = node->next)
-		if (node->hash == h && node->dup &&
-		    strcmp(node->name, key) == 0 &&
-		    xtc_pid_eq(node->pid, pid)) {
-			goto out;   /* already a member */
-		}
-	if ((rc = __os_calloc(1, sizeof *node, (void **)&node)) != XTC_OK)
-		goto out;
-	if ((rc = __os_strdup(key, &node->name)) != XTC_OK) {
-		__os_free(node);
-		goto out;
-	}
-	node->hash = h;
-	node->pid = pid;
-	node->dup = 1;
-	__reg_insert_locked(r, node);
-out:
-	(void)__xtc_mtx_unlock(&r->lock);
-	return rc;
-}
-
-/*
- * Remove one (key, pid) duplicate-key entry (a group leave).  Returns
- * XTC_OK if removed, XTC_E_INVAL if not a member.
- */
-int
-xtc_reg_unregister_pid(xtc_reg_t *r, const char *key, xtc_pid_t pid)
-{
-	struct reg_node **link, *node;
-	uint32_t h;
-	int rc = XTC_E_INVAL;
-	if (r == NULL || key == NULL) return XTC_E_INVAL;
-	h = __reg_hash(key);
-	(void)__xtc_mtx_lock(&r->lock);
-	for (link = __reg_bucket(r, h);
-	    (node = *link) != NULL; link = &node->next) {
-		if (node->hash == h && strcmp(node->name, key) == 0 &&
-		    xtc_pid_eq(node->pid, pid)) {
-			*link = node->next;
-			__os_free(node->name);
-			__os_free(node);
-			r->n--;
-			rc = XTC_OK;
-			break;
-		}
-	}
-	(void)__xtc_mtx_unlock(&r->lock);
-	return rc;
 }
 
 /*
@@ -420,7 +341,7 @@ xtc_reg_members(xtc_reg_t *r, const char *key,
 /*
  * The reaper is a small proc the embedder spawns once with
  * xtc_reg_reaper as the body and the registry as the argument.  It
- * registers its own pid in the registry (so xtc_reg_register_mon can
+ * registers its own pid in the registry (so xtc_reg_put can
  * find it), then loops: each REG_REAPER_MONITOR request arms an
  * xtc_monitor on the named pid; every DOWN it receives (a monitored
  * pid exited) triggers xtc_reg_drop_pid so the dead pid leaves every
@@ -438,7 +359,7 @@ xtc_reg_reaper(void *arg)
 	if (xtc_cancel_requested())
 		return;
 
-	/* Publish the reaper's pid so xtc_reg_register_mon can reach it.  A
+	/* Publish the reaper's pid so xtc_reg_put can reach it.  A
 	 * second reaper for the same registry takes over enrollment. */
 	(void)__xtc_mtx_lock(&r->lock);
 	r->reaper = self;
@@ -461,7 +382,7 @@ xtc_reg_reaper(void *arg)
 			break;
 		}
 
-		/* A monitor request from xtc_reg_register_mon. */
+		/* A monitor request from xtc_reg_put. */
 		if (len == sizeof(struct reg_reaper_msg)) {
 			struct reg_reaper_msg m;
 			memcpy(&m, msg, sizeof m);
@@ -523,7 +444,7 @@ __xtc_reg_reaper_set(xtc_reg_t *r, xtc_pid_t pid)
 /*
  * Ask the reaper (if one runs) to monitor `pid` so the entry `name` is
  * dropped when pid goes DOWN; on a failed enrollment roll the entry back
- * and report it.  Shared by xtc_reg_register_mon and xtc_reg_put with
+ * and report it.  Shared by xtc_reg_put and xtc_reg_put with
  * XTC_REG_MONITOR.  The entry is already in the table.
  */
 static int
@@ -550,7 +471,7 @@ __reg_enroll_mon(xtc_reg_t *r, const char *name, xtc_pid_t pid)
 		 * The send is bounded (the reaper's mailbox can be full), so
 		 * the loss is real and possible.  Roll the registration BACK
 		 * and report it, so the caller never holds a "monitored" name
-		 * that nothing is watching.  xtc_reg_unregister_pid removes
+		 * that nothing is watching.  xtc_reg_del removes
 		 * the name only if it is still bound to THIS pid, so it cannot
 		 * clobber a concurrent re-registration of the same name.  The
 		 * drop stays diagnosable via XTC_TAIL_LIFECYCLE_DROP too.
@@ -560,7 +481,7 @@ __reg_enroll_mon(xtc_reg_t *r, const char *name, xtc_pid_t pid)
 			__xtc_tail_emit(XTC_TAIL_SCHED,
 			    XTC_TAIL_LIFECYCLE_DROP, pid,
 			    (uint64_t)(int64_t)rc);
-			(void)xtc_reg_unregister_pid(r, name, pid);
+			(void)xtc_reg_del(r, name, pid);
 			return (rc == XTC_E_RESOURCE) ? XTC_E_RESOURCE
 			                              : XTC_E_AGAIN;
 		}
@@ -568,26 +489,17 @@ __reg_enroll_mon(xtc_reg_t *r, const char *name, xtc_pid_t pid)
 	return XTC_OK;
 }
 
-int
-xtc_reg_register_mon(xtc_reg_t *r, const char *name, xtc_pid_t pid)
-{
-	int rc;
-	if (r == NULL || name == NULL) return XTC_E_INVAL;
-	if ((rc = xtc_reg_register(r, name, pid)) != XTC_OK)
-		return rc;
-	return __reg_enroll_mon(r, name, pid);
-}
 
 /*
  * PUBLIC: int       xtc_reg_put __P((xtc_reg_t *, const char *, xtc_pid_t, void *, unsigned));
  *
  * One entry: name -> (pid, value), the general form of register /
  * register_dup / register_mon.  A unique name that is taken is
- * XTC_E_EXIST (xtc_reg_register says XTC_E_INVAL for the same thing; it
+ * XTC_E_EXIST (xtc_reg_put says XTC_E_INVAL for the same thing; it
  * keeps that for compatibility).  XTC_REG_DUP adds a duplicate-key
  * member; putting the same (key, pid) twice is idempotent and keeps the
  * first value.  XTC_REG_MONITOR enrolls pid with the reaper, as
- * xtc_reg_register_mon does, rolling the entry back if that fails.
+ * xtc_reg_put does, rolling the entry back if that fails.
  */
 int
 xtc_reg_put(xtc_reg_t *r, const char *name, xtc_pid_t pid, void *value,
@@ -605,7 +517,7 @@ xtc_reg_put(xtc_reg_t *r, const char *name, xtc_pid_t pid, void *value,
 	(void)__xtc_mtx_lock(&r->lock);
 	/* Unique: any entry under the name blocks it.  Duplicate-key: only
 	 * the same (key, pid) is a no-op; a unique holder of the key does
-	 * not block group members, as with xtc_reg_register_dup. */
+	 * not block group members, as with xtc_reg_put. */
 	for (node = *__reg_bucket(r, h); node != NULL; node = node->next) {
 		if (node->hash != h || strcmp(node->name, name) != 0)
 			continue;
@@ -648,7 +560,7 @@ out:
  * are fine.  A nonzero return from fn stops the walk.
  *
  * A miss is authoritative: XTC_E_NOTFOUND means no entry existed at the
- * moment of the walk (unlike xtc_reg_whereis there is no simulated
+ * moment of the walk (unlike xtc_reg_get there is no simulated
  * transient miss).  *out_n (optional) gets the number of entries visited.
  */
 int
@@ -763,7 +675,7 @@ __reg_waiter_drop(void *arg)
  * timer.  The common use: a client whose server died waits for the
  * supervisor to register the next incarnation (not_pid = the dead one).
  * The lookup is exact (no simulated transient miss, unlike
- * xtc_reg_whereis).  From a proc it parks the fiber; from a plain thread
+ * xtc_reg_get).  From a proc it parks the fiber; from a plain thread
  * it blocks the thread.  Kill-safe: a killed waiter is unlinked by a
  * scope finalizer before its wait state is freed.
  */
@@ -899,7 +811,7 @@ xtc_svr_call_name(xtc_reg_t *r, const char *name,
 	xtc_pid_t pid;
 	int rc;
 	if (r == NULL || name == NULL) return XTC_E_INVAL;
-	if ((rc = xtc_reg_whereis(r, name, &pid)) != XTC_OK)
+	if ((rc = xtc_reg_get(r, name, &pid)) != XTC_OK)
 		return XTC_E_NOTFOUND;
 	return xtc_svr_call(pid, req, req_size, out_reply, out_size,
 	    timeout_ns);

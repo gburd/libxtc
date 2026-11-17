@@ -90,13 +90,13 @@ con_worker(void *arg)
 	int rc;
 
 	/* Odd workers take the name with xtc_reg_put (2.2), even ones with
-	 * xtc_reg_register, so the at-most-one-holder invariant (and planted
+	 * xtc_reg_put, so the at-most-one-holder invariant (and planted
 	 * bug 8, REGDUP) covers both paths.  A taken name is XTC_E_EXIST
 	 * from put and XTC_E_INVAL from register. */
 	if (id & 1)
 		rc = xtc_reg_put(g_reg, name, self, (void *)(intptr_t)(id + 1), 0);
 	else
-		rc = xtc_reg_register(g_reg, name, self);
+		rc = xtc_reg_put(g_reg, name, self, NULL, 0);
 	if (rc == ((id & 1) ? XTC_E_EXIST : XTC_E_INVAL)) {
 		/* Name already taken by another fiber -- a legal, expected
 		 * loser; do not touch it.  Yield so a winner can proceed. */
@@ -116,14 +116,14 @@ con_worker(void *arg)
 	xtc_yield();     /* hold across a yield so others contend the name */
 
 	/* whereis must resolve to OUR pid (deterministic resolution). */
-	if (xtc_reg_whereis(g_reg, name, &got) != XTC_OK ||
+	if (xtc_reg_get(g_reg, name, &got) != XTC_OK ||
 	    got.loop_id != self.loop_id || got.local_id != self.local_id ||
 	    got.gen != self.gen)
 		xtc_atomic_fetch_add_i32(&g_bad_resolve, 1, xtc_mo_relaxed);
 	fold((long)((uint64_t)slot << 16 ^ got.local_id));
 
 	xtc_atomic_fetch_sub_i32(&g_held[slot], 1, xtc_mo_relaxed);
-	(void)xtc_reg_unregister(g_reg, name);
+	(void)xtc_reg_del(g_reg, name, XTC_PID_NONE);
 	xtc_atomic_fetch_add_i32(&g_done, 1, xtc_mo_relaxed);
 }
 
@@ -190,7 +190,7 @@ churn_worker(void *arg)
 	snprintf(name, sizeof name, "priv.%d", id);
 	for (it = 0; it < CHURN_ITERS; it++) {
 		int tries;
-		if (xtc_reg_register(g_creg, name, self) != XTC_OK) {
+		if (xtc_reg_put(g_creg, name, self, NULL, 0) != XTC_OK) {
 			xtc_atomic_fetch_add_i32(&g_creg_bad, 1,
 			    xtc_mo_relaxed);
 			break;
@@ -199,14 +199,14 @@ churn_worker(void *arg)
 		/* whereis must resolve to self.  The retry buggify may make
 		 * a lookup transiently miss; retry (a fresh draw succeeds). */
 		for (tries = 0; tries < 100000; tries++) {
-			if (xtc_reg_whereis(g_creg, name, &got) == XTC_OK)
+			if (xtc_reg_get(g_creg, name, &got) == XTC_OK)
 				break;
 			xtc_yield();
 		}
 		if (got.local_id != self.local_id)
 			xtc_atomic_fetch_add_i32(&g_creg_bad, 1,
 			    xtc_mo_relaxed);
-		(void)xtc_reg_unregister(g_creg, name);
+		(void)xtc_reg_del(g_creg, name, XTC_PID_NONE);
 		xtc_atomic_fetch_add_i32(&g_creg_ok, 1, xtc_mo_relaxed);
 	}
 	xtc_atomic_fetch_add_i32(&g_creg_done, 1, xtc_mo_relaxed);
@@ -277,23 +277,23 @@ pg_worker(void *arg)
 	int i;
 
 	/* Join a shared group idempotently (double-join must not double-add). */
-	(void)xtc_reg_register_dup(g_preg, "grp", self);
-	(void)xtc_reg_register_dup(g_preg, "grp", self);
+	(void)xtc_reg_put(g_preg, "grp", self, NULL, XTC_REG_DUP);
+	(void)xtc_reg_put(g_preg, "grp", self, NULL, XTC_REG_DUP);
 	xtc_yield();
 
 	/* Half the workers leave; the other half stay.  A worker also joins
 	 * a second group to exercise multi-key membership. */
-	(void)xtc_reg_register_dup(g_preg, "grp2", self);
+	(void)xtc_reg_put(g_preg, "grp2", self, NULL, XTC_REG_DUP);
 	xtc_yield();
 
 	if (id % 2 == 0) {
 		/* Even ids leave grp explicitly. */
-		int rc = xtc_reg_unregister_pid(g_preg, "grp", self);
+		int rc = xtc_reg_del(g_preg, "grp", self);
 		/* Leaving a member must succeed exactly once. */
 		if (rc != XTC_OK)
 			xtc_atomic_fetch_add_i32(&g_pg_bad, 1, xtc_mo_relaxed);
 		/* A second leave must fail (no phantom membership). */
-		if (xtc_reg_unregister_pid(g_preg, "grp", self) == XTC_OK)
+		if (xtc_reg_del(g_preg, "grp", self) == XTC_OK)
 			xtc_atomic_fetch_add_i32(&g_pg_bad, 1, xtc_mo_relaxed);
 	} else if (id == 1) {
 		/* One worker drops itself from EVERY key (simulates the

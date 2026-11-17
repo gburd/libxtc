@@ -83,7 +83,7 @@ typedef struct xtc_child_spec {
 	 * child in its registry (xtc_sup_opts_t.registry; an xtc_app's own),
 	 * replacing the previous incarnation's entry, and removes when the
 	 * child dies.  Clients find the current incarnation with
-	 * xtc_reg_whereis, or wait for the next one with
+	 * xtc_reg_get, or wait for the next one with
 	 * xtc_reg_whereis_wait.  NULL = none.  Must stay valid for the
 	 * supervisor's life; at most one child per name.
 	 */

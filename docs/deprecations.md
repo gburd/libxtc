@@ -67,8 +67,14 @@ result keeps working until it moves to the new name.
 | `xtc_loop_fini()` | `xtc_loop_destroy()` | function | the new name returns void; the old one returns XTC_E_INVAL for NULL, else XTC_OK |
 | `xtc_loop_init()` | `xtc_loop_create()` | function |  |
 | `xtc_pg_join()` | `xtc_pg_subscribe()` | function |  |
-| `xtc_pg_leave()` | `xtc_pg_unsubscribe()` | function |  |
+| `xtc_pg_leave()` | `xtc_pg_unsubscribe()` | function | a non-member is XTC_E_NOTFOUND (the old name: XTC_E_INVAL) |
 | `xtc_preempt_set_involuntary()` | `xtc_runtime_set_preempt_involuntary()` | function |  |
+| `xtc_reg_register()` | `xtc_reg_put()` | function | call it as xtc_reg_put(r, name, pid, NULL, 0); a taken name is XTC_E_EXIST (the old name: XTC_E_INVAL) |
+| `xtc_reg_register_dup()` | `xtc_reg_put()` | function | call it as xtc_reg_put(r, key, pid, NULL, XTC_REG_DUP) |
+| `xtc_reg_register_mon()` | `xtc_reg_put()` | function | call it as xtc_reg_put(r, name, pid, NULL, XTC_REG_MONITOR) |
+| `xtc_reg_unregister()` | `xtc_reg_del()` | function | call it as xtc_reg_del(r, name, XTC_PID_NONE); a miss is XTC_E_NOTFOUND (the old name: XTC_E_INVAL) |
+| `xtc_reg_unregister_pid()` | `xtc_reg_del()` | function | same arguments; a miss is XTC_E_NOTFOUND (the old name: XTC_E_INVAL) |
+| `xtc_reg_whereis()` | `xtc_reg_get()` | function | same arguments; a miss is XTC_E_NOTFOUND (the old name: XTC_E_INVAL) |
 | `xtc_scope_close()` | `xtc_scope_leave()` | function |  |
 | `xtc_scope_open()` | `xtc_scope_enter()` | function |  |
 | `xtc_set_stack_size()` | `xtc_runtime_set_stack_size()` | function |  |

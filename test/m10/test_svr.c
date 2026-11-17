@@ -448,7 +448,7 @@ call_name_driver(void *arg)
 	/* Bump the counter so the read returns something nonzero. */
 	{
 		xtc_pid_t p;
-		if (xtc_reg_whereis(g_cn_reg, "counter.named", &p) == XTC_OK) {
+		if (xtc_reg_get(g_cn_reg, "counter.named", &p) == XTC_OK) {
 			(void)xtc_svr_cast(p, NULL, 0);
 			(void)xtc_svr_cast(p, NULL, 0);
 		}
@@ -501,8 +501,7 @@ test_svr_call_name(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_svr_start(loop, &cb, &state, &opts, &g_cn_svr),
 	    ==, XTC_OK);
-	munit_assert_int(xtc_reg_register(g_cn_reg, "counter.named",
-	    xtc_svr_pid(g_cn_svr)), ==, XTC_OK);
+	munit_assert_int(xtc_reg_put(g_cn_reg, "counter.named", xtc_svr_pid(g_cn_svr), NULL, 0), ==, XTC_OK);
 
 	xtc_atomic_store_i32(&a.result, -2, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&a.miss_rc, 12345, xtc_mo_seq_cst);

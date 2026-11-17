@@ -159,7 +159,7 @@ and removes when the child dies (its own exit, a sibling restart, a
 stop), before it restarts it.  So the name never names a dead
 incarnation once the supervisor has seen its death, and a client finds
 the current incarnation with
-.Fn xtc_reg_whereis
+.Fn xtc_reg_get
 or waits for the next with
 .Fn xtc_reg_whereis_wait
 .Pq Xr xtc_reg 3 .

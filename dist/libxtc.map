@@ -106,6 +106,8 @@ XTC_2.2 {
 		xtc_pg_subscribe;
 		xtc_pg_unsubscribe;
 		xtc_proc_set_label;
+		xtc_reg_del;
+		xtc_reg_get;
 		xtc_reg_put;
 		xtc_reg_send_wait;
 		xtc_reg_visit;

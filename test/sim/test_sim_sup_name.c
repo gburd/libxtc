@@ -129,7 +129,7 @@ match_reply_or_down(const void *data, size_t size, void *u)
 
 /* xtc_reg_visit callback: if the entry names *u (the dead pid), clear
  * *u to XTC_PID_NONE as the "stale" mark.  An exact lookup, unlike
- * xtc_reg_whereis, which may report a simulated transient miss. */
+ * xtc_reg_get, which may report a simulated transient miss. */
 static int
 stale_fn(xtc_pid_t pid, void *value, void *u)
 {

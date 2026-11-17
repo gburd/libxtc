@@ -13,7 +13,7 @@
  *	Single-node only.  Cross-node process groups need the (unbuilt)
  *	distributed module; this is the local substrate.
  *
- *	A group set is backed by an xtc_reg_t (see xtc_reg_register_dup),
+ *	A group set is backed by an xtc_reg_t (see xtc_reg_put),
  *	so it composes with the app registry: pass xtc_app_registry(app)
  *	to share one namespace, or a dedicated xtc_reg_t for isolation.
  */
@@ -45,7 +45,7 @@ extern "C" {
  * itself with xtc_self(). */
 XTC_API int xtc_pg_subscribe(xtc_reg_t *reg, const char *group, xtc_pid_t pid);
 
-/* Remove `pid` from `group`.  XTC_E_INVAL if not a member. */
+/* Remove `pid` from `group`.  XTC_E_NOTFOUND if not a member. */
 XTC_API int xtc_pg_unsubscribe(xtc_reg_t *reg, const char *group, xtc_pid_t pid);
 
 /* Visit every member pid of `group` (callback runs under the registry

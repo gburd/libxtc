@@ -51,7 +51,7 @@ test_pg_membership(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_pg_unsubscribe(r, "g", b), ==, XTC_OK);
 	n = 0;
 	munit_assert_int(xtc_pg_members(r, "g", count_cb, &n), ==, 2);
-	munit_assert_int(xtc_pg_unsubscribe(r, "g", b), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_pg_unsubscribe(r, "g", b), ==, XTC_E_NOTFOUND);
 
 	/* An empty group sends to nobody. */
 	munit_assert_int(xtc_pg_send(r, "empty", "x", 1), ==, 0);

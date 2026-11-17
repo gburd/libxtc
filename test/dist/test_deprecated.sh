@@ -87,6 +87,22 @@ if [ -n "${XTC_BUILD_DIR:-}" ] && [ -f "$XTC_BUILD_DIR/libxtc.a" ]; then
 		diff "$work/decl" "$work/rows" | grep '^[<>]' >&2
 		exit 1
 	fi
+	# Every row has a DEPRECATED entry in a man page and a man3 alias
+	# (`man 3 old` must resolve).
+	for p in "$SRC"/man/man3/*.3; do
+		awk '/^\.S[hH] DEPRECATED/ { f = 1; next } /^\.S[hH] / { f = 0 }
+		    f && /^\.(It Fn|It Dv|It Vt|B) / { print $NF }' "$p"
+	done | sort -u > "$work/mandep"
+	awk '{ print $1 }' "$work/old" | sort -u > "$work/allrows"
+	if ! cmp -s "$work/mandep" "$work/allrows"; then
+		echo "  [deprecated] FAIL: man DEPRECATED entries and the" \
+			"docs/deprecations.md rows differ (< man, > table):" >&2
+		diff "$work/mandep" "$work/allrows" | grep '^[<>]' >&2
+		exit 1
+	fi
+	while read -r o; do
+		[ -f "$SRC/man/man3/$o.3" ] || bad="$bad $o(no-man3-alias)"
+	done < "$work/allrows"
 	if [ -n "$bad" ]; then
 		echo "  [deprecated] FAIL: docs/deprecations.md rows whose warning" \
 			"in test_deprecated_bridge.c is wrong:$bad" >&2

@@ -4,6 +4,8 @@
 #ifndef ORC_EXT_H
 #define ORC_EXT_H
 
+int       xtc_reg_del __P((xtc_reg_t *, const char *, xtc_pid_t));
+int       xtc_reg_get __P((xtc_reg_t *, const char *, xtc_pid_t *));
 int       xtc_reg_put __P((xtc_reg_t *, const char *, xtc_pid_t, void *, unsigned));
 int       xtc_reg_send_wait __P((xtc_reg_t *, const char *, const void *, size_t, int64_t));
 int       xtc_reg_visit __P((xtc_reg_t *, const char *, xtc_reg_visit_fn, void *, int *));

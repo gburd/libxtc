@@ -406,8 +406,8 @@ than one lock.  Prefer, of course, not holding two (Shift 3).
 ## Naming procs in the output
 
 libxtc does not store a name on the proc, so `xtc-procs` shows pids.
-If you register procs by name (`xtc_reg_register(reg, "wal", pid)`),
-cross-reference with `xtc_reg_whereis`.  A future revision may add a
+If you register procs by name (`xtc_reg_put(reg, "wal", pid, NULL, 0)`),
+cross-reference with `xtc_reg_get`.  A future revision may add a
 short name field to the proc for zero-setup labels.
 
 ## Programmatic observability (no debugger)

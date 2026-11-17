@@ -809,7 +809,7 @@ test_app_giveup_returns(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
-/* The app runs its registry's reaper: xtc_reg_register_mon on
+/* The app runs its registry's reaper: xtc_reg_put on
  * xtc_app_registry(app) drops the name when the pid dies, with no setup,
  * and the reaper leaves with the supervisor. */
 static xtc_app_t *g_rm_app;
@@ -830,14 +830,14 @@ rm_driver(void *arg)
 	(void)arg;
 	if (xtc_proc_spawn(xtc_app_loop(g_rm_app), rm_victim, NULL, NULL, &v) !=
 	        XTC_OK ||
-	    xtc_reg_register_mon(reg, "victim", v) != XTC_OK) {
+	    xtc_reg_put(reg, "victim", v, NULL, XTC_REG_MONITOR) != XTC_OK) {
 		g_rm_found_after = -1;
 		(void)xtc_app_stop(g_rm_app);
 		return;
 	}
 	for (i = 0; i < 200; i++) {
 		(void)xtc_proc_sleep(1 * MS);
-		if (xtc_reg_whereis(reg, "victim", &got) != XTC_OK)
+		if (xtc_reg_get(reg, "victim", &got) != XTC_OK)
 			break;
 	}
 	g_rm_found_after = (i == 200);

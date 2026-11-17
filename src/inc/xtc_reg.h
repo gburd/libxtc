@@ -37,15 +37,11 @@ typedef int (*xtc_reg_visit_fn)(xtc_pid_t pid, void *value, void *user);
 /*
  * PUBLIC: int       xtc_reg_create __P((xtc_reg_t **));
  * PUBLIC: void      xtc_reg_destroy __P((xtc_reg_t *));
- * PUBLIC: int       xtc_reg_register __P((xtc_reg_t *, const char *, xtc_pid_t));
- * PUBLIC: int       xtc_reg_unregister __P((xtc_reg_t *, const char *));
- * PUBLIC: int       xtc_reg_whereis __P((xtc_reg_t *, const char *, xtc_pid_t *));
+ * PUBLIC: int       xtc_reg_get __P((xtc_reg_t *, const char *, xtc_pid_t *));
+ * PUBLIC: int       xtc_reg_del __P((xtc_reg_t *, const char *, xtc_pid_t));
  * PUBLIC: int       xtc_reg_count __P((const xtc_reg_t *));
- * PUBLIC: int       xtc_reg_register_dup __P((xtc_reg_t *, const char *, xtc_pid_t));
- * PUBLIC: int       xtc_reg_unregister_pid __P((xtc_reg_t *, const char *, xtc_pid_t));
  * PUBLIC: int       xtc_reg_drop_pid __P((xtc_reg_t *, xtc_pid_t));
  * PUBLIC: void      xtc_reg_reaper __P((void *));
- * PUBLIC: int       xtc_reg_register_mon __P((xtc_reg_t *, const char *, xtc_pid_t));
  * PUBLIC: int       xtc_svr_call_name __P((xtc_reg_t *, const char *, const void *, size_t, void **, size_t *, int64_t));
  * PUBLIC: int       xtc_reg_members __P((xtc_reg_t *, const char *, int (*)(xtc_pid_t, void *), void *));
  * PUBLIC: int       xtc_reg_put __P((xtc_reg_t *, const char *, xtc_pid_t, void *, unsigned));
@@ -56,24 +52,20 @@ typedef int (*xtc_reg_visit_fn)(xtc_pid_t pid, void *value, void *user);
 XTC_API int  xtc_reg_create(xtc_reg_t **out);
 XTC_API void xtc_reg_destroy(xtc_reg_t *r);
 
-/* Register name -> pid.  Fails with XTC_E_INVAL if name already taken. */
-XTC_API int  xtc_reg_register(xtc_reg_t *r, const char *name, xtc_pid_t pid);
+/* Look up a pid by name (2.2): for a unique name its holder, for a group
+ * key its most recent member (walk a group with xtc_reg_visit).  Writes
+ * *out_pid on XTC_OK; XTC_E_NOTFOUND if `name` has no entry, XTC_E_INVAL
+ * for a NULL argument.  Under the simulator a lookup may report a
+ * transient miss (buggify), as a racing xtc_reg_del could. */
+XTC_API int  xtc_reg_get(xtc_reg_t *r, const char *name, xtc_pid_t *out_pid);
 
-/* Remove a name.  Returns XTC_E_INVAL if not registered. */
-XTC_API int  xtc_reg_unregister(xtc_reg_t *r, const char *name);
-
-/* Look up a pid by name.  Writes to *out_pid on success. */
-XTC_API int  xtc_reg_whereis(xtc_reg_t *r, const char *name, xtc_pid_t *out_pid);
+/* Remove one entry under `name` (2.2): with pid XTC_PID_NONE its most
+ * recent entry (for a unique name, the only one), otherwise the entry
+ * for (name, pid), such as one group member.  XTC_E_NOTFOUND if there is
+ * none. */
+XTC_API int  xtc_reg_del(xtc_reg_t *r, const char *name, xtc_pid_t pid);
 
 XTC_API int  xtc_reg_count(const xtc_reg_t *r);
-
-/* Duplicate-key (pub/sub, group-membership) registration: many pids may
- * share one key.  The substrate for process groups.  Registering the
- * same (key, pid) twice is idempotent. */
-XTC_API int  xtc_reg_register_dup(xtc_reg_t *r, const char *key, xtc_pid_t pid);
-
-/* Remove one (key, pid) duplicate-key entry (a group leave). */
-XTC_API int  xtc_reg_unregister_pid(xtc_reg_t *r, const char *key, xtc_pid_t pid);
 
 /* Remove `pid` from EVERY key it is registered under (unique names and
  * all duplicate-key groups).  The "process left everything" cleanup an
@@ -83,8 +75,8 @@ XTC_API int  xtc_reg_unregister_pid(xtc_reg_t *r, const char *key, xtc_pid_t pid
 XTC_API int  xtc_reg_drop_pid(xtc_reg_t *r, xtc_pid_t pid);
 
 /* The crash-aware registry.  A proc with this body and the registry as
- * its argument registers itself, then auto-drops any pid registered via
- * xtc_reg_register_mon when that pid goes DOWN -- the automatic form of
+ * its argument registers itself, then auto-drops any pid put with
+ * XTC_REG_MONITOR when that pid goes DOWN -- the automatic form of
  * xtc_reg_drop_pid.  xtc_app_start runs one for xtc_app_registry(app)
  * and stops it with the root supervisor.  For a registry of your own,
  * spawn one (xtc_proc_spawn(loop, xtc_reg_reaper, reg, ...)) or make it
@@ -92,12 +84,6 @@ XTC_API int  xtc_reg_drop_pid(xtc_reg_t *r, xtc_pid_t pid);
  * XTC_APP_SHUTDOWN_MSG; it parks meanwhile, so a plain xtc_loop_run of
  * its loop does not return until one of those happens. */
 XTC_API void xtc_reg_reaper(void *reg);
-
-/* Register `name` -> `pid` (like xtc_reg_register) AND, if a reaper proc
- * is running, arrange for the entry to be auto-dropped when `pid` goes
- * DOWN.  With no reaper it is exactly xtc_reg_register (the caller may
- * still xtc_reg_drop_pid manually). */
-XTC_API int  xtc_reg_register_mon(xtc_reg_t *r, const char *name, xtc_pid_t pid);
 
 /* Via-dispatch: look up `name` -> pid, then xtc_svr_call it.  Returns
  * XTC_E_NOTFOUND if the name is not registered, otherwise the result of
@@ -116,19 +102,23 @@ XTC_API int  xtc_reg_members(xtc_reg_t *r, const char *key,
                              int (*fn)(xtc_pid_t pid, void *user), void *user);
 
 /*
- * Entries that carry a value (2.2).
+ * Adding entries (2.2).
  *
  * xtc_reg_put registers name -> (pid, value).  `value` is opaque and
  * owned by the caller: the registry stores it, hands it to
  * xtc_reg_visit, and never dereferences or frees it.  Flags:
  *   0                  a unique name; XTC_E_EXIST if it is taken
- *   XTC_REG_DUP        a duplicate-key member (as xtc_reg_register_dup)
+ *   XTC_REG_DUP        a duplicate-key (group) member: many pids may share
+ *                      one key; putting the same (key, pid) twice is a
+ *                      no-op that keeps the first value
  *   XTC_REG_MONITOR    also drop the entry when pid goes DOWN (needs the
- *                      reaper; as xtc_reg_register_mon)
+ *                      reaper; with none running it is a plain put).  If
+ *                      the enrollment cannot reach the reaper the entry
+ *                      is rolled back (XTC_E_AGAIN or XTC_E_RESOURCE).
  *
  * xtc_reg_visit calls fn(pid, value, user) for each entry under `name`
- * WITH THE REGISTRY LOCK HELD.  Remove an entry (xtc_reg_unregister,
- * xtc_reg_unregister_pid, xtc_reg_drop_pid) before freeing its value, and
+ * WITH THE REGISTRY LOCK HELD.  Remove an entry (xtc_reg_del,
+ * xtc_reg_drop_pid) before freeing its value, and
  * the value cannot be freed while fn uses it.  fn must not park and must
  * not call into the registry; xtc_proc_wake and atomics are fine.  A
  * nonzero return stops the walk.  Returns XTC_OK if at least one entry
@@ -173,6 +163,23 @@ XTC_API int xtc_reg_whereis_wait(xtc_reg_t *r, const char *name,
  */
 XTC_API int xtc_reg_send_wait(xtc_reg_t *r, const char *name,
     const void *data, size_t size, int64_t timeout_ns);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_reg_put")
+XTC_API int xtc_reg_register(xtc_reg_t *r, const char *name, xtc_pid_t pid);
+XTC_DEPRECATED("use xtc_reg_put")
+XTC_API int xtc_reg_register_dup(xtc_reg_t *r, const char *key, xtc_pid_t pid);
+XTC_DEPRECATED("use xtc_reg_put")
+XTC_API int xtc_reg_register_mon(xtc_reg_t *r, const char *name, xtc_pid_t pid);
+XTC_DEPRECATED("use xtc_reg_del")
+XTC_API int xtc_reg_unregister(xtc_reg_t *r, const char *name);
+XTC_DEPRECATED("use xtc_reg_del")
+XTC_API int xtc_reg_unregister_pid(xtc_reg_t *r, const char *key,
+    xtc_pid_t pid);
+XTC_DEPRECATED("use xtc_reg_get")
+XTC_API int xtc_reg_whereis(xtc_reg_t *r, const char *name, xtc_pid_t *out_pid);
 
 #ifdef __cplusplus
 }

@@ -6,58 +6,48 @@
 .Sh NAME
 .Nm xtc_reg_create ,
 .Nm xtc_reg_destroy ,
-.Nm xtc_reg_register ,
-.Nm xtc_reg_unregister ,
-.Nm xtc_reg_lookup ,
-.Nm xtc_reg_whereis ,
+.Nm xtc_reg_put ,
+.Nm xtc_reg_get ,
+.Nm xtc_reg_del ,
+.Nm xtc_reg_visit ,
+.Nm xtc_reg_members ,
 .Nm xtc_reg_count ,
-.Nm xtc_reg_register_dup ,
-.Nm xtc_reg_unregister_pid ,
 .Nm xtc_reg_drop_pid ,
 .Nm xtc_reg_reaper ,
-.Nm xtc_reg_register_mon ,
 .Nm xtc_svr_call_name ,
-.Nm xtc_reg_members ,
-.Nm xtc_reg_put ,
-.Nm xtc_reg_visit ,
 .Nm xtc_reg_whereis_wait ,
-.Nm xtc_reg_send_wait
+.Nm xtc_reg_send_wait ,
+.Nm xtc_reg_register ,
+.Nm xtc_reg_register_dup ,
+.Nm xtc_reg_register_mon ,
+.Nm xtc_reg_unregister ,
+.Nm xtc_reg_unregister_pid ,
+.Nm xtc_reg_whereis
 .Nd named process registry
 .Sh SYNOPSIS
-.In xtc.h
 .In xtc_reg.h
 .Ft int
 .Fn xtc_reg_create "xtc_reg_t **out"
 .Ft void
 .Fn xtc_reg_destroy "xtc_reg_t *r"
 .Ft int
-.Fn xtc_reg_register "xtc_reg_t *r" "const char *name" "xtc_pid_t pid"
+.Fn xtc_reg_put "xtc_reg_t *r" "const char *name" "xtc_pid_t pid" "void *value" "unsigned flags"
 .Ft int
-.Fn xtc_reg_unregister "xtc_reg_t *r" "const char *name"
+.Fn xtc_reg_get "xtc_reg_t *r" "const char *name" "xtc_pid_t *out_pid"
 .Ft int
-.Fn xtc_reg_lookup "xtc_reg_t *r" "const char *name" "xtc_pid_t *out"
+.Fn xtc_reg_del "xtc_reg_t *r" "const char *name" "xtc_pid_t pid"
 .Ft int
-.Fn xtc_reg_whereis "xtc_reg_t *r" "const char *name" "xtc_pid_t *out_pid"
+.Fn xtc_reg_visit "xtc_reg_t *r" "const char *name" "xtc_reg_visit_fn fn" "void *user" "int *out_n"
+.Ft int
+.Fn xtc_reg_members "xtc_reg_t *r" "const char *key" "int (*fn)(xtc_pid_t, void *)" "void *user"
 .Ft int
 .Fn xtc_reg_count "const xtc_reg_t *r"
-.Ft int
-.Fn xtc_reg_register_dup "xtc_reg_t *r" "const char *key" "xtc_pid_t pid"
-.Ft int
-.Fn xtc_reg_unregister_pid "xtc_reg_t *r" "const char *key" "xtc_pid_t pid"
 .Ft int
 .Fn xtc_reg_drop_pid "xtc_reg_t *r" "xtc_pid_t pid"
 .Ft void
 .Fn xtc_reg_reaper "void *reg"
 .Ft int
-.Fn xtc_reg_register_mon "xtc_reg_t *r" "const char *name" "xtc_pid_t pid"
-.Ft int
 .Fn xtc_svr_call_name "xtc_reg_t *r" "const char *name" "const void *req" "size_t req_size" "void **out_reply" "size_t *out_size" "int64_t timeout_ns"
-.Ft int
-.Fn xtc_reg_members "xtc_reg_t *r" "const char *key" "int (*fn)(xtc_pid_t, void *)" "void *user"
-.Ft int
-.Fn xtc_reg_put "xtc_reg_t *r" "const char *name" "xtc_pid_t pid" "void *value" "unsigned flags"
-.Ft int
-.Fn xtc_reg_visit "xtc_reg_t *r" "const char *name" "xtc_reg_visit_fn fn" "void *user" "int *out_n"
 .Ft int
 .Fn xtc_reg_whereis_wait "xtc_reg_t *r" "const char *name" "xtc_pid_t not_pid" "int64_t timeout_ns" "xtc_pid_t *out_pid"
 .Ft int
@@ -69,37 +59,44 @@ is a name-to-pid registry.  Modeled on Erlang's
 process registration.  Lets a process find a peer by canonical
 name without sharing pid pointers ahead of time.
 .Pp
-Names are short strings
-.Pq up to 64 bytes ;
-re-registering the same name with a different pid replaces the
-prior binding atomically.
-.Pp
+Names are strings.
 xtc_app owns a registry per app
 .Pq Xr xtc_app_registry 3 .
 Multiple registries are permitted for sharded namespaces.
 .Pp
-.Fn xtc_reg_whereis
+.Fn xtc_reg_put
+adds an entry (see
+.Sx Entries
+below).
+.Fn xtc_reg_get
 looks up the pid bound to
-.Fa name ,
+.Fa name
+.Pq the Erlang Sq whereis ,
 writing it to
-.Fa out_pid
-.Pq the Erlang Sq whereis No spelling of Fn xtc_reg_lookup .
+.Fa out_pid ;
+for a group key it reports the most recent member.
+It returns
+.Dv XTC_E_NOTFOUND
+when
+.Fa name
+has no entry.
+Under the simulator a lookup may report a transient miss, the outcome a
+racing removal can also produce; callers that loop retry.
+.Fn xtc_reg_del
+removes one entry: with
+.Fa pid
+.Dv XTC_PID_NONE
+the most recent entry under
+.Fa name
+(for a unique name, its only one), otherwise the entry for
+.Pq Fa name , Fa pid ,
+such as one member leaving a group.
+It returns
+.Dv XTC_E_NOTFOUND
+when nothing matches.
 .Fn xtc_reg_count
-returns the number of live registrations in
+returns the number of live entries in
 .Fa r .
-.Pp
-.Fn xtc_reg_register_dup
-registers a DUPLICATE-KEY entry: unlike
-.Fn xtc_reg_register
-(one pid per unique name), many pids may share one key, so a key names
-a GROUP -- the substrate for pub/sub and process groups.  Registering
-the same
-.Pq Fa key , Fa pid
-twice is idempotent.
-.Fn xtc_reg_unregister_pid
-removes one
-.Pq Fa key , Fa pid
-member (a group leave).
 .Fn xtc_reg_drop_pid
 removes
 .Fa pid
@@ -110,8 +107,8 @@ connection closes.
 .Pp
 .Fn xtc_reg_reaper
 is the CRASH-AWARE registry: a process with this body and the registry
-as its argument registers itself, then monitors every pid registered via
-.Fn xtc_reg_register_mon
+as its argument registers itself, then monitors every pid put with
+.Dv XTC_REG_MONITOR
 and calls
 .Fn xtc_reg_drop_pid
 automatically when such a pid goes DOWN -- the automatic form of the
@@ -127,33 +124,6 @@ or make it a supervised child.  It runs until it is killed or receives
 it parks meanwhile, so a plain
 .Xr xtc_loop_run 3
 of its loop does not return until one of those happens.
-.Fn xtc_reg_register_mon
-registers
-.Fa name No -> Fa pid
-like
-.Fn xtc_reg_register
-and, when a reaper is running, arranges the entry to be auto-dropped on
-the pid's DOWN; with no reaper it is exactly
-.Fn xtc_reg_register .
-.Pp
-When a reaper IS running,
-.Fn xtc_reg_register_mon
-either establishes monitoring or fails.
-If the enrollment cannot be delivered to the reaper -- its mailbox is
-bounded and may be full -- the name is rolled back and the call returns
-.Dv XTC_E_AGAIN
-.Pq or Dv XTC_E_RESOURCE ,
-so a caller never holds a monitored name that nothing is watching.
-Retry, or fall back to
-.Fn xtc_reg_register
-plus manual
-.Fn xtc_reg_drop_pid .
-If the reaper itself cannot establish the monitor, it drops the pid's
-names at once rather than leave them to outlive it.
-.Pp
-Releases before 1.50 returned
-.Dv XTC_OK
-even when the enrollment was lost, and such names were never reaped.
 .Pp
 .Fn xtc_svr_call_name
 is via-dispatch: it looks up
@@ -168,7 +138,7 @@ visits every pid registered under
 the callback runs UNDER the registry lock (keep it brief; do not
 re-enter the registry), a nonzero return stops the walk, and the return
 value is the number of members visited.
-.Ss Entries with a value
+.Ss Entries
 .Fn xtc_reg_put
 registers
 .Fa name
@@ -182,17 +152,28 @@ With
 0 the name is unique and a taken name is
 .Dv XTC_E_EXIST ;
 .Dv XTC_REG_DUP
-adds a duplicate-key member (putting the same key and pid again is a
-no-op that keeps the first value);
+adds a duplicate-key member: many pids may share one key, so a key
+names a GROUP, the substrate for pub/sub and process groups
+.Pq Xr xtc_pg 3 ;
+putting the same key and pid again is a no-op that keeps the first
+value.
 .Dv XTC_REG_MONITOR
 also drops the entry when
 .Fa pid
-goes DOWN, as
-.Fn xtc_reg_register_mon
-does (it needs the reaper, and rolls the entry back if enrollment fails).
-An entry made by
-.Fn xtc_reg_put
-is removed by the same calls as any other.
+goes DOWN.
+It needs a running reaper; with none it is a plain put.
+When a reaper IS running, the put either establishes monitoring or
+fails: if the enrollment cannot be delivered to the reaper (its mailbox
+is bounded and may be full) the entry is rolled back and the call
+returns
+.Dv XTC_E_AGAIN
+.Pq or Dv XTC_E_RESOURCE ,
+so a caller never holds a monitored name that nothing is watching.
+Retry, or put without the flag and call
+.Fn xtc_reg_drop_pid
+yourself.
+If the reaper itself cannot establish the monitor, it drops the pid's
+names at once rather than leave them to outlive it.
 .Pp
 .Fn xtc_reg_visit
 calls
@@ -215,7 +196,7 @@ It returns
 if at least one entry was visited and
 .Dv XTC_E_NOTFOUND
 if there was none; a miss is authoritative (unlike
-.Fn xtc_reg_whereis ,
+.Fn xtc_reg_get ,
 the simulator never fakes one).
 .Fa out_n ,
 if not NULL, gets the number visited.
@@ -236,7 +217,7 @@ interrupt_fn(xtc_pid_t pid, void *value, void *user)
 }
 
 /* owner, at start:  xtc_reg_put(reg, "backend:42", xtc_self(), b, 0);
- * owner, at exit:   xtc_reg_unregister(reg, "backend:42"); then free b */
+ * owner, at exit:   xtc_reg_del(reg, "backend:42", XTC_PID_NONE); then free b */
 uint32_t bit = INTERRUPT_CANCEL;
 rc = xtc_reg_visit(reg, "backend:42", interrupt_fn, &bit, NULL);
 .Ed
@@ -262,7 +243,7 @@ if (xtc_reg_whereis_wait(reg, "engine", dead_pid, 5000000000LL,
 .Pp
 A name that still names a dead process does not satisfy the wait.  The
 lookup is exact: unlike
-.Fn xtc_reg_whereis
+.Fn xtc_reg_get
 it never reports a simulated transient miss.  From a process it parks
 the fiber, and a waiter that is killed is unlinked from the registry on
 the way out; from a plain thread it blocks the thread.
@@ -306,18 +287,69 @@ an
 .Xr xtc_app 3
 child is named in
 .Fn xtc_app_registry .
+.Sh RETURN VALUES
+.Dv XTC_OK
+on success;
+.Dv XTC_E_INVAL
+for a NULL argument or unknown
+.Fa flags ;
+.Dv XTC_E_EXIST
+when
+.Fn xtc_reg_put
+finds a unique name taken;
+.Dv XTC_E_NOTFOUND
+when
+.Fn xtc_reg_get ,
+.Fn xtc_reg_del
+or
+.Fn xtc_reg_visit
+find no entry;
+.Dv XTC_E_NOMEM
+on allocation failure.
+The waits are described above.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 xtc_reg_t *r = xtc_app_registry(app);
 xtc_pid_t pid;
 
 /* Bind a name to my process. */
-xtc_reg_register(r, "metrics_proc", xtc_self());
+xtc_reg_put(r, "metrics_proc", xtc_self(), NULL, 0);
 
 /* From elsewhere: */
-if (xtc_reg_lookup(r, "metrics_proc", &pid) == XTC_OK)
+if (xtc_reg_get(r, "metrics_proc", &pid) == XTC_OK)
     xtc_send(pid, msg, sz);
 .Ed
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Fn xtc_reg_register
+Use
+.Fn xtc_reg_put ;
+call it as xtc_reg_put(r, name, pid, NULL, 0); a taken name is XTC_E_EXIST (the old name: XTC_E_INVAL).
+.It Fn xtc_reg_register_dup
+Use
+.Fn xtc_reg_put ;
+call it as xtc_reg_put(r, key, pid, NULL, XTC_REG_DUP).
+.It Fn xtc_reg_register_mon
+Use
+.Fn xtc_reg_put ;
+call it as xtc_reg_put(r, name, pid, NULL, XTC_REG_MONITOR).
+.It Fn xtc_reg_unregister
+Use
+.Fn xtc_reg_del ;
+call it as xtc_reg_del(r, name, XTC_PID_NONE); a miss is XTC_E_NOTFOUND (the old name: XTC_E_INVAL).
+.It Fn xtc_reg_unregister_pid
+Use
+.Fn xtc_reg_del ;
+same arguments; a miss is XTC_E_NOTFOUND (the old name: XTC_E_INVAL).
+.It Fn xtc_reg_whereis
+Use
+.Fn xtc_reg_get ;
+same arguments; a miss is XTC_E_NOTFOUND (the old name: XTC_E_INVAL).
+.El
 .Sh SEE ALSO
 .Xr xtc_app 3 ,
 .Xr xtc_proc 3 ,

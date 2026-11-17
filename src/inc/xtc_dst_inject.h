@@ -240,7 +240,7 @@
  * 44 APP_REAPER_LATE: xtc_app_start spawns the registry's reaper but does
  * not publish its pid; the reaper publishes it when it first runs, as a
  * hand-spawned reaper does.  A child on another loop that calls
- * xtc_reg_register_mon before loop 0 runs the reaper gets a plain,
+ * xtc_reg_put before loop 0 runs the reaper gets a plain,
  * unmonitored registration, and its name outlives it (test_sim_app: "a
  * monitored name outlived its proc").
  */

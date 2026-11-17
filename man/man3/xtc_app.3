@@ -93,7 +93,9 @@ its process registry.
 also spawns the registry's reaper
 .Pq Xr xtc_reg 3
 on the app's loop, so
-.Fn xtc_reg_register_mon
+.Fn xtc_reg_put
+with
+.Dv XTC_REG_MONITOR
 on
 .Fn xtc_app_registry
 drops a dead process's names with no setup; the reaper stops when the

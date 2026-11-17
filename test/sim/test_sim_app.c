@@ -14,11 +14,11 @@
  *	  - a SERVER child registers a well-known name in the app registry,
  *	    then serves request messages (reply = request + 1);
  *	  - CLIENT children (placed on other loops) look the server up by
- *	    name (xtc_reg_whereis), send a seeded value, await the reply,
+ *	    name (xtc_reg_get), send a seeded value, await the reply,
  *	    and record it -- proving the registry is usable across the app
  *	    lifecycle and cross-loop messaging works within the app;
  *	  - each client, and an unsupervised proc spawned on loop 1 before
- *	    the run, names itself with xtc_reg_register_mon and then exits;
+ *	    the run, names itself with xtc_reg_put and then exits;
  *	    the app's own reaper must drop every such name, also the one
  *	    registered before loop 0 has run the reaper (2.2: the reaper is
  *	    published at xtc_app_start; planted as APP_REAPER_LATE);
@@ -61,7 +61,7 @@ static xtc_app_t *g_app;
 static int g_replies_ok;     /* clients that got the right reply */
 static int g_clients_done;   /* clients that finished */
 static int g_reg_count_seen; /* registry count observed by server */
-static int g_mon_fail;       /* xtc_reg_register_mon calls that failed */
+static int g_mon_fail;       /* xtc_reg_put calls that failed */
 static int g_reg_count_end;  /* registry count once the clients are gone */
 
 /* Request/reply envelope: sender pid + a value. */
@@ -72,7 +72,7 @@ static void
 server(void *arg)
 {
 	(void)arg;
-	(void)xtc_reg_register(g_reg, SVC_NAME, xtc_self());
+	(void)xtc_reg_put(g_reg, SVC_NAME, xtc_self(), NULL, 0);
 	xtc_atomic_store_i32(&g_reg_count_seen, xtc_reg_count(g_reg),
 	    xtc_mo_seq_cst);
 	for (;;) {
@@ -104,11 +104,11 @@ client(void *arg)
 	char nm[16];
 
 	(void)snprintf(nm, sizeof nm, "client.%d", id);
-	if (xtc_reg_register_mon(g_reg, nm, xtc_self()) != XTC_OK)
+	if (xtc_reg_put(g_reg, nm, xtc_self(), NULL, XTC_REG_MONITOR) != XTC_OK)
 		xtc_atomic_fetch_add_i32(&g_mon_fail, 1, xtc_mo_seq_cst);
 
 	for (tries = 0; tries < 100; tries++) {
-		if (xtc_reg_whereis(g_reg, SVC_NAME, &svc) == XTC_OK &&
+		if (xtc_reg_get(g_reg, SVC_NAME, &svc) == XTC_OK &&
 		    !xtc_pid_is_none(svc))
 			break;
 		(void)xtc_proc_sleep(1000 * 1000LL);
@@ -146,7 +146,7 @@ static void
 early(void *arg)
 {
 	(void)arg;
-	if (xtc_reg_register_mon(g_reg, "early", xtc_self()) != XTC_OK)
+	if (xtc_reg_put(g_reg, "early", xtc_self(), NULL, XTC_REG_MONITOR) != XTC_OK)
 		xtc_atomic_fetch_add_i32(&g_mon_fail, 1, xtc_mo_seq_cst);
 }
 

@@ -210,7 +210,7 @@ write_cases() {
 # of lost handle identity (verified on direct seed 1), not the later stale
 # handle assertion. Keep EXPECT narrow rather than accepting any failure.
 #
-# Note on bug 8: a second holder of a name makes xtc_reg_whereis resolve
+# Note on bug 8: a second holder of a name makes xtc_reg_get resolve
 # to either pid, so the test's mis-resolve check is the FIRST consequence
 # of the double registration to fire.  Both messages are consequences of
 # the same at-most-one-holder violation, so EXPECT accepts either -- and

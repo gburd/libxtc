@@ -44,29 +44,29 @@ test_reg_basic(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_reg_create(&r), ==, XTC_OK);
 	munit_assert_int(xtc_reg_count(r), ==, 0);
 
-	munit_assert_int(xtc_reg_register(r, "alpha", pid_a), ==, XTC_OK);
-	munit_assert_int(xtc_reg_register(r, "beta",  pid_b), ==, XTC_OK);
+	munit_assert_int(xtc_reg_put(r, "alpha", pid_a, NULL, 0), ==, XTC_OK);
+	munit_assert_int(xtc_reg_put(r, "beta", pid_b, NULL, 0), ==, XTC_OK);
 	munit_assert_int(xtc_reg_count(r), ==, 2);
 
 	/* Duplicate name rejected. */
-	munit_assert_int(xtc_reg_register(r, "alpha", pid_b), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_reg_put(r, "alpha", pid_b, NULL, 0), ==, XTC_E_EXIST);
 
 	/* whereis */
-	munit_assert_int(xtc_reg_whereis(r, "alpha", &got), ==, XTC_OK);
+	munit_assert_int(xtc_reg_get(r, "alpha", &got), ==, XTC_OK);
 	munit_assert_true(xtc_pid_eq(got, pid_a));
-	munit_assert_int(xtc_reg_whereis(r, "beta", &got), ==, XTC_OK);
+	munit_assert_int(xtc_reg_get(r, "beta", &got), ==, XTC_OK);
 	munit_assert_true(xtc_pid_eq(got, pid_b));
-	munit_assert_int(xtc_reg_whereis(r, "missing", &got), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_reg_get(r, "missing", &got), ==, XTC_E_NOTFOUND);
 
 	/* unregister */
-	munit_assert_int(xtc_reg_unregister(r, "alpha"), ==, XTC_OK);
-	munit_assert_int(xtc_reg_whereis(r, "alpha", &got), ==, XTC_E_INVAL);
-	munit_assert_int(xtc_reg_unregister(r, "alpha"), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_reg_del(r, "alpha", XTC_PID_NONE), ==, XTC_OK);
+	munit_assert_int(xtc_reg_get(r, "alpha", &got), ==, XTC_E_NOTFOUND);
+	munit_assert_int(xtc_reg_del(r, "alpha", XTC_PID_NONE), ==, XTC_E_NOTFOUND);
 	munit_assert_int(xtc_reg_count(r), ==, 1);
 
 	/* Re-register under new pid OK. */
-	munit_assert_int(xtc_reg_register(r, "alpha", pid_b), ==, XTC_OK);
-	munit_assert_int(xtc_reg_whereis(r, "alpha", &got), ==, XTC_OK);
+	munit_assert_int(xtc_reg_put(r, "alpha", pid_b, NULL, 0), ==, XTC_OK);
+	munit_assert_int(xtc_reg_get(r, "alpha", &got), ==, XTC_OK);
 	munit_assert_true(xtc_pid_eq(got, pid_b));
 
 	xtc_reg_destroy(r);
@@ -118,33 +118,33 @@ test_reg_collisions(const MunitParameter p[], void *d)
 
 	/* Register all, then confirm each resolves to its own pid. */
 	for (i = 0; i < NCOLL; i++)
-		munit_assert_int(xtc_reg_register(r, names[i], pids[i]), ==,
+		munit_assert_int(xtc_reg_put(r, names[i], pids[i], NULL, 0), ==,
 		    XTC_OK);
 	munit_assert_int(xtc_reg_count(r), ==, NCOLL);
 	for (i = 0; i < NCOLL; i++) {
-		munit_assert_int(xtc_reg_whereis(r, names[i], &got), ==,
+		munit_assert_int(xtc_reg_get(r, names[i], &got), ==,
 		    XTC_OK);
 		munit_assert_true(xtc_pid_eq(got, pids[i]));
 	}
 
 	/* Remove the first-inserted (chain tail) and a middle node; the
 	 * rest must still resolve. */
-	munit_assert_int(xtc_reg_unregister(r, names[0]), ==, XTC_OK);
-	munit_assert_int(xtc_reg_unregister(r, names[2]), ==, XTC_OK);
+	munit_assert_int(xtc_reg_del(r, names[0], XTC_PID_NONE), ==, XTC_OK);
+	munit_assert_int(xtc_reg_del(r, names[2], XTC_PID_NONE), ==, XTC_OK);
 	munit_assert_int(xtc_reg_count(r), ==, NCOLL - 2);
-	munit_assert_int(xtc_reg_whereis(r, names[0], &got), ==, XTC_E_INVAL);
-	munit_assert_int(xtc_reg_whereis(r, names[2], &got), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_reg_get(r, names[0], &got), ==, XTC_E_NOTFOUND);
+	munit_assert_int(xtc_reg_get(r, names[2], &got), ==, XTC_E_NOTFOUND);
 	for (i = 0; i < NCOLL; i++) {
 		if (i == 0 || i == 2) continue;
-		munit_assert_int(xtc_reg_whereis(r, names[i], &got), ==,
+		munit_assert_int(xtc_reg_get(r, names[i], &got), ==,
 		    XTC_OK);
 		munit_assert_true(xtc_pid_eq(got, pids[i]));
 	}
 
 	/* Remove the remaining nodes; bucket empties cleanly. */
-	munit_assert_int(xtc_reg_unregister(r, names[1]), ==, XTC_OK);
-	munit_assert_int(xtc_reg_unregister(r, names[3]), ==, XTC_OK);
-	munit_assert_int(xtc_reg_unregister(r, names[4]), ==, XTC_OK);
+	munit_assert_int(xtc_reg_del(r, names[1], XTC_PID_NONE), ==, XTC_OK);
+	munit_assert_int(xtc_reg_del(r, names[3], XTC_PID_NONE), ==, XTC_OK);
+	munit_assert_int(xtc_reg_del(r, names[4], XTC_PID_NONE), ==, XTC_OK);
 	munit_assert_int(xtc_reg_count(r), ==, 0);
 
 	xtc_reg_destroy(r);
@@ -172,7 +172,7 @@ test_reg_scale(const MunitParameter p[], void *d)
 	for (i = 0; i < NSCALE; i++) {
 		xtc_pid_t pid = { 0, (uint16_t)(i + 1), (uint32_t)(i + 1) };
 		(void)snprintf(name, sizeof name, "svc-%d", i);
-		munit_assert_int(xtc_reg_register(r, name, pid), ==, XTC_OK);
+		munit_assert_int(xtc_reg_put(r, name, pid, NULL, 0), ==, XTC_OK);
 	}
 	munit_assert_int(xtc_reg_count(r), ==, NSCALE);
 
@@ -180,20 +180,20 @@ test_reg_scale(const MunitParameter p[], void *d)
 	for (i = 0; i < NSCALE; i++) {
 		xtc_pid_t want = { 0, (uint16_t)(i + 1), (uint32_t)(i + 1) };
 		(void)snprintf(name, sizeof name, "svc-%d", i);
-		munit_assert_int(xtc_reg_whereis(r, name, &got), ==, XTC_OK);
+		munit_assert_int(xtc_reg_get(r, name, &got), ==, XTC_OK);
 		munit_assert_true(xtc_pid_eq(got, want));
 	}
 
 	/* A name that was never registered misses. */
-	munit_assert_int(xtc_reg_whereis(r, "svc-none", &got), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_reg_get(r, "svc-none", &got), ==, XTC_E_NOTFOUND);
 
 	/* Unregister all; count returns to zero. */
 	for (i = 0; i < NSCALE; i++) {
 		(void)snprintf(name, sizeof name, "svc-%d", i);
-		munit_assert_int(xtc_reg_unregister(r, name), ==, XTC_OK);
+		munit_assert_int(xtc_reg_del(r, name, XTC_PID_NONE), ==, XTC_OK);
 	}
 	munit_assert_int(xtc_reg_count(r), ==, 0);
-	munit_assert_int(xtc_reg_whereis(r, "svc-0", &got), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_reg_get(r, "svc-0", &got), ==, XTC_E_NOTFOUND);
 
 	xtc_reg_destroy(r);
 	return MUNIT_OK;
@@ -219,26 +219,26 @@ test_reg_dup_keys(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_reg_create(&r), ==, XTC_OK);
 
 	/* Three pids join one group key. */
-	munit_assert_int(xtc_reg_register_dup(r, "grp", a), ==, XTC_OK);
-	munit_assert_int(xtc_reg_register_dup(r, "grp", b), ==, XTC_OK);
-	munit_assert_int(xtc_reg_register_dup(r, "grp", c), ==, XTC_OK);
+	munit_assert_int(xtc_reg_put(r, "grp", a, NULL, XTC_REG_DUP), ==, XTC_OK);
+	munit_assert_int(xtc_reg_put(r, "grp", b, NULL, XTC_REG_DUP), ==, XTC_OK);
+	munit_assert_int(xtc_reg_put(r, "grp", c, NULL, XTC_REG_DUP), ==, XTC_OK);
 	/* Idempotent re-add. */
-	munit_assert_int(xtc_reg_register_dup(r, "grp", a), ==, XTC_OK);
+	munit_assert_int(xtc_reg_put(r, "grp", a, NULL, XTC_REG_DUP), ==, XTC_OK);
 	n = 0;
 	munit_assert_int(xtc_reg_members(r, "grp", count_cb, &n), ==, 3);
 	munit_assert_int(n, ==, 3);
 
 	/* Leave one. */
-	munit_assert_int(xtc_reg_unregister_pid(r, "grp", b), ==, XTC_OK);
+	munit_assert_int(xtc_reg_del(r, "grp", b), ==, XTC_OK);
 	n = 0;
 	munit_assert_int(xtc_reg_members(r, "grp", count_cb, &n), ==, 2);
 	/* Leaving a non-member is XTC_E_INVAL. */
-	munit_assert_int(xtc_reg_unregister_pid(r, "grp", b), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_reg_del(r, "grp", b), ==, XTC_E_NOTFOUND);
 
 	/* drop_pid: a pid in several groups + a unique name is removed from
 	 * all of them in one call. */
-	munit_assert_int(xtc_reg_register_dup(r, "g2", a), ==, XTC_OK);
-	munit_assert_int(xtc_reg_register(r, "uniqueA", a), ==, XTC_OK);
+	munit_assert_int(xtc_reg_put(r, "g2", a, NULL, XTC_REG_DUP), ==, XTC_OK);
+	munit_assert_int(xtc_reg_put(r, "uniqueA", a, NULL, 0), ==, XTC_OK);
 	/* a is now in: grp, g2, and the unique name uniqueA (3 entries). */
 	munit_assert_int(xtc_reg_drop_pid(r, a), ==, 3);
 	/* c remains in grp. */
@@ -264,7 +264,7 @@ static void
 ca_worker(void *arg)
 {
 	struct ca_ctx *c = arg;
-	(void)xtc_reg_register_mon(c->reg, "worker", xtc_self());
+	(void)xtc_reg_put(c->reg, "worker", xtc_self(), NULL, XTC_REG_MONITOR);
 	/* exit immediately; the reaper's monitor -> DOWN -> drop_pid */
 }
 
@@ -279,7 +279,7 @@ ca_checker(void *arg)
 	/* Poll: the reaper must (a) receive+arm the monitor, (b) receive the
 	 * DOWN, (c) drop_pid.  Give it several scheduler turns. */
 	for (i = 0; i < 200; i++) {
-		if (xtc_reg_whereis(c->reg, "worker", &pid) != XTC_OK) {
+		if (xtc_reg_get(c->reg, "worker", &pid) != XTC_OK) {
 			xtc_atomic_store_i32(&c->worker_gone_seen, 1,
 			    xtc_mo_seq_cst);
 			break;
@@ -331,7 +331,7 @@ test_reg_crash_aware(const MunitParameter p[], void *d)
  * PLAN 19.27.12: a MONITORED registration must never be left without
  * monitoring.  The reaper's mailbox is capped at 1 and the reaper is not
  * scheduled until we yield, so every enrollment after the first cannot be
- * delivered.  The fixed contract: xtc_reg_register_mon either establishes
+ * delivered.  The fixed contract: xtc_reg_put either establishes
  * coverage and returns XTC_OK, or rolls the name back and returns an
  * error.  So after every worker has died, NO name may remain whose
  * register_mon call returned XTC_OK -- and no name at all may remain for a
@@ -367,7 +367,7 @@ rm_driver(void *a)
 	for (i = 0; i < 3; i++) {
 		(void)xtc_proc_spawn(loop, rm_worker, NULL, NULL, &w[i]);
 		snprintf(nm, sizeof nm, "w%d", i);
-		g_rm_rc[i] = xtc_reg_register_mon(g_rm_reg, nm, w[i]);
+		g_rm_rc[i] = xtc_reg_put(g_rm_reg, nm, w[i], NULL, XTC_REG_MONITOR);
 		if (g_rm_rc[i] != XTC_OK)
 			g_rm_failed++;
 	}
@@ -375,7 +375,7 @@ rm_driver(void *a)
 	for (i = 0; i < 3; i++) {
 		int present;
 		snprintf(nm, sizeof nm, "w%d", i);
-		present = (xtc_reg_whereis(g_rm_reg, nm, &dummy) == XTC_OK);
+		present = (xtc_reg_get(g_rm_reg, nm, &dummy) == XTC_OK);
 		if (present && g_rm_rc[i] == XTC_OK) g_rm_stale_ok++;
 		if (present && g_rm_rc[i] != XTC_OK) g_rm_present_failed++;
 	}
@@ -427,7 +427,7 @@ reg_lookup_ns(xtc_reg_t *r, int n)
 		for (i = 0; i < 100000; i++) {
 			(void)snprintf(name, sizeof name, "svc-%d",
 			    (int)(((int64_t)i * 7919) % n));
-			munit_assert_int(xtc_reg_whereis(r, name, &got), ==,
+			munit_assert_int(xtc_reg_get(r, name, &got), ==,
 			    XTC_OK);
 		}
 		t = xtc_clock_mono() - t0;
@@ -459,26 +459,26 @@ test_reg_resize(const MunitParameter p[], void *d)
 	for (i = 0; i < 1000; i++) {
 		xtc_pid_t pid = { 0, 1, (uint32_t)(i + 1) };
 		(void)snprintf(name, sizeof name, "svc-%d", i);
-		munit_assert_int(xtc_reg_register(r, name, pid), ==, XTC_OK);
+		munit_assert_int(xtc_reg_put(r, name, pid, NULL, 0), ==, XTC_OK);
 	}
-	munit_assert_int(xtc_reg_register_dup(r, "group", member), ==, XTC_OK);
+	munit_assert_int(xtc_reg_put(r, "group", member, NULL, XTC_REG_DUP), ==, XTC_OK);
 	small_ns = reg_lookup_ns(r, 1000);
 	for (i = 1000; i < NBIG; i++) {
 		xtc_pid_t pid = { 0, 1, (uint32_t)(i + 1) };
 		(void)snprintf(name, sizeof name, "svc-%d", i);
-		munit_assert_int(xtc_reg_register(r, name, pid), ==, XTC_OK);
+		munit_assert_int(xtc_reg_put(r, name, pid, NULL, 0), ==, XTC_OK);
 	}
 	munit_assert_int(xtc_reg_count(r), ==, NBIG + 1);
 	for (i = 0; i < NBIG; i++) {
 		xtc_pid_t want = { 0, 1, (uint32_t)(i + 1) };
 		(void)snprintf(name, sizeof name, "svc-%d", i);
-		munit_assert_int(xtc_reg_whereis(r, name, &got), ==, XTC_OK);
+		munit_assert_int(xtc_reg_get(r, name, &got), ==, XTC_OK);
 		munit_assert_true(xtc_pid_eq(got, want));
 	}
 	/* Duplicate a registered name fails; the dup entry survived the
 	 * rehashes. */
-	munit_assert_int(xtc_reg_register(r, "svc-12345", member), ==,
-	    XTC_E_INVAL);
+	munit_assert_int(xtc_reg_put(r, "svc-12345", member, NULL, 0), ==,
+	    XTC_E_EXIST);
 	munit_assert_int(xtc_reg_members(r, "group", reg_count_member, &seen),
 	    ==, 1);
 	munit_assert_int(xtc_reg_drop_pid(r, member), ==, 1);
@@ -489,7 +489,7 @@ test_reg_resize(const MunitParameter p[], void *d)
 
 	for (i = 0; i < NBIG; i++) {
 		(void)snprintf(name, sizeof name, "svc-%d", i);
-		munit_assert_int(xtc_reg_unregister(r, name), ==, XTC_OK);
+		munit_assert_int(xtc_reg_del(r, name, XTC_PID_NONE), ==, XTC_OK);
 	}
 	munit_assert_int(xtc_reg_count(r), ==, 0);
 	xtc_reg_destroy(r);
@@ -532,14 +532,14 @@ test_reg_put_visit(const MunitParameter p[], void *d)
 	 * back through visit.  whereis still resolves the pid. */
 	munit_assert_int(xtc_reg_put(r, "b1", pa, &va, 0), ==, XTC_OK);
 	munit_assert_int(xtc_reg_put(r, "b1", pb, &vb, 0), ==, XTC_E_EXIST);
-	munit_assert_int(xtc_reg_register(r, "b1", pb), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_reg_put(r, "b1", pb, NULL, 0), ==, XTC_E_EXIST);
 	memset(&acc, 0, sizeof acc);
 	munit_assert_int(xtc_reg_visit(r, "b1", visit_acc_fn, &acc, &n), ==,
 	    XTC_OK);
 	munit_assert_int(n, ==, 1);
 	munit_assert_true(xtc_pid_eq(acc.pid, pa));
 	munit_assert_ptr_equal(acc.value, &va);
-	munit_assert_int(xtc_reg_whereis(r, "b1", &got), ==, XTC_OK);
+	munit_assert_int(xtc_reg_get(r, "b1", &got), ==, XTC_OK);
 	munit_assert_true(xtc_pid_eq(got, pa));
 
 	/* A miss is XTC_E_NOTFOUND with a count of 0, and fn never runs. */
@@ -550,7 +550,7 @@ test_reg_put_visit(const MunitParameter p[], void *d)
 	munit_assert_int(acc.n, ==, 0);
 
 	/* Removal by any of the existing calls removes the value with it. */
-	munit_assert_int(xtc_reg_unregister(r, "b1"), ==, XTC_OK);
+	munit_assert_int(xtc_reg_del(r, "b1", XTC_PID_NONE), ==, XTC_OK);
 	munit_assert_int(xtc_reg_visit(r, "b1", visit_acc_fn, &acc, NULL), ==,
 	    XTC_E_NOTFOUND);
 
@@ -645,7 +645,7 @@ test_reg_visit_lifetime(const MunitParameter p[], void *d)
 		o->flips = 0;
 		munit_assert_int(xtc_reg_put(g_pv_reg, "backend:7", pa, o, 0),
 		    ==, XTC_OK);
-		munit_assert_int(xtc_reg_unregister(g_pv_reg, "backend:7"), ==,
+		munit_assert_int(xtc_reg_del(g_pv_reg, "backend:7", XTC_PID_NONE), ==,
 		    XTC_OK);
 		o->magic = 0;   /* poison, then free: a late visitor sees it */
 		xtc_free(o);
@@ -730,7 +730,7 @@ ww_driver(void *arg)
 	/* A name that names a dead pid is not a hit. */
 	(void)xtc_proc_spawn(g_ww_loop, ww_dead, NULL, NULL, &w->dead);
 	(void)xtc_proc_sleep(2 * WW_MS);
-	(void)xtc_reg_register(w->r, "gone", w->dead);
+	(void)xtc_reg_put(w->r, "gone", w->dead, NULL, 0);
 	w->rc_dead = xtc_reg_whereis_wait(w->r, "gone", XTC_PID_NONE, 0, &p);
 	w->rc_none = xtc_reg_whereis_wait(w->r, "svc", XTC_PID_NONE, 0, &p);
 	w->rc_bounded =
@@ -742,7 +742,7 @@ ww_driver(void *arg)
 	(void)xtc_proc_sleep(20 * WW_MS); /* all three parked */
 	(void)xtc_exit_pid(victim, 1);
 	(void)xtc_proc_spawn(g_ww_loop, ww_holder, NULL, NULL, &w->holder);
-	(void)xtc_reg_register(w->r, "svc", w->holder);
+	(void)xtc_reg_put(w->r, "svc", w->holder, NULL, 0);
 	(void)xtc_proc_sleep(20 * WW_MS);
 	/* not_pid: the only holder is excluded, so no hit. */
 	if (xtc_reg_whereis_wait(w->r, "svc", w->holder, 0, &p) != XTC_E_AGAIN)

@@ -3,7 +3,7 @@
  * Use of this source code is governed by the ISC License.
  *
  * src/orc/pg.c
- *	Process groups over the duplicate-key registry (xtc_reg_register_dup
+ *	Process groups over the duplicate-key registry (xtc_reg_put
  *	et al).  See src/inc/xtc_pg.h.  This is a thin, single-node layer:
  *	join/leave are registry ops, members walks the key, and send
  *	broadcasts to each member via xtc_send.
@@ -16,14 +16,14 @@ int
 xtc_pg_subscribe(xtc_reg_t *reg, const char *group, xtc_pid_t pid)
 {
 	if (reg == NULL || group == NULL) return XTC_E_INVAL;
-	return xtc_reg_register_dup(reg, group, pid);
+	return xtc_reg_put(reg, group, pid, NULL, XTC_REG_DUP);
 }
 
 int
 xtc_pg_unsubscribe(xtc_reg_t *reg, const char *group, xtc_pid_t pid)
 {
 	if (reg == NULL || group == NULL) return XTC_E_INVAL;
-	return xtc_reg_unregister_pid(reg, group, pid);
+	return xtc_reg_del(reg, group, pid);
 }
 
 int

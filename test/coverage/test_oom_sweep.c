@@ -508,17 +508,17 @@ step_reg(int *ok)
 	arm();
 	rc = xtc_reg_create(&r);
 	if (rc == XTC_OK)
-		rc = xtc_reg_register(r, "oom.name", pid);
+		rc = xtc_reg_put(r, "oom.name", pid, NULL, 0);
 	disarm();
 	*ok = 1;
 	if (r == NULL)
 		return rc;
 	if (rc == XTC_OK)
-		*ok = (xtc_reg_whereis(r, "oom.name", &got) == XTC_OK &&
+		*ok = (xtc_reg_get(r, "oom.name", &got) == XTC_OK &&
 		    xtc_pid_eq(got, pid) && xtc_reg_count(r) == 1);
 	else
 		*ok = (xtc_reg_count(r) == 0 &&
-		    xtc_reg_whereis(r, "oom.name", &got) != XTC_OK);
+		    xtc_reg_get(r, "oom.name", &got) != XTC_OK);
 	xtc_reg_destroy(r);
 	return rc;
 }
