@@ -33,8 +33,10 @@ How an old name keeps working:
 
 `XTC_NO_DEPRECATION_WARNINGS`, defined before the first libxtc include,
 silences every one of these marks while a large codebase migrates.
-`test/abi/test_deprecated_bridge.c` calls each old name once to prove it
-still works.
+libxtc's own build compiles with `-Werror=deprecated-declarations`, so
+nothing in the library, its tests, its benches or its examples uses an
+old name, apart from `test/abi/test_deprecated_bridge.c`, which calls
+each old name once to prove it still works.
 
 **Destructors.**  A new `*_destroy` returns `void`, and `NULL` is a
 no-op: a destructor cannot fail, so there is nothing to check.  The old
