@@ -3289,7 +3289,7 @@ fo_killer(void *arg)
 	(void)xtc_send(g_fo_victim, "m", 1);
 	(void)xtc_proc_sleep(10LL * 1000 * 1000);
 	if (xtc_proc_info(g_fo_victim, &info) == XTC_OK &&
-	    info.park_reason == XTC_PARK_FD && g_fo_killed_parked == 0)
+	    info.park_reason == XTC_PROC_PARK_FD && g_fo_killed_parked == 0)
 		g_fo_killed_parked = 1;
 	(void)xtc_exit_pid(g_fo_victim, 1);
 }

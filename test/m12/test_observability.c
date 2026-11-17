@@ -1015,7 +1015,7 @@ test_inspect_procs(const MunitParameter p[], void *d)
  * park_reason must name the MAILBOX park.
  *
  * A fiber blocked in xtc_recv(..., -1) reported run_state=PARKED with
- * park_reason=XTC_PARK_NONE -- a bare, sourceless park.  The branch meant
+ * park_reason=XTC_PROC_PARK_NONE -- a bare, sourceless park.  The branch meant
  * to catch it tested task->park_requested, but the coro substrate CONSUMES
  * and clears that one-shot when it turns the yield into the PENDING
  * verdict, so it is ALWAYS 0 by the time the task is PARKED: dead code.
@@ -1099,12 +1099,12 @@ test_inspect_park_reason(const MunitParameter p[], void *d)
 
 	munit_assert_int(xtc_atomic_load_i32(&g_pr_checked, xtc_mo_seq_cst), ==,
 	    1);
-	/* The regression: this was XTC_PARK_NONE (0) for every recv park. */
+	/* The regression: this was XTC_PROC_PARK_NONE (0) for every recv park. */
 	munit_assert_int(xtc_atomic_load_i32(&g_pr_mbox_reason, xtc_mo_seq_cst),
-	    ==, XTC_PARK_MAILBOX);
+	    ==, XTC_PROC_PARK_MAILBOX);
 	munit_assert_int(xtc_atomic_load_i32(&g_pr_timer_reason,
 	                     xtc_mo_seq_cst),
-	    ==, XTC_PARK_TIMER);
+	    ==, XTC_PROC_PARK_TIMER);
 
 	xtc_loop_destroy(loop);
 	return MUNIT_OK;

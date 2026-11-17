@@ -43,12 +43,12 @@
 extern "C" {
 #endif
 
-enum xtc_trace_kind {
+typedef enum xtc_trace_kind {
 	XTC_TRACE_SEND  = 0,   /* self sent a message to peer */
 	XTC_TRACE_RECV  = 1,   /* self received a message from peer */
 	XTC_TRACE_SPAWN = 2,   /* self (parent) spawned peer (child) */
 	XTC_TRACE_EXIT  = 3    /* self exited; detail = reason */
-};
+} xtc_trace_kind_t;
 
 typedef struct xtc_trace_rec {
 	uint64_t  hlc;     /* this event's HLC stamp */
@@ -107,12 +107,12 @@ XTC_API uint64_t xtc_hlc_now(void);
 
 /* The kind of suspend/resume boundary a causal record marks.  A PARK_*
  * value names WHY the fiber suspended; RESUME marks the matching wake. */
-enum xtc_causal_kind {
+typedef enum xtc_causal_kind {
 	XTC_CAUSAL_PARK_MAILBOX = 0,   /* parked in xtc_recv* (await a message) */
 	XTC_CAUSAL_PARK_TIMER   = 1,   /* parked in xtc_proc_sleep (a delay) */
 	XTC_CAUSAL_PARK_FD      = 2,   /* parked in xtc_proc_wait_fd (I/O) */
 	XTC_CAUSAL_RESUME       = 3    /* the fiber resumed after a park */
-};
+} xtc_causal_kind_t;
 
 /* One per-fiber causal record: the boundary kind + a static site label
  * (the __func__ of the park site, or a caller-supplied string literal --

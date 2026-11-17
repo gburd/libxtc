@@ -20,13 +20,13 @@ typedef struct xtc_batch_item {
 	void *request;
 } xtc_batch_item_t;
 
-enum xtc_batch_state {
+typedef enum xtc_batch_state {
 	XTC_BATCH_UNSET,
 	XTC_BATCH_CONTINUE,
 	XTC_BATCH_DONE,
 	XTC_BATCH_BLOCKED,
 	XTC_BATCH_ERROR
-};
+} xtc_batch_state_t;
 typedef struct xtc_batch_result {
 	enum xtc_batch_state state;
 	int error;
@@ -43,17 +43,20 @@ typedef struct xtc_batch_opts {
 	void *user;
 } xtc_batch_opts_t;
 
-enum xtc_batch_close_mode { XTC_BATCH_DRAIN, XTC_BATCH_CANCEL };
+typedef enum xtc_batch_close_mode {
+	XTC_BATCH_DRAIN,
+	XTC_BATCH_CANCEL
+} xtc_batch_close_mode_t;
 
 /* Async offload (--enable-sched-policy). A group may run a split step: submit
  * launches ONE device/pool op over the ready vector, the engine awaits a
  * completion token, then collect reads outputs. See xtc_batch(3). */
-enum xtc_batch_exec_kind {
+typedef enum xtc_batch_exec_kind {
 	XTC_BATCH_EXEC_SYNC,    /* done inline in submit; no park */
 	XTC_BATCH_EXEC_FENCE,   /* pollable fence fd (native only) */
 	XTC_BATCH_EXEC_FUTURE,  /* app resolves an xtc_future (sim-clean) */
 	XTC_BATCH_EXEC_BLOCKING /* synchronous closure on the blocking pool */
-};
+} xtc_batch_exec_kind_t;
 /* exec_status passed to collect: a non-negative engine sentinel below, or a
  * NEGATIVE XTC_E_* when the engine could not await the op (bad/closed fence
  * fd, no accel support, refused blocking closure, failed/dropped device

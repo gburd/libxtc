@@ -29,11 +29,11 @@ test_basic_exclusive(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	munit_assert_int(xtc_lwlock_init(&lk, 1), ==, XTC_OK);
 	munit_assert_int(xtc_lwlock_held_by_me(&lk), ==, 0);
-	munit_assert_int(xtc_lwlock_acquire(&lk, XTC_LW_EXCLUSIVE), ==, XTC_OK);
+	munit_assert_int(xtc_lwlock_acquire(&lk, XTC_LWLOCK_EXCLUSIVE), ==, XTC_OK);
 	munit_assert_int(xtc_lwlock_held_by_me(&lk), ==, 1);
-	munit_assert_int(xtc_lwlock_held_by_me_in_mode(&lk, XTC_LW_EXCLUSIVE),
+	munit_assert_int(xtc_lwlock_held_by_me_in_mode(&lk, XTC_LWLOCK_EXCLUSIVE),
 	    ==, 1);
-	munit_assert_int(xtc_lwlock_held_by_me_in_mode(&lk, XTC_LW_SHARED),
+	munit_assert_int(xtc_lwlock_held_by_me_in_mode(&lk, XTC_LWLOCK_SHARED),
 	    ==, 0);
 	xtc_lwlock_release(&lk);
 	munit_assert_int(xtc_lwlock_held_by_me(&lk), ==, 0);
@@ -49,11 +49,11 @@ test_basic_shared(const MunitParameter p[], void *d)
 	xtc_lwlock_t lk;
 	(void)p; (void)d;
 	munit_assert_int(xtc_lwlock_init(&lk, 2), ==, XTC_OK);
-	munit_assert_int(xtc_lwlock_acquire(&lk, XTC_LW_SHARED), ==, XTC_OK);
-	munit_assert_int(xtc_lwlock_held_by_me_in_mode(&lk, XTC_LW_SHARED),
+	munit_assert_int(xtc_lwlock_acquire(&lk, XTC_LWLOCK_SHARED), ==, XTC_OK);
+	munit_assert_int(xtc_lwlock_held_by_me_in_mode(&lk, XTC_LWLOCK_SHARED),
 	    ==, 1);
 	/* A second shared acquire should succeed without blocking. */
-	munit_assert_int(xtc_lwlock_acquire(&lk, XTC_LW_SHARED), ==, XTC_OK);
+	munit_assert_int(xtc_lwlock_acquire(&lk, XTC_LWLOCK_SHARED), ==, XTC_OK);
 	xtc_lwlock_release(&lk);
 	xtc_lwlock_release(&lk);
 	xtc_lwlock_destroy(&lk);
@@ -69,23 +69,23 @@ test_conditional(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	munit_assert_int(xtc_lwlock_init(&lk, 3), ==, XTC_OK);
 	/* Free -> conditional EXCLUSIVE succeeds. */
-	munit_assert_int(xtc_lwlock_acquire_cond(&lk, XTC_LW_EXCLUSIVE),
+	munit_assert_int(xtc_lwlock_acquire_cond(&lk, XTC_LWLOCK_EXCLUSIVE),
 	    ==, XTC_OK);
 	/* Held EXCLUSIVE -> another EXCLUSIVE conditional fails. */
-	munit_assert_int(xtc_lwlock_acquire_cond(&lk, XTC_LW_EXCLUSIVE),
+	munit_assert_int(xtc_lwlock_acquire_cond(&lk, XTC_LWLOCK_EXCLUSIVE),
 	    ==, XTC_E_AGAIN);
 	/* Held EXCLUSIVE -> SHARED conditional fails. */
-	munit_assert_int(xtc_lwlock_acquire_cond(&lk, XTC_LW_SHARED),
+	munit_assert_int(xtc_lwlock_acquire_cond(&lk, XTC_LWLOCK_SHARED),
 	    ==, XTC_E_AGAIN);
 	xtc_lwlock_release(&lk);
 	/* Now SHARED can succeed conditionally. */
-	munit_assert_int(xtc_lwlock_acquire_cond(&lk, XTC_LW_SHARED),
+	munit_assert_int(xtc_lwlock_acquire_cond(&lk, XTC_LWLOCK_SHARED),
 	    ==, XTC_OK);
 	/* Another shared also succeeds. */
-	munit_assert_int(xtc_lwlock_acquire_cond(&lk, XTC_LW_SHARED),
+	munit_assert_int(xtc_lwlock_acquire_cond(&lk, XTC_LWLOCK_SHARED),
 	    ==, XTC_OK);
 	/* But EXCLUSIVE conditional fails while shared held. */
-	munit_assert_int(xtc_lwlock_acquire_cond(&lk, XTC_LW_EXCLUSIVE),
+	munit_assert_int(xtc_lwlock_acquire_cond(&lk, XTC_LWLOCK_EXCLUSIVE),
 	    ==, XTC_E_AGAIN);
 	xtc_lwlock_release(&lk);
 	xtc_lwlock_release(&lk);
@@ -104,7 +104,7 @@ writer_thread(void *arg)
 {
 	(void)arg;
 	xtc_atomic_store_i32(&g_writer_started, 1, xtc_mo_seq_cst);
-	(void)xtc_lwlock_acquire(&g_lk, XTC_LW_EXCLUSIVE);
+	(void)xtc_lwlock_acquire(&g_lk, XTC_LWLOCK_EXCLUSIVE);
 	xtc_atomic_store_i32(&g_writer_acquired, 1, xtc_mo_seq_cst);
 	xtc_lwlock_release(&g_lk);
 	return NULL;
@@ -120,7 +120,7 @@ test_writer_blocks_on_reader(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_writer_started, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_writer_acquired, 0, xtc_mo_seq_cst);
 
-	munit_assert_int(xtc_lwlock_acquire(&g_lk, XTC_LW_SHARED), ==, XTC_OK);
+	munit_assert_int(xtc_lwlock_acquire(&g_lk, XTC_LWLOCK_SHARED), ==, XTC_OK);
 	pthread_create(&th, NULL, writer_thread, NULL);
 
 	/* Wait for writer to start contesting; then verify it cannot
@@ -172,7 +172,7 @@ shared_thread(void *arg)
 	int i;
 	(void)arg;
 	for (i = 0; i < N_OPS_PER; i++) {
-		(void)xtc_lwlock_acquire(&g_lk2, XTC_LW_SHARED);
+		(void)xtc_lwlock_acquire(&g_lk2, XTC_LWLOCK_SHARED);
 		{
 			int n = xtc_atomic_fetch_add_i32(&g_shared_in_section,
 			            1, xtc_mo_seq_cst) +
@@ -242,7 +242,7 @@ race_writer(void *arg)
 {
 	(void)arg;
 	while (!xtc_atomic_load_i32(&g_stop, xtc_mo_seq_cst)) {
-		(void)xtc_lwlock_acquire(&g_lk3, XTC_LW_EXCLUSIVE);
+		(void)xtc_lwlock_acquire(&g_lk3, XTC_LWLOCK_EXCLUSIVE);
 		g_protected_value = 0xdead;
 		g_protected_value = 0xbeef;
 		xtc_lwlock_release(&g_lk3);
@@ -256,7 +256,7 @@ race_reader(void *arg)
 	(void)arg;
 	while (!xtc_atomic_load_i32(&g_stop, xtc_mo_seq_cst)) {
 		int v;
-		(void)xtc_lwlock_acquire(&g_lk3, XTC_LW_SHARED);
+		(void)xtc_lwlock_acquire(&g_lk3, XTC_LWLOCK_SHARED);
 		v = g_protected_value;
 		if (v != 0 && v != 0xbeef)
 			xtc_atomic_fetch_add_i32(&g_failures, 1,
@@ -312,15 +312,15 @@ test_lock_order_track(const MunitParameter p[], void *d)
 	xtc_lwlock_track_enable(1);
 
 	/* Establish order 100 -> 200. */
-	munit_assert_int(xtc_lwlock_acquire(&a, XTC_LW_EXCLUSIVE), ==, XTC_OK);
-	munit_assert_int(xtc_lwlock_acquire(&b, XTC_LW_EXCLUSIVE), ==, XTC_OK);
+	munit_assert_int(xtc_lwlock_acquire(&a, XTC_LWLOCK_EXCLUSIVE), ==, XTC_OK);
+	munit_assert_int(xtc_lwlock_acquire(&b, XTC_LWLOCK_EXCLUSIVE), ==, XTC_OK);
 	xtc_lwlock_release(&b);
 	xtc_lwlock_release(&a);
 	munit_assert_long(xtc_lwlock_track_violations(), ==, 0);
 
 	/* Now the inverse order 200 -> 100: an inversion. */
-	munit_assert_int(xtc_lwlock_acquire(&b, XTC_LW_EXCLUSIVE), ==, XTC_OK);
-	munit_assert_int(xtc_lwlock_acquire(&a, XTC_LW_EXCLUSIVE), ==, XTC_OK);
+	munit_assert_int(xtc_lwlock_acquire(&b, XTC_LWLOCK_EXCLUSIVE), ==, XTC_OK);
+	munit_assert_int(xtc_lwlock_acquire(&a, XTC_LWLOCK_EXCLUSIVE), ==, XTC_OK);
 	xtc_lwlock_release(&a);
 	xtc_lwlock_release(&b);
 	munit_assert_long(xtc_lwlock_track_violations(), >=, 1);
@@ -330,8 +330,8 @@ test_lock_order_track(const MunitParameter p[], void *d)
 	xtc_lwlock_track_enable(0);
 	xtc_lwlock_track_reset();
 	g_track_handler_hits = 0;
-	munit_assert_int(xtc_lwlock_acquire(&b, XTC_LW_EXCLUSIVE), ==, XTC_OK);
-	munit_assert_int(xtc_lwlock_acquire(&a, XTC_LW_EXCLUSIVE), ==, XTC_OK);
+	munit_assert_int(xtc_lwlock_acquire(&b, XTC_LWLOCK_EXCLUSIVE), ==, XTC_OK);
+	munit_assert_int(xtc_lwlock_acquire(&a, XTC_LWLOCK_EXCLUSIVE), ==, XTC_OK);
 	xtc_lwlock_release(&a);
 	xtc_lwlock_release(&b);
 	munit_assert_long(xtc_lwlock_track_violations(), ==, 0);
@@ -360,7 +360,7 @@ static void
 kl_victim(void *arg)
 {
 	(void)arg;
-	(void)xtc_lwlock_acquire(&g_kl, XTC_LW_EXCLUSIVE);
+	(void)xtc_lwlock_acquire(&g_kl, XTC_LWLOCK_EXCLUSIVE);
 	xtc_atomic_store_i32(&g_kl_returned, 1,
 	    xtc_mo_seq_cst); /* must not be reached */
 }
@@ -374,7 +374,7 @@ kl_driver(void *arg)
 	size_t n = 0;
 	int i;
 	(void)arg;
-	munit_assert_int(xtc_lwlock_acquire(&g_kl, XTC_LW_EXCLUSIVE), ==, XTC_OK);
+	munit_assert_int(xtc_lwlock_acquire(&g_kl, XTC_LWLOCK_EXCLUSIVE), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn_monitor(g_kl_loop, kl_victim, NULL,
 	    NULL, &victim, &ref), ==, XTC_OK);
 	for (i = 0; i < 10; i++) xtc_yield();     /* victim parks */
@@ -383,7 +383,7 @@ kl_driver(void *arg)
 	xtc_lwlock_release(&g_kl);                /* the later wake */
 	g_kl_down = xtc_recv(&m, &n, 2000LL * 1000 * 1000) == XTC_OK;
 	if (m != NULL) xtc_free(m);
-	g_kl_after = xtc_lwlock_acquire_cond(&g_kl, XTC_LW_EXCLUSIVE);
+	g_kl_after = xtc_lwlock_acquire_cond(&g_kl, XTC_LWLOCK_EXCLUSIVE);
 	if (g_kl_after == XTC_OK) xtc_lwlock_release(&g_kl);
 }
 

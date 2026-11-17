@@ -160,7 +160,7 @@ killer(void *arg)
 		(void)xtc_send(r->victim, "m", 1);
 	}
 	if (xtc_proc_info(r->victim, &info) == XTC_OK &&
-	    info.park_reason == XTC_PARK_FD)
+	    info.park_reason == XTC_PROC_PARK_FD)
 		r->kill_parked = 1;
 	(void)xtc_exit_pid(r->victim, 7);
 	if (xtc_recv(&m, &n, 1000 * MS) == XTC_OK) {

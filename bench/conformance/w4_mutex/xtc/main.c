@@ -176,7 +176,7 @@ lock_acquire(lock_t *l)
 		(void)xtc_amutex_lock(l->amutex, (int64_t)-1);
 		break;
 	case PRIM_LWLOCK:
-		(void)xtc_lwlock_acquire(&l->lwlock, XTC_LW_EXCLUSIVE);
+		(void)xtc_lwlock_acquire(&l->lwlock, XTC_LWLOCK_EXCLUSIVE);
 		break;
 	case PRIM_OSMUTEX:
 		(void)__os_mutex_lock(&l->osmutex);

@@ -14,7 +14,9 @@
 .Nm xtc_lwlock_track_enable ,
 .Nm xtc_lwlock_track_violations ,
 .Nm xtc_lwlock_track_reset ,
-.Nm xtc_lwlock_track_set_handler
+.Nm xtc_lwlock_track_set_handler ,
+.Nm XTC_LW_EXCLUSIVE ,
+.Nm XTC_LW_SHARED
 .Nd lightweight lock with shared / exclusive modes
 .Sh SYNOPSIS
 .In xtc.h
@@ -93,11 +95,11 @@ Inside a fiber
 a contended acquire parks the fiber, so the other fibers on its loop
 keep running; on a plain thread it waits on a condition variable.
 The modes:
-.Bl -tag -width "XTC_LW_EXCLUSIVE" -offset indent
-.It Dv XTC_LW_SHARED
+.Bl -tag -width "XTC_LWLOCK_EXCLUSIVE" -offset indent
+.It Dv XTC_LWLOCK_SHARED
 Multiple threads can hold the lock concurrently in shared mode.
 Excluded by an exclusive holder.
-.It Dv XTC_LW_EXCLUSIVE
+.It Dv XTC_LWLOCK_EXCLUSIVE
 Only one thread holds the lock; excludes all readers.
 .El
 .Pp
@@ -163,17 +165,32 @@ xtc_lwlock_t lk;
 xtc_lwlock_init(&lk, /* tranche */ 1);
 
 /* hot path: reader */
-xtc_lwlock_acquire(&lk, XTC_LW_SHARED);
+xtc_lwlock_acquire(&lk, XTC_LWLOCK_SHARED);
 read_state();
 xtc_lwlock_release(&lk);
 
 /* mutator */
-xtc_lwlock_acquire(&lk, XTC_LW_EXCLUSIVE);
+xtc_lwlock_acquire(&lk, XTC_LWLOCK_EXCLUSIVE);
 update_state();
 xtc_lwlock_release(&lk);
 
 xtc_lwlock_destroy(&lk);
 .Ed
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Dv XTC_LW_EXCLUSIVE
+Use
+.Dv XTC_LWLOCK_EXCLUSIVE ;
+frozen lock layer: an alias, no warning; 3.0 keeps only XTC_LWLOCK_EXCLUSIVE.
+.It Dv XTC_LW_SHARED
+Use
+.Dv XTC_LWLOCK_SHARED ;
+frozen lock layer: an alias, no warning; 3.0 keeps only XTC_LWLOCK_SHARED.
+.El
 .Sh SEE ALSO
 .Xr xtc_lrlock 3 ,
 .Xr xtc_lockmgr 3 ,

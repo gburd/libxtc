@@ -122,8 +122,8 @@ run_lwlock(xtc_lwlock_mode_t mode)
 	return (double)(t1 - t0) / (double)iters;
 }
 
-static double bench_lwlock_excl(void)   { return run_lwlock(XTC_LW_EXCLUSIVE); }
-static double bench_lwlock_shared(void) { return run_lwlock(XTC_LW_SHARED); }
+static double bench_lwlock_excl(void)   { return run_lwlock(XTC_LWLOCK_EXCLUSIVE); }
+static double bench_lwlock_shared(void) { return run_lwlock(XTC_LWLOCK_SHARED); }
 
 /* ---- lrlock wait-free read ---------------------------------------- */
 

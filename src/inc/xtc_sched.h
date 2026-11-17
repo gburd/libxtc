@@ -27,9 +27,9 @@ typedef struct xtc_sched_view {
 	size_t count;
 } xtc_sched_view_t;
 
-enum xtc_sched_verdict {
+typedef enum xtc_sched_verdict {
 	XTC_SCHED_DONE, XTC_SCHED_YIELD, XTC_SCHED_PARK
-};
+} xtc_sched_verdict_t;
 typedef struct xtc_sched_run {
 	int32_t lane;
 	enum xtc_sched_verdict verdict;

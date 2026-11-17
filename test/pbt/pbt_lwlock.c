@@ -40,7 +40,7 @@ lw1_worker(void *arg)
 	struct lw1_state *s = arg;
 	int i;
 	for (i = 0; i < 100; i++) {
-		(void)xtc_lwlock_acquire(&s->lk, XTC_LW_EXCLUSIVE);
+		(void)xtc_lwlock_acquire(&s->lk, XTC_LWLOCK_EXCLUSIVE);
 		s->val = 42;
 		s->val = 0;        /* if mutex broken, another thread sees 42 */
 		s->val = 99;
@@ -56,7 +56,7 @@ lw1_observer(void *arg)
 	struct lw1_state *s = arg;
 	int i;
 	for (i = 0; i < 200; i++) {
-		(void)xtc_lwlock_acquire(&s->lk, XTC_LW_SHARED);
+		(void)xtc_lwlock_acquire(&s->lk, XTC_LWLOCK_SHARED);
 		if (s->val != 0)
 			xtc_atomic_fetch_add_i32(&s->failures, 1,
 			    xtc_mo_seq_cst);
@@ -99,11 +99,11 @@ prop_conditional_consistent(hegel_test_case *tc, void *u)
 		op = (int)hegel_draw_int(tc, hegel_integers(0, 2));
 		if (op == 0) {
 			/* Conditional shared. */
-			if (xtc_lwlock_acquire_cond(&lk, XTC_LW_SHARED) == XTC_OK)
+			if (xtc_lwlock_acquire_cond(&lk, XTC_LWLOCK_SHARED) == XTC_OK)
 				held_count++;
 		} else if (op == 1) {
 			/* Conditional exclusive -- only succeeds if nothing held. */
-			int rc = xtc_lwlock_acquire_cond(&lk, XTC_LW_EXCLUSIVE);
+			int rc = xtc_lwlock_acquire_cond(&lk, XTC_LWLOCK_EXCLUSIVE);
 			if (rc == XTC_OK) {
 				held_count++;
 			} else {

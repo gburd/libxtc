@@ -7,7 +7,11 @@
 .Nm xtc_inspect_procs ,
 .Nm xtc_inspect_loops ,
 .Nm xtc_proc_info ,
-.Nm xtc_runtime_info
+.Nm xtc_runtime_info ,
+.Nm XTC_PARK_NONE ,
+.Nm XTC_PARK_FD ,
+.Nm XTC_PARK_TIMER ,
+.Nm XTC_PARK_MAILBOX
 .Nd live process and loop introspection
 .Sh SYNOPSIS
 .In xtc.h
@@ -151,7 +155,7 @@ Why a
 proc is parked, one of the
 .Vt enum xtc_proc_park
 values below;
-.Dv XTC_PARK_NONE
+.Dv XTC_PROC_PARK_NONE
 when the proc is not parked.
 .It Va alive
 Non-zero while the proc is live.
@@ -265,18 +269,18 @@ Finished, awaiting reap.
 .Pp
 .Vt enum xtc_proc_park
 records why a parked proc is waiting:
-.Bl -tag -width XTC_PARK_MAILBOX -compact -offset indent
-.It Dv XTC_PARK_NONE
+.Bl -tag -width XTC_PROC_PARK_MAILBOX -compact -offset indent
+.It Dv XTC_PROC_PARK_NONE
 Not parked.
-.It Dv XTC_PARK_FD
+.It Dv XTC_PROC_PARK_FD
 Waiting on a file descriptor
 .Pq Fn xtc_proc_wait_fd .
-.It Dv XTC_PARK_TIMER
+.It Dv XTC_PROC_PARK_TIMER
 Waiting on a timer
 .Pq Fn xtc_proc_sleep
 or a timed
 .Fn xtc_recv .
-.It Dv XTC_PARK_MAILBOX
+.It Dv XTC_PROC_PARK_MAILBOX
 Waiting for a message
 .Pq a blocking Fn xtc_recv .
 .El
@@ -364,6 +368,29 @@ xtc_proc_info_t info = XTC_PROC_INFO_INIT;
 if (xtc_proc_info(pid, &info) == XTC_OK && info.mbox_len > info.mbox_cap / 2)
         log_warn("proc %llu mailbox half full", (unsigned long long)pid);
 .Ed
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Dv XTC_PARK_NONE
+Use
+.Dv XTC_PROC_PARK_NONE ;
+same value.
+.It Dv XTC_PARK_FD
+Use
+.Dv XTC_PROC_PARK_FD ;
+same value.
+.It Dv XTC_PARK_TIMER
+Use
+.Dv XTC_PROC_PARK_TIMER ;
+same value.
+.It Dv XTC_PARK_MAILBOX
+Use
+.Dv XTC_PROC_PARK_MAILBOX ;
+same value.
+.El
 .Sh SEE ALSO
 .Xr xtc_proc 3 ,
 .Xr xtc_reg 3 ,

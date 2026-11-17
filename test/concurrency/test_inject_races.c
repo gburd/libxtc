@@ -235,7 +235,7 @@ lw_acquirer_A(void *arg)
 	(void)arg;
 	g_is_thread_A = 1;
 	/* This acquire trips pre_cas; the callback pauses us there. */
-	munit_assert_int(xtc_lwlock_acquire(&g_lw, XTC_LW_EXCLUSIVE),
+	munit_assert_int(xtc_lwlock_acquire(&g_lw, XTC_LWLOCK_EXCLUSIVE),
 	    ==, XTC_OK);
 	note_acquire();
 	xtc_atomic_store_i32(&g_lwA_acquired, 1, xtc_mo_seq_cst);
@@ -273,7 +273,7 @@ test_lwlock_contended_cas_retry(const MunitParameter p[], void *d)
 
 	/* B (main) takes the lock exclusively, changing state under A.
 	 * B also passes through pre_cas, but the callback lets it by. */
-	munit_assert_int(xtc_lwlock_acquire(&g_lw, XTC_LW_EXCLUSIVE),
+	munit_assert_int(xtc_lwlock_acquire(&g_lw, XTC_LWLOCK_EXCLUSIVE),
 	    ==, XTC_OK);
 	note_acquire();
 	munit_assert_int(xtc_atomic_load_i32(&g_lwA_acquired, xtc_mo_seq_cst),

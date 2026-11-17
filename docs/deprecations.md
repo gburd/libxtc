@@ -77,6 +77,12 @@ result keeps working until it moves to the new name.
 | `XTC_LOG_OPTS_DEFAULT` | `XTC_LOG_OPTS_INIT` | macro |  |
 | `xtc_loop_fini()` | `xtc_loop_destroy()` | function | the new name returns void; the old one returns XTC_E_INVAL for NULL, else XTC_OK |
 | `xtc_loop_init()` | `xtc_loop_create()` | function |  |
+| `XTC_LW_EXCLUSIVE` | `XTC_LWLOCK_EXCLUSIVE` | frozen | frozen lock layer: an alias, no warning; 3.0 keeps only XTC_LWLOCK_EXCLUSIVE |
+| `XTC_LW_SHARED` | `XTC_LWLOCK_SHARED` | frozen | frozen lock layer: an alias, no warning; 3.0 keeps only XTC_LWLOCK_SHARED |
+| `XTC_PARK_FD` | `XTC_PROC_PARK_FD` | enum | same value |
+| `XTC_PARK_MAILBOX` | `XTC_PROC_PARK_MAILBOX` | enum | same value |
+| `XTC_PARK_NONE` | `XTC_PROC_PARK_NONE` | enum | same value |
+| `XTC_PARK_TIMER` | `XTC_PROC_PARK_TIMER` | enum | same value |
 | `xtc_pg_join()` | `xtc_pg_subscribe()` | function |  |
 | `xtc_pg_leave()` | `xtc_pg_unsubscribe()` | function | a non-member is XTC_E_NOTFOUND (the old name: XTC_E_INVAL) |
 | `xtc_preempt_set_involuntary()` | `xtc_runtime_set_preempt_involuntary()` | function |  |
@@ -111,6 +117,17 @@ result keeps working until it moves to the new name.
 | `xtc_xspawn()` | `xtc_xproc_spawn()` | function |  |
 | `xtc_xspawn_entry()` | `xtc_xproc_spawn_entry()` | function |  |
 <!-- renames:end -->
+
+## Enums given a type name in 2.2
+
+These enums had a tag and no typedef (or a typedef and no tag).  2.2
+adds the missing half; the old spelling keeps working with no warning,
+because `enum xtc_x` and `xtc_x_t` name the same type:
+`xtc_kill_status_t`, `xtc_proc_run_state_t`, `xtc_proc_park_t`,
+`xtc_batch_state_t`, `xtc_batch_close_mode_t`, `xtc_batch_exec_kind_t`,
+`xtc_sched_verdict_t`, `xtc_tail_kind_t`, `xtc_trace_kind_t`,
+`xtc_causal_kind_t`, and the tag `enum xtc_down_kind` for
+`xtc_down_kind_t`.
 
 ## Planned for 3.0 (not done in 2.x)
 

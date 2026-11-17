@@ -493,9 +493,9 @@ main(int argc, char **argv)
 	{
 		xtc_lwlock_t lw;
 		CHECK(xtc_lwlock_init(&lw, 0) == XTC_OK);
-		CHECK(xtc_lwlock_acquire(&lw, XTC_LW_EXCLUSIVE) == XTC_OK);
+		CHECK(xtc_lwlock_acquire(&lw, XTC_LWLOCK_EXCLUSIVE) == XTC_OK);
 		xtc_lwlock_release(&lw);
-		CHECK(xtc_lwlock_acquire(&lw, XTC_LW_SHARED) == XTC_OK);
+		CHECK(xtc_lwlock_acquire(&lw, XTC_LWLOCK_SHARED) == XTC_OK);
 		xtc_lwlock_release(&lw);
 		xtc_lwlock_destroy(&lw);
 		printf("  ok   lwlock acquire/release (X + S)\n");

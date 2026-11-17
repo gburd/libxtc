@@ -52,7 +52,7 @@ extern "C" {
                          XTC_TAIL_OS | XTC_TAIL_APP)
 
 /* Event kinds recorded by the SCHED source. */
-enum xtc_tail_kind {
+typedef enum xtc_tail_kind {
 	XTC_TAIL_SPAWN    = 0,   /* a proc was spawned */
 	XTC_TAIL_EXIT     = 1,   /* a proc exited (detail = reason) */
 	XTC_TAIL_WAKE     = 2,   /* an I/O completion was DISPATCHED to a task
@@ -251,7 +251,7 @@ enum xtc_tail_kind {
 	 * thread's xtc_thread_register name) the same way.  2.2.
 	 */
 	XTC_TAIL_LABEL = 15
-};
+} xtc_tail_kind_t;
 
 /*
  * The application's own events, source XTC_TAIL_APP (2.2): a batched

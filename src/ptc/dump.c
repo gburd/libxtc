@@ -85,10 +85,10 @@ static const char *
 park_name(int p)
 {
 	switch (p) {
-	case XTC_PARK_NONE:    return "-";
-	case XTC_PARK_FD:      return "fd";
-	case XTC_PARK_TIMER:   return "timer";
-	case XTC_PARK_MAILBOX: return "mailbox";
+	case XTC_PROC_PARK_NONE:    return "-";
+	case XTC_PROC_PARK_FD:      return "fd";
+	case XTC_PROC_PARK_TIMER:   return "timer";
+	case XTC_PROC_PARK_MAILBOX: return "mailbox";
 	default:               return "?";
 	}
 }

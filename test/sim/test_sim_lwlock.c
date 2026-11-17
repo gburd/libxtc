@@ -82,7 +82,7 @@ ex_worker(void *arg)
 
 	for (it = 0; it < EXCL_ITERS; it++) {
 		int pk, live;
-		(void)xtc_lwlock_acquire(&g_ex_lk, XTC_LW_EXCLUSIVE);
+		(void)xtc_lwlock_acquire(&g_ex_lk, XTC_LWLOCK_EXCLUSIVE);
 		live =
 		    xtc_atomic_fetch_add_i32(&g_ex_live, 1, xtc_mo_relaxed) + 1;
 		do {
@@ -166,7 +166,7 @@ rw_writer(void *arg)
 	for (it = 0; it < RW_ITERS; it++) {
 		long nv = (long)((id + 1) * 100 + it);
 		int live;
-		(void)xtc_lwlock_acquire(&g_rw_lk, XTC_LW_EXCLUSIVE);
+		(void)xtc_lwlock_acquire(&g_rw_lk, XTC_LWLOCK_EXCLUSIVE);
 		live =
 		    xtc_atomic_fetch_add_i32(&g_rw_wr_live, 1, xtc_mo_relaxed) +
 		    1;
@@ -195,7 +195,7 @@ rw_reader(void *arg)
 	for (it = 0; it < RW_ITERS; it++) {
 		long hi, lo;
 		int live, pk;
-		(void)xtc_lwlock_acquire(&g_rw_lk, XTC_LW_SHARED);
+		(void)xtc_lwlock_acquire(&g_rw_lk, XTC_LWLOCK_SHARED);
 		live =
 		    xtc_atomic_fetch_add_i32(&g_rw_rd_live, 1, xtc_mo_relaxed) +
 		    1;

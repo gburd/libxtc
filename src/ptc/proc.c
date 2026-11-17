@@ -6436,10 +6436,10 @@ __fill_proc_info(struct xtc_proc *p, xtc_proc_info_t *info)
 		if (st == XTC_TS_PARKED) {
 			if (xtc_atomic_load_i64(&task->park_fd,
 			        xtc_mo_relaxed) != __PARK_TOK_NONE)
-				info->park_reason = XTC_PARK_FD;
+				info->park_reason = XTC_PROC_PARK_FD;
 			else if (xtc_atomic_load_ptr(&task->park_timer,
 			             xtc_mo_relaxed) != NULL)
-				info->park_reason = XTC_PARK_TIMER;
+				info->park_reason = XTC_PROC_PARK_TIMER;
 			/* else: possibly a mailbox park -- decided below from
 			 * waker_armed, which is read under mbox_lock.  It CANNOT
 			 * be decided from park_requested: that flag is a one-shot
@@ -6448,7 +6448,7 @@ __fill_proc_info(struct xtc_proc *p, xtc_proc_info_t *info)
 			 * coro_fctx.c / coro_winfiber.c), so by the time the task
 			 * is XTC_TS_PARKED it is always 0 -- the old test here was
 			 * dead code and EVERY mailbox park reported
-			 * XTC_PARK_NONE.
+			 * XTC_PROC_PARK_NONE.
 			 *
 			 * Not a cosmetic mislabel: a fiber blocked in xtc_recv
 			 * showed as a bare PARKED with NO park source, which is
@@ -6465,8 +6465,8 @@ __fill_proc_info(struct xtc_proc *p, xtc_proc_info_t *info)
 	 * "parked waiting for a mailbox wake" for the whole park -- unlike
 	 * park_requested, which the coro substrate has already consumed. */
 	if (info->run_state == XTC_TS_PARKED &&
-	    info->park_reason == XTC_PARK_NONE && p->waker_armed)
-		info->park_reason = XTC_PARK_MAILBOX;
+	    info->park_reason == XTC_PROC_PARK_NONE && p->waker_armed)
+		info->park_reason = XTC_PROC_PARK_MAILBOX;
 	info->mbox_len = p->mbox_n;
 	info->mbox_peak = p->mbox_peak;
 	info->mbox_cap = p->mbox_cap;

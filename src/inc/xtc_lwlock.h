@@ -57,9 +57,13 @@ extern "C" {
 #define XTC_LWLOCK_MAX_BACKENDS 4096   /* power of 2; bits 0..11 = shared count */
 #endif
 
+/* The lock layer is frozen (docs/abi-stability.md): XTC_LWLOCK_* are the
+ * names to use, and XTC_LW_* stay as plain aliases until 3.0. */
 typedef enum xtc_lwlock_mode {
 	XTC_LW_EXCLUSIVE = 0,
-	XTC_LW_SHARED    = 1
+	XTC_LW_SHARED    = 1,
+	XTC_LWLOCK_EXCLUSIVE = XTC_LW_EXCLUSIVE,
+	XTC_LWLOCK_SHARED    = XTC_LW_SHARED
 } xtc_lwlock_mode_t;
 
 /* The lock itself.  Caller embeds in any structure or stack-allocates. */

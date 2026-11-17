@@ -238,7 +238,7 @@ __try_attempt(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 		uint32_t expected = old_state;
 		uint32_t desired;
 
-		if (mode == XTC_LW_EXCLUSIVE) {
+		if (mode == XTC_LWLOCK_EXCLUSIVE) {
 			if ((old_state & LW_LOCK_MASK) != 0)
 				return 0;        /* held shared or exclusive -- block */
 			desired = old_state + LW_VAL_EXCLUSIVE;
@@ -270,7 +270,7 @@ __release_state(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 	uint32_t old_state, desired;
 	old_state = xtc_atomic_load_u32(&lock->state, xtc_mo_relaxed);
 	for (;;) {
-		if (mode == XTC_LW_EXCLUSIVE)
+		if (mode == XTC_LWLOCK_EXCLUSIVE)
 			desired = old_state - LW_VAL_EXCLUSIVE;
 		else
 			desired = old_state - LW_VAL_SHARED;

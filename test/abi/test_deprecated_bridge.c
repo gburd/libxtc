@@ -32,10 +32,12 @@
 #include "xtc_chan.h"
 #include "xtc_dispatch.h"
 #include "xtc_exec.h"
+#include "xtc_inspect.h"
 #include "xtc_io.h"
 #include "xtc_lockmgr.h"
 #include "xtc_log.h"
 #include "xtc_loop.h"
+#include "xtc_lwlock.h"
 #include "xtc_net.h"
 #include "xtc_orc.h"
 #include "xtc_pg.h"
@@ -422,6 +424,22 @@ bridge_fn_types(void)
 	CHECK(s2 == stall_cb && p2 == NULL && n2 == NULL);
 }
 
+/* enum constants: XTC_PARK_* -> XTC_PROC_PARK_* (deprecated) and the
+ * frozen XTC_LW_* -> XTC_LWLOCK_* (aliases, no warning). */
+static void
+bridge_enums(void)
+{
+	xtc_lwlock_mode_t m = XTC_LW_SHARED;
+	enum xtc_proc_park pk = XTC_PARK_MAILBOX;
+
+	CHECK(XTC_PARK_NONE == XTC_PROC_PARK_NONE);
+	CHECK(XTC_PARK_FD == XTC_PROC_PARK_FD);
+	CHECK(XTC_PARK_TIMER == XTC_PROC_PARK_TIMER);
+	CHECK(pk == XTC_PROC_PARK_MAILBOX);
+	CHECK(m == XTC_LWLOCK_SHARED);
+	CHECK(XTC_LW_EXCLUSIVE == XTC_LWLOCK_EXCLUSIVE);
+}
+
 int
 main(void)
 {
@@ -440,6 +458,7 @@ main(void)
 	bridge_coro();
 	bridge_cfg_session();
 	bridge_fn_types();
+	bridge_enums();
 	printf("  [bridge] OK: every deprecated name still works\n");
 	return 0;
 }

@@ -292,7 +292,7 @@ XTC_API int xtc_exit_pid(xtc_pid_t target, int reason);
  * and will never fire."  Guessing after a fixed timeout is the only
  * option today; these statuses replace the guess with an answer.
  */
-enum xtc_kill_status {
+typedef enum xtc_kill_status {
 	/* The target is no longer ALIVE: it observed the kill and left its
 	 * body, or it was already dead (a pid that was never issued is
 	 * XTC_E_INVAL, not DELIVERED).  NOT proof that at-exit
@@ -326,7 +326,7 @@ enum xtc_kill_status {
 	 * this deadline is an observation budget, not a wall-clock bound --
 	 * call from a plain thread if you need the latter. */
 	XTC_KILL_TIMEOUT   = 2
-};
+} xtc_kill_status_t;
 
 /*
  * xtc_exit_pid with a bounded wait and a REPORT of what happened.
@@ -1153,7 +1153,7 @@ XTC_API int xtc_down_decode(const void *msg, size_t len, xtc_pid_t *out_pid,
  * collide.  The legacy single-integer xtc_down_decode still works and
  * returns the same `reason` it always did.
  */
-typedef enum {
+typedef enum xtc_down_kind {
 	XTC_DOWN_KIND_CLEAN  = 0,  /* target returned or xtc_exit_self(0) */
 	XTC_DOWN_KIND_EXIT   = 1,  /* xtc_exit_self(code), code in .exit_code */
 	XTC_DOWN_KIND_SIGNAL = 2,  /* R1 contained fault, signal in .signal */

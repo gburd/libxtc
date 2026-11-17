@@ -35,20 +35,29 @@ extern "C" {
 #endif
 
 /* Run state of a proc (mirrors the scheduler task state). */
-enum xtc_proc_run_state {
+typedef enum xtc_proc_run_state {
 	XTC_PROC_SCHEDULED = 0,
 	XTC_PROC_RUNNING   = 1,
 	XTC_PROC_PARKED    = 2,
 	XTC_PROC_DONE      = 3
-};
+} xtc_proc_run_state_t;
 
-/* Why a PARKED proc is parked (XTC_PARK_NONE otherwise). */
-enum xtc_proc_park {
-	XTC_PARK_NONE    = 0,
-	XTC_PARK_FD      = 1,
-	XTC_PARK_TIMER   = 2,
-	XTC_PARK_MAILBOX = 3
-};
+/* Why a PARKED proc is parked (XTC_PROC_PARK_NONE otherwise).  The
+ * XTC_PARK_* spellings are deprecated aliases (docs/deprecations.md). */
+typedef enum xtc_proc_park {
+	XTC_PROC_PARK_NONE    = 0,
+	XTC_PROC_PARK_FD      = 1,
+	XTC_PROC_PARK_TIMER   = 2,
+	XTC_PROC_PARK_MAILBOX = 3,
+	XTC_PARK_NONE XTC_DEPRECATED_ENUM("use XTC_PROC_PARK_NONE") =
+	    XTC_PROC_PARK_NONE,
+	XTC_PARK_FD XTC_DEPRECATED_ENUM("use XTC_PROC_PARK_FD") =
+	    XTC_PROC_PARK_FD,
+	XTC_PARK_TIMER XTC_DEPRECATED_ENUM("use XTC_PROC_PARK_TIMER") =
+	    XTC_PROC_PARK_TIMER,
+	XTC_PARK_MAILBOX XTC_DEPRECATED_ENUM("use XTC_PROC_PARK_MAILBOX") =
+	    XTC_PROC_PARK_MAILBOX
+} xtc_proc_park_t;
 
 /*
  * One proc's snapshot.  mbox_len is the live mailbox depth -- the

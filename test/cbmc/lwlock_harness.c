@@ -59,7 +59,7 @@ int nondet_int(void);   /* CBMC nondeterministic choice */
 #define LW_SHARED_MASK     (XTC_LWLOCK_MAX_BACKENDS - 1u)
 #define LW_LOCK_MASK       (LW_SHARED_MASK | LW_VAL_EXCLUSIVE)
 
-enum lw_mode { XTC_LW_EXCLUSIVE = 0, XTC_LW_SHARED = 1 };
+enum lw_mode { XTC_LWLOCK_EXCLUSIVE = 0, XTC_LWLOCK_SHARED = 1 };
 
 static uint32_t g_state;
 
@@ -81,7 +81,7 @@ try_attempt(int mode)
 		uint32_t expected = old_state;
 		uint32_t desired;
 
-		if (mode == XTC_LW_EXCLUSIVE) {
+		if (mode == XTC_LWLOCK_EXCLUSIVE) {
 			if ((old_state & LW_LOCK_MASK) != 0)
 				return 0;        /* held shared or exclusive */
 			desired = old_state + LW_VAL_EXCLUSIVE;
@@ -105,7 +105,7 @@ release_state(int mode)
 	uint32_t old_state, desired;
 	old_state = xtc_atomic_load_u32(&g_state, xtc_mo_relaxed);
 	for (;;) {
-		if (mode == XTC_LW_EXCLUSIVE)
+		if (mode == XTC_LWLOCK_EXCLUSIVE)
 			desired = old_state - LW_VAL_EXCLUSIVE;
 		else
 			desired = old_state - LW_VAL_SHARED;
@@ -142,11 +142,11 @@ static void
 excl_actor(void)
 {
 	int n;
-	acquire(XTC_LW_EXCLUSIVE);
+	acquire(XTC_LWLOCK_EXCLUSIVE);
 	n = xtc_atomic_fetch_add_i32(&in_excl_cs, 1, xtc_mo_relaxed);
 	__CPROVER_assert(n == 0, "mutual exclusion: never two exclusive holders");
 	(void)xtc_atomic_fetch_sub_i32(&in_excl_cs, 1, xtc_mo_relaxed);
-	(void)release_state(XTC_LW_EXCLUSIVE);
+	(void)release_state(XTC_LWLOCK_EXCLUSIVE);
 }
 
 /* Shared contender: while it holds shared, the exclusive bit must be
@@ -155,11 +155,11 @@ static void
 shared_actor(void)
 {
 	uint32_t s;
-	acquire(XTC_LW_SHARED);
+	acquire(XTC_LWLOCK_SHARED);
 	s = xtc_atomic_load_u32(&g_state, xtc_mo_relaxed);
 	__CPROVER_assert((s & LW_VAL_EXCLUSIVE) == 0,
 	    "no exclusive holder while a shared holder is in the CS");
-	(void)release_state(XTC_LW_SHARED);
+	(void)release_state(XTC_LWLOCK_SHARED);
 }
 
 int
