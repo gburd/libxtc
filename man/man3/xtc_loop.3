@@ -77,7 +77,7 @@ A coroutine created with
 and a handle is reaped at
 .Fn xtc_loop_destroy ,
 so that handle stays valid, and
-.Fn xtc_await
+.Fn xtc_coro_join
 can read its result, until then.
 The fiber of a process
 .Pq Xr xtc_proc 3 ,

@@ -79,7 +79,7 @@ inside a process (a fiber started with `xtc_proc_spawn`; see
 [processes]({{ '/guide/03-processes-and-messages/' | relative_url }})),
 `xtc_proc_sleep(ns)` parks *this fiber* for `ns` nanoseconds while the
 loop keeps running everything else. It needs the process: in a bare
-`xtc_async` coroutine it returns `XTC_E_INVAL` at once, without
+`xtc_coro_spawn` coroutine it returns `XTC_E_INVAL` at once, without
 sleeping, so give the work a process when it has to wait on time.
 
 {: .warning }

@@ -27,10 +27,10 @@
  *	  - No timeout/cancellable acquire (use xtc_amutex, or xtc_arwlock
  *	    for a reader/writer lock, for those scenarios).
  *
- *	A contended acquire inside a fiber (a process or an xtc_async
- *	coroutine, in every build) parks the fiber, so other fibers on its
- *	loop keep running; on a plain thread it waits on a condition
- *	variable.
+ *	A contended acquire inside a fiber (a process or an
+ *	xtc_coro_spawn coroutine, in every build) parks the fiber, so other
+ *	fibers on its loop keep running; on a plain thread it waits on a
+ *	condition variable.
  *
  *	Trade-offs vs xtc_lrlock:
  *	  + Multiple writers (serialized).

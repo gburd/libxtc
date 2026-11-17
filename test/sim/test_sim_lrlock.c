@@ -203,7 +203,8 @@ run_oom(uint64_t seed, int *out_done, int *out_torn, int *out_lost,
 	xtc_atomic_store_long(&g_hash, 0, xtc_mo_seq_cst);
 	g_last = 0;
 
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){ .size = sizeof(xtc_exec_opts_t),
+	    .n_loops = N_LOOPS }, &e) != XTC_OK)
 		return -1;
 	o.name = "lr.oom";
 	o.data_size = sizeof(struct payload);
@@ -211,7 +212,7 @@ run_oom(uint64_t seed, int *out_done, int *out_torn, int *out_lost,
 	o.sync_fn = pl_sync;
 	o.oplog_capacity = 32; /* two ops */
 	if (xtc_lrlock_create_ex(&o, &g_lr) != XTC_OK) {
-		(void)xtc_exec_fini(e);
+		xtc_exec_destroy(e);
 		return -1;
 	}
 	for (i = 0; i < WRITERS; i++)
@@ -243,7 +244,7 @@ run_oom(uint64_t seed, int *out_done, int *out_torn, int *out_lost,
 	*out_state = xtc_sim_state_hash(e);
 	xtc_lrlock_destroy(g_lr);
 	g_lr = NULL;
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	return rc;
 }
 

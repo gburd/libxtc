@@ -459,9 +459,9 @@ test_async_releases_stack(const MunitParameter p[], void *d)
 #endif
 
 /*
- * C12: a coroutine spawned without a handle (xtc_async(..., NULL)) is
- * reclaimed when it finishes, as a proc's fiber is: nobody can await
- * it.  Its task and coro stayed until xtc_loop_fini, so 400,000
+ * C12: a coroutine spawned without a handle (xtc_coro_spawn(..., NULL))
+ * is reclaimed when it finishes, as a proc's fiber is: nobody can join
+ * it.  Its task and coro stayed until xtc_loop_destroy, so 400,000
  * fire-and-forget fibers held 129 MB against 4.4 MB for as many procs.
  * Counted here through the allocator hook: 20,000 of them, at most 64
  * alive at once, must leave far fewer than one allocation each behind
@@ -518,7 +518,7 @@ c12_driver(void *arg)
 	(void)__os_alloc_set_hook(&h);
 	live0 = xtc_atomic_load_long(&g_c12_live, xtc_mo_relaxed);
 	for (i = 0; i < C12_N; i++) {
-		if (xtc_async(loop, c12_leaf, NULL, NULL) != XTC_OK)
+		if (xtc_coro_spawn(loop, c12_leaf, NULL, NULL) != XTC_OK)
 			break;
 		if ((i & 63) == 63)
 			while (g_c12_done <= i - 64)
@@ -539,10 +539,11 @@ test_async_detached_reclaimed(const MunitParameter p[], void *d)
 	(void)p;
 	(void)d;
 	munit_assert_int(__os_alloc_get_hook(&g_c12_real), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
-	munit_assert_int(xtc_async(loop, c12_driver, loop, NULL), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_coro_spawn(loop, c12_driver, loop, NULL), ==,
+	    XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_logf(MUNIT_LOG_INFO, "%ld coroutines left %ld allocations",
 	    g_c12_done, g_c12_left);
 	munit_assert_long(g_c12_done, ==, C12_N);

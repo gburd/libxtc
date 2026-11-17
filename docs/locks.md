@@ -207,7 +207,7 @@ lock ("nothing under this lock may park"); if that ever changes,
 convert it.  This is the shape `xtc_reg_visit` relies on: its callback
 runs under the registry's internal lock and must not park.
 
-### `xtc_arwlock_t` and `xtc_rwlock_t`  --  reader/writer locks
+### `xtc_arwlock_t` and `xtc_thrd_rwlock_t`  --  reader/writer locks
 
 `xtc_arwlock_t` is the reader/writer analogue of `xtc_amutex_t`: a
 contended reader or writer parks its fiber, so the loop keeps running,
@@ -221,12 +221,12 @@ queue FIFO, so a stream of readers cannot starve a writer.
     int  xtc_arwlock_wrlock (xtc_arwlock_t *r, int64_t timeout_ns);
     int  xtc_arwlock_unlock (xtc_arwlock_t *r);
 
-`xtc_rwlock_t` has the same shape and writer priority, but a contended
-acquire **blocks the OS thread** on a pthread condition variable; it
-does not park the fiber.  Two processes on one loop therefore deadlock
-when one waits while the other holds the lock across a park: the
-waiter blocks the thread the holder needs to run.  Use it only between
-plain threads, and `xtc_arwlock_t` on a loop.
+`xtc_thrd_rwlock_t` has the same shape and writer priority, but a
+contended acquire **blocks the OS thread** on a pthread condition
+variable; it does not park the fiber.  Two processes on one loop
+therefore deadlock when one waits while the other holds the lock across
+a park: the waiter blocks the thread the holder needs to run.  Use it
+only between plain threads, and `xtc_arwlock_t` on a loop.
 
 ### `xtc_notify_t`  --  one-shot signalling
 

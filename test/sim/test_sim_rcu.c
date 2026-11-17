@@ -477,7 +477,8 @@ run_oom(uint64_t seed, int *out_uaf, int *out_rd, long *out_hash,
 	if (xtc_rcu_init() != XTC_OK)
 		return -1;
 	xtc_atomic_store_ptr(&g_ptr, node_new(1), xtc_mo_release);
-	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
+	if (xtc_exec_create(&(xtc_exec_opts_t){ .size = sizeof(xtc_exec_opts_t),
+	    .n_loops = N_LOOPS }, &e) != XTC_OK)
 		return -1;
 	for (i = 0; i <= OO_READERS; i++) {
 		xtc_loop_t *l = xtc_exec_loop(e, (unsigned)(i % N_LOOPS));
@@ -510,7 +511,7 @@ run_oom(uint64_t seed, int *out_uaf, int *out_rd, long *out_hash,
 	if (xtc_atomic_load_i32(&g_freed, xtc_mo_seq_cst) !=
 	    xtc_atomic_load_i32(&g_alloc, xtc_mo_seq_cst))
 		*out_uaf += 1000;
-	(void)xtc_exec_fini(e);
+	xtc_exec_destroy(e);
 	xtc_rcu_fini();
 	return rc;
 }
