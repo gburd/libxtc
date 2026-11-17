@@ -1044,7 +1044,10 @@ test_backtrace(const MunitParameter p[], void *d)
 static MunitResult
 test_pressure_listen_ex_stop(const MunitParameter p[], void *d)
 {
-	xtc_slab_pressure_t *h = NULL, *h2 = NULL;
+	xtc_slab_pressure_t *h = NULL;
+#if defined(__linux__)
+	xtc_slab_pressure_t *h2 = NULL;
+#endif
 	int rc;
 	(void)p; (void)d;
 
