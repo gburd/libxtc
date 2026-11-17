@@ -31,6 +31,7 @@
 #include "xtc_slab.h"
 #include "xtc_dispatch.h"
 #include "xtc_tnt.h"
+#include "xtc_xproc.h"
 
 /* Group: loop / io / bloom / hll lifecycle (create / destroy). */
 
@@ -221,4 +222,39 @@ int
 xtc_tnt_start(const xtc_tnt_spec_t *spec)
 {
 	return xtc_tnt_run(spec);
+}
+
+/* Group: xproc (the handle's methods take the xtc_xproc_ prefix). */
+
+int
+xtc_xspawn(xtc_loop_t *loop, const char *name,
+    xtc_xproc_root_fn root_fn, const void *arg, size_t arg_len,
+    xtc_xproc_t **out)
+{
+	return xtc_xproc_spawn(loop, name, root_fn, arg, arg_len, out);
+}
+
+int
+xtc_xspawn_entry(xtc_loop_t *loop, const char *name,
+    const char *entry, const void *arg, size_t arg_len, xtc_xproc_t **out)
+{
+	return xtc_xproc_spawn_entry(loop, name, entry, arg, arg_len, out);
+}
+
+int
+xtc_xsend(xtc_xproc_t *p, const void *msg, size_t len)
+{
+	return xtc_xproc_send(p, msg, len);
+}
+
+int
+xtc_xmonitor(xtc_xproc_t *p, uint64_t *out_ref)
+{
+	return xtc_xproc_monitor(p, out_ref);
+}
+
+int
+xtc_xlink(xtc_xproc_t *p)
+{
+	return xtc_xproc_link(p);
 }

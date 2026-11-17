@@ -4,7 +4,7 @@
  *
  * bench/bench_xproc_fanout.c -- cross-fork spawn/monitor scale probe.
  *
- * Fork N children (via xtc_xspawn), monitor each, send each a message,
+ * Fork N children (via xtc_xproc_spawn), monitor each, send each a message,
  * and wait for all N DOWNs.  Reports children/sec and the wall time, to
  * find where the xtc_xproc relay/monitor machinery (or the OS fork/fd
  * limits) caps throughput.  A ceiling well below the OS process limit
@@ -59,14 +59,14 @@ driver(void *a)
 	t0 = xtc_clock_mono();
 	for (i = 0; i < d->n; i++) {
 		int code = 1 + (i & 0x3f);
-		if (xtc_xspawn(d->loop, "kid", child_body, &code, sizeof code,
+		if (xtc_xproc_spawn(d->loop, "kid", child_body, &code, sizeof code,
 		    &kids[i]) != XTC_OK) {
 			d->spawn_fail++;
 			kids[i] = NULL;
 			continue;
 		}
-		(void)xtc_xmonitor(kids[i], NULL);
-		(void)xtc_xsend(kids[i], &code, sizeof code);
+		(void)xtc_xproc_monitor(kids[i], NULL);
+		(void)xtc_xproc_send(kids[i], &code, sizeof code);
 	}
 	/* Collect one DOWN per successfully spawned child. */
 	for (i = 0; i < d->n - d->spawn_fail; i++) {

@@ -4,37 +4,42 @@
 .Dt XTC_XPROC 3
 .Os
 .Sh NAME
-.Nm xtc_xspawn ,
+.Nm xtc_xproc_spawn ,
 .Nm xtc_xproc_register_entry ,
-.Nm xtc_xspawn_entry ,
+.Nm xtc_xproc_spawn_entry ,
 .Nm xtc_xproc_destroy ,
 .Nm xtc_xproc_os_pid ,
+.Nm xtc_xproc_send ,
+.Nm xtc_xproc_monitor ,
+.Nm xtc_xproc_link ,
+.Nm xtc_xproc_child_main ,
+.Nm xtc_xproc_win_child_maybe ,
+.Nm xtc_xspawn ,
+.Nm xtc_xspawn_entry ,
 .Nm xtc_xsend ,
 .Nm xtc_xmonitor ,
-.Nm xtc_xlink ,
-.Nm xtc_xproc_child_main ,
-.Nm xtc_xproc_win_child_maybe
+.Nm xtc_xlink
 .Nd cross-fork spawn, send, and monitor
 .Sh LIBRARY
 .Lb libxtc
 .Sh SYNOPSIS
 .In xtc_xproc.h
 .Ft int
-.Fn xtc_xspawn "xtc_loop_t *loop" "const char *name" "xtc_xproc_root_fn root_fn" "const void *arg" "size_t arg_len" "xtc_xproc_t **out"
+.Fn xtc_xproc_spawn "xtc_loop_t *loop" "const char *name" "xtc_xproc_root_fn root_fn" "const void *arg" "size_t arg_len" "xtc_xproc_t **out"
 .Ft int
 .Fn xtc_xproc_register_entry "const char *name" "xtc_xproc_root_fn fn"
 .Ft int
-.Fn xtc_xspawn_entry "xtc_loop_t *loop" "const char *name" "const char *entry" "const void *arg" "size_t arg_len" "xtc_xproc_t **out"
+.Fn xtc_xproc_spawn_entry "xtc_loop_t *loop" "const char *name" "const char *entry" "const void *arg" "size_t arg_len" "xtc_xproc_t **out"
 .Ft void
 .Fn xtc_xproc_destroy "xtc_xproc_t *p"
 .Ft long
 .Fn xtc_xproc_os_pid "const xtc_xproc_t *p"
 .Ft int
-.Fn xtc_xsend "xtc_xproc_t *p" "const void *msg" "size_t len"
+.Fn xtc_xproc_send "xtc_xproc_t *p" "const void *msg" "size_t len"
 .Ft int
-.Fn xtc_xmonitor "xtc_xproc_t *p" "uint64_t *out_ref"
+.Fn xtc_xproc_monitor "xtc_xproc_t *p" "uint64_t *out_ref"
 .Ft int
-.Fn xtc_xlink "xtc_xproc_t *p"
+.Fn xtc_xproc_link "xtc_xproc_t *p"
 .Ft int
 .Fn xtc_xproc_child_main "int ctrl_fd" "xtc_xproc_root_fn root_fn" "void *arg"
 .Ft int
@@ -48,7 +53,7 @@ single-host subset of the (unbuilt) distributed design -- a stepping
 stone toward cluster support, built over a local socketpair rather than
 TCP.
 .Pp
-.Fn xtc_xspawn
+.Fn xtc_xproc_spawn
 forks a child running
 .Fa root_fn ,
 which receives a private copy of the
@@ -65,7 +70,7 @@ it returns
 .Dv XTC_E_NOSYS ,
 because a raw function pointer does not survive process creation there
 (a Windows child is a fresh image, not a clone of the parent) -- use
-.Fn xtc_xspawn_entry
+.Fn xtc_xproc_spawn_entry
 there, and portably.
 .Pp
 .Fn xtc_xproc_register_entry
@@ -74,7 +79,7 @@ The same binary -- parent and any re-exec'd child -- resolves the name
 to the same function, which is the portable bridge for platforms where a
 function pointer cannot cross process creation.  Call it once, early, in
 code that runs in BOTH the parent and the child image.
-.Fn xtc_xspawn_entry
+.Fn xtc_xproc_spawn_entry
 spawns a child running the function registered under
 .Fa entry
 by re-executing this binary, which resolves the name in its own copy of
@@ -88,21 +93,21 @@ as the first statement of
 .Fn main
 (see below); on POSIX, a binary that never calls it falls back to a
 plain fork, with the caveat described for
-.Fn xtc_xspawn .  It is otherwise identical to
-.Fn xtc_xspawn
+.Fn xtc_xproc_spawn .  It is otherwise identical to
+.Fn xtc_xproc_spawn
 (monitor, send, destroy all behave the same) and returns
 .Dv XTC_E_NOTFOUND
 if
 .Fa entry
 is not registered.  This is the portable and Windows-capable spawn form.
 .Pp
-.Fn xtc_xsend
+.Fn xtc_xproc_send
 sends a byte payload (copied) to the child's root proc; it arrives in
 that proc's mailbox as an ordinary
 .Fn xtc_recv
 message.
 .Pp
-.Fn xtc_xmonitor
+.Fn xtc_xproc_monitor
 monitors the child from the calling fiber.  When the child exits,
 crashes, or its control channel dies, the caller receives a normal xtc
 DOWN message (decode with
@@ -116,7 +121,7 @@ if the channel died before a clean exit was seen.  Internally the child's
 fate is mirrored into a local shadow proc, so all the ordinary
 monitor/DOWN machinery applies unchanged.
 .Pp
-.Fn xtc_xlink
+.Fn xtc_xproc_link
 is the bidirectional form (like
 .Xr xtc_link 3
 across the fork boundary, with its BEAM semantics since 1.55.1): an
@@ -127,7 +132,7 @@ first instead receives an EXIT message for every child exit.  If the
 linking fiber / parent process dies the child observes its control
 channel close and shuts down.  It links to
 the same shadow proc
-.Fn xtc_xmonitor
+.Fn xtc_xproc_monitor
 uses, so the intra-process link machinery extends across the fork
 unchanged.
 .Pp
@@ -176,7 +181,7 @@ live monitor was still reading.
 .Pp
 .Fn xtc_xproc_child_main
 is the child-side entry that
-.Fn xtc_xspawn
+.Fn xtc_xproc_spawn
 arranges automatically; it is public so a re-exec'd child can re-enter
 its runtime.
 .Pp
@@ -186,7 +191,7 @@ is wired as the first statement of
 after the
 .Fn xtc_xproc_register_entry
 calls, in a binary that hosts
-.Fn xtc_xspawn_entry
+.Fn xtc_xproc_spawn_entry
 children, on every platform (the name predates POSIX re-exec).
 If the cross-process-child sentinel argv is present it connects the
 control channel, receives its arg, runs the registered entry, and exits
@@ -197,24 +202,24 @@ enables re-exec: without it a re-exec'd child would run
 from the top and repeat whatever the parent did.
 .Pp
 Releases before 1.50 forked the POSIX
-.Fn xtc_xspawn_entry
+.Fn xtc_xproc_spawn_entry
 child straight into a new runtime without exec, so a child forked while
 another parent thread held one of the library's process-wide locks could
 block forever; the hook was a no-op on POSIX then, so binaries that
 followed the earlier advice already have it.
 .Pp
-.Fn xtc_xspawn
+.Fn xtc_xproc_spawn
 still forks without exec, because a raw function pointer is only
 meaningful in a clone of the parent.
 Its child runs a full runtime in a copy of a possibly multithreaded
 parent; prefer
-.Fn xtc_xspawn_entry
+.Fn xtc_xproc_spawn_entry
 there.
 .Sh RETURN VALUES
-.Fn xtc_xspawn ,
-.Fn xtc_xsend ,
+.Fn xtc_xproc_spawn ,
+.Fn xtc_xproc_send ,
 and
-.Fn xtc_xmonitor
+.Fn xtc_xproc_monitor
 return
 .Dv XTC_OK
 or a negative
@@ -264,6 +269,28 @@ covered by the unit test tier
 .Pq test/m10/test_xproc.c ;
 a future DST model would run both sides as loops over a simulated
 socketpair, as the distributed design describes.
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Fn xtc_xspawn
+Use
+.Fn xtc_xproc_spawn .
+.It Fn xtc_xspawn_entry
+Use
+.Fn xtc_xproc_spawn_entry .
+.It Fn xtc_xsend
+Use
+.Fn xtc_xproc_send .
+.It Fn xtc_xmonitor
+Use
+.Fn xtc_xproc_monitor .
+.It Fn xtc_xlink
+Use
+.Fn xtc_xproc_link .
+.El
 .Sh SEE ALSO
 .Xr xtc_osproc 3 ,
 .Xr xtc_proc 3 ,

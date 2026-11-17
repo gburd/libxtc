@@ -423,7 +423,7 @@ make check
 - Fiber-stack pool (spawn mprotect elimination), x86_64-Windows MSVC validation of xtc_xproc, test_sim_pg DST, bench_xproc_fanout.
 
 * Sat Jul 11 2026 Greg Burd <greg@burd.me> - 1.13.0-1
-- Proc-teardown refcount (UAF race class fixed), sanitizer fiber-switch annotations, Windows xtc_xproc port, xtc_xlink, xtc_tail compact-portable format + MSG source + offline viewer.
+- Proc-teardown refcount (UAF race class fixed), sanitizer fiber-switch annotations, Windows xtc_xproc port, xtc_xproc_link, xtc_tail compact-portable format + MSG source + offline viewer.
 
 * Fri Jul 10 2026 Greg Burd <greg@burd.me> - 1.12.0-1
 - Crash-aware registry (reaper + register_mon + svr_call_name), cross-fork xtc_xproc, xtc_tail microscope (phase 1).

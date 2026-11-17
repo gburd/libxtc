@@ -5,7 +5,7 @@
  * test/m2/test_net_sigpipe.c -- a send to a closed peer must RETURN an
  * error, not kill the host process with SIGPIPE.
  *
- *	Reproduced: xtc_xsend to an xproc child that had exited killed the
+ *	Reproduced: xtc_xproc_send to an xproc child that had exited killed the
  *	parent with status 141 (128 + SIGPIPE); every example hid it with
  *	signal(SIGPIPE, SIG_IGN).  Each probe runs in a forked child with
  *	SIGPIPE explicitly at SIG_DFL, so a regression shows up as the

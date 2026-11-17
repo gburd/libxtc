@@ -413,16 +413,16 @@ smoke_xdriver(void *arg)
 	int init = 1, code = 42;
 	void *m = NULL; size_t n = 0;
 	(void)arg;
-	if (xtc_xspawn_entry(s_xproc_loop, "xc", "smoke_xchild",
+	if (xtc_xproc_spawn_entry(s_xproc_loop, "xc", "smoke_xchild",
 	    &init, sizeof init, &child) != XTC_OK) {
 		s_xproc_reason = -2;   /* spawn_entry failed */
 		return;
 	}
-	if (xtc_xmonitor(child, NULL) != XTC_OK) {
+	if (xtc_xproc_monitor(child, NULL) != XTC_OK) {
 		s_xproc_reason = -3;   /* monitor failed */
 		xtc_xproc_destroy(child); return;
 	}
-	(void)xtc_xsend(child, &code, sizeof code);
+	(void)xtc_xproc_send(child, &code, sizeof code);
 	if (xtc_recv(&m, &n, 5000LL * 1000 * 1000) == XTC_OK) {
 		xtc_down_info_t di = XTC_DOWN_INFO_INIT;
 		if (xtc_down_decode_ex(m, n, &di) == XTC_OK)

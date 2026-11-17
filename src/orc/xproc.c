@@ -9,7 +9,7 @@
  *	Design: fork via xtc_osproc (which already gives a pidfd-pollable
  *	child + a control socket + raw waitpid-status reaping).  The child
  *	runs xtc_xproc_child_main, which stands up a child runtime and
- *	pumps parent xtc_xsend payloads into the root proc's mailbox.
+ *	pumps parent xtc_xproc_send payloads into the root proc's mailbox.
  *
  *	The parent mirrors the child's fate into a LOCAL "shadow" proc: a
  *	relay fiber xtc_osproc_wait()s the child, decodes its status, and
@@ -38,7 +38,7 @@
  * A raw function pointer cannot survive process creation on Windows (a
  * child is a fresh image), so a child root function is addressed by a
  * registered NAME that the identical binary resolves the same way in
- * parent and child.  xtc_xspawn_entry uses this; POSIX xtc_xspawn keeps
+ * parent and child.  xtc_xproc_spawn_entry uses this; POSIX xtc_xproc_spawn keeps
  * the direct-pointer path (fork preserves the address space).
  */
 #define XPROC_MAX_ENTRIES 64
@@ -99,8 +99,8 @@ struct child_root_ctx {
 };
 
 /* The child's root proc: run the user's root_fn with its arg.  Messages
- * the parent xtc_xsends are delivered to THIS proc's mailbox by the
- * relay below, so root_fn just xtc_recv()s them. */
+ * the parent sends with xtc_xproc_send are delivered to THIS proc's
+ * mailbox by the relay below, so root_fn just xtc_recv()s them. */
 static void
 child_root_proc(void *a)
 {
@@ -200,7 +200,7 @@ child_pump_proc(void *a)
 
 /*
  * The fork'd child's osproc handle, shared by the xtc_xproc handle and
- * (once xtc_xmonitor / xtc_xlink creates one) the SHADOW proc that parks
+ * (once xtc_xproc_monitor / xtc_xproc_link creates one) the SHADOW proc that parks
  * in xtc_osproc_wait on it.  Refcounted, and freed by whichever releases
  * it LAST.
  *
@@ -301,7 +301,7 @@ xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg)
 }
 
 /*
- * POSIX child re-entry for xtc_xspawn_entry.  The named-entry spawn
+ * POSIX child re-entry for xtc_xproc_spawn_entry.  The named-entry spawn
  * re-execs THIS binary (see __xproc_self_exe) with the sentinel
  *     --xtc-xproc-exec <entry> <ctrl_fd>
  * and the control fd inherited open.  If the sentinel is present this
@@ -447,8 +447,8 @@ shadow_proc(void *a)
 }
 
 int
-xtc_xspawn(xtc_loop_t *loop, const char *name, xtc_xproc_root_fn root_fn,
-           const void *arg, size_t arg_len, xtc_xproc_t **out)
+xtc_xproc_spawn(xtc_loop_t *loop, const char *name, xtc_xproc_root_fn root_fn,
+                const void *arg, size_t arg_len, xtc_xproc_t **out)
 {
 	struct xtc_xproc *p = NULL;
 	struct child_spawn_ctx *cctx = NULL;
@@ -517,7 +517,7 @@ fail_p:
 }
 
 /*
- * POSIX xtc_xspawn_entry: RE-EXEC this binary and resolve the entry in
+ * POSIX xtc_xproc_spawn_entry: RE-EXEC this binary and resolve the entry in
  * the fresh image, as Windows does.
  *
  * It used to resolve the entry and fork straight into
@@ -535,7 +535,7 @@ fail_p:
  * hosting binary calls first thing in main() -- the requirement Windows
  * always had.  Re-exec is used only once that hook has run in this image
  * (see __xproc_hook_seen); a binary that never calls it keeps the old
- * fork path, as does xtc_xspawn (raw function pointer).  The man page
+ * fork path, as does xtc_xproc_spawn (raw function pointer).  The man page
  * states the async-signal-safety caveat for both.
  */
 static int
@@ -563,8 +563,8 @@ __xproc_self_exe(char *buf, size_t bufsz)
 }
 
 int
-xtc_xspawn_entry(xtc_loop_t *loop, const char *name, const char *entry,
-                 const void *arg, size_t arg_len, xtc_xproc_t **out)
+xtc_xproc_spawn_entry(xtc_loop_t *loop, const char *name, const char *entry,
+                      const void *arg, size_t arg_len, xtc_xproc_t **out)
 {
 	struct xtc_xproc *p = NULL;
 	xtc_osproc_opts_t oo;
@@ -585,7 +585,7 @@ xtc_xspawn_entry(xtc_loop_t *loop, const char *name, const char *entry,
 	 * this platform cannot name its own executable. */
 	if (!xtc_atomic_load_i32(&__xproc_hook_seen, xtc_mo_acquire) ||
 	    __xproc_self_exe(exe, sizeof exe) != XTC_OK)
-		return xtc_xspawn(loop, name, fn, arg, arg_len, out);
+		return xtc_xproc_spawn(loop, name, fn, arg, arg_len, out);
 
 	if ((rc = __os_calloc(1, sizeof *p, (void **)&p)) != XTC_OK)
 		return rc;
@@ -679,7 +679,7 @@ xtc_xproc_os_pid(const xtc_xproc_t *p)
 }
 
 int
-xtc_xsend(xtc_xproc_t *p, const void *msg, size_t len)
+xtc_xproc_send(xtc_xproc_t *p, const void *msg, size_t len)
 {
 	if (p == NULL || p->ctrl_fd < 0) return XTC_E_INVAL;
 	if (len > 0 && msg == NULL) return XTC_E_INVAL;
@@ -714,7 +714,7 @@ __xproc_ensure_shadow(xtc_xproc_t *p)
 }
 
 int
-xtc_xmonitor(xtc_xproc_t *p, uint64_t *out_ref)
+xtc_xproc_monitor(xtc_xproc_t *p, uint64_t *out_ref)
 {
 	int rc;
 	if (p == NULL || p->os == NULL) return XTC_E_INVAL;
@@ -723,7 +723,7 @@ xtc_xmonitor(xtc_xproc_t *p, uint64_t *out_ref)
 }
 
 int
-xtc_xlink(xtc_xproc_t *p)
+xtc_xproc_link(xtc_xproc_t *p)
 {
 	int rc;
 	if (p == NULL || p->os == NULL) return XTC_E_INVAL;
@@ -749,11 +749,11 @@ xtc_xlink(xtc_xproc_t *p)
  * a fresh CreateProcess'd image, so the child body cannot be a raw
  * function pointer -- it must be a REGISTERED ENTRY NAME the identical
  * binary resolves the same way (xtc_xproc_register_entry).  Hence
- * xtc_xspawn (pointer form) declines with XTC_E_NOSYS on Windows; the
- * portable xtc_xspawn_entry works here.
+ * xtc_xproc_spawn (pointer form) declines with XTC_E_NOSYS on Windows; the
+ * portable xtc_xproc_spawn_entry works here.
  *
  * Contract mirrors POSIX: the parent gets an xtc_xproc handle it can
- * xtc_xsend to and xtc_xmonitor; a child exit / crash surfaces as a
+ * xtc_xproc_send to and xtc_xproc_monitor; a child exit / crash surfaces as a
  * normal xtc DOWN whose reason is the exit code, or a signal number
  * mapped from the unhandled-exception NTSTATUS (Cygwin's table), or
  * XTC_DOWN_KIND_NOCONNECTION if the control channel died first.
@@ -917,19 +917,19 @@ win_shadow_proc(void *a)
 }
 
 int
-xtc_xspawn(xtc_loop_t *loop, const char *name, xtc_xproc_root_fn root_fn,
-           const void *arg, size_t arg_len, xtc_xproc_t **out)
+xtc_xproc_spawn(xtc_loop_t *loop, const char *name, xtc_xproc_root_fn root_fn,
+                const void *arg, size_t arg_len, xtc_xproc_t **out)
 {
 	/* Pointer form cannot cross a fresh process image; use
-	 * xtc_xspawn_entry on Windows. */
+	 * xtc_xproc_spawn_entry on Windows. */
 	(void)loop; (void)name; (void)root_fn; (void)arg; (void)arg_len;
 	if (out) *out = NULL;
 	return XTC_E_NOSYS;
 }
 
 int
-xtc_xspawn_entry(xtc_loop_t *loop, const char *name, const char *entry,
-                 const void *arg, size_t arg_len, xtc_xproc_t **out)
+xtc_xproc_spawn_entry(xtc_loop_t *loop, const char *name, const char *entry,
+                      const void *arg, size_t arg_len, xtc_xproc_t **out)
 {
 	struct xtc_xproc *p = NULL;
 	SOCKET listener = INVALID_SOCKET, ctrl = INVALID_SOCKET;
@@ -1019,7 +1019,7 @@ xtc_xproc_os_pid(const xtc_xproc_t *p)
 }
 
 int
-xtc_xsend(xtc_xproc_t *p, const void *msg, size_t len)
+xtc_xproc_send(xtc_xproc_t *p, const void *msg, size_t len)
 {
 	if (p == NULL || p->ctrl_fd < 0) return XTC_E_INVAL;
 	if (len > 0 && msg == NULL) return XTC_E_INVAL;
@@ -1053,7 +1053,7 @@ __xproc_ensure_shadow_win(xtc_xproc_t *p)
 }
 
 int
-xtc_xmonitor(xtc_xproc_t *p, uint64_t *out_ref)
+xtc_xproc_monitor(xtc_xproc_t *p, uint64_t *out_ref)
 {
 	int rc;
 	if (p == NULL || p->proc == NULL) return XTC_E_INVAL;
@@ -1062,7 +1062,7 @@ xtc_xmonitor(xtc_xproc_t *p, uint64_t *out_ref)
 }
 
 int
-xtc_xlink(xtc_xproc_t *p)
+xtc_xproc_link(xtc_xproc_t *p)
 {
 	int rc;
 	if (p == NULL || p->proc == NULL) return XTC_E_INVAL;

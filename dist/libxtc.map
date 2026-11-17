@@ -132,4 +132,9 @@ XTC_2.2 {
 		xtc_tnt_run;
 		xtc_tnt_send_from;
 		xtc_tuning_check_ex;
+		xtc_xproc_link;
+		xtc_xproc_monitor;
+		xtc_xproc_send;
+		xtc_xproc_spawn;
+		xtc_xproc_spawn_entry;
 } XTC_2.0;

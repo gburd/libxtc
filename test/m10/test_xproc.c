@@ -50,7 +50,7 @@ child_root(void *arg)
 	if (arg != NULL)
 		memcpy(&want_code, arg, sizeof(int));
 	{
-		/* Wait for the parent's xtc_xsend, then exit with the code it
+		/* Wait for the parent's xtc_xproc_send, then exit with the code it
 		 * carries (or want_code if none arrives in time). */
 		void *msg = NULL; size_t n = 0;
 		if (xtc_recv(&msg, &n, 1000LL * 1000 * 1000) == XTC_OK &&
@@ -66,7 +66,7 @@ child_root(void *arg)
  * then recv the DOWN and record the decoded reason. */
 struct mon_ctx {
 	xtc_loop_t *loop;
-	int    use_entry;        /* 1 = xtc_xspawn_entry, 0 = xtc_xspawn */
+	int    use_entry;        /* 1 = xtc_xproc_spawn_entry, 0 = xtc_xproc_spawn */
 	int    down_seen;
 	int    down_reason;
 	int    xspawn_rc;
@@ -85,9 +85,9 @@ monitor_fiber(void *a)
 	void *msg = NULL; size_t n = 0;
 
 	m->xspawn_rc = m->use_entry
-	    ? xtc_xspawn_entry(loop, "xchild", "root",
+	    ? xtc_xproc_spawn_entry(loop, "xchild", "root",
 	        &init_code, sizeof init_code, &child)
-	    : xtc_xspawn(loop, "xchild", child_root,
+	    : xtc_xproc_spawn(loop, "xchild", child_root,
 	        &init_code, sizeof init_code, &child);
 	if (m->xspawn_rc != XTC_OK)
 		return;
@@ -95,11 +95,11 @@ monitor_fiber(void *a)
 	/* The child's OS pid is a real, positive pid on POSIX. */
 	m->child_os_pid = xtc_xproc_os_pid(child);
 	/* Monitor first, then tell the child to exit with 42. */
-	if (xtc_xmonitor(child, &ref) != XTC_OK) {
+	if (xtc_xproc_monitor(child, &ref) != XTC_OK) {
 		xtc_xproc_destroy(child);
 		return;
 	}
-	(void)xtc_xsend(child, &exit_code, sizeof exit_code);
+	(void)xtc_xproc_send(child, &exit_code, sizeof exit_code);
 
 	/* Wait for the DOWN the shadow proc delivers on the child's exit. */
 	if (xtc_recv(&msg, &n, 3000LL * 1000 * 1000) == XTC_OK) {
@@ -140,7 +140,7 @@ test_xproc_monitor_exit(const MunitParameter p[], void *d)
 
 /* Entry-registry path (portable form; the only form that works on
  * Windows).  Registers child_root under a name, then spawns via
- * xtc_xspawn_entry.  On POSIX this forks + resolves the name; the
+ * xtc_xproc_spawn_entry.  On POSIX this forks + resolves the name; the
  * monitored child exit surfaces as the same DOWN. */
 static MunitResult
 test_xproc_entry(const MunitParameter p[], void *d)
@@ -152,7 +152,7 @@ test_xproc_entry(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_xproc_register_entry("root", child_root), ==,
 	    XTC_OK);
 	/* An unknown entry is rejected. */
-	munit_assert_int(xtc_xspawn_entry(loop, "x", "nope", NULL, 0, NULL),
+	munit_assert_int(xtc_xproc_spawn_entry(loop, "x", "nope", NULL, 0, NULL),
 	    ==, XTC_E_INVAL);   /* NULL loop/out caught first */
 
 	memset(&m, 0, sizeof m);
@@ -174,7 +174,7 @@ test_xproc_entry(const MunitParameter p[], void *d)
 }
 
 /* Link path: the linking fiber binds its fate to the child via
- * xtc_xlink; the child's exit delivers an EXIT signal (link semantics),
+ * xtc_xproc_link; the child's exit delivers an EXIT signal (link semantics),
  * which the linker receives and decodes. */
 struct link_ctx { xtc_loop_t *loop; int exit_seen; int exit_reason; int rc; };
 
@@ -186,14 +186,14 @@ linker_fiber(void *a)
 	int init_code = 3, exit_code = 55;
 	void *msg = NULL; size_t n = 0;
 
-	m->rc = xtc_xspawn_entry(m->loop, "lk", "root", &init_code,
+	m->rc = xtc_xproc_spawn_entry(m->loop, "lk", "root", &init_code,
 	    sizeof init_code, &child);
 	if (m->rc != XTC_OK) return;
 #ifdef XTC_HAVE_PROC_TRAP_EXIT
 	(void)xtc_proc_trap_exit(1);   /* receive the EXIT, do not die of it */
 #endif
-	if (xtc_xlink(child) != XTC_OK) { xtc_xproc_destroy(child); return; }
-	(void)xtc_xsend(child, &exit_code, sizeof exit_code);
+	if (xtc_xproc_link(child) != XTC_OK) { xtc_xproc_destroy(child); return; }
+	(void)xtc_xproc_send(child, &exit_code, sizeof exit_code);
 	/* A link EXIT arrives as a decodable signal in our mailbox. */
 	if (xtc_recv(&msg, &n, 3000LL * 1000 * 1000) == XTC_OK) {
 		xtc_down_info_t di = XTC_DOWN_INFO_INIT;
@@ -268,11 +268,11 @@ live_destroy_fiber(void *a)
 	size_t n = 0;
 	int st = 0;
 
-	if (xtc_xspawn(ld->loop, "sleeper", sleeper_root,
+	if (xtc_xproc_spawn(ld->loop, "sleeper", sleeper_root,
 	    NULL, 0, &child) != XTC_OK)
 		return;
 	ld->child_pid = xtc_xproc_os_pid(child);
-	if (xtc_xmonitor(child, &ref) != XTC_OK) {
+	if (xtc_xproc_monitor(child, &ref) != XTC_OK) {
 		xtc_xproc_destroy(child);
 		return;
 	}
@@ -337,10 +337,10 @@ kind_fiber(void *a)
 	size_t n = 0;
 	xtc_down_info_t di = XTC_DOWN_INFO_INIT;
 
-	if (xtc_xspawn(k->loop, "kind", kind_child_root, &k->c->mode,
+	if (xtc_xproc_spawn(k->loop, "kind", kind_child_root, &k->c->mode,
 	    sizeof k->c->mode, &child) != XTC_OK)
 		return;
-	if (xtc_xmonitor(child, &ref) == XTC_OK &&
+	if (xtc_xproc_monitor(child, &ref) == XTC_OK &&
 	    xtc_recv(&msg, &n, 5000LL * 1000 * 1000) == XTC_OK &&
 	    xtc_down_decode_ex(msg, n, &di) == XTC_OK) {
 		k->c->seen = 1;
@@ -408,7 +408,7 @@ test_xproc_destroy_live_child(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
-/* ---- PLAN 19.27.9: xtc_xspawn_entry from a multithreaded parent ----
+/* ---- PLAN 19.27.9: xtc_xproc_spawn_entry from a multithreaded parent ----
  *
  * Other threads continuously create and tear down loops (each takes the
  * process-global proc-table lock, __lt_lock) while a fiber spawns
@@ -452,12 +452,12 @@ fh_fiber(void *a)
 		void *m = NULL;
 		size_t n = 0;
 		xtc_down_info_t di = XTC_DOWN_INFO_INIT;
-		if (xtc_xspawn_entry(c->loop, "fh", "fh_root", NULL, 0,
+		if (xtc_xproc_spawn_entry(c->loop, "fh", "fh_root", NULL, 0,
 		    &ch) != XTC_OK) {
 			c->other++;
 			continue;
 		}
-		(void)xtc_xmonitor(ch, &ref);
+		(void)xtc_xproc_monitor(ch, &ref);
 		if (xtc_recv(&m, &n, 10LL * 1000 * 1000 * 1000) != XTC_OK)
 			c->wedged++;
 		else if (xtc_down_decode_ex(m, n, &di) == XTC_OK &&
@@ -554,7 +554,7 @@ int
 main(int argc, char *argv[])
 {
 #if !defined(_WIN32)
-	/* xtc_xspawn_entry re-execs THIS binary; the child must resolve the
+	/* xtc_xproc_spawn_entry re-execs THIS binary; the child must resolve the
 	 * same names, so register them BEFORE the child hook, which runs the
 	 * entry and _exit()s when this is a child launch. */
 	(void)xtc_xproc_register_entry("root", child_root);

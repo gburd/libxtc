@@ -10,19 +10,19 @@
  *	distributed design -- a stepping stone toward --enable-dist, built
  *	over a local socketpair rather than TCP.
  *
- *	A parent xtc_xspawn()s a child that runs its own xtc runtime; the
+ *	A parent xtc_xproc_spawn()s a child that runs its own xtc runtime; the
  *	two are joined by the xtc_osproc control socketpair.  The parent
  *	gets an xtc_xpid_t handle for the child.  Over that handle it can:
- *	  - xtc_xsend  a message that the child's runtime delivers to its
+ *	  - xtc_xproc_send  a message that the child's runtime delivers to its
  *	    root proc (a byte payload, copied);
- *	  - xtc_xmonitor / xtc_xlink to the child so a child CRASH or EXIT
+ *	  - xtc_xproc_monitor / xtc_xproc_link to the child so a child CRASH or EXIT
  *	    surfaces as a normal xtc DOWN in the monitoring fiber, with the
  *	    signal / exit code decoded from the child's waitpid status;
  *	  - observe XTC_DOWN_KIND_NOCONNECTION if the control channel dies
  *	    before a clean exit is seen (the local analog of node-down).
  *
  *	The child side runs xtc_xproc_child_main(ctrl_fd, root_fn, arg): it
- *	stands up a relay that receives xtc_xsend payloads and delivers
+ *	stands up a relay that receives xtc_xproc_send payloads and delivers
  *	them to root_fn's proc, and it exits when the parent closes the
  *	channel or the child's own runtime finishes.
  *
@@ -59,19 +59,19 @@ typedef struct xtc_xpid {
 
 /* The child's entry: stand up the relay on `ctrl_fd`, spawn root_fn as
  * the child's root proc, and pump the relay + loop until the parent
- * closes the channel.  Call this from the fn passed to xtc_xspawn (it is
+ * closes the channel.  Call this from the fn passed to xtc_xproc_spawn (it is
  * the child-side counterpart).  Returns the child's exit code. */
 typedef void (*xtc_xproc_root_fn)(void *arg);
 
 /*
- * PUBLIC: int  xtc_xspawn __P((xtc_loop_t *, const char *, xtc_xproc_root_fn, const void *, size_t, xtc_xproc_t **));
+ * PUBLIC: int  xtc_xproc_spawn __P((xtc_loop_t *, const char *, xtc_xproc_root_fn, const void *, size_t, xtc_xproc_t **));
  * PUBLIC: int  xtc_xproc_register_entry __P((const char *, xtc_xproc_root_fn));
- * PUBLIC: int  xtc_xspawn_entry __P((xtc_loop_t *, const char *, const char *, const void *, size_t, xtc_xproc_t **));
+ * PUBLIC: int  xtc_xproc_spawn_entry __P((xtc_loop_t *, const char *, const char *, const void *, size_t, xtc_xproc_t **));
  * PUBLIC: void xtc_xproc_destroy __P((xtc_xproc_t *));
  * PUBLIC: long xtc_xproc_os_pid __P((const xtc_xproc_t *));
- * PUBLIC: int  xtc_xsend __P((xtc_xproc_t *, const void *, size_t));
- * PUBLIC: int  xtc_xmonitor __P((xtc_xproc_t *, uint64_t *));
- * PUBLIC: int  xtc_xlink __P((xtc_xproc_t *));
+ * PUBLIC: int  xtc_xproc_send __P((xtc_xproc_t *, const void *, size_t));
+ * PUBLIC: int  xtc_xproc_monitor __P((xtc_xproc_t *, uint64_t *));
+ * PUBLIC: int  xtc_xproc_link __P((xtc_xproc_t *));
  * PUBLIC: int  xtc_xproc_child_main __P((int, xtc_xproc_root_fn, void *));
  * PUBLIC: int  xtc_xproc_win_child_maybe __P((int, char **));
  */
@@ -86,12 +86,12 @@ typedef void (*xtc_xproc_root_fn)(void *arg);
  * POSIX ONLY (fork preserves the address space, so a raw function
  * pointer is meaningful in the child).  Returns XTC_E_NOSYS on Windows,
  * where a child is a fresh process image and a function pointer does not
- * survive -- use xtc_xspawn_entry there (and portably).
+ * survive -- use xtc_xproc_spawn_entry there (and portably).
  */
-XTC_API int  xtc_xspawn(xtc_loop_t *loop, const char *name,
-                        xtc_xproc_root_fn root_fn,
-                        const void *arg, size_t arg_len,
-                        xtc_xproc_t **out);
+XTC_API int  xtc_xproc_spawn(xtc_loop_t *loop, const char *name,
+                             xtc_xproc_root_fn root_fn,
+                             const void *arg, size_t arg_len,
+                             xtc_xproc_t **out);
 
 /*
  * Register a child root function under a name in a process-global table.
@@ -115,13 +115,13 @@ XTC_API int  xtc_xproc_register_entry(const char *name, xtc_xproc_root_fn fn);
  * binary must call first thing in main() on EVERY platform.  On POSIX,
  * if this image never called it, the entry path falls back to a plain
  * fork (re-exec would re-run main() in the child) with the async-
- * signal-safety caveat of xtc_xspawn.
+ * signal-safety caveat of xtc_xproc_spawn.
  * `arg`/`arg_len` are copied and delivered to the root function as its
- * arg.  Otherwise identical to xtc_xspawn (monitor, send, destroy all
+ * arg.  Otherwise identical to xtc_xproc_spawn (monitor, send, destroy all
  * work the same).  Returns XTC_E_NOTFOUND if `entry` is not registered.
  */
-XTC_API int  xtc_xspawn_entry(xtc_loop_t *loop, const char *name, const char *entry,
-                              const void *arg, size_t arg_len, xtc_xproc_t **out);
+XTC_API int  xtc_xproc_spawn_entry(xtc_loop_t *loop, const char *name, const char *entry,
+                                   const void *arg, size_t arg_len, xtc_xproc_t **out);
 
 /* Tear down the handle: terminate (SIGTERM, 2s, SIGKILL) and reap the
  * child if still running, close the channel, free the handle.  NULL is a
@@ -134,7 +134,7 @@ XTC_API long xtc_xproc_os_pid(const xtc_xproc_t *p);
 /* Send a byte payload (copied) to the child's root proc.  It arrives in
  * the child root's mailbox as an ordinary xtc_recv message.  Returns
  * XTC_E_INVAL if the channel is closed. */
-XTC_API int  xtc_xsend(xtc_xproc_t *p, const void *msg, size_t len);
+XTC_API int  xtc_xproc_send(xtc_xproc_t *p, const void *msg, size_t len);
 
 /*
  * Monitor the child from the calling fiber: when the child exits or
@@ -144,7 +144,7 @@ XTC_API int  xtc_xsend(xtc_xproc_t *p, const void *msg, size_t len);
  * or XTC_DOWN_KIND_NOCONNECTION if the channel died first.  *out_ref (if
  * non-NULL) receives the monitor reference.  Must be called from a fiber.
  */
-XTC_API int  xtc_xmonitor(xtc_xproc_t *p, uint64_t *out_ref);
+XTC_API int  xtc_xproc_monitor(xtc_xproc_t *p, uint64_t *out_ref);
 
 /*
  * Bidirectionally LINK the calling fiber to the child (like xtc_link,
@@ -154,19 +154,19 @@ XTC_API int  xtc_xmonitor(xtc_xproc_t *p, uint64_t *out_ref);
  * exit (nonzero code, signal) KILLS the linking fiber unless it traps
  * exits; a clean exit is silent.  Call xtc_proc_trap_exit(1) first to
  * receive an EXIT message instead, for every child exit (decode with
- * xtc_down_decode_ex).  Must be called from a fiber.  Use xtc_xmonitor
+ * xtc_down_decode_ex).  Must be called from a fiber.  Use xtc_xproc_monitor
  * instead when you want a one-way DOWN without binding the caller's own
  * fate to the child.
  */
-XTC_API int  xtc_xlink(xtc_xproc_t *p);
+XTC_API int  xtc_xproc_link(xtc_xproc_t *p);
 
 /*
  * Child-side entry.  Call this from the child body (the process the fork
  * lands in) with the inherited control fd, the root proc function, and
- * its arg.  It stands up a child runtime, delivers parent xtc_xsend
+ * its arg.  It stands up a child runtime, delivers parent xtc_xproc_send
  * payloads into root_fn's mailbox, and returns the child's exit code
  * when the channel closes or root_fn's proc finishes.  Most embedders do
- * not call this directly -- xtc_xspawn arranges the child side -- but it
+ * not call this directly -- xtc_xproc_spawn arranges the child side -- but it
  * is public so a re-exec'd child (a future extension) can re-enter.
  */
 XTC_API int  xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg);
@@ -174,14 +174,31 @@ XTC_API int  xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *
 /*
  * The re-exec'd child image's entry point, on every platform (the name
  * predates POSIX re-exec).  Call it as the first statement of main() --
- * after registering entries -- in a binary that hosts xtc_xspawn_entry
+ * after registering entries -- in a binary that hosts xtc_xproc_spawn_entry
  * children: if the cross-process-child sentinel argv is present it
  * connects the control channel, receives its arg, runs the registered
  * entry, and _exit()s -- never returning.  Otherwise it returns 0 and
  * normal startup continues; on POSIX it also records that this binary
- * has the hook, which is what enables re-exec for xtc_xspawn_entry.
+ * has the hook, which is what enables re-exec for xtc_xproc_spawn_entry.
  */
 XTC_API int  xtc_xproc_win_child_maybe(int argc, char **argv);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_xproc_spawn")
+XTC_API int xtc_xspawn(xtc_loop_t *loop, const char *name,
+    xtc_xproc_root_fn root_fn, const void *arg, size_t arg_len,
+    xtc_xproc_t **out);
+XTC_DEPRECATED("use xtc_xproc_spawn_entry")
+XTC_API int xtc_xspawn_entry(xtc_loop_t *loop, const char *name,
+    const char *entry, const void *arg, size_t arg_len, xtc_xproc_t **out);
+XTC_DEPRECATED("use xtc_xproc_send")
+XTC_API int xtc_xsend(xtc_xproc_t *p, const void *msg, size_t len);
+XTC_DEPRECATED("use xtc_xproc_monitor")
+XTC_API int xtc_xmonitor(xtc_xproc_t *p, uint64_t *out_ref);
+XTC_DEPRECATED("use xtc_xproc_link")
+XTC_API int xtc_xlink(xtc_xproc_t *p);
 
 #ifdef __cplusplus
 }

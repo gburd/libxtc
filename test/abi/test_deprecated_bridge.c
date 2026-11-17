@@ -36,6 +36,7 @@
 #include "xtc_slab.h"
 #include "xtc_sync.h"
 #include "xtc_tnt.h"
+#include "xtc_xproc.h"
 
 #define CHECK(c)                                                               \
 	do {                                                                   \
@@ -232,6 +233,24 @@ bridge_tnt(void)
 	CHECK(rc == XTC_E_INVAL || rc == XTC_E_NOSYS);
 }
 
+/* xproc: xspawn / xspawn_entry / xsend / xmonitor / xlink ->
+ * xtc_xproc_*.  Each refuses a NULL handle the same way (a real spawn
+ * forks; test_xproc covers that through the new names). */
+static void
+bridge_xproc(void)
+{
+	xtc_xproc_t *x = NULL;
+	int rc;
+
+	rc = xtc_xspawn(NULL, "b", NULL, NULL, 0, &x);
+	CHECK(rc == XTC_E_INVAL || rc == XTC_E_NOSYS);
+	rc = xtc_xspawn_entry(NULL, "b", "none", NULL, 0, &x);
+	CHECK(rc == XTC_E_INVAL || rc == XTC_E_NOSYS);
+	CHECK(xtc_xsend(NULL, "m", 1) == XTC_E_INVAL);
+	CHECK(xtc_xmonitor(NULL, NULL) == XTC_E_INVAL);
+	CHECK(xtc_xlink(NULL) == XTC_E_INVAL);
+}
+
 int
 main(void)
 {
@@ -243,6 +262,7 @@ main(void)
 	bridge_slab_pressure();
 	bridge_detach();
 	bridge_tnt();
+	bridge_xproc();
 	printf("  [bridge] OK: every deprecated name still works\n");
 	return 0;
 }

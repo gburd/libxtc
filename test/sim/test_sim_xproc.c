@@ -6,7 +6,7 @@
  *	DST coverage of the PORTABLE half of the cross-fork subsystem
  *	(src/orc/xproc.c): the child-entry registry that both POSIX (fork)
  *	and Windows (re-exec) resolve.  The registry is the piece Windows
- *	adds to make xtc_xspawn_entry work where a function pointer cannot
+ *	adds to make xtc_xproc_spawn_entry work where a function pointer cannot
  *	cross process creation; it must resolve names deterministically.
  *
  *	The fork / CreateProcess / socketpair paths themselves are NOT
@@ -46,7 +46,7 @@ static void (*g_fns[4])(void *) = { e0, e1, e2, e3 };
 static int g_bad; /* a spawn_entry gave the wrong error (bug) */
 static int g_done;
 
-/* Worker: try xtc_xspawn_entry with a NULL loop/out (so no real process
+/* Worker: try xtc_xproc_spawn_entry with a NULL loop/out (so no real process
  * is created -- we are only exercising the portable name-resolution +
  * argument-validation contract deterministically).  A registered name
  * must be resolved (and then fail on the NULL args with XTC_E_INVAL); an
@@ -59,12 +59,12 @@ worker(void *arg)
 	int i;
 	for (i = 0; i < 4; i++) {
 		/* Known name: resolves, then the NULL loop is rejected. */
-		int rc = xtc_xspawn_entry(NULL, "x", g_names[(id + i) & 3],
+		int rc = xtc_xproc_spawn_entry(NULL, "x", g_names[(id + i) & 3],
 		    NULL, 0, NULL);
 		if (rc != XTC_E_INVAL)      /* resolved -> NULL-arg path */
 			xtc_atomic_fetch_add_i32(&g_bad, 1, xtc_mo_relaxed);
 		/* Unknown name: NOTFOUND regardless of args. */
-		rc = xtc_xspawn_entry(NULL, "x", "no_such_entry", NULL, 0, NULL);
+		rc = xtc_xproc_spawn_entry(NULL, "x", "no_such_entry", NULL, 0, NULL);
 		if (rc != XTC_E_NOTFOUND && rc != XTC_E_INVAL)
 			xtc_atomic_fetch_add_i32(&g_bad, 1, xtc_mo_relaxed);
 		xtc_yield();

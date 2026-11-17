@@ -499,10 +499,10 @@ parent passed -- the pointer is meaningless in a fresh image.
 libxtc's cross-process spawn/monitor (`xtc_xproc`) bridges this the way
 libuv and the BEAM do:
 
-  - The portable `xtc_xproc_register_entry(name, fn)` + `xtc_xspawn_entry`
+  - The portable `xtc_xproc_register_entry(name, fn)` + `xtc_xproc_spawn_entry`
     address the child body by a REGISTERED NAME the identical binary
     resolves the same way in parent and child.  This is the form that
-    works on Windows (and portably).  The pointer form `xtc_xspawn`
+    works on Windows (and portably).  The pointer form `xtc_xproc_spawn`
     stays POSIX-only and returns `XTC_E_NOSYS` on Windows.
   - Windows spawn re-execs `GetModuleFileNameW(NULL)` with a sentinel
     argv; the embedder wires `xtc_xproc_win_child_maybe(argc, argv)` as
