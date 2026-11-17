@@ -89,6 +89,45 @@ git archive "$base" | tar x -C "$out/base-src"
 }
 libs=$(sed -n 's/^LIBS[[:space:]]*=//p' "$out/head-build/Makefile")
 git show "$base:$consumer" > "$out/consumer.c"
+
+# The consumer's NEWER-struct cases play a caller whose struct is larger
+# than the library's: `bigsz = sizeof(T) + slack`, with an unknown tail
+# from sizeof(T) on.  Compiled against BASE_TAG's headers, sizeof(T) is
+# the base size, so once HEAD's T has grown by more than the slack the
+# struct is no longer newer than the library under test and its "tail"
+# holds fields HEAD knows and fills (2.2's xtc_proc_info_t is 208 bytes;
+# 2.1's consumer asks for 96 + 32).  Size those cases from the larger of
+# the base and HEAD sizes, so each still tests a struct newer than the
+# library it runs against.  The older-struct cases are left as they are.
+newer=$(sed -n 's/.*bigsz = sizeof(\(xtc_[a-z0-9_]*_t\)) + [0-9][0-9]*;.*/\1/p' \
+    "$out/consumer.c" | sort -u)
+if [ -n "$newer" ]; then
+	{
+		grep '^#include' "$out/consumer.c"
+		echo 'int main(void) {'
+		for t in $newer; do
+			printf 'printf("%s %%zu\\n", sizeof(%s));\n' "$t" "$t"
+		done
+		echo 'return 0; }'
+	} > "$out/head-sizes.c"
+	$CC -std=c11 -D_GNU_SOURCE -I"$src/src/inc" -I"$out/head-build" \
+	    -o "$out/head-sizes" "$out/head-sizes.c" || {
+		echo "compat-check: cannot measure HEAD's struct sizes ($out/head-sizes.c)" >&2
+		exit 2
+	}
+	"$out/head-sizes" > "$out/head-sizes.txt"
+	: > "$out/newer.sed"
+	while read -r t sz; do
+		echo "s/bigsz = sizeof($t) +/bigsz = XTC_COMPAT_NEWER($t, $sz) +/" >> "$out/newer.sed"
+		echo "s/i = sizeof($t); i < bigsz/i = XTC_COMPAT_NEWER($t, $sz); i < bigsz/" >> "$out/newer.sed"
+		echo "compat-check: the newer-struct case for $t is sized from HEAD's $sz bytes when larger"
+	done < "$out/head-sizes.txt"
+	{
+		echo '#define XTC_COMPAT_NEWER(T, h) (sizeof(T) > (size_t)(h) ? sizeof(T) : (size_t)(h))'
+		sed -f "$out/newer.sed" "$out/consumer.c"
+	} > "$out/consumer-newer.c"
+	mv "$out/consumer-newer.c" "$out/consumer.c"
+fi
 # shellcheck disable=SC2086  # $libs is a word list
 $CC -std=c11 -D_GNU_SOURCE -g -I"$out/base-prefix/include" \
     -c -o "$out/consumer.o" "$out/consumer.c" &&
