@@ -198,8 +198,8 @@ bridge_slab_pressure(void)
 	int rc;
 
 	CHECK(xtc_slab_pressure_stop(NULL) == XTC_E_INVAL);
-	CHECK(xtc_slab_pressure_listen_ex(NULL, NULL, NULL, NULL) ==
-	    XTC_E_INVAL);
+	CHECK(
+	    xtc_slab_pressure_listen_ex(NULL, NULL, NULL, NULL) == XTC_E_INVAL);
 	rc = xtc_slab_pressure_listen("/nonexistent/xtc/psi", NULL, NULL);
 	CHECK(rc == XTC_E_NOSYS);
 	rc = xtc_slab_pressure_listen_ex(NULL, NULL, NULL, &h);

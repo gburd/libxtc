@@ -241,16 +241,15 @@ xtc_tnt_start(const xtc_tnt_spec_t *spec)
 /* Group: xproc (the handle's methods take the xtc_xproc_ prefix). */
 
 int
-xtc_xspawn(xtc_loop_t *loop, const char *name,
-    xtc_xproc_root_fn root_fn, const void *arg, size_t arg_len,
-    xtc_xproc_t **out)
+xtc_xspawn(xtc_loop_t *loop, const char *name, xtc_xproc_root_fn root_fn,
+    const void *arg, size_t arg_len, xtc_xproc_t **out)
 {
 	return xtc_xproc_spawn(loop, name, root_fn, arg, arg_len, out);
 }
 
 int
-xtc_xspawn_entry(xtc_loop_t *loop, const char *name,
-    const char *entry, const void *arg, size_t arg_len, xtc_xproc_t **out)
+xtc_xspawn_entry(xtc_loop_t *loop, const char *name, const char *entry,
+    const void *arg, size_t arg_len, xtc_xproc_t **out)
 {
 	return xtc_xproc_spawn_entry(loop, name, entry, arg, arg_len, out);
 }
@@ -393,8 +392,7 @@ xtc_reg_whereis(xtc_reg_t *r, const char *name, xtc_pid_t *out_pid)
 /* Group (tier B): stackful coroutines (async / await -> coro spawn / join). */
 
 int
-xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg,
-    xtc_task_t **out_task)
+xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, xtc_task_t **out_task)
 {
 	return xtc_coro_spawn(loop, fn, arg, out_task);
 }
@@ -422,22 +420,22 @@ xtc_cfg_ssn_set_int(xtc_cfg_session_t *s, const char *name, int v,
 }
 
 int
-xtc_cfg_ssn_set_int64(xtc_cfg_session_t *s, const char *name,
-    int64_t v, xtc_cfg_source_t src)
+xtc_cfg_ssn_set_int64(xtc_cfg_session_t *s, const char *name, int64_t v,
+    xtc_cfg_source_t src)
 {
 	return xtc_cfg_session_set_int64(s, name, v, src);
 }
 
 int
-xtc_cfg_ssn_set_double(xtc_cfg_session_t *s, const char *name,
-    double v, xtc_cfg_source_t src)
+xtc_cfg_ssn_set_double(xtc_cfg_session_t *s, const char *name, double v,
+    xtc_cfg_source_t src)
 {
 	return xtc_cfg_session_set_double(s, name, v, src);
 }
 
 int
-xtc_cfg_ssn_set_string(xtc_cfg_session_t *s, const char *name,
-    const char *v, xtc_cfg_source_t src)
+xtc_cfg_ssn_set_string(xtc_cfg_session_t *s, const char *name, const char *v,
+    xtc_cfg_source_t src)
 {
 	return xtc_cfg_session_set_string(s, name, v, src);
 }
