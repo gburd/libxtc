@@ -828,7 +828,21 @@ when the time runs out, and
 .Er XTC_E_INVAL
 for a dead target, at once or when the target exits while the sender
 waits.  It is for a plain thread reporting to a process, such as a
-device worker.  A process that must not block on one slow receiver uses
+device worker.
+Under a simulation run, on the simulator's own thread outside a process
+(the delivery function of
+.Xr xtc_sim_external_complete 3 ) ,
+it returns
+.Er XTC_E_STATE
+at once where it would have to wait: no fiber runs and no virtual time
+passes while that thread is blocked, so nothing could make room.
+A delivery function uses
+.Fn xtc_send ;
+when that returns
+.Er XTC_E_AGAIN
+the message is still the delivery function's, to keep and retry, for
+example by handing it to a process that can wait.
+A process that must not block on one slow receiver uses
 .Fn xtc_send_notify
 instead: after
 .Fn xtc_send

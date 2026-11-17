@@ -253,11 +253,16 @@ the way out; from a plain thread it blocks the thread.
 .Er XTC_E_AGAIN
 when the time ran out,
 .Er XTC_E_INVAL
-for a NULL argument, or
+for a NULL argument,
 .Er XTC_E_NOMEM
 /
 .Er XTC_E_RESOURCE
-if the wait could not be set up.
+if the wait could not be set up, or
+.Er XTC_E_STATE
+where it would wait on the simulator's own thread outside a process
+(the delivery function of
+.Xr xtc_sim_external_complete 3 ,
+which no registration can reach while it waits).
 .Pp
 .Fn xtc_reg_send_wait ,
 also added in 2.2, sends
@@ -276,9 +281,14 @@ before taking it loses it with its mailbox, as for any message.
 .Er XTC_E_AGAIN
 means
 .Fa timeout_ns
-(one deadline for the whole call) ran out.  It is the call a device or
-I/O thread uses to report to a supervised service that may be
-restarting.
+(one deadline for the whole call) ran out, and
+.Er XTC_E_STATE
+is a wait it cannot make, as for
+.Fn xtc_reg_whereis_wait
+and
+.Xr xtc_send_wait 3 .
+It is the call a device or I/O thread uses to report to a supervised
+service that may be restarting.
 .Pp
 The supervisor names a child itself when its spec sets
 .Va reg_name

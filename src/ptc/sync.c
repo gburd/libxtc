@@ -36,19 +36,18 @@
  * mechanical pieces out so each primitive keeps only its own predicate.
  *
  * deadline_from_timeout fills *ts with now + timeout_ns (CLOCK_REALTIME,
- * the clock pthread_cond_timedwait uses).  cv_wait_until does one
- * bounded wait against that deadline and returns 0 if the cond was
+ * the clock pthread_cond_timedwait uses), or with a passed deadline on
+ * the simulator's thread off a fiber during a run (sim.c
+ * __xtc_sim_cond_deadline), where nothing could end the wait.
+ * cv_wait_until does one bounded wait against that deadline and returns
+ * 0 if the cond was
  * signaled (the caller re-tests its predicate) or 1 if the deadline
  * has passed (the caller maps that to XTC_E_AGAIN).
  * ----------------------------------------------------------------------- */
 static void
 deadline_from_timeout(int64_t timeout_ns, struct timespec *ts)
 {
-	int64_t now = 0;
-	(void)__os_clock_real(&now);
-	now += timeout_ns;
-	ts->tv_sec  = (time_t)(now / 1000000000LL);
-	ts->tv_nsec = (long)(now % 1000000000LL);
+	(void)__xtc_sim_cond_deadline(timeout_ns, ts);
 }
 
 static int

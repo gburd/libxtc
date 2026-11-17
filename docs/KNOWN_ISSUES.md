@@ -580,6 +580,34 @@ received, `XTC_E_DEADLK`); fixed, all pass, and the allocation auditor
 counts no message left behind.  Planted bug 49 (`SIM_DROP_LATE`)
 restores the old admission and is caught at seed 1.
 
+## FIXED (2.2): a delivery fn that waited for mailbox room broke its simulation run
+
+**What it was.**  An `xtc_sim_external_complete` delivery function runs
+on the simulator's own thread, outside any proc, and nothing else runs
+while it does.  One that called `xtc_send_wait` or `xtc_reg_send_wait`
+on a full mailbox could not be woken: with a timeout the wait took its
+deadline from the wall clock and the determinism guard aborted the run
+("real clock (CLOCK_REALTIME)"), and with -1 it blocked the only thread
+of the run for good.  Every timed plain-thread wait in the library
+(`xtc_notify_wait`, the semaphore, gate, locks and rwlocks,
+`xtc_future_wait`, the lock manager) read the wall clock for its
+deadline, so any of them made from a delivery function tripped the
+guard the same way.
+
+**Fix.**  A timed wait made on the simulator's thread off a fiber during
+a run never sleeps and reads no clock: virtual time cannot pass while
+the only thread is blocked, so it expires at once.  `xtc_send_wait`,
+`xtc_reg_whereis_wait`, `xtc_reg_send_wait` and an off-proc
+`xtc_svr_call` return `XTC_E_STATE` at once where they would wait
+there.  A delivery function uses `xtc_send`; on `XTC_E_AGAIN` the
+message is still its own, to keep and retry (hand it to a proc that can
+wait).  `test_sim_external` adds a delivery function that meets a full
+mailbox, with a timeout and with -1: before the fix the timed run
+aborts in the guard and the -1 run blocks (its watchdog reports it); now the
+first delivery lands and the other three return `XTC_E_STATE`, with no
+guard count.  Planted bug 68 (`SIM_OFFLOOP_WAIT`) restores the old
+waits and is caught.  Only simulator runs were affected.
+
 ## FIXED (2.2): DST runs that partitioned loops could lose DOWN and EXIT signals
 
 **What it was.**  The simulator's partition (`xtc_sim_partition_set`,

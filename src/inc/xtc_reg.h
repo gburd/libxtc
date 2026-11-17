@@ -145,7 +145,10 @@ XTC_API int  xtc_reg_visit(xtc_reg_t *r, const char *name,
  * fiber (kill-safe); from a plain thread it blocks the thread.
  * timeout_ns: < 0 forever, 0 look once, > 0 bound.  Returns XTC_OK,
  * XTC_E_AGAIN when the time ran out, XTC_E_INVAL for a NULL argument,
- * XTC_E_NOMEM / XTC_E_RESOURCE if the wait could not be set up.
+ * XTC_E_NOMEM / XTC_E_RESOURCE if the wait could not be set up,
+ * XTC_E_STATE where it would wait on the simulator's own thread off a
+ * proc (an xtc_sim_external_complete delivery fn: no registration can
+ * happen while it waits).
  */
 XTC_API int xtc_reg_whereis_wait(xtc_reg_t *r, const char *name,
     xtc_pid_t not_pid, int64_t timeout_ns, xtc_pid_t *out_pid);
@@ -159,7 +162,8 @@ XTC_API int xtc_reg_whereis_wait(xtc_reg_t *r, const char *name,
  * deadline for the whole call.  For a device or I/O thread that reports
  * to a supervised service which may be restarting.  Returns XTC_OK,
  * XTC_E_AGAIN when the time ran out, XTC_E_INVAL for a NULL argument,
- * XTC_E_NOMEM.
+ * XTC_E_NOMEM, XTC_E_STATE for a wait it cannot make (as
+ * xtc_reg_whereis_wait and xtc_send_wait).
  */
 XTC_API int xtc_reg_send_wait(xtc_reg_t *r, const char *name,
     const void *data, size_t size, int64_t timeout_ns);

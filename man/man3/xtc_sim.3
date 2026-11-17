@@ -298,6 +298,34 @@ The thread's real speed therefore never reaches the run.
 Call
 .Fn xtc_sim_external_complete
 exactly once per token, also when the work failed.
+.Pp
+.Fa fn
+runs on the only thread of the run, so nothing else runs while it
+waits.
+It uses
+.Fn xtc_send ;
+a full mailbox returns
+.Er XTC_E_AGAIN
+and the message is still
+.Fa fn Ns 's ,
+to keep and retry, for example by handing it to a process that can
+wait.
+A wait for something only the run can do returns at once:
+.Xr xtc_send_wait 3
+on a full mailbox,
+.Xr xtc_reg_whereis_wait 3
+and
+.Xr xtc_reg_send_wait 3
+on a missing name, and an
+.Xr xtc_svr_call 3
+from outside a process return
+.Er XTC_E_STATE .
+A timed wait made on that thread outside a fiber
+.Po Fn xtc_notify_wait , Fn xtc_future_wait , a lock with a timeout Pc
+never sleeps, because virtual time cannot pass while the only thread is
+blocked: it expires at once with
+.Er XTC_E_AGAIN
+and reads no wall clock.
 Outside a run
 .Fn xtc_sim_external_begin
 stores NULL in

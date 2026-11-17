@@ -17,7 +17,7 @@
 #include "xtc_app.h"       /* xtc_app_is_shutdown_msg: the reaper drains */
 #include "xtc_sync.h"      /* xtc_notify: xtc_reg_whereis_wait */
 #include "proc_int.h"      /* __xtc_proc_alive */
-#include "xtc_sim.h"       /* XTC_SIM_BUGGIFY / xtc_sim_fault (DST) */
+#include "sim_int.h"       /* XTC_SIM_BUGGIFY; __xtc_sim_offloop_wait */
 #include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
 #include "xtc_tail.h"      /* XTC_TAIL_LIFECYCLE_DROP kind */
 #include "tail_int.h"      /* __xtc_tail_emit */
@@ -677,7 +677,9 @@ __reg_waiter_drop(void *arg)
  * The lookup is exact (no simulated transient miss, unlike
  * xtc_reg_get).  From a proc it parks the fiber; from a plain thread
  * it blocks the thread.  Kill-safe: a killed waiter is unlinked by a
- * scope finalizer before its wait state is freed.
+ * scope finalizer before its wait state is freed.  XTC_E_STATE where it
+ * would wait on the simulator's thread off a fiber during a run (an
+ * xtc_sim_external_complete delivery fn), as for xtc_send_wait.
  */
 int
 xtc_reg_whereis_wait(xtc_reg_t *r, const char *name, xtc_pid_t not_pid,
@@ -700,6 +702,10 @@ xtc_reg_whereis_wait(xtc_reg_t *r, const char *name, xtc_pid_t not_pid,
 	(void)__xtc_mtx_unlock(&r->lock);
 	if (timeout_ns == 0)
 		return XTC_E_AGAIN;
+	/* A delivery fn on the simulator's thread: no registration can
+	 * happen while it waits. */
+	if (__xtc_sim_offloop_wait())
+		return XTC_E_STATE;
 
 	/* Waiter state on the heap, linked under the lock it is checked
 	 * under, so an insert between the miss above and the park below
@@ -765,7 +771,8 @@ xtc_reg_whereis_wait(xtc_reg_t *r, const char *name, xtc_pid_t not_pid,
  * unregistered (a supervised child between incarnations) and while its
  * mailbox is full: xtc_reg_whereis_wait, then xtc_send_wait.  A holder
  * that dies before or during the send (XTC_E_INVAL) is excluded and the
- * next one waited for.  XTC_OK means the message is in a live
+ * next one waited for (XTC_E_STATE: a wait it cannot make, see
+ * xtc_reg_whereis_wait).  XTC_OK means the message is in a live
  * incarnation's mailbox; if that incarnation dies before taking it, the
  * message is lost with its mailbox, as any queued message is.  One
  * deadline for the whole call.  From a proc it parks the fiber; from a

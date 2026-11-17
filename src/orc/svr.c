@@ -733,6 +733,10 @@ __svr_call(xtc_pid_t target, const void *req, size_t req_size,
 		return rc;
 	}
 
+	/* Off a proc on the simulator's thread (a delivery fn): the server
+	 * cannot run while this thread waits for its reply. */
+	if (timeout_ns != 0 && __xtc_sim_offloop_wait())
+		return XTC_E_STATE;
 	memset(&slot, 0, sizeof slot);
 	if ((rc = xtc_notify_create(&slot.done)) != XTC_OK)
 		return rc;

@@ -21,6 +21,7 @@
 
 #include "xtc_int.h"
 #include "preempt_int.h"   /* __xtc_mtx_* */
+#include "sim_int.h"       /* __xtc_sim_cond_deadline */
 #include "xtc_future.h"
 #include "future_int.h"  /* internal discard helper */
 #include "xtc_loop.h"
@@ -440,11 +441,7 @@ future_get(xtc_future_t *fut, intptr_t *out, int64_t timeout_ns)
 			(void)pthread_cond_wait(&c->cv, &c->lock);
 	} else {
 		struct timespec ts;
-		int64_t now_ns = 0;
-		(void)__os_clock_real(&now_ns);
-		now_ns += timeout_ns;
-		ts.tv_sec = (time_t)(now_ns / 1000000000LL);
-		ts.tv_nsec = (long)(now_ns % 1000000000LL);
+		(void)__xtc_sim_cond_deadline(timeout_ns, &ts);
 		while (!c->ready) {
 			if (pthread_cond_timedwait(&c->cv, &c->lock, &ts) != 0) {
 				if (!c->ready) {

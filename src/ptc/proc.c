@@ -3243,7 +3243,10 @@ __room_wait(struct xtc_proc *p, int64_t deadline)
  * Woken by the receiver's take that brings its mailbox to half of cap or
  * below, not by a timer.  A dead target is XTC_E_INVAL at once, as for
  * xtc_send, and a target that exits while the sender waits ends the wait
- * with XTC_E_INVAL.
+ * with XTC_E_INVAL.  On the simulator's own thread off a fiber during a
+ * run (an xtc_sim_external_complete delivery fn) it returns XTC_E_STATE
+ * where it would have to wait: nothing can make room while that thread
+ * is blocked.
  */
 int
 xtc_send_wait(xtc_pid_t to, const void *data, size_t size,
@@ -3262,6 +3265,11 @@ xtc_send_wait(xtc_pid_t to, const void *data, size_t size,
 		rc = __send_on(NULL, to, data, size);
 		if (rc != XTC_E_AGAIN || timeout_ns == 0)
 			return rc;
+		/* The simulator's thread off a fiber (a delivery fn): the
+		 * receiver cannot run while this thread waits, so no room can
+		 * come and no virtual time can pass. */
+		if (__xtc_sim_offloop_wait())
+			return XTC_E_STATE;
 		if (deadline >= 0) {
 			(void)__os_clock_mono(&now);
 			if (now >= deadline)

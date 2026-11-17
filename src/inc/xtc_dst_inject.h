@@ -381,4 +381,15 @@
  */
 #define XTC_DST_BUG_PART_SYSDROP 67
 
+/*
+ * 68 SIM_OFFLOOP_WAIT: a wait on the simulator's own thread off a fiber
+ * (an xtc_sim_external_complete delivery fn) behaves as in 2.2.0: a
+ * timed wait takes its deadline from the wall clock and xtc_send_wait
+ * waits for room no fiber can make, so a delivery fn that meets a full
+ * mailbox trips the determinism guard (timed) or blocks the run for
+ * good (-1) (test_sim_external: "a delivery fn's wait did not return
+ * at once").
+ */
+#define XTC_DST_BUG_SIM_OFFLOOP_WAIT 68
+
 #endif /* XTC_DST_INJECT_H */

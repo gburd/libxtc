@@ -219,6 +219,12 @@ on timeout,
 if the server exits before replying, or
 .Dv XTC_E_INVAL
 for bad arguments or a server that is already gone.
+A call with a nonzero timeout from the simulator's own thread outside a
+process (the delivery function of
+.Xr xtc_sim_external_complete 3 )
+returns
+.Dv XTC_E_STATE
+at once: the server cannot run while that thread waits.
 The exit is noticed at once, with any timeout: an in-process caller
 monitors the server for the duration of the call and turns the monitor
 off

@@ -776,7 +776,13 @@ XTC_API int xtc_demonitor(uint64_t ref, int flags);
  * XTC_E_INVAL for a dead target (at once, or when the target exits while
  * the sender waits), XTC_E_NOMEM.  For a plain thread reporting to a proc
  * (a device or I/O worker).  A proc that must not block on one slow
- * receiver uses xtc_send_notify instead.
+ * receiver uses xtc_send_notify instead.  Under a simulation run, on the
+ * simulator's own thread outside a proc (an xtc_sim_external_complete
+ * delivery fn), it returns XTC_E_STATE at once where it would wait: no
+ * fiber runs and no virtual time passes while that thread is blocked, so
+ * nothing could make room.  A delivery fn uses xtc_send; on XTC_E_AGAIN
+ * the message stays the delivery fn's, to keep and retry (hand it to a
+ * proc that can wait).
  *
  * xtc_send_notify asks for one ROOM message, sent to the calling proc
  * when `to`'s mailbox has room (at once if it has now), or when `to`

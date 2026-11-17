@@ -419,6 +419,17 @@ XTC_API int xtc_sim_fd_ready_at(int fd, int64_t due_ns, uint32_t revents);
  * (xtc_send from there is a send from a foreign thread).  Call complete
  * exactly once per token, also when the work failed.
  *
+ * fn runs on the only thread of the run, so nothing else runs while it
+ * waits.  It uses xtc_send: an XTC_E_AGAIN (a full mailbox) leaves the
+ * message fn's, to keep and retry, for example by handing it to a proc
+ * that can wait.  A wait for something only the run can do returns at
+ * once: xtc_send_wait on a full mailbox, xtc_reg_whereis_wait /
+ * xtc_reg_send_wait on a missing name and an off-proc xtc_svr_call
+ * return XTC_E_STATE.  Any timed wait made on that thread off a fiber
+ * (xtc_notify_wait, xtc_future_wait, a lock with a timeout) never
+ * sleeps: virtual time cannot pass while the only thread is blocked, so
+ * it expires at once (XTC_E_AGAIN) without reading the wall clock.
+ *
  * Outside a run, begin stores NULL and complete(NULL, fn, arg) calls
  * fn(arg) at once on the calling thread: production code calls both
  * unconditionally.  begin returns XTC_E_INVAL (NULL out, a negative

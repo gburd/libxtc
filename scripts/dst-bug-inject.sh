@@ -122,6 +122,7 @@ write_cases() {
 		"61;test_sim_sup_child;0;1;a nested supervisor's give-up did not reach its parent" \
 		"62;test_sim_sup_child;0;1;a drain did not reach a nested supervisor's child" \
 		"67;test_sim_partition;0;0;a DOWN or link EXIT was lost under a partition" \
+		"68;test_sim_external;0;0;a delivery fn's wait did not return at once" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -206,6 +207,8 @@ write_cases() {
 #               -> an app drain reaches the children of a nested supervisor
 # 67 PART_SYSDROP proc.c the sim's partition cuts DOWN and link EXIT too
 #               -> a death across a cut still reaches its watcher
+# 68 SIM_OFFLOOP_WAIT sim.c a delivery fn's wait reads the wall clock or
+#               blocks -> a wait no fiber can end returns at once
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

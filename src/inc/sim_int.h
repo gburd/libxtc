@@ -91,6 +91,18 @@ XTC_API int      __xtc_sim_run_consistency_check(void);
 XTC_API int      __xtc_sim_fd_ready(int fd, int64_t *out_due_ns,
                      uint32_t *out_revents);
 
+/* 1 on the simulator's own thread, off any fiber, during a run (an
+ * xtc_sim_external_complete delivery fn): a blocking wait there can never
+ * end, since no fiber runs and no virtual time passes while it blocks.
+ * __xtc_sim_cond_deadline is the absolute pthread_cond_timedwait
+ * deadline for a plain-thread wait of timeout_ns >= 0: there, 1 and an
+ * already-passed deadline (the wait expires at once, no clock read);
+ * elsewhere, 0 and the wall clock plus timeout_ns.  Every timed
+ * plain-thread wait in the library takes its deadline from it (sim.c). */
+struct timespec;
+XTC_API int __xtc_sim_offloop_wait(void);
+XTC_API int __xtc_sim_cond_deadline(int64_t timeout_ns, struct timespec *ts);
+
 /* XTC_OK during a run, XTC_E_STATE (said once on stderr) outside one on
  * a sim build: the entry guard of xtc_loop_run and xtc_exec_run, which
  * the sim backend cannot drive on real fds (sim.c). */

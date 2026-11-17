@@ -140,6 +140,9 @@ XTC_API xtc_pid_t xtc_svr_pid(const xtc_svr_t *svr);
  *                      it after, a plain thread is woken by the server's
  *                      exit; 2.2 -- through 2.1 a 25 ms liveness poll)
  *   XTC_E_INVAL     -- bad pid / not a server / server already gone
+ *   XTC_E_STATE     -- a waiting call off a proc on the simulator's own
+ *                      thread (an xtc_sim_external_complete delivery fn),
+ *                      where the server cannot run while it waits
  * A timed-out, aborted or server-gone call only stops the CALLER
  * waiting.  A reply the server sends afterwards to an off-proc caller is
  * discarded (that xtc_svr_reply returns XTC_E_NOTFOUND); to an in-proc
