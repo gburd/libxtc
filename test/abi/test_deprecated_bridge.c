@@ -32,6 +32,7 @@
 #include "xtc_chan.h"
 #include "xtc_dispatch.h"
 #include "xtc_exec.h"
+#include "xtc_future.h"
 #include "xtc_inspect.h"
 #include "xtc_io.h"
 #include "xtc_lockmgr.h"
@@ -48,6 +49,7 @@
 #include "xtc_res.h"
 #include "xtc_runtime.h"
 #include "xtc_slab.h"
+#include "xtc_stats.h"
 #include "xtc_sync.h"
 #include "xtc_tls.h"
 #include "xtc_tnt.h"
@@ -440,6 +442,37 @@ bridge_enums(void)
 	CHECK(XTC_LW_EXCLUSIVE == XTC_LWLOCK_EXCLUSIVE);
 }
 
+/* futures, amutex flags, yield budget, tuning check, and the frozen
+ * lwlock alias. */
+static void
+bridge_misc_b(void)
+{
+	xtc_promise_t *p = NULL;
+	xtc_future_t *f = NULL;
+	xtc_amutex_t *m = NULL;
+	xtc_loop_t *loop = NULL;
+	xtc_lwlock_t lw;
+
+	CHECK(xtc_future_new_pair(&p, &f) == XTC_OK && p != NULL);
+	xtc_promise_drop(p);
+	CHECK(xtc_future_wait(f, NULL, -1) == XTC_E_ABORTED);
+	CHECK(xtc_amutex_create_ex(&m, XTC_AMUTEX_RECURSIVE) == XTC_OK);
+	CHECK(xtc_amutex_lock(m, -1) == XTC_OK);
+	CHECK(xtc_amutex_lock(m, -1) == XTC_OK);
+	CHECK(xtc_amutex_unlock(m) == XTC_OK);
+	CHECK(xtc_amutex_unlock(m) == XTC_OK);
+	xtc_amutex_destroy(m);
+	CHECK(xtc_loop_create(&loop) == XTC_OK);
+	xtc_yield_set_budget(loop, 5000);
+	CHECK(xtc_loop_get_yield_budget(loop) == 5000);
+	xtc_loop_destroy(loop);
+	xtc_tuning_check();
+	CHECK(xtc_lwlock_init(&lw, 1) == XTC_OK);
+	CHECK(xtc_lwlock_acquire_cond(&lw, XTC_LWLOCK_EXCLUSIVE) == XTC_OK);
+	xtc_lwlock_release(&lw);
+	xtc_lwlock_destroy(&lw);
+}
+
 int
 main(void)
 {
@@ -459,6 +492,7 @@ main(void)
 	bridge_cfg_session();
 	bridge_fn_types();
 	bridge_enums();
+	bridge_misc_b();
 	printf("  [bridge] OK: every deprecated name still works\n");
 	return 0;
 }

@@ -38,6 +38,9 @@
 #include "xtc_xproc.h"
 #include "xtc_runtime.h"
 #include "xtc_reg.h"
+#include "xtc_lwlock.h"
+#include "xtc_future.h"
+#include "xtc_stats.h"
 #include "xtc_async.h"
 #include "xtc_cfg.h"
 
@@ -444,4 +447,45 @@ xtc_cfg_ssn_set_enum(xtc_cfg_session_t *s, const char *name, int v,
     xtc_cfg_source_t src)
 {
 	return xtc_cfg_session_set_enum(s, name, v, src);
+}
+
+/* Group (tier B): futures, amutex flags, yield budget, tuning check, and
+ * the frozen lwlock alias. */
+
+int
+xtc_future_new_pair(xtc_promise_t **out_prom, xtc_future_t **out_fut)
+{
+	return xtc_future_create(out_prom, out_fut);
+}
+
+void
+xtc_promise_drop(xtc_promise_t *prom)
+{
+	xtc_promise_destroy(prom);
+}
+
+int
+xtc_amutex_create_ex(xtc_amutex_t **out, unsigned flags)
+{
+	return xtc_amutex_create_flags(flags, out);
+}
+
+void
+xtc_yield_set_budget(xtc_loop_t *loop, int64_t budget_ns)
+{
+	xtc_loop_set_yield_budget(loop, budget_ns);
+}
+
+void
+xtc_tuning_check(void)
+{
+	xtc_runtime_tuning_check();
+}
+
+/* Frozen (the lock layer): an alias with no deprecation mark.  3.0 keeps
+ * only xtc_lwlock_try_acquire. */
+int
+xtc_lwlock_acquire_cond(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
+{
+	return xtc_lwlock_try_acquire(lock, mode);
 }

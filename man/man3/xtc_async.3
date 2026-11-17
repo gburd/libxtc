@@ -7,7 +7,8 @@
 .Nm xtc_coro_spawn ,
 .Nm xtc_coro_join ,
 .Nm xtc_yield ,
-.Nm xtc_yield_set_budget ,
+.Nm xtc_loop_set_yield_budget ,
+.Nm xtc_loop_get_yield_budget ,
 .Nm xtc_yield_check ,
 .Nm xtc_yield_if_due ,
 .Nm xtc_yield_due_count ,
@@ -18,7 +19,8 @@
 .Nm XTC_PT_YIELD ,
 .Nm XTC_PT_WAIT_UNTIL ,
 .Nm xtc_async ,
-.Nm xtc_await
+.Nm xtc_await ,
+.Nm xtc_yield_set_budget
 .Nd L2 stackful coroutines and protothreads
 .Sh SYNOPSIS
 .In xtc_async.h
@@ -29,7 +31,9 @@
 .Ft void
 .Fn xtc_yield "void"
 .Ft void
-.Fn xtc_yield_set_budget "xtc_loop_t *loop" "int64_t budget_ns"
+.Fn xtc_loop_set_yield_budget "xtc_loop_t *loop" "int64_t budget_ns"
+.Ft int64_t
+.Fn xtc_loop_get_yield_budget "const xtc_loop_t *loop"
 .Ft int
 .Fn xtc_yield_check "void"
 .Ft int
@@ -102,9 +106,13 @@ at the line after the call.
 .Pp
 xtc has no forcible preemption, so a long compute loop must yield to
 be fair to the rest of the loop.
-.Fn xtc_yield_set_budget
+.Fn xtc_loop_set_yield_budget
 arms a per-loop run-quantum time budget in nanoseconds (0, the
-default, disables it).  With a budget set,
+default, disables it), and
+.Fn xtc_loop_get_yield_budget
+reads it back (0 for a
+.Dv NULL
+loop).  With a budget set,
 .Fn xtc_yield_check
 returns 1 once the current coroutine's quantum has run past the
 budget without yielding, and
@@ -209,6 +217,10 @@ Use
 .It Fn xtc_await
 Use
 .Fn xtc_coro_join .
+.It Fn xtc_yield_set_budget
+Use
+.Fn xtc_loop_set_yield_budget ;
+the new name has a getter, xtc_loop_get_yield_budget.
 .El
 .Sh SEE ALSO
 .Xr xtc_loop 3 ,

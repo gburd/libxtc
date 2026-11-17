@@ -48,6 +48,7 @@ result keeps working until it moves to the new name.
 | Old (deprecated in 2.2) | New (2.2) | Kind | Notes |
 |---|---|---|---|
 | `xtc_alloc_audit_enable()` | `xtc_runtime_set_alloc_audit()` | function |  |
+| `xtc_amutex_create_ex()` | `xtc_amutex_create_flags()` | function | arguments reordered: (flags, out) |
 | `XTC_APP_OPTS_DEFAULT` | `XTC_APP_OPTS_INIT` | macro |  |
 | `xtc_async()` | `xtc_coro_spawn()` | function |  |
 | `xtc_await()` | `xtc_coro_join()` | function |  |
@@ -67,6 +68,7 @@ result keeps working until it moves to the new name.
 | `xtc_dispatch_handle_free()` | `xtc_dispatch_detach()` | function |  |
 | `xtc_exec_fini()` | `xtc_exec_destroy()` | function | the new name returns void; the old one returns XTC_E_INVAL for NULL, else XTC_OK |
 | `xtc_exec_init()` | `xtc_exec_create()` | function | arguments changed: (const xtc_exec_opts_t *opts, out), n_loops is opts->n_loops |
+| `xtc_future_new_pair()` | `xtc_future_create()` | function |  |
 | `xtc_gate_close()` | `xtc_gate_shutdown()` | function |  |
 | `xtc_hll_fini()` | `xtc_hll_destroy()` | function |  |
 | `xtc_hll_init()` | `xtc_hll_create()` | function | arguments reordered: (precision, out) |
@@ -79,6 +81,7 @@ result keeps working until it moves to the new name.
 | `xtc_loop_init()` | `xtc_loop_create()` | function |  |
 | `XTC_LW_EXCLUSIVE` | `XTC_LWLOCK_EXCLUSIVE` | frozen | frozen lock layer: an alias, no warning; 3.0 keeps only XTC_LWLOCK_EXCLUSIVE |
 | `XTC_LW_SHARED` | `XTC_LWLOCK_SHARED` | frozen | frozen lock layer: an alias, no warning; 3.0 keeps only XTC_LWLOCK_SHARED |
+| `xtc_lwlock_acquire_cond` | `xtc_lwlock_try_acquire` | frozen | frozen lock layer: an alias, no warning; 3.0 keeps only xtc_lwlock_try_acquire |
 | `XTC_PARK_FD` | `XTC_PROC_PARK_FD` | enum | same value |
 | `XTC_PARK_MAILBOX` | `XTC_PROC_PARK_MAILBOX` | enum | same value |
 | `XTC_PARK_NONE` | `XTC_PROC_PARK_NONE` | enum | same value |
@@ -86,6 +89,7 @@ result keeps working until it moves to the new name.
 | `xtc_pg_join()` | `xtc_pg_subscribe()` | function |  |
 | `xtc_pg_leave()` | `xtc_pg_unsubscribe()` | function | a non-member is XTC_E_NOTFOUND (the old name: XTC_E_INVAL) |
 | `xtc_preempt_set_involuntary()` | `xtc_runtime_set_preempt_involuntary()` | function |  |
+| `xtc_promise_drop()` | `xtc_promise_destroy()` | function |  |
 | `xtc_reg_register()` | `xtc_reg_put()` | function | call it as xtc_reg_put(r, name, pid, NULL, 0); a taken name is XTC_E_EXIST (the old name: XTC_E_INVAL) |
 | `xtc_reg_register_dup()` | `xtc_reg_put()` | function | call it as xtc_reg_put(r, key, pid, NULL, XTC_REG_DUP) |
 | `xtc_reg_register_mon()` | `xtc_reg_put()` | function | call it as xtc_reg_put(r, name, pid, NULL, XTC_REG_MONITOR) |
@@ -111,11 +115,13 @@ result keeps working until it moves to the new name.
 | `xtc_tls_passphrase_cb_t` | `xtc_tls_passphrase_fn` | type |  |
 | `xtc_tls_sni_cb_t` | `xtc_tls_sni_fn` | type |  |
 | `xtc_tnt_start()` | `xtc_tnt_run()` | function | same arguments; it blocks until the system stops, as before |
+| `xtc_tuning_check()` | `xtc_runtime_tuning_check()` | function |  |
 | `xtc_xlink()` | `xtc_xproc_link()` | function |  |
 | `xtc_xmonitor()` | `xtc_xproc_monitor()` | function |  |
 | `xtc_xsend()` | `xtc_xproc_send()` | function |  |
 | `xtc_xspawn()` | `xtc_xproc_spawn()` | function |  |
 | `xtc_xspawn_entry()` | `xtc_xproc_spawn_entry()` | function |  |
+| `xtc_yield_set_budget()` | `xtc_loop_set_yield_budget()` | function | the new name has a getter, xtc_loop_get_yield_budget |
 <!-- renames:end -->
 
 ## Enums given a type name in 2.2

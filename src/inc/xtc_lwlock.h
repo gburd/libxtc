@@ -89,7 +89,7 @@ typedef struct xtc_lwlock {
  * PUBLIC: void xtc_lwlock_destroy __P((xtc_lwlock_t *));
  *
  * PUBLIC: int  xtc_lwlock_acquire __P((xtc_lwlock_t *, xtc_lwlock_mode_t));
- * PUBLIC: int  xtc_lwlock_acquire_cond __P((xtc_lwlock_t *, xtc_lwlock_mode_t));
+ * PUBLIC: int  xtc_lwlock_try_acquire __P((xtc_lwlock_t *, xtc_lwlock_mode_t));
  * PUBLIC: void xtc_lwlock_release __P((xtc_lwlock_t *));
  *
  * PUBLIC: int  xtc_lwlock_held_by_me __P((const xtc_lwlock_t *));
@@ -108,7 +108,10 @@ XTC_API void  xtc_lwlock_destroy(xtc_lwlock_t *lock);
 XTC_API int   xtc_lwlock_acquire(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode);
 
 /* Conditional acquire -- non-blocking.  Returns XTC_OK on success,
- * XTC_E_AGAIN if the lock would block. */
+ * XTC_E_AGAIN if the lock would block.  xtc_lwlock_acquire_cond is the
+ * same call under its old name; the lock layer is frozen, so it stays,
+ * unmarked, until 3.0. */
+XTC_API int   xtc_lwlock_try_acquire(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode);
 XTC_API int   xtc_lwlock_acquire_cond(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode);
 
 /* Release the lock.  Mode is recorded in the per-thread held-list,

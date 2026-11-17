@@ -25,6 +25,7 @@
 #include "xtc_int.h"
 #include "xtc_log.h"
 #include "xtc_stats.h"
+#include "xtc_runtime.h"
 #include "os_tuning.h"
 
 #if defined(__linux__)
@@ -445,7 +446,7 @@ test_check_ex_findings(const MunitParameter p[], void *d)
 	xtc_log_set_default(log);
 
 	memset(&fs, 0, sizeof fs);
-	munit_assert_int(xtc_tuning_check_ex(collect, &fs), ==, 4);
+	munit_assert_int(xtc_runtime_tuning_check_ex(collect, &fs), ==, 4);
 	munit_assert_int(fs.n, ==, 4);
 	munit_assert_string_equal(fs.probe[0], "governor");
 	munit_assert_string_equal(fs.current[0], "powersave");
@@ -461,8 +462,8 @@ test_check_ex_findings(const MunitParameter p[], void *d)
 	munit_assert_int(fs.advice_ok, ==, 4);
 
 	/* NULL counts; a nonzero return stops after that finding. */
-	munit_assert_int(xtc_tuning_check_ex(NULL, NULL), ==, 4);
-	munit_assert_int(xtc_tuning_check_ex(stop_after_one, &calls), ==, 1);
+	munit_assert_int(xtc_runtime_tuning_check_ex(NULL, NULL), ==, 4);
+	munit_assert_int(xtc_runtime_tuning_check_ex(stop_after_one, &calls), ==, 1);
 	munit_assert_int(calls, ==, 1);
 
 	munit_assert_int(xtc_log_drain(log), ==, 0);

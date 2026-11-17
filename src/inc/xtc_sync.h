@@ -143,7 +143,7 @@ typedef struct xtc_amutex xtc_amutex_t;
  * that is not on a loop blocks on a condvar as a fallback.
  *
  * PUBLIC: int  xtc_amutex_create __P((xtc_amutex_t **));
- * PUBLIC: int  xtc_amutex_create_ex __P((xtc_amutex_t **, unsigned));
+ * PUBLIC: int  xtc_amutex_create_flags __P((unsigned, xtc_amutex_t **));
  * PUBLIC: xtc_amutex_t *xtc_amutex_static __P((unsigned));
  * PUBLIC: void xtc_amutex_destroy __P((xtc_amutex_t *));
  * PUBLIC: int  xtc_amutex_lock __P((xtc_amutex_t *, int64_t));
@@ -162,7 +162,7 @@ XTC_API int  xtc_amutex_create(xtc_amutex_t **out);
  * across loops.
  */
 #define XTC_AMUTEX_RECURSIVE 0x1u
-XTC_API int  xtc_amutex_create_ex(xtc_amutex_t **out, unsigned flags);
+XTC_API int  xtc_amutex_create_flags(unsigned flags, xtc_amutex_t **out);
 
 /*
  * Process-global static mutexes.  Returns a stable, lazily-created
@@ -285,6 +285,8 @@ XTC_API int  xtc_gate_count(const xtc_gate_t *g);
  */
 XTC_DEPRECATED("use xtc_gate_shutdown")
 XTC_API int xtc_gate_close(xtc_gate_t *g);
+XTC_DEPRECATED("use xtc_amutex_create_flags")
+XTC_API int xtc_amutex_create_ex(xtc_amutex_t **out, unsigned flags);
 
 #ifdef __cplusplus
 }

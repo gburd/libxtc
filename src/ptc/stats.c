@@ -45,7 +45,8 @@
 #include "xtc_int.h"
 #include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
 #include "xtc_stats.h"
-#include "os_tuning.h"   /* __os_tuning_check: xtc_tuning_check wraps it */
+#include "xtc_runtime.h"
+#include "os_tuning.h"   /* __os_tuning_check: xtc_runtime_tuning_check wraps it */
 
 #include <errno.h>
 #include <pthread.h>
@@ -1290,7 +1291,7 @@ xtc_metrics_dump_prometheus(int fd)
 }
 
 /*
- * PUBLIC: void xtc_tuning_check __P((void));
+ * PUBLIC: void xtc_runtime_tuning_check __P((void));
  *
  * Public entry to the host-tuning advisor.  Thin wrapper over the
  * internal __os_tuning_check so a consumer on the xtc_exec / xtc_loop
@@ -1299,14 +1300,14 @@ xtc_metrics_dump_prometheus(int fd)
  * going through xtc_app_start.  See xtc_stats.h.
  */
 void
-xtc_tuning_check(void)
+xtc_runtime_tuning_check(void)
 {
 	__os_tuning_check();
 }
 
-/* PUBLIC: int xtc_tuning_check_ex __P((xtc_tuning_fn, void *)); */
+/* PUBLIC: int xtc_runtime_tuning_check_ex __P((xtc_tuning_fn, void *)); */
 int
-xtc_tuning_check_ex(xtc_tuning_fn fn, void *user)
+xtc_runtime_tuning_check_ex(xtc_tuning_fn fn, void *user)
 {
 	return __os_tuning_check_ex(fn, user);
 }

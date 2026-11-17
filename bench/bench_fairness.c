@@ -98,7 +98,7 @@ run_scenario(int use_budget)
 		return -1;
 	}
 	if (use_budget)
-		xtc_yield_set_budget(loop, 1 * 1000 * 1000LL);  /* 1 ms quantum */
+		xtc_loop_set_yield_budget(loop, 1 * 1000 * 1000LL);  /* 1 ms quantum */
 
 	for (i = 0; i < N_WORKERS; i++)
 		(void)xtc_proc_spawn(loop, worker, NULL, NULL, NULL);

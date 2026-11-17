@@ -37,8 +37,9 @@
 .Nm xtc_metrics_dump_prometheus ,
 .Nm xtc_metrics_write_prometheus ,
 .Nm xtc_metrics_set_help ,
-.Nm xtc_tuning_check ,
-.Nm xtc_tuning_check_ex
+.Nm xtc_runtime_tuning_check ,
+.Nm xtc_runtime_tuning_check_ex ,
+.Nm xtc_tuning_check
 .Nd runtime statistics: counters, gauges, histograms
 .Sh SYNOPSIS
 .In xtc.h
@@ -108,9 +109,9 @@
 .Ft int
 .Fn xtc_metrics_set_help "const void *metric" "const char *help"
 .Ft void
-.Fn xtc_tuning_check "void"
+.Fn xtc_runtime_tuning_check "void"
 .Ft int
-.Fn xtc_tuning_check_ex "xtc_tuning_fn fn" "void *user"
+.Fn xtc_runtime_tuning_check_ex "xtc_tuning_fn fn" "void *user"
 .Sh DESCRIPTION
 .Nm xtc_stats
 is the runtime telemetry layer.  Three metric kinds:
@@ -466,7 +467,7 @@ A scrape handler hands the page from
 to its HTTP response; see
 .Pa docs/_includes/snippets/stats_prometheus.c .
 .Pp
-.Fn xtc_tuning_check
+.Fn xtc_runtime_tuning_check
 runs libxtc's host-tuning advisor: cheap, read-only probes (CPU
 governor, intel_pstate, transparent hugepages, vm swappiness, sched
 autogroup, io_uring-under-seccomp) that each log one
@@ -484,13 +485,13 @@ calls it by default, but a consumer that brings carriers up directly
 via
 .Xr xtc_exec 3
 should call
-.Fn xtc_tuning_check
+.Fn xtc_runtime_tuning_check
 once at startup, after installing its
 .Fn xtc_log_set_default
 sink, to receive the advisories.
 With no default logger the lines go nowhere.
 .Pp
-.Fn xtc_tuning_check_ex
+.Fn xtc_runtime_tuning_check_ex
 runs the same probes and hands each finding to
 .Fa fn
 on the calling thread instead of logging it, so it reads and writes no
@@ -530,7 +531,7 @@ or
 .Dq 10 .
 .It Va advice
 one English sentence: the line
-.Fn xtc_tuning_check
+.Fn xtc_runtime_tuning_check
 logs, without its
 .Dq [tuning]
 prefix.
@@ -544,7 +545,7 @@ show(const xtc_tuning_finding_t *f, void *user)
 	return 0;
 }
 
-int n = xtc_tuning_check_ex(show, NULL);
+int n = xtc_runtime_tuning_check_ex(show, NULL);
 .Ed
 .Pp
 .Nm xtc_metrics
@@ -553,6 +554,16 @@ internal metrics (use
 .Xr xtc_exec 3 Ns 's
 .Fn xtc_exec_loop_stats
 for per-carrier internals).
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Fn xtc_tuning_check
+Use
+.Fn xtc_runtime_tuning_check .
+.El
 .Sh SEE ALSO
 .Xr xtc_log 3 ,
 .Xr xtc_cfg 3 ,
@@ -560,7 +571,7 @@ for per-carrier internals).
 .Xr perf-stat 1
 .Sh HISTORY
 Appeared in xtc 0.1.
-.Fn xtc_tuning_check_ex ,
+.Fn xtc_runtime_tuning_check_ex ,
 .Fn xtc_hist_create_bounds ,
 .Fn xtc_hist_record_value ,
 .Fn xtc_hist_quantiles ,

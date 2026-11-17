@@ -56,7 +56,7 @@ struct xtc_dispatch_handle {
  * dropped, which completes the future with XTC_E_ABORTED -- so an
  * awaiter never hangs on a cancelled or crashed dispatch.  The
  * set-once / drop-once guard is the _Atomic exchange: xtc_promise_set
- * and xtc_promise_drop both consume the promise exactly once, and this
+ * and xtc_promise_destroy both consume the promise exactly once, and this
  * exchange makes SURE only one of {fn's set, this drop} runs.
  */
 static void
@@ -67,7 +67,7 @@ __dispatch_finalize(void *v)
 
 	was = xtc_atomic_exchange_i32(&c->resolved, 1, xtc_mo_acq_rel);
 	if (!was)
-		xtc_promise_drop(c->prom);   /* fiber ended without a result */
+		xtc_promise_destroy(c->prom);   /* fiber ended without a result */
 	__os_free(c);
 }
 
@@ -91,7 +91,7 @@ __dispatch_entry(void *v)
 	if (xtc_proc_at_exit(__dispatch_finalize, c) != XTC_OK) {
 		was = xtc_atomic_exchange_i32(&c->resolved, 1, xtc_mo_acq_rel);
 		if (!was)
-			xtc_promise_drop(c->prom);
+			xtc_promise_destroy(c->prom);
 		(void)c->fn(c->arg);
 		return;
 	}
@@ -132,7 +132,7 @@ xtc_dispatch(xtc_loop_t *loop, int (*fn)(void *), void *arg,
 			return rc;
 		}
 	}
-	if ((rc = xtc_future_new_pair(&prom, &fut)) != XTC_OK) {
+	if ((rc = xtc_future_create(&prom, &fut)) != XTC_OK) {
 		__os_free(h);
 		__os_free(c);
 		return rc;
@@ -152,7 +152,7 @@ xtc_dispatch(xtc_loop_t *loop, int (*fn)(void *), void *arg,
 	if (rc != XTC_OK) {
 		/* Nothing was spawned; c is still ours.  Drop the promise so a
 		 * (never-handed-out) future would resolve, then free. */
-		xtc_promise_drop(prom);
+		xtc_promise_destroy(prom);
 		(void)xtc_future_wait(fut, NULL, 0);   /* consume/free the read half */
 		__os_free(h);
 		__os_free(c);

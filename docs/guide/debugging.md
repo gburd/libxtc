@@ -369,7 +369,7 @@ is the `recon_alloc` / `bin_leak` analog.  Globally,
 
 Turn on the cooperative-yield watchdog:
 
-    xtc_yield_set_budget(loop, 5LL * 1000 * 1000);   /* 5ms quantum */
+    xtc_loop_set_yield_budget(loop, 5LL * 1000 * 1000);   /* 5ms quantum */
 
 Then `xtc_yield_due_count(loop)` counts how often a fiber blew its
 budget, and `xtc_yield_check()` is the in-fiber "am I over budget?"

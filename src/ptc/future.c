@@ -247,7 +247,7 @@ fut_wq_remove(struct future_cell *c, struct fut_waiter *w)
 /* ---- public: pair, set, drop ---- */
 
 int
-xtc_future_new_pair(xtc_promise_t **out_prom, xtc_future_t **out_fut)
+xtc_future_create(xtc_promise_t **out_prom, xtc_future_t **out_fut)
 {
 	struct future_cell *c = NULL;
 	xtc_promise_t *p = NULL;
@@ -302,7 +302,7 @@ xtc_promise_set(xtc_promise_t *prom, intptr_t value, int status)
 }
 
 void
-xtc_promise_drop(xtc_promise_t *prom)
+xtc_promise_destroy(xtc_promise_t *prom)
 {
 	struct future_cell *c;
 	if (prom == NULL || prom->set_or_dropped)
@@ -543,7 +543,7 @@ xtc_future_map(xtc_future_t *src, xtc_future_map_fn fn, void *user,
 		return XTC_E_INVAL;
 	if ((rc = __os_malloc(sizeof *m, (void **)&m)) != XTC_OK)
 		return rc;
-	if ((rc = xtc_future_new_pair(&prom, &fut)) != XTC_OK) {
+	if ((rc = xtc_future_create(&prom, &fut)) != XTC_OK) {
 		__os_free(m);
 		return rc;
 	}
@@ -553,7 +553,7 @@ xtc_future_map(xtc_future_t *src, xtc_future_map_fn fn, void *user,
 
 	sc = src->cell;
 	if ((rc = cell_on_complete(sc, map_on_complete, m)) != XTC_OK) {
-		xtc_promise_drop(prom);
+		xtc_promise_destroy(prom);
 		cell_unref(fut->cell);
 		__os_free(fut);
 		__os_free(m);
@@ -637,7 +637,7 @@ xtc_future_then(xtc_future_t *src, xtc_future_then_fn fn, void *user,
 		return XTC_E_INVAL;
 	if ((rc = __os_malloc(sizeof *t, (void **)&t)) != XTC_OK)
 		return rc;
-	if ((rc = xtc_future_new_pair(&prom, &fut)) != XTC_OK) {
+	if ((rc = xtc_future_create(&prom, &fut)) != XTC_OK) {
 		__os_free(t);
 		return rc;
 	}
@@ -646,7 +646,7 @@ xtc_future_then(xtc_future_t *src, xtc_future_then_fn fn, void *user,
 	t->user = user;
 
 	if ((rc = cell_on_complete(src->cell, then_on_complete, t)) != XTC_OK) {
-		xtc_promise_drop(prom);
+		xtc_promise_destroy(prom);
 		cell_unref(fut->cell);
 		__os_free(fut);
 		__os_free(t);
@@ -703,7 +703,7 @@ xtc_future_when_all(xtc_future_t **futs, int n, xtc_future_t **out_fut)
 			return XTC_E_INVAL;
 	if ((rc = __os_malloc(sizeof *a, (void **)&a)) != XTC_OK)
 		return rc;
-	if ((rc = xtc_future_new_pair(&prom, &fut)) != XTC_OK) {
+	if ((rc = xtc_future_create(&prom, &fut)) != XTC_OK) {
 		__os_free(a);
 		return rc;
 	}
@@ -779,7 +779,7 @@ xtc_future_when_any(xtc_future_t **futs, int n, xtc_future_t **out_fut)
 			return XTC_E_INVAL;
 	if ((rc = __os_malloc(sizeof *a, (void **)&a)) != XTC_OK)
 		return rc;
-	if ((rc = xtc_future_new_pair(&prom, &fut)) != XTC_OK) {
+	if ((rc = xtc_future_create(&prom, &fut)) != XTC_OK) {
 		__os_free(a);
 		return rc;
 	}
@@ -864,7 +864,7 @@ xtc_future_with_timeout(xtc_future_t *src, int64_t timeout_ns,
 		return XTC_E_INVAL;   /* needs a running loop for the timer */
 	if ((rc = __os_malloc(sizeof *t, (void **)&t)) != XTC_OK)
 		return rc;
-	if ((rc = xtc_future_new_pair(&prom, &fut)) != XTC_OK) {
+	if ((rc = xtc_future_create(&prom, &fut)) != XTC_OK) {
 		__os_free(t);
 		return rc;
 	}

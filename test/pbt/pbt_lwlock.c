@@ -99,11 +99,11 @@ prop_conditional_consistent(hegel_test_case *tc, void *u)
 		op = (int)hegel_draw_int(tc, hegel_integers(0, 2));
 		if (op == 0) {
 			/* Conditional shared. */
-			if (xtc_lwlock_acquire_cond(&lk, XTC_LWLOCK_SHARED) == XTC_OK)
+			if (xtc_lwlock_try_acquire(&lk, XTC_LWLOCK_SHARED) == XTC_OK)
 				held_count++;
 		} else if (op == 1) {
 			/* Conditional exclusive -- only succeeds if nothing held. */
-			int rc = xtc_lwlock_acquire_cond(&lk, XTC_LWLOCK_EXCLUSIVE);
+			int rc = xtc_lwlock_try_acquire(&lk, XTC_LWLOCK_EXCLUSIVE);
 			if (rc == XTC_OK) {
 				held_count++;
 			} else {

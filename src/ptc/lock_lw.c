@@ -507,7 +507,7 @@ xtc_lwlock_acquire(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 }
 
 int
-xtc_lwlock_acquire_cond(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
+xtc_lwlock_try_acquire(xtc_lwlock_t *lock, xtc_lwlock_mode_t mode)
 {
 	if (lock == NULL || !lock->initialised) return XTC_E_INVAL;
 	if (__try_attempt(lock, mode)) {

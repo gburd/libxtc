@@ -420,7 +420,7 @@ oom_workload(void)
 
 	/* future/promise pair + a combinator: several allocations each, with
 	 * cleanup paths that must unwind a partly-built cell. */
-	if (xtc_future_new_pair(&prom, &fut) == XTC_OK) {
+	if (xtc_future_create(&prom, &fut) == XTC_OK) {
 		intptr_t out = 0;
 		(void)xtc_promise_set(prom, 7, XTC_OK);
 		(void)xtc_future_wait(fut, &out, 0);

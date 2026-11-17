@@ -49,8 +49,9 @@
 #include "xtc_tnt.h"
 #include "xtc_xproc.h"
 #include "xtc_int.h"
+#include "xtc_runtime.h"
 #include "loop_int.h"      /* xtc_sim_check: plant a corrupt field */
-#include "os_tuning.h"     /* xtc_tuning_check: fixture-path seam */
+#include "os_tuning.h"     /* xtc_runtime_tuning_check: fixture-path seam */
 
 #define MS (1000LL * 1000)
 
@@ -904,7 +905,7 @@ tuning_says_governor(const char *governor)
 	o.sink = cap_sink; o.sink_fd = -1;
 	munit_assert_int(xtc_log_create(&o, &log), ==, XTC_OK);
 	munit_assert_int(xtc_log_set_default(log), ==, XTC_OK);
-	xtc_tuning_check();
+	xtc_runtime_tuning_check();
 	munit_assert_int(xtc_log_drain(log), >=, 0);
 	(void)xtc_log_set_default(NULL);
 	xtc_log_destroy(log);
@@ -923,7 +924,7 @@ test_tuning_check(const MunitParameter p[], void *d)
 	munit_assert_int(tuning_says_governor("performance\n"), ==, 0);
 	return MUNIT_OK;
 #else
-	xtc_tuning_check();   /* every probe is Linux-only: a no-op here */
+	xtc_runtime_tuning_check();   /* every probe is Linux-only: a no-op here */
 	return MUNIT_SKIP;
 #endif
 }

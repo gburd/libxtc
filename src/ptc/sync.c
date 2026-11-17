@@ -1059,7 +1059,7 @@ amutex_owner_eq(const struct amutex_owner *a, const struct amutex_owner *b)
 }
 
 int
-xtc_amutex_create_ex(xtc_amutex_t **out, unsigned flags)
+xtc_amutex_create_flags(unsigned flags, xtc_amutex_t **out)
 {
 	xtc_amutex_t *m;
 	int rc;
@@ -1076,7 +1076,7 @@ xtc_amutex_create_ex(xtc_amutex_t **out, unsigned flags)
 int
 xtc_amutex_create(xtc_amutex_t **out)
 {
-	return xtc_amutex_create_ex(out, 0);
+	return xtc_amutex_create_flags(0, out);
 }
 
 /* Process-global recursive static mutexes, lazily created. */
@@ -1091,7 +1091,7 @@ xtc_amutex_static(unsigned slot)
 	(void)__xtc_mtx_lock(&g_static_amutex_lock);
 	m = g_static_amutex[slot];
 	if (m == NULL) {
-		if (xtc_amutex_create_ex(&m, XTC_AMUTEX_RECURSIVE) == XTC_OK)
+		if (xtc_amutex_create_flags(XTC_AMUTEX_RECURSIVE, &m) == XTC_OK)
 			g_static_amutex[slot] = m;
 		else
 			m = NULL;

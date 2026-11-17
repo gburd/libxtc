@@ -271,7 +271,9 @@ test_yield_watchdog(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	/* Budget set before the first dispatch so the hog's quanta are
 	 * timed from the start. */
-	xtc_yield_set_budget(loop, 2LL * 1000 * 1000);   /* 2ms */
+	xtc_loop_set_yield_budget(loop, 2LL * 1000 * 1000);   /* 2ms */
+	munit_assert_int64(xtc_loop_get_yield_budget(loop), ==,
+	    2LL * 1000 * 1000);
 	munit_assert_int(xtc_coro_spawn(loop, yc_hog, NULL, &hog), ==, XTC_OK);
 	munit_assert_int(xtc_coro_spawn(loop, yc_ticker, NULL, &tick), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);

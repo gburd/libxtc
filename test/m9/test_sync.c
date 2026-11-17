@@ -1213,7 +1213,7 @@ test_kill_after_park_while_running(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_sem_create(0, &g_kw_sem), ==, XTC_OK);
 	munit_assert_int(xtc_notify_create(&g_kw_n), ==, XTC_OK);
 	munit_assert_int(xtc_amutex_create(&g_kw_m), ==, XTC_OK);
-	munit_assert_int(xtc_future_new_pair(&g_kr_pr, &g_kr_f), ==, XTC_OK);
+	munit_assert_int(xtc_future_create(&g_kr_pr, &g_kr_f), ==, XTC_OK);
 	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
 	    .size = sizeof(xtc_exec_opts_t), .n_loops = 2 }, &g_kr_e), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(xtc_exec_loop(g_kr_e, 1), kr_killer,
@@ -1284,7 +1284,7 @@ test_amutex_recursive_exit(const MunitParameter p[], void *d)
 	xtc_loop_t *loop = NULL;
 	(void)p; (void)d;
 	g_ra_got = g_ra_runs = g_ra_held = 0;
-	munit_assert_int(xtc_amutex_create_ex(&g_ra_m, XTC_AMUTEX_RECURSIVE),
+	munit_assert_int(xtc_amutex_create_flags(XTC_AMUTEX_RECURSIVE, &g_ra_m),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, ra_driver, loop, NULL, NULL),
@@ -1345,7 +1345,7 @@ test_amutex_recursive_thread(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	xtc_atomic_store_i32(&g_rt_ok, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_rt_bad, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_amutex_create_ex(&g_rt_m, XTC_AMUTEX_RECURSIVE),
+	munit_assert_int(xtc_amutex_create_flags(XTC_AMUTEX_RECURSIVE, &g_rt_m),
 	    ==, XTC_OK);
 	for (i = 0; i < 4; i++)
 		munit_assert_int(pthread_create(&th[i], NULL, rt_thread, NULL), ==, 0);

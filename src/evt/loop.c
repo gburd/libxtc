@@ -1653,12 +1653,19 @@ __loop_step_once(xtc_loop_t *loop)
  * token (fire xtc_abort_source on over-budget; see xtc_svr_call_abortable).
  */
 
-/* PUBLIC: void xtc_yield_set_budget __P((xtc_loop_t *, int64_t)); */
+/* PUBLIC: void xtc_loop_set_yield_budget __P((xtc_loop_t *, int64_t)); */
 void
-xtc_yield_set_budget(xtc_loop_t *loop, int64_t budget_ns)
+xtc_loop_set_yield_budget(xtc_loop_t *loop, int64_t budget_ns)
 {
 	if (loop != NULL)
 		loop->yield_budget_ns = budget_ns < 0 ? 0 : budget_ns;
+}
+
+/* PUBLIC: int64_t xtc_loop_get_yield_budget __P((const xtc_loop_t *)); */
+int64_t
+xtc_loop_get_yield_budget(const xtc_loop_t *loop)
+{
+	return loop != NULL ? loop->yield_budget_ns : 0;
 }
 
 /* PUBLIC: int xtc_yield_check __P((void)); */

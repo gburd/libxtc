@@ -80,6 +80,7 @@ int xtc_yield_if_due __P((void));
 int64_t __xtc_sim_io_latency __P((void));
 int64_t __xtc_sim_net_latency __P((void));
 int64_t xtc_exec_class_latency __P((xtc_exec_class_t));
+int64_t xtc_loop_get_yield_budget __P((const xtc_loop_t *));
 struct xtc_res *xtc_loop_res __P((xtc_loop_t *));
 uint64_t __xtc_sim_rng __P((int));
 uint64_t __xtc_sim_rng_range __P((int, uint64_t));
@@ -104,6 +105,7 @@ void xtc_exec_set_steal_backoff __P((xtc_exec_t *, int));
 void xtc_loop_destroy __P((xtc_loop_t *));
 void xtc_loop_set_stall_budget __P((xtc_loop_t *, int64_t));
 void xtc_loop_set_stall_cb __P((xtc_loop_t *, xtc_stall_fn, void *));
+void xtc_loop_set_yield_budget __P((xtc_loop_t *, int64_t));
 void xtc_sim_activate __P((uint64_t));
 void xtc_sim_buggify_disable __P((void));
 void xtc_sim_buggify_enable __P((unsigned));
@@ -132,7 +134,6 @@ void xtc_sim_strict __P((int));
 void xtc_sim_swizzle_disable __P((void));
 void xtc_sim_swizzle_enable __P((unsigned));
 void xtc_yield __P((void));
-void xtc_yield_set_budget __P((xtc_loop_t *, int64_t));
 xtc_loop_t *xtc_exec_loop __P((xtc_exec_t *, int));
 
 #endif /* EVT_EXT_H */

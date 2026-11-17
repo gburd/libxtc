@@ -4,9 +4,9 @@
 .Dt XTC_FUTURE 3
 .Os
 .Sh NAME
-.Nm xtc_future_new_pair ,
+.Nm xtc_future_create ,
 .Nm xtc_promise_set ,
-.Nm xtc_promise_drop ,
+.Nm xtc_promise_destroy ,
 .Nm xtc_future_await ,
 .Nm xtc_future_wait ,
 .Nm xtc_future_ready ,
@@ -14,17 +14,19 @@
 .Nm xtc_future_then ,
 .Nm xtc_future_when_all ,
 .Nm xtc_future_when_any ,
-.Nm xtc_future_with_timeout
+.Nm xtc_future_with_timeout ,
+.Nm xtc_future_new_pair ,
+.Nm xtc_promise_drop
 .Nd one-shot awaitable values (futures and promises)
 .Sh SYNOPSIS
 .In xtc.h
 .In xtc_future.h
 .Ft int
-.Fn xtc_future_new_pair "xtc_promise_t **out_prom" "xtc_future_t **out_fut"
+.Fn xtc_future_create "xtc_promise_t **out_prom" "xtc_future_t **out_fut"
 .Ft int
 .Fn xtc_promise_set "xtc_promise_t *prom" "intptr_t value" "int status"
 .Ft void
-.Fn xtc_promise_drop "xtc_promise_t *prom"
+.Fn xtc_promise_destroy "xtc_promise_t *prom"
 .Ft int
 .Fn xtc_future_await "xtc_future_t *fut" "intptr_t *out"
 .Ft int
@@ -67,7 +69,7 @@ code).  The promise is set exactly once; the future is then ready
 forever and every awaiter observes the same
 .Pq value , status .
 .Pp
-.Fn xtc_future_new_pair
+.Fn xtc_future_create
 creates a linked pair sharing one reference-counted cell.
 .Pp
 .Fn xtc_promise_set
@@ -80,7 +82,7 @@ is set once -- a second set returns
 .Dv XTC_E_INVAL .
 Setting consumes the promise handle (do not use or drop it afterward).
 .Pp
-.Fn xtc_promise_drop
+.Fn xtc_promise_destroy
 abandons a promise without setting it: the future completes with
 .Dv XTC_E_ABORTED ,
 so an awaiter never hangs on a broken promise.
@@ -158,12 +160,25 @@ Await a producer's result from within a fiber:
 .Bd -literal -offset indent
 xtc_promise_t *prom;
 xtc_future_t  *fut;
-xtc_future_new_pair(&prom, &fut);
+xtc_future_create(&prom, &fut);
 /* ... hand prom to a producer (another fiber or thread) ... */
 intptr_t v;
 if (xtc_future_await(fut, &v) == XTC_OK)
 	use(v);
 .Ed
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Fn xtc_future_new_pair
+Use
+.Fn xtc_future_create .
+.It Fn xtc_promise_drop
+Use
+.Fn xtc_promise_destroy .
+.El
 .Sh SEE ALSO
 .Xr xtc_proc 3 ,
 .Xr xtc_async 3 ,

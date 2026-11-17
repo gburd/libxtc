@@ -38,7 +38,8 @@ typedef intptr_t (*xtc_coro_fn)(void *arg);
  * PUBLIC: int      xtc_coro_spawn __P((xtc_loop_t *, xtc_coro_fn, void *, xtc_task_t **));
  * PUBLIC: int      xtc_coro_join __P((xtc_task_t *, intptr_t *));
  * PUBLIC: void     xtc_yield __P((void));
- * PUBLIC: void     xtc_yield_set_budget __P((xtc_loop_t *, int64_t));
+ * PUBLIC: void     xtc_loop_set_yield_budget __P((xtc_loop_t *, int64_t));
+ * PUBLIC: int64_t  xtc_loop_get_yield_budget __P((const xtc_loop_t *));
  * PUBLIC: int      xtc_yield_check __P((void));
  * PUBLIC: int      xtc_yield_if_due __P((void));
  * PUBLIC: uint64_t xtc_yield_due_count __P((const xtc_loop_t *));
@@ -75,7 +76,8 @@ XTC_API void     xtc_yield(void);
 /*
  * Cooperative yield watchdog.  xtc has no forcible preemption, so a
  * long compute loop must cooperate.  Set a per-loop time budget with
- * xtc_yield_set_budget (ns; 0 disables, the default), then in the
+ * xtc_loop_set_yield_budget (ns; 0 disables, the default; read it back
+ * with xtc_loop_get_yield_budget, 0 off a loop), then in the
  * compute loop call xtc_yield_if_due() -- it yields when the current
  * run quantum has exceeded the budget.  xtc_yield_check() is the
  * queryable form (1 == over budget) for embedders that want to react
@@ -83,7 +85,8 @@ XTC_API void     xtc_yield(void);
  * xtc_yield_due_count() reports how many times a task went over
  * budget on the loop (telemetry).  All are no-ops / 0 off a loop.
  */
-XTC_API void     xtc_yield_set_budget(xtc_loop_t *loop, int64_t budget_ns);
+XTC_API void     xtc_loop_set_yield_budget(xtc_loop_t *loop, int64_t budget_ns);
+XTC_API int64_t  xtc_loop_get_yield_budget(const xtc_loop_t *loop);
 XTC_API int      xtc_yield_check(void);
 XTC_API int      xtc_yield_if_due(void);
 XTC_API uint64_t xtc_yield_due_count(const xtc_loop_t *loop);
@@ -172,6 +175,8 @@ XTC_API int xtc_async(xtc_loop_t *loop, xtc_coro_fn fn, void *arg,
     xtc_task_t **out_task);
 XTC_DEPRECATED("use xtc_coro_join")
 XTC_API int xtc_await(xtc_task_t *t, intptr_t *result);
+XTC_DEPRECATED("use xtc_loop_set_yield_budget")
+XTC_API void xtc_yield_set_budget(xtc_loop_t *loop, int64_t budget_ns);
 
 #ifdef __cplusplus
 }

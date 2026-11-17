@@ -26,7 +26,7 @@ test_recursive_basic(const MunitParameter p[], void *d)
 {
 	xtc_amutex_t *m;
 	(void)p; (void)d;
-	munit_assert_int(xtc_amutex_create_ex(&m, XTC_AMUTEX_RECURSIVE),
+	munit_assert_int(xtc_amutex_create_flags(XTC_AMUTEX_RECURSIVE, &m),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_amutex_lock(m, -1), ==, XTC_OK);
 	munit_assert_int(xtc_amutex_lock(m, -1), ==, XTC_OK);  /* re-enter */
@@ -89,7 +89,7 @@ test_xloop_recursive(const MunitParameter p[], void *d)
 	g_iters = 300;
 	g_critical = 0;
 	__os_atomic_store_i32(&g_done, 0);
-	munit_assert_int(xtc_amutex_create_ex(&g_m, XTC_AMUTEX_RECURSIVE),
+	munit_assert_int(xtc_amutex_create_flags(XTC_AMUTEX_RECURSIVE, &g_m),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_exec_create(&(xtc_exec_opts_t){
 	    .size = sizeof(xtc_exec_opts_t), .n_loops = n_loops }, &e), ==, XTC_OK);

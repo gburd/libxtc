@@ -582,7 +582,7 @@ tm14_future_proc(void *a)
 	int rc;
 	(void)a;
 	for (i = 0; i < TM14_N; i++) {
-		munit_assert_int(xtc_future_new_pair(&prom, &fut), ==, XTC_OK);
+		munit_assert_int(xtc_future_create(&prom, &fut), ==, XTC_OK);
 		munit_assert_int(xtc_future_with_timeout(fut, XTC_NS_PER_SEC,
 		    &tf), ==, XTC_OK);
 		munit_assert_int(xtc_promise_set(prom, (intptr_t)i, XTC_OK),
@@ -592,13 +592,13 @@ tm14_future_proc(void *a)
 		if (i % 100 == 0) {
 			/* The timeout wins: a 1us timeout on a never-set
 			 * source. */
-			munit_assert_int(xtc_future_new_pair(&prom, &fut), ==,
+			munit_assert_int(xtc_future_create(&prom, &fut), ==,
 			    XTC_OK);
 			munit_assert_int(xtc_future_with_timeout(fut, 1000,
 			    &tf), ==, XTC_OK);
 			rc = xtc_future_await(tf, &out);
 			munit_assert_int(rc, ==, XTC_E_AGAIN);
-			xtc_promise_drop(prom);
+			xtc_promise_destroy(prom);
 		}
 	}
 	(void)xtc_proc_sleep(XTC_NS_PER_MS);

@@ -7,7 +7,7 @@
 .Nm xtc_lwlock_init ,
 .Nm xtc_lwlock_destroy ,
 .Nm xtc_lwlock_acquire ,
-.Nm xtc_lwlock_acquire_cond ,
+.Nm xtc_lwlock_try_acquire ,
 .Nm xtc_lwlock_release ,
 .Nm xtc_lwlock_held_by_me ,
 .Nm xtc_lwlock_held_by_me_in_mode ,
@@ -16,7 +16,8 @@
 .Nm xtc_lwlock_track_reset ,
 .Nm xtc_lwlock_track_set_handler ,
 .Nm XTC_LW_EXCLUSIVE ,
-.Nm XTC_LW_SHARED
+.Nm XTC_LW_SHARED ,
+.Nm xtc_lwlock_acquire_cond
 .Nd lightweight lock with shared / exclusive modes
 .Sh SYNOPSIS
 .In xtc.h
@@ -28,7 +29,7 @@
 .Ft int
 .Fn xtc_lwlock_acquire "xtc_lwlock_t *lock" "xtc_lwlock_mode_t mode"
 .Ft int
-.Fn xtc_lwlock_acquire_cond "xtc_lwlock_t *lock" "xtc_lwlock_mode_t mode"
+.Fn xtc_lwlock_try_acquire "xtc_lwlock_t *lock" "xtc_lwlock_mode_t mode"
 .Ft void
 .Fn xtc_lwlock_release "xtc_lwlock_t *lock"
 .Ft int
@@ -103,7 +104,7 @@ Excluded by an exclusive holder.
 Only one thread holds the lock; excludes all readers.
 .El
 .Pp
-.Fn xtc_lwlock_acquire_cond
+.Fn xtc_lwlock_try_acquire
 is the non-blocking variant: returns
 .Dv XTC_OK
 if the acquire succeeded immediately,
@@ -153,7 +154,7 @@ critical sections that span async I/O.  See
 .Fn xtc_lwlock_init ,
 .Fn xtc_lwlock_acquire ,
 and
-.Fn xtc_lwlock_acquire_cond
+.Fn xtc_lwlock_try_acquire
 return
 .Dv XTC_OK
 on success or a negative
@@ -190,6 +191,10 @@ frozen lock layer: an alias, no warning; 3.0 keeps only XTC_LWLOCK_EXCLUSIVE.
 Use
 .Dv XTC_LWLOCK_SHARED ;
 frozen lock layer: an alias, no warning; 3.0 keeps only XTC_LWLOCK_SHARED.
+.It Fn xtc_lwlock_acquire_cond
+Use
+.Fn xtc_lwlock_try_acquire ;
+frozen lock layer: an alias, no warning; 3.0 keeps only xtc_lwlock_try_acquire.
 .El
 .Sh SEE ALSO
 .Xr xtc_lrlock 3 ,

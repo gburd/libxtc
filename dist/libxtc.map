@@ -73,6 +73,7 @@ XTC_2.0 {
 
 XTC_2.2 {
 	global:
+		xtc_amutex_create_flags;
 		xtc_app_supervisor;
 		xtc_batch_shutdown;
 		xtc_bloom_create;
@@ -94,6 +95,7 @@ XTC_2.2 {
 		xtc_err_from_errno;
 		xtc_exec_create;
 		xtc_exec_destroy;
+		xtc_future_create;
 		xtc_gate_shutdown;
 		xtc_hist_create_bounds;
 		xtc_hist_iterate;
@@ -109,11 +111,15 @@ XTC_2.2 {
 		xtc_logf_impl;
 		xtc_loop_create;
 		xtc_loop_destroy;
+		xtc_loop_get_yield_budget;
+		xtc_loop_set_yield_budget;
+		xtc_lwlock_try_acquire;
 		xtc_metrics_set_help;
 		xtc_metrics_write_prometheus;
 		xtc_pg_subscribe;
 		xtc_pg_unsubscribe;
 		xtc_proc_set_label;
+		xtc_promise_destroy;
 		xtc_reg_del;
 		xtc_reg_get;
 		xtc_reg_put;
@@ -133,6 +139,8 @@ XTC_2.2 {
 		xtc_runtime_set_preempt_involuntary;
 		xtc_runtime_set_stack_reclaim;
 		xtc_runtime_set_stack_size;
+		xtc_runtime_tuning_check;
+		xtc_runtime_tuning_check_ex;
 		xtc_scope_enter;
 		xtc_scope_leave;
 		xtc_send_notify;
@@ -153,7 +161,6 @@ XTC_2.2 {
 		xtc_timer_detach;
 		xtc_tnt_run;
 		xtc_tnt_send_from;
-		xtc_tuning_check_ex;
 		xtc_xproc_link;
 		xtc_xproc_monitor;
 		xtc_xproc_send;

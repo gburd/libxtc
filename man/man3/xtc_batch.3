@@ -334,7 +334,7 @@ CROSS-LOOP RESULTS (REPLY-FUTURE PATTERN).
 Completion still runs the group's complete callback on the DRIVER loop; the
 engine does not invent a cross-loop result channel. An mt submitter that needs
 the result on its own loop passes a request that carries an xtc_future_t
-(created with xtc_future_new_pair) which the complete callback resolves with
+(created with xtc_future_create) which the complete callback resolves with
 xtc_promise_set; the submitter awaits that future on its own loop. The request
 pointer is the consumer's per-sequence handle and carries whatever outbound
 state (device-output location, KV-cache slot id) the application needs.

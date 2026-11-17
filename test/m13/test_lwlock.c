@@ -69,23 +69,23 @@ test_conditional(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	munit_assert_int(xtc_lwlock_init(&lk, 3), ==, XTC_OK);
 	/* Free -> conditional EXCLUSIVE succeeds. */
-	munit_assert_int(xtc_lwlock_acquire_cond(&lk, XTC_LWLOCK_EXCLUSIVE),
+	munit_assert_int(xtc_lwlock_try_acquire(&lk, XTC_LWLOCK_EXCLUSIVE),
 	    ==, XTC_OK);
 	/* Held EXCLUSIVE -> another EXCLUSIVE conditional fails. */
-	munit_assert_int(xtc_lwlock_acquire_cond(&lk, XTC_LWLOCK_EXCLUSIVE),
+	munit_assert_int(xtc_lwlock_try_acquire(&lk, XTC_LWLOCK_EXCLUSIVE),
 	    ==, XTC_E_AGAIN);
 	/* Held EXCLUSIVE -> SHARED conditional fails. */
-	munit_assert_int(xtc_lwlock_acquire_cond(&lk, XTC_LWLOCK_SHARED),
+	munit_assert_int(xtc_lwlock_try_acquire(&lk, XTC_LWLOCK_SHARED),
 	    ==, XTC_E_AGAIN);
 	xtc_lwlock_release(&lk);
 	/* Now SHARED can succeed conditionally. */
-	munit_assert_int(xtc_lwlock_acquire_cond(&lk, XTC_LWLOCK_SHARED),
+	munit_assert_int(xtc_lwlock_try_acquire(&lk, XTC_LWLOCK_SHARED),
 	    ==, XTC_OK);
 	/* Another shared also succeeds. */
-	munit_assert_int(xtc_lwlock_acquire_cond(&lk, XTC_LWLOCK_SHARED),
+	munit_assert_int(xtc_lwlock_try_acquire(&lk, XTC_LWLOCK_SHARED),
 	    ==, XTC_OK);
 	/* But EXCLUSIVE conditional fails while shared held. */
-	munit_assert_int(xtc_lwlock_acquire_cond(&lk, XTC_LWLOCK_EXCLUSIVE),
+	munit_assert_int(xtc_lwlock_try_acquire(&lk, XTC_LWLOCK_EXCLUSIVE),
 	    ==, XTC_E_AGAIN);
 	xtc_lwlock_release(&lk);
 	xtc_lwlock_release(&lk);
@@ -383,7 +383,7 @@ kl_driver(void *arg)
 	xtc_lwlock_release(&g_kl);                /* the later wake */
 	g_kl_down = xtc_recv(&m, &n, 2000LL * 1000 * 1000) == XTC_OK;
 	if (m != NULL) xtc_free(m);
-	g_kl_after = xtc_lwlock_acquire_cond(&g_kl, XTC_LWLOCK_EXCLUSIVE);
+	g_kl_after = xtc_lwlock_try_acquire(&g_kl, XTC_LWLOCK_EXCLUSIVE);
 	if (g_kl_after == XTC_OK) xtc_lwlock_release(&g_kl);
 }
 

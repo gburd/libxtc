@@ -36,7 +36,7 @@ here you slice it yourself, by reaching a yield point.
     the whole duration, including the I/O completions they are waiting
     on.  The cure: call `xtc_yield()` periodically in long computations,
     or move the work off the loop with `xtc_blocking_run`, or use the
-    yield watchdog (`xtc_yield_set_budget`) to catch yourself.
+    yield watchdog (`xtc_loop_set_yield_budget`) to catch yourself.
   * **Rust intuition that misleads:** `async` Rust is also cooperative,
     so this one transfers -- but Rust's `.await` points are marked by
     the compiler and you cannot forget them.  Here the yield points are

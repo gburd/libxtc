@@ -6,7 +6,7 @@
 .Sh NAME
 .Nm xtc_amutex ,
 .Nm xtc_amutex_create ,
-.Nm xtc_amutex_create_ex ,
+.Nm xtc_amutex_create_flags ,
 .Nm xtc_amutex_static ,
 .Nm xtc_amutex_destroy ,
 .Nm xtc_amutex_lock ,
@@ -55,7 +55,8 @@
 .Nm xtc_abort_source_token ,
 .Nm xtc_abort_token_is_aborted ,
 .Nm xtc_abort_token_reason ,
-.Nm xtc_gate_close
+.Nm xtc_gate_close ,
+.Nm xtc_amutex_create_ex
 .Nd async synchronisation primitives
 .Sh SYNOPSIS
 .In xtc.h
@@ -63,7 +64,7 @@
 .Ft int
 .Fn xtc_amutex_create "xtc_amutex_t **out"
 .Ft int
-.Fn xtc_amutex_create_ex "xtc_amutex_t **out" "unsigned flags"
+.Fn xtc_amutex_create_flags "xtc_amutex_t **out" "unsigned flags"
 .Ft xtc_amutex_t *
 .Fn xtc_amutex_static "unsigned flags"
 .Ft void
@@ -165,7 +166,7 @@ which uses pthread mutex underneath
 .Pq blocks the OS thread .
 .Fn xtc_amutex_create
 allocates a mutex;
-.Fn xtc_amutex_create_ex
+.Fn xtc_amutex_create_flags
 takes a flags word;
 .Fn xtc_amutex_static
 returns a process-static instance.
@@ -379,6 +380,10 @@ A rebuild that uses one warns.
 .It Fn xtc_gate_close
 Use
 .Fn xtc_gate_shutdown .
+.It Fn xtc_amutex_create_ex
+Use
+.Fn xtc_amutex_create_flags ;
+arguments reordered: (flags, out).
 .El
 .Sh SEE ALSO
 .Xr xtc_async 3 ,

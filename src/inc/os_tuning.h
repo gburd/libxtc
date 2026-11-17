@@ -24,14 +24,14 @@
  * to be called once, at startup.
  *
  * INTERNAL: this is the __os_* implementation.  The public entry is
- * xtc_tuning_check() (xtc_stats.h), a thin wrapper -- so consumers on
+ * xtc_runtime_tuning_check() (xtc_stats.h), a thin wrapper -- so consumers on
  * the xtc_exec / xtc_loop path can reach the advisor.  Not exported
  * (no XTC_API): the __os_* symbol stays library-local per the ABI
- * gate; xtc_app_start and stats.c's xtc_tuning_check call it directly.
+ * gate; xtc_app_start and stats.c's xtc_runtime_tuning_check call it directly.
  */
 void __os_tuning_check(void);
 
-/* The structured form behind xtc_tuning_check_ex: each finding goes to
+/* The structured form behind xtc_runtime_tuning_check_ex: each finding goes to
  * fn (which may be NULL); returns the number of findings.
  * __os_tuning_check is this with a callback that logs each advice line
  * as "[tuning] <advice>". */

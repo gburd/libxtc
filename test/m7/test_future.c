@@ -48,7 +48,7 @@ test_wait_from_thread(const MunitParameter p[], void *d)
 	intptr_t out = 0;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_future_new_pair(&prom, &fut), ==, XTC_OK);
+	munit_assert_int(xtc_future_create(&prom, &fut), ==, XTC_OK);
 	sa.prom = prom;
 	sa.value = 4242;
 	munit_assert_int(pthread_create(&th, NULL, setter_thread, &sa), ==, 0);
@@ -70,7 +70,7 @@ test_timeout_and_ready(const MunitParameter p[], void *d)
 	int ready = -1;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_future_new_pair(&prom, &fut), ==, XTC_OK);
+	munit_assert_int(xtc_future_create(&prom, &fut), ==, XTC_OK);
 	munit_assert_int(xtc_future_ready(fut, &ready), ==, XTC_OK);
 	munit_assert_int(ready, ==, 0);
 	/* 0-timeout poll on an unset future: AGAIN, not consumed. */
@@ -96,8 +96,8 @@ test_dropped_promise(const MunitParameter p[], void *d)
 	intptr_t out = 12345;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_future_new_pair(&prom, &fut), ==, XTC_OK);
-	xtc_promise_drop(prom);
+	munit_assert_int(xtc_future_create(&prom, &fut), ==, XTC_OK);
+	xtc_promise_destroy(prom);
 	munit_assert_int(xtc_future_wait(fut, &out, -1), ==, XTC_E_ABORTED);
 	return MUNIT_OK;
 }
@@ -111,7 +111,7 @@ test_double_set(const MunitParameter p[], void *d)
 	intptr_t out = 0;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_future_new_pair(&prom, &fut), ==, XTC_OK);
+	munit_assert_int(xtc_future_create(&prom, &fut), ==, XTC_OK);
 	munit_assert_int(xtc_promise_set(prom, 1, XTC_OK), ==, XTC_OK);
 	/* prom is consumed by set; a second set on the (freed) handle is
 	 * not valid to call -- instead verify the future carries the first
@@ -158,7 +158,7 @@ test_await_in_fiber(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	xtc_atomic_store_i32(&g_fiber_ok, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_future_new_pair(&g_prom, &g_fut), ==, XTC_OK);
+	munit_assert_int(xtc_future_create(&g_prom, &g_fut), ==, XTC_OK);
 
 	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	opts.name = "consumer";
@@ -191,7 +191,7 @@ test_map(const MunitParameter p[], void *d)
 	intptr_t out = 0;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_future_new_pair(&prom, &fut), ==, XTC_OK);
+	munit_assert_int(xtc_future_create(&prom, &fut), ==, XTC_OK);
 	munit_assert_int(xtc_future_map(fut, double_it, NULL, &mapped),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_promise_set(prom, 21, XTC_OK), ==, XTC_OK);
@@ -209,7 +209,7 @@ test_map_already_ready(const MunitParameter p[], void *d)
 	intptr_t out = 0;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_future_new_pair(&prom, &fut), ==, XTC_OK);
+	munit_assert_int(xtc_future_create(&prom, &fut), ==, XTC_OK);
 	munit_assert_int(xtc_promise_set(prom, 50, XTC_OK), ==, XTC_OK);
 	munit_assert_int(xtc_future_map(fut, double_it, NULL, &mapped),
 	    ==, XTC_OK);
@@ -225,7 +225,7 @@ chain_next(intptr_t v, int status, void *user, xtc_future_t **out_next)
 	xtc_promise_t *p2 = NULL;
 	xtc_future_t *f2 = NULL;
 	(void)status; (void)user;
-	if (xtc_future_new_pair(&p2, &f2) != XTC_OK)
+	if (xtc_future_create(&p2, &f2) != XTC_OK)
 		return XTC_E_NOMEM;
 	/* resolve the inner future with v + 100 immediately. */
 	(void)xtc_promise_set(p2, v + 100, XTC_OK);
@@ -241,7 +241,7 @@ test_then(const MunitParameter p[], void *d)
 	intptr_t out = 0;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_future_new_pair(&prom, &fut), ==, XTC_OK);
+	munit_assert_int(xtc_future_create(&prom, &fut), ==, XTC_OK);
 	munit_assert_int(xtc_future_then(fut, chain_next, NULL, &chained),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_promise_set(prom, 5, XTC_OK), ==, XTC_OK);
@@ -260,9 +260,9 @@ test_when_all(const MunitParameter p[], void *d)
 	intptr_t out = 0;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_future_new_pair(&p1, &f[0]), ==, XTC_OK);
-	munit_assert_int(xtc_future_new_pair(&p2, &f[1]), ==, XTC_OK);
-	munit_assert_int(xtc_future_new_pair(&p3, &f[2]), ==, XTC_OK);
+	munit_assert_int(xtc_future_create(&p1, &f[0]), ==, XTC_OK);
+	munit_assert_int(xtc_future_create(&p2, &f[1]), ==, XTC_OK);
+	munit_assert_int(xtc_future_create(&p3, &f[2]), ==, XTC_OK);
 	munit_assert_int(xtc_future_when_all(f, 3, &all), ==, XTC_OK);
 
 	munit_assert_int(xtc_promise_set(p1, 1, XTC_OK), ==, XTC_OK);
@@ -287,8 +287,8 @@ test_when_all_error(const MunitParameter p[], void *d)
 	intptr_t out = 0;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_future_new_pair(&p1, &f[0]), ==, XTC_OK);
-	munit_assert_int(xtc_future_new_pair(&p2, &f[1]), ==, XTC_OK);
+	munit_assert_int(xtc_future_create(&p1, &f[0]), ==, XTC_OK);
+	munit_assert_int(xtc_future_create(&p2, &f[1]), ==, XTC_OK);
 	munit_assert_int(xtc_future_when_all(f, 2, &all), ==, XTC_OK);
 	munit_assert_int(xtc_promise_set(p1, 0, XTC_E_IO), ==, XTC_OK);
 	munit_assert_int(xtc_promise_set(p2, 0, XTC_OK), ==, XTC_OK);
@@ -306,8 +306,8 @@ test_when_any(const MunitParameter p[], void *d)
 	intptr_t out = 0;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_future_new_pair(&p1, &f[0]), ==, XTC_OK);
-	munit_assert_int(xtc_future_new_pair(&p2, &f[1]), ==, XTC_OK);
+	munit_assert_int(xtc_future_create(&p1, &f[0]), ==, XTC_OK);
+	munit_assert_int(xtc_future_create(&p2, &f[1]), ==, XTC_OK);
 	munit_assert_int(xtc_future_when_any(f, 2, &any), ==, XTC_OK);
 	/* second one wins; first never set (its promise leaks a pending
 	 * completion, dropped when the test ends -- acceptable here). */
@@ -315,7 +315,7 @@ test_when_any(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_future_wait(any, &out, -1), ==, XTC_OK);
 	munit_assert_llong((long long)out, ==, 999);
 	/* drop the never-resolved one to release its cell cleanly. */
-	xtc_promise_drop(p1);
+	xtc_promise_destroy(p1);
 	return MUNIT_OK;
 }
 
@@ -330,15 +330,15 @@ timeout_consumer(void *arg)
 	intptr_t out = 0;
 	int rc;
 	(void)arg;
-	if (xtc_future_new_pair(&prom, &fut) != XTC_OK) return;
+	if (xtc_future_create(&prom, &fut) != XTC_OK) return;
 	/* Source is never set within the window -> timeout fires. */
 	if (xtc_future_with_timeout(fut, 20 * 1000 * 1000, &tf) != XTC_OK) {
-		xtc_promise_drop(prom);
+		xtc_promise_destroy(prom);
 		return;
 	}
 	rc = xtc_future_await(tf, &out);
 	xtc_atomic_store_i32(&g_to_status, rc, xtc_mo_seq_cst);
-	xtc_promise_drop(prom);   /* release the never-set source */
+	xtc_promise_destroy(prom);   /* release the never-set source */
 }
 
 static MunitResult
@@ -414,9 +414,9 @@ test_combinator_oom(const MunitParameter p[], void *d)
 			intptr_t out = 0;
 
 			g_fail_at = -1;
-			munit_assert_int(xtc_future_new_pair(&p1, &f[0]), ==,
+			munit_assert_int(xtc_future_create(&p1, &f[0]), ==,
 			    XTC_OK);
-			munit_assert_int(xtc_future_new_pair(&p2, &f[1]), ==,
+			munit_assert_int(xtc_future_create(&p2, &f[1]), ==,
 			    XTC_OK);
 			g_n_malloc = 0;
 			g_fail_at = k;
@@ -428,8 +428,8 @@ test_combinator_oom(const MunitParameter p[], void *d)
 				 * ours.  A dropped promise completes its future
 				 * (ABORTED), and the wait consumes it. */
 				munit_assert_int(rc, ==, XTC_E_NOMEM);
-				xtc_promise_drop(p1);
-				xtc_promise_drop(p2);
+				xtc_promise_destroy(p1);
+				xtc_promise_destroy(p2);
 				(void)xtc_future_wait(f[0], &out, 0);
 				(void)xtc_future_wait(f[1], &out, 0);
 				continue;
@@ -463,7 +463,7 @@ timeout_oom_body(void *arg)
 		intptr_t out = 0;
 
 		g_fail_at = -1;
-		if (xtc_future_new_pair(&prom, &fut) != XTC_OK)
+		if (xtc_future_create(&prom, &fut) != XTC_OK)
 			continue;
 		g_n_malloc = 0;
 		g_fail_at = k;
@@ -474,7 +474,7 @@ timeout_oom_body(void *arg)
 			if (rc != XTC_E_NOMEM)
 				xtc_atomic_store_i32(&g_to_oom_bad, 1000 + k,
 				    xtc_mo_seq_cst);
-			xtc_promise_drop(prom);
+			xtc_promise_destroy(prom);
 			(void)xtc_future_wait(fut, &out, 0);   /* still ours */
 			continue;
 		}
@@ -522,12 +522,12 @@ test_inval(const MunitParameter p[], void *d)
 	xtc_future_t *fut = NULL;
 	int ready = 0;
 	(void)p; (void)d;
-	munit_assert_int(xtc_future_new_pair(NULL, &fut), ==, XTC_E_INVAL);
-	munit_assert_int(xtc_future_new_pair(&prom, NULL), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_future_create(NULL, &fut), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_future_create(&prom, NULL), ==, XTC_E_INVAL);
 	munit_assert_int(xtc_promise_set(NULL, 0, XTC_OK), ==, XTC_E_INVAL);
 	munit_assert_int(xtc_future_await(NULL, NULL), ==, XTC_E_INVAL);
 	munit_assert_int(xtc_future_ready(NULL, &ready), ==, XTC_E_INVAL);
-	xtc_promise_drop(NULL);   /* no-op, no crash */
+	xtc_promise_destroy(NULL);   /* no-op, no crash */
 	return MUNIT_OK;
 }
 
@@ -588,7 +588,7 @@ test_kill_then_fulfil(const MunitParameter params[], void *data)
 	    50LL * 1000 * 1000 : -1;
 	xtc_atomic_store_i32(&g_kf_returned, 0, xtc_mo_seq_cst);
 	g_kf_down = 0;
-	munit_assert_int(xtc_future_new_pair(&g_kf_prom, &g_kf_fut), ==, XTC_OK);
+	munit_assert_int(xtc_future_create(&g_kf_prom, &g_kf_fut), ==, XTC_OK);
 	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	g_kf_loop = loop;
 	munit_assert_int(xtc_proc_spawn(loop, kf_driver, NULL, NULL, NULL), ==, XTC_OK);

@@ -57,13 +57,13 @@ typedef struct xtc_future  xtc_future_t;
 typedef struct xtc_promise xtc_promise_t;
 
 /*
- * PUBLIC: int  xtc_future_new_pair __P((xtc_promise_t **, xtc_future_t **));
+ * PUBLIC: int  xtc_future_create __P((xtc_promise_t **, xtc_future_t **));
  *
  * Create a linked promise/future pair sharing one cell.  On XTC_OK both
  * *out_prom and *out_fut are non-NULL.  Returns XTC_E_INVAL on a NULL
  * out, XTC_E_NOMEM on allocation failure.
  */
-XTC_API int  xtc_future_new_pair(xtc_promise_t **out_prom,
+XTC_API int  xtc_future_create(xtc_promise_t **out_prom,
              xtc_future_t **out_fut);
 
 /*
@@ -74,21 +74,21 @@ XTC_API int  xtc_future_new_pair(xtc_promise_t **out_prom,
  * second set returns XTC_E_INVAL and changes nothing.  Setting also
  * releases the promise's reference -- after xtc_promise_set the promise
  * handle is consumed and must not be used again (do NOT also call
- * xtc_promise_drop).  Returns XTC_OK, or XTC_E_INVAL (NULL / already
+ * xtc_promise_destroy).  Returns XTC_OK, or XTC_E_INVAL (NULL / already
  * set).
  */
 XTC_API int  xtc_promise_set(xtc_promise_t *prom, intptr_t value,
              int status);
 
 /*
- * PUBLIC: void xtc_promise_drop __P((xtc_promise_t *));
+ * PUBLIC: void xtc_promise_destroy __P((xtc_promise_t *));
  *
  * Abandon a promise WITHOUT setting it: the future completes with
  * status XTC_E_ABORTED (value 0), so an awaiter never hangs on a
  * dropped promise.  A no-op on NULL or an already-set promise.  Do not
  * use the handle after this.
  */
-XTC_API void xtc_promise_drop(xtc_promise_t *prom);
+XTC_API void xtc_promise_destroy(xtc_promise_t *prom);
 
 /*
  * PUBLIC: int  xtc_future_await __P((xtc_future_t *, intptr_t *));
@@ -196,6 +196,14 @@ XTC_API int  xtc_future_when_any(xtc_future_t **futs, int n,
  */
 XTC_API int  xtc_future_with_timeout(xtc_future_t *src, int64_t timeout_ns,
              xtc_future_t **out_fut);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_future_create")
+XTC_API int xtc_future_new_pair(xtc_promise_t **out_prom, xtc_future_t **out_fut);
+XTC_DEPRECATED("use xtc_promise_destroy")
+XTC_API void xtc_promise_drop(xtc_promise_t *prom);
 
 #ifdef __cplusplus
 }

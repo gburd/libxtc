@@ -12,7 +12,7 @@
  *	resolved EXACTLY ONCE -- never lost, never doubled -- across the
  *	race between the fiber completing fn (which sets the promise) and
  *	a concurrent cancel/unwind (which runs the finalizer, dropping the
- *	promise if fn never set it).  xtc_promise_set / xtc_promise_drop
+ *	promise if fn never set it).  xtc_promise_set / xtc_promise_destroy
  *	each consume the one-shot promise; if BOTH ran, the second would
  *	touch a consumed promise (a double-resolve / use-after-consume).
  *	The single _Atomic exchange on `resolved` is what makes SURE only
@@ -49,7 +49,7 @@
 static int cancel_req;
 static int resolved;
 
-/* "Resolve" the promise: models xtc_promise_set OR xtc_promise_drop,
+/* "Resolve" the promise: models xtc_promise_set OR xtc_promise_destroy,
  * each of which consumes the one-shot promise.  A monotone counter --
  * the invariant is that it ends at exactly 1. */
 static int resolves;
@@ -93,7 +93,7 @@ finalize(void)
 {
 	int was = xtc_atomic_exchange_i32(&resolved, 1, xtc_mo_acq_rel);
 	if (!was)
-		resolve_once();   /* xtc_promise_drop() -> ABORTED */
+		resolve_once();   /* xtc_promise_destroy() -> ABORTED */
 }
 
 int

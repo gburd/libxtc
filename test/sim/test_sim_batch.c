@@ -443,7 +443,7 @@ asubmit(const xtc_batch_item_t *items, size_t n, void *user,
 	size_t i;
 	arequire(f, n > 0 && n <= ACTIVE, "async vector cap");
 	arequire(f, f->prom == NULL && f->fut == NULL, "one op at a time");
-	if (xtc_future_new_pair(&f->prom, &f->fut) != XTC_OK)
+	if (xtc_future_create(&f->prom, &f->fut) != XTC_OK)
 		return XTC_E_NOMEM;
 	exec->kind = XTC_BATCH_EXEC_FUTURE;
 	exec->future = f->fut;

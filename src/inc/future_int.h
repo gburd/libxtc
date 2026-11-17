@@ -18,7 +18,7 @@
  * and free the handle, exactly as a completed xtc_future_wait would,
  * but without blocking. Safe whether the paired promise is already set,
  * never set (still outstanding), or dropped -- the cell is reference
- * counted, so a later xtc_promise_set / xtc_promise_drop is a safe
+ * counted, so a later xtc_promise_set / xtc_promise_destroy is a safe
  * refcount operation on the (possibly last-ref-freed) cell, never a
  * UAF. The handle must not be used after this (it is freed). NULL is a
  * no-op.

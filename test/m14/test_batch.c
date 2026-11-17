@@ -771,7 +771,7 @@ asub(const xtc_batch_item_t *items, size_t n, void *user,
 		exec->arg = c;
 		break;
 	case XTC_BATCH_EXEC_FUTURE:
-		if (xtc_future_new_pair(&c->pending_prom, &c->pending_fut)
+		if (xtc_future_create(&c->pending_prom, &c->pending_fut)
 		    != XTC_OK)
 			return XTC_E_NOMEM;
 		exec->future = c->pending_fut;
@@ -1041,7 +1041,7 @@ async_timeout(void)
 	assert(c.req[0].completions == 1 && c.req[0].outcome == XTC_E_IO);
 	assert(c.last_exec_status == XTC_BATCH_EXEC_TIMEOUT);
 	if (c.pending_prom != NULL)
-		xtc_promise_drop(c.pending_prom);
+		xtc_promise_destroy(c.pending_prom);
 	puts("batch-async: timeout -> collect sees TIMEOUT, member failed OK");
 }
 
@@ -1087,7 +1087,7 @@ async_teardown_while_parked(void)
 	 * promise and drops it. Dropping after discard is a safe refcount
 	 * no-op on the cell (ASan proves no UAF/leak either ordering). */
 	if (c.pending_prom != NULL)
-		xtc_promise_drop(c.pending_prom);
+		xtc_promise_destroy(c.pending_prom);
 	xtc_loop_destroy(c.loop);
 	puts("batch-async: teardown-while-parked finalized exactly-once OK");
 }
@@ -1178,7 +1178,7 @@ async_cancel_wakes_immediately(void)
 	assert(c.collect_calls == 1 && c.cancel_hints == 1);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
 	if (c.pending_prom != NULL)
-		xtc_promise_drop(c.pending_prom);
+		xtc_promise_destroy(c.pending_prom);
 	xtc_loop_destroy(c.loop);
 	puts("batch-async: cancel-close edge-wakes the await (no slice) OK");
 }
@@ -1343,7 +1343,7 @@ mt_producer_fn(void *arg)
 		int rc;
 		/* The reply pair is created on the producer; the driver's
 		 * complete cb resolves it. */
-		assert(xtc_future_new_pair(&c->req[i].reply, &c->req[i].reply_fut)
+		assert(xtc_future_create(&c->req[i].reply, &c->req[i].reply_fut)
 		       == XTC_OK);
 		for (;;) {
 			rc = xtc_batch_submit_mt(c->batch, &c->req[i], 1, &h);
@@ -2077,7 +2077,7 @@ sv_submit(const xtc_batch_item_t *items, size_t n, void *user,
 	if (r == &g_sv.req[0])
 		xtc_atomic_store_i32(&g_sv.r0_ran, 1, xtc_mo_seq_cst);
 	if (g_sv.mode == 1 && n == 1 && r == &g_sv.req[0] && r->ran == 1) {
-		assert(xtc_future_new_pair(&g_sv.prom, &f) == XTC_OK);
+		assert(xtc_future_create(&g_sv.prom, &f) == XTC_OK);
 		exec->kind = XTC_BATCH_EXEC_FUTURE;
 		exec->future = f;
 		return XTC_OK;
@@ -2525,7 +2525,7 @@ oc_submit(const xtc_batch_item_t *items, size_t n, void *user,
 	switch (c->kind) {
 	case XTC_BATCH_EXEC_FUTURE: {
 		xtc_promise_t *p;
-		if (xtc_future_new_pair(&p, &f) != XTC_OK)
+		if (xtc_future_create(&p, &f) != XTC_OK)
 			return XTC_E_NOMEM;
 		exec->future = f;
 		xtc_atomic_store_i32(&c->op_running, 1, xtc_mo_seq_cst);
@@ -2847,7 +2847,7 @@ async_future_kill(void)
 	assert(c->statuses[0] == XTC_BATCH_EXEC_ABORTED);
 	assert(c->outcome == XTC_E_ABORTED && c->t_collect < 1.0);
 	if (xtc_atomic_load_ptr(&c->prom, xtc_mo_seq_cst) != NULL)
-		xtc_promise_drop(
+		xtc_promise_destroy(
 		    xtc_atomic_exchange_ptr(&c->prom, NULL, xtc_mo_seq_cst));
 #else
 	puts("batch-async: future kill test skipped (needs proc kill-wake)");
