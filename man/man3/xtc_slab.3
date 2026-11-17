@@ -12,10 +12,12 @@
 .Nm xtc_slab_stat ,
 .Nm xtc_slab_offset ,
 .Nm xtc_slab_resolve ,
+.Nm xtc_slab_pressure_create ,
+.Nm xtc_slab_pressure_destroy ,
+.Nm xtc_slab_reaper_spawn ,
 .Nm xtc_slab_pressure_listen ,
 .Nm xtc_slab_pressure_listen_ex ,
-.Nm xtc_slab_pressure_stop ,
-.Nm xtc_slab_reaper_spawn
+.Nm xtc_slab_pressure_stop
 .Nd slab + magazine allocator
 .Sh SYNOPSIS
 .In xtc.h
@@ -37,11 +39,9 @@
 .Ft "void *"
 .Fn xtc_slab_resolve "const xtc_slab_t *slab" "xtc_slab_off_t off"
 .Ft int
-.Fn xtc_slab_pressure_listen "const char *psi_path" "xtc_slab_pressure_fn fn" "void *user"
-.Ft int
-.Fn xtc_slab_pressure_listen_ex "const char *psi_path" "xtc_slab_pressure_fn fn" "void *user" "xtc_slab_pressure_t **out"
-.Ft int
-.Fn xtc_slab_pressure_stop "xtc_slab_pressure_t *handle"
+.Fn xtc_slab_pressure_create "const char *psi_path" "xtc_slab_pressure_fn fn" "void *user" "xtc_slab_pressure_t **out"
+.Ft void
+.Fn xtc_slab_pressure_destroy "xtc_slab_pressure_t *handle"
 .Ft int
 .Fn xtc_slab_reaper_spawn "xtc_loop_t *loop" "int64_t interval_ns" "xtc_pid_t *out_pid"
 .Sh DESCRIPTION
@@ -166,9 +166,10 @@ is derived from them.  The figures are exact when no alloc or free is in
 flight; a read concurrent with other threads' traffic is a near-instant
 snapshot.
 .Pp
-.Fn xtc_slab_pressure_listen
+.Fn xtc_slab_pressure_create
 attaches a callback that fires when Linux PSI memory pressure is
-detected.  When triggered, all registered slab caches are reaped, then
+detected, and returns its handle in
+.Fa out .  When triggered, all registered slab caches are reaped, then
 .Fa fn Ns ( 2 , Fa user )
 runs on the listener's own thread, never on a loop: it may block
 briefly and must not park.
@@ -188,11 +189,11 @@ or
 limit produces), and falls back to
 .Pa /proc/pressure/memory ;
 an explicit path is used alone.
-.Fn xtc_slab_pressure_listen_ex
-does the same and returns a handle that
-.Fn xtc_slab_pressure_stop
-stops.
-Both return
+.Fn xtc_slab_pressure_destroy
+stops the listener and frees the handle; a listener meant to run until
+exit keeps its handle.
+.Fn xtc_slab_pressure_create
+returns
 .Dv XTC_E_NOSYS
 only without PSI (no such file, or not Linux),
 .Dv XTC_E_INVAL
@@ -226,6 +227,25 @@ strcpy(w->name, "answer");
 xtc_slab_free(slab, w);
 xtc_slab_destroy(slab);
 .Ed
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Fn xtc_slab_pressure_listen
+Use
+.Fn xtc_slab_pressure_create ;
+the handle is now returned: pass an out pointer and keep (or never destroy) it.
+.It Fn xtc_slab_pressure_listen_ex
+Use
+.Fn xtc_slab_pressure_create ;
+same arguments.
+.It Fn xtc_slab_pressure_stop
+Use
+.Fn xtc_slab_pressure_destroy ;
+the new name returns void; the old one returns XTC_E_INVAL for NULL, XTC_E_NOSYS without PSI, else XTC_OK.
+.El
 .Sh SEE ALSO
 .Xr xtc_mctx 3 ,
 .Xr xtc_res 3 ,

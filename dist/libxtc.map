@@ -119,6 +119,8 @@ XTC_2.2 {
 		xtc_sim_external_complete;
 		xtc_sim_fd_ready_at;
 		xtc_sim_rand;
+		xtc_slab_pressure_create;
+		xtc_slab_pressure_destroy;
 		xtc_sup_child_main;
 		xtc_sup_child_restarts;
 		xtc_svr_child_main;

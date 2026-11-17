@@ -66,6 +66,9 @@ result keeps working until it moves to the new name.
 | `xtc_pg_leave()` | `xtc_pg_unsubscribe()` | function |  |
 | `xtc_scope_close()` | `xtc_scope_leave()` | function |  |
 | `xtc_scope_open()` | `xtc_scope_enter()` | function |  |
+| `xtc_slab_pressure_listen()` | `xtc_slab_pressure_create()` | function | the handle is now returned: pass an out pointer and keep (or never destroy) it |
+| `xtc_slab_pressure_listen_ex()` | `xtc_slab_pressure_create()` | function | same arguments |
+| `xtc_slab_pressure_stop()` | `xtc_slab_pressure_destroy()` | function | the new name returns void; the old one returns XTC_E_INVAL for NULL, XTC_E_NOSYS without PSI, else XTC_OK |
 <!-- renames:end -->
 
 ## Planned for 3.0 (not done in 2.x)

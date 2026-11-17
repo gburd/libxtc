@@ -31,6 +31,7 @@
 #include "xtc_prob.h"
 #include "xtc_proc.h"
 #include "xtc_reg.h"
+#include "xtc_slab.h"
 #include "xtc_sync.h"
 
 #define CHECK(c)                                                               \
@@ -165,6 +166,29 @@ bridge_scope(void)
 	CHECK(g_scope_fin == 1);
 }
 
+/* slab pressure: listen / listen_ex / stop -> create / destroy.  Where
+ * PSI is missing every form fails the same way, and stop keeps its
+ * NULL contract. */
+static void
+bridge_slab_pressure(void)
+{
+	xtc_slab_pressure_t *h = NULL;
+	int rc;
+
+	CHECK(xtc_slab_pressure_stop(NULL) == XTC_E_INVAL);
+	CHECK(xtc_slab_pressure_listen_ex(NULL, NULL, NULL, NULL) ==
+	    XTC_E_INVAL);
+	rc = xtc_slab_pressure_listen("/nonexistent/xtc/psi", NULL, NULL);
+	CHECK(rc == XTC_E_NOSYS);
+	rc = xtc_slab_pressure_listen_ex(NULL, NULL, NULL, &h);
+	if (rc == XTC_OK) {
+		CHECK(h != NULL);
+		CHECK(xtc_slab_pressure_stop(h) == XTC_OK);
+	} else {
+		CHECK(h == NULL);
+	}
+}
+
 int
 main(void)
 {
@@ -173,6 +197,7 @@ main(void)
 	bridge_pg();
 	bridge_shutdown();
 	bridge_scope();
+	bridge_slab_pressure();
 	printf("  [bridge] OK: every deprecated name still works\n");
 	return 0;
 }

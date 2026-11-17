@@ -674,13 +674,16 @@ test_sim_check(const MunitParameter p[], void *d)
 /* ---- slab: pressure_listen (fire-and-forget) + reaper_spawn -------- */
 
 static MunitResult
-test_slab_pressure_listen(const MunitParameter p[], void *d)
+test_slab_pressure_create(const MunitParameter p[], void *d)
 {
+	xtc_slab_pressure_t *h = NULL;
+
 	(void)p; (void)d;
 	/* No PSI file at that path (or no PSI on this platform): NOSYS,
 	 * and no listener thread is left behind. */
-	munit_assert_int(xtc_slab_pressure_listen("/nonexistent/xtc/psi",
-	    NULL, NULL), ==, XTC_E_NOSYS);
+	munit_assert_int(xtc_slab_pressure_create("/nonexistent/xtc/psi",
+	    NULL, NULL, &h), ==, XTC_E_NOSYS);
+	munit_assert_ptr_null(h);
 	return MUNIT_OK;
 }
 
@@ -986,7 +989,7 @@ static MunitTest tests[] = {
 	T("/proc_set_class",          test_proc_set_class),
 	T("/sim_knobs",               test_sim_knobs),
 	T("/sim_check",               test_sim_check),
-	T("/slab_pressure_listen",    test_slab_pressure_listen),
+	T("/slab_pressure_create",    test_slab_pressure_create),
 	T("/slab_reaper_spawn",       test_slab_reaper_spawn),
 	T("/tail_from_env",           test_tail_from_env),
 	T("/tail_spill_dial9",        test_tail_spill_dial9),

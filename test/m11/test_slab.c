@@ -1065,21 +1065,21 @@ test_pressure_listen_ex_stop(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	/* NULL out-pointer is rejected. */
-	munit_assert_int(xtc_slab_pressure_listen_ex(NULL, NULL, NULL, NULL),
+	munit_assert_int(xtc_slab_pressure_create(NULL, NULL, NULL, NULL),
 	    ==, XTC_E_INVAL);
-	/* Stopping a NULL handle is rejected, not a crash. */
-	munit_assert_int(xtc_slab_pressure_stop(NULL), ==, XTC_E_INVAL);
+	/* Destroying a NULL handle is a no-op, not a crash. */
+	xtc_slab_pressure_destroy(NULL);
 
 	/* NOSYS only where there is no PSI.  Through 2.2 the default
 	 * trigger used a 1 s window, which the kernel refuses to an
 	 * unprivileged process, and every failure read as NOSYS. */
-	rc = xtc_slab_pressure_listen_ex(NULL, NULL, NULL, &h);
+	rc = xtc_slab_pressure_create(NULL, NULL, NULL, &h);
 #if defined(__linux__)
 	if (rc == XTC_E_NOSYS)
 		munit_assert_int(access("/proc/pressure/memory", F_OK), !=, 0);
 	/* A file that exists but is not PSI fails, and not as NOSYS: a
 	 * directory cannot be opened for writing. */
-	munit_assert_int(xtc_slab_pressure_listen_ex("/proc", NULL, NULL, &h2),
+	munit_assert_int(xtc_slab_pressure_create("/proc", NULL, NULL, &h2),
 	    ==, XTC_E_IO);
 	munit_assert_ptr_null(h2);
 #endif
@@ -1091,8 +1091,8 @@ test_pressure_listen_ex_stop(const MunitParameter p[], void *d)
 	}
 	munit_assert_int(rc, ==, XTC_OK);
 	munit_assert_ptr_not_null(h);
-	/* Clean stop: joins the listener thread and frees the handle. */
-	munit_assert_int(xtc_slab_pressure_stop(h), ==, XTC_OK);
+	/* Clean destroy: joins the listener thread and frees the handle. */
+	xtc_slab_pressure_destroy(h);
 	return MUNIT_OK;
 }
 

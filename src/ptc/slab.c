@@ -1503,9 +1503,9 @@ __psi_open(const char *path)
 }
 
 int
-xtc_slab_pressure_listen_ex(const char *psi_path,
-                            xtc_slab_pressure_fn fn, void *user,
-                            xtc_slab_pressure_t **out)
+xtc_slab_pressure_create(const char *psi_path,
+                         xtc_slab_pressure_fn fn, void *user,
+                         xtc_slab_pressure_t **out)
 {
 	struct psi_listener *l;
 	int fd;
@@ -1546,23 +1546,11 @@ xtc_slab_pressure_listen_ex(const char *psi_path,
 	return XTC_OK;
 }
 
-int
-xtc_slab_pressure_listen(const char *psi_path,
-                         xtc_slab_pressure_fn fn, void *user)
+void
+xtc_slab_pressure_destroy(xtc_slab_pressure_t *h)
 {
-	/* Fire-and-forget: the handle is intentionally discarded, so the
-	 * listener runs until process exit.  Use the _ex variant to keep a
-	 * handle and stop it later. */
-	xtc_slab_pressure_t *h = NULL;
-	int rc = xtc_slab_pressure_listen_ex(psi_path, fn, user, &h);
-	(void)h;
-	return rc;
-}
-
-int
-xtc_slab_pressure_stop(xtc_slab_pressure_t *h)
-{
-	if (h == NULL) return XTC_E_INVAL;
+	if (h == NULL)
+		return;
 	/* Write a byte AND close the write end: closing alone raises only
 	 * POLLHUP on the read end, but a written byte guarantees POLLIN, so
 	 * the poll loop wakes on either. */
@@ -1572,30 +1560,21 @@ xtc_slab_pressure_stop(xtc_slab_pressure_t *h)
 	(void)close(h->stop_fd);
 	(void)close(h->psi_fd);
 	__os_free(h);
-	return XTC_OK;
 }
 #else
 int
-xtc_slab_pressure_listen_ex(const char *psi_path,
-                            xtc_slab_pressure_fn fn, void *user,
-                            xtc_slab_pressure_t **out)
+xtc_slab_pressure_create(const char *psi_path,
+                         xtc_slab_pressure_fn fn, void *user,
+                         xtc_slab_pressure_t **out)
 {
 	(void)psi_path; (void)fn; (void)user;
 	if (out == NULL) return XTC_E_INVAL;   /* arg contract before NOSYS */
 	*out = NULL;
 	return XTC_E_NOSYS;
 }
-int
-xtc_slab_pressure_stop(xtc_slab_pressure_t *handle)
+void
+xtc_slab_pressure_destroy(xtc_slab_pressure_t *handle)
 {
-	if (handle == NULL) return XTC_E_INVAL;
-	return XTC_E_NOSYS;
-}
-int
-xtc_slab_pressure_listen(const char *psi_path,
-                         xtc_slab_pressure_fn fn, void *user)
-{
-	(void)psi_path; (void)fn; (void)user;
-	return XTC_E_NOSYS;
+	(void)handle;
 }
 #endif

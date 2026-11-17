@@ -72,7 +72,7 @@
  *	  BACKOFF -- short usleep + retry once, then FAIL
  *	  ABORT   -- call abort() (debug builds only; never in prod)
  *
- *	Memory-pressure: callers can register `xtc_slab_pressure_listen`
+ *	Memory-pressure: callers can register `xtc_slab_pressure_create`
  *	on Linux (/proc/pressure/memory PSI).  When pressure is high,
  *	all caches drop their magazines and reap empty slabs.
  */
@@ -109,7 +109,7 @@ typedef void (*xtc_slab_dtor_fn)(void *obj, void *user);
 typedef void (*xtc_slab_pressure_fn)(int level, void *user);
 
 /* Opaque handle for a stoppable pressure listener (see
- * xtc_slab_pressure_listen_ex / xtc_slab_pressure_stop). */
+ * xtc_slab_pressure_create / xtc_slab_pressure_destroy). */
 typedef struct psi_listener xtc_slab_pressure_t;
 
 /* Storage mode. */
@@ -201,9 +201,8 @@ typedef struct xtc_slab_stats {
  * PUBLIC: xtc_slab_off_t xtc_slab_offset __P((const xtc_slab_t *, const void *));
  * PUBLIC: void *xtc_slab_resolve __P((const xtc_slab_t *, xtc_slab_off_t));
  *
- * PUBLIC: int  xtc_slab_pressure_listen __P((const char *, xtc_slab_pressure_fn, void *));
- * PUBLIC: int  xtc_slab_pressure_listen_ex __P((const char *, xtc_slab_pressure_fn, void *, xtc_slab_pressure_t **));
- * PUBLIC: int  xtc_slab_pressure_stop __P((xtc_slab_pressure_t *));
+ * PUBLIC: int  xtc_slab_pressure_create __P((const char *, xtc_slab_pressure_fn, void *, xtc_slab_pressure_t **));
+ * PUBLIC: void xtc_slab_pressure_destroy __P((xtc_slab_pressure_t *));
  * PUBLIC: int  xtc_slab_reap_all __P((void));
  */
 
@@ -224,37 +223,30 @@ XTC_API int   xtc_slab_stat(const xtc_slab_t *slab, xtc_slab_stats_t *out);
 XTC_API xtc_slab_off_t xtc_slab_offset(const xtc_slab_t *slab, const void *p);
 XTC_API void          *xtc_slab_resolve(const xtc_slab_t *slab, xtc_slab_off_t off);
 
-/* Install a process-wide memory-pressure listener.  On Linux it
- * registers the PSI trigger "some 150000 2000000" (150 ms of memory
- * stall in a 2 s window, the shortest window an unprivileged process may
- * use) and polls it on a thread of its own.  When pressure fires, all
- * registered slab caches are reaped, then fn(2, user) runs ON THAT
- * THREAD (never on a loop): it may block briefly, must not park.
- * `psi_path` NULL tries the calling process's cgroup v2
- * memory.pressure, then /proc/pressure/memory; a path is used alone.
- * Returns XTC_E_NOSYS without PSI (no such file, or not Linux),
- * XTC_E_INVAL when the kernel refuses the trigger, XTC_E_IO when the
- * file cannot be opened for writing (permission) or the write fails
- * otherwise.
+/* Install a process-wide memory-pressure listener and return its handle
+ * in *out (*out must be non-NULL).  On Linux it registers the PSI
+ * trigger "some 150000 2000000" (150 ms of memory stall in a 2 s window,
+ * the shortest window an unprivileged process may use) and polls it on a
+ * thread of its own.  When pressure fires, all registered slab caches
+ * are reaped, then fn(2, user) runs ON THAT THREAD (never on a loop): it
+ * may block briefly, must not park.  `psi_path` NULL tries the calling
+ * process's cgroup v2 memory.pressure, then /proc/pressure/memory; a path
+ * is used alone.  xtc_slab_pressure_destroy stops the listener; a
+ * listener meant to run until exit simply keeps its handle.
+ * Returns XTC_E_NOSYS without PSI (no such file, or not Linux) and
+ * leaves *out NULL, XTC_E_INVAL when the kernel refuses the trigger,
+ * XTC_E_IO when the file cannot be opened for writing (permission) or
+ * the write fails otherwise.
  */
-XTC_API int   xtc_slab_pressure_listen(const char *psi_path,
+XTC_API int   xtc_slab_pressure_create(const char *psi_path,
                                        xtc_slab_pressure_fn fn,
-                                       void *user);
+                                       void *user,
+                                       xtc_slab_pressure_t **out);
 
-/* Like xtc_slab_pressure_listen, but returns an opaque handle so the
- * listener can be stopped (its background thread joined and its fds
- * closed) with xtc_slab_pressure_stop.  On platforms without PSI,
- * returns XTC_E_NOSYS and leaves *out NULL.  *out must be non-NULL. */
-XTC_API int   xtc_slab_pressure_listen_ex(const char *psi_path,
-                                          xtc_slab_pressure_fn fn,
-                                          void *user,
-                                          xtc_slab_pressure_t **out);
-
-/* Stop a listener created by xtc_slab_pressure_listen_ex: signal its
- * thread, join it, close its fds, and free the handle.  Idempotent on
- * NULL (returns XTC_E_INVAL).  After this returns the handle is
- * invalid. */
-XTC_API int   xtc_slab_pressure_stop(xtc_slab_pressure_t *handle);
+/* Stop a listener created by xtc_slab_pressure_create: signal its
+ * thread, join it, close its fds, and free the handle.  A NULL handle
+ * is a no-op.  After this returns the handle is invalid. */
+XTC_API void  xtc_slab_pressure_destroy(xtc_slab_pressure_t *handle);
 
 /* Fan a reap across every cache currently registered.  Returns the
  * total number of objects reaped. */
@@ -266,6 +258,18 @@ XTC_API int   xtc_slab_reap_all(void);
  * Returns the proc's pid (XTC_PID_NONE on failure). */
 XTC_API int xtc_slab_reaper_spawn(xtc_loop_t *loop, int64_t interval_ns,
     xtc_pid_t *out_pid);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_slab_pressure_create")
+XTC_API int xtc_slab_pressure_listen(const char *psi_path,
+    xtc_slab_pressure_fn fn, void *user);
+XTC_DEPRECATED("use xtc_slab_pressure_create")
+XTC_API int xtc_slab_pressure_listen_ex(const char *psi_path,
+    xtc_slab_pressure_fn fn, void *user, xtc_slab_pressure_t **out);
+XTC_DEPRECATED("use xtc_slab_pressure_destroy")
+XTC_API int xtc_slab_pressure_stop(xtc_slab_pressure_t *handle);
 
 #ifdef __cplusplus
 }

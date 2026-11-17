@@ -28,6 +28,7 @@
 #include "xtc_sync.h"
 #include "xtc_batch.h"
 #include "xtc_proc.h"
+#include "xtc_slab.h"
 
 /* Group: loop / io / bloom / hll lifecycle (create / destroy). */
 
@@ -163,4 +164,37 @@ void
 xtc_scope_close(xtc_scope_t *s)
 {
 	xtc_scope_leave(s);
+}
+
+/* Group: slab pressure listener (create / destroy). */
+
+int
+xtc_slab_pressure_listen(const char *psi_path, xtc_slab_pressure_fn fn,
+    void *user)
+{
+	xtc_slab_pressure_t *h = NULL;
+
+	/* Fire-and-forget: the handle is dropped and the listener runs until
+	 * the process exits, as it always did. */
+	return xtc_slab_pressure_create(psi_path, fn, user, &h);
+}
+
+int
+xtc_slab_pressure_listen_ex(const char *psi_path, xtc_slab_pressure_fn fn,
+    void *user, xtc_slab_pressure_t **out)
+{
+	return xtc_slab_pressure_create(psi_path, fn, user, out);
+}
+
+int
+xtc_slab_pressure_stop(xtc_slab_pressure_t *handle)
+{
+	if (handle == NULL)
+		return XTC_E_INVAL;
+#if !defined(__linux__)
+	return XTC_E_NOSYS;
+#else
+	xtc_slab_pressure_destroy(handle);
+	return XTC_OK;
+#endif
 }
