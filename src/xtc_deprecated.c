@@ -1,0 +1,80 @@
+/*-
+ * Copyright (c) 2026, The XTC Project
+ * Use of this source code is governed by the ISC License.
+ *
+ * src/xtc_deprecated.c
+ *	The 2.x deprecation bridges: every public function renamed in 2.2
+ *	keeps its old name here, as an exported out-of-line wrapper that
+ *	calls the new one.  A binary built against an older 2.x keeps
+ *	linking against this library; a rebuild warns (each declaration is
+ *	XTC_DEPRECATED in its header's "Deprecated names" block).
+ *
+ *	Each wrapper keeps the OLD contract exactly: its arguments in the
+ *	old order and its old return values (an old int-returning *_fini
+ *	still returns XTC_E_INVAL for NULL and XTC_OK otherwise, though the
+ *	new *_destroy is void).  docs/deprecations.md lists every name.
+ *	3.0 deletes this file.
+ *
+ *	The old symbols stay in the XTC_2.0 node of dist/libxtc.map (its
+ *	xtc_* glob); their new names are listed in XTC_2.2.
+ */
+#include "xtc.h"
+#include "xtc_loop.h"
+#include "xtc_io.h"
+#include "xtc_prob.h"
+
+/* Group: loop / io / bloom / hll lifecycle (create / destroy). */
+
+int
+xtc_loop_init(xtc_loop_t **out)
+{
+	return xtc_loop_create(out);
+}
+
+int
+xtc_loop_fini(xtc_loop_t *loop)
+{
+	if (loop == NULL)
+		return XTC_E_INVAL;
+	xtc_loop_destroy(loop);
+	return XTC_OK;
+}
+
+int
+xtc_io_init(xtc_io_t **out)
+{
+	return xtc_io_create(out);
+}
+
+int
+xtc_io_fini(xtc_io_t *io)
+{
+	if (io == NULL)
+		return XTC_E_INVAL;
+	xtc_io_destroy(io);
+	return XTC_OK;
+}
+
+int
+xtc_bloom_init(xtc_bloom_t **out, size_t n_expected, double fp_rate)
+{
+	return xtc_bloom_create(n_expected, fp_rate, out);
+}
+
+void
+xtc_bloom_fini(xtc_bloom_t *b)
+{
+	xtc_bloom_destroy(b);
+}
+
+int
+xtc_hll_init(xtc_hll_t **out, int precision)
+{
+	return xtc_hll_create(precision, out);
+}
+
+void
+xtc_hll_fini(xtc_hll_t *h)
+{
+	xtc_hll_destroy(h);
+}

@@ -73,11 +73,11 @@ test_scope_normal_lifo(const MunitParameter p[], void *d)
 	xtc_pid_t pid;
 	(void)p; (void)d;
 	log_reset();
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, scope_normal_proc, NULL, NULL,
 	    &pid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(g_log_n, ==, 3);
 	munit_assert_int(g_log[0], ==, 3);   /* LIFO */
 	munit_assert_int(g_log[1], ==, 2);
@@ -110,11 +110,11 @@ test_scope_exit_self(const MunitParameter p[], void *d)
 	xtc_pid_t pid;
 	(void)p; (void)d;
 	log_reset();
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, scope_exit_proc, NULL, NULL,
 	    &pid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(g_log_n, ==, 2);
 	munit_assert_int(g_log[0], ==, 20);
 	munit_assert_int(g_log[1], ==, 10);
@@ -169,13 +169,13 @@ test_scope_contained_crash(const MunitParameter p[], void *d)
 #endif
 	log_reset();
 	munit_assert_int(xtc_fault_guard_install(), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, scope_crash_proc, NULL, NULL,
 	    &faulter), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, scope_crash_watcher, &faulter,
 	    NULL, &watcher), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	/* The contained crash still ran both finalizers, LIFO. */
 	munit_assert_int(g_log_n, ==, 2);
 	munit_assert_int(g_log[0], ==, 200);
@@ -239,11 +239,11 @@ test_bracket_release_normal(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	log_reset();
 	g_bracket_rc = 0x7fff;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, bracket_ok_proc, NULL, NULL,
 	    &pid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(g_acquire_ran, ==, 1);
 	munit_assert_int(g_use_ran, ==, 1);
 	munit_assert_int(g_release_ran, ==, 1);
@@ -259,11 +259,11 @@ test_bracket_release_on_error(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	log_reset();
 	g_bracket_rc = 0x7fff;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, bracket_err_proc, NULL, NULL,
 	    &pid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(g_release_ran, ==, 1);         /* released anyway */
 	munit_assert_int(g_bracket_rc, ==, XTC_E_INVAL);
 	return MUNIT_OK;
@@ -334,13 +334,13 @@ test_mask_defers_kill(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	xtc_atomic_store_i32(&g_masked_completed, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_masked_fin_ran, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, mask_target_proc, NULL, NULL,
 	    &g_mask_target), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, mask_killer_proc, NULL, NULL,
 	    &killer), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	/* The masked body completed despite the mid-region kill... */
 	munit_assert_int(xtc_atomic_load_i32(&g_masked_completed,
 	                     xtc_mo_seq_cst),
@@ -444,13 +444,13 @@ rw_run(xtc_proc_fn target)
 	xtc_atomic_store_i32(&g_b_runs, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_a_done, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_after, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, target, NULL, NULL, &g_rw_target),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, rw_killer, NULL, NULL, &k), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 }
 
 static MunitResult
@@ -525,11 +525,11 @@ test_recovery_record_exits_once(const MunitParameter p[], void *d)
 	(void)d;
 	xtc_atomic_store_i32(&g_exit_cb_runs, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_low_cb_runs, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, rw_exit_target, NULL, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(xtc_atomic_load_i32(&g_exit_cb_runs, xtc_mo_seq_cst),
 	    ==, 1);
 	munit_assert_int(xtc_atomic_load_i32(&g_low_cb_runs, xtc_mo_seq_cst),
@@ -617,7 +617,7 @@ cl_run(xtc_proc_fn target, int kill)
 	xtc_atomic_store_i32(&g_old_fin, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_park_fin_done, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_after_close, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	rc = xtc_proc_spawn(loop, target, NULL, NULL, &g_close_target);
 	munit_assert_int(rc, ==, XTC_OK);
 	if (kill) {
@@ -625,7 +625,7 @@ cl_run(xtc_proc_fn target, int kill)
 		munit_assert_int(rc, ==, XTC_OK);
 	}
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 }
 
 static MunitResult

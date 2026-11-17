@@ -51,7 +51,7 @@ prop_each_task_runs_target_times(hegel_test_case *tc, void *u)
 
 	n = (int)hegel_draw_int(tc, hegel_integers(1, 32));
 
-	hegel_assume(xtc_loop_init(&loop) == XTC_OK);
+	hegel_assume(xtc_loop_create(&loop) == XTC_OK);
 	st = calloc((size_t)n, sizeof *st);
 	hegel_assume(st != NULL);
 
@@ -68,7 +68,7 @@ prop_each_task_runs_target_times(hegel_test_case *tc, void *u)
 		hegel_assume(st[i].counter == st[i].target);
 
 	free(st);
-	hegel_assume(xtc_loop_fini(loop) == XTC_OK);
+	xtc_loop_destroy(loop);
 }
 
 static const pbt_entry_t tests[] = {

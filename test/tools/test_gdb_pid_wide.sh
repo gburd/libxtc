@@ -149,7 +149,7 @@ main(void)
 	int i;
 
 	(void)xtc_set_stack_size(16 * 1024);
-	if (xtc_loop_init(&lp) != XTC_OK)
+	if (xtc_loop_create(&lp) != XTC_OK)
 		return 2;
 	r = xtc_loop_res(lp);
 	xtc_res_set_cap(r, XTC_RES_TASKS, 2 * N);

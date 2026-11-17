@@ -186,7 +186,7 @@ main(int argc, char **argv)
 		printf("SKIP: thread failed\n");
 		return 77;
 	}
-	if (xtc_loop_init(&lp) != XTC_OK) {
+	if (xtc_loop_create(&lp) != XTC_OK) {
 		printf("SKIP: loop_init failed\n");
 		return 77;
 	}
@@ -194,12 +194,12 @@ main(int argc, char **argv)
 		o.name = i == 0 ? "engine" : NULL; /* one named, two not */
 		if (xtc_proc_spawn(lp, worker, NULL, &o, NULL) != XTC_OK) {
 			printf("SKIP: spawn failed\n");
-			(void)xtc_loop_fini(lp);
+			xtc_loop_destroy(lp);
 			return 77;
 		}
 	}
 	(void)xtc_loop_run(lp);
-	(void)xtc_loop_fini(lp);
+	xtc_loop_destroy(lp);
 
 	fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
 	if (fd < 0) { printf("SKIP: open failed\n"); return 77; }

@@ -92,10 +92,10 @@ int
 main(void)
 {
     xtc_loop_t *loop;
-    xtc_loop_init(&loop);
+    xtc_loop_create(&loop);
     xtc_task_spawn(loop, greeter, NULL, NULL);
     xtc_loop_run(loop);
-    xtc_loop_fini(loop);
+    xtc_loop_destroy(loop);
     return 0;
 }
 ```
@@ -159,11 +159,11 @@ main(void)
     xtc_loop_t *loop;
     xtc_pid_t pong_pid, ping_pid;
 
-    xtc_loop_init(&loop);
+    xtc_loop_create(&loop);
     xtc_proc_spawn(loop, ponger, NULL, NULL, &pong_pid);
     xtc_proc_spawn(loop, pinger, &pong_pid, NULL, &ping_pid);
     xtc_loop_run(loop);
-    xtc_loop_fini(loop);
+    xtc_loop_destroy(loop);
     return 0;
 }
 ```
@@ -238,12 +238,12 @@ main(void)
     };
     int i;
 
-    xtc_loop_init(&loop);
+    xtc_loop_create(&loop);
     xtc_proc_spawn(loop, worker, NULL, NULL, &pid);
     for (i = 0; i < 5; i++)
         xtc_send(pid, msgs[i], strlen(msgs[i]));
     xtc_loop_run(loop);
-    xtc_loop_fini(loop);
+    xtc_loop_destroy(loop);
     return 0;
 }
 ```
@@ -342,11 +342,11 @@ main(void)
         perror("listen");
         return 1;
     }
-    xtc_loop_init(&loop);
+    xtc_loop_create(&loop);
     xtc_proc_spawn(loop, listener, &listen_fd, NULL, &pid);
     printf("echo server listening on 127.0.0.1:7777\n");
     xtc_loop_run(loop);
-    xtc_loop_fini(loop);
+    xtc_loop_destroy(loop);
     close(listen_fd);
     return 0;
 }

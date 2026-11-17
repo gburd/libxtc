@@ -41,7 +41,7 @@ prop_spawn_n_all_complete(hegel_test_case *tc, void *u)
 	(void)u;
 	n = (int)hegel_draw_int(tc, hegel_integers(1, 32));
 	xtc_atomic_store_i32(&mp1_done, 0, xtc_mo_seq_cst);
-	hegel_assume(xtc_loop_init(&loop) == XTC_OK);
+	hegel_assume(xtc_loop_create(&loop) == XTC_OK);
 	for (i = 0; i < n; i++) {
 		xtc_pid_t p;
 		hegel_assume(xtc_proc_spawn(loop, mp1_proc, NULL, NULL, &p)
@@ -49,7 +49,7 @@ prop_spawn_n_all_complete(hegel_test_case *tc, void *u)
 	}
 	hegel_assume(xtc_loop_run(loop) == XTC_OK);
 	hegel_assume(xtc_atomic_load_i32(&mp1_done, xtc_mo_seq_cst) == n);
-	hegel_assume(xtc_loop_fini(loop) == XTC_OK);
+	xtc_loop_destroy(loop);
 }
 
 /* ----- Mp2: send K bytes, recv K bytes back unchanged ------- */
@@ -78,12 +78,12 @@ prop_send_recv_roundtrip(hegel_test_case *tc, void *u)
 	s.k = (size_t)hegel_draw_int(tc, hegel_integers(1, 64));
 	for (i = 0; i < s.k; i++)
 		s.buf[i] = (uint8_t)hegel_draw_int(tc, hegel_integers(0, 255));
-	hegel_assume(xtc_loop_init(&loop) == XTC_OK);
+	hegel_assume(xtc_loop_create(&loop) == XTC_OK);
 	hegel_assume(xtc_proc_spawn(loop, mp2_proc, &s, NULL, &pid) == XTC_OK);
 	hegel_assume(xtc_send(pid, s.buf, s.k) == XTC_OK);
 	hegel_assume(xtc_loop_run(loop) == XTC_OK);
 	hegel_assume(s.ok == 1);
-	hegel_assume(xtc_loop_fini(loop) == XTC_OK);
+	xtc_loop_destroy(loop);
 }
 
 /* ----- Mp3: K-message FIFO ----------------------------------- */
@@ -121,14 +121,14 @@ prop_fifo_order(hegel_test_case *tc, void *u)
 	for (i = 0; i < s.n; i++)
 		vals[i] = (int)hegel_draw_int(tc, hegel_integers(-1000, 1000));
 	s.exp = vals;
-	hegel_assume(xtc_loop_init(&loop) == XTC_OK);
+	hegel_assume(xtc_loop_create(&loop) == XTC_OK);
 	hegel_assume(xtc_proc_spawn(loop, mp3_proc, &s, NULL, &pid) == XTC_OK);
 	for (i = 0; i < s.n; i++)
 		hegel_assume(xtc_send(pid, &vals[i], sizeof(int)) == XTC_OK);
 	hegel_assume(xtc_loop_run(loop) == XTC_OK);
 	hegel_assume(s.ok == 1);
 	free(vals);
-	hegel_assume(xtc_loop_fini(loop) == XTC_OK);
+	xtc_loop_destroy(loop);
 }
 
 static const pbt_entry_t tests[] = {

@@ -329,7 +329,7 @@ test_arena_group_join_during_discard(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_ag_size_after, -1, xtc_mo_seq_cst);
 
 	munit_assert_int(xtc_arena_group_create("ag-seal", &g_ag), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	opts.name = "ag-victim";
 	munit_assert_int(xtc_proc_spawn(loop, ag_victim_proc, NULL, &opts,
 	    &pid), ==, XTC_OK);
@@ -365,7 +365,7 @@ test_arena_group_join_during_discard(const MunitParameter p[], void *d)
 
 	xtc_arena_group_destroy(g_ag);
 	g_ag = NULL;
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -404,8 +404,8 @@ test_arena_group_reaped_vs_equal_pid(const MunitParameter p[], void *d)
 	int gone = -1;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_loop_init(&a), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&b), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&a), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&b), ==, XTC_OK);
 	munit_assert_int(xtc_arena_group_create("ag-eqpid", &g), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(a, ag_join_proc, g, NULL, &pa), ==,
 	    XTC_OK);
@@ -418,8 +418,8 @@ test_arena_group_reaped_vs_equal_pid(const MunitParameter p[], void *d)
 	munit_assert_int(gone, ==, 1);
 	munit_assert_int(xtc_loop_run(b), ==, XTC_OK);
 	xtc_arena_group_destroy(g);
-	munit_assert_int(xtc_loop_fini(a), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(b), ==, XTC_OK);
+	xtc_loop_destroy(a);
+	xtc_loop_destroy(b);
 	return MUNIT_OK;
 }
 
@@ -436,8 +436,8 @@ test_arena_group_add_equal_pid_other_loop(const MunitParameter p[], void *d)
 	int gone = -1;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_loop_init(&a), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&b), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&a), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&b), ==, XTC_OK);
 	munit_assert_int(xtc_arena_group_create("ag-dedup", &g), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(a, ag_join_proc, g, NULL, &pa), ==,
 	    XTC_OK);
@@ -450,8 +450,8 @@ test_arena_group_add_equal_pid_other_loop(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_arena_group_discard(g, 1, 0, &gone), ==, XTC_OK);
 	munit_assert_int(gone, ==, 1);
 	xtc_arena_group_destroy(g);
-	munit_assert_int(xtc_loop_fini(a), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(b), ==, XTC_OK);
+	xtc_loop_destroy(a);
+	xtc_loop_destroy(b);
 	return MUNIT_OK;
 }
 
@@ -517,8 +517,8 @@ test_arena_group_kill_targets_owner(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_kg_m_normal, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_kg_u_normal, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_kg_all_gone, -1, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&a), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&b), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&a), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&b), ==, XTC_OK);
 	munit_assert_int(xtc_arena_group_create("ag-kill", &g_kg), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(a, kg_member_proc, NULL, NULL, &pm),
 	    ==, XTC_OK);
@@ -541,8 +541,8 @@ test_arena_group_kill_targets_owner(const MunitParameter p[], void *d)
 
 	xtc_arena_group_destroy(g_kg);
 	g_kg = NULL;
-	munit_assert_int(xtc_loop_fini(a), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(b), ==, XTC_OK);
+	xtc_loop_destroy(a);
+	xtc_loop_destroy(b);
 	return MUNIT_OK;
 }
 

@@ -344,7 +344,7 @@ test_demand_wakers(const MunitParameter p[], void *d)
 	memset(&dp, 0, sizeof dp);
 	dp.item = 77;
 	munit_assert_int(xtc_chan_demand_create(NULL, 4, &dp.c), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	/* Spawn producer first so it parks before the consumer asks. */
 	munit_assert_int(xtc_task_spawn(loop, demand_producer, &dp, NULL),
 	    ==, XTC_OK);
@@ -356,7 +356,7 @@ test_demand_wakers(const MunitParameter p[], void *d)
 	munit_assert_int(dp.cons_runs, ==, 2);   /* park + resume */
 	munit_assert_int(dp.got, ==, 77);
 
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	xtc_chan_demand_destroy(dp.c);
 	return MUNIT_OK;
 }

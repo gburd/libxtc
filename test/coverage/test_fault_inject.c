@@ -12,7 +12,7 @@
  *	error code.
  *
  *	Covers:
- *	  - xtc_io_init: calloc-fail, pipe-fail, fcntl-fail, backend-fail
+ *	  - xtc_io_create: calloc-fail, pipe-fail, fcntl-fail, backend-fail
  *	    (src/io/io_common.c) -- the four io.init.* points.
  *	  - xtc_svr reply-path edges (src/orc/svr.c): NULL call, the
  *	    no-handler empty-reply path, reply after the server stopped.
@@ -51,9 +51,9 @@ noop_inject(const char *name, void *user)
 	(void)user;
 }
 
-/* ----- xtc_io_init failure paths -------------------------------- */
+/* ----- xtc_io_create failure paths -------------------------------- */
 
-/* Each io.init.* point forces xtc_io_init to fail at a distinct stage;
+/* Each io.init.* point forces xtc_io_create to fail at a distinct stage;
  * we assert it returns an error (not XTC_OK) and does not crash / leak
  * (run under ASan in CI to catch a leak). */
 
@@ -65,7 +65,7 @@ test_io_init_calloc_fail(const MunitParameter p[], void *d)
 
 	munit_assert_int(xtc_inject_attach("io.init.calloc_fail",
 	    noop_inject, NULL), ==, XTC_OK);
-	munit_assert_int(xtc_io_init(&io), ==, XTC_E_NOMEM);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_E_NOMEM);
 	munit_assert_null(io);
 	(void)xtc_inject_detach("io.init.calloc_fail");
 	return MUNIT_OK;
@@ -80,7 +80,7 @@ test_io_init_backend_fail(const MunitParameter p[], void *d)
 
 	munit_assert_int(xtc_inject_attach("io.init.backend_fail",
 	    noop_inject, NULL), ==, XTC_OK);
-	rc = xtc_io_init(&io);
+	rc = xtc_io_create(&io);
 	munit_assert_int(rc, !=, XTC_OK);   /* backend-init failure path */
 	munit_assert_null(io);
 	(void)xtc_inject_detach("io.init.backend_fail");
@@ -99,7 +99,7 @@ test_io_init_pipe_fail(const MunitParameter p[], void *d)
 
 	munit_assert_int(xtc_inject_attach("io.init.pipe_fail",
 	    noop_inject, NULL), ==, XTC_OK);
-	munit_assert_int(xtc_io_init(&io), ==, XTC_E_INTERNAL);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_E_INTERNAL);
 	munit_assert_null(io);
 	(void)xtc_inject_detach("io.init.pipe_fail");
 	return MUNIT_OK;
@@ -113,14 +113,14 @@ test_io_init_fcntl_fail(const MunitParameter p[], void *d)
 
 	munit_assert_int(xtc_inject_attach("io.init.fcntl_fail",
 	    noop_inject, NULL), ==, XTC_OK);
-	munit_assert_int(xtc_io_init(&io), ==, XTC_E_INTERNAL);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_E_INTERNAL);
 	munit_assert_null(io);
 	(void)xtc_inject_detach("io.init.fcntl_fail");
 	return MUNIT_OK;
 }
 #endif
 
-/* Sanity: with no injection attached, xtc_io_init succeeds and fini
+/* Sanity: with no injection attached, xtc_io_create succeeds and fini
  * cleans up (the happy path the failure tests deviate from). */
 static MunitResult
 test_io_init_happy(const MunitParameter p[], void *d)
@@ -128,9 +128,9 @@ test_io_init_happy(const MunitParameter p[], void *d)
 	xtc_io_t *io = NULL;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	munit_assert_not_null(io);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -140,8 +140,8 @@ static MunitResult
 test_io_null_guards(const MunitParameter p[], void *d)
 {
 	(void)p; (void)d;
-	munit_assert_int(xtc_io_init(NULL), ==, XTC_E_INVAL);
-	munit_assert_int(xtc_io_fini(NULL), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_io_create(NULL), ==, XTC_E_INVAL);
+	xtc_io_destroy(NULL);
 	munit_assert_int(xtc_io_wakeup(NULL), ==, XTC_E_INVAL);
 	return MUNIT_OK;
 }
@@ -153,10 +153,10 @@ test_io_wakeup_roundtrip(const MunitParameter p[], void *d)
 {
 	xtc_io_t *io = NULL;
 	(void)p; (void)d;
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	munit_assert_int(xtc_io_wakeup(io), ==, XTC_OK);
 	munit_assert_int(xtc_io_wakeup(io), ==, XTC_OK);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -215,7 +215,7 @@ test_svr_no_handler_empty_reply(const MunitParameter p[], void *d)
 	g_noh_call_rc = -99;
 	g_noh_reply_size = (size_t)-1;
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_svr_start(loop, &cb, NULL, &opts, &svr),
 	    ==, XTC_OK);
 	g_noh_svr = svr;
@@ -233,7 +233,7 @@ test_svr_no_handler_empty_reply(const MunitParameter p[], void *d)
 	/* Stop on a NULL server is rejected, not crashed. */
 	munit_assert_int(xtc_svr_stop(NULL), ==, XTC_E_INVAL);
 
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -325,7 +325,7 @@ test_svr_reply_oom(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_inject_attach("svr.reply.oom", noop_inject, NULL),
 	    ==, XTC_OK);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_svr_start(loop, &cb, NULL, &opts, &svr),
 	    ==, XTC_OK);
 	g_oom_svr = svr;
@@ -339,7 +339,7 @@ test_svr_reply_oom(const MunitParameter p[], void *d)
 	/* The handler's non-empty reply hit the forced-OOM path. */
 	munit_assert_int(g_oom_reply_rc, ==, XTC_E_NOMEM);
 
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -429,7 +429,7 @@ oom_workload(void)
 	/* A loop is the biggest composite object in the library; spawning a
 	 * proc and a server on it multiplies the allocations (and therefore
 	 * the distinct unwind paths) the sweep walks. */
-	if (xtc_loop_init(&loop) == XTC_OK) {
+	if (xtc_loop_create(&loop) == XTC_OK) {
 		xtc_chan_mpmc_t *ch = NULL;
 
 		/* Channel: its own ring + slot allocations, with an unwind if
@@ -437,7 +437,7 @@ oom_workload(void)
 		if (xtc_chan_mpmc_create(NULL, 8, &ch) == XTC_OK)
 			xtc_chan_mpmc_destroy(ch);
 
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 	}
 
 	/* Executor: worker array, per-loop structures, NUMA map -- and its

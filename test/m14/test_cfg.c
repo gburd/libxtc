@@ -960,13 +960,13 @@ test_session_per_fiber(const MunitParameter p[], void *d)
 
 	aa.mine = a; aa.expect = 11;
 	ba.mine = b; ba.expect = 22;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, fiber_ssn_body, &aa, &opts, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, fiber_ssn_body, &ba, &opts, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 
 	munit_assert_int(aa.ran, ==, 1);
 	munit_assert_int(ba.ran, ==, 1);
@@ -1048,11 +1048,11 @@ test_session_unbound_at_exit(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_cfg_session_create(&arg.s), ==, XTC_OK);
 	munit_assert_int(xtc_cfg_ssn_set_int(arg.s, "se.work_mem", 11,
 	    XTC_CFG_SRC_SESSION), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&arg.loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&arg.loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(arg.loop, ssn_exit_driver, &arg, NULL,
 	    NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(arg.loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(arg.loop), ==, XTC_OK);
+	xtc_loop_destroy(arg.loop);
 
 	munit_assert_int(arg.a_ran, ==, 10);
 	munit_assert_int(arg.b_ran, ==, 10);

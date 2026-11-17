@@ -167,14 +167,14 @@ run(void (*victim)(void *), int with_slow)
 	g_second_r = 0;
 	g_slow = NULL;
 	g_victim_fn = victim;
-	munit_assert_int(xtc_loop_init(&g_loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&g_loop), ==, XTC_OK);
 	if (with_slow)
 		munit_assert_int(xtc_async(g_loop, slow_task, NULL, &g_slow),
 		    ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(g_loop, driver, NULL, NULL, NULL), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_loop_run(g_loop), ==, XTC_OK);
-	(void)xtc_loop_fini(g_loop);
+	xtc_loop_destroy(g_loop);
 }
 
 static MunitResult

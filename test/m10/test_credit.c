@@ -152,7 +152,7 @@ test_credit_sliding_window(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	memset(&ist, 0, sizeof ist);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, worker_proc, NULL, NULL,
 	    &ist.worker), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, issuer_proc, &ist, NULL, NULL),
@@ -164,7 +164,7 @@ test_credit_sliding_window(const MunitParameter p[], void *d)
 	munit_assert_uint(ist.peak, <=, WINDOW);     /* never exceeded window */
 	munit_assert_uint(ist.peak, >, 1);           /* did overlap (pipelined) */
 
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -202,12 +202,12 @@ test_credit_blocking_acquire(const MunitParameter p[], void *d)
 	xtc_pid_t pid;
 	(void)p; (void)d;
 	xtc_atomic_store_i32(&g_ba_ok, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, blocking_acquire_proc, NULL, NULL,
 	    &pid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_atomic_load_i32(&g_ba_ok, xtc_mo_seq_cst), ==, 1);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -253,7 +253,7 @@ test_credit_two_waiters(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	memset(&x, 0, sizeof x);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_credit_create(2, &x.c), ==, XTC_OK);
 	munit_assert_int(xtc_credit_try_acquire(x.c), ==, XTC_OK);
 	munit_assert_int(xtc_credit_try_acquire(x.c), ==, XTC_OK);
@@ -268,7 +268,7 @@ test_credit_two_waiters(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_atomic_load_i32(&x.got, xtc_mo_seq_cst), ==, 2);
 	munit_assert_int64(xtc_clock_mono() - t0, <, 1LL * 1000 * 1000 * 1000);
 	xtc_credit_destroy(x.c);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 

@@ -96,7 +96,7 @@ main(void)
 	double elapsed_ms;
 	int i;
 
-	if (xtc_loop_init(&g_loop) != XTC_OK) {
+	if (xtc_loop_create(&g_loop) != XTC_OK) {
 		fprintf(stderr, "failed to init loop\n");
 		return 1;
 	}
@@ -155,6 +155,6 @@ main(void)
 	printf("Throughput: %.0f msgs/sec\n",
 	    (double)(N_SENDERS * MSGS_PER_SEND) / (elapsed_ms / 1000.0));
 
-	xtc_loop_fini(g_loop);
+	xtc_loop_destroy(g_loop);
 	return 0;
 }

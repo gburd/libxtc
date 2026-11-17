@@ -101,7 +101,7 @@ main(int argc, char **argv)
 
 	rss_before = __rss_kib();
 
-	if (xtc_loop_init(&loop) != XTC_OK) {
+	if (xtc_loop_create(&loop) != XTC_OK) {
 		fprintf(stderr, "loop_init failed\n");
 		return 1;
 	}
@@ -177,6 +177,6 @@ main(int argc, char **argv)
 	        "none" :
 	        "VMA/memory cap (graceful)");
 
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return 0;
 }

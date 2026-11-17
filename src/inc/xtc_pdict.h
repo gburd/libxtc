@@ -16,7 +16,7 @@
  *	entries per proc.  Linear lookup; entries usually <16 per proc.
  *
  *	All entries live in process memory and are freed at proc exit,
- *	after the proc's xtc_proc_at_exit hooks (or by xtc_loop_fini for
+ *	after the proc's xtc_proc_at_exit hooks (or by xtc_loop_destroy for
  *	a proc still alive then).  Values are caller-owned `void *`; the
  *	store stores the pointer verbatim (no deep copy).  If a value's
  *	lifetime should match the proc, register a destructor via

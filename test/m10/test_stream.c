@@ -204,7 +204,7 @@ test_stream_for_each_same_loop_producer(const MunitParameter p[], void *d)
 	memset(&c, 0, sizeof c);
 	for (i = 0; i < 4; i++) c.items[i] = i + 1;
 	c.rc = -12345;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_chan_demand_create(NULL, 8, &c.ch), ==, XTC_OK);
 	munit_assert_int(xtc_stream_from_demand(c.ch, &c.s), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, fe_consumer, &c, NULL, NULL),
@@ -220,7 +220,7 @@ test_stream_for_each_same_loop_producer(const MunitParameter p[], void *d)
 	munit_assert_int(c.sum, ==, 10);
 	xtc_stream_destroy(c.s);
 	xtc_chan_demand_destroy(c.ch);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 

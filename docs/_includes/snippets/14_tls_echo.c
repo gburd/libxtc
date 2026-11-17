@@ -260,7 +260,7 @@ main(void)
 		if (xtc_net_listen(XTC_NET_INET, "127.0.0.1", sh.port, &topts,
 		    &sh.listen_fd) == XTC_OK)
 			break;
-	if (sh.listen_fd < 0 || xtc_loop_init(&loop) != XTC_OK)
+	if (sh.listen_fd < 0 || xtc_loop_create(&loop) != XTC_OK)
 		goto out;
 	if (xtc_proc_spawn(loop, server, &sh, NULL, &spid) != XTC_OK ||
 	    xtc_proc_spawn(loop, client, &sh, NULL, &cpid) != XTC_OK)
@@ -271,7 +271,7 @@ main(void)
 		status = 0;
 out:
 	if (loop != NULL)
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 	if (sh.listen_fd >= 0)
 		xtc_net_close(sh.listen_fd);
 	xtc_tls_ctx_destroy(sh.cli_ctx);      /* after every connection */

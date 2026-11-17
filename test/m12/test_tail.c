@@ -69,7 +69,7 @@ test_tail_sched(const MunitParameter p[], void *d)
 	prev = xtc_tail_enable(XTC_TAIL_SCHED);
 	munit_assert_uint(prev, ==, 0);   /* was off */
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	/* Spawn three procs that each exit with reason 7. */
 	munit_assert_int(xtc_proc_spawn(loop, exit7_proc, NULL, NULL, NULL),
 	    ==, XTC_OK);
@@ -78,7 +78,7 @@ test_tail_sched(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, exit7_proc, NULL, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 
 	memset(&c, 0, sizeof c);
 	munit_assert_int(xtc_tail_read(count_cb, &c), ==, XTC_OK);
@@ -100,11 +100,11 @@ test_tail_disabled(const MunitParameter p[], void *d)
 
 	(void)xtc_tail_reset();
 	xtc_tail_disable();
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, exit7_proc, NULL, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_size(xtc_tail_count(), ==, 0);   /* nothing recorded */
 	return MUNIT_OK;
 }
@@ -127,11 +127,11 @@ test_tail_dump(const MunitParameter p[], void *d)
 
 	(void)xtc_tail_reset();
 	(void)xtc_tail_enable(XTC_TAIL_SCHED);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, exit7_proc, NULL, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	n = xtc_tail_count();
 	munit_assert_size(n, >=, 2);
 
@@ -194,13 +194,13 @@ test_tail_wake_latency(const MunitParameter p[], void *d)
 	memset(&c, 0, sizeof c);
 	(void)xtc_tail_reset();
 	(void)xtc_tail_enable(XTC_TAIL_SCHED);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, wl_receiver, &c, NULL,
 	    &c.recv_pid), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, wl_sender, &c, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 
 	munit_assert_int(c.recv_got, ==, 1);
 	memset(&cnt, 0, sizeof cnt);
@@ -241,14 +241,14 @@ test_tail_msg(const MunitParameter p[], void *d)
 
 	(void)xtc_tail_reset();
 	(void)xtc_tail_enable(XTC_TAIL_MSG);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, msg_receiver, &st, NULL, &rpid),
 	    ==, XTC_OK);
 	/* Send 4 before running: they queue (mailbox depth rises -> HWM). */
 	for (i = 0; i < 4; i++)
 		munit_assert_int(xtc_send(rpid, &v, sizeof v), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 
 	munit_assert_int(st.got, ==, 4);
 	memset(&cnt, 0, sizeof cnt);
@@ -356,14 +356,14 @@ test_tail_park_fd(const MunitParameter p[], void *d)
 
 	(void)xtc_tail_reset();
 	(void)xtc_tail_enable(XTC_TAIL_SCHED);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, wfd_waiter, &c, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(pthread_create(&writer, NULL, wfd_writer,
 	    (void *)(intptr_t)pipefd[1]), ==, 0);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(pthread_join(writer, NULL), ==, 0);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 
 	/* The park really happened and really woke on the fd (not a timeout):
 	 * without this the tail assertions below could pass vacuously. */
@@ -402,14 +402,14 @@ test_tail_park_fd_disabled(const MunitParameter p[], void *d)
 
 	(void)xtc_tail_reset();
 	xtc_tail_disable();
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, wfd_waiter, &c, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(pthread_create(&writer, NULL, wfd_writer,
 	    (void *)(intptr_t)pipefd[1]), ==, 0);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(pthread_join(writer, NULL), ==, 0);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 
 	munit_assert_int(c.rc, ==, XTC_OK);        /* the park did happen */
 	munit_assert_size(xtc_tail_count(), ==, 0);   /* and recorded nothing */
@@ -568,7 +568,7 @@ test_tail_reap(const MunitParameter p[], void *d)
 	memset(&c, 0, sizeof c);
 	(void)xtc_tail_reset();
 	xtc_tail_enable(XTC_TAIL_SCHED);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, reap_worker, &c, NULL, NULL),
 	    ==, XTC_OK);
 	wd.loop = loop;
@@ -577,7 +577,7 @@ test_tail_reap(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	xtc_atomic_store_i32(&wd.done, 1, xtc_mo_seq_cst);
 	munit_assert_int(pthread_join(wdt, NULL), ==, 0);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	/* If the watchdog had to stop the loop, the fiber never finished --
 	 * that IS the lost-wake symptom, so report it as such. */
 	munit_assert_int(c.rc, ==, XTC_OK);
@@ -708,14 +708,14 @@ test_tail_app_foreign(const MunitParameter p[], void *d)
 	(void)xtc_trace_reset();
 	(void)xtc_tail_enable(XTC_TAIL_SCHED | XTC_TAIL_APP);
 	(void)xtc_trace_enable(1);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	o.name = "engine";
 	munit_assert_int(xtc_proc_spawn(loop, app_rx, NULL, &o, &g_app_rx), ==,
 	    XTC_OK);
 	munit_assert_int(pthread_create(&th, NULL, app_device, NULL), ==, 0);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	(void)pthread_join(th, NULL);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	(void)xtc_trace_enable(0);
 
 	for (i = 0; i < 5; i++)

@@ -89,7 +89,7 @@ test_pg_broadcast(const MunitParameter p[], void *d)
 	int i, sent, payload = 7;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_reg_create(&r), ==, XTC_OK);
 
 	/* Spawn four subscribers, each parked in recv, and join their pids
@@ -117,7 +117,7 @@ test_pg_broadcast(const MunitParameter p[], void *d)
 	}
 
 	xtc_reg_destroy(r);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -160,7 +160,7 @@ test_pg_send_owned(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	for (n = 1; n <= 3; n += 2) {
-		munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+		munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 		munit_assert_int(xtc_reg_create(&r), ==, XTC_OK);
 		for (i = 0; i < n; i++) {
 			munit_assert_int(xtc_proc_spawn(loop, own_sub, NULL,
@@ -181,7 +181,7 @@ test_pg_send_owned(const MunitParameter p[], void *d)
 		                     xtc_mo_seq_cst),
 		    ==, 1);
 		xtc_reg_destroy(r);
-		munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+		xtc_loop_destroy(loop);
 	}
 	/* No member: the buffer is freed, 0 sent (ASan/valgrind: no leak). */
 	munit_assert_int(xtc_reg_create(&r), ==, XTC_OK);

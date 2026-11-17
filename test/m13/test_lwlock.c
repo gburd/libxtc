@@ -396,11 +396,11 @@ test_kill_then_release(const MunitParameter p[], void *d)
 	g_kl_down = 0;
 	g_kl_after = -999;
 	munit_assert_int(xtc_lwlock_init(&g_kl, 0), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	g_kl_loop = loop;
 	munit_assert_int(xtc_proc_spawn(loop, kl_driver, NULL, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	munit_assert_int(xtc_atomic_load_i32(&g_kl_returned, xtc_mo_seq_cst),
 	    ==, 0);
 	munit_assert_int(g_kl_down, ==, 1);

@@ -91,7 +91,7 @@ in
 The task handle stays valid, and
 .Fn xtc_await
 can read the result again, until
-.Fn xtc_loop_fini .
+.Fn xtc_loop_destroy .
 The coroutine's stack does not: it is returned to the thread's stack
 pool as soon as the coroutine returns.
 A coroutine spawned with a
@@ -194,10 +194,10 @@ int main(void) {
         xtc_task_t *t;
         int v = 21;
         intptr_t r;
-        xtc_loop_init(&loop);
+        xtc_loop_create(&loop);
         xtc_async(loop, multiply, &v, &t);
         xtc_await(t, &r);     /* r == 42 */
-        xtc_loop_fini(loop);
+        xtc_loop_destroy(loop);
         return 0;
 }
 .Ed

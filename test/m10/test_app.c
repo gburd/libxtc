@@ -659,7 +659,7 @@ aeq_by_start(xtc_loop_t **b, xtc_pid_t *by, int n, pthread_t *th)
 	xtc_atomic_store_i32(&g_aeq_stop, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_aeq_by_msgs, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_aeq_by_normal, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(b), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(b), ==, XTC_OK);
 	for (i = 0; i < n; i++)
 		munit_assert_int(xtc_proc_spawn(*b, aeq_by, NULL, NULL, &by[i]),
 		    ==, XTC_OK);
@@ -718,7 +718,7 @@ test_app_shutdown_equal_pid_other_loop(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_atomic_load_i32(&g_dr_hook_done, xtc_mo_seq_cst),
 	    ==, 1);
 	xtc_app_destroy(r.app);
-	munit_assert_int(xtc_loop_fini(lb), ==, XTC_OK);
+	xtc_loop_destroy(lb);
 	return MUNIT_OK;
 }
 

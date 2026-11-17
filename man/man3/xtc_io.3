@@ -4,8 +4,8 @@
 .Dt XTC_IO 3
 .Os
 .Sh NAME
-.Nm xtc_io_init ,
-.Nm xtc_io_fini ,
+.Nm xtc_io_create ,
+.Nm xtc_io_destroy ,
 .Nm xtc_io_backend_name ,
 .Nm xtc_io_reg_fd ,
 .Nm xtc_io_mod_fd ,
@@ -13,14 +13,16 @@
 .Nm xtc_io_poll ,
 .Nm xtc_io_aio_submit ,
 .Nm xtc_io_wakeup ,
-.Nm xtc_io_set_iowq_max_workers
+.Nm xtc_io_set_iowq_max_workers ,
+.Nm xtc_io_init ,
+.Nm xtc_io_fini
 .Nd L1 event-notification engine
 .Sh SYNOPSIS
 .In xtc_io.h
 .Ft int
-.Fn xtc_io_init "xtc_io_t **out"
-.Ft int
-.Fn xtc_io_fini "xtc_io_t *io"
+.Fn xtc_io_create "xtc_io_t **out"
+.Ft void
+.Fn xtc_io_destroy "xtc_io_t *io"
 .Ft "const char *"
 .Fn xtc_io_backend_name "void"
 .Ft int
@@ -273,7 +275,7 @@ xtc_io_t *io;
 xtc_io_event_t evs[16];
 int n;
 
-xtc_io_init(&io);
+xtc_io_create(&io);
 xtc_io_reg_fd(io, sockfd, XTC_IO_READABLE, my_tag);
 xtc_io_poll(io, evs, 16, -1, &n);
 for (int i = 0; i < n; i++) {
@@ -301,6 +303,20 @@ It is a Linux
 backend concern only -- a linkable no-op on every other backend, and a
 no-op on kernels lacking the register operation.  The shipped default
 caps the bounded pool to a small value.
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Fn xtc_io_init
+Use
+.Fn xtc_io_create .
+.It Fn xtc_io_fini
+Use
+.Fn xtc_io_destroy ;
+the new name returns void; the old one returns XTC_E_INVAL for NULL, else XTC_OK.
+.El
 .Sh SEE ALSO
 .Xr xtc_loop 3 ,
 .Xr xtc 7

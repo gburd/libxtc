@@ -4,7 +4,7 @@
  *
  * test/m2/test_io_uring_setup.c -- io_uring ring setup and ownership.
  *
- * xtc_io_init builds the ring with COOP_TASKRUN (Linux 5.19+) or no
+ * xtc_io_create builds the ring with COOP_TASKRUN (Linux 5.19+) or no
  * optional flag.  When a thread starts RUNNING the loop, the ring is
  * rebuilt on that thread with DEFER_TASKRUN + SINGLE_ISSUER (6.1+): such
  * a ring is bound to one thread, which is the only one that may submit to
@@ -17,7 +17,7 @@
  *   /fallback_coop    DEFER refused ("io.uring.no_defer"): a run stays COOP
  *   /fallback_plain   every optional flag refused ("io.uring.setup_einval"):
  *                     a plain ring, still working
- *   /creator_no_submit xtc_io_init submits nothing (a poll's completion
+ *   /creator_no_submit xtc_io_create submits nothing (a poll's completion
  *                     work runs on its SUBMITTER); the first poll arms the
  *                     wakeup, and a wakeup posted before it is delivered
  *   /loop_other_thread a loop created on one thread and run on another
@@ -32,7 +32,7 @@
  *                     a fiber parked in a 1 MiB aio_pwrite reaps it before
  *                     the run returns, so fini frees nothing the kernel owns
  *   /aio_fini_direct  an op submitted on loop->io and never polled is
- *                     reaped by xtc_loop_fini before it frees anything
+ *                     reaped by xtc_loop_destroy before it frees anything
  *   /aio_fini_cancel  one that would never complete (a read on an empty
  *                     pipe) is cancelled by fini after the bound
  *
@@ -153,7 +153,7 @@ test_tiers(const MunitParameter p[], void *d)
 
 	if (!is_uring())
 		return MUNIT_SKIP;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	fl = ring_flags(loop->io);
 	munit_assert_true(fl == COOP || fl == 0);
 	if (kernel_at_least(5, 19))
@@ -170,7 +170,7 @@ test_tiers(const MunitParameter p[], void *d)
 	/* Same thread again: no rebuild. */
 	munit_assert_uint(flags_after_run(loop), ==, fl);
 	munit_assert_uint(rebinds(loop->io), ==, fl == DEFER ? 1 : 0);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -191,13 +191,13 @@ fallback(const char *inj, unsigned want)
 	if (want == COOP && !kernel_at_least(5, 19))
 		return MUNIT_SKIP;
 	munit_assert_int(xtc_inject_attach(inj, inj_nop, NULL), ==, XTC_OK);
-	rc = xtc_loop_init(&loop);
+	rc = xtc_loop_create(&loop);
 	if (rc == XTC_OK)
 		munit_assert_uint(flags_after_run(loop), ==, want);
 	(void)xtc_inject_detach(inj);
 	munit_assert_int(rc, ==, XTC_OK);
 	assert_wakes(loop->io);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -226,7 +226,7 @@ test_creator_no_submit(const MunitParameter p[], void *d)
 
 	if (!is_uring())
 		return MUNIT_SKIP;
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	munit_assert_int(__xtc_io_uring_info(io, NULL, &head, NULL), ==,
 	    XTC_OK);
 	munit_assert_uint(head, ==, 0);   /* nothing reached the kernel */
@@ -243,7 +243,7 @@ test_creator_no_submit(const MunitParameter p[], void *d)
 	assert_wakes(io);
 	munit_assert_int(xtc_io_poll(io, evs, 8, 0, &n), ==, XTC_OK);
 	munit_assert_int(n, ==, 0);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -362,7 +362,7 @@ test_loop_other_thread(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	work_open(&w, path, sizeof path);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	/* Three runs, each on a fresh thread: DEFER ring built on each. */
 	for (k = 0; k < 3; k++) {
 		w.round = k;
@@ -383,7 +383,7 @@ test_loop_other_thread(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_atomic_load_i32(&w.bad, xtc_mo_seq_cst), ==, 0);
 	if (is_uring() && (ring_flags(loop->io) & SETUP_SINGLE_ISSUER))
 		munit_assert_uint(rebinds(loop->io), ==, 4);   /* 1 per run */
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	work_close(&w, path);
 	return MUNIT_OK;
 }
@@ -463,7 +463,7 @@ test_aio_across_stop(const MunitParameter p[], void *d)
 	c.fd = mkstemp(path);
 	munit_assert_int(c.fd, >=, 0);
 	xtc_atomic_store_i32(&c.res, -12345, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	c.loop = loop;
 	munit_assert_int(xtc_proc_spawn(loop, stop_fiber, &c, NULL, NULL), ==,
 	    XTC_OK);
@@ -475,7 +475,7 @@ test_aio_across_stop(const MunitParameter p[], void *d)
 	run_on_thread(loop);
 	munit_assert_int(xtc_atomic_load_i32(&c.res, xtc_mo_seq_cst), ==,
 	    1 << 20);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	close(c.fd);
 	unlink(path);
 	return MUNIT_OK;
@@ -518,7 +518,7 @@ test_ready_across_move(const MunitParameter p[], void *d)
 	c.rp = pp[0];
 	c.wp = pp[1];
 	xtc_atomic_store_i32(&c.res, -12345, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	c.loop = loop;
 	munit_assert_int(xtc_proc_spawn(loop, ready_fiber, &c, NULL, NULL), ==,
 	    XTC_OK);
@@ -531,13 +531,13 @@ test_ready_across_move(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_atomic_load_i32(&c.res, xtc_mo_seq_cst), ==,
 	    XTC_OK);
 	munit_assert_uint(c.rev & XTC_IO_READABLE, ==, XTC_IO_READABLE);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	close(pp[0]);
 	close(pp[1]);
 	return MUNIT_OK;
 }
 
-/* ---- file AIO in flight at xtc_loop_fini ---------------------------- */
+/* ---- file AIO in flight at xtc_loop_destroy ---------------------------- */
 
 #define FINI_BIG (1u << 20)
 
@@ -625,7 +625,7 @@ test_aio_fini_no_defer(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&c.res, -12345, xtc_mo_seq_cst);
 	munit_assert_int(xtc_inject_attach("io.uring.no_defer", inj_nop, NULL),
 	    ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	c.loop = loop;
 	munit_assert_int(xtc_proc_spawn(loop, fini_fiber, &c, NULL, NULL), ==,
 	    XTC_OK);
@@ -637,7 +637,7 @@ test_aio_fini_no_defer(const MunitParameter p[], void *d)
 	munit_assert_uint(ring_flags(loop->io) & SETUP_SINGLE_ISSUER, ==, 0);
 	munit_assert_int(xtc_atomic_load_i32(&c.res, xtc_mo_seq_cst), ==,
 	    -12345); /* still parked */
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	xtc_atomic_store_i32(&c.fini_done, 1, xtc_mo_seq_cst);
 	munit_assert_int(__os_thread_join(&th, NULL), ==, XTC_OK);
 	/* The write moved bytes: it completed rather than being dropped with
@@ -689,7 +689,7 @@ fini_direct(int cancel)
 	a->op = XTC_AIO_PREAD;
 	a->buf = b;
 	a->len = 64;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_io_aio_submit(loop->io, a), ==, XTC_OK);
 	if (cancel)
 		munit_assert_int(xtc_inject_attach("io.uring.aio_drain_cancel",
@@ -699,7 +699,7 @@ fini_direct(int cancel)
 		munit_assert_int(__os_thread_create(&th, fini_feed, &c), ==,
 		    XTC_OK);
 	/* Never polled: fini must reap it before freeing the ring. */
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(__xtc_aio_done_get(a), ==, 1);
 	if (cancel) {
 		(void)xtc_inject_detach("io.uring.aio_drain_cancel");

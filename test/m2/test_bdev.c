@@ -92,10 +92,10 @@ test_roundtrip(const MunitParameter p[], void *d)
 
 	memset(&c, 0, sizeof c);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, bdev_proc, &c, &o, &a), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 
 	munit_assert_int(c.opened, ==, XTC_OK);
 	munit_assert_uint32(c.logical, ==, SECT);        /* fallback logical */

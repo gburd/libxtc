@@ -71,12 +71,12 @@ int main(void) {
 	/* Runtime: spawn a proc, send it a message, run the loop to
 	 * completion (loop_run returns once all procs exit -- no
 	 * indefinite blocking). */
-	if (xtc_loop_init(&loop) != XTC_OK) return 4;
+	if (xtc_loop_create(&loop) != XTC_OK) return 4;
 	if (xtc_proc_spawn(loop, echo_proc, NULL, NULL, &pid) != XTC_OK)
 		return 5;
 	if (xtc_send(pid, &payload, sizeof payload) != XTC_OK) return 6;
 	if (xtc_loop_run(loop) != XTC_OK) return 7;
-	if (xtc_loop_fini(loop) != XTC_OK) return 8;
+	xtc_loop_destroy(loop);
 	if (g_got != 4242) return 9;     /* message delivered + handled */
 	return 0;
 }

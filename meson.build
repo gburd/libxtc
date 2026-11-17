@@ -365,6 +365,7 @@ inc = include_directories('src/inc')
 lib_sources = files(
   'src/xtc_version.c',
   'src/xtc_strerror.c',
+  'src/xtc_deprecated.c',
   'src/os/os_alloc.c',
   'src/os/os_env.c',
   'src/os/os_errno.c',

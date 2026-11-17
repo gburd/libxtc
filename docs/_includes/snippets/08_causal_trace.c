@@ -71,13 +71,13 @@ main(void)
 
 	xtc_trace_causal_enable(1);         /* opt in (off by default) */
 
-	if (xtc_loop_init(&loop) != XTC_OK)
+	if (xtc_loop_create(&loop) != XTC_OK)
 		return 1;
 	if (xtc_proc_spawn(loop, worker, NULL, &o, &g_worker) != XTC_OK)
 		return 1;
 	if (xtc_loop_run(loop) != XTC_OK)
 		return 1;
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 
 	xtc_trace_causal_enable(0);         /* stop paying for it */
 	return 0;

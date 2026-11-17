@@ -153,7 +153,7 @@ xtc_app_create(const xtc_app_opts_t *opts, xtc_app_t **out)
 		a->loop = xtc_exec_loop(a->exec, 0);
 		a->owns_loop = 0;   /* the executor owns its loops */
 	} else {
-		if ((rc = xtc_loop_init(&a->loop)) != XTC_OK) goto fail;
+		if ((rc = xtc_loop_create(&a->loop)) != XTC_OK) goto fail;
 		a->owns_loop = 1;
 	}
 
@@ -175,7 +175,7 @@ xtc_app_create(const xtc_app_opts_t *opts, xtc_app_t **out)
 fail:
 	if (a->reg) xtc_reg_destroy(a->reg);
 	if (a->exec) (void)xtc_exec_fini(a->exec);
-	if (a->loop && a->owns_loop) (void)xtc_loop_fini(a->loop);
+	if (a->loop && a->owns_loop) xtc_loop_destroy(a->loop);
 	if (a->name) __os_free(a->name);
 	__os_free(a);
 	return rc;
@@ -694,7 +694,7 @@ xtc_app_destroy(xtc_app_t *a)
 	/* The registry outlives the loops: a proc freed with them (the
 	 * reaper, frozen by the stop) holds it. */
 	if (a->exec) (void)xtc_exec_fini(a->exec);
-	if (a->loop && a->owns_loop) (void)xtc_loop_fini(a->loop);
+	if (a->loop && a->owns_loop) xtc_loop_destroy(a->loop);
 	if (a->reg)
 		xtc_reg_destroy(a->reg);
 	if (a->specs) __os_free(a->specs);

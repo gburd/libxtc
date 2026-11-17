@@ -90,7 +90,7 @@ main(void)
 	if (xtc_fault_guard_install() != XTC_OK) {
 		printf("FAIL: fault_guard_install\n"); return 1;
 	}
-	if (xtc_loop_init(&loop) != XTC_OK) { printf("FAIL: loop_init\n"); return 1; }
+	if (xtc_loop_create(&loop) != XTC_OK) { printf("FAIL: loop_init\n"); return 1; }
 	if (xtc_proc_spawn(loop, watcher, NULL, NULL, &w) != XTC_OK) {
 		printf("FAIL: spawn watcher\n"); return 1;
 	}
@@ -102,7 +102,7 @@ main(void)
 	/* If the VEH did NOT contain the fault, the loop thread takes the
 	 * access violation here and the process dies (nonzero exit). */
 	if (xtc_loop_run(loop) != XTC_OK) { printf("FAIL: loop_run\n"); return 1; }
-	xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 
 	if (!g_cleanup_path) { printf("FAIL: recovery branch did not run\n"); return 1; }
 	if (!g_cb_ran)       { printf("FAIL: tracked callback not released\n"); return 1; }

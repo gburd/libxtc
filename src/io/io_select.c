@@ -198,7 +198,7 @@ __xtc_io_backend_init(xtc_io_t *io)
 	xtc_atomic_store_i32(&io->owner_set, 0, xtc_mo_relaxed);
 	if (pthread_mutex_init(&io->del_lock, NULL) != 0)
 		return XTC_E_INTERNAL;
-	/* Release a partially grown set: xtc_io_init does not call
+	/* Release a partially grown set: xtc_io_create does not call
 	 * backend_fini when init fails (see io_poll.c). */
 	if ((rc = __grow(io)) != XTC_OK)
 		__xtc_io_backend_fini(io);

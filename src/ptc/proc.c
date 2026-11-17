@@ -1094,7 +1094,7 @@ static void __proc_release(struct xtc_proc *p);
 
 /*
  * M11.5b: invalidate the registry entry for `loop` and tear down its
- * table.  Called from xtc_loop_fini.  Idempotent.
+ * table.  Called from xtc_loop_destroy.  Idempotent.
  *
  * A loop may be finalized with procs still alive (an executor shut down
  * with idle connection procs parked in recv).  Their fibers are freed by

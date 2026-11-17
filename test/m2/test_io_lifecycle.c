@@ -16,12 +16,12 @@ test_init_fini(const MunitParameter p[], void *d)
 {
 	xtc_io_t *io = NULL;
 	(void)p; (void)d;
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	munit_assert_not_null(io);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 
-	munit_assert_int(xtc_io_init(NULL), ==, XTC_E_INVAL);
-	munit_assert_int(xtc_io_fini(NULL), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_io_create(NULL), ==, XTC_E_INVAL);
+	xtc_io_destroy(NULL);
 	return MUNIT_OK;
 }
 
@@ -32,8 +32,8 @@ test_init_fini_repeat(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	for (i = 0; i < 100; i++) {
 		xtc_io_t *io = NULL;
-		munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
-		munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+		munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
+		xtc_io_destroy(io);
 	}
 	return MUNIT_OK;
 }
@@ -64,8 +64,8 @@ test_iowq_hint(const MunitParameter p[], void *d)
 	/* Best-effort io-wq worker cap hint (a uring tunable; a no-op on
 	 * other backends).  Setting it must not perturb normal init/fini. */
 	xtc_io_set_iowq_max_workers(8, 16);
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	/* Zero means "kernel default" -- also accepted. */
 	xtc_io_set_iowq_max_workers(0, 0);
 	return MUNIT_OK;

@@ -213,7 +213,7 @@ scenario(int mode)
 	c.b.left = mode == 13 ? 4 : 1;
 	c.c.left = 1;
 	c.a.block = mode == 2 || mode == 3 || mode == 8;
-	assert(xtc_loop_init(&c.loop) == XTC_OK);
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
 	o = options(&c);
 	o.version = 2;
 	assert(xtc_batch_create(c.loop, &o, &c.batch) == XTC_E_VERSION);
@@ -249,7 +249,7 @@ scenario(int mode)
 	if (mode == 1)
 		assert(c.vector2 >= 2 && c.c.completions == 1);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
-	xtc_loop_fini(c.loop);
+	xtc_loop_destroy(c.loop);
 }
 /* These detect missing size/version checks, wrong-loop permission and treating
  * close/stop as reaping. All cleanup is completed before loop finalization. */
@@ -263,8 +263,8 @@ lifecycle(void)
 	xtc_batch_stats_t stats = { .size = sizeof(stats), .version = 2 };
 	uint64_t h[5];
 	int i;
-	assert(xtc_loop_init(&c.loop) == XTC_OK);
-	assert(xtc_loop_init(&other) == XTC_OK);
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
+	assert(xtc_loop_create(&other) == XTC_OK);
 	o = options(&c);
 	c.mode = 20;
 	assert(xtc_exec_class_create(other, 100, 0, &o.sched_class) == XTC_OK);
@@ -295,17 +295,17 @@ lifecycle(void)
 	assert(c.a.calls == 0 && c.a.completions == 4);
 	assert(xtc_batch_create(c.loop, &o, &unused) == XTC_E_AGAIN);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
-	assert(xtc_loop_fini(c.loop) == XTC_OK);
-	assert(xtc_loop_fini(other) == XTC_OK);
+	xtc_loop_destroy(c.loop);
+	xtc_loop_destroy(other);
 	c = (struct context) { 0 };
-	assert(xtc_loop_init(&c.loop) == XTC_OK);
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
 	o = options(&c);
 	assert(xtc_batch_create(c.loop, &o, &c.batch) == XTC_OK);
 	assert(xtc_batch_close(c.batch, XTC_BATCH_DRAIN) == XTC_OK);
 	assert(xtc_batch_destroy(c.batch) == XTC_E_AGAIN);
 	assert(xtc_loop_run(c.loop) == XTC_OK);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
-	assert(xtc_loop_fini(c.loop) == XTC_OK);
+	xtc_loop_destroy(c.loop);
 }
 
 static void
@@ -314,8 +314,8 @@ independent_loop_teardown(void)
 	struct context a = {0}, b = {0};
 	xtc_batch_opts_t o;
 
-	assert(xtc_loop_init(&a.loop) == XTC_OK);
-	assert(xtc_loop_init(&b.loop) == XTC_OK);
+	assert(xtc_loop_create(&a.loop) == XTC_OK);
+	assert(xtc_loop_create(&b.loop) == XTC_OK);
 	o = options(&a);
 	assert(xtc_batch_create(a.loop, &o, &a.batch) == XTC_OK);
 	o = options(&b);
@@ -328,8 +328,8 @@ independent_loop_teardown(void)
 	assert(xtc_batch_close(b.batch, XTC_BATCH_DRAIN) == XTC_OK);
 	assert(xtc_loop_run(b.loop) == XTC_OK);
 	assert(xtc_batch_destroy(b.batch) == XTC_OK);
-	assert(xtc_loop_fini(a.loop) == XTC_OK);
-	assert(xtc_loop_fini(b.loop) == XTC_OK);
+	xtc_loop_destroy(a.loop);
+	xtc_loop_destroy(b.loop);
 }
 
 #ifndef __has_feature
@@ -373,7 +373,7 @@ stop_is_not_drain(void)
 	struct context c = { 0 };
 	xtc_batch_opts_t o;
 	xtc_pid_t pid;
-	assert(xtc_loop_init(&c.loop) == XTC_OK);
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
 	o = options(&c);
 	assert(xtc_batch_create(c.loop, &o, &c.batch) == XTC_OK);
 	assert(xtc_proc_spawn(c.loop, stop_peer, &c, NULL, &pid) == XTC_OK);
@@ -382,7 +382,7 @@ stop_is_not_drain(void)
 	assert(xtc_proc_spawn(c.loop, close_peer, &c, NULL, &pid) == XTC_OK);
 	assert(xtc_loop_run(c.loop) == XTC_OK);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
-	assert(xtc_loop_fini(c.loop) == XTC_OK);
+	xtc_loop_destroy(c.loop);
 }
 
 static void
@@ -407,7 +407,7 @@ masked_wait_kill(void)
 	struct context c = { 0 };
 	xtc_batch_opts_t o;
 	xtc_pid_t pid;
-	assert(xtc_loop_init(&c.loop) == XTC_OK);
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
 	o = options(&c);
 	c.a.block = 1;
 	assert(xtc_batch_create(c.loop, &o, &c.batch) == XTC_OK);
@@ -416,7 +416,7 @@ masked_wait_kill(void)
 	assert(xtc_loop_run(c.loop) == XTC_OK);
 	assert(c.a.completions == 1 && c.a.outcome == XTC_E_ABORTED);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
-	assert(xtc_loop_fini(c.loop) == XTC_OK);
+	xtc_loop_destroy(c.loop);
 }
 
 extern void __xtc_batch_set_last_handle(xtc_batch_t *, uint64_t);
@@ -448,7 +448,7 @@ handle_exhaustion(void)
 	xtc_batch_stats_t s = { .size = sizeof(s), .version = 1 };
 	xtc_pid_t pid;
 	uint64_t h = 99;
-	assert(xtc_loop_init(&c.loop) == XTC_OK);
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
 	o = options(&c);
 	c.a.left = 1;
 	assert(xtc_batch_create(c.loop, &o, &c.batch) == XTC_OK);
@@ -466,7 +466,7 @@ handle_exhaustion(void)
 	       && c.last_done == UINT64_MAX);
 	assert(c.b.calls == 0 && c.b.completions == 0);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
-	assert(xtc_loop_fini(c.loop) == XTC_OK);
+	xtc_loop_destroy(c.loop);
 }
 
 /* resource_capacity == UINT64_MAX: a sum that would wrap is a refusal, and
@@ -506,7 +506,7 @@ charge_limits(void)
 	xtc_batch_opts_t o;
 	xtc_batch_stats_t s = { .size = sizeof(s), .version = 1 };
 	uint64_t h;
-	assert(xtc_loop_init(&c.loop) == XTC_OK);
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
 	o = options(&c);
 	o.max_active = 3;
 	o.resource_capacity = UINT64_MAX;
@@ -524,7 +524,7 @@ charge_limits(void)
 	assert(xtc_batch_get_stats(c.batch, &s) == XTC_OK);
 	assert(s.reserved_units == 0 && s.completed == 4 && s.rejections == 0);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
-	assert(xtc_loop_fini(c.loop) == XTC_OK);
+	xtc_loop_destroy(c.loop);
 }
 
 static struct __os_alloc_hook saved_hook;
@@ -615,7 +615,7 @@ allocation_failures(void)
 	assert(__os_alloc_set_hook(&h) == XTC_OK);
 	for (nth = 1; nth < 100; nth++) {
 		c = (struct context) { 0 };
-		assert(xtc_loop_init(&c.loop) == XTC_OK);
+		assert(xtc_loop_create(&c.loop) == XTC_OK);
 		o = options(&c);
 		alloc_attempt = 0;
 		fail_at = nth;
@@ -633,7 +633,7 @@ allocation_failures(void)
 		}
 		/* Lazy proc-table registration belongs to the loop, not the
 		 * group. */
-		assert(xtc_loop_fini(c.loop) == XTC_OK);
+		xtc_loop_destroy(c.loop);
 		assert(alloc_live == 0);
 		if (nth > attempts)
 			break;
@@ -655,7 +655,7 @@ storage_overflow(void)
 	int want = SIZE_MAX <= UINT32_MAX ? XTC_E_RANGE : XTC_E_NOMEM;
 	assert(__os_alloc_get_hook(&saved_hook) == XTC_OK);
 	assert(__os_alloc_set_hook(&h) == XTC_OK);
-	assert(xtc_loop_init(&c.loop) == XTC_OK);
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
 	o = options(&c);
 	o.capacity = UINT32_MAX;
 	o.max_active = 1;
@@ -663,7 +663,7 @@ storage_overflow(void)
 	assert(xtc_batch_create(c.loop, &o, &c.batch) == want);
 	alloc_cap = 0;
 	assert(c.batch == NULL);
-	assert(xtc_loop_fini(c.loop) == XTC_OK);
+	xtc_loop_destroy(c.loop);
 	assert(alloc_live == 0);
 	assert(__os_alloc_set_hook(&saved_hook) == XTC_OK);
 	printf("batch: storage overflow => %s\n",
@@ -697,7 +697,7 @@ noalloc(void)
 	xtc_pid_t pid;
 	assert(__os_alloc_get_hook(&saved_hook) == XTC_OK);
 	assert(__os_alloc_set_hook(&h) == XTC_OK);
-	assert(xtc_loop_init(&c.loop) == XTC_OK);
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
 	o = options(&c);
 	c.a.block = 1;
 	assert(xtc_batch_create(c.loop, &o, &c.batch) == XTC_OK);
@@ -707,7 +707,7 @@ noalloc(void)
 	alloc_deny = 0;
 	assert(c.a.completions == 1 && c.a.outcome == XTC_E_ABORTED);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
-	assert(xtc_loop_fini(c.loop) == XTC_OK);
+	xtc_loop_destroy(c.loop);
 	assert(alloc_live == 0);
 	assert(__os_alloc_set_hook(&saved_hook) == XTC_OK);
 }
@@ -913,7 +913,7 @@ async_finish(struct actx *c, int accepted)
 	assert(as.offloads == (uint64_t)c->submit_calls);
 	assert(as.offload_timeouts + as.offload_errors <= as.offloads);
 	assert(xtc_batch_destroy(c->batch) == XTC_OK);
-	assert(xtc_loop_fini(c->loop) == XTC_OK);
+	xtc_loop_destroy(c->loop);
 }
 
 static void
@@ -927,7 +927,7 @@ async_sync_kind(void)
 	c.want_cancel = -1;
 	for (i = 0; i < 3; ++i)
 		c.req[i].left = i + 1; /* variable length: 1,2,3 iterations */
-	assert(xtc_loop_init(&c.loop) == XTC_OK);
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
 	o = aopts(&c);
 	/* version 2 is unknown, max_active 0 is malformed, submit NULL rejected. */
 	o.version = XTC_BATCH_VERSION + 1;
@@ -967,7 +967,7 @@ async_blocking_kind(void)
 	c.kind = XTC_BATCH_EXEC_BLOCKING;
 	c.want_cancel = -1;
 	c.req[0].left = 1;
-	assert(xtc_loop_init(&c.loop) == XTC_OK);
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
 	o = aopts(&c);
 	assert(xtc_batch_create_async(c.loop, &o, &c.batch) == XTC_OK);
 	async_submit(&c, 0, 1);
@@ -990,7 +990,7 @@ async_future_kind(void)
 	c.want_cancel = -1;
 	for (i = 0; i < 2; ++i)
 		c.req[i].left = i + 1;
-	assert(xtc_loop_init(&c.loop) == XTC_OK);
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
 	o = aopts(&c);
 	assert(xtc_batch_create_async(c.loop, &o, &c.batch) == XTC_OK);
 	for (i = 0; i < 2; ++i)
@@ -1011,7 +1011,7 @@ async_cancel_inflight(void)
 	c.kind = XTC_BATCH_EXEC_FUTURE;
 	c.want_cancel = 0; /* cancel member 0 while its future is outstanding */
 	c.req[0].left = 3; /* multi-iteration so it is still live when cancelled */
-	assert(xtc_loop_init(&c.loop) == XTC_OK);
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
 	o = aopts(&c);
 	assert(xtc_batch_create_async(c.loop, &o, &c.batch) == XTC_OK);
 	async_submit(&c, 0, 1);
@@ -1031,7 +1031,7 @@ async_timeout(void)
 	c.want_cancel = -1;
 	c.timeout_ns = 1000000; /* 1ms; the future is never resolved */
 	c.req[0].left = 1;
-	assert(xtc_loop_init(&c.loop) == XTC_OK);
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
 	o = aopts(&c);
 	assert(xtc_batch_create_async(c.loop, &o, &c.batch) == XTC_OK);
 	async_submit(&c, 0, 1);
@@ -1071,7 +1071,7 @@ async_teardown_while_parked(void)
 	c.kind = XTC_BATCH_EXEC_FUTURE;
 	c.want_cancel = -1;
 	c.req[0].left = 5; /* never resolved; stays in flight until the cancel */
-	assert(xtc_loop_init(&c.loop) == XTC_OK);
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
 	o = aopts(&c);
 	assert(xtc_batch_create_async(c.loop, &o, &c.batch) == XTC_OK);
 	async_submit(&c, 0, 1);
@@ -1087,7 +1087,7 @@ async_teardown_while_parked(void)
 	 * no-op on the cell (ASan proves no UAF/leak either ordering). */
 	if (c.pending_prom != NULL)
 		xtc_promise_drop(c.pending_prom);
-	assert(xtc_loop_fini(c.loop) == XTC_OK);
+	xtc_loop_destroy(c.loop);
 	puts("batch-async: teardown-while-parked finalized exactly-once OK");
 }
 
@@ -1118,7 +1118,7 @@ async_teardown_resolved(void)
 	c.kind = XTC_BATCH_EXEC_FUTURE;
 	c.want_cancel = -1;
 	c.req[0].left = 5;
-	assert(xtc_loop_init(&c.loop) == XTC_OK);
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
 	o = aopts(&c);
 	assert(xtc_batch_create_async(c.loop, &o, &c.batch) == XTC_OK);
 	async_submit(&c, 0, 1);
@@ -1130,7 +1130,7 @@ async_teardown_resolved(void)
 	assert(c.req[0].completions == 1);
 	assert(c.req[0].outcome == XTC_E_ABORTED || c.req[0].outcome == XTC_OK);
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
-	assert(xtc_loop_fini(c.loop) == XTC_OK);
+	xtc_loop_destroy(c.loop);
 	puts("batch-async: teardown with resolved future finalized once OK");
 }
 
@@ -1165,7 +1165,7 @@ async_cancel_wakes_immediately(void)
 	c.kind = XTC_BATCH_EXEC_FUTURE;
 	c.want_cancel = -1;
 	c.req[0].left = 5; /* never resolved; only close(CANCEL) ends it */
-	assert(xtc_loop_init(&c.loop) == XTC_OK);
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
 	o = aopts(&c);
 	assert(xtc_batch_create_async(c.loop, &o, &c.batch) == XTC_OK);
 	async_submit(&c, 0, 1);
@@ -1178,7 +1178,7 @@ async_cancel_wakes_immediately(void)
 	assert(xtc_batch_destroy(c.batch) == XTC_OK);
 	if (c.pending_prom != NULL)
 		xtc_promise_drop(c.pending_prom);
-	assert(xtc_loop_fini(c.loop) == XTC_OK);
+	xtc_loop_destroy(c.loop);
 	puts("batch-async: cancel-close edge-wakes the await (no slice) OK");
 }
 
@@ -1213,7 +1213,7 @@ async_fence_kind(void)
 		puts("batch-async: FENCE test skipped (no eventfd)");
 		return;
 	}
-	assert(xtc_loop_init(&c.loop) == XTC_OK);
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
 	o = aopts(&c);
 	assert(xtc_batch_create_async(c.loop, &o, &c.batch) == XTC_OK);
 	async_submit(&c, 0, 1);
@@ -2632,7 +2632,7 @@ oc_setup(struct oc *c, const char *name, int kind, int64_t timeout_ns)
 	c->timeout_ns = timeout_ns;
 	o.exec_timeout_ns = timeout_ns;
 	o.user = c;
-	assert(xtc_loop_init(&c->loop) == XTC_OK);
+	assert(xtc_loop_create(&c->loop) == XTC_OK);
 	assert(xtc_batch_create_async(c->loop, &o, &c->batch) == XTC_OK);
 	assert(xtc_batch_submit(c->batch, NULL, 1, &h) == XTC_OK);
 	c->t0 = oc_now();
@@ -2654,7 +2654,7 @@ oc_run(struct oc *c, void (*peer)(void *), int device_ms)
 	xtc_atomic_store_i32(&c->done, 1, xtc_mo_seq_cst);
 	assert(pthread_join(wd, NULL) == 0);
 	assert(xtc_batch_destroy(c->batch) == XTC_OK);
-	assert(xtc_loop_fini(c->loop) == XTC_OK);
+	xtc_loop_destroy(c->loop);
 	printf("batch-async: %s: collects=%d status0=%d outcome=%d hints=%d "
 	       "t_collect=%.3f t_hint=%.3f\n",
 	    c->name, xtc_atomic_load_i32(&c->collects, xtc_mo_seq_cst),
@@ -2725,7 +2725,7 @@ async_blocking_refused(void)
 	c->name = "blocking refused";
 	c->kind = XTC_BATCH_EXEC_BLOCKING;
 	o.user = c;
-	assert(xtc_loop_init(&c->loop) == XTC_OK);
+	assert(xtc_loop_create(&c->loop) == XTC_OK);
 	assert(xtc_batch_create_async(c->loop, &o, &c->batch) == XTC_OK);
 	assert(xtc_batch_submit(c->batch, NULL, 1, &h) == XTC_OK);
 	assert(xtc_batch_close(c->batch, XTC_BATCH_DRAIN) == XTC_OK);
@@ -2734,7 +2734,7 @@ async_blocking_refused(void)
 	assert(c->statuses[0] == XTC_E_INVAL && c->outcome == XTC_E_INVAL);
 	assert(as.offload_errors == 1);
 	assert(xtc_batch_destroy(c->batch) == XTC_OK);
-	assert(xtc_loop_fini(c->loop) == XTC_OK);
+	xtc_loop_destroy(c->loop);
 	puts("batch-async: blocking closure refused -> negative exec_status OK");
 }
 
@@ -2880,7 +2880,7 @@ async_hint_on_landing(void)
 			       == XTC_OK);
 			assert(xtc_loop_run(c->loop) == XTC_OK);
 			assert(xtc_batch_destroy(c->batch) == XTC_OK);
-			assert(xtc_loop_fini(c->loop) == XTC_OK);
+			xtc_loop_destroy(c->loop);
 			break;
 		}
 #else

@@ -67,13 +67,13 @@ main(void)
 	 * Arm with a very long interval so the timeout never fires during
 	 * the run: every call is the not-due fast path (two loads of the
 	 * ring head/tail via io_uring_cq_ready). */
-	if (xtc_io_init(&io) != XTC_OK) {
-		fprintf(stderr, "xtc_io_init failed\n");
+	if (xtc_io_create(&io) != XTC_OK) {
+		fprintf(stderr, "xtc_io_create failed\n");
 		return 1;
 	}
 	if (__xtc_io_uring_preempt_arm(io, 3600LL * 1000000000LL) != XTC_OK) {
 		fprintf(stderr, "preempt_arm failed\n");
-		(void)xtc_io_fini(io);
+		xtc_io_destroy(io);
 		return 1;
 	}
 	t0 = xtc_clock_mono();
@@ -84,6 +84,6 @@ main(void)
 	    (double)(t1 - t0) / ITERS);
 
 	__xtc_io_uring_preempt_disarm(io);
-	(void)xtc_io_fini(io);
+	xtc_io_destroy(io);
 	return 0;
 }

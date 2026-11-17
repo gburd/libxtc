@@ -404,21 +404,21 @@ void __xtc_io_owner_leave(xtc_io_t *io);
  * Reap every file-AIO op still in the kernel (io_uring: bounded, then
  * cancelled; see io_uring.c __aio_drain), so the memory the kernel would
  * write -- the caller's xtc_aio_t and buffer -- can be freed.  Called by
- * xtc_loop_fini before any fiber stack goes, and by xtc_io_fini.  No-op
+ * xtc_loop_destroy before any fiber stack goes, and by xtc_io_destroy.  No-op
  * on other backends and when nothing is in flight.
  */
 void __xtc_io_aio_drain(xtc_io_t *io);
 
 /*
  * io_uring (XTC_E_NOSYS elsewhere): POLL_REMOVEs submitted, and
- * re-registrations served by adopting a lingering poll, since xtc_io_init.
+ * re-registrations served by adopting a lingering poll, since xtc_io_create.
  * Tests.  Out pointers may be NULL.
  */
 int __xtc_io_uring_poll_stats(xtc_io_t *io, unsigned long *cancels,
     unsigned long *adopted);
 
 /*
- * io_uring (XTC_E_NOSYS elsewhere): io_uring_enter calls since xtc_io_init
+ * io_uring (XTC_E_NOSYS elsewhere): io_uring_enter calls since xtc_io_create
  * that handed SQEs to the kernel, those that only waited for a completion
  * (a poll's wait; not the reap loop's task-work flush), and the SQEs
  * prepared but not yet submitted (see __submit_wait).  Tests.  Out

@@ -40,10 +40,10 @@ hooks have run, and each entry's destructor, if it has one, is invoked
 on its value.
 A proc still alive when its loop is finalized has its entries
 removed by
-.Fn xtc_loop_fini
+.Fn xtc_loop_destroy
 .Pq see Xr xtc_loop 3
 the same way; there the destructors run on the thread calling
-.Fn xtc_loop_fini ,
+.Fn xtc_loop_destroy ,
 not on the proc.
 .Pp
 The store lives in a side-table keyed by pid rather than embedded

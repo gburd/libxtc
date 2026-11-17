@@ -65,7 +65,7 @@ run2(xtc_proc_fn a, void *aa, xtc_proc_fn b, void *bb, xtc_pid_t *ra)
 {
 	xtc_loop_t *loop;
 	xtc_pid_t pa;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	g_loop = loop;
 	munit_assert_int(xtc_proc_spawn(loop, a, aa, NULL, &pa), ==, XTC_OK);
 	if (ra != NULL)
@@ -74,7 +74,7 @@ run2(xtc_proc_fn a, void *aa, xtc_proc_fn b, void *bb, xtc_pid_t *ra)
 		munit_assert_int(xtc_proc_spawn(loop, b, bb, NULL, NULL), ==,
 		    XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 }
 
 /* run2 once unaudited (warms the process-wide caches), then audited;

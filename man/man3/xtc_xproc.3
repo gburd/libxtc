@@ -229,7 +229,7 @@ returns the OS pid or -1.
 .Fn xtc_xproc_child_main
 returns the child's exit code.
 A child whose own runtime cannot start retries
-.Fn xtc_loop_init
+.Fn xtc_loop_create
 for about 2 seconds (1 ms back-off, doubling) when it fails with
 .Dv XTC_E_INTERNAL ,
 .Dv XTC_E_NOMEM

@@ -109,7 +109,7 @@ run_window(int use_shares, int a_shares, int b_shares,
 	xtc_atomic_store_long(&g_b_chunks, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_stop, 0, xtc_mo_seq_cst);
 
-	if (xtc_loop_init(&loop) != XTC_OK) {
+	if (xtc_loop_create(&loop) != XTC_OK) {
 		fprintf(stderr, "loop_init failed\n");
 		return -1;
 	}
@@ -123,7 +123,7 @@ run_window(int use_shares, int a_shares, int b_shares,
 		if (xtc_exec_class_create(loop, a_shares, 0, &ca) != XTC_OK ||
 		    xtc_exec_class_create(loop, b_shares, 0, &cb) != XTC_OK) {
 			fprintf(stderr, "class_create failed\n");
-			(void)xtc_loop_fini(loop);
+			xtc_loop_destroy(loop);
 			return -1;
 		}
 		oa.sched_class = ca;
@@ -139,7 +139,7 @@ run_window(int use_shares, int a_shares, int b_shares,
 	(void)xtc_proc_spawn(loop, timekeeper, NULL, NULL, NULL);
 
 	(void)xtc_loop_run(loop);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 
 	*out_a = xtc_atomic_load_long(&g_a_chunks, xtc_mo_seq_cst);
 	*out_b = xtc_atomic_load_long(&g_b_chunks, xtc_mo_seq_cst);

@@ -299,7 +299,7 @@ test_reg_crash_aware(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	memset(&c, 0, sizeof c);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_reg_create(&r), ==, XTC_OK);
 	c.reg = r;
 	c.loop = loop;
@@ -323,7 +323,7 @@ test_reg_crash_aware(const MunitParameter p[], void *d)
 	    ==, 1);
 
 	xtc_reg_destroy(r);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -389,10 +389,10 @@ test_reg_mon_no_silent_loss(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	g_rm_stale_ok = g_rm_present_failed = g_rm_failed = 0;
 	munit_assert_int(xtc_reg_create(&g_rm_reg), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&l), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&l), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(l, rm_driver, l, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(l), ==, XTC_OK);
-	(void)xtc_loop_fini(l);
+	xtc_loop_destroy(l);
 	xtc_reg_destroy(g_rm_reg);
 
 	/* The scenario must actually overflow enrollment -- otherwise the
@@ -758,7 +758,7 @@ test_reg_whereis_wait(const MunitParameter p[], void *d)
 	(void)p;
 	(void)d;
 	memset(&w, 0, sizeof w);
-	munit_assert_int(xtc_loop_init(&g_ww_loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&g_ww_loop), ==, XTC_OK);
 	munit_assert_int(xtc_reg_create(&w.r), ==, XTC_OK);
 	munit_assert_int(xtc_reg_whereis_wait(NULL, "x", XTC_PID_NONE, 0,
 	                     &w.got_fiber),
@@ -780,7 +780,7 @@ test_reg_whereis_wait(const MunitParameter p[], void *d)
 	munit_assert_int64(w.fiber_ns, <, 1000 * WW_MS);
 	munit_assert_int64(w.thread_ns, <, 1000 * WW_MS);
 	xtc_reg_destroy(w.r);
-	munit_assert_int(xtc_loop_fini(g_ww_loop), ==, XTC_OK);
+	xtc_loop_destroy(g_ww_loop);
 	return MUNIT_OK;
 }
 

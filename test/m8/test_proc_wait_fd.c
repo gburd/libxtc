@@ -61,7 +61,7 @@ test_wait_fd_readable(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	munit_assert_int(pipe(pipefd), ==, 0);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 
 	/* The "self" pid in this thread is initialized lazily; we spawn
 	 * a "collector" pseudo-proc by sending to ourselves once a real
@@ -95,7 +95,7 @@ test_wait_fd_readable(const MunitParameter p[], void *d)
 
 	(void)msg; (void)sz; (void)revents;
 	close(pipefd[0]); close(pipefd[1]);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -126,7 +126,7 @@ test_wait_fd_timeout(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&t_revents, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(pipe(pipefd), ==, 0);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, to_proc,
 	    (void *)(intptr_t)pipefd[0], NULL, &pid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
@@ -141,7 +141,7 @@ test_wait_fd_timeout(const MunitParameter p[], void *d)
 	    ==, 0);
 
 	close(pipefd[0]); close(pipefd[1]);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -180,7 +180,7 @@ test_wait_fd_idle_low_cpu(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&idle_proc_ran, 0, xtc_mo_seq_cst);
 
 	munit_assert_int(pipe(pipefd), ==, 0);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, idle_proc,
 	    (void *)(intptr_t)pipefd[0], NULL, &pid), ==, XTC_OK);
 
@@ -204,7 +204,7 @@ test_wait_fd_idle_low_cpu(const MunitParameter p[], void *d)
 	munit_assert_int64(cpu_us, <, wall_us / 10);  /* < 10% busy */
 
 	close(pipefd[0]); close(pipefd[1]);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -287,7 +287,7 @@ test_wait_fd_no_probe_per_park(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	(void)p; (void)d;
 	munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, g_wf_sv), ==, 0);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, wf_side, (void *)(intptr_t)0,
 	    NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, wf_side, (void *)(intptr_t)1,
@@ -296,7 +296,7 @@ test_wait_fd_no_probe_per_park(const MunitParameter p[], void *d)
 	g_wf_count_on = 1;
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	g_wf_count_on = 0;
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	(void)close(g_wf_sv[0]);
 	(void)close(g_wf_sv[1]);
 	munit_logf(MUNIT_LOG_INFO, "%d round trips: %ld fcntl calls", WF_ROUNDS,

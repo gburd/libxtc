@@ -432,8 +432,8 @@ xtc_exec_init(xtc_exec_t **out, int n_loops)
 	e->started = 0;
 
 	for (i = 0; i < n_loops; i++) {
-		if ((rc = xtc_loop_init(&e->loops[i])) != XTC_OK) {
-			while (--i >= 0) (void)xtc_loop_fini(e->loops[i]);
+		if ((rc = xtc_loop_create(&e->loops[i])) != XTC_OK) {
+			while (--i >= 0) xtc_loop_destroy(e->loops[i]);
 			/* loop_node is allocated above and must be released here
 			 * too -- omitting it leaked the array on every
 			 * partially-constructed executor (ASan-caught by the
@@ -461,7 +461,7 @@ xtc_exec_fini(xtc_exec_t *e)
 	if (e == NULL) return XTC_E_INVAL;
 	for (i = 0; i < e->n_loops; i++)
 		if (e->loops[i] != NULL)
-			(void)xtc_loop_fini(e->loops[i]);
+			xtc_loop_destroy(e->loops[i]);
 	__os_free(e->loops);
 	__os_free(e->workers);
 	__os_free(e->loop_node);

@@ -500,14 +500,14 @@ bench_fiber_switch(void)
 	xtc_task_t *t = NULL;
 
 	g_yield_iters = 10000000L * g_scale;
-	if (xtc_loop_init(&loop) != XTC_OK)
+	if (xtc_loop_create(&loop) != XTC_OK)
 		return -1.0;
 	if (xtc_async(loop, yield_coro, NULL, &t) != XTC_OK) {
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 		return -1.0;
 	}
 	(void)xtc_loop_run(loop);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	/*
 	 * Report ns per xtc_yield -- the full cooperative yield the
 	 * scheduler actually executes (fiber -> loop -> fiber), which
@@ -596,15 +596,15 @@ bench_proc_send_recv(void)
 	xtc_pid_t ping_pid;
 
 	g_pp_rounds = 2000000L * g_scale;
-	if (xtc_loop_init(&loop) != XTC_OK)
+	if (xtc_loop_create(&loop) != XTC_OK)
 		return -1.0;
 	if (xtc_proc_spawn(loop, pp_pong, NULL, NULL, &g_pp_pong) != XTC_OK ||
 	    xtc_proc_spawn(loop, pp_ping, NULL, NULL, &ping_pid) != XTC_OK) {
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 		return -1.0;
 	}
 	(void)xtc_loop_run(loop);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	/* One round = one send + one recv + one reply send + one recv. */
 	return (double)(g_pp_t1 - g_pp_t0) / (double)g_pp_rounds;
 }
@@ -637,15 +637,15 @@ bench_timer_set_fire(void)
 
 	g_tm_iters = 2000000L * g_scale;
 	g_tm_fired = 0;
-	if (xtc_loop_init(&g_tm_loop) != XTC_OK)
+	if (xtc_loop_create(&g_tm_loop) != XTC_OK)
 		return -1.0;
 	g_tm_t0 = now_ns();
 	if (xtc_timer_set(g_tm_loop, 0, tm_fire, NULL, &t) != XTC_OK) {
-		(void)xtc_loop_fini(g_tm_loop);
+		xtc_loop_destroy(g_tm_loop);
 		return -1.0;
 	}
 	(void)xtc_loop_run(g_tm_loop);
-	(void)xtc_loop_fini(g_tm_loop);
+	xtc_loop_destroy(g_tm_loop);
 	/* Each iteration is one set + one fire. */
 	return (double)(g_tm_t1 - g_tm_t0) / (double)g_tm_iters;
 }

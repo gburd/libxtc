@@ -95,7 +95,7 @@ main(void)
 	xtc_loop_t *loop;
 	xtc_pool_t *pool;
 
-	if (xtc_loop_init(&loop) != XTC_OK ||
+	if (xtc_loop_create(&loop) != XTC_OK ||
 	    xtc_pool_create(2, &pool) != XTC_OK)
 		return 1;
 	(void)xtc_pool_add(pool, &conns[0]);
@@ -103,7 +103,7 @@ main(void)
 	if (xtc_proc_spawn(loop, order, pool, NULL, NULL) != XTC_OK)
 		return 1;
 	(void)xtc_loop_run(loop);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	ok = ok && xtc_pool_available(pool) == 2;
 	xtc_pool_destroy(pool);
 	return ok ? 0 : 1;

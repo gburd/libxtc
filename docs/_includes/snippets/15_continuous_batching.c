@@ -82,7 +82,7 @@ main(void)
 	xtc_batch_opts_t opts;
 	int i, rc;
 
-	if (xtc_loop_init(&loop) != XTC_OK ||
+	if (xtc_loop_create(&loop) != XTC_OK ||
 	    xtc_exec_class_create(loop, 100, 0, &cls) != XTC_OK)
 		return 1;
 
@@ -99,7 +99,7 @@ main(void)
 	rc = xtc_batch_create(loop, &opts, &d.group);
 	if (rc == XTC_E_NOSYS) {
 		puts("batching not built (configure --enable-sched-policy)");
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 		return 0;
 	}
 	if (rc != XTC_OK ||
@@ -118,9 +118,9 @@ main(void)
 	if (xtc_batch_close(d.group, XTC_BATCH_DRAIN) != XTC_OK ||
 	    xtc_loop_run(loop) != XTC_OK ||
 	    xtc_batch_get_stats(d.group, &st) != XTC_OK ||
-	    xtc_batch_destroy(d.group) != XTC_OK ||
-	    xtc_loop_fini(loop) != XTC_OK)
+	    xtc_batch_destroy(d.group) != XTC_OK)
 		return 1;
+	xtc_loop_destroy(loop);
 	/* !endregion lifecycle */
 
 	printf("iterations=%llu members=%llu completed=%llu order=%u,%u,%u,%u "

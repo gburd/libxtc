@@ -11,7 +11,7 @@ for %%D in (os io evt ptc orc) do (
     if /I not "%%~nxF"=="os_unsafe_stub.c" set SRCS=!SRCS! "%%F"
   )
 )
-set SRCS=!SRCS! "%XTC_SRC%\src\xtc_version.c" "%XTC_SRC%\src\xtc_strerror.c"
+set SRCS=!SRCS! "%XTC_SRC%\src\xtc_version.c" "%XTC_SRC%\src\xtc_strerror.c" "%XTC_SRC%\src\xtc_deprecated.c"
 cl %CFLAGS% /c !SRCS!
 if errorlevel 1 exit /b 1
 lib /nologo /OUT:xtc.lib *.obj

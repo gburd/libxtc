@@ -110,14 +110,14 @@ main(void)
 {
 	struct run r = { 0 };
 
-	xtc_loop_init(&r.loop);
+	xtc_loop_create(&r.loop);
 	xtc_reg_create(&r.reg);
 	xtc_proc_spawn(r.loop, client, &r, NULL, NULL);
 	xtc_loop_run(r.loop);
 	if (r.root != NULL)
 		xtc_sup_join(r.root, -1);
 	xtc_reg_destroy(r.reg);
-	xtc_loop_fini(r.loop);
+	xtc_loop_destroy(r.loop);
 	return 0;
 }
 /* !endregion */

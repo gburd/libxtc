@@ -238,7 +238,7 @@ The rules the snippet follows:
   cancels it. The driver exits only when the loop runs, even for an
   empty group closed before the first run. `xtc_loop_stop` is not a
   drain: destroy returns `XTC_E_AGAIN` while the driver exists. Destroy
-  the group before `xtc_loop_fini`.
+  the group before `xtc_loop_destroy`.
 
 ### Alternatives not chosen
 

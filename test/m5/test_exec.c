@@ -1030,7 +1030,7 @@ test_blocking_kill_no_frame_escape(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_blk7_kill_status, -1, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_blk7_run_returned, 0, xtc_mo_seq_cst);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	opts.name = "blk7-victim";
 	munit_assert_int(xtc_proc_spawn(loop, blk7_victim_proc, NULL, &opts,
 	    &g_blk7_victim), ==, XTC_OK);
@@ -1060,7 +1060,7 @@ test_blocking_kill_no_frame_escape(const MunitParameter p[], void *d)
 	                     xtc_mo_seq_cst),
 	    ==, XTC_KILL_DEFERRED);
 
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 

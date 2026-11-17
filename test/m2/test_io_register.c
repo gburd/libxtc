@@ -44,13 +44,13 @@ test_reg_basic(const MunitParameter p[], void *d)
 	xtc_io_t *io;
 	int r, w, marker = 0;
 	(void)p; (void)d;
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	munit_assert_int(make_pipe(&r, &w), ==, 0);
 	munit_assert_int(xtc_io_reg_fd(io, r, XTC_IO_READABLE, &marker),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_io_del_fd(io, r), ==, XTC_OK);
 	test_pipe_close(r); test_pipe_close(w);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -60,14 +60,14 @@ test_reg_bad_args(const MunitParameter p[], void *d)
 {
 	xtc_io_t *io;
 	(void)p; (void)d;
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	munit_assert_int(xtc_io_reg_fd(NULL, 0, XTC_IO_READABLE, NULL),
 	    ==, XTC_E_INVAL);
 	munit_assert_int(xtc_io_reg_fd(io, -1, XTC_IO_READABLE, NULL),
 	    ==, XTC_E_INVAL);
 	munit_assert_int(xtc_io_reg_fd(io,  0, 0,                NULL),
 	    ==, XTC_E_INVAL);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -78,14 +78,14 @@ test_reg_duplicate(const MunitParameter p[], void *d)
 	xtc_io_t *io;
 	int r, w;
 	(void)p; (void)d;
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	munit_assert_int(make_pipe(&r, &w), ==, 0);
 	munit_assert_int(xtc_io_reg_fd(io, r, XTC_IO_READABLE, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_io_reg_fd(io, r, XTC_IO_READABLE, NULL),
 	    ==, XTC_E_INVAL);
 	test_pipe_close(r); test_pipe_close(w);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -96,7 +96,7 @@ test_mod_fd(const MunitParameter p[], void *d)
 	xtc_io_t *io;
 	int r, w, a = 1, b = 2;
 	(void)p; (void)d;
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	munit_assert_int(make_pipe(&r, &w), ==, 0);
 	munit_assert_int(xtc_io_reg_fd(io, r, XTC_IO_READABLE, &a),
 	    ==, XTC_OK);
@@ -105,7 +105,7 @@ test_mod_fd(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_io_mod_fd(io, 9999, XTC_IO_READABLE, NULL),
 	    ==, XTC_E_INVAL);     /* not registered */
 	test_pipe_close(r); test_pipe_close(w);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -138,7 +138,7 @@ test_mod_then_del_then_poll(const MunitParameter p[], void *d)
 	char buf[8];
 	int r, w, n_out, i, j, a = 1, b = 2, c = 3, e = 4, saw_new = 0;
 	(void)p; (void)d;
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	munit_assert_int(make_pipe(&r, &w), ==, 0);
 
 	/* --- Part A: the use-after-free / double-free shape. --- */
@@ -185,7 +185,7 @@ test_mod_then_del_then_poll(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_io_poll(io, evs, 8, 50 * 1000 * 1000LL, &n_out),
 	    ==, XTC_OK);
 	test_pipe_close(r); test_pipe_close(w);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -196,7 +196,7 @@ test_del_fd(const MunitParameter p[], void *d)
 	xtc_io_t *io;
 	int r, w;
 	(void)p; (void)d;
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	munit_assert_int(make_pipe(&r, &w), ==, 0);
 	munit_assert_int(xtc_io_reg_fd(io, r, XTC_IO_READABLE, NULL),
 	    ==, XTC_OK);
@@ -205,7 +205,7 @@ test_del_fd(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_io_mod_fd(io, r, XTC_IO_READABLE, NULL),
 	    ==, XTC_E_INVAL);
 	test_pipe_close(r); test_pipe_close(w);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -260,7 +260,7 @@ test_reg_with_pending_del(const MunitParameter p[], void *data)
 	if (strcmp(xtc_io_backend_name(), "uring") != 0)
 		return MUNIT_SKIP;
 
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	munit_assert_int(make_pipe(&r, &w), ==, 0);
 	pr[0] = r; pr[1] = w;
 
@@ -307,7 +307,7 @@ test_reg_with_pending_del(const MunitParameter p[], void *data)
 	}
 
 	(void)xtc_io_del_fd(io, r);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	test_pipe_close_pair(pr);
 	return MUNIT_OK;
 }
@@ -330,7 +330,7 @@ test_closed_registered_fd(const MunitParameter p[], void *d)
 	char c = 'x';
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	munit_assert_int(make_pipe(&dr, &dw), ==, 0);
 	munit_assert_int(make_pipe(&lr, &lw), ==, 0);
 	munit_assert_int(xtc_io_reg_fd(io, dr, XTC_IO_READABLE, (void *)1),
@@ -356,7 +356,7 @@ test_closed_registered_fd(const MunitParameter p[], void *d)
 	(void)xtc_io_del_fd(io, dr);        /* may already be gone */
 	(void)close(lr);
 	(void)close(lw);
-	(void)xtc_io_fini(io);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 #endif
@@ -476,7 +476,7 @@ test_overflow_no_leak(const MunitParameter p[], void *d)
 		    ==, 0);
 		munit_assert_int(fcntl(sp[i][0], F_SETFL, O_NONBLOCK), ==, 0);
 	}
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	for (round = 0; round < 2; round++) {
 		munit_assert_int(r7_round(io, sp, seen, N), ==, N);
 		if (!uring)
@@ -511,7 +511,7 @@ test_overflow_no_leak(const MunitParameter p[], void *d)
 	}
 	munit_assert_int(r7_round(io, sp, seen, N), ==, N);
 
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	for (i = 0; i < N; i++) {
 		(void)close(sp[i][0]);
 		(void)close(sp[i][1]);

@@ -142,7 +142,7 @@ test_ready_no_cancel(const MunitParameter p[], void *d)
 
 	if (!is_uring())
 		return MUNIT_SKIP;
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	sockpair(sp);
 	for (k = 0; k < 100; k++) {
 		munit_assert_int(xtc_io_reg_fd(io, sp[0], XTC_IO_READABLE, &tag),
@@ -157,7 +157,7 @@ test_ready_no_cancel(const MunitParameter p[], void *d)
 	munit_assert_ulong(cancels(io), ==, 0);
 	close(sp[0]);
 	close(sp[1]);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -170,7 +170,7 @@ test_idle_repark(const MunitParameter p[], void *d)
 
 	if (!is_uring())
 		return MUNIT_SKIP;
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	sockpair(sp);
 	for (k = 0; k < 100; k++) {
 		munit_assert_int(xtc_io_reg_fd(io, sp[0], XTC_IO_READABLE, &tag),
@@ -190,7 +190,7 @@ test_idle_repark(const MunitParameter p[], void *d)
 	    XTC_IO_READABLE);
 	close(sp[0]);
 	close(sp[1]);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -203,7 +203,7 @@ test_linger_fires(const MunitParameter p[], void *d)
 
 	if (!is_uring())
 		return MUNIT_SKIP;
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	sockpair(sp);
 	prime(io, sp[0], &tag);
 	munit_assert_int(xtc_io_reg_fd(io, sp[0], XTC_IO_READABLE, &tag), ==,
@@ -224,7 +224,7 @@ test_linger_fires(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_io_del_fd(io, sp[0]), ==, XTC_OK);
 	close(sp[0]);
 	close(sp[1]);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -237,7 +237,7 @@ test_linger_reused_fd(const MunitParameter p[], void *d)
 
 	if (!is_uring())
 		return MUNIT_SKIP;
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	sockpair(a);
 	fd = a[0];
 	prime(io, fd, &tag);
@@ -269,7 +269,7 @@ test_linger_reused_fd(const MunitParameter p[], void *d)
 	close(a[1]);
 	close(b[0]);
 	close(b[1]);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -282,7 +282,7 @@ test_linger_expires(const MunitParameter p[], void *d)
 
 	if (!is_uring())
 		return MUNIT_SKIP;
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	sockpair(sp);
 	prime(io, sp[0], &tag);
 	munit_assert_int(xtc_io_reg_fd(io, sp[0], XTC_IO_READABLE, &tag), ==,
@@ -304,7 +304,7 @@ test_linger_expires(const MunitParameter p[], void *d)
 	munit_assert_ulong(cancels(io), ==, 2);   /* prime's + the expiry */
 	close(sp[0]);
 	close(sp[1]);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -317,7 +317,7 @@ test_level_kept(const MunitParameter p[], void *d)
 
 	if (!is_uring())
 		return MUNIT_SKIP;
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	sockpair(sp);
 	munit_assert_int(xtc_io_reg_fd(io, sp[0], XTC_IO_READABLE, &tag), ==,
 	    XTC_OK);
@@ -329,7 +329,7 @@ test_level_kept(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_io_del_fd(io, sp[0]), ==, XTC_OK);
 	close(sp[0]);
 	close(sp[1]);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -351,7 +351,7 @@ test_reg_past_table(const MunitParameter p[], void *d)
 		if (getrlimit(RLIMIT_NOFILE, &rl) != 0 || rl.rlim_cur < 4096)
 			return MUNIT_SKIP;
 	}
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	sockpair(sp);
 	/* Far past the initial table, and past any table a grown one
 	 * would have: the lookup must not index it before it grows. */
@@ -366,7 +366,7 @@ test_reg_past_table(const MunitParameter p[], void *d)
 	close(fd);
 	close(sp[0]);
 	close(sp[1]);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -421,7 +421,7 @@ test_idle_many(const MunitParameter p[], void *d)
 		sockpair(g_sp[i]);
 	xtc_atomic_store_i32(&g_timeouts, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_bad, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	for (i = 0; i < NIDLE; i++)
 		munit_assert_int(xtc_proc_spawn(loop, idle_fiber,
 		    (void *)(intptr_t)i, NULL, NULL), ==, XTC_OK);
@@ -441,7 +441,7 @@ test_idle_many(const MunitParameter p[], void *d)
 	munit_assert_ulong(cancels(loop->io), <=, 2 * NIDLE + NIDLE / 8);
 	munit_assert_ulong(adopted(loop->io), >=,
 	    (unsigned long)NIDLE * (ROUNDS - 2) * 7 / 8);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	for (i = 0; i < NIDLE; i++) {
 		close(g_sp[i][0]);
 		close(g_sp[i][1]);

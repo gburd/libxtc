@@ -98,7 +98,7 @@ test_in_proc_liveness(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_a_ok, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_b_ran, 0, xtc_mo_seq_cst);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	opts.name = "A";
 	munit_assert_int(xtc_proc_spawn(loop, proc_a, NULL, &opts, &a),
 	    ==, XTC_OK);
@@ -106,7 +106,7 @@ test_in_proc_liveness(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, proc_b, NULL, &opts, &b),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 
 	/* A's offload returned the right value. */
 	munit_assert_int(xtc_atomic_load_i32(&g_a_ok, xtc_mo_seq_cst), ==, 1);
@@ -157,7 +157,7 @@ test_concurrent(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	xtc_atomic_store_i32(&g_conc_ok, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	for (i = 0; i < NCONC; i++) {
 		/* values 1..NCONC ms; all offloaded through a 4-thread pool */
 		opts.name = "c";
@@ -165,7 +165,7 @@ test_concurrent(const MunitParameter p[], void *d)
 		    (void *)(intptr_t)(i + 1), &opts, &pid), ==, XTC_OK);
 	}
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(xtc_atomic_load_i32(&g_conc_ok, xtc_mo_seq_cst), ==,
 	    NCONC);
 	return MUNIT_OK;
@@ -224,12 +224,12 @@ test_file_offload(const MunitParameter p[], void *d)
 	memset(pattern, 'Z', sizeof pattern);
 	munit_assert_int((int)write(fd, pattern, sizeof pattern), ==, 512);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	opts.name = "file";
 	munit_assert_int(xtc_proc_spawn(loop, file_proc,
 	    (void *)(intptr_t)fd, &opts, &pid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 
 	(void)close(fd);
 	(void)unlink(path);
@@ -241,10 +241,10 @@ test_file_offload(const MunitParameter p[], void *d)
 /* ---- loop teardown with a fiber parked on the pool ----
  * The loop is stopped and finalized while a fiber waits in
  * xtc_blocking_run.  fn writes into that fiber's frame when it returns,
- * and the pool then wakes the fiber's task, so xtc_loop_fini must not
+ * and the pool then wakes the fiber's task, so xtc_loop_destroy must not
  * free either before fn is done.  Through 2.2 it did not wait: fn and
  * the wake landed in freed memory (ASan: heap-use-after-free in
- * xtc_waker_wake), and xtc_loop_fini returned with fn still running. */
+ * xtc_waker_wake), and xtc_loop_destroy returned with fn still running. */
 static int g_fini_fn_done;
 
 static int
@@ -281,7 +281,7 @@ test_loop_fini_waits(const MunitParameter p[], void *d)
 	(void)d;
 
 	xtc_atomic_store_i32(&g_fini_fn_done, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, fini_parker, NULL, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, fini_stopper, loop, NULL, NULL),
@@ -289,7 +289,7 @@ test_loop_fini_waits(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_atomic_load_i32(&g_fini_fn_done, xtc_mo_seq_cst),
 	    ==, 0);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(xtc_atomic_load_i32(&g_fini_fn_done, xtc_mo_seq_cst),
 	    ==, 1);
 	return MUNIT_OK;
@@ -412,12 +412,12 @@ test_off_loop(const MunitParameter p[], void *d)
 
 	/* From a fiber it must be rejected (use xtc_blocking_run there). */
 	xtc_atomic_store_i32(&g_off_from_fiber_rc, XTC_OK, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	opts.name = "offfib";
 	munit_assert_int(xtc_proc_spawn(loop, off_from_fiber_proc, NULL,
 	    &opts, &pid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(xtc_atomic_load_i32(&g_off_from_fiber_rc,
 	                     xtc_mo_seq_cst),
 	    ==, XTC_E_INVAL);
@@ -468,7 +468,7 @@ test_pool_grows(const MunitParameter p[], void *d)
 
 	xtc_atomic_store_i32(&g_grow_ok, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i64(&g_grow_wall_start, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	opts.name = "t";
 	munit_assert_int(xtc_proc_spawn(loop, grow_timer_proc, NULL, &opts, &pid),
 	    ==, XTC_OK);
@@ -480,7 +480,7 @@ test_pool_grows(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	(void)__os_clock_mono(&t1);
 	xtc_atomic_store_i64(&g_grow_wall_end, t1, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 
 	/* All offloads returned correctly. */
 	munit_assert_int(xtc_atomic_load_i32(&g_grow_ok, xtc_mo_seq_cst), ==,
@@ -538,12 +538,12 @@ test_pool_size(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_blocking_pool_size(2), ==, XTC_OK);
 
 	/* Start the pool for real via a fiber that offloads. */
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	opts.name = "off";
 	munit_assert_int(xtc_proc_spawn(loop, pool_size_offload_proc, NULL,
 	    &opts, &pid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 
 	/* Too late now: the pool is live, so pinning is rejected. */
 	munit_assert_int(xtc_blocking_pool_size(4), ==, XTC_E_INVAL);
@@ -615,7 +615,7 @@ test_no_fd_per_call(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_fd_off_loop, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_fd_ok, 0, xtc_mo_seq_cst);
 	g_fd_loop_thr = pthread_self();
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	for (i = 0; i < NFD; i++) {
 		opts.name = "fd";
 		munit_assert_int(xtc_proc_spawn(loop, fd_proc,
@@ -638,7 +638,7 @@ test_no_fd_per_call(const MunitParameter p[], void *d)
 #else
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 #endif
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(xtc_atomic_load_i32(&g_fd_on_loop, xtc_mo_seq_cst), ==,
 	    0);
 	munit_assert_int(xtc_atomic_load_i32(&g_fd_off_loop, xtc_mo_seq_cst),

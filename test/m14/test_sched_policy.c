@@ -84,7 +84,7 @@ scenario(int choice, int steal, int changed)
 	xtc_sched_stats_t s = {0};
 	xtc_task_t *t;
 	int i, id, n = changed ? 1 : 4;
-	assert(xtc_loop_init(&c.loop) == XTC_OK);
+	assert(xtc_loop_create(&c.loop) == XTC_OK);
 	__xtc_current_loop = c.loop;
 	c.choice = choice; c.steal = steal; c.changed = changed;
 	p.size = sizeof p; p.version = 1; p.max_bypass = 3;
@@ -129,7 +129,7 @@ scenario(int choice, int steal, int changed)
 	assert(s.selections == (uint64_t)c.calls);
 	if (choice == 99) assert(s.invalid_choices > 0 && s.fallbacks > 0);
 	if (choice == 0 && !changed) assert(s.fairness_overrides > 0);
-	assert(xtc_loop_fini(c.loop) == XTC_OK);
+	xtc_loop_destroy(c.loop);
 	__xtc_current_loop = NULL;
 }
 #ifdef XTC_IO_BACKEND_SIM
@@ -274,7 +274,7 @@ main(int argc, char **argv)
 	(void)argc;
 	(void)argv;
 #endif
-	assert(xtc_loop_init(&loop) == XTC_OK);
+	assert(xtc_loop_create(&loop) == XTC_OK);
 #ifdef XTC_ENABLE_SCHED_POLICY
 	assert(xtc_sched_policy_set(loop, NULL) == XTC_OK);
 	(void)__xtc_loop_step_once(loop); /* Empty first step still freezes. */
@@ -294,7 +294,7 @@ main(int argc, char **argv)
 	assert(xtc_sched_policy_set(loop, NULL) == XTC_E_NOSYS);
 	assert(xtc_sched_get_stats(loop, NULL) == XTC_E_NOSYS);
 #endif
-	assert(xtc_loop_fini(loop) == XTC_OK);
+	xtc_loop_destroy(loop);
 	puts("sched policy OK");
 	return 0;
 }

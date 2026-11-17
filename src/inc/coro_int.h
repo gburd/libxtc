@@ -136,7 +136,7 @@ int  __xtc_stack_size_norm(size_t bytes, size_t *out);
  * primitives (e.g. xtc_amutex) find the current task to park it. */
 xtc_task_t *__xtc_current_task(void);
 
-/* xtc_loop_fini: unmap the loop's spare fiber stacks (a no-op for the
+/* xtc_loop_destroy: unmap the loop's spare fiber stacks (a no-op for the
  * winfiber substrate, which does not mmap its stacks). */
 void __xtc_coro_stack_spare_fini(xtc_loop_t *loop);
 

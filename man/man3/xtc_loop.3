@@ -4,8 +4,8 @@
 .Dt XTC_LOOP 3
 .Os
 .Sh NAME
-.Nm xtc_loop_init ,
-.Nm xtc_loop_fini ,
+.Nm xtc_loop_create ,
+.Nm xtc_loop_destroy ,
 .Nm xtc_loop_run ,
 .Nm xtc_loop_stop ,
 .Nm xtc_loop_wake ,
@@ -17,14 +17,16 @@
 .Nm xtc_waker_wake ,
 .Nm xtc_timer_set ,
 .Nm xtc_timer_cancel ,
-.Nm xtc_timer_release
+.Nm xtc_timer_release ,
+.Nm xtc_loop_init ,
+.Nm xtc_loop_fini
 .Nd L2 single-thread event loop, tasks, wakers, timers
 .Sh SYNOPSIS
 .In xtc_loop.h
 .Ft int
-.Fn xtc_loop_init "xtc_loop_t **out"
-.Ft int
-.Fn xtc_loop_fini "xtc_loop_t *loop"
+.Fn xtc_loop_create "xtc_loop_t **out"
+.Ft void
+.Fn xtc_loop_destroy "xtc_loop_t *loop"
 .Ft int
 .Fn xtc_loop_run "xtc_loop_t *loop"
 .Ft int
@@ -72,7 +74,7 @@ so its handle names that task only until it returns
 A coroutine created with
 .Xr xtc_async 3
 and a handle is reaped at
-.Fn xtc_loop_fini ,
+.Fn xtc_loop_destroy ,
 so that handle stays valid, and
 .Fn xtc_await
 can read its result, until then.
@@ -94,7 +96,7 @@ The task is waiting on a wakeup; do not run it again until either
 its waker fires or the timer / fd it parked on becomes ready.
 .El
 .Sh LIFECYCLE
-.Fn xtc_loop_init
+.Fn xtc_loop_create
 allocates a fresh loop with no spawned tasks.  Each loop owns a
 resource accountant
 .Pq Vt xtc_res_t
@@ -128,7 +130,7 @@ The nudge is lost-wake-free (it writes the loop's wakeup fd, which the
 backends keep armed across the drain) and delivers no event, so a
 spurious wake is always safe.
 .Pp
-.Fn xtc_loop_fini
+.Fn xtc_loop_destroy
 frees every task still held by the loop, every timer ever created
 (live or fired), the loop's
 .Vt xtc_io_t ,
@@ -149,7 +151,7 @@ be told to exit, for example with
 .Pq see Xr xtc_proc 3 ,
 and allowed to finish before the loop is finalized.
 Messages sent to such a process after
-.Fn xtc_loop_fini
+.Fn xtc_loop_destroy
 are dropped.
 .Sh TASKS
 .Fn xtc_task_spawn
@@ -252,7 +254,7 @@ The handle must not be used after the release.
 Every handle should be released or cancelled-and-released: a handle
 that is never released keeps its timer (about 128 bytes) allocated
 until
-.Fn xtc_loop_fini ,
+.Fn xtc_loop_destroy ,
 which on a long-running loop is unbounded growth.
 .Fn xtc_timer_release
 was added in 1.55.1; before it, every
@@ -260,7 +262,7 @@ was added in 1.55.1; before it, every
 timer, and every
 .Fn xtc_future_with_timeout ,
 was retained until
-.Fn xtc_loop_fini .
+.Fn xtc_loop_destroy .
 .Fn xtc_timer_cancel
 and
 .Fn xtc_timer_release
@@ -298,13 +300,27 @@ static int hello(xtc_task_t *self, void *u) {
 
 int main(void) {
         xtc_loop_t *loop;
-        xtc_loop_init(&loop);
+        xtc_loop_create(&loop);
         xtc_task_spawn(loop, hello, NULL, NULL);
         xtc_loop_run(loop);
-        xtc_loop_fini(loop);
+        xtc_loop_destroy(loop);
         return 0;
 }
 .Ed
+.Sh DEPRECATED
+These names still work through the rest of 2.x and are
+removed in 3.0; see
+.Lk https://codeberg.org/gregburd/libxtc/src/branch/main/docs/deprecations.md docs/deprecations.md .
+A rebuild that uses one warns.
+.Bl -tag -width Ds
+.It Fn xtc_loop_init
+Use
+.Fn xtc_loop_create .
+.It Fn xtc_loop_fini
+Use
+.Fn xtc_loop_destroy ;
+the new name returns void; the old one returns XTC_E_INVAL for NULL, else XTC_OK.
+.El
 .Sh SEE ALSO
 .Xr xtc_io 3 ,
 .Xr xtc 7

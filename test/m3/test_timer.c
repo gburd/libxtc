@@ -33,7 +33,7 @@ test_timer_basic(const MunitParameter p[], void *d)
 	xtc_timer_t *t;
 	int64_t before;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	basic_fired = 0;
 	munit_assert_int(__os_clock_mono(&before), ==, XTC_OK);
 	munit_assert_int(xtc_timer_set(loop, 5 * XTC_NS_PER_MS,
@@ -41,7 +41,7 @@ test_timer_basic(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(basic_fired, ==, 1);
 	munit_assert_int64(basic_fire_time - before, >=, 5 * XTC_NS_PER_MS);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -60,7 +60,7 @@ test_order(const MunitParameter p[], void *d)
 	int i;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	order_idx = 0;
 	for (i = 0; i < 5; i++)
 		munit_assert_int(xtc_timer_set(loop,
@@ -70,7 +70,7 @@ test_order(const MunitParameter p[], void *d)
 	munit_assert_int(order_idx, ==, 5);
 	for (i = 0; i < 5; i++)
 		munit_assert_int(order_log[i], ==, sorted[i]);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -84,14 +84,14 @@ test_cancel_before_fire(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	xtc_timer_t *t;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	cancel_fired = 0;
 	munit_assert_int(xtc_timer_set(loop, 5 * XTC_NS_PER_MS,
 	    cancel_cb, NULL, &t), ==, XTC_OK);
 	munit_assert_int(xtc_timer_cancel(t), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(cancel_fired, ==, 0);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -102,13 +102,13 @@ test_cancel_after_fire(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	xtc_timer_t *t;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_timer_set(loop, 1 * XTC_NS_PER_MS,
 	    basic_cb, NULL, &t), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	/* Now t has fired; cancelling is a safe no-op. */
 	munit_assert_int(xtc_timer_cancel(t), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -135,7 +135,7 @@ test_many_timers(const MunitParameter p[], void *d)
 	int i;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	many_fired = 0; many_last = 0; many_in_order = 1;
 	for (i = 0; i < MANY; i++) {
 		ids[i] = i;
@@ -148,7 +148,7 @@ test_many_timers(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(many_fired, ==, MANY);
 	munit_assert_int(many_in_order, ==, 1);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -175,7 +175,7 @@ test_park_on_timer(const MunitParameter p[], void *d)
 	struct pt c = { 0 };
 	int64_t before, after;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	park_runs = 0;
 	munit_assert_int(__os_clock_mono(&before), ==, XTC_OK);
 	munit_assert_int(xtc_task_spawn(loop, park_task, &c, NULL), ==, XTC_OK);
@@ -183,7 +183,7 @@ test_park_on_timer(const MunitParameter p[], void *d)
 	munit_assert_int(__os_clock_mono(&after), ==, XTC_OK);
 	munit_assert_int(park_runs, ==, 2);
 	munit_assert_int64(after - before, >=, 5 * XTC_NS_PER_MS);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -228,7 +228,7 @@ test_timer_under_busy_runqueue(const MunitParameter p[], void *d)
 	xtc_timer_t *t;
 	int64_t before, after;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	busy_timer_fired = 0;
 	busy_starved = 0;
 	munit_assert_int(__os_clock_mono(&before), ==, XTC_OK);
@@ -247,7 +247,7 @@ test_timer_under_busy_runqueue(const MunitParameter p[], void *d)
 	/* And it fired reasonably promptly -- well under the starvation
 	 * bound (a loose 500ms ceiling; the deadline is 5ms). */
 	munit_assert_int64(after - before, <, 500 * XTC_NS_PER_MS);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -261,7 +261,7 @@ test_timer_under_busy_runqueue(const MunitParameter p[], void *d)
  * pushed onto the slab's free list as a foreign pointer and lost when the
  * slab was destroyed.  Counted here through the allocator hook (no
  * sanitizer needed): every calloc/malloc the loop makes must be matched
- * by a free by the time xtc_loop_fini returns.  Fails on the unfixed code
+ * by a free by the time xtc_loop_destroy returns.  Fails on the unfixed code
  * (one live allocation per park); passes with it. */
 static long g_tm12_live;
 static struct __os_alloc_hook g_tm12_saved;
@@ -346,7 +346,7 @@ test_park_timers_freed_with_slab(const MunitParameter p[], void *d)
 	xtc_atomic_store_long(&g_tm12_live, 0, xtc_mo_seq_cst);
 	munit_assert_int(__os_alloc_set_hook(&h), ==, XTC_OK);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	/* Creates the loop's timer slab -- the trigger.  1us, so the loop
 	 * does not wait on it. */
 	munit_assert_int(xtc_timer_set(loop, 1000, tm12_noop, NULL, NULL),
@@ -356,7 +356,7 @@ test_park_timers_freed_with_slab(const MunitParameter p[], void *d)
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(parks, ==, TM12_PARKS + 1);   /* really parked */
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 
 	munit_assert_int(__os_alloc_set_hook(&g_tm12_saved), ==, XTC_OK);
 	leaked = xtc_atomic_load_long(&g_tm12_live, xtc_mo_seq_cst);
@@ -414,12 +414,12 @@ static MunitResult
 test_cancel_removes_owner(const MunitParameter p[], void *d)
 {
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&g_tm13_loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&g_tm13_loop), ==, XTC_OK);
 	munit_assert_int(xtc_task_spawn(g_tm13_loop, tm13_task, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(g_tm13_loop), ==, XTC_OK);
 	munit_assert_int(g_tm13_loop->n_timers, ==, 0);
-	munit_assert_int(xtc_loop_fini(g_tm13_loop), ==, XTC_OK);
+	xtc_loop_destroy(g_tm13_loop);
 	return MUNIT_OK;
 }
 
@@ -428,11 +428,11 @@ test_cancel_removes_offloop(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	tm13_churn(loop);          /* off the loop's thread (not running) */
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);   /* nothing live */
 	munit_assert_int(loop->n_timers, ==, 0);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -489,7 +489,7 @@ test_cancel_removes_timed_recv(const MunitParameter p[], void *d)
 	xtc_pid_t t;
 	(void)p; (void)d;
 	g_tm13_stop = 0;
-	munit_assert_int(xtc_loop_init(&g_tm13_loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&g_tm13_loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(g_tm13_loop, tm13_ticker, NULL, NULL,
 	    &t), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(g_tm13_loop, tm13_pong, NULL, NULL,
@@ -500,12 +500,12 @@ test_cancel_removes_timed_recv(const MunitParameter p[], void *d)
 	munit_logf(MUNIT_LOG_INFO, "%d timed-recv round trips behind a live "
 	    "ticker: max heap %d", TM13_ROUNDS, g_tm13_max);
 	munit_assert_int(g_tm13_max, <, TM13_BOUND);
-	munit_assert_int(xtc_loop_fini(g_tm13_loop), ==, XTC_OK);
+	xtc_loop_destroy(g_tm13_loop);
 	return MUNIT_OK;
 }
 
 /* [Tm14] M4 (review155): an xtc_timer_set timer must be reclaimable during
- * the run.  v1.55.0 kept every one on all_timers until xtc_loop_fini
+ * the run.  v1.55.0 kept every one on all_timers until xtc_loop_destroy
  * (+128 B per timer; rt.c case D: 1M timers, +125 MB), and every
  * xtc_future_with_timeout called xtc_timer_set.  Measured as the timers
  * still allocated from the loop's timer slab (white-box n_inuse) after
@@ -558,7 +558,7 @@ test_timer_set_reclaimed(const MunitParameter p[], void *d)
 	xtc_pid_t pid;
 	(void)p; (void)d;
 	g_tm14_fired = 0;
-	munit_assert_int(xtc_loop_init(&g_tm14_loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&g_tm14_loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(g_tm14_loop, tm14_set_proc, NULL,
 	    NULL, &pid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(g_tm14_loop), ==, XTC_OK);
@@ -566,7 +566,7 @@ test_timer_set_reclaimed(const MunitParameter p[], void *d)
 	    "allocated %ld", TM14_N, g_tm14_fired, g_tm14_inuse);
 	munit_assert_long(g_tm14_fired, ==, 2L * TM14_N);
 	munit_assert_long(g_tm14_inuse, <, TM14_BOUND);
-	munit_assert_int(xtc_loop_fini(g_tm14_loop), ==, XTC_OK);
+	xtc_loop_destroy(g_tm14_loop);
 	return MUNIT_OK;
 }
 
@@ -610,14 +610,14 @@ test_future_timeout_reclaimed(const MunitParameter p[], void *d)
 {
 	xtc_pid_t pid;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&g_tm14_loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&g_tm14_loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(g_tm14_loop, tm14_future_proc, NULL,
 	    NULL, &pid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(g_tm14_loop), ==, XTC_OK);
 	munit_logf(MUNIT_LOG_INFO, "%d xtc_future_with_timeout: timers still "
 	    "allocated %ld", TM14_N, g_tm14_inuse);
 	munit_assert_long(g_tm14_inuse, <, TM14_BOUND);
-	munit_assert_int(xtc_loop_fini(g_tm14_loop), ==, XTC_OK);
+	xtc_loop_destroy(g_tm14_loop);
 	return MUNIT_OK;
 }
 
@@ -686,12 +686,12 @@ test_heap_slots_consistent(const MunitParameter p[], void *d)
 	xtc_pid_t pid;
 	(void)p; (void)d;
 	g_tm15_fired = 0;
-	munit_assert_int(xtc_loop_init(&g_tm15_loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&g_tm15_loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(g_tm15_loop, tm15_proc, NULL, NULL,
 	    &pid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(g_tm15_loop), ==, XTC_OK);
 	munit_assert_int(g_tm15_fired, ==, 256);
-	munit_assert_int(xtc_loop_fini(g_tm15_loop), ==, XTC_OK);
+	xtc_loop_destroy(g_tm15_loop);
 	return MUNIT_OK;
 }
 
@@ -756,7 +756,7 @@ test_fire_clears_own_slot(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	g_tm16_b = g_tm16_slot = NULL;
 	g_tm16_refs = 0;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_task_spawn(loop, tm16_task, &phase, NULL), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
@@ -765,7 +765,7 @@ test_fire_clears_own_slot(const MunitParameter p[], void *d)
 	munit_assert_ptr_equal(g_tm16_slot, g_tm16_b);
 	munit_assert_int(g_tm16_refs, ==, 2);   /* heap + slot */
 	munit_assert_int(loop->n_timers, ==, 0);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 

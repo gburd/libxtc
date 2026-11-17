@@ -181,7 +181,7 @@ __stack_pool_put(void *base, size_t stack_sz)
  * small locked spare on its task's HOME loop, and a spawn onto that loop
  * whose thread pool is empty takes from it.  Bounded per loop
  * (XTC_LOOP_STACK_SPARE), filled only on a loop that other threads spawn
- * onto, and unmapped at xtc_loop_fini, so retention stays bounded by the
+ * onto, and unmapped at xtc_loop_destroy, so retention stays bounded by the
  * live count plus the pools, never by history.
  * The spinlock is held for a few loads and stores; never across a yield,
  * an allocation, a syscall or another lock; preemption deferred. */
@@ -253,7 +253,7 @@ __stack_spare_put(xtc_loop_t *l, void *base, size_t stack_sz)
 	return ok;
 }
 
-/* xtc_loop_fini, after every task's cleanup has run (single-threaded). */
+/* xtc_loop_destroy, after every task's cleanup has run (single-threaded). */
 void
 __xtc_coro_stack_spare_fini(xtc_loop_t *l)
 {

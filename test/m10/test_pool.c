@@ -104,7 +104,7 @@ test_pool_block_until_checkin(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	memset(&c, 0, sizeof c);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_pool_create(1, &pool), ==, XTC_OK);
 	munit_assert_int(xtc_pool_add(pool, &res), ==, XTC_OK);
 	c.pool = pool;
@@ -121,7 +121,7 @@ test_pool_block_until_checkin(const MunitParameter p[], void *d)
 	munit_assert_size(xtc_pool_available(pool), ==, 1);
 
 	xtc_pool_destroy(pool);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -171,7 +171,7 @@ test_pool_two_waiters(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	memset(&c, 0, sizeof c);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_pool_create(2, &c.pool), ==, XTC_OK);
 	munit_assert_int(xtc_pool_add(c.pool, &res[0]), ==, XTC_OK);
 	munit_assert_int(xtc_pool_add(c.pool, &res[1]), ==, XTC_OK);
@@ -189,7 +189,7 @@ test_pool_two_waiters(const MunitParameter p[], void *d)
 	/* Both woke on the checkins, not on their 2 s timeouts. */
 	munit_assert_int64(xtc_clock_mono() - t0, <, 1LL * 1000 * 1000 * 1000);
 	xtc_pool_destroy(c.pool);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 

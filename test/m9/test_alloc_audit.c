@@ -64,7 +64,7 @@ test_proc_leaks(const MunitParameter p[], void *d)
 	memset(&s, 0, sizeof s);
 	munit_assert_int(xtc_alloc_audit_enable(1), ==, XTC_OK);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	opts.name = "leaker";
 	munit_assert_int(xtc_proc_spawn(loop, leaker_proc, &s, &opts, &a),
 	    ==, XTC_OK);
@@ -101,7 +101,7 @@ test_proc_leaks(const MunitParameter p[], void *d)
 	xtc_alloc_audit_proc_leaks(s.leaker_pid, &cnt, NULL);
 	munit_assert_size(cnt, ==, 0);
 
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(xtc_alloc_audit_enable(0), ==, XTC_OK);
 	return MUNIT_OK;
 }

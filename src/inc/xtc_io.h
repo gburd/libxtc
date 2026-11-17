@@ -137,8 +137,8 @@ typedef struct xtc_aio {
 #define XTC_AIO_INIT { .size = sizeof(xtc_aio_t) }
 
 /*
- * PUBLIC: int          xtc_io_init __P((xtc_io_t **));
- * PUBLIC: int          xtc_io_fini __P((xtc_io_t *));
+ * PUBLIC: int          xtc_io_create __P((xtc_io_t **));
+ * PUBLIC: void         xtc_io_destroy __P((xtc_io_t *));
  * PUBLIC: const char  *xtc_io_backend_name __P((void));
  * PUBLIC: int          xtc_io_reg_fd __P((xtc_io_t *, int, uint32_t, void *));
  * PUBLIC: int          xtc_io_mod_fd __P((xtc_io_t *, int, uint32_t, void *));
@@ -151,8 +151,8 @@ typedef struct xtc_aio {
  */
 
 /* Lifecycle. */
-XTC_API int          xtc_io_init(xtc_io_t **out);
-XTC_API int          xtc_io_fini(xtc_io_t *io);
+XTC_API int          xtc_io_create(xtc_io_t **out);
+XTC_API void         xtc_io_destroy(xtc_io_t *io);
 XTC_API const char  *xtc_io_backend_name(void);
 
 /* Registration. */
@@ -197,6 +197,14 @@ XTC_API int          xtc_io_wakeup(xtc_io_t *io);
  */
 XTC_API void         xtc_io_set_iowq_max_workers(unsigned bound,
                                                  unsigned unbound);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_io_create")
+XTC_API int xtc_io_init(xtc_io_t **out);
+XTC_DEPRECATED("use xtc_io_destroy")
+XTC_API int xtc_io_fini(xtc_io_t *io);
 
 #ifdef __cplusplus
 }

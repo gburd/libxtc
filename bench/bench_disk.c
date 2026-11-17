@@ -176,7 +176,7 @@ main(int argc, char **argv)
 	 * benchmark for the M11 async-stream rollout.
 	 */
 
-	rc = xtc_io_init(&io);
+	rc = xtc_io_create(&io);
 	if (rc != XTC_OK) { fprintf(stderr, "io_init: %d\n", rc); return 1; }
 
 	slots = calloc((size_t)pipe_depth, sizeof *slots);
@@ -236,6 +236,6 @@ main(int argc, char **argv)
 	free(zeros);
 	(void)close(fd);
 	(void)unlink(path);
-	(void)xtc_io_fini(io);
+	xtc_io_destroy(io);
 	return 0;
 }

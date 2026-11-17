@@ -156,7 +156,7 @@ run_burst(int n, int verify)
 	memset(&b, 0, sizeof b);
 	b.fd = tmpfile_open(path, sizeof path);
 	b.verify = verify;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	for (i = 0; i < n; i++)
 		munit_assert_int(xtc_proc_spawn(loop, burst_fiber, &b, NULL,
 		    NULL), ==, XTC_OK);
@@ -172,7 +172,7 @@ run_burst(int n, int verify)
 		    NULL, &queued), ==, XTC_OK);
 		munit_assert_uint(queued, ==, 0);
 	}
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	(void)xtc_fs_close(b.fd);
 	(void)unlink(path);
 	return s1 < 0 ? -1 : s1 - s0;
@@ -231,7 +231,7 @@ run_fd_burst(struct fdb *f, int n)
 		    0);
 		munit_assert_int(xtc_test_pipe_write(f->wp[i], "x", 1), ==, 1);
 	}
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	for (i = 0; i < n; i++)
 		munit_assert_int(xtc_proc_spawn(loop, fd_fiber, f, NULL,
 		    NULL), ==, XTC_OK);
@@ -241,7 +241,7 @@ run_fd_burst(struct fdb *f, int n)
 	munit_assert_int(xtc_atomic_load_i32(&f->ok, xtc_mo_seq_cst), ==, n);
 	if (s1 >= 0)
 		assert_defer_if_kernel(loop->io);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	for (i = 0; i < n; i++)
 		xtc_test_close_pipe(f->rp[i], f->wp[i]);
 	return s1 < 0 ? -1 : s1 - s0;
@@ -289,7 +289,7 @@ test_sq_full_burst(const MunitParameter p[], void *d)
 
 	memset(&g_fdb, 0, sizeof g_fdb);
 	memset(seen, 0, sizeof seen);
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	for (i = 0; i < nfd; i++) {
 		munit_assert_int(xtc_test_make_pipe(&g_fdb.rp[i], &g_fdb.wp[i]),
 		    ==, 0);
@@ -321,7 +321,7 @@ test_sq_full_burst(const MunitParameter p[], void *d)
 		munit_assert_int(xtc_io_del_fd(io, g_fdb.rp[i]), ==, XTC_OK);
 		xtc_test_close_pipe(g_fdb.rp[i], g_fdb.wp[i]);
 	}
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 
 	s = run_burst(N, 1);
 	if (s >= 0)
@@ -341,9 +341,9 @@ test_zero_poll(const MunitParameter p[], void *d)
 	int i, n;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	if (__xtc_io_uring_enter_stats(io, &s0, &w0, NULL) != XTC_OK) {
-		(void)xtc_io_fini(io);
+		xtc_io_destroy(io);
 		return MUNIT_SKIP;
 	}
 	/* The first poll arms the wakeup poll (one submit). */
@@ -365,7 +365,7 @@ test_zero_poll(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_io_poll(io, ev, 8, 2000LL * 1000000, &n), ==,
 	    XTC_OK);
 	munit_assert_int(n, ==, 1);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -428,14 +428,14 @@ test_spin_on_peer(const MunitParameter p[], void *d)
 	xtc_atomic_store_long(&g_spin_yields, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_spin_timed_out, 0, xtc_mo_seq_cst);
 	g_spin_t0 = xtc_clock_mono();
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	for (i = 0; i < 4; i++)
 		munit_assert_int(xtc_proc_spawn(loop, spinner, NULL, NULL,
 		    NULL), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, spin_writer, NULL, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	(void)xtc_fs_close(g_spin_fd);
 	(void)unlink(path);
 	munit_logf(MUNIT_LOG_INFO,

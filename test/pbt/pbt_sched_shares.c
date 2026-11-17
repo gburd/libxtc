@@ -82,7 +82,7 @@ prop_higher_shares_get_more_cpu(hegel_test_case *tc, void *u)
 	lo = (int)hegel_draw_int(tc, hegel_integers(1, 1000));
 	if (hi < lo) { int t = hi; hi = lo; lo = t; }
 
-	hegel_assume(xtc_loop_init(&loop) == XTC_OK);
+	hegel_assume(xtc_loop_create(&loop) == XTC_OK);
 	hegel_assume(xtc_exec_class_create(loop, hi, 0, &chi) == XTC_OK);
 	hegel_assume(xtc_exec_class_create(loop, lo, 0, &clo) == XTC_OK);
 
@@ -121,7 +121,7 @@ prop_higher_shares_get_more_cpu(hegel_test_case *tc, void *u)
 	 */
 	hegel_assume(runs_hi >= runs_lo);
 
-	hegel_assume(xtc_loop_fini(loop) == XTC_OK);
+	xtc_loop_destroy(loop);
 }
 
 static const pbt_entry_t tests[] = {

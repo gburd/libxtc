@@ -268,7 +268,7 @@ g2_inputs(void)
 	xtc_svr_callbacks_t zcb = XTC_SVR_CALLBACKS_INIT;
 	int i;
 
-	CHECK(xtc_loop_init(&loop) == XTC_OK);
+	CHECK(xtc_loop_create(&loop) == XTC_OK);
 
 	/* Older child-spec array: 3 elements at a 32-byte stride. */
 	so = xalloc(sizeof *so);
@@ -355,7 +355,7 @@ g2_inputs(void)
 	CHECK(xtc_loop_run(loop) == XTC_OK);
 	if (svr != NULL)
 		CHECK(xtc_svr_join(svr, -1) == XTC_OK);
-	CHECK(xtc_loop_fini(loop) == XTC_OK);
+	xtc_loop_destroy(loop);
 
 	/* loop stats, older view */
 	CHECK(xtc_exec_init(&ex, 1) == XTC_OK);
@@ -416,7 +416,7 @@ g3_io(void)
 
 	/* An aio struct is held in place for its whole flight: a size short of
 	 * the 2.0 layout is refused before anything is submitted. */
-	CHECK(xtc_io_init(&io) == XTC_OK);
+	CHECK(xtc_io_create(&io) == XTC_OK);
 	if (io != NULL) {
 		az.fd = 0;
 		az.op = XTC_AIO_FSYNC;
@@ -424,7 +424,7 @@ g3_io(void)
 		CHECK(xtc_io_aio_submit(io, &az) == XTC_E_INVAL);
 		az.size = 0;
 		CHECK(xtc_io_aio_submit(io, &az) == XTC_E_INVAL);
-		CHECK(xtc_io_fini(io) == XTC_OK);
+		xtc_io_destroy(io);
 	}
 
 	/* TLS opts cut after ca_file: verify mode, ciphers, CRLs and the
@@ -657,7 +657,7 @@ main(void)
 	xtc_proc_opts_t zero = XTC_PROC_OPTS_INIT;
 	xtc_pid_t pid;
 
-	CHECK(xtc_loop_init(&loop) == XTC_OK);
+	CHECK(xtc_loop_create(&loop) == XTC_OK);
 	if (loop == NULL)
 		return 1;
 
@@ -696,7 +696,7 @@ main(void)
 	CHECK(xtc_proc_spawn(loop, g2_out_proc, NULL, NULL, NULL) == XTC_OK);
 	CHECK(xtc_loop_run(loop) == XTC_OK);
 	CHECK(g_g2_ran);
-	CHECK(xtc_loop_fini(loop) == XTC_OK);
+	xtc_loop_destroy(loop);
 
 	g2_inputs();
 	g3_io();

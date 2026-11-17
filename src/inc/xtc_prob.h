@@ -27,7 +27,7 @@
  *	one whole-stream estimate with no loss.
  *
  *	Bloom filter (xtc_bloom): a bit array of m bits probed by k hash
- *	functions.  xtc_bloom_init derives the optimal m and k from the
+ *	functions.  xtc_bloom_create derives the optimal m and k from the
  *	expected element count n and the target false-positive rate p:
  *	m = ceil(-n*ln(p) / (ln2)^2), k = round((m/n)*ln2).  A membership
  *	test has NO false negatives (a key that was added always tests
@@ -66,15 +66,15 @@ typedef struct xtc_bloom xtc_bloom_t;
 typedef struct xtc_hll   xtc_hll_t;
 
 /*
- * PUBLIC: int      xtc_bloom_init __P((xtc_bloom_t **, size_t, double));
+ * PUBLIC: int      xtc_bloom_create __P((size_t, double, xtc_bloom_t **));
  * PUBLIC: void     xtc_bloom_add __P((xtc_bloom_t *, const void *, size_t));
  * PUBLIC: int      xtc_bloom_maybe_contains __P((const xtc_bloom_t *, const void *, size_t));
- * PUBLIC: void     xtc_bloom_fini __P((xtc_bloom_t *));
- * PUBLIC: int      xtc_hll_init __P((xtc_hll_t **, int));
+ * PUBLIC: void     xtc_bloom_destroy __P((xtc_bloom_t *));
+ * PUBLIC: int      xtc_hll_create __P((int, xtc_hll_t **));
  * PUBLIC: void     xtc_hll_add __P((xtc_hll_t *, const void *, size_t));
  * PUBLIC: uint64_t xtc_hll_count __P((const xtc_hll_t *));
  * PUBLIC: int      xtc_hll_merge __P((xtc_hll_t *, const xtc_hll_t *));
- * PUBLIC: void     xtc_hll_fini __P((xtc_hll_t *));
+ * PUBLIC: void     xtc_hll_destroy __P((xtc_hll_t *));
  */
 
 /*
@@ -85,8 +85,7 @@ typedef struct xtc_hll   xtc_hll_t;
  * XTC_OK and writes *out, or XTC_E_INVAL (NULL out, or fp_rate not in
  * the open interval (0,1)) / XTC_E_NOMEM.
  */
-XTC_API int      xtc_bloom_init(xtc_bloom_t **out, size_t n_expected,
-                                double fp_rate);
+XTC_API int      xtc_bloom_create(size_t n_expected, double fp_rate, xtc_bloom_t **out);
 
 /*
  * Add `len` bytes at `key` to the filter.  Idempotent: adding the same
@@ -105,7 +104,7 @@ XTC_API int      xtc_bloom_maybe_contains(const xtc_bloom_t *b,
                                           const void *key, size_t len);
 
 /* Free the filter.  A NULL argument is a no-op. */
-XTC_API void     xtc_bloom_fini(xtc_bloom_t *b);
+XTC_API void     xtc_bloom_destroy(xtc_bloom_t *b);
 
 /*
  * Create a HyperLogLog sketch with 2^precision registers; `precision`
@@ -113,7 +112,7 @@ XTC_API void     xtc_bloom_fini(xtc_bloom_t *b);
  * error, more memory).  Returns XTC_OK and writes *out, or
  * XTC_E_INVAL (NULL out or out-of-range precision) / XTC_E_NOMEM.
  */
-XTC_API int      xtc_hll_init(xtc_hll_t **out, int precision);
+XTC_API int      xtc_hll_create(int precision, xtc_hll_t **out);
 
 /*
  * Add `len` bytes at `key` to the sketch.  A NULL sketch is ignored; a
@@ -139,7 +138,20 @@ XTC_API uint64_t xtc_hll_count(const xtc_hll_t *h);
 XTC_API int      xtc_hll_merge(xtc_hll_t *dst, const xtc_hll_t *src);
 
 /* Free the sketch.  A NULL argument is a no-op. */
-XTC_API void     xtc_hll_fini(xtc_hll_t *h);
+XTC_API void     xtc_hll_destroy(xtc_hll_t *h);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_bloom_create")
+XTC_API int xtc_bloom_init(xtc_bloom_t **out, size_t n_expected,
+    double fp_rate);
+XTC_DEPRECATED("use xtc_bloom_destroy")
+XTC_API void xtc_bloom_fini(xtc_bloom_t *b);
+XTC_DEPRECATED("use xtc_hll_create")
+XTC_API int xtc_hll_init(xtc_hll_t **out, int precision);
+XTC_DEPRECATED("use xtc_hll_destroy")
+XTC_API void xtc_hll_fini(xtc_hll_t *h);
 
 #ifdef __cplusplus
 }

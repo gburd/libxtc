@@ -92,7 +92,7 @@ test_supervisor_restarts(const MunitParameter p[], void *d)
 	kids[0].arg    = NULL;
 	kids[0].policy = XTC_RESTART_TRANSIENT;   /* restart only on abnormal exit */
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_start(loop, &opts, kids, 1, &sup), ==, XTC_OK);
 	g_sup_for_watch = sup;
 	munit_assert_int(xtc_proc_spawn(loop, watch_proc, NULL, NULL,
@@ -102,7 +102,7 @@ test_supervisor_restarts(const MunitParameter p[], void *d)
 	munit_assert_int(__os_atomic_load_i32(&g_spawn_count), ==, g_target_spawns);
 	munit_assert_int(xtc_sup_n_restarts(sup), >=, g_target_spawns - 1);
 	munit_assert_int(xtc_sup_join(sup, 1LL * 1000 * 1000 * 1000), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -168,7 +168,7 @@ test_one_for_all(const MunitParameter p[], void *d)
 	kids[0].name = "a"; kids[0].fn = ofa_a; kids[0].policy = XTC_RESTART_TRANSIENT;
 	kids[1].name = "b"; kids[1].fn = ofa_b; kids[1].policy = XTC_RESTART_TRANSIENT;
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_start(loop, &opts, kids, 2, &sup), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, ofa_watch, sup, NULL, &wpid),
 	    ==, XTC_OK);
@@ -177,7 +177,7 @@ test_one_for_all(const MunitParameter p[], void *d)
 	munit_assert_int(__os_atomic_load_i32(&g_ofa_b_spawns), >=, 2);
 	munit_assert_int(__os_atomic_load_i32(&g_ofa_a_spawns), >=, 2);
 	munit_assert_int(xtc_sup_join(sup, 1LL * 1000 * 1000 * 1000), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -248,7 +248,7 @@ test_rest_for_one(const MunitParameter p[], void *d)
 	kids[1].name = "b"; kids[1].fn = rfo_b; kids[1].policy = XTC_RESTART_TRANSIENT;
 	kids[2].name = "c"; kids[2].fn = rfo_c; kids[2].policy = XTC_RESTART_TRANSIENT;
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_start(loop, &opts, kids, 3, &sup), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, rfo_watch, sup, NULL, &wpid),
 	    ==, XTC_OK);
@@ -262,7 +262,7 @@ test_rest_for_one(const MunitParameter p[], void *d)
 	munit_assert_int(__os_atomic_load_i32(&g_rfo_c_spawns), >=, 2);
 
 	munit_assert_int(xtc_sup_join(sup, 1LL * 1000 * 1000 * 1000), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -296,7 +296,7 @@ test_intensity_exceeded(const MunitParameter p[], void *d)
 	kids[0].fn     = fast_flapper;
 	kids[0].policy = XTC_RESTART_PERMANENT;
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_start(loop, &opts, kids, 1, &sup), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 
@@ -306,7 +306,7 @@ test_intensity_exceeded(const MunitParameter p[], void *d)
 	munit_assert_int(__os_atomic_load_i32(&g_intensity_count), <=,
 	    opts.max_restarts + 2);
 	munit_assert_int(xtc_sup_join(sup, 1LL * 1000 * 1000 * 1000), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -357,7 +357,7 @@ test_simple_one_for_one(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	xtc_atomic_store_i32(&g_sofo_ran, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	opts.strategy = XTC_SUP_SIMPLE_OFO;
 	/* Start with zero children -- the pool is filled dynamically. */
 	munit_assert_int(xtc_sup_start(loop, &opts, NULL, 0, &sup), ==, XTC_OK);
@@ -367,7 +367,7 @@ test_simple_one_for_one(const MunitParameter p[], void *d)
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_join(sup, 1LL * 1000 * 1000 * 1000), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 
 	munit_assert_int(st.added, ==, 3);            /* 3 spawned on demand */
 	munit_assert_int(xtc_atomic_load_i32(&g_sofo_ran, xtc_mo_seq_cst), ==,
@@ -419,7 +419,7 @@ test_pool_max_children(const MunitParameter p[], void *d)
 	xtc_proc_opts_t popts = XTC_PROC_OPTS_INIT;
 	(void)p; (void)d;
 	xtc_atomic_store_i32(&g_pool_alive, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	opts.strategy = XTC_SUP_SIMPLE_OFO;
 	opts.max_children = 2;
 	munit_assert_int(xtc_sup_start(loop, &opts, NULL, 0, &sup), ==, XTC_OK);
@@ -430,7 +430,7 @@ test_pool_max_children(const MunitParameter p[], void *d)
 	munit_assert_int(st.live_at_cap, ==, 2);
 	munit_assert_int(st.over_cap_rc, ==, XTC_E_RESOURCE);
 	munit_assert_int(xtc_sup_join(sup, 1LL * 1000 * 1000 * 1000), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -506,7 +506,7 @@ test_atomic_spawn_monitor(const MunitParameter p[], void *d)
 	cs.fn = spawnmon_child;
 	cs.policy = XTC_RESTART_TRANSIENT;
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_start(loop, &so, &cs, 1, &sup), ==, XTC_OK);
 	g_atomic_mon_sup = sup;
 	munit_assert_int(xtc_proc_spawn(loop, spawnmon_watch, NULL, NULL, NULL),
@@ -523,7 +523,7 @@ test_atomic_spawn_monitor(const MunitParameter p[], void *d)
 	    ==, 1);
 	munit_assert_int(xtc_sup_join(sup, 1LL * 1000 * 1000 * 1000), ==,
 	    XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -607,7 +607,7 @@ run_overlap_case(xtc_restart_strategy_t strategy)
 	cs[0].fn = ov_crasher; cs[0].name = "crasher";
 	for (i = 1; i < 3; i++) { cs[i].size = sizeof cs[i]; cs[i].fn = ov_holder; cs[i].name = "holder"; }
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_start(loop, &o, cs, 3, &sup), ==, XTC_OK);
 	munit_assert_int(xtc_timer_set(loop, 400LL * 1000 * 1000, ov_stopper,
 	    loop, NULL), ==, XTC_OK);
@@ -627,7 +627,7 @@ run_overlap_case(xtc_restart_strategy_t strategy)
 	(void)xtc_loop_run(loop);
 	/* The sup exited during that drain; join frees it (poll, it is done). */
 	munit_assert_int(xtc_sup_join(sup, 0), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -713,7 +713,7 @@ test_join_timeout_keeps_sup(const MunitParameter p[], void *d)
 	kids[0].name = "w";
 	kids[0].fn = join_worker;
 	kids[0].policy = XTC_RESTART_PERMANENT;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_start(loop, &opts, kids, 1, &g_join_sup),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, join_watchdog, loop, NULL, NULL),
@@ -726,7 +726,7 @@ test_join_timeout_keeps_sup(const MunitParameter p[], void *d)
 	munit_assert_int(g_join_alive_after, ==, 1);     /* still running */
 	munit_assert_int(xtc_sup_join(g_join_sup, 1LL * 1000 * 1000 * 1000),
 	    ==, XTC_OK);                                 /* now it is */
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -770,7 +770,7 @@ seq_by_start(xtc_loop_t **b, xtc_pid_t *by, int n, pthread_t *th)
 	xtc_atomic_store_i32(&g_seq_stop, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_seq_by_msgs, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_seq_by_normal, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(b), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(b), ==, XTC_OK);
 	for (i = 0; i < n; i++)
 		munit_assert_int(xtc_proc_spawn(*b, seq_by, NULL, NULL, &by[i]),
 		    ==, XTC_OK);
@@ -857,7 +857,7 @@ test_one_for_all_equal_pid_other_loop(const MunitParameter p[], void *d)
 	kids[1].size = sizeof kids[1];
 	kids[0].name = "a"; kids[0].fn = seq_a; kids[0].policy = XTC_RESTART_TRANSIENT;
 	kids[1].name = "b"; kids[1].fn = seq_b; kids[1].policy = XTC_RESTART_TRANSIENT;
-	munit_assert_int(xtc_loop_init(&la), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&la), ==, XTC_OK);
 	munit_assert_int(xtc_sup_start(la, &opts, kids, 2, &sup), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(la, seq_watch, sup, NULL, &wpid),
 	    ==, XTC_OK);
@@ -871,8 +871,8 @@ test_one_for_all_equal_pid_other_loop(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_atomic_load_i32(&g_seq_by_normal, xtc_mo_seq_cst),
 	    ==, 8); /* none killed */
 	munit_assert_int(xtc_sup_join(sup, 1LL * 1000 * 1000 * 1000), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(la), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(lb), ==, XTC_OK);
+	xtc_loop_destroy(la);
+	xtc_loop_destroy(lb);
 	return MUNIT_OK;
 }
 
@@ -916,10 +916,10 @@ test_add_child_other_loop(const MunitParameter p[], void *d)
 
 	xtc_atomic_store_i32(&g_sofo_ran, 0, xtc_mo_seq_cst);
 	seq_by_start(&lb, by, 8, &thb);      /* bystanders, registered first */
-	munit_assert_int(xtc_loop_init(&ls), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&ls), ==, XTC_OK);
 	opts.strategy = XTC_SUP_SIMPLE_OFO;
 	munit_assert_int(xtc_sup_start(ls, &opts, NULL, 0, &sup), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&lc), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&lc), ==, XTC_OK);
 	x.sup = sup;
 	munit_assert_int(xtc_proc_spawn(lc, xadd_caller, &x, NULL, &cpid),
 	    ==, XTC_OK);
@@ -937,9 +937,9 @@ test_add_child_other_loop(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_atomic_load_i32(&g_seq_by_msgs, xtc_mo_seq_cst),
 	    ==, 0); /* no stray */
 	munit_assert_int(xtc_sup_join(sup, 1LL * 1000 * 1000 * 1000), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(lc), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(ls), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(lb), ==, XTC_OK);
+	xtc_loop_destroy(lc);
+	xtc_loop_destroy(ls);
+	xtc_loop_destroy(lb);
 	return MUNIT_OK;
 }
 
@@ -988,7 +988,7 @@ test_simple_ofo_reclaims_dead(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	memset(&st, 0, sizeof st);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	opts.strategy = XTC_SUP_SIMPLE_OFO;
 	opts.max_restarts = 1000000;
 	munit_assert_int(xtc_sup_start(loop, &opts, NULL, 0, &sup), ==, XTC_OK);
@@ -997,7 +997,7 @@ test_simple_ofo_reclaims_dead(const MunitParameter p[], void *d)
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_join(sup, 2LL * 1000 * 1000 * 1000), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 
 	munit_assert_int(st.fails, ==, 0);
 	munit_assert_int(st.n_alive_end, ==, 0);
@@ -1084,7 +1084,7 @@ test_n_alive_during_group_restart(const MunitParameter p[], void *d)
 	(void)signal(SIGALRM, na_alarm);
 	(void)alarm(10);
 #endif
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_start(loop, &so, ch, 2, &g_na_sup), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, na_observer, NULL, NULL, &pid),
@@ -1098,7 +1098,7 @@ test_n_alive_during_group_restart(const MunitParameter p[], void *d)
 	munit_assert_int64(xtc_atomic_load_i64(&g_na_ns, xtc_mo_seq_cst), <,
 	    100 * NA_MS);
 	munit_assert_int(xtc_sup_join(g_na_sup, 0), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -1183,7 +1183,7 @@ test_killed_sup_stops_children(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_kd_stop, 0, xtc_mo_seq_cst);
 	ch.fn = kd_worker;
 	ch.policy = XTC_RESTART_PERMANENT;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_start(loop, &so, &ch, 1, &g_kd_sup), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, kd_killer, NULL, NULL, &pid), ==,
@@ -1196,7 +1196,7 @@ test_killed_sup_stops_children(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_atomic_load_i32(&g_kd_child_after, xtc_mo_seq_cst),
 	    ==, 0);
 	munit_assert_int(xtc_sup_join(g_kd_sup, 0), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -1259,7 +1259,7 @@ test_add_child_keeps_mail(const MunitParameter p[], void *d)
 	(void)p;
 	(void)d;
 	so.strategy = XTC_SUP_SIMPLE_OFO;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_start(loop, &so, NULL, 0, &g_ac_sup), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, ac_caller, loop, NULL, &pid), ==,
@@ -1270,7 +1270,7 @@ test_add_child_keeps_mail(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_atomic_load_i32(&g_ac_down, xtc_mo_seq_cst), ==,
 	    1);
 	munit_assert_int(xtc_sup_join(g_ac_sup, 0), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -1405,13 +1405,13 @@ test_down_hook_kinds(const MunitParameter p[], void *d)
 	for (int i = 0; i < 4; i++)
 		ch[i].policy = XTC_RESTART_TEMPORARY;
 	so.on_child_down = hk_fn;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_start(loop, &so, ch, 4, &sup), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, hk_stopper, sup, NULL, &pid), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_join(sup, 0), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 
 	munit_assert_int(g_hk_n, ==, 4);
 	munit_assert_not_null(r = hk_find("clean", 0));
@@ -1457,13 +1457,13 @@ test_down_hook_old_opts(const MunitParameter p[], void *d)
 	ch.name = "clean";
 	ch.fn = hk_clean;
 	ch.policy = XTC_RESTART_TEMPORARY;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_start(loop, &u.o, &ch, 1, &sup), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, hk_stopper, sup, NULL, &pid), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_join(sup, 0), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	munit_assert_int(g_hk_n, ==, 0);
 	return MUNIT_OK;
 }
@@ -1515,13 +1515,13 @@ test_down_hook_group_restart(const MunitParameter p[], void *d)
 	ch[0].policy = ch[1].policy = XTC_RESTART_PERMANENT;
 	so.strategy = XTC_SUP_ONE_FOR_ALL;
 	so.on_child_down = hk_fn;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_start(loop, &so, ch, 2, &sup), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, hk_stopper, sup, NULL, &pid), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_join(sup, 0), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 
 	munit_assert_int(xtc_atomic_load_i32(&g_hk_gen, xtc_mo_relaxed), ==, 2);
 	munit_assert_not_null(r = hk_find("crasher", 0));
@@ -1571,13 +1571,13 @@ test_down_hook_group_nofault(const MunitParameter p[], void *d)
 	ch[0].policy = ch[1].policy = XTC_RESTART_PERMANENT;
 	so.strategy = XTC_SUP_ONE_FOR_ALL;
 	so.on_child_down = hk_fn;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_start(loop, &so, ch, 2, &sup), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, hk_stopper, sup, NULL, &pid), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_join(sup, 0), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 
 	munit_assert_not_null(r = hk_find("exiter", 0));
 	munit_assert_int(r->kind, ==, XTC_DOWN_KIND_EXIT);
@@ -1673,7 +1673,7 @@ test_spec_proc_opts(const MunitParameter p[], void *d)
 	(void)d;
 
 	g_ks_wm = g_ks_runs = g_ks_pinned = g_ks_wm_bad = g_ks_big = 0;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_exec_class_create(loop, 10, 0, &cls), ==, XTC_OK);
 	kids[0].name = "ks";
 	kids[0].fn = ks_kid;
@@ -1715,7 +1715,7 @@ test_spec_proc_opts(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_sup_child_restarts(sup, 0, NULL), ==, XTC_E_INVAL);
 	munit_assert_int(xtc_sup_child_restarts(NULL, 0, &n), ==, XTC_E_INVAL);
 	munit_assert_int(xtc_sup_join(sup, 1000LL * 1000 * 1000), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -1787,7 +1787,7 @@ test_spec_reg_name(const MunitParameter p[], void *d)
 	g_nm_runs = 0;
 	g_nm_wait_rc = g_nm_stale = g_nm_gone_rc = -99;
 	g_nm_stale = 0;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_reg_create(&g_nm_reg), ==, XTC_OK);
 	so.registry = g_nm_reg;
 	k.name = "engine";
@@ -1808,7 +1808,7 @@ test_spec_reg_name(const MunitParameter p[], void *d)
 	munit_assert_int(g_nm_gone_rc, !=, XTC_OK);
 	munit_assert_int(xtc_reg_count(g_nm_reg), ==, 0);
 	xtc_reg_destroy(g_nm_reg);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -1895,7 +1895,7 @@ test_reg_send_wait(const MunitParameter p[], void *d)
 	(void)p;
 	(void)d;
 	g_rs_got = g_rs_runs = g_rs_fail = g_rs_done = 0;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_reg_create(&g_rs_reg), ==, XTC_OK);
 	so.registry = g_rs_reg;
 	so.max_restarts = 10;
@@ -1925,7 +1925,7 @@ test_reg_send_wait(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_reg_send_wait(g_rs_reg, "none", "a", 1, 0), ==,
 	    XTC_E_AGAIN);
 	xtc_reg_destroy(g_rs_reg);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -2067,7 +2067,7 @@ test_sup_wait_children(const MunitParameter p[], void *d)
 	(void)d;
 	memset(&w, 0, sizeof w);
 	g_wc_seq = g_wc_svr_at = g_wc_kid_at = g_wc_fail_init = 0;
-	munit_assert_int(xtc_loop_init(&w.loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&w.loop), ==, XTC_OK);
 	o.wait_children = 1;
 	wc_specs(kids);
 	munit_assert_int(xtc_sup_start(w.loop, &o, kids, 2, &sup), ==,
@@ -2096,7 +2096,7 @@ test_sup_wait_children(const MunitParameter p[], void *d)
 	munit_assert_int(pthread_join(th, NULL), ==, 0);
 	munit_assert_int(t.rc, ==, XTC_OK);
 	munit_assert_int(xtc_sup_join(t.sup, 1000LL * 1000 * 1000), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(w.loop), ==, XTC_OK);
+	xtc_loop_destroy(w.loop);
 	return MUNIT_OK;
 }
 
@@ -2209,7 +2209,7 @@ test_sup_nested_child(const MunitParameter p[], void *d)
 	kids[1].policy = XTC_RESTART_PERMANENT;
 	ro.max_restarts = 1;
 	ro.on_child_down = ns_root_down;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_start(loop, &ro, kids, 2, &dr.root), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, ns_driver, &dr, NULL, NULL), ==,
@@ -2225,7 +2225,7 @@ test_sup_nested_child(const MunitParameter p[], void *d)
 	munit_assert_int(g_ns_steady_runs, ==, 1);
 	munit_assert_int(xtc_sup_join(dr.root, 1000LL * 1000 * 1000), ==,
 	    XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -2260,13 +2260,13 @@ test_sup_nested_drain(const MunitParameter p[], void *d)
 	(void)d;
 	g_ns_drained = 0;
 	g_ns_crash_mode = 0;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, ns_drainer, &clean, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(g_ns_drained, ==, 1);
 	munit_assert_int(clean, ==, 1);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 

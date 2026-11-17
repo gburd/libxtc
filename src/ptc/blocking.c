@@ -29,7 +29,7 @@
  *	An off-loop caller waits on g_done_cv under the same lock.
  *
  *	Loop teardown.  A fiber caller's work item is on g_fly from enqueue
- *	until the worker publishes completion.  xtc_loop_fini frees the
+ *	until the worker publishes completion.  xtc_loop_destroy frees the
  *	tasks and stacks of fibers still parked here, so it first waits
  *	(__xtc_blocking_loop_fini) until no item on g_fly belongs to the
  *	loop: the worker would otherwise write w and wake a freed task, and
@@ -505,7 +505,7 @@ xtc_blocking_submit(int (*fn)(void *), void *arg)
 /*
  * PUBLIC: void __xtc_blocking_loop_fini __P((xtc_loop_t *));
  *
- * xtc_loop_fini, before it frees any task: wait until no fiber of
+ * xtc_loop_destroy, before it frees any task: wait until no fiber of
  * `loop` is parked in xtc_blocking_run, so the pool never writes into
  * a freed fiber frame or wakes a freed task.  A fiber belongs to the
  * loop when it is its home loop or the loop its waker names (a stolen

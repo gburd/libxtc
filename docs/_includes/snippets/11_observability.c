@@ -43,7 +43,7 @@ main(void)
 	 */
 	xtc_tail_enable(XTC_TAIL_SCHED);
 
-	if (xtc_loop_init(&loop) != XTC_OK)
+	if (xtc_loop_create(&loop) != XTC_OK)
 		return 1;
 	for (i = 0; i < 4; i++) {
 		if (xtc_proc_spawn(loop, task, NULL, NULL, NULL) != XTC_OK)
@@ -51,7 +51,7 @@ main(void)
 	}
 	if (xtc_loop_run(loop) != XTC_OK)
 		return 1;
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 
 	/* One-shot dump to a file, for `dial9 serve --local-dir`. */
 	snprintf(trace, sizeof trace, "/tmp/xtc_obs_snippet_%ld.d9",

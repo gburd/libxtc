@@ -95,14 +95,14 @@ main(int argc, char **argv)
 		return 0;
 	}
 	if (xtc_amutex_create(&g_mu) != XTC_OK ||
-	    xtc_loop_init(&loop) != XTC_OK)
+	    xtc_loop_create(&loop) != XTC_OK)
 		return 1;
 	if (xtc_proc_spawn(loop, echo_proc, NULL, NULL, &g_echo) != XTC_OK ||
 	    xtc_proc_spawn(loop, main_proc, NULL, NULL, &g_main) != XTC_OK)
 		return 1;
 	if (xtc_loop_run(loop) != XTC_OK)
 		return 1;
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	xtc_amutex_destroy(g_mu);
 	if (g_done != 2) {
 		fprintf(stderr, "probe_workload: incomplete (%d of 2)\n", g_done);

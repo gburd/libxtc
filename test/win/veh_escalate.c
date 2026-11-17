@@ -42,10 +42,10 @@ main(void)
 	xtc_loop_t *loop = NULL;
 	xtc_pid_t f;
 	if (xtc_fault_guard_install() != XTC_OK) return 2;
-	if (xtc_loop_init(&loop) != XTC_OK) return 2;
+	if (xtc_loop_create(&loop) != XTC_OK) return 2;
 	if (xtc_proc_spawn(loop, faulter, NULL, NULL, &f) != XTC_OK) return 2;
 	(void)xtc_loop_run(loop);   /* process should die before returning */
-	xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	printf("ESCAPED: loop returned normally\n");
 	return 0;   /* reaching here at all is wrong */
 }

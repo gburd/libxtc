@@ -104,6 +104,7 @@ TLS_OBJS = tls_@XTC_TLS_BACKEND@.o
 LIB_SRCS	= \
 	$(srcdir)/../src/xtc_version.c \
 	$(srcdir)/../src/xtc_strerror.c \
+	$(srcdir)/../src/xtc_deprecated.c \
 	$(srcdir)/../src/os/os_alloc.c \
 	$(srcdir)/../src/os/os_env.c \
 	$(srcdir)/../src/os/os_errno.c \
@@ -202,6 +203,7 @@ LIB_OBJS	= \
 	$(TLS_OBJS) \
 	xtc_version.o \
 	xtc_strerror.o \
+	xtc_deprecated.o \
 	os_alloc.o \
 	os_env.o \
 	os_errno.o \
@@ -657,6 +659,9 @@ xtc_version.o: $(srcdir)/../src/xtc_version.c $(LIB_HDR_PUBLIC) xtc_config.h
 xtc_strerror.o: $(srcdir)/../src/xtc_strerror.c $(LIB_HDR_PUBLIC) xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/xtc_strerror.c
 
+xtc_deprecated.o: $(srcdir)/../src/xtc_deprecated.c $(LIB_HDR_PUBLIC) xtc_config.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/xtc_deprecated.c
+
 os_alloc.o: $(srcdir)/../src/os/os_alloc.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/os/os_alloc.c
 os_errno.o: $(srcdir)/../src/os/os_errno.c xtc_config.h
@@ -1063,7 +1068,7 @@ bench-micro: bench_micro
 # -------------------------------------------------------------------------
 # Memory-bound soak (PLAN 19.27.20).  NOT part of `make check`: it is a
 # soak, and it FAILS today by design -- completed coro-backed procs keep
-# their fiber stack + coro until xtc_loop_fini (PLAN 19.26) and every
+# their fiber stack + coro until xtc_loop_destroy (PLAN 19.26) and every
 # park timer stays on the loop's all_timers until fini.  CI runs it
 # nightly as a non-gating job.  It prints the bytes retained per
 # generation for each mode; `plain` is the control and must pass.

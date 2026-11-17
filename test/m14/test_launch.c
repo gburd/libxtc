@@ -280,14 +280,14 @@ test_launch_keeps_mail(const MunitParameter p[], void *d)
 	(void)d;
 	xtc_atomic_store_i32(&g_mail_seen, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_mail_sent, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, mail_launcher, NULL, NULL,
 	                     &g_mail_launcher),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, mailer, NULL, NULL, &m), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(xtc_atomic_load_i32(&g_mail_rc, xtc_mo_seq_cst), ==,
 	    XTC_E_AGAIN);
 	munit_assert_int64(xtc_atomic_load_i64(&g_mail_ms, xtc_mo_seq_cst), <,
@@ -345,14 +345,14 @@ test_launch_no_orphan(const MunitParameter p[], void *d)
 	(void)d;
 	xtc_atomic_store_i32(&g_orphan_ticks, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_orphan_done, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, orphan_launcher, NULL, NULL,
 	                     &g_orphan_launcher),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, orphan_killer, NULL, NULL, &k),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(xtc_atomic_load_i32(&g_orphan_done, xtc_mo_seq_cst),
 	    ==, 0);
 	/* Killed at ~25 ms: 2 ticks, at most 3; never the 2.1.1 20. */

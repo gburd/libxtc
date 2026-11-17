@@ -64,13 +64,13 @@ test_dump_basic(const MunitParameter p[], void *d)
 	fd = mkstemp(tmpl);
 	munit_assert_int(fd, >=, 0);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, dump_sleeper, NULL, &o,
 	    &g_sleeper), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, dump_driver, &fd, &o, &dpid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 
 	munit_assert_int(lseek(fd, 0, SEEK_SET), ==, 0);
 	n = (int)read(fd, buf, sizeof buf - 1);
@@ -254,7 +254,7 @@ gc_child(int which)
 		(void)xtc_crash_handler_install();
 		(void)xtc_fault_guard_install();
 		(void)xtc_crash_handler_install();
-		if (xtc_loop_init(&loop) != XTC_OK)
+		if (xtc_loop_create(&loop) != XTC_OK)
 			_exit(97);
 		if (xtc_proc_spawn(loop, gc_watcher, loop, NULL, NULL) != XTC_OK)
 			_exit(97);

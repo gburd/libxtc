@@ -17,10 +17,10 @@ test_spawn_bad_args(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_task_spawn(NULL, dummy, NULL, NULL), ==, XTC_E_INVAL);
 	munit_assert_int(xtc_task_spawn(loop, NULL,  NULL, NULL), ==, XTC_E_INVAL);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -38,12 +38,12 @@ test_user_pointer(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	int marker = 0xC0DE;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	observed_int = 0;
 	munit_assert_int(xtc_task_spawn(loop, task_record, &marker, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(observed_int, ==, 0xC0DE);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -59,11 +59,11 @@ test_done_runs_once(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	(void)p; (void)d;
 	call_count = 0;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_task_spawn(loop, task_count_then_done, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(call_count, ==, 1);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -83,11 +83,11 @@ test_resched_loops(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	struct rs c = { 0, 100 };
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_task_spawn(loop, task_resched_n, &c, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(c.n, ==, 100);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -114,13 +114,13 @@ test_spawn_inside_task(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	struct sp c;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	c.loop = loop; c.spawned = 0;
 	leaf_hits = 0;
 	munit_assert_int(xtc_task_spawn(loop, task_spawner, &c, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(leaf_hits, ==, 3);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -142,7 +142,7 @@ test_n_tasks_independent(const MunitParameter p[], void *d)
 	struct ind ctx[TS6_N];
 	int i;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	for (i = 0; i < TS6_N; i++) {
 		ctx[i].id = i; ctx[i].counter = 0; ctx[i].target = 1 + i * 3;
 		munit_assert_int(xtc_task_spawn(loop, task_indep, &ctx[i], NULL),
@@ -151,7 +151,7 @@ test_n_tasks_independent(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	for (i = 0; i < TS6_N; i++)
 		munit_assert_int(ctx[i].counter, ==, ctx[i].target);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -188,7 +188,7 @@ test_recycle_bounded(const MunitParameter p[], void *d)
 	long before, after, grew;
 	int i;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&ts7_loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&ts7_loop), ==, XTC_OK);
 	ts7_owed = TS7_TOTAL;
 	ts7_done = 0;
 	before = ru_maxrss_kb();
@@ -210,7 +210,7 @@ test_recycle_bounded(const MunitParameter p[], void *d)
 #else
 	(void)before; (void)after; (void)grew;
 #endif
-	munit_assert_int(xtc_loop_fini(ts7_loop), ==, XTC_OK);
+	xtc_loop_destroy(ts7_loop);
 	return MUNIT_OK;
 }
 

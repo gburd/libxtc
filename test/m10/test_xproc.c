@@ -121,7 +121,7 @@ test_xproc_monitor_exit(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	memset(&m, 0, sizeof m);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	m.loop = loop;
 	munit_assert_int(xtc_proc_spawn(loop, monitor_fiber, &m, NULL, NULL),
 	    ==, XTC_OK);
@@ -134,7 +134,7 @@ test_xproc_monitor_exit(const MunitParameter p[], void *d)
 	munit_assert_int(m.down_reason, ==, 42);     /* the code we sent */
 	munit_assert_int64(m.child_os_pid, >, 0);    /* a real child pid */
 
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -157,7 +157,7 @@ test_xproc_entry(const MunitParameter p[], void *d)
 
 	memset(&m, 0, sizeof m);
 	m.use_entry = 1;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	m.loop = loop;
 	munit_assert_int(xtc_proc_spawn(loop, monitor_fiber, &m, NULL, NULL),
 	    ==, XTC_OK);
@@ -169,7 +169,7 @@ test_xproc_entry(const MunitParameter p[], void *d)
 	munit_assert_int(m.down_seen, ==, 1);
 	munit_assert_int(m.down_reason, ==, 42);
 
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -215,7 +215,7 @@ test_xproc_link(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_xproc_register_entry("root", child_root), ==,
 	    XTC_OK);
 	memset(&m, 0, sizeof m);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	m.loop = loop;
 	munit_assert_int(xtc_proc_spawn(loop, linker_fiber, &m, NULL, NULL),
 	    ==, XTC_OK);
@@ -224,7 +224,7 @@ test_xproc_link(const MunitParameter p[], void *d)
 	munit_assert_int(m.rc, ==, XTC_OK);
 	munit_assert_int(m.exit_seen, ==, 1);       /* link EXIT delivered */
 	munit_assert_int(m.exit_reason, ==, 55);    /* the code we sent */
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -366,13 +366,13 @@ test_xproc_down_kind(const MunitParameter p[], void *d)
 	for (i = 0; i < 4; i++) {
 		xtc_loop_t *loop = NULL;
 		struct kind_ctx k;
-		munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+		munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 		k.loop = loop;
 		k.c = &c[i];
 		munit_assert_int(xtc_proc_spawn(loop, kind_fiber, &k, NULL,
 		    NULL), ==, XTC_OK);
 		munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 		munit_assert_int(c[i].seen, ==, 1);
 	}
 	munit_assert_int(c[0].got_kind, ==, XTC_DOWN_KIND_CLEAN);
@@ -394,12 +394,12 @@ test_xproc_destroy_live_child(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	memset(&ld, 0, sizeof ld);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	ld.loop = loop;
 	munit_assert_int(xtc_proc_spawn(loop, live_destroy_fiber, &ld, NULL,
 	    NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 
 	munit_assert_long(ld.child_pid, >, 0);
 	munit_assert_int(ld.child_still_alive, ==, 0);  /* terminated */
@@ -431,9 +431,9 @@ fh_churn(void *a)
 	(void)a;
 	while (!xtc_atomic_load_i32(&g_fh_stop, xtc_mo_seq_cst)) {
 		xtc_loop_t *l = NULL;
-		if (xtc_loop_init(&l) == XTC_OK) {
+		if (xtc_loop_create(&l) == XTC_OK) {
 			(void)xtc_proc_spawn(l, fh_noop, NULL, NULL, NULL);
-			(void)xtc_loop_fini(l);   /* no run: hold time maximal */
+			xtc_loop_destroy(l);   /* no run: hold time maximal */
 		}
 	}
 	return NULL;
@@ -508,12 +508,12 @@ test_xproc_entry_mt_parent(const MunitParameter p[], void *d)
 	for (i = 0; i < FH_THREADS; i++)
 		munit_assert_int(pthread_create(&t[i], NULL, fh_churn, NULL),
 		    ==, 0);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	c.loop = loop;
 	munit_assert_int(xtc_proc_spawn(loop, fh_fiber, &c, NULL, NULL), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	xtc_atomic_store_i32(&g_fh_stop, 1, xtc_mo_seq_cst);
 	for (i = 0; i < FH_THREADS; i++)
 		(void)pthread_join(t[i], NULL);

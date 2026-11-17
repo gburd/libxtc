@@ -97,13 +97,13 @@ main(int argc, char **argv)
 
 	memset(&d, 0, sizeof d);
 	d.n = n;
-	if (xtc_loop_init(&loop) != XTC_OK) { fprintf(stderr, "loop\n"); return 1; }
+	if (xtc_loop_create(&loop) != XTC_OK) { fprintf(stderr, "loop\n"); return 1; }
 	d.loop = loop;
 	if (xtc_proc_spawn(loop, driver, &d, NULL, NULL) != XTC_OK) {
 		fprintf(stderr, "spawn\n"); return 1;
 	}
 	(void)xtc_loop_run(loop);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 
 	printf("xproc_fanout: n=%d spawned=%d downs=%d spawn_fail=%d "
 	    "%.3fs  %.0f children/sec\n",

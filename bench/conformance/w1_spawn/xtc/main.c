@@ -100,8 +100,8 @@ main(int argc, char *argv[])
 
 	xtc_atomic_store_i32(&g_done, 0, xtc_mo_relaxed);
 
-	if (xtc_loop_init(&loop) != XTC_OK) {
-		fprintf(stderr, "xtc_loop_init failed\n");
+	if (xtc_loop_create(&loop) != XTC_OK) {
+		fprintf(stderr, "xtc_loop_create failed\n");
 		return 1;
 	}
 
@@ -111,21 +111,21 @@ main(int argc, char *argv[])
 	for (i = 0; i < N; i++) {
 		if (xtc_task_spawn(loop, task_bump, NULL, NULL) != XTC_OK) {
 			fprintf(stderr, "xtc_task_spawn failed at i=%ld\n", i);
-			(void)xtc_loop_fini(loop);
+			xtc_loop_destroy(loop);
 			return 1;
 		}
 	}
 
 	if (xtc_loop_run(loop) != XTC_OK) {
 		fprintf(stderr, "xtc_loop_run failed\n");
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 		return 1;
 	}
 
 	/* ---- stop wall clock ---- */
 	t1_ns = mono_ns();
 
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 
 	/* ---- resource usage ---- */
 	if (getrusage(RUSAGE_SELF, &ru) != 0) {

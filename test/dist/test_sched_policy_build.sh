@@ -40,10 +40,10 @@ for mode in no yes; do
 int main(void) {
     xtc_loop_t *loop;
     int rc, batch_rc;
-    if (xtc_loop_init(&loop) != XTC_OK) return 1;
+    if (xtc_loop_create(&loop) != XTC_OK) return 1;
     rc = xtc_sched_continuous_set(loop, 3);
     batch_rc = xtc_batch_create(loop, 0, 0);
-    xtc_loop_fini(loop);
+    xtc_loop_destroy(loop);
 #ifdef EXPECT_OFF
     return rc != XTC_E_NOSYS || batch_rc != XTC_E_NOSYS;
 #else

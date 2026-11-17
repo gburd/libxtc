@@ -82,7 +82,7 @@ __server_main(int port)
 	if (listen(listen_fd, 1024) < 0) { perror("listen"); return 1; }
 	if (__set_nb(listen_fd) < 0) { perror("nonblock listen"); return 1; }
 
-	if ((rc = xtc_io_init(&io)) != XTC_OK) {
+	if ((rc = xtc_io_create(&io)) != XTC_OK) {
 		fprintf(stderr, "io_init: %d\n", rc); return 1;
 	}
 	if ((rc = xtc_io_reg_fd(io, listen_fd, XTC_IO_READABLE,
@@ -161,7 +161,7 @@ __server_main(int port)
 			}
 		}
 	}
-	(void)xtc_io_fini(io);
+	xtc_io_destroy(io);
 	(void)close(listen_fd);
 	return 0;
 }

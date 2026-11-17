@@ -65,14 +65,14 @@ test_t_spawn(const MunitParameter p[], void *d)
 	xtc_pid_t   pid;
 	(void)p; (void)d;
 	xtc_atomic_store_i32(&g_spawned_ran, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, trivial_proc, NULL, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_false(xtc_pid_is_none(pid));
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_atomic_load_i32(&g_spawned_ran, xtc_mo_seq_cst),
 	    ==, 1);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -133,7 +133,7 @@ test_spawn_link_abnormal(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	xtc_atomic_store_i32(&g_link_signal_seen, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_link_signal_reason, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, crashing_proc, NULL, NULL,
 	    &crasher_pid), ==, XTC_OK);
 	st.target = crasher_pid;
@@ -143,7 +143,7 @@ test_spawn_link_abnormal(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_atomic_load_i32(&g_link_signal_seen,
 	                     xtc_mo_seq_cst),
 	    ==, 1);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -187,7 +187,7 @@ test_spawn_monitor_down(const MunitParameter p[], void *d)
 	xtc_pid_t target_pid, observer_pid;
 	(void)p; (void)d;
 	xtc_atomic_store_i32(&g_monitor_down_seen, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, crashing_proc, NULL, NULL,
 	    &target_pid), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, monitor_observer, &target_pid,
@@ -196,7 +196,7 @@ test_spawn_monitor_down(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_atomic_load_i32(&g_monitor_down_seen,
 	                     xtc_mo_seq_cst),
 	    ==, 1);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -222,13 +222,13 @@ test_self_returns_pid(const MunitParameter p[], void *d)
 	xtc_pid_t pid;
 	(void)p; (void)d;
 	xtc_atomic_store_i32(&g_self_observed, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, self_observer, NULL, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_atomic_load_i32(&g_self_observed, xtc_mo_seq_cst),
 	    ==, 1);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -284,7 +284,7 @@ test_pingpong_50(const MunitParameter p[], void *d)
 	xtc_pid_t pong_pid, ping_pid;
 	(void)p; (void)d;
 	xtc_atomic_store_i32(&g_pingpong_count, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, pingpong_pong, NULL, NULL,
 	    &pong_pid), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, pingpong_ping, &pong_pid, NULL,
@@ -292,7 +292,7 @@ test_pingpong_50(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_atomic_load_i32(&g_pingpong_count, xtc_mo_seq_cst),
 	    >=, 50);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -318,13 +318,13 @@ test_recv_timeout(const MunitParameter p[], void *d)
 	xtc_pid_t pid;
 	(void)p; (void)d;
 	xtc_atomic_store_i32(&g_timeout_seen, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, timeout_proc, NULL, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_atomic_load_i32(&g_timeout_seen, xtc_mo_seq_cst),
 	    ==, 1);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -373,7 +373,7 @@ test_selective_receive(const MunitParameter p[], void *d)
 	int sent[5] = { 1, 2, 42, 3, 4 };
 	int i;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, selective_proc, &s, NULL, &pid),
 	    ==, XTC_OK);
 	for (i = 0; i < 5; i++)
@@ -387,7 +387,7 @@ test_selective_receive(const MunitParameter p[], void *d)
 	munit_assert_int(s.order_seen[2], ==, 2);
 	munit_assert_int(s.order_seen[3], ==, 3);
 	munit_assert_int(s.order_seen[4], ==, 4);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -416,7 +416,7 @@ test_fanout_100_workers(const MunitParameter p[], void *d)
 	int i;
 	(void)p; (void)d;
 	xtc_atomic_store_i32(&g_fanout_count, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	for (i = 0; i < FANOUT_N; i++)
 		munit_assert_int(xtc_proc_spawn(loop, fanout_worker, NULL,
 		    NULL, &pids[i]), ==, XTC_OK);
@@ -425,7 +425,7 @@ test_fanout_100_workers(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_atomic_load_i32(&g_fanout_count, xtc_mo_seq_cst),
 	    ==, FANOUT_N);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 

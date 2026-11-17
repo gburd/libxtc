@@ -288,14 +288,14 @@ test_amutex_fiber(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_cs_count, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_amutex_create(&g_am), ==, XTC_OK);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	for (i = 0; i < 3; i++) {
 		opts.name = "cs";
 		munit_assert_int(xtc_proc_spawn(loop, cs_proc,
 		    (void *)(intptr_t)3, &opts, &pid), ==, XTC_OK);
 	}
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	xtc_amutex_destroy(g_am);
 	g_am = NULL;
 	xtc_blocking_shutdown();
@@ -386,7 +386,7 @@ test_arwlock_fiber(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_arw_read_viol, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_arw_writes, 0, xtc_mo_seq_cst);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	for (i = 0; i < 3; i++) {
 		o.name = "w";
 		munit_assert_int(xtc_proc_spawn(loop, arw_writer, NULL, &o, &pid), ==, XTC_OK);
@@ -399,7 +399,7 @@ test_arwlock_fiber(const MunitParameter p[], void *d)
 	 * mid-critical-section would wedge the single loop and this never
 	 * returns. */
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 
 	munit_assert_int(xtc_atomic_load_i32(&g_arw_excl_viol, xtc_mo_seq_cst),
 	    ==, 0); /* exclusion held */
@@ -539,7 +539,7 @@ test_fiber_timeout_expiry(const MunitParameter p[], void *d)
 
 	munit_assert_int(xtc_amutex_create(&g_to_m), ==, XTC_OK);
 	munit_assert_int(xtc_arwlock_create(&g_to_rw), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 
 	/* Holders first, so they own the locks before the waiters run. */
 	opts.name = "hold-m";
@@ -569,7 +569,7 @@ test_fiber_timeout_expiry(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_atomic_load_i32(&g_to_holder_done, xtc_mo_seq_cst),
 	    ==, 2);
 
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	xtc_amutex_destroy(g_to_m);
 	xtc_arwlock_destroy(g_to_rw);
 	return MUNIT_OK;
@@ -636,12 +636,12 @@ tw_run(int mode)
 	xtc_atomic_store_i32(&g_tw_late, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_sem_create(0, &g_tw_sem), ==, XTC_OK);
 	munit_assert_int(xtc_notify_create(&g_tw_n), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, tw_waiter, NULL, NULL, &pid), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, tw_waiter, NULL, NULL, &pid), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, tw_poster, NULL, NULL, &pid), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	xtc_sem_destroy(g_tw_sem);
 	xtc_notify_destroy(g_tw_n);
 	munit_assert_int(xtc_atomic_load_i32(&g_tw_ok, xtc_mo_seq_cst), ==, 2);
@@ -824,11 +824,11 @@ test_timed_lock_no_stale_timer(const MunitParameter p[], void *d)
 		g_tl_yield_ns = -1;
 		munit_assert_int(xtc_amutex_create(&g_tl_m), ==, XTC_OK);
 		munit_assert_int(xtc_arwlock_create(&g_tl_rw), ==, XTC_OK);
-		munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+		munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 		munit_assert_int(xtc_proc_spawn(loop, tl_holder, NULL, NULL, NULL), ==, XTC_OK);
 		munit_assert_int(xtc_proc_spawn(loop, tl_waiter, NULL, NULL, NULL), ==, XTC_OK);
 		munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 		xtc_amutex_destroy(g_tl_m);
 		xtc_arwlock_destroy(g_tl_rw);
 		munit_logf(MUNIT_LOG_INFO, "kind %d: rc=%d yield %.3f ms",
@@ -870,11 +870,11 @@ test_gate_drain_open(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	munit_assert_int(xtc_gate_create(&g_gd), ==, XTC_OK);
 	munit_assert_int(xtc_gate_enter(g_gd), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, gd_drainer, NULL, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, gd_worker, NULL, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	xtc_gate_destroy(g_gd);
 	munit_assert_int(g_gd_rc, ==, XTC_OK);
 	munit_assert_int64(g_gd_ns, <, TW_PROMPT);
@@ -1014,11 +1014,11 @@ kw_run(xtc_proc_fn driver)
 	munit_assert_int(xtc_notify_create(&g_kw_n), ==, XTC_OK);
 	munit_assert_int(xtc_barrier_create(2, &g_kw_b), ==, XTC_OK);
 	munit_assert_int(xtc_gate_create(&g_kw_g), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	g_kw_loop = loop;
 	munit_assert_int(xtc_proc_spawn(loop, driver, NULL, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	xtc_amutex_destroy(g_kw_m);
 	xtc_arwlock_destroy(g_kw_rw);
 	xtc_sem_destroy(g_kw_sem);
@@ -1284,11 +1284,11 @@ test_amutex_recursive_exit(const MunitParameter p[], void *d)
 	g_ra_got = g_ra_runs = g_ra_held = 0;
 	munit_assert_int(xtc_amutex_create_ex(&g_ra_m, XTC_AMUTEX_RECURSIVE),
 	    ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, ra_driver, loop, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(g_ra_held, ==, 1);
 	munit_assert_int(g_ra_runs, ==, 10);
 	munit_assert_int(g_ra_got, ==, 0);
@@ -2083,11 +2083,11 @@ test_amutex_no_starve(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	g_ns_rounds = 0; g_ns_got_at = -1; g_ns_stop = 0;
 	munit_assert_int(xtc_amutex_create(&g_ns_m), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_async(loop, nst_barger, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_async(loop, nst_waiter, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	xtc_amutex_destroy(g_ns_m);
 	munit_logf(MUNIT_LOG_INFO, "waiter got the mutex at barger round %d",
 	    g_ns_got_at);

@@ -199,8 +199,8 @@ main(int argc, char *argv[])
 	}
 
 	/* ---- init loop ---- */
-	if (xtc_loop_init(&g_loop) != XTC_OK) {
-		fprintf(stderr, "w7_timer/xtc: xtc_loop_init failed\n");
+	if (xtc_loop_create(&g_loop) != XTC_OK) {
+		fprintf(stderr, "w7_timer/xtc: xtc_loop_create failed\n");
 		return 1;
 	}
 
@@ -230,7 +230,7 @@ main(int argc, char *argv[])
 			fprintf(stderr,
 			        "w7_timer/xtc: xtc_timer_set failed i=%ld\n",
 			        i);
-			(void)xtc_loop_fini(g_loop);
+			xtc_loop_destroy(g_loop);
 			return 1;
 		}
 
@@ -259,7 +259,7 @@ main(int argc, char *argv[])
 		if (xtc_timer_cancel(timers[idx]) != XTC_OK) {
 			fprintf(stderr,
 			        "w7_timer/xtc: xtc_timer_cancel failed\n");
-			(void)xtc_loop_fini(g_loop);
+			xtc_loop_destroy(g_loop);
 			return 1;
 		}
 		call_t1 = mono_ns();
@@ -294,7 +294,7 @@ main(int argc, char *argv[])
 	t1           = mono_ns();
 	elapsed_fire = (uint64_t)(t1 - t0);
 
-	(void)xtc_loop_fini(g_loop);
+	xtc_loop_destroy(g_loop);
 
 	/* ---- resource usage ---- */
 	if (getrusage(RUSAGE_SELF, &ru) != 0) {

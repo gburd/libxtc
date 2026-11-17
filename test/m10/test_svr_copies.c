@@ -122,7 +122,7 @@ test_svr_call_copies(const MunitParameter p[], void *d)
 	g_req_ok = g_rep_ok = 0;
 	xtc_atomic_store_i32(&g_req_allocs, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_reply_allocs, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_svr_start(loop, &svr_cb, NULL, NULL, &s), ==,
 	    XTC_OK);
 	hook_on();
@@ -131,7 +131,7 @@ test_svr_call_copies(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	hook_off();
 	munit_assert_int(xtc_svr_join(s, 1000LL * 1000 * 1000), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	munit_assert_int(g_req_ok, ==, 1);
 	munit_assert_int(g_rep_ok, ==, 1);
 	munit_assert_int(g_req_allocs_at_call, ==, 1);
@@ -187,7 +187,7 @@ test_fsm_call_copies(const MunitParameter p[], void *d)
 	g_req_ok = g_rep_ok = 0;
 	xtc_atomic_store_i32(&g_req_allocs, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_reply_allocs, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_fsm_start(loop, &fsm_cb, NULL, 0, NULL, &f), ==,
 	    XTC_OK);
 	hook_on();
@@ -196,7 +196,7 @@ test_fsm_call_copies(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	hook_off();
 	munit_assert_int(xtc_fsm_join(f, 1000LL * 1000 * 1000), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	munit_assert_int(g_req_ok, ==, 1);
 	munit_assert_int(g_rep_ok, ==, 1);
 	munit_assert_int(g_req_allocs_at_call, ==, 1);

@@ -15,7 +15,7 @@
  *	  - A proc's entries are released when it exits: the proc exit
  *	    path calls __xtc_pdict_proc_exit after the proc's at-exit
  *	    hooks, which runs each destructor and drops the side-table
- *	    node.  xtc_loop_fini does the same for a proc it tears down.
+ *	    node.  xtc_loop_destroy does the same for a proc it tears down.
  */
 
 #include "xtc_int.h"
@@ -235,7 +235,7 @@ xtc_pdict_clear(void)
 }
 
 /* Release the entries of the proc `pid`, which is exiting or being torn
- * down by xtc_loop_fini.  Called from proc.c only. */
+ * down by xtc_loop_destroy.  Called from proc.c only. */
 void
 __xtc_pdict_proc_exit(xtc_pid_t pid)
 {

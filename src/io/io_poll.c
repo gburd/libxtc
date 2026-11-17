@@ -219,7 +219,7 @@ __xtc_io_backend_init(xtc_io_t *io)
 	if (pthread_mutex_init(&io->del_lock, NULL) != 0)
 		return XTC_E_INTERNAL;
 	/* __grow reallocs two arrays; if the second fails the first is
-	 * already ours, and the caller (xtc_io_init) does not call
+	 * already ours, and the caller (xtc_io_create) does not call
 	 * backend_fini on an init failure -- release it here (found by the
 	 * OOM-injection sweep on the poll backend: 1 allocation leaked). */
 	if ((rc = __grow(io)) != XTC_OK)

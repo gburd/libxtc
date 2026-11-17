@@ -48,13 +48,13 @@ test_waker_resumes(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	struct pair c = {{NULL,NULL}, 0, 0, 0};
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_task_spawn(loop, parker_fn,   &c, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_task_spawn(loop, producer_fn, &c, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(c.parker_done, ==, 1);
 	munit_assert_int(c.parker_runs, ==, 2);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -82,12 +82,12 @@ test_pending_blocks(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	struct selfwake c = { 0, {NULL,NULL} };
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_task_spawn(loop, self_park_fn, &c, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_task_spawn(loop, waker_then_done, &c, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(c.runs, ==, 2);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -117,12 +117,12 @@ test_waker_idempotent(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	struct idem c = {{NULL,NULL}, 0};
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_task_spawn(loop, idem_parker,  &c, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_task_spawn(loop, idem_blaster, &c, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(c.parker_runs, ==, 2);  /* exactly: initial run + one resume */
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -142,14 +142,14 @@ test_waker_after_done(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	struct adone c = {{NULL,NULL}, 0};
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_task_spawn(loop, adone_task, &c, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	/* The task is DONE; the waker is captured. */
 	munit_assert_int(xtc_waker_wake(&c.w), ==, XTC_OK);   /* no crash */
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);     /* no resurrection */
 	munit_assert_int(c.runs, ==, 1);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 

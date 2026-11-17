@@ -263,7 +263,7 @@ test_io_aio_submit(const MunitParameter p[], void *d)
 	int fd = -1, rc, n, i, seen = 0, tries;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	munit_assert_int(xtc_fs_tmpdir(path, sizeof path), ==, XTC_OK);
 	(void)xtc_strlcat(path, "/xtc_ar_aio_XXXXXX", sizeof path);
 	munit_assert_int(xtc_fs_mkstemp(path, &fd), ==, XTC_OK);
@@ -303,7 +303,7 @@ test_io_aio_submit(const MunitParameter p[], void *d)
 	}
 	(void)xtc_fs_close(fd);
 	(void)xtc_fs_unlink(path);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -423,7 +423,7 @@ run_fault_child(int mode)
 		xtc_loop_t *loop = NULL;
 		alarm(20);
 		(void)xtc_fault_guard_install();
-		if (xtc_loop_init(&loop) != XTC_OK) _exit(97);
+		if (xtc_loop_create(&loop) != XTC_OK) _exit(97);
 		if (xtc_proc_spawn(loop, flt_body, (void *)(intptr_t)mode,
 		    NULL, NULL) != XTC_OK) _exit(96);
 		(void)xtc_loop_run(loop);
@@ -507,11 +507,11 @@ test_recovery_untrack_fd(const MunitParameter p[], void *d)
 	munit_assert_int(pipe(b), ==, 0);
 	s.keep_fd = a[1]; s.drop_fd = b[1];
 	s.rc_first = s.rc_again = 12345;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, untrack_body, &s, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(s.rc_first, ==, XTC_OK);
 	munit_assert_int(s.rc_again, ==, XTC_E_NOTFOUND);
 	/* The untracked fd survived the proc's exit; the tracked one was
@@ -554,8 +554,8 @@ test_proc_set_class(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	memset(&s, 0, sizeof s);
 	munit_assert_int(xtc_proc_set_class(NULL), ==, XTC_E_INVAL); /* off proc */
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&other), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&other), ==, XTC_OK);
 	munit_assert_int(xtc_exec_class_create(loop, 100, 0, &s.mine),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_exec_class_create(other, 100, 0, &s.foreign),
@@ -570,8 +570,8 @@ test_proc_set_class(const MunitParameter p[], void *d)
 	munit_assert_uint64(s.runs_after_set, >=, 5);
 	/* Back on the default lane: the class sees no more picks. */
 	munit_assert_uint64(s.runs_after_reset, ==, s.runs_after_set);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(other), ==, XTC_OK);
+	xtc_loop_destroy(loop);
+	xtc_loop_destroy(other);
 	return MUNIT_OK;
 }
 
@@ -712,7 +712,7 @@ test_slab_reaper_spawn(const MunitParameter p[], void *d)
 	memset(&s, 0, sizeof s);
 	o.name = "ar.reap"; o.obj_size = 64;
 	munit_assert_int(xtc_slab_create(&o, &s.slab), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_slab_reaper_spawn(NULL, MS, &s.reaper),
 	    ==, XTC_E_INVAL);
 	munit_assert_int(xtc_slab_reaper_spawn(loop, 0, &s.reaper),
@@ -723,7 +723,7 @@ test_slab_reaper_spawn(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, reap_watch, &s, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	/* A 1ms reaper over 30ms reaped the registered cache repeatedly. */
 	munit_assert_uint64(s.after, >, s.before);
 	xtc_slab_destroy(s.slab);
@@ -772,11 +772,11 @@ test_tail_spill_dial9(const MunitParameter p[], void *d)
 	(void)xtc_strlcat(dir, "/xtc_ar_spill_XXXXXX", sizeof dir);
 	munit_assert_not_null(mkdtemp(dir));
 	(void)xtc_tail_enable(XTC_TAIL_SCHED);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, tail_worker, NULL, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(xtc_tail_spill_dial9(dir), ==, XTC_OK);
 	xtc_tail_disable();
 

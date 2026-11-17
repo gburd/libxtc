@@ -106,7 +106,7 @@ measure(int n_tasks, size_t stack_bytes)
 	(void)xtc_set_stack_size(stack_bytes);
 	xtc_atomic_store_i32(&g_parked, 0, xtc_mo_seq_cst);
 
-	if (xtc_loop_init(&g_loop) != XTC_OK) {
+	if (xtc_loop_create(&g_loop) != XTC_OK) {
 		fprintf(stderr, "loop_init failed\n");
 		return;
 	}
@@ -148,7 +148,7 @@ measure(int n_tasks, size_t stack_bytes)
 		    rss_after - rss_before, per_task);
 	}
 
-	(void)xtc_loop_fini(g_loop);
+	xtc_loop_destroy(g_loop);
 	g_loop = NULL;
 }
 

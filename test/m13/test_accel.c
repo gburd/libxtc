@@ -135,7 +135,7 @@ test_wait_fence_signalled(const MunitParameter p[], void *d)
 	munit_assert_int(fd, >=, 0);
 	xtc_atomic_store_i32(&g_wait_rc, 12345, xtc_mo_seq_cst);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	opts.name = "waiter";
 	munit_assert_int(xtc_proc_spawn(loop, waiter_proc,
 	    (void *)(intptr_t)fd, &opts, &w), ==, XTC_OK);
@@ -143,7 +143,7 @@ test_wait_fence_signalled(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, signaller_proc,
 	    (void *)(intptr_t)fd, &opts, &s), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 
 	/* The waiter woke because the "fence" signalled -> XTC_OK. */
 	munit_assert_int(xtc_atomic_load_i32(&g_wait_rc, xtc_mo_seq_cst), ==,
@@ -188,12 +188,12 @@ test_wait_fence_timeout(const MunitParameter p[], void *d)
 	munit_assert_int(fd, >=, 0);
 	xtc_atomic_store_i32(&g_to_rc, 12345, xtc_mo_seq_cst);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	opts.name = "timeout";
 	munit_assert_int(xtc_proc_spawn(loop, timeout_proc,
 	    (void *)(intptr_t)fd, &opts, &t), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 
 	munit_assert_int(xtc_atomic_load_i32(&g_to_rc, xtc_mo_seq_cst), ==,
 	    XTC_E_AGAIN);
@@ -322,7 +322,7 @@ mb_run(int mode)
 	g_mb_fd = eventfd(0, EFD_NONBLOCK);
 	munit_assert_int(g_mb_fd, >=, 0);
 	munit_assert_int(pthread_create(&wd, NULL, mb_watchdog, NULL), ==, 0);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, mb_heartbeat, NULL, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, mb_waiter, NULL, NULL,
@@ -331,7 +331,7 @@ mb_run(int mode)
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	(void)pthread_join(wd, NULL);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	(void)close(g_mb_fd);
 	printf("# mode %d: rc=%d after %.3f s, heartbeats=%d, mail left=%zu\n",
 	    mode, g_mb_rc, g_mb_elapsed,

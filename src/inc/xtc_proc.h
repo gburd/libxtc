@@ -51,7 +51,7 @@ extern "C" {
  * Process identifier (16 bytes; 2.0).  Encodes the loop ID, a per-loop
  * slot index, and the slot's generation, so a stale pid (after a
  * process exits and its slot is reused) is recognisably stale on
- * lookup.  The loop ID is process-wide (2.2): every xtc_loop_init, on an
+ * lookup.  The loop ID is process-wide (2.2): every xtc_loop_create, on an
  * executor or standalone, takes the next id from 1, and an id is never
  * reused in the process, so a pid names one proc from any loop of any
  * executor, and a pid of a finalized loop names none.  (Through 2.1 it
@@ -73,7 +73,7 @@ typedef struct xtc_pid {
 
 /*
  * The loop_id of a plain thread's identity (xtc_thread_register, 2.2).
- * No loop has this id (xtc_loop_init stops below it), so such a pid
+ * No loop has this id (xtc_loop_create stops below it), so such a pid
  * reaches no proc: it only names the sender of that thread's messages
  * and trace events.
  */

@@ -228,7 +228,7 @@ test_inval(const MunitParameter p[], void *d)
 	xtc_loop_t *loop = NULL;
 	xtc_future_t *fut = NULL;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_dispatch(NULL, effect_return_7, NULL, &fut, NULL),
 	    ==, XTC_E_INVAL);
 	munit_assert_int(xtc_dispatch(loop, NULL, NULL, &fut, NULL),
@@ -237,7 +237,7 @@ test_inval(const MunitParameter p[], void *d)
 	    ==, XTC_E_INVAL);
 	munit_assert_int(xtc_dispatch_cancel(NULL), ==, XTC_E_INVAL);
 	xtc_dispatch_handle_free(NULL);   /* no-op, no crash */
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 

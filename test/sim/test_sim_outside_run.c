@@ -84,7 +84,7 @@ main(void)
 	(void)signal(SIGALRM, on_alarm);
 
 	/* A plain loop, outside any run. */
-	if (xtc_loop_init(&loop) != XTC_OK ||
+	if (xtc_loop_create(&loop) != XTC_OK ||
 	    xtc_proc_spawn(loop, reader, NULL, NULL, NULL) != XTC_OK) {
 		printf("FAIL: setup of the plain loop\n");
 		return 1;

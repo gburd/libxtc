@@ -20,7 +20,7 @@
  *	at a fixture file instead of the real /sys -- no root or real
  *	cgroup required.  This is a one-time host probe, not a hot path
  *	and not called from any DST sim-reachable code path (every
- *	xtc_res_init / xtc_exec_init / xtc_loop_init call site runs before
+ *	xtc_res_init / xtc_exec_init / xtc_loop_create call site runs before
  *	xtc_sim_activate; see src/evt/sim.c), so no sim guard is needed.
  */
 

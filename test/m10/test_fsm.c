@@ -153,7 +153,7 @@ test_fsm_basic(const MunitParameter p[], void *data)
 	memset(&sc, 0, sizeof sc);
 	sc.d = &d;
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_fsm_start(loop, &DOOR_CB, &d, S_CLOSED, NULL,
 	    &sc.fsm), ==, XTC_OK);
 	sc.fsm_pid = xtc_fsm_pid(sc.fsm);
@@ -169,7 +169,7 @@ test_fsm_basic(const MunitParameter p[], void *data)
 	munit_assert_int(d.opens, >=, 2);   /* opened directly, and via replay */
 
 	(void)xtc_fsm_join(sc.fsm, 0);   /* reclaim the handle (proc already gone) */
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -285,7 +285,7 @@ test_fsm_state_timeout(const MunitParameter p[], void *data)
 
 	memset(&t, 0, sizeof t);
 	memset(&s, 0, sizeof s);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_fsm_start(loop, &TIMER_CB2, &t, T_WAIT, NULL,
 	    &s.fsm), ==, XTC_OK);
 	s.pid = xtc_fsm_pid(s.fsm);
@@ -297,7 +297,7 @@ test_fsm_state_timeout(const MunitParameter p[], void *data)
 	munit_assert_int(t.reached_done, ==, 1);  /* and drove the transition */
 
 	(void)xtc_fsm_join(s.fsm, 0);   /* reclaim the handle */
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -341,7 +341,7 @@ feq_by_start(xtc_loop_t **b, xtc_pid_t *by, int n, pthread_t *th)
 	xtc_atomic_store_i32(&g_feq_stop, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_feq_by_msgs, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_feq_by_normal, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(b), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(b), ==, XTC_OK);
 	for (i = 0; i < n; i++)
 		munit_assert_int(xtc_proc_spawn(*b, feq_by, NULL, NULL, &by[i]),
 		    ==, XTC_OK);
@@ -385,7 +385,7 @@ test_fsm_join_equal_pid_other_loop(const MunitParameter p[], void *d)
 	memset(&cb, 0, sizeof cb);
 	cb.size = sizeof cb;
 	cb.event = feq_event;
-	munit_assert_int(xtc_loop_init(&la), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&la), ==, XTC_OK);
 	munit_assert_int(xtc_fsm_start(la, &cb, NULL, 0, NULL, &fsm), ==, XTC_OK);
 	munit_assert_true(feq_has_equal(by, 4, xtc_fsm_pid(fsm)));   /* premise */
 	munit_assert_int(xtc_fsm_stop(fsm), ==, XTC_OK);
@@ -396,8 +396,8 @@ test_fsm_join_equal_pid_other_loop(const MunitParameter p[], void *d)
 	munit_assert_int(rc, ==, XTC_OK);
 	munit_assert_int(xtc_atomic_load_i32(&g_feq_by_msgs, xtc_mo_seq_cst),
 	    ==, 0); /* no stray kick */
-	munit_assert_int(xtc_loop_fini(la), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(lb), ==, XTC_OK);
+	xtc_loop_destroy(la);
+	xtc_loop_destroy(lb);
 	return MUNIT_OK;
 }
 
@@ -454,7 +454,7 @@ test_fsm_call_keeps_mail(const MunitParameter p[], void *data)
 	memset(&d, 0, sizeof d);
 	memset(&ck, 0, sizeof ck);
 	ck.call_rc = -999;
-	munit_assert_int(xtc_loop_init(&ck.loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&ck.loop), ==, XTC_OK);
 	munit_assert_int(xtc_fsm_start(ck.loop, &DOOR_CB, &d, S_CLOSED, NULL,
 	                     &ck.fsm),
 	    ==, XTC_OK);
@@ -464,7 +464,7 @@ test_fsm_call_keeps_mail(const MunitParameter p[], void *data)
 	munit_assert_int(ck.call_rc, ==, XTC_OK);
 	munit_assert_int(ck.down_kept, ==, 1);
 	(void)xtc_fsm_join(ck.fsm, 0);
-	(void)xtc_loop_fini(ck.loop);
+	xtc_loop_destroy(ck.loop);
 	return MUNIT_OK;
 }
 
@@ -518,7 +518,7 @@ test_fsm_enter_fail_exits(const MunitParameter p[], void *data)
 	(void)p;
 	(void)data;
 	memset(&f, 0, sizeof f);
-	munit_assert_int(xtc_loop_init(&f.loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&f.loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(f.loop, enter_fail_watcher, &f, NULL,
 	                     NULL),
 	    ==, XTC_OK);
@@ -528,7 +528,7 @@ test_fsm_enter_fail_exits(const MunitParameter p[], void *data)
 	munit_assert_int(f.di.kind, ==, XTC_DOWN_KIND_EXIT);
 	munit_assert_int(f.di.exit_code, ==, XTC_E_NOMEM);
 	munit_assert_int(xtc_fsm_join(f.fsm, 0), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(f.loop), ==, XTC_OK);
+	xtc_loop_destroy(f.loop);
 	return MUNIT_OK;
 }
 
@@ -610,7 +610,7 @@ test_fsm_killed_frees(const MunitParameter p[], void *data)
 	(void)data;
 	cb.event = kf_event;
 	memset(g_kf_live, 0, sizeof g_kf_live);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(__os_alloc_get_hook(&g_kf_saved), ==, XTC_OK);
 	my = g_kf_saved;
 	my.malloc = kf_malloc;
@@ -628,7 +628,7 @@ test_fsm_killed_frees(const MunitParameter p[], void *data)
 		if (g_kf_live[i] != NULL)
 			live++;
 	munit_assert_int(live, ==, 0);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -689,7 +689,7 @@ test_fsm_call_machine_stops(const MunitParameter p[], void *data)
 	(void)data;
 	memset(&c, 0, sizeof c);
 	cb.event = stop_event;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_fsm_start(loop, &cb, NULL, 0, NULL, &fsm), ==,
 	    XTC_OK);
 	c.fsm_pid = xtc_fsm_pid(fsm);
@@ -700,7 +700,7 @@ test_fsm_call_machine_stops(const MunitParameter p[], void *data)
 	munit_assert_int64(c.elapsed_ns, <, 500LL * 1000 * 1000);
 	munit_assert_int(c.left, ==, 0);
 	(void)xtc_fsm_join(fsm, 0);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -763,7 +763,7 @@ test_fsm_wait_init(const MunitParameter p[], void *data)
 	(void)data;
 	memset(&w, 0, sizeof w);
 	g_fw_entered = 0;
-	munit_assert_int(xtc_loop_init(&w.loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&w.loop), ==, XTC_OK);
 	o.wait_init = 1;
 	munit_assert_int(xtc_fsm_start(w.loop, &cb, NULL, S_CLOSED, &o, &f), ==,
 	    XTC_E_STATE);
@@ -780,7 +780,7 @@ test_fsm_wait_init(const MunitParameter p[], void *data)
 	munit_assert_int(w.good_rc, ==, XTC_OK);
 	munit_assert_int(w.entered_at_return, ==, 1);
 	munit_assert_int(xtc_fsm_join(w.good, 0), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(w.loop), ==, XTC_OK);
+	xtc_loop_destroy(w.loop);
 	return MUNIT_OK;
 }
 

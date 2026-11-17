@@ -85,7 +85,7 @@ and test builds keep the framework live.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 /* In production code: */
-int xtc_io_init(xtc_io_t **out) {
+int xtc_io_create(xtc_io_t **out) {
     XTC_INJECTION_POINT("io.init.calloc_fail");
     if (xtc_inject_check("io.init.calloc_fail"))
         return XTC_E_NOMEM;
@@ -94,7 +94,7 @@ int xtc_io_init(xtc_io_t **out) {
 
 /* In a test: */
 xtc_inject_attach("io.init.calloc_fail", my_callback, NULL);
-int rc = xtc_io_init(&io);
+int rc = xtc_io_create(&io);
 munit_assert_int(rc, ==, XTC_E_NOMEM);
 xtc_inject_detach("io.init.calloc_fail");
 .Ed

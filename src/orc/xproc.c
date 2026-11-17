@@ -262,7 +262,7 @@ xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg)
 	 * XTC_E_* (241..249), not a bare 3, so the parent's DOWN names why.
 	 * The sleep is a plain OS sleep: no loop exists yet to yield to.
 	 */
-	while ((rc = xtc_loop_init(&loop)) != XTC_OK &&
+	while ((rc = xtc_loop_create(&loop)) != XTC_OK &&
 	    (rc == XTC_E_INTERNAL || rc == XTC_E_NOMEM ||
 	     rc == XTC_E_RESOURCE) &&
 	    slept < 2000 * 1000 * 1000LL) {
@@ -288,13 +288,13 @@ xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg)
 	/* The pump spawns the root itself (spawn+monitor, race-free); see
 	 * child_pump_proc. */
 	if (xtc_proc_spawn(loop, child_pump_proc, &pctx, NULL, NULL) != XTC_OK) {
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 		return 5;
 	}
 
 	/* Run until both the root and the pump finish (loop goes idle). */
 	(void)xtc_loop_run(loop);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	if (pctx.spawn_rc != XTC_OK)
 		return 4;                     /* the root never started */
 	return exit_code;
@@ -1223,7 +1223,7 @@ xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg)
 	 * XTC_E_* (241..249), not a bare 3, so the parent's DOWN names why.
 	 * The sleep is a plain OS sleep: no loop exists yet to yield to.
 	 */
-	while ((rc = xtc_loop_init(&loop)) != XTC_OK &&
+	while ((rc = xtc_loop_create(&loop)) != XTC_OK &&
 	    (rc == XTC_E_INTERNAL || rc == XTC_E_NOMEM ||
 	     rc == XTC_E_RESOURCE) &&
 	    slept < 2000 * 1000 * 1000LL) {
@@ -1238,18 +1238,18 @@ xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg)
 	rctx.root_fn = root_fn;
 	rctx.arg = arg;
 	if (xtc_proc_spawn(loop, child_root_proc, &rctx, NULL, &root) != XTC_OK) {
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 		return 4;
 	}
 	/* Monitor the root so the loop stops when it exits. */
 	mctx.root = root; mctx.loop = loop; mctx.exit_code = &exit_code;
 	if (xtc_proc_spawn(loop, win_rootmon_proc, &mctx, NULL, NULL) != XTC_OK) {
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 		return 5;
 	}
 	/* Start the blocking control-socket reader on its own OS thread. */
 	if (__os_calloc(1, sizeof *rctxp, (void **)&rctxp) != XTC_OK) {
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 		return 6;
 	}
 	rctxp->sock = (SOCKET)ctrl_fd;
@@ -1266,7 +1266,7 @@ xtc_xproc_child_main(int ctrl_fd, xtc_xproc_root_fn root_fn, void *arg)
 		CloseHandle(reader);
 	}
 	if (rctxp) __os_free(rctxp);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return exit_code;
 }
 

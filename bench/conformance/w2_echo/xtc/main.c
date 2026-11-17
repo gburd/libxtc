@@ -104,8 +104,8 @@ server_thread(void *arg)
 	int             n, i;
 	(void)arg;
 
-	if (xtc_io_init(&io) != XTC_OK) {
-		fprintf(stderr, "w2/xtc: xtc_io_init failed\n");
+	if (xtc_io_create(&io) != XTC_OK) {
+		fprintf(stderr, "w2/xtc: xtc_io_create failed\n");
 		return NULL;
 	}
 
@@ -113,7 +113,7 @@ server_thread(void *arg)
 	if (xtc_io_reg_fd(io, g_listen_fd, XTC_IO_READABLE,
 	                  (void *)(intptr_t)(-1)) != XTC_OK) {
 		fprintf(stderr, "w2/xtc: xtc_io_reg_fd(listen_fd) failed\n");
-		xtc_io_fini(io);
+		xtc_io_destroy(io);
 		return NULL;
 	}
 
@@ -208,7 +208,7 @@ server_thread(void *arg)
 			break;
 	}
 
-	xtc_io_fini(io);
+	xtc_io_destroy(io);
 	return NULL;
 }
 

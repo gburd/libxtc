@@ -433,7 +433,7 @@ jobs:
     # work on ONE long-lived loop; heap and address space must plateau.
     # NON-GATING (continue-on-error) because it is RED BY DESIGN today:
     # completed coro-backed procs keep their fiber stack + coro until
-    # xtc_loop_fini (PLAN 19.26) and each park timer stays on the loop's
+    # xtc_loop_destroy (PLAN 19.26) and each park timer stays on the loop's
     # all_timers until fini.  Its job is to print the bytes retained per
     # generation every night so the regression -- or the fix -- is
     # visible.  The `plain` mode is the instrument's control and must

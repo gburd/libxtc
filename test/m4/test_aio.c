@@ -90,11 +90,11 @@ run_roundtrip(int force_offload)
 	c.fd = mkstemp(tmpl);
 	munit_assert_int(c.fd, >=, 0);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, peer_proc, NULL, &o, &b), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, aio_proc, &c, &o, &a), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 
 	close(c.fd);
 	unlink(tmpl);
@@ -209,13 +209,13 @@ run_vec_roundtrip(int force_offload)
 	c.fd = mkstemp(tmpl);
 	munit_assert_int(c.fd, >=, 0);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, peer_proc, NULL, &o, &b), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, vec_proc, &c, &o, &a), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	close(c.fd);
 	unlink(tmpl);
 	__xtc_aio_force_offload(0);
@@ -264,11 +264,11 @@ test_aiov_bounds(const MunitParameter p[], void *d)
 	memset(&g_badv, 0, sizeof g_badv);
 	g_badv.fd = mkstemp(tmpl);
 	munit_assert_int(g_badv.fd, >=, 0);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, badv_proc, &g_badv, &o, &a),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	close(g_badv.fd);
 	unlink(tmpl);
 
@@ -304,10 +304,10 @@ test_aio_short_read(const MunitParameter p[], void *d)
 	munit_assert_int(g_eof.fd, >=, 0);
 	munit_assert_int((int)write(g_eof.fd, "0123456789", 10), ==, 10);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, eof_proc, &g_eof, &o, &a), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	close(g_eof.fd);
 	unlink(tmpl);
 
@@ -381,12 +381,12 @@ test_aio_timer_churn(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_churn_wrote, 0, xtc_mo_seq_cst);
 	g_churn_start = xtc_clock_mono();
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, churn_spinner, NULL, &o, &a), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, churn_spinner, NULL, &o, &a), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, churn_writer, &fd, &o, &a), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	took = xtc_clock_mono() - g_churn_start;
 	close(fd);
 	unlink(tmpl);
@@ -424,12 +424,12 @@ run_badfd(int force_offload)
 	int fd = -1, i;
 
 	__xtc_aio_force_offload(force_offload);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, badfd_proc, (void *)(intptr_t)fd,
 	                     NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	__xtc_aio_force_offload(0);
 	for (i = 0; i < 3; i++) {
 		munit_assert_int(g_badfd_rc[i], ==, XTC_E_SYS(EBADF));

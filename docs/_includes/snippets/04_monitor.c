@@ -65,12 +65,12 @@ main(void)
 {
 	xtc_loop_t *loop;
 
-	if (xtc_loop_init(&loop) != XTC_OK)
+	if (xtc_loop_create(&loop) != XTC_OK)
 		return 1;
 	if (xtc_proc_spawn(loop, parent, loop, NULL, NULL) != XTC_OK)
 		return 1;
 	(void)xtc_loop_run(loop);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return 0;
 }
 /* !endregion full */

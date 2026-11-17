@@ -181,7 +181,7 @@ main(void)
 	int i, j, fail = 0, total = 0, wrong = 0;
 
 	if (xtc_exec_init(&A, 2) != XTC_OK || xtc_exec_init(&B, 2) != XTC_OK ||
-	    xtc_loop_init(&S0) != XTC_OK || xtc_loop_init(&S1) != XTC_OK) {
+	    xtc_loop_create(&S0) != XTC_OK || xtc_loop_create(&S1) != XTC_OK) {
 		printf("FAIL: setup\n");
 		return 1;
 	}
@@ -249,8 +249,8 @@ main(void)
 	g_dead[0] = pid[0];
 	g_dead[1] = pid[5];
 	(void)xtc_exec_fini(A);
-	(void)xtc_loop_fini(S1);
-	if (xtc_exec_init(&C, 2) != XTC_OK || xtc_loop_init(&S2) != XTC_OK) {
+	xtc_loop_destroy(S1);
+	if (xtc_exec_init(&C, 2) != XTC_OK || xtc_loop_create(&S2) != XTC_OK) {
 		printf("FAIL: setup 2\n");
 		return 1;
 	}
@@ -281,8 +281,8 @@ main(void)
 
 	(void)xtc_exec_fini(B);
 	(void)xtc_exec_fini(C);
-	(void)xtc_loop_fini(S0);
-	(void)xtc_loop_fini(S2);
+	xtc_loop_destroy(S0);
+	xtc_loop_destroy(S2);
 	if (fail)
 		return 1;
 	printf("OK: pids cross executors and standalone loops exactly; a "

@@ -73,13 +73,13 @@ main(void)
 	int sv[2], frame_ok;
 
 	/* Part 1: zero-copy message. */
-	if (xtc_loop_init(&loop) != XTC_OK)
+	if (xtc_loop_create(&loop) != XTC_OK)
 		return 1;
 	if (xtc_proc_spawn(loop, consumer, NULL, NULL, &cons) != XTC_OK ||
 	    xtc_proc_spawn(loop, producer, &cons, NULL, &prod) != XTC_OK)
 		return 1;
 	(void)xtc_loop_run(loop);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 
 	/* Part 2: one frame from three pieces, no assembly copy. */
 	if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0)

@@ -70,11 +70,11 @@ prop_scope_lifo(hegel_test_case *tc, void *u)
 	struct sc1_state s = {0};
 	(void)u;
 	s.n = (int)hegel_draw_int(tc, hegel_integers(1, SC_MAX));
-	hegel_assume(xtc_loop_init(&loop) == XTC_OK);
+	hegel_assume(xtc_loop_create(&loop) == XTC_OK);
 	hegel_assume(xtc_proc_spawn(loop, sc1_proc, &s, NULL, &pid) == XTC_OK);
 	hegel_assume(xtc_loop_run(loop) == XTC_OK);
 	hegel_assume(s.ok == 1);
-	hegel_assume(xtc_loop_fini(loop) == XTC_OK);
+	xtc_loop_destroy(loop);
 }
 
 /* ----- Sc2: N nested scopes close inner->outer -------------- */
@@ -121,11 +121,11 @@ prop_nested_scopes(hegel_test_case *tc, void *u)
 	struct sc2_state s = {0};
 	(void)u;
 	s.depth = (int)hegel_draw_int(tc, hegel_integers(1, 12));
-	hegel_assume(xtc_loop_init(&loop) == XTC_OK);
+	hegel_assume(xtc_loop_create(&loop) == XTC_OK);
 	hegel_assume(xtc_proc_spawn(loop, sc2_proc, &s, NULL, &pid) == XTC_OK);
 	hegel_assume(xtc_loop_run(loop) == XTC_OK);
 	hegel_assume(s.ok == 1);
-	hegel_assume(xtc_loop_fini(loop) == XTC_OK);
+	xtc_loop_destroy(loop);
 }
 
 /* ----- Sc3: bracket always releases (OK or error) ----------- */
@@ -170,13 +170,13 @@ prop_bracket_always_releases(hegel_test_case *tc, void *u)
 	s.use_rc = (pick == 0) ? XTC_OK :
 	           (pick == 1) ? XTC_E_INVAL :
 	           (pick == 2) ? XTC_E_AGAIN : XTC_E_RESOURCE;
-	hegel_assume(xtc_loop_init(&loop) == XTC_OK);
+	hegel_assume(xtc_loop_create(&loop) == XTC_OK);
 	hegel_assume(xtc_proc_spawn(loop, sc3_proc, &s, NULL, &pid) == XTC_OK);
 	hegel_assume(xtc_loop_run(loop) == XTC_OK);
 	/* Release ran exactly once and bracket returned use's code. */
 	hegel_assume(s.released == 1);
 	hegel_assume(s.bracket_rc == s.use_rc);
-	hegel_assume(xtc_loop_fini(loop) == XTC_OK);
+	xtc_loop_destroy(loop);
 }
 
 static const pbt_entry_t tests[] = {

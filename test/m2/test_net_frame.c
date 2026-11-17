@@ -91,7 +91,7 @@ test_frame_roundtrip(const MunitParameter p[], void *d)
 	(void)xtc_net_setnonblock(sv[1]);
 	s.sv0 = sv[0]; s.sv1 = sv[1];
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	opts.name = "recv";
 	munit_assert_int(xtc_proc_spawn(loop, fr_receiver, &s, &opts, &b),
 	    ==, XTC_OK);
@@ -99,7 +99,7 @@ test_frame_roundtrip(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, fr_sender, &s, &opts, &a),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	xtc_net_close(sv[0]); xtc_net_close(sv[1]);
 
 	munit_assert_int(s.ok, ==, 3);
@@ -143,7 +143,7 @@ test_frame_cap(const MunitParameter p[], void *d)
 	(void)xtc_net_setnonblock(sv[0]);
 	(void)xtc_net_setnonblock(sv[1]);
 	s.sv0 = sv[0]; s.sv1 = sv[1];
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	opts.name = "crecv";
 	munit_assert_int(xtc_proc_spawn(loop, cap_receiver, &s, &opts, &b),
 	    ==, XTC_OK);
@@ -151,7 +151,7 @@ test_frame_cap(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, cap_sender, &s, &opts, &a),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	xtc_net_close(sv[0]); xtc_net_close(sv[1]);
 
 	munit_assert_int(s.cap_range, ==, 1);
@@ -225,7 +225,7 @@ test_frame_truncated(const MunitParameter p[], void *d)
 	(void)xtc_net_setnonblock(sv[0]);
 	(void)xtc_net_setnonblock(sv[1]);
 	s.sv0 = sv[0]; s.sv1 = sv[1];
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	opts.name = "trecv";
 	munit_assert_int(xtc_proc_spawn(loop, trunc_receiver, &s, &opts, &b),
 	    ==, XTC_OK);
@@ -233,7 +233,7 @@ test_frame_truncated(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, trunc_sender, &s, &opts, &a),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(s.trunc_ok, ==, 1);
 	if (s.sv0 >= 0) xtc_net_close(sv[0]);
 	xtc_net_close(sv[1]);
@@ -300,13 +300,13 @@ test_frame_framev(const MunitParameter p[], void *d)
 	(void)xtc_net_setnonblock(sv[0]);
 	(void)xtc_net_setnonblock(sv[1]);
 	s.sv0 = sv[0]; s.sv1 = sv[1];
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, fv_receiver, &s, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, fv_sender, &s, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(s.ok, ==, 3);
 
 	/* Refused before anything is sent. */
@@ -391,13 +391,13 @@ test_frame_with_mail(const MunitParameter p[], void *d)
 	munit_assert_int(socketpair(AF_UNIX, SOCK_STREAM, 0, g_wm_sv), ==, 0);
 	(void)xtc_net_setnonblock(g_wm_sv[0]);
 	(void)xtc_net_setnonblock(g_wm_sv[1]);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, wm_sender, NULL, NULL, NULL), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, wm_receiver, NULL, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(g_wm_rc, ==, XTC_OK);
 	munit_assert_int(g_wm_depth, ==, 1);
 	munit_assert_int(g_wm_got, ==, 1);

@@ -110,13 +110,13 @@ test_records_order(const MunitParameter p[], void *d)
 
 	(void)xtc_trace_causal_enable(1);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, recv_forever, NULL, &o,
 	    &g_worker), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, order_driver, NULL, &o, &dpid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 
 	(void)xtc_trace_causal_enable(0);
 
@@ -160,13 +160,13 @@ test_disabled_zero(const MunitParameter p[], void *d)
 
 	(void)xtc_trace_causal_enable(0);   /* off (the default) */
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, recv_forever, NULL, &o,
 	    &g_worker), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, disabled_driver, NULL, &o, &dpid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 
 	/* Trace disabled: the fiber parked/resumed but recorded nothing. */
 	munit_assert_int(g_collect2.n, ==, 0);
@@ -207,13 +207,13 @@ test_ring_evict(const MunitParameter p[], void *d)
 
 	(void)xtc_trace_causal_enable(1);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, recv_forever, NULL, &o,
 	    &g_spinner), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, ring_driver, NULL, &o, &dpid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 
 	(void)xtc_trace_causal_enable(0);
 
@@ -257,13 +257,13 @@ test_dump_splice(const MunitParameter p[], void *d)
 
 	(void)xtc_trace_causal_enable(1);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, recv_forever, NULL, &o,
 	    &g_dworker), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, dump_driver, NULL, &o, &dpid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 
 	(void)xtc_trace_causal_enable(0);
 

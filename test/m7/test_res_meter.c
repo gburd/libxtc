@@ -264,11 +264,11 @@ test_net_recovery_close(const MunitParameter p[], void *d)
 
 	munit_assert_int(xtc_res_init(&r, &caps), ==, XTC_OK);
 	munit_assert_int(xtc_res_attach_net(&r), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, recov_net_proc, &s, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(s.sock, >=, 0);
 	munit_assert_int64(s.used_in, ==, 1);
 	munit_assert_int64(xtc_res_used(&r, XTC_RES_FDS), ==, 0);

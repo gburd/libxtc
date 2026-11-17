@@ -1807,13 +1807,13 @@ test_server_transport_yield_isolation(const MunitParameter params[],
 
     munit_assert_int(yattacker_open(ctx, &a, av), ==, XTC_OK);
     g_ya_write_yield = 1;
-    munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+    munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
     munit_assert_int(xtc_proc_spawn(loop, yvictim_fiber, &v, NULL, NULL),
                      ==, XTC_OK);
     munit_assert_int(xtc_proc_spawn(loop, yattacker_fiber, &a, NULL, NULL),
                      ==, XTC_OK);
     munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-    munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+    xtc_loop_destroy(loop);
     g_ya_write_yield = 0;
 
     /* The interleaving happened: A was suspended in its alert write

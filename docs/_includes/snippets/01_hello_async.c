@@ -37,7 +37,7 @@ main(void)
 	xtc_task_t *task;
 	intptr_t    result = 0;
 
-	if (xtc_loop_init(&loop) != XTC_OK)
+	if (xtc_loop_create(&loop) != XTC_OK)
 		return 1;
 
 	/* Spawn the coroutine.  It does not run yet -- it is queued on the
@@ -53,7 +53,7 @@ main(void)
 	(void)xtc_await(task, &result);
 	printf("result = %lld\n", (long long)result);
 
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return 0;
 }
 /* !endregion full */

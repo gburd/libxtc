@@ -92,7 +92,7 @@ class Event:
     @property
     def pid(self):
         # LOOP_NONE is XTC_TAIL_LOOP_NONE: a ring with no exec-relative loop id
-        # (a bare xtc_loop_init loop).  Rendered "none" rather than as a
+        # (a bare xtc_loop_create loop).  Rendered "none" rather than as a
         # number, because the old code reported it as 0 and a consumer read
         # those events as belonging to the executor's REAL loop 0.
         if self.loop == LOOP_NONE:

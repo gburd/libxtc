@@ -67,7 +67,7 @@ prop_random_timers(hegel_test_case *tc, void *u)
 
 	n = (int)hegel_draw_int(tc, hegel_integers(1, 64));
 
-	hegel_assume(xtc_loop_init(&loop) == XTC_OK);
+	hegel_assume(xtc_loop_create(&loop) == XTC_OK);
 	g_recs = calloc((size_t)n, sizeof *g_recs);
 	handles = calloc((size_t)n, sizeof *handles);
 	hegel_assume(g_recs != NULL && handles != NULL);
@@ -119,7 +119,7 @@ prop_random_timers(hegel_test_case *tc, void *u)
 
 	free(g_recs); g_recs = NULL;
 	free(handles);
-	hegel_assume(xtc_loop_fini(loop) == XTC_OK);
+	xtc_loop_destroy(loop);
 }
 
 static const pbt_entry_t tests[] = {

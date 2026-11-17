@@ -72,7 +72,7 @@ test_park_on_fd_read(const MunitParameter p[], void *d)
 	munit_assert_int(make_pipe_pair(p_), ==, 0);
 	c.rfd = p_[0]; c.wfd = p_[1]; c.phase = 0; c.run_count = 0;
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	c.loop = loop;
 	munit_assert_int(xtc_task_spawn(loop, parker_read,      &c, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_task_spawn(loop, writer_then_done, &c, NULL), ==, XTC_OK);
@@ -80,7 +80,7 @@ test_park_on_fd_read(const MunitParameter p[], void *d)
 	munit_assert_int(c.run_count, ==, 2);
 
 	test_close(c.rfd); test_close(c.wfd);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -107,12 +107,12 @@ test_park_on_fd_write(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	munit_assert_int(make_pipe_pair(p_), ==, 0);
 	c.wfd = p_[1]; c.phase = 0; c.runs = 0;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_task_spawn(loop, parker_write, &c, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(c.runs, ==, 2);
 	test_close_pair(p_);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -140,12 +140,12 @@ test_park_one_at_a_time(const MunitParameter p[], void *d)
 	munit_assert_int(make_pipe_pair(a), ==, 0);
 	munit_assert_int(make_pipe_pair(b), ==, 0);
 	c.fd1 = a[0]; c.fd2 = b[0]; c.phase = 0; c.rc_second = 0;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_task_spawn(loop, parker_two, &c, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(c.rc_second, ==, XTC_E_INVAL);
 	test_close_pair(a); test_close_pair(b);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 

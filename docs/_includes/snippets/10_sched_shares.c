@@ -80,7 +80,7 @@ main(void)
 	struct ctx c;
 	double ratio;
 
-	if (xtc_loop_init(&loop) != XTC_OK)
+	if (xtc_loop_create(&loop) != XTC_OK)
 		return 1;
 
 	/* Class A: 3 shares.  Class B: 1 share.  Optional latency bound 0
@@ -115,7 +115,7 @@ main(void)
 		    (unsigned long long)xtc_exec_class_runs(b),
 		    ratio, stalls);
 
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 		/* The well-behaved workers never trip the stall watchdog.
 		 *
 		 * NOTE what this does and does not assert.  It does NOT assert

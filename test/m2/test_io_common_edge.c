@@ -8,7 +8,7 @@
  *	Edge coverage for io_common.c paths that the existing
  *	fault-injection test (test_io_fault_inject.c) does not reach.
  *
- *	The four inject points in xtc_io_init (calloc/pipe/fcntl/backend
+ *	The four inject points in xtc_io_create (calloc/pipe/fcntl/backend
  *	fail) are already covered there.  This file drives the remaining
  *	public-API-reachable edges:
  *
@@ -21,7 +21,7 @@
  *	    branch's fd-close correctness end to end.
  *
  *	NOTE: the __xtc_io_register_wakeup failure-cleanup branch in
- *	xtc_io_init has NO injection point in src/io/io_common.c, so it
+ *	xtc_io_create has NO injection point in src/io/io_common.c, so it
  *	is not reachable from the public API without a source edit.  It
  *	is deliberately not tested here.
  */
@@ -51,7 +51,7 @@ test_wakeup_coalesce(const MunitParameter p[], void *d)
 	int i;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	munit_assert_not_null(io);
 
 	/* 256 KiB worth of 1-byte wakeups: well past any pipe buffer, so
@@ -59,7 +59,7 @@ test_wakeup_coalesce(const MunitParameter p[], void *d)
 	for (i = 0; i < 256 * 1024; i++)
 		munit_assert_int(xtc_io_wakeup(io), ==, XTC_OK);
 
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -100,7 +100,7 @@ test_fcntl_cleanup_no_leak(const MunitParameter p[], void *d)
 	    ==, XTC_OK);
 	for (i = 0; i < 4096; i++) {
 		io = NULL;
-		munit_assert_int(xtc_io_init(&io), ==, XTC_E_INTERNAL);
+		munit_assert_int(xtc_io_create(&io), ==, XTC_E_INTERNAL);
 		munit_assert_null(io);
 	}
 	(void)xtc_inject_detach("io.init.fcntl_fail");
@@ -108,9 +108,9 @@ test_fcntl_cleanup_no_leak(const MunitParameter p[], void *d)
 	/* If any of the 4096 forced failures leaked its pipe fds, this
 	 * clean init would eventually hit EMFILE and fail. */
 	io = NULL;
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	munit_assert_not_null(io);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 #endif

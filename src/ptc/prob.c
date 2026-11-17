@@ -125,7 +125,7 @@ __prob_next_pow2(size_t v)
 }
 
 int
-xtc_bloom_init(xtc_bloom_t **out, size_t n_expected, double fp_rate)
+xtc_bloom_create(size_t n_expected, double fp_rate, xtc_bloom_t **out)
 {
 	xtc_bloom_t *b;
 	double n, ln_p, m_opt, k_opt;
@@ -207,7 +207,7 @@ xtc_bloom_maybe_contains(const xtc_bloom_t *b, const void *key, size_t len)
 }
 
 void
-xtc_bloom_fini(xtc_bloom_t *b)
+xtc_bloom_destroy(xtc_bloom_t *b)
 {
 	if (b == NULL) return;
 	__os_free(b->bits);
@@ -223,7 +223,7 @@ struct xtc_hll {
 };
 
 int
-xtc_hll_init(xtc_hll_t **out, int precision)
+xtc_hll_create(int precision, xtc_hll_t **out)
 {
 	xtc_hll_t *h;
 	int rc;
@@ -337,7 +337,7 @@ xtc_hll_merge(xtc_hll_t *dst, const xtc_hll_t *src)
 }
 
 void
-xtc_hll_fini(xtc_hll_t *h)
+xtc_hll_destroy(xtc_hll_t *h)
 {
 	if (h == NULL) return;
 	__os_free(h->reg);

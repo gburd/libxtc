@@ -40,7 +40,7 @@ see [Architecture]({{ '/reference/architecture/' | relative_url }}) for when to 
 
 {: .note }
 > If `make check` reports a failure in `test_io_lifecycle` about
-> `xtc_io_init` on a machine with a low `ulimit -l`, configure with
+> `xtc_io_create` on a machine with a low `ulimit -l`, configure with
 > `--with-io-backend=epoll` -- that is a memlock-limit quirk of
 > io_uring on the host, not a library fault. See
 > [Known issues]({{ '/reference/known-issues/' | relative_url }}).
@@ -69,8 +69,8 @@ result = 49
 
 Three objects and four calls carry the whole program.
 
-**The loop** ([`xtc_loop_init`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_loop.3),
-`xtc_loop_run`, `xtc_loop_fini`). An `xtc_loop_t` is an event loop: a
+**The loop** ([`xtc_loop_create`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_loop.3),
+`xtc_loop_run`, `xtc_loop_destroy`). An `xtc_loop_t` is an event loop: a
 run queue of ready fibers plus an OS I/O poller (io_uring, epoll,
 kqueue, or IOCP, chosen at configure time). `xtc_loop_run` drives it,
 resuming ready fibers one at a time on this thread until there is no
@@ -123,7 +123,7 @@ Nearly every program follows the same skeleton:
    `xtc_proc_spawn` (for a supervised, message-passing process --
    [Processes and messages]({{ '/guide/03-processes-and-messages/' | relative_url }})).
 3. **Run** the loop.
-4. **Tear down** with `xtc_loop_fini`.
+4. **Tear down** with `xtc_loop_destroy`.
 
 The next chapter opens up step 2 and 3: what a fiber really is, how the
 loop decides what to run, and how to await I/O rather than just a

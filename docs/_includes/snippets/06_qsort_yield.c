@@ -61,7 +61,7 @@ main(void)
 	xtc_task_t *task;
 	intptr_t    ok = -1;
 
-	if (xtc_loop_init(&loop) != XTC_OK)
+	if (xtc_loop_create(&loop) != XTC_OK)
 		return 1;
 	if (xtc_async(loop, sorter, data, &task) != XTC_OK)
 		return 1;
@@ -70,7 +70,7 @@ main(void)
 
 	printf("sorted correctly through %d in-qsort yields: %s\n",
 	    g_yields, ok == 0 ? "yes" : "no");
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return ok == 0 ? 0 : 1;
 }
 /* !endregion full */

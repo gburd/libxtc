@@ -160,7 +160,7 @@ test_await_in_fiber(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_fiber_ok, 0, xtc_mo_seq_cst);
 	munit_assert_int(xtc_future_new_pair(&g_prom, &g_fut), ==, XTC_OK);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	opts.name = "consumer";
 	munit_assert_int(xtc_proc_spawn(loop, consumer_proc, NULL, &opts, &a),
 	    ==, XTC_OK);
@@ -168,7 +168,7 @@ test_await_in_fiber(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_proc_spawn(loop, producer_proc, NULL, &opts, &b),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 
 	munit_assert_int(xtc_atomic_load_i32(&g_fiber_ok, xtc_mo_seq_cst), ==,
 	    1);
@@ -350,12 +350,12 @@ test_with_timeout(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	xtc_atomic_store_i32(&g_to_status, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	opts.name = "to";
 	munit_assert_int(xtc_proc_spawn(loop, timeout_consumer, NULL, &opts, &c),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 
 	munit_assert_int(xtc_atomic_load_i32(&g_to_status, xtc_mo_seq_cst), ==,
 	    XTC_E_AGAIN);
@@ -498,13 +498,13 @@ test_with_timeout_oom(const MunitParameter p[], void *d)
 
 	xtc_atomic_store_i32(&g_to_oom_bad, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_to_oom_ran, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, timeout_oom_body, NULL, NULL,
 	    &c), ==, XTC_OK);
 	oom_arm();
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	oom_disarm();
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(xtc_atomic_load_i32(&g_to_oom_ran, xtc_mo_seq_cst), ==,
 	    1);
 	/* 1 + k: the k-th allocation failed and a completed source was
@@ -589,11 +589,11 @@ test_kill_then_fulfil(const MunitParameter params[], void *data)
 	xtc_atomic_store_i32(&g_kf_returned, 0, xtc_mo_seq_cst);
 	g_kf_down = 0;
 	munit_assert_int(xtc_future_new_pair(&g_kf_prom, &g_kf_fut), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	g_kf_loop = loop;
 	munit_assert_int(xtc_proc_spawn(loop, kf_driver, NULL, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	munit_assert_int(xtc_atomic_load_i32(&g_kf_returned, xtc_mo_seq_cst),
 	    ==, 0);
 	munit_assert_int(g_kf_down, ==, 1);

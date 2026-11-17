@@ -88,7 +88,7 @@ test_correlate_fork_join(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_collected, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_total_result, 0, xtc_mo_seq_cst);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, parent_proc, loop, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
@@ -99,7 +99,7 @@ test_correlate_fork_join(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_atomic_load_i32(&g_total_result, xtc_mo_seq_cst),
 	    ==, 100);
 
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -164,13 +164,13 @@ test_correlate_out_of_order(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, oo_main, loop, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(g_oo_rc1, ==, XTC_OK);
 	munit_assert_int(g_oo_rc2, ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 

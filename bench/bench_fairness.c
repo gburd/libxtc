@@ -93,7 +93,7 @@ run_scenario(int use_budget)
 	xtc_atomic_store_i32(&g_runaway_done, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_use_budget, use_budget, xtc_mo_seq_cst);
 
-	if (xtc_loop_init(&loop) != XTC_OK) {
+	if (xtc_loop_create(&loop) != XTC_OK) {
 		fprintf(stderr, "loop_init failed\n");
 		return -1;
 	}
@@ -105,7 +105,7 @@ run_scenario(int use_budget)
 	(void)xtc_proc_spawn(loop, runaway, NULL, NULL, NULL);
 
 	(void)xtc_loop_run(loop);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return xtc_atomic_load_long(&g_coop_iters, xtc_mo_seq_cst);
 }
 

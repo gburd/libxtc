@@ -211,11 +211,11 @@ test_fn_ctrl_wait(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	xtc_atomic_store_i32(&g_ok, 0, xtc_mo_seq_cst);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, parent_proc, NULL, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(xtc_atomic_load_i32(&g_ok, xtc_mo_seq_cst), ==, 1);
 	return MUNIT_OK;
 }
@@ -259,11 +259,11 @@ test_signal(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	xtc_atomic_store_i32(&g_sig_ok, 0, xtc_mo_seq_cst);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, signal_proc, NULL, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(xtc_atomic_load_i32(&g_sig_ok, xtc_mo_seq_cst), ==, 1);
 	return MUNIT_OK;
 }
@@ -320,11 +320,11 @@ test_wait_with_mail(const MunitParameter p[], void *d)
 	(void)p;
 	(void)d;
 	xtc_atomic_store_i32(&g_mw_ok, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, mail_wait_proc, NULL, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(xtc_atomic_load_i32(&g_mw_ok, xtc_mo_seq_cst), ==, 1);
 	munit_assert_double(g_mw_cpu, <, 0.1);
 	return MUNIT_OK;

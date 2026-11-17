@@ -52,14 +52,14 @@ main(void)
 {
 	xtc_loop_t *loop;
 
-	if (xtc_amutex_create(&mu) != XTC_OK || xtc_loop_init(&loop) != XTC_OK)
+	if (xtc_amutex_create(&mu) != XTC_OK || xtc_loop_create(&loop) != XTC_OK)
 		return 1;
 	if (xtc_proc_spawn(loop, pong, NULL, NULL, &peer) != XTC_OK ||
 	    xtc_proc_spawn(loop, ping, NULL, NULL, NULL) != XTC_OK)
 		return 1;
 	if (xtc_loop_run(loop) != XTC_OK)
 		return 1;
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	xtc_amutex_destroy(mu);
 	puts("done");
 	return 0;

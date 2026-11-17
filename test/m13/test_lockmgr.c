@@ -740,11 +740,11 @@ test_kill_then_release(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_lockmgr_id(g_km, &g_km_l1), ==, XTC_OK);
 	munit_assert_int(xtc_lockmgr_id(g_km, &g_km_l2), ==, XTC_OK);
 	munit_assert_int(xtc_lockmgr_id(g_km, &g_km_l3), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	g_km_loop = loop;
 	munit_assert_int(xtc_proc_spawn(loop, km_driver, NULL, NULL, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	munit_logf(MUNIT_LOG_INFO, "down=%d after=%d held=%d waiting=%d",
 	    g_km_down, g_km_after, xtc_lockmgr_n_held(g_km),
 	    xtc_lockmgr_n_waiting(g_km));

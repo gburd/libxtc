@@ -240,8 +240,8 @@ main(int argc, char **argv)
 	ping_st.N    = N;
 	ping_st.hist = &hist;
 
-	if (xtc_loop_init(&loop) != XTC_OK) {
-		fprintf(stderr, "w3/xtc: xtc_loop_init failed\n");
+	if (xtc_loop_create(&loop) != XTC_OK) {
+		fprintf(stderr, "w3/xtc: xtc_loop_create failed\n");
 		hist_fini(&hist);
 		return 1;
 	}
@@ -249,7 +249,7 @@ main(int argc, char **argv)
 	/* Spawn pong first so we have its pid before spawning ping */
 	if (xtc_proc_spawn(loop, pong_fn, NULL, NULL, &pong_pid) != XTC_OK) {
 		fprintf(stderr, "w3/xtc: spawn pong failed\n");
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 		hist_fini(&hist);
 		return 1;
 	}
@@ -257,19 +257,19 @@ main(int argc, char **argv)
 
 	if (xtc_proc_spawn(loop, ping_fn, &ping_st, NULL, NULL) != XTC_OK) {
 		fprintf(stderr, "w3/xtc: spawn ping failed\n");
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 		hist_fini(&hist);
 		return 1;
 	}
 
 	if (xtc_loop_run(loop) != XTC_OK) {
 		fprintf(stderr, "w3/xtc: xtc_loop_run failed\n");
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 		hist_fini(&hist);
 		return 1;
 	}
 
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 
 	/* M17 results line -- exactly one line on stdout */
 	printf("workload=W3 runtime=xtc params=N=%ld"

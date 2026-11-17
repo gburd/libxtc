@@ -60,7 +60,7 @@ __task_freelist(xtc_loop_t *loop, int pinned)
  * rest onto task_spare, which any thread pops under a spinlock (held for
  * a few pointer moves; never across a yield, an allocation or another
  * lock; preemption deferred).  Recycled structs still never go back to
- * the allocator before xtc_loop_fini (type-stable, see below), and the
+ * the allocator before xtc_loop_destroy (type-stable, see below), and the
  * structs of each pinned-ness belonging to a loop stay within its peak
  * live count + XTC_TASK_FREELIST_LOCAL + 1: a home spawn mallocs only
  * when its free list and spare are both empty, a foreign one only when
@@ -166,7 +166,7 @@ __task_freelist_pop(xtc_loop_t *loop, int pinned)
 	return t != NULL ? t : __task_spare_pop(loop, pinned);
 }
 
-/* xtc_loop_fini: move the spares onto the free lists, which fini frees.
+/* xtc_loop_destroy: move the spares onto the free lists, which fini frees.
  * Declared in loop_int.h. */
 void
 __xtc_task_spare_fini(xtc_loop_t *loop)
@@ -305,7 +305,7 @@ __xtc_task_free(xtc_task_t *t)
  *
  * A proc's coro task used to stay on its loop's all_tasks, with its fiber
  * stack (two mappings: stack + guard) and coro struct, until
- * xtc_loop_fini.  A server spawning one proc per connection therefore
+ * xtc_loop_destroy.  A server spawning one proc per connection therefore
  * grew by ~6 KB RSS and two VMAs per connection EVER served, and on a
  * stock kernel (vm.max_map_count 65530) every spawn failed after ~32K.
  *
@@ -328,7 +328,7 @@ __xtc_task_free(xtc_task_t *t)
  * can fire after the task finished (a wake racing a migrated fiber's
  * exit).  So a reclaimed struct is never returned to the allocator while
  * its loop lives: it stays on the loop's free list (bounded by the
- * high-water count of live tasks) and is freed at xtc_loop_fini.  A late
+ * high-water count of live tasks) and is freed at xtc_loop_destroy.  A late
  * waker then lands on a valid task struct -- a no-op on a DONE task, at
  * worst one spurious wake of the next incarnation, which every park site
  * already tolerates (xtc_await re-parks until its target is done).  The
@@ -402,7 +402,7 @@ __xtc_task_reclaim(xtc_loop_t *loop, xtc_task_t *t)
 }
 
 /* Recycle the tasks other loops handed back.  Owner thread only; called
- * at the top of every loop step and by xtc_loop_fini. */
+ * at the top of every loop step and by xtc_loop_destroy. */
 void
 __xtc_task_reclaim_drain(xtc_loop_t *loop)
 {

@@ -65,7 +65,7 @@ contracts(void)
 	int i, id;
 
 	assert(xtc_sched_continuous_set(NULL, 3) == XTC_E_INVAL);
-	assert(xtc_loop_init(&loop) == XTC_OK);
+	assert(xtc_loop_create(&loop) == XTC_OK);
 	assert(xtc_sched_continuous_set(loop, 0) == XTC_E_INVAL);
 	assert(__xtc_sched_batch_attach(loop, 0) == XTC_E_INVAL);
 	for (i = 0; i < 16; i++) {
@@ -148,7 +148,7 @@ contracts(void)
 	(void)__xtc_loop_step_once(loop);
 	assert(xtc_sched_continuous_set(loop, 3) == XTC_E_AGAIN);
 	assert(xtc_sched_policy_set(loop, NULL) == XTC_E_AGAIN);
-	assert(xtc_loop_fini(loop) == XTC_OK);
+	xtc_loop_destroy(loop);
 }
 
 static void
@@ -160,7 +160,7 @@ two_groups_and_heartbeat(int continuous)
 	xtc_task_t *task;
 	int i, id;
 
-	assert(xtc_loop_init(&p.loop) == XTC_OK);
+	assert(xtc_loop_create(&p.loop) == XTC_OK);
 	__xtc_current_loop = p.loop;
 	p.continuous = continuous;
 	if (continuous)
@@ -197,7 +197,7 @@ two_groups_and_heartbeat(int continuous)
 		assert(stats.selections == 0 && stats.fallbacks == 0);
 	__xtc_sched_batch_detach(p.loop, 0);
 	__xtc_sched_batch_detach(p.loop, 1);
-	assert(xtc_loop_fini(p.loop) == XTC_OK);
+	xtc_loop_destroy(p.loop);
 	__xtc_current_loop = NULL;
 }
 #endif

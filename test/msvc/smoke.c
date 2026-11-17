@@ -508,7 +508,7 @@ main(int argc, char **argv)
 		xtc_pid_t pid;
 		s_fault_recovered = 0;
 		CHECK(xtc_fault_guard_install() == XTC_OK);
-		CHECK(xtc_loop_init(&loop) == XTC_OK);
+		CHECK(xtc_loop_create(&loop) == XTC_OK);
 		po.name = "faulty";
 		CHECK(xtc_proc_spawn(loop, smoke_faulty_proc, NULL, &po, &pid)
 		    == XTC_OK);
@@ -516,7 +516,7 @@ main(int argc, char **argv)
 		 * crash here instead of returning. */
 		CHECK(xtc_loop_run(loop) == XTC_OK);
 		CHECK(s_fault_recovered == 1);
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 		printf("  ok   fault contained (wild write recovered via SEH)\n");
 	}
 
@@ -538,13 +538,13 @@ main(int argc, char **argv)
 		s_aio_fd = _open_osfhandle((intptr_t)fh, _O_BINARY);
 		CHECK(s_aio_fd >= 0);
 		s_aio_ok = 0;
-		CHECK(xtc_loop_init(&loop) == XTC_OK);
+		CHECK(xtc_loop_create(&loop) == XTC_OK);
 		po.name = "aio";
 		CHECK(xtc_proc_spawn(loop, smoke_aio_proc, NULL, &po, &pid)
 		    == XTC_OK);
 		CHECK(xtc_loop_run(loop) == XTC_OK);
 		CHECK(s_aio_ok == 1);
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 		(void)_close(s_aio_fd);            /* closes fh */
 		(void)DeleteFileA(path);
 		printf("  ok   native IOCP file AIO: overlapped pwrite+pread"
@@ -594,14 +594,14 @@ main(int argc, char **argv)
 		int i;
 		s_sel_n = 0;
 		memset(s_sel_seen, 0, sizeof s_sel_seen);
-		CHECK(xtc_loop_init(&loop) == XTC_OK);
+		CHECK(xtc_loop_create(&loop) == XTC_OK);
 		CHECK(xtc_proc_spawn(loop, smoke_selective_proc, NULL, &po,
 		    &pid) == XTC_OK);
 		for (i = 0; i < 5; i++)
 			CHECK(xtc_send(pid, &s_sel_sent[i], sizeof(int))
 			    == XTC_OK);
 		CHECK(xtc_loop_run(loop) == XTC_OK);
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 		CHECK(s_sel_n == 5);
 		CHECK(s_sel_seen[0] == 42);
 		CHECK(s_sel_seen[1] == 1);
@@ -630,13 +630,13 @@ main(int argc, char **argv)
 		s_aio_multi_fd = _open_osfhandle((intptr_t)fh, _O_BINARY);
 		CHECK(s_aio_multi_fd >= 0);
 		s_aio_multi_ok = 0;
-		CHECK(xtc_loop_init(&loop) == XTC_OK);
+		CHECK(xtc_loop_create(&loop) == XTC_OK);
 		po.name = "aio-multi";
 		CHECK(xtc_proc_spawn(loop, smoke_aio_multi_proc, NULL, &po, &pid)
 		    == XTC_OK);
 		CHECK(xtc_loop_run(loop) == XTC_OK);
 		CHECK(s_aio_multi_ok == 1);
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 		(void)_close(s_aio_multi_fd);       /* closes fh */
 		(void)DeleteFileA(path);
 		printf("  ok   native IOCP file AIO: %d overlapped pwrite/pread"
@@ -652,7 +652,7 @@ main(int argc, char **argv)
 		HANDLE thr;
 		int i;
 		s_xt_recv_count = 0;
-		CHECK(xtc_loop_init(&loop) == XTC_OK);
+		CHECK(xtc_loop_create(&loop) == XTC_OK);
 		po.name = "xt-worker";
 		for (i = 0; i < SMOKE_XT_N; i++)
 			CHECK(xtc_proc_spawn(loop, smoke_xt_worker, NULL, &po,
@@ -664,7 +664,7 @@ main(int argc, char **argv)
 		CHECK(xtc_loop_run(loop) == XTC_OK);
 		CHECK(WaitForSingleObject(thr, 10000) == WAIT_OBJECT_0);
 		(void)CloseHandle(thr);
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 		CHECK(s_xt_recv_count == SMOKE_XT_N);
 		printf("  ok   cross-thread wakeup: %d foreign xtc_send delivered"
 		    " (PostQueuedCompletionStatus coalescing)\n", SMOKE_XT_N);
@@ -712,7 +712,7 @@ main(int argc, char **argv)
 			CHECK(xtc_net_dial(XTC_NET_INET, "127.0.0.1",
 			    s_sock_port, &topts, &client_fd) == XTC_OK);
 			s_sock_client_fd = client_fd;
-			CHECK(xtc_loop_init(&loop) == XTC_OK);
+			CHECK(xtc_loop_create(&loop) == XTC_OK);
 			po.name = "sock-srv";
 			CHECK(xtc_proc_spawn(loop, smoke_sock_server, NULL, &po,
 			    &sp) == XTC_OK);
@@ -720,7 +720,7 @@ main(int argc, char **argv)
 			CHECK(xtc_proc_spawn(loop, smoke_sock_client, NULL, &po,
 			    &cp) == XTC_OK);
 			CHECK(xtc_loop_run(loop) == XTC_OK);
-			(void)xtc_loop_fini(loop);
+			xtc_loop_destroy(loop);
 			xtc_net_close(client_fd);
 			xtc_net_close(listen_fd);
 			/* The loopback socket echo scenario is now a HARD GATE
@@ -757,7 +757,7 @@ main(int argc, char **argv)
 		LARGE_INTEGER freq, t0, t1;
 		double wall_s, cpu_ms;
 
-		CHECK(xtc_io_init(&io) == XTC_OK);
+		CHECK(xtc_io_create(&io) == XTC_OK);
 		for (i = 0; i < N_IDLE; i++) {
 			struct sockaddr_in a;
 			int alen = sizeof a;
@@ -807,7 +807,7 @@ main(int argc, char **argv)
 
 		for (i = 0; i < N_IDLE; i++)
 			(void)xtc_io_del_fd(io, (int)idle_ss[i]);
-		(void)xtc_io_fini(io);
+		xtc_io_destroy(io);
 		for (i = 0; i < N_IDLE; i++) {
 			(void)closesocket(idle_ls[i]);
 			(void)closesocket(idle_cs[i]);
@@ -829,7 +829,7 @@ main(int argc, char **argv)
 	{
 		xtc_loop_t *loop = NULL;
 		xtc_proc_opts_t po = XTC_PROC_OPTS_INIT;
-		CHECK(xtc_loop_init(&loop) == XTC_OK);
+		CHECK(xtc_loop_create(&loop) == XTC_OK);
 		s_xproc_loop = loop;
 		s_xproc_reason = -1;
 		CHECK(xtc_proc_spawn(loop, smoke_xdriver, NULL, &po, NULL)
@@ -845,7 +845,7 @@ main(int argc, char **argv)
 		CHECK(s_xproc_reason == 42);
 		printf("  ok   xtc_xproc: re-exec child spawn+send+monitor, "
 		    "DOWN reason=42\n");
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 	}
 
 	/* --- xtc_logf --- */

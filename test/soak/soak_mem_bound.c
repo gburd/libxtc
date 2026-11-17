@@ -23,7 +23,7 @@
  *	  procs  -- each worker is an xtc_proc that calls xtc_proc_sleep once
  *	            (the long-lived-service shape PLAN 19.26 describes).
  *	            STILL EXPECTED TO FAIL: a completed coro-backed task keeps
- *	            its fiber stack + coro until xtc_loop_fini (PLAN 19.26).
+ *	            its fiber stack + coro until xtc_loop_destroy (PLAN 19.26).
  *	            The park-timer half of this arm's old growth is fixed --
  *	            park timers are now reclaimed when they fire or cancel --
  *	            so the residual growth here is the fiber stack alone.
@@ -225,7 +225,7 @@ main(int argc, char **argv)
 	h.malloc = c_malloc; h.calloc = c_calloc; h.realloc = c_realloc;
 	h.free = c_free; h.aligned = c_aligned; h.aligned_free = c_aligned_free;
 	if (__os_alloc_set_hook(&h) != XTC_OK) return 2;
-	if (xtc_loop_init(&loop) != XTC_OK) return 2;
+	if (xtc_loop_create(&loop) != XTC_OK) return 2;
 
 	printf("soak_mem_bound: mode=%s generations=%d workers/gen=%d "
 	    "(backend %s)\n", mode, gens, k, xtc_io_backend_name());
@@ -286,7 +286,7 @@ main(int argc, char **argv)
 		printf("OK: memory plateaued (heap and mapping within %.0f "
 		    "B/gen)\n", slack_per_gen);
 
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	(void)__os_alloc_set_hook(&g_real);
 	return fail;
 }

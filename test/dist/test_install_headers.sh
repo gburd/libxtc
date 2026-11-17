@@ -64,13 +64,13 @@ int
 main(void)
 {
 	xtc_loop_t *loop = NULL;
-	if (xtc_loop_init(&loop) != XTC_OK)
+	if (xtc_loop_create(&loop) != XTC_OK)
 		return 1;
 	(void)xtc_aio_fsync;          /* a real symbol, exercised below */
 	(void)xtc_proc_spawn;
 	(void)xtc_chan_mpsc_create;
 	(void)xtc_net_listen;
-	xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return 0;
 }
 EOF

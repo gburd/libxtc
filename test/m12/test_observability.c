@@ -845,13 +845,13 @@ test_pdict_basic(const MunitParameter p[], void *d)
 	xtc_pid_t pid;
 	(void)p; (void)d;
 	xtc_atomic_store_i32(&g_pdict_test_ok, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, pdict_user, NULL, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_atomic_load_i32(&g_pdict_test_ok, xtc_mo_seq_cst),
 	    ==, 1);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -987,7 +987,7 @@ test_inspect_procs(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_insp_seen, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_insp_sleeper_mbox, -1, xtc_mo_seq_cst);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	o.name = "sleeper";
 	munit_assert_int(xtc_proc_spawn(loop, insp_sleeper, NULL, &o,
 	    &g_insp_sleeper), ==, XTC_OK);
@@ -1007,7 +1007,7 @@ test_inspect_procs(const MunitParameter p[], void *d)
 	                     xtc_mo_seq_cst),
 	    >=, 2);
 
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -1085,7 +1085,7 @@ test_inspect_park_reason(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_pr_timer_reason, -1, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_pr_checked, 0, xtc_mo_seq_cst);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	o.name = "pr-mbox";
 	munit_assert_int(xtc_proc_spawn(loop, pr_mbox_proc, NULL, &o,
 	    &g_pr_mbox), ==, XTC_OK);
@@ -1106,7 +1106,7 @@ test_inspect_park_reason(const MunitParameter p[], void *d)
 	                     xtc_mo_seq_cst),
 	    ==, XTC_PARK_TIMER);
 
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -1186,7 +1186,7 @@ test_inspect_name_label_crit(const MunitParameter p[], void *d)
 	munit_assert_int(g_nm_label_rc_off, ==, XTC_E_INVAL);
 	g_nm_dump_fd = mkstemp(tmpl);
 	munit_assert_int(g_nm_dump_fd, >=, 0);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	o.name = "engine";
 	munit_assert_int(xtc_proc_spawn(loop, nm_engine, NULL, &o,
 	                     &g_nm_engine),
@@ -1200,7 +1200,7 @@ test_inspect_name_label_crit(const MunitParameter p[], void *d)
 	    XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	(void)xtc_sup_join(sup, 1000LL * 1000 * 1000);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 
 	munit_assert_true(XTC_FIELD_OK(&g_nm_eng_info, label));
 	munit_assert_string_equal(g_nm_eng_info.name, "engine");
@@ -1269,7 +1269,7 @@ test_trace_causal(const MunitParameter p[], void *d)
 	xtc_trace_reset();
 	(void)xtc_trace_enable(1);
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	o.name = "C";
 	munit_assert_int(xtc_proc_spawn(loop, tr_c_proc, NULL, &o, &g_tr_c), ==, XTC_OK);
 	o.name = "B";
@@ -1277,7 +1277,7 @@ test_trace_causal(const MunitParameter p[], void *d)
 	o.name = "A";
 	munit_assert_int(xtc_proc_spawn(loop, tr_a_proc, NULL, &o, &ap), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 
 	dumped = xtc_trace_dump(tr_collect, NULL);
 	(void)xtc_trace_enable(0);
@@ -1343,18 +1343,18 @@ test_pdict_dtor(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	xtc_atomic_store_i32(&g_dtor_calls, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_i32(&g_pdict_dtor_ok, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, pdict_dtor_user, NULL, NULL, &pid),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_atomic_load_i32(&g_pdict_dtor_ok, xtc_mo_seq_cst),
 	    ==, 1);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
 /*
- * A proc that returns, or is torn down by xtc_loop_fini, holding pdict
+ * A proc that returns, or is torn down by xtc_loop_destroy, holding pdict
  * entries has them released: each destructor runs once.  Before 2.2
  * nothing released them (0 of PD_EXIT_PROCS destructors ran).
  */
@@ -1390,7 +1390,7 @@ test_pdict_exit_cleanup(const MunitParameter p[], void *d)
 	(void)p;
 	(void)d;
 	xtc_atomic_store_i32(&g_pd_exit_dtors, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	for (i = 0; i < PD_EXIT_PROCS; i++)
 		munit_assert_int(xtc_proc_spawn(loop, pd_exit_returner, NULL,
 		                     NULL, NULL),
@@ -1406,7 +1406,7 @@ test_pdict_exit_cleanup(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_atomic_load_i32(&g_pd_exit_dtors, xtc_mo_seq_cst),
 	    ==, 2 * PD_EXIT_PROCS);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	munit_assert_int(xtc_atomic_load_i32(&g_pd_exit_dtors, xtc_mo_seq_cst),
 	    ==, 2 * PD_EXIT_PROCS + 1);
 	return MUNIT_OK;

@@ -255,7 +255,7 @@ __pollres_to_flags(uint32_t res)
  * Every SQ submit goes through here so the DIAGNOSTIC single-issuer
  * check lives in exactly ONE place instead of nine.
  *
- * The invariant: a ring is created on one thread (xtc_loop_init's
+ * The invariant: a ring is created on one thread (xtc_loop_create's
  * caller, which for an executor is the exec-init thread) and submitted
  * to only by its owner, the thread that polls it (__own makes the caller
  * the owner on every entry point, so this holds by construction).  The
@@ -642,7 +642,7 @@ __flush_pending(xtc_io_t *io)
  * interrupt, never on an unrelated system call.  A loop polls its ring
  * from one thread, so it IS a single issuer; but SINGLE_ISSUER binds the
  * ring to one task, and a loop's thread can change (xtc_exec_run starts
- * new workers on every call; xtc_loop_init and xtc_loop_run may run on
+ * new workers on every call; xtc_loop_create and xtc_loop_run may run on
  * different threads).  So a DEFER ring is created ON the thread that
  * runs the loop, and rebuilt for a new one (__own, __ring_rebind).
  *
@@ -660,7 +660,7 @@ __flush_pending(xtc_io_t *io)
  * +5.5% / +2.7%.  Same SQE mix and syscall count: it is all completion
  * signalling (task_work_add per request 1.84 -> 0.007).
  *
- * WHEN each tier is used.  xtc_io_init builds the ring at the best NON-
+ * WHEN each tier is used.  xtc_io_create builds the ring at the best NON-
  * binding tier (COOP, else plain).  The DEFER tier is taken only when a
  * thread starts RUNNING the loop (__xtc_io_set_owner -> __own): the ring
  * is rebuilt then, with nothing on it yet.  Two reasons.  First, a DEFER
@@ -686,7 +686,7 @@ __flush_pending(xtc_io_t *io)
 #define XTC_URING_COOP \
 	(IORING_SETUP_COOP_TASKRUN | IORING_SETUP_TASKRUN_FLAG)
 
-/* What xtc_io_init asks for, best first. */
+/* What xtc_io_create asks for, best first. */
 static const unsigned __xtc_uring_init_tiers[] = { XTC_URING_COOP, 0u };
 #define XTC_URING_N_INIT_TIERS \
 	((int)(sizeof __xtc_uring_init_tiers / sizeof __xtc_uring_init_tiers[0]))
@@ -899,7 +899,7 @@ __ring_rebind(xtc_io_t *io, int want_defer)
 }
 
 /* POLL_REMOVEs submitted and re-registrations served by a lingering
- * poll, since xtc_io_init (tests). */
+ * poll, since xtc_io_create (tests). */
 int
 __xtc_io_uring_poll_stats(xtc_io_t *io, unsigned long *cancels,
     unsigned long *adopted)
@@ -1017,7 +1017,7 @@ __xtc_io_backend_fini(xtc_io_t *io)
 	__xtc_io_aio_drain(io);
 	if (io->n_aio != 0) {
 		fprintf(stderr,
-		    "xtc: xtc_io_fini: %d file AIO op(s) still in "
+		    "xtc: xtc_io_destroy: %d file AIO op(s) still in "
 		    "the kernel (io=%p); aborting rather than free memory the "
 		    "kernel will write\n",
 		    io->n_aio, (void *)io);
@@ -1670,7 +1670,7 @@ __xtc_io_owner_leave(xtc_io_t *io)
 }
 
 /* Reap every file AIO still in the kernel before the io's memory goes
- * (xtc_loop_fini, before any fiber stack is freed).  See io_int.h. */
+ * (xtc_loop_destroy, before any fiber stack is freed).  See io_int.h. */
 void
 __xtc_io_aio_drain(xtc_io_t *io)
 {

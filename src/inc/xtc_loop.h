@@ -54,8 +54,8 @@ typedef struct xtc_waker {
 typedef void (*xtc_timer_fn)(void *user);
 
 /*
- * PUBLIC: int  xtc_loop_init __P((xtc_loop_t **));
- * PUBLIC: int  xtc_loop_fini __P((xtc_loop_t *));
+ * PUBLIC: int  xtc_loop_create __P((xtc_loop_t **));
+ * PUBLIC: void xtc_loop_destroy __P((xtc_loop_t *));
  * PUBLIC: int  xtc_loop_run __P((xtc_loop_t *));
  * PUBLIC: int  xtc_loop_stop __P((xtc_loop_t *));
  * PUBLIC: int  xtc_loop_wake __P((xtc_loop_t *));
@@ -71,8 +71,8 @@ typedef void (*xtc_timer_fn)(void *user);
  * PUBLIC: int  xtc_timer_cancel __P((xtc_timer_t *));
  * PUBLIC: int  xtc_timer_release __P((xtc_timer_t *));
  */
-XTC_API int  xtc_loop_init(xtc_loop_t **out);
-XTC_API int  xtc_loop_fini(xtc_loop_t *loop);
+XTC_API int  xtc_loop_create(xtc_loop_t **out);
+XTC_API void xtc_loop_destroy(xtc_loop_t *loop);
 XTC_API int  xtc_loop_run(xtc_loop_t *loop);
 XTC_API int  xtc_loop_stop(xtc_loop_t *loop);
 
@@ -109,7 +109,7 @@ XTC_API int  xtc_loop_wake(xtc_loop_t *loop);
 /*
  * Borrow the loop's resource accountant.  Non-NULL after init.
  * The pointer is owned by the loop and must not be freed by the
- * caller; it is reset on xtc_loop_fini.
+ * caller; it is reset on xtc_loop_destroy.
  *
  * PUBLIC: struct xtc_res *xtc_loop_res __P((xtc_loop_t *));
  */
@@ -153,11 +153,19 @@ XTC_API int  xtc_timer_cancel(xtc_timer_t *timer);
  * pending one still fires unless cancelled first); its memory is
  * reclaimed once it has fired or been cancelled and the handle is
  * released.  The handle must not be used afterwards.  A handle that is
- * never released stays valid until xtc_loop_fini, as before 1.55.1.
+ * never released stays valid until xtc_loop_destroy, as before 1.55.1.
  * Pass NULL as xtc_timer_set's out_timer to need no handle at all.
  * Returns XTC_OK, or XTC_E_INVAL for NULL.  Any thread.
  */
 XTC_API int  xtc_timer_release(xtc_timer_t *timer);
+
+/*
+ * Deprecated names (docs/deprecations.md): removed in 3.0.
+ */
+XTC_DEPRECATED("use xtc_loop_create")
+XTC_API int xtc_loop_init(xtc_loop_t **out);
+XTC_DEPRECATED("use xtc_loop_destroy")
+XTC_API int xtc_loop_fini(xtc_loop_t *loop);
 
 #ifdef __cplusplus
 }

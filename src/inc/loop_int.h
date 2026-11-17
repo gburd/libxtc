@@ -194,7 +194,7 @@ struct xtc_task {
 	 * push, not the allocation source. */
 	int              recyclable;
 
-	/* Optional cleanup hook invoked by xtc_loop_fini before the task
+	/* Optional cleanup hook invoked by xtc_loop_destroy before the task
 	 * struct is freed.  The coroutine layer sets this to release the
 	 * fiber stack + coro struct that wrap a task; plain tasks leave
 	 * it NULL.  Keeps task lifetime owned by the loop while letting
@@ -509,7 +509,7 @@ struct xtc_loop {
 	 * this loop is standalone (M3 single-thread mode). */
 	int exec_id;
 
-	/* Process-wide loop id, 1.., set by xtc_loop_init and never reused
+	/* Process-wide loop id, 1.., set by xtc_loop_create and never reused
 	 * in the process: pid.loop_id, xtc_loop_info.loop_id, the xtc_tail
 	 * and USDT loop label.  Through 2.1 a pid carried exec_id + 1, which
 	 * two executors (or two standalone loops) shared.  See
@@ -571,7 +571,7 @@ struct xtc_loop {
 	 * own pool had no room for, handed to the next spawn onto this loop
 	 * from any thread (coro_common.h __stack_spare_*).  Locked like
 	 * task_spare; stack_spare_n is written under the lock and read
-	 * relaxed as an empty/full hint.  Unmapped at xtc_loop_fini.
+	 * relaxed as an empty/full hint.  Unmapped at xtc_loop_destroy.
 	 * stack_spare_want: spawns onto this loop from another thread,
 	 * counted up to XTC_LOOP_STACK_SPARE; the spare is filled only once
 	 * it gets there, so a loop only its own thread spawns onto (startup
@@ -749,7 +749,7 @@ extern void  (*__xtc_fiber_kill_check)(void);
 extern void  (*__xtc_fiber_kill_poll)(void);
 
 /* Loop-fini hook.  Installed by the process layer (proc.c) on first
- * spawn; lets xtc_loop_fini release the loop's per-loop proc table
+ * spawn; lets xtc_loop_destroy release the loop's per-loop proc table
  * without the L2 loop depending on the L3 proc layer directly (the
  * loop calls the hook, proc.c points it at __xtc_proc_loop_unregister).
  * NULL when no process layer is in use, so a bare-coroutine loop has

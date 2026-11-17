@@ -92,7 +92,7 @@ __coro_destroy(struct xtc_coro *c)
 	__os_free(c);
 }
 
-/* Task cleanup trampoline: xtc_loop_fini calls this for each coro
+/* Task cleanup trampoline: xtc_loop_destroy calls this for each coro
  * task so the fiber + coro struct are released with the loop. */
 static void
 __coro_task_cleanup(void *coro)
@@ -218,7 +218,7 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 		 * spawned without a handle, are reclaimed by the loop's DONE
 		 * handler (task.c __xtc_task_reclaim): nobody can await them.
 		 * An xtc_async task whose handle was handed out stays until
-		 * xtc_loop_fini.  c->proc is set by __proc_entry before the
+		 * xtc_loop_destroy.  c->proc is set by __proc_entry before the
 		 * body runs and never cleared. */
 		if (c->proc != NULL || c->detached)
 			self->reclaim = 1;

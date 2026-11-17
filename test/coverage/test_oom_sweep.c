@@ -240,13 +240,13 @@ step_loop(int *ok)
 	xtc_loop_t *loop = NULL;
 	int rc;
 	arm();
-	rc = xtc_loop_init(&loop);
+	rc = xtc_loop_create(&loop);
 	disarm();
 	*ok = 1;
 	if (rc == XTC_OK) {
 		if (loop == NULL) { *ok = 0; return rc; }
 		if (xtc_loop_run(loop) != XTC_OK) *ok = 0;
-		if (xtc_loop_fini(loop) != XTC_OK) *ok = 0;
+		xtc_loop_destroy(loop);
 	}
 	return rc;
 }
@@ -275,13 +275,13 @@ step_spawn(int *ok)
 	xtc_loop_t *loop = NULL;
 	xtc_pid_t pid = XTC_PID_NONE;
 	int rc;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	xtc_atomic_store_i32(&g_ran, 0, xtc_mo_seq_cst);
 	arm();
 	rc = xtc_proc_spawn(loop, p_mark, NULL, NULL, &pid);
 	disarm();
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	/* A spawn that reported success must have produced a pid AND a
 	 * proc that ran; a failed one must not have run anything. */
 	if (rc == XTC_OK)
@@ -343,11 +343,11 @@ step_mbox(int *ok)
 	struct mbox_st s;
 	memset(&s, 0, sizeof s);
 	s.len = g_mbox_len;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, mbox_body, &s, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	*ok = s.ok;
 	return s.send_rc != XTC_OK ? s.send_rc : s.recv_rc;
 }
@@ -386,13 +386,13 @@ step_timer(int *ok)
 	xtc_loop_t *loop = NULL;
 	xtc_timer_t *tm = NULL;
 	int rc;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	xtc_atomic_store_i32(&g_fired, 0, xtc_mo_seq_cst);
 	arm();
 	rc = xtc_timer_set(loop, 1000, t_mark, NULL, &tm);
 	disarm();
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	if (rc == XTC_OK)
 		*ok = (tm != NULL &&
 		    xtc_atomic_load_i32(&g_fired, xtc_mo_seq_cst) == 1);
@@ -582,11 +582,11 @@ step_sleep(int *ok)
 {
 	xtc_loop_t *loop = NULL;
 	g_sleep_rc = 12345;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, sleeper, NULL, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	/* XTC_OK means "slept at least ns" (xtc_proc.h); an error means it
 	 * could not.  OK with a short sleep is the swallowed-failure bug. */
 	*ok = (g_sleep_rc != 12345) &&
@@ -643,12 +643,12 @@ step_monitor(int *ok)
 	xtc_loop_t *loop = NULL;
 	struct mon_st s;
 	memset(&s, 0, sizeof s);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	s.loop = loop;
 	munit_assert_int(xtc_proc_spawn(loop, mon_parent, &s, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	*ok = (s.spawn_rc == XTC_OK) ? s.got_down : 1;
 	return s.spawn_rc;
 }
@@ -696,12 +696,12 @@ step_link(int *ok)
 	xtc_loop_t *loop = NULL;
 	struct lnk_st s;
 	memset(&s, 0, sizeof s);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	s.loop = loop;
 	munit_assert_int(xtc_proc_spawn(loop, lnk_parent, &s, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	*ok = (s.spawn_rc == XTC_OK) ? s.got_exit : 1;
 	return s.spawn_rc;
 }

@@ -419,14 +419,14 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 		 * spawned without a handle, are reclaimed by the loop's DONE
 		 * handler (task.c __xtc_task_reclaim): nobody can await them.
 		 * An xtc_async task whose handle was handed out stays, with
-		 * its coro, until xtc_loop_fini (the stack does not).  c->proc
-		 * is set by __proc_entry before the body runs and never
-		 * cleared. */
+		 * its coro, until xtc_loop_destroy (the stack does not).
+		 * c->proc is set by __proc_entry before the body runs and
+		 * never cleared. */
 		if (c->proc != NULL || c->detached)
 			self->reclaim = 1;
 		else
 			/* A bare xtc_async coroutine keeps its task + coro for
-			 * xtc_await until xtc_loop_fini, but not its stack:
+			 * xtc_await until xtc_loop_destroy, but not its stack:
 			 * 20,000 async/await pairs held 20,000 stacks (two
 			 * mappings each) until fini.  We are on the scheduler
 			 * stack, so the finished fiber's is idle. */
@@ -465,13 +465,13 @@ __xtc_coro_step(xtc_task_t *self, void *user)
 /*
  * Free the fiber's stack on task completion.  Hooked from the
  * loop's task-cleanup pass at fini time.  For now we register a
- * destructor on the task user pointer; M4 just frees in xtc_loop_fini
+ * destructor on the task user pointer; M4 just frees in xtc_loop_destroy
  * via the all_tasks walk.
  */
 /* Give a coro's fiber stack back (the thread's pool, the loop's spare,
  * or munmap) and forget it.  Idempotent: a finished xtc_async coroutine
  * releases its stack at once (__xtc_coro_step), and the coro struct --
- * which xtc_await reads the result from -- is freed at xtc_loop_fini. */
+ * which xtc_await reads the result from -- is freed at xtc_loop_destroy. */
 static void
 __coro_release_stack(struct xtc_coro *c)
 {
@@ -512,7 +512,7 @@ __coro_destroy(struct xtc_coro *c)
 	__os_free(c);
 }
 
-/* Task cleanup trampoline: xtc_loop_fini calls this for each coro
+/* Task cleanup trampoline: xtc_loop_destroy calls this for each coro
  * task so the fiber stack + coro struct are released with the loop. */
 static void
 __coro_task_cleanup(void *coro)

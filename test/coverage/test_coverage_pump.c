@@ -56,10 +56,10 @@ test_loop_res(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	xtc_res_t  *res;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	res = xtc_loop_res(loop);
 	munit_assert_not_null(res);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	munit_assert_null(xtc_loop_res(NULL));
 	return MUNIT_OK;
 }
@@ -72,7 +72,7 @@ test_res_api(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	xtc_res_t  *res;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	res = xtc_loop_res(loop);
 
 	/* Acquire under cap. */
@@ -88,7 +88,7 @@ test_res_api(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_res_acquire(res, XTC_RES_CHANNELS, 1), ==, XTC_E_RESOURCE);
 	xtc_res_release(res, XTC_RES_CHANNELS, 2);
 
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -103,7 +103,7 @@ test_chan_mpsc_full_api(const MunitParameter p[], void *d)
 	int marker = 1;
 	void *out;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	res = xtc_loop_res(loop);
 	munit_assert_int(xtc_chan_mpsc_create(res, 4, &c), ==, XTC_OK);
 
@@ -129,7 +129,7 @@ test_chan_mpsc_full_api(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_chan_mpsc_try_send(c, &marker), ==, XTC_E_INVAL);
 
 	xtc_chan_mpsc_destroy(c);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -144,7 +144,7 @@ test_chan_mpmc_full_api(const MunitParameter p[], void *d)
 	int marker = 1;
 	void *out;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	res = xtc_loop_res(loop);
 	munit_assert_int(xtc_chan_mpmc_create(res, 4, &c), ==, XTC_OK);
 
@@ -157,7 +157,7 @@ test_chan_mpmc_full_api(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_chan_mpmc_try_send(c, &marker), ==, XTC_E_INVAL);
 
 	xtc_chan_mpmc_destroy(c);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -170,7 +170,7 @@ test_chan_oneshot_waker(const MunitParameter p[], void *d)
 	xtc_res_t  *res;
 	xtc_chan_oneshot_t *c;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	res = xtc_loop_res(loop);
 	munit_assert_int(xtc_chan_oneshot_create(res, &c), ==, XTC_OK);
 	/* set_waker(NULL) is rejected; pass it the loop's own waker
@@ -178,7 +178,7 @@ test_chan_oneshot_waker(const MunitParameter p[], void *d)
 	 * NULL-validation path. */
 	munit_assert_int(xtc_chan_oneshot_set_waker(NULL, NULL), ==, XTC_E_INVAL);
 	xtc_chan_oneshot_destroy(c);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -242,7 +242,7 @@ test_link_unlink(const MunitParameter p[], void *d)
 	xtc_pid_t crasher_pid, linker_pid;
 	(void)p; (void)d;
 	xtc_atomic_store_i32(&g_link_died_seen, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, crasher, NULL, NULL,
 	    &crasher_pid), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, linker_proc, &crasher_pid, NULL,
@@ -250,7 +250,7 @@ test_link_unlink(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_atomic_load_i32(&g_link_died_seen, xtc_mo_seq_cst),
 	    ==, 1);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -288,7 +288,7 @@ test_exit_pid(const MunitParameter p[], void *d)
 	xtc_pid_t victim, killer;
 	(void)p; (void)d;
 	xtc_atomic_store_i32(&g_killed_proc_ran, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, victim_proc, NULL, NULL, &victim),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(loop, killer_proc, &victim, NULL, &killer),
@@ -297,7 +297,7 @@ test_exit_pid(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_atomic_load_i32(&g_killed_proc_ran,
 	                     xtc_mo_seq_cst),
 	    ==, 1);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -491,7 +491,7 @@ test_sup_n_children(const MunitParameter p[], void *d)
 	xtc_child_spec_t kids[3];
 	xtc_pid_t watcher_pid;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 
 	memset(kids, 0, sizeof kids);
 	kids[0].size = sizeof kids[0];
@@ -509,7 +509,7 @@ test_sup_n_children(const MunitParameter p[], void *d)
 
 	(void)xtc_loop_run(loop);
 	munit_assert_int(xtc_sup_join(sup, 1000LL * 1000 * 1000), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 

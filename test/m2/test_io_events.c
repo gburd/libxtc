@@ -47,7 +47,7 @@ test_readable(const MunitParameter p[], void *d)
 
 	munit_assert_int(make_pipe_pair(p_), ==, 0);
 	rfd = p_[0]; wfd = p_[1];
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	munit_assert_int(xtc_io_reg_fd(io, rfd, XTC_IO_READABLE, &marker),
 	    ==, XTC_OK);
 
@@ -61,7 +61,7 @@ test_readable(const MunitParameter p[], void *d)
 
 	munit_assert_int(xtc_io_del_fd(io, rfd), ==, XTC_OK);
 	test_close(rfd); test_close(wfd);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -76,7 +76,7 @@ test_writable(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	munit_assert_int(make_pipe_pair(p_), ==, 0);
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	munit_assert_int(xtc_io_reg_fd(io, p_[1], XTC_IO_WRITABLE, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_io_poll(io, evs, 8, 1000 * 1000 * 1000LL, &n_out),
@@ -85,7 +85,7 @@ test_writable(const MunitParameter p[], void *d)
 	munit_assert_uint(evs[0].flags & XTC_IO_WRITABLE, ==, XTC_IO_WRITABLE);
 	munit_assert_int(xtc_io_del_fd(io, p_[1]), ==, XTC_OK);
 	test_close_pair(p_);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -99,7 +99,7 @@ test_hup(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	munit_assert_int(make_pipe_pair(p_), ==, 0);
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	munit_assert_int(xtc_io_reg_fd(io, p_[0], XTC_IO_READABLE, NULL),
 	    ==, XTC_OK);
 	test_close(p_[1]);     /* close writer */
@@ -113,7 +113,7 @@ test_hup(const MunitParameter p[], void *d)
 	    (evs[0].flags & (XTC_IO_HUP | XTC_IO_READABLE)) != 0);
 	munit_assert_int(xtc_io_del_fd(io, p_[0]), ==, XTC_OK);
 	test_close(p_[0]);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -129,7 +129,7 @@ test_many_ready(const MunitParameter p[], void *d)
 	xtc_io_event_t evs[MANY];
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	for (i = 0; i < MANY; i++) {
 		int p_[2];
 		munit_assert_int(make_pipe_pair(p_), ==, 0);
@@ -145,7 +145,7 @@ test_many_ready(const MunitParameter p[], void *d)
 		(void)xtc_io_del_fd(io, rfds[i]);
 		test_close(rfds[i]); test_close(wfds[i]);
 	}
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -158,10 +158,10 @@ test_timeout_zero(const MunitParameter p[], void *d)
 	xtc_io_event_t evs[8];
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	munit_assert_int(xtc_io_poll(io, evs, 8, 0, &n_out), ==, XTC_OK);
 	munit_assert_int(n_out, ==, 0);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -176,7 +176,7 @@ test_timeout_positive(const MunitParameter p[], void *d)
 	const int64_t target_ns = 50 * 1000 * 1000;   /* 50 ms */
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	munit_assert_int(__os_clock_mono(&before), ==, XTC_OK);
 	munit_assert_int(xtc_io_poll(io, evs, 8, target_ns, &n_out), ==, XTC_OK);
 	munit_assert_int(__os_clock_mono(&after), ==, XTC_OK);
@@ -185,7 +185,7 @@ test_timeout_positive(const MunitParameter p[], void *d)
 	 * for CI noise but bound the upper to twice the request. */
 	munit_assert_int64(after - before, >=, target_ns - target_ns/4);
 	munit_assert_int64(after - before, <=, target_ns * 4);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 

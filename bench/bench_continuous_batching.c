@@ -452,7 +452,7 @@ wake(struct bench *b)
 
 	must(xtc_notify_create(&ping[0]));
 	must(xtc_notify_create(&ping[1]));
-	must(xtc_loop_init(&loop));
+	must(xtc_loop_create(&loop));
 	b->start = now();
 	must(xtc_proc_spawn(loop, pong, b, NULL, NULL));
 	must(xtc_proc_spawn(loop, pong, b, NULL, NULL));
@@ -462,7 +462,7 @@ wake(struct bench *b)
 	printf("workload=wake roundtrips=%u seconds=%.6f\n", b->c.requests,
 	       (double)b->out.ns / 1e9);
 	print_hist("wake_to_run", &b->heartbeat);
-	must(xtc_loop_fini(loop));
+	xtc_loop_destroy(loop);
 	xtc_notify_destroy(ping[0]);
 	xtc_notify_destroy(ping[1]);
 	return b->out;
@@ -495,7 +495,7 @@ run(const struct config *config)
 	b.requests = xtc_calloc(b.c.requests, sizeof(*b.requests));
 	check(b.requests != NULL, "request allocation");
 	prepare(&b);
-	must(xtc_loop_init(&loop));
+	must(xtc_loop_create(&loop));
 	must(xtc_exec_class_create(loop, 100, 0, &cls));
 	if (b.c.policy)
 		must(xtc_sched_continuous_set(loop, 3));
@@ -595,7 +595,7 @@ run(const struct config *config)
 		print_hist("cancel_running_to_terminal", &b.cancel[1]);
 	}
 	must(xtc_batch_destroy(b.batch));
-	must(xtc_loop_fini(loop));
+	xtc_loop_destroy(loop);
 	xtc_free(b.requests);
 	check(fflush(stdout) == 0 && !ferror(stdout), "benchmark output");
 	return b.out;

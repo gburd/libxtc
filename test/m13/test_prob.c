@@ -32,13 +32,13 @@ test_bloom_basic(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	/* NULL / invalid args. */
-	munit_assert_int(xtc_bloom_init(NULL, 100, 0.01), ==, XTC_E_INVAL);
-	munit_assert_int(xtc_bloom_init(&b, 100, 0.0), ==, XTC_E_INVAL);
-	munit_assert_int(xtc_bloom_init(&b, 100, 1.0), ==, XTC_E_INVAL);
-	munit_assert_int(xtc_bloom_init(&b, 100, -0.5), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_bloom_create(100, 0.01, NULL), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_bloom_create(100, 0.0, &b), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_bloom_create(100, 1.0, &b), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_bloom_create(100, -0.5, &b), ==, XTC_E_INVAL);
 	munit_assert_int(xtc_bloom_maybe_contains(NULL, "x", 1), ==, 0);
 
-	munit_assert_int(xtc_bloom_init(&b, 100, 0.01), ==, XTC_OK);
+	munit_assert_int(xtc_bloom_create(100, 0.01, &b), ==, XTC_OK);
 	/* Empty filter: everything definitely absent. */
 	munit_assert_int(xtc_bloom_maybe_contains(b, "x", 1), ==, 0);
 	xtc_bloom_add(b, "x", 1);
@@ -48,8 +48,8 @@ test_bloom_basic(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_bloom_maybe_contains(b, "x", 1), ==, 1);
 	xtc_bloom_add(b, NULL, 0);
 	munit_assert_int(xtc_bloom_maybe_contains(b, NULL, 0), ==, 1);
-	xtc_bloom_fini(b);
-	xtc_bloom_fini(NULL);   /* NULL is a no-op */
+	xtc_bloom_destroy(b);
+	xtc_bloom_destroy(NULL);   /* NULL is a no-op */
 	return MUNIT_OK;
 }
 
@@ -61,26 +61,26 @@ test_bloom_sizing_edges(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 
 	/* n_expected == 0 is bumped to 1 internally (no divide-by-zero). */
-	munit_assert_int(xtc_bloom_init(&b, 0, 0.01), ==, XTC_OK);
+	munit_assert_int(xtc_bloom_create(0, 0.01, &b), ==, XTC_OK);
 	xtc_bloom_add(b, "a", 1);
 	munit_assert_int(xtc_bloom_maybe_contains(b, "a", 1), ==, 1);
-	xtc_bloom_fini(b);
+	xtc_bloom_destroy(b);
 
 	/* fp_rate very close to 1: m_opt tiny (clamped to >=1), k clamped
 	 * to >=1.  Still no false negatives. */
-	munit_assert_int(xtc_bloom_init(&b, 1, 0.999), ==, XTC_OK);
+	munit_assert_int(xtc_bloom_create(1, 0.999, &b), ==, XTC_OK);
 	xtc_bloom_add(b, "a", 1);
 	munit_assert_int(xtc_bloom_maybe_contains(b, "a", 1), ==, 1);
-	xtc_bloom_fini(b);
+	xtc_bloom_destroy(b);
 
 	/* fp_rate extremely small with a huge n: k would exceed 64, so it
 	 * is capped at 64.  A handful of keys still test present. */
-	munit_assert_int(xtc_bloom_init(&b, 1000000, 1e-18), ==, XTC_OK);
+	munit_assert_int(xtc_bloom_create(1000000, 1e-18, &b), ==, XTC_OK);
 	xtc_bloom_add(b, "a", 1);
 	xtc_bloom_add(b, "b", 1);
 	munit_assert_int(xtc_bloom_maybe_contains(b, "a", 1), ==, 1);
 	munit_assert_int(xtc_bloom_maybe_contains(b, "b", 1), ==, 1);
-	xtc_bloom_fini(b);
+	xtc_bloom_destroy(b);
 	return MUNIT_OK;
 }
 
@@ -94,7 +94,7 @@ test_bloom_stats(const MunitParameter p[], void *d)
 	double rate;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_bloom_init(&b, BLOOM_N, target), ==, XTC_OK);
+	munit_assert_int(xtc_bloom_create(BLOOM_N, target, &b), ==, XTC_OK);
 
 	/* Add keys 0..BLOOM_N-1 (as raw 8-byte spans). */
 	for (i = 0; i < BLOOM_N; i++)
@@ -120,7 +120,7 @@ test_bloom_stats(const MunitParameter p[], void *d)
 	/* Within ~2x of target (statistical bound). */
 	munit_assert_double(rate, <, target * 2.0);
 
-	xtc_bloom_fini(b);
+	xtc_bloom_destroy(b);
 	return MUNIT_OK;
 }
 
@@ -133,11 +133,11 @@ hll_relerr(int precision, uint64_t n)
 	uint64_t i, est;
 	double err;
 
-	munit_assert_int(xtc_hll_init(&h, precision), ==, XTC_OK);
+	munit_assert_int(xtc_hll_create(precision, &h), ==, XTC_OK);
 	for (i = 0; i < n; i++)
 		xtc_hll_add(h, &i, sizeof i);
 	est = xtc_hll_count(h);
-	xtc_hll_fini(h);
+	xtc_hll_destroy(h);
 	err = ((double)est - (double)n) / (double)n;
 	if (err < 0.0) err = -err;
 	munit_logf(MUNIT_LOG_INFO,
@@ -152,19 +152,19 @@ test_hll_basic(const MunitParameter p[], void *d)
 	xtc_hll_t *h;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_hll_init(NULL, 12), ==, XTC_E_INVAL);
-	munit_assert_int(xtc_hll_init(&h, 3), ==, XTC_E_INVAL);
-	munit_assert_int(xtc_hll_init(&h, 19), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_hll_create(12, NULL), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_hll_create(3, &h), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_hll_create(19, &h), ==, XTC_E_INVAL);
 	munit_assert_uint64(xtc_hll_count(NULL), ==, 0);
 
-	munit_assert_int(xtc_hll_init(&h, 12), ==, XTC_OK);
+	munit_assert_int(xtc_hll_create(12, &h), ==, XTC_OK);
 	munit_assert_uint64(xtc_hll_count(h), ==, 0);   /* empty */
 	xtc_hll_add(h, "one", 3);
 	munit_assert_uint64(xtc_hll_count(h), >=, 1);
 	munit_assert_uint64(xtc_hll_count(h), <=, 2);
 	xtc_hll_add(h, NULL, 0);   /* empty key ok */
-	xtc_hll_fini(h);
-	xtc_hll_fini(NULL);        /* NULL no-op */
+	xtc_hll_destroy(h);
+	xtc_hll_destroy(NULL);        /* NULL no-op */
 	return MUNIT_OK;
 }
 
@@ -179,7 +179,7 @@ test_hll_low_precision(const MunitParameter p[], void *d)
 	for (prec = 4; prec <= 6; prec++) {
 		xtc_hll_t *h;
 		uint64_t i, est;
-		munit_assert_int(xtc_hll_init(&h, prec), ==, XTC_OK);
+		munit_assert_int(xtc_hll_create(prec, &h), ==, XTC_OK);
 		for (i = 0; i < 50; i++)
 			xtc_hll_add(h, &i, sizeof i);
 		est = xtc_hll_count(h);
@@ -187,7 +187,7 @@ test_hll_low_precision(const MunitParameter p[], void *d)
 		 * estimate (small-range linear counting keeps it positive). */
 		munit_assert_uint64(est, >=, 20);
 		munit_assert_uint64(est, <=, 120);
-		xtc_hll_fini(h);
+		xtc_hll_destroy(h);
 	}
 	return MUNIT_OK;
 }
@@ -216,8 +216,8 @@ test_hll_merge(const MunitParameter p[], void *d)
 	const uint64_t half = 500000;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_hll_init(&a, 14), ==, XTC_OK);
-	munit_assert_int(xtc_hll_init(&b, 14), ==, XTC_OK);
+	munit_assert_int(xtc_hll_create(14, &a), ==, XTC_OK);
+	munit_assert_int(xtc_hll_create(14, &b), ==, XTC_OK);
 
 	/* Two DISJOINT key ranges: a gets [0,half), b gets [half,2*half). */
 	for (i = 0; i < half; i++)          xtc_hll_add(a, &i, sizeof i);
@@ -226,9 +226,9 @@ test_hll_merge(const MunitParameter p[], void *d)
 	/* NULL / mismatch. */
 	munit_assert_int(xtc_hll_merge(NULL, b), ==, XTC_E_INVAL);
 	munit_assert_int(xtc_hll_merge(a, NULL), ==, XTC_E_INVAL);
-	munit_assert_int(xtc_hll_init(&mismatch, 10), ==, XTC_OK);
+	munit_assert_int(xtc_hll_create(10, &mismatch), ==, XTC_OK);
 	munit_assert_int(xtc_hll_merge(a, mismatch), ==, XTC_E_INVAL);
-	xtc_hll_fini(mismatch);
+	xtc_hll_destroy(mismatch);
 
 	munit_assert_int(xtc_hll_merge(a, b), ==, XTC_OK);
 	est = xtc_hll_count(a);
@@ -239,8 +239,8 @@ test_hll_merge(const MunitParameter p[], void *d)
 	    (unsigned long long)(2 * half), (unsigned long long)est, err);
 	munit_assert_double(err, <, 0.03);
 
-	xtc_hll_fini(a);
-	xtc_hll_fini(b);
+	xtc_hll_destroy(a);
+	xtc_hll_destroy(b);
 	return MUNIT_OK;
 }
 

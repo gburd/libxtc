@@ -40,7 +40,7 @@ test_calloc_fail(const MunitParameter p[], void *d)
 	g_callback_hits = 0;
 	munit_assert_int(xtc_inject_attach("io.init.calloc_fail", inj_cb, NULL),
 	    ==, XTC_OK);
-	rc = xtc_io_init(&io);
+	rc = xtc_io_create(&io);
 	(void)xtc_inject_detach("io.init.calloc_fail");
 	munit_assert_int(rc, ==, XTC_E_NOMEM);
 	munit_assert_null(io);
@@ -62,7 +62,7 @@ test_pipe_fail(const MunitParameter p[], void *d)
 	g_callback_hits = 0;
 	munit_assert_int(xtc_inject_attach("io.init.pipe_fail", inj_cb, NULL),
 	    ==, XTC_OK);
-	rc = xtc_io_init(&io);
+	rc = xtc_io_create(&io);
 	(void)xtc_inject_detach("io.init.pipe_fail");
 	munit_assert_int(rc, ==, XTC_E_INTERNAL);
 	munit_assert_null(io);
@@ -79,7 +79,7 @@ test_fcntl_fail(const MunitParameter p[], void *d)
 	g_callback_hits = 0;
 	munit_assert_int(xtc_inject_attach("io.init.fcntl_fail", inj_cb, NULL),
 	    ==, XTC_OK);
-	rc = xtc_io_init(&io);
+	rc = xtc_io_create(&io);
 	(void)xtc_inject_detach("io.init.fcntl_fail");
 	munit_assert_int(rc, ==, XTC_E_INTERNAL);
 	munit_assert_null(io);
@@ -99,7 +99,7 @@ test_backend_fail(const MunitParameter p[], void *d)
 	g_callback_hits = 0;
 	munit_assert_int(xtc_inject_attach("io.init.backend_fail", inj_cb, NULL),
 	    ==, XTC_OK);
-	rc = xtc_io_init(&io);
+	rc = xtc_io_create(&io);
 	(void)xtc_inject_detach("io.init.backend_fail");
 	munit_assert_int(rc, ==, XTC_E_INTERNAL);
 	munit_assert_null(io);
@@ -107,14 +107,14 @@ test_backend_fail(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
-/* ----- xtc_io_init / xtc_io_fini with NULL --------------- */
+/* ----- xtc_io_create / xtc_io_destroy with NULL --------------- */
 
 static MunitResult
 test_null_args(const MunitParameter p[], void *d)
 {
 	(void)p; (void)d;
-	munit_assert_int(xtc_io_init(NULL), ==, XTC_E_INVAL);
-	munit_assert_int(xtc_io_fini(NULL), ==, XTC_E_INVAL);
+	munit_assert_int(xtc_io_create(NULL), ==, XTC_E_INVAL);
+	xtc_io_destroy(NULL);
 	munit_assert_int(xtc_io_wakeup(NULL), ==, XTC_E_INVAL);
 	return MUNIT_OK;
 }
@@ -127,10 +127,10 @@ test_normal_after_inject(const MunitParameter p[], void *d)
 	xtc_io_t *io = NULL;
 	(void)p; (void)d;
 	/* After the previous tests detached, init should work. */
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	munit_assert_not_null(io);
 	munit_assert_int(xtc_io_wakeup(io), ==, XTC_OK);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 

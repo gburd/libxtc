@@ -9,7 +9,10 @@ if ! command -v mandoc >/dev/null 2>&1; then
 fi
 
 bad=0
-for m in "$XTC_SRC_DIR"/man/man3/*.3 "$XTC_SRC_DIR"/man/man7/*.7; do
+# From man/, so the ".so man3/<page>.3" alias of a deprecated name
+# resolves the way man(1) resolves it.
+cd "$XTC_SRC_DIR/man"
+for m in man3/*.3 man7/*.7; do
 	[ -f "$m" ] || continue
 	# Check only for ERROR-level lint issues; WARNINGs vary across
 	# mandoc versions (FreeBSD's mandoc is stricter than Linux's)

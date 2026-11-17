@@ -39,7 +39,7 @@ test_wakeup_basic(const MunitParameter p[], void *d)
 	int64_t before, after;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	c.io = io; c.delay_ms = 20;
 	munit_assert_int(__os_thread_create(&thr, w1_waker, &c), ==, XTC_OK);
 
@@ -55,7 +55,7 @@ test_wakeup_basic(const MunitParameter p[], void *d)
 	munit_assert_int64(after - before, >=, 15 * 1000 * 1000);
 	munit_assert_int64(after - before, <=, 500 * 1000 * 1000);
 
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -68,7 +68,7 @@ test_wakeup_coalesce(const MunitParameter p[], void *d)
 	int n_out, i;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	for (i = 0; i < 100; i++)
 		munit_assert_int(xtc_io_wakeup(io), ==, XTC_OK);
 	munit_assert_int(xtc_io_poll(io, evs, 8, 0, &n_out), ==, XTC_OK);
@@ -77,7 +77,7 @@ test_wakeup_coalesce(const MunitParameter p[], void *d)
 	/* Drained: subsequent zero-timeout poll sees nothing. */
 	munit_assert_int(xtc_io_poll(io, evs, 8, 0, &n_out), ==, XTC_OK);
 	munit_assert_int(n_out, ==, 0);
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 
@@ -105,7 +105,7 @@ test_wakeup_concurrent(const MunitParameter p[], void *d)
 	int n_out, i;
 	(void)p; (void)d;
 
-	munit_assert_int(xtc_io_init(&io), ==, XTC_OK);
+	munit_assert_int(xtc_io_create(&io), ==, XTC_OK);
 	c.io = io;
 	for (i = 0; i < W4_THREADS; i++)
 		munit_assert_int(__os_thread_create(&thr[i], w4_worker, &c),
@@ -120,7 +120,7 @@ test_wakeup_concurrent(const MunitParameter p[], void *d)
 	munit_assert_int(n_out, >=, 1);
 	munit_assert_uint(evs[0].flags & XTC_IO_WAKEUP, ==, XTC_IO_WAKEUP);
 
-	munit_assert_int(xtc_io_fini(io), ==, XTC_OK);
+	xtc_io_destroy(io);
 	return MUNIT_OK;
 }
 

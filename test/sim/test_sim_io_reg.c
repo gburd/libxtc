@@ -54,8 +54,8 @@ main(void)
 
 	xtc_sim_activate(0x10E9EA11u);
 
-	if (xtc_io_init(&io) != XTC_OK) {
-		printf("FAIL: xtc_io_init\n");
+	if (xtc_io_create(&io) != XTC_OK) {
+		printf("FAIL: xtc_io_create\n");
 		return 1;
 	}
 
@@ -112,7 +112,7 @@ main(void)
 	    == XTC_OK, "re-register after delete");
 	check(xtc_io_del_fd(io, 100) == XTC_OK, "delete the re-registered fd");
 
-	(void)xtc_io_fini(io);
+	xtc_io_destroy(io);
 
 	if (g_fail != 0) {
 		printf("FAIL: %d sim io-registry check(s) failed\n", g_fail);

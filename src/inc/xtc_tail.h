@@ -281,14 +281,14 @@ enum xtc_tail_kind {
  * standalone or on an executor, labels its ring with its process-wide id
  * (the loop_id of its pids), so a loop event joins the pids it minted.
  * Through 2.1 the label was the executor slot (0-based, unlike the pid's
- * slot + 1) and a ring of a bare xtc_loop_init loop reported this value.
+ * slot + 1) and a ring of a bare xtc_loop_create loop reported this value.
  *
  * This exists because the obvious fallback is a lie: reporting 0 makes an
  * unlabelled ring indistinguishable from the executor's REAL loop 0, and a
  * consumer read a stack of "loop 0" SUBMIT/REAP events as evidence that
  * loop 0 owned a stranded completion.  That inference may well be right, but
  * the number they read could not distinguish the two cases, so it could not
- * support it.  0xFFFFFFFF is never a loop id (xtc_loop_init stops one
+ * support it.  0xFFFFFFFF is never a loop id (xtc_loop_create stops one
  * short of it).  (1.x, with a 16-bit loop_id, used 0xFFFF.)
  */
 #define XTC_TAIL_LOOP_NONE 0xFFFFFFFFu

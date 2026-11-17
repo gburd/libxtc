@@ -109,10 +109,9 @@ main()
 	if (xtc_log_drain(log) != 1)
 		return 3;
 	xtc_log_destroy(log);
-	if (xtc_loop_init(&loop) != XTC_OK)
+	if (xtc_loop_create(&loop) != XTC_OK)
 		return 4;
-	if (xtc_loop_fini(loop) != XTC_OK)
-		return 5;
+	xtc_loop_destroy(loop);
 	printf("libxtc %s: C++ coexistence OK\n", xtc_version_string());
 	return 0;
 }

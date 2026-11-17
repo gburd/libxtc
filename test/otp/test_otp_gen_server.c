@@ -132,7 +132,7 @@ test_start_stop(const MunitParameter p[], void *d)
 	struct counter_state state = {0};
 	xtc_pid_t driver;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_svr_start(loop, &counter_cb, &state, NULL, &svr),
 	    ==, XTC_OK);
 	/* init runs inside the server's proc -- only after loop starts. */
@@ -141,7 +141,7 @@ test_start_stop(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_true(state.init_called);
 	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -215,7 +215,7 @@ test_call_cast_info(const MunitParameter p[], void *d)
 	struct call_driver_args da = {0};
 	xtc_pid_t  dpid;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_svr_start(loop, &counter_cb, &state, NULL, &svr),
 	    ==, XTC_OK);
 	da.target = xtc_svr_pid(svr);
@@ -234,7 +234,7 @@ test_call_cast_info(const MunitParameter p[], void *d)
 	    ==, 1);
 
 	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -289,7 +289,7 @@ test_stop_via_handle_call(const MunitParameter p[], void *d)
 	g_stop_init_count = 0;
 	g_stop_terminated = 0;
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_svr_start(loop, &stop_cb, &dummy_state, NULL, &svr),
 	    ==, XTC_OK);
 	target = xtc_svr_pid(svr);
@@ -299,7 +299,7 @@ test_stop_via_handle_call(const MunitParameter p[], void *d)
 	munit_assert_int(g_stop_init_count, ==, 1);
 	munit_assert_int(g_stop_terminated, ==, 1);
 	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -353,7 +353,7 @@ test_call_timeout(const MunitParameter p[], void *d)
 	int dummy = 0;
 	(void)p; (void)d;
 	xtc_atomic_store_i32(&g_call_timeout_seen, 0, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_svr_start(loop, &slow_cb, &dummy, NULL, &svr),
 	    ==, XTC_OK);
 	target = xtc_svr_pid(svr);
@@ -366,7 +366,7 @@ test_call_timeout(const MunitParameter p[], void *d)
 	                     xtc_mo_seq_cst),
 	    ==, 1);
 	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 

@@ -165,7 +165,7 @@ main(void)
 	 * the EPIPE error from send() instead. */
 	(void)signal(SIGPIPE, SIG_IGN);
 
-	if (xtc_loop_init(&loop) != XTC_OK)
+	if (xtc_loop_create(&loop) != XTC_OK)
 		return 1;
 
 	/* A fixed port can be taken by something else on a shared host, so
@@ -195,6 +195,6 @@ main(void)
 		status = 0;
 	printf("%d of 3 lines echoed\n", g_echoed);
 out:
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return status;
 }

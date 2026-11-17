@@ -200,7 +200,7 @@ test_reclaim_correct(const MunitParameter p[], void *d)
 /* ---- B3: completed proc fibers are reclaimed before loop teardown ----
  *
  * Every proc used to keep its fiber stack (two VMAs: stack + guard) and
- * its coro until xtc_loop_fini, so a server spawning one proc per
+ * its coro until xtc_loop_destroy, so a server spawning one proc per
  * connection grew without bound and, on a stock kernel
  * (vm.max_map_count 65530), failed every spawn after ~32K lifetime
  * spawns.  These cases spawn many short-lived procs with a bounded number
@@ -392,7 +392,7 @@ life_run(long n, int mode)
 	xtc_atomic_store_long(&life_started, 0, xtc_mo_seq_cst);
 	xtc_atomic_store_long(&life_exited, 0, xtc_mo_seq_cst);
 
-	munit_assert_int(xtc_loop_init(&l), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&l), ==, XTC_OK);
 	m0 = life_maps();
 	r0 = life_status_kb("VmRSS:");
 	life_maps_peak = m0;
@@ -411,7 +411,7 @@ life_run(long n, int mode)
 	    mode, n, (long)xtc_atomic_load_long(&life_exited, xtc_mo_seq_cst),
 	    maps_grow, rss_grow, m1 - m0, r1 - r0);
 	fflush(stdout);
-	(void)xtc_loop_fini(l);
+	xtc_loop_destroy(l);
 
 	munit_assert_long(life_spawn_fail, ==, -1);
 	munit_assert_long(xtc_atomic_load_long(&life_exited, xtc_mo_seq_cst),
@@ -604,11 +604,11 @@ test_reclaim_monitor_entries(const MunitParameter p[], void *d)
 
 	mon_fail = -1;
 	mon_rss_grow = 0;
-	munit_assert_int(xtc_loop_init(&l), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&l), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(l, mon_watcher, l, NULL, NULL), ==,
 	    XTC_OK);
 	munit_assert_int(xtc_loop_run(l), ==, XTC_OK);
-	(void)xtc_loop_fini(l);
+	xtc_loop_destroy(l);
 	printf("  monitor watcher: %d children, rss +%ld kB from 10%% to "
 	    "the end (%.1f B per child)\n", MON_N, mon_rss_grow,
 	    mon_rss_grow * 1024.0 / (MON_N * 0.9));
@@ -913,7 +913,7 @@ sz_round_thread(void *arg)
 
 	/* Not a page multiple: rounded up (1 MiB - 100 -> 1 MiB). */
 	big.stack_size = BIG_STACK - 100;
-	r->rc = xtc_loop_init(&loop);
+	r->rc = xtc_loop_create(&loop);
 	if (r->rc == XTC_OK)
 		r->rc = sz_spawn(loop, r->first, &big);
 	if (r->rc == XTC_OK)
@@ -925,7 +925,7 @@ sz_round_thread(void *arg)
 	if (r->rc == XTC_OK)
 		r->rc = xtc_loop_run(loop);
 	if (loop != NULL)
-		(void)xtc_loop_fini(loop);
+		xtc_loop_destroy(loop);
 	return NULL;
 }
 
@@ -944,11 +944,11 @@ test_proc_stack_size(const MunitParameter p[], void *d)
 	xtc_atomic_store_i32(&g_sz_bad, 0, xtc_mo_seq_cst);
 
 	/* Below the minimum: refused, nothing spawned. */
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	bad.stack_size = 8 * 1024;
 	munit_assert_int(xtc_proc_spawn(loop, sz_proc, NULL, &bad, NULL), ==,
 	    XTC_E_INVAL);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 
 	/* Alternate which size the empty pool is offered first. */
 	for (i = 0; i < SZ_ROUNDS; i++) {

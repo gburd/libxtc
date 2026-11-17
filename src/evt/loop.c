@@ -108,7 +108,7 @@ __xtc_inbox_fini(struct xtc_inbox *ib)
 	if (!ib->inited) return;
 	/* An undrained PUBLISH carries a task that was spawned cross-thread
 	 * but never ran, so it was never linked into the loop's all_tasks
-	 * list and thus was NOT freed by xtc_loop_fini's all_tasks walk.
+	 * list and thus was NOT freed by xtc_loop_destroy's all_tasks walk.
 	 * Reclaim it here exactly as that walk does: run its cleanup (the
 	 * coroutine layer's callback releases the fiber stack + coro struct)
 	 * then free the task struct.  A WAKE entry, by contrast, is a task
@@ -334,7 +334,7 @@ __xtc_inbox_drain(xtc_loop_t *loop)
  * twice, so a pid of a finalized loop resolves to nothing rather than to
  * a later loop.  Ids run 1..0xFFFFFFFD (0 is XTC_PID_NONE's, 0xFFFFFFFE
  * XTC_LOOP_FOREIGN's, 0xFFFFFFFF XTC_TAIL_LOOP_NONE); after
- * 4,294,967,293 loop inits xtc_loop_init fails with XTC_E_RESOURCE
+ * 4,294,967,293 loop inits xtc_loop_create fails with XTC_E_RESOURCE
  * instead of wrapping.
  *
  * DST: the sim backend restarts the ids at 1 when a loop is created and
@@ -375,9 +375,9 @@ __xtc_loop_id_put(void)
 	    xtc_mo_relaxed);
 }
 
-/* PUBLIC: int xtc_loop_init __P((xtc_loop_t **)); */
+/* PUBLIC: int xtc_loop_create __P((xtc_loop_t **)); */
 int
-xtc_loop_init(xtc_loop_t **out)
+xtc_loop_create(xtc_loop_t **out)
 {
 	xtc_loop_t *loop;
 	int rc;
@@ -390,7 +390,7 @@ xtc_loop_init(xtc_loop_t **out)
 		return rc;
 	}
 
-	if ((rc = xtc_io_init(&loop->io)) != XTC_OK)        goto fail0;
+	if ((rc = xtc_io_create(&loop->io)) != XTC_OK)        goto fail0;
 	xtc_deque_init(&loop->deque);
 	if ((rc = __xtc_inbox_init(&loop->inbox)) != XTC_OK) goto fail1;
 
@@ -418,20 +418,20 @@ xtc_loop_init(xtc_loop_t **out)
 	return XTC_OK;
 
 fail2:	__xtc_inbox_fini(&loop->inbox);
-fail1:	(void)xtc_io_fini(loop->io);
+fail1:	xtc_io_destroy(loop->io);
 fail0:
 	__xtc_loop_id_put();
 	__os_free(loop);
 	return rc;
 }
 
-/* PUBLIC: int xtc_loop_fini __P((xtc_loop_t *)); */
-int
-xtc_loop_fini(xtc_loop_t *loop)
+/* PUBLIC: void xtc_loop_destroy __P((xtc_loop_t *)); */
+void
+xtc_loop_destroy(xtc_loop_t *loop)
 {
 	xtc_task_t *t, *next_t;
 
-	if (loop == NULL) return XTC_E_INVAL;
+	if (loop == NULL) return;
 
 	/* File AIO the kernel still owns writes the parked fiber's stack and
 	 * buffer: reap it before any task (and its stack) is freed below. */
@@ -510,11 +510,10 @@ xtc_loop_fini(xtc_loop_t *loop)
 	__xtc_inbox_fini(&loop->inbox);
 	/* After every cleanup above: those may have refilled the spare. */
 	__xtc_coro_stack_spare_fini(loop);
-	(void)xtc_io_fini(loop->io);
+	xtc_io_destroy(loop->io);
 	if (loop->owns_res) __os_free(loop->res);
 	__os_free(loop);
 	__xtc_loop_id_put();
-	return XTC_OK;
 }
 
 /* PUBLIC: struct xtc_res *xtc_loop_res __P((xtc_loop_t *)); */

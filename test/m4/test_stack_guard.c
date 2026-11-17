@@ -77,7 +77,7 @@ test_guard(const MunitParameter p[], void *d)
 		/* Child: drive a fiber that overflows; the guard should
 		 * deliver SIGSEGV/SIGBUS and terminate us. */
 		xtc_loop_t *loop = NULL;
-		if (xtc_loop_init(&loop) != XTC_OK)
+		if (xtc_loop_create(&loop) != XTC_OK)
 			_exit(8);
 		(void)xtc_proc_spawn(loop, overflow_fn, NULL, NULL, NULL);
 		(void)xtc_loop_run(loop);

@@ -96,7 +96,7 @@ test_hog_trips(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	reset();
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	/* 5 ms budget: a 200M-iter burn in one run blows past it. */
 	xtc_loop_set_stall_budget(loop, 5 * 1000 * 1000LL);
 	xtc_loop_set_stall_cb(loop, stall_cb, NULL);
@@ -116,7 +116,7 @@ test_hog_trips(const MunitParameter p[], void *d)
 	    ==, 5 * 1000 * 1000LL);
 	munit_assert_uint64(xtc_loop_stall_count(loop), >, 0);
 
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -128,7 +128,7 @@ test_polite_ok(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	reset();
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	xtc_loop_set_stall_budget(loop, 5 * 1000 * 1000LL);
 	xtc_loop_set_stall_cb(loop, stall_cb, NULL);
 
@@ -139,7 +139,7 @@ test_polite_ok(const MunitParameter p[], void *d)
 	    ==, 0); /* never */
 	munit_assert_uint64(xtc_loop_stall_count(loop), ==, 0);
 
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -151,7 +151,7 @@ test_off_by_default(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 	reset();
 
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	/* No xtc_loop_set_stall_budget call: the default is off (0). */
 	xtc_loop_set_stall_cb(loop, stall_cb, NULL);
 
@@ -162,7 +162,7 @@ test_off_by_default(const MunitParameter p[], void *d)
 	    ==, 0); /* off */
 	munit_assert_uint64(xtc_loop_stall_count(loop), ==, 0);
 
-	(void)xtc_loop_fini(loop);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 

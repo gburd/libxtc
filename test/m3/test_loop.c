@@ -21,11 +21,11 @@ test_init_fini(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop = NULL;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_not_null(loop);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_init(NULL), ==, XTC_E_INVAL);
-	munit_assert_int(xtc_loop_fini(NULL), ==, XTC_E_INVAL);
+	xtc_loop_destroy(loop);
+	munit_assert_int(xtc_loop_create(NULL), ==, XTC_E_INVAL);
+	xtc_loop_destroy(NULL);
 	return MUNIT_OK;
 }
 
@@ -35,9 +35,9 @@ test_run_empty(const MunitParameter p[], void *d)
 {
 	xtc_loop_t *loop;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -53,12 +53,12 @@ test_run_until_done(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	(void)p; (void)d;
 	hits = 0;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_task_spawn(loop, task_done_once, NULL, NULL),
 	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(hits, ==, 1);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
@@ -79,19 +79,19 @@ test_stop(const MunitParameter p[], void *d)
 	xtc_loop_t *loop;
 	struct stop_ctx c;
 	(void)p; (void)d;
-	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	c.loop = loop; c.counter = 0;
 	munit_assert_int(xtc_task_spawn(loop, task_stop, &c, NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(c.counter, >=, 3);
-	munit_assert_int(xtc_loop_fini(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
 	return MUNIT_OK;
 }
 
 /*
- * m6: xtc_loop_fini with live procs.  Procs parked in a long sleep, each
+ * m6: xtc_loop_destroy with live procs.  Procs parked in a long sleep, each
  * holding queued messages, links and a monitor, are torn down by
- * xtc_loop_fini.  Their envelopes used to leak (the unregister freed the
+ * xtc_loop_destroy.  Their envelopes used to leak (the unregister freed the
  * proc structs without draining their mailboxes).  Outstanding heap
  * bytes are counted through the allocator hook; messages are larger
  * than the envelope slab's payload so each one is a heap allocation.
@@ -176,11 +176,11 @@ fini_round(void)
 {
 	long long before;
 	before = xtc_atomic_load_llong(&fini_live, xtc_mo_seq_cst);
-	munit_assert_int(xtc_loop_init(&fini_loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&fini_loop), ==, XTC_OK);
 	munit_assert_int(xtc_proc_spawn(fini_loop, fini_parent, NULL, NULL,
 	    NULL), ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(fini_loop), ==, XTC_OK);
-	munit_assert_int(xtc_loop_fini(fini_loop), ==, XTC_OK);
+	xtc_loop_destroy(fini_loop);
 	return xtc_atomic_load_llong(&fini_live, xtc_mo_seq_cst) - before;
 }
 

@@ -27,7 +27,7 @@
 /* Set FD_CLOEXEC and O_NONBLOCK on a file descriptor.  Used only by
  * the self-pipe path (POSIX backends other than kqueue and sim); the
  * Windows path uses ioctlsocket(FIONBIO), kqueue EVFILT_USER, sim a
- * flag.  Same condition as the self-pipe block in xtc_io_init. */
+ * flag.  Same condition as the self-pipe block in xtc_io_create. */
 #if !defined(_WIN32) && !defined(XTC_IO_BACKEND_KQUEUE) && \
     !defined(XTC_IO_BACKEND_SIM)
 static int
@@ -50,10 +50,10 @@ void __xtc_io_backend_fini(xtc_io_t *io);
 int  __xtc_io_register_wakeup(xtc_io_t *io, int fd);
 
 /*
- * PUBLIC: int xtc_io_init __P((xtc_io_t **));
+ * PUBLIC: int xtc_io_create __P((xtc_io_t **));
  */
 int
-xtc_io_init(xtc_io_t **out)
+xtc_io_create(xtc_io_t **out)
 {
 	xtc_io_t *io;
 	int rc;
@@ -140,20 +140,19 @@ xtc_io_init(xtc_io_t **out)
 }
 
 /*
- * PUBLIC: int xtc_io_fini __P((xtc_io_t *));
+ * PUBLIC: void xtc_io_destroy __P((xtc_io_t *));
  */
-int
-xtc_io_fini(xtc_io_t *io)
+void
+xtc_io_destroy(xtc_io_t *io)
 {
 	if (io == NULL)
-		return XTC_E_INVAL;
+		return;
 	__xtc_io_backend_fini(io);
 #if !defined(_WIN32)
 	if (io->wakeup_rfd >= 0) (void)close(io->wakeup_rfd);
 	if (io->wakeup_wfd >= 0) (void)close(io->wakeup_wfd);
 #endif
 	__os_free(io);
-	return XTC_OK;
 }
 
 #if defined(_WIN32)
