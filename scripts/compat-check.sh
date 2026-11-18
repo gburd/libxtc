@@ -16,7 +16,7 @@
 #      it to HEAD's library; run it.  Static first, then the same object
 #      against HEAD's libxtc.so (the dynamic-link swap a packager does).
 #
-# BASE_TAG defaults to the newest v2.* tag that is not HEAD's own
+# BASE_TAG defaults to the newest v2.* release tag OLDER than HEAD's
 # version.  Until a 2.x tag exists there is nothing to be compatible
 # WITH: 1.x -> 2.0 is the major break (structs gained a size field, the
 # symbols a version node), so the job SKIPS (exit 0, says why).  The
@@ -38,8 +38,15 @@ head_ver=$(cat dist/version.in)
 
 base=${1:-}
 if [ -z "$base" ]; then
+	# The newest older release: a newer tag (2.2.0 seen from the 2.1
+	# LTS branch) is not N-1, and its consumer may use API this tree
+	# does not have.
 	base=$(git tag -l 'v2.*' --sort=-v:refname 2>/dev/null |
-	    grep -vx "v$head_ver" | head -1 || true)
+	    awk -v h="$head_ver" -F'[v.]' '
+		BEGIN { n = split(h, hv, "."); hk = hv[1] * 1000000 + hv[2] * 1000 + hv[3] }
+		/^v[0-9]+\.[0-9]+\.[0-9]+$/ {
+			if ($2 * 1000000 + $3 * 1000 + $4 < hk) { print; exit }
+		}' || true)
 fi
 if [ -z "$base" ]; then
 	echo "compat-check: SKIP: no 2.x release tag yet (HEAD is $head_ver)."
