@@ -1144,17 +1144,20 @@ check-examples: check-continuous-batching check-gpu-batching check-hetero-batchi
 # 16_l2book: the order-book engine's unit + differential + determinism
 # tests (test_book) and the venue's end-to-end self-test over loopback TCP
 # (book Isolates + session fibers).  Its own Makefile builds it against
-# this tree; the self-test picks a port from its pid, so parallel runs on
-# one host do not collide.  The wasm build and the compose box are the CI
-# examples job's and the release qualification's (they need clang's
-# wasm32 target and a container runtime).
+# this tree, into l2book/ in this build directory (O=), so two builds of
+# one checkout running check at once never share a binary; the self-test
+# picks a port from its pid, so parallel runs on one host do not collide.
+# The wasm build and the compose box are the CI examples job's and the
+# release qualification's (they need clang's wasm32 target and a
+# container runtime).
 .PHONY: check-l2book
 check-l2book: $(STATIC_LIB)
-	@$(MAKE) -C $(srcdir)/../examples/16_l2book \
+	@mkdir -p l2book && \
+	$(MAKE) -C $(srcdir)/../examples/16_l2book O=$(abs_builddir)/l2book \
 	    XTC_BUILD=$(abs_builddir) XTC_INC=$(abs_top_srcdir)/../src/inc \
 	    CC='$(CC)' check >/dev/null || \
 	    { echo "  [examples] FAIL: 16_l2book (make -C examples/16_l2book check)"; exit 1; }; \
-	$(MAKE) -C $(srcdir)/../examples/16_l2book clean >/dev/null; \
+	$(RM) -r l2book; \
 	echo "  [examples] OK: 16_l2book engine tests + venue self-test"
 
 # examples/20_jobq: a job queue with leases and fencing tokens, and its own
@@ -2611,7 +2614,7 @@ clean:
 	$(RM) soak_mem_bound continuous_batching bench_continuous_batching mandel hetero usdt_convoy
 	$(RM) 17_checkout 18_clickstream 19_edgeacl 17_checkout.out 18_clickstream.out 19_edgeacl.out
 	$(RM) 20_jobq 20_jobq_dst 20_jobq_dst.out
-	$(RM) -r jobq-sim
+	$(RM) -r jobq-sim l2book
 	$(RM) $(FUZZ_BINS)
 	$(RM) $(SHARED_LIB_REAL) $(SHARED_LIB_SONAME) $(SHARED_LIB_LINKNAME)
 	$(RM) libxtc.exp xtc_probes.o xtc_probes_dtrace.h
