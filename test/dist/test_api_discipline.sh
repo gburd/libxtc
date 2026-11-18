@@ -169,8 +169,10 @@ inc_viol=$(printf '%s\n' "$ex_src" | while IFS= read -r f; do
 	grep -nE '^[[:space:]]*#[[:space:]]*include[[:space:]]*["<](xtc[a-z0-9_]*|os_[a-z_]+|[a-z_]+_int|[a-z_]+_ext)\.h[">]' \
 	    "$f" 2>/dev/null | while IFS= read -r hit; do
 		h=$(printf '%s\n' "$hit" | sed -E 's/.*["<]([a-z0-9_]+\.h)[">].*/\1/')
+		# The leading "(" lets bash 3.2 (macOS /bin/sh) parse a case
+		# inside $(...); without it the ")" ends the substitution.
 		case "$f:$h" in
-		*/examples/06_sqlxtc/*:xtc_sim.h|*/examples/06_sqlxtc/*:xtc_dst_inject.h)
+		(*/examples/06_sqlxtc/*:xtc_sim.h|*/examples/06_sqlxtc/*:xtc_dst_inject.h)
 			continue ;;
 		esac
 		printf '%s\n' "$installed" | grep -qx "$h" ||
