@@ -137,7 +137,7 @@ ponger(void *arg)
         void *msg; size_t sz;
         if (xtc_recv(&msg, &sz, -1) != XTC_OK) return;
         printf("ponger got: %.*s\n", (int)sz, (char *)msg);
-        free(msg);
+        xtc_free(msg);
     }
 }
 
@@ -219,12 +219,12 @@ worker(void *arg)
     /* Pick the priority message first, even if not the FIFO head. */
     if (xtc_recv_match(is_priority, NULL, &m1, &s1, -1) == XTC_OK) {
         printf("priority: %.*s\n", (int)s1, (char *)m1);
-        free(m1);
+        xtc_free(m1);
     }
     /* Then drain the rest in arrival order. */
     while (xtc_recv(&m2, &s2, 100LL * 1000 * 1000) == XTC_OK) {
         printf("normal:   %.*s\n", (int)s2, (char *)m2);
-        free(m2);
+        xtc_free(m2);
     }
 }
 
