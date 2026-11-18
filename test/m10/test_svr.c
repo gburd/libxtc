@@ -854,9 +854,13 @@ test_svr_server_dies_mid_call(const MunitParameter p[], void *d)
 	 * call polled the server's liveness every 25 ms from the call, so it
 	 * returned 30 ms after the exit (on a 48-core x86-64 host).  Timed
 	 * from the exit, not the call: the 20 ms sleep takes up to 31 ms on a
-	 * 15.6 ms Windows tick.  10 ms of slack for a loaded host. */
-	munit_assert_int64(xtc_atomic_load_i64(&a.elapsed_ns, xtc_mo_seq_cst),
-	    <, 10LL * 1000 * 1000);
+	 * 15.6 ms Windows tick.  10 ms of slack for a loaded host.  Not under
+	 * valgrind, which alone adds 10 to 15 ms (10.6 ms in CI's memcheck
+	 * step, 14.4 ms on the 48-core host); every other job checks it. */
+	if (getenv("XTC_UNDER_VALGRIND") == NULL)
+		munit_assert_int64(xtc_atomic_load_i64(&a.elapsed_ns,
+		                       xtc_mo_seq_cst),
+		    <, 10LL * 1000 * 1000);
 	munit_assert_int(xtc_svr_join(svr, 1000LL * 1000 * 1000), ==, XTC_OK);
 	xtc_loop_destroy(loop);
 	return MUNIT_OK;
