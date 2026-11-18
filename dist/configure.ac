@@ -891,6 +891,22 @@ AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[]], [[
    AC_MSG_RESULT([no])
    AC_MSG_ERROR([xtc requires a C11 compiler])])
 
+# sync.o and preempt.o get -falign-functions=64 (XTC_ALIGN_CFLAGS in
+# dist/Makefile.in): the amutex lock/unlock path's cost follows where their
+# functions fall in a cache line.  -Werror makes a compiler that only warns
+# about an unknown flag count as rejecting it; then the flag is left out
+# (Solaris cc, xlc).
+AC_MSG_CHECKING([whether the C compiler accepts -falign-functions=64])
+saved_CFLAGS=$CFLAGS
+CFLAGS="$CFLAGS -Werror -falign-functions=64"
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[]], [[]])],
+  [XTC_ALIGN_CFLAGS=-falign-functions=64
+   AC_MSG_RESULT([yes])],
+  [XTC_ALIGN_CFLAGS=
+   AC_MSG_RESULT([no])])
+CFLAGS=$saved_CFLAGS
+AC_SUBST([XTC_ALIGN_CFLAGS])
+
 # Under -std=c11 the libc exposes only the ISO C namespace by default;
 # POSIX functions (nanosleep, fdopen, etc.) need a feature-test macro.
 # The library TUs get _DEFAULT_SOURCE via xtc_int.h, but the test

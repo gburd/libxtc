@@ -405,7 +405,6 @@ lib_sources = files(
   'src/ptc/res.c',
   'src/ptc/chan.c',
   'src/ptc/proc.c',
-  'src/ptc/sync.c',
   'src/ptc/future.c',
   'src/ptc/dispatch.c',
   'src/ptc/log.c',
@@ -413,7 +412,6 @@ lib_sources = files(
   'src/ptc/cfg.c',
   'src/ptc/inject.c',
   'src/ptc/pdict.c',
-  'src/ptc/preempt.c',
   'src/ptc/stats.c',
   'src/ptc/tail.c',
   'src/ptc/slab.c',
@@ -505,11 +503,24 @@ if probes_mode == 'dtrace'
   )
 endif
 
+# sync.c and preempt.c are compiled with -falign-functions=64 where the
+# compiler has it (XTC_ALIGN_CFLAGS in dist/Makefile.in): the amutex
+# lock/unlock path's cost follows where their functions fall in a cache
+# line.  c_args are per target, so the two files compile in an internal
+# library of their own and its objects go into libxtc.
+xtc_align_objlib = static_library('xtc_align_objs',
+  sources : [files('src/ptc/sync.c', 'src/ptc/preempt.c'), lib_gen],
+  include_directories : inc,
+  c_args : xtc_c_args + cc.get_supported_arguments('-falign-functions=64'),
+  dependencies : lib_deps,
+)
+align_objects = xtc_align_objlib.extract_all_objects(recursive : false)
+
 # With dtrace -G the probe objects must be post-processed before they are
 # archived or linked, so compile them once into an internal library, run
 # dtrace -G over its objects, and build the real libraries from those
 # objects plus xtc_probes.o (PostgreSQL's meson build does the same).
-lib_objects = []
+lib_objects = [align_objects]
 lib_srcs_final = [lib_sources, lib_gen]
 if probes_g
   xtc_objlib = static_library('xtc_probes_objs',
@@ -519,13 +530,14 @@ if probes_g
     dependencies : lib_deps,
   )
   xtc_probes_o = custom_target('xtc_probes.o',
-    input : xtc_objlib.extract_all_objects(recursive : false),
+    input : [xtc_objlib.extract_all_objects(recursive : false), align_objects],
     depend_files : probes_d,
     output : 'xtc_probes.o',
     command : ['env', 'CC=' + cc.cmd_array()[0], 'sh', probes_sh, 'object',
       dtrace_prog, probes_d, '@OUTPUT@', '@INPUT@'],
   )
-  lib_objects = [xtc_objlib.extract_all_objects(recursive : false), xtc_probes_o]
+  lib_objects = [xtc_objlib.extract_all_objects(recursive : false), align_objects,
+    xtc_probes_o]
   lib_srcs_final = [xtc_probes_o, lib_gen]
 endif
 

@@ -644,6 +644,7 @@ ac_header_c_list=
 ac_subst_vars='LTLIBOBJS
 LIBOBJS
 XTC_PC_LIBS_PRIVATE
+XTC_ALIGN_CFLAGS
 XTC_PROBES_OBJ
 XTC_PROBES_HDR
 XTC_PROBES_MODE
@@ -6157,6 +6158,41 @@ printf "%s\n" "no" >&6; }
 esac
 fi
 rm -f core conftest.err conftest.$ac_objext conftest.beam conftest.$ac_ext
+
+# sync.o and preempt.o get -falign-functions=64 (XTC_ALIGN_CFLAGS in
+# dist/Makefile.in): the amutex lock/unlock path's cost follows where their
+# functions fall in a cache line.  -Werror makes a compiler that only warns
+# about an unknown flag count as rejecting it; then the flag is left out
+# (Solaris cc, xlc).
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether the C compiler accepts -falign-functions=64" >&5
+printf %s "checking whether the C compiler accepts -falign-functions=64... " >&6; }
+saved_CFLAGS=$CFLAGS
+CFLAGS="$CFLAGS -Werror -falign-functions=64"
+cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+int
+main (void)
+{
+
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_compile "$LINENO"
+then :
+  XTC_ALIGN_CFLAGS=-falign-functions=64
+   { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: yes" >&5
+printf "%s\n" "yes" >&6; }
+else case e in #(
+  e) XTC_ALIGN_CFLAGS=
+   { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: no" >&5
+printf "%s\n" "no" >&6; } ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam conftest.$ac_ext
+CFLAGS=$saved_CFLAGS
+
 
 # Under -std=c11 the libc exposes only the ISO C namespace by default;
 # POSIX functions (nanosleep, fdopen, etc.) need a feature-test macro.

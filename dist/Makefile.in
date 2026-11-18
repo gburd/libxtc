@@ -47,6 +47,11 @@ CPPFLAGS	= @CPPFLAGS@ $(XTC_INCLUDES)
 LDFLAGS		= @LDFLAGS@ -pthread
 XTC_PLATFORM_LIBS = @XTC_PLATFORM_LIBS@
 LIBS		= @LIBS@ @XTC_URING_LIBS@ @XTC_PLATFORM_LIBS@ @XTC_TLS_LIBS@ @XTC_LIBUNWIND_LIBS@ @XTC_ACCEL_LIBS@
+# -falign-functions=64 for sync.o and preempt.o only, empty where the
+# compiler lacks the flag.  The uncontended amutex lock/unlock path runs
+# through small functions in those two files, and where they fall in a
+# cache line moves its cost by up to 14% with the same instructions.
+XTC_ALIGN_CFLAGS = @XTC_ALIGN_CFLAGS@
 XTC_HEGEL_CFLAGS = @XTC_HEGEL_CFLAGS@
 XTC_HEGEL_LIBS	 = @XTC_HEGEL_LIBS@
 XTC_HEGEL_PBT	 = @XTC_HEGEL_PBT@
@@ -787,7 +792,7 @@ aio.o: $(srcdir)/../src/ptc/aio.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/aio.c
 
 sync.o: $(srcdir)/../src/ptc/sync.c xtc_config.h
-	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/sync.c
+	$(CC) $(CFLAGS) $(XTC_ALIGN_CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/sync.c
 
 future.o: $(srcdir)/../src/ptc/future.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/future.c
@@ -808,7 +813,7 @@ pdict.o: $(srcdir)/../src/ptc/pdict.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/pdict.c
 
 preempt.o: $(srcdir)/../src/ptc/preempt.c xtc_config.h
-	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/preempt.c
+	$(CC) $(CFLAGS) $(XTC_ALIGN_CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/preempt.c
 
 stats.o: $(srcdir)/../src/ptc/stats.c xtc_config.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $(srcdir)/../src/ptc/stats.c
