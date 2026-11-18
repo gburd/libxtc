@@ -404,6 +404,9 @@ and
 were the same pointers as the previous call, which made
 .Fn xtc_recv_correlate
 miss a reply that arrived before its request was waited on.
+Waiting for several messages at once with it is covered in
+.Sx Waiting for two messages
+below.
 .Pp
 .Fn xtc_recv_correlate
 collects
@@ -598,6 +601,48 @@ The caller must not be the target
 it returns
 .Dv XTC_E_INVAL
 if it is.
+.Ss Waiting for two messages
+A join waits for messages that belong together, an A and a B with the
+same key from the same sender, in either order, and acts only when both
+are there.
+Taking an A with one
+.Fn xtc_recv_match
+and then waiting for its B with a second is wrong.
+It commits to the first A in the mailbox, so an A whose B never comes
+blocks a complete pair queued behind it: on the mailbox
+[A(s1), A(s2), N, B(s2)] it waits for s1's B and times out with s1's A
+consumed and s2's pair still queued.
+And the A is consumed before its B arrives, so a kill delivered at the
+second receive unwinds the proc with the A in a local variable, where
+no cleanup that looks at the mailbox finds it.
+.Pp
+The correct join is one
+.Fn xtc_recv_match
+whose predicate remembers the parts it has been shown.
+One call shows its predicate the save queue and then each new arrival,
+in arrival order, so the predicate can accept the first message that
+completes a pair with a part it saw earlier; that partner is then in
+the save queue.
+A second
+.Fn xtc_recv_match
+with a zero timeout takes the partner without parking, inside
+.Fn xtc_mask_enter
+and
+.Fn xtc_mask_leave :
+every receive delivers a pending kill at entry, and masked, the kill
+waits for the leave and unwinds with both parts in hand.
+The predicate also accepts the DOWN of a monitor of the sender, so a
+sender's death ends a wait that would otherwise last until its timeout.
+A timeout consumes nothing.
+The parts of incomplete pairs stay in the save queue and count against
+.Fa mailbox_cap ,
+so a join whose partial matches can grow without bound refuses its own
+senders.
+If copying the partner out fails
+.Pq Dv XTC_E_NOMEM
+the first part is already taken.
+.Pa docs/_includes/snippets/23_recv_join.c
+has both forms and runs them on the same mailbox.
 .Ss KILL DELIVERY
 Where a proc is parked when
 .Fn xtc_exit_pid

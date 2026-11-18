@@ -95,6 +95,52 @@ correlation (pull the reply with *your* request id) without draining
 unrelated traffic. See
 [`xtc_proc(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_proc.3).
 
+### Waiting for two messages that belong together
+
+A join waits for several messages and acts only when all of them are
+there: an A and a B with the same key from the same sender, in either
+order. The code everyone writes first takes an A, then waits for the B
+that goes with it:
+
+{% include snippet.html file="23_recv_join.c" region="wrong" %}
+
+It is wrong in two ways. It commits to the first A in the mailbox, so
+an A whose B never comes blocks a complete pair queued behind it: on the
+mailbox `[A(s1) A(s2) N B(s2)]` it waits for s1's B and times out with
+s1's A consumed and s2's pair still queued. And the A is consumed
+before the B arrives, so a kill delivered in the second receive unwinds
+the proc with the A in a local variable: no cleanup that looks at the
+mailbox sees it.
+
+The correct join makes one selective receive with a predicate that
+remembers the parts it has been shown. One call of `xtc_recv_match`
+shows its predicate the save queue and then each new arrival, in arrival
+order, so the first message that completes a pair is accepted, and its
+partner is then in the save queue. A second receive with a zero timeout
+takes the partner without parking. That receive is masked
+(`xtc_mask_enter`): every receive delivers a pending kill at entry, and
+masked, the kill waits for `xtc_mask_leave` and unwinds with both parts
+in hand. The same predicate also accepts the DOWN of a monitor, so the
+death of a sender ends a wait that would otherwise last forever:
+
+{% include snippet.html file="23_recv_join.c" region="join" %}
+
+```
+nested: resource temporarily unavailable holding the A of s1, 3 left queued
+join:   ok, the pair of s2, 2 left queued
+join:   resource temporarily unavailable, 2 left queued
+join:   requested item does not exist after s3's DOWN, 3 left queued
+nested: killed waiting for its B, 0 left queued
+join:   killed waiting for its B, 1 left queued
+```
+
+A timeout consumes nothing, so there is nothing to put back. Two costs
+remain. The parts of incomplete pairs stay in the save queue and count
+against `mailbox_cap`, so a join whose partial matches can grow without
+bound refuses its own senders; the snippet sizes its table to the cap.
+And if copying the partner out fails (`XTC_E_NOMEM`), the first part is
+already taken.
+
 ## Resource scope: release on every exit path
 
 A process holds resources -- a file descriptor, a buffer, a lock. The
