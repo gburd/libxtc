@@ -1003,7 +1003,7 @@ static void server(void *arg) {
         if (xtc_recv(&msg, &sz, 5000LL * 1000 * 1000) != XTC_OK)
             continue;
         /* ... handle msg, reply via xtc_send to msg->reply_to ... */
-        free(msg);
+        xtc_free(msg);
     }
 }
 
