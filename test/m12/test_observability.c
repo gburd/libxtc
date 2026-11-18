@@ -1172,7 +1172,7 @@ nm_probe(void *a)
 static MunitResult
 test_inspect_name_label_crit(const MunitParameter p[], void *d)
 {
-	char tmpl[] = "/tmp/xtc_nm_dump_XXXXXX", buf[16384];
+	char tmpl[512], buf[16384];
 	xtc_loop_t *loop = NULL;
 	xtc_proc_opts_t o = XTC_PROC_OPTS_INIT;
 	xtc_sup_opts_t so = XTC_SUP_OPTS_INIT;
@@ -1184,6 +1184,10 @@ test_inspect_name_label_crit(const MunitParameter p[], void *d)
 
 	g_nm_label_rc_off = xtc_proc_set_label("off a proc");
 	munit_assert_int(g_nm_label_rc_off, ==, XTC_E_INVAL);
+	/* Not "/tmp/...": on Windows that names a directory on the current
+	 * drive, and CI's D: has none. */
+	munit_assert_int(xtc_fs_tmpdir(tmpl, sizeof tmpl), ==, XTC_OK);
+	strncat(tmpl, "/xtc_nm_dump_XXXXXX", sizeof tmpl - strlen(tmpl) - 1);
 	g_nm_dump_fd = mkstemp(tmpl);
 	munit_assert_int(g_nm_dump_fd, >=, 0);
 	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
