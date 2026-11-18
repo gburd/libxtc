@@ -84,7 +84,7 @@ make check
 %changelog
 * Tue Nov 17 2026 Greg Burd <greg@burd.me> - 2.2.0-1
 - MINOR on 2.x; SONAME libxtc.so.2.  2.1.2's 761 functions stay at
-  XTC_2.0 and 99 new ones are in XTC_2.2; none removed.  Renamed with the
+  XTC_2.0 and 101 new ones are in XTC_2.2; none removed.  Renamed with the
   old names kept until 3.0 (docs/deprecations.md, 82 names):
   create/destroy, shutdown, registry put/get/del, *_INIT, *_fn,
   xtc_coro_spawn/xtc_coro_join, xtc_xproc_*, xtc_runtime_set_/_get_
@@ -95,15 +95,17 @@ make check
   xtc_compiler.h, supervision hooks and a synchronous start, waiting for
   mailbox room and for a name, xtc_demonitor, proc names and labels,
   per-proc stack size, a valid Prometheus exposition, an installed
-  xtc_version.h.  Changed: every installed header has extern "C" and
+  xtc_version.h, batch groups created on a running loop with variable
+  charge and preemption.  Changed: every installed header has extern "C" and
   compiles as C++; xtc_tnt_spec_t is size-first (experimental tier;
   rebuild xtc_tnt users); a DOWN says how a proc ended (SIGNAL, KILLED,
   EXIT(rc)); XTC_API on every installed declaration.  Fixed: pids across
   executors, xtc_exec_run's return, rcu and lrlock out of memory,
   fire-and-forget coroutines, loop teardown under xtc_blocking_run,
   unfinished log records, fiber RCU read-sides without a lock, fd waits
-  spinning on mail, the simulator's latency and partition losses, the
-  MinGW build, and the 2.1.2 fixes.  Examples are the libxtc-examples
+  spinning on mail, the simulator's latency and partition losses, waits
+  in a simulator delivery fn, the call on every fiber switch, the MinGW
+  build, and the 2.1.2 fixes.  Examples are the libxtc-examples
   submodule; 16-20 are new.
 
 * Thu Oct 29 2026 Greg Burd <greg@burd.me> - 2.1.1-1

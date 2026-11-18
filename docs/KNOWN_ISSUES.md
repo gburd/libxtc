@@ -27,7 +27,7 @@ aliases.
 Nothing a 2.1 binary uses went away.  Each old function is still
 exported at `XTC_2.0`, as a wrapper that calls the new one (the new
 names are `XTC_2.2` symbols; abidiff against 2.1.2 reports 0 functions
-removed, 99 added), so a binary built against 2.1 runs on 2.2 without a
+removed, 101 added), so a binary built against 2.1 runs on 2.2 without a
 rebuild.  A rebuild warns: the old declarations carry
 `XTC_DEPRECATED` (`-Wdeprecated-declarations` on gcc and clang, C4996
 on MSVC), and `XTC_NO_DEPRECATION_WARNINGS` silences that while a code

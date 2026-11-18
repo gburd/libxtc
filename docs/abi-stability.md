@@ -119,9 +119,9 @@ v1.59.0 to the 2.0 tree reports status 4 (struct size changes on
 function) with the 1.x SONAME, because the major bump is a separate
 release commit.
 
-v2.1.2 to 2.2.0 reports status 4: 0 functions removed, 99 added (the
+v2.1.2 to 2.2.0 reports status 4: 0 functions removed, 101 added (the
 `XTC_2.2` node: new calls and the new names of the renamed ones; every
-old name keeps its `XTC_2.0` symbol), and 8 changed, all through struct
+old name keeps its `XTC_2.0` symbol), and 10 changed, all through struct
 pointers in their parameters:
 
 | function | struct (bytes, x86-64) | change |
@@ -132,10 +132,14 @@ pointers in their parameters:
 | `xtc_app_create` | `xtc_sup_opts_t` 40 -> 72 (via `xtc_app_opts_t.sup`) | appended `on_child_down`, `registry`, `wait_children` |
 | `xtc_svr_start` | `xtc_svr_opts_t` 24 -> 56 | appended the proc knobs, `wait_init` |
 | `xtc_fsm_start` | `xtc_fsm_opts_t` 24 -> 32 | appended `wait_init` |
+| `xtc_batch_get_stats` | `xtc_batch_stats_t` 88 -> 96 | appended `preemptions` |
+| `xtc_batch_get_async_stats` | `xtc_batch_async_stats_t` 48 -> 64 | appended `busy_ns`, `idle_with_work_ns` |
 | `xtc_tnt_start` | `xtc_tnt_spec_t` 40 -> 56 | became size-first: a leading `size` moved every field |
 | `xtc_lwlock_acquire` | `xtc_lwlock_t` 128 -> 128 | `state` lost its `_Atomic` qualifier; same layout |
 
-The first six are appends to size-first structs, which a minor may make.
+The first eight are appends to size-first structs, which a minor may
+make (the two batch structs are experimental and keep accepting their
+2.1 size).
 `xtc_tnt_spec_t` is in the experimental tier, and its change is the one
 a 2.1 binary must rebuild for (KNOWN_ISSUES, "CHANGED (2.2):
 `xtc_tnt_spec_t` is size-first").  `xtc_lwlock_t` keeps every offset

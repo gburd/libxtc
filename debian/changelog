@@ -3,9 +3,9 @@ libxtc (2.2.0-1) unstable; urgency=medium
   * MINOR release on 2.x: new API, renamed API with the old names kept,
     behaviour changes listed below, and the fixes 2.1.2 and 2.1.3 ship
     plus later ones.  SONAME stays libxtc.so.2.  The library exports
-    2.1.2's 761 functions, each still at XTC_2.0, plus 99 new ones in a
+    2.1.2's 761 functions, each still at XTC_2.0, plus 101 new ones in a
     new XTC_2.2 node; none was removed (abidiff against 2.1.2: status 4,
-    0 removed, 99 added).  Stable-tier structs only grew at the end; the
+    0 removed, 101 added).  Stable-tier structs only grew at the end; the
     experimental xtc_tnt_spec_t changed layout (below).  A 2.1.2 consumer
     built against 2.1.2's headers runs against 2.2.0 (scripts/compat-
     check.sh v2.1.2).
@@ -58,6 +58,13 @@ libxtc (2.2.0-1) unstable; urgency=medium
     - Metrics: a valid Prometheus exposition (xtc_metrics_write_prometheus,
       sums and buckets, xtc_hist_create_bounds); xtc_runtime_tuning_check_ex
       hands the findings to a callback; xtc_log_swap_default.
+    - Batching (--enable-sched-policy, experimental): a group can be
+      created on a running loop and is then owned by its creating proc,
+      whose exit closes it; xtc_batch_recharge changes a member's charge
+      and xtc_batch_preempt takes an admitted member back to the head of
+      the waiting list; xtc_batch_stats_t gains preemptions and
+      xtc_batch_async_stats_t busy_ns and idle_with_work_ns (2.1-sized
+      structs still accepted).
     - xtc_tnt_send_from, a thread-safe send to an Isolate from outside
       any handler; xtc_tnt_spec_t.spin_ns.
     - XTC_E_EXIST (-13) and XTC_E_STATE (-14), appended.
@@ -110,7 +117,16 @@ libxtc (2.2.0-1) unstable; urgency=medium
       unprivileged; stack reclaim fires under AddressSanitizer;
       XTC_AIO_FORCE_OFFLOAD is never read inside a simulation run.
     - Simulator: net latency no longer drops a send it accepted, and a
-      partition no longer drops a DOWN or a link EXIT.
+      partition no longer drops a DOWN or a link EXIT.  A delivery fn of
+      xtc_sim_external_complete that waited (xtc_send_wait on a full
+      mailbox, any timed wait) aborted the run in the determinism guard
+      or blocked it; such a wait now returns at once (XTC_E_STATE, or
+      XTC_E_AGAIN for a timed one) and reads no wall clock.
+    - A fiber switch with stack reclaim off (the default) no longer
+      calls into the reclaim code (micro_fiber_switch 68.5 -> 72.1 ns
+      since the reclaim fix for AddressSanitizer).
+    - Docs: getting-started and xtc_proc(3) release a received message
+      with xtc_free, not free(3).
     - MinGW-w64 builds again.
     - The 2.1.2 fixes (stale readiness events, fault-recovery re-walks,
       scope finalizers, supervisor shutdown and group restart, mailbox
@@ -118,7 +134,7 @@ libxtc (2.2.0-1) unstable; urgency=medium
       executable-stack note, cross-shard xtc_tnt_send, illumos AIO).
   * Tests and gates: CBMC harnesses that link the library source; DST
     of DOWN classification, pids across executors and partitions;
-    planted bugs 30-35, 44-54, 60-65 and 67 the simulator catches; gates
+    planted bugs 30-35, 44-54, 60-65 and 67-71 the simulator catches; gates
     for XTC_API, standalone and C++ header compilation, and the
     deprecation bridges.
   * Examples moved to their own repository (libxtc-examples), carried as
