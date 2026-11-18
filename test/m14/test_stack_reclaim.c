@@ -875,12 +875,20 @@ sz_proc(void *arg)
 	xtc_proc_info_t info = XTC_PROC_INFO_INIT;
 	volatile char here = 0;
 	int ok = 1;
+#if defined(__linux__) && !defined(SZ_NO_MAPS)
+	size_t mapped;
+#endif
 
 	if (xtc_proc_info(xtc_self(), &info) != XTC_OK ||
 	    info.stack_size != want)
 		ok = 0;
 #if defined(__linux__) && !defined(SZ_NO_MAPS)
-	if (sz_mapped_stack((uintptr_t)&here) != want)
+	/* At least `want`, not exactly: the kernel merges the stack with an
+	 * anonymous mapping just above it, such as the ones musl's malloc
+	 * makes for small blocks (a 64 KiB stack showed up as 76 KiB).  A
+	 * default proc on a recycled big stack still fails. */
+	mapped = sz_mapped_stack((uintptr_t)&here);
+	if (mapped < want || (want != BIG_STACK && mapped >= BIG_STACK))
 		ok = 0;
 #endif
 	(void)here;
