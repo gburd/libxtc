@@ -175,3 +175,9 @@ XTC_2.2 {
 		xtc_xproc_spawn;
 		xtc_xproc_spawn_entry;
 } XTC_2.0;
+
+XTC_2.3 {
+	global:
+		xtc_recv_mark;
+		xtc_recv_match_since;
+} XTC_2.2;

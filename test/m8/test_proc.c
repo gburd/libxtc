@@ -3599,6 +3599,140 @@ test_recv_nomem_keeps_order(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- 2.3: the receive mark.  A marked receive tests only what arrived
+ * after the mark, the mark survives takes (the marked envelope's own
+ * included), a stale mark walks everything, and an XTC_E_NOMEM copy-out
+ * of the marked envelope keeps the mark exact. ---- */
+static int
+rm_match(const void *d, size_t n, void *u)
+{
+	return n == 1 && *(const char *)d == *(const char *)u;
+}
+
+static int rm_calls;
+static int
+rm_count(const void *d, size_t n, void *u)
+{
+	rm_calls++;
+	return rm_match(d, n, u);
+}
+
+static void
+rm_send(char c)
+{
+	munit_assert_int(xtc_send(xtc_self(), &c, 1), ==, XTC_OK);
+}
+
+/* Take one c with xtc_recv_match_since(mark), 0 timeout; count the
+ * predicate calls in rm_calls. */
+static int
+rm_take(uint64_t mark, char c)
+{
+	void *m = NULL;
+	size_t n = 0;
+	int rc;
+
+	rm_calls = 0;
+	rc = xtc_recv_match_since(mark, rm_count, &c, &m, &n, 0);
+	xtc_free(m);
+	return rc;
+}
+
+static int rm_done;
+static void
+rm_main(void *a)
+{
+	struct __os_alloc_hook h;
+	xtc_mailbox_stats_t st = XTC_MAILBOX_STATS_INIT;
+	uint64_t mark, m2;
+	void *m = NULL;
+	size_t n = 0;
+	int i;
+
+	(void)a;
+	/* Twenty old messages and an 'x', the mark, then a reply. */
+	for (i = 0; i < 20; i++)
+		rm_send('o');
+	rm_send('x');
+	munit_assert_int(xtc_recv_mark(&mark), ==, XTC_OK);
+	munit_assert_uint64(mark, !=, 0);
+	(void)xtc_proc_mailbox_stats(xtc_self(), &st);
+	munit_assert_size(st.depth, ==, 0); /* moved to the save queue */
+	munit_assert_size(st.saved, ==, 21);
+	rm_send('r');
+	munit_assert_int(rm_take(mark, 'r'), ==, XTC_OK);
+	munit_assert_int(rm_calls, ==, 1); /* the reply alone */
+	/* The 'x' before the mark is skipped, and still there. */
+	munit_assert_int(rm_take(mark, 'x'), ==, XTC_E_AGAIN);
+	munit_assert_int(rm_calls, ==, 0);
+	munit_assert_int(rm_take(0, 'x'), ==, XTC_OK);
+	munit_assert_int(rm_calls, ==, 21); /* mark 0 walks everything */
+	/* Takes before and of the marked envelope (the last 'o') keep the
+	 * mark exact: it moves to the envelope before. */
+	munit_assert_int(xtc_recv(&m, &n, 0), ==, XTC_OK); /* oldest 'o' */
+	xtc_free(m);
+	for (i = 0; i < 18; i++)
+		munit_assert_int(rm_take(0, 'o'), ==, XTC_OK);
+	munit_assert_int(rm_take(mark, 'o'), ==, XTC_E_AGAIN);
+	munit_assert_int(rm_take(0, 'o'), ==, XTC_OK); /* the marked one */
+	rm_send('r');
+	munit_assert_int(rm_take(mark, 'r'), ==, XTC_OK);
+	munit_assert_int(rm_calls, ==, 1);
+	/* A newer mark makes the old one stale: a full walk, nothing lost. */
+	rm_send('o');
+	munit_assert_int(xtc_recv_mark(&m2), ==, XTC_OK);
+	munit_assert_uint64(m2, !=, mark);
+	munit_assert_int(rm_take(mark, 'o'), ==, XTC_OK);
+	munit_assert_int(rm_calls, ==, 1);
+	/* NOMEM on the marked envelope: it goes back, and the mark with it,
+	 * so a marked receive still skips a, b and c. */
+	for (i = 0; i < 3; i++)
+		rm_send((char)('a' + i));
+	munit_assert_int(xtc_recv_mark(&mark), ==, XTC_OK);
+	rm_send('r');
+	munit_assert_int(__os_alloc_get_hook(&nm_down), ==, XTC_OK);
+	h = nm_down;
+	h.malloc = nm_malloc;
+	munit_assert_int(__os_alloc_set_hook(&h), ==, XTC_OK);
+	nm_fail = 1;
+	i = rm_take(0, 'c');
+	nm_fail = 0;
+	(void)__os_alloc_set_hook(&nm_down);
+	munit_assert_int(i, ==, XTC_E_NOMEM);
+	munit_assert_int(rm_take(mark, 'r'), ==, XTC_OK);
+	munit_assert_int(rm_calls, ==, 1);
+	for (i = 0; i < 3; i++) {
+		munit_assert_int(xtc_recv(&m, &n, 0), ==, XTC_OK);
+		munit_assert_char(*(char *)m, ==, (char)('a' + i));
+		xtc_free(m);
+	}
+	munit_assert_int(xtc_recv(&m, &n, 0), ==, XTC_E_AGAIN);
+	munit_assert_int(xtc_recv_mark(NULL), ==, XTC_E_INVAL);
+	rm_done = 1;
+}
+
+static MunitResult
+test_recv_mark(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	uint64_t mark = 0;
+	void *m = NULL;
+	size_t n = 0;
+	char c = 'r';
+	(void)p;
+	(void)d;
+	munit_assert_int(xtc_recv_mark(&mark), ==, XTC_E_STATE);
+	munit_assert_int(xtc_recv_match_since(1, rm_match, &c, &m, &n, 0), ==,
+	    XTC_E_STATE);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, rm_main, NULL, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(rm_done, ==, 1);
+	xtc_loop_destroy(loop);
+	return MUNIT_OK;
+}
+
 /* ---- M1/D4: a DOWN reaches a watcher whose mailbox is FULL.  Pre-fix
  * the DOWN was an ordinary capped send and was dropped. ---- */
 static int m1_got_down;
@@ -3897,6 +4031,8 @@ static MunitTest tests[] = {
 	{ "/recv_match_reused_user", test_recv_match_reused_user, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/recv_nomem_keeps_order", test_recv_nomem_keeps_order, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/recv_mark", test_recv_mark, NULL, NULL, MUNIT_TEST_OPTION_NONE,
+	    NULL },
 	{ "/down_bypasses_full_mailbox", test_down_bypasses_full_mailbox, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/link_semantics", test_link_semantics, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/kill_interrupts_park", test_kill_interrupts_park, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

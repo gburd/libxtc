@@ -126,6 +126,7 @@ write_cases() {
 		"69;test_sim_batch;0;1;a dead owner's group was not closed" \
 		"70;test_sim_batch;0;1;preempt did not free the units" \
 		"71;test_sim_batch;0;1;reservation over capacity" \
+		"76;test_sim_recv_mark;0;1;a marked receive skipped a reply" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -218,6 +219,9 @@ write_cases() {
 #               -> preempt frees the units in the same callback
 # 71 BATCH_RECHARGE_OVER batch.c recharge grows past the free units
 #               -> reserved_units never exceeds resource_capacity
+# 76 RMARK_LATE proc.c a marked receive starts after what has arrived by
+#               the receive, not by the mark -> a reply that arrived between
+#               the mark and the receive is found
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

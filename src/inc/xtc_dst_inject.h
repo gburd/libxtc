@@ -414,4 +414,12 @@
  */
 #define XTC_DST_BUG_BATCH_RECHARGE_OVER 71
 
+/*
+ * 76 RMARK_LATE: xtc_recv_match_since starts after what has arrived by
+ * the time of the receive, not by the time of xtc_recv_mark, so a reply
+ * that arrived after the mark and before the receive is skipped
+ * (test_sim_recv_mark: "a marked receive skipped a reply").
+ */
+#define XTC_DST_BUG_RMARK_LATE 76
+
 #endif /* XTC_DST_INJECT_H */

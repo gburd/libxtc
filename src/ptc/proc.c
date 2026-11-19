@@ -498,6 +498,12 @@ struct xtc_proc {
 	struct envelope  *save_head;
 	struct envelope  *save_tail;
 	size_t mbox_saved;
+	/* The receive mark (xtc_recv_mark), owner-only.  Every envelope up to
+	 * and including rmark arrived before the mark; NULL: none did.  A
+	 * take of rmark moves it to its predecessor.  rmark_id names the
+	 * mark (0: none); a newer mark replaces it. */
+	struct envelope *rmark;
+	uint64_t rmark_id;
 	/* Messages admitted but still in flight to this mailbox (the
 	 * simulator's cross-loop latency), under mbox_lock.  They count
 	 * against mailbox_cap like queued ones: the sender was told XTC_OK,
@@ -1165,7 +1171,7 @@ __xtc_proc_loop_unregister(xtc_loop_t *loop)
 			n = e->next;
 			__env_free(e);
 		}
-		p->save_head = p->save_tail = NULL;
+		p->save_head = p->save_tail = p->rmark = NULL;
 		xtc_atomic_store_size(&p->mbox_saved, 0, xtc_mo_relaxed);
 		for (le = p->links; le != NULL; le = next_le) {
 			next_le = le->next;
@@ -3774,6 +3780,62 @@ __match_first(const void *data, size_t size, void *u)
 }
 
 /*
+ * The receive mark.  xtc_recv_mark records the end of the save queue
+ * and, by draining the mailbox into it, of everything that has arrived:
+ * rmark is the last envelope that arrived before the mark (NULL: the
+ * queue was empty).  Takes keep it exact, so a receive given the mark
+ * starts its walk after rmark and never tests what arrived before it.
+ * The mark is not reset per call (as the walk mark in __do_recv is),
+ * because it does not depend on the predicate: what the caller promises
+ * is that nothing before the mark can match, whatever it receives with.
+ */
+static uint64_t __rmark_seq;
+
+/*
+ * Unlink save-queue envelope e, whose predecessor is prev (NULL: e is
+ * the head), from self's save queue at *link.  Keeps the receive mark
+ * exact: a take of rmark moves it to prev.
+ */
+static void
+__saveq_unlink(struct xtc_proc *self, struct envelope **link,
+    struct envelope *e, struct envelope *prev)
+{
+	*link = e->next;
+	if (self->save_tail == e)
+		self->save_tail = prev;
+	if (self->rmark == e)
+		self->rmark = prev;
+	/* seq_cst: the room-waiter handshake (see __room_check). */
+	xtc_atomic_fetch_sub_size(&self->mbox_saved, 1, xtc_mo_seq_cst);
+}
+
+/*
+ * Move every envelope in self's mailbox to the end of its save queue, in
+ * arrival order, under mbox_lock (a sender's admission check reads the
+ * two counts there, and their sum does not change), and return the save
+ * queue's new tail: the last envelope that has arrived, or NULL.
+ */
+static struct envelope *
+__mbox_to_saveq(struct xtc_proc *self)
+{
+	(void)__proc_mtx_lock(&self->mbox_lock);
+	if (self->mbox_head != NULL) {
+		if (self->save_tail == NULL)
+			self->save_head = self->mbox_head;
+		else
+			self->save_tail->next = self->mbox_head;
+		self->save_tail = self->mbox_tail;
+		xtc_atomic_fetch_add_size(&self->mbox_saved, self->mbox_n,
+		    xtc_mo_relaxed);
+		self->mbox_head = self->mbox_tail = NULL;
+		self->mbox_n = 0;
+		self->mbox_wm_fired = 0;
+	}
+	(void)__proc_mtx_unlock(&self->mbox_lock);
+	return self->save_tail;
+}
+
+/*
  * Put back envelope e, which a receive took and could not copy out, where
  * it was in arrival order.  A take from the save queue (from_save) left
  * e->next pointing at its old successor, still queued, so e goes back in
@@ -3801,13 +3863,13 @@ __saveq_putback(struct xtc_proc *self, struct envelope *e, int from_save)
 }
 
 static int
-__do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
-          int64_t timeout_ns)
+__do_recv(xtc_match_fn match, void *u, uint64_t rmark, void **out,
+    size_t *out_size, int64_t timeout_ns)
 {
 	struct xtc_proc *self = __current_proc, *prev_self;
 	struct envelope *e, **link, *mark;
 	int64_t deadline = -1;
-	int from_save = 0;
+	int from_save = 0, was_mark = 0;
 
 	/*
 	 * Act on the RUNNING fiber's proc, not the thread-local, which a
@@ -3850,9 +3912,18 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 	 * kept across calls: the predicate's meaning lives in *u, and callers
 	 * (xtc_recv_correlate, svr.c) reuse one stack struct with a different
 	 * value, so a mark keyed on the (match, u) pointers skipped envelopes
-	 * the new value would have matched.
+	 * the new value would have matched.  A receive mark the caller names
+	 * (xtc_recv_mark) that is still current starts the walk at its
+	 * position instead; a stale one is ignored, which costs a full walk
+	 * and never skips a message.  Planted bug 76 (RMARK_LATE) starts
+	 * after what has arrived by the time of the receive instead, which
+	 * skips a reply that arrived between the mark and the receive.
 	 */
 	mark = NULL;
+	if (rmark != 0 && rmark == self->rmark_id)
+		mark = XTC_DST_BUG(XTC_DST_BUG_RMARK_LATE) ?
+		    __mbox_to_saveq(self) :
+		    self->rmark;
 
 	for (;;) {
 		struct envelope *prev = mark;
@@ -3860,12 +3931,8 @@ __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
 		link = (mark != NULL) ? &mark->next : &self->save_head;
 		while ((e = *link) != NULL) {
 			if (match(__env_payload(e), e->size, u)) {
-				*link = e->next;
-				/* seq_cst: the room-waiter handshake. */
-				xtc_atomic_fetch_sub_size(&self->mbox_saved, 1,
-				    xtc_mo_seq_cst);
-				if (self->save_tail == e)
-					self->save_tail = prev;
+				was_mark = self->rmark == e;
+				__saveq_unlink(self, link, e, prev);
 				from_save = 1;
 				goto deliver;
 			}
@@ -4047,6 +4114,8 @@ deliver:
 			 * custom allocator hits a mismatched free. */
 			if (__os_malloc(e->size, &buf) != XTC_OK) {
 				__saveq_putback(self, e, from_save);
+				if (was_mark)
+					self->rmark = e;
 				xtc_atomic_fetch_add_size(&self->mbox_saved, 1,
 				    xtc_mo_relaxed);
 				return XTC_E_NOMEM;
@@ -4080,7 +4149,7 @@ xtc_recv(void **out, size_t *out_size, int64_t timeout_ns)
 	/* Wrapper around __do_recv with the always-match predicate.
 	 * Annotated XTC_MUSTTAIL so the compiler emits a jmp, not a
 	 * call+ret -- keeps the recv fast path single-frame. */
-	return XTC_MUSTTAIL __do_recv(__match_first, NULL, out, out_size,
+	return XTC_MUSTTAIL __do_recv(__match_first, NULL, 0, out, out_size,
 	    timeout_ns);
 }
 
@@ -4091,7 +4160,36 @@ xtc_recv_match(xtc_match_fn fn, void *u, void **out, size_t *out_size,
 {
 	if (XTC_UNLIKELY(fn == NULL)) return XTC_E_INVAL;
 	/* XTC_MUSTTAIL: delegate to __do_recv as a tail call. */
-	return XTC_MUSTTAIL __do_recv(fn, u, out, out_size, timeout_ns);
+	return XTC_MUSTTAIL __do_recv(fn, u, 0, out, out_size, timeout_ns);
+}
+
+/* PUBLIC: int xtc_recv_mark __P((uint64_t *)); */
+int
+xtc_recv_mark(uint64_t *out_mark)
+{
+	struct xtc_proc *self = __proc_reanchor(__current_proc);
+
+	if (self == NULL)
+		return XTC_E_STATE;
+	if (out_mark == NULL)
+		return XTC_E_INVAL;
+	self->rmark = __mbox_to_saveq(self);
+	self->rmark_id =
+	    xtc_atomic_fetch_add_u64(&__rmark_seq, 1, xtc_mo_relaxed) + 1;
+	*out_mark = self->rmark_id;
+	return XTC_OK;
+}
+
+/* PUBLIC: int xtc_recv_match_since __P((uint64_t, xtc_match_fn, void *, void **, size_t *, int64_t)); */
+int
+xtc_recv_match_since(uint64_t mark, xtc_match_fn fn, void *u, void **out,
+    size_t *out_size, int64_t timeout_ns)
+{
+	if (__proc_reanchor(__current_proc) == NULL)
+		return XTC_E_STATE;
+	if (fn == NULL)
+		return XTC_E_INVAL;
+	return __do_recv(fn, u, mark, out, out_size, timeout_ns);
 }
 
 /* Predicate context for xtc_recv_correlate. */
@@ -4143,10 +4241,8 @@ xtc_recv_correlate(const void *corr_value, size_t corr_size,
 			(void)__os_clock_mono(&now);
 			per_call_to = now >= deadline ? 0 : deadline - now;
 		}
-		rc = __do_recv(__corr_match, &ctx,
-		    &out_msgs[collected].data,
-		    &out_msgs[collected].size,
-		    per_call_to);
+		rc = __do_recv(__corr_match, &ctx, 0, &out_msgs[collected].data,
+		    &out_msgs[collected].size, per_call_to);
 		if (rc == XTC_OK) {
 			collected++;
 		} else {
@@ -6234,11 +6330,7 @@ __mbox_flush_down(struct xtc_proc *self, uint64_t ref)
 
 	for (pp = &self->save_head; (e = *pp) != NULL; pp = &e->next) {
 		if (__env_is_down(e, ref)) {
-			*pp = e->next;
-			if (self->save_tail == e)
-				self->save_tail = prev;
-			xtc_atomic_fetch_sub_size(&self->mbox_saved, 1,
-			    xtc_mo_seq_cst);
+			__saveq_unlink(self, pp, e, prev);
 			__env_free(e);
 			__room_check(self);
 			return;

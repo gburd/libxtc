@@ -228,6 +228,8 @@ typedef struct xtc_mailbox_stats {
  * PUBLIC: int       xtc_recv __P((void **, size_t *, int64_t));
  * PUBLIC: int       xtc_recv_match __P((xtc_match_fn, void *, void **, size_t *, int64_t));
  * PUBLIC: int       xtc_recv_correlate __P((const void *, size_t, int, xtc_msg_t *, int *, int64_t));
+ * PUBLIC: int       xtc_recv_mark __P((uint64_t *));
+ * PUBLIC: int       xtc_recv_match_since __P((uint64_t, xtc_match_fn, void *, void **, size_t *, int64_t));
  * PUBLIC: int       xtc_proc_wait_fd __P((int, uint32_t, int64_t, uint32_t *));
  * PUBLIC: int       xtc_proc_sleep __P((int64_t));
  * PUBLIC: int       xtc_exit_self __P((int));
@@ -595,6 +597,41 @@ XTC_API int       xtc_recv_correlate(const void *corr_value, size_t corr_size,
                                       xtc_msg_t *out_msgs,
                                       int *out_n,
                                       int64_t timeout_ns);
+
+/*
+ * Receive mark (2.3), Erlang's make_ref receive optimisation.  A
+ * selective receive tests every queued message before it waits, so
+ * waiting for a reply costs time in proportion to the unrelated messages
+ * queued ahead of it.  xtc_recv_mark records, in *out_mark, the position
+ * of the last message that has arrived; xtc_recv_match_since(mark, ...)
+ * is xtc_recv_match that starts after it, so match_fn sees only messages
+ * that arrived after the mark.  The caller promises that nothing that
+ * arrived before the mark matches, which holds for the reply to a
+ * request sent after the mark with a tag made after it.  A message the
+ * receive skips is not lost: it stays queued for later receives.
+ *
+ *   xtc_recv_mark(&mark);              before the request goes out
+ *   xtc_send(server, &req, sizeof req);
+ *   xtc_recv_match_since(mark, match_reply, &tag, &m, &n, timeout_ns);
+ *
+ * A proc has one mark.  It stays valid through any number of receives,
+ * of any kind, until the proc calls xtc_recv_mark again.  A mark that is
+ * not the proc's current one (a later mark replaced it, or another proc
+ * made it), or 0, makes xtc_recv_match_since walk the whole queue, as
+ * xtc_recv_match does: a call nested inside a marked wait costs the
+ * outer wait one full walk, never a message.  xtc_recv_mark moves the
+ * mailbox's queued messages to the save queue (xtc_proc_mailbox_stats
+ * then counts them as saved; the total is unchanged).
+ *
+ * xtc_recv_mark returns XTC_OK, XTC_E_INVAL for a NULL out_mark, or
+ * XTC_E_STATE off a proc.  xtc_recv_match_since returns xtc_recv_match's
+ * codes, and XTC_E_STATE off a proc.
+ *
+ * @context PROC
+ */
+XTC_API int xtc_recv_mark(uint64_t *out_mark);
+XTC_API int xtc_recv_match_since(uint64_t mark, xtc_match_fn match_fn,
+    void *user_data, void **out, size_t *out_size, int64_t timeout_ns);
 
 /*
  * Wait until ANY of the following becomes true:

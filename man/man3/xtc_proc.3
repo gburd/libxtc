@@ -18,6 +18,8 @@
 .Nm xtc_recv ,
 .Nm xtc_recv_match ,
 .Nm xtc_recv_correlate ,
+.Nm xtc_recv_mark ,
+.Nm xtc_recv_match_since ,
 .Nm xtc_proc_wait_fd ,
 .Nm xtc_proc_sleep ,
 .Nm xtc_exit_self ,
@@ -67,6 +69,10 @@
 .Fn xtc_recv_match "xtc_match_fn match_fn" "void *user_data" "void **out" "size_t *out_size" "int64_t timeout_ns"
 .Ft int
 .Fn xtc_recv_correlate "const void *corr_value" "size_t corr_size" "int n_expected" "xtc_msg_t *out_msgs" "int *out_n" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_recv_mark "uint64_t *out_mark"
+.Ft int
+.Fn xtc_recv_match_since "uint64_t mark" "xtc_match_fn match_fn" "void *user_data" "void **out" "size_t *out_size" "int64_t timeout_ns"
 .Ft int
 .Fn xtc_proc_wait_fd "int fd" "uint32_t interest" "int64_t timeout_ns" "uint32_t *out_revents"
 .Ft int
@@ -429,6 +435,87 @@ buffer, as for
 .Fn xtc_recv ,
 and releases it with
 .Xr xtc_free 3 .
+.Ss Receive marks
+A selective receive tests every queued message before it waits, so
+waiting for one reply costs time in proportion to the unrelated
+messages queued ahead of it.
+.Fn xtc_recv_mark ,
+added in 2.3, records in
+.Fa *out_mark
+the position of the last message that has arrived.
+.Fn xtc_recv_match_since
+is
+.Fn xtc_recv_match
+that starts after that position:
+.Fa match_fn
+sees only messages that arrived after the mark.
+This is Erlang's
+.Fn make_ref
+receive optimisation, made explicit.
+The caller promises that nothing that arrived before the mark matches,
+which holds for the reply to a request sent after the mark, tagged with
+a value chosen after it.
+A message the receive skips is not lost: it stays queued for later
+receives.
+.Bd -literal -offset indent
+uint64_t mark;
+xtc_recv_mark(&mark);
+xtc_send(server, &req, sizeof req);     /* req.tag is new */
+rc = xtc_recv_match_since(mark, match_tag, &req.tag, &m, &n, timeout_ns);
+.Ed
+.Pp
+A process has one mark.
+It stays valid through any number of receives of any kind, which keep
+it exact, until the process calls
+.Fn xtc_recv_mark
+again.
+A mark that is not the process's current one (a later mark replaced it,
+or another process made it) and a mark of 0 make
+.Fn xtc_recv_match_since
+walk the whole queue, as
+.Fn xtc_recv_match
+does: a marked wait nested inside another costs the outer wait one full
+walk, never a message.
+.Fn xtc_recv_mark
+moves the messages queued in the mailbox to the save queue, so
+.Fn xtc_proc_mailbox_stats
+counts them as
+.Va saved
+afterwards; the total is unchanged.
+.Pp
+Before 1.56 every selective receive kept an implicit mark across calls,
+keyed on the
+.Fa match_fn
+and
+.Fa user_data
+pointers.
+The meaning of a predicate lives in what
+.Fa user_data
+points to, and callers that reuse one struct with a new value
+.Pq Fn xtc_recv_correlate , No the in-process Xr xtc_svr 3 No call
+skipped messages the new value matched, so the implicit mark became
+local to one call.
+An explicit mark has no such problem: what it records is when the
+caller started waiting, not which predicate it waits with.
+.Pp
+.Fn xtc_recv_mark
+returns
+.Dv XTC_OK ,
+.Dv XTC_E_INVAL
+for a
+.Dv NULL
+.Fa out_mark ,
+or
+.Dv XTC_E_STATE
+off a process.
+.Fn xtc_recv_match_since
+returns the codes of
+.Fn xtc_recv_match ,
+and
+.Dv XTC_E_STATE
+off a process.
+Both are
+.Em @context PROC .
 .Pp
 .Fn xtc_proc_wait_fd
 blocks until any of:
@@ -1355,3 +1442,7 @@ appeared in xtc 0.1.
 and
 .Fn xtc_thread_register
 appeared in xtc 2.2; before it a proc's name was accepted and dropped.
+.Fn xtc_recv_mark
+and
+.Fn xtc_recv_match_since
+appeared in xtc 2.3.

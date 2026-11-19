@@ -6,6 +6,21 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## CHANGED (2.3): a receive mark, so a reply wait does not scan the backlog
+
+A selective receive tests every queued message before it waits, so a
+proc with N unrelated messages queued paid N predicate calls for every
+reply it waited for.  `xtc_recv_mark(&mark)` records the position of the
+last message that has arrived, and `xtc_recv_match_since(mark, fn, user,
+&m, &n, timeout_ns)` is `xtc_recv_match` that starts after it: take the
+mark, send the request, wait with the mark.  Messages it skips stay
+queued.  A proc has one mark; a stale mark (a later one replaced it) or
+0 walks the whole queue, never skipping a message.  On a 48-core x86-64
+host one request-reply with a backlog of 100,000 unrelated messages took
+1.42 ms with `xtc_recv_match` and 626 ns with the mark.  New symbols:
+`xtc_recv_mark`, `xtc_recv_match_since` (`XTC_2.3`).  See xtc_proc(3)
+"Receive marks".
+
 ## CHANGED (2.2): one name per verb; the old names still work until 3.0
 
 2.2 renames part of the API so that one verb has one meaning:
