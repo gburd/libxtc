@@ -3773,6 +3773,33 @@ __match_first(const void *data, size_t size, void *u)
 	return 1;
 }
 
+/*
+ * Put back envelope e, which a receive took and could not copy out, where
+ * it was in arrival order.  A take from the save queue (from_save) left
+ * e->next pointing at its old successor, still queued, so e goes back in
+ * front of it; a take from the mailbox, or of the save queue's last
+ * envelope, goes after the tail (a mailbox envelope arrived after
+ * everything saved).  The walk to the successor runs only on this
+ * XTC_E_NOMEM path, which keeps the position out of the receive loop.
+ */
+static void
+__saveq_putback(struct xtc_proc *self, struct envelope *e, int from_save)
+{
+	struct envelope *succ = from_save ? e->next : NULL, **link;
+
+	if (succ == NULL) {
+		link = self->save_tail != NULL ? &self->save_tail->next :
+		                                 &self->save_head;
+		self->save_tail = e;
+	} else {
+		for (link = &self->save_head; *link != succ;
+		     link = &(*link)->next)
+			;
+	}
+	e->next = succ;
+	*link = e;
+}
+
 static int
 __do_recv(xtc_match_fn match, void *u, void **out, size_t *out_size,
           int64_t timeout_ns)
@@ -4019,11 +4046,7 @@ deliver:
 			 * hook), so it MUST be __os_malloc'd or an embedder with a
 			 * custom allocator hits a mismatched free. */
 			if (__os_malloc(e->size, &buf) != XTC_OK) {
-				/* Put it back at the head of save queue
-				 * to preserve ordering. */
-				e->next = self->save_head;
-				self->save_head = e;
-				if (self->save_tail == NULL) self->save_tail = e;
+				__saveq_putback(self, e, from_save);
 				xtc_atomic_fetch_add_size(&self->mbox_saved, 1,
 				    xtc_mo_relaxed);
 				return XTC_E_NOMEM;
