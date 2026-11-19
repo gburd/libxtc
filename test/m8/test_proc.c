@@ -30,6 +30,7 @@
 #include "xtc_inspect.h"   /* xtc_proc_info: supervisor-side mask state */
 #include "xtc_mctx.h"
 #include "xtc_int.h"
+#include "os_alloc.h"   /* __os_alloc_set_hook: fail the recv copy-out */
 #include "proc_int.h"   /* __xtc_proc_slot_gen_set: the gen-wrap seam */
 #include "xtc_res.h"
 #include "xtc_inject.h"   /* drive the wait_fd check/arm window deterministically */
@@ -3059,6 +3060,96 @@ test_recv_match_reused_user(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- 2.3: a receive whose copy-out fails (XTC_E_NOMEM) puts the
+ * message back where it was, so the mailbox keeps its arrival order.
+ * Pre-fix the message went to the head of the save queue: queue a, b, c,
+ * fail the copy of c, and a plain xtc_recv then returned c, a, b. ---- */
+static struct __os_alloc_hook nm_down;
+static int nm_fail;
+static void *
+nm_malloc(size_t sz)
+{
+	return nm_fail ? NULL : nm_down.malloc(sz);
+}
+
+static int
+nm_match_c(const void *d, size_t n, void *u)
+{
+	(void)u;
+	return n == 1 && *(const char *)d == 'c';
+}
+
+static int
+nm_match_none(const void *d, size_t n, void *u)
+{
+	(void)d;
+	(void)n;
+	(void)u;
+	return 0;
+}
+
+static char nm_order[2][4];
+static int nm_rc[2];
+
+/* Queue a, b, c (c saved, or c still in the mailbox when c_in_mailbox),
+ * fail the copy-out of c, and record the order plain receives see. */
+static void
+nm_run(int c_in_mailbox)
+{
+	struct __os_alloc_hook h;
+	const char *abc = "abc";
+	void *m = NULL;
+	size_t n = 0;
+	int i;
+
+	for (i = 0; i < 3 - c_in_mailbox; i++)
+		munit_assert_int(xtc_send(xtc_self(), abc + i, 1), ==, XTC_OK);
+	/* Everything queued is now saved. */
+	munit_assert_int(xtc_recv_match(nm_match_none, NULL, &m, &n, 0), ==,
+	    XTC_E_AGAIN);
+	if (c_in_mailbox)
+		munit_assert_int(xtc_send(xtc_self(), abc + 2, 1), ==, XTC_OK);
+	munit_assert_int(__os_alloc_get_hook(&nm_down), ==, XTC_OK);
+	h = nm_down;
+	h.malloc = nm_malloc;
+	munit_assert_int(__os_alloc_set_hook(&h), ==, XTC_OK);
+	nm_fail = 1;
+	nm_rc[c_in_mailbox] = xtc_recv_match(nm_match_c, NULL, &m, &n, 0);
+	nm_fail = 0;
+	(void)__os_alloc_set_hook(&nm_down);
+	for (i = 0; i < 3 && xtc_recv(&m, &n, 0) == XTC_OK; i++) {
+		nm_order[c_in_mailbox][i] = *(char *)m;
+		xtc_free(m);
+	}
+}
+
+static void
+nm_main(void *a)
+{
+	(void)a;
+	nm_run(0);
+	nm_run(1);
+}
+
+static MunitResult
+test_recv_nomem_keeps_order(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	(void)p;
+	(void)d;
+	memset(nm_order, 0, sizeof nm_order);
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, nm_main, NULL, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+	munit_assert_int(nm_rc[0], ==, XTC_E_NOMEM);
+	munit_assert_int(nm_rc[1], ==, XTC_E_NOMEM);
+	munit_assert_string_equal(nm_order[0], "abc"); /* c was saved */
+	munit_assert_string_equal(nm_order[1], "abc"); /* c in the mailbox */
+	return MUNIT_OK;
+}
+
 /* ---- M1/D4: a DOWN reaches a watcher whose mailbox is FULL.  Pre-fix
  * the DOWN was an ordinary capped send and was dropped. ---- */
 static int m1_got_down;
@@ -3344,6 +3435,8 @@ static MunitTest tests[] = {
 	{ "/cross_thread_send_wakes", test_cross_thread_send_wakes, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 #endif
 	{ "/recv_match_reused_user", test_recv_match_reused_user, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/recv_nomem_keeps_order", test_recv_nomem_keeps_order, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/down_bypasses_full_mailbox", test_down_bypasses_full_mailbox, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/link_semantics", test_link_semantics, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/kill_interrupts_park", test_kill_interrupts_park, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
