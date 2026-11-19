@@ -86,6 +86,7 @@ if errorlevel 1 goto :fail
 echo.
 echo BUILD OK: xtc.lib + smoke.exe
 smoke.exe
+if errorlevel 1 goto :fail
 
 rem --- 4a. Deprecated-name bridges (test/dist/test_deprecated.sh on POSIX):
 rem         test_deprecated_bridge.c, the one file that uses the old 2.x
