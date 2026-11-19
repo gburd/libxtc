@@ -926,6 +926,49 @@ esac
 
 AC_SUBST([CFLAGS])
 
+# The words of LDFLAGS that link a compiler runtime the library's objects
+# call into: a sanitizer's (-fsanitize=*) or the coverage/profile counters'
+# (--coverage, -fprofile-*).  The shell gates that link their own program
+# against libxtc.a (a C++ program, the gdb probes) take these and nothing
+# else from LDFLAGS: the rest can be wrong there (a distribution's
+# -specs=...-hardened-ld forces PIE, which the non-PIE gdb probes reject).
+xtc_instr_ldflags=
+xtc_instr_cov=no
+for xtc_w in $LDFLAGS; do
+  case "$xtc_w" in
+    -fsanitize=*)
+      xtc_instr_ldflags="${xtc_instr_ldflags:+$xtc_instr_ldflags }$xtc_w" ;;
+    --coverage|-fprofile-*)
+      xtc_instr_ldflags="${xtc_instr_ldflags:+$xtc_instr_ldflags }$xtc_w"
+      xtc_instr_cov=yes ;;
+  esac
+done
+# A coverage runtime belongs to one compiler: gcc's objects call __gcov_*
+# in libgcov, clang's call llvm_gcda_* in libclang_rt.profile.  A gate that
+# links with another driver (clang++ against a gcc-built libxtc.a) gets
+# only its own driver's runtime from --coverage, so name $CC's archive too.
+AS_IF([test "$xtc_instr_cov" = yes],
+  [AC_MSG_CHECKING([for the coverage runtime of $CC])
+   AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#ifndef __clang__
+#error not clang
+#endif]], [[]])], [xtc_cc_clang=yes], [xtc_cc_clang=no])
+   xtc_cov_rt=
+   if test "$xtc_cc_clang" = yes; then
+     xtc_rtdir=`$CC -print-runtime-dir 2>/dev/null`
+     for xtc_f in "$xtc_rtdir/libclang_rt.profile-$host_cpu.a" \
+         "$xtc_rtdir/libclang_rt.profile.a"; do
+       if test -f "$xtc_f"; then xtc_cov_rt=$xtc_f; break; fi
+     done
+   else
+     xtc_f=`$CC -print-file-name=libgcov.a 2>/dev/null`
+     if test -f "$xtc_f"; then xtc_cov_rt=$xtc_f; fi
+   fi
+   AS_IF([test -n "$xtc_cov_rt"],
+     [xtc_instr_ldflags="$xtc_instr_ldflags $xtc_cov_rt"
+      AC_MSG_RESULT([$xtc_cov_rt])],
+     [AC_MSG_RESULT([not found (a link with another compiler driver may fail)])])])
+AC_SUBST([XTC_INSTR_LDFLAGS], [$xtc_instr_ldflags])
+
 # -------------------------------------------------------------------------
 # pkg-config private link flags.  These are the transitive dependencies a
 # static consumer must add on the link line; pkg-config emits them under
