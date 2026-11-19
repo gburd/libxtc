@@ -1474,6 +1474,22 @@ test_down_hook_old_opts(const MunitParameter p[], void *d)
  * DOWNs 2.1 dropped. */
 static int g_hk_gen;
 
+/* Stop once the restart's replacement has run (g_hk_gen 2).  hk_stopper's
+ * fixed 50 ms lost to a loaded host, where the 10 ms sleep, the fault and
+ * the restart outlast it (one CPU at nice 19 beside 2 busy loops: 17 of
+ * 30 runs ended at g_hk_gen 1).  Bounded at 10 s, so a restart that never
+ * comes fails the g_hk_gen check instead of hanging. */
+static void
+hk_stop_after2(void *a)
+{
+	int i;
+	for (i = 0;
+	     i < 10000 && xtc_atomic_load_i32(&g_hk_gen, xtc_mo_relaxed) < 2;
+	     i++)
+		(void)xtc_proc_sleep(NA_MS);
+	(void)xtc_sup_stop((xtc_supervisor_t *)a);
+}
+
 static void
 hk_crash_once(void *a)
 {
@@ -1517,8 +1533,8 @@ test_down_hook_group_restart(const MunitParameter p[], void *d)
 	so.on_child_down = hk_fn;
 	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_start(loop, &so, ch, 2, &sup), ==, XTC_OK);
-	munit_assert_int(xtc_proc_spawn(loop, hk_stopper, sup, NULL, &pid), ==,
-	    XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, hk_stop_after2, sup, NULL, &pid),
+	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_join(sup, 0), ==, XTC_OK);
 	xtc_loop_destroy(loop);
@@ -1573,12 +1589,13 @@ test_down_hook_group_nofault(const MunitParameter p[], void *d)
 	so.on_child_down = hk_fn;
 	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_start(loop, &so, ch, 2, &sup), ==, XTC_OK);
-	munit_assert_int(xtc_proc_spawn(loop, hk_stopper, sup, NULL, &pid), ==,
-	    XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, hk_stop_after2, sup, NULL, &pid),
+	    ==, XTC_OK);
 	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
 	munit_assert_int(xtc_sup_join(sup, 0), ==, XTC_OK);
 	xtc_loop_destroy(loop);
 
+	munit_assert_int(xtc_atomic_load_i32(&g_hk_gen, xtc_mo_relaxed), ==, 2);
 	munit_assert_not_null(r = hk_find("exiter", 0));
 	munit_assert_int(r->kind, ==, XTC_DOWN_KIND_EXIT);
 	munit_assert_int(r->exit_code, ==, 5);
