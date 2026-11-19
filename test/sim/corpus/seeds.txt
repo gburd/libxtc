@@ -104,3 +104,10 @@ test_sim_sup_child      0          1   bug60/61/62: ordered start, nested give-u
 # EXIT across an isolated loop.  FAILS on 40c560fb ("down 0 exit 0") and on
 # the planted build (-DXTC_DST_INJECT_BUG=67).
 test_sim_partition      -          -   bug67 PART_SYSDROP: a partition dropped a DOWN and a link EXIT for good; fixed "proc: a DOWN or link EXIT crosses the simulator's partition"
+# p167/uniq (2.2.x).  Seed 5 FAILS on both planted builds: bug 72 UNIQPROBE
+# ("UNIQUE: value 0 (2 bytes) is held by 2 rows": a failed probe read as no
+# duplicate) and bug 73 LONGKEY ("UNIQUE: value 2 (498 bytes) is held by 6
+# rows": a long key not indexed).  2.2.0 is both bugs.  Seed 1 is bug 73's
+# first catching seed.
+test_sim_sqlxtc_uniq    5          1   bug72/73: UNIQUE over long keys and failed probes; fixed libxtc-examples "06_sqlxtc: a failed UNIQUE probe is an error" + "index every row, whatever its key's length"
+test_sim_sqlxtc_uniq    1          1   bug73 LONGKEY: a key longer than bt_max_key was never indexed; fixed libxtc-examples "06_sqlxtc: index every row, whatever its key's length"

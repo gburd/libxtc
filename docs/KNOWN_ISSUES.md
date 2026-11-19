@@ -80,6 +80,23 @@ is unchanged.  New symbol: `xtc_recv_match_ex` (`XTC_2.3`), new type
 `xtc_msg_info_t`.  See xtc_proc(3) "Seeing the sender and system
 messages".
 
+## FIXED (2.2.1): sqlxtc indexes missed long keys, and UNIQUE let them repeat
+
+An index key longer than one B-tree key (497 bytes on 4 KiB pages; a
+TEXT value of about 490 bytes) got no index entry, at INSERT, UPDATE,
+CREATE INDEX or a rebuild.  A UNIQUE column then accepted two identical
+long values (the probe for the duplicate failed and its error read as
+"no duplicate"), CREATE UNIQUE INDEX over two such values succeeded,
+and a query through a plain index did not return the row.  Base rows
+were never lost.  2.2.1 stores a long key as its first 476 bytes plus a
+keyed hash of the whole key and checks every match against the row, so
+every row is indexed and UNIQUE holds at any length; a UNIQUE probe that
+cannot finish (a page read error) now fails the statement with "index
+error: cannot check UNIQUE t.c: ...".  The index format moves to 3: a
+store closed cleanly by 2.2.0 rebuilds its indexes once at the first
+2.2.1 open.  `examples/06_sqlxtc/test_uniq_long` and the DST tier
+`test_sim_sqlxtc_uniq` (planted bugs 72 and 73) fail on 2.2.0.
+
 ## CHANGED (2.2): one name per verb; the old names still work until 3.0
 
 2.2 renames part of the API so that one verb has one meaning:
