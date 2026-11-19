@@ -172,7 +172,7 @@ fi
 # out"), and the helpers under test read them by name.
 if ! ${CC:-cc} -O0 -g -w -fno-lto -I "$XTC_SRC_DIR/src/inc" -I "$XTC_BUILD_DIR" \
     -o "$TMPD/prog" "$TMPD/prog.c" "$LIB" \
-    -pthread $(sed -n 's/^LDFLAGS[ \t]*=//p' "$XTC_BUILD_DIR/Makefile" | tr ' \t' '\n\n' | grep '^-fsanitize') \
+    -pthread ${XTC_INSTR_LDFLAGS:-} \
     -luring -lssl -lcrypto -ldl -lm > "$TMPD/cc.log" 2>&1; then
 	# No io_uring (or no liburing) -- this gate is uring-specific.
 	echo "  [gdb-cqes] SKIP: test program will not link (no io_uring?)"

@@ -38,6 +38,10 @@ CFLAGS		= $(XTC_INCLUDES) @CFLAGS@ -Wall -Wextra -Wpedantic -fPIC -pthread -DXTC
 # runtime.  Empty on a plain build.
 SNIPPET_SAN_CFLAGS  = @CFLAGS@
 SNIPPET_SAN_LDFLAGS = @LDFLAGS@
+# Only the LDFLAGS words that link an instrumentation runtime (sanitizer,
+# --coverage, plus the compiler's coverage runtime archive): for the shell
+# gates that link a program against libxtc.a but cannot take all of LDFLAGS.
+INSTR_LDFLAGS = @XTC_INSTR_LDFLAGS@
 CPPFLAGS	= @CPPFLAGS@ $(XTC_INCLUDES)
 LDFLAGS		= @LDFLAGS@ -pthread
 XTC_PLATFORM_LIBS = @XTC_PLATFORM_LIBS@
@@ -1383,6 +1387,7 @@ tests-sh: $(STATIC_LIB) tnt_echo
 		  XTC_SRC_DIR=$(abs_top_srcdir)/.. \
 		  XTC_SNIPPET_CFLAGS='$(SNIPPET_SAN_CFLAGS)' \
 		  XTC_SNIPPET_LDFLAGS='$(SNIPPET_SAN_LDFLAGS)' \
+		  XTC_INSTR_LDFLAGS='$(INSTR_LDFLAGS)' \
 		  sh $$t 2>&1; echo "$$?" >.tests-sh.rc; } | tee .tests-sh.out; \
 		rc=$$(cat .tests-sh.rc); \
 		awk -v t=$$(basename $$t) -v rc=$$rc -f $(SKIP_AWK) \

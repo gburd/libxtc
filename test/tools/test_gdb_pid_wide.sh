@@ -166,8 +166,9 @@ main(void)
 }
 PROGEOF
 
-# The build's -fsanitize flags: a sanitizer build's libxtc.a needs its
-# runtime at this link (the rest of LDFLAGS, e.g. a distribution's
+# The build's instrumentation link words (XTC_INSTR_LDFLAGS from make
+# check): a sanitizer or --coverage build's libxtc.a needs its runtime at
+# this link (the rest of LDFLAGS, e.g. a distribution's
 # -specs=...-hardened-ld forcing PIE, does not fit this non-PIE probe).
 # -fno-lto: a libxtc built with -ffat-lto-objects -flto (distribution
 # hardened flags) would otherwise be re-optimized at this link, which
@@ -175,7 +176,7 @@ PROGEOF
 # out"), and the helpers under test read them by name.
 if ! ${CC:-cc} -O0 -g -w -fno-lto -I "$XTC_SRC_DIR/src/inc" -I "$XTC_BUILD_DIR" \
     -o "$TMPD/prog" "$TMPD/prog.c" "$LIB" \
-    -pthread $(sed -n 's/^LDFLAGS[ \t]*=//p' "$XTC_BUILD_DIR/Makefile" | tr ' \t' '\n\n' | grep '^-fsanitize') \
+    -pthread ${XTC_INSTR_LDFLAGS:-} \
     $(sed -n 's/^LIBS[ \t]*=[ \t]*//p' "$XTC_BUILD_DIR/Makefile") \
     > "$TMPD/cc.log" 2>&1; then
 	echo "  [pid-wide] FAIL: probe program did not build"
