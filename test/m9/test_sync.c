@@ -16,7 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #if !defined(_WIN32)
-#include <sys/resource.h>   /* getrusage (the off-loop no-herd tests) */
+#include <sys/resource.h>   /* getrusage (offloop_hot_mutex) */
 #endif
 #if defined(__linux__)
 #include <sys/syscall.h>  /* SYS_gettid (offloop_release_wakes) */
@@ -1321,21 +1321,28 @@ test_amutex_recursive_thread(const MunitParameter p[], void *d)
  * 1. No thundering herd (offloop_no_herd).  K threads sleep in wrlock
  *    (then in amutex_lock) on a lock the main thread holds.
  *    The main thread holds it ~1 ms, releases and takes it straight back,
- *    R times; the waiters loop on lock/unlock.  A release may usefully
+ *    R times; each waiter takes the lock once per such release.  A
+ *    release may usefully
  *    wake ONE waiter (which usually finds the lock taken again and
  *    sleeps).  The arwlock used to broadcast to every off-loop waiter on
  *    every release, so the waiters' summed voluntary context switches
  *    came to about K per release (measured 8478-9347 for K = 8, R = 200);
- *    a targeted wake keeps it near 1 (207-208).  Asserted bound: K/2 per
- *    release.  Needs 2+ CPUs (on one, the main thread's release runs the
- *    woken waiter at once and the waiters rarely all sleep).  Readers are
- *    not tested this way: an exclusive release SHOULD wake every sleeping
- *    reader, since they can all enter together.
+ *    a targeted wake keeps it near 1 (207-208).  Asserted: at most one
+ *    waiter wakeup per release, the holder's or a waiter's, as the lock
+ *    counts them (a condvar sleep that ended other than by its timeout),
+ *    plus HERD_K.  Context switches also count every time another job
+ *    took a waiter's CPU: a loaded host failed the old bound of K/2
+ *    switches per release with a correct lock.  Needs 2+ CPUs.  Readers
+ *    are not tested this way: an exclusive release SHOULD wake every
+ *    sleeping reader, since they can all enter together.
  * 2. Spin before sleep (offloop_spin).  Two threads alternate on one lock
- *    with ~2 us holds.  A waiter that sleeps at once (the old off-loop
- *    path) pays a context switch on most contended acquires; one that
- *    polls the lock briefly first takes it without sleeping.  Asserted:
- *    fewer than 1 voluntary switch per 10 acquires.  Needs 2+ CPUs.
+ *    with 2 us holds.  A waiter that sleeps at once (the old off-loop
+ *    path) parks on most contended acquires; one that polls the lock
+ *    briefly first takes it without sleeping.  Asserted: fewer than 1
+ *    park (condvar sleep, counted by the lock) per 10 acquires, plus one
+ *    per hold that lost its CPU (outlasted 10 us, beyond the spin): a
+ *    waiter behind a descheduled holder is right to park.  Needs 2+
+ *    CPUs.
  * 3. Every release wakes (offloop_release_wakes).  HERD_K threads sleep
  *    in wrlock (then amutex_lock) on a lock the main thread holds; the
  *    main thread releases and re-takes it HERD_K times back to back
@@ -1351,9 +1358,16 @@ test_amutex_recursive_thread(const MunitParameter p[], void *d)
  *    a notify and the process-wide spin cap of 1 on a 2-4 CPU host
  *    suffices).  A waiter that sleeps at once pays a futex sleep + wake
  *    per signal; one that polls first takes it without sleeping.
- *    Asserted: fewer than 1 voluntary switch per 10 waits.  Needs 2+
+ *    Asserted: fewer than 1 park per 10 waits, plus one per signal that
+ *    came more than 10 us late (the signaler lost its CPU).  Needs 2+
  *    CPUs.
- * Context switches are read per thread (RUSAGE_THREAD, and
+ * Tests 1, 2 and 4 count parks and wakeups in the lock (sync.c's
+ * test-only __xtc_*_offloop_* counters) and time holds with
+ * xtc_clock_mono.  OS context switches change with other load on the
+ * host and, at -O0 --coverage, with how long a loop-count hold takes:
+ * there "~2 us" was 37 us, and a loaded host failed the old bounds
+ * (4808 switches over 40000 acquires).  Tests 3 and 6 still read
+ * context switches per thread (RUSAGE_THREAD, and
  * /proc/self/task/TID/status for another thread's): Linux only.
  * 5. Liveness + exclusion (arwlock_threads, offloop_timed_handoff):
  *    every acquire is timed, so a lost wakeup fails instead of hanging.
@@ -1370,13 +1384,29 @@ test_amutex_recursive_thread(const MunitParameter p[], void *d)
  * amutex/arwlock tests in this file.
  */
 #if defined(__linux__) && defined(RUSAGE_THREAD)
+/* sync.c test-only counters (not PUBLIC): off-loop condvar sleeps and
+ * the sleeps that ended in a wakeup so far, and the threads asleep now. */
+extern void
+__xtc_amutex_offloop_stats(xtc_amutex_t *, unsigned *, unsigned *, int *);
+extern void
+__xtc_arwlock_offloop_stats(xtc_arwlock_t *, unsigned *, unsigned *, int *);
+extern unsigned __xtc_notify_offloop_parks(xtc_notify_t *);
 #define HERD_K 8
 #define HERD_R 200
 enum { HD_WR, HD_RD, HD_AM };
 static xtc_arwlock_t *g_hd_rw;
 static xtc_amutex_t  *g_hd_m;
-static _Atomic int    g_hd_ready, g_hd_stop, g_hd_got;
-static _Atomic long   g_hd_csw;
+static _Atomic int    g_hd_ready, g_hd_stop, g_hd_got, g_hd_gen;
+
+/* The off-loop counters of the lock `kind` uses (see hd_lock). */
+static void
+hd_stats(int kind, unsigned *parks, unsigned *wakes, int *sleepers)
+{
+	if (kind == HD_AM)
+		__xtc_amutex_offloop_stats(g_hd_m, parks, wakes, sleepers);
+	else
+		__xtc_arwlock_offloop_stats(g_hd_rw, parks, wakes, sleepers);
+}
 
 static void
 hd_lock(int kind, int64_t to)
@@ -1395,122 +1425,86 @@ hd_unlock(int kind)
 	else (void)xtc_arwlock_unlock(g_hd_rw);
 }
 
+/* Take the lock at most once per release by the holder (g_hd_gen), so
+ * a holder that loses its CPU between its unlock and relock lets each
+ * waiter in once, not into a lock/unlock loop whose every release wakes
+ * a sleeper (1153 wakeups over 200 releases in a loaded make check). */
 static void *
 hd_waiter(void *arg)
 {
-	struct rusage u0, u1;
-	int kind = (int)(intptr_t)arg;
-	(void)getrusage(RUSAGE_THREAD, &u0);
+	int kind = (int)(intptr_t)arg, gen;
 	atomic_fetch_add(&g_hd_ready, 1);
 	while (!atomic_load(&g_hd_stop)) {
 		hd_lock(kind, 30LL * 1000 * 1000 * 1000);
+		gen = atomic_load(&g_hd_gen);
 		atomic_fetch_add(&g_hd_got, 1);
 		hd_unlock(kind);
+		while (!atomic_load(&g_hd_stop) && atomic_load(&g_hd_gen) == gen)
+			(void)__os_sleep_ns(100 * 1000);
 	}
-	(void)getrusage(RUSAGE_THREAD, &u1);
-	atomic_fetch_add(&g_hd_csw, u1.ru_nvcsw - u0.ru_nvcsw);
 	return NULL;
 }
 
-static long
-herd_run(int kind)
+/* HERD_K waiters asleep on lock `kind`, then HERD_R releases by the
+ * holder; the wakeups up to the last of them go to *wakes, and the
+ * waiters' own acquires (each one a release too) to g_hd_got. */
+static void
+herd_run(int kind, unsigned *wakes)
 {
 	pthread_t th[HERD_K];
-	int i;
-	g_hd_ready = 0; g_hd_stop = 0; g_hd_got = 0; g_hd_csw = 0;
+	unsigned parks, w0;
+	int i, sleepers;
+	g_hd_ready = 0; g_hd_stop = 0; g_hd_got = 0; g_hd_gen = 0;
 	hd_lock(kind, -1);
 	for (i = 0; i < HERD_K; i++)
 		munit_assert_int(pthread_create(&th[i], NULL, hd_waiter,
 		    (void *)(intptr_t)kind), ==, 0);
-	while (atomic_load(&g_hd_ready) < HERD_K)
+	/* All asleep in the lock: counted, not a fixed sleep. */
+	for (i = 0; i < 10000; i++) {
+		hd_stats(kind, &parks, &w0, &sleepers);
+		if (sleepers == HERD_K)
+			break;
 		(void)__os_sleep_ns(1000 * 1000);
-	(void)__os_sleep_ns(50LL * 1000 * 1000);   /* all asleep in the lock */
+	}
+	munit_assert_int(sleepers, ==, HERD_K);
 	for (i = 0; i < HERD_R; i++) {
 		(void)__os_sleep_ns(1000 * 1000);
+		atomic_fetch_add(&g_hd_gen, 1);
 		hd_unlock(kind);
 		hd_lock(kind, -1);
 	}
+	hd_stats(kind, &parks, wakes, &sleepers);
+	*wakes -= w0;
 	atomic_store(&g_hd_stop, 1);
+	atomic_fetch_add(&g_hd_gen, 1);
 	hd_unlock(kind);
 	for (i = 0; i < HERD_K; i++)
 		(void)pthread_join(th[i], NULL);
 	munit_assert_int(atomic_load(&g_hd_got), >=, HERD_K);
-	return atomic_load(&g_hd_csw);
-}
-
-static void *
-hd_spin(void *arg)
-{
-	volatile unsigned long n = 0;
-	(void)arg;
-	while (!atomic_load_explicit(&g_hd_stop, memory_order_relaxed))
-		n++;
-	(void)n;   /* read once: gcc 16 -Wunused-but-set-variable */
-	return NULL;
-}
-
-/* CPUs that n (<= HERD_K) spinning threads of this process get right
- * now (CPU-seconds per second; no library code involved). */
-static double
-hd_capacity(int n)
-{
-	pthread_t th[HERD_K];
-	struct timespec w0, w1, c0, c1;
-	int i;
-	atomic_store(&g_hd_stop, 0);
-	clock_gettime(CLOCK_MONOTONIC, &w0);  /* XTC_RAW_OK: test measurement */
-	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &c0);  /* XTC_RAW_OK: test measurement */
-	for (i = 0; i < n; i++)
-		munit_assert_int(pthread_create(&th[i], NULL, hd_spin, NULL),
-		    ==, 0);
-	(void)__os_sleep_ns(200LL * 1000 * 1000);
-	atomic_store(&g_hd_stop, 1);
-	for (i = 0; i < n; i++)
-		(void)pthread_join(th[i], NULL);
-	clock_gettime(CLOCK_MONOTONIC, &w1);  /* XTC_RAW_OK: test measurement */
-	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &c1);  /* XTC_RAW_OK: test measurement */
-	return ((double)(c1.tv_sec - c0.tv_sec) +
-	    (double)(c1.tv_nsec - c0.tv_nsec) / 1e9) /
-	    ((double)(w1.tv_sec - w0.tv_sec) +
-	    (double)(w1.tv_nsec - w0.tv_nsec) / 1e9);
 }
 
 static MunitResult
 test_offloop_no_herd(const MunitParameter p[], void *d)
 {
 	static const char *name[] = { "arwlock wr", "arwlock rd", "amutex" };
-	long csw;
-	double cap;
-	int kind;
+	unsigned wakes;
+	int kind, rels;
 	(void)p; (void)d;
 	if (getenv("XTC_UNDER_VALGRIND") != NULL)
 		return MUNIT_SKIP;   /* timing: see offloop_valgrind_note */
-	/* HERD_K sleepers + the releasing thread: with fewer CPUs the woken
-	 * waiters cannot all run, re-sleep and are counted as a herd (2 CPUs:
-	 * 1167 and 7987 switches against the 800 bound). */
-	if (xtc_ncpus() < HERD_K / 2)
+	if (xtc_ncpus() < 2)
 		return MUNIT_SKIP;
-	/* The same holds when other jobs share the CPUs (a CI runner): the
-	 * herd bound measures the lock only when the waiters can all run.
-	 * 4 CPUs + 4 busy loops: 1.59.0 and 2.0 both fail it (1,360 and
-	 * 3,155 switches) with 2.0 CPUs left to the process.  So compare
-	 * against what an idle host of this size gives HERD_K spinners: a
-	 * quiet 4-CPU host measures ~4.0 of 4; a 16-vCPU host under 16 busy
-	 * loops ~4 of 8, and fails the bound there (2.0.0: 4/15 runs,
-	 * 845-982 switches) though 4 quiet CPUs pass it. */
-	cap = hd_capacity(HERD_K);
-	if (cap < 0.85 * (xtc_ncpus() < HERD_K ? xtc_ncpus() : HERD_K)) {
-		fprintf(stderr, "  skipped: %d spinning threads get %.2f CPUs "
-		    "here (a shared host)\n", HERD_K, cap);
-		return MUNIT_SKIP;
-	}
 	munit_assert_int(xtc_arwlock_create(&g_hd_rw), ==, XTC_OK);
 	munit_assert_int(xtc_amutex_create(&g_hd_m), ==, XTC_OK);
 	for (kind = HD_WR; kind <= HD_AM; kind += 2) {
-		csw = herd_run(kind);
-		fprintf(stderr, "  %s: %ld waiter csw over %d releases\n",
-		    name[kind], csw, HERD_R);
-		munit_assert_long(csw, <=, (long)HERD_R * HERD_K / 2);
+		herd_run(kind, &wakes);
+		/* A targeted wake wakes at most one sleeper per release,
+		 * the holder's or a waiter's (HERD_K more for the spurious
+		 * wakeups POSIX allows); a broadcast wakes them all. */
+		rels = HERD_R + atomic_load(&g_hd_got);
+		fprintf(stderr, "  %s: %u waiter wakeups over %d releases\n",
+		    name[kind], wakes, rels);
+		munit_assert_uint(wakes, <=, (unsigned)(rels + HERD_K));
 	}
 	xtc_arwlock_destroy(g_hd_rw);
 	xtc_amutex_destroy(g_hd_m);
@@ -1518,8 +1512,11 @@ test_offloop_no_herd(const MunitParameter p[], void *d)
 }
 
 #define SP_N 20000
+#define SP_HOLD_NS 2000  /* the hold the spin must absorb */
+#define SP_GAP_NS 1000   /* between a release and the next lock */
+#define SP_LONG_NS 10000 /* a hold or signal this late lost its CPU */
 static _Atomic int  g_sp_go;
-static _Atomic long g_sp_csw;
+static _Atomic long g_sp_long;
 static volatile long g_sp_val;
 
 static void
@@ -1531,23 +1528,34 @@ sp_burn(int n)
 	(void)k;
 }
 
+/* Busy-wait ns of real time and return how long it took, which is more
+ * than ns when the thread lost its CPU meanwhile.  A time, not a loop
+ * count: sp_burn(2000) held the lock ~4 us at -O2 and ~37 us at -O0
+ * --coverage, longer than the spin, so that build tested nothing. */
+static int64_t
+sp_wait_ns(int64_t ns)
+{
+	int64_t t0 = xtc_clock_mono(), t;
+	while ((t = xtc_clock_mono()) - t0 < ns)
+		;
+	return t - t0;
+}
+
 static void *
 sp_thread(void *arg)
 {
-	struct rusage u0, u1;
 	int kind = (int)(intptr_t)arg, i;
+	long n_long = 0;
 	while (!atomic_load(&g_sp_go))
 		;
-	(void)getrusage(RUSAGE_THREAD, &u0);
 	for (i = 0; i < SP_N; i++) {
 		hd_lock(kind, 30LL * 1000 * 1000 * 1000);
 		g_sp_val++;
-		sp_burn(2000);                     /* ~2 us hold */
+		n_long += sp_wait_ns(SP_HOLD_NS) > SP_LONG_NS;
 		hd_unlock(kind);
-		sp_burn(1000);
+		(void)sp_wait_ns(SP_GAP_NS);
 	}
-	(void)getrusage(RUSAGE_THREAD, &u1);
-	atomic_fetch_add(&g_sp_csw, u1.ru_nvcsw - u0.ru_nvcsw);
+	atomic_fetch_add(&g_sp_long, n_long);
 	return NULL;
 }
 
@@ -1556,6 +1564,9 @@ test_offloop_spin(const MunitParameter p[], void *d)
 {
 	static const char *name[] = { "arwlock wr", "arwlock rd", "amutex" };
 	pthread_t th[2];
+	unsigned parks, wakes;
+	int sleepers;
+	long n_long;
 	int kind, i;
 	(void)p; (void)d;
 	if (getenv("XTC_UNDER_VALGRIND") != NULL)
@@ -1565,24 +1576,26 @@ test_offloop_spin(const MunitParameter p[], void *d)
 	munit_assert_int(xtc_arwlock_create(&g_hd_rw), ==, XTC_OK);
 	munit_assert_int(xtc_amutex_create(&g_hd_m), ==, XTC_OK);
 	for (kind = HD_WR; kind <= HD_AM; kind += 2) {
-		g_sp_go = 0; g_sp_csw = 0; g_sp_val = 0;
+		g_sp_go = 0; g_sp_long = 0; g_sp_val = 0;
 		for (i = 0; i < 2; i++)
 			munit_assert_int(pthread_create(&th[i], NULL, sp_thread,
 			    (void *)(intptr_t)kind), ==, 0);
 		atomic_store(&g_sp_go, 1);
 		for (i = 0; i < 2; i++)
 			(void)pthread_join(th[i], NULL);
-		fprintf(stderr, "  %s: %ld csw over %d acquires\n", name[kind],
-		    atomic_load(&g_sp_csw), 2 * SP_N);
+		hd_stats(kind, &parks, &wakes, &sleepers);
+		n_long = atomic_load(&g_sp_long);
+		fprintf(stderr, "  %s: %u parks / %d acquires, %ld long\n",
+		    name[kind], parks, 2 * SP_N, n_long);
 		munit_assert_long(g_sp_val, ==, 2L * SP_N);
-		/* The switch bound is a property of real cores: under CPU
+		/* The park bound is a property of real cores: under CPU
 		 * emulation (CI's riscv64 qemu-user job sets
 		 * XTC_TEST_EMULATED) an amutex hand-off outlasts the
 		 * time-bounded spin and 50-100% of acquires park.  Mutual
 		 * exclusion (above) is still checked there. */
 		if (getenv("XTC_TEST_EMULATED") == NULL)
-			munit_assert_long(atomic_load(&g_sp_csw), <,
-			    2L * SP_N / 10);
+			munit_assert_long((long)parks, <,
+			    2L * SP_N / 10 + n_long);
 	}
 	xtc_arwlock_destroy(g_hd_rw);
 	xtc_amutex_destroy(g_hd_m);
@@ -1683,16 +1696,12 @@ static _Atomic int   g_ns_ack;
 static void *
 ns_waiter(void *arg)
 {
-	struct rusage u0, u1;
 	int i;
 	(void)arg;
-	(void)getrusage(RUSAGE_THREAD, &u0);
 	for (i = 0; i < NS_N; i++) {
 		munit_assert_int(xtc_notify_wait(g_ns, -1), ==, XTC_OK);
 		atomic_store(&g_ns_ack, i + 1);
 	}
-	(void)getrusage(RUSAGE_THREAD, &u1);
-	atomic_store(&g_sp_csw, u1.ru_nvcsw - u0.ru_nvcsw);
 	return NULL;
 }
 
@@ -1700,37 +1709,31 @@ static MunitResult
 test_offloop_notify_spin(const MunitParameter p[], void *d)
 {
 	pthread_t th;
-	double cap;
+	unsigned parks;
+	int64_t t0;
+	long n_late = 0;
 	int i;
 	(void)p; (void)d;
 	if (getenv("XTC_UNDER_VALGRIND") != NULL)
 		return MUNIT_SKIP;   /* timing: see offloop_valgrind_note */
 	if (xtc_ncpus() < 2)
 		return MUNIT_SKIP;
-	/* The waiter spins only while it has a CPU of its own: on a shared
-	 * host it is descheduled mid-spin and counted as a switch (32 vCPUs
-	 * + 40 busy loops: 2.0.0 failed 1/20 runs, 4,398 switches once).
-	 * So the two threads here must each get a CPU; a quiet 2-CPU host
-	 * measures ~2.0. */
-	cap = hd_capacity(2);
-	if (cap < 1.8) {
-		fprintf(stderr, "  skipped: 2 spinning threads get %.2f CPUs "
-		    "here (a shared host)\n", cap);
-		return MUNIT_SKIP;
-	}
 	munit_assert_int(xtc_notify_create(&g_ns), ==, XTC_OK);
-	g_sp_csw = 0; g_ns_ack = 0;
+	g_ns_ack = 0;
 	munit_assert_int(pthread_create(&th, NULL, ns_waiter, NULL), ==, 0);
 	for (i = 0; i < NS_N; i++) {
-		sp_burn(2000);                     /* ~2 us into the wait */
+		t0 = xtc_clock_mono();
+		(void)sp_wait_ns(SP_HOLD_NS); /* 2 us into the wait */
 		munit_assert_int(xtc_notify_signal(g_ns), ==, XTC_OK);
+		n_late += xtc_clock_mono() - t0 > SP_LONG_NS;
 		while (atomic_load(&g_ns_ack) <= i)
 			;                          /* the waiter took it */
 	}
 	(void)pthread_join(th, NULL);
-	fprintf(stderr, "  notify: %ld waiter csw over %d waits\n",
-	    atomic_load(&g_sp_csw), NS_N);
-	munit_assert_long(atomic_load(&g_sp_csw), <, (long)NS_N / 10);
+	parks = __xtc_notify_offloop_parks(g_ns);
+	fprintf(stderr, "  notify: %u parks / %d waits, %ld late signals\n",
+	    parks, NS_N, n_late);
+	munit_assert_long((long)parks, <, (long)NS_N / 10 + n_late);
 	xtc_notify_destroy(g_ns);
 	return MUNIT_OK;
 }

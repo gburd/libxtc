@@ -473,6 +473,8 @@ struct xtc_notify {
 	_Atomic int     stored;       /* one-shot stored signal; under lock,
 	                               * peeked by off-loop spinners */
 	struct fw_queue wq;           /* fiber waiters */
+	unsigned off_parks;           /* off-loop condvar sleeps (test counter:
+	                               * __xtc_notify_offloop_parks) */
 };
 
 #define NT_STORED(n) atomic_load_explicit(&(n)->stored, memory_order_relaxed)
@@ -629,13 +631,16 @@ xtc_notify_wait(xtc_notify_t *n, int64_t timeout_ns)
 			sync_spin_leave(&g_notify_spinners);
 			(void)__xtc_mtx_lock(&n->lock);
 		}
-		while (!NT_STORED(n))
+		while (!NT_STORED(n)) {
+			n->off_parks++;
 			(void)pthread_cond_wait(&n->cv, &n->lock);
+		}
 		NT_SET(n, 0);
 	} else {
 		struct timespec ts;
 		deadline_from_timeout(timeout_ns, &ts);
 		while (!NT_STORED(n)) {
+			n->off_parks++;
 			if (cv_wait_until(&n->cv, &n->lock, &ts)) {
 				rc = XTC_E_AGAIN;
 				break;
@@ -645,6 +650,19 @@ xtc_notify_wait(xtc_notify_t *n, int64_t timeout_ns)
 	}
 	(void)__xtc_mtx_unlock(&n->lock);
 	return rc;
+}
+
+/* Test-only (not PUBLIC): off-loop condvar sleeps on n so far.  The
+ * test_sync spin tests count these rather than the OS's context
+ * switches, which other load on the host adds to. */
+unsigned
+__xtc_notify_offloop_parks(xtc_notify_t *n)
+{
+	unsigned v;
+	(void)__xtc_mtx_lock(&n->lock);
+	v = n->off_parks;
+	(void)__xtc_mtx_unlock(&n->lock);
+	return v;
 }
 
 /* ----- semaphore -------------------------------------------------- */
@@ -915,6 +933,8 @@ struct xtc_amutex {
 	_Atomic int           held;      /* written under lock; spinners peek */
 	int                   recursive; /* XTC_AMUTEX_RECURSIVE */
 	int                   cv_waiters; /* threads asleep on cv */
+	unsigned off_parks;               /* condvar sleeps (test counters:
+	                                   * __xtc_amutex_offloop_stats) */
 	struct fw_queue       wq;        /* fiber waiters */
 	_Atomic int           spinners;  /* threads in the off-loop spin */
 	int                   count;     /* recursion depth */
@@ -928,6 +948,7 @@ struct xtc_amutex {
 		pthread_t thr;           /* thread identity (kind 2) */
 	}                     owner;     /* valid while held; under lock */
 	pthread_cond_t        cv;        /* thread (non-fiber) waiters */
+	unsigned off_wakes;              /* sleeps that woke (not timed out) */
 };
 
 #define AM_HELD(m) atomic_load_explicit(&(m)->held, memory_order_relaxed)
@@ -1174,6 +1195,7 @@ __amutex_lock_thread(xtc_amutex_t *m, int64_t timeout_ns)
 			continue;
 		}
 		m->cv_waiters++;
+		m->off_parks++;
 		expired = 0;
 		XTC_PROBE_LOCK_WAIT_START((uintptr_t)m, XTC_PROBE_LOCK_AMUTEX, 0,
 		    (uintptr_t)0);
@@ -1184,6 +1206,7 @@ __amutex_lock_thread(xtc_amutex_t *m, int64_t timeout_ns)
 		XTC_PROBE_LOCK_WAIT_DONE((uintptr_t)m, XTC_PROBE_LOCK_AMUTEX, 0,
 		    (uintptr_t)0);
 		m->cv_waiters--;
+		m->off_wakes += !expired;
 		spun = 0;
 		if (expired && AM_HELD(m))
 			return XTC_E_AGAIN; /* the holder's release wakes the next */
@@ -1318,6 +1341,20 @@ xtc_amutex_unlock(xtc_amutex_t *m)
 	return XTC_OK;
 }
 
+/* Test-only (not PUBLIC): off-loop condvar sleeps and the sleeps that
+ * woke (not timed out) on m so far, and the threads asleep on it now
+ * (see __xtc_notify_offloop_parks). */
+void
+__xtc_amutex_offloop_stats(xtc_amutex_t *m, unsigned *parks, unsigned *wakes,
+    int *sleepers)
+{
+	(void)__xtc_mtx_lock(&m->lock);
+	*parks = m->off_parks;
+	*wakes = m->off_wakes;
+	*sleepers = m->cv_waiters;
+	(void)__xtc_mtx_unlock(&m->lock);
+}
+
 /* ----- arwlock (parking reader/writer latch) --------------------
  *
  * A shared/exclusive latch whose contended waiters PARK the fiber
@@ -1376,6 +1413,8 @@ struct xtc_arwlock {
 	_Atomic int            spinners;  /* threads in the off-loop spin */
 	pthread_cond_t         cv;        /* off-loop shared waiters */
 	pthread_cond_t         wcv;       /* off-loop exclusive waiters */
+	unsigned off_parks;               /* condvar sleeps (test counters: */
+	unsigned off_wakes;               /* __xtc_arwlock_offloop_stats) */
 };
 
 /* readers / writer are written under lock; spinners peek without it. */
@@ -1525,6 +1564,7 @@ __arw_lock_thread(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
 			continue;
 		}
 		(*nwait)++;
+		r->off_parks++;
 		expired = 0;
 		XTC_PROBE_LOCK_WAIT_START((uintptr_t)r, XTC_PROBE_LOCK_ARWLOCK,
 		    mode, (uintptr_t)0);
@@ -1535,6 +1575,7 @@ __arw_lock_thread(xtc_arwlock_t *r, int mode, int64_t timeout_ns)
 		XTC_PROBE_LOCK_WAIT_DONE((uintptr_t)r, XTC_PROBE_LOCK_ARWLOCK,
 		    mode, (uintptr_t)0);
 		(*nwait)--;
+		r->off_wakes += !expired;
 		spun = 0;
 		if (expired && !ARW_THREAD_OK(r, mode))
 			return XTC_E_AGAIN;
@@ -1648,6 +1689,18 @@ xtc_arwlock_unlock(xtc_arwlock_t *r)
 	__arw_grant_locked(r);
 	(void)__xtc_mtx_unlock(&r->lock);
 	return XTC_OK;
+}
+
+/* Test-only (not PUBLIC): as __xtc_amutex_offloop_stats, for r. */
+void
+__xtc_arwlock_offloop_stats(xtc_arwlock_t *r, unsigned *parks, unsigned *wakes,
+    int *sleepers)
+{
+	(void)__xtc_mtx_lock(&r->lock);
+	*parks = r->off_parks;
+	*wakes = r->off_wakes;
+	*sleepers = r->rd_waiters + r->wr_waiters;
+	(void)__xtc_mtx_unlock(&r->lock);
 }
 
 /* ----- rwlock (writer-priority) -------------------------------- */
