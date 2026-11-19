@@ -1597,10 +1597,11 @@ check-dst:
 # how evt/sim.c came to look 16% covered while being exercised by 65 DST
 # tests.
 #
-# This target measures BOTH and merges the tracefiles, which is the only
-# honest figure to quote for "the DST-reachable public surface" that
-# AGENTS.md asks for.  Requires gcovr (in the nix dev shell).  Run it from
-# a build dir configured WITH coverage instrumentation, e.g.:
+# This target measures BOTH and merges them, and prints the coverage of
+# the DST-reachable public surface that AGENTS.md asks for, as
+# scripts/dst_surface.py defines it.  Requires gcc and gcovr (in the nix
+# dev shell).  Run it from a build dir configured WITH coverage
+# instrumentation, e.g.:
 #
 #   CFLAGS='--coverage -O0 -g' LDFLAGS='--coverage' ../dist/configure
 #   make && make coverage
