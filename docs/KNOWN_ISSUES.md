@@ -64,6 +64,22 @@ host one request-reply with a backlog of 100,000 unrelated messages took
 `xtc_recv_mark`, `xtc_recv_match_since` (`XTC_2.3`).  See xtc_proc(3)
 "Receive marks".
 
+## CHANGED (2.3): a selective receive that sees the sender and system messages
+
+An `xtc_match_fn` sees only the payload, so it could not select by
+sender, and it could not tell a DOWN the library sent from a peer's
+message with the same bytes: `xtc_down_decode_ex` decodes any payload of
+the right shape.  `xtc_recv_match_ex(mark, fn, user, &m, &n, &info,
+timeout_ns)` takes an `xtc_match_ex_fn`, which is shown an
+`xtc_msg_info_t` with the sender's pid and `XTC_MSG_SYS` (set only on a
+DOWN, link EXIT, ROOM or start acknowledgement the library sent), and
+reports both for the message it takes.  A message is a DOWN when
+`xtc_down_decode_ex` accepts it and `XTC_MSG_SYS` is set.  It starts
+after a receive mark as `xtc_recv_match_since` does.  `xtc_recv_match`
+is unchanged.  New symbol: `xtc_recv_match_ex` (`XTC_2.3`), new type
+`xtc_msg_info_t`.  See xtc_proc(3) "Seeing the sender and system
+messages".
+
 ## CHANGED (2.2): one name per verb; the old names still work until 3.0
 
 2.2 renames part of the API so that one verb has one meaning:

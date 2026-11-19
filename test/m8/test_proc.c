@@ -3793,6 +3793,133 @@ test_recv_mark(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- 2.3: xtc_recv_match_ex shows the predicate the sender and whether
+ * the library sent the message.  A user payload shaped like a DOWN
+ * decodes as one with xtc_down_decode_ex (the layout is public); only
+ * XTC_MSG_SYS tells the real DOWN apart. ---- */
+struct ex_seen {
+	int n;
+	xtc_pid_t from[4];
+	uint32_t flags[4];
+};
+
+static int
+ex_down(const xtc_msg_info_t *mi, void *u)
+{
+	struct ex_seen *s = u;
+	xtc_down_info_t di = XTC_DOWN_INFO_INIT;
+
+	if (s->n < 4) {
+		s->from[s->n] = mi->from;
+		s->flags[s->n] = mi->flags;
+		s->n++;
+	}
+	return (mi->flags & XTC_MSG_SYS) != 0 &&
+	    xtc_down_decode_ex(mi->data, mi->data_size, &di) == XTC_OK;
+}
+
+static int
+ex_from(const xtc_msg_info_t *mi, void *u)
+{
+	return xtc_pid_eq(mi->from, *(const xtc_pid_t *)u);
+}
+
+static void
+ex_quick(void *a)
+{
+	(void)a;
+}
+
+static void
+ex_sender(void *a)
+{
+	char c = 's';
+	(void)xtc_send(*(const xtc_pid_t *)a, &c, 1);
+}
+
+static int ex_done;
+static void
+ex_main(void *a)
+{
+	xtc_loop_t *loop = a;
+	unsigned char fake[29];
+	xtc_down_info_t di = XTC_DOWN_INFO_INIT;
+	xtc_msg_info_t mi = XTC_MSG_INFO_INIT;
+	struct ex_seen seen;
+	xtc_pid_t self = xtc_self(), child, other;
+	uint64_t ref;
+	void *m = NULL;
+	size_t n = 0;
+	char c = 'u';
+
+	/* A user payload starting with 'D', then a real DOWN. */
+	memset(fake, 0, sizeof fake);
+	fake[0] = 'D';
+	munit_assert_int(xtc_send(self, fake, sizeof fake), ==, XTC_OK);
+	munit_assert_int(xtc_down_decode_ex(fake, sizeof fake, &di), ==,
+	    XTC_OK); /* the bytes alone cannot tell */
+	munit_assert_int(xtc_proc_spawn_monitor(loop, ex_quick, NULL, NULL,
+	                     &child, &ref),
+	    ==, XTC_OK);
+	memset(&seen, 0, sizeof seen);
+	munit_assert_int(xtc_recv_match_ex(0, ex_down, &seen, &m, &n, &mi,
+	                     1000 * F155_MS),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_down_decode_ex(m, n, &di), ==, XTC_OK);
+	munit_assert_uint64(di.ref, ==, ref); /* the real one, not the fake */
+	munit_assert_uint32(mi.flags, ==, XTC_MSG_SYS);
+	munit_assert_true(xtc_pid_eq(mi.from, child));
+	xtc_free(m);
+	munit_assert_int(seen.n, ==, 2); /* the fake was shown, unflagged */
+	munit_assert_uint32(seen.flags[0], ==, 0);
+	munit_assert_true(xtc_pid_eq(seen.from[0], self));
+	/* The fake is still queued, an ordinary message from self. */
+	munit_assert_int(xtc_recv_match_ex(0, NULL, NULL, &m, &n, &mi, 0), ==,
+	    XTC_OK);
+	munit_assert_size(n, ==, sizeof fake);
+	munit_assert_uint32(mi.flags, ==, 0);
+	munit_assert_true(xtc_pid_eq(mi.from, self));
+	xtc_free(m);
+	/* Select by sender. */
+	munit_assert_int(xtc_send(self, &c, 1), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, ex_sender, &self, NULL, &other),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_recv_match_ex(0, ex_from, &other, &m, &n, &mi,
+	                     1000 * F155_MS),
+	    ==, XTC_OK);
+	munit_assert_char(*(char *)m, ==, 's');
+	xtc_free(m);
+	munit_assert_int(xtc_recv(&m, &n, 0), ==, XTC_OK); /* 'u' stayed */
+	munit_assert_char(*(char *)m, ==, 'u');
+	xtc_free(m);
+	/* A 0 out_info size is rejected; out_info NULL is fine. */
+	mi.size = 0;
+	munit_assert_int(xtc_recv_match_ex(0, NULL, NULL, &m, &n, &mi, 0), ==,
+	    XTC_E_INVAL);
+	munit_assert_int(xtc_recv_match_ex(0, NULL, NULL, &m, &n, NULL, 0), ==,
+	    XTC_E_AGAIN);
+	ex_done = 1;
+}
+
+static MunitResult
+test_recv_match_ex(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	void *m = NULL;
+	size_t n = 0;
+	(void)p;
+	(void)d;
+	munit_assert_int(xtc_recv_match_ex(0, NULL, NULL, &m, &n, NULL, 0), ==,
+	    XTC_E_STATE);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, ex_main, loop, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
+	munit_assert_int(ex_done, ==, 1);
+	return MUNIT_OK;
+}
+
 /* ---- M1/D4: a DOWN reaches a watcher whose mailbox is FULL.  Pre-fix
  * the DOWN was an ordinary capped send and was dropped. ---- */
 static int m1_got_down;
@@ -4095,6 +4222,8 @@ static MunitTest tests[] = {
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/recv_mark", test_recv_mark, NULL, NULL, MUNIT_TEST_OPTION_NONE,
 	    NULL },
+	{ "/recv_match_ex", test_recv_match_ex, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/down_bypasses_full_mailbox", test_down_bypasses_full_mailbox, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/link_semantics", test_link_semantics, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/kill_interrupts_park", test_kill_interrupts_park, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

@@ -230,6 +230,7 @@ typedef struct xtc_mailbox_stats {
  * PUBLIC: int       xtc_recv_correlate __P((const void *, size_t, int, xtc_msg_t *, int *, int64_t));
  * PUBLIC: int       xtc_recv_mark __P((uint64_t *));
  * PUBLIC: int       xtc_recv_match_since __P((uint64_t, xtc_match_fn, void *, void **, size_t *, int64_t));
+ * PUBLIC: int       xtc_recv_match_ex __P((uint64_t, xtc_match_ex_fn, void *, void **, size_t *, xtc_msg_info_t *, int64_t));
  * PUBLIC: int       xtc_proc_wait_fd __P((int, uint32_t, int64_t, uint32_t *));
  * PUBLIC: int       xtc_proc_sleep __P((int64_t));
  * PUBLIC: int       xtc_exit_self __P((int));
@@ -632,6 +633,58 @@ XTC_API int       xtc_recv_correlate(const void *corr_value, size_t corr_size,
 XTC_API int xtc_recv_mark(uint64_t *out_mark);
 XTC_API int xtc_recv_match_since(uint64_t mark, xtc_match_fn match_fn,
     void *user_data, void **out, size_t *out_size, int64_t timeout_ns);
+
+/*
+ * Selective receive that sees the envelope (2.3).  An xtc_match_fn sees
+ * only the payload, so it cannot tell who sent a message, nor a DOWN the
+ * library sent from a user message with the same bytes: the DOWN, link
+ * EXIT and ROOM layouts are public, and xtc_down_decode_ex decodes any
+ * payload of the right shape.  xtc_match_ex_fn is shown an
+ * xtc_msg_info_t:
+ *
+ *   from       the sender's pid: a proc's own, a registered thread's
+ *              (xtc_thread_register), XTC_PID_NONE from a plain thread.
+ *              For a DOWN or link EXIT it is the proc whose exit sent it
+ *              (or the watcher itself for a NOPROC DOWN).
+ *   flags      XTC_MSG_SYS: the library sent it (a DOWN, link EXIT,
+ *              ROOM or start ack).  No xtc_send can set it.
+ *   data, data_size  the payload, as an xtc_match_fn sees it.
+ *
+ * The struct is the library's and sized by it: read a field newer than
+ * the oldest library you support only if XTC_FIELD_OK(msg, field).
+ * Valid during the call only.  Return 1 to take the message, 0 to leave
+ * it queued.
+ *
+ * xtc_recv_match_ex(mark, match_fn, user_data, &out, &out_size,
+ * out_info, timeout_ns) is xtc_recv_match with that predicate, starting
+ * after receive mark `mark` as xtc_recv_match_since does (0: the whole
+ * queue).  match_fn NULL takes the first message, as xtc_recv does.
+ * out_info, if not NULL, gets the taken message's from and flags (its
+ * data and data_size are NULL and 0: the payload is *out): set its size
+ * first (XTC_MSG_INFO_INIT), it is written up to that size.  A message
+ * is a DOWN only when xtc_down_decode_ex accepts it AND XTC_MSG_SYS is
+ * set.  Codes as xtc_recv_match, XTC_E_STATE off a proc, XTC_E_INVAL for
+ * a NULL out or out_size or an out_info with a size of 0.
+ *
+ * @context PROC
+ */
+#define XTC_MSG_SYS 0x1u /* the library sent it (DOWN, EXIT, ROOM, ack) */
+
+typedef struct xtc_msg_info {
+	size_t      size;      /* sizeof(xtc_msg_info_t): XTC_MSG_INFO_INIT */
+	xtc_pid_t   from;      /* the sender (see above) */
+	uint32_t    flags;     /* XTC_MSG_* */
+	const void *data;      /* the payload (predicate only) */
+	size_t      data_size; /* its size in bytes */
+} xtc_msg_info_t;
+
+#define XTC_MSG_INFO_INIT { .size = sizeof(xtc_msg_info_t) }
+
+typedef int (*xtc_match_ex_fn)(const xtc_msg_info_t *msg, void *user);
+
+XTC_API int xtc_recv_match_ex(uint64_t mark, xtc_match_ex_fn match_fn,
+    void *user_data, void **out, size_t *out_size, xtc_msg_info_t *out_info,
+    int64_t timeout_ns);
 
 /*
  * Wait until ANY of the following becomes true:
@@ -1228,7 +1281,10 @@ typedef struct xtc_down_info {
  * Accepts both the monitor DOWN ('D') and the link EXIT ('E') signal
  * shapes.  Returns XTC_OK on either, XTC_E_INVAL for any other message.
  * A monitor need no longer know the producer's encoding convention:
- * kind + signal + exit_code are unambiguous by construction.
+ * kind + signal + exit_code are unambiguous by construction.  It reads
+ * bytes only: an ordinary message with the same bytes decodes too, so
+ * a receiver that must not be fooled by its peers takes the message with
+ * xtc_recv_match_ex and checks XTC_MSG_SYS.
  *
  * PUBLIC: int xtc_down_decode_ex __P((const void *, size_t, xtc_down_info_t *));
  */

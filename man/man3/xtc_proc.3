@@ -20,6 +20,7 @@
 .Nm xtc_recv_correlate ,
 .Nm xtc_recv_mark ,
 .Nm xtc_recv_match_since ,
+.Nm xtc_recv_match_ex ,
 .Nm xtc_proc_wait_fd ,
 .Nm xtc_proc_sleep ,
 .Nm xtc_exit_self ,
@@ -73,6 +74,8 @@
 .Fn xtc_recv_mark "uint64_t *out_mark"
 .Ft int
 .Fn xtc_recv_match_since "uint64_t mark" "xtc_match_fn match_fn" "void *user_data" "void **out" "size_t *out_size" "int64_t timeout_ns"
+.Ft int
+.Fn xtc_recv_match_ex "uint64_t mark" "xtc_match_ex_fn match_fn" "void *user_data" "void **out" "size_t *out_size" "xtc_msg_info_t *out_info" "int64_t timeout_ns"
 .Ft int
 .Fn xtc_proc_wait_fd "int fd" "uint32_t interest" "int64_t timeout_ns" "uint32_t *out_revents"
 .Ft int
@@ -516,6 +519,107 @@ and
 off a process.
 Both are
 .Em @context PROC .
+.Ss Seeing the sender and system messages
+An
+.Vt xtc_match_fn
+sees only the payload.
+It cannot tell who sent a message, and it cannot tell a DOWN, link
+EXIT or ROOM the library sent from a user message with the same bytes:
+those layouts are public, and
+.Fn xtc_down_decode_ex
+decodes any payload of the right shape, so a message from a peer that
+starts with
+.Sq D
+decodes as a DOWN.
+.Fn xtc_recv_match_ex ,
+added in 2.3, takes a predicate
+.Ft int
+.Fn (*xtc_match_ex_fn) "const xtc_msg_info_t *msg" "void *user"
+that is shown the envelope:
+.Bd -literal -offset indent
+typedef struct xtc_msg_info {
+    size_t      size;      /* XTC_MSG_INFO_INIT */
+    xtc_pid_t   from;      /* the sender */
+    uint32_t    flags;     /* XTC_MSG_SYS: the library sent it */
+    const void *data;      /* the payload (predicate only) */
+    size_t      data_size;
+} xtc_msg_info_t;
+.Ed
+.Pp
+.Va from
+is the sending proc, a thread's pid from
+.Fn xtc_thread_register ,
+or
+.Dv XTC_PID_NONE
+from a plain thread; for a DOWN or link EXIT it is the proc whose exit
+sent it (the watcher itself for a NOPROC DOWN).
+.Dv XTC_MSG_SYS
+is set on a DOWN, a link EXIT, a ROOM and a start acknowledgement, and
+no
+.Fn xtc_send
+can set it.
+A message is a DOWN when
+.Fn xtc_down_decode_ex
+accepts it
+.Em and
+.Dv XTC_MSG_SYS
+is set.
+The struct is the library's: read a field newer than the oldest library
+you support only if
+.Fn XTC_FIELD_OK msg field ,
+and do not keep the pointer past the call.
+.Pp
+.Fn xtc_recv_match_ex
+is
+.Fn xtc_recv_match
+with that predicate, starting after receive mark
+.Fa mark
+as
+.Fn xtc_recv_match_since
+does (0: the whole queue).
+A
+.Dv NULL
+.Fa match_fn
+takes the first message, as
+.Fn xtc_recv
+does.
+.Fa out_info ,
+if not
+.Dv NULL ,
+gets the taken message's
+.Va from
+and
+.Va flags
+(its
+.Va data
+is
+.Dv NULL :
+the payload is
+.Fa *out ) ;
+set its
+.Va size
+first
+.Pq Dv XTC_MSG_INFO_INIT ,
+and it is written up to that size.
+It returns the codes of
+.Fn xtc_recv_match ,
+.Dv XTC_E_STATE
+off a process, and
+.Dv XTC_E_INVAL
+for an
+.Fa out_info
+whose
+.Va size
+is 0.
+Since 2.2.1 the library's own receivers of DOWNs (supervisors, the
+registry reaper, the
+.Xr xtc_svr 3
+and
+.Xr xtc_fsm 3
+calls,
+.Xr xtc_launch 3 )
+make the same check; before, a user message shaped like a DOWN could
+make a supervisor restart a live child.
 .Pp
 .Fn xtc_proc_wait_fd
 blocks until any of:
@@ -1144,6 +1248,9 @@ decodes a
 .Sq DOWN
 or a link
 .Sq EXIT
+(by its bytes only; see
+.Sx Seeing the sender and system messages
+for telling the library's from a peer's)
 into an
 .Vt xtc_down_info_t
 whose
@@ -1442,7 +1549,8 @@ appeared in xtc 0.1.
 and
 .Fn xtc_thread_register
 appeared in xtc 2.2; before it a proc's name was accepted and dropped.
-.Fn xtc_recv_mark
-and
+.Fn xtc_recv_mark ,
 .Fn xtc_recv_match_since
+and
+.Fn xtc_recv_match_ex
 appeared in xtc 2.3.

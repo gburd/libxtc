@@ -89,6 +89,7 @@ int xtc_recv __P((void **, size_t *, int64_t));
 int xtc_recv_correlate __P((const void *, size_t, int, xtc_msg_t *, int *, int64_t));
 int xtc_recv_mark __P((uint64_t *));
 int xtc_recv_match __P((xtc_match_fn, void *, void **, size_t *, int64_t));
+int xtc_recv_match_ex __P((uint64_t, xtc_match_ex_fn, void *, void **, size_t *, xtc_msg_info_t *, int64_t));
 int xtc_recv_match_since __P((uint64_t, xtc_match_fn, void *, void **, size_t *, int64_t));
 int xtc_res_acquire __P((xtc_res_t *, xtc_res_kind_t, int64_t));
 int xtc_res_init __P((xtc_res_t *, const xtc_res_caps_t *));

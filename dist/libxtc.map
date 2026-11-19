@@ -179,5 +179,6 @@ XTC_2.2 {
 XTC_2.3 {
 	global:
 		xtc_recv_mark;
+		xtc_recv_match_ex;
 		xtc_recv_match_since;
 } XTC_2.2;

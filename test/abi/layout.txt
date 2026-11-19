@@ -263,6 +263,12 @@ xtc_mailbox_stats_t.peak off=24 size=8
 xtc_mailbox_stats_t.cap off=32 size=8
 xtc_mailbox_stats_t.recv_total off=40 size=8
 xtc_mailbox_stats_t.drop_total off=48 size=8
+xtc_msg_info_t size=48 align=8
+xtc_msg_info_t.size off=0 size=8
+xtc_msg_info_t.from off=8 size=16
+xtc_msg_info_t.flags off=24 size=4
+xtc_msg_info_t.data off=32 size=8
+xtc_msg_info_t.data_size off=40 size=8
 xtc_msg_t size=16 align=8
 xtc_msg_t.data off=0 size=8
 xtc_msg_t.size off=8 size=8
