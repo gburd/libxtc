@@ -6,6 +6,49 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## FIXED (2.2.1, 2.1.4): a user message shaped like a DOWN was taken for a death
+
+**What it was.**  A DOWN, a link EXIT and a start acknowledgement are
+mailbox messages with a public byte layout (`{'D', ref, pid, reason,
+exit_kind}`, packed).  The library's own receivers of those messages
+recognized them by their bytes alone, so any proc that could send to
+them could fake one with an ordinary `xtc_send`:
+
+* **A supervisor restarted a live child.**  One 30-byte message naming
+  a running child, sent to its supervisor, made the supervisor record
+  the child as dead, report it to `on_child_down` (2.2), and start a
+  second copy while the first kept running.  Two copies of one supervised child
+  then ran, each holding whatever that child owns (a listening socket,
+  a registered name, a lock).
+* **The registry reaper dropped a live name.**  The same message naming
+  a running proc, sent to the reaper (`xtc_reg_reaper`, the app's
+  registry), dropped every name that proc held with `XTC_REG_MONITOR`,
+  so lookups of a live service failed.
+* **A call ended early.**  `xtc_launch`, and in 2.2 `xtc_svr_call` and
+  `xtc_fsm_call`, monitor their target and wait for its DOWN in the
+  caller's mailbox, matched by the monitor reference.  References are a
+  process-wide counter, so a message in the caller's mailbox with the
+  right reference in bytes 1 to 8 ended the call with `XTC_E_NOTFOUND`
+  as if the server had died.
+
+No message from outside the process could do this; it took a send from
+code in the same process.  A program whose procs send only their own
+message formats, none starting with `'D'`, was not affected by
+accident, but a protocol whose messages start with `'D'` (a "data" tag,
+a "delete" verb) and that sends them to a supervisor or the reaper was.
+
+**Fix.**  The library's receivers act only on messages the library sent:
+the mailbox marks each DOWN, link EXIT, ROOM and start acknowledgement
+when it is queued, and the supervisor's main loop, its start and
+killed-child waits, the registry reaper, the svr and fsm call waits and
+`xtc_launch` check that mark.  An ordinary message with the same bytes
+is handled as an ordinary message (a supervisor and the reaper drop it).
+`test/m10/test_sup.c` `/forged_down_ignored` sends one forged DOWN to a
+supervisor and one to the reaper; before the fix the child starts
+twice and the name is gone.  `test_sim_forged_down` sends seeded bursts
+of them across three loops while one child crashes for real; planted
+bugs 77 and 78 take the forged ones again and are caught on every seed.
+
 ## CHANGED (2.3): a receive mark, so a reply wait does not scan the backlog
 
 A selective receive tests every queued message before it waits, so a

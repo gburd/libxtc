@@ -3779,6 +3779,18 @@ __match_first(const void *data, size_t size, void *u)
 	return 1;
 }
 
+/* Does envelope e match: match on its bytes, or fmatch on its bytes and
+ * whether the library sent it (exactly one of the two is set). */
+static inline int
+__env_match(const struct envelope *e, xtc_match_fn match,
+    __xtc_match_flag_fn fmatch, void *u)
+{
+	if (fmatch != NULL)
+		return fmatch(__env_payload(e), e->size,
+		    (e->flags & ENV_F_SYS) != 0, u);
+	return match(__env_payload(e), e->size, u);
+}
+
 /*
  * The receive mark.  xtc_recv_mark records the end of the save queue
  * and, by draining the mailbox into it, of everything that has arrived:
@@ -3862,9 +3874,18 @@ __saveq_putback(struct xtc_proc *self, struct envelope *e, int from_save)
 	*link = e;
 }
 
+/*
+ * The receive core.  match(payload, size, u) picks the envelope.  With
+ * fmatch set instead, fmatch(payload, size, sys, u) picks it, sys being
+ * 1 iff the library sent the envelope (ENV_F_SYS: a DOWN, a link EXIT, a
+ * ROOM or a start ack), so a user message whose bytes look like one can
+ * be told from it.  out_sys (may be NULL) is set to that flag for the
+ * delivered envelope.  rmark is a receive mark (xtc_recv_mark), 0 for
+ * none.
+ */
 static int
-__do_recv(xtc_match_fn match, void *u, uint64_t rmark, void **out,
-    size_t *out_size, int64_t timeout_ns)
+__do_recv(xtc_match_fn match, __xtc_match_flag_fn fmatch, void *u, int *out_sys,
+    uint64_t rmark, void **out, size_t *out_size, int64_t timeout_ns)
 {
 	struct xtc_proc *self = __current_proc, *prev_self;
 	struct envelope *e, **link, *mark;
@@ -3930,7 +3951,7 @@ __do_recv(xtc_match_fn match, void *u, uint64_t rmark, void **out,
 		/* Walk the save queue after the mark. */
 		link = (mark != NULL) ? &mark->next : &self->save_head;
 		while ((e = *link) != NULL) {
-			if (match(__env_payload(e), e->size, u)) {
+			if (__env_match(e, match, fmatch, u)) {
 				was_mark = self->rmark == e;
 				__saveq_unlink(self, link, e, prev);
 				from_save = 1;
@@ -3983,7 +4004,7 @@ __do_recv(xtc_match_fn match, void *u, uint64_t rmark, void **out,
 				break;
 			}
 			(void) __proc_mtx_unlock(&self->mbox_lock);
-			if (match(__env_payload(e), e->size, u))
+			if (__env_match(e, match, fmatch, u))
 				goto deliver;
 			/* Append to save queue. */
 			e->next = NULL;
@@ -4124,6 +4145,8 @@ deliver:
 		}
 		*out = buf;
 		*out_size = e->size;
+		if (out_sys != NULL)
+			*out_sys = (e->flags & ENV_F_SYS) != 0;
 		/* Causal tracing: advance past the sender's stamp and record
 		 * the receive, linking back to the send via `cause`. */
 		if (XTC_UNLIKELY(__trace_active())) {
@@ -4149,8 +4172,8 @@ xtc_recv(void **out, size_t *out_size, int64_t timeout_ns)
 	/* Wrapper around __do_recv with the always-match predicate.
 	 * Annotated XTC_MUSTTAIL so the compiler emits a jmp, not a
 	 * call+ret -- keeps the recv fast path single-frame. */
-	return XTC_MUSTTAIL __do_recv(__match_first, NULL, 0, out, out_size,
-	    timeout_ns);
+	return XTC_MUSTTAIL __do_recv(__match_first, NULL, NULL, NULL, 0, out,
+	    out_size, timeout_ns);
 }
 
 /* PUBLIC: int xtc_recv_match __P((xtc_match_fn, void *, void **, size_t *, int64_t)); */
@@ -4160,7 +4183,57 @@ xtc_recv_match(xtc_match_fn fn, void *u, void **out, size_t *out_size,
 {
 	if (XTC_UNLIKELY(fn == NULL)) return XTC_E_INVAL;
 	/* XTC_MUSTTAIL: delegate to __do_recv as a tail call. */
-	return XTC_MUSTTAIL __do_recv(fn, u, 0, out, out_size, timeout_ns);
+	return XTC_MUSTTAIL __do_recv(fn, NULL, u, NULL, 0, out, out_size,
+	    timeout_ns);
+}
+
+/* A __xtc_recv_match_sys predicate: the caller's, on sys envelopes. */
+struct __sys_only {
+	xtc_match_fn fn;
+	void *u;
+};
+
+static int
+__match_sys_only(const void *data, size_t size, int sys, void *u)
+{
+	const struct __sys_only *so = u;
+	return sys && so->fn(data, size, so->u);
+}
+
+/* See proc_int.h. */
+int
+__xtc_recv_match_sys(xtc_match_fn fn, void *u, void **out, size_t *out_size,
+    int64_t timeout_ns)
+{
+	struct __sys_only so;
+
+	if (fn == NULL)
+		return XTC_E_INVAL;
+	so.fn = fn;
+	so.u = u;
+	return __do_recv(NULL, __match_sys_only, &so, NULL, 0, out, out_size,
+	    timeout_ns);
+}
+
+/* See proc_int.h. */
+int
+__xtc_recv_match_flag(__xtc_match_flag_fn fn, void *u, void **out,
+    size_t *out_size, int64_t timeout_ns)
+{
+	if (fn == NULL)
+		return XTC_E_INVAL;
+	return __do_recv(NULL, fn, u, NULL, 0, out, out_size, timeout_ns);
+}
+
+/* See proc_int.h. */
+int
+__xtc_recv_sys(void **out, size_t *out_size, int *out_sys, int64_t timeout_ns)
+{
+	if (out_sys == NULL)
+		return XTC_E_INVAL;
+	*out_sys = 0;
+	return __do_recv(__match_first, NULL, NULL, out_sys, 0, out, out_size,
+	    timeout_ns);
 }
 
 /* PUBLIC: int xtc_recv_mark __P((uint64_t *)); */
@@ -4189,7 +4262,7 @@ xtc_recv_match_since(uint64_t mark, xtc_match_fn fn, void *u, void **out,
 		return XTC_E_STATE;
 	if (fn == NULL)
 		return XTC_E_INVAL;
-	return __do_recv(fn, u, mark, out, out_size, timeout_ns);
+	return __do_recv(fn, NULL, u, NULL, mark, out, out_size, timeout_ns);
 }
 
 /* Predicate context for xtc_recv_correlate. */
@@ -4241,8 +4314,9 @@ xtc_recv_correlate(const void *corr_value, size_t corr_size,
 			(void)__os_clock_mono(&now);
 			per_call_to = now >= deadline ? 0 : deadline - now;
 		}
-		rc = __do_recv(__corr_match, &ctx, 0, &out_msgs[collected].data,
-		    &out_msgs[collected].size, per_call_to);
+		rc = __do_recv(__corr_match, NULL, &ctx, NULL, 0,
+		    &out_msgs[collected].data, &out_msgs[collected].size,
+		    per_call_to);
 		if (rc == XTC_OK) {
 			collected++;
 		} else {

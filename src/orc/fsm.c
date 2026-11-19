@@ -503,14 +503,15 @@ __fsm_is_reply(const void *data, size_t size)
 }
 
 /* Any fsm reply, or the DOWN of this call's monitor of the machine (u:
- * the ref, NULL for replies only). */
+ * the ref, NULL for replies only), the DOWN only when the library sent
+ * it (sys). */
 static int
-__match_fsm_reply(const void *data, size_t size, void *u)
+__match_fsm_reply(const void *data, size_t size, int sys, void *u)
 {
 	xtc_down_info_t di = XTC_DOWN_INFO_INIT;
 	if (__fsm_is_reply(data, size))
 		return 1;
-	return u != NULL && size > 0 && *(const uint8_t *)data == 'D' &&
+	return sys && u != NULL && size > 0 && *(const uint8_t *)data == 'D' &&
 	    xtc_down_decode_ex(data, size, &di) == XTC_OK &&
 	    di.ref == *(const uint64_t *)u;
 }
@@ -597,8 +598,8 @@ __fsm_wait_reply(uint32_t tag, uint64_t mref, int64_t timeout_ns,
 		}
 		if (gone)
 			to = __xtc_sim_active() ? 25LL * 1000 * 1000 : 0;
-		rc = xtc_recv_match(__match_fsm_reply, gone ? NULL : &mref,
-		    &rmsg, &rsize, to);
+		rc = __xtc_recv_match_flag(__match_fsm_reply,
+		    gone ? NULL : &mref, &rmsg, &rsize, to);
 		if (rc == XTC_E_AGAIN && gone)
 			return XTC_E_NOTFOUND;
 		if (rc != XTC_OK)

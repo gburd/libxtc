@@ -700,7 +700,7 @@ __drain_killed_downs(struct xtc_supervisor *sup)
 
 	if (sup->opts.on_child_down == NULL)
 		return;
-	while (xtc_recv_match(__match_killed_down, sup, &msg, &sz, 0) ==
+	while (__xtc_recv_match_sys(__match_killed_down, sup, &msg, &sz, 0) ==
 	    XTC_OK) {
 		info = (xtc_down_info_t)XTC_DOWN_INFO_INIT;
 		(void)xtc_down_decode_ex(msg, sz, &info);
@@ -959,15 +959,18 @@ __match_ack(const void *data, size_t size, void *u)
 }
 
 /* A start acknowledgement ('K', the monitor ref) or a DOWN of the child
- * being started, `u` (struct child *), or the stop kick of xtc_sup_stop. */
+ * being started, `u` (struct child *), both sent by the library (sys),
+ * or the stop kick of xtc_sup_stop, an ordinary one-byte send. */
 static int
-__match_start(const void *data, size_t size, void *u)
+__match_start(const void *data, size_t size, int sys, void *u)
 {
 	const struct child *c = u;
 	xtc_down_info_t info = XTC_DOWN_INFO_INIT;
 
 	if (size == 1 && *(const uint8_t *)data == 'X')
 		return 1;
+	if (!sys)
+		return 0;
 	if (__match_ack(data, size, u))
 		return 1;
 	return size >= 1 && *(const uint8_t *)data == 'D' &&
@@ -999,8 +1002,8 @@ __start_children(struct xtc_supervisor *sup)
 		if ((rc = __spawn_child_ex(sup, c, ack)) != XTC_OK)
 			return rc;
 		while (ack) {
-			if ((rc = xtc_recv_match(__match_start, c, &msg, &sz,
-			         -1)) != XTC_OK)
+			if ((rc = __xtc_recv_match_flag(__match_start, c, &msg,
+			         &sz, -1)) != XTC_OK)
 				return rc;
 			if (*(const uint8_t *)msg == 'X') {
 				__os_free(msg); /* the stop kick */
@@ -1023,7 +1026,7 @@ __start_children(struct xtc_supervisor *sup)
 		 * both reach us in that order; the simulator's latency can
 		 * reorder them, so look for the ack a little longer there. */
 		if (__xtc_sim_active() &&
-		    xtc_recv_match(__match_ack, c, &msg, &sz,
+		    __xtc_recv_match_sys(__match_ack, c, &msg, &sz,
 		        25LL * 1000 * 1000) == XTC_OK) {
 			__os_free(msg);
 			c->early_down = d;
@@ -1093,12 +1096,13 @@ __sup_entry(void *arg)
 		size_t sz;
 		xtc_down_info_t d;
 		uint8_t kind;
+		int sys;
 
 		/* Receive ANY message (not a selective match): DOWN signals
 		 * AND ADD_CHILD control messages share this mailbox, and a
 		 * selective match would pile the others into the (capped)
 		 * save queue. */
-		rc = xtc_recv(&msg, &sz, 100LL * 1000 * 1000);
+		rc = __xtc_recv_sys(&msg, &sz, &sys, 100LL * 1000 * 1000);
 		if (rc == XTC_E_AGAIN) continue;
 		if (rc != XTC_OK) break;
 		if (sz < 1) { __os_free(msg); continue; }
@@ -1124,7 +1128,11 @@ __sup_entry(void *arg)
 				break;
 			continue;
 		}
-		if (kind != 'D' || sz < sizeof(struct down_signal)) {
+		/* Only a DOWN the library sent: the layout is public, so an
+		 * xtc_send of the same bytes would otherwise restart a live
+		 * child.  Planted bug 77 (SUP_FORGED_DOWN) takes any. */
+		if (kind != 'D' || sz < sizeof(struct down_signal) ||
+		    (!sys && !XTC_DST_BUG(XTC_DST_BUG_SUP_FORGED_DOWN))) {
 			__os_free(msg);
 			continue;
 		}

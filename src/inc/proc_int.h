@@ -51,6 +51,34 @@ int __xtc_proc_spawn_monitor_ack(xtc_loop_t *loop, xtc_proc_fn fn, void *arg,
 int __xtc_proc_start_ack_wanted(void);
 void __xtc_proc_start_ack(void);
 
+/*
+ * xtc_recv_match restricted to the messages the library sent: a DOWN, a
+ * link EXIT, a ROOM, a start ack.  fn sees only those; every other
+ * message stays queued untested.  For the library's own receivers of
+ * those messages (supervisor, registry reaper, xtc_svr_call,
+ * xtc_fsm_call, xtc_launch): their byte layouts are public, so a test of
+ * the bytes alone takes an ordinary xtc_send for a death.  Codes as
+ * xtc_recv_match; XTC_E_INVAL for a NULL fn or off a proc.
+ */
+int __xtc_recv_match_sys(xtc_match_fn fn, void *u, void **out,
+    size_t *out_size, int64_t timeout_ns);
+
+/* xtc_recv_match whose predicate is also told whether the library sent
+ * the message (sys 1: a DOWN, link EXIT, ROOM or start ack; 0: an
+ * xtc_send), for a wait that takes one of each kind. */
+typedef int (*__xtc_match_flag_fn)(const void *data, size_t size,
+    int sys, void *u);
+int __xtc_recv_match_flag(__xtc_match_flag_fn fn, void *u, void **out,
+    size_t *out_size, int64_t timeout_ns);
+
+/* xtc_recv that also says whether the message is one the library sent:
+ * *out_sys is 1 for a DOWN, link EXIT, ROOM or start ack, 0 for anything
+ * an xtc_send made, whatever its bytes.  For a receiver that takes every
+ * message (a supervisor, the registry reaper) and acts on the library's.
+ * Codes as xtc_recv; XTC_E_INVAL for a NULL out_sys. */
+int __xtc_recv_sys(void **out, size_t *out_size, int *out_sys,
+    int64_t timeout_ns);
+
 /* xtc_exit_pid_deadline resolved in `owner`'s table only, so an equal pid
  * on another loop is never signalled.  owner must be non-NULL and alive
  * (not finalized) for the call; XTC_E_INVAL if NULL. */

@@ -127,6 +127,8 @@ write_cases() {
 		"70;test_sim_batch;0;1;preempt did not free the units" \
 		"71;test_sim_batch;0;1;reservation over capacity" \
 		"76;test_sim_recv_mark;0;1;a marked receive skipped a reply" \
+		"77;test_sim_forged_down;0;1;a forged DOWN restarted a live child" \
+		"78;test_sim_forged_down;0;1;a forged DOWN dropped a live name" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -222,6 +224,10 @@ write_cases() {
 # 76 RMARK_LATE proc.c a marked receive starts after what has arrived by
 #               the receive, not by the mark -> a reply that arrived between
 #               the mark and the receive is found
+# 77 SUP_FORGED_DOWN sup.c acts on a user message shaped like a DOWN
+#               -> an xtc_send of a DOWN's bytes never restarts a live child
+# 78 REG_FORGED_DOWN reg.c reaper acts on a user message shaped like a DOWN
+#               -> an xtc_send of a DOWN's bytes never drops a live name
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

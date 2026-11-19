@@ -920,12 +920,12 @@ xtc_svr_call_save(const xtc_svr_call_t *call)
 
 /* In-proc receive helper.  The predicate takes ANY svr reply (magic
  * suffix) and the DOWN of this call's monitor of the server (u: the
- * ref, or NULL for replies only); other messages stay queued for the
- * proc.  A proc has at most one in-proc call outstanding (the caller
- * waits here), so a reply whose tag is not the current one answers an
- * earlier call that already gave up (timeout, abort, server exit): it is
- * dropped here, so late replies never pile up in the save queue or slow
- * later calls. */
+ * ref, or NULL for replies only), the DOWN only when the library sent
+ * it (sys); other messages stay queued for the proc.  A proc has at
+ * most one in-proc call outstanding (the caller waits here), so a reply
+ * whose tag is not the current one answers an earlier call that already
+ * gave up (timeout, abort, server exit): it is dropped here, so late
+ * replies never pile up in the save queue or slow later calls. */
 static int
 __svr_is_reply(const void *data, size_t size)
 {
@@ -935,12 +935,12 @@ __svr_is_reply(const void *data, size_t size)
 }
 
 static int
-__match_svr_reply(const void *data, size_t size, void *u)
+__match_svr_reply(const void *data, size_t size, int sys, void *u)
 {
 	xtc_down_info_t di = XTC_DOWN_INFO_INIT;
 	if (__svr_is_reply(data, size))
 		return 1;
-	return u != NULL && size > 0 && *(const uint8_t *)data == 'D' &&
+	return sys && u != NULL && size > 0 && *(const uint8_t *)data == 'D' &&
 	    xtc_down_decode_ex(data, size, &di) == XTC_OK &&
 	    di.ref == *(const uint64_t *)u;
 }
@@ -970,8 +970,8 @@ __recv_reply_for_tag(uint64_t tag, uint64_t mref, xtc_pid_t target, void **out,
 		w = !gone              ? __svr_slice(deadline, tok) :
 		    __xtc_sim_active() ? SVR_ABORT_SLICE_NS :
 		                         0;
-		rc = xtc_recv_match(__match_svr_reply, gone ? NULL : &mref,
-		    &msg, &size, w < 0 ? 0 : w);
+		rc = __xtc_recv_match_flag(__match_svr_reply,
+		    gone ? NULL : &mref, &msg, &size, w < 0 ? 0 : w);
 		if (rc == XTC_OK) {
 			if (!__svr_is_reply(msg, size)) {
 				__os_free(msg); /* the server's DOWN */
