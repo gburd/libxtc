@@ -1250,22 +1250,31 @@ ex5_proc(void *arg)
 static void *
 ex5_driver(void *arg)
 {
+	xtc_loop_t *l = xtc_exec_loop((xtc_exec_t *)arg, 0);
 	int i;
-	(void)arg;
-	for (i = 0;
-	     i < 2000 && xtc_atomic_load_i32(&g_ex5_parked, xtc_mo_seq_cst) < 1;
+	/* Wait for the proc to park and the loop to enter its blocking poll
+	 * (sleeping is raised after the step's next-deadline peek), so the
+	 * cancel below lands on a timer that peek kept.  Fixed 20 ms sleeps
+	 * here and before the sample lost to a loaded host: one CPU at nice
+	 * 19 beside 2 busy loops failed 34 of 40 runs, the owner not having
+	 * run yet. */
+	for (i = 0; i < 10000 &&
+	     (xtc_atomic_load_i32(&g_ex5_parked, xtc_mo_seq_cst) < 1 ||
+	         !xtc_atomic_load_i32(&l->inbox.sleeping, xtc_mo_seq_cst));
 	     i++)
 		(void)__os_sleep_ns(1000 * 1000LL);
-	(void)__os_sleep_ns(20 * 1000 * 1000LL);
 	(void)xtc_timer_cancel(g_ex5_timer);    /* foreign: marks only */
 	/* Wake the loop, not the proc: an idle step pops the cancelled node
 	 * in its next-deadline peek and blocks again, running nothing. */
-	(void)xtc_io_wakeup(xtc_exec_loop((xtc_exec_t *)arg, 0)->io);
-	(void)__os_sleep_ns(20 * 1000 * 1000LL);
+	(void)xtc_io_wakeup(l->io);
+	/* The owner publishes 0 before it blocks again; a count published
+	 * only when a step returns stays 1 until the exit below wakes it. */
+	for (i = 0; i < 5000 &&
+	     xtc_atomic_load_i32(&l->n_timers_pub, xtc_mo_relaxed) != 0;
+	     i++)
+		(void)__os_sleep_ns(1000 * 1000LL);
 	xtc_atomic_store_i32(&g_ex5_pub,
-	    xtc_atomic_load_i32(&xtc_exec_loop((xtc_exec_t *)arg, 0)
-	                             ->n_timers_pub,
-	        xtc_mo_relaxed),
+	    xtc_atomic_load_i32(&l->n_timers_pub, xtc_mo_relaxed),
 	    xtc_mo_seq_cst);
 	(void)xtc_exit_pid(g_ex5_pid, 0);
 	/* Bound the test: if the run has not returned in 5 s, it is the
