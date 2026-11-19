@@ -9,9 +9,11 @@
 #	how evt/sim.c came to look ~16% covered while being exercised by 65
 #	DST tests.
 #
-#	This script measures BOTH tiers with instrumentation and merges the
-#	gcovr tracefiles.  The merged figure is the only honest one to quote
-#	for "the DST-reachable public surface" that AGENTS.md asks for.
+#	This script measures BOTH tiers with instrumentation and merges
+#	them.  Next to the merged totals it prints the coverage of the
+#	DST-reachable public surface that AGENTS.md states the claim against,
+#	as scripts/dst_surface.py defines it (the rule is printed with it),
+#	covered by any tier and by the DST tier alone.
 #
 #	Usage:
 #	    sh scripts/coverage.sh [OUTDIR]      # default: ./coverage-out
@@ -90,9 +92,23 @@ gcovr -r "$SRC_DIR/src" --object-directory "$BUILD" \
 # carries --coverage too because the script links the test binaries itself.
 # run_sim_tests.sh runs every DST test past a failure and prints
 # "[sim] FAIL: <test>" for each.
+#
+# The sim library is also compiled with gcc's call-graph and CFG dumps, from
+# which scripts/dst_surface.py computes the DST-reachable surface (its
+# docstring holds the rules and why).  Its self-test runs first: if gcc's
+# dump format moved, the surface figure is not printed and the run fails,
+# rather than quote a figure from a misread graph.
+SURF_FLAGS=
+if python3 "$SRC_DIR/scripts/dst_surface.py" --self-test --cc "$COV_CC" \
+    >"$OUT/surface-selftest.log" 2>&1; then
+	SURF_FLAGS="-fdump-ipa-cgraph -fdump-tree-cfg-blocks-lineno"
+else
+	echo "[surface] scripts/dst_surface.py --self-test failed" \
+	    "(see $OUT/surface-selftest.log)" >>"$FAILS"
+fi
 echo "  [coverage] 2/3 building + running the DST tier (instrumented)"
 dst_rc=0
-CFLAGS="--coverage -O0 -g" LDFLAGS="--coverage" \
+CFLAGS="--coverage -O0 -g $SURF_FLAGS" LDFLAGS="--coverage" \
 CC="$COV_CC --coverage" \
 XTC_SIM_KEEP_BUILD="$OUT/simbuild" \
 XTC_SRC_DIR="$SRC_DIR" \
@@ -104,6 +120,16 @@ if [ "$dst_rc" -ne 0 ] && [ "$(wc -l <"$FAILS")" -eq "$n_before" ]; then
 fi
 gcovr -r "$SRC_DIR/src" --object-directory "$OUT/simbuild/build" \
     --json -o "$OUT/tf-dst.json" >/dev/null 2>&1 || true
+SURFACE=
+rm -f "$OUT/surface.json"
+if [ -n "$SURF_FLAGS" ]; then
+	if python3 "$SRC_DIR/scripts/dst_surface.py" --map "$SRC_DIR/dist/libxtc.map" \
+	    --out "$OUT/surface.json" "$OUT/simbuild/build" >"$OUT/surface.log" 2>&1; then
+		SURFACE="--surface $OUT/surface.json"
+	else
+		echo "[surface] scripts/dst_surface.py failed (see $OUT/surface.log)" >>"$FAILS"
+	fi
+fi
 
 # ---- 3. merge ---------------------------------------------------------
 echo "  [coverage] 3/3 merging"
@@ -133,7 +159,8 @@ fi
 # reports real coverage for each (os_time.c: 75% of 36 lines) -- which
 # understated the whole os layer.  The gcovr summary/HTML above is kept as
 # a convenient browsable view, but do not quote it.
-python3 "$SRC_DIR/scripts/coverage_summary.py" --failures "$FAILS" \
+# shellcheck disable=SC2086  # SURFACE is empty or one option and its file
+python3 "$SRC_DIR/scripts/coverage_summary.py" --failures "$FAILS" $SURFACE \
     "$BUILD" "$OUT/simbuild/build"
 
 echo "  [coverage] logs: $BUILD/check.log, $OUT/dst.log"

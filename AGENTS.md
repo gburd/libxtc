@@ -252,6 +252,28 @@ track it, but state the claim precisely as ">85% of the DST-reachable
 public surface," and never force thread-only / real-kernel / native-
 backend code to a coverage number UNDER DST -- that is dishonest.
 
+The surface is defined mechanically, not by a hand-kept list:
+scripts/dst_surface.py computes it on every `scripts/coverage.sh` run
+from gcc's call-graph and CFG dumps of the sim build, and
+coverage_summary.py prints the figure next to the totals with the rule.
+The rule, in short: the sim build's exported functions (dist/libxtc.map)
+and everything they call, take the address of, or hold in a static
+table, with the native io and real TLS backends compiled out
+(--with-io-backend=sim --with-tls=none), the not-simulating side of
+every `__xtc_sim_active()` test cut, and thread bodies (anything handed
+to a thread-creating call) cut.  So the thread pool, the exec workers,
+the real fork/exec path, the aio offload and the native backends drop
+out because the code says so, and a new gate or thread moves the
+boundary by itself.  It is reported twice: covered by any tier (the
+claim) and by the DST tier alone (how much of it the simulator itself
+exercises).  Known residue the rules keep IN (in-process code that
+needs a real kernel object, so a lower figure, never a higher one): the
+slab's shared-memory mode, the xproc parent path past xtc_osproc_spawn's
+NOSYS under the simulator, and pool code reached without a sim gate
+(xtc_blocking_submit); about 450 of the surface's ~20,000 lines.  Never
+cut code by hand to raise the number; if something belongs outside,
+gate it on the simulator in the code.
+
 ## Continuous integration -- always check after pushing
 
 The repository lives on Codeberg (`origin`,
