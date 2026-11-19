@@ -85,6 +85,7 @@ if errorlevel 1 goto :fail
 echo.
 echo BUILD OK: xtc.lib + smoke.exe
 smoke.exe
+if errorlevel 1 goto :fail
 
 rem --- 5. Build + run a curated set of REAL munit-suite tests under
 rem        cl.exe, now that MUNIT_ARRAY_PARAM no longer expands to a

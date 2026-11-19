@@ -821,6 +821,9 @@ main(int argc, char **argv)
 		 * exit-latch loop wakeup -- works end to end on Windows as of
 		 * the coro_winfiber stack-reserve fix + the slab Win32-fiber
 		 * magazine fix, so this is now a HARD GATE, not a SKIP. */
+		if (s_xproc_reason != 42)
+			fprintf(stderr, "  xtc_xproc: DOWN reason %d, want 42\n",
+			    s_xproc_reason);
 		CHECK(s_xproc_reason == 42);
 		printf("  ok   xtc_xproc: re-exec child spawn+send+monitor, "
 		    "DOWN reason=42\n");
