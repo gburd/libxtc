@@ -18,6 +18,12 @@
 #	Requires gcovr and gcc (the nix dev shell provides both).
 #	Prints the merged line/branch/function percentages and writes a
 #	browsable HTML report.
+#
+#	A failing test does not stop the measurement: every C, PBT and shell
+#	test and every DST test runs (make -k CHECK_KEEP_GOING=1 check), the
+#	failures are listed next to the figure, and the script exits 1 after
+#	printing it.  Under -O0 --coverage some timing tests fail that pass
+#	in an optimized build; a figure from such a run says so.
 
 set -eu
 
@@ -33,46 +39,78 @@ fi
 mkdir -p "$OUT"
 BUILD="$OUT/build-check"
 mkdir -p "$BUILD"
+FAILS="$OUT/failures.txt"
+: >"$FAILS"
 
 # ---- 1. the ordinary configuration: make check -------------------------
+# A build failure leaves nothing to measure, so it stops the script.  A test
+# failure does not: each tier lists its failing tests in check-fails-*.txt,
+# and make -k runs the other tiers (and the examples) past a failed one.
 echo "  [coverage] 1/3 building + running make check (instrumented)"
 (
-	cd "$BUILD"
+	cd "$BUILD" &&
 	CFLAGS="--coverage -O0 -g" LDFLAGS="--coverage" \
-	    "$SRC_DIR/dist/configure" --with-tls=auto >configure.log 2>&1
+	    "$SRC_DIR/dist/configure" --with-tls=auto >configure.log 2>&1 &&
 	make -j"$(nproc 2>/dev/null || echo 2)" >build.log 2>&1
-	"${MAKE:-make}" check >check.log 2>&1
 ) || {
-	echo "  [coverage] FAIL: instrumented make check failed"
-	echo "             see $BUILD/check.log"
+	echo "  [coverage] FAIL: instrumented build failed"
+	echo "             see $BUILD/configure.log and $BUILD/build.log"
 	exit 1
 }
+# A tier whose recipe never ran (one of its test programs failed to
+# build) writes no check-fails file; say so rather than measure without it.
+for tier in c pbt sh; do
+	rm -f "$BUILD/check-fails-$tier.txt"
+done
+check_rc=0
+(cd "$BUILD" && "${MAKE:-make}" -k CHECK_KEEP_GOING=1 check) \
+    >"$BUILD/check.log" 2>&1 || check_rc=$?
+for tier in c pbt sh; do
+	if [ ! -f "$BUILD/check-fails-$tier.txt" ]; then
+		echo "[$tier] the tier did not run (see $BUILD/check.log)" >>"$FAILS"
+	elif [ -s "$BUILD/check-fails-$tier.txt" ]; then
+		sed "s/^/[$tier] /" "$BUILD/check-fails-$tier.txt" >>"$FAILS"
+	fi
+done
+# Any other target that failed (the examples, or a test that did not
+# build); the three tiers' failures are already listed by test.
+sed -n 's/^.*\*\*\* \[[^]]*: *\([^]]*\)\] Error.*$/\1/p' \
+    "$BUILD/check.log" | grep -vxE 'tests-(c|pbt|sh)' |
+    sed 's/^/[make] target failed: /' >>"$FAILS" || true
+if [ "$check_rc" -ne 0 ] && [ ! -s "$FAILS" ]; then
+	echo "[make] make check exited $check_rc (see $BUILD/check.log)" >>"$FAILS"
+fi
 gcovr -r "$SRC_DIR/src" --object-directory "$BUILD" \
-    --json -o "$OUT/tf-check.json" >/dev/null 2>&1
+    --json -o "$OUT/tf-check.json" >/dev/null 2>&1 || true
 
 # ---- 2. the sim configuration: the DST tier ----------------------------
 # run_sim_tests.sh configures its own --with-io-backend=sim build; it
 # honors CFLAGS/LDFLAGS from the environment, and XTC_SIM_KEEP_BUILD keeps
 # the build dir (with its .gcda) instead of a throwaway mktemp dir.  CC
 # carries --coverage too because the script links the test binaries itself.
+# run_sim_tests.sh runs every DST test past a failure and prints
+# "[sim] FAIL: <test>" for each.
 echo "  [coverage] 2/3 building + running the DST tier (instrumented)"
+dst_rc=0
 CFLAGS="--coverage -O0 -g" LDFLAGS="--coverage" \
 CC="$COV_CC --coverage" \
 XTC_SIM_KEEP_BUILD="$OUT/simbuild" \
 XTC_SRC_DIR="$SRC_DIR" \
-    sh "$SRC_DIR/test/sim/run_sim_tests.sh" >"$OUT/dst.log" 2>&1 || {
-	echo "  [coverage] FAIL: instrumented DST tier failed"
-	echo "             see $OUT/dst.log"
-	exit 1
-}
+    sh "$SRC_DIR/test/sim/run_sim_tests.sh" >"$OUT/dst.log" 2>&1 || dst_rc=$?
+n_before=$(wc -l <"$FAILS")
+sed -n 's/^ *\[sim\] FAIL: /[dst] /p' "$OUT/dst.log" >>"$FAILS"
+if [ "$dst_rc" -ne 0 ] && [ "$(wc -l <"$FAILS")" -eq "$n_before" ]; then
+	echo "[dst] run_sim_tests.sh exited $dst_rc (see $OUT/dst.log)" >>"$FAILS"
+fi
 gcovr -r "$SRC_DIR/src" --object-directory "$OUT/simbuild/build" \
-    --json -o "$OUT/tf-dst.json" >/dev/null 2>&1
+    --json -o "$OUT/tf-dst.json" >/dev/null 2>&1 || true
 
 # ---- 3. merge ---------------------------------------------------------
 echo "  [coverage] 3/3 merging"
 gcovr --add-tracefile "$OUT/tf-check.json" \
       --add-tracefile "$OUT/tf-dst.json" \
-      --json-summary-pretty -o "$OUT/merged-summary.json" >/dev/null 2>&1
+      --json-summary-pretty -o "$OUT/merged-summary.json" >/dev/null 2>&1 ||
+    true
 # A browsable per-file HTML view is a nice-to-have, and it needs the SOURCE
 # files at the paths recorded in each tracefile.  Merging two build dirs can
 # leave some of those unresolvable, and gcovr then exits non-zero ("N source
@@ -95,7 +133,12 @@ fi
 # reports real coverage for each (os_time.c: 75% of 36 lines) -- which
 # understated the whole os layer.  The gcovr summary/HTML above is kept as
 # a convenient browsable view, but do not quote it.
-python3 "$SRC_DIR/scripts/coverage_summary.py" \
+python3 "$SRC_DIR/scripts/coverage_summary.py" --failures "$FAILS" \
     "$BUILD" "$OUT/simbuild/build"
 
+echo "  [coverage] logs: $BUILD/check.log, $OUT/dst.log"
 echo "  [coverage] detail: $OUT/merged-summary.json (+ merged.html)"
+if [ -s "$FAILS" ]; then
+	echo "  [coverage] FAIL: $(wc -l <"$FAILS" | tr -d ' ') failing test(s); see above"
+	exit 1
+fi

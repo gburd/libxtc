@@ -7,7 +7,7 @@ authoritative numbers come from gcov's own --json-format output.
 Line/branch/function are unioned per source file across every build dir,
 which is what makes a cross-configuration (check + DST) figure meaningful.
 """
-import glob, gzip, json, os, subprocess, sys, collections
+import argparse, glob, gzip, json, os, subprocess, collections
 
 def collect(build_dir, want_prefix):
     files = {}
@@ -57,10 +57,31 @@ def merge(a, b):
 def pct(cov, tot):
     return 100.0 * cov / tot if tot else 0.0
 
+def print_failures(path):
+    """Print the failing tests listed in `path`, one per line.
+
+    A figure measured over a run in which tests failed undercounts what the
+    passing suite covers, and must not be quoted as if the run were green.
+    """
+    with open(path) as f:
+        fails = [ln.rstrip("\n") for ln in f if ln.strip()]
+    if not fails:
+        print("\ntests: all passed")
+        return
+    print("\ntests: %d FAILED -- this figure is from a run with failing tests:"
+          % len(fails))
+    for ln in fails:
+        print("  " + ln)
+
 if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--failures", metavar="FILE",
+                    help="list of the run's failing tests, one per line")
+    ap.add_argument("build_dirs", nargs="+")
+    args = ap.parse_args()
     prefix = "/src/"
     total = {}
-    for bd in sys.argv[1:]:
+    for bd in args.build_dirs:
         total = merge(total, collect(bd, prefix))
     L = Lc = B = Bc = F = Fc = 0
     rows = []
@@ -71,7 +92,7 @@ if __name__ == "__main__":
         L += l; Lc += lc; B += b; Bc += bc; F += fn; Fc += fc
         rows.append((l - lc, b - bc, pct(lc, l), l, rel))
     print("MERGED coverage over %d source file(s), %d build dir(s):"
-          % (len(total), len(sys.argv) - 1))
+          % (len(total), len(args.build_dirs)))
     print("  line     %6.1f%%   (%d/%d)" % (pct(Lc, L), Lc, L))
     print("  branch   %6.1f%%   (%d/%d)" % (pct(Bc, B), Bc, B))
     print("  function %6.1f%%   (%d/%d)" % (pct(Fc, F), Fc, F))
@@ -82,3 +103,5 @@ if __name__ == "__main__":
     for lm, bm, p, l, rel in rows[:15]:
         print("  %-28s %5.1f%%  miss L=%-5d B=%-5d (%d lines)"
               % (rel, p, lm, bm, l))
+    if args.failures:
+        print_failures(args.failures)
