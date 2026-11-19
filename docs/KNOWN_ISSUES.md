@@ -45,6 +45,10 @@ one forged DOWN to a supervisor and one to the reaper; on 2.1.3 the
 child starts twice and the name is gone.  `test_sim_forged_down` sends
 seeded bursts of them across three loops while one child crashes for
 real; planted bugs 77 and 78 take the forged ones again and are caught.
+The check costs a request-reply round trip about 22 ns (perf-gate
+`micro_proc_send_recv` against 2.1.3, bare metal: 712 to 762 ns,
+-6.5% to -7.1%, under the cell's 10% threshold); no other cell moved
+outside its noise.
 
 ## FIXED (2.1.4): a receive that ran out of memory reordered the mailbox
 

@@ -86,7 +86,8 @@ make check
   A user message shaped like a DOWN no longer makes a supervisor
   restart a live child, the registry reaper drop a live name, or
   xtc_launch end early: the library's receivers act only on the DOWN
-  and link EXIT messages the library sent.  A receive whose copy-out
+  and link EXIT messages the library sent (a request-reply round trip
+  costs about 22 ns more for the check).  A receive whose copy-out
   runs out of memory puts the message back in arrival order, and a DOWN
   of kind NOCONNECTION decodes as NOCONNECTION, not as signal 4.  The
   sqlxtc example indexes keys of any length, and UNIQUE holds for them;

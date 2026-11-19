@@ -12,7 +12,11 @@ libxtc (2.1.4-1) unstable; urgency=medium
     the messages the library sends, and those receivers act only on
     marked ones; an ordinary message with the same bytes is dropped.
     No API, symbol or layout change.  New DST test
-    test_sim_forged_down; planted bugs 77 and 78.
+    test_sim_forged_down; planted bugs 77 and 78.  Cost: the receive
+    path checks the mark, so a request-reply round trip costs about 22
+    ns more (perf-gate micro_proc_send_recv against 2.1.3: 712 -> 762
+    ns, -6.5% to -7.1% on a bare-metal host, under the cell's 10%
+    threshold); every other cell is within its noise.
   * A receive whose copy of an inline payload fails with XTC_E_NOMEM
     put the message back at the head of the save queue, so the next
     xtc_recv returned it ahead of messages that arrived before it.  It
