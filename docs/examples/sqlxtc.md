@@ -173,6 +173,18 @@ while splits and merges only move the reference. B-tree values go up to
 most 4096 bytes per row and refuses a longer one with "row too large"
 (see KNOWN_ISSUES).
 
+**Index keys of any length.** Keys do not go out of line: every
+separator, fence and cursor position is a whole key, so a key stays
+within `bt_max_key()`. An index key tuple has no such bound (a TEXT
+value takes its own length), so the engine stores a long one truncated:
+its first `bt_max_key() - 21` bytes (476 on 4 KiB pages) and a keyed
+SipHash-1-3 of the whole tuple (see "Keys" below). Every row is indexed
+whatever the length of its key, a lookup by a 3000-byte value finds its
+row, and a UNIQUE column refuses a second copy of it. An entry match is
+only a candidate: the row's whole key decides, so two values that share
+their first 476 bytes are different keys. Until 2.1.4 a key longer than
+`bt_max_key()` was not indexed at all; see KNOWN_ISSUES.
+
 **Writers do not hold the root.** RethinkDB's write descent keeps the
 root write-locked across a child read, which serializes every later
 operation (it compensates with page snapshots and eight shards per
@@ -423,13 +435,33 @@ field today -- add one (a first frame naming the version) with it.
 flipped][~commit stamp:8 BE]`, value `[flags:1][record]` (the record in
 SQLite's record format).  An index entry is `[0xFE][index id:4
 BE][column elements][rowid:8]` with an empty value; its encoding is
-versioned by `XS_IDX_FORMAT` (2), stored in the superblock's trust tag:
+versioned by `XS_IDX_FORMAT` (3), stored in the superblock's trust tag:
 a different value rebuilds every index from the rows at the next start.
+
+The column elements are an order-preserving, self-delimiting encoding
+of the values (`xs_tup_elem`: SQLite's cross-class order, 3 and 3.0
+alike, TEXT and BLOB with 0x00 escaped and a 0x00 0x00 terminator), so
+memcmp order over entries is the index order.  When the elements take
+more than P = `bt_max_key()` - 21 bytes the entry is truncated:
+
+| form | key |
+| --- | --- |
+| whole | `[0xFE][index id:4][elements, at most P bytes][rowid:8]` |
+| truncated | `[0xFE][index id:4][first P bytes of the elements][SipHash-1-3 of all the elements:8 BE][rowid:8]` |
+
+A truncated entry is exactly `bt_max_key()` bytes long and a whole one
+at most 8 bytes shorter, so the length tells them apart.  The hash key
+is 128 random bits per index, drawn at CREATE INDEX and kept in the
+index's catalog row (`<k0>,<k1>` in hex after the kind); an index made
+before format 3 has key 0, 0.  The order is exact except among
+truncated entries that share their first P bytes: readers re-check
+every candidate against its row, and an index scan re-sorts each such
+group by whole key.
 
 What to bump: the superblock magic for anything in the page file
 (header, slot, cells, fences, separators, child ids, the out-of-line
-and freelist pages); `XS_IDX_FORMAT` for the index-entry encoding; the
-log has none yet (see above).
+and freelist pages); `XS_IDX_FORMAT` for the index-entry encoding,
+the truncation rule, or the hash; the log has none yet (see above).
 
 ## Buffer replacement: HOT/COOL and CLOCK
 

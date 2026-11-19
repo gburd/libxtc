@@ -165,7 +165,7 @@ clean:
 	rm -f test_steal_page
 	rm -f test_wal_kill test_wal_tail test_wal_kill_engine test_wal_get_tail test_idx_trust test_crash_oracle
 	rm -f bench_wal test_wal_crc test_wal_crc_sw test_wal_dsync test_wal_dio
-	rm -f test_wal_kill test_wal_tail test_wal_kill_engine test_uniq_commit
+	rm -f test_wal_kill test_wal_tail test_wal_kill_engine test_uniq_commit test_uniq_long
 	rm -f test_steal_leaf test_cat_reopen test_ckpt_online test_wal_group_sync test_intents_thread test_torn_base test_snap_registry test_rowid_minmax test_btree_fill test_wal_bigtxn test_steal_reclaim test_dio_restart test_wal_prealloc
 	rm -f test_bufmgr test_bufmgr.o bufmgr.o test_bufmgr_dio test_bufmgr_dio.o
 	rm -f test_bufmgr_mt
@@ -1239,6 +1239,16 @@ test_uniq_commit: test_uniq_commit.c engine.o db.o quack.o metrics.o xstore.o xl
 
 test-uniq-commit: test_uniq_commit
 	TMPDIR=$${TMPDIR:-/tmp} ./test_uniq_commit
+
+# UNIQUE and index lookups over keys of every length: a failed UNIQUE
+# probe is an error, not "no duplicate".
+test: test-uniq-long
+
+test_uniq_long: test_uniq_long.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ)
+	$(CC) $(CFLAGS) -o $@ test_uniq_long.c engine.o db.o quack.o metrics.o xstore.o xlog.o wal.o btree.o btnode.o bufmgr.o $(LIME_OBJ) $(VEXEC_OBJ) $(LDFLAGS)
+
+test-uniq-long: test_uniq_long
+	TMPDIR=$${TMPDIR:-/tmp} ./test_uniq_long
 
 # A frame reused for a new page (bm_alloc_pid) changes its version, so a
 # pin-free optimistic reader that sampled it before cannot validate.

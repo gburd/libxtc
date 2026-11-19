@@ -1961,8 +1961,10 @@ sx_step_body(sx_stmt *st)
 				}
 				return nat_set_err(st->db, SX_MSG_SERIALIZE, SX_BUSY);
 			}
-			if (verr != NULL && (strncmp(verr, "UNIQUE", 6) == 0 ||
-			    strncmp(verr, "row too large", 13) == 0)) {
+			if (verr != NULL &&
+			    (strncmp(verr, "UNIQUE", 6) == 0 ||
+			        strncmp(verr, "row too large", 13) == 0 ||
+			        strncmp(verr, "index error", 11) == 0)) {
 				rc = nat_set_err(st->db, verr, verr[0] == 'U'
 				    ? SX_CONSTRAINT : SX_ERROR);
 				free(verr);
@@ -2010,6 +2012,10 @@ sx_step_body(sx_stmt *st)
 				return nat_set_err(st->db, xstore_uniq_err(st->db),
 				    SX_CONSTRAINT);
 			const char *ck = sx_cksum_msg(ckbuf, sizeof ckbuf);
+			/* A UNIQUE probe that failed left its reason. */
+			if (ck == NULL && !xstore_wal_failed() &&
+			    xstore_uniq_err(st->db)[0] != '\0')
+				ck = xstore_uniq_err(st->db);
 			return nat_set_err(st->db, ck != NULL ? ck :
 			    xstore_wal_failed() ? SX_MSG_WAL_IO
 			    : "commit failed; transaction rolled back", SX_ERROR);

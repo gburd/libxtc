@@ -6,6 +6,23 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## FIXED (2.1.4): sqlxtc indexes missed long keys, and UNIQUE let them repeat
+
+An index key longer than one B-tree key (497 bytes on 4 KiB pages; a
+TEXT value of about 490 bytes) got no index entry, at INSERT, UPDATE,
+CREATE INDEX or a rebuild.  A UNIQUE column then accepted two identical
+long values (the probe for the duplicate failed and its error read as
+"no duplicate"), CREATE UNIQUE INDEX over two such values succeeded,
+and a query through a plain index did not return the row.  Base rows
+were never lost.  2.1.4 stores a long key as its first 476 bytes plus a
+keyed hash of the whole key and checks every match against the row, so
+every row is indexed and UNIQUE holds at any length; a UNIQUE probe that
+cannot finish (a page read error) now fails the statement with "index
+error: cannot check UNIQUE t.c: ...".  The index format moves from 2 to
+3: a store closed cleanly by 2.1.3 rebuilds its indexes once at the
+first 2.1.4 open.  `examples/06_sqlxtc/test_uniq_long` and the DST tier
+`test_sim_sqlxtc_uniq` (planted bugs 72 and 73) fail on 2.1.3.
+
 ## CHANGED (2.1.3): the `__os_*.3` man pages are no longer installed
 
 `make install` and `meson install` installed the ten man pages of the

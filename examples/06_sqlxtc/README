@@ -6,7 +6,11 @@ constraint become an internal UNIQUE index (`sqlite_autoindex_<t>_<n>`,
 as SQLite names them); CREATE INDEX takes any number of columns with
 ASC/DESC.  Index keys are an order-preserving tuple encoding
 (`[0xFE][index id][elements...][rowid]`, xstore.c), so a prefix is a
-range.  One access-path chooser (vexec.c) serves SELECT, aggregates,
+range.  Keys of any length are indexed: a key tuple longer than one
+B-tree key holds (476 of its bytes on 4 KiB pages) is stored as that
+prefix plus a keyed SipHash-1-3 of the whole tuple, and every match is
+checked against the row, so a UNIQUE column refuses a duplicate
+3000-byte value and accepts two that differ only at the end.  One access-path chooser (vexec.c) serves SELECT, aggregates,
 ORDER BY, UPDATE and DELETE: rowid range, longest-equality-prefix index
 seek with an optional range on the next column, index order instead of a
 sort, MIN/MAX from the first or last key, and index nested-loop joins.

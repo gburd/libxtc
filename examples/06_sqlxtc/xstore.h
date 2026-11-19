@@ -131,7 +131,8 @@ void xstore_set_clock(uint64_t v);
  * distributed engine; an alias over xstore_set_clock). */
 void xstore_clock_observe(uint64_t peer_ts);
 /* Test seam for deterministic simulation: put the commit clock and the
- * read horizon back to their process-start value (1), so a run's stamps
+ * read horizon back to their process-start value (1), and clear the
+ * per-table, per-row and per-UNIQUE-key commit stamps, so a run's stamps
  * do not continue from an earlier run's in the same process.  Only with
  * no store open and no commit in flight; never on a live store (the
  * clock must not run backwards under data it has stamped). */
@@ -570,6 +571,9 @@ uint64_t xstore_index_rebuild_count(void);
 int      xstore_index_check(bt_t *bt, uint64_t *missing, uint64_t *stale);
 /* Test hook: the next n index entry inserts fail (as bt_insert can). */
 void     xstore_index_fail_inject(int n);
+/* Test hook: the next n UNIQUE probes of the committed index fail with
+ * XTC_E_IO (as a page read can); the write or COMMIT must then fail. */
+void xstore_uniq_fail_inject(int n);
 
 /* xstore_recover that also reports where the log ends after recovery
  * (wal_scan_ex form; tail->valid = 0 if unknown), so the engine's

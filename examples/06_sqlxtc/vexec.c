@@ -9188,20 +9188,23 @@ vx_insert_row(struct xsql *db, uint32_t tableid, int64_t rowid,
 	if (rc == 0) return 0;
 	if (rc == 1)
 		vx_write_uniq_err(db, errmsg, table, pk);
+	else if (errmsg != NULL && *errmsg == NULL && xstore_uniq_err(db)[0])
+		*errmsg = strdup(xstore_uniq_err(db));
 	else if (errmsg != NULL && *errmsg == NULL)
 		*errmsg = strdup("native insert failed");
 	return -1;
 }
 
-/* Report a refused UPDATE / DELETE row write: a UNIQUE violation keeps
- * its message, anything else gets `what`. */
+/* Report a refused UPDATE / DELETE row write: a UNIQUE violation (rc 1)
+ * or a failed UNIQUE probe (rc -1) keeps its message, anything else gets
+ * `what`. */
 static void
 vx_write_err(struct xsql *db, int rc, char **errmsg, const char *what)
 {
 	if (errmsg == NULL) return;
 	free(*errmsg);
 	*errmsg = NULL;
-	if (rc == 1 && xstore_uniq_err(db)[0] != '\0')
+	if (rc != 0 && xstore_uniq_err(db)[0] != '\0')
 		*errmsg = strdup(xstore_uniq_err(db));
 	else
 		*errmsg = strdup(what);

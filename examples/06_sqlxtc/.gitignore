@@ -48,6 +48,7 @@ test_wal_crc_once
 test_wal_dsync
 test_wal_dio
 test_uniq_commit
+test_uniq_long
 test_dio_restart
 test_steal_reclaim
 test_wal_bigtxn

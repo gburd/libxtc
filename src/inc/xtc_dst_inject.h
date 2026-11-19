@@ -161,6 +161,8 @@
 #define XTC_DST_BUG_PRUNEHZN   21  /* xstore.c: prune-on-write deletes the version at the horizon */
 #define XTC_DST_BUG_SHIFTLO    22  /* btree.c: a resumed cursor skips the lo-fence re-check */
 #define XTC_DST_BUG_GCBATCH    23  /* xstore.c: version GC forgets its row at a batch boundary */
+#define XTC_DST_BUG_UNIQPROBE  72  /* xstore.c: a failed UNIQUE probe reads as "no duplicate" */
+#define XTC_DST_BUG_LONGKEY    73  /* xstore.c: a key longer than a B-tree key is not indexed */
 /*
  * 29 AIO_TAG_AFTER_DONE: src/io/io_sim.c's AIO reaper publishes done and
  * only then reads a->tag, the order every native reaper had until 2.1.2.

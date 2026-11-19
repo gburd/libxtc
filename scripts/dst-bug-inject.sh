@@ -104,6 +104,8 @@ write_cases() {
 		"65;test_sim_lrlock;0;0;a write was lost .* when the oplog could not grow" \
 		"67;test_sim_partition;0;0;a DOWN or link EXIT was lost under a partition" \
 		"68;test_sim_offloop_wait;0;0;a timed wait off a fiber did not return at once" \
+		"72;test_sim_sqlxtc_uniq;1;1;UNIQUE: value [0-9]+ \\([0-9]+ bytes\\) is held by ([2-9]|[1-9][0-9]+) rows" \
+		"73;test_sim_sqlxtc_uniq;1;1;(UNIQUE: value [0-9]+ \\((49[89]|[5-9][0-9]{2}|[0-9]{4}) bytes\\) is held by|INDEX: value)" \
 		"77;test_sim_forged_down;0;1;a forged DOWN restarted a live child" \
 		"78;test_sim_forged_down;0;1;a forged DOWN dropped a live name" \
 		> "$1"
@@ -170,6 +172,10 @@ write_cases() {
 #               -> a death across a cut still reaches its watcher
 # 68 SIM_OFFLOOP_WAIT sim.c a timed wait off a fiber reads the wall
 #               clock -> a wait no fiber can end expires at once
+# 72 UNIQPROBE  xstore.c a failed UNIQUE probe reads as "no duplicate"
+#               -> no two live rows carry one UNIQUE value
+# 73 LONGKEY    xstore.c a key longer than a B-tree key gets no entry
+#               -> every row is in the index; UNIQUE holds for long values
 # 77 SUP_FORGED_DOWN sup.c acts on a user message shaped like a DOWN
 #               -> an xtc_send of a DOWN's bytes never restarts a live child
 # 78 REG_FORGED_DOWN reg.c reaper acts on a user message shaped like a DOWN

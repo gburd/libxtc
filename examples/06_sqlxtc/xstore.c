@@ -68,6 +68,7 @@
 #include "xtc_proc.h"
 #include "xtc_sync.h"
 #include "xtc_dst_inject.h" /* DST planted bugs (no-op in prod) */
+#include "sx_siphash.h"   /* the hash of a truncated index key */
 #include "xtc_sim.h"      /* XTC_SIM_BUGGIFY: DST pessimal points (no-op in prod) */
 
 /*
@@ -425,6 +426,11 @@ xstore_clock_reset(void)
 	xs_commit_lock();
 	atomic_store_explicit(&g_xclock, 1, memory_order_relaxed);
 	atomic_store_explicit(&g_xvisible, 1, memory_order_seq_cst);
+	/* The stamps are commit times: left over from the earlier run, the
+	 * re-check skips below would compare them with the restarted clock. */
+	memset(g_tab_cts, 0, sizeof g_tab_cts);
+	memset(g_row_cts, 0, sizeof g_row_cts);
+	memset(g_uk_cts, 0, sizeof g_uk_cts);
 	xs_commit_unlock();
 }
 
@@ -1560,7 +1566,35 @@ xstore_cat_forget_one(bt_t *bt, const char *name)
  * Otherwise -- a crash, a failed insert, an older format -- every index is
  * rebuilt from the base rows.  Bump XS_IDX_FORMAT whenever the entry
  * encoding (xs_tup_elem, xs_idx_rowkey, the prefix) changes.  Format 2:
- * compact numbers (xs_tup_num).
+ * compact numbers (xs_tup_num).  Format 3: long keys (below).
+ *
+ * LONG KEYS.  A B-tree key holds at most bt_max_key() = K bytes (497 on
+ * 4 KiB pages), and a key tuple is not bounded (a TEXT value takes its
+ * length plus escapes).  Every row is indexed whatever its key's length:
+ * a key tuple of at most P = K - 21 bytes is stored whole, a longer one
+ * truncated, as STORAGE_DESIGN.md section 8.3 specifies:
+ *     whole:     [0xFE][idx_id:4][key tuple, <= P bytes][rowid:8]
+ *     truncated: [0xFE][idx_id:4][first P bytes of the key tuple]
+ *                    [SipHash-1-3 of the whole key tuple: 8][rowid:8]
+ * The hash is keyed by the index's (k0, k1), random at CREATE INDEX and
+ * kept in its catalog row (0, 0 for an index made before format 3); it
+ * covers the tuple bytes after the 5-byte prefix and is stored big-endian.
+ * A truncated entry is exactly K bytes long and a whole one at most K - 8,
+ * so the length tells them apart (xs_idx_truncated).
+ * Order is exact except among truncated entries that share their first
+ * P tuple bytes (a "group"): the tuple encoding is self-delimiting, so a
+ * whole key differs from every other key within its own length, and
+ * only a group sorts by hash.  The consequences, all handled here:
+ *   - an entry match is a candidate, never an answer: a reader re-derives
+ *     the entry from the row (as for stale entries), the planner's
+ *     caller re-applies the WHERE, and UNIQUE compares the WHOLE tuples
+ *     of a truncated match (xs_uniq_same);
+ *   - a scan bound longer than P is widened to its P-byte group (with the
+ *     hash when every column is bound) and the rows decide;
+ *   - an index scan re-sorts each group by whole key (xs_iscan_group),
+ *     so index order, MIN/MAX and LIMIT stay exact.
+ * The HASH index (STORAGE_DESIGN.md section 10) relies on the same
+ * tuple encoding and the same keyed SipHash-1-3 over it.
  *
  * Entries are ADD-ONLY at commit: a row version whose key tuple differs
  * from its predecessor adds an entry, and the predecessor's entry is
@@ -1581,13 +1615,15 @@ xstore_cat_forget_one(bt_t *bt, const char *name)
  * The index CATALOG is persisted at reserved table-id XS_IDXCAT_TABLEID
  * as ordinary version rows (WAL-durable): one row per index, rowid =
  * dense index id, value
- *     "<name>\0<table>\0<c1,c2,...>\0<unique>\0<descmask>\0<kind>"
+ *     "<name>\0<table>\0<c1,c2,...>\0<unique>\0<descmask>\0<kind>\0
+ *      <k0>,<k1>"
  * kind 'p' = PRIMARY KEY autoindex, 'u' = UNIQUE constraint autoindex,
- * 'i' = CREATE INDEX.  A 1.57-format row ("<name>\0<table>\0<col>\0<u>")
- * still parses as a one-column ascending CREATE INDEX.
+ * 'i' = CREATE INDEX; k0, k1 the SipHash key in hex (absent before 2.2:
+ * 0, 0).  A 1.57-format row ("<name>\0<table>\0<col>\0<u>") still
+ * parses as a one-column ascending CREATE INDEX.
  * ================================================================== */
 #define XS_IDXCAT_TABLEID 0xFFFFFFFDu   /* persisted index catalog */
-#define XS_IDX_FORMAT     2u            /* index entry encoding version (1: 1.59) */
+#define XS_IDX_FORMAT     3u            /* index entry encoding version (1: 1.59) */
 /* The superblock word a clean close records when the indexes are complete
  * ("XIDX" + the format); xstore_index_open trusts only this value. */
 #define XS_IDX_TRUST_TAG  ((0x58494458ull << 32) | XS_IDX_FORMAT)
@@ -1595,6 +1631,10 @@ xstore_cat_forget_one(bt_t *bt, const char *name)
 #define XS_IDX_MAX        128           /* in-process index cache size */
 #define XS_IDX_NCOL       16            /* columns per index */
 #define XS_IDX_KMAX       1024          /* >= BT_MAX_KEY on every page size */
+/* The longest key tuple a record of XS_VMAX bytes encodes: each payload
+ * byte escaped once (TEXT/BLOB 0x00 -> 0x00 0xFF), plus at most 32 bytes
+ * of tags, terminators and number bodies per column, and the prefix. */
+#define XS_IDX_TMAX       (5 + 2 * XS_VMAX + 32 * XS_IDX_NCOL)
 
 /* Element type tags, in SQLite's cross-class order.  A number's tag is
  * XS_TUP_NUM plus (minus, if negative) its magnitude class 0..9
@@ -1615,6 +1655,8 @@ struct xs_idx_rt {
 	uint32_t descmask;          /* bit i: column i is DESC */
 	int      unique;
 	char     kind;              /* 'p' / 'u' / 'i' */
+	int      kmax;              /* bt_max_key: the entry bound */
+	uint64_t k0, k1;            /* SipHash key of truncated entries */
 };
 struct xs_idx_ent {
 	bt_t    *bt;
@@ -1639,6 +1681,7 @@ static _Atomic uint64_t g_idx_rebuilds;   /* full index rebuilds (metric) */
 static _Atomic uint64_t g_idx_garbage;
 #define XS_IDX_GARBAGE_MAX (1u << 16)
 static _Atomic int g_idx_failinj;         /* test hook: inserts to fail */
+static _Atomic int g_uniq_failinj;        /* test hook: UNIQUE probes to fail */
 
 /* Catalog generation: bumped by every DDL entry point (tables, indexes,
  * views) and index rebuild, so a cached plan built at an older one is
@@ -1859,17 +1902,15 @@ xs_idx_resolve(bt_t *bt, const char *table, char col[][64], int ncol, int *pay)
 }
 
 /*
- * Encode the index key of a row: the namespace prefix, one element per
- * index column read from payload record `rec` (rowid for pay == -1),
- * and (with_rowid) the 8-byte rowid suffix.  *has_null is set when an
- * element is NULL (exempt from UNIQUE).  Returns the length, or -1 if
- * the key exceeds `cap` (the row is then not indexed -- a seek that
- * would need it refuses and the caller scans).
+ * Encode the whole key tuple of a row: the namespace prefix and one
+ * element per index column read from payload record `rec` (rowid for
+ * pay == -1), never truncated.  *has_null is set when an element is
+ * NULL (exempt from UNIQUE).  Returns the length, or -1 if it exceeds
+ * `cap` (XS_IDX_TMAX holds any record's).
  */
 static int
-xs_idx_rowkey(const struct xs_idx_rt *e, const uint8_t *rec,
-    int reclen, int64_t rowid, int with_rowid, uint8_t *out, int cap,
-    int *has_null)
+xs_idx_tuple(const struct xs_idx_rt *e, const uint8_t *rec, int reclen,
+    int64_t rowid, uint8_t *out, int cap, int *has_null)
 {
 	/* The record is decoded once (xstore_rec_cols), up to the highest
 	 * payload column the index names; xstore_rec_col per column
@@ -1897,13 +1938,85 @@ xs_idx_rowkey(const struct xs_idx_rt *e, const uint8_t *rec,
 		off = xs_tup_elem(out, off, cap, cls, iv, rv, p, np,
 		    (int)((e->descmask >> i) & 1u));
 	}
-	if (off < 0) return -1;
-	if (with_rowid) {
-		if (off + 8 > cap) return -1;
-		xs_put_be64(out + off, (uint64_t)rowid ^ 0x8000000000000000ull);
-		off += 8;
-	}
 	return off;
+}
+
+/* Is an entry key of `klen` bytes (with its rowid suffix) truncated? */
+static int
+xs_idx_truncated(const struct xs_idx_rt *e, int klen)
+{
+	return klen == e->kmax;
+}
+
+/*
+ * The entry form of whole key tuple tup[0..tl) (prefix included): the
+ * tuple itself if it holds at most P = kmax - 21 bytes after the
+ * prefix, else its first P bytes and the SipHash-1-3 of all of them
+ * (the encoding in the LONG KEYS comment above), then (with_rowid) the
+ * rowid.  Returns the length (at most kmax), or -1 if `cap` is short or
+ * the page is too small to hold a truncated entry.
+ */
+static int
+xs_idx_entkey(const struct xs_idx_rt *e, const uint8_t *tup, int tl,
+    int64_t rowid, int with_rowid, uint8_t *out, int cap)
+{
+	int p = e->kmax - 21, n;
+#if XTC_DST_BUG(XTC_DST_BUG_LONGKEY)
+	if (with_rowid && tl - 5 > p)
+		return -1; /* planted 73: a long key gets no index entry */
+#endif
+	/* shortcut: pages under 512 bytes leave no room for a truncated
+	 * entry and do not index a long key; sqlxtc uses 4 KiB and up. */
+	if (p < 1)
+		return -1;
+	n = tl - 5 <= p ? tl : 5 + p + 8;
+	if (n + (with_rowid ? 8 : 0) > cap)
+		return -1;
+	if (tl - 5 <= p) {
+		memcpy(out, tup, (size_t)tl);
+	} else {
+		memcpy(out, tup, (size_t)(5 + p));
+		xs_put_be64(out + 5 + p,
+		    sx_siphash13(e->k0, e->k1, tup + 5, (size_t)(tl - 5)));
+	}
+	if (with_rowid) {
+		xs_put_be64(out + n, (uint64_t)rowid ^ 0x8000000000000000ull);
+		n += 8;
+	}
+	return n;
+}
+
+/*
+ * Encode the index entry key of a row (xs_idx_tuple, then the entry
+ * form, xs_idx_entkey) into `out` (cap >= kmax), with the 8-byte rowid
+ * suffix if with_rowid.  Every row has one: returns the length, or -1
+ * only on a short `cap` or a page too small for long keys.
+ */
+static int
+xs_idx_rowkey(const struct xs_idx_rt *e, const uint8_t *rec, int reclen,
+    int64_t rowid, int with_rowid, uint8_t *out, int cap, int *has_null)
+{
+	/* Per thread, not on the fiber stack: nothing here parks. */
+	static _Thread_local uint8_t tup[XS_IDX_TMAX];
+	int tl;
+	tl =
+	    xs_idx_tuple(e, rec, reclen, rowid, tup, (int)sizeof tup, has_null);
+	if (tl < 0)
+		return -1;
+	return xs_idx_entkey(e, tup, tl, rowid, with_rowid, out, cap);
+}
+
+/* Do two rows carry one whole key tuple in index `e`?  For a truncated
+ * entry match, which the hash alone cannot prove. */
+static int
+xs_idx_tuple_eq(const struct xs_idx_rt *e, const uint8_t *ra, int la,
+    int64_t ida, const uint8_t *rb, int lb, int64_t idb)
+{
+	static _Thread_local uint8_t ta[XS_IDX_TMAX], tb[XS_IDX_TMAX];
+	int na, nb;
+	na = xs_idx_tuple(e, ra, la, ida, ta, (int)sizeof ta, NULL);
+	nb = xs_idx_tuple(e, rb, lb, idb, tb, (int)sizeof tb, NULL);
+	return na >= 0 && na == nb && memcmp(ta, tb, (size_t)na) == 0;
 }
 
 /* Read the newest committed record for (tableid, rowid) into `rec`
@@ -2162,6 +2275,21 @@ xstore_index_fail_inject(int n)
 	atomic_store_explicit(&g_idx_failinj, n, memory_order_relaxed);
 }
 
+void
+xstore_uniq_fail_inject(int n)
+{
+	atomic_store_explicit(&g_uniq_failinj, n, memory_order_relaxed);
+}
+
+/* Should this UNIQUE probe fail (xstore_uniq_fail_inject)? */
+static int
+xs_uniq_fail_now(void)
+{
+	return atomic_load_explicit(&g_uniq_failinj, memory_order_relaxed) > 0 &&
+	    atomic_fetch_sub_explicit(&g_uniq_failinj, 1,
+	        memory_order_relaxed) > 0;
+}
+
 /*
  * Index maintenance for one committed base-row version (delete == 1 for
  * a tombstone), called after the version is in the tree.  oldrec is the
@@ -2187,11 +2315,15 @@ xs_idx_maintain_ts(bt_t *bt, uint32_t tableid, int64_t rowid,
 	for (i = 0; i < nh; i++) {
 		nkl = okl = -1;
 		if (!deleted && newrec != NULL && newlen > 0)
-			nkl = xs_idx_rowkey(&hits[i], newrec, newlen,
-			    rowid, 1, nk, (int)bt_max_key(bt), NULL);
+			nkl = xs_idx_rowkey(&hits[i], newrec, newlen, rowid, 1,
+			    nk, (int)sizeof nk, NULL);
 		if (oldrec != NULL && oldlen > 0)
-			okl = xs_idx_rowkey(&hits[i], oldrec, oldlen,
-			    rowid, 1, ok, (int)bt_max_key(bt), NULL);
+			okl = xs_idx_rowkey(&hits[i], oldrec, oldlen, rowid, 1,
+			    ok, (int)sizeof ok, NULL);
+		/* Every row has an entry (long keys are truncated): -1 only
+		 * on a page too small for one, and then the index is short. */
+		if (!deleted && newrec != NULL && newlen > 0 && nkl < 0)
+			atomic_store_explicit(&g_idx_taint, 1, memory_order_release);
 		if (nkl > 0 && okl == nkl && memcmp(nk, ok, (size_t)nkl) == 0)
 			continue;                  /* key tuple unchanged */
 		if (nkl > 0)
@@ -2218,6 +2350,7 @@ static int  xs_uniq_validate_locked(bt_t *bt, xstore_ctx_t *cx, uint32_t tid1,
     const struct xs_idx_rt *u, int nu, uint32_t *bad);
 static int  xs_idx_get(bt_t *bt, uint32_t idx_id, struct xs_idx_ent *e);
 static void xs_uniq_msg(const struct xs_idx_ent *e, char *out, size_t cap);
+static void xs_idx_err_msg(bt_t *bt, uint32_t idx, int rc, char *o, size_t n);
 static int  xs_uniq_check_stmt(xstore_ctx_t *cx, uint32_t tableid,
     int64_t rowid, const uint8_t *rec, int reclen);
 
@@ -4672,7 +4805,9 @@ xs_key_live_locked(bt_t *bt, uint32_t tableid, int64_t rowid)
  * of it has finished) return SX_CONSTRAINT and write nothing.  The
  * check and the registration are one step under the commit lock.
  * vis: return only once the write is visible (the caller holds no
- * engine lock); else only once its in-flight entry is unlinked. */
+ * engine lock); else only once its in-flight entry is unlinked.
+ * A UNIQUE conflict returns SX_CONSTRAINT and a UNIQUE probe that could
+ * not run its negative XTC_E_* code, both with *ubad set to the index. */
 static int
 xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n,
     int deleted, uint64_t base, int insert, uint64_t *out_ts, uint32_t *ubad,
@@ -4710,11 +4845,15 @@ xs_put_ts(bt_t *bt, uint32_t tableid, int64_t rowid, const void *blob, int n,
 	}
 	/* UNIQUE indexes: the check and the in-flight registration are one
 	 * step, so two concurrent writers of one key cannot both pass. */
-	if (nuq > 0 && xs_uniq_validate_locked(bt, NULL, tableid, rowid,
-	    (const uint8_t *)blob, n, uq, nuq, &bad)) {
+	rc = 0;
+	if (nuq > 0)
+		rc = xs_uniq_validate_locked(bt, NULL, tableid, rowid,
+		    (const uint8_t *)blob, n, uq, nuq, &bad);
+	if (rc != 0) {
 		xs_commit_unlock();
 		if (ubad != NULL) *ubad = bad;
-		return SX_CONSTRAINT;
+		/* rc < 0: the probe's error */
+		return rc > 0 ? SX_CONSTRAINT : rc;
 	}
 	if (base != 0 && xs_ww_recheck_locked(bt, &probe, 1, v0)) {
 		xs_commit_unlock();
@@ -5399,6 +5538,11 @@ xs_put_pruned(xstore_ctx_t *cx, uint32_t tableid, int64_t rowid, const void *blo
 		struct xs_idx_ent e;
 		if (xs_idx_get(cx->bt, ubad, &e))
 			xs_uniq_msg(&e, cx->uniq_err, sizeof cx->uniq_err);
+	} else if (rc < 0) {
+		if (ubad != 0)
+			xs_idx_err_msg(cx->bt, ubad, rc, cx->uniq_err,
+			    sizeof cx->uniq_err);
+		rc = SX_ERROR;
 	}
 	if (rc == SX_OK) {
 		cx->stmt_puts++;            /* an applied autocommit row */
@@ -5456,8 +5600,12 @@ xstore_write_txn(struct xsql *db, uint32_t tableid, int64_t rowid,
 		}
 		/* UNIQUE: against committed rows and this txn's own writes now;
 		 * the commit re-validates against concurrent committers. */
-		if (!deleted && xs_uniq_check_stmt(cx, tableid, rowid, rec, reclen))
-			return 1;
+		rc = 0;
+		if (!deleted)
+			rc =
+			    xs_uniq_check_stmt(cx, tableid, rowid, rec, reclen);
+		if (rc != 0)
+			return rc > 0 ? 1 : -1; /* -1: uniq_err says why */
 		rc = xs_buf_write(cx, tableid, rowid, deleted ? NULL : rec,
 		                  deleted ? 0 : reclen, deleted);
 		return rc == SX_OK ? 0 : -1;
@@ -6024,14 +6172,20 @@ xs_commit_ctx(xstore_ctx_t *cx)
 			(void)xs_rollback_ctx(cx);
 			return SX_BUSY;           /* serialization failure */
 		}
-		if (nuq > 0 && xs_uniq_validate_locked(cx->bt, cx, 0, 0, NULL, 0,
-		    uq, nuq, &ubad)) {
+		rc = 0;
+		if (nuq > 0)
+			rc = xs_uniq_validate_locked(cx->bt, cx, 0, 0, NULL, 0,
+			    uq, nuq, &ubad);
+		if (rc != 0) {
 			struct xs_idx_ent e;
 			xs_commit_unlock();
-			if (xs_idx_get(cx->bt, ubad, &e))
+			if (rc < 0)
+				xs_idx_err_msg(cx->bt, ubad, rc, cx->uniq_err,
+				    sizeof cx->uniq_err);
+			else if (xs_idx_get(cx->bt, ubad, &e))
 				xs_uniq_msg(&e, cx->uniq_err, sizeof cx->uniq_err);
 			(void)xs_rollback_ctx(cx);
-			return SX_CONSTRAINT;
+			return rc < 0 ? SX_ERROR : SX_CONSTRAINT;
 		}
 		/* Masked from here to the end: the in-flight entry is on this
 		 * stack, so a kill before xs_inflight_remove would leave it
@@ -6147,6 +6301,7 @@ xstore_commit(struct xsql *db)
 	if (cx == NULL) return 0;
 	if (cx->native_mode) cx->native_autocommit = 1;   /* end explicit txn */
 	if (!cx->in_txn) return 0;
+	cx->uniq_err[0] = '\0'; /* a failed commit's reason, if any */
 	{
 		int rc = xs_commit_ctx(cx);
 		if (rc == SX_OK) return 0;
@@ -6732,9 +6887,9 @@ xs_split_cols(const char *csv, char col[][64])
  * id and payload map now (a table not resolvable yet keeps tableid 0:
  * never maintained, never chosen). */
 static void
-xs_idx_cache_add(bt_t *bt, uint32_t idx_id, const char *name,
-    const char *table, char col[][64], int ncol, uint32_t descmask,
-    int unique, char kind)
+xs_idx_cache_add(bt_t *bt, uint32_t idx_id, const char *name, const char *table,
+    char col[][64], int ncol, uint32_t descmask, int unique, char kind,
+    const uint64_t *sipk)
 {
 	struct xs_idx_ent e;
 	int i;
@@ -6745,6 +6900,9 @@ xs_idx_cache_add(bt_t *bt, uint32_t idx_id, const char *name,
 	e.rt.descmask = descmask;
 	e.rt.unique = unique;
 	e.rt.kind = kind;
+	e.rt.kmax = (int)bt_max_key(bt);
+	e.rt.k0 = sipk[0];
+	e.rt.k1 = sipk[1];
 	snprintf(e.name, sizeof e.name, "%s", name);
 	snprintf(e.table, sizeof e.table, "%s", table);
 	for (i = 0; i < ncol; i++)
@@ -6773,19 +6931,46 @@ xs_idx_cache_add(bt_t *bt, uint32_t idx_id, const char *name,
  * last field (the caller copies it into a terminated buffer). */
 static int
 xs_idxcat_parse(const char *v, int vl, const char **name, const char **table,
-    const char **cols, int *unique, uint32_t *descmask, char *kind)
+    const char **cols, int *unique, uint32_t *descmask, char *kind,
+    uint64_t *sipk)
 {
 	int i, seg = 0;
-	const char *f[6];
+	const char *f[7];
+	char *end = NULL;
 	f[0] = v;
-	for (i = 0; i < vl && seg < 5; i++)
+	for (i = 0; i < vl && seg < 6; i++)
 		if (v[i] == 0) f[++seg] = v + i + 1;
 	if (seg < 3) return 0;
 	*name = f[0]; *table = f[1]; *cols = f[2];
 	*unique = (f[3][0] == '1');
 	*descmask = seg >= 4 ? (uint32_t)strtoul(f[4], NULL, 10) : 0;
 	*kind = (seg >= 5 && f[5][0] != '\0') ? f[5][0] : 'i';
+	sipk[0] = sipk[1] = 0; /* an index from before format 3 */
+	if (seg >= 6) {
+		sipk[0] = strtoull(f[6], &end, 16);
+		if (end != NULL && *end == ',')
+			sipk[1] = strtoull(end + 1, NULL, 16);
+	}
 	return 1;
+}
+
+/* Append index catalog row fields 4..7 ("<u>\0<descmask>\0<kind>\0
+ * <k0>,<k1>", the last in hex) for `rt` at vbuf + off; returns the new
+ * length.  The caller sized vbuf for them (64 bytes). */
+static size_t
+xs_idxcat_tail(char *vbuf, size_t cap, size_t off, const struct xs_idx_rt *rt)
+{
+	off += (size_t)snprintf(vbuf + off, cap - off, "%c",
+	    rt->unique ? '1' : '0');
+	off++;
+	off += (size_t)snprintf(vbuf + off, cap - off, "%u",
+	    (unsigned)rt->descmask);
+	off++;
+	off += (size_t)snprintf(vbuf + off, cap - off, "%c", rt->kind);
+	off++;
+	off += (size_t)snprintf(vbuf + off, cap - off, "%llx,%llx",
+	    (unsigned long long)rt->k0, (unsigned long long)rt->k1);
+	return off;
 }
 
 /* Load every persisted (non-tombstoned) index-catalog row for `bt` into
@@ -6826,13 +7011,15 @@ xs_idxcat_load(bt_t *bt)
 		const char *nm, *tb, *cl;
 		int uq, nc;
 		uint32_t dm;
+		uint64_t sk[2];
 		char kd, col[XS_IDX_NCOL][64];
 		if (!xs_idxcat_parse(rows[i].v, rows[i].vl, &nm, &tb, &cl, &uq,
-		    &dm, &kd))
+		        &dm, &kd, sk))
 			continue;
 		nc = xs_split_cols(cl, col);
 		if (nc > 0)
-			xs_idx_cache_add(bt, rows[i].id, nm, tb, col, nc, dm, uq, kd);
+			xs_idx_cache_add(bt, rows[i].id, nm, tb, col, nc, dm,
+			    uq, kd, sk);
 	}
 	free(rows);
 }
@@ -6948,8 +7135,11 @@ xs_idx_build_one(bt_t *bt, const struct xs_idx_ent *e)
 	if (s == NULL) return 0;
 	while (xstore_scan_next(s, &rowid, &rec, &reclen) == 1) {
 		klen = xs_idx_rowkey(&e->rt, rec, reclen, rowid, 1, key,
-		    (int)bt_max_key(bt), &isnull);
-		if (klen < 0) continue;            /* over-long key: not indexed */
+		    (int)sizeof key, &isnull);
+		if (klen < 0) { /* a page too small: built short */
+			rc = -2;
+			break;
+		}
 		/* Carry the NULL flag in the key's slot via a side array. */
 		if (xs_kbuf_add(&kb, key, klen) != 0) { rc = -2; break; }
 		if (e->rt.unique) {
@@ -7129,8 +7319,7 @@ xstore_index_rebuild_count(void)
  * Check every cached index of `bt` against the base: *missing counts live
  * rows whose newest committed version has no entry (a seek or a UNIQUE
  * check would miss the row), *stale counts entries the row's newest
- * committed version does not carry (harmless: readers filter them).  Rows
- * whose key is too long to index are skipped, as maintenance skips them.
+ * committed version does not carry (harmless: readers filter them).
  * Run quiesced (tests, tools).  Returns the number of indexes checked.
  */
 int
@@ -7157,9 +7346,10 @@ xstore_index_check(bt_t *bt, uint64_t *missing, uint64_t *stale)
 		uint16_t vl;
 		while (s != NULL && xstore_scan_next(s, &rowid, &r, &rlen) == 1) {
 			kl = xs_idx_rowkey(&snap[i].rt, r, rlen, rowid, 1, key,
-			    (int)bt_max_key(bt), NULL);
-			if (kl > 0 && bt_lookup(bt, key, (uint16_t)kl, kk, 0, &vl) !=
-			    XTC_OK)
+			    (int)sizeof key, NULL);
+			if (kl < 0 ||
+			    bt_lookup(bt, key, (uint16_t)kl, kk, 0, &vl) !=
+			        XTC_OK)
 				miss++;
 		}
 		xstore_scan_close(s);
@@ -7196,6 +7386,7 @@ xstore_create_index_ex(struct xsql *db, const char *name, const char *table,
 	bt_t *bt = xstore_bt_of(db);
 	struct xs_idx_ent e;
 	uint32_t tableid = 0, idx_id;
+	uint64_t sipk[2];
 	int i, exists = 0, rc;
 	char vbuf[1100];
 	size_t off = 0, cl = 0;
@@ -7221,27 +7412,33 @@ xstore_create_index_ex(struct xsql *db, const char *name, const char *table,
 	idx_id = xs_idxcat_max_id(bt) + 1u;
 	if (idx_id == 0u) idx_id = 1u;
 
-	/* Persist "<name>\0<table>\0<c1,c2,..>\0<u>\0<descmask>\0<kind>" as a
-	 * WAL-durable version row under XS_IDXCAT_TABLEID, so the definition
-	 * survives a crash (its entries are rebuilt from base rows at open). */
-	if (strlen(name) + strlen(table) + cl + 32 > sizeof vbuf) return 0;
+	/* Persist "<name>\0<table>\0<c1,c2,..>\0<u>\0<descmask>\0<kind>\0
+	 * <k0>,<k1>" as a WAL-durable version row under XS_IDXCAT_TABLEID, so
+	 * the definition survives a crash (its entries are rebuilt from base
+	 * rows at open). */
+	if (strlen(name) + strlen(table) + cl + 64 > sizeof vbuf)
+		return 0;
 	off += (size_t)snprintf(vbuf + off, sizeof vbuf - off, "%s", name) + 1;
 	off += (size_t)snprintf(vbuf + off, sizeof vbuf - off, "%s", table) + 1;
 	for (i = 0; i < ncol; i++)
 		off += (size_t)snprintf(vbuf + off, sizeof vbuf - off, "%s%s",
 		    i ? "," : "", cols[i]);
 	off++;
-	off += (size_t)snprintf(vbuf + off, sizeof vbuf - off, "%c",
-	    unique ? '1' : '0') + 1;
-	off += (size_t)snprintf(vbuf + off, sizeof vbuf - off, "%u",
-	    (unsigned)descmask) + 1;
-	off += (size_t)snprintf(vbuf + off, sizeof vbuf - off, "%c",
-	    kind ? (char)kind : 'i');
+	/* The SipHash key of truncated entries: random per index (a client
+	 * cannot aim keys at one hash), virtualized under the simulator. */
+	sipk[0] = xtc_rand_u64();
+	sipk[1] = xtc_rand_u64();
+	e.rt.unique = unique;
+	e.rt.descmask = descmask;
+	e.rt.kind = kind ? (char)kind : 'i';
+	e.rt.k0 = sipk[0];
+	e.rt.k1 = sipk[1];
+	off = xs_idxcat_tail(vbuf, sizeof vbuf, off, &e.rt);
 	/* Enter the cache BEFORE the build so a commit applied from here on
 	 * maintains the index; the barrier below waits out the commits in
 	 * flight (which may have missed it), and the build scans after it. */
 	xs_idx_cache_add(bt, idx_id, name, table, e.col, ncol, descmask, unique,
-	    kind ? (char)kind : 'i');
+	    kind ? (char)kind : 'i', sipk);
 	atomic_fetch_add_explicit(&g_idx_gen, 1, memory_order_relaxed);
 	xs_cat_gen_bump();
 	xstore_quiesce_begin();
@@ -7356,12 +7553,7 @@ xs_idx_rename_table(bt_t *bt, const char *oldname, const char *newname)
 			off += (size_t)snprintf(vbuf + off, sizeof vbuf - off, "%s%s",
 			    c ? "," : "", snap[i].col[c]);
 		off++;
-		off += (size_t)snprintf(vbuf + off, sizeof vbuf - off, "%c",
-		    snap[i].rt.unique ? '1' : '0') + 1;
-		off += (size_t)snprintf(vbuf + off, sizeof vbuf - off, "%u",
-		    (unsigned)snap[i].rt.descmask) + 1;
-		off += (size_t)snprintf(vbuf + off, sizeof vbuf - off, "%c",
-		    snap[i].rt.kind);
+		off = xs_idxcat_tail(vbuf, sizeof vbuf, off, &snap[i].rt);
 		(void)xs_put(bt, XS_IDXCAT_TABLEID, (int64_t)snap[i].rt.idx_id,
 		    vbuf, (int)off, 0);
 	}
@@ -7556,6 +7748,30 @@ xs_wrec_payload(xstore_ctx_t *c, int wi, int *len)
 	return w->data;
 }
 
+/* The row a UNIQUE check is for: its record and rowid. */
+struct xs_urow {
+	const uint8_t *rec;
+	int reclen;
+	int64_t rowid;
+};
+
+/* Is a candidate row (record crec/clen at crid, entry key ck/ckl without
+ * the rowid) a duplicate of the checked row `w`, whose entry key is
+ * key/klen?  The entries must match; a truncated match is a duplicate
+ * only if the whole tuples match too (equal hashes prove nothing). */
+static int
+xs_uniq_same(const struct xs_idx_rt *rt, const uint8_t *ck, int ckl,
+    const uint8_t *key, int klen, const uint8_t *crec, int clen, int64_t crid,
+    const struct xs_urow *w)
+{
+	if (ckl != klen || memcmp(ck, key, (size_t)klen) != 0)
+		return 0;
+	if (!xs_idx_truncated(rt, klen + 8))
+		return 1;
+	return xs_idx_tuple_eq(rt, crec, clen, crid, w->rec, w->reclen,
+	    w->rowid);
+}
+
 /* Record entry `wi`'s unique key tuples in the umap. */
 static void
 xs_umap_index(xstore_ctx_t *c, int wi)
@@ -7590,24 +7806,54 @@ xs_uniq_msg(const struct xs_idx_ent *e, char *out, size_t cap)
 		    i ? ", " : "", e->table, e->col[i]);
 }
 
+/* Format the error of a UNIQUE probe of index `idx_id` that failed with
+ * XTC_E_* code `rc`: "index error: cannot check UNIQUE t.a: <reason>".
+ * The engine passes a message with the "index error" prefix to the
+ * client unchanged. */
+static void
+xs_idx_err_msg(bt_t *bt, uint32_t idx_id, int rc, char *out, size_t cap)
+{
+	struct xs_idx_ent e;
+	if (xs_idx_get(bt, idx_id, &e))
+		snprintf(out, cap, "index error: cannot check UNIQUE %s.%s: %s",
+		    e.table, e.col[0], xtc_strerror(rc));
+	else
+		snprintf(out, cap, "index error: cannot check UNIQUE: %s",
+		    xtc_strerror(rc));
+}
+
 /* Does a live COMMITTED row other than `rowid` carry key tuple `key`
  * (no rowid suffix) in index `rt`?  The newest committed version of
  * each candidate decides; a candidate this transaction has a buffered
  * write for is skipped (`cx` non-NULL: the buffered state decides, and
- * the umap / statement check covers it). */
+ * the umap / statement check covers it).  Returns 1 (a duplicate), 0
+ * (none), or a negative XTC_E_* code when the probe could not run to
+ * the end of the key's entries: NB the caller must fail the write then,
+ * since a probe that stopped early has not proven the key absent. */
 static int
 xs_uniq_committed_dup(bt_t *bt, const struct xs_idx_rt *rt, const uint8_t *key,
-    int klen, int64_t rowid, xstore_ctx_t *cx)
+    int klen, const struct xs_urow *w, xstore_ctx_t *cx)
 {
+	int64_t rowid = w->rowid;
 	bt_cursor_t *cur = NULL;
 	uint8_t *rec = NULL, kk[XS_IDX_KMAX];
-	int dup = 0;
-	if (bt_cursor_open(bt, key, (uint16_t)klen, &cur) != XTC_OK) return 0;
+	int dup = 0, rc;
+	rc = bt_cursor_open(bt, key, (uint16_t)klen, &cur);
+	if (rc == XTC_OK && xs_uniq_fail_now()) {
+		bt_cursor_close(cur);
+		rc = XTC_E_IO;
+	}
+	if (rc != XTC_OK) /* planted 72: the error reads as "no duplicate" */
+		return XTC_DST_BUG(XTC_DST_BUG_UNIQPROBE) ? 0 : rc;
 	for (;;) {
 		const void *k = NULL, *vv = NULL; uint16_t kl = 0, vl = 0;
 		int64_t rid;
 		int rl, kl2;
-		if (bt_cursor_next(cur, &k, &kl, &vv, &vl) != XTC_OK) break;
+		if ((rc = bt_cursor_next(cur, &k, &kl, &vv, &vl)) != XTC_OK) {
+			if (rc != XTC_E_NOTFOUND) /* else: the end of the tree */
+				dup = rc;
+			break;
+		}
 		if (kl != klen + 8 || memcmp(k, key, (size_t)klen) != 0) break;
 		rid = (int64_t)(xs_get_be64((const uint8_t *)k + klen) ^
 		    0x8000000000000000ull);
@@ -7615,13 +7861,23 @@ xs_uniq_committed_dup(bt_t *bt, const struct xs_idx_rt *rt, const uint8_t *key,
 		if (cx != NULL && cx->in_txn && wbuf_find(cx, rt->tableid, rid) != NULL)
 			continue;
 		bt_cursor_park(cur);
-		if (rec == NULL && (rec = malloc(XS_VMAX)) == NULL) break;
+		if (rec == NULL && (rec = malloc(XS_VMAX)) == NULL) {
+			dup = XTC_E_NOMEM;
+			break;
+		}
 		rl = xs_read_rec(bt, rt->tableid, rid, rec, XS_VMAX);
 		if (rl > 0) {
 			kl2 = xs_idx_rowkey(rt, rec, rl, rid, 0, kk, (int)sizeof kk, NULL);
-			if (kl2 == klen && memcmp(kk, key, (size_t)klen) == 0) { dup = 1; break; }
+			if (xs_uniq_same(rt, kk, kl2, key, klen, rec, rl, rid,
+			        w)) {
+				dup = 1;
+				break;
+			}
 		}
-		if (bt_cursor_resume(cur) != XTC_OK) break;
+		if ((rc = bt_cursor_resume(cur)) != XTC_OK) {
+			dup = rc;
+			break;
+		}
 	}
 	bt_cursor_close(cur);
 	free(rec);
@@ -7632,8 +7888,9 @@ xs_uniq_committed_dup(bt_t *bt, const struct xs_idx_rt *rt, const uint8_t *key,
  * tuple `key` in index `rt`? */
 static int
 xs_uniq_buffered_dup(xstore_ctx_t *c, const struct xs_idx_rt *rt,
-    const uint8_t *key, int klen, int64_t rowid)
+    const uint8_t *key, int klen, const struct xs_urow *w)
 {
+	int64_t rowid = w->rowid;
 	uint8_t kk[XS_IDX_KMAX];
 	uint64_t h;
 	int i, m, wi, rl, kl2;
@@ -7651,7 +7908,9 @@ xs_uniq_buffered_dup(xstore_ctx_t *c, const struct xs_idx_rt *rt,
 		if (rec == NULL) continue;
 		kl2 = xs_idx_rowkey(rt, rec, rl, c->wbuf[wi].rowid, 0, kk,
 		    (int)sizeof kk, NULL);
-		if (kl2 == klen && memcmp(kk, key, (size_t)klen) == 0) return 1;
+		if (xs_uniq_same(rt, kk, kl2, key, klen, rec, rl,
+		        c->wbuf[wi].rowid, w))
+			return 1;
 	}
 	return 0;
 }
@@ -7661,17 +7920,19 @@ xs_uniq_buffered_dup(xstore_ctx_t *c, const struct xs_idx_rt *rt,
  * on connection `cx`: every unique index's key tuple must not be carried
  * by another live committed row or another of this transaction's
  * buffered rows.  On a violation formats the SQLite message into
- * cx->uniq_err and returns 1; else 0.  The commit re-validates against
- * commits this check could not see.
+ * cx->uniq_err and returns 1; if the committed probe fails, formats an
+ * "index error" message there and returns -1; else 0.  The commit
+ * re-validates against commits this check could not see.
  */
 static int
 xs_uniq_check_stmt(xstore_ctx_t *cx, uint32_t tableid, int64_t rowid,
     const uint8_t *rec, int reclen)
 {
 	struct xs_idx_rt hits[16];
+	struct xs_urow w = { rec, reclen, rowid };
 	uint8_t key[XS_IDX_KMAX];
 	uint64_t vis;
-	int nh, i, klen, isnull;
+	int nh, i, klen, isnull, d;
 	if (g_idx_n == 0 || rec == NULL) return 0;
 	nh = xs_idx_for_table(cx->bt, tableid, hits, 16);
 	if (nh == 0) return 0;
@@ -7682,11 +7943,17 @@ xs_uniq_check_stmt(xstore_ctx_t *cx, uint32_t tableid, int64_t rowid,
 		klen = xs_idx_rowkey(&hits[i], rec, reclen, rowid, 0, key,
 		    (int)sizeof key, &isnull);
 		if (klen < 0 || isnull) continue;
-		if (xs_uniq_buffered_dup(cx, &hits[i], key, klen, rowid) ||
-		    xs_uniq_committed_dup(cx->bt, &hits[i], key, klen, rowid, cx)) {
-			if (xs_idx_get(cx->bt, hits[i].idx_id, &e))
+		d = xs_uniq_buffered_dup(cx, &hits[i], key, klen, &w);
+		if (d == 0)
+			d = xs_uniq_committed_dup(cx->bt, &hits[i], key, klen,
+			    &w, cx);
+		if (d != 0) {
+			if (d < 0)
+				xs_idx_err_msg(cx->bt, hits[i].idx_id, d,
+				    cx->uniq_err, sizeof cx->uniq_err);
+			else if (xs_idx_get(cx->bt, hits[i].idx_id, &e))
 				xs_uniq_msg(&e, cx->uniq_err, sizeof cx->uniq_err);
-			return 1;
+			return d < 0 ? -1 : 1;
 		}
 	}
 	if (cx->in_txn && (cx->uniq_vis == 0 || vis < cx->uniq_vis)) {
@@ -7700,8 +7967,9 @@ xs_uniq_check_stmt(xstore_ctx_t *cx, uint32_t tableid, int64_t rowid,
  * key tuple in `rt` is `key`?  Caller holds the commit lock. */
 static int
 xs_uniq_inflight_dup(const struct xs_idx_rt *rt, const uint8_t *key, int klen,
-    int64_t rowid, const xstore_ctx_t *self)
+    const struct xs_urow *w, const xstore_ctx_t *self)
 {
+	int64_t rowid = w->rowid;
 	const struct xs_inflight *e;
 	uint8_t kk[XS_IDX_KMAX];
 	int i, rl, kl2;
@@ -7712,7 +7980,9 @@ xs_uniq_inflight_dup(const struct xs_idx_rt *rt, const uint8_t *key, int klen,
 				continue;
 			kl2 = xs_idx_rowkey(rt, e->rec, e->reclen, e->rid, 0, kk,
 			    (int)sizeof kk, NULL);
-			if (kl2 == klen && memcmp(kk, key, (size_t)klen) == 0) return 1;
+			if (xs_uniq_same(rt, kk, kl2, key, klen, e->rec,
+			        e->reclen, e->rid, w))
+				return 1;
 			continue;
 		}
 		for (i = 0; i < e->wn; i++) {
@@ -7725,7 +7995,9 @@ xs_uniq_inflight_dup(const struct xs_idx_rt *rt, const uint8_t *key, int klen,
 			rec = e->ws[i].data; rl = (int)e->ws[i].len;
 			kl2 = xs_idx_rowkey(rt, rec, rl, e->ws[i].rowid, 0, kk,
 			    (int)sizeof kk, NULL);
-			if (kl2 == klen && memcmp(kk, key, (size_t)klen) == 0) return 1;
+			if (xs_uniq_same(rt, kk, kl2, key, klen, rec, rl,
+			        e->ws[i].rowid, w))
+				return 1;
 		}
 	}
 	return 0;
@@ -7765,16 +8037,19 @@ xs_uniq_collect(bt_t *bt, const xstore_ctx_t *cx, uint32_t tid1,
  * commit has touched since the transaction's statement-time checks
  * (g_tab_cts <= uniq_vis, with no index created since) is skipped:
  * everything up to that horizon was applied when the checks ran.
- * Returns 1 with *bad set to the violated index on a conflict.
+ * Returns 1 with *bad set to the violated index on a conflict, or the
+ * probe's negative XTC_E_* code with *bad set to its index when the
+ * committed probe fails (the commit must fail: nothing is proven).
  */
 static int
 xs_uniq_validate_locked(bt_t *bt, xstore_ctx_t *cx, uint32_t tid1,
     int64_t rid1, const uint8_t *rec1, int len1,
     const struct xs_idx_rt *u, int nu, uint32_t *bad)
 {
+	struct xs_urow w;
 	uint8_t key[XS_IDX_KMAX];
 	int n = cx != NULL ? cx->wn : 1, wi, i, klen, isnull, rl = 0;
-	int skipok;
+	int skipok, d;
 	if (nu == 0) return 0;
 	skipok = cx != NULL && cx->uniq_vis != 0 &&
 	    cx->uniq_gen == atomic_load_explicit(&g_idx_gen, memory_order_relaxed);
@@ -7802,10 +8077,16 @@ xs_uniq_validate_locked(bt_t *bt, xstore_ctx_t *cx, uint32_t tid1,
 			if (skipok && g_uk_cts[xs_uk_slot(u[i].idx_id, key, klen)] <=
 			    cx->uniq_vis)
 				continue;
-			if (xs_uniq_committed_dup(bt, &u[i], key, klen, rid, cx) ||
-			    xs_uniq_inflight_dup(&u[i], key, klen, rid, cx)) {
+			w.rec = rec;
+			w.reclen = rl;
+			w.rowid = rid;
+			d = xs_uniq_committed_dup(bt, &u[i], key, klen, &w, cx);
+			if (d == 0)
+				d = xs_uniq_inflight_dup(&u[i], key, klen, &w,
+				    cx);
+			if (d != 0) {
 				*bad = u[i].idx_id;
-				return 1;
+				return d;
 			}
 		}
 	}
@@ -7846,6 +8127,39 @@ struct xs_icand {
 	int64_t  rowid;
 };
 
+/* A group of truncated entries that share their first P tuple bytes,
+ * read whole and re-sorted by whole key tuple, then rowid, so the scan's
+ * order is exact (xs_iscan_group).  Each row's buf holds its record,
+ * then its whole tuple. */
+struct xs_igrow {
+	int64_t rid;
+	int rl, tl;
+	uint8_t *buf;
+};
+struct xs_igrp {
+	struct xs_igrow *row;
+	int n, i, cap;
+	int have_next; /* the row read past the group, held: */
+	int64_t next_rid;
+	int next_rl, next_kl;
+	uint8_t next_rec[XS_VMAX], next_k[XS_IDX_KMAX];
+};
+
+/* A scan's bounds: the equality prefix, then an optional range on the
+ * next column (see xs_bnd_where). */
+struct xs_ibnd {
+	const uint8_t *pfx, *lo, *hi;
+	int pfxlen, lolen, hilen;
+	int lo_incl, hi_incl, has_lo, has_hi, range;
+};
+
+/* The whole (uncut) bounds of a scan whose bound is longer than an
+ * entry holds. */
+struct xs_ifull {
+	uint8_t pfx[XS_IDX_TMAX], lo[XS_IDX_TMAX], hi[XS_IDX_TMAX];
+	struct xs_ibnd b;
+};
+
 struct xstore_iscan {
 	struct xsql  *db;
 	xstore_ctx_t *cx;
@@ -7854,11 +8168,16 @@ struct xstore_iscan {
 	uint64_t      snap;
 	int           reverse;
 	int           done;
-	/* bounds */
+	/* bounds, in entry space (a long bound cut to its group) */
 	uint8_t       pfx[XS_IDX_KMAX];  int pfxlen;   /* ns + equality elems */
 	uint8_t       lo[XS_IDX_KMAX];   int lolen, lo_incl, has_lo;
 	uint8_t       hi[XS_IDX_KMAX];   int hilen, hi_incl, has_hi;
 	int           range;             /* a range on the next column */
+	struct xs_ibnd eb;               /* views of the bounds above */
+	struct xs_ifull *fb;             /* whole bounds, if a bound was cut */
+	struct xs_igrp *grp;             /* a re-sorted group (xs_iscan_group) */
+	const uint8_t *lk;               /* entry key of the row just taken */
+	int           lkl;
 	/* committed stream */
 	bt_cursor_t  *cur;
 	uint8_t       pos[XS_IDX_KMAX];  int poslen, started;
@@ -7886,27 +8205,64 @@ struct xstore_iscan {
 	int           ra_left;   /* hinted rows not yet read (0: no hint) */
 };
 
-/* Is entry key `k` (length kl) inside the scan's bounds?  Returns 1 in
- * range, 0 before the start (forward: skip; reverse: stop), 2 past the
- * end (forward: stop; reverse: skip). */
+/* Compare key k[0..kl) with bound b[0..bl) as a prefix: 0 if k starts
+ * with b, else the sign of their first difference (a k that ends first
+ * sorts before). */
+static int
+xs_pfxcmp(const uint8_t *k, int kl, const uint8_t *b, int bl)
+{
+	int r = memcmp(k, b, (size_t)(kl < bl ? kl : bl));
+	if (r == 0 && kl < bl)
+		return -1;
+	return r;
+}
+
+/* Is key `k` (length kl) inside bounds `b`?  Returns 1 in range, 0
+ * before the start (forward: skip; reverse: stop), 2 past the end
+ * (forward: stop; reverse: skip).  Used on entry keys with the entry
+ * bounds, and on a row's whole key tuple with the whole bounds. */
+static int
+xs_bnd_where(const struct xs_ibnd *b, const uint8_t *k, int kl)
+{
+	int r;
+	r = xs_pfxcmp(k, kl, b->pfx, b->pfxlen);
+	if (r != 0)
+		return r < 0 ? 0 : 2;
+	if (b->has_lo) {
+		r = xs_pfxcmp(k, kl, b->lo, b->lolen);
+		if (r < 0 || (r == 0 && !b->lo_incl))
+			return 0;
+	} else if (b->range && kl > b->pfxlen && k[b->pfxlen] <= XS_TUP_NULL) {
+		return 0;                         /* NULL never satisfies a range */
+	}
+	if (b->has_hi) {
+		r = xs_pfxcmp(k, kl, b->hi, b->hilen);
+		if (r > 0 || (r == 0 && !b->hi_incl))
+			return 2;
+	}
+	return 1;
+}
+
+/* Is entry key `k` (length kl) inside the scan's entry bounds? */
 static int
 xs_iscan_where(const struct xstore_iscan *s, const uint8_t *k, int kl)
 {
-	int r;
-	if (kl < s->pfxlen || memcmp(k, s->pfx, (size_t)s->pfxlen) != 0)
-		return memcmp(k, s->pfx, (size_t)(kl < s->pfxlen ? kl : s->pfxlen)) < 0
-		    ? 0 : 2;
-	if (s->has_lo) {
-		r = memcmp(k, s->lo, (size_t)s->lolen);
-		if (r < 0 || (r == 0 && !s->lo_incl)) return 0;
-	} else if (s->range && kl > s->pfxlen && k[s->pfxlen] <= XS_TUP_NULL) {
-		return 0;                         /* NULL never satisfies a range */
-	}
-	if (s->has_hi) {
-		r = memcmp(k, s->hi, (size_t)s->hilen);
-		if (r > 0 || (r == 0 && !s->hi_incl)) return 2;
-	}
-	return 1;
+	return xs_bnd_where(&s->eb, k, kl);
+}
+
+/* Does a candidate row's record rec[0..rl) satisfy the scan's whole
+ * bounds?  Always, unless a bound was cut to fit an entry: then the
+ * entries in range are a superset and the row's whole key decides. */
+static int
+xs_iscan_row_ok(const struct xstore_iscan *s, const uint8_t *rec, int rl,
+    int64_t rowid)
+{
+	static _Thread_local uint8_t tup[XS_IDX_TMAX];
+	int tl;
+	if (s->fb == NULL)
+		return 1;
+	tl = xs_idx_tuple(&s->e.rt, rec, rl, rowid, tup, (int)sizeof tup, NULL);
+	return tl >= 0 && xs_bnd_where(&s->fb->b, tup, tl) == 1;
 }
 
 static int
@@ -7956,6 +8312,142 @@ xs_point_get(bt_t *bt, uint32_t tid, int64_t rid, uint64_t snap,
 	return vl > 1 ? (int)vl - 1 : -1;   /* -1: live, empty record */
 }
 
+/* Encode bounds `b` (prefix eq[0..neq), then lo / hi on the next
+ * column) into the three buffers of `cap` bytes.  -1 if one overflows. */
+static int
+xs_bnd_encode(struct xs_ibnd *b, uint8_t *pfx, uint8_t *lob, uint8_t *hib,
+    int cap, uint32_t idx_id, uint32_t descmask, const xstore_val_t *eq,
+    int neq, const xstore_val_t *lo, const xstore_val_t *hi)
+{
+	int i, off;
+	off = xs_idx_prefix(idx_id, pfx);
+	for (i = 0; i < neq && off >= 0; i++)
+		off = xs_tup_elem(pfx, off, cap, eq[i].cls, eq[i].i, eq[i].r,
+		    eq[i].p, eq[i].n, (int)((descmask >> i) & 1u));
+	if (off < 0)
+		return -1;
+	b->pfx = pfx;
+	b->pfxlen = off;
+	b->lo = lob;
+	b->hi = hib;
+	b->range = (lo != NULL || hi != NULL);
+	if (lo != NULL) {
+		memcpy(lob, pfx, (size_t)off);
+		b->lolen = xs_tup_elem(lob, off, cap, lo->cls, lo->i, lo->r,
+		    lo->p, lo->n, 0);
+		if (b->lolen < 0)
+			return -1;
+	}
+	if (hi != NULL) {
+		memcpy(hib, pfx, (size_t)off);
+		b->hilen = xs_tup_elem(hib, off, cap, hi->cls, hi->i, hi->r,
+		    hi->p, hi->n, 0);
+		if (b->hilen < 0)
+			return -1;
+	}
+	return 0;
+}
+
+/* Cut a whole bound w[0..wl) (prefix included) to the entries it can
+ * match, into out: itself if its tuple part fits an entry whole (at
+ * most P = kmax - 21 bytes), else its P-byte group, plus the hash when
+ * `full` (an equality on every column: w is a whole key tuple; a range
+ * bound never gets it, hashes do not sort as values).  Returns the cut
+ * length. */
+static int
+xs_bnd_cut(const struct xs_idx_rt *rt, const uint8_t *w, int wl, int full,
+    uint8_t *out)
+{
+	int p = rt->kmax - 21;
+	if (wl - 5 <= p) {
+		memcpy(out, w, (size_t)wl);
+		return wl;
+	}
+	if (full)
+		return xs_idx_entkey(rt, w, wl, 0, 0, out, rt->kmax);
+	memcpy(out, w, (size_t)(5 + p));
+	return 5 + p;
+}
+
+/* Point the scan's entry-bound view (s->eb) at its bound buffers.  A
+ * cut scan leaves "NULL never satisfies a range" to the whole bounds:
+ * in a cut entry the byte after the prefix is not an element tag. */
+static void
+xs_iscan_view(xstore_iscan_t *s)
+{
+	s->eb.pfx = s->pfx;
+	s->eb.pfxlen = s->pfxlen;
+	s->eb.lo = s->lo;
+	s->eb.lolen = s->lolen;
+	s->eb.hi = s->hi;
+	s->eb.hilen = s->hilen;
+	s->eb.lo_incl = s->lo_incl;
+	s->eb.hi_incl = s->hi_incl;
+	s->eb.has_lo = s->has_lo;
+	s->eb.has_hi = s->has_hi;
+	s->eb.range = s->fb == NULL ? s->range : 0;
+}
+
+/*
+ * Set the scan's bounds.  The common case encodes them straight into
+ * the scan's entry bounds, capped at the longest tuple part an entry
+ * holds whole.  A bound longer than that is encoded whole into s->fb
+ * and cut to its group (xs_bnd_cut): the cut bounds then match a
+ * superset of the entries, a cut low or high bound turns inclusive, and
+ * each candidate row is checked against the whole bounds
+ * (xs_iscan_row_ok).  Returns 0, or -1 (the caller scans instead).
+ */
+static int
+xs_iscan_bounds(xstore_iscan_t *s, const xstore_val_t *eq, int neq,
+    const xstore_val_t *lo, int lo_incl, const xstore_val_t *hi, int hi_incl)
+{
+	const struct xs_idx_rt *rt = &s->e.rt;
+	struct xs_ifull *fb;
+	int p = rt->kmax - 21;
+	if (p < 1)
+		return -1;
+	s->range = lo != NULL || hi != NULL;
+	s->has_lo = lo != NULL;
+	s->lo_incl = lo_incl;
+	s->has_hi = hi != NULL;
+	s->hi_incl = hi_incl;
+	if (xs_bnd_encode(&s->eb, s->pfx, s->lo, s->hi, 5 + p, rt->idx_id,
+	        rt->descmask, eq, neq, lo, hi) == 0) {
+		s->pfxlen = s->eb.pfxlen;
+		s->lolen = s->eb.lolen;
+		s->hilen = s->eb.hilen;
+		xs_iscan_view(s);
+		return 0;
+	}
+	if ((fb = malloc(sizeof *fb)) == NULL)
+		return -1;
+	memset(&fb->b, 0, sizeof fb->b);
+	if (xs_bnd_encode(&fb->b, fb->pfx, fb->lo, fb->hi, XS_IDX_TMAX,
+	        rt->idx_id, rt->descmask, eq, neq, lo, hi) != 0) {
+		free(fb);
+		return -1;
+	}
+	fb->b.has_lo = lo != NULL;
+	fb->b.lo_incl = lo_incl;
+	fb->b.has_hi = hi != NULL;
+	fb->b.hi_incl = hi_incl;
+	s->fb = fb;
+	s->pfxlen =
+	    xs_bnd_cut(rt, fb->pfx, fb->b.pfxlen, neq == rt->ncol, s->pfx);
+	if (lo != NULL) {
+		s->lolen = xs_bnd_cut(rt, fb->lo, fb->b.lolen, 0, s->lo);
+		if (s->lolen < fb->b.lolen)
+			s->lo_incl = 1;
+	}
+	if (hi != NULL) {
+		s->hilen = xs_bnd_cut(rt, fb->hi, fb->b.hilen, 0, s->hi);
+		if (s->hilen < fb->b.hilen)
+			s->hi_incl = 1;
+	}
+	xs_iscan_view(s);
+	return 0;
+}
+
 xstore_iscan_t *
 xstore_iscan_open(struct xsql *db, const char *table, uint32_t idx_id,
     const xstore_val_t *eq, int neq, const xstore_val_t *lo, int lo_incl,
@@ -7963,7 +8455,7 @@ xstore_iscan_open(struct xsql *db, const char *table, uint32_t idx_id,
 {
 	bt_t *bt = xstore_bt_of(db);
 	xstore_iscan_t *s;
-	int i, off;
+	int i;
 	(void)table;
 	if (bt == NULL) return NULL;
 	s = calloc(1, sizeof *s);
@@ -7980,26 +8472,9 @@ xstore_iscan_open(struct xsql *db, const char *table, uint32_t idx_id,
 	if (s->cx != NULL) xs_enter_ctx(s->cx, db);
 	s->snap = xs_eff_snap(s->cx);
 	s->reverse = reverse;
-	off = xs_idx_prefix(idx_id, s->pfx);
-	for (i = 0; i < neq && off >= 0; i++)
-		off = xs_tup_elem(s->pfx, off, (int)sizeof s->pfx, eq[i].cls, eq[i].i,
-		    eq[i].r, eq[i].p, eq[i].n, (int)((s->e.rt.descmask >> i) & 1u));
-	if (off < 0) { free(s); return NULL; }
-	s->pfxlen = off;
-	s->range = (lo != NULL || hi != NULL);
-	if (lo != NULL) {
-		memcpy(s->lo, s->pfx, (size_t)off);
-		s->lolen = xs_tup_elem(s->lo, off, (int)sizeof s->lo, lo->cls, lo->i,
-		    lo->r, lo->p, lo->n, 0);
-		if (s->lolen < 0) { free(s); return NULL; }
-		s->has_lo = 1; s->lo_incl = lo_incl;
-	}
-	if (hi != NULL) {
-		memcpy(s->hi, s->pfx, (size_t)off);
-		s->hilen = xs_tup_elem(s->hi, off, (int)sizeof s->hi, hi->cls, hi->i,
-		    hi->r, hi->p, hi->n, 0);
-		if (s->hilen < 0) { free(s); return NULL; }
-		s->has_hi = 1; s->hi_incl = hi_incl;
+	if (xs_iscan_bounds(s, eq, neq, lo, lo_incl, hi, hi_incl) != 0) {
+		xstore_iscan_close(s);
+		return NULL;
 	}
 	atomic_fetch_add_explicit(&g_idx_seeks, 1, memory_order_relaxed);
 	if (s->cx != NULL && s->cx->in_txn) {
@@ -8025,7 +8500,9 @@ xstore_iscan_open(struct xsql *db, const char *table, uint32_t idx_id,
 			if (rec == NULL) continue;
 			kl = xs_idx_rowkey(&s->e.rt, rec, rl, cx->wbuf[wi].rowid, 1, key,
 			    (int)sizeof key, NULL);
-			if (kl < 0 || xs_iscan_where(s, key, kl) != 1) continue;
+			if (kl < 0 || xs_iscan_where(s, key, kl) != 1 ||
+			    !xs_iscan_row_ok(s, rec, rl, cx->wbuf[wi].rowid))
+				continue;
 			if (s->nbc % 64 == 0) {
 				struct xs_icand *nb = realloc(s->bc, sizeof *nb * (size_t)(s->nbc + 64));
 				uint8_t *nk = realloc(s->bkeys, boff + (size_t)64 * XS_IDX_KMAX);
@@ -8116,24 +8593,26 @@ xs_iscan_fill(xstore_iscan_t *s)
 		uint8_t bound[XS_IDX_KMAX + 16];
 		int bl, got = 0, j;
 		if (!s->started) {
+			/* Below the first key past every key that starts with
+			 * the bound (hi inclusive, or the prefix): its
+			 * successor.  The lead byte 0xFE takes any carry. */
 			if (s->has_hi) {
 				memcpy(bound, s->hi, (size_t)s->hilen);
 				bl = s->hilen;
-				if (s->hi_incl) { memset(bound + bl, 0xFF, 9); bl += 9; }
 			} else {
 				memcpy(bound, s->pfx, (size_t)s->pfxlen);
 				bl = s->pfxlen;
-				/* shortcut: an entry ending in 9 x 0xFF (rowid INT64_MAX
-				 * with no further column) sorts at the bound and is
-				 * missed; unreachable for real rowids. */
-				memset(bound + bl, 0xFF, 9); bl += 9;
+			}
+			if (!s->has_hi || s->hi_incl) {
+				while (bl > 1 && bound[bl - 1] == 0xFF)
+					bl--;
+				bound[bl - 1]++;
 			}
 			s->started = 1;
 		} else {
 			memcpy(bound, s->pos, (size_t)s->poslen);
 			bl = s->poslen;
 		}
-		if (bl > (int)bt_max_key(s->bt)) bl = (int)bt_max_key(s->bt);
 		if (bt_seek_lt_n(s->bt, bound, (uint16_t)bl, s->ka->buf,
 		    (uint32_t)sizeof s->ka->buf, s->ka->off, s->ka->len,
 		    s->kb_want, &got) != XTC_OK || got == 0) {
@@ -8294,14 +8773,15 @@ xs_iscan_cand(xstore_iscan_t *s)
 	}
 }
 
-int
-xstore_iscan_next(xstore_iscan_t *s, int64_t *rowid, const uint8_t **rec,
+/* The next verified row in entry order (1), 0 at the end, -1 on no
+ * memory; s->lk / s->lkl is its entry key. */
+static int
+xs_iscan_next1(xstore_iscan_t *s, int64_t *rowid, const uint8_t **rec,
     int *reclen)
 {
 	uint8_t kk[XS_IDX_KMAX];
 	const uint8_t *v;
 	int c, rl, kl, vr;
-	if (s == NULL) return -1;
 	for (;;) {
 		if (s->done) return 0;
 		if (!s->have_ck) {
@@ -8330,6 +8810,8 @@ xstore_iscan_next(xstore_iscan_t *s, int64_t *rowid, const uint8_t **rec,
 				if (rl > XS_VMAX) rl = XS_VMAX;
 				memcpy(s->rec + 1, p, (size_t)rl);
 				s->visited++;
+				s->lk = b->key;
+				s->lkl = b->klen;
 				*rowid = b->rowid; *rec = s->rec + 1; *reclen = rl;
 				return 1;
 			}
@@ -8355,13 +8837,165 @@ xstore_iscan_next(xstore_iscan_t *s, int64_t *rowid, const uint8_t **rec,
 		    (int)sizeof kk, NULL);
 		if (kl != s->cklen || memcmp(kk, s->ck, (size_t)kl) != 0)
 			continue;                     /* stale entry */
+		if (!xs_iscan_row_ok(s, v + 1, rl, s->crid))
+			continue; /* in a cut bound's group only */
 		if (s->cx != NULL && s->cx->in_txn && s->cx->serializable) {
 			rset_add(s->cx, s->e.rt.tableid, s->crid);
 			ssi_record_read(s->cx->ssi, s->e.rt.tableid, s->crid);
 		}
+		s->lk = s->ck;
+		s->lkl = s->cklen;
 		*rowid = s->crid; *rec = v + 1; *reclen = rl;
 		return 1;
 	}
+}
+
+/* The next row in entry order: the one held past a group, else
+ * xs_iscan_next1.  *k / *kl is its entry key. */
+static int
+xs_iscan_take(xstore_iscan_t *s, int64_t *rowid, const uint8_t **rec,
+    int *reclen, const uint8_t **k, int *kl)
+{
+	struct xs_igrp *g = s->grp;
+	int r;
+	if (g != NULL && g->have_next) {
+		g->have_next = 0;
+		*rowid = g->next_rid;
+		*rec = g->next_rec;
+		*reclen = g->next_rl;
+		*k = g->next_k;
+		*kl = g->next_kl;
+		return 1;
+	}
+	r = xs_iscan_next1(s, rowid, rec, reclen);
+	if (r == 1) {
+		*k = s->lk;
+		*kl = s->lkl;
+	}
+	return r;
+}
+
+/* Append a row to the group: its record and its whole tuple. */
+static int
+xs_igrp_add(xstore_iscan_t *s, int64_t rid, const uint8_t *rec, int rl)
+{
+	struct xs_igrp *g = s->grp;
+	struct xs_igrow *w;
+	uint8_t *b;
+	int tl;
+	if (g->n == g->cap) {
+		int nc = g->cap ? g->cap * 2 : 8;
+		struct xs_igrow *nr = realloc(g->row, sizeof *nr * (size_t)nc);
+		if (nr == NULL)
+			return -1;
+		g->row = nr;
+		g->cap = nc;
+	}
+	if ((b = malloc((size_t)rl + XS_IDX_TMAX)) == NULL)
+		return -1;
+	memcpy(b, rec, (size_t)rl);
+	tl = xs_idx_tuple(&s->e.rt, rec, rl, rid, b + rl, XS_IDX_TMAX, NULL);
+	w = &g->row[g->n++];
+	w->rid = rid;
+	w->rl = rl;
+	w->tl = tl < 0 ? 0 : tl;
+	w->buf = b;
+	return 0;
+}
+
+static int
+xs_igrow_cmp(const void *pa, const void *pb)
+{
+	const struct xs_igrow *a = pa, *b = pb;
+	int r = memcmp(a->buf + a->rl, b->buf + b->rl,
+	    (size_t)(a->tl < b->tl ? a->tl : b->tl));
+	if (r != 0)
+		return r;
+	if (a->tl != b->tl)
+		return a->tl < b->tl ? -1 : 1;
+	return a->rid < b->rid ? -1 : a->rid > b->rid;
+}
+
+/*
+ * The row just taken (rid, rec, its truncated entry key k) starts a
+ * group: read the rest of the group (every following row whose entry is
+ * truncated with the same first P tuple bytes), hold the first row past
+ * it, sort the group by whole tuple and rowid (descending for a reverse
+ * scan), and return its first row.  Groups are contiguous in entry
+ * order: a whole key never shares a truncated key's first P bytes.
+ */
+static int
+xs_iscan_group(xstore_iscan_t *s, int64_t *rowid, const uint8_t **rec,
+    int *reclen, const uint8_t *k)
+{
+	struct xs_igrp *g = s->grp;
+	uint8_t gk[XS_IDX_KMAX];
+	int gl = s->e.rt.kmax - 16, i, r, rl, kl;
+	int64_t rid;
+	const uint8_t *rc, *kp;
+	if (g == NULL && (g = s->grp = calloc(1, sizeof *g)) == NULL)
+		return -1;
+	for (i = 0; i < g->n; i++)
+		free(g->row[i].buf);
+	g->n = g->i = 0;
+	memcpy(gk, k, (size_t)gl);
+	if (xs_igrp_add(s, *rowid, *rec, *reclen) != 0)
+		return -1;
+	for (;;) {
+		r = xs_iscan_take(s, &rid, &rc, &rl, &kp, &kl);
+		if (r < 0)
+			return -1;
+		if (r == 0)
+			break;
+		if (xs_idx_truncated(&s->e.rt, kl) &&
+		    memcmp(kp, gk, (size_t)gl) == 0) {
+			if (xs_igrp_add(s, rid, rc, rl) != 0)
+				return -1;
+			continue;
+		}
+		g->have_next = 1; /* past the group: hold it */
+		g->next_rid = rid;
+		g->next_rl = rl;
+		g->next_kl = kl;
+		memcpy(g->next_rec, rc, (size_t)rl);
+		memcpy(g->next_k, kp, (size_t)kl);
+		break;
+	}
+	qsort(g->row, (size_t)g->n, sizeof *g->row, xs_igrow_cmp);
+	if (s->reverse)
+		for (i = 0; i < g->n / 2; i++) {
+			struct xs_igrow t = g->row[i];
+			g->row[i] = g->row[g->n - 1 - i];
+			g->row[g->n - 1 - i] = t;
+		}
+	g->i = 1;
+	*rowid = g->row[0].rid;
+	*rec = g->row[0].buf;
+	*reclen = g->row[0].rl;
+	return 1;
+}
+
+int
+xstore_iscan_next(xstore_iscan_t *s, int64_t *rowid, const uint8_t **rec,
+    int *reclen)
+{
+	struct xs_igrp *g;
+	const uint8_t *k;
+	int r, kl;
+	if (s == NULL)
+		return -1;
+	g = s->grp;
+	if (g != NULL && g->i < g->n) {
+		*rowid = g->row[g->i].rid;
+		*rec = g->row[g->i].buf;
+		*reclen = g->row[g->i].rl;
+		g->i++;
+		return 1;
+	}
+	r = xs_iscan_take(s, rowid, rec, reclen, &k, &kl);
+	if (r != 1 || !xs_idx_truncated(&s->e.rt, kl))
+		return r;
+	return xs_iscan_group(s, rowid, rec, reclen, k);
 }
 
 void
@@ -8376,6 +9010,14 @@ xstore_iscan_close(xstore_iscan_t *s)
 	free(s->ra);
 	free(s->bc);
 	free(s->bkeys);
+	free(s->fb);
+	if (s->grp != NULL) {
+		int i;
+		for (i = 0; i < s->grp->n; i++)
+			free(s->grp->row[i].buf);
+		free(s->grp->row);
+		free(s->grp);
+	}
 	free(s);
 }
 
