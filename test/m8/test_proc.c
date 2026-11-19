@@ -567,6 +567,66 @@ test_down_decode_ex_exit_vs_signal(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- 2.3: a proc that ends with kind NOCONNECTION (an xtc_xproc
+ * shadow whose child's control channel died) reaches its monitor, and a
+ * trapping linked peer, as NOCONNECTION.  Its reason is 4, and before the
+ * fix the decoder had no case for exit_kind 4 and read it through the
+ * legacy numeric fallback as SIGNAL 4 (SIGILL). ---- */
+static void
+noconn_child(void *arg)
+{
+	(void)arg;
+	(void)__xtc_exit_self_kind(XTC_DOWN_KIND_NOCONNECTION,
+	    XTC_DOWN_KIND_NOCONNECTION);
+}
+
+static xtc_down_info_t g_nc_down, g_nc_exit;
+
+static void
+noconn_parent(void *arg)
+{
+	xtc_loop_t *loop = arg;
+	xtc_down_info_t *di;
+	xtc_pid_t c;
+	uint64_t ref;
+	void *m = NULL;
+	size_t n = 0;
+	int i, rc;
+
+	(void)xtc_proc_trap_exit(1);
+	rc = xtc_proc_spawn_monitor(loop, noconn_child, NULL, NULL, &c, &ref);
+	munit_assert_int(rc, ==, XTC_OK);
+	munit_assert_int(xtc_link(c), ==, XTC_OK);
+	for (i = 0; i < 2; i++) {
+		rc = xtc_recv(&m, &n, 5LL * 1000 * 1000 * 1000);
+		munit_assert_int(rc, ==, XTC_OK);
+		di = *(char *)m == 'D' ? &g_nc_down : &g_nc_exit;
+		munit_assert_int(xtc_down_decode_ex(m, n, di), ==, XTC_OK);
+		xtc_free(m);
+	}
+}
+
+static MunitResult
+test_down_decode_noconnection(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	(void)p;
+	(void)d;
+	g_nc_down = (xtc_down_info_t)XTC_DOWN_INFO_INIT;
+	g_nc_exit = (xtc_down_info_t)XTC_DOWN_INFO_INIT;
+	g_nc_down.kind = g_nc_exit.kind = (xtc_down_kind_t)-1;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, noconn_parent, loop, NULL, NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+	munit_assert_int(g_nc_down.kind, ==, XTC_DOWN_KIND_NOCONNECTION);
+	munit_assert_int(g_nc_down.signal, ==, 0);
+	munit_assert_int(g_nc_exit.kind, ==, XTC_DOWN_KIND_NOCONNECTION);
+	munit_assert_int(g_nc_exit.signal, ==, 0);
+	return MUNIT_OK;
+}
+
 /* ---- every int is a deliverable exit reason.  The kill flag and the
  *      exit unwind used to carry reason+1 so that 0 meant "none": -1
  *      then encoded as 0, so xtc_exit_self(-1) read as CLEAN and
@@ -3401,6 +3461,8 @@ static MunitTest tests[] = {
 	{ "/spawn_link_atomic",  test_spawn_link_atomic, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/spawn_rel_needs_proc", test_spawn_rel_needs_proc, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/down_decode_ex",      test_down_decode_ex_exit_vs_signal, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/down_decode_noconnection", test_down_decode_noconnection, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/exit_reason_negative", test_exit_reason_negative, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/recv_inf_parks",    test_recv_inf_parks,   NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/mailbox_stats",     test_mailbox_stats,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

@@ -5247,6 +5247,8 @@ xtc_down_decode_ex(const void *msg, size_t len, xtc_down_info_t *out)
 	} else if (ek == 2) {
 		info.kind = XTC_DOWN_KIND_SIGNAL;
 		info.signal = info.reason;
+	} else if (ek == 4) {
+		info.kind = XTC_DOWN_KIND_NOCONNECTION;
 	} else if (ek == 1) {
 		info.kind = XTC_DOWN_KIND_EXIT;
 		info.exit_code = info.reason;
