@@ -1492,6 +1492,11 @@ tnt_echo: $(srcdir)/../examples/08_tnt/echo.c $(STATIC_LIB)
 # printed), not a pipe: a pipe would make the loop wait on any grandchild
 # that still holds it.  The collection never changes a test's exit status.
 SKIP_AWK	= $(abs_top_srcdir)/../test/dist/skip_collect.awk
+# Each tier also lists its failing tests in check-fails-<tier>.txt.  A tier
+# stops at its first failure unless CHECK_KEEP_GOING is non-empty; then it
+# runs every test and exits nonzero at the end.  scripts/coverage.sh sets it
+# (with make -k), so one failing test cannot cost the whole measurement.
+CHECK_KEEP_GOING =
 
 check: tests-c tests-pbt tests-sh $(XTC_CHECK_EXAMPLES)
 	@echo "== M0 test summary =="
@@ -1505,7 +1510,7 @@ check: tests-c tests-pbt tests-sh $(XTC_CHECK_EXAMPLES)
 	@echo "All tests passed."
 
 tests-c: $(TESTS_C)
-	@: >check-skips-c.txt; \
+	@: >check-skips-c.txt; : >check-fails-c.txt; \
 	for t in $(TESTS_C); do \
 		echo "running C test: $$t"; \
 		{ ./$$t 2>&1; echo "$$?" >.tests-c.rc; } | tee .tests-c.out; \
@@ -1513,11 +1518,15 @@ tests-c: $(TESTS_C)
 		awk -v t=$$t -v rc=$$rc -f $(SKIP_AWK) .tests-c.out \
 		    >>check-skips-c.txt 2>/dev/null || true; \
 		if [ $$rc -eq 77 ]; then echo "  SKIP: $$t (rc=77)"; \
-		elif [ $$rc -ne 0 ]; then exit 1; fi; \
-	done
+		elif [ $$rc -ne 0 ]; then \
+			echo "$$t (rc=$$rc)" >>check-fails-c.txt; \
+			[ -n "$(CHECK_KEEP_GOING)" ] || exit 1; \
+		fi; \
+	done; \
+	[ ! -s check-fails-c.txt ]
 
 tests-sh: $(STATIC_LIB)
-	@: >check-skips-sh.txt; \
+	@: >check-skips-sh.txt; : >check-fails-sh.txt; \
 	for t in $(TESTS_SH); do \
 		echo "running shell test: $$(basename $$t)"; \
 		{ CC='$(CC)' MAKE='$(MAKE)' \
@@ -1529,15 +1538,21 @@ tests-sh: $(STATIC_LIB)
 		rc=$$(cat .tests-sh.rc); \
 		awk -v t=$$(basename $$t) -v rc=$$rc -f $(SKIP_AWK) \
 		    .tests-sh.out >>check-skips-sh.txt 2>/dev/null || true; \
-		[ $$rc -eq 0 ] || exit 1; \
-	done
+		if [ $$rc -ne 0 ]; then \
+			echo "$$(basename $$t) (rc=$$rc)" >>check-fails-sh.txt; \
+			[ -n "$(CHECK_KEEP_GOING)" ] || exit 1; \
+		fi; \
+	done; \
+	[ ! -s check-fails-sh.txt ]
 
 tests-pbt: $(TESTS_PBT)
-	@skipped=0; ran=0; : >check-skips-pbt.txt; \
+	@skipped=0; ran=0; : >check-skips-pbt.txt; : >check-fails-pbt.txt; \
 	for t in $(TESTS_PBT); do \
 		echo "running PBT: $$t"; \
 		out=$$(./$$t 2>&1) || \
-		    { printf '%s\n' "$$out"; exit 1; }; \
+		    { echo "$$t (rc=$$?)" >>check-fails-pbt.txt; \
+		      printf '%s\n' "$$out"; \
+		      [ -n "$(CHECK_KEEP_GOING)" ] || exit 1; }; \
 		printf '%s\n' "$$out"; \
 		printf '%s\n' "$$out" | awk -v t=$$t -v rc=0 -f $(SKIP_AWK) \
 		    >>check-skips-pbt.txt 2>/dev/null || true; \
@@ -1555,7 +1570,8 @@ tests-pbt: $(TESTS_PBT)
 		echo "        hegeldev/hegel-rust and it is found via pkg-config."; \
 	else \
 		echo "  [PBT] OK: all $$ran property suite(s) actually ran"; \
-	fi
+	fi; \
+	[ ! -s check-fails-pbt.txt ]
 
 # check-sim / check-dst: the full DST suite (test/sim/, 52+ tests) built
 # against a separate --with-io-backend=sim configuration.  NOT part of
@@ -2616,6 +2632,7 @@ uninstall:
 clean:
 	$(RM) $(LIB_OBJS) $(STATIC_LIB) $(TESTS_C) $(TESTS_PBT) compile_commands.json
 	$(RM) check-skips-c.txt check-skips-sh.txt check-skips-pbt.txt check-skips-examples.txt .tests-c.out .tests-sh.out .tests-c.rc .tests-sh.rc
+	$(RM) check-fails-c.txt check-fails-sh.txt check-fails-pbt.txt
 	$(RM) soak_mem_bound continuous_batching bench_continuous_batching mandel hetero usdt_convoy
 	$(RM) 17_checkout 18_clickstream 19_edgeacl 17_checkout.out 18_clickstream.out 19_edgeacl.out
 	$(RM) 20_jobq 20_jobq_dst 20_jobq_dst.out
