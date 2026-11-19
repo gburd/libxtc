@@ -579,11 +579,14 @@ __xtc_async_ex(xtc_loop_t *loop, xtc_coro_fn fn, void *arg, int pinned,
 	c->waiter = NULL;
 	c->detached = (out_task == NULL);
 
+	/* getcontext is returns_twice on illumos, so gcc -Wclobbered flags
+	 * any multiply-assigned local live across it; `base` would be one.
+	 * Read the stack back from c instead, which leaves base dead here. */
 	if (getcontext(&c->ctx) != 0) {
 		__coro_destroy(c);
 		return XTC_E_INTERNAL;
 	}
-	c->ctx.uc_stack.ss_sp = base + guard;
+	c->ctx.uc_stack.ss_sp = (char *)c->stack + guard;
 	c->ctx.uc_stack.ss_size = c->stack_sz;
 	c->ctx.uc_link = NULL;       /* end-of-coroutine returns via swap */
 
