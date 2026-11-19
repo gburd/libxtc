@@ -6,6 +6,68 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## FIXED (2.1.4): a user message shaped like a DOWN was taken for a death
+
+**What it was.**  A DOWN and a link EXIT are mailbox messages with a
+public byte layout (`{'D', ref, pid, reason, exit_kind}`, packed).  The
+library's own receivers of those messages recognized them by their
+bytes alone, so any proc that could send to them could fake one with an
+ordinary `xtc_send`:
+
+* **A supervisor restarted a live child.**  One 30-byte message naming
+  a running child, sent to its supervisor, made the supervisor record
+  the child as dead and start a second copy while the first kept
+  running.  Two copies of one supervised child then ran, each holding
+  whatever that child owns (a listening socket, a registered name, a
+  lock).
+* **The registry reaper dropped a live name.**  The same message naming
+  a running proc, sent to the reaper (`xtc_reg_reaper`, the app's
+  registry), dropped every name that proc held with `XTC_REG_MONITOR`,
+  so lookups of a live service failed.
+* **A launch ended early.**  `xtc_launch` monitors its child and waits
+  for its DOWN in the caller's mailbox, matched by the monitor
+  reference; a message there with the right reference in bytes 1 to 8
+  ended the wait as if the child had died.
+
+No message from outside the process could do this; it took a send from
+code in the same process.  A program whose procs send only their own
+message formats, none starting with `'D'`, was not affected by
+accident, but a protocol whose messages start with `'D'` (a "data" tag,
+a "delete" verb) and that sends them to a supervisor or the reaper was.
+
+**Fix.**  The library's receivers act only on messages the library sent:
+the mailbox marks each DOWN and link EXIT when it is queued, and the
+supervisor's main loop, the registry reaper and `xtc_launch` check that
+mark.  An ordinary message with the same bytes is handled as an
+ordinary message (a supervisor and the reaper drop it).  No API, symbol
+or layout changes.  `test/m10/test_sup.c` `/forged_down_ignored` sends
+one forged DOWN to a supervisor and one to the reaper; on 2.1.3 the
+child starts twice and the name is gone.  `test_sim_forged_down` sends
+seeded bursts of them across three loops while one child crashes for
+real; planted bugs 77 and 78 take the forged ones again and are caught.
+
+## FIXED (2.1.4): a receive that ran out of memory reordered the mailbox
+
+When a receive cannot allocate the caller's copy of an inline payload
+(256 bytes or less) it returns `XTC_E_NOMEM` and puts the message back.
+It put it back at the head of the save queue, so the next plain
+`xtc_recv` returned it ahead of messages that arrived before it: queue
+a, b, c, fail the copy of c, and the receives then returned c, a, b.
+2.1.4 puts it back where it was in arrival order; the caller still sees
+`XTC_E_NOMEM` and can retry.  `test/m8/test_proc.c`
+`/recv_nomem_keeps_order` fails on 2.1.3.
+
+## FIXED (2.1.4): a NOCONNECTION DOWN decoded as signal 4
+
+An `xtc_xproc` shadow proc whose child's wait status is neither an exit
+nor a signal ends with kind `XTC_DOWN_KIND_NOCONNECTION`.
+`xtc_down_decode_ex` had no case for that kind's byte and read the DOWN
+as `XTC_DOWN_KIND_SIGNAL` with signal 4, so a monitor saw "killed by
+SIGILL".  It now decodes as NOCONNECTION, for a DOWN and a link EXIT;
+the wire format does not change.  `xtc_down_decode` still returns only
+the reason.  `test/m8/test_proc.c` `/down_decode_noconnection` fails on
+2.1.3.
+
 ## FIXED (2.1.4): sqlxtc indexes missed long keys, and UNIQUE let them repeat
 
 An index key longer than one B-tree key (497 bytes on 4 KiB pages; a

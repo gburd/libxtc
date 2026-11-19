@@ -1,3 +1,48 @@
+libxtc (2.1.4-1) unstable; urgency=medium
+
+  * PATCH release on the 2.1 LTS line: fixes only.  ABI-compatible with
+    2.0.0 and 2.1.0 to 2.1.3 (abidiff against 2.1.3: no change; the
+    same 762 exported symbols; SONAME libxtc.so.2).
+  * A user message shaped like a DOWN was taken for a death.  The
+    library's receivers of DOWN and link EXIT messages (the supervisor's
+    main loop, the registry reaper, xtc_launch's wait) tested the bytes
+    alone, so an ordinary xtc_send of a DOWN's 30 bytes made a
+    supervisor start a second copy of a running child, or the reaper
+    drop a running proc's XTC_REG_MONITOR names.  The mailbox now marks
+    the messages the library sends, and those receivers act only on
+    marked ones; an ordinary message with the same bytes is dropped.
+    No API, symbol or layout change.  New DST test
+    test_sim_forged_down; planted bugs 77 and 78.
+  * A receive whose copy of an inline payload fails with XTC_E_NOMEM
+    put the message back at the head of the save queue, so the next
+    xtc_recv returned it ahead of messages that arrived before it.  It
+    now goes back in arrival order.
+  * A DOWN or link EXIT of kind XTC_DOWN_KIND_NOCONNECTION (an xtc_xproc
+    child whose wait status was neither an exit nor a signal) decoded
+    as SIGNAL with signal 4; it now decodes as NOCONNECTION.
+  * sqlxtc example: an index key longer than one B-tree key (497 bytes
+    on 4 KiB pages) got no index entry, so a UNIQUE column accepted two
+    identical long values and an index lookup missed the row; base rows
+    were never lost.  A long key is now stored as its first 476 bytes
+    plus a keyed SipHash-1-3 of the whole key and every match is checked
+    against the row.  A UNIQUE probe that cannot finish fails the
+    statement ("index error: cannot check UNIQUE t.c: ...").  The index
+    format moves from 2 to 3: a store closed cleanly by 2.1.3 rebuilds
+    its indexes once at the first 2.1.4 open.  New test test_uniq_long,
+    DST test test_sim_sqlxtc_uniq, planted bugs 72 and 73.
+  * Tests: test_sync's off-loop spin, notify-spin and no-herd tests
+    count the lock's own condvar sleeps and wakeups (test-only counters
+    in sync.c, not exported) instead of OS context switches, which
+    other load on the host adds to; test_exec's Ex5 waits on the states
+    it checks instead of 20 ms sleeps.
+  * Build: no -Wclobbered warning on illumos (coro_uctx.c); the Windows
+    build_msvc.bat gate fails when smoke.exe fails; compat-check.sh
+    takes the newest older release as N-1.  scripts/coverage.sh runs
+    every test past a failure, links the probe gates with the coverage
+    runtime, and reports the DST-reachable public surface.
+
+ -- Greg Burd <greg@burd.me>  Thu, 19 Nov 2026 09:00:00 -0500
+
 libxtc (2.1.3-1) unstable; urgency=medium
 
   * PATCH release on the 2.1 LTS line: fixes, plus two exceptions the

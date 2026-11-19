@@ -12,7 +12,7 @@
 %global sover 2
 
 Name:           libxtc
-Version:        2.1.3
+Version:        2.1.4
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,21 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Thu Nov 19 2026 Greg Burd <greg@burd.me> - 2.1.4-1
+  A user message shaped like a DOWN no longer makes a supervisor
+  restart a live child, the registry reaper drop a live name, or
+  xtc_launch end early: the library's receivers act only on the DOWN
+  and link EXIT messages the library sent.  A receive whose copy-out
+  runs out of memory puts the message back in arrival order, and a DOWN
+  of kind NOCONNECTION decodes as NOCONNECTION, not as signal 4.  The
+  sqlxtc example indexes keys of any length, and UNIQUE holds for them;
+  its index format moves from 2 to 3, so a 2.1.3 store rebuilds its
+  indexes once.  Test fixes: the off-loop lock spin and herd tests
+  count the lock's own parks and wakeups, and the timer quiescence test
+  waits on events.  The illumos build has no -Wclobbered warning, the
+  Windows gate fails when smoke.exe fails, and scripts/coverage.sh runs
+  every test and reports the DST-reachable surface.
+
 * Mon Nov 16 2026 Greg Burd <greg@burd.me> - 2.1.3-1
   xtc_exec_run no longer fails, rarely, to return after its last task
   finishes.  A DOWN now says how a proc ended: a contained fault in a
