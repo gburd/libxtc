@@ -216,7 +216,8 @@ xtc_launch(xtc_loop_t *loop, xtc_launch_fn fn, void *arg,
 #if XTC_DST_BUG(XTC_DST_BUG_LAUNCH_EATMAIL)
 		rc = xtc_recv_match(launch_match_any, NULL, &m, &n, wait);
 #else
-		rc = xtc_recv_match(launch_match_down, &mref, &m, &n, wait);
+		rc = __xtc_recv_match_sys(launch_match_down, &mref, &m, &n,
+		    wait);
 #endif
 		if (rc == XTC_E_AGAIN && !timed_out) {
 			/* Deadline fired before the child exited: cancel it,

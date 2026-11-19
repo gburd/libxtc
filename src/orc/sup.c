@@ -615,12 +615,13 @@ __sup_entry(void *arg)
 		int idx;
 		int64_t now;
 		uint8_t kind;
+		int sys;
 
 		/* Receive ANY message (not a selective match): DOWN signals
 		 * AND ADD_CHILD control messages share this mailbox, and a
 		 * selective match would pile the others into the (capped)
 		 * save queue. */
-		rc = xtc_recv(&msg, &sz, 100LL * 1000 * 1000);
+		rc = __xtc_recv_sys(&msg, &sz, &sys, 100LL * 1000 * 1000);
 		if (rc == XTC_E_AGAIN) continue;
 		if (rc != XTC_OK) break;
 		if (sz < 1) { __os_free(msg); continue; }
@@ -637,7 +638,14 @@ __sup_entry(void *arg)
 			}
 			continue;
 		}
-		if (kind != 'D' || sz < sizeof d) { __os_free(msg); continue; }
+		/* Only a DOWN the library sent: the layout is public, so an
+		 * xtc_send of the same bytes would otherwise restart a live
+		 * child.  Planted bug 77 (SUP_FORGED_DOWN) takes any. */
+		if (kind != 'D' || sz < sizeof d ||
+		    (!sys && !XTC_DST_BUG(XTC_DST_BUG_SUP_FORGED_DOWN))) {
+			__os_free(msg);
+			continue;
+		}
 		memcpy(&d, msg, sizeof d);
 		__os_free(msg);
 

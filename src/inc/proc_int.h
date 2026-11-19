@@ -95,6 +95,31 @@ void      __xtc_cfg_task_exit(xtc_task_t *t);
  * by xtc_loop_fini for a proc it tears down. */
 void __xtc_pdict_proc_exit(xtc_pid_t pid);
 
+/*
+ * xtc_recv_match restricted to the messages the library sent: a DOWN or
+ * a link EXIT.  fn sees only those; every other message stays queued
+ * untested.  For the library's own receivers of those messages
+ * (supervisor, registry reaper, xtc_launch): their byte layouts are
+ * public, so a test of the bytes alone takes an ordinary xtc_send for a
+ * death.  Codes as xtc_recv_match; XTC_E_INVAL for a NULL fn or off a
+ * proc.
+ */
+int __xtc_recv_match_sys(xtc_match_fn fn, void *u, void **out,
+    size_t *out_size, int64_t timeout_ns);
+
+/* The predicate form behind __xtc_recv_match_sys: also told whether the
+ * library sent the message (sys 1: a DOWN or link EXIT; 0: an xtc_send). */
+typedef int (*__xtc_match_flag_fn)(const void *data, size_t size,
+    int sys, void *u);
+
+/* xtc_recv that also says whether the message is one the library sent:
+ * *out_sys is 1 for a DOWN or link EXIT, 0 for anything an xtc_send
+ * made, whatever its bytes.  For a receiver that takes every message (a
+ * supervisor, the registry reaper) and acts on the library's.  Codes as
+ * xtc_recv; XTC_E_INVAL for a NULL out_sys. */
+int __xtc_recv_sys(void **out, size_t *out_size, int *out_sys,
+    int64_t timeout_ns);
+
 /* xtc_exit_pid makes a target parked anywhere runnable (except inside
  * xtc_await), so a park site re-checks promptly and can deliver the kill. */
 #define XTC_HAVE_PROC_KILL_WAKE 1

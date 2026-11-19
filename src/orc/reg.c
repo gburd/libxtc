@@ -16,6 +16,7 @@
 #include "xtc_svr.h"       /* xtc_svr_call_name via-dispatch */
 #include "xtc_sim.h"       /* XTC_SIM_BUGGIFY / xtc_sim_fault (DST) */
 #include "xtc_dst_inject.h" /* DST bug-injection harness (no-op in prod) */
+#include "proc_int.h"      /* __xtc_recv_sys */
 #include "xtc_tail.h"      /* XTC_TAIL_LIFECYCLE_DROP kind */
 #include "tail_int.h"      /* __xtc_tail_emit */
 
@@ -407,9 +408,9 @@ xtc_reg_reaper(void *arg)
 		void *msg = NULL;
 		size_t len = 0;
 		xtc_pid_t down_pid;
-		int reason;
+		int reason, sys;
 
-		if (xtc_recv(&msg, &len, -1) != XTC_OK)
+		if (__xtc_recv_sys(&msg, &len, &sys, -1) != XTC_OK)
 			break;               /* loop torn down */
 		if (msg == NULL)
 			continue;
@@ -440,7 +441,11 @@ xtc_reg_reaper(void *arg)
 		}
 
 		/* Otherwise it should be a DOWN for a pid we monitor. */
-		if (xtc_down_decode(msg, len, &down_pid, &reason) == XTC_OK) {
+		/* Only a DOWN the library sent: an xtc_send of the same bytes
+		 * would otherwise drop a live proc's names.  Planted bug 78
+		 * (REG_FORGED_DOWN) takes any. */
+		if ((sys || XTC_DST_BUG(XTC_DST_BUG_REG_FORGED_DOWN)) &&
+		    xtc_down_decode(msg, len, &down_pid, &reason) == XTC_OK) {
 			(void)reason;
 			(void)xtc_reg_drop_pid(r, down_pid);
 		}

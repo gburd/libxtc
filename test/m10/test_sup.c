@@ -20,6 +20,7 @@
 #include "xtc_proc.h"
 #include "xtc_orc.h"
 #include "xtc_inspect.h"
+#include "xtc_reg.h"
 #include "xtc_int.h"
 
 /* Shared counter that flapping children bump on each spawn. */
@@ -1168,6 +1169,125 @@ test_killed_sup_stops_children(const MunitParameter p[], void *d)
 }
 
 /*
+ * A user message shaped like a DOWN is not a DOWN.  Its byte layout
+ * is public, so an xtc_send of {'D', ref, pid, reason, exit_kind} naming
+ * a live child reached the supervisor's main loop as that child's death:
+ * the supervisor started a second copy (starts 2, one restart) while the
+ * first ran on.  The same message to the registry reaper dropped a live
+ * proc's name.  Both now act only on the DOWN the library sends.
+ */
+XTC_PACK_PUSH
+struct fd_down {
+	uint8_t kind;
+	uint64_t ref;
+	xtc_pid_t pid;
+	int reason;
+	uint8_t exit_kind;
+} XTC_PACKED;
+XTC_PACK_POP
+
+static xtc_supervisor_t *g_fd_sup;
+static xtc_reg_t *g_fd_reg;
+static xtc_pid_t g_fd_child, g_fd_named, g_fd_reaper, g_fd_self;
+static int g_fd_starts, g_fd_restarts = -1, g_fd_name_kept = -1;
+static _Atomic int g_fd_stop;
+
+static void
+fd_child(void *a)
+{
+	(void)a;
+	g_fd_starts++;
+	g_fd_child = xtc_self();
+	while (!atomic_load(&g_fd_stop))
+		(void)xtc_proc_sleep(5 * NA_MS);
+}
+
+static void
+fd_named(void *a)
+{
+	(void)a;
+	(void)xtc_reg_register_mon(g_fd_reg, "svc", xtc_self());
+	while (!atomic_load(&g_fd_stop))
+		(void)xtc_proc_sleep(5 * NA_MS);
+}
+
+/* The supervisor: the proc that is none of the test's own. */
+static int
+fd_find_sup(const xtc_proc_info_t *i, void *u)
+{
+	xtc_pid_t *sup = u;
+	if (!xtc_pid_eq(i->pid, g_fd_child) &&
+	    !xtc_pid_eq(i->pid, g_fd_named) &&
+	    !xtc_pid_eq(i->pid, g_fd_reaper) && !xtc_pid_eq(i->pid, g_fd_self))
+		*sup = i->pid;
+	return 0;
+}
+
+static void
+fd_forge(xtc_pid_t to, xtc_pid_t subject)
+{
+	struct fd_down f;
+	memset(&f, 0, sizeof f);
+	f.kind = 'D';
+	f.pid = subject;
+	f.reason = 1;
+	f.exit_kind = 1;
+	munit_assert_int(xtc_send(to, &f, sizeof f), ==, XTC_OK);
+}
+
+static void
+fd_rogue(void *a)
+{
+	xtc_pid_t sup = XTC_PID_NONE, p;
+	(void)a;
+	g_fd_self = xtc_self();
+	(void)xtc_proc_sleep(20 * NA_MS);
+	(void)xtc_inspect_procs(fd_find_sup, &sup);
+	munit_assert_false(xtc_pid_is_none(sup));
+	fd_forge(sup, g_fd_child);
+	fd_forge(g_fd_reaper, g_fd_named);
+	(void)xtc_proc_sleep(50 * NA_MS);
+	g_fd_restarts = xtc_sup_n_restarts(g_fd_sup);
+	g_fd_name_kept = xtc_reg_whereis(g_fd_reg, "svc", &p) == XTC_OK &&
+	    xtc_pid_eq(p, g_fd_named);
+	atomic_store(&g_fd_stop, 1);
+	(void)xtc_sup_stop(g_fd_sup);
+	(void)xtc_exit_pid(g_fd_reaper, 1);
+}
+
+static MunitResult
+test_forged_down_ignored(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop = NULL;
+	xtc_child_spec_t ch = XTC_CHILD_SPEC_INIT;
+	xtc_sup_opts_t so = XTC_SUP_OPTS_DEFAULT;
+	(void)p;
+	(void)d;
+	ch.fn = fd_child;
+	ch.policy = XTC_RESTART_PERMANENT;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_reg_create(&g_fd_reg), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, xtc_reg_reaper, g_fd_reg, NULL,
+	                     &g_fd_reaper),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, fd_named, NULL, NULL,
+	                     &g_fd_named),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_sup_start(loop, &so, &ch, 1, &g_fd_sup), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, fd_rogue, NULL, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	munit_assert_int(xtc_sup_join(g_fd_sup, 0), ==, XTC_OK);
+	xtc_reg_destroy(g_fd_reg);
+	(void)xtc_loop_fini(loop);
+	munit_assert_int(g_fd_starts, ==, 1);
+	munit_assert_int(g_fd_restarts, ==, 0);
+	munit_assert_int(g_fd_name_kept, ==, 1);
+	return MUNIT_OK;
+}
+
+/*
  * A3 (otp probe E): a proc with a monitor DOWN already queued calls
  * xtc_sup_add_child.  2.1.1 waited for the reply with a plain xtc_recv
  * and freed everything that was not it: add_child returned XTC_OK and
@@ -1254,6 +1374,8 @@ static MunitTest tests[] = {
 	{ "/one_for_all_equal_pid_other_loop", test_one_for_all_equal_pid_other_loop, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/n_alive_during_group_restart", test_n_alive_during_group_restart,
 	    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/forged_down_ignored", test_forged_down_ignored, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/killed_sup_stops_children", test_killed_sup_stops_children, NULL,
 	    NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/add_child_keeps_mail", test_add_child_keeps_mail, NULL, NULL,

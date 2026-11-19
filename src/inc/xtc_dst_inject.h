@@ -297,4 +297,19 @@
  */
 #define XTC_DST_BUG_SIM_OFFLOOP_WAIT 68
 
+/*
+ * 77 SUP_FORGED_DOWN: a supervisor acts on any message shaped like a
+ * DOWN, not only one the library sent, so an xtc_send of a DOWN's bytes
+ * naming a live child restarts it while the first copy runs on
+ * (test_sim_forged_down: "a forged DOWN restarted a live child").
+ */
+#define XTC_DST_BUG_SUP_FORGED_DOWN 77
+
+/*
+ * 78 REG_FORGED_DOWN: the registry reaper acts on any message shaped like
+ * a DOWN, so an xtc_send of a DOWN's bytes naming a live proc drops its
+ * names (test_sim_forged_down: "a forged DOWN dropped a live name").
+ */
+#define XTC_DST_BUG_REG_FORGED_DOWN 78
+
 #endif /* XTC_DST_INJECT_H */
