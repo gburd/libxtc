@@ -17,11 +17,12 @@
  *	490 bytes, so long values meet both duplicates and near-duplicates.
  *	Half the writes run in BEGIN..COMMIT (the commit-time re-check),
  *	half autocommit; some UPDATE an existing row to a pool value; each
- *	writer parks a seeded few microseconds between statements.  With
- *	buggify on, the engine's xstore.uniq.probe_eio site makes some UNIQUE
- *	probes fail as a page read can.  A writer that sees "UNIQUE
- *	constraint failed: t.s" or "index error: cannot check UNIQUE t.s"
- *	carries on (the write was refused); any other error fails the run.
+ *	writer parks a seeded few microseconds between statements.  Before
+ *	one write in eight a writer arms xstore_uniq_fail_inject(1), so the
+ *	next UNIQUE probe of the committed index (any writer's) fails as a
+ *	page read can.  A writer that sees "UNIQUE constraint failed: t.s"
+ *	or "index error: cannot check UNIQUE t.s" carries on (the write was
+ *	refused); any other error fails the run.
  *
  *	Invariants (each a FAIL line naming the seed):
  *	  UNIQUE   no two live rows carry one value (counted by a table scan
@@ -168,6 +169,8 @@ writer(void *arg)
 		txn = (int)draw(2);
 		if (txn && sx_exec(h, "BEGIN", NULL) != SX_OK)
 			break;
+		if (draw(8) == 0)
+			xstore_uniq_fail_inject(1);
 		if (draw(4) == 0)
 			rc = run(h, "UPDATE t SET s = ? WHERE k = ?",
 			    (me * 1000) + (int64_t)draw((uint64_t)i + 1), v);
@@ -282,9 +285,8 @@ run_one(uint64_t seed, char *out)
 	        &e) != XTC_OK)
 		return -1;
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 1), setup, e, NULL, NULL);
-	xtc_sim_buggify_enable(500);
 	rc = xtc_sim_exec_run(e, seed, 50000000);
-	xtc_sim_buggify_disable();
+	xstore_uniq_fail_inject(0); /* an armed failure outlived the run */
 	xtc_exec_destroy(e);
 	snprintf(out, OUTCAP, "%s", g_out);
 	return (rc == XTC_OK && g_ok) ? 0 : -1;
