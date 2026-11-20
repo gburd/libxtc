@@ -3780,29 +3780,6 @@ __match_first(const void *data, size_t size, void *u)
 }
 
 /*
- * The envelope an fmatch predicate is being shown, so xtc_recv_match_ex's
- * adapter can report its sender.  Set only around an fmatch call, on the
- * receiving fiber, which does not yield inside a predicate.
- */
-static XTC_THREAD_LOCAL const struct envelope *__env_testing;
-
-/* Does envelope e match: match on its bytes, or fmatch on its bytes and
- * whether the library sent it (exactly one of the two is set). */
-static inline int
-__env_match(const struct envelope *e, xtc_match_fn match,
-    __xtc_match_flag_fn fmatch, void *u)
-{
-	int r;
-
-	if (fmatch == NULL)
-		return match(__env_payload(e), e->size, u);
-	__env_testing = e;
-	r = fmatch(__env_payload(e), e->size, (e->flags & ENV_F_SYS) != 0, u);
-	__env_testing = NULL;
-	return r;
-}
-
-/*
  * The receive mark.  xtc_recv_mark records the end of the save queue
  * and, by draining the mailbox into it, of everything that has arrived:
  * rmark is the last envelope that arrived before the mark (NULL: the
@@ -3893,23 +3870,50 @@ __saveq_putback(struct xtc_proc *self, struct envelope *e, int from_save)
  */
 struct __recv_opt {
 	__xtc_match_flag_fn fmatch; /* instead of match: also told sys */
+	int sys_only;               /* test only what the library sent */
 	uint64_t rmark;             /* a receive mark (xtc_recv_mark), or 0 */
 	int *out_sys;               /* the delivered envelope's sys flag */
 	xtc_pid_t *out_from;        /* the delivered envelope's sender */
+	const struct envelope **testing; /* set to what fmatch is shown */
 };
+
+/*
+ * Does envelope e match a receive whose options o set fmatch or
+ * sys_only.  A sys_only receive skips, untested, every envelope the
+ * library did not send (ENV_F_SYS), so its predicate never sees an
+ * xtc_send whose bytes look like a DOWN.  fmatch, when set, replaces
+ * match and is told whether the library sent e; o->testing, when set,
+ * names e for it (xtc_recv_match_ex reports the sender from it).
+ */
+static int
+__env_match_opt(const struct envelope *e, xtc_match_fn match,
+    const struct __recv_opt *o, void *u)
+{
+	int sys = (e->flags & ENV_F_SYS) != 0;
+
+	if (o->sys_only && !sys)
+		return 0;
+	if (o->fmatch == NULL)
+		return match(__env_payload(e), e->size, u);
+	if (o->testing != NULL)
+		*o->testing = e;
+	return o->fmatch(__env_payload(e), e->size, sys, u);
+}
 
 /*
  * The receive core.  match(payload, size, u) picks the envelope.  With
  * o->fmatch set instead, fmatch(payload, size, sys, u) picks it, sys
  * being 1 iff the library sent the envelope (ENV_F_SYS: a DOWN, a link
  * EXIT, a ROOM or a start ack), so a user message whose bytes look like
- * one can be told from it.  o may be NULL (see struct __recv_opt).
+ * one can be told from it; o->sys_only tests only such envelopes.  o may
+ * be NULL (see struct __recv_opt).
  */
 static int
 __do_recv(xtc_match_fn match, void *u, const struct __recv_opt *o, void **out,
     size_t *out_size, int64_t timeout_ns)
 {
-	__xtc_match_flag_fn fmatch = o != NULL ? o->fmatch : NULL;
+	const struct __recv_opt *fo =
+	    o != NULL && (o->fmatch != NULL || o->sys_only) ? o : NULL;
 	uint64_t rmark = o != NULL ? o->rmark : 0;
 	struct xtc_proc *self = __current_proc, *prev_self;
 	struct envelope *e, **link, *mark;
@@ -3972,17 +3976,32 @@ __do_recv(xtc_match_fn match, void *u, const struct __recv_opt *o, void **out,
 
 	for (;;) {
 		struct envelope *prev = mark;
-		/* Walk the save queue after the mark. */
+		/*
+		 * Walk the save queue after the mark.  A receive with no
+		 * filter (fo NULL: xtc_recv, xtc_recv_match) runs a loop of
+		 * its own that only calls match: one loop testing fo per
+		 * envelope made gcc schedule the walk worse, and it cost a
+		 * 10,000-message xtc_recv_match walk 11%.
+		 */
 		link = (mark != NULL) ? &mark->next : &self->save_head;
-		while ((e = *link) != NULL) {
-			if (__env_match(e, match, fmatch, u)) {
-				was_mark = self->rmark == e;
-				__saveq_unlink(self, link, e, prev);
-				from_save = 1;
-				goto deliver;
+		if (fo == NULL) {
+			while ((e = *link) != NULL &&
+			    !match(__env_payload(e), e->size, u)) {
+				prev = e;
+				link = &e->next;
 			}
-			prev = e;
-			link = &e->next;
+		} else {
+			while ((e = *link) != NULL &&
+			    !__env_match_opt(e, match, fo, u)) {
+				prev = e;
+				link = &e->next;
+			}
+		}
+		if (e != NULL) {
+			was_mark = self->rmark == e;
+			__saveq_unlink(self, link, e, prev);
+			from_save = 1;
+			goto deliver;
 		}
 
 		/* Pull from mailbox; for each, match or move to save. */
@@ -4028,7 +4047,8 @@ __do_recv(xtc_match_fn match, void *u, const struct __recv_opt *o, void **out,
 				break;
 			}
 			(void) __proc_mtx_unlock(&self->mbox_lock);
-			if (__env_match(e, match, fmatch, u))
+			if (fo == NULL ? match(__env_payload(e), e->size, u) :
+			                 __env_match_opt(e, match, fo, u))
 				goto deliver;
 			/* Append to save queue. */
 			e->next = NULL;
@@ -4212,32 +4232,16 @@ xtc_recv_match(xtc_match_fn fn, void *u, void **out, size_t *out_size,
 	return XTC_MUSTTAIL __do_recv(fn, u, NULL, out, out_size, timeout_ns);
 }
 
-/* A __xtc_recv_match_sys predicate: the caller's, on sys envelopes. */
-struct __sys_only {
-	xtc_match_fn fn;
-	void *u;
-};
-
-static int
-__match_sys_only(const void *data, size_t size, int sys, void *u)
-{
-	const struct __sys_only *so = u;
-	return sys && so->fn(data, size, so->u);
-}
-
 /* See proc_int.h. */
 int
 __xtc_recv_match_sys(xtc_match_fn fn, void *u, void **out, size_t *out_size,
     int64_t timeout_ns)
 {
-	struct __sys_only so;
-	struct __recv_opt o = { __match_sys_only, 0, NULL, NULL };
+	struct __recv_opt o = { .sys_only = 1 };
 
 	if (fn == NULL)
 		return XTC_E_INVAL;
-	so.fn = fn;
-	so.u = u;
-	return __do_recv(NULL, &so, &o, out, out_size, timeout_ns);
+	return __do_recv(fn, u, &o, out, out_size, timeout_ns);
 }
 
 /* See proc_int.h. */
@@ -4245,7 +4249,7 @@ int
 __xtc_recv_match_flag(__xtc_match_flag_fn fn, void *u, void **out,
     size_t *out_size, int64_t timeout_ns)
 {
-	struct __recv_opt o = { fn, 0, NULL, NULL };
+	struct __recv_opt o = { .fmatch = fn };
 
 	if (fn == NULL)
 		return XTC_E_INVAL;
@@ -4256,7 +4260,7 @@ __xtc_recv_match_flag(__xtc_match_flag_fn fn, void *u, void **out,
 int
 __xtc_recv_sys(void **out, size_t *out_size, int *out_sys, int64_t timeout_ns)
 {
-	struct __recv_opt o = { NULL, 0, out_sys, NULL };
+	struct __recv_opt o = { .out_sys = out_sys };
 
 	if (out_sys == NULL)
 		return XTC_E_INVAL;
@@ -4286,7 +4290,7 @@ int
 xtc_recv_match_since(uint64_t mark, xtc_match_fn fn, void *u, void **out,
     size_t *out_size, int64_t timeout_ns)
 {
-	struct __recv_opt o = { NULL, mark, NULL, NULL };
+	struct __recv_opt o = { .rmark = mark };
 
 	if (__proc_reanchor(__current_proc) == NULL)
 		return XTC_E_STATE;
@@ -4295,10 +4299,12 @@ xtc_recv_match_since(uint64_t mark, xtc_match_fn fn, void *u, void **out,
 	return __do_recv(fn, u, &o, out, out_size, timeout_ns);
 }
 
-/* xtc_recv_match_ex's predicate and its cookie. */
+/* xtc_recv_match_ex's predicate, its cookie, and the envelope it is
+ * shown (set by the receive core through __recv_opt.testing). */
 struct __ex_match {
 	xtc_match_ex_fn fn;
 	void *u;
+	const struct envelope *env;
 };
 
 /* xtc_recv_match_ex's adapter: the caller's predicate, shown the
@@ -4312,7 +4318,7 @@ __match_ex(const void *data, size_t size, int sys, void *u)
 	if (x->fn == NULL)
 		return 1;
 	mi.size = sizeof mi;
-	mi.from = __env_testing->from;
+	mi.from = x->env->from;
 	mi.flags = sys ? XTC_MSG_SYS : 0;
 	mi.data = data;
 	mi.data_size = size;
@@ -4328,7 +4334,11 @@ xtc_recv_match_ex(uint64_t mark, xtc_match_ex_fn fn, void *u, void **out,
 	xtc_msg_info_t mi;
 	xtc_pid_t from = XTC_PID_NONE;
 	int sys = 0, rc;
-	struct __recv_opt o = { __match_ex, mark, &sys, &from };
+	struct __recv_opt o = { .fmatch = __match_ex,
+		.rmark = mark,
+		.out_sys = &sys,
+		.out_from = &from,
+		.testing = &x.env };
 
 	if (__proc_reanchor(__current_proc) == NULL)
 		return XTC_E_STATE;

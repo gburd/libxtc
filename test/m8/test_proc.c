@@ -3818,6 +3818,16 @@ ex_down(const xtc_msg_info_t *mi, void *u)
 	    xtc_down_decode_ex(mi->data, mi->data_size, &di) == XTC_OK;
 }
 
+/* Any message whose bytes decode as a DOWN. */
+static int
+ex_down_bytes(const void *data, size_t size, void *u)
+{
+	xtc_down_info_t di = XTC_DOWN_INFO_INIT;
+
+	(void)u;
+	return xtc_down_decode_ex(data, size, &di) == XTC_OK;
+}
+
 static int
 ex_from(const xtc_msg_info_t *mi, void *u)
 {
@@ -3858,6 +3868,9 @@ ex_main(void *a)
 	munit_assert_int(xtc_send(self, fake, sizeof fake), ==, XTC_OK);
 	munit_assert_int(xtc_down_decode_ex(fake, sizeof fake, &di), ==,
 	    XTC_OK); /* the bytes alone cannot tell */
+	/* The library's own DOWN receivers never see it. */
+	munit_assert_int(__xtc_recv_match_sys(ex_down_bytes, NULL, &m, &n, 0),
+	    ==, XTC_E_AGAIN);
 	munit_assert_int(xtc_proc_spawn_monitor(loop, ex_quick, NULL, NULL,
 	                     &child, &ref),
 	    ==, XTC_OK);
