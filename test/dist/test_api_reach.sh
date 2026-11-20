@@ -53,10 +53,13 @@ trap 'rm -rf "$tmp" || true' EXIT
 
 # Portable nm: -g (external) works on GNU, BSD and macOS nm, where GNU's
 # --defined-only does not exist on macOS (the CI macos job failed with "no
-# exported xtc_* symbols").  Keep text (T) symbols; macOS/Mach-O prefixes C
-# names with '_', so strip one leading underscore before matching.
-nm -g "$LIB" 2>/dev/null |
-    awk '$2 == "T" { n = $3; sub(/^_/, "", n); if (n ~ /^xtc_/) print n }' |
+# exported xtc_* symbols").  -P is the POSIX format, "name type value size",
+# the one layout GNU, BSD, macOS and illumos nm share (illumos's default is
+# a table: "[47] | 1344| 518|FUNC |GLOB |0 |1 |xtc_loop_create").  Keep
+# text (T) symbols; macOS/Mach-O prefixes C names with '_', so strip one
+# leading underscore before matching.
+nm -gP "$LIB" 2>/dev/null |
+    awk '$2 == "T" { n = $1; sub(/^_/, "", n); if (n ~ /^xtc_/) print n }' |
     sort -u >"$tmp/exported"
 if [ ! -s "$tmp/exported" ]; then
 	echo "  [api-reach] FAIL: no exported xtc_* symbols found in $LIB" >&2
