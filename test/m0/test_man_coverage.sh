@@ -81,10 +81,12 @@ echo "  [D4] OK: $n public functions across the installed headers, all mentioned
 # [D4b] Every XTC_E_* code a man page cites must exist in xtc.h.  xtc_cfg.3
 # once documented XTC_E_EXIST, which never existed, so a caller switching on
 # it could not compile and one reading the page was told the wrong code.
+# The word boundaries are POSIX ERE: illumos grep has no \b.
 bad=""
 for c in $(cat "$MANDIR"/*.3 "$XTC_SRC_DIR"/man/man7/*.7 2>/dev/null |
     grep -ohE 'XTC_E_[A-Z_]+' | sort -u); do
-	grep -qE "\b$c\b" "$INC/xtc.h" || bad="$bad $c"
+	grep -qE "(^|[^A-Za-z0-9_])$c([^A-Za-z0-9_]|\$)" "$INC/xtc.h" ||
+	    bad="$bad $c"
 done
 if [ -n "$bad" ]; then
 	echo "  [D4b] FAIL: man pages cite error codes absent from xtc.h:$bad" >&2
