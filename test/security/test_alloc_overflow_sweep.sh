@@ -21,7 +21,7 @@ fail=0
 echo "[sec-sweep] scanning $SRC"
 
 # --- 1. Unbounded string functions: forbidden outright in src/. ---
-banned=$(grep -rnE '\b(strcpy|strcat|sprintf|gets|stpcpy)\b' "$SRC" \
+banned=$(grep -rnE '(^|[^A-Za-z0-9_])(strcpy|strcat|sprintf|gets|stpcpy)([^A-Za-z0-9_]|$)' "$SRC" \
     2>/dev/null | grep -vE '//|/\*|\*' || true)
 if [ -n "$banned" ]; then
     echo "[sec-sweep] FAIL: banned unbounded string function in src/:"

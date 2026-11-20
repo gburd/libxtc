@@ -112,7 +112,7 @@ done
 
 # ---- RULE 2: ignored / double-checked __os_ alloc returns -----------------
 voided=$(printf '%s\n' "$lib_c" | while IFS= read -r f; do
-	grep -nE '\(void\)[[:space:]]*__os_(malloc|calloc|realloc|strdup|aligned_alloc)\b' "$f" 2>/dev/null \
+	grep -nE '\(void\)[[:space:]]*__os_(malloc|calloc|realloc|strdup|aligned_alloc)([^A-Za-z0-9_]|$)' "$f" 2>/dev/null \
 	| sed "s#^#$f:#"
 done)
 if [ -n "$voided" ]; then
@@ -153,7 +153,7 @@ ex_src=$(find "$ROOT/examples" "$ROOT/docs/_includes/snippets" \
     grep -vE '/examples/06_sqlxtc/(sqlite|lime)/')
 consumer=$(printf '%s\n' "$ex_src" | while IFS= read -r f; do
 	[ -n "$f" ] || continue
-	grep -nE '\b__os_[a-z]|\b__xtc_[a-z]' "$f" 2>/dev/null \
+	grep -nE '(^|[^A-Za-z0-9_])(__os_|__xtc_)[a-z]' "$f" 2>/dev/null \
 	| grep -vE 'XTC_RAW_OK|/\*|//' \
 	| grep -vE '^[0-9]+:[[:space:]]*\*' | sed "s#^#$f:#"
 done)
