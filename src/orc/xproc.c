@@ -29,6 +29,7 @@
 #include "preempt_int.h"   /* __xtc_unsafe_* / __xtc_mtx_*: internal preemption brackets */
 #include "os_sharp.h"      /* __os_env_get */
 #include "os_time.h"       /* __os_sleep_ns: child start-up retry */
+#include "xtc_inject.h"    /* xproc.shadow.wait_fail: the shadow's NOCONNECTION path */
 
 #include <string.h>
 #include <pthread.h>
@@ -417,10 +418,14 @@ shadow_proc(void *a)
 	/* Park until the child exits (never blocks the loop thread).  `os`
 	 * stays valid for the whole wait: this proc holds its own reference
 	 * and drops it only below, after the last access. */
-	if (xtc_osproc_wait(os, &status, -1) != XTC_OK) {
+	if (xtc_inject_check("xproc.shadow.wait_fail") ||
+	    xtc_osproc_wait(os, &status, -1) != XTC_OK) {
+		/* The child's fate is unknowable: report NOCONNECTION as a
+		 * kind, not as exit code 4. */
 		__os_free(s);
 		__xproc_os_release(hold);
-		xtc_exit_self(XTC_DOWN_KIND_NOCONNECTION);
+		(void)__xtc_exit_self_kind(XTC_DOWN_KIND_NOCONNECTION,
+		    XTC_DOWN_KIND_NOCONNECTION);
 		return;
 	}
 	/* Decode the raw waitpid status into an exit reason AND a kind.
@@ -787,6 +792,7 @@ struct xtc_xproc {
 	long          os_pid;
 	DWORD         exit_code;
 	_Atomic int   exited;      /* set by the wait callback */
+	int           wait_failed; /* exit code unknowable: NOCONNECTION */
 	xtc_pid_t     shadow;
 	int           have_shadow;
 };
@@ -879,6 +885,8 @@ __xproc_exit_cb(PVOID ctx, BOOLEAN timedout)
 	(void)timedout;
 	if (GetExitCodeProcess(p->proc, &code))
 		p->exit_code = code;
+	else
+		p->wait_failed = 1;
 	atomic_store(&p->exited, 1);
 	/* This runs on a thread-pool thread, NOT the loop thread.  It must
 	 * NOT touch the proc table (xtc_send/__resolve take tbl->lock, which
@@ -916,9 +924,15 @@ win_shadow_proc(void *a)
 			__os_free(m); m = NULL;
 		}
 	}
+	__os_free(s);
+	if (p->wait_failed || xtc_inject_check("xproc.shadow.wait_fail")) {
+		/* As shadow_proc: the child's fate is unknowable. */
+		(void)__xtc_exit_self_kind(XTC_DOWN_KIND_NOCONNECTION,
+		    XTC_DOWN_KIND_NOCONNECTION);
+		return;
+	}
 	sig = __ntstatus_to_signal(p->exit_code);
 	reason = (sig != 0) ? sig : (int)(p->exit_code & 0xff);
-	__os_free(s);
 	xtc_exit_self(reason);
 }
 
@@ -1051,7 +1065,12 @@ __xproc_ensure_shadow_win(xtc_xproc_t *p)
 	if (p->wait == NULL) {
 		if (!RegisterWaitForSingleObject(&p->wait, p->proc,
 		    __xproc_exit_cb, p, INFINITE, WT_EXECUTEONLYONCE)) {
-			return XTC_E_IO;
+			/* No exit wait: release the shadow, which reports
+			 * NOCONNECTION, instead of leaving it parked forever.
+			 */
+			p->wait = NULL;
+			p->wait_failed = 1;
+			atomic_store(&p->exited, 1);
 		}
 	}
 	p->have_shadow = 1;
