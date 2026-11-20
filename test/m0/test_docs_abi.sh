@@ -25,6 +25,9 @@ F="$SRC/docs/abi-stability.md"
 [ -f "$F" ] || { echo "  [D3] FAIL: $F missing" >&2; exit 1; }
 
 rc=0
+# Word boundaries as POSIX ERE: illumos grep has no \b and no \|.
+L='(^|[^A-Za-z0-9_])'
+R='([^A-Za-z0-9_]|$)'
 
 # ---------------------------------------------------------------- D3a
 # Paths the page cites, in backticks, that look repo-relative: a
@@ -54,7 +57,7 @@ NEGATED='no such|does not exist|has no|never compiled|is absent|not present|no c
 # shellcheck disable=SC2016  # the backtick is markdown, not a subshell
 fns=$(grep -oE '`(xtc|__os)_[A-Za-z0-9_]+\(\)?`' "$F" | tr -d '`()' | sort -u || true)
 for fn in $fns; do
-	if grep -qE "\b$fn\b" "$SRC"/src/inc/*.h 2>/dev/null; then
+	if grep -qE "$L$fn$R" "$SRC"/src/inc/*.h 2>/dev/null; then
 		continue
 	fi
 	# Not declared anywhere.  Every line mentioning it must disclaim it.
@@ -71,14 +74,14 @@ done
 # The specific machinery that was once claimed and does not exist.  If
 # someone BUILDS one of these, the check passes automatically (the path
 # exists); until then the page must not claim it.
-# $thing is an EXTENDED REGEX; anchor it with \b where a bare substring
+# $thing is an EXTENDED REGEX; anchor it with $R where a bare substring
 # would false-positive (e.g. 's_abi' inside this script's own name, which
 # the page legitimately cites).
 check_absent_claim() {
 	thing=$1 kind=$2 target=$3
 	case "$kind" in
 	path) [ -e "$SRC/$target" ] && return 0 ;;
-	sym)  grep -qE "\b$target\b" "$SRC"/src/inc/*.h 2>/dev/null && return 0 ;;
+	sym)  grep -qE "$L$target$R" "$SRC"/src/inc/*.h 2>/dev/null && return 0 ;;
 	esac
 	hits=$(grep -nE "$thing" "$F" | grep -viE "$NEGATED" || true)
 	if [ -n "$hits" ]; then
@@ -87,7 +90,7 @@ check_absent_claim() {
 		rc=1
 	fi
 }
-check_absent_claim '(^|[^_a-z])s_abi\b'   path 'dist/s_abi'
+check_absent_claim "(^|[^_a-z])s_abi$R"   path 'dist/s_abi'
 check_absent_claim 'pubdef\.in'           path 'dist/pubdef.in'
 check_absent_claim 'capabilities\.in'     path 'dist/capabilities.in'
 check_absent_claim 'test/compat'          path 'test/compat'
@@ -110,10 +113,10 @@ fi
 [ "$rc" -eq 0 ] && echo "  [D3c] OK: no absent machinery claimed"
 
 # ---------------------------------------------------------------- D3d
-for token in "SemVer\|semver\|MAJOR.MINOR.PATCH" "PATCH" "MINOR" "MAJOR" \
+for token in "SemVer|semver|MAJOR\.MINOR\.PATCH" "PATCH" "MINOR" "MAJOR" \
              "Soft-deprecated" "Deprecated" "Default-off" "Removed" \
              "ENFORCED" "POLICY"; do
-	grep -qi "$token" "$F" || {
+	grep -qiE "$token" "$F" || {
 		echo "  [D3d] FAIL: token '$token' missing from abi-stability.md" >&2
 		rc=1
 	}
