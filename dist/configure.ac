@@ -968,6 +968,11 @@ AS_IF([test "$xtc_instr_cov" = yes],
       AC_MSG_RESULT([$xtc_cov_rt])],
      [AC_MSG_RESULT([not found (a link with another compiler driver may fail)])])])
 AC_SUBST([XTC_INSTR_LDFLAGS], [$xtc_instr_ldflags])
+# gcc predefines no macro for --coverage (it does for the sanitizers), so a
+# test that measures multi-thread scaling learns of the shared counters here.
+AS_IF([test "$xtc_instr_cov" = yes],
+  [AC_DEFINE([XTC_BUILD_COVERAGE], 1,
+     [Define to 1 when the build links coverage/profile counters.])])
 
 # -------------------------------------------------------------------------
 # pkg-config private link flags.  These are the transitive dependencies a

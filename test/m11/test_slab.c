@@ -937,8 +937,8 @@ test_stats_ctor_refused(const MunitParameter p[], void *d)
  * thread at 2, 4 and 8 threads); the magazine was per-thread but its
  * statistics were not.  Striped per thread: 3.98x at 4 threads.  The
  * bound (aggregate >= 1.5x single) leaves wide margin both ways.  Needs
- * 4 free CPUs; skipped under sanitizers/valgrind, whose instrumentation
- * of every access swamps the line-bouncing being measured.
+ * 4 free CPUs; skipped under sanitizers, valgrind and coverage, whose
+ * instrumentation swamps the line-bouncing being measured.
  */
 #define SC_THREADS 4
 #define SC_ROUNDS  200000
@@ -1012,6 +1012,12 @@ test_stats_scale(const MunitParameter p[], void *d)
 	(void)p; (void)d;
 #if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
     __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+	return MUNIT_SKIP;
+#endif
+#if defined(XTC_BUILD_COVERAGE)
+	/* Every instrumented arc bumps one process-wide gcov counter, a
+	 * shared line that 4 threads bounce: 0.56x of one thread, against
+	 * 4.0x with the alloc/free path built without --coverage. */
 	return MUNIT_SKIP;
 #endif
 	if (getenv("XTC_UNDER_VALGRIND") != NULL || __os_ncpus() < SC_THREADS)

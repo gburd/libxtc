@@ -328,6 +328,11 @@ elif probes_mode == 'sdt'
   cdata.set('XTC_PROBES_SDT', 1)
 endif
 
+# configure.ac's XTC_BUILD_COVERAGE: gcc predefines no macro for coverage.
+if get_option('b_coverage')
+  cdata.set('XTC_BUILD_COVERAGE', 1)
+endif
+
 xtc_config_h = configure_file(
   output : 'xtc_config.h',
   configuration : cdata,

@@ -53,6 +53,9 @@
    backward compatibility; new code need not use it. */
 #undef STDC_HEADERS
 
+/* Define to 1 when the build links coverage/profile counters. */
+#undef XTC_BUILD_COVERAGE
+
 /* Define to 1 to force the fcontext coroutine substrate */
 #undef XTC_CORO_FORCE_FCTX
 

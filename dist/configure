@@ -6284,6 +6284,14 @@ fi
 fi
 XTC_INSTR_LDFLAGS=$xtc_instr_ldflags
 
+# gcc predefines no macro for --coverage (it does for the sanitizers), so a
+# test that measures multi-thread scaling learns of the shared counters here.
+if test "$xtc_instr_cov" = yes
+then :
+
+printf "%s\n" "#define XTC_BUILD_COVERAGE 1" >>confdefs.h
+
+fi
 
 # -------------------------------------------------------------------------
 # pkg-config private link flags.  These are the transitive dependencies a
