@@ -19,6 +19,7 @@
 #include "xtc_loop.h"
 #include "xtc_proc.h"
 #include "xtc_xproc.h"
+#include "xtc_inject.h"
 #include "xtc_int.h"
 
 #if defined(_WIN32)
@@ -386,6 +387,43 @@ test_xproc_down_kind(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* When the shadow cannot wait for its OS child (xtc_osproc_wait fails,
+ * forced here through the xproc.shadow.wait_fail point), the child's
+ * fate is unknowable and the monitor must see kind NOCONNECTION, the
+ * same kind a dead control channel gives, not EXIT with code 4. */
+static void
+noconn_inj(const char *name, void *user)
+{
+	(void)name;
+	(void)user;
+}
+
+static MunitResult
+test_xproc_wait_fail_noconnection(const MunitParameter p[], void *d)
+{
+	struct kind_case c = { 0, -1, -1, -1, 0 };
+	xtc_loop_t *loop = NULL;
+	struct kind_ctx k;
+	(void)p;
+	(void)d;
+
+	munit_assert_int(xtc_inject_attach("xproc.shadow.wait_fail", noconn_inj,
+	                     NULL),
+	    ==, XTC_OK);
+	munit_assert_int(xtc_loop_create(&loop), ==, XTC_OK);
+	k.loop = loop;
+	k.c = &c;
+	munit_assert_int(xtc_proc_spawn(loop, kind_fiber, &k, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	xtc_loop_destroy(loop);
+	munit_assert_int(xtc_inject_detach("xproc.shadow.wait_fail"), ==,
+	    XTC_OK);
+	munit_assert_int(c.seen, ==, 1);
+	munit_assert_int(c.got_kind, ==, XTC_DOWN_KIND_NOCONNECTION);
+	return MUNIT_OK;
+}
+
 static MunitResult
 test_xproc_destroy_live_child(const MunitParameter p[], void *d)
 {
@@ -541,6 +579,7 @@ static MunitTest tests[] = {
 	{ "/monitor_exit", test_xproc_monitor_exit, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/destroy_live_child", test_xproc_destroy_live_child, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/down_kind",          test_xproc_down_kind,          NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/wait_fail_noconnection", test_xproc_wait_fail_noconnection, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/entry_mt_parent",    test_xproc_entry_mt_parent,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/entry",        test_xproc_entry,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/link",         test_xproc_link,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

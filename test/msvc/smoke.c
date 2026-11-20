@@ -42,6 +42,7 @@
 #include "xtc_fs.h"
 #include "xtc_xproc.h"
 #include "xtc_log.h"
+#include "xtc_inject.h"
 #include "os_time.h"
 
 #define CHECK(cond) do { \
@@ -401,8 +402,16 @@ smoke_xchild(void *arg)
 	(void)xtc_exit_self(code & 0x7f);
 }
 
+static void
+smoke_inj_noop(const char *name, void *user)
+{
+	(void)name;
+	(void)user;
+}
+
 static xtc_loop_t *s_xproc_loop;
 static int         s_xproc_reason = -1;
+static int         s_xproc_kind = -1;
 
 /* Driver proc: xspawn_entry a child, xsend it 42, xmonitor, recv the
  * DOWN, record the decoded reason. */
@@ -425,9 +434,10 @@ smoke_xdriver(void *arg)
 	(void)xtc_xproc_send(child, &code, sizeof code);
 	if (xtc_recv(&m, &n, 5000LL * 1000 * 1000) == XTC_OK) {
 		xtc_down_info_t di = XTC_DOWN_INFO_INIT;
-		if (xtc_down_decode_ex(m, n, &di) == XTC_OK)
+		if (xtc_down_decode_ex(m, n, &di) == XTC_OK) {
 			s_xproc_reason = di.reason;
-		else
+			s_xproc_kind = (int)di.kind;
+		} else
 			s_xproc_reason = -4;   /* got a msg but not a DOWN */
 	} else {
 		s_xproc_reason = -5;   /* no DOWN within timeout */
@@ -848,6 +858,24 @@ main(int argc, char **argv)
 		CHECK(s_xproc_reason == 42);
 		printf("  ok   xtc_xproc: re-exec child spawn+send+monitor, "
 		    "DOWN reason=42\n");
+		xtc_loop_destroy(loop);
+	}
+
+	/* --- xtc_xproc: an unknowable child fate is NOCONNECTION --- */
+	{
+		xtc_loop_t *loop = NULL;
+		CHECK(xtc_inject_attach("xproc.shadow.wait_fail",
+		          smoke_inj_noop, NULL) == XTC_OK);
+		CHECK(xtc_loop_create(&loop) == XTC_OK);
+		s_xproc_loop = loop;
+		s_xproc_kind = -1;
+		CHECK(xtc_proc_spawn(loop, smoke_xdriver, NULL, NULL, NULL) ==
+		    XTC_OK);
+		CHECK(xtc_loop_run(loop) == XTC_OK);
+		CHECK(xtc_inject_detach("xproc.shadow.wait_fail") == XTC_OK);
+		CHECK(s_xproc_kind == XTC_DOWN_KIND_NOCONNECTION);
+		printf("  ok   xtc_xproc: shadow wait failure, DOWN kind="
+		       "NOCONNECTION\n");
 		xtc_loop_destroy(loop);
 	}
 
