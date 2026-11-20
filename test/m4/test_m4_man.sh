@@ -9,7 +9,7 @@ H="$XTC_SRC_DIR/src/inc/xtc_async.h"
 [ -f "$PAGE" ] || { echo "  [D10] FAIL: $PAGE missing" >&2; exit 1; }
 
 # Public functions.
-fns=$(grep -oE 'xtc_(async|await|yield|stack_size|set_stack_size)\b' "$H" | sort -u)
+fns=$(grep -oE 'xtc_(async|await|yield|stack_size|set_stack_size)([^A-Za-z0-9_]|$)' "$H" | sed 's/[^A-Za-z0-9_]$//' | sort -u)
 for fn in $fns; do
 	if ! grep -q "$fn" "$PAGE"; then
 		echo "  [D10] FAIL: $PAGE missing $fn" >&2
