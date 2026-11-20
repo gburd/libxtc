@@ -1,3 +1,80 @@
+libxtc (2.3.0-1) unstable; urgency=medium
+
+  * MINOR release on 2.x: new API and the fixes 2.1.4 ships plus later
+    ones.  SONAME stays libxtc.so.2.  The library exports 2.2.0's
+    functions, each at its old version node, plus 3 new ones in a new
+    XTC_2.3 node; none was removed (abidiff against 2.2.0: status 4,
+    0 removed, 0 changed, 3 added).
+  * New API (XTC_2.3):
+    - xtc_recv_mark and xtc_recv_match_since: a receive mark records the
+      position of the last message that has arrived, and a receive given
+      the mark starts after it, so a reply wait does not test the
+      backlog.  A request-reply with 100,000 unrelated messages queued
+      took 1.42 ms with xtc_recv_match and 626 ns with the mark on a
+      48-core x86-64 host.  A stale mark, or 0, walks the whole queue.
+    - xtc_recv_match_ex, xtc_match_ex_fn and xtc_msg_info_t: a selective
+      receive whose predicate sees the sender's pid and XTC_MSG_SYS,
+      which the mailbox sets only on a DOWN, link EXIT, ROOM or start
+      acknowledgement the library sent.  A message is a DOWN when
+      xtc_down_decode_ex accepts it and XTC_MSG_SYS is set.
+  * Fixes:
+    - A user message shaped like a DOWN was taken for a death.  The
+      library's receivers of DOWN, link EXIT and start acknowledgements
+      (the supervisor, the registry reaper, the xtc_svr_call and
+      xtc_fsm_call waits, xtc_launch) tested the bytes alone, so an
+      ordinary xtc_send made a supervisor start a second copy of a
+      running child, the reaper drop a running proc's XTC_REG_MONITOR
+      names, or a call end with XTC_E_NOTFOUND.  They now act only on
+      messages the library marked.  No API, symbol or layout change.
+      New DST test test_sim_forged_down; planted bugs 77 and 78.  A
+      plain receive walks the save queue in a loop of its own and tests
+      the system flag only when a caller asks for it.
+      Cost: a same-loop send and receive takes about 22 ns more
+      (perf-gate micro_proc_send_recv against 2.2.0: 708.6 -> 731.2 ns,
+      -3.2%, under the cell's 10% threshold; no other cell regressed).
+    - A receive whose copy of an inline payload fails with XTC_E_NOMEM
+      put the message back at the head of the save queue, so the next
+      xtc_recv returned it ahead of older messages.  It now goes back in
+      arrival order.
+    - NOCONNECTION: a DOWN or link EXIT of kind
+      XTC_DOWN_KIND_NOCONNECTION decoded as SIGNAL with signal 4; it now
+      decodes as NOCONNECTION.  The xtc_xproc shadow proc reports
+      NOCONNECTION, not EXIT 4, when waiting for the child fails, and the
+      Windows shadow reports NOCONNECTION when the child's exit code
+      cannot be read or its wait cannot be registered (there
+      xtc_xproc_monitor and xtc_xproc_link returned XTC_E_IO and left the
+      shadow parked).
+    - sqlxtc example: an index key longer than one B-tree key (497 bytes
+      on 4 KiB pages) got no index entry, so a UNIQUE column accepted two
+      identical long values and an index lookup missed the row; base rows
+      were never lost.  A long key is now stored as its first 476 bytes
+      plus a keyed SipHash-1-3 of the whole key and every match is checked
+      against the row.  A UNIQUE probe that cannot finish fails the
+      statement.  The index format moves from 2 to 3: a store closed
+      cleanly by 2.2.0 rebuilds its indexes once at the first 2.3.0 open.
+      New test test_uniq_long, DST test test_sim_sqlxtc_uniq, planted
+      bugs 72 and 73.  The nested-loop join no longer reads one element
+      before its order array when it ends.
+  * Tests: test_sync's off-loop spin, notify-spin and no-herd tests count
+    the lock's own condvar sleeps and wakeups instead of OS context
+    switches; test_exec's Ex5 and test_sup's group-restart hook tests
+    wait on the states they check instead of fixed sleeps; test_slab's
+    stats_scale skips in coverage builds.  New DST test
+    test_sim_recv_mark, planted bug 76.
+  * Coverage: scripts/coverage.sh runs every test past a failure and
+    reports the failures, links the probe gates with the coverage
+    runtime, and reports the DST-reachable public surface computed by
+    scripts/dst_surface.py: 88.0% line, 70.1% branch and 97.0% function
+    coverage of that surface.
+  * Build and portability: the illumos gates use POSIX grep and nm
+    formats (test_docs_abi, test_api_reach); no -Wclobbered warning on
+    illumos (coro_uctx.c); the Windows build_msvc.bat gate fails when
+    smoke.exe fails; compat-check.sh takes the newest older release as
+    N-1.
+  * Docs: the correct two-message join, as a tested snippet.
+
+ -- Greg Burd <greg@burd.me>  Fri, 20 Nov 2026 09:00:00 -0500
+
 libxtc (2.2.0-1) unstable; urgency=medium
 
   * MINOR release on 2.x: new API, renamed API with the old names kept,

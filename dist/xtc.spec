@@ -12,7 +12,7 @@
 %global sover 2
 
 Name:           libxtc
-Version:        2.2.0
+Version:        2.3.0
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,21 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Fri Nov 20 2026 Greg Burd <greg@burd.me> - 2.3.0-1
+- MINOR on 2.x; SONAME libxtc.so.2, three new exports in XTC_2.3, none
+  removed.  New: xtc_recv_mark and xtc_recv_match_since (a reply wait
+  that does not scan the backlog), xtc_recv_match_ex with
+  xtc_msg_info_t and XTC_MSG_SYS (a selective receive that sees the
+  sender and whether the library sent the message).  Fixed: a user
+  message shaped like a DOWN was taken for a death by supervisors, the
+  registry reaper and call waits (the check costs a same-loop send
+  and receive about 22 ns); an XTC_E_NOMEM receive keeps arrival order; NOCONNECTION
+  decodes as NOCONNECTION and the xtc_xproc shadow reports it, on
+  Windows too; sqlxtc indexes keys of any length (index format 2 to 3);
+  illumos gate portability; the Windows gate fails on a smoke failure.
+  scripts/coverage.sh reports the DST-reachable surface (88.0% line,
+  70.1% branch, 97.0% function).
+
 * Tue Nov 17 2026 Greg Burd <greg@burd.me> - 2.2.0-1
 - MINOR on 2.x; SONAME libxtc.so.2.  2.1.2's 761 functions stay at
   XTC_2.0 and 101 new ones are in XTC_2.2; none removed.  Renamed with the

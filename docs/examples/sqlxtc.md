@@ -182,7 +182,7 @@ SipHash-1-3 of the whole tuple (see "Keys" below). Every row is indexed
 whatever the length of its key, a lookup by a 3000-byte value finds its
 row, and a UNIQUE column refuses a second copy of it. An entry match is
 only a candidate: the row's whole key decides, so two values that share
-their first 476 bytes are different keys. Until 2.2.1 a key longer than
+their first 476 bytes are different keys. Until 2.3.0 a key longer than
 `bt_max_key()` was not indexed at all; see KNOWN_ISSUES.
 
 **Writers do not hold the root.** RethinkDB's write descent keeps the

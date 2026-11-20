@@ -6,7 +6,7 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
-## FIXED (2.2.1, 2.1.4): a user message shaped like a DOWN was taken for a death
+## FIXED (2.3.0, 2.1.4): a user message shaped like a DOWN was taken for a death
 
 **What it was.**  A DOWN, a link EXIT and a start acknowledgement are
 mailbox messages with a public byte layout (`{'D', ref, pid, reason,
@@ -80,7 +80,7 @@ is unchanged.  New symbol: `xtc_recv_match_ex` (`XTC_2.3`), new type
 `xtc_msg_info_t`.  See xtc_proc(3) "Seeing the sender and system
 messages".
 
-## FIXED (2.2.1): sqlxtc indexes missed long keys, and UNIQUE let them repeat
+## FIXED (2.3.0, 2.1.4): sqlxtc indexes missed long keys, and UNIQUE let them repeat
 
 An index key longer than one B-tree key (497 bytes on 4 KiB pages; a
 TEXT value of about 490 bytes) got no index entry, at INSERT, UPDATE,
@@ -88,14 +88,61 @@ CREATE INDEX or a rebuild.  A UNIQUE column then accepted two identical
 long values (the probe for the duplicate failed and its error read as
 "no duplicate"), CREATE UNIQUE INDEX over two such values succeeded,
 and a query through a plain index did not return the row.  Base rows
-were never lost.  2.2.1 stores a long key as its first 476 bytes plus a
+were never lost.  2.3.0 stores a long key as its first 476 bytes plus a
 keyed hash of the whole key and checks every match against the row, so
 every row is indexed and UNIQUE holds at any length; a UNIQUE probe that
 cannot finish (a page read error) now fails the statement with "index
-error: cannot check UNIQUE t.c: ...".  The index format moves to 3: a
+error: cannot check UNIQUE t.c: ...".  The index format moves from 2 to
+3: a
 store closed cleanly by 2.2.0 rebuilds its indexes once at the first
-2.2.1 open.  `examples/06_sqlxtc/test_uniq_long` and the DST tier
+2.3.0 open.  `examples/06_sqlxtc/test_uniq_long` and the DST tier
 `test_sim_sqlxtc_uniq` (planted bugs 72 and 73) fail on 2.2.0.
+
+## FIXED (2.3.0, 2.1.4): a receive that ran out of memory reordered the mailbox
+
+When a receive cannot allocate the caller's copy of an inline payload
+(256 bytes or less) it returns `XTC_E_NOMEM` and puts the message back.
+It put it back at the head of the save queue, so the next plain
+`xtc_recv` returned it ahead of messages that arrived before it: queue
+a, b, c, fail the copy of c, and the receives then returned c, a, b.
+2.3.0 puts it back where it was in arrival order; the caller still sees
+`XTC_E_NOMEM` and can retry.  `test/m8/test_proc.c`
+`/recv_nomem_keeps_order` fails on 2.2.0.
+
+## FIXED (2.3.0, 2.1.4): a NOCONNECTION DOWN decoded as signal 4
+
+An `xtc_xproc` shadow proc whose child's wait status is neither an exit
+nor a signal ends with kind `XTC_DOWN_KIND_NOCONNECTION`.
+`xtc_down_decode_ex` had no case for that kind's byte and read the DOWN
+as `XTC_DOWN_KIND_SIGNAL` with signal 4, so a monitor saw "killed by
+SIGILL".  It now decodes as NOCONNECTION, for a DOWN and a link EXIT;
+the wire format does not change.  `xtc_down_decode` still returns only
+the reason.  `test/m8/test_proc.c` `/down_decode_noconnection` fails on
+2.2.0.
+
+## CHANGED (2.3): an `xtc_xproc` child whose fate is unknowable reports NOCONNECTION
+
+When the shadow proc of an `xtc_xproc` child cannot wait for the child
+(`xtc_osproc_wait` fails), its DOWN and link EXIT used to carry kind
+`XTC_DOWN_KIND_EXIT` with exit code 4.  They now carry kind
+`XTC_DOWN_KIND_NOCONNECTION`.  On Windows the shadow had no such path:
+when the child's exit code cannot be read it now reports NOCONNECTION
+instead of an exit code, and when the wait for the child cannot be
+registered `xtc_xproc_monitor` and `xtc_xproc_link` no longer return
+`XTC_E_IO` with the shadow parked forever; they succeed and the shadow
+reports NOCONNECTION.
+`test/m10/test_xproc.c` `/wait_fail_noconnection` (injection point
+`xproc.shadow.wait_fail`) fails on 2.2.0 with kind EXIT.
+
+## CHANGED (2.3): the library's receivers ignore user messages shaped like a DOWN
+
+A supervisor, the registry reaper, the `xtc_svr_call` and `xtc_fsm_call`
+waits and `xtc_launch` act only on DOWN, link EXIT and start
+acknowledgement messages the library sent (see the FIXED entry above).
+A user message with the same bytes is handled as an ordinary message: a
+supervisor and the reaper drop it, a call's wait leaves it queued.  A
+program that sent its own DOWN-shaped messages to a supervisor to make
+it restart a child no longer can; use `xtc_exit_pid` on the child.
 
 ## CHANGED (2.2): one name per verb; the old names still work until 3.0
 
