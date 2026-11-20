@@ -23,7 +23,7 @@
  * and two runs of one seed record identical arrival times and orders
  * (the worker's real timing does not leak into the run).
  *
- * Full mailbox (2.2.1): a delivery fn that meets a full mailbox.  The
+ * Full mailbox (2.3.0): a delivery fn that meets a full mailbox.  The
  * engine's mailbox holds one message and it sleeps through four
  * deliveries; each delivery fn calls xtc_send_wait, once with a timeout
  * and once with -1.  The receiver cannot run while the sim thread waits,
