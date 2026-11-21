@@ -129,7 +129,7 @@ write_cases() {
 		"72;test_sim_sqlxtc_uniq;1;1;UNIQUE: value [0-9]+ \\([0-9]+ bytes\\) is held by ([2-9]|[1-9][0-9]+) rows" \
 		"73;test_sim_sqlxtc_uniq;1;1;(UNIQUE: value [0-9]+ \\((49[89]|[5-9][0-9]{2}|[0-9]{4}) bytes\\) is held by|INDEX: value)" \
 		"80;test_sim_sqlxtc_uniq;1;1;UNIQUE: value [0-9]+ \\([0-9]+ bytes\\) is held by ([2-9]|[1-9][0-9]+) rows" \
-		"81;test_sim_sqlxtc_uniq;1;1;INDEX: the g group: index [0-9]+, scan [0-9]+, want [0-9]+" \
+		"81;test_sim_sqlxtc_uniq;1;1;(INDEX|SNAPSHOT): the g group:? (index|under one snapshot)" \
 		"76;test_sim_recv_mark;0;1;a marked receive skipped a reply" \
 		"77;test_sim_forged_down;0;1;a forged DOWN restarted a live child" \
 		"78;test_sim_forged_down;0;1;a forged DOWN dropped a live name" \

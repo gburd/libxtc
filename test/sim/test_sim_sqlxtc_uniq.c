@@ -27,7 +27,17 @@
  *	"UNIQUE constraint failed: t.s" or "index error: cannot check UNIQUE
  *	t.s" carries on (the write was refused); any other error fails the
  *	run.  The table also holds NGRP rows with one 200-byte value of g
- *	under a plain index on g: their entries span several leaves.
+ *	under a plain index on g: their entries span several leaves.  While
+ *	the writers run, a mover proc inserts and deletes rows of that
+ *	group (rowids between the group's own, so entries land in every
+ *	leaf of it) and moves group rows out of it and back by UPDATE, and
+ *	a reader proc counts the group twice through the index and once by
+ *	a table scan inside one transaction (one snapshot).  Buggify is on:
+ *	the site xstore.iscan.handoff stalls an equality probe between its
+ *	first leaf's batch and the cursor that reads the rest, so the
+ *	mover's writes land in that window.  A reader statement that fails
+ *	with "index error: cannot read index" (a writer's armed read fault
+ *	that the reader drew) is skipped.
  *
  *	Invariants (each a FAIL line naming the seed):
  *	  UNIQUE   no two live rows carry one value (counted by a table scan
@@ -36,6 +46,10 @@
  *	           its count by the scan, so does the g group's (an equality
  *	           probe over many leaves), and xstore_index_check reports
  *	           no entry missing;
+ *	  SNAPSHOT the reader's two index counts and its scan count of the
+ *	           g group under one snapshot are equal;
+ *	  BUGGIFY  over 8 or more seeds, xstore.iscan.handoff fired at least
+ *	           once (the window was exercised);
  *	  REPLAY   the same seed gives the same result text.
  *
  *	Planted bugs (scripts/dst-bug-inject.sh): 72 (UNIQPROBE) reads a
@@ -44,7 +58,8 @@
  *	longer than one B-tree key, as 2.2.0 did, so the index misses rows;
  *	80 (UNIQREAD) reads a UNIQUE candidate row that could not be read
  *	as absent, so a long duplicate is accepted; 81 (POINTEND) ends an
- *	equality index probe with its first leaf, so the g group is short.
+ *	equality index probe with its first leaf, so the g group is short
+ *	(the reader's SNAPSHOT check or the checker's INDEX check).
  *	usage: test_sim_sqlxtc_uniq [base [count]]   (default 1 8)
  */
 
@@ -76,13 +91,17 @@
 #define VMAX 3000
 #define OUTCAP 2048
 #define NGRP 60 /* rows of the g group: about 17 entries per leaf */
+#define GRP_K 900000 /* the group's rowids: GRP_K + 2i; the mover's odd */
+#define NMOVE 40 /* mover statements */
+#define NREAD 12 /* reader transactions */
+#define RD_ERR "index error: cannot read index "
 
 static bt_t *g_bt;
 static char g_pool[NPOOL][VMAX + 1];
 static char g_grp[201]; /* the g group's value */
 static char g_out[OUTCAP];
 static char g_why[256];
-static int g_left, g_ok;
+static int g_left, g_ok, g_handoff;
 static long g_dups; /* UNIQUE refusals seen */
 static long g_perr; /* writes refused by a failed probe */
 
@@ -124,6 +143,21 @@ run(sx_db *h, const char *sql, int64_t k, int v)
 		sx_bind_text(st, b++, g_pool[v], -1);
 	if (k >= 0)
 		sx_bind_int64(st, b, k);
+	rc = sx_step(st);
+	sx_finalize(st);
+	return rc;
+}
+
+/* Run `sql` with the g group's value bound to its ? (if any). */
+static int
+grp_exec(sx_db *h, const char *sql)
+{
+	sx_stmt *st = NULL;
+	int rc;
+	if (sx_prepare(h, sql, -1, &st, NULL) != SX_OK)
+		return -1;
+	if (strchr(sql, '?') != NULL)
+		sx_bind_text(st, 1, g_grp, -1);
 	rc = sx_step(st);
 	sx_finalize(st);
 	return rc;
@@ -221,6 +255,111 @@ out:
 	xtc_atomic_fetch_sub_i32(&g_left, 1, xtc_mo_seq_cst);
 }
 
+/* The mover: inserts and deletes rows of the g group at rowids between
+ * the group's own, and moves group rows out of it and back, then puts
+ * the group back as it was. */
+static void
+mover(void *arg)
+{
+	sx_db *h = NULL;
+	char sql[128];
+	unsigned char ins[NGRP] = { 0 }, out[NGRP] = { 0 };
+	int i, j, op, rc = SX_DONE;
+	(void)arg;
+	if (sx_open_bt(g_bt, &h) != SX_OK)
+		goto done;
+	for (i = 0; i < NMOVE && g_why[0] == '\0' && rc == SX_DONE; i++) {
+		j = (int)draw(NGRP);
+		op = (int)draw(2);
+		if (op == 0 && !ins[j]) {
+			snprintf(sql, sizeof sql,
+			    "INSERT INTO t(k, g) VALUES(%d, ?)", GRP_K + 2 * j + 1);
+			ins[j] = 1;
+		} else if (op == 0) {
+			snprintf(sql, sizeof sql, "DELETE FROM t WHERE k = %d",
+			    GRP_K + 2 * j + 1);
+			ins[j] = 0;
+		} else {
+			snprintf(sql, sizeof sql,
+			    "UPDATE t SET g = %s WHERE k = %d",
+			    out[j] ? "?" : "'out'", GRP_K + 2 * j);
+			out[j] = !out[j];
+		}
+		rc = grp_exec(h, sql);
+		(void)xtc_proc_sleep((int64_t)(1 + draw(200)) * 1000);
+	}
+	for (j = 0; j < NGRP && rc == SX_DONE; j++) {
+		if (ins[j]) {
+			snprintf(sql, sizeof sql, "DELETE FROM t WHERE k = %d",
+			    GRP_K + 2 * j + 1);
+			rc = grp_exec(h, sql);
+		}
+		if (out[j] && rc == SX_DONE) {
+			snprintf(sql, sizeof sql, "UPDATE t SET g = ? WHERE k = %d",
+			    GRP_K + 2 * j);
+			rc = grp_exec(h, sql);
+		}
+	}
+	if (rc != SX_DONE && g_why[0] == '\0')
+		snprintf(g_why, sizeof g_why, "mover: \"%s\" failed: rc %d \"%s\"",
+		    sql, rc, sx_errmsg(h));
+done:
+	if (h != NULL)
+		sx_close(h);
+	xtc_atomic_fetch_sub_i32(&g_left, 1, xtc_mo_seq_cst);
+}
+
+/* A reader count that failed: fine if a read fault drew it (the
+ * statement says it could not read the index), else the run fails. */
+static int
+rd_failed(sx_db *h, int64_t n)
+{
+	const char *m = sx_errmsg(h);
+	if (n != -2)
+		return 0;
+	if (m != NULL && strncmp(m, RD_ERR, sizeof RD_ERR - 1) == 0)
+		return 1;
+	if (g_why[0] == '\0')
+		snprintf(g_why, sizeof g_why, "reader: count failed: \"%s\"",
+		    m != NULL ? m : "");
+	return -1;
+}
+
+/* The reader: the g group counted twice through the index and once by a
+ * scan, under one snapshot, while the mover changes the group. */
+static void
+reader(void *arg)
+{
+	sx_db *h = NULL;
+	int64_t a, b, c;
+	int i, f;
+	(void)arg;
+	if (sx_open_bt(g_bt, &h) != SX_OK)
+		goto done;
+	for (i = 0; i < NREAD && g_why[0] == '\0'; i++) {
+		if (sx_exec(h, "BEGIN", NULL) != SX_OK)
+			break;
+		a = grp_count(h, "SELECT count(*) FROM t WHERE g = ?");
+		(void)xtc_proc_sleep((int64_t)(1 + draw(500)) * 1000);
+		b = grp_count(h, "SELECT count(*) FROM t WHERE g = ?");
+		c = grp_count(h, "SELECT count(*) FROM t WHERE g || '' = ?");
+		f = rd_failed(h, a) | rd_failed(h, b) | rd_failed(h, c);
+		(void)sx_exec(h, "COMMIT", NULL);
+		if (f < 0)
+			break;
+		if (f == 0 && (a != b || b != c) && g_why[0] == '\0')
+			snprintf(g_why, sizeof g_why,
+			    "SNAPSHOT: the g group under one snapshot: index "
+			    "%lld then %lld, scan %lld",
+			    (long long)a, (long long)b, (long long)c);
+		(void)xtc_proc_sleep((int64_t)(1 + draw(300)) * 1000);
+	}
+done:
+	if (h != NULL)
+		sx_close(h);
+	xtc_atomic_fetch_sub_i32(&g_left, 1, xtc_mo_seq_cst);
+}
+
 /* After the writers: the invariants, and the result text. */
 static void
 checker(void *arg)
@@ -295,7 +434,7 @@ grp_fill(sx_db *h)
 	    SX_OK)
 		return -1;
 	for (i = 0; i < NGRP && rc == 0; i++) {
-		sx_bind_int64(st, 1, 900000 + i);
+		sx_bind_int64(st, 1, GRP_K + 2 * i);
 		sx_bind_text(st, 2, g_grp, -1);
 		rc = sx_step(st) == SX_DONE ? 0 : -1;
 		sx_reset(st);
@@ -324,11 +463,26 @@ setup(void *arg)
 		return;
 	}
 	sx_close(h);
-	xtc_atomic_store_i32(&g_left, NW, xtc_mo_seq_cst);
+	xtc_atomic_store_i32(&g_left, NW + 2, xtc_mo_seq_cst);
 	for (i = 0; i < NW; i++)
 		(void)xtc_proc_spawn(xtc_exec_loop(e, (int)(i % N_LOOPS)),
 		    writer, (void *)i, NULL, NULL);
+	(void)xtc_proc_spawn(xtc_exec_loop(e, 2), mover, NULL, NULL, NULL);
+	(void)xtc_proc_spawn(xtc_exec_loop(e, 1), reader, NULL, NULL, NULL);
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), checker, e, NULL, NULL);
+}
+
+/* 1 if this run's xstore.iscan.handoff site was reached and active. */
+static int
+handoff_fired(void)
+{
+	char name[64];
+	int i, on = 0;
+	for (i = 0; xtc_sim_buggify_site(i, name, sizeof name, &on) == XTC_OK;
+	    i++)
+		if (strcmp(name, "xstore.iscan.handoff") == 0)
+			return on;
+	return 0;
 }
 
 static int
@@ -346,7 +500,10 @@ run_one(uint64_t seed, char *out)
 	        &e) != XTC_OK)
 		return -1;
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 1), setup, e, NULL, NULL);
+	xtc_sim_buggify_enable(500);
 	rc = xtc_sim_exec_run(e, seed, 50000000);
+	g_handoff += handoff_fired();
+	xtc_sim_buggify_disable();
 	xstore_uniq_fail_inject(0); /* an armed failure outlived the run */
 	xstore_index_read_fail_at(0);
 	xtc_exec_destroy(e);
@@ -427,13 +584,19 @@ main(int argc, char **argv)
 	if (bm != NULL)
 		bm_destroy(bm);
 	unlink(btf);
+	if (fails == 0 && count >= 8 && g_handoff == 0) {
+		printf("  FAIL: BUGGIFY: xstore.iscan.handoff never fired in "
+		       "%llu seeds\n", (unsigned long long)count);
+		fails++;
+	}
 	if (fails) {
 		printf("FAIL: %d of %llu seeds\n", fails,
 		    (unsigned long long)count);
 		return 1;
 	}
 	printf("OK: UNIQUE holds and the index finds every row over keys of "
-	       "3..3000 bytes -- %llu seeds, %d writers, replay clean\n",
-	    (unsigned long long)count, NW);
+	       "3..3000 bytes -- %llu seeds, %d writers, replay clean, "
+	       "hand-off buggified in %d runs\n",
+	    (unsigned long long)count, NW, g_handoff);
 	return 0;
 }
