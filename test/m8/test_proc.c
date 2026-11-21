@@ -3210,6 +3210,56 @@ test_recv_nomem_keeps_order(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- The library's own DOWN receive (__xtc_recv_match_sys, which
+ * xtc_launch uses) takes only system messages: a user payload whose
+ * bytes decode as a DOWN must not match it. ---- */
+
+/* Any message whose bytes decode as a DOWN. */
+static int
+so_down_bytes(const void *data, size_t size, void *u)
+{
+	xtc_down_info_t di = XTC_DOWN_INFO_INIT;
+
+	(void)u;
+	return xtc_down_decode_ex(data, size, &di) == XTC_OK;
+}
+
+static void
+so_main(void *a)
+{
+	unsigned char fake[29];
+	xtc_down_info_t di = XTC_DOWN_INFO_INIT;
+	void *m = NULL;
+	size_t n = 0;
+
+	(void)a;
+	memset(fake, 0, sizeof fake);
+	fake[0] = 'D';
+	munit_assert_int(xtc_send(xtc_self(), fake, sizeof fake), ==, XTC_OK);
+	munit_assert_int(xtc_down_decode_ex(fake, sizeof fake, &di), ==,
+	    XTC_OK); /* the bytes alone cannot tell */
+	munit_assert_int(__xtc_recv_match_sys(so_down_bytes, NULL, &m, &n, 0),
+	    ==, XTC_E_AGAIN);
+	/* The user message is still there for a plain receive. */
+	munit_assert_int(xtc_recv(&m, &n, 0), ==, XTC_OK);
+	munit_assert_size(n, ==, sizeof fake);
+	xtc_free(m);
+}
+
+static MunitResult
+test_recv_match_sys_only(const MunitParameter p[], void *d)
+{
+	xtc_loop_t *loop;
+	(void)p;
+	(void)d;
+	munit_assert_int(xtc_loop_init(&loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(loop, so_main, NULL, NULL, NULL), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_loop_run(loop), ==, XTC_OK);
+	(void)xtc_loop_fini(loop);
+	return MUNIT_OK;
+}
+
 /* ---- M1/D4: a DOWN reaches a watcher whose mailbox is FULL.  Pre-fix
  * the DOWN was an ordinary capped send and was dropped. ---- */
 static int m1_got_down;
@@ -3498,6 +3548,8 @@ static MunitTest tests[] = {
 #endif
 	{ "/recv_match_reused_user", test_recv_match_reused_user, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/recv_nomem_keeps_order", test_recv_nomem_keeps_order, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/recv_match_sys_only", test_recv_match_sys_only, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/down_bypasses_full_mailbox", test_down_bypasses_full_mailbox, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/link_semantics", test_link_semantics, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
