@@ -43,6 +43,17 @@
  *	  ATOMICITY   an op in flight at the crash is all or nothing;
  *	  EXACTNESS   no row the oracle does not hold, every column right;
  *	  INDEX       0 rows missing from an index, index counts = oracle;
+ *	  IDREUSE     each open creates a scratch table with an index, gives
+ *	              it a row and drops it, so the next open's CREATE comes
+ *	              after a clean close's GC or a crash rebuild's log dump
+ *	              has removed the drop's tombstones: the new table and
+ *	              index must take ids past every one handed out, and the
+ *	              table must be empty;
+ *	  DROPGAP     the final child crashes a DROP TABLE and a DROP INDEX
+ *	              between the high-water mark and the tombstone (buggify
+ *	              sites xstore.drop.*_gap): the table, its row and the
+ *	              index must survive recovery, and a new table must take
+ *	              a fresh id;
  *	  LIVENESS    every run quiesces (no deadlock / step budget);
  *	  REPLAY      the same seed yields the identical fingerprint: the
  *	              final rows and statuses, the counters, and every commit
@@ -130,6 +141,7 @@ struct shared {
 	int32_t     tgt[MAXID];
 	struct mrow row[MAXID];
 	int         created;
+	uint32_t    max_tid, max_iid; /* the largest table / index ids handed out */
 	int         last_clean;       /* the last segment closed cleanly */
 	uint64_t    acked, crashes, cleans, trusted_opens, recover_opens;
 	uint64_t    idx_trusted;      /* trusted opens that kept the indexes */
@@ -821,6 +833,136 @@ segment(uint64_t rs, int crash)
  * of a seed minted different stamps.)
  */
 
+/* The largest index id on `table`, or 0. */
+static uint32_t
+max_index_id(const char *table)
+{
+	xstore_index_info_t ix[8];
+	uint32_t m = 0;
+	int n = xstore_index_list(sx_storage_bt(), table, ix, 8), i;
+	for (i = 0; i < n; i++)
+		if (ix[i].idx_id > m)
+			m = ix[i].idx_id;
+	return m;
+}
+
+/*
+ * The IDREUSE check, off the run on a clock fixed at 0 like the table's
+ * CREATE: a scratch table and index made now must take ids past every
+ * one handed out and hold no row; then it gets a row and is dropped, so
+ * the store this segment closes or crashes with holds the drop.
+ */
+static int
+scratch_ddl(const char *kind)
+{
+	sx_db *h = NULL;
+	uint32_t tid = 0, iid;
+	int64_t n = -1;
+	sx_stmt *st = NULL;
+	int bad;
+
+	xtc_sim_clock_enable(0);
+	bad = sx_open(":memory:", &h) != SX_OK ||
+	    sx_exec(h, "CREATE TABLE s(k INTEGER PRIMARY KEY, v TEXT)", NULL) != SX_OK ||
+	    sx_exec(h, "CREATE INDEX s_v ON s(v)", NULL) != SX_OK ||
+	    !xstore_table_id(sx_storage_bt(), "s", &tid);
+	if (!bad && sx_prepare(h, "SELECT count(*) FROM s", -1, &st, NULL) == SX_OK &&
+	    sx_step(st) == SX_ROW)
+		n = sx_column_int64(st, 0);
+	sx_finalize(st);
+	iid = bad ? 0 : max_index_id("s");
+	if (!bad && (tid <= g_sh->max_tid || iid <= g_sh->max_iid || n != 0))
+		FAILF("%s: IDREUSE: new table s has id %u and index id %u (ids "
+		    "up to %u / %u handed out) and %lld rows", kind, tid, iid,
+		    g_sh->max_tid, g_sh->max_iid, (long long)n);
+	if (tid > g_sh->max_tid)
+		g_sh->max_tid = tid;
+	if (iid > g_sh->max_iid)
+		g_sh->max_iid = iid;
+	bad = bad || sx_exec(h, "INSERT INTO s VALUES(1, 'dropped')", NULL) != SX_OK ||
+	    sx_exec(h, "DROP TABLE s", NULL) != SX_OK;
+	if (h != NULL)
+		sx_close(h);
+	xtc_sim_clock_disable();
+	if (bad)
+		FAILF("%s: scratch table DDL failed", kind);
+	return g_sh->failed ? -1 : 0;
+}
+
+/* 1 if the store has table `name` with `rows` rows and index `idx`. */
+static int
+gap_intact(sx_db *h, const char *name, const char *idx, int64_t rows)
+{
+	char sql[64];
+	sx_stmt *st = NULL;
+	xstore_index_info_t ix[8];
+	int64_t n = -1;
+	int k, i, found = 0;
+
+	snprintf(sql, sizeof sql, "SELECT count(*) FROM %s", name);
+	if (sx_prepare(h, sql, -1, &st, NULL) == SX_OK && sx_step(st) == SX_ROW)
+		n = sx_column_int64(st, 0);
+	sx_finalize(st);
+	k = xstore_index_list(sx_storage_bt(), name, ix, 8);
+	for (i = 0; i < k; i++)
+		if (strcmp(ix[i].name, idx) == 0)
+			found = 1;
+	return n == rows && found;
+}
+
+/*
+ * DROPGAP, in the final child only (so no earlier segment's schedule
+ * moves): a crash between a DROP's high-water mark and its tombstone.
+ * Table g with a row and index gi; under the simulator with every
+ * buggify site armed, DROP INDEX gi and DROP TABLE g stop at their gap
+ * sites (xstore.drop.index_gap, xstore.drop.table_gap); the store
+ * crashes and recovers.  The tombstone is the DROP's commit point, so g,
+ * its row and gi must all be there, and a new table must take an id past
+ * g's.  A DROP that wrote its tombstone first loses them here.
+ */
+static int
+drop_gap(void)
+{
+	sx_db *h = NULL;
+	uint32_t tg = 0, tn = 0;
+	int bad;
+
+	xtc_sim_clock_enable(0);
+	bad = sx_open(":memory:", &h) != SX_OK ||
+	    sx_exec(h, "CREATE TABLE g(k INTEGER PRIMARY KEY, v TEXT)", NULL) != SX_OK ||
+	    sx_exec(h, "INSERT INTO g VALUES(1, 'kept')", NULL) != SX_OK ||
+	    sx_exec(h, "CREATE INDEX gi ON g(v)", NULL) != SX_OK ||
+	    !xstore_table_id(sx_storage_bt(), "g", &tg);
+	if (!bad) {
+		xtc_sim_activate(g_seed);
+		xtc_sim_buggify_enable(1000);
+		(void)sx_exec(h, "DROP INDEX gi", NULL);
+		(void)sx_exec(h, "DROP TABLE g", NULL);
+		sites_note();
+		xtc_sim_buggify_disable();
+		xtc_sim_deactivate();
+	}
+	if (h != NULL)
+		sx_close(h);
+	h = NULL;
+	sx_storage_abandon();
+	if (!bad && (sx_storage_open(g_path, SIM_FRAMES) != SX_OK ||
+	    sx_open(":memory:", &h) != SX_OK))
+		bad = 1;
+	if (!bad && !gap_intact(h, "g", "gi", 1))
+		FAILF("final: DROPGAP: table g (id %u), its row or index gi lost "
+		    "to a crash before the DROP's tombstone", tg);
+	if (!bad && (sx_exec(h, "CREATE TABLE n(k INTEGER PRIMARY KEY)", NULL) != SX_OK ||
+	    !xstore_table_id(sx_storage_bt(), "n", &tn) || tn <= tg))
+		FAILF("final: DROPGAP: new table n has id %u, g had %u", tn, tg);
+	if (h != NULL)
+		sx_close(h);
+	xtc_sim_clock_disable();
+	if (bad)
+		FAILF("final: DROPGAP: DDL or reopen failed");
+	return g_sh->failed ? -1 : 0;
+}
+
 /* Open the store, recording which kind of open this is. */
 static int
 open_store(const char **kind)
@@ -847,6 +989,9 @@ open_store(const char **kind)
 		    sx_exec(h, "CREATE TABLE t(k INTEGER PRIMARY KEY, u TEXT UNIQUE, "
 		    "g INTEGER, w INTEGER, p TEXT)", NULL) != SX_OK ||
 		    sx_exec(h, "CREATE INDEX t_g ON t(g)", NULL) != SX_OK;
+		if (!bad && !xstore_table_id(sx_storage_bt(), "t", &g_sh->max_tid))
+			bad = 1;
+		g_sh->max_iid = max_index_id("t");
 		if (h != NULL)
 			sx_close(h);
 		xtc_sim_clock_disable();
@@ -873,9 +1018,12 @@ round_child(int last)
 		return 3;
 	sx_storage_set_checkpoint(1ull << 40);   /* no periodic checkpoint proc */
 	for (g_seg = 0; g_seg < nseg; g_seg++) {
-		if (open_store(&kind) != 0 || verify(kind) != 0)
+		if (open_store(&kind) != 0 || verify(kind) != 0 ||
+		    scratch_ddl(kind) != 0)
 			return 3;
 		if (last) {
+			if (drop_gap() != 0)
+				return 3;
 			(void)sx_storage_close();
 			return 0;
 		}

@@ -123,3 +123,8 @@ test_sim_sqlxtc_uniq    4          1   p168 hand-off: the key after a deleted ha
 test_sim_sqlxtc_uniq    8          1   p168 hand-off: the same, a second shape; same commit
 test_sim_sqlxtc_uniq    55         1   p168 hand-off: found by the 1..400 re-review sweep (rr-sa); same commit
 test_sim_sqlxtc_uniq    64         1   p168 hand-off: found by the same sweep; same commit
+# p168/r12 (2.3.0, 2.1.5).  Seed 1 FAILS on the planted build (bug 79
+# IDREUSE) and on libxtc-examples before the fix: "IDREUSE: new table s has
+# id 2 and index id 4 (ids up to 2 / 3 handed out) and 1 rows", a dropped
+# table's id and rows back after a clean close's GC.  2.2.0 and 2.1.4 have it.
+test_sim_sqlxtc_reopen  1          1   bug79: a dropped table's id (and rows) reused; fixed libxtc-examples "06_sqlxtc: never reuse a dropped table's or index's id"
