@@ -13,12 +13,15 @@
  *	tombstone.  The next CREATE then took the dropped id and read the
  *	dropped table's rows as its own.
  *
- *	Four cases, each on a fresh store: a clean close and reopen; a
+ *	Six cases, each on a fresh store: a clean close and reopen; a
  *	crash after a log compaction (the rebuild replays the dump); a
  *	crash with the whole log (the rebuild replays the DROP itself);
- *	and a store that already lost a dropped table's tombstone while
- *	its rows stayed (what an older release leaves), whose next CREATE
- *	must still get a fresh id.
+ *	a store that already lost a dropped table's tombstone while its
+ *	rows stayed (what an older release leaves), whose next CREATE
+ *	must still get a fresh id; and a tombstone written without the
+ *	high-water row (a DROP by an older release), which neither a crash
+ *	rebuild nor GC may forget, with and without index entries in the
+ *	store.
  *	Off a loop.
  */
 
@@ -33,6 +36,9 @@
 #include "xstore.h"
 #include "xtc.h"
 #include "t_tmp.h"
+
+/* The index catalog's table id (xstore.c XS_IDXCAT_TABLEID). */
+#define IDXCAT 0xFFFFFFFDu
 
 enum { REOPEN_CLEAN, REOPEN_CRASH_DUMP, REOPEN_CRASH_LOG };
 
@@ -69,6 +75,29 @@ index_id(const char *table, const char *name)
 	for (i = 0; i < n; i++)
 		if (strcmp(ix[i].name, name) == 0) return ix[i].idx_id;
 	return 0;
+}
+
+/* Whether the tree holds any version of catalog row (`cat`, `rid`).  A
+ * version key starts with the table id and the rowid with its sign bit
+ * flipped, both big-endian (xstore.c enc_vkey). */
+static int
+cat_has(uint32_t cat, int64_t rid)
+{
+	uint8_t pre[12];
+	uint64_t r = (uint64_t)rid ^ ((uint64_t)1 << 63);
+	bt_cursor_t *c = NULL;
+	const void *k, *v;
+	uint16_t kl, vl;
+	int i, found = 0;
+	for (i = 0; i < 4; i++) pre[i] = (uint8_t)(cat >> (24 - 8 * i));
+	for (i = 0; i < 8; i++) pre[4 + i] = (uint8_t)(r >> (56 - 8 * i));
+	if (bt_cursor_open(sx_storage_bt(), pre, sizeof pre, &c) != 0)
+		return -1;
+	if (bt_cursor_next(c, &k, &kl, &v, &vl) == 0 && kl >= sizeof pre &&
+	    memcmp(k, pre, sizeof pre) == 0)
+		found = 1;
+	bt_cursor_close(c);
+	return found;
 }
 
 /* Close the store the way `mode` names, then open it again. */
@@ -145,9 +174,14 @@ drop_case(int mode)
 	sx_close(h);
 	/* Once the store has closed cleanly (GC removed b's tombstone; this
 	 * release leaves b's rows in place), a further new table still takes
-	 * a fresh id and is empty, and the live table keeps its row. */
+	 * a fresh id and is empty, and the live table keeps its row.  Both
+	 * tombstones are gone, which only a high-water row covering them
+	 * allows. */
 	CK(sx_storage_close() == SX_OK);
 	CK(sx_storage_open(path, 256) == SX_OK);
+	CK(cat_has(0, tb) == 0);
+	CK(cat_has(IDXCAT, ix) == 0);
+	CK(cat_has(IDXCAT, inew) == 1);
 	CK(sx_open(":memory:", &h) == SX_OK);
 	CK(sx_exec(h, "CREATE TABLE e(k INTEGER PRIMARY KEY, v TEXT)", NULL) == SX_OK);
 	CK(table_id("e") > td);
@@ -195,6 +229,62 @@ orphan_case(void)
 	unlink_store(path);
 }
 
+/*
+ * A DROP made by a release without the high-water row: a catalog
+ * tombstone the mark does not cover, here written directly.  The store
+ * then goes through a clean close (GC, which runs because the tombstones
+ * were logged), a crash rebuild (the log dump) and another clean close.
+ * With `live_a`, table a keeps a row, so the store holds index entries;
+ * without, it holds none, and GC must still reach the index catalog
+ * (it sorts after the index entries).  None of them may drop either
+ * tombstone (the mark would not record the id), so the next CREATE
+ * takes a fresh id.
+ */
+static void
+unmarked_case(int live_a)
+{
+	char path[256];
+	sx_db *h = NULL;
+	uint32_t tb, td, ix, inew;
+	int fd;
+
+	t_tmpl(path, sizeof path, "sqlxtc-dropid");
+	if ((fd = mkstemp(path)) < 0) { CK(0); return; }
+	close(fd);
+	CK(sx_storage_open(path, 256) == SX_OK);
+	CK(sx_open(":memory:", &h) == SX_OK);
+	CK(sx_exec(h, "CREATE TABLE a(k INTEGER PRIMARY KEY, v TEXT)", NULL) == SX_OK);
+	CK(sx_exec(h, "CREATE TABLE b(k INTEGER PRIMARY KEY, v TEXT)", NULL) == SX_OK);
+	if (live_a)
+		CK(sx_exec(h, "INSERT INTO a VALUES(1, 'live-a-row')", NULL) ==
+		    SX_OK);
+	CK(sx_exec(h, "INSERT INTO b VALUES(1, 'old-b-row')", NULL) == SX_OK);
+	CK(sx_exec(h, "CREATE INDEX a_v ON a(v)", NULL) == SX_OK);
+	CK(sx_exec(h, "CREATE INDEX a_k ON a(k)", NULL) == SX_OK);
+	tb = table_id("b");
+	ix = index_id("a", "a_k");
+	CK(xstore_delete_rec(sx_storage_bt(), 0, (int64_t)tb) == 0);
+	CK(xstore_delete_rec(sx_storage_bt(), IDXCAT, (int64_t)ix) == 0);
+	sx_close(h);
+	reopen(path, REOPEN_CLEAN);
+	reopen(path, REOPEN_CRASH_DUMP);
+	reopen(path, REOPEN_CLEAN);
+	CK(sx_open(":memory:", &h) == SX_OK);
+	CK(sx_exec(h, "CREATE TABLE d(k INTEGER PRIMARY KEY, v TEXT)", NULL) == SX_OK);
+	CK(sx_exec(h, "CREATE INDEX a_k2 ON a(k)", NULL) == SX_OK);
+	td = table_id("d");
+	inew = index_id("a", "a_k2");
+	printf("  %-24s dropped table %u, index %u; new table %u, index %u\n",
+	    live_a ? "unmarked tombstone" : "unmarked, no index entry",
+	    tb, ix, td, inew);
+	CK(td > tb);
+	CK(inew > ix);
+	CK(one(h, "SELECT count(*) FROM d") == 0);
+	sx_close(h);
+	CK(sx_storage_close() == SX_OK);
+	unlink_store(path);
+}
+
 int
 main(void)
 {
@@ -203,6 +293,8 @@ main(void)
 	drop_case(REOPEN_CRASH_DUMP);
 	drop_case(REOPEN_CRASH_LOG);
 	orphan_case();
+	unmarked_case(1);
+	unmarked_case(0);
 	if (g_fail) { fprintf(stderr, "FAIL: test_drop_id\n"); return 1; }
 	printf("  ok   a dropped table's or index's id is never reused\n");
 	return 0;

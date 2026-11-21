@@ -1173,13 +1173,18 @@ typedef struct xstore_vtab {
  *
  * An id is never reused.  DROP TABLE tombstones the catalog row, and
  * version GC and the log dump remove a tombstone once no snapshot needs
- * it (taking the dropped table's rows with it), so the catalog alone
- * forgets a dropped id.  The catalog therefore also holds a HIGH-WATER
- * row at rowid 0 (xs_hw_*): the largest id a DROP removed, raised before
- * the tombstone is written.  Its value has an empty name (a NUL, then
- * the id in decimal), so no name lookup matches it, and a store written
- * this way stays readable by a release that does not know the row.  The
- * index catalog keeps the same row for index ids.
+ * it, so the catalog alone forgets a dropped id.  The catalog therefore
+ * also holds a HIGH-WATER row at rowid 0 (xs_hw_*): the largest id a
+ * DROP removed, raised before the tombstone is written.  Its value has
+ * an empty name (a NUL, then the id in decimal), so no name lookup
+ * matches it, and a store written this way stays readable by a release
+ * that does not know the row.  The index catalog keeps the same row for
+ * index ids.  GC and the dump keep a tombstone the mark does not cover
+ * (a DROP by an older release), in either catalog.  One case is not
+ * covered: a store on which an older release already collected a
+ * dropped index's tombstone can hand that index id out again (tables
+ * have the data probe, xs_data_max_id; indexes have nothing to probe).
+ * That is harmless: the DROP cleared the entries.
  */
 #define XS_CAT_TABLEID 0u
 #define XS_CAT_MAX 256
@@ -4915,6 +4920,24 @@ xs_newest_ts(bt_t *bt, uint32_t tableid, int64_t rowid)
 	return ts;
 }
 
+static uint32_t xs_hw_parse(const uint8_t *p, int n);   /* defined below */
+
+/*
+ * The high-water mark a catalog version (key value `vv`, `vl` bytes,
+ * flag byte first) records, or 0 for a tombstone.  GC and the dump read
+ * the mark from rowid 0, which sorts before every catalog row, and keep
+ * a catalog tombstone above it (a DROP by a release without the mark):
+ * that tombstone alone keeps its id from being handed out again.
+ */
+static uint32_t
+xs_hw_of(const void *vv, uint16_t vl)
+{
+	const uint8_t *v = vv;
+	if (vl < 1 || (v[0] & XS_F_DELETED))
+		return 0;
+	return xs_hw_parse(v + 1, (int)vl - 1);
+}
+
 /*
  * Version GC (MVCC vacuum).  Reclaims versions no live snapshot can
  * reach: scanning in key order the cursor sees each rowid's versions
@@ -4955,6 +4978,9 @@ xs_gc(bt_t *bt, uint64_t horizon, int *out_reclaimed)
 	int64_t prev_rowid = 0;
 	uint32_t prev_tableid = 0;
 	int in_group = 0, survivor_found = 0;
+	/* The catalogs' high-water rows: [0] tables, [1] indexes. */
+	uint32_t mark[2] = { 0, 0 };
+	const uint8_t past = XS_IDX_LEAD + 1;
 
 	for (;;) {
 		bt_cursor_t *cur = NULL;
@@ -4973,13 +4999,24 @@ xs_gc(bt_t *bt, uint64_t horizon, int *out_reclaimed)
 			uint16_t klen = 0, vl = 0;
 			int64_t rid; uint64_t ts; int deleted, first_in_group;
 			uint32_t tid;
+			int is_cat;
 
-			/* The tables end at the index namespace; an index key can
-			 * be 20 bytes long too, so stop on its lead byte, not only
-			 * on the first key of another length. */
-			if (bt_cursor_next(cur, &k, &klen, &vv, &vl) != XTC_OK ||
-			    klen != XS_VKLEN ||
-			    ((const uint8_t *)k)[0] == XS_IDX_LEAD)
+			if (bt_cursor_next(cur, &k, &klen, &vv, &vl) != XTC_OK)
+				break;
+			/* The tables end at the index namespace (index entries
+			 * are not versions, and one can be 20 bytes long too).
+			 * The index catalog sorts after it, so seek past the
+			 * namespace, as xs_dump_tree does, rather than stop:
+			 * otherwise GC reached the index catalog only when the
+			 * store held no index entry at all. */
+			if (klen >= 1 && ((const uint8_t *)k)[0] == XS_IDX_LEAD) {
+				bt_cursor_close(cur);
+				cur = NULL;
+				if (bt_cursor_open(bt, &past, 1, &cur) != XTC_OK)
+					break;
+				continue;
+			}
+			if (klen != XS_VKLEN)
 				break;
 			/* Skip the resume key itself (already processed). */
 			if (have_resume && memcmp(k, resume, XS_VKLEN) == 0)
@@ -4989,6 +5026,7 @@ xs_gc(bt_t *bt, uint64_t horizon, int *out_reclaimed)
 			ts = dec_ts((const uint8_t *)k);
 			if (tid == XS_STAGE_TID)
 				continue;          /* STEAL staging area: not GC's concern */
+			is_cat = (tid == XS_CAT_TABLEID || tid == XS_IDXCAT_TABLEID);
 			deleted = (vl >= 1 && (((const uint8_t *)vv)[0] & XS_F_DELETED));
 			/* A logical row is (tableid, rowid): a group boundary is
 			 * either changing. */
@@ -4997,11 +5035,18 @@ xs_gc(bt_t *bt, uint64_t horizon, int *out_reclaimed)
 			if (first_in_group) {
 				prev_rowid = rid; prev_tableid = tid;
 				in_group = 1; survivor_found = 0;
+				if (is_cat && rid == 0)
+					mark[tid == XS_IDXCAT_TABLEID] = xs_hw_of(vv, vl);
 			}
 			if (!survivor_found) {
 				if (ts <= horizon) {
 					survivor_found = 1;
-					if (deleted && first_in_group)
+					/* An unmarked tombstone in either catalog
+					 * stays: it alone keeps its id from being
+					 * handed out again. */
+					if (deleted && first_in_group &&
+					    !(is_cat && rid > 0 && (uint32_t)rid >
+					    mark[tid == XS_IDXCAT_TABLEID]))
 						memcpy(dead[ndead++], k, XS_VKLEN);
 				}
 				/* else ts > horizon: keep (newer than horizon). */
@@ -10048,6 +10093,7 @@ xs_dump_tree(wal_emit_fn emit, void *ectx, void *user)
 	uint8_t ck[XL_HDR_LEN + 16];
 	uint32_t last_tid = 0; int64_t last_rid = 0; int have_last = 0;
 	int cn;
+	uint32_t mark[2] = { 0, 0 };   /* high-water rows: table, index catalog */
 
 	if ((cn = xl_enc_checkpoint(ck, sizeof ck, dc->clock, 0)) > 0)
 		emit(ectx, ck, (uint32_t)cn);
@@ -10123,7 +10169,15 @@ xs_dump_tree(wal_emit_fn emit, void *ectx, void *user)
 			continue;                  /* committed after the snapshot */
 		last_tid = tableid; last_rid = rowid; have_last = 1;
 		flags = (vl >= 1) ? ((const uint8_t *)vv)[0] : 0;
-		if (flags & XS_F_DELETED)
+		if ((tableid == XS_CAT_TABLEID || tableid == XS_IDXCAT_TABLEID) &&
+		    rowid == 0)
+			mark[tableid == XS_IDXCAT_TABLEID] = xs_hw_of(vv, vl);
+		/* A catalog tombstone above its catalog's mark is dumped as is
+		 * (xs_hw_of), so a rebuild keeps its id handed out. */
+		if ((flags & XS_F_DELETED) &&
+		    !((tableid == XS_CAT_TABLEID || tableid == XS_IDXCAT_TABLEID) &&
+		    rowid > 0 &&
+		    (uint32_t)rowid > mark[tableid == XS_IDXCAT_TABLEID]))
 			continue;                  /* newest is a tombstone: row is gone */
 
 		payl = (vl >= 1) ? (uint16_t)(vl - 1) : 0;
