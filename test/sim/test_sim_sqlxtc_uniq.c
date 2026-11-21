@@ -36,8 +36,9 @@
  *	the site xstore.iscan.handoff stalls an equality probe between its
  *	first leaf's batch and the cursor that reads the rest, so the
  *	mover's writes land in that window.  A reader statement that fails
- *	with "index error: cannot read index" (a writer's armed read fault
- *	that the reader drew) is skipped.
+ *	with "index error: cannot read index ...: I/O error" while the fault
+ *	hook failed a read (a writer's armed fault that the reader drew) is
+ *	skipped; any other reader error fails the run.
  *
  *	Invariants (each a FAIL line naming the seed):
  *	  UNIQUE   no two live rows carry one value (counted by a table scan
@@ -95,6 +96,7 @@
 #define NMOVE 40 /* mover statements */
 #define NREAD 12 /* reader transactions */
 #define RD_ERR "index error: cannot read index "
+#define RD_EIO ": I/O error" /* how RD_ERR ends for an injected fault */
 
 static bt_t *g_bt;
 static char g_pool[NPOOL][VMAX + 1];
@@ -309,20 +311,31 @@ done:
 	xtc_atomic_fetch_sub_i32(&g_left, 1, xtc_mo_seq_cst);
 }
 
-/* A reader count that failed: fine if a read fault drew it (the
- * statement says it could not read the index), else the run fails. */
-static int
-rd_failed(sx_db *h, int64_t n)
+/* The reader's count of the g group by `sql`.  *f becomes 1 if the
+ * count failed on an injected read fault: the fault hook failed a read
+ * while it ran, and the statement says it could not read the index with
+ * an I/O error.  Any other failure sets *f to -1 and fails the run. */
+static int64_t
+rd_count(sx_db *h, const char *sql, int *f)
 {
+	int f0 = xstore_index_read_faults();
+	int64_t n = grp_count(h, sql);
 	const char *m = sx_errmsg(h);
-	if (n != -2)
-		return 0;
-	if (m != NULL && strncmp(m, RD_ERR, sizeof RD_ERR - 1) == 0)
-		return 1;
+	size_t ml = m != NULL ? strlen(m) : 0;
+	if (n != -2 || *f < 0)
+		return n;
+	if (xstore_index_read_faults() != f0 && m != NULL &&
+	    strncmp(m, RD_ERR, sizeof RD_ERR - 1) == 0 &&
+	    ml >= sizeof RD_EIO - 1 &&
+	    strcmp(m + ml - (sizeof RD_EIO - 1), RD_EIO) == 0) {
+		*f = 1;
+		return n;
+	}
+	*f = -1;
 	if (g_why[0] == '\0')
 		snprintf(g_why, sizeof g_why, "reader: count failed: \"%s\"",
 		    m != NULL ? m : "");
-	return -1;
+	return n;
 }
 
 /* The reader: the g group counted twice through the index and once by a
@@ -339,11 +352,11 @@ reader(void *arg)
 	for (i = 0; i < NREAD && g_why[0] == '\0'; i++) {
 		if (sx_exec(h, "BEGIN", NULL) != SX_OK)
 			break;
-		a = grp_count(h, "SELECT count(*) FROM t WHERE g = ?");
+		f = 0;
+		a = rd_count(h, "SELECT count(*) FROM t WHERE g = ?", &f);
 		(void)xtc_proc_sleep((int64_t)(1 + draw(500)) * 1000);
-		b = grp_count(h, "SELECT count(*) FROM t WHERE g = ?");
-		c = grp_count(h, "SELECT count(*) FROM t WHERE g || '' = ?");
-		f = rd_failed(h, a) | rd_failed(h, b) | rd_failed(h, c);
+		b = rd_count(h, "SELECT count(*) FROM t WHERE g = ?", &f);
+		c = rd_count(h, "SELECT count(*) FROM t WHERE g || '' = ?", &f);
 		(void)sx_exec(h, "COMMIT", NULL);
 		if (f < 0)
 			break;
