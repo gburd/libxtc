@@ -111,3 +111,15 @@ test_sim_partition      -          -   bug67 PART_SYSDROP: a partition dropped a
 # has both bugs.
 test_sim_sqlxtc_uniq    1          1   bug72/73: UNIQUE over long keys and failed probes; fixed libxtc-examples "06_sqlxtc: a failed UNIQUE probe is an error" + "index every row, whatever its key's length"
 test_sim_sqlxtc_uniq    5          1   bug72/73: the same, a second shape (short and long duplicates); same fixes
+# p168/sa (phase a re-review R3).  An equality index probe hands its last
+# key to the cursor that reads the rest, and the cursor skips that key
+# only if it is still there.  With the comparison dropped (the first
+# key skipped whatever it is), a deleted hand-off key costs the next
+# entry, and each seed below FAILS with "SNAPSHOT: the g group under one
+# snapshot: index N then N+1"; the clean build passes them.  The seeds
+# fail only with the mover from "sqlxtc DST: the uniq mover churns the
+# rows an equality probe hands off".
+test_sim_sqlxtc_uniq    4          1   p168 hand-off: the key after a deleted hand-off key skipped; guards libxtc-examples 6cb5949 "06_sqlxtc: an equality index probe reads its entries without a cursor"
+test_sim_sqlxtc_uniq    8          1   p168 hand-off: the same, a second shape; same commit
+test_sim_sqlxtc_uniq    55         1   p168 hand-off: found by the 1..400 re-review sweep (rr-sa); same commit
+test_sim_sqlxtc_uniq    64         1   p168 hand-off: found by the same sweep; same commit
