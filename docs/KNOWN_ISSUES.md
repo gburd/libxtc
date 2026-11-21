@@ -6,6 +6,71 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## FIXED (2.1.5): sqlxtc handed a dropped table's id, and its rows, to a new table
+
+**What it was.**  The sqlxtc example allocated a table id as one past
+the largest id in its catalog.  DROP TABLE wrote a tombstone over the
+table's catalog row and left the table's rows in place.  Version GC at
+a clean close, and the log compaction of a crash recovery, both remove
+a tombstone no snapshot needs, so after either one the catalog no
+longer named the dropped id.  The next CREATE TABLE took that id and
+read the dropped table's rows as its own: drop a table that holds a
+row, close (or crash), reopen, create a new table, and the new table
+already holds the old row.  Index ids were reused the same way (DROP
+INDEX clears its entries, so a reused index id showed no stale
+entries).
+
+**Fix.**  Each catalog keeps a high-water row at rowid 0: the largest
+id a DROP removed, written before the DROP's tombstone.  A new table or
+index takes an id past the largest catalog rowid and the high-water
+row, and a new table also skips the largest table id that still has
+rows in the tree.  Version GC and the log compaction keep a tombstone
+the high-water row does not cover (a DROP by an older release), in both
+catalogs.  So 2.1.5 never hands out again an id it dropped itself.
+
+A store an older release already damaged is covered for tables: a
+table dropped there keeps its rows, so a new table skips its id even
+when the tombstone is gone.  It is covered for an index whose tombstone
+is still in the store.  It is not covered for an index whose tombstone
+the older release already collected (2.1.4 did that at a clean close
+of a store with no index entries): 2.1.5 can hand that index id out
+again.  That is harmless, because DROP INDEX cleared the index's
+entries.
+
+2.1.5 does not reclaim a dropped table's rows: they stay in the store,
+unreachable, as in every earlier release.  (2.3.0 reclaims them.)
+
+2.1.4 opens a 2.1.5 store (the high-water row has an empty name, so no
+lookup matches it), but it ignores the row, so it reuses ids again,
+including those of tables and indexes dropped under 2.1.5.  Since 2.1.5
+leaves a dropped table's rows in place, a table 2.1.4 then creates on
+a reused id can show the dropped table's rows, as on 2.1.4 itself.
+
+`examples/06_sqlxtc/test_drop_id.c` drops a table and an index, then
+reopens after a clean close, after a crash past a log compaction, and
+after a crash with the whole log; the new table and index must take
+fresh ids, the new table must be empty, and once the store has closed
+cleanly both tombstones must be gone.  It also writes tombstones with
+no high-water row, as an older release would, with and without index
+entries in the store, and both ids must stay handed out.  On 2.1.4 it
+fails in every case but the crash with the whole log (which replays
+the tombstone).  `test_sim_sqlxtc_reopen` drops a table with a row and an index
+on every open (its IDREUSE check), and crashes a DROP between the
+high-water row and the tombstone (its DROPGAP check, buggify sites
+`xstore.drop.table_gap` and `xstore.drop.index_gap`).  Planted bug 79
+ignores the high-water row and is caught on seed 1;
+`test_sim_sqlxtc_reopen 1 1` is pinned in the seed corpus.
+
+## FIXED (2.1.5): xtc_recv lost its tail call in 2.1.4
+
+2.1.4's check that a DOWN came from the library gave the receive core
+a seventh argument, which x86-64 passes on the stack, so `xtc_recv` and
+`xtc_recv_match` stopped being a single jump into it, and the save-queue
+walk tested per message which predicate the receive used.  2.1.5 passes
+the receive's options by pointer and walks the queue with a loop that
+only calls the predicate, so `xtc_recv` is one jump again.  The forged
+DOWN check is unchanged.  No API, symbol or layout change.
+
 ## FIXED (2.1.4): a user message shaped like a DOWN was taken for a death
 
 **What it was.**  A DOWN and a link EXIT are mailbox messages with a
@@ -45,10 +110,13 @@ one forged DOWN to a supervisor and one to the reaper; on 2.1.3 the
 child starts twice and the name is gone.  `test_sim_forged_down` sends
 seeded bursts of them across three loops while one child crashes for
 real; planted bugs 77 and 78 take the forged ones again and are caught.
-The check costs a request-reply round trip about 22 ns (perf-gate
-`micro_proc_send_recv` against 2.1.3, bare metal: 712 to 762 ns,
--6.5% to -7.1%, under the cell's 10% threshold); no other cell moved
-outside its noise.
+In 2.1.4 the check cost a request-reply round trip about 50 ns
+(perf-gate `micro_proc_send_recv` against 2.1.3, bare metal: 712 to 762
+ns, -6.5% to -7.1%, under the cell's 10% threshold); no other cell moved
+outside its noise.  2.1.5 gives back about 21 ns of it (see "xtc_recv
+lost its tail call" above): on a bare-metal x86-64 host,
+`proc_send_recv` measured 713 ns on 2.1.3, 760 on 2.1.4 and 739 on
+2.1.5, so 2.1.5 is about 26 ns (3.7%) above 2.1.3.
 
 ## FIXED (2.1.4): a receive that ran out of memory reordered the mailbox
 

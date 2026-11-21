@@ -65,10 +65,10 @@ See `xtc_strerror(3)`.
 ### Compile-time version macros
 
 ```c
-XTC_VERSION_STRING   /* "2.1.4" */
+XTC_VERSION_STRING   /* "2.1.5" */
 XTC_VERSION_MAJOR    /* 2 */
 XTC_VERSION_MINOR    /* 1 */
-XTC_VERSION_PATCH    /* 3 */
+XTC_VERSION_PATCH    /* 5 */
 ```
 
 These come from the installed `xtc_version.h`, which `xtc.h` includes

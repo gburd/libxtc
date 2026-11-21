@@ -1,3 +1,38 @@
+libxtc (2.1.5-1) unstable; urgency=medium
+
+  * PATCH release on the 2.1 LTS line: fixes only.  ABI-compatible with
+    2.0.0 and 2.1.0 to 2.1.4 (abidiff against 2.1.4: no change; the
+    same exported symbols; SONAME libxtc.so.2).
+  * sqlxtc example: a new table could take a dropped table's id, and
+    then read the dropped table's rows as its own.  Ids were allocated as
+    one past the largest catalog row, and version GC at a clean close
+    and the log compaction of a crash recovery both removed the DROP's
+    tombstone.  Index ids were reused the same way.  Each catalog now
+    keeps a high-water row (rowid 0) written before the tombstone, GC
+    and the log compaction keep a tombstone it does not cover, and a new
+    table also skips any id that still has rows in the store.  So 2.1.5
+    never hands out again an id it dropped itself.  A store an older
+    release damaged is covered for tables; an index id whose tombstone
+    the older release already collected can be handed out again
+    (harmless: its entries were cleared).  The dropped table's rows stay
+    in the store, unreachable, as in earlier releases.  2.1.4 opens a
+    2.1.5 store but ignores the high-water row, so it reuses ids again,
+    including ones dropped under 2.1.5, and a table it creates can then
+    show a dropped table's rows, as on 2.1.4 itself.  New test
+    test_drop_id; DST checks IDREUSE and DROPGAP in
+    test_sim_sqlxtc_reopen, buggify sites xstore.drop.table_gap and
+    xstore.drop.index_gap; planted bug 79.
+  * xtc_recv and xtc_recv_match are a tail call again.  2.1.4's
+    forged-DOWN check gave the receive core a seventh argument, passed
+    on the stack, and a per-message predicate test in the save-queue
+    walk.  The options now go by pointer and a plain receive walks the
+    queue with a loop of its own.  perf-gate micro_proc_send_recv on a
+    bare-metal x86-64 host: 713 ns on 2.1.3, 760 on 2.1.4, 739 on 2.1.5,
+    so this gives back about 21 of the 47 ns 2.1.4 added.  No API,
+    symbol or layout change.
+
+ -- Greg Burd <greg@burd.me>  Sat, 21 Nov 2026 09:00:00 -0500
+
 libxtc (2.1.4-1) unstable; urgency=medium
 
   * PATCH release on the 2.1 LTS line: fixes only.  ABI-compatible with

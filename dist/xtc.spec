@@ -12,7 +12,7 @@
 %global sover 2
 
 Name:           libxtc
-Version:        2.1.4
+Version:        2.1.5
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,18 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Sat Nov 21 2026 Greg Burd <greg@burd.me> - 2.1.5-1
+  The sqlxtc example no longer hands a dropped table's or index's id to
+  a new one, so a new table no longer shows a dropped table's rows after
+  a clean close or a crash.  On a store an older release damaged, an
+  index id whose tombstone was already collected can still be reused
+  (harmless: its entries were cleared).  The dropped rows stay in the
+  store, unreachable, as before.  Opened by 2.1.4 again, a store can
+  reuse ids, and show a dropped table's rows, as on 2.1.4 itself.
+  xtc_recv is a tail call again: 2.1.4's forged-DOWN check had cost
+  every receive a stack argument (a request-reply round trip 760 ns on
+  2.1.4, 739 on 2.1.5, 713 on 2.1.3, on bare metal).
+
 * Thu Nov 19 2026 Greg Burd <greg@burd.me> - 2.1.4-1
   A user message shaped like a DOWN no longer makes a supervisor
   restart a live child, the registry reaper drop a live name, or
