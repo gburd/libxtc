@@ -276,10 +276,11 @@ mover(void *arg)
 		goto done;
 	for (i = 0; i < NMOVE && g_why[0] == '\0' && rc == SX_DONE; i++) {
 		j = (int)draw(NHOT);
-		op = draw(4) != 0; /* 1: move a group row, three times in four */
+		op = draw(4) != 0; /* 1 (a move): three times in four */
 		if (op == 0 && !ins[j]) {
 			snprintf(sql, sizeof sql,
-			    "INSERT INTO t(k, g) VALUES(%d, ?)", GRP_K + 2 * j + 1);
+			    "INSERT INTO t(k, g) VALUES(%d, ?)",
+			    GRP_K + 2 * j + 1);
 			ins[j] = 1;
 		} else if (op == 0) {
 			snprintf(sql, sizeof sql, "DELETE FROM t WHERE k = %d",
@@ -301,14 +302,15 @@ mover(void *arg)
 			rc = grp_exec(h, sql);
 		}
 		if (out[j] && rc == SX_DONE) {
-			snprintf(sql, sizeof sql, "UPDATE t SET g = ? WHERE k = %d",
-			    GRP_K + 2 * j);
+			snprintf(sql, sizeof sql,
+			    "UPDATE t SET g = ? WHERE k = %d", GRP_K + 2 * j);
 			rc = grp_exec(h, sql);
 		}
 	}
 	if (rc != SX_DONE && g_why[0] == '\0')
-		snprintf(g_why, sizeof g_why, "mover: \"%s\" failed: rc %d \"%s\"",
-		    sql, rc, sx_errmsg(h));
+		snprintf(g_why, sizeof g_why,
+		    "mover: \"%s\" failed: rc %d \"%s\"", sql, rc,
+		    sx_errmsg(h));
 done:
 	if (h != NULL)
 		sx_close(h);
