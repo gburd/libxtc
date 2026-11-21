@@ -20,22 +20,31 @@
  *	writer parks a seeded few microseconds between statements.  Before
  *	one write in eight a writer arms xstore_uniq_fail_inject(1), so the
  *	next UNIQUE probe of the committed index (any writer's) fails as a
- *	page read can.  A writer that sees "UNIQUE constraint failed: t.s"
- *	or "index error: cannot check UNIQUE t.s" carries on (the write was
- *	refused); any other error fails the run.
+ *	page read can, and before one in eight (drawn from the fault stream,
+ *	so the application draws stay as they were) it arms
+ *	xstore_index_read_fail_at, so one of the next four B-tree reads of a
+ *	probe fails, its candidate-row read among them.  A writer that sees
+ *	"UNIQUE constraint failed: t.s" or "index error: cannot check UNIQUE
+ *	t.s" carries on (the write was refused); any other error fails the
+ *	run.  The table also holds NGRP rows with one 200-byte value of g
+ *	under a plain index on g: their entries span several leaves.
  *
  *	Invariants (each a FAIL line naming the seed):
  *	  UNIQUE   no two live rows carry one value (counted by a table scan
  *	           with the index defeated);
  *	  INDEX    for every pool value, its count through the index equals
- *	           its count by the scan, and xstore_index_check reports no
- *	           entry missing;
+ *	           its count by the scan, so does the g group's (an equality
+ *	           probe over many leaves), and xstore_index_check reports
+ *	           no entry missing;
  *	  REPLAY   the same seed gives the same result text.
  *
  *	Planted bugs (scripts/dst-bug-inject.sh): 72 (UNIQPROBE) reads a
  *	failed UNIQUE probe as "no duplicate", as 2.2.0 did, so a long
  *	duplicate is accepted; 73 (LONGKEY) skips the entry of a key
- *	longer than one B-tree key, as 2.2.0 did, so the index misses rows.
+ *	longer than one B-tree key, as 2.2.0 did, so the index misses rows;
+ *	80 (UNIQREAD) reads a UNIQUE candidate row that could not be read
+ *	as absent, so a long duplicate is accepted; 81 (POINTEND) ends an
+ *	equality index probe with its first leaf, so the g group is short.
  *	usage: test_sim_sqlxtc_uniq [base [count]]   (default 1 8)
  */
 
@@ -66,9 +75,11 @@
 #define NPOOL 10 /* distinct values */
 #define VMAX 3000
 #define OUTCAP 2048
+#define NGRP 60 /* rows of the g group: about 17 entries per leaf */
 
 static bt_t *g_bt;
 static char g_pool[NPOOL][VMAX + 1];
+static char g_grp[201]; /* the g group's value */
 static char g_out[OUTCAP];
 static char g_why[256];
 static int g_left, g_ok;
@@ -116,6 +127,21 @@ run(sx_db *h, const char *sql, int64_t k, int v)
 	rc = sx_step(st);
 	sx_finalize(st);
 	return rc;
+}
+
+/* `sql` (one bind: the g group's value) as a count, -2 on error. */
+static int64_t
+grp_count(sx_db *h, const char *sql)
+{
+	sx_stmt *st = NULL;
+	int64_t n = -2;
+	if (sx_prepare(h, sql, -1, &st, NULL) != SX_OK)
+		return -2;
+	sx_bind_text(st, 1, g_grp, -1);
+	if (sx_step(st) == SX_ROW)
+		n = sx_column_int64(st, 0);
+	sx_finalize(st);
+	return n;
 }
 
 static int64_t
@@ -171,6 +197,9 @@ writer(void *arg)
 			break;
 		if (draw(8) == 0)
 			xstore_uniq_fail_inject(1);
+		if (__xtc_sim_rng_range(XTC_SIM_RNG_FAULT, 8) == 0)
+			xstore_index_read_fail_at(
+			    1 + (int)__xtc_sim_rng_range(XTC_SIM_RNG_FAULT, 4));
 		if (draw(4) == 0)
 			rc = run(h, "UPDATE t SET s = ? WHERE k = ?",
 			    (me * 1000) + (int64_t)draw((uint64_t)i + 1), v);
@@ -204,8 +233,17 @@ checker(void *arg)
 	int v;
 	while (xtc_atomic_load_i32(&g_left, xtc_mo_seq_cst) > 0)
 		(void)xtc_proc_sleep(1000LL * 1000);
+	xstore_index_read_fail_at(0); /* a fault no writer reached */
 	if (g_why[0] != '\0' || sx_open_bt(g_bt, &h) != SX_OK)
 		goto out;
+	a = grp_count(h, "SELECT count(*) FROM t WHERE g = ?");
+	b = grp_count(h, "SELECT count(*) FROM t WHERE g || '' = ?");
+	if (a != b || b != NGRP) {
+		snprintf(g_why, sizeof g_why,
+		    "INDEX: the g group: index %lld, scan %lld, want %d",
+		    (long long)a, (long long)b, NGRP);
+		goto out;
+	}
 	for (v = 0; v < NPOOL; v++) {
 		a = count_q(h, "SELECT count(*) FROM t WHERE s = ?", v);
 		b = count_q(h, "SELECT count(*) FROM t WHERE s || '' = ?", v);
@@ -246,6 +284,26 @@ out:
 	(void)xtc_exec_stop(e);
 }
 
+/* The g group: NGRP rows with one long value of g, past every rowid a
+ * writer uses.  0, or -1 on a failed insert. */
+static int
+grp_fill(sx_db *h)
+{
+	sx_stmt *st = NULL;
+	int i, rc = 0;
+	if (sx_prepare(h, "INSERT INTO t(k, g) VALUES(?, ?)", -1, &st, NULL) !=
+	    SX_OK)
+		return -1;
+	for (i = 0; i < NGRP && rc == 0; i++) {
+		sx_bind_int64(st, 1, 900000 + i);
+		sx_bind_text(st, 2, g_grp, -1);
+		rc = sx_step(st) == SX_DONE ? 0 : -1;
+		sx_reset(st);
+	}
+	sx_finalize(st);
+	return rc;
+}
+
 static void
 setup(void *arg)
 {
@@ -253,9 +311,12 @@ setup(void *arg)
 	sx_db *h = NULL;
 	long i;
 	if (sx_open_bt(g_bt, &h) != SX_OK ||
-	    sx_exec(h, "CREATE TABLE t(k INTEGER PRIMARY KEY, s TEXT UNIQUE)",
+	    sx_exec(h,
+	        "CREATE TABLE t(k INTEGER PRIMARY KEY, s TEXT UNIQUE, g TEXT)",
 	        NULL) != SX_OK ||
-	    sx_exec(h, "CREATE INDEX t_s ON t(s)", NULL) != SX_OK) {
+	    sx_exec(h, "CREATE INDEX t_s ON t(s)", NULL) != SX_OK ||
+	    sx_exec(h, "CREATE INDEX t_g ON t(g)", NULL) != SX_OK ||
+	    grp_fill(h) != 0) {
 		snprintf(g_why, sizeof g_why, "create failed");
 		if (h != NULL)
 			sx_close(h);
@@ -287,6 +348,7 @@ run_one(uint64_t seed, char *out)
 	(void)xtc_proc_spawn(xtc_exec_loop(e, 1), setup, e, NULL, NULL);
 	rc = xtc_sim_exec_run(e, seed, 50000000);
 	xstore_uniq_fail_inject(0); /* an armed failure outlived the run */
+	xstore_index_read_fail_at(0);
 	xtc_exec_destroy(e);
 	snprintf(out, OUTCAP, "%s", g_out);
 	return (rc == XTC_OK && g_ok) ? 0 : -1;
@@ -333,6 +395,7 @@ main(int argc, char **argv)
 		return 1;
 	close(fd);
 	pool_make();
+	memset(g_grp, 'g', sizeof g_grp - 1);
 	bo.path = btf;
 	bo.page_size = 4096;
 	bo.n_frames = 512;
