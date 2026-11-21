@@ -6855,6 +6855,19 @@ xs_hw_raise(bt_t *bt, uint32_t cat, uint32_t id)
 }
 
 /*
+ * DST crash point between a DROP's high-water mark and its tombstone:
+ * under the simulator with buggify on, 1 on the site's seeded coin, and
+ * the DROP then stops there as if the tombstone's write had failed (the
+ * test crashes the store next).  The object must survive, and its id
+ * stay handed out.  A single relaxed load in production.
+ */
+static int
+xs_drop_gap(const char *site)
+{
+	return XTC_SIM_BUGGIFY(site) && xtc_sim_buggify_fault(1000);
+}
+
+/*
  * The largest table id that still has a row version in the tree, or 0.
  * Version keys of the user tables sort below the index namespace
  * (XS_IDX_LEAD), so this is the key just below it: one descent.  It
@@ -7571,7 +7584,8 @@ xstore_drop_index(struct xsql *db, const char *name)
 	xs_cat_unlock();
 	if (found <= 0) return found;   /* unknown (0) / constraint index (-1) */
 	vbuf[0] = 0;
-	if (xs_hw_raise(bt, XS_IDXCAT_TABLEID, idx_id) == SX_OK)
+	if (xs_hw_raise(bt, XS_IDXCAT_TABLEID, idx_id) == SX_OK &&
+	    !xs_drop_gap("xstore.drop.index_gap"))
 		(void)xs_put(bt, XS_IDXCAT_TABLEID, (int64_t)idx_id, vbuf, 1, 1);  /* tombstone catalog row */
 	xs_idx_clear(bt, idx_id);
 	return 1;
@@ -7598,7 +7612,8 @@ xs_idx_drop_table(bt_t *bt, const char *table)
 	xs_cat_unlock();
 	vbuf[0] = 0;
 	/* No tombstone without the mark, as in xstore_drop_index. */
-	marked = n > 0 && xs_hw_raise(bt, XS_IDXCAT_TABLEID, top) == SX_OK;
+	marked = n > 0 && xs_hw_raise(bt, XS_IDXCAT_TABLEID, top) == SX_OK &&
+	    !xs_drop_gap("xstore.drop.index_gap");
 	for (i = 0; i < n; i++) {
 		if (marked)
 			(void)xs_put(bt, XS_IDXCAT_TABLEID, (int64_t)ids[i], vbuf, 1, 1);
@@ -9120,6 +9135,7 @@ xstore_drop_table(struct xsql *db, const char *name)
 	/* The mark first: once GC takes the tombstone, it alone keeps the
 	 * id from coming back (see the table-id comment). */
 	if (xs_hw_raise(bt, XS_CAT_TABLEID, id) != SX_OK ||
+	    xs_drop_gap("xstore.drop.table_gap") ||
 	    xs_put(bt, XS_CAT_TABLEID, (int64_t)id, vbuf, (int)nlen, 1) != SX_OK)
 		return -1;
 	xs_idx_drop_table(bt, name);
