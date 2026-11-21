@@ -49,6 +49,11 @@
  *	              has removed the drop's tombstones: the new table and
  *	              index must take ids past every one handed out, and the
  *	              table must be empty;
+ *	  DROPGAP     the final child crashes a DROP TABLE and a DROP INDEX
+ *	              between the high-water mark and the tombstone (buggify
+ *	              sites xstore.drop.*_gap): the table, its row and the
+ *	              index must survive recovery, and a new table must take
+ *	              a fresh id;
  *	  LIVENESS    every run quiesces (no deadlock / step budget);
  *	  REPLAY      the same seed yields the identical fingerprint: the
  *	              final rows and statuses, the counters, and every commit
@@ -884,6 +889,80 @@ scratch_ddl(const char *kind)
 	return g_sh->failed ? -1 : 0;
 }
 
+/* 1 if the store has table `name` with `rows` rows and index `idx`. */
+static int
+gap_intact(sx_db *h, const char *name, const char *idx, int64_t rows)
+{
+	char sql[64];
+	sx_stmt *st = NULL;
+	xstore_index_info_t ix[8];
+	int64_t n = -1;
+	int k, i, found = 0;
+
+	snprintf(sql, sizeof sql, "SELECT count(*) FROM %s", name);
+	if (sx_prepare(h, sql, -1, &st, NULL) == SX_OK && sx_step(st) == SX_ROW)
+		n = sx_column_int64(st, 0);
+	sx_finalize(st);
+	k = xstore_index_list(sx_storage_bt(), name, ix, 8);
+	for (i = 0; i < k; i++)
+		if (strcmp(ix[i].name, idx) == 0)
+			found = 1;
+	return n == rows && found;
+}
+
+/*
+ * DROPGAP, in the final child only (so no earlier segment's schedule
+ * moves): a crash between a DROP's high-water mark and its tombstone.
+ * Table g with a row and index gi; under the simulator with every
+ * buggify site armed, DROP INDEX gi and DROP TABLE g stop at their gap
+ * sites (xstore.drop.index_gap, xstore.drop.table_gap); the store
+ * crashes and recovers.  The tombstone is the DROP's commit point, so g,
+ * its row and gi must all be there, and a new table must take an id past
+ * g's.  A DROP that wrote its tombstone first loses them here.
+ */
+static int
+drop_gap(void)
+{
+	sx_db *h = NULL;
+	uint32_t tg = 0, tn = 0;
+	int bad;
+
+	xtc_sim_clock_enable(0);
+	bad = sx_open(":memory:", &h) != SX_OK ||
+	    sx_exec(h, "CREATE TABLE g(k INTEGER PRIMARY KEY, v TEXT)", NULL) != SX_OK ||
+	    sx_exec(h, "INSERT INTO g VALUES(1, 'kept')", NULL) != SX_OK ||
+	    sx_exec(h, "CREATE INDEX gi ON g(v)", NULL) != SX_OK ||
+	    !xstore_table_id(sx_storage_bt(), "g", &tg);
+	if (!bad) {
+		xtc_sim_activate(g_seed);
+		xtc_sim_buggify_enable(1000);
+		(void)sx_exec(h, "DROP INDEX gi", NULL);
+		(void)sx_exec(h, "DROP TABLE g", NULL);
+		sites_note();
+		xtc_sim_buggify_disable();
+		xtc_sim_deactivate();
+	}
+	if (h != NULL)
+		sx_close(h);
+	h = NULL;
+	sx_storage_abandon();
+	if (!bad && (sx_storage_open(g_path, SIM_FRAMES) != SX_OK ||
+	    sx_open(":memory:", &h) != SX_OK))
+		bad = 1;
+	if (!bad && !gap_intact(h, "g", "gi", 1))
+		FAILF("final: DROPGAP: table g (id %u), its row or index gi lost "
+		    "to a crash before the DROP's tombstone", tg);
+	if (!bad && (sx_exec(h, "CREATE TABLE n(k INTEGER PRIMARY KEY)", NULL) != SX_OK ||
+	    !xstore_table_id(sx_storage_bt(), "n", &tn) || tn <= tg))
+		FAILF("final: DROPGAP: new table n has id %u, g had %u", tn, tg);
+	if (h != NULL)
+		sx_close(h);
+	xtc_sim_clock_disable();
+	if (bad)
+		FAILF("final: DROPGAP: DDL or reopen failed");
+	return g_sh->failed ? -1 : 0;
+}
+
 /* Open the store, recording which kind of open this is. */
 static int
 open_store(const char **kind)
@@ -943,6 +1022,8 @@ round_child(int last)
 		    scratch_ddl(kind) != 0)
 			return 3;
 		if (last) {
+			if (drop_gap() != 0)
+				return 3;
 			(void)sx_storage_close();
 			return 0;
 		}
