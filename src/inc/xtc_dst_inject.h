@@ -150,7 +150,7 @@
 #include "xtc_sim.h"
 
 /* Symbolic ids (keep in sync with scripts/dst-bug-inject.sh).  The
- * sqlxtc engine's ids (3, 17-23, 72-73) live in examples/06_sqlxtc/sx_dst.h. */
+ * sqlxtc engine's ids (3, 17-23, 72-73, 79) live in examples/06_sqlxtc/sx_dst.h. */
 #define XTC_DST_BUG_LOSTWAKE   1   /* proc.c: drop a mailbox waker fire */
 #define XTC_DST_BUG_LOCKEXCL   2   /* lock_mgr.c: grant a conflicting lock */
 #define XTC_DST_BUG_CREDITWIN  4   /* credit.c: double-post the free-credit sem */

@@ -131,6 +131,7 @@ write_cases() {
 		"76;test_sim_recv_mark;0;1;a marked receive skipped a reply" \
 		"77;test_sim_forged_down;0;1;a forged DOWN restarted a live child" \
 		"78;test_sim_forged_down;0;1;a forged DOWN dropped a live name" \
+		"79;test_sim_sqlxtc_reopen;1;1;IDREUSE: new table s has id" \
 		> "$1"
 }
 # 1  LOSTWAKE   proc.c drops a mailbox wake     -> lost-wakeup / no quiescence
@@ -230,6 +231,9 @@ write_cases() {
 #               -> an xtc_send of a DOWN's bytes never restarts a live child
 # 78 REG_FORGED_DOWN reg.c reaper acts on a user message shaped like a DOWN
 #               -> an xtc_send of a DOWN's bytes never drops a live name
+# 79 IDREUSE    xstore.c allocates ids from the live catalog rows only
+#               -> a table or index created after a DROP (and the GC or log
+#               dump that removes its tombstone) takes a fresh id and is empty
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.
