@@ -106,3 +106,8 @@ test_sim_partition      -          -   bug67 PART_SYSDROP: a partition dropped a
 # has both bugs.
 test_sim_sqlxtc_uniq    1          1   bug72/73: UNIQUE over long keys and failed probes; fixed "sqlxtc: a failed UNIQUE probe is an error" + "sqlxtc: index every row, whatever its key's length"
 test_sim_sqlxtc_uniq    5          1   bug72/73: the same, a second shape (short and long duplicates); same fixes
+# lts/2.1 (2.1.5).  Seed 1 FAILS on the planted build (bug 79 IDREUSE)
+# and on 2.1.4: "IDREUSE: new table s has id 2 and index id 4 (ids up to
+# 2 / 3 handed out) and 1 rows", a dropped table's id and rows back after
+# a clean close's GC.
+test_sim_sqlxtc_reopen  1          1   bug79: a dropped table's id (and rows) reused; fixed "sqlxtc: never reuse a dropped table's or index's id"

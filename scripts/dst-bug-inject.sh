@@ -106,6 +106,7 @@ write_cases() {
 		"68;test_sim_offloop_wait;0;0;a timed wait off a fiber did not return at once" \
 		"72;test_sim_sqlxtc_uniq;1;1;UNIQUE: value [0-9]+ \\([0-9]+ bytes\\) is held by ([2-9]|[1-9][0-9]+) rows" \
 		"73;test_sim_sqlxtc_uniq;1;1;(UNIQUE: value [0-9]+ \\((49[89]|[5-9][0-9]{2}|[0-9]{4}) bytes\\) is held by|INDEX: value)" \
+		"79;test_sim_sqlxtc_reopen;1;1;IDREUSE: new table s has id" \
 		"77;test_sim_forged_down;0;1;a forged DOWN restarted a live child" \
 		"78;test_sim_forged_down;0;1;a forged DOWN dropped a live name" \
 		> "$1"
@@ -176,6 +177,9 @@ write_cases() {
 #               -> no two live rows carry one UNIQUE value
 # 73 LONGKEY    xstore.c a key longer than a B-tree key gets no entry
 #               -> every row is in the index; UNIQUE holds for long values
+# 79 IDREUSE    xstore.c allocates ids from the live catalog rows only
+#               -> a table or index created after a DROP (and the GC or log
+#               dump that removes its tombstone) takes a fresh id and is empty
 # 77 SUP_FORGED_DOWN sup.c acts on a user message shaped like a DOWN
 #               -> an xtc_send of a DOWN's bytes never restarts a live child
 # 78 REG_FORGED_DOWN reg.c reaper acts on a user message shaped like a DOWN
