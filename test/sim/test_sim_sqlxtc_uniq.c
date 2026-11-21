@@ -29,10 +29,13 @@
  *	run.  The table also holds NGRP rows with one 200-byte value of g
  *	under a plain index on g: their entries span several leaves.  While
  *	the writers run, a mover proc inserts and deletes rows of that
- *	group (rowids between the group's own, so entries land in every
- *	leaf of it) and moves group rows out of it and back by UPDATE, and
- *	a reader proc counts the group twice through the index and once by
- *	a table scan inside one transaction (one snapshot).  Buggify is on:
+ *	group (rowids between the group's own) and, three times in four,
+ *	moves a group row out of it and back by UPDATE.  It changes only
+ *	the first NHOT rows: an equality probe's first batch ends among
+ *	them, so the entry it hands to the cursor is often one the mover
+ *	has just deleted.  A reader proc counts the group twice through the
+ *	index and once by a table scan inside one transaction (one
+ *	snapshot).  Buggify is on:
  *	the site xstore.iscan.handoff stalls an equality probe between its
  *	first leaf's batch and the cursor that reads the rest, so the
  *	mover's writes land in that window.  A reader statement that fails
@@ -93,8 +96,9 @@
 #define OUTCAP 2048
 #define NGRP 60 /* rows of the g group: about 17 entries per leaf */
 #define GRP_K 900000 /* the group's rowids: GRP_K + 2i; the mover's odd */
-#define NMOVE 40 /* mover statements */
-#define NREAD 12 /* reader transactions */
+#define NHOT 24 /* the group rows the mover changes: the first leaves */
+#define NMOVE 120 /* mover statements */
+#define NREAD 40 /* reader transactions */
 #define RD_ERR "index error: cannot read index "
 #define RD_EIO ": I/O error" /* how RD_ERR ends for an injected fault */
 
@@ -271,8 +275,8 @@ mover(void *arg)
 	if (sx_open_bt(g_bt, &h) != SX_OK)
 		goto done;
 	for (i = 0; i < NMOVE && g_why[0] == '\0' && rc == SX_DONE; i++) {
-		j = (int)draw(NGRP);
-		op = (int)draw(2);
+		j = (int)draw(NHOT);
+		op = draw(4) != 0; /* 1: move a group row, three times in four */
 		if (op == 0 && !ins[j]) {
 			snprintf(sql, sizeof sql,
 			    "INSERT INTO t(k, g) VALUES(%d, ?)", GRP_K + 2 * j + 1);
@@ -288,7 +292,7 @@ mover(void *arg)
 			out[j] = !out[j];
 		}
 		rc = grp_exec(h, sql);
-		(void)xtc_proc_sleep((int64_t)(1 + draw(200)) * 1000);
+		(void)xtc_proc_sleep((int64_t)(1 + draw(800)) * 1000);
 	}
 	for (j = 0; j < NGRP && rc == SX_DONE; j++) {
 		if (ins[j]) {
