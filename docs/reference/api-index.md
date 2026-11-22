@@ -48,14 +48,20 @@ headers. This section is the prose contract for each function.
 
 ## Environment variables
 
-libxtc reads a small set of environment variables, mainly for
-deterministic simulation and diagnostics:
+libxtc reads a small set of environment variables, and never while the
+simulator is running (see
+[`xtc_runtime(3)`]({{ '/reference/api/xtc_runtime/' | relative_url }})).
+The I/O backend and the simulation seed are not among them: the backend
+is chosen at configure time, and a simulation's seed is an argument to
+the run.
 
 | Variable | Effect |
 |---|---|
-| `XTC_SIM_SEED` | Seed for the deterministic simulation scheduler (sim I/O backend). Same seed, same run. |
-| `XTC_IO_BACKEND` | Override the compiled-in I/O backend selection at runtime where more than one is available. |
-| `TMPDIR` | Standard: where temporary files (e.g. test scratch) are created. |
+| `XTC_TAIL_ENABLE` | Read by `xtc_tail_from_env()` when the application calls it: turns the tail ring on (`all` for every source). |
+| `XTC_CTRL_FD` | Set by the parent in a child started by `xtc_osproc` or `xtc_xproc`: the inherited control socket. |
+| `XTC_AIO_FORCE_OFFLOAD` | `1` sends every `xtc_aio` operation to the offload pool; a testing aid. |
+| `PATH` | Searched by `xtc_osproc` for a program named without a slash. |
+| `TMPDIR`, `TMP`, `TEMP` | The directory for temporary files, in that order. |
 
 Sanitizer and debugging knobs (`ASAN_OPTIONS`, `UBSAN_OPTIONS`,
 `TSAN_OPTIONS`) are the standard ones; the project's CI runs with
