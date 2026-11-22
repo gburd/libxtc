@@ -70,9 +70,9 @@
 .Ft int
 .Fn xtc_amutex_create "xtc_amutex_t **out"
 .Ft int
-.Fn xtc_amutex_create_flags "xtc_amutex_t **out" "unsigned flags"
+.Fn xtc_amutex_create_flags "unsigned flags" "xtc_amutex_t **out"
 .Ft xtc_amutex_t *
-.Fn xtc_amutex_static "unsigned flags"
+.Fn xtc_amutex_static "unsigned slot"
 .Ft void
 .Fn xtc_amutex_destroy "xtc_amutex_t *m"
 .Ft int
@@ -175,7 +175,12 @@ allocates a mutex;
 .Fn xtc_amutex_create_flags
 takes a flags word;
 .Fn xtc_amutex_static
-returns a process-static instance.
+returns the process-static recursive mutex for
+.Fa slot
+.Pq 0 to Dv XTC_AMUTEX_STATIC_MAX No - 1 ,
+created on first use and never destroyed, or
+.Dv NULL
+for a slot out of range.
 .Fn xtc_amutex_lock
 parks until acquired or the
 .Va timeout_ns
