@@ -158,7 +158,9 @@ offsets, as in `xtc_lwlock_t`.  `scripts/compat-check.sh v2.1.2` runs
 `dist/libxtc.map` is an ELF version script whose base node, `XTC_2.0`,
 covers every exported `xtc_*` symbol (`nm -D` shows `xtc_foo@@XTC_2.0`),
 and whose later nodes name the functions each minor release added
-(`XTC_2.2`: `xtc_tnt_send_from`).  A consumer linked against 2.x records the node it
+(`XTC_2.2`: `xtc_tnt_send_from` and the rest of 2.2's additions;
+`XTC_2.3`: `xtc_recv_mark`, `xtc_recv_match_since`,
+`xtc_recv_match_ex`).  A consumer linked against 2.x records the node it
 needs, so the dynamic loader refuses a library that lacks it instead of
 failing at the first missing function.
 
@@ -186,9 +188,7 @@ Enforced by `test/m0/test_symbols.sh` in `make check` and CI:
   substrate and every other internal stays private.
 - `[C9]` every exported symbol carries an `XTC_<MAJOR>.N` version, none
   is unversioned, and the map's base node is `XTC_<MAJOR>.0` for the
-  major in `dist/version.in`.  (While `dist/version.in` still says 1.x --
-  the 2.0.0 version bump is its own release commit -- that last
-  comparison reports SKIP; everything else in `[C9]` is checked.)
+  major in `dist/version.in`.
 
 Per-platform link recipes (in `dist/configure.ac`):
 
