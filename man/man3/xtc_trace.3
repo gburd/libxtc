@@ -92,7 +92,7 @@ Call it before a workload to ensure the ring holds only the events of
 interest.
 .Pp
 .Fn xtc_trace_dump
-visits the buffered records in causal (HLC-ascending) order, invoking
+visits the buffered records in HLC-ascending order, invoking
 .Fa cb
 once per record with a pointer to the record and the caller's
 .Fa user
