@@ -43,6 +43,21 @@
  *	hook failed a read (a writer's armed fault that the reader drew) is
  *	skipped; any other reader error fails the run.
  *
+ *	Then, once the writers are done, a second phase on a table c:
+ *	NCTR counter procs each add 1 to one row NINC times, each time in a
+ *	transaction that reads the row, parks, and writes it back, and a
+ *	pk proc tries NPK times to INSERT, in a transaction, a key that c
+ *	already holds.  Before about half their statements they arm
+ *	xstore_row_read_fail_at (from the fault stream), so one of the next
+ *	reads of one row outside a scan fails: the INSERT's key check, an
+ *	UPDATE's write-write check at its write intent, a COMMIT's.  A
+ *	statement that fails with "cannot read table c: I/O error" while
+ *	that hook failed a read is fine (it changed nothing); so is a
+ *	refused duplicate or a serialization failure.  The checker then
+ *	counts the g group by a table scan with xstore_scan_read_fail_at
+ *	armed: a count that fails with "cannot read table t: I/O error" is
+ *	retried unarmed.
+ *
  *	Invariants (each a FAIL line naming the seed):
  *	  UNIQUE   no two live rows carry one value (counted by a table scan
  *	           with the index defeated);
@@ -54,6 +69,10 @@
  *	           g group under one snapshot are equal;
  *	  BUGGIFY  over 8 or more seeds, xstore.iscan.handoff fired at least
  *	           once (the window was exercised);
+ *	  SCAN     a table scan whose read failed never returns a count (a
+ *	           short scan is never the whole table);
+ *	  PKEY     no INSERT of a key c holds commits;
+ *	  LOST UPDATE the counter equals the increments acknowledged;
  *	  REPLAY   the same seed gives the same result text.
  *
  *	Planted bugs (scripts/dst-bug-inject.sh): 72 (UNIQPROBE) reads a
@@ -63,7 +82,11 @@
  *	80 (UNIQREAD) reads a UNIQUE candidate row that could not be read
  *	as absent, so a long duplicate is accepted; 81 (POINTEND) ends an
  *	equality index probe with its first leaf, so the g group is short
- *	(the reader's SNAPSHOT check or the checker's INDEX check).
+ *	(the reader's SNAPSHOT check or the checker's INDEX check); 82
+ *	(SCANSHORT) takes a failed base-scan read for the table's end (SCAN);
+ *	83 (PKREAD) reads a row the INSERT key check cannot read as absent
+ *	(PKEY); 84 (WWREAD) reads a row the write-write check cannot read as
+ *	having no newer version, so an increment is lost (LOST UPDATE).
  *	usage: test_sim_sqlxtc_uniq [base [count]]   (default 1 8)
  */
 
@@ -101,6 +124,10 @@
 #define NREAD 40 /* reader transactions */
 #define RD_ERR "index error: cannot read index "
 #define RD_EIO ": I/O error" /* how RD_ERR ends for an injected fault */
+#define TB_ERR "cannot read table " /* a row or scan read error */
+#define NCTR 2   /* counter procs */
+#define NINC 16  /* increments each tries */
+#define NPK 8    /* duplicate-key INSERTs the pk proc tries */
 
 static bt_t *g_bt;
 static char g_pool[NPOOL][VMAX + 1];
@@ -110,6 +137,9 @@ static char g_why[256];
 static int g_left, g_ok, g_handoff;
 static long g_dups; /* UNIQUE refusals seen */
 static long g_perr; /* writes refused by a failed probe */
+static int g_left2;  /* phase-2 procs still running */
+static long g_incs;  /* increments acknowledged */
+static long g_rerr;  /* phase-2 statements refused by a failed read */
 
 /* Value i of the pool: a short one, or 498..3000 bytes of a letter with
  * a tag at the end (so values 2k and 2k + 1 of one length share all but
@@ -379,6 +409,192 @@ done:
 	xtc_atomic_fetch_sub_i32(&g_left, 1, xtc_mo_seq_cst);
 }
 
+/* The single integer of `sql`, or -2. */
+static int64_t
+one_int(sx_db *h, const char *sql)
+{
+	sx_stmt *st = NULL;
+	int64_t v = -2;
+	if (sx_prepare(h, sql, -1, &st, NULL) != SX_OK)
+		return -2;
+	if (sx_step(st) == SX_ROW)
+		v = sx_column_int64(st, 0);
+	sx_finalize(st);
+	return v;
+}
+
+/* Did a statement fail on an injected row read: the row-read hook
+ * failed a read since f0, and the message names the table it could not
+ * read with an I/O error? */
+static int
+row_fault_ok(sx_db *h, int f0)
+{
+	const char *m = sx_errmsg(h);
+	size_t ml = m != NULL ? strlen(m) : 0;
+	return xstore_row_read_faults() != f0 && m != NULL &&
+	    strncmp(m, TB_ERR, sizeof TB_ERR - 1) == 0 &&
+	    ml >= sizeof RD_EIO - 1 &&
+	    strcmp(m + ml - (sizeof RD_EIO - 1), RD_EIO) == 0;
+}
+
+/* Before about half of phase 2's statements: fail its first row read
+ * (or, one time in four, its second). */
+static void
+arm_row_fault(void)
+{
+	if (__xtc_sim_rng_range(XTC_SIM_RNG_FAULT, 2) == 0)
+		xstore_row_read_fail_at(
+		    __xtc_sim_rng_range(XTC_SIM_RNG_FAULT, 4) == 0 ? 2 : 1);
+}
+
+/* A counter proc: NINC increments of c's row 1, each a transaction
+ * that reads the row, parks, then writes it, so another counter's
+ * commit often lands in between and the write-write check must refuse
+ * it.  The row-read fault is armed before the UPDATE and before the
+ * COMMIT, the two places that check reads the row. */
+static void
+counter(void *arg)
+{
+	sx_db *h = NULL;
+	int i, rc, f0;
+	(void)arg;
+	if (sx_open_bt(g_bt, &h) != SX_OK)
+		goto done;
+	for (i = 0; i < NINC && g_why[0] == '\0'; i++) {
+		if (sx_exec(h, "BEGIN", NULL) != SX_OK ||
+		    one_int(h, "SELECT v FROM c WHERE k = 1") < 0)
+			break;
+		(void)xtc_proc_sleep((int64_t)(1 + draw(300)) * 1000);
+		f0 = xstore_row_read_faults();
+		arm_row_fault();
+		rc = sx_exec(h, "UPDATE c SET v = v + 1 WHERE k = 1", NULL);
+		if (rc == SX_OK) {
+			arm_row_fault();
+			rc = sx_exec(h, "COMMIT", NULL);
+		}
+		if (rc == SX_OK)
+			g_incs++;
+		else if (row_fault_ok(h, f0))
+			g_rerr++;
+		else if (rc != SX_BUSY && g_why[0] == '\0')
+			snprintf(g_why, sizeof g_why, "counter: rc %d \"%s\"",
+			    rc, sx_errmsg(h));
+		if (rc != SX_OK)
+			(void)sx_exec(h, "ROLLBACK", NULL);
+		xstore_row_read_fail_at(0);
+		(void)xtc_proc_sleep((int64_t)(1 + draw(200)) * 1000);
+	}
+done:
+	if (h != NULL)
+		sx_close(h);
+	xtc_atomic_fetch_sub_i32(&g_left2, 1, xtc_mo_seq_cst);
+}
+
+/* The pk proc: NPK transactions that INSERT key 2, which c holds. */
+static void
+pkdup(void *arg)
+{
+	sx_db *h = NULL;
+	char sql[64];
+	int i, rc, f0;
+	(void)arg;
+	if (sx_open_bt(g_bt, &h) != SX_OK)
+		goto done;
+	for (i = 0; i < NPK && g_why[0] == '\0'; i++) {
+		if (sx_exec(h, "BEGIN", NULL) != SX_OK)
+			break;
+		arm_row_fault();
+		f0 = xstore_row_read_faults();
+		snprintf(sql, sizeof sql, "INSERT INTO c VALUES(2, %d)",
+		    100 + i);
+		rc = sx_exec(h, sql, NULL);
+		if (rc == SX_OK)
+			rc = sx_exec(h, "COMMIT", NULL);
+		else
+			(void)sx_exec(h, "ROLLBACK", NULL);
+		if (rc == SX_OK && g_why[0] == '\0')
+			snprintf(g_why, sizeof g_why, "PKEY: an INSERT of "
+			    "existing key 2 was committed (try %d)", i);
+		else if (row_fault_ok(h, f0))
+			g_rerr++;
+		else if (rc != SX_CONSTRAINT && rc != SX_BUSY &&
+		    g_why[0] == '\0')
+			snprintf(g_why, sizeof g_why, "pk: rc %d \"%s\"", rc,
+			    sx_errmsg(h));
+		(void)xtc_proc_sleep((int64_t)(1 + draw(300)) * 1000);
+	}
+done:
+	if (h != NULL)
+		sx_close(h);
+	xtc_atomic_fetch_sub_i32(&g_left2, 1, xtc_mo_seq_cst);
+}
+
+/* Phase 2 (from the checker, once the writers are done): the counter
+ * and pk procs over table c, then their invariants. */
+static void
+phase2(xtc_exec_t *e, sx_db *h)
+{
+	int64_t v, n, k2;
+	int i;
+	if (sx_exec(h, "CREATE TABLE c(k INTEGER PRIMARY KEY, v INTEGER)",
+	        NULL) != SX_OK ||
+	    sx_exec(h, "INSERT INTO c VALUES(1, 0), (2, 7)", NULL) != SX_OK) {
+		snprintf(g_why, sizeof g_why, "phase 2: create failed");
+		return;
+	}
+	xtc_atomic_store_i32(&g_left2, NCTR + 1, xtc_mo_seq_cst);
+	for (i = 0; i < NCTR; i++)
+		(void)xtc_proc_spawn(xtc_exec_loop(e, 1 + i % (N_LOOPS - 1)),
+		    counter, NULL, NULL, NULL);
+	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), pkdup, NULL, NULL, NULL);
+	while (xtc_atomic_load_i32(&g_left2, xtc_mo_seq_cst) > 0)
+		(void)xtc_proc_sleep(1000LL * 1000);
+	xstore_row_read_fail_at(0); /* a fault no statement reached */
+	if (g_why[0] != '\0')
+		return;
+	v = one_int(h, "SELECT v FROM c WHERE k = 1");
+	n = one_int(h, "SELECT count(*) FROM c");
+	k2 = one_int(h, "SELECT v FROM c WHERE k = 2");
+	if (v != g_incs)
+		snprintf(g_why, sizeof g_why, "LOST UPDATE: counter %lld, %ld "
+		    "increments acknowledged", (long long)v, g_incs);
+	else if (n != 2 || k2 != 7)
+		snprintf(g_why, sizeof g_why, "PKEY: key 2 holds %lld (%lld "
+		    "rows), want 7", (long long)k2, (long long)n);
+}
+
+/* The g group counted by a table scan with one of its reads failing:
+ * a count is wrong (the scan was short), a failure is retried with no
+ * fault.  -2 on another error. */
+static int64_t
+scan_count(sx_db *h)
+{
+	int64_t b;
+	int left, tries;
+	const char *m;
+	for (tries = 0; tries < 4; tries++) {
+		xstore_scan_read_fail_at(tries < 3 ?
+		    1 + (int)__xtc_sim_rng_range(XTC_SIM_RNG_FAULT, 4) : 0);
+		b = grp_count(h, "SELECT count(*) FROM t WHERE g || '' = ?");
+		left = xstore_scan_read_fail_at(0);
+		if (tries == 3 || left != 0)
+			return b;                 /* no read failed */
+		if (b != -2) {
+			snprintf(g_why, sizeof g_why, "SCAN: a scan whose read "
+			    "failed returned %lld rows of the g group",
+			    (long long)b);
+			return b;
+		}
+		m = sx_errmsg(h);
+		if (m == NULL || strncmp(m, TB_ERR, sizeof TB_ERR - 1) != 0) {
+			snprintf(g_why, sizeof g_why, "SCAN: failed: \"%s\"",
+			    m != NULL ? m : "");
+			return -2;
+		}
+	}
+	return -2;
+}
+
 /* After the writers: the invariants, and the result text. */
 static void
 checker(void *arg)
@@ -394,8 +610,13 @@ checker(void *arg)
 	xstore_index_read_fail_at(0); /* a fault no writer reached */
 	if (g_why[0] != '\0' || sx_open_bt(g_bt, &h) != SX_OK)
 		goto out;
+	phase2(e, h);
+	if (g_why[0] != '\0')
+		goto out;
 	a = grp_count(h, "SELECT count(*) FROM t WHERE g = ?");
-	b = grp_count(h, "SELECT count(*) FROM t WHERE g || '' = ?");
+	b = scan_count(h);
+	if (g_why[0] != '\0')
+		goto out;
 	if (a != b || b != NGRP) {
 		snprintf(g_why, sizeof g_why,
 		    "INDEX: the g group: index %lld, scan %lld, want %d",
@@ -432,11 +653,13 @@ checker(void *arg)
 		goto out;
 	}
 	l = strlen(g_out);
-	snprintf(g_out + l, OUTCAP - l, "d%ld,e%ld", g_dups, g_perr);
+	snprintf(g_out + l, OUTCAP - l, "d%ld,e%ld,c%ld,r%ld", g_dups, g_perr,
+	    g_incs, g_rerr);
 	g_ok = 1;
 out:
 	if (h != NULL) {
 		(void)sx_exec(h, "DROP TABLE IF EXISTS t", NULL);
+		(void)sx_exec(h, "DROP TABLE IF EXISTS c", NULL);
 		sx_close(h);
 	}
 	(void)xtc_exec_stop(e);
@@ -513,6 +736,7 @@ run_one(uint64_t seed, char *out)
 	g_why[0] = '\0';
 	g_ok = 0;
 	g_dups = g_perr = 0;
+	g_incs = g_rerr = 0;
 	if (xtc_exec_create(&(xtc_exec_opts_t) { .size =
 	                                             sizeof(xtc_exec_opts_t),
 	                        .n_loops = N_LOOPS },
@@ -525,6 +749,8 @@ run_one(uint64_t seed, char *out)
 	xtc_sim_buggify_disable();
 	xstore_uniq_fail_inject(0); /* an armed failure outlived the run */
 	xstore_index_read_fail_at(0);
+	xstore_row_read_fail_at(0);
+	xstore_scan_read_fail_at(0);
 	xtc_exec_destroy(e);
 	snprintf(out, OUTCAP, "%s", g_out);
 	return (rc == XTC_OK && g_ok) ? 0 : -1;

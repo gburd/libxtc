@@ -123,6 +123,14 @@ test_sim_sqlxtc_uniq    4          1   p168 hand-off: the key after a deleted ha
 test_sim_sqlxtc_uniq    8          1   p168 hand-off: the same, a second shape; same commit
 test_sim_sqlxtc_uniq    55         1   p168 hand-off: found by the 1..400 re-review sweep (rr-sa); same commit
 test_sim_sqlxtc_uniq    64         1   p168 hand-off: found by the same sweep; same commit
+# p168/rderr (2.3.0).  A read of the tree that fails is an error, never
+# "absent" or "the end".  Seed 2 FAILS on the planted builds of bug 82
+# SCANSHORT ("SCAN: a scan whose read failed returned 0 rows of the g
+# group") and bug 83 PKREAD ("PKEY: an INSERT of existing key 2 was
+# committed"); seed 3 FAILS on bug 84 WWREAD ("LOST UPDATE: counter 18,
+# 22 increments acknowledged").  The clean build passes both.
+test_sim_sqlxtc_uniq    2          1   bug82/83: a short base scan taken as whole; a duplicate primary key on a read error; fixed libxtc-examples 678b300 "a failed read in a base-table scan is an error" + "an INSERT key check that cannot read the row fails"
+test_sim_sqlxtc_uniq    3          1   bug84: a lost update on a read error; fixed libxtc-examples "a write-write or serializable check that cannot read fails"
 # p168/r12 (2.3.0, 2.1.5).  Seed 1 FAILS on the planted build (bug 79
 # IDREUSE) and on libxtc-examples before the fix: "IDREUSE: new table s has
 # id 2 and index id 4 (ids up to 2 / 3 handed out) and 1 rows", a dropped
