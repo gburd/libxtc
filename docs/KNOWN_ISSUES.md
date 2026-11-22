@@ -3951,7 +3951,8 @@ source on macOS (tracked in PLAN.md).  Neither changes correctness.
 ## sqlxtc multi-thread load test flakes on the macOS CI runner
 
 **Status:** KNOWN FLAKE (transient, re-run passes).  The
-`sqlxtc multi-thread load` CI step (`test/sqlxtc/test_sqlxtc_mt.sh` ->
+`sqlxtc multi-thread load` CI step
+(`examples/06_sqlxtc/test/test_sqlxtc_mt.sh` ->
 `test_sqlxtc_concurrent.py`, N clients * M queries against a shared
 server on a plain `CREATE TABLE`) intermittently fails on the macOS
 runner with all clients timing out and `server CRASHED under multi-loop
@@ -4024,7 +4025,9 @@ Resolved: `xtc_slab_pressure_listen_ex()` returns an opaque
 `xtc_slab_pressure_t` handle and `xtc_slab_pressure_stop(handle)` joins
 the listener thread, closes its fds, and frees it.  Plain
 `xtc_slab_pressure_listen()` delegates to `_ex` and discards the handle
-(unchanged fire-and-forget behaviour).
+(unchanged fire-and-forget behaviour).  Since 2.2 the three names are
+deprecated: `xtc_slab_pressure_create()` returns the handle and
+`xtc_slab_pressure_destroy()` releases it.
 
 
 ## epoll backend: rare lost blocking-I/O-completion wakeup under heavy churn
