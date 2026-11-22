@@ -31,7 +31,7 @@
 .Fn xtc_log_create "const xtc_log_opts_t *opts" "xtc_log_t **out"
 .Ft void
 .Fn xtc_log_destroy "xtc_log_t *log"
-.Ft int
+.Ft void
 .Fn xtc_log_write "xtc_log_t *log" "xtc_log_level_t level" "const char *fmt" "..."
 .Ft void
 .Fn xtc_log_vwrite "xtc_log_t *log" "xtc_log_level_t lvl" "const char *fmt" "va_list ap"
@@ -79,10 +79,12 @@ counts it, so records printed plus records dropped equals records
 written.
 .Pp
 Levels:
+.Dv XTC_LOG_TRACE ,
 .Dv XTC_LOG_DEBUG ,
 .Dv XTC_LOG_INFO ,
 .Dv XTC_LOG_WARN ,
-.Dv XTC_LOG_ERROR .
+.Dv XTC_LOG_ERROR ,
+.Dv XTC_LOG_FATAL .
 A configurable global level filter elides cheaper records before
 formatting.
 .Pp
