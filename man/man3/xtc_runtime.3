@@ -119,7 +119,10 @@ The library reads these variables, through its own environment
 wrapper, and never while the simulator is running:
 .Bl -tag -width Ds
 .It Ev XTC_TAIL_ENABLE
-At startup, turns the tail ring on: any value other than
+Read by
+.Fn xtc_tail_from_env
+when the application calls it, which turns the tail ring on: any value
+other than
 .Ql 0 ,
 .Ql off
 or
