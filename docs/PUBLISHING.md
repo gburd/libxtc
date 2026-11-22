@@ -1,26 +1,29 @@
 # Documentation publishing
 
-The `docs/` tree is rendered by Doxygen and published to:
+The `docs/` tree is a Jekyll site, plus a Doxygen API reference built
+from the public headers and copied into the site under `/api`.  Both
+Pages workflows run `docs/gen_api_reference.sh` (the man pages rendered
+with mandoc into `docs/reference/api/`), build the Jekyll site, build
+Doxygen, and check links with lychee, on every push to main that
+touches `src/inc/`, `docs/`, `man/` or `README.md`:
 
-  * Codeberg Pages (canonical):
-    <https://gregburd.codeberg.page/libxtc/>.  Built and deployed
-    by `.forgejo/workflows/pages.yml` on every push to main that
-    touches `docs/`, `src/inc/`, or `README.md`.  The workflow runs
-    Doxygen, stages the HTML, and deploys with the
+  * Codeberg Pages: `.forgejo/workflows/pages.yml`, deployed with the
     `codeberg.org/git-pages/action@v2` action.
 
-  * GitHub Pages (optional mirror):
-    `.github/workflows/pages.yml` validates that the Doxygen build
-    succeeds on every push but does not deploy by default.  To turn
-    on GitHub Pages, follow the commented instructions at the top of
-    that workflow.
+  * GitHub Pages: `.github/workflows/pages.yml`, deployed with
+    `actions/deploy-pages` (Pages enabled in the repository settings,
+    source GitHub Actions).  Broken links block the deploy.
 
-The setup mirrors the lime project's: the repository README is the
-Doxygen main page, the user-facing markdown guides under `docs/` are
-additional pages, and the public headers under `src/inc/` provide
-the API reference.
+For the Doxygen part the repository README is the main page, the
+markdown files listed in `docs/Doxyfile` are additional pages, and the
+public headers under `src/inc/` provide the API reference.
 
 ## Local preview
+
+    sh docs/gen_api_reference.sh
+    cd docs && bundle install && bundle exec jekyll serve
+
+The Doxygen part alone:
 
     cd docs
     doxygen Doxyfile
@@ -32,26 +35,26 @@ tracked.
 
 ## What gets published
 
-`docs/Doxyfile` lists the inputs explicitly in `INPUT`.  User-facing
-guides are included; internal material (claims sheets, KVM runbooks,
-milestone notes, the man-page TODO) is intentionally omitted.  The
-internal-only header `src/inc/xtc_int.h` is excluded from API
-extraction.
+The Jekyll site publishes every page under `docs/` that carries front
+matter (`title`, `parent`, `permalink`).  `docs/Doxyfile` lists the
+markdown it also feeds to Doxygen explicitly in `INPUT`, and excludes
+the internal-only header `src/inc/xtc_int.h` from API extraction.
 
-When adding a new user-facing guide:
+When adding a new user-facing page:
 
-  1. Write it as `docs/<name>.md` with a leading `# Heading`.
-  2. Add the path to the `INPUT` list in `docs/Doxyfile`.
-  3. Cross-link other guides with relative `.md` paths
-     (`[architecture]({{ '/reference/architecture/' | relative_url }})`); Doxygen rewrites these to
-     the generated page.
+  1. Write it as `docs/<name>.md` with Jekyll front matter, as the
+     other pages do.
+  2. Cross-link other pages with `relative_url` links
+     (`[architecture]({{ '/reference/architecture/' | relative_url }})`).
+  3. Add it to the Doxyfile's `INPUT` only if it belongs in the
+     Doxygen pages too.
 
 ## Warning backlog
 
 The Doxyfile sets `WARN_AS_ERROR = NO` because the public headers do
-not yet carry full Doxygen doc comments; the build currently emits
-~260 undocumented-symbol warnings.  The workflows surface the count
-in CI logs.  When the headers are fully documented, flip
+not yet carry full Doxygen doc comments, so the build emits
+undocumented-symbol warnings.  The workflows print the count in their
+logs.  When the headers are fully documented, flip
 `WARN_AS_ERROR` to `YES` so doc-rot fails the build.
 
 ## Voice
@@ -77,8 +80,11 @@ installs:
     `--enable-shared`), plus the SONAME symlink `libxtc.so.MAJOR` and
     the bare-name link `libxtc.so`.
   * `PFX/lib/pkgconfig/xtc.pc`          -- pkg-config metadata.
-  * `PFX/include/xtc.h`                 -- the single public header.
-  * `PFX/share/man/man3/*.3`, `man7/*.7`-- manual pages.
+  * `PFX/include/*.h`                   -- the public headers
+    (`LIB_HDRS_PUBLIC` in `dist/Makefile.in`) and the generated
+    `xtc_version.h`.
+  * `PFX/share/man/man3/*.3`, `man7/*.7`-- manual pages (not the
+    internal `__os_*.3` pages, since 2.1.3).
 
 `make uninstall` removes the same set.
 
@@ -106,16 +112,17 @@ The shared library is OPTIONAL (`--enable-shared`); the default build
 is static-only, preserving the historical behaviour.  When built, the
 ld version script `dist/libxtc.map` controls the exported ABI:
 
-  * global: `xtc_*` (the documented public API) and `__xtc_*` (internal
-    seams that PUBLIC macros in the installed header call through, e.g.
-    the proc recovery / fcontext hooks in `src/inc/xtc_proc.h`).
+  * global: `xtc_*` (the documented public API) and the
+    `__xtc_proc_recovery_slot` / `__xtc_recovery_*` symbols that the
+    `xtc_proc_recovery_arm()` macro in `src/inc/xtc_proc.h` expands
+    to.  No other `__xtc_*` symbol is exported.
   * local: everything else, notably the internal `__os_*`
     OS-abstraction layer.
 
-Every export carries the symbol version `XTC_2.0` (`nm -D` shows
-`xtc_foo@@XTC_2.0`; checked by `test/m0/test_symbols.sh` [C8]/[C9]), and
-no `__os_*` symbol leaks (755 exported symbols at this writing, all
-`xtc_*` plus the one macro-backed `__xtc_proc_recovery_slot`).  The
+Every export carries a symbol version: `XTC_2.0` for the 2.0 set, and
+`XTC_2.2` and `XTC_2.3` for the functions those minors added (`nm -D`
+shows `xtc_foo@@XTC_2.0`; checked by `test/m0/test_symbols.sh`
+[C8]/[C9]), and no `__os_*` symbol leaks.  The
 SONAME carries only the SemVer major; `docs/abi-stability.md` gives the
 policy for adding `XTC_2.N` nodes in later minors.  At release time,
 `scripts/abi-check.sh PREV_TAG` runs `abidiff` between the previous
@@ -123,17 +130,17 @@ release and the candidate.
 
 ## Release branches and tags
 
-`main` carries the next minor.  A major's LTS line has its own branch,
-`lts/MAJOR.MINOR` (the first is `lts/2.0`), cut from the `vMAJOR.MINOR.0`
-tag on the day it is released:
+`main` carries the next minor.  An LTS line has its own branch,
+`lts/MAJOR.MINOR`, cut from the `vMAJOR.MINOR.0` tag.  The current one
+is `lts/2.1` (2.1.x):
 
-    git branch lts/2.0 v2.0.0
-    git push origin lts/2.0
+    git branch lts/2.1 v2.1.0
+    git push origin lts/2.1
 
 Nothing is committed to an LTS branch directly except a backport that
 could not be cherry-picked.  What a patch release may change is the LTS
-contract in `docs/abi-stability.md` ("Long-term support and the 2.0
-LTS"): fixes only, no ABI, format, default or dependency change.
+contract in `docs/abi-stability.md` ("Long-term support"): fixes only,
+no ABI, format, default or dependency change.
 
 ## Patch releases on an LTS branch
 
@@ -141,7 +148,7 @@ LTS"): fixes only, no ABI, format, default or dependency change.
    for any change.
 2. Backport, naming the source commit:
 
-       git switch lts/2.0
+       git switch lts/2.1
        git cherry-pick -x <main-commit>
 
    If it does not apply, rewrite it on the branch with the same test and
@@ -155,13 +162,14 @@ LTS"): fixes only, no ABI, format, default or dependency change.
 4. Qualify on the branch exactly as a minor is qualified (AGENTS.md
    "Cutting a release"): `make check` on a readiness and a completion
    backend, `make check-dst` in a sim build, the 100k swarm by hand,
-   `scripts/perf-gate.sh vPREV HEAD` against the previous 2.0.x, and the
-   io_uring gate.  The compat CI job must pass: the N-1 consumer built
-   against v2.0.0's headers runs against the patch release's library.
+   `scripts/perf-gate.sh vPREV HEAD` against the previous patch release,
+   and the io_uring gate.  The compat CI job must pass: the N-1 consumer
+   built against the previous release's headers runs against the patch
+   release's library.
 5. Tag from the branch, signed, and push the tag:
 
-       git tag -s v2.0.N -m "libxtc 2.0.N"
-       git push origin lts/2.0 v2.0.N
+       git tag -s v2.1.N -m "libxtc 2.1.N"
+       git push origin lts/2.1 v2.1.N
 
 6. Check CI on the tag and on the branch (a tag does not run the nightly
    tiers; see AGENTS.md).
@@ -174,7 +182,8 @@ together on the disclosure day.
 
 `debian/` builds two binary packages:
 
-  * `libxtc0`     -- the shared library.
+  * `libxtc2`     -- the shared library (the package name carries the
+    SONAME major).
   * `libxtc-dev`  -- header, static lib, pkg-config file, man pages.
 
 `debian/rules` is debhelper-13 (`dh`) and overrides the `auto_*`
@@ -199,7 +208,8 @@ runs the test suite in `%check`.  Build from a release tarball with:
     rpmbuild -ba dist/xtc.spec
 
 Status: validated with `rpmspec --parse` and `rpmspec --query`
-(resolves to `libxtc-0.8.0-1` and `libxtc-devel-0.8.0-1`).  A full
+(it resolves to `libxtc-<version>-1` and `libxtc-devel-<version>-1`,
+the version in the spec).  A full
 `rpmbuild -ba` / `rpmlint` run was NOT performed on the development
 host (no RPM build root / rpmlint there); run it on a Fedora/RHEL/
 openSUSE machine, adjusting the `BuildRequires` package names if your
