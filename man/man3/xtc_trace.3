@@ -34,9 +34,8 @@ libxtc
 is libxtc's
 .Sy seq_trace :
 a bounded, opt-in ring of message-passing events -- each send and
-receive between procs -- stamped so that the causal order of one
-request can be reconstructed across procs and cores even when the
-wall-clock order in which the records arrived lies.
+receive between procs -- stamped and linked so that the path of one
+request can be followed across procs and cores.
 It is the analog of Erlang's trace token that rides along message
 sends, letting you answer
 .Dq who sent this, and what caused that
@@ -46,11 +45,18 @@ Every traced event is stamped with a hybrid logical clock
 .Pq Sy HLC :
 a 64-bit value whose high 48 bits are a monotonic physical-time
 component (microseconds) and whose low 16 bits are a logical counter.
-A single global clock ticks once per traced event, so a send's stamp
-is always strictly less than the stamp of the receive it causes.
-Sorting the records by HLC therefore yields a true happens-before
-order, not a thread-local arrival order: when two cores disagree about
-which message landed first, the HLC is the truth.
+A single process-wide clock ticks once per traced event, so a send's
+stamp is always strictly less than the stamp of the receive it causes,
+and one proc's records carry increasing stamps in the order it made
+them.
+Sorting by HLC therefore never puts an event before one that caused
+it.
+The converse does not hold: two events with no causal relation, on two
+loops, still get an order (whichever tick won the clock first), and
+that order means nothing.
+A lower stamp does not show that one event caused another; the
+.Va cause
+field below does.
 .Pp
 The causal edge is made explicit, not merely implied by ordering: a
 .Dv XTC_TRACE_RECV
@@ -117,35 +123,36 @@ typedef struct xtc_trace_rec {
         uint64_t  cause;   /* RECV: the originating send's HLC; else 0 */
         int       kind;    /* enum xtc_trace_kind */
         xtc_pid_t self;    /* the proc the event happened in */
-        xtc_pid_t peer;    /* the other proc (dest / source / child) */
-        uint32_t  detail;  /* SEND/RECV: payload bytes; EXIT: reason */
+        xtc_pid_t peer;    /* the other proc (dest / source) */
+        uint32_t  detail;  /* payload bytes */
 } xtc_trace_rec_t;
 .Ed
 .Pp
 The fields are:
 .Bl -tag -width "cause" -offset indent
 .It Va hlc
-This event's HLC stamp.  Records sort by this value into causal order.
+This event's HLC stamp, unique per record.
+Records are dumped in this order (see above for what it does and does
+not imply).
 .It Va cause
 For a
 .Dv XTC_TRACE_RECV
 record, the HLC stamp of the send that produced the received message;
 .Dv 0
-for every other kind.  This is the explicit causal edge.
+for every other kind, and also for a receive of a message that was
+sent while tracing was off.  This is the explicit causal edge.
 .It Va kind
 One of the
 .Vt enum xtc_trace_kind
 values below.
 .It Va self
 The proc in which the event happened: the sender for a send, the
-receiver for a receive, the parent for a spawn, the exiting proc for an
-exit.
+receiver for a receive.
 .It Va peer
 The other proc involved: the destination of a send, the source of a
-receive, or the spawned child.
+receive.
 .It Va detail
-For a send or receive, the message payload size in bytes; for an exit,
-the exit reason.
+The message payload size in bytes.
 .El
 .Pp
 .Vt enum xtc_trace_kind
@@ -161,16 +168,10 @@ received a message from
 .Va peer ;
 .Va cause
 holds the originating send's stamp.
-.It Dv XTC_TRACE_SPAWN
-.Va self
-(the parent) spawned
-.Va peer
-(the child).
-.It Dv XTC_TRACE_EXIT
-.Va self
-exited;
-.Va detail
-holds the exit reason.
+.It Dv XTC_TRACE_SPAWN , Dv XTC_TRACE_EXIT
+Defined in the enum, but no record of either kind is written: the trace
+records sends and receives only, so it shows no parent-to-child edge
+and no proc's exit.
 .El
 .Pp
 The visit callback has the type
@@ -302,10 +303,10 @@ static int
 on_rec(const xtc_trace_rec_t *r, void *user)
 {
         (void)user;
-        printf("HLC=%llu kind=%d self=%llu peer=%llu cause=%llu det=%u\\n",
-            (unsigned long long)r->hlc, r->kind,
-            (unsigned long long)r->self,
-            (unsigned long long)r->peer,
+        printf("HLC=%llu kind=%d self=%u:%u peer=%u:%u cause=%llu "
+            "det=%u\\n", (unsigned long long)r->hlc, r->kind,
+            r->self.loop_id, r->self.local_id,
+            r->peer.loop_id, r->peer.local_id,
             (unsigned long long)r->cause, r->detail);
         return (0);                 /* 0 = keep going */
 }
