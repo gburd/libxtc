@@ -153,8 +153,8 @@ to a libxtc process.
 ### `xtc-trace` -- the causal message trace
 
 Covered in full in the causal-trace recipe below; it prints the
-send/receive ring in happens-before (HLC) order so you can follow which
-message caused which.
+send/receive ring in HLC order, with each receive linked to its send,
+so you can follow which message caused which.
 
 ## Recipe: the whole program hangs
 
@@ -289,9 +289,8 @@ from which proc, set it off.  This is the hardest class of bug in a
 message-passing system: "who sent this, and what caused that."
 
 libxtc's `seq_trace` answers it.  It is an opt-in, bounded ring of
-send/receive events, each stamped with a hybrid logical clock (HLC) so
-the causal order survives even when the wall-clock order the records
-arrived in lies.  It is OFF by default and costs a single relaxed
+send/receive events, each stamped with a hybrid logical clock (HLC)
+and each receive linked to the send that caused it.  It is OFF by default and costs a single relaxed
 atomic load on the message hot path when disabled, so you turn it on
 for a specific investigation and off again -- it is not an always-on
 tax.
@@ -336,14 +335,17 @@ to C (HLC206), C receives that (cause=206).  That chain is the path of
 one request as it fanned out across A, B, and C -- the trail you could
 not see in any single mailbox.
 
-The HLC order is the truth.  A single global clock ticks once per
-traced event (its high 48 bits are microseconds, its low 16 a logical
-counter), so a send's stamp is always strictly less than the stamp of
-the receive it causes.  When two cores disagree about which message
-landed first -- because wall-clock arrival across threads is not a
-reliable order -- sort by HLC and the happens-before is restored.
-Both `xtc_trace_dump` and `xtc-trace` already present the records in
-HLC-ascending order for exactly this reason.
+A single global clock ticks once per traced event (its high 48 bits
+are microseconds, its low 16 a logical counter), so a send's stamp is
+always strictly less than the stamp of the receive it causes, and HLC
+order never puts an effect before its cause.  Both `xtc_trace_dump` and
+`xtc-trace` present the records in HLC-ascending order.  The order is
+not proof of causation, though: two unrelated events on two loops are
+still ordered, by whichever tick won the clock.  Follow `cause` for the
+causal chain, and read the order between records that `cause` does not
+link as arbitrary.  The trace records sends and receives only; it has
+no spawn or exit records, so a chain that passes through a spawned
+worker breaks at the spawn.
 
 The ring is bounded and overwrites its oldest records when full, so if
 the interesting events scroll off, narrow the window: `xtc_trace_reset`
