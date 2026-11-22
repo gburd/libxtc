@@ -129,8 +129,6 @@ variable on Windows.
 
     int  __os_cond_init    (__os_cond_t *c);
     int  __os_cond_wait    (__os_cond_t *c, __os_mutex_t *mu);
-    int  __os_cond_timedwait(__os_cond_t *c, __os_mutex_t *mu,
-                             int64_t deadline_ns);
     int  __os_cond_signal  (__os_cond_t *c);
     int  __os_cond_broadcast(__os_cond_t *c);
     int  __os_cond_destroy (__os_cond_t *c);
@@ -152,13 +150,14 @@ to a counter behind a mutex+cond pair on platforms without
 unnamed semaphore support.
 
     int  __os_sem_init    (__os_sem_t *s, unsigned initial);
-    int  __os_sem_post    (__os_sem_t *s, unsigned n);
-    int  __os_sem_wait    (__os_sem_t *s, unsigned n, int64_t deadline_ns);
+    int  __os_sem_post    (__os_sem_t *s);
+    int  __os_sem_wait    (__os_sem_t *s);
+    int  __os_sem_trywait (__os_sem_t *s);
     int  __os_sem_destroy (__os_sem_t *s);
 
 `__os_sem_t` is mostly used as scaffolding.  Higher layers use
-`xtc_sem` (section 2) which presents the same API but cooperates
-with the coroutine scheduler.
+`xtc_sem` (section 2), which counts in units of any size, takes a
+timeout, and parks a fiber instead of blocking its thread.
 
 ---
 
@@ -182,20 +181,19 @@ the OS thread.
 
     int  xtc_amutex_create   (xtc_amutex_t **out);
     void xtc_amutex_destroy  (xtc_amutex_t *m);
-    int  xtc_amutex_lock     (xtc_amutex_t *m, int64_t deadline_ns);
+    int  xtc_amutex_lock     (xtc_amutex_t *m, int64_t timeout_ns);
     int  xtc_amutex_try_lock (xtc_amutex_t *m);
     int  xtc_amutex_unlock   (xtc_amutex_t *m);
 
-The fast path is one `compare_exchange` against the owner field.
-Under contention, the caller registers a waker on the lock's
-queue and yields; the unlocking coroutine wakes the head of the
-queue.
+The fast path takes the lock's internal mutex, finds it free, and
+marks it held.  Under contention, the caller registers a waker on the
+lock's queue and yields; the unlocking coroutine wakes the head of the
+queue.  `timeout_ns` is relative: below 0 waits forever, 0 only tries,
+and a wait that runs out returns `XTC_E_AGAIN`.
 
 Use `xtc_amutex_t` when the critical section may yield, perform
-async I/O, or take a long time.  The cost relative to
-`__os_mutex_t` is one extra atomic and a queue-link write on the
-slow path; both primitives are within a small constant factor on
-the fast path.  The cost relative to `xtc_lwlock` (section 3) is
+async I/O, or take a long time.  On the uncontended fast path it
+costs one `__os_mutex_t` lock and unlock plus a flag write.  The cost relative to `xtc_lwlock` (section 3) is
 that there is no separation between readers and writers.
 
 The converse holds too: a lock that is never held across a park does
@@ -238,11 +236,11 @@ consumed, the edge is cleared.
     int  xtc_notify_create  (xtc_notify_t **out);
     void xtc_notify_destroy (xtc_notify_t *n);
     int  xtc_notify_signal  (xtc_notify_t *n);
-    int  xtc_notify_wait    (xtc_notify_t *n, int64_t deadline_ns);
+    int  xtc_notify_wait    (xtc_notify_t *n, int64_t timeout_ns);
 
 `xtc_notify_t` is the building block for higher-layer drain-wait
-patterns.  `xtc_lrlock` uses it to let a writer wait for the
-last reader on the old buffer to finish.
+patterns; the supervisor, the registry, and the server and machine
+layers use it.
 
 ### `xtc_sem_t`  --  counting semaphore
 
@@ -251,7 +249,7 @@ A counting semaphore that parks waiters on the loop.
     int  xtc_sem_create     (unsigned initial, xtc_sem_t **out);
     void xtc_sem_destroy    (xtc_sem_t *s);
     int  xtc_sem_post       (xtc_sem_t *s, unsigned n);
-    int  xtc_sem_acquire    (xtc_sem_t *s, unsigned n, int64_t deadline_ns);
+    int  xtc_sem_acquire    (xtc_sem_t *s, unsigned n, int64_t timeout_ns);
     int  xtc_sem_try_acquire(xtc_sem_t *s, unsigned n);
     int  xtc_sem_count      (const xtc_sem_t *s);
 
@@ -263,16 +261,19 @@ is faster.
 ### `xtc_abort_source_t`  --  cancellation
 
 Not strictly a lock, but listed here because it is the
-cooperative-cancellation primitive that other locks honour
-through their deadline arguments.
+cooperative-cancellation primitive.  A library wait that takes a
+token (`xtc_svr_call_abortable`) checks it, and application code polls
+it with `xtc_abort_token_is_aborted`; the lock calls above take no
+token.
 
     int  xtc_abort_source_create  (xtc_abort_source_t **out);
     void xtc_abort_source_destroy (xtc_abort_source_t *s);
     int  xtc_abort_source_fire    (xtc_abort_source_t *s, int reason);
     int  xtc_abort_source_token   (xtc_abort_source_t *s, xtc_abort_token_t *t);
+    int  xtc_abort_token_is_aborted(const xtc_abort_token_t *t);
 
-Fire an abort source and every wait on a token derived from it
-returns `XTC_E_ABORTED`.  The intent is to cancel a tree of
+Fire an abort source and every token derived from it reports aborted;
+a wait that checks the token returns `XTC_E_ABORTED`.  The intent is to cancel a tree of
 pending operations -- a request whose client disconnected, an
 RPC whose deadline expired -- without leaking blocked
 coroutines.
@@ -294,10 +295,11 @@ shared-release each compile to a single atomic increment when
 no exclusive waiter is present; the exclusive paths add a
 compare-exchange.
 
-    int  xtc_lwlock_init        (xtc_lwlock_t *lw);
+    int  xtc_lwlock_init        (xtc_lwlock_t *lw, uint16_t tranche);
     int  xtc_lwlock_acquire     (xtc_lwlock_t *lw, xtc_lwlock_mode_t mode);
-    int  xtc_lwlock_release     (xtc_lwlock_t *lw);
-    int  xtc_lwlock_destroy     (xtc_lwlock_t *lw);
+    int  xtc_lwlock_try_acquire (xtc_lwlock_t *lw, xtc_lwlock_mode_t mode);
+    void xtc_lwlock_release     (xtc_lwlock_t *lw);
+    void xtc_lwlock_destroy     (xtc_lwlock_t *lw);
 
 Modes are `XTC_LWLOCK_SHARED` and `XTC_LWLOCK_EXCLUSIVE`.
 
@@ -320,9 +322,14 @@ old buffer to finish; the reader-side cost is one atomic load.
     int          xtc_lrlock_create_ex     (const xtc_lrlock_opts_t *opts,
                                            xtc_lrlock_t **out);
     void         xtc_lrlock_destroy       (xtc_lrlock_t *lr);
-    const void  *xtc_lrlock_read_data     (xtc_lrlock_t *lr);
-    void        *xtc_lrlock_write_data    (xtc_lrlock_t *lr);
+    const void  *xtc_lrlock_read_begin    (xtc_lrlock_t *lr);
+    void         xtc_lrlock_read_end      (xtc_lrlock_t *lr);
+    void        *xtc_lrlock_write_begin   (xtc_lrlock_t *lr);
+    void         xtc_lrlock_apply_op      (xtc_lrlock_t *lr, const void *op,
+                                           size_t op_size);
+    void         xtc_lrlock_publish       (xtc_lrlock_t *lr);
     void         xtc_lrlock_publish_full_sync(xtc_lrlock_t *lr);
+    void         xtc_lrlock_write_end     (xtc_lrlock_t *lr);
 
 Use `xtc_lrlock_t` when reads are absolutely on the hot path,
 the data fits naturally in two copies (or the optional COW mode
@@ -340,26 +347,33 @@ automatic; the `xtc_alrlock_create` / `xtc_alrlock_create_ex` aliases
 name that fiber-awareness explicitly at the call site (an object created
 with either family works with either family's calls).
 
-### `xtc_rcu_t`  --  read-copy-update with epoch reclamation
+### `xtc_rcu`  --  read-copy-update with epoch reclamation
 
 Wait-free reads, copy-on-write for updates, deferred reclamation
-through epochs.
+through epochs.  There is one process-wide RCU domain, not a handle:
+one global epoch and a reader slot per thread (per fiber on a fiber).
 
-    int  xtc_rcu_create     (xtc_rcu_t **out);
-    void xtc_rcu_destroy    (xtc_rcu_t *r);
-    void xtc_rcu_read_lock  (xtc_rcu_t *r);
-    void xtc_rcu_read_unlock(xtc_rcu_t *r);
-    int  xtc_rcu_assign_pointer(xtc_rcu_t *r, void *new_ptr);
-    void xtc_rcu_synchronize(xtc_rcu_t *r);
-    void xtc_rcu_call       (xtc_rcu_t *r, void (*cb)(void *), void *arg);
+    int      xtc_rcu_init         (void);
+    void     xtc_rcu_fini         (void);
+    void     xtc_rcu_read_lock    (void);
+    void     xtc_rcu_read_unlock  (void);
+    void     xtc_rcu_retire       (void *p, xtc_rcu_free_fn fn);
+    void     xtc_rcu_synchronize  (void);
+    uint64_t xtc_rcu_current_epoch(void);
 
-Use `xtc_rcu_t` for graph data structures whose updates produce
+A writer publishes a new version with an ordinary release store of the
+pointer (for example `xtc_atomic_store_ptr`), then hands the old one to
+`xtc_rcu_retire`, which frees it with `fn` once every reader that could
+still see it has left its read-side section.  `xtc_rcu_synchronize`
+advances the epoch and reclaims what is safe.
+
+Use `xtc_rcu` for graph data structures whose updates produce
 new versions and whose old versions can be freed once no reader
 still holds a pointer into them: relcache-style maps, version
-trees, immutable index nodes.
+trees, immutable index nodes.  `xtc_chash` and `xtc_cskip` build on it.
 
 The trade-off relative to `xtc_lrlock_t` is that RCU has no
-internal copy management (the user produces and assigns the new
+internal copy management (the user produces and publishes the new
 version) but admits multiple writer threads producing updates
 concurrently with readers.
 
@@ -382,60 +396,72 @@ concurrently with readers.
 The xtc lock manager is the most general of the locking
 primitives.  It admits arbitrary lock-acquisition orders, detects
 and resolves deadlocks, supports timeouts and cancellation, and
-manages large numbers of fine-grained locks identified by 64-bit
-keys.  It is also the most expensive: each lock acquire takes one
-or two cache-line writes plus a hash lookup, plus the cost of
+manages large numbers of fine-grained locks, each named by an
+arbitrary byte string.  It is also the most expensive: each lock
+acquire takes one or two cache-line writes plus a hash lookup, plus
+the cost of
 honouring the deadlock detector's victim selection policy.
 
 The lock manager is a port of the Berkeley DB locking subsystem
 to the xtc framework.  It uses the same conflict matrix
 parameterization, the same notion of lockers and lock objects,
 and the same deadlock-detection algorithm (waits-for-graph
-search).  Code that ported between BDB and Cassandra by way of
-DataStax's lock manager will recognize the surface immediately.
+search).
 
 ### Conceptual model
 
-A *locker* is an entity that holds locks.  In xtc this is most
-often an `xtc_proc` -- one entity per coroutine -- but a locker
-can be any 64-bit handle the application chooses to allocate.
+A *locker* is an entity that holds locks, typically one transaction.
+The manager hands out locker ids (`xtc_lockmgr_id`); the application
+decides what each one stands for.
 
 A *lock object* is what the locker holds the lock on.  Lock
-objects are identified by a 64-bit key and an optional
-namespace tag, both selected by the application.  In a database
-context, the key might be a (database-id, table-id, page-id,
-row-id) tuple folded down to 64 bits; in a higher-level
-application, the key might be the address of the protected
+objects are named by a byte string the application chooses
+(`obj`, `obj_size`).  In a database
+context, the name might be a (database-id, table-id, page-id,
+row-id) tuple; in a higher-level
+application, it might be the address of the protected
 structure.
 
 A *lock mode* describes the access being requested.  The
-default conflict matrix is the BDB nine-mode matrix (NL, IS, IX,
-S, SIX, U, X, R, W); applications can install a custom matrix
-through `xtc_lockmgr_create_ex`.
+default conflict matrix is the nine-mode matrix of Berkeley DB's
+`db_riw_conflicts` (NL, S, X, WT, IX, IS, IWR, RU, WW; see
+`xtc_lockmgr.h`); applications can install a custom matrix
+through `xtc_lockmgr_opts_t.conflicts`.
 
 ### API
 
-    int   xtc_lockmgr_create     (xtc_lockmgr_t **out);
-    int   xtc_lockmgr_create_ex  (const xtc_lockmgr_opts_t *opts,
-                                  xtc_lockmgr_t **out);
+    int   xtc_lockmgr_create     (const xtc_lockmgr_opts_t *opts,
+                                  xtc_lockmgr_t **out);  /* NULL: defaults */
     void  xtc_lockmgr_destroy    (xtc_lockmgr_t *lm);
 
-    int   xtc_lockmgr_locker_alloc(xtc_lockmgr_t *lm,
-                                   xtc_locker_t *out);
-    int   xtc_lockmgr_locker_free (xtc_lockmgr_t *lm,
-                                   xtc_locker_t  l);
+    int   xtc_lockmgr_id         (xtc_lockmgr_t *lm, xtc_locker_t *out);
+    int   xtc_lockmgr_id_free    (xtc_lockmgr_t *lm, xtc_locker_t l);
+    int   xtc_lockmgr_id_set_timeout(xtc_lockmgr_t *lm, xtc_locker_t l,
+                                  int64_t timeout_ns);
 
-    int   xtc_lockmgr_acquire    (xtc_lockmgr_t *lm,
-                                  xtc_locker_t  l,
-                                  uint64_t      object_key,
+    int   xtc_lock_get           (xtc_lockmgr_t *lm, xtc_locker_t l,
+                                  const void *obj, size_t obj_size,
                                   xtc_lock_mode_t mode,
-                                  int64_t       deadline_ns,
-                                  xtc_lock_t   *out);
-    int   xtc_lockmgr_release    (xtc_lockmgr_t *lm, xtc_lock_t lk);
-    int   xtc_lockmgr_release_all(xtc_lockmgr_t *lm, xtc_locker_t l);
+                                  int64_t timeout_ns);
+    int   xtc_lock_put           (xtc_lockmgr_t *lm, xtc_locker_t l,
+                                  const void *obj, size_t obj_size);
+    int   xtc_lock_release_all   (xtc_lockmgr_t *lm, xtc_locker_t l);
+    int   xtc_lock_upgrade       (xtc_lockmgr_t *lm, xtc_locker_t l,
+                                  const void *obj, size_t obj_size,
+                                  xtc_lock_mode_t new_mode);
+    int   xtc_lock_downgrade     (xtc_lockmgr_t *lm, xtc_locker_t l,
+                                  const void *obj, size_t obj_size,
+                                  xtc_lock_mode_t new_mode);
+    int   xtc_lock_vec           (xtc_lockmgr_t *lm, xtc_locker_t l,
+                                  xtc_lock_req_t *reqs, int n_reqs,
+                                  int *out_executed);
 
-    int   xtc_lockmgr_stats      (xtc_lockmgr_t *lm,
-                                  xtc_lockmgr_stats_t *out);
+    int   xtc_lockmgr_check_deadlocks(xtc_lockmgr_t *lm, int *n_aborted);
+    int   xtc_lockmgr_failchk    (xtc_lockmgr_t *lm, xtc_locker_t l);
+    int   xtc_lockmgr_stat       (const xtc_lockmgr_t *lm,
+                                  xtc_lockmgr_stat_t *out);
+
+The full contract of each call is in `xtc_lockmgr(3)`.
 
 ### Deadlock detection
 
@@ -448,19 +474,19 @@ next, and none can release anything because none can proceed.
 The lock manager runs a periodic deadlock detector that walks
 the waits-for graph looking for cycles.  When it finds one, it
 breaks the cycle by aborting one of the lockers in it -- the
-victim.  The victim's `xtc_lockmgr_acquire` returns
+victim.  The victim's `xtc_lock_get` returns
 `XTC_E_DEADLK`; the application is responsible for reacting,
 typically by releasing every lock the locker holds and retrying
 the operation that triggered the cycle.
 
-The detector runs in its own thread.  Detection frequency is
-configurable through `xtc_lockmgr_opts_t.detect_interval_ns`;
-the default is 100 ms.  Setting the interval to zero disables
-the detector and reduces the lock manager to a deadlock-prone
-fast path; this is appropriate only when the application
-guarantees a global lock ordering and uses the lock manager for
-its other features (timeouts, statistics, fine-grained
-acquisition).
+`xtc_lockmgr_opts_t.detect_mode` picks when the detector runs.
+`XTC_LOCK_DETECT_PERIODIC` (the default) runs it in its own thread
+every `detect_interval_ns` (default 100 ms; 0 or less also means
+100 ms).  `XTC_LOCK_DETECT_ON_BLOCK` runs it synchronously on every
+conflict.  `XTC_LOCK_DETECT_NONE` never runs it: the caller drives
+detection with `xtc_lockmgr_check_deadlocks`, or guarantees a global
+lock ordering and uses the lock manager for its other features
+(timeouts, statistics, fine-grained acquisition).
 
 #### Victim selection
 
@@ -487,7 +513,8 @@ the cycle to abort.  The application chooses the policy through
     XTC_LOCK_VICTIM_MAX_WRITE -- pick the locker holding the
                                  most write locks
     XTC_LOCK_VICTIM_EXPIRE    -- pick only lockers whose own
-                                 deadlines have already passed;
+                                 deadlines (xtc_lockmgr_id_set_timeout)
+                                 have already passed;
                                  if no expired locker exists,
                                  abort no one and let the
                                  detector try again at the next
@@ -507,10 +534,10 @@ transaction.
 #### Timeouts
 
 Independently of the deadlock detector, an acquisition can fail
-because its own deadline has expired.  The `deadline_ns`
-argument to `xtc_lockmgr_acquire` is an absolute deadline in
-`xtc_now_ns()` units.  When the deadline elapses without the
-lock being granted, the call returns `XTC_E_TIMEDOUT`.
+because its own timeout has expired.  The `timeout_ns`
+argument to `xtc_lock_get` is relative: -1 waits forever and 0 does
+not wait.  When it elapses without the
+lock being granted, the call returns `XTC_E_AGAIN`.
 
 Timeouts are independent of deadlock detection but interact
 with it.  The `XTC_LOCK_VICTIM_EXPIRE` policy makes the
@@ -532,16 +559,16 @@ is negligible.  In a workload with many contention points the
 overhead can be observed; tune `detect_interval_ns` upward to
 amortize.
 
-`xtc_lockmgr_stats_t` exposes:
+`xtc_lockmgr_stat_t` exposes:
 
+    n_held               -- granted lock entries now
+    n_waiting            -- waiting requests now
+    n_objects            -- live lock objects
+    n_lockers            -- allocated locker ids
     n_acquires           -- successful acquisitions, lifetime
     n_releases           -- releases, lifetime
-    n_waits              -- acquisitions that had to wait
-    n_timeouts           -- acquisitions that returned TIMEDOUT
-    n_deadlocks_found    -- cycles found by the detector
-    n_aborts             -- victim aborts performed
-    detect_iterations    -- detector ticks elapsed
-    waits_for_edges      -- size of the current waits-for graph
+    n_deadlocks_found    -- deadlock victims aborted, lifetime
+    n_timeouts           -- waits that timed out, lifetime
 
 ### When to use the lock manager
 
@@ -550,16 +577,17 @@ Use `xtc_lockmgr_t` when:
   * The set of lockable objects is dynamic and large.  An
     application protecting individual rows of a million-row
     table cannot reasonably allocate a `xtc_amutex_t` per row;
-    the lock manager indexes by 64-bit key and folds collisions
-    onto a single hash bucket worth of state.
+    the lock manager hashes each object name into one of
+    `n_partitions` buckets and keeps lock state only while the
+    object is locked.
   * The acquisition order is dictated by the user (a SQL
     query plan, a graph traversal where edges are followed in
     response order) and a global ordering cannot be enforced.
     Deadlock detection is the only correct response to such
     workloads.
   * Multiple lock modes participate: shared, exclusive,
-    intention-shared, intention-exclusive, update.  The
-    full BDB conflict matrix is supported out of the box.
+    intention-shared, intention-exclusive, read-uncommitted.  The
+    BDB nine-mode matrix is the default.
   * Statistics and observability matter.  The lock manager
     tracks contention, wait queues, and conflict counts at low
     cost.
@@ -653,10 +681,12 @@ implications of this design:
     don't need the mutex either, because the OS-level lock
     blocks the thread.  Use `xtc_amutex_t` instead.
 
-  * Lock manager waits respect cancellation.  An
-    `xtc_lockmgr_acquire` whose caller's abort token is fired
-    returns `XTC_E_ABORTED` promptly; the locker is removed
-    from the wait graph and the deadlock detector no longer
+  * Lock manager waits respect cancellation.  A fiber killed
+    (`xtc_exit_pid`) while it waits in `xtc_lock_get` leaves the
+    wait with the lock not held: under a cancellation mask the call
+    returns `XTC_E_ABORTED` and the kill is delivered when the mask
+    drops; without one the kill unwinds the fiber at once.  Either
+    way the waiting request is removed, so the detector no longer
     sees its waits-for edges.
 
 ---
