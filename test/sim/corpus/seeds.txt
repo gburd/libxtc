@@ -143,3 +143,10 @@ test_sim_sqlxtc_uniq    1          1   bug85/86: a committed row overwritten; a 
 # id 2 and index id 4 (ids up to 2 / 3 handed out) and 1 rows", a dropped
 # table's id and rows back after a clean close's GC.  2.2.0 and 2.1.4 have it.
 test_sim_sqlxtc_reopen  1          1   bug79: a dropped table's id (and rows) reused; fixed libxtc-examples "06_sqlxtc: never reuse a dropped table's or index's id"
+# p168/rngseed (2.3.0).  Seed 4 FAILS on libxtc before "os_rand: seed
+# from the virtual clock alone outside a sim run": "FRESH REPLAY:
+# fingerprint ... here, ... in a fresh process".  CREATE INDEX drew its
+# SipHash key in the harness's setup (virtual clock on, no run), and the
+# thread's auto-seed mixed in its TLS address, so the key and the tree
+# differed per process under ASLR.  The clean build replays it.
+test_sim_sqlxtc_evict   4          1   rngseed: a setup-time RAND draw took the TLS address; fixed libxtc "os_rand: seed from the virtual clock alone outside a sim run"
