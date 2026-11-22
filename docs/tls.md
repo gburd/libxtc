@@ -39,6 +39,10 @@ underlying `int fd`; xtc_tls layers on top with read/write that
 return `XTC_OK` / `XTC_E_AGAIN` / `XTC_E_INVAL` and never block the
 event loop.
 
+A condensed view of `xtc_tls.h` (the header has the full option set:
+`verify_peer_mode`, cipher and group lists, CRLs, a passphrase callback,
+SNI, a caller-supplied transport, kTLS, and peer-certificate queries):
+
 ```c
 typedef struct xtc_tls_ctx  xtc_tls_ctx_t;   /* per-process: cert + key */
 typedef struct xtc_tls      xtc_tls_t;       /* per-connection state */
@@ -49,13 +53,17 @@ typedef enum xtc_tls_role {
 } xtc_tls_role_t;
 
 typedef struct xtc_tls_opts {
-    const char *cert_file;       /* PEM, server only */
-    const char *key_file;        /* PEM, server only */
-    const char *ca_file;         /* PEM CA bundle for client verification */
-    int         verify_peer;     /* boolean; 1 = require valid cert */
+    size_t      size;            /* XTC_TLS_OPTS_INIT */
+    const char *cert_file;       /* PEM; a client's makes it mutual TLS */
+    const char *key_file;        /* PEM */
+    const char *ca_file;         /* PEM CA bundle for peer verification */
     const char *alpn_protos;     /* "\x02h2\x08http/1.1" wire form */
+    int         verify_peer;     /* legacy on/off; see verify_peer_mode */
+    xtc_tls_verify_mode_t verify_peer_mode;
     int         min_version;     /* XTC_TLS_VER_12, _13 */
     int         max_version;
+    /* ... cipher_list, ciphersuites_13, groups, crl_file, crl_dir,
+     * prefer_server_ciphers, passphrase_cb, passphrase_userdata */
 } xtc_tls_opts_t;
 
 int  xtc_tls_ctx_create(xtc_tls_role_t role,
@@ -87,40 +95,29 @@ int  xtc_tls_shutdown(xtc_tls_t *tls);
 ## Backend pluggability
 
 `configure --with-tls=BACKEND` picks the backend at compile time.
-Default: `auto`, which tries OpenSSL first, BoringSSL, then disables
-TLS if neither is available.  No runtime selection -- same discipline
-as `xtc_io` backends.
+Default: `auto`, which uses OpenSSL (or LibreSSL, which installs the
+same library names) when its library and header are found, and
+otherwise builds with no TLS.  No other backend is picked
+automatically, so a build stays reproducible.  No runtime selection --
+same discipline as `xtc_io` backends.
 
 ```sh
-./configure --with-tls=openssl    # default
-./configure --with-tls=boringssl  # if you've vendored BoringSSL
+./configure --with-tls=openssl    # what auto picks when it is found
+./configure --with-tls=libressl   # same backend as openssl
+./configure --with-tls=boringssl  # OpenSSL-API backend; set CPPFLAGS
+./configure --with-tls=mbedtls
+./configure --with-tls=gnutls
 ./configure --with-tls=wolfssl
-./configure --with-tls=schannel   # auto-picked on Windows
-./configure --with-tls=darwin     # auto-picked on macOS
+./configure --with-tls=schannel   # Windows only
 ./configure --with-tls=none       # link without TLS
 ```
 
-Each backend lives in `src/io/tls_<backend>.c` and exports the
-same internal vtable:
-
-```c
-typedef struct xtc_tls_vtable {
-    int  (*ctx_create) (xtc_tls_role_t, const xtc_tls_opts_t *, xtc_tls_ctx_t **);
-    void (*ctx_destroy)(xtc_tls_ctx_t *);
-    int  (*tls_create) (xtc_tls_ctx_t *, int, xtc_tls_t **);
-    void (*tls_destroy)(xtc_tls_t *);
-    int  (*handshake)  (xtc_tls_t *);
-    int  (*read)       (xtc_tls_t *, void *, size_t, size_t *);
-    int  (*write)      (xtc_tls_t *, const void *, size_t, size_t *);
-    int  (*wants_read) (const xtc_tls_t *);
-    int  (*wants_write)(const xtc_tls_t *);
-    int  (*shutdown)   (xtc_tls_t *);
-} xtc_tls_vtable_t;
-```
-
-This vtable is **not** runtime-dispatched on the hot path -- it's
-selected at configure time, exactly like `XTC_IO_BACKEND_*`.  The
-preprocessor inlines the right impl.
+Each backend lives in `src/io/tls_<backend>.c` and defines the public
+`xtc_tls_*` functions directly; the build compiles exactly one of them
+(`tls_none.c` for `--with-tls=none`, whose calls return
+`XTC_E_NOSYS`).  There is no vtable and no runtime dispatch: the choice
+is made at configure time, exactly like `XTC_IO_BACKEND_*`.  The pieces
+the backends share are static inlines in `src/io/tls_common.h`.
 
 ## Non-blocking handshake protocol
 
@@ -154,54 +151,24 @@ for (;;) {
 
 ## Memory + allocation strategy
 
-OpenSSL allocates internally via `OPENSSL_malloc`.  We:
+The TLS library allocates internally with its own allocator (for
+OpenSSL, `OPENSSL_malloc`); libxtc does not override it.  libxtc's own
+per-context and per-connection structs come from the library allocator
+(`__os_calloc`), so they go through any allocator hook the embedder
+installed.  TLS objects are not charged to `xtc_res`.
 
-1. Don't override OpenSSL's allocator (would couple us tightly).
-2. Use `xtc_slab` for per-connection wrappers (`struct xtc_tls`).
-3. Track outstanding TLS contexts via `xtc_res` for memory cap +
-   alert under pressure.
+## Scope
 
-## Open questions
-
-1. **Vendoring** -- do we vendor BoringSSL or require system?
-   Recommendation: system-only for v1; vendoring adds 100 MB to
-   the source tree.
-
-2. **mTLS** -- verify_peer + client cert workflow is in scope; we
-   need a `xtc_tls_set_client_cert(tls, cert, key)` for client
-   role.  (Optional in v1.)
-
-3. **SNI / ALPN** -- both must work in v1; modern HTTP/2 / gRPC
-   demands them.
-
-4. **TLS 1.3 0-RTT** -- out of scope for v1; revisit if needed.
-
-5. **Session resumption tickets** -- out of scope for v1.
-
-## Effort estimate
-
-| Component | Lines | Days |
-|---|---|---|
-| xtc_tls.h API | ~150 | 1 |
-| OpenSSL backend | ~700 | 5 |
-| BoringSSL backend | ~700 | 3 (mostly identical to OpenSSL) |
-| wolfSSL backend | ~600 | 4 |
-| SChannel backend | ~900 | 8 |
-| macOS Network framework | ~700 | 6 |
-| Tests | ~600 | 4 |
-| Bench | ~200 | 2 |
-
-Total: ~33 person-days for a 1-backend ship (OpenSSL only).
-Adding 4 more backends doubles that.
-
-## Next concrete step
-
-When greenlit:
-
-1. Ship `xtc_tls.h` + OpenSSL backend only.
-2. Add 1 example: `examples/05_tls_echo.c` -- a TLS echo server +
-   client.  ~150 lines each.
-3. Tag a v0.3.0 once landed.
-
-The vtable shape lets us grow into other backends incrementally
-without reworking the public API.
+- **Mutual TLS** works through the options: a client context given
+  `cert_file` and `key_file` presents that certificate, and a server's
+  `verify_peer_mode` asks for or requires one.  There is no separate
+  per-connection call for it.
+- **SNI and ALPN** are supported: `xtc_tls_set_hostname` on a client,
+  `xtc_tls_ctx_set_sni_cb` on a server, `opts.alpn_protos` on both, and
+  `xtc_tls_get_alpn_selected` after the handshake.
+- **Session resumption and TLS 1.3 0-RTT** are not supported: the API
+  has no call for either, and the OpenSSL backend turns session
+  tickets and the session cache off.
+- **BoringSSL** is not vendored; `--with-tls=boringssl` builds the
+  OpenSSL-API backend against a BoringSSL the caller points
+  `CPPFLAGS` at.
