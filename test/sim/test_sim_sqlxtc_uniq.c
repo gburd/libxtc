@@ -59,8 +59,8 @@
  *	retried unarmed.  Last, with no other proc running: NAUTO
  *	transactions INSERT a row with no key into a fresh table with the
  *	row fault armed, and NREAP times a superseded UNIQUE entry that a
- *	newer version uses again is reaped with a read (drawn from the
- *	fault stream) failing.
+ *	newer version uses again is reaped with the reap's reads failing
+ *	(xstore_reap_read_fail).
  *
  *	Invariants (each a FAIL line naming the seed):
  *	  UNIQUE   no two live rows carry one value (counted by a table scan
@@ -591,11 +591,11 @@ phase2_autorowid(sx_db *h)
 /* Phase 2, the UNIQUE reap: NREAP times, on a fresh table r<j>, row 1's
  * UNIQUE value goes 10 -> 20 -> 10 while a REPEATABLE READ snapshot
  * pins the first version, so the superseded entry (10, 1) is queued for
- * the reap; the pin ends, and four INSERTs run with the n-th row read
- * failing (n drawn from the fault stream), so the reap that checks
- * whether a newer version uses the entry again can fail a read.  The
- * entry is live (row 1 holds 10 again): a duplicate 10 must still be
- * refused (REAP). */
+ * the reap; the pin ends, and four INSERTs run with every read of the
+ * reap's reuse check failing (xstore_reap_read_fail), so the check of
+ * whether a newer version uses the entry again fails on every seed, at
+ * the step that would have found the reuse.  The entry is live (row 1
+ * holds 10 again): a duplicate 10 must still be refused (REAP). */
 static void
 phase2_reap(sx_db *h)
 {
@@ -622,14 +622,13 @@ phase2_reap(sx_db *h)
 		(void)sx_exec(pin, "COMMIT", NULL);
 		sx_close(pin);
 		pin = NULL;
-		xstore_row_read_fail_at(
-		    1 + (int)__xtc_sim_rng_range(XTC_SIM_RNG_FAULT, 12));
+		(void)xstore_reap_read_fail(1);
 		for (i = 0; i < 4; i++) {        /* may fail on the read: fine */
 			snprintf(sql, sizeof sql, "INSERT INTO r%d VALUES(%d, %d)",
 			    j, 100 + i, 100 + i);
 			(void)sx_exec(h, sql, NULL);
 		}
-		xstore_row_read_fail_at(0);
+		(void)xstore_reap_read_fail(0);
 		snprintf(sql, sizeof sql, "INSERT INTO r%d VALUES(2, 10)", j);
 		rc = sx_exec(h, sql, NULL);
 		if (rc == SX_OK)
@@ -729,6 +728,7 @@ checker(void *arg)
 	while (xtc_atomic_load_i32(&g_left, xtc_mo_seq_cst) > 0)
 		(void)xtc_proc_sleep(1000LL * 1000);
 	xstore_index_read_fail_at(0); /* a fault no writer reached */
+	xstore_uniq_fail_inject(0);   /* nor a UNIQUE probe failure */
 	if (g_why[0] != '\0' || sx_open_bt(g_bt, &h) != SX_OK)
 		goto out;
 	phase2(e, h);
@@ -871,6 +871,7 @@ run_one(uint64_t seed, char *out)
 	xstore_uniq_fail_inject(0); /* an armed failure outlived the run */
 	xstore_index_read_fail_at(0);
 	xstore_row_read_fail_at(0);
+	(void)xstore_reap_read_fail(0);
 	xstore_scan_read_fail_at(0);
 	xtc_exec_destroy(e);
 	snprintf(out, OUTCAP, "%s", g_out);

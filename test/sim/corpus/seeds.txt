@@ -135,8 +135,13 @@ test_sim_sqlxtc_uniq    3          1   bug84: a lost update on a read error; fix
 # of bug 85 MAXROWID ("ROWID: committed row 1 of a0 overwritten (holds 9)":
 # an auto-rowid INSERT in a transaction took rowid 1 over a committed row)
 # and bug 86 REAPREAD ("REAP: a duplicate of the live UNIQUE value 10 went
-# into r2": the reap deleted a live entry), and on libxtc-examples before
+# into r0": the reap deleted a live entry), and on libxtc-examples before
 # each fix with the fault hook at the site; the clean build passes it.
+# p168/rderr3 re-verified seeds 1, 2 and 3 both ways after the reap case
+# moved to xstore_reap_read_fail and the max-rowid read went lazy: each
+# fails on its plant's build and on the fix taken back by hand (83: PKEY,
+# 85: ROWID, 86: REAP on 1, 2 and 3; 82: SCAN on 2; 84: LOST UPDATE on
+# 3), and passes clean.
 test_sim_sqlxtc_uniq    1          1   bug85/86: a committed row overwritten; a live UNIQUE entry reaped; fixed libxtc-examples e3343e2, c17b2be
 # p168/r12 (2.3.0, 2.1.5).  Seed 1 FAILS on the planted build (bug 79
 # IDREUSE) and on libxtc-examples before the fix: "IDREUSE: new table s has
