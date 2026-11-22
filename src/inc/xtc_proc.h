@@ -143,7 +143,7 @@ typedef int (*xtc_match_fn)(const void *data, size_t size, void *user_data);
 /*
  * Process entry function.  The proc runs as a coroutine and the
  * function returns nothing; exit happens by returning from the entry,
- * by calling xtc_exit, or by being killed via a link.
+ * by calling xtc_exit_self, or by being killed (xtc_exit_pid, a link).
  */
 typedef void (*xtc_proc_fn)(void *arg);
 
@@ -1104,7 +1104,7 @@ XTC_API void xtc_proc_recovery_cleanup(void);
 /* ---- A2: cancellation masking (uncancelable / poll) ----
  *
  * MonadCancel's masking discipline, for C.  Structured cancellation via
- * xtc_abort / xtc_exit_pid is cooperative -- a running fiber observes it
+ * xtc_exit_pid is cooperative -- a running fiber observes it
  * only at a yield/recv point.  Masking makes it COMPOSABLE: inside an
  * xtc_uncancelable() region an asynchronous kill delivered at a park
  * point is DEFERRED, not acted on, and is observed only when the region

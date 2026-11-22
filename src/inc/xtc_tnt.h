@@ -113,7 +113,7 @@ typedef enum xtc_tnt_transition_kind {
 	XTC_TNT_DONE = 0,         /* clean exit -- deallocate me */
 	XTC_TNT_YIELD,            /* run me again next tick */
 	XTC_TNT_WAIT_MESSAGE,     /* park until my mailbox has a message */
-	XTC_TNT_WAIT_IO,          /* staged I/O via xtc_tnt_submit_io -- park on it */
+	XTC_TNT_WAIT_IO,          /* staged I/O (xtc_tnt_submit_*, _io_send*): park */
 	XTC_TNT_CRASH             /* voluntary failure -- "let it crash" */
 } xtc_tnt_transition_kind_t;
 
