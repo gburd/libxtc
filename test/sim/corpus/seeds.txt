@@ -143,6 +143,11 @@ test_sim_sqlxtc_uniq    3          1   bug84: a lost update on a read error; fix
 # 85: ROWID, 86: REAP on 1, 2 and 3; 82: SCAN on 2; 84: LOST UPDATE on
 # 3), and passes clean.
 test_sim_sqlxtc_uniq    1          1   bug85/86: a committed row overwritten; a live UNIQUE entry reaped; fixed libxtc-examples e3343e2, c17b2be
+# p168/rderr3 SF-3: seed 1 FAILS on the planted build of bug 87 STMTATOMIC
+# ("ATOMIC: "UPDATE m SET v = v + 1" failed (rc 1) but changed m") and on
+# libxtc-examples with the implicit transaction turned off by hand; the
+# clean build passes it.
+test_sim_sqlxtc_uniq    1          1   bug87: a failed multi-row autocommit statement left rows committed; fixed libxtc-examples 0bb908c
 # p168/r12 (2.3.0, 2.1.5).  Seed 1 FAILS on the planted build (bug 79
 # IDREUSE) and on libxtc-examples before the fix: "IDREUSE: new table s has
 # id 2 and index id 4 (ids up to 2 / 3 handed out) and 1 rows", a dropped

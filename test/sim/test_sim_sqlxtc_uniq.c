@@ -60,7 +60,8 @@
  *	transactions INSERT a row with no key into a fresh table with the
  *	row fault armed, and NREAP times a superseded UNIQUE entry that a
  *	newer version uses again is reaped with the reap's reads failing
- *	(xstore_reap_read_fail).
+ *	(xstore_reap_read_fail); and NATOM autocommit statements over
+ *	several rows run with a scan or row read failing partway.
  *
  *	Invariants (each a FAIL line naming the seed):
  *	  UNIQUE   no two live rows carry one value (counted by a table scan
@@ -80,6 +81,8 @@
  *	  ROWID    an auto-rowid INSERT never overwrites a committed row;
  *	  REAP     a reaped UNIQUE entry a live row uses is never lost (a
  *	           duplicate of its value is refused);
+ *	  ATOMIC   an autocommit statement that fails leaves no row of its
+ *	           own committed;
  *	  REPLAY   the same seed gives the same result text.
  *
  *	Planted bugs (scripts/dst-bug-inject.sh): 72 (UNIQPROBE) reads a
@@ -96,7 +99,9 @@
  *	having no newer version, so an increment is lost (LOST UPDATE); 85
  *	(MAXROWID) reads a failed max-rowid descent as an empty table, so an
  *	auto-rowid INSERT takes rowid 1 (ROWID); 86 (REAPREAD) reads a failed
- *	step of the reap's reuse check as "not reused" (REAP).
+ *	step of the reap's reuse check as "not reused" (REAP); 87
+ *	(STMTATOMIC) commits each row of a multi-row autocommit statement on
+ *	its own, so one that fails partway leaves rows committed (ATOMIC).
  *	usage: test_sim_sqlxtc_uniq [base [count]]   (default 1 8)
  */
 
@@ -140,6 +145,7 @@
 #define NPK 8    /* duplicate-key INSERTs the pk proc tries */
 #define NAUTO 8  /* auto-rowid INSERT transactions (phase 2) */
 #define NREAP 4  /* UNIQUE reaps of a reused entry (phase 2) */
+#define NATOM 6  /* multi-row autocommit statements failed partway (phase 2) */
 
 static bt_t *g_bt;
 static char g_pool[NPOOL][VMAX + 1];
@@ -644,6 +650,63 @@ phase2_reap(sx_db *h)
 		sx_close(pin);
 }
 
+/* The row count and sum of v of table m, for phase2_atomic: -2 on an
+ * error. */
+static int64_t
+m_sum(sx_db *h)
+{
+	int64_t n = one_int(h, "SELECT count(*) FROM m"), s;
+	s = one_int(h, "SELECT sum(v) FROM m");
+	return n < 0 || s < 0 ? -2 : n * 1000000 + s;
+}
+
+/* Phase 2, statement atomicity: NATOM autocommit statements over m's
+ * eight rows (an UPDATE of every row, an INSERT ... SELECT of eight new
+ * ones, a DELETE of the new ones), each with a scan read or a row read
+ * failing at a point drawn from the fault stream.  A statement that
+ * fails must leave m exactly as it was (ATOMIC): it is one statement,
+ * all or none.  One that succeeds changed every row it should. */
+static void
+phase2_atomic(sx_db *h)
+{
+	static const char *const sql[3] = {
+		"UPDATE m SET v = v + 1",
+		"INSERT INTO m SELECT k + 100, v FROM m WHERE k < 100",
+		"DELETE FROM m WHERE k >= 100",
+	};
+	int64_t b, a;
+	int j, rc, w;
+	if (sx_exec(h, "CREATE TABLE m(k INTEGER PRIMARY KEY, v INTEGER)",
+	        NULL) != SX_OK ||
+	    sx_exec(h, "INSERT INTO m VALUES(1,1),(2,2),(3,3),(4,4),(5,5),"
+	        "(6,6),(7,7),(8,8)", NULL) != SX_OK) {
+		snprintf(g_why, sizeof g_why, "atomic: setup failed");
+		return;
+	}
+	for (j = 0; j < NATOM && g_why[0] == '\0'; j++) {
+		w = (int)__xtc_sim_rng_range(XTC_SIM_RNG_FAULT, 3);
+		b = m_sum(h);
+		if (__xtc_sim_rng_range(XTC_SIM_RNG_FAULT, 2) == 0)
+			xstore_scan_read_fail_at(
+			    2 + (int)__xtc_sim_rng_range(XTC_SIM_RNG_FAULT, 6));
+		else
+			xstore_row_read_fail_at(
+			    2 + (int)__xtc_sim_rng_range(XTC_SIM_RNG_FAULT, 6));
+		rc = sx_exec(h, sql[w], NULL);
+		xstore_scan_read_fail_at(0);
+		xstore_row_read_fail_at(0);
+		a = m_sum(h);
+		if (rc != SX_OK && a != b)
+			snprintf(g_why, sizeof g_why, "ATOMIC: \"%s\" failed (rc %d) "
+			    "but changed m (%lld -> %lld)", sql[w], rc,
+			    (long long)b, (long long)a);
+		else if (rc == SX_OK && a == b && w == 0)
+			snprintf(g_why, sizeof g_why, "atomic: \"%s\" changed "
+			    "nothing", sql[w]);
+	}
+	(void)sx_exec(h, "DROP TABLE m", NULL);
+}
+
 /* Phase 2 (from the checker, once the writers are done): the counter
  * and pk procs over table c, then their invariants; then the
  * auto-rowid and reap cases, alone. */
@@ -681,6 +744,7 @@ phase2(xtc_exec_t *e, sx_db *h)
 		return;
 	phase2_autorowid(h);
 	phase2_reap(h);
+	phase2_atomic(h);
 }
 
 /* The g group counted by a table scan with one of its reads failing:
