@@ -129,8 +129,15 @@ test_sim_sqlxtc_uniq    64         1   p168 hand-off: found by the same sweep; s
 # group") and bug 83 PKREAD ("PKEY: an INSERT of existing key 2 was
 # committed"); seed 3 FAILS on bug 84 WWREAD ("LOST UPDATE: counter 18,
 # 22 increments acknowledged").  The clean build passes both.
-test_sim_sqlxtc_uniq    2          1   bug82/83: a short base scan taken as whole; a duplicate primary key on a read error; fixed libxtc-examples 678b300 "a failed read in a base-table scan is an error" + "an INSERT key check that cannot read the row fails"
-test_sim_sqlxtc_uniq    3          1   bug84: a lost update on a read error; fixed libxtc-examples "a write-write or serializable check that cannot read fails"
+test_sim_sqlxtc_uniq    2          1   bug82/83: a short scan taken as whole; a duplicate key on a read error; fixed libxtc-examples 678b300, 238ed44
+test_sim_sqlxtc_uniq    3          1   bug84: a lost update on a read error; fixed libxtc-examples 4d47e8c
+# p168/rderr2: phase 2's last two cases.  Seed 1 FAILS on the planted builds
+# of bug 85 MAXROWID ("ROWID: committed row 1 of a0 overwritten (holds 9)":
+# an auto-rowid INSERT in a transaction took rowid 1 over a committed row)
+# and bug 86 REAPREAD ("REAP: a duplicate of the live UNIQUE value 10 went
+# into r2": the reap deleted a live entry), and on libxtc-examples before
+# each fix with the fault hook at the site; the clean build passes it.
+test_sim_sqlxtc_uniq    1          1   bug85/86: a committed row overwritten; a live UNIQUE entry reaped; fixed libxtc-examples e3343e2, c17b2be
 # p168/r12 (2.3.0, 2.1.5).  Seed 1 FAILS on the planted build (bug 79
 # IDREUSE) and on libxtc-examples before the fix: "IDREUSE: new table s has
 # id 2 and index id 4 (ids up to 2 / 3 handed out) and 1 rows", a dropped

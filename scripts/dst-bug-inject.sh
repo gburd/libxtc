@@ -133,6 +133,8 @@ write_cases() {
 		"82;test_sim_sqlxtc_uniq;1;1;SCAN: a scan whose read failed returned [0-9]+ rows" \
 		"83;test_sim_sqlxtc_uniq;1;1;PKEY: an INSERT of existing key 2 was committed" \
 		"84;test_sim_sqlxtc_uniq;1;1;LOST UPDATE: counter [0-9]+, [0-9]+ increments acknowledged" \
+		"85;test_sim_sqlxtc_uniq;1;1;ROWID: committed row 1 of a[0-9]+ overwritten" \
+		"86;test_sim_sqlxtc_uniq;1;1;REAP: a duplicate of the live UNIQUE value 10 went into r[0-9]+" \
 		"76;test_sim_recv_mark;0;1;a marked receive skipped a reply" \
 		"77;test_sim_forged_down;0;1;a forged DOWN restarted a live child" \
 		"78;test_sim_forged_down;0;1;a forged DOWN dropped a live name" \
@@ -245,6 +247,10 @@ write_cases() {
 #               absent -> an INSERT of an existing key never commits
 # 84 WWREAD     xstore.c the write-write check reads an unreadable row as
 #               having no newer version -> no acknowledged increment lost
+# 85 MAXROWID   xstore.c a failed max-rowid descent reads as an empty
+#               table -> an auto-rowid INSERT never overwrites a committed row
+# 86 REAPREAD   xstore.c a failed step of the UNIQUE reap's reuse check
+#               reads "not reused" -> a live UNIQUE entry is never reaped
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

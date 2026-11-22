@@ -56,7 +56,11 @@
  *	refused duplicate or a serialization failure.  The checker then
  *	counts the g group by a table scan with xstore_scan_read_fail_at
  *	armed: a count that fails with "cannot read table t: I/O error" is
- *	retried unarmed.
+ *	retried unarmed.  Last, with no other proc running: NAUTO
+ *	transactions INSERT a row with no key into a fresh table with the
+ *	row fault armed, and NREAP times a superseded UNIQUE entry that a
+ *	newer version uses again is reaped with a read (drawn from the
+ *	fault stream) failing.
  *
  *	Invariants (each a FAIL line naming the seed):
  *	  UNIQUE   no two live rows carry one value (counted by a table scan
@@ -73,6 +77,9 @@
  *	           short scan is never the whole table);
  *	  PKEY     no INSERT of a key c holds commits;
  *	  LOST UPDATE the counter equals the increments acknowledged;
+ *	  ROWID    an auto-rowid INSERT never overwrites a committed row;
+ *	  REAP     a reaped UNIQUE entry a live row uses is never lost (a
+ *	           duplicate of its value is refused);
  *	  REPLAY   the same seed gives the same result text.
  *
  *	Planted bugs (scripts/dst-bug-inject.sh): 72 (UNIQPROBE) reads a
@@ -86,7 +93,10 @@
  *	(SCANSHORT) takes a failed base-scan read for the table's end (SCAN);
  *	83 (PKREAD) reads a row the INSERT key check cannot read as absent
  *	(PKEY); 84 (WWREAD) reads a row the write-write check cannot read as
- *	having no newer version, so an increment is lost (LOST UPDATE).
+ *	having no newer version, so an increment is lost (LOST UPDATE); 85
+ *	(MAXROWID) reads a failed max-rowid descent as an empty table, so an
+ *	auto-rowid INSERT takes rowid 1 (ROWID); 86 (REAPREAD) reads a failed
+ *	step of the reap's reuse check as "not reused" (REAP).
  *	usage: test_sim_sqlxtc_uniq [base [count]]   (default 1 8)
  */
 
@@ -128,6 +138,8 @@
 #define NCTR 2   /* counter procs */
 #define NINC 16  /* increments each tries */
 #define NPK 8    /* duplicate-key INSERTs the pk proc tries */
+#define NAUTO 8  /* auto-rowid INSERT transactions (phase 2) */
+#define NREAP 4  /* UNIQUE reaps of a reused entry (phase 2) */
 
 static bt_t *g_bt;
 static char g_pool[NPOOL][VMAX + 1];
@@ -510,17 +522,19 @@ pkdup(void *arg)
 		rc = sx_exec(h, sql, NULL);
 		if (rc == SX_OK)
 			rc = sx_exec(h, "COMMIT", NULL);
-		else
-			(void)sx_exec(h, "ROLLBACK", NULL);
+		/* Judge the failure before the ROLLBACK: a statement that
+		 * succeeds clears the connection's message. */
 		if (rc == SX_OK && g_why[0] == '\0')
 			snprintf(g_why, sizeof g_why, "PKEY: an INSERT of "
 			    "existing key 2 was committed (try %d)", i);
-		else if (row_fault_ok(h, f0))
+		else if (rc != SX_OK && row_fault_ok(h, f0))
 			g_rerr++;
 		else if (rc != SX_CONSTRAINT && rc != SX_BUSY &&
 		    g_why[0] == '\0')
 			snprintf(g_why, sizeof g_why, "pk: rc %d \"%s\"", rc,
 			    sx_errmsg(h));
+		if (rc != SX_OK)
+			(void)sx_exec(h, "ROLLBACK", NULL);
 		(void)xtc_proc_sleep((int64_t)(1 + draw(300)) * 1000);
 	}
 done:
@@ -529,8 +543,111 @@ done:
 	xtc_atomic_fetch_sub_i32(&g_left2, 1, xtc_mo_seq_cst);
 }
 
+/* Phase 2, auto-rowid: NAUTO transactions, each on a fresh table a<j>
+ * holding rows 1 and 2 (explicit keys, so no rowid has been handed out
+ * for it), INSERT a row with no key and COMMIT, with the row fault
+ * armed.  The INSERT takes its rowid past the table's largest; a read
+ * of that which failed must fail the statement, never take rowid 1 and
+ * overwrite a committed row (ROWID). */
+static void
+phase2_autorowid(sx_db *h)
+{
+	char sql[96];
+	int j, rc, f0;
+	for (j = 0; j < NAUTO && g_why[0] == '\0'; j++) {
+		snprintf(sql, sizeof sql, "CREATE TABLE a%d(k INTEGER PRIMARY "
+		    "KEY, v INTEGER)", j);
+		if (sx_exec(h, sql, NULL) != SX_OK)
+			break;
+		snprintf(sql, sizeof sql, "INSERT INTO a%d VALUES(1, 1), (2, 2)",
+		    j);
+		if (sx_exec(h, sql, NULL) != SX_OK ||
+		    sx_exec(h, "BEGIN", NULL) != SX_OK)
+			break;
+		f0 = xstore_row_read_faults();
+		arm_row_fault();
+		snprintf(sql, sizeof sql, "INSERT INTO a%d(v) VALUES(9)", j);
+		rc = sx_exec(h, sql, NULL);
+		if (rc == SX_OK)
+			rc = sx_exec(h, "COMMIT", NULL);
+		xstore_row_read_fail_at(0);
+		if (rc != SX_OK && row_fault_ok(h, f0))
+			g_rerr++;
+		else if (rc != SX_OK && g_why[0] == '\0')
+			snprintf(g_why, sizeof g_why, "autorowid: rc %d \"%s\"",
+			    rc, sx_errmsg(h));
+		if (rc != SX_OK)
+			(void)sx_exec(h, "ROLLBACK", NULL);
+		snprintf(sql, sizeof sql, "SELECT v FROM a%d WHERE k = 1", j);
+		if (g_why[0] == '\0' && one_int(h, sql) != 1)
+			snprintf(g_why, sizeof g_why, "ROWID: committed row 1 of "
+			    "a%d overwritten (holds %lld)", j,
+			    (long long)one_int(h, sql));
+		snprintf(sql, sizeof sql, "DROP TABLE a%d", j);
+		(void)sx_exec(h, sql, NULL);
+	}
+}
+
+/* Phase 2, the UNIQUE reap: NREAP times, on a fresh table r<j>, row 1's
+ * UNIQUE value goes 10 -> 20 -> 10 while a REPEATABLE READ snapshot
+ * pins the first version, so the superseded entry (10, 1) is queued for
+ * the reap; the pin ends, and four INSERTs run with the n-th row read
+ * failing (n drawn from the fault stream), so the reap that checks
+ * whether a newer version uses the entry again can fail a read.  The
+ * entry is live (row 1 holds 10 again): a duplicate 10 must still be
+ * refused (REAP). */
+static void
+phase2_reap(sx_db *h)
+{
+	sx_db *pin = NULL;
+	char sql[96];
+	int j, i, rc;
+	for (j = 0; j < NREAP && g_why[0] == '\0'; j++) {
+		snprintf(sql, sizeof sql, "CREATE TABLE r%d(k INTEGER PRIMARY "
+		    "KEY, c INTEGER UNIQUE)", j);
+		if (sx_exec(h, sql, NULL) != SX_OK)
+			break;
+		snprintf(sql, sizeof sql, "INSERT INTO r%d VALUES(1, 10)", j);
+		if (sx_exec(h, sql, NULL) != SX_OK ||
+		    sx_open_bt(g_bt, &pin) != SX_OK)
+			break;
+		snprintf(sql, sizeof sql, "SELECT c FROM r%d WHERE k = 1", j);
+		if (sx_exec(pin, "BEGIN ISOLATION LEVEL REPEATABLE READ",
+		        NULL) != SX_OK || one_int(pin, sql) != 10)
+			break;
+		snprintf(sql, sizeof sql, "UPDATE r%d SET c = 20 WHERE k = 1", j);
+		(void)sx_exec(h, sql, NULL);
+		snprintf(sql, sizeof sql, "UPDATE r%d SET c = 10 WHERE k = 1", j);
+		(void)sx_exec(h, sql, NULL);
+		(void)sx_exec(pin, "COMMIT", NULL);
+		sx_close(pin);
+		pin = NULL;
+		xstore_row_read_fail_at(
+		    1 + (int)__xtc_sim_rng_range(XTC_SIM_RNG_FAULT, 12));
+		for (i = 0; i < 4; i++) {        /* may fail on the read: fine */
+			snprintf(sql, sizeof sql, "INSERT INTO r%d VALUES(%d, %d)",
+			    j, 100 + i, 100 + i);
+			(void)sx_exec(h, sql, NULL);
+		}
+		xstore_row_read_fail_at(0);
+		snprintf(sql, sizeof sql, "INSERT INTO r%d VALUES(2, 10)", j);
+		rc = sx_exec(h, sql, NULL);
+		if (rc == SX_OK)
+			snprintf(g_why, sizeof g_why, "REAP: a duplicate of the "
+			    "live UNIQUE value 10 went into r%d", j);
+		else if (rc != SX_CONSTRAINT && g_why[0] == '\0')
+			snprintf(g_why, sizeof g_why, "reap: rc %d \"%s\"", rc,
+			    sx_errmsg(h));
+		snprintf(sql, sizeof sql, "DROP TABLE r%d", j);
+		(void)sx_exec(h, sql, NULL);
+	}
+	if (pin != NULL)
+		sx_close(pin);
+}
+
 /* Phase 2 (from the checker, once the writers are done): the counter
- * and pk procs over table c, then their invariants. */
+ * and pk procs over table c, then their invariants; then the
+ * auto-rowid and reap cases, alone. */
 static void
 phase2(xtc_exec_t *e, sx_db *h)
 {
@@ -561,6 +678,10 @@ phase2(xtc_exec_t *e, sx_db *h)
 	else if (n != 2 || k2 != 7)
 		snprintf(g_why, sizeof g_why, "PKEY: key 2 holds %lld (%lld "
 		    "rows), want 7", (long long)k2, (long long)n);
+	if (g_why[0] != '\0')
+		return;
+	phase2_autorowid(h);
+	phase2_reap(h);
 }
 
 /* The g group counted by a table scan with one of its reads failing:
