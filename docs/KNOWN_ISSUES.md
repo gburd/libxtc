@@ -58,9 +58,11 @@ last message that has arrived, and `xtc_recv_match_since(mark, fn, user,
 &m, &n, timeout_ns)` is `xtc_recv_match` that starts after it: take the
 mark, send the request, wait with the mark.  Messages it skips stay
 queued.  A proc has one mark; a stale mark (a later one replaced it) or
-0 walks the whole queue, never skipping a message.  On a 48-core x86-64
-host one request-reply with a backlog of 100,000 unrelated messages took
-1.42 ms with `xtc_recv_match` and 626 ns with the mark.  New symbols:
+0 walks the whole queue, never skipping a message.  One request-reply
+with a backlog of 100,000 unrelated messages took 1.42 ms with
+`xtc_recv_match` and 626 ns with the mark (two procs on one loop,
+median of 5 interleaved runs on a shared 48-core x86-64 host,
+2026-11-18; the full table is in commit 3e4e5feb).  New symbols:
 `xtc_recv_mark`, `xtc_recv_match_since` (`XTC_2.3`).  See xtc_proc(3)
 "Receive marks".
 
