@@ -5,18 +5,20 @@
  *
  * src/inc/xtc_trace.h
  *	Causal message tracing -- libxtc's seq_trace.  An opt-in,
- *	bounded ring of trace events (message sends and receives,
- *	process spawns and exits), each stamped with a hybrid logical
- *	clock (HLC) so the true happens-before of a request can be
- *	reconstructed across procs and cores even when wall-clock
- *	arrival order lies.
+ *	bounded ring of trace events (message sends and receives),
+ *	each stamped with a hybrid logical clock (HLC) and linked send
+ *	to receive, so the path of a request can be followed across
+ *	procs and cores.
  *
  *	The HLC is a 64-bit stamp: the high 48 bits are a monotonic
  *	physical-time component (microseconds) and the low 16 bits a
  *	logical counter.  Every traced event ticks one global clock, so
  *	a send's stamp is always less than the stamp of the receive it
  *	causes; a RECV record also carries the originating SEND's stamp
- *	in `cause`, so the causal edge is explicit.  (A per-shard HLC for
+ *	in `cause`, so the causal edge is explicit.  The converse does
+ *	not hold: a lower stamp alone does not mean one event caused
+ *	another (two unrelated events on two loops are ordered by which
+ *	tick won the clock).  (A per-shard HLC for
  *	the MVCC data path is a separate, later
  *	use of the same idea.)
  *
@@ -46,17 +48,17 @@ extern "C" {
 typedef enum xtc_trace_kind {
 	XTC_TRACE_SEND  = 0,   /* self sent a message to peer */
 	XTC_TRACE_RECV  = 1,   /* self received a message from peer */
-	XTC_TRACE_SPAWN = 2,   /* self (parent) spawned peer (child) */
-	XTC_TRACE_EXIT  = 3    /* self exited; detail = reason */
+	XTC_TRACE_SPAWN = 2,   /* reserved: never recorded */
+	XTC_TRACE_EXIT  = 3    /* reserved: never recorded */
 } xtc_trace_kind_t;
 
 typedef struct xtc_trace_rec {
 	uint64_t  hlc;     /* this event's HLC stamp */
-	uint64_t  cause;   /* RECV: the originating send's HLC; else 0 */
+	uint64_t  cause;   /* RECV: the send's HLC (0 if sent untraced) */
 	int       kind;    /* enum xtc_trace_kind */
 	xtc_pid_t self;    /* the proc the event happened in */
-	xtc_pid_t peer;    /* the other proc (dest / source / child) */
-	uint32_t  detail;  /* SEND/RECV: payload bytes; EXIT: reason */
+	xtc_pid_t peer;    /* the other proc (dest / source) */
+	uint32_t  detail;  /* payload bytes */
 } xtc_trace_rec_t;
 
 /* Visit callback: return 0 to continue, nonzero to stop early. */
@@ -75,7 +77,7 @@ XTC_API int xtc_trace_enable(int on);
 /* Drop all buffered trace records.  Returns XTC_OK. */
 XTC_API int xtc_trace_reset(void);
 
-/* Visit buffered records in causal (HLC-ascending) order.  Returns the
+/* Visit buffered records in HLC-ascending order.  Returns the
  * number visited, or a negative XTC_E_* on error. */
 XTC_API int xtc_trace_dump(xtc_trace_fn cb, void *user);
 
