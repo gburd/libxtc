@@ -55,6 +55,19 @@ libxtc (2.3.0-1) unstable; urgency=medium
       New test test_uniq_long, DST test test_sim_sqlxtc_uniq, planted
       bugs 72 and 73.  The nested-loop join no longer reads one element
       before its order array when it ends.
+    - sqlxtc example: an autocommit statement that changes several rows
+      is atomic.  It runs as an implicit transaction, so a failure
+      partway (a read error, a UNIQUE violation, a row too large) or a
+      kill of the connection leaves none of its rows; before, the rows
+      before the failure stayed committed.  A one-row statement with a
+      kill pending commits nothing.  A multi-row INSERT that loses a key
+      race re-runs and reports UNIQUE, not a serialization failure.  The
+      one-fsync commit holds while the statement's rows stay under
+      256 KiB.  A statement over 100,000 rows fails with "too many rows".
+      A DDL statement waiting on the schema lock at shutdown fails with
+      "cannot change the schema: the storage engine is shutting down".
+      New tests test_stmt_atomic and test_insert_race; test_crash_oracle
+      kills multi-row statements; planted bug 87.
   * Tests: test_sync's off-loop spin, notify-spin and no-herd tests count
     the lock's own condvar sleeps and wakeups instead of OS context
     switches; test_exec's Ex5 and test_sup's group-restart hook tests
