@@ -17,17 +17,19 @@
 #      against HEAD's libxtc.so (the dynamic-link swap a packager does).
 #
 # BASE_TAG defaults to the previous release of THIS tree's release line
-# (docs/abi-stability.md, "Long-term support and release lines"):
-#   - a development tree (dist/release.in names a CalVer release) takes
-#     the newest CalVer tag vYYYY.MM.DD[.N] older than its own name, or
-#     v2.2.0, the last SemVer release cut from main, when there is none;
-#   - an LTS tree (no dist/release.in, so named by its ABI level) takes
-#     the newest SemVer tag v2.MINOR.N older than its ABI level with the
-#     SAME minor (2.1.5 for 2.1.6).  A different minor is another line: a
-#     newer one (2.2.0 seen from lts/2.1) may use API this tree lacks,
-#     and an older one is not the N-1 of this line.  Only when the line
-#     has no earlier release (an untagged main at 2.3.0, a new LTS's
-#     first patch) does it fall back to the newest older v2.* tag.
+# (docs/abi-stability.md, "Long-term support and release lines"), in
+# this order:
+#   1. a development release tree (dist/release.in names a CalVer
+#      release) takes the newest CalVer tag in its history other than its
+#      own, or v2.2.0, the last SemVer release cut from main;
+#   2. otherwise the newest SemVer tag v2.MINOR.N older than the ABI
+#      level with the SAME minor (2.1.5 for 2.1.6).  A different minor is
+#      another line: a newer one (2.2.0 seen from lts/2.1) may use API
+#      this tree lacks, and an older one is not the N-1 of this line;
+#   3. otherwise the newest CalVer tag in its history: main between
+#      development releases, or a new LTS line's first release.  An LTS
+#      branch never has one, since development releases come from main;
+#   4. otherwise the newest v2.* tag older than the ABI level.
 # Until a 2.x tag exists there is nothing to be compatible WITH: 1.x ->
 # 2.0 is the major break (structs gained a size field, the symbols a
 # version node), so the job SKIPS (exit 0, says why).
@@ -58,25 +60,26 @@ newest_semver_below() {
 		}' || true
 }
 
+# newest_calver_merged [EXCEPT]: the newest CalVer tag reachable from
+# HEAD, other than EXCEPT.
+newest_calver_merged() {
+	git tag --merged HEAD -l 'v20[0-9][0-9].*' --sort=-v:refname 2>/dev/null |
+	    grep -E '^v20[0-9]{2}\.[0-9]{2}\.[0-9]{2}(\.[0-9]+)?$' |
+	    grep -vxF "${1:-}" | head -n 1 || true
+}
+
 base=${1:-}
 if [ -z "$base" ] && [ "$head_ver" != "$head_abi" ]; then
-	# A development release.  CalVer names sort as versions, and any tag
-	# sorting below HEAD's own name is an earlier development release.
-	base=$(git tag -l 'v20[0-9][0-9].*' --sort=-v:refname 2>/dev/null |
-	    grep -E '^v20[0-9]{2}\.[0-9]{2}\.[0-9]{2}(\.[0-9]+)?$' |
-	    while read -r t; do
-		if [ "$t" != "v$head_ver" ] &&
-		    [ "$(printf '%s\n%s\n' "$t" "v$head_ver" | sort -V | head -1)" = "$t" ]; then
-			echo "$t"
-			break
-		fi
-	    done)
+	base=$(newest_calver_merged "v$head_ver")
 	if [ -z "$base" ] && git rev-parse --verify -q "v2.2.0^{commit}" >/dev/null; then
 		base=v2.2.0
 	fi
 fi
 if [ -z "$base" ]; then
 	base=$(newest_semver_below "$head_abi" "$(echo "$head_abi" | cut -d. -f2)")
+fi
+if [ -z "$base" ]; then
+	base=$(newest_calver_merged)
 fi
 if [ -z "$base" ]; then
 	base=$(newest_semver_below "$head_abi")

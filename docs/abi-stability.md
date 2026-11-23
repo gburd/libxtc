@@ -507,6 +507,9 @@ published as the normal release and marked "Latest".  Both ship the
 same source tarball, amalgamation and man-page bundle, and no distro
 packages.  The tag must equal v plus the tree's release name, so an LTS
 tree cannot publish a CalVer tag, nor a development tree a SemVer one.
+A development release's body is the dist/release-notes.md committed
+with it, and the workflow refuses a CalVer tag without one; an LTS
+release's body is its debian/changelog entry.
 
 **What a 2.1.x patch may change.**  Fixes only.  A patch release:
 
@@ -572,11 +575,12 @@ keep working against every later 2.x.  It skips, saying why, until a
 1.x -> 2.0 is the major break).  With the layout gate it is the
 mechanical half of this contract; the rest is review.
 
-The previous release is the previous one of the tree's own line.  On
-`main` with a dist/release.in it is the newest older CalVer tag, or
-v2.2.0 (the last SemVer release from `main`) when there is none.  On an
-LTS tree it is the previous v2.1.N; only a line with no earlier release
-falls back to the newest older v2.x tag.
+The previous release is the previous one of the tree's own line.  A
+development release takes the newest CalVer tag in its history, or
+v2.2.0 (the last SemVer release from `main`) when there is none.  An
+LTS tree takes the previous release of its minor (2.1.5 for 2.1.6).
+`main` between development releases, and a new LTS line's first
+release, take the newest CalVer tag in their history.
 
 **Security fixes** follow the process in SECURITY.md: private report,
 fix on every supported line, coordinated release.
