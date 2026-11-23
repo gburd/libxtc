@@ -432,10 +432,10 @@ test_stats_failchk(const MunitParameter p[], void *d)
  * test wants L2 as the victim: the CUSTOM picker finds it by locker ID,
  * and under EXPIRE it is the one locker whose deadline has passed.  The
  * victim's wait returns XTC_E_DEADLK and the others are granted in turn.
- * Before 2.3.0 (and 2.1.6) the picker was handed node indices. */
+ * Before 2.1.6 the picker was handed node indices. */
 static xtc_lockmgr_t *g_vc_m;
 static xtc_locker_t   g_vc_l[3];
-static int            g_vc_rc[3];
+static _Atomic int    g_vc_rc[3];
 static uint64_t       g_vc_seen[8];
 static int            g_vc_nseen;
 static int            g_vc_calls;
@@ -445,9 +445,8 @@ vc_waiter(void *arg)
 {
 	static const char *want[3] = { "b", "c", "a" };
 	int i = *(int *)arg;
-	xtc_atomic_store_i32(&g_vc_rc[i],
-	    xtc_lock_get(g_vc_m, g_vc_l[i], want[i], 1, XTC_LOCK_X, -1),
-	    xtc_mo_seq_cst);
+	atomic_store(&g_vc_rc[i],
+	    xtc_lock_get(g_vc_m, g_vc_l[i], want[i], 1, XTC_LOCK_X, -1));
 	return NULL;
 }
 
@@ -473,7 +472,7 @@ test_victim_cycle(const MunitParameter p[], void *d)
 	static const char *hold[3] = { "a", "b", "c" };
 	static int idx[3] = { 0, 1, 2 };
 	const char *policy = munit_parameters_get(p, "policy");
-	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_INIT;
+	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_DEFAULT;
 	xtc_lockmgr_stat_t s;
 	xtc_locker_t junk;
 	pthread_t th[3];
@@ -494,7 +493,7 @@ test_victim_cycle(const MunitParameter p[], void *d)
 		munit_assert_int(xtc_lockmgr_id(g_vc_m, &g_vc_l[i]), ==, XTC_OK);
 		munit_assert_int(xtc_lock_get(g_vc_m, g_vc_l[i], hold[i], 1,
 		    XTC_LOCK_X, 0), ==, XTC_OK);
-		xtc_atomic_store_i32(&g_vc_rc[i], 1, xtc_mo_seq_cst);
+		atomic_store(&g_vc_rc[i], 1);
 	}
 	munit_assert_uint64(g_vc_l[0], ==, 6);
 	if (strcmp(policy, "expire") == 0)
@@ -527,17 +526,14 @@ test_victim_cycle(const MunitParameter p[], void *d)
 		}
 	}
 	pthread_join(th[1], NULL);
-	munit_assert_int(xtc_atomic_load_i32(&g_vc_rc[1], xtc_mo_seq_cst), ==,
-	    XTC_E_DEADLK);
+	munit_assert_int(atomic_load(&g_vc_rc[1]), ==, XTC_E_DEADLK);
 
 	/* L1 now holds a and b; releasing it lets L3 take a. */
 	pthread_join(th[0], NULL);
-	munit_assert_int(xtc_atomic_load_i32(&g_vc_rc[0], xtc_mo_seq_cst), ==,
-	    XTC_OK);
+	munit_assert_int(atomic_load(&g_vc_rc[0]), ==, XTC_OK);
 	munit_assert_int(xtc_lock_release_all(g_vc_m, g_vc_l[0]), ==, 2);
 	pthread_join(th[2], NULL);
-	munit_assert_int(xtc_atomic_load_i32(&g_vc_rc[2], xtc_mo_seq_cst), ==,
-	    XTC_OK);
+	munit_assert_int(atomic_load(&g_vc_rc[2]), ==, XTC_OK);
 
 	xtc_lockmgr_destroy(g_vc_m);
 	return MUNIT_OK;
