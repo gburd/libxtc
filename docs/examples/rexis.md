@@ -114,7 +114,7 @@ both were allocated at accept; 20,000 idle connections, `--loops=2`,
 
 - **`main.c`** stands up an `xtc_app` with a supervised TCP listener.
 - **`conn.c`**: the listener (in `main.c`) accepts a socket and spawns
-  one connection process per client (`xtc_proc_spawn`). The process loops:
+  one connection process per client (`xtc_proc_spawn`).  The process loops:
   read from the socket (parking the fiber via the reactor when the
   socket is not ready), parse a RESP command, apply it, write the reply.
   The connection's teardown (close the socket, free both buffers, leave
@@ -152,7 +152,7 @@ both were allocated at accept; 20,000 idle connections, `--loops=2`,
   rejected: an RCU read section must be short, and a slow client can
   hold a reply for seconds. A planted bug that skips the reference is
   caught by `test_rexis_loopback` and the PBT pipeline property as wrong
-  bytes, and as a heap-use-after-free under ASan. Result (2026-10, one
+  bytes, and as a heap-use-after-free under ASan.  Result (2026-10, one
   loop, memtier GET-only): 64 KiB GETs +35%, 1 KiB unchanged.
 - **Output backpressure.** A reply is built into a per-connection output
   buffer that grows up to `--max-output`; a reply that would pass it is
@@ -190,7 +190,7 @@ both were allocated at accept; 20,000 idle connections, `--loops=2`,
 - **A path to more cores** without turning atomic-by-single-thread into
   a lock nightmare: the keyspace is the one shared structure, and it can
   be guarded by a single primitive (or sharded) rather than by ad-hoc
-  locking spread across the codebase. `--loops=N` takes that step: the
+  locking spread across the codebase.  `--loops=N` takes that step: the
   connection processes spread over an executor and the keyspace is cut
   into 64 latched shards.
 - **Backpressure and budgets are first-class** (`xtc_res`), not bolted

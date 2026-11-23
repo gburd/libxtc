@@ -63,7 +63,7 @@ DragonFly's shard-per-thread design: nothing owns a shard.
 ## Measurements
 
 Measured 2026-11-05 on one two-socket 64-core x86-64 bare-metal host
-(128 threads, 1 TiB), Debian 13, kernel 6.12, loopback. The OS was tuned for
+(128 threads, 1 TiB), Debian 13, kernel 6.12, loopback.  The OS was tuned for
 measurement: the performance governor, the C1E and C6 idle states
 disabled, transparent hugepages and NUMA balancing off, irqbalance
 stopped. The host has two NUMA nodes. Each server ran on node 0, first
