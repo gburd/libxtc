@@ -16,8 +16,10 @@
 # dist/release.in holding its CalVer name, YYYY.MM.DD, or YYYY.MM.DD.N
 # for a second release on one day.
 #
-# Both build systems, the version tests, the release workflow and
-# scripts/compat-check.sh call this script, so the rule lives once.
+# Both build systems, the version tests, the release workflow,
+# mkamalgamation.py and scripts/compat-check.sh call this script, so the
+# rule lives once.  flake.nix cannot run it and reads the two files
+# itself, unchecked.
 # It prints the name and exits 0, or names the problem and exits 1.
 set -eu
 
@@ -32,10 +34,18 @@ if [ "$name" = "$abi" ]; then
 	echo "$name"
 	exit 0
 fi
-# CalVer: a four-digit year from 2000, a month 01-12, a day 01-31, and
-# an optional .N (N >= 1, no leading zero).
+# CalVer: a year 2000-2099, a month 01-12, a day that exists in that
+# month (February 29 only in a leap year), and an optional .N (N >= 1,
+# no leading zero).  The regex checks the shape, awk the day.
 if echo "$name" | grep -Eq \
-    '^20[0-9]{2}\.(0[1-9]|1[0-2])\.(0[1-9]|[12][0-9]|3[01])(\.[1-9][0-9]*)?$'; then
+    '^20[0-9]{2}\.(0[1-9]|1[0-2])\.(0[1-9]|[12][0-9]|3[01])(\.[1-9][0-9]*)?$' &&
+    echo "$name" | awk -F. '{
+	y = $1 + 0; m = $2 + 0; d = $3 + 0
+	split("31 28 31 30 31 30 31 31 30 31 30 31", dim, " ")
+	if (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0))
+		dim[2] = 29
+	exit !(d <= dim[m])
+    }'; then
 	echo "$name"
 	exit 0
 fi

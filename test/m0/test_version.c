@@ -61,13 +61,16 @@ is_semver(const char *s)
 
 /*
  * CalVer YYYY.MM.DD with an optional .N, the form dist/release_name.sh
- * accepts: a year from 2000, a month 01-12, a day 01-31, and N >= 1
- * with no leading zero.
+ * accepts: a year 2000-2099, a month 01-12, a day that exists in that
+ * month, and N >= 1 with no leading zero.
  */
 static int
 is_calver(const char *s)
 {
-	int i, mon, day;
+	static const int dim[12] = {
+		31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
+	};
+	int i, year, mon, day, last;
 
 	if (s == NULL || strlen(s) < 10)
 		return 0;
@@ -80,9 +83,15 @@ is_calver(const char *s)
 	}
 	if (s[0] != '2' || s[1] != '0')
 		return 0;
+	year = 2000 + (s[2] - '0') * 10 + (s[3] - '0');
 	mon = (s[5] - '0') * 10 + (s[6] - '0');
 	day = (s[8] - '0') * 10 + (s[9] - '0');
-	if (mon < 1 || mon > 12 || day < 1 || day > 31)
+	if (mon < 1 || mon > 12)
+		return 0;
+	last = dim[mon - 1];
+	if (mon == 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0))
+		last = 29;
+	if (day < 1 || day > last)
 		return 0;
 	if (s[10] == '\0')
 		return 1;
@@ -111,6 +120,11 @@ test_version_string(const MunitParameter params[], void *data)
 	munit_assert_true(is_calver("2026.11.24"));
 	munit_assert_true(is_calver("2026.11.24.2"));
 	munit_assert_false(is_calver("2026.13.01"));
+	munit_assert_false(is_calver("2026.02.30"));
+	munit_assert_false(is_calver("2026.04.31"));
+	munit_assert_false(is_calver("2026.02.29"));
+	munit_assert_true(is_calver("2028.02.29"));
+	munit_assert_true(is_calver("2000.02.29"));
 	munit_assert_false(is_calver("2026.11.24.0"));
 	munit_assert_false(is_calver("2.3.0"));
 	munit_assert_true(is_semver("2.1.6"));
