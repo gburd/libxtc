@@ -19,11 +19,11 @@ systems -- Redis, SQLite, Kafka, Seastar/Tina, PostgreSQL -- rebuilt on
 libxtc. Each server has its own page below covering **the software that
 inspired it**, how the libxtc version is **similar and different**, **how
 it works**, and the **advantages and challenges** of building it on
-libxtc. The standalone teaching examples (01--04, 10, 15, 17--19), 16
-l2book and 20 jobq are built **and run** by `make check` itself (12--14
-too, in a `--enable-sched-policy` build), and the larger systems (05
-rexis, 06 sqlxtc, 07 kaka, 11 lorb) are built and exercised by the CI
-`examples` job -- so none of it rots.
+libxtc.  The standalone teaching examples (01 to 04, 10, 15, and 17 to
+19), 16 l2book, and 20 jobq are built **and run** by `make check` itself
+(12 to 14 too, in a `--enable-sched-policy` build), and the larger
+systems (05 rexis, 06 sqlxtc, 07 kaka, 11 lorb) are built and exercised
+by the CI `examples` job -- so none of it rots.
 (08 tnt binds a fixed TCP port, so `make check` builds it and checks its
 `--help` but does not serve with it; see its target comment in
 `dist/Makefile.in`.)
@@ -42,7 +42,7 @@ cd examples/05_rexis && make XTC_BUILD=../../build
 |---|---|---|
 | [rexis]({{ '/examples/rexis/' | relative_url }}) | Redis / Valkey | A drop-in RESP server with hard resource budgets; connection-per-process. |
 | [sqlxtc]({{ '/examples/sqlxtc/' | relative_url }}) | SQLite | A from-scratch SQL engine: parser, vectorized executor, B-link/buffer-pool/WAL storage. |
-| [kaka]({{ '/examples/kaka/' | relative_url }}) | Apache Kafka / Redpanda | A partitioned append-only log broker with credit-based backpressure. |
+| [kaka]({{ '/examples/kaka/' | relative_url }}) | Apache Kafka / Redpanda | A partitioned append-only log broker with TCP backpressure (one request in flight per connection). |
 | [tnt]({{ '/examples/tnt/' | relative_url }}) | Seastar / Tina | The stackless Isolate layer -- the deliberate alternative to fibers. |
 | [pgmock]({{ '/examples/pgmock/' | relative_url }}) | PostgreSQL | A mock PG backend proving the no-fork runtime seam, with zero PG source. |
 
@@ -87,8 +87,9 @@ This is the skeleton of a real service. Source:
 
 Two transactions deadlock on a heavyweight lock manager, six times over;
 the detector finds the circular wait and aborts the transaction a custom
-victim picker chooses (a shuffled deck dealt by an `xtc_proc`), so the
-victim differs from run to run. It is the
+victim picker chooses (a card from a shuffled, randomly seeded deck), so
+the victim differs from run to run.  A separate `xtc_proc` deals cards
+for the quicksort that follows.  It is the
 counterpoint to the process model: when you *do* want shared,
 lock-ordered state, [the lock manager]({{ '/reference/locks/' | relative_url }})
 provides it -- with deadlock detection, which hand-rolled
