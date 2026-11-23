@@ -36,8 +36,10 @@ framework backend is not implemented.
 
 `xtc_tls_t` is a per-connection state machine.  The user owns the
 underlying `int fd`; xtc_tls layers on top with read/write that
-return `XTC_OK` / `XTC_E_AGAIN` / `XTC_E_INVAL` and never block the
-event loop.
+never block the event loop.  They return `XTC_OK`, `XTC_E_AGAIN` when
+the fd is not ready, `XTC_E_IO` on a transport failure or truncation,
+`XTC_E_INVAL` for a NULL argument, and `XTC_E_NOSYS` when TLS is not
+compiled in; a read can also return another hard TLS error.
 
 A condensed view of `xtc_tls.h` (the header has the full option set:
 `verify_peer_mode`, cipher and group lists, CRLs, a passphrase callback,
@@ -98,8 +100,8 @@ int  xtc_tls_shutdown(xtc_tls_t *tls);
 Default: `auto`, which uses OpenSSL (or LibreSSL, which installs the
 same library names) when its library and header are found, and
 otherwise builds with no TLS.  No other backend is picked
-automatically, so a build stays reproducible.  No runtime selection --
-same discipline as `xtc_io` backends.
+automatically, so a build stays reproducible.  There is no runtime
+selection, the same discipline as the `xtc_io` backends.
 
 ```sh
 ./configure --with-tls=openssl    # what auto picks when it is found
@@ -114,7 +116,8 @@ same discipline as `xtc_io` backends.
 
 Each backend lives in `src/io/tls_<backend>.c` and defines the public
 `xtc_tls_*` functions directly; the build compiles exactly one of them
-(`tls_none.c` for `--with-tls=none`, whose calls return
+(`tls_none.c` for `--with-tls=none`, whose calls check their
+arguments, returning `XTC_E_INVAL` for bad ones, and otherwise return
 `XTC_E_NOSYS`).  There is no vtable and no runtime dispatch: the choice
 is made at configure time, exactly like `XTC_IO_BACKEND_*`.  The pieces
 the backends share are static inlines in `src/io/tls_common.h`.
