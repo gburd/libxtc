@@ -28,11 +28,9 @@ make check
 .Ed
 .Pp
 .Cm make check
-runs every test in the current milestone's claims file.
-See
-.Pa M0_CLAIMS.md
-.Pq or its successor
-for the full matrix.
+runs the C tests, the property tests, the shell tests, and the
+example tests, and ends with a summary that names every test it
+skipped.
 .Sh MESON PATH
 .Bd -literal -offset indent
 meson setup build_meson
