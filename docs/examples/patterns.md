@@ -126,11 +126,9 @@ session sees it at once, a dry-run request sets audit mode for one request
 and rolls it back (`xtc_cfg_session_push` / `_abort`, SET LOCAL), and a
 lower-ranked source cannot displace a higher one.
 
-Note that in libxtc 2.2.0, `xtc_rcu_read_lock` and `_read_unlock` on a
-fiber take a short internal mutex to find the fiber's reader slot, so many
-fiber readers on many loops contend on it.  The example is correct either
-way; a read-mostly service that needs its readers to scale across loops
-should measure this before it relies on it.
+A fiber caches its RCU reader slot (since 2.2.0), so `xtc_rcu_read_lock`
+and `_read_unlock` on a fiber take no lock, and readers on many loops do
+not contend; KNOWN_ISSUES has the before and after.
 
 ## What the examples check
 
