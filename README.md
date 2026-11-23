@@ -161,7 +161,9 @@ got 5 bytes from worker
 
 `pkg-config --static` adds the libraries libxtc.a was built against
 (liburing, the TLS backend); a bare `-lxtc -lpthread` fails to link when
-the build found either.
+the build found either.  `make install` puts xtc.pc in
+`$(libdir)/pkgconfig`; set `PKG_CONFIG_PATH=/usr/local/lib/pkgconfig` if
+pkg-config does not find xtc.
 
 That's a one-process actor system in about 50 lines.  Note the shape:
 `xtc_self()` and `xtc_recv()` are **proc-context** calls -- off a proc

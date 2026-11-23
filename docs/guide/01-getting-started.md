@@ -62,7 +62,9 @@ cc first.c $(pkg-config --cflags --libs --static xtc) -o first
 ```
 
 (`--static` adds the libraries libxtc.a was built against: liburing and
-the TLS library, when configure found them.)
+the TLS library, when configure found them.  Set
+`PKG_CONFIG_PATH=/usr/local/lib/pkgconfig` if pkg-config does not find
+xtc.)
 
 {% include output.html file="01_hello_async.out" %}
 

@@ -110,7 +110,9 @@ cc hello.c $(pkg-config --cflags --libs --static xtc) -o hello
 
 `pkg-config --static` adds what libxtc.a was built against (liburing,
 the TLS library); a bare `-lxtc -lpthread` fails to link when the build
-found either.  The examples below compile the same way.
+found either.  The examples below compile the same way.  Set
+`PKG_CONFIG_PATH=/usr/local/lib/pkgconfig` if pkg-config does not find
+xtc.
 
 Output:
 
