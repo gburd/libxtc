@@ -1341,9 +1341,10 @@ usdt_convoy: $(srcdir)/../examples/15_usdt/convoy.c $(STATIC_LIB)
 
 # check-rexis: examples/05_rexis (the README flagship) and its test suite
 # (examples/05_rexis/test)
-# suite -- RESP parser, loopback round-trips, property tests, and the
+# suite -- RESP parser, loopback round-trips, property tests, the
 # budget tests that MEASURE each --max-* cap on a real forked server
-# (RSS, affinity mask, reply rate).  Before this target nothing built or
+# (RSS, affinity mask, reply rate), and the --persist restart tests (a
+# real server restarted, cleanly and by SIGKILL, mid-test).  Before this target nothing built or
 # ran any of it.  Everything is built HERE, in the build dir, from the
 # sources; nothing is written into the source tree.  The servers bind
 # kernel-chosen free loopback ports (05_rexis/test/rexis_harness.h), so
@@ -1363,7 +1364,8 @@ REXIS_SRCS = $(REXIS_DIR)/main.c $(REXIS_DIR)/proto.c $(REXIS_DIR)/db.c \
 	     $(REXIS_DIR)/metrics.c $(REXIS_DIR)/bitcask.c
 REXIS_HDRS = $(REXIS_DIR)/proto.h $(REXIS_DIR)/db.h $(REXIS_DIR)/cmd.h \
 	     $(REXIS_DIR)/conn.h $(REXIS_DIR)/bitcask.h
-M99_NET    = test_rexis_loopback test_rexis_budgets test_rexis_pbt
+M99_NET    = test_rexis_loopback test_rexis_budgets test_rexis_pbt \
+	     test_rexis_restart
 REXIS_BINS = rexis-server-xtc rexis_test_bitcask rexis_test_metrics \
 	     rexis_test_db_persist rexis_test_db_table test_resp_parser \
 	     $(M99_NET)
