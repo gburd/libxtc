@@ -317,7 +317,7 @@ conn_proc(void *arg)
         if (n <= 0) break;
         if (write(a->fd, buf, (size_t)n) != n) break;
     }
-    close(a->fd);
+    xtc_net_close(a->fd);   /* refunds what xtc_net_accept charged */
     free(a);
 }
 
@@ -330,7 +330,7 @@ listener(void *arg)
     (void)arg;
     for (;;) {
         uint32_t revents;
-        int conn_fd;
+        int conn_fd, rc;
         struct conn_args *a;
         xtc_pid_t pid;
 
@@ -338,12 +338,21 @@ listener(void *arg)
             != XTC_OK)
             break;
         /* Non-blocking accept: XTC_E_AGAIN when another wakeup took
-         * the connection first. */
-        if (xtc_net_accept(listen_fd, &conn_fd) != XTC_OK) continue;
+         * the connection first.  Any other error would recur on the
+         * next wakeup, so the listener stops instead of spinning. */
+        rc = xtc_net_accept(listen_fd, &conn_fd);
+        if (rc == XTC_E_AGAIN) continue;
+        if (rc != XTC_OK) break;
 
-        a = malloc(sizeof *a);
+        if ((a = malloc(sizeof *a)) == NULL) {
+            xtc_net_close(conn_fd);
+            continue;
+        }
         a->fd = conn_fd;
-        xtc_proc_spawn(loop, conn_proc, a, NULL, &pid);
+        if (xtc_proc_spawn(loop, conn_proc, a, NULL, &pid) != XTC_OK) {
+            xtc_net_close(conn_fd);
+            free(a);
+        }
     }
 }
 
@@ -363,7 +372,7 @@ main(void)
     printf("echo server listening on 127.0.0.1:7777\n");
     xtc_loop_run(loop);
     xtc_loop_destroy(loop);
-    close(listen_fd);
+    xtc_net_close(listen_fd);
     return 0;
 }
 ```
@@ -392,7 +401,7 @@ What's happening:
 A thousand idle connections cost a thousand sleeping fibers -- each
 proc reserves a fiber stack (64 KiB of address space by default, see
 `xtc_runtime_set_stack_size`, of which the kernel backs only the pages
-it touches), and no thread per connection.  When a connection
+it touches), and there is no thread per connection.  When a connection
 becomes active, only its proc wakes; others stay asleep.  This is
 the xtc model in one screen of code.
 
