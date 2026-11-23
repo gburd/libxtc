@@ -1344,7 +1344,9 @@ usdt_convoy: $(srcdir)/../examples/15_usdt/convoy.c $(STATIC_LIB)
 # suite -- RESP parser, loopback round-trips, property tests, the
 # budget tests that MEASURE each --max-* cap on a real forked server
 # (RSS, affinity mask, reply rate), and the --persist restart tests (a
-# real server restarted, cleanly and by SIGKILL, mid-test).  Before this target nothing built or
+# real server restarted, cleanly and by SIGKILL, mid-test, and killed
+# in the middle of a log write through rexis_killwrite.so, which they
+# LD_PRELOAD into the server).  Before this target nothing built or
 # ran any of it.  Everything is built HERE, in the build dir, from the
 # sources; nothing is written into the source tree.  The servers bind
 # kernel-chosen free loopback ports (05_rexis/test/rexis_harness.h), so
@@ -1368,7 +1370,7 @@ M99_NET    = test_rexis_loopback test_rexis_budgets test_rexis_pbt \
 	     test_rexis_restart
 REXIS_BINS = rexis-server-xtc rexis_test_bitcask rexis_test_metrics \
 	     rexis_test_db_persist rexis_test_db_table test_resp_parser \
-	     $(M99_NET)
+	     rexis_killwrite.so $(M99_NET)
 
 check-rexis: $(REXIS_BINS)
 	@set -e; \
@@ -1420,6 +1422,10 @@ test_resp_parser: $(M99_DIR)/test_resp_parser.c $(M99_DIR)/munit.c \
 	$(CC) $(CFLAGS) $(CPPFLAGS) -D_GNU_SOURCE -I$(M99_DIR) -o $@ \
 		$(M99_DIR)/test_resp_parser.c $(M99_DIR)/munit.c \
 		$(REXIS_DIR)/proto.c $(LDFLAGS)
+
+rexis_killwrite.so: $(M99_DIR)/rexis_killwrite.c
+	$(CC) $(CFLAGS) $(CPPFLAGS) -shared -fPIC -o $@ \
+		$(M99_DIR)/rexis_killwrite.c -ldl
 
 $(M99_NET): %: $(M99_DIR)/%.c $(M99_DIR)/munit.c $(M99_DIR)/rexis_harness.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -D_GNU_SOURCE -I$(M99_DIR) -o $@ \
