@@ -52,9 +52,9 @@ extra:
   `scripts/dst-corpus.sh` replays the whole corpus on every CI push.
 - **The right metric is bug-detection latency, not coverage.** A
   bug-injection harness (`scripts/dst-bug-inject.sh`) plants each of
-  the known safety bugs listed in `src/inc/xtc_dst_inject.h` -- a
+  the known safety bugs listed in `src/inc/xtc_dst_inject.h` (a
   dropped wakeup, a skipped fsync, a conflicting lock grant, and about
-  fifty more -- and asserts that the simulator *catches* each one, for
+  fifty more) and asserts that the simulator *catches* each one, for
   the reason it was planted, within a seed budget (64 by default). A
   planted bug the sweep misses is a hole in DST coverage and fails the
   build. This is
