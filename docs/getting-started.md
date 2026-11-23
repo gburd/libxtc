@@ -75,6 +75,7 @@ This drops `libxtc.a` into `/usr/local/lib`, headers into
 The simplest possible xtc program: spawn a task, run the loop,
 exit.  Save as `hello.c`:
 
+<!-- snippet: 24_gs_hello.c -->
 ```c
 #include <stdio.h>
 #include <xtc.h>
@@ -111,7 +112,12 @@ cc hello.c $(pkg-config --cflags --libs --static xtc) -o hello
 the TLS library); a bare `-lxtc -lpthread` fails to link when the build
 found either.  The examples below compile the same way.
 
-Output: `hello from a task`.
+Output:
+
+<!-- output: 24_gs_hello.out -->
+```
+hello from a task
+```
 
 This isn't much yet -- a task that runs once and exits.  Tasks are
 the lowest level of "something the loop runs"; for real programs
@@ -123,6 +129,7 @@ and a mailbox.
 A process (`xtc_proc`) is a fiber with a mailbox.  Two processes
 communicate by sending messages.  Save as `pingpong.c`:
 
+<!-- snippet: 25_gs_pingpong.c -->
 ```c
 #include <stdio.h>
 #include <stdlib.h>
@@ -181,6 +188,7 @@ cc pingpong.c $(pkg-config --cflags --libs --static xtc) -o pingpong
 
 Output:
 
+<!-- output: 25_gs_pingpong.out -->
 ```
 ponger got: ping #0
 ponger got: ping #1
@@ -199,6 +207,7 @@ A process can receive messages selectively -- skip messages that
 don't match a predicate, leaving them in the mailbox for later.
 This is the BEAM's `receive` semantics.  Save as `selective.c`:
 
+<!-- snippet: 26_gs_selective.c -->
 ```c
 #include <stdio.h>
 #include <stdlib.h>
@@ -254,6 +263,7 @@ main(void)
 
 Output:
 
+<!-- output: 26_gs_selective.out -->
 ```
 priority: PRIORITY:urgent!
 normal:   first
@@ -271,6 +281,7 @@ This is the meat of why you'd use xtc: writing a server that handles
 many concurrent connections with predictable latency.  Save as
 `echo_server.c`:
 
+<!-- snippet: 27_gs_echo_server.c -->
 ```c
 #include <stdio.h>
 #include <stdlib.h>

@@ -93,6 +93,7 @@ start with libxtc, it's exqusite!"** -everyone who uses it.
 
 ## A 30-second taste
 
+<!-- snippet: 00_readme_taste.c -->
 ```c
 #include <stdio.h>
 
@@ -148,6 +149,12 @@ main(void)
 Compile against the installed library and run:
 ```sh
 cc my.c $(pkg-config --cflags --libs --static xtc) -o my && ./my
+```
+
+It prints:
+
+<!-- output: 00_readme_taste.out -->
+```
 got 5 bytes from worker
 ```
 
