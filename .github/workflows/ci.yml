@@ -338,40 +338,26 @@ jobs:
                exit 1 ;;
           esac
 
-      - name: ADVISORY banner -- this job cannot fail the workflow
-        # continue-on-error above means a property FAILURE still reports
-        # the job green, silently turning "the 36 properties pass" into
-        # "nobody knows".  This step always runs and states the real
-        # outcome as a run-summary entry AND a GitHub annotation, so an
-        # advisory failure is impossible to mistake for coverage.  It
-        # deliberately does not exit nonzero: non-blocking is the existing
-        # documented decision (see the job comment); this only makes the
-        # status unmistakable.
+      - name: Summary of the property tier
+        # States the outcome in the run summary.  The job gates: a failing
+        # props step above already fails it, so this step only reports and
+        # always exits 0.
         if: always()
         run: |
           st='${{ steps.props.outcome }}'
           if [ "$st" = success ]; then
-            echo "[hegel] ADVISORY tier PASSED: the property suites ran and passed."
+            echo "[hegel] property tier PASSED: the property suites ran and passed."
             {
-              echo "### hegel property tier: PASSED (advisory, non-blocking)"
+              echo "### hegel property tier: PASSED"
               echo "All property suites ran, no SKIPs."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          echo "#########################################################"
-          echo "#  hegel property tier FAILED (outcome=$st)"
-          echo "#  This job is ADVISORY (continue-on-error: true), so the"
-          echo "#  workflow is GREEN while these properties are"
-          echo "#  UNVERIFIED.  A green run does NOT mean the properties"
-          echo "#  hold.  See the job comment in ci.yml."
-          echo "#########################################################"
-          echo "::warning title=hegel property tier FAILED (advisory, non-blocking)::The property suites did not pass (outcome=$st). CI is green ANYWAY because this job is continue-on-error. Those properties are UNVERIFIED by this run -- do not read the green check as property coverage."
+          echo "[hegel] property tier FAILED (outcome=$st); this job fails the workflow."
           {
-            echo "### hegel property tier: FAILED (advisory, non-blocking)"
+            echo "### hegel property tier: FAILED"
             echo ""
-            echo "The workflow is green ANYWAY because this job is"
-            echo "continue-on-error.  The properties are UNVERIFIED by this"
-            echo "run -- do not read the green check as property coverage."
+            echo "The props step's outcome was $st; see its log."
           } >> "$GITHUB_STEP_SUMMARY"
 
   sim-dst:
