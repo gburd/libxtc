@@ -89,8 +89,9 @@ typedef enum xtc_err {
 } xtc_err_t;
 
 /*
- * The system-error band (2.2).  A call that fails with an operating
- * system error the XTC_E_* codes do not name returns XTC_E_SYS(errno):
+ * The system-error band (2.2).  xtc_aio and xtc_iosched return
+ * XTC_E_SYS(errno) for an operating system error the XTC_E_* codes do
+ * not name (the rest of the library folds those to XTC_E_IO):
  * XTC_E_SYS_BASE minus the errno, so the band lies below every XTC_E_*
  * code and a raw negative errno (which collides with them: -EIO is
  * XTC_E_AGAIN, -EBADF is XTC_E_VERSION) never leaves the library.
