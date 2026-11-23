@@ -85,8 +85,9 @@ Levels:
 .Dv XTC_LOG_WARN ,
 .Dv XTC_LOG_ERROR ,
 .Dv XTC_LOG_FATAL .
-A configurable global level filter elides cheaper records before
-formatting.
+Each logger's level floor
+.Pq Va opts.floor , Fn xtc_log_set_floor ; default Dv XTC_LOG_INFO
+drops cheaper records before formatting.
 .Pp
 .Sy Sinks
 .Pq Va opts.sink_fd
