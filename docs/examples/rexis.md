@@ -14,7 +14,7 @@ lede: >-
 
 Source:
 [`examples/05_rexis/`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/05_rexis)
-(~4,500 lines of C, including tests).
+(about 11,500 lines of C, including tests).
 
 ## The software that inspired it
 
@@ -69,14 +69,14 @@ each with its own parking reader/writer latch (`xtc_arwlock`). A command
 latches only its keys' shards, so writes to different keys run in
 parallel. SET/s with valkey-benchmark (`-c 200 --threads 8 -P 16`, 32 B,
 1M keys) on a two-socket 64-core x86-64 bare-metal host, libxtc
-2.1.1-37, median of 3 runs:
+2.1.1-37 (`a2134a08`), 2026-11, median of 3 runs:
 
 | `--loops` | 1 | 2 | 4 | 8 | 16 | 32 |
 |---|---:|---:|---:|---:|---:|---:|
 | SET/s | 0.78M | 1.14M | 1.75M | 2.53M | 3.20M | 3.50M |
 
 With one latch for the whole keyspace (an earlier build, on a 32-vCPU
-host), `--loops=4` gave 0.14M/s against one loop's 0.89M/s. Past 16
+host, 2026-10), `--loops=4` gave 0.14M/s against one loop's 0.89M/s. Past 16
 loops every SET still takes its shard's write latch, and 16 more loops
 buy 9%. The same client against DragonFly gives 0.38M, 0.72M, 1.36M,
 2.57M, 4.33M and 4.30M, and against Valkey at most 0.87M: rexis leads up
@@ -93,8 +93,9 @@ reply. libxtc 2.0's pid has a 32-bit slot (see
 and the [known issues]({{ '/reference/known-issues/' | relative_url }})),
 so the per-loop client cap is a configured number (`--loop-clients`), and
 ONE loop held 100,000 idle connections (7.3 KB of RSS each, 5 CPU ticks
-per 10 s idle, PING answered) on one 32-vCPU host, where the 1.x build
-refused every client past 65,520. A client over any limit gets Redis's
+per 10 s idle, PING answered) on one 32-vCPU host (2026-10-27, the 2.0
+development tree), where the 1.x build refused every client past
+65,520. A client over any limit gets Redis's
 `-ERR max number of clients reached`.
 
 An idle connection must also cost nothing while it waits. Each connection
@@ -106,13 +107,14 @@ no deadline, and shutdown wakes each one explicitly. That costs one
 second. Nor does it hold buffers it has not used: the 16 KiB query and
 output buffers are allocated by the first read and the first reply, so a
 connection that has sent nothing costs about 7.3 KB of RSS (15.7 KB when
-both were allocated at accept; 20,000 idle connections, `--loops=2`).
+both were allocated at accept; 20,000 idle connections, `--loops=2`,
+2026-10).
 
 ## How it works
 
 - **`main.c`** stands up an `xtc_app` with a supervised TCP listener.
-- **`conn.c`** -- the listener accepts a socket and spawns one
-  connection process per client (`xtc_proc_spawn`). The process loops:
+- **`conn.c`** -- the listener (in `main.c`) accepts a socket and spawns
+  one connection process per client (`xtc_proc_spawn`). The process loops:
   read from the socket (parking the fiber via the reactor when the
   socket is not ready), parse a RESP command, apply it, write the reply.
   The connection's teardown (close the socket, free both buffers, leave
@@ -150,8 +152,8 @@ both were allocated at accept; 20,000 idle connections, `--loops=2`).
   rejected: an RCU read section must be short, and a slow client can
   hold a reply for seconds. A planted bug that skips the reference is
   caught by `test_rexis_loopback` and the PBT pipeline property as wrong
-  bytes, and as a heap-use-after-free under ASan. Result: 64 KiB GETs
-  +35%, 1 KiB unchanged.
+  bytes, and as a heap-use-after-free under ASan. Result (2026-10, one
+  loop, memtier GET-only): 64 KiB GETs +35%, 1 KiB unchanged.
 - **Output backpressure.** A reply is built into a per-connection output
   buffer that grows up to `--max-output`; a reply that would pass it is
   replaced *whole* by an error (a truncated reply would desynchronize
@@ -164,9 +166,10 @@ both were allocated at accept; 20,000 idle connections, `--loops=2`).
 
 ## How libxtc concepts are applied
 
-- **Supervision.** The listener runs under a supervisor; a connection
-  proc that crashes on a malformed command is contained and reaped
-  without touching other clients or the keyspace.
+- **Supervision.** The listener runs under a supervisor.  Each
+  connection is its own proc, not supervised: a malformed command gets
+  an error and closes that connection only, without touching other
+  clients or the keyspace.
 - **Data sharing.** Connection state (parse buffer, in-flight command) is
   private to each conn proc -- shared-nothing. The keyspace is the one
   deliberately shared structure; rexis keeps its sharing model simple and
@@ -187,9 +190,9 @@ both were allocated at accept; 20,000 idle connections, `--loops=2`).
 - **A path to more cores** without turning atomic-by-single-thread into
   a lock nightmare: the keyspace is the one shared structure, and it can
   be guarded by a single primitive (or sharded) rather than by ad-hoc
-  locking spread across the codebase. rexis itself still runs one loop;
-  spreading the connection processes over an executor is the step not
-  taken.
+  locking spread across the codebase. `--loops=N` takes that step: the
+  connection processes spread over an executor and the keyspace is cut
+  into 64 latched shards.
 - **Backpressure and budgets are first-class** (`xtc_res`), not bolted
   on.
 
@@ -198,9 +201,9 @@ both were allocated at accept; 20,000 idle connections, `--loops=2`).
 - **The shared keyspace is the real concurrency question.** Redis dodges
   it by being single-threaded; rexis has to decide how concurrent
   connection processes see the keyspace. The example keeps this simple
-  (a single owning structure) rather than pretending it solved
-  distributed sharding -- see the code for exactly where the line is
-  drawn, and
+  (one table on one loop; 64 shards, each behind a reader/writer latch,
+  with `--loops`) rather than pretending it solved shard-per-thread
+  ownership -- see the code for exactly where the line is drawn, and
   [rexis vs DragonFly and Valkey]({{ '/examples/rexis-vs-dragonfly/' | relative_url }})
   for the shard-per-loop design that would take it to many cores.
 - **A table that does not grow is a time bomb.** Until 2026-10 the
