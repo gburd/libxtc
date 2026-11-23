@@ -37,13 +37,13 @@ interleave hundreds of thousands of fibers.
 {: .rationale }
 > **Why hand-written `fcontext` assembly?** The switch is the hottest
 > path in the whole library. The x86-64 System V switch measures about
-> 4.4 ns (on a two-socket x86-64 host). `ucontext` (the portable
+> 4.4 ns (on a two-socket x86-64 host).  `ucontext` (the portable
 > substrate) also saves the signal mask with a syscall on every switch --
 > roughly an order of magnitude slower. libxtc ships assembly for x86-64,
-> AArch64, ppc64le, riscv64, arm, s390x, and sparc64. A build uses it by
+> AArch64, ppc64le, riscv64, arm, s390x, and sparc64.  A build uses it by
 > default on Linux x86-64 and AArch64 with glibc, on Apple Silicon, and
 > on musl; other targets default to `ucontext` (`--with-coro=fctx`
-> selects the assembly), and Windows uses Win32 fibers. See
+> selects the assembly), and Windows uses Win32 fibers.  See
 > [Architecture]({{ '/reference/architecture/' | relative_url }}) for the substrate matrix.
 
 ## The loop's job

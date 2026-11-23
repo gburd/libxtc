@@ -55,15 +55,15 @@ extra:
   the known safety bugs listed in `src/inc/xtc_dst_inject.h` (a
   dropped wakeup, a skipped fsync, a conflicting lock grant, and about
   fifty more) and asserts that the simulator *catches* each one, for
-  the reason it was planted, within a seed budget (64 by default). A
+  the reason it was planted, within a seed budget (64 by default).  A
   planted bug the sweep misses is a hole in DST coverage and fails the
-  build. This is
+  build.  This is
   exactly how FoundationDB and TigerBeetle back the claim "our simulator
   finds real bugs."
 - **Determinism is mechanically enforced.** A guard traps any use of the
   real clock, the environment, or the raw thread id from sim-reachable
   code, so a test cannot silently become non-deterministic; every sim
-  run proves its own determinism. The RNG is not trapped but
+  run proves its own determinism.  The RNG is not trapped but
   virtualized: an un-seeded draw takes the run's own seeded stream.
 
 ### Simulating your own application
@@ -112,10 +112,10 @@ failure to a minimal reproducer.
 
 libxtc uses [**Hegel**](https://hegel.dev), a property-based-testing
 library based on [Hypothesis](https://github.com/hypothesisworks/hypothesis),
-as a first-class testing tool. The PBT suite links
+as a first-class testing tool.  The PBT suite links
 [`libhegel`](https://github.com/hegeldev/hegel-rust), Hegel's in-process
 C-ABI library: generation and shrinking run inside the test binary, with
-no server. The `test/pbt/` suite states 39 properties in 18 suites
+no server.  The `test/pbt/` suite states 39 properties in 18 suites
 across the layers:
 
 - deque and run queue: a pop/steal race partitions the items, and every
@@ -128,11 +128,11 @@ across the layers:
   invariants under generated input.
 
 PBT is a build-time option (`--with-hegel`, found through pkg-config,
-or `--with-hegel=PREFIX`; `nix develop` provides libhegel). The same
+or `--with-hegel=PREFIX`; `nix develop` provides libhegel).  The same
 test files compile without it and each suite prints a loud SKIP naming
 how many properties went unverified, so a green run without the option
-says nothing about them. CI runs the tier with libhegel in its own job,
-which gates the workflow. The commitment to PBT is recorded in
+says nothing about them.  CI runs the tier with libhegel in its own job,
+which gates the workflow.  The commitment to PBT is recorded in
 [ADR 0002](https://codeberg.org/gregburd/libxtc/src/branch/main/docs/adr/0002-hegel-pbt-first-class.md).
 
 ## Sanitizers

@@ -311,5 +311,5 @@ of reading a missing argument off the stack.
 Both calls share one record path: the same level floor, ring, sink and drop
 count. `xtc_logf` writes to the default logger, `xtc_logf_to(log, ...)` to a
 given one. The macros are C only: a C++ file that includes `xtc_log.h` gets
-`xtc_log_write` but not `xtc_logf`. See [`xtc_log(3)`]({{ '/reference/api/xtc_log/' | relative_url }})
+`xtc_log_write` but not `xtc_logf`.  See [`xtc_log(3)`]({{ '/reference/api/xtc_log/' | relative_url }})
 for the full list of argument types and specs.

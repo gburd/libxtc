@@ -74,7 +74,7 @@ Three objects and four calls carry the whole program.
 `xtc_loop_run`, `xtc_loop_destroy`). An `xtc_loop_t` is an event loop: a
 run queue of ready fibers plus an OS I/O poller (io_uring, epoll,
 kqueue, IOCP, event ports, poll, or select, chosen at configure
-time). `xtc_loop_run` drives it,
+time).  `xtc_loop_run` drives it,
 resuming ready fibers one at a time on this thread until there is no
 more work, then returns.
 
