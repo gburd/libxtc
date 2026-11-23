@@ -577,6 +577,19 @@ snippet does not demonstrate is a release blocker, exactly like the API
 discipline gate.  Never paste code into a doc page that is not backed by
 a tested snippet file.
 
+The gate enforces this on the pages too (docs/**/*.md and README.md).
+Include, don't paste: a program goes in docs/_includes/snippets/NN_name.c
+and the page uses `{% include snippet.html file=... %}`; the two pages a
+forge shows as plain Markdown (README.md, docs/getting-started.md) carry
+a `<!-- snippet: NN_name.c -->` line above a copy, which must equal the
+file's "full" region.  Every other ```c block needs `<!-- fragment -->` on
+the line above it, or the gate fails naming the page and line.  Output a
+page shows lives in NN_name.out beside its snippet (`{% include
+output.html file=... %}`, or `<!-- output: NN_name.out -->` above a copy);
+the gate runs the snippet and diffs it against the file, so the real
+output wins.  The normalizer in the gate rewrites only a value the page
+says varies, one commented rule per value.
+
 DEFERRED (revisit later, do NOT attempt now): the in-page live,
 editable, re-runnable WASM playground, and making WASM a tested libxtc
 target.  Recorded 2026-07; explicitly out of scope for the current docs
