@@ -78,7 +78,8 @@ XTC_API int xtc_trace_enable(int on);
 XTC_API int xtc_trace_reset(void);
 
 /* Visit buffered records in HLC-ascending order.  Returns the
- * number visited, or a negative XTC_E_* on error. */
+ * number of buffered records (the callback may stop the walk before it
+ * has seen them all), or a negative XTC_E_* on error. */
 XTC_API int xtc_trace_dump(xtc_trace_fn cb, void *user);
 
 /* The current global HLC value (for tests and display). */
@@ -138,7 +139,8 @@ typedef int (*xtc_causal_fn)(const xtc_causal_rec_t *rec, void *user);
 XTC_API int xtc_trace_causal_enable(int on);
 
 /* Visit the causal records of proc `pid` oldest-first (the fiber's
- * recent park/resume chain).  Returns the number visited, XTC_E_NOTFOUND
+ * recent park/resume chain).  Returns the number of records in the ring
+ * (even when the callback stops early), XTC_E_NOTFOUND
  * if no live proc has that pid, or XTC_E_INVAL on a NULL callback.  When
  * the trace is disabled a live proc simply has an empty ring (0). */
 XTC_API int xtc_trace_causal_dump(xtc_pid_t pid, xtc_causal_fn cb, void *user);
