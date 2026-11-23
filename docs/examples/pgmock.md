@@ -14,7 +14,7 @@ lede: >-
 
 Source:
 [`examples/09_pgmock/`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/09_pgmock)
-(~680 lines of C).
+(about 830 lines of C).
 
 ## The software that inspired it
 
@@ -63,10 +63,14 @@ the postmaster's accept loop becomes a supervised process.
 ## How it works
 
 - **`main.c` / `listener.c`** -- the postmaster process accepts TCP
-  connections and spawns one backend process per client.
+  (or Unix-socket) connections and spawns one backend process per
+  client.
 - **`backend.c`** -- a hand-rolled minimal PostgreSQL v3 wire handshake
-  (startup message, authentication-OK, parameter status, ready-for-query)
-  and a canned response to `SELECT 1`.
+  (startup message, authentication-OK, parameter status, backend key
+  data, ready-for-query) and a canned one-row `1` for any simple query.
+  It answers only a plain v3 startup.  Over TCP, psql's default sslmode
+  (prefer) opens with an SSLRequest, which the mock closes, so psql
+  needs `sslmode=disable` there; over a Unix socket it sends none.
 - **`pg_latch.c`** -- a shim mapping PostgreSQL's `Latch` /
   `WaitLatchOrSocket` semantics onto `xtc_proc_wait_fd`, which is the
   seam a real adapter would use.
@@ -121,8 +125,8 @@ protocol closely enough to prove the multiplexing and waiting model.
 
 ```sh
 cd examples/09_pgmock && make XTC_BUILD=../../build
-./pgmock &
-psql -h 127.0.0.1 -p <port> -c 'SELECT 1'   # minimal handshake + SELECT 1
+./pgmock-server -h 127.0.0.1 -p 15442 &
+PGSSLMODE=disable psql -h 127.0.0.1 -p 15442 -c 'SELECT 1'
 ```
 
 ---

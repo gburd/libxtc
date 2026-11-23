@@ -126,8 +126,9 @@ make check-jobq-sweep JOBQ_SEEDS=100000       # a longer sweep
 `make check` runs `check-jobq`: the service once on threads, then 300
 seeds, each twice, in about a second.  A native build makes its own
 simulation library in `jobq-sim/` the first time.  A sweep of 20,000
-seeds passes, with 92,763 kills and 32,210 network cuts.  The store
-fenced a stale write in 10,660 of those seeds.
+seeds passes, with 92,688 kills and 32,194 network cuts, and the store
+fenced a stale write in 10,705 of those seeds (2026-11-22, libxtc 2.3
+development; the counts move when libxtc's own buggify sites change).
 
 ## What it catches
 
@@ -137,9 +138,9 @@ fail the 300-seed run:
 
 | plant | the bug | first failing seed | reported as |
 |---|---|---|---|
-| 1 | the store accepts a write without the fence | 3 | FENCE |
+| 1 | the store accepts a write without the fence | 2 | FENCE |
 | 2 | the queue acknowledges a submit before its journal write | 7 | ACKED-LOST |
-| 3 | a restarted queue reuses its epoch, so tokens repeat | 3 | DOUBLE-EXEC |
+| 3 | a restarted queue reuses its epoch, so tokens repeat | 2 | DOUBLE-EXEC |
 
 A failure prints the seed and the command that replays it.  `-v` prints
 the run's trace, so the failure reads as a story with timestamps:

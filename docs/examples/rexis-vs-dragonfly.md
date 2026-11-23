@@ -62,8 +62,8 @@ DragonFly's shard-per-thread design: nothing owns a shard.
 
 ## Measurements
 
-One two-socket 64-core x86-64 bare-metal host (Ice Lake, 128
-threads, 1 TiB), Debian 13, kernel 6.12, loopback. The OS was tuned for
+Measured 2026-11-05 on one two-socket 64-core x86-64 bare-metal host
+(128 threads, 1 TiB), Debian 13, kernel 6.12, loopback.  The OS was tuned for
 measurement: the performance governor, the C1E and C6 idle states
 disabled, transparent hugepages and NUMA balancing off, irqbalance
 stopped. The host has two NUMA nodes. Each server ran on node 0, first
@@ -133,7 +133,8 @@ The result says less than it seems to:
   [rexis page]({{ '/examples/rexis/' | relative_url }}) has the curve.
 
 With one server thread every server is about 100k ops/s here, against
-140-219k on the one-node host of the earlier study. The cause is the
+140-219k on the one-node 64-vCPU host of the earlier study (2026-10-22,
+libxtc 1.59 development, v1.58.0-91).  The cause is the
 socket crossing. With the load generator on node 0 instead (the
 server's own node), the same one-thread runs give:
 

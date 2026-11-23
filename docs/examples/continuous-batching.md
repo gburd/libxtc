@@ -93,7 +93,7 @@ for the build contract and command-line options.
 `--self-test` also runs the restart mode. It checks exact scalar results, one terminal callback per accepted
 request, cancellation, capacity retry, BLOCKED/resume, heartbeat progress,
 released resources, and per-group completion order. Success ends with
-`continuous batching self-test: PASS (4 mode/policy combinations)`.
+`continuous batching self-test: PASS (4 mode/policy combinations, supervised restart)`.
 These checks remain enabled with `NDEBUG` and use no timing thresholds.
 Feature-enabled builds run the self-test through root `make check` (or
 `make check-continuous-batching`). The scheduler-policy CI job also runs it;

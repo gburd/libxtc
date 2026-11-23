@@ -4,7 +4,7 @@ parent: Examples
 nav_order: 3
 permalink: /examples/kaka/
 lede: >-
-  A partitioned, append-only log broker modelled on Kafka -- with credit-based backpressure and a lock-free offset coordinator.
+  A partitioned, append-only log broker modelled on Kafka, with TCP backpressure and a lock-free offset coordinator.
 ---
 
 1. TOC
@@ -14,7 +14,7 @@ lede: >-
 
 Source:
 [`examples/07_kaka/`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/07_kaka)
-(~2,800 lines of C, including tests).
+(about 5,500 lines of C, including tests).
 
 ## The software that inspired it
 
@@ -38,7 +38,7 @@ sustained backpressure and per-partition ordering.
 
 ```mermaid
 flowchart LR
-    Prod["producers"] -->|append + credit| Part
+    Prod["producers"] -->|append, one in flight| Part
     subgraph broker["kaka broker (libxtc procs)"]
         Part["partition proc<br/>(owns the log,<br/>enforces order)"]
         Part --> Seg[("segmented<br/>on-disk log")]
@@ -62,8 +62,9 @@ expressed with lightweight processes instead of OS threads.
 
 ## How it works
 
-- **`main.c`** -- the listener: `xtc_net_accept`, with a 10 ms back-off
-  when the process is out of descriptors (the broker keeps running and
+- **`main.c`**: the listener, `xtc_net_accept`, parking on the socket
+  when there is nothing to accept and backing off 10 ms when the process
+  is out of descriptors (the broker keeps running and
   serves again once fds free up). SIGTERM/SIGINT stop accepting and
   drain the broker.
 - **`broker.c`** -- one process per connection, one per partition, and
@@ -105,15 +106,19 @@ to the record and reads with `xtc_aio_pread`, so the partition proc parks
 while the kernel works and the loop keeps serving other connections. A
 large fetch is built 1 MiB at a time: after each slice the partition
 re-queues the rest of the request to itself and yields, so produces to
-the same partition interleave with it. Measured on a 32-vCPU host (150,000
-x 1 KB records, broker restarted so every read is cold): a 64 MiB FETCH
+the same partition interleave with it.  Measured 2026-10-13 (v1.55.0
+against the fix in `4313594a`, v1.55.0-2), on a 32-vCPU host (150,000 x
+1 KB records, broker restarted so every read is cold): a 64 MiB FETCH
 went from 8.6 s to 0.47 s, and a PRODUCE to another topic issued during
 it went from 8.0 s to 1 ms.
 
-- **Backpressure** is **credit-based**: a producer gets a bounded credit
-  window and takes a credit per PRODUCE; each ack (sent only once the
-  record is durable) returns one. The in-process test drives budget 4
-  against 200 records and confirms peak in-flight stays at 4.
+- **Backpressure** comes from the connection: its proc has one request
+  in flight and reads the next frame only after it has written the
+  reply, which (in the default mode) is sent only once the record is
+  durable.  A producer that sends faster than the partition acks fills
+  its socket and is slowed by TCP flow control.  A client that wants
+  several requests in flight bounds them with a window; `broker_credit_selftest` shows the shape
+  with `xtc_credit` (budget 4 against 200 records, peak in-flight 4).
 
 ## How libxtc concepts are applied
 
@@ -130,9 +135,10 @@ it went from 8.0 s to 1 ms.
 - **Locking.** None on the hot paths. The coordinator being the sole
   writer of offsets means the busiest coordination point in a log broker
   has no lock at all.
-- **Backpressure.** Credit accounting lives in each partition proc's
-  private state; a producer fiber parks when out of credit and resumes
-  when credit returns -- flow control with no condition variables.
+- **Backpressure.** A connection proc parks on its partition's reply
+  and does not read its socket meanwhile, so TCP carries the
+  backpressure to the producer: flow control with no condition
+  variables.
 
 ## Advantages of building it on libxtc
 
@@ -141,10 +147,9 @@ it went from 8.0 s to 1 ms.
 - **Lock-free offsets.** The coordinator being the sole writer means the
   hottest coordination point in a log broker -- offset commit -- has no
   contention primitive at all.
-- **Backpressure is natural.** Credit accounting lives in the partition
-  process's private state; the producer fiber simply parks when it is out
-  of credit and resumes when credit returns -- no condition-variable
-  choreography.
+- **Backpressure is natural.** The connection's fiber simply parks until
+  its reply comes back, and the unread socket throttles the producer --
+  no condition-variable choreography.
 
 ## Challenges (warts and all)
 
@@ -157,15 +162,16 @@ it went from 8.0 s to 1 ms.
   and truncating on a torn tail are the fiddly parts. A segment is synced
   before the next one is created, so recovery CRC-checks only the newest
   segment and truncates its torn tail; a defect in an older segment fails
-  the partition open instead of silently renumbering records. The
-  crash test kills the broker with SIGKILL mid-flood 20 times and checks
-  every acked record is present after each restart.
+  the partition open instead of silently renumbering records.  When the
+  durable ack went in (2026-10-13, `4313594a`, the fix round for the 1.55
+  review), a crash harness killed the broker with SIGKILL mid-flood 20
+  times and found every acked record present after each restart.  That
+  harness is not shipped; `make soak`
+  (8 producers and 8 consumers over TCP, every offset and byte checked)
+  and `make soak-plant` are.
 - **No retention by time, no compaction.** Retention is by size only
   (`--retention-bytes`, off by default); a consumer that asks for an
   offset that has been deleted gets records from the oldest one kept.
-- **Connections are not reclaimed across very long uptimes.** kaka spawns
-  one proc per connection; see the runtime's KNOWN_ISSUES entry on proc
-  reclamation.
 
 ## Run it
 

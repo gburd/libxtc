@@ -14,7 +14,7 @@ lede: >-
 
 Source:
 [`examples/08_tnt/echo.c`](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/08_tnt/echo.c)
-(~290 lines). The layer itself is a supported part of the library
+(about 370 lines).  The layer itself is a supported part of the library
 (`src/orc/tnt.c`,
 [`xtc_tnt(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_tnt.3));
 see the dedicated [Isolate layer (tnt / Tina)]({{ '/tnt/' | relative_url }})
@@ -70,10 +70,13 @@ no lock. An Isolate is a plain struct plus two functions:
 
 - **`echo_init`** records the client fd and submits the first `recv`,
   returning `XTC_TNT_TRANSITION_WAIT_IO`.
-- **`echo_handler`** runs on each I/O completion: on a read it echoes the
-  bytes back and submits the next `recv`; on error it returns a *crash*
-  transition (let it crash), and the scheduler reclaims the Isolate's
-  arena slot and generational handle.
+- **`echo_handler`** runs on each I/O completion: on a read it sends the
+  received buffer straight back (`xtc_tnt_recv_take` and
+  `xtc_tnt_io_send_owned`, no copy), and when the send completes it
+  submits the next `recv`.  When the peer closes, it submits a close and
+  returns *done* once the close completes; if it cannot stage the send,
+  it returns a *crash* transition (let it crash).  Either way the
+  scheduler reclaims the Isolate's arena slot and bumps its generation.
 
 The scheduler batches Isolates by type in their arena, references them by
 generational handle (so a stale handle to a reclaimed slot is caught),
@@ -121,7 +124,8 @@ and commits their staged I/O through libxtc's reactor.
 
 ```sh
 cd examples/08_tnt && make XTC_BUILD=../../build
-./echo &                        # TCP echo server
+./tnt_echo -p 7777 -s 2 &       # TCP echo server, 2 shards
+printf 'hello' | nc 127.0.0.1 7777
 ```
 
 ---
