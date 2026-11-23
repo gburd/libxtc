@@ -5,6 +5,12 @@
   upstream, and the tier had never actually run); **revived 2026-09-09** by
   porting the harness to `hegeldev/hegel-rust`'s in-process `libhegel`.
   All 36 properties now execute and pass.  See "Dormancy and revival".
+- **Status note (2026-11-22):** 39 properties in 18 suites (`pbt_qsel`,
+  built from the examples, added 3).  The "Build integration" section
+  below records the original hegel-c design: today `--with-hegel` finds
+  libhegel through pkg-config (or `--with-hegel=PREFIX`), and
+  `--with-hegel-server` and the libcbor/libz probe are gone.  The CI job
+  gates the workflow.
 - **Date:** 2026-05-25 (dormancy and revival recorded 2026-09-09).
 - **Supersedes:** --
 - **Related:** [`0001-test-first-claim-driven.md`](0001-test-first-claim-driven.md).

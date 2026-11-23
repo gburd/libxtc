@@ -1,6 +1,10 @@
 # ADR-0001: Test-first claim-driven development
 
-- **Status:** Accepted (M0).
+- **Status:** Accepted (M0).  Note (2026-11-22): the per-milestone
+  `Mn_CLAIMS.md` tables are no longer part of the repository.  Tests
+  still cite their claim IDs in their headers, and the docs' claims are
+  gated by the tests ARCHITECTURE.md lists (man coverage, the README
+  build, the doc snippets, the ABI page).
 - **Date:** 2026-05-25.
 - **Supersedes:** --
 
