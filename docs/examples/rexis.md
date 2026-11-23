@@ -129,6 +129,67 @@ both were allocated at accept; 20,000 idle connections, `--loops=2`,
   [Influences and lineage]({{ '/philosophy/influences/' | relative_url }}).
 - **`db.c`** holds the keyspace; **`expire.c`** handles TTLs;
   **`bitcask.c`** is the append-only persistence layer.
+- **Persistence (`--persist=DIR`).** Every command that changes the
+  keyspace appends one record to the log before its reply is sent, and
+  a restart reloads it, so the keyspace after a restart is the keyspace
+  as of the last acknowledged command.  The record is the key's
+  resulting state, not the command: INCR, DECR, INCRBY and DECRBY log
+  the new number, the list and hash commands the whole list or hash,
+  SET the value; DEL (or the LPOP, RPOP or HDEL that empties a key)
+  logs a tombstone, and FLUSHDB one flush record that ends every key
+  before it.  SET with EX or PX and EXPIRE log the absolute expiry on
+  the wall clock, and a key whose expiry has passed is not reloaded, so
+  a key that expired while the server was down does not come back.  The
+  record is written with `pwrite` and not fsync'd: an acknowledged
+  command survives the server crashing or being killed, but not a
+  power loss or a kernel crash.  A clean shutdown fsyncs, and there is
+  no per-command fsync option.  A write the log cannot take stops the
+  server before it answers.
+
+  One command is one record, written with one `pwritev`: a command
+  with several arguments (an `RPUSH` of five elements, an `HSET` of
+  three fields, a `DEL` of three keys, whose tombstones go in one batch
+  record) logs the key's state once, after the last argument, so a
+  crash in the middle of it brings back the keyspace before the command
+  or after it, never a part.  A TTL out of range is refused as Redis
+  refuses it, changing nothing: SET with an EX or PX of zero or less,
+  or with an expiry after April 2262 (the last instant signed 64-bit
+  nanoseconds can hold), answers `-ERR invalid expire time in 'set'
+  command`; EXPIRE past April 2262, or below INT64_MIN / 1000, answers
+  the same for `'expire'`; and any other EXPIRE of zero or less
+  deletes the key.
+
+  Every record's header carries its own checksum over its lengths, so
+  a damaged length is never taken for a torn write.  The rule at
+  startup: a crash or kill -9 leaves a torn tail, which is cut off,
+  with a line on stderr; any other damage refuses the start, naming
+  the offset, rather than drop every write after it.  A cut or a
+  refusal is decided by a search, from the bad record's second byte to
+  the end of the file, for a whole record whose checksums match: if one
+  is found the start is refused, and if none is the file is cut at the
+  bad record.  A failed read or allocation during that search refuses
+  the start and leaves the file as it was.  So damage to the last
+  record is cut like a torn write, unless the record's own bytes hold
+  a valid record (a client can send one as a value), which refuses.  A
+  power loss is not a crash: the log is not fsync'd, so a power loss
+  can leave a hole of unwritten bytes.  It refuses the start and needs
+  an operator if a whole valid record follows it, and is cut like a
+  torn tail if none does.
+
+  A directory from an older rexis (`bitcask.data`) is converted to
+  `bitcask.v2` at the first start, in steps that a crash at any point
+  resumes.  The old log's headers have no checksum, so a record in it
+  that runs past the end of the file is cut only if no valid record
+  follows; otherwise the start is refused and the old log is kept as
+  it was.  A leftover `bitcask.compact` (a merge cut short by a crash)
+  is removed at the start.  An older binary cannot read a converted
+  directory: it starts empty and leaves `bitcask.v2` alone, though it
+  creates an empty `bitcask.data`.  The next start removes that file
+  with a warning, and refuses to start if it holds records next to
+  `bitcask.v2`.  The
+  [README](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/05_rexis/README.md)
+  has the details (the merge, the record format, and the test that
+  kills the server in the middle of a write).
 - **`metrics.c`** exposes counters via
   [`xtc_stats(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_stats.3).
 - Memory is bounded by one
