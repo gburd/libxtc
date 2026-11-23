@@ -63,7 +63,9 @@ libxtc (2.3.0-1) unstable; urgency=medium
       nothing when one of its reads failed or a kill is pending.  A multi-row INSERT that loses a key
       race re-runs and reports UNIQUE, not a serialization failure.  The
       one-fsync commit holds while the statement's rows stay under
-      256 KiB.  A statement over 100,000 rows fails with "too many rows".
+      256 KiB.  An UPDATE, DELETE, INSERT ... SELECT or INSERT VALUES
+      over 100,000 rows fails with "too many rows"; INSERT VALUES had no
+      limit before.
       A DDL statement waiting on the schema lock at shutdown fails with
       "cannot change the schema: the storage engine is shutting down".
       New tests test_stmt_atomic and test_insert_race; test_crash_oracle

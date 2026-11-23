@@ -246,9 +246,9 @@ multi-row statements that take the same rows in opposite orders can
 deadlock; the youngest fails with `could not serialize access`.  The
 commit costs one fsync while the statement's buffered rows stay under
 256 KiB; a larger statement spills, and each spilled row then waits for
-its own fsync, about the speed of one commit per row.  A statement
-changes at most 100,000 rows; one over that fails with `too many rows`
-and changes nothing.
+its own fsync, about the speed of one commit per row.  An UPDATE,
+DELETE, INSERT ... SELECT or INSERT VALUES changes at most 100,000 rows;
+one over that fails with `too many rows` and changes nothing.
 
 | Level | Reads | Write-write conflicts | Selected by |
 | --- | --- | --- | --- |

@@ -89,18 +89,22 @@ earlier rows committed while the client was told the statement failed,
 so a client that retried applied it twice; a kill of the connection let
 the whole statement commit for a connection that never heard back.  Two
 such UPDATEs racing on one table left part of a statement reported as
-failed applied.  2.3.0 runs a multi-row
-autocommit statement as an implicit transaction that commits all of its
-rows or none, and a one-row statement commits nothing when one of its
-reads failed (a correlated subquery) or a kill is pending.  An INSERT that loses a key race to another session still
-reports `UNIQUE constraint failed`: the statement re-runs, and its key
-check finds the key.  A statement over the 100,000-row limit fails with
-`too many rows: ... the limit for one statement` (it said `unsupported
-SQL (native engine)`, or nothing).  `examples/06_sqlxtc/test_stmt_atomic`,
-`test_insert_race` and `test_crash_oracle`, and the DST tier
-`test_sim_sqlxtc_uniq` (planted bug 87), fail on 2.2.0.  The commit
-costs one fsync only while the statement's buffered rows stay under
-256 KiB; past that each spilled row waits for its own fsync.
+failed applied.  2.3.0 runs a multi-row autocommit statement as an
+implicit transaction that commits all of its rows or none, and a
+one-row statement commits nothing when one of its reads failed (a
+correlated subquery) or a kill is pending.  An INSERT that loses a key
+race to another session still reports `UNIQUE constraint failed`: the
+statement re-runs, and its key check finds the key.  An UPDATE, DELETE,
+INSERT ... SELECT or INSERT VALUES over the 100,000-row limit fails
+with `too many rows: ... the limit for one statement` (it said
+`unsupported SQL (native engine)`, or nothing; INSERT VALUES had no
+limit).  `examples/06_sqlxtc/test_stmt_atomic`, `test_insert_race` and
+`test_crash_oracle`, and the DST tier `test_sim_sqlxtc_uniq` (planted
+bug 87), check the behaviour, which 2.2.0 gets wrong; the tests
+themselves do not build against 2.2.0, since the read-fault hooks they
+arm are newer.  The commit costs one fsync only while the statement's
+buffered rows stay under 256 KiB; past that each spilled row waits for
+its own fsync.
 
 ## FIXED (2.3.0, 2.1.4): sqlxtc indexes missed long keys, and UNIQUE let them repeat
 
