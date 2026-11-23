@@ -1,18 +1,21 @@
 # Documentation publishing
 
 The `docs/` tree is a Jekyll site, plus a Doxygen API reference built
-from the public headers and copied into the site under `/api`.  Both
-Pages workflows run `docs/gen_api_reference.sh` (the man pages rendered
-with mandoc into `docs/reference/api/`), build the Jekyll site, build
-Doxygen, and check links with lychee, on every push to main that
-touches `src/inc/`, `docs/`, `man/` or `README.md`:
-
-  * Codeberg Pages: `.forgejo/workflows/pages.yml`, deployed with the
-    `codeberg.org/git-pages/action@v2` action.
+from the public headers and copied into the site under `/api`.  The
+Pages workflow runs `docs/gen_api_reference.sh` (the man pages rendered
+with mandoc into `docs/reference/api/`), builds the Jekyll site, builds
+Doxygen, and checks links with lychee, on every push to main that
+touches `src/inc/`, `docs/`, `man/`, or `README.md`:
 
   * GitHub Pages: `.github/workflows/pages.yml`, deployed with
     `actions/deploy-pages` (Pages enabled in the repository settings,
-    source GitHub Actions).  Broken links block the deploy.
+    source GitHub Actions).  Broken links block the deploy.  This is
+    the workflow that runs.
+
+  * Codeberg Pages: `.forgejo/workflows/pages.yml` does the same and
+    deploys with the `codeberg.org/git-pages/action@v2` action.  It is
+    kept but does not run: Codeberg disabled hosted Forgejo Actions for
+    this repository on 2026-10-30.
 
 For the Doxygen part the repository README is the main page, the
 markdown files listed in `docs/Doxyfile` are additional pages, and the
@@ -75,16 +78,15 @@ a separate build directory).
 `./dist/configure --prefix=PFX [--enable-shared] && make && make install`
 installs:
 
-  * `PFX/lib/libxtc.a`                  -- static library (always).
-  * `PFX/lib/libxtc.so.X.Y.Z`           -- shared library (only with
+  * `PFX/lib/libxtc.a`: the static library (always).
+  * `PFX/lib/libxtc.so.X.Y.Z`: the shared library (only with
     `--enable-shared`), plus the SONAME symlink `libxtc.so.MAJOR` and
     the bare-name link `libxtc.so`.
-  * `PFX/lib/pkgconfig/xtc.pc`          -- pkg-config metadata.
-  * `PFX/include/*.h`                   -- the public headers
-    (`LIB_HDRS_PUBLIC` in `dist/Makefile.in`) and the generated
-    `xtc_version.h`.
-  * `PFX/share/man/man3/*.3`, `man7/*.7`-- manual pages (not the
-    internal `__os_*.3` pages, since 2.1.3).
+  * `PFX/lib/pkgconfig/xtc.pc`: pkg-config metadata.
+  * `PFX/include/*.h`: the public headers (`LIB_HDRS_PUBLIC` in
+    `dist/Makefile.in`) and the generated `xtc_version.h`.
+  * `PFX/share/man/man3/*.3` and `man7/*.7`: the manual pages (not
+    the internal `__os_*.3` pages, since 2.1.3).
 
 `make uninstall` removes the same set.
 
@@ -182,9 +184,10 @@ together on the disclosure day.
 
 `debian/` builds two binary packages:
 
-  * `libxtc2`     -- the shared library (the package name carries the
+  * `libxtc2`: the shared library (the package name carries the
     SONAME major).
-  * `libxtc-dev`  -- header, static lib, pkg-config file, man pages.
+  * `libxtc-dev`: headers, static library, pkg-config file, and man
+    pages.
 
 `debian/rules` is debhelper-13 (`dh`) and overrides the `auto_*`
 steps to drive the out-of-source autoconf build with
