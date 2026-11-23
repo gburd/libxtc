@@ -232,7 +232,9 @@ other connections until COMMIT, and ROLLBACK discards only its own
 writes.
 
 A statement outside BEGIN ... COMMIT is atomic too.  One that writes a
-single row commits it directly.  One that writes more (a multi-row
+single row commits it directly, unless one of its reads failed (a
+correlated subquery that could not read its table): then it commits
+nothing.  One that writes more (a multi-row
 UPDATE, DELETE, INSERT ... SELECT or INSERT VALUES, or an UPDATE that
 moves a primary key) runs as an implicit transaction at SNAPSHOT
 isolation on the statement's own snapshot, and commits all of its rows

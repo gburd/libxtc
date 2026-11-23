@@ -91,8 +91,8 @@ the whole statement commit for a connection that never heard back.  Two
 such UPDATEs racing on one table left part of a statement reported as
 failed applied.  2.3.0 runs a multi-row
 autocommit statement as an implicit transaction that commits all of its
-rows or none, and a one-row statement with a kill pending commits
-nothing.  An INSERT that loses a key race to another session still
+rows or none, and a one-row statement commits nothing when one of its
+reads failed (a correlated subquery) or a kill is pending.  An INSERT that loses a key race to another session still
 reports `UNIQUE constraint failed`: the statement re-runs, and its key
 check finds the key.  A statement over the 100,000-row limit fails with
 `too many rows: ... the limit for one statement` (it said `unsupported

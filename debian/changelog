@@ -59,8 +59,8 @@ libxtc (2.3.0-1) unstable; urgency=medium
       is atomic.  It runs as an implicit transaction, so a failure
       partway (a read error, a UNIQUE violation, a row too large) or a
       kill of the connection leaves none of its rows; before, the rows
-      before the failure stayed committed.  A one-row statement with a
-      kill pending commits nothing.  A multi-row INSERT that loses a key
+      before the failure stayed committed.  A one-row statement commits
+      nothing when one of its reads failed or a kill is pending.  A multi-row INSERT that loses a key
       race re-runs and reports UNIQUE, not a serialization failure.  The
       one-fsync commit holds while the statement's rows stay under
       256 KiB.  A statement over 100,000 rows fails with "too many rows".
