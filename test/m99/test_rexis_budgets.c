@@ -62,7 +62,8 @@ static rexis_srv_t g_srv;
 	    (int)(sizeof a_ / sizeof a_[0])), ==, 0);                      \
 } while (0)
 
-#define STOP_CLEAN() munit_assert_int(rexis_stop(&g_srv), ==, 0)
+/* Stop a quiet server (stop_drained) and require a clean exit. */
+#define STOP_CLEAN() stop_drained()
 
 /* Send the whole command, read one reply chunk.  <= 0 on failure. */
 static int
@@ -93,6 +94,47 @@ info_field(int fd, const char *key)
 	if ((p = strstr(resp, key)) == NULL)
 		return -1;
 	return atoll(p + strlen(key));
+}
+
+/*
+ * Stop a quiet server.  A test that closes many connections and then
+ * stops at once makes the shutdown race the closes: the loop still holds
+ * the closed connections' poll completions, unread, when SIGTERM wakes
+ * every connection proc, and each proc's close then cancels a poll that
+ * already fired (an io_uring POLL_REMOVE that completes -ENOENT, which
+ * the io_uring gate reports as ERRORS).  So wait, from a fresh connection
+ * each try, until INFO counts that connection alone; the closes are then
+ * processed.  The probe stays open across the stop: its poll is still
+ * armed, so the shutdown's cancel finds it, where closing it first
+ * would leave one fired poll behind.  A server that never drains fails
+ * the test.  Every test that opened a connection stops this way, except
+ * /sigterm_with_client, which stops with its client open on purpose.
+ */
+#define DRAIN_MS 10000
+
+static void
+stop_drained(void)
+{
+	int64_t deadline = rexis_now_ms() + DRAIN_MS;
+	long long n = -1;
+	int fd = -1;
+
+	for (;;) {
+		/* A fresh connection may be refused (a cap not yet freed)
+		 * or queued (--max-fds): then INFO fails and we retry. */
+		fd = rexis_connect(&g_srv, 1000);
+		if (fd >= 0 && (n = info_field(fd, "connected_clients:")) == 1)
+			break;
+		if (fd >= 0)
+			close(fd);
+		if (rexis_now_ms() >= deadline)
+			munit_errorf("closed connections did not drain: INFO "
+			    "connected_clients %lld, not 1, after %d ms", n,
+			    DRAIN_MS);
+		usleep(20 * 1000);
+	}
+	munit_assert_int(rexis_stop(&g_srv), ==, 0);
+	close(fd);
 }
 
 #ifdef __linux__
@@ -578,7 +620,7 @@ test_core_pinning(const MunitParameter p[], void *d)
 	printf("\n  cores: ours %s, server %s (%d CPUs)\n", mine, theirs,
 	    n_cpus);
 	munit_assert_int(n_cpus, ==, 2);
-	STOP_CLEAN();
+	munit_assert_int(rexis_stop(&g_srv), ==, 0);   /* no client ever */
 	return MUNIT_OK;
 #else
 	(void)p; (void)d;
@@ -589,9 +631,9 @@ test_core_pinning(const MunitParameter p[], void *d)
 /* ----- shutdown ----- */
 
 /* An idle server and a server with an open client both exit 0 on
- * SIGTERM.  (The per-test STOP_CLEAN covers the idle case; this pins
- * the connected case, where a parked connection proc must see the
- * shutdown too.) */
+ * SIGTERM.  (/core_pinning's stop covers the idle case, and every
+ * STOP_CLEAN stops with its drain probe open; this pins a client that
+ * has been served and parked, which must see the shutdown too.) */
 static MunitResult
 test_sigterm_with_client(const MunitParameter p[], void *d)
 {
@@ -602,7 +644,7 @@ test_sigterm_with_client(const MunitParameter p[], void *d)
 	fd = rexis_connect(&g_srv, 2000);
 	munit_assert_int(fd, >=, 0);
 	munit_assert_true(served(fd));
-	STOP_CLEAN();
+	munit_assert_int(rexis_stop(&g_srv), ==, 0);   /* client still open */
 	close(fd);
 	return MUNIT_OK;
 }
