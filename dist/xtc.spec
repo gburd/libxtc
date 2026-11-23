@@ -12,7 +12,7 @@
 %global sover 2
 
 Name:           libxtc
-Version:        2.1.5
+Version:        2.1.6
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,17 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Mon Nov 23 2026 Greg Burd <greg@burd.me> - 2.1.6-1
+  A custom deadlock-victim picker now receives the locker IDs of the
+  cycle, as documented, not the detector's node indices.  An xtc_xproc
+  child whose fate the parent cannot learn now reports a DOWN of kind
+  NOCONNECTION instead of exit code 4, and on Windows a failed exit-wait
+  registration no longer leaves its shadow parked forever.  An RNG draw
+  made under the simulator's virtual clock outside a run no longer
+  depends on the process's address layout.  The policy docs now name
+  lts/2.1 as the LTS line.  The rexis budget tests stop the server only
+  after it has processed their closed connections (test-only).
+
 * Sat Nov 21 2026 Greg Burd <greg@burd.me> - 2.1.5-1
   The sqlxtc example no longer hands a dropped table's or index's id to
   a new one, so a new table no longer shows a dropped table's rows after

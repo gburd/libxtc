@@ -6,6 +6,54 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## FIXED (2.1.6): a custom deadlock-victim picker got node indices, not locker IDs
+
+`xtc_lock_victim_pick_fn` is documented as receiving the locker IDs of
+the lockers in a deadlock cycle.  The detector passed it its own
+internal node indices instead (0, 1, 2, ...), so a picker that looked a
+candidate up, logged it, or chose by ID saw the wrong values.  The
+victim it returned was mapped back the same way, so the lock manager
+still aborted one locker of the cycle; it was the picker's view that
+was wrong.  The picker now gets the lockers' IDs, and its choice maps
+back to the right locker.  The default and the other built-in policies
+never went through this path and are unchanged.
+`test/m13/test_lockmgr.c` `/victim_cycle` builds a cycle of lockers 6,
+7 and 8 and a picker that chooses 7 by ID; it fails on 2.1.5 (the
+picker sees 0, 1 and 2) and passes now.
+
+## FIXED (2.1.6): an `xtc_xproc` child whose fate is unknowable reported exit code 4
+
+When the shadow proc of an `xtc_xproc` child cannot wait for the child
+(`xtc_osproc_wait` fails), its DOWN and link EXIT carried kind
+`XTC_DOWN_KIND_EXIT` with exit code 4: the value of
+`XTC_DOWN_KIND_NOCONNECTION`, passed as an exit code.  They now carry
+kind `XTC_DOWN_KIND_NOCONNECTION`, which xtc_xproc(3) documents for a
+child whose end the parent cannot see.  On Windows the shadow had no
+such path: when the child's exit code cannot be read it now reports
+NOCONNECTION instead of an exit code, and when the wait for the child
+cannot be registered `xtc_xproc_monitor` and `xtc_xproc_link` no longer
+return `XTC_E_IO` with the shadow parked forever; they succeed and the
+shadow reports NOCONNECTION.  `test/m10/test_xproc.c`
+`/wait_fail_noconnection` (injection point `xproc.shadow.wait_fail`)
+fails on 2.1.5 with kind EXIT and passes now; the MSVC smoke test
+checks the same on Windows.  The Windows failures of the real calls
+are not tested: neither call fails on demand.
+
+## FIXED (2.1.6): an RNG draw outside a sim run depended on the address layout
+
+An un-seeded thread's first `xtc_rand_u64` draw seeds the thread from
+the monotonic clock XORed with the address of its own state cell.  A
+DST harness also draws between `xtc_sim_clock_enable` and
+`xtc_sim_exec_run`, with the virtual clock on but no run active; there
+the address carried the process's ASLR layout into the draw, and the
+determinism guard sees neither.  With the virtual clock on, the seed is
+now the virtual time XORed with a constant.  Off the virtual clock
+nothing changes, so real threads still get distinct streams.
+`test_sim_determinism_guard` gains a case: two concurrent threads must
+draw the same value there; it fails on 2.1.5 and passes now.  On this
+line no pinned seed changes: the six sqlxtc DST tests give the same
+output with 2.1.5's and 2.1.6's library, in every process tried.
+
 ## FIXED (2.1.5): sqlxtc handed a dropped table's id, and its rows, to a new table
 
 **What it was.**  The sqlxtc example allocated a table id as one past

@@ -1,3 +1,37 @@
+libxtc (2.1.6-1) unstable; urgency=medium
+
+  * PATCH release on the 2.1 LTS line: fixes only.  ABI-compatible with
+    2.0.0 and 2.1.0 to 2.1.5 (abidiff against 2.1.5: no change; the
+    same exported symbols; SONAME libxtc.so.2).
+  * lockmgr: a custom deadlock-victim picker (XTC_LOCK_VICTIM_CUSTOM)
+    received the detector's internal node indices instead of the locker
+    IDs xtc_lockmgr(3) documents.  The victim was still a locker of the
+    cycle; the picker's view was wrong.  It now gets the locker IDs.
+    New test /m13/lockmgr/victim_cycle.
+  * xproc: when the shadow of an xtc_xproc child cannot wait for the
+    child, a monitor saw kind EXIT with exit code 4; it now sees kind
+    NOCONNECTION.  On Windows, an unreadable exit code reports
+    NOCONNECTION, and a failed exit-wait registration no longer leaves
+    the shadow parked forever behind an XTC_E_IO.  New test
+    /m10.10/xproc/wait_fail_noconnection and an MSVC smoke check.
+  * DST: an un-seeded RNG draw made with the virtual clock on but
+    outside a run seeded from the thread's TLS address, so a harness's
+    setup could differ between processes.  It now seeds from the
+    virtual time and a constant; real threads are unchanged.  No pinned
+    seed changes on this line.
+  * test_lib_closure.sh compares its symbol lists in the C locale, so it
+    no longer reports defined symbols as missing where sort and comm
+    disagree on collation (uutils coreutils under a UTF-8 locale).
+  * test_rexis_budgets (test-only): each test waits until the server has
+    processed its closed connections before stopping it, so the io_uring
+    gate no longer sees -ENOENT poll removes from closes racing the
+    shutdown.  No library or example change.
+  * docs: lts/2.1 is the LTS line (SemVer 2.1.N); development releases
+    come from main as date-named pre-releases; 2.0.x is superseded by
+    2.1.x.  abi-stability.md, SECURITY.md and PUBLISHING.md say so.
+
+ -- Greg Burd <greg@burd.me>  Mon, 23 Nov 2026 09:00:00 -0500
+
 libxtc (2.1.5-1) unstable; urgency=medium
 
   * PATCH release on the 2.1 LTS line: fixes only.  ABI-compatible with
