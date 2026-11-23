@@ -127,6 +127,25 @@ both were allocated at accept; 20,000 idle connections, `--loops=2`).
   [Influences and lineage]({{ '/philosophy/influences/' | relative_url }}).
 - **`db.c`** holds the keyspace; **`expire.c`** handles TTLs;
   **`bitcask.c`** is the append-only persistence layer.
+- **Persistence (`--persist=DIR`).** Every command that changes the
+  keyspace appends one record to the log before its reply is sent, and
+  a restart reloads it, so the keyspace after a restart is the keyspace
+  as of the last acknowledged command.  The record is the key's
+  resulting state, not the command: INCR, DECR, INCRBY and DECRBY log
+  the new number, the list and hash commands the whole list or hash,
+  SET the value; DEL (or the LPOP, RPOP or HDEL that empties a key)
+  logs a tombstone, and FLUSHDB one flush record that ends every key
+  before it.  SET with EX or PX and EXPIRE log the absolute expiry on
+  the wall clock, and a key whose expiry has passed is not reloaded, so
+  a key that expired while the server was down does not come back.  The
+  record is written with `pwrite` and not fsync'd: an acknowledged
+  command survives the server crashing or being killed, but not a
+  power loss or a kernel crash.  A clean shutdown fsyncs, and there is
+  no per-command fsync option.  A write the log cannot take stops the
+  server before it answers.  The
+  [README](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/05_rexis/README.md)
+  has the details (the merge, the file format, and what an older rexis
+  does with a new log).
 - **`metrics.c`** exposes counters via
   [`xtc_stats(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_stats.3).
 - Memory is bounded by one
