@@ -2717,9 +2717,11 @@ after the fix: +1.4 MB RSS, +131 mappings.  A 4-loop migratable run with
 
 **Still retained until `xtc_loop_fini` (by contract, not a leak):**
 
-* A task created with `xtc_task_spawn` or `xtc_async`.  Its handle is
+* A task created with `xtc_async` (or `xtc_coro_spawn`).  Its handle is
   documented as valid for the loop's lifetime and `xtc_await` reads the
-  finished coroutine's result through it.  Since 2.1 a finished
+  finished coroutine's result through it.  A plain `xtc_task_spawn` task
+  is not retained: its struct is recycled when it returns
+  `XTC_TASK_DONE`, and a later spawn may return the same pointer.  Since 2.1 a finished
   `xtc_async` coroutine gives its fiber STACK back at once (to the
   per-thread pool), so what stays is the task and coro structs, a few
   hundred bytes: 4,000 async/await pairs grew `/proc/self/maps` from 44 to
