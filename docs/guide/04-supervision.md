@@ -27,10 +27,7 @@ ended; it just learns about it.
 
 {% include snippet.html file="04_monitor.c" region="full" %}
 
-```
-worker: exiting with reason 42
-parent: child ended, reason 42
-```
+{% include output.html file="04_monitor.out" %}
 
 Two details matter:
 

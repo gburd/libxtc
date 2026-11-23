@@ -1,0 +1,6 @@
+nested: resource temporarily unavailable holding the A of s1, 3 left queued
+join:   ok, the pair of s2, 2 left queued
+join:   resource temporarily unavailable, 2 left queued
+join:   requested item does not exist after s3's DOWN, 3 left queued
+nested: killed waiting for its B, 0 left queued
+join:   killed waiting for its B, 1 left queued

@@ -116,9 +116,7 @@ library never notices.
 
 {% include snippet.html file="06_qsort_yield.c" region="full" %}
 
-```
-sorted correctly through 17 in-qsort yields: yes
-```
+{% include output.html file="06_qsort_yield.out" %}
 
 (The count is the number of comparisons your libc's `qsort` makes on
 these eight values; 17 is glibc's.)

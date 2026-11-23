@@ -1,0 +1,2 @@
+worker: exiting with reason 42
+parent: child ended, reason 42

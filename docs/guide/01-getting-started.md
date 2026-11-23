@@ -64,10 +64,7 @@ cc first.c $(pkg-config --cflags --libs --static xtc) -o first
 (`--static` adds the libraries libxtc.a was built against: liburing and
 the TLS library, when configure found them.)
 
-```
-coroutine: computing 7 * 7
-result = 49
-```
+{% include output.html file="01_hello_async.out" %}
 
 ## What just happened
 
