@@ -1578,7 +1578,7 @@ tests-pbt: $(TESTS_PBT)
 	fi; \
 	[ ! -s check-fails-pbt.txt ]
 
-# check-sim / check-dst: the full DST suite (test/sim/, 52+ tests) built
+# check-sim / check-dst: the full DST suite (test/sim/, 92 tests) built
 # against a separate --with-io-backend=sim configuration.  NOT part of
 # plain `make check` (it configures+builds a second copy of the library),
 # so run it explicitly -- this is the project's strongest test tier and
