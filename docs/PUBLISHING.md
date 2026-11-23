@@ -209,7 +209,10 @@ how the two versions reach the build.
        $EDITOR dist/release-notes.md
        git add -f dist/release.in dist/release-notes.md
 
-   (`-f` because a global gitignore may cover `dist/`.)  The release
+   (`-f` because a global gitignore may cover `dist/`.)  Set
+   XTC_VERSION_STRING in `src/inc/compat/xtc_config.h`, the MSVC build's
+   hand-kept header, to "2026.11.24" too; `make check` [B7] fails until
+   it agrees.  The release
    workflow publishes dist/release-notes.md as the release body, word
    for word, and refuses a CalVer tag whose commit has none.  The build
    then reports `xtc_version_string()` = "2026.11.24" and pkg-config Version
@@ -231,7 +234,8 @@ how the two versions reach the build.
    (`tea releases create --prerelease`) with the same three files and
    dist/release-notes.md as the body.
 5. Remove dist/release.in and dist/release-notes.md in the next commit
-   on `main`, so a tree between releases is named by its ABI level and
+   on `main`, and set the MSVC header's XTC_VERSION_STRING back to the
+   ABI level, so a tree between releases is named by its ABI level and
    cannot be mistaken for the release.
 6. Check CI on the tag, as for an LTS release, and check that the
    newest v2.1.N is still "Latest" on both forges.

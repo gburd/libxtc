@@ -25,8 +25,8 @@
  * consistent and in step with dist/version.in: MAJOR/MINOR/PATCH are
  * the ABI level, and STRING is the release name, which is exactly
  * "MAJOR.MINOR.PATCH" unless dist/release.in names a development
- * release, when it is that name (dist/release_name.sh).  Otherwise
- * test/m0/test_version's checks fail under MSVC. */
+ * release, when it is that name (dist/release_name.sh).
+ * test/m0/test_config_header.sh [B7] fails when they disagree. */
 #define XTC_VERSION_MAJOR  2
 #define XTC_VERSION_MINOR  3
 #define XTC_VERSION_PATCH 0

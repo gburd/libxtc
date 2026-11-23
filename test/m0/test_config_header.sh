@@ -38,5 +38,18 @@ if [ "$(macro XTC_VERSION_STRING)" != "\"$name\"" ]; then
 	    "the release name is \"$name\"" >&2
 	exit 1
 fi
+
+# The MSVC build does not run configure: its hand-kept header must say
+# the same, or a Windows build of a release reports another version.
+C="$XTC_SRC_DIR/src/inc/compat/xtc_config.h"
+cmacro() {
+	sed -n "s/^#define $1 *//p" "$C"
+}
+got_abi="$(cmacro XTC_VERSION_MAJOR).$(cmacro XTC_VERSION_MINOR).$(cmacro XTC_VERSION_PATCH)"
+if [ "$got_abi" != "$abi" ] || [ "$(cmacro XTC_VERSION_STRING)" != "\"$name\"" ]; then
+	echo "  [B7] FAIL: src/inc/compat/xtc_config.h says $got_abi" \
+	    "$(cmacro XTC_VERSION_STRING); want ABI level $abi and \"$name\"" >&2
+	exit 1
+fi
 echo "  [B7] OK: xtc_config.h defines all four version macros" \
-    "(ABI level $abi, release name $name)"
+    "(ABI level $abi, release name $name), and the MSVC header agrees"
