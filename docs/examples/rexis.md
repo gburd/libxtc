@@ -142,10 +142,29 @@ both were allocated at accept; 20,000 idle connections, `--loops=2`).
   command survives the server crashing or being killed, but not a
   power loss or a kernel crash.  A clean shutdown fsyncs, and there is
   no per-command fsync option.  A write the log cannot take stops the
-  server before it answers.  The
+  server before it answers.
+
+  One command is one record, written with one `pwritev`: a command
+  with several arguments (an `RPUSH` of five elements, an `HSET` of
+  three fields, a `DEL` of three keys, whose tombstones go in one batch
+  record) logs the key's state once, after the last argument, so a
+  crash in the middle of it brings back the keyspace before the command
+  or after it, never a part.  A TTL out of range is refused as Redis
+  refuses it, changing nothing: SET with an EX or PX of zero or less,
+  or too far out to hold (about 220 years), answers `-ERR invalid
+  expire time in 'set' command`, EXPIRE too far out answers the same
+  for `'expire'`, and EXPIRE with zero or less deletes the key.  At
+  startup a torn last record (what a crash leaves) is cut off, with a
+  line on stderr; a record that fails its checksum with valid records
+  after it is damage, and the server refuses to start, naming the
+  offset, rather than drop every write after it.  A directory from an
+  older rexis (`bitcask.data`) is adopted as `bitcask.v2`; the empty
+  `bitcask.data` an older binary leaves when pointed at a new
+  directory is removed with a warning, and one that holds records next
+  to `bitcask.v2` makes the server refuse to start.  The
   [README](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/05_rexis/README.md)
-  has the details (the merge, the file format, and what an older rexis
-  does with a new log).
+  has the details (the merge, the record format, and the test that
+  kills the server in the middle of a write).
 - **`metrics.c`** exposes counters via
   [`xtc_stats(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_stats.3).
 - Memory is bounded by one
