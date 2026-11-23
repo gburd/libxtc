@@ -167,9 +167,11 @@ Async mutex.  Blocked acquires park the fiber.  Use for critical
 sections held across
 .Xr xtc_recv 3
 or other async I/O.  Compare with
-.Xr xtc_lwlock 3
-which uses pthread mutex underneath
-.Pq blocks the OS thread .
+.Xr xtc_lwlock 3 ,
+whose contended acquire parks a fiber and blocks a plain thread, but
+which must not be held across a park point; and whose shared
+acquirers get in past a waiting writer, so a steady stream of readers
+can starve it.
 .Fn xtc_amutex_create
 allocates a mutex;
 .Fn xtc_amutex_create_flags
