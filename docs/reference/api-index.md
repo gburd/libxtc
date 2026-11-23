@@ -48,8 +48,8 @@ headers. This section is the prose contract for each function.
 
 ## Environment variables
 
-libxtc reads a small set of environment variables, and never while the
-simulator is running (see
+libxtc reads a small set of environment variables.  A read while the
+simulator runs trips the determinism guard and fails the run (see
 [`xtc_runtime(3)`]({{ '/reference/api/xtc_runtime/' | relative_url }})).
 The I/O backend and the simulation seed are not among them: the backend
 is chosen at configure time, and a simulation's seed is an argument to

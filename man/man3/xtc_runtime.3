@@ -115,8 +115,9 @@ The int-returning setters return
 or the error named above.
 The getters cannot fail.
 .Sh ENVIRONMENT
-The library reads these variables, through its own environment
-wrapper, and never while the simulator is running:
+The library reads these variables through its own environment
+wrapper; a read while the simulator runs trips the determinism guard
+and fails the run:
 .Bl -tag -width Ds
 .It Ev XTC_TAIL_ENABLE
 Read by
