@@ -68,8 +68,9 @@ the postmaster's accept loop becomes a supervised process.
 - **`backend.c`** -- a hand-rolled minimal PostgreSQL v3 wire handshake
   (startup message, authentication-OK, parameter status, backend key
   data, ready-for-query) and a canned one-row `1` for any simple query.
-  It answers only a plain v3 startup: an SSLRequest is closed, so psql
-  needs `sslmode=disable`.
+  It answers only a plain v3 startup.  Over TCP, psql's default sslmode
+  (prefer) opens with an SSLRequest, which the mock closes, so psql
+  needs `sslmode=disable` there; over a Unix socket it sends none.
 - **`pg_latch.c`** -- a shim mapping PostgreSQL's `Latch` /
   `WaitLatchOrSocket` semantics onto `xtc_proc_wait_fd`, which is the
   seam a real adapter would use.
