@@ -47,8 +47,8 @@
 .Sh DESCRIPTION
 .Nm xtc_lwlock
 is a lightweight lock with shared (reader) and exclusive (writer)
-modes.  Single atomic on the fast path; pthread_mutex / cond on
-the contended path.  Ported from PostgreSQL's
+modes.  One CAS on the fast path; a contended acquire parks a fiber
+or waits on a condition variable on a plain thread.  Ported from PostgreSQL's
 .Pa src/backend/storage/lmgr/lwlock.c .
 .Pp
 The optional lock-order (WITNESS) tracker is off by default.
@@ -99,7 +99,14 @@ The modes:
 .Bl -tag -width "XTC_LWLOCK_EXCLUSIVE" -offset indent
 .It Dv XTC_LWLOCK_SHARED
 Multiple threads can hold the lock concurrently in shared mode.
-Excluded by an exclusive holder.
+Excluded by an exclusive holder, but not by an exclusive waiter: new
+shared acquirers get in past a queued writer, as with PostgreSQL's
+LWLock, so a steady stream of readers can starve a writer.
+Use the FIFO
+.Vt xtc_arwlock
+of
+.Xr xtc_sync 3
+when that matters.
 .It Dv XTC_LWLOCK_EXCLUSIVE
 Only one thread holds the lock; excludes all readers.
 .El

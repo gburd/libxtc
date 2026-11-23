@@ -1,7 +1,7 @@
 #!/bin/sh
 # dist/s_include
 # Build the per-subsystem prototype headers from PUBLIC: markers in C
-# source files.  The same idea as DBSQL/BDB.  See M0_CLAIMS.md [T2,T3].
+# source files.  The same idea as DBSQL/BDB.
 #
 # Inputs:
 #   src/<subsystem>/*.c        for each subsystem under src/
@@ -30,7 +30,6 @@ emit_header() {
 	out=$1; guard=$2; body=$3
 	{
 		echo "/* DO NOT EDIT: automatically built by dist/s_include. */"
-		echo "/* See M0_CLAIMS.md [T2]. */"
 		echo
 		echo "#ifndef $guard"
 		echo "#define $guard"

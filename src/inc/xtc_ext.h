@@ -1,5 +1,4 @@
 /* DO NOT EDIT: automatically built by dist/s_include. */
-/* See M0_CLAIMS.md [T2]. */
 
 #ifndef XTC_EXT_H
 #define XTC_EXT_H

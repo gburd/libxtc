@@ -50,13 +50,13 @@
 .Ft int
 .Fn xtc_lockmgr_check_deadlocks "xtc_lockmgr_t *m" "int *n_aborted"
 .Ft int
-.Fn xtc_lockmgr_stat "xtc_lockmgr_t *m" "xtc_lockmgr_stat_t *out"
+.Fn xtc_lockmgr_stat "const xtc_lockmgr_t *m" "xtc_lockmgr_stat_t *out"
 .Ft int
 .Fn xtc_lockmgr_n_held "const xtc_lockmgr_t *m"
 .Ft int
 .Fn xtc_lockmgr_n_waiting "const xtc_lockmgr_t *m"
 .Ft int
-.Fn xtc_lockmgr_failchk "xtc_lockmgr_t *m"
+.Fn xtc_lockmgr_failchk "xtc_lockmgr_t *m" "xtc_locker_t locker"
 .Sh DESCRIPTION
 .Nm xtc_lockmgr
 is a transactional lock manager modeled on Berkeley DB's
@@ -135,8 +135,17 @@ The wait is abandoned and the lock is NOT held; the kill is delivered
 when the caller's mask drops.  Without an enclosing mask the kill is
 delivered at once and the call does not return.
 .It Dv XTC_E_INVAL
-Bad arguments or unknown
-.Fa locker .
+Bad arguments: a
+.Dv NULL
+.Fa m
+or
+.Fa obj ,
+a zero
+.Fa obj_size ,
+or a mode that cannot be granted
+.Dv ( XTC_LOCK_NL , XTC_LOCK_WAIT ,
+or one outside the matrix).
+The locker is not checked.
 .El
 .Pp
 .Fn xtc_lock_put
@@ -144,17 +153,22 @@ releases the named lock.  Order of release does not matter; the
 lockmgr tracks per-locker held lists.
 .Pp
 .Fn xtc_lockmgr_id_set_timeout
-sets a per-locker deadline: once
-.Fa l
-has held its locks past
-.Fa timeout_ns ,
-the periodic detector treats it as expired for victim selection
-under the EXPIRE policy.  A negative value disables expiry.
+sets a per-locker deadline
+.Fa timeout_ns
+after the locker was created; once it has passed, the detector
+treats the locker as expired for victim selection under the EXPIRE
+policy.  A negative value disables expiry.
 .Pp
 .Fn xtc_lock_release_all
 drops every lock held by
 .Fa locker
-in one call, the normal end-of-transaction sweep.
+in one call, the normal end-of-transaction sweep, and aborts the
+locker's pending waits.
+It returns the number of locks it released (0 if none), or
+.Dv XTC_E_INVAL
+for a
+.Dv NULL
+.Fa m .
 .Pp
 .Fn xtc_lock_upgrade
 and
@@ -258,15 +272,27 @@ mode where the caller drives detection.
 .Fn xtc_lockmgr_stat
 fills
 .Fa out
-with current counts: held, waiting, total acquires, total
-releases, deadlocks found, victims aborted, etc.  No locks held
+with current counts: held, waiting, live objects, allocated lockers,
+total acquires, total releases, deadlock victims, and timed-out waits.
+No locks held
 during the snapshot
 .Pq counters are atomic .
 .Pp
 .Fn xtc_lockmgr_failchk
-sweeps for crashed lockers
-.Pq those whose owning thread has exited without releasing
-and reclaims their locks.
+marks
+.Fa locker
+as failed (typically because the thread that owned it died), releases
+all its locks and aborts its waits, as
+.Fn xtc_lock_release_all
+does.
+It returns
+.Dv XTC_OK ,
+or
+.Dv XTC_E_INVAL
+for a
+.Dv NULL
+.Fa m
+or a locker the manager does not know.
 .Pp
 .Fn xtc_lockmgr_n_held
 and

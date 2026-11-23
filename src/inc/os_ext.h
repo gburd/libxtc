@@ -1,5 +1,4 @@
 /* DO NOT EDIT: automatically built by dist/s_include. */
-/* See M0_CLAIMS.md [T2]. */
 
 #ifndef OS_EXT_H
 #define OS_EXT_H

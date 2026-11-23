@@ -3,7 +3,8 @@
  * Use of this source code is governed by the ISC License.
  *
  * test/m0/test_version.c
- *	Verifies M0_CLAIMS.md [C1, C2, C3].
+ *	Verifies the version API: the string is SemVer, its components match
+ *	it, and both match the build's version macros.
  */
 
 #include <stdio.h>

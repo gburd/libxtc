@@ -40,13 +40,18 @@ and
 .Fn xtc_rcu_read_unlock .
 Writers atomically swap pointers to new state and call
 .Fn xtc_rcu_retire
-to free the old state once all readers that may have observed it
-have exited their critical sections.
+to queue the old state for freeing; it is freed by a later
+.Fn xtc_rcu_synchronize ,
+once all readers that may have observed it have exited their
+critical sections.
 .Pp
 .Fn xtc_rcu_synchronize
-blocks until all currently-active readers have exited.  Used by
-writers that want to free old state synchronously rather than via
-the deferred-retire path.
+advances the epoch, waits for readers in the previous epoch to leave,
+and frees what was retired two epochs earlier.
+Retired objects are freed only by this call (and by
+.Fn xtc_rcu_fini ) ,
+so a writer that retires must call it: an object retired now is freed
+by the second call after.
 .Pp
 The implementation tracks per-reader epoch counters in a registered
 linked list: one per OS thread, and one per fiber when the reader runs

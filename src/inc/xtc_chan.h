@@ -93,7 +93,7 @@ XTC_API void   xtc_chan_mpsc_destroy(xtc_chan_mpsc_t *c);
  *   XTC_OK            on success
  *   XTC_E_AGAIN       channel full (caller is responsible for backpressure;
  *                     register a waker via _set_waker if you want to
- *                     wait for capacity, or use the wrapper xtc_chan_send)
+ *                     wait for capacity)
  *   XTC_E_INVAL       closed channel
  *   XTC_E_RESOURCE    global slot cap (xtc_res XTC_RES_CHAN_SLOTS) hit
  */
@@ -212,7 +212,7 @@ typedef struct xtc_chan_demand xtc_chan_demand_t;
  * xtc_chan_demand_send returns XTC_E_AGAIN when demand is exhausted (the
  * producer should stop until the consumer asks again -- register a
  * waker to be told when demand is granted).  The consumer drains with
- * xtc_chan_demand_recv, which does NOT itself grant demand; the
+ * xtc_chan_demand_try_recv, which does NOT itself grant demand; the
  * consumer decides its own high-water policy by calling _ask.
  *
  * PUBLIC: int    xtc_chan_demand_create __P((xtc_res_t *, size_t, xtc_chan_demand_t **));

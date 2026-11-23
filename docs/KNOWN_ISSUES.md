@@ -58,9 +58,11 @@ last message that has arrived, and `xtc_recv_match_since(mark, fn, user,
 &m, &n, timeout_ns)` is `xtc_recv_match` that starts after it: take the
 mark, send the request, wait with the mark.  Messages it skips stay
 queued.  A proc has one mark; a stale mark (a later one replaced it) or
-0 walks the whole queue, never skipping a message.  On a 48-core x86-64
-host one request-reply with a backlog of 100,000 unrelated messages took
-1.42 ms with `xtc_recv_match` and 626 ns with the mark.  New symbols:
+0 walks the whole queue, never skipping a message.  One request-reply
+with a backlog of 100,000 unrelated messages took 1.42 ms with
+`xtc_recv_match` and 626 ns with the mark (two procs on one loop,
+median of 5 interleaved runs on a shared 48-core x86-64 host,
+2026-11-18; the full table is in commit 3e4e5feb).  New symbols:
 `xtc_recv_mark`, `xtc_recv_match_since` (`XTC_2.3`).  See xtc_proc(3)
 "Receive marks".
 
@@ -3978,7 +3980,8 @@ source on macOS (tracked in PLAN.md).  Neither changes correctness.
 ## sqlxtc multi-thread load test flakes on the macOS CI runner
 
 **Status:** KNOWN FLAKE (transient, re-run passes).  The
-`sqlxtc multi-thread load` CI step (`test/sqlxtc/test_sqlxtc_mt.sh` ->
+`sqlxtc multi-thread load` CI step
+(`examples/06_sqlxtc/test/test_sqlxtc_mt.sh` ->
 `test_sqlxtc_concurrent.py`, N clients * M queries against a shared
 server on a plain `CREATE TABLE`) intermittently fails on the macOS
 runner with all clients timing out and `server CRASHED under multi-loop
@@ -4051,7 +4054,9 @@ Resolved: `xtc_slab_pressure_listen_ex()` returns an opaque
 `xtc_slab_pressure_t` handle and `xtc_slab_pressure_stop(handle)` joins
 the listener thread, closes its fds, and frees it.  Plain
 `xtc_slab_pressure_listen()` delegates to `_ex` and discards the handle
-(unchanged fire-and-forget behaviour).
+(unchanged fire-and-forget behaviour).  Since 2.2 the three names are
+deprecated: `xtc_slab_pressure_create()` returns the handle and
+`xtc_slab_pressure_destroy()` releases it.
 
 
 ## epoll backend: rare lost blocking-I/O-completion wakeup under heavy churn

@@ -47,14 +47,29 @@ typedef enum xtc_err {
     XTC_E_NOSYS    = -3,    /* not implemented on this platform */
     XTC_E_RANGE    = -4,    /* numeric out of range */
     XTC_E_AGAIN    = -5,    /* try again later */
-    XTC_E_INTERNAL = -6     /* invariant violation; bug */
+    XTC_E_INTERNAL = -6,    /* invariant violation; bug */
+    XTC_E_RESOURCE = -7,    /* resource cap reached (xtc_res) */
+    XTC_E_DEADLK   = -8,    /* lock-manager: deadlock victim */
+    XTC_E_VERSION  = -9,    /* version mismatch (shm) */
+    XTC_E_ABORTED  = -10,   /* operation cancelled via abort token */
+    XTC_E_NOTFOUND = -11,   /* requested item does not exist */
+    XTC_E_IO       = -12,   /* I/O error (read/write/fsync failed) */
+    XTC_E_EXIST    = -13,   /* already exists (a name is taken); 2.2 */
+    XTC_E_STATE    = -14    /* not allowed in this state or context; 2.2 */
 } xtc_err_t;
 
 const char *xtc_strerror(int xtc_err);
 ```
 
-`xtc_strerror` returns a stable English description.  Codes outside
-the known set return `"unknown"`; the function never returns NULL.
+Below these lies the system-error band (2.2): xtc_aio and xtc_iosched
+return `XTC_E_SYS(errno)` for an operating-system error the codes above
+do not name, and `xtc_err_errno(rc)` recovers the errno; the rest of
+the library folds such errors to `XTC_E_IO`.
+
+`xtc_strerror` returns a stable English description.  A code in the
+system-error band reads "system error: " and the C library's text;
+any other code outside the known set returns `"unknown"`; the function
+never returns NULL.
 
 The exact message text for known codes is part of the API contract
 and changes only on a major version bump.  See
@@ -65,9 +80,9 @@ See `xtc_strerror(3)`.
 ### Compile-time version macros
 
 ```c
-XTC_VERSION_STRING   /* "2.2.0" */
+XTC_VERSION_STRING   /* e.g. "2.3.0" */
 XTC_VERSION_MAJOR    /* 2 */
-XTC_VERSION_MINOR    /* 2 */
+XTC_VERSION_MINOR    /* 3 */
 XTC_VERSION_PATCH    /* 0 */
 ```
 
@@ -122,11 +137,12 @@ See `xtc_atomic(3)`.
   formalises this -- every other public function in xtc follows the
   same shape).
 - **Static-pointer functions** (`xtc_version_string`,
-  `xtc_strerror`) return pointers to immutable storage; the caller
-  must not free them.
-- **No `errno` reliance.**  The L0 `__os_errno` layer translates
-  `errno` and `GetLastError` into `XTC_E_*` codes.  Above L0 no
-  function reads `errno`.
+  `xtc_strerror`) return pointers the caller must not free.  They point
+  at immutable storage, except `xtc_strerror` for a system-band code,
+  which writes a per-thread buffer that stays valid until the thread's
+  next `xtc_strerror` call.
+- **No `errno` reliance.**  A caller never reads `errno` to learn why
+  a call failed: the return code says.
 - **No globals visible to users.**  Even the version macros are
   expanded at compile time into the consumer's translation unit;
   there is no `xtc_version` variable.

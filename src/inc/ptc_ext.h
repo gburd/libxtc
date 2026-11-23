@@ -1,5 +1,4 @@
 /* DO NOT EDIT: automatically built by dist/s_include. */
-/* See M0_CLAIMS.md [T2]. */
 
 #ifndef PTC_EXT_H
 #define PTC_EXT_H

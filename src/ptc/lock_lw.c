@@ -220,10 +220,8 @@ __held_find(const xtc_lwlock_t *l, xtc_lwlock_mode_t *out_mode)
 /* ----- low-level acquire/release on the state word ----- */
 
 /* XTC_NOALLOC_BEGIN: lwlock fast path (PLAN.md 19.23) -- the
- * uncontended CAS acquire/release docs/locks.md describes ("The fast
- * paths for shared-acquire and shared-release each compile to a
- * single atomic increment... the exclusive paths add a
- * compare-exchange").  __try_attempt/__release_state touch only the
+ * uncontended CAS acquire/release docs/locks.md describes (each one
+ * compare-exchange when uncontended).  __try_attempt/__release_state touch only the
  * state word; this file has no allocation calls anywhere (the slow
  * path below parks on a pthread_cond/fiber waker, never the
  * allocator), but the marker names the fast path explicitly per

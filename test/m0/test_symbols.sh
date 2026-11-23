@@ -1,6 +1,6 @@
 #!/bin/sh
 # test/m0/test_symbols.sh
-# Verifies M0_CLAIMS.md [C5]: every exported symbol begins with xtc_.
+# Verifies that every exported symbol begins with xtc_.
 #
 # Inspects the static archive's symbol table.  Skips quietly when
 # the toolchain is too unusual to introspect (Windows; no nm).

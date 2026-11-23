@@ -15,7 +15,7 @@ AC_LANG([C])
 AC_CANONICAL_HOST
 
 # -------------------------------------------------------------------------
-# Out-of-source build is mandatory.  See M0_CLAIMS.md [B3,B6].
+# Out-of-source build is mandatory (test/m0/test_oos_enforced.sh).
 # -------------------------------------------------------------------------
 AC_MSG_CHECKING([for an out-of-source build])
 abs_srcdir=`(cd "$srcdir" && pwd)`

@@ -16,9 +16,10 @@
  *	vtable of callbacks.  All callbacks run in the server's
  *	process; they may use any xtc_proc / xtc_sync API.
  *
- *	Modeled on Erlang's gen_server.  The xtc_call_t handle ties
- *	a synchronous reply back to its caller via xtc_chan_oneshot
- *	so the caller can park on the reply with a timeout.
+ *	Modeled on Erlang's gen_server.  The xtc_svr_call_t handle ties
+ *	a synchronous reply back to its caller (a tagged message to a
+ *	calling proc, a reply slot for a plain-thread caller), so the
+ *	caller can wait for the reply with a timeout.
  */
 
 #ifndef XTC_SVR_H

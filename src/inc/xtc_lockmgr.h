@@ -38,8 +38,8 @@
  *	        new readers but not other ex-writers in the same view)
  *
  *	Deadlock detection runs periodically by default; callers can
- *	also force a check or configure on-every-conflict mode.  Six
- *	victim-selection policies are configurable.
+ *	also force a check or configure on-every-conflict mode.  Eight
+ *	victim-selection policies and a custom picker are configurable.
  */
 
 #ifndef XTC_LOCKMGR_H
