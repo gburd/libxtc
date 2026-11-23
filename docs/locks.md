@@ -145,9 +145,9 @@ that thread cannot make progress.  Use `xtc_notify`
 
 ### `__os_sem_t`
 
-Counting semaphore.  POSIX `sem_t` where available, falling back
-to a counter behind a mutex+cond pair on platforms without
-unnamed semaphore support.
+Counting semaphore: POSIX `sem_t`, a dispatch semaphore on macOS
+(where unnamed POSIX semaphores fail), and a Win32 semaphore on
+Windows.
 
     int  __os_sem_init    (__os_sem_t *s, unsigned initial);
     int  __os_sem_post    (__os_sem_t *s);
@@ -193,8 +193,9 @@ and a wait that runs out returns `XTC_E_AGAIN`.
 
 Use `xtc_amutex_t` when the critical section may yield, perform
 async I/O, or take a long time.  On the uncontended fast path it
-costs one `__os_mutex_t` lock and unlock plus a flag write.  The cost relative to `xtc_lwlock` (section 3) is
-that there is no separation between readers and writers.
+costs one `__os_mutex_t` lock and unlock plus a flag write.  The
+cost relative to `xtc_lwlock` (section 3) is that there is no
+separation between readers and writers.
 
 The converse holds too: a lock that is never held across a park does
 not need `xtc_amutex_t`.  A critical section that only walks a list
@@ -290,10 +291,9 @@ read-bias / write-cost / consistency-model trade-off.
 A reader-writer lock with shared and exclusive modes, modelled
 directly on the PostgreSQL LWLock with the same encoding tricks
 (HAS_WAITERS, WAKE_IN_PROGRESS, QUEUE_LOCKED in the high-order
-bits of the state word).  The fast paths for shared-acquire and
-shared-release each compile to a single atomic increment when
-no exclusive waiter is present; the exclusive paths add a
-compare-exchange.
+bits of the state word).  The fast paths for shared and exclusive
+acquire and release are each one compare-exchange when
+uncontended.
 
     int  xtc_lwlock_init        (xtc_lwlock_t *lw, uint16_t tranche);
     int  xtc_lwlock_acquire     (xtc_lwlock_t *lw, xtc_lwlock_mode_t mode);
@@ -305,9 +305,11 @@ Modes are `XTC_LWLOCK_SHARED` and `XTC_LWLOCK_EXCLUSIVE`.
 
 Use `xtc_lwlock_t` when reads dominate and the protected region
 is short enough to leave a non-yielding critical section.  The
-contention behaviour matches PG's LWLock: shared acquirers see
-fully concurrent fast paths until an exclusive waiter arrives,
-at which point all subsequent acquirers queue.
+contention behaviour matches PG's LWLock: shared acquirers run
+concurrently and are refused only while an exclusive holder has
+the lock.  A queued exclusive waiter does not stop new shared
+acquirers, so a steady stream of readers can starve a writer.
+For FIFO reader/writer fairness use `xtc_arwlock_t`.
 
 `xtc_lwlock_t` is the right choice for ~95% of "this is a
 hot read-mostly map" cases.
@@ -347,7 +349,7 @@ automatic; the `xtc_alrlock_create` / `xtc_alrlock_create_ex` aliases
 name that fiber-awareness explicitly at the call site (an object created
 with either family works with either family's calls).
 
-### `xtc_rcu`  --  read-copy-update with epoch reclamation
+### `xtc_rcu`: read-copy-update with epoch reclamation
 
 Wait-free reads, copy-on-write for updates, deferred reclamation
 through epochs.  There is one process-wide RCU domain, not a handle:
@@ -363,9 +365,10 @@ one global epoch and a reader slot per thread (per fiber on a fiber).
 
 A writer publishes a new version with an ordinary release store of the
 pointer (for example `xtc_atomic_store_ptr`), then hands the old one to
-`xtc_rcu_retire`, which frees it with `fn` once every reader that could
-still see it has left its read-side section.  `xtc_rcu_synchronize`
-advances the epoch and reclaims what is safe.
+`xtc_rcu_retire`, which queues it.  `xtc_rcu_synchronize` advances the
+epoch, waits out readers of the previous one, and frees (with `fn`)
+what was retired two epochs earlier, so a writer must call it for
+retired versions to be freed.
 
 Use `xtc_rcu` for graph data structures whose updates produce
 new versions and whose old versions can be freed once no reader
@@ -535,8 +538,8 @@ transaction.
 
 Independently of the deadlock detector, an acquisition can fail
 because its own timeout has expired.  The `timeout_ns`
-argument to `xtc_lock_get` is relative: -1 waits forever and 0 does
-not wait.  When it elapses without the
+argument to `xtc_lock_get` is relative: below 0 waits forever and 0
+does not wait.  When it elapses without the
 lock being granted, the call returns `XTC_E_AGAIN`.
 
 Timeouts are independent of deadlock detection but interact
@@ -561,14 +564,14 @@ amortize.
 
 `xtc_lockmgr_stat_t` exposes:
 
-    n_held               -- granted lock entries now
-    n_waiting            -- waiting requests now
-    n_objects            -- live lock objects
-    n_lockers            -- allocated locker ids
-    n_acquires           -- successful acquisitions, lifetime
-    n_releases           -- releases, lifetime
-    n_deadlocks_found    -- deadlock victims aborted, lifetime
-    n_timeouts           -- waits that timed out, lifetime
+    n_held               granted lock entries now
+    n_waiting            waiting requests now
+    n_objects            live lock objects
+    n_lockers            allocated locker ids
+    n_acquires           successful acquisitions, lifetime
+    n_releases           releases, lifetime
+    n_deadlocks_found    deadlock victims aborted, lifetime
+    n_timeouts           waits that timed out, lifetime
 
 ### When to use the lock manager
 
@@ -589,8 +592,9 @@ Use `xtc_lockmgr_t` when:
     intention-shared, intention-exclusive, read-uncommitted.  The
     BDB nine-mode matrix is the default.
   * Statistics and observability matter.  The lock manager
-    tracks contention, wait queues, and conflict counts at low
-    cost.
+    reports held and waiting counts, live objects and lockers,
+    and lifetime acquires, releases, deadlock victims, and
+    timeouts (`xtc_lockmgr_stat`).
 
 Do not use the lock manager when:
 
