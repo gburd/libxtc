@@ -7,6 +7,7 @@
 [![Sanitizers](https://img.shields.io/badge/tested-ASan%20%2B%20UBSan-brightgreen)](https://github.com/gburd/libxtc/actions/workflows/ci.yml)
 [![License: ISC](https://img.shields.io/badge/license-ISC-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/badge/LTS-2.1.x-informational)](https://codeberg.org/gregburd/libxtc/releases)
+[![Development](https://img.shields.io/github/v/release/gburd/libxtc?include_prereleases&sort=date&filter=v20*&label=development)](https://codeberg.org/gregburd/libxtc/releases)
 [![C11](https://img.shields.io/badge/C-11-blue.svg)](https://en.wikipedia.org/wiki/C11_(C_standard_revision))
 
 **[Read the documentation &rarr;](https://gburd.github.io/libxtc/)**
