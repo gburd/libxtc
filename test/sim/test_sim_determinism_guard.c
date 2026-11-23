@@ -22,13 +22,18 @@
  *	active and assert the violation counter advanced.  The RNG is no
  *	longer a guarded class (2.0): under the simulator an un-seeded
  *	draw takes the run's own stream, so assert it does NOT trip and
- *	replays, and that a SEEDED draw does not trip either.
+ *	replays, and that a SEEDED draw does not trip either.  A draw with
+ *	the virtual clock on but outside a run (a harness's setup) must not
+ *	depend on the thread's TLS address either: two fresh threads, whose
+ *	state cells sit at different addresses, must draw the same value.
  *
  *	Count mode (xtc_sim_strict(0)) is used deliberately: the guard's
  *	behavior under a real sim run is to abort, which a test cannot
  *	observe.
  */
 
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -49,6 +54,57 @@ void     __os_rand_seed(uint64_t seed);
 int      __os_env_get(const char *name, char *buf, size_t bufsize);
 
 static int g_failures;
+
+/* Two threads alive at once, so their TLS state cells sit at different
+ * addresses (a joined thread's stack and TLS are reused by the next). */
+struct draw_pair {
+	pthread_barrier_t bar;     /* both drawn before either exits */
+	uint64_t r[2];
+	const void *cell[2];       /* each thread's stack, for the check */
+	atomic_int i;
+};
+
+/* One thread's first un-seeded draw. */
+static void *
+first_draw(void *arg)
+{
+	struct draw_pair *d = arg;
+	int me = atomic_fetch_add(&d->i, 1);
+	int tls_probe;
+
+	d->r[me] = __os_rand_u64();
+	d->cell[me] = &tls_probe;
+	(void)pthread_barrier_wait(&d->bar);
+	return NULL;
+}
+
+/* The first un-seeded draws of two fresh, concurrent threads, with the
+ * virtual clock at `vns` and no run active.  -1 if the two did not run
+ * on distinct stacks; a thread that cannot start ends the test. */
+static int
+vclock_draws(int64_t vns, uint64_t r[2])
+{
+	struct draw_pair d;
+	pthread_t th[2];
+	int k, rc = 0;
+
+	memset(&d, 0, sizeof d);
+	r[0] = r[1] = 0;
+	xtc_sim_clock_set(vns);
+	if (pthread_barrier_init(&d.bar, NULL, 2) != 0)
+		return -1;
+	for (k = 0; k < 2; k++)
+		if (pthread_create(&th[k], NULL, first_draw, &d) != 0)
+			abort();   /* the other thread would wait on the barrier */
+	for (k = 0; k < 2; k++)
+		(void)pthread_join(th[k], NULL);
+	(void)pthread_barrier_destroy(&d.bar);
+	if (d.cell[0] == d.cell[1])
+		rc = -1;
+	r[0] = d.r[0];
+	r[1] = d.r[1];
+	return rc;
+}
 
 static void
 expect_trapped(const char *what, int before, int after)
@@ -118,6 +174,38 @@ main(void)
 		}
 	}
 
+	/*
+	 * Setup-time draws: the virtual clock on, no run active (the window
+	 * between xtc_sim_clock_enable and xtc_sim_exec_run).  An un-seeded
+	 * thread seeds itself there, and its seed must be a function of the
+	 * virtual clock alone: mixing in the state cell's TLS address made
+	 * a DST harness's CREATE INDEX key, and so its tree, differ from one
+	 * process to the next under ASLR.  Two fresh threads have their
+	 * cells at different addresses, so they must still agree.
+	 */
+	{
+		uint64_t r[2] = { 0, 0 };
+		int rc;
+		xtc_sim_deactivate();
+		xtc_sim_clock_enable(0);
+		rc = vclock_draws(123456789, r);
+		xtc_sim_clock_disable();
+		xtc_sim_activate(0xD371E511u);
+		xtc_sim_strict(0);
+		if (rc != 0 || r[0] != r[1]) {
+			printf("  [guard] FAIL: an un-seeded __os_rand_u64 draw "
+			    "under the virtual clock outside a run depends on "
+			    "the thread (%s%016llx vs %016llx)\n",
+			    rc != 0 ? "threads not concurrent: " : "",
+			    (unsigned long long)r[0], (unsigned long long)r[1]);
+			g_failures++;
+		} else {
+			printf("  [guard] OK: an un-seeded RNG draw under the "
+			    "virtual clock outside a run is the same on every "
+			    "thread\n");
+		}
+	}
+
 	/* A SEEDED stream is deterministic and must NOT trip the guard,
 	 * or it would fire on every legitimate draw. */
 	{
@@ -165,7 +253,8 @@ main(void)
 		return 1;
 	}
 	printf("OK: determinism guard traps the real clock, env reads and raw "
-	    "thread ids; an un-seeded RNG draw replays from the run's seed and "
-	    "a seeded one is not trapped\n");
+	    "thread ids; an un-seeded RNG draw replays from the run's seed, "
+	    "does not depend on the thread under the virtual clock, and a "
+	    "seeded one is not trapped\n");
 	return 0;
 }

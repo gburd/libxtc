@@ -16,7 +16,9 @@
  *	The stream is deterministic from a seed set via __os_rand_seed; an
  *	un-seeded thread auto-seeds on first draw from the monotonic clock
  *	XORed with the address of its own state cell, so distinct threads
- *	get distinct default streams.
+ *	get distinct default streams.  With the simulator's virtual clock
+ *	on, the seed is the virtual time XORed with a constant instead, so
+ *	a draw made outside a run (a harness's setup) replays too.
  *
  *	Under the simulator a thread that has not called __os_rand_seed
  *	draws from the run's own stream instead (XTC_SIM_RNG_RAND, reset by
@@ -84,8 +86,15 @@ __os_rand_u64(void)
 		int64_t ns = 0;
 		(void)__os_clock_mono(&ns);
 		/* Mix the clock with this thread's own state address so two
-		 * threads seeding in the same nanosecond still diverge. */
-		__rng_state = (uint64_t)ns ^ (uint64_t)(uintptr_t)&__rng_state;
+		 * threads seeding in the same nanosecond still diverge.  Under
+		 * the virtual clock but outside a run (a DST harness's setup)
+		 * the address would carry the process's ASLR layout into the
+		 * draws, so the seed there is the virtual time and a constant. */
+		if (__xtc_sim_vclock(NULL))
+			__rng_state = (uint64_t)ns ^ 0x2545F4914F6CDD1DULL;
+		else
+			__rng_state = (uint64_t)ns ^
+			    (uint64_t)(uintptr_t)&__rng_state;
 		__rng_seeded = RNG_AUTO;
 	}
 	return __os_splitmix64(&__rng_state);
