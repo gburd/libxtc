@@ -135,8 +135,17 @@ The wait is abandoned and the lock is NOT held; the kill is delivered
 when the caller's mask drops.  Without an enclosing mask the kill is
 delivered at once and the call does not return.
 .It Dv XTC_E_INVAL
-Bad arguments or unknown
-.Fa locker .
+Bad arguments: a
+.Dv NULL
+.Fa m
+or
+.Fa obj ,
+a zero
+.Fa obj_size ,
+or a mode that cannot be granted
+.Dv ( XTC_LOCK_NL , XTC_LOCK_WAIT ,
+or one outside the matrix).
+The locker is not checked.
 .El
 .Pp
 .Fn xtc_lock_put
@@ -144,12 +153,11 @@ releases the named lock.  Order of release does not matter; the
 lockmgr tracks per-locker held lists.
 .Pp
 .Fn xtc_lockmgr_id_set_timeout
-sets a per-locker deadline: once
-.Fa l
-has held its locks past
-.Fa timeout_ns ,
-the periodic detector treats it as expired for victim selection
-under the EXPIRE policy.  A negative value disables expiry.
+sets a per-locker deadline
+.Fa timeout_ns
+after the locker was created; once it has passed, the detector
+treats the locker as expired for victim selection under the EXPIRE
+policy.  A negative value disables expiry.
 .Pp
 .Fn xtc_lock_release_all
 drops every lock held by
