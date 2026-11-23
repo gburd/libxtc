@@ -101,6 +101,7 @@ budget with `xtc_loop_set_stall_budget` (or every loop of an executor at
 once with `xtc_exec_set_stall_budget`), and when a single run exceeds it
 the runtime reports which task did it.
 
+<!-- fragment -->
 ```c
 xtc_loop_set_stall_budget(loop, 50 * 1000 * 1000LL);  /* 50 ms */
 xtc_loop_set_stall_cb(loop, my_report_fn, ctx);       /* or NULL to log */

@@ -39,6 +39,7 @@ underlying `int fd`; xtc_tls layers on top with read/write that
 return `XTC_OK` / `XTC_E_AGAIN` / `XTC_E_INVAL` and never block the
 event loop.
 
+<!-- fragment -->
 ```c
 typedef struct xtc_tls_ctx  xtc_tls_ctx_t;   /* per-process: cert + key */
 typedef struct xtc_tls      xtc_tls_t;       /* per-connection state */
@@ -103,6 +104,7 @@ as `xtc_io` backends.
 Each backend lives in `src/io/tls_<backend>.c` and exports the
 same internal vtable:
 
+<!-- fragment -->
 ```c
 typedef struct xtc_tls_vtable {
     int  (*ctx_create) (xtc_tls_role_t, const xtc_tls_opts_t *, xtc_tls_ctx_t **);
@@ -126,6 +128,7 @@ preprocessor inlines the right impl.
 
 OpenSSL's standard idiom is:
 
+<!-- fragment -->
 ```c
 int rc = SSL_do_handshake(ssl);
 if (rc <= 0) {
@@ -138,6 +141,7 @@ if (rc <= 0) {
 `xtc_tls_handshake` wraps this and exposes `wants_read/wants_write`.
 Caller pattern:
 
+<!-- fragment -->
 ```c
 xtc_tls_t *tls;
 xtc_tls_create(ctx, fd, &tls);

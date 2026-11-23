@@ -50,6 +50,7 @@ bounded resources a runtime actually consumes:
 
 Acquire is checked; release is unconditional:
 
+<!-- fragment -->
 ```c
 if (xtc_res_acquire(r, XTC_RES_FDS, 1) != XTC_OK) {
     /* at the descriptor cap -- reject this connection cleanly */
@@ -63,6 +64,7 @@ Set your own caps at init (an `xtc_res_caps_t`) or at runtime
 (`xtc_res_set_cap`), and arm an alert to learn you are *approaching* a
 limit before you hit it:
 
+<!-- fragment -->
 ```c
 xtc_res_set_alert(r, XTC_RES_MEM_BYTES, 0.90);   /* fire at 90% */
 xtc_res_set_alert_fn(r, on_pressure, user);      /* your callback */

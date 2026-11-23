@@ -3131,6 +3131,7 @@ real Windows host for the first time: `/fault_early_contain` asserted
 `src/ptc/proc.c`) stored the raw Win32 exception code into
 `p->fault_sig`:
 
+<!-- fragment -->
 ```c
 p->fault_sig = (int)code;       /* EXCEPTION_ACCESS_VIOLATION */
 ```
@@ -3169,6 +3170,7 @@ merely fail on Windows -- it killed the whole test binary with
 **Root cause: the TEST, not the library.**  The library closed the
 tracked fd correctly; the test proved it had, with the POSIX idiom
 
+<!-- fragment -->
 ```c
 munit_assert_int(close(g_rec.fd), ==, -1);   /* expect EBADF */
 ```

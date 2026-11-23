@@ -36,6 +36,7 @@ off-CPU and why.
 disabled, so it is safe to compile into a production binary. Turn it on in
 code:
 
+<!-- fragment -->
 ```c
 xtc_tail_enable(XTC_TAIL_SCHED);   /* record scheduler events */
 ```
@@ -43,6 +44,7 @@ xtc_tail_enable(XTC_TAIL_SCHED);   /* record scheduler events */
 or, for a deployed binary you do not want to rebuild, from the environment at
 startup:
 
+<!-- fragment -->
 ```c
 xtc_tail_from_env();   /* honors XTC_TAIL_ENABLE */
 ```
@@ -61,6 +63,7 @@ the mask it enabled (0 when off), so you can log whether tracing is live.
 The ring lives in memory. To analyze it you write it out in the dial9 format.
 For a one-shot capture (a test, a repro, a shutdown hook):
 
+<!-- fragment -->
 ```c
 int fd = open("/tmp/traces/app.d9", O_WRONLY | O_CREAT | O_TRUNC, 0600);
 xtc_tail_dump_dial9(fd);
@@ -70,6 +73,7 @@ close(fd);
 For a deployed service, spill a **segment** into a directory that a sidecar or
 `scp` ships to wherever you run the viewer:
 
+<!-- fragment -->
 ```c
 xtc_tail_spill_dial9("/var/lib/xtc-traces");
 /* writes /var/lib/xtc-traces/xtc-tail-<pid>-<ns>.d9 */

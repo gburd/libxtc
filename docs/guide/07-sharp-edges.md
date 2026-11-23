@@ -34,6 +34,7 @@ that lock, so the pointer it hands back cannot be pulled out from under you
 by another thread's `xtc_env_set`. The pointer is valid until the next
 `xtc_env_get` **on the same thread**; copy it if you need to keep it.
 
+<!-- fragment -->
 ```c
 if (xtc_env_set("XTC_DEMO", "on", /*overwrite=*/1) != XTC_OK)
         /* handle XTC_E_INVAL / XTC_E_NOMEM */;
@@ -55,6 +56,7 @@ so distinct threads get distinct default streams. Under the deterministic
 simulator an un-seeded thread draws from the run's own stream instead, so
 the same seed replays the same values there too.
 
+<!-- fragment -->
 ```c
 xtc_rand_seed(42);
 uint64_t x = xtc_rand_u64();   /* reproducible from seed 42 */
@@ -74,6 +76,7 @@ the buffer size -- another classic overflow.
 NUL-terminate when `dstsize > 0`, and they return the total length they
 *tried* to create. A return value `>= dstsize` is the truncation signal.
 
+<!-- fragment -->
 ```c
 char buf[8];
 if (xtc_strlcpy(buf, "verylongvalue", sizeof buf) >= sizeof buf)

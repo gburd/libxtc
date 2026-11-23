@@ -58,6 +58,7 @@ calling fiber** (so the loop keeps serving everyone else), and resumes
 the fiber with the result when the worker finishes. The blocking is real
 -- but it happens on a pool thread, not the loop thread.
 
+<!-- fragment -->
 ```c
 /* inside a fiber: compute a slow hash without stalling the loop */
 int result;
@@ -85,6 +86,7 @@ libxtc parks a fiber on a GPU/NPU completion the same way it parks one
 on a socket read
 ([`xtc_accel(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_accel.3)):
 
+<!-- fragment -->
 ```c
 /* inside a fiber: the consumer's runtime submitted work and gave us a
  * completion fence fd; park until the device is done -- no OS thread
