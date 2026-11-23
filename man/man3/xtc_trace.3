@@ -33,8 +33,8 @@ libxtc
 .Nm xtc_trace
 is libxtc's
 .Sy seq_trace :
-a bounded, opt-in ring of message-passing events -- each send and
-receive between procs -- stamped and linked so that the path of one
+a bounded, opt-in ring of message-passing events (each send and
+receive between procs), stamped and linked so that the path of one
 request can be followed across procs and cores.
 It is the analog of Erlang's trace token that rides along message
 sends, letting you answer
@@ -102,12 +102,13 @@ to continue or any non-zero value to stop the walk early.  The
 callbacks run
 .Em after
 the internal trace lock is released, so a callback may freely call
-back into libxtc -- including
+back into libxtc (including
 .Fn xtc_send ,
 the inspection API, or
 .Fn xtc_trace_dump
-itself -- without risk of self-deadlock.  It returns the number of
-records visited, or a negative
+itself) without risk of self-deadlock.  It returns the number of
+buffered records (the callback may stop the walk before it has seen
+them all), or a negative
 .Dv XTC_E_*
 code on error.
 .Pp
@@ -252,12 +253,12 @@ which governs the message trace above.
 .Fn xtc_trace_causal_dump
 visits the causal records of the proc
 .Fa pid
-oldest-first -- the fiber's recent park/resume chain -- invoking
+oldest-first (the fiber's recent park/resume chain), invoking
 .Fa cb
 once per record.  The callback returns
 .Dv 0
 to continue or non-zero to stop early.  It returns the number of
-records visited,
+records in the ring, even when the callback stopped early,
 .Dv XTC_E_NOTFOUND
 if no live proc has that pid (a proc that has exited has been reaped),
 or
@@ -289,7 +290,8 @@ returns
 .Dv XTC_OK .
 .Pp
 .Fn xtc_trace_dump
-returns the number of records visited, or a negative
+returns the number of buffered records (the callback may stop the walk
+before it has seen them all), or a negative
 .Dv XTC_E_*
 code on error.  See
 .Xr xtc_strerror 3 .
@@ -297,7 +299,7 @@ code on error.  See
 .Fn xtc_hlc_now
 returns the current global HLC value.
 .Sh EXAMPLES
-Enable tracing, run a workload, and print the records in causal order:
+Enable tracing, run a workload, and print the records in HLC order:
 .Bd -literal -offset indent
 static int
 on_rec(const xtc_trace_rec_t *r, void *user)
